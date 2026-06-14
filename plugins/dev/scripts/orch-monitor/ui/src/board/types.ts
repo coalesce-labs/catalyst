@@ -196,7 +196,10 @@ export interface DecisionOption {
 /** CTL-1110: the six extended escalation-explanation fields, surfaced as a nested
  *  object for the detail pane's CTA-led card. Each field is null when the payload
  *  omitted it (rendered absent, never fabricated). Field names stay snake_case to
- *  match the wire payload exactly (no transform). */
+ *  match the wire payload exactly (no transform).
+ *  CTL-1126: escalation_type + per-variant fields added as optional (server
+ *  population is a separate NEEDS-PLUMBING ticket). Defaults to "decision" when
+ *  absent — mirrors how CTL-1110 shipped explanation ahead of BFF plumbing. */
 export interface BoardEscalationExplanation {
   call_to_action: string | null;
   outcome: string | null;
@@ -204,6 +207,16 @@ export interface BoardEscalationExplanation {
   why_you: string | null;
   why_not_auto: string | null;
   what_to_do: string | null;
+  /** CTL-1126: discriminator for the escalation sub-type. Absent = "decision". */
+  escalation_type?: "decision" | "authorization" | "manual" | null;
+  /** authorization variant */
+  recommendation?: string | null;
+  risk?: string | null;
+  why_asking?: string | null;
+  higher_tier_retry?: string | null;
+  /** manual variant */
+  blocked_capability?: string | null;
+  instructions?: string[] | null;
 }
 
 export interface WorkflowSubStep {

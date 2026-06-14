@@ -136,10 +136,8 @@ export function accentFor(row: InboxRow): PaneAccent {
   return "none";
 }
 
-/** CTL-1110: the needs-human escalation card view-model — a highlighted CTA plus
- *  the labelled explanation sections, top to bottom. Each field is null when the
- *  payload omitted it (rendered absent, never fabricated). */
-export interface EscalationExplanationView {
+/** CTL-1110 / CTL-1126: base fields shared by all escalation view types. */
+interface EscalationViewBase {
   callToAction: string | null;
   outcome: string | null;
   problem: string | null;
@@ -148,20 +146,49 @@ export interface EscalationExplanationView {
   whatToDo: string | null;
 }
 
+/** A decision escalation — the default when escalation_type is absent. */
+export interface EscalationDecisionView extends EscalationViewBase {
+  type: "decision";
+  options: PaneOption[];
+}
+
+/** An authorization escalation — a team lead or approver must sign off. */
+export interface EscalationAuthorizationView extends EscalationViewBase {
+  type: "authorization";
+  recommendation: string | null;
+  risk: string | null;
+  whyAsking: string | null;
+  higherTierRetry: string | null;
+}
+
+/** A manual escalation — a capability the agent cannot perform; step-by-step instructions. */
+export interface EscalationManualView extends EscalationViewBase {
+  type: "manual";
+  blockedCapability: string | null;
+  instructions: string[];
+}
+
+/** CTL-1126: discriminated union replacing the old flat EscalationExplanationView. */
+export type EscalationExplanationView =
+  | EscalationDecisionView
+  | EscalationAuthorizationView
+  | EscalationManualView;
+
 const nz = (s: string | null | undefined): string | null =>
   s != null && s !== "" ? s : null;
 
 /**
  * The needs-human escalation explanation for the hero card, or null when the row
- * is not escalated, carries no explanation, or every field is empty (the pane
+ * is not escalated, carries no explanation, or every base field is empty (the pane
  * then falls back to the bare hero). Keyed on `attention === "needs-human"` so
  * waiting-on-you decision rows are untouched.
+ * CTL-1126: returns a discriminated union based on escalation_type (default "decision").
  */
 export function escalationExplanationFor(row: InboxRow): EscalationExplanationView | null {
   if (row.ticket.attention !== "needs-human") return null;
   const e = row.ticket.explanation as BoardEscalationExplanation | null | undefined;
   if (e == null) return null;
-  const view: EscalationExplanationView = {
+  const base: EscalationViewBase = {
     callToAction: nz(e.call_to_action),
     outcome: nz(e.outcome),
     problem: nz(e.problem),
@@ -169,7 +196,36 @@ export function escalationExplanationFor(row: InboxRow): EscalationExplanationVi
     whyNotAuto: nz(e.why_not_auto),
     whatToDo: nz(e.what_to_do),
   };
-  if (Object.values(view).every((v) => v == null)) return null;
+  // Null-gate on base fields only (variant extras never prevent showing the card).
+  if (Object.values(base).every((v) => v == null)) return null;
+
+  const kind = e.escalation_type ?? "decision";
+  if (kind === "authorization") {
+    const view: EscalationAuthorizationView = {
+      ...base,
+      type: "authorization",
+      recommendation: nz(e.recommendation),
+      risk: nz(e.risk),
+      whyAsking: nz(e.why_asking),
+      higherTierRetry: nz(e.higher_tier_retry),
+    };
+    return view;
+  }
+  if (kind === "manual") {
+    const view: EscalationManualView = {
+      ...base,
+      type: "manual",
+      blockedCapability: nz(e.blocked_capability),
+      instructions: e.instructions ?? [],
+    };
+    return view;
+  }
+  // Default: decision
+  const view: EscalationDecisionView = {
+    ...base,
+    type: "decision",
+    options: optionsFor(row),
+  };
   return view;
 }
 

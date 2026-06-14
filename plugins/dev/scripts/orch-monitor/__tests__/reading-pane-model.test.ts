@@ -308,15 +308,17 @@ const FULL_EXPL = {
 };
 
 describe("CTL-1110: escalationExplanationFor", () => {
-  it("returns the camelCase view for a needs-human row with a full explanation", () => {
+  it("returns the camelCase view for a needs-human row with a full explanation (defaults to decision)", () => {
     const row = rowFor(mkTicket("CTL-1092", { attention: "needs-human", explanation: FULL_EXPL }));
     expect(escalationExplanationFor(row)).toEqual({
+      type: "decision",
       callToAction: FULL_EXPL.call_to_action,
       outcome: FULL_EXPL.outcome,
       problem: FULL_EXPL.problem,
       whyYou: FULL_EXPL.why_you,
       whyNotAuto: FULL_EXPL.why_not_auto,
       whatToDo: FULL_EXPL.what_to_do,
+      options: [],
     });
   });
 
@@ -327,6 +329,7 @@ describe("CTL-1110: escalationExplanationFor", () => {
                      why_you: null, why_not_auto: null, what_to_do: null },
     }));
     const v = escalationExplanationFor(row)!;
+    expect(v.type).toBe("decision");
     expect(v.callToAction).toBe("Decide.");
     expect(v.problem).toBe("X.");
     expect(v.outcome).toBeNull();
@@ -350,5 +353,65 @@ describe("CTL-1110: escalationExplanationFor", () => {
   it("returns null for a waiting-on-you (non-escalated) row even if explanation is present", () => {
     const row = rowFor(mkTicket("CTL-4", { attention: "waiting-on-you", explanation: FULL_EXPL }));
     expect(escalationExplanationFor(row)).toBeNull();
+  });
+
+  // CTL-1126: escalation type union
+  it("authorization escalation_type maps to EscalationAuthorizationView", () => {
+    const row = rowFor(mkTicket("CTL-5", {
+      attention: "needs-human",
+      explanation: {
+        ...FULL_EXPL,
+        escalation_type: "authorization",
+        recommendation: "Approve the change and re-run CI.",
+        risk: "If skipped, the migration will roll back in prod.",
+        why_asking: "Only a team lead can approve cross-service schema changes.",
+        higher_tier_retry: null,
+      },
+    }));
+    const v = escalationExplanationFor(row)!;
+    expect(v.type).toBe("authorization");
+    if (v.type !== "authorization") return;
+    expect(v.recommendation).toBe("Approve the change and re-run CI.");
+    expect(v.risk).toBe("If skipped, the migration will roll back in prod.");
+    expect(v.whyAsking).toBe("Only a team lead can approve cross-service schema changes.");
+    expect(v.higherTierRetry).toBeNull();
+    // base fields still present
+    expect(v.callToAction).toBe(FULL_EXPL.call_to_action);
+    expect(v.outcome).toBe(FULL_EXPL.outcome);
+  });
+
+  it("manual escalation_type maps to EscalationManualView", () => {
+    const row = rowFor(mkTicket("CTL-6", {
+      attention: "needs-human",
+      explanation: {
+        ...FULL_EXPL,
+        escalation_type: "manual",
+        blocked_capability: "Deploy to production",
+        instructions: ["Step 1: Merge the PR", "Step 2: Tag the release"],
+      },
+    }));
+    const v = escalationExplanationFor(row)!;
+    expect(v.type).toBe("manual");
+    if (v.type !== "manual") return;
+    expect(v.blockedCapability).toBe("Deploy to production");
+    expect(v.instructions).toEqual(["Step 1: Merge the PR", "Step 2: Tag the release"]);
+    // base fields still present
+    expect(v.callToAction).toBe(FULL_EXPL.call_to_action);
+  });
+
+  it("manual escalation_type with null instructions defaults to empty array", () => {
+    const row = rowFor(mkTicket("CTL-7", {
+      attention: "needs-human",
+      explanation: {
+        ...FULL_EXPL,
+        escalation_type: "manual",
+        blocked_capability: "SSH access",
+        instructions: null,
+      },
+    }));
+    const v = escalationExplanationFor(row)!;
+    expect(v.type).toBe("manual");
+    if (v.type !== "manual") return;
+    expect(v.instructions).toEqual([]);
   });
 });
