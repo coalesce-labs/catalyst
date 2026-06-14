@@ -13,7 +13,7 @@
 //        executor pages exactly once. Per-tick hand-computed expectations inline.
 
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -589,5 +589,110 @@ describe("CTL-1065: executeEscalations emits structured explanation", () => {
     expect(ev).toBeTruthy();
     expect(validateExplanation(ev.payload.explanation).valid).toBe(true);
     expect(ev.payload.explanation.human_question).toContain("CTL-7");
+  });
+});
+
+// ──────────────────────────────────────────────────────────────────────────
+// CTL-1131: Phase 2 — beliefs/escalate.mjs writes explanation + needsHumanSince
+//           to the phase signal (not just the event log).
+// ──────────────────────────────────────────────────────────────────────────
+import { readFileSync as fsRead, writeFileSync as fsWrite, mkdirSync as fsMkdir } from "node:fs";
+import { validateExplanation as validateExpl } from "../escalation-explanation.mjs";
+
+const ISO_RE_ESCALATE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$/;
+
+function seedSignal(orchDir, ticket, phase, extra = {}) {
+  const dir = `${orchDir}/workers/${ticket}`;
+  fsMkdir(dir, { recursive: true });
+  const sig = { ticket, phase, status: "running", updatedAt: "2026-06-14T10:00:00Z", ...extra };
+  fsWrite(`${dir}/phase-${phase}.json`, JSON.stringify(sig, null, 2) + "\n");
+}
+
+function readSignal(orchDir, ticket, phase) {
+  return JSON.parse(fsRead(`${orchDir}/workers/${ticket}/phase-${phase}.json`, "utf8"));
+}
+
+describe("CTL-1131: executeEscalations writes explanation + needsHumanSince to the phase signal", () => {
+  test("enforce writes explanation + needsHumanSince to the phase signal on first page", () => {
+    seedCfg("max_attempts", 2);
+    const orch = scratch();
+    seedSignal(orch, "CTL-1131", "implement");
+
+    const t = insertTick(NOW);
+    const subject = "CTL-1131/implement";
+    insertEscalateHuman(t, subject, "stalled-alive");
+    insertWakeIntent(t, subject, { attempts: 2, outcome: null });
+
+    const events = [];
+    executeEscalations(db, t, {
+      orchDir: orch,
+      writeStatus: { applyLabel: () => ({ applied: true }) },
+      appendEvent: (e) => events.push(e),
+      enforce: true,
+      labelOnceFn: () => true,
+    });
+
+    const sig = readSignal(orch, "CTL-1131", "implement");
+    // explanation persisted to signal (same object that went to the event log)
+    expect(sig.explanation).toBeTruthy();
+    expect(validateExpl(sig.explanation).valid).toBe(true);
+    // needsHumanSince stamped
+    expect(typeof sig.needsHumanSince).toBe("string");
+    expect(ISO_RE_ESCALATE.test(sig.needsHumanSince)).toBe(true);
+    // prior signal fields preserved
+    expect(sig.status).toBe("running");
+    expect(sig.updatedAt).toBe("2026-06-14T10:00:00Z");
+  });
+
+  test("a missing signal file never throws (best-effort)", () => {
+    seedCfg("max_attempts", 2);
+    const orch = scratch(); // no signal seeded
+    const t = insertTick(NOW);
+    const subject = "CTL-1131/implement";
+    insertEscalateHuman(t, subject, "stalled-alive");
+    insertWakeIntent(t, subject, { attempts: 2, outcome: null });
+
+    const events = [];
+    let threw = false;
+    try {
+      const res = executeEscalations(db, t, {
+        orchDir: orch,
+        writeStatus: { applyLabel: () => ({ applied: true }) },
+        appendEvent: (e) => events.push(e),
+        enforce: true,
+        labelOnceFn: () => true,
+      });
+      // Still returns paged:1 — the signal write failure is best-effort
+      expect(res.paged).toBe(1);
+    } catch {
+      threw = true;
+    }
+    expect(threw).toBe(false);
+  });
+
+  test("re-arm (firstPage === false) does not rewrite the signal", () => {
+    seedCfg("max_attempts", 2);
+    const orch = scratch();
+    seedSignal(orch, "CTL-1131", "implement");
+
+    const t = insertTick(NOW);
+    const subject = "CTL-1131/implement";
+    insertEscalateHuman(t, subject, "stalled-alive");
+    insertWakeIntent(t, subject, { attempts: 2, outcome: null });
+
+    // labelOnceFn returns false → firstPage === false (re-arm / no-op)
+    const events = [];
+    executeEscalations(db, t, {
+      orchDir: orch,
+      writeStatus: { applyLabel: () => ({ applied: true }) },
+      appendEvent: (e) => events.push(e),
+      enforce: true,
+      labelOnceFn: () => false,
+    });
+
+    const sig = readSignal(orch, "CTL-1131", "implement");
+    // No mutation: no explanation, no needsHumanSince
+    expect(sig.explanation).toBeUndefined();
+    expect(sig.needsHumanSince).toBeUndefined();
   });
 });

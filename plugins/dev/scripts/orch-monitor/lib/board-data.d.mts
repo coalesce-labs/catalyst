@@ -263,6 +263,9 @@ export function heldFor(labels: unknown): "blocked" | "waiting" | null;
 /** CTL-729: the escalation labels that trigger attention 'needs-human'. */
 export const ATTENTION_LABEL_NEEDS_HUMAN: string;
 export const ATTENTION_LABEL_NEEDS_INPUT: string;
+/** CTL-1131: the durable needs-human age anchor — newest phase signal's
+ *  needsHumanSince stamp (written at status-flip time). null when none carries it. */
+export function deriveNeedsHumanSince(phaseSigs: unknown[]): string | null;
 /** CTL-729: PURE classifier for the single needs-attention bucket. needs-human
  *  (a needs-human/needs-input label OR the host-local marker) WINS over
  *  waiting-on-you (a live worker's blocked bg job). The anchor follows the winning

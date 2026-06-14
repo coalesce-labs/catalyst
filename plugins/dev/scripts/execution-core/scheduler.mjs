@@ -1805,6 +1805,7 @@ export function escalateDispatchExhausted(
         dispatchFailureCode: code,   // CTL-1045 Bug 2: exit code that exhausted retries (2 = prior_artifact_missing)
         dispatchFailureCause: cause, // CTL-1045 Bug 2: human-readable reason (observability)
         explanation,
+        needsHumanSince: existing.needsHumanSince ?? new Date().toISOString(), // CTL-1131
         updatedAt: new Date().toISOString(),
       })
     );
@@ -1859,6 +1860,7 @@ function writeTerminalStalled(
         status: "stalled",
         stalledReason: reason,
         explanation,
+        needsHumanSince: cur.needsHumanSince ?? new Date().toISOString(), // CTL-1131
         updatedAt: new Date().toISOString(),
       })
     );

@@ -214,3 +214,34 @@ describe("CTL-1065: killHungWorker writes signal.explanation alongside failureRe
     expect(onDisk.explanation).toBeUndefined();
   });
 });
+
+// CTL-1131: needsHumanSince stamped alongside explanation on hung-worker kill
+const ISO_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$/;
+
+describe("CTL-1131: killHungWorker stamps needsHumanSince", () => {
+  test("escalated path writes a valid ISO needsHumanSince when none exists", async () => {
+    const sig = writeSignal("running");
+    await killHungWorker(orchDir, T, sig, {
+      elapsedMin: 42, commitCount: 0,
+      writeStatus: { applyLabel: recorder({ applied: true }) },
+      emit: recorder(Promise.resolve(true)),
+      now: () => 1_000_000,
+    });
+    const onDisk = JSON.parse(readFileSync(join(orchDir, "workers", T, `phase-${PHASE}.json`), "utf8"));
+    expect(typeof onDisk.needsHumanSince).toBe("string");
+    expect(ISO_RE.test(onDisk.needsHumanSince)).toBe(true);
+  });
+
+  test("preserves an existing needsHumanSince (does not reset the age anchor)", async () => {
+    const existingStamp = "2026-06-01T08:00:00.000Z";
+    const sig = writeSignal("running", { needsHumanSince: existingStamp });
+    await killHungWorker(orchDir, T, sig, {
+      elapsedMin: 42, commitCount: 0,
+      writeStatus: { applyLabel: recorder({ applied: true }) },
+      emit: recorder(Promise.resolve(true)),
+      now: () => 1_000_000,
+    });
+    const onDisk = JSON.parse(readFileSync(join(orchDir, "workers", T, `phase-${PHASE}.json`), "utf8"));
+    expect(onDisk.needsHumanSince).toBe(existingStamp);
+  });
+});
