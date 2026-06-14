@@ -768,7 +768,10 @@ export function createServer(opts: CreateServerOptions): BunServer {
     catalystDir: catalystDirOpt,
     runsDir = null,
     startWatcher = true,
-    publicDir = join(import.meta.dir, "public"),
+    publicDir = resolvePublicDir(
+      process.env.MONITOR_PUBLIC_DIR,
+      join(import.meta.dir, "public"),
+    ),
     pidFile,
     prStatusFetcher,
     prStatusRefreshMs = PR_STATUS_REFRESH_MS,

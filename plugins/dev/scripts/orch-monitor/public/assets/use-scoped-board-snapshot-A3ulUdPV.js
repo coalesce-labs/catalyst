@@ -1,1 +1,0 @@
-import{ac as t,ad as p,r as c,ae as r}from"./main-CCN_t7i7.js";function d(){const{payload:o,status:e}=t(),a=(o==null?void 0:o.repos)??[],{scope:s}=p(a);return{payload:c.useMemo(()=>o?r(o,s):null,[o,s]),status:e}}export{d as u};
