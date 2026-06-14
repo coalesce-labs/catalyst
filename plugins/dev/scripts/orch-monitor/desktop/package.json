@@ -1,0 +1,21 @@
+{
+  "name": "orch-monitor-desktop",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "predev": "bun run src/write-window-url.ts",
+    "prebuild": "bun run src/write-window-url.ts",
+    "dev": "tauri dev",
+    "build": "tauri build",
+    "test": "bun test",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@tauri-apps/plugin-window-state": "^2"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2",
+    "@types/bun": "^1.3.14",
+    "typescript": "^6.0.2"
+  }
+}

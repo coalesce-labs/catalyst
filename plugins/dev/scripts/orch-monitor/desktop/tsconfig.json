@@ -10,12 +10,8 @@
     "noEmit": true,
     "skipLibCheck": true,
     "esModuleInterop": true,
-    "forceConsistentCasingInFileNames": true,
-    "jsx": "react-jsx",
-    "paths": {
-      "@/*": ["./ui/src/*"]
-    }
+    "forceConsistentCasingInFileNames": true
   },
-  "include": ["**/*.ts", "**/*.tsx"],
-  "exclude": ["ui", "desktop"]
+  "include": ["src/**/*.ts"],
+  "exclude": ["src-tauri"]
 }

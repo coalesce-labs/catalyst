@@ -28,7 +28,7 @@ const config: KnipConfig = {
         "cli/hud.tsx",
         "bin/gen-attribute-audit.ts",
       ],
-      project: ["**/*.{ts,tsx}", "!ui/**", "!public/**"],
+      project: ["**/*.{ts,tsx}", "!ui/**", "!public/**", "!desktop/**"],
     },
     ui: {
       entry: ["index.html", "board.html", "src/board/main.tsx", "src/components/ui/*.{ts,tsx}", "src/components/kibo-ui/**/*.{ts,tsx}"],
