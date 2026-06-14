@@ -214,10 +214,10 @@ function ColumnHeaderRow({ columns }: { columns: SharedColumn[] }) {
       }}
     >
       {columns.map((col) => (
-        // CTL-1144: each header cell is the rounded top cap of its column tray.
+        // CTL-1146: each header cell is the rounded top cap of its column tray (follows tray to s0).
         <div key={col.key} style={{
           display: "flex", alignItems: "center", gap: 8,
-          background: C.s1,
+          background: C.s0,
           borderRadius: "10px 10px 0 0",
           border: `1px solid ${C.borderSubtle}`,
           borderBottom: "none",
@@ -408,8 +408,8 @@ function LaneCardsRow({
             // columns read as discrete trays, not one continuous slab. The COL_GAP
             // between grid tracks is the visible canvas-colored gutter.
             // CTL-1027: tinted when the lane's project has a resolved hue.
-            // CTL-1144: re-based from subtle to s1 so cards (s2) read as elevated.
-            background: laneBg ?? C.s1,
+            // CTL-1146: re-based from s1 to s0 so cards (s2) read as clearly elevated.
+            background: laneBg ?? C.s0,
             borderRadius: 10,
             border: `1px solid ${C.borderSubtle}`,
             boxShadow: TRAY_LIFT,

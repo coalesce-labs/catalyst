@@ -17,8 +17,8 @@ describe("laneTint", () => {
     expect(laneTint("#3a2a5a", C.subtle)).not.toContain("in srgb");
   });
 
-  it("keeps the tint barely-there (3–6%)", () => {
-    expect(LANE_TINT_PCT).toBeGreaterThanOrEqual(3);
-    expect(LANE_TINT_PCT).toBeLessThanOrEqual(6);
+  it("keeps the tint perceptible but calm (3–10%)", () => {
+    expect(LANE_TINT_PCT).toBeGreaterThanOrEqual(8);
+    expect(LANE_TINT_PCT).toBeLessThanOrEqual(10);
   });
 });

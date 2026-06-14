@@ -106,9 +106,9 @@ export const NODE_ACCENTS = [
   "#e0824f", // C.orange
 ] as const;
 
-/** CTL-1027: the barely-there per-project lane tint strength (%). Tuned to keep
- *  lanes distinguishable without breaking the Linear-calm aesthetic. */
-export const LANE_TINT_PCT = 6;
+/** CTL-1146: the per-project lane tint strength (%). Bumped 6 → 9 so the
+ *  project hue is perceptible at a glance while staying Linear-calm. */
+export const LANE_TINT_PCT = 9;
 
 /**
  * Compose a project hue over a base surface as a perceptually-even oklab tint.
