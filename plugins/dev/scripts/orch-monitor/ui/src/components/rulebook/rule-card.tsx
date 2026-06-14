@@ -1,4 +1,6 @@
-// rule-card.tsx — CTL-1103 Phase 3: tri-lingual card (Plain English | Datalog | SQL).
+// rule-card.tsx — CTL-1103 Phase 3+5: tri-lingual card (Plain English | Datalog | SQL).
+// Border color uses strataTone() CSS variable; severity chip uses severityTone()
+// CSS class; both are distinct from liveIndicatorTone() (Phase 5 contract).
 import { useState } from "react";
 import { cn } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
@@ -23,15 +25,13 @@ export function RuleCard({
   const [tab, setTab] = useState<string>("english");
   const tabs = ruleCardTabs(rule);
   const sevClass = severityTone(rule.severity);
-  const stratumClass = stratumColorForId(rule.stratum);
+  const stratumColor = stratumColorForId(rule.stratum); // CSS var e.g. "var(--chart-1)"
 
   return (
     <div
       id={`rule-${rule.rule_id}`}
-      className={cn(
-        "rounded-lg border bg-card mb-4 overflow-hidden border-l-4",
-        stratumClass.split(" ")[0], // border-color token only
-      )}
+      className={cn("rounded-lg border bg-card mb-4 overflow-hidden border-l-4")}
+      style={{ borderLeftColor: stratumColor }}
     >
       {/* Header */}
       <div className="flex items-start gap-3 px-4 pt-3 pb-2">

@@ -31,15 +31,12 @@ function StratumSection({
   selectedRuleId: string | null;
   onSelectRule: (id: string) => void;
 }) {
-  const colorClass = stratumColorForId(group.stratum.id);
-  const borderClass = colorClass.split(" ")[0];
+  const color = stratumColorForId(group.stratum.id); // CSS var e.g. "var(--chart-1)"
   return (
     <section id={`stratum-${group.stratum.id}`} className="mb-8">
       <div
-        className={cn(
-          "flex items-baseline gap-2 mb-3 pb-2 border-b-2",
-          borderClass,
-        )}
+        className={cn("flex items-baseline gap-2 mb-3 pb-2 border-b-2")}
+        style={{ borderBottomColor: color }}
       >
         <span className="font-mono text-xs text-muted-foreground">
           S{group.stratum.id}
