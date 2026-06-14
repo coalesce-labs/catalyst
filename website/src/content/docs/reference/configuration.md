@@ -83,6 +83,7 @@ The `orchestration.dispatchMode` key picks how Catalyst runs each ticket:
 | `orchestration.phaseAgents.models[phase]` | `opus` | Model per step (`opus`, `sonnet`, or `haiku`). Phases: `triage`, `research`, `plan`, `implement`, `verify`, `review`, `pr`, `monitor-merge`, `monitor-deploy`, `teardown` |
 | `orchestration.phaseAgents.turnCaps[phase]` | per-phase | Max Claude turns per step |
 | `orchestration.draftPr.enabled` | `true` | Open a draft PR at the first implement commit; phase-pr flips it ready. Set `false` to create the PR only at the pr phase. |
+| `CATALYST_WORKFLOW_GITHUB_TOKEN` _(env var, never committed)_ | unset | A GitHub PAT with the `workflow` OAuth scope. When set, phase-pr automatically routes pushes that touch `.github/workflows/` through this token instead of the ambient `GITHUB_TOKEN` (which lacks `workflow` scope). When unset and such a push is attempted, phase-pr escalates with an actionable `human_question` telling the operator to grant the scope or push manually. Provision via the daemon launch environment or `~/.config/catalyst/config-<projectKey>.json`. Alternative: `gh auth refresh -s workflow` re-auths the host token. |
 | `orchestration.stalePrRescue.enabled` | `true` | Periodically rescue orphaned PRs that drifted to DIRTY or BEHIND after their workers died. |
 | `orchestration.stalePrRescue.intervalSeconds` | `600` | How often the rescue timer ticks (seconds). |
 | `orchestration.stalePrRescue.stableSeconds` | `300` | How long a PR must sit DIRTY/BEHIND before a rescue is attempted (avoids reacting to transient states). |
