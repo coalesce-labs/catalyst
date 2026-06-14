@@ -28,19 +28,25 @@ const statusIconSrc = read("components/home/status-icon.tsx");
 const phaseStripSrc = read("components/home/phase-strip.tsx");
 const inboxRowSrc = read("components/home/inbox-row.tsx");
 const readingPaneSrc = read("components/home/reading-pane.tsx");
+// CTL-1126: StatusIcon in the list row is now in AttentionCard (thin adapter).
+const attentionCardSrc = read("components/home/attention-card.tsx");
 
 const iconCode = stripComments(statusIconSrc);
 const stripCode = stripComments(phaseStripSrc);
 const rowCode = stripComments(inboxRowSrc);
 const paneCode = stripComments(readingPaneSrc);
+const attentionCardCode = stripComments(attentionCardSrc);
 
 // ── Scenario: A row shows progress and stage in one glyph ─────────────────────
 describe("Scenario: A row shows progress and stage in one glyph (CTL-900)", () => {
   it("the inbox row renders a single StatusIcon glyph fed by the ticket's phase + status", () => {
-    expect(rowCode).toContain("StatusIcon");
+    // CTL-1126: StatusIcon markup lives in AttentionCard; inbox-row.tsx is a thin adapter.
+    expect(attentionCardCode).toContain("StatusIcon");
     // Fed from the read-model item's phase + status (board-data deriveActiveState).
-    expect(rowCode).toMatch(/phase=\{row\.ticket\.phase\}/);
-    expect(rowCode).toMatch(/status=\{row\.ticket\.status\}/);
+    expect(attentionCardCode).toMatch(/phase=\{row\.ticket\.phase\}/);
+    expect(attentionCardCode).toMatch(/status=\{row\.ticket\.status\}/);
+    // inbox-row.tsx delegates to AttentionCard.
+    expect(inboxRowSrc).toContain("AttentionCard");
   });
 
   it("the glyph's fill is proportional to (phaseIndex+1)/total via the phase model", () => {

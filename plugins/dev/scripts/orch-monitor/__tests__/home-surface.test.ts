@@ -39,6 +39,10 @@ const allClearHeroSrc = read("components/home/all-clear-hero.tsx");
 // fetch-bearing client is called from).
 const readingPaneSrc = read("components/home/reading-pane.tsx");
 const useRespondSrc = read("hooks/use-respond.ts");
+// CTL-1126: the shared AttentionCard is now the canonical markup home for both
+// inbox row and reading-pane hero. Guards for data-inbox-row / data-row-verb /
+// etc. are repointed here; inbox-row.tsx and reading-pane.tsx become thin adapters.
+const attentionCardSrc = read("components/home/attention-card.tsx");
 
 function stripComments(src: string): string {
   return src
@@ -49,6 +53,7 @@ function stripComments(src: string): string {
 
 const homeCode = stripComments(homeSurfaceSrc);
 const rowCode = stripComments(inboxRowSrc);
+const attentionCardCode = stripComments(attentionCardSrc);
 const appCode = stripComments(appSrc);
 
 // ── Scenario: The split survives an iPad-landscape width (firm floors) ────────
@@ -107,12 +112,13 @@ describe("calm inbox surface — bare rows, calm header, master-detail (CTL-899)
   });
 
   it("the inbox row is a flat <button> row, NOT a bordered card", () => {
-    // It IS a button row keyed by the ticket id.
-    expect(inboxRowSrc).toContain("data-inbox-row");
-    // No card-in-card: the row must not use the Card primitive or a boxed border
-    // around itself. (Selection is a subtle surface, not a card outline.)
-    expect(rowCode).not.toContain("components/ui/card");
+    // CTL-1126: markup lives in AttentionCard; inbox-row.tsx is a thin adapter.
+    expect(attentionCardSrc).toContain("data-inbox-row");
+    // No card-in-card: AttentionCard must not use the Card primitive.
+    expect(attentionCardCode).not.toContain("components/ui/card");
     expect(rowCode).not.toMatch(/\bborder\b\s+rounded/); // no boxed card border
+    // inbox-row.tsx delegates to AttentionCard (thin adapter assertion).
+    expect(inboxRowSrc).toContain("AttentionCard");
   });
 
   it("rows are hairline-divided in the list (the list is the container)", () => {
@@ -173,17 +179,16 @@ describe("data plane — read-model SSE, never a synchronous Linear call (CTL-89
 // ── CTL-901 (HOME3): reframed groups + per-row durations + collapsed reassurance
 describe("HOME3 — per-row durations are wired honestly into the row (CTL-901)", () => {
   it("the row computes its duration from the pure rowDurationMs + fmtRelativeDuration", () => {
-    // The row derives the elapsed ms (rowDurationMs) and formats it with the
-    // quiet single-unit formatter — not the dense board's fmtDuration.
-    expect(inboxRowSrc).toContain("rowDurationMs");
-    expect(inboxRowSrc).toContain("fmtRelativeDuration");
+    // CTL-1126: duration markup lives in AttentionCard (the shared component).
+    expect(attentionCardSrc).toContain("rowDurationMs");
+    expect(attentionCardSrc).toContain("fmtRelativeDuration");
   });
 
   it("the row OMITS the duration cell when there is no honest backing timestamp", () => {
     // The "never fabricated" Gherkin: duration is rendered only when non-null;
     // the absent branch carries the unavailable marker, never a fabricated time.
-    expect(rowCode).toMatch(/duration\s*!=\s*null/);
-    expect(rowCode).toContain("data-row-duration-unavailable");
+    expect(attentionCardCode).toMatch(/duration\s*!=\s*null/);
+    expect(attentionCardCode).toContain("data-row-duration-unavailable");
   });
 
   it("the row threads a shared `now` clock (rows agree on one time)", () => {
@@ -290,19 +295,21 @@ describe("HOME5 — the bright verb fires the read-model write + resume (CTL-903
   });
 
   it("the row's verb is a real ACTION button that fires onAct (not just selects)", () => {
-    // The verb is a <button> carrying the action hook, and clicking it stops
-    // propagation so it acts instead of selecting the row.
-    expect(inboxRowSrc).toContain("data-row-verb");
-    expect(inboxRowSrc).toContain("onAct?.(row.id)");
-    expect(rowCode).toContain("stopPropagation");
+    // CTL-1126: verb markup lives in AttentionCard; inbox-row.tsx is a thin adapter.
+    expect(attentionCardSrc).toContain("data-row-verb");
+    expect(attentionCardSrc).toContain("onAct?.(row.id)");
+    expect(attentionCardCode).toContain("stopPropagation");
     // The verb word comes from the typed action model, not a re-derivation.
-    expect(inboxRowSrc).toContain("verbActionFor");
+    expect(attentionCardSrc).toContain("verbActionFor");
   });
 
   it("the reading pane carries the PROMINENT primary verb (the verb's home)", () => {
-    expect(readingPaneSrc).toContain("data-pane-verb");
-    expect(readingPaneSrc).toContain("verbActionFor");
+    // CTL-1126: verb markup lives in AttentionCard; reading-pane.tsx is a thin adapter.
+    expect(attentionCardSrc).toContain("data-pane-verb");
+    expect(attentionCardSrc).toContain("verbActionFor");
     expect(readingPaneSrc).toContain("onAct");
+    // reading-pane.tsx delegates to AttentionCard (thin adapter assertion).
+    expect(readingPaneSrc).toContain("AttentionCard");
   });
 
   it("the write client targets the BFF12 read-model endpoint (POST .../respond)", () => {
@@ -316,15 +323,16 @@ describe("HOME5 — the bright verb fires the read-model write + resume (CTL-903
 
   // Scenario: Exactly one bright verb per row
   it("exactly ONE bright verb per row; the rest are a hover/overflow `⋯` menu", () => {
+    // CTL-1126: overflow markup lives in AttentionCard (the shared component).
     // ONE primary verb (data-row-verb) + the demoted set behind the overflow
     // trigger (data-row-overflow) drawn from the closed OVERFLOW_ACTIONS list.
-    expect(inboxRowSrc).toContain("data-row-verb");
-    expect(inboxRowSrc).toContain("data-row-overflow");
-    expect(inboxRowSrc).toContain("OVERFLOW_ACTIONS");
-    expect(inboxRowSrc).toContain("DropdownMenu");
+    expect(attentionCardSrc).toContain("data-row-verb");
+    expect(attentionCardSrc).toContain("data-row-overflow");
+    expect(attentionCardSrc).toContain("OVERFLOW_ACTIONS");
+    expect(attentionCardSrc).toContain("DropdownMenu");
     // The overflow trigger is hover-revealed (opacity-0 → group-hover:opacity-100),
     // keeping the row calm with one bright button.
-    expect(inboxRowSrc).toContain("group-hover:opacity-100");
+    expect(attentionCardSrc).toContain("group-hover:opacity-100");
   });
 
   // Scenario: The mutation is fence-aware in a cluster
@@ -348,10 +356,11 @@ describe("HOME5 — the bright verb fires the read-model write + resume (CTL-903
   });
 
   it("the row surfaces the optimistic state: resuming… then 'didn't take' on rollback", () => {
-    expect(inboxRowSrc).toContain("resuming…");
-    expect(inboxRowSrc).toContain("data-row-resuming");
-    expect(inboxRowSrc).toContain("data-row-did-not-take");
-    expect(inboxRowSrc).toContain("respondStatus");
+    // CTL-1126: optimistic state markup lives in AttentionCard.
+    expect(attentionCardSrc).toContain("resuming…");
+    expect(attentionCardSrc).toContain("data-row-resuming");
+    expect(attentionCardSrc).toContain("data-row-did-not-take");
+    expect(attentionCardSrc).toContain("respondStatus");
   });
 
   it("the ONLY place the write client (fetch) is reached is the use-respond hook / its pure client", () => {
