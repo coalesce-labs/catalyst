@@ -324,6 +324,7 @@ const APP_SURFACE_PATHS: ReadonlySet<string> = new Set([
   "/fleetops",
   "/devops",
   "/settings",
+  "/rules",
 ]);
 export function isAppRoute(pathname: string): boolean {
   if (APP_SURFACE_PATHS.has(pathname)) return true;

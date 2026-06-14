@@ -303,6 +303,7 @@ test("SURFACES round-trips the Surface union", () => {
     finops: false,
     fleetops: false,
     devops: false,
+    rulebook: false,
   };
   for (const s of SURFACES) seen[s] = true;
   expect(Object.values(seen).every(Boolean)).toBe(true);

@@ -64,7 +64,8 @@ describe("surfaceContentKind", () => {
         s !== "telemetry" &&
         s !== "finops" &&
         s !== "utilization" &&
-        s !== "fleetops",
+        s !== "fleetops" &&
+        s !== "rulebook",
     );
     for (const s of stillDashboard) {
       expect(surfaceContentKind(s)).toBe("dashboard");
@@ -80,9 +81,14 @@ describe("surfaceContentKind", () => {
         "finops",
         "utilization",
         "fleetops",
+        "rulebook",
         "dashboard",
       ]).toContain(surfaceContentKind(s));
     }
+  });
+
+  it("routes the Rulebook surface to its own content kind (CTL-1103)", () => {
+    expect(surfaceContentKind("rulebook" as Surface)).toBe("rulebook");
   });
 });
 

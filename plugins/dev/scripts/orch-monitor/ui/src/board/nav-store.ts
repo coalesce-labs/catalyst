@@ -88,6 +88,10 @@ export const navObserveOpenAtom = atomWithStorage<boolean>(
   "catalyst-nav-observe-v1",
   true,
 );
+export const navReasonOpenAtom = atomWithStorage<boolean>(
+  "catalyst-nav-reason-v1",
+  true,
+);
 
 // ── list context (the resolved walk list) ───────────────────────────────────
 /**

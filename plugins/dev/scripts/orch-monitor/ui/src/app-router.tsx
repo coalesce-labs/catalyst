@@ -248,6 +248,16 @@ const devopsRoute = createRoute({
   ),
 });
 
+const rulebookRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/rules",
+  component: () => (
+    <S>
+      <RulebookSurface />
+    </S>
+  ),
+});
+
 const settingsRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/settings",
@@ -310,6 +320,7 @@ const routeTree = rootRoute.addChildren([
   finopsRoute,
   fleetopsRoute,
   devopsRoute,
+  rulebookRoute,
   settingsRoute,
   ticketRoute,
   workerRoute,
