@@ -124,6 +124,13 @@ describe("CTL-1033 elevation ladder — semantic surfaces stack upward in both t
     expect(dark).toContain("--shadow-tray");
   });
 
+  it("CTL-1151: board lane(s0) is recessed below canvas(s1), card(s2) elevated above", () => {
+    const dark = selectorBlock(".dark");
+    const lum = (t: string) => luminance(tokenHex(dark, t));
+    expect(lum("--surface-chrome")).toBeLessThan(lum("--surface-canvas")); // lane < canvas
+    expect(lum("--surface-card")).toBeGreaterThan(lum("--surface-canvas")); // card > canvas
+  });
+
   it("CTL-1147: warm-light --fg-dim is more recessive (lighter) than --fg-muted on paper", () => {
     const light = selectorBlock(":root");
     expect(luminance(tokenHex(light, "--fg-dim"))).toBeGreaterThan(
