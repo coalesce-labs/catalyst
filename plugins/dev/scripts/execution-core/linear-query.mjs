@@ -522,7 +522,9 @@ const DELEGATE_QUERY = `query IssueDelegate($id: String!) {
 }`;
 
 export function buildDelegateCurlArgs(identifier, { token = "", ca } = {}) {
-  const payload = JSON.stringify({ query: DELEGATE_QUERY, variables: { id: identifier } });
+  const m = /^([A-Za-z][A-Za-z0-9]*)-(\d+)$/.exec(identifier ?? "");
+  const variables = m ? { team: m[1], num: Number(m[2]) } : { team: String(identifier ?? ""), num: 0 };
+  const payload = JSON.stringify({ query: DELEGATE_QUERY, variables });
   const caArgs = ca && existsSync(ca) ? ["--cacert", ca] : [];
   const args = [
     "-sS",
