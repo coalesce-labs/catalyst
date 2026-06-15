@@ -1126,6 +1126,17 @@ describe("buildDelegateCurlArgs (CTL-1173)", () => {
     expect(payload).toContain("delegate");
     expect(JSON.parse(payload).variables).toEqual({ id: "CTL-1" });
   });
+
+  test("query uses issue(id:) — NOT the rejected IssueFilter.identifier form (CTL-1173 remediate)", () => {
+    // The live Linear API rejects issues(filter:{identifier:{eq}}) with HTTP 400
+    // ("Field \"identifier\" is not defined by type \"IssueFilter\""). The delegate
+    // read-back MUST use issue(id:$id), which accepts the human identifier directly.
+    const { payload } = buildDelegateCurlArgs("CTL-1", { token: "lin_oauth_x" });
+    const query = JSON.parse(payload).query;
+    expect(query).toContain("issue(id: $id)");
+    expect(query).not.toContain("identifier:");
+    expect(query).not.toContain("filter:");
+  });
 });
 
 // ── fetchTicketDelegate (CTL-1173) ────────────────────────────────────────────

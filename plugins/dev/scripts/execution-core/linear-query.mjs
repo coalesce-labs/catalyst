@@ -511,8 +511,14 @@ export function isAssigneeClaimable(assignee, botUserIds) {
 // UUID to delegate (not assignee), so linearis issues read never exposes it.
 // Mirrors the buildBatchCurlArgs / runBatchOnce pattern: one spawnSync curl POST,
 // same --cacert gating, same auth/rate classification.
+// issue(id:) accepts the human identifier (e.g. "CTL-1173") directly. The
+// issues(filter:{identifier:{eq}}) form is REJECTED by the live API with HTTP
+// 400 ("Field \"identifier\" is not defined by type \"IssueFilter\"") — the
+// same broken-filter class as the linear-comment-post bug. runDelegateOnce
+// normalizes the single `issue` object back into the {nodes:[…]} shape that
+// fetchTicketDelegate consumes.
 const DELEGATE_QUERY = `query IssueDelegate($id: String!) {
-  issues(filter: { identifier: { eq: $id } }) { nodes { delegate { id } } }
+  issue(id: $id) { delegate { id } }
 }`;
 
 export function buildDelegateCurlArgs(identifier, { token = "", ca } = {}) {
@@ -550,11 +556,11 @@ function runDelegateOnce(identifier) {
   if (httpCode === 401 || httpCode === 429) return { nodes: null };
   let parsed;
   try { parsed = JSON.parse(body); } catch { return { nodes: null }; }
-  if (parsed?.errors) {
-    if (isBatchAuthError(parsed.errors) || isBatchRateLimited(parsed.errors)) return { nodes: null };
-    return { nodes: null };
-  }
-  return { nodes: parsed?.data?.issues?.nodes ?? null };
+  if (parsed?.errors) return { nodes: null };
+  // issue(id:) returns a single object, not a nodes list — normalize it back
+  // into the {nodes:[…]} shape fetchTicketDelegate expects (it reads nodes[0]).
+  const issue = parsed?.data?.issue ?? null;
+  return { nodes: issue ? [issue] : null };
 }
 
 export function fetchTicketDelegate(identifier, { runQuery = runDelegateOnce } = {}) {
