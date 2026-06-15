@@ -17,6 +17,8 @@ import {
   classifyTicketResolution,
   fetchTicketAssignee,
   isAssigneeClaimable,
+  buildDelegateCurlArgs,
+  fetchTicketDelegate,
 } from "./linear-query.mjs";
 import { createTicketStateCache } from "./linear-cache.mjs";
 
@@ -1094,5 +1096,60 @@ describe("isAssigneeClaimable (CTL-781)", () => {
   test("empty botUserIds Set + non-null assignee → NOT claimable", () => {
     expect(isAssigneeClaimable(BOT, new Set())).toBe(false);
     expect(isAssigneeClaimable("human-uuid", new Set())).toBe(false);
+  });
+});
+
+// ── buildDelegateCurlArgs (CTL-1173) ──────────────────────────────────────────
+
+describe("buildDelegateCurlArgs (CTL-1173)", () => {
+  test("POSTs to the GraphQL endpoint", () => {
+    const { args } = buildDelegateCurlArgs("CTL-1", { token: "lin_oauth_x" });
+    expect(args).toContain("https://api.linear.app/graphql");
+    expect(args).toContain("-X");
+    expect(args[args.indexOf("-X") + 1]).toBe("POST");
+  });
+
+  test("reads payload from stdin (--data @-)", () => {
+    const { args } = buildDelegateCurlArgs("CTL-1", { token: "lin_oauth_x" });
+    expect(args).toContain("--data");
+    expect(args[args.indexOf("--data") + 1]).toBe("@-");
+  });
+
+  test("sets Authorization: Bearer for oauth token", () => {
+    const { args } = buildDelegateCurlArgs("CTL-1", { token: "lin_oauth_x" });
+    const hIdx = args.indexOf("-H");
+    expect(args[hIdx + 1]).toBe("Authorization: Bearer lin_oauth_x");
+  });
+
+  test("payload projects delegate field and passes identifier as variable", () => {
+    const { payload } = buildDelegateCurlArgs("CTL-1", { token: "lin_oauth_x" });
+    expect(payload).toContain("delegate");
+    expect(JSON.parse(payload).variables).toEqual({ id: "CTL-1" });
+  });
+});
+
+// ── fetchTicketDelegate (CTL-1173) ────────────────────────────────────────────
+
+describe("fetchTicketDelegate (CTL-1173)", () => {
+  const BOT = "ff78d890-7906-4c22-b2f5-020bd150c790";
+
+  test("delegate present → { known:true, delegate:<id> }", () => {
+    const runQuery = () => ({ nodes: [{ delegate: { id: BOT } }] });
+    expect(fetchTicketDelegate("CTL-1", { runQuery })).toEqual({ known: true, delegate: BOT });
+  });
+
+  test("no delegate → { known:true, delegate:null }", () => {
+    const runQuery = () => ({ nodes: [{ delegate: null }] });
+    expect(fetchTicketDelegate("CTL-1", { runQuery })).toEqual({ known: true, delegate: null });
+  });
+
+  test("read failed (nodes null) → { known:false }", () => {
+    const runQuery = () => ({ nodes: null });
+    expect(fetchTicketDelegate("CTL-1", { runQuery })).toEqual({ known: false });
+  });
+
+  test("empty nodes array → { known:true, delegate:null }", () => {
+    const runQuery = () => ({ nodes: [] });
+    expect(fetchTicketDelegate("CTL-1", { runQuery })).toEqual({ known: true, delegate: null });
   });
 });
