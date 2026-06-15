@@ -107,7 +107,11 @@ describe("updateCatalystConfig (CTL-1153)", () => {
     try {
       const p = writeTempConfig(dir);
       const before = JSON.parse(readFileSync(p, "utf8"));
-      updateCatalystConfig(p, (c) => upsertProject(c, "CTL", { color: "green" }).config as Record<string, unknown>);
+      updateCatalystConfig(p, (c) => {
+        const r = upsertProject(c, "CTL", { color: "green" });
+        if (!r.ok) throw new Error("upsert unexpectedly failed");
+        return r.config as Record<string, unknown>;
+      });
       const after = JSON.parse(readFileSync(p, "utf8"));
       // All sibling sections preserved
       expect(after.catalyst.orchestration).toEqual(before.catalyst.orchestration);
