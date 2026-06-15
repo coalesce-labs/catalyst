@@ -61,16 +61,16 @@ export function computeReport(db, { sinceMs = null, nowMs = null } = {}) {
     // Per-guard counts: aggregate from shadow_comparison, then fill every
     // canonical guard with zero counts so the report always has all ~16 rows.
     // Carries both derivations side-by-side (procedural + belief) for scenario-2.
-    // Multiple rule_ids per guard are merged by picking the first non-null example.
+    // Sample columns (rule_id, procedural, belief) use MIN to pick a stable non-null example.
     const rawGuardRows = db.query(
       `SELECT sc.legacy_guard,
               COUNT(*) AS total,
               SUM(sc.agree) AS agree_count,
               COUNT(*) - SUM(sc.agree) AS disagree,
-              MAX(sc.rule_id) AS rule_id,
-              MAX(sc.procedural) AS procedural,
-              MAX(sc.belief) AS belief,
-              MAX(sc.differing_input) AS differing_input
+              MIN(sc.rule_id) AS rule_id,
+              MIN(sc.procedural) AS procedural,
+              MIN(sc.belief) AS belief,
+              MIN(sc.differing_input) AS differing_input
          FROM shadow_comparison sc
          JOIN tick t ON t.tick_id = sc.tick_id
         WHERE t.now_ms >= ?

@@ -40,7 +40,7 @@ export function computeShadowStatus({
   const sourceWarning = flagSource === "env-override";
 
   if (!flagActive) {
-    return { status: "INACTIVE", passed: false, source: flagSource, sourceWarning: false, contiguityViolation: false, ageMs: null };
+    return { status: "INACTIVE", passed: false, source: flagSource, sourceWarning, contiguityViolation: false, ageMs: null };
   }
 
   if (tickCount === 0 || latestTickMs == null) {
@@ -114,7 +114,9 @@ export function renderText(result) {
 
 // ── main (CLI entry) ──────────────────────────────────────────────────────────
 
-export function main(argv = process.argv.slice(2), { env = process.env, out = console.log } = {}) {
+const SQLITE_SPECIFIER = ["bun:sqlite"].join("");
+
+export async function main(argv = process.argv.slice(2), { env = process.env, out = console.log } = {}) {
   let dbPath = null;
   let asJson = false;
   for (let i = 0; i < argv.length; i++) {
@@ -133,7 +135,7 @@ export function main(argv = process.argv.slice(2), { env = process.env, out = co
 
   if (dbPath && flagActive) {
     try {
-      const { Database } = await_require("bun:sqlite");
+      const { Database } = await import(SQLITE_SPECIFIER);
       const db = new Database(dbPath, { readonly: true, create: false });
       try {
         const stats = queryBeliefStats(db);
@@ -157,16 +159,10 @@ export function main(argv = process.argv.slice(2), { env = process.env, out = co
   return result.passed ? 0 : 1;
 }
 
-// Synchronous require wrapper for bun:sqlite (not available in ESM static import context).
-function await_require(id) {
-  // eslint-disable-next-line no-undef
-  return typeof require !== "undefined" ? require(id) : (() => { throw new Error(`require not available for ${id}`); })();
-}
-
 const isEntry =
   import.meta.main === true ||
   (typeof import.meta.url === "string" &&
     process.argv[1] &&
     fileURLToPath(import.meta.url) === process.argv[1]);
 
-if (isEntry) process.exit(main());
+if (isEntry) main().then((code) => process.exit(code));
