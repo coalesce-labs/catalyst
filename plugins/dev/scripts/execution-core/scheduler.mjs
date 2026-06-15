@@ -4522,15 +4522,13 @@ export function schedulerTick(
         },
         { ticket: t.identifier, phase: NEW_WORK_ENTRY_PHASE }
       );
-      // CTL-781: self-assign the Catalyst bot so the claim is visible in
-      // Linear. Best-effort (safeWrite) — an assignment failure never blocks
-      // the pipeline; the read-back inside applyAssignee logs the gap.
-      if (botWriteId) {
-        safeWrite(() => writeStatus.applyAssignee?.({ ticket: t.identifier, userId: botWriteId }), {
-          ticket: t.identifier,
-          phase: "assignment",
-        });
-      }
+      // CTL-781 + CTL-1011: self-assign the Catalyst bot. Always invoked so a
+      // null botWriteId surfaces the deduped config-missing warn instead of a
+      // silent skip. Best-effort (safeWrite) — never blocks the pipeline.
+      safeWrite(() => writeStatus.applyAssignee?.({ ticket: t.identifier, userId: botWriteId }), {
+        ticket: t.identifier,
+        phase: "assignment",
+      });
     }
   }
 

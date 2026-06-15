@@ -650,13 +650,13 @@ function dispatchTriage(
     applied: res.applied,
     reason: res.reason,
   });
-  // CTL-781: self-assign the bot on claim — best-effort, never blocks triage.
-  if (botWriteId) {
-    try {
-      applyAssignee({ ticket: identifier, userId: botWriteId });
-    } catch (err) {
-      log.warn({ identifier, err: err.message }, "monitor: self-assign threw — continuing");
-    }
+  // CTL-781 + CTL-1011: self-assign the bot on claim — always invoked so a
+  // missing botUserId surfaces the deduped config-missing warn (invalid-user)
+  // instead of silently skipping. Best-effort, never blocks triage.
+  try {
+    applyAssignee({ ticket: identifier, userId: botWriteId });
+  } catch (err) {
+    log.warn({ identifier, err: err.message }, "monitor: self-assign threw — continuing");
   }
   return true;
 }

@@ -8212,7 +8212,7 @@ describe("schedulerTick — CTL-781 respect-assignment + self-assign", () => {
     expect(fetchAssigneeCalls).toHaveLength(0);
   });
 
-  test("botWriteId absent → dispatch proceeds, NO applyAssignee call (predicate may still gate)", () => {
+  test("botWriteId absent → dispatch proceeds, applyAssignee called with userId:undefined (loud-no-op, CTL-1011)", () => {
     const dispatch = fakeDispatch();
     const assigneeCalls = [];
     const writeStatus = {
@@ -8221,7 +8221,7 @@ describe("schedulerTick — CTL-781 respect-assignment + self-assign", () => {
       applyLabel: () => {},
       applyAssignee: (a) => {
         assigneeCalls.push(a);
-        return { applied: true, reason: null };
+        return { applied: false, reason: "invalid-user" };
       },
     };
     const gateway = gatewayStub({ "CTL-WI1": null });
@@ -8236,7 +8236,10 @@ describe("schedulerTick — CTL-781 respect-assignment + self-assign", () => {
       hasTriageArtifact: () => true, // CTL-1150: bypass triage gate, subject is botWriteId-absent
     });
     expect(dispatch.calls.map((c) => c.ticket)).toEqual(["CTL-WI1"]);
-    expect(assigneeCalls).toHaveLength(0);
+    // CTL-1011: applyAssignee is now always invoked; the deduped invalid-user
+    // branch handles the null/undefined botWriteId instead of silently skipping.
+    expect(assigneeCalls).toHaveLength(1);
+    expect(assigneeCalls[0]).toMatchObject({ ticket: "CTL-WI1", userId: undefined });
   });
 
   test("applyAssignee failure (applied:false) does not fail the dispatch — ticket still advances", () => {

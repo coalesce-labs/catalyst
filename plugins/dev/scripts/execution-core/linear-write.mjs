@@ -459,18 +459,49 @@ export function applyEstimate({ ticket, estimate, exec = defaultExec, fetchLabel
   }
 }
 
+// CTL-1011: dedup Sets so a misconfigured host says so once, not once per claim.
+// Process-global (mirrors scheduler.warnedPerProjectConfigs). Reset seam for tests.
+const _warnedSelfAssignDisabled = new Set();
+const _warnedScopeFailureTeams = new Set();
+export function _resetAssigneeWarnDedup() {
+  _warnedSelfAssignDisabled.clear();
+  _warnedScopeFailureTeams.clear();
+}
+
+// Identifies the OAuth-scope failure so it can be surfaced once per team.
+const _SCOPE_ERR_RE = /lack(s|ed)?\s+the\s+required\s+scope|app user not valid/i;
+
 // applyAssignee — write the Catalyst bot as the Linear assignee on a claimed
 // ticket (CTL-781). Mirrors applyLabel: try/catch, log.warn, tagged
 // {applied, reason} return, CTL-587-style read-back so applied:true means a
 // follow-up read confirmed the assignee landed. Never throws.
-// reason values: null | "invalid-user" | "transient" | "verify-failed".
+// reason values: null | "invalid-user" | "transient" | "scope" | "verify-failed".
 export function applyAssignee({ ticket, userId, exec = defaultExec }) {
   if (typeof userId !== "string" || userId.length === 0) {
+    if (!_warnedSelfAssignDisabled.has("invalid-user")) {
+      _warnedSelfAssignDisabled.add("invalid-user");
+      log.warn(
+        { ticket, remedy: "set catalyst.linear.bot.orchestrator.botUserId in ~/.config/catalyst/config.json" },
+        "linear-write: self-assign disabled — botUserId not configured (CTL-1011); claim left unassigned"
+      );
+    }
     return { applied: false, reason: "invalid-user" };
   }
   try {
     const writeRes = exec("linearis", ["issues", "update", ticket, "--assignee", userId]);
     if (writeRes.code !== 0) {
+      if (_SCOPE_ERR_RE.test(writeRes.stderr ?? "")) {
+        const team = teamOf(ticket) ?? "unknown";
+        if (!_warnedScopeFailureTeams.has(team)) {
+          _warnedScopeFailureTeams.add(team);
+          log.warn(
+            { ticket, team, userId, code: writeRes.code,
+              remedy: "re-mint the app-actor OAuth token with scope app:mentionable,app:assignable" },
+            "linear-write: assignee write rejected — app-actor lacks assignee scope for team (CTL-1011); surfaced once/team"
+          );
+        }
+        return { applied: false, reason: "scope" };
+      }
       log.warn(
         { ticket, userId, code: writeRes.code, stderr: writeRes.stderr },
         "linear-write: assignee write failed (exit non-zero)"

@@ -561,3 +561,62 @@ If a HUD button later writes the same sentinel it requires no logic changes —
 - [ADR-006](adrs.md) — global state JSON design
 - [ADR-008](adrs.md) — SQLite session store
 - [ADR-014](adrs.md) — worker owns full PR lifecycle (no more `gh pr merge --auto`)
+
+## Self-assign activation runbook (CTL-1011)
+
+The execution-core daemon writes the Catalyst bot as the Linear assignee on every ticket it claims (`applyAssignee`, CTL-781). The mechanism is always invoked — when `botUserId` is absent or the token lacks scope, one deduped `warn` surfaces the gap instead of a silent skip.
+
+### Before you start
+
+Two prerequisites block the board-visibility outcome (assigned agent visible in Linear):
+
+1. **OAuth decision** — choose Path A or Path B:
+   - **Path A**: grant `app:assignable` scope to the existing Catalyst Orchestrator app (`ff78d890-7906-4c22-b2f5-020bd150c790`). The simplest path if your workspace already has the app installed.
+   - **Path B**: create a dedicated bot member account, add it to your Linear workspace, and use its `viewer.id` as the `botUserId`. The preferred path for fine-grained control.
+
+2. **Token scope** — the OAuth access token stored under `catalyst.linear.bot.orchestrator.accessToken` must include `app:assignable`. Re-mint the token after granting the scope (step 4 below).
+
+### Activation steps
+
+1. **Decide Path A or B** (see above). For Path A, go to your Linear workspace settings → API → OAuth apps → Catalyst Orchestrator → grant `app:assignable`.
+
+2. **Re-mint the access token**:
+   ```bash
+   # Uses the client credentials flow (requires clientId + clientSecret already in global config)
+   catalyst-execution-core remint-token --actor orchestrator
+   # or manually via the OAuth endpoint
+   ```
+
+3. **Capture `viewer.id`** for the app actor:
+   ```bash
+   TOKEN=$(jq -r '.catalyst.linear.bot.orchestrator.accessToken' ~/.config/catalyst/config.json)
+   BOT_ID=$(curl -s -X POST https://api.linear.app/graphql \
+     -H "Authorization: Bearer $TOKEN" \
+     -H "Content-Type: application/json" \
+     -d '{"query":"query{viewer{id name}}"}' | jq -r .data.viewer.id)
+   echo "botUserId = $BOT_ID"
+   ```
+
+4. **Set `botUserId` in Layer-2 on all hosts** (never committed — lives in `~/.config/catalyst/config.json`):
+   ```bash
+   jq --arg id "$BOT_ID" '.catalyst.linear.bot.orchestrator.botUserId = $id' \
+     ~/.config/catalyst/config.json > /tmp/cfg.json && mv /tmp/cfg.json ~/.config/catalyst/config.json
+   ```
+   Repeat on every host that runs the execution-core daemon.
+
+5. **Restart the daemon** — `botUserId` is read only at startup:
+   ```bash
+   catalyst-execution-core restart
+   ```
+
+6. **Smoke-test** — let one ticket enter Triage and confirm the Catalyst bot appears as assignee in Linear. The CTL-1011 Phase 1/2 guards make a misstep loud: a missing `botUserId` prints one `warn` ("self-assign disabled") and a scope error prints one `warn` per Linear team ("app-actor lacks assignee scope") — both include the remedy.
+
+7. **Backfill** (CTL-827) and enable the CTL-1159 ownership gate after the smoke-test passes.
+
+### Diagnostic signals
+
+| Symptom | Cause | Remedy |
+|---------|-------|--------|
+| `linear-write: self-assign disabled — botUserId not configured` (once per process) | `catalyst.linear.bot.orchestrator.botUserId` is null/absent | Steps 3–5 above |
+| `linear-write: assignee write rejected — app-actor lacks assignee scope for team` (once per team) | Token missing `app:assignable` | Steps 1–2 + 5 |
+| `applyAssignee` returns `reason: "verify-failed"` | Write succeeded but read-back mismatch (Linear eventual consistency lag) | Usually self-correcting; check if another user is reassigning the ticket |

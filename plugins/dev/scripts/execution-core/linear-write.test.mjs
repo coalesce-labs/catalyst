@@ -1,6 +1,6 @@
 // linear-write.test.mjs — execution-core Linear status write-back (CTL-558).
 // Run: cd plugins/dev/scripts/execution-core && bun test linear-write.test.mjs
-import { describe, test, expect } from "bun:test";
+import { describe, test, expect, spyOn, beforeEach } from "bun:test";
 import {
   applyPhaseStatus,
   applyTerminalDone,
@@ -12,7 +12,9 @@ import {
   applyAssignee,
   teamOf,
   classifyLabelFailure,
+  _resetAssigneeWarnDedup,
 } from "./linear-write.mjs";
+import { log } from "./config.mjs";
 import { createTicketStateCache } from "./linear-cache.mjs";
 
 const okExec = (calls) => (cmd, args) => {
@@ -1082,5 +1084,47 @@ describe("applyAssignee (CTL-781)", () => {
     expect(applyAssignee({ ticket: "CTL-1", userId: null, exec })).toEqual({ applied: false, reason: "invalid-user" });
     expect(applyAssignee({ ticket: "CTL-1", exec })).toEqual({ applied: false, reason: "invalid-user" });
     expect(calls).toHaveLength(0);
+  });
+
+  describe("CTL-1011: deduped warns", () => {
+    beforeEach(() => { _resetAssigneeWarnDedup(); });
+
+    test("invalid-user → warns once with remedy, deduped across calls, still 0 exec calls", () => {
+      const warn = spyOn(log, "warn");
+      const calls = [];
+      const exec = (cmd, args) => { calls.push({ cmd, args }); return { code: 0 }; };
+      expect(applyAssignee({ ticket: "CTL-D1", userId: null, exec })).toEqual({ applied: false, reason: "invalid-user" });
+      expect(applyAssignee({ ticket: "CTL-D2", userId: "", exec })).toEqual({ applied: false, reason: "invalid-user" });
+      expect(applyAssignee({ ticket: "CTL-D3", exec })).toEqual({ applied: false, reason: "invalid-user" });
+      expect(calls).toHaveLength(0);
+      const idWarns = warn.mock.calls.filter((c) =>
+        JSON.stringify(c).includes("botUserId") || JSON.stringify(c).includes("self-assign disabled"));
+      expect(idWarns.length).toBe(1);
+      warn.mockRestore();
+    });
+
+    test("scope-error stderr → reason 'scope', warned once per team with remedy", () => {
+      const warn = spyOn(log, "warn");
+      const exec = (_cmd, args) =>
+        args[1] === "update"
+          ? { code: 1, stdout: "", stderr: "App user not valid - One or more app users lack the required scope." }
+          : { code: 127 };
+      expect(applyAssignee({ ticket: "CTL-S1", userId: BOT, exec })).toEqual({ applied: false, reason: "scope" });
+      expect(applyAssignee({ ticket: "CTL-S2", userId: BOT, exec })).toEqual({ applied: false, reason: "scope" });
+      const ctlScopeWarns = warn.mock.calls.filter((c) =>
+        JSON.stringify(c).includes("scope") && JSON.stringify(c).includes("CTL"));
+      expect(ctlScopeWarns.length).toBe(1);
+      // a different team warns again
+      expect(applyAssignee({ ticket: "ADV-1", userId: BOT, exec })).toEqual({ applied: false, reason: "scope" });
+      const advScopeWarns = warn.mock.calls.filter((c) =>
+        JSON.stringify(c).includes("scope") && JSON.stringify(c).includes("ADV"));
+      expect(advScopeWarns.length).toBe(1);
+      warn.mockRestore();
+    });
+
+    test("non-scope exit-non-zero keeps reason 'transient' (back-compat)", () => {
+      const exec = () => ({ code: 1, stdout: "", stderr: "update-failed" });
+      expect(applyAssignee({ ticket: "CTL-T1", userId: BOT, exec })).toEqual({ applied: false, reason: "transient" });
+    });
   });
 });
