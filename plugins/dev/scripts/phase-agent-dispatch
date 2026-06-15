@@ -805,7 +805,8 @@ compose_worker_settings_json() {
          {
            "CLAUDE_CODE_ENABLE_TELEMETRY": $enable_telemetry,
            "OTEL_METRICS_EXPORTER": $metrics_exporter,
-           "OTEL_LOGS_EXPORTER": $logs_exporter
+           "OTEL_LOGS_EXPORTER": $logs_exporter,
+           "CATALYST_FAILURE_COMMENT": "1"
          }
          + (if $otlp_endpoint == "" then {} else { "OTEL_EXPORTER_OTLP_ENDPOINT": $otlp_endpoint } end)
          + (if $otlp_protocol == "" then {} else { "OTEL_EXPORTER_OTLP_PROTOCOL": $otlp_protocol } end)
@@ -846,6 +847,8 @@ DISPATCH_ENV=(
 	# CTL-864: cross-host cluster fencing token (distinct from the host-local
 	# CATALYST_GENERATION above). Empty on single-host → worker performs no check.
 	"CATALYST_CLUSTER_GENERATION=${CATALYST_CLUSTER_GENERATION-}"
+	# CTL-1182: failure-path Linear comment opt-in (always-on for dispatched workers).
+	"CATALYST_FAILURE_COMMENT=1"
 )
 [[ -n $OTEL_RES_ATTRS ]] &&
 	DISPATCH_ENV+=("OTEL_RESOURCE_ATTRIBUTES=${OTEL_RES_ATTRS}")

@@ -32,6 +32,9 @@ _escalate_workflow_scope_push() {
     "$SIGNAL_FILE" > "$tmp" && mv "$tmp" "$SIGNAL_FILE" || true
   local emit="${PLUGIN_ROOT}/scripts/phase-agent-emit-complete"
   if [[ -x "$emit" ]]; then
+    # emit-complete → lib/phase-failure-comment.sh posts the Linear comment when
+    # CATALYST_FAILURE_COMMENT=1 (injected by phase-agent-dispatch). No duplicate
+    # post needed here (CTL-1182).
     "$emit" --phase "$PHASE" --ticket "$TICKET" --status failed \
       --reason "push_rejected_no_workflow_scope"
   fi

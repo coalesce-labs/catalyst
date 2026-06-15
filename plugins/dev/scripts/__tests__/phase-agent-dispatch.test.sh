@@ -2130,6 +2130,12 @@ T67_BG_ISO=$(echo "$DRY_OUT_T67" | jq -r '.settings.worktree.bgIsolation // empt
 assert_eq "none" "$T67_BG_ISO" "dry-run .settings.worktree.bgIsolation = none"
 
 echo ""
+echo "Test 68 (CTL-1182): compose_worker_settings_json includes CATALYST_FAILURE_COMMENT=1 in .env"
+# Reuse the same settings captured for T65 (dry-run with project config in place)
+T68_FAILURE_COMMENT=$(echo "$SETTINGS_T65" | jq -r '.env.CATALYST_FAILURE_COMMENT // empty' 2>/dev/null)
+assert_eq "1" "$T68_FAILURE_COMMENT" '.settings.env.CATALYST_FAILURE_COMMENT = "1"'
+
+echo ""
 echo "─────────────────────────────────────────────"
 echo "phase-agent-dispatch: ${PASSES} passed, ${FAILURES} failed"
 if [[ $FAILURES -gt 0 ]]; then

@@ -399,6 +399,30 @@ project's Layer-1 `.catalyst/config.json` at the flat path `catalyst.monitor.lin
 the system can't distinguish the two, so it is the self-echo / loop-prevention guard for the
 Linear channel. See `docs/configuration.md` for how to obtain and set the value.
 
+### Linear comment strategy (CTL-1182)
+
+Phase agents post to Linear through a **two-tier** helper
+(`plugins/dev/scripts/lib/linear-comment-post.sh`):
+
+1. **App-actor** — mints an OAuth client-credentials token, resolves the issue UUID, and calls the
+   Linear GraphQL `commentCreate` mutation. This is the default path for all success mirrors.
+2. **`linearis` fallback** — when the app-actor path fails for any reason (invalid scope, missing
+   credentials, network error), the helper attempts `linearis issues discuss "$TICKET" --body "$BODY"`.
+   Both paths use the same function interface; exit 0 means the comment posted via one of them.
+
+**Failure-path comments** are centralized in `phase-agent-emit-complete`. When it transitions a
+phase to `failed` or `park`, it calls `lib/phase-failure-comment.sh` (after the canonical event
+emit and signal flip so the lifecycle record is already durable). That helper reads
+`.explanation.call_to_action` from the signal file (written by escalation helpers such as
+`escalate-workflow-scope.sh`) and posts it to Linear via the two-tier helper. This means
+`escalate-workflow-scope.sh` requires **no changes** to surface its `call_to_action` on the ticket:
+the post happens automatically at the `emit-complete` chokepoint every failure exits through.
+
+The post is gated by `CATALYST_FAILURE_COMMENT=1`, injected into every dispatched worker by
+`phase-agent-dispatch`'s `compose_worker_settings_json`. Default `OFF` keeps unit tests clean — no
+live Linear calls unless the env var is set. Idempotency is enforced via a
+`.linear-failure-mirror-${PHASE}` marker file alongside the success `.linear-mirror-${PHASE}`.
+
 ### `shouldSkipEvent` self-filter
 
 Because the broker both **reads** and **writes** the same JSONL log, it would otherwise re-ingest

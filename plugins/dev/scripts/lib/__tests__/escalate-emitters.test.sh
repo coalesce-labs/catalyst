@@ -280,6 +280,94 @@ S11F_SCRATCH="$(run_s11 1 0 true true)"
 S11F_STATUS="$(jq -r '.status' "${S11F_SCRATCH}/phase-implement.json" 2>/dev/null || echo "missing")"
 assert_eq "failed" "$S11F_STATUS" "11f: signal still set to failed even when linearis exits 1"
 rm -rf "$S11F_SCRATCH"
+# ── 12. End-to-end: escalate → emit-complete stub → phase-failure-comment → poster (CTL-1182) ──
+echo "12. escalate-workflow-scope end-to-end: call_to_action reaches Linear poster (CTL-1182)"
+E2E_WFSCOPE="${EMITTER_DIR}/escalate-workflow-scope.sh"
+E2E_PFC="${EMITTER_DIR}/phase-failure-comment.sh"
+if [[ -f "$E2E_WFSCOPE" && -f "$E2E_PFC" && -x "$E2E_PFC" ]]; then
+  E2E_SCRATCH="$(mktemp -d)"
+  E2E_TICKET="CTL-E2E5"
+  E2E_PHASE="pr"
+  E2E_ORCH="${E2E_SCRATCH}/orch"
+  mkdir -p "${E2E_ORCH}/workers/${E2E_TICKET}"
+  E2E_SIGNAL="${E2E_ORCH}/workers/${E2E_TICKET}/phase-${E2E_PHASE}.json"
+  printf '{"ticket":"%s","phase":"%s","status":"pending"}\n' "$E2E_TICKET" "$E2E_PHASE" >"$E2E_SIGNAL"
+
+  # Recording poster stub (injected via CATALYST_COMMENT_POST_HELPER)
+  E2E_INVOCATIONS="${E2E_SCRATCH}/invocations.txt"
+  E2E_BODY="${E2E_SCRATCH}/body.txt"
+  E2E_POSTER="${E2E_SCRATCH}/poster.sh"
+  cat >"$E2E_POSTER" <<PSTUBEOF
+#!/usr/bin/env bash
+printf '%s\n' "\$1" >> "${E2E_INVOCATIONS}"
+printf '%s' "\$2" > "${E2E_BODY}"
+exit 0
+PSTUBEOF
+  chmod +x "$E2E_POSTER"
+
+  # Fake PLUGIN_ROOT: real escalation-explain.mjs (needed by _escalate_workflow_scope_push)
+  # + stub phase-agent-emit-complete that calls the real phase-failure-comment.sh.
+  E2E_FAKE_ROOT="${E2E_SCRATCH}/fake-plugin"
+  mkdir -p "${E2E_FAKE_ROOT}/scripts/execution-core"
+  REAL_EXPLAIN="${PLUGIN_ROOT}/scripts/execution-core/escalation-explain.mjs"
+  [[ -f "$REAL_EXPLAIN" ]] && ln -s "$REAL_EXPLAIN" \
+    "${E2E_FAKE_ROOT}/scripts/execution-core/escalation-explain.mjs"
+
+  # Stub emit-complete: forwards --status failed to phase-failure-comment.sh
+  # (tests the emit-complete → phase-failure-comment portion of the chain)
+  cat >"${E2E_FAKE_ROOT}/scripts/phase-agent-emit-complete" <<ESTUBEOF
+#!/usr/bin/env bash
+_T=""; _P=""; _R=""; _S=""
+while [[ \$# -gt 0 ]]; do
+  case "\$1" in
+    --ticket) _T="\$2"; shift 2;;
+    --phase)  _P="\$2"; shift 2;;
+    --reason) _R="\$2"; shift 2;;
+    --status) _S="\$2"; shift 2;;
+    *)        shift;;
+  esac
+done
+if [[ "\$_S" == "failed" || "\$_S" == "park" ]] && [[ -n "\$_T" ]]; then
+  "${E2E_PFC}" --ticket "\$_T" --phase "\$_P" --reason "\$_R" \
+    --orch-dir "${E2E_ORCH}" >/dev/null 2>&1 || true
+fi
+exit 0
+ESTUBEOF
+  chmod +x "${E2E_FAKE_ROOT}/scripts/phase-agent-emit-complete"
+
+  # Run escalation in a subshell with overridden PLUGIN_ROOT
+  (
+    export PLUGIN_ROOT="${E2E_FAKE_ROOT}"
+    export SIGNAL_FILE="$E2E_SIGNAL"
+    export TICKET="$E2E_TICKET"
+    export PHASE="$E2E_PHASE"
+    export ORCH_ID="orch-e2e"
+    export COMMS=""
+    export CATALYST_FAILURE_COMMENT=1
+    export CATALYST_COMMENT_POST_HELPER="$E2E_POSTER"
+    # shellcheck source=/dev/null
+    source "$E2E_WFSCOPE" 2>/dev/null
+    _escalate_workflow_scope_push "CTL-E2E5-branch" 2>/dev/null || true
+  ) || true
+
+  # Assert poster was invoked exactly once
+  E2E_COUNT=0
+  [[ -f "$E2E_INVOCATIONS" ]] && E2E_COUNT="$(wc -l <"$E2E_INVOCATIONS" | tr -d ' ')"
+  assert_eq "1" "$E2E_COUNT" "e2e: Linear poster invoked exactly once"
+
+  # Assert body contains workflow-scope call_to_action text
+  if [[ -f "$E2E_BODY" ]] && grep -qi "workflow" "$E2E_BODY" 2>/dev/null; then
+    echo "  PASS: e2e: body contains workflow-scope call_to_action"
+    (( PASSES++ )) || true
+  else
+    echo "  FAIL: e2e: body missing workflow-scope text (got: $(head -3 "${E2E_BODY}" 2>/dev/null))"
+    (( FAILURES++ )) || true
+  fi
+
+  rm -rf "$E2E_SCRATCH"
+else
+  echo "  SKIP: escalate-workflow-scope.sh or phase-failure-comment.sh not found"
+fi
 
 echo ""
 echo "results: ${PASSES} passed, ${FAILURES} failed"
