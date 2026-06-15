@@ -99,6 +99,7 @@ import {
   readCycleFromEdb,
 } from "./beliefs/advance-shadow.mjs";
 import { recordShadowComparison } from "./beliefs/shadow-store.mjs";
+import { runFreeSlotsShadow } from "./beliefs/free-slots-shadow.mjs";
 // CTL-937: bounded stall-diagnostician wake wiring (opt-in CATALYST_DIAGNOSTICIAN=1).
 import { processDiagnosticianWakes } from "./diagnostician.mjs";
 import { executeEscalations } from "./beliefs/escalate.mjs";
@@ -4785,6 +4786,12 @@ export function schedulerTick(
     advanced,
     dispatched,
     freeSlots,
+    // CTL-935 Phase 2: expose procedural inputs so runFreeSlotsShadow can
+    // attribute the gap without re-reading scheduler internals.
+    maxParallel,
+    inFlightCount,
+    livenessFresh,
+    draining,
     ready: ready.map((t) => t.identifier),
   };
 }
@@ -5018,7 +5025,10 @@ function runTick() {
         }
       }
     }
-    schedulerTick(runningOpts.orchDir, {
+    // CTL-935 Phase 2: capture schedulerTick return so comparators can read
+    // procedural values (freeSlots, maxParallel, inFlightCount, etc.) without
+    // re-deriving them. The bare call is replaced by const tickResult = ...
+    const tickResult = schedulerTick(runningOpts.orchDir, {
       readEligible: runningOpts.readEligible,
       dispatch: runningOpts.dispatch,
       exec: runningOpts.exec,
@@ -5166,6 +5176,39 @@ function runTick() {
       // existsSync default in schedulerTick; test seam via startScheduler).
       hasTriageArtifact: runningOpts.hasTriageArtifact,
     });
+    // CTL-935 Phase 2: free-slots / R8 shadow comparator. Runs AFTER schedulerTick
+    // (which produces the authoritative freeSlots value) — apples-to-apples because
+    // the R8 belief was derived at collectBeliefsTick BEFORE schedulerTick modified
+    // any state. Guard mirrors the advance-shadow guard above.
+    if (beliefsRes?.ok && beliefsRes?.tickId != null) {
+      try {
+        const fsDb = getBeliefsDb();
+        if (fsDb) {
+          runFreeSlotsShadow(fsDb, beliefsRes.tickId, {
+            proceduralFreeSlots: typeof tickResult?.freeSlots === "number"
+              ? tickResult.freeSlots
+              : null,
+            proceduralInputs: tickResult
+              ? {
+                  maxParallel: tickResult.maxParallel,
+                  inFlightCount: tickResult.inFlightCount,
+                  livenessFresh: tickResult.livenessFresh,
+                  draining: tickResult.draining,
+                }
+              : null,
+            appendEvent: intentEventAppender,
+            writeComparison: (rec) => recordShadowComparison(fsDb, rec),
+            emitTickSummary: (process.env.CATALYST_FREE_SLOTS_SHADOW_SUMMARY ?? "0") === "1",
+          });
+        }
+      } catch (fsErr) {
+        try {
+          log.warn({ err: fsErr?.message }, "free-slots-shadow: comparator threw (tick unaffected)");
+        } catch {
+          /* even logging must not break the tick */
+        }
+      }
+    }
     // CTL-863: host-death takeover sweep — complement to worker-death reclaim.
     // Skip entirely on single-host installs (no-op inside the function, but the
     // pre-check avoids the call to stay zero-cost on the common case).
