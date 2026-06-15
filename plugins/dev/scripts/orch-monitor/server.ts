@@ -4008,6 +4008,36 @@ export function createServer(opts: CreateServerOptions): BunServer {
           }
         }
 
+        // CTL-935 Phase 5: GET /api/beliefs/report — weekly shadow disagreement report.
+        // ?sinceDays=7 (default 7, clamped to [1,90]). Degrades gracefully when
+        // beliefs.db is absent. DO NOT inline the specifier (VITE-GRAPH GUARD, CTL-883).
+        if (url.pathname === "/api/beliefs/report") {
+          const rawDays = url.searchParams.get("sinceDays");
+          let sinceDays = 7;
+          if (rawDays != null) {
+            const parsed = Number(rawDays);
+            if (!Number.isFinite(parsed) || parsed <= 0 || !Number.isInteger(parsed)) {
+              return new Response("sinceDays must be a positive integer", { status: 400 });
+            }
+            sinceDays = Math.min(Math.max(parsed, 1), 90);
+          }
+          const nowMs = Date.now();
+          const sinceMs = nowMs - sinceDays * 86_400_000;
+          const reportMod = ["./lib/belief-report.mjs"].join("");
+          try {
+            const { computeReportJson } = await import(reportMod) as {
+              computeReportJson: (opts: { dbPath: string; sinceMs: number; nowMs: number }) => Promise<unknown>;
+            };
+            const report = await computeReportJson({ dbPath: govDbPath(), sinceMs, nowMs });
+            return Response.json(report);
+          } catch {
+            return Response.json({
+              window: { sinceMs, nowMs, tickCount: 0, rulesShaSet: [], multipleRulesSha: false },
+              perRule: [], perGuard: [], replays: [],
+            });
+          }
+        }
+
         return new Response("Not Found", { status: 404 });
       } catch (err) {
         console.error(`[server] fetch handler error:`, err);
