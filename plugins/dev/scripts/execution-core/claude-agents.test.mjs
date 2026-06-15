@@ -334,6 +334,107 @@ describe("countBackgroundAgents", () => {
   });
 });
 
+// --- CTL-1165 D1: concurrency self-exclusion + live-count invariant fence ----
+//
+// The scheduler's in-flight count is the LIVE `claude agents` background count
+// (scheduler.mjs:4247 inFlightCount = liveCount). countBackgroundAgents must
+// therefore (a) NOT count the daemon's own controlling background session
+// against maxParallel (a self-count is a starve-by-1, safe direction but wrong),
+// and (b) keep counting a leaked-but-running / status:null zombie as occupying a
+// slot — the safe "never over-dispatch on top of a live worker" invariant that a
+// future "skip unknown status" optimization must never silently break. D1 adds
+// the self-exclusion + fences both invariants; it makes NO dispatch-arithmetic
+// change (that lives in the scheduler, unchanged).
+describe("countBackgroundAgents — D1 self-exclusion + live-count invariant (CTL-1165)", () => {
+  const allAlive = () => ({ state: "working", firstTerminalAt: null });
+  // hex-prefixed UUID so shortIdFromSessionId(/^[0-9a-f]{8}-/) parses it.
+  const bg = (id, extra = {}) => ({
+    sessionId: `${id}-0000-0000-0000-000000000000`,
+    kind: "background",
+    ...extra,
+  });
+
+  test("excludes the self/controlling session even when background + alive (short-id env)", () => {
+    const env = { CLAUDE_CODE_SESSION_ID: "aaaaaaaa" };
+    expect(
+      countBackgroundAgents({
+        agents: [bg("aaaaaaaa"), bg("bbbbbbbb")],
+        statJob: allAlive,
+        env,
+      }),
+    ).toBe(1);
+  });
+
+  test("env unset → counts all background sessions (back-compat, fails closed/over-count-safe)", () => {
+    // No CLAUDE_CODE_SESSION_ID → isSelfSession is false for everything → count all.
+    expect(
+      countBackgroundAgents({
+        agents: [bg("aaaaaaaa"), bg("bbbbbbbb")],
+        statJob: allAlive,
+        env: {},
+      }),
+    ).toBe(2);
+  });
+
+  test("full-UUID env self id still drops the matching short-id session", () => {
+    const env = { CLAUDE_CODE_SESSION_ID: "aaaaaaaa-0000-0000-0000-000000000000" };
+    expect(
+      countBackgroundAgents({
+        agents: [bg("aaaaaaaa"), bg("bbbbbbbb")],
+        statJob: allAlive,
+        env,
+      }),
+    ).toBe(1);
+  });
+
+  test("counts a leaked-but-running worker so the scheduler cannot over-dispatch on top of it", () => {
+    // 1 alive bg session whose signal would read terminal — the live-count design
+    // (scheduler.mjs:4242) counts the PROCESS, not the signal scan. Pins it.
+    expect(countBackgroundAgents({ agents: [bg("a1111111")], statJob: allAlive })).toBe(1);
+  });
+
+  test("interactive never counted; unknown/absent kind fails low; interactive self still excluded", () => {
+    const env = { CLAUDE_CODE_SESSION_ID: "cccccccc" };
+    const mixed = [
+      bg("a1111111"), // background, counts
+      { sessionId: "bbbbbbbb-0000-0000-0000-000000000000", kind: "interactive" }, // not counted
+      { sessionId: "dddddddd-0000-0000-0000-000000000000" }, // no kind → fail-low
+      { sessionId: "cccccccc-0000-0000-0000-000000000000", kind: "interactive" }, // self + interactive
+    ];
+    expect(countBackgroundAgents({ agents: mixed, statJob: allAlive, env })).toBe(1);
+  });
+
+  test("self-exclusion is the FIRST gate: a self session is dropped even if its job dir is gone (never throws, never counts)", () => {
+    const env = { CLAUDE_CODE_SESSION_ID: "aaaaaaaa" };
+    // statJob would classify it dead anyway, but the point is self is dropped up-front.
+    expect(
+      countBackgroundAgents({ agents: [bg("aaaaaaaa")], statJob: () => null, env }),
+    ).toBe(0);
+  });
+
+  test("per-ticket duplicate workers each counted (two bg sessions, same ticket)", () => {
+    expect(
+      countBackgroundAgents({ agents: [bg("a1111111"), bg("a2222222")], statJob: allAlive }),
+    ).toBe(2);
+  });
+
+  test("reboot-survivor status:null background zombie is counted-as-occupying (working job dir)", () => {
+    // A status:null background session whose job dir is still present + working
+    // holds a real slot — it MUST count (the invariant a 'skip unknown status'
+    // optimization could silently break into over-dispatch).
+    const statJob = () => ({ state: "working", firstTerminalAt: null });
+    expect(
+      countBackgroundAgents({ agents: [bg("a1111111", { status: null })], statJob }),
+    ).toBe(1);
+  });
+
+  test("status:null zombie whose job dir is GONE → 0 (CTL-1055 ghost exclusion, regression fence)", () => {
+    expect(
+      countBackgroundAgents({ agents: [bg("a1111111", { status: null })], statJob: () => null }),
+    ).toBe(0);
+  });
+});
+
 describe("claudeStop", () => {
   test("issues `claude stop <shortId>` and reports ok on rc 0", () => {
     const calls = [];
