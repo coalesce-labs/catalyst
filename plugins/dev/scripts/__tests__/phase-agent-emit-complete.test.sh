@@ -699,6 +699,79 @@ REASON=$(echo "$LINE" | jq -r '.body.payload.failure_reason' 2>/dev/null || echo
 assert_eq "phase.plan.failed.CTL-1097" "$EVENT_NAME" "genuine miss in worktreePath → failed"
 assert_eq "artifact_not_gate_visible" "$REASON" "genuine miss preserves artifact_not_gate_visible reason"
 
+# ─── CTL-1182 Phase 2: failure-comment integration in emit-complete ───────────
+# Tests 46-48 verify that emit-complete calls phase-failure-comment.sh when
+# CATALYST_FAILURE_COMMENT=1 and --status failed, but NOT on complete or when
+# the env is unset. Uses CATALYST_COMMENT_POST_HELPER pointing at a recording
+# stub so no live Linear calls are made.
+
+# Recording stub for CATALYST_COMMENT_POST_HELPER
+STUB_1182="${SCRATCH}/linear-post-stub-1182.sh"
+STUB_1182_INVOCATIONS="${SCRATCH}/stub-1182-invocations.txt"
+STUB_1182_BODY="${SCRATCH}/stub-1182-body.txt"
+cat >"$STUB_1182" <<STUBEOF
+#!/usr/bin/env bash
+printf '%s\n' "\$1" >> "${STUB_1182_INVOCATIONS}"
+printf '%s' "\$2" > "${STUB_1182_BODY}"
+exit 0
+STUBEOF
+chmod +x "$STUB_1182"
+
+reset_stub_1182() {
+  rm -f "${STUB_1182_INVOCATIONS}" "${STUB_1182_BODY}"
+}
+
+stub_1182_count() {
+  wc -l < "${STUB_1182_INVOCATIONS}" 2>/dev/null | tr -d ' ' || echo 0
+}
+
+echo ""
+echo "Test 46 (CTL-1182): --status failed + CATALYST_FAILURE_COMMENT=1 calls failure-comment helper"
+fresh_env t46
+SIGNAL="${CATALYST_ORCHESTRATOR_DIR}/workers/CTL-100/phase-research.json"
+echo '{"status":"running","ticket":"CTL-100","phase":"research"}' >"$SIGNAL"
+reset_stub_1182
+CATALYST_FAILURE_COMMENT=1 \
+  CATALYST_COMMENT_POST_HELPER="$STUB_1182" \
+  "$EMIT_SCRIPT" --phase research --ticket CTL-100 --status failed \
+    --reason "tests_red" >/dev/null 2>&1
+LINE=$(read_event_line)
+EVENT_NAME=$(echo "$LINE" | jq -r '.attributes."event.name"')
+assert_eq "phase.research.failed.CTL-100" "$EVENT_NAME" "event still emitted on failed (regression-lock Test 34)"
+if [[ "$(stub_1182_count)" -ge 1 ]]; then
+  pass "failure-comment helper invoked on --status failed"
+else
+  fail "failure-comment helper NOT invoked on --status failed"
+fi
+if grep -q "CTL-100" "${STUB_1182_INVOCATIONS}" 2>/dev/null; then
+  pass "helper called with correct ticket"
+else
+  fail "helper not called with ticket CTL-100"
+fi
+
+echo ""
+echo "Test 47 (CTL-1182): --status complete does NOT call failure-comment helper"
+fresh_env t47
+SIGNAL="${CATALYST_ORCHESTRATOR_DIR}/workers/CTL-100/phase-verify.json"
+echo '{"status":"running","ticket":"CTL-100","phase":"verify"}' >"$SIGNAL"
+reset_stub_1182
+CATALYST_FAILURE_COMMENT=1 \
+  CATALYST_COMMENT_POST_HELPER="$STUB_1182" \
+  "$EMIT_SCRIPT" --phase verify --ticket CTL-100 --status complete >/dev/null 2>&1
+assert_eq "0" "$(stub_1182_count)" "failure-comment NOT called on --status complete"
+
+echo ""
+echo "Test 48 (CTL-1182): default (env unset) makes no failure comment post"
+fresh_env t48
+SIGNAL="${CATALYST_ORCHESTRATOR_DIR}/workers/CTL-100/phase-research.json"
+echo '{"status":"running","ticket":"CTL-100","phase":"research"}' >"$SIGNAL"
+reset_stub_1182
+env -u CATALYST_FAILURE_COMMENT \
+  CATALYST_COMMENT_POST_HELPER="$STUB_1182" \
+  "$EMIT_SCRIPT" --phase research --ticket CTL-100 --status failed \
+    --reason "some_reason" >/dev/null 2>&1
+assert_eq "0" "$(stub_1182_count)" "failure-comment NOT called when CATALYST_FAILURE_COMMENT unset (test-isolation contract)"
+
 echo ""
 echo "─────────────────────────────────────────────"
 echo "phase-agent-emit-complete: ${PASSES} passed, ${FAILURES} failed"

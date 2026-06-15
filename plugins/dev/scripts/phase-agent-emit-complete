@@ -419,6 +419,19 @@ if [[ -n $ORCH_DIR && $NO_SIGNAL_UPDATE -eq 0 ]]; then
 	fi
 fi
 
+# ─── 2b. Failure-path Linear comment (CTL-1182) ─────────────────────────────
+#
+# Post the failure explanation (or --reason) to Linear exactly once, gated by
+# CATALYST_FAILURE_COMMENT=1 (injected by phase-agent-dispatch). Best-effort:
+# a failing or absent helper never aborts the caller. Runs AFTER the signal
+# flip so the outcome is recorded before any network I/O. Also fires on the
+# artifact_not_gate_visible downgrade above (desirable — surfaces the stall).
+if [[ ( $STATUS == failed || $STATUS == park ) && -n ${TICKET-} ]]; then
+	"${SCRIPT_DIR}/lib/phase-failure-comment.sh" \
+		--ticket "$TICKET" --phase "$PHASE" --reason "$REASON" \
+		--orch-dir "${ORCH_DIR:-}" >/dev/null 2>&1 || true
+fi
+
 # ─── 3. End catalyst-session ────────────────────────────────────────────────
 
 if [[ -n $SESSION_ID ]] && [[ -x "${SCRIPT_DIR}/catalyst-session.sh" ]]; then
