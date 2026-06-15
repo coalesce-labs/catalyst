@@ -46,13 +46,19 @@ describe("emitReapIntent", () => {
     await expect(emitReapIntent("bogus.event", {})).rejects.toThrow(/unknown/);
   });
 
-  it("exposes REAP_INTENT_TYPES with 18 entries", async () => {
+  it("exposes REAP_INTENT_TYPES with 23 entries", async () => {
     const { REAP_INTENT_TYPES } = await freshModule();
-    expect(REAP_INTENT_TYPES.length).toBe(18);
+    expect(REAP_INTENT_TYPES.length).toBe(23);
     expect(REAP_INTENT_TYPES).toContain("phase.yield.reap-requested");
     expect(REAP_INTENT_TYPES).toContain("pr.merged.cleanup-requested");
     expect(REAP_INTENT_TYPES).toContain("orphans.reap-requested");
+    expect(REAP_INTENT_TYPES).toContain("jobs.gc.swept"); // CTL-1165 D3
     expect(REAP_INTENT_TYPES).toContain("worktree.cleanup-deferred"); // CTL-791
+    // CTL-1165 D2: the orphan child-process reaper vocabulary.
+    expect(REAP_INTENT_TYPES).toContain("procOrphans.reap-requested");
+    expect(REAP_INTENT_TYPES).toContain("procOrphans.reaped");
+    expect(REAP_INTENT_TYPES).toContain("procOrphans.would-reap");
+    expect(REAP_INTENT_TYPES).toContain("procOrphans.spared");
     // CTL-1004 stall-janitor (shadow-first) event vocabulary.
     expect(REAP_INTENT_TYPES).toContain("janitor.worktree.deferred");
     expect(REAP_INTENT_TYPES).toContain("janitor.would.reap-request");
@@ -90,6 +96,38 @@ describe("emitReapIntent", () => {
       const last = JSON.parse(readFileSync(LOG_PATH, "utf8").trim().split("\n").pop());
       expect(last.event).toBe(type);
       expect(last.ticket).toBe("CTL-1005");
+    }
+  });
+
+  it("accepts jobs.gc.swept end-to-end (CTL-1165 D3)", async () => {
+    const { emitReapIntent, REAP_INTENT_TYPES } = await freshModule();
+    expect(REAP_INTENT_TYPES).toContain("jobs.gc.swept");
+    const ok = await emitReapIntent("jobs.gc.swept", { reclaimed: 3 });
+    expect(ok).toBe(true);
+    const last = JSON.parse(readFileSync(LOG_PATH, "utf8").trim().split("\n").pop());
+    expect(last.event).toBe("jobs.gc.swept");
+    expect(last.reclaimed).toBe(3);
+  });
+
+  it("accepts the procOrphans.* types end-to-end with pid/command fields (CTL-1165 D2)", async () => {
+    const { emitReapIntent, REAP_INTENT_TYPES } = await freshModule();
+    for (const type of [
+      "procOrphans.reap-requested",
+      "procOrphans.reaped",
+      "procOrphans.would-reap",
+      "procOrphans.spared",
+    ]) {
+      expect(REAP_INTENT_TYPES).toContain(type);
+      const ok = await emitReapIntent(type, {
+        pid: 4242,
+        command: "node",
+        reason: "orphan-node-under-worktree",
+      });
+      expect(ok).toBe(true);
+      const last = JSON.parse(readFileSync(LOG_PATH, "utf8").trim().split("\n").pop());
+      expect(last.event).toBe(type);
+      expect(last.pid).toBe(4242);
+      expect(last.command).toBe("node");
     }
   });
 

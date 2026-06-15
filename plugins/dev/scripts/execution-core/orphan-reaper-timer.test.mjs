@@ -30,17 +30,22 @@ function fakeClock() {
 }
 
 describe("startOrphanReaperTimer", () => {
-  it("emits orphans + reconcile reap-requested every interval (CTL-661)", () => {
+  it("emits orphans + reconcile + procOrphans reap-requested every interval (CTL-661 / CTL-1165 D2)", () => {
     const emitted = [];
     const clock = fakeClock();
     startOrphanReaperTimer({ intervalSeconds: 600, emit: (e) => emitted.push(e), clock });
     clock.advance(600_000);
-    // CTL-661: each tick now drives BOTH the orphan sweep and the per-ticket
-    // reconcile sweep (the bare reconcile event is the sweep trigger).
-    expect(emitted).toEqual(["orphans.reap-requested", "phase.reconcile.reap-requested"]);
+    // CTL-661: each tick drives the orphan sweep AND the per-ticket reconcile
+    // sweep. CTL-1165 D2: it also fires the orphan child-process reaper trigger.
+    expect(emitted).toEqual([
+      "orphans.reap-requested",
+      "phase.reconcile.reap-requested",
+      "procOrphans.reap-requested",
+    ]);
     clock.advance(600_000);
     expect(emitted.filter((e) => e === "orphans.reap-requested").length).toBe(2);
     expect(emitted.filter((e) => e === "phase.reconcile.reap-requested").length).toBe(2);
+    expect(emitted.filter((e) => e === "procOrphans.reap-requested").length).toBe(2);
   });
 
   it("honors a config-overridden interval", () => {
@@ -78,6 +83,48 @@ describe("startOrphanReaperTimer", () => {
     handle.stop();
     clock.advance(600_000);
     expect(emitted.length).toBe(0);
+  });
+
+  // CTL-1165 D3: the job-dir GC runs on the same 600s cadence, sharing the
+  // tick's try/catch with the two reap emits.
+  it("runs jobGc on the same tick as the two reap emits (CTL-1165 D3)", async () => {
+    const emitted = [];
+    let jobGcCalls = 0;
+    const clock = fakeClock();
+    startOrphanReaperTimer({
+      intervalSeconds: 600,
+      emit: async (e) => emitted.push(e),
+      jobGc: async () => {
+        jobGcCalls++;
+      },
+      clock,
+    });
+    clock.advance(600_000);
+    // flush the async tick body
+    await new Promise((r) => setTimeout(r, 0));
+    expect(emitted.filter((e) => e === "orphans.reap-requested").length).toBe(1);
+    expect(emitted.filter((e) => e === "phase.reconcile.reap-requested").length).toBe(1);
+    expect(jobGcCalls).toBe(1);
+  });
+
+  // CTL-1165 D3: a rejecting jobGc must NOT suppress the two reap emits —
+  // they share the tick's try/catch, so the emits run first (synchronously,
+  // before any await) and a jobGc rejection is swallowed by the same catch.
+  it("a rejecting jobGc does not suppress the two reap emits (CTL-1165 D3)", async () => {
+    const emitted = [];
+    const clock = fakeClock();
+    startOrphanReaperTimer({
+      intervalSeconds: 600,
+      emit: async (e) => emitted.push(e),
+      jobGc: async () => {
+        throw new Error("job-gc boom");
+      },
+      clock,
+    });
+    clock.advance(600_000);
+    await new Promise((r) => setTimeout(r, 0));
+    expect(emitted.filter((e) => e === "orphans.reap-requested").length).toBe(1);
+    expect(emitted.filter((e) => e === "phase.reconcile.reap-requested").length).toBe(1);
   });
 });
 

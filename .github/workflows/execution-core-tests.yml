@@ -117,6 +117,8 @@ jobs:
             event-cursor.test.mjs \
             event-scan.test.mjs \
             event-tail.test.mjs \
+            fleet-health-event.test.mjs \
+            fleet-health-probe.test.mjs \
             gateway-read.test.mjs \
             halt-on-complete.test.mjs \
             heartbeat-event.test.mjs \
@@ -124,6 +126,7 @@ jobs:
             integration-ctl-701.test.mjs \
             integration-ctl-705.test.mjs \
             integration.test.mjs \
+            job-dir-gc.test.mjs \
             label-guard.test.mjs \
             linear-breaker.test.mjs \
             linear-cache.test.mjs \
@@ -137,6 +140,7 @@ jobs:
             memory-sampler.test.mjs \
             merge-state.test.mjs \
             orphan-reaper-timer.test.mjs \
+            proc-reaper.test.mjs \
             ratelimit-event.test.mjs \
             ratelimit-poller.test.mjs \
             reap-intent.test.mjs \

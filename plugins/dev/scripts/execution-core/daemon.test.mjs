@@ -653,6 +653,61 @@ describe("startDaemon", () => {
     expect(() => stopDaemon()).not.toThrow();
     expect(stopped).toBe(1);
   });
+
+  // CTL-1165 D5: the pre-exhaustion fleet-health probe is started from
+  // startDaemon (default-on), gated by enableFleetHealth, and stopped in
+  // stopDaemon — mirroring the CTL-685 memory-sampler wiring exactly.
+  test("starts the fleet-health probe when enabled (CTL-1165 D5)", () => {
+    let started = 0;
+    startDaemon({
+      recover: () => {},
+      startMonitor: () => {},
+      startScheduler: () => {},
+      watchRegistry: false,
+      startFleetHealthProbe: () => {
+        started++;
+        return { stop: () => {} };
+      },
+      enableFleetHealth: true,
+    });
+    expect(started).toBe(1);
+  });
+
+  test("skips the fleet-health probe when disabled (CTL-1165 D5)", () => {
+    let started = 0;
+    startDaemon({
+      recover: () => {},
+      startMonitor: () => {},
+      startScheduler: () => {},
+      watchRegistry: false,
+      startFleetHealthProbe: () => {
+        started++;
+        return { stop: () => {} };
+      },
+      enableFleetHealth: false,
+    });
+    expect(started).toBe(0);
+  });
+
+  test("stopDaemon stops the fleet-health probe and swallows a throwing stop() (CTL-1165 D5)", () => {
+    let stopped = 0;
+    startDaemon({
+      recover: () => {},
+      startMonitor: () => {},
+      startScheduler: () => {},
+      watchRegistry: false,
+      startFleetHealthProbe: () => ({
+        stop: () => {
+          stopped++;
+          throw new Error("simulated probe stop failure");
+        },
+      }),
+      enableFleetHealth: true,
+    });
+    // Must not throw even though stop() throws
+    expect(() => stopDaemon()).not.toThrow();
+    expect(stopped).toBe(1);
+  });
 });
 
 // CTL-678 — main()-side resolver: pre-merge Layer-1 (committed seed) under
@@ -979,6 +1034,40 @@ describe("startReaperAndTimer — poll fallback drains reap-intents (CTL-769)", 
     await new Promise((r) => setTimeout(r, 200));
 
     expect(handled.filter((e) => e.event === "phase.yield.reap-requested")).toHaveLength(0);
+  });
+});
+
+// CTL-1165 D2: the daemon constructs the production orphan child-process reaper
+// (ProcReaper, DEFAULT mode:"shadow") and injects it into the Reaper via the
+// makeReaper opts, so reaper.mjs's procOrphans.reap-requested case has a real
+// sweeper to drive (no-op until injected).
+describe("startReaperAndTimer — injects a production ProcReaper (CTL-1165 D2)", () => {
+  test("makeReaper receives a procReaper whose sweep is a function, defaulting to shadow mode", () => {
+    let capturedOpts = null;
+    const fakeReaper = {
+      handle: () => Promise.resolve(),
+      bootReplay: () => Promise.resolve(),
+    };
+    startDaemon({
+      recover: () => {},
+      reconcileBoot: () => {},
+      startMonitor: () => {},
+      startScheduler: () => {},
+      watchRegistry: false,
+      enableReaper: true,
+      makeReaper: (opts) => {
+        capturedOpts = opts;
+        return fakeReaper;
+      },
+      pollMs: 0, // no poll interval needed for this assertion
+      debounceMs: 600_000,
+    });
+    expect(capturedOpts).not.toBeNull();
+    expect(capturedOpts.procReaper).toBeTruthy();
+    expect(typeof capturedOpts.procReaper.sweep).toBe("function");
+    // Default-safe: shadow mode emits would-reap, kills nothing.
+    expect(capturedOpts.procReaper.mode).toBe("shadow");
+    stopDaemon();
   });
 });
 

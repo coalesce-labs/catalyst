@@ -295,6 +295,108 @@
                   "type": "number",
                   "default": 120,
                   "description": "Minimum number of seconds a worker's signal file must be unmodified before the reaper considers it a candidate for reclaim."
+                },
+                "jobGc": {
+                  "type": "object",
+                  "description": "CTL-1165 D3: garbage-collection of stale ~/.claude/jobs/<id> directories, run on the same cadence as the orphan-reaper sweep. Fail-closed (skips the whole sweep if `claude agents` is unreadable); deletes only the job directory (never `claude rm`), and only when it is not a live/registered session, not the controlling session, and older than retentionSeconds.",
+                  "additionalProperties": false,
+                  "properties": {
+                    "enabled": {
+                      "type": "boolean",
+                      "default": true,
+                      "description": "When false, the job-dir GC is disabled (the orphan-reaper sweep still runs)."
+                    },
+                    "retentionSeconds": {
+                      "type": "number",
+                      "default": 86400,
+                      "description": "Minimum age (in seconds) of a job directory before it is eligible for deletion. Default 24h — far longer than any phase duration. Env CATALYST_JOB_GC_RETENTION_SECONDS overrides."
+                    },
+                    "batchCap": {
+                      "type": "number",
+                      "default": 200,
+                      "description": "Maximum number of job directories deleted per sweep; the remainder drains on the next tick. Env CATALYST_JOB_GC_BATCH_CAP overrides."
+                    }
+                  }
+                },
+                "procReaper": {
+                  "type": "object",
+                  "description": "CTL-1165 D2: the orphan child-process reaper, run on the same cadence as the orphan-reaper sweep. `claude stop` deregisters a worker's claude agent but leaves its reparented node/bun grandchildren (MCP servers, sub-agent tooling, bun-test runners) running — the bulk of the resident-memory leak. It refuses to act unless every signal corroborates: a successful `claude agents` read this cycle (a failed read aborts the whole sweep, killing nothing), the process is reparented and outside the entire live-agent process tree, command and working directory match, and it has persisted across two consecutive sweeps. A hard never-kill allowlist always protects the daemon, broker, monitor, the live-agent tree, Tailscale, pid 1, and any foreign-uid process.",
+                  "additionalProperties": false,
+                  "properties": {
+                    "mode": {
+                      "type": "string",
+                      "enum": ["off", "shadow", "enforce"],
+                      "default": "shadow",
+                      "description": "off disables the reaper; shadow (the default) logs procOrphans.would-reap for each eligible orphan but kills nothing; enforce SIGTERMs then (after grace, if still alive) SIGKILLs. Ships in shadow so the allowlist + live-tree correlation can be audited on real hosts before any enforce flip."
+                    },
+                    "graceMs": {
+                      "type": "number",
+                      "default": 5000,
+                      "description": "Milliseconds to wait after SIGTERM before re-probing and (only if still alive) SIGKILLing, so node/bun can flush."
+                    },
+                    "minEtimeSec": {
+                      "type": "number",
+                      "default": 900,
+                      "description": "A process must have run at least this long (elapsed seconds) to be eligible — corroboration only, never the sole gate."
+                    },
+                    "worktreeRoot": {
+                      "type": "string",
+                      "description": "Only orphans whose working directory is under this root are reapable. Defaults to ~/catalyst/wt."
+                    },
+                    "allowlistPatterns": {
+                      "type": "array",
+                      "items": { "type": "string" },
+                      "default": [],
+                      "description": "Extra case-insensitive argv substrings to never kill, on top of the built-in allowlist (daemon, broker/index.mjs, orch-monitor/server.ts, the live-agent tree, Tailscale, pid 1, foreign-uid processes)."
+                    }
+                  }
+                }
+              }
+            },
+            "fleetHealth": {
+              "type": "object",
+              "description": "CTL-1165 D5: the pre-exhaustion fleet-health guardrail. Every intervalMs it samples four steady-state degradation signals (the ~/.claude/jobs dir count, the live background-agent count, the resident node/bun worker-process count, and macOS swap-used MB) and, when any crosses its threshold, emits a single fleet.health.degraded event. selfHealEnabled is OFF by default (emit-only); when enabled it eagerly fires the same gated reap intents the 600s orphan-reaper timer emits — it gains no new kill authority.",
+              "additionalProperties": false,
+              "properties": {
+                "enabled": {
+                  "type": "boolean",
+                  "default": true,
+                  "description": "When false, the fleet-health probe is disabled. Env CATALYST_FLEET_HEALTH=0 also disables it."
+                },
+                "intervalMs": {
+                  "type": "number",
+                  "default": 120000,
+                  "description": "How often (in milliseconds) the probe samples the four signals. Env EXECUTION_CORE_FLEET_HEALTH_INTERVAL_MS overrides."
+                },
+                "jobsThreshold": {
+                  "type": "number",
+                  "default": 500,
+                  "description": "Emit fleet.health.degraded when the ~/.claude/jobs dir count reaches this value. Env EXECUTION_CORE_FLEET_JOBS_THRESHOLD overrides."
+                },
+                "swapUsedMbThreshold": {
+                  "type": "number",
+                  "default": 4096,
+                  "description": "Emit when macOS swap-used MB reaches this value. Env EXECUTION_CORE_FLEET_SWAP_MB_THRESHOLD overrides."
+                },
+                "agentsThreshold": {
+                  "type": "number",
+                  "default": 12,
+                  "description": "Emit when the live background-agent count reaches this value. Env EXECUTION_CORE_FLEET_AGENTS_THRESHOLD overrides."
+                },
+                "procsThreshold": {
+                  "type": "number",
+                  "default": 40,
+                  "description": "Emit when the resident node/bun worker-process count reaches this value. Env EXECUTION_CORE_FLEET_PROCS_THRESHOLD overrides."
+                },
+                "selfHealEnabled": {
+                  "type": "boolean",
+                  "default": false,
+                  "description": "When true, a sustained breach eagerly fires the orphan-reaper + phase-reconcile + proc-orphan reap intents (each gated by its own reaper; the proc-orphan sweep is shadow by default). DEFAULT OFF — the first ship is a pure alert. Env EXECUTION_CORE_FLEET_SELF_HEAL=1 also enables it."
+                },
+                "sustainedTicks": {
+                  "type": "number",
+                  "default": 2,
+                  "description": "Number of consecutive degraded ticks before self-heal fires (once per breach episode, re-armed after a healthy tick)."
                 }
               }
             }

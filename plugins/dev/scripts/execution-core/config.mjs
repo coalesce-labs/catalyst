@@ -401,6 +401,102 @@ export function readMemorySamplerConfig() {
   };
 }
 
+// CTL-1165 D5 — pre-exhaustion fleet-health guardrail config. Re-reads from
+// process.env on every call (mirrors readMemorySamplerConfig) so tests mutate
+// env freely. Three-layer precedence per knob: env > Layer-1
+// (catalyst.orchestration.fleetHealth in .catalyst/config.json) > code default.
+// `selfHealEnabled` DEFAULTS OFF — the first ship is a pure alert; nothing is
+// reaped until an operator opts in via EXECUTION_CORE_FLEET_SELF_HEAL.
+const FLEET_HEALTH_DEFAULTS = Object.freeze({
+  enabled: true,
+  intervalMs: 120_000,
+  jobsThreshold: 500,
+  swapUsedMbThreshold: 4096,
+  agentsThreshold: 12,
+  procsThreshold: 40,
+  selfHealEnabled: false,
+  sustainedTicks: 2,
+});
+
+// readFleetHealthConfigLayer1 — pull catalyst.orchestration.fleetHealth out of a
+// project's .catalyst/config.json. Returns {} for a null/missing/unparseable
+// file or absent key so callers fall back to env/defaults. Never throws.
+export function readFleetHealthConfigLayer1(configPath) {
+  if (!configPath) return {};
+  try {
+    const parsed = JSON.parse(readFileSync(configPath, "utf8"));
+    const fh = parsed?.catalyst?.orchestration?.fleetHealth;
+    return fh && typeof fh === "object" ? fh : {};
+  } catch (err) {
+    if (err?.code !== "ENOENT") {
+      log.warn({ configPath, err: err.message }, "fleet-health: Layer-1 config unreadable; using defaults");
+    }
+    return {};
+  }
+}
+
+function fleetHealthNumber(envVal, l1Val, def) {
+  for (const v of [envVal, l1Val]) {
+    if (v === undefined || v === null || v === "") continue;
+    const n = Number(v);
+    if (Number.isFinite(n) && n >= 0) return n;
+  }
+  return def;
+}
+
+export function readFleetHealthConfig(configPath) {
+  const l1 = readFleetHealthConfigLayer1(configPath);
+  return {
+    // env=0 disables; otherwise Layer-1 enabled===false disables; else default-on.
+    enabled:
+      process.env.CATALYST_FLEET_HEALTH === "0"
+        ? false
+        : l1.enabled === false
+          ? false
+          : FLEET_HEALTH_DEFAULTS.enabled,
+    intervalMs: fleetHealthNumber(
+      process.env.EXECUTION_CORE_FLEET_HEALTH_INTERVAL_MS,
+      l1.intervalMs,
+      FLEET_HEALTH_DEFAULTS.intervalMs,
+    ),
+    jobsThreshold: fleetHealthNumber(
+      process.env.EXECUTION_CORE_FLEET_JOBS_THRESHOLD,
+      l1.jobsThreshold,
+      FLEET_HEALTH_DEFAULTS.jobsThreshold,
+    ),
+    swapUsedMbThreshold: fleetHealthNumber(
+      process.env.EXECUTION_CORE_FLEET_SWAP_MB_THRESHOLD,
+      l1.swapUsedMbThreshold,
+      FLEET_HEALTH_DEFAULTS.swapUsedMbThreshold,
+    ),
+    agentsThreshold: fleetHealthNumber(
+      process.env.EXECUTION_CORE_FLEET_AGENTS_THRESHOLD,
+      l1.agentsThreshold,
+      FLEET_HEALTH_DEFAULTS.agentsThreshold,
+    ),
+    procsThreshold: fleetHealthNumber(
+      process.env.EXECUTION_CORE_FLEET_PROCS_THRESHOLD,
+      l1.procsThreshold,
+      FLEET_HEALTH_DEFAULTS.procsThreshold,
+    ),
+    // Self-heal: env=1 enables; otherwise Layer-1 selfHealEnabled===true enables;
+    // else DEFAULT OFF (emit-only).
+    selfHealEnabled:
+      process.env.EXECUTION_CORE_FLEET_SELF_HEAL === "1"
+        ? true
+        : process.env.EXECUTION_CORE_FLEET_SELF_HEAL === "0"
+          ? false
+          : l1.selfHealEnabled === true
+            ? true
+            : FLEET_HEALTH_DEFAULTS.selfHealEnabled,
+    sustainedTicks: fleetHealthNumber(
+      process.env.EXECUTION_CORE_FLEET_SUSTAINED_TICKS,
+      l1.sustainedTicks,
+      FLEET_HEALTH_DEFAULTS.sustainedTicks,
+    ),
+  };
+}
+
 // CTL-787 — account-level Claude rate-limit usage poller. Re-reads from
 // process.env on every call so tests can manipulate env vars freely (mirrors
 // readMemorySamplerConfig). The poller floors intervalMs at 180s internally;
