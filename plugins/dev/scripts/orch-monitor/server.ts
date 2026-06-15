@@ -200,6 +200,8 @@ import { loadOtelConfig } from "./lib/otel-config";
 import { loadWebhookConfig } from "./lib/webhook-config";
 import { detectProjectKey } from "./lib/project-key";
 import { loadMonitorConfig } from "./lib/monitor-config";
+// CTL-1152: config-driven project roster behind GET /api/projects.
+import { loadProjects } from "./lib/project-roster";
 // CTL-961: per-repo favicon auto-detection via GitHub API + disk cache.
 import { fetchRepoIcon } from "./lib/repo-icon-fetcher";
 import {
@@ -1505,6 +1507,22 @@ export function createServer(opts: CreateServerOptions): BunServer {
         if (url.pathname === "/api/config") {
           const cfg = loadMonitorConfig(`${process.cwd()}/.catalyst/config.json`);
           return Response.json(cfg);
+        }
+
+        // CTL-1152: GET /api/projects — the config-driven project roster. One
+        // descriptor per configured catalyst.monitor.linear.teams[] entry PLUS a
+        // self-identifying unconfigured lane per observed-work repo (the live
+        // board snapshot's `.repos`) with no configured descriptor (union rule).
+        // Fail-open: ANY error degrades to { projects: [] } (mirrors /api/config
+        // and the repo-icon endpoint) so the nav renders its empty state, never 5xx.
+        if (url.pathname === "/api/projects") {
+          try {
+            const board = await boardSnapshot.getLatest();
+            const observedRepos = board?.repos ?? [];
+            return Response.json({ projects: loadProjects({ observedRepos }) });
+          } catch {
+            return Response.json({ projects: [] });
+          }
         }
 
         // CTL-961: /api/repo-icon/<repoShortName> — auto-detect favicon from GitHub.

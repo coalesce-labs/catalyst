@@ -17,9 +17,10 @@
 
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { readFile, readdir, stat } from "node:fs/promises";
 import { homedir } from "node:os";
-import { join, dirname } from "node:path";
+import { join, dirname, basename } from "node:path";
 import { promisify } from "node:util";
 import { readLinearCache } from "./linear-cache-reader.mjs";
 import { fillEstimateFallback, getEstimationMethodAsync } from "./linear-estimate-fallback.mjs";
@@ -248,13 +249,13 @@ export const PHASE_TO_LINEAR = {
 // synthesizeQueuedTicket — build a thin BoardTicket from an eligible queue entry
 // so it renders in the "Todo" Kanban column (CTL-767). All agent/cost/phase-summary
 // fields default to null / empty since there is no worker dir for these tickets.
-export function synthesizeQueuedTicket(e, linfo, relationBlockerMap = new Map()) {
+export function synthesizeQueuedTicket(e, linfo, relationBlockerMap = new Map(), teamRepoMap = {}) {
   const li = linfo[e.id] ?? {};
   return {
     id: e.id,
     title: e.title || e.id,
     type: "task",
-    repo: e.repo || repoFor(e.id),
+    repo: e.repo || repoForWith(teamRepoMap, e.id),
     team: e.team || teamFor(e.id),
     phase: "queued",
     status: "queued",
@@ -305,10 +306,58 @@ export function synthesizeQueuedTicket(e, linfo, relationBlockerMap = new Map())
   };
 }
 
-// team/prefix → repo swim-lane label
-const TEAM_REPO = { CTL: "catalyst", ADV: "adva" };
-const repoFor = (ticket) => TEAM_REPO[String(ticket).split("-")[0]] || "other";
-const teamFor = (ticket) => String(ticket).split("-")[0];
+// team/prefix → repo swim-lane label.
+//
+// CTL-1152: the prefix→short-repo-name map is now CONFIG-DRIVEN from
+// catalyst.monitor.linear.teams[] (the single source of truth all 5 teams are
+// already declared in), replacing the hardcoded `{ CTL: "catalyst", ADV: "adva" }`.
+// buildTeamRepoMap is PURE so the project-roster builder and the unit test can
+// drive it directly; loadTeamRepoMap performs the sync two-location config read
+// (mirroring maxParallel()'s L2-then-L1 lookup) once at import — preserving the
+// const-loaded-once semantics of the old literal and keeping repoFor/teamFor
+// synchronous (they're called from the sync synthesizeQueuedTicket, line ~219).
+
+// buildTeamRepoMap(teams) → { [KEY.toUpperCase()]: basename(vcsRepo).toLowerCase() }.
+// Skips entries whose vcsRepo lacks a '/' (malformed). Fail-open to {}.
+export function buildTeamRepoMap(teams) {
+  const map = {};
+  if (!Array.isArray(teams)) return map;
+  for (const t of teams) {
+    if (!t || typeof t.key !== "string" || typeof t.vcsRepo !== "string") continue;
+    if (!t.vcsRepo.includes("/")) continue;
+    map[t.key.toUpperCase()] = basename(t.vcsRepo).toLowerCase();
+  }
+  return map;
+}
+
+// loadTeamRepoMap() — sync L2-then-L1 config read, fail-open to {}. Same two
+// locations and precedence direction maxParallel() uses (L2 = ~/.config/catalyst,
+// L1 = cwd/.catalyst), preferring the L2 teams[] then L1.
+function readJSONSync(path) {
+  try { return JSON.parse(readFileSync(path, "utf8")); } catch { return null; }
+}
+function loadTeamRepoMap() {
+  const l2 = readJSONSync(join(HOME, ".config", "catalyst", "config.json"));
+  const l1 = readJSONSync(join(process.cwd(), ".catalyst", "config.json"));
+  const pickTeams = (c) => c?.catalyst?.monitor?.linear?.teams ?? c?.monitor?.linear?.teams;
+  const teams = pickTeams(l2) ?? pickTeams(l1) ?? [];
+  return buildTeamRepoMap(teams);
+}
+
+const TEAM_REPO = loadTeamRepoMap();
+// CTL-1152: an UNCONFIGURED prefix resolves to its OWN raw lowercased team key
+// (self-identifying), NEVER the opaque "other" bucket — so the union rule in
+// project-roster.ts can surface observed-but-unconfigured work as its own lane.
+export const repoFor = (ticket) => {
+  const prefix = String(ticket).split("-")[0];
+  return TEAM_REPO[prefix] || prefix.toLowerCase();
+};
+export const teamFor = (ticket) => String(ticket).split("-")[0];
+// repoForWith — explicit-map variant (for tests and project-roster). Returns
+// "unconfigured" for unknown prefixes (the board-data-team-repo.test.ts contract).
+export function repoForWith(map, ticket) {
+  return map[String(ticket).split("-")[0].toUpperCase()] || "unconfigured";
+}
 
 async function readJSON(path, fallback = null) {
   try {
@@ -1098,7 +1147,7 @@ async function catalystSessionByCcUuid() {
 // local compareQueued (priority → createdAt → id), and comparator-identical to
 // the scheduler forever.
 
-async function loadEligible() {
+async function loadEligible(teamRepoMap = {}) {
   const out = [];
   if (!(await exists(ELIGIBLE_DIR))) return out;
   let files;
@@ -1116,13 +1165,9 @@ async function loadEligible() {
       const id = t.identifier || t.id;
       if (!id) continue;
       out.push({
-        id,
-        title: t.title || id,
-        priority: t.priority ?? 0,
-        createdAt: t.createdAt || "",
-        state: t.state || null,
-        repo: repoFor(id),
-        team: teamFor(id),
+        id, title: t.title || id, priority: t.priority ?? 0,
+        createdAt: t.createdAt || "", state: t.state || null,
+        repo: repoForWith(teamRepoMap, id), team: teamFor(id),
       });
     }
   }
@@ -1210,17 +1255,10 @@ async function loadDispatchCooldowns(now) {
 
 // ── main assembly ───────────────────────────────────────────────────────────
 export async function assembleBoard({ getPrStatus = null } = {}) {
-  const [agents, costs, phaseCostsByTicket, eligible, linfo, mp, catalystSessByUuid, cooldowns] =
-    await Promise.all([
-      liveAgents(),
-      costByTicket(),
-      costByPhase(),
-      loadEligible(),
-      linearInfo(),
-      maxParallel(),
-      catalystSessionByCcUuid(),
-      loadDispatchCooldowns(Date.now()),
-    ]);
+  const [agents, costs, phaseCostsByTicket, eligible, linfo, mp, catalystSessByUuid, cooldowns] = await Promise.all([
+    liveAgents(), costByTicket(), costByPhase(), loadEligible(TEAM_REPO), linearInfo(), maxParallel(),
+    catalystSessionByCcUuid(), loadDispatchCooldowns(Date.now()),
+  ]);
   const eligibleIndex = Object.fromEntries(eligible.map((e) => [e.id, e]));
 
   // CTL-1020: dependency edges derived from Linear blocked-by/blocks relations,
@@ -1580,9 +1618,7 @@ export async function assembleBoard({ getPrStatus = null } = {}) {
   // ANY worker dir is already surfaced as live / between-phases above, so it is
   // excluded here (cardTicketIds) — it is accounted for, not duplicated.
   const notInFlight = eligible.filter((e) => !cardTicketIds.has(e.id));
-  const queuedTickets = notInFlight.map((e) =>
-    synthesizeQueuedTicket(e, linfo, relationBlockerMap)
-  );
+  const queuedTickets = notInFlight.map((e) => synthesizeQueuedTicket(e, linfo, relationBlockerMap, TEAM_REPO));
   tickets = [...liveTickets, ...betweenPhases, ...recentDone, ...queuedTickets];
 
   // priority queue: eligible (not yet in-flight), globally ranked (Queue tab)

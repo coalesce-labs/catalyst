@@ -37,7 +37,7 @@ import {
 import { ALL_NODES, resolveNodeScope, useNodeScope } from "@/lib/node-scope";
 import { CatalystLogo } from "@/components/catalyst-logo";
 import {
-  buildNavGroups,
+  buildNavGroupsFromProjects,
   displayCaseName,
   projectWorkerCount,
   projectQueueDepth,
@@ -55,6 +55,10 @@ import {
 import { useBoardSnapshot } from "@/hooks/use-board-snapshot";
 // CTL-961: per-project icon auto-detection (favicon from GitHub) + manual override.
 import { useRepoIcons } from "@/hooks/use-repo-icons";
+// CTL-1152: the config-driven project roster (GET /api/projects). Replaces the raw
+// payload.repos list so EVERY configured team renders (incl. zero-work) and the
+// per-project dot color (server-resolved, short-name-keyed) finally renders.
+import { useProjects } from "@/hooks/use-projects";
 import {
   Collapsible,
   CollapsibleContent,
@@ -272,22 +276,41 @@ export function AppSidebar() {
   const [repoScope] = useAtom(repoScopeAtom);
   const [groupsOpen, setGroupsOpen] = useAtom(navGroupsOpenAtom);
 
-  // Get repos from the board snapshot for nav group construction.
+  // CTL-1152: the project LIST now comes from the config-driven roster (GET
+  // /api/projects), NOT the raw board snapshot's observed-repo set. The roster
+  // includes EVERY configured team (even with zero observed work) and carries a
+  // pre-resolved, short-name-keyed dot color — so configured-but-idle projects render
+  // and the per-project dot finally has a color (the old `buildNavGroups(repos, {})`
+  // path always passed an empty color map → forever-undefined dot). The board
+  // snapshot is still read below for the live PER-PROJECT COUNTS (workers/queue/inbox),
+  // which genuinely key off observed work.
   const { payload } = useBoardSnapshot();
-  const repos = payload?.repos ?? [];
+  const { projects, loaded: projectsLoaded } = useProjects();
+  // Fall back to the observed-repo set for one release if /api/projects is
+  // unavailable on an old server (fail-open): once the fetch resolves to an empty
+  // roster we honor it (renders the empty state); only while it's still in flight do
+  // we borrow payload.repos so the nav isn't blank on a fresh load.
+  const repos =
+    projects.length > 0 || projectsLoaded
+      ? projects.map((p) => p.repo)
+      : (payload?.repos ?? []);
 
-  // CTL-961: auto-detect repo favicons from GitHub + manual overrides.
+  // CTL-961: auto-detect repo favicons from GitHub + manual overrides. Keyed by the
+  // SAME short repo name the roster carries.
   const repoIconMap = useRepoIcons(repos);
-  // Map to the simple repoKey → dataUrl shape that buildNavGroups expects.
+  // Map to the simple repoKey → dataUrl shape buildNavGroupsFromProjects expects.
   const repoIconDataUrls: Record<string, string | null> = {};
   for (const repo of repos) {
     repoIconDataUrls[repo] = repoIconMap[repo]?.autoDataUrl ?? null;
   }
 
-  // Repo colors from the nav signal (if available) or empty.
-  const repoColors: Record<string, { text: string }> = {};
-  // Build nav groups dynamically from live repos.
-  const navGroups = buildNavGroups(repos, repoColors, repoIconDataUrls);
+  // CTL-1152: build nav groups from the roster descriptors. defaultColor is a hue
+  // NAME pre-resolved server-side and keyed by the short repo name, so the dot color
+  // resolves through NAMED_COLORS inside the builder with no owner/repo reconciliation.
+  const navGroups = buildNavGroupsFromProjects(projects, repoIconDataUrls);
+  // True once the roster fetch has resolved to an empty list (no configured teams AND
+  // no observed work) → render a first-class empty state rather than a bare shell.
+  const noProjects = projectsLoaded && projects.length === 0;
 
   // CTL-898 / SHELL8 — a node going dark must not strand the operator.
   useEffect(() => {
@@ -570,13 +593,28 @@ export function AppSidebar() {
           );
         })()}
 
-        {/* ── PER-PROJECT GROUPS: one collapsible per repo ────────────────── */}
+        {/* ── PER-PROJECT GROUPS: one collapsible per roster descriptor ────── */}
         {/* CTL-980: "Projects" / "Your projects" section heading above the collapsible
             project rows — mirrors Linear's "Your teams" parent section label. Only
             render the heading when there is at least one project to show. */}
         {repos.length > 0 && (
           <SidebarGroup className="px-1 pt-0 pb-0">
             <SidebarGroupLabel>Projects</SidebarGroupLabel>
+          </SidebarGroup>
+        )}
+        {/* CTL-1152: first-class EMPTY STATE — when the config-driven roster resolves
+            to zero projects (no configured teams AND no observed work) render an
+            explicit affordance under a "Projects" heading rather than a bare
+            Overall + Observe shell, so the operator knows the nav loaded and is
+            genuinely empty (vs. broken / still loading). */}
+        {noProjects && (
+          <SidebarGroup className="px-1 pt-0 pb-0">
+            <SidebarGroupLabel>Projects</SidebarGroupLabel>
+            <SidebarGroupContent>
+              <p className="px-2 py-1 text-xs text-sidebar-foreground/45">
+                No projects configured
+              </p>
+            </SidebarGroupContent>
           </SidebarGroup>
         )}
         {/* CTL-1034 §2: Title-Cased repo name (displayCaseName) at heading weight/size
@@ -589,9 +627,19 @@ export function AppSidebar() {
           const dotColor = navGroup?.dotColor;
           // CTL-961: show auto-detected favicon if available; otherwise fall back to dot.
           const iconDataUrl = navGroup?.iconDataUrl ?? null;
+          // CTL-1152: a project has "active work" when its roster descriptor's
+          // hasWork is set (repo ∈ observed work). Drives both the first-load
+          // collapse default and the active-work dot on the logo below.
+          const hasWork = navGroup?.hasWork ?? false;
           // Force-open when this group contains the active item.
           const forceOpen = groupContainsActive(repo);
-          const isOpen = forceOpen || (groupsOpen[repo] ?? true); // default open
+          // CTL-1152: FIRST-LOAD default — an idle project (no active work) starts
+          // COLLAPSED, an active one starts open. This is ONLY the default for a
+          // project the operator hasn't toggled yet (no persisted bit); once they
+          // open/close it the stored value wins, and we never auto-toggle mid-session.
+          // hasWork undefined (legacy/fallback path) → default open.
+          const isOpen =
+            forceOpen || (groupsOpen[repo] ?? (navGroup?.hasWork ?? true));
           const groupKey = repo.replace(/[^a-z0-9]/gi, "_");
           // CTL-1034 §2: spell the repo short-name out as a heading ("adva" → "Adva").
           const repoLabel = displayCaseName(repo) || repo;
@@ -636,7 +684,13 @@ export function AppSidebar() {
                       // attention overlay still has something to pin onto.
                       <span aria-hidden className="size-4 flex-shrink-0" />
                     )}
-                    {repoSignal && (
+                    {/* CTL-1152: active-work dot on the logo. Show it whenever the
+                        project has active work (hasWork) OR a live/anomaly child
+                        signal — so the operator can tell at a glance which projects
+                        are working, even with the idle ones collapsed. Amber (anomaly)
+                        outranks green (live) per the sectionSignal vocabulary; a plain
+                        active project with no attention shows green. */}
+                    {(hasWork || repoSignal) && (
                       <StatusDot kind={repoSignal === "anomaly" ? "anomaly" : "live"} />
                     )}
                   </span>
