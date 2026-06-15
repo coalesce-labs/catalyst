@@ -1,9 +1,18 @@
 # Changelog
 
-## [12.9.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.8.0...catalyst-dev-v12.9.0) (2026-06-15)
+## [12.9.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.8.0...catalyst-dev-v12.9.0)
+
+Jun 15, 2026
+
+<!-- ai-enhanced -->
+
+### Process Pipeline Visualization & Fleet Stability
+
+Click any worker row in the orch-monitor to see its real-time metrics and activity feed, plus a new `/process` route that maps the daemon's 9-phase FSM pipeline with live ticket dots overlaid on each phase. Desktop client launches server-agnostic with setup screen for any Catalyst instance. Critical fleet memory leak fixed — execution-core now runs for months without restart, with bounded background workers and job directory cleanup.
 
 
-### Features
+
+### PRs
 
 * **dev:** CTL-1011 — make applyAssignee self-assign loud (config-missing & scope-failure) ([#2046](https://github.com/coalesce-labs/catalyst/issues/2046)) ([34077e3](https://github.com/coalesce-labs/catalyst/commit/34077e344294f6d9ccf6a0979b1cddeecb1fda99))
 * **dev:** CTL-1101 — /process route FSM machine map in orch-monitor ([#1970](https://github.com/coalesce-labs/catalyst/issues/1970)) ([62e3fde](https://github.com/coalesce-labs/catalyst/commit/62e3fde37b73a7e19c43cc6ba9540ae38ed86433))
@@ -13,10 +22,6 @@
 * **dev:** CTL-1146 — card elevation (tray s1→s0) & band hue bump (6→9%) ([#2016](https://github.com/coalesce-labs/catalyst/issues/2016)) ([85240d2](https://github.com/coalesce-labs/catalyst/commit/85240d24d8f44292ce575203ce40f494d599a3ca))
 * **dev:** CTL-1148 — fix selected toggle chip fill in light themes ([#2015](https://github.com/coalesce-labs/catalyst/issues/2015)) ([3bcb73a](https://github.com/coalesce-labs/catalyst/commit/3bcb73af564b1a99c0b1b3d31516df0939939fef))
 * **dev:** CTL-1158 — surface PR merge-state on BoardTicket for stuck-PR inbox attention ([#2033](https://github.com/coalesce-labs/catalyst/issues/2033)) ([a2ca8e1](https://github.com/coalesce-labs/catalyst/commit/a2ca8e1f9986904dbae62e4151643a68e355e48a))
-
-
-### Bug Fixes
-
 * **dev:** CTL-1150 — add triage-artifact guard to scheduler Pass 2 new-work dispatch ([#2038](https://github.com/coalesce-labs/catalyst/issues/2038)) ([67434e0](https://github.com/coalesce-labs/catalyst/commit/67434e0b3a36647ef0fb3f75b12cbe40a36d72d1))
 * **dev:** CTL-1161 — broker webhook-independent merge refresh ([#2034](https://github.com/coalesce-labs/catalyst/issues/2034)) ([609134f](https://github.com/coalesce-labs/catalyst/commit/609134f3d0b6847e0c248b6711199fd9a8b16e56))
 * **dev:** CTL-1165 — bound the execution-core fleet (reap-leak fix, 5 drivers) ([#2045](https://github.com/coalesce-labs/catalyst/issues/2045)) ([4915f7d](https://github.com/coalesce-labs/catalyst/commit/4915f7dd35b9908b624dd07f640df51047fe39c5))
