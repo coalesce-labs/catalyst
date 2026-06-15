@@ -5,6 +5,13 @@ import type { HostLivenessStatus, LivenessThresholds } from "./node-liveness.mjs
 /** The footer daemon-health vocabulary (mapped from node-liveness status). */
 export type DaemonHealth = "healthy" | "degraded" | "offline";
 
+/**
+ * CTL-1169: the default "healthy" window for the daemon-health dot — wider than
+ * one raw heartbeat interval (hysteresis) so normal heartbeat jitter does not flap
+ * the footer dot / fire spurious notifications.
+ */
+export const DEFAULT_DAEMON_HEALTHY_WINDOW_MS: number;
+
 /** The single nav-signal projection that feeds the rail's live badges/dots. */
 export interface NavSignal {
   /** Active execution-core workers — the Workers nav badge. */

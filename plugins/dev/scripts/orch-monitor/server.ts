@@ -1286,7 +1286,15 @@ export function createServer(opts: CreateServerOptions): BunServer {
       // event-log path itself (config.getEventLogPath, UTC YYYY-MM) so the read
       // path matches exactly what the daemon writes — no format drift here.
       const lastSeen = deps.readClusterHeartbeats({});
-      return deps.deriveDaemonHealth(lastSeen, deps.getHostName());
+      // CTL-1169: the daemon-health dot uses a hysteresis window (default ~3
+      // heartbeat intervals, set in nav-signal.mjs) so normal heartbeat jitter
+      // doesn't flap healthy↔degraded and storm the desktop notifications.
+      // MONITOR_DAEMON_HEALTHY_WINDOW_MS overrides it; unset → the module default.
+      const healthyWindowMs =
+        Number(process.env.MONITOR_DAEMON_HEALTHY_WINDOW_MS) || undefined;
+      return deps.deriveDaemonHealth(lastSeen, deps.getHostName(), {
+        intervalMs: healthyWindowMs,
+      });
     } catch {
       return "offline";
     }

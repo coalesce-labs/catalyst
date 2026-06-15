@@ -20,7 +20,26 @@
 // is a later cluster concern (BFF3); here the daemon dot reflects the local daemon
 // and nothing else.
 
-import { classifyHostLiveness } from "./node-liveness.mjs";
+import {
+  classifyHostLiveness,
+  DEFAULT_HEARTBEAT_INTERVAL_MS,
+} from "./node-liveness.mjs";
+
+// CTL-1169: hysteresis for the daemon-health DOT/notification path.
+//
+// classifyHostLiveness calls a host "live" only while its last heartbeat is ≤ one
+// 30s interval old — but the daemon emits on that SAME 30s cadence, so real-world
+// jitter (measured gaps: median ~35s, spikes to 60–100s) routinely pushes the age
+// just past 30s before the next (late) beat lands. With the desktop app firing a
+// notification on every healthy↔degraded transition, that boundary-flap becomes a
+// notification storm. So the daemon-health classification uses a wider "healthy"
+// window than the raw cluster-liveness overlay: ~3 missed beats. This is ONLY the
+// nav daemon-health projection — the cluster overlay (overlayClusterLiveness) keeps
+// the tight 30s/5min eviction window. A genuinely overdue daemon still degrades
+// (≥3 missed beats) and still goes offline at the 5min grace. Tune via the server
+// env override (MONITOR_DAEMON_HEALTHY_WINDOW_MS); the real fix for the >60s gaps is
+// CTL-1170 (stop the event-loop stalls), after which this window can shrink.
+export const DEFAULT_DAEMON_HEALTHY_WINDOW_MS = 3 * DEFAULT_HEARTBEAT_INTERVAL_MS;
 
 /**
  * @typedef {"healthy" | "degraded" | "offline"} DaemonHealth
@@ -90,12 +109,16 @@ export function deriveNavSignal(board, { daemon, liveness } = {}) {
  * @param {Record<string, string>} lastSeenByHost  readClusterHeartbeats output
  * @param {string} localHostName  the local node's name (config.getHostName / hostName())
  * @param {{ now?: number, intervalMs?: number, graceMs?: number }} [opts]
+ *   `intervalMs` is the "healthy" window and defaults to
+ *   DEFAULT_DAEMON_HEALTHY_WINDOW_MS (CTL-1169 hysteresis), NOT one raw heartbeat
+ *   interval — so normal heartbeat jitter does not flap the footer dot. Pass an
+ *   explicit value (e.g. from MONITOR_DAEMON_HEALTHY_WINDOW_MS) to override.
  * @returns {DaemonHealth}
  */
 export function deriveDaemonHealth(
   lastSeenByHost,
   localHostName,
-  { now = Date.now(), intervalMs, graceMs } = {},
+  { now = Date.now(), intervalMs = DEFAULT_DAEMON_HEALTHY_WINDOW_MS, graceMs } = {},
 ) {
   const seen =
     lastSeenByHost && typeof lastSeenByHost === "object" ? lastSeenByHost : {};
