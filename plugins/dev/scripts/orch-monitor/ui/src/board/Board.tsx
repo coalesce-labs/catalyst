@@ -94,7 +94,7 @@ import { laneColumns, visibleColumnDefs, PHASE_COLUMNS, type BoardColumnDef } fr
 // cards laid into the SAME shared column grid under ONE horizontal scroll axis.
 // axis="none" collapses to the single shared-header column board (one synthetic
 // lane, no group label). The shared `C` / `LIVE` tokens are in board-tokens.ts.
-import { C, LIVE, PHASE, TYPE as TYPE_MAP, NODE_ACCENTS, CARD_LIFT } from "./board-tokens";
+import { C, LIVE, NODE_ACCENTS, CARD_LIFT } from "./board-tokens";
 import { typeSymbol } from "./type-icon";
 import { SwimlaneBoard, type SharedColumn, type LaneCell } from "./Swimlane";
 import { formatIssueCount } from "./board-counts";
@@ -120,15 +120,9 @@ import type { ConnectionStatus } from "@/lib/types";
 
 // ── tokens (orch-monitor DESIGN.md) ─────────────────────────────────────────
 // CTL-930 Phase 4/5: phase/type/node tokens from canonical board-tokens.ts.
-// PHASE_C is an inline literal so the drift guard (board-phase-drift.test.ts)
-// can text-extract its keys; values match the Phase-4 board-tokens.ts palette.
-// The PHASE alias (imported from board-tokens) is available for non-guarded use.
-const PHASE_C: Record<string, string> = {
-  triage: "#8492a4", research: "#5e9ee8", plan: "#a98ee3", implement: "#45c08a",
-  verify: "#dba14f", remediate: "#d98ab2", review: "#cdb84e", pr: "#45bcab",
-  "monitor-merge": "#5e9ee8", "monitor-deploy": "#41bd7d", teardown: "#788596",
-  merge: "#5e9ee8", deploy: "#41bd7d", done: "#788596",
-};
+// CTL-1153: PHASE_C / ColorBy / accentFor extracted to board-accent.ts (pure,
+// no React) so unit tests and the phase-drift guard import without pulling React.
+// Board.tsx re-exports all three for backward-compat (list-columns.tsx consumers).
 // BOARD2 / CTL-906: the ticket column SETS (linear / phase) now live in the pure
 // board-display.ts (LINEAR_COLUMNS / PHASE_COLUMNS) so there is ONE definition
 // the DOM-free column-derivation tests can read. The Workers phase lens reuses
@@ -153,10 +147,14 @@ const HELD_LABEL_WAITING = "waiting";
 // formatters as its table cells, rather than re-implementing the live/priority/
 // phase render (which would let the Board and List drift). They stay module-local
 // to Board.tsx (the single source of truth); BOARD4 imports the named exports.
-export type ColorBy = "phase" | "status" | "repo" | "type";
-// CTL-930 Phase 5: type/repo/node accents from canonical board-tokens.ts.
-const TYPE_C: Record<string, string> = TYPE_MAP;
-const repoColor = (repo: string) => (repo === "adva" ? C.purple : C.blue);
+// CTL-1153: ColorBy / accentFor / PHASE_C live in board-accent.ts (pure, no React)
+// so unit tests and the phase-drift guard import without pulling React. Re-exported
+// here for backward-compat with list-columns.tsx and other callers. PHASE_C is also
+// imported for direct use in PhaseStrip — the drift guard reads it from board-accent.ts
+// but the board renders it via this import.
+export type { ColorBy } from "./board-accent";
+import { PHASE_C, accentFor, type ColorBy } from "./board-accent";
+export { accentFor };
 // CTL-909 / SURF1: a stable per-node accent so the "group by Node" columns +
 // the host chip on each worker card carry a consistent color. Hashed from the
 // host name (the unattributed bucket reads dim) — deterministic, no palette
@@ -172,14 +170,6 @@ const nodeColor = (host: string): string => {
   return NODE_PALETTE[h % NODE_PALETTE.length] ?? C.blue;
 };
 
-export function accentFor(t: { phase: string; repo: string; type: string; activeState: ActiveState; status: string }, by: ColorBy): string {
-  if (by === "phase") return PHASE_C[t.phase] || C.blue;
-  if (by === "repo") return repoColor(t.repo);
-  if (by === "type") return TYPE_C[t.type] || C.fgMuted;
-  if (t.activeState === "active") return LIVE;
-  if (t.activeState === "stuck" || t.status === "failed") return C.red;
-  return C.fgDim;
-}
 
 export const fmtRuntime = (ms: number | null) => {
   if (!ms || !Number.isFinite(ms) || ms < 0) return "";
@@ -469,8 +459,8 @@ type OpenDetailFn = (
 // rather than jump-cutting. AnimatePresence (in the column container) handles
 // enter/exit. `useReducedMotion` collapses everything to instant when the OS
 // accessibility preference is set.
-function TicketCard({ t, colorBy, density = "comfortable", colIds, lens, col, onOpen, blockedBy }: { t: Ticket; colorBy: ColorBy; density?: Density; colIds?: string[]; lens?: DetailLens; col?: string; onOpen?: OpenDetailFn; blockedBy?: string[] }) {
-  const accent = accentFor(t, colorBy);
+function TicketCard({ t, colorBy, density = "comfortable", colIds, lens, col, onOpen, blockedBy, repoAccents }: { t: Ticket; colorBy: ColorBy; density?: Density; colIds?: string[]; lens?: DetailLens; col?: string; onOpen?: OpenDetailFn; blockedBy?: string[]; repoAccents?: Record<string, string> }) {
+  const accent = accentFor(t, colorBy, repoAccents);
   const live = t.activeState === "active";
   const stuck = t.activeState === "stuck";
   const dim = t.activeState == null;
@@ -760,11 +750,11 @@ function buildBlockedByIndex(tickets: Ticket[]): Record<string, string[]> {
 // lane's cards come from `laneColumns(laneItems, defs)` (empty cells kept). The
 // card render + the column order are byte-identical to the legacy TicketBoard.
 function TicketSwimlaneBoard({
-  tickets, groupBy, swimlane, colorBy, density, order, showEmpty, fill, embedded = false, onOpen, laneColors,
+  tickets, groupBy, swimlane, colorBy, density, order, showEmpty, fill, embedded = false, onOpen, laneColors, repoAccents,
 }: {
   tickets: Ticket[]; groupBy: "linear" | "phase"; swimlane: GroupBy; colorBy: ColorBy;
   density: Density; order: Ordering; showEmpty: boolean; fill: boolean; embedded?: boolean; onOpen?: OpenDetailFn;
-  laneColors?: Record<string, string>;
+  laneColors?: Record<string, string>; repoAccents?: Record<string, string>;
 }) {
   const defs = visibleColumnDefs(tickets, { groupBy, showEmptyColumns: showEmpty });
   const blockedByIdx = buildBlockedByIndex(tickets);
@@ -778,7 +768,7 @@ function TicketSwimlaneBoard({
         count: c.items.length,
         live: c.live,
         cards: c.items.map((t) => (
-          <TicketCard key={t.id} t={t} colorBy={colorBy} density={density} colIds={colIds} lens={groupBy} col={c.key} onOpen={onOpen} blockedBy={blockedByIdx[t.id]} />
+          <TicketCard key={t.id} t={t} colorBy={colorBy} density={density} colIds={colIds} lens={groupBy} col={c.key} onOpen={onOpen} blockedBy={blockedByIdx[t.id]} repoAccents={repoAccents} />
         )),
       };
     });
@@ -974,9 +964,15 @@ export function Board({
   const swimlane: GroupBy = prefs.swimlane;
 
   // CTL-1027: per-project swimlane tint — local picks layered over server defaults.
+  // CTL-1153 (M2): repoAccents uses .text (legible foreground) for card accent dots;
+  // laneColors uses .bg (lane background tint). Both derive from the same resolved map.
   const resolvedColors = useResolvedRepoColors();
   const laneColors = useMemo(
     () => Object.fromEntries(Object.entries(resolvedColors).map(([k, v]) => [k, v.bg])),
+    [resolvedColors],
+  );
+  const repoAccents = useMemo(
+    () => Object.fromEntries(Object.entries(resolvedColors).map(([k, v]) => [k, v.text])),
     [resolvedColors],
   );
 
@@ -1137,6 +1133,7 @@ export function Board({
                 embedded={embedded}
                 onOpen={onOpen}
                 laneColors={laneColors}
+                repoAccents={repoAccents}
               />
             )
           )}

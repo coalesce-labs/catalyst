@@ -101,13 +101,20 @@ resolve_config() {
 CONFIG_PATH="$(resolve_config)"
 
 # ─── Resolve target state ──────────────────────────────────────────────────
-# Precedence: explicit --state > config stateMap[transition] > default.
+# Precedence: explicit --state
+#           > per-project catalyst.projects[<ticket-prefix>].stateMap[transition]  (CTL-1153)
+#           > global catalyst.linear.stateMap[transition]
+#           > built-in default.
 TARGET_STATE=""
+# Derive team prefix from ticket (e.g. "CTL-123" → "CTL"). Use tr for bash-3.2-safe
+# uppercasing (${x^^} fails as "bad substitution" on macOS /bin/bash 3.2).
+PROJECT_KEY="$(printf '%s' "${TICKET%%-*}" | tr '[:lower:]' '[:upper:]')"
 if [ -n "$STATE" ]; then
   TARGET_STATE="$STATE"
 elif [ -n "$CONFIG_PATH" ] && [ -f "$CONFIG_PATH" ] && command -v jq >/dev/null 2>&1; then
-  TARGET_STATE=$(jq -r --arg k "$TRANSITION" \
-    '.catalyst.linear.stateMap[$k] // empty' "$CONFIG_PATH" 2>/dev/null)
+  TARGET_STATE=$(jq -r --arg p "$PROJECT_KEY" --arg k "$TRANSITION" \
+    '(.catalyst.projects[]? | select(.key == $p) | .stateMap[$k]) // .catalyst.linear.stateMap[$k] // empty' \
+    "$CONFIG_PATH" 2>/dev/null)
 fi
 if [ -z "$TARGET_STATE" ]; then
   TARGET_STATE="$(default_state_for "$TRANSITION")"

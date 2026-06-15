@@ -604,6 +604,127 @@ run "--dry-run transition exits 0 on a cache miss" \
 run "--dry-run did NOT create the registry (auto-resolve skipped)" \
   bash -c "[ ! -f '$REGISTRY' ]"
 
+# ─── CTL-1153 (M2): per-project stateMap tests (27–32) ───────────────────────
+# build_config_with_projects creates both global stateMap AND catalyst.projects[].
+# FAKE_LINEARIS_STATE stays at default "In Review" (non-target) so idempotency
+# never short-circuits any of these tests.
+build_config_with_projects() {
+  local dir="$1"
+  mkdir -p "${dir}/.catalyst"
+  cat > "${dir}/.catalyst/config.json" <<'EOF'
+{
+  "catalyst": {
+    "projectKey": "test",
+    "linear": {
+      "teamKey": "CTL",
+      "stateMap": {
+        "inReview": "In Review",
+        "done": "Done"
+      }
+    },
+    "projects": [
+      { "key": "CTL", "vcsRepo": "coalesce-labs/catalyst", "stateMap": { "inReview": "Code Review" } },
+      { "key": "ADV", "vcsRepo": "coalesce-labs/adva" }
+    ]
+  }
+}
+EOF
+}
+
+# ─── Test 27: per-project stateMap override wins over global ──────────────
+WORK27="${SCRATCH}/t27"
+BIN27="${SCRATCH}/t27/bin"
+LOG27="${SCRATCH}/t27/log"
+build_config_with_projects "$WORK27"
+install_fake_linearis "$BIN27"
+touch "$LOG27"
+
+run "CTL-1153 Test 27: per-project override wins (inReview=Code Review > global In Review)" \
+  bash -c "FAKE_LINEARIS_LOG='$LOG27' PATH='$BIN27:$PATH' \
+    '$TRANSITION' --ticket CTL-27 --transition inReview --config '$WORK27/.catalyst/config.json'"
+
+run "CTL-1153 Test 27: update used the per-project state" \
+  expect_contains "$LOG27" "linearis issues update CTL-27 --status Code Review"
+
+# ─── Test 28: project entry present but missing the key → global fallback ──
+WORK28="${SCRATCH}/t28"
+BIN28="${SCRATCH}/t28/bin"
+LOG28="${SCRATCH}/t28/log"
+build_config_with_projects "$WORK28"
+install_fake_linearis "$BIN28"
+touch "$LOG28"
+
+run "CTL-1153 Test 28: projects[] entry without stateMap → global fallback (done=Done)" \
+  bash -c "FAKE_LINEARIS_LOG='$LOG28' PATH='$BIN28:$PATH' \
+    '$TRANSITION' --ticket ADV-28 --transition done --config '$WORK28/.catalyst/config.json'"
+
+run "CTL-1153 Test 28: update used the global state" \
+  expect_contains "$LOG28" "linearis issues update ADV-28 --status Done"
+
+# ─── Test 29: project key with no stateMap at all → global fallback ────────
+# Use `done` (→ "Done") not `inReview` (→ "In Review") to avoid the idempotency
+# short-circuit: FAKE_LINEARIS_STATE defaults to "In Review" so inReview is a no-op.
+WORK29="${SCRATCH}/t29"
+BIN29="${SCRATCH}/t29/bin"
+LOG29="${SCRATCH}/t29/log"
+build_config_with_projects "$WORK29"
+install_fake_linearis "$BIN29"
+touch "$LOG29"
+
+run "CTL-1153 Test 29: ADV entry with no stateMap → global fallback (done=Done)" \
+  bash -c "FAKE_LINEARIS_LOG='$LOG29' PATH='$BIN29:$PATH' \
+    '$TRANSITION' --ticket ADV-29 --transition done --config '$WORK29/.catalyst/config.json'"
+
+run "CTL-1153 Test 29: used global Done (not per-project)" \
+  expect_contains "$LOG29" "linearis issues update ADV-29 --status Done"
+
+# ─── Test 30: no projects[] array → unchanged global behavior (regression) ─
+WORK30="${SCRATCH}/t30"
+BIN30="${SCRATCH}/t30/bin"
+LOG30="${SCRATCH}/t30/log"
+build_config "$WORK30"  # original helper, no projects[]
+install_fake_linearis "$BIN30"
+touch "$LOG30"
+
+run "CTL-1153 Test 30: no projects[] → global stateMap still resolves (regression)" \
+  bash -c "FAKE_LINEARIS_LOG='$LOG30' PATH='$BIN30:$PATH' \
+    '$TRANSITION' --ticket TST-30 --transition done --config '$WORK30/.catalyst/config.json'"
+
+run "CTL-1153 Test 30: global Done resolved correctly" \
+  expect_contains "$LOG30" "linearis issues update TST-30 --status Done"
+
+# ─── Test 31: unknown prefix → no per-project entry → global fallback ──────
+# Use `done` (→ "Done") not `inReview` (→ "In Review") to avoid the idempotency
+# short-circuit: FAKE_LINEARIS_STATE defaults to "In Review" so inReview is a no-op.
+WORK31="${SCRATCH}/t31"
+BIN31="${SCRATCH}/t31/bin"
+LOG31="${SCRATCH}/t31/log"
+build_config_with_projects "$WORK31"
+install_fake_linearis "$BIN31"
+touch "$LOG31"
+
+run "CTL-1153 Test 31: unknown ticket prefix ZZZ → global fallback (done=Done)" \
+  bash -c "FAKE_LINEARIS_LOG='$LOG31' PATH='$BIN31:$PATH' \
+    '$TRANSITION' --ticket ZZZ-31 --transition done --config '$WORK31/.catalyst/config.json'"
+
+run "CTL-1153 Test 31: used global Done (ZZZ not in projects[])" \
+  expect_contains "$LOG31" "linearis issues update ZZZ-31 --status Done"
+
+# ─── Test 32: lowercase prefix resolved to uppercase key ─────────────────
+WORK32="${SCRATCH}/t32"
+BIN32="${SCRATCH}/t32/bin"
+LOG32="${SCRATCH}/t32/log"
+build_config_with_projects "$WORK32"
+install_fake_linearis "$BIN32"
+touch "$LOG32"
+
+run "CTL-1153 Test 32: lowercase ticket prefix 'ctl-32' resolved to CTL key" \
+  bash -c "FAKE_LINEARIS_LOG='$LOG32' PATH='$BIN32:$PATH' \
+    '$TRANSITION' --ticket ctl-32 --transition inReview --config '$WORK32/.catalyst/config.json'"
+
+run "CTL-1153 Test 32: per-project override applied for lowercased prefix" \
+  expect_contains "$LOG32" "linearis issues update ctl-32 --status Code Review"
+
 echo ""
 echo "Results: ${PASSES} passed, ${FAILURES} failed"
 [ "$FAILURES" = "0" ]

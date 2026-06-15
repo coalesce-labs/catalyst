@@ -34,6 +34,7 @@ import { AppShell } from "./components/app-shell";
 import { SkeletonDashboard } from "./components/ui/skeleton";
 import { validateDetailSearch } from "./board/route-search";
 import { validateRootSearch } from "./lib/root-search";
+import { validateSettingsSearch } from "./lib/settings-search";
 import { surfaceToPath } from "./lib/route-surface";
 import { readLandingSurface, shouldApplyLandingRedirect } from "./lib/prefs";
 
@@ -283,6 +284,7 @@ const rulebookRoute = createRoute({
 const settingsRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/settings",
+  validateSearch: validateSettingsSearch,
   component: () => (
     <S>
       <SettingsSurface />

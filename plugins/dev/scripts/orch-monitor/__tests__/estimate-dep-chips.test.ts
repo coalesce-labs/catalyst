@@ -36,6 +36,11 @@ describe("CTL-957: estimate read-model projection", () => {
     dbPath = join(tmpDir, "filter-state.db");
     eligibleDir = join(tmpDir, "eligible");
     mkdirSync(eligibleDir, { recursive: true });
+    // Reset any broker-state singleton a prior test file left open: openBrokerStateDb
+    // is a singleton that ignores dbPath when one is already open, so without this
+    // upsertTicketDescriptor would write to the wrong db and this test reads empty
+    // (CI-only ordering flake exposed when another server test runs first).
+    closeBrokerStateDb();
     openBrokerStateDb(dbPath);
   });
 

@@ -65,6 +65,12 @@ import {
   CollapsibleTrigger,
 } from "@/components/ui/collapsible";
 import {
+  ContextMenu,
+  ContextMenuContent,
+  ContextMenuItem,
+  ContextMenuTrigger,
+} from "@/components/ui/context-menu";
+import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuLabel,
@@ -332,6 +338,13 @@ export function AppSidebar() {
           ? { ...prev, scope: scopeVal === "all" ? undefined : scopeVal }
           : prev,
     });
+    if (isMobile) setOpenMobile(false);
+  }
+
+  // CTL-1153: deep-link into the per-project settings pane from the sidebar.
+  function goSettings(repo: string) {
+    const key = projects.find((p) => p.repo === repo)?.key ?? repo;
+    void navigate({ to: SETTINGS_PATH, search: (prev) => ({ ...prev, project: key }) });
     if (isMobile) setOpenMobile(false);
   }
 
@@ -657,54 +670,65 @@ export function AppSidebar() {
               className={`group/${groupKey}`}
             >
               <SidebarGroup className="px-1 pt-0">
-                <CollapsibleTrigger className={PROJECT_HEADER_TRIGGER}>
-                  {/* CTL-961: favicon takes priority over the color dot; only show dot
-                      when no favicon is available. Never show a placeholder.
-                      CTL-1052 §4: the project ATTENTION dot is now an OVERLAY on the
-                      project icon (same StatusDot convention the worker-presence dot
-                      uses), not a separate inline dot beside the chevron. The wrapping
-                      span anchors the absolute-positioned StatusDot; the dot survives
-                      collapse (rolled-up child signal) AND expansion. */}
-                  <span className="relative flex shrink-0 items-center justify-center">
-                    {iconDataUrl ? (
-                      <img
-                        src={iconDataUrl}
-                        alt=""
-                        aria-hidden
-                        className="size-4 flex-shrink-0 rounded-sm object-contain"
+                {/* CTL-1153: right-click a project header → "Project settings" deep-link. */}
+                <ContextMenu>
+                  <ContextMenuTrigger asChild>
+                    <CollapsibleTrigger className={PROJECT_HEADER_TRIGGER}>
+                      {/* CTL-961: favicon takes priority over the color dot; only show dot
+                          when no favicon is available. Never show a placeholder.
+                          CTL-1052 §4: the project ATTENTION dot is now an OVERLAY on the
+                          project icon (same StatusDot convention the worker-presence dot
+                          uses), not a separate inline dot beside the chevron. The wrapping
+                          span anchors the absolute-positioned StatusDot; the dot survives
+                          collapse (rolled-up child signal) AND expansion. */}
+                      <span className="relative flex shrink-0 items-center justify-center">
+                        {iconDataUrl ? (
+                          <img
+                            src={iconDataUrl}
+                            alt=""
+                            aria-hidden
+                            className="size-4 flex-shrink-0 rounded-sm object-contain"
+                          />
+                        ) : dotColor ? (
+                          <span
+                            aria-hidden
+                            className="size-2 rounded-full flex-shrink-0 inline-block"
+                            style={{ background: dotColor }}
+                          />
+                        ) : (
+                          // No favicon and no color: a neutral icon-sized anchor so the
+                          // attention overlay still has something to pin onto.
+                          <span aria-hidden className="size-4 flex-shrink-0" />
+                        )}
+                        {/* CTL-1152: active-work dot on the logo. Show it whenever the
+                            project has active work (hasWork) OR a live/anomaly child
+                            signal — so the operator can tell at a glance which projects
+                            are working, even with the idle ones collapsed. Amber (anomaly)
+                            outranks green (live) per the sectionSignal vocabulary; a plain
+                            active project with no attention shows green. */}
+                        {(hasWork || repoSignal) && (
+                          <StatusDot kind={repoSignal === "anomaly" ? "anomaly" : "live"} />
+                        )}
+                      </span>
+                      <span className="truncate">{repoLabel}</span>
+                      {/* CTL-1052 §3: twistie sits IMMEDIATELY adjacent to the label text
+                          (the PROJECT_HEADER_TRIGGER's gap-1.5 spaces it), NOT floated to the
+                          far edge — overrides the CTL-977 → CTL-1034 ml-auto convention. */}
+                      <ChevronRightIcon
+                        className={cn(
+                          "size-3 flex-shrink-0 transition-transform duration-200",
+                          isOpen && "rotate-90",
+                        )}
                       />
-                    ) : dotColor ? (
-                      <span
-                        aria-hidden
-                        className="size-2 rounded-full flex-shrink-0 inline-block"
-                        style={{ background: dotColor }}
-                      />
-                    ) : (
-                      // No favicon and no color: a neutral icon-sized anchor so the
-                      // attention overlay still has something to pin onto.
-                      <span aria-hidden className="size-4 flex-shrink-0" />
-                    )}
-                    {/* CTL-1152: active-work dot on the logo. Show it whenever the
-                        project has active work (hasWork) OR a live/anomaly child
-                        signal — so the operator can tell at a glance which projects
-                        are working, even with the idle ones collapsed. Amber (anomaly)
-                        outranks green (live) per the sectionSignal vocabulary; a plain
-                        active project with no attention shows green. */}
-                    {(hasWork || repoSignal) && (
-                      <StatusDot kind={repoSignal === "anomaly" ? "anomaly" : "live"} />
-                    )}
-                  </span>
-                  <span className="truncate">{repoLabel}</span>
-                  {/* CTL-1052 §3: twistie sits IMMEDIATELY adjacent to the label text
-                      (the PROJECT_HEADER_TRIGGER's gap-1.5 spaces it), NOT floated to the
-                      far edge — overrides the CTL-977 → CTL-1034 ml-auto convention. */}
-                  <ChevronRightIcon
-                    className={cn(
-                      "size-3 flex-shrink-0 transition-transform duration-200",
-                      isOpen && "rotate-90",
-                    )}
-                  />
-                </CollapsibleTrigger>
+                    </CollapsibleTrigger>
+                  </ContextMenuTrigger>
+                  <ContextMenuContent>
+                    <ContextMenuItem onClick={() => goSettings(repo)}>
+                      <SettingsIcon />
+                      Project settings
+                    </ContextMenuItem>
+                  </ContextMenuContent>
+                </ContextMenu>
                 <CollapsibleContent>
                   <SidebarGroupContent>
                     {/* CTL-1034 §3: indent + guide line so children read as subordinate
