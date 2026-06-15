@@ -24,6 +24,9 @@ sidebar:
 | `stop` | Stop all services in reverse order. |
 | `restart` | Stop then start. Accepts the same flags as `start`. |
 | `status` | Print running/stopped state for each service. |
+| `install-services` | Install a launchd LaunchAgent that auto-starts the stack on boot. macOS only. |
+| `uninstall-services` | Unload and remove the auto-start LaunchAgent (leaves running daemons up). |
+| `services-status` | Show whether the auto-start LaunchAgent is installed and loaded. |
 
 ## Flags
 
@@ -81,6 +84,28 @@ plugins/dev/scripts/setup-plugin-source.sh [--path DIR] [--repo-url URL] [--forc
 
 `catalyst-stack parity` reports node-freshness + setup drift for the `pluginDirs` checkout (exit code = number of drift findings). In addition to the freshness/dirty/manifest checks, it flags a checkout that is **off `main`** or is a **linked worktree** (run `setup-plugin-source.sh` to fix).
 
+### `install-services` / `uninstall-services` / `services-status`
+
+Auto-start the stack on boot via a single launchd LaunchAgent
+(`ai.coalesce.catalyst-stack`), so a reboot never leaves the fleet down.
+
+```bash
+catalyst-stack install-services                 # write + load the agent
+catalyst-stack install-services --interval 300  # keep-alive cadence in seconds (default 600)
+catalyst-stack install-services --print         # print the plist to stdout, install nothing
+catalyst-stack services-status                  # installed? loaded?
+catalyst-stack uninstall-services               # unload + remove (running daemons stay up)
+```
+
+The agent runs `catalyst-stack start` at login (`RunAtLoad`) and every `--interval`
+seconds. Because `start` is ordered (monitor → broker → execution-core) and no-ops a
+running service, the agent never double-starts and self-heals a daemon that died
+between intervals. It is a **per-user LaunchAgent** (the stack runs as you, with
+`$HOME` paths), so it fires at **login** — enable automatic login on a headless Mac.
+Logs go to `~/catalyst/stack-launchd.log`. macOS only; `--print` works anywhere for
+review. Re-running `install-services` is idempotent (it boots out the old instance
+first). See [Post-reboot and updates](/getting-started/reboot-and-updates/).
+
 ### `--yes`
 
 Non-interactive mode under `--proxy`: auto-approves `brew install mitmproxy` instead of prompting.
@@ -120,6 +145,9 @@ catalyst-stack restart --hotpatch
 
 # Restart with proxy enabled
 catalyst-stack restart --proxy
+
+# Auto-start the stack on boot (install once per host)
+catalyst-stack install-services
 ```
 
 ## See also

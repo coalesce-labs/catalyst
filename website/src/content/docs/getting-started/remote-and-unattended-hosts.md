@@ -38,14 +38,24 @@ this works regardless of how you logged in locally.
 
 ## After a reboot
 
-The services do not auto-start at boot today. After the host reboots, reconnect and run:
+After the host reboots, reconnect and run:
 
 ```bash
 catalyst-stack start
 ```
 
-See [Post-reboot and updates](/getting-started/reboot-and-updates/) for the day-to-day
-boot and update flow.
+On a headless host you'll usually want this to happen automatically. Install the
+auto-start LaunchAgent once, then a reboot brings the whole stack back on its own:
+
+```bash
+catalyst-stack install-services
+```
+
+It runs `catalyst-stack start` at login plus a keep-alive that self-heals a crashed
+daemon. Because it's a per-user LaunchAgent, enable **automatic login** so it fires on
+boot without anyone signing in. See
+[Post-reboot and updates](/getting-started/reboot-and-updates/) for the day-to-day
+boot and update flow and the full `install-services` options.
 
 ## If the daemon dispatches nothing
 

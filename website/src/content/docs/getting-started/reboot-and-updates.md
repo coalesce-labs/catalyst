@@ -7,7 +7,7 @@ sidebar:
 
 ## After a reboot
 
-The Catalyst services (broker, monitor, execution-core) do not auto-start. Run once after each reboot:
+Run once after each reboot to bring the stack up:
 
 ```bash
 catalyst-stack start
@@ -18,6 +18,37 @@ That's it. The command is idempotent — already-running services are skipped. C
 ```bash
 catalyst-stack status
 ```
+
+### Auto-start on boot (unattended)
+
+To skip the manual step entirely — so a reboot never leaves the fleet (and the
+dashboard) down — install a launchd LaunchAgent that runs `catalyst-stack start`
+at login and keeps it alive:
+
+```bash
+catalyst-stack install-services
+```
+
+This writes `~/Library/LaunchAgents/ai.coalesce.catalyst-stack.plist` and loads
+it. The agent runs `catalyst-stack start` at login (`RunAtLoad`) and again every
+10 minutes as an idempotent keep-alive — because `start` is ordered
+(monitor → broker → execution-core) and no-ops a running daemon, it never
+double-starts and it self-heals a daemon that crashed between intervals. Output
+goes to `~/catalyst/stack-launchd.log`.
+
+```bash
+catalyst-stack install-services --interval 300   # change the keep-alive cadence (seconds)
+catalyst-stack install-services --print          # preview the plist without installing
+catalyst-stack services-status                   # is the agent installed + loaded?
+catalyst-stack uninstall-services                # unload + remove (leaves running daemons up)
+```
+
+Because it is a per-user LaunchAgent (not a root LaunchDaemon), it starts at
+**login** — on a headless Mac, enable automatic login so it fires on boot. macOS
+only. Install it on every host that should run the fleet (laptop + mini).
+
+> Pairs with the bg-worker reaper fix — only enable auto-start once reaping is
+> bounded, or a freshly-booted box just refills the leak.
 
 ## Plugin source checkout
 
