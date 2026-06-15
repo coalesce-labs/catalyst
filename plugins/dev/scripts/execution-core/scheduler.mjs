@@ -143,7 +143,14 @@ import { resolvePhaseSessionId as defaultResolveSession } from "./session-resolv
 import { evaluateHungWorker } from "./hung-detector.mjs";
 import { transcriptAgeMs as defaultTranscriptAgeMs } from "./transcript-silence.mjs";
 import { killHungWorker as defaultKillEscalate } from "./watchdog-action.mjs";
-import { readWatchdogConfig, phaseBudgetMs, readStallJanitorConfig } from "./config.mjs";
+import { readWatchdogConfig, phaseBudgetMs, readStallJanitorConfig, readCostCapConfig } from "./config.mjs";
+// CTL-1137: cost-cap watcher (Pass 0c) — out-of-process per-session $ preemption.
+import {
+  shouldCheckNow,
+  fetchSessionCostUsd,
+  markPhaseSignalFailed,
+  checkWorkerCost,
+} from "./cost-cap.mjs";
 import { defaultProgressMark } from "./work-done-probes.mjs";
 // CTL-1004: stall-janitor (terminal-state leftover collapser) — runs as Pass 0j,
 // shadow-first. The pure decision + action driver live in stall-janitor.mjs; the
@@ -2555,6 +2562,17 @@ export function schedulerTick(
       now: _watchdogNow = Date.now,
       emit: _watchdogEmit = emitReapIntent,
     } = {},
+    // CTL-1137: cost-cap watcher seams (Pass 0c). Defaults wire the real Prom fetch +
+    // terminal-write + reap; tests inject mocks + an override mode to drive the truth
+    // table. Mode resolves from readCostCapConfig() (env > Layer-2 > shadow) unless
+    // overridden here.
+    costCap: {
+      mode: _costCapMode = undefined,        // resolved inside the pass
+      fetchCost: _costCapFetch = fetchSessionCostUsd,
+      now: _costCapNow = Date.now,
+      markFailed: _costCapMarkFailed = markPhaseSignalFailed,
+      reap: _costCapReap = emitReapIntent,
+    } = {},
     // CTL-1004: stall-janitor seams (Pass 0j). Defaults keep the bare unit tick
     // inert — no census producers means nothing to collapse — so a direct
     // schedulerTick caller that does not opt in gets a no-op pass. Production wires
@@ -2966,6 +2984,46 @@ export function schedulerTick(
             "scheduler: per-worker watchdog step failed — continuing tick (CTL-729)"
           );
         }
+      }
+    }
+  }
+
+  // (0c) CTL-1137 cost-cap watcher. Out-of-process preemption (the daemon, NEVER the
+  // worker — watcher-is-the-watched caused the 2026-06-14 outage) of an AUTONOMOUS
+  // phase worker whose cumulative Claude-session cost (Prometheus = the single source
+  // of truth) exceeds the per-session cap. SHADOW default → log "would-abort", mutate
+  // nothing. FAIL-OPEN → a missing cost signal never aborts. Each check is async (Prom
+  // HTTP) and fire-and-forget so the sync tick never blocks; a $40 overspend caught a
+  // second later is fine (typical run < $3). Throttled per session (not every tick).
+  {
+    const ccfg = readCostCapConfig();
+    const ccMode = _costCapMode ?? ccfg.mode;
+    if (ccMode !== "off") {
+      for (const sig of readWorkerSignals(orchDir)) {
+        if (!sig.ticket) continue;
+        // AUTONOMOUS phase-bg workers ONLY — never interactive sessions (the $300+ outliers).
+        if (sig.layout !== "nested" || sig.liveness?.kind !== "bg") continue;
+        if (!isTicketInFlight(readPhaseSignals(orchDir, sig.ticket))) continue;
+        if (sig.status === PREEMPTED_STATUS) continue;
+        const bgJobId = sig.liveness.value;
+        if (!bgJobId) continue;
+        // Throttle by bgJobId BEFORE the resolveSession fs read + Prom fetch, so a
+        // worker is resolved + queried at most once per pollMs (not every tick).
+        if (!shouldCheckNow(bgJobId, _costCapNow(), ccfg.pollMs)) continue;
+        const sessionId = resolveSession(bgJobId);
+        if (!sessionId) continue; // session unresolvable → fail-open (no cost signal to read)
+        const { ticket, phase, status } = sig;
+        // Fire-and-forget: the per-worker check is async (Prom HTTP) so the sync tick
+        // never blocks. checkWorkerCost does fetch → decide → shadow-log | enforce-preempt
+        // (terminal-write + reap). Any rejection fails OPEN (logged, no abort).
+        void checkWorkerCost({
+          orchDir, ticket, phase, status, sessionId, bgJobId,
+          mode: ccMode, capUsd: ccfg.capUsd, promBaseUrl: ccfg.promBaseUrl,
+          fetchCost: _costCapFetch, markFailed: _costCapMarkFailed, reap: _costCapReap, log,
+        }).catch((err) => log.warn(
+          { ticket, step: "cost-cap", err: err?.message },
+          "scheduler: per-worker cost-cap step failed — continuing (CTL-1137, fail-open)",
+        ));
       }
     }
   }
