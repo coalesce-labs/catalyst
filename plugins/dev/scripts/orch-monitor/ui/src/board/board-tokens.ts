@@ -11,9 +11,16 @@
 // style resolves through the CSS cascade and flips with the .dark class, making
 // all ~40 board/queue/detail consumers theme-aware with zero call-site edits.
 // surface-contract.test.ts Guard 1 asserts the alias mapping.
-// SLATE-BRAND CARVE-OUT: C.* follows the MODE axis (warm-dark/warm-light) but NOT
-// the BRAND axis (slate-dark/slate-light). Slate-brand parity for the inline path
-// is a separate follow-up. See CTL-1147 research Open Question #2.
+//
+// CTL-1168 NOTE (supersedes the prior slate-brand carve-out): C.* now follows BOTH
+// axes. The surface/border/fg vars it aliases are redefined under
+// `.dark[data-theme="slate"]` (slate-dark) and inherited under
+// `:root[data-theme="slate"]` (slate-light) in app.css — see the CTL-1099 brand
+// blocks. So `background: C.s1` in an inline style resolves through the cascade and
+// flips with BOTH the `.dark` class (MODE) AND the `data-theme="slate"` attribute
+// (BRAND), with no call-site edits. The board no longer renders warm surfaces under
+// the Slate brand. (The earlier "MODE only, not BRAND" carve-out predated the
+// CTL-1099 slate-dark surface ladder and is no longer accurate.)
 
 export const C = {
   // CTL-1147: surface/border/fg are var() aliases of the per-theme CSS tokens
@@ -102,9 +109,12 @@ export const NODE_ACCENTS = [
   "#e0824f", // C.orange
 ] as const;
 
-/** CTL-1146: the per-project lane tint strength (%). Bumped 6 → 9 so the
- *  project hue is perceptible at a glance while staying Linear-calm. */
-export const LANE_TINT_PCT = 9;
+/** The per-project lane tint strength (%).
+ *  CTL-1146: bumped 6 → 9.
+ *  CTL-1168: bumped 9 → 18 (~doubled) so the per-project row hue reads clearly at
+ *  a glance — the prior 9% was too faint to distinguish lanes. Still Linear-calm:
+ *  an 18% oklab mix over the recessed surface stays a tint, never a saturated fill. */
+export const LANE_TINT_PCT = 18;
 
 /**
  * Compose a project hue over a base surface as a perceptually-even oklab tint.
