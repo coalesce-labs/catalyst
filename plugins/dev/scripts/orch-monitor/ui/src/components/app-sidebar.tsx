@@ -627,9 +627,19 @@ export function AppSidebar() {
           const dotColor = navGroup?.dotColor;
           // CTL-961: show auto-detected favicon if available; otherwise fall back to dot.
           const iconDataUrl = navGroup?.iconDataUrl ?? null;
+          // CTL-1152: a project has "active work" when its roster descriptor's
+          // hasWork is set (repo ∈ observed work). Drives both the first-load
+          // collapse default and the active-work dot on the logo below.
+          const hasWork = navGroup?.hasWork ?? false;
           // Force-open when this group contains the active item.
           const forceOpen = groupContainsActive(repo);
-          const isOpen = forceOpen || (groupsOpen[repo] ?? true); // default open
+          // CTL-1152: FIRST-LOAD default — an idle project (no active work) starts
+          // COLLAPSED, an active one starts open. This is ONLY the default for a
+          // project the operator hasn't toggled yet (no persisted bit); once they
+          // open/close it the stored value wins, and we never auto-toggle mid-session.
+          // hasWork undefined (legacy/fallback path) → default open.
+          const isOpen =
+            forceOpen || (groupsOpen[repo] ?? (navGroup?.hasWork ?? true));
           const groupKey = repo.replace(/[^a-z0-9]/gi, "_");
           // CTL-1034 §2: spell the repo short-name out as a heading ("adva" → "Adva").
           const repoLabel = displayCaseName(repo) || repo;
@@ -674,7 +684,13 @@ export function AppSidebar() {
                       // attention overlay still has something to pin onto.
                       <span aria-hidden className="size-4 flex-shrink-0" />
                     )}
-                    {repoSignal && (
+                    {/* CTL-1152: active-work dot on the logo. Show it whenever the
+                        project has active work (hasWork) OR a live/anomaly child
+                        signal — so the operator can tell at a glance which projects
+                        are working, even with the idle ones collapsed. Amber (anomaly)
+                        outranks green (live) per the sectionSignal vocabulary; a plain
+                        active project with no attention shows green. */}
+                    {(hasWork || repoSignal) && (
                       <StatusDot kind={repoSignal === "anomaly" ? "anomaly" : "live"} />
                     )}
                   </span>

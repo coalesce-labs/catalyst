@@ -234,6 +234,18 @@ describe("nav-model — buildNavGroupsFromProjects (CTL-1152)", () => {
     expect(groups.map((g) => g.scope)).toEqual(["all", "observe"]);
   });
 
+  it("threads descriptor.hasWork onto the group so the sidebar can default idle projects collapsed + badge active ones (CTL-1152)", () => {
+    const groups = buildNavGroupsFromProjects([
+      desc({ repo: "catalyst", name: "Catalyst", hasWork: true }),
+      desc({ repo: "evergreen", name: "Evergreen", hasWork: false }),
+    ]);
+    expect(groups.find((g) => g.scope === "catalyst")?.hasWork).toBe(true);
+    expect(groups.find((g) => g.scope === "evergreen")?.hasWork).toBe(false);
+    // Overall / Observe carry no hasWork (treated as always-open by the sidebar).
+    expect(groups.find((g) => g.scope === "all")?.hasWork).toBeUndefined();
+    expect(groups.find((g) => g.scope === "observe")?.hasWork).toBeUndefined();
+  });
+
   it("per-descriptor group has the same 3 OPERATE items scoped to that repo", () => {
     const groups = buildNavGroupsFromProjects([desc({ repo: "catalyst", name: "Catalyst" })]);
     const grp = groups.find((g) => g.scope === "catalyst")!;

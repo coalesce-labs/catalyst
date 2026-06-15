@@ -56,6 +56,14 @@ export interface NavGroup {
    * Shown in preference to the color dot when present.
    */
   iconDataUrl?: string | null;
+  /**
+   * CTL-1152: true when this project has active work (the roster descriptor's
+   * `hasWork` — repo ∈ BoardPayload.repos). Drives the first-load defaults: an
+   * idle project (hasWork=false) starts COLLAPSED and shows no active-work dot on
+   * its logo; an active one starts open and carries the dot. Undefined for the
+   * Overall/Observe groups and the legacy `buildNavGroups` path (treated as open).
+   */
+  hasWork?: boolean;
   items: NavItem[];
 }
 
@@ -192,6 +200,9 @@ export function buildNavGroupsFromProjects(
     // lookup is a direct NAMED_COLORS hit — no owner/repo reconciliation needed.
     dotColor: p.defaultColor ? NAMED_COLORS[p.defaultColor]?.text : undefined,
     iconDataUrl: repoIcons ? (repoIcons[p.repo] ?? null) : undefined,
+    // CTL-1152: carry hasWork so the sidebar can default idle projects collapsed
+    // and badge the active ones with a dot on first load.
+    hasWork: p.hasWork,
     items: makeOperateItems(p.repo),
   }));
 
