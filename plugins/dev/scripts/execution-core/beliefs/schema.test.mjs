@@ -38,6 +38,7 @@ const SPEC_TABLES = [
   "cfg",
   "belief",
   "intent",
+  "shadow_comparison",
 ];
 
 function tableNames(db) {
@@ -272,5 +273,71 @@ describe("defaultBeliefsDbPath — env override", () => {
     db.run("INSERT INTO tick (now_ms, host) VALUES (2, 'h')");
     db.close();
     expect(existsSync(target)).toBe(true);
+  });
+});
+
+describe("openBeliefsDb — CTL-935: shadow_comparison table", () => {
+  test("creates shadow_comparison with exact column set in order", () => {
+    const db = openBeliefsDb({ path: join(scratch(), "beliefs.db") });
+    expect(columns(db, "shadow_comparison")).toEqual([
+      "cmp_id", "tick_id", "dimension", "subject", "agree",
+      "procedural", "belief", "differing_input", "legacy_guard",
+      "rule_id", "rules_sha",
+    ]);
+    db.close();
+  });
+
+  test("UNIQUE(tick_id, dimension, subject): duplicate plain INSERT throws; INSERT OR IGNORE leaves COUNT=1", () => {
+    const db = openBeliefsDb({ path: join(scratch(), "beliefs.db") });
+    db.run("INSERT INTO tick (now_ms, host) VALUES (1, 'mini')");
+    const ins = "INSERT INTO shadow_comparison (tick_id, dimension, subject, agree) VALUES (1, 'advance', 'CTL-1', 1)";
+    db.run(ins);
+    expect(() => db.run(ins)).toThrow();
+    db.run(ins.replace("INSERT", "INSERT OR IGNORE"));
+    expect(db.query("SELECT COUNT(*) AS n FROM shadow_comparison").get().n).toBe(1);
+    // same (dimension,subject) under a new tick_id inserts a second row
+    db.run("INSERT INTO tick (now_ms, host) VALUES (2, 'mini')");
+    db.run("INSERT INTO shadow_comparison (tick_id, dimension, subject, agree) VALUES (2, 'advance', 'CTL-1', 0)");
+    expect(db.query("SELECT COUNT(*) AS n FROM shadow_comparison").get().n).toBe(2);
+    db.close();
+  });
+
+  test("FK shadow_comparison.tick_id -> tick(tick_id) is declared", () => {
+    const db = openBeliefsDb({ path: join(scratch(), "beliefs.db") });
+    const fks = fkList(db, "shadow_comparison");
+    expect(fks.length).toBe(1);
+    expect(fks[0].table).toBe("tick");
+    expect(fks[0].from).toBe("tick_id");
+    expect(fks[0].to).toBe("tick_id");
+    db.close();
+  });
+
+  test("indexes idx_shadow_cmp_tick, idx_shadow_cmp_dim_rule, idx_shadow_cmp_guard exist", () => {
+    const db = openBeliefsDb({ path: join(scratch(), "beliefs.db") });
+    const idxs = db.query("PRAGMA index_list(shadow_comparison)").all().map((r) => r.name);
+    expect(idxs).toContain("idx_shadow_cmp_tick");
+    expect(idxs).toContain("idx_shadow_cmp_dim_rule");
+    expect(idxs).toContain("idx_shadow_cmp_guard");
+    db.close();
+  });
+
+  test("idempotent additive migration: pre-CTL-935 db (no shadow_comparison) does not throw and preserves existing tick rows", () => {
+    const path = join(scratch(), "beliefs.db");
+    // Simulate a pre-CTL-935 db by opening and manually dropping the table (if it existed)
+    const db1 = openBeliefsDb({ path });
+    db1.run("INSERT INTO tick (now_ms, host) VALUES (1, 'h')");
+    db1.run(
+      "INSERT INTO belief (tick_id, stratum, name, subject, rule_id, source_fact_ids) VALUES (1, 1, 'x', 's', 'R1', '[]')",
+    );
+    db1.run("DROP TABLE IF EXISTS shadow_comparison");
+    db1.close();
+    // Re-open must create the table without throwing and preserve existing rows
+    expect(() => {
+      const db2 = openBeliefsDb({ path });
+      const names = db2.query("SELECT name FROM sqlite_master WHERE type='table'").all().map((r) => r.name);
+      expect(names).toContain("shadow_comparison");
+      expect(db2.query("SELECT COUNT(*) AS n FROM belief").get().n).toBe(1);
+      db2.close();
+    }).not.toThrow();
   });
 });

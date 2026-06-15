@@ -256,6 +256,12 @@ function pruneRetention(db, now) {
   db.run("DELETE FROM intent WHERE tick_id IN (SELECT tick_id FROM tick WHERE now_ms < ?)", [
     beliefCutoff,
   ]);
+  // CTL-935: shadow_comparison is pruned at the 90d belief window (same as
+  // belief/intent) so 7-day reports always have full data — NOT the 14d obs window.
+  db.run(
+    "DELETE FROM shadow_comparison WHERE tick_id IN (SELECT tick_id FROM tick WHERE now_ms < ?)",
+    [beliefCutoff],
+  );
   for (const t of [
     "obs_agent",
     "obs_job",

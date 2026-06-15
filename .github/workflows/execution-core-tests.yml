@@ -96,6 +96,7 @@ jobs:
             beliefs/recursive-rules.test.mjs \
             beliefs/rules.test.mjs \
             beliefs/schema.test.mjs \
+            beliefs/shadow-store.test.mjs \
             beliefs/why.test.mjs \
             abort-worker.test.mjs \
             autotune-decision.test.mjs \

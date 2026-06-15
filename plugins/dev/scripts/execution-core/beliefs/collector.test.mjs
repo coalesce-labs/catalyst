@@ -661,6 +661,27 @@ describe("collectTickFacts — retention", () => {
     db.close();
   });
 
+  test("CTL-935: pruneRetention deletes shadow_comparison rows at 90d belief window (NOT 14d obs window)", () => {
+    const db = openBeliefsDb({ path: join(scratch(), "b.db") });
+    // tick A: 100d old → past 90d belief window → shadow_comparison row should be pruned
+    db.run("INSERT INTO tick (tick_id, now_ms, host) VALUES (10, ?, 'mini')", [NOW - 100 * DAY]);
+    db.run(
+      "INSERT INTO shadow_comparison (tick_id, dimension, subject, agree) VALUES (10, 'advance', 'CTL-X', 0)",
+    );
+    // tick B: 20d old → past 14d obs window but WITHIN 90d belief window → shadow_comparison row survives
+    db.run("INSERT INTO tick (tick_id, now_ms, host) VALUES (11, ?, 'mini')", [NOW - 20 * DAY]);
+    db.run(
+      "INSERT INTO shadow_comparison (tick_id, dimension, subject, agree) VALUES (11, 'advance', 'CTL-Y', 1)",
+    );
+    const res = collect(db, scratch(), { pruneEveryTicks: 1 });
+    expect(res.ok).toBe(true);
+    // 100d shadow_comparison → pruned
+    expect(db.query("SELECT COUNT(*) AS n FROM shadow_comparison WHERE tick_id=10").get().n).toBe(0);
+    // 20d shadow_comparison → still present (within 90d belief window)
+    expect(db.query("SELECT COUNT(*) AS n FROM shadow_comparison WHERE tick_id=11").get().n).toBe(1);
+    db.close();
+  });
+
   test("prune runs once per N ticks, not every tick", () => {
     const db = openBeliefsDb({ path: join(scratch(), "b.db") });
     db.run("INSERT INTO tick (tick_id, now_ms, host) VALUES (999, ?, 'h')", [NOW - 15 * DAY]);

@@ -98,6 +98,7 @@ import {
   readVerdictFromEdb,
   readCycleFromEdb,
 } from "./beliefs/advance-shadow.mjs";
+import { recordShadowComparison } from "./beliefs/shadow-store.mjs";
 // CTL-937: bounded stall-diagnostician wake wiring (opt-in CATALYST_DIAGNOSTICIAN=1).
 import { processDiagnosticianWakes } from "./diagnostician.mjs";
 import { executeEscalations } from "./beliefs/escalate.mjs";
@@ -5004,6 +5005,9 @@ function runTick() {
             appendEvent: intentEventAppender,
             // Opt-in tick summary; off by default to keep the event log lean.
             emitTickSummary: (process.env.CATALYST_ADVANCE_SHADOW_SUMMARY ?? "0") === "1",
+            // CTL-935: dual-write to beliefs.db so the weekly report has a
+            // uniform durable corpus (event log stays the live operator feed).
+            writeComparison: (rec) => recordShadowComparison(advDb, rec),
           });
         }
       } catch (advErr) {
