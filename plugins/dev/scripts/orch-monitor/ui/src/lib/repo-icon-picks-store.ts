@@ -4,6 +4,11 @@ import type { IconCandidate } from "./repo-icons";
 
 /** repoKey → selected candidate path. Persisted browser-local (CTL-997). */
 export const REPO_ICON_PICKS_KEY = "catalyst.repoIconPicks";
+/**
+ * @deprecated CTL-1153 (M2): reads are back-compat only. Writes now go through
+ * PUT /api/projects/:key; the server-persisted icon in useProjects() is
+ * authoritative. This atom will be removed once the settings pane ships.
+ */
 export const repoIconPicksAtom = atomWithStorage<Record<string, string>>(REPO_ICON_PICKS_KEY, {});
 
 /**

@@ -21,8 +21,16 @@ interface FetchedIcon {
  * Fetch and resolve per-repo icons for the given repos.
  * Returns the icon map, which updates reactively when the operator's pick changes.
  * Fail-open: a fetch failure yields empty candidates and null autoDataUrl.
+ *
+ * CTL-1153 (M2): accepts optional `serverIconByRepo` (repo → chosen icon path from
+ * the server's ProjectDescriptor.icon). It feeds as the `defaultSelectedPath` so the
+ * precedence is: legacy localStorage pick > server icon > favicon candidates[0]. The
+ * default `{}` means this parameter is always safe to omit (fail-safe, M1 behavior).
  */
-export function useRepoIcons(repos: readonly string[]): RepoIconMap {
+export function useRepoIcons(
+  repos: readonly string[],
+  serverIconByRepo: Record<string, string | null | undefined> = {},
+): RepoIconMap {
   const [fetched, setFetched] = useState<Record<string, FetchedIcon>>({});
   const picks = useAtomValue(repoIconPicksAtom);
 
@@ -65,9 +73,12 @@ export function useRepoIcons(repos: readonly string[]): RepoIconMap {
     const out: RepoIconMap = {};
     for (const repo of repos) {
       const f = fetched[repo] ?? { candidates: [], defaultSelectedPath: null };
+      // CTL-1153 (M2): server icon from projects[] feeds as the defaultSelectedPath
+      // (precedence: localStorage pick > server icon > fetch defaultSelectedPath > candidates[0])
+      const effectiveDefault = serverIconByRepo[repo] ?? f.defaultSelectedPath;
       const { autoDataUrl, selectedPath } = resolveEffectiveIcon(
         f.candidates,
-        f.defaultSelectedPath,
+        effectiveDefault,
         picks[repo],
       );
       out[repo] = {
