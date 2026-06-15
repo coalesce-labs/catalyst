@@ -346,6 +346,61 @@ run "start --hotpatch on live stack refuses with restart message" bash -c "
     '${STACK}' start --hotpatch 2>&1 | grep -qi 'restart'
 "
 
+# ── CTL-1166: install-services (launchd auto-start) ───────────────────────────
+# All assertions use --print, which is pure (no launchctl/filesystem side
+# effects) and OS-independent, so they run identically in CI and on macOS.
+
+run "install-services --print emits the catalyst-stack LaunchAgent label" bash -c "
+  '${STACK}' install-services --print 2>&1 | grep -q 'ai.coalesce.catalyst-stack'
+"
+
+run "install-services --print runs 'catalyst-stack start'" bash -c "
+  '${STACK}' install-services --print 2>&1 | grep -q '<string>start</string>'
+"
+
+run "install-services --print sets RunAtLoad true" bash -c "
+  '${STACK}' install-services --print 2>&1 | grep -A1 'RunAtLoad' | grep -q '<true/>'
+"
+
+run "install-services --print defaults StartInterval to 600" bash -c "
+  '${STACK}' install-services --print 2>&1 | grep -A1 'StartInterval' | grep -q '<integer>600</integer>'
+"
+
+run "install-services --print honors --interval" bash -c "
+  '${STACK}' install-services --print --interval 300 2>&1 | grep -A1 'StartInterval' | grep -q '<integer>300</integer>'
+"
+
+run "install-services --print injects HOME + catalyst bin on PATH" bash -c "
+  '${STACK}' install-services --print 2>&1 | grep -q '.catalyst/bin'
+"
+
+run "install-services --print is side-effect-free (writes no plist)" bash -c "
+  fh='${SCRATCH}/se_home'; mkdir -p \"\$fh/Library/LaunchAgents\";
+  HOME=\"\$fh\" '${STACK}' install-services --print >/dev/null 2>&1;
+  [[ ! -e \"\$fh/Library/LaunchAgents/ai.coalesce.catalyst-stack.plist\" ]]
+"
+
+run "install-services rejects an unknown arg" bash -c "
+  ! '${STACK}' install-services --bogus >/dev/null 2>&1
+"
+
+run "install-services rejects a non-numeric --interval" bash -c "
+  ! '${STACK}' install-services --interval abc >/dev/null 2>&1
+"
+
+run "--help lists install-services" bash -c "
+  '${STACK}' --help 2>&1 | grep -q 'install-services'
+"
+
+run "rendered plist passes plutil lint (macOS)" bash -c "
+  if command -v plutil >/dev/null 2>&1; then
+    '${STACK}' install-services --print > '${SCRATCH}/ctl1166.plist' 2>/dev/null
+    plutil -lint '${SCRATCH}/ctl1166.plist' >/dev/null
+  else
+    true  # plutil is macOS-only; skip the lint elsewhere
+  fi
+"
+
 # ── Summary ───────────────────────────────────────────────────────────────────
 echo ""
 TOTAL=$((PASSES + FAILURES))
