@@ -69,6 +69,7 @@ import {
   classifyTicketResolution,
   fetchTicketAssignee,
   isAssigneeClaimable,
+  isClaimable,
   readTicketLabels,
 } from "./linear-query.mjs";
 import { gatewayLabelsHit } from "./gateway-read.mjs"; // CTL-1079
@@ -4523,24 +4524,25 @@ export function schedulerTick(
     // CTL-671: circuit breaker — stop re-dispatching a new-work ticket that has
     // failed its entry-phase dispatch THRESHOLD times in a row.
     if (maybeTripCircuitBreaker(orchDir, t.identifier, NEW_WORK_ENTRY_PHASE)) continue;
-    // CTL-781: respect-assignment gate — claim only assignee ∈ {null, bot}.
-    // Gateway-first (rate-free); live read only on a miss. An unreadable
-    // assignee HOLDS the candidate this tick (fail-safe) — it is not a dispatch
-    // failure, so no cooldown marker and no failure event. Empty/absent
-    // botUserIds disables the gate (CTL-749 fail-open convention).
+    // CTL-781/CTL-1174: respect-assignment + delegate gate.
+    // Claim only when assignee ∈ {null,bot} AND delegate ∈ {null,bot}.
+    // Gateway-first (rate-free); live read on a miss. An unreadable
+    // assignee or delegate HOLDS the candidate this tick (fail-safe) — no
+    // cooldown marker, no failure event. Empty/absent botUserIds disables
+    // the gate (CTL-749 fail-open convention).
     if (botUserIds instanceof Set && botUserIds.size > 0) {
       const a = fetchAssignee(t.identifier, { gateway, exec });
       if (!a.known) {
         log.debug(
           { ticket: t.identifier },
-          "ctl-781: assignee unreadable — holding candidate this tick"
+          "ctl-781: assignee/delegate unreadable — holding candidate this tick"
         );
         continue;
       }
-      if (!isAssigneeClaimable(a.assignee, botUserIds)) {
+      if (!isClaimable(a.assignee, a.delegate, botUserIds)) {
         log.debug(
-          { ticket: t.identifier, assignee: a.assignee },
-          "ctl-781: candidate assigned to a non-bot — skipping (respect-assignment)"
+          { ticket: t.identifier, assignee: a.assignee, delegate: a.delegate },
+          "ctl-1174: candidate not claimable (assignee/delegate respect-gate) — skipping"
         );
         continue;
       }

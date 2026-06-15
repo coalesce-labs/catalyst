@@ -1157,3 +1157,61 @@ describe("buildLinearEventLogEnvelope — agent_session and mention", () => {
     expect(env).toBeNull();
   });
 });
+
+// ── CTL-1174: toDelegateId forwarded in body.payload ─────────────────────────
+
+describe("buildLinearEventLogEnvelope — toDelegateId (CTL-1174)", () => {
+  const BOT = "bot-uuid-ff78d890";
+
+  function delegateIssueEvent(
+    toDelegateId: string | null | undefined
+  ): Parameters<typeof buildLinearEventLogEnvelope>[0] {
+    return {
+      kind: "issue" as const,
+      action: "update" as const,
+      topic: "linear.issue.delegate_changed",
+      ticket: "CTL-1174",
+      teamKey: "CTL",
+      data: {},
+      updatedFromKeys: ["delegateId"],
+      issueId: null,
+      actorId: null,
+      actorName: null,
+      toState: null,
+      toPriority: null,
+      toAssigneeId: null,
+      toAssigneeName: null,
+      toLabels: null,
+      toProject: null,
+      toProjectId: null,
+      previousFromValues: {},
+      description: null,
+      descriptionChanged: false,
+      toDelegateId,
+    };
+  }
+
+  it("toDelegateId: BOT → forwarded as non-null in body.payload", () => {
+    const env = buildLinearEventLogEnvelope(delegateIssueEvent(BOT), TS);
+    expect(env).not.toBeNull();
+    const payload = env!.body.payload as Record<string, unknown>;
+    expect(payload.toDelegateId).toBe(BOT);
+  });
+
+  it("toDelegateId: null → serializes as null in body.payload (explicit clear)", () => {
+    const env = buildLinearEventLogEnvelope(delegateIssueEvent(null), TS);
+    expect(env).not.toBeNull();
+    const payload = env!.body.payload as Record<string, unknown>;
+    expect(payload.toDelegateId).toBeNull();
+    expect("toDelegateId" in payload).toBe(true);
+  });
+
+  it("toDelegateId: undefined → key DROPPED from body.payload JSON (key-presence: fold keeps stored value)", () => {
+    const env = buildLinearEventLogEnvelope(delegateIssueEvent(undefined), TS);
+    expect(env).not.toBeNull();
+    // undefined serializes as absent in JSON — check via round-trip, as the broker fold
+    // reads from the event log (JSON), not the in-memory JS object.
+    const jsonPayload = JSON.parse(JSON.stringify(env!.body.payload)) as Record<string, unknown>;
+    expect("toDelegateId" in jsonPayload).toBe(false);
+  });
+});

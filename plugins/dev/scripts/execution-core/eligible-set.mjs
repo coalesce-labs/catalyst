@@ -82,6 +82,11 @@ function contentKey(tickets) {
       t.parent ?? null,
       t.estimate ?? null,
       relationsSignature(t),
+      // CTL-1174: delegate in the signature so an out-of-band delegate change
+      // forces a projection rewrite (the CONTENTKEY PROJECTION TRAP). `?? null`
+      // collapses undefined/null identically — a batch outage leaves delegate
+      // unset and must not churn the set on the next successful poll.
+      t.delegate ?? null,
     ]),
   );
 }

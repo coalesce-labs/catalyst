@@ -1046,6 +1046,22 @@ function foldLinearIssueDescriptor(name, detail, eventTicket) {
         (Array.isArray(detail.updatedFromKeys) && detail.updatedFromKeys.includes("assigneeId"));
       if (changeEvidenced) descriptor.assignee = v;
     }
+    if ("toDelegateId" in detail) {
+      const v = detail.toDelegateId ?? null;
+      // CTL-1174: mirror the CTL-821 assignee guard — a bare null CLEARS only
+      // when the change is evidenced, else it is "unknown" and KEEPS (a partial
+      // Linear payload must never spuriously un-delegate a bot-owned ticket →
+      // re-claim). Accept BOTH updatedFrom key spellings since Linear's exact
+      // key is unverified (Open Question #2) — accepting both fails toward KEEP.
+      const changeEvidenced =
+        v !== null ||
+        name === "linear.issue.delegate_changed" ||
+        detail.action === "create" ||
+        (Array.isArray(detail.updatedFromKeys) &&
+          (detail.updatedFromKeys.includes("delegateId") ||
+            detail.updatedFromKeys.includes("delegate")));
+      if (changeEvidenced) descriptor.delegate = v;
+    }
     if (detail.toLabels != null) descriptor.labels = detail.toLabels;
     if (uuid) descriptor.uuid = uuid;
     upsertTicketDescriptor(descriptor);
