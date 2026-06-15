@@ -75,6 +75,15 @@ trap 'rm -rf "$TMPDIR_TEST"' EXIT
 BIN_DIR="${TMPDIR_TEST}/bin"
 mkdir -p "$BIN_DIR"
 
+# Default linearis stub: fails. Tests that expect linearis to succeed override this
+# individually (CTL-1182: fallback contract). Having a failing stub ensures Tests
+# 6, 7, 8, etc. still assert non-zero when the app-actor path also fails.
+cat >"${BIN_DIR}/linearis" <<'LINEOF'
+#!/usr/bin/env bash
+exit 1
+LINEOF
+chmod +x "${BIN_DIR}/linearis"
+
 # Test 4: exits 0 when curl stub returns valid token + issue UUID + comment success
 cat >"${BIN_DIR}/curl" <<'CURLEOF'
 #!/usr/bin/env bash
@@ -99,7 +108,9 @@ PATH="${BIN_DIR}:$PATH" assert_exit_zero \
   "exits 0 on successful token + comment post" \
   bash "$HELPER" "CTL-550" "Hello from test"
 
-# Test 5: exits non-zero when token mint fails (curl returns error body, no access_token)
+# Test 5 (CTL-1182): when token mint fails but linearis fallback is available →
+# helper now exits 0 (expectation flipped from non-zero). Add a working linearis
+# stub and assert it was invoked with `issues discuss CTL-550`.
 cat >"${BIN_DIR}/curl" <<'CURLEOF'
 #!/usr/bin/env bash
 if printf '%s\n' "$@" | grep -q "oauth/token"; then
@@ -109,9 +120,33 @@ exit 0
 CURLEOF
 chmod +x "${BIN_DIR}/curl"
 
-PATH="${BIN_DIR}:$PATH" assert_exit_nonzero \
-  "exits non-zero when token mint returns no access_token" \
+LINEARIS_ARGS5="${TMPDIR_TEST}/linearis-args-5.txt"
+rm -f "$LINEARIS_ARGS5"
+cat >"${BIN_DIR}/linearis" <<LINEOF
+#!/usr/bin/env bash
+printf '%s\n' "\$@" >"${LINEARIS_ARGS5}"
+exit 0
+LINEOF
+chmod +x "${BIN_DIR}/linearis"
+
+PATH="${BIN_DIR}:$PATH" assert_exit_zero \
+  "exits 0 when token mint fails but linearis fallback succeeds (CTL-1182)" \
   bash "$HELPER" "CTL-550" "body"
+
+if grep -q "discuss" "${LINEARIS_ARGS5}" 2>/dev/null && grep -q "CTL-550" "${LINEARIS_ARGS5}" 2>/dev/null; then
+  echo "PASS: linearis invoked with 'issues discuss' and ticket"
+  PASS=$((PASS+1))
+else
+  echo "FAIL: linearis not invoked correctly (args: $(cat "${LINEARIS_ARGS5}" 2>/dev/null || echo none))"
+  FAIL=$((FAIL+1))
+fi
+
+# Reset linearis to fail so subsequent tests keep their non-zero expectations.
+cat >"${BIN_DIR}/linearis" <<'LINEOF'
+#!/usr/bin/env bash
+exit 1
+LINEOF
+chmod +x "${BIN_DIR}/linearis"
 
 # Test 6: exits non-zero when issue UUID resolution fails (empty nodes)
 cat >"${BIN_DIR}/curl" <<'CURLEOF'
@@ -151,14 +186,16 @@ PATH="${BIN_DIR}:$PATH" assert_exit_nonzero \
   "exits non-zero when commentCreate returns success=false" \
   bash "$HELPER" "CTL-550" "body"
 
-# Test 8: exits non-zero when CATALYST_LINEAR_AGENT_CLIENT_ID not set and no config
+# Test 8: exits non-zero when CATALYST_LINEAR_AGENT_CLIENT_ID not set and no config.
+# Use PATH="${BIN_DIR}:$PATH" so the failing linearis stub (set above) shadows any
+# real linearis installation — ensuring both the app-actor AND linearis paths fail
+# and the exit is still non-zero (CTL-1182: only exit 0 when either path succeeds).
 unset CATALYST_LINEAR_AGENT_CLIENT_ID
 unset CATALYST_LINEAR_AGENT_CLIENT_SECRET
 
-# Run from a dir with no .catalyst/config.json ancestry
-assert_exit_nonzero \
-  "exits non-zero when no creds and no config file" \
-  bash -c "cd /tmp && bash '$HELPER' CTL-550 body"
+PATH="${BIN_DIR}:$PATH" assert_exit_nonzero \
+  "exits non-zero when no creds, no config, and linearis unavailable" \
+  bash -c "cd /tmp && PATH='${BIN_DIR}:${PATH}' bash '$HELPER' CTL-550 body"
 
 # Reinstate the success curl stub for the file-resolution back-compat tests.
 cat >"${BIN_DIR}/curl" <<'CURLEOF'
@@ -233,8 +270,11 @@ else
   FAIL=$((FAIL+1))
 fi
 
-# Test 12 (CTL-835): a 400 invalid_scope mint emits EXACTLY ONE diagnostic line,
-# and that line carries the real cause (invalid_scope) — no longer silent.
+# Test 12 (CTL-835): a 400 invalid_scope mint emits a diagnostic carrying the real
+# cause (invalid_scope) — no longer silent. With the CTL-1182 fallback in place,
+# both the app-actor diagnostic AND the linearis fallback diagnostic may appear, so
+# we drop the strict "exactly one line" count and assert only that invalid_scope is
+# present and a fallback diagnostic appears (BIN_DIR/linearis exits 1 = both fail).
 cat >"${BIN_DIR}/curl" <<'CURLEOF'
 #!/usr/bin/env bash
 ARGS_STR="$*"
@@ -248,19 +288,20 @@ CURLEOF
 chmod +x "${BIN_DIR}/curl"
 
 STDERR_OUT="$(PATH="${BIN_DIR}:$PATH" bash "$HELPER" "CTL-550" "body" 2>&1 1>/dev/null || true)"
-DIAG_LINES="$(printf '%s' "$STDERR_OUT" | grep -c .)"
-if [[ "$DIAG_LINES" -eq 1 ]]; then
-  echo "PASS: invalid_scope mint emits exactly one diagnostic line"
-  PASS=$((PASS+1))
-else
-  echo "FAIL: invalid_scope mint emitted ${DIAG_LINES} diagnostic line(s), expected 1 (out: ${STDERR_OUT})"
-  FAIL=$((FAIL+1))
-fi
 if printf '%s' "$STDERR_OUT" | grep -q "invalid_scope"; then
-  echo "PASS: diagnostic surfaces the invalid_scope cause"
+  echo "PASS: diagnostic surfaces the invalid_scope cause (CTL-835)"
   PASS=$((PASS+1))
 else
   echo "FAIL: diagnostic did not surface invalid_scope (out: ${STDERR_OUT})"
+  FAIL=$((FAIL+1))
+fi
+# CTL-1182: with fallback, stderr also contains a linearis-fallback diagnostic
+# (BIN_DIR/linearis exits 1 → both paths fail → fallback diagnostic appears).
+if printf '%s' "$STDERR_OUT" | grep -q "linearis"; then
+  echo "PASS: fallback diagnostic present in stderr when linearis fails (CTL-1182)"
+  PASS=$((PASS+1))
+else
+  echo "FAIL: no linearis fallback diagnostic in stderr (out: ${STDERR_OUT})"
   FAIL=$((FAIL+1))
 fi
 
@@ -325,6 +366,91 @@ if printf '%s' "$HK_STDERR" | grep -qi "no projectKey"; then
 else
   echo "PASS: no drift warning when projectKey resolves correctly"
   PASS=$((PASS+1))
+fi
+
+# ─── CTL-1182: new fallback contract tests ──────────────────────────────────
+
+# Test 15: both app-actor AND linearis fail → exit non-zero
+export CATALYST_LINEAR_AGENT_CLIENT_ID="test-cid"
+export CATALYST_LINEAR_AGENT_CLIENT_SECRET="test-csec"
+cat >"${BIN_DIR}/curl" <<'CURLEOF'
+#!/usr/bin/env bash
+if printf '%s\n' "$@" | grep -q "oauth/token"; then
+  printf '{"error":"invalid_client"}'
+fi
+exit 0
+CURLEOF
+chmod +x "${BIN_DIR}/curl"
+# BIN_DIR/linearis already exits 1 (reset after Test 5).
+PATH="${BIN_DIR}:$PATH" assert_exit_nonzero \
+  "exits non-zero when both app-actor and linearis fail (CTL-1182)" \
+  bash "$HELPER" "CTL-550" "body"
+
+# Test 16: no linearis on PATH (only curl, which fails) → exit non-zero, app-actor
+# diagnostic still present.
+NOLIN_BIN="${TMPDIR_TEST}/nolin-bin"
+mkdir -p "$NOLIN_BIN"
+cat >"${NOLIN_BIN}/curl" <<'CURLEOF'
+#!/usr/bin/env bash
+if printf '%s\n' "$@" | grep -q "oauth/token"; then
+  printf '{"error":"invalid_scope","error_description":"missing scope"}\n400'
+fi
+exit 0
+CURLEOF
+chmod +x "${NOLIN_BIN}/curl"
+# No linearis in NOLIN_BIN.
+NOLIN_STDERR="$(PATH="${NOLIN_BIN}:/usr/bin:/bin:/usr/local/bin" \
+  bash "$HELPER" "CTL-550" "body" 2>&1 1>/dev/null || true)"
+NOLIN_EXIT=0
+PATH="${NOLIN_BIN}:/usr/bin:/bin:/usr/local/bin" \
+  bash "$HELPER" "CTL-550" "body" >/dev/null 2>/dev/null || NOLIN_EXIT=$?
+if [[ "$NOLIN_EXIT" -ne 0 ]]; then
+  echo "PASS: exits non-zero when no linearis on PATH and app-actor fails (CTL-1182)"
+  PASS=$((PASS+1))
+else
+  echo "FAIL: expected non-zero, got 0 (linearis may unexpectedly be on PATH)"
+  FAIL=$((FAIL+1))
+fi
+if printf '%s' "$NOLIN_STDERR" | grep -q "invalid_scope"; then
+  echo "PASS: app-actor diagnostic still present when linearis unavailable (CTL-1182)"
+  PASS=$((PASS+1))
+else
+  echo "FAIL: app-actor diagnostic missing when linearis unavailable (stderr: ${NOLIN_STDERR})"
+  FAIL=$((FAIL+1))
+fi
+
+# Test 17: app-actor succeeds → linearis NOT called (no double-post).
+cat >"${BIN_DIR}/curl" <<'CURLEOF'
+#!/usr/bin/env bash
+ARGS_STR="$*"
+if printf '%s' "$ARGS_STR" | grep -q "oauth/token"; then
+  printf '{"access_token":"test_token","token_type":"Bearer"}'
+elif printf '%s' "$ARGS_STR" | grep -q "commentCreate"; then
+  printf '{"data":{"commentCreate":{"success":true}}}'
+else
+  printf '{"data":{"issues":{"nodes":[{"id":"issue-uuid-123"}]}}}'
+fi
+exit 0
+CURLEOF
+chmod +x "${BIN_DIR}/curl"
+LINEARIS_RECORD17="${TMPDIR_TEST}/linearis-record-17.txt"
+rm -f "$LINEARIS_RECORD17"
+cat >"${BIN_DIR}/linearis" <<LINEOF
+#!/usr/bin/env bash
+touch "${LINEARIS_RECORD17}"
+exit 0
+LINEOF
+chmod +x "${BIN_DIR}/linearis"
+
+PATH="${BIN_DIR}:$PATH" assert_exit_zero \
+  "app-actor success exits 0 (baseline for double-post check, CTL-1182)" \
+  bash "$HELPER" "CTL-550" "body"
+if [[ ! -f "$LINEARIS_RECORD17" ]]; then
+  echo "PASS: linearis NOT called when app-actor succeeds — no double-post (CTL-1182)"
+  PASS=$((PASS+1))
+else
+  echo "FAIL: linearis was called even though app-actor succeeded"
+  FAIL=$((FAIL+1))
 fi
 
 echo ""

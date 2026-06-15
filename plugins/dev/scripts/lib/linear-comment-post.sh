@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
-# linear-comment-post.sh — Post a Linear comment using the app-actor identity.
+# linear-comment-post.sh — Post a Linear comment, with a two-tier strategy (CTL-1182):
+#   1. App-actor: client_credentials token mint → UUID resolve → commentCreate
+#   2. linearis CLI fallback: `linearis issues discuss "$TICKET" --body "$BODY"`
+# Exit 0 if either path posts successfully; non-zero only when both fail.
 #
 # Usage: linear-comment-post.sh <ticket-identifier> <comment-body>
 # E.g.:  linear-comment-post.sh CTL-550 "Hello from Catalyst agent"
@@ -51,100 +54,136 @@ _find_layer2_config() {
   echo "$HOME/.config/catalyst/config.json"
 }
 
-CLIENT_ID="${CATALYST_LINEAR_AGENT_CLIENT_ID:-}"
-CLIENT_SECRET="${CATALYST_LINEAR_AGENT_CLIENT_SECRET:-}"
+# ── Tier 1: post via the app-actor (client_credentials) identity ─────────────
+#
+# Self-contained: resolves credentials, mints the token, resolves the UUID, and
+# posts the comment. Returns 1 (not exit 1) at each failure point so the caller
+# can fall through to the linearis tier without exiting the process (CTL-1182).
+_post_via_app_actor() {
+  local client_id="${CATALYST_LINEAR_AGENT_CLIENT_ID:-}"
+  local client_secret="${CATALYST_LINEAR_AGENT_CLIENT_SECRET:-}"
 
-if [[ -z "$CLIENT_ID" || -z "$CLIENT_SECRET" ]]; then
-  GLOBAL_CONFIG="$HOME/.config/catalyst/config.json"
-  LAYER2_CONFIG="$(_find_layer2_config)"
+  if [[ -z "$client_id" || -z "$client_secret" ]]; then
+    local global_config="$HOME/.config/catalyst/config.json"
+    local layer2_config
+    layer2_config="$(_find_layer2_config)"
 
-  # 1. NEW global path (~/.config/catalyst/config.json):
-  #    catalyst.linear.bot.worker.{clientId,clientSecret}
-  if [[ -f "$GLOBAL_CONFIG" ]]; then
-    CLIENT_ID=$(jq -r '.catalyst.linear.bot.worker.clientId // empty' "$GLOBAL_CONFIG" 2>/dev/null)
-    CLIENT_SECRET=$(jq -r '.catalyst.linear.bot.worker.clientSecret // empty' "$GLOBAL_CONFIG" 2>/dev/null)
+    # 1. NEW global path (~/.config/catalyst/config.json):
+    #    catalyst.linear.bot.worker.{clientId,clientSecret}
+    if [[ -f "$global_config" ]]; then
+      client_id=$(jq -r '.catalyst.linear.bot.worker.clientId // empty' "$global_config" 2>/dev/null)
+      client_secret=$(jq -r '.catalyst.linear.bot.worker.clientSecret // empty' "$global_config" 2>/dev/null)
+    fi
+
+    # 2. OLD per-team path fallback (config-<key>.json, resolved above):
+    #    catalyst.linear.agent.{clientId,clientSecret}. During the transition the
+    #    worker creds may still live in the per-team file under the legacy key.
+    if [[ -z "$client_id" || -z "$client_secret" ]] && [[ -f "$layer2_config" ]]; then
+      client_id=$(jq -r '.catalyst.linear.agent.clientId // empty' "$layer2_config" 2>/dev/null)
+      client_secret=$(jq -r '.catalyst.linear.agent.clientSecret // empty' "$layer2_config" 2>/dev/null)
+    fi
+
+    # 3. OLD global path fallback: legacy catalyst.linear.agent.* in the global
+    #    config.json (covers a global-only legacy layout when no per-team file
+    #    exists or the resolver already pointed at config.json).
+    if [[ -z "$client_id" || -z "$client_secret" ]] && [[ -f "$global_config" ]]; then
+      client_id=$(jq -r '.catalyst.linear.agent.clientId // empty' "$global_config" 2>/dev/null)
+      client_secret=$(jq -r '.catalyst.linear.agent.clientSecret // empty' "$global_config" 2>/dev/null)
+    fi
+
+    if [[ -z "$client_id" || -z "$client_secret" ]]; then
+      echo "linear-comment-post: catalyst.linear.bot.worker.{clientId,clientSecret} (global) or legacy catalyst.linear.agent.* (per-team $layer2_config / global $global_config) not found" >&2
+      return 1
+    fi
   fi
 
-  # 2. OLD per-team path fallback (config-<key>.json, resolved above):
-  #    catalyst.linear.agent.{clientId,clientSecret}. During the transition the
-  #    worker creds may still live in the per-team file under the legacy key.
-  if [[ -z "$CLIENT_ID" || -z "$CLIENT_SECRET" ]] && [[ -f "$LAYER2_CONFIG" ]]; then
-    CLIENT_ID=$(jq -r '.catalyst.linear.agent.clientId // empty' "$LAYER2_CONFIG" 2>/dev/null)
-    CLIENT_SECRET=$(jq -r '.catalyst.linear.agent.clientSecret // empty' "$LAYER2_CONFIG" 2>/dev/null)
+  # 1. Mint app-actor token via client_credentials grant.
+  #    Capture the body + HTTP status WITHOUT -f so a 400 (e.g. invalid_scope)
+  #    surfaces the real error JSON instead of being discarded — the single
+  #    diagnostic line below then carries the actual cause (CTL-835).
+  local token_http
+  token_http=$(curl -s -w '\n%{http_code}' -X POST "${LINEAR_API}/oauth/token" \
+    -d "grant_type=client_credentials" \
+    -d "client_id=${client_id}" \
+    -d "client_secret=${client_secret}" \
+    -d "scope=${MINT_SCOPE}" \
+    -d "actor=app" \
+    -H "Content-Type: application/x-www-form-urlencoded" 2>/dev/null) || {
+    echo "linear-comment-post: token mint request failed (curl error)" >&2
+    return 1
+  }
+  local token_code="${token_http##*$'\n'}"
+  local token_response="${token_http%$'\n'*}"
+  local access_token
+  access_token=$(printf '%s' "$token_response" | jq -r '.access_token // empty' 2>/dev/null)
+  if [[ -z "$access_token" ]]; then
+    # One clear diagnostic carrying the HTTP status + Linear's error/description so
+    # invalid_scope (and any future mint rejection) is no longer silent.
+    local err_detail
+    err_detail=$(printf '%s' "$token_response" | jq -r '[.error, .error_description] | map(select(. != null and . != "")) | join(": ") // empty' 2>/dev/null)
+    echo "linear-comment-post: token mint failed (HTTP ${token_code:-?}${err_detail:+; }${err_detail}) — comment NOT posted" >&2
+    return 1
   fi
 
-  # 3. OLD global path fallback: legacy catalyst.linear.agent.* in the global
-  #    config.json (covers a global-only legacy layout when no per-team file
-  #    exists or the resolver already pointed at config.json).
-  if [[ -z "$CLIENT_ID" || -z "$CLIENT_SECRET" ]] && [[ -f "$GLOBAL_CONFIG" ]]; then
-    CLIENT_ID=$(jq -r '.catalyst.linear.agent.clientId // empty' "$GLOBAL_CONFIG" 2>/dev/null)
-    CLIENT_SECRET=$(jq -r '.catalyst.linear.agent.clientSecret // empty' "$GLOBAL_CONFIG" 2>/dev/null)
+  # 2. Resolve ticket identifier → issue UUID.
+  local issue_query
+  issue_query=$(jq -nc \
+    --arg q 'query($id:String!){issues(filter:{identifier:{eq:$id}}){nodes{id}}}' \
+    --arg id "$TICKET" \
+    '{query: $q, variables: {id: $id}}')
+  local issue_response
+  issue_response=$(curl -sf -X POST "${LINEAR_API}/graphql" \
+    -H "Content-Type: application/json" \
+    -H "Authorization: Bearer ${access_token}" \
+    -d "$issue_query" 2>/dev/null) || {
+    echo "linear-comment-post: issue identifier resolution failed" >&2
+    return 1
+  }
+  local issue_uuid
+  issue_uuid=$(printf '%s' "$issue_response" | jq -r '.data.issues.nodes[0].id // empty' 2>/dev/null)
+  if [[ -z "$issue_uuid" ]]; then
+    echo "linear-comment-post: no issue found for identifier $TICKET" >&2
+    return 1
   fi
 
-  if [[ -z "$CLIENT_ID" || -z "$CLIENT_SECRET" ]]; then
-    echo "linear-comment-post: catalyst.linear.bot.worker.{clientId,clientSecret} (global) or legacy catalyst.linear.agent.* (per-team $LAYER2_CONFIG / global $GLOBAL_CONFIG) not found" >&2
-    exit 1
+  # 3. Post the comment.
+  local mutation
+  mutation=$(jq -nc \
+    --arg q 'mutation($input:CommentCreateInput!){commentCreate(input:$input){success}}' \
+    --arg issueId "$issue_uuid" \
+    --arg body "$BODY" \
+    '{query: $q, variables: {input: {issueId: $issueId, body: $body}}}')
+  local comment_response
+  comment_response=$(curl -sf -X POST "${LINEAR_API}/graphql" \
+    -H "Content-Type: application/json" \
+    -H "Authorization: Bearer ${access_token}" \
+    -d "$mutation" 2>/dev/null) || {
+    echo "linear-comment-post: comment mutation request failed" >&2
+    return 1
+  }
+  local success
+  success=$(printf '%s' "$comment_response" | jq -r '.data.commentCreate.success // false' 2>/dev/null)
+  if [[ "$success" != "true" ]]; then
+    echo "linear-comment-post: commentCreate returned success=false" >&2
+    return 1
   fi
-fi
-
-# 1. Mint app-actor token via client_credentials grant.
-#    Capture the body + HTTP status WITHOUT -f so a 400 (e.g. invalid_scope)
-#    surfaces the real error JSON instead of being discarded — the single
-#    diagnostic line below then carries the actual cause (CTL-835).
-TOKEN_HTTP=$(curl -s -w '\n%{http_code}' -X POST "${LINEAR_API}/oauth/token" \
-  -d "grant_type=client_credentials" \
-  -d "client_id=${CLIENT_ID}" \
-  -d "client_secret=${CLIENT_SECRET}" \
-  -d "scope=${MINT_SCOPE}" \
-  -d "actor=app" \
-  -H "Content-Type: application/x-www-form-urlencoded" 2>/dev/null) || {
-  echo "linear-comment-post: token mint request failed (curl error)" >&2
-  exit 1
 }
-TOKEN_CODE="${TOKEN_HTTP##*$'\n'}"
-TOKEN_RESPONSE="${TOKEN_HTTP%$'\n'*}"
-ACCESS_TOKEN=$(printf '%s' "$TOKEN_RESPONSE" | jq -r '.access_token // empty' 2>/dev/null)
-if [[ -z "$ACCESS_TOKEN" ]]; then
-  # One clear diagnostic carrying the HTTP status + Linear's error/description so
-  # invalid_scope (and any future mint rejection) is no longer silent.
-  ERR_DETAIL=$(printf '%s' "$TOKEN_RESPONSE" | jq -r '[.error, .error_description] | map(select(. != null and . != "")) | join(": ") // empty' 2>/dev/null)
-  echo "linear-comment-post: token mint failed (HTTP ${TOKEN_CODE:-?}${ERR_DETAIL:+; }${ERR_DETAIL}) — comment NOT posted" >&2
-  exit 1
-fi
 
-# 2. Resolve ticket identifier → issue UUID.
-ISSUE_QUERY=$(jq -nc \
-  --arg q 'query($id:String!){issues(filter:{identifier:{eq:$id}}){nodes{id}}}' \
-  --arg id "$TICKET" \
-  '{query: $q, variables: {id: $id}}')
-ISSUE_RESPONSE=$(curl -sf -X POST "${LINEAR_API}/graphql" \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer ${ACCESS_TOKEN}" \
-  -d "$ISSUE_QUERY" 2>/dev/null) || {
-  echo "linear-comment-post: issue identifier resolution failed" >&2
-  exit 1
+# ── Tier 2: linearis CLI fallback ─────────────────────────────────────────────
+_post_via_linearis() {
+  command -v linearis >/dev/null 2>&1 || {
+    echo "linear-comment-post: linearis not found on PATH — fallback unavailable" >&2
+    return 1
+  }
+  linearis issues discuss "$TICKET" --body "$BODY" >/dev/null 2>&1 || {
+    echo "linear-comment-post: linearis fallback failed" >&2
+    return 1
+  }
 }
-ISSUE_UUID=$(printf '%s' "$ISSUE_RESPONSE" | jq -r '.data.issues.nodes[0].id // empty' 2>/dev/null)
-if [[ -z "$ISSUE_UUID" ]]; then
-  echo "linear-comment-post: no issue found for identifier $TICKET" >&2
-  exit 1
-fi
 
-# 3. Post the comment.
-MUTATION=$(jq -nc \
-  --arg q 'mutation($input:CommentCreateInput!){commentCreate(input:$input){success}}' \
-  --arg issueId "$ISSUE_UUID" \
-  --arg body "$BODY" \
-  '{query: $q, variables: {input: {issueId: $issueId, body: $body}}}')
-COMMENT_RESPONSE=$(curl -sf -X POST "${LINEAR_API}/graphql" \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer ${ACCESS_TOKEN}" \
-  -d "$MUTATION" 2>/dev/null) || {
-  echo "linear-comment-post: comment mutation request failed" >&2
-  exit 1
-}
-SUCCESS=$(printf '%s' "$COMMENT_RESPONSE" | jq -r '.data.commentCreate.success // false' 2>/dev/null)
-if [[ "$SUCCESS" != "true" ]]; then
-  echo "linear-comment-post: commentCreate returned success=false" >&2
-  exit 1
-fi
+# ── Main flow ─────────────────────────────────────────────────────────────────
+if _post_via_app_actor; then exit 0; fi
+echo "linear-comment-post: app-actor post failed — attempting linearis fallback" >&2
+if _post_via_linearis; then exit 0; fi
+echo "linear-comment-post: linearis fallback unavailable or failed — comment NOT posted" >&2
+exit 1
