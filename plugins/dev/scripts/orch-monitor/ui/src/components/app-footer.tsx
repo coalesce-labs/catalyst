@@ -22,8 +22,18 @@ import { deriveFooterCounts } from "@/components/footer-counts";
 // CTL-945: consume shared context from AppShell — no additional EventSources.
 import { useNavSignalContext } from "@/hooks/use-nav-signal";
 import { useClusterSignalContext } from "@/hooks/use-cluster-signal";
-import { nodeDotClass, nodeStatusLabel } from "@/lib/cluster-signal";
-import { daemonDotClass, daemonLabel } from "@/lib/nav-signal";
+import { nodeStatusLabel } from "@/lib/cluster-signal";
+import { daemonLabel } from "@/lib/nav-signal";
+// CTL-1172: shared service-health context + fold helper for the right indicator.
+import { useServiceHealthContext } from "@/hooks/use-service-health";
+import {
+  worstSeverity,
+  severityDotColor,
+  severityDotGlow,
+  severityDotOpacity,
+  isLabelMuted,
+  type ServiceSeverity,
+} from "@/components/observe/service-health-kit";
 import {
   Tooltip,
   TooltipContent,
@@ -31,12 +41,48 @@ import {
 } from "@/components/ui/tooltip";
 import { C, LIVE } from "@/board/board-tokens";
 
+const RIGHT_LABEL: Record<ServiceSeverity, string> = {
+  up: "HEALTHY",
+  degraded: "DEGRADED",
+  down: "DOWN",
+  unknown: "SERVICES ?",
+};
+
 export function AppFooter() {
   const { payload, status } = useBoardSnapshot();
   const nav = useNavSignalContext();
   const cluster = useClusterSignalContext();
+  const { services, unavailable } = useServiceHealthContext();
 
   const isLive = status === "connected";
+
+  // CTL-1172: fold node + daemon + service health into one right indicator.
+  const worst = worstSeverity({
+    services,
+    unavailable,
+    nodeStatuses: cluster?.nodes.map((n) => n.status),
+    daemonHealth: nav?.daemon ?? null,
+  });
+  const label = RIGHT_LABEL[worst];
+  const muted = isLabelMuted(worst);
+  const tooltipLines: string[] = unavailable
+    ? ["Service health unavailable"]
+    : (() => {
+        const out: string[] = [];
+        for (const s of services ?? []) {
+          if (s.severity === "down" || s.severity === "degraded") {
+            out.push(`${s.label} ${s.severity}`);
+          }
+        }
+        for (const n of cluster?.nodes ?? []) {
+          if (n.status === "offline" || n.status === "degraded") {
+            out.push(nodeStatusLabel(n.host, n.status));
+          }
+        }
+        if (nav && nav.daemon !== "healthy") out.push(daemonLabel(nav.daemon));
+        return out.length > 0 ? out : ["All services healthy"];
+      })();
+  const tooltipText = tooltipLines.join("\n");
   // CTL-1032: derive the four honest categories from the board snapshot using the
   // shared CTL-1015 classification (dead workers excluded from active, free =
   // empty slots, waiting = admission-gate-held tickets). The board snapshot is
@@ -112,53 +158,35 @@ export function AppFooter() {
       {/* Spacer */}
       <span className="flex-1" />
 
-      {/* Health dots */}
-      {cluster && cluster.nodes.length > 0 ? (
-        <span className="flex items-center gap-1">
-          {cluster.nodes.map((node) => (
-            <Tooltip key={node.host}>
-              <TooltipTrigger asChild>
-                <button
-                  type="button"
-                  aria-label={nodeStatusLabel(node.host, node.status)}
-                  className="flex size-4 cursor-default items-center justify-center"
-                >
-                  <span
-                    aria-hidden
-                    className={cn("size-2 rounded-full", nodeDotClass(node.status))}
-                  />
-                </button>
-              </TooltipTrigger>
-              <TooltipContent side="top">
-                {nodeStatusLabel(node.host, node.status)}
-              </TooltipContent>
-            </Tooltip>
-          ))}
-        </span>
-      ) : nav ? (
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <button
-              type="button"
-              aria-label={daemonLabel(nav.daemon)}
-              className="flex size-4 cursor-default items-center justify-center"
-            >
-              <span
-                aria-hidden
-                className={cn("size-2 rounded-full", daemonDotClass(nav.daemon))}
-              />
-            </button>
-          </TooltipTrigger>
-          <TooltipContent side="top">
-            {daemonLabel(nav.daemon)}
-          </TooltipContent>
-        </Tooltip>
-      ) : (
-        <span
-          aria-hidden
-          className="size-2 rounded-full bg-muted-foreground/40"
-        />
-      )}
+      {/* CTL-1172: overall fleet-health indicator — dot + label + tooltip */}
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <button
+            type="button"
+            aria-label={`Service health: ${label}`}
+            className="inline-flex cursor-default items-center gap-1.5 font-mono text-[10px] tracking-widest"
+            style={{ color: muted ? C.fgMuted : C.fg }}
+          >
+            <span
+              aria-hidden
+              style={{
+                width: 6,
+                height: 6,
+                borderRadius: "50%",
+                background: severityDotColor(worst),
+                boxShadow: severityDotGlow(worst),
+                opacity: severityDotOpacity(worst),
+                display: "inline-block",
+                flex: "0 0 auto",
+              }}
+            />
+            {label}
+          </button>
+        </TooltipTrigger>
+        <TooltipContent side="top" className="whitespace-pre-line">
+          {tooltipText}
+        </TooltipContent>
+      </Tooltip>
     </footer>
   );
 }

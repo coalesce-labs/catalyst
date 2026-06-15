@@ -31,10 +31,7 @@ import { StuckDeadReap } from "@/components/observe/stuck-dead-reap";
 import { fleetHero, reapList } from "@/components/observe/fleetops-kit";
 import { ServiceHealthStrip } from "@/components/observe/service-health-strip";
 import { GovernanceModesStrip } from "@/components/observe/governance-modes-strip";
-import type {
-  ServiceHealthSnapshotView,
-  ServiceStatusView,
-} from "@/components/observe/service-health-kit";
+import { useServiceHealthContext } from "@/hooks/use-service-health";
 import {
   isClusterGovernanceSignal,
   type ClusterGovernanceNode,
@@ -63,11 +60,8 @@ export function FleetOpsSurface() {
   const [config, setConfig] = useState<BoardConfig>(EMPTY_CONFIG);
   const [workers, setWorkers] = useState<BoardWorker[]>([]);
   const [boardGeneratedAt, setBoardGeneratedAt] = useState<string | null>(null);
-  // CTL-1050: the service-health registry snapshot for the SERVICES strip. null
-  // until the first /api/health/services lands; `servicesUnavailable` flips on a
-  // fetch failure so the strip renders the honest grey line (never green).
-  const [services, setServices] = useState<ServiceStatusView[] | null>(null);
-  const [servicesUnavailable, setServicesUnavailable] = useState<boolean>(false);
+  // CTL-1172: read service health from the shared AppShell context (one poll, not two).
+  const { services, unavailable } = useServiceHealthContext();
   // CTL-1104: per-host governance snapshot for the GOVERNANCE strip. null until
   // the first /api/cluster/governance lands; `governanceUnavailable` flips on
   // failure so the strip renders the honest grey line (never fabricates green).
@@ -115,23 +109,6 @@ export function FleetOpsSurface() {
       }
     }
 
-    // CTL-1050: the SERVICES strip reads ONLY the monitor's own registry endpoint
-    // (Fleet Ops stays Prometheus/Loki-FREE — the strip never probes the patient).
-    async function loadServices() {
-      try {
-        const resp = await fetch("/api/health/services");
-        if (!resp.ok || !alive) {
-          if (alive) setServicesUnavailable(true);
-          return;
-        }
-        const body = (await resp.json()) as ServiceHealthSnapshotView;
-        setServices(body.services ?? []);
-        setServicesUnavailable(false);
-      } catch {
-        if (alive) setServicesUnavailable(true);
-      }
-    }
-
     // CTL-1104: per-host governance snapshot from the heartbeat event log.
     async function loadGovernance() {
       try {
@@ -154,13 +131,11 @@ export function FleetOpsSurface() {
 
     void loadCluster();
     void loadBoard();
-    void loadServices();
     void loadGovernance();
     const id = setInterval(() => {
       setNow(Date.now());
       void loadCluster();
       void loadBoard();
-      void loadServices();
       void loadGovernance();
     }, REFRESH_MS);
     return () => {
@@ -211,7 +186,7 @@ export function FleetOpsSurface() {
           shrinkable flex child). One quiet dot row of the eight stack services. */}
       <ServiceHealthStrip
         services={services}
-        unavailable={servicesUnavailable}
+        unavailable={unavailable}
         now={now}
       />
 

@@ -7,6 +7,7 @@
 import { describe, it, expect } from "bun:test";
 import {
   type ServiceStatusView,
+  type WorstSeverityInput,
   STRIP_ORDER,
   hoverText,
   isLabelMuted,
@@ -15,6 +16,7 @@ import {
   severityDotColor,
   severityDotGlow,
   severityDotOpacity,
+  worstSeverity,
 } from "./service-health-kit";
 
 function svc(partial: Partial<ServiceStatusView> & { id: string }): ServiceStatusView {
@@ -136,5 +138,106 @@ describe("hoverText", () => {
   it("an unconfigured service reads 'not configured'", () => {
     const t = hoverText(svc({ id: "grafana", severity: "unknown", target: null }));
     expect(t).toContain("not configured");
+  });
+});
+
+describe("worstSeverity — fold node+daemon+service severities (CTL-1172)", () => {
+  // helper alias already declared above as svc()
+  type Input = WorstSeverityInput;
+
+  // C — all up → up
+  it("all services up + daemon healthy + nodes live → up", () => {
+    const i: Input = { services: [svc({ id: "monitor" }), svc({ id: "broker" })], unavailable: false, daemonHealth: "healthy", nodeStatuses: ["live", "live"] };
+    expect(worstSeverity(i)).toBe("up");
+  });
+
+  it("optional inputs omitted still yields up when services up", () => {
+    expect(worstSeverity({ services: [svc({ id: "monitor" })], unavailable: false })).toBe("up");
+  });
+
+  // A — down wins
+  it("one down service → down", () => {
+    const i: Input = { services: [svc({ id: "monitor" }), svc({ id: "broker", severity: "down" })], unavailable: false, daemonHealth: "healthy", nodeStatuses: ["live"] };
+    expect(worstSeverity(i)).toBe("down");
+  });
+
+  it("node offline → down (services all up)", () => {
+    const i: Input = { services: [svc({ id: "monitor" })], unavailable: false, daemonHealth: "healthy", nodeStatuses: ["live", "offline"] };
+    expect(worstSeverity(i)).toBe("down");
+  });
+
+  it("daemon offline → down", () => {
+    const i: Input = { services: [svc({ id: "monitor" })], unavailable: false, daemonHealth: "offline", nodeStatuses: ["live"] };
+    expect(worstSeverity(i)).toBe("down");
+  });
+
+  // B — degraded
+  it("one degraded service, none down → degraded", () => {
+    const i: Input = { services: [svc({ id: "monitor" }), svc({ id: "loki", severity: "degraded" })], unavailable: false, daemonHealth: "healthy", nodeStatuses: ["live"] };
+    expect(worstSeverity(i)).toBe("degraded");
+  });
+
+  it("daemon degraded, services up → degraded", () => {
+    const i: Input = { services: [svc({ id: "monitor" })], unavailable: false, daemonHealth: "degraded", nodeStatuses: ["live"] };
+    expect(worstSeverity(i)).toBe("degraded");
+  });
+
+  it("single degraded node → degraded", () => {
+    const i: Input = { services: [svc({ id: "monitor" })], unavailable: false, daemonHealth: "healthy", nodeStatuses: ["live", "degraded"] };
+    expect(worstSeverity(i)).toBe("degraded");
+  });
+
+  // down outranks degraded
+  it("down outranks degraded when both present", () => {
+    const i: Input = { services: [svc({ id: "loki", severity: "degraded" }), svc({ id: "broker", severity: "down" })], unavailable: false, daemonHealth: "degraded", nodeStatuses: ["degraded"] };
+    expect(worstSeverity(i)).toBe("down");
+  });
+
+  // unknown non-escalating
+  it("unknown does NOT mask a real down", () => {
+    const i: Input = { services: [svc({ id: "grafana", severity: "unknown" }), svc({ id: "broker", severity: "down" })], unavailable: false, daemonHealth: "healthy", nodeStatuses: ["live"] };
+    expect(worstSeverity(i)).toBe("down");
+  });
+
+  it("unknown does NOT grey-out an all-up fleet", () => {
+    const i: Input = { services: [svc({ id: "monitor" }), svc({ id: "grafana", severity: "unknown" })], unavailable: false, daemonHealth: "healthy", nodeStatuses: ["live"] };
+    expect(worstSeverity(i)).toBe("up");
+  });
+
+  it("unknown + degraded → degraded (unknown inert)", () => {
+    const i: Input = { services: [svc({ id: "grafana", severity: "unknown" }), svc({ id: "loki", severity: "degraded" })], unavailable: false, daemonHealth: "healthy", nodeStatuses: ["live"] };
+    expect(worstSeverity(i)).toBe("degraded");
+  });
+
+  it("all-unknown services + healthy daemon/live nodes → up (not unknown)", () => {
+    const i: Input = { services: [svc({ id: "a", severity: "unknown" }), svc({ id: "b", severity: "unknown" })], unavailable: false, daemonHealth: "healthy", nodeStatuses: ["live"] };
+    expect(worstSeverity(i)).toBe("up");
+  });
+
+  // E + Q2 — fail-open
+  it("unavailable (fetch failed) → unknown, even with stale services", () => {
+    const i: Input = { services: [svc({ id: "monitor" })], unavailable: true, daemonHealth: "healthy", nodeStatuses: ["live"] };
+    expect(worstSeverity(i)).toBe("unknown");
+  });
+
+  it("services === null pre-first-fetch → unknown", () => {
+    const i: Input = { services: null, unavailable: false, daemonHealth: "healthy", nodeStatuses: ["live"] };
+    expect(worstSeverity(i)).toBe("unknown");
+  });
+
+  // edge cases
+  it("empty services array is LOADED (not null) → liveness drives the result", () => {
+    expect(worstSeverity({ services: [], unavailable: false, daemonHealth: "healthy", nodeStatuses: ["live"] })).toBe("up");
+    expect(worstSeverity({ services: [], unavailable: false, daemonHealth: "offline", nodeStatuses: ["live"] })).toBe("down");
+  });
+
+  it("daemonHealth null is inert (does not escalate, does not force unknown)", () => {
+    const i: Input = { services: [svc({ id: "monitor" })], unavailable: false, daemonHealth: null, nodeStatuses: ["live"] };
+    expect(worstSeverity(i)).toBe("up");
+  });
+
+  it("empty nodeStatuses is inert", () => {
+    const i: Input = { services: [svc({ id: "monitor" })], unavailable: false, daemonHealth: "healthy", nodeStatuses: [] };
+    expect(worstSeverity(i)).toBe("up");
   });
 });
