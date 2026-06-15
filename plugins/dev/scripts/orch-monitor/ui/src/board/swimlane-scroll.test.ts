@@ -34,7 +34,7 @@ import {
 } from "./Swimlane";
 import { buildLanes, showLaneChrome } from "./board-grouping";
 import type { GroupableEntity, GroupBy } from "./board-grouping";
-import { computeLaneHeights, LANE_MIN_CELL_H } from "./lane-heights";
+import { computeLaneHeights } from "./lane-heights";
 
 // ── helper: the constrainCells value used in SwimlaneBoard ────────────────────
 // CTL-1178: `constrainCells` is now constant `false` for EVERY render (grouped and
@@ -190,20 +190,16 @@ describe("CTL-1168 (retired) — laneRowGrow pure mapping (kept exported)", () =
     expect(laneRowGrow(0)).toBe(0);
   });
 
-  it("page-scrolling lanes (computeLaneHeights Case 3) are ALL pinned flexGrow 0", () => {
-    // Case 3: Σ floor > avail → every deep lane is floored at a px number. None may
-    // grow, or the last band pushes off the bottom and scroll-to-top breaks.
-    const MIN = LANE_MIN_CELL_H("comfortable"); // 248
-    const caps = computeLaneHeights([2000, 2000, 2000], 500, MIN); // [248,248,248]
+  it("capped lanes (px number from computeLaneHeights) are ALL pinned flexGrow 0", () => {
+    // CTL-1178: lanes taller than capH cap at capH (a px number). None may grow, or
+    // the last band pushes off the bottom and scroll-to-top breaks.
+    const caps = computeLaneHeights([2000, 2000, 2000], 500); // [500,500,500]
     expect(caps.every((c) => laneRowGrow(c) === 0)).toBe(true);
   });
 
-  it("a board that fully fits (Case 1) lets every lane grow (flexGrow 1) — no scroll", () => {
-    // Case 1: Σ demand ≤ avail → all null → all growable. The board does not page-
-    // scroll, so growing rows to fill leftover space is correct (and top is trivially
-    // reachable because there's nothing to scroll past).
-    const MIN = LANE_MIN_CELL_H("comfortable");
-    const caps = computeLaneHeights([300, 300], 900, MIN); // [null, null]
+  it("lanes that fully fit (null) are growable (flexGrow 1)", () => {
+    // A lane shorter than capH is uncapped (null); laneRowGrow lets it grow when used.
+    const caps = computeLaneHeights([300, 300], 900); // [null, null]
     expect(caps.every((c) => laneRowGrow(c) === 1)).toBe(true);
   });
 });

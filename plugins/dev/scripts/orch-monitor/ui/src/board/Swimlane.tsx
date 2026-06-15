@@ -80,7 +80,7 @@ import {
 import { useRepoIconMap } from "./repo-icon-context";
 import { laneIconSrc } from "./entity-icon";
 import { laneDisplayName } from "@/lib/nav-model";
-import { computeLaneHeights, LANE_MIN_CELL_H } from "./lane-heights";
+import { computeLaneHeights } from "./lane-heights";
 import type { Density } from "./prefs-store";
 
 // ── shared geometry ──────────────────────────────────────────────────────────
@@ -177,6 +177,10 @@ const HEADER_H = 44;
 // `padding: 6px top + 16px bottom`. Subtracted per lane when computing the
 // available cell-area height so the water-fill budget is exact (no magic fudge).
 export const ROW_PAD_V = 22;
+// CTL-1178: how much of the next group to leave peeking below a capped lane so the
+// operator sees there's more to scroll to (Linear shows the next group's label just
+// below the fold). Subtracted from the per-lane viewport cap. Tunable.
+export const LANE_CAP_PEEK = 44;
 // CTL-958: CSS variable name for the per-cell max-height knob.
 // CTL-1010: this var/default is now ONLY the PRE-MEASUREMENT fallback applied on
 // the very first frame before useLaneCellHeights has measured the lanes; the real
@@ -704,7 +708,6 @@ function useLaneCellHeights(
   scrollRef: React.RefObject<HTMLDivElement | null>,
   laneKeys: string[],
   constrainCells: boolean,
-  density: Density,
 ): Map<string, number | null> | null {
   const [allocs, setAllocs] = useState<Map<string, number | null> | null>(null);
   // ResizeObserver bumps this so the layout effect re-measures on viewport resize.
@@ -742,19 +745,22 @@ function useLaneCellHeights(
       demands.push(Math.ceil(demand));
     }
 
-    // AVAIL: scroller cell-area height. Measure the REAL chrome (no magic numbers):
-    // clientHeight − colHeader.offsetHeight − Σ(labelBand.offsetHeight) − laneCount×ROW_PAD_V.
+    // CTL-1178: capH = ONE lane's viewport-sized budget (NOT divided by lane count).
+    // = clientHeight − the column-header row − ONE label band − one row's vertical
+    // pad − a small peek so the next group's label sits below the fold (inviting the
+    // scroll). A lane taller than capH is capped here and scrolls its columns
+    // internally; a shorter lane is uncapped (content-height). Measured chrome, no
+    // magic numbers.
     const colHeaderEl = scroller.querySelector<HTMLElement>("[data-board-colheader]");
     const labelBandEls = Array.from(
       scroller.querySelectorAll<HTMLElement>("[data-lane-label-band]"),
     );
     const colHeaderH = colHeaderEl?.offsetHeight ?? 0;
-    const labelBandH = labelBandEls.reduce((sum, el) => sum + el.offsetHeight, 0);
-    const avail =
-      scroller.clientHeight - colHeaderH - labelBandH - laneEls.length * ROW_PAD_V;
+    const oneLabelBandH = labelBandEls[0]?.offsetHeight ?? 0;
+    const capH =
+      scroller.clientHeight - colHeaderH - oneLabelBandH - ROW_PAD_V - LANE_CAP_PEEK;
 
-    const minH = LANE_MIN_CELL_H(density);
-    const caps = computeLaneHeights(demands, Math.max(0, avail), minH);
+    const caps = computeLaneHeights(demands, Math.max(0, capH));
 
     const next = new Map<string, number | null>();
     keys.forEach((k, i) => next.set(k, caps[i]));
@@ -836,7 +842,8 @@ export function SwimlaneBoard<T extends GroupableEntity>({
   columns,
   deriveLane,
   entityNoun = "ticket",
-  density = "comfortable",
+  // CTL-1178: `density` is still an accepted prop (callers pass it) but no longer
+  // consumed here — the per-lane minimum it drove is gone with the water-fill.
   laneColors = {},
 }: {
   items: T[];
@@ -861,17 +868,15 @@ export function SwimlaneBoard<T extends GroupableEntity>({
 }) {
   const lanes = buildLanes(items, groupBy, liveness);
   const chrome = showLaneChrome(groupBy, lanes.length);
-  // CTL-1178: the GROUPED swimlane board now renders at NATURAL CONTENT HEIGHT
-  // with ONE whole-board vertical scroll (Linear-style scroll-through), retiring
-  // the CTL-958/CTL-1010 per-cell water-fill cap + per-cell scroll boxes. Cells
-  // are plain content stacks (no maxHeight, no per-cell overflow-y, no
-  // `.cat-overlay-scroll`), and grouped lane rows do NOT flex-grow — a group with
-  // one card stays one-card tall. The grouped container's own overflowY:"auto"
-  // (below) is the single vertical scroll; sticky header/bands + the CTL-973 swipe
-  // guard are all preserved. `constrainCells` is therefore always false now — the
-  // flag is kept (vs. deleted) so useLaneCellHeights early-returns null (a no-op)
-  // and the water-fill machinery stays intact but DEAD for the grouped path.
-  const constrainCells = false;
+  // CTL-1178 (revised): the GROUPED board caps each lane at ≈ ONE VIEWPORT (capH,
+  // computed in useLaneCellHeights) and scrolls its columns INTERNALLY for the
+  // overflow, while the whole board scrolls vertically BETWEEN lanes — matching
+  // Linear (a big group fills ~one screen with its columns scrolling inside; a
+  // small group stays content-height). `constrainCells` gates the per-cell
+  // maxHeight + per-cell overflow-y; it's on for any multi-lane grouped board. A
+  // single grouped lane (and the flat board) stays unconstrained — content-height
+  // (the board scrolls) / per-column flat scroll respectively.
+  const constrainCells = groupBy !== "none" && lanes.length > 1;
   // CTL-1168: the FLAT (ungrouped) board switches to Linear-style per-column
   // independent scroll — but only when the board has a BOUNDED height (`fill`), since
   // each column's viewport needs a fixed parent height to scroll against. Without
@@ -893,7 +898,7 @@ export function SwimlaneBoard<T extends GroupableEntity>({
   // flat 300px cap. `allocs.get(laneKey)` is the per-lane cell max (null=uncapped);
   // the whole map is null on the unmeasured first frame (cells fall back to var()).
   const laneKeys = chrome ? lanes.map((l) => l.key) : [];
-  const allocs = useLaneCellHeights(scrollRef, laneKeys, constrainCells, density);
+  const allocs = useLaneCellHeights(scrollRef, laneKeys, constrainCells);
 
   // CTL-1168: the CTL-973 "Layer 3" cosmetic edge-fade gradient (and its
   // scroll-position `shadows` state + listener) is removed — it read as a stray
