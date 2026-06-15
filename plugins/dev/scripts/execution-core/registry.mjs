@@ -124,10 +124,40 @@ export function upsertProjectEntry({ team, repoRoot, eligibleQuery } = {}) {
   return entry;
 }
 
+// deleteProjectEntry — idempotently remove a team's registry entry. Reads the
+// current list, drops the matching `team`, atomically rewrites (tmp + renameSync,
+// mirroring upsertProjectEntry). A missing file or absent team is a no-op:
+// returns { deleted: false } so callers can distinguish removal from no-op.
+// Throws on a falsy `team`.
+export function deleteProjectEntry({ team } = {}) {
+  if (!team) throw new Error("deleteProjectEntry: team is required");
+  const file = getRegistryPath();
+  if (!existsSync(file)) return { team, deleted: false };
+  const before = listProjects();
+  const projects = before.filter((p) => p.team !== team);
+  if (projects.length === before.length) return { team, deleted: false };
+
+  mkdirSync(dirname(file), { recursive: true });
+  const tmp = `${file}.tmp`;
+  try {
+    writeFileSync(tmp, JSON.stringify({ projects }, null, 2));
+    renameSync(tmp, file);
+  } catch (err) {
+    try {
+      unlinkSync(tmp);
+    } catch {
+      /* tmp already gone */
+    }
+    throw err;
+  }
+  return { team, deleted: true };
+}
+
 // --- CLI ---------------------------------------------------------------------
 // `registry.mjs list`                              → JSON array of entries
 // `registry.mjs get <team>`                        → JSON object or empty
 // `registry.mjs upsert --team T --repo-root R --eligible-query JSON`
+// `registry.mjs delete --team T`                   → JSON { team, deleted }
 //
 // The setup tooling (setup-execution-core-states.sh) invokes this CLI rather
 // than hand-writing registry JSON, keeping the D9 seam single.
@@ -184,10 +214,17 @@ function main(argv) {
       process.stdout.write(`${JSON.stringify(entry, null, 2)}\n`);
       return 0;
     }
+    case "delete": {
+      const flags = parseFlags(rest);
+      const result = deleteProjectEntry({ team: flags.team });
+      process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+      return 0;
+    }
     default: {
       process.stderr.write(
         "registry.mjs: usage — list | get <team> | " +
-          "upsert --team T --repo-root R [--eligible-query JSON]\n"
+          "upsert --team T --repo-root R [--eligible-query JSON] | " +
+          "delete --team T\n"
       );
       return 1;
     }
