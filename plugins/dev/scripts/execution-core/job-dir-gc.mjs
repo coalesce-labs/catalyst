@@ -24,7 +24,7 @@
 // registered status:null zombie's dir is PRESERVED by the liveness gate; its
 // eviction is D4's job.
 
-import { readdirSync, statSync, rmSync } from "node:fs";
+import { readdir, stat, rm as rmAsync } from "node:fs/promises";
 import { join } from "node:path";
 import { getJobsRoot, log as defaultLog } from "./config.mjs";
 import { listClaudeAgentsResult } from "./claude-agents.mjs";
@@ -44,12 +44,13 @@ const DEFAULT_BATCH_CAP = 200;
  */
 export async function sweepJobDirs({
   jobsRoot = getJobsRoot(),
-  readDir = readdirSync,
-  statDir = (p) => statSync(p),
-  rm = rmSync,
+  readDir = (p) => readdir(p),
+  statDir = (p) => stat(p),
+  rm = (p, opts) => rmAsync(p, opts),
   readAgents = listClaudeAgentsResult,
   now = () => Date.now(),
-  retentionMs = (Number(process.env.CATALYST_JOB_GC_RETENTION_SECONDS) || DEFAULT_RETENTION_SECONDS) * 1000,
+  retentionMs = (Number(process.env.CATALYST_JOB_GC_RETENTION_SECONDS) ||
+    DEFAULT_RETENTION_SECONDS) * 1000,
   batchCap = Number(process.env.CATALYST_JOB_GC_BATCH_CAP) || DEFAULT_BATCH_CAP,
   emit = emitReapIntent,
   env = process.env,
@@ -98,7 +99,7 @@ export async function sweepJobDirs({
   // recovery.mjs). Any other read error → degrade safe: nothing to sweep.
   let basenames;
   try {
-    basenames = readDir(jobsRoot);
+    basenames = await readDir(jobsRoot);
   } catch (err) {
     if (err?.code !== "ENOENT") {
       log.warn({ jobsRoot, err: err?.message }, "job-dir-gc: jobs root unreadable; skipping sweep");
@@ -142,7 +143,7 @@ export async function sweepJobDirs({
     const dir = join(jobsRoot, basename);
     let st;
     try {
-      st = statDir(dir);
+      st = await statDir(dir);
     } catch {
       errors++;
       continue;
@@ -163,7 +164,7 @@ export async function sweepJobDirs({
 
     // All gates passed — delete the JOB DIR ALONE (never `claude rm`).
     try {
-      rm(dir, { recursive: true, force: true });
+      await rm(dir, { recursive: true, force: true });
       reclaimed++;
     } catch {
       errors++;

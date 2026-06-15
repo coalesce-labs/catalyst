@@ -23,8 +23,8 @@
 // tick() is fully unit-testable with no real timer, sysctl, ps, or kill. Models
 // memory-sampler.mjs byte-for-byte.
 
-import { execFileSync } from "node:child_process";
-import { readdirSync } from "node:fs";
+import { execFile } from "node:child_process";
+import { readdir } from "node:fs/promises";
 import { getAgentsCached } from "./claude-agents.mjs";
 import { getJobsRoot, readFleetHealthConfig, log } from "./config.mjs";
 import { emitFleetHealthEvent } from "./fleet-health-event.mjs";
@@ -37,10 +37,8 @@ function realClock() {
   };
 }
 
-// safe() — run a reader, returning its value, or the supplied NON-CROSSING
-// sentinel on any throw. The sentinel must be a value that can never trip a
-// threshold (null for counts; 0 for swap), so an unreadable signal can only
-// cause the guardrail to UNDER-react — never to over-react / over-reap.
+// safe() — run a sync reader, returning its value, or the supplied NON-CROSSING
+// sentinel on any throw. Used for the warm-cache listAgents read only.
 function safe(fn, sentinel) {
   try {
     const v = fn();
@@ -50,11 +48,29 @@ function safe(fn, sentinel) {
   }
 }
 
+function execFileAsync(bin, args, opts = {}) {
+  return new Promise((resolve, reject) => {
+    execFile(bin, args, { encoding: "utf8", ...opts }, (err, stdout) =>
+      err ? reject(err) : resolve(stdout)
+    );
+  });
+}
+
+// safeAsync() — await a reader, returning its value or the sentinel on any error.
+async function safeAsync(fn, sentinel) {
+  try {
+    const v = await fn();
+    return v === undefined || v === null ? sentinel : v;
+  } catch {
+    return sentinel;
+  }
+}
+
 // defaultReadJobsCount — count of ~/.claude/jobs/<id> dirs. try/catch → null
 // (non-crossing) so a missing/unreadable jobs root never trips the guardrail.
-export function defaultReadJobsCount() {
+export async function defaultReadJobsCount() {
   try {
-    return readdirSync(getJobsRoot()).length;
+    return (await readdir(getJobsRoot())).length;
   } catch {
     return null;
   }
@@ -63,10 +79,9 @@ export function defaultReadJobsCount() {
 // defaultPsLines — `ps -axo pid=,ppid=,command=` lines. Best-effort `[]` on
 // failure. command= (not comm=) preserves the full argv so node/bun detection
 // in the proc count + child sweep is exact.
-export function defaultPsLines() {
+export async function defaultPsLines() {
   try {
-    const out = execFileSync("ps", ["-axo", "pid=,ppid=,command="], {
-      encoding: "utf8",
+    const out = await execFileAsync("ps", ["-axo", "pid=,ppid=,command="], {
       maxBuffer: 16 * 1024 * 1024,
     });
     return out.split("\n");
@@ -77,9 +92,9 @@ export function defaultPsLines() {
 
 // defaultReadProcsCount — count resident node/bun worker processes from the ps
 // snapshot. A null/empty snapshot yields 0 (non-crossing safe sentinel handled
-// by the caller's safe()).
-export function defaultReadProcsCount(psLines = defaultPsLines) {
-  const lines = psLines() ?? [];
+// by the caller's safeAsync()).
+export async function defaultReadProcsCount(psLines = defaultPsLines) {
+  const lines = (await psLines()) ?? [];
   let n = 0;
   for (const line of lines) {
     const m = line.trim().match(/^(\d+)\s+(\d+)\s+(.*)$/);
@@ -93,14 +108,14 @@ export function defaultReadProcsCount(psLines = defaultPsLines) {
 // defaultReadSwapUsedMb — parse macOS `sysctl -n vm.swapusage`'s `used = N.NNM`
 // field → integer MB. Non-darwin / parse-error / throw → 0 (safe sentinel,
 // non-crossing). run/platform are injectable for tests.
-export function defaultReadSwapUsedMb({
+export async function defaultReadSwapUsedMb({
   platform = process.platform,
-  run = () => execFileSync("sysctl", ["-n", "vm.swapusage"], { encoding: "utf8" }),
+  run = () => execFileAsync("sysctl", ["-n", "vm.swapusage"]),
 } = {}) {
   if (platform !== "darwin") return 0;
   let out;
   try {
-    out = run();
+    out = await run();
   } catch {
     return 0;
   }
@@ -148,8 +163,7 @@ export async function defaultTriggerSelfHeal({ emitIntent = emitReapIntent } = {
  */
 export function classifyFleetHealth(readings, thresholds) {
   const { jobsCount, agentsCount, procsCount, swapUsedMb } = readings ?? {};
-  const { jobsThreshold, agentsThreshold, procsThreshold, swapUsedMbThreshold } =
-    thresholds ?? {};
+  const { jobsThreshold, agentsThreshold, procsThreshold, swapUsedMbThreshold } = thresholds ?? {};
   const tripped = [];
   if (jobsCount != null && jobsCount >= jobsThreshold) tripped.push("jobs");
   if (agentsCount != null && agentsCount >= agentsThreshold) tripped.push("agents");
@@ -198,13 +212,13 @@ export function startFleetHealthProbe({
   let sustained = 0; // consecutive degraded ticks
   let fired = false; // self-heal already fired this breach episode (re-armed on a healthy tick)
 
-  function tick() {
+  async function tick() {
     // Each signal read is wrapped so a throw yields a NON-CROSSING sentinel,
     // never a faked-healthy reading and never a crash.
-    const jobsCount = safe(() => readJobsCount(), null);
+    const jobsCount = await safeAsync(() => readJobsCount(), null);
     const agentsCount = safe(() => (listAgents() ?? []).length, null);
-    const procsCount = safe(() => defaultReadProcsCount(psLines), null);
-    const swapUsedMb = safe(() => readSwapUsedMb(), 0);
+    const procsCount = await safeAsync(() => defaultReadProcsCount(psLines), null);
+    const swapUsedMb = await safeAsync(() => readSwapUsedMb(), 0);
 
     const readings = { jobsCount, agentsCount, procsCount, swapUsedMb };
     const { degraded, tripped } = classifyFleetHealth(readings, {
@@ -240,7 +254,9 @@ export function startFleetHealthProbe({
     }
   }
 
-  const handle = clock.setInterval(tick, intervalMs);
+  const handle = clock.setInterval(() => {
+    tick().catch(() => {});
+  }, intervalMs);
   if (typeof handle?.unref === "function") handle.unref();
   return { stop: () => clock.clearInterval(handle), tick };
 }

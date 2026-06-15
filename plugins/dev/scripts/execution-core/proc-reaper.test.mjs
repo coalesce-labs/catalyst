@@ -205,13 +205,13 @@ function ctx(overrides = {}) {
 }
 
 describe("classifyProc kill-gate (ALL must hold else SPARE)", () => {
-  test("orphan node under a worktree, not in LIVE_TREE, old enough → kill", () => {
+  test("orphan node under a worktree, not in LIVE_TREE, old enough → kill", async () => {
     const row = { pid: 10, ppid: 1, command: "node", etimeSec: 1000, args: "node x.mjs" };
     const c = ctx();
-    const v = classifyProc(row, c);
+    const v = await classifyProc(row, c);
     expect(v.action).toBe("kill");
   });
-  test("allowlisted argv (daemon) → spare(reason allowlisted)", () => {
+  test("allowlisted argv (daemon) → spare(reason allowlisted)", async () => {
     const row = {
       pid: 10,
       ppid: 1,
@@ -219,75 +219,75 @@ describe("classifyProc kill-gate (ALL must hold else SPARE)", () => {
       etimeSec: 1000,
       args: "node /x/execution-core/daemon.mjs --pid-file /y",
     };
-    const v = classifyProc(row, ctx());
+    const v = await classifyProc(row, ctx());
     expect(v.action).toBe("spare");
     expect(v.reason).toBe("allowlisted");
   });
-  test("pid in allowlist.pids (self/daemon/LIVE_TREE) → spare(reason allowlisted)", () => {
+  test("pid in allowlist.pids (self/daemon/LIVE_TREE) → spare(reason allowlisted)", async () => {
     const row = { pid: 100, ppid: 1, command: "node", etimeSec: 1000, args: "node x.mjs" };
-    const v = classifyProc(row, ctx({ allowlist: buildAllowlist({ selfPid: 100 }) }));
+    const v = await classifyProc(row, ctx({ allowlist: buildAllowlist({ selfPid: 100 }) }));
     expect(v.action).toBe("spare");
     expect(v.reason).toBe("allowlisted");
   });
-  test("pid in LIVE_TREE subtree → spare(reason live-agent-owned)", () => {
+  test("pid in LIVE_TREE subtree → spare(reason live-agent-owned)", async () => {
     const row = { pid: 222, ppid: 100, command: "node", etimeSec: 1000, args: "node x.mjs" };
     const c = ctx({
       liveAgentSubtreePids: new Set([222]),
       byPid: new Map([[100, { pid: 100, ppid: 1 }]]),
     });
-    const v = classifyProc(row, c);
+    const v = await classifyProc(row, c);
     expect(v.action).toBe("spare");
     expect(v.reason).toBe("live-agent-owned");
   });
-  test("cwd matches a live-agent cwd → spare(reason live-agent-owned)", () => {
+  test("cwd matches a live-agent cwd → spare(reason live-agent-owned)", async () => {
     const row = { pid: 10, ppid: 1, command: "node", etimeSec: 1000, args: "node x.mjs" };
     const c = ctx({
       liveAgentCwds: new Set([`${WT_ROOT}/CTL-X`]),
       cwdForPid: () => `${WT_ROOT}/CTL-X`,
     });
-    const v = classifyProc(row, c);
+    const v = await classifyProc(row, c);
     expect(v.action).toBe("spare");
     expect(v.reason).toBe("live-agent-owned");
   });
-  test("command not in killableCommands → spare(reason command-not-killable)", () => {
+  test("command not in killableCommands → spare(reason command-not-killable)", async () => {
     const row = { pid: 10, ppid: 1, command: "python", etimeSec: 1000, args: "python x.py" };
-    const v = classifyProc(row, ctx());
+    const v = await classifyProc(row, ctx());
     expect(v.action).toBe("spare");
     expect(v.reason).toBe("command-not-killable");
   });
-  test("not orphaned (has live ancestor) → spare(reason has-live-ancestor)", () => {
+  test("not orphaned (has live ancestor) → spare(reason has-live-ancestor)", async () => {
     const row = { pid: 10, ppid: 5, command: "node", etimeSec: 1000, args: "node x.mjs" };
     const c = ctx({ byPid: new Map([[5, { pid: 5, ppid: 100 }]]), cwdForPid: () => null });
-    const v = classifyProc(row, c);
+    const v = await classifyProc(row, c);
     expect(v.action).toBe("spare");
     expect(v.reason).toBe("has-live-ancestor");
   });
-  test("lsof cwd unknown (null) → spare(reason cwd-unknown)", () => {
+  test("lsof cwd unknown (null) → spare(reason cwd-unknown)", async () => {
     const row = { pid: 10, ppid: 1, command: "node", etimeSec: 1000, args: "node x.mjs" };
-    const v = classifyProc(row, ctx({ cwdForPid: () => null }));
+    const v = await classifyProc(row, ctx({ cwdForPid: () => null }));
     expect(v.action).toBe("spare");
     expect(v.reason).toBe("cwd-unknown");
   });
-  test("cwd NOT under worktree root (interactive claude region) → spare(reason not-under-worktree-root)", () => {
+  test("cwd NOT under worktree root (interactive claude region) → spare(reason not-under-worktree-root)", async () => {
     const row = { pid: 10, ppid: 1, command: "node", etimeSec: 1000, args: "node x.mjs" };
-    const v = classifyProc(row, ctx({ cwdForPid: () => "/Users/test/somewhere-else" }));
+    const v = await classifyProc(row, ctx({ cwdForPid: () => "/Users/test/somewhere-else" }));
     expect(v.action).toBe("spare");
     expect(v.reason).toBe("not-under-worktree-root");
   });
-  test("etime below minEtimeSec → spare(reason too-young)", () => {
+  test("etime below minEtimeSec → spare(reason too-young)", async () => {
     const row = { pid: 10, ppid: 1, command: "node", etimeSec: 100, args: "node x.mjs" };
-    const v = classifyProc(row, ctx({ minEtimeSec: 900 }));
+    const v = await classifyProc(row, ctx({ minEtimeSec: 900 }));
     expect(v.action).toBe("spare");
     expect(v.reason).toBe("too-young");
   });
-  test("targeted worktreePath scopes the kill (boundary-safe: CTL-X ≠ CTL-X9)", () => {
+  test("targeted worktreePath scopes the kill (boundary-safe: CTL-X ≠ CTL-X9)", async () => {
     const row = { pid: 10, ppid: 1, command: "node", etimeSec: 1000, args: "node x.mjs" };
     // candidate cwd under CTL-X9, sweep targets CTL-X → spared (out of scope)
     const c = ctx({
       worktreePath: `${WT_ROOT}/CTL-X`,
       cwdForPid: () => `${WT_ROOT}/CTL-X9`,
     });
-    const v = classifyProc(row, c);
+    const v = await classifyProc(row, c);
     expect(v.action).toBe("spare");
     expect(v.reason).toBe("outside-target-worktree");
   });
@@ -632,6 +632,45 @@ describe("ProcReaper.sweep — degrade-safe + CATASTROPHE GUARD", () => {
     const r = await reaper.sweep({});
     expect(r.reaped).toHaveLength(0);
     expect(killProc.calls).toHaveLength(0);
+  });
+});
+
+describe("ProcReaper.sweep — async psLister / lsofCwd seams", () => {
+  it("awaits an async psLister snapshot (shadow mode would-reap path)", async () => {
+    const liveAgents = { ok: true, agents: [] };
+    const psLines = [
+      "1001 1 900000 20:00 node /Users/ryanrozich/catalyst/wt/CTL-999/x.mjs",
+    ];
+    const reaper = new ProcReaper({
+      mode: "shadow",
+      worktreeRoot: "/Users/ryanrozich/catalyst/wt",
+      minEtimeSec: 0,
+      agentsResult: () => liveAgents,
+      psLister: async () => psLines,
+      lsofCwd: async () => "/Users/ryanrozich/catalyst/wt/CTL-999",
+      emit: async () => true,
+      log: silentLog(),
+    });
+    await reaper.sweep();
+    const report = await reaper.sweep();
+    expect(report.wouldReap.map((r) => r.pid)).toContain(1001);
+  });
+
+  it("spares when async lsofCwd rejects (cwd-unknown → degrade safe)", async () => {
+    const reaper = new ProcReaper({
+      mode: "enforce",
+      worktreeRoot: "/Users/ryanrozich/catalyst/wt",
+      minEtimeSec: 0,
+      agentsResult: () => ({ ok: true, agents: [] }),
+      psLister: async () => ["1001 1 900000 20:00 node /x/y.mjs"],
+      lsofCwd: async () => { throw new Error("lsof failed"); },
+      killProc: () => { throw new Error("must not kill"); },
+      emit: async () => true,
+      log: silentLog(),
+    });
+    await reaper.sweep();
+    const report = await reaper.sweep();
+    expect(report.reaped).toEqual([]);
   });
 });
 
