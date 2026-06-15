@@ -156,7 +156,8 @@ cmd_start() {
 	if [[ -n "$_ocid" && -n "$_ocsec" ]]; then
 		_otok=$(curl -s --noproxy '*' -X POST https://api.linear.app/oauth/token \
 			-d grant_type=client_credentials -d "client_id=$_ocid" -d "client_secret=$_ocsec" \
-			-d 'scope=read,write,comments:create' 2>/dev/null | jq -r '.access_token // empty' 2>/dev/null)
+			-d 'scope=read,write,comments:create,app:assignable,app:mentionable' \
+			-d 'actor=app' 2>/dev/null | jq -r '.access_token // empty' 2>/dev/null)
 		if [[ -n "$_otok" ]]; then
 			export LINEAR_API_TOKEN="$_otok" LINEAR_API_KEY="$_otok"
 			echo "catalyst-execution-core: authenticated as Catalyst Orchestrator app-actor (isolated 5000/hr bucket)" >&2

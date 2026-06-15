@@ -157,7 +157,17 @@ describe("buildMintCurlArgs", () => {
   test("payload includes client_credentials grant and correct scope", () => {
     const { payload } = buildMintCurlArgs({ clientId: "c", clientSecret: "s" });
     expect(payload).toContain("grant_type=client_credentials");
-    expect(payload).toContain("read%2Cwrite%2Ccomments%3Acreate");
+    expect(payload).toContain("read%2Cwrite%2Ccomments%3Acreate%2Capp%3Aassignable%2Capp%3Amentionable");
+  });
+
+  test("payload includes the widened app-actor scope (CTL-1173)", () => {
+    const { payload } = buildMintCurlArgs({ clientId: "c", clientSecret: "s" });
+    expect(payload).toContain("read%2Cwrite%2Ccomments%3Acreate%2Capp%3Aassignable%2Capp%3Amentionable");
+  });
+
+  test("payload sets actor=app so the token is minted as an app-actor (CTL-1173)", () => {
+    const { payload } = buildMintCurlArgs({ clientId: "c", clientSecret: "s" });
+    expect(payload).toContain("actor=app");
   });
 
   test("sets --max-time", () => {
