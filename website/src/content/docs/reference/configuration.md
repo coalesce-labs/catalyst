@@ -90,6 +90,23 @@ The `orchestration.dispatchMode` key picks how Catalyst runs each ticket:
 | `orchestration.stalePrRescue.behindThreshold` | `10` | BEHIND-commit count that triggers a rebase rescue (commits-behind below this are skipped). |
 | `orchestration.stalePrRescue.maxAttempts` | `1` | Max rescue attempts per ticket. After exhaustion, the ticket is escalated to `needs-human`. |
 | `orchestration.stalePrRescue.maxConflictFiles` | `5` | Max conflicting files before a DIRTY PR is deemed unresolvable and escalated instead of dispatched. |
+| `orchestration.orphanReaper.procReaper.mode` | `shadow` | Orphan child-process reaper mode. `off` disables it; `shadow` (the default) logs `procOrphans.would-reap` for each orphaned reparented `node`/`bun` grandchild a dead worker left behind but **kills nothing**; `enforce` actually `SIGTERM`→grace→`SIGKILL`s them. Ships in `shadow` so the never-kill allowlist + live-agent process-tree correlation can be audited on real hosts before any `enforce` flip. |
+| `orchestration.orphanReaper.procReaper.graceMs` | `5000` | Milliseconds to wait after `SIGTERM` before re-probing and (only if still alive) `SIGKILL`ing, so `node`/`bun` can flush. |
+| `orchestration.orphanReaper.procReaper.minEtimeSec` | `900` | A process must have run at least this long (elapsed time) before it is eligible — corroboration only, never the sole gate. |
+| `orchestration.orphanReaper.procReaper.worktreeRoot` | `~/catalyst/wt` | Only orphans whose working directory is under this root are reapable; an interactive `claude` or dev shell outside it is never touched. |
+| `orchestration.orphanReaper.procReaper.allowlistPatterns` | `[]` | Extra case-insensitive argv substrings to never kill, on top of the built-in allowlist (the daemon, `broker/index.mjs`, `orch-monitor/server.ts`, the entire live-agent process tree, Tailscale, pid 1, and any foreign-uid process). |
+| `orchestration.fleetHealth.enabled` | `true` | Whether the pre-exhaustion fleet-health probe runs. Set `false` (or `CATALYST_FLEET_HEALTH=0`) to disable it entirely. |
+| `orchestration.fleetHealth.intervalMs` | `120000` | How often the probe samples the four steady-state signals (milliseconds). |
+| `orchestration.fleetHealth.jobsThreshold` | `500` | `~/.claude/jobs` dir count at or above which the `jobs` signal trips. |
+| `orchestration.fleetHealth.agentsThreshold` | `12` | Live background-agent count at or above which the `agents` signal trips. |
+| `orchestration.fleetHealth.procsThreshold` | `40` | Resident `node`/`bun` worker-process count at or above which the `procs` signal trips. |
+| `orchestration.fleetHealth.swapUsedMbThreshold` | `4096` | macOS swap-used MB at or above which the `swap` signal trips. |
+| `orchestration.fleetHealth.selfHealEnabled` | `false` | Whether a sustained breach triggers self-heal (the two orphan-reaper intents plus a bounded `ppid==1` `node`/`bun` child sweep). **Default OFF** — the first ship is a pure alert. Enable with `EXECUTION_CORE_FLEET_SELF_HEAL=1`. |
+| `orchestration.fleetHealth.sustainedTicks` | `2` | Consecutive degraded ticks required before self-heal fires (once per breach episode; re-armed only after a healthy tick). |
+
+The orphan child-process reaper is the corroboration-heavy companion to the session-level reaper: `claude stop` deregisters a worker's claude agent but leaves its reparented `node`/`bun` grandchildren (MCP servers, sub-agent tooling, `bun test` runners) running — the bulk of the resident-memory leak. It runs on the same 600-second cadence as the orphan-session sweep and refuses to act unless every signal corroborates: a successful `claude agents` read this cycle (a failed read aborts the whole sweep), the process is reparented and outside the live-agent process tree, its command and working directory match, and it has persisted across two consecutive sweeps.
+
+The fleet-health probe is the steady-state guardrail that ties the reapers together: it samples four degradation signals (the `~/.claude/jobs` dir count, the live background-agent count, the resident `node`/`bun` worker-process count, and macOS swap-used MB), each read fail-safe so an unreadable signal can only cause the probe to under-react. On a threshold breach it emits one `fleet.health.degraded` event (the host lives in the OTel `resource` block, so the monitor composes `fleet.health.degraded.<host>`). Self-heal is **default OFF** — the first ship is pure observability. When enabled it fires the same two reap intents the 600-second timer emits plus a capped (25-process) `node`/`bun` child sweep, once per sustained breach, re-armed only after the fleet recovers to healthy.
 
 For `execution-core` mode, the number of workers comes from a separate committed block, `orchestration.executionCore.maxParallel` (default `4`). One daemon runs per machine and serves all your projects.
 
@@ -136,9 +153,11 @@ Each carries a `botUserId` (the Linear user UUID of that app actor). The daemon 
 
 | Key | What it does |
 | --- | --- |
-| `catalyst.linear.bot.worker.botUserId` | Linear user UUID of the worker app actor. Suppresses self-echo on the worker's own mirror comments / description updates |
-| `catalyst.linear.bot.orchestrator.botUserId` | Linear user UUID of the orchestrator app actor. Suppresses self-echo on orchestrator-posted updates |
+| `catalyst.linear.bot.worker.botUserId` | Linear user UUID of the worker app actor. Suppresses self-echo on mirror comments / description updates. Also the read ID for the daemon's self-echo filter. |
+| `catalyst.linear.bot.orchestrator.botUserId` | Linear user UUID of the orchestrator app actor. **Also drives self-assign on claim (CTL-1011)** — the daemon writes this UUID as the Linear assignee when it claims a ticket. When absent, `applyAssignee` emits a single deduped `warn` and leaves the ticket unassigned. Daemon reads it **only at startup** — restart required after changing. |
 | `catalyst.linear.bot.worker.{clientId,clientSecret,webhookSecret,accessToken}` | OAuth app-actor credentials for the worker identity. Secrets — keep in the un-committed global config |
+
+> **Self-assign activation:** `catalyst.linear.bot.orchestrator.botUserId` must be set AND the app-actor token must carry the `app:assignable` OAuth scope for the assignee write to succeed. If the token lacks scope, a deduped `warn` is emitted once per Linear team with the re-mint remedy. See [Self-assign activation runbook](/reference/configuration#self-assign-activation-runbook) below.
 
 ### Back-compat (transition period)
 

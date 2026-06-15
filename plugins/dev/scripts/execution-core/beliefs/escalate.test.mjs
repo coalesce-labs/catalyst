@@ -13,7 +13,7 @@
 //        executor pages exactly once. Per-tick hand-computed expectations inline.
 
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -71,15 +71,18 @@ function insertEscalateHuman(tickId, subject, why = "stalled-alive") {
   db.run(
     `INSERT INTO belief (tick_id, stratum, name, subject, value, rule_id, source_fact_ids)
      VALUES (?, 4, 'escalate_human', ?, ?, 'R12', '[]')`,
-    [tickId, subject, JSON.stringify({ why })],
+    [tickId, subject, JSON.stringify({ why })]
   );
 }
 // Insert a wake-diagnostician intent row directly (UNIT tests).
 function insertWakeIntent(tickId, subject, { attempts = 2, outcome = null } = {}) {
-  db.run(
-    "INSERT INTO intent (tick_id, kind, subject, attempts, outcome) VALUES (?, ?, ?, ?, ?)",
-    [tickId, "wake-diagnostician", subject, attempts, outcome],
-  );
+  db.run("INSERT INTO intent (tick_id, kind, subject, attempts, outcome) VALUES (?, ?, ?, ?, ?)", [
+    tickId,
+    "wake-diagnostician",
+    subject,
+    attempts,
+    outcome,
+  ]);
   return db.query("SELECT last_insert_rowid() AS id").get().id;
 }
 
@@ -192,7 +195,7 @@ describe("executeEscalations — enforce mode (enforce=true)", () => {
       labelOnceFn,
     });
     expect(db.query("SELECT outcome FROM intent WHERE intent_id = ?").get(intentId).outcome).toBe(
-      "escalated",
+      "escalated"
     );
 
     // Next tick: with the intent now 'escalated', R11 (outcome IS NULL) no longer
@@ -304,7 +307,9 @@ describe("executeEscalations — enforce mode (enforce=true)", () => {
     // We still page (R12 fired), but the uncapped intent stays open.
     expect(res.paged).toBe(1);
     expect(res.escalated).toBe(0);
-    expect(db.query("SELECT outcome FROM intent WHERE intent_id = ?").get(freshId).outcome).toBeNull();
+    expect(
+      db.query("SELECT outcome FROM intent WHERE intent_id = ?").get(freshId).outcome
+    ).toBeNull();
   });
 
   test("never throws — a writeStatus that throws is isolated per subject", () => {
@@ -509,7 +514,7 @@ describe("MULTI-TICK LADDER — R4 → R10 → R11 → R12 in real tick order, p
     // R12 provenance cites the wake belief AND the action_ineffective belief
     const wd = beliefRows(t3.tickId, "wake_diagnostician")[0];
     expect(JSON.parse(r12[0].source_fact_ids).sort()).toEqual(
-      [`b${wd.belief_id}`, `b${r11[0].belief_id}`].sort(),
+      [`b${wd.belief_id}`, `b${r11[0].belief_id}`].sort()
     );
     // executor pages ONCE this tick
     expect(t3.esc.paged).toBe(1);
@@ -658,5 +663,107 @@ describe("CTL-1130: executeEscalations emits typed-union explanation", () => {
     expect(validateExplanation(expl).valid).toBe(true);
     expect(expl.escalation_type).not.toBe("manual");
     expect(expl.call_to_action).toContain("CTL-7");
+  });
+});
+
+// ─── CTL-1131: executeEscalations persists explanation + needsHumanSince to the phase signal ───
+describe("CTL-1131: executeEscalations (enforce) writes explanation + needsHumanSince to signal", () => {
+  const ISO_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/;
+
+  function seedSignal(orchDir, ticket, phase, extra = {}) {
+    const dir = join(orchDir, "workers", ticket);
+    mkdirSync(dir, { recursive: true });
+    const sig = { ticket, phase, status: "running", ...extra };
+    writeFileSync(join(dir, `phase-${phase}.json`), JSON.stringify(sig, null, 2) + "\n");
+  }
+
+  function readSignal(orchDir, ticket, phase) {
+    return JSON.parse(
+      readFileSync(join(orchDir, "workers", ticket, `phase-${phase}.json`), "utf8")
+    );
+  }
+
+  test("first page: signal gains explanation + needsHumanSince; prior fields preserved", () => {
+    seedCfg("max_attempts", 2);
+    const t = insertTick(NOW);
+    const ticket = "CTL-1131x",
+      phase = "implement";
+    const subject = `${ticket}/${phase}`;
+    insertEscalateHuman(t, subject, "stalled-alive");
+    insertWakeIntent(t, subject, { attempts: 2, outcome: null });
+
+    const orchDir = scratch();
+    seedSignal(orchDir, ticket, phase, { bg_job_id: "abc123" });
+
+    const events = [];
+    executeEscalations(db, t, {
+      orchDir,
+      writeStatus: { applyLabel: () => ({ applied: true }) },
+      appendEvent: (e) => events.push(e),
+      enforce: true,
+      labelOnceFn: () => {},
+    });
+
+    const sig = readSignal(orchDir, ticket, phase);
+    expect(sig.explanation).toBeTruthy();
+    expect(typeof sig.needsHumanSince).toBe("string");
+    expect(ISO_RE.test(sig.needsHumanSince)).toBe(true);
+    // prior fields preserved
+    expect(sig.status).toBe("running");
+    expect(sig.bg_job_id).toBe("abc123");
+    // explanation matches what was appended to the event
+    const ev = events.find((e) => e["event.name"] === "escalate.human");
+    expect(sig.explanation).toEqual(ev.payload.explanation);
+  });
+
+  test("missing signal file: no throw, escalation still returns paged=1", () => {
+    seedCfg("max_attempts", 2);
+    const t = insertTick(NOW);
+    const ticket = "CTL-1131y",
+      phase = "implement";
+    const subject = `${ticket}/${phase}`;
+    insertEscalateHuman(t, subject, "stalled-alive");
+    insertWakeIntent(t, subject, { attempts: 2, outcome: null });
+
+    const orchDir = scratch(); // no signal file seeded → best-effort miss
+    const events = [];
+    const res = executeEscalations(db, t, {
+      orchDir,
+      writeStatus: { applyLabel: () => ({ applied: true }) },
+      appendEvent: (e) => events.push(e),
+      enforce: true,
+      labelOnceFn: () => {},
+    });
+
+    expect(res.paged).toBe(1);
+    expect(events).toHaveLength(1);
+  });
+
+  test("re-arm (firstPage=false via labelOnceFn returning false): signal NOT rewritten", () => {
+    seedCfg("max_attempts", 2);
+    const t = insertTick(NOW);
+    const ticket = "CTL-1131z",
+      phase = "implement";
+    const subject = `${ticket}/${phase}`;
+    insertEscalateHuman(t, subject, "stalled-alive");
+    insertWakeIntent(t, subject, { attempts: 2, outcome: null });
+
+    const orchDir = scratch();
+    seedSignal(orchDir, ticket, phase, { needsHumanSince: "2026-06-14T01:00:00Z" });
+
+    // labelOnceFn returns false → firstPage=false → signal write must not run
+    executeEscalations(db, t, {
+      orchDir,
+      writeStatus: { applyLabel: () => ({ applied: true }) },
+      appendEvent: () => {},
+      enforce: true,
+      labelOnceFn: () => false,
+    });
+
+    const sig = readSignal(orchDir, ticket, phase);
+    // needsHumanSince must not be overwritten by the re-arm path
+    expect(sig.needsHumanSince).toBe("2026-06-14T01:00:00Z");
+    // explanation must not have been written by the re-arm path
+    expect(sig.explanation).toBeUndefined();
   });
 });

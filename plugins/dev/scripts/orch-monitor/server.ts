@@ -1288,7 +1288,15 @@ export function createServer(opts: CreateServerOptions): BunServer {
       // event-log path itself (config.getEventLogPath, UTC YYYY-MM) so the read
       // path matches exactly what the daemon writes — no format drift here.
       const lastSeen = deps.readClusterHeartbeats({});
-      return deps.deriveDaemonHealth(lastSeen, deps.getHostName());
+      // CTL-1169: the daemon-health dot uses a hysteresis window (default ~3
+      // heartbeat intervals, set in nav-signal.mjs) so normal heartbeat jitter
+      // doesn't flap healthy↔degraded and storm the desktop notifications.
+      // MONITOR_DAEMON_HEALTHY_WINDOW_MS overrides it; unset → the module default.
+      const healthyWindowMs =
+        Number(process.env.MONITOR_DAEMON_HEALTHY_WINDOW_MS) || undefined;
+      return deps.deriveDaemonHealth(lastSeen, deps.getHostName(), {
+        intervalMs: healthyWindowMs,
+      });
     } catch {
       return "offline";
     }
@@ -2822,6 +2830,37 @@ export function createServer(opts: CreateServerOptions): BunServer {
             return new Response("Not Found", { status: 404 });
           }
           return Response.json(detail);
+        }
+
+        // CTL-1133: PWA installability. The web app is installable as a
+        // chrome-less standalone window (desktop) / iOS home-screen app. The
+        // manifest and service worker are served from the ROOT (not /public/) so
+        // the SW's default scope is "/" and it controls the whole app — a SW at
+        // /public/service-worker.js would only scope /public/. Icons are plain
+        // PNGs served by the existing /public/* route.
+        if (url.pathname === "/manifest.webmanifest") {
+          const file = Bun.file(join(publicDir, "manifest.webmanifest"));
+          if (await file.exists()) {
+            return new Response(file, {
+              headers: { "Content-Type": "application/manifest+json; charset=utf-8" },
+            });
+          }
+          return new Response("manifest not found", { status: 404 });
+        }
+        if (url.pathname === "/service-worker.js") {
+          const file = Bun.file(join(publicDir, "service-worker.js"));
+          if (await file.exists()) {
+            return new Response(file, {
+              headers: {
+                "Content-Type": "text/javascript; charset=utf-8",
+                // allow root scope even though the file lives under publicDir
+                "Service-Worker-Allowed": "/",
+                // never let a stale SW pin an old shell
+                "Cache-Control": "no-cache",
+              },
+            });
+          }
+          return new Response("service worker not found", { status: 404 });
         }
 
         // CTL-989: the app shell (index.html → main.tsx → the unified TanStack

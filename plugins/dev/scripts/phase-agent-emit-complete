@@ -208,7 +208,7 @@ TICKET_TYPE="$(resolve_ticket_type)"
 # ONLY when both generations are numeric AND mine < signal; on any missing /
 # non-numeric value, proceed (fail-open) so legacy workers and unfenced
 # dispatches are unaffected.
-if [[ -n ${CATALYST_GENERATION:-} && -n $ORCH_DIR ]]; then
+if [[ -n ${CATALYST_GENERATION-} && -n $ORCH_DIR ]]; then
 	_FENCE_SIGNAL="${ORCH_DIR}/workers/${TICKET}/phase-${PHASE}.json"
 	if [[ -f $_FENCE_SIGNAL ]]; then
 		_SIG_GEN=$(jq -r '.generation // empty' "$_FENCE_SIGNAL" 2>/dev/null || echo "")
@@ -306,7 +306,8 @@ if [[ -n $ORCH_DIR ]]; then
 		_ATTEMPT=$(jq -r '.attempt // empty' "$_ATT_SIGNAL" 2>/dev/null || echo "")
 		if [[ $_ATTEMPT =~ ^[0-9]+$ ]]; then
 			PHASE_ATTEMPT="$_ATTEMPT"
-			_RC=$((_ATTEMPT - 1)); [[ $_RC -lt 0 ]] && _RC=0
+			_RC=$((_ATTEMPT - 1))
+			[[ $_RC -lt 0 ]] && _RC=0
 			PHASE_REVIVE_COUNT="$_RC"
 		fi
 	fi
@@ -373,7 +374,7 @@ if [[ -n $ORCH_DIR && $NO_SIGNAL_UPDATE -eq 0 ]]; then
 		complete) NEW_STATUS="done" ;;
 		failed) NEW_STATUS="failed" ;;
 		turn-cap-exhausted) NEW_STATUS="turn-cap-exhausted" ;;
-		skipped) NEW_STATUS="skipped" ;; # CTL-512: monitor-deploy terminal-no-deploy
+		skipped) NEW_STATUS="skipped" ;;  # CTL-512: monitor-deploy terminal-no-deploy
 		park) NEW_STATUS="needs-input" ;; # CTL-549: parked waiting for human comment
 		esac
 		# turn-cap-exhausted and park are NOT terminal states — leave completedAt unset.
@@ -403,7 +404,9 @@ if [[ -n $ORCH_DIR && $NO_SIGNAL_UPDATE -eq 0 ]]; then
               elif \$reason == \"\" then .
               else .failureReason = \$reason end)
            | (if \$handoff == \"\" then . else .handoffPath    = \$handoff end)
-           | (if \$status  == \"needs-input\" then .parkedFrom = \$phase else . end)
+           | (if \$status  == \"needs-input\" then .parkedFrom = \$phase
+                | (if (.needsHumanSince == null) then .needsHumanSince = \$ts else . end)
+              else . end)
            | (if .host == null and \$host_name != \"\" then .host = {name: \$host_name, id: \$host_id} else . end)" \
 			"$SIGNAL_FILE" >"$TMP" 2>/dev/null; then
 			mv "$TMP" "$SIGNAL_FILE"

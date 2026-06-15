@@ -264,6 +264,9 @@ describe("execution-core integration — crash recovery (CTL-539)", () => {
       orchDir,
       dispatch,
       readEligible,
+      // CTL-1150: ENG-NEW is a Ready ticket (already triaged per CTL-565), so
+      // bypass the Pass-2 triage-artifact guard — the test seeds no triage.json.
+      hasTriageArtifact: () => true,
       // CTL-731: pin the live background count so the new-work pull is
       // deterministic. Without it startScheduler shells out to the REAL
       // `claude agents --json`, whose count depends on whatever sessions happen
@@ -335,6 +338,9 @@ describe("execution-core integration — crash recovery (CTL-539)", () => {
       orchDir,
       dispatch,
       readEligible,
+      // CTL-1150: ENG-NEW is a Ready ticket (already triaged per CTL-565), so
+      // bypass the Pass-2 triage-artifact guard — the test seeds no triage.json.
+      hasTriageArtifact: () => true,
       // CTL-731: pin the live background count so the new-work pull is
       // deterministic. Without it startScheduler shells out to the REAL
       // `claude agents --json`, whose count depends on whatever sessions happen

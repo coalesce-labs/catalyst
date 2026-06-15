@@ -598,6 +598,38 @@ Edit `.catalyst/config.json`:
 }
 ```
 
+### "Tune (or disable) the `~/.claude/jobs` directory GC"
+
+The orphan reaper also garbage-collects stale `~/.claude/jobs/<id>` directories
+on its periodic cadence (CTL-1165). The sweep is **fail-closed** — if `claude
+agents` cannot be read it deletes nothing — and only removes a job directory when
+it is not a live or registered session, not the controlling session, and older
+than `retentionSeconds` (default 24h). It deletes the job directory alone (never
+`claude rm`), capped at `batchCap` per sweep with the remainder draining on the
+next tick. Edit `.catalyst/config.json`:
+
+```json
+{
+  "catalyst": {
+    "orchestration": {
+      "orphanReaper": {
+        "jobGc": {
+          "enabled": true,
+          "retentionSeconds": 86400,
+          "batchCap": 200
+        }
+      }
+    }
+  }
+}
+```
+
+Set `"enabled": false` to disable only the directory GC (the orphan-reaper sweep
+still runs). The env vars `CATALYST_JOB_GC_RETENTION_SECONDS` and
+`CATALYST_JOB_GC_BATCH_CAP` override the corresponding fields. See
+[`catalyst-config.schema.json`](./schemas/catalyst-config.schema.json) for the
+canonical field reference.
+
 ### "Change the Linear state the daemon polls for new work"
 
 Edit `~/catalyst/execution-core/registry.json` directly or re-run the enrollment script:

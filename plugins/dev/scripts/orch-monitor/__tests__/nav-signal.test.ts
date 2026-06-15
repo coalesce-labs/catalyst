@@ -6,6 +6,7 @@ import { describe, it, expect } from "bun:test";
 import {
   deriveNavSignal,
   deriveDaemonHealth,
+  DEFAULT_DAEMON_HEALTHY_WINDOW_MS,
 } from "../lib/nav-signal.mjs";
 import type {
   BoardPayload,
@@ -210,8 +211,37 @@ describe("nav-signal projection (CTL-896 / SHELL6)", () => {
     });
 
     it("a stale-but-grace local heartbeat → degraded", () => {
-      const last = { "mac-mini": "2026-06-08T11:58:00.000Z" }; // 2min ago (> 30s, < 5min)
+      const last = { "mac-mini": "2026-06-08T11:58:00.000Z" }; // 2min ago (> 90s window, < 5min)
       expect(deriveDaemonHealth(last, "mac-mini", { now })).toBe("degraded");
+    });
+
+    // CTL-1169 hysteresis: a beat that is late by more than one 30s interval but
+    // within the healthy window must NOT flap to degraded — this is the jitter
+    // (median ~35s, spikes to ~60–90s) that was storming the desktop with
+    // "daemon degraded" notifications.
+    it("a heartbeat 45s ago (one missed beat) stays healthy — no flap", () => {
+      const last = { "mac-mini": "2026-06-08T11:59:15.000Z" }; // 45s ago
+      expect(deriveDaemonHealth(last, "mac-mini", { now })).toBe("healthy");
+    });
+
+    it("the healthy window is wider than one 30s heartbeat interval (hysteresis)", () => {
+      expect(DEFAULT_DAEMON_HEALTHY_WINDOW_MS).toBeGreaterThan(30_000);
+      // a beat exactly at the window edge is still healthy; just past it degrades
+      const edge = now - DEFAULT_DAEMON_HEALTHY_WINDOW_MS;
+      const past = now - DEFAULT_DAEMON_HEALTHY_WINDOW_MS - 1;
+      expect(
+        deriveDaemonHealth({ "mac-mini": new Date(edge).toISOString() }, "mac-mini", { now }),
+      ).toBe("healthy");
+      expect(
+        deriveDaemonHealth({ "mac-mini": new Date(past).toISOString() }, "mac-mini", { now }),
+      ).toBe("degraded");
+    });
+
+    it("an explicit intervalMs override still wins (env-tunable path)", () => {
+      const last = { "mac-mini": "2026-06-08T11:59:15.000Z" }; // 45s ago
+      // a tight 30s override reproduces the old behavior — proves the server's
+      // MONITOR_DAEMON_HEALTHY_WINDOW_MS override reaches the classifier.
+      expect(deriveDaemonHealth(last, "mac-mini", { now, intervalMs: 30_000 })).toBe("degraded");
     });
 
     it("a very old local heartbeat → offline", () => {

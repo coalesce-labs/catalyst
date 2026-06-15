@@ -33,11 +33,13 @@ import {
   getExecutionCoreDir,
   getRegistryPath,
   getEventLogPath,
+  getJobsRoot,      // CTL-1165 D3: job-dir GC root
   log,
   EVENT_DEBOUNCE_MS,
   TAILER_POLL_INTERVAL_MS,
   readWaitWatcherConfig,
   readMemorySamplerConfig,
+  readFleetHealthConfig, // CTL-1165 D5: fleet-health guardrail config (selfHeal default OFF)
   readRatelimitPollerConfig,
   getHostName,      // CTL-862
   getClusterHosts,  // CTL-862
@@ -45,6 +47,7 @@ import {
 import { ownedBy } from "./hrw.mjs"; // CTL-862: HRW ownership filter
 import { startWaitWatcher as realStartWaitWatcher } from "./wait-watcher.mjs";
 import { startMemorySampler as realStartMemorySampler } from "./memory-sampler.mjs";
+import { startFleetHealthProbe as realStartFleetHealthProbe } from "./fleet-health-probe.mjs"; // CTL-1165 D5: pre-exhaustion fleet-health guardrail
 import { startRatelimitPoller as realStartRatelimitPoller } from "./ratelimit-poller.mjs";
 import { listProjects as realListProjects } from "./registry.mjs"; // CTL-854: boot health check
 import { startHeartbeat as realStartHeartbeat } from "./heartbeat-event.mjs"; // CTL-859: node.heartbeat emitter
@@ -61,6 +64,8 @@ import {
 } from "./index.mjs";
 import { Reaper, defaultReadActivePhaseSignal, defaultReadSignalBgJobId } from "./reaper.mjs";
 import { startOrphanReaperTimer, readOrphanReaperConfig } from "./orphan-reaper-timer.mjs";
+import { sweepJobDirs } from "./job-dir-gc.mjs"; // CTL-1165 D3: ~/.claude/jobs/<id> dir GC
+import { ProcReaper } from "./proc-reaper.mjs"; // CTL-1165 D2: orphan child-process reaper (default shadow)
 import {
   startWorktreeRefreshTimer,
   readWorktreeRefreshConfig,
@@ -96,7 +101,7 @@ import { removeLabel as defaultRemoveLabel } from "./linear-write.mjs"; // CTL-5
 // so the phantom worker-dir validity sweep is operative in production.
 import { classifyTicketResolution } from "./linear-query.mjs";
 import { createGatewayReader } from "./gateway-read.mjs";
-import { isBgJobAlive, refreshAgents } from "./claude-agents.mjs";
+import { isBgJobAlive, refreshAgents, listClaudeAgentsResult } from "./claude-agents.mjs"; // CTL-1165 D3: fail-closed liveness reader for job-dir GC
 
 const DEFAULT_MAX_PARALLEL = 3;
 
@@ -116,6 +121,8 @@ let _stalePrRescueTimer = null;
 let _waitWatcher = null;
 // CTL-685: per-worker memory sampler handle.
 let _memorySampler = null;
+// CTL-1165 D5: pre-exhaustion fleet-health probe handle.
+let _fleetHealthProbe = null;
 // CTL-787: account-level rate-limit usage poller handle.
 let _ratelimitPoller = null;
 // CTL-859: node-heartbeat emitter handle (distributed-coordination foundation).
@@ -398,6 +405,13 @@ export function startDaemon({
   // knob (default-on, CATALYST_MEMORY_SAMPLER=0 disables) like the wait-watcher.
   startMemorySampler = realStartMemorySampler,
   enableMemorySampler = readMemorySamplerConfig().enabled,
+  // CTL-1165 D5: pre-exhaustion fleet-health probe. Injectable for tests; gated
+  // by a config knob (default-on, CATALYST_FLEET_HEALTH=0 disables) like the
+  // memory sampler. The probe is EMIT-ONLY by default (self-heal default OFF).
+  startFleetHealthProbe = realStartFleetHealthProbe,
+  // undefined → resolve from config (env + Layer-1 via configPath) in the boot
+  // body below; tests may force true/false and that wins via `??`.
+  enableFleetHealth = undefined,
   // CTL-787: account-level rate-limit usage poller. Injectable for tests; gated
   // by a config knob (default-on, CATALYST_RATELIMIT_POLLER=0 disables) like the
   // memory sampler.
@@ -637,6 +651,18 @@ export function startDaemon({
       _memorySampler = startMemorySampler();
     }
 
+    // CTL-1165 D5: start the pre-exhaustion fleet-health probe. EMIT-ONLY by
+    // default (self-heal default OFF — first ship is a pure alert). Inside the
+    // same try/catch so a throw triggers PID-file cleanup via stopDaemon. The
+    // config is resolved WITH configPath (mirroring readOrphanReaperConfig) so
+    // the documented Layer-1 catalyst.orchestration.fleetHealth knobs — enable,
+    // thresholds, and selfHealEnabled — actually take effect in production, and
+    // is passed to the probe so it reads the SAME resolved thresholds.
+    const fleetHealthConfig = readFleetHealthConfig(configPath);
+    if (enableFleetHealth ?? fleetHealthConfig.enabled) {
+      _fleetHealthProbe = startFleetHealthProbe({ orchDir, config: fleetHealthConfig });
+    }
+
     // CTL-787: start the account-level rate-limit usage poller. Inside the same
     // try/catch so a throw triggers PID-file cleanup via stopDaemon.
     if (enableRatelimitPoller) {
@@ -727,10 +753,33 @@ function startReaperAndTimer({
   // CTL-661: bind the per-ticket reconciler's canonical-owner reader to this
   // daemon's orchDir so the sweep resolves the authoritative active-phase
   // bg_job_id (falling back to newest-by-last_seen when no signal is found).
+  // CTL-1165 D2: construct the production orphan child-process reaper and inject
+  // it into the Reaper. DEFAULT mode:"shadow" (emits procOrphans.would-reap, kills
+  // NOTHING) so the allowlist + LIVE_TREE correlation bakes on mini before any
+  // enforce flip — exactly like stall-janitor (CTL-1004) and cost-cap (CTL-1137).
+  // mode/graceMs/worktreeRoot/allowlistPatterns come from
+  // orphanReaper.procReaper; the daemon's own pid is on the never-kill list
+  // (selfPid defaults to process.pid; broker/monitor are covered by the argv
+  // allowlist patterns). A disabled config ("off") makes every sweep an empty
+  // no-op.
+  const procCfg = orphanReaperConfig?.procReaper ?? {};
+  const procReaper = new ProcReaper({
+    mode: procCfg.mode ?? "shadow",
+    ...(procCfg.graceMs != null ? { graceMs: Number(procCfg.graceMs) } : {}),
+    ...(procCfg.minEtimeSec != null ? { minEtimeSec: Number(procCfg.minEtimeSec) } : {}),
+    ...(procCfg.worktreeRoot ? { worktreeRoot: procCfg.worktreeRoot } : {}),
+    ...(Array.isArray(procCfg.allowlistPatterns)
+      ? { allowlistPatterns: procCfg.allowlistPatterns }
+      : {}),
+    daemonPids: [process.pid],
+    log,
+  });
+
   _reaper = makeReaper({
     minIdleMs: (orphanReaperConfig?.minIdleSeconds ?? 900) * 1000,
     readActivePhaseSignal: (ticket) => defaultReadActivePhaseSignal(orchDir, ticket),
     readSignalBgJobId: (ticket, phase) => defaultReadSignalBgJobId(orchDir, ticket, phase),
+    procReaper,
   });
 
   // Boot replay: cover for any intents that landed while the daemon was down.
@@ -774,9 +823,29 @@ function startReaperAndTimer({
   }
 
   const cfg = orphanReaperConfig ?? {};
+  // CTL-1165 D3: bind the real ~/.claude/jobs/<id> dir GC onto the same 600s
+  // orphan-reaper cadence (no new daemon timer). Default-on; an operator can
+  // disable via .catalyst → orphanReaper.jobGc.enabled:false. retention/batchCap
+  // come from config (env still wins inside sweepJobDirs's defaults). A no-op
+  // async closure is bound when disabled so the timer's Promise.all stays
+  // uniform.
+  const jobGcCfg = cfg.jobGc ?? {};
+  const jobGcEnabled = jobGcCfg.enabled !== false;
+  const jobGc = jobGcEnabled
+    ? () =>
+        sweepJobDirs({
+          jobsRoot: getJobsRoot(),
+          readAgents: () => listClaudeAgentsResult(),
+          ...(jobGcCfg.retentionSeconds != null
+            ? { retentionMs: Number(jobGcCfg.retentionSeconds) * 1000 }
+            : {}),
+          ...(jobGcCfg.batchCap != null ? { batchCap: Number(jobGcCfg.batchCap) } : {}),
+        })
+    : async () => {};
   _orphanTimer = startOrphanReaperTimer({
     enabled: cfg.enabled !== false,
     intervalSeconds: cfg.intervalSeconds ?? 600,
+    jobGc,
   });
 
   // CTL-707: start the periodic worktree-refresh timer.
@@ -990,6 +1059,15 @@ export function stopDaemon() {
       log.warn({ err: err?.message }, "stopDaemon: memory-sampler stop failed");
     }
     _memorySampler = null;
+  }
+  // CTL-1165 D5: stop the pre-exhaustion fleet-health probe.
+  if (_fleetHealthProbe) {
+    try {
+      _fleetHealthProbe.stop();
+    } catch (err) {
+      log.warn({ err: err?.message }, "stopDaemon: fleet-health-probe stop failed");
+    }
+    _fleetHealthProbe = null;
   }
   // CTL-787: stop the account-level rate-limit usage poller.
   if (_ratelimitPoller) {

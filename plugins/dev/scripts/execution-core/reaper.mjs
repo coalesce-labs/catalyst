@@ -35,6 +35,21 @@ const CLAUDE_BIN = process.env.CATALYST_DISPATCH_CLAUDE_BIN || "claude";
 const DEDUPE_WINDOW_MS = Number(process.env.REAPER_DEDUPE_WINDOW_MS) || 60_000;
 const DEFAULT_MIN_IDLE_MS = 15 * 60 * 1000; // 15 min
 
+/**
+ * isSweepReapableStatus — CTL-1165 D4. The periodic orphan sweep's status gate.
+ * Returns true for a session status the sweep is willing to CONSIDER reaping:
+ * `'idle'`, plus the null-like states (`null`/`undefined`/`''`). A reboot-survivor
+ * `status:null` background zombie (the 6 mini incidents) was hard-skipped by the
+ * pre-D4 `status !== "idle"` gate and so was never considered. Any other truthy
+ * status string (`'busy'`/`'active'`/future states) is NOT sweep-reapable — the
+ * busy-spare is never weakened. Eligibility here only means "consider"; the
+ * background-only, cwd-vanished, and recency gates still run afterward.
+ */
+export function isSweepReapableStatus(status) {
+  if (status === null || status === undefined || status === "") return true;
+  return status === "idle";
+}
+
 // CTL-661 Phase 5 — the per-ticket reconciler's spawn-grace window. A revive or
 // advance reassigns a ticket's bg_job_id to a fresh successor; for a brief
 // window two background sessions co-exist by design while the new one takes
@@ -103,6 +118,11 @@ export async function defaultAssessWorktreeRemoval(event, readAgents = () => lis
 export class Reaper {
   constructor({
     executorReap = defaultExecutorReap,
+    // CTL-1165 D4: the stuck-registration escalation seam. `claude stop` no-ops
+    // on the reboot-survivor zombies on mini; when stop fails AND a fresh agents()
+    // re-read still lists the shortId, _handleBgReap escalates to `claude rm`.
+    // Same {ok,error} contract as executorReap; tests inject a recording mock.
+    executorRmForce = defaultExecutorRmForce,
     agents = defaultAgents,
     emit = defaultEmit,
     gitWorktreeRemove = defaultGitWorktreeRemove,
@@ -137,8 +157,14 @@ export class Reaper {
     // Returns the raw bg_job_id string or null (fail-open: skips the reap).
     // Tests inject a stub; the daemon injects a real orchDir-backed reader.
     readSignalBgJobId = () => null,
+    // CTL-1165 D2 — the orphan child-process reaper (proc-reaper.mjs). DEFAULT
+    // null so all pre-D2 reaper behavior is unchanged: _handleProcOrphansSweep
+    // is a no-op when no ProcReaper is injected. The daemon constructs the
+    // production ProcReaper (DEFAULT mode:"shadow") and injects it here.
+    procReaper = null,
   } = {}) {
     this.executorReap = executorReap;
+    this.executorRmForce = executorRmForce;
     this.agents = agents;
     this.emit = emit;
     this.gitWorktreeRemove = gitWorktreeRemove;
@@ -153,6 +179,7 @@ export class Reaper {
     this.now = now;
     this.log = logger;
     this.readSignalBgJobId = readSignalBgJobId;
+    this.procReaper = procReaper;
     this._inflight = new Map(); // key → expiresAt
   }
 
@@ -226,6 +253,12 @@ export class Reaper {
           break;
         case "orphans.reap-requested":
           await this._handleOrphansSweep(event);
+          break;
+        // CTL-1165 D2: the orphan child-process sweep trigger (emitted by the
+        // 600s orphan-reaper timer). Routed to the injected ProcReaper — a no-op
+        // when none is injected, so all pre-D2 behavior is unchanged.
+        case "procOrphans.reap-requested":
+          await this._handleProcOrphansSweep(event);
           break;
         default:
           this.log.warn({ event: event.event }, "reaper: unknown reap-intent event");
@@ -303,14 +336,85 @@ export class Reaper {
       return;
     }
     const result = await this.executorReap(shortId);
-    const echoSuffix = result.ok ? "reap-complete" : "reap-failed";
-    const echoEvent = event.event.replace("reap-requested", echoSuffix);
-    await this.emit(echoEvent, {
+
+    // Happy path — `claude stop` succeeded → emit reap-complete, no escalation.
+    if (result.ok) {
+      await this.emit(event.event.replace("reap-requested", "reap-complete"), {
+        ticket: event.ticket,
+        phase: event.phase,
+        bgJobId,
+        worktreePath: event.worktree_path,
+      });
+      return;
+    }
+
+    // CTL-1165 D4: stop NON-OK. The reboot-survivor `status:null` zombies on mini
+    // no-op `claude stop` ("background service may be restarting"). Escalate to
+    // `claude rm <shortId>` ONLY after a CONFIRMING fresh agents() re-read still
+    // lists the same shortId — if the session is gone now, there is nothing to rm
+    // (a successful-but-async stop, or it exited on its own); surface reap-failed
+    // with the original stop error and let the next tick no-op. We re-read because
+    // `claude rm` ALSO tears down state and must not fire on a guess.
+    let rereadTarget = null;
+    try {
+      const reread = await this.agents();
+      rereadTarget =
+        reread.find((a) => {
+          try {
+            return shortIdFromSessionId(a.sessionId) === shortId;
+          } catch {
+            return false;
+          }
+        }) ?? null;
+    } catch {
+      rereadTarget = null; // unreadable fleet → degrade safe, do NOT rm
+    }
+
+    // CTL-1165 D4 (hardened): escalate to `claude rm` ONLY for a confirmed-stuck
+    // ZOMBIE — still registered AND its status is sweep-reapable (idle / null /
+    // undefined: the reboot-survivor class `claude stop` can't clear). A BUSY (or
+    // any other non-reapable) re-read means `claude stop` failed TRANSIENTLY on a
+    // still-LIVE worker ("background service may be restarting") — and `claude rm`
+    // deletes the session AND its worktree (often the SAME ticket worktree a live
+    // successor runs in), so we must NOT escalate. Emit reap-failed and let the
+    // periodic orphan sweep retry once the worker actually goes idle. An
+    // unreadable re-read (rereadTarget === null) also degrades safe (no rm).
+    if (!rereadTarget || !isSweepReapableStatus(rereadTarget.status)) {
+      await this.emit(event.event.replace("reap-requested", "reap-failed"), {
+        ticket: event.ticket,
+        phase: event.phase,
+        bgJobId,
+        worktreePath: event.worktree_path,
+        ...(result.error ? { reason: result.error } : {}),
+      });
+      return;
+    }
+
+    // Confirmed-stuck registration — escalate stop → rm.
+    const rm = await this.executorRmForce(shortId);
+    if (rm.ok) {
+      await this.emit(event.event.replace("reap-requested", "reap-complete"), {
+        ticket: event.ticket,
+        phase: event.phase,
+        bgJobId,
+        worktreePath: event.worktree_path,
+      });
+      return;
+    }
+
+    // stop no-op THEN rm no-op → loudly flag the stuck registration ONCE. The
+    // handle() per-event de-dupe (:189-190) drops a re-delivered identical event,
+    // so this never loops; the *.reap-failed is a terminal FLAG, not a re-trigger.
+    this.log.warn(
+      { bgJobId, shortId, stopError: result.error, rmError: rm.error },
+      "reaper: stuck-registration — claude stop AND claude rm both no-op'd",
+    );
+    await this.emit(event.event.replace("reap-requested", "reap-failed"), {
       ticket: event.ticket,
       phase: event.phase,
       bgJobId,
       worktreePath: event.worktree_path,
-      ...(result.error ? { reason: result.error } : {}),
+      reason: "stop-and-rm-noop",
     });
   }
 
@@ -462,6 +566,20 @@ export class Reaper {
   }
 
   /**
+   * _handleProcOrphansSweep — CTL-1165 D2. Run one orphan child-process sweep via
+   * the injected ProcReaper (proc-reaper.mjs). The ProcReaper reaps reparented
+   * node/bun grandchildren that `claude stop` orphaned (the RSS bulk of the
+   * leak), gated by a hard never-kill allowlist + LIVE_TREE correlation + a
+   * CATASTROPHE GUARD (a failed `claude agents` read aborts the sweep). It
+   * DEFAULTS to mode:"shadow" (emits would-reap, kills nothing). A null
+   * procReaper makes this a complete no-op, so the case is inert until the daemon
+   * injects a production ProcReaper — every pre-D2 reaper test is unaffected.
+   */
+  async _handleProcOrphansSweep(_event) {
+    await this.procReaper?.sweep({});
+  }
+
+  /**
    * scanOrphans — find sessions whose cwd no longer exists and emit one
    * `phase.abort.reap-requested` per orphan. Reconciler then handles each
    * via the standard bg-reap path. Public so the daemon timer can call it
@@ -472,7 +590,12 @@ export class Reaper {
     for (const a of live) {
       if (!a.sessionId || !a.cwd) continue;
       if (isSelfSession(a.sessionId)) continue;
-      if (a.status !== "idle") continue;
+      // CTL-1165 D4: consider idle AND null-like statuses (the reboot-survivor
+      // `status:null` zombies). The pre-D4 `status !== "idle"` skip never even
+      // looked at them. Busy/active are still spared — isSweepReapableStatus is
+      // false for any other truthy string. (Self-skip above + background-only,
+      // cwd-vanished, and recency gates below all still run, unchanged.)
+      if (!isSweepReapableStatus(a.status)) continue;
       // CTL-649 kind guard: the periodic sweep enumerates ALL live sessions —
       // it can see the user's interactive windows — so it is strict
       // background-ONLY. Skip interactive AND unknown/null kinds: never
@@ -795,6 +918,25 @@ async function defaultExecutorReap(shortId) {
     });
     if ((res.status ?? 0) === 0) return { ok: true };
     return { ok: false, error: res.stderr?.trim() || `claude stop rc=${res.status}` };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+}
+
+// CTL-1165 D4: the stuck-registration escalation wrapper. `claude rm <shortId>`
+// force-deregisters a session whose `claude stop` no-op'd. Same never-throw
+// {ok,error} contract as defaultExecutorReap. Only ever called by _handleBgReap
+// AFTER a failed stop AND a confirming live re-read of the same shortId, so it
+// never fires on a guess. Takes the same 8-char short id (claude-ids.mjs:8: rm
+// rejects full UUIDs).
+async function defaultExecutorRmForce(shortId) {
+  try {
+    const res = spawnSync(CLAUDE_BIN, ["rm", shortId], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    if ((res.status ?? 0) === 0) return { ok: true };
+    return { ok: false, error: res.stderr?.trim() || `claude rm rc=${res.status}` };
   } catch (err) {
     return { ok: false, error: err.message };
   }

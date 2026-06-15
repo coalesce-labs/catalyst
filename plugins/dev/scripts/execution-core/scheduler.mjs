@@ -83,7 +83,11 @@ import { readWorkerSignals } from "./signal-reader.mjs";
 // CTL-937: getBeliefsDb exposes the module-level db handle for the diagnostician.
 import { collectBeliefsTick, getBeliefsDb } from "./beliefs/collector.mjs";
 // CTL-1045 Bug 1: kill-storm suppression guard for defaultJanitorKillIntentRecorder.
-import { isIntentEffective, getMaxAttempts, recordIntent as recordIntentBelief } from "./beliefs/intent.mjs";
+import {
+  isIntentEffective,
+  getMaxAttempts,
+  recordIntent as recordIntentBelief,
+} from "./beliefs/intent.mjs";
 // CTL-966 + CTL-935: the advancement shadow comparator — compares the procedural
 // deriveAdvancement oracle against the advance_to / cycle_exhausted beliefs and
 // logs disagreements. SHADOW ONLY (reads beliefs + computes oracle + logs; never
@@ -143,7 +147,12 @@ import { resolvePhaseSessionId as defaultResolveSession } from "./session-resolv
 import { evaluateHungWorker } from "./hung-detector.mjs";
 import { transcriptAgeMs as defaultTranscriptAgeMs } from "./transcript-silence.mjs";
 import { killHungWorker as defaultKillEscalate } from "./watchdog-action.mjs";
-import { readWatchdogConfig, phaseBudgetMs, readStallJanitorConfig, readCostCapConfig } from "./config.mjs";
+import {
+  readWatchdogConfig,
+  phaseBudgetMs,
+  readStallJanitorConfig,
+  readCostCapConfig,
+} from "./config.mjs";
 // CTL-1137: cost-cap watcher (Pass 0c) — out-of-process per-session $ preemption.
 import {
   shouldCheckNow,
@@ -172,10 +181,7 @@ import {
   defaultCollectUnstuckCandidates,
   emitUnstuckEvent,
 } from "./unstuck-sweep.mjs";
-import {
-  readUnstuckSweepConfig,
-  isThrottled,
-} from "./config.mjs";
+import { readUnstuckSweepConfig, isThrottled } from "./config.mjs";
 // CTL-558: the deterministic Linear status/label write seam. The whole module
 // is injected as `writeStatus` so tests pass fakes; production uses the real
 // module (best-effort — every write swallows its own failures).
@@ -201,7 +207,15 @@ import { isLinearTerminal } from "./terminal-state.mjs";
 import { labelOnce, clearStalledLabel } from "./label-guard.mjs";
 import { processApprovedResumes } from "./boot-resume.mjs"; // CTL-644: per-tick approval poll
 import { countReapOutcomes } from "./reaper-metrics.mjs";
-import { log, getEligibleDir, getEventLogPath, getHostName, getClusterHosts, hostMembershipWarning, isDraining as isDrainingDefault } from "./config.mjs";
+import {
+  log,
+  getEligibleDir,
+  getEventLogPath,
+  getHostName,
+  getClusterHosts,
+  hostMembershipWarning,
+  isDraining as isDrainingDefault,
+} from "./config.mjs";
 import { emitDrainedEvent as defaultEmitDrainedEvent } from "./drain-event.mjs"; // CTL-1095: drained sentinel
 import { defaultCheckSequencing } from "./sequencing.mjs"; // CTL-537
 import { ownedBy } from "./hrw.mjs"; // CTL-850: HRW ownership filter
@@ -1328,15 +1342,17 @@ export function maybeEscalateRemediateExhausted(
     if (cur.status === "stalled") return true; // idempotent
     let remediateSummary;
     if (typeof summarizeHistory === "function") {
-      try { remediateSummary = summarizeHistory(ticket); } catch { /* best-effort */ }
+      try {
+        remediateSummary = summarizeHistory(ticket);
+      } catch {
+        /* best-effort */
+      }
     }
     // CTL-1108: source the operator-facing explanation from the verify.json that
     // still exists on disk at cap-exhaustion time (HIGH findings + regression_risk).
     let verifyJson = null;
     try {
-      verifyJson = JSON.parse(
-        readFile(join(orchDir, "workers", ticket, "verify.json"), "utf8")
-      );
+      verifyJson = JSON.parse(readFile(join(orchDir, "workers", ticket, "verify.json"), "utf8"));
     } catch {
       // verify.json absent/unreadable → mapper degrades to a valid generic explanation
     }
@@ -1502,7 +1518,11 @@ export function convergeHeldLabel(
 // "team-mismatch": CTL-1085 split it out of "missing-label" in classifyLabelFailure;
 // it MUST stay in this set or convergeHeldLabel loses its cool-down on cross-team
 // (ADV) label failures and re-introduces the CTL-834 per-tick retry storm.
-const UNRECOVERABLE_LABEL_REASONS = new Set(["missing-label", "exclusive-conflict", "team-mismatch"]);
+const UNRECOVERABLE_LABEL_REASONS = new Set([
+  "missing-label",
+  "exclusive-conflict",
+  "team-mismatch",
+]);
 
 // CTL-1068 — convergeStartedHeldLabels: retract orphaned held labels for a STARTED
 // (already-admitted) ticket. The admission A.7 loop only converges the pre-pickup
@@ -1828,9 +1848,10 @@ export function escalateDispatchExhausted(
         phase,
         status: "stalled",
         stalledReason: "prior-artifact-retry-exhausted",
-        dispatchFailureCode: code,   // CTL-1045 Bug 2: exit code that exhausted retries (2 = prior_artifact_missing)
+        dispatchFailureCode: code, // CTL-1045 Bug 2: exit code that exhausted retries (2 = prior_artifact_missing)
         dispatchFailureCause: cause, // CTL-1045 Bug 2: human-readable reason (observability)
         explanation,
+        needsHumanSince: existing.needsHumanSince ?? new Date().toISOString(), // CTL-1131: preserve prior stamp
         updatedAt: new Date().toISOString(),
       })
     );
@@ -1872,10 +1893,9 @@ function writeTerminalStalled(
   // CTL-1130: every terminal stall carries a typed-union explanation so the inbox
   // shows a meaningful call_to_action. Callers may pass a richer typed explanation
   // via extra.explanation; fall back to a coerced decision generic.
-  const explanation = extra.explanation ?? coerceExplanation(
-    { problem: `${phase} phase stalled: ${reason}` },
-    { ticket, phase }
-  );
+  const explanation =
+    extra.explanation ??
+    coerceExplanation({ problem: `${phase} phase stalled: ${reason}` }, { ticket, phase });
   try {
     writeFile(
       p,
@@ -1885,6 +1905,7 @@ function writeTerminalStalled(
         status: "stalled",
         stalledReason: reason,
         explanation,
+        needsHumanSince: cur.needsHumanSince ?? new Date().toISOString(), // CTL-1131: preserve prior stamp
         updatedAt: new Date().toISOString(),
       })
     );
@@ -2302,15 +2323,20 @@ function defaultJanitorKillIntentRecorder(intentDb, killBgJob = defaultKillBgJob
     // own. Fail-open when intentDb is null.
     if (intentDb) {
       try {
-        if (!isIntentEffective(intentDb, "kill", subject, { maxAttempts: getMaxAttempts(intentDb) })) {
+        if (
+          !isIntentEffective(intentDb, "kill", subject, { maxAttempts: getMaxAttempts(intentDb) })
+        ) {
           log.warn(
             { subject, bgJobId },
-            "stall-janitor: kill intent ineffective — skipping claude stop (CTL-1045 storm prevention)",
+            "stall-janitor: kill intent ineffective — skipping claude stop (CTL-1045 storm prevention)"
           );
           return false;
         }
       } catch (err) {
-        log.warn({ subject, err: err?.message }, "stall-janitor: isIntentEffective threw — continuing kill (CTL-1045)");
+        log.warn(
+          { subject, err: err?.message },
+          "stall-janitor: isIntentEffective threw — continuing kill (CTL-1045)"
+        );
       }
     }
     // Issue the real stop FIRST so a record-failure can never swallow the kill
@@ -2321,7 +2347,9 @@ function defaultJanitorKillIntentRecorder(intentDb, killBgJob = defaultKillBgJob
       try {
         // Skip the INSERT if an open kill-intent already exists (idempotent).
         const open = intentDb
-          .query("SELECT 1 FROM intent WHERE kind = 'kill' AND subject = ? AND outcome IS NULL LIMIT 1")
+          .query(
+            "SELECT 1 FROM intent WHERE kind = 'kill' AND subject = ? AND outcome IS NULL LIMIT 1"
+          )
           .get(subject);
         const tickRow = open
           ? null
@@ -2334,19 +2362,25 @@ function defaultJanitorKillIntentRecorder(intentDb, killBgJob = defaultKillBgJob
               tickRow.tick_id,
               subject,
               JSON.stringify({ kind: "kill", subject, bgJobId, sessionNotRegistered: true }),
-            ],
+            ]
           );
           recorded = true;
         }
       } catch (err) {
-        log.warn({ subject, err: err?.message }, "stall-janitor: recordKillIntent threw — continuing kill (CTL-1004)");
+        log.warn(
+          { subject, err: err?.message },
+          "stall-janitor: recordKillIntent threw — continuing kill (CTL-1004)"
+        );
       }
     }
     // Execute the stop — the actual ghost-session reap (mirrors intentAwareKill).
     try {
       killBgJob({ bgJobId });
     } catch (err) {
-      log.warn({ subject, bgJobId, err: err?.message }, "stall-janitor: killBgJob threw (CTL-1004)");
+      log.warn(
+        { subject, bgJobId, err: err?.message },
+        "stall-janitor: killBgJob threw (CTL-1004)"
+      );
       return recorded;
     }
     return true;
@@ -2381,7 +2415,10 @@ export function defaultClearStall(orchDir, writeStatus) {
     try {
       rmSync(join(workerDir, `phase-${phase}.json`), { force: true });
     } catch (err) {
-      log.warn({ ticket, phase, err: err?.message }, "stall-janitor: stalled-signal delete failed (CTL-1005)");
+      log.warn(
+        { ticket, phase, err: err?.message },
+        "stall-janitor: stalled-signal delete failed (CTL-1005)"
+      );
     }
     // 2. clear the needs-human label; write the once-marker ONLY on confirmed removal
     //    (CTL-1045 Bug 4 — a failed clear must NOT disarm future escalations).
@@ -2393,17 +2430,25 @@ export function defaultClearStall(orchDir, writeStatus) {
             // One clear per ticket per phase per worker-dir lifetime (CTL-1045 Bug 5).
             writeFileSync(join(workerDir, `.janitor-cleared-${phase}.applied`), "");
           } catch (err) {
-            log.warn({ ticket, phase, err: err?.message }, "stall-janitor: cleared-marker write failed (CTL-1005)");
+            log.warn(
+              { ticket, phase, err: err?.message },
+              "stall-janitor: cleared-marker write failed (CTL-1005)"
+            );
           }
         },
       });
     } catch (err) {
-      log.warn({ ticket, phase, err: err?.message }, "stall-janitor: needs-human clear failed (CTL-1005)");
+      log.warn(
+        { ticket, phase, err: err?.message },
+        "stall-janitor: needs-human clear failed (CTL-1005)"
+      );
     }
     // 3. delete .orphan-detected.applied so a future stall re-emits (CTL-868).
     try {
       rmSync(join(workerDir, ".orphan-detected.applied"), { force: true });
-    } catch { /* best-effort */ }
+    } catch {
+      /* best-effort */
+    }
     return true;
   };
 }
@@ -2567,7 +2612,7 @@ export function schedulerTick(
     // table. Mode resolves from readCostCapConfig() (env > Layer-2 > shadow) unless
     // overridden here.
     costCap: {
-      mode: _costCapMode = undefined,        // resolved inside the pass
+      mode: _costCapMode = undefined, // resolved inside the pass
       fetchCost: _costCapFetch = fetchSessionCostUsd,
       now: _costCapNow = Date.now,
       markFailed: _costCapMarkFailed = markPhaseSignalFailed,
@@ -2623,6 +2668,16 @@ export function schedulerTick(
     // tests unaffected). Production wires the module-level beliefs db handle
     // via startScheduler → runTick when CATALYST_BELIEFS_SHADOW=1.
     intentDb = null,
+    // CTL-1150: injectable triage-artifact predicate for Pass 2. Default undefined
+    // → the inline existsSync default applies inside the loop. Tests inject
+    // `() => true` to opt out of the filesystem check when the subject is not
+    // the triage gate itself.
+    hasTriageArtifact = undefined,
+    // CTL-1150: injectable listStartedTickets override. Default undefined → the
+    // real listStartedTickets(orchDir) runs. Tests that seed triage.json (which
+    // creates workers/<ticket>/) inject `() => new Set()` so the seeded ticket
+    // is not excluded from Pass 2 by dir-existence before the guard fires.
+    listStartedTickets: listStartedTicketsOpt = undefined,
   } = {}
 ) {
   // CTL-850: resolve this host + the cluster roster ONCE per tick (cheap
@@ -2930,9 +2985,15 @@ export function schedulerTick(
             progress = _progressMark({ ticket: sig.ticket, phase: sig.phase, repoRoot, orchDir });
           }
           const decision = evaluateHungWorker({
-            ticket: sig.ticket, phase: sig.phase, status: sig.status,
-            nowMs: _watchdogNow(), startedAtMs, transcriptAgeMs: ageMs,
-            progressMark: progress, silenceMs, budgetMs,
+            ticket: sig.ticket,
+            phase: sig.phase,
+            status: sig.status,
+            nowMs: _watchdogNow(),
+            startedAtMs,
+            transcriptAgeMs: ageMs,
+            progressMark: progress,
+            silenceMs,
+            budgetMs,
           });
           if (decision.action !== "kill-escalate") continue;
           if (wdMode === "shadow") {
@@ -2945,9 +3006,11 @@ export function schedulerTick(
           }
           // enforce: fire-and-forget (async kill, sync tick continues)
           void _killEscalate(orchDir, sig.ticket, sig, {
-            elapsedMin: decision.elapsedMin, commitCount: progress,
+            elapsedMin: decision.elapsedMin,
+            commitCount: progress,
             reviveBudget: wcfg.reviveBudget,
-            now: _watchdogNow, emit: _watchdogEmit,
+            now: _watchdogNow,
+            emit: _watchdogEmit,
             writeStatus,
             // CTL-729 remediate: real revive dispatcher. The prior wiring passed
             // claimDispatch — the cross-host Linear claim soft-CAS, NOT a worker
@@ -2961,10 +3024,12 @@ export function schedulerTick(
               const resumeSession = bgJobId ? (resolveSession(bgJobId) ?? undefined) : undefined;
               return dispatchTicket(orchDir, rt, rp, { dispatch, resumeSession, attempt });
             },
-          }).catch((err) => log.warn(
-            { ticket: sig.ticket, phase: sig.phase, err: err.message },
-            "scheduler: watchdog kill threw (CTL-729)"
-          ));
+          }).catch((err) =>
+            log.warn(
+              { ticket: sig.ticket, phase: sig.phase, err: err.message },
+              "scheduler: watchdog kill threw (CTL-729)"
+            )
+          );
           // CTL-729 remediate: watchdogKilled counts kill-attempts DISPATCHED this
           // tick, not confirmed kills. The kill is fire-and-forget (the sync tick
           // cannot await), so the resolved outcome — "escalated" vs "revived"
@@ -2975,7 +3040,12 @@ export function schedulerTick(
           // regardless; only this reporting field is attempt-granular.
           watchdogKilled.push({ ticket: sig.ticket, phase: sig.phase });
           log.warn(
-            { ticket: sig.ticket, phase: sig.phase, reason: decision.reason, elapsedMin: decision.elapsedMin },
+            {
+              ticket: sig.ticket,
+              phase: sig.phase,
+              reason: decision.reason,
+              elapsedMin: decision.elapsedMin,
+            },
             "scheduler: progress-watchdog kill dispatched for hung worker (CTL-729)"
           );
         } catch (err) {
@@ -3017,13 +3087,25 @@ export function schedulerTick(
         // never blocks. checkWorkerCost does fetch → decide → shadow-log | enforce-preempt
         // (terminal-write + reap). Any rejection fails OPEN (logged, no abort).
         void checkWorkerCost({
-          orchDir, ticket, phase, status, sessionId, bgJobId,
-          mode: ccMode, capUsd: ccfg.capUsd, promBaseUrl: ccfg.promBaseUrl,
-          fetchCost: _costCapFetch, markFailed: _costCapMarkFailed, reap: _costCapReap, log,
-        }).catch((err) => log.warn(
-          { ticket, step: "cost-cap", err: err?.message },
-          "scheduler: per-worker cost-cap step failed — continuing (CTL-1137, fail-open)",
-        ));
+          orchDir,
+          ticket,
+          phase,
+          status,
+          sessionId,
+          bgJobId,
+          mode: ccMode,
+          capUsd: ccfg.capUsd,
+          promBaseUrl: ccfg.promBaseUrl,
+          fetchCost: _costCapFetch,
+          markFailed: _costCapMarkFailed,
+          reap: _costCapReap,
+          log,
+        }).catch((err) =>
+          log.warn(
+            { ticket, step: "cost-cap", err: err?.message },
+            "scheduler: per-worker cost-cap step failed — continuing (CTL-1137, fail-open)"
+          )
+        );
       }
     }
   }
@@ -3093,8 +3175,12 @@ export function schedulerTick(
         janitorStallsCleared = jreport.stallsCleared;
         janitorWouldClear = jreport.wouldClear;
         if (
-          janitorReaped.length || janitorKillIntents.length || janitorWouldReap.length ||
-          janitorWouldKill.length || janitorStallsCleared.length || janitorWouldClear.length
+          janitorReaped.length ||
+          janitorKillIntents.length ||
+          janitorWouldReap.length ||
+          janitorWouldKill.length ||
+          janitorStallsCleared.length ||
+          janitorWouldClear.length
         ) {
           log.info(
             {
@@ -3149,7 +3235,9 @@ export function schedulerTick(
                   // scheduler.mjs:2199-2206). Without this, every pass would insert
                   // a duplicate intent row for the same subject (CTL-1064).
                   const open = intentDb
-                    .query("SELECT 1 FROM intent WHERE kind = ? AND subject = ? AND outcome IS NULL LIMIT 1")
+                    .query(
+                      "SELECT 1 FROM intent WHERE kind = ? AND subject = ? AND outcome IS NULL LIMIT 1"
+                    )
                     .get(kind, subject);
                   if (open) return;
                   // intent.tick_id is NOT NULL — the prior tickId:null always
@@ -3166,7 +3254,9 @@ export function schedulerTick(
                     subject,
                     postcondition: { kind: "unstuck-sweep", subject },
                   });
-                } catch { /* best-effort */ }
+                } catch {
+                  /* best-effort */
+                }
               }
             : () => {},
           // CTL-1064: the driver gate is act-once-then-skip (unstuck-sweep.mjs:257
@@ -3182,10 +3272,14 @@ export function schedulerTick(
             ? (kind, subject) => {
                 try {
                   const open = intentDb
-                    .query("SELECT 1 FROM intent WHERE kind = ? AND subject = ? AND outcome IS NULL LIMIT 1")
+                    .query(
+                      "SELECT 1 FROM intent WHERE kind = ? AND subject = ? AND outcome IS NULL LIMIT 1"
+                    )
                     .get(kind, subject);
                   return open != null;
-                } catch { return false; }
+                } catch {
+                  return false;
+                }
               }
             : () => false,
           postComment: _unstuckPostComment ?? (() => {}),
@@ -3195,8 +3289,10 @@ export function schedulerTick(
         unstuckEscalated = ureport.escalated;
         unstuckWouldEscalate = ureport.wouldEscalate;
         if (
-          ureport.acted.length || ureport.wouldAct.length ||
-          ureport.escalated.length || ureport.wouldEscalate.length
+          ureport.acted.length ||
+          ureport.wouldAct.length ||
+          ureport.escalated.length ||
+          ureport.wouldEscalate.length
         ) {
           log.info(
             {
@@ -4271,9 +4367,10 @@ export function schedulerTick(
   // subtracting heldStopCount removed that slot a SECOND time, over-suppressing
   // genuinely-free capacity at maxParallel>=2 (a transient single-tick throughput
   // loss; the slot frees naturally next tick via getAgentsCached deregistration).
-  const freeSlots = (livenessFresh && !draining)
-    ? Math.max(0, computeFreeSlots(maxParallel, inFlightCount) - resumedCount - promotedCount)
-    : 0;
+  const freeSlots =
+    livenessFresh && !draining
+      ? Math.max(0, computeFreeSlots(maxParallel, inFlightCount) - resumedCount - promotedCount)
+      : 0;
   if (!livenessFresh) {
     log.warn(
       { maxParallel, inFlightCount, resumedCount, promotedCount, heldStopCount },
@@ -4290,16 +4387,35 @@ export function schedulerTick(
   if (draining) {
     if (listInFlightTickets(orchDir).size === 0 && !existsSync(drainedMarker)) {
       emitDrained();
-      try { writeFileSync(drainedMarker, ""); } catch { /* best-effort */ }
+      try {
+        writeFileSync(drainedMarker, "");
+      } catch {
+        /* best-effort */
+      }
       log.info({}, "scheduler: node drained — all in-flight work landed (CTL-1095)");
     }
   } else if (existsSync(drainedMarker)) {
-    try { rmSync(drainedMarker, { force: true }); } catch { /* best-effort */ }
+    try {
+      rmSync(drainedMarker, { force: true });
+    } catch {
+      /* best-effort */
+    }
   }
+  // CTL-1150: resolve injectable seams before Pass 2 selection + dispatch loop.
+  // _hasTriageArtifact: default reads filesystem (mirroring monitor.mjs:667-669).
+  //   Kept inline (not imported from monitor.mjs) to avoid coupling two daemons.
+  //   Tests inject `() => true` to bypass when the subject is not the triage gate.
+  // _listStartedTickets: default is the real dir-scan. Tests seeding triage.json
+  //   (which creates workers/<ticket>/) inject `() => new Set()` to prevent the
+  //   seeded ticket from being excluded by dir-existence before the guard fires.
+  const _hasTriageArtifact =
+    hasTriageArtifact ?? ((dir, ticket) => existsSync(join(dir, "workers", ticket, "triage.json")));
+  const _listStartedTickets = listStartedTicketsOpt ?? listStartedTickets;
+
   // CTL-706: per-project caps + reserves gate selection AFTER ranking. With
   // no perProject config this is byte-for-byte selectDispatchable.
   // inFlightTickets was already computed above for the reclaim sweep.
-  const selected = selectDispatchablePerProject(ready, listStartedTickets(orchDir), freeSlots, {
+  const selected = selectDispatchablePerProject(ready, _listStartedTickets(orchDir), freeSlots, {
     perProject: concurrency?.perProject,
     inFlight: inFlightTickets,
   });
@@ -4314,6 +4430,22 @@ export function schedulerTick(
 
   const dispatched = [];
   for (const t of selected) {
+    // CTL-1150: hold an eligible candidate whose triage hasn't produced
+    // triage.json yet. The monitor defers triage under slot pressure
+    // (computeTriageBudget, CTL-716) and sweepMissingTriage retries; until then
+    // dispatching research trips phase-agent-dispatch's prior-artifact guard
+    // (research requires signal:triage.json) and emits spurious
+    // phase.research.failed + phase.dispatch.failed. Silent hold — no cooldown
+    // marker, no failure event — mirroring the CTL-781 assignee-unreadable hold.
+    // The candidate stays in the eligible set and dispatches next tick once
+    // triage.json lands.
+    if (!_hasTriageArtifact(orchDir, t.identifier)) {
+      log.debug(
+        { ticket: t.identifier },
+        "ctl-1150: new-work candidate not yet triaged (no triage.json) — holding"
+      );
+      continue;
+    }
     if (inDispatchCooldown(orchDir, t.identifier, NEW_WORK_ENTRY_PHASE, now())) continue; // CTL-624: throttle refused re-dispatch
     // CTL-537: sequencing gate — only when a worker is already in-flight and a
     // seam is wired. Fail-open verdicts dispatch normally.
@@ -4484,15 +4616,13 @@ export function schedulerTick(
         },
         { ticket: t.identifier, phase: NEW_WORK_ENTRY_PHASE }
       );
-      // CTL-781: self-assign the Catalyst bot so the claim is visible in
-      // Linear. Best-effort (safeWrite) — an assignment failure never blocks
-      // the pipeline; the read-back inside applyAssignee logs the gap.
-      if (botWriteId) {
-        safeWrite(() => writeStatus.applyAssignee?.({ ticket: t.identifier, userId: botWriteId }), {
-          ticket: t.identifier,
-          phase: "assignment",
-        });
-      }
+      // CTL-781 + CTL-1011: self-assign the Catalyst bot. Always invoked so a
+      // null botWriteId surfaces the deduped config-missing warn instead of a
+      // silent skip. Best-effort (safeWrite) — never blocks the pipeline.
+      safeWrite(() => writeStatus.applyAssignee?.({ ticket: t.identifier, userId: botWriteId }), {
+        ticket: t.identifier,
+        phase: "assignment",
+      });
     }
   }
 
@@ -4528,7 +4658,7 @@ export function schedulerTick(
       }
     : writeStatus;
 
-  for (const ticket of listStartedTickets(orchDir)) {
+  for (const ticket of _listStartedTickets(orchDir)) {
     const signals = readPhaseSignals(orchDir, ticket);
     // CTL-703: the terminal phase is now `teardown` (not `monitor-deploy`) —
     // read via the descriptor's TERMINAL_PHASE so a future pipeline change
@@ -4633,18 +4763,18 @@ export function schedulerTick(
     noProgressStopped,
     escalated,
     quarantinedPhantoms, // CTL-671 — phantom worker dirs stalled this tick
-    watchdogKilled,      // CTL-729 — kill-attempts DISPATCHED this tick (enforce mode); not confirmed kills (see Pass 0w)
-    watchdogWouldKill,   // CTL-729 — workers that WOULD be killed (shadow mode)
-    janitorReaped,       // CTL-1004 — targeted orphan reap-requests EMITTED this tick (enforce)
-    janitorWouldReap,    // CTL-1004 — orphan worktrees that WOULD be reap-requested (shadow)
-    janitorKillIntents,  // CTL-1004 — ghost-session kill-intents RECORDED this tick (enforce)
-    janitorWouldKill,    // CTL-1004 — ghost sessions that WOULD get a kill-intent (shadow)
-    janitorDeferred,     // CTL-1004 — dirty worktrees deferred (no removal, no queue)
+    watchdogKilled, // CTL-729 — kill-attempts DISPATCHED this tick (enforce mode); not confirmed kills (see Pass 0w)
+    watchdogWouldKill, // CTL-729 — workers that WOULD be killed (shadow mode)
+    janitorReaped, // CTL-1004 — targeted orphan reap-requests EMITTED this tick (enforce)
+    janitorWouldReap, // CTL-1004 — orphan worktrees that WOULD be reap-requested (shadow)
+    janitorKillIntents, // CTL-1004 — ghost-session kill-intents RECORDED this tick (enforce)
+    janitorWouldKill, // CTL-1004 — ghost sessions that WOULD get a kill-intent (shadow)
+    janitorDeferred, // CTL-1004 — dirty worktrees deferred (no removal, no queue)
     janitorStallsCleared, // CTL-1005 — prior-artifact-retry-exhausted stalls CLEARED this tick (enforce)
-    janitorWouldClear,   // CTL-1005 — stalls that WOULD be cleared (shadow)
-    unstuckActed,        // CTL-1064 — Pass 0u actions taken this tick (enforce)
-    unstuckWouldAct,     // CTL-1064 — Pass 0u would-act (shadow)
-    unstuckEscalated,    // CTL-1064 — Pass 0u escalations this tick (enforce)
+    janitorWouldClear, // CTL-1005 — stalls that WOULD be cleared (shadow)
+    unstuckActed, // CTL-1064 — Pass 0u actions taken this tick (enforce)
+    unstuckWouldAct, // CTL-1064 — Pass 0u would-act (shadow)
+    unstuckEscalated, // CTL-1064 — Pass 0u escalations this tick (enforce)
     unstuckWouldEscalate, // CTL-1064 — Pass 0u would-escalate (shadow)
     advanced,
     dispatched,
@@ -4825,7 +4955,7 @@ function runTick() {
           const evidenceBySubject = Object.fromEntries(
             (diagResult?.escalated ?? [])
               .filter((x) => x?.subject)
-              .map((x) => [x.subject, x.evidence ?? {}]),
+              .map((x) => [x.subject, x.evidence ?? {}])
           );
           executeEscalations(escDb, beliefsRes.tickId, {
             orchDir: runningOpts.orchDir,
@@ -5018,10 +5148,14 @@ function runTick() {
         // comment) unless an operator injects runningOpts.unstuckPostComment —
         // defaultPostUnstuckComment is NOT closed over orchDir here. Mirrors the
         // intentional actByCategory no-op above.
-        postComment: typeof runningOpts.unstuckPostComment === "function"
-          ? runningOpts.unstuckPostComment
-          : undefined,
+        postComment:
+          typeof runningOpts.unstuckPostComment === "function"
+            ? runningOpts.unstuckPostComment
+            : undefined,
       },
+      // CTL-1150: thread the triage-artifact predicate (undefined → inline
+      // existsSync default in schedulerTick; test seam via startScheduler).
+      hasTriageArtifact: runningOpts.hasTriageArtifact,
     });
     // CTL-863: host-death takeover sweep — complement to worker-death reclaim.
     // Skip entirely on single-host installs (no-op inside the function, but the
@@ -5107,6 +5241,10 @@ export function startScheduler({
   // CATALYST_INTENTS_ENFORCE=1, reconcileIntents emits events through this fn
   // instead of logging silently. Null/undefined → legacy shadow-only behavior.
   appendIntentEvent,
+  // CTL-1150: injectable triage-artifact predicate (test seam). Undefined →
+  // schedulerTick's inline existsSync default applies. Tests that are not
+  // exercising the triage gate inject () => true to unblock Pass 2 dispatch.
+  hasTriageArtifact = undefined,
   tickIntervalMs = TICK_INTERVAL_MS,
   debounceMs = TICK_DEBOUNCE_MS,
 } = {}) {
@@ -5132,6 +5270,7 @@ export function startScheduler({
     botUserIds, // CTL-781: respect-assignment predicate membership set
     botWriteId, // CTL-781: orchestrator bot UUID to write as assignee on claim
     appendIntentEvent, // CTL-936: operator-event seam for intent.ineffective
+    hasTriageArtifact, // CTL-1150: triage-artifact predicate for Pass 2
   };
 
   // CTL-585: warn once at startup if the Linear workspace lacks the labels

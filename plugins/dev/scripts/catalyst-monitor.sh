@@ -237,7 +237,10 @@ bootstrap() {
 
       # Complete the dist: copy non-vite static assets so the out-of-repo dir is a
       # full served root (server uses one publicDir for everything). Idempotent.
-      for _asset in history.html favicon.ico favicon.svg; do
+      # CTL-1133: manifest, service worker, and PWA icons join the served root.
+      for _asset in history.html favicon.ico favicon.svg \
+        manifest.webmanifest service-worker.js \
+        icon-192.png icon-512.png apple-touch-icon.png; do
         [[ -f "$MONITOR_DIR/public/$_asset" ]] && cp -f "$MONITOR_DIR/public/$_asset" "$MONITOR_UI_DIST_DIR/" 2>/dev/null || true
       done
       for _dir in vendor mockups; do

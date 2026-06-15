@@ -14,7 +14,7 @@
 import { execFile, execFileSync, spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { shortIdFromSessionId } from "./claude-ids.mjs";
+import { shortIdFromSessionId, isSelfSession } from "./claude-ids.mjs";
 import { getJobsRoot } from "./config.mjs";
 
 const CLAUDE_BIN = process.env.CATALYST_DISPATCH_CLAUDE_BIN || "claude";
@@ -432,9 +432,29 @@ export function defaultStatJobState(shortId) {
 // Terminal ghost sessions (state ∈ TERMINAL_JOB_STATES or firstTerminalAt set)
 // and dir-gone sessions are excluded so they cannot starve the admission gate.
 // The `statJob` seam (defaulting to defaultStatJobState) is injectable for tests.
-export function countBackgroundAgents({ agents, now, statJob = defaultStatJobState } = {}) {
+//
+// CTL-1165 (D1): exclude the daemon's OWN controlling background session from the
+// admission count. The scheduler's in-flight count IS this live `claude agents`
+// background count (scheduler.mjs:4247), so counting the daemon's own session
+// against maxParallel is a starve-by-1 (safe direction, but wrong). The self-skip
+// is the FIRST filter clause — a self session must never reach the kind/liveness
+// gates — and is keyed off CLAUDE_CODE_SESSION_ID via isSelfSession, which fails
+// CLOSED (env unset / malformed id → isSelf false → the session is still counted),
+// so the worst case stays the safe over-count direction. The `excludeSelf`/`env`
+// seams are injectable for tests; default behavior excludes self.
+export function countBackgroundAgents({
+  agents,
+  now,
+  statJob = defaultStatJobState,
+  env = process.env,
+  excludeSelf = true,
+  isSelf = isSelfSession,
+} = {}) {
   const list = agents ?? getAgentsCached(now ? { now } : {}).agents;
   return list.filter((a) => {
+    // CTL-1165: drop the controlling/self session FIRST — before kind/liveness —
+    // so the daemon's own background session never occupies an admission slot.
+    if (excludeSelf && a?.sessionId && isSelf(a.sessionId, env)) return false;
     if (a?.kind !== "background") return false; // unchanged: interactive/unknown excluded
     // CTL-1055: count only if the bg job is alive.
     let shortId;
