@@ -9,7 +9,7 @@ import { fileURLToPath } from "node:url";
 import { linearKeyForPhase, TERMINAL_LINEAR_KEY } from "../lib/phase-fsm.mjs";
 import { getProjectConfig } from "./registry.mjs";
 import { log } from "./config.mjs";
-import { fetchTicketLabels, readTicketLabels, readTicketLabelNodes, fetchTicketState } from "./linear-query.mjs";
+import { fetchTicketLabels, readTicketLabels, readTicketLabelNodes, fetchTicketState, fetchTicketDelegate } from "./linear-query.mjs";
 import { withBreaker } from "./linear-breaker.mjs";
 import { withAuthRemint, isAuthError } from "./linear-remint.mjs";
 // CTL-758: the SHARED Linear terminal-state predicate ({Done,Canceled} — its OWN
@@ -476,7 +476,7 @@ const _SCOPE_ERR_RE = /lack(s|ed)?\s+the\s+required\s+scope|app user not valid/i
 // {applied, reason} return, CTL-587-style read-back so applied:true means a
 // follow-up read confirmed the assignee landed. Never throws.
 // reason values: null | "invalid-user" | "transient" | "scope" | "verify-failed".
-export function applyAssignee({ ticket, userId, exec = defaultExec }) {
+export function applyAssignee({ ticket, userId, exec = defaultExec, fetchDelegate = fetchTicketDelegate }) {
   if (typeof userId !== "string" || userId.length === 0) {
     if (!_warnedSelfAssignDisabled.has("invalid-user")) {
       _warnedSelfAssignDisabled.add("invalid-user");
@@ -508,17 +508,11 @@ export function applyAssignee({ ticket, userId, exec = defaultExec }) {
       );
       return { applied: false, reason: "transient" };
     }
-    const readRes = exec("linearis", ["issues", "read", ticket]);
-    let actual = null;
-    try {
-      actual = JSON.parse(readRes.stdout ?? "")?.assignee?.id ?? null;
-    } catch {
-      /* unparseable read-back — falls through to verify-failed */
-    }
-    if (readRes.code !== 0 || actual !== userId) {
+    const { known, delegate } = fetchDelegate(ticket);
+    if (!known || delegate !== userId) {
       log.warn(
-        { ticket, userId, readback: actual },
-        "linear-write: assignee write exit-0 but read-back mismatch (silent-success gap)"
+        { ticket, userId, readback: known ? delegate : null },
+        "linear-write: assignee write exit-0 but delegate read-back mismatch (silent-success gap)"
       );
       return { applied: false, reason: "verify-failed" };
     }
