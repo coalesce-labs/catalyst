@@ -1792,6 +1792,25 @@ describe("dispatchTriage — CTL-781 respect-assignment + self-assign", () => {
     expect(applyTriageStatus).toHaveBeenCalledTimes(1);
     expect(appendEvent).toHaveBeenCalledTimes(1);
   });
+
+  test("botWriteId absent → applyAssignee still called with userId:undefined (loud-no-op, CTL-1011)", () => {
+    enroll("ENG", { status: "Ready" });
+    const dispatch = mock(() => ({ code: 0 }));
+    const applyAssignee = mock(() => ({ applied: false, reason: "invalid-user" }));
+    const fetchAssignee = () => ({ known: true, assignee: null });
+    handleStateChangedEvent(toTriageEvent("ENG-NU1"), {
+      dispatch,
+      orchDir,
+      botUserIds: new Set([BOT]),
+      // botWriteId intentionally absent
+      fetchAssignee,
+      applyAssignee,
+      triageBudget: { remaining: 5 },
+    });
+    expect(dispatch).toHaveBeenCalledTimes(1);
+    expect(applyAssignee).toHaveBeenCalledTimes(1);
+    expect(applyAssignee.mock.calls[0][0]).toMatchObject({ ticket: "ENG-NU1", userId: undefined });
+  });
 });
 
 describe("sweepMissingTriage — CTL-781 threading", () => {
