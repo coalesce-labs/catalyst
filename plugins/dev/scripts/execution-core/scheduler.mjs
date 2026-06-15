@@ -2623,6 +2623,16 @@ export function schedulerTick(
     // tests unaffected). Production wires the module-level beliefs db handle
     // via startScheduler → runTick when CATALYST_BELIEFS_SHADOW=1.
     intentDb = null,
+    // CTL-1150: injectable triage-artifact predicate for Pass 2. Default undefined
+    // → the inline existsSync default applies inside the loop. Tests inject
+    // `() => true` to opt out of the filesystem check when the subject is not
+    // the triage gate itself.
+    hasTriageArtifact = undefined,
+    // CTL-1150: injectable listStartedTickets override. Default undefined → the
+    // real listStartedTickets(orchDir) runs. Tests that seed triage.json (which
+    // creates workers/<ticket>/) inject `() => new Set()` so the seeded ticket
+    // is not excluded from Pass 2 by dir-existence before the guard fires.
+    listStartedTickets: listStartedTicketsOpt = undefined,
   } = {}
 ) {
   // CTL-850: resolve this host + the cluster roster ONCE per tick (cheap
@@ -4296,10 +4306,22 @@ export function schedulerTick(
   } else if (existsSync(drainedMarker)) {
     try { rmSync(drainedMarker, { force: true }); } catch { /* best-effort */ }
   }
+  // CTL-1150: resolve injectable seams before Pass 2 selection + dispatch loop.
+  // _hasTriageArtifact: default reads filesystem (mirroring monitor.mjs:667-669).
+  //   Kept inline (not imported from monitor.mjs) to avoid coupling two daemons.
+  //   Tests inject `() => true` to bypass when the subject is not the triage gate.
+  // _listStartedTickets: default is the real dir-scan. Tests seeding triage.json
+  //   (which creates workers/<ticket>/) inject `() => new Set()` to prevent the
+  //   seeded ticket from being excluded by dir-existence before the guard fires.
+  const _hasTriageArtifact =
+    hasTriageArtifact ??
+    ((dir, ticket) => existsSync(join(dir, "workers", ticket, "triage.json")));
+  const _listStartedTickets = listStartedTicketsOpt ?? listStartedTickets;
+
   // CTL-706: per-project caps + reserves gate selection AFTER ranking. With
   // no perProject config this is byte-for-byte selectDispatchable.
   // inFlightTickets was already computed above for the reclaim sweep.
-  const selected = selectDispatchablePerProject(ready, listStartedTickets(orchDir), freeSlots, {
+  const selected = selectDispatchablePerProject(ready, _listStartedTickets(orchDir), freeSlots, {
     perProject: concurrency?.perProject,
     inFlight: inFlightTickets,
   });
@@ -4314,6 +4336,22 @@ export function schedulerTick(
 
   const dispatched = [];
   for (const t of selected) {
+    // CTL-1150: hold an eligible candidate whose triage hasn't produced
+    // triage.json yet. The monitor defers triage under slot pressure
+    // (computeTriageBudget, CTL-716) and sweepMissingTriage retries; until then
+    // dispatching research trips phase-agent-dispatch's prior-artifact guard
+    // (research requires signal:triage.json) and emits spurious
+    // phase.research.failed + phase.dispatch.failed. Silent hold — no cooldown
+    // marker, no failure event — mirroring the CTL-781 assignee-unreadable hold.
+    // The candidate stays in the eligible set and dispatches next tick once
+    // triage.json lands.
+    if (!_hasTriageArtifact(orchDir, t.identifier)) {
+      log.debug(
+        { ticket: t.identifier },
+        "ctl-1150: new-work candidate not yet triaged (no triage.json) — holding"
+      );
+      continue;
+    }
     if (inDispatchCooldown(orchDir, t.identifier, NEW_WORK_ENTRY_PHASE, now())) continue; // CTL-624: throttle refused re-dispatch
     // CTL-537: sequencing gate — only when a worker is already in-flight and a
     // seam is wired. Fail-open verdicts dispatch normally.
@@ -4528,7 +4566,7 @@ export function schedulerTick(
       }
     : writeStatus;
 
-  for (const ticket of listStartedTickets(orchDir)) {
+  for (const ticket of _listStartedTickets(orchDir)) {
     const signals = readPhaseSignals(orchDir, ticket);
     // CTL-703: the terminal phase is now `teardown` (not `monitor-deploy`) —
     // read via the descriptor's TERMINAL_PHASE so a future pipeline change
@@ -5022,6 +5060,9 @@ function runTick() {
           ? runningOpts.unstuckPostComment
           : undefined,
       },
+      // CTL-1150: thread the triage-artifact predicate (undefined → inline
+      // existsSync default in schedulerTick; test seam via startScheduler).
+      hasTriageArtifact: runningOpts.hasTriageArtifact,
     });
     // CTL-863: host-death takeover sweep — complement to worker-death reclaim.
     // Skip entirely on single-host installs (no-op inside the function, but the
@@ -5107,6 +5148,10 @@ export function startScheduler({
   // CATALYST_INTENTS_ENFORCE=1, reconcileIntents emits events through this fn
   // instead of logging silently. Null/undefined → legacy shadow-only behavior.
   appendIntentEvent,
+  // CTL-1150: injectable triage-artifact predicate (test seam). Undefined →
+  // schedulerTick's inline existsSync default applies. Tests that are not
+  // exercising the triage gate inject () => true to unblock Pass 2 dispatch.
+  hasTriageArtifact = undefined,
   tickIntervalMs = TICK_INTERVAL_MS,
   debounceMs = TICK_DEBOUNCE_MS,
 } = {}) {
@@ -5132,6 +5177,7 @@ export function startScheduler({
     botUserIds, // CTL-781: respect-assignment predicate membership set
     botWriteId, // CTL-781: orchestrator bot UUID to write as assignee on claim
     appendIntentEvent, // CTL-936: operator-event seam for intent.ineffective
+    hasTriageArtifact, // CTL-1150: triage-artifact predicate for Pass 2
   };
 
   // CTL-585: warn once at startup if the Linear workspace lacks the labels
