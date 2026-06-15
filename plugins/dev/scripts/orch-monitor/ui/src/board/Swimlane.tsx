@@ -87,7 +87,11 @@ import type { Density } from "./prefs-store";
 // the header cells, the group-label divider, and every lane cell sit on the SAME
 // grid tracks and scroll as one. The board height reads the shell --cat-board-vh
 // var minus the subhead offset, exactly as the prior BoardScroll did.
-const COL_W = 300;
+// CTL-1168: matched to Linear's measured board — a FIXED 348px column (324px card
+// + 12px L/R padding). Linear's columns do NOT flex with viewport width (identical
+// 1280→2560px); wider screens just reveal more columns. We drop the `minmax(_, 1fr)`
+// stretch (which spread columns far apart on wide screens) for this fixed track.
+const COL_W = 348;
 
 // ── CTL-973 swipe-fix constants ───────────────────────────────────────────────
 // Exported for test assertions (see swimlane-scroll.test.ts).
@@ -139,10 +143,12 @@ export function swipeBlockDirection(
   if (atRight && deltaX > 0) return "right";
   return null;
 }
-// CTL-1168: tighter Linear gutters — COL_GAP 16→10, PAD_X 16→12. Narrower inter-
-// column gutter + a slimmer left/right board inset (less dead space between the
-// left nav and the first column) without crowding the cards.
-const COL_GAP = 10;
+// CTL-1168: tighter Linear gutters. Linear's columns are flush (0 gap) with the
+// gutter coming from 12px L/R padding inside each column; with our column trays
+// (borders) a small 8px gap keeps adjacent trays visually distinct while reading
+// as a tight set. PAD_X is the board's left/right inset — slimmer so the first
+// column sits close to the left nav.
+const COL_GAP = 8;
 const PAD_X = 12;
 
 /** CTL-1168: the board's TOP padding — shared by the sticky ColumnHeaderRow and
@@ -224,7 +230,7 @@ function ColumnHeaderRow({ columns }: { columns: SharedColumn[] }) {
       data-board-colheader="true"
       style={{
         display: "grid",
-        gridTemplateColumns: `repeat(${columns.length}, minmax(${COL_W}px, 1fr))`,
+        gridTemplateColumns: `repeat(${columns.length}, ${COL_W}px)`,
         gap: COL_GAP,
         // CTL-1144: top padding for comfortable board breathing room.
         // CTL-1168: BOARD_TOP_PAD shared with the LaneBackdrop so the band caps at
@@ -284,7 +290,7 @@ function LaneBackdrop({ count }: { count: number }) {
         zIndex: 0,
         pointerEvents: "none",
         display: "grid",
-        gridTemplateColumns: `repeat(${count}, minmax(${COL_W}px, 1fr))`,
+        gridTemplateColumns: `repeat(${count}, ${COL_W}px)`,
         gap: COL_GAP,
         padding: `${BOARD_TOP_PAD}px ${PAD_X}px 16px`,
       }}
@@ -457,7 +463,7 @@ function LaneCardsRow({
       data-lane-key={laneKey}
       style={{
         display: "grid",
-        gridTemplateColumns: `repeat(${cells.length}, minmax(${COL_W}px, 1fr))`,
+        gridTemplateColumns: `repeat(${cells.length}, ${COL_W}px)`,
         gap: COL_GAP,
         padding: `6px ${PAD_X}px 16px`,
         // CTL-1144 / CTL-1168: grow to fill leftover vertical space ONLY when the
