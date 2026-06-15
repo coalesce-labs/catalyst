@@ -39,6 +39,8 @@ import { useNavSignal, NavSignalContext } from "@/hooks/use-nav-signal";
 import { useClusterSignal, ClusterSignalContext } from "@/hooks/use-cluster-signal";
 // CTL-1100: lift useBeliefs into AppShell so no surface opens a second EventSource.
 import { useBeliefs, BeliefsContext } from "@/hooks/use-beliefs";
+// CTL-1172: lift /api/health/services poll to AppShell so footer + FleetOps share one fetch.
+import { useServiceHealth, ServiceHealthContext } from "@/hooks/use-service-health";
 import {
   readSidebarOpen,
   writeSidebarOpen,
@@ -156,6 +158,8 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const clusterSignal = useClusterSignal();
   // CTL-1100: single belief stream subscription — surfaces use useBeliefsContext().
   const beliefsState = useBeliefs();
+  // CTL-1172: single /api/health/services poll — footer + FleetOps read ServiceHealthContext.
+  const serviceHealth = useServiceHealth();
 
   // Persist collapse state across reloads (the controlled provider replaces the
   // primitive's cookie path; localStorage is the source of truth here). Logic +
@@ -354,6 +358,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const crumbs = detailId != null ? [...baseCrumbs, detailId] : baseCrumbs;
 
   return (
+    <ServiceHealthContext.Provider value={serviceHealth}>
     <BeliefsContext.Provider value={beliefsState}>
     <NavSignalContext.Provider value={navSignal}>
     <ClusterSignalContext.Provider value={clusterSignal}>
@@ -539,5 +544,6 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     </ClusterSignalContext.Provider>
     </NavSignalContext.Provider>
     </BeliefsContext.Provider>
+    </ServiceHealthContext.Provider>
   );
 }

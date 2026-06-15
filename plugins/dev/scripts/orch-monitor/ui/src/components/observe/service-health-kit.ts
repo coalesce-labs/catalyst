@@ -2,6 +2,8 @@
 // (CTL-1050 §2). React-free severity→token mapping, the catalyst-plane-first
 // ordering, and the last-checked label — unit-testable in isolation so the strip
 // component owns no branching logic. Mirrors fleetops-kit.ts / hero-state.ts.
+import type { ClusterNodeStatus } from "@/lib/cluster-signal";
+import type { DaemonHealth } from "@/lib/nav-signal";
 
 /** The four shared severities (kept in lock-step with lib/service-health.ts —
  *  this is a UI mirror so the ui/ module graph stays self-contained). */
@@ -129,4 +131,53 @@ export function hoverText(s: ServiceStatusView): string {
   }
   if (s.detail) lines.push(s.detail);
   return lines.join("\n");
+}
+
+// ── worstSeverity (CTL-1172) ──────────────────────────────────────────────────
+
+/** Escalation rank; higher wins. 'unknown' is absent — it is non-escalating. */
+const SEVERITY_RANK: Record<"up" | "degraded" | "down", number> = { up: 0, degraded: 1, down: 2 };
+
+export interface WorstSeverityInput {
+  services: ServiceStatusView[] | null;
+  unavailable: boolean;
+  nodeStatuses?: readonly ClusterNodeStatus[];
+  daemonHealth?: DaemonHealth | null;
+}
+
+function nodeContribution(status: ClusterNodeStatus): "up" | "degraded" | "down" {
+  if (status === "offline") return "down";
+  if (status === "degraded") return "degraded";
+  return "up";
+}
+
+function daemonContribution(health: DaemonHealth): "up" | "degraded" | "down" {
+  if (health === "offline") return "down";
+  if (health === "degraded") return "degraded";
+  return "up";
+}
+
+/**
+ * Fold node + daemon liveness + every service severity into one overall
+ * ServiceSeverity. Rank: down > degraded > up. 'unknown' is NON-ESCALATING:
+ * an unknown service is skipped (never masks a down, never greys an up fleet).
+ * The ONLY path that returns 'unknown' is fail-open: unavailable===true OR
+ * services===null. services===[] is loaded-with-zero, not fail-open.
+ */
+export function worstSeverity(input: WorstSeverityInput): ServiceSeverity {
+  if (input.unavailable || input.services === null) return "unknown";
+  let rank = SEVERITY_RANK.up;
+  for (const s of input.services) {
+    if (s.severity === "unknown") continue;
+    rank = Math.max(rank, SEVERITY_RANK[s.severity]);
+  }
+  for (const status of input.nodeStatuses ?? []) {
+    rank = Math.max(rank, SEVERITY_RANK[nodeContribution(status)]);
+  }
+  if (input.daemonHealth != null) {
+    rank = Math.max(rank, SEVERITY_RANK[daemonContribution(input.daemonHealth)]);
+  }
+  if (rank === SEVERITY_RANK.down) return "down";
+  if (rank === SEVERITY_RANK.degraded) return "degraded";
+  return "up";
 }
