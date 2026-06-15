@@ -4030,10 +4030,16 @@ export function createServer(opts: CreateServerOptions): BunServer {
             };
             const report = await computeReportJson({ dbPath: govDbPath(), sinceMs, nowMs });
             return Response.json(report);
-          } catch {
+          } catch (err) {
+            // CTL-935 remediate: tag the error-path payload as degraded so the
+            // flag-live helper / operator can tell a broken report (failed
+            // import, corrupt/locked db) from a legitimately quiet week. The
+            // shape stays well-formed (200) so existing consumers don't break.
             return Response.json({
               window: { sinceMs, nowMs, tickCount: 0, rulesShaSet: [], multipleRulesSha: false },
               perRule: [], perGuard: [], replays: [],
+              degraded: true,
+              degradedReason: err instanceof Error ? err.message : String(err),
             });
           }
         }

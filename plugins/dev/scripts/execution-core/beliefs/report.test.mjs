@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 
 import { openBeliefsDb } from "./schema.mjs";
 import { LEGACY_GUARDS } from "./guards.mjs";
-import { computeReport, renderMarkdown, renderJson } from "./report.mjs";
+import { computeReport, renderMarkdown, renderJson, main } from "./report.mjs";
 
 const NOW_MS = 1_800_000_000_000; // arbitrary frozen now
 const DAY_MS = 86_400_000;
@@ -220,11 +220,107 @@ describe("renderJson", () => {
     // Must be valid JSON (no Map/Set leakage)
     expect(() => JSON.parse(json)).not.toThrow();
     const parsed = JSON.parse(json);
-    // All top-level keys present
-    expect(Object.keys(parsed).sort()).toEqual(["perGuard", "perRule", "replays", "window"]);
+    // All top-level keys present (incl. CTL-935 remediate degraded markers).
+    expect(Object.keys(parsed).sort()).toEqual(["degraded", "degradedReason", "perGuard", "perRule", "replays", "window"]);
     // Structure preserved through round-trip
     expect(parsed.window.sinceMs).toBe(0);
     expect(Array.isArray(parsed.perGuard)).toBe(true);
     expect(Array.isArray(parsed.replays)).toBe(true);
+    // Healthy path is not degraded.
+    expect(parsed.degraded).toBe(false);
+    expect(parsed.degradedReason).toBe(null);
+  });
+});
+
+// ── degraded marker (CTL-935 remediate) ───────────────────────────────────────
+// A query/schema error must leave a `degraded` flag instead of silently
+// returning a partial report that reads as "100% agreement, no disagreements".
+
+describe("degraded marker on query error", () => {
+  test("computeReport sets degraded=true + reason when a query throws", () => {
+    // Stub a db whose .query throws — simulates schema drift / locked db AFTER
+    // the (here also throwing) first query. Never propagates per shadow contract.
+    const throwingDb = {
+      query() { throw new Error("no such table: shadow_comparison"); },
+    };
+    const report = computeReport(throwingDb, { sinceMs: 0, nowMs: NOW_MS });
+    expect(report.degraded).toBe(true);
+    expect(report.degradedReason).toContain("shadow_comparison");
+    // Still well-formed — callers can render without crashing.
+    expect(Array.isArray(report.perRule)).toBe(true);
+    expect(Array.isArray(report.perGuard)).toBe(true);
+  });
+
+  test("healthy report is degraded=false", () => {
+    const t = insertTick();
+    insertCmp({ tickId: t, dimension: "reclaim", subject: "CTL-1/plan", agree: 1, ruleId: "R7" });
+    const report = computeReport(db, { sinceMs: 0, nowMs: NOW_MS });
+    expect(report.degraded).toBe(false);
+    expect(report.degradedReason).toBe(null);
+  });
+
+  test("renderMarkdown surfaces a 'Report incomplete' banner when degraded", () => {
+    const degradedReport = {
+      window: { sinceMs: 0, nowMs: NOW_MS, tickCount: 5, rulesShaSet: [], multipleRulesSha: false },
+      perRule: [], perGuard: [], replays: [],
+      degraded: true, degradedReason: "no such table: shadow_comparison",
+    };
+    const md = renderMarkdown(degradedReport);
+    expect(md).toContain("Report incomplete");
+    expect(md).toContain("shadow_comparison");
+  });
+});
+
+// ── main (CLI entry) — CTL-935 remediate coverage ─────────────────────────────
+// report.test.mjs previously imported only the pure functions; main() (arg
+// parsing, openBeliefsDb wiring via CATALYST_BELIEFS_DB, db.close in finally)
+// was untested. Drive it against a scratch db via an injected env.
+
+describe("main (CLI entry)", () => {
+  function scratchEnv() {
+    const d = mkdtempSync(join(tmpdir(), "ctl935-report-main-"));
+    tmps.push(d);
+    return { CATALYST_BELIEFS_DB: join(d, "b.db") };
+  }
+
+  test("default (markdown) returns 0 and prints the report header", () => {
+    const out = [];
+    const code = main([], { env: scratchEnv(), out: (s) => out.push(s) });
+    expect(code).toBe(0);
+    expect(out.join("\n")).toContain("Belief Shadow Disagreement Report");
+  });
+
+  test("--json returns 0 and prints parseable JSON", () => {
+    const out = [];
+    const code = main(["--json"], { env: scratchEnv(), out: (s) => out.push(s) });
+    expect(code).toBe(0);
+    expect(() => JSON.parse(out.join("\n"))).not.toThrow();
+  });
+
+  test("--since-days 1 is accepted (narrow window, still 0)", () => {
+    const out = [];
+    const code = main(["--since-days", "1", "--json"], { env: scratchEnv(), out: (s) => out.push(s) });
+    expect(code).toBe(0);
+    const parsed = JSON.parse(out.join("\n"));
+    // 1-day window: sinceMs is within ~a day of nowMs.
+    expect(parsed.window.nowMs - parsed.window.sinceMs).toBe(DAY_MS);
+  });
+
+  test("--since-days 0 falls back to the 7-day default (not a 0-width window)", () => {
+    const out = [];
+    const code = main(["--since-days", "0", "--json"], { env: scratchEnv(), out: (s) => out.push(s) });
+    expect(code).toBe(0);
+    const parsed = JSON.parse(out.join("\n"));
+    expect(parsed.window.nowMs - parsed.window.sinceMs).toBe(7 * DAY_MS);
+  });
+
+  test("--since-days 9999 is accepted with NO upper clamp (documents CLI/endpoint divergence)", () => {
+    const out = [];
+    const code = main(["--since-days", "9999", "--json"], { env: scratchEnv(), out: (s) => out.push(s) });
+    expect(code).toBe(0);
+    const parsed = JSON.parse(out.join("\n"));
+    // The HTTP endpoint clamps to [1,90]; the CLI does not. This asserts the
+    // current (intentional) divergence so a future clamp change is a conscious one.
+    expect(parsed.window.nowMs - parsed.window.sinceMs).toBe(9999 * DAY_MS);
   });
 });

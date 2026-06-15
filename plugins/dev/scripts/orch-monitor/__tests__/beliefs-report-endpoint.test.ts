@@ -236,4 +236,21 @@ describe("GET /api/beliefs/report graceful degradation (absent db)", () => {
     expect(body.perGuard).toEqual([]);
     expect(Array.isArray(body.replays)).toBe(true);
   });
+
+  // CTL-935 remediate: an absent/empty db is a *legitimately* quiet week, not a
+  // machinery error — it must NOT be flagged degraded. Only a thrown error in
+  // the import/open/compute chain sets degraded:true, so the flag-live helper
+  // can tell "no disagreements" (healthy) from "report broke" (false confidence).
+  it("absent db is NOT degraded (legitimately empty, not an error)", async () => {
+    const res = await fetch(`${absentUrl}/api/beliefs/report`);
+    expect(res.status).toBe(200);
+    const body = await res.json() as { degraded?: boolean };
+    expect(body.degraded ?? false).toBe(false);
+  });
+
+  it("seeded db report is NOT degraded", async () => {
+    const res = await fetch(`${seededUrl}/api/beliefs/report`);
+    const body = await res.json() as { degraded?: boolean };
+    expect(body.degraded ?? false).toBe(false);
+  });
 });

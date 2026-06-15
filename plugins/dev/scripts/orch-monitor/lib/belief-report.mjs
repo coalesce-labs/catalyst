@@ -25,13 +25,20 @@ async function getReader() {
 //   2. If absent/unreadable returns an empty-but-well-formed report.
 //   3. Calls computeReport, closes in finally, returns JSON-serialisable result.
 export async function computeReportJson({ dbPath, sinceMs = null, nowMs = null } = {}) {
-  const emptyReport = {
+  // CTL-935 remediate: distinguish "beliefs.db genuinely absent / empty"
+  // (degraded:false — a legitimately quiet week) from "report machinery errored"
+  // (degraded:true). Without this, the three-layer collapse (computeReport →
+  // computeReportJson → endpoint) makes "no disagreements" ambiguous between
+  // healthy and broken, which could give false confidence before a gate-flip.
+  const emptyReport = (degraded = false, degradedReason = null) => ({
     window: { sinceMs: sinceMs ?? 0, nowMs: nowMs ?? Date.now(), tickCount: 0, rulesShaSet: [], multipleRulesSha: false },
     perRule: [],
     perGuard: [],
     replays: [],
-  };
-  if (!dbPath) return emptyReport;
+    degraded,
+    degradedReason,
+  });
+  if (!dbPath) return emptyReport();
   try {
     const [mod, reader] = await Promise.all([getReport(), getReader()]);
     const { computeReport } = mod;
@@ -39,12 +46,12 @@ export async function computeReportJson({ dbPath, sinceMs = null, nowMs = null }
     let db = null;
     try {
       db = await openBeliefsDbRO(dbPath);
-      if (!db) return emptyReport;
+      if (!db) return emptyReport(); // DB absent/unreadable — legitimately empty.
       return computeReport(db, { sinceMs, nowMs });
     } finally {
       try { db?.close(); } catch { /* best-effort */ }
     }
-  } catch {
-    return emptyReport;
+  } catch (err) {
+    return emptyReport(true, err?.message ?? String(err));
   }
 }

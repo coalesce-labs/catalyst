@@ -14,13 +14,18 @@ verbs:
                   --json          output JSON instead of text
 `;
 
-export function main(argv = process.argv.slice(2), opts = {}) {
+// CTL-935: async so the entry guard can `await` it. `beliefs-status` delegates
+// to the ASYNC shadowStatusMain (it opens beliefs.db via a dynamic import), so a
+// sync main() would hand a Promise to process.exit() and crash with
+// ERR_INVALID_ARG_TYPE on every invocation. `await` resolves both the sync
+// (report) and async (beliefs-status) verb results to a numeric exit code.
+export async function main(argv = process.argv.slice(2), opts = {}) {
   const [verb, ...rest] = argv;
   switch (verb) {
     case "report":
-      return reportMain(rest, opts);
+      return await reportMain(rest, opts);
     case "beliefs-status":
-      return shadowStatusMain(rest, opts);
+      return await shadowStatusMain(rest, opts);
     default: {
       const out = opts.out ?? console.error;
       out(USAGE.trim());
@@ -30,5 +35,5 @@ export function main(argv = process.argv.slice(2), opts = {}) {
 }
 
 if (import.meta.main) {
-  process.exit(main(process.argv.slice(2)));
+  main(process.argv.slice(2)).then((code) => process.exit(code ?? 0));
 }

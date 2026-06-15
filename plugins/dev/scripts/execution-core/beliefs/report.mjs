@@ -24,6 +24,8 @@ export function computeReport(db, { sinceMs = null, nowMs = null } = {}) {
   let window = { sinceMs: resolvedSince, nowMs: resolvedNow, tickCount: 0, rulesShaSet: [] };
   let perRule = [];
   let perGuard = [];
+  let degraded = false;       // CTL-935 remediate: set true if a query throws.
+  let degradedReason = null;  // so callers can tell "errored" from "quiet week".
   const replays = runReplays(db);
 
   try {
@@ -96,11 +98,17 @@ export function computeReport(db, { sinceMs = null, nowMs = null } = {}) {
       legacy_guard: g, total: 0, agree: 0, disagree: 0,
       rule_id: null, procedural: null, belief: null, differing_input: null,
     });
-  } catch {
-    // Shadow contract: report errors must not propagate to callers.
+  } catch (err) {
+    // Shadow contract: report errors must not propagate to callers. But flag
+    // the result as degraded (CTL-935 remediate) so a query/schema failure that
+    // leaves perRule/perGuard partial isn't misread as "100% agreement". A LATER
+    // query throwing can leave tickCount non-zero while the tables are empty —
+    // degraded distinguishes that from a legitimately quiet window.
+    degraded = true;
+    degradedReason = err?.message ?? String(err);
   }
 
-  return { window, perRule, perGuard, replays };
+  return { window, perRule, perGuard, replays, degraded, degradedReason };
 }
 
 // runReplays — run the three reference incident replays.
@@ -140,6 +148,11 @@ export function renderMarkdown(report) {
   const sinceDate = new Date(window.sinceMs).toISOString().slice(0, 10);
   const nowDate = new Date(window.nowMs).toISOString().slice(0, 10);
   lines.push(`## Belief Shadow Disagreement Report`);
+  if (report.degraded) {
+    // CTL-935 remediate: a report-machinery error left the tables partial.
+    // Banner it so an empty/partial table isn't misread as "no disagreements".
+    lines.push(`> ⚠️ **Report incomplete** — a query errored${report.degradedReason ? ` (${report.degradedReason})` : ""}; counts below may be partial.`);
+  }
   lines.push(`**Window**: ${sinceDate} → ${nowDate}  `);
   lines.push(`**Ticks**: ${window.tickCount}  `);
   lines.push(`**rules_sha**: ${window.rulesShaSet.length === 0 ? "n/a" : window.rulesShaSet.join(", ")}  `);

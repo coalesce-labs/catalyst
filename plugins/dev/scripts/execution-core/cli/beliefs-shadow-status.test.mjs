@@ -1,8 +1,15 @@
 // cli/beliefs-shadow-status.test.mjs — CTL-935 Phase 6: flag-live verification.
 // Run: cd plugins/dev/scripts/execution-core && bun test cli/beliefs-shadow-status.test.mjs
 
-import { describe, test, expect } from "bun:test";
-import { computeShadowStatus, STALE_THRESHOLD_MS, CONTIGUITY_GAP_THRESHOLD_MS } from "./beliefs-shadow-status.mjs";
+import { describe, test, expect, afterEach } from "bun:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
+import {
+  computeShadowStatus, STALE_THRESHOLD_MS, CONTIGUITY_GAP_THRESHOLD_MS,
+  queryBeliefStats, renderText, main,
+} from "./beliefs-shadow-status.mjs";
+import { openBeliefsDb } from "../beliefs/schema.mjs";
 
 const NOW = 1_000_000_000; // fixed reference epoch for all tests
 
@@ -231,5 +238,138 @@ describe("exported threshold constants", () => {
 
   test("CONTIGUITY_GAP_THRESHOLD_MS is positive", () => {
     expect(CONTIGUITY_GAP_THRESHOLD_MS).toBeGreaterThan(0);
+  });
+});
+
+// ─── queryBeliefStats — live beliefs.db reader (CTL-935 remediate coverage) ────
+// The LAG() OVER (ORDER BY now_ms) max-consecutive-gap SQL and the <2-tick
+// null-gap branch were untested. Seed a real scratch db and assert the metrics.
+
+const tmps = [];
+function scratchDb() {
+  const d = mkdtempSync(join(tmpdir(), "ctl935-shadow-status-"));
+  tmps.push(d);
+  return openBeliefsDb({ path: join(d, "b.db") });
+}
+function seedTick(db, nowMs) {
+  db.run("INSERT INTO tick (now_ms, host) VALUES (?, ?)", [nowMs, "mini"]);
+}
+afterEach(() => {
+  while (tmps.length) {
+    try { rmSync(tmps.pop(), { recursive: true, force: true }); } catch { /* */ }
+  }
+});
+
+describe("queryBeliefStats", () => {
+  test("zero ticks → count 0, null latest, null gap", () => {
+    const db = scratchDb();
+    try {
+      const stats = queryBeliefStats(db);
+      expect(stats.tickCount).toBe(0);
+      expect(stats.latestTickMs).toBe(null);
+      expect(stats.tickGapMs).toBe(null);
+    } finally { db.close(); }
+  });
+
+  test("single tick → count 1, latest set, gap null (<2 ticks)", () => {
+    const db = scratchDb();
+    try {
+      seedTick(db, 1_000);
+      const stats = queryBeliefStats(db);
+      expect(stats.tickCount).toBe(1);
+      expect(stats.latestTickMs).toBe(1_000);
+      expect(stats.tickGapMs).toBe(null);
+    } finally { db.close(); }
+  });
+
+  test("N ticks → latest = max, tickGapMs = max consecutive gap", () => {
+    const db = scratchDb();
+    try {
+      // Gaps: 500, 2000, 300 → max consecutive gap is 2000.
+      [1_000, 1_500, 3_500, 3_800].forEach((t) => seedTick(db, t));
+      const stats = queryBeliefStats(db);
+      expect(stats.tickCount).toBe(4);
+      expect(stats.latestTickMs).toBe(3_800);
+      expect(stats.tickGapMs).toBe(2_000);
+    } finally { db.close(); }
+  });
+
+  test("returns null when the db handle throws", () => {
+    const throwingDb = { query() { throw new Error("db closed"); } };
+    expect(queryBeliefStats(throwingDb)).toBe(null);
+  });
+});
+
+// ─── renderText — per-verdict text rendering ──────────────────────────────────
+
+describe("renderText", () => {
+  test("INACTIVE renders status/passed/source, no age/gap lines", () => {
+    const txt = renderText(computeShadowStatus({ flagActive: false, flagSource: "config", nowMs: NOW }));
+    expect(txt).toContain("status:  INACTIVE");
+    expect(txt).toContain("passed:  false");
+    expect(txt).toContain("source:  config");
+    expect(txt).not.toContain("age:");
+  });
+
+  test("env-override surfaces the durability warning", () => {
+    const txt = renderText(computeShadowStatus({
+      flagActive: true, flagSource: "env-override",
+      latestTickMs: NOW - 5_000, tickCount: 3, tickGapMs: 1_000, nowMs: NOW,
+    }));
+    expect(txt).toContain("warning: flag set via env-override");
+    expect(txt).toContain("age:");
+  });
+
+  test("CONTIGUITY-VIOLATION renders the gap line", () => {
+    const txt = renderText(computeShadowStatus({
+      flagActive: true, flagSource: "config",
+      latestTickMs: NOW - 1_000, tickCount: 5,
+      tickGapMs: CONTIGUITY_GAP_THRESHOLD_MS + 1, nowMs: NOW,
+    }));
+    expect(txt).toContain("gap:");
+    expect(txt).toContain("contiguity violation");
+  });
+});
+
+// ─── main (CLI entry) — async dispatch + exit codes ───────────────────────────
+
+describe("main (CLI entry)", () => {
+  test("flag off → INACTIVE, resolves to numeric exit 1", async () => {
+    const out = [];
+    const code = await main([], { env: {}, out: (s) => out.push(s) });
+    expect(typeof code).toBe("number");
+    expect(code).toBe(1);
+    expect(out.join("\n")).toContain("INACTIVE");
+  });
+
+  test("--json emits a parseable result object", async () => {
+    const out = [];
+    const code = await main(["--json"], { env: {}, out: (s) => out.push(s) });
+    expect(typeof code).toBe("number");
+    const parsed = JSON.parse(out.join("\n"));
+    expect(parsed).toHaveProperty("status");
+    expect(parsed).toHaveProperty("passed");
+  });
+
+  test("--db at a seeded scratch db + flag on → reads ticks, ACTIVE/exit 0", async () => {
+    const d = mkdtempSync(join(tmpdir(), "ctl935-shadow-main-"));
+    tmps.push(d);
+    const dbPath = join(d, "b.db");
+    const db = openBeliefsDb({ path: dbPath });
+    const now = Date.now();
+    // Two fresh, contiguous ticks → ACTIVE.
+    seedTick(db, now - 2_000);
+    seedTick(db, now - 1_000);
+    db.close();
+    const out = [];
+    const code = await main(["--db", dbPath, "--json"], {
+      env: { CATALYST_BELIEFS_SHADOW: "1" },
+      out: (s) => out.push(s),
+    });
+    expect(typeof code).toBe("number");
+    const parsed = JSON.parse(out.join("\n"));
+    expect(parsed.status).toBe("ACTIVE");
+    expect(parsed.passed).toBe(true);
+    expect(code).toBe(0);
   });
 });
