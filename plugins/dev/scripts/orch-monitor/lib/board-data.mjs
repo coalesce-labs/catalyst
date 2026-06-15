@@ -222,13 +222,13 @@ export const PHASE_TO_LINEAR = {
 // synthesizeQueuedTicket — build a thin BoardTicket from an eligible queue entry
 // so it renders in the "Todo" Kanban column (CTL-767). All agent/cost/phase-summary
 // fields default to null / empty since there is no worker dir for these tickets.
-export function synthesizeQueuedTicket(e, linfo, relationBlockerMap = new Map()) {
+export function synthesizeQueuedTicket(e, linfo, relationBlockerMap = new Map(), teamRepoMap = {}) {
   const li = linfo[e.id] ?? {};
   return {
     id: e.id,
     title: e.title || e.id,
     type: "task",
-    repo: e.repo || repoFor(e.id),
+    repo: e.repo || repoForWith(teamRepoMap, e.id),
     team: e.team || teamFor(e.id),
     phase: "queued",
     status: "queued",
@@ -326,6 +326,11 @@ export const repoFor = (ticket) => {
   return TEAM_REPO[prefix] || prefix.toLowerCase();
 };
 export const teamFor = (ticket) => String(ticket).split("-")[0];
+// repoForWith — explicit-map variant (for tests and project-roster). Returns
+// "unconfigured" for unknown prefixes (the board-data-team-repo.test.ts contract).
+export function repoForWith(map, ticket) {
+  return map[String(ticket).split("-")[0].toUpperCase()] || "unconfigured";
+}
 
 async function readJSON(path, fallback = null) {
   try { return JSON.parse(await readFile(path, "utf8")); } catch { return fallback; }
@@ -1031,7 +1036,7 @@ async function catalystSessionByCcUuid() {
 // local compareQueued (priority → createdAt → id), and comparator-identical to
 // the scheduler forever.
 
-async function loadEligible() {
+async function loadEligible(teamRepoMap = {}) {
   const out = [];
   if (!(await exists(ELIGIBLE_DIR))) return out;
   let files;
@@ -1047,7 +1052,7 @@ async function loadEligible() {
       out.push({
         id, title: t.title || id, priority: t.priority ?? 0,
         createdAt: t.createdAt || "", state: t.state || null,
-        repo: repoFor(id), team: teamFor(id),
+        repo: repoForWith(teamRepoMap, id), team: teamFor(id),
       });
     }
   }
@@ -1125,7 +1130,7 @@ async function loadDispatchCooldowns(now) {
 // ── main assembly ───────────────────────────────────────────────────────────
 export async function assembleBoard({ getPrStatus = null } = {}) {
   const [agents, costs, phaseCostsByTicket, eligible, linfo, mp, catalystSessByUuid, cooldowns] = await Promise.all([
-    liveAgents(), costByTicket(), costByPhase(), loadEligible(), linearInfo(), maxParallel(),
+    liveAgents(), costByTicket(), costByPhase(), loadEligible(TEAM_REPO), linearInfo(), maxParallel(),
     catalystSessionByCcUuid(), loadDispatchCooldowns(Date.now()),
   ]);
   const eligibleIndex = Object.fromEntries(eligible.map((e) => [e.id, e]));
@@ -1435,7 +1440,7 @@ export async function assembleBoard({ getPrStatus = null } = {}) {
   // ANY worker dir is already surfaced as live / between-phases above, so it is
   // excluded here (cardTicketIds) — it is accounted for, not duplicated.
   const notInFlight = eligible.filter((e) => !cardTicketIds.has(e.id));
-  const queuedTickets = notInFlight.map((e) => synthesizeQueuedTicket(e, linfo, relationBlockerMap));
+  const queuedTickets = notInFlight.map((e) => synthesizeQueuedTicket(e, linfo, relationBlockerMap, TEAM_REPO));
   tickets = [...liveTickets, ...betweenPhases, ...recentDone, ...queuedTickets];
 
   // priority queue: eligible (not yet in-flight), globally ranked (Queue tab)
