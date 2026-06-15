@@ -208,6 +208,28 @@ export {
  */
 export const BROKER_HANDOFF_MAX_AGE_MS = 5 * 60_000;
 
+// CTL-1171: cadence for the broker's own periodic liveness heartbeat. The monitor
+// classifies broker health by event-log recency (service.name=catalyst.broker:
+// degraded > 3m, down > 10m), but the broker otherwise emits events ONLY on
+// activity/state-change — so an idle broker (no registered interests, no webhooks)
+// goes silent and false-reports "down". A 60s heartbeat keeps recency fresh with a
+// comfortable margin under the 3m degraded line. Env-tunable.
+export const BROKER_HEARTBEAT_INTERVAL_MS =
+  Number(process.env.BROKER_HEARTBEAT_INTERVAL_MS) || 60_000;
+
+// buildBrokerHeartbeatEvent — pure factory for the periodic liveness beat. Kept
+// minimal: appendEvent stamps resource.service.name=catalyst.broker (what the
+// monitor's service-health keys off), so the recency signal is all that matters.
+export function buildBrokerHeartbeatEvent({ pid, activeInterests }) {
+  return {
+    event: "broker.daemon.heartbeat",
+    orchestrator: null,
+    worker: null,
+    severity: "INFO",
+    detail: { pid, active_interests: activeInterests, broker: true },
+  };
+}
+
 export function resolveBootByteOffset({ handoff, logPath, eofSize, now = Date.now(), maxAgeMs = BROKER_HANDOFF_MAX_AGE_MS }) {
   if (!handoff) return eofSize;
   if (handoff.logPath !== logPath) return eofSize;
@@ -474,6 +496,20 @@ function main() {
   startTailing();
   const watchdogId = startWatchdog();
   const driftCheckId = startDriftCheckWatcher();
+  // CTL-1171: periodic liveness heartbeat so an idle broker doesn't false-report
+  // "down" in the monitor (which keys off catalyst.broker event recency). Beat
+  // immediately so the broker is fresh the moment it boots, then every interval.
+  const emitBrokerHeartbeat = () => {
+    try {
+      appendEvent(
+        buildBrokerHeartbeatEvent({ pid: process.pid, activeInterests: interests.size }),
+      );
+    } catch {
+      // Best-effort telemetry — never crash the broker on a heartbeat emit.
+    }
+  };
+  emitBrokerHeartbeat();
+  const heartbeatId = setInterval(emitBrokerHeartbeat, BROKER_HEARTBEAT_INTERVAL_MS);
   log.info(
     {
       pid: process.pid,
@@ -495,6 +531,7 @@ function main() {
   const shutdown = (signal) => {
     stopTailing();
     clearInterval(watchdogId);
+    clearInterval(heartbeatId); // CTL-1171: stop the liveness heartbeat
     clearInterval(driftCheckId); // CTL-1161: drift-check backstop timer
     // CTL-529: the debounce timer handles are router module-internal.
     clearDebounceTimers();
