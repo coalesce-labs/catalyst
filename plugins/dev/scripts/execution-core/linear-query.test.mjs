@@ -17,8 +17,11 @@ import {
   classifyTicketResolution,
   fetchTicketAssignee,
   isAssigneeClaimable,
+  isClaimable,
   buildDelegateCurlArgs,
   fetchTicketDelegate,
+  buildDelegateBatchCurlArgs,
+  fetchTicketsDelegateBatch,
 } from "./linear-query.mjs";
 import { createTicketStateCache } from "./linear-cache.mjs";
 
@@ -1018,35 +1021,40 @@ describe("fetchTicketState — gateway state-freshness boundary (CTL-823)", () =
 describe("fetchTicketAssignee (CTL-781)", () => {
   const BOT = "ff78d890-7906-4c22-b2f5-020bd150c790";
 
-  test("gateway descriptor present + !removed → {known:true, assignee:<uuid>}, zero exec", () => {
+  test("gateway descriptor present + !removed → {known:true, assignee:<uuid>, delegate:null}, zero exec", () => {
     const exec = fakeExec({ code: 0, stdout: "{}" });
+    // CTL-1174: gateway hit now returns delegate from descriptor (undefined→null for pre-Phase-1 DBs)
     const gateway = fakeGateway({ ticket: "CTL-1", assignee: BOT, removed: false, updatedAt: FRESH() });
     const r = fetchTicketAssignee("CTL-1", { exec, gateway });
-    expect(r).toEqual({ known: true, assignee: BOT });
+    expect(r).toEqual({ known: true, assignee: BOT, delegate: null });
     expect(exec.calls.length).toBe(0);
   });
 
-  test("gateway descriptor present with assignee null → {known:true, assignee:null}, zero exec", () => {
+  test("gateway descriptor present with assignee null → {known:true, assignee:null, delegate:null}, zero exec", () => {
     const exec = fakeExec({ code: 0, stdout: "{}" });
     const gateway = fakeGateway({ ticket: "CTL-2", assignee: null, removed: false, updatedAt: FRESH() });
     const r = fetchTicketAssignee("CTL-2", { exec, gateway });
-    expect(r).toEqual({ known: true, assignee: null });
+    expect(r).toEqual({ known: true, assignee: null, delegate: null });
     expect(exec.calls.length).toBe(0);
   });
 
-  test("gateway descriptor removed → falls through to live read", () => {
+  test("gateway descriptor removed → falls through to live read (CTL-1174: injects fetchDelegate)", () => {
     const exec = fakeExec({ code: 0, stdout: JSON.stringify({ assignee: { id: BOT } }) });
     const gateway = fakeGateway({ ticket: "CTL-3", assignee: BOT, removed: true, updatedAt: FRESH() });
-    const r = fetchTicketAssignee("CTL-3", { exec, gateway });
-    expect(r).toEqual({ known: true, assignee: BOT });
+    // CTL-1174: gateway miss now also fetches delegate; inject to avoid real curl
+    const fetchDelegate = () => ({ known: true, delegate: null });
+    const r = fetchTicketAssignee("CTL-3", { exec, gateway, fetchDelegate });
+    expect(r).toEqual({ known: true, assignee: BOT, delegate: null });
     expect(exec.calls.length).toBe(1);
   });
 
-  test("gateway absent/miss (getDescriptor null) → live read parses assignee.id", () => {
+  test("gateway absent/miss (getDescriptor null) → live read parses assignee.id (CTL-1174: injects fetchDelegate)", () => {
     const exec = fakeExec({ code: 0, stdout: JSON.stringify({ assignee: { id: BOT } }) });
     const gateway = fakeGateway(null);
-    const r = fetchTicketAssignee("CTL-4", { exec, gateway });
-    expect(r).toEqual({ known: true, assignee: BOT });
+    // CTL-1174: gateway miss now also fetches delegate; inject to avoid real curl
+    const fetchDelegate = () => ({ known: true, delegate: null });
+    const r = fetchTicketAssignee("CTL-4", { exec, gateway, fetchDelegate });
+    expect(r).toEqual({ known: true, assignee: BOT, delegate: null });
     expect(exec.calls.length).toBe(1);
   });
 
@@ -1153,5 +1161,190 @@ describe("fetchTicketDelegate (CTL-1173)", () => {
   test("empty nodes array → { known:true, delegate:null }", () => {
     const runQuery = () => ({ nodes: [] });
     expect(fetchTicketDelegate("CTL-1", { runQuery })).toEqual({ known: true, delegate: null });
+  });
+});
+
+// ── isClaimable (CTL-1174) ────────────────────────────────────────────────────
+
+describe("isClaimable (CTL-1174)", () => {
+  const BOT = "bot-uuid-ff78d890";
+  const HUMAN = "human-uuid-abcd1234";
+  const bots = new Set([BOT]);
+
+  test("(null, null, botSet) → true: unassigned + undelegated is always claimable", () => {
+    expect(isClaimable(null, null, bots)).toBe(true);
+  });
+
+  test("(null, null, empty Set) → true: no bots registered, no foreign owner", () => {
+    expect(isClaimable(null, null, new Set())).toBe(true);
+  });
+
+  test("(null, null, undefined) → true: no botUserIds at all", () => {
+    expect(isClaimable(null, null, undefined)).toBe(true);
+  });
+
+  test("(null, BOT, botSet) → true: our bot holds the delegate slot", () => {
+    expect(isClaimable(null, BOT, bots)).toBe(true);
+  });
+
+  test("(null, 'foreign', botSet) → false: foreign delegate blocks the claim (AC#1)", () => {
+    expect(isClaimable(null, "foreign-uuid-xyz", bots)).toBe(false);
+  });
+
+  test("(BOT, BOT, botSet) → true: bot owns both assignee and delegate", () => {
+    expect(isClaimable(BOT, BOT, bots)).toBe(true);
+  });
+
+  test("(HUMAN, null, botSet) → false: human assignee always blocks regardless of delegate", () => {
+    expect(isClaimable(HUMAN, null, bots)).toBe(false);
+  });
+
+  test("(HUMAN, BOT, botSet) → false: human assignee wins even with our bot delegate", () => {
+    expect(isClaimable(HUMAN, BOT, bots)).toBe(false);
+  });
+
+  test("(null, undefined, botSet) → true: undefined coerced to null (back-compat no-gateway shape)", () => {
+    expect(isClaimable(null, undefined, bots)).toBe(true);
+  });
+
+  test("(BOT, undefined, botSet) → true: undefined coerced to null, bot assignee passes", () => {
+    expect(isClaimable(BOT, undefined, bots)).toBe(true);
+  });
+});
+
+// ── buildDelegateBatchCurlArgs (CTL-1174) ────────────────────────────────────
+
+describe("buildDelegateBatchCurlArgs (CTL-1174)", () => {
+  test("POSTs to the GraphQL endpoint", () => {
+    const { args } = buildDelegateBatchCurlArgs("CTL", ["CTL-1"], { token: "lin_oauth_x" });
+    expect(args).toContain("https://api.linear.app/graphql");
+    expect(args[args.indexOf("-X") + 1]).toBe("POST");
+  });
+
+  test("reads payload from stdin (--data @-)", () => {
+    const { args } = buildDelegateBatchCurlArgs("CTL", ["CTL-1"], { token: "lin_oauth_x" });
+    expect(args[args.indexOf("--data") + 1]).toBe("@-");
+  });
+
+  test("variables include team and parsed ticket numbers", () => {
+    const { payload } = buildDelegateBatchCurlArgs("CTL", ["CTL-1", "CTL-42"], { token: "lin_oauth_x" });
+    const vars = JSON.parse(payload).variables;
+    expect(vars.team).toBe("CTL");
+    expect(vars.nums).toEqual([1, 42]);
+  });
+
+  test("query projects identifier and delegate fields", () => {
+    const { payload } = buildDelegateBatchCurlArgs("CTL", ["CTL-1"], { token: "lin_oauth_x" });
+    const q = JSON.parse(payload).query;
+    expect(q).toContain("identifier");
+    expect(q).toContain("delegate");
+  });
+
+  test("malformed identifiers are excluded from nums (not NaN)", () => {
+    const { payload } = buildDelegateBatchCurlArgs("CTL", ["CTL-1", "NOTANID"], { token: "tok" });
+    const vars = JSON.parse(payload).variables;
+    expect(vars.nums).toEqual([1]);
+  });
+});
+
+// ── fetchTicketsDelegateBatch (CTL-1174) ─────────────────────────────────────
+
+describe("fetchTicketsDelegateBatch (CTL-1174)", () => {
+  const BOT = "bot-uuid-ff78d890";
+
+  test("empty identifiers → empty Map, exec NOT called", () => {
+    const calls = [];
+    const exec = (...a) => { calls.push(a); return []; };
+    const result = fetchTicketsDelegateBatch("CTL", [], { exec });
+    expect(result.size).toBe(0);
+    expect(calls).toHaveLength(0);
+  });
+
+  test("null team → empty Map, exec NOT called", () => {
+    const calls = [];
+    const exec = (...a) => { calls.push(a); return []; };
+    const result = fetchTicketsDelegateBatch(null, ["CTL-1"], { exec });
+    expect(result.size).toBe(0);
+    expect(calls).toHaveLength(0);
+  });
+
+  test("nodes with delegate id → Map<identifier, delegateId>", () => {
+    const exec = () => [
+      { identifier: "CTL-1", delegate: { id: BOT } },
+      { identifier: "CTL-2", delegate: null },
+    ];
+    const result = fetchTicketsDelegateBatch("CTL", ["CTL-1", "CTL-2"], { exec });
+    expect(result.get("CTL-1")).toBe(BOT);
+    expect(result.get("CTL-2")).toBeNull();
+  });
+
+  test("exec returns null → fail-safe empty Map (no crash)", () => {
+    const exec = () => null;
+    expect(() => fetchTicketsDelegateBatch("CTL", ["CTL-1"], { exec })).not.toThrow();
+    expect(fetchTicketsDelegateBatch("CTL", ["CTL-1"], { exec }).size).toBe(0);
+  });
+
+  test("deduplicates identifiers before passing to exec", () => {
+    const calls = [];
+    const exec = (team, ids) => { calls.push(ids.slice()); return []; };
+    fetchTicketsDelegateBatch("CTL", ["CTL-1", "CTL-1", "CTL-2"], { exec });
+    expect(calls[0]).toHaveLength(2);
+    expect(calls[0]).toContain("CTL-1");
+    expect(calls[0]).toContain("CTL-2");
+  });
+
+  test("absent id from exec result stays absent from Map (not mapped to null)", () => {
+    const exec = () => [{ identifier: "CTL-1", delegate: { id: BOT } }];
+    const result = fetchTicketsDelegateBatch("CTL", ["CTL-1", "CTL-2"], { exec });
+    expect(result.has("CTL-1")).toBe(true);
+    expect(result.has("CTL-2")).toBe(false);
+  });
+});
+
+// ── runEligibleQuery — delegate enrichment (CTL-1174) ─────────────────────────
+
+describe("runEligibleQuery — delegate enrichment (CTL-1174)", () => {
+  const query = { team: "CTL", status: "Todo", project: null, label: null, priority: null };
+  const BOT = "bot-uuid-ff78d890";
+
+  test("normalizeTicket defaults delegate to null when linearis omits it", () => {
+    const exec = fakeExec({ stdout: ticketsJson([{ identifier: "CTL-1", state: { name: "Todo" } }]) });
+    // delegateExec miss → null → delegate stays null
+    const delegateExec = () => null;
+    const tickets = runEligibleQuery(query, { exec, delegateExec });
+    expect(tickets[0].delegate).toBeNull();
+  });
+
+  test("delegate hydrated from batch when id returned", () => {
+    const exec = fakeExec({ stdout: ticketsJson([{ identifier: "CTL-1", state: { name: "Todo" } }]) });
+    const delegateExec = () => [{ identifier: "CTL-1", delegate: { id: BOT } }];
+    const tickets = runEligibleQuery(query, { exec, delegateExec });
+    expect(tickets[0].delegate).toBe(BOT);
+  });
+
+  test("delegate null when batch returns node with null delegate (explicit clear)", () => {
+    const exec = fakeExec({ stdout: ticketsJson([{ identifier: "CTL-1", state: { name: "Todo" } }]) });
+    const delegateExec = () => [{ identifier: "CTL-1", delegate: null }];
+    const tickets = runEligibleQuery(query, { exec, delegateExec });
+    expect(tickets[0].delegate).toBeNull();
+  });
+
+  test("batch failure → delegate stays null, no throw (best-effort fail-safe)", () => {
+    const exec = fakeExec({ stdout: ticketsJson([{ identifier: "CTL-1", state: { name: "Todo" } }]) });
+    const delegateExec = () => { throw new Error("network failure"); };
+    let tickets;
+    expect(() => { tickets = runEligibleQuery(query, { exec, delegateExec }); }).not.toThrow();
+    expect(tickets[0].delegate).toBeNull();
+  });
+
+  test("skips delegate batch entirely when zero tickets survive priority floor", () => {
+    // priority: 4 (Low) tickets filtered by floor 2 → 0 survive → no batch call
+    const exec = fakeExec({
+      stdout: ticketsJson([{ identifier: "CTL-1", state: { name: "Todo" }, priority: 4 }]),
+    });
+    const calls = [];
+    const delegateExec = (...a) => { calls.push(a); return null; };
+    runEligibleQuery({ ...query, priority: 2 }, { exec, delegateExec });
+    expect(calls).toHaveLength(0);
   });
 });

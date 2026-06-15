@@ -81,6 +81,15 @@ export type LinearWebhookEvent =
        * in the webhook payload — KEY-PRESENCE: absent → keep stored value. CTL-957.
        */
       toEstimate?: number | null;
+      /**
+       * CTL-1174: Current delegate UUID from data.delegate.id. undefined when the
+       * `delegate` key is absent from the payload (KEY-PRESENCE: absent → keep);
+       * null when the key is present but cleared (explicit un-delegate). DEFENSIVE:
+       * Linear does NOT reliably carry delegate in Issue webhooks (routes to
+       * AgentSessionEvent) — this field is dormant scaffolding that activates if
+       * Linear ever surfaces it.
+       */
+      toDelegateId?: string | null;
     }
   | {
       kind: "comment";
@@ -161,7 +170,10 @@ function actionLabel(value: unknown): string {
  * Pick the topic for an Issue event based on action and (for updates) the
  * fields changed in updatedFrom.
  *
- * Priority for updates: state > priority > assignee > generic.
+ * Priority for updates: state > priority > assignee > delegate > generic.
+ * CTL-1174: delegate_changed is lower priority than assignee. The exact
+ * updatedFrom key Linear uses for delegate is unverified ("delegateId" is the
+ * likely key by analogy with "assigneeId"); we check both spellings defensively.
  */
 function issueTopic(action: "create" | "update" | "remove", updatedFromKeys: string[]): string {
   if (action === "create") return "linear.issue.created";
@@ -169,6 +181,9 @@ function issueTopic(action: "create" | "update" | "remove", updatedFromKeys: str
   if (updatedFromKeys.includes("stateId")) return "linear.issue.state_changed";
   if (updatedFromKeys.includes("priority")) return "linear.issue.priority_changed";
   if (updatedFromKeys.includes("assigneeId")) return "linear.issue.assignee_changed";
+  if (updatedFromKeys.includes("delegateId") || updatedFromKeys.includes("delegate")) {
+    return "linear.issue.delegate_changed";
+  }
   return "linear.issue.updated";
 }
 
@@ -214,6 +229,14 @@ function parseIssue(payload: Record<string, unknown>): LinearWebhookEvent {
   const toEstimate = "estimate" in data
     ? (typeof data.estimate === "number" ? data.estimate : null)
     : undefined; // absent → keep stored value
+  // CTL-1174: delegate UUID — KEY-PRESENCE so the broker fold can distinguish
+  // "payload said nothing about delegate" (absent key → keep) from "delegate
+  // was explicitly cleared" (key present, value null). DEFENSIVE: Linear does
+  // NOT reliably emit delegate in Issue webhooks; this is dormant scaffolding.
+  const delegateObj = isObject(data.delegate) ? data.delegate : null;
+  const toDelegateId = "delegate" in data
+    ? (delegateObj !== null ? getOptStr(delegateObj, "id") : null)
+    : undefined; // absent → key-presence KEEP
   return {
     kind: "issue",
     action,
@@ -236,6 +259,7 @@ function parseIssue(payload: Record<string, unknown>): LinearWebhookEvent {
     description,
     descriptionChanged,
     toEstimate,
+    toDelegateId,
   };
 }
 
