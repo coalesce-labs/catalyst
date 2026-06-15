@@ -518,6 +518,51 @@ export function readWatchdogConfig() {
   return { mode, silenceThresholdMs, phaseBudgetMultiplier, reviveBudget };
 }
 
+// --- CTL-1137 cost-cap watcher config. SHADOW-FIRST, same shape + precedence as the
+// CTL-729 watchdog above: env > Layer-2 catalyst.costCap.* > code default, default
+// mode "shadow" (detect + log "would-abort", never kill, until an operator flips it to
+// "enforce"). CATALYST_COST_CAP=0 is the kill-switch → "off". The cost SIGNAL is
+// Prometheus (the single source of truth — claude_code_cost_usage_USD_total by
+// session_id); enforcement FAILS OPEN when Prom is unreachable.
+const COST_CAP_DEFAULT_USD = 40;          // $40/phase-session ≈ 1.6× the most expensive legit autonomous run ever (28d, n=1548; max $24.97)
+const COST_CAP_DEFAULT_POLL_SEC = 30;     // per-session Prom cadence — NOT every tick
+const COST_CAP_DEFAULT_PROM_URL = "http://100.65.193.30:9098"; // OTel/Prom stack on Tailscale
+
+function readLayer2CostCap() {
+  try {
+    const c = JSON.parse(readFileSync(getLayer2ConfigPath(), "utf8"))?.catalyst?.costCap;
+    return c && typeof c === "object" ? c : {};
+  } catch { return {}; }
+}
+function resolvePositiveNumber(envVal, l2Val, def) {
+  for (const v of [envVal, l2Val]) {
+    if (v === undefined || v === null || v === "") continue;
+    const n = Number(v);
+    if (Number.isFinite(n) && n > 0) return n;
+  }
+  return def;
+}
+function resolveNonEmptyString(envVal, l2Val, def) {
+  for (const v of [envVal, l2Val]) {
+    if (typeof v === "string" && v.trim() !== "") return v.trim();
+  }
+  return def;
+}
+
+export function readCostCapConfig() {
+  const l2 = readLayer2CostCap();
+  const mode = process.env.CATALYST_COST_CAP === "0"
+    ? "off"
+    : resolveMode(process.env.EXECUTION_CORE_COST_CAP_MODE, l2.mode); // shares {off,shadow,enforce}
+  const capUsd = resolvePositiveNumber(
+    process.env.EXECUTION_CORE_COST_CAP_USD, l2.perSessionUsd, COST_CAP_DEFAULT_USD);
+  const pollMs = resolvePositiveNumber(
+    process.env.EXECUTION_CORE_COST_CAP_POLL_SEC, l2.pollEverySec, COST_CAP_DEFAULT_POLL_SEC) * 1000;
+  const promBaseUrl = resolveNonEmptyString(
+    process.env.EXECUTION_CORE_COST_CAP_PROM_URL, l2.promBaseUrl, COST_CAP_DEFAULT_PROM_URL);
+  return { mode, capUsd, pollMs, promBaseUrl };
+}
+
 // phaseBudgetMs — expected wall-clock ceiling (ms) from the dispatch-time turnCap.
 // Pure (no clock/fs) so the predicate gate is cheaply unit-testable.
 export function phaseBudgetMs(phase, turnCap, cfg = readWatchdogConfig()) {
