@@ -33,9 +33,11 @@ import {
   BOARD_BUMP_CLASS_RIGHT,
   BOARD_BUMP_DURATION_MS,
   swipeBlockDirection,
+  laneRowGrow,
 } from "./Swimlane";
 import { buildLanes, showLaneChrome } from "./board-grouping";
 import type { GroupableEntity, GroupBy } from "./board-grouping";
+import { computeLaneHeights, LANE_MIN_CELL_H } from "./lane-heights";
 
 // ── helper: the exact constrainCells condition used in SwimlaneBoard ─────────
 // This mirrors the inline expression in SwimlaneBoard so tests break if the
@@ -167,6 +169,43 @@ describe("CTL-958 — dual-sticky group label structure (documented invariants)"
     // We document this invariant as a boolean: the header SHOULD NOT pin left.
     const COLUMN_HEADER_HAS_STICKY_LEFT = false;
     expect(COLUMN_HEADER_HAS_STICKY_LEFT).toBe(false);
+  });
+});
+
+describe("CTL-1168 — laneRowGrow scroll-to-top gate (last band bottom-anchored)", () => {
+  // The regression (CTL-1010 follow-up): with multiple fixed-height bands the flex
+  // column's `minHeight:100%` + a growing last row pushed the final band DOWN, so
+  // scrolling up never reached the top row. laneRowGrow gates flexGrow so ONLY a
+  // FITTING lane (cellMax null/undefined) grows; a CAPPED lane (px number — the
+  // board is page-scrolling) does NOT grow, keeping the last band bottom-anchored
+  // and the first row reachable at the top.
+  it("a fitting lane (null) grows to fill leftover space → flexGrow 1", () => {
+    expect(laneRowGrow(null)).toBe(1);
+  });
+  it("the unmeasured first frame (undefined) grows harmlessly → flexGrow 1", () => {
+    expect(laneRowGrow(undefined)).toBe(1);
+  });
+  it("a capped/floored lane (px number → page scrolling) does NOT grow → flexGrow 0", () => {
+    expect(laneRowGrow(248)).toBe(0);
+    expect(laneRowGrow(379)).toBe(0);
+    expect(laneRowGrow(0)).toBe(0);
+  });
+
+  it("page-scrolling lanes (computeLaneHeights Case 3) are ALL pinned flexGrow 0", () => {
+    // Case 3: Σ floor > avail → every deep lane is floored at a px number. None may
+    // grow, or the last band pushes off the bottom and scroll-to-top breaks.
+    const MIN = LANE_MIN_CELL_H("comfortable"); // 248
+    const caps = computeLaneHeights([2000, 2000, 2000], 500, MIN); // [248,248,248]
+    expect(caps.every((c) => laneRowGrow(c) === 0)).toBe(true);
+  });
+
+  it("a board that fully fits (Case 1) lets every lane grow (flexGrow 1) — no scroll", () => {
+    // Case 1: Σ demand ≤ avail → all null → all growable. The board does not page-
+    // scroll, so growing rows to fill leftover space is correct (and top is trivially
+    // reachable because there's nothing to scroll past).
+    const MIN = LANE_MIN_CELL_H("comfortable");
+    const caps = computeLaneHeights([300, 300], 900, MIN); // [null, null]
+    expect(caps.every((c) => laneRowGrow(c) === 1)).toBe(true);
   });
 });
 
