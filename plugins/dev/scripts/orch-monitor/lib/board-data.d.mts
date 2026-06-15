@@ -372,11 +372,27 @@ export function derivePhaseWithRemediate(
   phaseSigs: unknown[],
   remediateSig: unknown | null | undefined,
 ): BoardCurrentPhase;
-/** Build a thin Todo-column BoardTicket from an eligible queue entry (CTL-767). */
+/** Build a thin Todo-column BoardTicket from an eligible queue entry (CTL-767).
+ *  CTL-1152: optional teamRepoMap (from buildTeamRepoMap) for explicit repo resolution. */
 export function synthesizeQueuedTicket(
   eligible: unknown,
   linfo: Record<string, unknown>,
+  relationBlockerMap?: Map<string, unknown>,
+  teamRepoMap?: Record<string, string>,
 ): BoardTicket;
+/** CTL-1152: PURE prefix→short-repo-name map from catalyst.monitor.linear.teams[].
+ *  Maps each {key,vcsRepo} to UPPERCASE-key → lowercased basename; skips entries
+ *  whose vcsRepo lacks a '/'. Fail-open to {} for a non-array or malformed input. */
+export function buildTeamRepoMap(teams: unknown): Record<string, string>;
+/** CTL-1152: resolve a ticket's repo swim-lane short name from the config-driven
+ *  TEAM_REPO map; an UNCONFIGURED prefix falls back to its raw lowercased team key
+ *  (self-identifying), NEVER "other". */
+export function repoFor(ticket: string): string;
+/** CTL-1152: explicit-map variant of repoFor. Looks up the prefix in the provided
+ *  map (built by buildTeamRepoMap). Returns "unconfigured" for unknown prefixes. */
+export function repoForWith(map: Record<string, string>, ticket: string): string;
+/** CTL-1152: a ticket's team prefix, verbatim (e.g. "CTL-1152" → "CTL"). */
+export function teamFor(ticket: string): string;
 /** CTL-1041: resolve a ticket's display TITLE (the outcome line — leads on every
  *  surface). Priority: explicit triage.title → the authoritative Linear title
  *  (linfo, then the eligible projection) → triage.summary (last-ditch) → the
