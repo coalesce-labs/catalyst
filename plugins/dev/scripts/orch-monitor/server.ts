@@ -4022,6 +4022,64 @@ export function createServer(opts: CreateServerOptions): BunServer {
           return new Response(null, { status: 201 });
         }
 
+        // CTL-1167: SSE stream of novel push-worthy notifications. Mirrors
+        // /api/nav/stream: one per-connection projector, subscribe-first, emit on
+        // every board recompute that yields new notifications. Each event:
+        //   event: notification\ndata: {title,body,deepLink}\n\n
+        if (url.pathname === "/api/notifications/stream") {
+          let unsubNotif: (() => void) | null = null;
+          let closedNotif = false;
+          const notifProjector = createNotificationProjector();
+          const emitNotifications = (
+            controller: ReadableStreamDefaultController<Uint8Array>,
+            pb: ProjectorBoard,
+          ) => {
+            if (closedNotif) return;
+            for (const n of notifProjector.project(pb)) {
+              try {
+                controller.enqueue(
+                  encoder.encode(
+                    `event: notification\ndata: ${JSON.stringify(n)}\n\n`,
+                  ),
+                );
+              } catch {
+                unsubNotif?.();
+                unsubNotif = null;
+              }
+            }
+          };
+          const notifStream = new ReadableStream<Uint8Array>({
+            async start(controller) {
+              unsubNotif = boardSnapshot.subscribe((snap) => {
+                void toProjectorBoard(snap).then((pb) =>
+                  emitNotifications(controller, pb),
+                );
+              });
+              try {
+                emitNotifications(
+                  controller,
+                  await toProjectorBoard(await boardSnapshot.getLatest()),
+                );
+              } catch (err) {
+                console.error(`[server] notifications stream initial emit failed:`, err);
+              }
+            },
+            cancel() {
+              closedNotif = true;
+              unsubNotif?.();
+              unsubNotif = null;
+            },
+          });
+          return new Response(notifStream, {
+            headers: {
+              "Content-Type": "text/event-stream",
+              "Cache-Control": "no-cache",
+              Connection: "keep-alive",
+              "Access-Control-Allow-Origin": "*",
+            },
+          });
+        }
+
         // CTL-967 (N5): read-only SSE feed of new belief rows from
         // ~/catalyst/beliefs.db, tailed by a BeliefTail cursor. Each SSE
         // event carries a single belief row (joined with tick.ts_ms/host) in
