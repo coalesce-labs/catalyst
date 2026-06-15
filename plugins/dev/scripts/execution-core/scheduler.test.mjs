@@ -1889,6 +1889,63 @@ describe("CTL-1108: writeTerminalStalled explanation coverage", () => {
   });
 });
 
+// ─── CTL-1131: needsHumanSince stamped at terminal-stall write sites ───
+describe("CTL-1131: escalateDispatchExhausted stamps needsHumanSince", () => {
+  const ISO_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/;
+
+  test("new signal: carries a needsHumanSince ISO string and preserves explanation", () => {
+    expect(escalateDispatchExhausted(orchDir, "CTL-1131a", "pr")).toBe(true);
+    const sig = JSON.parse(
+      readFileSync(join(orchDir, "workers", "CTL-1131a", "phase-pr.json"), "utf8")
+    );
+    expect(typeof sig.needsHumanSince).toBe("string");
+    expect(ISO_RE.test(sig.needsHumanSince)).toBe(true);
+    expect(sig.explanation).toBeTruthy();
+  });
+
+  test("existing signal with needsHumanSince: preserves the prior stamp (does not reset age)", () => {
+    const p = join(orchDir, "workers", "CTL-1131b", "phase-pr.json");
+    mkdirSync(join(orchDir, "workers", "CTL-1131b"), { recursive: true });
+    writeFileSync(p, JSON.stringify({
+      ticket: "CTL-1131b", phase: "pr", status: "running",
+      needsHumanSince: "2026-06-14T00:00:00Z",
+    }));
+    escalateDispatchExhausted(orchDir, "CTL-1131b", "pr");
+    const sig = JSON.parse(readFileSync(p, "utf8"));
+    expect(sig.needsHumanSince).toBe("2026-06-14T00:00:00Z");
+  });
+});
+
+describe("CTL-1131: writeTerminalStalled (via maybeTripCircuitBreaker) stamps needsHumanSince", () => {
+  const ISO_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/;
+
+  test("stalled signal carries a needsHumanSince ISO string", () => {
+    const t = "CTL-1131c", phase = "implement";
+    writeSignal(t, phase, "running");
+    for (let i = 1; i <= CIRCUIT_BREAKER_THRESHOLD; i++)
+      recordDispatchFailure(orchDir, t, phase, 1, i * 1000);
+    expect(maybeTripCircuitBreaker(orchDir, t, phase)).toBe(true);
+    const sig = JSON.parse(
+      readFileSync(join(orchDir, "workers", t, `phase-${phase}.json`), "utf8")
+    );
+    expect(typeof sig.needsHumanSince).toBe("string");
+    expect(ISO_RE.test(sig.needsHumanSince)).toBe(true);
+  });
+
+  test("existing needsHumanSince is preserved (does not reset age)", () => {
+    const t = "CTL-1131d", phase = "verify";
+    writeSignal(t, phase, "running");
+    const p = join(orchDir, "workers", t, `phase-${phase}.json`);
+    const cur = JSON.parse(readFileSync(p, "utf8"));
+    writeFileSync(p, JSON.stringify({ ...cur, needsHumanSince: "2026-06-14T05:00:00Z" }));
+    for (let i = 1; i <= CIRCUIT_BREAKER_THRESHOLD; i++)
+      recordDispatchFailure(orchDir, t, phase, 1, i * 1000);
+    maybeTripCircuitBreaker(orchDir, t, phase);
+    const sig = JSON.parse(readFileSync(p, "utf8"));
+    expect(sig.needsHumanSince).toBe("2026-06-14T05:00:00Z");
+  });
+});
+
 // ─── CTL-712: dispatch retry ceiling wired into schedulerTick ───
 describe("CTL-712: dispatch retry ceiling (schedulerTick)", () => {
   let prevMax;

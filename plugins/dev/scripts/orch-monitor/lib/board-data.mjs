@@ -729,6 +729,19 @@ export function deriveHumanQuestion(phaseSigs) {
   return null;
 }
 
+/** CTL-1131: the durable needs-human age anchor — the newest phase signal's
+ *  needsHumanSince stamp (written at status-flip time). null when none carries
+ *  it (the duration cell renders unavailable, never fabricated). */
+export function deriveNeedsHumanSince(phaseSigs) {
+  for (let i = phaseSigs.length - 1; i >= 0; i--) {
+    const sig = phaseSigs[i];
+    if (!sig || typeof sig !== "object") continue;
+    const v = sig.needsHumanSince;
+    if (typeof v === "string" && v !== "") return v;
+  }
+  return null;
+}
+
 /** CTL-1110: the six extended escalation-explanation fields, surfaced as a
  *  cohesive nested object so the detail pane can render a CTA-led card. Distinct
  *  from deriveHumanQuestion (the canonical call_to_action sub-label). */
@@ -1285,7 +1298,7 @@ export async function assembleBoard({ getPrStatus = null } = {}) {
       labels: linfo[id]?.labels,
       needsHumanMarker,
       waitingSince: cur.startedAt ?? null,
-      needsHumanSince: null,
+      needsHumanSince: deriveNeedsHumanSince(phaseSigs),   // CTL-1131: real age anchor
       prStuck,
       prStuckSince: prPhaseStartedAt,
     });

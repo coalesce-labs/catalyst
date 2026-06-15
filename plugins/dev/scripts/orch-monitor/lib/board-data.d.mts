@@ -270,6 +270,10 @@ export const HELD_LABEL_BLOCKED: string;
 export const HELD_LABEL_WAITING: string;
 export function heldFor(labels: unknown): "blocked" | "waiting" | null;
 
+/** CTL-1131: the durable needs-human age anchor — the newest phase signal's
+ *  needsHumanSince stamp. null when none carries it (never fabricated). */
+export function deriveNeedsHumanSince(phaseSigs: unknown[]): string | null;
+
 /** CTL-729: the escalation labels that trigger attention 'needs-human'. */
 export const ATTENTION_LABEL_NEEDS_HUMAN: string;
 export const ATTENTION_LABEL_NEEDS_INPUT: string;

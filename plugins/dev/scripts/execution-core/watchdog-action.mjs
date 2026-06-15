@@ -127,6 +127,7 @@ export async function killHungWorker(
       status: "failed",
       failureReason,
       explanation,
+      needsHumanSince: cur.needsHumanSince ?? new Date(now()).toISOString(),  // CTL-1131: preserve prior stamp
       failedAt: new Date(now()).toISOString(),
     };
     const tmp = `${sigPath}.tmp.${process.pid}`;
