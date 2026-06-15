@@ -85,7 +85,10 @@ export function deriveNavSignal(board, { daemon, liveness } = {}) {
   const stuck = typeof board?.config?.stuck === "number" ? board.config.stuck : 0;
 
   const blocked = tickets.some((t) => t && t.held === "blocked");
-  const anomaly = blocked || stuck > 0;
+  // CTL-1180: a needs-human ticket (incl. a surfaced failed phase) lights the dot
+  // even when it carries no admission hold.
+  const needsHuman = tickets.some((t) => t && t.attention === "needs-human");
+  const anomaly = blocked || needsHuman || stuck > 0;
 
   const resolvedDaemon =
     daemon ?? (liveness ? daemonFromLiveness(liveness) : "offline");
