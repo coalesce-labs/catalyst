@@ -33,11 +33,11 @@ SIGNAL_FILE=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --ticket)     TICKET="$2";      shift 2 ;;
-    --phase)      PHASE="$2";       shift 2 ;;
-    --reason)     REASON="$2";      shift 2 ;;
-    --orch-dir)   ORCH_DIR="$2";    shift 2 ;;
-    --signal-file) SIGNAL_FILE="$2"; shift 2 ;;
+    --ticket)      TICKET="${2:-}";      shift 2 || true ;;
+    --phase)       PHASE="${2:-}";       shift 2 || true ;;
+    --reason)      REASON="${2:-}";      shift 2 || true ;;
+    --orch-dir)    ORCH_DIR="${2:-}";    shift 2 || true ;;
+    --signal-file) SIGNAL_FILE="${2:-}"; shift 2 || true ;;
     *) shift ;;
   esac
 done
@@ -101,9 +101,12 @@ POSTER="${CATALYST_COMMENT_POST_HELPER:-${SCRIPT_DIR}/linear-comment-post.sh}"
 # Post — timeout-bounded so a hung network call cannot delay teardown.
 # Wrap in || true: best-effort, never fails the caller.
 if [[ -x "$POSTER" ]]; then
-  # `timeout` is GNU coreutils (gtimeout on macOS); fall back to direct exec.
+  # Prefer `timeout` (GNU coreutils), then `gtimeout` (Homebrew coreutils on macOS),
+  # then fall back to a direct (unbounded) exec.
   if command -v timeout >/dev/null 2>&1; then
     timeout 20 "$POSTER" "$TICKET" "$BODY" >/dev/null 2>&1 || true
+  elif command -v gtimeout >/dev/null 2>&1; then
+    gtimeout 20 "$POSTER" "$TICKET" "$BODY" >/dev/null 2>&1 || true
   else
     "$POSTER" "$TICKET" "$BODY" >/dev/null 2>&1 || true
   fi
