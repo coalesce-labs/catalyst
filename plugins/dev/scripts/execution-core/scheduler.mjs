@@ -4693,21 +4693,26 @@ export function schedulerTick(
         multiHost,
       }
     );
-    if (Object.values(signals).some((s) => s === "stalled")) {
+    const anyStalled = Object.values(signals).some((s) => s === "stalled");
+    const anyFailed = Object.values(signals).some((s) => s === "failed");
+    // CTL-1180: pipeline-done already clears needs-human in the TERMINAL_PHASE block
+    // above; never (re)apply for a genuinely-shipped ticket (the Done false positive).
+    const pipelineDone = signals[TERMINAL_PHASE] === "done";
+    if ((anyStalled || anyFailed) && !pipelineDone) {
       if (fenceGuard({ ticket, orchDir, multiHost })) {
         labelOnce(orchDir, ticket, "needs-human", writeStatus);
       } else {
         log.warn(
           { ticket },
-          "ctl-863: stale fence — suppressing labelOnce(needs-human/stalled) write (zombie guard)"
+          "ctl-863: stale fence — suppressing labelOnce(needs-human/failed-or-stalled) write (zombie guard)"
         );
       }
       // CTL-868 route (B): also emit a canonical orphan-detected event (once) so a
-      // stalled-no-recovery ticket is visible on the dashboard, not just label-flagged.
+      // stalled/failed-no-recovery ticket is visible on the dashboard, not just label-flagged.
       emitOrphanDetectedOnce(orchDir, ticket, signals, appendOrphanDetectedEvent);
     } else {
-      // CTL-646: no phase stalled → clear the ratchet if the marker exists.
-      // Guard on marker presence so a no-stall, no-marker tick fires zero
+      // No failed/stalled phase (or pipeline done) → clear the ratchet if the marker exists.
+      // Guard on marker presence so a no-stall/no-fail, no-marker tick fires zero
       // removeLabel API calls (steady-state-zero-writes invariant).
       const base = join(orchDir, "workers", ticket, ".linear-label-needs-human");
       if (existsSync(`${base}.applied`) || existsSync(`${base}.skipped`)) {
