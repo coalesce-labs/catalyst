@@ -153,7 +153,7 @@ const HELD_LABEL_WAITING = "waiting";
 // imported for direct use in PhaseStrip — the drift guard reads it from board-accent.ts
 // but the board renders it via this import.
 export type { ColorBy } from "./board-accent";
-import { PHASE_C, accentFor } from "./board-accent";
+import { PHASE_C, accentFor, type ColorBy } from "./board-accent";
 export { accentFor };
 // CTL-909 / SURF1: a stable per-node accent so the "group by Node" columns +
 // the host chip on each worker card carry a consistent color. Hashed from the

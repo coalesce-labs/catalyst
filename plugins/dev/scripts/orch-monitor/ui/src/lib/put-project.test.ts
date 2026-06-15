@@ -4,6 +4,14 @@ import { putProject } from "./put-project";
 describe("putProject", () => {
   let originalFetch: typeof globalThis.fetch;
 
+  // Bun's mock() returns a Mock<…> that lacks fetch's `preconnect` member, so a
+  // direct assignment to globalThis.fetch fails typecheck — cast through unknown once.
+  const setFetch = (
+    fn: (url: string | URL | Request, opts?: RequestInit) => Promise<Response>,
+  ) => {
+    globalThis.fetch = mock(fn) as unknown as typeof fetch;
+  };
+
   beforeEach(() => {
     originalFetch = globalThis.fetch;
   });
@@ -15,7 +23,7 @@ describe("putProject", () => {
   it("PUTs to /api/projects/:key with JSON body", async () => {
     let capturedUrl = "";
     let capturedOpts: RequestInit | undefined;
-    globalThis.fetch = mock(async (url: string | URL | Request, opts?: RequestInit) => {
+    setFetch(async (url, opts) => {
       capturedUrl = String(url);
       capturedOpts = opts;
       return new Response("{}", { status: 200 });
@@ -31,7 +39,7 @@ describe("putProject", () => {
 
   it("encodes special characters in the key", async () => {
     let capturedUrl = "";
-    globalThis.fetch = mock(async (url: string | URL | Request) => {
+    setFetch(async (url) => {
       capturedUrl = String(url);
       return new Response("{}", { status: 200 });
     });
@@ -41,17 +49,17 @@ describe("putProject", () => {
   });
 
   it("resolves without error on a 2xx response", async () => {
-    globalThis.fetch = mock(async () => new Response("{}", { status: 200 }));
+    setFetch(async () => new Response("{}", { status: 200 }));
     await expect(putProject("CTL", {})).resolves.toBeUndefined();
   });
 
   it("throws on a non-ok response", async () => {
-    globalThis.fetch = mock(async () => new Response("unknown-key", { status: 404 }));
+    setFetch(async () => new Response("unknown-key", { status: 404 }));
     await expect(putProject("BOGUS", {})).rejects.toThrow("404");
   });
 
   it("throws on a 500 server error", async () => {
-    globalThis.fetch = mock(async () => new Response("internal error", { status: 500 }));
+    setFetch(async () => new Response("internal error", { status: 500 }));
     await expect(putProject("CTL", {})).rejects.toThrow("500");
   });
 });

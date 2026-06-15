@@ -2,15 +2,16 @@
 // Imports from board-accent.ts (pure, no React) — Board.tsx re-exports for consumers.
 import { describe, expect, it } from "bun:test";
 import { accentFor } from "./board-accent";
+import type { BoardActiveState } from "./types";
 
 const C_BLUE = "#5e9ee8";
 
-function ticket(overrides: Partial<{ phase: string; repo: string; type: string; activeState: string | null; status: string }> = {}) {
+function ticket(overrides: Partial<{ phase: string; repo: string; type: string; activeState: BoardActiveState; status: string }> = {}) {
   return {
     phase: "implement",
     repo: "catalyst",
     type: "feature",
-    activeState: null as string | null,
+    activeState: null as BoardActiveState,
     status: "pending",
     ...overrides,
   };
