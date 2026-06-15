@@ -1034,6 +1034,54 @@ export function prStuckReason(mergeStateStatus, prNumber) {
   }
 }
 
+// ── CTL-1175: orphan-PR Needs-You synthetic cards ──────────────────────────
+
+// readOrphanPrState — read ${EC}/orphan-prs.json produced by orphan-pr-sweep-timer.
+// Returns {} on ENOENT (sweep not yet run), null on parse error (fail-open, never throws).
+function readOrphanPrState() {
+  const path = join(EC, "orphan-prs.json");
+  let raw;
+  try {
+    raw = readFileSync(path, "utf8");
+  } catch { return {}; } // ENOENT: no sweep has run yet
+  try {
+    return JSON.parse(raw);
+  } catch { return {}; } // torn file: fail-open, zero orphan rows
+}
+
+// synthesizeOrphanTickets — pure helper: one BoardTicket-shaped card per
+// notified orphan, reusing CTL-1158 attention derivation path. Exported so
+// unit tests can exercise it without the filesystem reads of assembleBoard.
+export function synthesizeOrphanTickets(orphanState, now) {
+  if (!orphanState || typeof orphanState !== "object") return [];
+  return Object.values(orphanState)
+    .filter((e) => e && e.notifiedAt)
+    .map((e) => {
+      const reason = prStuckReason(e.mergeStateStatus, e.number);
+      return {
+        id: `orphan:${e.repo}#${e.number}`,
+        title: e.title || `Orphan PR #${e.number}`,
+        type: "orphan-pr",
+        repo: e.repo || "", team: "",
+        phase: "monitor-merge", status: "running", model: null,
+        linearState: "", workerStatus: null, activeState: null, working: false,
+        lastActiveMs: null, priority: 0, estimate: null, scope: null, project: null,
+        held: null, heldSince: null, currentPhaseSince: null,
+        // CTL-1175: surface as a Needs-You row, reusing CTL-1158 inbox derivation.
+        attention: "needs-human",
+        attentionSince: e.firstSeenAt ?? e.notifiedAt ?? null,
+        humanQuestion: reason,
+        explanation: null,
+        pr: e.number, prUrl: e.url ?? null,
+        mergeStateStatus: e.mergeStateStatus ?? null,
+        prStuckReason: reason,
+        costUSD: null, tokens: null, turns: null, phaseCosts: null, phaseSummary: [],
+        updatedAt: e.notifiedAt ?? new Date(now).toISOString(),
+        host: null, generation: null, failureReason: null,
+      };
+    });
+}
+
 // ── Linear enrichment: priority / estimate / project / labels / relations /
 // assignee, read EXCLUSIVELY from the broker's durable caches (CTL-883).
 //
@@ -1620,6 +1668,12 @@ export async function assembleBoard({ getPrStatus = null } = {}) {
   const notInFlight = eligible.filter((e) => !cardTicketIds.has(e.id));
   const queuedTickets = notInFlight.map((e) => synthesizeQueuedTicket(e, linfo, relationBlockerMap, TEAM_REPO));
   tickets = [...liveTickets, ...betweenPhases, ...recentDone, ...queuedTickets];
+
+  // CTL-1175: orphan-PR Needs-You rows. Synthetic cards (no worker dir, never in
+  // cardTicketIds → no capacity/queue impact), appended like queuedTickets so
+  // deriveInbox surfaces them via the existing attention bucket (CTL-1158 reuse).
+  const orphanTickets = synthesizeOrphanTickets(readOrphanPrState(), now);
+  tickets = [...tickets, ...orphanTickets];
 
   // priority queue: eligible (not yet in-flight), globally ranked (Queue tab)
   const queue = await Promise.all(
