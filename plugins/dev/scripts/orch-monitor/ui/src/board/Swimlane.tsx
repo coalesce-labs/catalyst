@@ -139,8 +139,16 @@ export function swipeBlockDirection(
   if (atRight && deltaX > 0) return "right";
   return null;
 }
-const COL_GAP = 16;
-const PAD_X = 16;
+// CTL-1168: tighter Linear gutters — COL_GAP 16→10, PAD_X 16→12. Narrower inter-
+// column gutter + a slimmer left/right board inset (less dead space between the
+// left nav and the first column) without crowding the cards.
+const COL_GAP = 10;
+const PAD_X = 12;
+
+/** CTL-1168: the board's TOP padding — shared by the sticky ColumnHeaderRow and
+ *  the LaneBackdrop so the continuous column band starts exactly at the column
+ *  header's top edge (no strip poking up through the gutter above the header). */
+const BOARD_TOP_PAD = 16;
 
 /** CTL-1144: the board's intrinsic minimum width — N column tracks at COL_W,
  *  (N-1) inter-column gaps at COL_GAP, plus the row's left+right PAD_X. Drives
@@ -171,6 +179,21 @@ export const ROW_PAD_V = 22;
 // Exported for tests.
 export const LANE_CELL_MAX_VAR = "--lane-cell-max";
 export const LANE_CELL_MAX_DEFAULT = "300px";
+
+/** CTL-1168 scroll-to-top gate: a LaneCardsRow's CSS `flexGrow`, derived from its
+ *  water-fill cap (`cellMax` from useLaneCellHeights → computeLaneHeights).
+ *
+ *  Returns 1 (grow to fill leftover vertical space) ONLY when the lane FITS:
+ *    • `null`      → uncapped, alloc ≥ demand (Case 1, or a saturated Case-2 lane);
+ *    • `undefined` → unmeasured first frame (harmless to grow once).
+ *  Returns 0 when `cellMax` is a px number — the lane is capped/floored, which only
+ *  happens when the board is PAGE-SCROLLING (Case 3, or a still-hungry Case-2 lane).
+ *  Growing a row in that state pushes the last band down and breaks scroll-to-top
+ *  (the CTL-1010 regression); pinning flexGrow to 0 keeps the last band bottom-
+ *  anchored and the first row reachable at the top. */
+export function laneRowGrow(cellMax: number | null | undefined): 0 | 1 {
+  return cellMax === null || cellMax === undefined ? 1 : 0;
+}
 
 /** One shared header column — the lens phase/linear column the whole board aligns
  *  to. `count` / `live` are totals across ALL lanes (the header chip + live dot). */
@@ -203,8 +226,10 @@ function ColumnHeaderRow({ columns }: { columns: SharedColumn[] }) {
         display: "grid",
         gridTemplateColumns: `repeat(${columns.length}, minmax(${COL_W}px, 1fr))`,
         gap: COL_GAP,
-        // CTL-1144: top padding increased to 16px for comfortable board breathing room.
-        padding: `16px ${PAD_X}px 0`,
+        // CTL-1144: top padding for comfortable board breathing room.
+        // CTL-1168: BOARD_TOP_PAD shared with the LaneBackdrop so the band caps at
+        // exactly the header's top edge (no strip above the header).
+        padding: `${BOARD_TOP_PAD}px ${PAD_X}px 0`,
         position: "sticky",
         top: 0,
         zIndex: 3,
@@ -240,7 +265,14 @@ function ColumnHeaderRow({ columns }: { columns: SharedColumn[] }) {
 // CTL-1151: one continuous full-height lane per column, painted ONCE behind all
 // bands/cards. Aligned to the same grid tracks as the content rows so strips sit
 // exactly under their columns. The header cap (ColumnHeaderRow, opaque s0, sticky)
-// occludes the strip top; strips round their BOTTOM corners.
+// rounds its TOP corners; strips round their BOTTOM corners.
+//
+// CTL-1168: the band's TOP now caps at the column header's TOP edge. The header
+// row carries a BOARD_TOP_PAD (16px) top padding for board breathing room;
+// previously the backdrop's top padding was 0 so the strips poked up through that
+// gutter ABOVE the header. Matching the backdrop's TOP padding to BOARD_TOP_PAD
+// starts the strips exactly at the header's top edge — full-height to the bottom,
+// no strip above the header.
 function LaneBackdrop({ count }: { count: number }) {
   return (
     <div
@@ -254,7 +286,7 @@ function LaneBackdrop({ count }: { count: number }) {
         display: "grid",
         gridTemplateColumns: `repeat(${count}, minmax(${COL_W}px, 1fr))`,
         gap: COL_GAP,
-        padding: `0 ${PAD_X}px 16px`,
+        padding: `${BOARD_TOP_PAD}px ${PAD_X}px 16px`,
       }}
     >
       {Array.from({ length: count }).map((_, i) => (
@@ -409,6 +441,17 @@ function LaneCardsRow({
   constrainCells?: boolean;
   cellMax?: number | null;
 }) {
+  // CTL-1168 scroll-to-top fix: flexGrow must NOT apply when the board is
+  // PAGE-SCROLLING (Σ content > viewport, lane-heights Case 3 → cellMax is a px
+  // number/floor). In that case the flex column's `minHeight:100%` plus a growing
+  // last row pushed the final band DOWN so scrolling up never reached the first
+  // row (the CTL-1010 regression). flexGrow is now gated on the lane FITTING:
+  //   • cellMax === null      → uncapped (fits) → grow to fill leftover space (1);
+  //   • cellMax === undefined → unmeasured first frame → grow (1, harmless);
+  //   • cellMax is a number   → capped/floored → page scrolls → DON'T grow (0) so
+  //     rows keep their natural height, the last band stays bottom-anchored, and
+  //     the board scrolls fully to the top (first row reachable).
+  const growable = laneRowGrow(cellMax);
   return (
     <div
       data-lane-key={laneKey}
@@ -417,10 +460,10 @@ function LaneCardsRow({
         gridTemplateColumns: `repeat(${cells.length}, minmax(${COL_W}px, 1fr))`,
         gap: COL_GAP,
         padding: `6px ${PAD_X}px 16px`,
-        // CTL-1144: flexGrow:1 lets this row expand to fill leftover vertical space
-        // (full-height lane cells, Phase 3); stretch fills the taller row height.
-        // flexGrow is inert when content overflows — water-fill caps still govern.
-        flexGrow: 1,
+        // CTL-1144 / CTL-1168: grow to fill leftover vertical space ONLY when the
+        // lane fits (uncapped) — never when the board is page-scrolling (capped),
+        // which would break scroll-to-top by pushing the last band down.
+        flexGrow: growable,
         alignItems: "stretch",
         width: "100%",
         // CTL-1151: cards must sit above the zIndex:0 LaneBackdrop painted behind
@@ -734,29 +777,10 @@ export function SwimlaneBoard<T extends GroupableEntity>({
   const laneKeys = chrome ? lanes.map((l) => l.key) : [];
   const allocs = useLaneCellHeights(scrollRef, laneKeys, constrainCells, density);
 
-  // Shadow visibility state: tracks whether the board has scrollable overflow
-  // on either side, so we can show left/right edge shadows without scroll-
-  // driven animations (which degrade in Safari). Updated on scroll + resize.
-  const [shadows, setShadows] = useState<{ left: boolean; right: boolean }>({ left: false, right: false });
-  useEffect(() => {
-    const el = scrollRef.current;
-    if (!el) return;
-    const update = () => {
-      const { scrollLeft, scrollWidth, clientWidth } = el;
-      setShadows({
-        left: scrollLeft > SWIPE_EDGE_TOLERANCE,
-        right: scrollLeft < scrollWidth - clientWidth - SWIPE_EDGE_TOLERANCE,
-      });
-    };
-    update();
-    el.addEventListener("scroll", update, { passive: true });
-    const ro = new ResizeObserver(update);
-    ro.observe(el);
-    return () => {
-      el.removeEventListener("scroll", update);
-      ro.disconnect();
-    };
-  }, []);
+  // CTL-1168: the CTL-973 "Layer 3" cosmetic edge-fade gradient (and its
+  // scroll-position `shadows` state + listener) is removed — it read as a stray
+  // vignette over the calm board. The wheel guard (useBoardSwipeGuard) and the
+  // bump-class nudge — the FUNCTIONAL swipe-navigation protection — are untouched.
 
   return (
     <div
@@ -786,28 +810,6 @@ export function SwimlaneBoard<T extends GroupableEntity>({
         position: "relative",
       }}
     >
-      {/* CTL-973 Layer 3: left/right edge shadow affordances. Rendered as
-          position:sticky pseudo-elements via a wrapper div so the shadow
-          travels with the viewport during scroll without needing JS. The
-          gradient fades from the board background color to transparent.
-          Visibility is driven by the scroll-position state. */}
-      {shadows.left && (
-        <div
-          aria-hidden="true"
-          style={{
-            position: "sticky",
-            left: 0,
-            top: 0,
-            width: 32,
-            height: "100%",
-            pointerEvents: "none",
-            zIndex: 10,
-            float: "left",
-            background: `linear-gradient(to right, color-mix(in srgb, ${C.s1} 80%, transparent) 0%, transparent 100%)`,
-            marginRight: -32,
-          }}
-        />
-      )}
       {/* CTL-1144: min-width driven by column count so tracks never compete for
           negative space; flex column + minHeight:100% lets lane rows divide the
           leftover vertical space (Phase 3 full-height cells). */}
@@ -855,23 +857,6 @@ export function SwimlaneBoard<T extends GroupableEntity>({
           <LaneCardsRow cells={deriveLane(lanes[0]?.items ?? items)} />
         )}
       </div>
-      {shadows.right && (
-        <div
-          aria-hidden="true"
-          style={{
-            position: "sticky",
-            right: 0,
-            top: 0,
-            width: 32,
-            height: "100%",
-            pointerEvents: "none",
-            zIndex: 10,
-            float: "right",
-            background: `linear-gradient(to left, color-mix(in srgb, ${C.s1} 80%, transparent) 0%, transparent 100%)`,
-            marginLeft: -32,
-          }}
-        />
-      )}
     </div>
   );
 }

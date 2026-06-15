@@ -17,8 +17,11 @@ describe("laneTint", () => {
     expect(laneTint("#3a2a5a", C.subtle)).not.toContain("in srgb");
   });
 
-  it("keeps the tint perceptible but calm (3–10%)", () => {
-    expect(LANE_TINT_PCT).toBeGreaterThanOrEqual(8);
-    expect(LANE_TINT_PCT).toBeLessThanOrEqual(10);
+  it("keeps the tint perceptible but calm (CTL-1168: ~doubled to 18%, capped at 25%)", () => {
+    // CTL-1168: 9 → 18 so per-project lanes read clearly; an oklab mix this low is
+    // still a calm tint, not a saturated fill. Upper bound guards against a future
+    // bump turning the band into a solid color block.
+    expect(LANE_TINT_PCT).toBeGreaterThanOrEqual(16);
+    expect(LANE_TINT_PCT).toBeLessThanOrEqual(25);
   });
 });
