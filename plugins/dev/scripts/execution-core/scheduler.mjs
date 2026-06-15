@@ -100,6 +100,7 @@ import {
 } from "./beliefs/advance-shadow.mjs";
 import { recordShadowComparison } from "./beliefs/shadow-store.mjs";
 import { runFreeSlotsShadow } from "./beliefs/free-slots-shadow.mjs";
+import { makeReclaimShadowRecorder } from "./beliefs/reclaim-shadow.mjs";
 // CTL-937: bounded stall-diagnostician wake wiring (opt-in CATALYST_DIAGNOSTICIAN=1).
 import { processDiagnosticianWakes } from "./diagnostician.mjs";
 import { executeEscalations } from "./beliefs/escalate.mjs";
@@ -3338,6 +3339,10 @@ export function schedulerTick(
   // are silent — they describe "no externally-visible change" the next tick
   // re-evaluates. 'reviveSuppressed' now marks only the audit-append-failure
   // path; 'noProgressStopped' + 'escalated' fire `needs-human`.
+  // CTL-935 Phase 3: capture raw reclaim outcomes per subject (ticket/phase) BEFORE
+  // the lossy switch — the switch coarsens outcomes into HUD buckets, losing the
+  // raw string needed by the reclaim shadow comparator.
+  const reclaimOutcomes = new Map();
   const reclaimed = [];
   const revived = [];
   // CTL-736: reviveSuppressed now marks ONLY the audit-append-failure path (the
@@ -3434,6 +3439,8 @@ export function schedulerTick(
       // (revive only while progressing; stop on zero progress) + the Phase-1 O_EXCL
       // claim bound the mass-revive storm structurally.
       const r = reclaimDeadWork(orchDir, sig, reclaimOpts);
+      // CTL-935 Phase 3: record raw outcome before the switch coarsens it.
+      try { reclaimOutcomes.set(`${sig.ticket}/${sig.phase}`, r); } catch { /* isolation */ }
       const entry = { ticket: sig.ticket, phase: sig.phase };
       switch (r) {
         case "reclaimed":
@@ -4792,6 +4799,9 @@ export function schedulerTick(
     inFlightCount,
     livenessFresh,
     draining,
+    // CTL-935 Phase 3: raw per-subject reclaim outcomes (before the lossy switch)
+    // for the reclaim shadow comparator.
+    reclaimOutcomes,
     ready: ready.map((t) => t.identifier),
   };
 }
@@ -5204,6 +5214,27 @@ function runTick() {
       } catch (fsErr) {
         try {
           log.warn({ err: fsErr?.message }, "free-slots-shadow: comparator threw (tick unaffected)");
+        } catch {
+          /* even logging must not break the tick */
+        }
+      }
+    }
+    // CTL-935 Phase 3: reclaim-verdict / R4-R7 shadow comparator. Runs AFTER
+    // schedulerTick (which produces reclaimOutcomes with raw guard strings before
+    // the lossy switch). Guard mirrors the Phase 2 free-slots guard above.
+    if (beliefsRes?.ok && beliefsRes?.tickId != null) {
+      try {
+        const rcDb = getBeliefsDb();
+        if (rcDb && tickResult?.reclaimOutcomes?.size) {
+          const recordReclaim = makeReclaimShadowRecorder(rcDb, beliefsRes.tickId, {
+            appendEvent: intentEventAppender,
+            writeComparison: (rec) => recordShadowComparison(rcDb, rec),
+          });
+          recordReclaim(tickResult.reclaimOutcomes);
+        }
+      } catch (rcErr) {
+        try {
+          log.warn({ err: rcErr?.message }, "reclaim-shadow: comparator threw (tick unaffected)");
         } catch {
           /* even logging must not break the tick */
         }
