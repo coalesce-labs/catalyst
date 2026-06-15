@@ -448,6 +448,40 @@ describe("ProcReaper.sweep — allowlist + live-tree sparing", () => {
     expect(killProc.calls.filter(([, s]) => s !== 0)).toHaveLength(0);
   });
 
+  it("live-agent cwd protection (gate 7) uses the fresh agents read, not a stale cache", async () => {
+    // An ORPHANED node (pid 250, ppid 1) sharing a live agent's worktree cwd.
+    // isOrphaned does NOT save it (reparented to launchd), so it is spared ONLY
+    // by the cwd gate — and that live-agent cwd set must come from the
+    // catastrophe-guard's fresh agentsResult, NOT a stale/cold cache. With the
+    // pre-hardening code (LIVE_TREE/cwds from a separate cached liveAgents that
+    // returned []), this orphan would have been killed.
+    const psLines = [
+      psLine({ pid: 250, ppid: 1, etime: "99:00", command: "node leftover.mjs" }),
+    ];
+    const emit = recordingEmit();
+    const killProc = recordingKill({ alive: new Set([250]) });
+    const reaper = new ProcReaper({
+      mode: "enforce",
+      worktreeRoot: WT_ROOT,
+      psLister: () => psLines,
+      lsofCwd: () => `${WT_ROOT}/CTL-X`,
+      liveAgents: () => [], // a stale/cold cache — MUST be ignored now
+      agentsResult: () => ({ ok: true, agents: [{ pid: 100, cwd: `${WT_ROOT}/CTL-X` }] }),
+      killProc,
+      sleep: async () => {},
+      now: () => 0,
+      selfPid: 1,
+      daemonPids: [],
+      emit,
+      log: silentLog(),
+    });
+    await reaper.sweep({});
+    const r2 = await reaper.sweep({});
+    expect(r2.reaped).toHaveLength(0);
+    expect(r2.spared.some((s) => s.reason === "live-agent-owned")).toBe(true);
+    expect(killProc.calls.filter(([, s]) => s !== 0)).toHaveLength(0);
+  });
+
   it("interactive claude + children spared (cwd NOT under worktree root)", async () => {
     const psLines = [
       psLine({ pid: 300, ppid: 1, etime: "99:00", command: "node tool.mjs" }),

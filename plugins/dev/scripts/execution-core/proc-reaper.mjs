@@ -30,7 +30,7 @@
 // DEFAULT mode:"shadow" — emits procOrphans.would-reap, kills NOTHING. Bakes on
 // mini before any enforce flip (like stall-janitor CTL-1004 + cost-cap CTL-1137).
 //
-// ALL IO is injected (psLister/lsofCwd/liveAgents/agentsResult/killProc/sleep/now)
+// ALL IO is injected (psLister/lsofCwd/agentsResult/killProc/sleep/now)
 // so the unit tests never spawn a subprocess, run ps/lsof, touch ~/.claude, or
 // signal a real pid.
 
@@ -38,7 +38,7 @@ import { execFileSync } from "node:child_process";
 import { homedir } from "node:os";
 import { basename } from "node:path";
 import { emitReapIntent } from "./reap-intent.mjs";
-import { getAgentsCached, listClaudeAgentsResult } from "./claude-agents.mjs";
+import { listClaudeAgentsResult } from "./claude-agents.mjs";
 import { log as defaultLog } from "./config.mjs";
 
 // The hard never-kill argv-substring allowlist (case-insensitive). Config-
@@ -323,7 +323,6 @@ export class ProcReaper {
     killableCommands = new Set(["node", "bun"]),
     psLister = defaultPsLister,
     lsofCwd = defaultLsofCwd,
-    liveAgents = () => getAgentsCached().agents,
     agentsResult = () => listClaudeAgentsResult(),
     killProc = defaultKillProc,
     sleep = realSleep,
@@ -341,7 +340,6 @@ export class ProcReaper {
     this.killableCommands = killableCommands;
     this.psLister = psLister;
     this.lsofCwd = lsofCwd;
-    this.liveAgents = liveAgents;
     this.agentsResult = agentsResult;
     this.killProc = killProc;
     this.sleep = sleep;
@@ -406,14 +404,13 @@ export class ProcReaper {
       childrenByPpid.get(r.ppid).push(r.pid);
     }
 
-    // Live-agent correlation: pid roots → LIVE_TREE subtree; cwd set.
-    const liveAgents = (() => {
-      try {
-        return this.liveAgents() ?? [];
-      } catch {
-        return [];
-      }
-    })();
+    // Live-agent correlation: pid roots → LIVE_TREE subtree; cwd set. These
+    // derive from the SAME fresh, ok-verified read that just passed the
+    // catastrophe guard — NOT a separate cached snapshot. Keeping the guard and
+    // the correlation on one source means a cold/stale cache returning [] while
+    // the fresh read succeeds can never shrink the live-agent cwd set out from
+    // under the kill gate.
+    const liveAgents = Array.isArray(agentsRes.agents) ? agentsRes.agents : [];
     const liveAgentSubtreePids = collectLiveAgentSubtree(liveAgents, byPid, childrenByPpid);
     const liveAgentCwds = new Set();
     for (const a of liveAgents) if (a?.cwd) liveAgentCwds.add(a.cwd);
