@@ -511,12 +511,16 @@ export function isAssigneeClaimable(assignee, botUserIds) {
 // UUID to delegate (not assignee), so linearis issues read never exposes it.
 // Mirrors the buildBatchCurlArgs / runBatchOnce pattern: one spawnSync curl POST,
 // same --cacert gating, same auth/rate classification.
-const DELEGATE_QUERY = `query IssueDelegate($id: String!) {
-  issues(filter: { identifier: { eq: $id } }) { nodes { delegate { id } } }
+// IssueFilter has no `identifier` field — filter by team key + number parsed
+// from the identifier (e.g. "CTL-1160" → team "CTL", number 1160).
+const DELEGATE_QUERY = `query IssueDelegate($team: String!, $num: Float!) {
+  issues(filter: { team: { key: { eq: $team } }, number: { eq: $num } }) { nodes { delegate { id } } }
 }`;
 
 export function buildDelegateCurlArgs(identifier, { token = "", ca } = {}) {
-  const payload = JSON.stringify({ query: DELEGATE_QUERY, variables: { id: identifier } });
+  const m = /^([A-Za-z][A-Za-z0-9]*)-(\d+)$/.exec(identifier ?? "");
+  const variables = m ? { team: m[1], num: Number(m[2]) } : { team: String(identifier ?? ""), num: 0 };
+  const payload = JSON.stringify({ query: DELEGATE_QUERY, variables });
   const caArgs = ca && existsSync(ca) ? ["--cacert", ca] : [];
   const args = [
     "-sS",

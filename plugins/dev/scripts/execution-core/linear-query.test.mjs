@@ -1121,10 +1121,12 @@ describe("buildDelegateCurlArgs (CTL-1173)", () => {
     expect(args[hIdx + 1]).toBe("Authorization: Bearer lin_oauth_x");
   });
 
-  test("payload projects delegate field and passes identifier as variable", () => {
+  test("payload projects delegate field and passes parsed team+number as variables", () => {
     const { payload } = buildDelegateCurlArgs("CTL-1", { token: "lin_oauth_x" });
     expect(payload).toContain("delegate");
-    expect(JSON.parse(payload).variables).toEqual({ id: "CTL-1" });
+    // IssueFilter has no `identifier`; the identifier is parsed to team key + number.
+    expect(JSON.parse(payload).variables).toEqual({ team: "CTL", num: 1 });
+    expect(JSON.parse(payload).query).toContain("team: { key: { eq: $team } }, number: { eq: $num }");
   });
 });
 
