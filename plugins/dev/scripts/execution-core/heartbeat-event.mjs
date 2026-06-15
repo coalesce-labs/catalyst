@@ -13,10 +13,16 @@
 // resource block carries host.name + host.id from lib/host-identity.mjs, the
 // same primitives every other execution-core MJS emitter uses.
 
-import { mkdirSync, appendFileSync } from "node:fs";
+import { mkdir, appendFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import { randomBytes } from "node:crypto";
-import { getEventLogPath, getHostName, HEARTBEAT_INTERVAL_MS, log, readGovernanceConfig } from "./config.mjs";
+import {
+  getEventLogPath,
+  getHostName,
+  HEARTBEAT_INTERVAL_MS,
+  log,
+  readGovernanceConfig,
+} from "./config.mjs";
 import { hostName, hostId } from "./lib/host-identity.mjs";
 
 export const HEARTBEAT_EVENT = "node.heartbeat";
@@ -78,11 +84,11 @@ export function buildHeartbeatEnvelope({ now, epochFn, governanceFn } = {}) {
  * throws). `logPath` is injectable for tests; defaults to the same
  * getEventLogPath() every other emitter uses (no new log path).
  */
-export function emitHeartbeatEvent({ logPath = getEventLogPath(), now, epochFn } = {}) {
+export async function emitHeartbeatEvent({ logPath = getEventLogPath(), now, epochFn } = {}) {
   const line = `${JSON.stringify(buildHeartbeatEnvelope({ now, epochFn }))}\n`;
   try {
-    mkdirSync(dirname(logPath), { recursive: true });
-    appendFileSync(logPath, line);
+    await mkdir(dirname(logPath), { recursive: true });
+    await appendFile(logPath, line);
     return true;
   } catch (err) {
     log.warn({ err: err?.message }, "heartbeat-event: event append failed");
@@ -101,13 +107,14 @@ export function emitHeartbeatEvent({ logPath = getEventLogPath(), now, epochFn }
  * @param {string} [opts.logPath]     event-log path (injectable for tests)
  */
 export function startHeartbeat({ intervalMs = HEARTBEAT_INTERVAL_MS, logPath } = {}) {
-  const tick = () => emitHeartbeatEvent({ logPath });
-  tick(); // emit once at boot so liveness is visible immediately
+  const tick = () => emitHeartbeatEvent({ logPath }).catch(() => {});
+  const started = tick(); // emit once at boot; Promise for callers that need to await it
   const timer = setInterval(tick, intervalMs);
   timer.unref?.();
   return {
     stop() {
       clearInterval(timer);
     },
+    started, // resolves after the first heartbeat write attempt
   };
 }

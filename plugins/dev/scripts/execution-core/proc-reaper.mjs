@@ -34,7 +34,7 @@
 // so the unit tests never spawn a subprocess, run ps/lsof, touch ~/.claude, or
 // signal a real pid.
 
-import { execFileSync } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import { homedir } from "node:os";
 import { basename } from "node:path";
 import { emitReapIntent } from "./reap-intent.mjs";
@@ -207,7 +207,7 @@ function isArgvAllowlisted(args, patterns) {
  * The ordering puts the never-kill allowlist + LIVE_TREE FIRST (so an
  * allowlisted/live proc is never even probed), then orphan/command/cwd/etime.
  */
-export function classifyProc(row, ctx) {
+export async function classifyProc(row, ctx) {
   const {
     byPid,
     liveAgentCwds,
@@ -240,7 +240,7 @@ export function classifyProc(row, ctx) {
   if (!isOrphaned(row, byPid)) return { action: "spare", reason: "has-live-ancestor" };
 
   // (5) cwd must be resolvable; unknown cwd → SPARE (degrade safe).
-  const cwd = cwdForPid(row.pid);
+  const cwd = await cwdForPid(row.pid);
   if (cwd === null || cwd === undefined) return { action: "spare", reason: "cwd-unknown" };
 
   // (6) cwd AT OR UNDER any live-agent cwd → a live worker's own (possibly
@@ -275,10 +275,17 @@ export function classifyProc(row, ctx) {
 
 // ─── Default IO seams (replaced wholesale in tests) ──────────────────────────
 
-function defaultPsLister() {
+function execFileAsync(bin, args, opts = {}) {
+  return new Promise((resolve, reject) => {
+    execFile(bin, args, { encoding: "utf8", ...opts }, (err, stdout) =>
+      err ? reject(err) : resolve(stdout)
+    );
+  });
+}
+
+async function defaultPsLister() {
   try {
-    const out = execFileSync("ps", ["-axo", "pid=,ppid=,rss=,etime=,command="], {
-      encoding: "utf8",
+    const out = await execFileAsync("ps", ["-axo", "pid=,ppid=,rss=,etime=,command="], {
       maxBuffer: 16 * 1024 * 1024,
     });
     return out.split("\n");
@@ -287,11 +294,9 @@ function defaultPsLister() {
   }
 }
 
-function defaultLsofCwd(pid) {
+async function defaultLsofCwd(pid) {
   try {
-    const out = execFileSync("lsof", ["-a", "-p", String(pid), "-d", "cwd", "-Fn"], {
-      encoding: "utf8",
-    });
+    const out = await execFileAsync("lsof", ["-a", "-p", String(pid), "-d", "cwd", "-Fn"]);
     // -Fn output: lines like `pPID`, `fcwd`, `n/abs/path`. The cwd path line
     // starts with 'n'.
     for (const line of out.split("\n")) {
@@ -393,7 +398,7 @@ export class ProcReaper {
     if (!agentsRes || agentsRes.ok !== true) {
       this.log.warn(
         {},
-        "proc-reaper: `claude agents` read FAILED — aborting sweep, killing nothing (CATASTROPHE GUARD)",
+        "proc-reaper: `claude agents` read FAILED — aborting sweep, killing nothing (CATASTROPHE GUARD)"
       );
       await this._safeEmit("procOrphans.spared", { reason: "agents-unreadable" });
       this._priorCandidates.clear(); // a failed read invalidates persistence state
@@ -403,7 +408,7 @@ export class ProcReaper {
     // Snapshot processes. An unreadable ps degrades safe (empty report).
     let rows;
     try {
-      rows = parsePsRows(this.psLister());
+      rows = parsePsRows(await this.psLister());
     } catch (err) {
       this.log.warn({ err: err?.message }, "proc-reaper: ps snapshot failed — skipping sweep");
       return report;
@@ -450,7 +455,7 @@ export class ProcReaper {
     const thisSweepCandidates = new Map();
     const verdicts = [];
     for (const row of rows) {
-      const v = classifyProc(row, ctx);
+      const v = await classifyProc(row, ctx);
       verdicts.push({ row, v });
       if (v.action === "kill") thisSweepCandidates.set(row.pid, row.args);
     }
@@ -475,7 +480,7 @@ export class ProcReaper {
         await this._safeEmit("procOrphans.would-reap", {
           pid: row.pid,
           command: row.command,
-          worktreePath: this._safeCwd(row.pid),
+          worktreePath: await this._safeCwd(row.pid),
         });
       } else if (this.mode === "enforce") {
         const killed = await this._terminateWithGrace(row);
@@ -484,7 +489,7 @@ export class ProcReaper {
           await this._safeEmit("procOrphans.reaped", {
             pid: row.pid,
             command: row.command,
-            worktreePath: this._safeCwd(row.pid),
+            worktreePath: await this._safeCwd(row.pid),
           });
         }
       }
@@ -509,7 +514,7 @@ export class ProcReaper {
     // different argv (or is absent) → stillSame false → no SIGKILL.
     let stillSame = true;
     try {
-      const fresh = parsePsRows(this.psLister());
+      const fresh = parsePsRows(await this.psLister());
       const cur = fresh.find((r) => r.pid === row.pid);
       stillSame = !!cur && cur.args === row.args;
     } catch {
@@ -523,9 +528,9 @@ export class ProcReaper {
     return true;
   }
 
-  _safeCwd(pid) {
+  async _safeCwd(pid) {
     try {
-      return this.lsofCwd(pid);
+      return await this.lsofCwd(pid);
     } catch {
       return null;
     }

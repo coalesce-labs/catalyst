@@ -89,9 +89,9 @@ describe("emitHeartbeatEvent (CTL-859)", () => {
     rmSync(tmp, { recursive: true, force: true });
   });
 
-  test("appends one parseable node.heartbeat line to the event log", () => {
+  test("appends one parseable node.heartbeat line to the event log", async () => {
     process.env.CATALYST_HOST_NAME = "mini";
-    expect(emitHeartbeatEvent({ logPath })).toBe(true);
+    expect(await emitHeartbeatEvent({ logPath })).toBe(true);
     const lines = readFileSync(logPath, "utf8").trim().split("\n");
     expect(lines).toHaveLength(1);
     const evt = JSON.parse(lines[0]);
@@ -99,12 +99,28 @@ describe("emitHeartbeatEvent (CTL-859)", () => {
     expect(evt.body.payload["host.name"]).toBe("mini");
   });
 
-  test("returns false (never throws) when the log path is unwriteable", () => {
-    // A path whose parent is a file, not a dir → mkdirSync/appendFileSync fail.
+  test("returns false (never throws) when the log path is unwriteable", async () => {
+    // A path whose parent is a file, not a dir → mkdir/appendFile fail.
     const fileAsDir = join(tmp, "afile");
     appendFileSync(fileAsDir, "x");
     const bad = join(fileAsDir, "events.jsonl");
-    expect(emitHeartbeatEvent({ logPath: bad })).toBe(false);
+    expect(await emitHeartbeatEvent({ logPath: bad })).toBe(false);
+  });
+
+  test("appends the envelope via async fs and resolves true", async () => {
+    const tmp2 = `${tmpdir()}/ctl1170-hb-${process.pid}.jsonl`;
+    try {
+      const ok = await emitHeartbeatEvent({ logPath: tmp2 });
+      expect(ok).toBe(true);
+      expect(readFileSync(tmp2, "utf8")).toContain('"event.action":"heartbeat"');
+    } finally {
+      rmSync(tmp2, { force: true });
+    }
+  });
+
+  test("resolves false on a write failure (never throws)", async () => {
+    const ok = await emitHeartbeatEvent({ logPath: "/proc/nonexistent/cannot/write.jsonl" });
+    expect(ok).toBe(false);
   });
 });
 
@@ -121,10 +137,11 @@ describe("startHeartbeat (CTL-859)", () => {
     rmSync(tmp, { recursive: true, force: true });
   });
 
-  test("emits once immediately and returns a stop handle", () => {
+  test("emits once immediately and returns a stop handle", async () => {
     process.env.CATALYST_HOST_NAME = "mini";
     const h = startHeartbeat({ intervalMs: 1_000_000, logPath });
     try {
+      await h.started;
       const lines = readFileSync(logPath, "utf8").trim().split("\n");
       expect(lines).toHaveLength(1);
       expect(JSON.parse(lines[0]).attributes["event.name"]).toBe("node.heartbeat");
@@ -194,9 +211,9 @@ describe("readClusterHeartbeats (CTL-859)", () => {
     });
   });
 
-  test("round-trips an emitHeartbeatEvent-produced line", () => {
+  test("round-trips an emitHeartbeatEvent-produced line", async () => {
     process.env.CATALYST_HOST_NAME = "mini";
-    emitHeartbeatEvent({ logPath });
+    await emitHeartbeatEvent({ logPath });
     const seen = readClusterHeartbeats({ logPath });
     expect(Object.keys(seen)).toEqual(["mini"]);
     expect(typeof seen.mini).toBe("string");

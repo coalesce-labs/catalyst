@@ -138,9 +138,9 @@ describe("classifyFleetHealth (pure)", () => {
 // ─── Probe tick behaviour ────────────────────────────────────────────────────
 
 describe("startFleetHealthProbe tick", () => {
-  test("threshold-cross emits exactly one event with all four readings + tripped + sustained_n=1", () => {
+  test("threshold-cross emits exactly one event with all four readings + tripped + sustained_n=1", async () => {
     const { p, emitted } = harness({ jobs: 600, agents: 3, procs: 5, swap: 100 });
-    p.tick();
+    await p.tick();
     expect(emitted.length).toBe(1);
     const e = emitted[0];
     expect(e.jobsCount).toBe(600);
@@ -151,7 +151,7 @@ describe("startFleetHealthProbe tick", () => {
     expect(e.sustained_n).toBe(1);
   });
 
-  test("below-threshold is silent (0 events, 0 self-heal, counter stays 0)", () => {
+  test("below-threshold is silent (0 events, 0 self-heal, counter stays 0)", async () => {
     const { p, emitted, selfHeals } = harness({
       config: baseConfig({ selfHealEnabled: true }),
       jobs: 10,
@@ -159,65 +159,65 @@ describe("startFleetHealthProbe tick", () => {
       procs: 1,
       swap: 0,
     });
-    p.tick();
-    p.tick();
+    await p.tick();
+    await p.tick();
     expect(emitted.length).toBe(0);
     expect(selfHeals.length).toBe(0);
   });
 
-  test("self-heal fires ONCE on sustained breach (sustainedTicks=2)", () => {
+  test("self-heal fires ONCE on sustained breach (sustainedTicks=2)", async () => {
     const { p, emitted, selfHeals } = harness({
       config: baseConfig({ selfHealEnabled: true, sustainedTicks: 2 }),
       jobs: 600,
     });
-    p.tick(); // sustained_n=1, below sustainedTicks
+    await p.tick(); // sustained_n=1, below sustainedTicks
     expect(selfHeals.length).toBe(0);
-    p.tick(); // sustained_n=2 === sustainedTicks → fires once
+    await p.tick(); // sustained_n=2 === sustainedTicks → fires once
     expect(selfHeals.length).toBe(1);
-    p.tick(); // sustained_n=3, already fired this episode → still 1
-    p.tick(); // sustained_n=4 → still 1
+    await p.tick(); // sustained_n=3, already fired this episode → still 1
+    await p.tick(); // sustained_n=4 → still 1
     expect(selfHeals.length).toBe(1);
     // every degraded tick still emits an event
     expect(emitted.length).toBe(4);
   });
 
-  test("hysteresis re-arms only after a healthy tick", () => {
+  test("hysteresis re-arms only after a healthy tick", async () => {
     const { p, refs, selfHeals } = harness({
       config: baseConfig({ selfHealEnabled: true, sustainedTicks: 2 }),
       jobs: 600,
     });
-    p.tick(); // n=1
-    p.tick(); // n=2 → fire #1
+    await p.tick(); // n=1
+    await p.tick(); // n=2 → fire #1
     expect(selfHeals.length).toBe(1);
     // recover
     refs.jobs = 10;
-    p.tick(); // healthy → resets counter + re-arms
+    await p.tick(); // healthy → resets counter + re-arms
     // fresh sustained run
     refs.jobs = 600;
-    p.tick(); // n=1
+    await p.tick(); // n=1
     expect(selfHeals.length).toBe(1);
-    p.tick(); // n=2 → fire #2
+    await p.tick(); // n=2 → fire #2
     expect(selfHeals.length).toBe(2);
   });
 
-  test("reader failure degrades safe — all readers throw → sentinels, 0 events, 0 self-heal", () => {
+  test("reader failure degrades safe — all readers throw → sentinels, 0 events, 0 self-heal", async () => {
     const { p, emitted, selfHeals } = harness({
       config: baseConfig({ selfHealEnabled: true, sustainedTicks: 1 }),
       throwAll: true,
     });
-    expect(() => p.tick()).not.toThrow();
+    await p.tick();
     expect(emitted.length).toBe(0);
     expect(selfHeals.length).toBe(0);
   });
 
-  test("selfHealEnabled=false (default) → emits every tick but never sweeps", () => {
+  test("selfHealEnabled=false (default) → emits every tick but never sweeps", async () => {
     const { p, emitted, selfHeals } = harness({
       config: baseConfig({ selfHealEnabled: false, sustainedTicks: 2 }),
       jobs: 600,
     });
-    p.tick();
-    p.tick();
-    p.tick();
+    await p.tick();
+    await p.tick();
+    await p.tick();
     expect(emitted.length).toBe(3);
     expect(selfHeals.length).toBe(0);
   });
@@ -228,6 +228,39 @@ describe("startFleetHealthProbe tick", () => {
     p.stop();
     expect(clock.wasCleared()).toBe(true);
   });
+
+  test("awaits async readers and emits degraded when a threshold trips", async () => {
+    const emitted = [];
+    const { tick } = startFleetHealthProbe({
+      clock: { setInterval: () => ({ unref() {} }), clearInterval() {} },
+      config: { intervalMs: 120000, selfHealEnabled: false, sustainedTicks: 1,
+        jobsThreshold: 1, agentsThreshold: 9999, procsThreshold: 9999, swapUsedMbThreshold: 999999 },
+      readJobsCount: async () => 5,
+      listAgents: () => [],
+      psLines: async () => [],
+      readSwapUsedMb: async () => 0,
+      emit: (r) => emitted.push(r),
+    });
+    await tick();
+    expect(emitted).toHaveLength(1);
+    expect(emitted[0].tripped).toContain("jobs");
+  });
+
+  test("a rejecting async reader yields the non-crossing sentinel (no crash, no trip)", async () => {
+    const emitted = [];
+    const { tick } = startFleetHealthProbe({
+      clock: { setInterval: () => ({ unref() {} }), clearInterval() {} },
+      config: { intervalMs: 120000, selfHealEnabled: false, sustainedTicks: 1,
+        jobsThreshold: 1, agentsThreshold: 1, procsThreshold: 1, swapUsedMbThreshold: 1 },
+      readJobsCount: async () => { throw new Error("readdir failed"); },
+      listAgents: () => { throw new Error("x"); },
+      psLines: async () => { throw new Error("ps failed"); },
+      readSwapUsedMb: async () => { throw new Error("sysctl failed"); },
+      emit: (r) => emitted.push(r),
+    });
+    await tick();
+    expect(emitted).toHaveLength(0);
+  });
 });
 
 // ─── defaultReadSwapUsedMb ───────────────────────────────────────────────────
@@ -236,19 +269,19 @@ describe("defaultReadSwapUsedMb", () => {
   // platform:"darwin" is pinned explicitly — the default reads process.platform,
   // which is "linux" on CI, where the function short-circuits to 0 (sysctl is a
   // macOS-only signal). Pinning darwin exercises the real parse path everywhere.
-  test("parses the used field from sysctl vm.swapusage output", () => {
+  test("parses the used field from sysctl vm.swapusage output", async () => {
     const sample =
       "total = 8192.00M  used = 4500.06M  free = 3691.94M  (encrypted)";
-    expect(defaultReadSwapUsedMb({ platform: "darwin", run: () => sample })).toBe(4500);
+    expect(await defaultReadSwapUsedMb({ platform: "darwin", run: () => sample })).toBe(4500);
   });
 
-  test("off-darwin / non-darwin platform → 0 safe sentinel", () => {
-    expect(defaultReadSwapUsedMb({ platform: "linux" })).toBe(0);
+  test("off-darwin / non-darwin platform → 0 safe sentinel", async () => {
+    expect(await defaultReadSwapUsedMb({ platform: "linux" })).toBe(0);
   });
 
-  test("throwing sysctl → 0 safe sentinel", () => {
+  test("throwing sysctl → 0 safe sentinel", async () => {
     expect(
-      defaultReadSwapUsedMb({
+      await defaultReadSwapUsedMb({
         platform: "darwin",
         run: () => {
           throw new Error("sysctl missing");
@@ -257,9 +290,9 @@ describe("defaultReadSwapUsedMb", () => {
     ).toBe(0);
   });
 
-  test("no-match output → 0 safe sentinel", () => {
+  test("no-match output → 0 safe sentinel", async () => {
     expect(
-      defaultReadSwapUsedMb({ platform: "darwin", run: () => "garbage no used field" }),
+      await defaultReadSwapUsedMb({ platform: "darwin", run: () => "garbage no used field" }),
     ).toBe(0);
   });
 });

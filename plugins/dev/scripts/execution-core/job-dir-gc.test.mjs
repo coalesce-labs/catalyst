@@ -202,4 +202,38 @@ describe("sweepJobDirs", () => {
     expect(rm.calls.length).toBe(0);
     expect(res.reclaimed).toBe(0);
   });
+
+  it("awaits async readDir/statDir/rm seams and still reclaims stale dirs", async () => {
+    const removed = [];
+    const res = await sweepJobDirs({
+      jobsRoot: ROOT,
+      readAgents: () => ({ ok: true, agents: [] }),
+      readDir: async () => ["aaaaaaaa", "bbbbbbbb"],
+      statDir: async () => ({ mtimeMs: 0 }),
+      rm: async (dir) => { removed.push(dir); },
+      now: () => 10 * 86_400_000,
+      env: {},
+      emit: async () => true,
+      log: logSpy(),
+    });
+    expect(removed).toEqual([join(ROOT, "aaaaaaaa"), join(ROOT, "bbbbbbbb")]);
+    expect(res.reclaimed).toBe(2);
+  });
+
+  it("isolates a per-entry async statDir rejection (errors++, batch continues)", async () => {
+    let calls = 0;
+    const res = await sweepJobDirs({
+      jobsRoot: ROOT,
+      readAgents: () => ({ ok: true, agents: [] }),
+      readDir: async () => ["aaaaaaaa", "bbbbbbbb"],
+      statDir: async () => { calls++; if (calls === 1) throw new Error("ENOENT"); return { mtimeMs: 0 }; },
+      rm: async () => {},
+      now: () => 10 * 86_400_000,
+      env: {},
+      emit: async () => true,
+      log: logSpy(),
+    });
+    expect(res.errors).toBe(1);
+    expect(res.reclaimed).toBe(1);
+  });
 });
