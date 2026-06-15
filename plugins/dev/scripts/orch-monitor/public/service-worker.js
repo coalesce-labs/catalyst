@@ -10,7 +10,44 @@
 //   - everything else, and crucially /api/* + /events + SSE streams → straight
 //     to network, never cached (stale fleet state would be worse than useless).
 //
-// CTL-1167 will add `push` + `notificationclick` handlers here on top of this.
+// CTL-1167: push + notificationclick handlers for Web Push notifications.
+
+self.addEventListener("push", (event) => {
+  let payload = {};
+  try {
+    payload = event.data ? event.data.json() : {};
+  } catch {
+    payload = {};
+  }
+  const title = payload.title || "Catalyst";
+  event.waitUntil(
+    self.registration.showNotification(title, {
+      body: payload.body || "",
+      data: { deepLink: payload.deepLink || "/" },
+      icon: "/icon-192.png",
+      badge: "/icon-192.png",
+    }),
+  );
+});
+
+self.addEventListener("notificationclick", (event) => {
+  event.notification.close();
+  const deepLink =
+    (event.notification.data && event.notification.data.deepLink) || "/";
+  event.waitUntil(
+    self.clients
+      .matchAll({ type: "window", includeUncontrolled: true })
+      .then((wins) => {
+        for (const w of wins) {
+          if ("focus" in w) {
+            w.navigate?.(deepLink);
+            return w.focus();
+          }
+        }
+        return self.clients.openWindow(deepLink);
+      }),
+  );
+});
 
 const CACHE = "catalyst-shell-v1";
 

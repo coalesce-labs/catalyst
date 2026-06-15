@@ -74,6 +74,11 @@ describe("service-worker.js (committed artifact)", () => {
     expect(sw).toContain("/events");
     expect(sw).toContain("text/event-stream");
   });
+
+  it("registers the push + notificationclick handlers (CTL-1167)", () => {
+    expect(sw).toContain('addEventListener("push"');
+    expect(sw).toContain('addEventListener("notificationclick"');
+  });
 });
 
 // ── Served from the root (integration through createServer) ───────────────────
