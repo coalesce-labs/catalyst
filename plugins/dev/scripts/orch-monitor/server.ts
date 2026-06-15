@@ -1428,7 +1428,8 @@ export function createServer(opts: CreateServerOptions): BunServer {
         id: t.id,
         attention: t.attention,
         attentionSince: t.attentionSince,
-        humanQuestion: t.humanQuestion ?? undefined,
+        // humanQuestion lives in explanation.call_to_action (CTL-1130).
+        humanQuestion: t.explanation?.call_to_action ?? undefined,
         title: t.title,
       })),
       daemon: nav.daemon,
@@ -4016,8 +4017,8 @@ export function createServer(opts: CreateServerOptions): BunServer {
             });
           }
           pushStore.upsertSubscription({
-            endpoint: sub.endpoint as string,
-            keys: { p256dh: keys.p256dh as string, auth: keys.auth as string },
+            endpoint: sub.endpoint,
+            keys: { p256dh: keys.p256dh, auth: keys.auth },
           });
           return new Response(null, { status: 201 });
         }

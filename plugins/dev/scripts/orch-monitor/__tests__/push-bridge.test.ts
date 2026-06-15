@@ -51,8 +51,9 @@ describe("createPushBridge", () => {
 
   beforeEach(() => {
     sendCalls = [];
-    send = async (sub, n) => {
+    send = (sub, n): Promise<void> => {
       sendCalls.push({ sub, n });
+      return Promise.resolve();
     };
   });
 
@@ -83,9 +84,7 @@ describe("createPushBridge", () => {
   it("prunes the subscription when send rejects with statusCode: 410", async () => {
     const store = makeStore([SUB_A]);
     const err410 = Object.assign(new Error("Gone"), { statusCode: 410 });
-    const failSend = async () => {
-      throw err410;
-    };
+    const failSend = (): Promise<void> => Promise.reject(err410);
     const bridge = createPushBridge({ store, projector: createNotificationProjector(), send: failSend });
     await bridge.onBoard(NEEDS_HUMAN_BOARD);
     expect(store.deleted).toContain(SUB_A.endpoint);
@@ -95,9 +94,7 @@ describe("createPushBridge", () => {
   it("retains subscription when send rejects with a non-410 error", async () => {
     const store = makeStore([SUB_A]);
     const err500 = Object.assign(new Error("Server Error"), { statusCode: 500 });
-    const failSend = async () => {
-      throw err500;
-    };
+    const failSend = (): Promise<void> => Promise.reject(err500);
     const bridge = createPushBridge({
       store,
       projector: createNotificationProjector(),
