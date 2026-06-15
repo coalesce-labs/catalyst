@@ -24,22 +24,23 @@
 //      inside it adds left:0 so the group name stays pinned to the board's left
 //      edge during horizontal scroll, exactly as observed on Linear's live board.
 //      Column headers are sticky-top only (they scroll horizontally with columns).
-//   2. CONSTRAINED PER-CELL HEIGHT + OVERSCROLL CHAINING: when multiple groups are
-//      visible (axis !== none AND laneCount > 1), each (group × column) cell becomes
-//      a vertical scroll container — overflow-y:auto with a per-lane max-height.
-//      CTL-1010: that cap is now MEASURED + WATER-FILLED per lane (useLaneCellHeights
-//      → computeLaneHeights) so the lanes fill the FULL board height instead of a
-//      flat 300px cap — the 300px is now only the pre-measurement first-frame
-//      fallback. Critically, overscroll-behavior is NOT set to "contain" — the
-//      default "auto" lets wheel events chain to the board's vertical scroll once the
-//      cell reaches its boundary (revealing the next group / page-scrolling in the
-//      degraded many-lane case). A short/empty cell passes the wheel straight to the
-//      board. The board remains the single both-axes scroll container; groups stack
-//      vertically inside it in normal document flow (no flex wrappers — the
-//      ChartCard flex-collapse trap is structurally avoided).
-//   3. axis="none" (single flat board): no group cells, no height constraint, the
-//      board scrolls normally. A single group (laneCount === 1) on a real axis
-//      also skips the height constraint so one lane doesn't get a tiny scroll box.
+//
+// CTL-1178 — CONTENT-HEIGHT GROUPED BOARD (retires the CTL-958/CTL-1010 water-fill):
+//   The grouped swimlane board now renders each (group × column) cell at its NATURAL
+//   CONTENT HEIGHT — no per-cell max-height, no per-cell overflow-y scroll box, no
+//   `.cat-overlay-scroll` on cells — and a single WHOLE-BOARD vertical scroll (the
+//   grouped container's overflowY:"auto") carries you down through the groups,
+//   matching Linear's live board (scrollHeight >> viewport). Grouped lane rows do
+//   NOT flex-grow (flexGrow 0), so a one-card group stays one-card tall instead of
+//   stretching to fill the viewport. Per operator direction ("taller is better")
+//   there is NO safety cap on a pathologically tall single lane.
+//   The water-fill machinery (the constrainCells gate + useLaneCellHeights →
+//   computeLaneHeights + LANE_CELL_MAX_* / laneRowGrow / lane-heights.ts) is kept
+//   but DEAD for the grouped path: `constrainCells` is now constant false, so
+//   useLaneCellHeights early-returns null (a no-op) and every cell resolves to the
+//   plain content-stack branch. The board stays the single both-axes scroll
+//   container; groups stack vertically inside it in normal document flow (no flex
+//   wrappers — the ChartCard flex-collapse trap is structurally avoided).
 //
 // CTL-973 SWIPE FIX — prevents browser back/forward navigation on 2-finger swipe:
 //   Layer 1 — CSS: `overscroll-behavior-x: contain` on the scroll container. The Y
@@ -537,23 +538,25 @@ function LaneCardsRow({
   laneKey,
   constrainCells = false,
   cellMax,
+  grow = false,
 }: {
   cells: LaneCell[];
   laneKey?: string;
   constrainCells?: boolean;
   cellMax?: number | null;
+  /** CTL-1178: whether this row may flex-grow to fill leftover vertical space.
+   *  The GROUPED content-height board passes `grow={false}` so a one-card group
+   *  stays one-card tall and the whole board scrolls through groups (Linear-style)
+   *  rather than each lane stretching to fill the viewport. The flat-fallback
+   *  single-lane render keeps the default (false) — it owns its own layout. */
+  grow?: boolean;
 }) {
-  // CTL-1168 scroll-to-top fix: flexGrow must NOT apply when the board is
-  // PAGE-SCROLLING (Σ content > viewport, lane-heights Case 3 → cellMax is a px
-  // number/floor). In that case the flex column's `minHeight:100%` plus a growing
-  // last row pushed the final band DOWN so scrolling up never reached the first
-  // row (the CTL-1010 regression). flexGrow is now gated on the lane FITTING:
-  //   • cellMax === null      → uncapped (fits) → grow to fill leftover space (1);
-  //   • cellMax === undefined → unmeasured first frame → grow (1, harmless);
-  //   • cellMax is a number   → capped/floored → page scrolls → DON'T grow (0) so
-  //     rows keep their natural height, the last band stays bottom-anchored, and
-  //     the board scrolls fully to the top (first row reachable).
-  const growable = laneRowGrow(cellMax);
+  // CTL-1178: grouped lane rows render at NATURAL CONTENT HEIGHT and do NOT grow —
+  // a small group stays small while the whole board scrolls vertically through the
+  // groups. flexGrow is forced to 0 (no stretch); the legacy laneRowGrow water-fill
+  // gate (CTL-1168 scroll-to-top fix for the retired per-cell cap) no longer drives
+  // the grouped path. `grow` defaults to false; nothing currently passes true.
+  const growable = grow ? laneRowGrow(cellMax) : 0;
   return (
     <div
       data-lane-key={laneKey}
@@ -562,9 +565,10 @@ function LaneCardsRow({
         gridTemplateColumns: `repeat(${cells.length}, ${COL_W}px)`,
         gap: COL_GAP,
         padding: `6px ${PAD_X}px 16px`,
-        // CTL-1144 / CTL-1168: grow to fill leftover vertical space ONLY when the
-        // lane fits (uncapped) — never when the board is page-scrolling (capped),
-        // which would break scroll-to-top by pushing the last band down.
+        // CTL-1178: grouped lane rows render at natural content height (flexGrow 0,
+        // no stretch) so a small group stays small and the whole board scrolls
+        // vertically through the groups (Linear-style). `growable` is 0 for the
+        // grouped path (grow=false); the legacy water-fill stretch is retired here.
         flexGrow: growable,
         alignItems: "stretch",
         width: "100%",
@@ -857,10 +861,17 @@ export function SwimlaneBoard<T extends GroupableEntity>({
 }) {
   const lanes = buildLanes(items, groupBy, liveness);
   const chrome = showLaneChrome(groupBy, lanes.length);
-  // CTL-958: constrain cell heights only when multiple groups are present
-  // (axis !== "none" AND laneCount > 1). A single group or no-axis board
-  // scrolls normally — one lane should not get a tiny scroll box.
-  const constrainCells = groupBy !== "none" && lanes.length > 1;
+  // CTL-1178: the GROUPED swimlane board now renders at NATURAL CONTENT HEIGHT
+  // with ONE whole-board vertical scroll (Linear-style scroll-through), retiring
+  // the CTL-958/CTL-1010 per-cell water-fill cap + per-cell scroll boxes. Cells
+  // are plain content stacks (no maxHeight, no per-cell overflow-y, no
+  // `.cat-overlay-scroll`), and grouped lane rows do NOT flex-grow — a group with
+  // one card stays one-card tall. The grouped container's own overflowY:"auto"
+  // (below) is the single vertical scroll; sticky header/bands + the CTL-973 swipe
+  // guard are all preserved. `constrainCells` is therefore always false now — the
+  // flag is kept (vs. deleted) so useLaneCellHeights early-returns null (a no-op)
+  // and the water-fill machinery stays intact but DEAD for the grouped path.
+  const constrainCells = false;
   // CTL-1168: the FLAT (ungrouped) board switches to Linear-style per-column
   // independent scroll — but only when the board has a BOUNDED height (`fill`), since
   // each column's viewport needs a fixed parent height to scroll against. Without

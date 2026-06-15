@@ -1,5 +1,11 @@
 // lane-heights.test.ts — CTL-1010 viewport-fitted swimlane height distribution.
 //
+// CTL-1178 NOTE: computeLaneHeights is NO LONGER WIRED into the grouped swimlane
+// board — that board now renders at natural content height with one whole-board
+// vertical scroll (the per-lane water-fill cap is retired). The pure math below is
+// unchanged and stays GREEN; the module/tests are kept for reference + potential
+// flat-board reuse, not because the grouped board still calls them.
+//
 // Pure / DOM-free unit tests for the equal-split water-fill model. The three
 // cases mirror the ticket's Gherkin contract:
 //   1. Σ demand ≤ avail → all null (uncapped — shows everything).
