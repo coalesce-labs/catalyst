@@ -7316,6 +7316,7 @@ describe("CTL-755: admission gate", () => {
       verifyDispatched: verifyOk,
       liveBackgroundCount: () => 0,
       fetchBatch: mkBatch(() => relUnblocked()),
+      hasTriageArtifact: () => true,
     });
     // STEP B promotes CTL-7 (+promotedCount); STEP C subtracts it so sweep 2 has
     // exactly 1 remaining slot for CTL-X — 2 total dispatches, not 3.
@@ -7426,6 +7427,7 @@ describe("CTL-755: admission gate", () => {
       verifyDispatched: verifyOk,
       liveBackgroundCount: () => 0,
       fetchBatch: mkBatch(() => relUnblocked({ priority: 3 })),
+      hasTriageArtifact: () => true,
     });
     // The single slot goes to the higher-priority new work; CTL-7 is held
     // "waiting" (ready, lost the selection), not promoted.
