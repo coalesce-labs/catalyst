@@ -2806,6 +2806,37 @@ export function createServer(opts: CreateServerOptions): BunServer {
           return Response.json(detail);
         }
 
+        // CTL-1133: PWA installability. The web app is installable as a
+        // chrome-less standalone window (desktop) / iOS home-screen app. The
+        // manifest and service worker are served from the ROOT (not /public/) so
+        // the SW's default scope is "/" and it controls the whole app — a SW at
+        // /public/service-worker.js would only scope /public/. Icons are plain
+        // PNGs served by the existing /public/* route.
+        if (url.pathname === "/manifest.webmanifest") {
+          const file = Bun.file(join(publicDir, "manifest.webmanifest"));
+          if (await file.exists()) {
+            return new Response(file, {
+              headers: { "Content-Type": "application/manifest+json; charset=utf-8" },
+            });
+          }
+          return new Response("manifest not found", { status: 404 });
+        }
+        if (url.pathname === "/service-worker.js") {
+          const file = Bun.file(join(publicDir, "service-worker.js"));
+          if (await file.exists()) {
+            return new Response(file, {
+              headers: {
+                "Content-Type": "text/javascript; charset=utf-8",
+                // allow root scope even though the file lives under publicDir
+                "Service-Worker-Allowed": "/",
+                // never let a stale SW pin an old shell
+                "Cache-Control": "no-cache",
+              },
+            });
+          }
+          return new Response("service worker not found", { status: 404 });
+        }
+
         // CTL-989: the app shell (index.html → main.tsx → the unified TanStack
         // Router → AppShell layout) is the SINGLE canonical entry. It hosts every
         // surface (Home/Tickets/Workers/Queue/Observe) AND every detail page

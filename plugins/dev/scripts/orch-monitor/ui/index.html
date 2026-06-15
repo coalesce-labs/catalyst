@@ -16,6 +16,13 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Catalyst Monitor</title>
     <link rel="icon" type="image/svg+xml" href="/public/favicon.svg" />
+    <!-- CTL-1133: PWA installability (desktop "Install" + iOS Add to Home Screen). -->
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <link rel="apple-touch-icon" href="/public/apple-touch-icon.png" />
+    <meta name="theme-color" content="#0B0D10" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="Catalyst" />
     <!-- CTL-1099/CTL-1147: pre-paint brand + mode resolve (FOUC fix). Runs
          before the module loads (which is at end of <body>), so the right
          tokens are live on first paint. try/catch is mandatory — localStorage
@@ -43,5 +50,17 @@
   <body class="bg-background text-foreground antialiased">
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
+    <!-- CTL-1133: register the PWA service worker (root scope). Secure-context
+         only, so it silently no-ops over plain http; the live dashboard is
+         unaffected. Registered after load so it never competes with app boot. -->
+    <script>
+      if ("serviceWorker" in navigator) {
+        window.addEventListener("load", function () {
+          navigator.serviceWorker
+            .register("/service-worker.js")
+            .catch(function () {});
+        });
+      }
+    </script>
   </body>
 </html>
