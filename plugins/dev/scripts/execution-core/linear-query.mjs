@@ -507,6 +507,66 @@ export function isAssigneeClaimable(assignee, botUserIds) {
   return botUserIds instanceof Set && botUserIds.has(assignee);
 }
 
+// CTL-1173: raw GraphQL read for Issue.delegate.id — Linear routes an app-user
+// UUID to delegate (not assignee), so linearis issues read never exposes it.
+// Mirrors the buildBatchCurlArgs / runBatchOnce pattern: one spawnSync curl POST,
+// same --cacert gating, same auth/rate classification.
+// IssueFilter has no `identifier` field — filter by team key + number parsed
+// from the identifier (e.g. "CTL-1160" → team "CTL", number 1160).
+const DELEGATE_QUERY = `query IssueDelegate($team: String!, $num: Float!) {
+  issues(filter: { team: { key: { eq: $team } }, number: { eq: $num } }) { nodes { delegate { id } } }
+}`;
+
+export function buildDelegateCurlArgs(identifier, { token = "", ca } = {}) {
+  const m = /^([A-Za-z][A-Za-z0-9]*)-(\d+)$/.exec(identifier ?? "");
+  const variables = m ? { team: m[1], num: Number(m[2]) } : { team: String(identifier ?? ""), num: 0 };
+  const payload = JSON.stringify({ query: DELEGATE_QUERY, variables });
+  const caArgs = ca && existsSync(ca) ? ["--cacert", ca] : [];
+  const args = [
+    "-sS",
+    "--max-time",
+    "30",
+    ...caArgs,
+    "-X",
+    "POST",
+    LINEAR_GRAPHQL_ENDPOINT,
+    "-H",
+    `Authorization: ${authHeader(token)}`,
+    "-H",
+    "Content-Type: application/json",
+    "-w",
+    "\n%{http_code}",
+    "--data",
+    "@-",
+  ];
+  return { args, payload };
+}
+
+function runDelegateOnce(identifier) {
+  const token = process.env.LINEAR_API_TOKEN ?? process.env.LINEAR_API_KEY ?? "";
+  const { args, payload } = buildDelegateCurlArgs(identifier, { token, ca: process.env.NODE_EXTRA_CA_CERTS });
+  const res = spawnSync("curl", args, { input: payload, encoding: "utf8" });
+  if (res.status !== 0) return { nodes: null };
+  const out = res.stdout ?? "";
+  const nl = out.lastIndexOf("\n");
+  const httpCode = Number(out.slice(nl + 1).trim());
+  const body = out.slice(0, Math.max(0, nl));
+  if (httpCode === 401 || httpCode === 429) return { nodes: null };
+  let parsed;
+  try { parsed = JSON.parse(body); } catch { return { nodes: null }; }
+  if (parsed?.errors) {
+    if (isBatchAuthError(parsed.errors) || isBatchRateLimited(parsed.errors)) return { nodes: null };
+    return { nodes: null };
+  }
+  return { nodes: parsed?.data?.issues?.nodes ?? null };
+}
+
+export function fetchTicketDelegate(identifier, { runQuery = runDelegateOnce } = {}) {
+  const { nodes } = runQuery(identifier);
+  if (nodes == null) return { known: false };
+  return { known: true, delegate: nodes[0]?.delegate?.id ?? null };
+}
+
 // runEligibleQuery — run the query, parse + normalize, apply the priority
 // floor. A non-zero linearis exit THROWS (never a silent []): a silent empty
 // would let one failed poll flatten a project's eligible set to zero. The

@@ -1006,27 +1006,26 @@ describe("applyAssignee (CTL-781)", () => {
       if (args[0] === "issues" && args[1] === "update") {
         return { code: 0, stdout: "", stderr: "" };
       }
-      if (args[0] === "issues" && args[1] === "read") {
-        return { code: 0, stdout: JSON.stringify({ assignee: { id: BOT } }), stderr: "" };
-      }
       return { code: 127, stdout: "", stderr: "unexpected" };
     };
   }
 
   test("shells linearis issues update --assignee <uuid>", () => {
     const calls = [];
-    applyAssignee({ ticket: "CTL-1", userId: BOT, exec: makeOkExec(calls) });
+    const fetchDelegate = () => ({ known: true, delegate: BOT });
+    applyAssignee({ ticket: "CTL-1", userId: BOT, exec: makeOkExec(calls), fetchDelegate });
     expect(calls[0].args.slice(0, 3)).toEqual(["issues", "update", "CTL-1"]);
     expect(calls[0].args).toContain("--assignee");
     expect(calls[0].args[calls[0].args.indexOf("--assignee") + 1]).toBe(BOT);
   });
 
-  test("write exit-0 AND read-back assignee.id matches → applied:true, reason:null", () => {
+  test("write exit-0 AND delegate read-back matches → applied:true, reason:null", () => {
     const calls = [];
-    const r = applyAssignee({ ticket: "CTL-1", userId: BOT, exec: makeOkExec(calls) });
+    const fetchDelegate = () => ({ known: true, delegate: BOT });
+    const r = applyAssignee({ ticket: "CTL-1", userId: BOT, exec: makeOkExec(calls), fetchDelegate });
     expect(r).toEqual({ applied: true, reason: null });
+    expect(calls).toHaveLength(1);
     expect(calls[0].args.slice(0, 2)).toEqual(["issues", "update"]);
-    expect(calls[1].args.slice(0, 2)).toEqual(["issues", "read"]);
   });
 
   test("write exits non-zero → applied:false, reason:'transient', no read-back exec", () => {
@@ -1040,33 +1039,21 @@ describe("applyAssignee (CTL-781)", () => {
     expect(calls).toHaveLength(1);
   });
 
-  test("write exit-0 BUT read-back assignee null → applied:false, reason:'verify-failed'", () => {
-    const exec = (_cmd, args) => {
-      if (args[1] === "update") return { code: 0, stdout: "", stderr: "" };
-      if (args[1] === "read") return { code: 0, stdout: JSON.stringify({ assignee: null }), stderr: "" };
-      return { code: 127 };
-    };
-    const r = applyAssignee({ ticket: "CTL-1", userId: BOT, exec });
+  test("write exit-0 BUT delegate differs → verify-failed", () => {
+    const fetchDelegate = () => ({ known: true, delegate: "other-uuid" });
+    const r = applyAssignee({ ticket: "CTL-1", userId: BOT, exec: () => ({ code: 0 }), fetchDelegate });
     expect(r).toEqual({ applied: false, reason: "verify-failed" });
   });
 
-  test("write exit-0 BUT read-back assignee.id differs → applied:false, reason:'verify-failed'", () => {
-    const exec = (_cmd, args) => {
-      if (args[1] === "update") return { code: 0, stdout: "", stderr: "" };
-      if (args[1] === "read") return { code: 0, stdout: JSON.stringify({ assignee: { id: "other-uuid" } }), stderr: "" };
-      return { code: 127 };
-    };
-    const r = applyAssignee({ ticket: "CTL-1", userId: BOT, exec });
+  test("write exit-0 BUT delegate read unknown → verify-failed", () => {
+    const fetchDelegate = () => ({ known: false });
+    const r = applyAssignee({ ticket: "CTL-1", userId: BOT, exec: () => ({ code: 0 }), fetchDelegate });
     expect(r).toEqual({ applied: false, reason: "verify-failed" });
   });
 
-  test("read-back unparseable stdout → applied:false, reason:'verify-failed'", () => {
-    const exec = (_cmd, args) => {
-      if (args[1] === "update") return { code: 0, stdout: "", stderr: "" };
-      if (args[1] === "read") return { code: 0, stdout: "not-json", stderr: "" };
-      return { code: 127 };
-    };
-    const r = applyAssignee({ ticket: "CTL-1", userId: BOT, exec });
+  test("write exit-0 BUT delegate null → verify-failed", () => {
+    const fetchDelegate = () => ({ known: true, delegate: null });
+    const r = applyAssignee({ ticket: "CTL-1", userId: BOT, exec: () => ({ code: 0 }), fetchDelegate });
     expect(r).toEqual({ applied: false, reason: "verify-failed" });
   });
 

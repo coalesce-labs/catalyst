@@ -11,7 +11,7 @@ import { resolve } from "node:path";
 import { log } from "./config.mjs";
 
 const OAUTH_ENDPOINT = "https://api.linear.app/oauth/token";
-const MINT_SCOPE = "read,write,comments:create";
+const MINT_SCOPE = "read,write,comments:create,app:assignable,app:mentionable";
 const DEFAULT_COOLDOWN_MS = 60_000;
 
 // isAuthError — Linear auth failures as surfaced on linearis stderr. Matched
@@ -69,6 +69,7 @@ export function buildMintCurlArgs({ clientId, clientSecret }) {
     client_id: clientId,
     client_secret: clientSecret,
     scope: MINT_SCOPE,
+    actor: "app",
   }).toString();
   return {
     args: [

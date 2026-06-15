@@ -56,11 +56,11 @@ describe("CTL-1131: deriveAttention projects needsHumanSince → attentionSince"
       needsHumanMarker: true,
       needsHumanSince: "2026-06-14T16:00:00Z",
     });
-    expect(r).toEqual({ attention: "needs-human", attentionSince: "2026-06-14T16:00:00Z" });
+    expect(r).toEqual({ attention: "needs-human", attentionSince: "2026-06-14T16:00:00Z", escalationType: null });
   });
 
   it("attentionSince is null when needs-human wins but no stamp provided", () => {
     const r = deriveAttention({ needsHumanMarker: true, needsHumanSince: null });
-    expect(r).toEqual({ attention: "needs-human", attentionSince: null });
+    expect(r).toEqual({ attention: "needs-human", attentionSince: null, escalationType: null });
   });
 });

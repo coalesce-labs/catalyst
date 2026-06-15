@@ -21,7 +21,7 @@ LINEAR_API="https://api.linear.app"
 # `400 invalid_scope` (CTL-835), so the mirror would fail open and the comment
 # would silently never post. This matches the canonical mints in
 # execution-core/linear-remint.mjs (MINT_SCOPE) and catalyst-execution-core.
-MINT_SCOPE="read,write,comments:create"
+MINT_SCOPE="read,write,comments:create,app:assignable,app:mentionable"
 
 # _find_layer2_config — resolve the OLD per-team Layer-2 file
 # (~/.config/catalyst/config-<key>.json) by walking up for .catalyst/config.json
@@ -96,6 +96,7 @@ TOKEN_HTTP=$(curl -s -w '\n%{http_code}' -X POST "${LINEAR_API}/oauth/token" \
   -d "client_id=${CLIENT_ID}" \
   -d "client_secret=${CLIENT_SECRET}" \
   -d "scope=${MINT_SCOPE}" \
+  -d "actor=app" \
   -H "Content-Type: application/x-www-form-urlencoded" 2>/dev/null) || {
   echo "linear-comment-post: token mint request failed (curl error)" >&2
   exit 1

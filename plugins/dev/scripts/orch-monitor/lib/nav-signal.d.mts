@@ -18,7 +18,7 @@ export interface NavSignal {
   workerCount: number;
   /** Tickets waiting in the queue — the Queue nav badge. */
   queueDepth: number;
-  /** A board anomaly exists (blocked/needs-human or a stuck worker) — the Board amber dot. */
+  /** A board anomaly exists (any blocked hold, a needs-human ticket, or a stuck worker) — the Board amber dot. */
   anomaly: boolean;
   /** The local daemon's liveness — the footer health dot. */
   daemon: DaemonHealth;

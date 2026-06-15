@@ -90,6 +90,10 @@ The `orchestration.dispatchMode` key picks how Catalyst runs each ticket:
 | `orchestration.stalePrRescue.behindThreshold` | `10` | BEHIND-commit count that triggers a rebase rescue (commits-behind below this are skipped). |
 | `orchestration.stalePrRescue.maxAttempts` | `1` | Max rescue attempts per ticket. After exhaustion, the ticket is escalated to `needs-human`. |
 | `orchestration.stalePrRescue.maxConflictFiles` | `5` | Max conflicting files before a DIRTY PR is deemed unresolvable and escalated instead of dispatched. |
+| `orchestration.orphanPrSweep.enabled` | `true` | Periodically scan all open PRs in the configured repo for ones that have no pipeline worker (orphans). When an orphan has been in a blocker state (DIRTY/BLOCKED/UNSTABLE) for `stableSeconds`, raises exactly one Needs-You inbox row. |
+| `orchestration.orphanPrSweep.intervalSeconds` | `600` | How often the orphan-PR sweep ticks (seconds). |
+| `orchestration.orphanPrSweep.stableSeconds` | `300` | How long an orphan must hold a blocker state before a Needs-You row is raised. |
+| `orchestration.orphanPrSweep.repo` | _(auto-detected)_ | The `org/repo` slug to pass to `gh pr list`. Falls back to top-level `.catalyst/config.json` repo fields, then `gh repo view`. Set this explicitly when auto-detection is unreliable. |
 | `orchestration.orphanReaper.procReaper.mode` | `shadow` | Orphan child-process reaper mode. `off` disables it; `shadow` (the default) logs `procOrphans.would-reap` for each orphaned reparented `node`/`bun` grandchild a dead worker left behind but **kills nothing**; `enforce` actually `SIGTERM`→grace→`SIGKILL`s them. Ships in `shadow` so the never-kill allowlist + live-agent process-tree correlation can be audited on real hosts before any `enforce` flip. |
 | `orchestration.orphanReaper.procReaper.graceMs` | `5000` | Milliseconds to wait after `SIGTERM` before re-probing and (only if still alive) `SIGKILL`ing, so `node`/`bun` can flush. |
 | `orchestration.orphanReaper.procReaper.minEtimeSec` | `900` | A process must have run at least this long (elapsed time) before it is eligible — corroboration only, never the sole gate. |

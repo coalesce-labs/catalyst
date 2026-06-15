@@ -236,6 +236,26 @@ draft_pr_push_verify() {
 
   errf="$(mktemp -t draft-pr-push-XXXXXX 2>/dev/null || echo "/tmp/draft-pr-push-verify-$$")"
 
+  # Proactive workflow-scope detour (CTL-1181): when a scoped token is configured
+  # and the diff touches .github/workflows/, route the first push through the
+  # scoped credential instead of attempting the plain push that will be rejected.
+  if [[ -n "${CATALYST_WORKFLOW_GITHUB_TOKEN:-}" ]] && draft_pr_diff_touches_workflows; then
+    _draft_pr_warn "workflow files + CATALYST_WORKFLOW_GITHUB_TOKEN set — routing through scoped token proactively"
+    if draft_pr_push_token "$CATALYST_WORKFLOW_GITHUB_TOKEN" -u origin HEAD >/dev/null 2>&1; then
+      rm -f "$errf"
+      git fetch --quiet origin "$branch" 2>/dev/null || true
+      remote_sha="$(git rev-parse "origin/${branch}" 2>/dev/null || true)"
+      if [[ -n "$remote_sha" && "$remote_sha" == "$local_sha" ]]; then
+        printf '%s\n' "$local_sha"; return 0
+      fi
+      _draft_pr_warn "post-push verify mismatch (proactive route): local=${local_sha} origin/${branch}=${remote_sha:-<none>}"
+      return 1
+    fi
+    _draft_pr_warn "proactive scoped-token push failed"
+    rm -f "$errf"
+    return "$_DRAFT_PR_WORKFLOW_SCOPE_RC"
+  fi
+
   if ! git -c core.hooksPath=/dev/null push -u origin HEAD >/dev/null 2>"$errf"; then
     if _draft_pr_is_workflow_scope_error "$errf"; then
       _draft_pr_warn "push rejected: missing 'workflow' OAuth scope"
