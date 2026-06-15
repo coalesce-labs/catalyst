@@ -107,12 +107,16 @@ describe("nav-signal UI contract (CTL-896 / SHELL6)", () => {
       expect(sidebarCode).toContain("nav.anomaly");
     });
 
-    it("wires the footer daemon-health dot to the signal (no hardcoded emerald)", () => {
+    it("wires the footer health indicator to the service-health signal (no hardcoded emerald)", () => {
       // CTL-930: health dots moved from app-sidebar.tsx to app-footer.tsx.
-      // The daemon dot lives in AppFooter; sidebar no longer needs daemonDotClass.
-      expect(footerCode).toContain("daemonDotClass(nav.daemon)");
+      // CTL-1172: the right indicator is now the OVERALL fleet-health dot —
+      // worst-of(services, daemon liveness) — driven off the shared service-health
+      // context (worstSeverity + severityDotColor), not the raw daemon dot. It must
+      // be signal-driven, never a literal color.
+      expect(footerCode).toContain("worstSeverity");
+      expect(footerCode).toContain("severityDotColor");
       // The old SHELL1 footer hardcoded `bg-emerald-500` for the daemon dot;
-      // SHELL6 must drive it off daemonDotClass, not a literal class.
+      // the indicator must drive its color off the signal, not a literal class.
       expect(footerCode).not.toMatch(/rounded-full bg-emerald-500/);
     });
   });
