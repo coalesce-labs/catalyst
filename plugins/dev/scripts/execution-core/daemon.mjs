@@ -33,6 +33,7 @@ import {
   getExecutionCoreDir,
   getRegistryPath,
   getEventLogPath,
+  getJobsRoot,      // CTL-1165 D3: job-dir GC root
   log,
   EVENT_DEBOUNCE_MS,
   TAILER_POLL_INTERVAL_MS,
@@ -61,6 +62,7 @@ import {
 } from "./index.mjs";
 import { Reaper, defaultReadActivePhaseSignal, defaultReadSignalBgJobId } from "./reaper.mjs";
 import { startOrphanReaperTimer, readOrphanReaperConfig } from "./orphan-reaper-timer.mjs";
+import { sweepJobDirs } from "./job-dir-gc.mjs"; // CTL-1165 D3: ~/.claude/jobs/<id> dir GC
 import {
   startWorktreeRefreshTimer,
   readWorktreeRefreshConfig,
@@ -96,7 +98,7 @@ import { removeLabel as defaultRemoveLabel } from "./linear-write.mjs"; // CTL-5
 // so the phantom worker-dir validity sweep is operative in production.
 import { classifyTicketResolution } from "./linear-query.mjs";
 import { createGatewayReader } from "./gateway-read.mjs";
-import { isBgJobAlive, refreshAgents } from "./claude-agents.mjs";
+import { isBgJobAlive, refreshAgents, listClaudeAgentsResult } from "./claude-agents.mjs"; // CTL-1165 D3: fail-closed liveness reader for job-dir GC
 
 const DEFAULT_MAX_PARALLEL = 3;
 
@@ -774,9 +776,29 @@ function startReaperAndTimer({
   }
 
   const cfg = orphanReaperConfig ?? {};
+  // CTL-1165 D3: bind the real ~/.claude/jobs/<id> dir GC onto the same 600s
+  // orphan-reaper cadence (no new daemon timer). Default-on; an operator can
+  // disable via .catalyst → orphanReaper.jobGc.enabled:false. retention/batchCap
+  // come from config (env still wins inside sweepJobDirs's defaults). A no-op
+  // async closure is bound when disabled so the timer's Promise.all stays
+  // uniform.
+  const jobGcCfg = cfg.jobGc ?? {};
+  const jobGcEnabled = jobGcCfg.enabled !== false;
+  const jobGc = jobGcEnabled
+    ? () =>
+        sweepJobDirs({
+          jobsRoot: getJobsRoot(),
+          readAgents: () => listClaudeAgentsResult(),
+          ...(jobGcCfg.retentionSeconds != null
+            ? { retentionMs: Number(jobGcCfg.retentionSeconds) * 1000 }
+            : {}),
+          ...(jobGcCfg.batchCap != null ? { batchCap: Number(jobGcCfg.batchCap) } : {}),
+        })
+    : async () => {};
   _orphanTimer = startOrphanReaperTimer({
     enabled: cfg.enabled !== false,
     intervalSeconds: cfg.intervalSeconds ?? 600,
+    jobGc,
   });
 
   // CTL-707: start the periodic worktree-refresh timer.

@@ -46,12 +46,13 @@ describe("emitReapIntent", () => {
     await expect(emitReapIntent("bogus.event", {})).rejects.toThrow(/unknown/);
   });
 
-  it("exposes REAP_INTENT_TYPES with 18 entries", async () => {
+  it("exposes REAP_INTENT_TYPES with 19 entries", async () => {
     const { REAP_INTENT_TYPES } = await freshModule();
-    expect(REAP_INTENT_TYPES.length).toBe(18);
+    expect(REAP_INTENT_TYPES.length).toBe(19);
     expect(REAP_INTENT_TYPES).toContain("phase.yield.reap-requested");
     expect(REAP_INTENT_TYPES).toContain("pr.merged.cleanup-requested");
     expect(REAP_INTENT_TYPES).toContain("orphans.reap-requested");
+    expect(REAP_INTENT_TYPES).toContain("jobs.gc.swept"); // CTL-1165 D3
     expect(REAP_INTENT_TYPES).toContain("worktree.cleanup-deferred"); // CTL-791
     // CTL-1004 stall-janitor (shadow-first) event vocabulary.
     expect(REAP_INTENT_TYPES).toContain("janitor.worktree.deferred");
@@ -91,6 +92,16 @@ describe("emitReapIntent", () => {
       expect(last.event).toBe(type);
       expect(last.ticket).toBe("CTL-1005");
     }
+  });
+
+  it("accepts jobs.gc.swept end-to-end (CTL-1165 D3)", async () => {
+    const { emitReapIntent, REAP_INTENT_TYPES } = await freshModule();
+    expect(REAP_INTENT_TYPES).toContain("jobs.gc.swept");
+    const ok = await emitReapIntent("jobs.gc.swept", { reclaimed: 3 });
+    expect(ok).toBe(true);
+    const last = JSON.parse(readFileSync(LOG_PATH, "utf8").trim().split("\n").pop());
+    expect(last.event).toBe("jobs.gc.swept");
+    expect(last.reclaimed).toBe(3);
   });
 
   it("accepts phase.terminal.reap-requested (CTL-695)", async () => {

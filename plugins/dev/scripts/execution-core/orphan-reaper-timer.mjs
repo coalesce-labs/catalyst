@@ -4,6 +4,7 @@
 
 import { readFileSync } from "node:fs";
 import { emitReapIntent } from "./reap-intent.mjs";
+import { sweepJobDirs } from "./job-dir-gc.mjs";
 import { log } from "./config.mjs";
 
 /**
@@ -44,12 +45,14 @@ function realClock() {
  * @param {boolean} [opts.enabled=true]            disable to no-op the timer
  * @param {number}  [opts.intervalSeconds=600]     default 10 minutes
  * @param {Function}[opts.emit=emitReapIntent]     emitter seam for tests
+ * @param {Function}[opts.jobGc=()=>sweepJobDirs()] CTL-1165 D3: job-dir GC seam
  * @param {object}  [opts.clock=realClock()]       fake-clock seam for tests
  */
 export function startOrphanReaperTimer({
   enabled = true,
   intervalSeconds = 600,
   emit = emitReapIntent,
+  jobGc = () => sweepJobDirs(),
   clock = realClock(),
 } = {}) {
   if (!enabled) return { stop: () => {} };
@@ -62,9 +65,16 @@ export function startOrphanReaperTimer({
       // emits per-session phase.reconcile.reap-requested intents WITH a target.
       // Both emits are issued synchronously (before any await) so a single tick
       // fires both even when the producer is async.
+      //
+      // CTL-1165 D3: piggyback the ~/.claude/jobs/<id> dir GC on the same 600s
+      // cadence (no new daemon timer). All three promises start synchronously
+      // (the emits before any await) and share THIS try/catch, so a rejecting
+      // jobGc cannot suppress the two reap emits — the emit calls have already
+      // run by the time jobGc's rejection surfaces in the shared catch.
       await Promise.all([
         emit("orphans.reap-requested", {}),
         emit("phase.reconcile.reap-requested", {}),
+        jobGc(),
       ]);
     } catch (err) {
       // CTL-649: a persistently-unwritable event log would make every tick

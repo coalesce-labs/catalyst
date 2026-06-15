@@ -32,6 +32,12 @@ export const REAP_INTENT_TYPES = Object.freeze([
   "worktree.presweep.reap-requested",
   "pr.merged.cleanup-requested",
   "orphans.reap-requested",
+  // CTL-1165 D3: the ~/.claude/jobs/<id> dir GC (job-dir-gc.mjs) emits this FLAG
+  // after a sweep so the reclaim is auditable in the event log. A FLAG class —
+  // the reaper has no handle() case for it (it is not a reap REQUEST, the work
+  // is already done); it is registered here ONLY so the emitter does not throw
+  // "unknown reap-intent event type" and silently drop the count.
+  "jobs.gc.swept",
   // CTL-695: terminal-worker reap — a phase signal reached failed/stalled, or the
   // final monitor-deploy phase completed, with no successor dispatch to trigger the
   // happy-path predecessor reap. Routed to the single-target (busy-OK) reap path.
