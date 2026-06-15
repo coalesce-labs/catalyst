@@ -421,10 +421,14 @@ export function mergeTitleFallback(
   nullTitleIds: string[],
   fetched: Record<string, { title?: string | null } | undefined>,
 ): Record<string, { title?: string | null } & Record<string, unknown>>;
+<<<<<<< HEAD
 export function assembleBoard(opts?: {
   /** CTL-1158: inject the PrStatusFetcher cache getter for the PR-stuck signal. */
   getPrStatus?: ((repo: string, number: number) => { mergeStateStatus: string; state?: string } | null) | null;
 }): Promise<BoardPayload>;
+=======
+export function assembleBoard(): Promise<BoardPayload>;
+>>>>>>> 27880c23 (fix(dev): CTL-1152 — fix board-data.d.mts declaration for assembleBoard)
 /** CTL-922 (BFF10): build a {name,id} HostRef from a bare host name (id =
  *  sha256(name)[:16]); null for a null/empty name. */
 export function hostRefFromName(name: unknown): BoardHostRef | null;
