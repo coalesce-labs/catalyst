@@ -19,7 +19,13 @@ export type BoardAttention = "waiting-on-you" | "needs-human" | null;
 
 /** CTL-1158: GitHub PR merge state from the PrStatusFetcher cache. */
 export type PrMergeStateStatus =
-  | "CLEAN" | "BLOCKED" | "DIRTY" | "BEHIND" | "UNSTABLE" | "HAS_HOOKS" | "UNKNOWN";
+  | "CLEAN"
+  | "BLOCKED"
+  | "DIRTY"
+  | "BEHIND"
+  | "UNSTABLE"
+  | "HAS_HOOKS"
+  | "UNKNOWN";
 
 /** CTL-922 (BFF10): a node's stable identity stamped on every board entity so
  *  the node-aware surfaces can attribute/group by host. `name` is the
@@ -270,6 +276,10 @@ export const HELD_LABEL_BLOCKED: string;
 export const HELD_LABEL_WAITING: string;
 export function heldFor(labels: unknown): "blocked" | "waiting" | null;
 
+/** CTL-1131: the durable needs-human age anchor — the newest phase signal's
+ *  needsHumanSince stamp. null when none carries it (never fabricated). */
+export function deriveNeedsHumanSince(phaseSigs: unknown[]): string | null;
+
 /** CTL-729: the escalation labels that trigger attention 'needs-human'. */
 export const ATTENTION_LABEL_NEEDS_HUMAN: string;
 export const ATTENTION_LABEL_NEEDS_INPUT: string;
@@ -293,13 +303,13 @@ export function deriveAttention(opts?: {
 export function isPrStuck(
   prStatus: { mergeStateStatus: string; state?: string } | null | undefined,
   prPhaseStartedAt: string | null | undefined,
-  now: number,
+  now: number
 ): boolean;
 
 /** CTL-1158: operator CTA string for a stuck PR; null when not a blocker state. */
 export function prStuckReason(
   mergeStateStatus: string | null | undefined,
-  prNumber: number | null | undefined,
+  prNumber: number | null | undefined
 ): string | null;
 
 /** CTL-928: a single ticket's lane on the queue board (live | between-phases |
@@ -323,7 +333,9 @@ export function readBgJobState(bgJobId: string | null | undefined): Promise<BgJo
 /** CTL-928: PURE read-model mirror of recovery.mjs::jobLifecycle. null jobState →
  *  "dead-gone"; firstTerminalAt set or terminal `state` → "dead-terminal"; else
  *  "alive". mtime is intentionally NOT consulted (CTL-662 fan-out trap). */
-export function bgJobLifecycle(jobState: BgJobState | null): "dead-gone" | "dead-terminal" | "alive";
+export function bgJobLifecycle(
+  jobState: BgJobState | null
+): "dead-gone" | "dead-terminal" | "alive";
 
 /** CTL-928: true iff bgJobLifecycle(jobState) is not "alive" (dead-gone or
  *  dead-terminal). null jobState → dead. */
@@ -331,13 +343,15 @@ export function isBgJobDead(jobState: BgJobState | null): boolean;
 
 /** CTL-928: true iff a board worker's derived activeState is "dead". A dead worker
  *  is excluded from ticketIds, inFlight, freeSlots, and the "active" count. */
-export function isWorkerDead(worker: { activeState?: BoardActiveState } | null | undefined): boolean;
+export function isWorkerDead(
+  worker: { activeState?: BoardActiveState } | null | undefined
+): boolean;
 
 /** CTL-928: PURE capacity summary — dead bg-workers excluded from inFlight +
  *  freeSlots, surfaced as `dead`. Drives the board config block. */
 export function deriveCapacity(
   workers: ReadonlyArray<{ activeState?: BoardActiveState; working?: boolean }>,
-  maxParallel: number,
+  maxParallel: number
 ): BoardConfig;
 
 /** CTL-928: classify a worker's top-level liveness — durable bg-job state FIRST
@@ -350,7 +364,7 @@ export function deriveActiveState(
   phase: string,
   ageMs: number | null,
   jobState: BgJobState | null,
-  bgKnown: boolean,
+  bgKnown: boolean
 ): Promise<"dead" | "stuck" | "active">;
 
 /** CTL-928: PURE single-source lane classifier for a non-queued ticket — "live"
@@ -370,12 +384,12 @@ export function deriveCurrentPhase(phaseSigs: unknown[]): BoardCurrentPhase;
  *  deriveCurrentPhase result unchanged when remediateSig is null/absent. PURE. */
 export function derivePhaseWithRemediate(
   phaseSigs: unknown[],
-  remediateSig: unknown | null | undefined,
+  remediateSig: unknown | null | undefined
 ): BoardCurrentPhase;
 /** Build a thin Todo-column BoardTicket from an eligible queue entry (CTL-767). */
 export function synthesizeQueuedTicket(
   eligible: unknown,
-  linfo: Record<string, unknown>,
+  linfo: Record<string, unknown>
 ): BoardTicket;
 /** CTL-1041: resolve a ticket's display TITLE (the outcome line — leads on every
  *  surface). Priority: explicit triage.title → the authoritative Linear title
@@ -386,7 +400,7 @@ export function ticketTitle(
   ticket: string,
   triage: { title?: string | null; summary?: string | null } | null | undefined,
   eligibleIndex: Record<string, { title?: string | null } | undefined>,
-  linfo?: Record<string, { title?: string | null } | undefined>,
+  linfo?: Record<string, { title?: string | null } | undefined>
 ): string;
 /** CTL-1046: board IDs whose title is null in BOTH sources ticketTitle() consults
  *  (durable linfo cache + eligible projection) — i.e. cross-team (ADV) records that
@@ -395,7 +409,7 @@ export function ticketTitle(
 export function collectNullTitleIds(
   boardIds: string[],
   linfo?: Record<string, { title?: string | null } | undefined>,
-  eligibleIndex?: Record<string, { title?: string | null } | undefined>,
+  eligibleIndex?: Record<string, { title?: string | null } | undefined>
 ): string[];
 /** CTL-1046: merge fetched Linear titles into linfo in-place (creates a linfo entry
  *  for eligible-only tickets). A null fetched title is left untouched (honest null).
@@ -403,11 +417,13 @@ export function collectNullTitleIds(
 export function mergeTitleFallback(
   linfo: Record<string, { title?: string | null } & Record<string, unknown>>,
   nullTitleIds: string[],
-  fetched: Record<string, { title?: string | null } | undefined>,
+  fetched: Record<string, { title?: string | null } | undefined>
 ): Record<string, { title?: string | null } & Record<string, unknown>>;
 export function assembleBoard(opts?: {
   /** CTL-1158: inject the PrStatusFetcher cache getter for the PR-stuck signal. */
-  getPrStatus?: ((repo: string, number: number) => { mergeStateStatus: string; state?: string } | null) | null;
+  getPrStatus?:
+    | ((repo: string, number: number) => { mergeStateStatus: string; state?: string } | null)
+    | null;
 }): Promise<BoardPayload>;
 /** CTL-922 (BFF10): build a {name,id} HostRef from a bare host name (id =
  *  sha256(name)[:16]); null for a null/empty name. */
@@ -416,13 +432,13 @@ export function hostRefFromName(name: unknown): BoardHostRef | null;
  *  first (CTL-852), else the durable fence projection owner_host (BFF11). */
 export function deriveHost(
   phaseSigs: unknown[],
-  fence?: { ownerHost?: string | null },
+  fence?: { ownerHost?: string | null }
 ): BoardHostRef | null;
 /** CTL-922 (BFF10): resolve an entity's fence generation — durable fence
  *  projection (BFF11) first, else the phase signal generation; null when neither. */
 export function deriveGeneration(
   phaseSigs: unknown[],
-  fence?: { generation?: number | null },
+  fence?: { generation?: number | null }
 ): number | null;
 
 /**
@@ -443,4 +459,7 @@ export function resolveTranscript(sessionId: string): Promise<string | null>;
  * Maps tShirt values to size labels ("XS"/"S"/"M"/"L"/"XL"), falls back to
  * String(estimate) for other methods. Returns null when estimate is null.
  */
-export function deriveEstimateDisplay(estimate: number | null, estimateMethod: string | null): string | null;
+export function deriveEstimateDisplay(
+  estimate: number | null,
+  estimateMethod: string | null
+): string | null;

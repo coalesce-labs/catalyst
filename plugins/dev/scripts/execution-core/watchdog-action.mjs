@@ -52,7 +52,7 @@ export async function killHungWorker(
     writeStatus,
     emit = emitReapIntent,
     reviveDispatch,
-  } = {},
+  } = {}
 ) {
   const phase = signal.phase;
   if (SETTLED.has(signal.status)) return { outcome: "already-terminal" };
@@ -65,7 +65,10 @@ export async function killHungWorker(
     const attempt = used + 1;
     if (bgJobId) {
       void emit("phase.terminal.reap-requested", {
-        ticket, phase, bgJobId, reason: `${failureReason}:revive`,
+        ticket,
+        phase,
+        bgJobId,
+        reason: `${failureReason}:revive`,
       }).catch((err) => log.warn({ ticket, phase, err }, "ctl-729: revive reap emit failed"));
     }
     try {
@@ -80,7 +83,7 @@ export async function killHungWorker(
     try {
       writeFileSync(
         join(orchDir, "workers", ticket, `.watchdog-revive-${phase}.${attempt}`),
-        new Date(now()).toISOString(),
+        new Date(now()).toISOString()
       );
     } catch (err) {
       // CTL-729 remediate: this marker is the SOLE persistence backing
@@ -89,7 +92,7 @@ export async function killHungWorker(
       // again (potentially unbounded), so make the failure observable.
       log.warn(
         { ticket, phase, attempt, err: err.message },
-        "ctl-729: revive-marker write failed — revive cap may not hold",
+        "ctl-729: revive-marker write failed — revive cap may not hold"
       );
     }
     log.warn({ ticket, phase, attempt, reviveBudget }, "ctl-729: hung worker revived (budget)");
@@ -127,6 +130,7 @@ export async function killHungWorker(
       status: "failed",
       failureReason,
       explanation,
+      needsHumanSince: cur.needsHumanSince ?? new Date(now()).toISOString(), // CTL-1131: preserve prior stamp
       failedAt: new Date(now()).toISOString(),
     };
     const tmp = `${sigPath}.tmp.${process.pid}`;
@@ -139,7 +143,11 @@ export async function killHungWorker(
   // (2) Fire-and-forget reap-intent → reaper._handleBgReap → claude stop <shortId>.
   if (bgJobId) {
     void emit("phase.terminal.reap-requested", {
-      ticket, phase, bgJobId, worktreePath: signal.raw?.worktreePath, reason: failureReason,
+      ticket,
+      phase,
+      bgJobId,
+      worktreePath: signal.raw?.worktreePath,
+      reason: failureReason,
     }).catch((err) => log.warn({ ticket, phase, err }, "ctl-729: reap-intent emit failed"));
   }
 
@@ -149,7 +157,7 @@ export async function killHungWorker(
 
   log.warn(
     { ticket, phase, elapsedMin, commitCount },
-    "ctl-729: hung worker force-killed + escalated",
+    "ctl-729: hung worker force-killed + escalated"
   );
   return { outcome: "escalated" };
 }

@@ -1717,14 +1717,22 @@ describe("CTL-653: maybeEscalateRemediateExhausted", () => {
       })
     );
     expect(
-      maybeEscalateRemediateExhausted(orchDir, "CTL-1108a", { verify: "done" }, "fail", REMEDIATE_CYCLE_CAP)
+      maybeEscalateRemediateExhausted(
+        orchDir,
+        "CTL-1108a",
+        { verify: "done" },
+        "fail",
+        REMEDIATE_CYCLE_CAP
+      )
     ).toBe(true);
     const sig = JSON.parse(readFileSync(join(wdir, "phase-verify.json"), "utf8"));
     expect(sig.status).toBe("stalled");
     expect(sig.stalledReason).toBe("remediate-cycle-cap-exhausted");
     expect(sig.explanation).toBeTruthy();
     expect(typeof sig.explanation.call_to_action).toBe("string");
-    expect(sig.explanation.call_to_action).toContain("verify keeps failing on broker/router.mjs:352");
+    expect(sig.explanation.call_to_action).toContain(
+      "verify keeps failing on broker/router.mjs:352"
+    );
   });
 
   test("CTL-1108: missing verify.json → still stalls with a (degraded) explanation, never throws", () => {
@@ -1736,7 +1744,13 @@ describe("CTL-653: maybeEscalateRemediateExhausted", () => {
     );
     // no verify.json on disk
     expect(
-      maybeEscalateRemediateExhausted(orchDir, "CTL-1108b", { verify: "done" }, "fail", REMEDIATE_CYCLE_CAP)
+      maybeEscalateRemediateExhausted(
+        orchDir,
+        "CTL-1108b",
+        { verify: "done" },
+        "fail",
+        REMEDIATE_CYCLE_CAP
+      )
     ).toBe(true);
     const sig = JSON.parse(readFileSync(join(wdir, "phase-verify.json"), "utf8"));
     expect(sig.status).toBe("stalled");
@@ -1756,7 +1770,13 @@ describe("CTL-653: maybeEscalateRemediateExhausted", () => {
     };
     writeFileSync(join(wdir, "phase-verify.json"), JSON.stringify(existing));
     expect(
-      maybeEscalateRemediateExhausted(orchDir, "CTL-1108c", { verify: "done" }, "fail", REMEDIATE_CYCLE_CAP)
+      maybeEscalateRemediateExhausted(
+        orchDir,
+        "CTL-1108c",
+        { verify: "done" },
+        "fail",
+        REMEDIATE_CYCLE_CAP
+      )
     ).toBe(true);
     const sig = JSON.parse(readFileSync(join(wdir, "phase-verify.json"), "utf8"));
     expect(sig.explanation.call_to_action).toBe("original question");
@@ -1811,8 +1831,13 @@ describe("CTL-712: escalateDispatchExhausted — retry ceiling → stalled", () 
   // tell the benign prior-artifact-missing case (code 2) from verify_failed (0)
   // or crash (≠ 2). A legacy signal without code stays operator-owned.
   test("CTL-1045 Bug 2: persists dispatchFailureCode + dispatchFailureCause when provided", () => {
-    escalateDispatchExhausted(orchDir, "CTL-712", "pr", { code: 2, cause: "prior_artifact_missing:research_doc" });
-    const sig = JSON.parse(readFileSync(join(orchDir, "workers", "CTL-712", "phase-pr.json"), "utf8"));
+    escalateDispatchExhausted(orchDir, "CTL-712", "pr", {
+      code: 2,
+      cause: "prior_artifact_missing:research_doc",
+    });
+    const sig = JSON.parse(
+      readFileSync(join(orchDir, "workers", "CTL-712", "phase-pr.json"), "utf8")
+    );
     expect(sig.stalledReason).toBe("prior-artifact-retry-exhausted");
     expect(sig.dispatchFailureCode).toBe(2);
     expect(sig.dispatchFailureCause).toBe("prior_artifact_missing:research_doc");
@@ -1820,7 +1845,9 @@ describe("CTL-712: escalateDispatchExhausted — retry ceiling → stalled", () 
 
   test("CTL-1045 Bug 2: defaults dispatchFailureCode / dispatchFailureCause to null when omitted (back-compat)", () => {
     escalateDispatchExhausted(orchDir, "CTL-712", "pr");
-    const sig = JSON.parse(readFileSync(join(orchDir, "workers", "CTL-712", "phase-pr.json"), "utf8"));
+    const sig = JSON.parse(
+      readFileSync(join(orchDir, "workers", "CTL-712", "phase-pr.json"), "utf8")
+    );
     expect(sig.dispatchFailureCode).toBeNull();
     expect(sig.dispatchFailureCause).toBeNull();
   });
@@ -1841,7 +1868,8 @@ describe("CTL-712: escalateDispatchExhausted — retry ceiling → stalled", () 
 // ─── CTL-1108: writeTerminalStalled explanation coverage ───
 describe("CTL-1108: writeTerminalStalled explanation coverage", () => {
   test("dispatch-circuit-breaker stall carries an explanation", () => {
-    const t = "CTL-1108f", phase = "research";
+    const t = "CTL-1108f",
+      phase = "research";
     writeSignal(t, phase, "running");
     for (let i = 1; i <= CIRCUIT_BREAKER_THRESHOLD; i++)
       recordDispatchFailure(orchDir, t, phase, 1, i * 1000);
@@ -1860,9 +1888,17 @@ describe("CTL-1108: writeTerminalStalled explanation coverage", () => {
     {
       const wdir = join(orchDir, "workers", "CTL-1108g");
       mkdirSync(wdir, { recursive: true });
-      writeFileSync(join(wdir, "phase-verify.json"),
-        JSON.stringify({ ticket: "CTL-1108g", phase: "verify", status: "done" }));
-      maybeEscalateRemediateExhausted(orchDir, "CTL-1108g", { verify: "done" }, "fail", REMEDIATE_CYCLE_CAP);
+      writeFileSync(
+        join(wdir, "phase-verify.json"),
+        JSON.stringify({ ticket: "CTL-1108g", phase: "verify", status: "done" })
+      );
+      maybeEscalateRemediateExhausted(
+        orchDir,
+        "CTL-1108g",
+        { verify: "done" },
+        "fail",
+        REMEDIATE_CYCLE_CAP
+      );
       const sig = JSON.parse(readFileSync(join(wdir, "phase-verify.json"), "utf8"));
       expect(sig.explanation?.call_to_action?.trim()).toBeTruthy();
     }
@@ -1876,7 +1912,8 @@ describe("CTL-1108: writeTerminalStalled explanation coverage", () => {
     }
     // dispatch-circuit-breaker (maybeTripCircuitBreaker → writeTerminalStalled)
     {
-      const t = "CTL-1108i", phase = "implement";
+      const t = "CTL-1108i",
+        phase = "implement";
       writeSignal(t, phase, "running");
       for (let i = 1; i <= CIRCUIT_BREAKER_THRESHOLD; i++)
         recordDispatchFailure(orchDir, t, phase, 1, i * 1000);
@@ -1886,6 +1923,70 @@ describe("CTL-1108: writeTerminalStalled explanation coverage", () => {
       );
       expect(sig.explanation?.call_to_action?.trim()).toBeTruthy();
     }
+  });
+});
+
+// ─── CTL-1131: needsHumanSince stamped at terminal-stall write sites ───
+describe("CTL-1131: escalateDispatchExhausted stamps needsHumanSince", () => {
+  const ISO_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/;
+
+  test("new signal: carries a needsHumanSince ISO string and preserves explanation", () => {
+    expect(escalateDispatchExhausted(orchDir, "CTL-1131a", "pr")).toBe(true);
+    const sig = JSON.parse(
+      readFileSync(join(orchDir, "workers", "CTL-1131a", "phase-pr.json"), "utf8")
+    );
+    expect(typeof sig.needsHumanSince).toBe("string");
+    expect(ISO_RE.test(sig.needsHumanSince)).toBe(true);
+    expect(sig.explanation).toBeTruthy();
+  });
+
+  test("existing signal with needsHumanSince: preserves the prior stamp (does not reset age)", () => {
+    const p = join(orchDir, "workers", "CTL-1131b", "phase-pr.json");
+    mkdirSync(join(orchDir, "workers", "CTL-1131b"), { recursive: true });
+    writeFileSync(
+      p,
+      JSON.stringify({
+        ticket: "CTL-1131b",
+        phase: "pr",
+        status: "running",
+        needsHumanSince: "2026-06-14T00:00:00Z",
+      })
+    );
+    escalateDispatchExhausted(orchDir, "CTL-1131b", "pr");
+    const sig = JSON.parse(readFileSync(p, "utf8"));
+    expect(sig.needsHumanSince).toBe("2026-06-14T00:00:00Z");
+  });
+});
+
+describe("CTL-1131: writeTerminalStalled (via maybeTripCircuitBreaker) stamps needsHumanSince", () => {
+  const ISO_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/;
+
+  test("stalled signal carries a needsHumanSince ISO string", () => {
+    const t = "CTL-1131c",
+      phase = "implement";
+    writeSignal(t, phase, "running");
+    for (let i = 1; i <= CIRCUIT_BREAKER_THRESHOLD; i++)
+      recordDispatchFailure(orchDir, t, phase, 1, i * 1000);
+    expect(maybeTripCircuitBreaker(orchDir, t, phase)).toBe(true);
+    const sig = JSON.parse(
+      readFileSync(join(orchDir, "workers", t, `phase-${phase}.json`), "utf8")
+    );
+    expect(typeof sig.needsHumanSince).toBe("string");
+    expect(ISO_RE.test(sig.needsHumanSince)).toBe(true);
+  });
+
+  test("existing needsHumanSince is preserved (does not reset age)", () => {
+    const t = "CTL-1131d",
+      phase = "verify";
+    writeSignal(t, phase, "running");
+    const p = join(orchDir, "workers", t, `phase-${phase}.json`);
+    const cur = JSON.parse(readFileSync(p, "utf8"));
+    writeFileSync(p, JSON.stringify({ ...cur, needsHumanSince: "2026-06-14T05:00:00Z" }));
+    for (let i = 1; i <= CIRCUIT_BREAKER_THRESHOLD; i++)
+      recordDispatchFailure(orchDir, t, phase, 1, i * 1000);
+    maybeTripCircuitBreaker(orchDir, t, phase);
+    const sig = JSON.parse(readFileSync(p, "utf8"));
+    expect(sig.needsHumanSince).toBe("2026-06-14T05:00:00Z");
   });
 });
 
@@ -2580,8 +2681,12 @@ describe("schedulerTick — CTL-1150 triage-artifact guard", () => {
     expect(r.dispatched).toEqual([]);
     // No spurious phase events emitted for CTL-1150.
     const events = readEventLog();
-    expect(events.filter((e) => e.ticket === "CTL-1150" && e.event?.startsWith("phase.research.failed"))).toHaveLength(0);
-    expect(events.filter((e) => e.ticket === "CTL-1150" && e.event?.startsWith("phase.dispatch.failed"))).toHaveLength(0);
+    expect(
+      events.filter((e) => e.ticket === "CTL-1150" && e.event?.startsWith("phase.research.failed"))
+    ).toHaveLength(0);
+    expect(
+      events.filter((e) => e.ticket === "CTL-1150" && e.event?.startsWith("phase.dispatch.failed"))
+    ).toHaveLength(0);
     // No cooldown marker written (silent hold, not a dispatch failure).
     expect(existsSync(dispatchCooldownPath(orchDir, "CTL-1150", "research"))).toBe(false);
   });
@@ -4189,7 +4294,11 @@ describe("schedulerTick — label write-back (CTL-558)", () => {
 describe("schedulerTick — retraction sweep uses gateway cache (CTL-1079)", () => {
   const TICKET = "CTL-1079T";
 
-  function makeExecSpy(labelsJson = JSON.stringify({ labels: { nodes: [{ name: "needs-human" }, { name: "feature" }] } })) {
+  function makeExecSpy(
+    labelsJson = JSON.stringify({
+      labels: { nodes: [{ name: "needs-human" }, { name: "feature" }] },
+    })
+  ) {
     const calls = [];
     const exec = (cmd, args) => {
       calls.push({ cmd, args });
@@ -4207,7 +4316,8 @@ describe("schedulerTick — retraction sweep uses gateway cache (CTL-1079)", () 
   }
 
   const isLiveRead = (c) => c.cmd === "linearis" && c.args[0] === "issues" && c.args[1] === "read";
-  const isOverwrite = (c) => c.cmd === "linearis" && c.args[0] === "issues" && c.args[1] === "update";
+  const isOverwrite = (c) =>
+    c.cmd === "linearis" && c.args[0] === "issues" && c.args[1] === "update";
 
   function makeWriteStatus(execSpy) {
     return {
@@ -9552,7 +9662,12 @@ describe("CTL-1068: convergeStartedHeldLabels (unit)", () => {
     const removed = [];
     return {
       removed,
-      ws: { removeLabel: (ticket, label) => { removed.push({ ticket, label }); return { removed: true }; } },
+      ws: {
+        removeLabel: (ticket, label) => {
+          removed.push({ ticket, label });
+          return { removed: true };
+        },
+      },
     };
   }
 
@@ -9629,10 +9744,17 @@ describe("CTL-1068: convergeStartedHeldLabels (unit)", () => {
     seedWorker("CTL-906");
     writeFileSync(markerPath("CTL-906", "waiting", "applied"), "");
     let rearms = 0;
-    convergeStartedHeldLabels(orchDir, "CTL-906", { removeLabel: () => ({ removed: true }) }, {
-      multiHost: false,
-      onRetract: () => { rearms += 1; },
-    });
+    convergeStartedHeldLabels(
+      orchDir,
+      "CTL-906",
+      { removeLabel: () => ({ removed: true }) },
+      {
+        multiHost: false,
+        onRetract: () => {
+          rearms += 1;
+        },
+      }
+    );
     expect(rearms).toBe(1);
   });
 });
@@ -9647,7 +9769,7 @@ describe("CTL-1068: schedulerTick — admitted-then-failed held-label retraction
 
   test("admitted-then-failed ticket drains its stale 'waiting' label", () => {
     writeSignal("CTL-764", "triage", "done");
-    writeSignal("CTL-764", "research", "done");   // admitted: has research+; pre-pickup gate excludes it
+    writeSignal("CTL-764", "research", "done"); // admitted: has research+; pre-pickup gate excludes it
     writeSignal("CTL-764", "implement", "failed");
     writeFileSync(join(orchDir, "workers", "CTL-764", ".linear-label-waiting.applied"), "");
     writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
@@ -9655,11 +9777,16 @@ describe("CTL-1068: schedulerTick — admitted-then-failed held-label retraction
     const writeStatus = {
       ...noWrites(),
       applyLabel: () => ({}),
-      removeLabel: (t, l) => { removed.push({ t, l }); return { removed: true }; },
+      removeLabel: (t, l) => {
+        removed.push({ t, l });
+        return { removed: true };
+      },
     };
     schedulerTick(orchDir, { readEligible: () => [], dispatch: fakeDispatch(), writeStatus });
     expect(removed).toContainEqual({ t: "CTL-764", l: "waiting" });
-    expect(existsSync(join(orchDir, "workers", "CTL-764", ".linear-label-waiting.applied"))).toBe(false);
+    expect(existsSync(join(orchDir, "workers", "CTL-764", ".linear-label-waiting.applied"))).toBe(
+      false
+    );
   });
 
   test("pre-pickup triaged ticket is NOT retracted by the started-sweep", () => {
@@ -9671,7 +9798,10 @@ describe("CTL-1068: schedulerTick — admitted-then-failed held-label retraction
     const writeStatus = {
       ...noWrites(),
       applyLabel: () => ({}),
-      removeLabel: (t, l) => { removed.push({ t, l }); return { removed: true }; },
+      removeLabel: (t, l) => {
+        removed.push({ t, l });
+        return { removed: true };
+      },
     };
     schedulerTick(orchDir, {
       readEligible: () => [],
@@ -9681,7 +9811,9 @@ describe("CTL-1068: schedulerTick — admitted-then-failed held-label retraction
     });
     // The started-sweep gate excluded CTL-7; the marker must be untouched.
     expect(removed.filter((r) => r.t === "CTL-7" && r.l === "waiting")).toHaveLength(0);
-    expect(existsSync(join(orchDir, "workers", "CTL-7", ".linear-label-waiting.applied"))).toBe(true);
+    expect(existsSync(join(orchDir, "workers", "CTL-7", ".linear-label-waiting.applied"))).toBe(
+      true
+    );
   });
 
   test("started ticket with no held marker makes zero held removeLabel calls", () => {
@@ -9692,7 +9824,10 @@ describe("CTL-1068: schedulerTick — admitted-then-failed held-label retraction
     const writeStatus = {
       ...noWrites(),
       applyLabel: () => ({}),
-      removeLabel: (t, l) => { removed.push({ t, l }); return { removed: true }; },
+      removeLabel: (t, l) => {
+        removed.push({ t, l });
+        return { removed: true };
+      },
     };
     schedulerTick(orchDir, { readEligible: () => [], dispatch: fakeDispatch(), writeStatus });
     expect(removed.filter((r) => r.l === "blocked" || r.l === "waiting")).toHaveLength(0);
@@ -9700,7 +9835,7 @@ describe("CTL-1068: schedulerTick — admitted-then-failed held-label retraction
 
   test("retraction emits a held-label-orphaned-in-flight state-write event", () => {
     writeSignal("CTL-764", "triage", "done");
-    writeSignal("CTL-764", "research", "done");   // admitted; pre-pickup gate excludes it
+    writeSignal("CTL-764", "research", "done"); // admitted; pre-pickup gate excludes it
     writeSignal("CTL-764", "implement", "failed");
     writeFileSync(join(orchDir, "workers", "CTL-764", ".linear-label-waiting.applied"), "");
     writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
@@ -9742,13 +9877,15 @@ describe("CTL-1068: marker-hygiene and re-arm (Phase 3 regression)", () => {
       removeLabel: () => ({ removed: true }),
     };
     schedulerTick(orchDir, { readEligible: () => [], dispatch: fakeDispatch(), writeStatus });
-    expect(existsSync(join(orchDir, "workers", "CTL-810", ".linear-label-blocked.applied"))).toBe(false);
+    expect(existsSync(join(orchDir, "workers", "CTL-810", ".linear-label-blocked.applied"))).toBe(
+      false
+    );
   });
 
   test("retraction clears lastHeldEmitState so a future genuine hold re-emits", () => {
     // Tick A: admitted-then-failed with marker → retract + onRetract deletes lastHeldEmitState entry.
     writeSignal("CTL-907", "triage", "done");
-    writeSignal("CTL-907", "research", "done");   // admitted; pre-pickup gate excludes it
+    writeSignal("CTL-907", "research", "done"); // admitted; pre-pickup gate excludes it
     writeSignal("CTL-907", "implement", "failed");
     writeFileSync(join(orchDir, "workers", "CTL-907", ".linear-label-waiting.applied"), "");
     writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
@@ -9756,12 +9893,17 @@ describe("CTL-1068: marker-hygiene and re-arm (Phase 3 regression)", () => {
     const writeStatus = {
       ...noWrites(),
       applyLabel: () => ({}),
-      removeLabel: (t, l) => { removed.push({ t, l }); return { removed: true }; },
+      removeLabel: (t, l) => {
+        removed.push({ t, l });
+        return { removed: true };
+      },
     };
     schedulerTick(orchDir, { readEligible: () => [], dispatch: fakeDispatch(), writeStatus });
     // Marker must be gone after Tick A retraction.
     expect(removed).toContainEqual({ t: "CTL-907", l: "waiting" });
-    expect(existsSync(join(orchDir, "workers", "CTL-907", ".linear-label-waiting.applied"))).toBe(false);
+    expect(existsSync(join(orchDir, "workers", "CTL-907", ".linear-label-waiting.applied"))).toBe(
+      false
+    );
     // The onRetract callback clears lastHeldEmitState for this ticket — no further assertion
     // needed here beyond confirming the retraction fired (the internal Map reset is exercised
     // by the unit test in Phase 1).
