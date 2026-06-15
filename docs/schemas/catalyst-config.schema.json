@@ -352,6 +352,53 @@
                   }
                 }
               }
+            },
+            "fleetHealth": {
+              "type": "object",
+              "description": "CTL-1165 D5: the pre-exhaustion fleet-health guardrail. Every intervalMs it samples four steady-state degradation signals (the ~/.claude/jobs dir count, the live background-agent count, the resident node/bun worker-process count, and macOS swap-used MB) and, when any crosses its threshold, emits a single fleet.health.degraded event. selfHealEnabled is OFF by default (emit-only); when enabled it eagerly fires the same gated reap intents the 600s orphan-reaper timer emits — it gains no new kill authority.",
+              "additionalProperties": false,
+              "properties": {
+                "enabled": {
+                  "type": "boolean",
+                  "default": true,
+                  "description": "When false, the fleet-health probe is disabled. Env CATALYST_FLEET_HEALTH=0 also disables it."
+                },
+                "intervalMs": {
+                  "type": "number",
+                  "default": 120000,
+                  "description": "How often (in milliseconds) the probe samples the four signals. Env EXECUTION_CORE_FLEET_HEALTH_INTERVAL_MS overrides."
+                },
+                "jobsThreshold": {
+                  "type": "number",
+                  "default": 500,
+                  "description": "Emit fleet.health.degraded when the ~/.claude/jobs dir count reaches this value. Env EXECUTION_CORE_FLEET_JOBS_THRESHOLD overrides."
+                },
+                "swapUsedMbThreshold": {
+                  "type": "number",
+                  "default": 4096,
+                  "description": "Emit when macOS swap-used MB reaches this value. Env EXECUTION_CORE_FLEET_SWAP_MB_THRESHOLD overrides."
+                },
+                "agentsThreshold": {
+                  "type": "number",
+                  "default": 12,
+                  "description": "Emit when the live background-agent count reaches this value. Env EXECUTION_CORE_FLEET_AGENTS_THRESHOLD overrides."
+                },
+                "procsThreshold": {
+                  "type": "number",
+                  "default": 40,
+                  "description": "Emit when the resident node/bun worker-process count reaches this value. Env EXECUTION_CORE_FLEET_PROCS_THRESHOLD overrides."
+                },
+                "selfHealEnabled": {
+                  "type": "boolean",
+                  "default": false,
+                  "description": "When true, a sustained breach eagerly fires the orphan-reaper + phase-reconcile + proc-orphan reap intents (each gated by its own reaper; the proc-orphan sweep is shadow by default). DEFAULT OFF — the first ship is a pure alert. Env EXECUTION_CORE_FLEET_SELF_HEAL=1 also enables it."
+                },
+                "sustainedTicks": {
+                  "type": "number",
+                  "default": 2,
+                  "description": "Number of consecutive degraded ticks before self-heal fires (once per breach episode, re-armed after a healthy tick)."
+                }
+              }
             }
           }
         },

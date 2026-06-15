@@ -12,7 +12,6 @@ import {
   classifyFleetHealth,
   startFleetHealthProbe,
   defaultReadSwapUsedMb,
-  defaultReapOrphanChildren,
   defaultTriggerSelfHeal,
 } from "./fleet-health-probe.mjs";
 import { FLEET_HEALTH_DEGRADED } from "./fleet-health-event.mjs";
@@ -259,86 +258,42 @@ describe("defaultReadSwapUsedMb", () => {
   });
 });
 
-// ─── defaultReapOrphanChildren ───────────────────────────────────────────────
-
-describe("defaultReapOrphanChildren", () => {
-  test("selects only reparented (ppid===1) node/bun pids, never the daemon's own tree", () => {
-    const lines = [
-      "201 1 node /some/worker.mjs", // orphan node → kill
-      "202 1 bun run test", // orphan bun → kill
-      "203 555 node /child.mjs", // not reparented → spare
-      "204 1 ruby script.rb", // not node/bun → spare
-      "999 1 node /daemon.mjs", // daemon pid → spare
-    ];
-    const kills = [];
-    const reaped = defaultReapOrphanChildren({
-      psLines: () => lines,
-      kill: (pid, sig) => kills.push({ pid, sig }),
-      daemonPids: [999],
-    });
-    const killedPids = kills.map((k) => k.pid).sort((a, b) => a - b);
-    expect(killedPids).toEqual([201, 202]);
-    expect(reaped).toBe(2);
-  });
-
-  test("respects maxPerSweep cap (25)", () => {
-    const lines = Array.from({ length: 60 }, (_, i) => `${1000 + i} 1 node x`);
-    const kills = [];
-    const reaped = defaultReapOrphanChildren({
-      psLines: () => lines,
-      kill: (pid) => kills.push(pid),
-      maxPerSweep: 25,
-    });
-    expect(kills.length).toBe(25);
-    expect(reaped).toBe(25);
-  });
-
-  test("never throws when kill throws (best-effort)", () => {
-    const lines = ["201 1 node worker"];
-    expect(() =>
-      defaultReapOrphanChildren({
-        psLines: () => lines,
-        kill: () => {
-          throw new Error("ESRCH");
-        },
-      }),
-    ).not.toThrow();
-  });
-});
-
 // ─── defaultTriggerSelfHeal ──────────────────────────────────────────────────
 
 describe("defaultTriggerSelfHeal", () => {
-  test("emits both reap intents then sweeps children, never throws", async () => {
+  test("emits the three gated reap intents (incl procOrphans.reap-requested) and never kills directly", async () => {
     const intents = [];
-    const swept = [];
     await expect(
       defaultTriggerSelfHeal({
         emitIntent: async (name) => intents.push(name),
-        reapChildren: () => {
-          swept.push(true);
-          return 0;
-        },
       }),
     ).resolves.toBeUndefined();
-    expect(intents).toContain("orphans.reap-requested");
-    expect(intents).toContain("phase.reconcile.reap-requested");
-    expect(swept.length).toBe(1);
+    // CTL-1165 (hardened): self-heal routes the child sweep through the gated,
+    // shadow-default proc-reaper via procOrphans.reap-requested — it gains NO new
+    // kill authority and has NO direct ppid===1 node/bun SIGTERM path of its own
+    // (a bare sweep with an empty skip set would take down the daemon itself).
+    expect(intents).toEqual([
+      "orphans.reap-requested",
+      "phase.reconcile.reap-requested",
+      "procOrphans.reap-requested",
+    ]);
   });
 
-  test("a throwing emitIntent does not prevent the child sweep and never throws", async () => {
-    let swept = false;
+  test("a throwing emitIntent does not prevent the remaining intents and never throws", async () => {
+    const intents = [];
     await expect(
       defaultTriggerSelfHeal({
-        emitIntent: async () => {
-          throw new Error("event log unwritable");
-        },
-        reapChildren: () => {
-          swept = true;
-          return 0;
+        emitIntent: async (name) => {
+          intents.push(name);
+          if (name === "orphans.reap-requested") throw new Error("event log unwritable");
         },
       }),
     ).resolves.toBeUndefined();
-    expect(swept).toBe(true);
+    // All three are attempted even though the first throws (independent guards).
+    expect(intents).toEqual([
+      "orphans.reap-requested",
+      "phase.reconcile.reap-requested",
+      "procOrphans.reap-requested",
+    ]);
   });
 });

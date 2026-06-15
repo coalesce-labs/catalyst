@@ -243,8 +243,18 @@ export function classifyProc(row, ctx) {
   const cwd = cwdForPid(row.pid);
   if (cwd === null || cwd === undefined) return { action: "spare", reason: "cwd-unknown" };
 
-  // (6) cwd matching a live-agent cwd → live-agent-owned, spare.
-  if (liveAgentCwds.has(cwd)) return { action: "spare", reason: "live-agent-owned" };
+  // (6) cwd AT OR UNDER any live-agent cwd → a live worker's own (possibly
+  //     reparented) child, spare. PREFIX-aware, not byte-exact: an MCP server /
+  //     bun-test / bun-install grandchild typically runs from a package SUBDIR
+  //     under the agent's worktree, and once its intermediate parent exits it
+  //     reparents to launchd (leaving LIVE_TREE) — the shared cwd prefix is what
+  //     still ties it to the live worker. Erring toward spare is the safe
+  //     direction (a live worker's tooling is never yanked mid-run).
+  for (const liveCwd of liveAgentCwds) {
+    if (cwdUnderWorktreeRoot(cwd, liveCwd)) {
+      return { action: "spare", reason: "live-agent-owned" };
+    }
+  }
 
   // (7) cwd must be under the worktree root (an interactive claude / dev shell
   //     outside ~/catalyst/wt is never reaped — the under-wt signal is REQUIRED).
@@ -349,9 +359,11 @@ export class ProcReaper {
     this.allowlistPatterns = allowlistPatterns;
     this.log = log;
     this.emit = emit;
-    // Two-sweep persistence: pid → { command, seen } seen on the PREVIOUS sweep.
-    // A candidate must be orphaned-and-killable on two CONSECUTIVE sweeps (and
-    // its command must match across both, guarding pid-reuse) before any kill.
+    // Two-sweep persistence: pid → full argv seen on the PREVIOUS sweep. A
+    // candidate must be orphaned-and-killable on two CONSECUTIVE sweeps AND its
+    // full argv must match across both — keying on argv (not the node/bun
+    // basename) is what actually guards pid-reuse: a recycled pid hosting a
+    // different node/bun process has a different argv and is spared.
     this._priorCandidates = new Map();
   }
 
@@ -440,7 +452,7 @@ export class ProcReaper {
     for (const row of rows) {
       const v = classifyProc(row, ctx);
       verdicts.push({ row, v });
-      if (v.action === "kill") thisSweepCandidates.set(row.pid, row.command);
+      if (v.action === "kill") thisSweepCandidates.set(row.pid, row.args);
     }
 
     // Two-sweep persistence: act only on a candidate seen orphaned-and-killable
@@ -451,8 +463,8 @@ export class ProcReaper {
         continue;
       }
       const prior = this._priorCandidates.get(row.pid);
-      if (!prior || prior !== row.command) {
-        // First sweep this candidate is seen (or pid reused under a new command):
+      if (!prior || prior !== row.args) {
+        // First sweep this candidate is seen (or pid reused under a new argv):
         // spare it this pass; the persistence map below records it for next time.
         report.spared.push({ pid: row.pid, command: row.command, reason: "awaiting-second-sweep" });
         continue;
@@ -492,12 +504,14 @@ export class ProcReaper {
     // Re-probe: signal 0 returns true (alive) / false (gone or foreign-uid).
     const stillAlive = this.killProc(row.pid, 0);
     if (!stillAlive) return true; // exited under SIGTERM (or vanished) — done.
-    // Re-match argv just before SIGKILL to dodge pid-reuse: re-snapshot.
+    // Re-match FULL argv just before SIGKILL to dodge pid-reuse: re-snapshot. A
+    // pid recycled into a different process during the grace window has a
+    // different argv (or is absent) → stillSame false → no SIGKILL.
     let stillSame = true;
     try {
       const fresh = parsePsRows(this.psLister());
       const cur = fresh.find((r) => r.pid === row.pid);
-      stillSame = !!cur && cur.command === row.command;
+      stillSame = !!cur && cur.args === row.args;
     } catch {
       stillSame = false; // can't re-confirm → do NOT SIGKILL (degrade safe).
     }

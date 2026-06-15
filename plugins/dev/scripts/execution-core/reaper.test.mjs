@@ -274,6 +274,35 @@ describe("Reaper._handleBgReap", () => {
     expect(executorRmForce).toHaveBeenCalledWith("abc12345");
   });
 
+  it("does NOT escalate to `claude rm` when the re-read shows the session is BUSY (transient stop failure on a live worker)", async () => {
+    // CTL-1165 D4 hardened: `claude stop` failed ("background service may be
+    // restarting") but the re-read shows the target is BUSY — a still-LIVE worker,
+    // NOT a stuck zombie. `claude rm` would delete its (often shared) worktree, so
+    // we must NOT escalate; emit reap-failed and let the periodic sweep retry once
+    // the worker goes idle.
+    const executorReap = mock(() =>
+      Promise.resolve({ ok: false, error: "background service may be restarting" }),
+    );
+    const executorRmForce = mock(() => Promise.resolve({ ok: true }));
+    const emitted = [];
+    const r = new Reaper({
+      executorReap,
+      executorRmForce,
+      agents: agentsFixture([
+        { sessionId: "abc12345-aaaa-bbbb-cccc-dddddddddddd", status: "busy", cwd: "/wt/x", kind: "background" },
+      ]),
+      emit: (evt, fields) => {
+        emitted.push({ evt, fields });
+        return Promise.resolve();
+      },
+      log: silentLog(),
+    });
+    await r.handle({ event: "phase.abort.reap-requested", bg_job_id: "abc12345" });
+    expect(executorReap).toHaveBeenCalledTimes(1);
+    expect(executorRmForce).not.toHaveBeenCalled();
+    expect(emitted.find((e) => e.evt === "phase.abort.reap-failed")).toBeTruthy();
+  });
+
   it("does NOT escalate to `claude rm` when stop succeeds (emits reap-complete)", async () => {
     const executorReap = mock(() => Promise.resolve({ ok: true }));
     const executorRmForce = mock(() => Promise.resolve({ ok: true }));

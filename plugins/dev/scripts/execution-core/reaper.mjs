@@ -355,21 +355,31 @@ export class Reaper {
     // (a successful-but-async stop, or it exited on its own); surface reap-failed
     // with the original stop error and let the next tick no-op. We re-read because
     // `claude rm` ALSO tears down state and must not fire on a guess.
-    let stillRegistered = false;
+    let rereadTarget = null;
     try {
       const reread = await this.agents();
-      stillRegistered = reread.some((a) => {
-        try {
-          return shortIdFromSessionId(a.sessionId) === shortId;
-        } catch {
-          return false;
-        }
-      });
+      rereadTarget =
+        reread.find((a) => {
+          try {
+            return shortIdFromSessionId(a.sessionId) === shortId;
+          } catch {
+            return false;
+          }
+        }) ?? null;
     } catch {
-      stillRegistered = false; // unreadable fleet → degrade safe, do NOT rm
+      rereadTarget = null; // unreadable fleet → degrade safe, do NOT rm
     }
 
-    if (!stillRegistered) {
+    // CTL-1165 D4 (hardened): escalate to `claude rm` ONLY for a confirmed-stuck
+    // ZOMBIE — still registered AND its status is sweep-reapable (idle / null /
+    // undefined: the reboot-survivor class `claude stop` can't clear). A BUSY (or
+    // any other non-reapable) re-read means `claude stop` failed TRANSIENTLY on a
+    // still-LIVE worker ("background service may be restarting") — and `claude rm`
+    // deletes the session AND its worktree (often the SAME ticket worktree a live
+    // successor runs in), so we must NOT escalate. Emit reap-failed and let the
+    // periodic orphan sweep retry once the worker actually goes idle. An
+    // unreadable re-read (rereadTarget === null) also degrades safe (no rm).
+    if (!rereadTarget || !isSweepReapableStatus(rereadTarget.status)) {
       await this.emit(event.event.replace("reap-requested", "reap-failed"), {
         ticket: event.ticket,
         phase: event.phase,

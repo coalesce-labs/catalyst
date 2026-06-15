@@ -409,7 +409,9 @@ export function startDaemon({
   // by a config knob (default-on, CATALYST_FLEET_HEALTH=0 disables) like the
   // memory sampler. The probe is EMIT-ONLY by default (self-heal default OFF).
   startFleetHealthProbe = realStartFleetHealthProbe,
-  enableFleetHealth = readFleetHealthConfig().enabled,
+  // undefined → resolve from config (env + Layer-1 via configPath) in the boot
+  // body below; tests may force true/false and that wins via `??`.
+  enableFleetHealth = undefined,
   // CTL-787: account-level rate-limit usage poller. Injectable for tests; gated
   // by a config knob (default-on, CATALYST_RATELIMIT_POLLER=0 disables) like the
   // memory sampler.
@@ -651,9 +653,14 @@ export function startDaemon({
 
     // CTL-1165 D5: start the pre-exhaustion fleet-health probe. EMIT-ONLY by
     // default (self-heal default OFF — first ship is a pure alert). Inside the
-    // same try/catch so a throw triggers PID-file cleanup via stopDaemon.
-    if (enableFleetHealth) {
-      _fleetHealthProbe = startFleetHealthProbe({ orchDir });
+    // same try/catch so a throw triggers PID-file cleanup via stopDaemon. The
+    // config is resolved WITH configPath (mirroring readOrphanReaperConfig) so
+    // the documented Layer-1 catalyst.orchestration.fleetHealth knobs — enable,
+    // thresholds, and selfHealEnabled — actually take effect in production, and
+    // is passed to the probe so it reads the SAME resolved thresholds.
+    const fleetHealthConfig = readFleetHealthConfig(configPath);
+    if (enableFleetHealth ?? fleetHealthConfig.enabled) {
+      _fleetHealthProbe = startFleetHealthProbe({ orchDir, config: fleetHealthConfig });
     }
 
     // CTL-787: start the account-level rate-limit usage poller. Inside the same

@@ -482,6 +482,73 @@ describe("ProcReaper.sweep — allowlist + live-tree sparing", () => {
     expect(killProc.calls.filter(([, s]) => s !== 0)).toHaveLength(0);
   });
 
+  it("spares a reparented grandchild running from a SUBDIR under a live agent's worktree (prefix cwd guard)", async () => {
+    // An orphaned (ppid 1) node whose cwd is a SUBDIR of a live agent's worktree
+    // — a reparented MCP-server / bun-test grandchild. Byte-exact cwd matching
+    // would kill it (it left LIVE_TREE and its exact cwd isn't an agent's cwd);
+    // the prefix-aware gate 6 spares it as live-agent-owned.
+    const psLines = [
+      psLine({ pid: 260, ppid: 1, etime: "99:00", command: "node mcp-server.mjs" }),
+    ];
+    const emit = recordingEmit();
+    const killProc = recordingKill({ alive: new Set([260]) });
+    const reaper = new ProcReaper({
+      mode: "enforce",
+      worktreeRoot: WT_ROOT,
+      psLister: () => psLines,
+      lsofCwd: () => `${WT_ROOT}/CTL-X/plugins/dev/scripts/execution-core`,
+      agentsResult: () => ({ ok: true, agents: [{ pid: 100, cwd: `${WT_ROOT}/CTL-X` }] }),
+      killProc,
+      sleep: async () => {},
+      now: () => 0,
+      selfPid: 1,
+      daemonPids: [],
+      emit,
+      log: silentLog(),
+    });
+    await reaper.sweep({});
+    const r2 = await reaper.sweep({});
+    expect(r2.reaped).toHaveLength(0);
+    expect(r2.spared.some((s) => s.reason === "live-agent-owned")).toBe(true);
+    expect(killProc.calls.filter(([, s]) => s !== 0)).toHaveLength(0);
+  });
+
+  it("does NOT SIGKILL when the pid is reused under a different argv during the grace window", async () => {
+    // A killable orphan persists two sweeps → enforce SIGTERMs it. During the
+    // grace window the pid is recycled into a DIFFERENT node/bun process (new
+    // argv). The pre-SIGKILL re-match keys on FULL argv, so the innocent reused
+    // pid must NOT be SIGKILL'd.
+    const orphanLine = psLine({ pid: 270, ppid: 1, etime: "99:00", command: "node worker-a.mjs" });
+    const reusedLine = psLine({ pid: 270, ppid: 1, etime: "00:05", command: "bun unrelated.mjs" });
+    let psCall = 0;
+    const psLister = () => {
+      psCall += 1;
+      // sweep1 snapshot (1) + sweep2 snapshot (2) → original; grace re-snapshot (3) → reused
+      return psCall <= 2 ? [orphanLine] : [reusedLine];
+    };
+    const emit = recordingEmit();
+    const killProc = recordingKill({ alive: new Set([270]) });
+    const reaper = new ProcReaper({
+      mode: "enforce",
+      worktreeRoot: WT_ROOT,
+      psLister,
+      lsofCwd: () => `${WT_ROOT}/CTL-X`,
+      agentsResult: () => ({ ok: true, agents: [] }),
+      killProc,
+      sleep: async () => {},
+      now: () => 0,
+      selfPid: 1,
+      daemonPids: [],
+      emit,
+      log: silentLog(),
+    });
+    await reaper.sweep({}); // sweep 1: first sighting → awaiting-second
+    const r2 = await reaper.sweep({}); // sweep 2: persisted → SIGTERM, grace, re-match fails → NO SIGKILL
+    expect(killProc.calls.filter(([, s]) => s === "SIGTERM")).toHaveLength(1);
+    expect(killProc.calls.filter(([, s]) => s === "SIGKILL")).toHaveLength(0);
+    expect(r2.reaped).toHaveLength(0);
+  });
+
   it("interactive claude + children spared (cwd NOT under worktree root)", async () => {
     const psLines = [
       psLine({ pid: 300, ppid: 1, etime: "99:00", command: "node tool.mjs" }),

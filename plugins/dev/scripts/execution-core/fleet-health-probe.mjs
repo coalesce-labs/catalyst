@@ -9,10 +9,15 @@
 // event (host in the OTel resource, not the dotted name).
 //
 // Self-heal is DEFAULT OFF (selfHealEnabled): the first ship is a pure alert.
-// When enabled, it fires the SAME two reap intents the 600s orphan-reaper timer
-// emits (orphans.reap-requested + phase.reconcile.reap-requested) plus a bounded
-// ppid===1 node/bun child sweep — ONCE per sustained breach episode, re-armed
-// only after a healthy tick (hysteresis). It never gains new reaping authority.
+// When enabled, it fires the SAME reap intents the 600s orphan-reaper timer
+// emits — orphans.reap-requested + phase.reconcile.reap-requested (claude-session
+// sweeps) AND procOrphans.reap-requested (the orphan child-process sweep, routed
+// through D2's fully-gated, shadow-default proc-reaper) — ONCE per sustained
+// breach episode, re-armed only after a healthy tick (hysteresis). It gains NO
+// new reaping authority: a child process dies only if proc-reaper.mode is ALSO
+// 'enforce'. There is deliberately NO crude direct child-kill here — an
+// empty-skip-set ppid===1 node/bun sweep would SIGTERM the daemon/broker/monitor
+// themselves (they run as nohup'd node/bun reparented to launchd).
 //
 // All side effects are injected (clock, readers, emit, triggerSelfHeal) so
 // tick() is fully unit-testable with no real timer, sysctl, ps, or kill. Models
@@ -24,8 +29,6 @@ import { getAgentsCached } from "./claude-agents.mjs";
 import { getJobsRoot, readFleetHealthConfig, log } from "./config.mjs";
 import { emitFleetHealthEvent } from "./fleet-health-event.mjs";
 import { emitReapIntent } from "./reap-intent.mjs";
-
-const FLEET_REAP_CHILD_CAP = 25; // bound the self-heal child sweep
 
 function realClock() {
   return {
@@ -107,63 +110,28 @@ export function defaultReadSwapUsedMb({
   return Number.isFinite(mb) ? Math.round(mb) : 0;
 }
 
-// defaultReapOrphanChildren — NET-NEW bounded sweep. Kills ONLY reparented
-// (ppid===1) node/bun processes, capped at maxPerSweep, never the daemon's own
-// pid(s). Best-effort: a throwing kill is swallowed. Returns the count reaped.
-// (D2's proc-reaper.mjs is the corroboration-heavy enforcement path; this is the
-// guardrail's last-resort bounded backstop.)
-export function defaultReapOrphanChildren({
-  psLines = defaultPsLines,
-  kill = process.kill,
-  daemonPids = [],
-  maxPerSweep = FLEET_REAP_CHILD_CAP,
-} = {}) {
-  const lines = psLines() ?? [];
-  const skip = new Set(daemonPids.map((p) => Number(p)));
-  let reaped = 0;
-  for (const line of lines) {
-    if (reaped >= maxPerSweep) break;
-    const m = line.trim().match(/^(\d+)\s+(\d+)\s+(.*)$/);
-    if (!m) continue;
-    const pid = Number(m[1]);
-    const ppid = Number(m[2]);
-    const command = m[3];
-    if (ppid !== 1) continue; // only reparented orphans
-    if (!/\b(?:node|bun)\b/.test(command)) continue; // only node/bun
-    if (skip.has(pid)) continue; // never the daemon's own tree
+// defaultTriggerSelfHeal — fire the SAME reap intents the 600s orphan-reaper
+// timer emits: orphans.reap-requested + phase.reconcile.reap-requested (the
+// claude-session sweeps) AND procOrphans.reap-requested (the orphan
+// child-process sweep). The last routes through D2's proc-reaper, which carries
+// the full kill gate (LIVE_TREE / allowlist / cwd-under-worktree / etime floor /
+// CATASTROPHE GUARD) and is shadow-by-default — so self-heal gains ZERO new kill
+// authority and a child process dies only if proc-reaper.mode is ALSO 'enforce'.
+// There is deliberately NO crude direct child-kill here (a bare ppid===1 node/bun
+// SIGTERM with an empty skip set would take down the daemon/broker/monitor).
+// All best-effort; NEVER throws (the guardrail must never wedge the daemon); each
+// emit is independently guarded so one failure cannot suppress the others.
+export async function defaultTriggerSelfHeal({ emitIntent = emitReapIntent } = {}) {
+  for (const type of [
+    "orphans.reap-requested",
+    "phase.reconcile.reap-requested",
+    "procOrphans.reap-requested",
+  ]) {
     try {
-      kill(pid, "SIGTERM");
-      reaped++;
+      await emitIntent(type, {});
     } catch {
-      /* ESRCH / EPERM — best-effort */
+      /* best-effort — never wedge the daemon */
     }
-  }
-  return reaped;
-}
-
-// defaultTriggerSelfHeal — fire the SAME two reap intents the 600s orphan-reaper
-// timer emits, then run the bounded child sweep. All best-effort; NEVER throws
-// (the guardrail must never wedge the daemon). Each step is independently
-// guarded so a failing emit cannot suppress the sweep.
-export async function defaultTriggerSelfHeal({
-  emitIntent = emitReapIntent,
-  reapChildren = defaultReapOrphanChildren,
-  daemonPids = [],
-} = {}) {
-  try {
-    await emitIntent("orphans.reap-requested", {});
-  } catch {
-    /* best-effort */
-  }
-  try {
-    await emitIntent("phase.reconcile.reap-requested", {});
-  } catch {
-    /* best-effort */
-  }
-  try {
-    reapChildren({ daemonPids });
-  } catch {
-    /* best-effort */
   }
 }
 
