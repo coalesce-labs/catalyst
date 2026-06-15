@@ -62,7 +62,7 @@
 // (buildLanes / showLaneChrome); this file is the presentational shell that lays
 // the lanes into one CSS grid. Hand-rolled inline styles per DESIGN.md, reusing
 // the shared `C` token object + the `.catalyst-live-dot` pulse.
-import { Fragment, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import { Fragment, useEffect, useLayoutEffect, useRef, useState, type ReactNode, type RefObject } from "react";
 import { AnimatePresence } from "motion/react";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { C, LIVE, TRAY_LIFT } from "./board-tokens";
@@ -222,6 +222,34 @@ export interface LaneCell {
 // position:sticky top:0 — pinned at the very top of the shared scroll so the
 // phase columns stay visible while the lanes scroll vertically; it scrolls
 // horizontally WITH the lanes (it lives inside the same overflow-x container).
+// CTL-1146/CTL-1168: one column-header cap — the rounded-top tray over its column.
+// Shared by the grouped ColumnHeaderRow (a sticky grid spanning the board) and the
+// flat per-column board (each column owns its header above an independent scroll
+// viewport). `flat` makes it a fixed-height flex child of the column instead of a
+// grid cell.
+function ColumnHeaderCell({ col, flat = false }: { col: SharedColumn; flat?: boolean }) {
+  return (
+    <div style={{
+      display: "flex", alignItems: "center", gap: 8,
+      background: C.s0,
+      borderRadius: "10px 10px 0 0",
+      border: `1px solid ${C.borderSubtle}`,
+      borderBottom: "none",
+      padding: "8px 10px 10px",
+      ...(flat ? { flex: "0 0 auto" } : {}),
+    }}>
+      <span style={{ width: 9, height: 9, borderRadius: "50%", background: col.c, flex: "0 0 auto" }} />
+      <span style={{ fontSize: 13, fontWeight: 600, color: C.fg, letterSpacing: 0.2 }}>{col.label}</span>
+      <span style={{ fontFamily: C.mono, fontVariantNumeric: "tabular-nums", fontSize: 11, color: C.fgMuted, background: C.s3, padding: "1px 7px", borderRadius: 9 }}>{col.count}</span>
+      {col.live > 0 && (
+        <span title={`${col.live} worker${col.live > 1 ? "s" : ""} live in this phase`} style={{ display: "inline-flex", alignItems: "center", gap: 4, fontFamily: C.mono, fontSize: 11, color: LIVE }}>
+          <span className="catalyst-live-dot" style={{ width: 7, height: 7, borderRadius: "50%", background: LIVE, display: "inline-block" }} />{col.live} live
+        </span>
+      )}
+    </div>
+  );
+}
+
 function ColumnHeaderRow({ columns }: { columns: SharedColumn[] }) {
   return (
     <div
@@ -245,25 +273,93 @@ function ColumnHeaderRow({ columns }: { columns: SharedColumn[] }) {
       }}
     >
       {columns.map((col) => (
-        // CTL-1146: each header cell is the rounded top cap of its column tray (follows tray to s0).
-        <div key={col.key} style={{
-          display: "flex", alignItems: "center", gap: 8,
-          background: C.s0,
-          borderRadius: "10px 10px 0 0",
-          border: `1px solid ${C.borderSubtle}`,
-          borderBottom: "none",
-          padding: "8px 10px 10px",
-        }}>
-          <span style={{ width: 9, height: 9, borderRadius: "50%", background: col.c, flex: "0 0 auto" }} />
-          <span style={{ fontSize: 13, fontWeight: 600, color: C.fg, letterSpacing: 0.2 }}>{col.label}</span>
-          <span style={{ fontFamily: C.mono, fontVariantNumeric: "tabular-nums", fontSize: 11, color: C.fgMuted, background: C.s3, padding: "1px 7px", borderRadius: 9 }}>{col.count}</span>
-          {col.live > 0 && (
-            <span title={`${col.live} worker${col.live > 1 ? "s" : ""} live in this phase`} style={{ display: "inline-flex", alignItems: "center", gap: 4, fontFamily: C.mono, fontSize: 11, color: LIVE }}>
-              <span className="catalyst-live-dot" style={{ width: 7, height: 7, borderRadius: "50%", background: LIVE, display: "inline-block" }} />{col.live} live
-            </span>
-          )}
-        </div>
+        <ColumnHeaderCell key={col.key} col={col} />
       ))}
+    </div>
+  );
+}
+
+// CTL-1168: the FLAT (ungrouped) board — Linear-style per-column independent scroll.
+// Each column owns a fixed header cap above its OWN vertical scroll viewport, so
+// cards scroll WITHIN the column and clip just below the header (a 9px gap, matching
+// Linear's measured board) — they never bleed above or behind the header. The columns
+// share ONE horizontal scroll (the outer board-scroll container, overflowY:hidden in
+// this mode); only the vertical scroll is per-column. Column width is fixed (COL_W),
+// so wide viewports reveal more columns rather than stretching them (Linear behavior).
+function FlatColumnsBoard({
+  columns,
+  cells,
+  bumpRef,
+}: {
+  columns: SharedColumn[];
+  cells: LaneCell[];
+  bumpRef: RefObject<HTMLDivElement | null>;
+}) {
+  return (
+    <div
+      ref={bumpRef}
+      data-board-flat="true"
+      style={{
+        width: `max(100%, ${boardMinWidth(columns.length)}px)`,
+        height: "100%",
+        display: "flex",
+        gap: COL_GAP,
+        // CTL-1168: near-flush LEFT inset (2px) so the first column sits right next
+        // to the nav like Linear's board; keep the wider PAD_X on the right edge.
+        padding: `${BOARD_TOP_PAD}px ${PAD_X}px 0 2px`,
+        position: "relative",
+      }}
+    >
+      {columns.map((col, i) => {
+        const cell = cells[i];
+        return (
+          <div
+            key={col.key}
+            style={{
+              width: COL_W,
+              flex: `0 0 ${COL_W}px`,
+              height: "100%",
+              display: "flex",
+              flexDirection: "column",
+              minHeight: 0,
+            }}
+          >
+            <ColumnHeaderCell col={col} flat />
+            {/* CTL-1168: the independent vertical scroll viewport = the rounded-bottom
+                tray. overflowY:auto scrolls THIS column alone; overscrollBehaviorY:
+                contain keeps the wheel in-column (no page bounce); overflowX:hidden
+                lets horizontal wheel chain out to the board's horizontal scroll.
+                Content clips at the viewport's top edge — just below the header, with
+                a 9px breathing gap — so cards vanish under the header, never above. */}
+            <div
+              className="cat-overlay-scroll"
+              data-flat-col-scroll="true"
+              style={{
+                flex: 1,
+                minHeight: 0,
+                overflowY: "auto",
+                overflowX: "hidden",
+                overscrollBehaviorY: "contain",
+                background: C.s0,
+                border: `1px solid ${C.borderSubtle}`,
+                borderTop: "none",
+                borderRadius: "0 0 10px 10px",
+                boxShadow: TRAY_LIFT,
+                padding: `9px 12px 12px`,
+                display: "flex",
+                flexDirection: "column",
+                gap: 8,
+              }}
+            >
+              {!cell || cell.count === 0 ? (
+                <div style={{ color: C.fgDim, fontSize: 11.5, padding: "8px 0", textAlign: "center" }}>—</div>
+              ) : (
+                <AnimatePresence mode="popLayout" initial={false}>{cell.cards}</AnimatePresence>
+              )}
+            </div>
+          </div>
+        );
+      })}
     </div>
   );
 }
@@ -765,6 +861,11 @@ export function SwimlaneBoard<T extends GroupableEntity>({
   // (axis !== "none" AND laneCount > 1). A single group or no-axis board
   // scrolls normally — one lane should not get a tiny scroll box.
   const constrainCells = groupBy !== "none" && lanes.length > 1;
+  // CTL-1168: the FLAT (ungrouped) board switches to Linear-style per-column
+  // independent scroll — but only when the board has a BOUNDED height (`fill`), since
+  // each column's viewport needs a fixed parent height to scroll against. Without
+  // `fill` (auto height, rare embeds) we keep the legacy single-flow flat board.
+  const flatScroll = !chrome && fill;
   const icons = useRepoIconMap();
 
   // CTL-973: refs for the swipe guard + bump affordance.
@@ -799,7 +900,10 @@ export function SwimlaneBoard<T extends GroupableEntity>({
       data-scroll-restoration-id="board-scroll"
       style={{
         overflowX: "auto",
-        overflowY: "auto",
+        // CTL-1168: the flat per-column board owns its OWN vertical scroll per column,
+        // so the board container must NOT scroll vertically (overflowY:hidden) — only
+        // horizontally. Every other mode keeps the shared vertical scroll.
+        overflowY: flatScroll ? "hidden" : "auto",
         // CTL-973 Layer 1: contain the X overscroll to block browser swipe-navigation
         // on Chrome/Edge/Firefox. Y axis stays "auto" (default) so per-cell overscroll
         // chaining (CTL-958 #2) continues to work. Safari bug 240183 means this alone
@@ -816,9 +920,18 @@ export function SwimlaneBoard<T extends GroupableEntity>({
         position: "relative",
       }}
     >
-      {/* CTL-1144: min-width driven by column count so tracks never compete for
-          negative space; flex column + minHeight:100% lets lane rows divide the
-          leftover vertical space (Phase 3 full-height cells). */}
+      {/* CTL-1168: the flat (ungrouped) board with a bounded height renders as
+          Linear-style fixed columns, each with its OWN vertical scroll viewport.
+          Grouped boards (and the auto-height flat fallback) keep the shared-scroll
+          grid: one min-width content block, flex column + minHeight:100% so lane rows
+          divide the leftover vertical space. */}
+      {flatScroll ? (
+        <FlatColumnsBoard
+          columns={columns}
+          cells={deriveLane(lanes[0]?.items ?? items)}
+          bumpRef={bumpRef}
+        />
+      ) : (
       <div ref={bumpRef} style={{
         width: `max(100%, ${boardMinWidth(columns.length)}px)`,
         display: "flex", flexDirection: "column", minHeight: "100%",
@@ -863,6 +976,7 @@ export function SwimlaneBoard<T extends GroupableEntity>({
           <LaneCardsRow cells={deriveLane(lanes[0]?.items ?? items)} />
         )}
       </div>
+      )}
     </div>
   );
 }
