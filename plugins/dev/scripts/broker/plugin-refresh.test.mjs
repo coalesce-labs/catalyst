@@ -23,9 +23,13 @@ import {
   resolvePluginCheckoutRoots,
   resolveRepoFullName,
   isThisRepoMergeEvent,
+  isDaemonLocalMergeSignal,
   refreshPluginCheckout,
+  refreshAllPluginCheckouts,
+  startPluginDriftCheck,
   handlePluginRefreshEvent,
   PLUGIN_REFRESH_THROTTLE_MS,
+  PLUGIN_DRIFT_CHECK_INTERVAL_MS,
   __clearThrottleForTest,
   CHECKOUT_LAG_FAILURE_THRESHOLD,
   __clearLagStateForTest,
@@ -885,5 +889,274 @@ describe("emitted events cannot loop through shouldSkipEvent", () => {
       expect(canonical.resource["service.name"]).toBe("catalyst.broker");
       expect(shouldSkipEvent(canonical)).toBe(true);
     }
+  });
+});
+
+// ─── isDaemonLocalMergeSignal (CTL-1161 Phase 1) ─────────────────────────────
+//
+// Daemon-local merge signal: phase.monitor-merge.complete.<TICKET> is emitted
+// by every pipeline merge into THIS daemon's event log, independently of GitHub
+// webhook delivery. Match on event name only (no repo attribute to check).
+
+describe("isDaemonLocalMergeSignal", () => {
+  test("true for phase.monitor-merge.complete.CTL-1161", () => {
+    expect(isDaemonLocalMergeSignal({ attributes: { "event.name": "phase.monitor-merge.complete.CTL-1161" } })).toBe(true);
+  });
+
+  test("true for any ticket suffix shape (ABC-9)", () => {
+    expect(isDaemonLocalMergeSignal({ attributes: { "event.name": "phase.monitor-merge.complete.ABC-9" } })).toBe(true);
+  });
+
+  test("true for legacy flat event shape", () => {
+    expect(isDaemonLocalMergeSignal({ event: "phase.monitor-merge.complete.CTL-42" })).toBe(true);
+  });
+
+  test("false for phase.monitor-merge.failed (not complete)", () => {
+    expect(isDaemonLocalMergeSignal({ attributes: { "event.name": "phase.monitor-merge.failed.CTL-1161" } })).toBe(false);
+  });
+
+  test("false for an unrelated phase event (phase.research.complete.CTL-1161)", () => {
+    expect(isDaemonLocalMergeSignal({ attributes: { "event.name": "phase.research.complete.CTL-1161" } })).toBe(false);
+  });
+
+  test("false for github.push (that is isThisRepoMergeEvent's job)", () => {
+    expect(isDaemonLocalMergeSignal({ attributes: { "event.name": "github.push", "vcs.ref.name": "main" } })).toBe(false);
+  });
+
+  test("false for github.pr.merged", () => {
+    expect(isDaemonLocalMergeSignal({ attributes: { "event.name": "github.pr.merged" } })).toBe(false);
+  });
+});
+
+// ─── handlePluginRefreshEvent — daemon-local merge signal (CTL-1161 Phase 1) ─
+
+describe("handlePluginRefreshEvent — daemon-local merge trigger (CTL-1161)", () => {
+  beforeEach(() => __clearThrottleForTest());
+
+  const baseArgs = {
+    now: 0,
+    env: {},
+    repoFullName: "coalesce-labs/catalyst",
+    machineConfigPath: "/no/machine.json",
+    repoConfigPath: "/no/repo.json",
+    readFileFn: (p) => {
+      if (p === "/no/machine.json")
+        return JSON.stringify({ catalyst: { orchestration: { pluginDirs: "/co/plugins/dev" } } });
+      throw new Error("ENOENT");
+    },
+    gitToplevelFn: (pd) => pd.replace(/\/plugins\/dev$/, ""),
+  };
+
+  test("fires a pull for phase.monitor-merge.complete.CTL-1161 with no vcs.repository.name", () => {
+    const emitted = [];
+    let fetched = false;
+    const results = handlePluginRefreshEvent({
+      ...baseArgs,
+      event: { attributes: { "event.name": "phase.monitor-merge.complete.CTL-1161" } },
+      gitFn: (root, args) => {
+        if (args[0] === "fetch") { fetched = true; return ""; }
+        if (args[0] === "reset") return "";
+        if (args[0] === "rev-parse") return fetched ? "new" : "old";
+        return "";
+      },
+      emitFn: (e) => emitted.push(e),
+    });
+    expect(fetched).toBe(true);
+    expect(Array.isArray(results)).toBe(true);
+    expect(emitted.some((e) => e.event === "plugin.checkout.updated")).toBe(true);
+  });
+
+  test("second phase.monitor-merge.complete within throttle window is throttled (no double-pull)", () => {
+    const emitted = [];
+    let fetchCount = 0;
+    const gitFn = (root, args) => {
+      if (args[0] === "fetch") { fetchCount++; return ""; }
+      if (args[0] === "reset") return "";
+      if (args[0] === "rev-parse") return fetchCount > 0 ? "new" : "old";
+      return "";
+    };
+    const phaseEvent = { attributes: { "event.name": "phase.monitor-merge.complete.CTL-1161" } };
+
+    handlePluginRefreshEvent({ ...baseArgs, now: 0, event: phaseEvent, gitFn, emitFn: (e) => emitted.push(e) });
+    const r2 = handlePluginRefreshEvent({ ...baseArgs, now: PLUGIN_REFRESH_THROTTLE_MS - 1, event: phaseEvent, gitFn, emitFn: (e) => emitted.push(e) });
+
+    expect(fetchCount).toBe(1);
+    expect(r2[0].throttled).toBe(true);
+  });
+
+  test("is still null (no-op) for a non-merge, non-phase event (regression guard)", () => {
+    const results = handlePluginRefreshEvent({
+      ...baseArgs,
+      event: { attributes: { "event.name": "linear.issue.created" } },
+      gitFn: () => "",
+      emitFn: () => {},
+    });
+    expect(results).toBeNull();
+  });
+});
+
+// ─── refreshAllPluginCheckouts (CTL-1161 Phase 2) ────────────────────────────
+//
+// Timer-driven analogue of handlePluginRefreshEvent's body without the event
+// gate. Resolves roots via resolvePluginCheckoutRoots and calls
+// refreshPluginCheckout per root.
+
+describe("refreshAllPluginCheckouts", () => {
+  beforeEach(() => __clearThrottleForTest());
+
+  test("calls refreshPluginCheckout once per resolved root (1-root config)", () => {
+    let fetched = false;
+    const results = refreshAllPluginCheckouts({
+      now: 0,
+      env: {},
+      machineConfigPath: "/no/machine.json",
+      repoConfigPath: "/no/repo.json",
+      readFileFn: (p) => {
+        if (p === "/no/machine.json")
+          return JSON.stringify({ catalyst: { orchestration: { pluginDirs: "/co/plugins/dev" } } });
+        throw new Error("ENOENT");
+      },
+      gitToplevelFn: (pd) => pd.replace(/\/plugins\/dev$/, ""),
+      gitFn: (root, args) => {
+        if (args[0] === "fetch") { fetched = true; return ""; }
+        if (args[0] === "reset") return "";
+        if (args[0] === "rev-parse") return fetched ? "new" : "old";
+        return "";
+      },
+      emitFn: () => {},
+    });
+    expect(Array.isArray(results)).toBe(true);
+    expect(results.length).toBe(1);
+    expect(results[0].root).toBe("/co");
+    expect(fetched).toBe(true);
+  });
+
+  test("calls refreshPluginCheckout for each root in a 2-root config", () => {
+    const fetched = new Set();
+    const results = refreshAllPluginCheckouts({
+      now: 0,
+      env: { CATALYST_PLUGIN_DIRS: "/co-a/plugins/dev:/co-b/plugins/dev" },
+      machineConfigPath: "/no/machine.json",
+      repoConfigPath: "/no/repo.json",
+      readFileFn: () => "{}",
+      gitToplevelFn: (pd) => pd.replace(/\/plugins\/dev$/, ""),
+      gitFn: (root, args) => {
+        if (args[0] === "fetch") { fetched.add(root); return ""; }
+        if (args[0] === "reset") return "";
+        if (args[0] === "rev-parse") return fetched.has(root) ? "new" : "old";
+        return "";
+      },
+      emitFn: () => {},
+    });
+    expect(results.length).toBe(2);
+    expect(fetched.has("/co-a")).toBe(true);
+    expect(fetched.has("/co-b")).toBe(true);
+  });
+
+  test("returns [] (does not throw) when no roots resolve", () => {
+    const results = refreshAllPluginCheckouts({
+      now: 0,
+      env: {},
+      machineConfigPath: "/no/machine.json",
+      repoConfigPath: "/no/repo.json",
+      readFileFn: () => "{}",
+      gitToplevelFn: () => null,
+      gitFn: () => "",
+      emitFn: () => {},
+    });
+    expect(results).toEqual([]);
+  });
+});
+
+// ─── PLUGIN_DRIFT_CHECK_INTERVAL_MS (CTL-1161 Phase 2) ───────────────────────
+
+describe("PLUGIN_DRIFT_CHECK_INTERVAL_MS", () => {
+  test("default is 300_000 ms (5 minutes)", () => {
+    expect(PLUGIN_DRIFT_CHECK_INTERVAL_MS).toBe(300_000);
+  });
+});
+
+// ─── startPluginDriftCheck (CTL-1161 Phase 2) ────────────────────────────────
+//
+// Thin seam-injected wrapper around setInterval, mirroring startWatchdog.
+
+describe("startPluginDriftCheck", () => {
+  test("invokes setIntervalFn with the given intervalMs and tickFn", () => {
+    let capturedFn = null;
+    let capturedMs = null;
+    const fakeSetInterval = (fn, ms) => { capturedFn = fn; capturedMs = ms; return 99; };
+    const tick = () => {};
+    const handle = startPluginDriftCheck({ intervalMs: 12_000, tickFn: tick, setIntervalFn: fakeSetInterval });
+    expect(handle).toBe(99);
+    expect(capturedFn).toBe(tick);
+    expect(capturedMs).toBe(12_000);
+  });
+
+  test("uses PLUGIN_DRIFT_CHECK_INTERVAL_MS as default intervalMs", () => {
+    let capturedMs = null;
+    startPluginDriftCheck({
+      tickFn: () => {},
+      setIntervalFn: (fn, ms) => { capturedMs = ms; return 1; },
+    });
+    expect(capturedMs).toBe(PLUGIN_DRIFT_CHECK_INTERVAL_MS);
+  });
+});
+
+// ─── Coalescing: three triggers → exactly one pull (CTL-1161 Phase 3) ────────
+//
+// Within one throttle window, a github.push event, a phase.monitor-merge.complete
+// event, and a direct refreshAllPluginCheckouts tick must collectively cause
+// exactly one git fetch (the throttle collapses them).
+
+describe("coalescing — three triggers in one throttle window", () => {
+  beforeEach(() => __clearThrottleForTest());
+
+  test("github.push + phase-complete + drift tick → exactly one git fetch", () => {
+    let fetchCount = 0;
+    const baseArgs = {
+      env: {},
+      machineConfigPath: "/no/machine.json",
+      repoConfigPath: "/no/repo.json",
+      readFileFn: (p) => {
+        if (p === "/no/machine.json")
+          return JSON.stringify({ catalyst: { orchestration: { pluginDirs: "/co/plugins/dev" } } });
+        throw new Error("ENOENT");
+      },
+      gitToplevelFn: (pd) => pd.replace(/\/plugins\/dev$/, ""),
+      gitFn: (root, args) => {
+        if (args[0] === "fetch") { fetchCount++; return ""; }
+        if (args[0] === "reset") return "";
+        if (args[0] === "rev-parse") return fetchCount > 0 ? "new" : "old";
+        return "";
+      },
+      emitFn: () => {},
+    };
+
+    // Trigger 1: github.push to main
+    handlePluginRefreshEvent({
+      ...baseArgs,
+      now: 0,
+      event: {
+        attributes: {
+          "event.name": "github.push",
+          "vcs.repository.name": "coalesce-labs/catalyst",
+          "vcs.ref.name": "main",
+        },
+      },
+      repoFullName: "coalesce-labs/catalyst",
+    });
+
+    // Trigger 2: phase.monitor-merge.complete (within throttle window)
+    handlePluginRefreshEvent({
+      ...baseArgs,
+      now: PLUGIN_REFRESH_THROTTLE_MS / 2,
+      event: { attributes: { "event.name": "phase.monitor-merge.complete.CTL-1161" } },
+      repoFullName: "coalesce-labs/catalyst",
+    });
+
+    // Trigger 3: periodic drift-check tick (still within throttle window)
+    refreshAllPluginCheckouts({ ...baseArgs, now: PLUGIN_REFRESH_THROTTLE_MS - 1 });
+
+    expect(fetchCount).toBe(1);
   });
 });

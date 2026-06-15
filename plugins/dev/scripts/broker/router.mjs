@@ -68,7 +68,12 @@ import {
   clearWaitingSession,
 } from "./broker-state.mjs";
 import { sessionLiveness } from "./session-liveness.mjs";
-import { handlePluginRefreshEvent, resolveRepoFullName } from "./plugin-refresh.mjs";
+import {
+  handlePluginRefreshEvent,
+  resolveRepoFullName,
+  refreshAllPluginCheckouts,
+  startPluginDriftCheck,
+} from "./plugin-refresh.mjs";
 import { handleStackReloadEvent } from "./stack-reload.mjs";
 import { getLastByteOffset } from "./tailer.mjs";
 import {
@@ -1779,6 +1784,32 @@ export function runWatchdogTick({ liveness = sessionLiveness } = {}) {
 
 export function startWatchdog() {
   return setInterval(runWatchdogTick, WATCHDOG_INTERVAL_MS);
+}
+
+// CTL-1161: periodic drift-check backstop. Mirrors startWatchdog — same
+// pattern, same shutdown contract (caller clearIntervals the returned handle).
+// The tickFn is wired here (where the private config accessors live) rather
+// than in index.mjs so the private __REPO_CONFIG_PATH / __loadedCommit* state
+// never leaks out of router.mjs.
+export function startDriftCheckWatcher() {
+  return startPluginDriftCheck({
+    tickFn: () => {
+      const results = refreshAllPluginCheckouts({
+        repoConfigPath: __REPO_CONFIG_PATH,
+        machineConfigPath: __machineConfigPath(),
+        emitFn: appendEvent,
+        loadedCommit: __loadedCommit(),
+        loadedCommitRoot: __loadedCommitRoot(),
+      });
+      handleStackReloadEvent({
+        results,
+        loadedCommitRoot: __loadedCommitRoot(),
+        emitFn: appendEvent,
+        getByteOffsetFn: getLastByteOffset,
+        logPath: getEventLogPath(),
+      });
+    },
+  });
 }
 
 // --- Event processing ---

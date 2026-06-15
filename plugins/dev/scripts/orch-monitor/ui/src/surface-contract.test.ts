@@ -69,15 +69,44 @@ function sourceFiles(): string[] {
   return out;
 }
 
-describe("CTL-1033 surface contract — board-tokens ↔ CSS sync (kills three-ramp drift)", () => {
-  it("C.s0/s1/subtle/s2/s3/s4 equal the resolved .dark semantic hexes", () => {
+describe("CTL-1147 surface contract — C aliases the per-theme surface vars", () => {
+  it("C surface members are var() aliases (theme-aware, not hardcoded hexes)", () => {
+    expect(C.s0).toBe("var(--surface-chrome)");
+    expect(C.s1).toBe("var(--surface-canvas)");
+    expect(C.subtle).toBe("var(--surface-subtle)");
+    expect(C.s2).toBe("var(--surface-card)");
+    expect(C.s3).toBe("var(--surface-elevated)");
+    expect(C.s4).toBe("var(--surface-hover)");
+    expect(C.border).toBe("var(--border-strong)");
+    expect(C.borderSubtle).toBe("var(--border-subtle)");
+    expect(C.fg).toBe("var(--fg)");
+    expect(C.fgMuted).toBe("var(--fg-muted)");
+    expect(C.fgDim).toBe("var(--fg-dim)");
+  });
+
+  it("every aliased var is defined in BOTH :root (light) and .dark (dark)", () => {
+    const light = selectorBlock(":root");
     const dark = selectorBlock(".dark");
-    expect(C.s0.toLowerCase()).toBe(tokenHex(dark, "--surface-chrome"));
-    expect(C.s1.toLowerCase()).toBe(tokenHex(dark, "--surface-canvas"));
-    expect(C.subtle.toLowerCase()).toBe(tokenHex(dark, "--surface-subtle"));
-    expect(C.s2.toLowerCase()).toBe(tokenHex(dark, "--surface-card"));
-    expect(C.s3.toLowerCase()).toBe(tokenHex(dark, "--surface-elevated"));
-    expect(C.s4.toLowerCase()).toBe(tokenHex(dark, "--surface-hover"));
+    for (const v of [
+      "--surface-chrome", "--surface-canvas", "--surface-subtle",
+      "--surface-card", "--surface-elevated", "--surface-hover",
+      "--fg", "--fg-muted", "--fg-dim",
+      "--border-strong", "--border-subtle",
+    ]) {
+      expect(light).toContain(v);
+      expect(dark).toContain(v);
+    }
+  });
+});
+
+describe("CTL-1147 surface contract — no hex-alpha concat on var-aliased C members", () => {
+  it("no `${C.sN|subtle|fg|fgMuted|fgDim|border|borderSubtle}` + 2 hex digits survives", () => {
+    const offenders: string[] = [];
+    const re = /\$\{\s*C\.(s[0-4]|subtle|fg|fgMuted|fgDim|border|borderSubtle)\s*\}[0-9a-fA-F]{2}/;
+    for (const f of sourceFiles()) {
+      if (re.test(readFileSync(f, "utf8"))) offenders.push(relative(SRC, f));
+    }
+    expect(offenders).toEqual([]);
   });
 });
 
@@ -144,6 +173,19 @@ describe("CTL-1033 surface contract — every route shell consumes the shared to
       expect(text).not.toMatch(/bg-\[#/);
     });
   }
+});
+
+describe("CTL-1151 surface contract — column lane is a continuous backdrop", () => {
+  const swim = readFileSync(join(SRC, "board/Swimlane.tsx"), "utf8");
+  it("a LaneBackdrop layer paints the column lane (not the per-cell tray)", () => {
+    expect(swim).toMatch(/data-lane-backdrop="true"/);
+  });
+  it("no LaneCardsRow cell re-introduces a column-tray background", () => {
+    const start = swim.indexOf("function LaneCardsRow(");
+    const body = swim.slice(start, swim.indexOf("function ", start + 1));
+    expect(body).not.toMatch(/background:\s*laneBg\s*\?\?\s*C\.s0/);
+    expect(body).not.toContain("TRAY_LIFT");
+  });
 });
 
 describe("CTL-1033 surface contract — single PHASE source", () => {

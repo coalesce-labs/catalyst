@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="512" height="512" role="img" aria-label="Catalyst Orchestrator">
+  <title>Catalyst Orchestrator</title>
+  <!-- Operator Console: SURFACE #0B0D10, accent = Operator Console "info" #58A6FF
+       (the system/control-plane blue — sibling to the workers app's Signal Amber #FFB547). -->
+  <rect width="64" height="64" fill="#0B0D10"/>
+  <g fill="none" stroke="#58A6FF" stroke-width="6" stroke-linecap="square" stroke-linejoin="miter">
+    <path d="M 8 44 L 32 20 L 56 44"/>
+    <path d="M 18 52 L 32 36 L 46 52" stroke-width="4" opacity="0.75"/>
+  </g>
+</svg>

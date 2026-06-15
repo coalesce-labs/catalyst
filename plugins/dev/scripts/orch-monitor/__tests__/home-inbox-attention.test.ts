@@ -239,4 +239,44 @@ describe("CTL-1065: attentionSubLabel uses humanQuestion when present", () => {
     const row = model.order.find((r) => r.id === "CTL-1065")!;
     expect(row.subLabel).toBe("waiting on your answer");
   });
+
+  // CTL-1158: PR-stuck tickets route to the "Needs you" section
+  it("CTL-1158: stuck-PR ticket (attention needs-human + prStuckReason) → 'attention' section, PR sub-label", () => {
+    const prReason = "PR #1158 has a merge conflict the pipeline couldn't auto-resolve — decide which change wins";
+    const t = mkTicket("CTL-1158", {
+      attention: "needs-human",
+      mergeStateStatus: "DIRTY",
+      prStuckReason: prReason,
+      humanQuestion: prReason,
+    });
+    expect(classifyTicket(t)).toBe("attention");
+    const model = deriveInbox(mkPayload([t]));
+    const row = model.order.find((r) => r.id === "CTL-1158")!;
+    expect(row).toBeDefined();
+    expect(row.subLabel).toMatch(/conflict/i);
+    expect(model.counts.needsYou).toBe(1);
+  });
+
+  it("CTL-1158: BLOCKED PR-stuck ticket → 'attention' with required-check sub-label", () => {
+    const prReason = "PR #999 is blocked by a failing required check or branch-protection rule";
+    const t = mkTicket("CTL-999", {
+      attention: "needs-human",
+      mergeStateStatus: "BLOCKED",
+      prStuckReason: prReason,
+      humanQuestion: prReason,
+    });
+    expect(classifyTicket(t)).toBe("attention");
+    const model = deriveInbox(mkPayload([t]));
+    const row = model.order.find((r) => r.id === "CTL-999")!;
+    expect(row.subLabel).toMatch(/required|check|protection/i);
+  });
+
+  it("CTL-1158: a clean PR (attention null) does NOT appear in 'attention'", () => {
+    const t = mkTicket("CTL-1160", {
+      attention: null,
+      mergeStateStatus: "CLEAN",
+      prStuckReason: null,
+    });
+    expect(classifyTicket(t)).not.toBe("attention");
+  });
 });

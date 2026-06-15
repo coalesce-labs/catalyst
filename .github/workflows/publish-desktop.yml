@@ -1,0 +1,57 @@
+# Build + release the Catalyst desktop .dmg on a tag (e.g. `desktop-v0.1.0`).
+# Unsigned/ad-hoc for now (CTL-1116 adds Apple signing/notarization + auto-update).
+name: publish-desktop
+
+on:
+  push:
+    tags:
+      - 'desktop-v*'
+  workflow_dispatch:
+
+jobs:
+  publish-tauri:
+    permissions:
+      contents: write
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust (Apple Silicon)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+
+      - name: Cache Rust build
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: './plugins/dev/scripts/orch-monitor/desktop/src-tauri -> target'
+
+      - name: Install bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Install desktop deps
+        working-directory: plugins/dev/scripts/orch-monitor/desktop
+        run: bun install
+
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Apple signing/notarization (CTL-1116) — add these secrets later for
+          # a Gatekeeper-clean download + working auto-update:
+          # APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          # APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          # APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          # APPLE_ID: ${{ secrets.APPLE_ID }}
+          # APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          # APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        with:
+          projectPath: plugins/dev/scripts/orch-monitor/desktop
+          args: --target aarch64-apple-darwin
+          tagName: ${{ github.ref_name }}
+          releaseName: 'Catalyst Desktop ${{ github.ref_name }}'
+          releaseBody: |
+            Unsigned build (Apple Silicon). On first open macOS will warn it's from an
+            unidentified developer — right-click the app → **Open**, or run:
+            `xattr -dr com.apple.quarantine /Applications/Catalyst.app`
+          releaseDraft: false
+          prerelease: false

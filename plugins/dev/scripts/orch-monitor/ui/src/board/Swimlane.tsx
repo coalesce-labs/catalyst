@@ -237,6 +237,39 @@ function ColumnHeaderRow({ columns }: { columns: SharedColumn[] }) {
   );
 }
 
+// CTL-1151: one continuous full-height lane per column, painted ONCE behind all
+// bands/cards. Aligned to the same grid tracks as the content rows so strips sit
+// exactly under their columns. The header cap (ColumnHeaderRow, opaque s0, sticky)
+// occludes the strip top; strips round their BOTTOM corners.
+function LaneBackdrop({ count }: { count: number }) {
+  return (
+    <div
+      data-lane-backdrop="true"
+      aria-hidden="true"
+      style={{
+        position: "absolute",
+        inset: 0,
+        zIndex: 0,
+        pointerEvents: "none",
+        display: "grid",
+        gridTemplateColumns: `repeat(${count}, minmax(${COL_W}px, 1fr))`,
+        gap: COL_GAP,
+        padding: `0 ${PAD_X}px 16px`,
+      }}
+    >
+      {Array.from({ length: count }).map((_, i) => (
+        <div key={i} style={{
+          background: C.s0,
+          borderRadius: "0 0 10px 10px",
+          border: `1px solid ${C.borderSubtle}`,
+          borderTop: "none",
+          boxShadow: TRAY_LIFT,
+        }} />
+      ))}
+    </div>
+  );
+}
+
 // ── a sticky group-label divider row ─────────────────────────────────────────
 // CTL-950: the outer band spans the full board width and is sticky-top (pins just
 // below the column header) so the group label holds position during vertical scroll.
@@ -370,13 +403,11 @@ function LaneCardsRow({
   laneKey,
   constrainCells = false,
   cellMax,
-  laneBg,
 }: {
   cells: LaneCell[];
   laneKey?: string;
   constrainCells?: boolean;
   cellMax?: number | null;
-  laneBg?: string;
 }) {
   return (
     <div
@@ -392,6 +423,10 @@ function LaneCardsRow({
         flexGrow: 1,
         alignItems: "stretch",
         width: "100%",
+        // CTL-1151: cards must sit above the zIndex:0 LaneBackdrop painted behind
+        // all rows; header (z:3) and band (z:2) already out-rank the backdrop.
+        position: "relative",
+        zIndex: 1,
       }}
     >
       {cells.map((cell, i) => (
@@ -404,15 +439,9 @@ function LaneCardsRow({
             flexDirection: "column",
             gap: 8,
             minWidth: 0,
-            // CTL-1033 column-tray: each column's track is its OWN surface so
-            // columns read as discrete trays, not one continuous slab. The COL_GAP
-            // between grid tracks is the visible canvas-colored gutter.
-            // CTL-1027: tinted when the lane's project has a resolved hue.
-            // CTL-1146: re-based from s1 to s0 so cards (s2) read as clearly elevated.
-            background: laneBg ?? C.s0,
-            borderRadius: 10,
-            border: `1px solid ${C.borderSubtle}`,
-            boxShadow: TRAY_LIFT,
+            // CTL-1151: column tray paint moved to LaneBackdrop (continuous lane
+            // backdrop). Cells are transparent flow containers; the lane surface
+            // (C.s0) renders once behind all bands via LaneBackdrop.
             padding: 8,
             // CTL-958 / CTL-1010: per-cell constrained height with overscroll
             // chaining. Only applied when multiple groups are present
@@ -774,7 +803,7 @@ export function SwimlaneBoard<T extends GroupableEntity>({
             pointerEvents: "none",
             zIndex: 10,
             float: "left",
-            background: `linear-gradient(to right, ${C.s1}cc 0%, transparent 100%)`,
+            background: `linear-gradient(to right, color-mix(in srgb, ${C.s1} 80%, transparent) 0%, transparent 100%)`,
             marginRight: -32,
           }}
         />
@@ -785,7 +814,9 @@ export function SwimlaneBoard<T extends GroupableEntity>({
       <div ref={bumpRef} style={{
         width: `max(100%, ${boardMinWidth(columns.length)}px)`,
         display: "flex", flexDirection: "column", minHeight: "100%",
+        position: "relative",
       }}>
+        <LaneBackdrop count={columns.length} />
         <ColumnHeaderRow columns={columns} />
         {/* axis="none" (and the empty-on-a-real-axis fallthrough) → one synthetic
             lane, no group label. Real axis → a sticky group-label divider per lane,
@@ -816,7 +847,6 @@ export function SwimlaneBoard<T extends GroupableEntity>({
                   laneKey={lane.key}
                   constrainCells={constrainCells}
                   cellMax={allocs?.get(lane.key)}
-                  laneBg={laneBg}
                 />
               </Fragment>
             );
@@ -837,7 +867,7 @@ export function SwimlaneBoard<T extends GroupableEntity>({
             pointerEvents: "none",
             zIndex: 10,
             float: "right",
-            background: `linear-gradient(to left, ${C.s1}cc 0%, transparent 100%)`,
+            background: `linear-gradient(to left, color-mix(in srgb, ${C.s1} 80%, transparent) 0%, transparent 100%)`,
             marginLeft: -32,
           }}
         />
