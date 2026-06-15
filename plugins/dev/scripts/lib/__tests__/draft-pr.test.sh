@@ -1065,6 +1065,91 @@ install_git_stub_workflow_scope_reject_both "$P8C_BIN" "$P8C_LOG"
 ) || true
 assert_eq "3" "$(cat "${SCRATCH}/p8c.exit" 2>/dev/null)" "8c: no token + workflow rejection → rc=3 (escalation)"
 
+# 8e: CATALYST_WORKFLOW_GITHUB_TOKEN set + diff touches workflows → proactive detour succeeds (rc=0)
+echo "8e: CATALYST_WORKFLOW_GITHUB_TOKEN + workflow diff → proactive detour, rc=0"
+new_fixture p8e
+P8E_BIN="${SCRATCH}/p8e-bin"; P8E_LOG="${SCRATCH}/p8e.log"; P8E_CRED="${SCRATCH}/p8e.cred"
+install_git_stub_plain_push_ok "$P8E_BIN" "$P8E_LOG" "$P8E_CRED"
+(
+  cd "$WORK"
+  # Simulate a workflow file in the diff
+  mkdir -p .github/workflows
+  echo "name: ci" > .github/workflows/ci.yml
+  git add .github/workflows/ci.yml
+  git commit --quiet --no-gpg-sign -m "feat: add workflow file"
+  PATH="${P8E_BIN}:${PATH}"
+  export CATALYST_WORKFLOW_GITHUB_TOKEN="ghp_testtoken_proactive"
+  source "$DRAFT_PR_LIB"
+  set +e
+  draft_pr_push_verify >/dev/null 2>/dev/null
+  echo "$?" > "${SCRATCH}/p8e.exit"
+) || true
+assert_eq "0" "$(cat "${SCRATCH}/p8e.exit" 2>/dev/null)" "8e: proactive detour with workflow file → rc=0"
+
+# 8f: CATALYST_WORKFLOW_GITHUB_TOKEN set but diff does NOT touch workflows → normal push path (rc=0)
+echo "8f: CATALYST_WORKFLOW_GITHUB_TOKEN set but no workflow diff → normal push, rc=0"
+new_fixture p8f
+P8F_BIN="${SCRATCH}/p8f-bin"; P8F_LOG="${SCRATCH}/p8f.log"; P8F_CRED="${SCRATCH}/p8f.cred"
+install_git_stub_plain_push_ok "$P8F_BIN" "$P8F_LOG" "$P8F_CRED"
+(
+  cd "$WORK"
+  # No .github/workflows/ file — normal diff
+  PATH="${P8F_BIN}:${PATH}"
+  export CATALYST_WORKFLOW_GITHUB_TOKEN="ghp_testtoken_notused"
+  source "$DRAFT_PR_LIB"
+  set +e
+  draft_pr_push_verify >/dev/null 2>/dev/null
+  echo "$?" > "${SCRATCH}/p8f.exit"
+) || true
+assert_eq "0" "$(cat "${SCRATCH}/p8f.exit" 2>/dev/null)" "8f: no workflow diff → normal push path, rc=0"
+
+# 8g: CATALYST_WORKFLOW_GITHUB_TOKEN set + diff touches workflows + token push fails → rc=3
+echo "8g: proactive token push fails → rc=3 (escalation, no plain push attempted)"
+new_fixture p8g
+P8G_BIN="${SCRATCH}/p8g-bin"; P8G_LOG="${SCRATCH}/p8g.log"
+install_git_stub_proactive_token_fail() {
+  local bin_dir="$1"; local log_file="$2"
+  mkdir -p "$bin_dir"
+  cat > "${bin_dir}/git" <<STUB
+#!/usr/bin/env bash
+echo "git \$*" >> "${log_file}"
+for a in "\$@"; do [[ "\$a" == "push" ]] && exec_push=1 && break; done
+if [[ "\${exec_push:-0}" == "1" ]]; then
+  echo "error: refusing to allow an OAuth App to create or update workflow" >&2
+  exit 1
+fi
+if [[ "\$1" == "rev-parse" ]]; then
+  case "\${2:-}" in
+    --abbrev-ref) echo "CTL-1181"; exit 0;;
+    HEAD) echo "aabbccdd1234567890aabbccdd1234567890aabb"; exit 0;;
+    "origin/CTL-1181") echo "aabbccdd1234567890aabbccdd1234567890aabb"; exit 0;;
+  esac
+fi
+if [[ "\$1" == "fetch" ]]; then exit 0; fi
+if [[ "\$1" == "diff" ]]; then
+  echo ".github/workflows/ci.yml"; exit 0
+fi
+exit 0
+STUB
+  chmod +x "${bin_dir}/git"
+}
+install_git_stub_proactive_token_fail "$P8G_BIN" "$P8G_LOG"
+(
+  cd "$WORK"
+  mkdir -p .github/workflows
+  echo "name: ci" > .github/workflows/ci.yml
+  git add .github/workflows/ci.yml
+  git commit --quiet --no-gpg-sign -m "feat: add workflow file"
+  PATH="${P8G_BIN}:${PATH}"
+  export CATALYST_WORKFLOW_GITHUB_TOKEN="ghp_testtoken_willfail"
+  unset COMMS 2>/dev/null || true
+  source "$DRAFT_PR_LIB"
+  set +e
+  draft_pr_push_verify >/dev/null 2>/dev/null
+  echo "$?" > "${SCRATCH}/p8g.exit"
+) || true
+assert_eq "3" "$(cat "${SCRATCH}/p8g.exit" 2>/dev/null)" "8g: proactive token push fails → rc=3 (escalation)"
+
 # ─── Suite 9: CTL-1119 remediate — SKILL.md capture-then-compare semantics ─────
 echo ""
 echo "Suite 9: phase-pr capture-then-compare (VERIFIED_SHA vs PR_HEAD_OID)"
