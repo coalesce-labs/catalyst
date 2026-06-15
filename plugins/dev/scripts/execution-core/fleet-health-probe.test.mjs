@@ -233,10 +233,13 @@ describe("startFleetHealthProbe tick", () => {
 // ─── defaultReadSwapUsedMb ───────────────────────────────────────────────────
 
 describe("defaultReadSwapUsedMb", () => {
+  // platform:"darwin" is pinned explicitly — the default reads process.platform,
+  // which is "linux" on CI, where the function short-circuits to 0 (sysctl is a
+  // macOS-only signal). Pinning darwin exercises the real parse path everywhere.
   test("parses the used field from sysctl vm.swapusage output", () => {
     const sample =
       "total = 8192.00M  used = 4500.06M  free = 3691.94M  (encrypted)";
-    expect(defaultReadSwapUsedMb({ run: () => sample })).toBe(4500);
+    expect(defaultReadSwapUsedMb({ platform: "darwin", run: () => sample })).toBe(4500);
   });
 
   test("off-darwin / non-darwin platform → 0 safe sentinel", () => {
@@ -246,6 +249,7 @@ describe("defaultReadSwapUsedMb", () => {
   test("throwing sysctl → 0 safe sentinel", () => {
     expect(
       defaultReadSwapUsedMb({
+        platform: "darwin",
         run: () => {
           throw new Error("sysctl missing");
         },
@@ -254,7 +258,9 @@ describe("defaultReadSwapUsedMb", () => {
   });
 
   test("no-match output → 0 safe sentinel", () => {
-    expect(defaultReadSwapUsedMb({ run: () => "garbage no used field" })).toBe(0);
+    expect(
+      defaultReadSwapUsedMb({ platform: "darwin", run: () => "garbage no used field" }),
+    ).toBe(0);
   });
 });
 
