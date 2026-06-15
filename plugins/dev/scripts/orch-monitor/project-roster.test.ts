@@ -224,9 +224,9 @@ describe("readProjectsOverlay (CTL-1153) — fail-open reader", () => {
       );
       const out = readProjectsOverlay(cfg);
       expect(out).toHaveLength(1);
-      expect(out[0]!.key).toBe("CTL");
-      expect(out[0]!.name).toBe("Catalyst Core");
-      expect(out[0]!.color).toBe("blue");
+      expect(out[0].key).toBe("CTL");
+      expect(out[0].name).toBe("Catalyst Core");
+      expect(out[0].color).toBe("blue");
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -249,8 +249,8 @@ describe("readProjectsOverlay (CTL-1153) — fail-open reader", () => {
       );
       const out = readProjectsOverlay(cfg);
       expect(out).toHaveLength(1);
-      expect(out[0]!.key).toBe("ADV");
-      expect(out[0]!.color).toBeUndefined(); // bad hue dropped
+      expect(out[0].key).toBe("ADV");
+      expect(out[0].color).toBeUndefined(); // bad hue dropped
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

@@ -124,7 +124,7 @@ export function upsertProject(
   const existing: Array<Record<string, unknown>> = [];
   if (Array.isArray(catalyst.projects)) {
     for (const p of catalyst.projects) {
-      if (isRecord(p)) existing.push(p as Record<string, unknown>);
+      if (isRecord(p)) existing.push(p);
     }
   }
 

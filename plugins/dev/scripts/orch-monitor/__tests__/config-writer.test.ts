@@ -110,7 +110,7 @@ describe("updateCatalystConfig (CTL-1153)", () => {
       updateCatalystConfig(p, (c) => {
         const r = upsertProject(c, "CTL", { color: "green" });
         if (!r.ok) throw new Error("upsert unexpectedly failed");
-        return r.config as Record<string, unknown>;
+        return r.config;
       });
       const after = JSON.parse(readFileSync(p, "utf8"));
       // All sibling sections preserved
@@ -151,7 +151,7 @@ describe("upsertProject (CTL-1153)", () => {
     const r = upsertProject(cfg as Record<string, unknown>, "ctl", { color: "green" });
     expect(r.ok).toBe(true);
     const projects = (r as { config: Record<string, unknown> }).config.catalyst as Record<string, unknown>;
-    const projectsArr = (projects as Record<string, unknown>).projects as Array<Record<string, unknown>>;
+    const projectsArr = (projects).projects as Array<Record<string, unknown>>;
     expect(projectsArr).toHaveLength(1);
     expect(projectsArr[0]).toEqual({ key: "CTL", vcsRepo: "coalesce-labs/catalyst", color: "green" });
   });
