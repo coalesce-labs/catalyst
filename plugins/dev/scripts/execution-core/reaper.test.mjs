@@ -9,6 +9,7 @@ import {
   defaultAgents,
   defaultAssessWorktreeRemoval,
   defaultReadSignalBgJobId,
+  isSweepReapableStatus,
 } from "./reaper.mjs";
 import {
   refreshAgents,
@@ -143,6 +144,10 @@ describe("Reaper._handleBgReap", () => {
     const emitted = [];
     const r = new Reaper({
       executorReap: () => Promise.resolve({ ok: false, error: "boom" }),
+      // CTL-1165 D4: a non-ok stop now re-reads agents() and (since the target is
+      // still listed) escalates to executorRmForce. Inject a fake so the test
+      // never spawns a real `claude rm`; rm also no-ops → terminal reap-failed.
+      executorRmForce: () => Promise.resolve({ ok: false, error: "rm boom" }),
       agents: agentsFixture([
         { sessionId: "abc12345-aaaa-bbbb-cccc-dddddddddddd", status: "idle", cwd: "/wt/x" },
       ]),
@@ -242,6 +247,103 @@ describe("Reaper._handleBgReap", () => {
     await r.handle({ event: "phase.yield.reap-requested", bg_job_id: "abc12345" });
     await r.handle({ event: "phase.yield.reap-requested", bg_job_id: "abc12345" });
     expect(executor).toHaveBeenCalledTimes(1);
+  });
+
+  // ─── CTL-1165 D4: claude stop → claude rm escalation for stuck registrations ──
+  // On mini, 6 reboot-survivor `status:null` sessions no-op'd `claude stop`. When
+  // stop fails AND a fresh agents() re-read still lists the same shortId, escalate
+  // to `claude rm <shortId>`. If rm also no-ops, emit *.reap-failed reason
+  // stop-and-rm-noop ONCE (the handle() de-dupe drops a re-delivered identical event).
+  it("escalates to `claude rm` when stop is non-ok and the session is still registered", async () => {
+    const executorReap = mock(() => Promise.resolve({ ok: false, error: "background service may be restarting" }));
+    const executorRmForce = mock(() => Promise.resolve({ ok: true }));
+    const r = new Reaper({
+      executorReap,
+      executorRmForce,
+      // agents() lists the target on BOTH the initial find AND the post-stop re-read.
+      agents: agentsFixture([
+        { sessionId: "abc12345-aaaa-bbbb-cccc-dddddddddddd", status: null, cwd: "/wt/x", kind: "background" },
+      ]),
+      emit: mock(() => Promise.resolve()),
+      log: silentLog(),
+    });
+    await r.handle({ event: "phase.abort.reap-requested", bg_job_id: "abc12345" });
+    expect(executorReap).toHaveBeenCalledTimes(1);
+    expect(executorReap).toHaveBeenCalledWith("abc12345");
+    expect(executorRmForce).toHaveBeenCalledTimes(1);
+    expect(executorRmForce).toHaveBeenCalledWith("abc12345");
+  });
+
+  it("does NOT escalate to `claude rm` when stop succeeds (emits reap-complete)", async () => {
+    const executorReap = mock(() => Promise.resolve({ ok: true }));
+    const executorRmForce = mock(() => Promise.resolve({ ok: true }));
+    const emitted = [];
+    const r = new Reaper({
+      executorReap,
+      executorRmForce,
+      agents: agentsFixture([
+        { sessionId: "abc12345-aaaa-bbbb-cccc-dddddddddddd", status: null, cwd: "/wt/x", kind: "background" },
+      ]),
+      emit: (evt, fields) => { emitted.push({ evt, fields }); return Promise.resolve(); },
+      log: silentLog(),
+    });
+    await r.handle({ event: "phase.abort.reap-requested", bg_job_id: "abc12345" });
+    expect(executorRmForce).not.toHaveBeenCalled();
+    expect(emitted.find((e) => e.evt === "phase.abort.reap-complete")).toBeTruthy();
+  });
+
+  it("does NOT escalate when stop fails but a fresh re-read shows the session gone", async () => {
+    // stop returned non-ok but the session disappeared from the re-read → nothing
+    // to rm; surface reap-failed without an rm call (next tick is a no-op).
+    let call = 0;
+    const executorReap = mock(() => Promise.resolve({ ok: false, error: "rc=1" }));
+    const executorRmForce = mock(() => Promise.resolve({ ok: true }));
+    const r = new Reaper({
+      executorReap,
+      executorRmForce,
+      // First agents() (the find) lists the target; the post-stop re-read is empty.
+      agents: mock(() => {
+        call += 1;
+        return Promise.resolve(
+          call === 1
+            ? [{ sessionId: "abc12345-aaaa-bbbb-cccc-dddddddddddd", status: null, cwd: "/wt/x", kind: "background" }]
+            : [],
+        );
+      }),
+      emit: mock(() => Promise.resolve()),
+      log: silentLog(),
+    });
+    await r.handle({ event: "phase.abort.reap-requested", bg_job_id: "abc12345" });
+    expect(executorRmForce).not.toHaveBeenCalled();
+  });
+
+  it("stop-noop then rm-noop logs + emits reap-failed reason stop-and-rm-noop ONCE (no loop)", async () => {
+    const executorReap = mock(() => Promise.resolve({ ok: false, error: "stop noop" }));
+    const executorRmForce = mock(() => Promise.resolve({ ok: false, error: "rm noop" }));
+    const emitted = [];
+    const warns = [];
+    const logger = { info: () => {}, warn: (o) => warns.push(o), error: () => {} };
+    const r = new Reaper({
+      executorReap,
+      executorRmForce,
+      // The stuck session is listed on every agents() read.
+      agents: agentsFixture([
+        { sessionId: "abc12345-aaaa-bbbb-cccc-dddddddddddd", status: null, cwd: "/wt/x", kind: "background" },
+      ]),
+      emit: (evt, fields) => { emitted.push({ evt, fields }); return Promise.resolve(); },
+      log: logger,
+    });
+    const ev = { event: "phase.abort.reap-requested", bg_job_id: "abc12345" };
+    await r.handle(ev);
+    const failed = emitted.filter((e) => e.evt === "phase.abort.reap-failed");
+    expect(failed.length).toBe(1);
+    expect(failed[0].fields.reason).toBe("stop-and-rm-noop");
+    expect(warns.length).toBe(1);
+    // A second identical handle() is dropped by the per-event de-dupe — no loop.
+    await r.handle(ev);
+    expect(executorReap).toHaveBeenCalledTimes(1);
+    expect(executorRmForce).toHaveBeenCalledTimes(1);
+    expect(emitted.filter((e) => e.evt === "phase.abort.reap-failed").length).toBe(1);
   });
 });
 
@@ -643,6 +745,105 @@ describe("Reaper.scanOrphans", () => {
     await r.scanOrphans();
     expect(emitted.length).toBe(1);
     expect(emitted[0].bgJobId).toBe("11111111");
+  });
+
+  // ─── CTL-1165 D4: status:null sweep gap ────────────────────────────────────
+  // The 6 reboot-survivor zombies on mini are `kind:"background"` `status:null`
+  // sessions whose cwd vanished. Pre-D4 scanOrphans hard-skipped at
+  // `if (a.status !== "idle") continue;`, so they were NEVER considered. D4 swaps
+  // that gate to `isSweepReapableStatus(a.status)` so idle|null|undefined|"" are
+  // all eligible-to-consider (still subject to the background-only + cwd-vanished
+  // + recency gates).
+  it("reaps a null-status background orphan whose cwd vanished (CTL-1165 D4 — THE RED CASE)", async () => {
+    const emitted = [];
+    const r = new Reaper({
+      agents: agentsFixture([
+        { sessionId: "11111111-aaaa-bbbb-cccc-dddddddddddd", cwd: "/wt/missing", status: null, kind: "background" },
+      ]),
+      cwdExists: () => Promise.resolve(false),
+      lastSeenMs: () => null,
+      emit: (evt, fields) => { emitted.push({ evt, ...fields }); return Promise.resolve(); },
+      log: silentLog(),
+    });
+    await r.scanOrphans();
+    expect(emitted.length).toBe(1);
+    expect(emitted[0].evt).toBe("phase.abort.reap-requested");
+    expect(emitted[0].bgJobId).toBe("11111111");
+    expect(emitted[0].reason).toBe("orphan-cwd-missing");
+  });
+
+  it("still reaps an idle background orphan whose cwd vanished (regression guard)", async () => {
+    const emitted = [];
+    const r = new Reaper({
+      agents: agentsFixture([
+        { sessionId: "11111111-aaaa-bbbb-cccc-dddddddddddd", cwd: "/wt/missing", status: "idle", kind: "background" },
+      ]),
+      cwdExists: () => Promise.resolve(false),
+      lastSeenMs: () => null,
+      emit: (evt, fields) => { emitted.push({ evt, ...fields }); return Promise.resolve(); },
+      log: silentLog(),
+    });
+    await r.scanOrphans();
+    expect(emitted.length).toBe(1);
+    expect(emitted[0].bgJobId).toBe("11111111");
+  });
+
+  it("still spares a busy session even with a vanished cwd (never weaken busy-spare)", async () => {
+    const emitted = [];
+    const r = new Reaper({
+      agents: agentsFixture([
+        { sessionId: "11111111-aaaa-bbbb-cccc-dddddddddddd", cwd: "/wt/missing", status: "busy", kind: "background" },
+      ]),
+      cwdExists: () => Promise.resolve(false),
+      lastSeenMs: () => null,
+      emit: (evt, fields) => { emitted.push({ evt, ...fields }); return Promise.resolve(); },
+      log: silentLog(),
+    });
+    await r.scanOrphans();
+    expect(emitted.length).toBe(0);
+  });
+
+  it("spares a null-status background orphan whose cwd STILL exists", async () => {
+    const emitted = [];
+    const r = new Reaper({
+      agents: agentsFixture([
+        { sessionId: "11111111-aaaa-bbbb-cccc-dddddddddddd", cwd: "/wt/present", status: null, kind: "background" },
+      ]),
+      cwdExists: () => Promise.resolve(true), // cwd still on disk → not an orphan
+      lastSeenMs: () => null,
+      emit: (evt, fields) => { emitted.push({ evt, ...fields }); return Promise.resolve(); },
+      log: silentLog(),
+    });
+    await r.scanOrphans();
+    expect(emitted.length).toBe(0);
+  });
+
+  it("spares a recently-active null-status orphan (lastSeenMs < minIdleMs)", async () => {
+    const emitted = [];
+    const r = new Reaper({
+      minIdleMs: 15 * 60 * 1000,
+      agents: agentsFixture([
+        { sessionId: "11111111-aaaa-bbbb-cccc-dddddddddddd", cwd: "/wt/missing", status: null, kind: "background" },
+      ]),
+      cwdExists: () => Promise.resolve(false),
+      lastSeenMs: () => 60_000, // touched 1 min ago — still in use
+      emit: (evt, fields) => { emitted.push({ evt, ...fields }); return Promise.resolve(); },
+      log: silentLog(),
+    });
+    await r.scanOrphans();
+    expect(emitted.length).toBe(0);
+  });
+});
+
+// ─── CTL-1165 D4: isSweepReapableStatus pure predicate ───────────────────────
+describe("isSweepReapableStatus (CTL-1165 D4)", () => {
+  it("treats idle/null/undefined/'' as eligible-to-consider, busy/active as not", () => {
+    expect(isSweepReapableStatus("idle")).toBe(true);
+    expect(isSweepReapableStatus(null)).toBe(true);
+    expect(isSweepReapableStatus(undefined)).toBe(true);
+    expect(isSweepReapableStatus("")).toBe(true); // empty string → null-like
+    expect(isSweepReapableStatus("busy")).toBe(false);
+    expect(isSweepReapableStatus("active")).toBe(false);
   });
 });
 
