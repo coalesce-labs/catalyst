@@ -75,6 +75,11 @@ import {
   readStalePrRescueConfig,
 } from "./stale-pr-rescue-timer.mjs";
 import { DEFAULTS as RESCUE_DEFAULTS } from "./stale-pr-rescue.mjs";
+import {
+  startOrphanPrSweepTimer,
+  readOrphanPrSweepConfig,
+} from "./orphan-pr-sweep-timer.mjs";
+import { DEFAULTS as ORPHAN_DEFAULTS } from "./orphan-pr-sweep.mjs";
 import { reconcileBootResume, processApprovedResumes } from "./boot-resume.mjs";
 // CTL-665: the committed executionCore concurrency reader — imported directly
 // (not via the index.mjs barrel, mirroring the orphan-reaper-timer import) so
@@ -117,6 +122,8 @@ let _orphanTimer = null;
 let _refreshTimer = null;
 // CTL-782: periodic stale/conflicting-PR rescue timer.
 let _stalePrRescueTimer = null;
+// CTL-1175: periodic orphan-PR detect+notify sweep timer.
+let _orphanPrSweepTimer = null;
 // CTL-650: the push-based session wait-state watcher handle.
 let _waitWatcher = null;
 // CTL-685: per-worker memory sampler handle.
@@ -397,6 +404,8 @@ export function startDaemon({
   worktreeRefreshConfig = null,
   // CTL-782: stale/conflicting-PR rescue timer config (catalyst.orchestration.stalePrRescue).
   stalePrRescueConfig = null,
+  // CTL-1175: orphan-PR detect+notify sweep timer config (catalyst.orchestration.orphanPrSweep).
+  orphanPrSweepConfig = null,
   // CTL-650: the session wait-state watcher. Injectable for tests; gated by a
   // config knob (default-on, CATALYST_WAIT_WATCHER=0 disables) like the reaper.
   startWaitWatcher = realStartWaitWatcher,
@@ -636,7 +645,7 @@ export function startDaemon({
     }
 
     if (enableReaper) {
-      startReaperAndTimer({ orphanReaperConfig, worktreeRefreshConfig, stalePrRescueConfig, debounceMs, pollMs, orchDir, makeReaper });
+      startReaperAndTimer({ orphanReaperConfig, worktreeRefreshConfig, stalePrRescueConfig, orphanPrSweepConfig, debounceMs, pollMs, orchDir, makeReaper });
     }
 
     // CTL-650: start the push-based session wait-state watcher. Inside the same
@@ -735,6 +744,7 @@ function startReaperAndTimer({
   orphanReaperConfig,
   worktreeRefreshConfig,
   stalePrRescueConfig,
+  orphanPrSweepConfig,
   debounceMs,
   orchDir,
   // CTL-769: poll-fallback interval. Defaults to TAILER_POLL_INTERVAL_MS
@@ -871,6 +881,17 @@ function startReaperAndTimer({
       intervalSeconds: rescueCfg.intervalSeconds ?? RESCUE_DEFAULTS.intervalSeconds,
       orchDir,
       config: rescueCfg,
+    });
+  }
+
+  // CTL-1175: start the periodic orphan-PR detect+notify sweep timer.
+  const orphanCfg = orphanPrSweepConfig ?? {};
+  if (orphanCfg.enabled !== false) {
+    _orphanPrSweepTimer = startOrphanPrSweepTimer({
+      enabled: true,
+      intervalSeconds: orphanCfg.intervalSeconds ?? ORPHAN_DEFAULTS.intervalSeconds,
+      orchDir,
+      config: orphanCfg,
     });
   }
 }
@@ -1041,6 +1062,14 @@ export function stopDaemon() {
     }
     _stalePrRescueTimer = null;
   }
+  if (_orphanPrSweepTimer) {
+    try {
+      _orphanPrSweepTimer.stop();
+    } catch {
+      /* timer already stopped */
+    }
+    _orphanPrSweepTimer = null;
+  }
   _reaper = null;
   // CTL-650: stop the wait-state watcher.
   if (_waitWatcher) {
@@ -1145,6 +1174,8 @@ function main() {
   const worktreeRefreshConfig = readWorktreeRefreshConfig(configPath);
   // CTL-782: read the stale-PR-rescue config from the same config file.
   const stalePrRescueConfig = readStalePrRescueConfig(configPath);
+  // CTL-1175: read the orphan-PR sweep config from the same config file.
+  const orphanPrSweepConfig = readOrphanPrSweepConfig(configPath);
   // CTL-665 / CTL-678: resolve the executionCore concurrency knobs once here
   // and thread them into startDaemon → scheduler + boot-resume. The
   // machine-canonical Layer-2 file (~/.config/catalyst/config.json) wins
@@ -1171,7 +1202,7 @@ function main() {
   process.on("unhandledRejection", fatal("unhandled rejection"));
 
   try {
-    startDaemon({ pidFile, orphanReaperConfig, worktreeRefreshConfig, stalePrRescueConfig, concurrency, configPath, layer2Path }); // CTL-676 + CTL-678 + CTL-707 + CTL-782
+    startDaemon({ pidFile, orphanReaperConfig, worktreeRefreshConfig, stalePrRescueConfig, orphanPrSweepConfig, concurrency, configPath, layer2Path }); // CTL-676 + CTL-678 + CTL-707 + CTL-782 + CTL-1175
   } catch (err) {
     log.error({ err }, "execution-core daemon: failed to start");
     process.exit(1);
