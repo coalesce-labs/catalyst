@@ -175,6 +175,19 @@ describe("CTL-1033 surface contract — every route shell consumes the shared to
   }
 });
 
+describe("CTL-1151 surface contract — column lane is a continuous backdrop", () => {
+  const swim = readFileSync(join(SRC, "board/Swimlane.tsx"), "utf8");
+  it("a LaneBackdrop layer paints the column lane (not the per-cell tray)", () => {
+    expect(swim).toMatch(/data-lane-backdrop="true"/);
+  });
+  it("no LaneCardsRow cell re-introduces a column-tray background", () => {
+    const start = swim.indexOf("function LaneCardsRow(");
+    const body = swim.slice(start, swim.indexOf("function ", start + 1));
+    expect(body).not.toMatch(/background:\s*laneBg\s*\?\?\s*C\.s0/);
+    expect(body).not.toContain("TRAY_LIFT");
+  });
+});
+
 describe("CTL-1033 surface contract — single PHASE source", () => {
   it("PHASE_COLORS resolves the canonical PHASE map", () => {
     expect(PHASE_COLORS.research).toBe(PHASE.research);
