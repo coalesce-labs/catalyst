@@ -62,8 +62,16 @@ function jobsRoot() {
 
 // Canonical 10-phase pipeline order + which statuses are terminal for a phase.
 export const PHASE_ORDER = [
-  "triage", "research", "plan", "implement", "verify",
-  "review", "pr", "monitor-merge", "monitor-deploy", "teardown",
+  "triage",
+  "research",
+  "plan",
+  "implement",
+  "verify",
+  "review",
+  "pr",
+  "monitor-merge",
+  "monitor-deploy",
+  "teardown",
 ];
 // CTL-972: the ancillary remediate phase. It is NOT in PHASE_ORDER (it cycles
 // WITH verify, not in the linear pipeline order), but it IS a real phase-agent
@@ -76,7 +84,13 @@ export const REMEDIATE_PHASE = "remediate";
 // against drift (board-phase-drift.test.ts) instead of carrying a silent
 // hand-copied duplicate (CTL-754).
 export const TERMINAL = new Set([
-  "done", "failed", "stalled", "skipped", "signal_corrupt", "superseded", "canceled",
+  "done",
+  "failed",
+  "stalled",
+  "skipped",
+  "signal_corrupt",
+  "superseded",
+  "canceled",
 ]);
 
 // CTL-928 — the authoritative `claude --bg` job-LIFECYCLE terminal states (the
@@ -190,17 +204,21 @@ export function deriveAttention({
   needsHumanMarker = false,
   waitingSince = null,
   needsHumanSince = null,
-  prStuck = false,            // CTL-1158: PR in a real-blocker merge state ≥ 300 s
+  prStuck = false, // CTL-1158: PR in a real-blocker merge state ≥ 300 s
   prStuckSince = null,
 } = {}) {
   const set = new Set(Array.isArray(labels) ? labels : []);
-  const labelNeedsHuman = set.has(ATTENTION_LABEL_NEEDS_HUMAN) || set.has(ATTENTION_LABEL_NEEDS_INPUT);
+  const labelNeedsHuman =
+    set.has(ATTENTION_LABEL_NEEDS_HUMAN) || set.has(ATTENTION_LABEL_NEEDS_INPUT);
   const needsHuman = labelNeedsHuman || needsHumanMarker === true || prStuck === true;
   if (needsHuman) {
     // Label/marker stamp is the more authoritative anchor when present; the
     // PR-stuck anchor is the fallback. needs-human (any source) outranks
     // waiting-on-you.
-    return { attention: "needs-human", attentionSince: needsHumanSince ?? (prStuck ? prStuckSince : null) };
+    return {
+      attention: "needs-human",
+      attentionSince: needsHumanSince ?? (prStuck ? prStuckSince : null),
+    };
   }
   if (waitingOnUser === true) {
     return { attention: "waiting-on-you", attentionSince: waitingSince ?? null };
@@ -212,10 +230,19 @@ export function deriveAttention({
 // CTL-972: remediate maps to "Validate" (the Linear stage it cycles within,
 // alongside verify — both are part of the validate gate loop).
 export const PHASE_TO_LINEAR = {
-  triage: "Triage", research: "Research", plan: "Plan", implement: "Implement",
-  verify: "Validate", remediate: "Validate", review: "Validate", pr: "PR", "monitor-merge": "PR",
-  "monitor-deploy": "Done", teardown: "Done", done: "Done",
-  queued: "Todo",  // synthetic phase for eligible-queue board cards (CTL-767)
+  triage: "Triage",
+  research: "Research",
+  plan: "Plan",
+  implement: "Implement",
+  verify: "Validate",
+  remediate: "Validate",
+  review: "Validate",
+  pr: "PR",
+  "monitor-merge": "PR",
+  "monitor-deploy": "Done",
+  teardown: "Done",
+  done: "Done",
+  queued: "Todo", // synthetic phase for eligible-queue board cards (CTL-767)
 };
 
 // synthesizeQueuedTicket — build a thin BoardTicket from an eligible queue entry
@@ -284,11 +311,20 @@ const repoFor = (ticket) => TEAM_REPO[String(ticket).split("-")[0]] || "other";
 const teamFor = (ticket) => String(ticket).split("-")[0];
 
 async function readJSON(path, fallback = null) {
-  try { return JSON.parse(await readFile(path, "utf8")); } catch { return fallback; }
+  try {
+    return JSON.parse(await readFile(path, "utf8"));
+  } catch {
+    return fallback;
+  }
 }
 // Cheap async existence check (replaces existsSync — no blocking stat).
 async function exists(p) {
-  try { await stat(p); return true; } catch { return false; }
+  try {
+    await stat(p);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 // CTL-928: read a `claude --bg` job's durable state from
@@ -336,7 +372,9 @@ async function workerBgJobId(ticket, phase) {
 async function liveAgents() {
   try {
     const { stdout } = await execFileP("claude", ["agents", "--json"], {
-      encoding: "utf8", timeout: 8000, maxBuffer: 8 * 1024 * 1024,
+      encoding: "utf8",
+      timeout: 8000,
+      maxBuffer: 8 * 1024 * 1024,
     });
     return JSON.parse(stdout);
   } catch {
@@ -354,8 +392,8 @@ function parseAgentName(name = "") {
 }
 
 // ── real activity signal (transcript freshness, not claude's busy bit) ──
-const WORKING_MS = 45_000;     // transcript touched within 45s → generating right now
-const STUCK_MS = 1_800_000;    // no transcript activity for 30m → likely abandoned/zombie
+const WORKING_MS = 45_000; // transcript touched within 45s → generating right now
+const STUCK_MS = 1_800_000; // no transcript activity for 30m → likely abandoned/zombie
 
 // CTL-733: a session's transcript path is stable once it exists, so memoize the
 // (expensive) ~1.5k-project-dir scan. Only cache HITS — a brand-new worker whose
@@ -378,7 +416,11 @@ export async function resolveTranscript(sessionId) {
   if (cached) return cached;
   const projectsDir = join(HOME, ".claude", "projects");
   let entries;
-  try { entries = await readdir(projectsDir, { withFileTypes: true }); } catch { return null; }
+  try {
+    entries = await readdir(projectsDir, { withFileTypes: true });
+  } catch {
+    return null;
+  }
   for (const e of entries) {
     if (!e.isDirectory()) continue;
     const candidate = join(projectsDir, e.name, `${sessionId}.jsonl`);
@@ -397,14 +439,22 @@ async function transcriptAgeMs(sessionId, now) {
   if (!sessionId) return null;
   const file = await resolveTranscript(sessionId);
   if (!file) return null;
-  const mtime = async (p) => { try { return (await stat(p)).mtimeMs; } catch { return 0; } };
+  const mtime = async (p) => {
+    try {
+      return (await stat(p)).mtimeMs;
+    } catch {
+      return 0;
+    }
+  };
   let newest = await mtime(file);
   const subDir = join(dirname(file), sessionId, "subagents");
   try {
     const subs = (await readdir(subDir)).filter((f) => f.endsWith(".jsonl"));
     const ages = await Promise.all(subs.map((f) => mtime(join(subDir, f))));
     for (const a of ages) newest = Math.max(newest, a);
-  } catch { /* no subagents dir */ }
+  } catch {
+    /* no subagents dir */
+  }
   return newest ? Math.max(0, now - newest) : null;
 }
 
@@ -433,7 +483,11 @@ export async function deriveActiveState(ticket, phase, ageMs, jobState, bgKnown)
   // do NOT mark a live `claude agents` worker dead on a missing id alone.
   if (bgKnown && isBgJobDead(jobState)) return "dead";
   const dir = join(WORKERS_DIR, ticket);
-  if ((await exists(join(dir, ".terminal-done.applied"))) || (await exists(join(dir, ".worktree-removed")))) return "stuck";
+  if (
+    (await exists(join(dir, ".terminal-done.applied"))) ||
+    (await exists(join(dir, ".worktree-removed")))
+  )
+    return "stuck";
   // monitor-merge / monitor-deploy / pr legitimately sit in long event-waits
   // (CI, merge, deploy) — staleness alone isn't stuck for them.
   const waitHeavy = phase === "monitor-merge" || phase === "monitor-deploy" || phase === "pr";
@@ -502,14 +556,29 @@ export function deriveCurrentPhase(phaseSigs) {
     const phase = PHASE_ORDER[i];
     const status = sig.status || "unknown";
     if (!TERMINAL.has(status)) {
-      return { phase, status, model: sig.model || null, startedAt: sig.startedAt, updatedAt: sig.updatedAt, failureReason: sig.failureReason ?? sig.stalledReason ?? null };
+      return {
+        phase,
+        status,
+        model: sig.model || null,
+        startedAt: sig.startedAt,
+        updatedAt: sig.updatedAt,
+        failureReason: sig.failureReason ?? sig.stalledReason ?? null,
+      };
     }
-    lastTerminal = { phase, status, model: sig.model || null, startedAt: sig.startedAt, updatedAt: sig.updatedAt, failureReason: sig.failureReason ?? sig.stalledReason ?? null };
+    lastTerminal = {
+      phase,
+      status,
+      model: sig.model || null,
+      startedAt: sig.startedAt,
+      updatedAt: sig.updatedAt,
+      failureReason: sig.failureReason ?? sig.stalledReason ?? null,
+    };
     lastTerminalIndex = i;
   }
   // No phase has written a signal file yet → pre-pipeline. Surface the first
   // column (Research), never Done (CTL-745).
-  if (!lastTerminal) return { phase: PHASE_ORDER[0], status: "unknown", model: null, failureReason: null };
+  if (!lastTerminal)
+    return { phase: PHASE_ORDER[0], status: "unknown", model: null, failureReason: null };
   // A failed/stalled phase always surfaces at its own column, wherever it sits.
   if (lastTerminal.status === "failed" || lastTerminal.status === "stalled") return lastTerminal;
   // CTL-745: the pipeline is genuinely "done" ONLY when its FINAL phase
@@ -546,7 +615,8 @@ export function derivePhaseWithRemediate(phaseSigs, remediateSig) {
   // Case 1: remediate is actively running.
   if (!TERMINAL.has(remStatus)) {
     return {
-      phase: REMEDIATE_PHASE, status: remStatus,
+      phase: REMEDIATE_PHASE,
+      status: remStatus,
       model: remediateSig.model || null,
       startedAt: remediateSig.startedAt ?? null,
       updatedAt: remediateSig.updatedAt ?? null,
@@ -560,7 +630,8 @@ export function derivePhaseWithRemediate(phaseSigs, remediateSig) {
   const curUpdated = cur.updatedAt ?? "";
   if (remUpdated > curUpdated || (!curUpdated && remUpdated)) {
     return {
-      phase: REMEDIATE_PHASE, status: remStatus,
+      phase: REMEDIATE_PHASE,
+      status: remStatus,
       model: remediateSig.model || null,
       startedAt: remediateSig.startedAt ?? null,
       updatedAt: remUpdated || null,
@@ -686,9 +757,7 @@ export function buildPhaseSummary(phaseSigs, now) {
       // so consumers get a clean string-or-null signal (CTL-734).
       const rawCompleted = sig.completedAt ?? null;
       const completedAt =
-        rawCompleted != null && Number.isFinite(Date.parse(rawCompleted))
-          ? rawCompleted
-          : null;
+        rawCompleted != null && Number.isFinite(Date.parse(rawCompleted)) ? rawCompleted : null;
       return {
         phase: PHASE_ORDER[i],
         status: sig.status,
@@ -746,7 +815,12 @@ export function deriveNeedsHumanSince(phaseSigs) {
  *  cohesive nested object so the detail pane can render a CTA-led card. Distinct
  *  from deriveHumanQuestion (the canonical call_to_action sub-label). */
 const EXPLANATION_RENDER_FIELDS = [
-  "call_to_action", "outcome", "problem", "why_you", "why_not_auto", "what_to_do",
+  "call_to_action",
+  "outcome",
+  "problem",
+  "why_you",
+  "why_not_auto",
+  "what_to_do",
 ];
 
 /** CTL-1110: extract the six extended explanation fields from the most-recent
@@ -764,8 +838,12 @@ export function deriveExplanation(phaseSigs) {
     let any = false;
     for (const k of EXPLANATION_RENDER_FIELDS) {
       const v = expl[k];
-      if (typeof v === "string" && v !== "") { out[k] = v; any = true; }
-      else { out[k] = null; }
+      if (typeof v === "string" && v !== "") {
+        out[k] = v;
+        any = true;
+      } else {
+        out[k] = null;
+      }
     }
     if (any) return out;
   }
@@ -798,9 +876,7 @@ export function ticketTitle(ticket, triage, eligibleIndex, linfo = {}) {
 export function collectNullTitleIds(boardIds, linfo = {}, eligibleIndex = {}) {
   return [
     ...new Set(
-      boardIds.filter(
-        (id) => (linfo[id]?.title ?? eligibleIndex[id]?.title ?? null) === null,
-      ),
+      boardIds.filter((id) => (linfo[id]?.title ?? eligibleIndex[id]?.title ?? null) === null)
     ),
   ];
 }
@@ -816,9 +892,19 @@ export function mergeTitleFallback(linfo, nullTitleIds, fetched) {
     if (fetchedTitle === null) continue; // Linear has no title → leave honest null
     if (!linfo[id]) {
       linfo[id] = {
-        priority: 0, estimate: null, project: null, labels: [], relations: null,
-        assignee: null, linearState: null, title: null,
-        ownerHost: null, generation: null, fencePhase: null, claimedAt: null, heldSince: null,
+        priority: 0,
+        estimate: null,
+        project: null,
+        labels: [],
+        relations: null,
+        assignee: null,
+        linearState: null,
+        title: null,
+        ownerHost: null,
+        generation: null,
+        fencePhase: null,
+        claimedAt: null,
+        heldSince: null,
       };
     }
     linfo[id] = { ...linfo[id], title: fetchedTitle };
@@ -924,14 +1010,18 @@ async function costByTicket() {
       "FROM sessions s JOIN session_metrics m ON m.session_id=s.session_id " +
       "WHERE s.ticket_key IS NOT NULL GROUP BY s.ticket_key;";
     const { stdout } = await execFileP("sqlite3", ["-separator", "\t", DB, sql], {
-      encoding: "utf8", timeout: 8000, maxBuffer: 8 * 1024 * 1024,
+      encoding: "utf8",
+      timeout: 8000,
+      maxBuffer: 8 * 1024 * 1024,
     });
     for (const line of stdout.trim().split("\n")) {
       if (!line) continue;
       const [tk, cost, tokens] = line.split("\t");
       map[tk] = { costUSD: Number(cost) || 0, tokens: Number(tokens) || 0 };
     }
-  } catch { /* sqlite missing — costs default to 0 */ }
+  } catch {
+    /* sqlite missing — costs default to 0 */
+  }
   return map;
 }
 
@@ -947,7 +1037,9 @@ async function costByPhase() {
       "WHERE s.ticket_key IS NOT NULL AND s.skill_name LIKE 'phase-%' " +
       "GROUP BY s.ticket_key, s.skill_name;";
     const { stdout } = await execFileP("sqlite3", ["-separator", "\t", DB, sql], {
-      encoding: "utf8", timeout: 8000, maxBuffer: 8 * 1024 * 1024,
+      encoding: "utf8",
+      timeout: 8000,
+      maxBuffer: 8 * 1024 * 1024,
     });
     for (const line of stdout.trim().split("\n")) {
       if (!line) continue;
@@ -960,7 +1052,9 @@ async function costByPhase() {
         turns: Number(turns) || 0,
       };
     }
-  } catch { /* sqlite missing or schema pre-migration */ }
+  } catch {
+    /* sqlite missing or schema pre-migration */
+  }
   return map;
 }
 
@@ -980,7 +1074,9 @@ async function catalystSessionByCcUuid() {
       "SELECT claude_session_id, session_id FROM sessions " +
       "WHERE claude_session_id IS NOT NULL AND claude_session_id <> '';";
     const { stdout } = await execFileP("sqlite3", ["-separator", "\t", DB, sql], {
-      encoding: "utf8", timeout: 8000, maxBuffer: 8 * 1024 * 1024,
+      encoding: "utf8",
+      timeout: 8000,
+      maxBuffer: 8 * 1024 * 1024,
     });
     for (const line of stdout.trim().split("\n")) {
       if (!line) continue;
@@ -988,7 +1084,9 @@ async function catalystSessionByCcUuid() {
       // Last write wins — a CC-UUID maps to a single catalyst session.
       if (ccUuid && sessId) map[ccUuid] = sessId;
     }
-  } catch { /* sqlite missing or pre-CTL-374 schema (no claude_session_id) */ }
+  } catch {
+    /* sqlite missing or pre-CTL-374 schema (no claude_session_id) */
+  }
   return map;
 }
 
@@ -1004,9 +1102,13 @@ async function loadEligible() {
   const out = [];
   if (!(await exists(ELIGIBLE_DIR))) return out;
   let files;
-  try { files = await readdir(ELIGIBLE_DIR); } catch { return out; }
+  try {
+    files = await readdir(ELIGIBLE_DIR);
+  } catch {
+    return out;
+  }
   const raws = await Promise.all(
-    files.filter((f) => f.endsWith(".json")).map((f) => readJSON(join(ELIGIBLE_DIR, f))),
+    files.filter((f) => f.endsWith(".json")).map((f) => readJSON(join(ELIGIBLE_DIR, f)))
   );
   for (const raw of raws) {
     const arr = Array.isArray(raw) ? raw : raw?.tickets || [];
@@ -1014,9 +1116,13 @@ async function loadEligible() {
       const id = t.identifier || t.id;
       if (!id) continue;
       out.push({
-        id, title: t.title || id, priority: t.priority ?? 0,
-        createdAt: t.createdAt || "", state: t.state || null,
-        repo: repoFor(id), team: teamFor(id),
+        id,
+        title: t.title || id,
+        priority: t.priority ?? 0,
+        createdAt: t.createdAt || "",
+        state: t.state || null,
+        repo: repoFor(id),
+        team: teamFor(id),
       });
     }
   }
@@ -1028,8 +1134,9 @@ async function maxParallel() {
     readJSON(join(HOME, ".config", "catalyst", "config.json")),
     readJSON(join(process.cwd(), ".catalyst", "config.json")),
   ]);
-  const pick = (c) => c?.catalyst?.orchestration?.executionCore?.maxParallel
-    ?? c?.orchestration?.executionCore?.maxParallel;
+  const pick = (c) =>
+    c?.catalyst?.orchestration?.executionCore?.maxParallel ??
+    c?.orchestration?.executionCore?.maxParallel;
   return pick(l2) ?? pick(l1) ?? 6;
 }
 
@@ -1045,8 +1152,11 @@ async function readTicketArtifacts(id) {
     Promise.all(PHASE_ORDER.map((p) => readJSON(join(dir, `phase-${p}.json`)))),
     readJSON(join(dir, `phase-${REMEDIATE_PHASE}.json`)),
     readJSON(join(dir, "triage.json")),
-    Promise.all(["phase-pr.json", "phase-monitor-merge.json", "phase-monitor-deploy.json"]
-      .map((f) => readJSON(join(dir, f)))),
+    Promise.all(
+      ["phase-pr.json", "phase-monitor-merge.json", "phase-monitor-deploy.json"].map((f) =>
+        readJSON(join(dir, f))
+      )
+    ),
     // CTL-729: the host-local needs-human marker the daemon's labelOnce guard
     // writes (before the Linear label round-trips) → the attention 'needs-human'
     // fallback so the board lights up immediately without waiting on the webhook.
@@ -1077,15 +1187,22 @@ async function loadDispatchCooldowns(now) {
   const out = new Map();
   if (!(await exists(COOLDOWNS_DIR))) return out;
   let files;
-  try { files = await readdir(COOLDOWNS_DIR); } catch { return out; }
+  try {
+    files = await readdir(COOLDOWNS_DIR);
+  } catch {
+    return out;
+  }
   const markers = await Promise.all(
-    files.filter((f) => f.endsWith(".json")).map((f) => readJSON(join(COOLDOWNS_DIR, f))),
+    files.filter((f) => f.endsWith(".json")).map((f) => readJSON(join(COOLDOWNS_DIR, f)))
   );
   for (const m of markers) {
     if (!m?.ticket || typeof m.expiresAt !== "number" || m.expiresAt <= now) continue;
     const prev = out.get(m.ticket);
     if (!prev || m.expiresAt > prev.expiresAt) {
-      out.set(m.ticket, { expiresAt: m.expiresAt, consecutiveFailures: m.consecutiveFailures ?? 1 });
+      out.set(m.ticket, {
+        expiresAt: m.expiresAt,
+        consecutiveFailures: m.consecutiveFailures ?? 1,
+      });
     }
   }
   return out;
@@ -1093,10 +1210,17 @@ async function loadDispatchCooldowns(now) {
 
 // ── main assembly ───────────────────────────────────────────────────────────
 export async function assembleBoard({ getPrStatus = null } = {}) {
-  const [agents, costs, phaseCostsByTicket, eligible, linfo, mp, catalystSessByUuid, cooldowns] = await Promise.all([
-    liveAgents(), costByTicket(), costByPhase(), loadEligible(), linearInfo(), maxParallel(),
-    catalystSessionByCcUuid(), loadDispatchCooldowns(Date.now()),
-  ]);
+  const [agents, costs, phaseCostsByTicket, eligible, linfo, mp, catalystSessByUuid, cooldowns] =
+    await Promise.all([
+      liveAgents(),
+      costByTicket(),
+      costByPhase(),
+      loadEligible(),
+      linearInfo(),
+      maxParallel(),
+      catalystSessionByCcUuid(),
+      loadDispatchCooldowns(Date.now()),
+    ]);
   const eligibleIndex = Object.fromEntries(eligible.map((e) => [e.id, e]));
 
   // CTL-1020: dependency edges derived from Linear blocked-by/blocks relations,
@@ -1111,65 +1235,94 @@ export async function assembleBoard({ getPrStatus = null } = {}) {
     .filter((a) => a.kind === "background")
     .map((a) => ({ a, p: parseAgentName(a.name) }))
     .filter(({ p }) => p);
-  const workers = await Promise.all(parsed.map(async ({ a, p }) => {
-    const runtimeMs = a.startedAt ? now - a.startedAt : null;
-    // null (not 0) when there is no metrics row — distinguishes "no data" from "free".
-    const cost = costs[p.ticket]?.costUSD ?? null;
-    const lastActiveMs = await transcriptAgeMs(a.sessionId, now);
-    // CTL-928: resolve the worker's DURABLE bg-job state before classifying. The
-    // bg_job_id lives on the phase signal; the state lives under ~/.claude/jobs.
-    // A null bgJobId means we cannot prove death (bgKnown=false) → fall back to
-    // transcript age rather than fabricate a dead verdict.
-    const bgJobId = await workerBgJobId(p.ticket, p.phase);
-    const jobState = bgJobId ? await readBgJobState(bgJobId) : null;
-    const bgKnown = bgJobId != null;
-    const activeState = await deriveActiveState(p.ticket, p.phase, lastActiveMs, jobState, bgKnown);
-    // A dead bg-job is not "working" however fresh its transcript looks.
-    const working = activeState !== "dead" && lastActiveMs != null && lastActiveMs < WORKING_MS; // detail-level only
-    // CTL-922 (BFF10): node attribution. host:{name,id} from the worker's own
-    // phase signal (CTL-852, dispatch-stamped) falling back to the durable fence
-    // projection owner_host (BFF11); generation from the fence projection first,
-    // then the signal. SINGLE-HOST: every worker resolves to the one node via
-    // this same path — no separate cluster branch, no live attachment fetch.
-    const workerSigs = await readWorkerPhaseSignals(p.ticket, p.phase);
-    const fence = linfo[p.ticket] ?? {};
-    return {
-      name: a.name, ticket: p.ticket, tickets: [p.ticket], phase: p.phase,
-      status: a.status || "idle", activeState, working, lastActiveMs,
-      repo: repoFor(p.ticket), team: teamFor(p.ticket),
-      runtimeMs, costUSD: cost, sessionId: a.sessionId,
-      // CTL-888 (BFF6) P6: exact wall-clock start (epoch ms from `claude agents
-      // --json .startedAt`, the same value runtimeMs derives from) so the worker
-      // header can render precise elapsed instead of a floored runtimeMs.
-      startedAt: typeof a.startedAt === "number" ? a.startedAt : null,
-      // CTL-888 (BFF6) P7: the OS pid (read by `claude agents --json` but
-      // previously dropped) drives the worker-rail PID row.
-      pid: typeof a.pid === "number" ? a.pid : null,
-      // CTL-888 (BFF6) P7: the catalyst `sess_…` id alongside the CC-UUID
-      // sessionId — surfaces both id spaces (Loki catalyst.session heartbeat
-      // joins on this one). null when the db has no row for this CC-UUID.
-      catalystSessionId: catalystSessByUuid[a.sessionId] ?? null,
-      // CTL-928: the durable bg-job id this worker's liveness was derived from
-      // (from the phase signal). null when no signal carried one — surfaced so the
-      // worker rail and the dead-worker capacity logic share one provenance.
-      bgJobId,
-      // CTL-922 (BFF10): owning host + fence generation (see above).
-      host: deriveHost(workerSigs, fence),
-      generation: deriveGeneration(workerSigs, fence),
-      // CTL-947: a worker whose bg-job state is "blocked" is parked waiting for
-      // user input (a permission grant). Surfaced separately from the dead/active
-      // classification so the operator sees a distinct "waiting on you" group
-      // rather than having it silently merge into the zombie corpse bucket.
-      waitingOnUser: isBgJobWaitingOnUser(jobState),
-    };
-  }));
+  const workers = await Promise.all(
+    parsed.map(async ({ a, p }) => {
+      const runtimeMs = a.startedAt ? now - a.startedAt : null;
+      // null (not 0) when there is no metrics row — distinguishes "no data" from "free".
+      const cost = costs[p.ticket]?.costUSD ?? null;
+      const lastActiveMs = await transcriptAgeMs(a.sessionId, now);
+      // CTL-928: resolve the worker's DURABLE bg-job state before classifying. The
+      // bg_job_id lives on the phase signal; the state lives under ~/.claude/jobs.
+      // A null bgJobId means we cannot prove death (bgKnown=false) → fall back to
+      // transcript age rather than fabricate a dead verdict.
+      const bgJobId = await workerBgJobId(p.ticket, p.phase);
+      const jobState = bgJobId ? await readBgJobState(bgJobId) : null;
+      const bgKnown = bgJobId != null;
+      const activeState = await deriveActiveState(
+        p.ticket,
+        p.phase,
+        lastActiveMs,
+        jobState,
+        bgKnown
+      );
+      // A dead bg-job is not "working" however fresh its transcript looks.
+      const working = activeState !== "dead" && lastActiveMs != null && lastActiveMs < WORKING_MS; // detail-level only
+      // CTL-922 (BFF10): node attribution. host:{name,id} from the worker's own
+      // phase signal (CTL-852, dispatch-stamped) falling back to the durable fence
+      // projection owner_host (BFF11); generation from the fence projection first,
+      // then the signal. SINGLE-HOST: every worker resolves to the one node via
+      // this same path — no separate cluster branch, no live attachment fetch.
+      const workerSigs = await readWorkerPhaseSignals(p.ticket, p.phase);
+      const fence = linfo[p.ticket] ?? {};
+      return {
+        name: a.name,
+        ticket: p.ticket,
+        tickets: [p.ticket],
+        phase: p.phase,
+        status: a.status || "idle",
+        activeState,
+        working,
+        lastActiveMs,
+        repo: repoFor(p.ticket),
+        team: teamFor(p.ticket),
+        runtimeMs,
+        costUSD: cost,
+        sessionId: a.sessionId,
+        // CTL-888 (BFF6) P6: exact wall-clock start (epoch ms from `claude agents
+        // --json .startedAt`, the same value runtimeMs derives from) so the worker
+        // header can render precise elapsed instead of a floored runtimeMs.
+        startedAt: typeof a.startedAt === "number" ? a.startedAt : null,
+        // CTL-888 (BFF6) P7: the OS pid (read by `claude agents --json` but
+        // previously dropped) drives the worker-rail PID row.
+        pid: typeof a.pid === "number" ? a.pid : null,
+        // CTL-888 (BFF6) P7: the catalyst `sess_…` id alongside the CC-UUID
+        // sessionId — surfaces both id spaces (Loki catalyst.session heartbeat
+        // joins on this one). null when the db has no row for this CC-UUID.
+        catalystSessionId: catalystSessByUuid[a.sessionId] ?? null,
+        // CTL-928: the durable bg-job id this worker's liveness was derived from
+        // (from the phase signal). null when no signal carried one — surfaced so the
+        // worker rail and the dead-worker capacity logic share one provenance.
+        bgJobId,
+        // CTL-922 (BFF10): owning host + fence generation (see above).
+        host: deriveHost(workerSigs, fence),
+        generation: deriveGeneration(workerSigs, fence),
+        // CTL-947: a worker whose bg-job state is "blocked" is parked waiting for
+        // user input (a permission grant). Surfaced separately from the dead/active
+        // classification so the operator sees a distinct "waiting on you" group
+        // rather than having it silently merge into the zombie corpse bucket.
+        waitingOnUser: isBgJobWaitingOnUser(jobState),
+      };
+    })
+  );
   // CTL-928: a worker whose durable bg job is dead is NOT in flight. Partition
   // the `claude agents` workers into the live set (real consumed capacity) and the
   // dead set (corpses still listed by `claude agents` / lingering job dirs). Only
   // the live set feeds inFlight, freeSlots, ticketIds, and the "active" count.
   const liveWorkers = workers.filter((w) => !isWorkerDead(w));
-  const inFlightTickets = new Map(liveWorkers.map((w) =>
-    [w.ticket, { phase: w.phase, status: w.status, activeState: w.activeState, working: w.working, lastActiveMs: w.lastActiveMs, waitingOnUser: w.waitingOnUser, startedAt: w.startedAt }]));
+  const inFlightTickets = new Map(
+    liveWorkers.map((w) => [
+      w.ticket,
+      {
+        phase: w.phase,
+        status: w.status,
+        activeState: w.activeState,
+        working: w.working,
+        lastActiveMs: w.lastActiveMs,
+        waitingOnUser: w.waitingOnUser,
+        startedAt: w.startedAt,
+      },
+    ])
+  );
 
   // tickets = in-flight (have a LIVE worker dir / live agent) ∪ eligible(queued).
   // CTL-928: a workers/<T>/ dir whose latest signal is a terminal INTERMEDIATE
@@ -1179,7 +1332,11 @@ export async function assembleBoard({ getPrStatus = null } = {}) {
   // queue's notInFlight exclusion). Worker dirs remain a card source via tickets.
   let workerDirs = [];
   if (await exists(WORKERS_DIR)) {
-    try { workerDirs = (await readdir(WORKERS_DIR)).filter((d) => /^[A-Z]+-\d+$/.test(d)); } catch { /* none */ }
+    try {
+      workerDirs = (await readdir(WORKERS_DIR)).filter((d) => /^[A-Z]+-\d+$/.test(d));
+    } catch {
+      /* none */
+    }
   }
   // Every card we render (live workers, dead-worker dirs, plain worker dirs) — the
   // union of card sources, so a between-phases ticket still gets a BoardTicket.
@@ -1197,10 +1354,7 @@ export async function assembleBoard({ getPrStatus = null } = {}) {
   // (one request for all null-estimate IDs), short-TTL-cached, and fail-open, so
   // a Linear outage / missing token merely leaves estimate===null (the prior state).
   await (async () => {
-    const allBoardIds = [
-      ...[...cardTicketIds],
-      ...eligible.map((e) => e.id),
-    ];
+    const allBoardIds = [...[...cardTicketIds], ...eligible.map((e) => e.id)];
     const nullEstimateIds = allBoardIds.filter((id) => (linfo[id]?.estimate ?? null) === null);
     if (nullEstimateIds.length === 0) return;
 
@@ -1208,10 +1362,12 @@ export async function assembleBoard({ getPrStatus = null } = {}) {
     const fallback = await fillEstimateFallback(nullEstimateIds);
 
     // Derive the distinct team keys present so we can fetch estimation methods.
-    const teamKeys = [...new Set(nullEstimateIds.map((id) => String(id).split("-")[0]).filter(Boolean))];
+    const teamKeys = [
+      ...new Set(nullEstimateIds.map((id) => String(id).split("-")[0]).filter(Boolean)),
+    ];
     // Fetch all team methods in parallel (each has its own 24h on-disk TTL).
     const methodEntries = await Promise.all(
-      teamKeys.map(async (team) => [team, await getEstimationMethodAsync(team)]),
+      teamKeys.map(async (team) => [team, await getEstimationMethodAsync(team)])
     );
     const methodByTeam = Object.fromEntries(methodEntries);
 
@@ -1225,9 +1381,19 @@ export async function assembleBoard({ getPrStatus = null } = {}) {
       // Ensure a linfo entry exists (ticket might be in eligible only, not ticket_state).
       if (!linfo[id]) {
         linfo[id] = {
-          priority: 0, estimate: null, project: null, labels: [], relations: null,
-          assignee: null, linearState: null, title: null,
-          ownerHost: null, generation: null, fencePhase: null, claimedAt: null, heldSince: null,
+          priority: 0,
+          estimate: null,
+          project: null,
+          labels: [],
+          relations: null,
+          assignee: null,
+          linearState: null,
+          title: null,
+          ownerHost: null,
+          generation: null,
+          fencePhase: null,
+          claimedAt: null,
+          heldSince: null,
         };
       }
       linfo[id] = {
@@ -1258,10 +1424,7 @@ export async function assembleBoard({ getPrStatus = null } = {}) {
   // the Linear title for ALL teams. A ticket genuinely missing a Linear title still
   // resolves to null here, so ticketTitle()'s honest summary/key fallback still runs.
   await (async () => {
-    const allBoardIds = [
-      ...[...cardTicketIds],
-      ...eligible.map((e) => e.id),
-    ];
+    const allBoardIds = [...[...cardTicketIds], ...eligible.map((e) => e.id)];
     // Only fetch titles for IDs that have NO title from either source the title
     // resolver consults (durable linfo cache OR the eligible projection).
     const nullTitleIds = collectNullTitleIds(allBoardIds, linfo, eligibleIndex);
@@ -1274,111 +1437,124 @@ export async function assembleBoard({ getPrStatus = null } = {}) {
     mergeTitleFallback(linfo, nullTitleIds, fallback);
   })();
 
-  let tickets = await Promise.all([...cardTicketIds].map(async (id) => {
-    const { phaseSigs, remediateSig, triage, prSigs, needsHumanMarker } = await readTicketArtifacts(id);
-    // CTL-972: use derivePhaseWithRemediate so ticket.phase matches the
-    // phase-AGENT TYPE the queue/worker surfaces (incl. 'remediate').
-    const cur = derivePhaseWithRemediate(phaseSigs, remediateSig);
-    const phaseSummary = buildPhaseSummary(phaseSigs, now);
-    const live = inFlightTickets.get(id);
-    // CTL-1158: PR-stuck attention signal. getPrStatus is an O(1) in-memory lookup
-    // on the PrStatusFetcher cache — no extra gh calls, negligible cost.
-    const prNumber = prFor(prSigs);
-    const prPhaseStartedAt = prStartedAt(prSigs);
-    const prStatus = getPrStatus && prNumber != null ? getPrStatus(repoFor(id), prNumber) : null;
-    const prStuck = isPrStuck(prStatus, prPhaseStartedAt, now);
-    const prReason = prStuck ? prStuckReason(prStatus?.mergeStateStatus, prNumber) : null;
-    // CTL-729: the single needs-attention bucket (waiting-on-you ∪ needs-human),
-    // merging the live worker's blocked-bg-job flag, the needs-human/needs-input
-    // Linear labels (CTL-1031 webhook fold), the host-local needs-human marker,
-    // and the CTL-1158 PR-stuck signal. The waiting-on-you anchor is the worker's
-    // current-phase start; the needs-human anchor falls back to heldSince downstream.
-    const attn = deriveAttention({
-      waitingOnUser: live?.waitingOnUser ?? false,
-      labels: linfo[id]?.labels,
-      needsHumanMarker,
-      waitingSince: cur.startedAt ?? null,
-      needsHumanSince: deriveNeedsHumanSince(phaseSigs),   // CTL-1131: real age anchor
-      prStuck,
-      prStuckSince: prPhaseStartedAt,
-    });
-    return {
-      id, title: ticketTitle(id, triage, eligibleIndex, linfo), type: ticketType(triage),
-      repo: repoFor(id), team: teamFor(id),
-      phase: cur.phase, status: cur.status, model: cur.model,
-      linearState: PHASE_TO_LINEAR[cur.phase] || "Research",
-      workerStatus: live?.status || null,
-      activeState: live?.activeState || null, working: live?.working || false,
-      lastActiveMs: live?.lastActiveMs ?? null,
-      priority: linfo[id]?.priority ?? 0,
-      estimate: linfo[id]?.estimate ?? null,
-      // CTL-954: method-aware estimate fields from triage.json (set by Opus-mode pass).
-      // CTL-974: fall back to linfo estimateMethod (populated by the supplemental
-      // estimate fallback) when triage.json has no estimateMethod (un-triaged tickets
-      // whose estimate was fetched from Linear directly).
-      estimateMethod: ticketEstimateMethod(triage) ?? linfo[id]?.estimateMethod ?? null,
-      estimateDisplay: deriveEstimateDisplay(linfo[id]?.estimate ?? null, ticketEstimateMethod(triage) ?? linfo[id]?.estimateMethod ?? null),
-      scope: ticketScope(triage),
-      project: linfo[id]?.project ?? null,
-      // CTL-755 held indicator: "blocked" | "waiting" | null, read from the
-      // ticket's Linear labels (the scheduler's admission gate writes them).
-      // `blockers` names the dependencies a `blocked` hold is waiting on (only
-      // meaningful when held === "blocked"); empty otherwise.
-      held: heldFor(linfo[id]?.labels),
-      // CTL-1020: triage-derived blockers (authoritative) ∪ Linear relation-derived
-      // blockers, so the dep graph draws an edge even when the dependency was set as
-      // a Linear "blocked by" relation rather than scraped into triage.json.
-      blockers: mergeBlockers(ticketBlockers(triage), relationBlockerMap.get(id)),
-      // CTL-901 (HOME3): per-row "how long has this needed me / been running"
-      // durations, sourced from DURABLE read-model timestamps only — never
-      // fabricated. `heldSince` is the applied-at of the held (blocked/waiting)
-      // labels, projected into ticket_state by the broker (BFF11 / CTL-923) and
-      // surfaced through linear-cache-reader; it is the honest "how long has it
-      // been waiting on you" anchor. null when the durable cache has no stamp
-      // (an older filter-state.db, or a not-yet-observed hold) → the UI renders
-      // the duration cell as unavailable rather than inventing one. Only
-      // meaningful while `held` is set; cleared to null on pickup/unblock.
-      heldSince: linfo[id]?.heldSince ?? null,
-      // The wall-clock start of the ticket's CURRENT phase (deriveCurrentPhase
-      // already reads it off the live/last phase signal) — the "how long has it
-      // been running / in its current state" anchor for the running set. null
-      // when the surfaced phase carried no startedAt (pre-pipeline / corrupt
-      // signal) → again rendered unavailable, never now-anchored to a guess.
-      currentPhaseSince: cur.startedAt ?? null,
-      // CTL-1130: call_to_action from the most-recent phase signal's explanation,
-      // surfaced as the inbox sub-label for needs-human rows. CTL-1158: fall back
-      // to the PR-stuck reason so the inbox sub-label names WHY (research F12).
-      humanQuestion: deriveHumanQuestion(phaseSigs) ?? prReason,
-      // CTL-1110: the six extended explanation fields surfaced for the detail
-      // pane's CTA-led card (distinct from humanQuestion, the list-row sub-label).
-      explanation: deriveExplanation(phaseSigs),
-      // CTL-729: the single needs-attention bucket — 'waiting-on-you' (live
-      // blocked bg job) | 'needs-human' (escalation label/marker) | null, with an
-      // ISO attentionSince anchor (or null, never fabricated). Drives the ONE
-      // yellow board accent + the Inbox "Needs you" section. needs-human wins.
-      attention: attn.attention,
-      attentionSince: attn.attentionSince,
-      costUSD: costs[id]?.costUSD ?? null, tokens: costs[id]?.tokens ?? null,
-      turns: phaseCostsByTicket[id]
-        ? Object.values(phaseCostsByTicket[id]).reduce((s, p) => s + p.turns, 0)
-        : null,
-      phaseCosts: phaseCostsByTicket[id] ?? null,
-      phaseSummary,
-      pr: prNumber,
-      // CTL-1158: PR merge state + the PR-stuck operator CTA (null unless stuck).
-      mergeStateStatus: prStatus?.mergeStateStatus ?? null,
-      prStuckReason: prReason,
-      updatedAt: ticketUpdatedAt(phaseSigs),
-      // CTL-922 (BFF10): node attribution. host:{name,id} from the ticket's phase
-      // signals (CTL-852, dispatch-stamped) falling back to the durable fence
-      // projection owner_host (BFF11); generation from the fence projection first,
-      // then the signal. SINGLE-HOST: resolves to the one node via this same path,
-      // no cluster branch, no live attachment fetch.
-      host: deriveHost(phaseSigs, linfo[id] ?? {}),
-      generation: deriveGeneration(phaseSigs, linfo[id] ?? {}),
-      failureReason: cur.failureReason ?? null,
-    };
-  }));
+  let tickets = await Promise.all(
+    [...cardTicketIds].map(async (id) => {
+      const { phaseSigs, remediateSig, triage, prSigs, needsHumanMarker } =
+        await readTicketArtifacts(id);
+      // CTL-972: use derivePhaseWithRemediate so ticket.phase matches the
+      // phase-AGENT TYPE the queue/worker surfaces (incl. 'remediate').
+      const cur = derivePhaseWithRemediate(phaseSigs, remediateSig);
+      const phaseSummary = buildPhaseSummary(phaseSigs, now);
+      const live = inFlightTickets.get(id);
+      // CTL-1158: PR-stuck attention signal. getPrStatus is an O(1) in-memory lookup
+      // on the PrStatusFetcher cache — no extra gh calls, negligible cost.
+      const prNumber = prFor(prSigs);
+      const prPhaseStartedAt = prStartedAt(prSigs);
+      const prStatus = getPrStatus && prNumber != null ? getPrStatus(repoFor(id), prNumber) : null;
+      const prStuck = isPrStuck(prStatus, prPhaseStartedAt, now);
+      const prReason = prStuck ? prStuckReason(prStatus?.mergeStateStatus, prNumber) : null;
+      // CTL-729: the single needs-attention bucket (waiting-on-you ∪ needs-human),
+      // merging the live worker's blocked-bg-job flag, the needs-human/needs-input
+      // Linear labels (CTL-1031 webhook fold), the host-local needs-human marker,
+      // and the CTL-1158 PR-stuck signal. The waiting-on-you anchor is the worker's
+      // current-phase start; the needs-human anchor falls back to heldSince downstream.
+      const attn = deriveAttention({
+        waitingOnUser: live?.waitingOnUser ?? false,
+        labels: linfo[id]?.labels,
+        needsHumanMarker,
+        waitingSince: cur.startedAt ?? null,
+        needsHumanSince: deriveNeedsHumanSince(phaseSigs), // CTL-1131: real age anchor
+        prStuck,
+        prStuckSince: prPhaseStartedAt,
+      });
+      return {
+        id,
+        title: ticketTitle(id, triage, eligibleIndex, linfo),
+        type: ticketType(triage),
+        repo: repoFor(id),
+        team: teamFor(id),
+        phase: cur.phase,
+        status: cur.status,
+        model: cur.model,
+        linearState: PHASE_TO_LINEAR[cur.phase] || "Research",
+        workerStatus: live?.status || null,
+        activeState: live?.activeState || null,
+        working: live?.working || false,
+        lastActiveMs: live?.lastActiveMs ?? null,
+        priority: linfo[id]?.priority ?? 0,
+        estimate: linfo[id]?.estimate ?? null,
+        // CTL-954: method-aware estimate fields from triage.json (set by Opus-mode pass).
+        // CTL-974: fall back to linfo estimateMethod (populated by the supplemental
+        // estimate fallback) when triage.json has no estimateMethod (un-triaged tickets
+        // whose estimate was fetched from Linear directly).
+        estimateMethod: ticketEstimateMethod(triage) ?? linfo[id]?.estimateMethod ?? null,
+        estimateDisplay: deriveEstimateDisplay(
+          linfo[id]?.estimate ?? null,
+          ticketEstimateMethod(triage) ?? linfo[id]?.estimateMethod ?? null
+        ),
+        scope: ticketScope(triage),
+        project: linfo[id]?.project ?? null,
+        // CTL-755 held indicator: "blocked" | "waiting" | null, read from the
+        // ticket's Linear labels (the scheduler's admission gate writes them).
+        // `blockers` names the dependencies a `blocked` hold is waiting on (only
+        // meaningful when held === "blocked"); empty otherwise.
+        held: heldFor(linfo[id]?.labels),
+        // CTL-1020: triage-derived blockers (authoritative) ∪ Linear relation-derived
+        // blockers, so the dep graph draws an edge even when the dependency was set as
+        // a Linear "blocked by" relation rather than scraped into triage.json.
+        blockers: mergeBlockers(ticketBlockers(triage), relationBlockerMap.get(id)),
+        // CTL-901 (HOME3): per-row "how long has this needed me / been running"
+        // durations, sourced from DURABLE read-model timestamps only — never
+        // fabricated. `heldSince` is the applied-at of the held (blocked/waiting)
+        // labels, projected into ticket_state by the broker (BFF11 / CTL-923) and
+        // surfaced through linear-cache-reader; it is the honest "how long has it
+        // been waiting on you" anchor. null when the durable cache has no stamp
+        // (an older filter-state.db, or a not-yet-observed hold) → the UI renders
+        // the duration cell as unavailable rather than inventing one. Only
+        // meaningful while `held` is set; cleared to null on pickup/unblock.
+        heldSince: linfo[id]?.heldSince ?? null,
+        // The wall-clock start of the ticket's CURRENT phase (deriveCurrentPhase
+        // already reads it off the live/last phase signal) — the "how long has it
+        // been running / in its current state" anchor for the running set. null
+        // when the surfaced phase carried no startedAt (pre-pipeline / corrupt
+        // signal) → again rendered unavailable, never now-anchored to a guess.
+        currentPhaseSince: cur.startedAt ?? null,
+        // CTL-1130: call_to_action from the most-recent phase signal's explanation,
+        // surfaced as the inbox sub-label for needs-human rows. CTL-1158: fall back
+        // to the PR-stuck reason so the inbox sub-label names WHY (research F12).
+        humanQuestion: deriveHumanQuestion(phaseSigs) ?? prReason,
+        // CTL-1110: the six extended explanation fields surfaced for the detail
+        // pane's CTA-led card (distinct from humanQuestion, the list-row sub-label).
+        explanation: deriveExplanation(phaseSigs),
+        // CTL-729: the single needs-attention bucket — 'waiting-on-you' (live
+        // blocked bg job) | 'needs-human' (escalation label/marker) | null, with an
+        // ISO attentionSince anchor (or null, never fabricated). Drives the ONE
+        // yellow board accent + the Inbox "Needs you" section. needs-human wins.
+        attention: attn.attention,
+        attentionSince: attn.attentionSince,
+        costUSD: costs[id]?.costUSD ?? null,
+        tokens: costs[id]?.tokens ?? null,
+        turns: phaseCostsByTicket[id]
+          ? Object.values(phaseCostsByTicket[id]).reduce((s, p) => s + p.turns, 0)
+          : null,
+        phaseCosts: phaseCostsByTicket[id] ?? null,
+        phaseSummary,
+        pr: prNumber,
+        // CTL-1158: PR merge state + the PR-stuck operator CTA (null unless stuck).
+        mergeStateStatus: prStatus?.mergeStateStatus ?? null,
+        prStuckReason: prReason,
+        updatedAt: ticketUpdatedAt(phaseSigs),
+        // CTL-922 (BFF10): node attribution. host:{name,id} from the ticket's phase
+        // signals (CTL-852, dispatch-stamped) falling back to the durable fence
+        // projection owner_host (BFF11); generation from the fence projection first,
+        // then the signal. SINGLE-HOST: resolves to the one node via this same path,
+        // no cluster branch, no live attachment fetch.
+        host: deriveHost(phaseSigs, linfo[id] ?? {}),
+        generation: deriveGeneration(phaseSigs, linfo[id] ?? {}),
+        failureReason: cur.failureReason ?? null,
+      };
+    })
+  );
 
   // CTL-928 lane assembly — every non-queued ticket lands in EXACTLY one lane via
   // laneFor (the single source of truth), so a dead-but-running ticket is never
@@ -1404,26 +1580,31 @@ export async function assembleBoard({ getPrStatus = null } = {}) {
   // ANY worker dir is already surfaced as live / between-phases above, so it is
   // excluded here (cardTicketIds) — it is accounted for, not duplicated.
   const notInFlight = eligible.filter((e) => !cardTicketIds.has(e.id));
-  const queuedTickets = notInFlight.map((e) => synthesizeQueuedTicket(e, linfo, relationBlockerMap));
+  const queuedTickets = notInFlight.map((e) =>
+    synthesizeQueuedTicket(e, linfo, relationBlockerMap)
+  );
   tickets = [...liveTickets, ...betweenPhases, ...recentDone, ...queuedTickets];
 
   // priority queue: eligible (not yet in-flight), globally ranked (Queue tab)
-  const queue = await Promise.all(notInFlight
-    .sort(compareDispatchOrder)
-    .map(async (e, i) => {
+  const queue = await Promise.all(
+    notInFlight.sort(compareDispatchOrder).map(async (e, i) => {
       const { triage } = await readTicketArtifacts(e.id);
       return {
         // `...e` already carries `team` (loadEligible stamps teamFor(id)) — the
         // BoardQueueItem type now declares it so the SURF2 node column / lane
         // grouping can read it (CTL-922 / BFF10).
-        ...e, rank: i + 1,
+        ...e,
+        rank: i + 1,
         priority: linfo[e.id]?.priority ?? e.priority ?? 0,
         estimate: linfo[e.id]?.estimate ?? null,
         // CTL-954/CTL-974: method-aware estimate fields. triage.json is the primary
         // source; fall back to linfo estimateMethod (set by the CTL-974 supplemental
         // fallback) for tickets whose triage.json lacks it.
         estimateMethod: ticketEstimateMethod(triage) ?? linfo[e.id]?.estimateMethod ?? null,
-        estimateDisplay: deriveEstimateDisplay(linfo[e.id]?.estimate ?? null, ticketEstimateMethod(triage) ?? linfo[e.id]?.estimateMethod ?? null),
+        estimateDisplay: deriveEstimateDisplay(
+          linfo[e.id]?.estimate ?? null,
+          ticketEstimateMethod(triage) ?? linfo[e.id]?.estimateMethod ?? null
+        ),
         scope: ticketScope(triage),
         project: linfo[e.id]?.project ?? e.project ?? null,
         // CTL-922 (BFF10): owning host from the durable fence projection (BFF11);
@@ -1433,7 +1614,8 @@ export async function assembleBoard({ getPrStatus = null } = {}) {
         // CTL-1066: active dispatch retry cool-down; null when not cooling down.
         dispatchCooldown: cooldowns.get(e.id) ?? null,
       };
-    }));
+    })
+  );
 
   const repos = [...new Set([...workers, ...tickets].map((x) => x.repo))].sort();
 

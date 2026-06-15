@@ -57,7 +57,9 @@ import { log } from "../config.mjs";
 import { buildExplanation, coerceExplanation, tierProducer } from "../escalation-explanation.mjs";
 
 function firstLine(s) {
-  return String(s ?? "").split(/\r?\n/)[0].slice(0, 200);
+  return String(s ?? "")
+    .split(/\r?\n/)[0]
+    .slice(0, 200);
 }
 
 // ── executeEscalations — per-tick executor for R12 escalate_human beliefs.
@@ -87,7 +89,7 @@ export function executeEscalations(
     labelOnceFn = labelOnce,
     env = process.env,
     evidenceBySubject = {},
-  } = {},
+  } = {}
 ) {
   let escalated = 0; // subjects whose intent we flipped to 'escalated'
   let paged = 0; // subjects we FRESHLY applied needs-human for (first apply only — CTL-962)
@@ -111,7 +113,7 @@ export function executeEscalations(
     `UPDATE intent SET outcome = 'escalated'
       WHERE kind = 'wake-diagnostician' AND subject = ?
         AND outcome IS NULL
-        AND attempts >= (SELECT value_int FROM cfg WHERE key = 'max_attempts')`,
+        AND attempts >= (SELECT value_int FROM cfg WHERE key = 'max_attempts')`
   );
 
   for (const row of beliefs) {
@@ -128,7 +130,10 @@ export function executeEscalations(
       if (enforce !== true) {
         // SHADOW: record-only. No label, no flip, no emit.
         skipped++;
-        log.debug({ subject, ticket, why }, "escalate: would escalate (shadow) — no label, no flip");
+        log.debug(
+          { subject, ticket, why },
+          "escalate: would escalate (shadow) — no label, no flip"
+        );
         continue;
       }
 
@@ -161,7 +166,8 @@ export function executeEscalations(
             // captureEvidence does not emit these today → production defaults AUTHORIZATION.
             const evType = typeof ev.escalation_type === "string" ? ev.escalation_type : null;
             const evCanExecute = typeof ev.canExecute === "boolean" ? ev.canExecute : undefined;
-            const evBlocked = typeof ev.blockedCapability === "string" ? ev.blockedCapability : undefined;
+            const evBlocked =
+              typeof ev.blockedCapability === "string" ? ev.blockedCapability : undefined;
             const evProblem = ev.logsOutput
               ? `${phaseName ?? "phase"} failed: ${firstLine(ev.logsOutput)}`
               : `${phaseName ?? "phase"} escalated (${why ?? "no diagnosis"})`;
@@ -171,11 +177,15 @@ export function executeEscalations(
               explanationFields = {
                 escalation_type: "decision",
                 problem: evProblem,
-                call_to_action: ev.humanQuestion ?? `decide next action for ${ticket} ${phaseName ?? "phase"}`,
-                options: Array.isArray(ev.options) && ev.options.length >= 2 ? ev.options : [
-                  { label: "retry", tradeoff: "may hit the same failure" },
-                  { label: "abandon / re-scope", tradeoff: "loses partial progress" },
-                ],
+                call_to_action:
+                  ev.humanQuestion ?? `decide next action for ${ticket} ${phaseName ?? "phase"}`,
+                options:
+                  Array.isArray(ev.options) && ev.options.length >= 2
+                    ? ev.options
+                    : [
+                        { label: "retry", tradeoff: "may hit the same failure" },
+                        { label: "abandon / re-scope", tradeoff: "loses partial progress" },
+                      ],
                 why_you: ev.why_you ?? `priority call for ${ticket} ${phaseName ?? "phase"}`,
               };
             } else if (evCanExecute === false || evBlocked) {
@@ -183,11 +193,14 @@ export function executeEscalations(
               explanationFields = {
                 escalation_type: "manual",
                 problem: evProblem,
-                call_to_action: ev.humanQuestion ?? `restore ${evBlocked ?? "required capability"} and re-run phase`,
+                call_to_action:
+                  ev.humanQuestion ??
+                  `restore ${evBlocked ?? "required capability"} and re-run phase`,
                 blocked_capability: evBlocked ?? "required capability unavailable",
-                instructions: Array.isArray(ev.instructions) && ev.instructions.length > 0
-                  ? ev.instructions
-                  : ["check the required credential or scope"],
+                instructions:
+                  Array.isArray(ev.instructions) && ev.instructions.length > 0
+                    ? ev.instructions
+                    : ["check the required credential or scope"],
                 remediation_then_retry: `re-run ${ticket} ${phaseName ?? "phase"} after restoring access`,
                 why_not_auto: `capability boundary: ${evBlocked ?? "required capability unavailable"}`,
               };
@@ -196,23 +209,32 @@ export function executeEscalations(
               explanationFields = {
                 escalation_type: "authorization",
                 problem: evProblem,
-                call_to_action: ev.humanQuestion ?? `authorize ${ticket}/${phaseName ?? "phase"} to continue — review and decide?`,
+                call_to_action:
+                  ev.humanQuestion ??
+                  `authorize ${ticket}/${phaseName ?? "phase"} to continue — review and decide?`,
                 recommendation: `re-run ${phaseName ?? "phase"} for ${ticket} with diagnostician output`,
-                risk: why ? `unresolved diagnostician signal: ${why}` : `${phaseName ?? "phase"} escalated with no specific diagnostics`,
+                risk: why
+                  ? `unresolved diagnostician signal: ${why}`
+                  : `${phaseName ?? "phase"} escalated with no specific diagnostics`,
                 why_asking: "risk-authority gate, not a capability gap",
                 could_higher_tier_resolve: tierProducer(ev.jobState?.model),
                 authorize_label: `retry ${ticket}/${phaseName ?? "phase"}`,
               };
             }
             // Passthrough observed/attempts (D1)
-            if (ev.jobState && typeof ev.jobState === "object") explanationFields.observed = ev.jobState;
+            if (ev.jobState && typeof ev.jobState === "object")
+              explanationFields.observed = ev.jobState;
             if (Array.isArray(ev.attempts)) explanationFields.attempts = ev.attempts;
 
             let explanation;
             try {
               explanation = buildExplanation(explanationFields);
             } catch {
-              explanation = coerceExplanation(explanationFields, { ticket, phase: phaseName, canExecute: evCanExecute });
+              explanation = coerceExplanation(explanationFields, {
+                ticket,
+                phase: phaseName,
+                canExecute: evCanExecute,
+              });
             }
             appendEvent({
               "event.name": "escalate.human",
@@ -237,7 +259,11 @@ export function executeEscalations(
                 writeFileSync(tmp, `${JSON.stringify(updated, null, 2)}\n`);
                 renameSync(tmp, sigPath);
               } catch (sigErr) {
-                errors.push({ subject, phase: "signalWrite", err: String(sigErr?.message ?? sigErr) });
+                errors.push({
+                  subject,
+                  phase: "signalWrite",
+                  err: String(sigErr?.message ?? sigErr),
+                });
               }
             }
           } catch (evtErr) {
@@ -253,9 +279,15 @@ export function executeEscalations(
       if (info?.changes > 0) escalated++;
 
       if (firstPage) {
-        log.warn({ subject, ticket, why }, "escalate: paged operator (needs-human) and flipped intent → escalated");
+        log.warn(
+          { subject, ticket, why },
+          "escalate: paged operator (needs-human) and flipped intent → escalated"
+        );
       } else {
-        log.debug({ subject, ticket, why }, "escalate: needs-human already applied — re-arm suppressed (no new event/page)");
+        log.debug(
+          { subject, ticket, why },
+          "escalate: needs-human already applied — re-arm suppressed (no new event/page)"
+        );
       }
     } catch (err) {
       errors.push({ subject, phase: "escalate", err: String(err?.message ?? err) });

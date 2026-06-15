@@ -45,10 +45,7 @@ describe("CTL-1131: deriveNeedsHumanSince", () => {
   });
 
   it("falls back to an earlier signal when newest carries none", () => {
-    const sigs = [
-      { needsHumanSince: "2026-06-14T08:00:00Z" },
-      { status: "running" },
-    ];
+    const sigs = [{ needsHumanSince: "2026-06-14T08:00:00Z" }, { status: "running" }];
     expect(deriveNeedsHumanSince(sigs)).toBe("2026-06-14T08:00:00Z");
   });
 });

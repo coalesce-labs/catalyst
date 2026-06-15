@@ -71,15 +71,18 @@ function insertEscalateHuman(tickId, subject, why = "stalled-alive") {
   db.run(
     `INSERT INTO belief (tick_id, stratum, name, subject, value, rule_id, source_fact_ids)
      VALUES (?, 4, 'escalate_human', ?, ?, 'R12', '[]')`,
-    [tickId, subject, JSON.stringify({ why })],
+    [tickId, subject, JSON.stringify({ why })]
   );
 }
 // Insert a wake-diagnostician intent row directly (UNIT tests).
 function insertWakeIntent(tickId, subject, { attempts = 2, outcome = null } = {}) {
-  db.run(
-    "INSERT INTO intent (tick_id, kind, subject, attempts, outcome) VALUES (?, ?, ?, ?, ?)",
-    [tickId, "wake-diagnostician", subject, attempts, outcome],
-  );
+  db.run("INSERT INTO intent (tick_id, kind, subject, attempts, outcome) VALUES (?, ?, ?, ?, ?)", [
+    tickId,
+    "wake-diagnostician",
+    subject,
+    attempts,
+    outcome,
+  ]);
   return db.query("SELECT last_insert_rowid() AS id").get().id;
 }
 
@@ -192,7 +195,7 @@ describe("executeEscalations — enforce mode (enforce=true)", () => {
       labelOnceFn,
     });
     expect(db.query("SELECT outcome FROM intent WHERE intent_id = ?").get(intentId).outcome).toBe(
-      "escalated",
+      "escalated"
     );
 
     // Next tick: with the intent now 'escalated', R11 (outcome IS NULL) no longer
@@ -304,7 +307,9 @@ describe("executeEscalations — enforce mode (enforce=true)", () => {
     // We still page (R12 fired), but the uncapped intent stays open.
     expect(res.paged).toBe(1);
     expect(res.escalated).toBe(0);
-    expect(db.query("SELECT outcome FROM intent WHERE intent_id = ?").get(freshId).outcome).toBeNull();
+    expect(
+      db.query("SELECT outcome FROM intent WHERE intent_id = ?").get(freshId).outcome
+    ).toBeNull();
   });
 
   test("never throws — a writeStatus that throws is isolated per subject", () => {
@@ -509,7 +514,7 @@ describe("MULTI-TICK LADDER — R4 → R10 → R11 → R12 in real tick order, p
     // R12 provenance cites the wake belief AND the action_ineffective belief
     const wd = beliefRows(t3.tickId, "wake_diagnostician")[0];
     expect(JSON.parse(r12[0].source_fact_ids).sort()).toEqual(
-      [`b${wd.belief_id}`, `b${r11[0].belief_id}`].sort(),
+      [`b${wd.belief_id}`, `b${r11[0].belief_id}`].sort()
     );
     // executor pages ONCE this tick
     expect(t3.esc.paged).toBe(1);
@@ -673,13 +678,16 @@ describe("CTL-1131: executeEscalations (enforce) writes explanation + needsHuman
   }
 
   function readSignal(orchDir, ticket, phase) {
-    return JSON.parse(readFileSync(join(orchDir, "workers", ticket, `phase-${phase}.json`), "utf8"));
+    return JSON.parse(
+      readFileSync(join(orchDir, "workers", ticket, `phase-${phase}.json`), "utf8")
+    );
   }
 
   test("first page: signal gains explanation + needsHumanSince; prior fields preserved", () => {
     seedCfg("max_attempts", 2);
     const t = insertTick(NOW);
-    const ticket = "CTL-1131x", phase = "implement";
+    const ticket = "CTL-1131x",
+      phase = "implement";
     const subject = `${ticket}/${phase}`;
     insertEscalateHuman(t, subject, "stalled-alive");
     insertWakeIntent(t, subject, { attempts: 2, outcome: null });
@@ -711,7 +719,8 @@ describe("CTL-1131: executeEscalations (enforce) writes explanation + needsHuman
   test("missing signal file: no throw, escalation still returns paged=1", () => {
     seedCfg("max_attempts", 2);
     const t = insertTick(NOW);
-    const ticket = "CTL-1131y", phase = "implement";
+    const ticket = "CTL-1131y",
+      phase = "implement";
     const subject = `${ticket}/${phase}`;
     insertEscalateHuman(t, subject, "stalled-alive");
     insertWakeIntent(t, subject, { attempts: 2, outcome: null });
@@ -733,7 +742,8 @@ describe("CTL-1131: executeEscalations (enforce) writes explanation + needsHuman
   test("re-arm (firstPage=false via labelOnceFn returning false): signal NOT rewritten", () => {
     seedCfg("max_attempts", 2);
     const t = insertTick(NOW);
-    const ticket = "CTL-1131z", phase = "implement";
+    const ticket = "CTL-1131z",
+      phase = "implement";
     const subject = `${ticket}/${phase}`;
     insertEscalateHuman(t, subject, "stalled-alive");
     insertWakeIntent(t, subject, { attempts: 2, outcome: null });
