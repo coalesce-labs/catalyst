@@ -39,6 +39,7 @@ import {
   TAILER_POLL_INTERVAL_MS,
   readWaitWatcherConfig,
   readMemorySamplerConfig,
+  readFleetHealthConfig, // CTL-1165 D5: fleet-health guardrail config (selfHeal default OFF)
   readRatelimitPollerConfig,
   getHostName,      // CTL-862
   getClusterHosts,  // CTL-862
@@ -46,6 +47,7 @@ import {
 import { ownedBy } from "./hrw.mjs"; // CTL-862: HRW ownership filter
 import { startWaitWatcher as realStartWaitWatcher } from "./wait-watcher.mjs";
 import { startMemorySampler as realStartMemorySampler } from "./memory-sampler.mjs";
+import { startFleetHealthProbe as realStartFleetHealthProbe } from "./fleet-health-probe.mjs"; // CTL-1165 D5: pre-exhaustion fleet-health guardrail
 import { startRatelimitPoller as realStartRatelimitPoller } from "./ratelimit-poller.mjs";
 import { listProjects as realListProjects } from "./registry.mjs"; // CTL-854: boot health check
 import { startHeartbeat as realStartHeartbeat } from "./heartbeat-event.mjs"; // CTL-859: node.heartbeat emitter
@@ -119,6 +121,8 @@ let _stalePrRescueTimer = null;
 let _waitWatcher = null;
 // CTL-685: per-worker memory sampler handle.
 let _memorySampler = null;
+// CTL-1165 D5: pre-exhaustion fleet-health probe handle.
+let _fleetHealthProbe = null;
 // CTL-787: account-level rate-limit usage poller handle.
 let _ratelimitPoller = null;
 // CTL-859: node-heartbeat emitter handle (distributed-coordination foundation).
@@ -401,6 +405,11 @@ export function startDaemon({
   // knob (default-on, CATALYST_MEMORY_SAMPLER=0 disables) like the wait-watcher.
   startMemorySampler = realStartMemorySampler,
   enableMemorySampler = readMemorySamplerConfig().enabled,
+  // CTL-1165 D5: pre-exhaustion fleet-health probe. Injectable for tests; gated
+  // by a config knob (default-on, CATALYST_FLEET_HEALTH=0 disables) like the
+  // memory sampler. The probe is EMIT-ONLY by default (self-heal default OFF).
+  startFleetHealthProbe = realStartFleetHealthProbe,
+  enableFleetHealth = readFleetHealthConfig().enabled,
   // CTL-787: account-level rate-limit usage poller. Injectable for tests; gated
   // by a config knob (default-on, CATALYST_RATELIMIT_POLLER=0 disables) like the
   // memory sampler.
@@ -638,6 +647,13 @@ export function startDaemon({
     // a throw triggers PID-file cleanup via stopDaemon.
     if (enableMemorySampler) {
       _memorySampler = startMemorySampler();
+    }
+
+    // CTL-1165 D5: start the pre-exhaustion fleet-health probe. EMIT-ONLY by
+    // default (self-heal default OFF — first ship is a pure alert). Inside the
+    // same try/catch so a throw triggers PID-file cleanup via stopDaemon.
+    if (enableFleetHealth) {
+      _fleetHealthProbe = startFleetHealthProbe({ orchDir });
     }
 
     // CTL-787: start the account-level rate-limit usage poller. Inside the same
@@ -1036,6 +1052,15 @@ export function stopDaemon() {
       log.warn({ err: err?.message }, "stopDaemon: memory-sampler stop failed");
     }
     _memorySampler = null;
+  }
+  // CTL-1165 D5: stop the pre-exhaustion fleet-health probe.
+  if (_fleetHealthProbe) {
+    try {
+      _fleetHealthProbe.stop();
+    } catch (err) {
+      log.warn({ err: err?.message }, "stopDaemon: fleet-health-probe stop failed");
+    }
+    _fleetHealthProbe = null;
   }
   // CTL-787: stop the account-level rate-limit usage poller.
   if (_ratelimitPoller) {
