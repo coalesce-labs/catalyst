@@ -153,8 +153,8 @@ const HELD_LABEL_WAITING = "waiting";
 // imported for direct use in PhaseStrip — the drift guard reads it from board-accent.ts
 // but the board renders it via this import.
 export type { ColorBy } from "./board-accent";
-export { accentFor } from "./board-accent";
-import { PHASE_C } from "./board-accent";
+import { PHASE_C, accentFor } from "./board-accent";
+export { accentFor };
 // CTL-909 / SURF1: a stable per-node accent so the "group by Node" columns +
 // the host chip on each worker card carry a consistent color. Hashed from the
 // host name (the unattributed bucket reads dim) — deterministic, no palette
@@ -170,25 +170,6 @@ const nodeColor = (host: string): string => {
   return NODE_PALETTE[h % NODE_PALETTE.length] ?? C.blue;
 };
 
-/**
- * CTL-1153 (M2): `accentFor` now accepts an optional `repoAccents` map (repo → hex)
- * built from the server's per-project resolved color (`.text` swatch). When present,
- * `repo` lane cards use the server color instead of the old hardcoded adva/blue branch.
- * The optional arg keeps backward-compat: list-columns.tsx callers that pass only 2
- * args (`accentFor(t, "phase")`) continue to work unchanged.
- */
-export function accentFor(
-  t: { phase: string; repo: string; type: string; activeState: ActiveState; status: string },
-  by: ColorBy,
-  repoAccents?: Record<string, string>,
-): string {
-  if (by === "phase") return PHASE_C[t.phase] || C.blue;
-  if (by === "repo") return repoAccents?.[t.repo] ?? C.blue;
-  if (by === "type") return TYPE_C[t.type] || C.fgMuted;
-  if (t.activeState === "active") return LIVE;
-  if (t.activeState === "stuck" || t.status === "failed") return C.red;
-  return C.fgDim;
-}
 
 export const fmtRuntime = (ms: number | null) => {
   if (!ms || !Number.isFinite(ms) || ms < 0) return "";
