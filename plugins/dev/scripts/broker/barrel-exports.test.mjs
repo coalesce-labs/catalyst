@@ -11,7 +11,8 @@
 // CTL-1077 remediate added 2 more — BROKER_HANDOFF_MAX_AGE_MS and the extracted
 // parseBootHandoff boot seam; CTL-1161 added 6 — isDaemonLocalMergeSignal,
 // refreshAllPluginCheckouts, startPluginDriftCheck, PLUGIN_DRIFT_CHECK_INTERVAL_MS
-// from plugin-refresh.mjs, and startDriftCheckWatcher from router.mjs).
+// from plugin-refresh.mjs, and startDriftCheckWatcher from router.mjs; CTL-1171
+// added 2 — BROKER_HEARTBEAT_INTERVAL_MS and buildBrokerHeartbeatEvent).
 // The count is the length of the enumerated REQUIRED_EXPORTS list below —
 // `grep -cE '^export '` undercounts because most re-exports are multi-name
 // `export { … } from` blocks.
@@ -122,14 +123,17 @@ const REQUIRED_EXPORTS = [
   // CTL-1077 remediate: handoff freshness budget + extracted boot-parse seam (index.mjs)
   "BROKER_HANDOFF_MAX_AGE_MS",
   "parseBootHandoff",
+  // CTL-1171: broker liveness heartbeat (cadence const + pure event factory)
+  "BROKER_HEARTBEAT_INTERVAL_MS",
+  "buildBrokerHeartbeatEvent",
 ];
 
 describe("CTL-529 barrel contract", () => {
-  test("all 90 public symbols re-export from ./index.mjs", () => {
+  test("all 92 public symbols re-export from ./index.mjs", () => {
     for (const name of REQUIRED_EXPORTS) {
       expect(typeof barrel[name], `missing export: ${name}`).not.toBe("undefined");
     }
-    expect(REQUIRED_EXPORTS.length).toBe(90);
+    expect(REQUIRED_EXPORTS.length).toBe(92);
   });
 
   test("singleton getters return identity-stable live references", () => {
