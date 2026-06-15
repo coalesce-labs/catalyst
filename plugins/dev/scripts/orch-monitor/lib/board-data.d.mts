@@ -269,6 +269,9 @@ export const TERMINAL: Set<string>;
 /** CTL-928: the `claude --bg` job-lifecycle terminal `state` values (distinct from
  *  the worker-signal TERMINAL set). In lock-step with recovery.mjs. */
 export const TERMINAL_JOB_STATES: Set<string>;
+/** CTL-1180: phase statuses that require operator attention — both failed
+ *  (self-emitted, no watchdog kill) and stalled (circuit-breaker gave up). */
+export const TERMINAL_FAILURE: Set<string>;
 /** CTL-928: the synthetic current-phase that marks a genuinely pipeline-done
  *  ticket (deriveCurrentPhase collapses terminal monitor-deploy/teardown to it). */
 export const PIPELINE_DONE_PHASE: string;
@@ -287,7 +290,9 @@ export const ATTENTION_LABEL_NEEDS_INPUT: string;
  *  (a needs-human/needs-input label OR the host-local marker) WINS over
  *  waiting-on-you (a live worker's blocked bg job). The anchor follows the winning
  *  reason; null when that reason carries no durable stamp (never fabricated).
- *  CTL-1158: also accepts prStuck/prStuckSince for the PR-stuck signal. */
+ *  CTL-1158: also accepts prStuck/prStuckSince for the PR-stuck signal.
+ *  CTL-1180: phaseFailed surfaces a self-emitted failed phase as needs-human;
+ *  escalationType is a passthrough from deriveEscalationType. */
 export function deriveAttention(opts?: {
   waitingOnUser?: boolean;
   labels?: unknown;
@@ -296,7 +301,13 @@ export function deriveAttention(opts?: {
   needsHumanSince?: string | null;
   prStuck?: boolean;
   prStuckSince?: string | null;
-}): { attention: BoardAttention; attentionSince: string | null };
+  phaseFailed?: boolean;
+  escalationType?: string | null;
+}): { attention: BoardAttention; attentionSince: string | null; escalationType: string | null };
+
+/** CTL-1180: scan phaseSigs newest-first for the first signal with an
+ *  explanation.escalation_type string. Returns it or null. */
+export function deriveEscalationType(phaseSigs: unknown[]): string | null;
 
 /** CTL-1158: returns true when the PR has been in a real-blocker merge state
  *  (DIRTY/BLOCKED/UNSTABLE) for ≥ 300 s, anchored to prPhaseStartedAt. */

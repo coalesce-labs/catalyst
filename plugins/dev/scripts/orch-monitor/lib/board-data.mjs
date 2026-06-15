@@ -94,6 +94,11 @@ export const TERMINAL = new Set([
   "canceled",
 ]);
 
+// CTL-1180: the phase-signal statuses that mean "a human must look" — failed
+// AND stalled. DISTINCT from TERMINAL (which also includes done/skipped/canceled/
+// superseded/signal_corrupt). Used by deriveAttention's phaseFailed gate.
+export const TERMINAL_FAILURE = new Set(["failed", "stalled"]);
+
 // CTL-928 — the authoritative `claude --bg` job-LIFECYCLE terminal states (the
 // `state` value Claude writes into ~/.claude/jobs/<id>/state.json). DISTINCT from
 // the worker-SIGNAL TERMINAL set above (a phase-signal `status` like done/skipped):
@@ -207,11 +212,14 @@ export function deriveAttention({
   needsHumanSince = null,
   prStuck = false, // CTL-1158: PR in a real-blocker merge state ≥ 300 s
   prStuckSince = null,
+  phaseFailed = false,    // CTL-1180: a terminal failed/stalled phase, ticket NOT pipeline-done
+  escalationType = null,  // CTL-1180: passthrough of explanation.escalation_type (forensic/render)
 } = {}) {
   const set = new Set(Array.isArray(labels) ? labels : []);
   const labelNeedsHuman =
     set.has(ATTENTION_LABEL_NEEDS_HUMAN) || set.has(ATTENTION_LABEL_NEEDS_INPUT);
-  const needsHuman = labelNeedsHuman || needsHumanMarker === true || prStuck === true;
+  const needsHuman =
+    labelNeedsHuman || needsHumanMarker === true || prStuck === true || phaseFailed === true;
   if (needsHuman) {
     // Label/marker stamp is the more authoritative anchor when present; the
     // PR-stuck anchor is the fallback. needs-human (any source) outranks
@@ -219,12 +227,13 @@ export function deriveAttention({
     return {
       attention: "needs-human",
       attentionSince: needsHumanSince ?? (prStuck ? prStuckSince : null),
+      escalationType: escalationType ?? null, // CTL-1180 passthrough; null when not a failed-phase source
     };
   }
   if (waitingOnUser === true) {
-    return { attention: "waiting-on-you", attentionSince: waitingSince ?? null };
+    return { attention: "waiting-on-you", attentionSince: waitingSince ?? null, escalationType: null };
   }
-  return { attention: null, attentionSince: null };
+  return { attention: null, attentionSince: null, escalationType: null };
 }
 
 // phase → Linear workflow state (board columns for the Tickets/Linear lens).
@@ -830,6 +839,21 @@ function ticketUpdatedAt(phaseSigs) {
     if (u > max) max = u;
   }
   return max;
+}
+
+/** CTL-1180: extract escalation_type from the most-recent phase signal that
+ *  carries a structured explanation with that field. Mirrors deriveHumanQuestion's
+ *  newest-phase-first scan. Returns string or null. */
+export function deriveEscalationType(phaseSigs) {
+  for (let i = phaseSigs.length - 1; i >= 0; i--) {
+    const sig = phaseSigs[i];
+    if (!sig || typeof sig !== "object") continue;
+    const expl = sig.explanation;
+    if (expl && typeof expl === "object" && typeof expl.escalation_type === "string") {
+      return expl.escalation_type;
+    }
+  }
+  return null;
 }
 
 /** CTL-1130: extract call_to_action from the most-recent phase signal that
@@ -1539,6 +1563,13 @@ export async function assembleBoard({ getPrStatus = null } = {}) {
       const prStatus = getPrStatus && prNumber != null ? getPrStatus(repoFor(id), prNumber) : null;
       const prStuck = isPrStuck(prStatus, prPhaseStartedAt, now);
       const prReason = prStuck ? prStuckReason(prStatus?.mergeStateStatus, prNumber) : null;
+      // CTL-1180: a terminal failed/stalled phase surfaces needs-human — UNLESS the
+      // pipeline genuinely shipped (cur.phase collapses to PIPELINE_DONE_PHASE). The
+      // explanation.escalation_type rides along for the reading pane.
+      const phaseFailed =
+        cur.phase !== PIPELINE_DONE_PHASE &&
+        phaseSigs.some((s) => TERMINAL_FAILURE.has(s?.status));
+      const failedEscalationType = phaseFailed ? deriveEscalationType(phaseSigs) : null;
       // CTL-729: the single needs-attention bucket (waiting-on-you ∪ needs-human),
       // merging the live worker's blocked-bg-job flag, the needs-human/needs-input
       // Linear labels (CTL-1031 webhook fold), the host-local needs-human marker,
@@ -1552,6 +1583,8 @@ export async function assembleBoard({ getPrStatus = null } = {}) {
         needsHumanSince: deriveNeedsHumanSince(phaseSigs), // CTL-1131: real age anchor
         prStuck,
         prStuckSince: prPhaseStartedAt,
+        phaseFailed,
+        escalationType: failedEscalationType,
       });
       return {
         id,
