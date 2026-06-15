@@ -1321,3 +1321,51 @@ describe("defaultReadSignalBgJobId (CTL-778)", () => {
     expect(defaultReadSignalBgJobId("/orch", "CTL-1", null)).toBeNull();
   });
 });
+
+// CTL-1165 D2: the orphan child-process reaper seam. reaper.mjs gains a
+// `procReaper=null` constructor arg + a `procOrphans.reap-requested` switch case
+// (`_handleProcOrphansSweep`) that delegates to procReaper.sweep — a NO-OP when
+// no ProcReaper is injected, so all pre-D2 reaper tests are unaffected.
+describe("Reaper.handle procOrphans.reap-requested (CTL-1165 D2)", () => {
+  it("routes procOrphans.reap-requested to the injected procReaper.sweep", async () => {
+    let swept = 0;
+    const fakeProcReaper = {
+      sweep: async () => {
+        swept++;
+        return { reaped: [], wouldReap: [], spared: [] };
+      },
+    };
+    const r = new Reaper({
+      agents: agentsFixture([]),
+      emit: mock(() => Promise.resolve()),
+      log: silentLog(),
+      procReaper: fakeProcReaper,
+    });
+    await r.handle({ event: "procOrphans.reap-requested" });
+    expect(swept).toBe(1);
+  });
+
+  it("is a SAFE no-op when no procReaper is injected (default null) — does not throw", async () => {
+    const r = new Reaper({
+      agents: agentsFixture([]),
+      emit: mock(() => Promise.resolve()),
+      log: silentLog(),
+    });
+    // No procReaper → the case must not throw and must not touch any executor.
+    await expect(r.handle({ event: "procOrphans.reap-requested" })).resolves.toBeUndefined();
+  });
+
+  it("a throwing procReaper.sweep is swallowed by handle()'s try/catch (never wedges the loop)", async () => {
+    const r = new Reaper({
+      agents: agentsFixture([]),
+      emit: mock(() => Promise.resolve()),
+      log: silentLog(),
+      procReaper: {
+        sweep: async () => {
+          throw new Error("sweep boom");
+        },
+      },
+    });
+    await expect(r.handle({ event: "procOrphans.reap-requested" })).resolves.toBeUndefined();
+  });
+});

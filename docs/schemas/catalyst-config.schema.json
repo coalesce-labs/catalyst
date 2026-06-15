@@ -317,6 +317,39 @@
                       "description": "Maximum number of job directories deleted per sweep; the remainder drains on the next tick. Env CATALYST_JOB_GC_BATCH_CAP overrides."
                     }
                   }
+                },
+                "procReaper": {
+                  "type": "object",
+                  "description": "CTL-1165 D2: the orphan child-process reaper, run on the same cadence as the orphan-reaper sweep. `claude stop` deregisters a worker's claude agent but leaves its reparented node/bun grandchildren (MCP servers, sub-agent tooling, bun-test runners) running — the bulk of the resident-memory leak. It refuses to act unless every signal corroborates: a successful `claude agents` read this cycle (a failed read aborts the whole sweep, killing nothing), the process is reparented and outside the entire live-agent process tree, command and working directory match, and it has persisted across two consecutive sweeps. A hard never-kill allowlist always protects the daemon, broker, monitor, the live-agent tree, Tailscale, pid 1, and any foreign-uid process.",
+                  "additionalProperties": false,
+                  "properties": {
+                    "mode": {
+                      "type": "string",
+                      "enum": ["off", "shadow", "enforce"],
+                      "default": "shadow",
+                      "description": "off disables the reaper; shadow (the default) logs procOrphans.would-reap for each eligible orphan but kills nothing; enforce SIGTERMs then (after grace, if still alive) SIGKILLs. Ships in shadow so the allowlist + live-tree correlation can be audited on real hosts before any enforce flip."
+                    },
+                    "graceMs": {
+                      "type": "number",
+                      "default": 5000,
+                      "description": "Milliseconds to wait after SIGTERM before re-probing and (only if still alive) SIGKILLing, so node/bun can flush."
+                    },
+                    "minEtimeSec": {
+                      "type": "number",
+                      "default": 900,
+                      "description": "A process must have run at least this long (elapsed seconds) to be eligible — corroboration only, never the sole gate."
+                    },
+                    "worktreeRoot": {
+                      "type": "string",
+                      "description": "Only orphans whose working directory is under this root are reapable. Defaults to ~/catalyst/wt."
+                    },
+                    "allowlistPatterns": {
+                      "type": "array",
+                      "items": { "type": "string" },
+                      "default": [],
+                      "description": "Extra case-insensitive argv substrings to never kill, on top of the built-in allowlist (daemon, broker/index.mjs, orch-monitor/server.ts, the live-agent tree, Tailscale, pid 1, foreign-uid processes)."
+                    }
+                  }
                 }
               }
             }

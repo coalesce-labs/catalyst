@@ -982,6 +982,40 @@ describe("startReaperAndTimer — poll fallback drains reap-intents (CTL-769)", 
   });
 });
 
+// CTL-1165 D2: the daemon constructs the production orphan child-process reaper
+// (ProcReaper, DEFAULT mode:"shadow") and injects it into the Reaper via the
+// makeReaper opts, so reaper.mjs's procOrphans.reap-requested case has a real
+// sweeper to drive (no-op until injected).
+describe("startReaperAndTimer — injects a production ProcReaper (CTL-1165 D2)", () => {
+  test("makeReaper receives a procReaper whose sweep is a function, defaulting to shadow mode", () => {
+    let capturedOpts = null;
+    const fakeReaper = {
+      handle: () => Promise.resolve(),
+      bootReplay: () => Promise.resolve(),
+    };
+    startDaemon({
+      recover: () => {},
+      reconcileBoot: () => {},
+      startMonitor: () => {},
+      startScheduler: () => {},
+      watchRegistry: false,
+      enableReaper: true,
+      makeReaper: (opts) => {
+        capturedOpts = opts;
+        return fakeReaper;
+      },
+      pollMs: 0, // no poll interval needed for this assertion
+      debounceMs: 600_000,
+    });
+    expect(capturedOpts).not.toBeNull();
+    expect(capturedOpts.procReaper).toBeTruthy();
+    expect(typeof capturedOpts.procReaper.sweep).toBe("function");
+    // Default-safe: shadow mode emits would-reap, kills nothing.
+    expect(capturedOpts.procReaper.mode).toBe("shadow");
+    stopDaemon();
+  });
+});
+
 // CTL-701 Phase 3: boot marker exists when recover() (detectColdStart) reads it
 describe("startDaemon — writeBootMarker ordering (CTL-701)", () => {
   test("daemon-boot.json written BEFORE recover() runs", () => {

@@ -157,6 +157,11 @@ export class Reaper {
     // Returns the raw bg_job_id string or null (fail-open: skips the reap).
     // Tests inject a stub; the daemon injects a real orchDir-backed reader.
     readSignalBgJobId = () => null,
+    // CTL-1165 D2 — the orphan child-process reaper (proc-reaper.mjs). DEFAULT
+    // null so all pre-D2 reaper behavior is unchanged: _handleProcOrphansSweep
+    // is a no-op when no ProcReaper is injected. The daemon constructs the
+    // production ProcReaper (DEFAULT mode:"shadow") and injects it here.
+    procReaper = null,
   } = {}) {
     this.executorReap = executorReap;
     this.executorRmForce = executorRmForce;
@@ -174,6 +179,7 @@ export class Reaper {
     this.now = now;
     this.log = logger;
     this.readSignalBgJobId = readSignalBgJobId;
+    this.procReaper = procReaper;
     this._inflight = new Map(); // key → expiresAt
   }
 
@@ -247,6 +253,12 @@ export class Reaper {
           break;
         case "orphans.reap-requested":
           await this._handleOrphansSweep(event);
+          break;
+        // CTL-1165 D2: the orphan child-process sweep trigger (emitted by the
+        // 600s orphan-reaper timer). Routed to the injected ProcReaper — a no-op
+        // when none is injected, so all pre-D2 behavior is unchanged.
+        case "procOrphans.reap-requested":
+          await this._handleProcOrphansSweep(event);
           break;
         default:
           this.log.warn({ event: event.event }, "reaper: unknown reap-intent event");
@@ -541,6 +553,20 @@ export class Reaper {
       return;
     }
     await this.scanOrphans();
+  }
+
+  /**
+   * _handleProcOrphansSweep — CTL-1165 D2. Run one orphan child-process sweep via
+   * the injected ProcReaper (proc-reaper.mjs). The ProcReaper reaps reparented
+   * node/bun grandchildren that `claude stop` orphaned (the RSS bulk of the
+   * leak), gated by a hard never-kill allowlist + LIVE_TREE correlation + a
+   * CATASTROPHE GUARD (a failed `claude agents` read aborts the sweep). It
+   * DEFAULTS to mode:"shadow" (emits would-reap, kills nothing). A null
+   * procReaper makes this a complete no-op, so the case is inert until the daemon
+   * injects a production ProcReaper — every pre-D2 reaper test is unaffected.
+   */
+  async _handleProcOrphansSweep(_event) {
+    await this.procReaper?.sweep({});
   }
 
   /**

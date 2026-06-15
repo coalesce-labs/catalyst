@@ -63,6 +63,7 @@ import {
 import { Reaper, defaultReadActivePhaseSignal, defaultReadSignalBgJobId } from "./reaper.mjs";
 import { startOrphanReaperTimer, readOrphanReaperConfig } from "./orphan-reaper-timer.mjs";
 import { sweepJobDirs } from "./job-dir-gc.mjs"; // CTL-1165 D3: ~/.claude/jobs/<id> dir GC
+import { ProcReaper } from "./proc-reaper.mjs"; // CTL-1165 D2: orphan child-process reaper (default shadow)
 import {
   startWorktreeRefreshTimer,
   readWorktreeRefreshConfig,
@@ -729,10 +730,33 @@ function startReaperAndTimer({
   // CTL-661: bind the per-ticket reconciler's canonical-owner reader to this
   // daemon's orchDir so the sweep resolves the authoritative active-phase
   // bg_job_id (falling back to newest-by-last_seen when no signal is found).
+  // CTL-1165 D2: construct the production orphan child-process reaper and inject
+  // it into the Reaper. DEFAULT mode:"shadow" (emits procOrphans.would-reap, kills
+  // NOTHING) so the allowlist + LIVE_TREE correlation bakes on mini before any
+  // enforce flip — exactly like stall-janitor (CTL-1004) and cost-cap (CTL-1137).
+  // mode/graceMs/worktreeRoot/allowlistPatterns come from
+  // orphanReaper.procReaper; the daemon's own pid is on the never-kill list
+  // (selfPid defaults to process.pid; broker/monitor are covered by the argv
+  // allowlist patterns). A disabled config ("off") makes every sweep an empty
+  // no-op.
+  const procCfg = orphanReaperConfig?.procReaper ?? {};
+  const procReaper = new ProcReaper({
+    mode: procCfg.mode ?? "shadow",
+    ...(procCfg.graceMs != null ? { graceMs: Number(procCfg.graceMs) } : {}),
+    ...(procCfg.minEtimeSec != null ? { minEtimeSec: Number(procCfg.minEtimeSec) } : {}),
+    ...(procCfg.worktreeRoot ? { worktreeRoot: procCfg.worktreeRoot } : {}),
+    ...(Array.isArray(procCfg.allowlistPatterns)
+      ? { allowlistPatterns: procCfg.allowlistPatterns }
+      : {}),
+    daemonPids: [process.pid],
+    log,
+  });
+
   _reaper = makeReaper({
     minIdleMs: (orphanReaperConfig?.minIdleSeconds ?? 900) * 1000,
     readActivePhaseSignal: (ticket) => defaultReadActivePhaseSignal(orchDir, ticket),
     readSignalBgJobId: (ticket, phase) => defaultReadSignalBgJobId(orchDir, ticket, phase),
+    procReaper,
   });
 
   // Boot replay: cover for any intents that landed while the daemon was down.

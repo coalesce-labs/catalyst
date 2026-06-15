@@ -67,13 +67,19 @@ export function startOrphanReaperTimer({
       // fires both even when the producer is async.
       //
       // CTL-1165 D3: piggyback the ~/.claude/jobs/<id> dir GC on the same 600s
-      // cadence (no new daemon timer). All three promises start synchronously
-      // (the emits before any await) and share THIS try/catch, so a rejecting
-      // jobGc cannot suppress the two reap emits — the emit calls have already
-      // run by the time jobGc's rejection surfaces in the shared catch.
+      // cadence (no new daemon timer). All promises start synchronously (the
+      // emits before any await) and share THIS try/catch, so a rejecting jobGc
+      // cannot suppress the reap emits — the emit calls have already run by the
+      // time jobGc's rejection surfaces in the shared catch.
+      //
+      // CTL-1165 D2: fire the orphan child-process reaper trigger on the same
+      // tick. reaper.mjs routes procOrphans.reap-requested to its injected
+      // ProcReaper.sweep (a no-op when no ProcReaper is injected). The ProcReaper
+      // DEFAULTS to mode:"shadow" (emits would-reap, kills nothing).
       await Promise.all([
         emit("orphans.reap-requested", {}),
         emit("phase.reconcile.reap-requested", {}),
+        emit("procOrphans.reap-requested", {}),
         jobGc(),
       ]);
     } catch (err) {

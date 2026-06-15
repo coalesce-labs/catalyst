@@ -90,6 +90,13 @@ The `orchestration.dispatchMode` key picks how Catalyst runs each ticket:
 | `orchestration.stalePrRescue.behindThreshold` | `10` | BEHIND-commit count that triggers a rebase rescue (commits-behind below this are skipped). |
 | `orchestration.stalePrRescue.maxAttempts` | `1` | Max rescue attempts per ticket. After exhaustion, the ticket is escalated to `needs-human`. |
 | `orchestration.stalePrRescue.maxConflictFiles` | `5` | Max conflicting files before a DIRTY PR is deemed unresolvable and escalated instead of dispatched. |
+| `orchestration.orphanReaper.procReaper.mode` | `shadow` | Orphan child-process reaper mode. `off` disables it; `shadow` (the default) logs `procOrphans.would-reap` for each orphaned reparented `node`/`bun` grandchild a dead worker left behind but **kills nothing**; `enforce` actually `SIGTERM`→grace→`SIGKILL`s them. Ships in `shadow` so the never-kill allowlist + live-agent process-tree correlation can be audited on real hosts before any `enforce` flip. |
+| `orchestration.orphanReaper.procReaper.graceMs` | `5000` | Milliseconds to wait after `SIGTERM` before re-probing and (only if still alive) `SIGKILL`ing, so `node`/`bun` can flush. |
+| `orchestration.orphanReaper.procReaper.minEtimeSec` | `900` | A process must have run at least this long (elapsed time) before it is eligible — corroboration only, never the sole gate. |
+| `orchestration.orphanReaper.procReaper.worktreeRoot` | `~/catalyst/wt` | Only orphans whose working directory is under this root are reapable; an interactive `claude` or dev shell outside it is never touched. |
+| `orchestration.orphanReaper.procReaper.allowlistPatterns` | `[]` | Extra case-insensitive argv substrings to never kill, on top of the built-in allowlist (the daemon, `broker/index.mjs`, `orch-monitor/server.ts`, the entire live-agent process tree, Tailscale, pid 1, and any foreign-uid process). |
+
+The orphan child-process reaper is the corroboration-heavy companion to the session-level reaper: `claude stop` deregisters a worker's claude agent but leaves its reparented `node`/`bun` grandchildren (MCP servers, sub-agent tooling, `bun test` runners) running — the bulk of the resident-memory leak. It runs on the same 600-second cadence as the orphan-session sweep and refuses to act unless every signal corroborates: a successful `claude agents` read this cycle (a failed read aborts the whole sweep), the process is reparented and outside the live-agent process tree, its command and working directory match, and it has persisted across two consecutive sweeps.
 
 For `execution-core` mode, the number of workers comes from a separate committed block, `orchestration.executionCore.maxParallel` (default `4`). One daemon runs per machine and serves all your projects.
 

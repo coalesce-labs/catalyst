@@ -30,17 +30,22 @@ function fakeClock() {
 }
 
 describe("startOrphanReaperTimer", () => {
-  it("emits orphans + reconcile reap-requested every interval (CTL-661)", () => {
+  it("emits orphans + reconcile + procOrphans reap-requested every interval (CTL-661 / CTL-1165 D2)", () => {
     const emitted = [];
     const clock = fakeClock();
     startOrphanReaperTimer({ intervalSeconds: 600, emit: (e) => emitted.push(e), clock });
     clock.advance(600_000);
-    // CTL-661: each tick now drives BOTH the orphan sweep and the per-ticket
-    // reconcile sweep (the bare reconcile event is the sweep trigger).
-    expect(emitted).toEqual(["orphans.reap-requested", "phase.reconcile.reap-requested"]);
+    // CTL-661: each tick drives the orphan sweep AND the per-ticket reconcile
+    // sweep. CTL-1165 D2: it also fires the orphan child-process reaper trigger.
+    expect(emitted).toEqual([
+      "orphans.reap-requested",
+      "phase.reconcile.reap-requested",
+      "procOrphans.reap-requested",
+    ]);
     clock.advance(600_000);
     expect(emitted.filter((e) => e === "orphans.reap-requested").length).toBe(2);
     expect(emitted.filter((e) => e === "phase.reconcile.reap-requested").length).toBe(2);
+    expect(emitted.filter((e) => e === "procOrphans.reap-requested").length).toBe(2);
   });
 
   it("honors a config-overridden interval", () => {

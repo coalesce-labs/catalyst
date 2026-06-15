@@ -38,6 +38,18 @@ export const REAP_INTENT_TYPES = Object.freeze([
   // is already done); it is registered here ONLY so the emitter does not throw
   // "unknown reap-intent event type" and silently drop the count.
   "jobs.gc.swept",
+  // CTL-1165 D2: the orphan child-process reaper (proc-reaper.mjs). The periodic
+  // orphan-reaper timer emits the TRIGGER `procOrphans.reap-requested` (routed by
+  // reaper.mjs _handleProcOrphansSweep → procReaper.sweep); the ProcReaper itself
+  // emits the per-process FLAGs `procOrphans.reaped` (enforce kill),
+  // `procOrphans.would-reap` (shadow — the DEFAULT, kills nothing), and
+  // `procOrphans.spared` (corroboration-failed / catastrophe-guard skip). Only
+  // the `.reap-requested` trigger has a handle() case; the FLAGs are registered
+  // here ONLY so the emitter does not throw "unknown reap-intent event type".
+  "procOrphans.reap-requested",
+  "procOrphans.reaped",
+  "procOrphans.would-reap",
+  "procOrphans.spared",
   // CTL-695: terminal-worker reap — a phase signal reached failed/stalled, or the
   // final monitor-deploy phase completed, with no successor dispatch to trigger the
   // happy-path predecessor reap. Routed to the single-target (busy-OK) reap path.
@@ -72,6 +84,9 @@ const FIELD_MAP = {
   dominantPhase: "dominant_phase",
   quietMs: "quiet_ms",
   orchId: "orch_id",
+  // CTL-1165 D2: proc-reaper process-level fields (already snake_case identity).
+  pid: "pid",
+  command: "command",
 };
 
 /**
