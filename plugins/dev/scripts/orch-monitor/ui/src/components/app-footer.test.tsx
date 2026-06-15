@@ -119,7 +119,7 @@ mock.module("@/hooks/use-push-subscription", () => {
     base64UrlToUint8Array,
     usePushSubscription: () => ({
       supported: false,
-      permission: "default" as const,
+      permission: "default" as "default",
       subscribed: false,
       enable: async () => {},
       error: null,

@@ -38,20 +38,20 @@ export function base64UrlToUint8Array(base64UrlString: string): Uint8Array {
 
 // ── Hook ──────────────────────────────────────────────────────────────────────
 
-export type NotificationPermission = "default" | "granted" | "denied";
+export type PushPushNotificationPermission = "default" | "granted" | "denied";
 
 export interface UsePushSubscriptionResult {
   supported: boolean;
-  permission: NotificationPermission;
+  permission: PushPushNotificationPermission;
   subscribed: boolean;
   enable(): Promise<void>;
   error: string | null;
 }
 
 export function usePushSubscription(): UsePushSubscriptionResult {
-  const [permission, setPermission] = useState<NotificationPermission>(
+  const [permission, setPermission] = useState<PushPushNotificationPermission>(
     PUSH_SUPPORTED
-      ? (Notification.permission as NotificationPermission)
+      ? (Notification.permission as PushNotificationPermission)
       : "default",
   );
   const [subscribed, setSubscribed] = useState(false);
@@ -69,7 +69,7 @@ export function usePushSubscription(): UsePushSubscriptionResult {
       }
       if (Notification.permission !== "granted") {
         const result = await Notification.requestPermission();
-        setPermission(result as NotificationPermission);
+        setPermission(result as PushNotificationPermission);
         if (result !== "granted") return;
       }
 

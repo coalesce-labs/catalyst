@@ -8,7 +8,16 @@ export interface VapidKeys {
 
 export function loadOrCreateVapidKeys(path: string): VapidKeys {
   if (existsSync(path)) {
-    return JSON.parse(readFileSync(path, "utf8")) as VapidKeys;
+    const parsed = JSON.parse(readFileSync(path, "utf8")) as unknown;
+    if (
+      typeof parsed !== "object" ||
+      parsed === null ||
+      typeof (parsed as Record<string, unknown>).publicKey !== "string" ||
+      typeof (parsed as Record<string, unknown>).privateKey !== "string"
+    ) {
+      throw new Error(`vapid.ts: malformed VAPID key file at ${path}`);
+    }
+    return parsed as VapidKeys;
   }
   const keys = webpush.generateVAPIDKeys();
   writeFileSync(path, JSON.stringify(keys), { mode: 0o600 });

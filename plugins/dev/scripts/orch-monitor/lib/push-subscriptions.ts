@@ -34,7 +34,7 @@ export function closeDb(): void {
 }
 
 function ensureDb(): Database {
-  if (!db) throw new Error("push-subscriptions: openDb() first");
+  if (!db) throw new Error("Database not opened — call openDb() first");
   return db;
 }
 
@@ -61,9 +61,3 @@ export function deleteSubscription(endpoint: string): void {
   ]);
 }
 
-export function touchLastUsed(endpoint: string): void {
-  ensureDb().run(
-    `UPDATE push_subscriptions SET last_used_at = ? WHERE endpoint = ?`,
-    [new Date().toISOString(), endpoint],
-  );
-}
