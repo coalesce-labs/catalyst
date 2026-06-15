@@ -11,8 +11,15 @@ const read = (rel: string) => readFileSync(join(HERE, "..", rel), "utf8");
 const boardDataSrc = read("lib/board-data.mjs");
 
 // Dynamic import so the pure helper can be exercised without the filesystem reads
-// that assembleBoard triggers (EC = homedir path).
-const { synthesizeOrphanTickets } = await import(join(HERE, "..", "lib", "board-data.mjs"));
+// that assembleBoard triggers (EC = homedir path). board-data.mjs has no adjacent
+// type for this new export, so cast the module to a typed function shape — same
+// pattern as board-todo-column.test.ts — to keep the no-unsafe-call lint rule happy.
+const mod = await import(join(HERE, "..", "lib", "board-data.mjs"));
+const synthesizeOrphanTickets = (mod as Record<string, unknown>)
+  .synthesizeOrphanTickets as (
+  state: unknown,
+  now: number,
+) => Array<Record<string, unknown>>;
 
 // Helpers
 const notified = (over: Record<string, unknown> = {}) => ({
