@@ -95,7 +95,7 @@ function formatOptionsTable(options: EscalationOption[]): string {
  */
 export function composeNotification(
   ticket: string,
-  escalation: EscalationPayload
+  escalation: EscalationPayload | null | undefined
 ): NotificationComposition | null {
   if (!escalation || !ticket) return null;
 
