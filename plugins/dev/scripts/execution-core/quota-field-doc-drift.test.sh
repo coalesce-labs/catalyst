@@ -26,7 +26,7 @@ done
 # Exclude ratelimit.sampled — it appears as a suffix of the event NAME
 # "account.ratelimit.sampled", not as an emitted attribute key.
 for d in $(grep -oE 'ratelimit\.[a-z_]+' "$DOC" | grep -v '^ratelimit\.sampled$' | sort -u); do
-  grep -qF "$d" <<<"$KEYS" && pass "doc key $d backed by source" || fail "doc invents key $d"
+  grep -qxF "$d" <<<"$KEYS" && pass "doc key $d backed by source" || fail "doc invents key $d"
 done
 
 # (d) event name + binding-limit + camelCase-internal note documented

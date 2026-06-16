@@ -59,7 +59,8 @@ everything marked **PER-NODE**. The classification is encoded in
 
 ## Canonical quota field-name schema
 
-**Single source of truth:** [`ratelimit-event.mjs:62-70`](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/scripts/execution-core/ratelimit-event.mjs#L62-L70).
+**Single source of truth:** [`ratelimit-event.mjs:63-70`](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/scripts/execution-core/ratelimit-event.mjs#L63-L70)
+(line 62 emits the `account.email` identity key, which is not part of the quota schema below).
 
 Event name: `account.ratelimit.sampled` (severity INFO, emitted every poll tick).
 
