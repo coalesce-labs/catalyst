@@ -208,6 +208,7 @@ export function SettingsSurface() {
           {settingsView.kind === "project" ? (
             /* ── Per-project editor pane ──────────────────────────────────── */
             <ProjectSettingsPane
+              key={settingsView.project.key}
               project={settingsView.project}
               candidates={iconMap[settingsView.project.repo]?.candidates ?? []}
               onSaved={refetch}
