@@ -33,12 +33,17 @@ function captureEmit() {
 }
 
 // A full set of healthy probe seams (round-number values so rounding is obvious).
+// readWorktree + emitMetricsFn + nowMs are injected so no test ever hits the real
+// `du` / OTLP path (CTL-1227); overrides win.
 function healthyProbes(overrides = {}) {
   return {
     readCpu: () => ({ cpuPct: 12.34, cpuCount: 10 }),
     readMem: () => ({ usedMb: 8192.6, totalMb: 16384 }),
     readDisk: () => ({ usedGb: 120.45, totalGb: 500 }),
     readLoad: () => 2.345,
+    readWorktree: () => ({ usedBytes: 3 * 1024 * 1024 * 1024, count: 2 }),
+    emitMetricsFn: () => {},
+    nowMs: () => 1_700_000_000_000,
     ...overrides,
   };
 }
@@ -144,7 +149,15 @@ describe("sampleHost — partial-probe failure still emits", () => {
     const boom = () => {
       throw new Error("nope");
     };
-    await sampleHost({ readCpu: boom, readMem: boom, readDisk: boom, readLoad: boom, emit });
+    await sampleHost({
+      readCpu: boom,
+      readMem: boom,
+      readDisk: boom,
+      readLoad: boom,
+      readWorktree: boom,
+      emitMetricsFn: () => {},
+      emit,
+    });
     expect(calls.length).toBe(1);
     const a = calls[0].spec.attrs;
     for (const k of Object.keys(a)) expect(a[k]).toBe(null);
@@ -196,12 +209,24 @@ describe("parseDfRoot — real `df -k /` fixtures", () => {
   const LINUX = `Filesystem     1K-blocks     Used Available Use% Mounted on
 /dev/nvme0n1p2 102400000 51200000  46137344  53% /`;
 
-  test("parses the macOS row by leading column position (total, used)", () => {
-    expect(parseDfRoot(MACOS)).toEqual({ totalKb: 971350180, usedKb: 16324544 });
+  test("parses the macOS row by leading column position (total, used, avail, device, mountpoint)", () => {
+    expect(parseDfRoot(MACOS)).toEqual({
+      totalKb: 971350180,
+      usedKb: 16324544,
+      availKb: 186926344,
+      device: "/dev/disk3s1s1",
+      mountpoint: "/",
+    });
   });
 
   test("parses the Linux row identically (same leading positions)", () => {
-    expect(parseDfRoot(LINUX)).toEqual({ totalKb: 102400000, usedKb: 51200000 });
+    expect(parseDfRoot(LINUX)).toEqual({
+      totalKb: 102400000,
+      usedKb: 51200000,
+      availKb: 46137344,
+      device: "/dev/nvme0n1p2",
+      mountpoint: "/",
+    });
   });
 
   test("returns null for empty / header-only / unparseable input", () => {
@@ -354,5 +379,155 @@ describe("defaultReadDisk — volume selection", () => {
   test("every probe failing returns nulls, never throws", () => {
     const disk = defaultReadDisk({ df: () => { throw new Error("boom"); }, platform: "darwin" });
     expect(disk).toEqual({ usedGb: null, totalGb: null });
+  });
+});
+
+// ─── CTL-1227: semconv metrics + new probes + new disk attrs ─────────────────
+import { buildHostMetrics, defaultReadWorktree, defaultReadThermal } from "./host.mjs";
+
+// metricByName / pointFor — small helpers to assert on the metric array.
+function metricByName(metrics, name) {
+  return metrics.find((m) => m.name === name);
+}
+function points(m) {
+  return (m.gauge?.dataPoints ?? m.sum?.dataPoints ?? []);
+}
+function attrVal(point, key) {
+  return point.attributes.find((a) => a.key === key)?.value?.stringValue;
+}
+
+describe("buildHostMetrics — semconv metric set (bytes/ratio)", () => {
+  const readings = {
+    cpuPct: 25,
+    cpuCount: 10,
+    load1: 2.5,
+    mem: { usedBytes: 8 * 1024 ** 3, totalBytes: 16 * 1024 ** 3 },
+    disk: {
+      usedBytes: 400 * 1024 ** 3,
+      totalBytes: 1000 * 1024 ** 3,
+      availBytes: 600 * 1024 ** 3,
+      device: "/dev/disk3s5",
+      mountpoint: "/System/Volumes/Data",
+      type: null,
+    },
+    worktree: { usedBytes: 30 * 1024 ** 3, count: 12 },
+    thermal: { temperatureCel: 55.5, speedLimitPct: 100 },
+  };
+
+  test("cpu.utilization is a 0..1 ratio; load + logical.count present", () => {
+    const m = buildHostMetrics(readings, "1000");
+    expect(points(metricByName(m, "system.cpu.utilization"))[0].asDouble).toBe(0.25);
+    expect(points(metricByName(m, "system.cpu.load_average.1m"))[0].asDouble).toBe(2.5);
+    expect(points(metricByName(m, "system.cpu.logical.count"))[0].asDouble).toBe(10);
+  });
+
+  test("memory.usage emits used + free states in BYTES; utilization is a ratio", () => {
+    const m = buildHostMetrics(readings, "1000");
+    const usage = metricByName(m, "system.memory.usage");
+    expect(usage.unit).toBe("By");
+    const used = points(usage).find((p) => attrVal(p, "system.memory.state") === "used");
+    const free = points(usage).find((p) => attrVal(p, "system.memory.state") === "free");
+    expect(used.asDouble).toBe(8 * 1024 ** 3);
+    expect(free.asDouble).toBe(8 * 1024 ** 3); // 16 - 8
+    expect(points(metricByName(m, "system.memory.utilization"))[0].asDouble).toBeCloseTo(0.5, 5);
+  });
+
+  test("filesystem.usage carries used+free states + device/mountpoint; limit + utilization present", () => {
+    const m = buildHostMetrics(readings, "1000");
+    const fs = metricByName(m, "system.filesystem.usage");
+    const used = points(fs).find((p) => attrVal(p, "system.filesystem.state") === "used");
+    expect(used.asDouble).toBe(400 * 1024 ** 3);
+    expect(attrVal(used, "system.device")).toBe("/dev/disk3s5");
+    expect(attrVal(used, "system.filesystem.mountpoint")).toBe("/System/Volumes/Data");
+    const free = points(fs).find((p) => attrVal(p, "system.filesystem.state") === "free");
+    expect(free.asDouble).toBe(600 * 1024 ** 3);
+    expect(points(metricByName(m, "system.filesystem.limit"))[0].asDouble).toBe(1000 * 1024 ** 3);
+    expect(points(metricByName(m, "system.filesystem.utilization"))[0].asDouble).toBeCloseTo(0.4, 5);
+  });
+
+  test("worktree gauge is labeled logical_du; thermal emits temp + speed-limit ratio", () => {
+    const m = buildHostMetrics(readings, "1000");
+    const wt = metricByName(m, "catalyst.worktree.disk.usage_logical");
+    expect(wt.unit).toBe("By");
+    expect(attrVal(points(wt)[0], "catalyst.measurement")).toBe("logical_du");
+    expect(points(metricByName(m, "catalyst.worktree.count"))[0].asDouble).toBe(12);
+    expect(points(metricByName(m, "hw.temperature"))[0].asDouble).toBe(55.5);
+    expect(points(metricByName(m, "catalyst.host.thermal.speed_limit"))[0].asDouble).toBe(1); // 100/100
+  });
+
+  test("missing readings drop their metrics (null-safe)", () => {
+    const m = buildHostMetrics({ cpuPct: null, mem: {}, disk: {}, worktree: {}, thermal: {} }, "1");
+    // no values → essentially no metrics survive
+    expect(metricByName(m, "system.cpu.utilization")).toBeUndefined();
+    expect(metricByName(m, "system.filesystem.usage")).toBeUndefined();
+    expect(metricByName(m, "hw.temperature")).toBeUndefined();
+  });
+});
+
+describe("defaultReadWorktree — du bytes + worktree count (injected)", () => {
+  test("parses `du -sk` KB→bytes and counts wt/<project>/<ticket> dirs", () => {
+    const du = () => "31457280\t/home/u/catalyst/wt"; // 30 GiB in KB
+    const dirent = (name) => ({ name, isDirectory: () => true });
+    const listDirs = (p) =>
+      p.endsWith("/wt") ? [dirent("catalyst-workspace"), dirent("adva")]
+        : p.endsWith("catalyst-workspace") ? [dirent("CTL-1"), dirent("CTL-2"), dirent("CTL-3")]
+          : [dirent("ADV-9")];
+    const r = defaultReadWorktree({ catalystDir: "/home/u/catalyst", du, listDirs });
+    expect(r.usedBytes).toBe(31457280 * 1024);
+    expect(r.count).toBe(4); // 3 + 1
+  });
+
+  test("du failure → usedBytes null; missing dir → count null; never throws", () => {
+    const r = defaultReadWorktree({
+      du: () => { throw new Error("no du"); },
+      listDirs: () => { throw new Error("ENOENT"); },
+    });
+    expect(r).toEqual({ usedBytes: null, count: null });
+  });
+});
+
+describe("defaultReadThermal — platform-specific, best-effort (injected)", () => {
+  test("linux: mean of thermal-zone Celsius temps", () => {
+    const r = defaultReadThermal({ platform: "linux", readZones: () => [50, 60] });
+    expect(r.temperatureCel).toBe(55);
+    expect(r.speedLimitPct).toBe(null);
+  });
+
+  test("darwin: pmset CPU_Speed_Limit parsed; temperature null", () => {
+    const pmset = () => "Note: ...\nCPU_Speed_Limit \t= 87\n";
+    const r = defaultReadThermal({ platform: "darwin", pmset });
+    expect(r.speedLimitPct).toBe(87);
+    expect(r.temperatureCel).toBe(null);
+  });
+
+  test("a throwing probe yields nulls (never throws)", () => {
+    const r = defaultReadThermal({ platform: "darwin", pmset: () => { throw new Error("no pmset"); } });
+    expect(r).toEqual({ temperatureCel: null, speedLimitPct: null });
+  });
+});
+
+describe("sampleHost — new disk avail/free + worktree attrs on the legacy event", () => {
+  test("emits disk_avail_gb, disk_free_pct, worktree_used_gb, worktree_count", async () => {
+    const { calls, emit } = captureEmit();
+    await sampleHost({
+      ...healthyProbes({
+        readDisk: () => ({ usedGb: 400, totalGb: 1000, availGb: 600 }),
+        readWorktree: () => ({ usedBytes: 30 * 1024 ** 3, count: 7 }),
+      }),
+      emit,
+    });
+    const a = calls[0].spec.attrs;
+    expect(a["host.disk_avail_gb"]).toBe(600);
+    expect(a["host.disk_free_pct"]).toBe(60); // 600/1000*100
+    expect(a["host.worktree_used_gb"]).toBe(30);
+    expect(a["host.worktree_count"]).toBe(7);
+  });
+
+  test("a metrics-emit seam receives the semconv metric batch", async () => {
+    const { emit } = captureEmit();
+    let got = null;
+    await sampleHost({ ...healthyProbes(), emit, emitMetricsFn: (m) => { got = m; } });
+    expect(Array.isArray(got)).toBe(true);
+    expect(got.some((m) => m.name === "system.cpu.utilization")).toBe(true);
   });
 });

@@ -279,3 +279,112 @@ export async function drainPending(pending) {
     /* never throw — drain is best-effort */
   }
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// OTLP METRICS (CTL-1227) — the agent's second transport. Unlike the event/log
+// path above (custom catalyst.* attributes → Loki labels), metrics are emitted
+// to the collector's METRICS pipeline (OTLP /v1/metrics → Prometheus) using
+// OpenTelemetry SEMANTIC CONVENTIONS (system.cpu.*, system.memory.*,
+// system.filesystem.*; https://opentelemetry.io/docs/specs/semconv/system/).
+// Values are bytes / ratios per semconv (NOT the GB / percent the legacy event
+// uses). All best-effort, NEVER-throw — a flaky collector must not sink a tick.
+//
+// NUMERIC TYPE: every data point uses asDouble (same single-type rationale as the
+// log path's otlpAnyValue — a key must not oscillate int/double across ticks).
+
+// metricResource — the same host/service identity the log envelope carries, so
+// metrics and events share one resource on the dashboards.
+export function metricResource() {
+  return {
+    "service.name": "catalyst.agent",
+    "service.namespace": "catalyst",
+    hostname: shortHostname(),
+    "host.name": hostName(),
+    "host.id": hostId(),
+  };
+}
+
+// dropNullAttrs — the put() pattern for metric data-point attributes: an attr is
+// included ONLY when non-null/defined (so an unknown system.filesystem.type etc.
+// is omitted rather than emitted as an empty label).
+function dropNullAttrs(attrs = {}) {
+  const out = {};
+  for (const [k, v] of Object.entries(attrs)) if (v !== null && v !== undefined) out[k] = v;
+  return out;
+}
+
+/**
+ * otlpMetric — build ONE OTLP metric JSON object (semconv-shaped).
+ * @param {object} m
+ * @param {string} m.name        e.g. "system.filesystem.usage"
+ * @param {string} [m.unit]      UCUM unit, e.g. "By" (bytes), "1" (ratio)
+ * @param {string} [m.description]
+ * @param {"gauge"|"sum"} m.kind gauge → Gauge; sum → (UpDown)Counter
+ * @param {boolean} [m.monotonic=false] for kind:"sum" (usage/limit are non-monotonic)
+ * @param {Array<{value:number, attrs?:object, timeUnixNano:string}>} m.points
+ *        points whose value is null/non-finite are dropped; a metric with no
+ *        surviving points returns null (and is filtered by build* callers).
+ * @returns {object|null}
+ */
+export function otlpMetric({ name, unit = "", description = "", kind, monotonic = false, points = [] }) {
+  const dataPoints = (points ?? [])
+    .filter((p) => p && typeof p.value === "number" && Number.isFinite(p.value))
+    .map((p) => ({
+      timeUnixNano: String(p.timeUnixNano ?? ""),
+      asDouble: p.value,
+      attributes: otlpAttributes(dropNullAttrs(p.attrs)),
+    }));
+  if (dataPoints.length === 0) return null;
+  const data =
+    kind === "sum"
+      ? { sum: { dataPoints, aggregationTemporality: 2 /* CUMULATIVE */, isMonotonic: monotonic } }
+      : { gauge: { dataPoints } };
+  return { name, unit, description, ...data };
+}
+
+/**
+ * sendOtlpMetrics — POST a batch of OTLP metrics to <endpoint>/v1/metrics as
+ * OTLP/HTTP JSON. Best-effort: true on 2xx, false otherwise; NEVER throws.
+ * @param {object[]} metrics  otlpMetric() results (nulls are filtered here too)
+ */
+export async function sendOtlpMetrics(
+  metrics,
+  { endpoint, headers = {}, fetchImpl = fetch, resource = metricResource() } = {},
+) {
+  const list = (Array.isArray(metrics) ? metrics : []).filter(Boolean);
+  if (!endpoint || list.length === 0) return false;
+  const url = `${endpoint.replace(/\/+$/, "")}/v1/metrics`;
+  const body = {
+    resourceMetrics: [
+      {
+        resource: { attributes: otlpAttributes(resource) },
+        scopeMetrics: [{ scope: { name: "catalyst-agent" }, metrics: list }],
+      },
+    ],
+  };
+  try {
+    const res = await fetchImpl(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...headers },
+      body: JSON.stringify(body),
+    });
+    const ok = res?.status >= 200 && res?.status < 300;
+    if (!ok) log.warn({ status: res?.status }, "emit: OTLP metrics POST non-2xx");
+    return ok;
+  } catch (err) {
+    log.warn({ err: err?.message }, "emit: OTLP metrics POST failed");
+    return false;
+  }
+}
+
+/**
+ * emitMetrics — route a metric batch through OTLP when the emit mode enables it
+ * (otlp / both). Returns the pending POST promise (for drainPending) or null when
+ * metrics are disabled (e.g. eventlog-only hosts like a dev laptop). NEVER throws.
+ */
+export function emitMetrics(metrics, config) {
+  if (!(config?.emit === "otlp" || config?.emit === "both")) return null;
+  return Promise.resolve(
+    sendOtlpMetrics(metrics, { endpoint: config.otlpEndpoint, headers: config.otlpHeaders }),
+  ).catch(() => false);
+}
