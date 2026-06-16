@@ -79,7 +79,10 @@ import {
   type GroupableEntity,
 } from "./board-grouping";
 import { useRepoIconMap } from "./repo-icon-context";
-import { laneIconSrc } from "./entity-icon";
+import { laneIconSrc, laneMark } from "./entity-icon";
+import { useResolvedRepoColors } from "@/hooks/use-resolved-repo-colors";
+import { ProjectMarkIcon } from "@/components/project-mark-icon";
+import type { ProjectMark } from "@/lib/project-mark";
 import { laneDisplayName } from "@/lib/nav-model";
 import { computeLaneHeights } from "./lane-heights";
 import type { Density } from "./prefs-store";
@@ -431,6 +434,8 @@ function GroupLabelRow({
   live,
   hint,
   iconSrc,
+  mark,
+  markColor,
   laneBg,
   isFirst,
 }: {
@@ -438,13 +443,24 @@ function GroupLabelRow({
   count: number;
   live: Lane<unknown>["live"];
   hint: string | null;
+  /** @deprecated Use `mark` + `markColor` (CTL-1208). Still accepted for back-compat. */
   iconSrc?: string | null;
+  /** CTL-1208: resolved ProjectMark for this lane's repo. Supersedes iconSrc. */
+  mark?: ProjectMark;
+  /** CTL-1208: CSS color to tint a glyph mark. */
+  markColor?: string;
   laneBg?: string;
   isFirst?: boolean;
 }) {
   const isLive = live === "live";
   const dotColor = isLive ? LIVE : live === "degraded" ? C.yellow : live === "offline" ? C.fgDim : C.blue;
   const bg = laneBg ?? C.s1;
+  // CTL-1208: mark supersedes legacy iconSrc when present.
+  const effectiveMark: ProjectMark | null = mark && mark.kind !== "none"
+    ? mark
+    : iconSrc
+      ? { kind: "favicon", dataUrl: iconSrc, selectedPath: "" }
+      : null;
   return (
     // Outer band: sticky-TOP only — holds its row position during vertical scroll;
     // scrolls horizontally with the column grid so the background fills the full width.
@@ -488,11 +504,10 @@ function GroupLabelRow({
           borderBottomLeftRadius: 10,
         }}
       >
-        {iconSrc ? (
-          // CTL-1012: the 16px project mark (up from the 14px CTL-998 favicon) so the
-          // brand reads at the lane-header scale; dot fallback when no icon discovered.
-          <img src={iconSrc} alt="" aria-hidden
-            style={{ width: 16, height: 16, borderRadius: 4, objectFit: "contain", flex: "0 0 auto" }} />
+        {effectiveMark ? (
+          // CTL-1012 / CTL-1208: the 16px project mark (up from 14px for lane-header
+          // scale). Glyph → tinted SVG; favicon → <img>; null → dot fallback.
+          <ProjectMarkIcon mark={effectiveMark} color={markColor ?? C.fg} size={16} />
         ) : (
           <span
             className={isLive ? "catalyst-live-dot" : undefined}
@@ -886,6 +901,8 @@ export function SwimlaneBoard<T extends GroupableEntity>({
   // `fill` (auto height, rare embeds) we keep the legacy single-flow flat board.
   const flatScroll = !chrome && fill;
   const icons = useRepoIconMap();
+  // CTL-1208: accent colors for glyph tinting (same .text channel as card accent dots).
+  const resolvedColors = useResolvedRepoColors();
 
   // CTL-973: refs for the swipe guard + bump affordance.
   // `scrollRef` points at the overflow container (the wheel listener target).
@@ -969,14 +986,15 @@ export function SwimlaneBoard<T extends GroupableEntity>({
             return (
               <Fragment key={lane.key}>
                 <GroupLabelRow
-                  // CTL-1012: spelled-out brand name ("Adva (ADV)") + project icon,
-                  // resolved from the lane's representative repo (the team→repo bridge).
-                  // Host axis keeps its bare label + liveness dot (laneIconSrc → null).
+                  // CTL-1012 / CTL-1208: lane header with project mark (glyph or favicon).
+                  // Host axis keeps its bare label + liveness dot (laneMark → none).
                   label={laneDisplayName(groupBy, lane.key, lane.label, lane.repo)}
                   count={lane.items.length}
                   live={lane.live}
                   hint={lanes.length === 1 ? singleLaneHint(groupBy, lane, entityNoun) : null}
                   iconSrc={laneIconSrc(groupBy, lane.repo, icons)}
+                  mark={laneMark(groupBy, lane.repo, icons)}
+                  markColor={lane.repo ? resolvedColors[lane.repo]?.text : undefined}
                   laneBg={laneBg}
                   isFirst={laneIdx === 0}
                 />

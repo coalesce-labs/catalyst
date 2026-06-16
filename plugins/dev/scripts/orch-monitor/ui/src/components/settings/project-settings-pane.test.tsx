@@ -43,41 +43,41 @@ const project = {
 
 describe("ProjectSettingsPane", () => {
   it("renders the project name as a heading", () => {
-    const el = ProjectSettingsPaneContent({ project, name: "", color: "auto", stateMapEdits: {}, saving: false, error: null, onNameChange: () => {}, onColorChange: () => {}, onStateMapChange: () => {}, onSave: () => {} });
+    const el = ProjectSettingsPaneContent({ project, name: "", color: "auto", icon: null, candidates: [], stateMapEdits: {}, saving: false, error: null, onNameChange: () => {}, onColorChange: () => {}, onIconChange: () => {}, onStateMapChange: () => {}, onSave: () => {} });
     expect(containsText(el, "Catalyst")).toBe(true);
   });
 
   it("renders the project key", () => {
-    const el = ProjectSettingsPaneContent({ project, name: "", color: "auto", stateMapEdits: {}, saving: false, error: null, onNameChange: () => {}, onColorChange: () => {}, onStateMapChange: () => {}, onSave: () => {} });
+    const el = ProjectSettingsPaneContent({ project, name: "", color: "auto", icon: null, candidates: [], stateMapEdits: {}, saving: false, error: null, onNameChange: () => {}, onColorChange: () => {}, onIconChange: () => {}, onStateMapChange: () => {}, onSave: () => {} });
     expect(containsText(el, "CTL")).toBe(true);
   });
 
   it("renders all 8 hue names as color options", () => {
-    const el = ProjectSettingsPaneContent({ project, name: "", color: "auto", stateMapEdits: {}, saving: false, error: null, onNameChange: () => {}, onColorChange: () => {}, onStateMapChange: () => {}, onSave: () => {} });
+    const el = ProjectSettingsPaneContent({ project, name: "", color: "auto", icon: null, candidates: [], stateMapEdits: {}, saving: false, error: null, onNameChange: () => {}, onColorChange: () => {}, onIconChange: () => {}, onStateMapChange: () => {}, onSave: () => {} });
     for (const hue of NAMED_COLOR_NAMES) {
       expect(containsText(el, hue)).toBe(true);
     }
   });
 
   it("renders an Auto color option", () => {
-    const el = ProjectSettingsPaneContent({ project, name: "", color: "auto", stateMapEdits: {}, saving: false, error: null, onNameChange: () => {}, onColorChange: () => {}, onStateMapChange: () => {}, onSave: () => {} });
+    const el = ProjectSettingsPaneContent({ project, name: "", color: "auto", icon: null, candidates: [], stateMapEdits: {}, saving: false, error: null, onNameChange: () => {}, onColorChange: () => {}, onIconChange: () => {}, onStateMapChange: () => {}, onSave: () => {} });
     expect(containsText(el, "Auto")).toBe(true);
   });
 
   it("renders all 12 STATE_MAP_KEYS labels", () => {
-    const el = ProjectSettingsPaneContent({ project, name: "", color: "auto", stateMapEdits: {}, saving: false, error: null, onNameChange: () => {}, onColorChange: () => {}, onStateMapChange: () => {}, onSave: () => {} });
+    const el = ProjectSettingsPaneContent({ project, name: "", color: "auto", icon: null, candidates: [], stateMapEdits: {}, saving: false, error: null, onNameChange: () => {}, onColorChange: () => {}, onIconChange: () => {}, onStateMapChange: () => {}, onSave: () => {} });
     for (const k of STATE_MAP_KEYS) {
       expect(containsText(el, STATE_MAP_KEY_LABEL[k])).toBe(true);
     }
   });
 
   it("renders a Save button", () => {
-    const el = ProjectSettingsPaneContent({ project, name: "", color: "auto", stateMapEdits: {}, saving: false, error: null, onNameChange: () => {}, onColorChange: () => {}, onStateMapChange: () => {}, onSave: () => {} });
+    const el = ProjectSettingsPaneContent({ project, name: "", color: "auto", icon: null, candidates: [], stateMapEdits: {}, saving: false, error: null, onNameChange: () => {}, onColorChange: () => {}, onIconChange: () => {}, onStateMapChange: () => {}, onSave: () => {} });
     expect(containsText(el, "Save")).toBe(true);
   });
 
   it("renders display name section header", () => {
-    const el = ProjectSettingsPaneContent({ project, name: "", color: "auto", stateMapEdits: {}, saving: false, error: null, onNameChange: () => {}, onColorChange: () => {}, onStateMapChange: () => {}, onSave: () => {} });
+    const el = ProjectSettingsPaneContent({ project, name: "", color: "auto", icon: null, candidates: [], stateMapEdits: {}, saving: false, error: null, onNameChange: () => {}, onColorChange: () => {}, onIconChange: () => {}, onStateMapChange: () => {}, onSave: () => {} });
     expect(containsText(el, "Display name")).toBe(true);
   });
 });
@@ -116,5 +116,34 @@ describe("buildProjectPatch", () => {
     const patch2 = buildProjectPatch(base, { name: "", color: "auto", stateMapEdits: {} });
     expect(patch1).not.toHaveProperty("defaultColor");
     expect(patch2).not.toHaveProperty("defaultColor");
+  });
+
+  // CTL-1208: icon field diff tests
+  it("emits icon when set to a glyph ref", () => {
+    const patch = buildProjectPatch(base, { name: "", color: "auto", stateMapEdits: {}, icon: "phosphor:rocket" });
+    expect(patch).toHaveProperty("icon", "phosphor:rocket");
+  });
+
+  it("emits icon: null when selecting Auto (clear icon override)", () => {
+    const stored = { ...base, icon: "phosphor:rocket" };
+    const patch = buildProjectPatch(stored, { name: "", color: "auto", stateMapEdits: {}, icon: null });
+    expect(patch).toHaveProperty("icon", null);
+  });
+
+  it("omits icon when unchanged from the stored value", () => {
+    const stored = { ...base, icon: "phosphor:rocket" };
+    const patch = buildProjectPatch(stored, { name: "", color: "auto", stateMapEdits: {}, icon: "phosphor:rocket" });
+    expect(patch).not.toHaveProperty("icon");
+  });
+
+  it("omits icon when both stored and edit are null/absent", () => {
+    const patch = buildProjectPatch(base, { name: "", color: "auto", stateMapEdits: {}, icon: null });
+    expect(patch).not.toHaveProperty("icon");
+  });
+
+  it("includes icon AND color when both change simultaneously", () => {
+    const patch = buildProjectPatch(base, { name: "", color: "green", stateMapEdits: {}, icon: "phosphor:git-fork" });
+    expect(patch).toHaveProperty("icon", "phosphor:git-fork");
+    expect(patch).toHaveProperty("color", "green");
   });
 });
