@@ -262,33 +262,37 @@ export function defaultClassifyTicket(evidence, opts = {}) {
 
 // Check for deterministic errors that have registered seams
 export function checkDeterministicErrors(logsOutput, failureReason) {
+  // Check failureReason shortcuts first (no log scan needed)
+  if (failureReason === "orphan-sweep-stale") {
+    return {
+      fix_class: "orphan_stale",
+      seam_id: "orphan-reconcile",
+      reason: "Orphan PR reconciliation needed",
+    };
+  }
+  // Merge-conflict and rebase-failed via failureReason → bounded-LLM, not a seam stub.
+  // These are handled by checkBoundedLlmFixes; signal here so the caller can short-circuit
+  // without a log scan when the signal file already contains the structured reason.
+  if (failureReason === "merge-conflict" || failureReason === "rebase-failed") {
+    return null; // fall through to bounded-LLM
+  }
+
   if (!logsOutput) {
-    // Check failureReason as fallback
-    if (failureReason === "orphan-sweep-stale") {
-      return {
-        fix_class: "orphan_stale",
-        seam_id: "orphan-reconcile",
-        reason: "Orphan PR reconciliation needed",
-      };
-    }
     return null;
   }
 
   const logs = String(logsOutput).toLowerCase();
 
-  // Known deterministic patterns (stub; real implementation would check seam registry CTL-1219)
+  // Known deterministic patterns (stub; real implementation would check seam registry CTL-1219).
+  // NOTE: merge_conflict is intentionally absent here. Real git conflicts ("CONFLICT (content):",
+  // "rebase conflict", "could not apply") are resolvable by an agent reading both sides —
+  // they belong in checkBoundedLlmFixes, not in a seam stub that always returns success:false.
   const patterns = [
     {
       pattern: "push.*rejected.*no.*workflow.*scope",
       fix_class: "push_rejected_no_workflow_scope",
       seam_id: "workflow-token-fallback",
       reason: "Push rejected: GitHub workflow scope missing",
-    },
-    {
-      pattern: "conflict.*merge.*tree",
-      fix_class: "merge_conflict",
-      seam_id: "force-rebase",
-      reason: "Merge conflict detected; rebase and retry",
     },
     {
       pattern: "unknown.*command",
@@ -308,46 +312,68 @@ export function checkDeterministicErrors(logsOutput, failureReason) {
     }
   }
 
-  // Fallback: check failureReason if provided
-  if (failureReason === "orphan-sweep-stale") {
-    return {
-      fix_class: "orphan_stale",
-      seam_id: "orphan-reconcile",
-      reason: "Orphan PR reconciliation needed",
-    };
-  }
-
   return null;
 }
 
 // Check for bounded-LLM fixes (small, verifiable)
 export function checkBoundedLlmFixes(logsOutput, jobState, signal) {
-  if (!logsOutput && !jobState) return null;
+  if (!logsOutput && !jobState && !signal) return null;
 
   const logs = String(logsOutput || "").toLowerCase();
   const details = jobState?.detail || "";
+  const signalFailure = signal?.failureReason || "";
 
-  // Bounded-LLM patterns: small fixes that are verifiable via one phase-remediate run
+  // Bounded-LLM patterns: small fixes that are verifiable via one phase-remediate run.
+  //
+  // Escalation bar is HIGH. An agent with full tool access can resolve most merge conflicts
+  // if it reads both sides carefully. Only escalate when the conflict is a genuine design
+  // incompatibility (two features that cannot coexist as shipped), requires approval (deleting
+  // a merged feature), or the agent explicitly cannot determine which approach is correct after
+  // trying. NOT reasons to escalate: conflict in a file, CI failure after rebase, stale branch.
   const patterns = [
+    // ── Merge / rebase conflicts ──────────────────────────────────────────────────────────
+    // Real git conflict output: "CONFLICT (content):", "merge conflict in", "could not apply",
+    // "rebase conflict", "conflict merge tree". All are BOUNDED-LLM: read both sides, pick the
+    // change consistent with this ticket's goal, only escalate if fix would delete another
+    // ticket's already-merged feature or if the conflict spans a load-bearing API boundary.
     {
-      pattern: "stale.*main",
+      pattern: "conflict.*merge.*tree|merge conflict in|conflict \\(content\\)|could not apply|rebase.*conflict",
+      reason: "Merge/rebase conflict detected; agent should read both sides and resolve",
+      brief: generateRemediateBrief("merge-conflict"),
+      failureReasons: ["merge-conflict", "rebase-failed"],
+    },
+    // ── Stale branch / stale PR ───────────────────────────────────────────────────────────
+    {
+      pattern: "stale.*main|branch.*diverged|your branch is behind",
       reason: "Working tree diverged from origin/main; rebase needed",
-      brief: "Rebase against origin/main and retry",
+      brief: generateRemediateBrief("stale-branch"),
+      failureReasons: ["stale-pr"],
     },
+    // ── CI failure after rebase ───────────────────────────────────────────────────────────
     {
-      pattern: "bun.*install",
-      reason: "Package dependencies out of sync",
-      brief: "Run bun install in affected packages and retry",
+      pattern: "ci.*fail|check.*fail|test.*fail|lint.*fail",
+      reason: "CI failure detected after rebase or push; agent should read logs and fix",
+      brief: generateRemediateBrief("ci-failure"),
+      failureReasons: ["ci-failure-after-rebase"],
     },
+    // ── Package dependency issues ─────────────────────────────────────────────────────────
+    {
+      pattern: "bun.*install|cannot find package",
+      reason: "Package dependencies out of sync",
+      brief: generateRemediateBrief("bun-install"),
+    },
+    // ── TypeScript errors ─────────────────────────────────────────────────────────────────
     {
       pattern: "typescript.*error|ts.*error",
       reason: "TypeScript errors detected",
-      brief: "Review and fix type errors, retry phase",
+      brief: generateRemediateBrief("typescript-error"),
     },
   ];
 
   for (const p of patterns) {
-    if (new RegExp(p.pattern).test(logs) || new RegExp(p.pattern).test(details)) {
+    const logMatch = new RegExp(p.pattern, "i").test(logs) || new RegExp(p.pattern, "i").test(details);
+    const signalMatch = p.failureReasons?.includes(signalFailure);
+    if (logMatch || signalMatch) {
       return {
         reason: p.reason,
         brief: p.brief,
@@ -356,6 +382,36 @@ export function checkBoundedLlmFixes(logsOutput, jobState, signal) {
   }
 
   return null;
+}
+
+// Generate a structured brief for phase-remediate that includes explicit instruction
+// on escalation bar: only return HUMAN if the fix would delete another ticket's merged feature.
+export function generateRemediateBrief(category) {
+  const briefs = {
+    "merge-conflict": [
+      "Read both sides of every conflicting hunk (git diff HEAD...MERGE_HEAD or git log --merge).",
+      "Keep the changes consistent with this ticket's stated goal.",
+      "If the conflict is purely additive (both sides add different things), keep both.",
+      "Only return HUMAN if: (a) resolving would delete another ticket's already-merged feature,",
+      "  (b) the conflict spans a load-bearing API boundary where the right choice is a design decision,",
+      "  or (c) you have tried and genuinely cannot determine which approach is correct.",
+      "After resolving: git add, git rebase --continue, push, re-trigger the failed phase.",
+    ].join(" "),
+    "stale-branch": [
+      "Rebase against origin/main: git fetch origin && git rebase --autostash origin/main.",
+      "If rebase produces conflicts, treat as merge-conflict brief.",
+      "Force-push the rebased branch and re-trigger the CI check.",
+    ].join(" "),
+    "ci-failure": [
+      "Read the CI failure logs (gh run view --log-failed).",
+      "Fix the root cause (type error, lint, test failure).",
+      "Commit the fix and push to re-trigger CI.",
+      "Only escalate if the failure requires a design decision that is out of scope for this ticket.",
+    ].join(" "),
+    "bun-install": "Run bun install in affected packages and retry the phase.",
+    "typescript-error": "Review and fix type errors reported by the compiler, then retry the phase.",
+  };
+  return briefs[category] ?? `Resolve the ${category} issue and retry the phase.`;
 }
 
 // Determine escalation reason (human decision)
