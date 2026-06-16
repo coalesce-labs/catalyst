@@ -298,8 +298,10 @@ describe("writeProjectPatch (CTL-1153)", () => {
       const p = writeTempConfig(dir);
       const r = writeProjectPatch(p, "CTL", { icon: "phosphor:git-fork" });
       expect(r.ok).toBe(true);
-      const after = JSON.parse(readFileSync(p, "utf8"));
-      const ctl = after.catalyst.projects?.find((pr: { key: string }) => pr.key === "CTL");
+      const after = JSON.parse(readFileSync(p, "utf8")) as {
+        catalyst: { projects?: Array<{ key: string; icon?: string | null }> };
+      };
+      const ctl = after.catalyst.projects?.find((pr) => pr.key === "CTL");
       expect(ctl?.icon).toBe("phosphor:git-fork");
     } finally {
       rmSync(dir, { recursive: true, force: true });
@@ -313,8 +315,10 @@ describe("writeProjectPatch (CTL-1153)", () => {
       writeProjectPatch(p, "CTL", { icon: "phosphor:rocket" });
       const r = writeProjectPatch(p, "CTL", { icon: null });
       expect(r.ok).toBe(true);
-      const after = JSON.parse(readFileSync(p, "utf8"));
-      const ctl = after.catalyst.projects?.find((pr: { key: string }) => pr.key === "CTL");
+      const after = JSON.parse(readFileSync(p, "utf8")) as {
+        catalyst: { projects?: Array<{ key: string; icon?: string | null }> };
+      };
+      const ctl = after.catalyst.projects?.find((pr) => pr.key === "CTL");
       expect(ctl?.icon).toBeUndefined();
     } finally {
       rmSync(dir, { recursive: true, force: true });

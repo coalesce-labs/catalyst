@@ -175,8 +175,10 @@ describe("PUT /api/projects/:key — happy path", () => {
     writeFileSync(fixtureCfg, JSON.stringify(FIXTURE_CONFIG, null, 2) + "\n");
     const res = await put("CTL", { icon: "phosphor:git-fork" });
     expect(res.status).toBe(200);
-    const written = JSON.parse(readFileSync(fixtureCfg, "utf8"));
-    const ctl = written.catalyst.projects?.find((p: { key: string }) => p.key === "CTL");
+    const written = JSON.parse(readFileSync(fixtureCfg, "utf8")) as {
+      catalyst: { projects?: Array<{ key: string; icon?: string | null }> };
+    };
+    const ctl = written.catalyst.projects?.find((p) => p.key === "CTL");
     expect(ctl?.icon).toBe("phosphor:git-fork");
   });
 
@@ -185,8 +187,10 @@ describe("PUT /api/projects/:key — happy path", () => {
     await put("CTL", { icon: "phosphor:rocket" });
     const res = await put("CTL", { icon: null });
     expect(res.status).toBe(200);
-    const written = JSON.parse(readFileSync(fixtureCfg, "utf8"));
-    const ctl = written.catalyst.projects?.find((p: { key: string }) => p.key === "CTL");
+    const written = JSON.parse(readFileSync(fixtureCfg, "utf8")) as {
+      catalyst: { projects?: Array<{ key: string; icon?: string | null }> };
+    };
+    const ctl = written.catalyst.projects?.find((p) => p.key === "CTL");
     expect(ctl?.icon).toBeUndefined();
   });
 });
