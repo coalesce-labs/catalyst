@@ -458,11 +458,21 @@ ensure_gh() {
 do_github_auth() {
   # (1) Operator-supplied token → HTTPS credentials via ~/.netrc (no gh needed).
   if [[ -n "${CATALYST_JOIN_GITHUB_TOKEN:-}" ]]; then
-    ( umask 077
+    local netrc="$HOME/.netrc"
+    # Don't clobber a pre-existing ~/.netrc that already configures github.com —
+    # the operator's own credentials win; we only WRITE when there's nothing for
+    # github.com yet (and preserve any other machine stanzas).
+    if [[ -f "$netrc" ]] && grep -qiE '^[[:space:]]*machine[[:space:]]+github\.com\b' "$netrc"; then
+      info "~/.netrc already has a github.com entry — leaving it unchanged."
+    else
+      # Create at 0600 from the start (no world-readable window), preserving any
+      # existing non-github stanzas by appending.
+      [[ -f "$netrc" ]] || { : > "$netrc"; chmod 600 "$netrc" 2>/dev/null || true; }
+      chmod 600 "$netrc" 2>/dev/null || true
       printf 'machine github.com\nlogin %s\npassword %s\n' \
-        "${CATALYST_JOIN_GITHUB_USER:-x-access-token}" "$CATALYST_JOIN_GITHUB_TOKEN" > "$HOME/.netrc" )
-    chmod 600 "$HOME/.netrc" 2>/dev/null || true
-    info "GitHub HTTPS auth configured via ~/.netrc (0600)."
+        "${CATALYST_JOIN_GITHUB_USER:-x-access-token}" "$CATALYST_JOIN_GITHUB_TOKEN" >> "$netrc"
+      info "GitHub HTTPS auth configured via ~/.netrc (0600)."
+    fi
     return 0
   fi
   # (2) gh credential helper — install gh if absent (private thoughts clone needs it).
