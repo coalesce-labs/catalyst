@@ -236,3 +236,30 @@ export function buildCanonicalEvent(input: BuildInput): CanonicalEvent {
   }
   return event;
 }
+
+/** CTL-1122: event name for the periodic monitor heartbeat. */
+export const MONITOR_HEARTBEAT_EVENT = "monitor.heartbeat";
+
+/**
+ * CTL-1122: the periodic `catalyst.monitor` heartbeat. A SURVIVING process (the broker)
+ * reads its recency to detect a monitor death/wedge from the log — the monitor's own
+ * `kind:"self"` health probe reports up iff this process answers, so it cannot observe
+ * its own death (the 11h-outage SPOF). `service.name` is `catalyst.monitor` for parity
+ * with the `catalyst.broker` / `catalyst.execution-core` recency matchers. Pure factory
+ * (mirrors the CTL-1171 broker `buildBrokerHeartbeatEvent` pattern).
+ */
+export function buildMonitorHeartbeatEvent(nowIso: string): CanonicalEvent {
+  return buildCanonicalEvent({
+    ts: nowIso,
+    severityText: "INFO",
+    traceId: null,
+    spanId: null,
+    resource: { "service.name": "catalyst.monitor" },
+    attributes: {
+      "event.name": MONITOR_HEARTBEAT_EVENT,
+      "event.entity": "monitor",
+      "event.action": "heartbeat",
+    },
+    body: { payload: null },
+  });
+}

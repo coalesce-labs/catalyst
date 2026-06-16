@@ -233,7 +233,7 @@ import {
   createServiceHealthEmitter,
   type ServiceHealthEmitter,
 } from "./lib/service-health-emitter";
-import { buildCanonicalEvent } from "./lib/canonical-event";
+import { buildCanonicalEvent, buildMonitorHeartbeatEvent } from "./lib/canonical-event";
 import {
   costByTicket,
   costByTaskType,
@@ -922,7 +922,16 @@ export function createServer(opts: CreateServerOptions): BunServer {
     createServiceHealthMonitor({
       config: serviceHealthConfig,
       catalystDir: CATALYST_DIR,
-      onTick: (snap) => serviceHealthEmitter.observe(snap.services),
+      onTick: (snap) => {
+        serviceHealthEmitter.observe(snap.services);
+        // CTL-1122: periodic catalyst.monitor heartbeat so the SURVIVING broker can
+        // detect a monitor death/wedge from the log. The monitor's own kind:"self"
+        // probe reports up iff this process answers — it cannot observe its own death
+        // (the 11h-outage SPOF). Emitting on this existing ~30s tick means a wedged
+        // tick or a dead process stops the heartbeat, which the broker's recency check
+        // then catches. (No self-descriptor flip → the in-monitor UI is unchanged.)
+        void serviceHealthEventLog.append(buildMonitorHeartbeatEvent(new Date().toISOString()));
+      },
     });
 
   const otelHealth: OtelHealthChecker =
