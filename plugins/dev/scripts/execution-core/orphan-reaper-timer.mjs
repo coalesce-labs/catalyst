@@ -48,6 +48,7 @@ function realClock() {
  * @param {Function}[opts.emit=emitReapIntent]     emitter seam for tests
  * @param {Function}[opts.jobGc=()=>sweepJobDirs()]     CTL-1165 D3: job-dir GC seam
  * @param {Function}[opts.workerGc=async()=>{}]         CTL-1205: worker-dir GC seam
+ * @param {Function}[opts.wtCleanupDrain=async()=>{}]   CTL-1218: wt-cleanup-queue drain seam
  * @param {object}  [opts.clock=realClock()]             fake-clock seam for tests
  */
 export function startOrphanReaperTimer({
@@ -56,6 +57,7 @@ export function startOrphanReaperTimer({
   emit = emitReapIntent,
   jobGc = () => sweepJobDirs(),
   workerGc = async () => {}, // CTL-1205: worker-dir GC seam (no-op default)
+  wtCleanupDrain = async () => {}, // CTL-1218: wt-cleanup-queue drain seam (no-op default)
   clock = realClock(),
 } = {}) {
   if (!enabled) return { stop: () => {} };
@@ -85,6 +87,7 @@ export function startOrphanReaperTimer({
         emit("procOrphans.reap-requested", {}),
         jobGc(),
         workerGc(), // CTL-1205
+        wtCleanupDrain(), // CTL-1218: drain the wt-cleanup-queue on the same tick
       ]);
     } catch (err) {
       // CTL-649: a persistently-unwritable event log would make every tick

@@ -62,10 +62,12 @@ import {
   reconcileAll,
   createTicketStateCache,
 } from "./index.mjs";
-import { Reaper, defaultReadActivePhaseSignal, defaultReadSignalBgJobId } from "./reaper.mjs";
+import { Reaper, defaultReadActivePhaseSignal, defaultReadSignalBgJobId, defaultAssessWorktreeRemoval } from "./reaper.mjs";
+import { listOrchDirs } from "./worktree-safety.mjs"; // CTL-1218: legacy-run provenance roots
 import { startOrphanReaperTimer, readOrphanReaperConfig } from "./orphan-reaper-timer.mjs";
 import { sweepJobDirs } from "./job-dir-gc.mjs"; // CTL-1165 D3: ~/.claude/jobs/<id> dir GC
 import { sweepWorkerDirs } from "./worker-dir-gc.mjs"; // CTL-1205: execution-core/workers/<TICKET>/ GC
+import { sweepWtCleanupQueue } from "./wt-cleanup-drain.mjs"; // CTL-1218: wt-cleanup-queue drain
 import { ProcReaper } from "./proc-reaper.mjs"; // CTL-1165 D2: orphan child-process reaper (default shadow)
 import {
   startWorktreeRefreshTimer,
@@ -790,6 +792,13 @@ function startReaperAndTimer({
     minIdleMs: (orphanReaperConfig?.minIdleSeconds ?? 900) * 1000,
     readActivePhaseSignal: (ticket) => defaultReadActivePhaseSignal(orchDir, ticket),
     readSignalBgJobId: (ticket, phase) => defaultReadSignalBgJobId(orchDir, ticket, phase),
+    // CTL-1218 Part A: thread the LIVE orchDir (~/catalyst/execution-core) as a
+    // provenance root alongside the legacy ~/catalyst/runs/ dirs. Without this the
+    // gate scans only listOrchDirs() and reads every daemon-created worktree as
+    // "unknown-provenance" → defer forever. ...listOrchDirs() preserves legacy
+    // orchestrator-created provenance detection.
+    assessWorktreeRemoval: (event) =>
+      defaultAssessWorktreeRemoval(event, undefined, [orchDir, ...listOrchDirs()]),
     procReaper,
   });
 
@@ -871,11 +880,26 @@ function startReaperAndTimer({
           ...(workerGcCfg.batchCap != null ? { batchCap: Number(workerGcCfg.batchCap) } : {}),
         })
     : async () => {};
+  // CTL-1218 Part C: bind the wt-cleanup-queue drain onto the same 600s cadence (no
+  // new daemon timer). Default-on; disable via .catalyst → orphanReaper.wtCleanupDrain
+  // .enabled:false. The drain reads ~/catalyst/wt-cleanup-queue/*.json, clears markers
+  // for already-gone worktrees, and re-runs the CTL-791 gated teardown (NEVER --force)
+  // for survivors — confirming merge first (fail-closed).
+  const drainCfg = cfg.wtCleanupDrain ?? {};
+  const drainEnabled = drainCfg.enabled !== false;
+  const wtCleanupDrain = drainEnabled
+    ? () =>
+        sweepWtCleanupQueue({
+          orchDir,
+          ...(drainCfg.batchCap != null ? { batchCap: Number(drainCfg.batchCap) } : {}),
+        })
+    : async () => {};
   _orphanTimer = startOrphanReaperTimer({
     enabled: cfg.enabled !== false,
     intervalSeconds: cfg.intervalSeconds ?? 600,
     jobGc,
     workerGc,
+    wtCleanupDrain, // CTL-1218
   });
 
   // CTL-707: start the periodic worktree-refresh timer.

@@ -177,6 +177,43 @@ describe("startOrphanReaperTimer", () => {
     await new Promise((r) => setTimeout(r, 0));
     expect(workerGcCalls).toBe(2);
   });
+
+  // CTL-1218: the wt-cleanup-queue drain runs on the same 600s cadence, sharing
+  // the tick's try/catch with the reap emits + the other GCs.
+  it("invokes the injected wtCleanupDrain seam each tick inside Promise.all (CTL-1218)", async () => {
+    const emitted = [];
+    let drainCalls = 0;
+    const clock = fakeClock();
+    startOrphanReaperTimer({
+      intervalSeconds: 600,
+      emit: async (e) => emitted.push(e),
+      wtCleanupDrain: async () => { drainCalls++; },
+      clock,
+    });
+    clock.advance(600_000);
+    await new Promise((r) => setTimeout(r, 0));
+    expect(emitted.filter((e) => e === "orphans.reap-requested").length).toBe(1);
+    expect(drainCalls).toBe(1);
+    clock.advance(600_000);
+    await new Promise((r) => setTimeout(r, 0));
+    expect(drainCalls).toBe(2);
+  });
+
+  // CTL-1218: a rejecting wtCleanupDrain must NOT suppress the reap emits.
+  it("a rejecting wtCleanupDrain does not suppress the reap emits (CTL-1218)", async () => {
+    const emitted = [];
+    const clock = fakeClock();
+    startOrphanReaperTimer({
+      intervalSeconds: 600,
+      emit: async (e) => emitted.push(e),
+      wtCleanupDrain: async () => { throw new Error("drain boom"); },
+      clock,
+    });
+    clock.advance(600_000);
+    await new Promise((r) => setTimeout(r, 0));
+    expect(emitted.filter((e) => e === "orphans.reap-requested").length).toBe(1);
+    expect(emitted.filter((e) => e === "phase.reconcile.reap-requested").length).toBe(1);
+  });
 });
 
 describe("readOrphanReaperConfig", () => {

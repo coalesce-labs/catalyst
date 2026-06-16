@@ -1071,6 +1071,50 @@ describe("startReaperAndTimer — injects a production ProcReaper (CTL-1165 D2)"
   });
 });
 
+// CTL-1218 Part A wiring: makeReaper must receive an assessWorktreeRemoval bound
+// to the live orchDir as a provenance root, so the production reaper recognizes
+// the execution-core worker layout (~/catalyst/execution-core/workers/<ticket>/)
+// — NOT just the legacy ~/catalyst/runs/. Otherwise every daemon-created
+// squash-merged worktree reads "unknown-provenance" and defers forever.
+describe("startReaperAndTimer — binds orchDir into assessWorktreeRemoval provenance (CTL-1218 Part A)", () => {
+  test("captured assessWorktreeRemoval threads the daemon orchDir → execution-core layout is NOT unknown-provenance", async () => {
+    let capturedOpts = null;
+    const fakeReaper = {
+      handle: () => Promise.resolve(),
+      bootReplay: () => Promise.resolve(),
+    };
+    // orchDir is getExecutionCoreDir() = <CATALYST_DIR>/execution-core (test harness).
+    const orchDir = join(process.env.CATALYST_DIR, "execution-core");
+    mkdirSync(join(orchDir, "workers", "CTL-1"), { recursive: true });
+
+    startDaemon({
+      recover: () => {},
+      reconcileBoot: () => {},
+      startMonitor: () => {},
+      startScheduler: () => {},
+      watchRegistry: false,
+      enableReaper: true,
+      makeReaper: (opts) => { capturedOpts = opts; return fakeReaper; },
+      pollMs: 0,
+      debounceMs: 600_000,
+    });
+
+    expect(capturedOpts).not.toBeNull();
+    expect(typeof capturedOpts.assessWorktreeRemoval).toBe("function");
+    // Invoke the bound assessor against a NON-git tmp path (git probes fail closed)
+    // for a ticket that exists ONLY under the execution-core orchDir → provenance
+    // must be found via the threaded orchDir, so "unknown-provenance" is absent.
+    const verdict = await capturedOpts.assessWorktreeRemoval({
+      ticket: "CTL-1",
+      worktree_path: join(process.env.CATALYST_DIR, "no-such-wt", "CTL-1"),
+      branch: "CTL-1",
+      force: true,
+    });
+    expect(verdict.reasons).not.toContain("unknown-provenance");
+    stopDaemon();
+  });
+});
+
 // CTL-701 Phase 3: boot marker exists when recover() (detectColdStart) reads it
 describe("startDaemon — writeBootMarker ordering (CTL-701)", () => {
   test("daemon-boot.json written BEFORE recover() runs", () => {
