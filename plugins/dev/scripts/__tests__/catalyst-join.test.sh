@@ -330,7 +330,9 @@ if command -v nc >/dev/null 2>&1; then
   # use a short bounded wait loop on the port becoming connectable).
   T112_READY=0
   for _i in 1 2 3 4 5 6 7 8 9 10; do
-    if nc -z -G 1 127.0.0.1 "$T112_PORT" >/dev/null 2>&1; then T112_READY=1; break; fi
+    # `-w` (portable BSD/OpenBSD/GNU) NOT `-G` (BSD-only) so this readiness probe
+    # works on Linux too, matching the production fix.
+    if nc -z -w 1 127.0.0.1 "$T112_PORT" >/dev/null 2>&1; then T112_READY=1; break; fi
   done
 
   run "T1.12 default preflight succeeds via nc/curl fallback (tailscale absent, port open)" bash -c "
@@ -346,9 +348,11 @@ if command -v nc >/dev/null 2>&1; then
       CATALYST_JOIN_STACK_BIN='${STUBS}/stub-catalyst-stack' \
       CATALYST_JOIN_DOCTOR_SCRIPT='${STUBS}/stub-check-setup.sh' \
       bash '$JOIN' 2>&1)
-    # The default preflight must NOT emit a reachability/port failure. (The run may
-    # later stop in another stage; we only assert preflight passed.)
-    ! echo \"\$out\" | grep -qiE 'not reachable|Tailscale ping'"
+    # The default preflight must NOT emit a reachability/port failure NOR the
+    # pre-fix 'tailscale not found in PATH' abort (including that string makes this
+    # a real regression guard — the unfixed source emits it and would fail here).
+    # (The run may later stop in another stage; we only assert preflight passed.)
+    ! echo \"\$out\" | grep -qiE 'not reachable|Tailscale ping|tailscale not found'"
 
   # Reap the listener if it's still alive.
   kill "$T112_LPID" >/dev/null 2>&1 || true
@@ -570,6 +574,34 @@ run "T2.7b structurally-missing required key still rejected" bash -c "
     CATALYST_JOIN_DOCTOR_SCRIPT='${STUBS2}/stub-check-setup.sh' \
     CATALYST_JOIN_REACH_PROBE='${STUBS2}/stub-reach-probe.sh' \
     bash '$JOIN' --bundle '$MISSING_ANCHOR_BUNDLE' >/dev/null 2>&1; [[ \$? -ne 0 ]]"
+
+# T2.7c: (CTL-1214 verify) a structurally-COMPLETE bundle whose IDENTITY keys are
+# null (the residual fail-open from bug #3's best-effort registry resolution) must
+# be REJECTED — identity/credential keys are non-null-required, NOT existence-only.
+# Guards against silently enrolling a node with an empty Linear team/projectKey.
+NULL_IDENTITY_BUNDLE="${SCRATCH}/null-identity.json"
+cat > "$NULL_IDENTITY_BUNDLE" <<'BEOF'
+{
+  "layer1Identity": {"projectKey": null, "teamKey": null, "stateMap": null},
+  "botCreds": {"orchestrator": "tok_orch", "worker": "tok_worker"},
+  "hostsRoster": ["mini"],
+  "livenessAnchorIssue": null,
+  "repoUrl": "https://github.com/example/repo",
+  "pluginSourceUrl": "https://github.com/example/plugins"
+}
+BEOF
+
+run "T2.7c null IDENTITY keys (projectKey/teamKey/stateMap=null) rejected (no fail-open)" bash -c "
+  env -i HOME='${SCRATCH}/h27c' CATALYST_DIR='${SCRATCH}/c27c' \
+    CATALYST_JOIN_TOKEN='$GOOD_TOKEN' \
+    CATALYST_JOIN_SETUP_SCRIPT='${STUBS2}/stub-setup-catalyst.sh' \
+    CATALYST_JOIN_INSTALL_CLI_SCRIPT='${STUBS2}/stub-install-cli.sh' \
+    CATALYST_JOIN_PLUGIN_SRC_SCRIPT='${STUBS2}/stub-setup-plugin-source.sh' \
+    CATALYST_JOIN_PROVISION_THOUGHTS_SCRIPT='${STUBS2}/stub-provision-thoughts.sh' \
+    CATALYST_JOIN_STACK_BIN='${STUBS2}/stub-catalyst-stack' \
+    CATALYST_JOIN_DOCTOR_SCRIPT='${STUBS2}/stub-check-setup.sh' \
+    CATALYST_JOIN_REACH_PROBE='${STUBS2}/stub-reach-probe.sh' \
+    bash '$JOIN' --bundle '$NULL_IDENTITY_BUNDLE' >/dev/null 2>&1; [[ \$? -ne 0 ]]"
 
 # ── Phase 3: Provisioner orchestration ────────────────────────────────────────
 

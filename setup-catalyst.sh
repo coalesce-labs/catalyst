@@ -1326,6 +1326,20 @@ setup_project_config() {
 	echo ""
 	project_name=$(prompt_value "Enter project name [${REPO_NAME}]:" "${REPO_NAME}")
 
+	# Thoughts subdir/profile: default to REPO_NAME/ORG_NAME but PRESERVE an
+	# existing committed value (CTL-1214) — e.g. the catalyst repo's canonical
+	# .catalyst.thoughts.directory is "catalyst-workspace", NOT the repo name
+	# "catalyst"; regenerating the config must not clobber it and fragment the
+	# node's thoughts subtree away from the fleet's.
+	local thoughts_directory="${REPO_NAME}" thoughts_profile="${ORG_NAME}"
+	if [[ -f "$config_file" ]]; then
+		local _existing_dir _existing_prof
+		_existing_dir=$(jq -r '.catalyst.thoughts.directory // empty' "$config_file" 2>/dev/null)
+		_existing_prof=$(jq -r '.catalyst.thoughts.profile // empty' "$config_file" 2>/dev/null)
+		[[ -n "$_existing_dir" ]] && thoughts_directory="$_existing_dir"
+		[[ -n "$_existing_prof" ]] && thoughts_profile="$_existing_prof"
+	fi
+
 	# Create/update config
 	cat >"$config_file" <<EOF
 {
@@ -1354,8 +1368,8 @@ setup_project_config() {
     },
     "thoughts": {
       "user": null,
-      "directory": "${REPO_NAME}",
-      "profile": "${ORG_NAME}"
+      "directory": "${thoughts_directory}",
+      "profile": "${thoughts_profile}"
     }
   }
 }

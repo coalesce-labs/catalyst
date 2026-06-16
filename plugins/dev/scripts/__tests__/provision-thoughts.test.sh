@@ -143,11 +143,15 @@ echo "=== Phase 2: --registry derivation + repoMapping .thoughts.directory ==="
 # prior repo's directory. (2b/2c previously documented two write_config bugs —
 # a `set -u` crash and a cross-iteration `local sub` leak — now fixed by
 # defaulting `sub` to the basename unconditionally before the config branch.)
-REPO_CL="$SCRATCH/github/coalesce-labs/catalyst"           # HAS .thoughts.directory
+REPO_CL="$SCRATCH/github/coalesce-labs/catalyst"           # HAS .catalyst.thoughts.directory
 REPO_GW="$SCRATCH/github/groundworkapp/groundwork"         # NO config.json
 mkdir -p "$REPO_CL/.catalyst" "$REPO_GW"
+# Real Layer-1 schema nests the key under the top-level "catalyst" object —
+# .catalyst.thoughts.directory (NOT top-level .thoughts.directory). Using the
+# real shape here is what makes this a genuine regression guard for the jq-path
+# fix in provision-thoughts.sh (CTL-1214 verify).
 cat > "$REPO_CL/.catalyst/config.json" <<'EOF'
-{"thoughts":{"directory":"catalyst-workspace"}}
+{"catalyst":{"thoughts":{"directory":"catalyst-workspace"}}}
 EOF
 
 # (2a) bug-#1 fixture: a single config-bearing repoRoot. repoMapping repo must be
@@ -283,6 +287,38 @@ assert_eq "force-include: ryanrozich also present (2 profiles total)" \
 # Sanity: the real HL config file was never created (dry-run is side-effect-free).
 assert_eq "HL_CONFIG file never written under --dry-run" \
   "$([[ -e "$HL_CONFIG_FILE" ]] && echo EXISTS || echo ABSENT)" "ABSENT"
+
+# ─── Phase 5: empty/unrecognized registry must not crash (set -u, bash 3.2) ──
+echo ""
+echo "=== Phase 5: registry yielding zero recognized orgs ==="
+# A registry whose repoRoots match no /github/<org>/<repo> path → ORGS empty
+# during derivation. Under `set -u`, macOS system bash 3.2 aborts on an empty
+# "${ORGS[@]}" expansion; the script must instead fall back to the primary org.
+REG_NONE="$SCRATCH/registry-none.json"
+cat > "$REG_NONE" <<EOF
+{"projects":[{"repoRoot":"/var/tmp/not-a-github-path/repo","team":"X"}]}
+EOF
+
+NONE_OUT="$(run_provision --registry "$REG_NONE")"
+assert_not_grep "zero-recognized-org registry does not crash (no unbound variable)" \
+  "$NONE_OUT" "unbound variable"
+NONE_JSON="$(extract_json "$NONE_OUT")"
+assert_eq "zero-recognized-org registry falls back to primary coalesce-labs" \
+  "$(jq -r '.defaultProfile // "MISSING"' <<<"$NONE_JSON")" "coalesce-labs"
+
+# Explicitly exercise the bash-3.2 set -u path when the system bash is 3.x
+# (macOS). On Linux / bash 5 this is skipped (the empty-array trap is bash-3.2
+# specific); bash 5 tolerates the expansion, so the assertion above is the
+# cross-platform guard and this is the platform-specific reproduction.
+if [[ -x /bin/bash ]] && /bin/bash -c '[[ ${BASH_VERSINFO[0]} -lt 4 ]]' 2>/dev/null; then
+  B32_OUT="$(env -i PATH="$PATH" HOME="$SCRATCH/home" USER="testnode" \
+    HLT_ROOT="$SCRATCH/hlt" HL_CONFIG="$HL_CONFIG_FILE" \
+    /bin/bash "$PROVISION" --dry-run --no-clone --registry "$REG_NONE" 2>&1)"
+  assert_not_grep "bash 3.2: zero-recognized-org registry does not abort with unbound variable" \
+    "$B32_OUT" "unbound variable"
+else
+  echo "  SKIP: system bash is not 3.x (no bash-3.2 empty-array repro on this host)"
+fi
 
 # ─── Summary ─────────────────────────────────────────────────────────────────
 echo ""

@@ -79,13 +79,23 @@ elif [[ -n "$REGISTRY" && -f "$REGISTRY" ]]; then
     o="$(normalize_org "$(repo_root_org "$root")")"
     [[ -n "$o" ]] && ORGS+=("$o")
   done < <(jq -r '(.projects // [])[].repoRoot // empty' "$REGISTRY" 2>/dev/null)
-  # de-dupe
-  IFS=$'\n' ORGS=($(printf '%s\n' "${ORGS[@]}" | awk '!seen[$0]++')); unset IFS
+  # de-dupe — guard the empty-array expansion: under `set -u`, macOS system bash
+  # 3.2 (the default on a fresh box before Homebrew) aborts on "${ORGS[@]}" when
+  # ORGS is empty (e.g. a registry whose repoRoots match no /github/<org>/ path).
+  if ((${#ORGS[@]})); then
+    IFS=$'\n' ORGS=($(printf '%s\n' "${ORGS[@]}" | awk '!seen[$0]++')); unset IFS
+  fi
 else
   warn "no --orgs and no readable --registry; defaulting to primary only ($PRIMARY_ORG)"
   ORGS=("$PRIMARY_ORG")
 fi
-[[ " ${ORGS[*]} " == *" $PRIMARY_ORG "* ]] || ORGS=("$PRIMARY_ORG" "${ORGS[@]}")
+# Ensure the primary org is always present (and ORGS is never empty before the
+# expansions below — bash 3.2 + set -u safety).
+if ((${#ORGS[@]} == 0)); then
+  ORGS=("$PRIMARY_ORG")
+elif [[ " ${ORGS[*]} " != *" $PRIMARY_ORG "* ]]; then
+  ORGS=("$PRIMARY_ORG" "${ORGS[@]}")
+fi
 info "Node org set: ${ORGS[*]}"
 info "HLT root: $HLT_ROOT   config: $HL_CONFIG   user: $NODE_USER"
 [[ "$DRY_RUN" -eq 1 ]] && info "DRY-RUN: will not clone or write config"
@@ -123,10 +133,11 @@ write_config() {
       # (a) crash under `set -u` when the first repoRoot lacks a config, and
       # (b) leak the prior iteration's value to a later config-less repoRoot.
       sub="$(basename "$root")"
-      # Prefer the repo's declared thoughts subdir (.thoughts.directory) when present
-      # — e.g. catalyst's Layer-1 config maps repoRoot "catalyst" → "catalyst-workspace".
+      # Prefer the repo's declared thoughts subdir when present — e.g. catalyst's
+      # Layer-1 config maps repoRoot "catalyst" → "catalyst-workspace". The key is
+      # nested under the top-level "catalyst" object: .catalyst.thoughts.directory.
       if [[ -f "$root/.catalyst/config.json" ]]; then
-        d="$(jq -r '.thoughts.directory // empty' "$root/.catalyst/config.json" 2>/dev/null)"
+        d="$(jq -r '.catalyst.thoughts.directory // empty' "$root/.catalyst/config.json" 2>/dev/null)"
         [[ -n "$d" ]] && sub="$d"
       fi
       mappings="$(jq --arg path "$root" --arg repo "$sub" --arg prof "$p" \
@@ -161,9 +172,13 @@ verify() {
     printf '[provision-thoughts]   %-16s ' "$org:"
     if [[ ! -d "$dest/.git" ]]; then echo "MISSING (not cloned)"; ok=0; continue; fi
     if git -C "$dest" ls-remote --heads origin main >/dev/null 2>&1; then printf 'read:OK '; else printf 'read:FAIL '; ok=0; fi
-    # push auth probe: dry-run push (exercises credentials without writing)
-    # non-ff is OK (means auth works), only real auth errors = FAIL
-    local push_out push_rc
+    # push auth probe: dry-run push (exercises credentials without writing).
+    # non-ff is OK (means auth works), only real auth errors = FAIL.
+    # Reset push_rc/push_out EVERY iteration: bash does not clear a same-named
+    # `local` across loop iterations, and `... || push_rc=$?` only assigns on
+    # failure — so a stale rc from a prior org would leak and mis-report later
+    # orgs as push:FAIL (CTL-1214 verify finding).
+    local push_out="" push_rc=""
     push_out="$(git -C "$dest" push --dry-run origin main 2>&1)" || push_rc=$?
     if [[ -z "${push_rc:-}" ]] || grep -q 'non-fast-forward\|up to date' <<<"$push_out"; then echo "push:OK"; else echo "push:FAIL (gh auth / HTTPS creds needed)"; ok=0; fi
   done

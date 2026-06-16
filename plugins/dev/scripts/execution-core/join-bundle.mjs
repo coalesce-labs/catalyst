@@ -1,7 +1,7 @@
 // join-bundle.mjs — CTL-1183. Assembles the SHARED-only cluster join-bundle
 // from Layer-1 + Layer-2 config. Pure function — no network, no side effects.
 
-import { readFileSync } from "node:fs";
+import { readFileSync, existsSync } from "node:fs";
 import { resolve } from "node:path";
 import { execFileSync } from "node:child_process";
 import { homedir } from "node:os";
@@ -21,12 +21,28 @@ function layer2Path() {
 // daemon's authoritative team→repoRoot map — rather than process.cwd().
 // CTL-1183 / PATH-B #3: `catalyst cluster join-token` arms this listener
 // detached (nohup, cwd=HOME), so a cwd-relative .catalyst/config.json is
-// absent and every layer1Identity field comes back null. The first registry
-// project's repoRoot owns the committed .catalyst/{config,hosts}.json.
+// absent and every layer1Identity field comes back null.
+//
+// The identity-owning repo is the one carrying the committed cluster roster
+// (.catalyst/hosts.json), NOT simply projects[0] — on a multi-team seed (CTL/
+// OTL/EVR/ADV/SLI) the registry order is insertion order and [0] could be a
+// non-coordination team, shipping the WRONG team's identity + roster. Prefer
+// the roster-owner; fall back to [0] only for a single-project registry.
 function registryRepoRoot() {
   try {
-    const first = listProjects()[0];
-    return first?.repoRoot || null;
+    const projects = listProjects();
+    if (!projects.length) return null;
+    const owner = projects.find(
+      (p) => p?.repoRoot && existsSync(resolve(p.repoRoot, ".catalyst", "hosts.json")),
+    );
+    if (owner) return owner.repoRoot;
+    if (projects.length === 1) return projects[0].repoRoot || null;
+    // Multiple projects, none carrying a roster — refuse to guess silently.
+    process.stderr.write(
+      "[join-bundle] WARN: multiple registry projects and none own .catalyst/hosts.json; " +
+        "cannot determine the cluster identity repo. Set CATALYST_CONFIG_FILE explicitly.\n",
+    );
+    return null;
   } catch {
     return null;
   }
