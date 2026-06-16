@@ -101,9 +101,6 @@ export function composeNotification(
 
   const type = escalation.escalation_type;
 
-  let shortText = "";
-  let fullBriefing = "";
-
   if (type === "manual") {
     return composeManualNotification(ticket, escalation);
   } else if (type === "authorization") {

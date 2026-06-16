@@ -173,11 +173,13 @@ describe("composeNotification — edge cases", () => {
   });
 
   it("returns null for missing escalation", () => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const result = composeNotification("CTL-1000", null as any);
     expect(result).toBeNull();
   });
 
   it("returns null for unknown escalation_type", () => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const result = composeNotification("CTL-1000", {
       escalation_type: "unknown" as any,
       problem: "test",
