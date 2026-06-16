@@ -55,6 +55,8 @@ import {
 import { useBoardSnapshot } from "@/hooks/use-board-snapshot";
 // CTL-961: per-project icon auto-detection (favicon from GitHub) + manual override.
 import { useRepoIcons } from "@/hooks/use-repo-icons";
+import { resolveEntityMark } from "@/board/entity-icon";
+import { ProjectMarkIcon } from "@/components/project-mark-icon";
 // CTL-1152: the config-driven project roster (GET /api/projects). Replaces the raw
 // payload.repos list so EVERY configured team renders (incl. zero-work) and the
 // per-project dot color (server-resolved, short-name-keyed) finally renders.
@@ -643,6 +645,8 @@ export function AppSidebar() {
           const dotColor = navGroup?.dotColor;
           // CTL-961: show auto-detected favicon if available; otherwise fall back to dot.
           const iconDataUrl = navGroup?.iconDataUrl ?? null;
+          // CTL-1208: resolved mark (glyph | favicon | none) — supersedes iconDataUrl for glyphs.
+          const repoMark = resolveEntityMark(repo, repoIconMap);
           // CTL-1152: a project has "active work" when its roster descriptor's
           // hasWork is set (repo ∈ observed work). Drives both the first-load
           // collapse default and the active-work dot on the logo below.
@@ -685,7 +689,10 @@ export function AppSidebar() {
                           span anchors the absolute-positioned StatusDot; the dot survives
                           collapse (rolled-up child signal) AND expansion. */}
                       <span className="relative flex shrink-0 items-center justify-center">
-                        {iconDataUrl ? (
+                        {repoMark.kind !== "none" ? (
+                          // CTL-1208: glyph tinted by project accent; favicon <img>.
+                          <ProjectMarkIcon mark={repoMark} color={dotColor ?? "currentColor"} size={16} />
+                        ) : iconDataUrl ? (
                           <img
                             src={iconDataUrl}
                             alt=""
