@@ -184,12 +184,15 @@ import {
   defaultCollectUnstuckCandidates,
   emitUnstuckEvent,
 } from "./unstuck-sweep.mjs";
+// CTL-1176: Pass 0r — LLM reasoning recovery pass. Ships off by default (ADR-023);
+// operators opt in via CATALYST_RECOVERY_PASS=shadow then =enforce.
+import { reasoningRecoveryPass } from "./recovery-reasoning.mjs";
 // CTL-1219: the per-category enforcement seam registry (dirty-tree /
 // source-conflict / orphan-stale / stale-label). Pure-cored + injectable; bound
 // to production deps at the unstuckSweep wiring point below. Wiring this does NOT
 // flip enforce on — the mode gate stays at its safe 'off' default (ADR-023).
 import { buildUnstuckActSeams } from "./unstuck-act-seams.mjs";
-import { readUnstuckSweepConfig, isThrottled } from "./config.mjs";
+import { readUnstuckSweepConfig, readRecoveryPassConfig, isThrottled } from "./config.mjs";
 // CTL-558: the deterministic Linear status/label write seam. The whole module
 // is injected as `writeStatus` so tests pass fakes; production uses the real
 // module (best-effort — every write swallows its own failures).
@@ -2665,6 +2668,11 @@ export function schedulerTick(
       postComment: _unstuckPostComment = undefined,
       nowMs: _unstuckNowMs = undefined,
     } = {},
+    // CTL-1176: Pass 0r — recovery-reasoning pass seams. Default undefined keeps
+    // a bare tick fully inert. Production passes mode from env > Layer-2.
+    recoveryPass: {
+      mode: _recoveryPassMode = undefined,
+    } = {},
     // CTL-1095: drain gate — node-level refusal of new-work admission. Default
     // reads the drain flag file from orchDir; tests inject a stub.
     isDraining = () => isDrainingDefault(orchDir),
@@ -3319,6 +3327,51 @@ export function schedulerTick(
         log.warn(
           { step: "unstuck-sweep", err: err.message },
           "scheduler: unstuck-sweep pass failed — continuing tick (CTL-1064)"
+        );
+      }
+    }
+  }
+
+  // CTL-1176: Pass 0r — LLM reasoning recovery pass. Low-frequency autonomous
+  // triage of the stalled/failed/needs-human/UNKNOWN backlog. Mode resolves from
+  // readRecoveryPassConfig() (env CATALYST_RECOVERY_PASS > Layer-2
+  // .catalyst.recovery.pass.mode > 'off'). Ships off by default (ADR-023);
+  // operators opt in via CATALYST_RECOVERY_PASS=shadow then =enforce.
+  {
+    const rcfg = readRecoveryPassConfig();
+    const rMode = _recoveryPassMode ?? rcfg.mode;
+    if (rMode !== "off") {
+      try {
+        const rItems = readWorkerSignals(orchDir)
+          .filter(
+            (sig) =>
+              sig.status === "needs-human" ||
+              sig.status === "failed" ||
+              sig.status === "stalled" ||
+              resolveTicketType(orchDir, sig.ticket) === "unknown"
+          )
+          .map((sig) => ({
+            ticket: sig.ticket,
+            phase: sig.phase,
+            evidence: sig.raw ?? {},
+          }));
+        if (rItems.length > 0) {
+          const rResult = reasoningRecoveryPass(rItems, { mode: rMode });
+          if (rResult.processed > 0) {
+            log.info(
+              {
+                mode: rMode,
+                processed: rResult.processed,
+                results: rResult.results.length,
+              },
+              "scheduler: recovery-reasoning pass (CTL-1176)"
+            );
+          }
+        }
+      } catch (err) {
+        log.warn(
+          { step: "recovery-pass", err: err.message },
+          "scheduler: recovery-reasoning pass failed — continuing tick (CTL-1176)"
         );
       }
     }
