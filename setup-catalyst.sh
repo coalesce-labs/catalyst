@@ -138,24 +138,56 @@ merge_catalyst_section() {
 		)'
 }
 
+# Secret-hygiene primitives (CTL-1203). Inlined for standalone curl-able use.
+# The canonical sourceable lib lives at plugins/dev/scripts/lib/secrets-hygiene.sh.
+
+# harden_secrets_dir <dir> — mkdir -p then chmod 700. Idempotent.
+harden_secrets_dir() {
+	local dir="$1"
+	[[ -n "$dir" ]] || return 1
+	mkdir -p "$dir" || return 1
+	chmod 700 "$dir"
+}
+
+# ensure_secrets_gitignore <dir> — create/update .gitignore with required lines.
+ensure_secrets_gitignore() {
+	local dir="$1" gi line
+	gi="${dir}/.gitignore"
+	mkdir -p "$dir" || return 1
+	[[ -f "$gi" ]] || : > "$gi"
+	for line in 'config*.json' '*.env'; do
+		grep -qxF "$line" "$gi" 2>/dev/null || printf '%s\n' "$line" >> "$gi"
+	done
+}
+
+# write_secret_file <content> <path> — atomic 600 writer (no JSON validation).
+write_secret_file() {
+	local content="$1" path="$2" tmp
+	tmp="$(mktemp)" || return 1
+	( umask 077; printf '%s' "$content" > "$tmp" ) || { rm -f "$tmp"; return 1; }
+	chmod 600 "$tmp"
+	mv "$tmp" "$path"
+}
+
 # Write the per-project secrets config safely (CTL-843): validate JSON first,
-# back up the existing file (timestamped, 0600), then write atomically.
+# back up the existing file (timestamped, 0600), then write atomically (CTL-1203).
 write_secrets_config() {
-	local content="$1" config_file="$2" tmp
+	local content="$1" config_file="$2" validated tmp
 	tmp=$(mktemp) || return 1
 	if ! echo "$content" | jq . >"$tmp" 2>/dev/null; then
 		rm -f "$tmp"
 		print_error "Refusing to write invalid JSON to $config_file — existing file left untouched"
 		return 1
 	fi
+	validated="$(cat "$tmp")"
+	rm -f "$tmp"
 	if [[ -f $config_file ]]; then
 		local backup="${config_file}.bak-$(date +%Y%m%d-%H%M%S)"
 		cp -p "$config_file" "$backup"
 		chmod 600 "$backup"
 		print_success "Backed up existing config to $backup"
 	fi
-	chmod 600 "$tmp"
-	mv "$tmp" "$config_file"
+	write_secret_file "$validated" "$config_file"
 }
 
 #
@@ -1383,7 +1415,8 @@ setup_catalyst_secrets() {
 	local config_dir="$HOME/.config/catalyst"
 	local config_file="${config_dir}/config-${PROJECT_KEY}.json"
 
-	mkdir -p "$config_dir"
+	harden_secrets_dir "$config_dir"
+	ensure_secrets_gitignore "$config_dir"
 
 	echo "This config file stores API tokens and secrets."
 	echo "Location: $config_file"

@@ -1,0 +1,76 @@
+#!/usr/bin/env bash
+# catalyst-doctor — secret-hygiene gate for Catalyst Layer-2 config (CTL-1203).
+# Usage: catalyst-doctor [--help]
+#
+# Checks:
+#   1. All ~/.config/catalyst/config*.json are mode 600 (not group/other readable).
+#   2. ~/.config/catalyst/ is not inside a git work tree.
+#   3. No known secret patterns appear in the committed Layer-1 .catalyst/config.json.
+#
+# Exits 0 if all checks pass; non-zero if any fail.
+# CTL-1186 may source lib/secret-hygiene-check.sh from a unified `catalyst doctor`.
+
+set -uo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib/secret-hygiene-check.sh
+source "${SCRIPT_DIR}/lib/secret-hygiene-check.sh"
+
+if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+	cat <<'EOF'
+Usage: catalyst-doctor [--help]
+
+Run secret-hygiene checks on the Catalyst Layer-2 config directory.
+
+Checks performed:
+  1. Config file modes — all config*.json must be 600 (not group/other readable)
+  2. Not in git worktree — the config dir must not be tracked by git
+  3. No secrets in Layer-1 — .catalyst/config.json must not contain known secret prefixes
+
+Override defaults with environment variables:
+  CATALYST_CONFIG_DIR   Config directory (default: ~/.config/catalyst)
+  CATALYST_REPO_ROOT    Repo root for Layer-1 check (default: auto-detected via git)
+
+Exit status: 0 if all checks pass, 1 if any fail.
+EOF
+	exit 0
+fi
+
+CATALYST_CONFIG_DIR="${CATALYST_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/catalyst}"
+CATALYST_REPO_ROOT="${CATALYST_REPO_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || echo .)}"
+
+FAILURES=0
+
+run_check() {
+	local label="$1"
+	shift
+	if "$@" 2>/tmp/catalyst-doctor-check-err-$$; then
+		echo "  ok: ${label}"
+	else
+		echo "  FAIL: ${label}"
+		cat /tmp/catalyst-doctor-check-err-$$ >&2
+		FAILURES=$((FAILURES + 1))
+	fi
+	rm -f /tmp/catalyst-doctor-check-err-$$
+}
+
+echo "catalyst-doctor: checking secret hygiene for ${CATALYST_CONFIG_DIR}"
+echo ""
+
+run_check "config file modes (all config*.json must be 600)" \
+	check_secret_file_modes "$CATALYST_CONFIG_DIR"
+
+run_check "config dir not inside a git work tree" \
+	check_secrets_not_in_worktree "$CATALYST_CONFIG_DIR"
+
+run_check "no secret patterns in Layer-1 .catalyst/config.json" \
+	check_no_secrets_in_layer1 "$CATALYST_REPO_ROOT"
+
+echo ""
+if [[ $FAILURES -eq 0 ]]; then
+	echo "catalyst-doctor: all checks passed"
+	exit 0
+else
+	echo "catalyst-doctor: ${FAILURES} check(s) failed"
+	exit 1
+fi

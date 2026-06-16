@@ -40,6 +40,8 @@ UNINSTALL_REPOS=()
 REPO_SHAPE='^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$'
 ENV_VAR_SHAPE='^[A-Z_][A-Z0-9_]*$'
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib/secrets-hygiene.sh
+source "${SCRIPT_DIR}/lib/secrets-hygiene.sh"
 
 # GitHub events the orch-monitor daemon subscribes to at startup. The bash
 # verifier mirrors this list so hooks registered here match what the daemon
@@ -261,9 +263,11 @@ fi
 # Provision (or reuse) a Linear smee.io channel and write it to Layer 2.
 # Sets LINEAR_WEBHOOK_URL to the resulting URL. CTL-242.
 provision_linear_smee_channel() {
-  mkdir -p "$HOME_CONFIG_DIR"
+  harden_secrets_dir "$HOME_CONFIG_DIR"
+  ensure_secrets_gitignore "$HOME_CONFIG_DIR"
   if [[ ! -f "$HOME_CONFIG_PATH" ]]; then
-    echo "{}" > "$HOME_CONFIG_PATH"
+    ( umask 077; echo "{}" > "$HOME_CONFIG_PATH" )
+    chmod 600 "$HOME_CONFIG_PATH"
   fi
 
   local existing_linear_channel
@@ -291,6 +295,7 @@ provision_linear_smee_channel() {
     | .catalyst.monitor.linear //= {}
     | .catalyst.monitor.linear.smeeChannel = $channel
   ' "$HOME_CONFIG_PATH" > "$tmp"
+  chmod 600 "$tmp"
   mv "$tmp" "$HOME_CONFIG_PATH"
   echo "Wrote catalyst.monitor.linear.smeeChannel to $HOME_CONFIG_PATH"
   LINEAR_WEBHOOK_URL="$new_channel"
@@ -592,7 +597,8 @@ else
 fi
 
 # ─── 2. Generate or reuse secret ───────────────────────────────────────────
-mkdir -p "$HOME_CONFIG_DIR"
+harden_secrets_dir "$HOME_CONFIG_DIR"
+ensure_secrets_gitignore "$HOME_CONFIG_DIR"
 if [[ -f "$SECRET_PATH" && $FORCE -eq 0 ]]; then
   echo "Reusing existing secret at $SECRET_PATH (use --force to regenerate)"
 else
@@ -604,7 +610,8 @@ fi
 
 # ─── 3. Write smeeChannel to cross-project home-dir config ────────────────
 if [[ ! -f "$HOME_CONFIG_PATH" ]]; then
-  echo "{}" > "$HOME_CONFIG_PATH"
+  ( umask 077; echo "{}" > "$HOME_CONFIG_PATH" )
+  chmod 600 "$HOME_CONFIG_PATH"
 fi
 tmp=$(mktemp)
 jq --arg channel "$channel" \
@@ -614,6 +621,7 @@ jq --arg channel "$channel" \
     | .catalyst.monitor.github //= {}
     | .catalyst.monitor.github.smeeChannel = $channel
   ' "$HOME_CONFIG_PATH" > "$tmp"
+chmod 600 "$tmp"
 mv "$tmp" "$HOME_CONFIG_PATH"
 echo "Updated $HOME_CONFIG_PATH"
 
