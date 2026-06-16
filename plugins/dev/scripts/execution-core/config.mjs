@@ -762,6 +762,37 @@ export function isThrottled(lastRunMs, intervalMs, nowMs) {
   return (nowMs - lastRunMs) < intervalMs;
 }
 
+// CTL-1176: Pass 0r — LLM reasoning recovery pass config reader.
+// Mirrors readUnstuckSweepConfig exactly: env (CATALYST_RECOVERY_PASS) overrides
+// Layer-2 config (.catalyst.recovery.pass.mode), which overrides the safe
+// default of 'off'. Ships off (ADR-023); operators opt in to shadow then enforce.
+const RECOVERY_PASS_MODES = new Set(["off", "shadow", "enforce"]);
+
+function readLayer2RecoveryPass() {
+  try {
+    const rp = JSON.parse(readFileSync(getLayer2ConfigPath(), "utf8"))?.catalyst?.recovery?.pass;
+    return rp && typeof rp === "object" ? rp : {};
+  } catch { return {}; }
+}
+
+export function readRecoveryPassConfig() {
+  const l2 = readLayer2RecoveryPass();
+  // CATALYST_RECOVERY_PASS is the single operator knob:
+  //   "0" → off (kill-switch), off|shadow|enforce → that mode, anything else → off.
+  const env = process.env.CATALYST_RECOVERY_PASS;
+  let mode;
+  if (env === "0") {
+    mode = "off";
+  } else if (typeof env === "string" && RECOVERY_PASS_MODES.has(env)) {
+    mode = env;
+  } else if (typeof l2.mode === "string" && RECOVERY_PASS_MODES.has(l2.mode)) {
+    mode = l2.mode;
+  } else {
+    mode = "off"; // safe default: off — operators opt into shadow then enforce
+  }
+  return { mode };
+}
+
 // --- Governance snapshot for operator visibility (CTL-1062/CTL-1084) ---
 // READ-ONLY, NEVER load-bearing. Recomputes each governance value the same way
 // its per-tick gate site does so the heartbeat payload and the
