@@ -8,7 +8,13 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { readBacklog, tailEventLog, readTunnelEventStats } from "../lib/event-log-reader";
+import {
+  readBacklog,
+  tailEventLog,
+  readTunnelEventStats,
+  fullReadMetrics,
+  recordFullRead,
+} from "../lib/event-log-reader";
 import { createEventRing } from "../lib/event-ring";
 
 let workdir: string;
@@ -518,6 +524,52 @@ describe("readTunnelEventStats (ring fast-path)", () => {
       // fallback must still count the older-in-window event from the file
       expect(r.eventCount24h).toBe(2);
       expect(r.eventCount24hByRepo).toEqual({ "org/old": 1, "org/new": 1 });
+    } finally {
+      ring.stop();
+    }
+  });
+});
+
+// CTL-1232: profiling counters for the full-log readFileSync fallback paths.
+// These are the suspected driver of the monitor's high-water RSS — surfaced by
+// GET /debug/memory so the offending path + cadence are visible in live traffic.
+describe("full-read counters (CTL-1232)", () => {
+  it("recordFullRead increments count and records bytes/ms/ts per label", () => {
+    const label = "ctl1232-unit-test";
+    const before = fullReadMetrics[label]?.count ?? 0;
+    recordFullRead(label, 123, 4.5);
+    expect(fullReadMetrics[label].count).toBe(before + 1);
+    expect(fullReadMetrics[label].lastBytes).toBe(123);
+    expect(fullReadMetrics[label].lastMs).toBe(4.5);
+    expect(fullReadMetrics[label].lastTs.length).toBeGreaterThan(0);
+    recordFullRead(label, 456, 6.7);
+    expect(fullReadMetrics[label].count).toBe(before + 2);
+    expect(fullReadMetrics[label].lastBytes).toBe(456);
+  });
+
+  it("readTunnelEventStats records a 'tunnelStats' full read on the file-fallback path (no ring)", () => {
+    eventsDir();
+    const before = fullReadMetrics.tunnelStats?.count ?? 0;
+    readTunnelEventStats(workdir, undefined, () => new Date("2026-05-04T12:00:00Z"));
+    expect(fullReadMetrics.tunnelStats?.count ?? 0).toBe(before + 1);
+  });
+
+  it("readTunnelEventStats does NOT record a full read when the ring covers the window (fast-path)", () => {
+    eventsDir();
+    const now = new Date("2026-05-04T12:00:00Z");
+    const lines = [
+      // an event older than the 24h cutoff so the ring's oldestTs covers the window
+      makeGithubLine("org/old", "2026-05-03T09:00:00Z"),
+      makeGithubLine("org/a", "2026-05-04T10:00:00Z"),
+      makeGithubLine("org/b", "2026-05-04T11:00:00Z"),
+    ];
+    writeFileSync(join(workdir, "events", "2026-05.jsonl"), lines.join("\n") + "\n");
+    const ring = createEventRing({ catalystDir: workdir, now: () => now });
+    ring.start();
+    try {
+      const before = fullReadMetrics.tunnelStats?.count ?? 0;
+      readTunnelEventStats(workdir, ring, () => now); // ring fast-path → no file read
+      expect(fullReadMetrics.tunnelStats?.count ?? 0).toBe(before);
     } finally {
       ring.stop();
     }

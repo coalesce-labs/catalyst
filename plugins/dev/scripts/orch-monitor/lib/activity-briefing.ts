@@ -5,6 +5,7 @@ import { getProvider, type SummarizeProvider } from "./summarize/providers";
 import { createCache, type Cache } from "./summarize/cache";
 import type { CanonicalEvent } from "./canonical-event";
 import type { EventRing } from "./event-ring";
+import { recordFullRead } from "./event-log-reader"; // CTL-1232 profiling counter
 
 export type ActivityWindow = "30m" | "1h" | "6h";
 
@@ -145,6 +146,8 @@ export function readActivityEvents(
   }
 
   // File fallback (no ring, or ring underflows the window).
+  const _t0 = performance.now();
+  let _fallbackBytes = 0;
   const currentPath = monthlyPath(catalystDir, now);
   const prevPath = monthlyPath(catalystDir, cutoff);
   const paths = currentPath === prevPath ? [currentPath] : [prevPath, currentPath];
@@ -158,6 +161,7 @@ export function readActivityEvents(
     } catch {
       continue;
     }
+    _fallbackBytes += text.length;
     for (const line of text.split("\n")) {
       if (!line.trim()) continue;
       const evt = projectCanonical(line);
@@ -167,6 +171,7 @@ export function readActivityEvents(
       }
     }
   }
+  recordFullRead("activityEvents", _fallbackBytes, performance.now() - _t0);
   return events;
 }
 
