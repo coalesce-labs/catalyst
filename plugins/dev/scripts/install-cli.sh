@@ -34,6 +34,7 @@ set -uo pipefail
 # Keep this in sync with check-setup.sh's "Catalyst CLI Install" section.
 CLI_ENTRIES=(
   "catalyst-broker:catalyst-broker"
+  "catalyst-cluster:catalyst-cluster"
   "catalyst-comms:catalyst-comms"
   "catalyst-events:catalyst-events"
   "catalyst-execution-core:catalyst-execution-core"
@@ -53,7 +54,6 @@ CLI_ENTRIES=(
   "catalyst-hud:catalyst-hud"
   "catalyst-hud-classic.sh:catalyst-hud-classic"
   "catalyst-stack:catalyst-stack"
-  "catalyst-cluster:catalyst-cluster"
   "catalyst-doctor:catalyst-doctor"
   "../hooks/emit-lifecycle-event.sh:emit-lifecycle-event"
 )

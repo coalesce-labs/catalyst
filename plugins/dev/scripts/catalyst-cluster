@@ -1,31 +1,63 @@
 #!/usr/bin/env bash
-# catalyst-cluster — seed-side cluster operations (CTL-1184).
+# catalyst-cluster — seed-side cluster operations (CTL-1184 + CTL-1183).
 #
 # Verbs:
 #   join-token   Mint a one-time, short-TTL join token (jt_<hex>) and ARM the
-#                separate bundle listener (CTL-1183) so exactly one bundle
-#                fetch succeeds. Re-run to mint a fresh token (re-arms).
+#                single-use bundle listener (CTL-1183) so exactly one bundle
+#                fetch succeeds (consume-on-first-200, then it exits). Re-run to
+#                mint a fresh token (re-arms). Optional: --port N --ttl MIN.
 #
 # Future verbs (CTL-1188): status | add | remove | rename | set-anchor | drain | tune
 #
 # The token is a bearer secret: printed once to stdout, written to a 0600 store
 # under ${CATALYST_DIR:-~/catalyst}/cluster/join-token.json. Never logged to a
-# file by this script; never committed.
+# file by this script; never committed. The same minted token is handed to the
+# listener via env (never argv → not visible in `ps`).
 set -uo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Resolve through symlinks so SCRIPT_DIR points at the real scripts/ dir.
+_SRC="${BASH_SOURCE[0]}"; while [[ -L "$_SRC" ]]; do _SRC="$(readlink "$_SRC")"; done
+SCRIPT_DIR="$(cd "$(dirname "$_SRC")" && pwd)"; unset _SRC
 STORE_MJS="${SCRIPT_DIR}/execution-core/join-token-store.mjs"
-LISTENER_MJS="${SCRIPT_DIR}/execution-core/join-bundle-listener.mjs"  # CTL-1183, may not exist yet
+LISTENER_MJS="${SCRIPT_DIR}/execution-core/join-listener.mjs"
+CATALYST_DIR="${CATALYST_DIR:-$HOME/catalyst}"
 
 # Resolve a JS runtime (bun preferred, node fallback) — matches sibling .mjs CLIs.
 JS_RUN="$(command -v bun || command -v node || true)"
 
+usage() {
+  cat >&2 <<'EOF'
+usage: catalyst cluster <verb>
+  join-token [--port N] [--ttl MIN]   Mint a one-time join token and arm the
+                                      single-use join-bundle listener
+                                      (consume-on-first-200, then it exits)
+  -h, --help                          Show this help
+EOF
+}
+
 cmd_join_token() {
+  local port="${CATALYST_JOIN_LISTENER_PORT:-7401}" ttl=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --port) port="$2"; shift 2 ;;
+      --ttl) ttl="$2"; shift 2 ;;
+      *) echo "catalyst cluster: unknown arg '$1'" >&2; return 2 ;;
+    esac
+  done
+
   [[ -n "$JS_RUN" ]] || { echo "catalyst cluster: no bun/node runtime found" >&2; return 1; }
   [[ -f "$STORE_MJS" ]] || { echo "catalyst cluster: missing $STORE_MJS" >&2; return 1; }
 
+  # Mint via the shared store (CTL-1184): writes the 0600 join-token.json and
+  # returns {token, ttlMs, expiresAt}. A --ttl override (minutes) is passed to
+  # the store as ms so the store record and the listener TTL stay consistent.
   local rec token ttl_ms expires_at
-  rec="$("$JS_RUN" "$STORE_MJS" mint)" || { echo "catalyst cluster: mint failed" >&2; return 1; }
+  if [[ -n "$ttl" ]]; then
+    rec="$(CATALYST_JOIN_TOKEN_TTL_MS=$(( ttl * 60000 )) "$JS_RUN" "$STORE_MJS" mint)" \
+      || { echo "catalyst cluster: mint failed" >&2; return 1; }
+  else
+    rec="$("$JS_RUN" "$STORE_MJS" mint)" || { echo "catalyst cluster: mint failed" >&2; return 1; }
+  fi
   token="$(printf '%s' "$rec" | jq -r '.token')"
   ttl_ms="$(printf '%s' "$rec" | jq -r '.ttlMs')"
   expires_at="$(printf '%s' "$rec" | jq -r '.expiresAt')"
@@ -33,33 +65,44 @@ cmd_join_token() {
 
   local ttl_min=$(( ttl_ms / 60000 ))
 
-  # Arm the listener: store write already happened (mint). Best-effort spawn of
-  # CTL-1183's listener if present; otherwise note it will arm from the store.
+  # Arm the single-use listener (CTL-1183). The minted token is passed via env
+  # (never argv → not in `ps`); the listener validates it with timingSafeEqual
+  # and serves the SHARED bundle exactly once before exiting.
+  # CATALYST_JOIN_LISTENER_CMD lets tests stub the actual process launch.
   local armed_note
-  if [[ -x "$LISTENER_MJS" || -f "$LISTENER_MJS" ]]; then
-    ( "$JS_RUN" "$LISTENER_MJS" >/dev/null 2>&1 & ) || true
+  local launch="${CATALYST_JOIN_LISTENER_CMD:-}"
+  if [[ -n "$launch" ]]; then
+    CATALYST_JOIN_TOKEN="$token" CATALYST_JOIN_LISTENER_PORT="$port" \
+      CATALYST_JOIN_TTL_MIN="$ttl_min" "$launch" >/dev/null 2>&1 &
+    armed_note="bundle listener spawned (stub)"
+  elif [[ -f "$LISTENER_MJS" ]]; then
+    mkdir -p "$CATALYST_DIR"
+    CATALYST_JOIN_TOKEN="$token" CATALYST_JOIN_LISTENER_PORT="$port" \
+      CATALYST_JOIN_TTL_MIN="$ttl_min" nohup "$JS_RUN" run "$LISTENER_MJS" \
+      >"$CATALYST_DIR/join-bundle-listener.log" 2>&1 &
+    disown
     armed_note="bundle listener spawned (auto-expires with token TTL)"
   else
     armed_note="listener not yet installed (CTL-1183) — it will arm from the token store on start"
   fi
 
-  # Operator-facing contract. The token line is machine-parseable (eval-able).
+  # Operator-facing contract. The CATALYST_JOIN_TOKEN line is machine-parseable
+  # (eval-able); the "Join token" / armed-URL lines are human-facing.
   cat <<EOF
 CATALYST_JOIN_TOKEN=${token}
 # TTL: ${ttl_min} min  (expires at epoch-ms ${expires_at})
 # Single-use: consumed on the first successful bundle fetch; a re-join needs a fresh mint.
 # Integrity: verify the bundle's integrityHash returned by the listener (CTL-1183) before trusting it.
 # Armed: ${armed_note}
+Armed join-bundle listener on http://0.0.0.0:${port}/join-bundle  (TTL ${ttl_min}m, single-use)
+Join token: ${token}  (give this to the joining node)
 EOF
 }
 
 case "${1:-}" in
   join-token) shift; cmd_join_token "$@" ;;
   ""|-h|--help|help)
-    cat >&2 <<'EOF'
-usage: catalyst cluster <verb>
-  join-token   mint a one-time join token and arm the bundle listener
-EOF
+    usage
     [[ "${1:-}" == "" ]] && exit 1 || exit 0 ;;
   *)
     echo "catalyst cluster: unknown verb '${1}'" >&2
