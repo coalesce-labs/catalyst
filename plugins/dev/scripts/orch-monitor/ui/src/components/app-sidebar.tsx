@@ -241,7 +241,7 @@ const GROUP_TRIGGER_BASE = cn(
 // minuscule /45 11px row it was. Linear-calm: weight & case over loudness — no
 // uppercase, no shouting color.
 const PROJECT_HEADER_TRIGGER = cn(
-  "flex h-8 w-full shrink-0 items-center gap-1.5 rounded-md px-2 outline-hidden",
+  "group flex h-8 w-full shrink-0 items-center gap-1.5 rounded-md px-2 outline-hidden",
   "text-xs font-medium text-sidebar-foreground/80",
   "transition-[margin,opacity,color] duration-200 ease-linear",
   "cursor-pointer hover:text-sidebar-foreground focus-visible:ring-2 focus-visible:ring-sidebar-ring",
@@ -730,6 +730,16 @@ export function AppSidebar() {
                           isOpen && "rotate-90",
                         )}
                       />
+                      {/* CTL-1212: one-click settings gear — hover-revealed so the row stays
+                          clean at rest. stopPropagation prevents triggering the CollapsibleTrigger. */}
+                      <button
+                        type="button"
+                        aria-label="Project settings"
+                        onClick={(e) => { e.stopPropagation(); goSettings(repo); }}
+                        className="ml-auto opacity-0 group-hover:opacity-100 focus-visible:opacity-100 rounded p-0.5 hover:bg-sidebar-accent transition-opacity"
+                      >
+                        <SettingsIcon className="size-3" />
+                      </button>
                     </CollapsibleTrigger>
                   </ContextMenuTrigger>
                   <ContextMenuContent>

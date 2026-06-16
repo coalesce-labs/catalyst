@@ -1,6 +1,7 @@
 // project-rail.tsx — left column of the settings surface: one row per project (CTL-1153 Phase 5).
 import { cn } from "@/lib/utils";
 import { NAMED_COLORS } from "@/lib/color-palette";
+import { SETTINGS_PENDING_SECTIONS } from "@/lib/project-settings-model";
 import type { ProjectRailRow } from "@/lib/project-settings-model";
 
 interface ProjectRailProps {
@@ -58,6 +59,31 @@ export function ProjectRail({ rows, selectedKey, onSelect }: ProjectRailProps) {
           </button>
         );
       })}
+
+      {SETTINGS_PENDING_SECTIONS.length > 0 && (
+        <>
+          <p className="mt-2 px-3 text-xs font-medium text-muted/60">Configuration</p>
+          {SETTINGS_PENDING_SECTIONS.map((section) => {
+            const selected = selectedKey === section.key;
+            return (
+              <button
+                key={section.key}
+                type="button"
+                aria-current={selected ? "page" : undefined}
+                onClick={() => onSelect(section.key)}
+                className={cn(
+                  "flex w-full items-center gap-2 rounded-md px-3 py-2 text-left text-sm transition-colors",
+                  selected
+                    ? "bg-surface-2 font-medium text-fg"
+                    : "text-muted hover:bg-surface-2 hover:text-fg",
+                )}
+              >
+                <span className="min-w-0 truncate">{section.label}</span>
+              </button>
+            );
+          })}
+        </>
+      )}
     </nav>
   );
 }

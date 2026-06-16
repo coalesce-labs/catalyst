@@ -4,6 +4,10 @@ import {
   buildProjectRailRows,
   resolveSelectedProject,
   diffStateMap,
+  SETTINGS_PENDING_SECTIONS,
+  CLUSTER_SECTION_KEY,
+  HOST_NODE_SECTION_KEY,
+  resolveSettingsView,
 } from "./project-settings-model";
 
 describe("STATE_MAP_KEYS", () => {
@@ -105,5 +109,56 @@ describe("diffStateMap", () => {
     const diff = diffStateMap(null, { inReview: "X", unknownKey: "Y" } as Record<string, string>);
     expect("unknownKey" in diff).toBe(false);
     expect(diff.inReview).toBe("X");
+  });
+});
+
+// ── CTL-1212: pending sections + resolveSettingsView ─────────────────────────
+
+const projects = [{ key: "CTL", name: "Catalyst", defaultColor: "blue", hasWork: true }];
+
+describe("SETTINGS_PENDING_SECTIONS", () => {
+  it("defines Cluster and Host/Node with sentinel keys distinct from any team key", () => {
+    const keys = SETTINGS_PENDING_SECTIONS.map((s) => s.key);
+    expect(keys).toEqual([CLUSTER_SECTION_KEY, HOST_NODE_SECTION_KEY]);
+    expect(CLUSTER_SECTION_KEY.startsWith("__")).toBe(true);
+    expect(SETTINGS_PENDING_SECTIONS.find((s) => s.key === CLUSTER_SECTION_KEY)?.label).toBe("Cluster");
+  });
+
+  it("Host/Node section has a label and a note", () => {
+    const section = SETTINGS_PENDING_SECTIONS.find((s) => s.key === HOST_NODE_SECTION_KEY);
+    expect(section?.label).toBeTruthy();
+    expect(section?.note).toBeTruthy();
+  });
+});
+
+describe("resolveSettingsView", () => {
+  it("returns kind:general for a null key", () => {
+    expect(resolveSettingsView(projects, null).kind).toBe("general");
+  });
+
+  it("returns kind:general for undefined key", () => {
+    expect(resolveSettingsView(projects, undefined).kind).toBe("general");
+  });
+
+  it("returns kind:project with the descriptor for a known team key", () => {
+    const v = resolveSettingsView(projects, "CTL");
+    expect(v.kind).toBe("project");
+    if (v.kind === "project") expect(v.project.key).toBe("CTL");
+  });
+
+  it("returns kind:pending with the section for CLUSTER_SECTION_KEY", () => {
+    const v = resolveSettingsView(projects, CLUSTER_SECTION_KEY);
+    expect(v.kind).toBe("pending");
+    if (v.kind === "pending") expect(v.section.label).toBe("Cluster");
+  });
+
+  it("returns kind:pending with the section for HOST_NODE_SECTION_KEY", () => {
+    const v = resolveSettingsView(projects, HOST_NODE_SECTION_KEY);
+    expect(v.kind).toBe("pending");
+    if (v.kind === "pending") expect(v.section.label).toMatch(/Host/);
+  });
+
+  it("falls back to kind:general for an unknown key", () => {
+    expect(resolveSettingsView(projects, "NOPE").kind).toBe("general");
   });
 });
