@@ -475,6 +475,17 @@ export function deriveGeneration(
  */
 export function peekTranscriptCache(sessionId: string): string | null;
 
+/** CTL-1215: hard size cap (insertion-order LRU) on the transcript-path cache. */
+export const TRANSCRIPT_CACHE_CAP: number;
+/** CTL-1215 (test-only): seed a sessionId→path entry through the same set + cap
+ *  path resolveTranscript uses on a HIT (HOME is module-scope so the real scan
+ *  can't be redirected in a unit test). */
+export function _seedTranscriptCacheForTest(sessionId: string, path: string): void;
+/** CTL-1215: current number of cached transcript paths. */
+export function _getTranscriptCacheSize(): number;
+/** CTL-1215: clear the transcript-path cache (tests). */
+export function _clearTranscriptCache(): void;
+
 /**
  * CTL-733: resolve a sessionId to its transcript `.jsonl` path, caching the hit.
  * Falls back to a single project-dir scan only on a cache miss.

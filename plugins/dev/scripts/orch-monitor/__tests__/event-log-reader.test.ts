@@ -9,6 +9,7 @@ import {
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { readBacklog, tailEventLog, readTunnelEventStats } from "../lib/event-log-reader";
+import { createEventRing } from "../lib/event-ring";
 
 let workdir: string;
 
@@ -251,7 +252,7 @@ function makeGithubLine(
 
 describe("readTunnelEventStats", () => {
   it("returns null lastEventAt and zero counts when file is absent", () => {
-    const r = readTunnelEventStats(workdir, () => new Date("2026-05-04T12:00:00Z"));
+    const r = readTunnelEventStats(workdir, undefined, () => new Date("2026-05-04T12:00:00Z"));
     expect(r.lastEventAt).toBeNull();
     expect(r.eventCount24h).toBe(0);
     expect(r.eventCount24hByRepo).toEqual({});
@@ -260,7 +261,7 @@ describe("readTunnelEventStats", () => {
   it("returns null lastEventAt and zero counts for empty file", () => {
     eventsDir();
     writeFileSync(join(workdir, "events", "2026-05.jsonl"), "");
-    const r = readTunnelEventStats(workdir, () => new Date("2026-05-04T12:00:00Z"));
+    const r = readTunnelEventStats(workdir, undefined, () => new Date("2026-05-04T12:00:00Z"));
     expect(r.lastEventAt).toBeNull();
     expect(r.eventCount24h).toBe(0);
   });
@@ -282,7 +283,7 @@ describe("readTunnelEventStats", () => {
       makeGithubLine("org/b", "2026-05-04T11:03:00Z"),
     ];
     writeFileSync(join(workdir, "events", "2026-05.jsonl"), lines.join("\n") + "\n");
-    const r = readTunnelEventStats(workdir, () => new Date("2026-05-04T12:00:00Z"));
+    const r = readTunnelEventStats(workdir, undefined, () => new Date("2026-05-04T12:00:00Z"));
     expect(r.eventCount24h).toBe(2);
     expect(r.lastEventAt).toBe("2026-05-04T11:03:00Z");
     expect(r.eventCount24hByRepo).toEqual({ "org/a": 1, "org/b": 1 });
@@ -295,7 +296,7 @@ describe("readTunnelEventStats", () => {
       makeGithubLine("org/b", "2026-05-04T11:00:00Z"),  // within 24h
     ];
     writeFileSync(join(workdir, "events", "2026-05.jsonl"), lines.join("\n") + "\n");
-    const r = readTunnelEventStats(workdir, () => new Date("2026-05-04T12:00:00Z"));
+    const r = readTunnelEventStats(workdir, undefined, () => new Date("2026-05-04T12:00:00Z"));
     expect(r.eventCount24h).toBe(1);
     expect(r.eventCount24hByRepo).toEqual({ "org/b": 1 });
     expect(r.lastEventAt).toBe("2026-05-04T11:00:00Z");
@@ -308,7 +309,7 @@ describe("readTunnelEventStats", () => {
     const mayLine   = makeGithubLine("org/y", "2026-05-01T00:15:00Z");
     writeFileSync(join(workdir, "events", "2026-04.jsonl"), aprilLine + "\n");
     writeFileSync(join(workdir, "events", "2026-05.jsonl"), mayLine + "\n");
-    const r = readTunnelEventStats(workdir, () => new Date("2026-05-01T00:30:00Z"));
+    const r = readTunnelEventStats(workdir, undefined, () => new Date("2026-05-01T00:30:00Z"));
     expect(r.eventCount24h).toBe(2);
     expect(r.eventCount24hByRepo).toEqual({ "org/x": 1, "org/y": 1 });
   });
@@ -321,7 +322,7 @@ describe("readTunnelEventStats", () => {
       makeGithubLine("org/b", "2026-05-04T11:00:00Z"),
     ];
     writeFileSync(join(workdir, "events", "2026-05.jsonl"), lines.join("\n") + "\n");
-    const r = readTunnelEventStats(workdir, () => new Date("2026-05-04T12:00:00Z"));
+    const r = readTunnelEventStats(workdir, undefined, () => new Date("2026-05-04T12:00:00Z"));
     expect(r.eventCount24h).toBe(3);
     expect(r.eventCount24hByRepo).toEqual({ "org/a": 2, "org/b": 1 });
   });
@@ -334,7 +335,7 @@ describe("readTunnelEventStats", () => {
       "{broken",
     ];
     writeFileSync(join(workdir, "events", "2026-05.jsonl"), lines.join("\n") + "\n");
-    const r = readTunnelEventStats(workdir, () => new Date("2026-05-04T12:00:00Z"));
+    const r = readTunnelEventStats(workdir, undefined, () => new Date("2026-05-04T12:00:00Z"));
     expect(r.eventCount24h).toBe(1);
   });
 
@@ -346,7 +347,7 @@ describe("readTunnelEventStats", () => {
     });
     const withTs = makeGithubLine("org/b", "2026-05-04T11:00:00Z");
     writeFileSync(join(workdir, "events", "2026-05.jsonl"), [noTs, withTs].join("\n") + "\n");
-    const r = readTunnelEventStats(workdir, () => new Date("2026-05-04T12:00:00Z"));
+    const r = readTunnelEventStats(workdir, undefined, () => new Date("2026-05-04T12:00:00Z"));
     expect(r.eventCount24h).toBe(1);
     expect(r.lastEventAt).toBe("2026-05-04T11:00:00Z");
     expect(r.eventCount24hByRepo).toEqual({ "org/b": 1 });
@@ -361,8 +362,69 @@ describe("readTunnelEventStats", () => {
     });
     const withRepo = makeGithubLine("org/a", "2026-05-04T11:30:00Z");
     writeFileSync(join(workdir, "events", "2026-05.jsonl"), [noRepo, withRepo].join("\n") + "\n");
-    const r = readTunnelEventStats(workdir, () => new Date("2026-05-04T12:00:00Z"));
+    const r = readTunnelEventStats(workdir, undefined, () => new Date("2026-05-04T12:00:00Z"));
     expect(r.eventCount24h).toBe(2);
     expect(r.eventCount24hByRepo).toEqual({ "org/a": 1 });
+  });
+});
+
+// CTL-1215 B2: ring fast-path + bounded file fallback.
+describe("readTunnelEventStats (ring fast-path)", () => {
+  it("ring that fully covers the 24h window returns counts identical to the file path", () => {
+    eventsDir();
+    const now = new Date("2026-05-04T12:00:00Z");
+    const lines = [
+      makeGithubLine("org/a", "2026-05-04T10:00:00Z"),
+      makeGithubLine("org/a", "2026-05-04T10:30:00Z"),
+      makeGithubLine("org/b", "2026-05-04T11:00:00Z"),
+      // older than 24h → excluded from counts, still the lastEventAt candidate is newer
+      makeGithubLine("org/c", "2026-05-03T09:00:00Z"),
+    ];
+    writeFileSync(join(workdir, "events", "2026-05.jsonl"), lines.join("\n") + "\n");
+
+    const ring = createEventRing({ catalystDir: workdir, now: () => now });
+    ring.start();
+    try {
+      const fromFile = readTunnelEventStats(workdir, undefined, () => now);
+      const fromRing = readTunnelEventStats(workdir, ring, () => now);
+      expect(fromRing).toEqual(fromFile);
+      expect(fromRing.eventCount24h).toBe(3);
+      expect(fromRing.eventCount24hByRepo).toEqual({ "org/a": 2, "org/b": 1 });
+    } finally {
+      ring.stop();
+    }
+  });
+
+  it("ring underflow (oldestTs newer than cutoff) falls back to the file path and stays correct", () => {
+    eventsDir();
+    const now = new Date("2026-05-04T12:00:00Z");
+    // File has an in-window event the ring will NOT have seen.
+    const oldInWindow = makeGithubLine("org/old", "2026-05-04T00:30:00Z"); // within 24h
+    const recent = makeGithubLine("org/new", "2026-05-04T11:30:00Z");
+    writeFileSync(
+      join(workdir, "events", "2026-05.jsonl"),
+      [oldInWindow, recent].join("\n") + "\n",
+    );
+
+    // Build a ring whose cold-start only saw the LAST line (tiny tailBytes), so
+    // its oldestTs is newer than the 24h cutoff → underflow → file fallback.
+    const ring = createEventRing({
+      catalystDir: workdir,
+      // back-read just past the recent line + its leading "\n" so the cold-fill
+      // keeps ONLY the recent line (the first, partial fragment is dropped).
+      tailBytes: recent.length + 5,
+      now: () => now,
+    });
+    ring.start();
+    try {
+      // sanity: ring underflows the window
+      expect(ring.oldestTs()).toBe("2026-05-04T11:30:00Z");
+      const r = readTunnelEventStats(workdir, ring, () => now);
+      // fallback must still count the older-in-window event from the file
+      expect(r.eventCount24h).toBe(2);
+      expect(r.eventCount24hByRepo).toEqual({ "org/old": 1, "org/new": 1 });
+    } finally {
+      ring.stop();
+    }
   });
 });

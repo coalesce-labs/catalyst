@@ -12,6 +12,7 @@ import {
 } from "../lib/activity-briefing";
 import type { SummarizeConfig } from "../lib/summarize/config";
 import type { SummarizeProvider } from "../lib/summarize/providers";
+import { createEventRing } from "../lib/event-ring";
 
 const BASE_TS = new Date("2026-05-07T10:00:00Z").toISOString();
 
@@ -359,7 +360,7 @@ describe("readActivityEvents", () => {
     const outsideTs = "2026-05-07T09:00:00Z"; // 60 min ago
     writeFileSync(monthFile(now), [makeEvent(insideTs), makeEvent(outsideTs)].join("\n") + "\n");
 
-    const events = readActivityEvents(tmp, 30 * 60 * 1000, now);
+    const events = readActivityEvents(tmp, 30 * 60 * 1000, undefined, now);
     expect(events.map((e) => e.ts)).toContain(insideTs);
     expect(events.map((e) => e.ts)).not.toContain(outsideTs);
   });
@@ -371,7 +372,7 @@ describe("readActivityEvents", () => {
     writeFileSync(monthFile(new Date("2026-05-31T00:00:00Z")), makeEvent(inPrev) + "\n");
     writeFileSync(monthFile(now), makeEvent(inCurr) + "\n");
 
-    const events = readActivityEvents(tmp, 6 * 60 * 60 * 1000, now);
+    const events = readActivityEvents(tmp, 6 * 60 * 60 * 1000, undefined, now);
     const tsList = events.map((e) => e.ts);
     expect(tsList).toContain(inPrev);
     expect(tsList).toContain(inCurr);
@@ -385,7 +386,7 @@ describe("readActivityEvents", () => {
       ["not-json", makeEvent(goodTs), "{broken", ""].join("\n"),
     );
 
-    const events = readActivityEvents(tmp, 30 * 60 * 1000, now);
+    const events = readActivityEvents(tmp, 30 * 60 * 1000, undefined, now);
     expect(events.map((e) => e.ts)).toContain(goodTs);
     expect(events).toHaveLength(1);
   });
@@ -393,6 +394,53 @@ describe("readActivityEvents", () => {
   it("returns empty array when events directory does not exist", () => {
     const events = readActivityEvents("/nonexistent/path/catalyst", 30 * 60 * 1000);
     expect(events).toHaveLength(0);
+  });
+
+  // CTL-1215 B3: ring fast-path + bounded file fallback.
+  describe("ring fast-path", () => {
+    it("ring covering the window returns the same events as the file path", () => {
+      const now = new Date("2026-08-07T10:00:00Z");
+      const inside = "2026-08-07T09:45:00Z";
+      const outside = "2026-08-07T09:00:00Z"; // 60 min ago, outside 30m
+      writeFileSync(monthFile(now), [makeEvent(inside), makeEvent(outside)].join("\n") + "\n");
+
+      const ring = createEventRing({ catalystDir: tmp, now: () => now });
+      ring.start();
+      try {
+        const fromFile = readActivityEvents(tmp, 30 * 60 * 1000, undefined, now);
+        const fromRing = readActivityEvents(tmp, 30 * 60 * 1000, ring, now);
+        expect(fromRing.map((e) => e.ts).sort()).toEqual(fromFile.map((e) => e.ts).sort());
+        expect(fromRing.map((e) => e.ts)).toContain(inside);
+        expect(fromRing.map((e) => e.ts)).not.toContain(outside);
+      } finally {
+        ring.stop();
+      }
+    });
+
+    it("ring underflow (oldestTs newer than cutoff) falls back to the file path", () => {
+      const now = new Date("2026-09-07T10:00:00Z");
+      const older = makeEvent("2026-09-07T09:10:00Z"); // 50 min ago, within 1h window
+      const recent = makeEvent("2026-09-07T09:55:00Z"); // within window
+      writeFileSync(monthFile(now), [older, recent].join("\n") + "\n");
+
+      // Cold-fill the ring with only the recent line → oldestTs newer than the
+      // 1h cutoff → underflow → file fallback (which sees the older event too).
+      const ring = createEventRing({
+        catalystDir: tmp,
+        tailBytes: recent.length + 5,
+        now: () => now,
+      });
+      ring.start();
+      try {
+        expect(ring.oldestTs()).toBe("2026-09-07T09:55:00Z");
+        const events = readActivityEvents(tmp, 60 * 60 * 1000, ring, now);
+        const tsList = events.map((e) => e.ts);
+        expect(tsList).toContain("2026-09-07T09:10:00Z"); // recovered via fallback
+        expect(tsList).toContain("2026-09-07T09:55:00Z");
+      } finally {
+        ring.stop();
+      }
+    });
   });
 });
 

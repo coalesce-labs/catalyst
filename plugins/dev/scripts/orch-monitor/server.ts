@@ -196,6 +196,8 @@ import {
 } from "./lib/event-log";
 import { validatePredicate } from "./lib/event-filter";
 import { readBacklog, tailEventLog, readTunnelEventStats } from "./lib/event-log-reader";
+import { createEventRing } from "./lib/event-ring";
+import { readSubStepEvents } from "./lib/substep-reader";
 import { loadOtelConfig } from "./lib/otel-config";
 import { loadWebhookConfig } from "./lib/webhook-config";
 import { detectProjectKey } from "./lib/project-key";
@@ -287,6 +289,7 @@ import { readTicketArtifacts, readTicketArtifactContent } from "./lib/ticket-art
 import {
   fillTitleDescriptionFallback,
   _clearTitleDescCache,
+  _sweepTitleDescCache,
 } from "./lib/linear-title-description-fallback.mjs";
 import { readTicketSearch } from "./lib/ticket-search-reader.mjs";
 
@@ -599,52 +602,11 @@ function safeParseJson(line: string): Record<string, unknown> | null {
   }
 }
 
-// CTL-753: workflow substep event reader for /api/ticket-substeps
-interface SubStepEvent {
-  ts: string;
-  workflowName: string;
-  stepLabel: string;
-  stepIndex: number;
-  status: string;
-}
-
-function readSubStepEvents(eventsDir: string, ticket: string): SubStepEvent[] {
-  const month = new Date().toISOString().slice(0, 7);
-  const logPath = join(eventsDir, `${month}.jsonl`);
-  const escapedTicket = ticket.replace(/[-[\]{}()*+?.,\\^$|#\s]/g, "\\$&");
-  const pattern = new RegExp(
-    `^workflow\\.substep\\.(started|complete|failed)\\.${escapedTicket}$`,
-  );
-  try {
-    const text = readFileSync(logPath, "utf-8");
-    const results: SubStepEvent[] = [];
-    for (const line of text.split("\n")) {
-      if (!line.trim()) continue;
-      const ev = safeParseJson(line);
-      if (!ev) continue;
-      const name =
-        (ev.attributes as Record<string, string> | undefined)?.["event.name"] ??
-        "";
-      if (!pattern.test(name)) continue;
-      const payload =
-        ((ev.body as Record<string, unknown>)?.payload as Record<
-          string,
-          unknown
-        >) ?? {};
-      results.push({
-        ts: (ev.ts as string) ?? "",
-        workflowName: (payload.workflowName as string) ?? "",
-        stepLabel: (payload.stepLabel as string) ?? "",
-        stepIndex: (payload.stepIndex as number) ?? 0,
-        status: (payload.status as string) ?? "",
-      });
-    }
-    results.sort((a, b) => a.ts.localeCompare(b.ts));
-    return results;
-  } catch {
-    return [];
-  }
-}
+// CTL-753: workflow substep event reader for /api/ticket-substeps.
+// CTL-1215: extracted to lib/substep-reader.ts and rerouted to the shared event
+// ring — the per-ticket substep slice is tiny + recent, so it lives comfortably
+// inside the ring without `readFileSync`-ing the whole current-month log per
+// request. readSubStepEvents is imported above.
 
 const SSE_EVENTS = EVENT_TYPES;
 // `global-event` and `global-event-backlog` are produced per-client by the
@@ -1394,6 +1356,22 @@ export function createServer(opts: CreateServerOptions): BunServer {
 
   let watcher: WatcherHandle | null = null;
 
+  // CTL-1215: periodic TTL sweep for the title/description fallback cache. The
+  // lazy TTL only fires on re-read, so a key fetched once and never re-requested
+  // would sit forever. A low-frequency sweep evicts abandoned keys. Cleared in
+  // server.stop().
+  const titleDescSweepTimer = setInterval(
+    () => _sweepTitleDescCache(),
+    5 * 60 * 1000,
+  );
+
+  // CTL-1215: ONE shared, incrementally-maintained recent-event ring. Per-request
+  // readers (substeps, tunnel stats, activity) scan this in-memory window instead
+  // of `readFileSync`-ing the 178 MB+ current-month log on every call. Windowed
+  // consumers fall back to the bounded file read on ring underflow (oldestTs).
+  const eventRing = createEventRing({ catalystDir: CATALYST_DIR });
+  eventRing.start();
+
   const server = Bun.serve({
     port,
     hostname,
@@ -2048,8 +2026,9 @@ export function createServer(opts: CreateServerOptions): BunServer {
           ) {
             return new Response("Bad Request", { status: 400 });
           }
-          const eventsDir = join(CATALYST_DIR, "events");
-          const subSteps = readSubStepEvents(eventsDir, ticketParam);
+          // CTL-1215: scan the shared event ring instead of reading the whole
+          // current-month log; the per-ticket substep slice is small + recent.
+          const subSteps = readSubStepEvents(eventRing, ticketParam);
           return Response.json({ ticket: ticketParam, subSteps });
         }
 
@@ -2269,6 +2248,8 @@ export function createServer(opts: CreateServerOptions): BunServer {
             CATALYST_DIR,
             activityBriefingConfig,
             windowParam as ActivityWindow,
+            undefined,
+            eventRing,
           );
           return Response.json(result);
         }
@@ -3012,7 +2993,7 @@ export function createServer(opts: CreateServerOptions): BunServer {
         }
 
         if (url.pathname === "/api/status/webhook-tunnel") {
-          const stats = readTunnelEventStats(CATALYST_DIR);
+          const stats = readTunnelEventStats(CATALYST_DIR, eventRing);
           if (!webhookConfig) {
             return Response.json({
               connected: false,
@@ -4156,6 +4137,8 @@ export function createServer(opts: CreateServerOptions): BunServer {
     void linearWebhookTunnel?.stop();
     closeDb();
     sseClients.clear();
+    clearInterval(titleDescSweepTimer);
+    eventRing.stop();
     if (pidFile) {
       try {
         unlinkSync(pidFile);

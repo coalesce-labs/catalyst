@@ -52,7 +52,23 @@
 // RelationTarget: { identifier, title: string|null, state: {name,type}|null, priority: number|null, project: string|null }
 const TITLE_DESC_TTL_MS = 5 * 60 * 1000; // 5 minutes (match ESTIMATE_TTL_MS)
 const DONE_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours for completed/canceled tickets (D4)
+// CTL-1215: hard size cap so the long-lived monitor process can't grow this map
+// without bound. A board holds low-hundreds of distinct tickets; 2000 covers
+// cross-team boards + relation targets with headroom while bounding worst-case
+// to a few MB. The lazy TTL (checked on read) only fires when a key is
+// re-requested; the cap + the periodic _sweepTitleDescCache (wired in server.ts)
+// evict abandoned keys that are never read again.
+export const TITLE_DESC_CAP = 2000;
 const _titleDescCache = new Map(); // ticketId → { title, description, labels, relations, state, priority, project, estimate, ts, ttlMs }
+
+// _capTitleDescCache — insertion-order LRU evict, mirroring the proven beliefRates
+// pattern (belief-store-queries.mjs). Map preserves insertion order so the first
+// key is the oldest. Call after each _titleDescCache.set(...).
+function _capTitleDescCache() {
+  while (_titleDescCache.size > TITLE_DESC_CAP) {
+    _titleDescCache.delete(_titleDescCache.keys().next().value);
+  }
+}
 
 // ── Linear GraphQL helpers ────────────────────────────────────────────────────
 const LINEAR_GRAPHQL_ENDPOINT = "https://api.linear.app/graphql";
@@ -360,6 +376,7 @@ export async function fillTitleDescriptionFallback(ticketIds) {
     _titleDescCache.set(id, { ...NULL_ENTRY, ts: Date.now(), ttlMs: TITLE_DESC_TTL_MS });
     result[id] = { ...NULL_ENTRY };
   }
+  _capTitleDescCache();
 
   // For each team key, chunk its numbers and fire one query per chunk.
   const perTeamChunks = [];
@@ -407,6 +424,7 @@ export async function fillTitleDescriptionFallback(ticketIds) {
           result[id] = { ...NULL_ENTRY };
         }
       }
+      _capTitleDescCache();
     }),
   );
 
@@ -432,6 +450,7 @@ export async function fillTitleDescriptionFallback(ticketIds) {
       }
     }
   }
+  _capTitleDescCache();
 
   // If called with objects, mutate them in place (board-data pattern).
   if (isObjectArray) {
@@ -460,4 +479,20 @@ export function _clearTitleDescCache(id) {
 }
 export function _getTitleDescCacheSize() {
   return _titleDescCache.size;
+}
+
+// _sweepTitleDescCache — CTL-1215: evict entries whose per-entry TTL has elapsed.
+// The lazy TTL (in fillTitleDescriptionFallback's hit check) only fires when a
+// key is re-requested; a key never read again would otherwise sit forever. A
+// low-frequency setInterval in server.ts calls this so abandoned keys leave
+// memory. Returns the count removed. `now` is injectable for tests.
+export function _sweepTitleDescCache(now = Date.now()) {
+  let removed = 0;
+  for (const [id, v] of _titleDescCache) {
+    if (now - v.ts >= (v.ttlMs ?? TITLE_DESC_TTL_MS)) {
+      _titleDescCache.delete(id);
+      removed++;
+    }
+  }
+  return removed;
 }
