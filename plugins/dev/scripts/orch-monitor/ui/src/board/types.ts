@@ -170,6 +170,12 @@ export interface BoardTicket {
    *  card. null/absent unless attention is needs-human and a signal carried the
    *  extended fields. */
   explanation?: BoardEscalationExplanation | null;
+  /** CTL-1220: true when this ticket was auto-fixed by the recovery sweep. */
+  autoFixed?: boolean | null;
+  /** CTL-1220: true when this ticket was triaged (identified as fixable) by the recovery sweep. */
+  triaged?: boolean | null;
+  /** CTL-1220: ISO timestamp when the ticket was recovered/auto-fixed. */
+  recoveredAt?: string | null;
   // ── CTL-902 (HOME4): the reading-pane CONTENT fields ─────────────────────
   // The "What's needed now" hero + the About block read these. They are NOT in
   // the board payload today — they derive from the ticket's AI summary + the

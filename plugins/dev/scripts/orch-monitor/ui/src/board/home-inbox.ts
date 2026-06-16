@@ -113,6 +113,10 @@ export interface InboxCounts {
   blocked: number;
   waiting: number;
   running: number;
+  /** CTL-1220: tickets auto-fixed by the recovery sweep (enforce mode). */
+  autoFixed: number;
+  /** CTL-1220: tickets identified as fixable by the recovery sweep (shadow mode). */
+  triaged: number;
   /** CTL-1050: current service outages (the awareness section) — NOT a needs-you
    *  count and NOT folded into needsYou / the all-clear gate. */
   awareness: number;
@@ -336,6 +340,8 @@ export function deriveInbox(payload: BoardPayload): InboxModel {
     blocked: buckets.blocked.length,
     waiting: buckets.waiting.length,
     running: buckets.running.length,
+    autoFixed: 0, // CTL-1220: to be populated by the monitor
+    triaged: 0, // CTL-1220: to be populated by the monitor
     awareness: buckets.awareness.length,
     done: buckets.done.length,
     // CTL-729: the single "N need you" figure absorbs the attention bucket.
