@@ -65,6 +65,7 @@ import {
 import { Reaper, defaultReadActivePhaseSignal, defaultReadSignalBgJobId } from "./reaper.mjs";
 import { startOrphanReaperTimer, readOrphanReaperConfig } from "./orphan-reaper-timer.mjs";
 import { sweepJobDirs } from "./job-dir-gc.mjs"; // CTL-1165 D3: ~/.claude/jobs/<id> dir GC
+import { sweepWorkerDirs } from "./worker-dir-gc.mjs"; // CTL-1205: execution-core/workers/<TICKET>/ GC
 import { ProcReaper } from "./proc-reaper.mjs"; // CTL-1165 D2: orphan child-process reaper (default shadow)
 import {
   startWorktreeRefreshTimer,
@@ -852,10 +853,29 @@ function startReaperAndTimer({
           ...(jobGcCfg.batchCap != null ? { batchCap: Number(jobGcCfg.batchCap) } : {}),
         })
     : async () => {};
+  // CTL-1205: bind the real execution-core/workers/<TICKET>/ dir GC onto the same
+  // 600s orphan-reaper cadence (no new daemon timer). Default-on; disable via
+  // .catalyst → orphanReaper.workerGc.enabled:false. retention/batchCap come from
+  // config (env CATALYST_WORKER_GC_RETENTION_SECONDS / CATALYST_WORKER_GC_BATCH_CAP
+  // still win inside sweepWorkerDirs's defaults).
+  const workerGcCfg = cfg.workerGc ?? {};
+  const workerGcEnabled = workerGcCfg.enabled !== false;
+  const workerGc = workerGcEnabled
+    ? () =>
+        sweepWorkerDirs({
+          orchDir,
+          readAgents: () => listClaudeAgentsResult(),
+          ...(workerGcCfg.retentionSeconds != null
+            ? { retentionMs: Number(workerGcCfg.retentionSeconds) * 1000 }
+            : {}),
+          ...(workerGcCfg.batchCap != null ? { batchCap: Number(workerGcCfg.batchCap) } : {}),
+        })
+    : async () => {};
   _orphanTimer = startOrphanReaperTimer({
     enabled: cfg.enabled !== false,
     intervalSeconds: cfg.intervalSeconds ?? 600,
     jobGc,
+    workerGc,
   });
 
   // CTL-707: start the periodic worktree-refresh timer.
