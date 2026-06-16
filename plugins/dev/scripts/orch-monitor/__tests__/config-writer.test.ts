@@ -233,6 +233,19 @@ describe("validateProjectPatch (CTL-1153)", () => {
     expect((r as any).patch.icon).toBeNull();
   });
 
+  // CTL-1208: phosphor glyph refs must survive validation
+  it("icon: 'phosphor:git-fork' → ok (glyph ref string)", () => {
+    const r = validateProjectPatch({ icon: "phosphor:git-fork" });
+    expect(r.ok).toBe(true);
+    expect((r as any).patch.icon).toBe("phosphor:git-fork");
+  });
+
+  it("icon: 'phosphor:rocket' → ok alongside other fields", () => {
+    const r = validateProjectPatch({ color: "blue", icon: "phosphor:rocket" });
+    expect(r.ok).toBe(true);
+    expect((r as any).patch).toMatchObject({ color: "blue", icon: "phosphor:rocket" });
+  });
+
   it("stateMap with unknown key → 400", () => expect(validateProjectPatch({ stateMap: { bogus: "X" } }).ok).toBe(false));
   it("stateMap with non-string value → 400", () => expect(validateProjectPatch({ stateMap: { done: 5 } }).ok).toBe(false));
   it("stateMap: null → ok (clear sentinel)", () => {
@@ -276,5 +289,35 @@ describe("writeProjectPatch (CTL-1153)", () => {
 
   it("missing config → throws (fail-closed, not fail-open)", () => {
     expect(() => writeProjectPatch("/no/such/config.json", "CTL", { color: "green" })).toThrow();
+  });
+
+  // CTL-1208: phosphor glyph icon survives write → read of config.json
+  it("icon: 'phosphor:git-fork' survives write → read round-trip", () => {
+    const dir = mkdtempSync(join(tmpdir(), "cw-icon-"));
+    try {
+      const p = writeTempConfig(dir);
+      const r = writeProjectPatch(p, "CTL", { icon: "phosphor:git-fork" });
+      expect(r.ok).toBe(true);
+      const after = JSON.parse(readFileSync(p, "utf8"));
+      const ctl = after.catalyst.projects?.find((pr: { key: string }) => pr.key === "CTL");
+      expect(ctl?.icon).toBe("phosphor:git-fork");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("icon: null clears a previously set icon from config.json", () => {
+    const dir = mkdtempSync(join(tmpdir(), "cw-icon-clear-"));
+    try {
+      const p = writeTempConfig(dir);
+      writeProjectPatch(p, "CTL", { icon: "phosphor:rocket" });
+      const r = writeProjectPatch(p, "CTL", { icon: null });
+      expect(r.ok).toBe(true);
+      const after = JSON.parse(readFileSync(p, "utf8"));
+      const ctl = after.catalyst.projects?.find((pr: { key: string }) => pr.key === "CTL");
+      expect(ctl?.icon).toBeUndefined();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

@@ -169,4 +169,24 @@ describe("PUT /api/projects/:key — happy path", () => {
     expect(written.catalyst.projects[0].key).toBe("CTL");
     expect(written.catalyst.projects[0].color).toBe("amber");
   });
+
+  // CTL-1208: phosphor glyph icon round-trip via HTTP
+  it("PUT icon: 'phosphor:git-fork' → 200 and persists to config", async () => {
+    writeFileSync(fixtureCfg, JSON.stringify(FIXTURE_CONFIG, null, 2) + "\n");
+    const res = await put("CTL", { icon: "phosphor:git-fork" });
+    expect(res.status).toBe(200);
+    const written = JSON.parse(readFileSync(fixtureCfg, "utf8"));
+    const ctl = written.catalyst.projects?.find((p: { key: string }) => p.key === "CTL");
+    expect(ctl?.icon).toBe("phosphor:git-fork");
+  });
+
+  it("PUT icon: null clears the icon override", async () => {
+    writeFileSync(fixtureCfg, JSON.stringify(FIXTURE_CONFIG, null, 2) + "\n");
+    await put("CTL", { icon: "phosphor:rocket" });
+    const res = await put("CTL", { icon: null });
+    expect(res.status).toBe(200);
+    const written = JSON.parse(readFileSync(fixtureCfg, "utf8"));
+    const ctl = written.catalyst.projects?.find((p: { key: string }) => p.key === "CTL");
+    expect(ctl?.icon).toBeUndefined();
+  });
 });
