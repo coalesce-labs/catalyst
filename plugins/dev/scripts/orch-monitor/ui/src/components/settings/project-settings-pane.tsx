@@ -1,4 +1,4 @@
-// project-settings-pane.tsx — per-project editor pane (CTL-1153 Phase 5).
+// project-settings-pane.tsx — per-project editor pane (CTL-1153 Phase 5, CTL-1208).
 //
 // Split into a pure renderer (ProjectSettingsPaneContent — tree-walk testable)
 // and a stateful wrapper (ProjectSettingsPane — the public component).
@@ -12,10 +12,12 @@ import { NAMED_COLOR_NAMES } from "@/lib/repo-color-picks-store";
 import { STATE_MAP_KEYS, STATE_MAP_KEY_LABEL, diffStateMap } from "@/lib/project-settings-model";
 import { putProject } from "@/lib/put-project";
 import type { ProjectDescriptor } from "@/hooks/use-projects";
+import { IconPickerPopover } from "./icon-picker-popover";
+import type { IconCandidate } from "@/lib/repo-icons";
 
 type ProjectInput = Pick<
   ProjectDescriptor,
-  "key" | "name" | "repo" | "defaultColor" | "storedName" | "storedColor" | "stateMap"
+  "key" | "name" | "repo" | "defaultColor" | "storedName" | "storedColor" | "stateMap" | "icon"
 >;
 
 // ── Pure content renderer (all state passed as props; tree-walk testable) ─────
@@ -24,19 +26,25 @@ export interface ProjectSettingsPaneContentProps {
   project: ProjectInput;
   name: string;
   color: string;
+  icon: string | null;
   stateMapEdits: Record<string, string>;
   saving: boolean;
   error: string | null;
+  candidates: IconCandidate[];
   onNameChange: (v: string) => void;
   onColorChange: (v: string) => void;
+  onIconChange: (v: string | null) => void;
   onStateMapChange: (key: string, value: string) => void;
   onSave: () => void;
 }
 
 export function ProjectSettingsPaneContent({
-  project, name, color, stateMapEdits, saving, error,
-  onNameChange, onColorChange, onStateMapChange, onSave,
+  project, name, color, icon, candidates, stateMapEdits, saving, error,
+  onNameChange, onColorChange, onIconChange, onStateMapChange, onSave,
 }: ProjectSettingsPaneContentProps) {
+  // Resolve the current hue for glyph previews (the project's effective color).
+  const currentHue = color !== "auto" ? color : (project.defaultColor ?? null);
+
   return (
     <div className="flex flex-1 flex-col gap-6 min-w-0">
       <header>
@@ -62,6 +70,20 @@ export function ProjectSettingsPaneContent({
         />
         <p className="text-xs text-muted">
           Leave blank to use the configured default ({project.name}).
+        </p>
+      </section>
+
+      {/* ── Icon (CTL-1208) ────────────────────────────────────────────────── */}
+      <section className="flex flex-col gap-2">
+        <p className="text-sm font-medium text-fg">Icon</p>
+        <IconPickerPopover
+          value={icon}
+          onChange={onIconChange}
+          candidates={candidates}
+          hue={currentHue}
+        />
+        <p className="text-xs text-muted">
+          Choose a curated glyph (tinted in the project color) or a detected favicon.
         </p>
       </section>
 
@@ -141,12 +163,19 @@ export function ProjectSettingsPaneContent({
 
 export function buildProjectPatch(
   project: ProjectInput,
-  edits: { name: string; color: string; stateMapEdits: Record<string, string> },
+  edits: { name: string; color: string; stateMapEdits: Record<string, string>; icon?: string | null },
 ): Parameters<typeof putProject>[1] {
   const patch: Parameters<typeof putProject>[1] = {};
   if (edits.name !== (project.storedName ?? "")) patch.name = edits.name || null;
   if (edits.color !== (project.storedColor ?? "auto")) {
     patch.color = edits.color === "auto" ? null : edits.color;
+  }
+  // CTL-1208: icon diff (undefined in edits → no icon field in patch).
+  if (edits.icon !== undefined) {
+    const storedIcon = project.icon ?? null;
+    if (edits.icon !== storedIcon) {
+      patch.icon = edits.icon;
+    }
   }
   const mapDiff = diffStateMap(project.stateMap, edits.stateMapEdits);
   if (Object.keys(mapDiff).length > 0) patch.stateMap = mapDiff;
@@ -157,13 +186,16 @@ export function buildProjectPatch(
 
 interface ProjectSettingsPaneProps {
   project: ProjectInput;
+  /** Favicon candidates for this project's repo (from useRepoIconMap). */
+  candidates?: IconCandidate[];
   /** Called after a successful save so the caller can refetch the roster. */
   onSaved: () => void | Promise<void>;
 }
 
-export function ProjectSettingsPane({ project, onSaved }: ProjectSettingsPaneProps) {
+export function ProjectSettingsPane({ project, candidates = [], onSaved }: ProjectSettingsPaneProps) {
   const [name, setName] = useState(project.storedName ?? "");
   const [color, setColor] = useState<string>(project.storedColor ?? "auto");
+  const [icon, setIcon] = useState<string | null>(project.icon ?? null);
   const [stateMapEdits, setStateMapEdits] = useState<Record<string, string>>(
     () => Object.fromEntries(STATE_MAP_KEYS.map((k) => [k, project.stateMap?.[k] ?? ""])),
   );
@@ -175,7 +207,7 @@ export function ProjectSettingsPane({ project, onSaved }: ProjectSettingsPanePro
     setSaving(true);
     setError(null);
     try {
-      const patch = buildProjectPatch(project, { name, color, stateMapEdits });
+      const patch = buildProjectPatch(project, { name, color, stateMapEdits, icon });
       await putProject(project.key, patch);
       await onSaved();
     } catch (err) {
@@ -190,11 +222,14 @@ export function ProjectSettingsPane({ project, onSaved }: ProjectSettingsPanePro
       project={project}
       name={name}
       color={color}
+      icon={icon}
+      candidates={candidates}
       stateMapEdits={stateMapEdits}
       saving={saving}
       error={error}
       onNameChange={setName}
       onColorChange={setColor}
+      onIconChange={setIcon}
       onStateMapChange={(k, v) => setStateMapEdits((prev) => ({ ...prev, [k]: v }))}
       onSave={handleSave}
     />

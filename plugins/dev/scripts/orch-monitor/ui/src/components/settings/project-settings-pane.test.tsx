@@ -117,4 +117,33 @@ describe("buildProjectPatch", () => {
     expect(patch1).not.toHaveProperty("defaultColor");
     expect(patch2).not.toHaveProperty("defaultColor");
   });
+
+  // CTL-1208: icon field diff tests
+  it("emits icon when set to a glyph ref", () => {
+    const patch = buildProjectPatch(base, { name: "", color: "auto", stateMapEdits: {}, icon: "phosphor:rocket" });
+    expect(patch).toHaveProperty("icon", "phosphor:rocket");
+  });
+
+  it("emits icon: null when selecting Auto (clear icon override)", () => {
+    const stored = { ...base, icon: "phosphor:rocket" };
+    const patch = buildProjectPatch(stored, { name: "", color: "auto", stateMapEdits: {}, icon: null });
+    expect(patch).toHaveProperty("icon", null);
+  });
+
+  it("omits icon when unchanged from the stored value", () => {
+    const stored = { ...base, icon: "phosphor:rocket" };
+    const patch = buildProjectPatch(stored, { name: "", color: "auto", stateMapEdits: {}, icon: "phosphor:rocket" });
+    expect(patch).not.toHaveProperty("icon");
+  });
+
+  it("omits icon when both stored and edit are null/absent", () => {
+    const patch = buildProjectPatch(base, { name: "", color: "auto", stateMapEdits: {}, icon: null });
+    expect(patch).not.toHaveProperty("icon");
+  });
+
+  it("includes icon AND color when both change simultaneously", () => {
+    const patch = buildProjectPatch(base, { name: "", color: "green", stateMapEdits: {}, icon: "phosphor:git-fork" });
+    expect(patch).toHaveProperty("icon", "phosphor:git-fork");
+    expect(patch).toHaveProperty("color", "green");
+  });
 });
