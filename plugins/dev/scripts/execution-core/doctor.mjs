@@ -23,7 +23,38 @@ import {
 } from "./config.mjs";
 import { ownedBy } from "./hrw.mjs";
 import { readPeerHeartbeats } from "./cluster-heartbeat.mjs";
-import { readLinearBotUserIds } from "./daemon.mjs";
+
+// readLinearBotUserIds — inlined from daemon.mjs to avoid pulling in the full
+// daemon dependency chain (which includes bun: protocol imports incompatible
+// with node). Logic is identical; deps are already imported above.
+//
+// Collects all known Linear bot user UUIDs from both config layers:
+//   1. ~/.config/catalyst/config.json  catalyst.linear.bot.worker.botUserId
+//   2. ~/.config/catalyst/config.json  catalyst.linear.bot.orchestrator.botUserId
+//   3. .catalyst/config.json           catalyst.monitor.linear.botUserId (Layer-1, back-compat)
+// Returns a Set<string>. Empty set = no filter (fail-open). Never throws.
+function readLinearBotUserIds(l1Path, l2Path) {
+  const ids = new Set();
+  function addFromPath(path, extractor) {
+    if (!path) return;
+    try {
+      const parsed = JSON.parse(readFileSync(path, "utf8"));
+      extractor(parsed, ids);
+    } catch { /* ignore unreadable / malformed files */ }
+  }
+  addFromPath(l2Path, (p, s) => {
+    const bot = p?.catalyst?.linear?.bot;
+    if (typeof bot?.worker?.botUserId === "string" && bot.worker.botUserId.length > 0)
+      s.add(bot.worker.botUserId);
+    if (typeof bot?.orchestrator?.botUserId === "string" && bot.orchestrator.botUserId.length > 0)
+      s.add(bot.orchestrator.botUserId);
+  });
+  addFromPath(l1Path, (p, s) => {
+    const uid = p?.catalyst?.monitor?.linear?.botUserId;
+    if (typeof uid === "string" && uid.length > 0) s.add(uid);
+  });
+  return ids;
+}
 
 // ─── Check model ─────────────────────────────────────────────────────────────
 
@@ -717,21 +748,35 @@ export function renderHuman(checks, meta = {}) {
   return [summary, ...lines].join("\n");
 }
 
+const USAGE = `Usage: catalyst doctor [options]
+
+Run a suite of read-only checks before activating a new cluster node.
+Exit code equals the number of FAIL-level checks (0 = safe to activate).
+
+Options:
+  --json                      Emit machine-readable JSON ({ok, counts, checks[]})
+  --dry-run                   No-op flag (all checks are already read-only)
+  --expected-bot-user-id <id> Assert that the configured token belongs to <id>
+  --help, -h                  Print this help and exit 0
+`;
+
 // parseArgs — parse CLI arguments for the doctor command.
 export function parseArgs(argv) {
   const args = Array.isArray(argv) ? argv : [];
   let json = false;
   let expectedBotUserId = null;
+  let help = false;
   // --dry-run is the default behavior (no separate code path); accept it silently
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
     if (a === "--json") json = true;
     else if (a === "--dry-run") { /* default behavior; no-op */ }
+    else if (a === "--help" || a === "-h") help = true;
     else if (a === "--expected-bot-user-id") {
       expectedBotUserId = args[++i] ?? null;
     }
   }
-  return { json, expectedBotUserId };
+  return { json, expectedBotUserId, help };
 }
 
 // runDoctor — orchestrate all checks, render, and return the fail count.
@@ -780,5 +825,9 @@ const isMain =
 
 if (isMain) {
   const opts = parseArgs(process.argv.slice(2));
+  if (opts.help) {
+    process.stdout.write(USAGE);
+    process.exit(0);
+  }
   runDoctor(opts).then((code) => process.exit(code));
 }
