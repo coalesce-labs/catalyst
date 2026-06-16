@@ -1,5 +1,5 @@
 import { join, resolve as resolvePath, sep, dirname, basename } from "path";
-import { realpathSync, readFileSync, writeFileSync, unlinkSync, existsSync } from "fs";
+import { realpathSync, readFileSync, writeFileSync, unlinkSync, existsSync, mkdirSync } from "fs";
 import { subscribe, emit } from "./lib/event-bus";
 import {
   buildSnapshot,
@@ -12,7 +12,7 @@ import {
 import { readSessionStore } from "./lib/session-store";
 import { readReconcileHealth } from "./lib/reconcile-health-reader"; // CTL-867
 import type { BoardPayload } from "./lib/board-data.mjs";
-import { assembleBoard } from "./lib/board-data.mjs";
+import { assembleBoard, _getTranscriptCacheSize } from "./lib/board-data.mjs";
 import { createBoardSnapshotManager } from "./lib/board-snapshot.mjs";
 // CTL-896 (SHELL6): the dedicated nav-signal projection — worker count, queue
 // depth, board anomaly, and the local daemon-health dot — derived off the SAME
@@ -195,7 +195,12 @@ import {
   type EventLogWriter,
 } from "./lib/event-log";
 import { validatePredicate, createFilterStream, type FilterStream } from "./lib/event-filter";
-import { readBacklog, readTunnelEventStats } from "./lib/event-log-reader";
+import {
+  readBacklog,
+  readTunnelEventStats,
+  fullReadMetrics, // CTL-1232: full-log readFileSync fallback counters for /debug/memory
+  recordFullRead,
+} from "./lib/event-log-reader";
 import { createEventRing } from "./lib/event-ring";
 import { readSubStepEvents } from "./lib/substep-reader";
 import { loadOtelConfig } from "./lib/otel-config";
@@ -3893,7 +3898,14 @@ export function createServer(opts: CreateServerOptions): BunServer {
             const { readClusterGovernance } = await import(govSpecifier) as {
               readClusterGovernance: () => Record<string, unknown>;
             };
-            return Response.json(readClusterGovernance());
+            // CTL-1232: readClusterGovernance() full-reads the current-month log
+            // (no ring, no cache) on every hit — the OBSERVE FleetOps surface
+            // polls this every 15s. Count it so /debug/memory can attribute the
+            // RSS ratchet to this path.
+            const _govT0 = performance.now();
+            const gov = readClusterGovernance();
+            recordFullRead("governance", 0, performance.now() - _govT0);
+            return Response.json(gov);
           } catch {
             return Response.json({ singleHost: true, nodes: [], generatedAt: "" });
           }
@@ -4042,6 +4054,99 @@ export function createServer(opts: CreateServerOptions): BunServer {
               degradedReason: err instanceof Error ? err.message : String(err),
             });
           }
+        }
+
+        // CTL-1232 (profiling): GET /debug/memory[?gc=1] — live memory breakdown.
+        // process.memoryUsage() (MB) + event-ring stats + cache sizes + the
+        // full-log readFileSync fallback counters (fullReadMetrics). With ?gc=1
+        // it forces a synchronous Bun.gc(true) and reports the freed deltas, to
+        // distinguish reclaimable JS-heap garbage from RSS-not-returned-to-the-OS
+        // (the sticky high-water from repeated large transient reads).
+        if (url.pathname === "/debug/memory") {
+          const toMB = (b: number): number => Math.round((b / 1048576) * 10) / 10;
+          const usageMB = (
+            u: ReturnType<typeof process.memoryUsage>,
+          ): Record<string, number> => ({
+            rss: toMB(u.rss),
+            heapTotal: toMB(u.heapTotal),
+            heapUsed: toMB(u.heapUsed),
+            external: toMB(u.external),
+            arrayBuffers: toMB(u.arrayBuffers),
+          });
+          const before = process.memoryUsage();
+          let afterGcMB: Record<string, number> | null = null;
+          let freedMB: Record<string, number> | null = null;
+          if (url.searchParams.get("gc") === "1") {
+            Bun.gc(true);
+            const after = process.memoryUsage();
+            afterGcMB = usageMB(after);
+            freedMB = {
+              rss: toMB(before.rss - after.rss),
+              heapTotal: toMB(before.heapTotal - after.heapTotal),
+              heapUsed: toMB(before.heapUsed - after.heapUsed),
+              external: toMB(before.external - after.external),
+              arrayBuffers: toMB(before.arrayBuffers - after.arrayBuffers),
+            };
+          }
+          const oldest = eventRing.oldestTs();
+          const spanHours =
+            oldest !== null
+              ? Math.round(((Date.now() - Date.parse(oldest)) / 3_600_000) * 100) / 100
+              : null;
+          return Response.json({
+            pid: process.pid,
+            uptimeSec: Math.round(process.uptime()),
+            memoryMB: usageMB(before),
+            ...(afterGcMB && freedMB ? { afterGcMB, freedMB } : {}),
+            ring: {
+              lineCount: eventRing.size(),
+              byteSizeMB: toMB(eventRing.byteSize()),
+              capacity: eventRing.capacity(),
+              oldestTs: oldest,
+              spanHours,
+              listenerCount: eventRing.listenerCount(),
+            },
+            caches: {
+              sseClients: sseClients.size,
+              transcriptPathCache: _getTranscriptCacheSize(),
+            },
+            fullReads: fullReadMetrics,
+          });
+        }
+
+        // CTL-1232 (profiling): GET /debug/heap-snapshot — write a Bun v8 heap
+        // snapshot (loadable in Chrome DevTools → Memory → Load profile) under
+        // ~/catalyst/heap-snapshots/. Heavy + blocking, so localhost-only (curl
+        // from the host) unless CATALYST_DEBUG_TOKEN is set and matched via
+        // ?token=. A small snapshot beside a large RSS confirms off-heap/native
+        // bloat rather than a JS-heap leak.
+        if (url.pathname === "/debug/heap-snapshot") {
+          const token = url.searchParams.get("token");
+          const required = process.env.CATALYST_DEBUG_TOKEN;
+          const ip = server.requestIP(req)?.address ?? "";
+          const isLocal =
+            ip === "127.0.0.1" || ip === "::1" || ip === "::ffff:127.0.0.1";
+          const allowed = required ? token === required : isLocal;
+          if (!allowed) {
+            return new Response(
+              "forbidden (localhost only, or pass ?token=$CATALYST_DEBUG_TOKEN)",
+              { status: 403 },
+            );
+          }
+          const dir = join(CATALYST_DIR, "heap-snapshots");
+          mkdirSync(dir, { recursive: true });
+          const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+          const snapPath = join(dir, `monitor-${process.pid}-${stamp}.heapsnapshot`);
+          const rssBeforeMB = Math.round(process.memoryUsage().rss / 1048576);
+          const snap = Bun.generateHeapSnapshot("v8", "arraybuffer");
+          const bytes = await Bun.write(snapPath, snap);
+          return Response.json({
+            path: snapPath,
+            snapshotBytes: bytes,
+            snapshotMB: Math.round((bytes / 1048576) * 10) / 10,
+            rssBeforeMB,
+            note: "load in Chrome DevTools → Memory → Load profile; small snapshot vs large RSS ⇒ off-heap/native bloat",
+          });
         }
 
         return new Response("Not Found", { status: 404 });

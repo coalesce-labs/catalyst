@@ -94,7 +94,15 @@ export function IconPickerPopover({ value, onChange, candidates, hue }: IconPick
           <ChevronDownIcon className="size-3 shrink-0 opacity-50" />
         </Button>
       </PopoverTrigger>
-      <PopoverContent className="w-80 p-0" align="start">
+      {/* CTL-1226 grid width + CTL-1225 dismiss guards so the first click on
+          Save (outside the popover) isn't swallowed by Radix DismissableLayer. */}
+      <PopoverContent
+        className="w-80 p-0"
+        align="start"
+        onPointerDownOutside={(e) => e.preventDefault()}
+        onCloseAutoFocus={(e) => e.preventDefault()}
+      >
+
         <Command>
           <CommandInput placeholder="Search icons…" className="h-9 text-xs" />
           <CommandList className="max-h-72">

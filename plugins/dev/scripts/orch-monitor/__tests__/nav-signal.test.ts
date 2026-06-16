@@ -73,6 +73,7 @@ function ticket(id: string, overrides: Partial<BoardTicket> = {}): BoardTicket {
     blockers: [],
     host: null,
     generation: null,
+    autoFixed: false,
     ...overrides,
   };
 }

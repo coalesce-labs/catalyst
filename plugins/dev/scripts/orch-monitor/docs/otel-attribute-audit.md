@@ -10,10 +10,10 @@ Do **not** edit this file directly.
 
 | Classification | Count |
 | --- | --- |
-| ✓ Conforming | 14 |
+| ✓ Conforming | 20 |
 | → Rename-to | 37 |
-| ● Legitimately Custom | 20 |
-| **Total** | 71 |
+| ● Legitimately Custom | 26 |
+| **Total** | 83 |
 
 ## Classification by Emitter
 
@@ -76,8 +76,12 @@ Do **not** edit this file directly.
 | Key | Source | Classification | Target | Cluster | Note |
 | --- | --- | --- | --- | --- | --- |
 | `account.email` | `ratelimit-event.mjs:62` | → rename-to | → `catalyst.account.email` | Cluster B |  |
+| `catalyst.directory` | `host.mjs:457` | ● custom |  |  | CTL-1227: directory path indicator (wt for worktree) |
+| `catalyst.measurement` | `host.mjs:457` | ● custom |  |  | CTL-1227: measurement type (logical_du for APFS clone-inflated values) |
 | `host.cpu_count` | `host.mjs:274` | → rename-to | → `system.cpu.logical_count` | Cluster C |  |
 | `host.cpu_pct` | `host.mjs:273` | → rename-to | → `system.cpu.utilization` | Cluster C | unit: ÷100 → 0.0–1.0 |
+| `host.disk_avail_gb` | `host.mjs:554` | ● custom |  |  | CTL-1227: unit: GB (1 decimal), available disk space |
+| `host.disk_free_pct` | `host.mjs:555` | ● custom |  |  | CTL-1227: unit: ÷100 percentage 0–100, available disk pct |
 | `host.disk_total_gb` | `host.mjs:280` | → rename-to | → `system.filesystem.capacity` | Cluster C | unit: ×1073741824 → bytes |
 | `host.disk_used_gb` | `host.mjs:279` | → rename-to | → `system.filesystem.usage` | Cluster C | unit: ×1073741824 → bytes, state=used |
 | `host.disk_used_pct` | `host.mjs:281` | → rename-to | → `system.filesystem.utilization` | Cluster C | unit: ÷100 → 0.0–1.0 |
@@ -85,6 +89,9 @@ Do **not** edit this file directly.
 | `host.mem_total_mb` | `host.mjs:277` | → rename-to | → `system.memory.limit` | Cluster C | unit: ×1048576 → bytes |
 | `host.mem_used_mb` | `host.mjs:276` | → rename-to | → `system.memory.usage` | Cluster C | unit: ×1048576 → bytes, state=used |
 | `host.mem_used_pct` | `host.mjs:278` | → rename-to | → `system.memory.utilization` | Cluster C | unit: ÷100 → 0.0–1.0 |
+| `host.worktree_count` | `host.mjs:557` | ● custom |  |  | CTL-1227: count of active worktrees |
+| `host.worktree_used_gb` | `host.mjs:556` | ● custom |  |  | CTL-1227: unit: GB, logical (du) APFS-clone-inflated worktree usage |
+| `hw.type` | `host.mjs:473` | ✓ conforming |  |  | CTL-1227: hardware type (cpu for thermal) |
 | `process.command` | `processes.mjs:283` | ✓ conforming |  |  |  |
 | `process.cpu_pct` | `processes.mjs:284` | → rename-to | → `process.cpu.utilization` | Cluster D | unit: ÷100 → 0.0–1.0 |
 | `process.phase` | `processes.mjs:287` | → rename-to | → `catalyst.process.phase` | Cluster D |  |
@@ -98,6 +105,11 @@ Do **not** edit this file directly.
 | `ratelimit.seven_day_resets_at` | `ratelimit-event.mjs:67` | → rename-to | → `catalyst.ratelimit.seven_day_resets_at` | Cluster B |  |
 | `ratelimit.seven_day_sonnet_pct` | `ratelimit-event.mjs:69` | → rename-to | → `catalyst.ratelimit.seven_day_sonnet_pct` | Cluster B |  |
 | `subscription.type` | `ratelimit-event.mjs:70` | → rename-to | → `catalyst.subscription.type` | Cluster B |  |
+| `system.device` | `host.mjs:379` | ✓ conforming |  |  | CTL-1227: filesystem device identifier |
+| `system.filesystem.mountpoint` | `host.mjs:380` | ✓ conforming |  |  | CTL-1227: filesystem mount point path |
+| `system.filesystem.state` | `host.mjs:428` | ✓ conforming |  |  | CTL-1227: filesystem state dimension (used|free) |
+| `system.filesystem.type` | `host.mjs:381` | ✓ conforming |  |  | CTL-1227: filesystem type (ext4, apfs, etc) |
+| `system.memory.state` | `host.mjs:411` | ✓ conforming |  |  | CTL-1227: memory state dimension (used|free) |
 
 ### Legacy Bash (`emit-otel-event.sh`)
 

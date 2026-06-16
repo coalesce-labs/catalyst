@@ -113,6 +113,20 @@ export const AUDIT_MANIFEST: AttributeAuditEntry[] = [
   { key: "host.disk_total_gb",emitter: "mjs", source: "host.mjs:280", classification: "rename-to", targetName: "system.filesystem.capacity",   remediationCluster: "C", where: "both", note: "unit: ×1073741824 → bytes" },
   { key: "host.disk_used_pct",emitter: "mjs", source: "host.mjs:281", classification: "rename-to", targetName: "system.filesystem.utilization",remediationCluster: "C", where: "both", note: "unit: ÷100 → 0.0–1.0" },
 
+  // CTL-1227: Host metrics attributes — OTel semconv dimensions + catalyst.* custom
+  { key: "system.device",               emitter: "mjs", source: "host.mjs:379", classification: "conforming", note: "CTL-1227: filesystem device identifier" },
+  { key: "system.filesystem.mountpoint",emitter: "mjs", source: "host.mjs:380", classification: "conforming", note: "CTL-1227: filesystem mount point path" },
+  { key: "system.filesystem.type",      emitter: "mjs", source: "host.mjs:381", classification: "conforming", note: "CTL-1227: filesystem type (ext4, apfs, etc)" },
+  { key: "system.memory.state",         emitter: "mjs", source: "host.mjs:411", classification: "conforming", note: "CTL-1227: memory state dimension (used|free)" },
+  { key: "system.filesystem.state",     emitter: "mjs", source: "host.mjs:428", classification: "conforming", note: "CTL-1227: filesystem state dimension (used|free)" },
+  { key: "catalyst.directory",          emitter: "mjs", source: "host.mjs:457", classification: "legitimately-custom", note: "CTL-1227: directory path indicator (wt for worktree)" },
+  { key: "catalyst.measurement",        emitter: "mjs", source: "host.mjs:457", classification: "legitimately-custom", note: "CTL-1227: measurement type (logical_du for APFS clone-inflated values)" },
+  { key: "hw.type",                     emitter: "mjs", source: "host.mjs:473", classification: "conforming", note: "CTL-1227: hardware type (cpu for thermal)" },
+  { key: "host.disk_avail_gb",          emitter: "mjs", source: "host.mjs:554", classification: "legitimately-custom", note: "CTL-1227: unit: GB (1 decimal), available disk space" },
+  { key: "host.disk_free_pct",          emitter: "mjs", source: "host.mjs:555", classification: "legitimately-custom", note: "CTL-1227: unit: ÷100 percentage 0–100, available disk pct" },
+  { key: "host.worktree_used_gb",       emitter: "mjs", source: "host.mjs:556", classification: "legitimately-custom", note: "CTL-1227: unit: GB, logical (du) APFS-clone-inflated worktree usage" },
+  { key: "host.worktree_count",         emitter: "mjs", source: "host.mjs:557", classification: "legitimately-custom", note: "CTL-1227: count of active worktrees" },
+
   // ── MJS emitter — catalyst-agent/processes.mjs ───────────────────────────
   // §4k: Process metrics — partially conforming, cluster D
   { key: "process.command",  emitter: "mjs", source: "processes.mjs:283", classification: "conforming" },

@@ -133,6 +133,25 @@ describe("ProjectSettingsPaneContent — CTL-1212 sections", () => {
   });
 });
 
+// ── CTL-1225: save confirmation ───────────────────────────────────────────────
+describe("CTL-1225 save confirmation", () => {
+  it("renders the default Save label when idle", () => {
+    const el = ProjectSettingsPaneContent({ project, name: "", color: "auto", icon: null, candidates: [], stateMapEdits: {}, saving: false, error: null, onNameChange: () => {}, onColorChange: () => {}, onIconChange: () => {}, onStateMapChange: () => {}, onSave: () => {} });
+    expect(containsText(el, "Save")).toBe(true);
+    expect(containsText(el, "Saved")).toBe(false);
+  });
+
+  it("renders a Saved confirmation when saved is true", () => {
+    const el = ProjectSettingsPaneContent({ project, name: "", color: "auto", icon: null, candidates: [], stateMapEdits: {}, saving: false, saved: true, error: null, onNameChange: () => {}, onColorChange: () => {}, onIconChange: () => {}, onStateMapChange: () => {}, onSave: () => {} });
+    expect(containsText(el, "Saved")).toBe(true);
+  });
+
+  it("prefers the Saving label over Saved while a save is in flight", () => {
+    const el = ProjectSettingsPaneContent({ project, name: "", color: "auto", icon: null, candidates: [], stateMapEdits: {}, saving: true, saved: true, error: null, onNameChange: () => {}, onColorChange: () => {}, onIconChange: () => {}, onStateMapChange: () => {}, onSave: () => {} });
+    expect(containsText(el, "Saving")).toBe(true);
+  });
+});
+
 describe("buildProjectPatch", () => {
   const base = {
     key: "CTL", name: "Catalyst", repo: "catalyst",

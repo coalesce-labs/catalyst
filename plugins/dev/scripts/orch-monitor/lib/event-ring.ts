@@ -53,6 +53,10 @@ export interface EventRing {
   oldestTs(): string | null;
   /** Current retained line count. */
   size(): number;
+  /** Approx retained bytes (UTF-8 content length of all retained lines). CTL-1232. */
+  byteSize(): number;
+  /** Configured max retained line count (capLines). CTL-1232. */
+  capacity(): number;
   /**
    * CTL-1224: register a listener fired synchronously with each batch of
    * newly-appended raw lines from the LIVE tick (NOT cold-fill / start()).
@@ -259,6 +263,14 @@ export function createEventRing(opts: EventRingOpts): EventRing {
     },
     size(): number {
       return ring.length;
+    },
+    byteSize(): number {
+      let b = 0;
+      for (const l of ring) b += Buffer.byteLength(l, "utf8");
+      return b;
+    },
+    capacity(): number {
+      return capLines;
     },
     onAppend(listener: (lines: string[]) => void): () => void {
       appendListeners.add(listener);

@@ -28,7 +28,9 @@ import {
   deferWorktreeCleanup,
   archiveWorktreeArtifacts,
   lsofCwdUnder,
+  listOrchDirs,
 } from "./worktree-safety.mjs";
+import { makePrView } from "./scan-adapters.mjs";
 import { log } from "./config.mjs";
 
 const CLAUDE_BIN = process.env.CATALYST_DISPATCH_CLAUDE_BIN || "claude";
@@ -74,7 +76,27 @@ export const CLEANUP_GRACE_MS = 60_000;
 // folds in the live `claude agents` snapshot + the lsof backstop + registry
 // provenance, and returns { safe, reasons }. Injectable as the Reaper's
 // `assessWorktreeRemoval` seam so unit tests drive the verdict without real git.
-export async function defaultAssessWorktreeRemoval(event, readAgents = () => listClaudeAgentsResult()) {
+//
+// CTL-1218 — two false-negative signals corrected (the data-loss gate is NOT
+// loosened; we only stop two false UNSAFE reads):
+//   • orchDirs (Part A): the LIVE daemon writes worker dirs under
+//     getExecutionCoreDir() (~/catalyst/execution-core/workers/<ticket>/), which
+//     the default listOrchDirs() (~/catalyst/runs/) never scans, so every
+//     daemon-created worktree read "unknown-provenance". The daemon now threads
+//     [orchDir, ...listOrchDirs()] in; tests inject their own.
+//   • prView (Part B): the AUTOMATED producers (stall-janitor J1, 600s timer)
+//     emit WITHOUT event.force, so the old `prMerged: event.force === true` read
+//     was always false → "not-merged". We now CONFIRM merge from the GitHub PR
+//     state (state === "MERGED" || mergedAt != null) via an injectable prView
+//     seam, fail-CLOSED on any error/unresolvable PR; event.force === true is
+//     kept as a no-gh fast-path for the manual CLI MERGED row.
+export async function defaultAssessWorktreeRemoval(
+  event,
+  readAgents = () => listClaudeAgentsResult(),
+  orchDirs = listOrchDirs(),
+  prView = makePrView((/* ticket */) => event.worktree_path),
+  resolvePr = (e) => defaultResolvePrForEvent(e),
+) {
   const gateRunGit = (args) =>
     spawnSync("git", ["-C", event.worktree_path, ...args], { encoding: "utf8" });
   // Fail-closed liveness: listClaudeAgentsResult distinguishes a FAILED read
@@ -97,6 +119,24 @@ export async function defaultAssessWorktreeRemoval(event, readAgents = () => lis
   } catch {
     agentsOk = false;
   }
+
+  // CTL-1218 Part B — confirm the merge from the real GitHub PR state. event.force
+  // (the manual CLI MERGED row) short-circuits with no gh round-trip; every other
+  // path resolves the ticket's PR and asks gh. Fail-CLOSED: an unresolvable PR or
+  // any gh/parse error leaves confirmedMerged false → "not-merged" → defer.
+  let confirmedMerged = event.force === true;
+  if (!confirmedMerged) {
+    try {
+      const pr = resolvePr(event);
+      if (pr?.number) {
+        const v = prView(event.ticket, pr);
+        confirmedMerged = v?.state === "MERGED" || v?.mergedAt != null;
+      }
+    } catch {
+      confirmedMerged = false;
+    }
+  }
+
   return isSafeToRemoveWorktree(
     event.worktree_path,
     {
@@ -104,11 +144,44 @@ export async function defaultAssessWorktreeRemoval(event, readAgents = () => lis
       repoRoot: event.worktree_path,
       branch: event.branch,
       terminal: true,
-      prMerged: event.force === true, // event.force === confirmed GitHub MERGED
-      orchProvenance: hasOrchProvenance(event.ticket),
+      prMerged: confirmedMerged, // confirmed GitHub MERGED (force fast-path OR prView)
+      orchProvenance: hasOrchProvenance(event.ticket, { orchDirs }),
     },
     { runGit: gateRunGit, agentsList, agentsOk, procLive: lsofCwdUnder(event.worktree_path) === true },
   );
+}
+
+// defaultResolvePrForEvent — CTL-1218 Part B. Resolve the GitHub PR descriptor
+// ({ number, url } | null) for a reap event so defaultAssessWorktreeRemoval can
+// confirm the merge state. Resolution order, all fail-soft → null on miss:
+//   1. event.pr if a producer already attached { number } (future-proof).
+//   2. `gh pr list -R <slug> --head <branch> --state merged` inside the worktree,
+//      which both resolves the repo slug AND filters to merged PRs in one call.
+// Never throws — any spawn/parse error yields null so the gate stays fail-closed
+// (no PR resolved → confirmedMerged stays false → "not-merged" → defer).
+export function defaultResolvePrForEvent(event, { exec = spawnSync } = {}) {
+  if (event?.pr?.number) return { number: event.pr.number, url: event.pr.url };
+  const wt = event?.worktree_path;
+  const branch = event?.branch;
+  if (!wt || !branch) return null;
+  try {
+    const remote = exec("git", ["-C", wt, "remote", "get-url", "origin"], { encoding: "utf8" });
+    if (remote?.error || (remote?.status ?? 1) !== 0) return null;
+    const m = (remote.stdout ?? "").trim().match(/github\.com[:/]([^/]+\/[^/.]+)(?:\.git)?$/);
+    const slug = m ? m[1] : null;
+    if (!slug) return null;
+    const res = exec(
+      "gh",
+      ["-R", slug, "pr", "list", "--head", branch, "--state", "merged", "--json", "number,url,state", "--limit", "1"],
+      { encoding: "utf8" },
+    );
+    if (res?.error || (res?.status ?? 1) !== 0) return null;
+    const arr = JSON.parse((res.stdout ?? "").trim() || "[]");
+    if (!Array.isArray(arr) || arr.length === 0) return null;
+    return { number: arr[0].number, url: arr[0].url, repo: slug };
+  } catch {
+    return null;
+  }
 }
 
 /**
