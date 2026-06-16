@@ -85,6 +85,11 @@ import {
   hostName,
   hostId,
 } from "../orch-monitor/lib/canonical-event-shared.ts";
+import {
+  PHASE_EVENT_PATTERN as _PHASE_EVENT_PATTERN,
+  FORBIDDEN_PREFIXES,
+  PROTECTED_EXACT_NAMES,
+} from "./namespace-contract.mjs";
 
 // Identity-stable aliases for the shared maps — the router mutates these; the
 // canonical instances live in state.mjs (see barrel-exports.test.mjs).
@@ -1338,14 +1343,10 @@ function _autoPrLifecycleFromTicket(ticket, prNumber, interestsMap, repo) {
 // the interest's ticket. Used by the phase-agent orchestrator to coordinate
 // hand-off between short-lived phase agents (see plan §Initiative 1).
 //
-// CTL-484: turn-cap-exhausted is routed alongside complete/failed so the
-// orchestrator can dispatch a continuation worker (separate budget from the
-// error-revive path) without an event-name namespace collision.
-// CTL-512: skipped is the monitor-deploy terminal-no-deploy status. Routed
-// the same as complete (phase-advance is a no-op for monitor-deploy) so the
-// scheduler frees the wave slot.
-const PHASE_EVENT_PATTERN =
-  /^phase\.([^.]+)\.(complete|failed|turn-cap-exhausted|skipped)\.([A-Za-z][A-Za-z0-9_]*-\d+)$/;
+// PHASE_EVENT_PATTERN lives in namespace-contract.mjs (CTL-1142 single source of
+// truth). Re-exported here to preserve the existing import surface for callers
+// that import it from this module (CTL-484, CTL-512 comments live in the contract).
+export const PHASE_EVENT_PATTERN = _PHASE_EVENT_PATTERN;
 
 export function tryPhaseLifecycleRoute(event, interestsMap) {
   const matches = [];
@@ -1423,11 +1424,10 @@ export function shouldSkipEvent(event) {
   }
   if (event.resource?.["service.name"] === "catalyst.broker") return true;
   const name = getEventName(event);
-  if (name.startsWith("filter.")) return true;
-  if (name.startsWith("broker.daemon")) return true;
+  if (FORBIDDEN_PREFIXES.some((p) => name.startsWith(p))) return true;
   // CTL-401: liveness pings — handled earlier in processEvent, skip here too
   // so they never reach the Groq queue even if the early-return path changes.
-  if (name === "session.heartbeat") return true;
+  if (PROTECTED_EXACT_NAMES.includes(name)) return true;
   return false;
 }
 
