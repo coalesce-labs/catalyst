@@ -21,6 +21,36 @@ import { join } from "node:path";
 import { createFilterStream } from "./event-filter";
 import type { EventRing } from "./event-ring";
 
+/**
+ * CTL-1232 (profiling): process-wide counters for the full-log `readFileSync`
+ * paths that survive the event-ring fast-path. The ring covers the common case;
+ * these count the FALLBACKS (the requested window underflows the ring → a
+ * whole-file read), the suspected driver of the monitor's high-water RSS. Each
+ * full read of the ~190 MB+ current-month file is a large transient that Bun/
+ * mimalloc rarely returns to the OS. Surfaced verbatim by GET /debug/memory so
+ * the offending path + cadence can be confirmed from live traffic.
+ */
+export interface FullReadMetric {
+  count: number;
+  lastBytes: number;
+  lastMs: number;
+  lastTs: string;
+  lastRssMB: number;
+}
+export const fullReadMetrics: Record<string, FullReadMetric> = {};
+export function recordFullRead(label: string, bytes: number, ms: number): void {
+  let m = fullReadMetrics[label];
+  if (!m) {
+    m = { count: 0, lastBytes: 0, lastMs: 0, lastTs: "", lastRssMB: 0 };
+    fullReadMetrics[label] = m;
+  }
+  m.count++;
+  m.lastBytes = bytes;
+  m.lastMs = ms;
+  m.lastTs = new Date().toISOString();
+  m.lastRssMB = Math.round(process.memoryUsage().rss / 1048576);
+}
+
 function monthlyPath(catalystDir: string, d: Date): string {
   const y = d.getUTCFullYear();
   const m = String(d.getUTCMonth() + 1).padStart(2, "0");
@@ -88,7 +118,9 @@ export async function readBacklog(opts: ReadBacklogOpts): Promise<string[]> {
   // Current monthly files are ~17MB at end-of-month; reading the whole file is
   // fast enough. If files grow significantly we can switch to chunked reads
   // from the end of the file.
+  const _t0 = performance.now();
   const text = readFileSync(path, "utf8");
+  recordFullRead("readBacklog", text.length, performance.now() - _t0);
   const allLines = text.split("\n").filter((l) => l.length > 0);
 
   if (!opts.predicate.trim()) {
@@ -260,6 +292,8 @@ export function readTunnelEventStats(
   }
 
   // File fallback (no ring, or ring underflows the 24h window).
+  const _t0 = performance.now();
+  let _fallbackBytes = 0;
   const currentPath = monthlyPath(catalystDir, nowDate);
   const prevPath = monthlyPath(catalystDir, cutoff24h);
   const paths = currentPath === prevPath ? [currentPath] : [prevPath, currentPath];
@@ -272,10 +306,12 @@ export function readTunnelEventStats(
     } catch {
       continue;
     }
+    _fallbackBytes += text.length;
     for (const line of text.split("\n")) {
       accumulateGithubStat(line, cutoffIso, acc);
     }
   }
+  recordFullRead("tunnelStats", _fallbackBytes, performance.now() - _t0);
 
   return acc;
 }

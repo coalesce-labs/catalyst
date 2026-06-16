@@ -103,6 +103,47 @@ describe("createEventRing", () => {
     }
   });
 
+  it("byteSize() reports the UTF-8 content bytes of retained lines; capacity() reports capLines (CTL-1232)", () => {
+    eventsDir();
+    const now = new Date("2026-06-04T00:00:00Z");
+    const lines = Array.from({ length: 5 }, (_, i) =>
+      line(`evt-${i}`, "2026-06-04T00:00:00Z"),
+    );
+    writeFileSync(monthFile(now), lines.join("\n") + "\n");
+
+    const ring = createEventRing({ catalystDir: workdir, capLines: 1234, now: () => now });
+    ring.start();
+    try {
+      // capacity reflects the configured cap, regardless of current fill.
+      expect(ring.capacity()).toBe(1234);
+      // byteSize equals the sum of UTF-8 byte lengths of exactly the retained lines.
+      const retained = ring.query({ limit: 10_000 });
+      const expectedBytes = retained.reduce(
+        (sum, l) => sum + Buffer.byteLength(l, "utf8"),
+        0,
+      );
+      expect(ring.byteSize()).toBe(expectedBytes);
+      expect(ring.byteSize()).toBeGreaterThan(0);
+    } finally {
+      ring.stop();
+    }
+  });
+
+  it("byteSize() is 0 and capacity() is the default for an empty ring (CTL-1232)", () => {
+    eventsDir();
+    const now = new Date("2026-06-04T00:00:00Z");
+    // No file written → cold-fill finds nothing → ring stays empty.
+    const ring = createEventRing({ catalystDir: workdir, now: () => now });
+    ring.start();
+    try {
+      expect(ring.size()).toBe(0);
+      expect(ring.byteSize()).toBe(0);
+      expect(ring.capacity()).toBe(50_000);
+    } finally {
+      ring.stop();
+    }
+  });
+
   it("picks up newly appended lines on the next poll tick", async () => {
     eventsDir();
     const now = new Date("2026-06-04T00:00:00Z");
