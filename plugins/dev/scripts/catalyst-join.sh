@@ -113,6 +113,13 @@ if [[ -z "$BUNDLE_PATH" ]]; then
     exit 1
   fi
   validate_token "$CATALYST_JOIN_TOKEN" || exit 1
+else
+  # --bundle mode: a token is optional, but if one IS supplied it must be
+  # well-formed. An unvalidated token would be persisted raw into the marker
+  # (CTL-1185 remediate: verify silent-failure finding).
+  if [[ -n "$CATALYST_JOIN_TOKEN" ]]; then
+    validate_token "$CATALYST_JOIN_TOKEN" || exit 1
+  fi
 fi
 
 # ── State paths ───────────────────────────────────────────────────────────────
@@ -144,10 +151,22 @@ marker_init() {
   if [[ "$RESUME" -eq 1 && -f "$MARKER_FILE" ]]; then
     return 0  # preserve existing marker for resume
   fi
-  printf '{"completedStages":[],"startedAt":"%s"' "$ts" > "$MARKER_FILE"
-  [[ -n "$CATALYST_JOIN_TOKEN" ]] && printf ',"token":"%s"' "$CATALYST_JOIN_TOKEN" >> "$MARKER_FILE"
-  [[ -n "$BUNDLE_PATH" ]]         && printf ',"bundlePath":"%s"' "$BUNDLE_PATH"   >> "$MARKER_FILE"
-  printf '}\n' >> "$MARKER_FILE"
+  # CTL-1185 remediate: build with jq --arg (not raw printf) so a token or
+  # bundlePath containing a double-quote/backslash cannot produce invalid JSON
+  # that silently breaks every later marker op under `2>/dev/null` and wedges
+  # resume with no error surfaced (verify silent-failure finding).
+  jq -n \
+    --arg ts "$ts" \
+    --arg token "${CATALYST_JOIN_TOKEN:-}" \
+    --arg bundlePath "${BUNDLE_PATH:-}" \
+    '{completedStages: [], startedAt: $ts}
+     + (if $token != "" then {token: $token} else {} end)
+     + (if $bundlePath != "" then {bundlePath: $bundlePath} else {} end)' \
+    > "$MARKER_FILE"
+  # The marker may hold the join token; lock it to 0600 immediately rather than
+  # leaving it world-readable until a later marker op's mktemp+mv replaces it
+  # (verify security finding; CTL-1203 secrets-600 hygiene).
+  chmod 0600 "$MARKER_FILE" 2>/dev/null || true
 }
 
 marker_has_stage() {
@@ -358,7 +377,13 @@ do_setup_plugin_source() {
 merge_shared_config() {
   local cfg="$LAYER2_CONFIG"
   mkdir -p "$(dirname "$cfg")"
-  [[ -f "$cfg" ]] || echo '{}' > "$cfg"
+  if [[ ! -f "$cfg" ]]; then
+    # Create at 0600 before it ever holds botCreds.orchestrator/worker — the
+    # default umask would otherwise leave a transient world-readable window
+    # (verify security finding; CTL-1203 secrets-600 hygiene).
+    echo '{}' > "$cfg"
+    chmod 0600 "$cfg" 2>/dev/null || true
+  fi
 
   # Extract SHARED keys from bundle; preserve all existing node-local keys
   local la_project la_team la_statemap bot_orch bot_worker liveness repo_url plugin_url
@@ -407,12 +432,20 @@ persist_host_name() {
     host_name="$(hostname -s 2>/dev/null || hostname | sed 's/\.local$//')"
     host_name="${host_name%.local}"
   fi
-  [[ -f "$cfg" ]] || echo '{}' > "$cfg"
+  if [[ ! -f "$cfg" ]]; then
+    echo '{}' > "$cfg"
+    chmod 0600 "$cfg" 2>/dev/null || true  # holds botCreds; protect immediately (CTL-1203)
+  fi
   local tmp
   tmp="$(mktemp "$(dirname "$cfg")/.config.XXXXXX")"
   jq --arg hn "$host_name" '.catalyst.host.name = $hn' "$cfg" > "$tmp" && mv "$tmp" "$cfg" || { rm -f "$tmp"; return 1; }
   info "host.name set to: ${host_name}"
-  echo "$host_name"  # return value
+  # CTL-1185 remediate: return the host name via a global, NOT via stdout. The
+  # caller captures host_name="$(persist_host_name)"; echoing here makes command
+  # substitution capture the info() line above too, so write_local_roster stored
+  # a polluted multi-line value and local-hosts.json became
+  # ["[join] host.name set to: <h>\n<h>"] instead of ["<h>"] (verify HIGH finding).
+  PERSISTED_HOST_NAME="$host_name"
 }
 
 write_local_roster() {
@@ -438,9 +471,12 @@ write_local_roster() {
 
 do_config_merge() {
   merge_shared_config || return 1
-  local host_name
-  host_name="$(persist_host_name)" || return 1
-  write_local_roster "$host_name" || return 1
+  # CTL-1185 remediate: persist_host_name returns the host name via the global
+  # PERSISTED_HOST_NAME (not stdout) so the info() progress line can't pollute
+  # the captured value. Same shell — run_stage calls "$@" directly, no subshell.
+  PERSISTED_HOST_NAME=""
+  persist_host_name || return 1
+  write_local_roster "$PERSISTED_HOST_NAME" || return 1
 }
 
 do_doctor_gate() {
@@ -500,7 +536,9 @@ main() {
   # 7. Install launchd stack LAST (Stage-0 SHADOW)
   run_stage "stack" do_install_stack || exit 1
 
-  marker_add_stage "shadow-stop"
+  # Guard so a successful re-run doesn't append a duplicate shadow-stop entry to
+  # completedStages each time (verify low finding).
+  marker_has_stage "shadow-stop" || marker_add_stage "shadow-stop"
 
   info ""
   info "=== Stage-0 SHADOW complete ==="

@@ -576,10 +576,12 @@ run "T4.3 local hosts.json written; committed roster untouched" bash -c "
     CATALYST_JOIN_DOCTOR_SCRIPT='${STUBS4}/stub-check-setup.sh' \
     CATALYST_JOIN_REACH_PROBE='${STUBS4}/stub-reach-probe.sh' \
     bash '$JOIN' --bundle '$FIXTURE_BUNDLE' >/dev/null 2>&1
-  # Local roster must exist
+  # Local roster must exist AND contain exactly the host name — a content
+  # assertion (not just type), so a polluted multi-line roster value fails here
+  # (CTL-1185 remediate: this is the test that lets the HIGH roster bug through).
   local_roster=\"\$catdir/cluster/local-hosts.json\"
   [[ -f \"\$local_roster\" ]] && \
-  jq -e 'type == \"array\" or type == \"object\"' \"\$local_roster\" >/dev/null && \
+  jq -e '. == [\"newnode\"]' \"\$local_roster\" >/dev/null && \
   # Committed roster must be unchanged
   new_sum=\$(md5 -q \"\$roster\" 2>/dev/null || md5sum \"\$roster\" | cut -d' ' -f1)
   [[ \"\$orig_sum\" == \"\$new_sum\" ]]"
@@ -652,11 +654,17 @@ run "T4.6 idempotency: second run is no-op" bash -c "
   # Run 1
   env -i \$base_env bash '$JOIN' --bundle '$FIXTURE_BUNDLE' >/dev/null 2>&1
   cfg=\"\$home46/.config/catalyst/config.json\"
+  roster=\"\$catdir/cluster/local-hosts.json\"
   sum1=\$(md5 -q \"\$cfg\" 2>/dev/null || md5sum \"\$cfg\" | cut -d' ' -f1)
+  rsum1=\$(md5 -q \"\$roster\" 2>/dev/null || md5sum \"\$roster\" | cut -d' ' -f1)
   # Run 2
   env -i \$base_env bash '$JOIN' --bundle '$FIXTURE_BUNDLE' >/dev/null 2>&1
   sum2=\$(md5 -q \"\$cfg\" 2>/dev/null || md5sum \"\$cfg\" | cut -d' ' -f1)
-  [[ \"\$sum1\" == \"\$sum2\" ]]"
+  rsum2=\$(md5 -q \"\$roster\" 2>/dev/null || md5sum \"\$roster\" | cut -d' ' -f1)
+  # CTL-1185 remediate: config AND roster must both be byte-identical across runs,
+  # and the roster must still be exactly [host] (not a duplicated/polluted value).
+  [[ \"\$sum1\" == \"\$sum2\" ]] && [[ \"\$rsum1\" == \"\$rsum2\" ]] && \
+  jq -e '. == [\"testnode\"]' \"\$roster\" >/dev/null"
 
 # ── Summary ────────────────────────────────────────────────────────────────────
 
