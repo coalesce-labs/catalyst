@@ -53,6 +53,7 @@ CLI_ENTRIES=(
   "catalyst-hud:catalyst-hud"
   "catalyst-hud-classic.sh:catalyst-hud-classic"
   "catalyst-stack:catalyst-stack"
+  "catalyst-cluster:catalyst-cluster"
   "../hooks/emit-lifecycle-event.sh:emit-lifecycle-event"
 )
 
