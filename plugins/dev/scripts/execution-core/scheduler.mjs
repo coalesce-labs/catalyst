@@ -184,6 +184,11 @@ import {
   defaultCollectUnstuckCandidates,
   emitUnstuckEvent,
 } from "./unstuck-sweep.mjs";
+// CTL-1219: the per-category enforcement seam registry (dirty-tree /
+// source-conflict / orphan-stale / stale-label). Pure-cored + injectable; bound
+// to production deps at the unstuckSweep wiring point below. Wiring this does NOT
+// flip enforce on — the mode gate stays at its safe 'off' default (ADR-023).
+import { buildUnstuckActSeams } from "./unstuck-act-seams.mjs";
 import { readUnstuckSweepConfig, isThrottled } from "./config.mjs";
 // CTL-558: the deterministic Linear status/label write seam. The whole module
 // is injected as `writeStatus` so tests pass fakes; production uses the real
@@ -5162,12 +5167,59 @@ function runTick() {
               return null;
             },
           }),
-        // actByCategory: production seams undefined → no-op (escalate handles
-        // all whitelisted categories in the initial shadow rollout). Operators
-        // enable per-category enforcement via Layer-2 config. Pass 0u ships
-        // shadow-/escalate-only: catA-D mechanical enforcement is DEFERRED and
-        // actByCategory:{} is an intentional no-op (no real act seams exist yet).
-        actByCategory: runningOpts.unstuckActByCategory ?? {},
+        // CTL-1219: wire the real per-category enforcement seams. These act ONLY
+        // when the unstuck-sweep mode resolves to 'enforce' (the driver looks up
+        // actByCategory[decision.category] solely on the enforce branch); the mode
+        // gate (readUnstuckSweepConfig, default 'off') is UNTOUCHED, so production
+        // stays inert until an operator opts in — enforce is an operator decision
+        // per ADR-023. Operators can still fully override via
+        // runningOpts.unstuckActByCategory (e.g. a partial registry during staged
+        // rollout, or {} to preserve the prior shadow-/escalate-only posture); the
+        // ?? precedence keeps every existing scheduler test that injects
+        // unstuckActByCategory:{} working unchanged. The seams are pure-cored +
+        // injectable; here we bind the production deps already in scope.
+        actByCategory: runningOpts.unstuckActByCategory ?? buildUnstuckActSeams({
+          orchDir: runningOpts.orchDir,
+          // re-arm seam: deletes the stalled signal so the phase re-dispatches.
+          clearStall: defaultClearStall(runningOpts.orchDir, runningOpts.writeStatus ?? linearWrite),
+          // label-removal seam for the stale-label category.
+          writeStatus: runningOpts.writeStatus ?? linearWrite,
+          // resolvePrState: normalize the live PR view ("MERGED" | other) for the
+          // orphan-stale gate. Reuses the SAME prAdapter the recovery short-circuit
+          // + reconcile backstop use (built once at boot, gh only fires inside
+          // prView). Inert when no prAdapter / PR number is wired.
+          resolvePrState: (ticket) => {
+            const adapter = runningOpts.prAdapter;
+            if (!adapter || typeof adapter.prView !== "function") return null;
+            let pr = null;
+            for (const sig of readWorkerSignals(runningOpts.orchDir)) {
+              if (sig.ticket === ticket) {
+                pr = sig.raw?.pr ?? sig.pr ?? null;
+                if (pr?.number) break;
+              }
+            }
+            if (!pr?.number) return null;
+            try {
+              const view = adapter.prView(ticket, pr);
+              if (view && (view.state === "MERGED" || view.mergedAt != null)) return "MERGED";
+              return view?.state ?? null;
+            } catch {
+              return null; // fail-closed: a gh error is never treated as MERGED.
+            }
+          },
+          // jobLifecycle: the same bg-liveness probe the reclaim sweep uses; bound
+          // to the warm agents snapshot. Inert (→ not-alive) without isBgJobAlive.
+          jobLifecycle: (bgJobId) => {
+            if (typeof runningOpts.isBgJobAlive !== "function" || !bgJobId) return false;
+            try {
+              return Boolean(runningOpts.isBgJobAlive(bgJobId, { agents: getAgentsCached().agents }));
+            } catch {
+              return false;
+            }
+          },
+          // runGit / fs primitives / emitPhaseComplete fall back to real defaults
+          // inside unstuck-act-seams.mjs (git, node:fs, phase-agent-emit-complete).
+        }),
         // emit: the dedicated unstuck unified-log emitter (NOT emitReapIntent,
         // whose closed vocabulary throws on unstuck.* — CTL-1064). Explicit here
         // so the production wiring does not silently depend on the schedulerTick
