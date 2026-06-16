@@ -177,6 +177,12 @@ export interface BoardTicket {
    *  card. null/absent unless attention is needs-human and a signal carried the
    *  extended fields. */
   explanation?: BoardEscalationExplanation | null;
+  /** CTL-1220: true when this ticket was auto-fixed by the recovery sweep. */
+  autoFixed?: boolean | null;
+  /** CTL-1220: true when this ticket was triaged (identified as fixable) by the recovery sweep. */
+  triaged?: boolean | null;
+  /** CTL-1220: ISO timestamp when the ticket was recovered/auto-fixed. */
+  recoveredAt?: string | null;
 }
 
 /** CTL-1110: the six extended escalation-explanation fields, surfaced as a nested
