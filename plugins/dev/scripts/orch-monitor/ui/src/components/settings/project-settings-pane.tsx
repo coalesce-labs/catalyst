@@ -2,7 +2,7 @@
 //
 // Split into a pure renderer (ProjectSettingsPaneContent — tree-walk testable)
 // and a stateful wrapper (ProjectSettingsPane — the public component).
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -31,6 +31,7 @@ export interface ProjectSettingsPaneContentProps {
   icon: string | null;
   stateMapEdits: Record<string, string>;
   saving: boolean;
+  saved?: boolean;
   error: string | null;
   candidates: IconCandidate[];
   onNameChange: (v: string) => void;
@@ -41,7 +42,7 @@ export interface ProjectSettingsPaneContentProps {
 }
 
 export function ProjectSettingsPaneContent({
-  project, name, color, icon, candidates, stateMapEdits, saving, error,
+  project, name, color, icon, candidates, stateMapEdits, saving, saved = false, error,
   onNameChange, onColorChange, onIconChange, onStateMapChange, onSave,
 }: ProjectSettingsPaneContentProps) {
   // Resolve the current hue for glyph previews (the project's effective color).
@@ -188,7 +189,7 @@ export function ProjectSettingsPaneContent({
 
       <div className="flex items-center gap-3">
         <Button onClick={onSave} disabled={saving} size="sm">
-          {saving ? "Saving…" : "Save"}
+          {saving ? "Saving…" : saved ? "Saved ✓" : "Save"}
         </Button>
       </div>
     </div>
@@ -237,15 +238,26 @@ export function ProjectSettingsPane({ project, candidates = [], onSaved }: Proje
   );
 
   const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // Clear the transient "Saved ✓" confirmation; cleanup covers the CTL-1225
+  // remount-on-project-switch so a pending timer never fires post-unmount.
+  useEffect(() => {
+    if (!saved) return;
+    const t = setTimeout(() => setSaved(false), 2000);
+    return () => clearTimeout(t);
+  }, [saved]);
 
   async function handleSave() {
     setSaving(true);
     setError(null);
+    setSaved(false);
     try {
       const patch = buildProjectPatch(project, { name, color, stateMapEdits, icon });
       await putProject(project.key, patch);
       await onSaved();
+      setSaved(true);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Save failed");
     } finally {
@@ -262,6 +274,7 @@ export function ProjectSettingsPane({ project, candidates = [], onSaved }: Proje
       candidates={candidates}
       stateMapEdits={stateMapEdits}
       saving={saving}
+      saved={saved}
       error={error}
       onNameChange={setName}
       onColorChange={setColor}

@@ -281,6 +281,27 @@ describe("CTL-1212 three-tier nav scaffolding", () => {
   });
 });
 
+// ── CTL-1225: icon picker must not swallow the first outside click (Save) ──────
+describe("CTL-1225 icon picker preserves the first outside click", () => {
+  const pickerSrc = read("components/settings/icon-picker-popover.tsx");
+  it("overrides Radix onPointerDownOutside so the paired click reaches Save", () => {
+    expect(pickerSrc).toContain("onPointerDownOutside");
+    expect(pickerSrc).toMatch(/onPointerDownOutside=\{[^}]*preventDefault\(\)/);
+  });
+  it("prevents focus theft on close so the underlying click target keeps focus", () => {
+    expect(pickerSrc).toContain("onCloseAutoFocus");
+  });
+});
+
+// ── CTL-1225: per-project pane resets on project switch ───────────────────────
+describe("CTL-1225 project pane keys on the selected project", () => {
+  it("mounts ProjectSettingsPane with a key bound to the project key", () => {
+    // Without a key, React reuses the instance across project switches and the
+    // pane shows the previous project's edited name/color/icon (stale useState).
+    expect(settingsSrc).toMatch(/<ProjectSettingsPane[\s\S]*?key=\{settingsView\.project\.key\}/);
+  });
+});
+
 // ── CTL-1212: one-click project settings affordance ───────────────────────────
 describe("CTL-1212 one-click project settings affordance", () => {
   it("each project header has a one-click settings button wired to goSettings", () => {
