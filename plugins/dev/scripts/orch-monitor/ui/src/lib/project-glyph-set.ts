@@ -1,49 +1,12 @@
 // project-glyph-set.ts — curated Phosphor fill-weight glyph set for project icons (CTL-1208).
-// Pure data + pure functions — no React, no DOM. Tree-shakes cleanly (individual imports).
-import type { Icon } from "@phosphor-icons/react";
-import {
-  GitFork,
-  Rocket,
-  Cube,
-  Stack,
-  Cpu,
-  TerminalWindow,
-  Lightning,
-  Globe,
-  Database,
-  HardDrives,
-  Shield,
-  Sparkle,
-  Star,
-  Flame,
-  Leaf,
-  ChartBar,
-  Flask,
-  Bug,
-  Package,
-  Cloud,
-  Gear,
-  Compass,
-  Target,
-  Tree,
-  Boat,
-  Mountains,
-  Flower,
-  Hexagon,
-  Diamond,
-  Crown,
-  Robot,
-  Alien,
-  Cat,
-  Dog,
-  Bird,
-  Fish,
-} from "@phosphor-icons/react";
+// Static imports and GLYPH_COMPONENTS removed in CTL-1226; resolution delegates to
+// the universal resolver in phosphor-icons.ts which covers the full icon set.
+import { resolvePhosphorIcon } from "./phosphor-icons";
 
 /** Prefix for all curated glyph references stored in the server icon field. */
 export const GLYPH_SET_PREFIX = "phosphor";
 
-/** Curated subset of Phosphor icon names (fill weight) legible at 14–16px. */
+/** Curated subset of Phosphor icon names (fill weight) legible at 14–16px. Shown first in the picker. */
 export const PHOSPHOR_GLYPH_NAMES: readonly string[] = [
   "git-fork",
   "rocket",
@@ -83,52 +46,15 @@ export const PHOSPHOR_GLYPH_NAMES: readonly string[] = [
   "fish",
 ] as const;
 
-/** Map from curated glyph name to the corresponding Phosphor React component. */
-export const GLYPH_COMPONENTS: Record<string, Icon> = {
-  "git-fork": GitFork,
-  "rocket": Rocket,
-  "cube": Cube,
-  "stack": Stack,
-  "cpu": Cpu,
-  "terminal-window": TerminalWindow,
-  "lightning": Lightning,
-  "globe": Globe,
-  "database": Database,
-  "hard-drives": HardDrives,
-  "shield": Shield,
-  "sparkle": Sparkle,
-  "star": Star,
-  "flame": Flame,
-  "leaf": Leaf,
-  "chart-bar": ChartBar,
-  "flask": Flask,
-  "bug": Bug,
-  "package": Package,
-  "cloud": Cloud,
-  "gear": Gear,
-  "compass": Compass,
-  "target": Target,
-  "tree": Tree,
-  "boat": Boat,
-  "mountains": Mountains,
-  "flower": Flower,
-  "hexagon": Hexagon,
-  "diamond": Diamond,
-  "crown": Crown,
-  "robot": Robot,
-  "alien": Alien,
-  "cat": Cat,
-  "dog": Dog,
-  "bird": Bird,
-  "fish": Fish,
-};
-
 /** Format a glyph name into a set reference string (e.g. "git-fork" → "phosphor:git-fork"). */
 export function formatGlyphRef(name: string): string {
   return `${GLYPH_SET_PREFIX}:${name}`;
 }
 
-/** Parse a set reference string. Returns null if not a curated glyph ref. */
+/**
+ * Parse a set reference string. Returns null if not a valid glyph ref
+ * (i.e. no real Phosphor component exists for the given name).
+ */
 export function parseGlyphRef(
   s: string | null | undefined,
 ): { set: "phosphor"; name: string } | null {
@@ -137,11 +63,11 @@ export function parseGlyphRef(
   if (!s.startsWith(prefix)) return null;
   const name = s.slice(prefix.length);
   if (!name) return null;
-  if (!(PHOSPHOR_GLYPH_NAMES as readonly string[]).includes(name)) return null;
+  if (resolvePhosphorIcon(name) === null) return null;
   return { set: "phosphor", name };
 }
 
-/** True iff `s` is a valid curated glyph reference (phosphor:<name> with a known name). */
+/** True iff `s` is a valid glyph reference (phosphor:<name> with a real Phosphor component). */
 export function isGlyphRef(s: string | null | undefined): boolean {
   return parseGlyphRef(s) !== null;
 }

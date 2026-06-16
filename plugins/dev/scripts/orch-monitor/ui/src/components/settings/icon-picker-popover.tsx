@@ -1,5 +1,5 @@
-// icon-picker-popover.tsx — searchable glyph+favicon picker for Project Settings (CTL-1208).
-// Popover + shadcn Command (cmdk): Auto | Detected favicons | Curated Phosphor set.
+// icon-picker-popover.tsx — searchable glyph+favicon picker for Project Settings (CTL-1208, CTL-1226).
+// Popover + shadcn Command (cmdk): Auto | Detected favicons | Featured grid | All icons grid.
 import { useState } from "react";
 import { ChevronDownIcon } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -20,6 +20,7 @@ import {
 import { NAMED_COLORS } from "@/lib/color-palette";
 import { ProjectMarkIcon } from "@/components/project-mark-icon";
 import { buildIconPickerItems, resolveActiveIconLabel } from "./icon-picker-model";
+import type { IconPickerItem } from "./icon-picker-model";
 import type { IconCandidate } from "@/lib/repo-icons";
 
 interface IconPickerPopoverProps {
@@ -32,12 +33,40 @@ interface IconPickerPopoverProps {
   hue: string | null;
 }
 
+function GlyphGridCell({
+  item,
+  currentValue,
+  accentColor,
+  onSelect,
+}: {
+  item: IconPickerItem;
+  currentValue: string | null;
+  accentColor: string;
+  onSelect: () => void;
+}) {
+  return (
+    <CommandItem
+      value={`glyph ${item.searchKey}`}
+      onSelect={onSelect}
+      className="p-0.5 h-8 w-8 justify-center flex-none"
+      data-active={currentValue === item.value ? true : undefined}
+      aria-label={item.label}
+      title={item.label}
+    >
+      <ProjectMarkIcon mark={{ kind: "glyph", name: item.name! }} color={accentColor} size={18} />
+    </CommandItem>
+  );
+}
+
 export function IconPickerPopover({ value, onChange, candidates, hue }: IconPickerPopoverProps) {
   const [open, setOpen] = useState(false);
 
   const items = buildIconPickerItems(candidates);
   const accentColor = (hue && NAMED_COLORS[hue]?.text) || "currentColor";
   const triggerLabel = resolveActiveIconLabel(value);
+
+  const featuredGlyphs = items.filter((i) => i.group === "glyph" && i.featured);
+  const allGlyphs = items.filter((i) => i.group === "glyph" && !i.featured);
 
   return (
     <Popover open={open} onOpenChange={setOpen}>
@@ -65,12 +94,15 @@ export function IconPickerPopover({ value, onChange, candidates, hue }: IconPick
           <ChevronDownIcon className="size-3 shrink-0 opacity-50" />
         </Button>
       </PopoverTrigger>
+      {/* CTL-1226 grid width + CTL-1225 dismiss guards so the first click on
+          Save (outside the popover) isn't swallowed by Radix DismissableLayer. */}
       <PopoverContent
-        className="w-72 p-0"
+        className="w-80 p-0"
         align="start"
         onPointerDownOutside={(e) => e.preventDefault()}
         onCloseAutoFocus={(e) => e.preventDefault()}
       >
+
         <Command>
           <CommandInput placeholder="Search icons…" className="h-9 text-xs" />
           <CommandList className="max-h-72">
@@ -121,27 +153,36 @@ export function IconPickerPopover({ value, onChange, candidates, hue }: IconPick
               </>
             )}
 
-            {/* Curated glyph set */}
+            {/* Featured glyph grid */}
             <CommandSeparator />
-            <CommandGroup heading="Icons">
-              {items
-                .filter((i) => i.group === "glyph")
-                .map((item) => (
-                  <CommandItem
+            <CommandGroup heading="Featured">
+              <div className="grid grid-cols-8 gap-1 p-1">
+                {featuredGlyphs.map((item) => (
+                  <GlyphGridCell
                     key={item.value}
-                    value={`glyph ${item.searchKey}`}
+                    item={item}
+                    currentValue={value}
+                    accentColor={accentColor}
                     onSelect={() => { onChange(item.value); setOpen(false); }}
-                    className="text-xs gap-2"
-                    data-active={value === item.value ? true : undefined}
-                  >
-                    <ProjectMarkIcon
-                      mark={{ kind: "glyph", name: item.name! }}
-                      color={accentColor}
-                      size={14}
-                    />
-                    <span className="truncate">{item.label}</span>
-                  </CommandItem>
+                  />
                 ))}
+              </div>
+            </CommandGroup>
+
+            {/* All icons glyph grid */}
+            <CommandSeparator />
+            <CommandGroup heading="All icons">
+              <div className="grid grid-cols-8 gap-1 p-1">
+                {allGlyphs.map((item) => (
+                  <GlyphGridCell
+                    key={item.value}
+                    item={item}
+                    currentValue={value}
+                    accentColor={accentColor}
+                    onSelect={() => { onChange(item.value); setOpen(false); }}
+                  />
+                ))}
+              </div>
             </CommandGroup>
           </CommandList>
         </Command>

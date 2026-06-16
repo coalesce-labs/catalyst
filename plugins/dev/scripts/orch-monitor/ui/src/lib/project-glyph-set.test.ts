@@ -1,9 +1,8 @@
-// project-glyph-set.test.ts — unit tests for the curated Phosphor glyph set (CTL-1208).
+// project-glyph-set.test.ts — unit tests for the curated Phosphor glyph set (CTL-1208, CTL-1226).
 // No DOM, no React — pure function tests.
 import { describe, it, expect } from "bun:test";
 import {
   PHOSPHOR_GLYPH_NAMES,
-  GLYPH_COMPONENTS,
   isGlyphRef,
   parseGlyphRef,
   formatGlyphRef,
@@ -17,25 +16,6 @@ describe("PHOSPHOR_GLYPH_NAMES", () => {
   it("has no duplicates", () => {
     const set = new Set(PHOSPHOR_GLYPH_NAMES);
     expect(set.size).toBe(PHOSPHOR_GLYPH_NAMES.length);
-  });
-});
-
-describe("GLYPH_COMPONENTS", () => {
-  it("has an entry for every PHOSPHOR_GLYPH_NAMES entry", () => {
-    for (const name of PHOSPHOR_GLYPH_NAMES) {
-      expect(GLYPH_COMPONENTS[name]).toBeDefined();
-    }
-  });
-
-  it("has no extra keys beyond PHOSPHOR_GLYPH_NAMES", () => {
-    const names = new Set(PHOSPHOR_GLYPH_NAMES);
-    for (const key of Object.keys(GLYPH_COMPONENTS)) {
-      expect(names.has(key)).toBe(true);
-    }
-  });
-
-  it("GLYPH_COMPONENTS keys match PHOSPHOR_GLYPH_NAMES exactly", () => {
-    expect(Object.keys(GLYPH_COMPONENTS).sort()).toEqual([...PHOSPHOR_GLYPH_NAMES].sort());
   });
 });
 
@@ -54,11 +34,15 @@ describe("parseGlyphRef", () => {
     expect(parseGlyphRef("phosphor:git-fork")).toEqual({ set: "phosphor", name: "git-fork" });
   });
 
+  it("parses a non-curated but valid full-set ref (airplane)", () => {
+    expect(parseGlyphRef("phosphor:airplane")).toEqual({ set: "phosphor", name: "airplane" });
+  });
+
   it("returns null for a favicon path", () => {
     expect(parseGlyphRef("public/favicon.svg")).toBeNull();
   });
 
-  it("returns null for an uncurated phosphor name", () => {
+  it("returns null for a non-existent phosphor name", () => {
     expect(parseGlyphRef("phosphor:unknown-glyph-xyz")).toBeNull();
   });
 
@@ -74,6 +58,10 @@ describe("parseGlyphRef", () => {
     expect(parseGlyphRef(undefined)).toBeNull();
   });
 
+  it("returns null for bare phosphor: prefix with no name", () => {
+    expect(parseGlyphRef("phosphor:")).toBeNull();
+  });
+
   it("parses all curated names correctly", () => {
     for (const name of PHOSPHOR_GLYPH_NAMES) {
       const ref = `phosphor:${name}`;
@@ -87,12 +75,16 @@ describe("isGlyphRef", () => {
     expect(isGlyphRef("phosphor:git-fork")).toBe(true);
   });
 
+  it("returns true for a non-curated but valid full-set ref (airplane)", () => {
+    expect(isGlyphRef("phosphor:airplane")).toBe(true);
+  });
+
   it("returns false for a favicon path", () => {
     expect(isGlyphRef("public/favicon.svg")).toBe(false);
   });
 
-  it("returns false for an uncurated phosphor name", () => {
-    expect(isGlyphRef("phosphor:not-in-set")).toBe(false);
+  it("returns false for a non-existent phosphor name", () => {
+    expect(isGlyphRef("phosphor:not-a-real-icon")).toBe(false);
   });
 
   it("returns false for null", () => {
