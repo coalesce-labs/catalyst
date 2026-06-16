@@ -111,6 +111,26 @@ else
   echo "  SKIP: cross-stack test (node not available or lib missing: $EC_LIB)"
 fi
 
+# CTL-1202: Layer-2 config fallback (catalyst.host.name) when env unset
+TMP_CFG_DIR="$(mktemp -d)"
+TMP_CFG="${TMP_CFG_DIR}/config.json"
+printf '{"catalyst":{"host":{"name":"mini"}}}' > "$TMP_CFG"
+
+expect_eq "Layer-2 config name used when env unset" \
+  "mini" "$(CATALYST_HOST_NAME='' CATALYST_LAYER2_CONFIG_FILE="$TMP_CFG" catalyst_host_name)"
+
+expect_eq "env wins over Layer-2 config" \
+  "alias-1" "$(CATALYST_HOST_NAME='alias-1' CATALYST_LAYER2_CONFIG_FILE="$TMP_CFG" catalyst_host_name)"
+
+# malformed/missing config falls through to real hostname (non-empty, no crash)
+MISSING="$(CATALYST_HOST_NAME='' CATALYST_LAYER2_CONFIG_FILE='/nonexistent/config.json' catalyst_host_name)"
+[[ -n "$MISSING" ]] && ok "missing Layer-2 file falls through" || fail "missing Layer-2 fallthrough" "got empty"
+
+# host.id reflects Layer-2 name == direct derivation
+expect_eq "Layer-2 name flows to host.id" \
+  "$(__host_id_from 'mini')" "$(CATALYST_HOST_NAME='' CATALYST_LAYER2_CONFIG_FILE="$TMP_CFG" catalyst_host_id)"
+rm -rf "$TMP_CFG_DIR"
+
 echo ""
 echo "Total: $((PASSES + FAILURES)), Passed: $PASSES, Failed: $FAILURES"
 exit "$FAILURES"
