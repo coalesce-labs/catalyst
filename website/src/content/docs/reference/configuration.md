@@ -94,6 +94,12 @@ The `orchestration.dispatchMode` key picks how Catalyst runs each ticket:
 | `orchestration.orphanPrSweep.intervalSeconds` | `600` | How often the orphan-PR sweep ticks (seconds). |
 | `orchestration.orphanPrSweep.stableSeconds` | `300` | How long an orphan must hold a blocker state before a Needs-You row is raised. |
 | `orchestration.orphanPrSweep.repo` | _(auto-detected)_ | The `org/repo` slug to pass to `gh pr list`. Falls back to top-level `.catalyst/config.json` repo fields, then `gh repo view`. Set this explicitly when auto-detection is unreliable. |
+| `orchestration.orphanReaper.jobGc.enabled` | `true` | Enable periodic GC of stale `~/.claude/jobs/<id>` dirs (CTL-1165 D3). Set `false` to disable. |
+| `orchestration.orphanReaper.jobGc.retentionSeconds` | `86400` | Delete a job dir only if its mtime is older than this many seconds (default 24 h). Env `CATALYST_JOB_GC_RETENTION_SECONDS` overrides. |
+| `orchestration.orphanReaper.jobGc.batchCap` | `200` | Max dirs deleted per sweep tick. Remaining dirs drain on subsequent ticks. Env `CATALYST_JOB_GC_BATCH_CAP` overrides. |
+| `orchestration.orphanReaper.workerGc.enabled` | `true` | Enable periodic GC of stale `execution-core/workers/<TICKET>/` dirs (CTL-1205). Set `false` to disable. |
+| `orchestration.orphanReaper.workerGc.retentionSeconds` | `86400` | Delete a worker dir only if its mtime is older than this many seconds (default 24 h). Env `CATALYST_WORKER_GC_RETENTION_SECONDS` overrides. |
+| `orchestration.orphanReaper.workerGc.batchCap` | `100` | Max worker dirs deleted per sweep tick. Env `CATALYST_WORKER_GC_BATCH_CAP` overrides. |
 | `orchestration.orphanReaper.procReaper.mode` | `shadow` | Orphan child-process reaper mode. `off` disables it; `shadow` (the default) logs `procOrphans.would-reap` for each orphaned reparented `node`/`bun` grandchild a dead worker left behind but **kills nothing**; `enforce` actually `SIGTERM`→grace→`SIGKILL`s them. Ships in `shadow` so the never-kill allowlist + live-agent process-tree correlation can be audited on real hosts before any `enforce` flip. |
 | `orchestration.orphanReaper.procReaper.graceMs` | `5000` | Milliseconds to wait after `SIGTERM` before re-probing and (only if still alive) `SIGKILL`ing, so `node`/`bun` can flush. |
 | `orchestration.orphanReaper.procReaper.minEtimeSec` | `900` | A process must have run at least this long (elapsed time) before it is eligible — corroboration only, never the sole gate. |

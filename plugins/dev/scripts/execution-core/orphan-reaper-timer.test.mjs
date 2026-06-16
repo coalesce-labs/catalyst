@@ -126,6 +126,57 @@ describe("startOrphanReaperTimer", () => {
     expect(emitted.filter((e) => e === "orphans.reap-requested").length).toBe(1);
     expect(emitted.filter((e) => e === "phase.reconcile.reap-requested").length).toBe(1);
   });
+
+  // CTL-1205: workerGc seam is invoked each tick alongside emits + jobGc.
+  it("calls workerGc on the same tick as the reap emits (CTL-1205)", async () => {
+    const emitted = [];
+    let workerGcCalls = 0;
+    const clock = fakeClock();
+    startOrphanReaperTimer({
+      intervalSeconds: 600,
+      emit: async (e) => emitted.push(e),
+      workerGc: async () => { workerGcCalls++; },
+      clock,
+    });
+    clock.advance(600_000);
+    await new Promise((r) => setTimeout(r, 0));
+    expect(emitted.filter((e) => e === "orphans.reap-requested").length).toBe(1);
+    expect(emitted.filter((e) => e === "phase.reconcile.reap-requested").length).toBe(1);
+    expect(workerGcCalls).toBe(1);
+  });
+
+  // CTL-1205: a rejecting workerGc must NOT suppress the reap emits.
+  it("a rejecting workerGc does not suppress the reap emits (CTL-1205)", async () => {
+    const emitted = [];
+    const clock = fakeClock();
+    startOrphanReaperTimer({
+      intervalSeconds: 600,
+      emit: async (e) => emitted.push(e),
+      workerGc: async () => { throw new Error("worker-gc boom"); },
+      clock,
+    });
+    clock.advance(600_000);
+    await new Promise((r) => setTimeout(r, 0));
+    expect(emitted.filter((e) => e === "orphans.reap-requested").length).toBe(1);
+    expect(emitted.filter((e) => e === "phase.reconcile.reap-requested").length).toBe(1);
+  });
+
+  // CTL-1205: workerGc fires twice when two intervals elapse.
+  it("calls workerGc on every tick, not just the first (CTL-1205)", async () => {
+    let workerGcCalls = 0;
+    const clock = fakeClock();
+    startOrphanReaperTimer({
+      intervalSeconds: 600,
+      emit: async () => {},
+      workerGc: async () => { workerGcCalls++; },
+      clock,
+    });
+    clock.advance(600_000);
+    await new Promise((r) => setTimeout(r, 0));
+    clock.advance(600_000);
+    await new Promise((r) => setTimeout(r, 0));
+    expect(workerGcCalls).toBe(2);
+  });
 });
 
 describe("readOrphanReaperConfig", () => {
