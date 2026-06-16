@@ -6,6 +6,7 @@ import { resolve } from "node:path";
 import { execFileSync } from "node:child_process";
 import { homedir } from "node:os";
 import { getClusterHosts, getLivenessAnchorIssue } from "./config.mjs";
+import { listProjects } from "./registry.mjs";
 
 export const JOIN_BUNDLE_SCHEMA_VERSION = 1;
 
@@ -16,11 +17,26 @@ function layer2Path() {
   );
 }
 
+// Resolve the seed's own repoRoot from the execution-core registry — the
+// daemon's authoritative team→repoRoot map — rather than process.cwd().
+// CTL-1183 / PATH-B #3: `catalyst cluster join-token` arms this listener
+// detached (nohup, cwd=HOME), so a cwd-relative .catalyst/config.json is
+// absent and every layer1Identity field comes back null. The first registry
+// project's repoRoot owns the committed .catalyst/{config,hosts}.json.
+function registryRepoRoot() {
+  try {
+    const first = listProjects()[0];
+    return first?.repoRoot || null;
+  } catch {
+    return null;
+  }
+}
+
 function layer1Path() {
-  return (
-    process.env.CATALYST_CONFIG_FILE ||
-    resolve(process.cwd(), ".catalyst", "config.json")
-  );
+  if (process.env.CATALYST_CONFIG_FILE) return process.env.CATALYST_CONFIG_FILE;
+  const root = registryRepoRoot();
+  if (root) return resolve(root, ".catalyst", "config.json");
+  return resolve(process.cwd(), ".catalyst", "config.json");
 }
 
 function readJson(p) {
@@ -50,6 +66,16 @@ function resolvePluginSourceUrl(l2) {
 }
 
 export function assembleJoinBundle() {
+  // Pin CATALYST_CONFIG_FILE to the registry repoRoot for the rest of assembly
+  // so the OTHER cwd-dependent read — getClusterHosts() via config.mjs
+  // getCatalystRepoDir() — also resolves <repoRoot>/.catalyst/hosts.json instead
+  // of falling back to the single-host default when this listener runs detached
+  // (PATH-B #3). Guarded so an explicit override (and tests) always win.
+  if (!process.env.CATALYST_CONFIG_FILE) {
+    const root = registryRepoRoot();
+    if (root)
+      process.env.CATALYST_CONFIG_FILE = resolve(root, ".catalyst", "config.json");
+  }
   const l1 = readJson(layer1Path());
   const l2 = readJson(layer2Path());
   const bot = l2?.catalyst?.linear?.bot ?? {};
