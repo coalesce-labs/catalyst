@@ -378,13 +378,18 @@ export async function sendOtlpMetrics(
 }
 
 /**
- * emitMetrics — route a metric batch through OTLP when the emit mode enables it
- * (otlp / both). Returns the pending POST promise (for drainPending) or null when
- * metrics are disabled (e.g. eventlog-only hosts like a dev laptop). NEVER throws.
+ * emitMetrics — POST a metric batch to the collector's metrics pipeline whenever a
+ * metrics endpoint is resolvable. DECOUPLED from the event `emit` mode (CTL-1227):
+ * metrics have no eventlog representation — they only make sense via OTLP /v1/metrics
+ * — so unlike events (which can ship to the event log + be forwarded), metrics are
+ * gated purely on `config.metricsEndpoint` (falling back to `otlpEndpoint`). Returns
+ * the pending POST promise (for drainPending) or null when no endpoint is set. NEVER
+ * throws.
  */
 export function emitMetrics(metrics, config) {
-  if (!(config?.emit === "otlp" || config?.emit === "both")) return null;
+  const endpoint = config?.metricsEndpoint || config?.otlpEndpoint;
+  if (!endpoint) return null;
   return Promise.resolve(
-    sendOtlpMetrics(metrics, { endpoint: config.otlpEndpoint, headers: config.otlpHeaders }),
+    sendOtlpMetrics(metrics, { endpoint, headers: config?.otlpHeaders }),
   ).catch(() => false);
 }

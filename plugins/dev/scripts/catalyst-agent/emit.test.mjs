@@ -520,14 +520,17 @@ describe("sendOtlpMetrics — OTLP /v1/metrics POST", () => {
   });
 });
 
-describe("emitMetrics — mode gating", () => {
+describe("emitMetrics — endpoint gating (decoupled from event emit mode)", () => {
   const metric = otlpMetric({ name: "m", unit: "1", kind: "gauge", points: [{ value: 1, timeUnixNano: "1" }] });
-  test("eventlog-only mode does NOT emit metrics (returns null)", () => {
+  test("no metrics endpoint → null (even in otlp/both event mode)", () => {
     expect(emitMetrics([metric], { emit: "eventlog" })).toBe(null);
-    expect(emitMetrics([metric], { emit: null })).toBe(null);
+    expect(emitMetrics([metric], { emit: "otlp", otlpEndpoint: null, metricsEndpoint: null })).toBe(null);
+    expect(emitMetrics([metric], { emit: "both", metricsEndpoint: null })).toBe(null);
   });
-  test("otlp / both modes return a pending promise", () => {
-    expect(emitMetrics([metric], { emit: "otlp", otlpEndpoint: null })).not.toBe(null);
-    expect(emitMetrics([metric], { emit: "both", otlpEndpoint: null })).not.toBe(null);
+  test("metricsEndpoint set → emits, EVEN when the event mode is eventlog-only (the CTL-1227 fix)", () => {
+    expect(emitMetrics([metric], { emit: "eventlog", metricsEndpoint: "http://c:4318" })).not.toBe(null);
+  });
+  test("falls back to otlpEndpoint when metricsEndpoint is unset", () => {
+    expect(emitMetrics([metric], { emit: "eventlog", otlpEndpoint: "http://c:4318" })).not.toBe(null);
   });
 });
