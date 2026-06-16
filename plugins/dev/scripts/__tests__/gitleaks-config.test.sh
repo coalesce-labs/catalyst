@@ -14,7 +14,7 @@ fi
 
 # 1. Config exists and parses / extends defaults (static asserts — always run).
 [[ -f "$CFG" ]] || { echo "FAIL: .gitleaks.toml missing"; exit 1; }
-grep -q 'useDefault' "$CFG" || { echo "FAIL: must [extend] useDefault=true"; exit 1; }
+grep -qE 'useDefault\s*=\s*true' "$CFG" || { echo "FAIL: must [extend] useDefault=true"; exit 1; }
 
 # 2. Baseline full-history scan is clean (the real gate).
 ( cd "$REPO_ROOT" && gitleaks detect --config .gitleaks.toml --no-banner --redact ) \

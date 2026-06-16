@@ -14,5 +14,6 @@ chk "pull_request trigger"          '^\s*pull_request:'
 chk "push to main trigger"          'branches:\s*\[.*main.*\]|- main'
 chk "fetch-depth 0"                 'fetch-depth:\s*0'
 chk "GITLEAKS_CONFIG points at toml" 'GITLEAKS_CONFIG:\s*\.gitleaks\.toml'
-chk "GITLEAKS_LICENSE wired"        'GITLEAKS_LICENSE'
+chk "GITLEAKS_LICENSE from secrets" 'GITLEAKS_LICENSE:\s*\$\{\{.*secrets\.GITLEAKS_LICENSE'
+chk "weekly schedule sweep"         'cron:\s*"0 6 \* \* 1"'
 [[ $fail -eq 0 ]] && echo "PASS: gitleaks workflow well-formed" || exit 1

@@ -14,7 +14,7 @@ REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
 CONFIG_ARG=()
 [[ -f "${REPO_ROOT}/.gitleaks.toml" ]] && CONFIG_ARG=(--config "${REPO_ROOT}/.gitleaks.toml")
 
-if ! gitleaks protect --staged --no-banner --redact "${CONFIG_ARG[@]}"; then
+if ! gitleaks protect --staged --no-banner --redact ${CONFIG_ARG[@]+"${CONFIG_ARG[@]}"}; then
   echo "gitleaks found a potential secret in staged changes — commit blocked." >&2
   echo "   Review the finding above. If it is a known-benign fixture, add it to .gitleaks.toml." >&2
   exit 1
