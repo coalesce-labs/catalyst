@@ -93,6 +93,31 @@ describe("buildCanonicalEvent", () => {
     expect(ev.body.message).toBe("PR #1 merged");
   });
 
+  it("CTL-1135: emits caused_by from causedBy, null by default (additive)", () => {
+    const withCause = buildCanonicalEvent({
+      ts: "2026-06-15T00:00:00.000Z",
+      severityText: "INFO",
+      traceId: null,
+      spanId: null,
+      causedBy: "evt-parent-9",
+      resource: { "service.name": "catalyst.session" },
+      attributes: { "event.name": "session.phase" },
+      body: {},
+    });
+    expect(withCause.caused_by).toBe("evt-parent-9");
+
+    const noCause = buildCanonicalEvent({
+      ts: "2026-06-15T00:00:00.000Z",
+      severityText: "INFO",
+      traceId: null,
+      spanId: null,
+      resource: { "service.name": "catalyst.session" },
+      attributes: { "event.name": "session.phase" },
+      body: {},
+    });
+    expect(noCause.caused_by).toBeNull();
+  });
+
   it("respects an explicit observedTs and overrides defaults", () => {
     const ev = buildCanonicalEvent({
       ts: "2026-05-08T18:00:00.000Z",

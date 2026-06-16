@@ -32,11 +32,12 @@ import {
 
 describe("CANONICAL_FIELDS whitelist", () => {
   test("contains the documented count of canonical fields", () => {
-    expect(CANONICAL_FIELDS.length).toBe(38);
-    expect(FIELD_PATH_SET.size).toBe(38);
+    expect(CANONICAL_FIELDS.length).toBe(39);
+    expect(FIELD_PATH_SET.size).toBe(39);
   });
 
   test("includes core attribute paths", () => {
+    expect(isWhitelistedField("caused_by")).toBe(true); // CTL-1135
     expect(isWhitelistedField('attributes."event.name"')).toBe(true);
     expect(isWhitelistedField('attributes."vcs.pr.number"')).toBe(true);
     expect(isWhitelistedField('attributes."catalyst.worker.ticket"')).toBe(true);

@@ -499,6 +499,22 @@ TT_DEF=$(echo "$LINE_TT_BARE" | jq -r '.attributes["catalyst.ticket.type"]')
 expect_eq "catalyst.ticket.type present even when flag absent" "true" "$TT_HAS"
 expect_eq "catalyst.ticket.type defaults to 'unknown'" "unknown" "$TT_DEF"
 
+# CTL-1135: caused_by — passthrough when set, null + key-always-present when absent.
+LINE_CB="$(build_canonical_line \
+  --ts "2026-06-05T00:00:00Z" --severity INFO \
+  --service catalyst.broker --event-name "filter.wake.sess_abc" \
+  --caused-by "evt-cause-1")"
+CB=$(echo "$LINE_CB" | jq -r '.caused_by')
+expect_eq "build_canonical_line caused_by from --caused-by" "evt-cause-1" "$CB"
+
+LINE_CB_BARE="$(build_canonical_line \
+  --ts "2026-06-05T00:00:00Z" --severity INFO \
+  --service catalyst.broker --event-name "filter.wake.sess_abc")"
+CB_HAS=$(echo "$LINE_CB_BARE" | jq -r 'has("caused_by")')
+CB_NULL=$(echo "$LINE_CB_BARE" | jq -r '.caused_by')
+expect_eq "caused_by key present even when flag absent" "true" "$CB_HAS"
+expect_eq "caused_by defaults to null when flag absent" "null" "$CB_NULL"
+
 echo ""
 echo "Total: $((PASSES + FAILURES)), Passed: $PASSES, Failed: $FAILURES"
 exit "$FAILURES"
