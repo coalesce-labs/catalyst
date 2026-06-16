@@ -116,6 +116,8 @@ export interface CanonicalEvent {
   traceId: string | null;
   spanId: string | null;
   parentSpanId?: string | null;
+  /** CTL-1135: id of the triggering event (additive; null when absent). */
+  caused_by?: string | null;
   resource: Resource;
   attributes: Attributes;
   body: Body;
@@ -128,6 +130,7 @@ export interface BuildInput {
   traceId: string | null;
   spanId: string | null;
   parentSpanId?: string | null;
+  causedBy?: string | null;
   resource: {
     "service.name": string;
     "service.version"?: string;
@@ -223,6 +226,7 @@ export function buildCanonicalEvent(input: BuildInput): CanonicalEvent {
     severityNumber: severityNumber(input.severityText),
     traceId: input.traceId,
     spanId: input.spanId,
+    caused_by: input.causedBy ?? null,
     resource,
     attributes: input.attributes,
     body: input.body,

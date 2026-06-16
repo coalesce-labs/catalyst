@@ -66,6 +66,37 @@ describe("buildCanonicalEnvelope", () => {
     expect(envelope.spanId).toBeNull();
   });
 
+  // CTL-1135: caused_by — the triggering event id. For filter.wake.* the cause is
+  // the source event that matched; auto-derive it from detail.source_event_ids[0].
+  test("CTL-1135: caused_by auto-derives from detail.source_event_ids[0]", async () => {
+    const { buildCanonicalEnvelope } = await import("./index.mjs");
+    const envelope = buildCanonicalEnvelope({
+      event: "filter.wake.sess_abc",
+      orchestrator: "orch_1",
+      detail: { reason: "PR #1 merged", source_event_ids: ["evt-cause-1", "evt-cause-2"] },
+    });
+    expect(envelope.caused_by).toBe("evt-cause-1");
+  });
+
+  test("CTL-1135: explicit causedBy overrides the derived source id", async () => {
+    const { buildCanonicalEnvelope } = await import("./index.mjs");
+    const envelope = buildCanonicalEnvelope({
+      event: "filter.wake.sess_abc",
+      causedBy: "evt-explicit",
+      detail: { source_event_ids: ["evt-derived"] },
+    });
+    expect(envelope.caused_by).toBe("evt-explicit");
+  });
+
+  test("CTL-1135: caused_by is null when there is no cause (additive default)", async () => {
+    const { buildCanonicalEnvelope } = await import("./index.mjs");
+    const startup = buildCanonicalEnvelope({ event: "broker.daemon.startup", detail: { foo: "bar" } });
+    expect(startup.caused_by).toBeNull();
+    // watchdog wakes carry an empty source_event_ids array → still null
+    const watchdog = buildCanonicalEnvelope({ event: "filter.wake.watchdog", detail: { source_event_ids: [] } });
+    expect(watchdog.caused_by).toBeNull();
+  });
+
   test("omits orchestrator/worker attributes when null", async () => {
     const { buildCanonicalEnvelope } = await import("./index.mjs");
     const envelope = buildCanonicalEnvelope({
@@ -216,6 +247,27 @@ describe("appendEvent — writes canonical envelopes to JSONL", () => {
     expect(e.severityNumber).toBe(9);
     expect(e.resource["service.name"]).toBe("catalyst.broker");
     expect(e.body.payload.reason).toBe("PR #1 merged");
+  });
+
+  // CTL-1135 E2E: a wake's source_event_ids[0] propagates through appendEvent into
+  // the emitted JSONL envelope's caused_by — the AC's "causal forensics is a query" seam.
+  test("CTL-1135: appended wake carries caused_by = the source event id (E2E)", async () => {
+    const { appendEvent } = await import("./index.mjs");
+    appendEvent({
+      event: "filter.wake.sess_abc",
+      orchestrator: "orch_1",
+      detail: { reason: "PR #1 merged", source_event_ids: ["gh-evt-42", "gh-evt-43"] },
+    });
+    const events = readEvents();
+    expect(events).toHaveLength(1);
+    expect(events[0].caused_by).toBe("gh-evt-42");
+  });
+
+  test("CTL-1135: appended non-wake event has caused_by null (E2E additive default)", async () => {
+    const { appendEvent } = await import("./index.mjs");
+    appendEvent({ event: "broker.daemon.startup", detail: { pid: 7 } });
+    const events = readEvents();
+    expect(events[0].caused_by).toBeNull();
   });
 
   test("writes broker.daemon.startup as canonical", async () => {

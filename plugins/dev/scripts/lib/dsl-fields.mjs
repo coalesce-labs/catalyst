@@ -22,6 +22,7 @@ export const CANONICAL_FIELDS = [
   { path: "traceId",                       type: "string",  description: "32-hex trace ID, or null for ambient events" },
   { path: "spanId",                        type: "string",  description: "16-hex span ID, or null for ambient events" },
   { path: "parentSpanId",                  type: "string",  description: "16-hex parent span ID when present" },
+  { path: "caused_by",                     type: "string",  description: "Id of the triggering event (CTL-1135), or null for root events" },
   { path: 'resource."service.name"',       type: "enum",    description: "catalyst.github | catalyst.linear | catalyst.session | catalyst.orchestrator | catalyst.comms | catalyst.broker" },
   { path: "body.message",                  type: "string",  description: "Human-readable summary of the event" },
 

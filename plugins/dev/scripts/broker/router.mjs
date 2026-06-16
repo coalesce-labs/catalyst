@@ -264,6 +264,17 @@ export function buildCanonicalEnvelope(legacy) {
     severityNumber: severityNumber(severity),
     traceId: deriveTraceId(orch),
     spanId: deriveSpanId(worker),
+    // CTL-1135: caused_by — the id of the triggering event (additive; null when
+    // absent). For filter.wake.* events the cause is the source event that matched;
+    // derive it from the already-present detail.source_event_ids[0] (the deterministic
+    // pr-lifecycle path is single-valued; the prose fan-in path uses first-matched =
+    // best-effort). An explicit legacy.causedBy overrides.
+    caused_by:
+      legacy.causedBy ??
+      legacy.caused_by ??
+      (Array.isArray(legacy.detail?.source_event_ids)
+        ? legacy.detail.source_event_ids[0] ?? null
+        : null),
     resource: {
       "service.name": "catalyst.broker",
       "service.namespace": "catalyst",

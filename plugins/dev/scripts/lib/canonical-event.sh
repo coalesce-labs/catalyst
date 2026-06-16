@@ -191,6 +191,9 @@ build_canonical_line() {
   # attribute is consistently present even when the caller cannot resolve a type.
   local ticket_type=""
 
+  # CTL-1135: caused_by — the id of the triggering event (additive; null when absent).
+  local caused_by=""
+
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --ts)              ts="$2"; shift 2 ;;
@@ -229,6 +232,7 @@ build_canonical_line() {
       --phase-attempt)       phase_attempt="$2"; shift 2 ;;
       --phase-revive-count)  phase_revive_count="$2"; shift 2 ;;
       --ticket-type)         ticket_type="$2"; shift 2 ;;
+      --caused-by)           caused_by="$2"; shift 2 ;;
       *) echo "build_canonical_line: unknown flag: $1" >&2; return 1 ;;
     esac
   done
@@ -301,6 +305,7 @@ build_canonical_line() {
     --arg phase_attempt "$phase_attempt" \
     --arg phase_revive_count "$phase_revive_count" \
     --arg ticket_type "$ticket_type" \
+    --arg caused_by "$caused_by" \
     '{
       ts: $ts,
       id: $id,
@@ -309,6 +314,7 @@ build_canonical_line() {
       severityNumber: $sev_num,
       traceId: (if $trace_id == "" then null else $trace_id end),
       spanId:  (if $span_id  == "" then null else $span_id  end),
+      caused_by: (if $caused_by == "" then null else $caused_by end),
       resource: (
         {
           "service.name": $svc_name,
