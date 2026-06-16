@@ -1,6 +1,8 @@
 // repo-icon-picks-store.ts — atom + pure selector for per-repo icon picks (CTL-997).
 import { atomWithStorage } from "jotai/utils";
 import type { IconCandidate } from "./repo-icons";
+import { parseGlyphRef } from "./project-glyph-set";
+import type { ProjectMark } from "./project-mark";
 
 /** repoKey → selected candidate path. Persisted browser-local (CTL-997). */
 export const REPO_ICON_PICKS_KEY = "catalyst.repoIconPicks";
@@ -42,4 +44,55 @@ export function resolveEffectiveIcon(
     candidates.find((c) => c.path === defaultSelectedPath) ??
     candidates[0];
   return { autoDataUrl: chosen.dataUrl, selectedPath: chosen.path };
+}
+
+/**
+ * Resolve the canonical `ProjectMark` for a repo — the discriminated union that
+ * render sites branch on (CTL-1208).
+ *
+ * Precedence (first match wins):
+ *  1. A glyph ref in the local `pick` (operator browser-local override)
+ *  2. A glyph ref in `serverIcon` (server-persisted glyph choice)
+ *  3. A favicon path in `pick` matching a candidate
+ *  4. A favicon path in `serverIcon` matching a candidate
+ *  5. The first candidate (auto best)
+ *  6. `{kind:"none"}` (no candidates, no glyph)
+ */
+export function resolveProjectMark(opts: {
+  serverIcon: string | null | undefined;
+  pick: string | undefined;
+  candidates: readonly IconCandidate[];
+  defaultSelectedPath: string | null;
+}): ProjectMark {
+  const { serverIcon, pick, candidates, defaultSelectedPath } = opts;
+
+  // 1. Glyph ref in local pick beats everything.
+  if (pick) {
+    const glyphPick = parseGlyphRef(pick);
+    if (glyphPick) return { kind: "glyph", name: glyphPick.name };
+  }
+
+  // 2. Glyph ref in server icon.
+  if (serverIcon) {
+    const glyphServer = parseGlyphRef(serverIcon);
+    if (glyphServer) return { kind: "glyph", name: glyphServer.name };
+  }
+
+  // 3–5. Favicon path resolution via existing logic (only if candidates present).
+  if (candidates.length > 0) {
+    // favicon pick: local pick as path > serverIcon as path > defaultSelectedPath > candidates[0]
+    const effectiveDefault = serverIcon && !parseGlyphRef(serverIcon)
+      ? serverIcon
+      : defaultSelectedPath;
+    const { autoDataUrl, selectedPath } = resolveEffectiveIcon(candidates, effectiveDefault, pick);
+    if (autoDataUrl && selectedPath) {
+      return { kind: "favicon", dataUrl: autoDataUrl, selectedPath };
+    }
+    // candidate exists but dataUrl is null — still a favicon with null dataUrl; emit none
+    if (selectedPath) {
+      return { kind: "none" };
+    }
+  }
+
+  return { kind: "none" };
 }

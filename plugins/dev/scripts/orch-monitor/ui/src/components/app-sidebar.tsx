@@ -303,7 +303,10 @@ export function AppSidebar() {
 
   // CTL-961: auto-detect repo favicons from GitHub + manual overrides. Keyed by the
   // SAME short repo name the roster carries.
-  const repoIconMap = useRepoIcons(repos);
+  // CTL-1208: thread serverIconByRepo so server-persisted glyph refs reach the mark resolver.
+  const serverIconByRepo: Record<string, string | null | undefined> = {};
+  for (const p of projects) { serverIconByRepo[p.repo] = p.icon ?? null; }
+  const repoIconMap = useRepoIcons(repos, serverIconByRepo);
   // Map to the simple repoKey → dataUrl shape buildNavGroupsFromProjects expects.
   const repoIconDataUrls: Record<string, string | null> = {};
   for (const repo of repos) {

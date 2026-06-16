@@ -1,5 +1,5 @@
 import { describe, it, expect } from "bun:test";
-import { resolveEntityIcon, liveBadgeKind, groupIconSrc, laneIconSrc } from "./entity-icon";
+import { resolveEntityIcon, liveBadgeKind, groupIconSrc, laneIconSrc, resolveEntityMark, laneMark } from "./entity-icon";
 import type { RepoIconMap } from "@/hooks/use-repo-icons";
 
 const ICONS: RepoIconMap = {
@@ -89,4 +89,74 @@ describe("groupIconSrc axis gating (regression guard)", () => {
       expect(groupIconSrc(a, "catalyst", GATE_ICONS)).toBeNull());
   });
   it("repo axis, null key → null", () => expect(groupIconSrc("repo", null, GATE_ICONS)).toBeNull());
+});
+
+// CTL-1208: resolveEntityMark and laneMark tests
+const MARK_ICONS: RepoIconMap = {
+  catalyst: {
+    autoDataUrl: "data:x",
+    override: null,
+    candidates: [],
+    selectedPath: null,
+    mark: { kind: "glyph", name: "git-fork" },
+  },
+  adva: {
+    autoDataUrl: "data:y",
+    override: null,
+    candidates: [],
+    selectedPath: null,
+    mark: { kind: "favicon", dataUrl: "data:y", selectedPath: "favicon.ico" },
+  },
+  nomark: {
+    autoDataUrl: null,
+    override: null,
+    candidates: [],
+    selectedPath: null,
+    // no mark field — tests back-compat optional
+  },
+};
+
+describe("resolveEntityMark (CTL-1208)", () => {
+  it("returns the repo's mark when present", () => {
+    expect(resolveEntityMark("catalyst", MARK_ICONS)).toEqual({ kind: "glyph", name: "git-fork" });
+  });
+  it("returns favicon mark for a favicon repo", () => {
+    expect(resolveEntityMark("adva", MARK_ICONS)).toEqual({
+      kind: "favicon", dataUrl: "data:y", selectedPath: "favicon.ico",
+    });
+  });
+  it("returns {kind:'none'} for a repo with no mark field (back-compat)", () => {
+    expect(resolveEntityMark("nomark", MARK_ICONS)).toEqual({ kind: "none" });
+  });
+  it("returns {kind:'none'} for an unknown repo", () => {
+    expect(resolveEntityMark("ghost", MARK_ICONS)).toEqual({ kind: "none" });
+  });
+  it("returns {kind:'none'} for null/undefined/empty repo", () => {
+    expect(resolveEntityMark(null, MARK_ICONS)).toEqual({ kind: "none" });
+    expect(resolveEntityMark(undefined, MARK_ICONS)).toEqual({ kind: "none" });
+    expect(resolveEntityMark("", MARK_ICONS)).toEqual({ kind: "none" });
+  });
+});
+
+describe("laneMark (CTL-1208)", () => {
+  it("host axis → {kind:'none'} regardless of repo (preserves liveness dot)", () => {
+    expect(laneMark("host", "catalyst", MARK_ICONS)).toEqual({ kind: "none" });
+  });
+  it("none axis → {kind:'none'} (no lane chrome on flat board)", () => {
+    expect(laneMark("none", "catalyst", MARK_ICONS)).toEqual({ kind: "none" });
+  });
+  it("team axis resolves the repo's mark", () => {
+    expect(laneMark("team", "catalyst", MARK_ICONS)).toEqual({ kind: "glyph", name: "git-fork" });
+  });
+  it("repo axis resolves the repo's mark", () => {
+    expect(laneMark("repo", "adva", MARK_ICONS)).toEqual({
+      kind: "favicon", dataUrl: "data:y", selectedPath: "favicon.ico",
+    });
+  });
+  it("project axis resolves the repo's mark", () => {
+    expect(laneMark("project", "catalyst", MARK_ICONS)).toEqual({ kind: "glyph", name: "git-fork" });
+  });
+  it("unknown repo on non-host axis → {kind:'none'}", () => {
+    expect(laneMark("team", "ghost", MARK_ICONS)).toEqual({ kind: "none" });
+  });
 });
