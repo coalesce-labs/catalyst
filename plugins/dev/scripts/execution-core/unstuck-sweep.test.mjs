@@ -15,6 +15,7 @@ import {
   defaultPostUnstuckComment,
   emitUnstuckEvent,
 } from "./unstuck-sweep.mjs";
+import { buildUnstuckActSeams } from "./unstuck-act-seams.mjs";
 
 // ---------------------------------------------------------------------------
 // classifyStalledTicket — pure top-level router (CTL-1064)
@@ -551,5 +552,205 @@ describe("buildAuditComment — three-section assembler (CTL-1064)", () => {
   test("falls back to _unavailable_ for missing sections", () => {
     const out = buildAuditComment({});
     expect(out.match(/_unavailable_/g)).toHaveLength(3);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// CTL-1219 — the wired act-seam registry plugs into the real driver
+// ---------------------------------------------------------------------------
+describe("CTL-1219 — buildUnstuckActSeams wired into runUnstuckSweepPass", () => {
+  // candidate builders with the driver shape (defaultCollectUnstuckCandidates).
+  function dirtyTreeCandidate() {
+    return {
+      ticket: "CTL-1",
+      phase: "implement",
+      signal: { phase: "implement", status: "stalled", stalledReason: "rebase_refused_dirty_tree" },
+      worktreePath: "/wt/CTL-1",
+      evidence: { reason: "rebase_refused_dirty_tree", ticket: "CTL-1", phase: "implement", liveSessionInWorktree: false, linearTerminal: false },
+    };
+  }
+  function sourceConflictCandidate(porcelainDirty = false) {
+    return {
+      ticket: "CTL-2",
+      phase: "implement",
+      signal: { phase: "implement", status: "stalled", stalledReason: "source_conflict_ctl708_unavailable" },
+      worktreePath: "/wt/CTL-2",
+      evidence: { reason: "source_conflict_ctl708_unavailable", ticket: "CTL-2", phase: "implement", liveSessionInWorktree: false, linearTerminal: false, _dirty: porcelainDirty },
+    };
+  }
+  function orphanStaleCandidate() {
+    return {
+      ticket: "CTL-3",
+      phase: "monitor-merge",
+      signal: { phase: "monitor-merge", status: "failed", failureReason: "orphan-sweep-stale", bg_job_id: "job-abc", updatedAt: "2020-01-01T00:00:00Z" },
+      worktreePath: "/wt/CTL-3",
+      evidence: { reason: "orphan-sweep-stale", ticket: "CTL-3", phase: "monitor-merge", liveSessionInWorktree: false, linearTerminal: false },
+    };
+  }
+  function remediateCapCandidate() {
+    return {
+      ticket: "CTL-9",
+      phase: "verify",
+      evidence: { reason: "remediate-cycle-cap-exhausted", ticket: "CTL-9", phase: "verify", liveSessionInWorktree: false, linearTerminal: false },
+    };
+  }
+
+  // a clean rebased branch git responder (for source-conflict success).
+  function cleanBranchGit(args) {
+    const a = args.join(" ");
+    if (a.includes("status --porcelain")) return { status: 0, stdout: "", stderr: "" };
+    if (a.includes("log") && a.includes("origin/main..HEAD")) return { status: 0, stdout: "CTL-2: fix\n", stderr: "" };
+    if (a.includes("merge-base") && a.includes("--is-ancestor")) return { status: 0, stdout: "", stderr: "" };
+    if (a.includes("push")) return { status: 0, stdout: "", stderr: "" };
+    return { status: 0, stdout: "", stderr: "" };
+  }
+
+  test("enforce + dirty-tree + wired registry → fires unstuck.cleared.noise + records intent", () => {
+    const emitted = [];
+    const intents = [];
+    let porcelainReads = 0;
+    const registry = buildUnstuckActSeams({
+      orchDir: "/tmp/orch",
+      markerExists: () => false,
+      writeMarker: () => {},
+      runGit: () => ({ status: 0, stdout: "", stderr: "" }),
+      readPorcelain: () => (++porcelainReads === 1 ? " M .catalyst/config.json" : ""),
+      clearStall: () => true,
+    });
+    const report = runUnstuckSweepPass({
+      mode: "enforce",
+      collectCandidates: () => [dirtyTreeCandidate()],
+      actByCategory: registry,
+      emit: (type) => { emitted.push(type); },
+      recordIntent: (kind, subject) => { intents.push({ kind, subject }); },
+      postComment: () => {},
+      isIntentEffective: () => false,
+    });
+    expect(emitted).toContain("unstuck.cleared.noise");
+    expect(report.acted).toHaveLength(1);
+    expect(intents).toHaveLength(1);
+    expect(intents[0]).toEqual({ kind: UNSTUCK_SWEEP_INTENT_KIND, subject: "CTL-1/implement" });
+  });
+
+  test("enforce + source-conflict on a CLEAN rebased branch → fires unstuck.pushed.force-with-lease", () => {
+    const emitted = [];
+    const registry = buildUnstuckActSeams({
+      orchDir: "/tmp/orch",
+      markerExists: () => false,
+      writeMarker: () => {},
+      runGit: cleanBranchGit,
+    });
+    const report = runUnstuckSweepPass({
+      mode: "enforce",
+      collectCandidates: () => [sourceConflictCandidate()],
+      actByCategory: registry,
+      emit: (type) => { emitted.push(type); },
+      isIntentEffective: () => false,
+    });
+    expect(emitted).toContain("unstuck.pushed.force-with-lease");
+    expect(report.acted).toHaveLength(1);
+  });
+
+  test("enforce + source-conflict on a DIRTY branch → seam throws → report.failed, NO push event", () => {
+    const emitted = [];
+    const registry = buildUnstuckActSeams({
+      orchDir: "/tmp/orch",
+      markerExists: () => false,
+      writeMarker: () => {},
+      runGit: (args) => {
+        if (args.join(" ").includes("status --porcelain")) return { status: 0, stdout: " M src/real.ts", stderr: "" };
+        return { status: 0, stdout: "", stderr: "" };
+      },
+    });
+    const report = runUnstuckSweepPass({
+      mode: "enforce",
+      collectCandidates: () => [sourceConflictCandidate(true)],
+      actByCategory: registry,
+      emit: (type) => { emitted.push(type); },
+      isIntentEffective: () => false,
+    });
+    expect(emitted).not.toContain("unstuck.pushed.force-with-lease");
+    expect(report.acted).toHaveLength(0);
+    expect(report.failed).toHaveLength(1);
+    expect(report.failed[0].category).toBe("source-conflict");
+  });
+
+  test("enforce + orphan-stale MERGED → fires unstuck.emitted.phase-complete", () => {
+    const emitted = [];
+    const phaseCompletes = [];
+    const registry = buildUnstuckActSeams({
+      orchDir: "/tmp/orch",
+      markerExists: () => false,
+      writeMarker: () => {},
+      resolvePrState: () => "MERGED",
+      jobLifecycle: () => false,
+      nowMs: () => Date.parse("2020-01-01T01:00:00Z"),
+      emitPhaseComplete: (a) => { phaseCompletes.push(a); return true; },
+    });
+    const report = runUnstuckSweepPass({
+      mode: "enforce",
+      collectCandidates: () => [orphanStaleCandidate()],
+      actByCategory: registry,
+      emit: (type) => { emitted.push(type); },
+      isIntentEffective: () => false,
+    });
+    expect(emitted).toContain("unstuck.emitted.phase-complete");
+    expect(report.acted).toHaveLength(1);
+    expect(phaseCompletes).toEqual([{ ticket: "CTL-3", phase: "monitor-merge" }]);
+  });
+
+  test("shadow + any wired category → emits ONLY the would-* twin; no seam fn invoked", () => {
+    const emitted = [];
+    const called = [];
+    // a registry whose dirty-tree fn records its invocation.
+    const registry = {
+      ...buildUnstuckActSeams({ orchDir: "/tmp/orch" }),
+      "dirty-tree": () => { called.push("dirty-tree"); },
+    };
+    runUnstuckSweepPass({
+      mode: "shadow",
+      collectCandidates: () => [dirtyTreeCandidate()],
+      actByCategory: registry,
+      emit: (type) => { emitted.push(type); },
+    });
+    expect(called).toHaveLength(0);
+    expect(emitted).toContain("unstuck.would.clear-noise");
+    expect(emitted).not.toContain("unstuck.cleared.noise");
+  });
+
+  test("unknown / remediate-cap → escalate seam (NOT the registry); registry fns never called", () => {
+    const escalated = [];
+    const called = [];
+    const registry = {
+      "dirty-tree": () => { called.push(1); },
+      "source-conflict": () => { called.push(1); },
+      "orphan-stale": () => { called.push(1); },
+      "stale-label": () => { called.push(1); },
+    };
+    const report = runUnstuckSweepPass({
+      mode: "enforce",
+      collectCandidates: () => [remediateCapCandidate()],
+      actByCategory: registry,
+      escalate: (c) => { escalated.push(c.ticket); },
+      emit: () => {},
+    });
+    expect(called).toHaveLength(0);
+    expect(report.escalated).toHaveLength(1);
+    expect(escalated).toContain("CTL-9");
+  });
+
+  test("off mode + wired registry → fully inert (no seam, no event)", () => {
+    const emitted = [];
+    const called = [];
+    const registry = { ...buildUnstuckActSeams({ orchDir: "/tmp/orch" }), "dirty-tree": () => { called.push(1); } };
+    const report = runUnstuckSweepPass({
+      mode: "off",
+      collectCandidates: () => [dirtyTreeCandidate()],
+      actByCategory: registry,
+      emit: (type) => { emitted.push(type); },
+    });
+    expect(called).toHaveLength(0);
+    expect(emitted).toHaveLength(0);
+    expect(report.acted).toHaveLength(0);
   });
 });
