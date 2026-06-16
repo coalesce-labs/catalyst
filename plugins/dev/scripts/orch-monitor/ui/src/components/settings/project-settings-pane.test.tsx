@@ -136,6 +136,7 @@ describe("ProjectSettingsPaneContent — CTL-1212 sections", () => {
 describe("buildProjectPatch", () => {
   const base = {
     key: "CTL", name: "Catalyst", repo: "catalyst",
+    vcsRepo: null as string | null,
     defaultColor: "blue", storedName: null, storedColor: null, stateMap: null,
   };
 
