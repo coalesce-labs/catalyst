@@ -1,7 +1,7 @@
-// repo-icon-picks-store.test.ts — unit tests for resolveEffectiveIcon (CTL-997 Phase 3).
+// repo-icon-picks-store.test.ts — unit tests for resolveEffectiveIcon and applyIconPick (CTL-997 Phase 3 / CTL-1207).
 // No DOM, no React — pure function tests.
 import { describe, it, expect } from "bun:test";
-import { resolveEffectiveIcon } from "./repo-icon-picks-store";
+import { resolveEffectiveIcon, applyIconPick } from "./repo-icon-picks-store";
 import type { IconCandidate } from "./repo-icons";
 
 const cands: IconCandidate[] = [
@@ -35,5 +35,29 @@ describe("resolveEffectiveIcon", () => {
     ];
     const r = resolveEffectiveIcon(nullCands, "favicon.ico", undefined);
     expect(r).toEqual({ autoDataUrl: null, selectedPath: "favicon.ico" });
+  });
+});
+
+describe("applyIconPick", () => {
+  it("sets a candidate path for the repo", () => {
+    expect(applyIconPick({}, "catalyst", ".github/icon.svg"))
+      .toEqual({ catalyst: ".github/icon.svg" });
+  });
+  it("clears the pick when value is 'auto' (inherit default)", () => {
+    expect(applyIconPick({ catalyst: ".github/icon.svg" }, "catalyst", "auto"))
+      .toEqual({});
+  });
+  it("is a no-op (same reference) on empty deselect", () => {
+    const prev = { catalyst: ".github/icon.svg" };
+    expect(applyIconPick(prev, "catalyst", "")).toBe(prev);
+  });
+  it("does not mutate the previous map", () => {
+    const prev = { catalyst: "a.svg" };
+    applyIconPick(prev, "catalyst", "b.svg");
+    expect(prev).toEqual({ catalyst: "a.svg" });
+  });
+  it("preserves other repos when setting a pick", () => {
+    expect(applyIconPick({ other: "x.svg" }, "catalyst", "logo.svg"))
+      .toEqual({ other: "x.svg", catalyst: "logo.svg" });
   });
 });

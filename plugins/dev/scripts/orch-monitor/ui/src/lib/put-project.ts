@@ -3,7 +3,7 @@
 
 export interface ProjectPatch {
   name?: string | null;
-  defaultColor?: string | null;
+  color?: string | null;
   icon?: string | null;
   stateMap?: Record<string, string> | null;
 }

@@ -34,12 +34,13 @@ import {
 import { SWIMLANE_OPTIONS } from "@/board/Swimlane";
 import { useBoardSnapshot } from "@/hooks/use-board-snapshot";
 import { useRepoIcons } from "@/hooks/use-repo-icons";
-import { repoIconPicksAtom } from "@/lib/repo-icon-picks-store";
-import { buildIconPickerRows } from "@/components/icon-picker-model";
+import { repoIconPicksAtom, applyIconPick } from "@/lib/repo-icon-picks-store";
+import { buildIconPickerRows, resolveIconSectionState } from "@/components/icon-picker-model";
 import { NAMED_COLORS } from "@/lib/color-palette";
 import {
   repoColorPicksAtom,
   NAMED_COLOR_NAMES,
+  applyColorPick,
 } from "@/lib/repo-color-picks-store";
 // CTL-1153 Phase 5: project rail + per-project settings pane.
 import { useProjects } from "@/hooks/use-projects";
@@ -153,14 +154,15 @@ export function SettingsSurface() {
 
   // Project icons — per-repo candidate picker (CTL-997).
   const { payload } = useBoardSnapshot();
+  const payloadLoaded = payload != null;
   const repos = payload?.repos ?? [];
   const iconMap = useRepoIcons(repos);
-  const [iconPicks] = useAtom(repoIconPicksAtom);
+  const [iconPicks, setIconPicks] = useAtom(repoIconPicksAtom);
   const iconPickerRows = buildIconPickerRows(repos, iconMap, iconPicks);
+  const iconSectionState = resolveIconSectionState(payloadLoaded, iconPickerRows.length);
 
-  // Project colors — per-repo hue picker (CTL-1027, read-only here — writes go
-  // through the per-project pane after CTL-1153).
-  const [colorPicks] = useAtom(repoColorPicksAtom);
+  // Project colors — per-repo hue picker (CTL-1027).
+  const [colorPicks, setColorPicks] = useAtom(repoColorPicksAtom);
   const colorPickerRows = repos;
 
   // CTL-1153: project rail — server roster + URL-backed selection.
@@ -329,7 +331,9 @@ export function SettingsSurface() {
                 title="Project icons"
                 description="Pick the crispest detected icon per project, or let Catalyst choose the best (SVG preferred). Saved in this browser."
               >
-                {iconPickerRows.length === 0 ? (
+                {iconSectionState === "loading" ? (
+                  <p className="py-3 text-xs text-muted">Detecting project icons…</p>
+                ) : iconSectionState === "empty" ? (
                   <p className="py-3 text-xs text-muted">
                     No detectable project icons yet.
                   </p>
@@ -348,7 +352,7 @@ export function SettingsSurface() {
                         <ToggleGroup
                           type="single"
                           value={activeValue}
-                          onValueChange={() => {}}
+                          onValueChange={(v) => setIconPicks((prev) => applyIconPick(prev, repo, v))}
                           variant="outline"
                           size="sm"
                           className="shrink-0"
@@ -404,7 +408,7 @@ export function SettingsSurface() {
                         <ToggleGroup
                           type="single"
                           value={active}
-                          onValueChange={() => {}}
+                          onValueChange={(v) => setColorPicks((prev) => applyColorPick(prev, repo, v))}
                           variant="outline"
                           size="sm"
                           className="shrink-0"
