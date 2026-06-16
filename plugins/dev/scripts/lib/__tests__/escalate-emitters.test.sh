@@ -245,35 +245,6 @@ else
 fi
 rm -rf "$S11C_SCRATCH"
 
-# 11d: comment-post is called with the ticket and a non-empty body containing the CTA
-echo "11d: comment-post invoked with non-empty body containing the CTA"
-S11D_SCRATCH="$(run_s11 0 0 true true)"
-CP_OUT_D="${S11D_SCRATCH}/cp.out"
-if [[ -s "$CP_OUT_D" ]]; then
-  CP_TICKET="$(head -1 "$CP_OUT_D" | cut -f1)"
-  CP_BODY="$(head -1 "$CP_OUT_D" | cut -f2-)"
-  assert_eq "CTL-S11" "$CP_TICKET" "11d: comment-post called with correct ticket"
-  if [[ -n "$CP_BODY" && "$CP_BODY" == *"Workflow scope push blocked"* ]]; then
-    pass "11d: comment body contains the escalation header"
-  else
-    fail "11d: comment body missing expected text — got: $(printf '%q' "$CP_BODY")"
-  fi
-else
-  fail "11d: comment-post was not invoked (cp.out is empty or missing)"
-fi
-rm -rf "$S11D_SCRATCH"
-
-# 11e: comment-post is NOT invoked when the CTA is empty
-echo "11e: comment-post NOT invoked when call_to_action is empty"
-S11E_SCRATCH="$(run_s11 0 0 true false)"
-CP_OUT_E="${S11E_SCRATCH}/cp.out"
-if [[ -s "$CP_OUT_E" ]]; then
-  fail "11e: comment-post was called despite empty CTA — got: $(cat "$CP_OUT_E")"
-else
-  pass "11e: comment-post not called when CTA is empty"
-fi
-rm -rf "$S11E_SCRATCH"
-
 # 11f: the helper is fail-open — a failing linearis does not abort the function
 echo "11f: failing linearis does not abort _escalate_workflow_scope_push"
 S11F_SCRATCH="$(run_s11 1 0 true true)"

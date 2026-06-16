@@ -57,17 +57,4 @@ _escalate_workflow_scope_push() {
     mkdir -p "$(dirname "$_nh_marker")" 2>/dev/null || true
     : > "$_nh_marker" 2>/dev/null || true
   fi
-
-  # Post call_to_action to Linear as a comment so the operator sees the CTA.
-  local _cta
-  _cta="$(printf '%s' "$expl_json" | jq -r '.call_to_action // empty' 2>/dev/null || true)"
-  local _comment_post="${CATALYST_COMMENT_POST_HELPER:-${PLUGIN_ROOT}/scripts/lib/linear-comment-post.sh}"
-  if [[ -z "${_comment_post:-}" || ! -x "${_comment_post:-}" ]]; then
-    _comment_post="$(command -v linear-comment-post.sh 2>/dev/null || true)"
-  fi
-  if [[ -n "${_cta:-}" && -n "${_comment_post:-}" && -x "${_comment_post:-}" ]]; then
-    local _cta_body
-    _cta_body="$(printf '**Workflow scope push blocked — operator action required**\n\n%s\n\n_Posted automatically by phase-pr escalation (CTL-1181)._' "${_cta}")"
-    "$_comment_post" "${TICKET}" "${_cta_body}" >/dev/null 2>&1 || true
-  fi
 }
