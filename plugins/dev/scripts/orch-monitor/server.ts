@@ -194,8 +194,8 @@ import {
   createEventLogWriter,
   type EventLogWriter,
 } from "./lib/event-log";
-import { validatePredicate } from "./lib/event-filter";
-import { readBacklog, tailEventLog, readTunnelEventStats } from "./lib/event-log-reader";
+import { validatePredicate, createFilterStream, type FilterStream } from "./lib/event-filter";
+import { readBacklog, readTunnelEventStats } from "./lib/event-log-reader";
 import { createEventRing } from "./lib/event-ring";
 import { readSubStepEvents } from "./lib/substep-reader";
 import { loadOtelConfig } from "./lib/otel-config";
@@ -1400,7 +1400,14 @@ export function createServer(opts: CreateServerOptions): BunServer {
           }
 
           let captured: ReadableStreamDefaultController<Uint8Array> | null = null;
-          let activityCtrl: AbortController | null = null;
+          // CTL-1224: the live activity tail is now fed by the ONE shared
+          // event-ring (eventRing.onAppend) rather than a per-client
+          // tailEventLog poll loop + per-client backlog readFileSync. Each
+          // client keeps its OWN jq filter stream (predicates differ per
+          // client), but the expensive shared part — the file poll + byte read —
+          // is one backend loop (the ring's tick) regardless of client count.
+          let activityUnsub: (() => void) | null = null;
+          let activityFilter: FilterStream | null = null;
           const stream = new ReadableStream<Uint8Array>({
             async start(controller) {
               captured = controller;
@@ -1420,10 +1427,14 @@ export function createServer(opts: CreateServerOptions): BunServer {
               if (filter.activityPredicate !== undefined) {
                 const predicate = filter.activityPredicate;
                 try {
+                  // CTL-1224: serve the backlog from the shared ring when it
+                  // covers the window; bounded file fallback on underflow. No
+                  // unconditional full-file readFileSync on the SSE path.
                   const backlogLines = await readBacklog({
                     catalystDir: CATALYST_DIR,
                     predicate,
                     limit: 100,
+                    ring: eventRing,
                   });
                   const parsed = backlogLines
                     .map((l) => safeParseJson(l))
@@ -1449,31 +1460,39 @@ export function createServer(opts: CreateServerOptions): BunServer {
                   console.error(`[server] activity backlog failed:`, err);
                 }
 
-                activityCtrl = new AbortController();
-                void tailEventLog({
-                  catalystDir: CATALYST_DIR,
-                  predicate,
-                  signal: activityCtrl.signal,
-                  onEvent: (line) => {
-                    const parsed = safeParseJson(line);
-                    if (parsed === null) return;
-                    const env = createEvent("global-event", parsed, "filesystem");
-                    try {
-                      controller.enqueue(
-                        encoder.encode(
-                          `event: global-event\ndata: ${JSON.stringify(env)}\n\n`,
-                        ),
-                      );
-                    } catch {
-                      activityCtrl?.abort();
-                    }
-                  },
+                // CTL-1224: per-client jq filter (or passthrough for an empty
+                // predicate) fed by the SHARED ring tail. Matched lines are
+                // wrapped in the SAME global-event envelope + framing as before.
+                const filterStream = createFilterStream(predicate);
+                activityFilter = filterStream;
+                filterStream.onMatch((line) => {
+                  const parsed = safeParseJson(line);
+                  if (parsed === null) return;
+                  const env = createEvent("global-event", parsed, "filesystem");
+                  try {
+                    controller.enqueue(
+                      encoder.encode(
+                        `event: global-event\ndata: ${JSON.stringify(env)}\n\n`,
+                      ),
+                    );
+                  } catch {
+                    // client gone — stop feeding it
+                    activityUnsub?.();
+                    activityUnsub = null;
+                  }
+                });
+                activityUnsub = eventRing.onAppend((lines) => {
+                  for (const l of lines) filterStream.write(l);
+                  void filterStream.flush();
                 });
               }
             },
             cancel() {
               if (captured) sseClients.delete(captured);
-              activityCtrl?.abort();
+              activityUnsub?.(); // CTL-1224: deregister ring listener (no leak)
+              activityUnsub = null;
+              activityFilter?.close(); // CTL-1224: reap the per-client jq process
+              activityFilter = null;
             },
           });
           return new Response(stream, {
@@ -4154,6 +4173,16 @@ export function createServer(opts: CreateServerOptions): BunServer {
     }
     return originalStop(closeActiveConnections);
   }) as typeof server.stop;
+
+  // CTL-1224: undocumented `__`-prefixed debug seams used ONLY by the
+  // server-activity test suite to assert the shared-ring fan-out + leak
+  // invariants (N clients ⇒ N onAppend listeners on the ONE ring; disconnect
+  // deregisters both the listener and the sseClients entry). The UI never reads
+  // these.
+  (server as unknown as { __ringListenerCount?: () => number }).__ringListenerCount =
+    () => eventRing.listenerCount();
+  (server as unknown as { __sseClientCount?: () => number }).__sseClientCount =
+    () => sseClients.size;
 
   return server;
 }

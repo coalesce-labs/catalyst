@@ -55,10 +55,32 @@ export interface ReadBacklogOpts {
   catalystDir: string;
   predicate: string;
   limit: number;
+  /**
+   * CTL-1224: shared event ring. When present and it retains at least `limit`
+   * lines, the backlog is served from the in-memory ring (no full-file
+   * `readFileSync`). Same underflow-guard posture as readTunnelEventStats /
+   * readActivityEvents: a missing/empty/too-small ring falls back to the file
+   * read so the backlog is always complete (correctness over speed).
+   */
+  ring?: EventRing | null;
   now?: () => Date;
 }
 
 export async function readBacklog(opts: ReadBacklogOpts): Promise<string[]> {
+  // CTL-1224 ring fast-path. With no explicit sinceTs the implicit window is
+  // "last N matching lines from the current month". The ring covers that iff it
+  // holds at least `limit` lines (else the file may hold older matches the ring
+  // already evicted → fall back). ring.query applies the SAME select(<pred>) jq
+  // wrapping + the limit newest-last slice, so output is identical to the file
+  // path. Empty-predicate passthrough is handled inside ring.query too.
+  if (
+    opts.ring &&
+    opts.ring.oldestTs() !== null &&
+    opts.ring.size() >= opts.limit
+  ) {
+    return opts.ring.query({ predicate: opts.predicate, limit: opts.limit });
+  }
+
   const now = opts.now ?? (() => new Date());
   const path = monthlyPath(opts.catalystDir, now());
   if (!existsSync(path)) return [];

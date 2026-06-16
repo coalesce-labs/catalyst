@@ -88,6 +88,23 @@ interface MinimalReader {
   read(): Promise<{ done: boolean; value?: Uint8Array }>;
 }
 
+/**
+ * Open a body reader narrowed to the zero-arg default-reader shape `readUntil`
+ * needs. The DOM `getReader()` overload set widens to a Default|BYOB union; the
+ * BYOB branch's `read(view)` is incompatible with `MinimalReader`. We always
+ * use the default reader, so narrow on the absence of the BYOB-only `read`
+ * arity rather than asserting a cast.
+ */
+function bodyReader(
+  res: Response,
+): MinimalReader & { cancel(): Promise<void> } {
+  const reader = res.body!.getReader();
+  // The default reader's read() takes no required argument; the BYOB reader's
+  // does. `readUntil` only ever calls read() with none, so the default reader
+  // is the correct (and only) shape we open here.
+  return reader as MinimalReader & { cancel(): Promise<void> };
+}
+
 async function readUntil(
   reader: MinimalReader,
   match: (chunk: string) => boolean,
@@ -250,5 +267,138 @@ describe("activity stream", () => {
 
     await reader.cancel().catch(() => {});
     ctrl.abort();
+  });
+
+  // CTL-1224: a non-matching live append must NOT reach a predicated client —
+  // proves the per-client jq still gates the SHARED ring fan-out.
+  it("does NOT deliver a live global-event for a non-matching line (per-client jq gates the shared tail)", async () => {
+    const ctrl = new AbortController();
+    const res = await fetch(
+      `${baseUrl}/events?activity=${encodeURIComponent('.event == "github.unique.match.evt"')}`,
+      { signal: ctrl.signal },
+    );
+    const reader = res.body!.getReader();
+    await readUntil(reader, (b) => b.includes("event: global-event-backlog"));
+
+    // Append a NON-matching line, then a matching one. The non-matching line
+    // must be filtered out; the matching one must arrive.
+    appendFileSync(eventsFile, makeLine("linear.no.match.evt") + "\n");
+    appendFileSync(eventsFile, makeLine("github.unique.match.evt") + "\n");
+
+    const chunk = await readUntil(
+      reader,
+      (b) => b.includes("event: global-event\n"),
+      3000,
+    );
+    // Only the matching event appears in any global-event frame.
+    expect(chunk).toContain("github.unique.match.evt");
+    const globalIdx = chunk.indexOf("event: global-event\n");
+    const liveTail = chunk.slice(globalIdx);
+    expect(liveTail).not.toContain("linear.no.match.evt");
+
+    await reader.cancel().catch(() => {});
+    ctrl.abort();
+  });
+});
+
+// CTL-1224: shared-ring fan-out + leak audit. These use the `__`-prefixed debug
+// seams (ringListenerCount / sseClientCount) the server exposes for tests; the
+// UI never reads them.
+interface DebugServer {
+  __ringListenerCount?: () => number;
+  __sseClientCount?: () => number;
+}
+
+describe("activity stream — shared ring fan-out (CTL-1224)", () => {
+  it("T7 — disconnect removes the client AND its ring subscription (no leak)", async () => {
+    const dbg = server as unknown as DebugServer;
+    expect(typeof dbg.__ringListenerCount).toBe("function");
+    expect(typeof dbg.__sseClientCount).toBe("function");
+
+    // Let any async cleanup from earlier tests settle so the baseline is stable.
+    await sleep(200);
+    const baseListeners = dbg.__ringListenerCount!();
+    const baseClients = dbg.__sseClientCount!();
+
+    const ctrl = new AbortController();
+    const res = await fetch(
+      `${baseUrl}/events?activity=${encodeURIComponent('.event == "github.pr.merged"')}`,
+      { signal: ctrl.signal },
+    );
+    const reader = res.body!.getReader();
+    await readUntil(reader, (b) => b.includes("event: global-event-backlog"));
+
+    // While connected: one extra ring listener + one extra sse client. The
+    // onAppend registration runs in the stream start() right after the backlog
+    // frame; give it a beat to settle before asserting.
+    for (let i = 0; i < 50; i++) {
+      if (dbg.__ringListenerCount!() === baseListeners + 1) break;
+      await sleep(20);
+    }
+    expect(dbg.__ringListenerCount!()).toBe(baseListeners + 1);
+    expect(dbg.__sseClientCount!()).toBe(baseClients + 1);
+
+    // Disconnect.
+    await reader.cancel().catch(() => {});
+    ctrl.abort();
+
+    // Cleanup must run: both counters return to baseline (no listener/client leak).
+    for (let i = 0; i < 50; i++) {
+      if (
+        dbg.__ringListenerCount!() === baseListeners &&
+        dbg.__sseClientCount!() === baseClients
+      )
+        break;
+      await sleep(20);
+    }
+    expect(dbg.__ringListenerCount!()).toBe(baseListeners);
+    expect(dbg.__sseClientCount!()).toBe(baseClients);
+  });
+
+  it("T8 — N clients share ONE backend tail; one append fans out to all", async () => {
+    const dbg = server as unknown as DebugServer;
+    const baseListeners = dbg.__ringListenerCount!();
+
+    const M = 3;
+    const pred = '.event == "github.fanout.evt"';
+    const ctrls: AbortController[] = [];
+    const readers: Array<MinimalReader & { cancel(): Promise<void> }> = [];
+    for (let i = 0; i < M; i++) {
+      const ctrl = new AbortController();
+      ctrls.push(ctrl);
+      const res = await fetch(
+        `${baseUrl}/events?activity=${encodeURIComponent(pred)}`,
+        { signal: ctrl.signal },
+      );
+      const reader = bodyReader(res);
+      readers.push(reader);
+      await readUntil(reader, (b) => b.includes("event: global-event-backlog"));
+    }
+
+    // M extra listeners on the ONE shared ring (no per-client tail loop).
+    expect(dbg.__ringListenerCount!()).toBe(baseListeners + M);
+
+    // ONE append must reach ALL M readers exactly once each.
+    appendFileSync(eventsFile, makeLine("github.fanout.evt", { uniq: "fan1" }) + "\n");
+
+    for (const reader of readers) {
+      const chunk = await readUntil(
+        reader,
+        (b) => b.includes("event: global-event\n") && b.includes("fan1"),
+        3000,
+      );
+      expect(chunk).toContain("github.fanout.evt");
+      expect(chunk).toContain("fan1");
+    }
+
+    for (const reader of readers) await reader.cancel().catch(() => {});
+    for (const ctrl of ctrls) ctrl.abort();
+
+    // All M listeners deregistered on disconnect.
+    for (let i = 0; i < 50; i++) {
+      if (dbg.__ringListenerCount!() === baseListeners) break;
+      await sleep(20);
+    }
+    expect(dbg.__ringListenerCount!()).toBe(baseListeners);
   });
 });

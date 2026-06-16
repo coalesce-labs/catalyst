@@ -53,6 +53,17 @@ export interface EventRing {
   oldestTs(): string | null;
   /** Current retained line count. */
   size(): number;
+  /**
+   * CTL-1224: register a listener fired synchronously with each batch of
+   * newly-appended raw lines from the LIVE tick (NOT cold-fill / start()).
+   * Returns a deregister fn. Cold-fill lines are backlog, not live events, so
+   * firing them would replay history as live frames — they are deliberately
+   * excluded. Listener exceptions are swallowed so one bad subscriber cannot
+   * stall the shared tick loop for everyone.
+   */
+  onAppend(listener: (lines: string[]) => void): () => void;
+  /** CTL-1224: current onAppend listener count. Test/debug seam only. */
+  listenerCount(): number;
 }
 
 const DEFAULT_CAP_LINES = 50_000;
@@ -112,12 +123,32 @@ export function createEventRing(opts: EventRingOpts): EventRing {
   let timer: ReturnType<typeof setInterval> | null = null;
   let started = false;
 
-  function pushLines(lines: string[]): void {
+  // CTL-1224: live fan-out listeners. Fired synchronously after a NOTIFYING
+  // push (tick appends only — never cold-fill) with the batch of new lines.
+  const appendListeners = new Set<(lines: string[]) => void>();
+
+  // `notify` distinguishes live tick appends (true) from cold-fill backlog
+  // (false). When true, registered onAppend listeners receive the batch of
+  // actually-pushed (non-empty) lines AFTER the front-trim.
+  function pushLines(lines: string[], notify: boolean): void {
+    const added: string[] = [];
     for (const l of lines) {
-      if (l.length > 0) ring.push(l);
+      if (l.length > 0) {
+        ring.push(l);
+        added.push(l);
+      }
     }
     if (ring.length > capLines) {
       ring = ring.slice(ring.length - capLines);
+    }
+    if (notify && added.length > 0) {
+      for (const fn of appendListeners) {
+        try {
+          fn(added);
+        } catch {
+          /* a bad subscriber must not stall the shared tick loop (CTL-1224) */
+        }
+      }
     }
   }
 
@@ -126,7 +157,15 @@ export function createEventRing(opts: EventRingOpts): EventRing {
   // but we only call with from>0 on the incremental delta read, where `from` is
   // always a previous EOF (a line boundary), so no partial occurs there. The
   // cold-start back-read passes from>0 and drops the first fragment explicitly.
-  function readDelta(path: string, from: number, size: number, dropFirst: boolean): void {
+  // `notify` is threaded to pushLines so cold-fill (notify=false) never replays
+  // history as live frames; only the live tick (notify=true) fans out.
+  function readDelta(
+    path: string,
+    from: number,
+    size: number,
+    dropFirst: boolean,
+    notify: boolean,
+  ): void {
     if (size <= from) return;
     const fd = openSync(path, "r");
     const len = size - from;
@@ -138,7 +177,7 @@ export function createEventRing(opts: EventRingOpts): EventRing {
     }
     let parts = buf.toString("utf8").split("\n");
     if (dropFirst && parts.length > 0) parts = parts.slice(1);
-    pushLines(parts);
+    pushLines(parts, notify);
   }
 
   function coldFill(path: string): void {
@@ -149,10 +188,10 @@ export function createEventRing(opts: EventRingOpts): EventRing {
     const size = statSync(path).size;
     if (size <= tailBytes) {
       // Whole file fits the cold-start budget — read it all.
-      readDelta(path, 0, size, false);
+      readDelta(path, 0, size, false, /* notify */ false);
     } else {
       // Back-read only the tail; drop the first (partial) line.
-      readDelta(path, size - tailBytes, size, true);
+      readDelta(path, size - tailBytes, size, true, /* notify */ false);
     }
     offset = size;
   }
@@ -168,7 +207,7 @@ export function createEventRing(opts: EventRingOpts): EventRing {
     if (!existsSync(currentPath)) return;
     const size = statSync(currentPath).size;
     if (size > offset) {
-      readDelta(currentPath, offset, size, false);
+      readDelta(currentPath, offset, size, false, /* notify */ true);
       offset = size;
     } else if (size < offset) {
       // truncated/replaced — restart from beginning
@@ -220,6 +259,15 @@ export function createEventRing(opts: EventRingOpts): EventRing {
     },
     size(): number {
       return ring.length;
+    },
+    onAppend(listener: (lines: string[]) => void): () => void {
+      appendListeners.add(listener);
+      return () => {
+        appendListeners.delete(listener);
+      };
+    },
+    listenerCount(): number {
+      return appendListeners.size;
     },
   };
 }
