@@ -622,7 +622,9 @@ cmd_install_services() {
 
   local cmd; cmd="$(_resolve_stack_cmd)"
   local host_name; host_name="$(_stack_host_name)"
-  [[ -z "$host_name" ]] && log "warning: catalyst.host.name not set in Layer-2 config; CATALYST_HOST_NAME will not be pinned (telemetry/scheduler identity may split)"
+  # Warning goes to stderr: log() writes stdout, and --print emits the plist to
+  # stdout — a stdout warning would corrupt `--print` output (CTL-1202 review).
+  [[ -z "$host_name" ]] && log "warning: catalyst.host.name not set in Layer-2 config; CATALYST_HOST_NAME will not be pinned (telemetry/scheduler identity may split)" >&2
   if [[ "$print_only" == "yes" ]]; then
     render_stack_plist "$cmd" "$interval" "$host_name"
     return 0
