@@ -170,7 +170,9 @@ const DDL = [
   `CREATE INDEX IF NOT EXISTS idx_belief_rule_id ON belief (rule_id)`,
   // CTL-935: durable shadow-comparator corpus. Every comparison (agree + disagree)
   // per (tick_id, dimension, subject) for the advance, free_slots, and reclaim
-  // dimensions. Pruned at the 90d belief window so 7-day reports always have data.
+  // dimensions. Pruned at the 90d belief window — and pruneRetention keeps the
+  // parent tick alive as long as a shadow_comparison row references it, so the
+  // report's tick INNER JOIN resolves for the full 90d window (not just 14d).
   `CREATE TABLE IF NOT EXISTS shadow_comparison (
     cmp_id          INTEGER PRIMARY KEY AUTOINCREMENT,
     tick_id         INTEGER NOT NULL REFERENCES tick(tick_id),

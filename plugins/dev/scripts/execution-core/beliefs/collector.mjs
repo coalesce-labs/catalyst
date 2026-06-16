@@ -245,8 +245,9 @@ function tailHeartbeats(db, eventLogPath, capBytes = HB_TAIL_CAP_BYTES) {
 }
 
 // pruneRetention — spec §6 retention, driven entirely by the tick's `now`
-// (no clock read). Order matters: belief/intent first (90d), then obs_* (14d),
-// then tick rows that are old AND no longer cited by any belief/intent.
+// (no clock read). Order matters: belief/intent/shadow_comparison first (90d),
+// then obs_* (14d), then tick rows that are old AND no longer cited by any
+// belief/intent/shadow_comparison.
 function pruneRetention(db, now) {
   const obsCutoff = now - OBS_RETENTION_MS;
   const beliefCutoff = now - BELIEF_RETENTION_MS;
@@ -277,10 +278,22 @@ function pruneRetention(db, now) {
     ]);
   }
   db.run("DELETE FROM obs_heartbeat WHERE ts_ms < ?", [obsCutoff]); // own time axis
+  // CTL-935 (phase-review remediation): retain a tick cited by any surviving
+  // shadow_comparison row as that row's provenance time-spine — mirroring the
+  // belief/intent guards. Without this third guard, a quiet tick that wrote a
+  // shadow_comparison row but no belief/intent (e.g. the free-slots agree row,
+  // which is written every shadow tick even when the R8 belief did not fire) is
+  // deleted at the 14d obs window while its shadow_comparison row survives to
+  // 90d, orphaning it. report.mjs INNER-JOINs shadow_comparison to tick, so an
+  // orphaned row silently drops and disagreements aged 14–90d under-count —
+  // biasing the very agreement rates the gate-flip decision reads. Because
+  // shadow_comparison is itself pruned at the 90d belief window above, the tick
+  // is still reclaimed on the next prune once its rows age out.
   db.run(
     `DELETE FROM tick WHERE now_ms < ?
        AND tick_id NOT IN (SELECT tick_id FROM belief)
-       AND tick_id NOT IN (SELECT tick_id FROM intent)`,
+       AND tick_id NOT IN (SELECT tick_id FROM intent)
+       AND tick_id NOT IN (SELECT tick_id FROM shadow_comparison)`,
     [obsCutoff],
   );
 }
