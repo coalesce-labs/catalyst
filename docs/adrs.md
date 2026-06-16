@@ -996,3 +996,201 @@ chore `#8d8d8d` · test `#22c55e`.
   remain team-scoped (CTL-only) — only the type axis is workspace-level.
 - New tickets on any team should apply workspace type labels; team-scoped type labels should not
   be created.
+
+---
+
+## ADR-022: Belief engine is a derivation layer; "log → projection" is the directional target, not the shipped reality
+
+**Status**: Accepted (direction), 2026-06-14. Track A active; Track B is a deliberate, un-started bet.
+
+**Context**: External research into the "log is the agent" line (ActiveGraph / arXiv 2605.21997 /
+operad / ESAA) prompted the question: how does Catalyst's stratified-Datalog belief engine
+(`execution-core/beliefs/`, CTL-962→967, CTL-1063) fit the immutable-log-+-deterministic-projection
+model? A 24-agent verification workflow (`wf_42692b50-b35`, 2026-06-14) plus an adversarial pro/con
+panel established the facts. Two source documents hold the full reasoning:
+`thoughts/shared/research/2026-06-14-resilience-and-peer-platform-learnings.md` and
+`thoughts/shared/research/2026-06-13-catalyst-patentability-and-open-core-strategy.md`.
+
+The conceptual fit is exact: Datalog's EDB→IDB deductive closure **is** event-sourcing's
+`state = fold(log)`, expressed declaratively. The belief engine also already gets the hard
+determinism discipline right — `now` captured once per tick (`collector.mjs:765`), the EDB frozen
+inside a single SQLite transaction during evaluation (`collector.mjs:348,734`), and a differential
+shadow oracle (`advance-shadow.mjs`) that compares the Datalog `advance_to` against the procedural
+`deriveAdvancement` on the same tick-locked snapshot. That is the categorically correct substrate.
+
+But the verification established three facts that bound the claim:
+
+1. **The EDB is fed from mutable live state, not the log.** Eight of nine `obs_*` tables are live
+   probes (`obs_agent` shells `claude agents`; `obs_job` reads `~/.claude/jobs/*/state.json`;
+   `obs_signal` reads the mutable `phase-*.json` files; `obs_linear/relation` read an in-memory API
+   cache). The one log-sourced table, `obs_heartbeat`, is **permanently empty** because no
+   `worker.heartbeat` emitter exists (`collector.mjs:164-167`). So as-shipped this is
+   "the *filesystem* is the agent, observed through Datalog" — **not** a log projection.
+2. **The custom `rules.dl` compiler compiles only 3 of 18 rules** (`compiler/index.mjs`); the
+   load-bearing logic (recursive S5 dependency rules, S6 `advance_to`/`cycle_exhausted`) is `extern`
+   hand-written SQL, with a 61KB checked-in generated artifact kept in hand-sync.
+3. **Advancement is graded *against* the 33-line procedural `deriveAdvancement` as ground truth**
+   (`advance-shadow.mjs`), so porting advancement to Datalog can at best equal it — low standalone ROI.
+
+The engine has also been shadow/dark (default-off) its entire life; graduation is **not** a flag
+flip — it is blocked on prerequisites that do not exist (a log-sourced EDB; `caused_by` + monotonic
+`seq` on the canonical envelope, both verified absent).
+
+**Decision**:
+
+1. **Affirm "immutable log → deterministic projection" as the directional target**, and keep the
+   belief engine as the principled projection substrate. Do **not** rip it out.
+2. **Stop describing the belief EDB as a "log projection"** in docs/comments until its authoritative
+   tables are sourced from the event log. Today it is a projection of parallel mutable state.
+3. **Split the engine's conflated ambition into two tracks:**
+   - **Track A — derivation / health / provenance / absence-detection brain.** Dependency reasoning
+     (S5), `catalyst why` provenance, and negation-over-time absence detection. This is where Datalog
+     beats the procedural code and where it earns its keep. It does **not** require replacing
+     `deriveAdvancement` or the full rewrite. **Keep, invest, graduate.**
+   - **Track B — Datalog owns the control path** (R16/R17 replace `deriveAdvancement`; log-sourced
+     EDB; `signal.json` demoted to a regeneratable projection). A genuine architectural bet to be made
+     *deliberately*, with the `advance-shadow` oracle as the zero-disagreement graduation gate — not
+     drifted into.
+4. **First graduation = the resilience absence-detector** (per ADR-relevant plan
+   `2026-06-14-resilience-safeguard-monitor-outage.md`, L2): "no `github.*`/`linear.*` event in N
+   minutes → `ingestion_stale`" is a one-line stratified-Datalog rule and the single thing the
+   procedural code is worst at. It requires emitting the heartbeat/webhook-freshness events (fixing
+   the empty `obs_heartbeat`), which exercises the log-as-EDB-source path for real and makes the
+   engine authoritative for one valuable thing — all Track A, no `deriveAdvancement` replacement.
+
+**Rationale**:
+
+- The decide/act seam must stay a bright line: Datalog *derives* intent purely; an imperative
+  executor *acts* and emits the resulting event back into the log. `advance-shadow` already respects
+  this (derive-only); the one actuation path (`escalate.mjs`, gated by `CATALYST_INTENTS_ENFORCE=1`)
+  sits outside the rule engine, which is correct.
+- **Datalog, not Prolog**, is the right choice: guaranteed termination is a feature for a control
+  plane that must always halt. Bounded `WITH RECURSIVE` (S5) is the correct use of recursion; resist
+  drift toward Prolog-style unbounded search in the control path.
+- Per-tick EDB checkpoints are the materialized-view/snapshot half of event sourcing — and the half
+  ActiveGraph admits it lacks. The primitive is right; only its *source* is wrong.
+
+**Consequences**:
+
+- `caused_by` + monotonic `seq` on the canonical event envelope become prerequisites for a
+  log-sourced EDB (tracked as the `EVENT_SCHEMA_CAUSAL_SEQ` gap; near-free, additive).
+- The `rules.dl` compiler's fate is decided by Track-B intent: either migrate the load-bearing
+  `extern` rules into compiled form, or retire the compiler — do not maintain a 3/18 compiler plus a
+  hand-synced generated artifact indefinitely.
+- **Do not "fix" `REVIVE_BUDGET=1`** — it is dead code in the live recovery path (the CTL-736
+  progress-gate is the live model).
+- Complements **ADR-018** (broker `replayWorkerStateProjection` is the existing event-fold pattern
+  Track A extends) and **ADR-006/008** (log + SQLite session store). Supersedes nothing.
+
+**Alternatives considered**:
+
+- **Rip out the belief engine; keep procedural only** — rejected: loses dependency reasoning,
+  provenance, and absence-detection the procedural code structurally cannot provide; discards correct
+  determinism primitives and a finished migration instrument (the oracle).
+- **Promote `advance_to` to authoritative now** — rejected: blocked on prerequisites, and advancement
+  via Datalog has low standalone ROI (graded against the simple function as spec).
+- **Full "log is the agent" rewrite now** — deferred: that is Track B, a deliberate bet, not a default.
+
+---
+
+## ADR-023: Shadow→Enforce Rollout Discipline for Autonomous Actuators
+
+**Status**: Accepted, 2026-06-16.
+
+**Context**: The fleet has accumulated several autonomous actuators — the session reaper (CTL-649/657), the proc-reaper (CTL-1165), the stall-janitor (CTL-1004/1064), the unstuck-sweep (CTL-1064), the belief-engine executors (CTL-962→967), and fleet-health self-heal (CTL-1165 D5). Each can take a real, hard-to-reverse action: kill a process, remove a git worktree, `claude stop` a session, apply a `needs-human` label, page an operator, force-push a branch. Without a shared rollout discipline an actuator could be enabled before its behavior is proven on a real host — the 1,798-job / 17 GB-swap reap-leak outage (CTL-1165) is the cautionary case. Several actuators independently adopted an `off|shadow|enforce` mode convention, but it was never elevated to a stated principle. Verified 2026-06-16: every recovery actuator on the live fleet runs on its conservative code default (shadow/off); nothing turns one on without an explicit flag.
+
+**Decision**: Adopt one rollout discipline for every fleet actuator:
+
+1. **Rules DERIVE, executors ACT.** The decision (a belief, a stall classification, a category) is computed purely; a separate imperative executor takes the action and emits the resulting event back into the log. The decide/act seam stays a bright line (mirrors ADR-022's belief-engine seam).
+2. **Dark by default.** Every actuator ships `off` (or `shadow`), gated by a single knob — an env flag (`CATALYST_INTENTS_ENFORCE`, `CATALYST_STALL_JANITOR`, `CATALYST_UNSTUCK_SWEEP`, `CATALYST_DIAGNOSTICIAN`, `EXECUTION_CORE_FLEET_SELF_HEAL`) or a Layer-1 config mode (`orphanReaper.procReaper.mode`). Nothing derived is in the live decision path until an operator flips it.
+3. **Three-state mode `off → shadow → enforce`.** Shadow emits a "would-X" twin (`procOrphans.would-reap`, `unstuck.would.push`, `janitor.would.kill`, the `advance-shadow` comparator) so the action is observable and auditable without firing.
+4. **Gated criteria flips.** Promotion `shadow → enforce` requires written criteria verified on real hosts over a real observation window (the CTL-1165 proc-reaper criteria are the template: shadow has seen real candidates over ≥3–5 days; each candidate spot-checked as a true target; no false spared/reaped; steady-state bounded).
+5. **Reversible by unset.** A flip reverts by unsetting the flag/mode + restart; gates fail closed (a failed `claude agents` liveness read aborts the sweep, killing nothing).
+6. **One at a time.** Subsystem flips are independent knobs — flip one, watch, then the next; never a blanket "turn everything on."
+
+**Rationale**:
+
+- The reap-leak outage proved an unproven actuator can cause fleet-wide harm; shadow-first + gated criteria makes harm observable before it is possible.
+- Independent knobs (vs one global switch) let the riskiest actuators (force-push, kill) be enabled last, after the cheap-safe ones (escalate, label) are proven. **Known coarseness**: `CATALYST_INTENTS_ENFORCE` is today a *single* global flag arming four belief executors at once; its safety rests on each being individually idempotent/bounded (`labelOnce` marker, bgJobId-pinned kill, max-attempts cap) until per-intent granularity exists.
+- This is the cross-cutting statement of the **deterministic-vs-flexible boundary**: deterministic rule-based actuators (reapers, janitors, belief executors) stay predictable and gated this way; the flexible LLM reasoning layer (ADR-025) is a separate category with its own guardrails.
+
+**Consequences**:
+
+- New actuators MUST ship with an `off|shadow|enforce` mode, a `would-X` shadow event, and written promotion criteria — none goes straight to `enforce`.
+- The mode convention is instantiated per-feature in `website/.../reference/configuration.md` + the config schema enum; this ADR is the principle they realize.
+- Flips are operator-owned; there is (by design) no auto-promotion. The **ownerless-gate risk** — clean shadow evidence sitting with nobody driving the flip — is real and is itself an operator-surfacing concern (ADR-025 / CTL-1176).
+
+**Alternatives considered**:
+
+- **Enable actuators on merge (no gate)** — rejected: that is exactly what produced the reap-leak outage.
+- **A single global enforce flag for all actuators** — rejected: couples low-risk and high-blast-radius actions; the independent-knob model is safer.
+
+---
+
+## ADR-024: Mechanical Fleet Hygiene — Reapers, Janitors, and Garbage Collection (Thread 1)
+
+**Status**: Accepted, 2026-06-16.
+
+**Context**: Each short-lived phase-agent worker leaves durable state behind: a `~/.claude/jobs/<id>` bg-job dir, an `execution-core/workers/<TICKET>/` phase-signal dir, a git worktree under `~/catalyst/wt/`, and reparented `node`/`bun` child processes. Unmanaged, these accumulate and degrade the fleet. Two incidents make the case: the reap-leak outage (1,798 job dirs / 17 GB swap, CTL-1165) and a 2026-06-16 incident where **137 `execution-core/workers/` state dirs cold the CTL-731 liveness snapshot** (`inFlightCount:0` while workers were live) → the daemon held *all* new-work dispatch, including Urgent. These are **mechanical** cleanup concerns, distinct from the inference engine (ADR-022) and the reasoning sweep (ADR-025), and were scattered across tickets with no unifying record.
+
+**Decision**: Treat mechanical hygiene as one named layer of bounded, deterministic cleaners, each governed by ADR-023:
+
+1. **Session/bg-worker reaper** (CTL-649/657) — reaps completed/dead bg workers (`claude stop` + `reap-complete`). Live/enforce.
+2. **proc-reaper** (CTL-1165 D2, `orphanReaper.procReaper.mode`) — kills reparented `node`/`bun` grandchildren that `claude stop` orphans. Shadow; enforce-flip gated on the CTL-1165 criteria.
+3. **job-dir GC** (CTL-1165 D3) — removes aged `~/.claude/jobs` dirs past a 24 h retention.
+4. **worker-dir GC** (CTL-1205, **NEW — did not exist**) — removes `execution-core/workers/<TICKET>/` state dirs on pipeline completion (in the reaper's `pr.merged` cleanup, after worktree removal) + a periodic sweep for Done/merged tickets. Nothing reaped these before; the per-tick `readdirSync` over the pile is what cold the CTL-731 snapshot.
+5. **stall-janitor** (CTL-1004/1064, `CATALYST_STALL_JANITOR`) — J1 reaps orphan git worktrees (teardown-done), J2 kills idle ghost sessions, J3 re-dispatches the narrow `prior-artifact-retry-exhausted` stall. Shadow → enforce.
+6. **unstuck-sweep** (CTL-1064, `CATALYST_UNSTUCK_SWEEP`) — category-aware stalled-ticket rescuer; its `actByCategory` act-seams are intentionally unwired (`{}`) pending the act modules.
+7. **fleet-health probe** (CTL-1165 D5) — alerts (`fleet.health.degraded`) on jobs/swap/procs thresholds; self-heal default-off.
+
+**Boundary (load-bearing)**: these cleaners operate on fleet *state* (processes, dirs, worktrees, sessions); they do **not** reason about ticket content — that is ADR-025. They are **not interchangeable**: the stall-janitor reaps worktrees + sessions but **not** worker-state dirs (that is the worker-dir GC). A cold liveness snapshot is a worker-dir-GC problem, **not** a stall-janitor one — a distinction that misdiagnosed the 2026-06-16 incident until corrected.
+
+**Rationale**:
+
+- **Liveness depends on hygiene.** The CTL-731 guard (holds new work when the liveness snapshot is stale/cold) is pressured by per-tick I/O over accumulated state dirs; bounded dirs keep the snapshot warm.
+- Each cleaner has a single clear target; conflating them (the "just flip the janitor" instinct) misdiagnoses incidents.
+- The immutable event log is the source of truth — removing a completed ticket's state dir is safe; the daemon restores from the log on boot.
+
+**Consequences**:
+
+- **worker-dir GC (CTL-1205)** is the durable fix for the CTL-731 cold-snapshot incident class; the immediate relief is archiving worktree-gone + aged state dirs.
+- Each cleaner follows ADR-023 (`off|shadow|enforce`, `would-X`, gated flips). proc-reaper / stall-janitor / unstuck-sweep remain shadow/off pending their criteria.
+- The **CTL-731 liveness-snapshot guard** is named here as the reason hygiene matters; it had no durable doc before this ADR.
+
+**Alternatives considered**:
+
+- **Let state accumulate (rely on host reboots)** — rejected: the outages prove it does not hold.
+- **One mega-reaper** — rejected: distinct targets need distinct, separately-gated cleaners.
+
+---
+
+## ADR-025: Pre-Human Reasoning-Recovery Sweep and Operator Surfacing (Thread 3)
+
+**Status**: Accepted (direction), 2026-06-16. Surfacing shipped (CTL-1180/1182/1181); the reasoning sweep (CTL-1176) is proposed, not built.
+
+**Context**: When a ticket stalls, fails, or needs a decision, two things must happen well: it must **surface** to the operator (not sit silent), and ideally something autonomous should try to **unstick** it before it consumes human attention. This session found both broken. ADV-1392's `pr` phase failed (`push_rejected_no_workflow_scope`) and surfaced **nowhere** — no `needs-human`, no inbox row, no comment — masked as Linear state `PR`, because `needs-human` was applied only for `status:"stalled"`, never `"failed"`. CTL-1167 stalled on a dirty-tree rebase precheck with no explanatory comment. A fleet scan found **31 silently-stuck tickets in a month against only 6 `escalate.human` events**. And nothing reasons over the escalation queue: the diagnostician (CTL-937/828) is evidence-only and dark, the stall-janitor's J3 covers one narrow category, `phase-remediate` (CTL-653) fires only in-pipeline on a verify verdict, and the unstuck-sweep's act-seams are unwired.
+
+**Decision**: Define a flexible, LLM-reasoning recovery layer that sits in front of the human inbox — distinct from the deterministic hygiene (ADR-024) and belief (ADR-022) layers:
+
+1. **The reasoning recovery sweep (CTL-1176)** — a periodic LLM pass over the stuck/failed/needs-human queue that, per item, reconstructs the situation from the immutable log + belief store + worktree/PR/CI state and asks *"is this genuinely a human-decision, or can I unblock it?"*. It resolves the mechanical cases via existing deterministic act-seams and escalates only true human-decisions, **with a written reason**. It unifies the prior fragments (diagnostician + janitor + sweeper + remediator). **Guardrail (adopted from CTL-828's three-panel review)**: it is **not** a general open-ended fixer — DETERMINISTIC when the stuck-type is typed and the fix mechanical; LLM only with a structured brief + a downstream deterministic re-check gate + hard cycle cap; HUMAN otherwise. No open-ended re-dispatch authority (that reopens the CTL-736 revive-storm). Every decision is written to the immutable log + a Linear comment (auditable).
+2. **Surfacing model (CTL-1180, shipped)** — a terminally-`failed` phase surfaces like a `stalled` one: `needs-human` applied for `status ∈ {failed, stalled}` when not pipeline-done (scheduler terminal sweep), plus a `phaseFailed`/`escalationType` trigger in the monitor's `deriveAttention` so it reaches the Needs-You inbox + nav dot + `/queue`. Closes the `failed ≠ stalled` silent-stuck gap.
+3. **Always-record comment policy (CTL-1182, shipped)** — every phase, *including a failed one*, records its outcome on the Linear ticket; a codified `linearis` fallback when the app-actor mirror fails; a failure-path comment so escalations self-document.
+4. **Registered deterministic act-seams the sweep invokes** — the workflow-scope push detour (CTL-1181), sibling-conflict resolve (CTL-855), orphan-PR detect/adopt (CTL-1175/1159/1160), and the ADR-024 hygiene cleaners. The LLM *selects among* registered seams; it does not invent mutations.
+
+**Rationale**:
+
+- Today the fleet only **alerts** (`fleet.health.degraded`) and **escalates** (`needs-human`, inconsistently), then stops — the "before we just stop, try to clean it up" step exists only as scaffolding. The 31-silently-stuck / 6-escalations ratio quantifies the cost.
+- The **deterministic-vs-flexible boundary** (ADR-023): rules/hygiene stay predictable and gated; the flexible LLM judgment is bounded to "human-or-not + which registered seam" — never an open-ended agent.
+- **Surfacing is the floor.** Even before the sweep acts, a stuck ticket must reach the operator with a reason (CTL-1180/1182); inbox membership keys on the worker-dir/event signal status (`failed`/`stalled`/`needs-human`), not just `gh pr list`, so failed-but-no-PR cases (ADV-1392) surface.
+
+**Consequences**:
+
+- CTL-1176 needs its own scoping doc (it currently survives as one paragraph) and becomes this ADR's implementation vehicle.
+- The belief executors (ADR-022, `INTENTS_ENFORCE`) and this LLM sweep are **complementary**: the deterministic layer escalates by rule; the flexible layer triages the escalation queue and attempts resolution.
+- This is the architecture record for the "supervisor" concept previously split across CTL-780 (held) / CTL-828 (deferred) / CTL-937.
+
+**Alternatives considered**:
+
+- **A general "get-it-moving" agent with open-ended re-dispatch/fix authority** — rejected (CTL-828 panel): reopens the long-lived-orchestrator / revive-storm failure modes (CTL-736).
+- **Surfacing only, no autonomous resolution** — insufficient: leaves resolvable stalls (a stray lockfile, a missing OAuth scope) consuming human attention.
+- **Leave re-engagement to the inference engine's lease rules** (CTL-780) — that is the *deterministic* re-engagement, held pending the engine; this ADR is the *flexible* reasoning complement, not a replacement.
