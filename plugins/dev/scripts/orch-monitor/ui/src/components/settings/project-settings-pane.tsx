@@ -137,6 +137,22 @@ export function ProjectSettingsPaneContent({
   );
 }
 
+// ── Pure patch builder (exported for unit tests) ──────────────────────────────
+
+export function buildProjectPatch(
+  project: ProjectInput,
+  edits: { name: string; color: string; stateMapEdits: Record<string, string> },
+): Parameters<typeof putProject>[1] {
+  const patch: Parameters<typeof putProject>[1] = {};
+  if (edits.name !== (project.storedName ?? "")) patch.name = edits.name || null;
+  if (edits.color !== (project.storedColor ?? "auto")) {
+    patch.color = edits.color === "auto" ? null : edits.color;
+  }
+  const mapDiff = diffStateMap(project.stateMap, edits.stateMapEdits);
+  if (Object.keys(mapDiff).length > 0) patch.stateMap = mapDiff;
+  return patch;
+}
+
 // ── Stateful wrapper (public component) ───────────────────────────────────────
 
 interface ProjectSettingsPaneProps {
@@ -159,13 +175,7 @@ export function ProjectSettingsPane({ project, onSaved }: ProjectSettingsPanePro
     setSaving(true);
     setError(null);
     try {
-      const patch: Parameters<typeof putProject>[1] = {};
-      if (name !== (project.storedName ?? "")) patch.name = name || null;
-      if (color !== (project.storedColor ?? "auto")) {
-        patch.defaultColor = color === "auto" ? null : color;
-      }
-      const mapDiff = diffStateMap(project.stateMap, stateMapEdits);
-      if (Object.keys(mapDiff).length > 0) patch.stateMap = mapDiff;
+      const patch = buildProjectPatch(project, { name, color, stateMapEdits });
       await putProject(project.key, patch);
       await onSaved();
     } catch (err) {

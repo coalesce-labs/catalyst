@@ -62,4 +62,14 @@ describe("putProject", () => {
     setFetch(async () => new Response("internal error", { status: 500 }));
     await expect(putProject("CTL", {})).rejects.toThrow("500");
   });
+
+  it("ProjectPatch uses `color`, never `defaultColor`", async () => {
+    let body: Record<string, unknown> = {};
+    setFetch(async (_url, opts) => {
+      body = JSON.parse(opts?.body as string);
+      return new Response("{}", { status: 200 });
+    });
+    await putProject("CTL", { color: "lime" });
+    expect(body).toEqual({ color: "lime" });
+  });
 });

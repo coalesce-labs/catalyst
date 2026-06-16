@@ -11,6 +11,20 @@ export const REPO_ICON_PICKS_KEY = "catalyst.repoIconPicks";
  */
 export const repoIconPicksAtom = atomWithStorage<Record<string, string>>(REPO_ICON_PICKS_KEY, {});
 
+/** Apply a picker selection: a candidate path sets it, "auto" clears it (inherit
+ *  server/default), empty is a deselect no-op (returns the same reference). */
+export function applyIconPick(
+  prev: Record<string, string>,
+  repo: string,
+  value: string,
+): Record<string, string> {
+  if (!value) return prev;
+  const next = { ...prev };
+  if (value === "auto") delete next[repo];
+  else next[repo] = value;
+  return next;
+}
+
 /**
  * Derive the effective icon for a repo from the candidate list, the server's
  * default selected path, and the operator's optional pick.

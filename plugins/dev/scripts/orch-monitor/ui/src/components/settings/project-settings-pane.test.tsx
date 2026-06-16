@@ -2,7 +2,7 @@
 import { describe, it, expect } from "bun:test";
 import type { ReactNode, ReactElement } from "react";
 // Use the pure content renderer (no hooks) for tree-walk testing.
-import { ProjectSettingsPaneContent } from "./project-settings-pane";
+import { ProjectSettingsPaneContent, buildProjectPatch } from "./project-settings-pane";
 import { NAMED_COLOR_NAMES } from "@/lib/repo-color-picks-store";
 import { STATE_MAP_KEYS, STATE_MAP_KEY_LABEL } from "@/lib/project-settings-model";
 
@@ -79,5 +79,42 @@ describe("ProjectSettingsPane", () => {
   it("renders display name section header", () => {
     const el = ProjectSettingsPaneContent({ project, name: "", color: "auto", stateMapEdits: {}, saving: false, error: null, onNameChange: () => {}, onColorChange: () => {}, onStateMapChange: () => {}, onSave: () => {} });
     expect(containsText(el, "Display name")).toBe(true);
+  });
+});
+
+describe("buildProjectPatch", () => {
+  const base = {
+    key: "CTL", name: "Catalyst", repo: "catalyst",
+    defaultColor: "blue", storedName: null, storedColor: null, stateMap: null,
+  };
+
+  it("emits the server field name `color` (not `defaultColor`) on a color change", () => {
+    const patch = buildProjectPatch(base, { name: "", color: "lime", stateMapEdits: {} });
+    expect(patch).toHaveProperty("color", "lime");
+    expect(patch).not.toHaveProperty("defaultColor");
+  });
+
+  it("maps the `auto` sentinel to null (clear the override)", () => {
+    const stored = { ...base, storedColor: "lime" };
+    const patch = buildProjectPatch(stored, { name: "", color: "auto", stateMapEdits: {} });
+    expect(patch).toHaveProperty("color", null);
+  });
+
+  it("omits color when unchanged from the stored value", () => {
+    const stored = { ...base, storedColor: "lime" };
+    const patch = buildProjectPatch(stored, { name: "", color: "lime", stateMapEdits: {} });
+    expect(patch).not.toHaveProperty("color");
+  });
+
+  it("includes name only when changed", () => {
+    const patch = buildProjectPatch(base, { name: "Renamed", color: "auto", stateMapEdits: {} });
+    expect(patch).toHaveProperty("name", "Renamed");
+  });
+
+  it("never includes `defaultColor` in any output", () => {
+    const patch1 = buildProjectPatch(base, { name: "", color: "lime", stateMapEdits: {} });
+    const patch2 = buildProjectPatch(base, { name: "", color: "auto", stateMapEdits: {} });
+    expect(patch1).not.toHaveProperty("defaultColor");
+    expect(patch2).not.toHaveProperty("defaultColor");
   });
 });
