@@ -9,11 +9,11 @@
  * - ticket key is always included
  */
 
+/* eslint-disable @typescript-eslint/no-non-null-assertion */
 import { describe, it, expect } from "bun:test";
 import {
   composeNotification,
   EscalationPayload,
-  NotificationComposition,
 } from "./notification-composer";
 
 describe("composeNotification — manual escalation", () => {
