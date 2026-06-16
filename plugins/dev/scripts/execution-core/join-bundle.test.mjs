@@ -17,6 +17,11 @@ const BUNDLE_ENVS = [
   "CATALYST_HOST_NAME",
   "OTEL_EXPORTER_OTLP_ENDPOINT",
   "CATALYST_LIVENESS_ANCHOR_ISSUE",
+  // CTL-1214 PATH-B #3: the registry-path override (controls where listProjects()
+  // resolves repoRoot) MUST be saved/restored — the detached-listener test below
+  // sets it, and assembleJoinBundle() MUTATES CATALYST_CONFIG_FILE as a side
+  // effect, so a leak would corrupt later tests.
+  "CATALYST_DIR",
 ];
 
 let saved = {};
@@ -155,6 +160,76 @@ describe("assembleJoinBundle", () => {
     const b = assembleJoinBundle();
     expect(b.layer1Identity.projectKey).toBeNull();
     expect(b.layer1Identity.teamKey).toBeNull();
+  });
+
+  // CTL-1214 PATH-B #3 (bug #3): the detached `nohup` join-listener runs with
+  // cwd=HOME and NO CATALYST_CONFIG_FILE in its env. Before the fix, layer1Path()
+  // and getClusterHosts() both resolved <cwd>/.catalyst/* → null projectKey/
+  // teamKey/stateMap and a single-host roster default. The fix resolves both from
+  // the execution-core registry's first project repoRoot (listProjects()[0]).
+  //
+  // The existing beforeEach masks this because it always sets CATALYST_CONFIG_FILE.
+  // This test reproduces the real detached environment: delete the override, chdir
+  // to a non-repo tmp dir, and point the registry (via CATALYST_DIR) at a fixture
+  // repo that owns the committed Layer-1 config + multi-host roster.
+  test("detached listener (no CATALYST_CONFIG_FILE, cwd=non-repo) resolves layer1 + multi-host roster from registry repoRoot", () => {
+    // A scratch repoRoot OTHER than repoDir, carrying the committed .catalyst tree.
+    const fixtureRepo = mkdtempSync(join(tmpdir(), "jb-registry-repo-"));
+    const cwdSandbox = mkdtempSync(join(tmpdir(), "jb-nonrepo-cwd-"));
+    const catalystDir = mkdtempSync(join(tmpdir(), "jb-catalyst-dir-"));
+    const originalCwd = process.cwd();
+    try {
+      mkdirSync(join(fixtureRepo, ".catalyst"), { recursive: true });
+      writeFileSync(
+        join(fixtureRepo, ".catalyst", "config.json"),
+        JSON.stringify(LAYER1_FIXTURE),
+      );
+      const MULTI_HOST_ROSTER = ["mini", "studio", "mini-2"];
+      writeFileSync(
+        join(fixtureRepo, ".catalyst", "hosts.json"),
+        JSON.stringify(MULTI_HOST_ROSTER),
+      );
+
+      // Layer-2 is still resolved via CATALYST_LAYER2_CONFIG_FILE (set in
+      // beforeEach), so the bot creds / liveness anchor remain available; only
+      // the cwd-relative Layer-1 + roster reads are under test here.
+
+      // Point the execution-core registry at the fixture repoRoot. getRegistryPath()
+      // = <CATALYST_DIR>/execution-core/registry.json.
+      process.env.CATALYST_DIR = catalystDir;
+      mkdirSync(join(catalystDir, "execution-core"), { recursive: true });
+      writeFileSync(
+        join(catalystDir, "execution-core", "registry.json"),
+        JSON.stringify({
+          projects: [{ team: "CTL", repoRoot: fixtureRepo, eligibleQuery: null }],
+        }),
+      );
+
+      // Reproduce the detached listener environment.
+      delete process.env.CATALYST_CONFIG_FILE;
+      process.chdir(cwdSandbox);
+
+      const b = assembleJoinBundle();
+
+      // Layer-1 identity must be POPULATED from the registry repoRoot, not null.
+      expect(b.layer1Identity.projectKey).toBe("catalyst-workspace");
+      expect(b.layer1Identity.teamKey).toBe("CTL");
+      expect(b.layer1Identity.teamId).toBe("team-uuid-1234");
+      expect(b.layer1Identity.stateMap).toEqual({ Todo: "state-1", "In Progress": "state-2" });
+
+      // Roster must be the committed MULTI-host list, NOT the single-host default.
+      expect(b.hostsRoster).toEqual(MULTI_HOST_ROSTER);
+      expect(b.hostsRoster.length).toBeGreaterThan(1);
+    } finally {
+      process.chdir(originalCwd);
+      // assembleJoinBundle() MUTATES CATALYST_CONFIG_FILE when it was unset — wipe
+      // it here too (afterEach restores from `saved`, which holds the pre-test
+      // value; this prevents the mutation leaking inside this test's own teardown).
+      delete process.env.CATALYST_CONFIG_FILE;
+      rmSync(fixtureRepo, { recursive: true, force: true });
+      rmSync(cwdSandbox, { recursive: true, force: true });
+      rmSync(catalystDir, { recursive: true, force: true });
+    }
   });
 });
 

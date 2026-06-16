@@ -76,6 +76,16 @@ exit 0
 EOF
   chmod +x "$dir/stub-setup-plugin-source.sh"
 
+  # CTL-1214 (PATH-B #6): provision-thoughts is a new pre-setup-catalyst stage.
+  # Stub it (mirror of setup-plugin-source) so the real provision-thoughts.sh
+  # never runs and aborts the hermetic flow.
+  cat > "$dir/stub-provision-thoughts.sh" <<EOF
+#!/usr/bin/env bash
+echo "provision-thoughts" >> "$log"
+exit 0
+EOF
+  chmod +x "$dir/stub-provision-thoughts.sh"
+
   cat > "$dir/stub-catalyst-stack" <<EOF
 #!/usr/bin/env bash
 echo "catalyst-stack \$*" >> "$log"
@@ -110,6 +120,7 @@ run_join() {
     CATALYST_JOIN_SETUP_SCRIPT="${stub_dir}/stub-setup-catalyst.sh" \
     CATALYST_JOIN_INSTALL_CLI_SCRIPT="${stub_dir}/stub-install-cli.sh" \
     CATALYST_JOIN_PLUGIN_SRC_SCRIPT="${stub_dir}/stub-setup-plugin-source.sh" \
+    CATALYST_JOIN_PROVISION_THOUGHTS_SCRIPT="${stub_dir}/stub-provision-thoughts.sh" \
     CATALYST_JOIN_STACK_BIN="${stub_dir}/stub-catalyst-stack" \
     CATALYST_JOIN_DOCTOR_SCRIPT="${stub_dir}/stub-check-setup.sh" \
     CATALYST_JOIN_REACH_PROBE="${stub_dir}/stub-reach-probe.sh" \
@@ -152,6 +163,7 @@ run "T1.3 missing token exits non-zero" bash -c "
     CATALYST_JOIN_SETUP_SCRIPT='${STUBS}/stub-setup-catalyst.sh' \
     CATALYST_JOIN_INSTALL_CLI_SCRIPT='${STUBS}/stub-install-cli.sh' \
     CATALYST_JOIN_PLUGIN_SRC_SCRIPT='${STUBS}/stub-setup-plugin-source.sh' \
+    CATALYST_JOIN_PROVISION_THOUGHTS_SCRIPT='${STUBS}/stub-provision-thoughts.sh' \
     CATALYST_JOIN_STACK_BIN='${STUBS}/stub-catalyst-stack' \
     CATALYST_JOIN_DOCTOR_SCRIPT='${STUBS}/stub-check-setup.sh' \
     CATALYST_JOIN_REACH_PROBE='${STUBS}/stub-reach-probe.sh' \
@@ -168,6 +180,7 @@ run "T1.4 malformed token (not_a_token) rejected" bash -c "
     CATALYST_JOIN_SETUP_SCRIPT='${STUBS}/stub-setup-catalyst.sh' \
     CATALYST_JOIN_INSTALL_CLI_SCRIPT='${STUBS}/stub-install-cli.sh' \
     CATALYST_JOIN_PLUGIN_SRC_SCRIPT='${STUBS}/stub-setup-plugin-source.sh' \
+    CATALYST_JOIN_PROVISION_THOUGHTS_SCRIPT='${STUBS}/stub-provision-thoughts.sh' \
     CATALYST_JOIN_STACK_BIN='${STUBS}/stub-catalyst-stack' \
     CATALYST_JOIN_DOCTOR_SCRIPT='${STUBS}/stub-check-setup.sh' \
     CATALYST_JOIN_REACH_PROBE='${STUBS}/stub-reach-probe.sh' \
@@ -184,6 +197,7 @@ run "T1.5 wrong-length token rejected" bash -c "
     CATALYST_JOIN_SETUP_SCRIPT='${STUBS}/stub-setup-catalyst.sh' \
     CATALYST_JOIN_INSTALL_CLI_SCRIPT='${STUBS}/stub-install-cli.sh' \
     CATALYST_JOIN_PLUGIN_SRC_SCRIPT='${STUBS}/stub-setup-plugin-source.sh' \
+    CATALYST_JOIN_PROVISION_THOUGHTS_SCRIPT='${STUBS}/stub-provision-thoughts.sh' \
     CATALYST_JOIN_STACK_BIN='${STUBS}/stub-catalyst-stack' \
     CATALYST_JOIN_DOCTOR_SCRIPT='${STUBS}/stub-check-setup.sh' \
     CATALYST_JOIN_REACH_PROBE='${STUBS}/stub-reach-probe.sh' \
@@ -198,6 +212,7 @@ run "T1.6 non-hex token rejected" bash -c "
     CATALYST_JOIN_SETUP_SCRIPT='${STUBS}/stub-setup-catalyst.sh' \
     CATALYST_JOIN_INSTALL_CLI_SCRIPT='${STUBS}/stub-install-cli.sh' \
     CATALYST_JOIN_PLUGIN_SRC_SCRIPT='${STUBS}/stub-setup-plugin-source.sh' \
+    CATALYST_JOIN_PROVISION_THOUGHTS_SCRIPT='${STUBS}/stub-provision-thoughts.sh' \
     CATALYST_JOIN_STACK_BIN='${STUBS}/stub-catalyst-stack' \
     CATALYST_JOIN_DOCTOR_SCRIPT='${STUBS}/stub-check-setup.sh' \
     CATALYST_JOIN_REACH_PROBE='${STUBS}/stub-reach-probe.sh' \
@@ -222,6 +237,7 @@ run "T1.7 well-formed token passes format validation" bash -c "
     CATALYST_JOIN_SETUP_SCRIPT='${STUBS}/stub-setup-catalyst.sh' \
     CATALYST_JOIN_INSTALL_CLI_SCRIPT='${STUBS}/stub-install-cli.sh' \
     CATALYST_JOIN_PLUGIN_SRC_SCRIPT='${STUBS}/stub-setup-plugin-source.sh' \
+    CATALYST_JOIN_PROVISION_THOUGHTS_SCRIPT='${STUBS}/stub-provision-thoughts.sh' \
     CATALYST_JOIN_STACK_BIN='${STUBS}/stub-catalyst-stack' \
     CATALYST_JOIN_DOCTOR_SCRIPT='${STUBS}/stub-check-setup.sh' \
     CATALYST_JOIN_REACH_PROBE='${STUBS}/stub-reach-probe.sh' \
@@ -235,6 +251,7 @@ run "T1.8 --bundle mode does not require CATALYST_SEED" bash -c "
     CATALYST_JOIN_SETUP_SCRIPT='${STUBS}/stub-setup-catalyst.sh' \
     CATALYST_JOIN_INSTALL_CLI_SCRIPT='${STUBS}/stub-install-cli.sh' \
     CATALYST_JOIN_PLUGIN_SRC_SCRIPT='${STUBS}/stub-setup-plugin-source.sh' \
+    CATALYST_JOIN_PROVISION_THOUGHTS_SCRIPT='${STUBS}/stub-provision-thoughts.sh' \
     CATALYST_JOIN_STACK_BIN='${STUBS}/stub-catalyst-stack' \
     CATALYST_JOIN_DOCTOR_SCRIPT='${STUBS}/stub-check-setup.sh' \
     CATALYST_JOIN_REACH_PROBE='${STUBS}/stub-reach-probe.sh' \
@@ -256,6 +273,7 @@ run "T1.9 reachability failure exits non-zero" bash -c "
     CATALYST_JOIN_SETUP_SCRIPT='${STUBS_NOREACH}/stub-setup-catalyst.sh' \
     CATALYST_JOIN_INSTALL_CLI_SCRIPT='${STUBS_NOREACH}/stub-install-cli.sh' \
     CATALYST_JOIN_PLUGIN_SRC_SCRIPT='${STUBS_NOREACH}/stub-setup-plugin-source.sh' \
+    CATALYST_JOIN_PROVISION_THOUGHTS_SCRIPT='${STUBS_NOREACH}/stub-provision-thoughts.sh' \
     CATALYST_JOIN_STACK_BIN='${STUBS_NOREACH}/stub-catalyst-stack' \
     CATALYST_JOIN_DOCTOR_SCRIPT='${STUBS_NOREACH}/stub-check-setup.sh' \
     CATALYST_JOIN_REACH_PROBE='${STUBS_NOREACH}/stub-reach-probe.sh' \
@@ -268,6 +286,7 @@ run "T1.10 --bundle skips reachability probe" bash -c "
     CATALYST_JOIN_SETUP_SCRIPT='${STUBS_NOREACH}/stub-setup-catalyst.sh' \
     CATALYST_JOIN_INSTALL_CLI_SCRIPT='${STUBS_NOREACH}/stub-install-cli.sh' \
     CATALYST_JOIN_PLUGIN_SRC_SCRIPT='${STUBS_NOREACH}/stub-setup-plugin-source.sh' \
+    CATALYST_JOIN_PROVISION_THOUGHTS_SCRIPT='${STUBS_NOREACH}/stub-provision-thoughts.sh' \
     CATALYST_JOIN_STACK_BIN='${STUBS_NOREACH}/stub-catalyst-stack' \
     CATALYST_JOIN_DOCTOR_SCRIPT='${STUBS_NOREACH}/stub-check-setup.sh' \
     CATALYST_JOIN_REACH_PROBE='${STUBS_NOREACH}/stub-reach-probe.sh' \
@@ -281,6 +300,7 @@ run "T1.11 progress marker created after successful run" bash -c "
     CATALYST_JOIN_SETUP_SCRIPT='${STUBS}/stub-setup-catalyst.sh' \
     CATALYST_JOIN_INSTALL_CLI_SCRIPT='${STUBS}/stub-install-cli.sh' \
     CATALYST_JOIN_PLUGIN_SRC_SCRIPT='${STUBS}/stub-setup-plugin-source.sh' \
+    CATALYST_JOIN_PROVISION_THOUGHTS_SCRIPT='${STUBS}/stub-provision-thoughts.sh' \
     CATALYST_JOIN_STACK_BIN='${STUBS}/stub-catalyst-stack' \
     CATALYST_JOIN_DOCTOR_SCRIPT='${STUBS}/stub-check-setup.sh' \
     CATALYST_JOIN_REACH_PROBE='${STUBS}/stub-reach-probe.sh' \
@@ -289,6 +309,70 @@ run "T1.11 progress marker created after successful run" bash -c "
   [[ -f \"\$marker\" ]] && \
   jq -e '.completedStages | type == \"array\"' \"\$marker\" >/dev/null && \
   jq -e '.startedAt | length > 0' \"\$marker\" >/dev/null"
+
+# T1.12: (PATH-B #2) DEFAULT preflight (no CATALYST_JOIN_REACH_PROBE override) with the
+# `tailscale` CLI absent from PATH falls back to the nc/curl TCP probe:
+#  - a reachable local TCP port → preflight SUCCEEDS (join proceeds, fails later in a
+#    benign stage; we assert it gets PAST preflight, i.e. no reachability fail message)
+#  - a CLOSED port → preflight FAILS (non-zero, with the reachability fail message)
+# PATH is /usr/bin:/bin so nc/curl/jq/bash resolve but `tailscale` does NOT (not installed).
+# A throwaway `nc -l` listener provides the open port; an unbound port provides the closed case.
+T112_PATH="/usr/bin:/bin"
+if command -v nc >/dev/null 2>&1; then
+  # Pick a high port unlikely to be in use; bind a one-shot listener to it.
+  T112_PORT=53999
+  # Open-port case: background keep-open (-k) listener so the readiness probe and the
+  # script's own preflight probe both find the port bound (a plain `nc -l` accepts a
+  # SINGLE connection and exits, so the readiness check would consume it).
+  ( nc -k -l 127.0.0.1 "$T112_PORT" >/dev/null 2>&1 ) &
+  T112_LPID=$!
+  # Give the listener a moment to bind (no foreground sleep allowed by harness rules;
+  # use a short bounded wait loop on the port becoming connectable).
+  T112_READY=0
+  for _i in 1 2 3 4 5 6 7 8 9 10; do
+    if nc -z -G 1 127.0.0.1 "$T112_PORT" >/dev/null 2>&1; then T112_READY=1; break; fi
+  done
+
+  run "T1.12 default preflight succeeds via nc/curl fallback (tailscale absent, port open)" bash -c "
+    [[ '$T112_READY' -eq 1 ]] || { echo 'listener never came up'; exit 1; }
+    out=\$(env -i HOME='${SCRATCH}/h112' CATALYST_DIR='${SCRATCH}/c112' \
+      PATH='$T112_PATH' \
+      CATALYST_JOIN_TOKEN='$GOOD_TOKEN' \
+      CATALYST_SEED='127.0.0.1:$T112_PORT' \
+      CATALYST_JOIN_SETUP_SCRIPT='${STUBS}/stub-setup-catalyst.sh' \
+      CATALYST_JOIN_INSTALL_CLI_SCRIPT='${STUBS}/stub-install-cli.sh' \
+      CATALYST_JOIN_PLUGIN_SRC_SCRIPT='${STUBS}/stub-setup-plugin-source.sh' \
+      CATALYST_JOIN_PROVISION_THOUGHTS_SCRIPT='${STUBS}/stub-provision-thoughts.sh' \
+      CATALYST_JOIN_STACK_BIN='${STUBS}/stub-catalyst-stack' \
+      CATALYST_JOIN_DOCTOR_SCRIPT='${STUBS}/stub-check-setup.sh' \
+      bash '$JOIN' 2>&1)
+    # The default preflight must NOT emit a reachability/port failure. (The run may
+    # later stop in another stage; we only assert preflight passed.)
+    ! echo \"\$out\" | grep -qiE 'not reachable|Tailscale ping'"
+
+  # Reap the listener if it's still alive.
+  kill "$T112_LPID" >/dev/null 2>&1 || true
+  wait "$T112_LPID" 2>/dev/null || true
+
+  # Closed-port case: a port with nothing bound → preflight must FAIL.
+  T112_CLOSED_PORT=53997
+  run "T1.12b default preflight fails when port is closed (nc/curl fallback, tailscale absent)" bash -c "
+    out=\$(env -i HOME='${SCRATCH}/h112b' CATALYST_DIR='${SCRATCH}/c112b' \
+      PATH='$T112_PATH' \
+      CATALYST_JOIN_TOKEN='$GOOD_TOKEN' \
+      CATALYST_SEED='127.0.0.1:$T112_CLOSED_PORT' \
+      CATALYST_JOIN_SETUP_SCRIPT='${STUBS}/stub-setup-catalyst.sh' \
+      CATALYST_JOIN_INSTALL_CLI_SCRIPT='${STUBS}/stub-install-cli.sh' \
+      CATALYST_JOIN_PLUGIN_SRC_SCRIPT='${STUBS}/stub-setup-plugin-source.sh' \
+      CATALYST_JOIN_PROVISION_THOUGHTS_SCRIPT='${STUBS}/stub-provision-thoughts.sh' \
+      CATALYST_JOIN_STACK_BIN='${STUBS}/stub-catalyst-stack' \
+      CATALYST_JOIN_DOCTOR_SCRIPT='${STUBS}/stub-check-setup.sh' \
+      bash '$JOIN' 2>&1); ec=\$?
+    [[ \$ec -ne 0 ]] && echo \"\$out\" | grep -qiE 'not reachable'"
+else
+  fail "T1.12 default preflight nc/curl fallback" "nc not available to build the local listener"
+  fail "T1.12b default preflight closed-port fallback" "nc not available"
+fi
 
 # ── Phase 2: Bundle acquisition ────────────────────────────────────────────────
 
@@ -306,6 +390,7 @@ run "T2.1 --bundle valid fixture succeeds" bash -c "
     CATALYST_JOIN_SETUP_SCRIPT='${STUBS2}/stub-setup-catalyst.sh' \
     CATALYST_JOIN_INSTALL_CLI_SCRIPT='${STUBS2}/stub-install-cli.sh' \
     CATALYST_JOIN_PLUGIN_SRC_SCRIPT='${STUBS2}/stub-setup-plugin-source.sh' \
+    CATALYST_JOIN_PROVISION_THOUGHTS_SCRIPT='${STUBS2}/stub-provision-thoughts.sh' \
     CATALYST_JOIN_STACK_BIN='${STUBS2}/stub-catalyst-stack' \
     CATALYST_JOIN_DOCTOR_SCRIPT='${STUBS2}/stub-check-setup.sh' \
     CATALYST_JOIN_REACH_PROBE='${STUBS2}/stub-reach-probe.sh' \
@@ -322,6 +407,7 @@ run "T2.2 --bundle malformed bundle rejected" bash -c "
     CATALYST_JOIN_SETUP_SCRIPT='${STUBS2}/stub-setup-catalyst.sh' \
     CATALYST_JOIN_INSTALL_CLI_SCRIPT='${STUBS2}/stub-install-cli.sh' \
     CATALYST_JOIN_PLUGIN_SRC_SCRIPT='${STUBS2}/stub-setup-plugin-source.sh' \
+    CATALYST_JOIN_PROVISION_THOUGHTS_SCRIPT='${STUBS2}/stub-provision-thoughts.sh' \
     CATALYST_JOIN_STACK_BIN='${STUBS2}/stub-catalyst-stack' \
     CATALYST_JOIN_DOCTOR_SCRIPT='${STUBS2}/stub-check-setup.sh' \
     CATALYST_JOIN_REACH_PROBE='${STUBS2}/stub-reach-probe.sh' \
@@ -343,6 +429,7 @@ run "T2.3 seed fetch via mock succeeds" bash -c "
     CATALYST_JOIN_SETUP_SCRIPT='${STUBS2}/stub-setup-catalyst.sh' \
     CATALYST_JOIN_INSTALL_CLI_SCRIPT='${STUBS2}/stub-install-cli.sh' \
     CATALYST_JOIN_PLUGIN_SRC_SCRIPT='${STUBS2}/stub-setup-plugin-source.sh' \
+    CATALYST_JOIN_PROVISION_THOUGHTS_SCRIPT='${STUBS2}/stub-provision-thoughts.sh' \
     CATALYST_JOIN_STACK_BIN='${STUBS2}/stub-catalyst-stack' \
     CATALYST_JOIN_DOCTOR_SCRIPT='${STUBS2}/stub-check-setup.sh' \
     CATALYST_JOIN_REACH_PROBE='${STUBS2}/stub-reach-probe.sh' \
@@ -365,6 +452,7 @@ run "T2.4 consumed token prints re-mint command" bash -c "
     CATALYST_JOIN_SETUP_SCRIPT='${STUBS2}/stub-setup-catalyst.sh' \
     CATALYST_JOIN_INSTALL_CLI_SCRIPT='${STUBS2}/stub-install-cli.sh' \
     CATALYST_JOIN_PLUGIN_SRC_SCRIPT='${STUBS2}/stub-setup-plugin-source.sh' \
+    CATALYST_JOIN_PROVISION_THOUGHTS_SCRIPT='${STUBS2}/stub-provision-thoughts.sh' \
     CATALYST_JOIN_STACK_BIN='${STUBS2}/stub-catalyst-stack' \
     CATALYST_JOIN_DOCTOR_SCRIPT='${STUBS2}/stub-check-setup.sh' \
     CATALYST_JOIN_REACH_PROBE='${STUBS2}/stub-reach-probe.sh' \
@@ -388,12 +476,100 @@ run "T2.5 --bundle mode does not call fetch stub" bash -c "
     CATALYST_JOIN_SETUP_SCRIPT='${STUBS2}/stub-setup-catalyst.sh' \
     CATALYST_JOIN_INSTALL_CLI_SCRIPT='${STUBS2}/stub-install-cli.sh' \
     CATALYST_JOIN_PLUGIN_SRC_SCRIPT='${STUBS2}/stub-setup-plugin-source.sh' \
+    CATALYST_JOIN_PROVISION_THOUGHTS_SCRIPT='${STUBS2}/stub-provision-thoughts.sh' \
     CATALYST_JOIN_STACK_BIN='${STUBS2}/stub-catalyst-stack' \
     CATALYST_JOIN_DOCTOR_SCRIPT='${STUBS2}/stub-check-setup.sh' \
     CATALYST_JOIN_REACH_PROBE='${STUBS2}/stub-reach-probe.sh' \
     CATALYST_JOIN_FETCH_CMD='$FETCH_TRACK' \
     bash '$JOIN' --bundle '$FIXTURE_BUNDLE' >/dev/null 2>&1
   [[ ! -f '$FETCH_TRACK_LOG' ]]"
+
+# T2.6: (PATH-B #1) seed-fetch bundle_url path ends in /join-bundle AND that literal
+# matches JOIN_ROUTE in execution-core/join-listener.mjs. Two assertions:
+#  (a) runtime: the fetch stub receives a URL ending in /join-bundle as $1, and
+#  (b) contract: the .sh literal and the .mjs JOIN_ROUTE literal are byte-identical.
+JOIN_LISTENER="${REPO_ROOT}/plugins/dev/scripts/execution-core/join-listener.mjs"
+URL_CAPTURE="${SCRATCH}/t26-url.log"
+URL_STUB="${STUBS2}/stub-fetch-url.sh"
+cat > "$URL_STUB" <<EOF
+#!/usr/bin/env bash
+echo "\$1" > "$URL_CAPTURE"
+cat '$FIXTURE_BUNDLE'
+EOF
+chmod +x "$URL_STUB"
+
+run "T2.6 seed-fetch bundle_url ends in /join-bundle and matches JOIN_ROUTE" bash -c "
+  rm -f '$URL_CAPTURE'
+  env -i HOME='${SCRATCH}/h26' CATALYST_DIR='${SCRATCH}/c26' \
+    CATALYST_JOIN_TOKEN='$GOOD_TOKEN' \
+    CATALYST_SEED='mini:7400' \
+    CATALYST_JOIN_SETUP_SCRIPT='${STUBS2}/stub-setup-catalyst.sh' \
+    CATALYST_JOIN_INSTALL_CLI_SCRIPT='${STUBS2}/stub-install-cli.sh' \
+    CATALYST_JOIN_PLUGIN_SRC_SCRIPT='${STUBS2}/stub-setup-plugin-source.sh' \
+    CATALYST_JOIN_PROVISION_THOUGHTS_SCRIPT='${STUBS2}/stub-provision-thoughts.sh' \
+    CATALYST_JOIN_STACK_BIN='${STUBS2}/stub-catalyst-stack' \
+    CATALYST_JOIN_DOCTOR_SCRIPT='${STUBS2}/stub-check-setup.sh' \
+    CATALYST_JOIN_REACH_PROBE='${STUBS2}/stub-reach-probe.sh' \
+    CATALYST_JOIN_FETCH_CMD='$URL_STUB' \
+    bash '$JOIN' >/dev/null 2>&1
+  # (a) runtime URL the seed-fetch built ends in /join-bundle
+  [[ -f '$URL_CAPTURE' ]] && grep -qE '/join-bundle\$' '$URL_CAPTURE' && \
+  # (b) the catalyst-join.sh literal is /join-bundle (PATH-B #1, not the old /bundle)
+  grep -qF 'bundle_url=\"http://\${host}:\${port}/join-bundle\"' '$JOIN' && \
+  # (c) join-listener.mjs JOIN_ROUTE is exactly \"/join-bundle\" — the contract both sides pin
+  grep -qE 'JOIN_ROUTE\s*=\s*\"/join-bundle\"' '$JOIN_LISTENER'"
+
+# T2.7: (PATH-B #4) a bundle whose .livenessAnchorIssue is literal null (all other
+# required keys present) is ACCEPTED — validate_bundle asserts key EXISTENCE, not
+# truthiness. A STRUCTURALLY-missing key still fails.
+NULL_ANCHOR_BUNDLE="${SCRATCH}/null-anchor.json"
+cat > "$NULL_ANCHOR_BUNDLE" <<'BEOF'
+{
+  "layer1Identity": {"projectKey": "CTL", "teamKey": "T1", "stateMap": {}},
+  "botCreds": {"orchestrator": "tok_orch", "worker": "tok_worker"},
+  "hostsRoster": ["mini"],
+  "livenessAnchorIssue": null,
+  "repoUrl": "https://github.com/example/repo",
+  "pluginSourceUrl": "https://github.com/example/plugins"
+}
+BEOF
+
+run "T2.7 null-valued required key (livenessAnchorIssue=null) is accepted" bash -c "
+  env -i HOME='${SCRATCH}/h27' CATALYST_DIR='${SCRATCH}/c27' \
+    CATALYST_JOIN_TOKEN='$GOOD_TOKEN' \
+    CATALYST_JOIN_SETUP_SCRIPT='${STUBS2}/stub-setup-catalyst.sh' \
+    CATALYST_JOIN_INSTALL_CLI_SCRIPT='${STUBS2}/stub-install-cli.sh' \
+    CATALYST_JOIN_PLUGIN_SRC_SCRIPT='${STUBS2}/stub-setup-plugin-source.sh' \
+    CATALYST_JOIN_PROVISION_THOUGHTS_SCRIPT='${STUBS2}/stub-provision-thoughts.sh' \
+    CATALYST_JOIN_STACK_BIN='${STUBS2}/stub-catalyst-stack' \
+    CATALYST_JOIN_DOCTOR_SCRIPT='${STUBS2}/stub-check-setup.sh' \
+    CATALYST_JOIN_REACH_PROBE='${STUBS2}/stub-reach-probe.sh' \
+    bash '$JOIN' --bundle '$NULL_ANCHOR_BUNDLE' >/dev/null 2>&1"
+
+# T2.7b: a structurally-MISSING required key (.livenessAnchorIssue absent entirely)
+# still fails — confirms the existence assertion didn't become a no-op.
+MISSING_ANCHOR_BUNDLE="${SCRATCH}/missing-anchor.json"
+cat > "$MISSING_ANCHOR_BUNDLE" <<'BEOF'
+{
+  "layer1Identity": {"projectKey": "CTL", "teamKey": "T1", "stateMap": {}},
+  "botCreds": {"orchestrator": "tok_orch", "worker": "tok_worker"},
+  "hostsRoster": ["mini"],
+  "repoUrl": "https://github.com/example/repo",
+  "pluginSourceUrl": "https://github.com/example/plugins"
+}
+BEOF
+
+run "T2.7b structurally-missing required key still rejected" bash -c "
+  env -i HOME='${SCRATCH}/h27b' CATALYST_DIR='${SCRATCH}/c27b' \
+    CATALYST_JOIN_TOKEN='$GOOD_TOKEN' \
+    CATALYST_JOIN_SETUP_SCRIPT='${STUBS2}/stub-setup-catalyst.sh' \
+    CATALYST_JOIN_INSTALL_CLI_SCRIPT='${STUBS2}/stub-install-cli.sh' \
+    CATALYST_JOIN_PLUGIN_SRC_SCRIPT='${STUBS2}/stub-setup-plugin-source.sh' \
+    CATALYST_JOIN_PROVISION_THOUGHTS_SCRIPT='${STUBS2}/stub-provision-thoughts.sh' \
+    CATALYST_JOIN_STACK_BIN='${STUBS2}/stub-catalyst-stack' \
+    CATALYST_JOIN_DOCTOR_SCRIPT='${STUBS2}/stub-check-setup.sh' \
+    CATALYST_JOIN_REACH_PROBE='${STUBS2}/stub-reach-probe.sh' \
+    bash '$JOIN' --bundle '$MISSING_ANCHOR_BUNDLE' >/dev/null 2>&1; [[ \$? -ne 0 ]]"
 
 # ── Phase 3: Provisioner orchestration ────────────────────────────────────────
 
@@ -404,7 +580,9 @@ STUBS3="${SCRATCH}/stubs3"
 make_stubs "$STUBS3"
 INVLOG3="${STUBS3}/invocations.log"
 
-# T3.1: Fresh run executes provisioners in order: setup-catalyst, install-cli, setup-plugin-source
+# T3.1: Fresh run executes provisioners in order: provision-thoughts, setup-catalyst,
+# install-cli, setup-plugin-source. (github-auth runs first but logs nothing when
+# gh is absent from the env -i PATH — do_github_auth returns 0 with no invocation.)
 run "T3.1 provisioners run in correct order" bash -c "
   catdir='${SCRATCH}/c31'
   rm -f '$INVLOG3'
@@ -413,14 +591,18 @@ run "T3.1 provisioners run in correct order" bash -c "
     CATALYST_JOIN_SETUP_SCRIPT='${STUBS3}/stub-setup-catalyst.sh' \
     CATALYST_JOIN_INSTALL_CLI_SCRIPT='${STUBS3}/stub-install-cli.sh' \
     CATALYST_JOIN_PLUGIN_SRC_SCRIPT='${STUBS3}/stub-setup-plugin-source.sh' \
+    CATALYST_JOIN_PROVISION_THOUGHTS_SCRIPT='${STUBS3}/stub-provision-thoughts.sh' \
     CATALYST_JOIN_STACK_BIN='${STUBS3}/stub-catalyst-stack' \
     CATALYST_JOIN_DOCTOR_SCRIPT='${STUBS3}/stub-check-setup.sh' \
     CATALYST_JOIN_REACH_PROBE='${STUBS3}/stub-reach-probe.sh' \
     bash '$JOIN' --bundle '$FIXTURE_BUNDLE' >/dev/null 2>&1
-  # Verify order: setup-catalyst before install-cli before setup-plugin-source
-  grep -n 'setup-catalyst\|install-cli\|setup-plugin-source' '$INVLOG3' | \
+  # Verify order: provision-thoughts before setup-catalyst before install-cli
+  # before setup-plugin-source. The grep alternation pins each provisioner's
+  # first log line; their stable order in invocations.log is the assertion.
+  grep -n 'provision-thoughts\|setup-catalyst\|install-cli\|setup-plugin-source' '$INVLOG3' | \
     awk -F: '{print \$1, \$2}' | sort -n | \
-    awk '{print \$2}' | tr '\n' ' ' | grep -q 'setup-catalyst.*install-cli.*setup-plugin-source'"
+    awk '{print \$2}' | tr '\n' ' ' | \
+    grep -q 'provision-thoughts.*setup-catalyst.*install-cli.*setup-plugin-source'"
 
 # T3.2: setup-catalyst invoked with CATALYST_AUTONOMOUS=1
 run "T3.2 setup-catalyst invoked with CATALYST_AUTONOMOUS=1" bash -c "
@@ -431,6 +613,7 @@ run "T3.2 setup-catalyst invoked with CATALYST_AUTONOMOUS=1" bash -c "
     CATALYST_JOIN_SETUP_SCRIPT='${STUBS3}/stub-setup-catalyst.sh' \
     CATALYST_JOIN_INSTALL_CLI_SCRIPT='${STUBS3}/stub-install-cli.sh' \
     CATALYST_JOIN_PLUGIN_SRC_SCRIPT='${STUBS3}/stub-setup-plugin-source.sh' \
+    CATALYST_JOIN_PROVISION_THOUGHTS_SCRIPT='${STUBS3}/stub-provision-thoughts.sh' \
     CATALYST_JOIN_STACK_BIN='${STUBS3}/stub-catalyst-stack' \
     CATALYST_JOIN_DOCTOR_SCRIPT='${STUBS3}/stub-check-setup.sh' \
     CATALYST_JOIN_REACH_PROBE='${STUBS3}/stub-reach-probe.sh' \
@@ -450,6 +633,7 @@ run "T3.3 resume skips already-completed stages" bash -c "
     CATALYST_JOIN_SETUP_SCRIPT='${STUBS3}/stub-setup-catalyst.sh' \
     CATALYST_JOIN_INSTALL_CLI_SCRIPT='${STUBS3}/stub-install-cli.sh' \
     CATALYST_JOIN_PLUGIN_SRC_SCRIPT='${STUBS3}/stub-setup-plugin-source.sh' \
+    CATALYST_JOIN_PROVISION_THOUGHTS_SCRIPT='${STUBS3}/stub-provision-thoughts.sh' \
     CATALYST_JOIN_STACK_BIN='${STUBS3}/stub-catalyst-stack' \
     CATALYST_JOIN_DOCTOR_SCRIPT='${STUBS3}/stub-check-setup.sh' \
     CATALYST_JOIN_REACH_PROBE='${STUBS3}/stub-reach-probe.sh' \
@@ -476,6 +660,7 @@ run "T3.4 provisioner failure records failedStage and exits non-zero" bash -c "
     CATALYST_JOIN_SETUP_SCRIPT='${STUBS3F}/stub-setup-catalyst.sh' \
     CATALYST_JOIN_INSTALL_CLI_SCRIPT='${STUBS3F}/stub-install-cli.sh' \
     CATALYST_JOIN_PLUGIN_SRC_SCRIPT='${STUBS3F}/stub-setup-plugin-source.sh' \
+    CATALYST_JOIN_PROVISION_THOUGHTS_SCRIPT='${STUBS3F}/stub-provision-thoughts.sh' \
     CATALYST_JOIN_STACK_BIN='${STUBS3F}/stub-catalyst-stack' \
     CATALYST_JOIN_DOCTOR_SCRIPT='${STUBS3F}/stub-check-setup.sh' \
     CATALYST_JOIN_REACH_PROBE='${STUBS3F}/stub-reach-probe.sh' \
@@ -501,6 +686,7 @@ run "T3.5 re-run after failure resumes from failed stage" bash -c "
     CATALYST_JOIN_SETUP_SCRIPT='${STUBS3R}/stub-setup-catalyst.sh' \
     CATALYST_JOIN_INSTALL_CLI_SCRIPT='${STUBS3R}/stub-install-cli.sh' \
     CATALYST_JOIN_PLUGIN_SRC_SCRIPT='${STUBS3R}/stub-setup-plugin-source.sh' \
+    CATALYST_JOIN_PROVISION_THOUGHTS_SCRIPT='${STUBS3R}/stub-provision-thoughts.sh' \
     CATALYST_JOIN_STACK_BIN='${STUBS3R}/stub-catalyst-stack' \
     CATALYST_JOIN_DOCTOR_SCRIPT='${STUBS3R}/stub-check-setup.sh' \
     CATALYST_JOIN_REACH_PROBE='${STUBS3R}/stub-reach-probe.sh' \
@@ -508,6 +694,33 @@ run "T3.5 re-run after failure resumes from failed stage" bash -c "
   # setup-catalyst skipped, install-cli and later ran
   ! grep -q 'setup-catalyst' '$INVLOG3R' && \
   grep -q 'install-cli' '$INVLOG3R'"
+
+# T3.6: (PATH-B #6 wiring) the provision-thoughts stage is invoked (appears in
+# invocations.log) AND runs BEFORE setup-catalyst — setup-catalyst's thoughts-init
+# binds the checkout to the repos provision-thoughts cloned, so order matters.
+STUBS36="${SCRATCH}/stubs36"
+make_stubs "$STUBS36"
+INVLOG36="${STUBS36}/invocations.log"
+
+run "T3.6 provision-thoughts invoked and runs before setup-catalyst" bash -c "
+  catdir='${SCRATCH}/c36'
+  rm -f '$INVLOG36'
+  env -i HOME='${SCRATCH}/h36' CATALYST_DIR=\"\$catdir\" \
+    CATALYST_JOIN_TOKEN='$GOOD_TOKEN' \
+    CATALYST_JOIN_SETUP_SCRIPT='${STUBS36}/stub-setup-catalyst.sh' \
+    CATALYST_JOIN_INSTALL_CLI_SCRIPT='${STUBS36}/stub-install-cli.sh' \
+    CATALYST_JOIN_PLUGIN_SRC_SCRIPT='${STUBS36}/stub-setup-plugin-source.sh' \
+    CATALYST_JOIN_PROVISION_THOUGHTS_SCRIPT='${STUBS36}/stub-provision-thoughts.sh' \
+    CATALYST_JOIN_STACK_BIN='${STUBS36}/stub-catalyst-stack' \
+    CATALYST_JOIN_DOCTOR_SCRIPT='${STUBS36}/stub-check-setup.sh' \
+    CATALYST_JOIN_REACH_PROBE='${STUBS36}/stub-reach-probe.sh' \
+    bash '$JOIN' --bundle '$FIXTURE_BUNDLE' >/dev/null 2>&1
+  # (a) provision-thoughts ran at all
+  grep -q 'provision-thoughts' '$INVLOG36' && \
+  # (b) its log line precedes setup-catalyst's (lower line number)
+  pt_line=\$(grep -n 'provision-thoughts' '$INVLOG36' | head -1 | cut -d: -f1) && \
+  sc_line=\$(grep -n 'setup-catalyst' '$INVLOG36' | head -1 | cut -d: -f1) && \
+  [[ -n \"\$pt_line\" && -n \"\$sc_line\" && \"\$pt_line\" -lt \"\$sc_line\" ]]"
 
 # ── Phase 4: SHARED config merge, per-node items, doctor gate, SHADOW stop ────
 
@@ -530,6 +743,7 @@ run "T4.1 merge-preserve: node-local keys survive" bash -c "
     CATALYST_JOIN_SETUP_SCRIPT='${STUBS4}/stub-setup-catalyst.sh' \
     CATALYST_JOIN_INSTALL_CLI_SCRIPT='${STUBS4}/stub-install-cli.sh' \
     CATALYST_JOIN_PLUGIN_SRC_SCRIPT='${STUBS4}/stub-setup-plugin-source.sh' \
+    CATALYST_JOIN_PROVISION_THOUGHTS_SCRIPT='${STUBS4}/stub-provision-thoughts.sh' \
     CATALYST_JOIN_STACK_BIN='${STUBS4}/stub-catalyst-stack' \
     CATALYST_JOIN_DOCTOR_SCRIPT='${STUBS4}/stub-check-setup.sh' \
     CATALYST_JOIN_REACH_PROBE='${STUBS4}/stub-reach-probe.sh' \
@@ -550,6 +764,7 @@ run "T4.2 host.name written to Layer-2 config" bash -c "
     CATALYST_JOIN_SETUP_SCRIPT='${STUBS4}/stub-setup-catalyst.sh' \
     CATALYST_JOIN_INSTALL_CLI_SCRIPT='${STUBS4}/stub-install-cli.sh' \
     CATALYST_JOIN_PLUGIN_SRC_SCRIPT='${STUBS4}/stub-setup-plugin-source.sh' \
+    CATALYST_JOIN_PROVISION_THOUGHTS_SCRIPT='${STUBS4}/stub-provision-thoughts.sh' \
     CATALYST_JOIN_STACK_BIN='${STUBS4}/stub-catalyst-stack' \
     CATALYST_JOIN_DOCTOR_SCRIPT='${STUBS4}/stub-check-setup.sh' \
     CATALYST_JOIN_REACH_PROBE='${STUBS4}/stub-reach-probe.sh' \
@@ -572,6 +787,7 @@ run "T4.3 local hosts.json written; committed roster untouched" bash -c "
     CATALYST_JOIN_SETUP_SCRIPT='${STUBS4}/stub-setup-catalyst.sh' \
     CATALYST_JOIN_INSTALL_CLI_SCRIPT='${STUBS4}/stub-install-cli.sh' \
     CATALYST_JOIN_PLUGIN_SRC_SCRIPT='${STUBS4}/stub-setup-plugin-source.sh' \
+    CATALYST_JOIN_PROVISION_THOUGHTS_SCRIPT='${STUBS4}/stub-provision-thoughts.sh' \
     CATALYST_JOIN_STACK_BIN='${STUBS4}/stub-catalyst-stack' \
     CATALYST_JOIN_DOCTOR_SCRIPT='${STUBS4}/stub-check-setup.sh' \
     CATALYST_JOIN_REACH_PROBE='${STUBS4}/stub-reach-probe.sh' \
@@ -608,6 +824,7 @@ run "T4.4 doctor gate failure exits non-zero before stack install" bash -c "
     CATALYST_JOIN_SETUP_SCRIPT='${STUBS4D}/stub-setup-catalyst.sh' \
     CATALYST_JOIN_INSTALL_CLI_SCRIPT='${STUBS4D}/stub-install-cli.sh' \
     CATALYST_JOIN_PLUGIN_SRC_SCRIPT='${STUBS4D}/stub-setup-plugin-source.sh' \
+    CATALYST_JOIN_PROVISION_THOUGHTS_SCRIPT='${STUBS4D}/stub-provision-thoughts.sh' \
     CATALYST_JOIN_STACK_BIN='${STUBS4D}/stub-catalyst-stack' \
     CATALYST_JOIN_DOCTOR_SCRIPT='${STUBS4D}/stub-check-setup.sh' \
     CATALYST_JOIN_REACH_PROBE='${STUBS4D}/stub-reach-probe.sh' \
@@ -630,6 +847,7 @@ run "T4.5 catalyst-stack install-services runs last" bash -c "
     CATALYST_JOIN_SETUP_SCRIPT='${STUBS4O}/stub-setup-catalyst.sh' \
     CATALYST_JOIN_INSTALL_CLI_SCRIPT='${STUBS4O}/stub-install-cli.sh' \
     CATALYST_JOIN_PLUGIN_SRC_SCRIPT='${STUBS4O}/stub-setup-plugin-source.sh' \
+    CATALYST_JOIN_PROVISION_THOUGHTS_SCRIPT='${STUBS4O}/stub-provision-thoughts.sh' \
     CATALYST_JOIN_STACK_BIN='${STUBS4O}/stub-catalyst-stack' \
     CATALYST_JOIN_DOCTOR_SCRIPT='${STUBS4O}/stub-check-setup.sh' \
     CATALYST_JOIN_REACH_PROBE='${STUBS4O}/stub-reach-probe.sh' \
@@ -648,6 +866,7 @@ run "T4.6 idempotency: second run is no-op" bash -c "
   base_env+=' CATALYST_JOIN_SETUP_SCRIPT=${STUBS4}/stub-setup-catalyst.sh'
   base_env+=' CATALYST_JOIN_INSTALL_CLI_SCRIPT=${STUBS4}/stub-install-cli.sh'
   base_env+=' CATALYST_JOIN_PLUGIN_SRC_SCRIPT=${STUBS4}/stub-setup-plugin-source.sh'
+  base_env+=' CATALYST_JOIN_PROVISION_THOUGHTS_SCRIPT=${STUBS4}/stub-provision-thoughts.sh'
   base_env+=' CATALYST_JOIN_STACK_BIN=${STUBS4}/stub-catalyst-stack'
   base_env+=' CATALYST_JOIN_DOCTOR_SCRIPT=${STUBS4}/stub-check-setup.sh'
   base_env+=' CATALYST_JOIN_REACH_PROBE=${STUBS4}/stub-reach-probe.sh'

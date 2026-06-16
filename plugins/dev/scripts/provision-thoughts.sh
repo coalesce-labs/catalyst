@@ -115,12 +115,20 @@ write_config() {
   if [[ -n "$REGISTRY" && -f "$REGISTRY" ]]; then
     while IFS=$'\t' read -r root team; do
       [[ -z "$root" ]] && continue
-      local o p sub; o="$(normalize_org "$(repo_root_org "$root")")"; p="$(org_profile "$o")"
-      # read .thoughts.directory from the repo's Layer-1 config if available; fall back to basename
+      local o p sub d
+      o="$(normalize_org "$(repo_root_org "$root")")"; p="$(org_profile "$o")"
+      # Default the thoughts subdir name to the repoRoot basename, ALWAYS — must be
+      # set unconditionally before any branch: bash preserves a same-named `local`
+      # across loop iterations, so leaving `sub` unset in the no-config branch would
+      # (a) crash under `set -u` when the first repoRoot lacks a config, and
+      # (b) leak the prior iteration's value to a later config-less repoRoot.
+      sub="$(basename "$root")"
+      # Prefer the repo's declared thoughts subdir (.thoughts.directory) when present
+      # — e.g. catalyst's Layer-1 config maps repoRoot "catalyst" → "catalyst-workspace".
       if [[ -f "$root/.catalyst/config.json" ]]; then
-        sub="$(jq -r '.thoughts.directory // empty' "$root/.catalyst/config.json" 2>/dev/null)"
+        d="$(jq -r '.thoughts.directory // empty' "$root/.catalyst/config.json" 2>/dev/null)"
+        [[ -n "$d" ]] && sub="$d"
       fi
-      [[ -z "$sub" ]] && sub="$(basename "$root")"
       mappings="$(jq --arg path "$root" --arg repo "$sub" --arg prof "$p" \
         '. + {($path): {repo:$repo, profile:$prof}}' <<<"$mappings")"
     done < <(jq -r '(.projects // [])[] | "\(.repoRoot)\t\(.team)"' "$REGISTRY" 2>/dev/null)
