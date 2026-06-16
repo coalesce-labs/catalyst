@@ -1,13 +1,18 @@
 #!/usr/bin/env bash
-# catalyst-cluster — seed-side cluster operations (CTL-1184 + CTL-1183).
+# catalyst-cluster — cluster administration (CTL-1184 + CTL-1183 + CTL-1188).
 #
 # Verbs:
 #   join-token   Mint a one-time, short-TTL join token (jt_<hex>) and ARM the
 #                single-use bundle listener (CTL-1183) so exactly one bundle
 #                fetch succeeds (consume-on-first-200, then it exits). Re-run to
 #                mint a fresh token (re-arms). Optional: --port N --ttl MIN.
-#
-# Future verbs (CTL-1188): status | add | remove | rename | set-anchor | drain | tune
+#   status       Show cluster roster and live heartbeat state          [live]
+#   add          Add a host to the roster                              [live]
+#   remove       Remove a host from the roster                         [live]
+#   rename       Rename this host (requires catalyst-stack restart)    [restart]
+#   set-anchor   Set the liveness anchor ticket (requires restart)     [restart]
+#   drain        Toggle the local drain flag                           [live]
+#   tune         Write a concurrency param to Layer-2                  [live]
 #
 # The token is a bearer secret: printed once to stdout, written to a 0600 store
 # under ${CATALYST_DIR:-~/catalyst}/cluster/join-token.json. Never logged to a
@@ -20,6 +25,8 @@ _SRC="${BASH_SOURCE[0]}"; while [[ -L "$_SRC" ]]; do _SRC="$(readlink "$_SRC")";
 SCRIPT_DIR="$(cd "$(dirname "$_SRC")" && pwd)"; unset _SRC
 STORE_MJS="${SCRIPT_DIR}/execution-core/join-token-store.mjs"
 LISTENER_MJS="${SCRIPT_DIR}/execution-core/join-listener.mjs"
+CLI_MJS="${SCRIPT_DIR}/execution-core/cli/cluster.mjs"
+EXEC_CORE="${SCRIPT_DIR}/catalyst-execution-core"
 CATALYST_DIR="${CATALYST_DIR:-$HOME/catalyst}"
 
 # Resolve a JS runtime (bun preferred, node fallback) — matches sibling .mjs CLIs.
@@ -31,6 +38,18 @@ usage: catalyst cluster <verb>
   join-token [--port N] [--ttl MIN]   Mint a one-time join token and arm the
                                       single-use join-bundle listener
                                       (consume-on-first-200, then it exits)
+  status [--json]                     Show cluster roster + live heartbeat state
+                                      [takes effect: live]
+  add <name> [--no-commit]            Add a host to the roster                  [live]
+  remove <name> [--no-commit]         Remove a host from the roster             [live]
+  rename <newname> [--no-commit]      Rename this host in Layer-2 + roster
+                                      [requires: catalyst-stack restart]
+  set-anchor <ticket>                 Set the cross-host liveness anchor ticket
+                                      [requires: catalyst-stack restart]
+  drain [--off]                       Toggle the local drain flag               [live]
+                                      (remote-host drain: T13 — not yet implemented)
+  tune <param> <value>                Write a concurrency param to Layer-2      [live]
+                                      params: maxParallel, minParallel, maxParallelCeiling
   -h, --help                          Show this help
 EOF
 }
@@ -101,6 +120,18 @@ EOF
 
 case "${1:-}" in
   join-token) shift; cmd_join_token "$@" ;;
+  status|add|remove|rename|set-anchor|tune)
+    [[ -n "$JS_RUN" ]] || { echo "catalyst cluster: no bun/node runtime found" >&2; exit 1; }
+    [[ -f "$CLI_MJS" ]] || { echo "catalyst cluster: missing $CLI_MJS" >&2; exit 1; }
+    exec "$JS_RUN" "$CLI_MJS" "$@" ;;
+  drain)
+    shift
+    # Local-only; a non-flag host argument means remote drain (T13) which is unimplemented.
+    if [[ -n "${1:-}" && "${1:0:1}" != "-" ]]; then
+      echo "catalyst cluster drain: remote-host drain is not implemented (T13); drains the local host only" >&2
+      exit 2
+    fi
+    exec "$EXEC_CORE" drain "$@" ;;
   ""|-h|--help|help)
     usage
     [[ "${1:-}" == "" ]] && exit 1 || exit 0 ;;
