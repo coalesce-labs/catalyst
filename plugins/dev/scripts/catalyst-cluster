@@ -1,0 +1,68 @@
+#!/usr/bin/env bash
+# catalyst-cluster — seed-side cluster operations (CTL-1184).
+#
+# Verbs:
+#   join-token   Mint a one-time, short-TTL join token (jt_<hex>) and ARM the
+#                separate bundle listener (CTL-1183) so exactly one bundle
+#                fetch succeeds. Re-run to mint a fresh token (re-arms).
+#
+# Future verbs (CTL-1188): status | add | remove | rename | set-anchor | drain | tune
+#
+# The token is a bearer secret: printed once to stdout, written to a 0600 store
+# under ${CATALYST_DIR:-~/catalyst}/cluster/join-token.json. Never logged to a
+# file by this script; never committed.
+set -uo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+STORE_MJS="${SCRIPT_DIR}/execution-core/join-token-store.mjs"
+LISTENER_MJS="${SCRIPT_DIR}/execution-core/join-bundle-listener.mjs"  # CTL-1183, may not exist yet
+
+# Resolve a JS runtime (bun preferred, node fallback) — matches sibling .mjs CLIs.
+JS_RUN="$(command -v bun || command -v node || true)"
+
+cmd_join_token() {
+  [[ -n "$JS_RUN" ]] || { echo "catalyst cluster: no bun/node runtime found" >&2; return 1; }
+  [[ -f "$STORE_MJS" ]] || { echo "catalyst cluster: missing $STORE_MJS" >&2; return 1; }
+
+  local rec token ttl_ms expires_at
+  rec="$("$JS_RUN" "$STORE_MJS" mint)" || { echo "catalyst cluster: mint failed" >&2; return 1; }
+  token="$(printf '%s' "$rec" | jq -r '.token')"
+  ttl_ms="$(printf '%s' "$rec" | jq -r '.ttlMs')"
+  expires_at="$(printf '%s' "$rec" | jq -r '.expiresAt')"
+  [[ -n "$token" && "$token" != "null" ]] || { echo "catalyst cluster: could not parse minted token" >&2; return 1; }
+
+  local ttl_min=$(( ttl_ms / 60000 ))
+
+  # Arm the listener: store write already happened (mint). Best-effort spawn of
+  # CTL-1183's listener if present; otherwise note it will arm from the store.
+  local armed_note
+  if [[ -x "$LISTENER_MJS" || -f "$LISTENER_MJS" ]]; then
+    ( "$JS_RUN" "$LISTENER_MJS" >/dev/null 2>&1 & ) || true
+    armed_note="bundle listener spawned (auto-expires with token TTL)"
+  else
+    armed_note="listener not yet installed (CTL-1183) — it will arm from the token store on start"
+  fi
+
+  # Operator-facing contract. The token line is machine-parseable (eval-able).
+  cat <<EOF
+CATALYST_JOIN_TOKEN=${token}
+# TTL: ${ttl_min} min  (expires at epoch-ms ${expires_at})
+# Single-use: consumed on the first successful bundle fetch; a re-join needs a fresh mint.
+# Integrity: verify the bundle's integrityHash returned by the listener (CTL-1183) before trusting it.
+# Armed: ${armed_note}
+EOF
+}
+
+case "${1:-}" in
+  join-token) shift; cmd_join_token "$@" ;;
+  ""|-h|--help|help)
+    cat >&2 <<'EOF'
+usage: catalyst cluster <verb>
+  join-token   mint a one-time join token and arm the bundle listener
+EOF
+    [[ "${1:-}" == "" ]] && exit 1 || exit 0 ;;
+  *)
+    echo "catalyst cluster: unknown verb '${1}'" >&2
+    echo "run 'catalyst cluster --help'" >&2
+    exit 1 ;;
+esac
