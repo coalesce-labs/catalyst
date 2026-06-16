@@ -96,6 +96,12 @@ jobs:
             beliefs/recursive-rules.test.mjs \
             beliefs/rules.test.mjs \
             beliefs/schema.test.mjs \
+            beliefs/free-slots-shadow.test.mjs \
+            beliefs/incident-replay.test.mjs \
+            beliefs/reclaim-shadow.test.mjs \
+            beliefs/report.test.mjs \
+            cli/beliefs-shadow-status.test.mjs \
+            beliefs/shadow-store.test.mjs \
             beliefs/why.test.mjs \
             abort-worker.test.mjs \
             autotune-decision.test.mjs \

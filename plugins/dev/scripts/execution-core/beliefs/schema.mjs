@@ -168,6 +168,28 @@ const DDL = [
   `CREATE INDEX IF NOT EXISTS idx_intent_tick ON intent (tick_id)`,
   // CTL-1063 Phase 4: rule_id lookup index (query path: belief.rule_id filter)
   `CREATE INDEX IF NOT EXISTS idx_belief_rule_id ON belief (rule_id)`,
+  // CTL-935: durable shadow-comparator corpus. Every comparison (agree + disagree)
+  // per (tick_id, dimension, subject) for the advance, free_slots, and reclaim
+  // dimensions. Pruned at the 90d belief window — and pruneRetention keeps the
+  // parent tick alive as long as a shadow_comparison row references it, so the
+  // report's tick INNER JOIN resolves for the full 90d window (not just 14d).
+  `CREATE TABLE IF NOT EXISTS shadow_comparison (
+    cmp_id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    tick_id         INTEGER NOT NULL REFERENCES tick(tick_id),
+    dimension       TEXT NOT NULL,
+    subject         TEXT NOT NULL,
+    agree           INTEGER NOT NULL,
+    procedural      TEXT,
+    belief          TEXT,
+    differing_input TEXT,
+    legacy_guard    TEXT,
+    rule_id         TEXT,
+    rules_sha       TEXT,
+    UNIQUE (tick_id, dimension, subject)
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_shadow_cmp_tick     ON shadow_comparison (tick_id)`,
+  `CREATE INDEX IF NOT EXISTS idx_shadow_cmp_dim_rule ON shadow_comparison (dimension, rule_id)`,
+  `CREATE INDEX IF NOT EXISTS idx_shadow_cmp_guard    ON shadow_comparison (legacy_guard)`,
 ];
 
 // openBeliefsDb — open (creating parent dirs) + migrate idempotently + seed
