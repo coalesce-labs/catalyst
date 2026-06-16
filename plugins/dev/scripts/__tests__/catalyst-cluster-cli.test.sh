@@ -68,6 +68,37 @@ else
   FAIL=$((FAIL+1)); echo "FAIL: --help (got: ${out})"
 fi
 
+# CTL-1188: new verbs
+
+# 7. usage lists all seven verbs
+out="$("$CLUSTER" --help 2>&1 || true)"
+for v in status add remove rename set-anchor drain tune; do
+  if echo "$out" | grep -q " $v"; then
+    PASS=$((PASS+1)); echo "PASS: usage lists $v"
+  else
+    FAIL=$((FAIL+1)); echo "FAIL: usage lists $v (got: $(echo "$out" | head -5))"
+  fi
+done
+
+# 8. status routes via JS (smoke: CATALYST_CONFIG_FILE points at a temp .catalyst)
+tmp="$(mktemp -d)"; mkdir -p "$tmp/.catalyst"; printf '["mini"]' > "$tmp/.catalyst/hosts.json"
+out="$(CATALYST_CONFIG_FILE="$tmp/.catalyst/config.json" CATALYST_HOST_NAME=mini \
+       "$CLUSTER" status --json 2>&1 || true)"
+rm -rf "$tmp"
+if echo "$out" | grep -q '"hosts"'; then
+  PASS=$((PASS+1)); echo "PASS: status --json routes and returns hosts field"
+else
+  FAIL=$((FAIL+1)); echo "FAIL: status --json (got: ${out})"
+fi
+
+# 9. drain rejects a host argument (remote drain is T13 / out of scope)
+rc=0; out="$("$CLUSTER" drain some-host 2>&1)" || rc=$?
+if echo "$out" | grep -q "T13" && [[ $rc -ne 0 ]]; then
+  PASS=$((PASS+1)); echo "PASS: drain rejects host arg with T13 pointer"
+else
+  FAIL=$((FAIL+1)); echo "FAIL: drain with host arg (rc=${rc}, out=${out})"
+fi
+
 echo ""
 echo "catalyst-cluster-cli: ${PASS} passed, ${FAIL} failed"
 [[ $FAIL -eq 0 ]] || exit 1

@@ -145,7 +145,7 @@ export function getEventLogPath() {
 // Layer-2 (machine-local) config path. Mirrors daemon.mjs main()'s resolution:
 // CATALYST_LAYER2_CONFIG_FILE || ~/.config/catalyst/config.json. Each host's
 // Layer-2 file differs, so this is the right home for a per-host name.
-function getLayer2ConfigPath() {
+export function getLayer2ConfigPath() {
   return (
     process.env.CATALYST_LAYER2_CONFIG_FILE ||
     resolve(homedir(), ".config", "catalyst", "config.json")
@@ -201,6 +201,14 @@ export function getClusterHosts() {
     /* absent/malformed roster → single-host default */
   }
   return [getHostName()];
+}
+
+// getCatalystRepoDirHostsPath — absolute path to the committed cluster roster.
+// Exported so cli/cluster.mjs and its unit tests share one source of truth
+// (avoids drift between the writer and the reader that live in different files).
+// Redirectable via CATALYST_CONFIG_FILE (same as getCatalystRepoDir).
+export function getCatalystRepoDirHostsPath() {
+  return resolve(getCatalystRepoDir(), "hosts.json");
 }
 
 // CTL-1057: a multi-host roster that does NOT include this host means every
