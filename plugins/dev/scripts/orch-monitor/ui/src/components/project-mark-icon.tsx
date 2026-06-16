@@ -1,6 +1,6 @@
 // project-mark-icon.tsx — renders a ProjectMark as a tinted Phosphor glyph or favicon
 // img. Used on cards, lane headers, and the sidebar (CTL-1208).
-import { GLYPH_COMPONENTS } from "@/lib/project-glyph-set";
+import { resolvePhosphorIcon } from "@/lib/phosphor-icons";
 import type { ProjectMark } from "@/lib/project-mark";
 
 interface ProjectMarkIconProps {
@@ -18,7 +18,7 @@ interface ProjectMarkIconProps {
  */
 export function ProjectMarkIcon({ mark, color, size = 14 }: ProjectMarkIconProps) {
   if (mark.kind === "glyph") {
-    const G = GLYPH_COMPONENTS[mark.name];
+    const G = resolvePhosphorIcon(mark.name);
     if (!G) return null;
     return (
       <G

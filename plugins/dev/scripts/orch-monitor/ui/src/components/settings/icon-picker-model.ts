@@ -2,6 +2,7 @@
 // in ProjectSettingsPane (CTL-1208). No React, no side effects — fully unit-testable.
 import type { IconCandidate } from "@/lib/repo-icons";
 import { PHOSPHOR_GLYPH_NAMES, formatGlyphRef, parseGlyphRef } from "@/lib/project-glyph-set";
+import { enumeratePhosphorGlyphNames } from "@/lib/phosphor-icons";
 
 export type IconPickerGroup = "auto" | "favicon" | "glyph";
 
@@ -19,15 +20,16 @@ export interface IconPickerItem {
   name?: string;
   /** Favicon data URL (only set when group === "favicon"). */
   dataUrl?: string | null;
+  /** True for curated Featured icons; false for the rest of the full set. Only set when group === "glyph". */
+  featured?: boolean;
 }
 
 /**
  * Build the flat list of icon picker items for a project.
- * Order: Auto → favicon candidates → curated glyphs.
+ * Order: Auto → favicon candidates → Featured glyphs (curated 36) → All icons (full set remainder).
  */
 export function buildIconPickerItems(
   candidates: readonly IconCandidate[],
-  glyphNames: readonly string[] = PHOSPHOR_GLYPH_NAMES,
 ): IconPickerItem[] {
   const items: IconPickerItem[] = [];
 
@@ -49,17 +51,32 @@ export function buildIconPickerItems(
       group: "favicon",
       dataUrl: c.dataUrl,
     });
-    void ext; // suppress unused warning
+    void ext;
   }
 
-  // 3. Curated Phosphor glyphs
-  for (const name of glyphNames) {
+  // 3. Featured (curated) glyphs first, in curated order
+  const featuredSet = new Set(PHOSPHOR_GLYPH_NAMES);
+  for (const name of PHOSPHOR_GLYPH_NAMES) {
     items.push({
       value: formatGlyphRef(name),
       label: name.replace(/-/g, " "),
       searchKey: name,
       group: "glyph",
       name,
+      featured: true,
+    });
+  }
+
+  // 4. Remaining full-set icons (sorted, excluding curated names to avoid duplicates)
+  for (const name of enumeratePhosphorGlyphNames()) {
+    if (featuredSet.has(name)) continue;
+    items.push({
+      value: formatGlyphRef(name),
+      label: name.replace(/-/g, " "),
+      searchKey: name,
+      group: "glyph",
+      name,
+      featured: false,
     });
   }
 
