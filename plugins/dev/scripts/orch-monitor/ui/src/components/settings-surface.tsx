@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useAtom } from "jotai";
 import { useNavigate, useSearch } from "@tanstack/react-router";
 
@@ -173,6 +173,14 @@ export function SettingsSurface() {
   const [selectedKey, setSelectedKey] = useState<string | null>(
     typeof paramKey === "string" && paramKey !== "" ? paramKey : null,
   );
+
+  // CTL-1212: resync selection when the URL param changes after mount. Without
+  // this, cross-surface deep-links (the sidebar one-click gear / context menu,
+  // and browser back/forward) update the URL but leave the mount-only selectedKey
+  // stale, so the pane silently fails to switch projects.
+  useEffect(() => {
+    setSelectedKey(typeof paramKey === "string" && paramKey !== "" ? paramKey : null);
+  }, [paramKey]);
 
   function selectProject(key: string | null) {
     setSelectedKey(key);
