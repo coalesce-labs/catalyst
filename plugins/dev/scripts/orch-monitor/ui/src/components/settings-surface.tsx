@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useAtom } from "jotai";
 import { useNavigate, useSearch } from "@tanstack/react-router";
 
@@ -44,10 +44,11 @@ import {
 } from "@/lib/repo-color-picks-store";
 // CTL-1153 Phase 5: project rail + per-project settings pane.
 import { useProjects } from "@/hooks/use-projects";
-import { buildProjectRailRows, resolveSelectedProject } from "@/lib/project-settings-model";
+import { buildProjectRailRows, resolveSettingsView } from "@/lib/project-settings-model";
 import { SETTINGS_PATH } from "@/lib/route-surface";
 import { ProjectRail } from "@/components/settings/project-rail";
 import { ProjectSettingsPane } from "@/components/settings/project-settings-pane";
+import { PendingSectionPane } from "@/components/settings/pending-section-pane";
 
 // settings-surface.tsx — the Settings preferences surface (CTL-911 / SURF3).
 // Replaces the footer Settings placeholder (handoff next-step #4). Renders the
@@ -173,6 +174,14 @@ export function SettingsSurface() {
     typeof paramKey === "string" && paramKey !== "" ? paramKey : null,
   );
 
+  // CTL-1212: resync selection when the URL param changes after mount. Without
+  // this, cross-surface deep-links (the sidebar one-click gear / context menu,
+  // and browser back/forward) update the URL but leave the mount-only selectedKey
+  // stale, so the pane silently fails to switch projects.
+  useEffect(() => {
+    setSelectedKey(typeof paramKey === "string" && paramKey !== "" ? paramKey : null);
+  }, [paramKey]);
+
   function selectProject(key: string | null) {
     setSelectedKey(key);
     void navigate({
@@ -182,7 +191,7 @@ export function SettingsSurface() {
   }
 
   const railRows = buildProjectRailRows(projects);
-  const selectedProject = resolveSelectedProject(projects, selectedKey);
+  const settingsView = resolveSettingsView(projects, selectedKey);
 
   return (
     <div className="h-full min-h-0 overflow-y-auto bg-surface-1">
@@ -196,12 +205,16 @@ export function SettingsSurface() {
 
         {/* ── Content (right column) ────────────────────────────────────────── */}
         <div className="flex min-w-0 flex-1 flex-col gap-5">
-          {selectedProject ? (
+          {settingsView.kind === "project" ? (
             /* ── Per-project editor pane ──────────────────────────────────── */
             <ProjectSettingsPane
-              project={selectedProject}
+              project={settingsView.project}
+              candidates={iconMap[settingsView.project.repo]?.candidates ?? []}
               onSaved={refetch}
             />
+          ) : settingsView.kind === "pending" ? (
+            /* ── Pending configuration tier pane ─────────────────────────── */
+            <PendingSectionPane section={settingsView.section} />
           ) : (
             /* ── Global sections (General) ───────────────────────────────── */
             <>

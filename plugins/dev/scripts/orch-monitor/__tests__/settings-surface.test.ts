@@ -264,3 +264,36 @@ describe("Settings is reachable from the command palette (CTL-911)", () => {
     expect(shellSrc).toMatch(/CommandItem\s+value="Settings"\s+onSelect=\{openSettings\}/);
   });
 });
+
+// ── CTL-1212: three-tier nav scaffolding ──────────────────────────────────────
+describe("CTL-1212 three-tier nav scaffolding", () => {
+  it("the surface uses resolveSettingsView for content dispatch", () => {
+    expect(settingsSrc).toContain("resolveSettingsView");
+  });
+
+  it("the surface renders PendingSectionPane for pending sections", () => {
+    expect(settingsSrc).toContain("PendingSectionPane");
+  });
+
+  it("the rail imports SETTINGS_PENDING_SECTIONS", () => {
+    const railSrc = read("components/settings/project-rail.tsx");
+    expect(railSrc).toContain("SETTINGS_PENDING_SECTIONS");
+  });
+});
+
+// ── CTL-1212: one-click project settings affordance ───────────────────────────
+describe("CTL-1212 one-click project settings affordance", () => {
+  it("each project header has a one-click settings button wired to goSettings", () => {
+    const occurrences = sidebarSrc.match(/goSettings\(repo\)/g) ?? [];
+    expect(occurrences.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("the gear stops propagation so it does not toggle the collapsible header", () => {
+    expect(sidebarSrc).toMatch(/stopPropagation\(\)/);
+    expect(sidebarSrc).toContain('aria-label="Project settings"');
+  });
+
+  it("the gear is hover-revealed with group-hover", () => {
+    expect(sidebarSrc).toMatch(/group-hover/);
+  });
+});

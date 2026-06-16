@@ -4,6 +4,7 @@ import { describe, it, expect } from "bun:test";
 import type { ReactNode, ReactElement } from "react";
 import { ProjectRail } from "./project-rail";
 import type { ProjectRailRow } from "@/lib/project-settings-model";
+import { SETTINGS_PENDING_SECTIONS, CLUSTER_SECTION_KEY } from "@/lib/project-settings-model";
 
 // ── tree-walk helpers ─────────────────────────────────────────────────────────
 
@@ -61,5 +62,17 @@ describe("ProjectRail", () => {
   it("renders with no rows (just General)", () => {
     const el = ProjectRail({ rows: [], selectedKey: null, onSelect: () => {} });
     expect(containsText(el, "General")).toBe(true);
+  });
+
+  it("renders the Cluster and Host/Node pending sections", () => {
+    const el = ProjectRail({ rows: [], selectedKey: null, onSelect: () => {} });
+    for (const s of SETTINGS_PENDING_SECTIONS) {
+      expect(containsText(el, s.label)).toBe(true);
+    }
+  });
+
+  it("marks a pending section as active when its key is selected", () => {
+    const el = ProjectRail({ rows: [], selectedKey: CLUSTER_SECTION_KEY, onSelect: () => {} });
+    expect(containsText(el, "Cluster")).toBe(true);
   });
 });

@@ -33,11 +33,14 @@ const project = {
   key: "CTL",
   name: "Catalyst",
   repo: "catalyst",
+  vcsRepo: null as string | null,
   defaultColor: "blue",
   storedName: null,
   storedColor: null,
   stateMap: null,
 };
+
+const projectWithSource = { ...project, vcsRepo: "coalesce-labs/catalyst" };
 
 // ── tests ─────────────────────────────────────────────────────────────────────
 
@@ -82,9 +85,58 @@ describe("ProjectSettingsPane", () => {
   });
 });
 
+// ── CTL-1212: Identity / Source / Workflow sections ───────────────────────────
+
+describe("ProjectSettingsPaneContent — CTL-1212 sections", () => {
+  const baseProps = {
+    name: "",
+    color: "auto" as const,
+    icon: null as string | null,
+    candidates: [] as import("@/lib/repo-icons").IconCandidate[],
+    stateMapEdits: {} as Record<string, string>,
+    saving: false,
+    error: null as string | null,
+    onNameChange: () => {},
+    onColorChange: () => {},
+    onIconChange: () => {},
+    onStateMapChange: () => {},
+    onSave: () => {},
+  };
+
+  it("renders Identity, Source, and Workflow section headers", () => {
+    const el = ProjectSettingsPaneContent({ project: projectWithSource, ...baseProps });
+    for (const h of ["Identity", "Source", "Workflow"]) {
+      expect(containsText(el, h)).toBe(true);
+    }
+  });
+
+  it("shows the Linear team key in Source", () => {
+    const el = ProjectSettingsPaneContent({ project: projectWithSource, ...baseProps });
+    expect(containsText(el, "CTL")).toBe(true);
+  });
+
+  it("shows the GitHub repo in Source when vcsRepo is set", () => {
+    const el = ProjectSettingsPaneContent({ project: projectWithSource, ...baseProps });
+    expect(containsText(el, "coalesce-labs/catalyst")).toBe(true);
+    expect(containsText(el, "managed in configuration")).toBe(true);
+  });
+
+  it("renders a placeholder when vcsRepo is null", () => {
+    const el = ProjectSettingsPaneContent({ project, ...baseProps });
+    expect(containsText(el, "managed in configuration")).toBe(true);
+  });
+
+  it("shows eligible-query defaults in Workflow", () => {
+    const el = ProjectSettingsPaneContent({ project: projectWithSource, ...baseProps });
+    expect(containsText(el, "Todo")).toBe(true);
+    expect(containsText(el, "Triage")).toBe(true);
+  });
+});
+
 describe("buildProjectPatch", () => {
   const base = {
     key: "CTL", name: "Catalyst", repo: "catalyst",
+    vcsRepo: null as string | null,
     defaultColor: "blue", storedName: null, storedColor: null, stateMap: null,
   };
 

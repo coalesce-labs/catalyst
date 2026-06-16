@@ -66,6 +66,48 @@ export function resolveSelectedProject<T extends Pick<ProjectDescriptor, "key">>
   return projects.find((p) => p.key === key) ?? null;
 }
 
+// ── CTL-1212: three-tier nav scaffolding ─────────────────────────────────────
+
+/** Sentinel rail keys for the not-yet-wired config tiers (CTL-1212).
+ *  Double-underscore prefix guarantees they never collide with an UPPERCASE Linear team key. */
+export const CLUSTER_SECTION_KEY = "__cluster__";
+export const HOST_NODE_SECTION_KEY = "__host_node__";
+
+export interface PendingSettingsSection {
+  key: string;
+  label: string;
+  note: string;
+}
+
+export const SETTINGS_PENDING_SECTIONS: PendingSettingsSection[] = [
+  {
+    key: CLUSTER_SECTION_KEY,
+    label: "Cluster",
+    note: "Cluster-wide configuration and secrets will appear here once the configuration service is available.",
+  },
+  {
+    key: HOST_NODE_SECTION_KEY,
+    label: "Host / Node",
+    note: "Host- and node-specific settings (not synchronized across the cluster) will appear here once the configuration service is available.",
+  },
+];
+
+export type SettingsView<T extends Pick<ProjectDescriptor, "key">> =
+  | { kind: "general" }
+  | { kind: "project"; project: T }
+  | { kind: "pending"; section: PendingSettingsSection };
+
+export function resolveSettingsView<T extends Pick<ProjectDescriptor, "key">>(
+  projects: readonly T[],
+  selectedKey: string | null | undefined,
+): SettingsView<T> {
+  if (!selectedKey) return { kind: "general" };
+  const pending = SETTINGS_PENDING_SECTIONS.find((s) => s.key === selectedKey);
+  if (pending) return { kind: "pending", section: pending };
+  const project = resolveSelectedProject(projects, selectedKey);
+  return project ? { kind: "project", project } : { kind: "general" };
+}
+
 /**
  * Compute the changed keys between the current stateMap and an edited version.
  * Only includes keys whose value has changed AND is non-empty; omits unchanged or
