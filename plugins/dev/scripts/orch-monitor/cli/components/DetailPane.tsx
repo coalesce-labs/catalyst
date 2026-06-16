@@ -71,7 +71,7 @@ export function buildDetailLines(
     lines.push({ k: "field", label: "phase", value: String(phase) });
   }
 
-  const conclusion = attrs["cicd.pipeline.run.conclusion"];
+  const conclusion = attrs["cicd.pipeline.run.result"];
   const pipeline = attrs["cicd.pipeline.name"];
   if (conclusion || pipeline) {
     lines.push({ k: "sep" });

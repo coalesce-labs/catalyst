@@ -141,7 +141,7 @@ describe("status/orch/worker formatters", () => {
       formatStatus(makeEvent({
         attributes: {
           "event.name": "github.check_suite.completed",
-          "cicd.pipeline.run.conclusion": "success",
+          "cicd.pipeline.run.result": "success",
         },
       })),
     ).toBe("✓ ");
@@ -152,7 +152,7 @@ describe("status/orch/worker formatters", () => {
       formatStatus(makeEvent({
         attributes: {
           "event.name": "github.check_suite.completed",
-          "cicd.pipeline.run.conclusion": "failure",
+          "cicd.pipeline.run.result": "failure",
         },
       })),
     ).toBe("✗ ");
@@ -181,7 +181,7 @@ describe("status/orch/worker formatters", () => {
       const result = formatStatus(makeEvent({
         attributes: {
           "event.name": "github.workflow_run.in_progress",
-          "cicd.pipeline.run.conclusion": "in_progress",
+          "cicd.pipeline.run.result": "in_progress",
         },
       }));
       expect(result).toBe("… ");
@@ -201,7 +201,7 @@ describe("status/orch/worker formatters", () => {
       const result = formatStatus(makeEvent({
         attributes: {
           "event.name": "github.workflow_run.in_progress",
-          "cicd.pipeline.run.conclusion": "in_progress",
+          "cicd.pipeline.run.result": "in_progress",
         },
       }));
       expect(result.codePointAt(0)).toBe(0xf252);

@@ -143,8 +143,8 @@ describe("createLinearWebhookHandler", () => {
     expect(env.resource["service.name"]).toBe("catalyst.linear");
     expect(env.attributes["event.name"]).toBe("linear.issue.state_changed");
     expect(env.attributes["linear.issue.identifier"]).toBe("CTL-210");
-    expect(env.attributes["event.label"]).toBe("CTL-210");
-    expect(env.attributes["event.channel"]).toBe("webhook");
+    expect(env.attributes["catalyst.event.label"]).toBe("CTL-210");
+    expect(env.attributes["catalyst.event.channel"]).toBe("webhook");
   });
 
   it("emits to in-process bus on success", async () => {
@@ -547,8 +547,8 @@ describe("buildLinearEventLogEnvelope (canonical)", () => {
     expect(env!.attributes["event.name"]).toBe("linear.issue.state_changed");
     expect(env!.attributes["linear.issue.identifier"]).toBe("CTL-1");
     expect(env!.attributes["linear.team.key"]).toBe("CTL");
-    expect(env!.attributes["event.entity"]).toBe("issue");
-    expect(env!.attributes["event.action"]).toBe("state_changed");
+    expect(env!.attributes["catalyst.event.entity"]).toBe("issue");
+    expect(env!.attributes["catalyst.event.action"]).toBe("state_changed");
   });
 
   it("state_changed event forwards toState into body.payload (CTL-399)", () => {

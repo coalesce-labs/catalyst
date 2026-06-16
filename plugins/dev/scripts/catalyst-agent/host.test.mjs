@@ -2,8 +2,8 @@
 //
 // sampleHost is exercised purely through injected seams (readCpu / readMem /
 // readDisk / readLoad / emit) so there is no real /proc, df, vm_stat, or sleep.
-// Covers: exact contract attrs, partial-probe failure still emits, pct bounds
-// clamped 0..100, rounding (pct 1dp, mb int, gb 1dp, load1 2dp), the put()
+// Covers: exact contract attrs (OTel system.* names + unit conversions), partial-probe
+// failure still emits, pct bounds clamped 0..1.0 utilization, the put()
 // pattern (null probe → attr omitted), and the pure parse helpers against real
 // `df -k /` and `vm_stat` output captured on macOS.
 //
@@ -66,19 +66,19 @@ describe("sampleHost — emits one host.metrics.sampled per contract", () => {
     expect(calls[0].opts.now).toBe(now);
   });
 
-  test("carries every contract attr with correct rounding", async () => {
+  test("carries every contract attr with correct values and OTel units", async () => {
     const { calls, emit } = captureEmit();
     await sampleHost({ ...healthyProbes(), emit });
     const a = calls[0].spec.attrs;
-    expect(a["host.cpu_pct"]).toBe(12.3); // 1 decimal
-    expect(a["host.cpu_count"]).toBe(10); // int
-    expect(a["host.load1"]).toBe(2.35); // 2 decimals
-    expect(a["host.mem_used_mb"]).toBe(8193); // int (8192.6 → 8193)
-    expect(a["host.mem_total_mb"]).toBe(16384); // int
-    expect(a["host.mem_used_pct"]).toBe(50.0); // 8192.6/16384*100 → 50.0
-    expect(a["host.disk_used_gb"]).toBe(120.5); // 1 decimal (120.45 → 120.5)
-    expect(a["host.disk_total_gb"]).toBe(500.0); // 1 decimal
-    expect(a["host.disk_used_pct"]).toBe(24.1); // 120.45/500*100 = 24.09 → 24.1
+    expect(a["system.cpu.utilization"]).toBeCloseTo(0.123, 3); // 12.3% → 0.123
+    expect(a["system.cpu.logical_count"]).toBe(10);
+    expect(a["system.linux.cpu.load_1m"]).toBe(2.35);
+    expect(a["system.memory.usage"]).toBe(8193 * 1048576);   // 8193 MB → bytes
+    expect(a["system.memory.limit"]).toBe(16384 * 1048576);  // 16384 MB → bytes
+    expect(a["system.memory.utilization"]).toBeCloseTo(0.5, 3); // 50% → 0.5
+    expect(a["system.filesystem.usage"]).toBe(Math.round(120.5 * 1073741824));   // 120.5 GB → bytes
+    expect(a["system.filesystem.capacity"]).toBe(Math.round(500.0 * 1073741824)); // 500 GB → bytes
+    expect(a["system.filesystem.utilization"]).toBeCloseTo(0.241, 3); // 24.1% → 0.241
   });
 });
 
@@ -96,12 +96,12 @@ describe("sampleHost — partial-probe failure still emits", () => {
     expect(calls.length).toBe(1);
     const a = calls[0].spec.attrs;
     // disk probe threw → all three disk attrs are null (dropped downstream).
-    expect(a["host.disk_used_gb"]).toBe(null);
-    expect(a["host.disk_total_gb"]).toBe(null);
-    expect(a["host.disk_used_pct"]).toBe(null);
+    expect(a["system.filesystem.usage"]).toBe(null);
+    expect(a["system.filesystem.capacity"]).toBe(null);
+    expect(a["system.filesystem.utilization"]).toBe(null);
     // the others are unaffected.
-    expect(a["host.cpu_pct"]).toBe(12.3);
-    expect(a["host.mem_used_mb"]).toBe(8193);
+    expect(a["system.cpu.utilization"]).toBeCloseTo(0.123, 3);
+    expect(a["system.memory.usage"]).toBe(8193 * 1048576);
   });
 
   test("a null-returning probe omits only its attrs", async () => {
@@ -111,9 +111,9 @@ describe("sampleHost — partial-probe failure still emits", () => {
       emit,
     });
     const a = calls[0].spec.attrs;
-    expect(a["host.cpu_pct"]).toBe(null);
-    expect(a["host.cpu_count"]).toBe(null);
-    expect(a["host.load1"]).toBe(2.35); // still present
+    expect(a["system.cpu.utilization"]).toBe(null);
+    expect(a["system.cpu.logical_count"]).toBe(null);
+    expect(a["system.linux.cpu.load_1m"]).toBe(2.35); // still present
   });
 
   test("a rejected async probe is swallowed and the event still emits", async () => {
@@ -124,9 +124,9 @@ describe("sampleHost — partial-probe failure still emits", () => {
     });
     expect(calls.length).toBe(1);
     const a = calls[0].spec.attrs;
-    expect(a["host.mem_used_mb"]).toBe(null);
-    expect(a["host.mem_total_mb"]).toBe(null);
-    expect(a["host.mem_used_pct"]).toBe(null);
+    expect(a["system.memory.usage"]).toBe(null);
+    expect(a["system.memory.limit"]).toBe(null);
+    expect(a["system.memory.utilization"]).toBe(null);
   });
 
   test("an async probe value is awaited (not emitted as a Promise)", async () => {
@@ -135,8 +135,8 @@ describe("sampleHost — partial-probe failure still emits", () => {
       ...healthyProbes({ readCpu: async () => ({ cpuPct: 50, cpuCount: 8 }) }),
       emit,
     });
-    expect(calls[0].spec.attrs["host.cpu_pct"]).toBe(50);
-    expect(calls[0].spec.attrs["host.cpu_count"]).toBe(8);
+    expect(calls[0].spec.attrs["system.cpu.utilization"]).toBeCloseTo(0.5, 3);
+    expect(calls[0].spec.attrs["system.cpu.logical_count"]).toBe(8);
   });
 
   test("all probes failing still emits an event (all value attrs null)", async () => {
@@ -152,28 +152,28 @@ describe("sampleHost — partial-probe failure still emits", () => {
 });
 
 describe("sampleHost — pct bounds clamped to 0..100", () => {
-  test("cpu_pct above 100 is clamped to 100", async () => {
+  test("cpu_pct above 100 is clamped to 1.0 utilization", async () => {
     const { calls, emit } = captureEmit();
     await sampleHost({ ...healthyProbes({ readCpu: () => ({ cpuPct: 150, cpuCount: 4 }) }), emit });
-    expect(calls[0].spec.attrs["host.cpu_pct"]).toBe(100);
+    expect(calls[0].spec.attrs["system.cpu.utilization"]).toBe(1.0);
   });
 
-  test("cpu_pct below 0 is clamped to 0", async () => {
+  test("cpu_pct below 0 is clamped to 0.0 utilization", async () => {
     const { calls, emit } = captureEmit();
     await sampleHost({ ...healthyProbes({ readCpu: () => ({ cpuPct: -5, cpuCount: 4 }) }), emit });
-    expect(calls[0].spec.attrs["host.cpu_pct"]).toBe(0);
+    expect(calls[0].spec.attrs["system.cpu.utilization"]).toBe(0.0);
   });
 
-  test("derived mem_used_pct over 100 (used > total) is clamped to 100", async () => {
+  test("derived mem_used_pct over 100 (used > total) is clamped to 1.0 utilization", async () => {
     const { calls, emit } = captureEmit();
     await sampleHost({
       ...healthyProbes({ readMem: () => ({ usedMb: 20000, totalMb: 16384 }) }),
       emit,
     });
-    expect(calls[0].spec.attrs["host.mem_used_pct"]).toBe(100);
+    expect(calls[0].spec.attrs["system.memory.utilization"]).toBe(1.0);
   });
 
-  test("a zero/absent denominator yields a null pct (no div-by-zero / NaN)", async () => {
+  test("a zero/absent denominator yields a null utilization (no div-by-zero / NaN)", async () => {
     const { calls, emit } = captureEmit();
     await sampleHost({
       ...healthyProbes({
@@ -182,8 +182,8 @@ describe("sampleHost — pct bounds clamped to 0..100", () => {
       }),
       emit,
     });
-    expect(calls[0].spec.attrs["host.mem_used_pct"]).toBe(null);
-    expect(calls[0].spec.attrs["host.disk_used_pct"]).toBe(null);
+    expect(calls[0].spec.attrs["system.memory.utilization"]).toBe(null);
+    expect(calls[0].spec.attrs["system.filesystem.utilization"]).toBe(null);
   });
 });
 
@@ -223,9 +223,9 @@ describe("parseDfRoot — real `df -k /` fixtures", () => {
       emit,
     });
     const a = calls[0].spec.attrs;
-    expect(a["host.disk_total_gb"]).toBe(926.4); // 971350180/1048576 = 926.36 → 926.4
-    expect(a["host.disk_used_gb"]).toBe(15.6); // 16324544/1048576 = 15.57 → 15.6
-    expect(a["host.disk_used_pct"]).toBe(1.7); // 16324544/971350180*100 = 1.68 → 1.7
+    expect(a["system.filesystem.capacity"]).toBe(Math.round(926.4 * 1073741824)); // 926.4 GB → bytes
+    expect(a["system.filesystem.usage"]).toBe(Math.round(15.6 * 1073741824));    // 15.6 GB → bytes
+    expect(a["system.filesystem.utilization"]).toBeCloseTo(0.017, 3);             // 1.7% → 0.017
   });
 });
 

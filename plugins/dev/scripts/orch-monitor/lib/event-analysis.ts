@@ -184,7 +184,7 @@ export function normalize(line: string): NormalizedEvent | null {
   // CI conclusion
   let ciConclusion: string | null = null;
   if (isCanonical) {
-    ciConclusion = asString(attrs["cicd.pipeline.run.conclusion"]);
+    ciConclusion = asString(attrs["cicd.pipeline.run.result"]);
   }
   if (ciConclusion === null && detail !== null) {
     ciConclusion = asString(detail["conclusion"]);

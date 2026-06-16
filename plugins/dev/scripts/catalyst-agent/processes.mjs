@@ -281,10 +281,10 @@ export async function sampleProcesses({
         // (the put() pattern in buildAgentEnvelope drops null/undefined).
         attrs: {
           "process.command": row.command,
-          "process.cpu_pct": row.cpu_pct,
-          "process.rss_mb": row.rss_kb == null ? null : Math.round(row.rss_kb / 1024),
-          "process.ticket": worker?.ticket ?? null,
-          "process.phase": worker?.phase ?? null,
+          "process.cpu.utilization": row.cpu_pct == null ? null : row.cpu_pct / 100,
+          "process.memory.usage": row.rss_kb == null ? null : Math.round(row.rss_kb * 1024),
+          "catalyst.process.ticket": worker?.ticket ?? null,
+          "catalyst.process.phase": worker?.phase ?? null,
         },
         // High-cardinality fields stay in the payload, never as labels.
         payload: {

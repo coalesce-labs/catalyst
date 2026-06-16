@@ -27,14 +27,14 @@ export function isAllowedTargetNamespace(target: string): boolean {
 
 /** Expected per-cluster rename-to counts (CTL-1009 research §6). */
 export const EXPECTED_CLUSTER_COUNTS: Readonly<Record<RemediationCluster, number>> = {
-  A: 5,
-  B: 9,
-  C: 9,
-  D: 4,
-  E: 3,
-  F: 2,
-  G: 4,
-  H: 1,
+  A: 0,
+  B: 0,
+  C: 0,
+  D: 0,
+  E: 0,
+  F: 0,
+  G: 0,
+  H: 0,
 };
 
 // ── Extractor helpers ────────────────────────────────────────────────────────

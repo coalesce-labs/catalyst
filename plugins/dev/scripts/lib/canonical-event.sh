@@ -251,7 +251,7 @@ build_canonical_line() {
   [[ -n "$cat_orch" ]]   || cat_orch="$orch"
   if [[ -z "$project" && -n "${OTEL_RESOURCE_ATTRIBUTES:-}" ]]; then
     project="$(printf '%s\n' "$OTEL_RESOURCE_ATTRIBUTES" \
-      | grep -oE 'project=[^,]+' | head -1 | cut -d= -f2- || true)"
+      | grep -oE 'catalyst\.project=[^,]+' | head -1 | cut -d= -f2- || true)"
   fi
 
   local sev_num event_id host_name host_id_val
@@ -317,17 +317,17 @@ build_canonical_line() {
           "host.name": $host_name,
           "host.id": $host_id
         }
-        + (if $project    == "" then {} else { "project": $project } end)
+        + (if $project    == "" then {} else { "catalyst.project": $project } end)
         + (if $linear_key == "" then {} else { "linear.key": $linear_key } end)
         + (if $cat_orch   == "" then {} else { "catalyst.orchestration": $cat_orch } end)
       ),
       attributes: (
         { "event.name": $event_name }
-        + (if $entity  == "" then {} else { "event.entity": $entity }  end)
-        + (if $action  == "" then {} else { "event.action": $action }  end)
-        + (if $label   == "" then {} else { "event.label":  $label }   end)
-        + (if $value   == "" then {} else { "event.value":  $value }   end)
-        + (if $channel == "" then {} else { "event.channel": $channel } end)
+        + (if $entity  == "" then {} else { "catalyst.event.entity": $entity }  end)
+        + (if $action  == "" then {} else { "catalyst.event.action": $action }  end)
+        + (if $label   == "" then {} else { "catalyst.event.label":  $label }   end)
+        + (if $value   == "" then {} else { "catalyst.event.value":  $value }   end)
+        + (if $channel == "" then {} else { "catalyst.event.channel": $channel } end)
         + (if $orch    == "" then {} else { "catalyst.orchestrator.id": $orch } end)
         + (if $worker  == "" then {} else { "catalyst.worker.ticket": $worker } end)
         + (if $session == "" then {} else { "catalyst.session.id": $session } end)
@@ -344,8 +344,8 @@ build_canonical_line() {
         + (if $claude_rl_7d == "" then {} else { "claude.ratelimit.seven_day_pct": ($claude_rl_7d | tonumber) } end)
         + (if $claude_rl_7d_opus   == "" then {} else { "claude.ratelimit.seven_day_opus_pct":   ($claude_rl_7d_opus   | tonumber) } end)
         + (if $claude_rl_7d_sonnet == "" then {} else { "claude.ratelimit.seven_day_sonnet_pct": ($claude_rl_7d_sonnet | tonumber) } end)
-        + (if $phase_attempt == "" then {} else { "phase.attempt": ($phase_attempt | tonumber) } end)
-        + (if $phase_revive_count == "" then {} else { "phase.revive_count": ($phase_revive_count | tonumber) } end)
+        + (if $phase_attempt == "" then {} else { "catalyst.phase.attempt": ($phase_attempt | tonumber) } end)
+        + (if $phase_revive_count == "" then {} else { "catalyst.phase.revive_count": ($phase_revive_count | tonumber) } end)
         + { "catalyst.ticket.type": $ticket_type }
       ),
       body: (
