@@ -7,6 +7,7 @@
 
 import { describe, test, expect, beforeEach, afterEach, mock } from "bun:test";
 import { ownerForTicket } from "./hrw.mjs"; // CTL-862: HRW owner computation for ownership-filter tests
+import { __resetLivenessState } from "./liveness-roster.mjs"; // CTL-1091: test isolation
 import { readClusterGeneration } from "./scheduler.mjs"; // CTL-1028: persistence assertion
 import { mkdtempSync, rmSync, mkdirSync, writeFileSync, appendFileSync, statSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -54,6 +55,9 @@ beforeEach(() => {
   __resetForTests();
   enrolledTeams.clear();
   registryEntries.length = 0;
+  // CTL-1091: reset liveness singleton so hysteresis state does not bleed
+  // across tests (the module is shared when bun runs files in one process).
+  __resetLivenessState();
 });
 
 afterEach(() => {
@@ -2092,6 +2096,85 @@ describe("dispatchTriage — drain gate (CTL-1095)", () => {
       isDraining: () => false,
       triageBudget: { remaining: 5 },
     });
+    expect(dispatch).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ── CTL-1091: liveness-filtered HRW ownership (monitor triage gate) ──
+//
+// Mirrors the CTL-850/CTL-1091 scheduler pattern but drives dispatchTriage
+// via handleStateChangedEvent (→Triage / →Ready branches). ENG-1 HRW-hashes
+// to "laptop" under ["mini","laptop"]. When laptop is shed (liveHosts=["mini"]),
+// mini dispatches triage for ENG-1 — the new-work entry never starves.
+describe("CTL-1091 — liveness-filtered triage gate (monitor)", () => {
+  const ROSTER = ["mini", "laptop"];
+  // ENG-1 hashes to "laptop" under this roster (verified with ownerForTicket).
+  const LAPTOP_TICKET = ownerForTicket("ENG-1", ROSTER) === "laptop" ? "ENG-1" : "ENG-2";
+
+  const triageEvent = () => ({
+    event: "linear.issue.state_changed",
+    detail: { ticket: LAPTOP_TICKET, teamKey: "ENG", toState: "Triage" },
+  });
+
+  const recordClaim = (verdict) => {
+    const calls = [];
+    const fn = (arg) => { calls.push(arg); return verdict; };
+    fn.calls = calls;
+    return fn;
+  };
+
+  const fakeOrchDir = "/fake-orch-1091";
+
+  test("laptop shed (liveHosts=['mini']) → mini dispatches triage for laptop-hashing ticket", () => {
+    enroll("ENG", { status: "Ready" });
+    const dispatch = mock(() => ({ code: 0 }));
+    const claimDispatch = recordClaim({ won: true, generation: 1 });
+    handleStateChangedEvent(triageEvent(), {
+      dispatch,
+      orchDir: fakeOrchDir,
+      hosts: ROSTER,
+      hostName: "mini",
+      resolveLiveRoster: () => ["mini"], // laptop shed
+      claimDispatch,
+      applyTriageStatus: () => ({ applied: false, verified: false, from_state: null, to_state: null, reason: null }),
+      appendEvent: () => {},
+    });
+    expect(dispatch).toHaveBeenCalledTimes(1);
+  });
+
+  test("both live (liveHosts=ROSTER) → laptop-hashing ticket skipped on mini", () => {
+    enroll("ENG", { status: "Ready" });
+    const dispatch = mock(() => ({ code: 0 }));
+    const claimDispatch = recordClaim({ won: true, generation: 1 });
+    handleStateChangedEvent(triageEvent(), {
+      dispatch,
+      orchDir: fakeOrchDir,
+      hosts: ROSTER,
+      hostName: "mini",
+      resolveLiveRoster: () => ROSTER, // both live
+      claimDispatch,
+      applyTriageStatus: () => ({ applied: false, verified: false, from_state: null, to_state: null, reason: null }),
+      appendEvent: () => {},
+    });
+    expect(dispatch).not.toHaveBeenCalled();
+    expect(claimDispatch.calls).toHaveLength(0);
+  });
+
+  test("single-host roster: resolveLiveRoster not consulted, dispatch proceeds", () => {
+    enroll("ENG", { status: "Ready" });
+    const dispatch = mock(() => ({ code: 0 }));
+    let resolverCalled = false;
+    handleStateChangedEvent(triageEvent(), {
+      dispatch,
+      orchDir: fakeOrchDir,
+      hosts: ["mini"],
+      hostName: "mini",
+      resolveLiveRoster: () => { resolverCalled = true; return ["mini"]; },
+      claimDispatch: recordClaim({ won: false, generation: null }),
+      applyTriageStatus: () => ({ applied: false, verified: false, from_state: null, to_state: null, reason: null }),
+      appendEvent: () => {},
+    });
+    expect(resolverCalled).toBe(false);
     expect(dispatch).toHaveBeenCalledTimes(1);
   });
 });
