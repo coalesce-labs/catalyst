@@ -9,6 +9,7 @@ import {
   checkDeterministicErrors,
   checkBoundedLlmFixes,
   determineEscalationReason,
+  generateRemediateBrief,
 } from "./recovery-reasoning.mjs";
 
 describe("checkDeterministicErrors", () => {
@@ -22,19 +23,47 @@ describe("checkDeterministicErrors", () => {
     expect(result.seam_id).toBe("workflow-token-fallback");
   });
 
-  test("detects merge_conflict pattern", () => {
+  // Merge conflicts are NO LONGER deterministic (seam stub always returned success:false).
+  // They are now BOUNDED-LLM so the agent reads both sides and resolves them.
+  test("does NOT classify merge_conflict as deterministic (falls to bounded-LLM)", () => {
     const result = checkDeterministicErrors(
       "Merge conflict detected in merge tree analysis",
       null,
     );
-    expect(result).not.toBeNull();
-    expect(result.fix_class).toBe("merge_conflict");
+    expect(result).toBeNull();
+  });
+
+  test("does NOT classify CONFLICT (content): output as deterministic", () => {
+    const result = checkDeterministicErrors(
+      "CONFLICT (content): Merge conflict in src/foo.ts",
+      null,
+    );
+    expect(result).toBeNull();
+  });
+
+  test("does NOT classify rebase conflict output as deterministic", () => {
+    const result = checkDeterministicErrors(
+      "error: could not apply abc1234... feat: add thing",
+      null,
+    );
+    expect(result).toBeNull();
   });
 
   test("detects orphan-sweep-stale via failureReason", () => {
     const result = checkDeterministicErrors(null, "orphan-sweep-stale");
     expect(result).not.toBeNull();
     expect(result.fix_class).toBe("orphan_stale");
+  });
+
+  // merge-conflict / rebase-failed failureReasons fall through to bounded-LLM
+  test("returns null for merge-conflict failureReason (falls to bounded-LLM)", () => {
+    const result = checkDeterministicErrors(null, "merge-conflict");
+    expect(result).toBeNull();
+  });
+
+  test("returns null for rebase-failed failureReason (falls to bounded-LLM)", () => {
+    const result = checkDeterministicErrors(null, "rebase-failed");
+    expect(result).toBeNull();
   });
 
   test("returns null for unknown errors", () => {
@@ -44,12 +73,91 @@ describe("checkDeterministicErrors", () => {
 });
 
 describe("checkBoundedLlmFixes", () => {
+  // ── Merge / rebase conflict patterns ───────────────────────────────────────
+  test("detects conflict.*merge.*tree log pattern as bounded-LLM", () => {
+    const result = checkBoundedLlmFixes("Merge conflict detected in merge tree analysis", null, {});
+    expect(result).not.toBeNull();
+    expect(result.reason).toContain("Merge/rebase conflict");
+    expect(result.brief).toContain("Read both sides");
+  });
+
+  test("detects CONFLICT (content): git output as bounded-LLM", () => {
+    const result = checkBoundedLlmFixes(
+      "CONFLICT (content): Merge conflict in src/app/server.ts",
+      null,
+      {},
+    );
+    expect(result).not.toBeNull();
+    expect(result.reason).toContain("Merge/rebase conflict");
+  });
+
+  test("detects 'merge conflict in' git output as bounded-LLM", () => {
+    const result = checkBoundedLlmFixes(
+      "Auto-merging src/foo.ts\nmerge conflict in src/foo.ts",
+      null,
+      {},
+    );
+    expect(result).not.toBeNull();
+    expect(result.reason).toContain("Merge/rebase conflict");
+  });
+
+  test("detects 'could not apply' rebase failure as bounded-LLM", () => {
+    const result = checkBoundedLlmFixes(
+      "error: could not apply abc1234... feat: add thing",
+      null,
+      {},
+    );
+    expect(result).not.toBeNull();
+    expect(result.reason).toContain("Merge/rebase conflict");
+  });
+
+  test("detects rebase.*conflict pattern as bounded-LLM", () => {
+    const result = checkBoundedLlmFixes("rebase conflict encountered during merge", null, {});
+    expect(result).not.toBeNull();
+    expect(result.reason).toContain("Merge/rebase conflict");
+  });
+
+  test("detects merge-conflict failureReason via signal as bounded-LLM", () => {
+    const result = checkBoundedLlmFixes(null, null, { failureReason: "merge-conflict" });
+    expect(result).not.toBeNull();
+    expect(result.reason).toContain("Merge/rebase conflict");
+  });
+
+  test("detects rebase-failed failureReason via signal as bounded-LLM", () => {
+    const result = checkBoundedLlmFixes(null, null, { failureReason: "rebase-failed" });
+    expect(result).not.toBeNull();
+    expect(result.reason).toContain("Merge/rebase conflict");
+  });
+
+  // ── Stale branch / stale PR ────────────────────────────────────────────────
   test("detects stale main pattern", () => {
     const result = checkBoundedLlmFixes("Your branch is stale with respect to main", null, {});
     expect(result).not.toBeNull();
     expect(result.reason).toContain("diverged from origin/main");
+    expect(result.brief).toContain("git fetch origin");
   });
 
+  test("detects stale-pr failureReason via signal", () => {
+    const result = checkBoundedLlmFixes(null, null, { failureReason: "stale-pr" });
+    expect(result).not.toBeNull();
+    expect(result.reason).toContain("diverged from origin/main");
+  });
+
+  // ── CI failure after rebase ────────────────────────────────────────────────
+  test("detects CI failure pattern as bounded-LLM", () => {
+    const result = checkBoundedLlmFixes("Check suite failed: CI tests failed on push", null, {});
+    expect(result).not.toBeNull();
+    expect(result.reason).toContain("CI failure");
+    expect(result.brief).toContain("gh run view");
+  });
+
+  test("detects ci-failure-after-rebase failureReason via signal", () => {
+    const result = checkBoundedLlmFixes(null, null, { failureReason: "ci-failure-after-rebase" });
+    expect(result).not.toBeNull();
+    expect(result.reason).toContain("CI failure");
+  });
+
+  // ── Package / TypeScript ───────────────────────────────────────────────────
   test("detects bun install pattern", () => {
     const result = checkBoundedLlmFixes(
       "Cannot find package pino; bun install required",
@@ -78,6 +186,37 @@ describe("checkBoundedLlmFixes", () => {
   test("returns null for unknown fixes", () => {
     const result = checkBoundedLlmFixes("mysterious error", null, {});
     expect(result).toBeNull();
+  });
+});
+
+describe("generateRemediateBrief", () => {
+  test("merge-conflict brief instructs agent to read both sides", () => {
+    const brief = generateRemediateBrief("merge-conflict");
+    expect(brief).toContain("Read both sides");
+    expect(brief).toContain("Only return HUMAN if");
+    expect(brief).toContain("already-merged feature");
+  });
+
+  test("stale-branch brief instructs rebase", () => {
+    const brief = generateRemediateBrief("stale-branch");
+    expect(brief).toContain("git fetch origin");
+    expect(brief).toContain("git rebase");
+  });
+
+  test("ci-failure brief instructs reading CI logs", () => {
+    const brief = generateRemediateBrief("ci-failure");
+    expect(brief).toContain("gh run view");
+  });
+
+  test("bun-install brief is concise", () => {
+    const brief = generateRemediateBrief("bun-install");
+    expect(brief).toContain("bun install");
+  });
+
+  test("unknown category returns fallback string", () => {
+    const brief = generateRemediateBrief("totally-unknown");
+    expect(brief).toContain("totally-unknown");
+    expect(brief).toContain("retry the phase");
   });
 });
 
@@ -114,9 +253,46 @@ describe("defaultClassifyTicket", () => {
     expect(result.fix_class).toBe("push_rejected_no_workflow_scope");
   });
 
-  test("classifies bounded-LLM as fix", () => {
+  test("classifies stale-main as bounded-LLM fix", () => {
     const result = defaultClassifyTicket({
       logsOutput: "Your branch is stale with respect to main",
+    });
+    expect(result.decision).toBe("fix");
+    expect(result.fix_class).toBe("bounded-llm");
+  });
+
+  // CTL-1176: merge conflicts → BOUNDED-LLM, not HUMAN
+  test("classifies merge conflict log output as bounded-LLM fix (not escalate)", () => {
+    const result = defaultClassifyTicket({
+      logsOutput: "CONFLICT (content): Merge conflict in src/server.ts",
+    });
+    expect(result.decision).toBe("fix");
+    expect(result.fix_class).toBe("bounded-llm");
+    expect(result.details.brief).toContain("Read both sides");
+  });
+
+  test("classifies merge-conflict failureReason as bounded-LLM fix", () => {
+    const result = defaultClassifyTicket({
+      logsOutput: null,
+      signal: { failureReason: "merge-conflict" },
+    });
+    expect(result.decision).toBe("fix");
+    expect(result.fix_class).toBe("bounded-llm");
+  });
+
+  test("classifies rebase-failed failureReason as bounded-LLM fix", () => {
+    const result = defaultClassifyTicket({
+      logsOutput: null,
+      signal: { failureReason: "rebase-failed" },
+    });
+    expect(result.decision).toBe("fix");
+    expect(result.fix_class).toBe("bounded-llm");
+  });
+
+  test("classifies ci-failure-after-rebase as bounded-LLM fix", () => {
+    const result = defaultClassifyTicket({
+      logsOutput: null,
+      signal: { failureReason: "ci-failure-after-rebase" },
     });
     expect(result.decision).toBe("fix");
     expect(result.fix_class).toBe("bounded-llm");
