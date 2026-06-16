@@ -46,15 +46,28 @@ export const KNOWN_PHASES = Object.freeze([
   "teardown",
 ]);
 
-// Documented exceptions: phase-slot strings that match PHASE_EVENT_PATTERN but
-// are NOT in KNOWN_PHASES. Each exception MUST be listed here with its rationale.
+// Documented exceptions: phase-slot strings that appear in recovery.mjs's
+// `buildEventEnvelope({ phase: "<slot>", ... })` calls but are NOT in KNOWN_PHASES.
+// Each exception MUST be listed here with its rationale.
 //
-//   "dispatch" — recovery.mjs:805 emits `phase.dispatch.failed.<ticket>` to mark
-//     a dispatch-level failure before a real phase worker starts. The real phase
-//     rides payload.target_phase. No broker phase_lifecycle interest lists
-//     "dispatch" as a phase name, so it is harmless; but it must be an explicit,
-//     auditable entry rather than a silent tolerance.
-export const INTENTIONAL_PHASE_SLOT_EXCEPTIONS = Object.freeze(["dispatch"]);
+//   "dispatch" — recovery.mjs emits `phase.dispatch.failed.<ticket>` to mark a
+//     dispatch-level failure before a real phase worker starts. The real phase
+//     rides payload.target_phase. This is the only slot that matches
+//     PHASE_EVENT_PATTERN's terminal-action suffix (failed); no phase_lifecycle
+//     interest lists "dispatch", so it is harmless today but must be explicit.
+//   "scheduler" — recovery.mjs emits `phase.scheduler.yield-file-skip.<ticket>`,
+//     `phase.scheduler.cooldown-gc.<ticket>`, etc. — scheduler-internal
+//     observability events. Their action suffixes ("yield-file-skip", "held", …)
+//     do NOT match PHASE_EVENT_PATTERN's (complete|failed|…) set, so they create
+//     no routing collisions. Listed here for completeness.
+//   "advance" — recovery.mjs emits `phase.advance.held.<ticket>` when the
+//     phase-advance step is blocked by a safety gate. Same as "scheduler": the
+//     action "held" does not match PHASE_EVENT_PATTERN's routing suffixes.
+export const INTENTIONAL_PHASE_SLOT_EXCEPTIONS = Object.freeze([
+  "dispatch",
+  "scheduler",
+  "advance",
+]);
 
 // CTL-484: turn-cap-exhausted is routed alongside complete/failed so the
 // orchestrator can dispatch a continuation worker (separate budget from the
