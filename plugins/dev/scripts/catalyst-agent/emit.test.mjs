@@ -438,3 +438,99 @@ describe("shortHostname", () => {
     expect(env.resource.hostname.endsWith(".local")).toBe(false);
   });
 });
+
+// ─── OTLP metrics transport (CTL-1227) ───────────────────────────────────────
+import { otlpMetric, sendOtlpMetrics, emitMetrics, metricResource } from "./emit.mjs";
+
+describe("otlpMetric — semconv metric shape", () => {
+  test("gauge wraps points under .gauge with asDouble + dropped-null attrs", () => {
+    const m = otlpMetric({
+      name: "system.cpu.utilization",
+      unit: "1",
+      kind: "gauge",
+      points: [{ value: 0.5, attrs: { "system.cpu.state": "used", absent: null }, timeUnixNano: "1000" }],
+    });
+    expect(m.name).toBe("system.cpu.utilization");
+    expect(m.unit).toBe("1");
+    expect(m.gauge.dataPoints[0].asDouble).toBe(0.5);
+    expect(m.gauge.dataPoints[0].timeUnixNano).toBe("1000");
+    // null attr dropped; non-null kept
+    const keys = m.gauge.dataPoints[0].attributes.map((a) => a.key);
+    expect(keys).toContain("system.cpu.state");
+    expect(keys).not.toContain("absent");
+  });
+
+  test("sum is non-monotonic cumulative by default", () => {
+    const m = otlpMetric({ name: "system.filesystem.usage", unit: "By", kind: "sum", points: [{ value: 10, timeUnixNano: "1" }] });
+    expect(m.sum.isMonotonic).toBe(false);
+    expect(m.sum.aggregationTemporality).toBe(2);
+  });
+
+  test("points with null / non-finite values are dropped; a metric with no points returns null", () => {
+    const m = otlpMetric({
+      name: "system.memory.usage",
+      unit: "By",
+      kind: "sum",
+      points: [
+        { value: 100, attrs: { "system.memory.state": "used" }, timeUnixNano: "1" },
+        { value: null, attrs: { "system.memory.state": "free" }, timeUnixNano: "1" },
+      ],
+    });
+    expect(m.sum.dataPoints.length).toBe(1);
+    expect(otlpMetric({ name: "x", kind: "gauge", points: [{ value: null, timeUnixNano: "1" }] })).toBe(null);
+    expect(otlpMetric({ name: "x", kind: "gauge", points: [] })).toBe(null);
+  });
+});
+
+describe("sendOtlpMetrics — OTLP /v1/metrics POST", () => {
+  const metric = otlpMetric({ name: "system.cpu.utilization", unit: "1", kind: "gauge", points: [{ value: 0.25, timeUnixNano: "5" }] });
+
+  test("POSTs resourceMetrics → scopeMetrics → metrics to <endpoint>/v1/metrics", async () => {
+    let captured;
+    const fetchImpl = async (url, opts) => {
+      captured = { url, body: JSON.parse(opts.body), headers: opts.headers };
+      return { status: 200 };
+    };
+    const ok = await sendOtlpMetrics([metric], { endpoint: "http://collector:4318/", fetchImpl });
+    expect(ok).toBe(true);
+    expect(captured.url).toBe("http://collector:4318/v1/metrics"); // trailing slash collapsed
+    const rm = captured.body.resourceMetrics[0];
+    expect(rm.scopeMetrics[0].scope.name).toBe("catalyst-agent");
+    expect(rm.scopeMetrics[0].metrics[0].name).toBe("system.cpu.utilization");
+    expect(rm.resource.attributes.some((a) => a.key === "service.name")).toBe(true);
+  });
+
+  test("no endpoint / empty metrics / null-filtered → false (no POST)", async () => {
+    const fetchImpl = async () => ({ status: 200 });
+    expect(await sendOtlpMetrics([metric], { endpoint: "", fetchImpl })).toBe(false);
+    expect(await sendOtlpMetrics([], { endpoint: "http://c/", fetchImpl })).toBe(false);
+    expect(await sendOtlpMetrics([null, null], { endpoint: "http://c/", fetchImpl })).toBe(false);
+  });
+
+  test("non-2xx → false; a throwing fetch is swallowed → false (never throws)", async () => {
+    expect(await sendOtlpMetrics([metric], { endpoint: "http://c", fetchImpl: async () => ({ status: 500 }) })).toBe(false);
+    expect(await sendOtlpMetrics([metric], { endpoint: "http://c", fetchImpl: async () => { throw new Error("down"); } })).toBe(false);
+  });
+
+  test("metricResource carries the service + host identity", () => {
+    const r = metricResource();
+    expect(r["service.name"]).toBe("catalyst.agent");
+    expect(r["service.namespace"]).toBe("catalyst");
+    expect(typeof r.hostname).toBe("string");
+  });
+});
+
+describe("emitMetrics — endpoint gating (decoupled from event emit mode)", () => {
+  const metric = otlpMetric({ name: "m", unit: "1", kind: "gauge", points: [{ value: 1, timeUnixNano: "1" }] });
+  test("no metrics endpoint → null (even in otlp/both event mode)", () => {
+    expect(emitMetrics([metric], { emit: "eventlog" })).toBe(null);
+    expect(emitMetrics([metric], { emit: "otlp", otlpEndpoint: null, metricsEndpoint: null })).toBe(null);
+    expect(emitMetrics([metric], { emit: "both", metricsEndpoint: null })).toBe(null);
+  });
+  test("metricsEndpoint set → emits, EVEN when the event mode is eventlog-only (the CTL-1227 fix)", () => {
+    expect(emitMetrics([metric], { emit: "eventlog", metricsEndpoint: "http://c:4318" })).not.toBe(null);
+  });
+  test("falls back to otlpEndpoint when metricsEndpoint is unset", () => {
+    expect(emitMetrics([metric], { emit: "eventlog", otlpEndpoint: "http://c:4318" })).not.toBe(null);
+  });
+});

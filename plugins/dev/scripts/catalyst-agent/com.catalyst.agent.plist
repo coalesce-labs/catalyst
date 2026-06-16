@@ -34,6 +34,10 @@
     <string>REPLACE_WITH_PATH</string>
     <key>HOME</key>
     <string>REPLACE_WITH_HOME</string>
+    <!-- CTL-1227: OTLP metrics endpoint (HTTP /v1/metrics). Decoupled from the
+         event-log path; empty disables metric emission. -->
+    <key>CATALYST_AGENT_METRICS_ENDPOINT</key>
+    <string>REPLACE_WITH_METRICS_ENDPOINT</string>
   </dict>
 
   <key>RunAtLoad</key>

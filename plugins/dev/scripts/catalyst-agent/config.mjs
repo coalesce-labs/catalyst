@@ -105,6 +105,13 @@ export function readAgentConfig() {
     emit,
     otlpEndpoint: process.env.CATALYST_AGENT_OTLP_ENDPOINT || null,
     otlpHeaders: parseHeaders(process.env.CATALYST_AGENT_OTLP_HEADERS),
+    // CTL-1227: metrics have NO eventlog path — they only flow via OTLP /v1/metrics.
+    // So metric emission is decoupled from the event `emit` mode: post whenever a
+    // metrics endpoint is resolvable. Dedicated CATALYST_AGENT_METRICS_ENDPOINT,
+    // falling back to the shared OTLP endpoint. (Events keep shipping via the
+    // catalyst-otel-forward → /v1/logs path in eventlog mode.)
+    metricsEndpoint:
+      process.env.CATALYST_AGENT_METRICS_ENDPOINT || process.env.CATALYST_AGENT_OTLP_ENDPOINT || null,
     intervalMs,
     topN,
     // Per-domain toggles default ON; "0" is the explicit opt-out (mirrors the
