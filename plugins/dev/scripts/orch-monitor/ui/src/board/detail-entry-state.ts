@@ -35,6 +35,12 @@ export interface DetailEntryState {
    *  (`data-shell-scroll`). 0 on a fresh push (top); a real offset on a traversed
    *  entry (back/forward restoration). */
   scrollY: number;
+  /** Saved vertical scrollTop per flat-board column, keyed by `col.key` (CTL-1206).
+   *  Only populated when the flat (ungrouped) board is active. An absent key means
+   *  0 (top); a present value is the last saved scrollTop for that column. Rides
+   *  inside the same per-entry atom that is already LRU-bounded, so no new unbounded
+   *  growth. */
+  colScrollY: Record<string, number>;
 }
 
 /** The fresh-push defaults: Spec tab, ALL rail sections expanded, scrolled to top.
@@ -44,12 +50,13 @@ export const DETAIL_ENTRY_DEFAULTS: DetailEntryState = {
   activeTab: "spec",
   railExpanded: {},
   scrollY: 0,
+  colScrollY: {},
 };
 
 /** A fresh, independent copy of the defaults (never share the object reference —
  *  each entry's atom owns its own mutable snapshot). */
 export function freshEntryState(): DetailEntryState {
-  return { activeTab: "spec", railExpanded: {}, scrollY: 0 };
+  return { activeTab: "spec", railExpanded: {}, scrollY: 0, colScrollY: {} };
 }
 
 /** Resolve whether a rail section is expanded for an entry: an explicit stored
@@ -68,6 +75,22 @@ export function setRailSection(
   expanded: boolean,
 ): DetailEntryState {
   return { ...state, railExpanded: { ...state.railExpanded, [sectionId]: expanded } };
+}
+
+/** The saved vertical scrollTop for a flat-board column, keyed by `col.key`
+ *  (CTL-1206). Absent column → 0 (top), the fresh default. */
+export function colScrollFor(state: DetailEntryState, colKey: string): number {
+  return state.colScrollY[colKey] ?? 0;
+}
+
+/** Return a new state with `colKey`'s saved scrollTop set to `y` (immutable
+ *  update — the jotai setter replaces the atom value). CTL-1206. */
+export function setColScroll(
+  state: DetailEntryState,
+  colKey: string,
+  y: number,
+): DetailEntryState {
+  return { ...state, colScrollY: { ...state.colScrollY, [colKey]: y } };
 }
 
 // ── bounded memory (LRU over live entry keys) ────────────────────────────────

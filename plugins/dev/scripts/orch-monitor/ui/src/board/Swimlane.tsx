@@ -64,6 +64,7 @@
 // the lanes into one CSS grid. Hand-rolled inline styles per DESIGN.md, reusing
 // the shared `C` token object + the `.catalyst-live-dot` pulse.
 import { Fragment, useEffect, useLayoutEffect, useRef, useState, type ReactNode, type RefObject } from "react";
+import { useColScrollState } from "../hooks/use-col-scroll-state";
 import { AnimatePresence } from "motion/react";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { C, LIVE, TRAY_LIFT } from "./board-tokens";
@@ -300,6 +301,7 @@ function FlatColumnsBoard({
   cells: LaneCell[];
   bumpRef: RefObject<HTMLDivElement | null>;
 }) {
+  useColScrollState(bumpRef); // CTL-1206
   return (
     <div
       ref={bumpRef}
@@ -339,6 +341,7 @@ function FlatColumnsBoard({
             <div
               className="cat-overlay-scroll"
               data-flat-col-scroll="true"
+              data-col-key={col.key}
               style={{
                 flex: 1,
                 minHeight: 0,
