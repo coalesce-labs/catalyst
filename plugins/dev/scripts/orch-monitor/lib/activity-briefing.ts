@@ -4,6 +4,7 @@ import type { SummarizeConfig } from "./summarize/config";
 import { getProvider, type SummarizeProvider } from "./summarize/providers";
 import { createCache, type Cache } from "./summarize/cache";
 import type { CanonicalEvent } from "./canonical-event";
+import type { EventRing } from "./event-ring";
 
 export type ActivityWindow = "30m" | "1h" | "6h";
 
@@ -109,14 +110,41 @@ export function projectCanonical(line: string): RawEvent | null {
   return { ts, event: eventName, orchestrator: orch, worker, detail };
 }
 
+/**
+ * Project the in-window RawEvents.
+ *
+ * CTL-1215: when a shared event ring is supplied AND it retains history reaching
+ * back past the window cutoff (`oldestTs() <= cutoff`), the events are projected
+ * from the in-memory ring — no `readFileSync` of the (178 MB+) current-month
+ * file. When no ring is supplied, or the ring underflows the window (cold start /
+ * very high event rate; the 6h window can exceed the ring's span at peak), it
+ * falls back to the original two-file scan unchanged, so the result is always
+ * correct (underflow degrades to current behavior, never to missing events).
+ */
 export function readActivityEvents(
   catalystDir: string,
   windowMs: number,
+  ring?: EventRing | null,
   now: Date = new Date(),
 ): RawEvent[] {
   const cutoff = new Date(now.getTime() - windowMs);
   const cutoffIso = cutoff.toISOString();
 
+  // Ring fast-path: only when the ring's retained history fully covers the
+  // window. A null oldestTs (empty ring) cannot cover it → fallback.
+  const oldest = ring ? ring.oldestTs() : null;
+  if (ring && oldest !== null && oldest <= cutoffIso) {
+    const events: RawEvent[] = [];
+    for (const line of ring.query({ sinceTs: cutoffIso })) {
+      const evt = projectCanonical(line);
+      if (evt === null) continue;
+      // sinceTs already filters by raw ts; projectCanonical re-confirms the ts.
+      if (evt.ts >= cutoffIso) events.push(evt);
+    }
+    return events;
+  }
+
+  // File fallback (no ring, or ring underflows the window).
   const currentPath = monthlyPath(catalystDir, now);
   const prevPath = monthlyPath(catalystDir, cutoff);
   const paths = currentPath === prevPath ? [currentPath] : [prevPath, currentPath];
@@ -310,6 +338,7 @@ export async function generateActivityBriefing(
   config: SummarizeConfig,
   window: ActivityWindow = "30m",
   overrideProvider?: SummarizeProvider,
+  ring?: EventRing | null,
 ): Promise<ActivityBriefingResult | ActivityBriefingDisabled> {
   if (!config.enabled) return { enabled: false };
 
@@ -328,7 +357,7 @@ export async function generateActivityBriefing(
   const promise = (async (): Promise<ActivityBriefingResult> => {
     try {
       const windowMs = parseWindowMs(window);
-      const events = readActivityEvents(catalystDir, windowMs);
+      const events = readActivityEvents(catalystDir, windowMs, ring);
       const preprocessed = preprocessEvents(events);
       preprocessed.windowLabel = window;
 

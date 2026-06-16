@@ -19,6 +19,7 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 import { createFilterStream } from "./event-filter";
+import type { EventRing } from "./event-ring";
 
 function monthlyPath(catalystDir: string, d: Date): string {
   const y = d.getUTCFullYear();
@@ -164,8 +165,47 @@ export interface TunnelEventStats {
   eventCount24hByRepo: Record<string, number>;
 }
 
+/** Accumulate the github.* counts from one raw JSONL line into `acc`. */
+function accumulateGithubStat(
+  line: string,
+  cutoffIso: string,
+  acc: TunnelEventStats,
+): void {
+  if (!line.trim()) return;
+  let evt: Record<string, unknown>;
+  try {
+    evt = JSON.parse(line) as Record<string, unknown>;
+  } catch {
+    return;
+  }
+  // CTL-300: canonical envelope — event name lives at attributes."event.name"
+  // and repo lives at attributes."vcs.repository.name".
+  const attrs = evt.attributes as Record<string, unknown> | undefined;
+  const eventName = attrs ? attrs["event.name"] : undefined;
+  if (typeof eventName !== "string" || !eventName.startsWith("github.")) return;
+
+  const ts = typeof evt.ts === "string" ? evt.ts : null;
+  if (ts === null) return;
+  if (acc.lastEventAt === null || ts > acc.lastEventAt) acc.lastEventAt = ts;
+  if (ts >= cutoffIso) {
+    acc.eventCount24h++;
+    const repo = attrs ? attrs["vcs.repository.name"] : undefined;
+    if (typeof repo === "string" && repo.length > 0) {
+      acc.eventCount24hByRepo[repo] = (acc.eventCount24hByRepo[repo] ?? 0) + 1;
+    }
+  }
+}
+
 /**
- * Synchronously scans monthly event log files for github.* events.
+ * Synchronously computes github.* tunnel stats over the last 24h.
+ *
+ * CTL-1215: when a shared event ring is supplied AND it retains history reaching
+ * back past the 24h cutoff (`oldestTs() <= cutoff`), the counts are computed by
+ * scanning the in-memory ring — no `readFileSync` of the (178 MB+) current-month
+ * file. When no ring is supplied, or the ring underflows the window (cold start /
+ * very high event rate), it falls back to the original two-file scan unchanged,
+ * so counts are always correct (underflow degrades to current behavior, never to
+ * wrong counts).
  *
  * Reads the current month's JSONL and, when the 24h window spans a month
  * boundary, the previous month's file too. Uses JSON.parse per line (no jq
@@ -173,18 +213,34 @@ export interface TunnelEventStats {
  */
 export function readTunnelEventStats(
   catalystDir: string,
+  ring?: EventRing | null,
   now: () => Date = () => new Date(),
 ): TunnelEventStats {
   const nowDate = now();
   const cutoff24h = new Date(nowDate.getTime() - 24 * 60 * 60 * 1000);
+  const cutoffIso = cutoff24h.toISOString();
 
+  const acc: TunnelEventStats = {
+    lastEventAt: null,
+    eventCount24h: 0,
+    eventCount24hByRepo: {},
+  };
+
+  // Ring fast-path: only when the ring's retained history fully covers the
+  // window. oldestTs() === cutoff or earlier means no in-window event predates
+  // the ring. A null oldestTs (empty ring) cannot cover the window → fallback.
+  const oldest = ring ? ring.oldestTs() : null;
+  if (ring && oldest !== null && oldest <= cutoffIso) {
+    for (const line of ring.query()) {
+      accumulateGithubStat(line, cutoffIso, acc);
+    }
+    return acc;
+  }
+
+  // File fallback (no ring, or ring underflows the 24h window).
   const currentPath = monthlyPath(catalystDir, nowDate);
   const prevPath = monthlyPath(catalystDir, cutoff24h);
   const paths = currentPath === prevPath ? [currentPath] : [prevPath, currentPath];
-
-  let lastEventAt: string | null = null;
-  let eventCount24h = 0;
-  const eventCount24hByRepo: Record<string, number> = {};
 
   for (const filePath of paths) {
     if (!existsSync(filePath)) continue;
@@ -195,34 +251,9 @@ export function readTunnelEventStats(
       continue;
     }
     for (const line of text.split("\n")) {
-      if (!line.trim()) continue;
-      let evt: Record<string, unknown>;
-      try {
-        evt = JSON.parse(line) as Record<string, unknown>;
-      } catch {
-        continue;
-      }
-      // CTL-300: canonical envelope — event name lives at attributes."event.name"
-      // and repo lives at attributes."vcs.repository.name".
-      const attrs = evt.attributes as Record<string, unknown> | undefined;
-      const eventName = attrs ? attrs["event.name"] : undefined;
-      if (typeof eventName !== "string" || !eventName.startsWith("github.")) {
-        continue;
-      }
-
-      const ts = typeof evt.ts === "string" ? evt.ts : null;
-      if (ts !== null) {
-        if (lastEventAt === null || ts > lastEventAt) lastEventAt = ts;
-        if (ts >= cutoff24h.toISOString()) {
-          eventCount24h++;
-          const repo = attrs ? attrs["vcs.repository.name"] : undefined;
-          if (typeof repo === "string" && repo.length > 0) {
-            eventCount24hByRepo[repo] = (eventCount24hByRepo[repo] ?? 0) + 1;
-          }
-        }
-      }
+      accumulateGithubStat(line, cutoffIso, acc);
     }
   }
 
-  return { lastEventAt, eventCount24h, eventCount24hByRepo };
+  return acc;
 }

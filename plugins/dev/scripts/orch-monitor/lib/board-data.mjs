@@ -456,7 +456,21 @@ const STUCK_MS = 1_800_000; // no transcript activity for 30m → likely abandon
 // CTL-733: a session's transcript path is stable once it exists, so memoize the
 // (expensive) ~1.5k-project-dir scan. Only cache HITS — a brand-new worker whose
 // transcript dir is created after a miss must still be found on a later pass.
+// CTL-1215: bound the map. The growth driver is distinct session UUIDs ever
+// seen (one permanent entry each, previously unbounded). The path is stable
+// once set so no TTL is needed — a pure insertion-order LRU cap suffices. The
+// fleet runs low-tens of live workers; 1000 retains many recently-seen sessions
+// while bounding the map to ~1000 short path strings.
+const TRANSCRIPT_CACHE_CAP = 1000;
 const _transcriptPathCache = new Map(); // sessionId -> absolute path
+
+// _capTranscriptCache — insertion-order LRU evict (Map preserves insertion order
+// so the first key is the oldest). Call after each _transcriptPathCache.set(...).
+function _capTranscriptCache() {
+  while (_transcriptPathCache.size > TRANSCRIPT_CACHE_CAP) {
+    _transcriptPathCache.delete(_transcriptPathCache.keys().next().value);
+  }
+}
 
 // CTL-887 (BFF5): cache-only peek so the live-tail SSE endpoint resolves a
 // running worker's transcript without ever triggering the ~1.5k-dir scan —
@@ -466,6 +480,24 @@ const _transcriptPathCache = new Map(); // sessionId -> absolute path
 export function peekTranscriptCache(sessionId) {
   if (!sessionId) return null;
   return _transcriptPathCache.get(sessionId) ?? null;
+}
+
+// ── CTL-1215: transcript-cache bound introspection (tests + future sweeps) ──
+// The LRU cap fires inside resolveTranscript's HIT path, but HOME is captured at
+// module scope via os.homedir() (not process.env.HOME), so a unit test can't
+// redirect the scan to a temp dir. These thin exports drive the same set + cap
+// path deterministically. TRANSCRIPT_CACHE_CAP is exported so the test asserts
+// against the real bound rather than a duplicated literal.
+export { TRANSCRIPT_CACHE_CAP };
+export function _seedTranscriptCacheForTest(sessionId, path) {
+  _transcriptPathCache.set(sessionId, path);
+  _capTranscriptCache();
+}
+export function _getTranscriptCacheSize() {
+  return _transcriptPathCache.size;
+}
+export function _clearTranscriptCache() {
+  _transcriptPathCache.clear();
 }
 
 export async function resolveTranscript(sessionId) {
@@ -484,6 +516,7 @@ export async function resolveTranscript(sessionId) {
     const candidate = join(projectsDir, e.name, `${sessionId}.jsonl`);
     if (await exists(candidate)) {
       _transcriptPathCache.set(sessionId, candidate);
+      _capTranscriptCache();
       return candidate;
     }
   }

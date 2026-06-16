@@ -73,8 +73,16 @@ export function fillTitleDescriptionFallback(
   ticketIds: string[],
 ): Promise<Record<string, TitleDescription>>;
 
+/** CTL-1215: hard size cap (insertion-order LRU) on the in-memory cache. */
+export const TITLE_DESC_CAP: number;
+
 // Test / webhook helpers.
 /** Clear one ticket's cache entry (id given) or the whole cache (id omitted). */
 export function _clearTitleDescCache(id?: string): void;
 /** Current number of cached ticket entries. */
 export function _getTitleDescCacheSize(): number;
+/**
+ * CTL-1215: evict entries whose per-entry TTL has elapsed. Returns the count
+ * removed. `now` is injectable for tests; a setInterval in server.ts calls it.
+ */
+export function _sweepTitleDescCache(now?: number): number;
