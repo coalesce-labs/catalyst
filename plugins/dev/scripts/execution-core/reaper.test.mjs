@@ -16,6 +16,9 @@ import {
   getAgentsCached,
   resetLivenessCache,
 } from "./claude-agents.mjs";
+import { mkdtempSync, mkdirSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 function silentLog() {
   return { info: () => {}, warn: () => {}, error: () => {} };
@@ -639,6 +642,99 @@ describe("Reaper._handlePrMergedCleanup", () => {
     expect(brDelete).not.toHaveBeenCalled();
     expect(emitted.find((e) => e.evt === "worktree.cleanup-deferred")).toBeTruthy();
     expect(emitted.find((e) => e.evt === "pr.merged.cleanup-failed")).toBeTruthy();
+  });
+});
+
+// CTL-1218 Part A — defaultAssessWorktreeRemoval must thread an injected orchDirs
+// array into hasOrchProvenance so the LIVE daemon's execution-core worker layout
+// (~/catalyst/execution-core/workers/<ticket>/) is recognized as provenance. The
+// pre-1218 bare call only scanned ~/catalyst/runs/, so every daemon-created
+// squash-merged worktree was "unknown-provenance" → defer forever.
+describe("defaultAssessWorktreeRemoval — orchDirs provenance threading (CTL-1218 Part A)", () => {
+  it("threads injected orchDirs into hasOrchProvenance (execution-core layout → NOT unknown-provenance)", async () => {
+    const orch = mkdtempSync(join(tmpdir(), "ctl1218-orchA-"));
+    mkdirSync(join(orch, "workers", "CTL-1"), { recursive: true });
+    try {
+      // worktree_path points at a NON-git tmp dir so the git probes fail closed
+      // deterministically; we assert ONLY on the provenance reason (Part A's scope).
+      const verdict = await defaultAssessWorktreeRemoval(
+        { worktree_path: orch, ticket: "CTL-1", branch: "CTL-1", force: true },
+        () => ({ ok: true, agents: [] }),
+        [orch],
+      );
+      expect(verdict.reasons).not.toContain("unknown-provenance");
+    } finally {
+      rmSync(orch, { recursive: true, force: true });
+    }
+  });
+
+  it("with NO orchDirs arg + a ticket only in the execution-core layout → unknown-provenance (documents the default)", async () => {
+    // No third arg → falls back to listOrchDirs() (~/catalyst/runs/). A ticket
+    // that exists only under an execution-core-style dir is NOT found there.
+    const verdict = await defaultAssessWorktreeRemoval(
+      { worktree_path: "/nonexistent/wt/CTL-ZZZ-1218", ticket: "CTL-ZZZ-1218", branch: "b", force: true },
+      () => ({ ok: true, agents: [] }),
+    );
+    expect(verdict.reasons).toContain("unknown-provenance");
+  });
+});
+
+// CTL-1218 Part B — prMerged must reflect the REAL GitHub PR state, confirmed via
+// an injectable prView seam, so the automated producers (J1, 600s timer) that emit
+// WITHOUT event.force still pass the merge gate for a genuinely-merged PR. The gate
+// stays fail-closed: any unresolvable PR / gh error keeps prMerged false.
+describe("defaultAssessWorktreeRemoval — prView merge confirmation (CTL-1218 Part B)", () => {
+  // Inject a resolvePr stub that always names a PR so prView is consulted, and
+  // drive readAgents to a trusted-empty fleet. worktree_path is a non-git tmp dir
+  // (git probes fail closed) — we assert ONLY on the "not-merged" membership.
+  const PR = { number: 42, url: "https://x/42" };
+  const assessWithPrView = (prViewResult, { force = false } = {}) =>
+    defaultAssessWorktreeRemoval(
+      { worktree_path: "/nonexistent/wt/CTL-1", ticket: "CTL-1", branch: "CTL-1", ...(force ? { force: true } : {}) },
+      () => ({ ok: true, agents: [] }),
+      [],
+      typeof prViewResult === "function" ? prViewResult : () => prViewResult,
+      () => PR,
+    );
+
+  it("prMerged true when prView reports state MERGED (no event.force) → NOT not-merged", async () => {
+    const verdict = await assessWithPrView({ state: "MERGED", mergedAt: "2026-06-16T00:00:00Z" });
+    expect(verdict.reasons).not.toContain("not-merged");
+  });
+
+  it("prMerged true when prView reports mergedAt non-null even if state not MERGED (dual-field)", async () => {
+    const verdict = await assessWithPrView({ state: "UNKNOWN", mergedAt: "2026-06-16T00:00:00Z" });
+    expect(verdict.reasons).not.toContain("not-merged");
+  });
+
+  it("prMerged false → not-merged when prView reports OPEN", async () => {
+    const verdict = await assessWithPrView({ state: "OPEN", mergedAt: null });
+    expect(verdict.reasons).toContain("not-merged");
+  });
+
+  it("prView failure (throws) is fail-closed → not-merged (never optimistic)", async () => {
+    const verdict = await assessWithPrView(() => { throw new Error("gh boom"); });
+    expect(verdict.reasons).toContain("not-merged");
+  });
+
+  it("an unresolvable PR (resolvePr → null) → not-merged (prView never consulted)", async () => {
+    let prViewCalls = 0;
+    const verdict = await defaultAssessWorktreeRemoval(
+      { worktree_path: "/nonexistent/wt/CTL-1", ticket: "CTL-1", branch: "CTL-1" },
+      () => ({ ok: true, agents: [] }),
+      [],
+      () => { prViewCalls++; return { state: "MERGED" }; },
+      () => null, // no PR resolvable
+    );
+    expect(verdict.reasons).toContain("not-merged");
+    expect(prViewCalls).toBe(0);
+  });
+
+  it("event.force === true keeps the merged fast-path (prView NOT consulted)", async () => {
+    let prViewCalls = 0;
+    const verdict = await assessWithPrView(() => { prViewCalls++; return { state: "OPEN", mergedAt: null }; }, { force: true });
+    expect(verdict.reasons).not.toContain("not-merged");
+    expect(prViewCalls).toBe(0);
   });
 });
 

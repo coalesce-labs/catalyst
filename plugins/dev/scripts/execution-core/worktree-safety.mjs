@@ -170,16 +170,24 @@ export function isSafeToRemoveWorktree(worktreePath, ctx = {}, deps = {}) {
   // committed-unpushed guard for the no-PR case (only when an upstream resolves;
   // absence of an upstream is NOT unpushed evidence).
   if (ctx.prMerged !== true) reasons.push("not-merged");
-  try {
-    const up = runGit(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"]);
-    if ((up.status ?? 1) === 0 && (up.stdout ?? "").trim()) {
-      const ahead = runGit(["rev-list", "--count", "@{u}..HEAD"]);
-      if ((ahead.status ?? 1) === 0 && Number((ahead.stdout ?? "0").trim()) > 0) {
-        reasons.push("unpushed-commits");
+  // CTL-1218: the committed-unpushed guard is ONLY meaningful for the no-PR /
+  // not-merged case. A CONFIRMED squash-merged PR leaves the local branch ahead of
+  // @{u} BY DESIGN (the commits were squashed on GitHub, never pushed to
+  // origin/<branch>), so `ahead > 0` is expected, not data-loss evidence. Running
+  // the probe when prMerged === true falsely flagged every squash-merged tree
+  // (the dominant CTL-1218 false-negative). Skip it for confirmed-merged.
+  if (ctx.prMerged !== true) {
+    try {
+      const up = runGit(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"]);
+      if ((up.status ?? 1) === 0 && (up.stdout ?? "").trim()) {
+        const ahead = runGit(["rev-list", "--count", "@{u}..HEAD"]);
+        if ((ahead.status ?? 1) === 0 && Number((ahead.stdout ?? "0").trim()) > 0) {
+          reasons.push("unpushed-commits");
+        }
       }
+    } catch {
+      /* upstream probe failed → not treated as unpushed evidence */
     }
-  } catch {
-    /* upstream probe failed → not treated as unpushed evidence */
   }
 
   // (c) clean tree, machine-local noise excluded.

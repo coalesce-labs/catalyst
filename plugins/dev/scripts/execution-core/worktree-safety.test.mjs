@@ -43,7 +43,23 @@ describe("isSafeToRemoveWorktree — every unsafe condition blocks removal (fail
     expect(v.reasons).toContain("not-merged");
   });
   test("committed-unpushed (upstream resolves, ahead>0) → unpushed-commits", () => {
-    const v = isSafeToRemoveWorktree("/wt/CTL-1", SAFE_CTX, { ...SAFE_DEPS, runGit: gitStub({ ahead: "3" }) });
+    // The no-PR / not-merged case: SAFE_CTX.prMerged is true, so flip it off to
+    // exercise the committed-but-unpushed guard.
+    const v = isSafeToRemoveWorktree("/wt/CTL-1", { ...SAFE_CTX, prMerged: false }, { ...SAFE_DEPS, runGit: gitStub({ ahead: "3" }) });
+    expect(v.reasons).toContain("unpushed-commits");
+  });
+  // CTL-1218 Part B — a squash-merged branch is ahead of @{u} BY DESIGN (the local
+  // commits were squashed on GitHub, never pushed to origin/<branch>). When the PR
+  // is CONFIRMED merged, that ahead count is NOT unpushed-work evidence, so the
+  // unpushed guard must NOT fire. (Pre-1218 it fired unconditionally → every
+  // squash-merged tree tripped "unpushed-commits" → defer forever.)
+  test("CTL-1218: prMerged true + ahead>0 does NOT push unpushed-commits (squash-merge) → safe", () => {
+    const v = isSafeToRemoveWorktree("/wt/CTL-1", { ...SAFE_CTX, prMerged: true }, { ...SAFE_DEPS, runGit: gitStub({ ahead: "3" }) });
+    expect(v.reasons).not.toContain("unpushed-commits");
+    expect(v.safe).toBe(true);
+  });
+  test("CTL-1218: prMerged false + ahead>0 STILL pushes unpushed-commits (no-PR regression keep)", () => {
+    const v = isSafeToRemoveWorktree("/wt/CTL-1", { ...SAFE_CTX, prMerged: false }, { ...SAFE_DEPS, runGit: gitStub({ ahead: "3" }) });
     expect(v.reasons).toContain("unpushed-commits");
   });
   test("NO upstream is NOT treated as unpushed (detached/local-only branches)", () => {
