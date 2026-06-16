@@ -1,0 +1,38 @@
+# Gitleaks configuration (CTL-1204).
+# Extends the upstream default ruleset; adds allowlists ONLY for known
+# fake/placeholder tokens in test fixtures and documentation so the baseline
+# scan is clean. Real secrets in non-fixture source remain detectable.
+title = "catalyst gitleaks config"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Known-benign fixtures and documentation placeholders (CTL-1204)"
+
+# Path-based: test directories are fixture-only; allowlist wholesale.
+paths = [
+  '''plugins/dev/scripts/lib/__tests__/.*''',
+  '''plugins/dev/scripts/__tests__/.*''',
+  '''plugins/dev/scripts/orch-monitor/__tests__/.*''',
+  '''plugins/dev/scripts/execution-core/.*\.test\.mjs''',
+  '''cma/.*''',
+  '''\.gitleaks\.toml''',
+]
+
+# Regex-based: specific fake values + doc placeholders that live outside the
+# path allowlist above (READMEs, website docs, agent prompts, code comments).
+# Matched against the detected secret value.
+regexes = [
+  '''ghp_test[a-z_]*''',
+  '''ghp_benigntoken123''',
+  '''lin_api_test[a-z0-9_]*''',
+  '''lin_api_fake[a-z0-9_]*''',
+  '''lin_api_(abc|xyz|x|tok)\b''',
+  '''test_lin_api_token_x+''',
+  '''lin_oauth_[a-z0-9]*''',
+  '''sk-ant-xxx''',
+  '''xoxb-fake''',
+  # Documentation placeholders ending in ... / … (NOT real tokens).
+  '''(lin_api_|github_pat_|sntrys_)(\.\.\.|…)''',
+]
