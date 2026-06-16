@@ -1,23 +1,20 @@
-// swimlane-scroll.test.ts — CTL-958 board scroll refinement: dual-sticky group
-// labels + per-cell overscroll chaining.
+// swimlane-scroll.test.ts — board scroll behavior contract.
 // CTL-973: board horizontal swipe fix — overscroll-behavior-x contain + edge bump.
-//
-// Tests the exported constants and the constrainCells logic that drives the
-// Linear-style scroll UX introduced in CTL-958, plus the swipe-fix invariants
-// from CTL-973.
+// CTL-1178: the GROUPED board renders at NATURAL CONTENT HEIGHT with one whole-board
+//   vertical scroll (Linear-style scroll-through), retiring the CTL-958/CTL-1010
+//   per-cell water-fill cap + per-cell scroll boxes. `constrainCells` is now constant
+//   false for every grouped render; the water-fill constants/functions remain exported
+//   but are DEAD (kept to avoid churn; pinned here so a rename is a compile-time catch).
 //
 // WHAT IS TESTED (pure / DOM-free):
-//   1. CSS var names + defaults — the tokens the cell style references.
-//      LANE_CELL_MAX_VAR / LANE_CELL_MAX_DEFAULT are the single source of truth
-//      for the knob; a rename here is a compile-time catch in Swimlane.tsx too.
-//   2. constrainCells logic — the condition `groupBy !== "none" && laneCount > 1`
-//      via the real buildLanes + showLaneChrome that Swimlane.tsx uses. We verify
-//      each axis / lane-count combination so it is impossible to accidentally
-//      enable the height constraint on a single-group or no-axis board.
-//   3. overscroll-behavior sentinel — the default value "auto" (NOT "contain") is
-//      the browser standard that lets wheel events chain to the parent board scroll
-//      at the cell boundary. We assert this value is never accidentally changed to
-//      "contain" or "none" by comparing it to the expected "auto" sentinel.
+//   1. CSS var names + defaults — retired water-fill tokens kept for reference.
+//      LANE_CELL_MAX_VAR / LANE_CELL_MAX_DEFAULT are still exported (dead) and pinned
+//      so a rename is a compile-time catch in Swimlane.tsx too.
+//   2. constrainCells is now ALWAYS false — the grouped board no longer constrains
+//      cell heights; cells are plain content stacks. We assert the new invariant
+//      across every axis / lane-count combination.
+//   3. laneRowGrow — retired-but-pinned pure function (the grouped path forces
+//      flexGrow 0 directly now). Kept exported + tested to minimize churn.
 //   4. CTL-973 swipe-fix constants — BOARD_SCROLL_OVERSCROLL_X must be "contain"
 //      (not "none", which would kill the rubber-band affordance), SWIPE_EDGE_TOLERANCE
 //      must be a small positive px value, bump class names / duration are stable.
@@ -33,21 +30,29 @@ import {
   BOARD_BUMP_CLASS_RIGHT,
   BOARD_BUMP_DURATION_MS,
   swipeBlockDirection,
+  laneRowGrow,
 } from "./Swimlane";
 import { buildLanes, showLaneChrome } from "./board-grouping";
 import type { GroupableEntity, GroupBy } from "./board-grouping";
+import { computeLaneHeights } from "./lane-heights";
 
-// ── helper: the exact constrainCells condition used in SwimlaneBoard ─────────
-// This mirrors the inline expression in SwimlaneBoard so tests break if the
-// production condition changes without updating the tests.
-function shouldConstrainCells(groupBy: GroupBy, laneCount: number): boolean {
-  return groupBy !== "none" && laneCount > 1;
+// ── helper: the constrainCells value used in SwimlaneBoard ────────────────────
+// CTL-1178: `constrainCells` is now constant `false` for EVERY render (grouped and
+// flat alike) — the grouped board renders at natural content height with one
+// whole-board vertical scroll, so no cell is ever a per-lane scroll box. This mirror
+// breaks if the production constant is ever re-enabled without updating the tests.
+function shouldConstrainCells(_groupBy: GroupBy, _laneCount: number): boolean {
+  return false;
 }
 
 // ── minimal entity fixtures ───────────────────────────────────────────────────
 const mkEntity = (team: string): GroupableEntity => ({ team, repo: "cat", host: null });
 
-describe("CTL-958 — LANE_CELL_MAX constants (dual-sticky scroll knob)", () => {
+// CTL-1178: these LANE_CELL_MAX constants are RETIRED — the per-cell water-fill cap
+// no longer runs (cells render at natural content height). They remain exported +
+// pinned here only to keep them stable for any future flat-board reuse and to make a
+// rename a compile-time catch; they no longer describe live grouped-board behavior.
+describe("CTL-958 (retired) — LANE_CELL_MAX constants kept exported", () => {
   it("LANE_CELL_MAX_VAR is the CSS custom property name --lane-cell-max", () => {
     expect(LANE_CELL_MAX_VAR).toBe("--lane-cell-max");
   });
@@ -72,63 +77,57 @@ describe("CTL-958 — LANE_CELL_MAX constants (dual-sticky scroll knob)", () => 
   });
 });
 
-describe("CTL-958 — overscroll-behavior sentinel (chaining, NOT contain)", () => {
-  it('the per-cell overscroll value is "auto" (browser default chaining)', () => {
-    // "auto" is the CSS overscroll-behavior value that lets wheel events chain
-    // to the parent scroll container at the cell boundary — the behavior that
-    // reveals the next group. "contain" would block that hand-off entirely.
-    const CELL_OVERSCROLL: string = "auto";
-    expect(CELL_OVERSCROLL).toBe("auto");
-    expect(CELL_OVERSCROLL).not.toBe("contain");
-    expect(CELL_OVERSCROLL).not.toBe("none");
+describe("CTL-1178 — grouped cells are content-height (no per-cell scroll box)", () => {
+  it("the grouped board no longer applies a per-cell overscroll value", () => {
+    // CTL-1178 retired the per-cell overflow-y:auto + overscroll chaining (CTL-958).
+    // Cells are now plain content stacks; there is no per-cell overscroll knob. The
+    // ONLY overscroll value left on the board is the container's X-axis swipe guard
+    // (BOARD_SCROLL_OVERSCROLL_X = "contain"), tested in the CTL-973 suite below.
+    expect(BOARD_SCROLL_OVERSCROLL_X).toBe("contain");
   });
 });
 
-describe("CTL-958 — constrainCells logic (height constraint gate)", () => {
-  it('axis="none" → constrainCells=false regardless of item count', () => {
+describe("CTL-1178 — constrainCells is now constant false (content-height board)", () => {
+  it('axis="none" → constrainCells=false', () => {
     const items = [mkEntity("CTL"), mkEntity("ADV")];
     const lanes = buildLanes(items, "none");
-    // buildLanes("none") always returns one synthetic lane
     expect(lanes).toHaveLength(1);
     expect(shouldConstrainCells("none", lanes.length)).toBe(false);
   });
 
-  it("real axis + 1 lane (single team) → constrainCells=false (no tiny scroll box)", () => {
+  it("real axis + 1 lane → constrainCells=false", () => {
     const items = [mkEntity("CTL"), mkEntity("CTL")];
     const lanes = buildLanes(items, "team");
     expect(lanes).toHaveLength(1);
     expect(shouldConstrainCells("team", lanes.length)).toBe(false);
   });
 
-  it("real axis + 2 lanes → constrainCells=true (height constraint active)", () => {
+  it("real axis + 2 lanes → constrainCells=false (cells render at content height)", () => {
     const items = [mkEntity("CTL"), mkEntity("ADV")];
     const lanes = buildLanes(items, "team");
     expect(lanes).toHaveLength(2);
-    expect(shouldConstrainCells("team", lanes.length)).toBe(true);
+    expect(shouldConstrainCells("team", lanes.length)).toBe(false);
   });
 
-  it("real axis + 3 lanes → constrainCells=true", () => {
+  it("real axis + 3 lanes → constrainCells=false", () => {
     const items = [mkEntity("CTL"), mkEntity("ADV"), mkEntity("ENG")];
     const lanes = buildLanes(items, "team");
     expect(lanes).toHaveLength(3);
-    expect(shouldConstrainCells("team", lanes.length)).toBe(true);
+    expect(shouldConstrainCells("team", lanes.length)).toBe(false);
   });
 
-  it("constrainCells is consistent with showLaneChrome (both require real axis + lanes)", () => {
-    // showLaneChrome = by !== "none" && laneCount > 0
-    // constrainCells  = by !== "none" && laneCount > 1
-    // Therefore: constrainCells implies showLaneChrome, but not vice versa.
+  it("constrainCells is false for EVERY axis / lane-count (grouped or flat)", () => {
+    // showLaneChrome still gates the grouped vs flat render (by !== "none" && n > 0),
+    // but the height constraint is gone entirely — no axis / lane-count constrains
+    // cells anymore. The grouped container's own vertical scroll handles overflow.
     const axes: GroupBy[] = ["none", "repo", "team", "project", "host"];
     for (const axis of axes) {
-      // 0 lanes: both false
       expect(showLaneChrome(axis, 0)).toBe(false);
-      expect(shouldConstrainCells(axis, 0)).toBe(false);
-      // 1 lane: chrome=true iff real axis; constrain=false always (single group)
       expect(showLaneChrome(axis, 1)).toBe(axis !== "none");
-      expect(shouldConstrainCells(axis, 1)).toBe(false);
-      // 2 lanes: chrome=true iff real axis; constrain=true iff real axis
       expect(showLaneChrome(axis, 2)).toBe(axis !== "none");
-      expect(shouldConstrainCells(axis, 2)).toBe(axis !== "none");
+      for (const n of [0, 1, 2, 3]) {
+        expect(shouldConstrainCells(axis, n)).toBe(false);
+      }
     }
   });
 });
@@ -167,6 +166,41 @@ describe("CTL-958 — dual-sticky group label structure (documented invariants)"
     // We document this invariant as a boolean: the header SHOULD NOT pin left.
     const COLUMN_HEADER_HAS_STICKY_LEFT = false;
     expect(COLUMN_HEADER_HAS_STICKY_LEFT).toBe(false);
+  });
+});
+
+describe("CTL-1168 (retired) — laneRowGrow pure mapping (kept exported)", () => {
+  // CTL-1178: the grouped path now forces flexGrow 0 directly (grow=false) so lanes
+  // render at natural content height and the whole board scrolls — laneRowGrow no
+  // longer drives the live render. The pure function is kept exported (to minimize
+  // churn) and its null/undefined→1, number→0 mapping is still pinned below.
+  //
+  // (Original CTL-1168 intent, for reference): laneRowGrow gated flexGrow so only a
+  // FITTING lane (cellMax null/undefined) grew; a CAPPED lane (px number — the board
+  // was page-scrolling) did NOT grow, keeping the last band bottom-anchored.
+  it("a fitting lane (null) grows to fill leftover space → flexGrow 1", () => {
+    expect(laneRowGrow(null)).toBe(1);
+  });
+  it("the unmeasured first frame (undefined) grows harmlessly → flexGrow 1", () => {
+    expect(laneRowGrow(undefined)).toBe(1);
+  });
+  it("a capped/floored lane (px number → page scrolling) does NOT grow → flexGrow 0", () => {
+    expect(laneRowGrow(248)).toBe(0);
+    expect(laneRowGrow(379)).toBe(0);
+    expect(laneRowGrow(0)).toBe(0);
+  });
+
+  it("capped lanes (px number from computeLaneHeights) are ALL pinned flexGrow 0", () => {
+    // CTL-1178: lanes taller than capH cap at capH (a px number). None may grow, or
+    // the last band pushes off the bottom and scroll-to-top breaks.
+    const caps = computeLaneHeights([2000, 2000, 2000], 500); // [500,500,500]
+    expect(caps.every((c) => laneRowGrow(c) === 0)).toBe(true);
+  });
+
+  it("lanes that fully fit (null) are growable (flexGrow 1)", () => {
+    // A lane shorter than capH is uncapped (null); laneRowGrow lets it grow when used.
+    const caps = computeLaneHeights([300, 300], 900); // [null, null]
+    expect(caps.every((c) => laneRowGrow(c) === 1)).toBe(true);
   });
 });
 
