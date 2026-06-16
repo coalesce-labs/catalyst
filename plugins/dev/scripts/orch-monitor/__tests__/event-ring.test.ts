@@ -236,3 +236,104 @@ describe("createEventRing", () => {
     }
   });
 });
+
+// CTL-1224: live fan-out hook. onAppend fires synchronously per tick batch with
+// ONLY the newly-appended lines, never on cold-fill, and a throwing listener
+// must not stall the shared tick loop.
+describe("createEventRing onAppend (live fan-out hook)", () => {
+  it("T1 — fires for live (tick) appends only, with the batch of new lines", async () => {
+    eventsDir();
+    const now = new Date("2026-06-04T00:00:00Z");
+    writeFileSync(monthFile(now), line("a", "2026-06-04T00:00:00Z") + "\n");
+
+    const ring = createEventRing({ catalystDir: workdir, pollMs: 10, now: () => now });
+    ring.start();
+    const batches: string[][] = [];
+    ring.onAppend((lines) => batches.push(lines));
+    try {
+      appendFileSync(monthFile(now), line("b", "2026-06-04T00:01:00Z") + "\n");
+      for (let i = 0; i < 50 && ring.size() < 2; i++) await sleep(10);
+      expect(ring.size()).toBe(2);
+      // Listener received the new line "b" only — cold-fill "a" never replayed.
+      const all = batches.flat();
+      expect(all.map((l) => eventName(l))).toEqual(["b"]);
+      expect(all.some((l) => eventName(l) === "a")).toBe(false);
+    } finally {
+      ring.stop();
+    }
+  });
+
+  it("T2 — does NOT fire during cold-fill / start()", async () => {
+    eventsDir();
+    const now = new Date("2026-06-04T00:00:00Z");
+    const seed = Array.from({ length: 5 }, (_, i) =>
+      line(`seed-${i}`, "2026-06-04T00:00:00Z"),
+    );
+    writeFileSync(monthFile(now), seed.join("\n") + "\n");
+
+    const ring = createEventRing({ catalystDir: workdir, pollMs: 10, now: () => now });
+    ring.start(); // cold-fills 5
+    expect(ring.size()).toBe(5);
+
+    const batches: string[][] = [];
+    ring.onAppend((lines) => batches.push(lines));
+    try {
+      // No new ticks have occurred since registering → no delivery yet.
+      await sleep(40);
+      expect(batches.flat()).toEqual([]);
+
+      // A genuine live append fires exactly the one new line.
+      appendFileSync(monthFile(now), line("live", "2026-06-04T00:02:00Z") + "\n");
+      for (let i = 0; i < 50 && ring.size() < 6; i++) await sleep(10);
+      expect(ring.size()).toBe(6);
+      expect(batches.flat().map((l) => eventName(l))).toEqual(["live"]);
+    } finally {
+      ring.stop();
+    }
+  });
+
+  it("T3 — deregister stops delivery", async () => {
+    eventsDir();
+    const now = new Date("2026-06-04T00:00:00Z");
+    writeFileSync(monthFile(now), line("a", "2026-06-04T00:00:00Z") + "\n");
+
+    const ring = createEventRing({ catalystDir: workdir, pollMs: 10, now: () => now });
+    ring.start();
+    const batches: string[][] = [];
+    const unsubscribe = ring.onAppend((lines) => batches.push(lines));
+    unsubscribe();
+    try {
+      appendFileSync(monthFile(now), line("b", "2026-06-04T00:01:00Z") + "\n");
+      for (let i = 0; i < 50 && ring.size() < 2; i++) await sleep(10);
+      expect(ring.size()).toBe(2); // ring still ingested
+      expect(batches.flat()).toEqual([]); // but no delivery after deregister
+    } finally {
+      ring.stop();
+    }
+  });
+
+  it("T4 — a throwing listener does not kill the tick loop", async () => {
+    eventsDir();
+    const now = new Date("2026-06-04T00:00:00Z");
+    writeFileSync(monthFile(now), line("a", "2026-06-04T00:00:00Z") + "\n");
+
+    const ring = createEventRing({ catalystDir: workdir, pollMs: 10, now: () => now });
+    ring.start();
+    ring.onAppend(() => {
+      throw new Error("boom");
+    });
+    const good: string[] = [];
+    ring.onAppend((lines) => good.push(...lines));
+    try {
+      appendFileSync(monthFile(now), line("b", "2026-06-04T00:01:00Z") + "\n");
+      for (let i = 0; i < 50 && ring.size() < 2; i++) await sleep(10);
+      appendFileSync(monthFile(now), line("c", "2026-06-04T00:02:00Z") + "\n");
+      for (let i = 0; i < 50 && ring.size() < 3; i++) await sleep(10);
+      expect(ring.size()).toBe(3); // loop survived the throw, kept ingesting
+      // well-behaved listener still received both live appends
+      expect(good.map((l) => eventName(l))).toEqual(["b", "c"]);
+    } finally {
+      ring.stop();
+    }
+  });
+});

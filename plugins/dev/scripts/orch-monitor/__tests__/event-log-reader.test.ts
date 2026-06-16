@@ -102,6 +102,101 @@ describe("readBacklog", () => {
   });
 });
 
+// CTL-1224: readBacklog ring fast-path + bounded file fallback. The SSE path
+// passes the shared ring so N reconnecting clients no longer each readFileSync
+// the whole current-month log. Behavioral parity is asserted by mutating the
+// on-disk file AFTER the ring has cold-filled — if the result still matches the
+// ring's pre-mutation contents, the disk was provably not read.
+describe("readBacklog (ring fast-path)", () => {
+  it("T5 — served from the ring does NO full file read (disk mutated post-coldfill)", async () => {
+    const dir = eventsDir();
+    const now = new Date("2026-05-04T00:00:00Z");
+    // Seed N (> limit) matching lines so the ring covers the window.
+    const lines = Array.from({ length: 20 }, (_, i) =>
+      makeLine("github.pr.merged", { i }),
+    );
+    writeFileSync(join(dir, "2026-05.jsonl"), lines.join("\n") + "\n");
+
+    const ring = createEventRing({ catalystDir: workdir, now: () => now });
+    ring.start(); // cold-fills the 20 lines into the in-memory ring
+    try {
+      expect(ring.size()).toBe(20);
+
+      // Overwrite the on-disk file with a single UNRELATED line. If readBacklog
+      // read the file, it would return [] (no github.* match) instead of the
+      // ring's 10 newest github.pr.merged lines.
+      writeFileSync(join(dir, "2026-05.jsonl"), makeLine("unrelated.event") + "\n");
+
+      const r = await readBacklog({
+        catalystDir: workdir,
+        predicate: '.event == "github.pr.merged"',
+        limit: 10,
+        ring,
+        now: () => now,
+      });
+      // Last 10 ring matches, newest-last — the file was NOT consulted.
+      expect(r.length).toBe(10);
+      expect(JSON.parse(r[0]).i).toBe(10);
+      expect(JSON.parse(r[9]).i).toBe(19);
+      expect(r.every((l) => (JSON.parse(l) as { event: string }).event === "github.pr.merged")).toBe(true);
+    } finally {
+      ring.stop();
+    }
+  });
+
+  it("T6a — no ring falls back to the file read", async () => {
+    const dir = eventsDir();
+    const now = new Date("2026-05-04T00:00:00Z");
+    const lines = Array.from({ length: 15 }, (_, i) =>
+      makeLine("github.pr.merged", { i }),
+    );
+    writeFileSync(join(dir, "2026-05.jsonl"), lines.join("\n") + "\n");
+
+    const r = await readBacklog({
+      catalystDir: workdir,
+      predicate: '.event == "github.pr.merged"',
+      limit: 10,
+      ring: null,
+      now: () => now,
+    });
+    expect(r.length).toBe(10);
+    expect(JSON.parse(r[0]).i).toBe(5);
+    expect(JSON.parse(r[9]).i).toBe(14);
+  });
+
+  it("T6b — ring smaller than limit underflows → file read (file's last N matches)", async () => {
+    const dir = eventsDir();
+    const now = new Date("2026-05-04T00:00:00Z");
+    // File has MORE matching lines than the tiny ring will retain.
+    const lines = Array.from({ length: 30 }, (_, i) =>
+      makeLine("github.pr.merged", { i }),
+    );
+    writeFileSync(join(dir, "2026-05.jsonl"), lines.join("\n") + "\n");
+
+    // capLines below the limit → ring.size() < limit → underflow → fallback.
+    const ring = createEventRing({ catalystDir: workdir, capLines: 5, now: () => now });
+    ring.start();
+    try {
+      expect(ring.size()).toBe(5); // ring holds fewer than the limit (10)
+
+      const r = await readBacklog({
+        catalystDir: workdir,
+        predicate: '.event == "github.pr.merged"',
+        limit: 10,
+        ring,
+        now: () => now,
+      });
+      // Must return the FILE's last 10 matches (25..29-region), proving it did
+      // NOT silently return the short 5-line ring slice.
+      expect(r.length).toBe(10);
+      expect(JSON.parse(r[0]).i).toBe(20);
+      expect(JSON.parse(r[9]).i).toBe(29);
+    } finally {
+      ring.stop();
+    }
+  });
+});
+
 describe("tailEventLog", () => {
   it("emits new lines appended to the current file", async () => {
     const dir = eventsDir();
