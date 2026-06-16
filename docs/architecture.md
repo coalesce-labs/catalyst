@@ -416,6 +416,45 @@ processing it. The filter drops:
 This self-filter is what makes the single unified log safe to use as both the broker's input and
 its output.
 
+### Lifecycle-event namespace contract
+
+The four protected name-spaces below are enforced as a verified invariant (CTL-1142). Only
+`service.name = "catalyst.broker"` may emit events in the first three spaces; the fourth governs
+which phase-slot strings are valid in routing events.
+
+| Space | Rule |
+|---|---|
+| `filter.*` | Broker interest-management events only. Any non-broker emission here would create a filter-wake feedback loop. |
+| `broker.daemon.*` | Broker operational heartbeats / startup / shutdown only. |
+| `session.heartbeat` | Exact match; broker liveness pings only (CTL-401). |
+| `phase.<name>.(complete\|failed\|turn-cap-exhausted\|skipped).<ticket>` | Routing namespace matched by `PHASE_EVENT_PATTERN`. Only names in `KNOWN_PHASES` or `INTENTIONAL_PHASE_SLOT_EXCEPTIONS` may occupy the `<name>` slot. |
+
+**`KNOWN_PHASES`** (canonical 10-phase pipeline, in order): `triage`, `research`, `plan`,
+`implement`, `verify`, `review`, `pr`, `monitor-merge`, `monitor-deploy`, `teardown`.
+
+**Documented `<name>` slot exceptions** — these appear in `recovery.mjs` but are NOT pipeline
+phases; their action suffixes do not match the routing pattern's terminal-status set:
+
+- `dispatch` — `phase.dispatch.failed.<ticket>` marks a dispatch-level failure before a real phase
+  worker starts. The real phase rides `payload.target_phase`. This is the only exception that uses
+  a terminal-status suffix (`failed`) and therefore actually matches `PHASE_EVENT_PATTERN`.
+- `scheduler` — scheduler-internal observability events (`yield-file-skip`, `cooldown-gc`, …).
+  Action suffixes never match `(complete|failed|turn-cap-exhausted|skipped)`.
+- `advance` — phase-advance gate events (`held`). Same: action suffix never matches the routing set.
+
+**Enforcement surfaces:**
+
+- `plugins/dev/scripts/broker/namespace-contract.mjs` — single source of truth: exports
+  `FORBIDDEN_PREFIXES`, `PROTECTED_EXACT_NAMES`, `KNOWN_PHASES`,
+  `INTENTIONAL_PHASE_SLOT_EXCEPTIONS`, `PHASE_EVENT_PATTERN`, `isBrokerProtectedName`,
+  `phaseSlotOf`, `isAllowedPhaseSlot`. `router.mjs`'s `shouldSkipEvent` imports from here.
+- `plugins/dev/scripts/broker/namespace-parity.test.mjs` — exec-core producer parity: static-
+  constant event names + a `recovery.mjs` source-scan that snapshots the hardcoded phase-slot set.
+- `plugins/dev/scripts/orch-monitor/__tests__/namespace-parity.test.ts` — orch-monitor producer
+  parity: representative GitHub/Linear/service-health names + prefix-family invariant proof.
+
+See `thoughts/shared/plans/2026-06-16-ctl-1142.md` §3.8 for the originating design.
+
 ## Context Management Principles
 
 1. **Context is precious** — Use specialized agents, not monoliths
