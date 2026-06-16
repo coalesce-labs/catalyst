@@ -11,7 +11,9 @@
  */
 
 import { createHash, randomUUID } from "node:crypto";
-import { hostname } from "node:os";
+import { hostname, homedir } from "node:os";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 
 export type Severity = "DEBUG" | "INFO" | "WARN" | "ERROR";
 
@@ -81,6 +83,18 @@ export function generateEventId(): string {
   return randomUUID();
 }
 
+// Layer-2 (machine-local) config — mirrors config.mjs getLayer2ConfigPath()/getHostName().
+function layer2HostName(): string | null {
+  const path = process.env.CATALYST_LAYER2_CONFIG_FILE ??
+    resolve(homedir(), ".config", "catalyst", "config.json");
+  try {
+    const name = (JSON.parse(readFileSync(path, "utf8")) as
+      { catalyst?: { host?: { name?: unknown } } })?.catalyst?.host?.name;
+    if (typeof name === "string" && name.length > 0) return name;
+  } catch { /* missing/malformed → caller falls through */ }
+  return null;
+}
+
 /**
  * Resolve the effective host name.
  * Mirrors lib/host-identity.sh (bash) and execution-core/lib/host-identity.mjs (MJS).
@@ -88,11 +102,16 @@ export function generateEventId(): string {
  * Precedence:
  *   1. explicit override param
  *   2. CATALYST_HOST_NAME env var
- *   3. os.hostname() with trailing ".local" stripped
+ *   3. catalyst.host.name from Layer-2 config
+ *   4. os.hostname() with trailing ".local" stripped
  */
 export function hostName(opts: { raw?: string; override?: string } = {}): string {
   const override = opts.override ?? process.env.CATALYST_HOST_NAME;
   if (override) return override;
+  if (opts.raw === undefined) {
+    const cfg = layer2HostName();
+    if (cfg) return cfg;
+  }
   return (opts.raw ?? hostname()).replace(/\.local$/, "");
 }
 

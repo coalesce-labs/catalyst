@@ -367,6 +367,8 @@ Commands:
   branches    inventory / delete merged or orphaned branch refs (list|prune)
   tidy        run sessions → worktrees → branches in the safe order, then prune git admin records
   governance  show which governance modes the daemon is actually running (--json)
+  beliefs     shadow disagreement report and status (report|beliefs-status)
+              Usage: catalyst-execution-core beliefs report [--since-days N] [--json]
   drain       toggle node drain mode: refuse new-work admission while draining
               Usage: catalyst-execution-core drain [--off] [--json]
               drain         set drain flag — no new tickets admitted; in-flight pipelines finish
@@ -416,7 +418,7 @@ if ! (return 0 2>/dev/null); then
 		cmd_register "$@"
 		;;
 	# CTL-649 audit CLI nouns — each routes to execution-core/cli/<noun>.mjs.
-	sessions | worktrees | branches | tidy | governance)
+	sessions | worktrees | branches | tidy | governance | beliefs)
 		module="$1"
 		shift
 		exec_runtime_module "$module" "$@"

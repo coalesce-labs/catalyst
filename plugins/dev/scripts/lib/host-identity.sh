@@ -8,6 +8,7 @@
 #
 # Algorithm:
 #   host.name = CATALYST_HOST_NAME  (if set and non-empty)
+#               else catalyst.host.name from Layer-2 config  (if readable and non-empty)
 #               else os.hostname() with trailing ".local" stripped
 #   host.id   = sha256(host.name)[:16]   # 16 hex chars, same shape as spanId
 #
@@ -19,11 +20,20 @@ _CATALYST_HOST_IDENTITY_SH_LOADED=1
 __host_name_from() { printf '%s' "${1%.local}"; }
 
 # catalyst_host_name — resolve the effective host name.
-# Honors CATALYST_HOST_NAME override for multi-host alias scenarios.
+# Honors CATALYST_HOST_NAME override, then Layer-2 config, then os hostname.
 catalyst_host_name() {
   if [[ -n "${CATALYST_HOST_NAME:-}" ]]; then
     printf '%s' "$CATALYST_HOST_NAME"
     return
+  fi
+  local _cfg="${CATALYST_LAYER2_CONFIG_FILE:-${HOME}/.config/catalyst/config.json}"
+  if [[ -r "$_cfg" ]] && command -v jq >/dev/null 2>&1; then
+    local _n
+    _n="$(jq -r '.catalyst.host.name // empty' "$_cfg" 2>/dev/null || true)"
+    if [[ -n "$_n" ]]; then
+      printf '%s' "$_n"
+      return
+    fi
   fi
   __host_name_from "$(hostname 2>/dev/null || uname -n)"
 }

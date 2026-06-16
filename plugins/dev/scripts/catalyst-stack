@@ -535,17 +535,34 @@ _resolve_stack_cmd() {
   fi
 }
 
+# _stack_host_name — resolve catalyst.host.name from Layer-2 config for plist pinning.
+# Honors CATALYST_LAYER2_CONFIG_FILE then ~/.config/catalyst/config.json. Empty when
+# unset/unreadable (caller omits the CATALYST_HOST_NAME key).
+_stack_host_name() {
+  local cfg="${CATALYST_LAYER2_CONFIG_FILE:-${HOME}/.config/catalyst/config.json}"
+  if [[ -r "$cfg" ]] && command -v jq >/dev/null 2>&1; then
+    jq -r '.catalyst.host.name // empty' "$cfg" 2>/dev/null || true
+  fi
+}
+
 # _stack_agent_path — PATH for the launchd job so it finds the catalyst CLIs,
 # bun/node, and git in launchd's otherwise-minimal environment.
 _stack_agent_path() {
   printf '%s\n' "${HOME}/.catalyst/bin:${HOME}/.bun/bin:/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 }
 
-# render_stack_plist <cmd> <interval> — emit the LaunchAgent plist XML to stdout.
+# render_stack_plist <cmd> <interval> [host_name] — emit the LaunchAgent plist XML to stdout.
 # Pure: no filesystem or launchctl side effects, so it is unit-testable and the
-# `--print` flag can show exactly what would be installed.
+# `--print` flag can show exactly what would be installed. host_name is optional;
+# when non-empty, CATALYST_HOST_NAME is pinned in EnvironmentVariables (CTL-1202).
 render_stack_plist() {
-  local cmd="$1" interval="$2"
+  local cmd="$1" interval="$2" host_name="${3:-}"
+  local host_env=""
+  if [[ -n "$host_name" ]]; then
+    host_env="
+    <key>CATALYST_HOST_NAME</key>
+    <string>${host_name}</string>"
+  fi
   cat <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
@@ -579,7 +596,7 @@ render_stack_plist() {
     <key>PATH</key>
     <string>$(_stack_agent_path)</string>
     <key>HOME</key>
-    <string>${HOME}</string>
+    <string>${HOME}</string>${host_env}
   </dict>
 
   <key>StandardOutPath</key>
@@ -604,8 +621,12 @@ cmd_install_services() {
   [[ "$interval" =~ ^[0-9]+$ ]] || fail "--interval must be an integer (seconds), got: $interval"
 
   local cmd; cmd="$(_resolve_stack_cmd)"
+  local host_name; host_name="$(_stack_host_name)"
+  # Warning goes to stderr: log() writes stdout, and --print emits the plist to
+  # stdout — a stdout warning would corrupt `--print` output (CTL-1202 review).
+  [[ -z "$host_name" ]] && log "warning: catalyst.host.name not set in Layer-2 config; CATALYST_HOST_NAME will not be pinned (telemetry/scheduler identity may split)" >&2
   if [[ "$print_only" == "yes" ]]; then
-    render_stack_plist "$cmd" "$interval"
+    render_stack_plist "$cmd" "$interval" "$host_name"
     return 0
   fi
 
@@ -613,7 +634,7 @@ cmd_install_services() {
   command -v launchctl >/dev/null 2>&1 || fail "launchctl not found"
 
   mkdir -p "${HOME}/Library/LaunchAgents" "${HOME}/catalyst"
-  render_stack_plist "$cmd" "$interval" > "$STACK_AGENT_PLIST"
+  render_stack_plist "$cmd" "$interval" "$host_name" > "$STACK_AGENT_PLIST"
   log "wrote $STACK_AGENT_PLIST (exec: $cmd start, keep-alive ${interval}s)"
 
   local guid; guid="gui/$(id -u)"

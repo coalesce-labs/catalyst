@@ -347,3 +347,84 @@ describe("readAdvanceBeliefs / compareAdvancement units", () => {
     expect(d.belief_exhausted).toBe(false);
   });
 });
+
+describe("CTL-935 Phase 1: advance-shadow dual-write to shadow_comparison", () => {
+  test("runAdvanceShadow with writeComparison seam writes agree=0 row AND emits disagree event on disagreement", () => {
+    const t = tick();
+    signal(t, "CTL-DUAL", "triage", "done");
+    // Intentionally skip evaluateBeliefs so no advance_to belief exists → disagree
+    const events = [];
+    const written = [];
+    runAdvanceShadow(db, t, {
+      ...makeSeams({ "CTL-DUAL": { triage: "done" } }, { events }),
+      writeComparison: (rec) => written.push(rec),
+    });
+    // Dual-write: both the disagree event AND the comparison record
+    expect(events.filter((e) => e["event.name"] === "beliefs.advance_shadow.disagree")).toHaveLength(1);
+    expect(written).toHaveLength(1);
+    expect(written[0].agree).toBe(0);
+    expect(written[0].dimension).toBe("advance");
+    expect(written[0].subject).toBe("CTL-DUAL");
+  });
+
+  test("runAdvanceShadow writes agree=1 row on agreement and does NOT emit disagree event", () => {
+    const t = tick();
+    signal(t, "CTL-AGR", "triage", "done");
+    evaluateBeliefs(db, t);
+    const events = [];
+    const written = [];
+    runAdvanceShadow(db, t, {
+      ...makeSeams({ "CTL-AGR": { triage: "done" } }, { events }),
+      writeComparison: (rec) => written.push(rec),
+    });
+    expect(events.filter((e) => e["event.name"] === "beliefs.advance_shadow.disagree")).toHaveLength(0);
+    expect(written).toHaveLength(1);
+    expect(written[0].agree).toBe(1);
+    expect(written[0].subject).toBe("CTL-AGR");
+  });
+
+  test("rule_id attribution: R17 when cycle_exhausted involved, else R16", () => {
+    const sig = { triage: "done", research: "done", plan: "done", implement: "done", verify: "done" };
+    // R16 case: belief→remediate, oracle→review (verdict mismatch)
+    const t1 = tick();
+    for (const [p, s] of Object.entries(sig)) signal(t1, "CTL-R16", p, s);
+    verdict(t1, "CTL-R16", "fail");
+    cycle(t1, "CTL-R16", 0);
+    evaluateBeliefs(db, t1);
+    const wr16 = [];
+    runAdvanceShadow(db, t1, {
+      ...makeSeams({ "CTL-R16": sig }, { verdicts: { "CTL-R16": "pass" }, cycles: { "CTL-R16": 0 } }),
+      writeComparison: (rec) => wr16.push(rec),
+    });
+    expect(wr16.some((r) => r.ruleId === "R16")).toBe(true);
+
+    // R17 case: cap-reached, oracle exhausted, belief not exhausted
+    const t2 = tick();
+    for (const [p, s] of Object.entries(sig)) signal(t2, "CTL-R17", p, s);
+    verdict(t2, "CTL-R17", "fail");
+    cycle(t2, "CTL-R17", REMEDIATE_CYCLE_CAP);
+    // Skip evaluateBeliefs so cycle_exhausted belief is absent → disagree on exhaustion
+    const wr17 = [];
+    runAdvanceShadow(db, t2, {
+      ...makeSeams(
+        { "CTL-R17": sig },
+        { verdicts: { "CTL-R17": "fail" }, cycles: { "CTL-R17": REMEDIATE_CYCLE_CAP } },
+      ),
+      writeComparison: (rec) => wr17.push(rec),
+    });
+    expect(wr17.some((r) => r.ruleId === "R17")).toBe(true);
+  });
+
+  test("a throwing writeComparison does NOT abort runAdvanceShadow or prevent event emission", () => {
+    const t = tick();
+    signal(t, "CTL-THROW", "triage", "done");
+    const events = [];
+    const res = runAdvanceShadow(db, t, {
+      ...makeSeams({ "CTL-THROW": { triage: "done" } }, { events }),
+      writeComparison: () => { throw new Error("store broke"); },
+    });
+    // disagree still fires despite throwing writeComparison
+    expect(res.disagree).toBe(1);
+    expect(events.filter((e) => e["event.name"] === "beliefs.advance_shadow.disagree")).toHaveLength(1);
+  });
+});

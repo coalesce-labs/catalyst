@@ -4,6 +4,11 @@ import { NAMED_COLORS } from "./color-palette";
 
 /** repoKey → chosen hue name. Persisted browser-local (mirrors CTL-997 icon picks). */
 export const REPO_COLOR_PICKS_KEY = "catalyst.repoColorPicks";
+/**
+ * @deprecated CTL-1153 (M2): reads are back-compat only. Writes now go through
+ * PUT /api/projects/:key; the server-persisted defaultColor in useProjects() is
+ * authoritative. This atom will be removed once the settings pane ships.
+ */
 export const repoColorPicksAtom = atomWithStorage<Record<string, string>>(REPO_COLOR_PICKS_KEY, {});
 
 /** The palette names, in canonical order — the picker's option list. */

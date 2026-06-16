@@ -5,6 +5,7 @@
 import { readFileSync } from "node:fs";
 import { emitReapIntent } from "./reap-intent.mjs";
 import { sweepJobDirs } from "./job-dir-gc.mjs";
+import { sweepWorkerDirs } from "./worker-dir-gc.mjs"; // CTL-1205: worker-dir GC
 import { log } from "./config.mjs";
 
 /**
@@ -45,14 +46,16 @@ function realClock() {
  * @param {boolean} [opts.enabled=true]            disable to no-op the timer
  * @param {number}  [opts.intervalSeconds=600]     default 10 minutes
  * @param {Function}[opts.emit=emitReapIntent]     emitter seam for tests
- * @param {Function}[opts.jobGc=()=>sweepJobDirs()] CTL-1165 D3: job-dir GC seam
- * @param {object}  [opts.clock=realClock()]       fake-clock seam for tests
+ * @param {Function}[opts.jobGc=()=>sweepJobDirs()]     CTL-1165 D3: job-dir GC seam
+ * @param {Function}[opts.workerGc=async()=>{}]         CTL-1205: worker-dir GC seam
+ * @param {object}  [opts.clock=realClock()]             fake-clock seam for tests
  */
 export function startOrphanReaperTimer({
   enabled = true,
   intervalSeconds = 600,
   emit = emitReapIntent,
   jobGc = () => sweepJobDirs(),
+  workerGc = async () => {}, // CTL-1205: worker-dir GC seam (no-op default)
   clock = realClock(),
 } = {}) {
   if (!enabled) return { stop: () => {} };
@@ -81,6 +84,7 @@ export function startOrphanReaperTimer({
         emit("phase.reconcile.reap-requested", {}),
         emit("procOrphans.reap-requested", {}),
         jobGc(),
+        workerGc(), // CTL-1205
       ]);
     } catch (err) {
       // CTL-649: a persistently-unwritable event log would make every tick

@@ -98,6 +98,9 @@ import {
   readVerdictFromEdb,
   readCycleFromEdb,
 } from "./beliefs/advance-shadow.mjs";
+import { recordShadowComparison } from "./beliefs/shadow-store.mjs";
+import { runFreeSlotsShadow } from "./beliefs/free-slots-shadow.mjs";
+import { makeReclaimShadowRecorder } from "./beliefs/reclaim-shadow.mjs";
 // CTL-937: bounded stall-diagnostician wake wiring (opt-in CATALYST_DIAGNOSTICIAN=1).
 import { processDiagnosticianWakes } from "./diagnostician.mjs";
 import { executeEscalations } from "./beliefs/escalate.mjs";
@@ -3336,6 +3339,10 @@ export function schedulerTick(
   // are silent — they describe "no externally-visible change" the next tick
   // re-evaluates. 'reviveSuppressed' now marks only the audit-append-failure
   // path; 'noProgressStopped' + 'escalated' fire `needs-human`.
+  // CTL-935 Phase 3: capture raw reclaim outcomes per subject (ticket/phase) BEFORE
+  // the lossy switch — the switch coarsens outcomes into HUD buckets, losing the
+  // raw string needed by the reclaim shadow comparator.
+  const reclaimOutcomes = new Map();
   const reclaimed = [];
   const revived = [];
   // CTL-736: reviveSuppressed now marks ONLY the audit-append-failure path (the
@@ -3432,6 +3439,8 @@ export function schedulerTick(
       // (revive only while progressing; stop on zero progress) + the Phase-1 O_EXCL
       // claim bound the mass-revive storm structurally.
       const r = reclaimDeadWork(orchDir, sig, reclaimOpts);
+      // CTL-935 Phase 3: record raw outcome before the switch coarsens it.
+      try { reclaimOutcomes.set(`${sig.ticket}/${sig.phase}`, r); } catch { /* isolation */ }
       const entry = { ticket: sig.ticket, phase: sig.phase };
       switch (r) {
         case "reclaimed":
@@ -4693,21 +4702,26 @@ export function schedulerTick(
         multiHost,
       }
     );
-    if (Object.values(signals).some((s) => s === "stalled")) {
+    const anyStalled = Object.values(signals).some((s) => s === "stalled");
+    const anyFailed = Object.values(signals).some((s) => s === "failed");
+    // CTL-1180: pipeline-done already clears needs-human in the TERMINAL_PHASE block
+    // above; never (re)apply for a genuinely-shipped ticket (the Done false positive).
+    const pipelineDone = signals[TERMINAL_PHASE] === "done";
+    if ((anyStalled || anyFailed) && !pipelineDone) {
       if (fenceGuard({ ticket, orchDir, multiHost })) {
         labelOnce(orchDir, ticket, "needs-human", writeStatus);
       } else {
         log.warn(
           { ticket },
-          "ctl-863: stale fence — suppressing labelOnce(needs-human/stalled) write (zombie guard)"
+          "ctl-863: stale fence — suppressing labelOnce(needs-human/failed-or-stalled) write (zombie guard)"
         );
       }
       // CTL-868 route (B): also emit a canonical orphan-detected event (once) so a
-      // stalled-no-recovery ticket is visible on the dashboard, not just label-flagged.
+      // stalled/failed-no-recovery ticket is visible on the dashboard, not just label-flagged.
       emitOrphanDetectedOnce(orchDir, ticket, signals, appendOrphanDetectedEvent);
     } else {
-      // CTL-646: no phase stalled → clear the ratchet if the marker exists.
-      // Guard on marker presence so a no-stall, no-marker tick fires zero
+      // No failed/stalled phase (or pipeline done) → clear the ratchet if the marker exists.
+      // Guard on marker presence so a no-stall/no-fail, no-marker tick fires zero
       // removeLabel API calls (steady-state-zero-writes invariant).
       const base = join(orchDir, "workers", ticket, ".linear-label-needs-human");
       if (existsSync(`${base}.applied`) || existsSync(`${base}.skipped`)) {
@@ -4779,6 +4793,15 @@ export function schedulerTick(
     advanced,
     dispatched,
     freeSlots,
+    // CTL-935 Phase 2: expose procedural inputs so runFreeSlotsShadow can
+    // attribute the gap without re-reading scheduler internals.
+    maxParallel,
+    inFlightCount,
+    livenessFresh,
+    draining,
+    // CTL-935 Phase 3: raw per-subject reclaim outcomes (before the lossy switch)
+    // for the reclaim shadow comparator.
+    reclaimOutcomes,
     ready: ready.map((t) => t.identifier),
   };
 }
@@ -4999,6 +5022,9 @@ function runTick() {
             appendEvent: intentEventAppender,
             // Opt-in tick summary; off by default to keep the event log lean.
             emitTickSummary: (process.env.CATALYST_ADVANCE_SHADOW_SUMMARY ?? "0") === "1",
+            // CTL-935: dual-write to beliefs.db so the weekly report has a
+            // uniform durable corpus (event log stays the live operator feed).
+            writeComparison: (rec) => recordShadowComparison(advDb, rec),
           });
         }
       } catch (advErr) {
@@ -5009,7 +5035,10 @@ function runTick() {
         }
       }
     }
-    schedulerTick(runningOpts.orchDir, {
+    // CTL-935 Phase 2: capture schedulerTick return so comparators can read
+    // procedural values (freeSlots, maxParallel, inFlightCount, etc.) without
+    // re-deriving them. The bare call is replaced by const tickResult = ...
+    const tickResult = schedulerTick(runningOpts.orchDir, {
       readEligible: runningOpts.readEligible,
       dispatch: runningOpts.dispatch,
       exec: runningOpts.exec,
@@ -5157,6 +5186,60 @@ function runTick() {
       // existsSync default in schedulerTick; test seam via startScheduler).
       hasTriageArtifact: runningOpts.hasTriageArtifact,
     });
+    // CTL-935 Phase 2: free-slots / R8 shadow comparator. Runs AFTER schedulerTick
+    // (which produces the authoritative freeSlots value) — apples-to-apples because
+    // the R8 belief was derived at collectBeliefsTick BEFORE schedulerTick modified
+    // any state. Guard mirrors the advance-shadow guard above.
+    if (beliefsRes?.ok && beliefsRes?.tickId != null) {
+      try {
+        const fsDb = getBeliefsDb();
+        if (fsDb) {
+          runFreeSlotsShadow(fsDb, beliefsRes.tickId, {
+            proceduralFreeSlots: typeof tickResult?.freeSlots === "number"
+              ? tickResult.freeSlots
+              : null,
+            proceduralInputs: tickResult
+              ? {
+                  maxParallel: tickResult.maxParallel,
+                  inFlightCount: tickResult.inFlightCount,
+                  livenessFresh: tickResult.livenessFresh,
+                  draining: tickResult.draining,
+                }
+              : null,
+            appendEvent: intentEventAppender,
+            writeComparison: (rec) => recordShadowComparison(fsDb, rec),
+            emitTickSummary: (process.env.CATALYST_FREE_SLOTS_SHADOW_SUMMARY ?? "0") === "1",
+          });
+        }
+      } catch (fsErr) {
+        try {
+          log.warn({ err: fsErr?.message }, "free-slots-shadow: comparator threw (tick unaffected)");
+        } catch {
+          /* even logging must not break the tick */
+        }
+      }
+    }
+    // CTL-935 Phase 3: reclaim-verdict / R4-R7 shadow comparator. Runs AFTER
+    // schedulerTick (which produces reclaimOutcomes with raw guard strings before
+    // the lossy switch). Guard mirrors the Phase 2 free-slots guard above.
+    if (beliefsRes?.ok && beliefsRes?.tickId != null) {
+      try {
+        const rcDb = getBeliefsDb();
+        if (rcDb && tickResult?.reclaimOutcomes?.size) {
+          const recordReclaim = makeReclaimShadowRecorder(rcDb, beliefsRes.tickId, {
+            appendEvent: intentEventAppender,
+            writeComparison: (rec) => recordShadowComparison(rcDb, rec),
+          });
+          recordReclaim(tickResult.reclaimOutcomes);
+        }
+      } catch (rcErr) {
+        try {
+          log.warn({ err: rcErr?.message }, "reclaim-shadow: comparator threw (tick unaffected)");
+        } catch {
+          /* even logging must not break the tick */
+        }
+      }
+    }
     // CTL-863: host-death takeover sweep — complement to worker-death reclaim.
     // Skip entirely on single-host installs (no-op inside the function, but the
     // pre-check avoids the call to stay zero-cost on the common case).

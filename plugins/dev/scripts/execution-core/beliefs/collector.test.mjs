@@ -15,6 +15,7 @@ import {
   __resetBeliefsCollectorForTests,
 } from "./collector.mjs";
 import { RULES_SHA } from "./rules.mjs";
+import { computeReport } from "./report.mjs";
 
 const DAY = 86_400_000;
 const NOW = 1781030108000; // spec §5 tick: 2026-06-09T18:35:08Z
@@ -658,6 +659,54 @@ describe("collectTickFacts — retention", () => {
     expect(db.query("SELECT COUNT(*) AS n FROM obs_agent WHERE tick_id=2").get().n).toBe(0);
     const hb = db.query("SELECT ticket FROM obs_heartbeat").all().map((r) => r.ticket);
     expect(hb).toEqual(["CTL-2"]);
+    db.close();
+  });
+
+  test("CTL-935: pruneRetention keeps shadow_comparison rows AND their parent tick at the 90d belief window (NOT 14d obs window)", () => {
+    const db = openBeliefsDb({ path: join(scratch(), "b.db") });
+    // tick A: 100d old → past 90d belief window → shadow_comparison row AND tick pruned
+    db.run("INSERT INTO tick (tick_id, now_ms, host) VALUES (10, ?, 'mini')", [NOW - 100 * DAY]);
+    db.run(
+      "INSERT INTO shadow_comparison (tick_id, dimension, subject, agree) VALUES (10, 'advance', 'CTL-X', 0)",
+    );
+    // tick B: 20d old → past 14d obs window but WITHIN 90d belief window, with a
+    // shadow_comparison row but NO belief/intent (the free-slots-agree shape) →
+    // BOTH the row and its parent tick must survive as the report's time-spine.
+    db.run("INSERT INTO tick (tick_id, now_ms, host) VALUES (11, ?, 'mini')", [NOW - 20 * DAY]);
+    db.run(
+      "INSERT INTO shadow_comparison (tick_id, dimension, subject, agree) VALUES (11, 'advance', 'CTL-Y', 1)",
+    );
+    const res = collect(db, scratch(), { pruneEveryTicks: 1 });
+    expect(res.ok).toBe(true);
+    // 100d → both shadow_comparison row and parent tick pruned
+    expect(db.query("SELECT COUNT(*) AS n FROM shadow_comparison WHERE tick_id=10").get().n).toBe(0);
+    expect(db.query("SELECT COUNT(*) AS n FROM tick WHERE tick_id=10").get().n).toBe(0);
+    // 20d → shadow_comparison row still present (within 90d belief window)…
+    expect(db.query("SELECT COUNT(*) AS n FROM shadow_comparison WHERE tick_id=11").get().n).toBe(1);
+    // …AND its parent tick retained: without the shadow_comparison guard in the
+    // final tick DELETE, tick 11 (no belief/intent) is deleted at 14d, orphaning
+    // the row so report.mjs's INNER JOIN drops it. This assertion fails on the bug.
+    expect(db.query("SELECT COUNT(*) AS n FROM tick WHERE tick_id=11").get().n).toBe(1);
+    db.close();
+  });
+
+  test("CTL-935: a >14d disagreement survives prune and is surfaced by computeReport (orphan-row regression)", () => {
+    const db = openBeliefsDb({ path: join(scratch(), "b.db") });
+    // A 20d-old reclaim disagreement (rule R7) on a tick with NO belief/intent —
+    // exactly the orphan-prone shape. The tick is past the 14d obs window.
+    db.run("INSERT INTO tick (tick_id, now_ms, host) VALUES (21, ?, 'mini')", [NOW - 20 * DAY]);
+    db.run(
+      `INSERT INTO shadow_comparison (tick_id, dimension, subject, agree, legacy_guard, rule_id)
+       VALUES (21, 'reclaim', 'CTL-Z/plan', 0, 'reclaimed', 'R7')`,
+    );
+    const res = collect(db, scratch(), { pruneEveryTicks: 1 });
+    expect(res.ok).toBe(true);
+    // A 30d report window spans the 20d disagreement. Pre-fix the parent tick was
+    // pruned at 14d, so the report's `JOIN tick` dropped the row and perRule was [].
+    const report = computeReport(db, { nowMs: NOW, sinceMs: NOW - 30 * DAY });
+    const r7 = report.perRule.find((r) => r.rule_id === "R7");
+    expect(r7).toBeDefined();
+    expect(r7.disagree).toBe(1);
     db.close();
   });
 

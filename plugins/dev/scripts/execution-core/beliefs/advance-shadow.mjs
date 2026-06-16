@@ -163,6 +163,7 @@ export function runAdvanceShadow(
     cap,
     appendEvent = null,
     emitTickSummary = false,
+    writeComparison = null,
   } = {},
 ) {
   const result = { agree: 0, disagree: 0, disagreements: [] };
@@ -227,8 +228,43 @@ export function runAdvanceShadow(
             /* operator-event append is best-effort — never breaks the tick */
           }
         }
+        if (typeof writeComparison === "function") {
+          try {
+            const beliefVal = advanceTo.get(ticket) ?? null;
+            const ruleId =
+              (beliefExhausted || expectExhausted) ? "R17" : "R16";
+            writeComparison({
+              tickId,
+              dimension: "advance",
+              subject: ticket,
+              agree: 0,
+              procedural: disagreement.procedural,
+              belief: disagreement.belief,
+              differingInput: disagreement.differingInput,
+              ruleId,
+              rulesSha: rulesShaTick,
+            });
+          } catch {
+            /* shadow write is best-effort — never breaks the tick */
+          }
+        }
       } else {
         result.agree += 1;
+        if (typeof writeComparison === "function") {
+          try {
+            const ruleId = cycleExhausted.has(ticket) ? "R17" : "R16";
+            writeComparison({
+              tickId,
+              dimension: "advance",
+              subject: ticket,
+              agree: 1,
+              ruleId,
+              rulesSha: rulesShaTick,
+            });
+          } catch {
+            /* shadow write is best-effort */
+          }
+        }
       }
     } catch {
       // one bad ticket must not abort the comparison of the rest (shadow contract)

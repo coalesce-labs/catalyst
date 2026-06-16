@@ -193,7 +193,10 @@ export function groupHoldingBuckets(
   const waiting: HoldingBucketItem[] = [];
   for (const t of tickets) {
     if (inFlightTicketIds.has(t.id)) continue;
-    if (t.status === "stalled") stalled.push({ kind: "ticket", ticket: t });
+    // CTL-1180: a not-in-flight needs-human ticket (e.g. a reaped failed phase)
+    // belongs in needs-you — the bucket's documented intent. Stalled keeps its own bucket.
+    if (t.attention === "needs-human") needsYou.push({ kind: "ticket", ticket: t });
+    else if (t.status === "stalled") stalled.push({ kind: "ticket", ticket: t });
     else if (t.held === "blocked") blocked.push({ kind: "ticket", ticket: t });
     else if (t.held === "waiting") waiting.push({ kind: "ticket", ticket: t });
   }

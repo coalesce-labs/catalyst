@@ -20,7 +20,7 @@ import { describe, it, expect } from "bun:test";
 import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { buildProjects, loadProjects } from "./lib/project-roster";
+import { buildProjects, loadProjects, readProjectsOverlay, applyProjectsOverlay } from "./lib/project-roster";
 
 const TEAMS = [
   { key: "CTL", vcsRepo: "coalesce-labs/catalyst" },
@@ -159,6 +159,205 @@ describe("loadProjects (CTL-1152) — fail-open I/O", () => {
       expect(ctl.hasWork).toBe(true);
       // union: mystery appended
       expect(out.some((p) => p.repo === "mystery" && p.hasWork === true)).toBe(true);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+// ─── CTL-1153 (M2): overlay tests ─────────────────────────────────────────────
+
+describe("buildProjects (CTL-1153) — M2 fields default to null", () => {
+  it("every descriptor from buildProjects has the 5 new raw-override fields at null", () => {
+    const out = buildProjects(TEAMS, {}, [], []);
+    for (const p of out) {
+      expect(p.storedName).toBeNull();
+      expect(p.storedColor).toBeNull();
+      expect(p.icon).toBeNull();
+      expect(p.stateMap).toBeNull();
+    }
+  });
+
+  it("configured teams have source='config', unconfigured lanes have source='unconfigured'", () => {
+    const out = buildProjects(TEAMS, {}, [], ["mystery"]);
+    expect(out.find((p) => p.key === "CTL")!.source).toBe("config");
+    expect(out.find((p) => p.key === "MYSTERY")!.source).toBe("unconfigured");
+  });
+});
+
+describe("readProjectsOverlay (CTL-1153) — fail-open reader", () => {
+  it("absent projects[] → []", () => {
+    const dir = mkdtempSync(join(tmpdir(), "roster-overlay-"));
+    try {
+      const cfg = join(dir, "config.json");
+      writeFileSync(cfg, JSON.stringify({ catalyst: { monitor: { linear: { teams: [] } } } }));
+      expect(readProjectsOverlay(cfg)).toEqual([]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("garbage config → []", () => {
+    const dir = mkdtempSync(join(tmpdir(), "roster-overlay-"));
+    try {
+      const cfg = join(dir, "config.json");
+      writeFileSync(cfg, "not-json");
+      expect(readProjectsOverlay(cfg)).toEqual([]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("parses valid projects[] entries, uppercases key", () => {
+    const dir = mkdtempSync(join(tmpdir(), "roster-overlay-"));
+    try {
+      const cfg = join(dir, "config.json");
+      writeFileSync(
+        cfg,
+        JSON.stringify({
+          catalyst: {
+            projects: [
+              { key: "ctl", vcsRepo: "coalesce-labs/catalyst", name: "Catalyst Core", color: "blue" },
+            ],
+          },
+        }),
+      );
+      const out = readProjectsOverlay(cfg);
+      expect(out).toHaveLength(1);
+      expect(out[0].key).toBe("CTL");
+      expect(out[0].name).toBe("Catalyst Core");
+      expect(out[0].color).toBe("blue");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("drops entries missing key, drops non-string/unknown color values without throwing", () => {
+    const dir = mkdtempSync(join(tmpdir(), "roster-overlay-"));
+    try {
+      const cfg = join(dir, "config.json");
+      writeFileSync(
+        cfg,
+        JSON.stringify({
+          catalyst: {
+            projects: [
+              { vcsRepo: "owner/no-key" },                     // missing key → skipped
+              { key: "ADV", vcsRepo: "o/a", color: "fuchsia" }, // bad hue → entry kept but color dropped
+            ],
+          },
+        }),
+      );
+      const out = readProjectsOverlay(cfg);
+      expect(out).toHaveLength(1);
+      expect(out[0].key).toBe("ADV");
+      expect(out[0].color).toBeUndefined(); // bad hue dropped
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("applyProjectsOverlay (CTL-1153) — pure merge", () => {
+  it("empty overlay is identity on all fields", () => {
+    const base = buildProjects(TEAMS, { "coalesce-labs/catalyst": "green" }, [], []);
+    const out = applyProjectsOverlay(base, []);
+    expect(out.map((p) => p.key)).toEqual(base.map((p) => p.key));
+    expect(out.every((p) => p.storedName === null && p.storedColor === null && p.icon === null && p.stateMap === null)).toBe(true);
+    expect(out.find((p) => p.key === "CTL")!.defaultColor).toBe("green");
+  });
+
+  it("overlay override: sets effective name/defaultColor + raw storedName/storedColor, source=overlay", () => {
+    const base = buildProjects(TEAMS, {}, [], []);
+    const out = applyProjectsOverlay(base, [
+      { key: "CTL", vcsRepo: "coalesce-labs/catalyst", name: "Catalyst Core", color: "blue", icon: "favicon.ico", stateMap: { inReview: "Code Review" } },
+    ]);
+    const ctl = out.find((p) => p.key === "CTL")!;
+    expect(ctl.name).toBe("Catalyst Core");
+    expect(ctl.defaultColor).toBe("blue");
+    expect(ctl.storedName).toBe("Catalyst Core");
+    expect(ctl.storedColor).toBe("blue");
+    expect(ctl.icon).toBe("favicon.ico");
+    expect(ctl.stateMap).toEqual({ inReview: "Code Review" });
+    expect(ctl.source).toBe("overlay");
+    expect(ctl.vcsRepo).toBe("coalesce-labs/catalyst"); // identity untouched
+  });
+
+  it("unknown hue in overlay is ignored (effective defaultColor falls back to base)", () => {
+    const base = buildProjects(TEAMS, { "coalesce-labs/catalyst": "green" }, [], []);
+    const out = applyProjectsOverlay(base, [
+      { key: "CTL", vcsRepo: "coalesce-labs/catalyst", color: "fuchsia" },
+    ]);
+    expect(out.find((p) => p.key === "CTL")!.defaultColor).toBe("green");
+  });
+
+  it("forward-compat: overlay key ∉ teams[] with vcsRepo is appended", () => {
+    const base = buildProjects(TEAMS, {}, [], []);
+    const out = applyProjectsOverlay(base, [
+      { key: "NEW", vcsRepo: "owner/new-repo", color: "teal" },
+    ]);
+    expect(out.some((p) => p.key === "NEW")).toBe(true);
+    expect(out.find((p) => p.key === "NEW")!.defaultColor).toBe("teal");
+  });
+
+  it("null-vcsRepo orphan entry is skipped", () => {
+    const base = buildProjects(TEAMS, {}, [], []);
+    const out = applyProjectsOverlay(base, [
+      { key: "ORPHAN", vcsRepo: null },
+    ]);
+    expect(out.some((p) => p.key === "ORPHAN")).toBe(false);
+  });
+});
+
+describe("loadProjects (CTL-1153) — overlay integration", () => {
+  it("catalog projects[] overlay is applied: CTL.defaultColor=blue, source=overlay", () => {
+    const dir = mkdtempSync(join(tmpdir(), "roster-overlay-"));
+    try {
+      writeFileSync(
+        join(dir, "config.json"),
+        JSON.stringify({
+          catalyst: {
+            monitor: {
+              linear: { teams: [{ key: "CTL", vcsRepo: "coalesce-labs/catalyst" }] },
+              github: { repoColors: {} },
+            },
+            projects: [{ key: "CTL", vcsRepo: "coalesce-labs/catalyst", color: "blue" }],
+          },
+        }),
+      );
+      writeFileSync(join(dir, "registry.json"), JSON.stringify({ projects: [] }));
+      const out = loadProjects({
+        configPath: join(dir, "config.json"),
+        registryPath: join(dir, "registry.json"),
+      });
+      const ctl = out.find((p) => p.key === "CTL")!;
+      expect(ctl.defaultColor).toBe("blue");
+      expect(ctl.source).toBe("overlay");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("malformed projects[] degrades to teams[]-only roster (no throw)", () => {
+    const dir = mkdtempSync(join(tmpdir(), "roster-overlay-"));
+    try {
+      writeFileSync(
+        join(dir, "config.json"),
+        JSON.stringify({
+          catalyst: {
+            monitor: {
+              linear: { teams: [{ key: "CTL", vcsRepo: "coalesce-labs/catalyst" }] },
+              github: { repoColors: {} },
+            },
+            projects: "garbage",
+          },
+        }),
+      );
+      writeFileSync(join(dir, "registry.json"), JSON.stringify({ projects: [] }));
+      const out = loadProjects({
+        configPath: join(dir, "config.json"),
+        registryPath: join(dir, "registry.json"),
+      });
+      expect(out.find((p) => p.key === "CTL")).toBeDefined();
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

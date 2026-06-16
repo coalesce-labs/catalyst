@@ -83,13 +83,17 @@ import { PHASE_LIST, TERMINAL_STATUSES } from "@/board/phase-model";
 // We read the source as TEXT (never import it) because Board.tsx pulls in React
 // + CSS + "@/…" path-aliased modules that don't resolve under `bun test`. This
 // mirrors the column-widths.test.ts / event-row.test.tsx precedent of testing
-// against a component's data, not the component itself. The PHASE_C /
-// TERMINAL_STATUSES consts live at the top of Board.tsx; the PHASE_COLUMNS /
-// LINEAR_COLUMNS column SETS live in the pure board-display.ts (BOARD2 / CTL-906).
+// against a component's data, not the component itself.
+// CTL-1153: PHASE_C / ColorBy / accentFor were extracted to board-accent.ts (pure,
+// no React) — the drift guard now reads PHASE_C from there. TERMINAL_STATUSES
+// stays in Board.tsx (it drives the live-ring logic, not the accent map).
+// PHASE_COLUMNS / LINEAR_COLUMNS live in the pure board-display.ts (BOARD2 / CTL-906).
 const HERE = dirname(fileURLToPath(import.meta.url));
 const BOARD_TSX_PATH = join(HERE, "..", "ui", "src", "board", "Board.tsx");
+const BOARD_ACCENT_PATH = join(HERE, "..", "ui", "src", "board", "board-accent.ts");
 const BOARD_DISPLAY_PATH = join(HERE, "..", "ui", "src", "board", "board-display.ts");
 const boardSrc = readFileSync(BOARD_TSX_PATH, "utf8");
+const boardAccentSrc = readFileSync(BOARD_ACCENT_PATH, "utf8");
 const boardDisplaySrc = readFileSync(BOARD_DISPLAY_PATH, "utf8");
 
 /**
@@ -193,12 +197,12 @@ function extractKeys(initializer: string, mode: "objectKeys" | "recordKeyField")
   return out;
 }
 
-// Extract the copies once. The column SETS now live in board-display.ts
-// (PHASE_COLUMNS / LINEAR_COLUMNS — BOARD2 / CTL-906); the color map stays in
-// Board.tsx (PHASE_C).
+// Extract the copies once. The column SETS live in board-display.ts
+// (PHASE_COLUMNS / LINEAR_COLUMNS — BOARD2 / CTL-906); the color map lives in
+// board-accent.ts (PHASE_C — CTL-1153: extracted for testability without React).
 const phaseColsKeys = extractKeys(extractConstInitializer(boardDisplaySrc, "PHASE_COLUMNS", BOARD_DISPLAY_PATH), "recordKeyField");
 const linearColsKeys = extractKeys(extractConstInitializer(boardDisplaySrc, "LINEAR_COLUMNS", BOARD_DISPLAY_PATH), "recordKeyField");
-const phaseCKeys = extractKeys(extractConstInitializer(boardSrc, "PHASE_C"), "objectKeys");
+const phaseCKeys = extractKeys(extractConstInitializer(boardAccentSrc, "PHASE_C", BOARD_ACCENT_PATH), "objectKeys");
 
 // ── Requirement 3: board-data PHASE_ORDER === descriptor PHASES (exact order) ─
 test("board-data.mjs PHASE_ORDER equals descriptor PHASES exactly (order + elements)", () => {

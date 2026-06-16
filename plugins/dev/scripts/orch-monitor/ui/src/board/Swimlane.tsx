@@ -24,22 +24,23 @@
 //      inside it adds left:0 so the group name stays pinned to the board's left
 //      edge during horizontal scroll, exactly as observed on Linear's live board.
 //      Column headers are sticky-top only (they scroll horizontally with columns).
-//   2. CONSTRAINED PER-CELL HEIGHT + OVERSCROLL CHAINING: when multiple groups are
-//      visible (axis !== none AND laneCount > 1), each (group × column) cell becomes
-//      a vertical scroll container — overflow-y:auto with a per-lane max-height.
-//      CTL-1010: that cap is now MEASURED + WATER-FILLED per lane (useLaneCellHeights
-//      → computeLaneHeights) so the lanes fill the FULL board height instead of a
-//      flat 300px cap — the 300px is now only the pre-measurement first-frame
-//      fallback. Critically, overscroll-behavior is NOT set to "contain" — the
-//      default "auto" lets wheel events chain to the board's vertical scroll once the
-//      cell reaches its boundary (revealing the next group / page-scrolling in the
-//      degraded many-lane case). A short/empty cell passes the wheel straight to the
-//      board. The board remains the single both-axes scroll container; groups stack
-//      vertically inside it in normal document flow (no flex wrappers — the
-//      ChartCard flex-collapse trap is structurally avoided).
-//   3. axis="none" (single flat board): no group cells, no height constraint, the
-//      board scrolls normally. A single group (laneCount === 1) on a real axis
-//      also skips the height constraint so one lane doesn't get a tiny scroll box.
+//
+// CTL-1178 — CONTENT-HEIGHT GROUPED BOARD (retires the CTL-958/CTL-1010 water-fill):
+//   The grouped swimlane board now renders each (group × column) cell at its NATURAL
+//   CONTENT HEIGHT — no per-cell max-height, no per-cell overflow-y scroll box, no
+//   `.cat-overlay-scroll` on cells — and a single WHOLE-BOARD vertical scroll (the
+//   grouped container's overflowY:"auto") carries you down through the groups,
+//   matching Linear's live board (scrollHeight >> viewport). Grouped lane rows do
+//   NOT flex-grow (flexGrow 0), so a one-card group stays one-card tall instead of
+//   stretching to fill the viewport. Per operator direction ("taller is better")
+//   there is NO safety cap on a pathologically tall single lane.
+//   The water-fill machinery (the constrainCells gate + useLaneCellHeights →
+//   computeLaneHeights + LANE_CELL_MAX_* / laneRowGrow / lane-heights.ts) is kept
+//   but DEAD for the grouped path: `constrainCells` is now constant false, so
+//   useLaneCellHeights early-returns null (a no-op) and every cell resolves to the
+//   plain content-stack branch. The board stays the single both-axes scroll
+//   container; groups stack vertically inside it in normal document flow (no flex
+//   wrappers — the ChartCard flex-collapse trap is structurally avoided).
 //
 // CTL-973 SWIPE FIX — prevents browser back/forward navigation on 2-finger swipe:
 //   Layer 1 — CSS: `overscroll-behavior-x: contain` on the scroll container. The Y
@@ -62,7 +63,8 @@
 // (buildLanes / showLaneChrome); this file is the presentational shell that lays
 // the lanes into one CSS grid. Hand-rolled inline styles per DESIGN.md, reusing
 // the shared `C` token object + the `.catalyst-live-dot` pulse.
-import { Fragment, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import { Fragment, useEffect, useLayoutEffect, useRef, useState, type ReactNode, type RefObject } from "react";
+import { useColScrollState } from "../hooks/use-col-scroll-state";
 import { AnimatePresence } from "motion/react";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { C, LIVE, TRAY_LIFT } from "./board-tokens";
@@ -77,9 +79,12 @@ import {
   type GroupableEntity,
 } from "./board-grouping";
 import { useRepoIconMap } from "./repo-icon-context";
-import { laneIconSrc } from "./entity-icon";
+import { laneIconSrc, laneMark } from "./entity-icon";
+import { useResolvedRepoColors } from "@/hooks/use-resolved-repo-colors";
+import { ProjectMarkIcon } from "@/components/project-mark-icon";
+import type { ProjectMark } from "@/lib/project-mark";
 import { laneDisplayName } from "@/lib/nav-model";
-import { computeLaneHeights, LANE_MIN_CELL_H } from "./lane-heights";
+import { computeLaneHeights } from "./lane-heights";
 import type { Density } from "./prefs-store";
 
 // ── shared geometry ──────────────────────────────────────────────────────────
@@ -87,7 +92,11 @@ import type { Density } from "./prefs-store";
 // the header cells, the group-label divider, and every lane cell sit on the SAME
 // grid tracks and scroll as one. The board height reads the shell --cat-board-vh
 // var minus the subhead offset, exactly as the prior BoardScroll did.
-const COL_W = 300;
+// CTL-1168: matched to Linear's measured board — a FIXED 348px column (324px card
+// + 12px L/R padding). Linear's columns do NOT flex with viewport width (identical
+// 1280→2560px); wider screens just reveal more columns. We drop the `minmax(_, 1fr)`
+// stretch (which spread columns far apart on wide screens) for this fixed track.
+const COL_W = 348;
 
 // ── CTL-973 swipe-fix constants ───────────────────────────────────────────────
 // Exported for test assertions (see swimlane-scroll.test.ts).
@@ -139,8 +148,18 @@ export function swipeBlockDirection(
   if (atRight && deltaX > 0) return "right";
   return null;
 }
-const COL_GAP = 16;
-const PAD_X = 16;
+// CTL-1168: tighter Linear gutters. Linear's columns are flush (0 gap) with the
+// gutter coming from 12px L/R padding inside each column; with our column trays
+// (borders) a small 8px gap keeps adjacent trays visually distinct while reading
+// as a tight set. PAD_X is the board's left/right inset — slimmer so the first
+// column sits close to the left nav.
+const COL_GAP = 8;
+const PAD_X = 12;
+
+/** CTL-1168: the board's TOP padding — shared by the sticky ColumnHeaderRow and
+ *  the LaneBackdrop so the continuous column band starts exactly at the column
+ *  header's top edge (no strip poking up through the gutter above the header). */
+const BOARD_TOP_PAD = 16;
 
 /** CTL-1144: the board's intrinsic minimum width — N column tracks at COL_W,
  *  (N-1) inter-column gaps at COL_GAP, plus the row's left+right PAD_X. Drives
@@ -162,6 +181,10 @@ const HEADER_H = 44;
 // `padding: 6px top + 16px bottom`. Subtracted per lane when computing the
 // available cell-area height so the water-fill budget is exact (no magic fudge).
 export const ROW_PAD_V = 22;
+// CTL-1178: how much of the next group to leave peeking below a capped lane so the
+// operator sees there's more to scroll to (Linear shows the next group's label just
+// below the fold). Subtracted from the per-lane viewport cap. Tunable.
+export const LANE_CAP_PEEK = 44;
 // CTL-958: CSS variable name for the per-cell max-height knob.
 // CTL-1010: this var/default is now ONLY the PRE-MEASUREMENT fallback applied on
 // the very first frame before useLaneCellHeights has measured the lanes; the real
@@ -171,6 +194,21 @@ export const ROW_PAD_V = 22;
 // Exported for tests.
 export const LANE_CELL_MAX_VAR = "--lane-cell-max";
 export const LANE_CELL_MAX_DEFAULT = "300px";
+
+/** CTL-1168 scroll-to-top gate: a LaneCardsRow's CSS `flexGrow`, derived from its
+ *  water-fill cap (`cellMax` from useLaneCellHeights → computeLaneHeights).
+ *
+ *  Returns 1 (grow to fill leftover vertical space) ONLY when the lane FITS:
+ *    • `null`      → uncapped, alloc ≥ demand (Case 1, or a saturated Case-2 lane);
+ *    • `undefined` → unmeasured first frame (harmless to grow once).
+ *  Returns 0 when `cellMax` is a px number — the lane is capped/floored, which only
+ *  happens when the board is PAGE-SCROLLING (Case 3, or a still-hungry Case-2 lane).
+ *  Growing a row in that state pushes the last band down and breaks scroll-to-top
+ *  (the CTL-1010 regression); pinning flexGrow to 0 keeps the last band bottom-
+ *  anchored and the first row reachable at the top. */
+export function laneRowGrow(cellMax: number | null | undefined): 0 | 1 {
+  return cellMax === null || cellMax === undefined ? 1 : 0;
+}
 
 /** One shared header column — the lens phase/linear column the whole board aligns
  *  to. `count` / `live` are totals across ALL lanes (the header chip + live dot). */
@@ -193,6 +231,34 @@ export interface LaneCell {
 // position:sticky top:0 — pinned at the very top of the shared scroll so the
 // phase columns stay visible while the lanes scroll vertically; it scrolls
 // horizontally WITH the lanes (it lives inside the same overflow-x container).
+// CTL-1146/CTL-1168: one column-header cap — the rounded-top tray over its column.
+// Shared by the grouped ColumnHeaderRow (a sticky grid spanning the board) and the
+// flat per-column board (each column owns its header above an independent scroll
+// viewport). `flat` makes it a fixed-height flex child of the column instead of a
+// grid cell.
+function ColumnHeaderCell({ col, flat = false }: { col: SharedColumn; flat?: boolean }) {
+  return (
+    <div style={{
+      display: "flex", alignItems: "center", gap: 8,
+      background: C.s0,
+      borderRadius: "10px 10px 0 0",
+      border: `1px solid ${C.borderSubtle}`,
+      borderBottom: "none",
+      padding: "8px 10px 10px",
+      ...(flat ? { flex: "0 0 auto" } : {}),
+    }}>
+      <span style={{ width: 9, height: 9, borderRadius: "50%", background: col.c, flex: "0 0 auto" }} />
+      <span style={{ fontSize: 13, fontWeight: 600, color: C.fg, letterSpacing: 0.2 }}>{col.label}</span>
+      <span style={{ fontFamily: C.mono, fontVariantNumeric: "tabular-nums", fontSize: 11, color: C.fgMuted, background: C.s3, padding: "1px 7px", borderRadius: 9 }}>{col.count}</span>
+      {col.live > 0 && (
+        <span title={`${col.live} worker${col.live > 1 ? "s" : ""} live in this phase`} style={{ display: "inline-flex", alignItems: "center", gap: 4, fontFamily: C.mono, fontSize: 11, color: LIVE }}>
+          <span className="catalyst-live-dot" style={{ width: 7, height: 7, borderRadius: "50%", background: LIVE, display: "inline-block" }} />{col.live} live
+        </span>
+      )}
+    </div>
+  );
+}
+
 function ColumnHeaderRow({ columns }: { columns: SharedColumn[] }) {
   return (
     <div
@@ -201,10 +267,12 @@ function ColumnHeaderRow({ columns }: { columns: SharedColumn[] }) {
       data-board-colheader="true"
       style={{
         display: "grid",
-        gridTemplateColumns: `repeat(${columns.length}, minmax(${COL_W}px, 1fr))`,
+        gridTemplateColumns: `repeat(${columns.length}, ${COL_W}px)`,
         gap: COL_GAP,
-        // CTL-1144: top padding increased to 16px for comfortable board breathing room.
-        padding: `16px ${PAD_X}px 0`,
+        // CTL-1144: top padding for comfortable board breathing room.
+        // CTL-1168: BOARD_TOP_PAD shared with the LaneBackdrop so the band caps at
+        // exactly the header's top edge (no strip above the header).
+        padding: `${BOARD_TOP_PAD}px ${PAD_X}px 0`,
         position: "sticky",
         top: 0,
         zIndex: 3,
@@ -214,25 +282,95 @@ function ColumnHeaderRow({ columns }: { columns: SharedColumn[] }) {
       }}
     >
       {columns.map((col) => (
-        // CTL-1146: each header cell is the rounded top cap of its column tray (follows tray to s0).
-        <div key={col.key} style={{
-          display: "flex", alignItems: "center", gap: 8,
-          background: C.s0,
-          borderRadius: "10px 10px 0 0",
-          border: `1px solid ${C.borderSubtle}`,
-          borderBottom: "none",
-          padding: "8px 10px 10px",
-        }}>
-          <span style={{ width: 9, height: 9, borderRadius: "50%", background: col.c, flex: "0 0 auto" }} />
-          <span style={{ fontSize: 13, fontWeight: 600, color: C.fg, letterSpacing: 0.2 }}>{col.label}</span>
-          <span style={{ fontFamily: C.mono, fontVariantNumeric: "tabular-nums", fontSize: 11, color: C.fgMuted, background: C.s3, padding: "1px 7px", borderRadius: 9 }}>{col.count}</span>
-          {col.live > 0 && (
-            <span title={`${col.live} worker${col.live > 1 ? "s" : ""} live in this phase`} style={{ display: "inline-flex", alignItems: "center", gap: 4, fontFamily: C.mono, fontSize: 11, color: LIVE }}>
-              <span className="catalyst-live-dot" style={{ width: 7, height: 7, borderRadius: "50%", background: LIVE, display: "inline-block" }} />{col.live} live
-            </span>
-          )}
-        </div>
+        <ColumnHeaderCell key={col.key} col={col} />
       ))}
+    </div>
+  );
+}
+
+// CTL-1168: the FLAT (ungrouped) board — Linear-style per-column independent scroll.
+// Each column owns a fixed header cap above its OWN vertical scroll viewport, so
+// cards scroll WITHIN the column and clip just below the header (a 9px gap, matching
+// Linear's measured board) — they never bleed above or behind the header. The columns
+// share ONE horizontal scroll (the outer board-scroll container, overflowY:hidden in
+// this mode); only the vertical scroll is per-column. Column width is fixed (COL_W),
+// so wide viewports reveal more columns rather than stretching them (Linear behavior).
+function FlatColumnsBoard({
+  columns,
+  cells,
+  bumpRef,
+}: {
+  columns: SharedColumn[];
+  cells: LaneCell[];
+  bumpRef: RefObject<HTMLDivElement | null>;
+}) {
+  useColScrollState(bumpRef); // CTL-1206
+  return (
+    <div
+      ref={bumpRef}
+      data-board-flat="true"
+      style={{
+        width: `max(100%, ${boardMinWidth(columns.length)}px)`,
+        height: "100%",
+        display: "flex",
+        gap: COL_GAP,
+        // CTL-1168: near-flush LEFT inset (2px) so the first column sits right next
+        // to the nav like Linear's board; keep the wider PAD_X on the right edge.
+        padding: `${BOARD_TOP_PAD}px ${PAD_X}px 0 2px`,
+        position: "relative",
+      }}
+    >
+      {columns.map((col, i) => {
+        const cell = cells[i];
+        return (
+          <div
+            key={col.key}
+            style={{
+              width: COL_W,
+              flex: `0 0 ${COL_W}px`,
+              height: "100%",
+              display: "flex",
+              flexDirection: "column",
+              minHeight: 0,
+            }}
+          >
+            <ColumnHeaderCell col={col} flat />
+            {/* CTL-1168: the independent vertical scroll viewport = the rounded-bottom
+                tray. overflowY:auto scrolls THIS column alone; overscrollBehaviorY:
+                contain keeps the wheel in-column (no page bounce); overflowX:hidden
+                lets horizontal wheel chain out to the board's horizontal scroll.
+                Content clips at the viewport's top edge — just below the header, with
+                a 9px breathing gap — so cards vanish under the header, never above. */}
+            <div
+              className="cat-overlay-scroll"
+              data-flat-col-scroll="true"
+              data-col-key={col.key}
+              style={{
+                flex: 1,
+                minHeight: 0,
+                overflowY: "auto",
+                overflowX: "hidden",
+                overscrollBehaviorY: "contain",
+                background: C.s0,
+                border: `1px solid ${C.borderSubtle}`,
+                borderTop: "none",
+                borderRadius: "0 0 10px 10px",
+                boxShadow: TRAY_LIFT,
+                padding: `9px 12px 12px`,
+                display: "flex",
+                flexDirection: "column",
+                gap: 8,
+              }}
+            >
+              {!cell || cell.count === 0 ? (
+                <div style={{ color: C.fgDim, fontSize: 11.5, padding: "8px 0", textAlign: "center" }}>—</div>
+              ) : (
+                <AnimatePresence mode="popLayout" initial={false}>{cell.cards}</AnimatePresence>
+              )}
+            </div>
+          </div>
+        );
+      })}
     </div>
   );
 }
@@ -240,7 +378,14 @@ function ColumnHeaderRow({ columns }: { columns: SharedColumn[] }) {
 // CTL-1151: one continuous full-height lane per column, painted ONCE behind all
 // bands/cards. Aligned to the same grid tracks as the content rows so strips sit
 // exactly under their columns. The header cap (ColumnHeaderRow, opaque s0, sticky)
-// occludes the strip top; strips round their BOTTOM corners.
+// rounds its TOP corners; strips round their BOTTOM corners.
+//
+// CTL-1168: the band's TOP now caps at the column header's TOP edge. The header
+// row carries a BOARD_TOP_PAD (16px) top padding for board breathing room;
+// previously the backdrop's top padding was 0 so the strips poked up through that
+// gutter ABOVE the header. Matching the backdrop's TOP padding to BOARD_TOP_PAD
+// starts the strips exactly at the header's top edge — full-height to the bottom,
+// no strip above the header.
 function LaneBackdrop({ count }: { count: number }) {
   return (
     <div
@@ -252,9 +397,9 @@ function LaneBackdrop({ count }: { count: number }) {
         zIndex: 0,
         pointerEvents: "none",
         display: "grid",
-        gridTemplateColumns: `repeat(${count}, minmax(${COL_W}px, 1fr))`,
+        gridTemplateColumns: `repeat(${count}, ${COL_W}px)`,
         gap: COL_GAP,
-        padding: `0 ${PAD_X}px 16px`,
+        padding: `${BOARD_TOP_PAD}px ${PAD_X}px 16px`,
       }}
     >
       {Array.from({ length: count }).map((_, i) => (
@@ -289,6 +434,8 @@ function GroupLabelRow({
   live,
   hint,
   iconSrc,
+  mark,
+  markColor,
   laneBg,
   isFirst,
 }: {
@@ -296,13 +443,24 @@ function GroupLabelRow({
   count: number;
   live: Lane<unknown>["live"];
   hint: string | null;
+  /** @deprecated Use `mark` + `markColor` (CTL-1208). Still accepted for back-compat. */
   iconSrc?: string | null;
+  /** CTL-1208: resolved ProjectMark for this lane's repo. Supersedes iconSrc. */
+  mark?: ProjectMark;
+  /** CTL-1208: CSS color to tint a glyph mark. */
+  markColor?: string;
   laneBg?: string;
   isFirst?: boolean;
 }) {
   const isLive = live === "live";
   const dotColor = isLive ? LIVE : live === "degraded" ? C.yellow : live === "offline" ? C.fgDim : C.blue;
   const bg = laneBg ?? C.s1;
+  // CTL-1208: mark supersedes legacy iconSrc when present.
+  const effectiveMark: ProjectMark | null = mark && mark.kind !== "none"
+    ? mark
+    : iconSrc
+      ? { kind: "favicon", dataUrl: iconSrc, selectedPath: "" }
+      : null;
   return (
     // Outer band: sticky-TOP only — holds its row position during vertical scroll;
     // scrolls horizontally with the column grid so the background fills the full width.
@@ -346,11 +504,10 @@ function GroupLabelRow({
           borderBottomLeftRadius: 10,
         }}
       >
-        {iconSrc ? (
-          // CTL-1012: the 16px project mark (up from the 14px CTL-998 favicon) so the
-          // brand reads at the lane-header scale; dot fallback when no icon discovered.
-          <img src={iconSrc} alt="" aria-hidden
-            style={{ width: 16, height: 16, borderRadius: 4, objectFit: "contain", flex: "0 0 auto" }} />
+        {effectiveMark ? (
+          // CTL-1012 / CTL-1208: the 16px project mark (up from 14px for lane-header
+          // scale). Glyph → tinted SVG; favicon → <img>; null → dot fallback.
+          <ProjectMarkIcon mark={effectiveMark} color={markColor ?? C.fg} size={16} />
         ) : (
           <span
             className={isLive ? "catalyst-live-dot" : undefined}
@@ -403,24 +560,38 @@ function LaneCardsRow({
   laneKey,
   constrainCells = false,
   cellMax,
+  grow = false,
 }: {
   cells: LaneCell[];
   laneKey?: string;
   constrainCells?: boolean;
   cellMax?: number | null;
+  /** CTL-1178: whether this row may flex-grow to fill leftover vertical space.
+   *  The GROUPED content-height board passes `grow={false}` so a one-card group
+   *  stays one-card tall and the whole board scrolls through groups (Linear-style)
+   *  rather than each lane stretching to fill the viewport. The flat-fallback
+   *  single-lane render keeps the default (false) — it owns its own layout. */
+  grow?: boolean;
 }) {
+  // CTL-1178: grouped lane rows render at NATURAL CONTENT HEIGHT and do NOT grow —
+  // a small group stays small while the whole board scrolls vertically through the
+  // groups. flexGrow is forced to 0 (no stretch); the legacy laneRowGrow water-fill
+  // gate (CTL-1168 scroll-to-top fix for the retired per-cell cap) no longer drives
+  // the grouped path. `grow` defaults to false; nothing currently passes true.
+  const growable = grow ? laneRowGrow(cellMax) : 0;
   return (
     <div
       data-lane-key={laneKey}
       style={{
         display: "grid",
-        gridTemplateColumns: `repeat(${cells.length}, minmax(${COL_W}px, 1fr))`,
+        gridTemplateColumns: `repeat(${cells.length}, ${COL_W}px)`,
         gap: COL_GAP,
         padding: `6px ${PAD_X}px 16px`,
-        // CTL-1144: flexGrow:1 lets this row expand to fill leftover vertical space
-        // (full-height lane cells, Phase 3); stretch fills the taller row height.
-        // flexGrow is inert when content overflows — water-fill caps still govern.
-        flexGrow: 1,
+        // CTL-1178: grouped lane rows render at natural content height (flexGrow 0,
+        // no stretch) so a small group stays small and the whole board scrolls
+        // vertically through the groups (Linear-style). `growable` is 0 for the
+        // grouped path (grow=false); the legacy water-fill stretch is retired here.
+        flexGrow: growable,
         alignItems: "stretch",
         width: "100%",
         // CTL-1151: cards must sit above the zIndex:0 LaneBackdrop painted behind
@@ -555,7 +726,6 @@ function useLaneCellHeights(
   scrollRef: React.RefObject<HTMLDivElement | null>,
   laneKeys: string[],
   constrainCells: boolean,
-  density: Density,
 ): Map<string, number | null> | null {
   const [allocs, setAllocs] = useState<Map<string, number | null> | null>(null);
   // ResizeObserver bumps this so the layout effect re-measures on viewport resize.
@@ -593,19 +763,22 @@ function useLaneCellHeights(
       demands.push(Math.ceil(demand));
     }
 
-    // AVAIL: scroller cell-area height. Measure the REAL chrome (no magic numbers):
-    // clientHeight − colHeader.offsetHeight − Σ(labelBand.offsetHeight) − laneCount×ROW_PAD_V.
+    // CTL-1178: capH = ONE lane's viewport-sized budget (NOT divided by lane count).
+    // = clientHeight − the column-header row − ONE label band − one row's vertical
+    // pad − a small peek so the next group's label sits below the fold (inviting the
+    // scroll). A lane taller than capH is capped here and scrolls its columns
+    // internally; a shorter lane is uncapped (content-height). Measured chrome, no
+    // magic numbers.
     const colHeaderEl = scroller.querySelector<HTMLElement>("[data-board-colheader]");
     const labelBandEls = Array.from(
       scroller.querySelectorAll<HTMLElement>("[data-lane-label-band]"),
     );
     const colHeaderH = colHeaderEl?.offsetHeight ?? 0;
-    const labelBandH = labelBandEls.reduce((sum, el) => sum + el.offsetHeight, 0);
-    const avail =
-      scroller.clientHeight - colHeaderH - labelBandH - laneEls.length * ROW_PAD_V;
+    const oneLabelBandH = labelBandEls[0]?.offsetHeight ?? 0;
+    const capH =
+      scroller.clientHeight - colHeaderH - oneLabelBandH - ROW_PAD_V - LANE_CAP_PEEK;
 
-    const minH = LANE_MIN_CELL_H(density);
-    const caps = computeLaneHeights(demands, Math.max(0, avail), minH);
+    const caps = computeLaneHeights(demands, Math.max(0, capH));
 
     const next = new Map<string, number | null>();
     keys.forEach((k, i) => next.set(k, caps[i]));
@@ -687,7 +860,8 @@ export function SwimlaneBoard<T extends GroupableEntity>({
   columns,
   deriveLane,
   entityNoun = "ticket",
-  density = "comfortable",
+  // CTL-1178: `density` is still an accepted prop (callers pass it) but no longer
+  // consumed here — the per-lane minimum it drove is gone with the water-fill.
   laneColors = {},
 }: {
   items: T[];
@@ -712,11 +886,23 @@ export function SwimlaneBoard<T extends GroupableEntity>({
 }) {
   const lanes = buildLanes(items, groupBy, liveness);
   const chrome = showLaneChrome(groupBy, lanes.length);
-  // CTL-958: constrain cell heights only when multiple groups are present
-  // (axis !== "none" AND laneCount > 1). A single group or no-axis board
-  // scrolls normally — one lane should not get a tiny scroll box.
+  // CTL-1178 (revised): the GROUPED board caps each lane at ≈ ONE VIEWPORT (capH,
+  // computed in useLaneCellHeights) and scrolls its columns INTERNALLY for the
+  // overflow, while the whole board scrolls vertically BETWEEN lanes — matching
+  // Linear (a big group fills ~one screen with its columns scrolling inside; a
+  // small group stays content-height). `constrainCells` gates the per-cell
+  // maxHeight + per-cell overflow-y; it's on for any multi-lane grouped board. A
+  // single grouped lane (and the flat board) stays unconstrained — content-height
+  // (the board scrolls) / per-column flat scroll respectively.
   const constrainCells = groupBy !== "none" && lanes.length > 1;
+  // CTL-1168: the FLAT (ungrouped) board switches to Linear-style per-column
+  // independent scroll — but only when the board has a BOUNDED height (`fill`), since
+  // each column's viewport needs a fixed parent height to scroll against. Without
+  // `fill` (auto height, rare embeds) we keep the legacy single-flow flat board.
+  const flatScroll = !chrome && fill;
   const icons = useRepoIconMap();
+  // CTL-1208: accent colors for glyph tinting (same .text channel as card accent dots).
+  const resolvedColors = useResolvedRepoColors();
 
   // CTL-973: refs for the swipe guard + bump affordance.
   // `scrollRef` points at the overflow container (the wheel listener target).
@@ -732,31 +918,12 @@ export function SwimlaneBoard<T extends GroupableEntity>({
   // flat 300px cap. `allocs.get(laneKey)` is the per-lane cell max (null=uncapped);
   // the whole map is null on the unmeasured first frame (cells fall back to var()).
   const laneKeys = chrome ? lanes.map((l) => l.key) : [];
-  const allocs = useLaneCellHeights(scrollRef, laneKeys, constrainCells, density);
+  const allocs = useLaneCellHeights(scrollRef, laneKeys, constrainCells);
 
-  // Shadow visibility state: tracks whether the board has scrollable overflow
-  // on either side, so we can show left/right edge shadows without scroll-
-  // driven animations (which degrade in Safari). Updated on scroll + resize.
-  const [shadows, setShadows] = useState<{ left: boolean; right: boolean }>({ left: false, right: false });
-  useEffect(() => {
-    const el = scrollRef.current;
-    if (!el) return;
-    const update = () => {
-      const { scrollLeft, scrollWidth, clientWidth } = el;
-      setShadows({
-        left: scrollLeft > SWIPE_EDGE_TOLERANCE,
-        right: scrollLeft < scrollWidth - clientWidth - SWIPE_EDGE_TOLERANCE,
-      });
-    };
-    update();
-    el.addEventListener("scroll", update, { passive: true });
-    const ro = new ResizeObserver(update);
-    ro.observe(el);
-    return () => {
-      el.removeEventListener("scroll", update);
-      ro.disconnect();
-    };
-  }, []);
+  // CTL-1168: the CTL-973 "Layer 3" cosmetic edge-fade gradient (and its
+  // scroll-position `shadows` state + listener) is removed — it read as a stray
+  // vignette over the calm board. The wheel guard (useBoardSwipeGuard) and the
+  // bump-class nudge — the FUNCTIONAL swipe-navigation protection — are untouched.
 
   return (
     <div
@@ -769,7 +936,10 @@ export function SwimlaneBoard<T extends GroupableEntity>({
       data-scroll-restoration-id="board-scroll"
       style={{
         overflowX: "auto",
-        overflowY: "auto",
+        // CTL-1168: the flat per-column board owns its OWN vertical scroll per column,
+        // so the board container must NOT scroll vertically (overflowY:hidden) — only
+        // horizontally. Every other mode keeps the shared vertical scroll.
+        overflowY: flatScroll ? "hidden" : "auto",
         // CTL-973 Layer 1: contain the X overscroll to block browser swipe-navigation
         // on Chrome/Edge/Firefox. Y axis stays "auto" (default) so per-cell overscroll
         // chaining (CTL-958 #2) continues to work. Safari bug 240183 means this alone
@@ -786,31 +956,18 @@ export function SwimlaneBoard<T extends GroupableEntity>({
         position: "relative",
       }}
     >
-      {/* CTL-973 Layer 3: left/right edge shadow affordances. Rendered as
-          position:sticky pseudo-elements via a wrapper div so the shadow
-          travels with the viewport during scroll without needing JS. The
-          gradient fades from the board background color to transparent.
-          Visibility is driven by the scroll-position state. */}
-      {shadows.left && (
-        <div
-          aria-hidden="true"
-          style={{
-            position: "sticky",
-            left: 0,
-            top: 0,
-            width: 32,
-            height: "100%",
-            pointerEvents: "none",
-            zIndex: 10,
-            float: "left",
-            background: `linear-gradient(to right, color-mix(in srgb, ${C.s1} 80%, transparent) 0%, transparent 100%)`,
-            marginRight: -32,
-          }}
+      {/* CTL-1168: the flat (ungrouped) board with a bounded height renders as
+          Linear-style fixed columns, each with its OWN vertical scroll viewport.
+          Grouped boards (and the auto-height flat fallback) keep the shared-scroll
+          grid: one min-width content block, flex column + minHeight:100% so lane rows
+          divide the leftover vertical space. */}
+      {flatScroll ? (
+        <FlatColumnsBoard
+          columns={columns}
+          cells={deriveLane(lanes[0]?.items ?? items)}
+          bumpRef={bumpRef}
         />
-      )}
-      {/* CTL-1144: min-width driven by column count so tracks never compete for
-          negative space; flex column + minHeight:100% lets lane rows divide the
-          leftover vertical space (Phase 3 full-height cells). */}
+      ) : (
       <div ref={bumpRef} style={{
         width: `max(100%, ${boardMinWidth(columns.length)}px)`,
         display: "flex", flexDirection: "column", minHeight: "100%",
@@ -829,14 +986,15 @@ export function SwimlaneBoard<T extends GroupableEntity>({
             return (
               <Fragment key={lane.key}>
                 <GroupLabelRow
-                  // CTL-1012: spelled-out brand name ("Adva (ADV)") + project icon,
-                  // resolved from the lane's representative repo (the team→repo bridge).
-                  // Host axis keeps its bare label + liveness dot (laneIconSrc → null).
+                  // CTL-1012 / CTL-1208: lane header with project mark (glyph or favicon).
+                  // Host axis keeps its bare label + liveness dot (laneMark → none).
                   label={laneDisplayName(groupBy, lane.key, lane.label, lane.repo)}
                   count={lane.items.length}
                   live={lane.live}
                   hint={lanes.length === 1 ? singleLaneHint(groupBy, lane, entityNoun) : null}
                   iconSrc={laneIconSrc(groupBy, lane.repo, icons)}
+                  mark={laneMark(groupBy, lane.repo, icons)}
+                  markColor={lane.repo ? resolvedColors[lane.repo]?.text : undefined}
                   laneBg={laneBg}
                   isFirst={laneIdx === 0}
                 />
@@ -855,22 +1013,6 @@ export function SwimlaneBoard<T extends GroupableEntity>({
           <LaneCardsRow cells={deriveLane(lanes[0]?.items ?? items)} />
         )}
       </div>
-      {shadows.right && (
-        <div
-          aria-hidden="true"
-          style={{
-            position: "sticky",
-            right: 0,
-            top: 0,
-            width: 32,
-            height: "100%",
-            pointerEvents: "none",
-            zIndex: 10,
-            float: "right",
-            background: `linear-gradient(to left, color-mix(in srgb, ${C.s1} 80%, transparent) 0%, transparent 100%)`,
-            marginLeft: -32,
-          }}
-        />
       )}
     </div>
   );

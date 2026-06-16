@@ -78,3 +78,11 @@ catalyst-execution-core daemon status
 
 See [configuration reference](/reference/configuration/) for details on the registry and
 eligible-query format.
+
+## Mirroring config to another node
+
+When adding a second host to a cluster, some config items must be copied verbatim from the seed
+node (SHARED) and others must be regenerated on the new host (PER-NODE). See
+[Cluster config mirror contract](/reference/cluster-config-mirror/) for the full classification
+table, correct file locations for bot OAuth credentials, and the quota field-name schema consumed
+by monitoring and heartbeat code.

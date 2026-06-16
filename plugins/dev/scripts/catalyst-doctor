@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+# catalyst-doctor — fail-closed activation gate (CTL-1186).
+#
+# Delegates all logic to execution-core/doctor.mjs; this script is the
+# thin POSIX entry-point that resolves the JS runtime and forwards argv.
+#
+# Gate contract: exit 0 => safe to activate; non-zero => fail-closed
+# --json emits {ok, pass, warn, fail, checks[]} where ok === (fail === 0)
+# Consumers (CTL-1185 catalyst-join.sh) must gate on [$? -eq 0], not a specific nonzero value.
+# --dry-run accepted (documented as default read-only behavior, no separate code path).
+set -uo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DOCTOR_MJS="${DOCTOR_MJS:-${SCRIPT_DIR}/execution-core/doctor.mjs}"
+
+# Resolve a JS runtime (bun preferred, node fallback) — matches sibling .mjs CLIs.
+JS_RUN="$(command -v bun || command -v node || true)"
+
+[[ -n "$JS_RUN" ]] || { echo "catalyst doctor: no bun/node runtime found" >&2; exit 1; }
+[[ -f "$DOCTOR_MJS" ]] || { echo "catalyst doctor: missing $DOCTOR_MJS" >&2; exit 1; }
+
+exec "$JS_RUN" "$DOCTOR_MJS" "$@"

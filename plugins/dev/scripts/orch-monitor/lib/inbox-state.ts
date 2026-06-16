@@ -99,12 +99,15 @@ function findHeldSignal(
       return { phase, signal: sig };
     }
   }
-  // Second pass: stalled / held fallback
+  // Second pass: stalled / held / failed fallback (CTL-1180: failed surfaces too)
   for (const phase of PHASE_ORDER) {
     const fname = `phase-${phase}.json`;
     if (!phaseFiles.has(fname)) continue;
     const sig = readJsonSafe(join(workersDir, ticket, fname));
-    if (isRecord(sig) && (sig.status === "stalled" || sig.status === "held")) {
+    if (
+      isRecord(sig) &&
+      (sig.status === "stalled" || sig.status === "held" || sig.status === "failed")
+    ) {
       return { phase, signal: sig };
     }
   }

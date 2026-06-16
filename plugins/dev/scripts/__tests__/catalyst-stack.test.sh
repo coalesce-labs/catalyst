@@ -401,6 +401,29 @@ run "rendered plist passes plutil lint (macOS)" bash -c "
   fi
 "
 
+# ── CTL-1202: install-services pins CATALYST_HOST_NAME from Layer-2 config ────
+HOSTCFG_HOME="${SCRATCH}/host_home"
+mkdir -p "${HOSTCFG_HOME}/.config/catalyst"
+printf '{"catalyst":{"host":{"name":"mini"}}}' > "${HOSTCFG_HOME}/.config/catalyst/config.json"
+
+run "install-services --print pins CATALYST_HOST_NAME key" bash -c "
+  HOME='${HOSTCFG_HOME}' '${STACK}' install-services --print 2>&1 | grep -q '<key>CATALYST_HOST_NAME</key>'
+"
+
+run "install-services --print pins configured host name value" bash -c "
+  HOME='${HOSTCFG_HOME}' '${STACK}' install-services --print 2>&1 | grep -A1 'CATALYST_HOST_NAME' | grep -q '<string>mini</string>'
+"
+
+run "install-services --print honors CATALYST_LAYER2_CONFIG_FILE" bash -c "
+  CATALYST_LAYER2_CONFIG_FILE='${HOSTCFG_HOME}/.config/catalyst/config.json' '${STACK}' install-services --print 2>&1 | grep -A1 'CATALYST_HOST_NAME' | grep -q '<string>mini</string>'
+"
+
+run "install-services --print omits key when host.name unset" bash -c "
+  emptyhome=\$(mktemp -d);
+  out=\$(HOME=\"\$emptyhome\" '${STACK}' install-services --print 2>/dev/null);
+  printf '%s' \"\$out\" | grep -q 'ai.coalesce.catalyst-stack' && ! printf '%s' \"\$out\" | grep -q '<key>CATALYST_HOST_NAME</key>'
+"
+
 # ── Summary ───────────────────────────────────────────────────────────────────
 echo ""
 TOTAL=$((PASSES + FAILURES))

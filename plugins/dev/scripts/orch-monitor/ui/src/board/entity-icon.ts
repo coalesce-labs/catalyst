@@ -1,8 +1,9 @@
 // entity-icon.ts — pure resolution of repo favicon + liveness-badge kind for the
-// board's entity/group markers (CTL-998). No DOM, no React — unit-tested.
+// board's entity/group markers (CTL-998, CTL-1208). No DOM, no React — unit-tested.
 import type { RepoIconMap } from "@/hooks/use-repo-icons";
 import type { BoardActiveState } from "./types";
 import type { Swimlane } from "./prefs-store";
+import type { ProjectMark } from "@/lib/project-mark";
 
 /** Best favicon dataUrl for an entity's repo, or null (fail-open: no repo / no icon). */
 export function resolveEntityIcon(
@@ -11,6 +12,32 @@ export function resolveEntityIcon(
 ): string | null {
   if (!repo) return null;
   return icons[repo]?.autoDataUrl ?? null;
+}
+
+/**
+ * CTL-1208: resolved ProjectMark for an entity's repo (glyph | favicon | none).
+ * Falls back to `{kind:"none"}` when the repo is absent, unknown, or has no mark.
+ */
+export function resolveEntityMark(
+  repo: string | null | undefined,
+  icons: RepoIconMap,
+): ProjectMark {
+  if (!repo) return { kind: "none" };
+  return icons[repo]?.mark ?? { kind: "none" };
+}
+
+/**
+ * CTL-1208: the mark for a lane header, respecting host/none axis gating.
+ * The HOST and NONE axes return `{kind:"none"}` — host keeps its liveness dot,
+ * none has no lane chrome. Team/repo/project lanes resolve from the repo's mark.
+ */
+export function laneMark(
+  axis: Swimlane,
+  repo: string | null | undefined,
+  icons: RepoIconMap,
+): ProjectMark {
+  if (axis === "host" || axis === "none") return { kind: "none" };
+  return resolveEntityMark(repo, icons);
 }
 
 /** Liveness badge to overlay on an icon. Preserves the invariant: cyan==live, red==stuck. */

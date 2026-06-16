@@ -1,4 +1,4 @@
-// repo-icons.ts — pure logic for per-project icons (CTL-961, CTL-997).
+// repo-icons.ts — pure logic for per-project icons (CTL-961, CTL-997, CTL-1208).
 //
 // Three-tier system:
 //   1. AUTO-DETECTED (picked): the server probes GitHub for all icon candidates
@@ -68,6 +68,9 @@ export interface ResolvedRepoIcon {
   selectedPath: string | null;
   /** Manual lucide override (from localStorage), unchanged. */
   override: RepoIconOverride | null;
+  /** CTL-1208: the resolved project mark (glyph | favicon | none). Optional for back-compat
+   *  with existing test fixtures that construct ResolvedRepoIcon without this field. */
+  mark?: import("./project-mark").ProjectMark;
 }
 
 export const REPO_ICON_KEY_PREFIX = "catalyst.repoIcon.";

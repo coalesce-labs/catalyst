@@ -58,6 +58,36 @@ describe("CTL-1151 — LaneCardsRow cells no longer paint a column tray", () => 
   });
 });
 
+describe("CTL-1168 — edge-fade gradient removed, wheel guard untouched", () => {
+  it("the cosmetic edge-fade linear-gradient (CTL-973 Layer 3) is gone", () => {
+    // The static edge shadow/vignette is removed; only the FUNCTIONAL swipe guard
+    // remains. No linear-gradient edge layer and no `shadows` scroll-state plumbing.
+    expect(src).not.toContain("linear-gradient");
+    expect(src).not.toContain("shadows.left");
+    expect(src).not.toContain("shadows.right");
+    expect(src).not.toContain("setShadows");
+  });
+  it("the wheel-guard swipe protection is preserved exactly", () => {
+    // swipeBlockDirection + non-passive wheel listener + overscroll-x + bump nudge
+    // must all remain — only the visual fade was removed.
+    expect(src).toContain("useBoardSwipeGuard");
+    expect(src).toContain("swipeBlockDirection");
+    expect(src).toContain('{ passive: false }');
+    expect(src).toContain("BOARD_SCROLL_OVERSCROLL_X");
+    expect(src).toContain("BOARD_BUMP_CLASS_LEFT");
+  });
+});
+
+describe("CTL-1168 — band caps at the column header top (no strip above header)", () => {
+  it("LaneBackdrop top padding matches the header's BOARD_TOP_PAD", () => {
+    const body = fnBody("LaneBackdrop");
+    // The strips begin at BOARD_TOP_PAD (the header's top padding) so they don't
+    // poke up through the gutter above the column header.
+    expect(body).toContain("BOARD_TOP_PAD");
+    expect(src).toContain("const BOARD_TOP_PAD = 16");
+  });
+});
+
 describe("CTL-1151 — hue on the band overlay, not the continuous lane", () => {
   it("the lane backdrop strip is neutral C.s0 (no laneBg tint)", () => {
     const body = fnBody("LaneBackdrop");

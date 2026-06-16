@@ -202,6 +202,8 @@ import { detectProjectKey } from "./lib/project-key";
 import { loadMonitorConfig } from "./lib/monitor-config";
 // CTL-1152: config-driven project roster behind GET /api/projects.
 import { loadProjects } from "./lib/project-roster";
+// CTL-1153 (M2): config mutation for PUT /api/projects/:key.
+import { validateProjectPatch, writeProjectPatch } from "./lib/config-writer";
 // CTL-961: per-repo favicon auto-detection via GitHub API + disk cache.
 import { fetchRepoIcon } from "./lib/repo-icon-fetcher";
 import {
@@ -373,6 +375,12 @@ export interface CreateServerOptions {
   previewFetcher?: PreviewFetcher | null;
   previewRefreshMs?: number;
   annotationsDbPath?: string;
+  /**
+   * CTL-1153 (M2): injectable path for PUT /api/projects/:key and GET /api/projects.
+   * Defaults to `${process.cwd()}/.catalyst/config.json`. Tests inject a temp fixture
+   * so the endpoint round-trip never rewrites the committed workspace config.
+   */
+  projectsConfigPath?: string;
   /**
    * CTL-1100: override for beliefs.db used by governance read endpoints.
    * Production resolves via defaultBeliefsDbPath(process.env); tests inject
@@ -798,6 +806,7 @@ export function createServer(opts: CreateServerOptions): BunServer {
     previewFetcher: previewFetcherOpt,
     previewRefreshMs = PREVIEW_REFRESH_MS,
     annotationsDbPath,
+    projectsConfigPath: projectsConfigPathOpt,
     filterStateDbPath,
     beliefStoreDbPath,
     commsReader: commsReaderOpt,
@@ -814,6 +823,9 @@ export function createServer(opts: CreateServerOptions): BunServer {
   const CATALYST_DIR =
     catalystDirOpt ?? process.env.CATALYST_DIR ?? `${process.env.HOME}/catalyst`;
   const annDbPath = annotationsDbPath ?? `${CATALYST_DIR}/annotations.db`;
+  // CTL-1153 (M2): injectable config path for PUT /api/projects/:key + GET /api/projects.
+  // Injected in tests to avoid rewriting the committed workspace config.json.
+  const projectsConfigPath = projectsConfigPathOpt ?? `${process.cwd()}/.catalyst/config.json`;
   // CTL-889: the broker's durable ticket_state cache the detail/search routes
   // read (filter-state.db). Defaults to the broker's own default path.
   const filterStateDb = filterStateDbPath ?? `${CATALYST_DIR}/filter-state.db`;
@@ -1519,9 +1531,47 @@ export function createServer(opts: CreateServerOptions): BunServer {
           try {
             const board = await boardSnapshot.getLatest();
             const observedRepos = board?.repos ?? [];
-            return Response.json({ projects: loadProjects({ observedRepos }) });
+            return Response.json({ projects: loadProjects({ observedRepos, configPath: projectsConfigPath }) });
           } catch {
             return Response.json({ projects: [] });
+          }
+        }
+
+        // CTL-1153 (M2): PUT /api/projects/:key — upsert one editable projects[] entry
+        // (name/color/icon/stateMap). First edit of a known team key migrates THAT project
+        // into catalyst.projects[]. READ (GET above) is fail-open; WRITE is fail-CLOSED on input.
+        // Validation → HTTP code table:
+        //   405  non-PUT method
+        //   400  bad JSON | non-object | unknown field (incl. vcsRepo/key) | bad name | bad hue | bad stateMap
+        //   404  key not in teams[] and not in existing projects[]
+        //   500  genuine persistence failure
+        //   200  { project, projects }
+        {
+          const projectKeyMatch = url.pathname.match(/^\/api\/projects\/([A-Za-z0-9._-]+)$/);
+          if (projectKeyMatch && projectKeyMatch[1]) {
+            if (req.method !== "PUT") return new Response("Method Not Allowed", { status: 405 });
+            let key: string;
+            try { key = decodeURIComponent(projectKeyMatch[1]); }
+            catch { return Response.json({ error: "Bad project key" }, { status: 400 }); }
+            let body: unknown;
+            try { body = await req.json(); }
+            catch { return Response.json({ error: "Invalid JSON body" }, { status: 400 }); }
+            const v = validateProjectPatch(body);
+            if (!v.ok) return Response.json({ error: v.error }, { status: v.status });
+            let result: ReturnType<typeof writeProjectPatch>;
+            try {
+              result = writeProjectPatch(projectsConfigPath, key.toUpperCase(), v.patch);
+            } catch (err) {
+              console.error(`[server] PUT /api/projects/${key} failed:`, err);
+              return Response.json({ error: "Failed to persist project settings" }, { status: 500 });
+            }
+            if (!result.ok) {
+              return Response.json({ error: `Unknown project key: ${key.toUpperCase()}` }, { status: 404 });
+            }
+            const board = await boardSnapshot.getLatest();
+            const observedRepos = board?.repos ?? [];
+            const projects = loadProjects({ observedRepos, configPath: projectsConfigPath });
+            return Response.json({ project: projects.find((p) => p.key === key.toUpperCase()) ?? null, projects });
           }
         }
 
@@ -3955,6 +4005,42 @@ export function createServer(opts: CreateServerOptions): BunServer {
             return Response.json(trace);
           } catch {
             return Response.json({ ticket, tickId: null, beliefs: [] });
+          }
+        }
+
+        // CTL-935 Phase 5: GET /api/beliefs/report — weekly shadow disagreement report.
+        // ?sinceDays=7 (default 7, clamped to [1,90]). Degrades gracefully when
+        // beliefs.db is absent. DO NOT inline the specifier (VITE-GRAPH GUARD, CTL-883).
+        if (url.pathname === "/api/beliefs/report") {
+          const rawDays = url.searchParams.get("sinceDays");
+          let sinceDays = 7;
+          if (rawDays != null) {
+            const parsed = Number(rawDays);
+            if (!Number.isFinite(parsed) || parsed <= 0 || !Number.isInteger(parsed)) {
+              return new Response("sinceDays must be a positive integer", { status: 400 });
+            }
+            sinceDays = Math.min(Math.max(parsed, 1), 90);
+          }
+          const nowMs = Date.now();
+          const sinceMs = nowMs - sinceDays * 86_400_000;
+          const reportMod = ["./lib/belief-report.mjs"].join("");
+          try {
+            const { computeReportJson } = await import(reportMod) as {
+              computeReportJson: (opts: { dbPath: string; sinceMs: number; nowMs: number }) => Promise<unknown>;
+            };
+            const report = await computeReportJson({ dbPath: govDbPath(), sinceMs, nowMs });
+            return Response.json(report);
+          } catch (err) {
+            // CTL-935 remediate: tag the error-path payload as degraded so the
+            // flag-live helper / operator can tell a broken report (failed
+            // import, corrupt/locked db) from a legitimately quiet week. The
+            // shape stays well-formed (200) so existing consumers don't break.
+            return Response.json({
+              window: { sinceMs, nowMs, tickCount: 0, rulesShaSet: [], multipleRulesSha: false },
+              perRule: [], perGuard: [], replays: [],
+              degraded: true,
+              degradedReason: err instanceof Error ? err.message : String(err),
+            });
           }
         }
 

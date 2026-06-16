@@ -1,7 +1,7 @@
-// icon-picker-model.test.ts — unit tests for buildIconPickerRows (CTL-997 Phase 4).
+// icon-picker-model.test.ts — unit tests for buildIconPickerRows and resolveIconSectionState (CTL-997 Phase 4 / CTL-1207).
 // Pure view-model builder — no DOM, no React.
 import { describe, it, expect } from "bun:test";
-import { buildIconPickerRows } from "./icon-picker-model";
+import { buildIconPickerRows, resolveIconSectionState } from "./icon-picker-model";
 import type { RepoIconMap } from "@/hooks/use-repo-icons";
 
 describe("buildIconPickerRows", () => {
@@ -82,5 +82,20 @@ describe("buildIconPickerRows", () => {
     expect(opts.find((o) => o.path === "logo.svg")?.label).toBe("SVG");
     expect(opts.find((o) => o.path === "favicon.ico")?.label).toBe("ICO");
     expect(opts.find((o) => o.path === "logo.png")?.label).toBe("PNG");
+  });
+});
+
+describe("resolveIconSectionState", () => {
+  it("is 'loading' before the board snapshot arrives (no payload, no rows)", () => {
+    expect(resolveIconSectionState(false, 0)).toBe("loading");
+  });
+  it("is 'empty' once loaded with no icon rows", () => {
+    expect(resolveIconSectionState(true, 0)).toBe("empty");
+  });
+  it("is 'ready' once loaded with rows", () => {
+    expect(resolveIconSectionState(true, 3)).toBe("ready");
+  });
+  it("is 'ready' when rows present even if payload not loaded (warm paint)", () => {
+    expect(resolveIconSectionState(false, 3)).toBe("ready");
   });
 });

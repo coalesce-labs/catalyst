@@ -1,7 +1,20 @@
-// icon-picker-model.ts — pure view-model builder for the icon picker UI (CTL-997 Phase 4).
+// icon-picker-model.ts — pure view-model builder for the icon picker UI (CTL-997 Phase 4 / CTL-1207).
 // No React, no side effects — fully unit-testable.
 import type { RepoIconMap } from "@/hooks/use-repo-icons";
 import type { IconCandidate, IconFormat } from "@/lib/repo-icons";
+
+export type IconSectionState = "loading" | "empty" | "ready";
+
+/** Decide the icon-picker section's render mode. Rows present → always show them;
+ *  otherwise the empty state is only correct once the board snapshot has loaded —
+ *  before that we are still detecting (CTL-1207 Defect 3). */
+export function resolveIconSectionState(
+  payloadLoaded: boolean,
+  rowCount: number,
+): IconSectionState {
+  if (rowCount > 0) return "ready";
+  return payloadLoaded ? "empty" : "loading";
+}
 
 export interface IconPickerOption {
   /** null = "Auto (best)"; a path string = specific candidate. */

@@ -1,5 +1,35 @@
 # Changelog
 
+## [12.10.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.9.0...catalyst-dev-v12.10.0) (2026-06-16)
+
+
+### Features
+
+* **dev:** CTL-1131 — durable needsHumanSince anchor + escalation signal persistence (Phases 1–2) ([#1995](https://github.com/coalesce-labs/catalyst/issues/1995)) ([ada430e](https://github.com/coalesce-labs/catalyst/commit/ada430eb4be524cef56c760e345355ffa5b0b6a4))
+* **dev:** CTL-1133 — installable PWA for the orch-monitor ([#2049](https://github.com/coalesce-labs/catalyst/issues/2049)) ([1289b5a](https://github.com/coalesce-labs/catalyst/commit/1289b5a4faa57a7104d0fc741b34d520bbbfce46))
+* **dev:** CTL-1152 — config-driven, server-authoritative project roster in the monitor ([#2031](https://github.com/coalesce-labs/catalyst/issues/2031)) ([51f56be](https://github.com/coalesce-labs/catalyst/commit/51f56be36f84a1f7cb25d953c15a8f5b5d4f00dc))
+* **dev:** CTL-1153 — editable project settings in the monitor (server-saved) ([#2092](https://github.com/coalesce-labs/catalyst/issues/2092)) ([57c8f12](https://github.com/coalesce-labs/catalyst/commit/57c8f1271a3e6a72788c29ac802561d0cafac53d))
+* **dev:** CTL-1166 — catalyst-stack install-services (launchd auto-start on boot) ([#2047](https://github.com/coalesce-labs/catalyst/issues/2047)) ([15925c3](https://github.com/coalesce-labs/catalyst/commit/15925c33c4ed97b2a2e3e2bcdb5d0b0ed6c5e264))
+* **dev:** CTL-1168 + CTL-1178 — Linear-match Tickets board (fixed columns, per-column flat scroll, viewport-capped grouped lanes) ([#2044](https://github.com/coalesce-labs/catalyst/issues/2044)) ([f70de89](https://github.com/coalesce-labs/catalyst/commit/f70de89c40408472934a9a7c83331d8d552ded19))
+* **dev:** CTL-1170 — async sweeps to unblock heartbeat event loop ([#2058](https://github.com/coalesce-labs/catalyst/issues/2058)) ([d086770](https://github.com/coalesce-labs/catalyst/commit/d08677002520468d61756a0c5da57e77ef6b7157))
+* **dev:** CTL-1172 — labeled service-health indicator in the orch-monitor footer ([#2055](https://github.com/coalesce-labs/catalyst/issues/2055)) ([c301d36](https://github.com/coalesce-labs/catalyst/commit/c301d360b3ecde83febabb2e6b026d2addec26fd))
+* **dev:** CTL-1173 Phase 2 — fix applyAssignee read-back to verify Issue.delegate.id ([#2064](https://github.com/coalesce-labs/catalyst/issues/2064)) ([68181f1](https://github.com/coalesce-labs/catalyst/commit/68181f1bc140a5fe850baf099d21e47ef446349e))
+* **dev:** CTL-1175 — orphan-PR detect+notify sweep raises Needs-You inbox row ([#2065](https://github.com/coalesce-labs/catalyst/issues/2065)) ([6d2ac03](https://github.com/coalesce-labs/catalyst/commit/6d2ac03f4866865b8fe2c4e59c33bd2a01fe6bc8))
+* **dev:** CTL-1180 — surface failed phases as needs-human (monitor + daemon) ([#2095](https://github.com/coalesce-labs/catalyst/issues/2095)) ([9a8027b](https://github.com/coalesce-labs/catalyst/commit/9a8027bffc44cb7b3dc68bea8f083e216b019ef0))
+* **dev:** CTL-1184 — catalyst-cluster join-token + join-token-store.mjs seam module ([#2097](https://github.com/coalesce-labs/catalyst/issues/2097)) ([df2b838](https://github.com/coalesce-labs/catalyst/commit/df2b838821c8f6a292a219876d3e961516e910f7))
+* **dev:** CTL-1185 — catalyst-join.sh one-line node onboarding ([#2110](https://github.com/coalesce-labs/catalyst/issues/2110)) ([5122573](https://github.com/coalesce-labs/catalyst/commit/5122573df656ed784caf26785d006974d2b45603))
+* **dev:** CTL-1203 — secrets 600 hygiene: installer enforcement + doctor assertion ([#2104](https://github.com/coalesce-labs/catalyst/issues/2104)) ([d9fd590](https://github.com/coalesce-labs/catalyst/commit/d9fd590d4ccf9cad2e6469b67082ce78b6ad0b68))
+* **dev:** CTL-1205 — worker-dir GC to prevent per-tick I/O blowup ([#2112](https://github.com/coalesce-labs/catalyst/issues/2112)) ([9c5d933](https://github.com/coalesce-labs/catalyst/commit/9c5d9336b2e4d74168a955877641a019054dbe22))
+* **dev:** CTL-1206 — flat board per-column scroll restoration ([#2113](https://github.com/coalesce-labs/catalyst/issues/2113)) ([9b1db6d](https://github.com/coalesce-labs/catalyst/commit/9b1db6d4041a38bddd4bea163703dc25ae551f81))
+* **dev:** CTL-935 shadow comparators + disagreement report + flag-live verification ([#2101](https://github.com/coalesce-labs/catalyst/issues/2101)) ([6922530](https://github.com/coalesce-labs/catalyst/commit/6922530279e767d17949dccaaeaece1047cca58d))
+
+
+### Bug Fixes
+
+* **dev:** CTL-1169 — daemon-health hysteresis (stop the degraded↔healthy notification flap) ([#2052](https://github.com/coalesce-labs/catalyst/issues/2052)) ([e045155](https://github.com/coalesce-labs/catalyst/commit/e045155f89ed59a3748d49bac5387634b9c38fe4))
+* **dev:** CTL-1171 — broker liveness heartbeat (stop the idle-broker false-down) ([#2056](https://github.com/coalesce-labs/catalyst/issues/2056)) ([8f28285](https://github.com/coalesce-labs/catalyst/commit/8f28285eb9a43a521aaa1b14355db212e644c625))
+* **dev:** CTL-1181 — loud needs-human escalation + proactive token detour in phase-pr ([#2093](https://github.com/coalesce-labs/catalyst/issues/2093)) ([e1adadd](https://github.com/coalesce-labs/catalyst/commit/e1adadd479d575d6ee2dc0400695bec518d98fbc))
+
 ## [12.9.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.8.0...catalyst-dev-v12.9.0)
 
 Jun 15, 2026

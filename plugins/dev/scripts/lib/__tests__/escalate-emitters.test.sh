@@ -9,6 +9,9 @@ EMITTER_DIR="${SCRIPT_DIR}/.."
 
 PASSES=0; FAILURES=0
 
+pass() { (( PASSES++ )) || true; echo "  PASS: $1"; }
+fail() { (( FAILURES++ )) || true; echo "  FAIL: $1"; }
+
 assert_eq() {
   local expected="$1" actual="$2" label="$3"
   if [[ "$expected" == "$actual" ]]; then
@@ -137,6 +140,146 @@ if command -v shellcheck >/dev/null 2>&1; then
 else
   echo "  SKIP: shellcheck not available"
 fi
+
+# ── 11. CTL-1181: _escalate_workflow_scope_push side-effects ─────────────────
+echo ""
+echo "11. CTL-1181: _escalate_workflow_scope_push side-effects"
+
+run_s11() {
+  # Creates a fake plugin root with stub escalation-explain.mjs and
+  # phase-agent-emit-complete no-op, then runs _escalate_workflow_scope_push
+  # in a subshell with per-test stubs for linearis and linear-comment-post.sh.
+  # Args: stub_linearis (0|1 exit), stub_commentpost (0|1 exit), set_orch_dir (true|false),
+  #       set_cta_token (true|false - whether the cta is non-empty in the stub json)
+  local stub_lin_rc="${1:-0}" stub_cp_rc="${2:-0}" set_orch="${3:-true}" set_cta="${4:-true}"
+  local scratch
+  scratch="$(mktemp -d "${TMPDIR:-/tmp}/s11-XXXXXX")"
+  # Fake plugin root structure
+  local fpr="${scratch}/plugin_root"
+  mkdir -p "${fpr}/scripts/execution-core" "${fpr}/scripts/lib"
+
+  # Minimal escalation-explain.mjs stub (outputs just enough for the helper).
+  # Write via printf to avoid heredoc quoting complexity with the JSON string.
+  if [[ "$set_cta" == "true" ]]; then
+    printf '%s\n' \
+      "import process from 'process';" \
+      "process.stdout.write(JSON.stringify({escalation_type:'manual',blocked_capability:'workflow-oauth-scope',call_to_action:'Run gh auth refresh -s workflow then re-run phase-pr.'}));" \
+      > "${fpr}/scripts/execution-core/escalation-explain.mjs"
+  else
+    printf '%s\n' \
+      "import process from 'process';" \
+      "process.stdout.write(JSON.stringify({escalation_type:'manual',blocked_capability:'workflow-oauth-scope',call_to_action:''}));" \
+      > "${fpr}/scripts/execution-core/escalation-explain.mjs"
+  fi
+
+  # no-op emit-complete
+  local emit="${fpr}/scripts/phase-agent-emit-complete"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$emit"; chmod +x "$emit"
+
+  # Stub linearis
+  local lin_bin="${scratch}/lin_bin"
+  mkdir -p "$lin_bin"
+  printf '#!/usr/bin/env bash\nexit %s\n' "$stub_lin_rc" > "${lin_bin}/linearis"
+  chmod +x "${lin_bin}/linearis"
+
+  # Stub linear-comment-post.sh (captures args so we can verify)
+  local cp_out="${scratch}/cp.out"
+  cat > "${fpr}/scripts/lib/linear-comment-post.sh" <<CPSTUB
+#!/usr/bin/env bash
+printf '%s\t%s\n' "\$1" "\$2" > "${cp_out}"
+exit ${stub_cp_rc}
+CPSTUB
+  chmod +x "${fpr}/scripts/lib/linear-comment-post.sh"
+
+  # Fake signal file
+  local sig="${scratch}/phase-implement.json"
+  printf '{"status":"running","ticket":"CTL-S11"}\n' > "$sig"
+
+  # Fake orch dir
+  local orch_dir="${scratch}/orch_dir"
+  mkdir -p "${orch_dir}/workers/CTL-S11"
+
+  # Run helper in subshell
+  (
+    export PLUGIN_ROOT="$fpr"
+    export SIGNAL_FILE="$sig"
+    export TICKET="CTL-S11"
+    export PHASE="pr"
+    export ORCH_ID="CTL-S11"
+    export COMMS=""
+    [[ "$set_orch" == "true" ]] && export CATALYST_ORCHESTRATOR_DIR="$orch_dir"
+    PATH="${lin_bin}:${PATH}"
+    source "${EMITTER_DIR}/escalate-workflow-scope.sh"
+    _escalate_workflow_scope_push "my-test-branch" >/dev/null 2>&1
+  ) || true
+
+  printf '%s' "$scratch"
+}
+
+# 11a: signal file gains status=failed after the call
+echo "11a: signal file status=failed after _escalate_workflow_scope_push"
+S11A_SCRATCH="$(run_s11 0 0 true true)"
+S11A_STATUS="$(jq -r '.status' "${S11A_SCRATCH}/phase-implement.json" 2>/dev/null || echo "missing")"
+assert_eq "failed" "$S11A_STATUS" "11a: signal file status=failed"
+rm -rf "$S11A_SCRATCH"
+
+# 11b: .linear-label-needs-human.applied marker is created when CATALYST_ORCHESTRATOR_DIR set
+echo "11b: needs-human marker file created when CATALYST_ORCHESTRATOR_DIR set"
+S11B_SCRATCH="$(run_s11 0 0 true true)"
+MARKER="${S11B_SCRATCH}/orch_dir/workers/CTL-S11/.linear-label-needs-human.applied"
+if [[ -e "$MARKER" ]]; then
+  pass "11b: needs-human marker file created"
+else
+  fail "11b: needs-human marker file NOT created (expected at ${MARKER})"
+fi
+rm -rf "$S11B_SCRATCH"
+
+# 11c: marker is NOT created when CATALYST_ORCHESTRATOR_DIR is unset
+echo "11c: needs-human marker NOT created when CATALYST_ORCHESTRATOR_DIR unset"
+S11C_SCRATCH="$(run_s11 0 0 false true)"
+MARKER_C="${S11C_SCRATCH}/orch_dir/workers/CTL-S11/.linear-label-needs-human.applied"
+if [[ -e "$MARKER_C" ]]; then
+  fail "11c: marker created even though CATALYST_ORCHESTRATOR_DIR was unset"
+else
+  pass "11c: marker not created (CATALYST_ORCHESTRATOR_DIR unset — expected)"
+fi
+rm -rf "$S11C_SCRATCH"
+
+# 11d: comment-post is called with the ticket and a non-empty body containing the CTA
+echo "11d: comment-post invoked with non-empty body containing the CTA"
+S11D_SCRATCH="$(run_s11 0 0 true true)"
+CP_OUT_D="${S11D_SCRATCH}/cp.out"
+if [[ -s "$CP_OUT_D" ]]; then
+  CP_TICKET="$(head -1 "$CP_OUT_D" | cut -f1)"
+  CP_BODY="$(head -1 "$CP_OUT_D" | cut -f2-)"
+  assert_eq "CTL-S11" "$CP_TICKET" "11d: comment-post called with correct ticket"
+  if [[ -n "$CP_BODY" && "$CP_BODY" == *"Workflow scope push blocked"* ]]; then
+    pass "11d: comment body contains the escalation header"
+  else
+    fail "11d: comment body missing expected text — got: $(printf '%q' "$CP_BODY")"
+  fi
+else
+  fail "11d: comment-post was not invoked (cp.out is empty or missing)"
+fi
+rm -rf "$S11D_SCRATCH"
+
+# 11e: comment-post is NOT invoked when the CTA is empty
+echo "11e: comment-post NOT invoked when call_to_action is empty"
+S11E_SCRATCH="$(run_s11 0 0 true false)"
+CP_OUT_E="${S11E_SCRATCH}/cp.out"
+if [[ -s "$CP_OUT_E" ]]; then
+  fail "11e: comment-post was called despite empty CTA — got: $(cat "$CP_OUT_E")"
+else
+  pass "11e: comment-post not called when CTA is empty"
+fi
+rm -rf "$S11E_SCRATCH"
+
+# 11f: the helper is fail-open — a failing linearis does not abort the function
+echo "11f: failing linearis does not abort _escalate_workflow_scope_push"
+S11F_SCRATCH="$(run_s11 1 0 true true)"
+S11F_STATUS="$(jq -r '.status' "${S11F_SCRATCH}/phase-implement.json" 2>/dev/null || echo "missing")"
+assert_eq "failed" "$S11F_STATUS" "11f: signal still set to failed even when linearis exits 1"
+rm -rf "$S11F_SCRATCH"
 
 echo ""
 echo "results: ${PASSES} passed, ${FAILURES} failed"
