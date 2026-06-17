@@ -62,6 +62,42 @@ export function classifyHostLiveness(
 }
 
 /**
+ * mergeHeartbeatsNewestWins — merge any number of { host: lastSeenISO } maps,
+ * keeping the NEWER timestamp per host (CTL-1255). The monitor folds the
+ * cross-host LIVENESS ANCHOR heartbeats (coarse ~2-min cadence) over the LOCAL
+ * event-log heartbeats (~30s). A plain spread ({...local, ...anchor}) let the
+ * anchor's older timestamp CLOBBER the fresher local heartbeat for the self
+ * host, so a live local node displayed "degraded". Newest-wins fixes that while
+ * still surfacing peers that exist only in the anchor. An unparseable timestamp
+ * loses to any parseable one; never throws.
+ *
+ * @param {...Record<string, string>} maps
+ * @returns {Record<string, string>}
+ */
+export function mergeHeartbeatsNewestWins(...maps) {
+  const out = {};
+  for (const m of maps) {
+    if (!m || typeof m !== "object") continue;
+    for (const [host, ts] of Object.entries(m)) {
+      if (typeof ts !== "string" || ts.length === 0) continue;
+      const prev = out[host];
+      if (prev === undefined) {
+        out[host] = ts;
+        continue;
+      }
+      const prevMs = Date.parse(prev);
+      const tsMs = Date.parse(ts);
+      if (!Number.isFinite(prevMs)) {
+        out[host] = ts; // any later value beats an unparseable earlier one
+      } else if (Number.isFinite(tsMs) && tsMs > prevMs) {
+        out[host] = ts;
+      }
+    }
+  }
+  return out;
+}
+
+/**
  * overlayClusterLiveness — overlay liveness across an entire roster. Returns one
  * node entry per roster host (stable roster order), carrying its status and the
  * lastSeen timestamp the overlay classified (null when the host was never heard).

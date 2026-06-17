@@ -27,6 +27,7 @@ import type { NavSignal, DaemonHealth } from "./lib/nav-signal.mjs";
 // is an exact identity no-op (one node — the local daemon).
 import { createClusterEntity } from "./lib/cluster-view.mjs";
 import type { ClusterView } from "./lib/cluster-view.mjs";
+import { mergeHeartbeatsNewestWins } from "./lib/node-liveness.mjs";
 import { deriveClusterSignal } from "./lib/cluster-signal.mjs";
 import type { ClusterSignal } from "./lib/cluster-signal.mjs";
 // CTL-886 (BFF4): run→worker identity — surface every phase-*.json signal as a
@@ -1380,7 +1381,10 @@ export function createServer(opts: CreateServerOptions): BunServer {
       } catch {
         /* fail-open: anchor cache alone still drives the overlay */
       }
-      return { ...local, ...anchorHeartbeatCache.map };
+      // CTL-1255: newest-wins, NOT anchor-clobbers-local — the anchor's coarse
+      // ~2-min cadence must not make a live self-host (fresh ~30s local log)
+      // display as degraded.
+      return mergeHeartbeatsNewestWins(local, anchorHeartbeatCache.map);
     },
   });
   const readClusterView = async (board: BoardPayload): Promise<ClusterView> => {
