@@ -425,6 +425,47 @@ fi
 rm -rf "$ROOT"
 
 echo ""
+echo "Test (CTL-1254): rebuild swaps in a fresh dist and drops stale chunks (no accumulation)"
+ROOT="$(mktemp -d)"
+mkdir -p "$ROOT/catalyst/wt" "$ROOT/srv/node_modules"
+: > "$ROOT/srv/server.ts"
+mkdir -p "$ROOT/srv/ui/node_modules"
+: > "$ROOT/srv/ui/package.json"
+: > "$ROOT/srv/ui/bun.lock"
+# Pre-existing dist carrying a STALE hashed chunk (simulates prior accumulated builds).
+mkdir -p "$ROOT/dist/assets"
+: > "$ROOT/dist/assets/stale-OLDHASH.js"
+: > "$ROOT/dist/index.html"
+FAKE_BUN_DIR="$ROOT/fake-bin"
+mkdir -p "$FAKE_BUN_DIR"
+# Fake `bunx vite build` writes a fresh bundle into the (staging) MONITOR_UI_DIST_DIR.
+cat > "$FAKE_BUN_DIR/bunx" <<'EOF'
+#!/usr/bin/env bash
+mkdir -p "$MONITOR_UI_DIST_DIR/assets"
+: > "$MONITOR_UI_DIST_DIR/assets/main-NEWHASH.js"
+: > "$MONITOR_UI_DIST_DIR/index.html"
+exit 0
+EOF
+chmod +x "$FAKE_BUN_DIR/bunx"
+cat > "$FAKE_BUN_DIR/bun" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+chmod +x "$FAKE_BUN_DIR/bun"
+(
+  CATALYST_DIR="$ROOT/catalyst" MONITOR_SERVER_SCRIPT="$ROOT/srv/server.ts" \
+  MONITOR_UI_DIST_DIR="$ROOT/dist" MONITOR_SKIP_BOOTSTRAP="" MONITOR_FORCE_BUILD=1 \
+  PATH="$FAKE_BUN_DIR:$PATH" \
+  bash -c 'source "'"$MONITOR_SH"'" url >/dev/null 2>&1; bootstrap >/dev/null 2>&1'
+)
+if [[ -f "$ROOT/dist/assets/main-NEWHASH.js" && ! -f "$ROOT/dist/assets/stale-OLDHASH.js" ]]; then
+  pass "CTL-1254: rebuild swapped in fresh dist and removed the stale chunk"
+else
+  fail "CTL-1254: stale chunk survived rebuild (accumulation) or fresh build missing"
+fi
+rm -rf "$ROOT"
+
+echo ""
 echo "─────────────────────────────────────────────"
 echo "catalyst-monitor-bootstrap: ${PASSES} passed, ${FAILURES} failed"
 if [[ $FAILURES -gt 0 ]]; then
