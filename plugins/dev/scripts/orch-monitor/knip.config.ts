@@ -17,10 +17,6 @@ const config: KnipConfig = {
     "ui/src/components/governance/derivation-tree.tsx",
     "ui/src/components/governance/governance-flags-chip.tsx",
     "ui/src/components/governance/journey-strip.tsx",
-    // CTL-1249 Phase 1: the per-icon importer map is generated and committed
-    // ahead of its consumer. The loader rewrite (Phase 2) lazy-imports it from
-    // phosphor-icons.ts; remove this entry when that lands.
-    "ui/src/lib/phosphor-icon-importers.generated.ts",
   ],
   workspaces: {
     ".": {

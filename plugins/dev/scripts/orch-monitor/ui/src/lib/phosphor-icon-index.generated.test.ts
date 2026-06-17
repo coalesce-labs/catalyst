@@ -1,6 +1,7 @@
 import { readdirSync } from "fs";
 import { describe, it, expect } from "bun:test";
 import { PHOSPHOR_ICON_NAMES } from "./phosphor-icon-index.generated";
+import { ICON_IMPORTERS } from "./phosphor-icon-importers.generated";
 import { pascalToKebab, kebabToPascal } from "./phosphor-icons";
 import { PHOSPHOR_GLYPH_NAMES } from "./project-glyph-set";
 
@@ -22,6 +23,13 @@ describe("phosphor-icon-index.generated", () => {
 
   it("includes 'fire' (acceptance anchor)", () => {
     expect(PHOSPHOR_ICON_NAMES).toContain("fire");
+  });
+
+  // index ⇄ importer parity: every name resolvable by loadGlyph has exactly one importer
+  // and no importer is orphaned. Both files are emitted in lockstep by gen:icons, so this
+  // catches a hand-edit of either generated file (against the DO-NOT-EDIT banner).
+  it("has exactly one lazy importer per name (index ⇄ ICON_IMPORTERS key parity)", () => {
+    expect(Object.keys(ICON_IMPORTERS).sort()).toEqual([...PHOSPHOR_ICON_NAMES]);
   });
 
   // DRIFT GUARD — fails CI if @phosphor-icons/react is bumped without re-running gen:icons.
