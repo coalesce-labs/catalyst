@@ -5338,10 +5338,13 @@ function runTick() {
             projects: listProjects(),
             agents: getAgentsCached().agents,
             isLinearTerminal: (id) => {
-              // fetchTicketState with no gateway behaves as the plain cache-first
-              // read (the daemon's runTick does not thread a gateway, matching the
-              // CTL-642 terminal short-circuit at the reconcile backstop).
-              const state = fetchTicketState(id);
+              // CTL-1240: 3-tier read (cache → gateway/filter-state.db → live linearis),
+              // matching the reclaim + reasoning-pass paths. TTL/gateway hits suppress
+              // the live `linearis issues read` storm this census otherwise caused.
+              const state = fetchTicketState(id, {
+                cache: runningOpts.cache,
+                gateway: runningOpts.gateway,
+              });
               return state != null && isLinearTerminal(state);
             },
           }),
@@ -5358,7 +5361,12 @@ function runTick() {
             orchDir: runningOpts.orchDir,
             agentsSnapshot: getAgentsCached().agents,
             isLinearTerminal: (id) => {
-              const state = fetchTicketState(id);
+              // CTL-1240: 3-tier read (cache → gateway → live linearis). Matches
+              // the stall-clear census path above and the reclaim/reasoning paths.
+              const state = fetchTicketState(id, {
+                cache: runningOpts.cache,
+                gateway: runningOpts.gateway,
+              });
               return state != null && isLinearTerminal(state);
             },
             // CTL-1064: thread the worktree resolver from each worker's signal so
