@@ -84,6 +84,19 @@ export const PHASE_ORDER = [
 // use it to override ticket.phase when remediate is the most-recently-active
 // phase — so the board column and the queue agree on the ticket's current agent type.
 export const REMEDIATE_PHASE = "remediate";
+// CTL-1239: the ancillary recovery-pass phase. Like remediate, it is NOT in
+// PHASE_ORDER — it runs LAST (after every canonical phase) when the recovery
+// sweep escalates a stuck ticket. Its phase-recovery-pass.json carries the RICH
+// structured explanation (escalation_type / problem / call_to_action / options)
+// that must surface in the inbox row + detail card. The explanation derivers scan
+// a separate, ordered array (see ANCILLARY_EXPLANATION_PHASES + the explanation
+// scan assembled in readTicketArtifacts) so this signal is read newest-first.
+export const RECOVERY_PASS_PHASE = "recovery-pass";
+// CTL-1239: ancillary phase signals appended to the explanation scan AFTER the
+// PHASE_ORDER-aligned canonical signals, in run order (remediate cycles with
+// verify; recovery-pass runs last). The explanation derivers iterate newest-first
+// (i = len-1 → 0), so recovery-pass — the last entry — wins the scan.
+export const ANCILLARY_EXPLANATION_PHASES = [REMEDIATE_PHASE, RECOVERY_PASS_PHASE];
 // Single source of truth for which phase statuses are terminal (no longer
 // running). Exported so the UI's PhaseStrip terminal-status list can be guarded
 // against drift (board-phase-drift.test.ts) instead of carrying a silent
@@ -1339,17 +1352,41 @@ async function maxParallel() {
   return pick(l2) ?? pick(l1) ?? 6;
 }
 
+// CTL-1239: assemble the explanation-derivation scan array — the PHASE_ORDER-
+// aligned canonical signals FIRST, then the ancillary phase signals (remediate,
+// then recovery-pass) appended as the NEWEST entries. The explanation derivers
+// (deriveHumanQuestion / deriveEscalationType / deriveExplanation) iterate
+// newest-first, so recovery-pass — the last appended — wins. PHASE_ORDER itself
+// is unchanged: this array feeds ONLY the explanation scan, never activePhase /
+// phase-stage rendering. Fail-open: a missing/corrupt ancillary signal is a
+// null/falsey entry the derivers already skip (`if (!sig) continue`).
+export function explanationScan(phaseSigs, ancillarySigs) {
+  return [...phaseSigs, ...ancillarySigs];
+}
+
 // Read a ticket's worker-dir artifacts once (phase signals + triage + PR signals).
 // CTL-972: also reads phase-remediate.json separately (it is NOT in PHASE_ORDER,
 // so derivePhaseWithRemediate overlays it on top of the PHASE_ORDER-based result).
+// CTL-1239: also reads the ancillary phase signals (remediate + recovery-pass) for
+// the explanation scan — recovery-pass authors the rich escalation explanation but
+// is not in PHASE_ORDER, so the PHASE_ORDER-aligned phaseSigs scan never saw it.
 async function readTicketArtifacts(id) {
   const dir = join(WORKERS_DIR, id);
   if (!(await exists(dir))) {
-    return { phaseSigs: [], remediateSig: null, triage: null, prSigs: [], needsHumanMarker: false };
+    return {
+      phaseSigs: [],
+      remediateSig: null,
+      ancillarySigs: [],
+      triage: null,
+      prSigs: [],
+      needsHumanMarker: false,
+    };
   }
-  const [phaseSigs, remediateSig, triage, prSigs, needsHumanMarker] = await Promise.all([
+  const [phaseSigs, ancillarySigs, triage, prSigs, needsHumanMarker] = await Promise.all([
     Promise.all(PHASE_ORDER.map((p) => readJSON(join(dir, `phase-${p}.json`)))),
-    readJSON(join(dir, `phase-${REMEDIATE_PHASE}.json`)),
+    // CTL-1239: ancillary signals in run order (remediate, recovery-pass). Each
+    // fail-opens to null via readJSON on a missing/corrupt file.
+    Promise.all(ANCILLARY_EXPLANATION_PHASES.map((p) => readJSON(join(dir, `phase-${p}.json`)))),
     readJSON(join(dir, "triage.json")),
     Promise.all(
       ["phase-pr.json", "phase-monitor-merge.json", "phase-monitor-deploy.json"].map((f) =>
@@ -1361,7 +1398,11 @@ async function readTicketArtifacts(id) {
     // fallback so the board lights up immediately without waiting on the webhook.
     exists(join(dir, ".linear-label-needs-human.applied")),
   ]);
-  return { phaseSigs, remediateSig, triage, prSigs, needsHumanMarker };
+  // The remediate signal stays a standalone field for derivePhaseWithRemediate
+  // (CTL-972 phase overlay); it is ALSO included in ancillarySigs for the
+  // explanation scan. ANCILLARY_EXPLANATION_PHASES[0] === REMEDIATE_PHASE.
+  const remediateSig = ancillarySigs[0] ?? null;
+  return { phaseSigs, remediateSig, ancillarySigs, triage, prSigs, needsHumanMarker };
 }
 
 // CTL-922 (BFF10): read a single worker's own phase signal, positioned into a
@@ -1636,8 +1677,15 @@ export async function assembleBoard({ getPrStatus = null } = {}) {
 
   let tickets = await Promise.all(
     [...cardTicketIds].map(async (id) => {
-      const { phaseSigs, remediateSig, triage, prSigs, needsHumanMarker } =
+      const { phaseSigs, remediateSig, ancillarySigs, triage, prSigs, needsHumanMarker } =
         await readTicketArtifacts(id);
+      // CTL-1239: the explanation-derivation scan = canonical PHASE_ORDER signals
+      // FIRST, then ancillary signals (remediate, then recovery-pass) appended as
+      // the newest entries. The explanation derivers iterate newest-first, so
+      // recovery-pass's rich escalation explanation (which is NOT in PHASE_ORDER)
+      // wins. Used ONLY by the three explanation consumers below — NOT by
+      // activePhase / phase-stage logic, which keeps the PHASE_ORDER-aligned phaseSigs.
+      const explSigs = explanationScan(phaseSigs, ancillarySigs);
       // CTL-972: use derivePhaseWithRemediate so ticket.phase matches the
       // phase-AGENT TYPE the queue/worker surfaces (incl. 'remediate').
       const cur = derivePhaseWithRemediate(phaseSigs, remediateSig);
@@ -1656,6 +1704,13 @@ export async function assembleBoard({ getPrStatus = null } = {}) {
       const phaseFailed =
         cur.phase !== PIPELINE_DONE_PHASE &&
         phaseSigs.some((s) => TERMINAL_FAILURE.has(s?.status));
+      // CTL-1180 / CTL-1239: the escalation_type passthrough for the reading pane.
+      // Scan the FULL explanation array (incl. recovery-pass + remediate) so a
+      // recovery-pass escalation — which lands needs-human via the marker/label,
+      // NOT a failed canonical phase — still carries its escalation_type. Only the
+      // needs-human attention branch surfaces it (deriveAttention), so it is safe
+      // to derive unconditionally here.
+      const escalationType = deriveEscalationType(explSigs);
       const failedEscalationType = phaseFailed ? deriveEscalationType(phaseSigs) : null;
       // CTL-729: the single needs-attention bucket (waiting-on-you ∪ needs-human),
       // merging the live worker's blocked-bg-job flag, the needs-human/needs-input
@@ -1671,7 +1726,10 @@ export async function assembleBoard({ getPrStatus = null } = {}) {
         prStuck,
         prStuckSince: prPhaseStartedAt,
         phaseFailed,
-        escalationType: failedEscalationType,
+        // CTL-1239: prefer the full-scan escalation_type (covers recovery-pass /
+        // remediate) and fall back to the failed-phase value. deriveAttention only
+        // surfaces this in the needs-human branch, so it stays null elsewhere.
+        escalationType: escalationType ?? failedEscalationType,
       });
       return {
         id,
@@ -1728,10 +1786,13 @@ export async function assembleBoard({ getPrStatus = null } = {}) {
         // CTL-1130: call_to_action from the most-recent phase signal's explanation,
         // surfaced as the inbox sub-label for needs-human rows. CTL-1158: fall back
         // to the PR-stuck reason so the inbox sub-label names WHY (research F12).
-        humanQuestion: deriveHumanQuestion(phaseSigs) ?? prReason,
+        // CTL-1239: scan explSigs (canonical + ancillary) so a recovery-pass
+        // call_to_action surfaces (it is not in PHASE_ORDER).
+        humanQuestion: deriveHumanQuestion(explSigs) ?? prReason,
         // CTL-1110: the six extended explanation fields surfaced for the detail
         // pane's CTA-led card (distinct from humanQuestion, the list-row sub-label).
-        explanation: deriveExplanation(phaseSigs),
+        // CTL-1239: same explSigs scan so the recovery-pass explanation card renders.
+        explanation: deriveExplanation(explSigs),
         // CTL-729: the single needs-attention bucket — 'waiting-on-you' (live
         // blocked bg job) | 'needs-human' (escalation label/marker) | null, with an
         // ISO attentionSince anchor (or null, never fabricated). Drives the ONE

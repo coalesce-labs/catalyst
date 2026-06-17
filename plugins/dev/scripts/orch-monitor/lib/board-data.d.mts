@@ -270,6 +270,18 @@ export const PHASE_ORDER: string[];
  *  verify), but a real phase-agent type. Used by derivePhaseWithRemediate to
  *  unify ticket.phase with the worker/queue's phase-agent-type value. */
 export const REMEDIATE_PHASE: string;
+/** CTL-1239: the ancillary recovery-pass phase — not in PHASE_ORDER (runs LAST
+ *  when the recovery sweep escalates a stuck ticket). Its signal carries the rich
+ *  structured escalation explanation surfaced by the explanation derivers. */
+export const RECOVERY_PASS_PHASE: string;
+/** CTL-1239: ancillary phase signals appended (in run order: remediate, then
+ *  recovery-pass) to the explanation-derivation scan AFTER the PHASE_ORDER-aligned
+ *  canonical signals, so the newest-first scan reads recovery-pass first. */
+export const ANCILLARY_EXPLANATION_PHASES: string[];
+/** CTL-1239: assemble the explanation-derivation scan array (canonical
+ *  PHASE_ORDER-aligned signals first, then ancillary signals as the newest
+ *  entries). Feeds ONLY the explanation derivers — never activePhase/phase-stage. */
+export function explanationScan(phaseSigs: unknown[], ancillarySigs: unknown[]): unknown[];
 export const PHASE_TO_LINEAR: Record<string, string>;
 export const TERMINAL: Set<string>;
 /** CTL-928: the `claude --bg` job-lifecycle terminal `state` values (distinct from
@@ -314,6 +326,17 @@ export function deriveAttention(opts?: {
 /** CTL-1180: scan phaseSigs newest-first for the first signal with an
  *  explanation.escalation_type string. Returns it or null. */
 export function deriveEscalationType(phaseSigs: unknown[]): string | null;
+
+/** CTL-1130: scan phaseSigs newest-first for the first signal whose explanation
+ *  carries a call_to_action string (the inbox row sub-label). null when none. */
+export function deriveHumanQuestion(phaseSigs: unknown[]): string | null;
+
+/** CTL-1110: scan phaseSigs newest-first for the first signal whose explanation
+ *  carries at least one of the extended render fields; returns the projected
+ *  object (absent fields → null) or null when no signal carries any. */
+export function deriveExplanation(
+  phaseSigs: unknown[]
+): Record<string, string | null> | null;
 
 /** CTL-1158: returns true when the PR has been in a real-blocker merge state
  *  (DIRTY/BLOCKED/UNSTABLE) for ≥ 300 s, anchored to prPhaseStartedAt. */
