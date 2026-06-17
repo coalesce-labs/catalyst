@@ -41,6 +41,10 @@ import { buildBlockerMapFromRelations, mergeBlockers } from "./relation-blockers
 // execution-core/scheduler-rank.mjs compareTickets, parity-tested). The queue's
 // global rank is exactly the order the scheduler dispatches in.
 import { compareDispatchOrder } from "./dispatch-rank.mjs";
+// CTL-1220: the UTC YYYY-MM event-log resolver — the SAME path the recovery
+// sweep's defaultEmitEvent writes to (execution-core/config.mjs:133). Read here
+// so recovery.fixed / recovery.would-fix outcomes fold into the board.
+import { getEventLogPath } from "../../execution-core/config.mjs";
 
 const execFileP = promisify(execFile);
 
@@ -1106,6 +1110,51 @@ function readOrphanPrState() {
   } catch { return {}; } // torn file: fail-open, zero orphan rows
 }
 
+// loadRecoveryOutcomes — CTL-1220: scan the unified event log for the recovery
+// sweep's outcome events and fold them into per-ticket flags. This is the half
+// CTL-1220 left hollow: the emit side (recovery-reasoning.mjs:defaultEmitEvent)
+// lands recovery.fixed / recovery.would-fix into ~/catalyst/events/YYYY-MM.jsonl;
+// this reader matches them by attributes["event.name"], keys on the CTL id at
+// attributes["event.label"] (mirrored in body.payload.ticket), and builds
+// Map<ticketKey, {autoFixed, triaged, recoveredAt}>.
+//
+//   recovery.fixed     (enforce success)        → autoFixed:true, recoveredAt:ts
+//   recovery.would-fix (shadow identified-fixable) → triaged:true
+//   recovery.escalated / would-escalate         → ignored (surface via attention)
+//
+// Fail-OPEN: {} on ENOENT (no events yet), skip torn lines, never throws —
+// mirrors readOrphanPrState above + the envelope read in event-log-reader.ts.
+export function loadRecoveryOutcomes(eventLogPath = getEventLogPath()) {
+  let text;
+  try {
+    text = readFileSync(eventLogPath, "utf8");
+  } catch {
+    return new Map(); // ENOENT: no events yet
+  }
+  const out = new Map();
+  for (const line of text.split("\n")) {
+    if (!line) continue;
+    let evt;
+    try {
+      evt = JSON.parse(line);
+    } catch {
+      continue; // torn line: skip, fail-open
+    }
+    const name = evt?.attributes?.["event.name"];
+    if (name !== "recovery.fixed" && name !== "recovery.would-fix") continue;
+    const key = evt?.attributes?.["event.label"] ?? evt?.body?.payload?.ticket;
+    if (!key) continue;
+    const prev = out.get(key) ?? { autoFixed: false, triaged: false, recoveredAt: null };
+    if (name === "recovery.fixed") {
+      prev.autoFixed = true;
+      prev.recoveredAt = evt.ts ?? prev.recoveredAt;
+    }
+    if (name === "recovery.would-fix") prev.triaged = true;
+    out.set(key, prev); // last-write-wins per ticket
+  }
+  return out;
+}
+
 // synthesizeOrphanTickets — pure helper: one BoardTicket-shaped card per
 // notified orphan, reusing CTL-1158 attention derivation path. Exported so
 // unit tests can exercise it without the filesystem reads of assembleBoard.
@@ -1371,6 +1420,11 @@ export async function assembleBoard({ getPrStatus = null } = {}) {
   // Tickets without a triage.json (queued / relation-only) get their blockers[]
   // from here so the dep graph can draw their edges.
   const relationBlockerMap = buildBlockerMapFromRelations(linfo);
+
+  // CTL-1220: per-ticket recovery-sweep outcomes, read once from the unified
+  // event log. Map<ticketKey, {autoFixed, triaged, recoveredAt}>. Synchronous +
+  // fail-open (empty Map on any error) so it never blocks board assembly.
+  const recoveryByTicket = loadRecoveryOutcomes();
 
   // workers (live background agents that map to a ticket:phase)
   const now = Date.now();
@@ -1684,6 +1738,11 @@ export async function assembleBoard({ getPrStatus = null } = {}) {
         // yellow board accent + the Inbox "Needs you" section. needs-human wins.
         attention: attn.attention,
         attentionSince: attn.attentionSince,
+        // CTL-1220: recovery-sweep outcome flags, read from the unified event
+        // log. id is the CTL key — exactly what attributes["event.label"] carries.
+        autoFixed: recoveryByTicket.get(id)?.autoFixed ?? false,
+        triaged: recoveryByTicket.get(id)?.triaged ?? false,
+        recoveredAt: recoveryByTicket.get(id)?.recoveredAt ?? null,
         costUSD: costs[id]?.costUSD ?? null,
         tokens: costs[id]?.tokens ?? null,
         turns: phaseCostsByTicket[id]

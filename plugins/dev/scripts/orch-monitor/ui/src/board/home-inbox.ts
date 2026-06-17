@@ -340,8 +340,12 @@ export function deriveInbox(payload: BoardPayload): InboxModel {
     blocked: buckets.blocked.length,
     waiting: buckets.waiting.length,
     running: buckets.running.length,
-    autoFixed: 0, // CTL-1220: to be populated by the monitor
-    triaged: 0, // CTL-1220: to be populated by the monitor
+    // CTL-1220: recovery-sweep counts, folded over every ticket (the safe
+    // denominator for the "Done while you were away" reassurance copy — these
+    // are independent of section bucketing). Fields populated by board-data.mjs
+    // from the unified event log (loadRecoveryOutcomes).
+    autoFixed: payload.tickets.filter((t) => t.autoFixed).length, // was 0
+    triaged: payload.tickets.filter((t) => t.triaged).length, // was 0
     awareness: buckets.awareness.length,
     done: buckets.done.length,
     // CTL-729: the single "N need you" figure absorbs the attention bucket.

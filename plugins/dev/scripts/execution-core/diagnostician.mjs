@@ -80,7 +80,10 @@ export function __resetDiagnosticianForTests() {
 //
 // Both sources are injectable for tests (no real process spawning in tests).
 // The 'Unknown command' banner in logsOutput is the 2026-06-09 root cause.
-function captureEvidence(subject, bgJobId, { captureLogs, readJobState } = {}) {
+//
+// CTL-1176: exported so recovery-reasoning's DIAGNOSE step can populate
+// {logsOutput, jobState} read-only before classifying a ticket.
+export function captureEvidence(subject, bgJobId, { captureLogs, readJobState } = {}) {
   const shortId = bgJobId; // subject's short ID (already resolved by the caller)
 
   // claude logs output — the screen buffer that reveals WHY the session is idle
