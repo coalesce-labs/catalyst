@@ -49,13 +49,11 @@ describe("CTL-1248 Phase 2 — order atom + reconcile wired into AppSidebar", ()
   it("the per-project render loop iterates orderedRepos.map, not repos.map", () => {
     // orderedRepos.map must appear in the file
     expect(sidebarCode).toMatch(/orderedRepos\.map\s*\(/);
-    // The raw repos.map loop should NOT be the per-project iterator anymore.
-    // (repos.map may still appear in comments or the repoIconDataUrls build loop —
-    // but not as the Collapsible render loop's iterator.)
-    // We check that the Collapsible render is driven by orderedRepos:
-    const collapsibleIdx = sidebarCode.indexOf("<Collapsible");
-    const orderedReposIdx = sidebarCode.lastIndexOf("orderedRepos.map", collapsibleIdx);
-    expect(orderedReposIdx).toBeGreaterThan(-1);
+    // The JSX usage <SortableProjectGroup must appear after orderedRepos.map
+    const orderedMapIdx = sidebarCode.indexOf("orderedRepos.map");
+    const sortableGroupJsxIdx = sidebarCode.indexOf("<SortableProjectGroup", orderedMapIdx);
+    expect(orderedMapIdx).toBeGreaterThan(-1);
+    expect(sortableGroupJsxIdx).toBeGreaterThan(-1);
   });
 });
 
@@ -136,7 +134,8 @@ describe("CTL-1248 Phase 3 — dnd-kit sortable wired into AppSidebar", () => {
 
   it("Observe block appears AFTER </SortableContext> in source (Observe is not sortable)", () => {
     const closeSc = sidebarCode.lastIndexOf("</SortableContext>");
-    const observeIdx = sidebarCode.indexOf("navObserveOpenAtom", closeSc);
+    // Use "group/observe" className which appears ONLY in the Observe render section
+    const observeIdx = sidebarCode.indexOf("group/observe", closeSc);
     expect(closeSc).toBeGreaterThan(-1);
     expect(observeIdx).toBeGreaterThan(-1);
   });

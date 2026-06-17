@@ -1,11 +1,29 @@
-import { useEffect, useMemo } from "react";
-import { useAtom, useAtomValue } from "jotai";
+import { useCallback, useEffect, useMemo } from "react";
+import { useAtom } from "jotai";
+import {
+  DndContext,
+  type DragEndEvent,
+  KeyboardSensor,
+  PointerSensor,
+  useSensor,
+  useSensors,
+} from "@dnd-kit/core";
+import { restrictToVerticalAxis } from "@dnd-kit/modifiers";
+import {
+  SortableContext,
+  arrayMove,
+  sortableKeyboardCoordinates,
+  useSortable,
+  verticalListSortingStrategy,
+} from "@dnd-kit/sortable";
+import { CSS } from "@dnd-kit/utilities";
 import {
   ActivityIcon,
   BookOpenIcon,
   ChevronRightIcon,
   CodeIcon,
   GaugeIcon,
+  GripVertical,
   InboxIcon,
   LayoutGridIcon,
   ServerIcon,
@@ -259,6 +277,37 @@ const PROJECT_CHILD_GUIDE = cn(
   "ml-3.5 border-l border-sidebar-border pl-2.5",
 );
 
+// CTL-1248: wrapper that makes each project group a sortable item. Spreads
+// {attributes} + {listeners} ONLY on the grip button (not on the CollapsibleTrigger
+// or ContextMenuTrigger) to preserve all three existing header interactions.
+function SortableProjectGroup({
+  repo,
+  children,
+}: { repo: string; children: React.ReactNode }) {
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } =
+    useSortable({ id: repo });
+  const style = {
+    transform: CSS.Transform.toString(transform),
+    transition,
+    zIndex: isDragging ? 1 : undefined,
+    opacity: isDragging ? 0.85 : undefined,
+  };
+  return (
+    <div ref={setNodeRef} style={style} className={cn("group/reorder relative", isDragging && "cursor-grabbing")}>
+      <button
+        type="button"
+        aria-label={`Reorder ${repo}`}
+        className="absolute left-0 top-1 z-10 cursor-grab touch-none opacity-0 group-hover/reorder:opacity-100 focus-visible:opacity-100"
+        {...attributes}
+        {...listeners}
+      >
+        <GripVertical className="size-3" />
+      </button>
+      {children}
+    </div>
+  );
+}
+
 export function AppSidebar() {
   // CTL-989 — surface + settingsOpen are READ from the route (useSurface derives
   // them from location.pathname). Nav WRITES go through router.navigate below.
@@ -285,9 +334,8 @@ export function AppSidebar() {
   // CHANGES are written onto the URL via navigate({search:{scope}}) in `go`.
   const [repoScope] = useAtom(repoScopeAtom);
   const [groupsOpen, setGroupsOpen] = useAtom(navGroupsOpenAtom);
-  // CTL-1248: operator's saved project order (repo short-names). Read-only in
-  // Phase 2; Phase 3 switches to useAtom when setProjectOrder is needed.
-  const projectOrder = useAtomValue(navProjectOrderAtom);
+  // CTL-1248: operator's saved project order (repo short-names).
+  const [projectOrder, setProjectOrder] = useAtom(navProjectOrderAtom);
 
   // CTL-1152: the project LIST now comes from the config-driven roster (GET
   // /api/projects), NOT the raw board snapshot's observed-repo set. The roster
@@ -314,6 +362,24 @@ export function AppSidebar() {
   const orderedRepos = useMemo(
     () => reconcileProjectOrder(projectOrder, repos),
     [projectOrder, repos],
+  );
+
+  // CTL-1248: dnd-kit sensors — PointerSensor with distance constraint (mirrors
+  // the Gantt's distance:10) + KeyboardSensor for a11y.
+  const sensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 8 } }),
+    useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
+  );
+  const handleDragEnd = useCallback(
+    (event: DragEndEvent) => {
+      const { active, over } = event;
+      if (!over || active.id === over.id) return;
+      const from = orderedRepos.indexOf(String(active.id));
+      const to = orderedRepos.indexOf(String(over.id));
+      if (from === -1 || to === -1) return;
+      setProjectOrder(arrayMove(orderedRepos, from, to));
+    },
+    [orderedRepos, setProjectOrder],
   );
 
   // CTL-961: auto-detect repo favicons from GitHub + manual overrides. Keyed by the
@@ -648,6 +714,10 @@ export function AppSidebar() {
             </SidebarGroupContent>
           </SidebarGroup>
         )}
+        {/* CTL-1248: DndContext + SortableContext wrap only the per-project loop.
+            Overall / Reason / Observe are outside this context and never sortable. */}
+        <DndContext sensors={sensors} modifiers={[restrictToVerticalAxis]} onDragEnd={handleDragEnd}>
+          <SortableContext items={orderedRepos} strategy={verticalListSortingStrategy}>
         {/* CTL-1034 §2: Title-Cased repo name (displayCaseName) at heading weight/size
             (PROJECT_HEADER_TRIGGER), favicon stays LEFT of the label. §1: twistie is
             RIGHT-aligned (ml-auto) per CTL-977. §3: children indented under a guide line.
@@ -679,8 +749,8 @@ export function AppSidebar() {
           // CTL-1034 §4: a collapsed project rolls its child signal up onto the header.
           const repoSignal = sectionSignal(repo);
           return (
+            <SortableProjectGroup key={repo} repo={repo}>
             <Collapsible
-              key={repo}
               open={isOpen}
               onOpenChange={(open) => {
                 if (!forceOpen) {
@@ -773,8 +843,11 @@ export function AppSidebar() {
                 </CollapsibleContent>
               </SidebarGroup>
             </Collapsible>
+            </SortableProjectGroup>
           );
         })}
+          </SortableContext>
+        </DndContext>
 
         {/* ── REASON — collapsible, defaults open — "Process" + "Rulebook" ─── */}
         {/* CTL-1101: the REASON tier groups the two analytical/governance surfaces
