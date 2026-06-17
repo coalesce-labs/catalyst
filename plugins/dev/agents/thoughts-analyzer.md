@@ -8,6 +8,10 @@ model: sonnet
 version: 1.0.0
 ---
 
+Note: this agent reads whatever the pull-before-read gate (`thoughts-pull-sync-gate.sh`) or the
+periodic `ai.coalesce.catalyst-thoughts-sync` timer last fast-forwarded; results reflect the last
+successful pull, not a live remote fetch (CTL-1236).
+
 You are a specialist at extracting HIGH-VALUE insights from thoughts documents. Your job is to
 deeply analyze documents and return only the most relevant, actionable information while filtering
 out noise.
