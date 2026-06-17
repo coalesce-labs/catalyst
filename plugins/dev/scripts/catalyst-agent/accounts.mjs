@@ -2,8 +2,9 @@
 // should sample rate-limit usage for: the locally-active account plus any
 // claude-swap backups.
 //
-// On most hosts there is exactly ONE account — the active one read from the
-// macOS Keychain (or ~/.claude/.credentials.json on other platforms). When the
+// On most hosts there is exactly ONE account — the active one read from
+// ~/.claude/.credentials.json (the file current Claude Code writes everywhere),
+// with the macOS Keychain tried first as a legacy fallback. When the
 // operator uses claude-swap (cswap), each swapped-out account is persisted as a
 // JSON file under ~/.claude-swap-backup/credentials/ with the same
 // { claudeAiOauth: { accessToken, refreshToken } } shape. Those backup tokens
@@ -40,30 +41,55 @@ function backupCredentialsDir() {
   return resolve(homedir(), ".claude-swap-backup", "credentials");
 }
 
-// defaultReadActiveToken — resolve the locally-active OAuth access token. On
-// macOS this reads the Keychain generic password; other platforms read
-// ~/.claude/.credentials.json. Both paths parse the same JSON blob and pull
-// .claudeAiOauth.accessToken. Returns null on ANY error — never throws, never
-// logs the token. (Copied verbatim in spirit from
-// execution-core/ratelimit-poller.mjs's defaultReadToken so the standalone
-// agent stays dependency-free.)
-export function defaultReadActiveToken() {
-  try {
-    let raw;
-    if (process.platform === "darwin") {
-      raw = execFileSync(
+// defaultReadActiveToken — resolve the locally-active OAuth access token. The
+// token blob ({ claudeAiOauth: { accessToken } }) lives in one of two places:
+//   • ~/.claude/.credentials.json — the FILE that current Claude Code (2.1.x)
+//     writes on EVERY platform, macOS included. This is the source of truth on
+//     modern installs.
+//   • the macOS Keychain generic password "Claude Code-credentials" — where
+//     OLDER Claude Code stored it on macOS. Some hosts still carry this entry.
+// On macOS we therefore try the Keychain FIRST (legacy hosts) and fall back to
+// the file; everywhere else we read the file directly. Previously macOS read
+// ONLY the Keychain, so a node whose token lived solely in the file (the modern
+// default) reported "no active OAuth token" and emitted no quota telemetry.
+// Returns null on ANY error — never throws, never logs the token. All I/O seams
+// are injectable so the keychain-hit / keychain-miss→file / file-only paths are
+// unit-testable with no real keychain, fs, or platform.
+export function defaultReadActiveToken({
+  platform = process.platform,
+  exec = execFileSync,
+  readFile = readFileSync,
+  home = homedir(),
+} = {}) {
+  const parseToken = (raw) => {
+    try {
+      return JSON.parse(raw)?.claudeAiOauth?.accessToken || null;
+    } catch {
+      return null;
+    }
+  };
+  const fromFile = () => {
+    try {
+      return parseToken(readFile(resolve(home, ".claude", ".credentials.json"), "utf8"));
+    } catch {
+      return null;
+    }
+  };
+  if (platform === "darwin") {
+    try {
+      const raw = exec(
         "security",
         ["find-generic-password", "-s", "Claude Code-credentials", "-w"],
         { encoding: "utf8" },
       );
-    } else {
-      raw = readFileSync(resolve(homedir(), ".claude", ".credentials.json"), "utf8");
+      const token = parseToken(raw);
+      if (token) return token;
+    } catch {
+      /* Keychain item absent (current Claude on macOS) → fall through to the file */
     }
-    const token = JSON.parse(raw)?.claudeAiOauth?.accessToken;
-    return token || null;
-  } catch {
-    return null;
+    return fromFile();
   }
+  return fromFile();
 }
 
 // defaultListBackups — enumerate the claude-swap backup credential files,
