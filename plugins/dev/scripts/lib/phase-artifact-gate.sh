@@ -43,6 +43,11 @@ prior_artifact_for_phase() {
 	monitor-merge) echo "signal:phase-pr.json" ;;
 	monitor-deploy) echo "signal:phase-monitor-merge.json" ;;
 	remediate) echo "signal:verify.json" ;;
+	# recovery-pass (CTL-1176 rung 3): its brief is recovery-pass.json — the
+	# evidence envelope + failed-seam list the wire-in writes before dispatch
+	# (the analogue of verify.json for remediate). The skill reads it as its
+	# prior-phase artifact.
+	recovery-pass) echo "signal:recovery-pass.json" ;;
 	teardown) echo "signal:phase-monitor-deploy.json" ;;
 	*) echo "" ;;
 	esac

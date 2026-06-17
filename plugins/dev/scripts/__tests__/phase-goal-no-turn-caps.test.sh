@@ -19,6 +19,7 @@ SKILLS=(
   "plugins/dev/skills/phase-pr/SKILL.md"
   "plugins/dev/skills/phase-monitor-merge/SKILL.md"
   "plugins/dev/skills/phase-remediate/SKILL.md"
+  "plugins/dev/skills/recovery-pass/SKILL.md"
 )
 
 FAILURES=0; PASSES=0

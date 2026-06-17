@@ -16,6 +16,7 @@ import {
   countReviveEvents,
   countDistinctRevivingTickets,
   countRemediateCycles,
+  countRecoveryPassCycles,
   hasCompleteEvent,
   __resetEventScanIndexForTest,
   __phaseEventsLengthForTest,
@@ -236,6 +237,33 @@ describe("CTL-653: countRemediateCycles", () => {
 
   test("throws without ticket", () => {
     expect(() => countRemediateCycles({})).toThrow();
+  });
+});
+
+// ─── CTL-1176 rung 3: countRecoveryPassCycles — the recovery-pass dispatch budget ─
+// Mirrors countRemediateCycles; one completed sweep == one
+// phase.recovery-pass.complete.<ticket>. The hyphen in "recovery-pass" is matched
+// by COMPLETE_NAME_RE's [^.]+ phase segment, so the complete event is indexed.
+
+describe("CTL-1176: countRecoveryPassCycles", () => {
+  test("missing event log returns 0 (cold start)", () => {
+    const dir = mkdtempSync(join(tmpdir(), "evtscan-"));
+    expect(countRecoveryPassCycles({ ticket: "CTL-1176", path: join(dir, "events.jsonl") })).toBe(0);
+  });
+
+  test("counts only phase.recovery-pass.complete.<ticket> envelopes", () => {
+    const { path } = tempLog([
+      makeEvent({ phase: "recovery-pass", action: "complete", ticket: "CTL-1176", ts: "2026-06-16T00:00:00Z" }), // match
+      makeEvent({ phase: "recovery-pass", action: "complete", ticket: "CTL-1176", ts: "2026-06-16T00:01:00Z" }), // match
+      makeEvent({ phase: "remediate", action: "complete", ticket: "CTL-1176", ts: "2026-06-16T00:02:00Z" }), // diff phase
+      makeEvent({ phase: "recovery-pass", action: "complete", ticket: "CTL-999", ts: "2026-06-16T00:03:00Z" }), // diff ticket
+      "not json", // skipped
+    ]);
+    expect(countRecoveryPassCycles({ ticket: "CTL-1176", path })).toBe(2);
+  });
+
+  test("throws without ticket", () => {
+    expect(() => countRecoveryPassCycles({})).toThrow();
   });
 });
 

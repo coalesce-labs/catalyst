@@ -73,6 +73,17 @@ export function reasoningRecoveryPass(items, opts = {}) {
     classifyTicket = defaultClassifyTicket,
     invokeSeam = defaultInvokeSeam,
     invokeRemediateCapped = defaultInvokeRemediateCapped,
+    // CTL-1176 rung 3 (recovery-pass): the goal-driven senior-engineer dispatcher
+    // for the bounded-LLM path. Replaces the phase-remediate detour — instead of
+    // disguising a pipeline-recovery brief as a fake verify finding and squeezing
+    // it through a single-ticket verify⇄remediate worker, it writes a first-class
+    // recovery-pass.json brief (diagnostician evidence + which deterministic seams
+    // already failed) and dispatches the `recovery-pass` skill, which resolves
+    // conflicts / rebases / merges / re-dispatches autonomously and authors the
+    // inbox+push messages on escalation. The scheduler binds this to the tick's
+    // orchDir. Injectable for tests; falls back to invokeRemediateCapped when a
+    // caller (or a legacy test) only wired the remediate path (see below).
+    invokeRecoveryPass: injectedInvokeRecoveryPass,
     recordIntent = defaultRecordIntent,
     postComment = defaultPostComment,
     emitEvent = defaultEmitEvent,
@@ -88,6 +99,24 @@ export function reasoningRecoveryPass(items, opts = {}) {
     // them up. Prevents a 19-item storm in one sweep. Default 3, env-overridable.
     maxFixesPerTick = Number(process.env.CATALYST_RECOVERY_MAX_FIXES_PER_TICK) || 3,
   } = opts;
+
+  // CTL-1176 rung 3: resolve the effective bounded-LLM dispatcher. Precedence:
+  //   1. an explicitly-injected invokeRecoveryPass (new wiring / new tests);
+  //   2. an explicitly-injected invokeRemediateCapped WITHOUT a recovery-pass
+  //      override (legacy tests that stub the remediate dispatch directly — keep
+  //      them green; the brief/evidence shape is forward-compatible);
+  //   3. the new default (defaultInvokeRecoveryPass) — production dispatches the
+  //      recovery-pass skill, replacing the phase-remediate detour. All of this
+  //      stays behind the existing CATALYST_RECOVERY_PASS flag: at mode=off
+  //      NOTHING here runs (the early return above), so there is no live behavior
+  //      change until an operator opts into shadow/enforce.
+  const callerOverrodeRemediate = Object.prototype.hasOwnProperty.call(
+    opts,
+    "invokeRemediateCapped",
+  );
+  const effectiveInvokeRecoveryPass =
+    injectedInvokeRecoveryPass ??
+    (callerOverrodeRemediate ? invokeRemediateCapped : defaultInvokeRecoveryPass);
 
   if (mode === "off") {
     log("recovery-reasoning: mode=off, skipping");
@@ -220,7 +249,11 @@ export function reasoningRecoveryPass(items, opts = {}) {
 
         const fixOutcome = attemptFix(item, classification, {
           invokeSeam,
-          invokeRemediateCapped,
+          invokeRecoveryPass: effectiveInvokeRecoveryPass,
+          // CTL-1176 rung 3: thread the DIAGNOSE evidence into the fix so the
+          // recovery-pass brief carries it (the bounded-LLM dispatcher consumes
+          // the eyes' output rather than re-diagnosing from scratch).
+          evidence,
           log,
         });
         actionLog = fixOutcome.actionLog;
@@ -545,32 +578,45 @@ export function determineEscalationReason(logsOutput, jobState, signal, beliefSt
 
 // ─── Act phase (guarded fix: seam or remediate cap) ────────────────────────
 
-function attemptFix(item, classification, { invokeSeam, invokeRemediateCapped, log }) {
+function attemptFix(item, classification, { invokeSeam, invokeRecoveryPass, evidence, log }) {
   const { ticket } = item;
   const { fix_class, details } = classification;
   const actionLog = [];
 
   if (fix_class === "bounded-llm") {
-    // Invoke capped remediate
+    // CTL-1176 rung 3: dispatch the recovery-pass skill (goal-driven senior
+    // engineer) instead of squeezing a pipeline-recovery brief through a
+    // single-ticket phase-remediate worker. The brief carries the diagnostician
+    // evidence + the failure reason + the guidance; the dispatcher additionally
+    // reads which deterministic seams already ran/failed off disk so the skill
+    // does NOT redo the narrow hands-work.
     try {
-      const remediateResult = invokeRemediateCapped(ticket, {
+      const recoveryResult = invokeRecoveryPass(ticket, {
         brief: details.brief,
         reason: details.reason,
+        evidence,
+        phase: item.phase ?? null,
+        bgJobId: item.bgJobId ?? null,
+        failureReason:
+          evidence?.failureReason ??
+          evidence?.signal?.failureReason ??
+          item.evidence?.failureReason ??
+          null,
       });
 
-      const remediateStatus = remediateResult.success ? "success" : "failed";
-      actionLog.push(`remediate invoked: ${remediateStatus}`);
+      const recoveryStatus = recoveryResult.success ? "success" : "failed";
+      actionLog.push(`recovery-pass dispatched: ${recoveryStatus}`);
 
       return {
-        success: remediateResult.success,
-        reason: remediateResult.reason,
-        attempts: remediateResult.attempts || 1,
+        success: recoveryResult.success,
+        reason: recoveryResult.reason,
+        attempts: recoveryResult.attempts || 1,
         actionLog,
-        details: remediateResult.details || {},
+        details: recoveryResult.details || {},
       };
     } catch (err) {
-      log(`recovery-reasoning: ${ticket} remediate failed: ${err.message}`);
-      actionLog.push(`remediate error: ${err.message}`);
+      log(`recovery-reasoning: ${ticket} recovery-pass dispatch failed: ${err.message}`);
+      actionLog.push(`recovery-pass error: ${err.message}`);
       return {
         success: false,
         reason: err.message,
@@ -656,14 +702,58 @@ Reasoning pass determined this requires human judgment.
 This ticket is now marked for human review.`;
 }
 
+// buildEscalationPayload — the composer-ready EscalationPayload for the router's
+// OWN escalations (Rule-3 "human" classification, which never reaches the skill).
+// CTL-1221's notification-composer.ts and board-data.mjs's deriveEscalationType /
+// deriveHumanQuestion read this tagged union ({escalation_type, problem,
+// call_to_action, ...}) to render the push short_text + the inbox briefing — so a
+// thin {diagnosis, flags} blob renders nothing. This emits a valid `manual`-type
+// payload with CONCRETE, non-tautological fields (NEVER "needs a human"):
+// the recovery pass tried its registered seams + bounded-LLM fix and could not
+// classify the stuck state, so a human must look. The skill's OWN escalations
+// (richer — decision options, authorization risk) override this whenever the
+// recovery-pass skill authors them and threads them back via the intent/event.
+// The audit fields (observed/attempts) are preserved as passthrough.
 function buildEscalationPayload(item, classification) {
   const evidence = item.evidence || {};
+  const ticket = item.ticket;
+  const reason = classification?.details?.reason || "unclassified stuck state";
+  // If the skill already authored a rich escalation (CTL-1176 rung 3) and threaded
+  // it onto the item/classification, prefer it verbatim — it carries the
+  // executive-voiced summary/ask/options the operator should see.
+  const authored =
+    classification?.details?.escalation || item.authoredEscalation || null;
+  if (authored && authored.escalation_type) {
+    return {
+      ...authored,
+      observed: {
+        ...(authored.observed ?? {}),
+        diagnosis: reason,
+        logs_available: !!evidence.logsOutput,
+        job_state_available: !!evidence.jobState,
+        belief_state: evidence.beliefState ?? null,
+      },
+    };
+  }
   return {
-    diagnosis: classification.details.reason,
-    evidence: {
+    escalation_type: "manual",
+    problem: `${ticket} is stuck and the recovery pass could not classify it for an autonomous fix: ${reason}`,
+    call_to_action: `Look at ${ticket}'s worker log and decide whether it should be re-dispatched, abandoned, or fixed by hand`,
+    blocked_capability:
+      "automatic classification of this stuck state into a registered seam or bounded-LLM fix",
+    instructions: [
+      `Read the worker evidence for ${ticket} (claude logs + the failed phase signal)`,
+      "Decide the correct next move (re-dispatch the phase, fix the branch by hand, or close the ticket)",
+    ],
+    remediation_then_retry:
+      "Once the stuck state is resolved by hand, the next scheduler tick re-evaluates the ticket",
+    why_not_auto:
+      "neither a deterministic act-seam nor a bounded-LLM fix matched this failure signature, so the pass has no safe action to take",
+    observed: {
+      diagnosis: reason,
       logs_available: !!evidence.logsOutput,
       job_state_available: !!evidence.jobState,
-      belief_state: evidence.beliefState,
+      belief_state: evidence.beliefState ?? null,
     },
     timestamp: new Date().toISOString(),
   };
@@ -730,7 +820,7 @@ export function buildRecoveryEnvelope(event, { now } = {}) {
   };
 }
 
-function defaultEmitEvent(event, { logPath = getEventLogPath(), now } = {}) {
+export function defaultEmitEvent(event, { logPath = getEventLogPath(), now } = {}) {
   try {
     mkdirSync(dirname(logPath), { recursive: true });
     appendFileSync(logPath, JSON.stringify(buildRecoveryEnvelope(event, { now })) + "\n");
@@ -989,6 +1079,192 @@ export function defaultInvokeRemediateCapped(ticket, { brief, reason } = {}, dep
         phase: REMEDIATE_PHASE,
         bg_job_id: r.signal?.bg_job_id ?? null,
         worktreePath: r.worktreePath ?? null,
+      },
+    };
+  }
+  return {
+    success: false,
+    dispatched: false,
+    attempts,
+    reason: r?.stderr ? `dispatch failed: ${String(r.stderr).trim()}` : "dispatch failed",
+    details: { code: r?.code ?? null },
+  };
+}
+
+// ── (4b) defaultInvokeRecoveryPass — ONE capped recovery-pass --bg (CTL-1176) ──
+//
+// The replacement for the bounded-LLM phase-remediate detour. Where remediate
+// disguises a pipeline-recovery brief as a synthetic high-severity verify finding
+// (injectBriefIntoVerify) and re-enters the single-ticket verify⇄remediate cycle,
+// recovery-pass writes a FIRST-CLASS brief file (recovery-pass.json) carrying the
+// diagnostician evidence + the failure reason + the deterministic seams that
+// already ran/failed, then dispatches the `recovery-pass` skill — a goal-driven
+// senior engineer that may rebase / resolve conflicts / merge / re-dispatch
+// across the pipeline and authors the operator inbox+push on a legitimate
+// escalation. Fire-and-forget (dispatched, not fixed); the host-local cooldown +
+// the event-counted cap prevent a re-dispatch before the sweep lands.
+//
+// The recovery-pass cap (event-counted phase.recovery-pass.complete.<ticket>) is
+// enforced HERE, mirroring the remediate cap — phase-agent-dispatch does not.
+export const RECOVERY_PASS_PHASE = "recovery-pass";
+export const RECOVERY_PASS_CYCLE_CAP =
+  Number(process.env.CATALYST_RECOVERY_PASS_CYCLE_CAP) || 3;
+
+// readUnstuckSeamsTried — read the deterministic act-seam idempotency markers the
+// hands (unstuck-act-seams.mjs) leave under workers/<ticket>/ so the brief can
+// tell the skill "these narrow seams already ran — do NOT redo them". A present
+// marker means the seam fired this lifetime; the ticket is STILL in the recovery
+// backlog, so it fired and did not unstick the item. Best-effort, pure-read.
+function readUnstuckSeamsTried(orchDir, ticket, phase) {
+  if (!orchDir || !ticket) return [];
+  const ph = phase ?? "pr";
+  const dir = join(orchDir, "workers", ticket);
+  // (markerName → human category). Mirrors unstuck-act-seams.mjs markerPath():
+  //   .unstuck-cleared-<phase>.applied      (dirty-tree seam)
+  //   .unstuck-force-pushed-<phase>.applied (source-conflict seam)
+  //   .unstuck-orphan-merge-<phase>.applied (orphan-stale seam)
+  const seams = [
+    { marker: `.unstuck-cleared-${ph}.applied`, category: "dirty-tree" },
+    { marker: `.unstuck-force-pushed-${ph}.applied`, category: "source-conflict" },
+    { marker: `.unstuck-orphan-merge-${ph}.applied`, category: "orphan-stale" },
+  ];
+  const tried = [];
+  for (const s of seams) {
+    try {
+      if (existsSync(join(dir, s.marker))) {
+        tried.push({ category: s.category, marker: s.marker, outcome: "ran-did-not-clear" });
+      }
+    } catch {
+      /* best-effort — a stat error just omits the seam */
+    }
+  }
+  return tried;
+}
+
+// writeRecoveryBrief — atomic tmp+rename of recovery-pass.json, the prior-phase
+// artifact the skill reads (resolved from its --orch-dir + ticket, exactly like
+// every other phase agent resolves its upstream artifact). NOT verify.json, NOT
+// env — a brief file keyed in the worker dir is the auditable, reusable channel
+// (env leaks the wrong ticket/phase to phase skills — operator memory).
+function writeRecoveryBrief(orchDir, ticket, brief) {
+  const p = join(orchDir, "workers", ticket, "recovery-pass.json");
+  mkdirSync(dirname(p), { recursive: true });
+  const tmp = `${p}.tmp.${process.pid}`;
+  writeFileSync(tmp, JSON.stringify(brief, null, 2));
+  renameSync(tmp, p); // atomic
+}
+
+export function defaultInvokeRecoveryPass(ticket, briefObj = {}, deps = {}) {
+  const orchDir = deps.orchDir ?? resolveOrchDir();
+  if (!orchDir) {
+    return { success: false, dispatched: false, attempts: 0, reason: "no orchDir", details: {} };
+  }
+
+  const { brief, reason, evidence, phase, bgJobId, failureReason } = briefObj;
+
+  // Lazy imports — same rationale as defaultInvokeRemediateCapped (avoid loading
+  // the dispatch graph on the off/shadow paths; no import cycle).
+  let dispatchTicket, countRecoveryPassCycles;
+  try {
+    ({ dispatchTicket } = deps.dispatchMod ?? requireSync("./dispatch.mjs"));
+    ({ countRecoveryPassCycles } = deps.eventScanMod ?? requireSync("./event-scan.mjs"));
+  } catch (err) {
+    return {
+      success: false,
+      dispatched: false,
+      attempts: 0,
+      reason: `recovery-pass module load failed: ${err.message}`,
+      details: { error: err.message },
+    };
+  }
+
+  const countCycles = deps.countCycles ?? countRecoveryPassCycles;
+  const dispatch = deps.dispatchTicket ?? dispatchTicket;
+  const cap = deps.cap ?? RECOVERY_PASS_CYCLE_CAP;
+
+  // (1) Enforce the recovery-pass dispatch cap.
+  const attempts = countCycles({ ticket });
+  if (attempts >= cap) {
+    return {
+      success: false,
+      dispatched: false,
+      attempts,
+      reason: "recovery-pass-cycle-cap-exhausted",
+      details: { cap },
+    };
+  }
+
+  // (2) Assemble + write the first-class brief the skill consumes. It carries the
+  //     eyes' output (diagnostician evidence) and the hands' history (which
+  //     deterministic seams already ran), so the skill picks up where the narrow
+  //     passes failed instead of redoing them.
+  const seamsTried = readUnstuckSeamsTried(orchDir, ticket, phase);
+  const recoveryBrief = {
+    schema: "recovery-pass-brief/v1",
+    ticket,
+    phase: phase ?? null,
+    bgJobId: bgJobId ?? null,
+    failureReason: failureReason ?? null,
+    // The DIAGNOSE output (read-only): claude logs buffer + bg job state + signal
+    // + belief state. The skill reads this instead of re-diagnosing from scratch.
+    diagnosis: {
+      reason: reason ?? null,
+      logsOutput: evidence?.logsOutput ?? null,
+      jobState: evidence?.jobState ?? null,
+      signal: evidence?.signal ?? null,
+      beliefState: evidence?.beliefState ?? null,
+    },
+    // The hands' history: deterministic seams that already ran and did NOT clear
+    // it. The skill must NOT redo these — it does the harder cross-pipeline moves.
+    deterministicSeamsTried: seamsTried,
+    // The remediation guidance (generateRemediateBrief output) + the autonomy
+    // boundary. The skill body owns the full senior-engineer decision checklist;
+    // this is the per-item hint, not the policy.
+    guidance: brief ?? null,
+    attempt: attempts + 1,
+    maxAttempts: cap,
+    writtenAt: new Date().toISOString(),
+  };
+  try {
+    writeRecoveryBrief(orchDir, ticket, recoveryBrief);
+  } catch (err) {
+    return {
+      success: false,
+      dispatched: false,
+      attempts,
+      reason: `recovery-pass.json brief write failed: ${err.message}`,
+      details: { error: err.message },
+    };
+  }
+
+  // (3) Dispatch the recovery-pass skill through the JS seam (worktree
+  //     provisioning, claim, OTEL, signal envelope). The dispatcher resolves the
+  //     phase `recovery-pass` to /catalyst-dev:recovery-pass (skill_for_phase).
+  let r;
+  try {
+    r = dispatch(orchDir, ticket, RECOVERY_PASS_PHASE);
+  } catch (err) {
+    return {
+      success: false,
+      dispatched: false,
+      attempts,
+      reason: `dispatch threw: ${err.message}`,
+      details: { error: err.message },
+    };
+  }
+
+  if (r && r.code === 0) {
+    // Fire-and-forget: dispatched, not fixed. Cooldown prevents re-dispatch.
+    return {
+      success: true,
+      dispatched: true,
+      attempts: 1,
+      reason: "recovery-pass dispatched",
+      details: {
+        phase: RECOVERY_PASS_PHASE,
+        bg_job_id: r.signal?.bg_job_id ?? null,
+        worktreePath: r.worktreePath ?? null,
+        seamsTriedCount: seamsTried.length,
       },
     };
   }

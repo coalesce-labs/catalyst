@@ -45,6 +45,11 @@ import { getEventLogPath } from "./config.mjs";
 // `phase.remediate.complete.` or `phase.revive.reap-requested`.)
 const REVIVE_NAME_RE = /^phase\.[^.]+\.revive\./;
 const REMEDIATE_NAME_PREFIX = "phase.remediate.complete.";
+// CTL-1176 rung 3: the recovery-pass dispatch budget, analogous to the
+// remediate verdict-cycle budget. One completed recovery-pass sweep ==
+// one phase.recovery-pass.complete.<ticket> event. Durable (survives signal
+// resets), so the cap holds across ticks/restarts.
+const RECOVERY_PASS_NAME_PREFIX = "phase.recovery-pass.complete.";
 
 // CTL-802 — countTicketEventsInWindow (the CTL-671 runaway detector) used to scan
 // the WHOLE log from offset 0 on every call — and it is called once per in-flight
@@ -195,6 +200,16 @@ export function countReviveEvents({ ticket, orchId, since, path = getEventLogPat
 export function countRemediateCycles({ ticket, orchId, since, path = getEventLogPath() } = {}) {
   if (!ticket) throw new Error("countRemediateCycles: ticket required");
   return countByExactName(`${REMEDIATE_NAME_PREFIX}${ticket}`, { orchId, since, path });
+}
+
+// countRecoveryPassCycles — number of phase.recovery-pass.complete.<ticket>
+// envelopes (CTL-1176 rung 3). The event-counted recovery-pass dispatch budget,
+// mirroring countRemediateCycles. Used by defaultInvokeRecoveryPass to refuse a
+// re-dispatch once the per-target cap is spent (the cap holds even after the
+// per-cycle signal reset, because events are durable).
+export function countRecoveryPassCycles({ ticket, orchId, since, path = getEventLogPath() } = {}) {
+  if (!ticket) throw new Error("countRecoveryPassCycles: ticket required");
+  return countByExactName(`${RECOVERY_PASS_NAME_PREFIX}${ticket}`, { orchId, since, path });
 }
 
 // countDistinctRevivingTickets — unique tickets that have any revive event

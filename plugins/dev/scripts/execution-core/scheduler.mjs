@@ -207,7 +207,11 @@ import {
   defaultShouldSkipItem as recoveryShouldSkipItem,
   defaultRecordIntent as recoveryRecordIntent,
   defaultInvokeSeam as recoveryInvokeSeam,
-  defaultInvokeRemediateCapped as recoveryInvokeRemediateCapped,
+  // CTL-1176 rung 3: the bounded-LLM path now dispatches the goal-driven
+  // recovery-pass skill (replacing the phase-remediate detour). Bound to the
+  // tick's orchDir at the call site. Still entirely behind CATALYST_RECOVERY_PASS
+  // (mode=off ⇒ the pass never runs), so no live behavior change until opt-in.
+  defaultInvokeRecoveryPass as recoveryInvokeRecoveryPass,
 } from "./recovery-reasoning.mjs";
 // CTL-1219: the per-category enforcement seam registry (dirty-tree /
 // source-conflict / orphan-stale / stale-label). Pure-cored + injectable; bound
@@ -3489,8 +3493,10 @@ export function schedulerTick(
               recoveryRecordIntent(ticket, intent, { orchDir }),
             invokeSeam: (ticket, seamId, brief) =>
               recoveryInvokeSeam(ticket, seamId, brief, { orchDir }),
-            invokeRemediateCapped: (ticket, briefObj) =>
-              recoveryInvokeRemediateCapped(ticket, briefObj, { orchDir }),
+            // CTL-1176 rung 3: dispatch the recovery-pass skill for the
+            // bounded-LLM path (was recoveryInvokeRemediateCapped → phase-remediate).
+            invokeRecoveryPass: (ticket, briefObj) =>
+              recoveryInvokeRecoveryPass(ticket, briefObj, { orchDir }),
           });
           if (rResult.processed > 0) {
             log.info(
