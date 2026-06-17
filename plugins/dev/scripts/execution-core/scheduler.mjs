@@ -5255,6 +5255,7 @@ function runTick() {
       exec: runningOpts.exec,
       writeStatus: runningOpts.writeStatus,
       cache: runningOpts.cache, // CTL-634: shared out-of-set blocker state cache
+      gateway: runningOpts.gateway, // CTL-1240/823: enables tier-2 reads in reclaim + reasoning filter
       concurrency, // CTL-665 + CTL-676: per-tick re-read, then threaded into readMaxParallel
       // CTL-676: forward the optional liveBackgroundCount seam (test-only) so
       // a unit test can drive freeSlots deterministically without shelling
@@ -5531,6 +5532,7 @@ export function startScheduler({
   exec,
   writeStatus,
   cache, // CTL-634: shared out-of-set blocker state cache (from startDaemon)
+  gateway, // CTL-1240/823: durable filter-state.db reader; threaded into runningOpts → schedulerTick
   concurrency = {}, // CTL-665 + CTL-676: boot-captured executionCore knobs. When
   // `configPath` is also set (production wiring), runTick re-reads the live
   // file every tick and ignores this object; the boot-captured value is the
@@ -5597,6 +5599,7 @@ export function startScheduler({
     exec,
     writeStatus,
     cache,
+    gateway, // CTL-1240: thread the durable descriptor reader into the per-tick options
     concurrency,
     configPath, // CTL-676: per-tick Layer-1 re-read source
     layer2Path, // CTL-678: per-tick Layer-2 re-read source (host-wide override)

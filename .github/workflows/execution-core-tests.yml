@@ -131,6 +131,7 @@ jobs:
             hrw.test.mjs \
             integration-ctl-701.test.mjs \
             integration-ctl-705.test.mjs \
+            integration-ctl-1240.test.mjs \
             integration.test.mjs \
             job-dir-gc.test.mjs \
             label-guard.test.mjs \
