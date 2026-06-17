@@ -232,10 +232,24 @@ bootstrap() {
 
       if [[ -n "$rebuild_reason" ]]; then
         echo "Building orch-monitor frontend → $MONITOR_UI_DIST_DIR ($rebuild_reason) ..."
-        if (cd "$MONITOR_DIR/ui" && bunx vite build); then
+        # CTL-1254: build into a staging dir and atomically swap on success. vite.config
+        # sets emptyOutDir:false for this out-of-repo outDir, so building in place piled
+        # stale hashed chunks across every rebuild (observed 5759 vs the ~1522 a clean
+        # build emits). The served bundle then referenced per-glyph icon chunks that no
+        # longer matched → silent 404s → icon-picker glyphs stuck as placeholders, plus
+        # unbounded disk growth. Staging keeps the previous dist intact as a fallback if
+        # the build fails (preserving the warn-and-serve-previous behaviour below).
+        _ui_stage="${MONITOR_UI_DIST_DIR%/}.staging.$$"
+        rm -rf "$_ui_stage"
+        if (cd "$MONITOR_DIR/ui" && MONITOR_UI_DIST_DIR="$_ui_stage" bunx vite build); then
+          # Swap fresh build into place (drops ALL stale chunks); the static-asset copy
+          # step below re-populates PWA manifest/sw/icons. mv is atomic on one filesystem.
+          rm -rf "$MONITOR_UI_DIST_DIR"
+          mv "$_ui_stage" "$MONITOR_UI_DIST_DIR"
           # Record the built source SHA ONLY on success so a failed build retries next start.
           [[ -n "$ui_source_sha" ]] && printf '%s\n' "$ui_source_sha" > "$built_sha_file"
         else
+          rm -rf "$_ui_stage"
           echo "warning: orch-monitor vite build failed — serving previous dist (will retry next restart)" >&2
           if declare -f build_canonical_line >/dev/null 2>&1; then
             _bf_line="$(build_canonical_line \
