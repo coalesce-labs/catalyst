@@ -59,6 +59,7 @@ export function startLivenessPublisher({
   orchDir,
   ownedTickets = () => localInFlightTickets(self, { orchDir }),
   publish = (args) => publishHeartbeatSync(args),
+  logger = log, // CTL-1251: injectable so tests can assert publish-outcome logging
 } = {}) {
   // Single-host no-op (no network, no publish, zero cost).
   if (!Array.isArray(roster) || roster.length <= 1) {
@@ -67,7 +68,7 @@ export function startLivenessPublisher({
 
   // Multi-host but no anchor configured: warn once, return inert handle.
   if (!anchorIssue) {
-    log.warn(
+    logger.warn(
       { roster },
       "cluster-heartbeat-publisher: CATALYST_LIVENESS_ANCHOR_ISSUE not configured — " +
         "cross-host liveness channel is disabled. Set catalyst.cluster.livenessAnchorIssue " +
@@ -76,9 +77,33 @@ export function startLivenessPublisher({
     return { stop() {} };
   }
 
+  // CTL-1251: a publish failure used to vanish into fail-open silence, so a
+  // multi-host daemon that "isn't publishing" gave no diagnostic. We now LOG the
+  // outcome: warn on failure (with the reason from publishHeartbeatSync), but
+  // throttle to once-per-CONSECUTIVE-failure-run so a sustained Linear outage
+  // doesn't spam the log every interval. The first success after failures logs
+  // an info recovery line. Still fail-open — logging never throws.
+  let consecutiveFailures = 0;
   const tick = () => {
     try {
-      publish({ anchorIssue, host: self, inFlightTickets: ownedTickets() });
+      const result = publish({ anchorIssue, host: self, inFlightTickets: ownedTickets() });
+      if (result && result.ok === false) {
+        if (consecutiveFailures === 0) {
+          logger.warn(
+            { host: self, anchorIssue, error: result.error },
+            "cluster-heartbeat-publisher: publish to liveness anchor FAILED — peers will look stale",
+          );
+        }
+        consecutiveFailures += 1;
+      } else {
+        if (consecutiveFailures > 0) {
+          logger.info(
+            { host: self, anchorIssue, afterFailures: consecutiveFailures },
+            "cluster-heartbeat-publisher: publish recovered",
+          );
+        }
+        consecutiveFailures = 0;
+      }
     } catch {
       // fail-open: a Linear hiccup must never crash the daemon
     }

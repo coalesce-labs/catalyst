@@ -93,6 +93,42 @@ describe("publishHeartbeatSync — argv + fail-open contract", () => {
     const csvArg = capturedArgs[capturedArgs.length - 1];
     expect(csvArg).toBe("");
   });
+
+  // CTL-1251: failures now carry a diagnostic `error` reason (still fail-open).
+  test("non-zero exit surfaces exit code + stderr tail in error", () => {
+    const spawn = () => ({ status: 2, stdout: "", stderr: "Linear 401 Unauthorized\n" });
+    const r = publishHeartbeatSync({ anchorIssue: "CTL-9", host: "mini" }, { spawn });
+    expect(r.ok).toBe(false);
+    expect(r.error).toContain("exit 2");
+    expect(r.error).toContain("401 Unauthorized");
+  });
+
+  test("timeout (status null, res.error set) surfaces the spawn error", () => {
+    const spawn = () => ({ status: null, error: new Error("ETIMEDOUT"), stdout: null });
+    const r = publishHeartbeatSync({ anchorIssue: "CTL-9", host: "mini" }, { spawn });
+    expect(r.ok).toBe(false);
+    expect(r.error).toContain("ETIMEDOUT");
+  });
+
+  test("spawn throw surfaces the thrown message in error", () => {
+    const spawn = () => { throw new Error("EACCES"); };
+    const r = publishHeartbeatSync({ anchorIssue: "CTL-9", host: "mini" }, { spawn });
+    expect(r.ok).toBe(false);
+    expect(r.error).toContain("EACCES");
+  });
+
+  test("unparseable stdout → ok:false with an error reason", () => {
+    const spawn = () => ({ status: 0, stdout: "not json" });
+    const r = publishHeartbeatSync({ anchorIssue: "CTL-9", host: "mini" }, { spawn });
+    expect(r.ok).toBe(false);
+    expect(typeof r.error).toBe("string");
+  });
+
+  test("stderr is truncated so a noisy subprocess can't bloat the log line", () => {
+    const spawn = () => ({ status: 1, stdout: "", stderr: "x".repeat(5000) });
+    const r = publishHeartbeatSync({ anchorIssue: "CTL-9", host: "mini" }, { spawn });
+    expect(r.error.length).toBeLessThan(260); // ~200 stderr tail + "exit 1: " prefix
+  });
 });
 
 describe("readPeerHeartbeatsSync — parsing + fail-open contract", () => {
