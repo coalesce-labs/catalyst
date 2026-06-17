@@ -52,13 +52,21 @@ async function defaultPost(query, variables) {
 
 // ─── identifier → issue UUID ─────────────────────────────────────────────────
 
+// CTL-1255: resolve via the `issue(id:)` query, which accepts the human
+// identifier ("CTL-1217") directly and returns the UUID. The previous
+// `issues(filter:{identifier:{eq}})` form was a hard 400 — IssueFilter has no
+// `identifier` field ("Field identifier is not defined by type IssueFilter") —
+// so resolveIssueId ALWAYS returned null and every publish aborted with "no
+// issue found". This is why cross-host liveness never published (CTL-1251).
+// READ_ATTACHMENTS_QUERY below already uses `issue(id:)`, which is why reads
+// worked while writes silently failed.
 const RESOLVE_ISSUE_QUERY = `query ResolveIssueId($id: String!) {
-  issues(filter: { identifier: { eq: $id } }) { nodes { id } }
+  issue(id: $id) { id }
 }`;
 
 export async function resolveIssueId(ticket, { post = defaultPost } = {}) {
   const data = await post(RESOLVE_ISSUE_QUERY, { id: ticket });
-  return data?.issues?.nodes?.[0]?.id ?? null;
+  return data?.issue?.id ?? null;
 }
 
 // ─── read ────────────────────────────────────────────────────────────────────

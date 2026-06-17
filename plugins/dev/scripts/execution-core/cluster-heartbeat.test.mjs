@@ -65,7 +65,7 @@ describe("publishHeartbeat", () => {
     const calls = [];
     const post = async (q, v) => {
       calls.push({ q, v });
-      if (q.includes("ResolveIssue")) return { issues: { nodes: [{ id: "uuid-anchor" }] } };
+      if (q.includes("ResolveIssue")) return { issue: { id: "uuid-anchor" } };
       return { attachmentCreate: { success: true, attachment: { id: "a1" } } };
     };
     const rec = await publishHeartbeat(
@@ -81,15 +81,36 @@ describe("publishHeartbeat", () => {
   });
 
   test("throws when the anchor issue cannot be resolved", async () => {
-    const post = async () => ({ issues: { nodes: [] } });
+    const post = async () => ({ issue: null });
     await expect(
       publishHeartbeat({ anchorIssue: "CTL-9999", host: "mini" }, { post }),
     ).rejects.toThrow(/no issue found/);
   });
 
+  // CTL-1255 regression guard: the resolve query MUST use issue(id:) — the human
+  // identifier accessor Linear accepts — not issues(filter:{identifier}), which is
+  // a hard 400 (IssueFilter has no identifier field). The old fakes returned the
+  // wrong {issues:{nodes}} shape and so masked the live failure for the whole
+  // CTL-1090 → CTL-1251 window.
+  test("resolve query targets issue(id:) and reads issue.id (not issues.nodes)", async () => {
+    let resolveQ = "";
+    const post = async (q) => {
+      if (q.includes("issue(id:") && !q.includes("attachmentCreate")) {
+        resolveQ = q;
+        return { issue: { id: "uuid-anchor" } };
+      }
+      // a fake that ONLY answers the issue(id:) shape — if the code still used
+      // issues(filter:), issueId would be null and this would throw "no issue found"
+      return { attachmentCreate: { success: true, attachment: {} } };
+    };
+    await publishHeartbeat({ anchorIssue: "CTL-9999", host: "mini" }, { post });
+    expect(resolveQ).toContain("issue(id: $id)");
+    expect(resolveQ).not.toContain("identifier");
+  });
+
   test("throws when attachmentCreate returns success:false", async () => {
     const post = async (q) => {
-      if (q.includes("ResolveIssue")) return { issues: { nodes: [{ id: "uuid-x" }] } };
+      if (q.includes("ResolveIssue")) return { issue: { id: "uuid-x" } };
       return { attachmentCreate: { success: false } };
     };
     await expect(
@@ -99,7 +120,7 @@ describe("publishHeartbeat", () => {
 
   test("defaults inFlightTickets to [] when omitted", async () => {
     const post = async (q) => {
-      if (q.includes("ResolveIssue")) return { issues: { nodes: [{ id: "uuid-x" }] } };
+      if (q.includes("ResolveIssue")) return { issue: { id: "uuid-x" } };
       return { attachmentCreate: { success: true, attachment: {} } };
     };
     const rec = await publishHeartbeat(
@@ -160,7 +181,7 @@ describe("readPeerHeartbeats", () => {
 describe("runCli", () => {
   test("publish: prints one JSON line and exits 0", async () => {
     const post = async (q) => {
-      if (q.includes("ResolveIssue")) return { issues: { nodes: [{ id: "uuid-x" }] } };
+      if (q.includes("ResolveIssue")) return { issue: { id: "uuid-x" } };
       return { attachmentCreate: { success: true, attachment: {} } };
     };
     const { code, out } = await captureStdout(() =>
@@ -178,7 +199,7 @@ describe("runCli", () => {
 
   test("publish: empty ticketsCsv passes empty in_flight_tickets", async () => {
     const post = async (q) => {
-      if (q.includes("ResolveIssue")) return { issues: { nodes: [{ id: "uuid-x" }] } };
+      if (q.includes("ResolveIssue")) return { issue: { id: "uuid-x" } };
       return { attachmentCreate: { success: true, attachment: {} } };
     };
     const { code, out } = await captureStdout(() =>
