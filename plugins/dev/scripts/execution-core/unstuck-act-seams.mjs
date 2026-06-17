@@ -229,7 +229,7 @@ export function buildSourceConflictActSeam(deps = {}) {
       commitSubjects,
       headIsDescendant,
       liveSessionInWorktree: false,
-      linearTerminal: false,
+      linearTerminal: candidate.evidence?.linearTerminal ?? false,
       alreadyPushed: false,
     });
     if (decision.action !== "force-push") {

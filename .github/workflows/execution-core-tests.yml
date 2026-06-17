@@ -175,4 +175,6 @@ jobs:
             work-done-probes.test.mjs \
             worktree-refresh-timer.test.mjs \
             worktree-safety.test.mjs \
-            worktree.test.mjs
+            worktree.test.mjs \
+            recovery-reasoning.test.mjs \
+            unstuck-act-seams.test.mjs
