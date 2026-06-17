@@ -517,6 +517,9 @@ describe("sendOtlpMetrics — OTLP /v1/metrics POST", () => {
     expect(r["service.name"]).toBe("catalyst.agent");
     expect(r["service.namespace"]).toBe("catalyst");
     expect(typeof r.hostname).toBe("string");
+    // CTL-1235: the running semver rides the shared metric resource (semconv
+    // service.version) when resolvable, so any metric can be grouped by version.
+    expect(r["service.version"]).toMatch(/^\d+\.\d+\.\d+/);
   });
 });
 

@@ -25,6 +25,7 @@ import { dirname } from "node:path";
 import { randomBytes } from "node:crypto";
 import { hostname } from "node:os";
 import { hostName, hostId } from "../execution-core/lib/host-identity.mjs";
+import { serviceVersion } from "./build-info.mjs";
 
 // shortHostname — os.hostname() with the macOS-appended ".local" suffix
 // stripped, matching the hostname Claude Code's native OTel emits
@@ -295,13 +296,19 @@ export async function drainPending(pending) {
 // metricResource — the same host/service identity the log envelope carries, so
 // metrics and events share one resource on the dashboards.
 export function metricResource() {
-  return {
+  const res = {
     "service.name": "catalyst.agent",
     "service.namespace": "catalyst",
     hostname: shortHostname(),
     "host.name": hostName(),
     "host.id": hostId(),
   };
+  // CTL-1235: stamp the running semver (OTel semconv `service.version`) on the
+  // shared metric resource so EVERY agent metric can be grouped/filtered by the
+  // version that emitted it. Omitted when unresolvable (no empty label).
+  const v = serviceVersion();
+  if (v) res["service.version"] = v;
+  return res;
 }
 
 // dropNullAttrs — the put() pattern for metric data-point attributes: an attr is

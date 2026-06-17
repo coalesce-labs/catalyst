@@ -119,6 +119,7 @@ export function readAgentConfig() {
     usageEnabled: process.env.CATALYST_AGENT_USAGE !== "0",
     hostEnabled: process.env.CATALYST_AGENT_HOST !== "0",
     processEnabled: process.env.CATALYST_AGENT_PROCESS !== "0",
+    versionEnabled: process.env.CATALYST_AGENT_VERSION !== "0",
   };
 }
 
