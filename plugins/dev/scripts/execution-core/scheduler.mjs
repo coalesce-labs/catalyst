@@ -131,6 +131,12 @@ import { emitReapIntent } from "./reap-intent.mjs";
 import {
   reclaimDeadWorkIfPossible as defaultReclaimDeadWork,
   reclaimDeadHostWork,
+  // CTL-1191: surviving-roster primitives so the recovery passes (unstuck /
+  // reasoning / diagnostician) HRW-gate over the SURVIVING roster — a dead
+  // node's stuck work fails over to a live owner instead of stranding.
+  readClusterHeartbeats,
+  deadHosts,
+  survivingRoster,
   defaultAppendDispatchFailedEvent,
   defaultAppendDispatchRequestedEvent,
   defaultAppendDispatchLaunchedEvent,
@@ -225,7 +231,10 @@ import { resolveTicketType } from "./ticket-type.mjs"; // CTL-1023: work-type di
 // ({Done,Canceled} — its OWN set) backs both the reconcile-backstop's
 // "live state !terminal" check and the recovery short-circuit threaded into
 // reclaimOpts below.
-import { isLinearTerminal } from "./terminal-state.mjs";
+// CTL-1191: isTicketTerminalOrMerged — used by the recovery-reasoning pass (Pass
+// 0r) to stop reasoning over a ticket already finished (terminal Linear state or
+// merged PR), per the PR #2163 verify flag.
+import { isLinearTerminal, isTicketTerminalOrMerged } from "./terminal-state.mjs";
 // CTL-638: labelOnce moved out of this file into a shared leaf module so the
 // recovery-sweep escalation path can use the same once-marker guard. Keeping
 // labelOnce here would force recovery.mjs → scheduler.mjs to import it, but
@@ -242,10 +251,11 @@ import {
   getClusterHosts,
   hostMembershipWarning,
   isDraining as isDrainingDefault,
+  HEARTBEAT_GRACE_MS, // CTL-1191: dead-host grace for surviving-roster recovery gate
 } from "./config.mjs";
 import { emitDrainedEvent as defaultEmitDrainedEvent } from "./drain-event.mjs"; // CTL-1095: drained sentinel
 import { defaultCheckSequencing } from "./sequencing.mjs"; // CTL-537
-import { ownedBy } from "./hrw.mjs"; // CTL-850: HRW ownership filter
+import { ownedBy } from "./hrw.mjs"; // CTL-850: HRW ownership filter (CTL-1191 also uses it for the diagnostician gate)
 import { claimDispatchSync } from "./cluster-claim-sync.mjs"; // CTL-850: cross-host claim soft-CAS
 // CTL-954: team estimation method — lazy-cached from Linear, used to expand
 // the allowed estimate point set beyond the hard-coded Fibonacci values.
@@ -287,6 +297,29 @@ import {
 // not collapse with this set — see the CTL-565 cross-reference comment on
 // isTicketInFlight).
 const TERMINAL_SIGNAL_STATUSES = new Set(["failed", "stalled", "aborted"]);
+
+// CTL-1191: computeSurvivingRoster — the roster minus hosts whose heartbeat is
+// older than the grace window. SHARED by both recovery-pass HRW gates
+// (schedulerTick's ownsForRecovery and runTick's diagnostician ownsSubject) so
+// the two never disagree about who is alive. Mirrors reclaimDeadHostWork's
+// survivor computation (recovery.mjs:2979-2983) exactly.
+//
+// FAIL-SAFE: a thrown heartbeat read, or a roster where EVERY host looks dead
+// (e.g. an empty/garbled event log), degrades to the FULL roster — each node
+// then owns only its own HRW slice (NEVER double-acts) and we merely forgo the
+// dead-owner failover for this tick (no worse than the pre-CTL-1191 strand).
+// Single-host (roster.length <= 1) returns the roster unchanged with no read.
+function computeSurvivingRoster(roster, { readHeartbeats = readClusterHeartbeats, nowMs = Date.now() } = {}) {
+  if (!Array.isArray(roster) || roster.length <= 1) return roster;
+  try {
+    const lastSeen = readHeartbeats({ roster });
+    const dead = deadHosts({ lastSeen, roster, graceMs: HEARTBEAT_GRACE_MS, nowMs });
+    const alive = survivingRoster(roster, dead);
+    return alive.length > 0 ? alive : roster;
+  } catch {
+    return roster;
+  }
+}
 
 // CTL-1004/CTL-1056 Bug 2: dispatchFailureDiag — extract the diagnostic fields
 // from a dispatch result (r = { code, stderr, spawnError, signal }) for the
@@ -2624,6 +2657,12 @@ export function schedulerTick(
     hosts = undefined,
     hostName = undefined,
     claimDispatch = claimDispatchSync,
+    // CTL-1191: injectable surviving-roster computation for the recovery-pass HRW
+    // gate (ownsForRecovery). Default undefined → computeSurvivingRoster(roster),
+    // which reads heartbeats from the (test-redirected) event log. Tests inject a
+    // fixed survivor set to drive the dead-owner-failover path deterministically
+    // without writing heartbeat events. Single-host is still a no-op regardless.
+    recoverySurvivingRoster = undefined,
     // CTL-729: progress-watchdog seams. Defaults keep every existing bare unit
     // tick inert (null silence probe → predicate no-ops via "no-transcript").
     watchdog: {
@@ -2726,6 +2765,39 @@ export function schedulerTick(
     globalThis.__ctl1057_scheduler_warned = true;
     log.warn({ roster, self }, _smw);
   }
+
+  // CTL-1191: ownsForRecovery — the HRW ownership predicate for the three
+  // recovery passes (Pass 0u unstuck-sweep, Pass 0r reasoning, diagnostician).
+  // These passes classify-then-ACT (escalate / FIX / re-dispatch / comment) over
+  // the stalled/failed/needs-human backlog. Before CTL-1191 they had NO ownership
+  // gate, so on a 2-node cluster BOTH nodes acted on EVERY stalled ticket
+  // (duplicate escalations, double Linear comments, racing re-dispatch).
+  //
+  // STRICT no-op at N=1: when !multiHost this is an identity (returns true for
+  // every ticket) — the lone host keeps acting on all of its work exactly as
+  // before. The surviving-roster read below NEVER runs single-host.
+  //
+  // DEAD-OWNER FAILOVER: at N>1 the HRW hash is computed over the SURVIVING
+  // roster (roster minus dead hosts), NOT the raw roster. So when the ticket's
+  // original owner has died, ownership re-homes to a LIVE survivor and that node
+  // picks up the dead owner's stuck work instead of it stranding. Mirrors
+  // reclaimDeadHostWork's `ownerForTicket(ticket, survivors)` gate exactly
+  // (recovery.mjs:2983-2989) so the dispatch-side and recovery-side agree on who
+  // owns a dead node's tickets.
+  //
+  // Computed lazily + memoized once per tick via the shared computeSurvivingRoster
+  // helper: the heartbeat read only fires the first time a recovery pass actually
+  // has candidates, and only when multiHost.
+  let _survivorRoster = null;
+  const _survivors = () => {
+    if (_survivorRoster) return _survivorRoster;
+    _survivorRoster = Array.isArray(recoverySurvivingRoster)
+      ? recoverySurvivingRoster
+      : computeSurvivingRoster(roster);
+    return _survivorRoster;
+  };
+  const ownsForRecovery = (ticket) =>
+    !multiHost || ownedBy(ticket, _survivors(), self);
   // CTL-757: emitStateWrite — caller-emit the canonical linear.state.write audit
   // event for ONE scheduler write site. `writerResult` is the runTransition return
   // ({applied, reason, from_state, to_state, ...}) from applyPhaseStatus /
@@ -3255,7 +3327,13 @@ export function schedulerTick(
       try {
         const ureport = runUnstuckSweepPass({
           mode: uMode,
-          collectCandidates: _collectUnstuckCandidates,
+          // CTL-1191: HRW-gate the unstuck candidate census over the SURVIVING
+          // roster. The unstuck pass escalates / acts on stalled tickets; on a
+          // 2-node cluster only the owning node should act so two nodes don't
+          // both post escalation comments / race a clear on the same ticket. A
+          // dead owner's stuck tickets re-home to a live survivor. STRICT no-op
+          // at N=1 (ownsForRecovery is identity → the census is unchanged).
+          collectCandidates: () => (_collectUnstuckCandidates() ?? []).filter((c) => ownsForRecovery(c.ticket)),
           actByCategory: _unstuckActByCategory ?? {},
           escalate: _unstuckEscalate ?? (() => {}),
           emit: _unstuckEmit,
@@ -3365,6 +3443,28 @@ export function schedulerTick(
               sig.status === "failed" ||
               sig.status === "stalled" ||
               resolveTicketType(orchDir, sig.ticket) === "unknown"
+          )
+          // CTL-1191: HRW ownership gate over the SURVIVING roster. On a 2-node
+          // cluster only the node that OWNS a stalled ticket reasons over it, so
+          // the pass no longer double-acts (duplicate escalations / racing
+          // re-dispatch). A dead owner's tickets re-home to a live survivor.
+          // STRICT identity at N=1 (ownsForRecovery → !multiHost short-circuit).
+          .filter((sig) => ownsForRecovery(sig.ticket))
+          // CTL-1191: terminal-state filter (PR #2163 verify flag). Stop reasoning
+          // over a ticket that already reached a terminal Linear state or whose PR
+          // already merged — the pipeline (or a human) finished it; reasoning over
+          // it just burns cooldown + re-posts diagnoses. Cheap-first cached Linear
+          // read; fail-open (a thrown/unreadable read → NOT terminal → kept).
+          // Threads the SAME per-tick TTL state cache + gateway the reclaim/advance
+          // paths use (≤1 Linear read per ticket per tick).
+          .filter(
+            (sig) =>
+              !isTicketTerminalOrMerged({
+                ticket: sig.ticket,
+                signal: sig,
+                cache,
+                fetchState: (id, o = {}) => fetchTicketState(id, { ...o, cache, gateway }),
+              }).terminal
           )
           .map((sig) => ({
             ticket: sig.ticket,
@@ -5045,7 +5145,19 @@ function runTick() {
           // same R12 escalate_human beliefs exactly once.
           // CTL-1065: capture the result so escalated[].evidence can be threaded
           // into executeEscalations as evidenceBySubject.
-          diagResult = processDiagnosticianWakes(diagDb, beliefsRes.tickId, {});
+          // CTL-1191: HRW-gate the diagnostician over the surviving roster — on a
+          // multi-host cluster only the node that OWNS a stalled subject captures
+          // evidence + escalates it, so two nodes don't double-page needs-human.
+          // STRICT no-op at N=1: a single-host roster makes ownedBy an identity
+          // (the lone host owns everything), so ownsSubject is always true.
+          const diagRoster = getClusterHosts();
+          const diagSelf = getHostName();
+          const diagSurvivors =
+            diagRoster.length > 1 ? computeSurvivingRoster(diagRoster) : diagRoster;
+          const ownsSubject = (subject) =>
+            diagRoster.length <= 1 ||
+            ownedBy(String(subject).split("/")[0], diagSurvivors, diagSelf);
+          diagResult = processDiagnosticianWakes(diagDb, beliefsRes.tickId, { ownsSubject });
         }
       } catch (diagErr) {
         try {

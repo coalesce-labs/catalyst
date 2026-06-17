@@ -209,10 +209,20 @@ export function processDiagnosticianWakes(db, tickId, opts = {}) {
     return { skipped: "disabled" };
   }
 
+  // CTL-1191: HRW ownership gate over the surviving roster. The caller (runTick)
+  // injects `ownsSubject(subject)` so on a multi-host cluster only the node that
+  // OWNS a stalled subject diagnoses + escalates it — otherwise two nodes both
+  // capture evidence and double-page needs-human for the same ticket. Default is
+  // own-everything (() => true) so the single-host install and every existing
+  // diagnostician test are an EXACT no-op (no behavior change unless wired).
+  const ownsSubject =
+    typeof opts.ownsSubject === "function" ? opts.ownsSubject : () => true;
+
   const ran = [];
   const cooled = [];
   const escalated = []; // CTL-962: subjects whose R12 fired, with captured evidence
   const errors = [];
+  const skippedNotOwned = []; // CTL-1191: subjects another node owns this tick
 
   try {
     // Read the current tick's now_ms for cooldown arithmetic
@@ -239,6 +249,16 @@ export function processDiagnosticianWakes(db, tickId, opts = {}) {
 
     for (const wb of wakeBeliefs) {
       const subject = wb.subject;
+
+      // CTL-1191: HRW ownership gate — skip a subject another node owns this tick
+      // (over the surviving roster). Runs BEFORE evidence capture / escalation so
+      // a non-owner does nothing: no captureEvidence, no recordWakeIntent, no
+      // R12 page. Single-host / unwired callers own everything (no-op).
+      if (!ownsSubject(subject)) {
+        skippedNotOwned.push(subject);
+        continue;
+      }
+
       const reason = (() => {
         try {
           return JSON.parse(wb.value ?? "{}").reason ?? "unknown";
@@ -293,7 +313,15 @@ export function processDiagnosticianWakes(db, tickId, opts = {}) {
     errors.push({ phase: "outer", err: String(err?.message ?? err) });
   }
 
-  return { ran, cooled, escalated, errors: errors.length ? errors : undefined };
+  return {
+    ran,
+    cooled,
+    escalated,
+    // CTL-1191: surface non-owned skips only when the gate actually fired, so the
+    // single-host / unwired return shape is byte-identical to before.
+    ...(skippedNotOwned.length ? { skippedNotOwned } : {}),
+    errors: errors.length ? errors : undefined,
+  };
 }
 
 // ── extractShortId — resolve the bg_job_id / short_id for a subject ──────
