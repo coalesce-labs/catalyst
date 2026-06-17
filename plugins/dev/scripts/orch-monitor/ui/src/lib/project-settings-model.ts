@@ -54,6 +54,26 @@ export function buildProjectRailRows(
 }
 
 /**
+ * Union the board-snapshot's observed-work repos with the roster's per-project
+ * repos (CTL-1253). The icon picker keys its candidate lookup on the SELECTED
+ * project's `repo`, which comes from the project roster (/api/projects) and
+ * INCLUDES configured-but-idle teams (hasWork: false). Those idle repos are
+ * absent from BoardPayload.repos (board-data derives it from observed
+ * workers/tickets only), so feeding only the board's repos to useRepoIcons
+ * never fetches /api/repo-icon for an idle project — its Detected favicon group
+ * silently stays empty. Unifying the two sources guarantees every roster
+ * project's repo is fetched. Deduped, order-stable (observed repos first).
+ */
+export function mergeIconRepos(
+  observedRepos: readonly string[],
+  projects: readonly Pick<ProjectDescriptor, "repo">[],
+): string[] {
+  return Array.from(
+    new Set([...observedRepos, ...projects.map((p) => p.repo)]),
+  );
+}
+
+/**
  * Find a project descriptor by team key. Returns null for an unknown/undefined key
  * so the settings surface can fall back to the global sections. Generic so the caller
  * gets back the full descriptor type it passed in, not a narrowed Pick.

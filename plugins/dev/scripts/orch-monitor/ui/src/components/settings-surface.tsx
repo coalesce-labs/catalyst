@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useAtom } from "jotai";
 import { useNavigate, useSearch } from "@tanstack/react-router";
 
@@ -44,7 +44,7 @@ import {
 } from "@/lib/repo-color-picks-store";
 // CTL-1153 Phase 5: project rail + per-project settings pane.
 import { useProjects } from "@/hooks/use-projects";
-import { buildProjectRailRows, resolveSettingsView } from "@/lib/project-settings-model";
+import { buildProjectRailRows, mergeIconRepos, resolveSettingsView } from "@/lib/project-settings-model";
 import { SETTINGS_PATH } from "@/lib/route-surface";
 import { ProjectRail } from "@/components/settings/project-rail";
 import { ProjectSettingsPane } from "@/components/settings/project-settings-pane";
@@ -153,10 +153,26 @@ export function SettingsSurface() {
   // through on change (it only takes effect on the next load).
   const [landing, setLanding] = useState<Surface>(readLandingSurface);
 
-  // Project icons — per-repo candidate picker (CTL-997).
+  // CTL-1153: project rail — server roster + URL-backed selection. Read BEFORE the
+  // icon fetch (CTL-1253): the per-project picker keys its candidate lookup on
+  // settingsView.project.repo, which comes from THIS roster — including
+  // configured-but-idle teams (hasWork: false) that are absent from the board
+  // snapshot's observed-work repos.
+  const { projects, refetch } = useProjects();
+
+  // Project icons — per-repo candidate picker (CTL-997, CTL-1253).
   const { payload } = useBoardSnapshot();
   const payloadLoaded = payload != null;
-  const repos = payload?.repos ?? [];
+  // CTL-1253: fetch icons for the UNION of board-observed repos and EVERY roster
+  // project's repo, so the selected project's repo key always has an iconMap entry
+  // (an idle configured project was never in payload.repos → candidates were []
+  // → the picker's "Detected" group never rendered). useRepoIcons stabilizes on
+  // repos.join(","), so this MUST be a memoized stable reference or the effect
+  // refetches every render.
+  const repos = useMemo(
+    () => mergeIconRepos(payload?.repos ?? [], projects),
+    [payload?.repos, projects],
+  );
   const iconMap = useRepoIcons(repos);
   const [iconPicks, setIconPicks] = useAtom(repoIconPicksAtom);
   const iconPickerRows = buildIconPickerRows(repos, iconMap, iconPicks);
@@ -166,8 +182,6 @@ export function SettingsSurface() {
   const [colorPicks, setColorPicks] = useAtom(repoColorPicksAtom);
   const colorPickerRows = repos;
 
-  // CTL-1153: project rail — server roster + URL-backed selection.
-  const { projects, refetch } = useProjects();
   const navigate = useNavigate();
   const { project: paramKey } = useSearch({ from: SETTINGS_PATH });
   const [selectedKey, setSelectedKey] = useState<string | null>(

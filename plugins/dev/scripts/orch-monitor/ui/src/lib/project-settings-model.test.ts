@@ -2,6 +2,7 @@ import { describe, expect, it } from "bun:test";
 import {
   STATE_MAP_KEYS,
   buildProjectRailRows,
+  mergeIconRepos,
   resolveSelectedProject,
   diffStateMap,
   SETTINGS_PENDING_SECTIONS,
@@ -53,6 +54,33 @@ describe("buildProjectRailRows", () => {
 
   it("returns empty array for empty projects", () => {
     expect(buildProjectRailRows([])).toEqual([]);
+  });
+});
+
+describe("mergeIconRepos (CTL-1253)", () => {
+  it("includes an idle configured project's repo absent from observed-work repos", () => {
+    // The bug: observed-work repos (board snapshot) miss the idle ADV team's repo,
+    // so its favicon candidates were never fetched and the Detected group stayed empty.
+    const merged = mergeIconRepos(["ctl"], [{ repo: "ctl" }, { repo: "adva" }]);
+    expect(merged).toContain("adva");
+    expect(merged).toEqual(["ctl", "adva"]);
+  });
+
+  it("dedupes a repo present in BOTH sources", () => {
+    expect(mergeIconRepos(["ctl"], [{ repo: "ctl" }])).toEqual(["ctl"]);
+  });
+
+  it("keeps observed-work repos first, then appends new roster repos", () => {
+    const merged = mergeIconRepos(["ctl", "otl"], [{ repo: "adva" }, { repo: "ctl" }]);
+    expect(merged).toEqual(["ctl", "otl", "adva"]);
+  });
+
+  it("returns the observed repos unchanged when the roster is empty", () => {
+    expect(mergeIconRepos(["ctl"], [])).toEqual(["ctl"]);
+  });
+
+  it("returns roster repos when there is no observed work yet", () => {
+    expect(mergeIconRepos([], [{ repo: "adva" }, { repo: "ctl" }])).toEqual(["adva", "ctl"]);
   });
 });
 
