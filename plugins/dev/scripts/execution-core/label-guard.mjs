@@ -274,6 +274,53 @@ export function inEscalationCooldown(orchDir, ticket, phase, now) {
   return now - escalatedAt < ESCALATION_COOLDOWN_MS;
 }
 
+// ─── CTL-1241: belief-ownership deferral guard ────────────────────────────────
+//
+// When CATALYST_INTENTS_ENFORCE=1, the belief engine's executeEscalations
+// (beliefs/escalate.mjs) is the SINGLE owner of the needs-human label. The six
+// non-belief producers are gated through labelNeedsHumanUnlessBeliefOwner so
+// they defer to the belief owner instead of writing directly. With enforcement
+// OFF (the default), behavior is byte-for-byte unchanged.
+//
+// Enforcement flag: CATALYST_INTENTS_ENFORCE=1 (Layer-2 config / launchd env).
+// Flipping the flag is an operational rollout step (see CTL-1241 plan §Rollout)
+// — NOT a code default change. All code here is behavior-neutral while the flag
+// is OFF, matching the belief-engine shadow discipline (CTL-933, ADR-023).
+
+// beliefOwnsNeedsHuman — returns true when enforcement is ON and the belief
+// engine is the single owner of the needs-human label. Single source of truth
+// for the deferral predicate.
+export function beliefOwnsNeedsHuman(env = process.env) {
+  return (env ?? process.env).CATALYST_INTENTS_ENFORCE === "1";
+}
+
+// labelNeedsHumanUnlessBeliefOwner — the shared gate used by every non-belief
+// needs-human producer. Either defers to executeEscalations (enforcement ON) or
+// calls labelOnce exactly as before (enforcement OFF / default).
+//
+// Parameters match labelOnce's calling convention at each producer site:
+//   orchDir     — path to the orchestrator directory
+//   ticket      — ticket identifier
+//   writeStatus — { applyLabel } as passed to labelOnce
+//   opts        — {
+//     env   : Record<string,string>  (process.env in production)
+//     site  : string                 (short site-id for the deferral log)
+//     log   : { info }              (the module's log instance)
+//   }
+export function labelNeedsHumanUnlessBeliefOwner(orchDir, ticket, writeStatus, { env = process.env, site = "unknown", log: logArg = null } = {}) {
+  if (beliefOwnsNeedsHuman(env)) {
+    // Defer to executeEscalations — R12 belief owner. Record, do not page.
+    const logger = logArg ?? log;
+    logger.info(
+      { ticket, site },
+      "needs-human deferred to belief owner (CTL-1241)"
+    );
+    return;
+  }
+  // Enforcement OFF (default): call labelOnce exactly as before.
+  labelOnce(orchDir, ticket, "needs-human", writeStatus);
+}
+
 export function recordEscalation(orchDir, ticket, phase, reason, now) {
   const dir = join(orchDir, ".escalation-cooldowns");
   try {

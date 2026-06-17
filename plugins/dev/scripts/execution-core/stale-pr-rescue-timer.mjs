@@ -20,7 +20,7 @@ import { spawnSync } from "node:child_process";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { jobLifecycle } from "./recovery.mjs";
-import { labelOnce } from "./label-guard.mjs";
+import { labelNeedsHumanUnlessBeliefOwner } from "./label-guard.mjs";
 import { fenceGuard } from "./fence-guard.mjs";
 import { appendFileSync } from "node:fs";
 import { log, getEventLogPath, getClusterHosts } from "./config.mjs";
@@ -285,10 +285,10 @@ function defaultDispatchRescue(ticket, opts) {
 // linearWrite defaults to the real linear-write module at the
 // startStalePrRescueTimer boundary; a null here means a caller explicitly
 // opted out, which leaves the ticket invisible to humans — say so loudly.
-export function defaultEscalate(ticket, detail, { orchDir, linearWrite, multiHost = false }) {
+export function defaultEscalate(ticket, detail, { orchDir, linearWrite, multiHost = false, env = process.env } = {}) {
   if (linearWrite) {
     if (fenceGuard({ ticket, orchDir, multiHost })) {
-      labelOnce(orchDir, ticket, "needs-human", linearWrite);
+      labelNeedsHumanUnlessBeliefOwner(orchDir, ticket, linearWrite, { env, site: "stale-pr-rescue", log });
     } else {
       log.warn({ ticket }, "ctl-863: stale fence — suppressing stale-pr-rescue labelOnce write (zombie guard)");
     }

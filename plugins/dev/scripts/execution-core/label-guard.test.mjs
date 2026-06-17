@@ -16,6 +16,8 @@ import {
   recordRemovalFailure,
   clearRemovalFailures,
   inRemovalBackoff,
+  beliefOwnsNeedsHuman,
+  labelNeedsHumanUnlessBeliefOwner,
 } from "./label-guard.mjs";
 
 let orchDir;
@@ -677,5 +679,84 @@ describe("clearStalledLabel — CTL-1078 storm-break", () => {
     writeFileSync(badOrchDir, ""); // this is a FILE, not a dir
     const ws = { removeLabel: () => ({ removed: false, reason: "transient" }) };
     expect(() => clearStalledLabel(badOrchDir, "CTL-S5", "needs-human", ws, { now: () => Date.now() })).not.toThrow();
+  });
+});
+
+// ─── CTL-1241: beliefOwnsNeedsHuman + labelNeedsHumanUnlessBeliefOwner ────────
+describe("beliefOwnsNeedsHuman (CTL-1241)", () => {
+  test("returns true when CATALYST_INTENTS_ENFORCE=1", () => {
+    expect(beliefOwnsNeedsHuman({ CATALYST_INTENTS_ENFORCE: "1" })).toBe(true);
+  });
+
+  test("returns false when CATALYST_INTENTS_ENFORCE is unset", () => {
+    expect(beliefOwnsNeedsHuman({})).toBe(false);
+  });
+
+  test("returns false when CATALYST_INTENTS_ENFORCE=0", () => {
+    expect(beliefOwnsNeedsHuman({ CATALYST_INTENTS_ENFORCE: "0" })).toBe(false);
+  });
+
+  test("returns false for any non-'1' value", () => {
+    expect(beliefOwnsNeedsHuman({ CATALYST_INTENTS_ENFORCE: "true" })).toBe(false);
+    expect(beliefOwnsNeedsHuman({ CATALYST_INTENTS_ENFORCE: "" })).toBe(false);
+  });
+
+  test("defaults to process.env when env is omitted", () => {
+    const prev = process.env.CATALYST_INTENTS_ENFORCE;
+    process.env.CATALYST_INTENTS_ENFORCE = "1";
+    try {
+      expect(beliefOwnsNeedsHuman()).toBe(true);
+    } finally {
+      if (prev === undefined) delete process.env.CATALYST_INTENTS_ENFORCE;
+      else process.env.CATALYST_INTENTS_ENFORCE = prev;
+    }
+  });
+});
+
+describe("labelNeedsHumanUnlessBeliefOwner (CTL-1241)", () => {
+  function makeWS() {
+    const calls = [];
+    return {
+      applyLabel: (args) => { calls.push(args); return { applied: true }; },
+      calls,
+    };
+  }
+
+  test("with enforcement OFF: calls labelOnce (legacy behavior unchanged)", () => {
+    const ws = makeWS();
+    mkdirSync(join(orchDir, "workers", "CTL-1"), { recursive: true });
+    const deferred = [];
+    labelNeedsHumanUnlessBeliefOwner(orchDir, "CTL-1", ws, {
+      env: { CATALYST_INTENTS_ENFORCE: "0" },
+      site: "test-site",
+      log: { info: (obj) => deferred.push(obj) },
+    });
+    expect(ws.calls.length).toBe(1);
+    expect(ws.calls[0]).toMatchObject({ ticket: "CTL-1", label: "needs-human" });
+    expect(deferred.length).toBe(0);
+  });
+
+  test("with enforcement ON: does NOT call labelOnce, records deferral", () => {
+    const ws = makeWS();
+    const deferred = [];
+    labelNeedsHumanUnlessBeliefOwner(orchDir, "CTL-2", ws, {
+      env: { CATALYST_INTENTS_ENFORCE: "1" },
+      site: "test-site",
+      log: { info: (obj, _msg) => deferred.push(obj) },
+    });
+    expect(ws.calls.length).toBe(0); // no labelOnce call
+    expect(deferred.length).toBe(1);
+    expect(deferred[0]).toMatchObject({ ticket: "CTL-2", site: "test-site" });
+  });
+
+  test("with enforcement unset: calls labelOnce (default OFF)", () => {
+    const ws = makeWS();
+    mkdirSync(join(orchDir, "workers", "CTL-3"), { recursive: true });
+    labelNeedsHumanUnlessBeliefOwner(orchDir, "CTL-3", ws, {
+      env: {},
+      site: "test-site",
+      log: { info: () => {} },
+    });
+    expect(ws.calls.length).toBe(1);
   });
 });

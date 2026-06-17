@@ -247,7 +247,7 @@ import { isLinearTerminal, isTicketTerminalOrMerged } from "./terminal-state.mjs
 // labelOnce here would force recovery.mjs → scheduler.mjs to import it, but
 // scheduler.mjs already imports reclaimDeadWorkIfPossible from recovery.mjs —
 // a cycle. label-guard.mjs is the leaf module both can import.
-import { labelOnce, clearStalledLabel } from "./label-guard.mjs";
+import { labelOnce, clearStalledLabel, labelNeedsHumanUnlessBeliefOwner } from "./label-guard.mjs";
 import { processApprovedResumes } from "./boot-resume.mjs"; // CTL-644: per-tick approval poll
 import { countReapOutcomes } from "./reaper-metrics.mjs";
 import {
@@ -1843,9 +1843,9 @@ export function gcDispatchCooldowns(orchDir, eligibleIdentifiers, now) {
 // CTL-713: consecutive-failure escalation. When a (ticket,phase) has failed N
 // times in a row with the same code, apply needs-human via labelOnce and emit
 // cooldown-escalated. labelOnce's .applied marker makes this idempotent.
-export function maybeEscalateDispatchFailures(orchDir, marker, { writeStatus, appendEvent }) {
+export function maybeEscalateDispatchFailures(orchDir, marker, { writeStatus, appendEvent, env = process.env } = {}) {
   if (!marker || marker.consecutiveFailures < DISPATCH_FAILURE_ESCALATION_THRESHOLD) return;
-  labelOnce(orchDir, marker.ticket, "needs-human", writeStatus);
+  labelNeedsHumanUnlessBeliefOwner(orchDir, marker.ticket, writeStatus, { env, site: "dispatch-failures", log });
   appendEvent({
     ticket: marker.ticket,
     orchId: marker.ticket,
@@ -3822,7 +3822,7 @@ export function schedulerTick(
           if (triagedWaiting.includes(member)) {
             cycleMembers.add(member);
             if (fenceGuard({ ticket: member, orchDir, multiHost })) {
-              labelOnce(orchDir, member, "needs-human", writeStatus);
+              labelNeedsHumanUnlessBeliefOwner(orchDir, member, writeStatus, { env, site: "dependency-cycle", log });
             } else {
               log.warn(
                 { ticket: member },
@@ -4527,7 +4527,7 @@ export function schedulerTick(
           // CTL-863 fence: external Linear write — a zombie host that lost its
           // claim must not label after takeover (mirrors the A.5 cycle site).
           if (fenceGuard({ ticket: member, orchDir, multiHost })) {
-            labelOnce(orchDir, member, "needs-human", writeStatus);
+            labelNeedsHumanUnlessBeliefOwner(orchDir, member, writeStatus, { env, site: "ctl-925-cycle", log });
           }
         }
       }
@@ -4910,7 +4910,7 @@ export function schedulerTick(
     const pipelineDone = signals[TERMINAL_PHASE] === "done";
     if ((anyStalled || anyFailed) && !pipelineDone) {
       if (fenceGuard({ ticket, orchDir, multiHost })) {
-        labelOnce(orchDir, ticket, "needs-human", writeStatus);
+        labelNeedsHumanUnlessBeliefOwner(orchDir, ticket, writeStatus, { env, site: "terminal-sweep", log });
       } else {
         log.warn(
           { ticket },

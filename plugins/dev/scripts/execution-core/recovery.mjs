@@ -79,6 +79,7 @@ import {
   labelOnce,
   inEscalationCooldown as defaultInEscalationCooldown,
   recordEscalation as defaultRecordEscalation,
+  labelNeedsHumanUnlessBeliefOwner,
 } from "./label-guard.mjs";
 import { countReviveEvents as defaultCountReviveEvents, hasCompleteEvent } from "./event-scan.mjs";
 
@@ -1278,7 +1279,11 @@ export function defaultReviveDispatch(
 //     the audit-event + label-call pair entirely so the scheduler's own
 //     event-log fast path stops self-feeding.
 function defaultApplyStalledLabel({ orchDir, ticket }) {
-  return labelOnce(orchDir, ticket, "needs-human", { applyLabel: defaultApplyLabel });
+  return labelNeedsHumanUnlessBeliefOwner(orchDir, ticket, { applyLabel: defaultApplyLabel }, {
+    env: process.env,
+    site: "recovery-stalled",
+    log: { info: () => {} },
+  });
 }
 
 // defaultKillBgJob — terminate a dead/abandoned bg worker (CTL-657). Pre-CTL-657
