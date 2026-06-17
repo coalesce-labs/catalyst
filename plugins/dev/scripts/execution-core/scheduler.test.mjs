@@ -4286,6 +4286,193 @@ describe("schedulerTick — label write-back (CTL-558)", () => {
   });
 });
 
+// ── CTL-1242: terminal-sweep needs-human clear for merge-without-teardown ───
+//
+// A ticket that reaches Linear Done / merged-PR WITHOUT teardown completing
+// was being re-flagged needs-human every tick because the anyStalled/anyFailed
+// branch ran before any terminal-or-merged probe. These tests drive the fix:
+// isTicketTerminalOrMerged runs ONLY on the narrow stalled/failed-not-done set
+// and clears (never re-applies) needs-human for terminal/merged tickets.
+//
+// Gateway controls fetchTicketState without any network calls. The fresh
+// timestamp is within the 60 s GATEWAY_STATE_FRESH_MS window.
+
+describe("schedulerTick — terminal-sweep needs-human clear (CTL-1242)", () => {
+  const FRESH = new Date().toISOString(); // within 60 s gateway-fresh window
+
+  const noWrites1242 = () => ({
+    applyPhaseStatus() {},
+    applyTerminalDone() {},
+  });
+
+  // T1: merge-without-teardown + failed signal → clears, never re-applies
+  test("CTL-1242 T1: failed signal + Linear Done → clears needs-human, does not re-apply", () => {
+    const TICKET = "CTL-1242-T1";
+    writeSignal(TICKET, "implement", "failed");
+    // Pre-seed the .applied marker (simulates a prior tick that already applied it)
+    const base = join(orchDir, "workers", TICKET, ".linear-label-needs-human");
+    writeFileSync(`${base}.applied`, "");
+
+    const removed = [];
+    const applied = [];
+    const writeStatus = {
+      ...noWrites1242(),
+      applyLabel: (a) => { applied.push(a); return { applied: true }; },
+      removeLabel: (t, l) => { removed.push({ t, l }); return { removed: true }; },
+    };
+    const gateway = {
+      getDescriptor: (id) =>
+        id === TICKET
+          ? { state: "Done", removed: false, updatedAt: FRESH }
+          : null,
+    };
+
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: fakeDispatch(),
+      writeStatus,
+      gateway,
+    });
+
+    // removeLabel called for needs-human
+    expect(removed.some((r) => r.t === TICKET && r.l === "needs-human")).toBe(true);
+    // applyLabel must NOT have been called for needs-human
+    expect(applied.some((a) => a.ticket === TICKET && a.label === "needs-human")).toBe(false);
+    // marker deleted
+    expect(existsSync(`${base}.applied`)).toBe(false);
+  });
+
+  // T2: merged PR (Linear non-terminal) → clears
+  test("CTL-1242 T2: failed signal + merged PR (Linear non-terminal) → clears needs-human", () => {
+    const TICKET = "CTL-1242-T2";
+    // Seed a failed signal that carries a PR number.
+    // parseSignal stores the full file JSON as signal.raw, so signal.raw.pr
+    // reads the TOP-LEVEL pr field in the file — not a nested raw.pr key.
+    const dir = join(orchDir, "workers", TICKET);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, "phase-implement.json"),
+      JSON.stringify({ ticket: TICKET, phase: "implement", status: "failed", pr: { number: 99 } })
+    );
+    const base = join(orchDir, "workers", TICKET, ".linear-label-needs-human");
+    writeFileSync(`${base}.applied`, "");
+
+    const removed = [];
+    const applied = [];
+    const writeStatus = {
+      ...noWrites1242(),
+      applyLabel: (a) => { applied.push(a); return { applied: true }; },
+      removeLabel: (t, l) => { removed.push({ t, l }); return { removed: true }; },
+    };
+    // Linear state is non-terminal; PR is merged → terminal via pr-merged path
+    const gateway = {
+      getDescriptor: (id) =>
+        id === TICKET
+          ? { state: "In Review", removed: false, updatedAt: FRESH }
+          : null,
+    };
+    const prAdapter = { prView: () => ({ state: "MERGED", mergedAt: "2026-06-17T00:00:00Z" }) };
+
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: fakeDispatch(),
+      writeStatus,
+      gateway,
+      prAdapter,
+    });
+
+    expect(removed.some((r) => r.t === TICKET && r.l === "needs-human")).toBe(true);
+    expect(applied.some((a) => a.ticket === TICKET && a.label === "needs-human")).toBe(false);
+    expect(existsSync(`${base}.applied`)).toBe(false);
+  });
+
+  // T3: non-terminal + stalled signal → still re-applies (regression guard)
+  // (emitOrphanDetectedOnce only fires for stalled phases; failed-only tickets still
+  // apply needs-human but skip the orphan event — use stalled to hit both assertions.)
+  test("CTL-1242 T3: stalled signal + non-terminal Linear + no merged PR → still applies needs-human", () => {
+    const TICKET = "CTL-1242-T3";
+    writeSignal(TICKET, "implement", "stalled");
+
+    const applied = [];
+    const removed = [];
+    const writeStatus = {
+      ...noWrites1242(),
+      applyLabel: (a) => { applied.push(a); return { applied: true }; },
+      removeLabel: (t, l) => { removed.push({ t, l }); return { removed: true }; },
+    };
+    const gateway = {
+      getDescriptor: (id) =>
+        id === TICKET
+          ? { state: "In Progress", removed: false, updatedAt: FRESH }
+          : null,
+    };
+    const orphans = [];
+    const appendOrphanDetectedEvent = (e) => { orphans.push(e); return true; };
+
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: fakeDispatch(),
+      writeStatus,
+      gateway,
+      appendOrphanDetectedEvent,
+    });
+
+    expect(applied.some((a) => a.ticket === TICKET && a.label === "needs-human")).toBe(true);
+    expect(removed.filter((r) => r.t === TICKET && r.l === "needs-human")).toHaveLength(0);
+    expect(orphans.some((o) => o.ticket === TICKET)).toBe(true);
+  });
+
+  // T4: steady-state-zero-writes — no stalled/failed, no marker → zero needs-human writes
+  // (The terminal-or-merged probe only runs inside the anyStalled||anyFailed branch, so a
+  // ticket with only done/running phases must produce zero needs-human label API calls.)
+  test("CTL-1242 T4: no stalled/failed signal → zero needs-human label writes (zero-writes invariant)", () => {
+    const TICKET = "CTL-1242-T4";
+    // Only a done implement signal — no stalled/failed, no teardown (no .terminal-done.applied
+    // marker written, so the reconcile backstop never probes the gateway for this ticket).
+    writeSignal(TICKET, "implement", "done");
+
+    const nhWrites = [];
+    const writeStatus = {
+      ...noWrites1242(),
+      applyLabel: (a) => { if (a.label === "needs-human") nhWrites.push({ kind: "apply", ...a }); return { applied: true }; },
+      removeLabel: (t, l) => { if (l === "needs-human") nhWrites.push({ kind: "remove", t, l }); return { removed: true }; },
+    };
+
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: fakeDispatch(),
+      writeStatus,
+    });
+
+    // Zero needs-human label writes for this non-stalled ticket
+    expect(nhWrites.filter((w) => (w.ticket ?? w.t) === TICKET)).toHaveLength(0);
+  });
+
+  // T5: fail-safe — fetchTicketState returns null + no PR → re-applies (never false clear)
+  test("CTL-1242 T5: fetchTicketState returns null + no PR → fail-safe re-applies needs-human", () => {
+    const TICKET = "CTL-1242-T5";
+    writeSignal(TICKET, "implement", "stalled");
+
+    const applied = [];
+    const writeStatus = {
+      ...noWrites1242(),
+      applyLabel: (a) => { applied.push(a); return { applied: true }; },
+      removeLabel: () => ({ removed: true }),
+    };
+    // gateway returns null → fetchTicketState returns null → non-terminal (D5 fail-safe)
+    const gateway = { getDescriptor: () => null };
+
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: fakeDispatch(),
+      writeStatus,
+      gateway,
+    });
+
+    expect(applied.some((a) => a.ticket === TICKET && a.label === "needs-human")).toBe(true);
+  });
+});
+
 // ── CTL-1079: retraction sweep reads from broker cache instead of live API ──
 // These tests use an exec spy + the real removeLabel (from linear-write.mjs)
 // to verify that gateway cache hits suppress the live `linearis issues read`

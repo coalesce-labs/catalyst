@@ -4932,17 +4932,41 @@ export function schedulerTick(
     // above; never (re)apply for a genuinely-shipped ticket (the Done false positive).
     const pipelineDone = signals[TERMINAL_PHASE] === "done";
     if ((anyStalled || anyFailed) && !pipelineDone) {
-      if (fenceGuard({ ticket, orchDir, multiHost })) {
-        labelNeedsHumanUnlessBeliefOwner(orchDir, ticket, writeStatus, { env, site: "terminal-sweep", log });
+      // CTL-1242: a merged/terminal-Linear ticket that skipped teardown must NOT be
+      // re-flagged needs-human. Cheap-first terminal probe (cached Linear read, then
+      // optional gh PR view) runs ONLY on this narrow stalled/failed-not-done set, so
+      // the steady-state-zero-writes invariant holds.
+      const term = isTicketTerminalOrMerged({
+        ticket,
+        signal: signalByTicket.get(ticket),
+        fetchState: (id, o = {}) => fetchTicketState(id, { ...o, cache, gateway }),
+        cache,
+        prAdapter,
+      });
+      if (term.terminal) {
+        // Terminal/merged but teardown never ran → clear the marker+label instead of
+        // re-applying. Marker-guarded so a no-marker terminal ticket fires zero API calls.
+        const base = join(orchDir, "workers", ticket, ".linear-label-needs-human");
+        if (existsSync(`${base}.applied`) || existsSync(`${base}.skipped`)) {
+          clearStalledLabel(orchDir, ticket, "needs-human", retractionWriteStatus);
+        }
       } else {
-        log.warn(
-          { ticket },
-          "ctl-863: stale fence — suppressing labelOnce(needs-human/failed-or-stalled) write (zombie guard)"
-        );
+        // Non-terminal stalled/failed ticket → apply the belief-aware needs-human
+        // label (CTL-1241: skipped when the belief engine owns the reclaim).
+        if (fenceGuard({ ticket, orchDir, multiHost })) {
+          labelNeedsHumanUnlessBeliefOwner(orchDir, ticket, writeStatus, { env, site: "terminal-sweep", log });
+        } else {
+          log.warn(
+            { ticket },
+            "ctl-863: stale fence — suppressing labelOnce(needs-human/failed-or-stalled) write (zombie guard)"
+          );
+        }
+        // CTL-868 route (B): emit a canonical orphan-detected event (once) so a
+        // non-terminal stalled/failed-no-recovery ticket is visible on the dashboard
+        // (runs regardless of fence, matching main; the terminal branch above is
+        // excluded so a finished ticket is never re-surfaced as an orphan).
+        emitOrphanDetectedOnce(orchDir, ticket, signals, appendOrphanDetectedEvent);
       }
-      // CTL-868 route (B): also emit a canonical orphan-detected event (once) so a
-      // stalled/failed-no-recovery ticket is visible on the dashboard, not just label-flagged.
-      emitOrphanDetectedOnce(orchDir, ticket, signals, appendOrphanDetectedEvent);
     } else {
       // No failed/stalled phase (or pipeline done) → clear the ratchet if the marker exists.
       // Guard on marker presence so a no-stall/no-fail, no-marker tick fires zero
