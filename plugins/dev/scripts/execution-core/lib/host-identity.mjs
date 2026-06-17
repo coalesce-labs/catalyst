@@ -7,7 +7,7 @@
 // Algorithm:
 //   host.name = CATALYST_HOST_NAME  (if set and non-empty)
 //               else catalyst.host.name from Layer-2 config  (if readable and non-empty)
-//               else os.hostname() with trailing ".local" stripped
+//               else os.hostname() reduced to its first DNS label
 //   host.id   = sha256(host.name)[:16]   // 16 hex chars, same shape as spanId
 
 import { createHash } from "node:crypto";
@@ -39,8 +39,12 @@ export function hostName({ raw, override } = {}) {
     const cfg = layer2HostName();
     if (cfg) return cfg;
   }
+  // Fallback only: a bare os.hostname() may be a FQDN (mini.rozich, mini.local).
+  // Canonical host names are short — take the first label. Explicit override /
+  // env / Layer-2 values above are returned verbatim. (CTL-1252)
   const base = raw ?? hostname();
-  return base.replace(/\.local$/, "");
+  const dot = base.indexOf(".");
+  return dot === -1 ? base : base.slice(0, dot);
 }
 
 /**

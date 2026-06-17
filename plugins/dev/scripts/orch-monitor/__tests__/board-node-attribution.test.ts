@@ -89,6 +89,33 @@ test("hostRefFromName derives the canonical sha256(name)[:16] id; null/empty →
   expect(hostRefFromName("")).toBeNull();
 });
 
+// ── Scenario: CTL-1252 — FQDN host names collapse to their first label ───────
+
+test("hostRefFromName collapses a FQDN fence ownerHost to the first label (CTL-1252)", () => {
+  const ref = hostRefFromName("mini.rozich");
+  expect(ref).toEqual({ name: "mini", id: expectedId("mini") });
+});
+
+test("hostRefFromName leaves a short name unchanged", () => {
+  expect(hostRefFromName("mini")?.name).toBe("mini");
+});
+
+test("deriveHost collapses a stale FQDN fence ownerHost (no signal host)", () => {
+  const host = deriveHost(sigs(), { ownerHost: "mini.rozich" });
+  expect(host?.name).toBe("mini");
+});
+
+test("deriveHost collapses a FQDN that slipped into the signal host.name", () => {
+  const s = sigs();
+  s[idx("implement")] = {
+    status: "running",
+    host: { name: "mini.rozich", id: "deadbeefdeadbeef" },
+  };
+  const host = deriveHost(s, {});
+  expect(host?.name).toBe("mini");
+  expect(host?.id).toBe(expectedId("mini"));
+});
+
 // ── Scenario: Generation is available for fence-aware writes ─────────────────
 
 test("deriveGeneration reads the durable fence projection generation first (BFF11)", () => {

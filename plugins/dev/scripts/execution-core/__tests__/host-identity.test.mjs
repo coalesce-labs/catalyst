@@ -45,6 +45,29 @@ describe("hostName", () => {
   test("result has no .local suffix by default", () => {
     expect(hostName()).not.toMatch(/\.local$/);
   });
+
+  test("strips a non-.local domain suffix (mini.rozich → mini)", () => {
+    expect(hostName({ raw: "mini.rozich" })).toBe("mini");
+  });
+
+  test("strips multi-label FQDN to the first label", () => {
+    expect(hostName({ raw: "host.with.many.dots" })).toBe("host");
+  });
+
+  test("explicit override with a dot is returned verbatim (not truncated)", () => {
+    expect(hostName({ raw: "mini.rozich", override: "alias.one" })).toBe("alias.one");
+  });
+
+  test("CATALYST_HOST_NAME with a dot is returned verbatim", () => {
+    const orig = process.env.CATALYST_HOST_NAME;
+    process.env.CATALYST_HOST_NAME = "alias.one";
+    try {
+      expect(hostName({ raw: "mini.rozich" })).toBe("alias.one");
+    } finally {
+      if (orig === undefined) delete process.env.CATALYST_HOST_NAME;
+      else process.env.CATALYST_HOST_NAME = orig;
+    }
+  });
 });
 
 function withLayer2(name, fn) {
