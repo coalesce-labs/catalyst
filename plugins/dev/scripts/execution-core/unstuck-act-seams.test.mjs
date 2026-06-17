@@ -358,6 +358,26 @@ describe("buildSourceConflictActSeam (CTL-1219)", () => {
     expect(gitCalls.some((a) => a.includes("push"))).toBe(false);
   });
 
+  // CTL-1243: hardcoded linearTerminal:false bypasses the guard in classifyCleanRebaseForcePush
+  test("buildSourceConflictActSeam honors candidate.evidence.linearTerminal", () => {
+    const gitCalls = [];
+    const seam = buildSourceConflictActSeam(
+      makeStubDeps({
+        runGit: (args) => {
+          gitCalls.push(args);
+          return { status: 0, stdout: "", stderr: "" };
+        },
+      }),
+    );
+    expect(() =>
+      seam(
+        sourceConflictCandidate({ linearTerminal: true, evidence: { linearTerminal: true, reason: "source_conflict_ctl708_unavailable", ticket: "CTL-2", phase: "implement" } }),
+        { category: "source-conflict", action: "force-push-if-clean" },
+      ),
+    ).toThrow(/linear-terminal/);
+    expect(gitCalls.some((a) => a.includes("push"))).toBe(false);
+  });
+
   test("writes the marker after a successful push", () => {
     const markers = [];
     const seam = buildSourceConflictActSeam(

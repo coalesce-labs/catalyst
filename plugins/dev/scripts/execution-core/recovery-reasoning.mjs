@@ -134,6 +134,13 @@ export function reasoningRecoveryPass(items, opts = {}) {
       continue;
     }
 
+    // CTL-1243: never post the give-up comment on tickets that are already terminal.
+    // Mirrors classifyStalledTicket's linearTerminal skip (unstuck-sweep.mjs:95-97).
+    if (item.evidence?.linearTerminal) {
+      log(`recovery-reasoning: ${item.ticket} skipped (linear-terminal)`);
+      continue;
+    }
+
     // DIAGNOSE: reuse diagnostician evidence. If the caller didn't attach
     // logsOutput, capture it read-only now (claude logs + bg job state). This is
     // a pure collector — no env gate, no side effects (CTL-937 captureEvidence).
@@ -461,6 +468,17 @@ export function checkBoundedLlmFixes(logsOutput, jobState, signal) {
   const logs = String(logsOutput || "").toLowerCase();
   const details = jobState?.detail || "";
   const signalFailure = signal?.failureReason || "";
+
+  // CTL-1243: stalled tickets carry stalledReason, not failureReason. The unstuck-sweep
+  // (STALL_CATEGORY_MAP) routes source_conflict_ctl708_unavailable to force-push-if-clean;
+  // the reasoning pass must classify it as a bounded-LLM FIX so it does NOT fall through
+  // to Rule 3 and post the legacy give-up comment on the same tick.
+  if (signal?.stalledReason === "source_conflict_ctl708_unavailable") {
+    return {
+      reason: "Source conflict (CTL-708 unavailable); agent should rebase and force-push-if-clean",
+      brief: generateRemediateBrief("merge-conflict"),
+    };
+  }
 
   // Bounded-LLM patterns: small fixes that are verifiable via one phase-remediate run.
   //

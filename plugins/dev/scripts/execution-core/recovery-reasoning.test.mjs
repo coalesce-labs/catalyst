@@ -219,6 +219,17 @@ describe("checkBoundedLlmFixes", () => {
     const result = checkBoundedLlmFixes("mysterious error", null, {});
     expect(result).toBeNull();
   });
+
+  // CTL-1243: stalled tickets carry stalledReason, not failureReason
+  test("source_conflict stalledReason → bounded-LLM (not null)", () => {
+    const result = checkBoundedLlmFixes(
+      null,
+      null,
+      { stalledReason: "source_conflict_ctl708_unavailable" },
+    );
+    expect(result).not.toBeNull();
+    expect(result.brief).toContain("git rebase --continue");
+  });
 });
 
 describe("generateRemediateBrief", () => {
@@ -345,6 +356,17 @@ describe("defaultClassifyTicket", () => {
       logsOutput: "push rejected no workflow scope AND stale main",
     });
     expect(result.fix_class).toBe("push_rejected_no_workflow_scope");
+  });
+
+  // CTL-1243: source_conflict stall → decision:fix, fix_class:bounded-llm
+  test("defaultClassifyTicket: source_conflict stall → decision:fix, fix_class:bounded-llm", () => {
+    const result = defaultClassifyTicket({
+      logsOutput: null,
+      jobState: null,
+      signal: { stalledReason: "source_conflict_ctl708_unavailable" },
+    });
+    expect(result.decision).toBe("fix");
+    expect(result.fix_class).toBe("bounded-llm");
   });
 });
 
@@ -524,6 +546,34 @@ describe("reasoningRecoveryPass", () => {
     expect(comments[0]).toContain("CTL-1176 Diagnosis");
     expect(comments[0]).toContain("Decision:");
     expect(comments[0]).toContain("bounded-llm");
+  });
+
+  // CTL-1243: never post the give-up comment on tickets that are already terminal
+  test("linearTerminal:true item is skipped — no comment, no escalation", () => {
+    const posted = [];
+    const events = [];
+    const result = reasoningRecoveryPass(
+      [
+        {
+          ticket: "CTL-999",
+          phase: "implement",
+          evidence: {
+            linearTerminal: true,
+            signal: { stalledReason: "source_conflict_ctl708_unavailable" },
+          },
+        },
+      ],
+      {
+        mode: "enforce",
+        postComment: (t, body) => posted.push({ t, body }),
+        emitEvent: (event) => events.push(event),
+        recordIntent: () => {},
+        invokeRemediateCapped: () => ({ success: true, reason: "fixed", details: {} }),
+      },
+    );
+    expect(posted.length).toBe(0);
+    const r = result.results.find((r) => r.ticket === "CTL-999");
+    expect(r?.decision).not.toBe("escalate");
   });
 });
 
