@@ -7,9 +7,11 @@ import {
   buildAllGlyphItems,
   filterPickerItems,
   resolveActiveIconLabel,
+  resolveAllIconsViewState,
 } from "./icon-picker-model";
 import type { IconCandidate } from "@/lib/repo-icons";
 import { PHOSPHOR_GLYPH_NAMES } from "@/lib/project-glyph-set";
+import { enumeratePhosphorGlyphNames } from "@/lib/phosphor-icons";
 
 const CANDS: IconCandidate[] = [
   { path: "public/favicon.svg", format: "svg", downloadUrl: "u1", dataUrl: "data:svg" },
@@ -122,5 +124,32 @@ describe("resolveActiveIconLabel", () => {
   it("returns a favicon label for a path string", () => {
     const label = resolveActiveIconLabel("public/favicon.svg");
     expect(label).toContain("favicon");
+  });
+});
+
+describe("resolveAllIconsViewState", () => {
+  it("'error' when the name index is empty (codegen/load failure)", () => {
+    expect(resolveAllIconsViewState({ namesEmpty: true, queryActive: true, filteredCount: 0 })).toBe("error");
+  });
+  it("'no-matches' when index ready, query active, zero matches", () => {
+    expect(resolveAllIconsViewState({ namesEmpty: false, queryActive: true, filteredCount: 0 })).toBe("no-matches");
+  });
+  it("'results' when there are matches", () => {
+    expect(resolveAllIconsViewState({ namesEmpty: false, queryActive: true, filteredCount: 5 })).toBe("results");
+  });
+  it("'results' for empty query (full list shown)", () => {
+    expect(resolveAllIconsViewState({ namesEmpty: false, queryActive: false, filteredCount: 1500 })).toBe("results");
+  });
+  it("error precedence over no-matches", () => {
+    expect(resolveAllIconsViewState({ namesEmpty: true, queryActive: true, filteredCount: 0 })).toBe("error");
+  });
+});
+
+describe("full-library search over the static index", () => {
+  it("builds the full non-featured set and finds 'fire' across the FULL library", () => {
+    const all = buildAllGlyphItems(enumeratePhosphorGlyphNames());
+    const hits = filterPickerItems(all, "fire");
+    expect(hits.length).toBeGreaterThan(0);
+    expect(hits.some((i) => i.name === "fire")).toBe(true);
   });
 });

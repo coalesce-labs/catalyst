@@ -130,14 +130,6 @@ export function useGlyphLoad(name: string): GlyphLoadState {
   );
 }
 
-// --- Phase-2 compat shims (REMOVED in Phase 3). Names are eager now, so "loaded" is always true. ---
-export function loadPhosphorRegistry(): Promise<readonly string[]> {
-  return Promise.resolve(PHOSPHOR_ICON_NAMES);
-}
-export function usePhosphorRegistry(): boolean {
-  return true;
-}
-
 // --- test hooks (bun shares module state across files) ---
 export function __setGlyphImporters(map: ImporterMap | null): void {
   _importers = map;
