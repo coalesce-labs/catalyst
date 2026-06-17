@@ -13,7 +13,8 @@
     "check": "bun run typecheck && bun run lint && bun run knip && bun audit && bun test",
     "build:ui": "cd ui && bun run build",
     "dev:ui": "cd ui && bun run dev",
-    "audit:gen": "bun run bin/gen-attribute-audit.ts"
+    "audit:gen": "bun run bin/gen-attribute-audit.ts",
+    "gen:icons": "bun run bin/gen-phosphor-icons.ts"
   },
   "dependencies": {
     "ink": "^5.2.1",

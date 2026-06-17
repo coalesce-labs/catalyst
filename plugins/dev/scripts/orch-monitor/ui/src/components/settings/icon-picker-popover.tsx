@@ -1,8 +1,11 @@
-// icon-picker-popover.tsx — searchable glyph+favicon picker for Project Settings (CTL-1208, CTL-1226, CTL-1233).
-// CTL-1233: lazy-loads the full Phosphor set on popover open, virtualizes the All-icons grid with
-// @tanstack/react-virtual to eliminate typing lag. Featured grid remains cmdk CommandItem-based
-// (small, keyboard-navigable). All-icons uses plain buttons (GlyphGridButton) to avoid cmdk
-// item-registration overhead on mount/unmount.
+// icon-picker-popover.tsx — searchable glyph+favicon picker for Project Settings (CTL-1208, CTL-1226, CTL-1233, CTL-1249).
+// CTL-1249: the searchable name index is a committed static array, so the All-icons grid renders
+// instantly (no chunk gate) and full-library search is zero-network; per-glyph chunks load only for
+// the visible virtualized cells. The All-icons body branches via the pure resolveAllIconsViewState
+// state machine (error/no-matches/results) — never an indefinite "Loading icons…".
+// CTL-1233: virtualizes the All-icons grid with @tanstack/react-virtual to eliminate typing lag.
+// Featured grid remains cmdk CommandItem-based (small, keyboard-navigable). All-icons uses plain
+// buttons (GlyphGridButton) to avoid cmdk item-registration overhead on mount/unmount.
 import { useState, useMemo, useRef, useCallback } from "react";
 import { ChevronDownIcon } from "lucide-react";
 import { useDebounce } from "@uidotdev/usehooks";
@@ -24,16 +27,13 @@ import {
 } from "@/components/ui/command";
 import { NAMED_COLORS } from "@/lib/color-palette";
 import { ProjectMarkIcon } from "@/components/project-mark-icon";
-import {
-  loadPhosphorRegistry,
-  usePhosphorRegistry,
-  enumeratePhosphorGlyphNames,
-} from "@/lib/phosphor-icons";
+import { enumeratePhosphorGlyphNames } from "@/lib/phosphor-icons";
 import {
   buildBasePickerItems,
   buildAllGlyphItems,
   filterPickerItems,
   resolveActiveIconLabel,
+  resolveAllIconsViewState,
 } from "./icon-picker-model";
 import type { IconPickerItem } from "./icon-picker-model";
 import type { IconCandidate } from "@/lib/repo-icons";
@@ -174,12 +174,9 @@ export function IconPickerPopover({ value, onChange, candidates, hue }: IconPick
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
   const debouncedQuery = useDebounce(query, 80);
-  const phosphorLoaded = usePhosphorRegistry();
 
-  // Load the full Phosphor set when popover opens (memoized — won't re-fetch).
   const handleOpenChange = useCallback((next: boolean) => {
     setOpen(next);
-    if (next) void loadPhosphorRegistry();
   }, []);
 
   const accentColor = (hue && NAMED_COLORS[hue]?.text) || "currentColor";
@@ -188,11 +185,8 @@ export function IconPickerPopover({ value, onChange, candidates, hue }: IconPick
   // Base items (Auto + favicons + featured) — memoized on candidates (stable ref).
   const baseItems = useMemo(() => buildBasePickerItems(candidates), [candidates]);
 
-  // All non-featured items — memoized on phosphorLoaded to rebuild once after load.
-  const allGlyphItems = useMemo(
-    () => (phosphorLoaded ? buildAllGlyphItems(enumeratePhosphorGlyphNames()) : []),
-    [phosphorLoaded],
-  );
+  // All non-featured items — built eagerly from the committed static index (no chunk gate).
+  const allGlyphItems = useMemo(() => buildAllGlyphItems(enumeratePhosphorGlyphNames()), []);
 
   // Filtered views.
   const filteredBase = useMemo(
@@ -329,18 +323,29 @@ export function IconPickerPopover({ value, onChange, candidates, hue }: IconPick
             {/* All icons — virtualized; plain buttons (not cmdk items) */}
             <CommandSeparator />
             <CommandGroup heading="All icons">
-              {!phosphorLoaded ? (
-                <p className="py-4 text-center text-xs text-muted">Loading icons…</p>
-              ) : filteredAll.length === 0 && debouncedQuery.trim() ? (
-                <p className="py-2 text-center text-xs text-muted">No matching icons.</p>
-              ) : (
-                <VirtualGlyphGrid
-                  items={filteredAll}
-                  accentColor={accentColor}
-                  currentValue={value}
-                  onSelect={handleSelect}
-                />
-              )}
+              {(() => {
+                const state = resolveAllIconsViewState({
+                  namesEmpty: enumeratePhosphorGlyphNames().length === 0,
+                  queryActive: Boolean(debouncedQuery.trim()),
+                  filteredCount: filteredAll.length,
+                });
+                if (state === "error")
+                  return (
+                    <p role="alert" className="py-4 text-center text-xs text-muted">
+                      Couldn&apos;t load icons.
+                    </p>
+                  );
+                if (state === "no-matches")
+                  return <p className="py-2 text-center text-xs text-muted">No matching icons.</p>;
+                return (
+                  <VirtualGlyphGrid
+                    items={filteredAll}
+                    accentColor={accentColor}
+                    currentValue={value}
+                    onSelect={handleSelect}
+                  />
+                );
+              })()}
             </CommandGroup>
           </CommandList>
         </Command>

@@ -26,6 +26,7 @@ const config: KnipConfig = {
         "analyze-events.ts",
         "cli/hud.tsx",
         "bin/gen-attribute-audit.ts",
+        "bin/gen-phosphor-icons.ts",
       ],
       project: ["**/*.{ts,tsx}", "!ui/**", "!public/**"],
     },

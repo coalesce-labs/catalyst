@@ -1,8 +1,9 @@
 // project-mark-icon.tsx — renders a ProjectMark as a tinted Phosphor glyph or favicon
-// img. Used on cards, lane headers, and the sidebar (CTL-1208, CTL-1233).
-// CTL-1233: subscribes to the async Phosphor load so non-featured glyphs pop in
-// once the chunk arrives; featured glyphs render synchronously (SSR-safe).
-import { resolvePhosphorIcon, loadPhosphorRegistry, usePhosphorRegistry } from "@/lib/phosphor-icons";
+// img. Used on cards, lane headers, and the sidebar (CTL-1208, CTL-1233, CTL-1249).
+// CTL-1249: featured glyphs render synchronously (SSR-safe); non-featured glyphs render a
+// neutral placeholder while their per-glyph chunk loads (and on miss/error — fail-open), then
+// re-render as the resolved component. Each non-featured glyph pulls only its own ~6-12 KB chunk.
+import { resolvePhosphorIcon, loadGlyph, useGlyphLoad } from "@/lib/phosphor-icons";
 import type { ProjectMark } from "@/lib/project-mark";
 
 interface ProjectMarkIconProps {
@@ -12,33 +13,51 @@ interface ProjectMarkIconProps {
   size?: number;
 }
 
+/** Neutral square placeholder shown while a non-featured glyph's chunk loads (or on miss/error). */
+function GlyphPlaceholder({ size }: { size: number }) {
+  return (
+    <span
+      data-glyph-placeholder
+      aria-hidden
+      style={{
+        width: size,
+        height: size,
+        display: "block",
+        flex: "0 0 auto",
+        borderRadius: 3,
+        background: "var(--s2, rgba(127,127,127,0.12))",
+      }}
+    />
+  );
+}
+
 /**
  * Render the resolved ProjectMark for a repo:
- *  - glyph → Phosphor fill-weight SVG tinted in `color`
+ *  - glyph → Phosphor fill-weight SVG tinted in `color` (featured: sync; non-featured: lazy)
  *  - favicon → <img> with the existing border-radius / object-contain style
  *  - none → null (caller falls back to its dot / ActivityDot)
  *
- * For non-featured glyphs: returns null until the full Phosphor chunk loads, then
- * re-renders with the component (fail-open — same as the pre-CTL-1233 "unknown glyph → null").
+ * Non-featured glyphs render a neutral placeholder until their per-glyph chunk resolves; a
+ * miss/error keeps the placeholder (fail-open) rather than hanging.
  */
 export function ProjectMarkIcon({ mark, color, size = 14 }: ProjectMarkIconProps) {
-  usePhosphorRegistry(); // re-render when the full set finishes loading
+  const glyphName = mark.kind === "glyph" ? mark.name : "";
+  const state = useGlyphLoad(glyphName); // unconditional hook (rules-of-hooks safe)
   if (mark.kind === "glyph") {
     const G = resolvePhosphorIcon(mark.name);
-    if (!G) {
-      // Non-featured & not yet loaded: trigger load, render nothing this paint.
-      void loadPhosphorRegistry();
-      return null;
+    if (state === "ready" && G) {
+      return (
+        <G
+          weight="fill"
+          color={color}
+          size={size}
+          aria-hidden
+          style={{ flex: "0 0 auto", display: "block" }}
+        />
+      );
     }
-    return (
-      <G
-        weight="fill"
-        color={color}
-        size={size}
-        aria-hidden
-        style={{ flex: "0 0 auto", display: "block" }}
-      />
-    );
+    if (state === "idle") void loadGlyph(mark.name); // trigger once; loading/missing/error → placeholder
+    return <GlyphPlaceholder size={size} />;
   }
   if (mark.kind === "favicon") {
     return (

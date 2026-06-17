@@ -70,9 +70,9 @@ export function buildBasePickerItems(candidates: readonly IconCandidate[]): Icon
 const FEATURED_SET = new Set(PHOSPHOR_GLYPH_NAMES);
 
 /**
- * Build non-featured glyph items from the full loaded name list.
- * Filters out featured names to avoid duplicates; preserves the sorted order from the loader.
- * Pass the result of enumeratePhosphorGlyphNames() after loadPhosphorRegistry() resolves.
+ * Build non-featured glyph items from the full name list.
+ * Filters out featured names to avoid duplicates; preserves the sorted order of the input.
+ * Pass the committed static index via enumeratePhosphorGlyphNames() (CTL-1249) — no load needed.
  */
 export function buildAllGlyphItems(allNames: readonly string[]): IconPickerItem[] {
   return allNames
@@ -100,6 +100,22 @@ export function filterPickerItems(
   return items.filter(
     (i) => i.searchKey.toLowerCase().includes(q) || i.label.toLowerCase().includes(q),
   );
+}
+
+/**
+ * Resolve which "All icons" view to render (CTL-1249). Pure state machine so the affordance
+ * is unit-testable without jsdom. Precedence: empty index → "error" (Couldn't load icons.);
+ * active query with zero matches → "no-matches"; otherwise → "results" (the virtualized grid).
+ */
+export type AllIconsViewState = "error" | "no-matches" | "results";
+export function resolveAllIconsViewState(input: {
+  namesEmpty: boolean;
+  queryActive: boolean;
+  filteredCount: number;
+}): AllIconsViewState {
+  if (input.namesEmpty) return "error";
+  if (input.queryActive && input.filteredCount === 0) return "no-matches";
+  return "results";
 }
 
 /** Return a short label for the picker trigger button based on the current value. */
