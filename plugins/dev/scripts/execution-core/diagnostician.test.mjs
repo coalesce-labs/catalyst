@@ -28,6 +28,7 @@ import {
   processDiagnosticianWakes,
   __resetDiagnosticianForTests,
 } from "./diagnostician.mjs";
+import { ownedBy } from "./hrw.mjs"; // CTL-1191: HRW ownership for the diagnostician gate test
 
 // ── frozen time ───────────────────────────────────────────────────────────
 const NOW = 1781030108000; // 2026-06-09T18:35:08Z
@@ -570,5 +571,101 @@ describe("multiple subjects in one tick", () => {
     // CTL-B/implement processed on tickId
     expect(result.ran).toHaveLength(1);
     expect(result.ran[0].subject).toBe("CTL-B/implement");
+  });
+});
+
+// ── CTL-1191: HRW ownership gate (multi-host) ───────────────────────────────
+//
+// On a multi-host cluster the diagnostician must only diagnose + escalate the
+// stalled subjects THIS node owns by HRW — otherwise two nodes both capture
+// evidence and double-page needs-human for the same ticket. The caller (runTick)
+// injects ownsSubject; here we drive it directly. Under roster
+// ["mini","mac-studio"]: CTL-A is owned by mini, CTL-B by mac-studio.
+describe("CTL-1191 — HRW ownership gate (ownsSubject)", () => {
+  const ROSTER = ["mini", "mac-studio"];
+  // Build the same predicate the scheduler builds: own a subject iff this host
+  // is its HRW owner over the (surviving) roster.
+  const ownsSubjectFor = (survivors, self) => (subject) =>
+    survivors.length <= 1 || ownedBy(String(subject).split("/")[0], survivors, self);
+
+  test("default (no ownsSubject) is an EXACT no-op — every owned subject runs", () => {
+    const { tickId } = seedNeverStartedTick({ ticket: "CTL-A", phase: "plan" });
+    const result = processDiagnosticianWakes(db, tickId, {
+      env: { CATALYST_DIAGNOSTICIAN: "1" },
+      captureLogs: fakeCaptureLogs,
+      readJobState: fakeReadJobState,
+      // intentionally NO ownsSubject — must behave exactly as before CTL-1191
+    });
+    expect(result.ran).toHaveLength(1);
+    expect(result.ran[0].subject).toBe("CTL-A/plan");
+    expect(result.skippedNotOwned).toBeUndefined(); // return shape unchanged
+  });
+
+  test("multi-host: a subject this node owns is diagnosed; one another node owns is SKIPPED", () => {
+    // Two stuck workers on one tick: CTL-A (owned by mini), CTL-B (owned by mac-studio).
+    const tickId = insertTick(NOW);
+    insertSignal(tickId, {
+      ticket: "CTL-A",
+      phase: "plan",
+      bg_job_id: "aaashort",
+      started_at_ms: NOW - 10 * MIN,
+      updated_at_ms: NOW - 10 * MIN,
+    });
+    insertAgent(tickId, { session_id: "aaashort-sess", short_id: "aaashort", kind: "background" });
+    insertJob(tickId, { bg_job_id: "aaashort", state: "working", tempo: "blocked" });
+    insertSignal(tickId, {
+      ticket: "CTL-B",
+      phase: "implement",
+      bg_job_id: "bbbshort",
+      started_at_ms: NOW - 10 * MIN,
+      updated_at_ms: NOW - 10 * MIN,
+    });
+    insertAgent(tickId, { session_id: "bbbshort-sess", short_id: "bbbshort", kind: "background" });
+    insertJob(tickId, { bg_job_id: "bbbshort", state: "working", tempo: "blocked" });
+    evaluateBeliefs(db, tickId);
+
+    const result = processDiagnosticianWakes(db, tickId, {
+      env: { CATALYST_DIAGNOSTICIAN: "1" },
+      captureLogs: fakeCaptureLogs,
+      readJobState: fakeReadJobState,
+      ownsSubject: ownsSubjectFor(ROSTER, "mini"), // this host = mini
+    });
+
+    // Only the mini-owned subject ran; the mac-studio-owned one was skipped
+    // BEFORE any evidence capture / escalation.
+    expect(result.ran.map((r) => r.subject)).toEqual(["CTL-A/plan"]);
+    expect(result.skippedNotOwned).toEqual(["CTL-B/implement"]);
+  });
+
+  test("dead-owner failover: when the owning node is dead, the survivor diagnoses its subject", () => {
+    // CTL-B is owned by mac-studio in the full roster. mac-studio is DEAD, so
+    // the surviving roster is just [mini] — under which mini owns CTL-B and must
+    // pick up its diagnosis instead of it stranding.
+    const tickId = insertTick(NOW);
+    insertSignal(tickId, {
+      ticket: "CTL-B",
+      phase: "implement",
+      bg_job_id: "bbbshort",
+      started_at_ms: NOW - 10 * MIN,
+      updated_at_ms: NOW - 10 * MIN,
+    });
+    insertAgent(tickId, { session_id: "bbbshort-sess", short_id: "bbbshort", kind: "background" });
+    insertJob(tickId, { bg_job_id: "bbbshort", state: "working", tempo: "blocked" });
+    evaluateBeliefs(db, tickId);
+
+    // Sanity: in the FULL roster mini would NOT own CTL-B (so without failover
+    // this subject would strand on a dead owner).
+    expect(ownedBy("CTL-B", ROSTER, "mini")).toBe(false);
+
+    const survivors = ["mini"]; // mac-studio dead
+    const result = processDiagnosticianWakes(db, tickId, {
+      env: { CATALYST_DIAGNOSTICIAN: "1" },
+      captureLogs: fakeCaptureLogs,
+      readJobState: fakeReadJobState,
+      ownsSubject: ownsSubjectFor(survivors, "mini"),
+    });
+
+    expect(result.ran.map((r) => r.subject)).toEqual(["CTL-B/implement"]);
+    expect(result.skippedNotOwned).toBeUndefined();
   });
 });

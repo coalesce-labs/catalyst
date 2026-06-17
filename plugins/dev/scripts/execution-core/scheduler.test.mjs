@@ -8771,6 +8771,179 @@ describe("CTL-850 — HRW ownership + claim-on-dispatch (schedulerTick new-work)
   });
 });
 
+// ── CTL-1191: HRW-gate the recovery passes over the surviving roster ──────────
+//
+// The recovery passes (Pass 0u unstuck-sweep, Pass 0r reasoning, diagnostician)
+// classify-then-ACT over the stalled backlog. Before CTL-1191 they had NO
+// ownership gate, so a 2-node cluster double-acted on every stalled ticket. These
+// tests drive Pass 0u (the cleanest injectable seam) to assert:
+//   • N=1 is a STRICT no-op (every candidate acted — would break live mini if not)
+//   • N=2 acts ONLY on the candidates THIS node owns by HRW
+//   • a DEAD owner's candidates fail over to the surviving owner (gate hashes over
+//     the SURVIVING roster, not the raw roster)
+describe("CTL-1191 — recovery passes HRW-gated over the surviving roster (Pass 0u)", () => {
+  const ROSTER = ["mini", "mac-studio"];
+  // CTL-A → mini, CTL-B → mac-studio (deterministic under this roster).
+  const T_MINI = "CTL-A";
+  const T_STUDIO = "CTL-B";
+  // Sanity-anchor the fixtures to the real HRW math so the test can't silently
+  // drift if hrw.mjs changes.
+  expect(ownerForTicket(T_MINI, ROSTER)).toBe("mini");
+  expect(ownerForTicket(T_STUDIO, ROSTER)).toBe("mac-studio");
+
+  // Two stalled candidates with empty evidence → classifyStalledTicket returns
+  // { category:"unknown", action:"escalate" }, so each fires the escalate seam.
+  const twoCandidates = () => [
+    { ticket: T_MINI, phase: "implement", evidence: {} },
+    { ticket: T_STUDIO, phase: "implement", evidence: {} },
+  ];
+  // Recorder for the escalate seam: captures every ticket it was called for.
+  const recordEscalate = () => {
+    const tickets = [];
+    const fn = (c) => tickets.push(c.ticket);
+    fn.tickets = tickets;
+    return fn;
+  };
+  // unstuckSweep opts that force the pass to RUN (intervalMs:0 defeats the
+  // per-run throttle regardless of module-global carryover) with a recorder.
+  const unstuckOpts = (escalate) => ({
+    mode: "enforce",
+    intervalMs: 0,
+    nowMs: () => 9_000_000,
+    collectCandidates: twoCandidates,
+    escalate,
+    emit: () => true, // swallow events
+    postComment: () => {},
+  });
+
+  test("single-host roster is a STRICT no-op: BOTH stalled candidates are acted on", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    const escalate = recordEscalate();
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: fakeDispatch({ code: 0 }),
+      hosts: ["solo"],
+      hostName: "solo",
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0,
+      now: () => 9_000_000,
+      unstuckSweep: unstuckOpts(escalate),
+    });
+    expect(escalate.tickets.sort()).toEqual([T_MINI, T_STUDIO].sort());
+  });
+
+  test("multi-host: only the candidate THIS node owns by HRW is acted on", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    const escalate = recordEscalate();
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: fakeDispatch({ code: 0 }),
+      hosts: ROSTER,
+      hostName: "mini",
+      // Both hosts alive → survivors = full roster. mini owns only CTL-A.
+      recoverySurvivingRoster: ROSTER,
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0,
+      now: () => 9_000_000,
+      unstuckSweep: unstuckOpts(escalate),
+    });
+    expect(escalate.tickets).toEqual([T_MINI]); // CTL-B (mac-studio's) filtered out
+  });
+
+  test("dead-owner failover: a dead node's stalled candidate fails over to the survivor", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    const escalate = recordEscalate();
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: fakeDispatch({ code: 0 }),
+      hosts: ROSTER,
+      hostName: "mini",
+      // mac-studio is DEAD → survivors = [mini]. Under [mini], mini owns BOTH
+      // tickets (HRW over a 1-host survivor set is an identity), so the
+      // mac-studio-owned CTL-B fails over to mini instead of stranding.
+      recoverySurvivingRoster: ["mini"],
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0,
+      now: () => 9_000_000,
+      unstuckSweep: unstuckOpts(escalate),
+    });
+    expect(escalate.tickets.sort()).toEqual([T_MINI, T_STUDIO].sort());
+  });
+
+  test("multi-host: the OTHER node acts on the complementary candidate (no ticket stranded)", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    const escalate = recordEscalate();
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: fakeDispatch({ code: 0 }),
+      hosts: ROSTER,
+      hostName: "mac-studio", // the other node
+      recoverySurvivingRoster: ROSTER,
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0,
+      now: () => 9_000_000,
+      unstuckSweep: unstuckOpts(escalate),
+    });
+    // Across the two nodes (this test + the owned-only test) every candidate is
+    // covered exactly once — mac-studio handles CTL-B.
+    expect(escalate.tickets).toEqual([T_STUDIO]);
+  });
+});
+
+// ── CTL-1191: Pass 0r reasoning — terminal-state filter (PR #2163 verify flag) ──
+//
+// The reasoning pass must NOT reason over a ticket already finished (terminal
+// Linear state / merged PR) — doing so burns cooldown + re-posts diagnoses on a
+// Done ticket. The pass writes a per-ticket marker under .recovery-intents/ for
+// every item it processes (shadow mode), so the marker's presence/absence is the
+// observable. Single-host so the ownership gate is identity (we isolate the
+// terminal filter). A gateway descriptor supplies the Linear state without any
+// network — "Done" ⇒ terminal ⇒ filtered; "In Progress" ⇒ kept.
+describe("CTL-1191 — reasoning pass skips terminal tickets (Pass 0r terminal-state filter)", () => {
+  const recoveryIntentMarker = (ticket) =>
+    join(orchDir, ".recovery-intents", `${ticket}.json`);
+
+  test("a Done ticket is filtered out; an in-flight stalled ticket is processed", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    // Two stalled workers: CTL-DONE (Linear=Done) and CTL-LIVE (Linear=In Progress).
+    writeSignal("CTL-DONE", "implement", "stalled");
+    writeSignal("CTL-LIVE", "implement", "stalled");
+
+    const fresh = new Date().toISOString(); // within the 60s gateway-fresh window
+    const gateway = {
+      getDescriptor: (id) => {
+        if (id === "CTL-DONE") return { state: "Done", removed: false, updatedAt: fresh };
+        if (id === "CTL-LIVE") return { state: "In Progress", removed: false, updatedAt: fresh };
+        return null;
+      },
+    };
+
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: fakeDispatch({ code: 0 }),
+      hosts: ["solo"],
+      hostName: "solo",
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0,
+      now: () => 9_000_000,
+      gateway,
+      // No-op the Linear write seam so the stalled-signal terminal sweep doesn't
+      // shell out to `linearis` (unrelated to the filter under test).
+      writeStatus: {
+        applyPhaseStatus: () => {},
+        applyTerminalDone: () => {},
+        applyLabel: () => ({ applied: true }),
+      },
+      recoveryPass: { mode: "shadow" }, // shadow still writes the cooldown marker
+    });
+
+    // The in-flight ticket was reasoned over (marker written); the Done ticket
+    // was filtered BEFORE the pass (no marker — never processed).
+    expect(existsSync(recoveryIntentMarker("CTL-LIVE"))).toBe(true);
+    expect(existsSync(recoveryIntentMarker("CTL-DONE"))).toBe(false);
+  });
+});
+
 // ── CTL-864 remediation: advancement + revive sweeps re-inject the fence token ──
 //
 // The HIGH verify finding: the 5 guarded skills run as LATER phases dispatched by
