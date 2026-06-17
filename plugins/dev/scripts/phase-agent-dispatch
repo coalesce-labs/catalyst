@@ -282,8 +282,17 @@ config_value() {
 # because all three values are required by the time this runs. The caller
 # still guards on `-n` to remain defensive against future helper changes.
 compose_otel_resource_attrs() {
-	local project_key worker_wt worker_branch attrs
+	local project_key worker_wt worker_branch attrs host_attr
 	project_key="$(config_value '.catalyst.projectKey' '')"
+
+	# CTL-1237: stamp the canonical host identity so bg-worker claude_code metrics
+	# carry host.name (→ host_name=mini/mini-2 in Prometheus), not null. The daemon
+	# neutralizes OTEL attrs at startup (CTL-635) and this composition replaces the
+	# settings.json pin for the worker, so without this the per-host claude_code
+	# dashboards are blank for bg workers (interactive sessions are unaffected).
+	host_attr=""
+	local _hn; _hn="$(catalyst_host_name 2>/dev/null || true)"
+	[[ -n $_hn ]] && host_attr="host.name=${_hn},"
 
 	worker_branch=""
 	if [[ -n $project_key ]]; then
@@ -308,10 +317,10 @@ compose_otel_resource_attrs() {
 	fi
 
 	if [[ -n $project_key ]]; then
-		attrs="project=${project_key},linear.key=${TICKET},catalyst.orchestration=${ORCH_ID}"
+		attrs="${host_attr}project=${project_key},linear.key=${TICKET},catalyst.orchestration=${ORCH_ID}"
 		[[ -n $worker_branch ]] && attrs="${attrs},branch=${worker_branch}"
 	else
-		attrs="linear.key=${TICKET},catalyst.orchestration=${ORCH_ID}"
+		attrs="${host_attr}linear.key=${TICKET},catalyst.orchestration=${ORCH_ID}"
 	fi
 	attrs="${attrs},task.type=phase-${PHASE}"
 	# CTL-760: launch-mode dimension. Rides OTEL_RES_ATTRS → the --settings env →
