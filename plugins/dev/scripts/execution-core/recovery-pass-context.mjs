@@ -10,7 +10,11 @@
 //                    If the brief is missing, fall through to a ticket-scoped
 //                    sweep so the agent still has something to act on.
 // MODE=sweep       → no ticket. Enumerate the stuck set from THREE local sources,
-//                    dedupe by ticket key, HRW-filter to this host, and print.
+//                    dedupe by ticket key, and print. HRW is a SOFT owner-signal
+//                    here, NOT a hard filter: items are KEPT and ANNOTATED YOURS
+//                    (you own it — act) vs CONTEXT (another host owns it — awareness
+//                    only; a sibling you don't own may explain your conflict). At
+//                    N=1 every item is YOURS (identity).
 //
 // The three sweep sources (union, dedupe by ticket key):
 //   1. Worker signals    — ${ORCH_DIR}/workers/*/phase-*.json, status ∈
@@ -25,10 +29,10 @@
 // Run under bun (broker-state uses bun:sqlite). Under node, source 3 degrades to
 // "(linear cache unavailable under this runtime)" and the other two still run.
 
-import { readFileSync, readdirSync, existsSync, statSync } from "node:fs";
-import { join, basename, dirname } from "node:path";
+import { readFileSync, readdirSync, existsSync } from "node:fs";
+import { join } from "node:path";
 
-import { ownedBy } from "./hrw.mjs";
+import { ownerForTicket } from "./hrw.mjs";
 import { getClusterHosts, getHostName } from "./config.mjs";
 
 // ── arg parsing ──────────────────────────────────────────────────────────────
@@ -223,13 +227,18 @@ function unionDedupe(...lists) {
 }
 
 // ── output formatting ─────────────────────────────────────────────────────────
-function formatSweepItem(item) {
+// `tag` is "YOURS" (act on it) or "CONTEXT" (another host owns it — awareness
+// only). For CONTEXT items the owning host is annotated. Plain "STUCK …" (no
+// tag) is used in the ticket-scoped fall-through where ownership is moot.
+function formatSweepItem(item, tag) {
   const parts = [];
   if (item.signalStatus) parts.push(`signal-status=${item.signalStatus}`);
   if (item.linearState && item.linearState !== "-") parts.push(`linear-state=${item.linearState}`);
   if (item.labels && item.labels.length) parts.push(`labels=${item.labels.join(",")}`);
+  if (tag === "CONTEXT" && item.owner) parts.push(`owner=${item.owner}`);
   parts.push(`source=${[...item.sources].sort().join("/")}`);
-  return `STUCK ${item.ticket} [${parts.join(" | ")}] reason=${item.reason || "-"}`;
+  const prefix = tag ? `STUCK ${tag}` : "STUCK";
+  return `${prefix} ${item.ticket} [${parts.join(" | ")}] reason=${item.reason || "-"}`;
 }
 
 function printDispatchedBrief(ticket, orchDir) {
@@ -309,25 +318,34 @@ async function main() {
     console.log("(linear cache unavailable under this runtime)");
   }
 
-  let union = unionDedupe(signals, events, cache.items);
+  const union = unionDedupe(signals, events, cache.items);
 
-  // HRW filter — identity at N=1. Drop tickets this host does not own.
-  let dropped = 0;
-  if (multiHost) {
-    const before = union.length;
-    union = union.filter((it) => ownedBy(it.ticket, roster, self));
-    dropped = before - union.length;
+  // HRW is a SOFT owner-signal, NOT a hard filter (a sibling ticket you don't own
+  // may explain YOUR conflict). KEEP the whole stuck set; ANNOTATE each item with
+  // its owner + whether it's mine. At N=1 every item is mine (identity).
+  for (const it of union) {
+    it.owner = ownerForTicket(it.ticket, roster);
+    it.mine = !multiHost || it.owner === self;
   }
-
   union.sort((a, b) => a.ticket.localeCompare(b.ticket));
-  for (const it of union) console.log(formatSweepItem(it));
 
-  if (multiHost && dropped > 0) {
+  const yours = union.filter((it) => it.mine);
+  const context = union.filter((it) => !it.mine);
+
+  // YOURS first — these are the items to act on.
+  for (const it of yours) console.log(formatSweepItem(it, "YOURS"));
+
+  // CONTEXT group — only when multiHost and there are non-owned items. Awareness
+  // only; another host owns these. Do NOT act on them (avoid cross-host
+  // double-action) — they may explain a conflict or dependency in YOUR items.
+  if (multiHost && context.length > 0) {
     console.log(
-      `(HRW: dropped ${dropped} item(s) owned by another host; roster=${roster.join(",")} self=${self})`
+      `--- CONTEXT (owned by another host — awareness only, do NOT act; roster=${roster.join(",")} self=${self}) ---`
     );
+    for (const it of context) console.log(formatSweepItem(it, "CONTEXT"));
   }
-  console.log(`TOTAL: ${union.length} items (HRW-owned)`);
+
+  console.log(`TOTAL: ${union.length} items (${yours.length} yours, ${context.length} context)`);
 }
 
 main().catch((err) => {
@@ -335,5 +353,5 @@ main().catch((err) => {
   // skill still proceeds (it can reconstruct from logs/gh directly).
   console.log("MODE=sweep");
   console.log(`(context-gather error: ${err?.message || err}; proceed manually)`);
-  console.log("TOTAL: 0 items (HRW-owned)");
+  console.log("TOTAL: 0 items (0 yours, 0 context)");
 });

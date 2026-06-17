@@ -152,8 +152,9 @@ fi
 # dispatched mode it reads the recovery-pass.json brief (the eyes+hands output —
 # CONSUME it, do NOT re-run the diagnostician or the seams); in sweep mode it
 # unions THREE local sources — worker signals + the unified event log + the
-# webhook-fed Linear cache — deduped by ticket and HRW-filtered to this host.
-# Read its output; the MODE line drives which path you take below.
+# webhook-fed Linear cache — deduped by ticket and HRW-TAGGED (a soft owner
+# signal, NOT a hard filter): YOURS = act on it; CONTEXT = another host owns it,
+# awareness only. Read its output; the MODE line drives which path you take below.
 node "${EXEC_CORE}/recovery-pass-context.mjs" ${TICKET:+--ticket "$TICKET"} --orch-dir "$ORCH_DIR"
 ```
 
@@ -162,14 +163,20 @@ The script's banner is your context:
 - `MODE=dispatched` → the brief block + tail-of-logs is printed; you own that ONE
   ticket. Go to the Step-0..4 fix loop. (Brief missing → it falls through to a
   ticket-scoped sweep and you reconstruct the diagnosis yourself.)
-- `MODE=sweep` → a `STUCK <ticket> [...] reason=…` line per item and a `TOTAL: N`
-  summary. Each printed ticket is a per-item context; walk them all. There is no
-  pre-written brief — see the **Sweep SOP** section below for how to reconstruct
-  each item's diagnosis yourself.
+- `MODE=sweep` → a `STUCK YOURS <ticket> [...]` line per owned item, then (when
+  multiHost) a `CONTEXT` group of items another host owns, and a
+  `TOTAL: N items (M yours, K context)` summary. ACT on the YOURS items — walk
+  them all. The CONTEXT items are situational awareness ONLY: do NOT act on them
+  (that host owns them — acting would cause cross-host double-action), but they
+  may explain a conflict or dependency in one of your items (e.g. "CTL-1190 also
+  touched this file"). At N=1 every item is YOURS. There is no pre-written brief —
+  see the **Sweep SOP** section below for how to reconstruct each item's
+  diagnosis yourself.
 
 > **Sweep-mode binding.** In the sweep there is NO dispatcher `CATALYST_TICKET`.
-> Each `STUCK <ticket>` line the context script printed is one per-item context.
-> When you walk an item in Steps 0–4 below, FIRST bind `TICKET` (and re-resolve
+> Each `STUCK YOURS <ticket>` line the context script printed is one per-item
+> context to act on (CONTEXT lines are awareness only — never bind TICKET to one).
+> When you walk a YOURS item in Steps 0–4 below, FIRST bind `TICKET` (and re-resolve
 > `BRIEF` / `SIGNAL_FILE` from it) to that item's ticket before authoring anything
 > — the authoring shims (`escalation-explain.mjs --ticket`, `recovery-emit.mjs
 > escalated --ticket`) reject an empty `--ticket`, so an escalation with `TICKET`
@@ -223,6 +230,15 @@ When the context script printed `MODE=sweep`, there is NO pre-written brief: no
 diagnostician ran ahead of you, so YOU reconstruct each item's diagnosis from the
 local sources before you act. This is the one place you read logs directly. A
 minimal senior-engineer onboarding to the machine you are operating:
+
+**Act on YOURS, not CONTEXT.** The script tags each item `YOURS` (you own it under
+HRW — act on it) or `CONTEXT` (another host owns it — `owner=<host>`). HRW is a
+SOFT signal here: CONTEXT items are kept so you have situational awareness — a
+sibling ticket you don't own may explain a conflict or dependency in one of your
+items ("CTL-1190 also rewrote this file"). But when multiHost you must NOT act on
+a CONTEXT item — that node owns it, and acting would cause cross-host
+double-action. Reconstruct + fix only the YOURS items; read CONTEXT items for
+context. At N=1 every item is YOURS.
 
 **The pipeline model.** Catalyst ships work through a 9-phase pipeline — triage →
 research → plan → implement → verify → review → pr → monitor-merge →
@@ -436,15 +452,17 @@ node "${EXEC_CORE}/recovery-emit.mjs" fixed \
 
 ### Iterate
 
-In sweep mode, repeat Steps 0–4 for every enumerated `SWEEP_ITEMS` entry,
+In sweep mode, repeat Steps 0–4 for every `STUCK YOURS <ticket>` item the context
+script printed (skip CONTEXT items — those are another host's, awareness only),
 printing a resolution line each. **Bind `TICKET` to the CURRENT item's ticket at
 the top of each iteration** (it is NOT the dispatcher var — that is empty in the
 sweep) and re-resolve `SIGNAL_FILE` /the per-item brief from it, so Step 4's
 `escalation-explain.mjs --ticket "$TICKET"` and `recovery-emit.mjs escalated
 --ticket "$TICKET"` carry the real ticket — an empty `--ticket` is rejected (exit
 2) and would leave the item neither FIXED nor ESCALATED, so the goal would never
-go TRUE. The goal stays FALSE while any item is "still stuck, not yet escalated",
-so keep going. Stop only when every item is UNSTUCK or legitimately ESCALATED.
+go TRUE. The goal stays FALSE while any YOURS item is "still stuck, not yet
+escalated", so keep going. Stop only when every YOURS item is UNSTUCK or
+legitimately ESCALATED.
 
 ## Mid-flight inbox check (CTL-749)
 
