@@ -45,8 +45,12 @@ export async function sampleVersion({
     // build_info: a constant 1 whose labels carry the build identity. The commit
     // is the only label not already on the shared resource (service.version is).
     otlpMetric({
+      // Unit MUST be empty: the OTel→Prometheus mapping appends a unit suffix
+      // (unit "1" → "_ratio"), which would yield the wrong name
+      // `catalyst_build_info_ratio`. Empty unit → the conventional
+      // `catalyst_build_info`.
       name: "catalyst.build.info",
-      unit: "1",
+      unit: "",
       description: "Running Catalyst build identity (value always 1); labels carry the commit revision.",
       kind: "gauge",
       points: [{ value: 1, attrs: { "vcs.ref.head.revision": revision }, timeUnixNano: t }],
@@ -54,8 +58,10 @@ export async function sampleVersion({
     // commits-behind drift. otlpMetric drops the point when behind is null, so
     // the metric is simply absent on a host that can't resolve it (no false 0).
     otlpMetric({
+      // Empty unit (a plain count): unit "1" would append "_ratio" →
+      // `catalyst_vcs_commits_behind_ratio`. Empty → `catalyst_vcs_commits_behind`.
       name: "catalyst.vcs.commits_behind",
-      unit: "1",
+      unit: "",
       description: "Commits HEAD is behind origin/main (0 = up to date with main).",
       kind: "gauge",
       points: [{ value: behind, timeUnixNano: t }],
