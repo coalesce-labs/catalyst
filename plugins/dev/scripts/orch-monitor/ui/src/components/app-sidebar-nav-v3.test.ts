@@ -179,7 +179,9 @@ describe("CTL-980 nav proportion v3 — Projects section heading", () => {
 
   it("Projects heading appears before the per-project map block", () => {
     const projectsHeadingIdx = src.indexOf(">Projects<");
-    const reposMapIdx = src.indexOf("{repos.map(");
+    // CTL-1248: the per-project render loop was renamed `repos.map` -> `orderedRepos.map`
+    // (drag-to-reorder). Track the new literal; the ordering assertion below is unchanged.
+    const reposMapIdx = src.indexOf("{orderedRepos.map(");
     expect(projectsHeadingIdx).toBeGreaterThan(-1);
     expect(reposMapIdx).toBeGreaterThan(-1);
     // Heading must come BEFORE the map (higher up in the source)
