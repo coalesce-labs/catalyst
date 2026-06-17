@@ -30,7 +30,12 @@ const LIVENESS_TIMEOUT_MS =
   Number(process.env.EXECUTION_CORE_LIVENESS_TIMEOUT_MS) || 15_000;
 
 // publishHeartbeatSync — publish this host's liveness record synchronously.
-// Returns { ok: true } on success, { ok: false } on any failure (fail-open).
+// Returns { ok: true } on success, { ok: false, error } on any failure (fail-open).
+// CTL-1251: the failure path now carries a short `error` reason (exit code +
+// stderr tail / spawn error / timeout / unparseable) so the publisher tick can
+// LOG why a publish failed — previously every failure was a silent { ok: false }
+// and a post-restart non-publish was undiagnosable. Callers must still treat any
+// non-ok as fail-open and never throw.
 // `spawn`/`nodeBin`/`cli`/`env`/`timeout` are injectable for unit tests.
 export function publishHeartbeatSync(
   { anchorIssue, host, inFlightTickets = [] },
@@ -49,13 +54,30 @@ export function publishHeartbeatSync(
       env,
       timeout,
     });
-    if (!res || res.status !== 0 || typeof res.stdout !== "string") return { ok: false };
+    if (!res || res.status !== 0 || typeof res.stdout !== "string") {
+      return { ok: false, error: describeSpawnFailure(res) };
+    }
     const line = res.stdout.trim().split("\n").filter(Boolean).pop();
     JSON.parse(line); // validate parseable; value not needed
     return { ok: true };
-  } catch {
-    return { ok: false };
+  } catch (err) {
+    return { ok: false, error: err?.message || String(err) };
   }
+}
+
+// describeSpawnFailure — render a short, log-safe reason from a spawnSync result
+// (CTL-1251). Covers the three non-throwing failure shapes: a timeout/spawn error
+// (res.error set, status null), a non-zero exit (status + stderr tail), and a
+// missing/!string stdout. Truncates stderr so a noisy subprocess can't bloat the
+// daemon log line. A heartbeat publish carries no secret, so stderr is safe to log.
+function describeSpawnFailure(res) {
+  if (!res) return "no spawn result";
+  if (res.error) return `spawn error: ${res.error.message || String(res.error)}`;
+  const stderr = typeof res.stderr === "string" ? res.stderr.trim().slice(-200) : "";
+  if (res.status !== 0) {
+    return `exit ${res.status}${stderr ? `: ${stderr}` : ""}`;
+  }
+  return "missing stdout";
 }
 
 // readPeerHeartbeatsSync — read all peer liveness records synchronously.
