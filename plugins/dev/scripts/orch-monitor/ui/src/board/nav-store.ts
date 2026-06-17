@@ -63,6 +63,14 @@ export const navGroupsOpenAtom = atomWithStorage<Record<string, boolean>>(
   {},
 );
 
+// CTL-1248: operator's preferred per-project nav order (repo short-names, in order).
+// Membership stays roster-driven; this atom is authoritative for ORDER only.
+// Default [] === "no saved order" → reconcile returns the live roster verbatim.
+export const navProjectOrderAtom = atomWithStorage<string[]>(
+  "catalyst-nav-project-order-v1",
+  [],
+);
+
 // ── section open-state for the Overall + Observe groups (CTL-1034) ───────────
 /**
  * CTL-1034: EVERY top-level sidebar section is collapsible — not just the

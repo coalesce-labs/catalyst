@@ -15,6 +15,7 @@ import {
   isActiveWorker,
   displayCaseName,
   laneDisplayName,
+  reconcileProjectOrder,
   type NavGroup,
   type NavProjectDescriptor,
 } from "./nav-model";
@@ -475,5 +476,78 @@ describe("nav-model — laneDisplayName", () => {
     expect(laneDisplayName("team", "__catalyst_unassigned__", "No team", null)).toBe("No team");
     expect(laneDisplayName("repo", "__catalyst_unassigned__", "Unassigned", null)).toBe("Unassigned");
     expect(laneDisplayName("project", "__catalyst_unassigned__", "Unassigned", null)).toBe("Unassigned");
+  });
+});
+
+// ── CTL-1248: reconcileProjectOrder ──────────────────────────────────────────
+
+describe("nav-model — reconcileProjectOrder (CTL-1248)", () => {
+  it("preserves saved order when roster set matches", () => {
+    expect(reconcileProjectOrder(
+      ["catalyst", "adva", "otel"],
+      ["adva", "otel", "catalyst"],
+    )).toEqual(["catalyst", "adva", "otel"]);
+  });
+
+  it("appends a single new roster repo to the end", () => {
+    expect(reconcileProjectOrder(
+      ["catalyst", "adva"],
+      ["catalyst", "adva", "newrepo"],
+    )).toEqual(["catalyst", "adva", "newrepo"]);
+  });
+
+  it("appends multiple new repos in roster order", () => {
+    expect(reconcileProjectOrder(
+      ["catalyst"],
+      ["catalyst", "alpha", "beta"],
+    )).toEqual(["catalyst", "alpha", "beta"]);
+  });
+
+  it("drops a roster-removed repo from saved order", () => {
+    expect(reconcileProjectOrder(
+      ["catalyst", "gone", "adva"],
+      ["catalyst", "adva"],
+    )).toEqual(["catalyst", "adva"]);
+  });
+
+  it("empty saved order returns roster as-is (a copy, not same reference)", () => {
+    const roster = ["adva", "catalyst"];
+    const result = reconcileProjectOrder([], roster);
+    expect(result).toEqual(["adva", "catalyst"]);
+    expect(result).not.toBe(roster);
+  });
+
+  it("empty roster returns []", () => {
+    expect(reconcileProjectOrder(["catalyst", "adva"], [])).toEqual([]);
+  });
+
+  it("de-dupes duplicate entries in saved (first occurrence wins)", () => {
+    expect(reconcileProjectOrder(
+      ["catalyst", "adva", "catalyst"],
+      ["catalyst", "adva"],
+    )).toEqual(["catalyst", "adva"]);
+  });
+
+  it("de-dupes duplicate entries in roster on append", () => {
+    expect(reconcileProjectOrder(
+      [],
+      ["catalyst", "adva", "catalyst"],
+    )).toEqual(["catalyst", "adva"]);
+  });
+
+  it("is idempotent: reconcile(reconcile(saved, roster), roster) === reconcile(saved, roster)", () => {
+    const saved = ["catalyst", "adva"];
+    const roster = ["adva", "catalyst", "newrepo"];
+    const once = reconcileProjectOrder(saved, roster);
+    const twice = reconcileProjectOrder(once, roster);
+    expect(twice).toEqual(once);
+  });
+
+  it("does not mutate inputs", () => {
+    const saved = Object.freeze(["catalyst", "adva"]) as readonly string[];
+    const roster = Object.freeze(["adva", "catalyst", "newrepo"]) as readonly string[];
+    expect(() => reconcileProjectOrder(saved, roster)).not.toThrow();
+    expect(saved).toEqual(["catalyst", "adva"]);
+    expect(roster).toEqual(["adva", "catalyst", "newrepo"]);
   });
 });
