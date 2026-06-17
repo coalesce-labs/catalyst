@@ -39,7 +39,13 @@ import {
   HEARTBEAT_GRACE_MS,
   ZOMBIE_STALE_FLOOR_MS,
   NEVER_STARTED_MS,
+  DEAD_DOC_WORKER_TRANSCRIPT_SILENCE_MS,
+  readDeadDocWorkerConfig,
 } from "./config.mjs";
+// CTL-1245: transcript-silence corroborator. transcriptAgeMs folds in subagent
+// transcripts so a doc worker mid in-process fan-out is never judged silent
+// (CTL-662-safe). Used ONLY to break the cold-snapshot doc-phase 6h tie below.
+import { transcriptAgeMs as defaultTranscriptAgeMs } from "./transcript-silence.mjs";
 import { readPeerHeartbeatsSync } from "./cluster-heartbeat-sync.mjs";
 import { HEARTBEAT_EVENT } from "./heartbeat-event.mjs"; // CTL-859: node.heartbeat reader
 import { resolveTicketType, UNKNOWN_TICKET_TYPE } from "./ticket-type.mjs"; // CTL-1023: work-type dimension
@@ -1811,6 +1817,16 @@ export function reclaimDeadWorkIfPossible(
     // Subordinate to a fresh snapshot (a LISTED worker is busy, never reclaimed
     // here regardless of mtime — CTL-662-safe). Injectable; defaults to the const.
     zombieStaleFloorMs = ZOMBIE_STALE_FLOOR_MS,
+    // CTL-1245 — dead-but-running doc-worker corroborator seams. deadDocWorkerMode
+    // gates the whole feature (off → strict no-op; shadow → log only; enforce →
+    // set ghostAbsent). transcriptAgeMs measures the most-recent transcript write
+    // (subagents folded in) so a busy fan-out is spared; deadDocSilenceMs is the
+    // silence floor past which an `alive`-by-state.json doc worker with no fresh
+    // agents snapshot is a corpse. All injectable; production defaults read the
+    // env/Layer-2 mode and the real transcript primitive. INERT by default.
+    deadDocWorkerMode = readDeadDocWorkerConfig().mode,
+    transcriptAgeMs = defaultTranscriptAgeMs,
+    deadDocSilenceMs = DEAD_DOC_WORKER_TRANSCRIPT_SILENCE_MS,
     // CTL-735 — revival age ceiling. An absent/idle, work-not-done worker whose
     // signal has not been touched in this long is an abandoned historical dir,
     // not a fresh crash: treated as inert (no revive, no escalate). Injectable for
@@ -2467,6 +2483,43 @@ export function reclaimDeadWorkIfPossible(
               { ticket, phase, prevBgJobId, staleForMs: now() - job.mtimeMs, mtimeFloorMs },
               "ctl-868: jobLifecycle-alive but state.json mtime stale beyond zombie floor (no fresh agents snapshot) — treating as dead (zombie breaker)"
             );
+          } else if (
+            // CTL-1245 — dead-but-running doc-worker corroborator. The CTL-868
+            // mtime floor above is BUSY_CEILING_MS (6h) for doc phases
+            // (MTIME_ZOMBIE_EXEMPT_PHASES), so a genuinely-dead triage/research/
+            // plan/verify/review corpse with a frozen state:"working" sits
+            // alive-suppressed for up to 6h on the headless mini (no fresh
+            // agents snapshot to break it). Corroborate liveness with the
+            // TRANSCRIPT: a live worker (incl. a multi-minute in-process sub-agent
+            // fan-out — transcriptAgeMs folds subagent transcripts in) keeps
+            // writing it; a transcript silent past deadDocSilenceMs on an
+            // alive-by-state.json doc worker is a corpse. Conjunction (ALL
+            // required; any miss → spare the worker, the #1 invariant):
+            //   • feature enabled (mode shadow|enforce — off is a strict no-op);
+            //   • this is a doc/exempt phase (the only ones stuck at the 6h floor);
+            //   • mtime floor did NOT already fire (else ghostAbsent is set above);
+            //   • the transcript age is MEASURABLE (null = can't measure = spare)
+            //     AND older than deadDocSilenceMs.
+            deadDocWorkerMode !== "off" &&
+            MTIME_ZOMBIE_EXEMPT_PHASES.has(phase)
+          ) {
+            const tAge = transcriptAgeMs(signal, { now: now() });
+            const silent = Number.isFinite(tAge) && tAge > deadDocSilenceMs;
+            if (silent) {
+              if (deadDocWorkerMode === "enforce") {
+                ghostAbsent = true;
+                log.warn(
+                  { ticket, phase, prevBgJobId, transcriptAgeMs: tAge, deadDocSilenceMs, mode: deadDocWorkerMode },
+                  "ctl-1245: jobLifecycle-alive doc worker with transcript silent past floor (no fresh agents snapshot) — treating as dead (dead-doc-worker breaker)",
+                );
+              } else {
+                // shadow: measure + log the would-be verdict, take NO action.
+                log.info(
+                  { ticket, phase, prevBgJobId, transcriptAgeMs: tAge, deadDocSilenceMs, mode: deadDocWorkerMode },
+                  "ctl-1245 shadow: doc worker WOULD be reclaimed as dead (transcript silent past floor) — no action taken",
+                );
+              }
+            }
           }
         }
       }
