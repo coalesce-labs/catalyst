@@ -7,6 +7,7 @@
 //   1. account.ratelimit.sampled  (CATALYST_AGENT_USAGE)
 //   2. host.metrics.sampled       (CATALYST_AGENT_HOST)
 //   3. host.process.sampled       (CATALYST_AGENT_PROCESS, one event per top-N proc)
+//   4. catalyst.build.info + catalyst.vcs.commits_behind  (CATALYST_AGENT_VERSION)
 //
 // Modes:
 //   --once     run one tick of each enabled domain, then exit 0 (launchd path)
@@ -36,6 +37,7 @@ Domains (each emits OTel envelopes; toggle with env, default on):
   account.ratelimit.sampled   CATALYST_AGENT_USAGE=0    to disable
   host.metrics.sampled        CATALYST_AGENT_HOST=0     to disable
   host.process.sampled        CATALYST_AGENT_PROCESS=0  to disable
+  catalyst.build.info/vcs     CATALYST_AGENT_VERSION=0  to disable
 
 Emit (CATALYST_AGENT_EMIT, default eventlog):
   eventlog   append JSONL to ~/catalyst/events/<YYYY-MM>.jsonl
@@ -159,6 +161,15 @@ export function defaultImporters(pending = []) {
           await processes.sampleProcesses({ topN: config.topN });
         },
       })),
+    // Domain 4 (CTL-1235) — catalyst.build.info + catalyst.vcs.commits_behind.
+    // Emits the running version/commit + drift-from-main as OTLP gauges. Uses its
+    // own config-aware metric emit (like host), so nothing is collected here.
+    version: () =>
+      import(new URL("./version.mjs", import.meta.url).href).then((version) => ({
+        runOnce: async () => {
+          await version.sampleVersion();
+        },
+      })),
   };
 }
 
@@ -182,6 +193,9 @@ export async function runOnce({ config = readAgentConfig(), importers } = {}) {
   }
   if (config.processEnabled) {
     results.process = await runDomain({ name: "process", importer: useImporters.process, config });
+  }
+  if (config.versionEnabled) {
+    results.version = await runDomain({ name: "version", importer: useImporters.version, config });
   }
   // Await every OTLP POST kicked off this tick before resolving — the load-
   // bearing fix for the --once telemetry-drop. No-op in eventlog mode / when a
