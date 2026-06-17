@@ -64,6 +64,37 @@ describe("buildBasePickerItems", () => {
   });
 });
 
+// ── CTL-1253: the "Detected" favicon group is purely candidate-driven ──────────
+// IconPickerPopover renders the "Detected" CommandGroup iff filteredFavicons.length > 0,
+// where filteredFavicons = buildBasePickerItems(candidates).filter(group === "favicon").
+// These pin that contract: candidates threaded into the pane → favicon items appear;
+// no candidates → the Detected group is never rendered (the pre-fix symptom).
+describe("Detected favicon group gate (CTL-1253)", () => {
+  const adva: IconCandidate[] = [
+    { path: "apps/web/public/favicon.svg", format: "svg", downloadUrl: "u", dataUrl: "data:image/svg+xml;base64,xxx" },
+    { path: "apps/web/public/favicon.ico", format: "ico", downloadUrl: "u2", dataUrl: "data:image/x-icon;base64,yyy" },
+  ];
+
+  function detectedItems(candidates: IconCandidate[]) {
+    return buildBasePickerItems(candidates).filter((i) => i.group === "favicon");
+  }
+
+  it("renders one Detected favicon item per candidate, carrying its dataUrl", () => {
+    const detected = detectedItems(adva);
+    expect(detected).toHaveLength(adva.length);
+    expect(detected.map((i) => i.value)).toEqual([
+      "apps/web/public/favicon.svg",
+      "apps/web/public/favicon.ico",
+    ]);
+    expect(detected[0].dataUrl).toBe("data:image/svg+xml;base64,xxx");
+    expect(detected.every((i) => Boolean(i.dataUrl))).toBe(true);
+  });
+
+  it("renders NO Detected items for an empty candidate list (the pre-fix symptom)", () => {
+    expect(detectedItems([])).toHaveLength(0);
+  });
+});
+
 describe("buildAllGlyphItems", () => {
   it("maps loaded names minus featured into non-featured glyph items", () => {
     const items = buildAllGlyphItems(["airplane", "git-fork", "zz-fake"]);
