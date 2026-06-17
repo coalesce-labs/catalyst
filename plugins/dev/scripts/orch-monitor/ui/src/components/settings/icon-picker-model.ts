@@ -118,6 +118,22 @@ export function resolveAllIconsViewState(input: {
   return "results";
 }
 
+/**
+ * Tailwind classes for the virtualized "All icons" scroll container.
+ * `overflow-y-auto` + `max-h-72` cap the box at 288 px and let it scroll; the inner
+ * total-size spacer drives the actual height in normal block layout.
+ */
+export const GLYPH_GRID_SCROLL_CLASS = "overflow-y-auto max-h-72";
+
+/**
+ * Inline style for the virtualized "All icons" scroll container.
+ * CTL-1254: uses `contain: "layout paint"` — NOT `strict`/`size`. CSS Size Containment
+ * (`contain: size`, included in `strict`) sized this box from an empty subtree, collapsing it
+ * to clientHeight: 0 so the virtualizer rendered 0 rows. `layout paint` keeps the isolation
+ * benefit without sizing the container from its (intentionally empty until scrolled) descendants.
+ */
+export const GLYPH_GRID_SCROLL_STYLE = { contain: "layout paint" } as const;
+
 /** Return a short label for the picker trigger button based on the current value. */
 export function resolveActiveIconLabel(value: string | null | undefined): string {
   if (!value) return "Auto";

@@ -8,6 +8,8 @@ import {
   filterPickerItems,
   resolveActiveIconLabel,
   resolveAllIconsViewState,
+  GLYPH_GRID_SCROLL_CLASS,
+  GLYPH_GRID_SCROLL_STYLE,
 } from "./icon-picker-model";
 import type { IconCandidate } from "@/lib/repo-icons";
 import { PHOSPHOR_GLYPH_NAMES } from "@/lib/project-glyph-set";
@@ -142,6 +144,23 @@ describe("resolveAllIconsViewState", () => {
   });
   it("error precedence over no-matches", () => {
     expect(resolveAllIconsViewState({ namesEmpty: true, queryActive: true, filteredCount: 0 })).toBe("error");
+  });
+});
+
+describe("VirtualGlyphGrid scroll container (CTL-1254)", () => {
+  it("does NOT apply CSS Size Containment (which collapses clientHeight to 0)", () => {
+    const contain = GLYPH_GRID_SCROLL_STYLE.contain;
+    expect(contain).not.toContain("size");
+    expect(contain).not.toBe("strict"); // strict implies size
+  });
+
+  it("still applies paint isolation (preserves the CTL-1233 virtualization perf intent)", () => {
+    expect(GLYPH_GRID_SCROLL_STYLE.contain).toContain("paint");
+  });
+
+  it("keeps a scrollable, height-capped container", () => {
+    expect(GLYPH_GRID_SCROLL_CLASS).toContain("overflow-y-auto");
+    expect(GLYPH_GRID_SCROLL_CLASS).toContain("max-h-72");
   });
 });
 
