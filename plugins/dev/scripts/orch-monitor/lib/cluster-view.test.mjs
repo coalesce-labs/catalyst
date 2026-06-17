@@ -81,3 +81,61 @@ describe("assembleClusterView — drain display (CTL-1095)", () => {
     expect(node.inFlightCount).toBe(0);
   });
 });
+
+describe("assembleClusterView — cross-host anchor peers / shadow nodes (CTL-1251)", () => {
+  test("a live anchor peer NOT in the roster is surfaced as a shadow node (0 tickets)", () => {
+    const view = assembleClusterView({
+      board: { generatedAt: "2026-06-13T00:00:00Z", tickets: [{ id: "T1" }] },
+      ownerHostById: { T1: "mini" }, // T1 fenced to mini → no unassigned bucket
+      hosts: ["mini"], // committed roster is single-host
+      heartbeats: { mini: "2026-06-13T00:00:00Z", "mini-2": "2026-06-13T00:00:05Z" },
+      now: NOW,
+    });
+    // roster ∪ live anchor peers = {mini, mini-2} → multi-host view
+    expect(view.singleHost).toBe(false);
+    const hosts = view.nodes.map((n) => n.host).sort();
+    expect(hosts).toEqual(["mini", "mini-2"]);
+    const shadow = view.nodes.find((n) => n.host === "mini-2");
+    expect(shadow.status).toBe("live");
+    expect(shadow.tickets).toEqual([]); // owns zero tickets — pure liveness
+    expect(view.nodes.find((n) => n.host === "mini").tickets).toHaveLength(1);
+  });
+
+  test("a stale anchor attachment (offline, not in roster) is DROPPED", () => {
+    const view = assembleClusterView({
+      board,
+      hosts: ["mini"],
+      heartbeats: {
+        mini: "2026-06-13T00:00:00Z",
+        "decommissioned": "2026-06-12T00:00:00Z", // >24h stale → offline
+      },
+      now: NOW,
+    });
+    expect(view.singleHost).toBe(true);
+    expect(view.nodes.map((n) => n.host)).toEqual(["mini"]);
+  });
+
+  test("a roster host that is offline is STILL shown (roster always displayed)", () => {
+    const view = assembleClusterView({
+      board,
+      hosts: ["mini", "laptop"],
+      heartbeats: { mini: "2026-06-13T00:00:00Z" }, // laptop never heard → offline
+      now: NOW,
+    });
+    expect(view.singleHost).toBe(false);
+    const laptop = view.nodes.find((n) => n.host === "laptop");
+    expect(laptop.status).toBe("offline");
+  });
+
+  test("single-host identity no-op preserved when no other host publishes", () => {
+    const view = assembleClusterView({
+      board: { generatedAt: "2026-06-13T00:00:00Z", tickets: [{ id: "T1" }, { id: "T2" }] },
+      hosts: ["mini"],
+      heartbeats: { mini: "2026-06-13T00:00:00Z" },
+      now: NOW,
+    });
+    expect(view.singleHost).toBe(true);
+    expect(view.nodes).toHaveLength(1);
+    expect(view.nodes[0].tickets).toHaveLength(2); // all board tickets on the one host
+  });
+});

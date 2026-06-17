@@ -1163,9 +1163,19 @@ export function createServer(opts: CreateServerOptions): BunServer {
   // and resolved ONCE under Bun. Every step is best-effort: an import or read
   // failure degrades to "offline" rather than throwing out of a nav request
   // (the read-model never fabricates health for a daemon it cannot hear).
+  // CTL-1251: this loader also exposes the roster (getClusterHosts), the liveness
+  // anchor id (getLivenessAnchorIssue), and the synchronous anchor peer-reader
+  // (readPeerHeartbeatsSync) so the cluster view can overlay CROSS-HOST liveness,
+  // not just the local event log. readPeerHeartbeatsSync is the same subprocess
+  // the working `catalyst cluster status` CLI uses, so Linear creds resolve
+  // identically (LINEAR_API_TOKEN in the process env).
+  type AnchorPeerRec = { host?: string; last_seen?: string; in_flight_tickets?: string[] };
   let daemonDepsPromise: Promise<{
     readClusterHeartbeats: (opts: { logPath?: string }) => Record<string, string>;
     getHostName: () => string;
+    getClusterHosts: () => string[];
+    getLivenessAnchorIssue: () => string | null;
+    readPeerHeartbeatsSync: (args: { anchorIssue: string }) => Record<string, AnchorPeerRec>;
     deriveDaemonHealth: typeof import("./lib/nav-signal.mjs").deriveDaemonHealth;
   } | null> | null = null;
   const loadDaemonDeps = () => {
@@ -1174,14 +1184,25 @@ export function createServer(opts: CreateServerOptions): BunServer {
         try {
           const recoveryMod = ["..", "execution-core", "recovery.mjs"].join("/");
           const configMod = ["..", "execution-core", "config.mjs"].join("/");
-          const [recovery, config, navSignal] = await Promise.all([
+          const heartbeatSyncMod = ["..", "execution-core", "cluster-heartbeat-sync.mjs"].join("/");
+          const [recovery, config, heartbeatSync, navSignal] = await Promise.all([
             import(recoveryMod) as Promise<{ readClusterHeartbeats: (opts: { logPath?: string }) => Record<string, string> }>,
-            import(configMod) as Promise<{ getHostName: () => string }>,
+            import(configMod) as Promise<{
+              getHostName: () => string;
+              getClusterHosts: () => string[];
+              getLivenessAnchorIssue: () => string | null;
+            }>,
+            import(heartbeatSyncMod) as Promise<{
+              readPeerHeartbeatsSync: (args: { anchorIssue: string }) => Record<string, AnchorPeerRec>;
+            }>,
             import("./lib/nav-signal.mjs"),
           ]);
           return {
             readClusterHeartbeats: recovery.readClusterHeartbeats,
             getHostName: config.getHostName,
+            getClusterHosts: config.getClusterHosts,
+            getLivenessAnchorIssue: config.getLivenessAnchorIssue,
+            readPeerHeartbeatsSync: heartbeatSync.readPeerHeartbeatsSync,
             deriveDaemonHealth: navSignal.deriveDaemonHealth,
           };
         } catch {
@@ -1299,7 +1320,69 @@ export function createServer(opts: CreateServerOptions): BunServer {
   // identity no-op when the execution-core roster/recovery deps are unavailable.
   // The view is then projected to the tiny footer signal. Tests inject
   // `clusterReaderOpt` so the routes don't touch the live event log/roster.
-  const clusterEntity = createClusterEntity();
+  // CTL-1251: cross-host liveness for the dashboard (the deferred BFF3 transport).
+  // The cluster view's liveness overlay must see PEER heartbeats — published to the
+  // Linear liveness anchor — not just the LOCAL event log, or the dashboard can
+  // never show another node (the gap the handoff found: CLI shows peers, dashboard
+  // doesn't). We keep the read-model's "spawns nothing per request" contract by
+  // reading the anchor in a low-frequency BACKGROUND poll into an in-memory cache;
+  // per-request reads merge that cache over the local-log heartbeats synchronously.
+  // Production-only: tests inject clusterReaderOpt and never start the poller.
+  const anchorHeartbeatCache: { map: Record<string, string> } = { map: {} };
+  let execCoreDeps: Awaited<ReturnType<typeof loadDaemonDeps>> = null;
+  let anchorPollTimer: ReturnType<typeof setInterval> | null = null;
+  const pollAnchorHeartbeats = (): void => {
+    try {
+      if (!execCoreDeps) return;
+      const anchor = execCoreDeps.getLivenessAnchorIssue();
+      if (!anchor) {
+        anchorHeartbeatCache.map = {}; // no anchor configured → no peers
+        return;
+      }
+      const peers = execCoreDeps.readPeerHeartbeatsSync({ anchorIssue: anchor });
+      const next: Record<string, string> = {};
+      for (const [host, rec] of Object.entries(peers)) {
+        if (rec && typeof rec.last_seen === "string" && rec.last_seen.length > 0) {
+          next[host] = rec.last_seen;
+        }
+      }
+      anchorHeartbeatCache.map = next;
+    } catch {
+      // fail-open: keep the last cache; stale entries age out via node-liveness
+    }
+  };
+  if (clusterReaderOpt == null) {
+    void loadDaemonDeps().then((d) => {
+      execCoreDeps = d;
+      pollAnchorHeartbeats(); // prime immediately once deps resolve
+    });
+    const anchorPollMs = Number(process.env.MONITOR_ANCHOR_POLL_MS) || 60_000;
+    anchorPollTimer = setInterval(pollAnchorHeartbeats, anchorPollMs);
+    anchorPollTimer.unref?.();
+  }
+
+  // Inject BOTH the roster and a MERGED heartbeat reader (local event log ∪ the
+  // anchor peer cache). createClusterEntity then surfaces any node currently live
+  // on the anchor — including a Stage-0 SHADOW node that owns zero tickets —
+  // decoupled from the dispatch roster (see cluster-view.mjs CTL-1251 header).
+  const clusterEntity = createClusterEntity({
+    rosterProvider: () => {
+      try {
+        return execCoreDeps?.getClusterHosts() ?? [];
+      } catch {
+        return [];
+      }
+    },
+    heartbeatReader: (opts) => {
+      let local: Record<string, string> = {};
+      try {
+        local = execCoreDeps?.readClusterHeartbeats(opts) ?? {};
+      } catch {
+        /* fail-open: anchor cache alone still drives the overlay */
+      }
+      return { ...local, ...anchorHeartbeatCache.map };
+    },
+  });
   const readClusterView = async (board: BoardPayload): Promise<ClusterView> => {
     if (clusterReaderOpt != null) return clusterReaderOpt(board);
     return clusterEntity.project(board);
@@ -4262,6 +4345,7 @@ export function createServer(opts: CreateServerOptions): BunServer {
     closeDb();
     sseClients.clear();
     clearInterval(titleDescSweepTimer);
+    if (anchorPollTimer) clearInterval(anchorPollTimer); // CTL-1251 anchor poll
     eventRing.stop();
     if (pidFile) {
       try {

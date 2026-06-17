@@ -19,13 +19,22 @@
 //
 // SINGLE-HOST IDENTITY NO-OP (the load-bearing operator constraint):
 //   When the roster is absent or length 1 (config.mjs::getClusterHosts returns
-//   [getHostName()] when .catalyst/hosts.json is absent), the cluster view is an
-//   EXACT identity no-op: ONE node carrying ALL board tickets in board order
-//   (un-fenced tickets included — on a 1-node fleet there is no "other" owner),
-//   the local daemon's own heartbeat as its liveness, and ZERO added latency
-//   (one local-log read, no per-peer fan-out, no cross-node transport — that is
-//   BFF3's concern). The N>1 grouping/unassigned-bucket branch below is exercised
-//   ONLY once a real multi-host roster exists.
+//   [getHostName()] when .catalyst/hosts.json is absent) AND no OTHER host is
+//   currently publishing a heartbeat, the cluster view is an EXACT identity
+//   no-op: ONE node carrying ALL board tickets in board order (un-fenced tickets
+//   included — on a 1-node fleet there is no "other" owner), the local daemon's
+//   own heartbeat as its liveness, and ZERO added latency.
+//
+// CTL-1251 (the deferred BFF3 cross-node transport): the `heartbeats` the server
+//   injects now carry BOTH the local event log AND the cross-host LIVENESS ANCHOR
+//   peers (the server polls readPeerHeartbeats into a cache and merges it in). A
+//   host that is publishing a live heartbeat but is NOT in the committed roster is
+//   a real node — a Stage-0 SHADOW node that owns zero tickets, or a roster-
+//   lagging peer — so the view SURFACES it (while it is non-offline) instead of
+//   hiding it. That is what makes the dashboard a true single control plane: it
+//   shows every node currently alive on the anchor, decoupled from the dispatch
+//   roster. Stale anchor attachments from decommissioned nodes classify offline
+//   and are dropped; roster hosts are always shown regardless of status.
 
 import { overlayClusterLiveness } from "./node-liveness.mjs";
 
@@ -75,19 +84,29 @@ export function assembleClusterView({
   drainReader = null,
 }) {
   const roster = Array.isArray(hosts) && hosts.length > 0 ? hosts : [];
-  // SINGLE-HOST: roster absent or length 1 → identity no-op. Everything belongs
-  // to the one host; there is no "other" owner to group away.
-  const singleHost = roster.length <= 1;
   const tickets = Array.isArray(board?.tickets) ? board.tickets : [];
 
-  // Resolve liveness ONCE — read the local event log a single time (the reader is
-  // injected so tests don't touch fs; the read-model passes the real one). On a
-  // single node this is the ONE local log; there is no per-peer fan-out.
+  // Resolve liveness ONCE. `lastSeen` ({host: lastSeenISO}) carries BOTH the local
+  // event-log heartbeats AND the cross-host anchor peers the server merges in
+  // (CTL-1251). The DISPLAY host set = roster ∪ (anchor hosts currently alive):
+  // a host publishing a live/degraded heartbeat but absent from the roster is a
+  // real node (a Stage-0 SHADOW node or a roster-lagging peer) and is surfaced;
+  // a stale anchor attachment (offline) from a decommissioned node is dropped.
+  // Roster hosts are ALWAYS shown, whatever their status.
   const lastSeen =
     heartbeats && typeof heartbeats === "object"
       ? heartbeats
       : heartbeatReader({ logPath });
-  const liveness = overlayClusterLiveness(roster, lastSeen, { now, intervalMs, graceMs });
+  const heartbeatHosts = lastSeen && typeof lastSeen === "object" ? Object.keys(lastSeen) : [];
+  const allHosts = [...new Set([...roster, ...heartbeatHosts])];
+  const rosterSet = new Set(roster);
+  const liveness = overlayClusterLiveness(allHosts, lastSeen, { now, intervalMs, graceMs }).filter(
+    (n) => rosterSet.has(n.host) || n.status !== "offline",
+  );
+  const displayHosts = liveness.map((n) => n.host);
+  // SINGLE-HOST: one displayed node → identity no-op. Everything belongs to the
+  // one host; there is no "other" owner to group away.
+  const singleHost = displayHosts.length <= 1;
   const livenessByHost = new Map(liveness.map((n) => [n.host, n]));
 
   // CTL-1095: resolve drain state per host — fail-open on error or absent reader.
@@ -108,7 +127,7 @@ export function assembleClusterView({
   const makeTicket = (t, host) => ({ ...t, ownerHost: host });
 
   if (singleHost) {
-    const host = roster[0] ?? null;
+    const host = displayHosts[0] ?? null;
     const node = livenessByHost.get(host) ?? { host, status: host ? "offline" : null, lastSeen: null };
     return {
       generatedAt: board?.generatedAt ?? new Date(now).toISOString(),
@@ -129,7 +148,9 @@ export function assembleClusterView({
 
   // ── multi-host (N>1): group by the durable owner_host key ───────────────────
   const byHost = new Map(); // host (string | null) → ticket[]
-  for (const host of roster) byHost.set(host, []); // stable roster order, even if empty
+  // Seed with the DISPLAY hosts (roster ∪ live anchor peers) in stable order, so a
+  // live SHADOW node that owns zero tickets still appears as its own empty group.
+  for (const host of displayHosts) byHost.set(host, []);
   for (const t of tickets) {
     const raw = ownerHostById[t.id];
     const host = typeof raw === "string" && raw.length > 0 ? raw : null;
