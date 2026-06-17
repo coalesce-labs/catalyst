@@ -19,6 +19,7 @@ import {
   recentlyViewedAtom,
   recordRecentAtom,
   RECENTLY_VIEWED_KEY,
+  navProjectOrderAtom,
 } from "./nav-store";
 
 // Minimal in-memory localStorage so atomWithStorage's default storage — which
@@ -133,5 +134,46 @@ describe("nav-store — recentlyViewedAtom persistence (survives a reload)", () 
     const unsub2 = store2.sub(recentlyViewedAtom, () => {});
     expect(store2.get(recentlyViewedAtom)).toEqual(["CTL-831", "CTL-845"]);
     unsub2();
+  });
+});
+
+// ── CTL-1248: navProjectOrderAtom ────────────────────────────────────────────
+
+describe("nav-store — navProjectOrderAtom (CTL-1248)", () => {
+  it("defaults to an empty array", () => {
+    const store = createStore();
+    expect(store.get(navProjectOrderAtom)).toEqual([]);
+  });
+
+  it("round-trips a project order array (set + get)", () => {
+    const store = createStore();
+    const unsub = store.sub(navProjectOrderAtom, () => {});
+    store.set(navProjectOrderAtom, ["catalyst", "adva"]);
+    expect(store.get(navProjectOrderAtom)).toEqual(["catalyst", "adva"]);
+    unsub();
+  });
+
+  it("persists to localStorage under the catalyst-nav-project-order-v1 key", () => {
+    const store = createStore();
+    const unsub = store.sub(navProjectOrderAtom, () => {});
+    store.set(navProjectOrderAtom, ["adva", "catalyst"]);
+    const raw = (globalThis as unknown as { window: { localStorage: Storage } }).window.localStorage.getItem(
+      "catalyst-nav-project-order-v1",
+    );
+    expect(raw).not.toBeNull();
+    expect(JSON.parse(raw!)).toEqual(["adva", "catalyst"]);
+    unsub();
+  });
+
+  it("does not collide with the catalyst-nav-groups-v1 key", () => {
+    const store = createStore();
+    const unsub = store.sub(navProjectOrderAtom, () => {});
+    store.set(navProjectOrderAtom, ["catalyst"]);
+    const groupsRaw = (globalThis as unknown as { window: { localStorage: Storage } }).window.localStorage.getItem(
+      "catalyst-nav-groups-v1",
+    );
+    // groups key should NOT be set by the order atom
+    expect(groupsRaw).toBeNull();
+    unsub();
   });
 });

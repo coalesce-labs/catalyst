@@ -395,6 +395,27 @@ export function overallQueueDepth(payload: BoardPayload): number {
   return payload.queue.length;
 }
 
+// ── reconcileProjectOrder (CTL-1248) ─────────────────────────────────────────
+
+/**
+ * CTL-1248: reconcile the operator's saved project order against the live roster.
+ * Keeps saved order for repos still present, drops removed repos, appends new repos
+ * (roster order) to the end, and de-dupes against malformed input. Output is always a
+ * duplicate-free subset of `roster` in the final display order. Pure + idempotent.
+ */
+export function reconcileProjectOrder(
+  saved: readonly string[],
+  roster: readonly string[],
+): string[] {
+  const rosterSet = new Set(roster);
+  const seen = new Set<string>();
+  const kept = saved.filter(
+    (r) => rosterSet.has(r) && !seen.has(r) && (seen.add(r), true),
+  );
+  const appended = roster.filter((r) => !seen.has(r) && (seen.add(r), true));
+  return [...kept, ...appended];
+}
+
 /**
  * The "needs you" attention count for a scope (CTL-1037 inbox-badge addendum).
  * This is the SAME number the inbox header reports ("N needs you") — the union of
