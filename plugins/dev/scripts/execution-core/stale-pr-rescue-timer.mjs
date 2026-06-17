@@ -35,9 +35,7 @@ import * as linearWriteDefault from "./linear-write.mjs";
 // is the real linear-write transport (not null).
 export const defaultLinearWrite = linearWriteDefault;
 
-const ORCHESTRATE_REBASE_BIN = fileURLToPath(
-  new URL("../orchestrate-rebase", import.meta.url)
-);
+const ORCHESTRATE_REBASE_BIN = fileURLToPath(new URL("../orchestrate-rebase", import.meta.url));
 const RESCUE_PROMPT_TEMPLATE = fileURLToPath(
   new URL("../templates/rescue-rebase-prompt.md", import.meta.url)
 );
@@ -96,7 +94,9 @@ function readTicketPr(orchDir, ticket) {
       if (raw?.pr?.number && !prInfo) prInfo = raw.pr;
       if (raw?.worktreePath && !worktreePath) worktreePath = raw.worktreePath;
       if (raw?.orchestrator && !orchestrator) orchestrator = raw.orchestrator;
-    } catch { /* absent or unreadable */ }
+    } catch {
+      /* absent or unreadable */
+    }
   }
 
   if (!prInfo?.number) return null;
@@ -116,7 +116,9 @@ function anyPhaseJobAlive(orchDir, ticket, jobLifecycleFn) {
   let names;
   try {
     names = readdirSync(dir);
-  } catch { return false; }
+  } catch {
+    return false;
+  }
 
   for (const name of names) {
     if (!name.startsWith("phase-") || !name.endsWith(".json")) continue;
@@ -124,7 +126,9 @@ function anyPhaseJobAlive(orchDir, ticket, jobLifecycleFn) {
     try {
       const raw = JSON.parse(readFileSync(join(dir, name), "utf8"));
       if (raw?.bg_job_id && jobLifecycleFn(raw.bg_job_id) === "alive") return true;
-    } catch { /* skip */ }
+    } catch {
+      /* skip */
+    }
   }
   return false;
 }
@@ -140,7 +144,9 @@ function readRescueState(orchDir, ticket) {
   let raw;
   try {
     raw = readFileSync(path, "utf8");
-  } catch { return {}; } // ENOENT (or unreadable): treat as no prior state
+  } catch {
+    return {};
+  } // ENOENT (or unreadable): treat as no prior state
   try {
     return JSON.parse(raw);
   } catch (err) {
@@ -168,8 +174,15 @@ function writeRescueState(orchDir, ticket, state) {
 async function defaultPrView(slug, prNumber) {
   const res = spawnSync(
     "gh",
-    ["pr", "view", String(prNumber), "--repo", slug,
-      "--json", "state,mergeStateStatus,baseRefName,headRefName"],
+    [
+      "pr",
+      "view",
+      String(prNumber),
+      "--repo",
+      slug,
+      "--json",
+      "state,mergeStateStatus,baseRefName,headRefName",
+    ],
     { encoding: "utf8", timeout: 15_000 }
   );
   if (res.status !== 0) throw new Error(res.stderr || "gh pr view failed");
@@ -212,11 +225,10 @@ async function defaultCompareBehind(slug, base, head) {
 // against a stale origin/<base>.
 // Exported for the real-git integration test.
 export async function defaultMergeTree(worktreePath, base, head) {
-  const fetchRes = spawnSync(
-    "git",
-    ["-C", worktreePath, "fetch", "origin", base, head],
-    { encoding: "utf8", timeout: 30_000 }
-  );
+  const fetchRes = spawnSync("git", ["-C", worktreePath, "fetch", "origin", base, head], {
+    encoding: "utf8",
+    timeout: 30_000,
+  });
   if (fetchRes.status !== 0) {
     throw new Error(
       `git fetch origin ${base} ${head} failed (exit ${fetchRes.status}): ${fetchRes.stderr ?? ""}`
@@ -239,17 +251,27 @@ function defaultWorktreeExists(worktreePath) {
 // dispatch. Exported so a unit test can assert the arg vector carries a
 // non-empty --orch (orchestrate-rebase hard-exits on an empty one) without
 // spawning anything (verify finding, CTL-782).
-export function buildRescueDispatchArgs(ticket, { prNumber, orchId, orchDir, worktreePath, base, signalFile, headRef }) {
+export function buildRescueDispatchArgs(
+  ticket,
+  { prNumber, orchId, orchDir, worktreePath, base, signalFile, headRef }
+) {
   const args = [
     ORCHESTRATE_REBASE_BIN,
     ticket,
-    "--pr", String(prNumber),
-    "--orch", orchId,
-    "--orch-dir", orchDir,
-    "--worker-dir", worktreePath,
-    "--base-branch", base,
-    "--signal-file", signalFile,
-    "--prompt-template", RESCUE_PROMPT_TEMPLATE,
+    "--pr",
+    String(prNumber),
+    "--orch",
+    orchId,
+    "--orch-dir",
+    orchDir,
+    "--worker-dir",
+    worktreePath,
+    "--base-branch",
+    base,
+    "--signal-file",
+    signalFile,
+    "--prompt-template",
+    RESCUE_PROMPT_TEMPLATE,
   ];
   // PR head branch: execution-core branches are just <TICKET>, while
   // orchestrate-rebase's legacy default is <orch>-<TICKET> — without this
@@ -285,12 +307,23 @@ function defaultDispatchRescue(ticket, opts) {
 // linearWrite defaults to the real linear-write module at the
 // startStalePrRescueTimer boundary; a null here means a caller explicitly
 // opted out, which leaves the ticket invisible to humans — say so loudly.
-export function defaultEscalate(ticket, detail, { orchDir, linearWrite, multiHost = false, env = process.env } = {}) {
+export function defaultEscalate(
+  ticket,
+  detail,
+  { orchDir, linearWrite, multiHost = false, env = process.env } = {}
+) {
   if (linearWrite) {
     if (fenceGuard({ ticket, orchDir, multiHost })) {
-      labelNeedsHumanUnlessBeliefOwner(orchDir, ticket, linearWrite, { env, site: "stale-pr-rescue", log });
+      labelNeedsHumanUnlessBeliefOwner(orchDir, ticket, linearWrite, {
+        env,
+        site: "stale-pr-rescue",
+        log,
+      });
     } else {
-      log.warn({ ticket }, "ctl-863: stale fence — suppressing stale-pr-rescue labelOnce write (zombie guard)");
+      log.warn(
+        { ticket },
+        "ctl-863: stale fence — suppressing stale-pr-rescue labelOnce write (zombie guard)"
+      );
     }
   } else {
     log.warn(
@@ -298,10 +331,7 @@ export function defaultEscalate(ticket, detail, { orchDir, linearWrite, multiHos
       "stale-pr-rescue: no linearWrite transport — needs-human label NOT applied (log-only escalation)"
     );
   }
-  log.warn(
-    { ticket, ...detail },
-    "stale-pr-rescue: escalating to needs-human"
-  );
+  log.warn({ ticket, ...detail }, "stale-pr-rescue: escalating to needs-human");
 }
 
 // defaultEmit — append a bare event envelope to the event log.
@@ -310,7 +340,9 @@ function defaultEmit(name, payload) {
   try {
     const line = JSON.stringify({ name, ...payload, ts: new Date().toISOString() });
     appendFileSync(getEventLogPath(), line + "\n");
-  } catch { /* best-effort */ }
+  } catch {
+    /* best-effort */
+  }
 }
 
 /**
@@ -351,9 +383,19 @@ export function startStalePrRescueTimer({
   const handle = clock.setInterval(async () => {
     try {
       await runTick({
-        orchDir, orchId, cfg, linearWrite, multiHost,
-        jobLifecycleFn, prView, compareBehind, mergeTree,
-        worktreeExists, dispatchRescue, escalate, emit,
+        orchDir,
+        orchId,
+        cfg,
+        linearWrite,
+        multiHost,
+        jobLifecycleFn,
+        prView,
+        compareBehind,
+        mergeTree,
+        worktreeExists,
+        dispatchRescue,
+        escalate,
+        emit,
         nowMs: clock.now(),
       });
     } catch (err) {
@@ -366,23 +408,48 @@ export function startStalePrRescueTimer({
 }
 
 async function runTick({
-  orchDir, orchId, cfg, linearWrite, multiHost,
-  jobLifecycleFn, prView, compareBehind, mergeTree,
-  worktreeExists, dispatchRescue, escalate, emit, nowMs,
+  orchDir,
+  orchId,
+  cfg,
+  linearWrite,
+  multiHost,
+  jobLifecycleFn,
+  prView,
+  compareBehind,
+  mergeTree,
+  worktreeExists,
+  dispatchRescue,
+  escalate,
+  emit,
+  nowMs,
 }) {
   let ticketDirs;
   try {
     ticketDirs = readdirSync(join(orchDir, "workers"), { withFileTypes: true })
-      .filter(e => e.isDirectory())
-      .map(e => e.name);
-  } catch { return; }
+      .filter((e) => e.isDirectory())
+      .map((e) => e.name);
+  } catch {
+    return;
+  }
 
   for (const ticket of ticketDirs) {
     try {
       await processTicket({
-        ticket, orchDir, orchId, cfg, linearWrite, multiHost, nowMs,
-        jobLifecycleFn, prView, compareBehind, mergeTree,
-        worktreeExists, dispatchRescue, escalate, emit,
+        ticket,
+        orchDir,
+        orchId,
+        cfg,
+        linearWrite,
+        multiHost,
+        nowMs,
+        jobLifecycleFn,
+        prView,
+        compareBehind,
+        mergeTree,
+        worktreeExists,
+        dispatchRescue,
+        escalate,
+        emit,
       });
     } catch (err) {
       log.warn({ ticket, err: err.message }, "stale-pr-rescue: per-ticket error, continuing");
@@ -391,9 +458,21 @@ async function runTick({
 }
 
 async function processTicket({
-  ticket, orchDir, orchId, cfg, linearWrite, multiHost, nowMs,
-  jobLifecycleFn, prView, compareBehind, mergeTree,
-  worktreeExists, dispatchRescue, escalate, emit,
+  ticket,
+  orchDir,
+  orchId,
+  cfg,
+  linearWrite,
+  multiHost,
+  nowMs,
+  jobLifecycleFn,
+  prView,
+  compareBehind,
+  mergeTree,
+  worktreeExists,
+  dispatchRescue,
+  escalate,
+  emit,
 }) {
   // 1. Cheap skip: no PR info → nothing to rescue.
   const prInfo = readTicketPr(orchDir, ticket);
@@ -426,7 +505,9 @@ async function processTicket({
       let externalState = null;
       try {
         externalState = (await prView(slug, prInfo.number))?.state ?? null;
-      } catch { /* re-check unavailable — fall through to escalate */ }
+      } catch {
+        /* re-check unavailable — fall through to escalate */
+      }
       if (externalState === "MERGED" || externalState === "CLOSED") {
         log.info(
           { ticket, prState: externalState },
@@ -440,8 +521,15 @@ async function processTicket({
         return;
       }
     }
-    escalate(ticket, { reason: "rescue_worker_stalled", ...rescueState }, { orchDir, orchId: effectiveOrchId, linearWrite, multiHost });
-    writeRescueState(orchDir, ticket, { ...rescueState, escalatedAt: new Date(nowMs).toISOString() });
+    escalate(
+      ticket,
+      { reason: "rescue_worker_stalled", ...rescueState },
+      { orchDir, orchId: effectiveOrchId, linearWrite, multiHost }
+    );
+    writeRescueState(orchDir, ticket, {
+      ...rescueState,
+      escalatedAt: new Date(nowMs).toISOString(),
+    });
     emit(`phase.rescue.escalated.${ticket}`, { ticket, reason: "rescue_worker_stalled" });
     return;
   }
@@ -541,7 +629,10 @@ async function processTicket({
           lastDispatchAt: new Date(nowMs).toISOString(),
           lastDispatchError: result.error ?? "dispatch failed",
         });
-        emit(`phase.rescue.dispatch-failed.${ticket}`, { ticket, error: result.error ?? "dispatch failed" });
+        emit(`phase.rescue.dispatch-failed.${ticket}`, {
+          ticket,
+          error: result.error ?? "dispatch failed",
+        });
         return;
       }
       const newAttempts = (rescueState.rescueAttempts ?? 0) + 1;
@@ -556,7 +647,12 @@ async function processTicket({
     }
 
     case "escalate": {
-      escalate(ticket, decision.detail ?? {}, { orchDir, orchId: effectiveOrchId, linearWrite, multiHost });
+      escalate(ticket, decision.detail ?? {}, {
+        orchDir,
+        orchId: effectiveOrchId,
+        linearWrite,
+        multiHost,
+      });
       writeRescueState(orchDir, ticket, {
         ...rescueState,
         escalatedAt: new Date(nowMs).toISOString(),

@@ -51,7 +51,11 @@ function labelMarkerBase(orchDir, ticket, label) {
 // stop the per-tick retry storm. "missing-label": the workspace lacks the label;
 // "exclusive-conflict": the label's exclusive-group sibling is already present;
 // "team-mismatch": name resolution used the wrong team's UUID context (CTL-1085).
-const UNRECOVERABLE_LABEL_REASONS = new Set(["missing-label", "exclusive-conflict", "team-mismatch"]);
+const UNRECOVERABLE_LABEL_REASONS = new Set([
+  "missing-label",
+  "exclusive-conflict",
+  "team-mismatch",
+]);
 
 // CTL-936: labelOnce now accepts an optional `appendEvent` seam. When provided
 // AND CATALYST_INTENTS_ENFORCE=1, an unrecoverable label-write failure emits an
@@ -65,7 +69,13 @@ const UNRECOVERABLE_LABEL_REASONS = new Set(["missing-label", "exclusive-conflic
 // terminal marker (.applied/.skipped) already exists → this call is a no-op;
 // `true` when this call performed the write attempt (the once-application).
 // Existing callers ignore the return value, so this is backward-compatible.
-export function labelOnce(orchDir, ticket, label, writeStatus, { appendEvent = null, env = process.env } = {}) {
+export function labelOnce(
+  orchDir,
+  ticket,
+  label,
+  writeStatus,
+  { appendEvent = null, env = process.env } = {}
+) {
   const base = labelMarkerBase(orchDir, ticket, label);
   if (existsSync(`${base}.applied`) || existsSync(`${base}.skipped`)) return false;
   try {
@@ -127,7 +137,13 @@ export function labelOnce(orchDir, ticket, label, writeStatus, { appendEvent = n
 // After REMOVAL_ESCALATION_THRESHOLD consecutive failures, activates a back-off
 // window (inRemovalBackoff) that short-circuits before calling removeLabel — the
 // storm-break. Escalates once with a log.error on the threshold trip.
-export function clearStalledLabel(orchDir, ticket, label, writeStatus, { onRemoved = null, now = () => Date.now() } = {}) {
+export function clearStalledLabel(
+  orchDir,
+  ticket,
+  label,
+  writeStatus,
+  { onRemoved = null, now = () => Date.now() } = {}
+) {
   const base = labelMarkerBase(orchDir, ticket, label);
   // CTL-1078: guard at entry — if we're in backoff, skip the doomed removeLabel.
   if (inRemovalBackoff(orchDir, ticket, label, now())) {
@@ -142,14 +158,25 @@ export function clearStalledLabel(orchDir, ticket, label, writeStatus, { onRemov
         clearRemovalFailures(orchDir, ticket, label);
         for (const suffix of [".applied", ".skipped"]) {
           const p = `${base}${suffix}`;
-          if (existsSync(p)) { try { unlinkSync(p); } catch { /* best-effort */ } }
+          if (existsSync(p)) {
+            try {
+              unlinkSync(p);
+            } catch {
+              /* best-effort */
+            }
+          }
         }
         // CTL-1045 Bug 4: run the caller's confirmed-removal hook ONLY when
         // removal is confirmed — e.g. the J3 once-marker write. A failed removal
         // must NOT disarm future genuine escalations via the once-marker.
         if (typeof onRemoved === "function") {
-          try { onRemoved(); } catch (err) {
-            log.warn({ ticket, label, err: err?.message }, "clearStalledLabel: onRemoved threw — continuing");
+          try {
+            onRemoved();
+          } catch (err) {
+            log.warn(
+              { ticket, label, err: err?.message },
+              "clearStalledLabel: onRemoved threw — continuing"
+            );
           }
         }
       } else if (r?.removed === false) {
@@ -164,8 +191,14 @@ export function clearStalledLabel(orchDir, ticket, label, writeStatus, { onRemov
       }
     };
     if (res && typeof res.then === "function") {
-      res.then(finalize).catch((err) =>
-        log.warn({ ticket, label, err: err?.message }, "clearStalledLabel: removeLabel rejected — continuing"));
+      res
+        .then(finalize)
+        .catch((err) =>
+          log.warn(
+            { ticket, label, err: err?.message },
+            "clearStalledLabel: removeLabel rejected — continuing"
+          )
+        );
     } else {
       finalize(res);
     }
@@ -184,8 +217,7 @@ export function clearStalledLabel(orchDir, ticket, label, writeStatus, { onRemov
 //
 // Marker lives under orchDir/.removal-failures/ (same rationale as
 // .escalation-cooldowns/ — outside workers/<T>/ to avoid manufacturing worker dirs).
-const REMOVAL_ESCALATION_THRESHOLD =
-  Number(process.env.REMOVAL_ESCALATION_THRESHOLD) || 3;
+const REMOVAL_ESCALATION_THRESHOLD = Number(process.env.REMOVAL_ESCALATION_THRESHOLD) || 3;
 
 function removalFailurePath(orchDir, ticket, label) {
   return join(orchDir, ".removal-failures", `${ticket}-${label}.json`);
@@ -205,9 +237,15 @@ export function recordRemovalFailure(orchDir, ticket, label, reason, now) {
       // absent or malformed → start fresh
     }
     mkdirSync(dir, { recursive: true });
-    writeFileSync(p, JSON.stringify({ ticket, label, count, firstFailedAt, lastReason: reason, lastFailedAt: now }));
+    writeFileSync(
+      p,
+      JSON.stringify({ ticket, label, count, firstFailedAt, lastReason: reason, lastFailedAt: now })
+    );
   } catch (err) {
-    log.warn({ ticket, label, err: err.message }, "label-guard: removal-failure marker write failed — continuing");
+    log.warn(
+      { ticket, label, err: err.message },
+      "label-guard: removal-failure marker write failed — continuing"
+    );
     return { count };
   }
   return { count };
@@ -218,7 +256,10 @@ export function clearRemovalFailures(orchDir, ticket, label) {
   try {
     if (existsSync(p)) unlinkSync(p);
   } catch (err) {
-    log.warn({ ticket, label, err: err.message }, "label-guard: removal-failure marker delete failed — continuing");
+    log.warn(
+      { ticket, label, err: err.message },
+      "label-guard: removal-failure marker delete failed — continuing"
+    );
   }
 }
 
@@ -307,14 +348,16 @@ export function beliefOwnsNeedsHuman(env = process.env) {
 //     site  : string                 (short site-id for the deferral log)
 //     log   : { info }              (the module's log instance)
 //   }
-export function labelNeedsHumanUnlessBeliefOwner(orchDir, ticket, writeStatus, { env = process.env, site = "unknown", log: logArg = null } = {}) {
+export function labelNeedsHumanUnlessBeliefOwner(
+  orchDir,
+  ticket,
+  writeStatus,
+  { env = process.env, site = "unknown", log: logArg = null } = {}
+) {
   if (beliefOwnsNeedsHuman(env)) {
     // Defer to executeEscalations — R12 belief owner. Record, do not page.
     const logger = logArg ?? log;
-    logger.info(
-      { ticket, site },
-      "needs-human deferred to belief owner (CTL-1241)"
-    );
+    logger.info({ ticket, site }, "needs-human deferred to belief owner (CTL-1241)");
     return;
   }
   // Enforcement OFF (default): call labelOnce exactly as before.

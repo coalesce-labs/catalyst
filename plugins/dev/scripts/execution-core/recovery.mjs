@@ -84,9 +84,7 @@ import {
 import { countReviveEvents as defaultCountReviveEvents, hasCompleteEvent } from "./event-scan.mjs";
 
 // phase-agent-emit-complete sits two directories up from execution-core/.
-const EMIT_COMPLETE_BIN = fileURLToPath(
-  new URL("../phase-agent-emit-complete", import.meta.url),
-);
+const EMIT_COMPLETE_BIN = fileURLToPath(new URL("../phase-agent-emit-complete", import.meta.url));
 
 // resolvePhaseSessionId — extracted to session-resolve.mjs (CTL-729) so
 // transcript-silence.mjs can import it without pulling in recovery.mjs's
@@ -221,7 +219,7 @@ export function reconstructWorkerState(orchDir, { statJob = defaultStatJob } = {
   if (buckets.dead.length || buckets.unknown.length) {
     log.warn(
       { dead: buckets.dead.length, unknown: buckets.unknown.length },
-      "recovery: workers need attention (dead = lost process, unknown = orphan dispatch)",
+      "recovery: workers need attention (dead = lost process, unknown = orphan dispatch)"
     );
   }
   return buckets;
@@ -251,11 +249,16 @@ export function reconstructWorkerState(orchDir, { statJob = defaultStatJob } = {
 
 function defaultEmitComplete({ orchDir, signal }, { spawn = spawnSync } = {}) {
   const args = [
-    "--phase", signal.phase,
-    "--ticket", signal.ticket,
-    "--status", "complete",
-    "--orch-dir", orchDir,
-    "--orch-id", signal.raw?.orchestrator ?? signal.ticket,
+    "--phase",
+    signal.phase,
+    "--ticket",
+    signal.ticket,
+    "--status",
+    "complete",
+    "--orch-dir",
+    orchDir,
+    "--orch-id",
+    signal.raw?.orchestrator ?? signal.ticket,
   ];
   const sessionId = signal.raw?.catalystSessionId;
   if (sessionId) {
@@ -275,7 +278,17 @@ function defaultEmitComplete({ orchDir, signal }, { spawn = spawnSync } = {}) {
 // `ticketType` is resolved by the caller from triage.json (resolveTicketType);
 // when omitted it defaults to UNKNOWN_TICKET_TYPE so the attribute is ALWAYS
 // present, never inconsistently missing (the gherkin contract).
-function buildEventEnvelope({ phase, ticket, orchId, action, reason, payloadExtras = {}, severityText = "WARN", severityNumber = 13, ticketType = UNKNOWN_TICKET_TYPE }) {
+function buildEventEnvelope({
+  phase,
+  ticket,
+  orchId,
+  action,
+  reason,
+  payloadExtras = {},
+  severityText = "WARN",
+  severityNumber = 13,
+  ticketType = UNKNOWN_TICKET_TYPE,
+}) {
   const ts = new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
   return (
     JSON.stringify({
@@ -372,7 +385,7 @@ export function defaultAppendReclaimEvent({
         body,
       },
     }),
-    "reclaim",
+    "reclaim"
   );
 }
 
@@ -399,7 +412,7 @@ export function defaultAppendOrphanDetectedEvent({
       reason,
       payloadExtras: { stalled_phases },
     }),
-    "orphan-detected",
+    "orphan-detected"
   );
 }
 
@@ -438,7 +451,7 @@ export function neverStartedAttemptsPath(orchDir, ticket, phase) {
 export function defaultReadNeverStartedAttempts(orchDir, ticket, phase) {
   try {
     const parsed = JSON.parse(
-      readFileSync(neverStartedAttemptsPath(orchDir, ticket, phase), "utf8"),
+      readFileSync(neverStartedAttemptsPath(orchDir, ticket, phase), "utf8")
     );
     const count = Number.isInteger(parsed?.count) && parsed.count > 0 ? parsed.count : 0;
     const captures = Array.isArray(parsed?.captures)
@@ -461,17 +474,17 @@ export function defaultRecordNeverStartedAttempt(orchDir, ticket, phase, capture
     mkdirSync(dirname(p), { recursive: true });
     const next = {
       count: prev.count + 1,
-      captures: [
-        ...prev.captures,
-        String(capture ?? "").slice(0, NEVER_STARTED_CAPTURE_CAP),
-      ],
+      captures: [...prev.captures, String(capture ?? "").slice(0, NEVER_STARTED_CAPTURE_CAP)],
       updatedAt: new Date().toISOString().replace(/\.\d{3}Z$/, "Z"),
     };
     const tmp = `${p}.tmp.${process.pid}`;
     writeFileSync(tmp, JSON.stringify(next, null, 2));
     renameSync(tmp, p);
   } catch (err) {
-    log.warn({ ticket, phase, err: err.message }, "ctl-932: never-started attempt marker write failed");
+    log.warn(
+      { ticket, phase, err: err.message },
+      "ctl-932: never-started attempt marker write failed"
+    );
   }
 }
 
@@ -488,7 +501,10 @@ export function defaultClearNeverStartedAttempts(orchDir, ticket, phase, { rm = 
   try {
     rm(neverStartedAttemptsPath(orchDir, ticket, phase), { force: true });
   } catch (err) {
-    log.warn({ ticket, phase, err: err.message }, "ctl-932: never-started attempt marker clear failed");
+    log.warn(
+      { ticket, phase, err: err.message },
+      "ctl-932: never-started attempt marker clear failed"
+    );
   }
 }
 
@@ -555,7 +571,7 @@ export function defaultAppendWedgedNeverStartedEvent({
         body: `Worker for ${ticket} ${phase} registered but never started its first turn (no transcript; agents state=blocked). Stopped and replaced via the revive path. Captured screen:\n\n${captured_logs}`,
       },
     }),
-    "wedged-never-started",
+    "wedged-never-started"
   );
 }
 
@@ -571,17 +587,23 @@ export function defaultPostReclaimMirror(
     existsSync: exists = existsSync,
     writeMarker = (p) => writeFileSync(p, ""),
     runCommentPost = (t, bodyText) => {
-      const helperPath = join(dirname(fileURLToPath(import.meta.url)), "../lib/linear-comment-post.sh");
+      const helperPath = join(
+        dirname(fileURLToPath(import.meta.url)),
+        "../lib/linear-comment-post.sh"
+      );
       return spawnSync(helperPath, [t, bodyText], { encoding: "utf8" });
     },
     multiHost = false,
-  } = {},
+  } = {}
 ) {
   const marker = `${orchDir}/workers/${ticket}/.linear-mirror-${phase}`;
   if (exists(marker)) return; // first-writer-wins
   // CTL-863: zombie guard — a post-takeover paused host must not post a mirror comment.
   if (!fenceGuard({ ticket, orchDir, multiHost })) {
-    log.warn({ ticket, phase }, "ctl-863: stale fence — suppressing postReclaimMirror comment (zombie guard)");
+    log.warn(
+      { ticket, phase },
+      "ctl-863: stale fence — suppressing postReclaimMirror comment (zombie guard)"
+    );
     return;
   }
   const bodyText = [
@@ -610,7 +632,7 @@ export function defaultPostReclaimMirror(
         .pop();
       log.warn(
         { ticket, phase, status: r?.status, detail },
-        "reclaim-mirror: linear-comment-post failed (continuing)",
+        "reclaim-mirror: linear-comment-post failed (continuing)"
       );
     }
   } catch (err) {
@@ -636,7 +658,7 @@ export function defaultAppendBootResumeEvent({ phase, ticket, orchId }) {
       action: "boot-resume",
       reason: "cold-start-no-live-worker",
     }),
-    "boot-resume",
+    "boot-resume"
   );
 }
 
@@ -654,7 +676,7 @@ export function defaultAppendBootResumeGatedEvent({ phase, ticket, orchId }) {
       action: "boot-resume-gated",
       reason: "cold-start-expensive-phase-awaiting-approval",
     }),
-    "boot-resume-gated",
+    "boot-resume-gated"
   );
 }
 
@@ -669,7 +691,12 @@ export function defaultAppendBootResumeGatedEvent({ phase, ticket, orchId }) {
 // regression for operator forensics INSTEAD of spawning a fresh earlier-phase
 // worker. Exported so boot-resume.mjs imports it as the default appender seam and
 // the round-trip test can confirm the envelope shape.
-export function defaultAppendBootResumePhaseRegressionEvent({ phase, ticket, dominantPhase, orchId }) {
+export function defaultAppendBootResumePhaseRegressionEvent({
+  phase,
+  ticket,
+  dominantPhase,
+  orchId,
+}) {
   return appendEnvelopeBestEffort(
     buildEventEnvelope({
       phase,
@@ -679,7 +706,7 @@ export function defaultAppendBootResumePhaseRegressionEvent({ phase, ticket, dom
       reason: "later-terminal-phase-supersedes-resume-candidate",
       payloadExtras: { dominantPhase },
     }),
-    "boot-resume-phase-regression",
+    "boot-resume-phase-regression"
   );
 }
 
@@ -714,7 +741,7 @@ export function defaultAppendReviveEvent({
       ticketType: resolveTicketType(orchDir, ticket), // CTL-1023
       payloadExtras: { attempt, prev_state_json_mtime, prev_bg_job_id },
     }),
-    "revive",
+    "revive"
   );
 }
 
@@ -733,14 +760,21 @@ export function defaultAppendYieldFileSkipEvent({ ticket, orchId, filename }) {
       reason: "yield_tombstone_filtered",
       payloadExtras: { filename },
     }),
-    "yield-file-skip",
+    "yield-file-skip"
   );
 }
 
 // CTL-932: `extras` rides into the payload so an escalation can carry evidence
 // (the wedged-never-started cap escalation embeds the screen captures from all
 // attempts). Absent for every pre-existing caller — shape unchanged.
-function defaultAppendEscalatedEvent({ phase, ticket, orchId, reason, final_attempt_count, extras = {} }) {
+function defaultAppendEscalatedEvent({
+  phase,
+  ticket,
+  orchId,
+  reason,
+  final_attempt_count,
+  extras = {},
+}) {
   return appendEnvelopeBestEffort(
     buildEventEnvelope({
       phase,
@@ -750,7 +784,7 @@ function defaultAppendEscalatedEvent({ phase, ticket, orchId, reason, final_atte
       reason,
       payloadExtras: { final_attempt_count, ...extras },
     }),
-    "escalated",
+    "escalated"
   );
 }
 
@@ -773,7 +807,7 @@ function defaultAppendReviveSuppressedEvent({
       reason,
       payloadExtras: { window_distinct_tickets, window_ms: STORM_WINDOW_MS },
     }),
-    "revive-suppressed",
+    "revive-suppressed"
   );
 }
 
@@ -819,7 +853,7 @@ export function defaultAppendDispatchFailedEvent({
         ...(signal !== undefined && signal !== null && signal !== "" && { signal }),
       },
     }),
-    "dispatch-failed",
+    "dispatch-failed"
   );
 }
 
@@ -841,7 +875,7 @@ export function defaultAppendRunawayEvent({ ticket, orchId, count, window_ms }) 
       reason: "event-rate-domination",
       payloadExtras: { count, window_ms },
     }),
-    "runaway",
+    "runaway"
   );
 }
 
@@ -860,7 +894,13 @@ export function defaultAppendRunawayEvent({ ticket, orchId, count, window_ms }) 
 // defaultAppendDispatchRequestedEvent — phase.dispatch.requested.<TICKET>.
 // Emitted when the scheduler/recovery DECIDES to dispatch a phase, before the
 // `claude --bg` spawn. reason ∈ {new-work, advance, revive}.
-export function defaultAppendDispatchRequestedEvent({ orchId, orchDir, ticket, target_phase, reason }) {
+export function defaultAppendDispatchRequestedEvent({
+  orchId,
+  orchDir,
+  ticket,
+  target_phase,
+  reason,
+}) {
   return appendEnvelopeBestEffort(
     buildEventEnvelope({
       phase: "dispatch",
@@ -874,7 +914,7 @@ export function defaultAppendDispatchRequestedEvent({ orchId, orchDir, ticket, t
       // CTL-1023: resolves to "unknown" pre-triage (no triage.json yet) — correct.
       ticketType: resolveTicketType(orchDir, ticket),
     }),
-    "dispatch-requested",
+    "dispatch-requested"
   );
 }
 
@@ -902,7 +942,7 @@ export function defaultAppendDispatchLaunchedEvent({
       // CTL-1023: "unknown" until triage.json lands; full type post-triage.
       ticketType: resolveTicketType(orchDir, ticket),
     }),
-    "dispatch-launched",
+    "dispatch-launched"
   );
 }
 
@@ -921,7 +961,7 @@ export function defaultAppendPreemptedEvent({ orchId, ticket, phase, preemptedBy
       action: "preempted",
       payloadExtras: { preempted_by: preemptedBy, bg_job_id: bgJobId },
     }),
-    "preempted",
+    "preempted"
   );
 }
 
@@ -938,7 +978,7 @@ export function defaultAppendResumedAfterPreemptionEvent({ orchId, ticket, phase
       action: "resumed-after-preemption",
       payloadExtras: { resume_session: resumeSession ?? null },
     }),
-    "resumed-after-preemption",
+    "resumed-after-preemption"
   );
 }
 
@@ -947,9 +987,14 @@ export function defaultAppendResumedAfterPreemptionEvent({ orchId, ticket, phase
 // (CTL-768). bg_job_id preserved so the revive path resolves --resume. Never throws.
 export function defaultAppendHeldStoppedEvent({ orchId, ticket, phase, bgJobId }) {
   return appendEnvelopeBestEffort(
-    buildEventEnvelope({ phase, ticket, orchId, action: "held-stopped",
-      payloadExtras: { bg_job_id: bgJobId } }),
-    "held-stopped",
+    buildEventEnvelope({
+      phase,
+      ticket,
+      orchId,
+      action: "held-stopped",
+      payloadExtras: { bg_job_id: bgJobId },
+    }),
+    "held-stopped"
   );
 }
 
@@ -975,7 +1020,7 @@ export function defaultAppendPhaseAdvanceHeldEvent({ orchId, ticket, reason, blo
       reason,
       payloadExtras: { blockers: blockers ?? [] },
     }),
-    "advance-held",
+    "advance-held"
   );
 }
 
@@ -992,7 +1037,7 @@ export function defaultAppendCooldownGcEvent({ ticket, orchId, target_phase }) {
       reason: "expired-and-ineligible",
       payloadExtras: { target_phase },
     }),
-    "cooldown-gc",
+    "cooldown-gc"
   );
 }
 
@@ -1014,7 +1059,7 @@ export function defaultAppendCooldownEscalatedEvent({
       reason: "consecutive-dispatch-failures",
       payloadExtras: { target_phase, code, consecutiveFailures },
     }),
-    "cooldown-escalated",
+    "cooldown-escalated"
   );
 }
 
@@ -1037,9 +1082,16 @@ export function defaultAppendParallelismSampledEvent({
       orchId: label,
       action: "parallelism-sampled",
       reason: "sample",
-      payloadExtras: { load1, load5, load15, mem_free_pct: memFreePct, bg_count: bgCount, maxParallel_current: maxParallelCurrent },
+      payloadExtras: {
+        load1,
+        load5,
+        load15,
+        mem_free_pct: memFreePct,
+        bg_count: bgCount,
+        maxParallel_current: maxParallelCurrent,
+      },
     }),
-    "parallelism-sampled",
+    "parallelism-sampled"
   );
 }
 
@@ -1060,7 +1112,7 @@ export function defaultAppendParallelismAdjustedEvent({
       reason,
       payloadExtras: { old_maxParallel: oldMaxParallel, new_maxParallel: newMaxParallel },
     }),
-    "parallelism-adjusted",
+    "parallelism-adjusted"
   );
 }
 
@@ -1100,7 +1152,7 @@ export function defaultAppendAutotuneGaugeEvent({
         decision_reason: reason,
       },
     }),
-    "autotune-gauge",
+    "autotune-gauge"
   );
 }
 
@@ -1181,13 +1233,13 @@ export function defaultReviveDispatch(
     // on the revive path too (the failed path was already covered by CTL-611).
     appendRequested = defaultAppendDispatchRequestedEvent,
     appendLaunched = defaultAppendDispatchLaunchedEvent,
-  } = {},
+  } = {}
 ) {
   const signalPath = join(orchDir, "workers", ticket, `phase-${phase}.json`);
   if (!existsSync(signalPath)) {
     log.warn(
       { ticket, phase, signalPath },
-      "revive: signal file missing — cannot reset to stalled, refusing dispatch",
+      "revive: signal file missing — cannot reset to stalled, refusing dispatch"
     );
     return { code: 1, stdout: "", stderr: "signal-missing" };
   }
@@ -1279,11 +1331,16 @@ export function defaultReviveDispatch(
 //     the audit-event + label-call pair entirely so the scheduler's own
 //     event-log fast path stops self-feeding.
 function defaultApplyStalledLabel({ orchDir, ticket }) {
-  return labelNeedsHumanUnlessBeliefOwner(orchDir, ticket, { applyLabel: defaultApplyLabel }, {
-    env: process.env,
-    site: "recovery-stalled",
-    log: { info: () => {} },
-  });
+  return labelNeedsHumanUnlessBeliefOwner(
+    orchDir,
+    ticket,
+    { applyLabel: defaultApplyLabel },
+    {
+      env: process.env,
+      site: "recovery-stalled",
+      log: { info: () => {} },
+    }
+  );
 }
 
 // defaultKillBgJob — terminate a dead/abandoned bg worker (CTL-657). Pre-CTL-657
@@ -1376,7 +1433,10 @@ export function writeBootMarker(orchDir, { now = () => new Date().toISOString() 
     writeFileSync(tmp, JSON.stringify({ bootedAt: now() }));
     renameSync(tmp, p);
   } catch (err) {
-    log.warn({ err }, "ctl-655: failed to write daemon-boot.json (revive budget will not reset this run)");
+    log.warn(
+      { err },
+      "ctl-655: failed to write daemon-boot.json (revive budget will not reset this run)"
+    );
   }
 }
 
@@ -1509,7 +1569,7 @@ export function detectColdStart({
   readDir = readdirSync,
   statJob = defaultStatJob,
   readEpoch = defaultReadRuntimeEpoch,
-  orchDir = undefined,                       // CTL-701: enables exec-core epoch
+  orchDir = undefined, // CTL-701: enables exec-core epoch
   readExecCoreEpoch = readExecCoreBootEpoch, // CTL-701: injectable seam
 } = {}) {
   const { epoch: runtimeEpoch, epochSource: runtimeSource } = readEpoch();
@@ -1807,7 +1867,7 @@ export function reclaimDeadWorkIfPossible(
     // The intentDb is obtained from beliefs.db (CATALYST_BELIEFS_SHADOW=1 gate);
     // it is threaded in from the scheduler's reclaimOpts alongside fetchState/cache.
     intentDb = null,
-  } = {},
+  } = {}
 ) {
   const klass = classifyWorker(signal, { statJob });
   // CTL-662: terminal (phase finished) and unknown (no bg_job_id) still
@@ -1820,7 +1880,10 @@ export function reclaimDeadWorkIfPossible(
   // comment. Neither reclaim nor escalate — the comment-wake path in daemon.mjs
   // handles re-dispatch. Treat as noop so the per-tick sweep never interferes.
   if (signal?.status === "needs-input") {
-    log.debug({ ticket: signal.ticket }, "reclaimDeadWork: skipping needs-input (parked for human)");
+    log.debug(
+      { ticket: signal.ticket },
+      "reclaimDeadWork: skipping needs-input (parked for human)"
+    );
     return "noop";
   }
 
@@ -1847,7 +1910,9 @@ export function reclaimDeadWorkIfPossible(
     try {
       const cfgRow = intentDb.query("SELECT value_int FROM cfg WHERE key = 'max_attempts'").get();
       if (typeof cfgRow?.value_int === "number") maxAttempts = cfgRow.value_int;
-    } catch { /* fall through — use default */ }
+    } catch {
+      /* fall through — use default */
+    }
 
     // Enforce: suppress kill when the intent has already gone ineffective.
     if ((process.env.CATALYST_INTENTS_ENFORCE ?? "0") === "1") {
@@ -1858,13 +1923,13 @@ export function reclaimDeadWorkIfPossible(
               WHERE kind = 'kill' AND subject = ?
                 AND (outcome = 'ineffective'
                   OR (outcome IS NULL AND attempts >= ?))
-              LIMIT 1`,
+              LIMIT 1`
           )
           .get(subject, maxAttempts);
         if (ineffective) {
           log.warn(
             { ticket, phase, bgJobId: killBgJobId, subject },
-            "ctl-936: kill intent ineffective — skipping claude stop (stop-storm prevention)",
+            "ctl-936: kill intent ineffective — skipping claude stop (stop-storm prevention)"
           );
           return;
         }
@@ -1876,10 +1941,14 @@ export function reclaimDeadWorkIfPossible(
     // Record the intent if not already open.
     try {
       const open = intentDb
-        .query("SELECT 1 FROM intent WHERE kind = 'kill' AND subject = ? AND outcome IS NULL LIMIT 1")
+        .query(
+          "SELECT 1 FROM intent WHERE kind = 'kill' AND subject = ? AND outcome IS NULL LIMIT 1"
+        )
         .get(subject);
       if (!open) {
-        const tickRow = intentDb.query("SELECT tick_id FROM tick ORDER BY tick_id DESC LIMIT 1").get();
+        const tickRow = intentDb
+          .query("SELECT tick_id FROM tick ORDER BY tick_id DESC LIMIT 1")
+          .get();
         if (tickRow) {
           // CTL-936 H1: pin bgJobId so resolvePostcondition can distinguish
           // the targeted session from a newly-revived worker on the same
@@ -1888,12 +1957,24 @@ export function reclaimDeadWorkIfPossible(
           intentDb.run(
             `INSERT INTO intent (tick_id, kind, subject, belief_id, postcondition, attempts, outcome)
              VALUES (?, 'kill', ?, NULL, ?, 0, NULL)`,
-            [tickRow.tick_id, subject, JSON.stringify({ kind: "kill", subject, bgJobId: killBgJobId, sessionNotRegistered: true })],
+            [
+              tickRow.tick_id,
+              subject,
+              JSON.stringify({
+                kind: "kill",
+                subject,
+                bgJobId: killBgJobId,
+                sessionNotRegistered: true,
+              }),
+            ]
           );
         }
       }
     } catch (err) {
-      log.warn({ err: err?.message, ticket, phase }, "ctl-936: recordIntent threw — continuing kill");
+      log.warn(
+        { err: err?.message, ticket, phase },
+        "ctl-936: recordIntent threw — continuing kill"
+      );
     }
     killBgJob({ bgJobId: killBgJobId });
   }
@@ -1956,10 +2037,7 @@ export function reclaimDeadWorkIfPossible(
     // so a genuine escalation re-fires cleanly once the breaker closes). A
     // transient 429 is not a human-intervention condition.
     if (breaker.isOpen(now())) {
-      log.warn(
-        { ticket, phase, reason },
-        "ctl-679: escalation deferred — Linear breaker open"
-      );
+      log.warn({ ticket, phase, reason }, "ctl-679: escalation deferred — Linear breaker open");
       return "rate-limited-deferred";
     }
     if (inEscalationCooldownFn(orchDir, ticket, phase, now())) {
@@ -1971,36 +2049,45 @@ export function reclaimDeadWorkIfPossible(
     const escType = reasonToType(reason);
     const whyField = reasonToWhyField(reason, finalAttemptCount);
     let explanation;
-    const explanationFields = escType === "manual"
-      ? {
-          escalation_type: "manual",
-          problem: `${phase} escalated after ${finalAttemptCount} attempt(s): ${reason}`,
-          call_to_action: extras?.call_to_action ?? `grant the required capability and re-run ${ticket} ${phase}, or push manually?`,
-          blocked_capability: extras?.blockedCapability ?? "required OAuth scope or credential unavailable",
-          instructions: extras?.instructions ?? ["check CATALYST_WORKFLOW_GITHUB_TOKEN"],
-          remediation_then_retry: `re-run ${ticket} ${phase} after granting the capability`,
-          why_not_auto: whyField.value,
-          observed: { final_attempt_count: finalAttemptCount, ...(extras?.observed ?? {}) },
-          attempts: extras?.attempts ?? [],
-        }
-      : {
-          escalation_type: "authorization",
-          problem: `${phase} escalated after ${finalAttemptCount} attempt(s): ${reason}`,
-          call_to_action: extras?.call_to_action ?? `authorize ${ticket} ${phase} to retry or change approach?`,
-          recommendation: `retry ${ticket} ${phase} after investigating ${reason}`,
-          risk: `continued retries risk wasting budget; ${finalAttemptCount} attempt(s) already made`,
-          why_asking: whyField.value,
-          could_higher_tier_resolve: tierProducer(extras?.model ?? signal?.raw?.model),
-          authorize_label: `retry ${ticket} ${phase}`,
-          observed: { final_attempt_count: finalAttemptCount, ...(extras?.observed ?? {}) },
-          attempts: extras?.attempts ?? [],
-        };
+    const explanationFields =
+      escType === "manual"
+        ? {
+            escalation_type: "manual",
+            problem: `${phase} escalated after ${finalAttemptCount} attempt(s): ${reason}`,
+            call_to_action:
+              extras?.call_to_action ??
+              `grant the required capability and re-run ${ticket} ${phase}, or push manually?`,
+            blocked_capability:
+              extras?.blockedCapability ?? "required OAuth scope or credential unavailable",
+            instructions: extras?.instructions ?? ["check CATALYST_WORKFLOW_GITHUB_TOKEN"],
+            remediation_then_retry: `re-run ${ticket} ${phase} after granting the capability`,
+            why_not_auto: whyField.value,
+            observed: { final_attempt_count: finalAttemptCount, ...(extras?.observed ?? {}) },
+            attempts: extras?.attempts ?? [],
+          }
+        : {
+            escalation_type: "authorization",
+            problem: `${phase} escalated after ${finalAttemptCount} attempt(s): ${reason}`,
+            call_to_action:
+              extras?.call_to_action ?? `authorize ${ticket} ${phase} to retry or change approach?`,
+            recommendation: `retry ${ticket} ${phase} after investigating ${reason}`,
+            risk: `continued retries risk wasting budget; ${finalAttemptCount} attempt(s) already made`,
+            why_asking: whyField.value,
+            could_higher_tier_resolve: tierProducer(extras?.model ?? signal?.raw?.model),
+            authorize_label: `retry ${ticket} ${phase}`,
+            observed: { final_attempt_count: finalAttemptCount, ...(extras?.observed ?? {}) },
+            attempts: extras?.attempts ?? [],
+          };
     try {
       explanation = buildExplanation(explanationFields);
     } catch {
       // CTL-1130: degrade with the full assembled fields (not just { problem })
       // so observed/recommendation/risk (or the manual capability fields) survive.
-      explanation = coerceExplanation(explanationFields, { ticket, phase, canExecute: escType !== "manual" });
+      explanation = coerceExplanation(explanationFields, {
+        ticket,
+        phase,
+        canExecute: escType !== "manual",
+      });
     }
     const enrichedExtras = { ...(extras ?? {}), explanation };
     appendEscalatedEvent({
@@ -2062,12 +2149,12 @@ export function reclaimDeadWorkIfPossible(
     if (sc.code !== 0) {
       log.warn(
         { ticket, phase, code: sc.code, stderr: sc.stderr, reason: terminalCheck.reason },
-        "ctl-642: terminal short-circuit emit-complete failed; falling through to lifecycle path (retry next tick)",
+        "ctl-642: terminal short-circuit emit-complete failed; falling through to lifecycle path (retry next tick)"
       );
     } else {
       log.info(
         { ticket, phase, reason: terminalCheck.reason },
-        "ctl-642: terminal short-circuit — ticket already terminal/merged, signal flipped to done (no escalation)",
+        "ctl-642: terminal short-circuit — ticket already terminal/merged, signal flipped to done (no escalation)"
       );
       return "terminal-short-circuit";
     }
@@ -2137,7 +2224,7 @@ export function reclaimDeadWorkIfPossible(
       if (r.code !== 0) {
         log.warn(
           { ticket, phase, code: r.code, stderr: r.stderr },
-          "ctl-778 alive-probe-reclaim: emit-complete failed; will retry next tick",
+          "ctl-778 alive-probe-reclaim: emit-complete failed; will retry next tick"
         );
         return "reclaim-failed";
       }
@@ -2149,7 +2236,10 @@ export function reclaimDeadWorkIfPossible(
         probeChecked: describeProbe(phase),
         reclaimedBgJobId: prevBgJobId,
       });
-      log.info({ ticket, phase }, "ctl-778: alive-but-idle worker reclaimed (complete event + probe)");
+      log.info(
+        { ticket, phase },
+        "ctl-778: alive-but-idle worker reclaimed (complete event + probe)"
+      );
       return "reclaimed";
     }
 
@@ -2171,11 +2261,7 @@ export function reclaimDeadWorkIfPossible(
     // committed work is never touched here (existing paths own it). Dead
     // workers never reach this branch (lifecycle === "alive" only), and a
     // worker WITH a transcript falls through untouched.
-    if (
-      prevBgJobId &&
-      Number.isFinite(startedAtMs) &&
-      now() - startedAtMs > neverStartedMs
-    ) {
+    if (prevBgJobId && Number.isFinite(startedAtMs) && now() - startedAtMs > neverStartedMs) {
       let wedgeShortId = null;
       try {
         wedgeShortId = shortIdFromSessionId(prevBgJobId);
@@ -2229,8 +2315,17 @@ export function reclaimDeadWorkIfPossible(
                 }).catch(() => {});
                 intentAwareKill({ bgJobId: prevBgJobId });
                 log.warn(
-                  { ticket, phase, prevBgJobId, attempts: attempts.count, exhaustedProgress, tempo: jobStat?.tempo, detail: jobStat?.detail, needs: jobStat?.needs },
-                  "ctl-932: wedged-never-started replacement budget exhausted — escalating needs-human (not looping)",
+                  {
+                    ticket,
+                    phase,
+                    prevBgJobId,
+                    attempts: attempts.count,
+                    exhaustedProgress,
+                    tempo: jobStat?.tempo,
+                    detail: jobStat?.detail,
+                    needs: jobStat?.needs,
+                  },
+                  "ctl-932: wedged-never-started replacement budget exhausted — escalating needs-human (not looping)"
                 );
                 return escalateOnce("wedged-never-started-exhausted", attempts.count, {
                   bg_job_id: prevBgJobId,
@@ -2268,16 +2363,31 @@ export function reclaimDeadWorkIfPossible(
                 reason: "ctl-932-wedged-never-started",
               }).catch(() => {});
               intentAwareKill({ bgJobId: prevBgJobId });
-              const dr = reviveDispatch({ orchDir, ticket, phase, resumeSession: null, attempt: attempt + 1 });
+              const dr = reviveDispatch({
+                orchDir,
+                ticket,
+                phase,
+                resumeSession: null,
+                attempt: attempt + 1,
+              });
               if (dr.code === 0) {
                 log.warn(
-                  { ticket, phase, prevBgJobId, attempt, ageMs: now() - startedAtMs, tempo: jobStat?.tempo, detail: jobStat?.detail, needs: jobStat?.needs },
-                  "ctl-932: wedged-never-started worker stopped and replaced (no transcript + agents blocked)",
+                  {
+                    ticket,
+                    phase,
+                    prevBgJobId,
+                    attempt,
+                    ageMs: now() - startedAtMs,
+                    tempo: jobStat?.tempo,
+                    detail: jobStat?.detail,
+                    needs: jobStat?.needs,
+                  },
+                  "ctl-932: wedged-never-started worker stopped and replaced (no transcript + agents blocked)"
                 );
               } else {
                 log.warn(
                   { ticket, phase, attempt, code: dr.code, stderr: dr.stderr },
-                  "ctl-932: wedged replacement dispatch failed; will retry next tick",
+                  "ctl-932: wedged replacement dispatch failed; will retry next tick"
                 );
               }
               return "wedged-redispatched";
@@ -2292,7 +2402,7 @@ export function reclaimDeadWorkIfPossible(
       if (!workDone) {
         log.warn(
           { ticket, phase, prevBgJobId, aliveForMs: now() - startedAtMs },
-          "ctl-736: alive worker past BUSY_CEILING_MS with no committed work — escalating (never silent reclaim)",
+          "ctl-736: alive worker past BUSY_CEILING_MS with no committed work — escalating (never silent reclaim)"
         );
         return escalateOnce("busy-ceiling-exceeded", 0);
       }
@@ -2331,7 +2441,7 @@ export function reclaimDeadWorkIfPossible(
             ghostAbsent = true;
             log.warn(
               { ticket, phase, prevBgJobId, snapshotAgeMs: snap.ageMs },
-              "ctl-809: jobLifecycle-alive but ABSENT from fresh claude-agents snapshot — treating as dead (ghost breaker)",
+              "ctl-809: jobLifecycle-alive but ABSENT from fresh claude-agents snapshot — treating as dead (ghost breaker)"
             );
           }
         } else {
@@ -2355,7 +2465,7 @@ export function reclaimDeadWorkIfPossible(
             ghostAbsent = true;
             log.warn(
               { ticket, phase, prevBgJobId, staleForMs: now() - job.mtimeMs, mtimeFloorMs },
-              "ctl-868: jobLifecycle-alive but state.json mtime stale beyond zombie floor (no fresh agents snapshot) — treating as dead (zombie breaker)",
+              "ctl-868: jobLifecycle-alive but state.json mtime stale beyond zombie floor (no fresh agents snapshot) — treating as dead (zombie breaker)"
             );
           }
         }
@@ -2365,8 +2475,15 @@ export function reclaimDeadWorkIfPossible(
       // CTL-932: surface the supervisor's self-report (tempo/detail/needs) —
       // the fields that contained the 2026-06-09 diagnosis but were never read.
       log.info(
-        { ticket, phase, prevBgJobId, tempo: jobStat?.tempo, detail: jobStat?.detail, needs: jobStat?.needs },
-        "ctl-736: alive worker — reclaim suppressed",
+        {
+          ticket,
+          phase,
+          prevBgJobId,
+          tempo: jobStat?.tempo,
+          detail: jobStat?.detail,
+          needs: jobStat?.needs,
+        },
+        "ctl-736: alive worker — reclaim suppressed"
       );
       return "alive-suppressed";
     }
@@ -2489,7 +2606,7 @@ export function reclaimDeadWorkIfPossible(
     if (r.code !== 0) {
       log.warn(
         { ticket, phase, code: r.code, stderr: r.stderr },
-        "reclaim-dead-work: emit-complete failed; will retry next tick",
+        "reclaim-dead-work: emit-complete failed; will retry next tick"
       );
       return "reclaim-failed";
     }
@@ -2545,12 +2662,12 @@ export function reclaimDeadWorkIfPossible(
   // A signal with no parseable timestamp (legacy) falls through unchanged.
   const lastActiveMs = Math.max(
     Date.parse(signal.raw?.updatedAt ?? "") || 0,
-    Date.parse(signal.raw?.startedAt ?? "") || 0,
+    Date.parse(signal.raw?.startedAt ?? "") || 0
   );
   if (lastActiveMs > 0 && now() - lastActiveMs > reviveMaxAgeMs) {
     log.info(
       { ticket, phase, prevBgJobId, ageMs: now() - lastActiveMs, reviveMaxAgeMs },
-      "ctl-735: signal too old to revive — abandoned historical dir, inert",
+      "ctl-735: signal too old to revive — abandoned historical dir, inert"
     );
     return "inert-stale";
   }
@@ -2594,7 +2711,7 @@ export function reclaimDeadWorkIfPossible(
     }
     log.warn(
       { ticket, phase, prevBgJobId, currentProgress, lastProgress },
-      "ctl-736: no forward progress since last attempt — stopping, not respawning",
+      "ctl-736: no forward progress since last attempt — stopping, not respawning"
     );
     // needs-human (cool-down + breaker guarded). When the Linear breaker is open
     // the escalation defers — surface that so the scheduler does not record a
@@ -2626,10 +2743,7 @@ export function reclaimDeadWorkIfPossible(
   // defensive kill + fresh dispatch. Resolving here (after the budget/storm gates
   // pass) means only an actually-reviving worker pays the one state.json read.
   const resumeSession = prevBgJobId ? resolveSession(prevBgJobId) : null;
-  log.info(
-    { ticket, phase, prevBgJobId, resumeSession },
-    "ctl-658: revive resume id resolved",
-  );
+  log.info({ ticket, phase, prevBgJobId, resumeSession }, "ctl-658: revive resume id resolved");
 
   // Defensive stop: the worker is reclaim-eligible (absent or idle-confirmed),
   // so we stop it to free RAM and release any worktree lock before re-dispatch.
@@ -2681,7 +2795,7 @@ export function reclaimDeadWorkIfPossible(
   if (eventLanded === false) {
     log.error(
       { ticket, phase, attempt },
-      "ctl-587: revive event append failed — aborting dispatch to preserve budget counter (will retry next tick)",
+      "ctl-587: revive event append failed — aborting dispatch to preserve budget counter (will retry next tick)"
     );
     // Best-effort suppression audit so operators see SOMETHING in events.jsonl
     // (if the audit log is writeable for this kind even though the revive
@@ -2700,7 +2814,13 @@ export function reclaimDeadWorkIfPossible(
   // CTL-761: forward the DISPATCH ordinal (= revive ordinal + 1; cold=1, first
   // revive=2) so the revived worker's terminal event carries phase.attempt /
   // phase.revive_count. `attempt` here is the revive ordinal (priorRevives+1).
-  const dispatchRes = reviveDispatch({ orchDir, ticket, phase, resumeSession, attempt: attempt + 1 });
+  const dispatchRes = reviveDispatch({
+    orchDir,
+    ticket,
+    phase,
+    resumeSession,
+    attempt: attempt + 1,
+  });
   if (dispatchRes.code === 0) {
     writeReviveMarker({ orchDir, ticket, attempt });
     log.info({ ticket, phase, attempt }, "ctl-587: revived");
@@ -2710,7 +2830,7 @@ export function reclaimDeadWorkIfPossible(
     // revives" record (audit-vs-marker drift is fine: the event is the truth).
     log.warn(
       { ticket, phase, attempt, code: dispatchRes.code, stderr: dispatchRes.stderr },
-      "ctl-587: revive dispatch failed; will retry next tick",
+      "ctl-587: revive dispatch failed; will retry next tick"
     );
   }
   return "revived";
@@ -2797,8 +2917,7 @@ export function readClusterHeartbeats({
         continue; // partial/garbage line
       }
       if (evt?.attributes?.["event.name"] !== HEARTBEAT_EVENT) continue;
-      const host =
-        evt?.body?.payload?.["host.name"] ?? evt?.resource?.["host.name"];
+      const host = evt?.body?.payload?.["host.name"] ?? evt?.resource?.["host.name"];
       const ts = evt?.ts;
       if (typeof host !== "string" || host.length === 0) continue;
       if (typeof ts !== "string" || ts.length === 0) continue;
@@ -2845,7 +2964,7 @@ export function readClusterHeartbeats({
 export function phaseAlreadyComplete(
   ticket,
   phase,
-  { readLog = () => readFileSync(getEventLogPath(), "utf8") } = {},
+  { readLog = () => readFileSync(getEventLogPath(), "utf8") } = {}
 ) {
   const needle = `phase.${phase}.complete.${ticket}`;
   let raw;
@@ -2916,11 +3035,14 @@ export async function inferResumePhase(ticket, { probes = WORK_DONE_PROBES, cwd 
 // Fallback: scan the local worker signal directory for non-terminal signals
 // dispatched from the dead host (the original local-only behavior, unchanged).
 // `anchorIssue`/`readPeers` are injectable for unit tests.
-function defaultOwnedTicketsForHost(deadHost, {
-  orchDir,
-  anchorIssue = getLivenessAnchorIssue(),
-  readPeers = (anchor) => readPeerHeartbeatsSync({ anchorIssue: anchor }),
-} = {}) {
+function defaultOwnedTicketsForHost(
+  deadHost,
+  {
+    orchDir,
+    anchorIssue = getLivenessAnchorIssue(),
+    readPeers = (anchor) => readPeerHeartbeatsSync({ anchorIssue: anchor }),
+  } = {}
+) {
   if (anchorIssue) {
     try {
       const peerMap = readPeers(anchorIssue);
@@ -2928,7 +3050,9 @@ function defaultOwnedTicketsForHost(deadHost, {
       if (Array.isArray(rec?.in_flight_tickets) && rec.in_flight_tickets.length > 0) {
         return [...new Set(rec.in_flight_tickets)];
       }
-    } catch { /* fail-open → local scan */ }
+    } catch {
+      /* fail-open → local scan */
+    }
   }
   // Fallback: local signal scan (original behavior; also runs when anchor unset).
   const signals = readWorkerSignals(orchDir);
@@ -2974,7 +3098,7 @@ export async function reclaimDeadHostWork(
     thoughtsPull = (cwd) => defaultThoughtsPull(cwd),
     dispatch = (od, ticket, phase, cwd) =>
       dispatchTicket(od, ticket, phase, { dispatch: defaultDispatch }),
-  } = {},
+  } = {}
 ) {
   const taken = [];
 
@@ -3005,7 +3129,11 @@ export async function reclaimDeadHostWork(
       // takeover host sees the dead host's pushed research/plan docs.
       // Fail-open: a failed pull must not abort reclaim (worst case the probe
       // re-dispatches, the prior behavior).
-      try { thoughtsPull(wt.cwd); } catch { /* fail-open */ }
+      try {
+        thoughtsPull(wt.cwd);
+      } catch {
+        /* fail-open */
+      }
 
       // Infer the next phase to dispatch from durable artifacts.
       const phase = await inferResume(ticket, wt.cwd);

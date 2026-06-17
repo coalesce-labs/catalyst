@@ -153,7 +153,11 @@ export async function killHungWorker(
   }
 
   // (3) needs-human (idempotent via .applied marker) + escalation record.
-  labelNeedsHumanUnlessBeliefOwner(orchDir, ticket, writeStatus, { env, site: "watchdog-kill", log });
+  labelNeedsHumanUnlessBeliefOwner(orchDir, ticket, writeStatus, {
+    env,
+    site: "watchdog-kill",
+    log,
+  });
   recordEscalation(orchDir, ticket, phase, failureReason, now());
 
   log.warn(
