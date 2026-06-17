@@ -186,7 +186,23 @@ import {
 } from "./unstuck-sweep.mjs";
 // CTL-1176: Pass 0r — LLM reasoning recovery pass. Ships off by default (ADR-023);
 // operators opt in via CATALYST_RECOVERY_PASS=shadow then =enforce.
-import { reasoningRecoveryPass } from "./recovery-reasoning.mjs";
+//
+// The host-local cooldown / intent ledger and the act-seams resolve their
+// orchDir from process.env.CATALYST_ORCHESTRATOR_DIR — which the daemon NEVER
+// sets on its own process (that env var is exported only onto CHILD phase-agent
+// processes by dispatch.mjs / phase-agent-dispatch). So the bare defaults would
+// resolve orchDir=null in the daemon, making the cooldown / max-attempts /
+// escalated-latch all inert and turning shadow into an unconditional spammer.
+// We import the defaults explicitly and BIND them to the tick's real orchDir at
+// the call site (the scheduler already has orchDir in scope) so the storm guard
+// is real in production, not just in unit tests that inject orchDir by hand.
+import {
+  reasoningRecoveryPass,
+  defaultShouldSkipItem as recoveryShouldSkipItem,
+  defaultRecordIntent as recoveryRecordIntent,
+  defaultInvokeSeam as recoveryInvokeSeam,
+  defaultInvokeRemediateCapped as recoveryInvokeRemediateCapped,
+} from "./recovery-reasoning.mjs";
 // CTL-1219: the per-category enforcement seam registry (dirty-tree /
 // source-conflict / orphan-stale / stale-label). Pure-cored + injectable; bound
 // to production deps at the unstuckSweep wiring point below. Wiring this does NOT
@@ -3353,10 +3369,29 @@ export function schedulerTick(
           .map((sig) => ({
             ticket: sig.ticket,
             phase: sig.phase,
+            // CTL-1176: thread the worker's bg_job_id so the recovery pass's
+            // DIAGNOSE step can capture `claude logs` evidence read-only when the
+            // signal didn't already carry logsOutput.
+            bgJobId: sig.raw?.bg_job_id ?? null,
             evidence: sig.raw ?? {},
           }));
         if (rItems.length > 0) {
-          const rResult = reasoningRecoveryPass(rItems, { mode: rMode });
+          // CTL-1176: BIND the host-local ledger + act-seams to THIS tick's real
+          // orchDir. Without this the defaults call resolveOrchDir() →
+          // process.env.CATALYST_ORCHESTRATOR_DIR, which the daemon never sets on
+          // its own process → orchDir=null → cooldown/max-attempts/escalated-latch
+          // all inert and shadow re-posts every item every tick. orchDir is the
+          // tick's first arg (schedulerTick(orchDir, …)), so it's already in scope.
+          const rResult = reasoningRecoveryPass(rItems, {
+            mode: rMode,
+            shouldSkipItem: (ticket) => recoveryShouldSkipItem(ticket, { orchDir }),
+            recordIntent: (ticket, intent) =>
+              recoveryRecordIntent(ticket, intent, { orchDir }),
+            invokeSeam: (ticket, seamId, brief) =>
+              recoveryInvokeSeam(ticket, seamId, brief, { orchDir }),
+            invokeRemediateCapped: (ticket, briefObj) =>
+              recoveryInvokeRemediateCapped(ticket, briefObj, { orchDir }),
+          });
           if (rResult.processed > 0) {
             log.info(
               {

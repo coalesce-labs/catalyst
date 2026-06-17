@@ -25,7 +25,25 @@
 // • R11 action_ineffective + max_attempts=2 → R12 forces escalate
 // • Decide/act bright line: Datalog derives; this pass + seams act and emit back
 
-import { log as defaultLog } from "./config.mjs";
+import {
+  mkdirSync,
+  appendFileSync,
+  readFileSync,
+  writeFileSync,
+  existsSync,
+  renameSync,
+} from "node:fs";
+import { dirname, join } from "node:path";
+import { randomBytes } from "node:crypto";
+import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
+import { createRequire } from "node:module";
+import {
+  log as defaultLog,
+  getEventLogPath,
+} from "./config.mjs";
+import { hostName, hostId } from "./lib/host-identity.mjs";
+import { captureEvidence } from "./diagnostician.mjs";
 
 // Wrap defaultLog to ensure it's a function (config.mjs may export an object)
 const defaultLogFn = typeof defaultLog === "function" ? defaultLog : (msg) => {
@@ -35,6 +53,17 @@ const defaultLogFn = typeof defaultLog === "function" ? defaultLog : (msg) => {
     console.log(msg);
   }
 };
+
+// linear-comment-post.sh — the app-actor OAuth comment helper (CTL-1182 path).
+const LINEAR_COMMENT_POST_BIN = fileURLToPath(
+  new URL("../lib/linear-comment-post.sh", import.meta.url),
+);
+
+// phase-agent-emit-complete — the canonical wake/synthetic-complete emitter, used
+// by the CTL-1186 phase-pr re-dispatch to nudge the scheduler after re-arming.
+const EMIT_COMPLETE_BIN = fileURLToPath(
+  new URL("../phase-agent-emit-complete", import.meta.url),
+);
 
 // ─── Main entry point ──────────────────────────────────────────────────────
 
@@ -48,7 +77,16 @@ export function reasoningRecoveryPass(items, opts = {}) {
     postComment = defaultPostComment,
     emitEvent = defaultEmitEvent,
     shouldSkipItem = defaultShouldSkipItem,
+    // CTL-1176: DIAGNOSE evidence-collector. Read-only — populates an item's
+    // {logsOutput, jobState} from `claude logs` + the bg job state when the
+    // caller didn't already attach them. Injectable for tests.
+    captureEvidenceFn = captureEvidence,
     log = defaultLogFn,
+    // CTL-1176: per-tick fix cap. Once this many FIX-actions have been ACTED on
+    // in this single enforce invocation, the rest fall through to a lightweight
+    // "deferred" outcome — no action, no cooldown burn — so the next tick picks
+    // them up. Prevents a 19-item storm in one sweep. Default 3, env-overridable.
+    maxFixesPerTick = Number(process.env.CATALYST_RECOVERY_MAX_FIXES_PER_TICK) || 3,
   } = opts;
 
   if (mode === "off") {
@@ -57,6 +95,8 @@ export function reasoningRecoveryPass(items, opts = {}) {
   }
 
   const results = [];
+  // CTL-1176: count of FIX-actions actually taken this invocation (enforce only).
+  let fixesThisTick = 0;
 
   for (const item of items) {
     // Check cooldown / already-escalated
@@ -65,8 +105,22 @@ export function reasoningRecoveryPass(items, opts = {}) {
       continue;
     }
 
-    // DIAGNOSE: reuse diagnostician evidence
-    const evidence = item.evidence || {};
+    // DIAGNOSE: reuse diagnostician evidence. If the caller didn't attach
+    // logsOutput, capture it read-only now (claude logs + bg job state). This is
+    // a pure collector — no env gate, no side effects (CTL-937 captureEvidence).
+    let evidence = item.evidence || {};
+    if (!evidence.logsOutput && item.bgJobId) {
+      try {
+        const captured = captureEvidenceFn(`${item.ticket}/${item.phase ?? ""}`, item.bgJobId, {});
+        evidence = {
+          ...evidence,
+          logsOutput: captured.logsOutput ?? evidence.logsOutput ?? null,
+          jobState: captured.jobState ?? evidence.jobState ?? null,
+        };
+      } catch (err) {
+        log(`recovery-reasoning: ${item.ticket} evidence capture failed: ${err.message}`);
+      }
+    }
 
     // PROPOSE: classify per CTL-828
     let classification;
@@ -121,10 +175,49 @@ export function reasoningRecoveryPass(items, opts = {}) {
         actionLog.push("emitted recovery.would-escalate");
       }
 
+      // CTL-1176: shadow STILL burns the cooldown ledger. Without a marker write,
+      // shadow re-posts a diagnosis comment + re-emits a .would-* event for EVERY
+      // qualifying item on EVERY tick (~14s) forever — 19 items × every tick is a
+      // Linear/OAuth/fork storm. Recording a "shadow" intent makes the next tick's
+      // shouldSkipItem honor the cooldown window exactly like enforce, so shadow is
+      // a rate-limited dry-run, not an unconditional spammer. Latches escalated for
+      // a would-escalate so a shadow escalation is terminal (mirrors enforce).
+      try {
+        recordIntent(item.ticket, {
+          type: "recovery-pass",
+          decision: decision === "escalate" ? "escalate" : "shadow",
+          fix_class: decision === "fix" ? fix_class : null,
+          escalated: decision === "escalate",
+        });
+        actionLog.push("recorded shadow intent (cooldown marker)");
+      } catch (err) {
+        log(`recovery-reasoning: ${item.ticket} shadow intent record failed: ${err.message}`);
+      }
+
       outcome = { decision, fix_class, actionLog, mode: "shadow" };
     } else if (mode === "enforce") {
       // Enforce mode: actually invoke seams / remediate, record intent
       if (decision === "fix") {
+        // CTL-1176: per-tick fix cap. Once maxFixesPerTick FIX-actions have been
+        // taken this invocation, defer the rest — no action, no cooldown burn —
+        // so the next scheduler tick processes them. Bounds a one-sweep storm.
+        if (fixesThisTick >= maxFixesPerTick) {
+          actionLog.push(`deferred: per-tick fix cap (${maxFixesPerTick}) reached`);
+          log(
+            `recovery-reasoning: ${item.ticket} deferred — per-tick fix cap ${maxFixesPerTick} reached`,
+          );
+          results.push({
+            ticket: item.ticket,
+            decision: "deferred",
+            fix_class,
+            reason: `per-tick fix cap (${maxFixesPerTick}) reached`,
+            actionLog,
+            mode: "enforce",
+          });
+          continue;
+        }
+        fixesThisTick += 1;
+
         const fixOutcome = attemptFix(item, classification, {
           invokeSeam,
           invokeRemediateCapped,
@@ -268,6 +361,19 @@ export function checkDeterministicErrors(logsOutput, failureReason) {
       fix_class: "orphan_stale",
       seam_id: "orphan-reconcile",
       reason: "Orphan PR reconciliation needed",
+    };
+  }
+  // CTL-1186: phase-pr push rejected because the GitHub token lacked workflow
+  // scope. The token now has the scope, so the deterministic FIX is to re-arm
+  // phase-pr (reset its failed signal → pending + wake the scheduler) and let it
+  // re-run. This shortcut classifies CTL-1186 as FIX (re-dispatch), not escalate,
+  // even when no `claude logs` buffer is available — the signal failureReason is
+  // enough. Routed to the workflow-token-redispatch seam (defaultInvokeSeam).
+  if (failureReason === "push_rejected_no_workflow_scope") {
+    return {
+      fix_class: "push_rejected_no_workflow_scope",
+      seam_id: "workflow-token-redispatch",
+      reason: "Push rejected (no workflow scope); re-arm phase-pr to re-run with the scoped token",
     };
   }
   // Merge-conflict and rebase-failed via failureReason → bounded-LLM, not a seam stub.
@@ -565,38 +671,439 @@ function buildEscalationPayload(item, classification) {
 
 // ─── Default injectable implementations ─────────────────────────────────────
 
-function defaultInvokeSeam(ticket, seamId, brief) {
-  // Stub: would invoke unstuck-sweep seam registry (CTL-1219)
+// Resolve the orchestrator runtime dir for host-local markers/seams. Mirrors
+// the scheduler's CATALYST_ORCHESTRATOR_DIR convention (execution-core: one dir).
+function resolveOrchDir() {
+  return process.env.CATALYST_ORCHESTRATOR_DIR ?? null;
+}
+
+// ── (1) defaultEmitEvent — append a real OTel envelope to the unified log ─────
+//
+// Mirrors the *-event.mjs pattern (ratelimit-event.mjs / drain-event.mjs):
+// build a pure OTel envelope, then one best-effort appendFileSync. NEVER throws —
+// recovery correctness never branches on the emit succeeding.
+//
+// The flat event.type becomes attributes["event.name"] VERBATIM and the CTL key
+// becomes attributes["event.label"] (mirrored in body.payload.ticket) — exactly
+// what board-data.mjs:loadRecoveryOutcomes matches on. This is the load-bearing
+// half of the emit↔read contract.
+
+// buildRecoveryEnvelope — pure. Assembles the canonical envelope for a
+// recovery.* event. Exported so tests can assert the contract shape directly.
+export function buildRecoveryEnvelope(event, { now } = {}) {
+  const ts = now ? now() : new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
+  const {
+    type,
+    ticket = null,
+    fix_class = null,
+    reason = null,
+    details = null,
+    escalation = null,
+  } = event;
+  // Escalations carry WARN severity; fixes/triage carry INFO.
+  const escalated = type === "recovery.would-escalate" || type === "recovery.escalated";
   return {
-    success: false,
-    reason: `seam ${seamId} not implemented (stub)`,
-    details: {},
+    ts,
+    id: randomBytes(8).toString("hex"),
+    observedTs: ts,
+    severityText: escalated ? "WARN" : "INFO",
+    severityNumber: escalated ? 13 : 9,
+    traceId: null,
+    spanId: null,
+    resource: {
+      "service.name": "catalyst.execution-core",
+      "service.namespace": "catalyst",
+      "host.name": hostName(),
+      "host.id": hostId(),
+    },
+    attributes: {
+      // ← THE canonical name. The board reader matches attributes["event.name"].
+      "event.name": type,
+      "event.entity": "ticket",
+      "event.action": String(type).replace(/^recovery\./, ""),
+      // ← the CTL key — what loadRecoveryOutcomes keys its outcome map on.
+      "event.label": ticket,
+      ...(fix_class != null ? { "recovery.fix_class": fix_class } : {}),
+    },
+    // human-readable mirror; also the reader's fallback ticket-key source.
+    body: { payload: { ticket, type, fix_class, reason, details, escalation } },
   };
 }
 
-function defaultInvokeRemediateCapped(ticket, brief) {
-  // Stub: would invoke phase-remediate with hard cycle cap (CTL-653)
+function defaultEmitEvent(event, { logPath = getEventLogPath(), now } = {}) {
+  try {
+    mkdirSync(dirname(logPath), { recursive: true });
+    appendFileSync(logPath, JSON.stringify(buildRecoveryEnvelope(event, { now })) + "\n");
+    return true;
+  } catch {
+    return false; // best-effort, matches all *-event.mjs appenders
+  }
+}
+
+// ── (2) defaultPostComment — app-actor Linear comment, fail-open ──────────────
+//
+// Invokes lib/linear-comment-post.sh with the markdown as a single argv element
+// (never via stdin — multi-line is preserved because shell:false). The helper
+// fails CLOSED (exit 1) on any error; we catch that here and never throw past a
+// logged warning so a comment-post failure never wedges the recovery tick.
+function defaultPostComment(ticket, markdown, opts = {}) {
+  const log = opts.log ?? defaultLogFn;
+  try {
+    const res = spawnSync(LINEAR_COMMENT_POST_BIN, [ticket, markdown], {
+      cwd: opts.cwd ?? process.cwd(), // must resolve projectKey from cwd ancestry
+      env: { ...process.env, ...(opts.env ?? {}) },
+      encoding: "utf8",
+      maxBuffer: 10 * 1024 * 1024,
+    });
+    if (res.status === 0) {
+      return { ok: true, via: "app-actor" };
+    }
+    log(
+      `recovery-reasoning: ${ticket} comment post failed (status ${res.status}): ` +
+        `${(res.stderr || res.error?.message || "unknown").toString().trim().split("\n").pop()}`,
+    );
+    return { ok: false, via: "app-actor", status: res.status };
+  } catch (err) {
+    log(`recovery-reasoning: ${ticket} comment post threw: ${err.message}`);
+    return { ok: false, error: err.message };
+  }
+}
+
+// ── (3) defaultInvokeSeam — invoke the CTL-1219 act-seam registry ─────────────
+//
+// Builds buildUnstuckActSeams(deps) and invokes the named seam by category. The
+// recovery seam_id vocabulary maps to the frozen registry's category keys. The
+// seam contract is throw=fail / return=success; we translate that into
+// {success, reason, details}. The recovery pass owns all emit/post/intent.
+//
+// CTL-1186: "workflow-token-redispatch" / "workflow-token-fallback" have NO
+// registry seam — they re-arm phase-pr by deleting its failed signal so the
+// scheduler re-dispatches, then wake the loop via phase-agent-emit-complete.
+//
+// scheduler.mjs imports recovery-reasoning.mjs, so importing scheduler statically
+// would be a CYCLE. defaultClearStall + buildUnstuckActSeams are therefore
+// loaded lazily here (only at act-time, in enforce mode) via dynamic import.
+const SEAM_ID_TO_CATEGORY = {
+  "orphan-reconcile": "orphan-stale",
+};
+
+export function defaultInvokeSeam(ticket, seamId, brief = {}, deps = {}) {
+  // CTL-1186 / CTL-1219: the two workflow-token classifications re-arm phase-pr
+  // (reset its failed signal → pending) then wake the scheduler. Fully
+  // synchronous — the file ops + emit are synchronous spawnSync underneath.
+  if (seamId === "workflow-token-redispatch" || seamId === "workflow-token-fallback") {
+    const orchDir = deps.orchDir ?? resolveOrchDir();
+    if (!orchDir) {
+      return { success: false, reason: "no orchDir for phase-pr re-dispatch", details: {} };
+    }
+    const phase = deps.phase ?? "pr";
+    const signalPath = join(orchDir, "workers", ticket, `phase-${phase}.json`);
+    try {
+      if (existsSync(signalPath)) {
+        let sig = {};
+        try {
+          sig = JSON.parse(readFileSync(signalPath, "utf8"));
+        } catch {
+          sig = {};
+        }
+        sig.status = "pending";
+        delete sig.failureReason;
+        const tmp = `${signalPath}.tmp.${process.pid}`;
+        writeFileSync(tmp, JSON.stringify(sig, null, 2));
+        renameSync(tmp, signalPath);
+      }
+      const res = spawnSync(
+        EMIT_COMPLETE_BIN,
+        [
+          "--phase", "review",
+          "--ticket", ticket,
+          "--status", "complete",
+          "--no-signal-update",
+          "--orch-dir", orchDir,
+          "--orch-id", ticket,
+        ],
+        { encoding: "utf8" },
+      );
+      return {
+        success: res.status === 0 || res.status == null,
+        reason: "re-armed phase-pr (reset failed→pending) and woke the scheduler",
+        details: { phase, signalPath, wakeStatus: res.status ?? null, seam_id: seamId },
+      };
+    } catch (err) {
+      return { success: false, reason: err.message, details: { error: err.message } };
+    }
+  }
+
+  // Map recovery seam_id → frozen-registry category.
+  const category = SEAM_ID_TO_CATEGORY[seamId];
+  if (!category) {
+    return { success: false, reason: `no registry seam for ${seamId}`, details: {} };
+  }
+
+  // Build the CTL-1219 frozen registry. unstuck-act-seams.mjs has NO transitive
+  // import of scheduler/recovery-reasoning (verified), so a static import is safe
+  // — no cycle. Production deps (clearStall, resolvePrState, jobLifecycle) fall
+  // back to the module's real defaults; the scheduler can inject richer deps via
+  // deps.actByCategory (a pre-built registry) when it already has them in scope.
+  let registry = deps.actByCategory;
+  if (!registry) {
+    try {
+      const { buildUnstuckActSeams } = requireSync("./unstuck-act-seams.mjs");
+      registry = buildUnstuckActSeams({ orchDir: deps.orchDir ?? resolveOrchDir() });
+    } catch (err) {
+      return {
+        success: false,
+        reason: `registry build failed: ${err.message}`,
+        details: { error: err.message },
+      };
+    }
+  }
+  if (typeof registry[category] !== "function") {
+    return {
+      success: false,
+      reason: `registry seam '${category}' unavailable`,
+      details: {},
+    };
+  }
+
+  const seam = registry[category];
+  const candidate = { ticket, ...(deps.candidate ?? {}) };
+  const decision = deps.decision ?? { category, ...(brief ?? {}) };
+  try {
+    seam(candidate, decision); // return ignored; throws on hard failure
+    return { success: true, reason: brief?.reason ?? `${category} seam applied`, details: {} };
+  } catch (err) {
+    return { success: false, reason: err.message, details: { error: err.message } };
+  }
+}
+
+// ── (4) defaultInvokeRemediateCapped — ONE capped phase-remediate --bg ────────
+//
+// Dispatches a single phase-remediate worker, fire-and-forget. The structured
+// brief reaches the worker ONLY through verify.json.findings[] (the SKILL reads
+// that file), so we inject the brief as a synthetic high-severity finding before
+// dispatching. The CTL-653 cap (3) is event-counted — we refuse a dispatch when
+// the count is already at the cap. On a successful launch we return
+// {success:true, dispatched:true, attempts:1} — "dispatched", NOT "fixed". The
+// fix verdict only exists later in the re-run verify.json; the dispatch cooldown +
+// event-counted cap prevent re-dispatch before it lands.
+function injectBriefIntoVerify(orchDir, ticket, { brief, reason }) {
+  const p = join(orchDir, "workers", ticket, "verify.json");
+  let verify;
+  try {
+    verify = existsSync(p)
+      ? JSON.parse(readFileSync(p, "utf8"))
+      : { regression_risk: 5, findings: [], tests_attempted: 0 };
+  } catch {
+    verify = { regression_risk: 5, findings: [], tests_attempted: 0 };
+  }
+  verify.findings = Array.isArray(verify.findings) ? verify.findings : [];
+  verify.findings.push({
+    severity: "high", // high → remediate is REQUIRED to address it
+    kind: "review",
+    file: null,
+    line: null,
+    message: reason ?? "recovery-injected remediation brief",
+    recommendation: brief ?? "Resolve the issue and retry the phase.",
+  });
+  mkdirSync(dirname(p), { recursive: true }); // worker dir exists in prod; be safe
+  const tmp = `${p}.tmp.${process.pid}`;
+  writeFileSync(tmp, JSON.stringify(verify, null, 2));
+  renameSync(tmp, p); // atomic
+}
+
+export function defaultInvokeRemediateCapped(ticket, { brief, reason } = {}, deps = {}) {
+  const orchDir = deps.orchDir ?? resolveOrchDir();
+  if (!orchDir) {
+    return { success: false, dispatched: false, attempts: 0, reason: "no orchDir", details: {} };
+  }
+
+  // Lazy imports — dispatch.mjs / event-scan.mjs / phase-fsm.mjs do NOT import
+  // recovery-reasoning, so these are safe, but we keep them here to avoid loading
+  // the dispatch graph for the off/shadow paths.
+  let dispatchTicket, countRemediateCycles, REMEDIATE_PHASE, REMEDIATE_CYCLE_CAP;
+  try {
+    ({ dispatchTicket } = deps.dispatchMod ?? requireSync("./dispatch.mjs"));
+    ({ countRemediateCycles } = deps.eventScanMod ?? requireSync("./event-scan.mjs"));
+    ({ REMEDIATE_PHASE, REMEDIATE_CYCLE_CAP } = deps.fsmMod ?? requireSync("../lib/phase-fsm.mjs"));
+  } catch (err) {
+    return {
+      success: false,
+      dispatched: false,
+      attempts: 0,
+      reason: `remediate module load failed: ${err.message}`,
+      details: { error: err.message },
+    };
+  }
+
+  const countCycles = deps.countCycles ?? countRemediateCycles;
+  const dispatch = deps.dispatchTicket ?? dispatchTicket;
+
+  // (1) Enforce the CTL-653 hard cap HERE — phase-agent-dispatch does not.
+  const attempts = countCycles({ ticket });
+  if (attempts >= REMEDIATE_CYCLE_CAP) {
+    return {
+      success: false,
+      dispatched: false,
+      attempts,
+      reason: "remediate-cycle-cap-exhausted",
+      details: { cap: REMEDIATE_CYCLE_CAP },
+    };
+  }
+
+  // (2) Write the brief into the channel the worker reads.
+  try {
+    injectBriefIntoVerify(orchDir, ticket, { brief, reason });
+  } catch (err) {
+    return {
+      success: false,
+      dispatched: false,
+      attempts,
+      reason: `verify.json brief injection failed: ${err.message}`,
+      details: { error: err.message },
+    };
+  }
+
+  // (3) Dispatch through the JS seam (worktree provisioning, claim, OTEL).
+  let r;
+  try {
+    r = dispatch(orchDir, ticket, REMEDIATE_PHASE);
+  } catch (err) {
+    return {
+      success: false,
+      dispatched: false,
+      attempts,
+      reason: `dispatch threw: ${err.message}`,
+      details: { error: err.message },
+    };
+  }
+
+  if (r && r.code === 0) {
+    // Fire-and-forget: dispatched, not fixed. Cooldown prevents re-dispatch.
+    return {
+      success: true,
+      dispatched: true,
+      attempts: 1,
+      reason: "phase-remediate dispatched",
+      details: {
+        phase: REMEDIATE_PHASE,
+        bg_job_id: r.signal?.bg_job_id ?? null,
+        worktreePath: r.worktreePath ?? null,
+      },
+    };
+  }
   return {
     success: false,
-    reason: "remediate not implemented (stub)",
-    attempts: 1,
-    details: {},
+    dispatched: false,
+    attempts,
+    reason: r?.stderr ? `dispatch failed: ${String(r.stderr).trim()}` : "dispatch failed",
+    details: { code: r?.code ?? null },
   };
 }
 
-function defaultRecordIntent(ticket, intent) {
-  // Stub: would write to intention ledger (label-guard.mjs pattern)
+// requireSync — synchronous module access for the dispatch graph. The recovery
+// pass calls invokeRemediateCapped synchronously; createRequire gives us a sync
+// loader for these ESM siblings (Bun resolves .mjs through require). Throws on
+// failure so the caller's try/catch surfaces a load error rather than a silent stub.
+const _require = createRequire(import.meta.url);
+function requireSync(spec) {
+  return _require(spec);
 }
 
-function defaultPostComment(ticket, comment, opts) {
-  // Stub: would use linearis or direct GraphQL
+// ── (5) Host-local cooldown + intent ledger (CTL-638 / CTL-1078 pattern) ──────
+//
+// HOST-LOCAL: this ledger lives at ~/catalyst/execution-core/.recovery-intents/
+// (one file per ticket). ~/catalyst is per-host, so a second host running its
+// own daemon keeps a SEPARATE ledger — the cooldown/max-attempts/escalated-latch
+// guarantees are scoped to ONE machine. Cross-host claim (a durable lease on the
+// ticket itself, e.g. a Linear field/label so every daemon sees it) is a SEPARATE
+// follow-up for the dormant multi-host layer, out of scope here. Correct and
+// complete for the single-host (mini) topology in production today.
+
+// Cooldown window: 30-min default, env-overridable. NaN*x and 0*x are both falsy
+// → fall through to the default (matches label-guard's Number(env) || default).
+export const RECOVERY_COOLDOWN_MS =
+  Number(process.env.CATALYST_RECOVERY_COOLDOWN_MIN) * 60 * 1000 || 30 * 60 * 1000;
+
+// max_attempts: recovery passes before we stop self-healing. Env-overridable, default 2.
+export const RECOVERY_MAX_ATTEMPTS =
+  Number(process.env.CATALYST_RECOVERY_MAX_ATTEMPTS) || 2;
+
+function recoveryIntentPath(orchDir, ticket) {
+  return join(orchDir, ".recovery-intents", `${ticket}.json`);
 }
 
-function defaultEmitEvent(event) {
-  // Stub: would append to event log
+// defaultRecordIntent — append/upgrade a recovery-intent ledger entry.
+// Read-modify-write: preserve first-action ts, accrue attempts, latch escalated.
+export function defaultRecordIntent(ticket, intent, opts = {}) {
+  const orchDir = opts.orchDir ?? resolveOrchDir();
+  if (!orchDir) return null;
+  const now = opts.now ?? (() => Date.now());
+  const log = opts.log ?? defaultLogFn;
+  const dir = join(orchDir, ".recovery-intents");
+  const p = recoveryIntentPath(orchDir, ticket);
+  const ts = now();
+
+  let prior = {};
+  try {
+    prior = JSON.parse(readFileSync(p, "utf8")) ?? {};
+  } catch {
+    prior = {}; // absent / malformed → start fresh
+  }
+
+  const escalated =
+    Boolean(prior.escalated) ||
+    Boolean(intent.escalated) ||
+    intent.decision === "escalate"; // an escalate-pass latches escalated
+
+  const entry = {
+    ticket,
+    ts: typeof prior.ts === "number" ? prior.ts : ts, // first-action timestamp
+    lastTs: ts, // most-recent action timestamp (drives the cooldown window)
+    decision: intent.decision,
+    fix_class: intent.fix_class ?? prior.fix_class ?? null,
+    attempts:
+      typeof intent.attempts === "number"
+        ? intent.attempts
+        : (typeof prior.attempts === "number" ? prior.attempts : 0) + 1,
+    escalated,
+  };
+
+  try {
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(p, JSON.stringify(entry));
+  } catch (err) {
+    // Never let a marker write crash the tick — worst case the next tick re-acts.
+    log(`recovery-reasoning: ${ticket} intent ledger write failed: ${err.message}`);
+  }
+  return entry;
 }
 
-function defaultShouldSkipItem(ticket) {
-  // Stub: would check cooldown + escalation history
+// defaultShouldSkipItem — true when recovery should NOT act this pass. Fail-OPEN
+// on absent/malformed ledger (returns false → recovery proceeds). Evaluation
+// order: escalated (terminal) → attempts (terminal) → cooldown (transient).
+export function defaultShouldSkipItem(ticket, opts = {}) {
+  const orchDir = opts.orchDir ?? resolveOrchDir();
+  if (!orchDir) return false;
+  const now = opts.now ?? (() => Date.now());
+  const p = recoveryIntentPath(orchDir, ticket);
+
+  let data;
+  try {
+    data = JSON.parse(readFileSync(p, "utf8"));
+  } catch {
+    return false; // no ledger / malformed → never acted → don't skip
+  }
+
+  // (c) already escalated → terminal, hand off to human, stop acting.
+  if (data?.escalated === true) return true;
+
+  // (b) attempts exhausted → stop self-healing.
+  if (typeof data?.attempts === "number" && data.attempts >= RECOVERY_MAX_ATTEMPTS) return true;
+
+  // (a) acted within the cooldown window → too soon, skip this pass.
+  const last = typeof data?.lastTs === "number" ? data.lastTs : data?.ts;
+  if (typeof last === "number" && now() - last < RECOVERY_COOLDOWN_MS) return true;
+
   return false;
 }

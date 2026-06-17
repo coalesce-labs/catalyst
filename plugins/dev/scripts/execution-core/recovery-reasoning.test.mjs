@@ -2,7 +2,7 @@
 //
 // Run: cd plugins/dev/scripts/execution-core && bun test recovery-reasoning.test.mjs
 
-import { describe, test, expect, beforeEach } from "bun:test";
+import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import {
   reasoningRecoveryPass,
   defaultClassifyTicket,
@@ -10,7 +10,16 @@ import {
   checkBoundedLlmFixes,
   determineEscalationReason,
   generateRemediateBrief,
+  buildRecoveryEnvelope,
+  defaultRecordIntent,
+  defaultShouldSkipItem,
+  defaultInvokeRemediateCapped,
+  RECOVERY_MAX_ATTEMPTS,
+  RECOVERY_COOLDOWN_MS,
 } from "./recovery-reasoning.mjs";
+import { mkdtempSync, rmSync } from "node:fs";
+import { join as pathJoin } from "node:path";
+import { tmpdir } from "node:os";
 
 describe("checkDeterministicErrors", () => {
   test("detects push_rejected_no_workflow_scope", () => {
@@ -53,6 +62,26 @@ describe("checkDeterministicErrors", () => {
     const result = checkDeterministicErrors(null, "orphan-sweep-stale");
     expect(result).not.toBeNull();
     expect(result.fix_class).toBe("orphan_stale");
+  });
+
+  // CTL-1186: the push_rejected_no_workflow_scope failureReason shortcut must
+  // classify as FIX (re-dispatch via the workflow-token-redispatch seam) even
+  // when there is NO log buffer — the signal failureReason alone is enough.
+  test("detects push_rejected_no_workflow_scope via failureReason (no logs)", () => {
+    const result = checkDeterministicErrors(null, "push_rejected_no_workflow_scope");
+    expect(result).not.toBeNull();
+    expect(result.fix_class).toBe("push_rejected_no_workflow_scope");
+    expect(result.seam_id).toBe("workflow-token-redispatch");
+  });
+
+  test("push_rejected_no_workflow_scope failureReason → classifyTicket decision=fix", () => {
+    const result = defaultClassifyTicket({
+      logsOutput: null,
+      failureReason: "push_rejected_no_workflow_scope",
+    });
+    expect(result.decision).toBe("fix");
+    expect(result.fix_class).toBe("push_rejected_no_workflow_scope");
+    expect(result.details.seam_id).toBe("workflow-token-redispatch");
   });
 
   // merge-conflict / rebase-failed failureReasons fall through to bounded-LLM
@@ -406,6 +435,7 @@ describe("reasoningRecoveryPass", () => {
       mode: "enforce",
       recordIntent: (ticket, intent) => intents.push({ ticket, intent }),
       emitEvent: (event) => events.push(event),
+      postComment: () => {}, // no-op: avoid real linear-comment-post.sh shell-out
     });
 
     expect(result.processed).toBe(1);
@@ -462,6 +492,7 @@ describe("reasoningRecoveryPass", () => {
     const result = reasoningRecoveryPass(items, {
       mode: "shadow",
       emitEvent: (event) => events.push(event),
+      postComment: () => {}, // no-op: avoid real linear-comment-post.sh shell-out
     });
 
     expect(result.processed).toBe(3);
@@ -490,5 +521,467 @@ describe("reasoningRecoveryPass", () => {
     expect(comments[0]).toContain("CTL-1176 Diagnosis");
     expect(comments[0]).toContain("Decision:");
     expect(comments[0]).toContain("bounded-llm");
+  });
+});
+
+// ─── CTL-1176: per-tick fix cap (anti-storm) ────────────────────────────────
+describe("reasoningRecoveryPass maxFixesPerTick cap", () => {
+  // Build N fixable items (bounded-llm stale-main) so each would be a FIX action.
+  function fixableItems(n) {
+    return Array.from({ length: n }, (_, i) => ({
+      ticket: `CTL-${100 + i}`,
+      evidence: { logsOutput: "stale main" },
+    }));
+  }
+
+  test("caps fix-actions at maxFixesPerTick; rest are deferred (no action)", () => {
+    let remediateCalls = 0;
+    const result = reasoningRecoveryPass(fixableItems(5), {
+      mode: "enforce",
+      maxFixesPerTick: 2,
+      invokeRemediateCapped: () => {
+        remediateCalls += 1;
+        return { success: true, dispatched: true, attempts: 1, reason: "dispatched", details: {} };
+      },
+      recordIntent: () => {},
+      postComment: () => {},
+      emitEvent: () => {},
+    });
+
+    expect(result.processed).toBe(5);
+    // Only 2 actually invoked the remediate seam.
+    expect(remediateCalls).toBe(2);
+    // The remaining 3 are deferred — no action, no cooldown burn.
+    const deferred = result.results.filter((r) => r.decision === "deferred");
+    expect(deferred.length).toBe(3);
+    expect(deferred[0].reason).toContain("per-tick fix cap");
+  });
+
+  test("deferred items do NOT record intent (no cooldown burn)", () => {
+    const intents = [];
+    reasoningRecoveryPass(fixableItems(4), {
+      mode: "enforce",
+      maxFixesPerTick: 1,
+      invokeRemediateCapped: () => ({ success: true, dispatched: true, attempts: 1, details: {} }),
+      recordIntent: (ticket, intent) => intents.push({ ticket, intent }),
+      postComment: () => {},
+      emitEvent: () => {},
+    });
+    // Only the 1 acted item records an intent; the 3 deferred do not.
+    expect(intents.length).toBe(1);
+  });
+
+  test("env CATALYST_RECOVERY_MAX_FIXES_PER_TICK is honored by default", () => {
+    const prev = process.env.CATALYST_RECOVERY_MAX_FIXES_PER_TICK;
+    process.env.CATALYST_RECOVERY_MAX_FIXES_PER_TICK = "1";
+    try {
+      let calls = 0;
+      const result = reasoningRecoveryPass(fixableItems(3), {
+        mode: "enforce",
+        invokeRemediateCapped: () => {
+          calls += 1;
+          return { success: true, dispatched: true, attempts: 1, details: {} };
+        },
+        recordIntent: () => {},
+        postComment: () => {},
+        emitEvent: () => {},
+      });
+      expect(calls).toBe(1);
+      expect(result.results.filter((r) => r.decision === "deferred").length).toBe(2);
+    } finally {
+      if (prev === undefined) delete process.env.CATALYST_RECOVERY_MAX_FIXES_PER_TICK;
+      else process.env.CATALYST_RECOVERY_MAX_FIXES_PER_TICK = prev;
+    }
+  });
+});
+
+// ─── CTL-1176: cooldown skip (injected shouldSkipItem) ──────────────────────
+describe("reasoningRecoveryPass cooldown skip", () => {
+  test("a ticket in cooldown is skipped and takes NO action", () => {
+    const events = [];
+    let acted = false;
+    const result = reasoningRecoveryPass(
+      [{ ticket: "CTL-9", evidence: { logsOutput: "stale main" } }],
+      {
+        mode: "enforce",
+        shouldSkipItem: (ticket) => ticket === "CTL-9",
+        invokeRemediateCapped: () => {
+          acted = true;
+          return { success: true, dispatched: true, attempts: 1, details: {} };
+        },
+        emitEvent: (e) => events.push(e),
+        recordIntent: () => {},
+        postComment: () => {},
+      },
+    );
+    expect(result.processed).toBe(0);
+    expect(acted).toBe(false);
+    expect(events.length).toBe(0);
+  });
+});
+
+// ─── CTL-1176: DIAGNOSE evidence capture wiring ─────────────────────────────
+describe("reasoningRecoveryPass DIAGNOSE capture", () => {
+  test("captures evidence via captureEvidenceFn when logsOutput is missing", () => {
+    const captured = [];
+    reasoningRecoveryPass([{ ticket: "CTL-7", bgJobId: "abc123", evidence: {} }], {
+      mode: "shadow",
+      captureEvidenceFn: (subject, bgJobId) => {
+        captured.push({ subject, bgJobId });
+        return { logsOutput: "stale main", jobState: { detail: "idle" } };
+      },
+      postComment: () => {},
+      emitEvent: () => {},
+    });
+    expect(captured.length).toBe(1);
+    expect(captured[0].bgJobId).toBe("abc123");
+    expect(captured[0].subject).toContain("CTL-7");
+  });
+
+  test("does NOT capture when logsOutput already present", () => {
+    let called = false;
+    reasoningRecoveryPass(
+      [{ ticket: "CTL-7", bgJobId: "abc123", evidence: { logsOutput: "stale main" } }],
+      {
+        mode: "shadow",
+        captureEvidenceFn: () => {
+          called = true;
+          return {};
+        },
+        postComment: () => {},
+        emitEvent: () => {},
+      },
+    );
+    expect(called).toBe(false);
+  });
+
+  test("captured logsOutput drives classification (stale-main → bounded-llm fix)", () => {
+    const result = reasoningRecoveryPass(
+      [{ ticket: "CTL-7", bgJobId: "abc123", evidence: {} }],
+      {
+        mode: "shadow",
+        captureEvidenceFn: () => ({ logsOutput: "stale main", jobState: null }),
+        postComment: () => {},
+        emitEvent: () => {},
+      },
+    );
+    expect(result.results[0].decision).toBe("fix");
+    expect(result.results[0].fix_class).toBe("bounded-llm");
+  });
+});
+
+// ─── CTL-1220: emit shape matches the board reader contract ─────────────────
+describe("buildRecoveryEnvelope (emit↔read contract)", () => {
+  test("recovery.fixed → event.name + event.label, INFO severity", () => {
+    const env = buildRecoveryEnvelope(
+      { type: "recovery.fixed", ticket: "CTL-50", fix_class: "x", reason: "r", details: {} },
+      { now: () => "2026-06-16T00:00:00Z" },
+    );
+    expect(env.attributes["event.name"]).toBe("recovery.fixed");
+    expect(env.attributes["event.label"]).toBe("CTL-50");
+    expect(env.body.payload.ticket).toBe("CTL-50"); // reader fallback key
+    expect(env.severityText).toBe("INFO");
+    expect(env.ts).toBe("2026-06-16T00:00:00Z");
+    expect(env.attributes["recovery.fix_class"]).toBe("x");
+  });
+
+  test("recovery.would-fix → INFO; recovery.escalated → WARN", () => {
+    const wouldFix = buildRecoveryEnvelope({ type: "recovery.would-fix", ticket: "CTL-51" });
+    expect(wouldFix.severityText).toBe("INFO");
+    const escal = buildRecoveryEnvelope({ type: "recovery.escalated", ticket: "CTL-52" });
+    expect(escal.severityText).toBe("WARN");
+    expect(escal.severityNumber).toBe(13);
+  });
+
+  test("event.action strips the recovery. prefix", () => {
+    const env = buildRecoveryEnvelope({ type: "recovery.would-escalate", ticket: "CTL-53" });
+    expect(env.attributes["event.action"]).toBe("would-escalate");
+  });
+
+  test("omits recovery.fix_class when fix_class is null", () => {
+    const env = buildRecoveryEnvelope({ type: "recovery.escalated", ticket: "CTL-54" });
+    expect(env.attributes["recovery.fix_class"]).toBeUndefined();
+  });
+
+  test("carries OTel resource (service.name execution-core)", () => {
+    const env = buildRecoveryEnvelope({ type: "recovery.fixed", ticket: "CTL-55" });
+    expect(env.resource["service.name"]).toBe("catalyst.execution-core");
+    expect(env.resource["host.name"]).toBeDefined();
+    expect(typeof env.id).toBe("string");
+  });
+});
+
+// ─── CTL-1176: host-local cooldown + intent ledger ──────────────────────────
+describe("recovery-intent ledger (cooldown + max-attempts + escalated)", () => {
+  let orchDir;
+  beforeEach(() => {
+    orchDir = mkdtempSync(pathJoin(tmpdir(), "rec-intent-"));
+  });
+  afterEach(() => {
+    try {
+      rmSync(orchDir, { recursive: true, force: true });
+    } catch {
+      /* best-effort */
+    }
+  });
+
+  test("record then shouldSkip within cooldown window → skip", () => {
+    const now = 1_000_000_000_000;
+    defaultRecordIntent("CTL-300", { decision: "fix", fix_class: "bounded-llm" }, {
+      orchDir,
+      now: () => now,
+    });
+    // 1 minute later — well inside the 30-min default window.
+    expect(defaultShouldSkipItem("CTL-300", { orchDir, now: () => now + 60_000 })).toBe(true);
+  });
+
+  test("after cooldown window elapses → no skip (attempts still under cap)", () => {
+    const now = 1_000_000_000_000;
+    defaultRecordIntent("CTL-301", { decision: "fix", fix_class: "x" }, {
+      orchDir,
+      now: () => now,
+    });
+    const after = now + RECOVERY_COOLDOWN_MS + 1;
+    expect(defaultShouldSkipItem("CTL-301", { orchDir, now: () => after })).toBe(false);
+  });
+
+  test("attempts >= max_attempts → skip (terminal, stops self-healing)", () => {
+    const now = 1_000_000_000_000;
+    // Record max_attempts passes (each call accrues +1).
+    for (let i = 0; i < RECOVERY_MAX_ATTEMPTS; i++) {
+      defaultRecordIntent("CTL-302", { decision: "fix", fix_class: "x" }, {
+        orchDir,
+        now: () => now + i,
+      });
+    }
+    // Far past the cooldown window — attempts cap is what skips it now.
+    const after = now + RECOVERY_COOLDOWN_MS * 10;
+    expect(defaultShouldSkipItem("CTL-302", { orchDir, now: () => after })).toBe(true);
+  });
+
+  test("escalate decision latches escalated → skip forever", () => {
+    const now = 1_000_000_000_000;
+    defaultRecordIntent("CTL-303", { decision: "escalate" }, { orchDir, now: () => now });
+    const after = now + RECOVERY_COOLDOWN_MS * 100;
+    expect(defaultShouldSkipItem("CTL-303", { orchDir, now: () => after })).toBe(true);
+  });
+
+  test("escalated latch survives a later fix-pass write", () => {
+    const now = 1_000_000_000_000;
+    defaultRecordIntent("CTL-304", { decision: "escalate" }, { orchDir, now: () => now });
+    // A subsequent fix-pass must NOT un-latch escalated.
+    const entry = defaultRecordIntent("CTL-304", { decision: "fix", fix_class: "x" }, {
+      orchDir,
+      now: () => now + 1,
+    });
+    expect(entry.escalated).toBe(true);
+  });
+
+  test("first-action ts preserved across writes; attempts accrue", () => {
+    const t0 = 1_000_000_000_000;
+    defaultRecordIntent("CTL-305", { decision: "fix", fix_class: "x" }, {
+      orchDir,
+      now: () => t0,
+    });
+    const second = defaultRecordIntent("CTL-305", { decision: "fix", fix_class: "x" }, {
+      orchDir,
+      now: () => t0 + 5000,
+    });
+    expect(second.ts).toBe(t0); // first-action timestamp preserved
+    expect(second.lastTs).toBe(t0 + 5000); // most-recent action
+    expect(second.attempts).toBe(2);
+  });
+
+  test("fail-open: no ledger → shouldSkip returns false", () => {
+    expect(defaultShouldSkipItem("CTL-999", { orchDir, now: () => Date.now() })).toBe(false);
+  });
+
+  test("no orchDir → record no-ops, shouldSkip fail-open false", () => {
+    // resolveOrchDir() returns null when CATALYST_ORCHESTRATOR_DIR is unset and
+    // none is injected. Force that by passing orchDir: null explicitly.
+    expect(defaultRecordIntent("CTL-998", { decision: "fix" }, { orchDir: null })).toBeNull();
+    expect(defaultShouldSkipItem("CTL-998", { orchDir: null })).toBe(false);
+  });
+});
+
+// ─── CTL-1176: capped remediate dispatch (cap enforcement) ──────────────────
+describe("defaultInvokeRemediateCapped cap enforcement", () => {
+  let orchDir;
+  beforeEach(() => {
+    orchDir = mkdtempSync(pathJoin(tmpdir(), "rec-rem-"));
+  });
+  afterEach(() => {
+    try {
+      rmSync(orchDir, { recursive: true, force: true });
+    } catch {
+      /* best-effort */
+    }
+  });
+
+  test("refuses dispatch when remediate cycle count is already at cap", () => {
+    const result = defaultInvokeRemediateCapped(
+      "CTL-400",
+      { brief: "fix it", reason: "ci-failure" },
+      {
+        orchDir,
+        // Inject module stubs so no real dispatch graph is loaded.
+        eventScanMod: { countRemediateCycles: () => 3 },
+        fsmMod: { REMEDIATE_PHASE: "remediate", REMEDIATE_CYCLE_CAP: 3 },
+        dispatchMod: { dispatchTicket: () => ({ code: 0 }) },
+      },
+    );
+    expect(result.success).toBe(false);
+    expect(result.reason).toBe("remediate-cycle-cap-exhausted");
+    expect(result.dispatched).toBe(false);
+  });
+
+  test("dispatches ONE remediate and returns dispatched:true, attempts:1", () => {
+    let dispatchCalls = 0;
+    const result = defaultInvokeRemediateCapped(
+      "CTL-401",
+      { brief: "fix it", reason: "ci-failure" },
+      {
+        orchDir,
+        eventScanMod: { countRemediateCycles: () => 0 },
+        fsmMod: { REMEDIATE_PHASE: "remediate", REMEDIATE_CYCLE_CAP: 3 },
+        dispatchMod: {
+          dispatchTicket: (od, ticket, phase) => {
+            dispatchCalls += 1;
+            return { code: 0, worktreePath: "/tmp/wt", signal: { bg_job_id: "bg1" } };
+          },
+        },
+      },
+    );
+    expect(dispatchCalls).toBe(1);
+    expect(result.success).toBe(true);
+    expect(result.dispatched).toBe(true);
+    expect(result.attempts).toBe(1);
+    expect(result.details.bg_job_id).toBe("bg1");
+  });
+
+  test("dispatch failure (non-zero code) → success:false, dispatched:false", () => {
+    const result = defaultInvokeRemediateCapped(
+      "CTL-402",
+      { brief: "fix it", reason: "ci-failure" },
+      {
+        orchDir,
+        eventScanMod: { countRemediateCycles: () => 0 },
+        fsmMod: { REMEDIATE_PHASE: "remediate", REMEDIATE_CYCLE_CAP: 3 },
+        dispatchMod: { dispatchTicket: () => ({ code: 1, stderr: "boom" }) },
+      },
+    );
+    expect(result.success).toBe(false);
+    expect(result.dispatched).toBe(false);
+    expect(result.reason).toContain("boom");
+  });
+
+  test("no orchDir → returns success:false without dispatching", () => {
+    const result = defaultInvokeRemediateCapped("CTL-403", { brief: "x" }, { orchDir: null });
+    expect(result.success).toBe(false);
+    expect(result.reason).toBe("no orchDir");
+  });
+});
+
+// ─── CTL-1176: storm-guard wiring (shadow burns the cooldown ledger) ─────────
+//
+// The production bug: shadow mode posted a diagnosis comment + emitted a .would-*
+// event for every qualifying item, but NEVER recorded an intent — so the cooldown
+// marker was never written and the SAME items re-spammed every ~14s tick forever.
+// Combined with the daemon never setting CATALYST_ORCHESTRATOR_DIR (so the bare
+// default ledger resolved orchDir=null and skipped nothing), shadow was an
+// unconditional 19-comments-per-tick spammer. These tests pin the fix: shadow now
+// writes a real cooldown intent through the SAME default ledger the scheduler
+// binds to the tick's orchDir, so a second tick within the cooldown window skips.
+describe("reasoningRecoveryPass shadow cooldown wiring (CTL-1176)", () => {
+  let orchDir;
+  beforeEach(() => {
+    orchDir = mkdtempSync(pathJoin(tmpdir(), "rec-shadow-"));
+  });
+  afterEach(() => {
+    try {
+      rmSync(orchDir, { recursive: true, force: true });
+    } catch {
+      /* best-effort */
+    }
+  });
+
+  test("shadow mode records a cooldown intent for each acted item", () => {
+    const intents = [];
+    const result = reasoningRecoveryPass(
+      [
+        {
+          ticket: "CTL-1",
+          evidence: { logsOutput: "stale main" },
+        },
+      ],
+      {
+        mode: "shadow",
+        recordIntent: (ticket, intent) => intents.push({ ticket, intent }),
+        postComment: () => {}, // no real shell-out
+        emitEvent: () => {},
+      },
+    );
+    expect(result.processed).toBe(1);
+    // The headline fix: shadow now writes a cooldown marker.
+    expect(intents.length).toBe(1);
+    expect(intents[0].ticket).toBe("CTL-1");
+    expect(intents[0].intent.type).toBe("recovery-pass");
+    expect(intents[0].intent.decision).toBe("shadow"); // fix-class item → "shadow"
+  });
+
+  test("shadow escalation records a terminal (escalated) intent", () => {
+    const intents = [];
+    reasoningRecoveryPass(
+      [
+        {
+          ticket: "CTL-2",
+          evidence: { logsOutput: "unknown error", beliefState: { escalate_human: true } },
+        },
+      ],
+      {
+        mode: "shadow",
+        recordIntent: (ticket, intent) => intents.push({ ticket, intent }),
+        postComment: () => {},
+        emitEvent: () => {},
+      },
+    );
+    expect(intents.length).toBe(1);
+    expect(intents[0].intent.decision).toBe("escalate");
+    expect(intents[0].intent.escalated).toBe(true);
+  });
+
+  test("two consecutive shadow ticks: 2nd skips via the real default ledger (orchDir bound)", () => {
+    // This is the production scenario: the scheduler BINDS the default ledger to
+    // the tick's orchDir. Tick 1 acts + records; tick 2 within the cooldown window
+    // must skip — proving the storm guard is real, not inert.
+    const t0 = Date.now();
+    const items = [{ ticket: "CTL-3", evidence: { logsOutput: "stale main" } }];
+
+    const comments1 = [];
+    const r1 = reasoningRecoveryPass(items, {
+      mode: "shadow",
+      // Bind exactly like scheduler.mjs does — orchDir threaded into the defaults.
+      shouldSkipItem: (ticket) => defaultShouldSkipItem(ticket, { orchDir, now: () => t0 }),
+      recordIntent: (ticket, intent) =>
+        defaultRecordIntent(ticket, intent, { orchDir, now: () => t0 }),
+      postComment: (ticket, c) => comments1.push(c),
+      emitEvent: () => {},
+    });
+    expect(r1.processed).toBe(1);
+    expect(comments1.length).toBe(1); // tick 1 posts a diagnosis
+
+    // Tick 2: 1 second later, well inside the 30-min cooldown window.
+    const t1 = t0 + 1000;
+    const comments2 = [];
+    const r2 = reasoningRecoveryPass(items, {
+      mode: "shadow",
+      shouldSkipItem: (ticket) => defaultShouldSkipItem(ticket, { orchDir, now: () => t1 }),
+      recordIntent: (ticket, intent) =>
+        defaultRecordIntent(ticket, intent, { orchDir, now: () => t1 }),
+      postComment: (ticket, c) => comments2.push(c),
+      emitEvent: () => {},
+    });
+    expect(r2.processed).toBe(0); // skipped via cooldown — NO re-spam
+    expect(comments2.length).toBe(0); // zero new comments on the 2nd tick
   });
 });
