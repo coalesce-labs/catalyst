@@ -1,4 +1,8 @@
+// node-liveness.test.mjs — CTL-1255. mergeHeartbeatsNewestWins coverage.
+//
+// Run: cd plugins/dev/scripts/orch-monitor && bun test lib/node-liveness.test.mjs
 
+import { describe, test, expect } from "bun:test";
 import { mergeHeartbeatsNewestWins } from "./node-liveness.mjs";
 
 describe("mergeHeartbeatsNewestWins (CTL-1255)", () => {
