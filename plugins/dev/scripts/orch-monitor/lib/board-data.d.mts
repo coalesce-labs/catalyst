@@ -3,6 +3,10 @@
 // Vite config import assembleBoard() without a TS7016 implicit-any error.
 // Keep in sync with the object assembled in board-data.mjs.
 
+// CTL-1257: the event-ring is threaded into assembleBoard so loadRecoveryOutcomes
+// can use the ring fast-path instead of a full-file readFileSync per 3s recompute.
+import type { EventRing } from "./event-ring";
+
 // CTL-928: "dead" joins the liveness states — a worker whose DURABLE bg-job state
 // (~/.claude/jobs/<id>/state.json) is terminal (stopped/failed/done/blocked) or
 // whose job dir is gone, regardless of a phase signal still saying `running`. A
@@ -480,7 +484,20 @@ export function assembleBoard(opts?: {
   getPrStatus?:
     | ((repo: string, number: number) => { mergeStateStatus: string; state?: string } | null)
     | null;
+  /** CTL-1257: inject the event-ring so loadRecoveryOutcomes uses the ring
+   *  fast-path (no full-file readFileSync) when it has cold-filled. */
+  ring?: EventRing | null;
 }): Promise<BoardPayload>;
+
+/** CTL-1257: per-ticket recovery outcome flags folded from recovery.fixed /
+ *  recovery.would-fix events (last-write-wins). Uses the event-ring fast-path
+ *  when `ring` has cold-filled (oldestTs() !== null), else a full-file read of
+ *  `eventLogPath`. This is the monitor DISPLAY half (CTL-1220) — the recovery
+ *  DECISION path reads its own state fresh. */
+export function loadRecoveryOutcomes(
+  eventLogPath?: string,
+  ring?: EventRing | null
+): Map<string, { autoFixed: boolean; triaged: boolean; recoveredAt: string | null }>;
 /** CTL-922 (BFF10): build a {name,id} HostRef from a bare host name (id =
  *  sha256(name)[:16]); null for a null/empty name. */
 export function hostRefFromName(name: unknown): BoardHostRef | null;
