@@ -108,7 +108,10 @@ function shortIdOf(value) {
 // recovery.mjs's statJob parses only {state, firstTerminalAt}; CTL-932 owns
 // that file, so the full-schema parse (tempo/detail/needs/cliVersion/
 // timestamps) lives here instead of extending it.
-export function defaultReadJobState(bgJobId, { jobsDir = join(homedir(), ".claude", "jobs") } = {}) {
+export function defaultReadJobState(
+  bgJobId,
+  { jobsDir = join(homedir(), ".claude", "jobs") } = {}
+) {
   const file = join(jobsDir, bgJobId, "state.json");
   let st;
   try {
@@ -217,7 +220,7 @@ function tailHeartbeats(db, eventLogPath, capBytes = HB_TAIL_CAP_BYTES) {
   }
 
   const insert = db.prepare(
-    "INSERT INTO obs_heartbeat (ticket, phase, generation, host, kind, ts_ms) VALUES (?, ?, ?, ?, ?, ?)",
+    "INSERT INTO obs_heartbeat (ticket, phase, generation, host, kind, ts_ms) VALUES (?, ?, ?, ?, ?, ?)"
   );
   for (const line of buf.toString("utf8", start, end + 1).split("\n")) {
     if (!line.trim()) continue;
@@ -238,10 +241,13 @@ function tailHeartbeats(db, eventLogPath, capBytes = HB_TAIL_CAP_BYTES) {
       p.generation ?? null,
       evt?.resource?.["host.name"] ?? p.host ?? null,
       p.kind ?? null,
-      tsMs,
+      tsMs
     );
   }
-  db.run("INSERT OR REPLACE INTO cfg (key, value_int) VALUES (?, ?)", [cursorKey, offset + end + 1]);
+  db.run("INSERT OR REPLACE INTO cfg (key, value_int) VALUES (?, ?)", [
+    cursorKey,
+    offset + end + 1,
+  ]);
 }
 
 // pruneRetention — spec §6 retention, driven entirely by the tick's `now`
@@ -261,7 +267,7 @@ function pruneRetention(db, now) {
   // belief/intent) so 7-day reports always have full data — NOT the 14d obs window.
   db.run(
     "DELETE FROM shadow_comparison WHERE tick_id IN (SELECT tick_id FROM tick WHERE now_ms < ?)",
-    [beliefCutoff],
+    [beliefCutoff]
   );
   for (const t of [
     "obs_agent",
@@ -294,7 +300,7 @@ function pruneRetention(db, now) {
        AND tick_id NOT IN (SELECT tick_id FROM belief)
        AND tick_id NOT IN (SELECT tick_id FROM intent)
        AND tick_id NOT IN (SELECT tick_id FROM shadow_comparison)`,
-    [obsCutoff],
+    [obsCutoff]
   );
 }
 
@@ -310,6 +316,39 @@ function getModuleDb(env) {
 // and should skip when this returns null).
 export function getBeliefsDb() {
   return _moduleDb;
+}
+
+// getEscalateHumanBelief — CTL-1241: read-only helper that returns the latest
+// escalate_human belief for a ticket from the current-tick beliefs.db.
+//
+// Query: most-recent (ORDER BY tick_id DESC LIMIT 1) row whose
+//   name = 'escalate_human' AND subject LIKE '<ticket>/%'
+// The '/' boundary ensures 'CTL-1241/x' matches 'CTL-1241' but 'CTL-12410/x'
+// does NOT.
+//
+// Returns { escalate_human: true, why, subject, tickId } or null.
+// Never throws — fail-open so a beliefs-disabled or broken daemon is a no-op.
+export function getEscalateHumanBelief(db, ticket) {
+  if (!db) return null;
+  try {
+    const row = db
+      .query(
+        `SELECT subject, value, tick_id FROM belief
+         WHERE name = 'escalate_human' AND subject LIKE ?
+         ORDER BY tick_id DESC LIMIT 1`
+      )
+      .get(`${ticket}/%`);
+    if (!row) return null;
+    let why = null;
+    try {
+      why = JSON.parse(row.value ?? "{}").why ?? null;
+    } catch {
+      // malformed JSON → why stays null; still return the belief
+    }
+    return { escalate_human: true, why, subject: row.subject, tickId: row.tick_id };
+  } catch {
+    return null; // db closed or query error → fail-open
+  }
 }
 
 // collectTickFacts — the hermetic core. All sources injectable; returns
@@ -398,7 +437,7 @@ export function collectTickFacts({
             }
             db.run(
               "INSERT OR REPLACE INTO cfg (key, value_text) VALUES ('rules_sha_last_seen', ?)",
-              [RULES_SHA],
+              [RULES_SHA]
             );
           }
         } catch {
@@ -412,7 +451,7 @@ export function collectTickFacts({
         agents = getAgents?.() ?? [];
         const ins = db.prepare(
           `INSERT INTO obs_agent (tick_id, session_id, short_id, kind, status, state, cwd, name, pid, started_at_ms)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
         );
         for (const a of agents) {
           const sid = a?.sessionId ?? a?.session_id;
@@ -427,7 +466,7 @@ export function collectTickFacts({
             a.cwd ?? null,
             a.name ?? null,
             a.pid ?? null,
-            toMs(a.startedAt ?? a.started_at_ms),
+            toMs(a.startedAt ?? a.started_at_ms)
           );
         }
       } catch (err) {
@@ -438,7 +477,7 @@ export function collectTickFacts({
       // ── obs_transcript — per listed session, via the resolver ──────────
       // A resolver FAILURE is an error, never the fact "transcript absent".
       const insTr = db.prepare(
-        "INSERT INTO obs_transcript (tick_id, session_id, exists_flag, mtime_ms, bytes) VALUES (?, ?, ?, ?, ?)",
+        "INSERT INTO obs_transcript (tick_id, session_id, exists_flag, mtime_ms, bytes) VALUES (?, ?, ?, ?, ?)"
       );
       for (const a of agents) {
         const sid = a?.sessionId ?? a?.session_id;
@@ -462,7 +501,7 @@ export function collectTickFacts({
         signals = readSignals?.() ?? [];
         const ins = db.prepare(
           `INSERT INTO obs_signal (tick_id, ticket, phase, status, bg_job_id, generation, started_at_ms, updated_at_ms)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
         );
         for (const s of signals) {
           if (!s?.ticket || s.phase == null) continue; // ticket+phase NOT NULL
@@ -475,7 +514,7 @@ export function collectTickFacts({
             bgJobId,
             s.raw?.generation ?? s.generation ?? null,
             toMs(s.raw?.startedAt ?? s.startedAt),
-            toMs(s.updatedAt ?? s.raw?.updatedAt),
+            toMs(s.updatedAt ?? s.raw?.updatedAt)
           );
         }
       } catch (err) {
@@ -487,7 +526,7 @@ export function collectTickFacts({
       try {
         const ins = db.prepare(
           `INSERT INTO obs_job (tick_id, bg_job_id, state, tempo, detail, needs, first_terminal_at, cli_version, created_at_ms, updated_at_ms, mtime_ms, exists_flag)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
         );
         const seen = new Set();
         for (const s of signals) {
@@ -496,7 +535,20 @@ export function collectTickFacts({
           seen.add(bgJobId);
           const j = readJobState?.(bgJobId) ?? { exists: false };
           if (!j.exists) {
-            ins.run(tickId, String(bgJobId), null, null, null, null, null, null, null, null, null, 0);
+            ins.run(
+              tickId,
+              String(bgJobId),
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              0
+            );
           } else {
             ins.run(
               tickId,
@@ -510,7 +562,7 @@ export function collectTickFacts({
               toMs(j.createdAtMs),
               toMs(j.updatedAtMs),
               toMs(j.mtimeMs),
-              1,
+              1
             );
           }
         }
@@ -575,7 +627,7 @@ export function collectTickFacts({
       // while still re-inserting on subsequent ticks (insert-only-per-tick preserved).
       {
         const insRel = db.prepare(
-          "INSERT INTO obs_relation (tick_id, source_ticket, target_ticket, relation_type) VALUES (?, ?, ?, ?)",
+          "INSERT INTO obs_relation (tick_id, source_ticket, target_ticket, relation_type) VALUES (?, ?, ?, ?)"
         );
         const seenRel = new Set();
         const seenEdge = new Set();
@@ -597,7 +649,8 @@ export function collectTickFacts({
               if (!peer) continue;
               if (node.type === "blocks") addEdge(s.ticket, peer, "blocks");
               else if (node.type === "blocked_by") addEdge(peer, s.ticket, "blocks");
-              else if (node.type === "related" || node.type === "duplicate") addEdge(s.ticket, peer, node.type);
+              else if (node.type === "related" || node.type === "duplicate")
+                addEdge(s.ticket, peer, node.type);
             }
             for (const node of descriptor?.inverseRelations?.nodes ?? []) {
               const peer = node?.issue?.identifier;
@@ -621,7 +674,7 @@ export function collectTickFacts({
       try {
         if (orchDir) {
           const insV = db.prepare(
-            "INSERT INTO obs_verdict (tick_id, ticket, verdict) VALUES (?, ?, ?)",
+            "INSERT INTO obs_verdict (tick_id, ticket, verdict) VALUES (?, ?, ?)"
           );
           const seenV = new Set();
           for (const s of signals) {
@@ -647,7 +700,7 @@ export function collectTickFacts({
       // scheduler uses). Per-source try/catch.
       try {
         const insC = db.prepare(
-          "INSERT INTO obs_cycle (tick_id, ticket, remediate_count) VALUES (?, ?, ?)",
+          "INSERT INTO obs_cycle (tick_id, ticket, remediate_count) VALUES (?, ?, ?)"
         );
         const seenC = new Set();
         for (const s of signals) {
@@ -689,7 +742,10 @@ export function collectTickFacts({
           for (const a of agents) {
             const sid = a?.sessionId ?? a?.session_id;
             if (!sid) continue;
-            agentByShortId.set(shortIdOf(sid), { session_id: String(sid), short_id: shortIdOf(sid) });
+            agentByShortId.set(shortIdOf(sid), {
+              session_id: String(sid),
+              short_id: shortIdOf(sid),
+            });
           }
           // Map each signal's (ticket/phase) → its registered agent entry (or null).
           const m = new Map();
@@ -738,12 +794,17 @@ export function collectTickFacts({
 
         const maxAttempts = getMaxAttempts(db);
         const intentsEnforce = (env.CATALYST_INTENTS_ENFORCE ?? "0") === "1";
-        intentResult = reconcileIntents(db, tickId, { agentsBySubject, linearStateByTicket, signalStatusBySubject }, {
-          maxAttempts,
-          enforce: intentsEnforce,
-          appendEvent: typeof appendIntentEvent === "function" ? appendIntentEvent : null,
-          now,
-        });
+        intentResult = reconcileIntents(
+          db,
+          tickId,
+          { agentsBySubject, linearStateByTicket, signalStatusBySubject },
+          {
+            maxAttempts,
+            enforce: intentsEnforce,
+            appendEvent: typeof appendIntentEvent === "function" ? appendIntentEvent : null,
+            now,
+          }
+        );
       } catch (err) {
         fail("intents", err);
       }
@@ -811,7 +872,10 @@ export function collectBeliefsTick({
   } catch (err) {
     // Belt and braces: collectTickFacts never throws, but the wiring above could.
     try {
-      log.warn({ err: err?.message }, "beliefs: collector wrapper threw (shadow — tick unaffected)");
+      log.warn(
+        { err: err?.message },
+        "beliefs: collector wrapper threw (shadow — tick unaffected)"
+      );
     } catch {
       /* even logging must not break the tick */
     }

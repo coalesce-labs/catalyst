@@ -20,7 +20,7 @@ import { readFileSync, writeFileSync, renameSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { log } from "./config.mjs";
 import { emitReapIntent } from "./reap-intent.mjs";
-import { labelOnce, recordEscalation } from "./label-guard.mjs";
+import { labelNeedsHumanUnlessBeliefOwner, recordEscalation } from "./label-guard.mjs";
 import { buildExplanation, coerceExplanation, tierProducer } from "./escalation-explanation.mjs";
 
 const SETTLED = new Set(["done", "failed", "stalled", "aborted", "skipped", "complete"]);
@@ -52,6 +52,7 @@ export async function killHungWorker(
     writeStatus,
     emit = emitReapIntent,
     reviveDispatch,
+    env = process.env,
   } = {}
 ) {
   const phase = signal.phase;
@@ -152,7 +153,11 @@ export async function killHungWorker(
   }
 
   // (3) needs-human (idempotent via .applied marker) + escalation record.
-  labelOnce(orchDir, ticket, "needs-human", writeStatus);
+  labelNeedsHumanUnlessBeliefOwner(orchDir, ticket, writeStatus, {
+    env,
+    site: "watchdog-kill",
+    log,
+  });
   recordEscalation(orchDir, ticket, phase, failureReason, now());
 
   log.warn(

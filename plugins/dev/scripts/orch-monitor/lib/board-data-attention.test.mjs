@@ -64,3 +64,62 @@ describe("CTL-1131: deriveAttention projects needsHumanSince → attentionSince"
     expect(r).toEqual({ attention: "needs-human", attentionSince: null, escalationType: null });
   });
 });
+
+// ─── CTL-1241 Phase 3: board/recovery label agreement (regression pins) ───────
+//
+// Pins the contract that board.deriveAttention reads the same needs-human label
+// that executeEscalations (the R12 belief owner) applies. This is the source of
+// truth both surfaces share; a future producer change that diverges them would
+// break this test.
+describe("CTL-1241 — deriveAttention label agreement regression", () => {
+  it("ticket with needs-human label → board flags needsHuman (via labelNeedsHuman)", () => {
+    const r = deriveAttention({ labels: ["needs-human"] });
+    expect(r.attention).toBe("needs-human");
+  });
+
+  it("needs-human label alone is sufficient — phaseFailed and prStuck not required", () => {
+    const r = deriveAttention({
+      labels: ["needs-human"],
+      phaseFailed: false,
+      prStuck: false,
+      needsHumanMarker: false,
+    });
+    expect(r.attention).toBe("needs-human");
+  });
+
+  it("needs-human OUTRANKS waiting-on-you when both fire", () => {
+    const r = deriveAttention({ labels: ["needs-human"], waitingOnUser: true });
+    expect(r.attention).toBe("needs-human");
+  });
+
+  it("ticket WITHOUT needs-human label → board does NOT report needsHuman from label alone", () => {
+    const r = deriveAttention({
+      labels: [],
+      phaseFailed: false,
+      prStuck: false,
+      needsHumanMarker: false,
+    });
+    expect(r.attention).toBeNull();
+  });
+
+  it("cross-surface: recovery-escalated ticket (label applied) → board needsHuman true", () => {
+    // Simulate: recovery pass escalated ticket, executeEscalations applied the
+    // needs-human label. Board reads the label and reports needs-human — same
+    // source of truth as the recovery pass classification.
+    const boardResult = deriveAttention({ labels: ["needs-human"] });
+    expect(boardResult.attention).toBe("needs-human");
+  });
+
+  it("cross-surface: recovery FIX (no label applied) → board does NOT report needsHuman from label", () => {
+    // Simulate: recovery pass classified FIX — no needs-human label was applied.
+    // Board should NOT report needsHuman solely from a stale marker that was
+    // never applied (empty labels array, no marker).
+    const boardResult = deriveAttention({
+      labels: [],
+      needsHumanMarker: false,
+      phaseFailed: false,
+      prStuck: false,
+    });
+    expect(boardResult.attention).toBeNull();
+  });
+});

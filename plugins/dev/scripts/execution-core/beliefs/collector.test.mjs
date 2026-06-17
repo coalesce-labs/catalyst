@@ -13,6 +13,7 @@ import {
   collectTickFacts,
   collectBeliefsTick,
   __resetBeliefsCollectorForTests,
+  getEscalateHumanBelief,
 } from "./collector.mjs";
 import { RULES_SHA } from "./rules.mjs";
 import { computeReport } from "./report.mjs";
@@ -933,6 +934,86 @@ describe("collectBeliefsTick — daemon wrapper threads appendEvent (CTL-1063 re
     const db = openBeliefsDb({ path: dbPath });
     const row = db.query("SELECT value_text FROM cfg WHERE key = 'rules_sha_last_seen'").get();
     expect(row).toBeFalsy(); // one-shot signal NOT silently consumed
+    db.close();
+  });
+});
+
+// ─── CTL-1241: getEscalateHumanBelief ────────────────────────────────────────
+describe("getEscalateHumanBelief", () => {
+  // Helper: open an in-memory db seeded with a tick and optionally a belief row.
+  function makeDb({ subject = null, value = null, tickId = 1 } = {}) {
+    const db = openBeliefsDb({ path: ":memory:" });
+    db.run("INSERT INTO tick (tick_id, now_ms, host) VALUES (?, ?, 'h')", [tickId, NOW]);
+    if (subject !== null) {
+      db.run(
+        "INSERT INTO belief (tick_id, stratum, name, subject, value, rule_id, source_fact_ids) VALUES (?, 0, 'escalate_human', ?, ?, 'R12', '[]')",
+        [tickId, subject, value]
+      );
+    }
+    return db;
+  }
+
+  test("returns null when db handle is null", () => {
+    expect(getEscalateHumanBelief(null, "CTL-1241")).toBeNull();
+  });
+
+  test("returns null when no escalate_human row for the ticket", () => {
+    const db = makeDb();
+    expect(getEscalateHumanBelief(db, "CTL-1241")).toBeNull();
+    db.close();
+  });
+
+  test("returns belief object for a matching row", () => {
+    const db = makeDb({ subject: "CTL-1241/implement", value: JSON.stringify({ why: "R10+R11 co-occur" }) });
+    const r = getEscalateHumanBelief(db, "CTL-1241");
+    expect(r).not.toBeNull();
+    expect(r.escalate_human).toBe(true);
+    expect(r.why).toBe("R10+R11 co-occur");
+    expect(r.subject).toBe("CTL-1241/implement");
+    expect(typeof r.tickId).toBe("number");
+    db.close();
+  });
+
+  test("returns the MOST RECENT row (ORDER BY tick_id DESC LIMIT 1)", () => {
+    const db = openBeliefsDb({ path: ":memory:" });
+    db.run("INSERT INTO tick (tick_id, now_ms, host) VALUES (1, ?, 'h')", [NOW - 2000]);
+    db.run("INSERT INTO tick (tick_id, now_ms, host) VALUES (2, ?, 'h')", [NOW - 1000]);
+    db.run(
+      "INSERT INTO belief (tick_id, stratum, name, subject, value, rule_id, source_fact_ids) VALUES (1, 0, 'escalate_human', 'CTL-1241/triage', ?, 'R12', '[]')",
+      [JSON.stringify({ why: "older" })]
+    );
+    db.run(
+      "INSERT INTO belief (tick_id, stratum, name, subject, value, rule_id, source_fact_ids) VALUES (2, 0, 'escalate_human', 'CTL-1241/implement', ?, 'R12', '[]')",
+      [JSON.stringify({ why: "newer" })]
+    );
+    const r = getEscalateHumanBelief(db, "CTL-1241");
+    expect(r.why).toBe("newer");
+    expect(r.subject).toBe("CTL-1241/implement");
+    db.close();
+  });
+
+  test("does NOT match ticket with longer prefix (/ boundary)", () => {
+    // CTL-12410 must NOT match CTL-1241
+    const db = makeDb({ subject: "CTL-12410/implement", value: JSON.stringify({ why: "x" }) });
+    expect(getEscalateHumanBelief(db, "CTL-1241")).toBeNull();
+    db.close();
+  });
+
+  test("parses malformed JSON defensively — no throw, why is null", () => {
+    const db = makeDb({ subject: "CTL-1241/implement", value: "INVALID{{{" });
+    const r = getEscalateHumanBelief(db, "CTL-1241");
+    expect(r).not.toBeNull();
+    expect(r.escalate_human).toBe(true);
+    expect(r.why).toBeNull();
+    db.close();
+  });
+
+  test("handles missing value (null) defensively", () => {
+    const db = makeDb({ subject: "CTL-1241/implement", value: null });
+    const r = getEscalateHumanBelief(db, "CTL-1241");
+    expect(r).not.toBeNull();
+    expect(r.escalate_human).toBe(true);
+    expect(r.why).toBeNull();
     db.close();
   });
 });
