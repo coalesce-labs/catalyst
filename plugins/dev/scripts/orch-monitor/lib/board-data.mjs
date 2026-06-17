@@ -45,6 +45,11 @@ import { compareDispatchOrder } from "./dispatch-rank.mjs";
 // sweep's defaultEmitEvent writes to (execution-core/config.mjs:133). Read here
 // so recovery.fixed / recovery.would-fix outcomes fold into the board.
 import { getEventLogPath } from "../../execution-core/config.mjs";
+// CTL-1257: count the readFileSync full-read fallback so /debug/memory can
+// attribute any remaining RSS ratchet to this path (same counter the CTL-1232
+// instrumentation + the other ring consumers use). event-log-reader.ts has no
+// bun:sqlite/pino edge, so this import is graph-safe.
+import { recordFullRead } from "./event-log-reader.ts";
 
 const execFileP = promisify(execFile);
 
@@ -1136,29 +1141,14 @@ function readOrphanPrState() {
   } catch { return {}; } // torn file: fail-open, zero orphan rows
 }
 
-// loadRecoveryOutcomes — CTL-1220: scan the unified event log for the recovery
-// sweep's outcome events and fold them into per-ticket flags. This is the half
-// CTL-1220 left hollow: the emit side (recovery-reasoning.mjs:defaultEmitEvent)
-// lands recovery.fixed / recovery.would-fix into ~/catalyst/events/YYYY-MM.jsonl;
-// this reader matches them by attributes["event.name"], keys on the CTL id at
-// attributes["event.label"] (mirrored in body.payload.ticket), and builds
-// Map<ticketKey, {autoFixed, triaged, recoveredAt}>.
-//
-//   recovery.fixed     (enforce success)        → autoFixed:true, recoveredAt:ts
-//   recovery.would-fix (shadow identified-fixable) → triaged:true
-//   recovery.escalated / would-escalate         → ignored (surface via attention)
-//
-// Fail-OPEN: {} on ENOENT (no events yet), skip torn lines, never throws —
-// mirrors readOrphanPrState above + the envelope read in event-log-reader.ts.
-export function loadRecoveryOutcomes(eventLogPath = getEventLogPath()) {
-  let text;
-  try {
-    text = readFileSync(eventLogPath, "utf8");
-  } catch {
-    return new Map(); // ENOENT: no events yet
-  }
+// foldRecoveryOutcomes — the shared, byte-identical fold. Given the recovery
+// outcome lines (recovery.fixed / recovery.would-fix only), build
+// Map<ticketKey, {autoFixed, triaged, recoveredAt}> with last-write-wins per
+// ticket. Both the ring-routed path and the readFileSync fallback feed this so
+// the result is identical regardless of source. Torn lines are skipped.
+function foldRecoveryOutcomes(lines) {
   const out = new Map();
-  for (const line of text.split("\n")) {
+  for (const line of lines) {
     if (!line) continue;
     let evt;
     try {
@@ -1179,6 +1169,59 @@ export function loadRecoveryOutcomes(eventLogPath = getEventLogPath()) {
     out.set(key, prev); // last-write-wins per ticket
   }
   return out;
+}
+
+// loadRecoveryOutcomes — CTL-1220: scan the unified event log for the recovery
+// sweep's outcome events and fold them into per-ticket flags. This is the half
+// CTL-1220 left hollow: the emit side (recovery-reasoning.mjs:defaultEmitEvent)
+// lands recovery.fixed / recovery.would-fix into ~/catalyst/events/YYYY-MM.jsonl;
+// this reader matches them by attributes["event.name"], keys on the CTL id at
+// attributes["event.label"] (mirrored in body.payload.ticket), and builds
+// Map<ticketKey, {autoFixed, triaged, recoveredAt}>.
+//
+//   recovery.fixed     (enforce success)        → autoFixed:true, recoveredAt:ts
+//   recovery.would-fix (shadow identified-fixable) → triaged:true
+//   recovery.escalated / would-escalate         → ignored (surface via attention)
+//
+// CTL-1257: this runs INSIDE assembleBoard, so the old unconditional
+// readFileSync full-read of the ~190MB current-month log fired on EVERY 3s board
+// recompute — the worst contributor to the monitor's off-heap RSS ratchet. It is
+// now routed through the shared CTL-1215 event-ring exactly like the three other
+// ring consumers (substeps, tunnel stats, activity): when a ring is threaded in
+// and has cold-filled (oldestTs() !== null), query the SAME select(<pred>) the
+// file scan implies and run the IDENTICAL fold. recovery.fixed/would-fix events
+// are rare + recent-skewed, so they sit comfortably inside the ~8h / 50k-line
+// ring at fleet rate. Underflow guard: a not-yet-cold-filled ring (oldestTs()
+// === null) falls back to the readFileSync body verbatim. A recovery event older
+// than the ring window degrades to NOT-shown — a UI display flag, NOT the
+// recovery decision path (the actuator/scheduler half reads its own state).
+//
+// Ring-less callers (tests, execution-core) pass ring=null and get the legacy
+// full-read path unchanged.
+//
+// Fail-OPEN: {} on ENOENT (no events yet), skip torn lines, never throws —
+// mirrors readOrphanPrState above + the envelope read in event-log-reader.ts.
+export function loadRecoveryOutcomes(eventLogPath = getEventLogPath(), ring = null) {
+  // CTL-1257 ring fast-path. The ring holds the SAME lines (same file), so when
+  // it has cold-filled we apply the same recovery.fixed/would-fix select() and
+  // the identical fold — no full-file readFileSync. oldestTs()===null means the
+  // ring has not cold-filled yet → fall back to the file read (correctness over
+  // speed: never wrong counts, just a slower idle path).
+  if (ring && ring.oldestTs() !== null) {
+    const predicate =
+      '(.attributes."event.name") == "recovery.fixed" or (.attributes."event.name") == "recovery.would-fix"';
+    return foldRecoveryOutcomes(ring.query({ predicate }));
+  }
+
+  let text;
+  try {
+    const _t0 = performance.now();
+    text = readFileSync(eventLogPath, "utf8");
+    recordFullRead("loadRecoveryOutcomes", text.length, performance.now() - _t0);
+  } catch {
+    return new Map(); // ENOENT: no events yet
+  }
+  return foldRecoveryOutcomes(text.split("\n"));
 }
 
 // synthesizeOrphanTickets — pure helper: one BoardTicket-shaped card per
@@ -1462,7 +1505,12 @@ async function loadDispatchCooldowns(now) {
 }
 
 // ── main assembly ───────────────────────────────────────────────────────────
-export async function assembleBoard({ getPrStatus = null } = {}) {
+// CTL-1257: `ring` is the shared CTL-1215 event-ring (createEventRing in
+// server.ts createServer). When
+// present, loadRecoveryOutcomes reads recovery outcomes from the in-memory ring
+// instead of full-reading the ~190MB log on every 3s recompute. Ring-less
+// callers (tests) pass nothing and keep the legacy readFileSync path.
+export async function assembleBoard({ getPrStatus = null, ring = null } = {}) {
   const [agents, costs, phaseCostsByTicket, eligible, linfo, mp, catalystSessByUuid, cooldowns] = await Promise.all([
     liveAgents(), costByTicket(), costByPhase(), loadEligible(TEAM_REPO), linearInfo(), maxParallel(),
     catalystSessionByCcUuid(), loadDispatchCooldowns(Date.now()),
@@ -1475,10 +1523,12 @@ export async function assembleBoard({ getPrStatus = null } = {}) {
   // from here so the dep graph can draw their edges.
   const relationBlockerMap = buildBlockerMapFromRelations(linfo);
 
-  // CTL-1220: per-ticket recovery-sweep outcomes, read once from the unified
-  // event log. Map<ticketKey, {autoFixed, triaged, recoveredAt}>. Synchronous +
-  // fail-open (empty Map on any error) so it never blocks board assembly.
-  const recoveryByTicket = loadRecoveryOutcomes();
+  // CTL-1220: per-ticket recovery-sweep outcomes. Map<ticketKey, {autoFixed,
+  // triaged, recoveredAt}>. Synchronous + fail-open (empty Map on any error) so
+  // it never blocks board assembly.
+  // CTL-1257: routed through the shared event-ring (when threaded in by the
+  // server) so this no longer full-reads the ~190MB log on every 3s recompute.
+  const recoveryByTicket = loadRecoveryOutcomes(getEventLogPath(), ring);
 
   // workers (live background agents that map to a ticket:phase)
   const now = Date.now();
