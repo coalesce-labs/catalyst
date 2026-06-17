@@ -2756,6 +2756,13 @@ export function schedulerTick(
     // creates workers/<ticket>/) inject `() => new Set()` so the seeded ticket
     // is not excluded from Pass 2 by dir-existence before the guard fires.
     listStartedTickets: listStartedTicketsOpt = undefined,
+    // CTL-1241: env binding for the three labelNeedsHumanUnlessBeliefOwner
+    // escalation sites (dependency-cycle 3825, ctl-925-cycle 4530, terminal-sweep
+    // 4913). Mirrors maybeEscalateDispatchFailures' `env = process.env` so the
+    // belief-owner guard is injectable for tests; without it schedulerTick threw
+    // `ReferenceError: env is not defined` and aborted the whole tick on any
+    // escalation branch.
+    env = process.env,
   } = {}
 ) {
   // CTL-850: resolve this host + the cluster roster ONCE per tick (cheap
