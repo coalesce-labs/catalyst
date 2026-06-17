@@ -52,7 +52,10 @@ describe("CTL-1158: assembleBoard wiring — PR-stuck attention signal", () => {
   });
 
   test("humanQuestion falls back to prReason when no phase-signal CTA", () => {
-    expect(boardDataSrc).toContain("deriveHumanQuestion(phaseSigs) ?? prReason");
+    // CTL-1239: the scan array is now explSigs (canonical PHASE_ORDER signals +
+    // ancillary remediate/recovery-pass), so recovery-pass CTAs surface. The
+    // prReason fallback is unchanged.
+    expect(boardDataSrc).toContain("deriveHumanQuestion(explSigs) ?? prReason");
   });
 
   test("ticket object carries mergeStateStatus from prStatus", () => {
