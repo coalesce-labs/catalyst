@@ -103,7 +103,7 @@ function layer2HostName(): string | null {
  *   1. explicit override param
  *   2. CATALYST_HOST_NAME env var
  *   3. catalyst.host.name from Layer-2 config
- *   4. os.hostname() with trailing ".local" stripped
+ *   4. os.hostname() reduced to its first DNS label
  */
 export function hostName(opts: { raw?: string; override?: string } = {}): string {
   const override = opts.override ?? process.env.CATALYST_HOST_NAME;
@@ -112,7 +112,10 @@ export function hostName(opts: { raw?: string; override?: string } = {}): string
     const cfg = layer2HostName();
     if (cfg) return cfg;
   }
-  return (opts.raw ?? hostname()).replace(/\.local$/, "");
+  // Fallback only — collapse a FQDN os.hostname() to its first label (CTL-1252).
+  const base = opts.raw ?? hostname();
+  const dot = base.indexOf(".");
+  return dot === -1 ? base : base.slice(0, dot);
 }
 
 /**

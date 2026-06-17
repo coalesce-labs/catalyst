@@ -46,6 +46,18 @@ expect_eq "host_name strips .local" \
 expect_eq "host_name no-op without .local" \
   "my-mac" "$(__host_name_from 'my-mac')"
 
+# CTL-1252: __host_name_from strips non-.local domain suffix
+expect_eq "host_name strips .rozich domain suffix" \
+  "mini" "$(__host_name_from 'mini.rozich')"
+
+# CTL-1252: __host_name_from strips multi-label FQDN to first label
+expect_eq "host_name strips multi-label FQDN to first label" \
+  "host" "$(__host_name_from 'host.with.many.dots')"
+
+# CTL-1252: explicit CATALYST_HOST_NAME with a dot is returned verbatim
+expect_eq "host_name override with dot is verbatim" \
+  "alias.one" "$(CATALYST_HOST_NAME='alias.one' catalyst_host_name)"
+
 # CATALYST_HOST_NAME override wins
 expect_eq "CATALYST_HOST_NAME override" \
   "alias-1" "$(CATALYST_HOST_NAME='alias-1' catalyst_host_name)"

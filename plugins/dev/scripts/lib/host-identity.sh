@@ -9,15 +9,16 @@
 # Algorithm:
 #   host.name = CATALYST_HOST_NAME  (if set and non-empty)
 #               else catalyst.host.name from Layer-2 config  (if readable and non-empty)
-#               else os.hostname() with trailing ".local" stripped
+#               else os.hostname() reduced to its first DNS label
 #   host.id   = sha256(host.name)[:16]   # 16 hex chars, same shape as spanId
 #
 # Idempotent-source guard — safe to source multiple times.
 [[ -n "${_CATALYST_HOST_IDENTITY_SH_LOADED:-}" ]] && return 0
 _CATALYST_HOST_IDENTITY_SH_LOADED=1
 
-# __host_name_from RAW — strip trailing .local from a hostname string.
-__host_name_from() { printf '%s' "${1%.local}"; }
+# __host_name_from RAW — reduce a fallback hostname to its first DNS label
+# (strips .local, .rozich, or any domain suffix). CTL-1252.
+__host_name_from() { printf '%s' "${1%%.*}"; }
 
 # catalyst_host_name — resolve the effective host name.
 # Honors CATALYST_HOST_NAME override, then Layer-2 config, then os hostname.

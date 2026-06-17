@@ -762,6 +762,16 @@ export function derivePhaseWithRemediate(phaseSigs, remediateSig) {
 // derivation, with zero added latency or chrome.
 
 // hostRefFromName — build a {name,id} HostRef from a bare host NAME, deriving the
+// normalizeHostName — reduce a board host name to its first DNS label so a stale
+// FQDN persisted in the fence (ticket_state.owner_host) or leaked onto a signal
+// collapses to the canonical short name used as the swimlane key. Mirrors the
+// Phase-1 source fix; belt-and-suspenders against already-persisted data. (CTL-1252)
+function normalizeHostName(name) {
+  if (typeof name !== "string" || name.length === 0) return name;
+  const dot = name.indexOf(".");
+  return dot === -1 ? name : name.slice(0, dot);
+}
+
 // id as sha256(name)[:16] — the canonical host-id shape shared by the bash
 // (lib/host-identity.sh), mjs (execution-core/lib/host-identity.mjs), and ts
 // (lib/canonical-event-shared.ts::hostId) primitives, so a name resolved from
@@ -769,7 +779,8 @@ export function derivePhaseWithRemediate(phaseSigs, remediateSig) {
 // name → null (no host attribution rather than a fabricated id).
 export function hostRefFromName(name) {
   if (typeof name !== "string" || name.length === 0) return null;
-  return { name, id: createHash("sha256").update(name).digest("hex").slice(0, 16) };
+  const norm = normalizeHostName(name);
+  return { name: norm, id: createHash("sha256").update(norm).digest("hex").slice(0, 16) };
 }
 
 // deriveHost — resolve a {name,id} HostRef for an entity. Precedence:
@@ -786,14 +797,16 @@ export function deriveHost(phaseSigs, fence = {}) {
   // host) so the host tracks the entity's current owner.
   const sigHost = currentSignalHost(phaseSigs);
   if (sigHost && typeof sigHost.name === "string" && sigHost.name.length > 0) {
+    const norm = normalizeHostName(sigHost.name);
+    const nameUnchanged = norm === sigHost.name;
     return {
-      name: sigHost.name,
-      // the dispatch signal already carries the canonical id; only derive it if
-      // a malformed signal somehow omitted it.
+      name: norm,
+      // trust the stamped id only when the name was already short (no FQDN was
+      // collapsed); otherwise recompute from the normalized name. (CTL-1252)
       id:
-        typeof sigHost.id === "string" && sigHost.id.length > 0
+        nameUnchanged && typeof sigHost.id === "string" && sigHost.id.length > 0
           ? sigHost.id
-          : (hostRefFromName(sigHost.name)?.id ?? null),
+          : (hostRefFromName(norm)?.id ?? null),
     };
   }
   return hostRefFromName(fence?.ownerHost ?? null);

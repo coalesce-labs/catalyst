@@ -193,7 +193,7 @@ export function readClusterConfig(dir = getClusterRepoDir()) {
 // getHostName — resolve this host's coordination name. Precedence:
 //   1. CATALYST_HOST_NAME env (test/alias override; matches lib/host-identity.mjs)
 //   2. catalyst.host.name in the Layer-2 (machine-local) config file
-//   3. os.hostname() with a trailing ".local" stripped (the bare mDNS suffix)
+//   3. os.hostname() reduced to its first DNS label (strips .local, .rozich, etc.)
 // Never throws — an unreadable/malformed Layer-2 file falls through to the
 // hostname default. The result is the membership key HRW hashing will use.
 export function getHostName() {
@@ -206,7 +206,9 @@ export function getHostName() {
   } catch {
     /* missing/malformed Layer-2 file → hostname default */
   }
-  return hostname().replace(/\.local$/, "");
+  const base = hostname();
+  const dot = base.indexOf(".");
+  return dot === -1 ? base : base.slice(0, dot);
 }
 
 // getClusterHosts — read the committed cluster roster from
