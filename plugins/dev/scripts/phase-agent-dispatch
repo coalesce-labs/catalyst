@@ -108,8 +108,26 @@ phase_default_turn_cap() {
 	monitor-merge) echo 50 ;;
 	monitor-deploy) echo 30 ;;
 	remediate) echo 40 ;; # CTL-653: fix-scoped — smaller than implement's 75
+	# recovery-pass (CTL-1176 rung 3): a goal-driven senior-engineer sweep that
+	# resolves conflicts / rebases / merges / re-dispatches across the pipeline.
+	# Higher than remediate's fix-scoped 40 because it iterates to a fleet goal,
+	# but still bounded daemon-side (CTL-748). No self-stop prose in its /goal.
+	recovery-pass) echo 60 ;;
 	teardown) echo 15 ;;
 	*) echo "$DEFAULT_TURN_CAP" ;;
+	esac
+}
+
+# skill_for_phase — maps a dispatch phase name to the SKILL it resolves. The
+# default convention is phase-<PHASE> (every 9-phase worker). The recovery-pass
+# rung (CTL-1176) is the one exception: its skill is named `recovery-pass`
+# (Ryan's chosen name — it is also a standalone operator sweep `/recovery-pass`,
+# not strictly a pipeline phase), so the prompt resolves to /catalyst-dev:recovery-pass
+# rather than /catalyst-dev:phase-recovery-pass. Keep this list tiny and explicit.
+skill_for_phase() {
+	case "$1" in
+	recovery-pass) echo "recovery-pass" ;;
+	*) echo "phase-$1" ;;
 	esac
 }
 
@@ -718,7 +736,7 @@ fi
 
 # ─── Build prompt + spawn claude --bg ──────────────────────────────────────
 
-PROMPT="/catalyst-dev:phase-${PHASE} ${TICKET} --orch-dir ${ORCH_DIR}"
+PROMPT="/catalyst-dev:$(skill_for_phase "${PHASE}") ${TICKET} --orch-dir ${ORCH_DIR}"
 
 # Pass the resolved env through so the phase agent inherits orchestrator
 # context + the humanlayer-friendly thoughts repo location. The dispatch

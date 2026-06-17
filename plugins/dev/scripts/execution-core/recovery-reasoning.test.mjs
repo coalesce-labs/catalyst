@@ -14,10 +14,13 @@ import {
   defaultRecordIntent,
   defaultShouldSkipItem,
   defaultInvokeRemediateCapped,
+  defaultInvokeRecoveryPass,
+  RECOVERY_PASS_CYCLE_CAP,
+  RECOVERY_PASS_PHASE,
   RECOVERY_MAX_ATTEMPTS,
   RECOVERY_COOLDOWN_MS,
 } from "./recovery-reasoning.mjs";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, existsSync, readFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { join as pathJoin } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -983,5 +986,171 @@ describe("reasoningRecoveryPass shadow cooldown wiring (CTL-1176)", () => {
     });
     expect(r2.processed).toBe(0); // skipped via cooldown — NO re-spam
     expect(comments2.length).toBe(0); // zero new comments on the 2nd tick
+  });
+});
+
+// ─── CTL-1176 rung 3: defaultInvokeRecoveryPass (the phase-remediate replacement) ─
+//
+// The bounded-LLM path now dispatches the goal-driven recovery-pass skill instead
+// of disguising a brief as a fake verify finding. These pin the contract: cap
+// enforcement, the FIRST-CLASS recovery-pass.json brief (with diagnosis + the
+// failed-seam history off disk), and the dispatch of phase `recovery-pass`.
+describe("defaultInvokeRecoveryPass (CTL-1176 rung 3)", () => {
+  let orchDir;
+  beforeEach(() => {
+    orchDir = mkdtempSync(pathJoin(tmpdir(), "rec-pass-"));
+  });
+  afterEach(() => {
+    try {
+      rmSync(orchDir, { recursive: true, force: true });
+    } catch {
+      /* best-effort */
+    }
+  });
+
+  test("refuses dispatch when recovery-pass cycle count is already at cap", () => {
+    const result = defaultInvokeRecoveryPass(
+      "CTL-500",
+      { brief: "unstick it", reason: "merge-conflict" },
+      {
+        orchDir,
+        eventScanMod: { countRecoveryPassCycles: () => RECOVERY_PASS_CYCLE_CAP },
+        dispatchMod: { dispatchTicket: () => ({ code: 0 }) },
+      },
+    );
+    expect(result.success).toBe(false);
+    expect(result.reason).toBe("recovery-pass-cycle-cap-exhausted");
+    expect(result.dispatched).toBe(false);
+  });
+
+  test("dispatches phase `recovery-pass` (NOT remediate) and writes a first-class brief", () => {
+    // Seed two unstuck idempotency markers so the brief's deterministicSeamsTried
+    // proves it consumed the hands' history off disk.
+    const wdir = pathJoin(orchDir, "workers", "CTL-501");
+    mkdirSync(wdir, { recursive: true });
+    writeFileSync(pathJoin(wdir, ".unstuck-cleared-pr.applied"), "");
+    writeFileSync(pathJoin(wdir, ".unstuck-force-pushed-pr.applied"), "");
+
+    let dispatchedPhase = null;
+    const result = defaultInvokeRecoveryPass(
+      "CTL-501",
+      {
+        brief: "read both sides of the conflict and resolve",
+        reason: "merge-conflict",
+        evidence: { logsOutput: "CONFLICT (content): foo.ts", beliefState: { x: 1 } },
+        phase: "pr",
+        bgJobId: "bg501",
+        failureReason: "merge-conflict",
+      },
+      {
+        orchDir,
+        eventScanMod: { countRecoveryPassCycles: () => 0 },
+        dispatchMod: {
+          dispatchTicket: (od, ticket, phase) => {
+            dispatchedPhase = phase;
+            return { code: 0, worktreePath: "/tmp/wt", signal: { bg_job_id: "bg501" } };
+          },
+        },
+      },
+    );
+
+    expect(result.success).toBe(true);
+    expect(result.dispatched).toBe(true);
+    expect(dispatchedPhase).toBe(RECOVERY_PASS_PHASE); // "recovery-pass", NOT "remediate"
+    expect(result.details.seamsTriedCount).toBe(2);
+
+    // The first-class brief was written (NOT verify.json).
+    const briefPath = pathJoin(wdir, "recovery-pass.json");
+    expect(existsSync(briefPath)).toBe(true);
+    const brief = JSON.parse(readFileSync(briefPath, "utf8"));
+    expect(brief.schema).toBe("recovery-pass-brief/v1");
+    expect(brief.ticket).toBe("CTL-501");
+    expect(brief.failureReason).toBe("merge-conflict");
+    expect(brief.diagnosis.logsOutput).toContain("CONFLICT");
+    expect(brief.diagnosis.beliefState).toEqual({ x: 1 });
+    // Consumed the hands' history — the two markers, not redone.
+    const categories = brief.deterministicSeamsTried.map((s) => s.category).sort();
+    expect(categories).toEqual(["dirty-tree", "source-conflict"]);
+    expect(brief.guidance).toContain("resolve");
+    // No verify.json fake-finding injection.
+    expect(existsSync(pathJoin(wdir, "verify.json"))).toBe(false);
+  });
+
+  test("dispatch failure (non-zero code) → success:false, dispatched:false", () => {
+    const result = defaultInvokeRecoveryPass(
+      "CTL-502",
+      { brief: "x", reason: "stale-branch" },
+      {
+        orchDir,
+        eventScanMod: { countRecoveryPassCycles: () => 0 },
+        dispatchMod: { dispatchTicket: () => ({ code: 1, stderr: "boom" }) },
+      },
+    );
+    expect(result.success).toBe(false);
+    expect(result.dispatched).toBe(false);
+    expect(result.reason).toContain("boom");
+  });
+
+  test("no orchDir → returns success:false without dispatching", () => {
+    const result = defaultInvokeRecoveryPass("CTL-503", { brief: "x" }, { orchDir: null });
+    expect(result.success).toBe(false);
+    expect(result.reason).toBe("no orchDir");
+  });
+});
+
+// CTL-1176 rung 3: the bounded-LLM branch dispatches recovery-pass (the injected
+// invokeRecoveryPass), and threads the diagnostician evidence into it.
+describe("reasoningRecoveryPass bounded-LLM → recovery-pass dispatch (CTL-1176)", () => {
+  test("enforce mode calls invokeRecoveryPass with the evidence threaded in", () => {
+    const items = [
+      {
+        ticket: "CTL-600",
+        phase: "pr",
+        bgJobId: "bg600",
+        evidence: { logsOutput: "merge conflict in foo.ts", beliefState: { r: 1 } },
+      },
+    ];
+    const calls = [];
+    const events = [];
+    const result = reasoningRecoveryPass(items, {
+      mode: "enforce",
+      invokeRecoveryPass: (ticket, briefObj) => {
+        calls.push({ ticket, briefObj });
+        return { success: true, reason: "recovery-pass dispatched", details: {} };
+      },
+      recordIntent: () => {},
+      postComment: () => {},
+      emitEvent: (e) => events.push(e),
+    });
+
+    expect(result.results[0].decision).toBe("fix");
+    expect(result.results[0].fix_class).toBe("bounded-llm");
+    expect(calls.length).toBe(1);
+    expect(calls[0].ticket).toBe("CTL-600");
+    // Evidence threaded through (the eyes' output the skill consumes).
+    expect(calls[0].briefObj.evidence.logsOutput).toContain("merge conflict");
+    expect(calls[0].briefObj.phase).toBe("pr");
+    expect(calls[0].briefObj.bgJobId).toBe("bg600");
+    expect(events.some((e) => e.type === "recovery.fixed")).toBe(true);
+  });
+
+  test("back-compat: a caller that injects only invokeRemediateCapped still drives the fix", () => {
+    // Legacy wiring/tests that stub the remediate dispatch directly must stay green.
+    const items = [
+      { ticket: "CTL-601", phase: "pr", bgJobId: "bg601", evidence: { logsOutput: "stale main" } },
+    ];
+    let remediateCalled = false;
+    const result = reasoningRecoveryPass(items, {
+      mode: "enforce",
+      invokeRemediateCapped: () => {
+        remediateCalled = true;
+        return { success: true, reason: "fixed", details: {} };
+      },
+      recordIntent: () => {},
+      postComment: () => {},
+      emitEvent: () => {},
+    });
+    expect(remediateCalled).toBe(true);
+    expect(result.results[0].decision).toBe("fix");
   });
 });
