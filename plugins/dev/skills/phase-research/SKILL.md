@@ -122,7 +122,14 @@ is performed.
    get the title, description, and any linked plan reference.
 2. Read the triage summary from `$TRIAGE_FILE` to understand classification and
    surfaced dependencies.
-3. **Relevant Past Learnings lens (compound loop, CTL-789).** BEFORE the
+3. **Pull-before-read (CTL-1236).** Fast-forward all thoughts checkouts so reads
+   pick up the freshest peer state. Roster-gated, ff-only, non-fatal — skips on
+   single-host setups, never blocks research if offline:
+   ```bash
+   # Pull-before-read (CTL-1236): roster-gated, ff-only, non-fatal.
+   "${PLUGIN_ROOT}/scripts/lib/thoughts-pull-sync-gate.sh" || true
+   ```
+4. **Relevant Past Learnings lens (compound loop, CTL-789).** BEFORE the
    `/catalyst-dev:research-codebase` fan-out, grep the shared learnings store for
    prior problem→solution entries that touch this ticket's area, so the research
    inherits hard-won context instead of rediscovering it. Pick 2–5 keywords from
@@ -141,7 +148,7 @@ is performed.
    `title — path — one-line guidance`. Write `None found.` when the store is empty
    or nothing matches. The store may not exist yet — the `-d` guard above makes this
    best-effort; NEVER block research on an empty store.
-4. Assert the `thoughts/` root belongs to this project before writing (CTL-1081):
+5. Assert the `thoughts/` root belongs to this project before writing (CTL-1081):
    ```bash
    bash "${PLUGIN_ROOT}/scripts/lib/assert-thoughts-project.sh" || {
      "${PLUGIN_ROOT}/scripts/phase-agent-emit-complete" \
@@ -150,10 +157,10 @@ is performed.
      exit 1
    }
    ```
-5. Invoke `/catalyst-dev:research-codebase` against the ticket's research question.
+6. Invoke `/catalyst-dev:research-codebase` against the ticket's research question.
    That skill spawns parallel sub-agents, synthesizes findings, and writes the
    document. Do not duplicate its logic.
-6. Confirm the artifact exists at the expected path before continuing.
+7. Confirm the artifact exists at the expected path before continuing.
    Use the shared slug-tolerant matcher from lib/phase-artifact-gate.sh (CTL-1081):
    ```bash
    source "${PLUGIN_ROOT}/scripts/lib/phase-artifact-gate.sh"

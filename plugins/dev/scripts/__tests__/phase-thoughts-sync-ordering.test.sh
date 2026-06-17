@@ -49,6 +49,68 @@ for skill in phase-research phase-plan; do
   fi
 done
 
+# ── CTL-1236: pull-before-read gate in phase-research and research-codebase ───
+
+# phase-research: thoughts-pull-sync-gate.sh is referenced AND precedes learnings grep
+echo "Test: phase-research references thoughts-pull-sync-gate.sh"
+PR_FILE="${SKILLS_DIR}/phase-research/SKILL.md"
+if grep -q "thoughts-pull-sync-gate.sh" "$PR_FILE"; then
+  pass "phase-research references thoughts-pull-sync-gate.sh"
+else
+  fail "phase-research references thoughts-pull-sync-gate.sh" \
+    "thoughts-pull-sync-gate.sh not found in ${PR_FILE}"
+fi
+
+echo "Test: phase-research — pull gate is before the learnings grep"
+pull_gate_line=$(grep -n "thoughts-pull-sync-gate.sh" "$PR_FILE" | head -1 | cut -d: -f1)
+learn_line=$(grep -n "LEARN_DIR\|thoughts/shared/learnings" "$PR_FILE" | head -1 | cut -d: -f1)
+if [[ -z "$pull_gate_line" ]]; then
+  fail "phase-research pull gate ordering: pull gate not found"
+elif [[ -z "$learn_line" ]]; then
+  fail "phase-research pull gate ordering: learnings grep not found"
+elif [[ "$pull_gate_line" -lt "$learn_line" ]]; then
+  pass "phase-research pull gate (line ${pull_gate_line}) before learnings grep (line ${learn_line})"
+else
+  fail "phase-research pull gate ordering: pull gate (line ${pull_gate_line}) is NOT before learnings grep (line ${learn_line})"
+fi
+
+echo "Test: phase-research pull gate does not use 'humanlayer thoughts sync'"
+if grep -A2 "thoughts-pull-sync-gate.sh" "$PR_FILE" | grep -q "humanlayer thoughts sync"; then
+  fail "phase-research pull gate must not use 'humanlayer thoughts sync'"
+else
+  pass "phase-research pull gate does not use 'humanlayer thoughts sync'"
+fi
+
+# research-codebase: thoughts-pull-sync-gate.sh is referenced AND before Step 0
+echo "Test: research-codebase references thoughts-pull-sync-gate.sh"
+RC_FILE="${SKILLS_DIR}/research-codebase/SKILL.md"
+if grep -q "thoughts-pull-sync-gate.sh" "$RC_FILE"; then
+  pass "research-codebase references thoughts-pull-sync-gate.sh"
+else
+  fail "research-codebase references thoughts-pull-sync-gate.sh" \
+    "thoughts-pull-sync-gate.sh not found in ${RC_FILE}"
+fi
+
+echo "Test: research-codebase — pull gate is before Step 0"
+rc_pull_gate_line=$(grep -n "thoughts-pull-sync-gate.sh" "$RC_FILE" | head -1 | cut -d: -f1)
+step0_line=$(grep -n "### Step 0" "$RC_FILE" | head -1 | cut -d: -f1)
+if [[ -z "$rc_pull_gate_line" ]]; then
+  fail "research-codebase pull gate ordering: pull gate not found"
+elif [[ -z "$step0_line" ]]; then
+  fail "research-codebase pull gate ordering: Step 0 not found"
+elif [[ "$rc_pull_gate_line" -lt "$step0_line" ]]; then
+  pass "research-codebase pull gate (line ${rc_pull_gate_line}) before Step 0 (line ${step0_line})"
+else
+  fail "research-codebase pull gate ordering: pull gate (line ${rc_pull_gate_line}) is NOT before Step 0 (line ${step0_line})"
+fi
+
+echo "Test: research-codebase pull gate does not use 'humanlayer thoughts sync'"
+if grep -A2 "thoughts-pull-sync-gate.sh" "$RC_FILE" | grep -q "humanlayer thoughts sync"; then
+  fail "research-codebase pull gate must not use 'humanlayer thoughts sync'"
+else
+  pass "research-codebase pull gate does not use 'humanlayer thoughts sync'"
+fi
+
 echo ""
 echo "Results: $PASSES passed, $FAILURES failed"
 [[ $FAILURES -eq 0 ]] || exit 1

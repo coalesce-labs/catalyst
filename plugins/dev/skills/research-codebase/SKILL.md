@@ -59,6 +59,17 @@ and I'll analyze it thoroughly by exploring relevant components and connections.
 
 Then wait for the user's research query.
 
+## Pull-Before-Read (CTL-1236)
+
+Before the first thoughts read, fast-forward all HumanLayer thoughts checkouts so
+research picks up the freshest peer state. Roster-gated, ff-only, non-fatal — skips
+on single-host setups and never blocks research if offline:
+
+```bash
+# Pull-before-read (CTL-1236): roster-gated, ff-only, non-fatal.
+"${CLAUDE_PLUGIN_ROOT}/scripts/lib/thoughts-pull-sync-gate.sh" || true
+```
+
 ## Steps to Follow After Receiving the Research Query
 
 ### Step 0: Orient with DeepWiki (ALWAYS attempt this first)
