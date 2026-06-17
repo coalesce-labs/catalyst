@@ -280,7 +280,11 @@ describe("getHostName (CTL-859)", () => {
 });
 
 describe("getClusterHosts (CTL-859)", () => {
-  const ROSTER_ENVS = ["CATALYST_CONFIG_FILE", "CATALYST_HOST_NAME", "CATALYST_LAYER2_CONFIG_FILE"];
+  // CTL-1211: CATALYST_CLUSTER_DIR is pinned at a non-existent path so the new
+  // cluster-repo-first branch is a deterministic miss here — these tests assert
+  // the project-repo hosts.json fallback in isolation from any real cluster repo
+  // that may exist at the default ~/catalyst/catalyst-cluster on the test host.
+  const ROSTER_ENVS = ["CATALYST_CONFIG_FILE", "CATALYST_HOST_NAME", "CATALYST_LAYER2_CONFIG_FILE", "CATALYST_CLUSTER_DIR"];
   let saved = {};
   let repo;
 
@@ -294,6 +298,7 @@ describe("getClusterHosts (CTL-859)", () => {
     // CATALYST_CONFIG_FILE points at <repoRoot>/.catalyst/config.json; the
     // roster reader resolves hosts.json as its sibling.
     process.env.CATALYST_CONFIG_FILE = join(repo, ".catalyst", "config.json");
+    process.env.CATALYST_CLUSTER_DIR = join(repo, "no-such-cluster");
   });
 
   afterEach(() => {
@@ -337,6 +342,69 @@ describe("getClusterHosts (CTL-859)", () => {
       JSON.stringify(["mini", 42, "", "mac-studio"]),
     );
     expect(getClusterHosts()).toEqual(["mini", "mac-studio"]);
+  });
+});
+
+describe("getClusterHosts cluster-repo-first (CTL-1211)", () => {
+  const ENVS = ["CATALYST_CONFIG_FILE", "CATALYST_HOST_NAME", "CATALYST_LAYER2_CONFIG_FILE", "CATALYST_CLUSTER_DIR"];
+  let saved = {};
+  let repo, cluster;
+
+  beforeEach(() => {
+    for (const k of ENVS) { saved[k] = process.env[k]; delete process.env[k]; }
+    repo = mkdtempSync(join(tmpdir(), "ctl1211-repo-"));
+    cluster = mkdtempSync(join(tmpdir(), "ctl1211-cluster-"));
+    mkdirSync(join(repo, ".catalyst"), { recursive: true });
+    process.env.CATALYST_CONFIG_FILE = join(repo, ".catalyst", "config.json");
+    process.env.CATALYST_CLUSTER_DIR = cluster;
+  });
+
+  afterEach(() => {
+    for (const k of ENVS) { if (saved[k] === undefined) delete process.env[k]; else process.env[k] = saved[k]; }
+    saved = {};
+    rmSync(repo, { recursive: true, force: true });
+    rmSync(cluster, { recursive: true, force: true });
+  });
+
+  const writeCluster = (obj) => writeFileSync(join(cluster, "cluster.json"), JSON.stringify(obj));
+  const writeProject = (arr) => writeFileSync(join(repo, ".catalyst", "hosts.json"), JSON.stringify(arr));
+
+  test("reads roster from cluster.json when present", () => {
+    writeCluster({ schemaVersion: 1, roster: ["mini", "mini-2"] });
+    expect(getClusterHosts()).toEqual(["mini", "mini-2"]);
+  });
+
+  test("cluster.json roster wins over project hosts.json", () => {
+    writeCluster({ schemaVersion: 1, roster: ["mini", "mini-2"] });
+    writeProject(["mini"]);
+    expect(getClusterHosts()).toEqual(["mini", "mini-2"]);
+  });
+
+  test("falls back to project hosts.json when cluster.json absent", () => {
+    writeProject(["mini", "mac-studio"]);
+    expect(getClusterHosts()).toEqual(["mini", "mac-studio"]);
+  });
+
+  test("ignores a too-new cluster schemaVersion and degrades to project roster", () => {
+    writeCluster({ schemaVersion: 999, roster: ["should", "be", "ignored"] });
+    writeProject(["mini"]);
+    expect(getClusterHosts()).toEqual(["mini"]);
+  });
+
+  test("empty cluster roster degrades to project roster", () => {
+    writeCluster({ schemaVersion: 1, roster: [] });
+    writeProject(["mini"]);
+    expect(getClusterHosts()).toEqual(["mini"]);
+  });
+
+  test("filters non-string entries from the cluster roster", () => {
+    writeCluster({ schemaVersion: 1, roster: ["mini", 42, "", "mini-2"] });
+    expect(getClusterHosts()).toEqual(["mini", "mini-2"]);
+  });
+
+  test("unversioned cluster.json is treated as v1 and read", () => {
+    writeCluster({ roster: ["mini", "mini-2"] });
+    expect(getClusterHosts()).toEqual(["mini", "mini-2"]);
   });
 });
 

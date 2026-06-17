@@ -37,6 +37,11 @@ function pickProbeCommand() {
 function stageScratch() {
   const scratch = mkdtempSync(join(tmpdir(), "ctl-578-pino-"));
   cpSync(CONFIG_MJS, join(scratch, "config.mjs"));
+  // CTL-1211: config.mjs imports the dep-free sibling config-schema.mjs — copy it
+  // too so the scratch fixture can resolve config.mjs's local (non-pino) imports.
+  // (The point of the fixture is that PINO is unresolvable; local siblings must
+  // still resolve, so any new sibling import config.mjs gains belongs here.)
+  cpSync(resolve(__dirname, "config-schema.mjs"), join(scratch, "config-schema.mjs"));
   // type:module + no deps -> pino unresolvable from this directory tree.
   writeFileSync(
     join(scratch, "package.json"),

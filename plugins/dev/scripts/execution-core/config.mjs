@@ -10,6 +10,11 @@ import { homedir, hostname } from "node:os";
 import { resolve, join } from "node:path";
 import { readFileSync, existsSync } from "node:fs";
 
+// CTL-1211: schema-version policy for cluster config. config-schema.mjs is a
+// dep-free sibling leaf, so this import cannot reintroduce the bun-install crash
+// risk the pino try/catch below guards against.
+import { schemaCompat } from "./config-schema.mjs";
+
 // --- Logger (CTL-578) ---
 // Pino is the daemon's runtime logger. A worktree checkout that hasn't run
 // `bun install` cannot resolve it — and any module graph that includes
@@ -165,6 +170,26 @@ function getCatalystRepoDir() {
   return resolve(process.cwd(), ".catalyst");
 }
 
+// CTL-1211: the cluster control-plane repo (catalyst-cluster) — a pristine clone
+// (the plugin-source pattern, CTL-992) holding the node roster + cluster.json +
+// SOPS-encrypted secrets. CATALYST_CLUSTER_DIR overrides; default
+// ~/catalyst/catalyst-cluster. Re-resolved per call so tests redirect via the env.
+export function getClusterRepoDir() {
+  return process.env.CATALYST_CLUSTER_DIR || resolve(catalystDir(), "catalyst-cluster");
+}
+
+// readClusterConfig(dir) — parse <clusterRepoDir>/cluster.json. Returns the
+// parsed object, or null when absent/malformed. Never throws.
+export function readClusterConfig(dir = getClusterRepoDir()) {
+  try {
+    const parsed = JSON.parse(readFileSync(resolve(dir, "cluster.json"), "utf8"));
+    if (parsed && typeof parsed === "object") return parsed;
+  } catch {
+    /* absent/malformed cluster repo → null (fall back to project-repo roster) */
+  }
+  return null;
+}
+
 // getHostName — resolve this host's coordination name. Precedence:
 //   1. CATALYST_HOST_NAME env (test/alias override; matches lib/host-identity.mjs)
 //   2. catalyst.host.name in the Layer-2 (machine-local) config file
@@ -190,6 +215,22 @@ export function getHostName() {
 // back to the single-host default ([getHostName()]) — the safe behavior for the
 // current single-primary deployment. Never throws.
 export function getClusterHosts() {
+  // CTL-1211: cluster-repo-first. Prefer the control-plane repo's roster
+  // (cluster.json.roster); fall back to the project repo's committed hosts.json;
+  // then the single-host default. A cluster.json whose schemaVersion is newer
+  // than this stack supports is ignored here (degrade to the project roster)
+  // rather than trusted blindly. getCatalystRepoDirHostsPath (the CLI write
+  // target) is deliberately NOT changed, so add/remove writes still land on the
+  // project repo and the reader/writer can never silently diverge.
+  const cluster = readClusterConfig();
+  if (
+    cluster &&
+    schemaCompat(cluster.schemaVersion) !== "too-new" &&
+    Array.isArray(cluster.roster)
+  ) {
+    const hosts = cluster.roster.filter((h) => typeof h === "string" && h.length > 0);
+    if (hosts.length > 0) return hosts;
+  }
   try {
     const raw = readFileSync(resolve(getCatalystRepoDir(), "hosts.json"), "utf8");
     const parsed = JSON.parse(raw);

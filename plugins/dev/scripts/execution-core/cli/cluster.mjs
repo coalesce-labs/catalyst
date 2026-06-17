@@ -3,8 +3,9 @@
 // take injectable deps for unit testing; runX() wires real config/heartbeat/git;
 // main() dispatches. drain + join-token are handled in the bash front end.
 import { writeFileSync, renameSync, readFileSync } from "node:fs";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { ownerForTicket } from "../hrw.mjs";
 import {
   getClusterHosts,
   getHostName,
@@ -13,10 +14,12 @@ import {
   getLayer2ConfigPath,
   isDraining,
   getExecutionCoreDir,
+  readClusterConfig,
 } from "../config.mjs";
 import { readPeerHeartbeatsSync } from "../cluster-heartbeat-sync.mjs";
 import { writeSecretConfig } from "../write-secret-config.mjs";
 import { listInFlightTickets } from "../scheduler.mjs";
+import { clusterSync } from "../cluster-sync.mjs";
 
 // ── Roster I/O helpers (shared across all mutating verbs) ──────────────────
 
@@ -264,6 +267,107 @@ export function runTune(argv = []) {
   return 0;
 }
 
+// ── sync — CTL-1211: pull the cluster repo + decrypt secrets into Layer-2 ────
+
+export function runSync(argv = []) {
+  const res = clusterSync();
+  if (argv.includes("--json")) {
+    process.stdout.write(JSON.stringify(res) + "\n");
+    return res.sync.ok ? 0 : 1;
+  }
+  const { pull, sync, files } = res;
+  const lines = [
+    `cluster-sync: pull ${pull.pulled ? "ok" : `skipped (${pull.reason ?? ""})`}`,
+  ];
+  if (!sync.ok && sync.reason) {
+    lines.push(`  configs: ${sync.reason}`);
+  } else {
+    lines.push(
+      `  configs: ${sync.synced.length} synced` +
+        (sync.skipped.length ? `, ${sync.skipped.length} skipped` : ""),
+    );
+  }
+  lines.push(`  secret-files: ${files.written.length} written`);
+  process.stdout.write(lines.join("\n") + "\n");
+  return sync.ok ? 0 : 1;
+}
+
+// ── ownership — CTL-1211: make the HRW partition SEEABLE (no-contention proof) ─
+// Lists every Todo ticket and the single host HRW assigns it to, grouped by host.
+// `--roster=mini,mini-2` previews a hypothetical roster BEFORE flipping it live.
+
+// buildOwnership — pure: group tickets by their HRW owner across a roster. Each
+// ticket is owned by exactly one host (argmax), so there is never any overlap.
+export function buildOwnership(tickets, roster) {
+  const byHost = Object.fromEntries(roster.map((h) => [h, []]));
+  let unassigned = 0;
+  for (const t of tickets) {
+    const owner = ownerForTicket(t, roster);
+    if (owner && byHost[owner]) byHost[owner].push(t);
+    else unassigned += 1;
+  }
+  return { roster, total: tickets.length, byHost, unassigned };
+}
+
+// The cluster's teams (from cluster.json.projects), fallback to CTL.
+function clusterTeams() {
+  const c = readClusterConfig();
+  const teams = Array.isArray(c?.projects) ? c.projects.map((p) => p?.teamKey).filter(Boolean) : [];
+  return teams.length ? teams : ["CTL"];
+}
+
+// linearis requires --team alongside --status, so aggregate Todo across the
+// cluster's teams. A team that errors (auth/network) is skipped, not fatal.
+function listTodoTickets(teams = clusterTeams()) {
+  const ids = [];
+  for (const team of teams) {
+    const r = spawnSync("linearis", ["issues", "list", "--team", team, "--status", "Todo", "-l", "200"], {
+      encoding: "utf8",
+      timeout: 15_000,
+    });
+    if (r.status !== 0) continue;
+    try {
+      const parsed = JSON.parse(r.stdout);
+      const items = Array.isArray(parsed) ? parsed : (parsed?.issues ?? parsed?.nodes ?? []);
+      for (const t of items) {
+        const id = t?.identifier ?? t?.id;
+        if (typeof id === "string" && id.length > 0) ids.push(id);
+      }
+    } catch {
+      /* skip an unparseable team response */
+    }
+  }
+  return ids;
+}
+
+export function runOwnership(argv = [], { listTickets = listTodoTickets } = {}) {
+  const rosterArg = argv.find((a) => a.startsWith("--roster="));
+  const roster = rosterArg
+    ? rosterArg.slice("--roster=".length).split(",").map((s) => s.trim()).filter(Boolean)
+    : getClusterHosts();
+  let tickets;
+  try {
+    tickets = listTickets();
+  } catch (err) {
+    process.stderr.write(`ownership: could not list tickets: ${err?.message ?? err}\n`);
+    return 1;
+  }
+  const o = buildOwnership(tickets, roster);
+  if (argv.includes("--json")) {
+    process.stdout.write(JSON.stringify(o) + "\n");
+    return 0;
+  }
+  const lines = [`HRW ownership over roster [${roster.join(", ")}] — ${o.total} Todo ticket(s):`];
+  for (const h of roster) {
+    const ts = o.byHost[h] ?? [];
+    lines.push(`  ${h}: ${ts.length}${ts.length ? "  " + ts.join(", ") : ""}`);
+  }
+  const assigned = Object.values(o.byHost).reduce((n, a) => n + a.length, 0);
+  lines.push(`  → each ticket owned by exactly one host: ${assigned}/${o.total} assigned, 0 overlap`);
+  process.stdout.write(lines.join("\n") + "\n");
+  return 0;
+}
+
 // ── main — dispatch ───────────────────────────────────────────────────────
 
 export function main(argv = process.argv.slice(2)) {
@@ -276,6 +380,8 @@ export function main(argv = process.argv.slice(2)) {
     case "rename":    code = runRename(rest); break;
     case "set-anchor": code = runSetAnchor(rest); break;
     case "tune":      code = runTune(rest); break;
+    case "sync":      code = runSync(rest); break;
+    case "ownership": code = runOwnership(rest); break;
     default:
       process.stderr.write(`catalyst cluster: unknown verb '${verb ?? ""}'\n`);
       code = 2;
