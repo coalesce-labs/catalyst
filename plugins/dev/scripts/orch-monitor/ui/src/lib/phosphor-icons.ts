@@ -93,7 +93,12 @@ export async function loadGlyph(name: string, timeoutMs = DEFAULT_TIMEOUT_MS): P
           timeoutMs,
         );
       });
-      const mod = await Promise.race([imp(), timeout]);
+      // Attach a no-op .catch so that if the timeout wins the race, a later
+      // rejection of the still-running import() cannot surface as an
+      // unhandledrejection (the result is discarded either way).
+      const importPromise = imp();
+      importPromise.catch(() => {});
+      const mod = await Promise.race([importPromise, timeout]);
       const pascal = kebabToPascal(name);
       const C = (mod[`${pascal}Icon`] ?? mod[pascal]) as Icon | undefined;
       if (!C) throw new Error(`phosphor glyph export missing: ${name}`);
@@ -123,7 +128,12 @@ export function useGlyphLoad(name: string): GlyphLoadState {
         _subs.set(name, set);
       }
       set.add(cb);
-      return () => set.delete(cb);
+      return () => {
+        set.delete(cb);
+        // Prune the now-empty Set so _subs doesn't accumulate one empty entry
+        // per distinct glyph name ever viewed.
+        if (set.size === 0) _subs.delete(name);
+      };
     },
     () => glyphLoadState(name), // snapshot is a STRING (stable) — do not return a fresh object
     () => glyphLoadState(name),

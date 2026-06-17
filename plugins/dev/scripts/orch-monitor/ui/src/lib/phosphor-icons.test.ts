@@ -3,6 +3,8 @@
 // lazy load (cache + dedupe + .catch + timeout + retryable error) with injected fake importers,
 // so tests never touch the real library or the network.
 import { beforeEach, describe, it, expect } from "bun:test";
+import { forwardRef } from "react";
+import type { Icon, IconProps } from "@phosphor-icons/react";
 import {
   enumeratePhosphorGlyphNames,
   resolvePhosphorIcon,
@@ -72,7 +74,10 @@ describe("enumeratePhosphorGlyphNames", () => {
 });
 
 describe("loadGlyph (per-glyph async resolver, injected importers)", () => {
-  const FakeFire = () => null;
+  // A real ForwardRefExoticComponent so the fixture satisfies `Icon`
+  // (ForwardRefExoticComponent<IconProps>) — the type `.toBe(FakeFire)` infers
+  // from loadGlyph/resolvePhosphorIcon — without an `as unknown as Icon` cast.
+  const FakeFire: Icon = forwardRef<SVGSVGElement, IconProps>(() => null);
   it("resolves a kebab to a component, preferring mod[Pascal+'Icon']", async () => {
     __setGlyphImporters({ fire: () => Promise.resolve({ Fire: () => null, FireIcon: FakeFire }) });
     expect(await loadGlyph("fire")).toBe(FakeFire);
@@ -82,6 +87,19 @@ describe("loadGlyph (per-glyph async resolver, injected importers)", () => {
     __setGlyphImporters({});
     expect(await loadGlyph("zzz-nope")).toBeNull();
     expect(glyphLoadState("zzz-nope")).toBe("missing");
+  });
+  it("falls back to mod[Pascal] when the Pascal+'Icon' export is absent", async () => {
+    // Module exposes only `Fire` (no `FireIcon`) → resolves via the `?? mod[pascal]` branch.
+    __setGlyphImporters({ fire: () => Promise.resolve({ Fire: FakeFire }) });
+    expect(await loadGlyph("fire")).toBe(FakeFire);
+    expect(glyphLoadState("fire")).toBe("ready");
+  });
+  it("returns null + 'error' when the importer resolves but the expected export is missing", async () => {
+    // Importer is present and settles, but the module lacks both `FireIcon` and `Fire`.
+    __setGlyphImporters({ fire: () => Promise.resolve({}) });
+    expect(await loadGlyph("fire")).toBeNull();
+    expect(glyphLoadState("fire")).toBe("error");
+    expect(getGlyphError("fire")).toContain("export missing");
   });
   it("caches the resolved component (importer invoked once)", async () => {
     let calls = 0;
