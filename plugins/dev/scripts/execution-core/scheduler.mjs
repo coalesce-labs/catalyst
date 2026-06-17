@@ -5255,6 +5255,7 @@ function runTick() {
       exec: runningOpts.exec,
       writeStatus: runningOpts.writeStatus,
       cache: runningOpts.cache, // CTL-634: shared out-of-set blocker state cache
+      gateway: runningOpts.gateway, // CTL-1240/823: enables tier-2 reads in reclaim + reasoning filter
       concurrency, // CTL-665 + CTL-676: per-tick re-read, then threaded into readMaxParallel
       // CTL-676: forward the optional liveBackgroundCount seam (test-only) so
       // a unit test can drive freeSlots deterministically without shelling
@@ -5337,10 +5338,13 @@ function runTick() {
             projects: listProjects(),
             agents: getAgentsCached().agents,
             isLinearTerminal: (id) => {
-              // fetchTicketState with no gateway behaves as the plain cache-first
-              // read (the daemon's runTick does not thread a gateway, matching the
-              // CTL-642 terminal short-circuit at the reconcile backstop).
-              const state = fetchTicketState(id);
+              // CTL-1240: 3-tier read (cache → gateway/filter-state.db → live linearis),
+              // matching the reclaim + reasoning-pass paths. TTL/gateway hits suppress
+              // the live `linearis issues read` storm this census otherwise caused.
+              const state = fetchTicketState(id, {
+                cache: runningOpts.cache,
+                gateway: runningOpts.gateway,
+              });
               return state != null && isLinearTerminal(state);
             },
           }),
@@ -5357,7 +5361,12 @@ function runTick() {
             orchDir: runningOpts.orchDir,
             agentsSnapshot: getAgentsCached().agents,
             isLinearTerminal: (id) => {
-              const state = fetchTicketState(id);
+              // CTL-1240: 3-tier read (cache → gateway → live linearis). Matches
+              // the stall-clear census path above and the reclaim/reasoning paths.
+              const state = fetchTicketState(id, {
+                cache: runningOpts.cache,
+                gateway: runningOpts.gateway,
+              });
               return state != null && isLinearTerminal(state);
             },
             // CTL-1064: thread the worktree resolver from each worker's signal so
@@ -5531,6 +5540,7 @@ export function startScheduler({
   exec,
   writeStatus,
   cache, // CTL-634: shared out-of-set blocker state cache (from startDaemon)
+  gateway, // CTL-1240/823: durable filter-state.db reader; threaded into runningOpts → schedulerTick
   concurrency = {}, // CTL-665 + CTL-676: boot-captured executionCore knobs. When
   // `configPath` is also set (production wiring), runTick re-reads the live
   // file every tick and ignores this object; the boot-captured value is the
@@ -5597,6 +5607,7 @@ export function startScheduler({
     exec,
     writeStatus,
     cache,
+    gateway, // CTL-1240: thread the durable descriptor reader into the per-tick options
     concurrency,
     configPath, // CTL-676: per-tick Layer-1 re-read source
     layer2Path, // CTL-678: per-tick Layer-2 re-read source (host-wide override)
