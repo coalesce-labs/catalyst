@@ -1,7 +1,12 @@
-// icon-picker-popover.tsx — searchable glyph+favicon picker for Project Settings (CTL-1208, CTL-1226).
-// Popover + shadcn Command (cmdk): Auto | Detected favicons | Featured grid | All icons grid.
-import { useState } from "react";
+// icon-picker-popover.tsx — searchable glyph+favicon picker for Project Settings (CTL-1208, CTL-1226, CTL-1233).
+// CTL-1233: lazy-loads the full Phosphor set on popover open, virtualizes the All-icons grid with
+// @tanstack/react-virtual to eliminate typing lag. Featured grid remains cmdk CommandItem-based
+// (small, keyboard-navigable). All-icons uses plain buttons (GlyphGridButton) to avoid cmdk
+// item-registration overhead on mount/unmount.
+import { useState, useMemo, useRef, useCallback } from "react";
 import { ChevronDownIcon } from "lucide-react";
+import { useDebounce } from "@uidotdev/usehooks";
+import { useVirtualizer } from "@tanstack/react-virtual";
 import { Button } from "@/components/ui/button";
 import {
   Popover,
@@ -19,9 +24,22 @@ import {
 } from "@/components/ui/command";
 import { NAMED_COLORS } from "@/lib/color-palette";
 import { ProjectMarkIcon } from "@/components/project-mark-icon";
-import { buildIconPickerItems, resolveActiveIconLabel } from "./icon-picker-model";
+import {
+  loadPhosphorRegistry,
+  usePhosphorRegistry,
+  enumeratePhosphorGlyphNames,
+} from "@/lib/phosphor-icons";
+import {
+  buildBasePickerItems,
+  buildAllGlyphItems,
+  filterPickerItems,
+  resolveActiveIconLabel,
+} from "./icon-picker-model";
 import type { IconPickerItem } from "./icon-picker-model";
 import type { IconCandidate } from "@/lib/repo-icons";
+
+const GRID_COLS = 8;
+const ROW_PX = 36;
 
 interface IconPickerPopoverProps {
   /** Current server icon value: null = Auto, path = favicon, "phosphor:<n>" = glyph. */
@@ -58,18 +76,147 @@ function GlyphGridCell({
   );
 }
 
+function GlyphGridButton({
+  item,
+  currentValue,
+  accentColor,
+  onSelect,
+}: {
+  item: IconPickerItem;
+  currentValue: string | null;
+  accentColor: string;
+  onSelect: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      role="option"
+      aria-selected={currentValue === item.value}
+      aria-label={item.label}
+      title={item.label}
+      onClick={onSelect}
+      className="p-0.5 h-8 w-8 flex items-center justify-center rounded-sm hover:bg-accent focus:outline-none focus-visible:ring-1 focus-visible:ring-ring flex-none"
+      data-active={currentValue === item.value ? true : undefined}
+    >
+      <ProjectMarkIcon mark={{ kind: "glyph", name: item.name! }} color={accentColor} size={18} />
+    </button>
+  );
+}
+
+function VirtualGlyphGrid({
+  items,
+  accentColor,
+  currentValue,
+  onSelect,
+}: {
+  items: IconPickerItem[];
+  accentColor: string;
+  currentValue: string | null;
+  onSelect: (value: string | null) => void;
+}) {
+  const parentRef = useRef<HTMLDivElement>(null);
+  const rowCount = Math.ceil(items.length / GRID_COLS);
+
+  const rowVirtualizer = useVirtualizer({
+    count: rowCount,
+    getScrollElement: () => parentRef.current,
+    estimateSize: () => ROW_PX,
+    overscan: 4,
+  });
+
+  return (
+    <div
+      ref={parentRef}
+      className="overflow-y-auto max-h-72"
+      style={{ contain: "strict" }}
+    >
+      <div
+        style={{
+          height: `${rowVirtualizer.getTotalSize()}px`,
+          width: "100%",
+          position: "relative",
+        }}
+      >
+        {rowVirtualizer.getVirtualItems().map((virtualRow) => {
+          const startIdx = virtualRow.index * GRID_COLS;
+          const rowItems = items.slice(startIdx, startIdx + GRID_COLS);
+          return (
+            <div
+              key={virtualRow.key}
+              style={{
+                position: "absolute",
+                top: 0,
+                left: 0,
+                width: "100%",
+                height: `${virtualRow.size}px`,
+                transform: `translateY(${virtualRow.start}px)`,
+              }}
+              className="flex gap-1 p-0.5"
+            >
+              {rowItems.map((item) => (
+                <GlyphGridButton
+                  key={item.value}
+                  item={item}
+                  currentValue={currentValue}
+                  accentColor={accentColor}
+                  onSelect={() => onSelect(item.value)}
+                />
+              ))}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 export function IconPickerPopover({ value, onChange, candidates, hue }: IconPickerPopoverProps) {
   const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState("");
+  const debouncedQuery = useDebounce(query, 80);
+  const phosphorLoaded = usePhosphorRegistry();
 
-  const items = buildIconPickerItems(candidates);
+  // Load the full Phosphor set when popover opens (memoized — won't re-fetch).
+  const handleOpenChange = useCallback((next: boolean) => {
+    setOpen(next);
+    if (next) void loadPhosphorRegistry();
+  }, []);
+
   const accentColor = (hue && NAMED_COLORS[hue]?.text) || "currentColor";
   const triggerLabel = resolveActiveIconLabel(value);
 
-  const featuredGlyphs = items.filter((i) => i.group === "glyph" && i.featured);
-  const allGlyphs = items.filter((i) => i.group === "glyph" && !i.featured);
+  // Base items (Auto + favicons + featured) — memoized on candidates (stable ref).
+  const baseItems = useMemo(() => buildBasePickerItems(candidates), [candidates]);
+
+  // All non-featured items — memoized on phosphorLoaded to rebuild once after load.
+  const allGlyphItems = useMemo(
+    () => (phosphorLoaded ? buildAllGlyphItems(enumeratePhosphorGlyphNames()) : []),
+    [phosphorLoaded],
+  );
+
+  // Filtered views.
+  const filteredBase = useMemo(
+    () => filterPickerItems(baseItems, debouncedQuery),
+    [baseItems, debouncedQuery],
+  );
+  const filteredAll = useMemo(
+    () => filterPickerItems(allGlyphItems, debouncedQuery),
+    [allGlyphItems, debouncedQuery],
+  );
+
+  const featuredGlyphs = filteredBase.filter((i) => i.group === "glyph" && i.featured);
+  const filteredFavicons = filteredBase.filter((i) => i.group === "favicon");
+  const showAuto = filteredBase.some((i) => i.group === "auto");
+
+  const hasResults = showAuto || filteredFavicons.length > 0 || featuredGlyphs.length > 0 || filteredAll.length > 0;
+
+  const handleSelect = useCallback((next: string | null) => {
+    onChange(next);
+    setOpen(false);
+  }, [onChange]);
 
   return (
-    <Popover open={open} onOpenChange={setOpen}>
+    <Popover open={open} onOpenChange={handleOpenChange}>
       <PopoverTrigger asChild>
         <Button
           variant="outline"
@@ -102,87 +249,98 @@ export function IconPickerPopover({ value, onChange, candidates, hue }: IconPick
         onPointerDownOutside={(e) => e.preventDefault()}
         onCloseAutoFocus={(e) => e.preventDefault()}
       >
-
-        <Command>
-          <CommandInput placeholder="Search icons…" className="h-9 text-xs" />
-          <CommandList className="max-h-72">
-            <CommandEmpty className="py-4 text-center text-xs text-muted">
-              No icons found.
-            </CommandEmpty>
+        <Command shouldFilter={false}>
+          <CommandInput
+            placeholder="Search icons…"
+            className="h-9 text-xs"
+            value={query}
+            onValueChange={setQuery}
+          />
+          <CommandList className="max-h-none">
+            {!hasResults && (
+              <CommandEmpty className="py-4 text-center text-xs text-muted">
+                No icons found.
+              </CommandEmpty>
+            )}
 
             {/* Auto group */}
-            <CommandGroup heading="Auto">
-              <CommandItem
-                key="auto"
-                value="auto"
-                onSelect={() => { onChange(null); setOpen(false); }}
-                className="text-xs gap-2"
-                data-active={value === null ? true : undefined}
-              >
-                <span className="size-3.5 rounded-sm border border-border bg-s2 flex-shrink-0" />
-                Auto (best detected)
-              </CommandItem>
-            </CommandGroup>
+            {showAuto && (
+              <CommandGroup heading="Auto">
+                <CommandItem
+                  key="auto"
+                  value="auto"
+                  onSelect={() => handleSelect(null)}
+                  className="text-xs gap-2"
+                  data-active={value === null ? true : undefined}
+                >
+                  <span className="size-3.5 rounded-sm border border-border bg-s2 flex-shrink-0" />
+                  Auto (best detected)
+                </CommandItem>
+              </CommandGroup>
+            )}
 
             {/* Detected favicon group */}
-            {candidates.length > 0 && (
+            {filteredFavicons.length > 0 && (
               <>
                 <CommandSeparator />
                 <CommandGroup heading="Detected">
-                  {items
-                    .filter((i) => i.group === "favicon")
-                    .map((item) => (
-                      <CommandItem
-                        key={item.value}
-                        value={`detected ${item.searchKey}`}
-                        onSelect={() => { onChange(item.value); setOpen(false); }}
-                        className="text-xs gap-2"
-                        data-active={value === item.value ? true : undefined}
-                      >
-                        {item.dataUrl && (
-                          <ProjectMarkIcon
-                            mark={{ kind: "favicon", dataUrl: item.dataUrl, selectedPath: item.value ?? "" }}
-                            color={accentColor}
-                            size={14}
-                          />
-                        )}
-                        <span className="truncate">{item.label}</span>
-                      </CommandItem>
-                    ))}
+                  {filteredFavicons.map((item) => (
+                    <CommandItem
+                      key={item.value}
+                      value={`detected ${item.searchKey}`}
+                      onSelect={() => handleSelect(item.value)}
+                      className="text-xs gap-2"
+                      data-active={value === item.value ? true : undefined}
+                    >
+                      {item.dataUrl && (
+                        <ProjectMarkIcon
+                          mark={{ kind: "favicon", dataUrl: item.dataUrl, selectedPath: item.value ?? "" }}
+                          color={accentColor}
+                          size={14}
+                        />
+                      )}
+                      <span className="truncate">{item.label}</span>
+                    </CommandItem>
+                  ))}
                 </CommandGroup>
               </>
             )}
 
-            {/* Featured glyph grid */}
-            <CommandSeparator />
-            <CommandGroup heading="Featured">
-              <div className="grid grid-cols-8 gap-1 p-1">
-                {featuredGlyphs.map((item) => (
-                  <GlyphGridCell
-                    key={item.value}
-                    item={item}
-                    currentValue={value}
-                    accentColor={accentColor}
-                    onSelect={() => { onChange(item.value); setOpen(false); }}
-                  />
-                ))}
-              </div>
-            </CommandGroup>
+            {/* Featured glyph grid — small, keyboard-navigable via cmdk */}
+            {featuredGlyphs.length > 0 && (
+              <>
+                <CommandSeparator />
+                <CommandGroup heading="Featured">
+                  <div className="grid grid-cols-8 gap-1 p-1">
+                    {featuredGlyphs.map((item) => (
+                      <GlyphGridCell
+                        key={item.value}
+                        item={item}
+                        currentValue={value}
+                        accentColor={accentColor}
+                        onSelect={() => handleSelect(item.value)}
+                      />
+                    ))}
+                  </div>
+                </CommandGroup>
+              </>
+            )}
 
-            {/* All icons glyph grid */}
+            {/* All icons — virtualized; plain buttons (not cmdk items) */}
             <CommandSeparator />
             <CommandGroup heading="All icons">
-              <div className="grid grid-cols-8 gap-1 p-1">
-                {allGlyphs.map((item) => (
-                  <GlyphGridCell
-                    key={item.value}
-                    item={item}
-                    currentValue={value}
-                    accentColor={accentColor}
-                    onSelect={() => { onChange(item.value); setOpen(false); }}
-                  />
-                ))}
-              </div>
+              {!phosphorLoaded ? (
+                <p className="py-4 text-center text-xs text-muted">Loading icons…</p>
+              ) : filteredAll.length === 0 && debouncedQuery.trim() ? (
+                <p className="py-2 text-center text-xs text-muted">No matching icons.</p>
+              ) : (
+                <VirtualGlyphGrid
+                  items={filteredAll}
+                  accentColor={accentColor}
+                  currentValue={value}
+                  onSelect={handleSelect}
+                />
+              )}
             </CommandGroup>
           </CommandList>
         </Command>

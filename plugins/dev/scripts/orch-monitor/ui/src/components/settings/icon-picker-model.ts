@@ -1,8 +1,9 @@
 // icon-picker-model.ts — pure view-model for the server-persisted glyph+favicon picker
-// in ProjectSettingsPane (CTL-1208). No React, no side effects — fully unit-testable.
+// in ProjectSettingsPane (CTL-1208, CTL-1226). No React, no side effects — fully unit-testable.
+// CTL-1233: split into buildBasePickerItems (sync: Auto + favicons + featured) and
+// buildAllGlyphItems (takes loaded names as arg, pure). filterPickerItems replaces cmdk filtering.
 import type { IconCandidate } from "@/lib/repo-icons";
 import { PHOSPHOR_GLYPH_NAMES, formatGlyphRef, parseGlyphRef } from "@/lib/project-glyph-set";
-import { enumeratePhosphorGlyphNames } from "@/lib/phosphor-icons";
 
 export type IconPickerGroup = "auto" | "favicon" | "glyph";
 
@@ -25,12 +26,11 @@ export interface IconPickerItem {
 }
 
 /**
- * Build the flat list of icon picker items for a project.
- * Order: Auto → favicon candidates → Featured glyphs (curated 36) → All icons (full set remainder).
+ * Build the base items (Auto + favicon candidates + 36 featured glyphs).
+ * Does NOT require the full Phosphor set to be loaded — safe to call synchronously.
+ * The "All icons" grid items are built separately via buildAllGlyphItems after load.
  */
-export function buildIconPickerItems(
-  candidates: readonly IconCandidate[],
-): IconPickerItem[] {
+export function buildBasePickerItems(candidates: readonly IconCandidate[]): IconPickerItem[] {
   const items: IconPickerItem[] = [];
 
   // 1. Auto
@@ -43,7 +43,6 @@ export function buildIconPickerItems(
 
   // 2. Detected favicon candidates
   for (const c of candidates) {
-    const ext = c.path.split(".").pop()?.toUpperCase() ?? "IMG";
     items.push({
       value: c.path,
       label: c.path.split("/").pop() ?? c.path,
@@ -51,11 +50,9 @@ export function buildIconPickerItems(
       group: "favicon",
       dataUrl: c.dataUrl,
     });
-    void ext;
   }
 
-  // 3. Featured (curated) glyphs first, in curated order
-  const featuredSet = new Set(PHOSPHOR_GLYPH_NAMES);
+  // 3. Featured (curated) glyphs in curated order
   for (const name of PHOSPHOR_GLYPH_NAMES) {
     items.push({
       value: formatGlyphRef(name),
@@ -67,20 +64,42 @@ export function buildIconPickerItems(
     });
   }
 
-  // 4. Remaining full-set icons (sorted, excluding curated names to avoid duplicates)
-  for (const name of enumeratePhosphorGlyphNames()) {
-    if (featuredSet.has(name)) continue;
-    items.push({
+  return items;
+}
+
+const FEATURED_SET = new Set(PHOSPHOR_GLYPH_NAMES);
+
+/**
+ * Build non-featured glyph items from the full loaded name list.
+ * Filters out featured names to avoid duplicates; preserves the sorted order from the loader.
+ * Pass the result of enumeratePhosphorGlyphNames() after loadPhosphorRegistry() resolves.
+ */
+export function buildAllGlyphItems(allNames: readonly string[]): IconPickerItem[] {
+  return allNames
+    .filter((n) => !FEATURED_SET.has(n))
+    .map((name) => ({
       value: formatGlyphRef(name),
       label: name.replace(/-/g, " "),
       searchKey: name,
-      group: "glyph",
+      group: "glyph" as const,
       name,
       featured: false,
-    });
-  }
+    }));
+}
 
-  return items;
+/**
+ * Substring-filter a list of picker items by a query string (case-insensitive).
+ * Empty or whitespace-only query returns all items unchanged.
+ */
+export function filterPickerItems(
+  items: readonly IconPickerItem[],
+  query: string,
+): IconPickerItem[] {
+  const q = query.trim().toLowerCase();
+  if (!q) return [...items];
+  return items.filter(
+    (i) => i.searchKey.toLowerCase().includes(q) || i.label.toLowerCase().includes(q),
+  );
 }
 
 /** Return a short label for the picker trigger button based on the current value. */

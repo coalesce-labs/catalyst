@@ -1,5 +1,7 @@
-// project-glyph-set.test.ts — unit tests for the curated Phosphor glyph set (CTL-1208, CTL-1226).
+// project-glyph-set.test.ts — unit tests for the curated Phosphor glyph set (CTL-1208, CTL-1226, CTL-1233).
 // No DOM, no React — pure function tests.
+// CTL-1233: parseGlyphRef is now fail-open for non-featured refs (shape-valid → accepted;
+// component existence is checked lazily at render time).
 import { describe, it, expect } from "bun:test";
 import {
   PHOSPHOR_GLYPH_NAMES,
@@ -42,8 +44,9 @@ describe("parseGlyphRef", () => {
     expect(parseGlyphRef("public/favicon.svg")).toBeNull();
   });
 
-  it("returns null for a non-existent phosphor name", () => {
-    expect(parseGlyphRef("phosphor:unknown-glyph-xyz")).toBeNull();
+  it("accepts a well-shaped non-featured ref even before the full set loads (fail-open, CTL-1233)", () => {
+    // Shape-valid (non-empty phosphor: prefix) is the contract; component existence is checked lazily.
+    expect(parseGlyphRef("phosphor:unknown-glyph-xyz")).toEqual({ set: "phosphor", name: "unknown-glyph-xyz" });
   });
 
   it("returns null for null", () => {
@@ -83,8 +86,9 @@ describe("isGlyphRef", () => {
     expect(isGlyphRef("public/favicon.svg")).toBe(false);
   });
 
-  it("returns false for a non-existent phosphor name", () => {
-    expect(isGlyphRef("phosphor:not-a-real-icon")).toBe(false);
+  it("returns true for a well-shaped non-existent phosphor name (fail-open, CTL-1233)", () => {
+    // Shape-valid (non-empty phosphor: prefix) → accepted; render-time yields null if truly absent.
+    expect(isGlyphRef("phosphor:not-a-real-icon")).toBe(true);
   });
 
   it("returns false for null", () => {
