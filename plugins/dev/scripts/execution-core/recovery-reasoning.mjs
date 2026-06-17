@@ -32,6 +32,7 @@ import {
   writeFileSync,
   existsSync,
   renameSync,
+  unlinkSync,
 } from "node:fs";
 import { dirname, join } from "node:path";
 import { randomBytes } from "node:crypto";
@@ -1498,4 +1499,25 @@ export function defaultShouldSkipItem(ticket, opts = {}) {
   if (typeof last === "number" && now() - last < RECOVERY_COOLDOWN_MS) return true;
 
   return false;
+}
+
+// defaultForgetIntent — delete a ticket's recovery-intent ledger entry. The
+// inverse of defaultRecordIntent. CTL-1242 (corrected scope): when the execution-
+// core terminal sweep observes a ticket reach a terminal/merged state, it forgets
+// the host-local escalated/cooldown latch so the ledger does not accumulate stale
+// `.recovery-intents/<ticket>.json` files for finished tickets (which inflate the
+// lifetime-escalation count and keep a closed ticket in the host-local ledger).
+// The recovery router already drops terminal tickets via its backlog filter, so
+// this is hygiene — not a functional gate. Idempotent: a missing file is a no-op.
+// Returns true when a file was removed, false otherwise. Never throws.
+export function defaultForgetIntent(ticket, opts = {}) {
+  const orchDir = opts.orchDir ?? resolveOrchDir();
+  if (!orchDir || !ticket) return false;
+  const p = recoveryIntentPath(orchDir, ticket);
+  try {
+    unlinkSync(p);
+    return true;
+  } catch {
+    return false; // absent (ENOENT) or unremovable → nothing to forget
+  }
 }

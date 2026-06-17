@@ -212,6 +212,10 @@ import {
   reasoningRecoveryPass,
   defaultShouldSkipItem as recoveryShouldSkipItem,
   defaultRecordIntent as recoveryRecordIntent,
+  // CTL-1242 (corrected scope): forget the host-local recovery-intent latch when
+  // a ticket goes terminal so the ledger doesn't accumulate stale finished-ticket
+  // files (called from the terminal-sweep clear branch below).
+  defaultForgetIntent as recoveryForgetIntent,
   defaultInvokeSeam as recoveryInvokeSeam,
   // CTL-1176 rung 3: the bounded-LLM path now dispatches the goal-driven
   // recovery-pass skill (replacing the phase-remediate detour). Bound to the
@@ -4969,6 +4973,10 @@ export function schedulerTick(
         if (existsSync(`${base}.applied`) || existsSync(`${base}.skipped`)) {
           clearStalledLabel(orchDir, ticket, "needs-human", retractionWriteStatus);
         }
+        // CTL-1242 (corrected scope): also forget the host-local recovery-intent
+        // latch so a finished ticket's escalated/cooldown ledger entry doesn't
+        // linger (hygiene — the recovery router already drops terminal tickets).
+        recoveryForgetIntent(ticket, { orchDir });
       } else {
         // Non-terminal stalled/failed ticket → apply the belief-aware needs-human
         // label (CTL-1241: skipped when the belief engine owns the reclaim).

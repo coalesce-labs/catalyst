@@ -13,6 +13,7 @@ import {
   buildRecoveryEnvelope,
   defaultRecordIntent,
   defaultShouldSkipItem,
+  defaultForgetIntent,
   defaultInvokeRemediateCapped,
   defaultInvokeRecoveryPass,
   RECOVERY_PASS_CYCLE_CAP,
@@ -952,6 +953,30 @@ describe("recovery-intent ledger (cooldown + max-attempts + escalated)", () => {
     // none is injected. Force that by passing orchDir: null explicitly.
     expect(defaultRecordIntent("CTL-998", { decision: "fix" }, { orchDir: null })).toBeNull();
     expect(defaultShouldSkipItem("CTL-998", { orchDir: null })).toBe(false);
+  });
+
+  // CTL-1242 (corrected scope): forget the latch when a ticket goes terminal.
+  test("forgetIntent removes the ledger entry → a later shouldSkip is false", () => {
+    const now = 1_000_000_000_000;
+    defaultRecordIntent("CTL-306", { decision: "escalate" }, { orchDir, now: () => now });
+    // Escalated latch would skip forever…
+    expect(defaultShouldSkipItem("CTL-306", { orchDir, now: () => now + 1 })).toBe(true);
+    // …until the terminal sweep forgets it.
+    expect(defaultForgetIntent("CTL-306", { orchDir })).toBe(true);
+    expect(defaultShouldSkipItem("CTL-306", { orchDir, now: () => now + 2 })).toBe(false);
+  });
+
+  test("forgetIntent on an absent ledger → false (idempotent no-op, never throws)", () => {
+    expect(defaultForgetIntent("CTL-307", { orchDir })).toBe(false);
+    // Re-running after a real forget is also a no-op.
+    defaultRecordIntent("CTL-308", { decision: "fix", fix_class: "x" }, { orchDir, now: () => 1 });
+    expect(defaultForgetIntent("CTL-308", { orchDir })).toBe(true);
+    expect(defaultForgetIntent("CTL-308", { orchDir })).toBe(false);
+  });
+
+  test("forgetIntent with no orchDir / no ticket → false (fail-soft)", () => {
+    expect(defaultForgetIntent("CTL-309", { orchDir: null })).toBe(false);
+    expect(defaultForgetIntent("", { orchDir })).toBe(false);
   });
 });
 
