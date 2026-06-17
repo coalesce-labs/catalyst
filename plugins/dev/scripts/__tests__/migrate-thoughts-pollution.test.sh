@@ -194,6 +194,29 @@ EMP_OUT="$("$MIGRATE" --manifest "$MANE" --source-root "$SRCE" --target-root "$T
 assert_eq "empty: exit 0" "$EMP_RC" "0"
 assert_grep "empty: 'nothing to migrate'" "$EMP_OUT" "nothing to migrate"
 
+# ─── Path-traversal guard ─────────────────────────────────────────────────────
+echo ""
+echo "=== Poisoned manifest (.. / absolute path) → abort, move nothing ==="
+REPOT="$SCRATCH/traversal"
+build_fixture "$REPOT" <<EOF
+repos/catalyst/shared/plans/safe.md	safe content
+EOF
+SRCT="$REPOT/source"; TGTT="$REPOT/target"
+# A canary the traversal path would clobber if the guard were absent.
+printf 'do not touch\n' > "$SCRATCH/canary.md"
+MANT="$SCRATCH/traversal-manifest.jsonl"
+{
+  jq -nc '{path:"repos/catalyst/shared/plans/safe.md",classification:"MOVE",repo:"catalyst",org:"rightsite-cloud",reason:"safe"}'
+  jq -nc '{path:"../../../canary.md",classification:"MOVE",repo:"catalyst",org:"rightsite-cloud",reason:"poison"}'
+} > "$MANT"
+
+TRV_OUT="$("$MIGRATE" --manifest "$MANT" --source-root "$SRCT" --target-root "$TGTT" --execute 2>&1)"; TRV_RC=$?
+assert_eq "traversal: non-zero exit on '..' path" "$([[ $TRV_RC -ne 0 ]] && echo nonzero || echo zero)" "nonzero"
+assert_grep "traversal: reports the unsafe path" "$TRV_OUT" "unsafe manifest path"
+assert_eq "traversal: canary outside the roots is untouched" "$(cat "$SCRATCH/canary.md")" "do not touch"
+assert_eq "traversal: safe sibling NOT moved (abort before moving anything)" \
+  "$([[ -e "$SRCT/repos/catalyst/shared/plans/safe.md" ]] && echo present || echo gone)" "present"
+
 # ─── Missing required args ────────────────────────────────────────────────────
 echo ""
 echo "=== Missing required args → non-zero ==="

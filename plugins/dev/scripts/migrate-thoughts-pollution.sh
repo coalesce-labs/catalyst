@@ -68,6 +68,18 @@ if ((${#MOVE_PATHS[@]} == 0)); then
   exit 0
 fi
 
+# Path-traversal guard: manifest paths must be REPO-RELATIVE with no `..` segment
+# and no leading `/`. The audit only ever emits repos/<subdir>/… paths, but the
+# manifest is external input — refuse anything that could escape --source-root /
+# --target-root (which would otherwise mv files outside the checkout). Abort the
+# whole run; never partially move on a poisoned manifest (zero-loss discipline).
+for rel in "${MOVE_PATHS[@]}"; do
+  if [[ "$rel" == /* || "$rel" == ".." || "$rel" == "../"* || "$rel" == *"/../"* || "$rel" == *"/.." ]]; then
+    fail "unsafe manifest path (absolute or contains '..'): $rel — aborting, moved nothing"
+    exit 1
+  fi
+done
+
 # ── Collision pre-check (move-and-rereference.sh:215-286 behavior) ────────────
 # A collision is a target that already exists with DIFFERING content. An identical
 # target is treated as already-migrated (idempotent), not a conflict. Collect ALL
