@@ -312,6 +312,39 @@ export function getBeliefsDb() {
   return _moduleDb;
 }
 
+// getEscalateHumanBelief — CTL-1241: read-only helper that returns the latest
+// escalate_human belief for a ticket from the current-tick beliefs.db.
+//
+// Query: most-recent (ORDER BY tick_id DESC LIMIT 1) row whose
+//   name = 'escalate_human' AND subject LIKE '<ticket>/%'
+// The '/' boundary ensures 'CTL-1241/x' matches 'CTL-1241' but 'CTL-12410/x'
+// does NOT.
+//
+// Returns { escalate_human: true, why, subject, tickId } or null.
+// Never throws — fail-open so a beliefs-disabled or broken daemon is a no-op.
+export function getEscalateHumanBelief(db, ticket) {
+  if (!db) return null;
+  try {
+    const row = db
+      .query(
+        `SELECT subject, value, tick_id FROM belief
+         WHERE name = 'escalate_human' AND subject LIKE ?
+         ORDER BY tick_id DESC LIMIT 1`
+      )
+      .get(`${ticket}/%`);
+    if (!row) return null;
+    let why = null;
+    try {
+      why = JSON.parse(row.value ?? "{}").why ?? null;
+    } catch {
+      // malformed JSON → why stays null; still return the belief
+    }
+    return { escalate_human: true, why, subject: row.subject, tickId: row.tick_id };
+  } catch {
+    return null; // db closed or query error → fail-open
+  }
+}
+
 // collectTickFacts — the hermetic core. All sources injectable; returns
 // { ok, tickId, errors } and NEVER throws.
 //

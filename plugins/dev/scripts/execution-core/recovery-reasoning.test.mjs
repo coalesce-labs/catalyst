@@ -1204,3 +1204,31 @@ describe("reasoningRecoveryPass bounded-LLM → recovery-pass dispatch (CTL-1176
     expect(result.results[0].decision).toBe("fix");
   });
 });
+
+// ─── CTL-1241: R12 belief state → escalation reason text end-to-end ──────────
+describe("CTL-1241 — R12 escalate_human belief wired into recovery evidence", () => {
+  test("determineEscalationReason with beliefState.escalate_human=true includes R12 text", () => {
+    const reason = determineEscalationReason(
+      null,
+      null,
+      {},
+      { escalate_human: true, why: "R10+R11 co-occur" }
+    );
+    expect(reason).toContain("Rule belief R12 escalate_human fired");
+  });
+
+  test("determineEscalationReason without beliefState does NOT include R12 text", () => {
+    const reason = determineEscalationReason(null, null, {}, undefined);
+    expect(reason).not.toContain("R12");
+  });
+
+  test("defaultClassifyTicket with beliefState escalates and reason includes R12 text", () => {
+    const result = defaultClassifyTicket({
+      logsOutput: "some unknown stuck state",
+      beliefState: { escalate_human: true, why: "R10+R11 co-occur" },
+    });
+    expect(result.decision).toBe("escalate");
+    expect(result.fix_class).toBe("human");
+    expect(result.details.reason).toContain("Rule belief R12 escalate_human fired");
+  });
+});

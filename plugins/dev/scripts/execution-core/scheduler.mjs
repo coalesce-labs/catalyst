@@ -81,7 +81,10 @@ import { getProjectConfig, listProjects } from "./registry.mjs";
 import { readWorkerSignals } from "./signal-reader.mjs";
 // CTL-933: shadow belief-store fact collector (opt-in CATALYST_BELIEFS_SHADOW=1).
 // CTL-937: getBeliefsDb exposes the module-level db handle for the diagnostician.
-import { collectBeliefsTick, getBeliefsDb } from "./beliefs/collector.mjs";
+// CTL-1241: getEscalateHumanBelief reads the latest escalate_human belief for the
+// recovery evidence attachment (revives the structurally-dead R12 branch).
+import { collectBeliefsTick, getBeliefsDb, getEscalateHumanBelief } from "./beliefs/collector.mjs";
+import { buildRecoveryItems } from "./recovery-evidence.mjs";
 // CTL-1045 Bug 1: kill-storm suppression guard for defaultJanitorKillIntentRecorder.
 import {
   isIntentEffective,
@@ -3440,7 +3443,7 @@ export function schedulerTick(
     const rMode = _recoveryPassMode ?? rcfg.mode;
     if (rMode !== "off") {
       try {
-        const rItems = readWorkerSignals(orchDir)
+        const rSigs = readWorkerSignals(orchDir)
           .filter(
             (sig) =>
               sig.status === "needs-human" ||
@@ -3469,16 +3472,15 @@ export function schedulerTick(
                 cache,
                 fetchState: (id, o = {}) => fetchTicketState(id, { ...o, cache, gateway }),
               }).terminal
-          )
-          .map((sig) => ({
-            ticket: sig.ticket,
-            phase: sig.phase,
-            // CTL-1176: thread the worker's bg_job_id so the recovery pass's
-            // DIAGNOSE step can capture `claude logs` evidence read-only when the
-            // signal didn't already carry logsOutput.
-            bgJobId: sig.raw?.bg_job_id ?? null,
-            evidence: sig.raw ?? {},
-          }));
+          );
+        // CTL-1241: buildRecoveryItems attaches the current-tick escalate_human
+        // belief (if any) as evidence.beliefState so the structurally-dead R12
+        // branch in recovery-reasoning.mjs is revived.
+        // getBeliefsDb() returns null when beliefs are disabled → no query.
+        const rItems = buildRecoveryItems(rSigs, {
+          db: getBeliefsDb(),
+          getBeliefs: getEscalateHumanBelief,
+        });
         if (rItems.length > 0) {
           // CTL-1176: BIND the host-local ledger + act-seams to THIS tick's real
           // orchDir. Without this the defaults call resolveOrchDir() →
