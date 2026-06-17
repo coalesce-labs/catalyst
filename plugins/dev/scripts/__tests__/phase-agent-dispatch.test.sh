@@ -126,6 +126,11 @@ fresh_env() {
 	# (CTL-689) Point machine-config fallback at a per-test non-existent path so
 	# the user's real ~/.config/catalyst/config.json never contaminates assertions.
 	export CATALYST_MACHINE_CONFIG="${TEST_DIR}/machine-config-absent.json"
+	# (CTL-1237) Pin a deterministic canonical host name so the host.name OTEL
+	# attribute the dispatch now stamps is stable across machines/CI (else it
+	# resolves to os.hostname()). This is the value compose_otel_resource_attrs
+	# prepends to OTEL_RESOURCE_ATTRIBUTES.
+	export CATALYST_HOST_NAME="test-host"
 	mkdir -p "$STUB_DIR" "$WORKER_DIR" "$CONFIG_DIR"
 	setup_claude_stub "$STUB_DIR"
 	export CLAUDE_STUB_LOG="${TEST_DIR}/claude-stub.log"
@@ -563,7 +568,7 @@ EOF
 		>/dev/null 2>&1)
 LOG=$(cat "$CLAUDE_STUB_LOG")
 assert_contains "$LOG" \
-	"OTEL_RESOURCE_ATTRIBUTES=project=test-proj,linear.key=CTL-100,catalyst.orchestration=orch-test,branch=orch-test-CTL-100" \
+	"OTEL_RESOURCE_ATTRIBUTES=host.name=test-host,project=test-proj,linear.key=CTL-100,catalyst.orchestration=orch-test,branch=orch-test-CTL-100" \
 	"OTEL attrs composed with projectKey + tier-2 branch fallback"
 
 # ─── Test 10b: CATALYST_EXECUTION_CORE drops the orchId prefix (CTL-582) ──────
@@ -584,7 +589,7 @@ EOF
 		--orch-dir "$ORCH_DIR" --orch-id orch-test >/dev/null 2>&1)
 LOG=$(cat "$CLAUDE_STUB_LOG")
 assert_contains "$LOG" \
-	"OTEL_RESOURCE_ATTRIBUTES=project=test-proj,linear.key=CTL-100,catalyst.orchestration=orch-test,branch=CTL-100" \
+	"OTEL_RESOURCE_ATTRIBUTES=host.name=test-host,project=test-proj,linear.key=CTL-100,catalyst.orchestration=orch-test,branch=CTL-100" \
 	"execution-core OTEL branch drops the orchId prefix (CTL-100, not orch-test-CTL-100)"
 
 # ─── Test 11: OTEL_RESOURCE_ATTRIBUTES three-attr form when projectKey absent
@@ -599,7 +604,7 @@ rm -rf "${CONFIG_DIR}"
 		>/dev/null 2>&1)
 LOG=$(cat "$CLAUDE_STUB_LOG")
 assert_contains "$LOG" \
-	"OTEL_RESOURCE_ATTRIBUTES=linear.key=CTL-100,catalyst.orchestration=orch-test" \
+	"OTEL_RESOURCE_ATTRIBUTES=host.name=test-host,linear.key=CTL-100,catalyst.orchestration=orch-test" \
 	"OTEL attrs three-attr form when no projectKey"
 if [[ $LOG == *"OTEL_RESOURCE_ATTRIBUTES="*"project="* ]]; then
 	fail "OTEL attrs three-attr form must omit project="
@@ -679,9 +684,9 @@ DRY=$(cd "${TEST_DIR}/proj" &&
 	"$DISPATCH" --phase triage --ticket CTL-100 --orch-dir "$ORCH_DIR" --orch-id orch-test --dry-run 2>/dev/null)
 OTEL_ENTRY=$(echo "$DRY" | jq -r '.env[] | select(startswith("OTEL_RESOURCE_ATTRIBUTES="))')
 assert_eq \
-	"OTEL_RESOURCE_ATTRIBUTES=project=test-proj,linear.key=CTL-100,catalyst.orchestration=orch-test,branch=orch-test-CTL-100,task.type=phase-triage,catalyst.exec_context=phase-bg" \
+	"OTEL_RESOURCE_ATTRIBUTES=host.name=test-host,project=test-proj,linear.key=CTL-100,catalyst.orchestration=orch-test,branch=orch-test-CTL-100,task.type=phase-triage,catalyst.exec_context=phase-bg" \
 	"$OTEL_ENTRY" \
-	"dry-run JSON env array carries the composed OTEL attribute string"
+	"dry-run JSON env array carries the composed OTEL attribute string (incl host.name CTL-1237)"
 
 # ─── Test 15 (CTL-495): task.type=phase-<phase> appended to OTEL attrs
 echo ""
@@ -737,8 +742,13 @@ rm -rf "${CONFIG_DIR}"
 		>/dev/null 2>&1)
 LOG=$(cat "$CLAUDE_STUB_LOG")
 assert_contains "$LOG" \
-	"OTEL_RESOURCE_ATTRIBUTES=linear.key=CTL-100,catalyst.orchestration=orch-test,task.type=phase-triage,catalyst.exec_context=phase-bg" \
-	"task.type appended even when projectKey absent (short form)"
+	"OTEL_RESOURCE_ATTRIBUTES=host.name=test-host,linear.key=CTL-100,catalyst.orchestration=orch-test,task.type=phase-triage,catalyst.exec_context=phase-bg" \
+	"task.type appended even when projectKey absent (short form), with host.name prefix (CTL-1237)"
+
+# ─── CTL-1237: host.name is always present so bg-worker claude_code metrics
+# carry the canonical host identity (host_name in Prometheus), not null.
+assert_contains "$LOG" "OTEL_RESOURCE_ATTRIBUTES=host.name=test-host," \
+	"host.name=<canonical> prepended to the worker OTEL attrs (CTL-1237)"
 
 # ─── CTL-511: claude --bg launch failure → signal stalled + phase.*.failed ───
 # A launch failure must leave the signal at status="stalled" with NO
@@ -1738,9 +1748,9 @@ assert_contains "$LOG" "--settings" "spawn argv carries --settings"
 SETTINGS_JSON="$(settings_json_from_log)"
 SET_OTEL=$(echo "$SETTINGS_JSON" | jq -r '.env["OTEL_RESOURCE_ATTRIBUTES"] // empty' 2>/dev/null)
 assert_eq \
-	"project=test-proj,linear.key=CTL-100,catalyst.orchestration=orch-test,branch=orch-test-CTL-100,task.type=phase-triage,catalyst.exec_context=phase-bg" \
+	"host.name=test-host,project=test-proj,linear.key=CTL-100,catalyst.orchestration=orch-test,branch=orch-test-CTL-100,task.type=phase-triage,catalyst.exec_context=phase-bg" \
 	"$SET_OTEL" \
-	".settings.env.OTEL_RESOURCE_ATTRIBUTES equals the composed attrs"
+	".settings.env.OTEL_RESOURCE_ATTRIBUTES equals the composed attrs (incl host.name CTL-1237)"
 
 echo ""
 echo "Test 49 (CTL-760): .settings.env carries the telemetry toggles from the dispatcher env"
@@ -1829,9 +1839,9 @@ HAS_SETTINGS=$(echo "$DRY" | jq -r 'has("settings")' 2>/dev/null)
 assert_eq "true" "$HAS_SETTINGS" "dry-run JSON has a settings field"
 DRY_OTEL=$(echo "$DRY" | jq -r '.settings.env["OTEL_RESOURCE_ATTRIBUTES"] // empty' 2>/dev/null)
 assert_eq \
-	"project=test-proj,linear.key=CTL-100,catalyst.orchestration=orch-test,branch=orch-test-CTL-100,task.type=phase-triage,catalyst.exec_context=phase-bg" \
+	"host.name=test-host,project=test-proj,linear.key=CTL-100,catalyst.orchestration=orch-test,branch=orch-test-CTL-100,task.type=phase-triage,catalyst.exec_context=phase-bg" \
 	"$DRY_OTEL" \
-	"dry-run JSON settings.env carries the composed OTEL attrs"
+	"dry-run JSON settings.env carries the composed OTEL attrs (incl host.name CTL-1237)"
 
 echo ""
 echo "Test 54 (CTL-761): --attempt is persisted to signal file"
