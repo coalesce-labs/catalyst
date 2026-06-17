@@ -73,6 +73,37 @@ export const HEARTBEAT_STALE_MS = parseInt(process.env.FILTER_HEARTBEAT_STALE_MS
 export const ORCH_STATUS_REPLAY_STALE_MS = parseInt(
   process.env.FILTER_ORCH_STATUS_REPLAY_STALE_MS ?? "21600000", 10);
 
+// CTL-1122: out-of-process ingestion-silence detector (PR1 = monitor recency).
+// The broker is the surviving process that judges the orch-monitor's liveness
+// from its catalyst.monitor heartbeat recency (the monitor's own kind:"self"
+// probe can't observe its own death — the 11h-outage SPOF). Default-on,
+// emit-only (the broker emits catalyst.ingestion.{stale,recovered} but takes no
+// corrective action). Kill-switch: CATALYST_INGESTION_RECENCY=0. Read at call
+// time (not a load-time const) so an operator can flip the switch without a
+// broker restart — parity with getEventLogPath's per-call env read.
+export function isIngestionRecencyEnabled() {
+  return process.env.CATALYST_INGESTION_RECENCY !== "0";
+}
+// Thresholds tuned to the monitor's fixed ~30 s heartbeat cadence: 3 min ≈ 6
+// missed beats (degraded), 10 min ≈ 20 missed beats (down → alarm). Tight and
+// defensible — github/linear recency (which idles organically) is PR2.
+export const MONITOR_RECENCY_DEGRADED_MS = parseInt(
+  process.env.FILTER_MONITOR_RECENCY_DEGRADED_MS ?? "180000", 10);
+export const MONITOR_RECENCY_DOWN_MS = parseInt(
+  process.env.FILTER_MONITOR_RECENCY_DOWN_MS ?? "600000", 10);
+// Flap guard: minimum gap between a recovery and the next stale alarm. A death
+// that begins within this window is DEFERRED (re-checked each tick), never
+// dropped — see nextRecencyAlarmState.
+export const INGESTION_RECENCY_HOLDDOWN_MS = parseInt(
+  process.env.FILTER_INGESTION_RECENCY_HOLDDOWN_MS ?? "600000", 10);
+// Bytes of the log tail re-read once at broker start to warm the per-service
+// last-seen map, so a broker that (re)starts while the monitor is ALREADY dead
+// can still detect the stale ingestion (an empty map fails open to "unknown"
+// forever). 16 MiB ≈ hours of history even on a busy fleet, and far cheaper than
+// the full-file read loadExistingRegistrations already does at boot.
+export const INGESTION_SEED_BYTES = parseInt(
+  process.env.FILTER_INGESTION_SEED_BYTES ?? String(16 * 1024 * 1024), 10);
+
 // --- Event log ---
 export function getEventLogPath() {
   const now = new Date();
@@ -81,6 +112,20 @@ export function getEventLogPath() {
   const ym = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}`;
   // Re-read CATALYST_DIR per call so tests can redirect by setting the env
   // var. Production deployments still pin a stable value via daemon launch.
+  const home = process.env.HOME ?? homedir();
+  const catalystDir = process.env.CATALYST_DIR ?? `${home}/catalyst`;
+  return resolve(catalystDir, "events", `${ym}.jsonl`);
+}
+
+// CTL-1122: the immediately-prior UTC-month event-log path (same UTC math as
+// getEventLogPath, year rolled at January). The ingestion-recency seed falls
+// back to this when the current-month file holds no monitor heartbeat — so a
+// broker that (re)starts just after a month rollover, while the monitor is
+// already dead, still finds the last beat (which lives in the prior file).
+export function getPrevMonthEventLogPath() {
+  const now = new Date();
+  const prev = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - 1, 1));
+  const ym = `${prev.getUTCFullYear()}-${String(prev.getUTCMonth() + 1).padStart(2, "0")}`;
   const home = process.env.HOME ?? homedir();
   const catalystDir = process.env.CATALYST_DIR ?? `${home}/catalyst`;
   return resolve(catalystDir, "events", `${ym}.jsonl`);

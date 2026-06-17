@@ -6,9 +6,24 @@ import {
   generateEventId,
   synthesizeEventId,
   buildCanonicalEvent,
+  buildMonitorHeartbeatEvent,
+  MONITOR_HEARTBEAT_EVENT,
   pluginVersion,
   type CanonicalEvent,
 } from "../lib/canonical-event";
+
+describe("buildMonitorHeartbeatEvent (CTL-1122)", () => {
+  it("emits a catalyst.monitor heartbeat the broker can match on recency", () => {
+    const ev = buildMonitorHeartbeatEvent("2026-06-16T18:00:00.000Z");
+    expect(ev.resource["service.name"]).toBe("catalyst.monitor");
+    expect(ev.attributes["event.name"]).toBe(MONITOR_HEARTBEAT_EVENT);
+    expect(ev.attributes["event.name"]).toBe("monitor.heartbeat");
+    expect(ev.severityText).toBe("INFO");
+    expect(ev.ts).toBe("2026-06-16T18:00:00.000Z");
+    expect(ev.id).toMatch(/[0-9a-f-]{36}/); // real envelope id
+    expect(ev.caused_by).toBeNull(); // a root liveness event has no cause
+  });
+});
 
 describe("severityNumber", () => {
   it("maps DEBUG/INFO/WARN/ERROR to OTel severity numbers", () => {
