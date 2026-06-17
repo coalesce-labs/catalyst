@@ -73,6 +73,33 @@ export const HEARTBEAT_STALE_MS = parseInt(process.env.FILTER_HEARTBEAT_STALE_MS
 export const ORCH_STATUS_REPLAY_STALE_MS = parseInt(
   process.env.FILTER_ORCH_STATUS_REPLAY_STALE_MS ?? "21600000", 10);
 
+// CTL-1122: out-of-process ingestion-silence detector (PR1 = monitor recency).
+// The broker is the surviving process that judges the orch-monitor's liveness
+// from its catalyst.monitor heartbeat recency (the monitor's own kind:"self"
+// probe can't observe its own death — the 11h-outage SPOF). Default-on,
+// emit-only (the broker emits catalyst.ingestion.{stale,recovered} but takes no
+// corrective action). Kill-switch: CATALYST_INGESTION_RECENCY=0.
+export const INGESTION_RECENCY_ENABLED = process.env.CATALYST_INGESTION_RECENCY !== "0";
+// Thresholds tuned to the monitor's fixed ~30 s heartbeat cadence: 3 min ≈ 6
+// missed beats (degraded), 10 min ≈ 20 missed beats (down → alarm). Tight and
+// defensible — github/linear recency (which idles organically) is PR2.
+export const MONITOR_RECENCY_DEGRADED_MS = parseInt(
+  process.env.FILTER_MONITOR_RECENCY_DEGRADED_MS ?? "180000", 10);
+export const MONITOR_RECENCY_DOWN_MS = parseInt(
+  process.env.FILTER_MONITOR_RECENCY_DOWN_MS ?? "600000", 10);
+// Flap guard: minimum gap between a recovery and the next stale alarm. A death
+// that begins within this window is DEFERRED (re-checked each tick), never
+// dropped — see nextRecencyAlarmState.
+export const INGESTION_RECENCY_HOLDDOWN_MS = parseInt(
+  process.env.FILTER_INGESTION_RECENCY_HOLDDOWN_MS ?? "600000", 10);
+// Bytes of the log tail re-read once at broker start to warm the per-service
+// last-seen map, so a broker that (re)starts while the monitor is ALREADY dead
+// can still detect the stale ingestion (an empty map fails open to "unknown"
+// forever). 16 MiB ≈ hours of history even on a busy fleet, and far cheaper than
+// the full-file read loadExistingRegistrations already does at boot.
+export const INGESTION_SEED_BYTES = parseInt(
+  process.env.FILTER_INGESTION_SEED_BYTES ?? String(16 * 1024 * 1024), 10);
+
 // --- Event log ---
 export function getEventLogPath() {
   const now = new Date();

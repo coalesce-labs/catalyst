@@ -76,6 +76,7 @@ import {
   startWatchdog,
   startDriftCheckWatcher,
   clearDebounceTimers,
+  seedLastSeenByService,
 } from "./router.mjs";
 import { seedTailer, startTailing, stopTailing, loadExistingRegistrations } from "./tailer.mjs";
 import { gcStaleInterests } from "./gc-startup.mjs";
@@ -151,8 +152,22 @@ export {
   startDriftCheckWatcher,
   processEvent,
   handleWorkerStateChanged,
+  seedLastSeenByService, // CTL-1122
 } from "./router.mjs";
 export { loadExistingRegistrations, getLastByteOffset } from "./tailer.mjs";
+// CTL-1122: ingestion-silence detector units — re-exported through the barrel so
+// the broker's public/test import surface stays complete (parity with the
+// CTL-1171 broker-heartbeat factory). The catalyst.ingestion.{stale,recovered}
+// names are the documented CTL-1123 consumer contract.
+export {
+  buildIngestionRecencyEnvelope,
+  emitIngestionRecencyEvent,
+  initialRecencyAlarmState,
+  nextRecencyAlarmState,
+  INGESTION_STALE,
+  INGESTION_RECOVERED,
+  MONITOR_SERVICE_NAME,
+} from "./ingestion-recency.mjs";
 // CTL-993: merge-to-main plugin-checkout refresh. router.mjs calls
 // handlePluginRefreshEvent in processEvent; the rest are pure units re-exported
 // through the barrel so the public import surface stays complete.
@@ -466,6 +481,10 @@ function main() {
       try { unlinkSync(handoffPath); } catch { /* ok */ }
     }
     seedTailer({ logPath, byteOffset });
+    // CTL-1122: warm the per-service last-seen map from the log tail BEFORE
+    // going live, so a broker that (re)starts while the monitor is already dead
+    // can still detect the stale ingestion (an empty map fails open forever).
+    seedLastSeenByService({ logPath });
     log.info({ byteOffset, logPath }, "starting");
   } catch {
     log.info({ logPath }, "starting (no log file yet)");

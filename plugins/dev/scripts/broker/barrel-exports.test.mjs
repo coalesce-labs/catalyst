@@ -126,14 +126,23 @@ const REQUIRED_EXPORTS = [
   // CTL-1171: broker liveness heartbeat (cadence const + pure event factory)
   "BROKER_HEARTBEAT_INTERVAL_MS",
   "buildBrokerHeartbeatEvent",
+  // CTL-1122: ingestion-silence detector (router seed + ingestion-recency.mjs)
+  "seedLastSeenByService",
+  "buildIngestionRecencyEnvelope",
+  "emitIngestionRecencyEvent",
+  "initialRecencyAlarmState",
+  "nextRecencyAlarmState",
+  "INGESTION_STALE",
+  "INGESTION_RECOVERED",
+  "MONITOR_SERVICE_NAME",
 ];
 
 describe("CTL-529 barrel contract", () => {
-  test("all 92 public symbols re-export from ./index.mjs", () => {
+  test("all 100 public symbols re-export from ./index.mjs", () => {
     for (const name of REQUIRED_EXPORTS) {
       expect(typeof barrel[name], `missing export: ${name}`).not.toBe("undefined");
     }
-    expect(REQUIRED_EXPORTS.length).toBe(92);
+    expect(REQUIRED_EXPORTS.length).toBe(100);
   });
 
   test("singleton getters return identity-stable live references", () => {

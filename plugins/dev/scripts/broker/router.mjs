@@ -9,7 +9,7 @@
 // + broker-state.mjs; nothing imports router except tailer.mjs and the index
 // barrel, so it sits one level below the daemon entrypoint in the DAG.
 
-import { appendFileSync, mkdirSync, readFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, readFileSync, openSync, fstatSync, closeSync } from "node:fs";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { execFileSync } from "node:child_process";
@@ -28,6 +28,11 @@ import {
   HEARTBEAT_STALE_MS,
   ORCH_STATUS_REPLAY_STALE_MS,
   DETERMINISTIC_INTEREST_TYPES,
+  INGESTION_RECENCY_ENABLED,
+  MONITOR_RECENCY_DEGRADED_MS,
+  MONITOR_RECENCY_DOWN_MS,
+  INGESTION_RECENCY_HOLDDOWN_MS,
+  INGESTION_SEED_BYTES,
 } from "./config.mjs";
 import {
   getInterests,
@@ -90,6 +95,19 @@ import {
   FORBIDDEN_PREFIXES,
   PROTECTED_EXACT_NAMES,
 } from "./namespace-contract.mjs";
+// CTL-1122: ingestion-silence detector (PR1 = monitor recency). The pure
+// classifier (no I/O) + the broker-side alarm machine + the byte-bounded tail
+// reader used once at boot to warm the last-seen map (a leaf module, no
+// execution-core deps — reused instead of re-reading the whole multi-hundred-MB
+// log per the design-review D2 blocker).
+import { evaluateSource } from "../lib/ingestion-recency.mjs";
+import {
+  MONITOR_SERVICE_NAME,
+  initialRecencyAlarmState,
+  nextRecencyAlarmState,
+  emitIngestionRecencyEvent,
+} from "./ingestion-recency.mjs";
+import { scanEventsChunked } from "../execution-core/event-tail.mjs";
 
 // Identity-stable aliases for the shared maps — the router mutates these; the
 // canonical instances live in state.mjs (see barrel-exports.test.mjs).
@@ -323,6 +341,113 @@ function shouldSkipWake(sourceEventId, interestId) {
 
 export function __clearEmittedWakeCacheForTest() {
   _emittedWakeCache.clear();
+}
+
+// === CTL-1122: ingestion-silence detection (the surviving-process observer) ===
+// The broker tails every event, so it records the last-seen timestamp + event id
+// per service.name inline (zero extra I/O on the live path) and, each watchdog
+// tick, judges the orch-monitor's liveness from its catalyst.monitor heartbeat
+// recency. This is the out-of-process inversion the 11h outage proved we need:
+// the monitor's own kind:"self" probe reports `up` iff the monitor answers, so
+// it can never observe its own death.
+const _lastSeenByService = new Map(); // service.name -> { ts: epochMs, id: string|null }
+let _monitorRecencyAlarm = initialRecencyAlarmState();
+
+// recordLastSeen — fold one ingested event into the per-service last-seen map.
+// Keyed on the canonical resource["service.name"]; legacy flat events (no
+// resource block) are skipped. The >= guard stops an out-of-order replay from
+// regressing a newer observation.
+function recordLastSeen(event) {
+  const svc = event?.resource?.["service.name"];
+  if (!svc) return;
+  const tsMs = Date.parse(event?.ts ?? "");
+  if (Number.isNaN(tsMs)) return;
+  const prev = _lastSeenByService.get(svc);
+  if (!prev || tsMs >= prev.ts) {
+    _lastSeenByService.set(svc, { ts: tsMs, id: event.id ?? null });
+  }
+}
+
+// seedLastSeenByService — warm the map ONCE at broker start from the log tail,
+// BEFORE live tailing begins. Without it, a broker that (re)starts while the
+// monitor is ALREADY dead has no catalyst.monitor entry → classifyRecency
+// returns "unknown" → fail-open → the dead monitor is never detected across the
+// restart (precisely the all-restart, monitor-stays-dead 11h-outage class).
+// Bounded byte read (INGESTION_SEED_BYTES) via the shared byte-correct
+// scanEventsChunked; synchronous (readSync) so it finishes before startTailing
+// with no race. Best-effort — a missing/unreadable log just leaves the map cold
+// (still fail-open, never a false alarm).
+export function seedLastSeenByService({
+  logPath = getEventLogPath(),
+  seedBytes = INGESTION_SEED_BYTES,
+} = {}) {
+  let size;
+  try {
+    const fd = openSync(logPath, "r");
+    try {
+      size = fstatSync(fd).size;
+    } finally {
+      closeSync(fd);
+    }
+  } catch {
+    return; // no log yet → nothing to seed
+  }
+  const fromOffset = Math.max(0, size - seedBytes);
+  try {
+    scanEventsChunked({ path: logPath, fromOffset, onEvent: recordLastSeen });
+  } catch (err) {
+    log.warn({ err: err?.message }, "ingestion-recency: seed scan failed (cold start)");
+  }
+}
+
+// checkMonitorRecency — one watchdog-tick evaluation of the monitor heartbeat's
+// freshness → edge-triggered catalyst.ingestion.{stale,recovered}. Fail-open: a
+// never-seen monitor classifies "unknown" and never alarms. The emit is
+// best-effort (emitIngestionRecencyEvent never throws). Returns the emit
+// decision so the wiring test can assert it without parsing the log.
+function checkMonitorRecency(now) {
+  if (!INGESTION_RECENCY_ENABLED) return null;
+  const seen = _lastSeenByService.get(MONITOR_SERVICE_NAME);
+  const { severity } = evaluateSource({
+    lastSeenTs: seen?.ts ?? null,
+    nowMs: now,
+    degradedAfterMs: MONITOR_RECENCY_DEGRADED_MS,
+    downAfterMs: MONITOR_RECENCY_DOWN_MS,
+  });
+  const { state, emit } = nextRecencyAlarmState(_monitorRecencyAlarm, {
+    severity,
+    nowMs: now,
+    holddownMs: INGESTION_RECENCY_HOLDDOWN_MS,
+  });
+  _monitorRecencyAlarm = state;
+  if (emit) {
+    emitIngestionRecencyEvent({
+      action: emit,
+      sourceName: MONITOR_SERVICE_NAME,
+      ageMs: seen ? now - seen.ts : null,
+      thresholdMs: MONITOR_RECENCY_DOWN_MS,
+      lastSeenAt: seen ? new Date(seen.ts).toISOString() : null,
+      // the forensic link: the last heartbeat we saw before silence (stale) /
+      // the fresh beat that cleared it (recovered).
+      causedBy: seen?.id ?? null,
+    });
+  }
+  return emit;
+}
+
+// Test seams (CTL-1122) — mirror the _emittedWakeCache __…ForTest pattern.
+export function __clearIngestionRecencyForTest() {
+  _lastSeenByService.clear();
+  _monitorRecencyAlarm = initialRecencyAlarmState();
+}
+export function __setLastSeenForTest(serviceName, entry) {
+  _lastSeenByService.set(serviceName, entry);
+}
+export function __getLastSeenByServiceForTest() {
+  return _lastSeenByService;
+}
+export function __getMonitorRecencyAlarmForTest() {
+  return _monitorRecencyAlarm;
 }
 
 // CTL-357: one-shot startup event. If the Groq prose path is gated off (the
@@ -1675,6 +1800,10 @@ export function runWatchdogTick({ liveness = sessionLiveness } = {}) {
     setDegradedEmittedAt(null);
   }
 
+  // CTL-1122: judge the orch-monitor's liveness from its heartbeat recency — the
+  // surviving-process observation the 11h silent outage proved we were missing.
+  checkMonitorRecency(now);
+
   let watchdogWoke = false;
 
   // CTL-419: collect all currently-stale not-yet-notified sessions first.
@@ -1826,6 +1955,11 @@ export function startDriftCheckWatcher() {
 // --- Event processing ---
 export function processEvent(event) {
   const name = getEventName(event);
+
+  // CTL-1122: fold every event into the per-service last-seen map (recency for
+  // the ingestion-silence detector). Non-consuming; runs ABOVE all gates so a
+  // catalyst.monitor heartbeat is recorded even though no interest matches it.
+  recordLastSeen(event);
 
   // CTL-532: fold every event into the worker-state projection (best-effort,
   // non-consuming — the projection is a side-channel observer and never
