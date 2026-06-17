@@ -321,6 +321,18 @@ escalate them:
 - **A green PR just sitting there** → verify it is CLEAN
   (`gh pr view <n> --json mergeable,mergeStateStatus,reviewDecision`), then
   `gh pr merge <n> --squash --delete-branch`.
+
+> **NEVER `--admin` / force-merge past a failing or pending check.** You may merge
+> a PR ONLY when its required checks are genuinely GREEN (`gh pr checks <n>` all
+> pass). A failing CI check — GitHub Actions, tests, quality, typecheck, lint — is
+> a problem to FIX (the "CI failure" bullet above: `gh run view --log-failed`, fix
+> the root cause, push, let CI re-run), NOT to bypass. Do NOT pass `--admin` to
+> `gh pr merge`, and do not use any other mechanism to override a red or pending
+> required check. If CI keeps failing and you genuinely cannot get it green after
+> trying, that is a Step-3 escalation ("genuinely cannot do it autonomously after
+> trying") — hand it to Ryan with what's failing and why; it is NOT a force-merge.
+> Bringing the branch to green is the job; overriding the gate never is.
+
 - **A stalled phase that died mid-flight** → re-dispatch it
   (`phase-agent-dispatch --phase <phase> --ticket <T> --orch-dir <ORCH_DIR>`),
   or re-arm its signal (failed→pending) and wake the scheduler.
@@ -355,7 +367,8 @@ Step 1/2 and FIX it.
     ADR, or is something we've explicitly decided NOT to do autonomously.
 [ ] Genuinely cannot do it autonomously after trying — I cannot determine the
     correct resolution, or an external approval/credential I do not hold is
-    required.
+    required. (A persistently-red CI you genuinely cannot get green after trying
+    is THIS case — a legitimate escalation, NOT a license to `--admin`-bypass.)
 ```
 
 **EXPLICIT RULE (Ryan's direction).** Do NOT escalate a mere merge conflict. A
@@ -365,7 +378,10 @@ and EXPECTED to resolve conflicts, rebase, merge PRs, and re-trigger CI
 autonomously. Bring Ryan only the genuine value / architecture / trade-off / ADR
 decisions. If the message you would write to Ryan describes a *mechanical state*
 (conflict, failed check, stale branch, unmerged PR) rather than a *decision Ryan
-owns*, that is the tell that it belongs in the FIX path — re-check Step 2.
+owns*, that is the tell that it belongs in the FIX path — re-check Step 2. The ONE
+CI-related exception is a persistently-red check you genuinely cannot get green
+after trying: escalate it (with what's failing and why) — never `--admin`-bypass
+it. Bringing the branch to green is the job; overriding the gate never is.
 
 ### Step 4 — On a legitimate escalation: AUTHOR the two operator messages
 
