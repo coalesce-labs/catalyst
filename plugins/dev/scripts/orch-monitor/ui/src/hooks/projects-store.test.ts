@@ -21,11 +21,13 @@ function makeProject(repo: string, icon?: string): ProjectDescriptor {
 }
 
 function stubFetch(projects: ProjectDescriptor[]) {
-  return () =>
+  // A bare stub lacks fetch's `preconnect` member, so cast through unknown once —
+  // matching the sanctioned idiom in src/lib/put-project.test.ts.
+  return (() =>
     Promise.resolve({
       ok: true,
       json: () => Promise.resolve({ projects }),
-    } as Response);
+    } as Response)) as unknown as typeof fetch;
 }
 
 describe("projectsStateAtom", () => {
@@ -78,7 +80,7 @@ describe("loadProjects", () => {
 
     // Now simulate a network error
     const failFetch = () => Promise.reject(new Error("network error"));
-    await loadProjects(store, failFetch as typeof fetch);
+    await loadProjects(store, failFetch as unknown as typeof fetch);
 
     const state = store.get(projectsStateAtom);
     expect(state.loaded).toBe(true);
@@ -96,7 +98,7 @@ describe("loadProjects", () => {
         ok: true,
         json: () => Promise.resolve({ error: "not found" }),
       } as Response);
-    await loadProjects(store, badFetch as typeof fetch);
+    await loadProjects(store, badFetch as unknown as typeof fetch);
 
     const state = store.get(projectsStateAtom);
     expect(state.loaded).toBe(true);
