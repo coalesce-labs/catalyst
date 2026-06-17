@@ -46,9 +46,9 @@ describe("emitReapIntent", () => {
     await expect(emitReapIntent("bogus.event", {})).rejects.toThrow(/unknown/);
   });
 
-  it("exposes REAP_INTENT_TYPES with 23 entries", async () => {
+  it("exposes REAP_INTENT_TYPES with 25 entries", async () => {
     const { REAP_INTENT_TYPES } = await freshModule();
-    expect(REAP_INTENT_TYPES.length).toBe(23);
+    expect(REAP_INTENT_TYPES.length).toBe(25); // +2 for CTL-1242 J4 (janitor.signals.gc, janitor.would.gc)
     expect(REAP_INTENT_TYPES).toContain("phase.yield.reap-requested");
     expect(REAP_INTENT_TYPES).toContain("pr.merged.cleanup-requested");
     expect(REAP_INTENT_TYPES).toContain("orphans.reap-requested");
@@ -69,6 +69,9 @@ describe("emitReapIntent", () => {
     // emitter and was silently lost: CTL-1004/CTL-1056).
     expect(REAP_INTENT_TYPES).toContain("janitor.stall.cleared");
     expect(REAP_INTENT_TYPES).toContain("janitor.would.clear");
+    // CTL-1242 J4 terminal/merged signal dir GC vocabulary.
+    expect(REAP_INTENT_TYPES).toContain("janitor.signals.gc");
+    expect(REAP_INTENT_TYPES).toContain("janitor.would.gc");
   });
 
   // CTL-1004/CTL-1056 regression guard: every event type the stall-janitor

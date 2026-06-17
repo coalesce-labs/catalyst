@@ -32,4 +32,7 @@ export const JANITOR_EVENT_TYPES = Object.freeze([
   // ---- J3 (prior-artifact-retry-exhausted stalls, CTL-1005) ------------------
   "janitor.stall.cleared", // enforce: a stall was auto-cleared once
   "janitor.would.clear", // shadow twin of janitor.stall.cleared
+  // ---- J4 (terminal/merged signal dir GC, CTL-1242) --------------------------
+  "janitor.signals.gc", // enforce: workers/<T>/ dir removed for a terminal ticket
+  "janitor.would.gc", // shadow twin of janitor.signals.gc
 ]);

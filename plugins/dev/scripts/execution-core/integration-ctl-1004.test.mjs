@@ -442,3 +442,85 @@ describe("CTL-1045 Bug 1 — J2 kill-storm: ineffective-intent suppression in de
     expect(killed).toEqual(["ghostjob"]);
   });
 });
+
+// ── CTL-1242 J4 integration — real emitter end-to-end ────────────────────
+// Mirrors the CTL-1005/CTL-1056 J3 integration test: drives schedulerTick
+// with the REAL reap-intent emitter (emit NOT injected) to verify that
+// "janitor.would.gc" and "janitor.signals.gc" are registered in the
+// REAP_INTENT_TYPES closed vocabulary and don't throw.
+describe("CTL-1242 J4 integration — real emitter accepts janitor.signals.gc / janitor.would.gc", () => {
+  const gcCandidate = (ticket = "CTL-1242J4") => ({
+    ticket,
+    linearTerminalOrMerged: true,
+    liveSessionInWorktree: false,
+    inFlight: false,
+    alreadyGcd: false,
+  });
+
+  function realEmitterGcOpts({ mode, candidate, gcTerminalSignals = () => true }) {
+    return {
+      readEligible: () => [],
+      dispatch: () => ({ status: "dispatched" }),
+      exec: () => ({ code: null }),
+      reclaimDeadWork: () => ({ class: "alive-suppressed" }),
+      writeStatus: {
+        applyLabel: () => ({ applied: true }),
+        removeLabel: () => ({ removed: true }),
+        runTransition: () => ({ applied: false }),
+      },
+      now: () => NOW,
+      watchdog: { mode: "off" },
+      stallJanitor: {
+        mode,
+        collectTerminalSignalGcCandidates: () => [candidate],
+        gcTerminalSignals,
+        // emit + recordKillIntent intentionally NOT injected → production seams.
+      },
+    };
+  }
+
+  function readEvents() {
+    const ym = new Date(NOW).toISOString().slice(0, 7);
+    const logPath = join(orchDir, "events", `${ym}.jsonl`);
+    if (!existsSync(logPath)) return [];
+    return readFileSync(logPath, "utf8")
+      .split("\n")
+      .filter((l) => l.length > 0)
+      .map((l) => JSON.parse(l));
+  }
+
+  let prevCatalystDir;
+  beforeEach(() => {
+    prevCatalystDir = process.env.CATALYST_DIR;
+    process.env.CATALYST_DIR = orchDir;
+  });
+  afterEach(() => {
+    if (prevCatalystDir === undefined) delete process.env.CATALYST_DIR;
+    else process.env.CATALYST_DIR = prevCatalystDir;
+  });
+
+  test("shadow: janitor.would.gc is emitted WITHOUT throwing 'unknown reap-intent event type'", () => {
+    const result = schedulerTick(orchDir, realEmitterGcOpts({ mode: "shadow", candidate: gcCandidate() }));
+    expect(result.janitorWouldGc).toEqual([{ ticket: "CTL-1242J4" }]);
+    const ev = readEvents().find((e) => e.event === "janitor.would.gc");
+    expect(ev).toBeDefined();
+    expect(ev.ticket).toBe("CTL-1242J4");
+  });
+
+  test("enforce: janitor.signals.gc is emitted WITHOUT throwing", () => {
+    let gcd = null;
+    const result = schedulerTick(
+      orchDir,
+      realEmitterGcOpts({
+        mode: "enforce",
+        candidate: gcCandidate("CTL-1242J4K"),
+        gcTerminalSignals: ({ ticket }) => { gcd = ticket; return true; },
+      }),
+    );
+    expect(gcd).toBe("CTL-1242J4K");
+    expect(result.janitorSignalsGcd).toEqual([{ ticket: "CTL-1242J4K" }]);
+    const ev = readEvents().find((e) => e.event === "janitor.signals.gc");
+    expect(ev).toBeDefined();
+    expect(ev.ticket).toBe("CTL-1242J4K");
+  });
+});
