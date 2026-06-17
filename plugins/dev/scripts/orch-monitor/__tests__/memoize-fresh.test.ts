@@ -51,7 +51,7 @@ describe("createMemoizedRead — single-slot TTL memo", () => {
   });
 
   it("invalidate() forces the next get() to re-read even within TTL (the onAppend path)", () => {
-    let t = 5000;
+    const t = 5000;
     let reads = 0;
     const memo = createMemoizedRead<number>({
       read: () => ++reads,
@@ -94,7 +94,7 @@ describe("createMemoizedRead — single-slot TTL memo", () => {
   });
 
   it("passes through call args to the read fn (heartbeat reader shape)", () => {
-    let t = 0;
+    const t = 0;
     const seen: Array<[unknown, unknown]> = [];
     const memo = createMemoizedRead<string>({
       read: (deps: { name: string }, opts: { logPath?: string }) => {
