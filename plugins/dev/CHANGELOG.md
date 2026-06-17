@@ -1,5 +1,38 @@
 # Changelog
 
+## [12.11.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.10.0...catalyst-dev-v12.11.0) (2026-06-17)
+
+
+### Features
+
+* **dev:** CTL-1135 — additive caused_by on the event envelope ([#2123](https://github.com/coalesce-labs/catalyst/issues/2123)) ([47035f2](https://github.com/coalesce-labs/catalyst/commit/47035f21e9857f587f6f475cd946f0def390617d))
+* **dev:** CTL-1186 — catalyst doctor: fail-closed activation gate for new cluster nodes ([#2109](https://github.com/coalesce-labs/catalyst/issues/2109)) ([6c4d910](https://github.com/coalesce-labs/catalyst/commit/6c4d910eb276c5778fc8a2749dec1b8e5ce002e1))
+* **dev:** CTL-1188 — catalyst cluster CLI (status/add/remove/rename/set-anchor/drain/tune) ([#2116](https://github.com/coalesce-labs/catalyst/issues/2116)) ([d062a42](https://github.com/coalesce-labs/catalyst/commit/d062a42c110e2d910ded01c730039553f60b8cfd))
+* **dev:** CTL-1208 — curated color-tinted project icon set picker (Phosphor glyphs) ([#2115](https://github.com/coalesce-labs/catalyst/issues/2115)) ([5b14eca](https://github.com/coalesce-labs/catalyst/commit/5b14eca87d9dbd4465353d48e558fd6bc394e42c))
+* **dev:** CTL-1211 — cluster control-plane (catalyst-cluster repo + SOPS) load-side: cluster-sync, cluster-repo-first roster, schema versioning, observability verbs ([#2181](https://github.com/coalesce-labs/catalyst/issues/2181)) ([8f55595](https://github.com/coalesce-labs/catalyst/commit/8f55595dc52349dbd4051535a3a1542c1e520862))
+* **dev:** CTL-1212 — grouped project settings page (Identity/Source/Workflow) + three-tier nav + one-click gear ([#2127](https://github.com/coalesce-labs/catalyst/issues/2127)) ([4de6396](https://github.com/coalesce-labs/catalyst/commit/4de639642f85b10e9cd3ac86ead3d8f1ab572032))
+* **dev:** CTL-1214 — durable cluster-node installer (PATH-B [#1](https://github.com/coalesce-labs/catalyst/issues/1)–[#6](https://github.com/coalesce-labs/catalyst/issues/6) + adversarially-verified hardening) ([#2159](https://github.com/coalesce-labs/catalyst/issues/2159)) ([fd85d21](https://github.com/coalesce-labs/catalyst/commit/fd85d211d092e5847e74fe1c8cb72d8ce855c323))
+* **dev:** CTL-1215 — consolidate monitor event-log reads behind a shared tail + bound caches ([#2135](https://github.com/coalesce-labs/catalyst/issues/2135)) ([95ec3a2](https://github.com/coalesce-labs/catalyst/commit/95ec3a2e9df09abdf043dd745d82493a8cff191d))
+* **dev:** CTL-1218 — reaper auto-removes squash-merged worktrees (provenance + GitHub merge signal + queue drain) ([#2143](https://github.com/coalesce-labs/catalyst/issues/2143)) ([3ae063f](https://github.com/coalesce-labs/catalyst/commit/3ae063ff8bf9fbfb49c655b20d6ea1da03df9973))
+* **dev:** CTL-1219 — wire unstuck-sweep deterministic act-seams (ships off/inert) ([#2140](https://github.com/coalesce-labs/catalyst/issues/2140)) ([460e2c3](https://github.com/coalesce-labs/catalyst/commit/460e2c3d3080a494a8732c3f22c5d3789997279e))
+* **dev:** CTL-1222 — deep-link notifications to action surfaces ([#2154](https://github.com/coalesce-labs/catalyst/issues/2154)) ([9731ff7](https://github.com/coalesce-labs/catalyst/commit/9731ff762984d30d2881dff7ff12f268924b44c8))
+* **dev:** CTL-1224 — route SSE backlog + live tail through the shared event-ring (N clients = one tail) ([#2141](https://github.com/coalesce-labs/catalyst/issues/2141)) ([0ea15c5](https://github.com/coalesce-labs/catalyst/commit/0ea15c566dedc33d498ff21ce5a0b7efcd8b96f4))
+* **dev:** CTL-1225 — first-click Save + confirmation + cross-project reset (Project Settings) ([#2144](https://github.com/coalesce-labs/catalyst/issues/2144)) ([755df8c](https://github.com/coalesce-labs/catalyst/commit/755df8c5777630dc92ebb8a5d44a98babbb523d0))
+* **dev:** CTL-1226 — searchable icon grid picker backed by full Phosphor set ([#2145](https://github.com/coalesce-labs/catalyst/issues/2145)) ([72057f6](https://github.com/coalesce-labs/catalyst/commit/72057f6a129fcb6c617f0527d1c5b44d04c7fe37))
+* **dev:** CTL-1233 — hybrid Phosphor loader + virtualized All-icons picker ([#2168](https://github.com/coalesce-labs/catalyst/issues/2168)) ([9805069](https://github.com/coalesce-labs/catalyst/commit/980506909e999c634f18418c37dce29b901f3211))
+* **dev:** CTL-1235 — emit running version + commit + drift-from-main (agent telemetry) ([#2169](https://github.com/coalesce-labs/catalyst/issues/2169)) ([73fe804](https://github.com/coalesce-labs/catalyst/commit/73fe804ea46739ac0056e262cd5042e2022236af))
+* **dev:** recovery-pass skill — goal-driven senior-engineer pipeline-unstick agent ([#2184](https://github.com/coalesce-labs/catalyst/issues/2184)) ([047e701](https://github.com/coalesce-labs/catalyst/commit/047e701c8ba2429af5c32a0f2bb6b03242b08680))
+
+
+### Bug Fixes
+
+* **dev:** CTL-1176 — raise escalation bar: merge conflicts → BOUNDED-LLM, not HUMAN ([#2156](https://github.com/coalesce-labs/catalyst/issues/2156)) ([ad9c426](https://github.com/coalesce-labs/catalyst/commit/ad9c426e2e47ea3dea49df86b4b57a465014e805))
+* **dev:** CTL-1176 — real recovery actuators (emit/post/seam/remediate/cooldown) + DIAGNOSE evidence + inbox reader ([#2163](https://github.com/coalesce-labs/catalyst/issues/2163)) ([3863adb](https://github.com/coalesce-labs/catalyst/commit/3863adb5157bdb183702f53da164346c14ca6d4b))
+* **dev:** CTL-1176 — wire reasoningRecoveryPass into scheduler as autonomous Pass 0r ([#2157](https://github.com/coalesce-labs/catalyst/issues/2157)) ([ab9e110](https://github.com/coalesce-labs/catalyst/commit/ab9e110574dc698a4027c10cee1a2143037e1011))
+* **dev:** CTL-1191 — HRW-gate the 3 recovery passes over the surviving roster + terminal-state filter ([#2173](https://github.com/coalesce-labs/catalyst/issues/2173)) ([38ed942](https://github.com/coalesce-labs/catalyst/commit/38ed942cb2dbdec2bc2fc1680fc2d1cf2638444b))
+* **dev:** CTL-1235 — clean metric names (drop _ratio suffix on build_info/commits_behind) ([#2171](https://github.com/coalesce-labs/catalyst/issues/2171)) ([2df7f6c](https://github.com/coalesce-labs/catalyst/commit/2df7f6cb0a5c308f33dbf5ec3229d69927c32806))
+* **dev:** CTL-1237 — stamp host.name on bg-worker OTEL attrs (claude_code host_name=null) ([#2167](https://github.com/coalesce-labs/catalyst/issues/2167)) ([768d5ac](https://github.com/coalesce-labs/catalyst/commit/768d5acf5efa1569a6883ad9ad7e5a8332dab5bf))
+
 ## [12.10.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.9.0...catalyst-dev-v12.10.0) (2026-06-16)
 
 
