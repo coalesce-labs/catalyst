@@ -56,6 +56,24 @@ move genuinely requires Ryan, author a clear executive briefing and hand it off.
 > is the diagnostician + unstuck output, and its actions are git/gh/dispatch, not
 > just Edit/Write. Do not narrow yourself to one ticket's review findings.
 
+## What you're walking into
+
+1. **What's been done before.** The eyes (the diagnostician) and the hands (the
+   deterministic unstuck seams) already ran on this — and failed to clear it. You
+   are the rung above them; the mechanical fixes were not enough.
+2. **What you know.** Router-dispatched: the `recovery-pass.json` brief (the
+   eyes+hands output). Sweep: the discovered stuck-set printed by the context
+   script (`recovery-pass-context.mjs`) — worker signals + the event log + the
+   Linear cache.
+3. **Your goal.** Get every stuck item MOVING again. Not "fix one review finding"
+   — keep the pipeline flowing.
+4. **Your mandate.** You are a senior engineer with full tool access; Ryan is your
+   executive PM. Default to ACTING: resolve conflicts, rebase, force-push, merge
+   green PRs, re-dispatch stalled phases — autonomously.
+5. **Your escalation cases.** Bring Ryan ONLY the genuine value-judgment /
+   degrades-other-functionality / real-cost-benefit / serious-architecture / ADR
+   cases (the Step-3 checklist). A mere conflict or failed check is never one.
+
 ## Two invocation modes
 
 1. **Router-dispatched (the bounded-LLM recovery path).** The scheduler's recovery
@@ -126,79 +144,64 @@ if [[ -n "$TICKET" ]]; then
     ' "$SIGNAL_FILE" > "$TMP" && mv "$TMP" "$SIGNAL_FILE"
   fi
 
-  # Read the BRIEF — the eyes + hands output. This is the prior-phase artifact the
-  # dispatcher gated on. CONSUME it; do NOT re-run the diagnostician or the seams.
-  BRIEF="${ORCH_DIR}/workers/${TICKET}/recovery-pass.json"
-  if [[ -f "$BRIEF" ]]; then
-    echo "recovery-pass: brief = ${BRIEF}"
-    echo "--- failure reason ---";        jq -r '.failureReason // "(none)"' "$BRIEF"
-    echo "--- diagnosis (eyes) ---";       jq -r '.diagnosis.reason // "(none)"' "$BRIEF"
-    echo "--- deterministic seams already tried (hands — do NOT redo) ---"
-    jq -r '.deterministicSeamsTried[]? | "- \(.category): \(.outcome) (\(.marker))"' "$BRIEF" || true
-    echo "--- guidance ---";               jq -r '.guidance // "(none)"' "$BRIEF"
-    echo "--- recent log buffer (truncated) ---"
-    jq -r '.diagnosis.logsOutput // "(no logs captured)"' "$BRIEF" | tail -40
-  else
-    echo "recovery-pass: no brief at ${BRIEF}; reconstructing from signal + logs" >&2
-  fi
-
-# ── Operator-sweep mode: enumerate the stuck set ─────────────────────────────
-else
-  echo "recovery-pass: operator sweep — enumerating the stuck/failed/needs-human set"
-  # Worker signals carrying a non-terminal stuck status. Capture each item's
-  # ticket + signal path so Steps 0–4 below can BIND a per-item TICKET (the sweep
-  # has no dispatcher CATALYST_TICKET — each enumerated item supplies its own).
-  SWEEP_ITEMS=()   # "TICKET<TAB>SIGNAL_FILE<TAB>status<TAB>reason" per stuck item
-  for s in "${ORCH_DIR}"/workers/*/phase-*.json; do
-    [[ -f "$s" ]] || continue
-    st="$(jq -r '.status // empty' "$s" 2>/dev/null || true)"
-    case "$st" in
-      needs-human|failed|stalled)
-        it="$(jq -r '.ticket // empty' "$s" 2>/dev/null || true)"
-        [[ -n "$it" ]] || it="$(basename "$(dirname "$s")")"
-        rsn="$(jq -r '.failureReason // "-"' "$s" 2>/dev/null || echo -)"
-        echo "STUCK $it $(basename "$s") status=$st reason=$rsn"
-        SWEEP_ITEMS+=("${it}	${s}	${st}	${rsn}")
-        ;;
-    esac
-  done
-  # Recovery escalations + would-escalates on the unified log (audit trail of what
-  # the deterministic/bounded passes punted) — surfacing the set the narrow sweeps
-  # couldn't get past, so the sweep also covers items whose signal was already
-  # cleared. Read the monthly JSONL DIRECTLY (catalyst-events `tail` is a
-  # long-running follower with a jq `--filter`, not a one-shot history reader);
-  # match the canonical envelope shape (`attributes["event.name"]` is the event
-  # name; `body.payload.ticket` / `.reason` carry the CTL key + reason).
-  EVENTS_FILE="${CATALYST_EVENTS_DIR:-${CATALYST_DIR:-$HOME/catalyst}/events}/$(date -u +%Y-%m).jsonl"
-  if [[ -f "$EVENTS_FILE" ]]; then
-    echo "--- recovery escalations / would-escalates on the unified log (this month) ---"
-    jq -rc 'select((.attributes["event.name"] // "")
-              | test("^recovery\\.(escalated|would-escalate)$"))
-            | "WOULD-ESCALATE \(.body.payload.ticket // .attributes["event.label"] // "?") \(.attributes["event.name"]) reason=\(.body.payload.reason // "-")"' \
-      "$EVENTS_FILE" 2>/dev/null | sort -u \
-      || echo "(no recovery escalations on the log)"
-  fi
 fi
+
+# ── Context / mode resolution (BOTH modes) ───────────────────────────────────
+# Run the read-only context resolver FIRST. It prints a MODE banner + the stuck
+# set, and makes NO direct Linear API calls (local on-disk state only): in
+# dispatched mode it reads the recovery-pass.json brief (the eyes+hands output —
+# CONSUME it, do NOT re-run the diagnostician or the seams); in sweep mode it
+# unions THREE local sources — worker signals + the unified event log + the
+# webhook-fed Linear cache — deduped by ticket and HRW-TAGGED (a soft owner
+# signal, NOT a hard filter): YOURS = act on it; CONTEXT = another host owns it,
+# awareness only. Read its output; the MODE line drives which path you take below.
+node "${EXEC_CORE}/recovery-pass-context.mjs" ${TICKET:+--ticket "$TICKET"} --orch-dir "$ORCH_DIR"
 ```
 
+The script's banner is your context:
+
+- `MODE=dispatched` → the brief block + tail-of-logs is printed; you own that ONE
+  ticket. Go to the Step-0..4 fix loop. (Brief missing → it falls through to a
+  ticket-scoped sweep and you reconstruct the diagnosis yourself.)
+- `MODE=sweep` → a `STUCK YOURS <ticket> [...]` line per owned item, then (when
+  multiHost) a `CONTEXT` group of items another host owns, and a
+  `TOTAL: N items (M yours, K context)` summary. ACT on the YOURS items — walk
+  them all. The CONTEXT items are situational awareness ONLY: do NOT act on them
+  (that host owns them — acting would cause cross-host double-action), but they
+  may explain a conflict or dependency in one of your items (e.g. "CTL-1190 also
+  touched this file"). At N=1 every item is YOURS. There is no pre-written brief —
+  see the **Sweep SOP** section below for how to reconstruct each item's
+  diagnosis yourself.
+
 > **Sweep-mode binding.** In the sweep there is NO dispatcher `CATALYST_TICKET`.
-> Each entry in `SWEEP_ITEMS` is the per-item context. When you walk an item in
-> Steps 0–4 below, FIRST bind `TICKET` (and re-resolve `BRIEF` /
-> `SIGNAL_FILE` from it) to that item's ticket before authoring anything — the
-> authoring shims (`escalation-explain.mjs --ticket`, `recovery-emit.mjs
+> Each `STUCK YOURS <ticket>` line the context script printed is one per-item
+> context to act on (CONTEXT lines are awareness only — never bind TICKET to one).
+> When you walk a YOURS item in Steps 0–4 below, FIRST bind `TICKET` (and re-resolve
+> `BRIEF` / `SIGNAL_FILE` from it) to that item's ticket before authoring anything
+> — the authoring shims (`escalation-explain.mjs --ticket`, `recovery-emit.mjs
 > escalated --ticket`) reject an empty `--ticket`, so an escalation with `TICKET`
 > still empty would silently no-op and leave the goal FALSE. There is no
 > pre-written `recovery-pass.json` brief in the sweep — reconstruct the diagnosis
 > from the item's signal + `claude logs` yourself (this is the one place the sweep
 > re-reads logs, because no diagnostician ran ahead of it).
 
-## /goal condition
+## /goal condition — your self-evaluated stop condition
 
-Transcript-evaluable (the `/goal` evaluator sees ONLY printed text, never the
-filesystem), so the work block must PRINT a per-item resolution line carrying the
-proof signal. The goal is the fleet condition — keep iterating until it reads
-unequivocally TRUE. No turn-cap self-stop language (CTL-748) — the bounded
-envelope is enforced daemon-side.
+This is your **self-evaluated stop condition. There is no `/goal` command, and
+none can be invoked from a skill or a `claude --bg` session (verified — `/goal`
+is not a real Catalyst command, and slash commands do not nest inside a running
+skill or a background worker).** Read the block below as a plain-English success
+criterion that YOU check your own printed resolution lines against — it is not
+handed to any evaluator. (Repo-wide consistency note: any other skill text that
+implies a `/goal` evaluator reads printed text is using the same loose shorthand;
+treat the success criterion as self-checked there too. Do not edit those skills
+from here.)
+
+So PRINT a per-item resolution line carrying the proof signal — that is your own
+audit record of the goal being met, and the artifact a later reviewer reads. The
+goal is the fleet condition — keep iterating until it reads unequivocally TRUE.
+No turn-cap self-stop language (CTL-748) — the bounded envelope is enforced
+daemon-side.
 
 ```
 /goal "Every item that was stuck/failed/needs-human at the start of this pass is
@@ -221,11 +224,57 @@ envelope is enforced daemon-side.
        NEVER an acceptable escalation — those are (a) and I must resolve them."
 ```
 
+## Sweep SOP — diagnose Catalyst yourself (no brief)
+
+When the context script printed `MODE=sweep`, there is NO pre-written brief: no
+diagnostician ran ahead of you, so YOU reconstruct each item's diagnosis from the
+local sources before you act. This is the one place you read logs directly. A
+minimal senior-engineer onboarding to the machine you are operating:
+
+**Act on YOURS, not CONTEXT.** The script tags each item `YOURS` (you own it under
+HRW — act on it) or `CONTEXT` (another host owns it — `owner=<host>`). HRW is a
+SOFT signal here: CONTEXT items are kept so you have situational awareness — a
+sibling ticket you don't own may explain a conflict or dependency in one of your
+items ("CTL-1190 also rewrote this file"). But when multiHost you must NOT act on
+a CONTEXT item — that node owns it, and acting would cause cross-host
+double-action. Reconstruct + fix only the YOURS items; read CONTEXT items for
+context. At N=1 every item is YOURS.
+
+**The pipeline model.** Catalyst ships work through a 9-phase pipeline — triage →
+research → plan → implement → verify → review → pr → monitor-merge →
+monitor-deploy. Each phase runs as one short-lived `claude --bg` worker. A worker
+writes its state to a signal file at `${ORCH_DIR}/workers/<ticket>/phase-*.json`
+(`status`, `failureReason`, `bg_job_id`). A ticket is "stuck" when a phase signal
+sits at `needs-human`/`failed`/`stalled`, or its worker died with the signal frozen.
+
+**Where to look (per item).**
+
+- **The worker signal** — `${ORCH_DIR}/workers/<ticket>/phase-*.json`: which phase,
+  its `status`, its `failureReason`, and the `bg_job_id`.
+- **The worker transcript** — `claude logs <shortId>` (the first 8 chars of the
+  signal's `bg_job_id`): what the worker actually did and where it stopped.
+- **The unified event log** — `~/catalyst/events/YYYY-MM.jsonl`: the surrounding
+  phase/recovery events for this ticket (escalations, dispatches, completions).
+- **The worktree** — `~/catalyst/wt/catalyst-workspace/<ticket>`: the live branch
+  state — `git status`, `git log`, conflict markers, a half-finished rebase.
+- **The PR** — `gh pr list --search <ticket>` then `gh pr view <n> --json
+  mergeable,mergeStateStatus,reviewDecision,statusCheckRollup`: is there a PR, is
+  it green, is it BEHIND/CONFLICTING, is it just sitting there mergeable.
+- **The Linear cache** — the `linear-state=…` / `labels=…` the context script
+  printed for the item (from the webhook-fed cache; no direct Linear call needed).
+
+**Then diagnose like a senior engineer.** From those: what phase is it in? what
+failed — a conflict, a failed check, a dead worker, an un-merged green PR, a
+stalled dispatch? Is there a PR and what state is it in? Write yourself the
+one-line diagnosis the brief would have carried, then drop into the Step-1/2 fix
+loop below (skip Step 0's "consume the brief" — you just built it yourself).
+
 ## Phase-specific work — the senior-engineer unstick loop
 
 Think hard. You are a senior engineer; Ryan is your executive product manager.
 Default to ACTING. For each stuck item, walk the decision checklist top-to-bottom;
-first match wins. Print a resolution line for every item so `/goal` has signal.
+first match wins. Print a per-item resolution line for every item (your own
+self-checked record of the goal — see the /goal condition section).
 
 ### Step 0 — Consume the eyes + hands output (do NOT redo it)
 
@@ -281,8 +330,9 @@ escalate them:
   scoped to the diff), retry the phase.
 
 After each action, PRINT the action + its success signal (the `exit 0`, the
-`mergeable: "MERGEABLE"`, the merged SHA, the re-dispatch event id) so `/goal`
-can see it. Use `gh` and `git` directly; delegate a deeper code fix to
+`mergeable: "MERGEABLE"`, the merged SHA, the re-dispatch event id) as the
+per-item resolution line you check the goal against. Use `gh` and `git`
+directly; delegate a deeper code fix to
 `/catalyst-dev:phase-remediate` or `/catalyst-dev:merge-pr` via the Task tool
 when one fits, but YOU own the cross-pipeline moves.
 
@@ -322,6 +372,12 @@ owns*, that is the tell that it belongs in the FIX path — re-check Step 2.
 This is the part that genuinely differs from phase-remediate. You author what Ryan
 sees in the Needs-You inbox AND in the push notification. Two surfaces, ONE
 payload, executive-voiced (you are the senior engineer reporting up to the PM).
+
+> **Required on escalation:** the inbox row (summary / ask / options / blocker)
+> AND the push notification CTA are BOTH authored via `recovery-emit.mjs` (one
+> `escalated` call writes both surfaces off the one payload). An escalation
+> without both is INCOMPLETE — the item is not yet terminal and the goal stays
+> FALSE.
 
 **Voice (from the `writing:ryan-writing-style` skill — Mode 1 / Mode 2):**
 answer-first (lead with the decision needed), plain language (NO stack traces,
@@ -381,8 +437,8 @@ You do NOT call web-push yourself — the curation layer
 (`deriveAttention`/`deriveNavSignal` → `shouldNotify` → `/api/notifications/stream`)
 gates the push off the `needs-human` + WARN signals you just wrote. The native/PWA
 app is a thin transport over that same shared filter; there is no second filter to
-satisfy. Print that both the event and the signal explanation were written so
-`/goal` sees the escalation landed.
+satisfy. Print that both the event and the signal explanation were written — that
+printed line is your record that the escalation landed (the goal's branch (b)).
 
 **On an autonomous FIX, record the win for the audit trail** (INFO, no push — the
 recovered lane, not a needs-you row). Write a plain past-tense changelog, NOT
@@ -396,15 +452,17 @@ node "${EXEC_CORE}/recovery-emit.mjs" fixed \
 
 ### Iterate
 
-In sweep mode, repeat Steps 0–4 for every enumerated `SWEEP_ITEMS` entry,
+In sweep mode, repeat Steps 0–4 for every `STUCK YOURS <ticket>` item the context
+script printed (skip CONTEXT items — those are another host's, awareness only),
 printing a resolution line each. **Bind `TICKET` to the CURRENT item's ticket at
 the top of each iteration** (it is NOT the dispatcher var — that is empty in the
 sweep) and re-resolve `SIGNAL_FILE` /the per-item brief from it, so Step 4's
 `escalation-explain.mjs --ticket "$TICKET"` and `recovery-emit.mjs escalated
 --ticket "$TICKET"` carry the real ticket — an empty `--ticket` is rejected (exit
 2) and would leave the item neither FIXED nor ESCALATED, so the goal would never
-go TRUE. The goal stays FALSE while any item is "still stuck, not yet escalated",
-so keep going. Stop only when every item is UNSTUCK or legitimately ESCALATED.
+go TRUE. The goal stays FALSE while any YOURS item is "still stuck, not yet
+escalated", so keep going. Stop only when every YOURS item is UNSTUCK or
+legitimately ESCALATED.
 
 ## Mid-flight inbox check (CTL-749)
 
@@ -417,7 +475,7 @@ with what's done, or failed on abort). Archive what you absorb.
 
 In router-dispatched mode, emit the terminal event so the scheduler advances and
 the bg job is reaped. (In bare sweep mode there is no signal envelope to close —
-the printed `/goal` resolution lines are the record.)
+the printed per-item resolution lines are the record.)
 
 ```bash
 if [[ -n "$TICKET" ]]; then
