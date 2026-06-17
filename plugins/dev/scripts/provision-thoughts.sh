@@ -50,7 +50,9 @@ HL_CONFIG="${HL_CONFIG:-$HOME/.config/humanlayer/humanlayer.json}"
 REGISTRY="${CATALYST_REGISTRY:-}"
 ORGS_CSV=""
 DRY_RUN=0; NO_CLONE=0; VERIFY_ONLY=0
-PRIMARY_ORG="coalesce-labs"   # global fallback + defaultProfile target
+PRIMARY_ORG="coalesce-labs"   # global fallback + defaultProfile target (CTL-1246: this clean-config
+                              # invariant — never a groundworkapp global fallback — is locked by
+                              # __tests__/provision-thoughts-invariant.test.sh; keep it coalesce-labs)
 
 while [[ $# -gt 0 ]]; do case "$1" in
   --node-user) NODE_USER="$2"; shift 2 ;;
