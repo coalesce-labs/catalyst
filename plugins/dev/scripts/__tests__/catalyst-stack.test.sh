@@ -424,6 +424,92 @@ run "install-services --print omits key when host.name unset" bash -c "
   printf '%s' \"\$out\" | grep -q 'ai.coalesce.catalyst-stack' && ! printf '%s' \"\$out\" | grep -q '<key>CATALYST_HOST_NAME</key>'
 "
 
+# ── CTL-1236: thoughts-sync LaunchAgent ───────────────────────────────────────
+# All assertions use --print (pure, no launchctl/filesystem side effects).
+
+run "install-services --print emits the thoughts-sync label" bash -c "
+  '${STACK}' install-services --print 2>&1 | grep -q 'ai.coalesce.catalyst-thoughts-sync'
+"
+
+run "install-services --print ProgramArguments include thoughts-pull-sync" bash -c "
+  '${STACK}' install-services --print 2>&1 | grep -q 'thoughts-pull-sync'
+"
+
+run "install-services --print sets thoughts-sync StartInterval to 300 by default" bash -c "
+  out=\$('${STACK}' install-services --print 2>/dev/null)
+  printf '%s\n' \"\$out\" | awk '/ai.coalesce.catalyst-thoughts-sync/{found=1} found && /StartInterval/{p=1} p && /<integer>/{print; exit}' | grep -q '<integer>300</integer>'
+"
+
+run "install-services --print honors --sync-interval 120" bash -c "
+  out=\$('${STACK}' install-services --print --sync-interval 120 2>/dev/null)
+  printf '%s\n' \"\$out\" | awk '/ai.coalesce.catalyst-thoughts-sync/{found=1} found && /StartInterval/{p=1} p && /<integer>/{print; exit}' | grep -q '<integer>120</integer>'
+"
+
+run "install-services --print keeps stack and sync StartInterval independent" bash -c "
+  out=\$('${STACK}' install-services --print --interval 600 --sync-interval 120 2>/dev/null)
+  stack_ok=\$(printf '%s\n' \"\$out\" | awk '/ai.coalesce.catalyst-stack/{found=1; f=0} found && /StartInterval/{p=1} p && /<integer>/{print; exit}')
+  sync_ok=\$(printf '%s\n' \"\$out\" | awk '/ai.coalesce.catalyst-thoughts-sync/{found=1} found && /StartInterval/{p=1} p && /<integer>/{print; exit}')
+  echo \"\$stack_ok\" | grep -q '<integer>600</integer>' && echo \"\$sync_ok\" | grep -q '<integer>120</integer>'
+"
+
+run "install-services --print injects rich PATH into thoughts-sync plist" bash -c "
+  out=\$('${STACK}' install-services --print 2>/dev/null)
+  # find the sync plist section and check for .catalyst/bin in its PATH
+  printf '%s\n' \"\$out\" | awk '/ai.coalesce.catalyst-thoughts-sync/{found=1} found' | grep -q '.catalyst/bin'
+"
+
+run "install-services --print sets RunAtLoad true in thoughts-sync plist" bash -c "
+  out=\$('${STACK}' install-services --print 2>/dev/null)
+  printf '%s\n' \"\$out\" | awk '/ai.coalesce.catalyst-thoughts-sync/{found=1} found' | grep -A1 'RunAtLoad' | grep -q '<true/>'
+"
+
+run "install-services --print is side-effect-free (no thoughts-sync plist written)" bash -c "
+  fh='${SCRATCH}/se_home2'; mkdir -p \"\$fh/Library/LaunchAgents\";
+  HOME=\"\$fh\" '${STACK}' install-services --print >/dev/null 2>&1;
+  [[ ! -e \"\$fh/Library/LaunchAgents/ai.coalesce.catalyst-thoughts-sync.plist\" ]]
+"
+
+run "rendered thoughts-sync plist passes plutil lint (macOS)" bash -c "
+  if command -v plutil >/dev/null 2>&1; then
+    '${STACK}' install-services --print 2>/dev/null > '${SCRATCH}/full_plists.txt'
+    # Extract the thoughts-sync plist: everything from the second <?xml declaration onward
+    awk '/^<\?xml/{count++} count>=2' '${SCRATCH}/full_plists.txt' > '${SCRATCH}/sync.plist'
+    plutil -lint '${SCRATCH}/sync.plist' >/dev/null
+  else
+    true
+  fi
+"
+
+run "install-services rejects a non-numeric --sync-interval" bash -c "
+  ! '${STACK}' install-services --sync-interval abc >/dev/null 2>&1
+"
+
+run "--help lists --sync-interval" bash -c "
+  '${STACK}' --help 2>&1 | grep -q 'sync-interval'
+"
+
+run "services-status reports the thoughts-sync plist line" bash -c "
+  fh='${SCRATCH}/status_home'; mkdir -p \"\$fh/Library/LaunchAgents\";
+  printf '<plist/>' > \"\$fh/Library/LaunchAgents/ai.coalesce.catalyst-thoughts-sync.plist\";
+  HOME=\"\$fh\" '${STACK}' services-status 2>&1 | grep -q 'thoughts-sync'
+"
+
+run "uninstall-services removes both plists" bash -c "
+  if [[ \"\$(uname -s)\" != \"Darwin\" ]]; then true; else
+    fh='${SCRATCH}/uninst_home'
+    mkdir -p \"\$fh/Library/LaunchAgents\"
+    printf '<plist/>' > \"\$fh/Library/LaunchAgents/ai.coalesce.catalyst-stack.plist\"
+    printf '<plist/>' > \"\$fh/Library/LaunchAgents/ai.coalesce.catalyst-thoughts-sync.plist\"
+    # Run uninstall with a fake launchctl that always exits 0
+    mkdir -p '${SCRATCH}/uninst_bin'
+    printf '#!/usr/bin/env bash\nexit 0\n' > '${SCRATCH}/uninst_bin/launchctl'
+    chmod +x '${SCRATCH}/uninst_bin/launchctl'
+    PATH='${SCRATCH}/uninst_bin:${REAL_PATH}' HOME=\"\$fh\" '${STACK}' uninstall-services >/dev/null 2>&1 || true
+    [[ ! -e \"\$fh/Library/LaunchAgents/ai.coalesce.catalyst-stack.plist\" ]] && \
+    [[ ! -e \"\$fh/Library/LaunchAgents/ai.coalesce.catalyst-thoughts-sync.plist\" ]]
+  fi
+"
+
 # ── Summary ───────────────────────────────────────────────────────────────────
 echo ""
 TOTAL=$((PASSES + FAILURES))
