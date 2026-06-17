@@ -1,4 +1,6 @@
 import { readFileSync } from "fs";
+import { join, basename } from "path";
+import { homedir } from "os";
 
 export type HudColumnId =
   | "status"
@@ -54,43 +56,69 @@ function isRecord(x: unknown): x is Record<string, unknown> {
  *     }
  *   }
  */
-export function loadMonitorConfig(configPath: string): MonitorConfig {
-  let raw: string;
-  try {
-    raw = readFileSync(configPath, "utf8");
-  } catch {
-    return { repoColors: {}, repoOwners: {} };
-  }
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(raw);
-  } catch {
-    return { repoColors: {}, repoOwners: {} };
-  }
-  if (!isRecord(parsed) || !isRecord(parsed.catalyst)) return { repoColors: {}, repoOwners: {} };
-  const monitor = parsed.catalyst.monitor;
-  if (!isRecord(monitor)) return { repoColors: {}, repoOwners: {} };
+// repoSlugFromRoot — derive a GitHub "owner/repo" slug from a registry repoRoot
+// path (…/code-repos/github/groundworkapp/Adva → groundworkapp/Adva). Returns null
+// when there is no /github/<owner>/<repo> segment. §13 — the registry's repoRoot is
+// the machine-level source of truth for which repo a team actually lives in.
+function repoSlugFromRoot(repoRoot: string): string | null {
+  const m = repoRoot.match(/\/github\/([^/]+\/[^/]+?)\/?$/);
+  return m ? m[1] : null;
+}
 
-  // repoColors from catalyst.monitor.github.repoColors
-  const github = monitor.github;
+export function loadMonitorConfig(configPath: string, registryPath?: string): MonitorConfig {
   const repoColors: Record<string, string> = {};
-  if (isRecord(github) && isRecord(github.repoColors)) {
-    for (const [repo, color] of Object.entries(github.repoColors)) {
-      if (typeof color === "string") repoColors[repo] = color;
-    }
-  }
-
-  // CTL-961: repoOwners from catalyst.monitor.linear.teams (repo short-name → owner/repo)
-  // CTL-979: key is lowercased so /api/repo-icon/adva resolves vcsRepo "rightsite-cloud/Adva".
   const repoOwners: Record<string, string> = {};
-  const linear = monitor.linear;
-  if (isRecord(linear) && Array.isArray(linear.teams)) {
-    for (const team of linear.teams) {
-      if (isRecord(team) && typeof team.vcsRepo === "string" && team.vcsRepo.includes("/")) {
-        const shortName = team.vcsRepo.split("/").at(-1);
-        if (shortName) repoOwners[shortName.toLowerCase()] = team.vcsRepo;
+
+  // --- config-derived: repoColors + FALLBACK repoOwners (catalyst.monitor.*) ---
+  try {
+    const parsed: unknown = JSON.parse(readFileSync(configPath, "utf8"));
+    if (isRecord(parsed) && isRecord(parsed.catalyst) && isRecord(parsed.catalyst.monitor)) {
+      const monitor = parsed.catalyst.monitor;
+      // repoColors from catalyst.monitor.github.repoColors
+      const github = monitor.github;
+      if (isRecord(github) && isRecord(github.repoColors)) {
+        for (const [repo, color] of Object.entries(github.repoColors)) {
+          if (typeof color === "string") repoColors[repo] = color;
+        }
+      }
+      // CTL-961: repoOwners from catalyst.monitor.linear.teams (short-name → owner/repo).
+      // §13: this is now the FALLBACK — the committed roster can be stale (e.g. ADV →
+      // coalesce-labs/adva, a 404). The registry override below corrects it.
+      const linear = monitor.linear;
+      if (isRecord(linear) && Array.isArray(linear.teams)) {
+        for (const team of linear.teams) {
+          if (isRecord(team) && typeof team.vcsRepo === "string" && team.vcsRepo.includes("/")) {
+            const shortName = team.vcsRepo.split("/").at(-1);
+            if (shortName) repoOwners[shortName.toLowerCase()] = team.vcsRepo;
+          }
+        }
       }
     }
+  } catch {
+    /* config absent/malformed → registry-derived owners (below) still apply */
+  }
+
+  // --- registry-derived repoOwners OVERRIDE (§13) ---
+  // The machine-level execution-core/registry.json carries the CORRECT team→repoRoot,
+  // which can DIVERGE from the stale committed monitor.linear.teams (ADV: registry
+  // groundworkapp/Adva vs config coalesce-labs/adva — a dead 404 that breaks repo
+  // icons). Derive the slug from repoRoot and let the registry WIN so icons/links
+  // resolve the real repo. The committed config stays only as a fallback.
+  const regPath =
+    registryPath ??
+    join(process.env.CATALYST_DIR ?? join(homedir(), "catalyst"), "execution-core", "registry.json");
+  try {
+    const reg: unknown = JSON.parse(readFileSync(regPath, "utf8"));
+    if (isRecord(reg) && Array.isArray(reg.projects)) {
+      for (const p of reg.projects) {
+        if (isRecord(p) && typeof p.repoRoot === "string") {
+          const slug = repoSlugFromRoot(p.repoRoot);
+          if (slug) repoOwners[basename(slug).toLowerCase()] = slug;
+        }
+      }
+    }
+  } catch {
+    /* no registry → config-derived owners stand */
   }
 
   return { repoColors, repoOwners };

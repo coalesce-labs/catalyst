@@ -158,11 +158,16 @@ describe("buildRepoOwnerMap", () => {
 describe("loadMonitorConfig — repoOwners extraction (CTL-961)", () => {
   let tmpDir: string;
   let configPath: string;
+  // §13: loadMonitorConfig now also reads the registry; these config-only cases
+  // point at a nonexistent registry so they stay deterministic regardless of the
+  // host machine's real ~/catalyst/execution-core/registry.json.
+  let noRegistry: string;
 
   beforeEach(() => {
     tmpDir = join(tmpdir(), `ctl-961-test-${Date.now()}`);
     mkdirSync(tmpDir, { recursive: true });
     configPath = join(tmpDir, "config.json");
+    noRegistry = join(tmpDir, "no-registry.json");
   });
 
   afterEach(() => {
@@ -183,7 +188,7 @@ describe("loadMonitorConfig — repoOwners extraction (CTL-961)", () => {
         },
       },
     }));
-    const cfg = loadMonitorConfig(configPath);
+    const cfg = loadMonitorConfig(configPath, noRegistry);
     expect(cfg.repoOwners).toEqual({
       catalyst: "coalesce-labs/catalyst",
       adva: "coalesce-labs/adva",
@@ -199,18 +204,18 @@ describe("loadMonitorConfig — repoOwners extraction (CTL-961)", () => {
         },
       },
     }));
-    const cfg = loadMonitorConfig(configPath);
+    const cfg = loadMonitorConfig(configPath, noRegistry);
     expect(cfg.repoOwners).toEqual({});
   });
 
   it("returns empty repoOwners when monitor section is absent", () => {
     writeFileSync(configPath, JSON.stringify({ catalyst: {} }));
-    const cfg = loadMonitorConfig(configPath);
+    const cfg = loadMonitorConfig(configPath, noRegistry);
     expect(cfg.repoOwners).toEqual({});
   });
 
   it("returns empty repoOwners when config file is missing", () => {
-    const cfg = loadMonitorConfig(join(tmpDir, "does-not-exist.json"));
+    const cfg = loadMonitorConfig(join(tmpDir, "does-not-exist.json"), noRegistry);
     expect(cfg.repoOwners).toEqual({});
   });
 
@@ -225,7 +230,7 @@ describe("loadMonitorConfig — repoOwners extraction (CTL-961)", () => {
         },
       },
     }));
-    const cfg = loadMonitorConfig(configPath);
+    const cfg = loadMonitorConfig(configPath, noRegistry);
     expect(cfg.repoColors["coalesce-labs/catalyst"]).toBe("green");
     expect(cfg.repoOwners.catalyst).toBe("coalesce-labs/catalyst");
   });
@@ -241,8 +246,46 @@ describe("loadMonitorConfig — repoOwners extraction (CTL-961)", () => {
         },
       },
     }));
-    const cfg = loadMonitorConfig(configPath);
+    const cfg = loadMonitorConfig(configPath, noRegistry);
     expect(cfg.repoOwners["adva"]).toBe("rightsite-cloud/Adva");
     expect(cfg.repoOwners["Adva"]).toBeUndefined();
+  });
+
+  // §13: the machine-level registry corrects a STALE committed roster.
+  it("registry repoRoot OVERRIDES a stale config vcsRepo (ADV → groundworkapp/Adva)", () => {
+    writeFileSync(configPath, JSON.stringify({
+      catalyst: { monitor: { linear: { teams: [
+        { key: "CTL", vcsRepo: "coalesce-labs/catalyst" },
+        { key: "ADV", vcsRepo: "coalesce-labs/adva" }, // stale 404
+      ] } } },
+    }));
+    const registryPath = join(tmpDir, "registry.json");
+    writeFileSync(registryPath, JSON.stringify({ projects: [
+      { team: "CTL", repoRoot: "/Users/x/code-repos/github/coalesce-labs/catalyst" },
+      { team: "ADV", repoRoot: "/Users/x/code-repos/github/groundworkapp/Adva" },
+    ] }));
+    const cfg = loadMonitorConfig(configPath, registryPath);
+    expect(cfg.repoOwners["adva"]).toBe("groundworkapp/Adva"); // registry wins
+    expect(cfg.repoOwners["catalyst"]).toBe("coalesce-labs/catalyst");
+  });
+
+  it("derives repoOwners from the registry even when config has no teams", () => {
+    writeFileSync(configPath, JSON.stringify({ catalyst: { monitor: {} } }));
+    const registryPath = join(tmpDir, "registry.json");
+    writeFileSync(registryPath, JSON.stringify({ projects: [
+      { team: "ADV", repoRoot: "/home/ci/code-repos/github/groundworkapp/Adva" },
+    ] }));
+    const cfg = loadMonitorConfig(configPath, registryPath);
+    expect(cfg.repoOwners["adva"]).toBe("groundworkapp/Adva");
+  });
+
+  it("ignores a registry repoRoot with no /github/<owner>/<repo> segment", () => {
+    writeFileSync(configPath, JSON.stringify({ catalyst: { monitor: {} } }));
+    const registryPath = join(tmpDir, "registry.json");
+    writeFileSync(registryPath, JSON.stringify({ projects: [
+      { team: "X", repoRoot: "/some/local/path/no-github" },
+    ] }));
+    const cfg = loadMonitorConfig(configPath, registryPath);
+    expect(cfg.repoOwners).toEqual({});
   });
 });
