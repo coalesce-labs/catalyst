@@ -16,9 +16,77 @@ import {
   enumerateAccounts,
   defaultListBackups,
   defaultRefreshToken,
+  defaultReadActiveToken,
 } from "./accounts.mjs";
 
 const ACTIVE_TOKEN = "FAKE-active-access-token-never-logged";
+
+// ─── defaultReadActiveToken: Keychain ↔ credentials-file resolution ──────────
+
+describe("defaultReadActiveToken — keychain/file fallback", () => {
+  const blob = (token) => JSON.stringify({ claudeAiOauth: { accessToken: token } });
+  const throwing = () => {
+    throw new Error("absent");
+  };
+
+  test("macOS: Keychain hit wins and the file is never read", () => {
+    let fileRead = false;
+    const token = defaultReadActiveToken({
+      platform: "darwin",
+      exec: () => blob("FAKE-keychain-token"),
+      readFile: () => {
+        fileRead = true;
+        return blob("FAKE-file-token");
+      },
+    });
+    expect(token).toBe("FAKE-keychain-token");
+    expect(fileRead).toBe(false);
+  });
+
+  test("macOS: Keychain item absent (throws) → falls back to the credentials file", () => {
+    const token = defaultReadActiveToken({
+      platform: "darwin",
+      exec: throwing, // SecKeychainSearchCopyNext: item not found
+      readFile: () => blob("FAKE-file-token"),
+    });
+    expect(token).toBe("FAKE-file-token");
+  });
+
+  test("macOS: Keychain blob without a token → falls back to the file", () => {
+    const token = defaultReadActiveToken({
+      platform: "darwin",
+      exec: () => JSON.stringify({ claudeAiOauth: {} }),
+      readFile: () => blob("FAKE-file-token"),
+    });
+    expect(token).toBe("FAKE-file-token");
+  });
+
+  test("non-macOS: reads the credentials file directly, never the Keychain", () => {
+    let execCalled = false;
+    const token = defaultReadActiveToken({
+      platform: "linux",
+      exec: () => {
+        execCalled = true;
+        return blob("FAKE-keychain-token");
+      },
+      readFile: () => blob("FAKE-file-token"),
+    });
+    expect(token).toBe("FAKE-file-token");
+    expect(execCalled).toBe(false);
+  });
+
+  test("neither Keychain nor file → null (never throws)", () => {
+    expect(
+      defaultReadActiveToken({ platform: "darwin", exec: throwing, readFile: throwing }),
+    ).toBeNull();
+  });
+
+  test("unparseable credentials file → null", () => {
+    expect(
+      defaultReadActiveToken({ platform: "linux", exec: throwing, readFile: () => "not json" }),
+    ).toBeNull();
+  });
+});
 
 // ─── active account ──────────────────────────────────────────────────────────
 
