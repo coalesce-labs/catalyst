@@ -206,7 +206,7 @@ import { createEventRing } from "./lib/event-ring";
 import { readSubStepEvents } from "./lib/substep-reader";
 import { loadOtelConfig } from "./lib/otel-config";
 import { loadWebhookConfig } from "./lib/webhook-config";
-import { detectProjectKey } from "./lib/project-key";
+import { detectProjectKey, detectProjectKeyFromConfig } from "./lib/project-key";
 import { loadMonitorConfig } from "./lib/monitor-config";
 // CTL-1152: config-driven project roster behind GET /api/projects.
 import { loadProjects } from "./lib/project-roster";
@@ -390,6 +390,11 @@ export interface CreateServerOptions {
    * so the endpoint round-trip never rewrites the committed workspace config.
    */
   projectsConfigPath?: string;
+  /**
+   * CTL-1156: injectable project config path for /api/config and /api/repo-icon/:key.
+   * Defaults to `${process.cwd()}/.catalyst/config.json`.
+   */
+  monitorConfigPath?: string;
   /**
    * CTL-1100: override for beliefs.db used by governance read endpoints.
    * Production resolves via defaultBeliefsDbPath(process.env); tests inject
@@ -775,6 +780,7 @@ export function createServer(opts: CreateServerOptions): BunServer {
     previewRefreshMs = PREVIEW_REFRESH_MS,
     annotationsDbPath,
     projectsConfigPath: projectsConfigPathOpt,
+    monitorConfigPath: monitorConfigPathOpt,
     filterStateDbPath,
     beliefStoreDbPath,
     commsReader: commsReaderOpt,
@@ -794,6 +800,8 @@ export function createServer(opts: CreateServerOptions): BunServer {
   // CTL-1153 (M2): injectable config path for PUT /api/projects/:key + GET /api/projects.
   // Injected in tests to avoid rewriting the committed workspace config.json.
   const projectsConfigPath = projectsConfigPathOpt ?? `${process.cwd()}/.catalyst/config.json`;
+  // CTL-1156: injectable config path for /api/config and /api/repo-icon/:key.
+  const monitorConfigPath = monitorConfigPathOpt ?? `${process.cwd()}/.catalyst/config.json`;
   // CTL-889: the broker's durable ticket_state cache the detail/search routes
   // read (filter-state.db). Defaults to the broker's own default path.
   const filterStateDb = filterStateDbPath ?? `${CATALYST_DIR}/filter-state.db`;
@@ -1606,7 +1614,7 @@ export function createServer(opts: CreateServerOptions): BunServer {
         }
 
         if (url.pathname === "/api/config") {
-          const cfg = loadMonitorConfig(`${process.cwd()}/.catalyst/config.json`);
+          const cfg = loadMonitorConfig(monitorConfigPath);
           return Response.json(cfg);
         }
 
@@ -1674,7 +1682,7 @@ export function createServer(opts: CreateServerOptions): BunServer {
           if (!repoKey || repoKey.includes("/")) {
             return new Response("Bad repo key", { status: 400 });
           }
-          const cfg = loadMonitorConfig(`${process.cwd()}/.catalyst/config.json`);
+          const cfg = loadMonitorConfig(monitorConfigPath);
           const ownerRepo = cfg.repoOwners[repoKey];
           if (!ownerRepo) {
             return Response.json({ found: false }, { status: 204 });
@@ -4403,6 +4411,18 @@ export function startTerminalOnly(
   };
 }
 
+/** CTL-1156: resolve the project config path from argv > env > cwd default. */
+export function resolveProjectConfigPath(
+  argv: string[],
+  env: NodeJS.ProcessEnv,
+  cwd: string,
+): string {
+  const i = argv.indexOf("--config");
+  if (i !== -1 && argv[i + 1] && !argv[i + 1].startsWith("--")) return argv[i + 1];
+  if (env.CATALYST_CONFIG_PATH) return env.CATALYST_CONFIG_PATH;
+  return `${cwd}/.catalyst/config.json`;
+}
+
 if (import.meta.main) {
   const CATALYST_DIR =
     process.env.CATALYST_DIR ?? `${process.env.HOME}/catalyst`;
@@ -4428,19 +4448,20 @@ if (import.meta.main) {
   const compact = process.argv.includes("--compact");
   const renderOpts: RenderOptions = { compact };
 
-  const projectKey = detectProjectKey(process.cwd());
+  // CTL-1156: resolve config path once — --config flag > CATALYST_CONFIG_PATH > cwd default.
+  const configPath = resolveProjectConfigPath(process.argv, process.env, process.cwd());
+  const projectKey =
+    detectProjectKeyFromConfig(configPath) ?? detectProjectKey(process.cwd());
   const otelCfg = loadOtelConfig(
     process.env.CATALYST_CONFIG_DIR ?? `${process.env.HOME}/.config/catalyst`,
     projectKey,
   );
 
-  const summarizeCfg = loadSummarizeConfig(
-    `${process.cwd()}/.catalyst/config.json`,
-  );
+  const summarizeCfg = loadSummarizeConfig(configPath);
 
   const fullWebhookConfig = loadWebhookConfig(
     process.env.CATALYST_CONFIG_DIR ?? `${process.env.HOME}/.config/catalyst`,
-    `${process.cwd()}/.catalyst/config.json`,
+    configPath,
     projectKey,
   );
   const webhookConfig =
@@ -4488,8 +4509,8 @@ if (import.meta.main) {
   // CTL-1042: per-inbox-item AI summary provider, built from the same two-layer
   // config as the briefing provider (project .catalyst/config.json + secrets).
   const aiCfg = loadAiConfig(
-    `${process.cwd()}/.catalyst/config.json`,
-    `${process.env.HOME ?? ""}/.config/catalyst/config-${detectProjectKey(process.cwd())}.json`,
+    configPath,
+    `${process.env.HOME ?? ""}/.config/catalyst/config-${projectKey ?? ""}.json`,
   );
   const inboxSummaryProvider: InboxSummaryProvider | null = aiCfg.enabled
     ? createInboxSummaryProvider(aiCfg, {
@@ -4538,6 +4559,8 @@ if (import.meta.main) {
       inboxSummaryProvider,
       webhookConfig,
       linearWebhookConfig,
+      projectsConfigPath: configPath,
+      monitorConfigPath: configPath,
     });
     const displayHost =
       srv.hostname === "0.0.0.0" ? "localhost" : String(srv.hostname);

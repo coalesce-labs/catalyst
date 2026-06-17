@@ -291,6 +291,7 @@ cmd_start() {
   mkdir -p "$(dirname "$PID_FILE")" 2>/dev/null || true
   mkdir -p "$CATALYST_DIR/wt" 2>/dev/null || true
 
+  CATALYST_CONFIG_PATH="${CATALYST_CONFIG_PATH:-}" \
   MONITOR_PORT="$PORT" \
   MONITOR_PUBLIC_DIR="${MONITOR_UI_DIST_DIR}" \
   nohup bun run "$SERVER_SCRIPT" --pid-file "$PID_FILE" \
