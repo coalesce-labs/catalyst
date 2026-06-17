@@ -173,6 +173,20 @@ ZSHENV_CONTENT=$(cat "$SCRATCH/home/.zshenv" 2>/dev/null || true)
 LINE_COUNT=$(grep -c '.local/bin' <<<"$ZSHENV_CONTENT" || true)
 assert_eq "ensure_local_bin is idempotent (PATH line written exactly once)" "$LINE_COUNT" "1"
 
+# CTL-1214: ensure_local_bin must also persist ~/.local/node/bin so a fresh login
+# shell can find humanlayer/linearis (npm -g installs land in the no-sudo node
+# prefix, not covered by the node/npm/npx symlinks in ~/.local/bin).
+fresh_dirs
+run_sourced "ensure_local_bin"
+NODEBIN_ZSHENV=$(cat "$SCRATCH/home/.zshenv" 2>/dev/null || true)
+assert_grep "ensure_local_bin persists ~/.local/node/bin to ~/.zshenv" "$NODEBIN_ZSHENV" '.local/node/bin'
+
+# Idempotent on a second call: the ~/.local/node/bin line is written exactly once.
+run_sourced "ensure_local_bin; ensure_local_bin"
+NODEBIN_ZSHENV=$(cat "$SCRATCH/home/.zshenv" 2>/dev/null || true)
+NODEBIN_LINE_COUNT=$(grep -c '.local/node/bin' <<<"$NODEBIN_ZSHENV" || true)
+assert_eq "ensure_local_bin ~/.local/node/bin PATH line idempotent" "$NODEBIN_LINE_COUNT" "1"
+
 # ─── Phase 1: offer_install_jq (no-sudo binary fallback) ─────────────────────
 
 echo ""

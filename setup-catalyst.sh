@@ -90,8 +90,14 @@ ask_yes_no() {
 	local REPLY
 
 	# Non-interactive mode (HEAD/sibling feature): answer with ni_answer
-	# without touching stdin.
+	# without touching stdin. CTL-1214 (PATH-B #5): when check_prerequisites is
+	# auto-installing a CRITICAL tool headlessly it sets CATALYST_NI_AUTOINSTALL=1
+	# to force-accept the install offer — otherwise the optional-style ni_answer
+	# of "n" aborts an autonomous catalyst-join on the HumanLayer/gh prereq gate.
+	# The default ni_answer is preserved for every other prompt (tests assert the
+	# install offers still decline in plain NI mode).
 	if [[ ${NON_INTERACTIVE:-0} -eq 1 ]]; then
+		if [[ ${CATALYST_NI_AUTOINSTALL:-0} -eq 1 ]]; then ni_answer="y"; fi
 		echo "$prompt $suffix → ${ni_answer} (non-interactive)" >&2
 		[[ $ni_answer == "y" ]]
 		return
@@ -597,10 +603,16 @@ persist_path_line() {
 }
 
 # Create ~/.local/bin and persist it on PATH via the shell rc files. Idempotent.
+# Also persist ~/.local/node/bin: the no-sudo Node install lives at ~/.local/node
+# and `npm install -g humanlayer linearis` puts their bins in that node prefix
+# (~/.local/node/bin), which is NOT covered by the node/npm/npx symlinks in
+# ~/.local/bin — without this line fresh login shells cannot find humanlayer or
+# linearis (CTL-1214 / mini-2 onboarding: "PATH must include ~/.local/node/bin").
 ensure_local_bin() {
 	mkdir -p "$LOCAL_BIN"
 	persist_path_line 'export PATH="$HOME/.local/bin:$PATH"'
-	export PATH="$LOCAL_BIN:$PATH"
+	persist_path_line 'export PATH="$HOME/.local/node/bin:$PATH"'
+	export PATH="$LOCAL_BIN:$HOME/.local/node/bin:$PATH"
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -671,15 +683,25 @@ check_prerequisites() {
 	# Critical: humanlayer (for thoughts system)
 	if ! check_command_exists "humanlayer"; then
 		print_warning "HumanLayer CLI not found (required for thoughts system)"
-		offer_install_humanlayer || missing_critical=true
+		# CTL-1214 (PATH-B #5): force-accept the install offer in headless mode so
+		# an autonomous catalyst-join does not abort on this critical prereq. The
+		# offer helper's own NI default ("n") is preserved for direct/test calls.
+		CATALYST_NI_AUTOINSTALL=1 offer_install_humanlayer || missing_critical=true
 	else
 		print_success "HumanLayer CLI installed"
 	fi
 
-	# Optional: gh (for Linear, GitHub backup)
+	# gh: required on a cluster NODE for HTTPS git push auth (gh auth git-credential)
+	# — thoughts sync pushes over HTTPS, mirroring the seed. Optional for a plain
+	# workstation install. CTL-1214: auto-install it in headless mode so a node
+	# join is not left without push credentials (mini-2 needed a manual download).
 	if ! check_command_exists "gh"; then
-		print_warning "GitHub CLI not found (optional, for Linear integration)"
-		offer_install_gh_cli || missing_optional=true
+		print_warning "GitHub CLI not found (needed for node HTTPS git auth / thoughts sync)"
+		if [[ ${NON_INTERACTIVE:-0} -eq 1 ]]; then
+			CATALYST_NI_AUTOINSTALL=1 offer_install_gh_cli || missing_optional=true
+		else
+			offer_install_gh_cli || missing_optional=true
+		fi
 	else
 		print_success "GitHub CLI installed"
 	fi
@@ -1304,6 +1326,20 @@ setup_project_config() {
 	echo ""
 	project_name=$(prompt_value "Enter project name [${REPO_NAME}]:" "${REPO_NAME}")
 
+	# Thoughts subdir/profile: default to REPO_NAME/ORG_NAME but PRESERVE an
+	# existing committed value (CTL-1214) — e.g. the catalyst repo's canonical
+	# .catalyst.thoughts.directory is "catalyst-workspace", NOT the repo name
+	# "catalyst"; regenerating the config must not clobber it and fragment the
+	# node's thoughts subtree away from the fleet's.
+	local thoughts_directory="${REPO_NAME}" thoughts_profile="${ORG_NAME}"
+	if [[ -f "$config_file" ]]; then
+		local _existing_dir _existing_prof
+		_existing_dir=$(jq -r '.catalyst.thoughts.directory // empty' "$config_file" 2>/dev/null)
+		_existing_prof=$(jq -r '.catalyst.thoughts.profile // empty' "$config_file" 2>/dev/null)
+		[[ -n "$_existing_dir" ]] && thoughts_directory="$_existing_dir"
+		[[ -n "$_existing_prof" ]] && thoughts_profile="$_existing_prof"
+	fi
+
 	# Create/update config
 	cat >"$config_file" <<EOF
 {
@@ -1331,7 +1367,9 @@ setup_project_config() {
       }
     },
     "thoughts": {
-      "user": null
+      "user": null,
+      "directory": "${thoughts_directory}",
+      "profile": "${thoughts_profile}"
     }
   }
 }

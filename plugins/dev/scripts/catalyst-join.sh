@@ -16,8 +16,9 @@
 #   CATALYST_JOIN_SETUP_SCRIPT      path to setup-catalyst.sh
 #   CATALYST_JOIN_INSTALL_CLI_SCRIPT path to install-cli.sh
 #   CATALYST_JOIN_PLUGIN_SRC_SCRIPT  path to setup-plugin-source.sh
+#   CATALYST_JOIN_PROVISION_THOUGHTS_SCRIPT path to provision-thoughts.sh
 #   CATALYST_JOIN_STACK_BIN          path to catalyst-stack
-#   CATALYST_JOIN_DOCTOR_SCRIPT      path to check-setup.sh
+#   CATALYST_JOIN_DOCTOR_SCRIPT      path to catalyst-doctor (CTL-1186 activation gate)
 #   CATALYST_JOIN_REACH_PROBE        path to reachability probe script
 #   CATALYST_JOIN_FETCH_CMD          path to bundle fetch command (replaces curl)
 #   CATALYST_LAYER2_CONFIG_FILE      path to Layer-2 config (default: ~/.config/catalyst/config.json)
@@ -37,8 +38,13 @@ REPO_ROOT="$(cd "${SELF_DIR}/../../.." && pwd)"
 SETUP_SCRIPT="${CATALYST_JOIN_SETUP_SCRIPT:-${REPO_ROOT}/setup-catalyst.sh}"
 INSTALL_CLI_SCRIPT="${CATALYST_JOIN_INSTALL_CLI_SCRIPT:-${SELF_DIR}/install-cli.sh}"
 PLUGIN_SRC_SCRIPT="${CATALYST_JOIN_PLUGIN_SRC_SCRIPT:-${SELF_DIR}/setup-plugin-source.sh}"
+PROVISION_THOUGHTS_SCRIPT="${CATALYST_JOIN_PROVISION_THOUGHTS_SCRIPT:-${SELF_DIR}/provision-thoughts.sh}"
 STACK_BIN="${CATALYST_JOIN_STACK_BIN:-${SELF_DIR}/catalyst-stack}"
-DOCTOR_SCRIPT="${CATALYST_JOIN_DOCTOR_SCRIPT:-${SELF_DIR}/check-setup.sh}"
+# CTL-1186 fail-closed activation gate (NOT the full-workstation check-setup.sh,
+# which is cwd-relative + asserts a fully-provisioned dev box and so exits nonzero
+# on a fresh SHADOW node). catalyst-doctor exits 0 iff zero FAIL checks; warns are
+# expected on a fresh node. Overridable for tests via CATALYST_JOIN_DOCTOR_SCRIPT.
+DOCTOR_SCRIPT="${CATALYST_JOIN_DOCTOR_SCRIPT:-${SELF_DIR}/catalyst-doctor}"
 REACH_PROBE="${CATALYST_JOIN_REACH_PROBE:-}"
 # CATALYST_JOIN_FETCH_CMD — used in acquire_bundle(); resolved there
 
@@ -221,23 +227,41 @@ preflight_tailscale() {
     return 0
   fi
 
-  # Default: check that tailscale is available and the host is reachable
+  # Default: confirm the seed host:port is reachable.
   local host="${seed%%:*}"
   local port="${seed##*:}"
-  if ! command -v tailscale >/dev/null 2>&1; then
-    fail "tailscale not found in PATH. Install Tailscale first."
-    return 1
-  fi
-  if ! tailscale ping --timeout=5s "$host" >/dev/null 2>&1; then
-    fail "Tailscale ping to '${host}' failed. Is this node on the tailnet?"
-    return 1
-  fi
-  # Port reachability check
-  if command -v nc >/dev/null 2>&1; then
-    if ! nc -z -G 5 "$host" "$port" >/dev/null 2>&1; then
-      fail "Port ${port} on '${host}' is not reachable. Is the bundle listener running?"
+
+  # CTL-1214 (PATH-B #2): the `tailscale` CLI is NOT required. A node can be
+  # fully on the tailnet via the GUI app with no CLI on PATH (mini-2's case).
+  # When the CLI is present, use `tailscale ping` as a tailnet liveness check;
+  # the signal that actually matters is a TCP connect to the seed port, which
+  # nc/curl provide with or without the CLI.
+  if command -v tailscale >/dev/null 2>&1; then
+    if ! tailscale ping --timeout=5s "$host" >/dev/null 2>&1; then
+      fail "Tailscale ping to '${host}' failed. Is this node on the tailnet?"
       return 1
     fi
+  fi
+
+  # TCP reachability to the seed port (works with or without the tailscale CLI).
+  # Prefer nc (protocol-agnostic); fall back to curl (a 404 from the listener
+  # still proves the port is reachable — curl without -f exits 0).
+  # NOTE: use `-w` (connect timeout) NOT `-G` — `-G` is a BSD/macOS-only flag and
+  # OpenBSD/GNU nc on Linux error out on it even when the port is open. `-w secs`
+  # is understood by BSD, OpenBSD, and GNU nc alike (CTL-1214 verify finding).
+  if command -v nc >/dev/null 2>&1; then
+    if ! nc -z -w 5 "$host" "$port" >/dev/null 2>&1; then
+      fail "Port ${port} on '${host}' is not reachable. Is this node on the tailnet and the bundle listener running?"
+      fail "Hint: confirm Tailscale is connected (GUI app or CLI) and the seed armed 'catalyst cluster join-token'."
+      return 1
+    fi
+  elif command -v curl >/dev/null 2>&1; then
+    if ! curl -sS -o /dev/null --connect-timeout 5 "http://${host}:${port}/" >/dev/null 2>&1; then
+      fail "Seed '${host}:${port}' is not reachable. Is this node on the tailnet and the bundle listener running?"
+      return 1
+    fi
+  else
+    warn "No reachability probe tool (nc/curl) available; skipping TCP preflight."
   fi
 }
 
@@ -245,7 +269,10 @@ preflight_tailscale() {
 BUNDLE_TMPFILE=""
 BUNDLE_JSON=""
 
-# Required bundle keys for schema validation
+# Required bundle keys that must be PRESENT and NON-NULL — identity, bot
+# credentials, roster, and URLs. A null here means a broken/misresolved seed
+# config (e.g. the listener read the wrong Layer-1); fail FAST rather than
+# silently enrol the node with an empty Linear team/projectKey (CTL-1214 verify).
 BUNDLE_REQUIRED_KEYS=(
   ".layer1Identity.projectKey"
   ".layer1Identity.teamKey"
@@ -253,16 +280,33 @@ BUNDLE_REQUIRED_KEYS=(
   ".botCreds.orchestrator"
   ".botCreds.worker"
   ".hostsRoster"
-  ".livenessAnchorIssue"
   ".repoUrl"
   ".pluginSourceUrl"
+)
+
+# Required keys that must EXIST but may legitimately be null — e.g.
+# .livenessAnchorIssue is null until an anchor ticket is set (CTL-1214 #4).
+BUNDLE_EXISTENCE_KEYS=(
+  ".livenessAnchorIssue"
 )
 
 validate_bundle() {
   local json="$1"
   local missing=()
+  # Non-null assertion for identity/credential/url keys: `jq -e "$key"` exits
+  # non-zero on null/false, so an all-null layer1Identity is rejected here.
   for key in "${BUNDLE_REQUIRED_KEYS[@]}"; do
     if ! echo "$json" | jq -e "$key" >/dev/null 2>&1; then
+      missing+=("$key")
+    fi
+  done
+  # Existence-only assertion (CTL-1214 #4): the key must be present but its value
+  # may be null. Test path existence via `any(paths; …)` — a null value passes,
+  # a structurally-absent key still fails.
+  for key in "${BUNDLE_EXISTENCE_KEYS[@]}"; do
+    if ! echo "$json" | jq -e --arg key "$key" \
+        '($key | ltrimstr(".") | split(".")) as $p | any(paths; . == $p)' \
+        >/dev/null 2>&1; then
       missing+=("$key")
     fi
   done
@@ -301,7 +345,10 @@ acquire_bundle() {
   local seed="${CATALYST_SEED:-}"
   local host="${seed%%:*}"
   local port="${seed##*:}"
-  local bundle_url="http://${host}:${port}/bundle"
+  # CTL-1214 (PATH-B #1): the armed listener serves ONLY /join-bundle
+  # (execution-core/join-listener.mjs JOIN_ROUTE); any other path 404s, so the
+  # seed-fetch join can never succeed with "/bundle". Must match JOIN_ROUTE.
+  local bundle_url="http://${host}:${port}/join-bundle"
   local fetch_cmd="${CATALYST_JOIN_FETCH_CMD:-}"
 
   if [[ -n "$fetch_cmd" && -x "$fetch_cmd" ]]; then
@@ -371,6 +418,118 @@ do_install_cli() {
 
 do_setup_plugin_source() {
   bash "$PLUGIN_SRC_SCRIPT"
+}
+
+# Install the GitHub CLI binary into ~/.local/bin when absent. provision-thoughts
+# clones PRIVATE org thoughts repos and runs BEFORE setup-catalyst installs gh, so
+# the join can't rely on setup-catalyst's prereq step for it. Idempotent; returns
+# non-zero only if the install genuinely failed.
+ensure_gh() {
+  command -v gh >/dev/null 2>&1 && return 0
+  command -v jq >/dev/null 2>&1 && command -v curl >/dev/null 2>&1 || {
+    warn "cannot install gh (need curl + jq)"; return 1; }
+  local os arch ghver tmp
+  os="$(uname -s)"; arch="$(uname -m)"
+  case "$arch" in arm64 | aarch64) arch="arm64" ;; x86_64 | amd64) arch="amd64" ;; esac
+  ghver="$(curl -fsSL https://api.github.com/repos/cli/cli/releases/latest 2>/dev/null | jq -r '.tag_name // empty' | sed 's/^v//')"
+  [[ -n "$ghver" ]] || { warn "could not resolve latest gh version"; return 1; }
+  mkdir -p "$HOME/.local/bin"; tmp="$(mktemp -d)"
+  info "Installing GitHub CLI gh ${ghver} → ~/.local/bin (needed for thoughts auth)…"
+  if [[ "$os" == "Darwin" ]]; then
+    curl -fsSL "https://github.com/cli/cli/releases/download/v${ghver}/gh_${ghver}_macOS_${arch}.zip" -o "$tmp/gh.zip" \
+      && unzip -q "$tmp/gh.zip" -d "$tmp" && cp "$tmp"/gh_*/bin/gh "$HOME/.local/bin/gh"
+  else
+    curl -fsSL "https://github.com/cli/cli/releases/download/v${ghver}/gh_${ghver}_linux_${arch}.tar.gz" | tar xz -C "$tmp" \
+      && cp "$tmp"/gh_*/bin/gh "$HOME/.local/bin/gh"
+  fi
+  chmod +x "$HOME/.local/bin/gh" 2>/dev/null || true
+  rm -rf "$tmp"
+  export PATH="$HOME/.local/bin:$PATH"
+  command -v gh >/dev/null 2>&1 || { warn "gh install failed"; return 1; }
+}
+
+# Establish GitHub HTTPS auth for the thoughts clone+push WITHOUT embedding a PAT
+# in the repo. Two mechanisms, in order: (1) CATALYST_JOIN_GITHUB_TOKEN → a 0600
+# ~/.netrc (gh-free — the reliable headless path mini-2 used; git uses it for
+# clone AND push); (2) an existing or freshly-installed `gh` credential helper.
+# provision-thoughts (next stage) clones PRIVATE org repos, so SOME auth must
+# exist by then — but a Stage-0 SHADOW node owns zero tickets and the sync-gate
+# only activates at roster>1, so this stage is non-fatal and flags the gap.
+do_github_auth() {
+  # (1) Operator-supplied token → HTTPS credentials via ~/.netrc (no gh needed).
+  if [[ -n "${CATALYST_JOIN_GITHUB_TOKEN:-}" ]]; then
+    local netrc="$HOME/.netrc"
+    # Don't clobber a pre-existing ~/.netrc that already configures github.com —
+    # the operator's own credentials win; we only WRITE when there's nothing for
+    # github.com yet (and preserve any other machine stanzas).
+    if [[ -f "$netrc" ]] && grep -qiE '^[[:space:]]*machine[[:space:]]+github\.com\b' "$netrc"; then
+      info "~/.netrc already has a github.com entry — leaving it unchanged."
+    else
+      # Create at 0600 from the start (no world-readable window), preserving any
+      # existing non-github stanzas by appending.
+      [[ -f "$netrc" ]] || { : > "$netrc"; chmod 600 "$netrc" 2>/dev/null || true; }
+      chmod 600 "$netrc" 2>/dev/null || true
+      printf 'machine github.com\nlogin %s\npassword %s\n' \
+        "${CATALYST_JOIN_GITHUB_USER:-x-access-token}" "$CATALYST_JOIN_GITHUB_TOKEN" >> "$netrc"
+      info "GitHub HTTPS auth configured via ~/.netrc (0600)."
+    fi
+    return 0
+  fi
+  # (2) gh credential helper — install gh if absent (private thoughts clone needs it).
+  if ! ensure_gh; then
+    warn "No CATALYST_JOIN_GITHUB_TOKEN and gh unavailable — the thoughts clone may fail."
+    warn "Provide CATALYST_JOIN_GITHUB_TOKEN or run 'gh auth login', then re-run the join."
+    return 0
+  fi
+  if gh auth status >/dev/null 2>&1; then
+    gh auth setup-git >/dev/null 2>&1 \
+      && info "GitHub HTTPS credential helper configured via gh." \
+      || warn "gh auth setup-git failed — thoughts push may not work until fixed."
+  else
+    warn "gh is installed but not authenticated — set CATALYST_JOIN_GITHUB_TOKEN or run 'gh auth login', then re-run."
+  fi
+  return 0
+}
+
+# Provision the HumanLayer thoughts system (PATH-B #6): clone each served org's
+# thoughts repo into ~/catalyst/hlt/<org>/thoughts, write a clean humanlayer.json
+# (global fallback → coalesce-labs, deterministic repoMappings), verify auth.
+# Orgs are derived data-driven from the node's execution-core registry when
+# present, else from the bundle's repoUrl org (coalesce-labs primary) — never a
+# hardcoded list. MUST run before setup-catalyst, whose thoughts-init binds the
+# checkout to these repos + humanlayer.json.
+do_provision_thoughts() {
+  local pt="$PROVISION_THOUGHTS_SCRIPT"
+  [[ -x "$pt" ]] || { fail "provision-thoughts.sh not found/executable at $pt"; return 1; }
+  local args=(--node-user "${USER:-$(whoami)}")
+  local registry="${CATALYST_DIR}/execution-core/registry.json"
+  [[ -f "$registry" ]] || registry="${CATALYST_DIR}/plugin-source/plugins/dev/scripts/execution-core/registry.json"
+  if [[ -f "$registry" ]]; then
+    args+=(--registry "$registry")
+  else
+    # First-join fallback: registry isn't written yet, so derive the primary org
+    # from the bundle's repoUrl. repoUrl is "<org>/<repo>" (join-bundle.mjs); also
+    # tolerate a full https URL. (A bare `${url%%/*}` would yield "https:".)
+    local repo_url org
+    repo_url="$(bundle_get '.repoUrl')"
+    org="$(sed -nE 's#^(https?://[^/]+/)?([^/]+)/.*#\2#p' <<<"$repo_url")"
+    [[ -n "$org" ]] && args+=(--orgs "$org")
+  fi
+  if bash "$pt" "${args[@]}"; then
+    return 0
+  fi
+  # provision-thoughts failed — usually push-auth (an M2 precondition), not the
+  # clone. If the primary thoughts repo is present AND has a usable HEAD (a real
+  # read-OK clone, not a partial/interrupted one), a Stage-0 SHADOW node can
+  # proceed; push auth must be verified-green before M2 activation. Else fail.
+  local primary="${CATALYST_DIR:-$HOME/catalyst}/hlt/coalesce-labs/thoughts"
+  if [[ -d "$primary/.git" ]] && git -C "$primary" rev-parse --verify -q HEAD >/dev/null 2>&1; then
+    warn "provision-thoughts: clone OK but push-auth/verify incomplete — acceptable for Stage-0 SHADOW."
+    warn "Configure CATALYST_JOIN_GITHUB_TOKEN (or 'gh auth login') and re-run before M2 activation."
+    return 0
+  fi
+  fail "provision-thoughts failed before a usable primary thoughts clone. Check GitHub auth / network."
+  return 1
 }
 
 # ── SHARED config merge ───────────────────────────────────────────────────────
@@ -480,11 +639,18 @@ do_config_merge() {
 }
 
 do_doctor_gate() {
-  if bash "$DOCTOR_SCRIPT" >/dev/null 2>&1; then
-    info "Doctor gate passed."
+  # catalyst-doctor (CTL-1186) is the fail-closed activation gate: exit 0 iff zero
+  # FAIL-level checks (warns/info are expected on a fresh SHADOW node — no Linear
+  # token, no liveness anchor, single-host roster). --dry-run is a documented
+  # no-op (all checks are read-only); we pass it to make the intent explicit.
+  # Gate strictly on [$? -eq 0] per the doctor contract. This replaces the old
+  # default of check-setup.sh, a cwd-relative full-workstation check that exits
+  # nonzero on a fresh node (the reason mini-2's join needed a manual marker poke).
+  if bash "$DOCTOR_SCRIPT" --dry-run >/dev/null 2>&1; then
+    info "Doctor gate passed (catalyst-doctor: 0 FAIL checks)."
     return 0
   else
-    fail "Setup health check (doctor gate) failed. Run '${DOCTOR_SCRIPT}' for details."
+    fail "Activation gate (catalyst-doctor) reported FAIL check(s). Run '${DOCTOR_SCRIPT}' for details."
     return 1
   fi
 }
@@ -523,9 +689,23 @@ main() {
   fi
 
   # 4. Provisioners (order matters)
-  run_stage "setup-catalyst"      do_setup_catalyst      || exit 1
+  # github-auth + provision-thoughts MUST precede setup-catalyst: setup-catalyst's
+  # thoughts-init binds the checkout to the cloned thoughts repos + humanlayer.json
+  # that provision-thoughts creates (CTL-1214 PATH-B #6). Stages are append-only in
+  # the resume marker, so a re-run skips completed stages by name.
+  run_stage "github-auth"         do_github_auth          || exit 1
+  run_stage "provision-thoughts"  do_provision_thoughts   || exit 1
+  run_stage "setup-catalyst"      do_setup_catalyst       || exit 1
   run_stage "install-cli"         do_install_cli          || exit 1
   run_stage "setup-plugin-source" do_setup_plugin_source  || exit 1
+
+  # setup-catalyst installs node/bun into ~/.local/node/bin + ~/.bun/bin in a
+  # CHILD shell, so the parent join shell's PATH doesn't see them. The doctor
+  # gate (catalyst-doctor needs a bun/node runtime) and the stack stage run in
+  # THIS shell — prepend the install bins + hash -r so they resolve on a truly
+  # fresh node where the launching shell had no node/bun (CTL-1214 verify).
+  export PATH="$HOME/.local/node/bin:$HOME/.bun/bin:$HOME/.local/bin:$PATH"
+  hash -r 2>/dev/null || true
 
   # 5. SHARED config merge + per-node items
   run_stage "config-merge" do_config_merge || exit 1

@@ -144,6 +144,84 @@ rc=$?
 [[ $rc -eq 0 && "$out" == *"Usage:"* ]] && pass "--help prints usage, exit 0" || fail "--help prints usage, exit 0" "rc=$rc"
 
 echo ""
+echo "=== Phase 5: CATALYST_NI_AUTOINSTALL guard (CTL-1214 PATH-B #5) ==="
+
+# T23: with NON_INTERACTIVE=1 CATALYST_NI_AUTOINSTALL=1, the override forces a
+# "y" answer even when the explicit ni_answer arg is "n" → returns 0. This is the
+# path check_prerequisites uses to auto-accept a CRITICAL prereq install headlessly.
+run_sourced 'NON_INTERACTIVE=1; CATALYST_NI_AUTOINSTALL=1; ask_yes_no "x?" "y" "n"' </dev/null 2>/dev/null \
+  && pass "NI autoinstall override forces accept (returns 0)" \
+  || fail "NI autoinstall override forces accept (returns 0)"
+
+# T24: WITHOUT the override, plain NON_INTERACTIVE=1 still honors the ni_answer
+# "n" and DECLINES (returns non-0) — the install offers must not silently flip on.
+# This keeps the existing T16 (line 113) decline guard valid.
+run_sourced 'NON_INTERACTIVE=1; ask_yes_no "x?" "y" "n"' </dev/null 2>/dev/null \
+  && fail "plain NI still declines without override" \
+  || pass "plain NI still declines without override"
+
+# T25: the override only affects NI mode — it must NOT short-circuit the source
+# guard / change the default ni_answer for unrelated prompts (default y stays y).
+run_sourced 'NON_INTERACTIVE=1; CATALYST_NI_AUTOINSTALL=1; ask_yes_no "x?" "n"' </dev/null 2>/dev/null \
+  && pass "NI autoinstall override beats default ni_answer n" \
+  || fail "NI autoinstall override beats default ni_answer n"
+
+# T26: check_prerequisites wraps the humanlayer install with the autoinstall env
+# so an autonomous catalyst-join auto-accepts the critical HumanLayer prereq.
+grep -qF 'CATALYST_NI_AUTOINSTALL=1 offer_install_humanlayer' "$SETUP" \
+  && pass "check_prerequisites wraps humanlayer install with CATALYST_NI_AUTOINSTALL=1" \
+  || fail "check_prerequisites wraps humanlayer install with CATALYST_NI_AUTOINSTALL=1"
+
+# T27: gh install offer is likewise wrapped with the autoinstall env in NI mode
+# (node HTTPS git auth / thoughts sync precondition).
+grep -qF 'CATALYST_NI_AUTOINSTALL=1 offer_install_gh_cli' "$SETUP" \
+  && pass "check_prerequisites wraps gh install with CATALYST_NI_AUTOINSTALL=1" \
+  || fail "check_prerequisites wraps gh install with CATALYST_NI_AUTOINSTALL=1"
+
+echo ""
+echo "=== Phase 6: setup_project_config thoughts block (CTL-1214) ==="
+
+# T28: after setup_project_config runs in a scratch repo (ORG_NAME/REPO_NAME set),
+# .catalyst/config.json carries non-empty .catalyst.thoughts.{directory,profile}
+# == {REPO_NAME, ORG_NAME} (drift-gate input). Hermetic: env -i + scratch HOME/dir,
+# NON_INTERACTIVE so prompt_value returns defaults without touching stdin.
+spc_scratch=$(mktemp -d)
+spc_out=$(env -i HOME="$spc_scratch/home" PATH="/usr/bin:/bin" bash -c "
+  source '$SETUP'
+  NON_INTERACTIVE=1
+  ORG_NAME=acme-org
+  REPO_NAME=acme-repo
+  PROJECT_KEY=acme-org
+  PROJECT_DIR='$spc_scratch/proj'
+  mkdir -p \"\$PROJECT_DIR\"
+  setup_project_config >/dev/null 2>&1
+  jq -r '.catalyst.thoughts.directory + \"|\" + .catalyst.thoughts.profile' \"\$PROJECT_DIR/.catalyst/config.json\"
+" 2>/dev/null)
+rm -rf "$spc_scratch"
+[[ "$spc_out" == "acme-repo|acme-org" ]] \
+  && pass "setup_project_config writes thoughts.{directory=REPO_NAME,profile=ORG_NAME}" \
+  || fail "setup_project_config writes thoughts.{directory,profile}" "$spc_out"
+
+# T29: both thoughts fields are non-empty / non-null (a null-valued required key
+# would fail the validate_bundle existence assertion downstream).
+spc_scratch=$(mktemp -d)
+spc_nonempty=$(env -i HOME="$spc_scratch/home" PATH="/usr/bin:/bin" bash -c "
+  source '$SETUP'
+  NON_INTERACTIVE=1
+  ORG_NAME=acme-org
+  REPO_NAME=acme-repo
+  PROJECT_KEY=acme-org
+  PROJECT_DIR='$spc_scratch/proj'
+  mkdir -p \"\$PROJECT_DIR\"
+  setup_project_config >/dev/null 2>&1
+  jq -r '(.catalyst.thoughts.directory != null and .catalyst.thoughts.directory != \"\" and .catalyst.thoughts.profile != null and .catalyst.thoughts.profile != \"\")' \"\$PROJECT_DIR/.catalyst/config.json\"
+" 2>/dev/null)
+rm -rf "$spc_scratch"
+[[ "$spc_nonempty" == "true" ]] \
+  && pass "setup_project_config thoughts.directory/profile non-empty" \
+  || fail "setup_project_config thoughts.directory/profile non-empty" "$spc_nonempty"
+
+echo ""
 echo "=== Phase 4: Documentation shape ==="
 
 # T18: usage header documents the new flags

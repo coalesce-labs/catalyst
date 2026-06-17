@@ -4,21 +4,37 @@ This document describes how to onboard a fresh macOS node into a Catalyst cluste
 
 ## Quick Start
 
-From mini (the seed host), run:
+As of CTL-1214, `catalyst-join` provisions a node end-to-end on its own — thoughts
+clone + clean `humanlayer.json`, GitHub auth, the daemon stack, and the Stage-0
+SHADOW gate are all baked in. The canonical flow is two commands:
 
 ```bash
-cd ~/catalyst/hlt-dev
-./cluster-node-onboard.sh mini mini-2
+# 1. On the seed (mini): mint a single-use token + arm the bundle listener
+catalyst cluster join-token
+
+# 2. On the fresh node: run the one-liner. Pass a GitHub token so the node can
+#    clone the private thoughts repos without an interactive `gh auth login`.
+CATALYST_JOIN_GITHUB_TOKEN=<ghp_…> \
+  bash catalyst-join.sh --seed mini:7401 --token <jt_…>
+#    (offline / seed-unreachable variant: --bundle ~/catalyst/join-bundle.json)
 ```
 
-This automates:
-1. Thoughts repo provisioning (3 orgs: coalesce-labs, rightsite-cloud, ryanrozich)
-2. HumanLayer configuration
-3. Claude Code settings (OTel telemetry + host identity)
-4. catalyst-join completion (Stage-0 SHADOW)
-5. Catalyst stack auto-start via launchd
+`catalyst-join` walks resumable stages: preflight → acquire-bundle → **github-auth**
+→ **provision-thoughts** → setup-catalyst → install-cli → setup-plugin-source →
+config-merge → **doctor** (the CTL-1186 `catalyst-doctor` gate) → stack. It is
+idempotent — re-run after any failure and it resumes from the failed stage.
 
-**Result:** mini-2 is provisioned and running, but owns zero tickets (SHADOW mode). No further action needed for now.
+**Result:** the node is provisioned and the stack is running under launchd, but the
+committed `.catalyst/hosts.json` is untouched, so it owns **zero tickets** (Stage-0
+SHADOW). Activation (adding it to the roster) is a deliberate later step — see
+[Activation](#activation-m2--future).
+
+### Convenience wrapper (seed-driven)
+
+`~/catalyst/hlt-dev/cluster-node-onboard.sh mini <target>` is an operator helper
+that SSHes the above into a target node and also copies the seed's
+`~/.claude/settings.json` (OTel identity). It is laptop ops glue, not part of the
+installer — the durable provisioning lives in `catalyst-join` itself.
 
 ## Prerequisites
 
@@ -40,14 +56,21 @@ This automates:
 
 ## Step-by-Step Setup
 
-### Phase 1: Prepare GitHub Authentication
+### Phase 1: GitHub Authentication (built into the `github-auth` stage)
 
-The automation script fetches the GitHub PAT (Personal Access Token) from the seed host's environment. This token is used for HTTPS git push auth (thoughts sync).
+Cluster nodes have no SSH keys, so thoughts clone+push uses HTTPS + a token. The
+`github-auth` stage establishes this two ways, in order:
 
-**Why:** cluster nodes have no SSH keys; HTTPS + token is the auth model.
+1. **`CATALYST_JOIN_GITHUB_TOKEN`** (recommended for headless joins) → written to a
+   `0600 ~/.netrc`. gh is not required; git uses `.netrc` for both clone and push.
+2. Otherwise the stage installs the `gh` CLI binary (if absent) and uses an
+   existing `gh auth login` credential helper.
 
-- [ ] Verify seed's token: `ssh mini env | grep GITHUB_TOKEN`
-- [ ] Token must have `repo` + `workflow` scopes
+The token needs `repo` scope (and `workflow` if the node will push workflow files).
+A Stage-0 SHADOW node owns zero tickets and the thoughts **sync-gate only activates
+at roster>1**, so missing push auth is non-fatal at join time but is the explicit
+precondition for [Activation](#activation-m2--future) — verify `humanlayer thoughts
+sync` round-trips before adding the node to the committed roster.
 
 ### Phase 2: Provision Thoughts Repositories
 
