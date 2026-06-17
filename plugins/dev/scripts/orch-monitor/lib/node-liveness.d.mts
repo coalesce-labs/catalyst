@@ -36,3 +36,8 @@ export function overlayClusterLiveness(
   lastSeenByHost: Record<string, string>,
   opts?: { now?: number } & LivenessThresholds,
 ): ClusterNodeLiveness[];
+
+/** CTL-1255: merge { host: lastSeenISO } maps keeping the newer timestamp per host. */
+export function mergeHeartbeatsNewestWins(
+  ...maps: Array<Record<string, string> | null | undefined>
+): Record<string, string>;
