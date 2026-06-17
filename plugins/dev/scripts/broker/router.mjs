@@ -28,11 +28,12 @@ import {
   HEARTBEAT_STALE_MS,
   ORCH_STATUS_REPLAY_STALE_MS,
   DETERMINISTIC_INTEREST_TYPES,
-  INGESTION_RECENCY_ENABLED,
+  isIngestionRecencyEnabled,
   MONITOR_RECENCY_DEGRADED_MS,
   MONITOR_RECENCY_DOWN_MS,
   INGESTION_RECENCY_HOLDDOWN_MS,
   INGESTION_SEED_BYTES,
+  getPrevMonthEventLogPath,
 } from "./config.mjs";
 import {
   getInterests,
@@ -377,10 +378,12 @@ function recordLastSeen(event) {
 // scanEventsChunked; synchronous (readSync) so it finishes before startTailing
 // with no race. Best-effort — a missing/unreadable log just leaves the map cold
 // (still fail-open, never a false alarm).
-export function seedLastSeenByService({
-  logPath = getEventLogPath(),
-  seedBytes = INGESTION_SEED_BYTES,
-} = {}) {
+// scanLogTailInto — bounded byte read of one log file's tail, folding each event
+// into the map. Returns the number of events folded (0 for a missing/unreadable
+// file). A present-but-unreadable log (EACCES/locked) is warned — louder than a
+// simply-absent one — so a detector that boots blind is not silent. Best-effort:
+// never throws.
+function scanLogTailInto(logPath, seedBytes) {
   let size;
   try {
     const fd = openSync(logPath, "r");
@@ -389,14 +392,56 @@ export function seedLastSeenByService({
     } finally {
       closeSync(fd);
     }
-  } catch {
-    return; // no log yet → nothing to seed
+  } catch (err) {
+    if (err?.code !== "ENOENT") {
+      log.warn({ err: err?.message, logPath }, "ingestion-recency: seed log unreadable");
+    }
+    return 0;
   }
   const fromOffset = Math.max(0, size - seedBytes);
+  let folded = 0;
   try {
-    scanEventsChunked({ path: logPath, fromOffset, onEvent: recordLastSeen });
+    scanEventsChunked({
+      path: logPath,
+      fromOffset,
+      onEvent: (e) => {
+        folded += 1;
+        recordLastSeen(e);
+      },
+    });
   } catch (err) {
-    log.warn({ err: err?.message }, "ingestion-recency: seed scan failed (cold start)");
+    log.warn({ err: err?.message, logPath }, "ingestion-recency: seed scan failed");
+  }
+  return folded;
+}
+
+export function seedLastSeenByService({
+  logPath = getEventLogPath(),
+  seedBytes = INGESTION_SEED_BYTES,
+} = {}) {
+  let folded = scanLogTailInto(logPath, seedBytes);
+  // Month-boundary fallback: if the current-month tail held no monitor heartbeat
+  // (a restart just after a UTC rollover while the monitor is already dead — no
+  // fresh beat has landed in the new file yet), the last beat lives in the PRIOR
+  // month. Scan it too; otherwise the seed silently fails for exactly the
+  // all-restart, monitor-stays-dead outage class it exists to close.
+  if (!_lastSeenByService.has(MONITOR_SERVICE_NAME)) {
+    folded += scanLogTailInto(getPrevMonthEventLogPath(), seedBytes);
+  }
+  // Loud-on-blind: a non-empty log that yields no monitor baseline means the
+  // detector booted cold for the monitor (corrupt tail / out-of-window / never
+  // emitted). Fail-open is intentional, but the operator should see it.
+  const monitorSeen = _lastSeenByService.has(MONITOR_SERVICE_NAME);
+  if (folded > 0 && !monitorSeen) {
+    log.warn(
+      { services: _lastSeenByService.size, folded },
+      "ingestion-recency: seeded but no monitor heartbeat in tail window (detector cold for monitor)",
+    );
+  } else {
+    log.info(
+      { services: _lastSeenByService.size, monitorSeen },
+      "ingestion-recency: seeded last-seen map",
+    );
   }
 }
 
@@ -406,32 +451,53 @@ export function seedLastSeenByService({
 // best-effort (emitIngestionRecencyEvent never throws). Returns the emit
 // decision so the wiring test can assert it without parsing the log.
 function checkMonitorRecency(now) {
-  if (!INGESTION_RECENCY_ENABLED) return null;
+  if (!isIngestionRecencyEnabled()) return null;
   const seen = _lastSeenByService.get(MONITOR_SERVICE_NAME);
+  const prevAlarm = _monitorRecencyAlarm;
   const { severity } = evaluateSource({
     lastSeenTs: seen?.ts ?? null,
     nowMs: now,
     degradedAfterMs: MONITOR_RECENCY_DEGRADED_MS,
     downAfterMs: MONITOR_RECENCY_DOWN_MS,
   });
-  const { state, emit } = nextRecencyAlarmState(_monitorRecencyAlarm, {
+  const { state, emit } = nextRecencyAlarmState(prevAlarm, {
     severity,
     nowMs: now,
     holddownMs: INGESTION_RECENCY_HOLDDOWN_MS,
   });
-  _monitorRecencyAlarm = state;
   if (emit) {
-    emitIngestionRecencyEvent({
+    const recovered = emit === "recovered";
+    // stale describes the silence (age since the last beat, vs the down
+    // threshold); recovered describes the outage it CLEARED (its duration, no
+    // threshold). ageMs is clamped so clock skew (a future beat) can never emit
+    // a negative age.
+    const ageMs = recovered
+      ? prevAlarm.downEmittedAt != null
+        ? Math.max(0, now - prevAlarm.downEmittedAt)
+        : null
+      : seen
+        ? Math.max(0, now - seen.ts)
+        : null;
+    const ok = emitIngestionRecencyEvent({
       action: emit,
       sourceName: MONITOR_SERVICE_NAME,
-      ageMs: seen ? now - seen.ts : null,
-      thresholdMs: MONITOR_RECENCY_DOWN_MS,
+      ageMs,
+      thresholdMs: recovered ? null : MONITOR_RECENCY_DOWN_MS,
       lastSeenAt: seen ? new Date(seen.ts).toISOString() : null,
-      // the forensic link: the last heartbeat we saw before silence (stale) /
-      // the fresh beat that cleared it (recovered).
+      // the forensic link: the last beat before silence (stale) / the fresh
+      // beat that cleared it (recovered).
       causedBy: seen?.id ?? null,
     });
+    if (!ok) {
+      // The append FAILED (e.g. transient ENOSPC/EACCES — conditions correlated
+      // with the very outage we detect). Do NOT advance the alarm state: leaving
+      // it un-latched means the next tick re-attempts the emit, so a real death
+      // is never reduced to a single lost broker.log line. (Also stops a later
+      // recovered from pairing against a stale that was never appended.)
+      return null;
+    }
   }
+  _monitorRecencyAlarm = state;
   return emit;
 }
 

@@ -6,10 +6,10 @@
 // Time is controlled by planting last-seen timestamps relative to the real
 // Date.now() runWatchdogTick reads — no clock injection needed.
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
-import { mkdtempSync, writeFileSync, readFileSync, rmSync, existsSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { getEventLogPath } from "./config.mjs";
+import { getEventLogPath, getPrevMonthEventLogPath } from "./config.mjs";
 import {
   runWatchdogTick,
   processEvent,
@@ -17,6 +17,7 @@ import {
   __clearIngestionRecencyForTest,
   __setLastSeenForTest,
   __getLastSeenByServiceForTest,
+  __getMonitorRecencyAlarmForTest,
 } from "./router.mjs";
 import { clearInterests, clearLastHeartbeat, __resetBrokerStartedAtForTest } from "./state.mjs";
 
@@ -124,5 +125,120 @@ describe("runWatchdogTick monitor recency (CTL-1122)", () => {
       (e) => e.attributes["event.name"] === "catalyst.ingestion.recovered",
     );
     expect(rec.caused_by).toBe("beat-fresh");
+  });
+
+  test("degraded band (3m–10m) classifies degraded but emits NOTHING", () => {
+    __setLastSeenForTest("catalyst.monitor", { ts: Date.now() - 5 * 60_000, id: "beat-degraded" });
+    runWatchdogTick();
+    expect(readIngestionEvents(getEventLogPath())).toHaveLength(0);
+    expect(__getMonitorRecencyAlarmForTest().lastSeverity).toBe("degraded");
+  });
+
+  test("a stale NON-monitor service does not alarm — PR1 scope is monitor-only", () => {
+    __setLastSeenForTest("catalyst.broker", { ts: Date.now() - 30 * 60_000, id: "old-broker" });
+    // deliberately no catalyst.monitor entry → monitor classifies unknown (fail-open)
+    runWatchdogTick();
+    expect(readIngestionEvents(getEventLogPath())).toHaveLength(0);
+  });
+
+  test("clock-skewed-ahead monitor (future beat) never alarms — fail-open up", () => {
+    __setLastSeenForTest("catalyst.monitor", { ts: Date.now() + 5 * 60_000, id: "future-beat" });
+    runWatchdogTick();
+    expect(readIngestionEvents(getEventLogPath())).toHaveLength(0);
+  });
+
+  test("recovered payload describes the cleared outage (duration, threshold null) and never negative under skew", () => {
+    __setLastSeenForTest("catalyst.monitor", { ts: Date.now() - (TEN_MIN + 60_000), id: "beat-old" });
+    runWatchdogTick();
+    // recover via a clock-skewed-ahead fresh beat
+    __setLastSeenForTest("catalyst.monitor", { ts: Date.now() + 5 * 60_000, id: "future-fresh" });
+    runWatchdogTick();
+    const rec = readIngestionEvents(getEventLogPath()).find(
+      (e) => e.attributes["event.name"] === "catalyst.ingestion.recovered",
+    );
+    expect(rec).toBeDefined();
+    expect(rec.body.payload.thresholdMs).toBeNull(); // threshold is meaningless on recovered
+    expect(rec.body.payload.ageMs).toBeGreaterThanOrEqual(0); // outage duration, clamped
+  });
+});
+
+describe("checkMonitorRecency append-failure resilience (CTL-1122)", () => {
+  test("a failed stale append does NOT latch — the next writable tick retries (no lost alarm)", () => {
+    // Make the events dir unwritable: a FILE where ${CATALYST_DIR}/events should be.
+    const eventsPath = join(dir, "events");
+    writeFileSync(eventsPath, "x");
+    __setLastSeenForTest("catalyst.monitor", { ts: Date.now() - (TEN_MIN + 60_000), id: "beat-old" });
+    runWatchdogTick(); // emit attempt fails (append → ENOTDIR)
+    // the alarm must NOT have latched, or a stays-dead monitor would never retry
+    expect(__getMonitorRecencyAlarmForTest().downEmitted).toBe(false);
+
+    // now make the dir writable and tick again — the stale must finally land
+    rmSync(eventsPath, { force: true });
+    runWatchdogTick();
+    const stale = readIngestionEvents(getEventLogPath()).filter(
+      (e) => e.attributes["event.name"] === "catalyst.ingestion.stale",
+    );
+    expect(stale).toHaveLength(1);
+    expect(__getMonitorRecencyAlarmForTest().downEmitted).toBe(true);
+  });
+});
+
+describe("boot-seed → first watchdog tick, end-to-end (CTL-1122)", () => {
+  test("a boot-time-dead monitor seeded from the log is detected on the first tick", () => {
+    const logPath = getEventLogPath();
+    mkdirSync(join(dir, "events"), { recursive: true });
+    // newest catalyst.monitor beat is already past the down threshold
+    writeFileSync(
+      logPath,
+      JSON.stringify({
+        ts: new Date(Date.now() - (TEN_MIN + 60_000)).toISOString(),
+        id: "pre-restart-beat",
+        resource: { "service.name": "catalyst.monitor" },
+      }) + "\n",
+    );
+    seedLastSeenByService({ logPath });
+    runWatchdogTick();
+    const evs = readIngestionEvents(logPath).filter(
+      (e) => e.attributes["event.name"] === "catalyst.ingestion.stale",
+    );
+    expect(evs).toHaveLength(1);
+    expect(evs[0].caused_by).toBe("pre-restart-beat");
+  });
+
+  test("month-boundary: a monitor beat only in the PRIOR month file still seeds (rollover restart)", () => {
+    mkdirSync(join(dir, "events"), { recursive: true });
+    // current-month file is absent; the last beat lives in the prior month
+    writeFileSync(
+      getPrevMonthEventLogPath(),
+      JSON.stringify({
+        ts: new Date(Date.now() - (TEN_MIN + 60_000)).toISOString(),
+        id: "prev-month-beat",
+        resource: { "service.name": "catalyst.monitor" },
+      }) + "\n",
+    );
+    seedLastSeenByService({ logPath: getEventLogPath() }); // current month missing → prior-month fallback
+    expect(__getLastSeenByServiceForTest().get("catalyst.monitor")?.id).toBe("prev-month-beat");
+    runWatchdogTick();
+    const evs = readIngestionEvents(getEventLogPath()).filter(
+      (e) => e.attributes["event.name"] === "catalyst.ingestion.stale",
+    );
+    expect(evs).toHaveLength(1);
+    expect(evs[0].caused_by).toBe("prev-month-beat");
+  });
+});
+
+describe("kill-switch CATALYST_INGESTION_RECENCY=0 (CTL-1122)", () => {
+  test("disabled → an over-down monitor produces no ingestion event", () => {
+    const prev = process.env.CATALYST_INGESTION_RECENCY;
+    process.env.CATALYST_INGESTION_RECENCY = "0"; // read at call time by isIngestionRecencyEnabled
+    try {
+      __setLastSeenForTest("catalyst.monitor", { ts: Date.now() - (TEN_MIN + 60_000), id: "beat-old" });
+      runWatchdogTick();
+      expect(readIngestionEvents(getEventLogPath())).toHaveLength(0);
+      expect(__getMonitorRecencyAlarmForTest().downEmitted).toBe(false);
+    } finally {
+      if (prev === undefined) delete process.env.CATALYST_INGESTION_RECENCY;
+      else process.env.CATALYST_INGESTION_RECENCY = prev;
+    }
   });
 });

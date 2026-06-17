@@ -21,7 +21,9 @@
 // appendFileSync that NEVER throws); the holddown machine mirrors
 // orch-monitor/lib/service-health-emitter.ts (one `down` per transition, paired
 // `recovered`, flap suppression) — see nextRecencyAlarmState for the one
-// deliberate divergence (a holddown-suppressed death is DEFERRED, not dropped).
+// deliberate divergence: a SUSTAINED death is DEFERRED (not dropped) and alarms
+// once the holddown expires. A brief death that both begins AND self-heals
+// entirely inside the post-recovery holddown window is suppressed as flap.
 
 import { mkdirSync, appendFileSync } from "node:fs";
 import { dirname } from "node:path";
@@ -58,8 +60,9 @@ export const INGESTION_RECOVERED = "catalyst.ingestion.recovered";
  * @param {object} i
  * @param {"stale"|"recovered"} i.action
  * @param {string} i.sourceName     the silent/recovered service identity (event.label)
- * @param {number|null} [i.ageMs]   age of the last-seen event at decision time
- * @param {number|null} [i.thresholdMs] the down threshold that was crossed
+ * @param {number|null} [i.ageMs]   stale: silence age (ms since last beat);
+ *                                  recovered: the cleared outage's duration (ms)
+ * @param {number|null} [i.thresholdMs] the down threshold (stale); null on recovered
  * @param {string|null} [i.lastSeenAt] ISO ts of the last-seen event
  * @param {string|null} [i.causedBy] id of the last-seen event → caused_by
  * @param {object} [opts]
@@ -161,11 +164,14 @@ export function initialRecencyAlarmState() {
  *
  * Mirrors service-health-emitter's down/recovered machine with ONE deliberate
  * divergence: a `down` that is holddown-suppressed does NOT latch downEmitted —
- * it is DEFERRED and re-checked every tick, so a genuine sustained outage that
- * began within the flap window still alarms once the holddown expires (the
+ * it is DEFERRED and re-checked every tick, so a SUSTAINED outage that began
+ * within the flap window still alarms once the holddown expires (the
  * service-health machine would mask it permanently until a recovery — wrong for
- * a death detector). Holddown therefore rate-limits stale emissions to one per
- * `holddownMs` after a recovery, without ever dropping a real death.
+ * a death detector). Holddown rate-limits stale to one per `holddownMs` after a
+ * recovery and defers (never permanently masks) any death that OUTLIVES the
+ * holddown. The accepted trade-off: a brief death that both begins AND
+ * self-heals entirely inside that window is suppressed as flap — no stale, no
+ * recovered. For an 11h-silent-outage detector that is the intended behavior.
  *
  * Fail-open: "unknown" (never-seen / read error) and "degraded" never emit and
  * never reset the recovery clock — only a sustained `down` alarms, only a clean
@@ -197,7 +203,8 @@ export function nextRecencyAlarmState(
         s.downEmitted = true; // latch only once the alarm actually fired
       }
       // else: DEFER — leave downEmitted false so the next tick re-checks and
-      // emits the moment the holddown expires (a real death is never masked).
+      // emits the moment the holddown expires (a SUSTAINED death is never masked;
+      // a death fully contained within the holddown window is suppressed as flap).
       s.upHoldSince = null;
     } else {
       // already alarming — hold; reset any pending recovery.

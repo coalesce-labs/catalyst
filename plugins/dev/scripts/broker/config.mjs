@@ -78,8 +78,12 @@ export const ORCH_STATUS_REPLAY_STALE_MS = parseInt(
 // from its catalyst.monitor heartbeat recency (the monitor's own kind:"self"
 // probe can't observe its own death — the 11h-outage SPOF). Default-on,
 // emit-only (the broker emits catalyst.ingestion.{stale,recovered} but takes no
-// corrective action). Kill-switch: CATALYST_INGESTION_RECENCY=0.
-export const INGESTION_RECENCY_ENABLED = process.env.CATALYST_INGESTION_RECENCY !== "0";
+// corrective action). Kill-switch: CATALYST_INGESTION_RECENCY=0. Read at call
+// time (not a load-time const) so an operator can flip the switch without a
+// broker restart — parity with getEventLogPath's per-call env read.
+export function isIngestionRecencyEnabled() {
+  return process.env.CATALYST_INGESTION_RECENCY !== "0";
+}
 // Thresholds tuned to the monitor's fixed ~30 s heartbeat cadence: 3 min ≈ 6
 // missed beats (degraded), 10 min ≈ 20 missed beats (down → alarm). Tight and
 // defensible — github/linear recency (which idles organically) is PR2.
@@ -108,6 +112,20 @@ export function getEventLogPath() {
   const ym = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}`;
   // Re-read CATALYST_DIR per call so tests can redirect by setting the env
   // var. Production deployments still pin a stable value via daemon launch.
+  const home = process.env.HOME ?? homedir();
+  const catalystDir = process.env.CATALYST_DIR ?? `${home}/catalyst`;
+  return resolve(catalystDir, "events", `${ym}.jsonl`);
+}
+
+// CTL-1122: the immediately-prior UTC-month event-log path (same UTC math as
+// getEventLogPath, year rolled at January). The ingestion-recency seed falls
+// back to this when the current-month file holds no monitor heartbeat — so a
+// broker that (re)starts just after a month rollover, while the monitor is
+// already dead, still finds the last beat (which lives in the prior file).
+export function getPrevMonthEventLogPath() {
+  const now = new Date();
+  const prev = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - 1, 1));
+  const ym = `${prev.getUTCFullYear()}-${String(prev.getUTCMonth() + 1).padStart(2, "0")}`;
   const home = process.env.HOME ?? homedir();
   const catalystDir = process.env.CATALYST_DIR ?? `${home}/catalyst`;
   return resolve(catalystDir, "events", `${ym}.jsonl`);

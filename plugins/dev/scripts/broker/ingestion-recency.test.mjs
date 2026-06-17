@@ -178,6 +178,21 @@ describe("nextRecencyAlarmState — edge-trigger + holddown (CTL-1122)", () => {
     expect(r.state.downEmitted).toBe(true);
   });
 
+  test("a flap fully contained within the holddown is suppressed — no stale, no recovered", () => {
+    // outage → recovered at t=61s
+    let r = step(initialRecencyAlarmState(), "down", 1_000);
+    r = step(r.state, "up", 61_000);
+    expect(r.emit).toBe("recovered");
+    // dies again within the 10 min holddown → deferred (no stale)
+    r = step(r.state, "down", 120_000);
+    expect(r.emit).toBeNull();
+    expect(r.state.downEmitted).toBe(false);
+    // ...and self-heals before the holddown expires → no recovered either (nothing was latched)
+    r = step(r.state, "up", 180_000);
+    expect(r.emit).toBeNull();
+    expect(r.state.downEmitted).toBe(false);
+  });
+
   test("recoveryHoldMs requires sustained up before recovered", () => {
     let r = step(initialRecencyAlarmState(), "down", 1_000, { recoveryHoldMs: 60_000 });
     expect(r.emit).toBe("stale");
