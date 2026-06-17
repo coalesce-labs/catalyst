@@ -34,6 +34,8 @@ import {
   filterPickerItems,
   resolveActiveIconLabel,
   resolveAllIconsViewState,
+  GLYPH_GRID_SCROLL_CLASS,
+  GLYPH_GRID_SCROLL_STYLE,
 } from "./icon-picker-model";
 import type { IconPickerItem } from "./icon-picker-model";
 import type { IconCandidate } from "@/lib/repo-icons";
@@ -127,8 +129,8 @@ function VirtualGlyphGrid({
   return (
     <div
       ref={parentRef}
-      className="overflow-y-auto max-h-72"
-      style={{ contain: "strict" }}
+      className={GLYPH_GRID_SCROLL_CLASS}
+      style={GLYPH_GRID_SCROLL_STYLE}
     >
       <div
         style={{
