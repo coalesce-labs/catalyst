@@ -28,6 +28,7 @@ import {
   refreshAllPluginCheckouts,
   startPluginDriftCheck,
   handlePluginRefreshEvent,
+  changedPackageDirs,
   PLUGIN_REFRESH_THROTTLE_MS,
   PLUGIN_DRIFT_CHECK_INTERVAL_MS,
   __clearThrottleForTest,
@@ -1158,5 +1159,257 @@ describe("coalescing — three triggers in one throttle window", () => {
     refreshAllPluginCheckouts({ ...baseArgs, now: PLUGIN_REFRESH_THROTTLE_MS - 1 });
 
     expect(fetchCount).toBe(1);
+  });
+});
+
+// ─── changedPackageDirs (CTL-1223) ───────────────────────────────────────────
+
+describe("changedPackageDirs", () => {
+  test("returns the dir when ui/package.json changed", () => {
+    const dirs = changedPackageDirs("/repo", "plugins/dev/scripts/orch-monitor/ui/package.json\n");
+    expect(dirs).toEqual(["/repo/plugins/dev/scripts/orch-monitor/ui"]);
+  });
+
+  test("returns the dir when only bun.lock changed", () => {
+    const dirs = changedPackageDirs("/repo", "plugins/dev/scripts/orch-monitor/ui/bun.lock\n");
+    expect(dirs).toEqual(["/repo/plugins/dev/scripts/orch-monitor/ui"]);
+  });
+
+  test("dedupes package.json AND bun.lock in the same dir → exactly one install", () => {
+    const diff =
+      "plugins/dev/scripts/orch-monitor/ui/package.json\n" +
+      "plugins/dev/scripts/orch-monitor/ui/bun.lock\n";
+    const dirs = changedPackageDirs("/repo", diff);
+    expect(dirs).toHaveLength(1);
+    expect(dirs[0]).toBe("/repo/plugins/dev/scripts/orch-monitor/ui");
+  });
+
+  test("multiple distinct package dirs changed → one dir per unique package", () => {
+    const diff =
+      "plugins/dev/scripts/orch-monitor/ui/package.json\n" +
+      "plugins/dev/scripts/orch-monitor/bun.lock\n";
+    const dirs = changedPackageDirs("/repo", diff);
+    expect(dirs).toHaveLength(2);
+    expect(new Set(dirs)).toEqual(
+      new Set([
+        "/repo/plugins/dev/scripts/orch-monitor/ui",
+        "/repo/plugins/dev/scripts/orch-monitor",
+      ])
+    );
+  });
+
+  test("no dependency-manifest change → empty array", () => {
+    const diff = "plugins/dev/scripts/broker/router.mjs\nsrc/index.ts\n";
+    const dirs = changedPackageDirs("/repo", diff);
+    expect(dirs).toEqual([]);
+  });
+
+  test("empty diff → empty array", () => {
+    expect(changedPackageDirs("/repo", "")).toEqual([]);
+    expect(changedPackageDirs("/repo", null)).toEqual([]);
+  });
+
+  test("root-level package.json maps to root", () => {
+    const dirs = changedPackageDirs("/repo", "package.json\n");
+    expect(dirs).toEqual(["/repo"]);
+  });
+});
+
+// ─── refreshPluginCheckout — bun install seam (CTL-1223) ─────────────────────
+
+describe("refreshPluginCheckout — bunInstallFn seam (CTL-1223)", () => {
+  beforeEach(() => __clearThrottleForTest());
+
+  // makeGitFnWithDiff: extends makeGitFn to support `diff --name-only` stubbing.
+  function makeGitFnWithDiff({ before = "aaaa", after = "bbbb", diffOutput = "" } = {}) {
+    const calls = [];
+    const gitFn = (root, args) => {
+      calls.push({ root, args });
+      const sub = args[0];
+      if (sub === "rev-parse") {
+        const seen = calls.filter((c) => c.args[0] === "rev-parse").length;
+        return seen === 1 ? before : after;
+      }
+      if (sub === "fetch") return "";
+      if (sub === "reset") return "";
+      if (sub === "diff") return diffOutput;
+      return "";
+    };
+    gitFn.calls = calls;
+    return gitFn;
+  }
+
+  test("installs in the package dir when ui/package.json changed", () => {
+    const installed = [];
+    const gitFn = makeGitFnWithDiff({
+      diffOutput: "plugins/dev/scripts/orch-monitor/ui/package.json\n",
+    });
+    refreshPluginCheckout({
+      root: "/repo",
+      now: 0,
+      gitFn,
+      emitFn: () => {},
+      bunInstallFn: (dir) => { installed.push(dir); },
+    });
+    expect(installed).toEqual(["/repo/plugins/dev/scripts/orch-monitor/ui"]);
+  });
+
+  test("installs when only bun.lock changed", () => {
+    const installed = [];
+    const gitFn = makeGitFnWithDiff({
+      diffOutput: "plugins/dev/scripts/orch-monitor/ui/bun.lock\n",
+    });
+    refreshPluginCheckout({
+      root: "/repo",
+      now: 0,
+      gitFn,
+      emitFn: () => {},
+      bunInstallFn: (dir) => { installed.push(dir); },
+    });
+    expect(installed).toEqual(["/repo/plugins/dev/scripts/orch-monitor/ui"]);
+  });
+
+  test("dedupes: package.json AND bun.lock in same dir → exactly one install", () => {
+    const installed = [];
+    const gitFn = makeGitFnWithDiff({
+      diffOutput:
+        "plugins/dev/scripts/orch-monitor/ui/package.json\n" +
+        "plugins/dev/scripts/orch-monitor/ui/bun.lock\n",
+    });
+    refreshPluginCheckout({
+      root: "/repo",
+      now: 0,
+      gitFn,
+      emitFn: () => {},
+      bunInstallFn: (dir) => { installed.push(dir); },
+    });
+    expect(installed).toHaveLength(1);
+  });
+
+  test("multiple distinct package dirs → one install per unique dir", () => {
+    const installed = [];
+    const gitFn = makeGitFnWithDiff({
+      diffOutput:
+        "plugins/dev/scripts/orch-monitor/ui/package.json\n" +
+        "plugins/dev/scripts/orch-monitor/bun.lock\n",
+    });
+    refreshPluginCheckout({
+      root: "/repo",
+      now: 0,
+      gitFn,
+      emitFn: () => {},
+      bunInstallFn: (dir) => { installed.push(dir); },
+    });
+    expect(installed).toHaveLength(2);
+  });
+
+  test("no dependency-manifest change → bunInstallFn NOT called, updated event still emitted", () => {
+    const installed = [];
+    const emitted = [];
+    const gitFn = makeGitFnWithDiff({ diffOutput: "src/index.ts\n" });
+    refreshPluginCheckout({
+      root: "/repo",
+      now: 0,
+      gitFn,
+      emitFn: (e) => emitted.push(e),
+      bunInstallFn: (dir) => { installed.push(dir); },
+    });
+    expect(installed).toHaveLength(0);
+    expect(emitted.some((e) => e.event === "plugin.checkout.updated")).toBe(true);
+  });
+
+  test("HEAD unchanged → no diff, no install, no updated event", () => {
+    const installed = [];
+    const emitted = [];
+    const gitFn = makeGitFnWithDiff({ before: "same", after: "same" });
+    refreshPluginCheckout({
+      root: "/repo",
+      now: 0,
+      gitFn,
+      emitFn: (e) => emitted.push(e),
+      bunInstallFn: (dir) => { installed.push(dir); },
+    });
+    expect(installed).toHaveLength(0);
+    expect(emitted).toHaveLength(0);
+  });
+
+  test("throttled call → no install", () => {
+    const installed = [];
+    const gitFn = makeGitFnWithDiff({
+      diffOutput: "plugins/dev/scripts/orch-monitor/ui/package.json\n",
+    });
+    // First call to set throttle
+    refreshPluginCheckout({ root: "/repo", now: 0, gitFn, emitFn: () => {}, bunInstallFn: () => {} });
+    // Throttled second call
+    refreshPluginCheckout({
+      root: "/repo",
+      now: PLUGIN_REFRESH_THROTTLE_MS - 1,
+      gitFn,
+      emitFn: () => {},
+      bunInstallFn: (dir) => { installed.push(dir); },
+    });
+    expect(installed).toHaveLength(0);
+  });
+
+  test("oldSha null (rev-parse failed) → bunInstallFn NOT called, updated still emitted", () => {
+    const installed = [];
+    const emitted = [];
+    let parseCount = 0;
+    const gitFn = (root, args) => {
+      if (args[0] === "rev-parse") {
+        parseCount++;
+        if (parseCount === 1) throw new Error("not a git repo");
+        return "newsha";
+      }
+      if (args[0] === "fetch" || args[0] === "reset") return "";
+      return "";
+    };
+    refreshPluginCheckout({
+      root: "/repo",
+      now: 0,
+      gitFn,
+      emitFn: (e) => emitted.push(e),
+      bunInstallFn: (dir) => { installed.push(dir); },
+    });
+    expect(installed).toHaveLength(0);
+    expect(emitted.some((e) => e.event === "plugin.checkout.updated")).toBe(true);
+  });
+
+  test("bunInstallFn throws → emits deps_install_failed (WARN), still emits updated, result.failed=false", () => {
+    const emitted = [];
+    const gitFn = makeGitFnWithDiff({
+      diffOutput: "plugins/dev/scripts/orch-monitor/ui/package.json\n",
+    });
+    const res = refreshPluginCheckout({
+      root: "/repo",
+      now: 0,
+      gitFn,
+      emitFn: (e) => emitted.push(e),
+      bunInstallFn: () => { throw new Error("bun install exploded"); },
+    });
+    const failEv = emitted.find((e) => e.event === "plugin.checkout.deps_install_failed");
+    expect(failEv).toBeDefined();
+    expect(failEv.severity).toBe("WARN");
+    expect(failEv.detail.package_dir).toBe("/repo/plugins/dev/scripts/orch-monitor/ui");
+    expect(emitted.some((e) => e.event === "plugin.checkout.updated")).toBe(true);
+    expect(res.failed).toBe(false);
+  });
+
+  test("plugin.checkout.updated detail carries deps_installed on the happy path", () => {
+    const emitted = [];
+    const gitFn = makeGitFnWithDiff({
+      diffOutput: "plugins/dev/scripts/orch-monitor/ui/package.json\n",
+    });
+    refreshPluginCheckout({
+      root: "/repo",
+      now: 0,
+      gitFn,
+      emitFn: (e) => emitted.push(e),
+      bunInstallFn: () => {},
+    });
+    const updEv = emitted.find((e) => e.event === "plugin.checkout.updated");
+    expect(updEv).toBeDefined();
+    expect(Array.isArray(updEv.detail.deps_installed)).toBe(true);
+    expect(updEv.detail.deps_installed).toContain("/repo/plugins/dev/scripts/orch-monitor/ui");
   });
 });

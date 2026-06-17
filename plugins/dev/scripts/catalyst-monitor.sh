@@ -46,6 +46,11 @@ MONITOR_DIR="$(cd "$(dirname "$SERVER_SCRIPT")" && pwd)"
 # CTL-1088: default out-of-repo dist dir for the vite build (single definition
 # used by both bootstrap and cmd_start).
 MONITOR_UI_DIST_DIR="${MONITOR_UI_DIST_DIR:-$CATALYST_DIR/monitor-ui-dist}"
+
+# CTL-1223: structured-event emission for silent vite-build failures. Best-effort.
+EVENTS_DIR="${CATALYST_EVENTS_DIR:-$CATALYST_DIR/events}"
+# shellcheck source=lib/canonical-event.sh
+[[ -f "$SCRIPT_DIR/lib/canonical-event.sh" ]] && source "$SCRIPT_DIR/lib/canonical-event.sh" || true
 FORWARD_PID_FILE="${CATALYST_DIR}/otel-forward.pid"
 FORWARD_LOG="${CATALYST_DIR}/otel-forward.log"
 FORWARD_SCRIPT="${SCRIPT_DIR}/otel-forward/index.ts"
@@ -197,7 +202,7 @@ bootstrap() {
       (cd "$MONITOR_DIR" && bun install --frozen-lockfile 2>/dev/null || bun install)
     fi
 
-    if [[ -d "$MONITOR_DIR/ui" && ! -d "$MONITOR_DIR/ui/node_modules" ]]; then
+    if [[ -d "$MONITOR_DIR/ui" ]] && { [[ ! -d "$MONITOR_DIR/ui/node_modules" ]] || [[ "$MONITOR_DIR/ui/bun.lock" -nt "$MONITOR_DIR/ui/node_modules" ]]; }; then
       echo "Installing orch-monitor UI dependencies..."
       (cd "$MONITOR_DIR/ui" && bun install --frozen-lockfile 2>/dev/null || bun install)
     fi
@@ -232,6 +237,21 @@ bootstrap() {
           [[ -n "$ui_source_sha" ]] && printf '%s\n' "$ui_source_sha" > "$built_sha_file"
         else
           echo "warning: orch-monitor vite build failed — serving previous dist (will retry next restart)" >&2
+          if declare -f build_canonical_line >/dev/null 2>&1; then
+            _bf_line="$(build_canonical_line \
+              --ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+              --severity WARN \
+              --service catalyst.monitor \
+              --event-name "monitor.ui.build_failed" \
+              --entity monitor --action ui_build_failed \
+              --label "${rebuild_reason:-build_failed}" \
+              --payload-json "$(jq -cn --arg dir "$MONITOR_DIR" --arg sha "${ui_source_sha:-}" \
+                --arg built "${built_sha:-}" --arg reason "${rebuild_reason:-}" \
+                '{monitor_dir:$dir,ui_source_sha:$sha,built_sha:$built,rebuild_reason:$reason}' \
+                2>/dev/null || echo '{}')" \
+              2>/dev/null)" || _bf_line=""
+            [[ -n "$_bf_line" ]] && canonical_jsonl_append "$EVENTS_DIR" "$_bf_line" || true
+          fi
         fi
       fi
 

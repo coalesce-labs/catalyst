@@ -96,6 +96,45 @@ function defaultGitFn(root, args) {
   }).trim();
 }
 
+// Dep install can take longer than a git op (lockfile resolution); generous ceiling.
+const BUN_INSTALL_TIMEOUT_MS =
+  Number(process.env.CATALYST_PLUGIN_REFRESH_BUN_TIMEOUT_MS) || 180_000;
+
+// defaultBunInstallFn — run `bun install` in a package dir. Frozen first (the
+// checkout was just reset to origin/main, so the lockfile is authoritative);
+// fall back to a plain install if frozen rejects. Throws on non-zero exit, which
+// the caller catches and surfaces as deps_install_failed (non-fatal).
+function defaultBunInstallFn(pkgDir) {
+  try {
+    execFileSync("bun", ["install", "--frozen-lockfile"], {
+      cwd: pkgDir, encoding: "utf8", timeout: BUN_INSTALL_TIMEOUT_MS,
+      killSignal: "SIGKILL", env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
+    });
+  } catch {
+    execFileSync("bun", ["install"], {
+      cwd: pkgDir, encoding: "utf8", timeout: BUN_INSTALL_TIMEOUT_MS,
+      killSignal: "SIGKILL", env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
+    });
+  }
+}
+
+// Files whose change means deps may need (re)installing in their containing dir.
+const DEP_MANIFEST_RE = /(^|\/)(package\.json|bun\.lock)$/;
+
+// changedPackageDirs — pure helper: map a `git diff --name-only` output to
+// unique absolute package dirs that need `bun install`. Exported for direct
+// unit testing (no I/O — path/dedup logic only).
+export function changedPackageDirs(root, diffOutput) {
+  const dirs = new Set();
+  for (const line of String(diffOutput || "").split("\n")) {
+    const rel = line.trim();
+    if (!rel || !DEP_MANIFEST_RE.test(rel)) continue;
+    const dir = rel.includes("/") ? rel.slice(0, rel.lastIndexOf("/")) : ".";
+    dirs.add(dir === "." ? root : resolve(root, dir));
+  }
+  return [...dirs];
+}
+
 // defaultGitToplevelFn — map a pluginDirs entry (<checkout>/plugins/dev) to its
 // git toplevel checkout root, or null when it is not inside a git checkout.
 function defaultGitToplevelFn(pluginDir) {
@@ -303,6 +342,7 @@ export function refreshPluginCheckout({
   root,
   now = Date.now(),
   gitFn = defaultGitFn,
+  bunInstallFn = defaultBunInstallFn,
   emitFn,
   loadedCommit = null,
   loadedCommitRoot = null,
@@ -389,6 +429,31 @@ export function refreshPluginCheckout({
     (loadedCommitRoot == null || loadedCommitRoot === root);
 
   _clearLagState(root);
+
+  // CTL-1223: diff the pulled range to find changed package.json/bun.lock dirs
+  // and run `bun install` in each before emitting plugin.checkout.updated (which
+  // triggers the monitor restart). Install failures are surfaced as WARN events
+  // and never block the checkout-updated signal (reset already succeeded).
+  const depsInstalled = [];
+  if (oldSha) {
+    let diffOut = "";
+    try { diffOut = gitFn(root, ["diff", "--name-only", oldSha, newSha]); } catch { diffOut = ""; }
+    for (const pkgDir of changedPackageDirs(root, diffOut)) {
+      try {
+        bunInstallFn(pkgDir);
+        depsInstalled.push(pkgDir);
+      } catch (err) {
+        emitFn({
+          event: "plugin.checkout.deps_install_failed",
+          orchestrator: null,
+          worker: null,
+          severity: "WARN",
+          detail: { checkout: root, package_dir: pkgDir, error: err?.message ?? String(err) },
+        });
+      }
+    }
+  }
+
   emitFn({
     event: "plugin.checkout.updated",
     orchestrator: null,
@@ -399,6 +464,7 @@ export function refreshPluginCheckout({
       new_sha: newSha,
       loaded_commit: loadedCommit,
       restart_needed: restartNeeded,
+      deps_installed: depsInstalled,
     },
   });
   return { pulled: true, throttled: false, changed: true, failed: false, root, oldSha, newSha, restartNeeded };
