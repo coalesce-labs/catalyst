@@ -1,5 +1,5 @@
-import { useEffect } from "react";
-import { useAtom } from "jotai";
+import { useEffect, useMemo } from "react";
+import { useAtom, useAtomValue } from "jotai";
 import {
   ActivityIcon,
   BookOpenIcon,
@@ -44,6 +44,7 @@ import {
   overallWorkerCount,
   overallQueueDepth,
   inboxAttentionCount,
+  reconcileProjectOrder,
 } from "@/lib/nav-model";
 import {
   repoScopeAtom,
@@ -51,6 +52,7 @@ import {
   navOverallOpenAtom,
   navReasonOpenAtom,
   navObserveOpenAtom,
+  navProjectOrderAtom,
 } from "@/board/nav-store";
 import { useBoardSnapshot } from "@/hooks/use-board-snapshot";
 // CTL-961: per-project icon auto-detection (favicon from GitHub) + manual override.
@@ -283,6 +285,9 @@ export function AppSidebar() {
   // CHANGES are written onto the URL via navigate({search:{scope}}) in `go`.
   const [repoScope] = useAtom(repoScopeAtom);
   const [groupsOpen, setGroupsOpen] = useAtom(navGroupsOpenAtom);
+  // CTL-1248: operator's saved project order (repo short-names). Read-only in
+  // Phase 2; Phase 3 switches to useAtom when setProjectOrder is needed.
+  const projectOrder = useAtomValue(navProjectOrderAtom);
 
   // CTL-1152: the project LIST now comes from the config-driven roster (GET
   // /api/projects), NOT the raw board snapshot's observed-repo set. The roster
@@ -302,6 +307,14 @@ export function AppSidebar() {
     projects.length > 0 || projectsLoaded
       ? projects.map((p) => p.repo)
       : (payload?.repos ?? []);
+
+  // CTL-1248: apply the operator's saved order against the live roster. Membership
+  // is always roster-driven (repos); the atom is authoritative only for ORDER.
+  // New repos append to the end; removed repos drop out automatically.
+  const orderedRepos = useMemo(
+    () => reconcileProjectOrder(projectOrder, repos),
+    [projectOrder, repos],
+  );
 
   // CTL-961: auto-detect repo favicons from GitHub + manual overrides. Keyed by the
   // SAME short repo name the roster carries.
@@ -639,7 +652,7 @@ export function AppSidebar() {
             (PROJECT_HEADER_TRIGGER), favicon stays LEFT of the label. §1: twistie is
             RIGHT-aligned (ml-auto) per CTL-977. §3: children indented under a guide line.
             §4: a collapsed project with live children shows a signal dot on its header. */}
-        {repos.map((repo) => {
+        {orderedRepos.map((repo) => {
           // navGroups has the per-repo group; get its dotColor + iconDataUrl (CTL-961)
           const navGroup = navGroups.find((g) => g.scope === repo);
           const dotColor = navGroup?.dotColor;
