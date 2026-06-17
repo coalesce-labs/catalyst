@@ -84,23 +84,26 @@ describe("resolveProjectMark — none cases", () => {
     expect(mark).toEqual({ kind: "none" });
   });
 
-  it("stale glyph ref with uncurated name → treated as non-glyph, falls through to favicon/none", () => {
+  it("unknown glyph name → glyph mark (fail-open CTL-1233: shape-valid ref accepted; render yields null)", () => {
+    // parseGlyphRef is now fail-open: phosphor:<any-name> is accepted as long as
+    // it has a non-empty name. ProjectMarkIcon returns null for truly absent icons.
     const mark = resolveProjectMark({
       serverIcon: "phosphor:not-a-real-glyph",
       pick: undefined,
       candidates: [],
       defaultSelectedPath: null,
     });
-    expect(mark).toEqual({ kind: "none" });
+    expect(mark).toEqual({ kind: "glyph", name: "not-a-real-glyph" });
   });
 
-  it("stale glyph ref falls through to favicon when candidates exist", () => {
+  it("unknown glyph name with candidates → glyph mark wins (not favicon, fail-open CTL-1233)", () => {
+    // Even with candidates, a shape-valid glyph ref takes precedence (step 2 of resolveProjectMark).
     const mark = resolveProjectMark({
       serverIcon: "phosphor:not-a-real-glyph",
       pick: undefined,
       candidates: CANDS,
       defaultSelectedPath: null,
     });
-    expect(mark).toEqual({ kind: "favicon", dataUrl: "data:svg", selectedPath: "public/favicon.svg" });
+    expect(mark).toEqual({ kind: "glyph", name: "not-a-real-glyph" });
   });
 });

@@ -1,7 +1,6 @@
 // project-glyph-set.ts — curated Phosphor fill-weight glyph set for project icons (CTL-1208).
-// Static imports and GLYPH_COMPONENTS removed in CTL-1226; resolution delegates to
-// the universal resolver in phosphor-icons.ts which covers the full icon set.
-import { resolvePhosphorIcon } from "./phosphor-icons";
+// Static imports and GLYPH_COMPONENTS removed in CTL-1226; parseGlyphRef made fail-open in CTL-1233
+// (shape-valid → accepted; component existence verified lazily at render time).
 
 /** Prefix for all curated glyph references stored in the server icon field. */
 export const GLYPH_SET_PREFIX = "phosphor";
@@ -52,8 +51,9 @@ export function formatGlyphRef(name: string): string {
 }
 
 /**
- * Parse a set reference string. Returns null if not a valid glyph ref
- * (i.e. no real Phosphor component exists for the given name).
+ * Parse a set reference string. Returns null only for structural failures
+ * (no `phosphor:` prefix, or empty name). Accepts any well-shaped ref — component
+ * existence is verified lazily at render time (CTL-1233 fail-open).
  */
 export function parseGlyphRef(
   s: string | null | undefined,
@@ -63,11 +63,10 @@ export function parseGlyphRef(
   if (!s.startsWith(prefix)) return null;
   const name = s.slice(prefix.length);
   if (!name) return null;
-  if (resolvePhosphorIcon(name) === null) return null;
-  return { set: "phosphor", name };
+  return { set: "phosphor", name }; // shape-valid; component existence verified lazily at render
 }
 
-/** True iff `s` is a valid glyph reference (phosphor:<name> with a real Phosphor component). */
+/** True iff `s` is a valid glyph reference (well-shaped `phosphor:<name>`). */
 export function isGlyphRef(s: string | null | undefined): boolean {
   return parseGlyphRef(s) !== null;
 }
