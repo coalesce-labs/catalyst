@@ -203,6 +203,7 @@ import {
   recordFullRead,
 } from "./lib/event-log-reader";
 import { createEventRing } from "./lib/event-ring";
+import { createMemoizedRead } from "./lib/memoize-fresh.mjs";
 import { readSubStepEvents } from "./lib/substep-reader";
 import { loadOtelConfig } from "./lib/otel-config";
 import { loadWebhookConfig } from "./lib/webhook-config";
@@ -1163,12 +1164,59 @@ export function createServer(opts: CreateServerOptions): BunServer {
   >();
   const encoder = new TextEncoder();
 
+  // CTL-1215: ONE shared, incrementally-maintained recent-event ring. Per-request
+  // readers (substeps, tunnel stats, activity) scan this in-memory window instead
+  // of `readFileSync`-ing the 178 MB+ current-month log on every call. Windowed
+  // consumers fall back to the bounded file read on ring underflow (oldestTs).
+  // CTL-1257: created BEFORE boardSnapshot + the heartbeat readers so they can
+  // route through it (loadRecoveryOutcomes) or be invalidated by its onAppend
+  // hook (the memoized heartbeat readers) — stopping the 190MB×3 full reads that
+  // fired on every 3s board recompute and ratcheted the monitor's off-heap RSS.
+  const eventRing = createEventRing({ catalystDir: CATALYST_DIR });
+  eventRing.start();
+
   // CTL-733: one shared, reactively-recomputed board snapshot pushed over SSE
   // (/api/board/stream) — replaces per-tab polling of /api/board. Subscriber-
   // gated, so it does zero work when no board tab is open.
+  // CTL-1257: thread eventRing into assembleBoard so loadRecoveryOutcomes reads
+  // recovery outcomes from the ring instead of full-reading the log every 3s.
   const boardSnapshot = createBoardSnapshotManager({
-    assemble: () => assembleBoard({ getPrStatus: (r, n) => prFetcher?.get(r, n) ?? null }),
+    assemble: () =>
+      assembleBoard({
+        getPrStatus: (r, n) => prFetcher?.get(r, n) ?? null,
+        ring: eventRing,
+      }),
   });
+
+  // CTL-1257: ONE shared, freshness-bounded memo for recovery.readClusterHeartbeats.
+  // Both heartbeat call sites — productionDaemonHealth (the footer health dot,
+  // nav/stream) and clusterEntity.heartbeatReader (cluster/stream) — full-read the
+  // SAME ~190MB local event log on EVERY 3s board recompute (2 full reads/recompute
+  // today). We do NOT route recovery.mjs through the ring (its multi-host peer
+  // merge + computed-specifier lazy import would cross the VITE-GRAPH-GUARD seam);
+  // instead we memoize at the call site where the ring lives natively. The cached
+  // lastSeen map is reused across recomputes and recomputed only when a NEW line
+  // actually appended to the log (eventRing.onAppend, CTL-1224) — heartbeats append
+  // ~every 30s vs the 3s recompute → ~10x fewer reads, 0 in idle windows. A short
+  // hard TTL (10s) bounds staleness even if onAppend ever misses (it never fires
+  // for cold-fill, but always fires for live ticks). Sharing ONE instance across
+  // both call sites means the footer dot and the cluster view can never skew.
+  // Correctness: heartbeat interval=30s, liveness grace=5min — a ≤10s-stale map
+  // against a 300s grace can never mis-declare a live node dead.
+  // `read(deps, opts)` invokes the lazily-resolved recovery.readClusterHeartbeats;
+  // keyed on the resolved log path so a (future) path change re-reads.
+  const heartbeatMemo = createMemoizedRead<Record<string, string>>({
+    read: (
+      deps: { readClusterHeartbeats: (o: { logPath?: string }) => Record<string, string> },
+      opts: { logPath?: string },
+    ) => deps.readClusterHeartbeats(opts),
+    ttlMs: 10_000,
+    key: (_deps: unknown, opts: { logPath?: string }) => opts?.logPath ?? "",
+  });
+  // Invalidate the memo the instant a new line lands in the ring (CTL-1224 hook):
+  // the next heartbeat read then re-scans within ~1 ring tick (~1s), far inside
+  // the 30s heartbeat interval and the 5-min grace. Registered once here.
+  eventRing.onAppend(() => heartbeatMemo.invalidate());
 
   // CTL-896 (SHELL6): the local daemon-health reader for the footer health dot.
   //
@@ -1305,7 +1353,9 @@ export function createServer(opts: CreateServerOptions): BunServer {
       // Let recovery.readClusterHeartbeats resolve the canonical current-month
       // event-log path itself (config.getEventLogPath, UTC YYYY-MM) so the read
       // path matches exactly what the daemon writes — no format drift here.
-      const lastSeen = deps.readClusterHeartbeats({});
+      // CTL-1257: through the shared memo so the 3s board recompute reuses the
+      // cached lastSeen map (re-read only on a genuine new log append / TTL).
+      const lastSeen = heartbeatMemo.get(deps, {});
       // CTL-1169: the daemon-health dot uses a hysteresis window (default ~3
       // heartbeat intervals, set in nav-signal.mjs) so normal heartbeat jitter
       // doesn't flap healthy↔degraded and storm the desktop notifications.
@@ -1394,7 +1444,11 @@ export function createServer(opts: CreateServerOptions): BunServer {
     heartbeatReader: (opts) => {
       let local: Record<string, string> = {};
       try {
-        local = execCoreDeps?.readClusterHeartbeats(opts) ?? {};
+        // CTL-1257: ONLY the local-log scan is memoized (shared with the footer
+        // health dot, so the two views can never skew). The anchor-peer merge
+        // below stays LIVE — anchorHeartbeatCache is already a separate 60s
+        // background poll, so per-request behavior is byte-identical to today.
+        local = execCoreDeps ? heartbeatMemo.get(execCoreDeps, opts ?? {}) : {};
       } catch {
         /* fail-open: anchor cache alone still drives the overlay */
       }
@@ -1473,13 +1527,6 @@ export function createServer(opts: CreateServerOptions): BunServer {
     () => _sweepTitleDescCache(),
     5 * 60 * 1000,
   );
-
-  // CTL-1215: ONE shared, incrementally-maintained recent-event ring. Per-request
-  // readers (substeps, tunnel stats, activity) scan this in-memory window instead
-  // of `readFileSync`-ing the 178 MB+ current-month log on every call. Windowed
-  // consumers fall back to the bounded file read on ring underflow (oldestTs).
-  const eventRing = createEventRing({ catalystDir: CATALYST_DIR });
-  eventRing.start();
 
   const server = Bun.serve({
     port,
