@@ -107,6 +107,31 @@ PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:-}"
 [[ -n "$PLUGIN_ROOT" ]] || PLUGIN_ROOT="$(dirname "$(dirname "$(dirname "$(realpath "${BASH_SOURCE[0]:-$0}" 2>/dev/null || echo .)")")")"
 EXEC_CORE="${PLUGIN_ROOT}/scripts/execution-core"
 
+# ── Mode + the app-actor coordination-comment shim (CTL-1176) ────────────────
+# Enforce-only: the worker is dispatched ONLY in enforce mode (shadow just emits
+# would-escalate and never invokes the skill — recovery-reasoning.mjs), so a
+# coordination comment must NEVER post outside enforce. A bare operator sweep
+# leaves CATALYST_RECOVERY_PASS unset → treated as enforce (Ryan is acting live).
+RECOVERY_MODE="${CATALYST_RECOVERY_PASS:-enforce}"
+
+# _rp_comment <ticket> <body> — post an app-actor coordination comment on the
+# ticket (claim/unstuck/escalate visibility for other agents/hosts). FAIL-OPEN:
+# a comment failure must NEVER abort the unstick. Enforce-only + bounded (call it
+# ONCE per item per moment — the router's cooldown/act-once already prevents
+# spam). No-op in shadow/off. Mirrors the canonical phase-skill invocation.
+_RP_COMMENT_POST="${CATALYST_COMMENT_POST_HELPER:-${PLUGIN_ROOT}/scripts/lib/linear-comment-post.sh}"
+[[ -x "$_RP_COMMENT_POST" ]] || _RP_COMMENT_POST="$(command -v linear-comment-post.sh 2>/dev/null || true)"
+_rp_comment() {
+  local t="$1" body="$2"
+  [[ "$RECOVERY_MODE" == "enforce" ]] || return 0          # enforce-only
+  [[ -n "$t" && -n "$body" ]] || return 0                  # never with empty ticket
+  if [[ -n "$_RP_COMMENT_POST" && -x "$_RP_COMMENT_POST" ]]; then
+    "$_RP_COMMENT_POST" "$t" "$body" >/dev/null 2>&1 \
+      || echo "recovery-pass: coordination comment failed on ${t} (continuing)" >&2
+  fi
+  return 0
+}
+
 # ── Router-dispatched mode: run the phase-agent envelope ─────────────────────
 if [[ -n "$TICKET" ]]; then
   SIGNAL_FILE="${ORCH_DIR}/workers/${TICKET}/phase-${PHASE}.json"
@@ -269,6 +294,25 @@ stalled dispatch? Is there a PR and what state is it in? Write yourself the
 one-line diagnosis the brief would have carried, then drop into the Step-1/2 fix
 loop below (skip Step 0's "consume the brief" — you just built it yourself).
 
+**Verify the work, not the status (CTL-1214).** When an item is BLOCKED on a
+dependency marked Done, OR itself claims completion but is stuck, do NOT trust the
+Done/complete status. Verify the deliverable actually SHIPPED: (a) was a PR whose
+SCOPE matches the ticket's deliverable merged to main — check the merged PR's
+actual diff (`gh pr view <n> --json files,title` / `gh pr diff <n>`), not just
+that *a* PR closed it (an unrelated PR merged under its number is the trap — e.g.
+CTL-1214 was marked Done but a cluster-installer PR merged under its number; its
+config-reader migration never shipped, wedging SLI-17/OTL-13); and (b) does the
+claimed code/artifact actually exist on main (grep/read it)? A "Done" ticket whose
+deliverable never shipped is a real finding, not a clean dependency.
+
+**What to do when it didn't ship.** If you can confidently ship the small missing
+piece yourself, do it (FIX). If the missing deliverable is load-bearing (a
+schema/config migration, a structural change), escalate as a `decision` — reopen
+the falsely-Done ticket and ship it first, vs authorize me to do the migration now
+— with the inbox+push authored (Step 4). A falsely-Done load-bearing dependency
+meets the "serious architecture change" / "genuinely cannot proceed autonomously"
+bar; it is NOT a mechanical conflict to merge past.
+
 ## Phase-specific work — the senior-engineer unstick loop
 
 Think hard. You are a senior engineer; Ryan is your executive product manager.
@@ -284,6 +328,18 @@ clear it). You are picking up where the narrow passes failed — do NOT re-run t
 diagnostician and do NOT re-run a seam that is listed as already-tried. If a seam
 ran and didn't clear it, the mechanical fix wasn't enough; that's your cue to do
 the harder, judgment-bearing move.
+
+**PICKUP comment (enforce-only, once per item).** Right after you have the
+one-line diagnosis and BEFORE you act, post a soft claim-signal comment on the
+ticket so another agent/host does not double-grab it (complements HRW ownership):
+
+```bash
+_rp_comment "$TICKET" "🔧 **recovery-pass** is working this — <one-line diagnosis of what's stuck>. Resolving autonomously or escalating."
+```
+
+`_rp_comment` is no-op outside enforce and fail-open (a comment failure never
+aborts the unstick). Post it exactly ONCE per item — the router's cooldown /
+act-once bound already prevents spam.
 
 ### Step 1 — Can a REGISTERED SEAM clear it? (deterministic → FIX, no further work)
 
@@ -347,6 +403,16 @@ per-item resolution line you check the goal against. Use `gh` and `git`
 directly; delegate a deeper code fix to
 `/catalyst-dev:phase-remediate` or `/catalyst-dev:merge-pr` via the Task tool
 when one fits, but YOU own the cross-pipeline moves.
+
+**UNSTUCK comment (enforce-only, once per item).** After a successful FIX, post an
+audit + move-it-along comment so downstream agents see the lane is flowing again:
+
+```bash
+_rp_comment "$TICKET" "✅ **recovery-pass** unstuck this — <what I did, plain language> → <moved to phase X / merged #Y / re-dispatched>."
+```
+
+(Pairs with the INFO `recovery-emit.mjs fixed` audit event below — the comment is
+the ticket-visible signal, the event is the log record.)
 
 ### Step 3 — Escalate ONLY IF one of these is genuinely true
 
@@ -455,6 +521,18 @@ gates the push off the `needs-human` + WARN signals you just wrote. The native/P
 app is a thin transport over that same shared filter; there is no second filter to
 satisfy. Print that both the event and the signal explanation were written — that
 printed line is your record that the escalation landed (the goal's branch (b)).
+
+**ESCALATE comment (enforce-only, once per item).** Alongside the inbox/push
+authoring above, post a ticket-visible comment so agents see it's awaiting a human
+decision and stop re-grabbing it:
+
+```bash
+_rp_comment "$TICKET" "🔼 **recovery-pass** escalated this to Ryan — <the decision needed, one line>. (See your inbox.)"
+```
+
+This is the ticket-surface counterpart to the inbox row + push (which the
+`recovery-emit.mjs escalated` curation layer authors). Keep it to one line — the
+full briefing lives in the inbox, not the comment.
 
 **On an autonomous FIX, record the win for the audit trail** (INFO, no push — the
 recovered lane, not a needs-you row). Write a plain past-tense changelog, NOT
