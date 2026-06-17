@@ -37,6 +37,9 @@ describe("sampleVersion — build-identity metric set", () => {
     const info = byName(captured, "catalyst.build.info");
     expect(info).toBeTruthy();
     expect(info.gauge.dataPoints[0].asDouble).toBe(1);
+    // Unit MUST be empty so Prometheus does NOT append "_ratio" (CTL-1235): the
+    // metric must land as `catalyst_build_info`, not `catalyst_build_info_ratio`.
+    expect(info.unit).toBe("");
     expect(attrMap(info)["vcs.ref.head.revision"]).toBe("abc1234");
     // service.version is NOT a build_info label — it rides the shared resource.
     expect(attrMap(info)["service.version"]).toBeUndefined();
