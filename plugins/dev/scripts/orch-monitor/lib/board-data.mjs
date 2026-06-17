@@ -50,6 +50,7 @@ import { getEventLogPath } from "../../execution-core/config.mjs";
 // instrumentation + the other ring consumers use). event-log-reader.ts has no
 // bun:sqlite/pino edge, so this import is graph-safe.
 import { recordFullRead } from "./event-log-reader.ts";
+import { isLinearTerminal } from "../../execution-core/terminal-state.mjs";
 
 const execFileP = promisify(execFile);
 
@@ -236,7 +237,14 @@ export function deriveAttention({
   prStuckSince = null,
   phaseFailed = false,    // CTL-1180: a terminal failed/stalled phase, ticket NOT pipeline-done
   escalationType = null,  // CTL-1180: passthrough of explanation.escalation_type (forensic/render)
+  linearTerminal = false, // CTL-1239: live Linear state is Done/Canceled
 } = {}) {
+  // CTL-1239: a ticket terminal in Linear (Done/Canceled) is finished regardless of
+  // any stale failed/stalled phase-*.json left on disk. Short-circuit BEFORE the
+  // needs-human/waiting computation so a stale signal can never re-raise attention.
+  if (linearTerminal === true) {
+    return { attention: null, attentionSince: null, escalationType: null };
+  }
   const set = new Set(Array.isArray(labels) ? labels : []);
   const labelNeedsHuman =
     set.has(ATTENTION_LABEL_NEEDS_HUMAN) || set.has(ATTENTION_LABEL_NEEDS_INPUT);
@@ -614,6 +622,14 @@ export async function deriveActiveState(ticket, phase, ageMs, jobState, bgKnown)
 // inFlight, freeSlots, and the "active" config count.
 export function isWorkerDead(worker) {
   return worker?.activeState === "dead";
+}
+
+// isTerminalDeadCorpse — CTL-1239: a dead bg-job corpse on a Linear-terminal ticket
+// (Done/Canceled) is not a real dead worker — it is leftover state on a shipped/
+// canceled ticket. Excluding it drops the corpse from BOTH deriveCapacity's `dead`
+// count and the UI "Dead / stale" section. PURE + exported for unit tests.
+export function isTerminalDeadCorpse(worker, linearState) {
+  return isWorkerDead(worker) && isLinearTerminal(linearState);
 }
 
 // deriveCapacity — CTL-928 PURE capacity summary over the assembled worker set,
@@ -1775,6 +1791,9 @@ export async function assembleBoard({ getPrStatus = null, ring = null } = {}) {
       // to derive unconditionally here.
       const escalationType = deriveEscalationType(explSigs);
       const failedEscalationType = phaseFailed ? deriveEscalationType(phaseSigs) : null;
+      // CTL-1239: live Linear terminal state (Done/Canceled) from the webhook cache —
+      // dominates any stale on-disk failed/stalled phase signal.
+      const linearTerminal = isLinearTerminal(linfo[id]?.linearState);
       // CTL-729: the single needs-attention bucket (waiting-on-you ∪ needs-human),
       // merging the live worker's blocked-bg-job flag, the needs-human/needs-input
       // Linear labels (CTL-1031 webhook fold), the host-local needs-human marker,
@@ -1793,6 +1812,7 @@ export async function assembleBoard({ getPrStatus = null, ring = null } = {}) {
         // remediate) and fall back to the failed-phase value. deriveAttention only
         // surfaces this in the needs-human branch, so it stays null elsewhere.
         escalationType: escalationType ?? failedEscalationType,
+        linearTerminal, // CTL-1239
       });
       return {
         id,
@@ -1803,7 +1823,10 @@ export async function assembleBoard({ getPrStatus = null, ring = null } = {}) {
         phase: cur.phase,
         status: cur.status,
         model: cur.model,
-        linearState: PHASE_TO_LINEAR[cur.phase] || "Research",
+        // CTL-1239: a Linear-terminal ticket reports its live state ("Done"/"Canceled") so
+        // the UI isDone() guard (home-inbox.ts:158) routes it to the Done section. Scoped to
+        // terminal tickets only — non-terminal cards keep the phase-derived column mapping.
+        linearState: linearTerminal ? linfo[id].linearState : PHASE_TO_LINEAR[cur.phase] || "Research",
         workerStatus: live?.status || null,
         activeState: live?.activeState || null,
         working: live?.working || false,
@@ -1956,7 +1979,13 @@ export async function assembleBoard({ getPrStatus = null, ring = null } = {}) {
     })
   );
 
-  const repos = [...new Set([...workers, ...tickets].map((x) => x.repo))].sort();
+  // CTL-1239: drop dead bg-job corpses on Linear-terminal tickets so they leave both
+  // the capacity `dead` count and the UI "Dead / stale" section. linfo is in scope.
+  const boardWorkers = workers.filter(
+    (w) => !isTerminalDeadCorpse(w, linfo[w.ticket]?.linearState),
+  );
+
+  const repos = [...new Set([...boardWorkers, ...tickets].map((x) => x.repo))].sort();
 
   return {
     generatedAt: new Date().toISOString(),
@@ -1965,9 +1994,9 @@ export async function assembleBoard({ getPrStatus = null, ring = null } = {}) {
     // 6 listed, 3 dead → inFlight 3, freeSlots 3). `dead` is surfaced as its own
     // count so the operator sees the corpses without them consuming capacity. The
     // computation lives in the PURE deriveCapacity (unit-tested) — DRY.
-    config: deriveCapacity(workers, mp),
+    config: deriveCapacity(boardWorkers, mp),
     repos,
-    workers: workers.sort((a, b) => (a.runtimeMs ?? 0) - (b.runtimeMs ?? 0)),
+    workers: boardWorkers.sort((a, b) => (a.runtimeMs ?? 0) - (b.runtimeMs ?? 0)),
     tickets,
     queue,
   };
