@@ -9,7 +9,7 @@ import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { getEventLogPath, getPrevMonthEventLogPath } from "./config.mjs";
+import { getEventLogPath, getPrevMonthEventLogPath, GITHUB_RECENCY_DOWN_MS } from "./config.mjs";
 import {
   runWatchdogTick,
   processEvent,
@@ -18,7 +18,14 @@ import {
   __setLastSeenForTest,
   __getLastSeenByServiceForTest,
   __getMonitorRecencyAlarmForTest,
+  __getRecencyAlarmForTest,
 } from "./router.mjs";
+import { GITHUB_SERVICE_NAME, LINEAR_SERVICE_NAME } from "./ingestion-recency.mjs";
+import {
+  openBrokerStateDb,
+  closeBrokerStateDb,
+  upsertWorkerState,
+} from "./broker-state.mjs";
 import { clearInterests, clearLastHeartbeat, __resetBrokerStartedAtForTest } from "./state.mjs";
 
 function readIngestionEvents(logPath) {
@@ -224,6 +231,128 @@ describe("boot-seed → first watchdog tick, end-to-end (CTL-1122)", () => {
     );
     expect(evs).toHaveLength(1);
     expect(evs[0].caused_by).toBe("prev-month-beat");
+  });
+});
+
+describe("github/linear activity-gated recency (CTL-1122 PR2)", () => {
+  // These tests open the broker-state DB so hasActiveWorkers (the gate input) is
+  // backed by real worker_state rows. The github source is in RECENCY_SOURCES
+  // with gated:true; linear is deferred. The file-level beforeEach already set
+  // CATALYST_DIR and cleared the recency map.
+  beforeEach(() => {
+    closeBrokerStateDb(); // defensively close any leaked handle
+    openBrokerStateDb(join(dir, "broker-state.db"));
+  });
+  afterEach(() => {
+    closeBrokerStateDb();
+  });
+
+  // staleGithubMs: just past the github down threshold.
+  const staleGithubMs = GITHUB_RECENCY_DOWN_MS + 60_000;
+
+  function dispatchActiveWorker(ticket = "CTL-1") {
+    // a fresh, non-terminal worker row → hasActiveWorkers() === true (gate open)
+    upsertWorkerState({
+      orchestrator: "orch-1",
+      ticket,
+      status: "implement",
+      eventId: `e-${ticket}`,
+      eventTs: new Date().toISOString(),
+    });
+  }
+  function finishWorker(ticket = "CTL-1") {
+    // advance the same row to a terminal status → gate closes
+    upsertWorkerState({
+      orchestrator: "orch-1",
+      ticket,
+      status: "done",
+      eventId: `done-${ticket}`,
+      eventTs: new Date().toISOString(),
+    });
+  }
+
+  test("(a) github silent + worker in-flight → one catalyst.ingestion.stale (label catalyst.github)", () => {
+    dispatchActiveWorker();
+    __setLastSeenForTest(GITHUB_SERVICE_NAME, { ts: Date.now() - staleGithubMs, id: "gh-old" });
+    runWatchdogTick();
+    const evs = readIngestionEvents(getEventLogPath());
+    expect(evs).toHaveLength(1);
+    expect(evs[0].attributes["event.name"]).toBe("catalyst.ingestion.stale");
+    expect(evs[0].attributes["event.label"]).toBe(GITHUB_SERVICE_NAME);
+    expect(evs[0].caused_by).toBe("gh-old");
+    expect(evs[0].body.payload.thresholdMs).toBe(GITHUB_RECENCY_DOWN_MS);
+
+    // edge-triggered: a second tick while still stale + gated-open does not re-emit
+    runWatchdogTick();
+    expect(readIngestionEvents(getEventLogPath())).toHaveLength(1);
+  });
+
+  test("(b) github silent + NO worker in-flight → gate closed, no emit", () => {
+    // no worker rows at all → hasActiveWorkers() false → severity forced up
+    __setLastSeenForTest(GITHUB_SERVICE_NAME, { ts: Date.now() - staleGithubMs, id: "gh-old" });
+    runWatchdogTick();
+    expect(readIngestionEvents(getEventLogPath())).toHaveLength(0);
+    expect(__getRecencyAlarmForTest(GITHUB_SERVICE_NAME).downEmitted).toBe(false);
+  });
+
+  test("(b') only terminal workers → gate closed, no github emit", () => {
+    finishWorker("DONE"); // a terminal row is not active
+    __setLastSeenForTest(GITHUB_SERVICE_NAME, { ts: Date.now() - staleGithubMs, id: "gh-old" });
+    runWatchdogTick();
+    expect(readIngestionEvents(getEventLogPath())).toHaveLength(0);
+  });
+
+  test("(c) github stale gated-open, then work finishes (gate closes) → paired recovered with duration", () => {
+    dispatchActiveWorker();
+    __setLastSeenForTest(GITHUB_SERVICE_NAME, { ts: Date.now() - staleGithubMs, id: "gh-old" });
+    runWatchdogTick(); // → stale (gate open)
+    expect(
+      readIngestionEvents(getEventLogPath()).filter(
+        (e) => e.attributes["event.name"] === "catalyst.ingestion.stale",
+      ),
+    ).toHaveLength(1);
+
+    // work finishes → gate closes; github last-seen is left UNCHANGED (still old)
+    finishWorker();
+    runWatchdogTick(); // gate closed → severity up → recovered
+    const rec = readIngestionEvents(getEventLogPath()).find(
+      (e) => e.attributes["event.name"] === "catalyst.ingestion.recovered",
+    );
+    expect(rec).toBeDefined();
+    expect(rec.attributes["event.label"]).toBe(GITHUB_SERVICE_NAME);
+    expect(rec.body.payload.thresholdMs).toBeNull();
+    expect(rec.body.payload.ageMs).toBeGreaterThanOrEqual(0); // outage duration
+  });
+
+  test("(d) linear is DEFERRED — a stale catalyst.linear with active work does not alarm", () => {
+    dispatchActiveWorker();
+    // even far past any plausible threshold, linear is not in RECENCY_SOURCES
+    __setLastSeenForTest(LINEAR_SERVICE_NAME, { ts: Date.now() - 3 * 60 * 60_000, id: "lin-old" });
+    runWatchdogTick();
+    const labels = readIngestionEvents(getEventLogPath()).map((e) => e.attributes["event.label"]);
+    expect(labels).not.toContain(LINEAR_SERVICE_NAME);
+  });
+
+  test("(e) per-source isolation — monitor and github alarms don't cross-contaminate", () => {
+    dispatchActiveWorker();
+    __setLastSeenForTest("catalyst.monitor", { ts: Date.now() - (TEN_MIN + 60_000), id: "mon-old" });
+    __setLastSeenForTest(GITHUB_SERVICE_NAME, { ts: Date.now() - staleGithubMs, id: "gh-old" });
+    runWatchdogTick();
+    const stale = readIngestionEvents(getEventLogPath()).filter(
+      (e) => e.attributes["event.name"] === "catalyst.ingestion.stale",
+    );
+    const labels = stale.map((e) => e.attributes["event.label"]).sort();
+    expect(labels).toEqual([GITHUB_SERVICE_NAME, "catalyst.monitor"].sort());
+    // each alarm latched in its own per-source state
+    expect(__getMonitorRecencyAlarmForTest().downEmitted).toBe(true);
+    expect(__getRecencyAlarmForTest(GITHUB_SERVICE_NAME).downEmitted).toBe(true);
+  });
+
+  test("(f) github gate open but fresh → no alarm (gating is necessary, not sufficient)", () => {
+    dispatchActiveWorker();
+    __setLastSeenForTest(GITHUB_SERVICE_NAME, { ts: Date.now() - 60_000, id: "gh-fresh" });
+    runWatchdogTick();
+    expect(readIngestionEvents(getEventLogPath())).toHaveLength(0);
   });
 });
 

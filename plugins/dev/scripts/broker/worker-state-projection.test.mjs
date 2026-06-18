@@ -22,6 +22,8 @@ import {
   getProjectionMeta,
   setProjectionMeta,
   getStaleWorkers,
+  hasActiveWorkers,
+  ACTIVE_WORKER_FRESHNESS_MS,
   reduceWorkerStateEvent,
   projectWorkerStateEvent,
   replayWorkerStateProjection,
@@ -334,6 +336,138 @@ describe("worker_state store helpers (CTL-532)", () => {
     meta = getProjectionMeta();
     expect(meta.lastEventId).toBe("e10");
     expect(meta.eventsFolded).toBe(99);
+  });
+});
+
+// ─── hasActiveWorkers: the activity gate (CTL-1122 PR2) ──────────────────────
+// True iff ≥1 non-terminal worker_state row has emitted an event within the
+// freshness window. Freshness-bounded (NOT raw non-terminal) so a crashed
+// never-terminal row can't pin the github/linear ingestion-recency gate open
+// during a dead-fleet lull (PR2 fork b / plan risk #4). The freshness bound is
+// the complement of getStaleWorkers' predicate among non-terminal rows.
+
+describe("hasActiveWorkers (CTL-1122 PR2)", () => {
+  const now = "2026-05-21T10:00:00.000Z";
+  const fresh = "2026-05-21T09:59:00.000Z"; // 1 min ago, within 30-min window
+  const stale = "2026-05-21T09:00:00.000Z"; // 60 min ago, past 30-min window
+
+  test("no rows → false", () => {
+    expect(hasActiveWorkers(now)).toBe(false);
+  });
+
+  test("one fresh non-terminal (running) row → true", () => {
+    upsertWorkerState({
+      orchestrator: "orch-1",
+      ticket: "CTL-1",
+      status: "implement",
+      eventId: "e1",
+      eventTs: fresh,
+    });
+    expect(hasActiveWorkers(now)).toBe(true);
+  });
+
+  test("one fresh null-status row → true (dispatched, no status yet)", () => {
+    upsertWorkerState({
+      orchestrator: "orch-1",
+      ticket: "CTL-1",
+      phase: "research",
+      eventId: "e1",
+      eventTs: fresh,
+    });
+    expect(getWorkerState("orch-1", "CTL-1").status).toBeNull();
+    expect(hasActiveWorkers(now)).toBe(true);
+  });
+
+  test("only terminal rows (done/failed/complete), even if fresh → false", () => {
+    for (const [t, status] of [
+      ["A", "done"],
+      ["B", "failed"],
+      ["C", "complete"],
+    ]) {
+      upsertWorkerState({
+        orchestrator: "orch-1",
+        ticket: t,
+        status,
+        eventId: `e-${t}`,
+        eventTs: fresh,
+      });
+    }
+    expect(hasActiveWorkers(now)).toBe(false);
+  });
+
+  test("a STALE non-terminal row (crashed, never terminal) → false (fork b)", () => {
+    upsertWorkerState({
+      orchestrator: "orch-1",
+      ticket: "CRASHED",
+      status: "implement",
+      eventId: "e1",
+      eventTs: stale,
+    });
+    // getStaleWorkers would return it; hasActiveWorkers must NOT count it.
+    expect(getStaleWorkers(30 * 60 * 1000, now).map((r) => r.ticket)).toContain("CRASHED");
+    expect(hasActiveWorkers(now)).toBe(false);
+  });
+
+  test("mixed: one terminal-fresh + one non-terminal-fresh → true", () => {
+    upsertWorkerState({
+      orchestrator: "orch-1",
+      ticket: "DONE",
+      status: "done",
+      eventId: "e1",
+      eventTs: fresh,
+    });
+    upsertWorkerState({
+      orchestrator: "orch-1",
+      ticket: "LIVE",
+      status: "verify",
+      eventId: "e2",
+      eventTs: fresh,
+    });
+    expect(hasActiveWorkers(now)).toBe(true);
+  });
+
+  test("non-terminal row with NULL last_event_ts → false (no confirmed beat)", () => {
+    // upsert with no eventTs leaves last_event_ts NULL; getStaleWorkers also
+    // excludes these (IS NOT NULL), so the gate stays consistent with it.
+    upsertWorkerState({
+      orchestrator: "orch-1",
+      ticket: "NOTS",
+      status: "implement",
+      eventId: "e1",
+    });
+    expect(getWorkerState("orch-1", "NOTS").last_event_ts).toBeNull();
+    expect(hasActiveWorkers(now)).toBe(false);
+  });
+
+  test("boundary: a row exactly at the freshness cutoff counts as active", () => {
+    // 30-min window ⇒ cutoff is 09:30:00. A beat AT the cutoff is >= cutoff ⇒
+    // active (the complement of getStaleWorkers, where AT-cutoff is excluded).
+    upsertWorkerState({
+      orchestrator: "orch-1",
+      ticket: "AT",
+      status: "implement",
+      eventId: "e1",
+      eventTs: "2026-05-21T09:30:00.000Z",
+    });
+    expect(hasActiveWorkers(now)).toBe(true);
+    expect(getStaleWorkers(30 * 60 * 1000, now).map((r) => r.ticket)).not.toContain("AT");
+  });
+
+  test("custom freshnessMs is honored (tighter window excludes an otherwise-fresh row)", () => {
+    upsertWorkerState({
+      orchestrator: "orch-1",
+      ticket: "CTL-1",
+      status: "implement",
+      eventId: "e1",
+      eventTs: "2026-05-21T09:50:00.000Z", // 10 min ago
+    });
+    expect(hasActiveWorkers(now, 30 * 60 * 1000)).toBe(true); // within 30 min
+    expect(hasActiveWorkers(now, 5 * 60 * 1000)).toBe(false); // outside 5 min
+  });
+
+  test("ACTIVE_WORKER_FRESHNESS_MS default is exported and positive", () => {
+    expect(typeof ACTIVE_WORKER_FRESHNESS_MS).toBe("number");
+    expect(ACTIVE_WORKER_FRESHNESS_MS).toBeGreaterThan(0);
   });
 });
 

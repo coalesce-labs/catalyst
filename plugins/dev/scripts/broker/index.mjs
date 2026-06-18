@@ -37,6 +37,8 @@ export {
   getProjectionMeta,
   setProjectionMeta,
   getStaleWorkers,
+  hasActiveWorkers,
+  ACTIVE_WORKER_FRESHNESS_MS,
 } from "./broker-state.mjs";
 import { formatMissingKeyWarning, formatLoadedKeyInfo, probeGroq } from "../lib/api-key-health.mjs";
 import {

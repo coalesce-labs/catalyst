@@ -385,6 +385,18 @@ on read (belt-and-suspenders fallback also drops names prefixed `filter.` or
 `(source_event_id, interest_id)`) deduplicates wakes when `fs.watch` fires twice
 on the same append.
 
+**The broker is also the ingestion-silence detector (CTL-1122).** Because it tails
+every event, the broker is the surviving process that can judge whether an upstream
+ingestion source has gone quiet — the out-of-process check the monitor can't do for
+itself (the SPOF behind a 2026-06-14 11h silent outage). Each watchdog tick it
+evaluates per-source event recency and edge-triggers `catalyst.ingestion.{stale,recovered}`
+(emit-only; CTL-1123 consumes them). The `catalyst.monitor` heartbeat is judged on a
+tight fixed cadence (3m/10m, ungated). The `catalyst.github` webhook source is judged
+on a wide threshold (15m/30m) **gated on fleet activity** — github silence only alarms
+while a worker is in-flight (a fresh non-terminal `worker_state` row), so an idle fleet
+never false-alarms. Linear is deferred (its bot-skip guard makes the source quiet even
+during active work). See the configuration reference for the env knobs.
+
 **The execution-core daemon reaper (CTL-649) is the second producer-and-consumer.**
 It consumes the reap-intent requests appended by the reap-intent producers
 (`lib/emit-reap-intent.sh`, `execution-core/reap-intent.mjs`) — `phase.<kind>.reap-requested`,

@@ -247,3 +247,14 @@ The execution-core scheduler protects itself against a single ticket dominating 
 - `SCHEDULER_RUNAWAY_WINDOW_MS` (default `600000`, 10 min) — rolling window for the runaway-rate alert and its once-per-window suppression marker.
 
 The **phantom worker-dir validity sweep** quarantines a `workers/<ticket>/` dir only when all three hold: the ticket is definitively **not-found** in Linear (a clean exit-0 not-found body — a nonzero exit or transient outage classifies as `unknown` and is never quarantined), it is **not in the eligible set**, and it has **no live bg worker**. This conjunction guarantees a transient Linear outage can never quarantine a healthy, resolvable, in-flight ticket. `SCHEDULER_CIRCUIT_BREAKER_THRESHOLD` is the Linear-independent backstop; the runaway knobs are observability only.
+
+### Ingestion-silence detector (CTL-1122)
+
+The broker tails every event, so it is the surviving process that can notice when an upstream ingestion source has gone silent — the out-of-process check the monitor cannot do for itself (its own health probe reports `up` iff it answers, so it can never observe its own death). Each watchdog tick the broker judges per-source event recency and edge-triggers `catalyst.ingestion.{stale,recovered}` (emit-only — it takes no corrective action; CTL-1123 is the consumer). These knobs are env vars on the `catalyst-broker` process:
+
+- `CATALYST_INGESTION_RECENCY` (default on; set `0` to disable) — master kill-switch, read at call time so it toggles without a broker restart.
+- `FILTER_MONITOR_RECENCY_DEGRADED_MS` / `FILTER_MONITOR_RECENCY_DOWN_MS` (defaults `180000` / `600000`) — the `catalyst.monitor` heartbeat thresholds. The monitor beats on a fixed ~30s cadence, so these are tight (3m degraded / 10m down) and **ungated**.
+- `FILTER_GITHUB_RECENCY_DEGRADED_MS` / `FILTER_GITHUB_RECENCY_DOWN_MS` (defaults `900000` / `1800000`) — the `catalyst.github` webhook thresholds. GitHub traffic idles organically, so these are wide (15m / 30m) **and activity-gated**: github silence only alarms while a worker is in-flight (a non-terminal `worker_state` row that has emitted an event within the last 30 min). With no active worker the source is forced healthy, so an idle fleet never false-alarms.
+- `FILTER_INGESTION_RECENCY_HOLDDOWN_MS` (default `600000`) — flap guard: minimum gap between a recovery and the next stale alarm. A sustained outage that begins inside the window is deferred (re-checked each tick), never dropped.
+
+Linear (`catalyst.linear`) recency is intentionally **not** wired: the linear-webhook bot-skip guard suppresses bot-authored events before they reach the log, so the source goes quiet even during active work. Its knobs (`FILTER_LINEAR_RECENCY_*`) are reserved for when a non-flaky threshold is found.
