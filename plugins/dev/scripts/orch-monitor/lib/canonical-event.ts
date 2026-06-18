@@ -46,6 +46,13 @@ export interface Resource {
   // CTL-852: host identity fields, always present on canonical events.
   "host.name": string;
   "host.id": string;
+  // CTL-1262: stable Catalyst node name, distinct from the OS hostname
+  // (host.name). Resolved the same way as getHostName() / hostName()
+  // (CATALYST_HOST_NAME env -> catalyst.host.name Layer-2 config ->
+  // os.hostname() first DNS label) and NEVER derived from a Tailscale device
+  // name. Optional so external (webhook/broker-daemon) events that build a bare
+  // resource block remain valid; the otel-forward event path always sets it.
+  "catalyst.node.name"?: string;
   // CTL-636: optional orchestration-context resource keys. Present only when
   // the event carries the corresponding data; omitted otherwise so external
   // (webhook / broker-daemon) events keep the bare 3-key block.
