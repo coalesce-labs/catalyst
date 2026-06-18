@@ -1,0 +1,245 @@
+// =============================================================================
+// Catalyst daemon-log shipper — Grafana Alloy (River) config        (CTL-1261)
+// =============================================================================
+//
+// PURPOSE
+//   Tail the four long-running Catalyst daemon .log files on THIS host, parse
+//   their pino-JSON lines into OpenTelemetry log records, tag every record with
+//   both host identities (OS hostname + the stable Catalyst node name), and
+//   export OTLP/HTTP to the EXISTING shared collector. The collector fans the
+//   stream out to Loki/Prometheus, so the daemon logs become Loki-greppable
+//   (e.g. the execution-core liveness hold) without ssh-ing to the host.
+//
+// OFF-THE-SHELF, BY DESIGN
+//   This is a stock Grafana Alloy config. There is NO hand-rolled shipper code,
+//   no in-process pino transport, and no Loki filelog receiver embedded in the
+//   daemons. Alloy runs as its own per-host process (wired into catalyst-stack
+//   START by a sibling ticket — this config alone does not start anything).
+//
+// THE FOUR DAEMON LOGS  (paths are ${CATALYST_HOME}-relative; default ~/catalyst)
+//   ~/catalyst/broker.log                  -> service.name catalyst.broker
+//   ~/catalyst/execution-core/daemon.log   -> service.name catalyst.execution-core
+//   ~/catalyst/otel-forward.log            -> service.name catalyst.otel-forward
+//   ~/catalyst/monitor.log                 -> service.name catalyst.monitor   (mixed/plain text)
+//
+//   broker / execution-core / otel-forward emit pino JSON:
+//     {level,time(ms),pid,hostname,name,msg,...}
+//   monitor.log is mixed console.* output (NOT JSON) and is shipped best-effort
+//   as unstructured records — never dropped.
+//
+// HOST TAGGING  (load-bearing — see the README "Node name" section)
+//   host.name           = constants.hostname (the OS hostname of this machine)
+//   catalyst.host.name  = the stable Catalyst NODE name, from CATALYST_HOST_NAME
+//   The launcher (sibling ticket) MUST export CATALYST_HOST_NAME resolved the
+//   SAME way as getHostName() in execution-core/config.mjs:
+//       CATALYST_HOST_NAME env
+//         -> catalyst.host.name in Layer-2 ~/.config/catalyst/config.json
+//         -> os.hostname() first DNS label
+//   The node name is STABLE and is NEVER derived from the Tailscale device name
+//   (RyansMini250233 != mini). If CATALYST_HOST_NAME is unset, this config
+//   falls back to constants.hostname so records are still tagged (the launcher
+//   is responsible for providing the correct stable value).
+//
+// SEMCONV MAPPING  (OTel logs data model)
+//   pino numeric level -> severityNumber / severityText
+//       30 = INFO  / 9      40 = WARN  / 13
+//       50 = ERROR / 17     60 = FATAL / 21
+//   pino time(ms)      -> log record timestamp (Alloy converts ms -> nanos)
+//   pino msg           -> log record body
+//   remaining context  -> log-record attributes
+//   pino name          -> resource service.name as catalyst.<name>
+//
+// OVERRIDABLE ENV (all optional; safe defaults below)
+//   CATALYST_HOST_NAME        stable Catalyst node name (REQUIRED for correct node tag)
+//   CATALYST_OTLP_ENDPOINT    collector OTLP/HTTP base  (default http://100.65.193.30:4318)
+//   CATALYST_BROKER_LOG       override broker.log path
+//   CATALYST_DAEMON_LOG       override execution-core/daemon.log path
+//   CATALYST_OTEL_FORWARD_LOG override otel-forward.log path
+//   CATALYST_MONITOR_LOG      override monitor.log path
+//
+//   NOTE: River's sys.env has no default operator, so the per-file paths are
+//   resolved with coalesce(sys.env(...), "<default>"). The launcher (sibling
+//   ticket) is expected to export the absolute, $HOME-resolved paths so the
+//   defaults below are only a last-resort fallback.
+// =============================================================================
+
+// -----------------------------------------------------------------------------
+// Shared OTLP/HTTP export pipeline.
+// Every per-file pipeline funnels through the transform processor (which sets
+// the OTel semconv fields + host identities) into a batch processor and out to
+// the existing collector over OTLP/HTTP.
+// -----------------------------------------------------------------------------
+
+otelcol.exporter.otlphttp "catalyst" {
+	client {
+		// Existing shared collector on the Tailscale net. Override via env for tests.
+		endpoint = coalesce(sys.env("CATALYST_OTLP_ENDPOINT"), "http://100.65.193.30:4318")
+
+		tls {
+			// Plain HTTP on the trusted Tailscale net (matches otel-forward / cost-cap).
+			insecure = true
+		}
+	}
+}
+
+otelcol.processor.batch "catalyst" {
+	output {
+		logs = [otelcol.exporter.otlphttp.catalyst.input]
+	}
+}
+
+// -----------------------------------------------------------------------------
+// SEMCONV + host-identity transform.
+//
+// Runs on every record AFTER the loki -> otel bridge. The loki.process stages
+// (below) lift pino fields into log-record attributes (level, name); this OTTL
+// transform turns them into the proper OTel semconv shape:
+//   * numeric pino level -> severity_number + severity_text
+//   * host.name resource attribute          = OS hostname
+//   * catalyst.host.name resource attribute = stable Catalyst node name
+// service.name is set on the resource by the loki receiver from the service_name
+// label (see per-file targets). error_mode = "ignore" keeps a malformed line
+// (e.g. a plain-text monitor.log line with no level) flowing instead of dropped.
+// -----------------------------------------------------------------------------
+
+otelcol.processor.transform "catalyst" {
+	error_mode = "ignore"
+
+	// --- per-log-record: pino level -> OTel severity --------------------------
+	log_statements {
+		context    = "log"
+		statements = [
+			// severityNumber (OTel logs data model numeric severity: 9/13/17/21)
+			`set(log.severity_number, SEVERITY_NUMBER_INFO)  where log.attributes["level"] == 30`,
+			`set(log.severity_number, SEVERITY_NUMBER_WARN)  where log.attributes["level"] == 40`,
+			`set(log.severity_number, SEVERITY_NUMBER_ERROR) where log.attributes["level"] == 50`,
+			`set(log.severity_number, SEVERITY_NUMBER_FATAL) where log.attributes["level"] == 60`,
+			// severityText
+			`set(log.severity_text, "INFO")  where log.attributes["level"] == 30`,
+			`set(log.severity_text, "WARN")  where log.attributes["level"] == 40`,
+			`set(log.severity_text, "ERROR") where log.attributes["level"] == 50`,
+			`set(log.severity_text, "FATAL") where log.attributes["level"] == 60`,
+		]
+	}
+
+	// --- per-resource: host identities ----------------------------------------
+	// context = "resource" sets attributes on the log record's RESOURCE.
+	// constants.hostname is the OS hostname; CATALYST_HOST_NAME is the stable
+	// Catalyst node name (resolved by the launcher exactly like getHostName()).
+	// Falls back to the OS hostname so records are always node-tagged even if the
+	// env var is missing. The values are spliced into the OTTL statement strings
+	// via River string concatenation (OTTL itself cannot read River symbols).
+	log_statements {
+		context    = "resource"
+		statements = [
+			`set(resource.attributes["host.name"], "` + constants.hostname + `")`,
+			`set(resource.attributes["catalyst.host.name"], "` + coalesce(sys.env("CATALYST_HOST_NAME"), constants.hostname) + `")`,
+		]
+	}
+
+	output {
+		logs = [otelcol.processor.batch.catalyst.input]
+	}
+}
+
+// The loki -> OTLP bridge. Loki labels (service_name, level, name, ...) become
+// log-record attributes; the "service_name" label is mapped to the service.name
+// resource attribute by the receiver.
+otelcol.receiver.loki "catalyst" {
+	output {
+		logs = [otelcol.processor.transform.catalyst.input]
+	}
+}
+
+// =============================================================================
+// PER-FILE TAIL + PARSE PIPELINES
+// =============================================================================
+
+// ----- broker.log (pino JSON) ------------------------------------------------
+loki.source.file "broker" {
+	targets = [{
+		__path__     = coalesce(sys.env("CATALYST_BROKER_LOG"), "/root/catalyst/broker.log"),
+		service_name = "catalyst.broker",
+	}]
+	forward_to    = [loki.process.pino.receiver]
+	tail_from_end = true
+}
+
+// ----- execution-core/daemon.log (pino JSON) ---------------------------------
+loki.source.file "execution_core" {
+	targets = [{
+		__path__     = coalesce(sys.env("CATALYST_DAEMON_LOG"), "/root/catalyst/execution-core/daemon.log"),
+		service_name = "catalyst.execution-core",
+	}]
+	forward_to    = [loki.process.pino.receiver]
+	tail_from_end = true
+}
+
+// ----- otel-forward.log (pino JSON) ------------------------------------------
+loki.source.file "otel_forward" {
+	targets = [{
+		__path__     = coalesce(sys.env("CATALYST_OTEL_FORWARD_LOG"), "/root/catalyst/otel-forward.log"),
+		service_name = "catalyst.otel-forward",
+	}]
+	forward_to    = [loki.process.pino.receiver]
+	tail_from_end = true
+}
+
+// pino-JSON processing, shared by the three structured daemon logs.
+//   * stage.json              — lift level/time/name/msg out of the JSON line
+//   * stage.timestamp         — pino time is Unix MILLISECONDS -> record timestamp
+//   * stage.structured_metadata — keep level + name as attributes (the transform
+//                               reads attributes["level"] to derive severity)
+//   * stage.output            — set the log body to msg (the human-readable text)
+// service_name comes from the source target label above and is preserved, so the
+// otel bridge maps it to the service.name resource attribute (catalyst.<name>).
+loki.process "pino" {
+	forward_to = [otelcol.receiver.loki.catalyst.receiver]
+
+	stage.json {
+		expressions = {
+			"level" = "level",
+			"time"  = "time",
+			"name"  = "name",
+			"msg"   = "msg",
+		}
+	}
+
+	stage.timestamp {
+		source = "time"
+		format = "UnixMs"
+	}
+
+	// Keep the pino level + name as attributes (level drives severity; name is the
+	// context that informed service.name). The whole original line is preserved as
+	// the body until stage.output overrides it with msg below.
+	stage.structured_metadata {
+		values = {
+			"level" = "level",
+			"name"  = "name",
+		}
+	}
+
+	// Body of the OTel log record = the pino msg field.
+	stage.output {
+		source = "msg"
+	}
+}
+
+// ----- monitor.log (mixed / plain text — best effort, NEVER dropped) ---------
+// monitor.log is console.* output, not pino JSON. We do NOT parse it: each line
+// ships verbatim as the OTel log body under service.name catalyst.monitor. With
+// no JSON stage, a non-JSON line can never be dropped for a parse failure.
+loki.source.file "monitor" {
+	targets = [{
+		__path__     = coalesce(sys.env("CATALYST_MONITOR_LOG"), "/root/catalyst/monitor.log"),
+		service_name = "catalyst.monitor",
+	}]
+	forward_to    = [loki.process.plain.receiver]
+	tail_from_end = true
+}
+
+loki.process "plain" {
+	// No stage.json — unstructured passthrough. The whole line becomes the body.
+	forward_to = [otelcol.receiver.loki.catalyst.receiver]
+}
