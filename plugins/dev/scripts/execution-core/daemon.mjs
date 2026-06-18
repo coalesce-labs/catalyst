@@ -46,8 +46,10 @@ import {
   resolveClusterHosts, // CTL-1273/CTL-1271: roster + source + multiHost for the boot assertion
   getLivenessAnchorIssue, // CTL-1271: "multi-host was configured" detector
   getStaticRoster,        // CTL-1271: "multi-host was configured" detector
+  CLUSTER_SYNC_INTERVAL_MS, // CTL-1274: cluster-repo auto-pull cadence
 } from "./config.mjs";
 import { ownedBy } from "./hrw.mjs"; // CTL-862: HRW ownership filter
+import { clusterSync as realClusterSync, pullClusterRepo as realPullClusterRepo } from "./cluster-sync.mjs"; // CTL-1274: cluster-repo auto-pull
 import { startWaitWatcher as realStartWaitWatcher } from "./wait-watcher.mjs";
 import { startMemorySampler as realStartMemorySampler } from "./memory-sampler.mjs";
 import { startFleetHealthProbe as realStartFleetHealthProbe } from "./fleet-health-probe.mjs"; // CTL-1165 D5: pre-exhaustion fleet-health guardrail
@@ -142,6 +144,8 @@ let _ratelimitPoller = null;
 let _heartbeat = null;
 // CTL-1090: cross-host liveness publisher handle (multi-host only; single-host no-op).
 let _livenessPublisher = null;
+// CTL-1274: cluster-repo auto-pull timer handle (git pull --ff-only on a cadence).
+let _clusterSyncTimer = null;
 // CTL-684: auto-tuner stop handle.
 let _stopAutoTuner = null;
 let _eventWatcher = null;
@@ -441,6 +445,16 @@ export function startDaemon({
   // CTL-1090: cross-host liveness publisher. Injectable for tests. Single-host
   // installs get an inert no-op handle from startLivenessPublisher itself.
   startLivenessPublisher = realStartLivenessPublisher,
+  // CTL-1274: cluster-repo auto-pull. clusterSync runs once at boot (pull +
+  // decrypt secrets); pullClusterRepo runs on a cadence so a roster change
+  // committed on one node reaches every running daemon without a restart. Both
+  // are FAIL-OPEN (a failure logs + continues, never breaks the daemon) and
+  // injectable for hermetic tests. enableClusterSync=false disables both (test
+  // default + a CATALYST_CLUSTER_SYNC=0 kill-switch).
+  clusterSync = realClusterSync,
+  pullClusterRepo = realPullClusterRepo,
+  clusterSyncIntervalMs = CLUSTER_SYNC_INTERVAL_MS,
+  enableClusterSync = process.env.CATALYST_CLUSTER_SYNC !== "0",
   // CTL-665: committed executionCore concurrency knobs resolved in main() from
   // .catalyst/config.json. Threaded into both the scheduler new-work pull and the
   // boot-resume ceiling. Empty {} (the test default) keeps the legacy state.json path.
@@ -699,6 +713,31 @@ export function startDaemon({
       // CTL-1090: cross-host liveness publisher (multi-host only; single-host no-op).
       // startLivenessPublisher self-gates on roster.length > 1, so this is always safe.
       _livenessPublisher = startLivenessPublisher({ orchDir });
+    }
+
+    // CTL-1274: cluster-repo auto-pull. Refresh the catalyst-cluster clone at boot
+    // (clusterSync = pull + decrypt secrets) and then on a periodic timer
+    // (pullClusterRepo = git pull --ff-only) so a roster change committed on one
+    // node (cluster cli) propagates to this running daemon — the next scheduler
+    // tick re-reads cluster.json.roster. FAIL-OPEN: both calls already swallow
+    // errors and return a status object (never throw); the extra try/catch here
+    // is belt-and-suspenders so a cluster-sync hiccup can NEVER abort daemon boot
+    // or wedge a timer tick. A pull is a no-op ("not-a-clone") when no clone exists.
+    if (enableClusterSync) {
+      try {
+        const bootSync = clusterSync();
+        log.info({ pull: bootSync?.pull }, "execution-core daemon: cluster-repo synced at boot");
+      } catch (err) {
+        log.warn({ err: err?.message }, "execution-core daemon: boot cluster-sync threw (continuing)");
+      }
+      _clusterSyncTimer = setInterval(() => {
+        try {
+          pullClusterRepo();
+        } catch (err) {
+          log.warn({ err: err?.message }, "cluster-sync timer: pull threw (continuing)");
+        }
+      }, clusterSyncIntervalMs);
+      _clusterSyncTimer.unref?.();
     }
   } catch (err) {
     stopDaemon();
@@ -1228,6 +1267,11 @@ export function stopDaemon() {
       log.warn({ err: err?.message }, "stopDaemon: liveness-publisher stop failed");
     }
     _livenessPublisher = null;
+  }
+  // CTL-1274: stop the cluster-repo auto-pull timer.
+  if (_clusterSyncTimer) {
+    clearInterval(_clusterSyncTimer);
+    _clusterSyncTimer = null;
   }
   // CTL-684: stop the auto-tuner.
   if (_stopAutoTuner) {

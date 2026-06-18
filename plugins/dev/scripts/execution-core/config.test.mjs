@@ -32,6 +32,7 @@ import {
   LIVENESS_PUBLISH_INTERVAL_MS,
   getStaticRoster,
   resolveClusterHosts,
+  CLUSTER_SYNC_INTERVAL_MS,
 } from "./config.mjs";
 
 const PREV = process.env.CATALYST_WAIT_WATCHER;
@@ -410,8 +411,10 @@ describe("getClusterHosts cluster-repo-first (CTL-1211)", () => {
   });
 });
 
-// CTL-1273: the roster resolver — anchor → static → hosts-fallback → single-host.
-// All Linear reads are injected (readNodeNames), so these tests are hermetic.
+// CTL-1273 seam, CTL-1274 source swap: the roster resolver —
+// cluster-repo → static → hosts-fallback → single-host. Every source is a file
+// read redirected via env (CATALYST_CLUSTER_DIR / CATALYST_LAYER2_CONFIG_FILE /
+// CATALYST_CONFIG_FILE), so these tests are fully hermetic with no spawn/Linear.
 describe("getStaticRoster (CTL-1273)", () => {
   const ENVS = ["CATALYST_LAYER2_CONFIG_FILE", "CATALYST_STATIC_ROSTER"];
   let saved = {};
@@ -461,7 +464,7 @@ describe("getStaticRoster (CTL-1273)", () => {
   });
 });
 
-describe("resolveClusterHosts (CTL-1273)", () => {
+describe("resolveClusterHosts (CTL-1274 — cluster-repo source)", () => {
   const ENVS = [
     "CATALYST_CONFIG_FILE",
     "CATALYST_HOST_NAME",
@@ -471,18 +474,21 @@ describe("resolveClusterHosts (CTL-1273)", () => {
     "CATALYST_STATIC_ROSTER",
   ];
   let saved = {};
-  let repo, cfg;
+  let repo, cluster, cfg;
 
   beforeEach(() => {
     for (const k of ENVS) {
       saved[k] = process.env[k];
       delete process.env[k];
     }
-    repo = mkdtempSync(join(tmpdir(), "ctl1273-resolve-"));
+    repo = mkdtempSync(join(tmpdir(), "ctl1274-resolve-repo-"));
+    cluster = mkdtempSync(join(tmpdir(), "ctl1274-resolve-cluster-"));
     mkdirSync(join(repo, ".catalyst"), { recursive: true });
     cfg = join(repo, "layer2.json");
     process.env.CATALYST_CONFIG_FILE = join(repo, ".catalyst", "config.json");
-    process.env.CATALYST_CLUSTER_DIR = join(repo, "no-such-cluster");
+    // A real (empty) cluster dir → cluster.json absent → cluster-repo source is a
+    // deterministic miss unless a test writes cluster.json.
+    process.env.CATALYST_CLUSTER_DIR = cluster;
     process.env.CATALYST_LAYER2_CONFIG_FILE = cfg;
     process.env.CATALYST_HOST_NAME = "solo-host";
   });
@@ -494,84 +500,95 @@ describe("resolveClusterHosts (CTL-1273)", () => {
     }
     saved = {};
     rmSync(repo, { recursive: true, force: true });
+    rmSync(cluster, { recursive: true, force: true });
   });
 
   const writeHosts = (arr) => writeFileSync(join(repo, ".catalyst", "hosts.json"), JSON.stringify(arr));
   const writeLayer2 = (obj) => writeFileSync(cfg, JSON.stringify(obj));
+  const writeCluster = (obj) => writeFileSync(join(cluster, "cluster.json"), JSON.stringify(obj));
 
-  test("anchor source wins when configured and the read succeeds", () => {
-    process.env.CATALYST_LIVENESS_ANCHOR_ISSUE = "CTL-1090";
-    writeHosts(["legacy-should-lose"]); // present but lower priority
-    const readNodeNames = () => ({ ok: true, names: ["mini", "mini-2"] });
-    expect(resolveClusterHosts({ readNodeNames })).toEqual({
+  test("cluster-repo source wins when cluster.json.roster is present", () => {
+    writeCluster({ schemaVersion: 1, roster: ["mini", "mini-2"] });
+    writeLayer2({ catalyst: { cluster: { staticRoster: ["static-should-lose"] } } });
+    writeHosts(["legacy-should-lose"]); // both lower priority
+    expect(resolveClusterHosts()).toEqual({
       hosts: ["mini", "mini-2"],
-      source: "anchor",
+      source: "cluster-repo",
       multiHost: true,
     });
   });
 
-  test("FAIL-OPEN: anchor read error falls through to the next source (never empties)", () => {
-    process.env.CATALYST_LIVENESS_ANCHOR_ISSUE = "CTL-1090";
+  test("FAIL-OPEN: a too-new cluster schema falls through (never empties)", () => {
+    writeCluster({ schemaVersion: 999, roster: ["should", "be", "ignored"] });
     writeHosts(["mini", "mac-studio"]);
-    const readNodeNames = () => ({ ok: false, names: [] }); // Linear unreadable
-    const r = resolveClusterHosts({ readNodeNames });
+    const r = resolveClusterHosts();
     expect(r.hosts).toEqual(["mini", "mac-studio"]);
     expect(r.source).toBe("hosts-fallback");
   });
 
-  test("anchor configured but empty roster falls through (not an empty fleet)", () => {
-    process.env.CATALYST_LIVENESS_ANCHOR_ISSUE = "CTL-1090";
+  test("FAIL-OPEN: an empty cluster roster falls through to static (not an empty fleet)", () => {
+    writeCluster({ schemaVersion: 1, roster: [] });
     writeLayer2({ catalyst: { cluster: { staticRoster: ["static-a", "static-b"] } } });
-    const readNodeNames = () => ({ ok: true, names: [] });
-    const r = resolveClusterHosts({ readNodeNames });
+    const r = resolveClusterHosts();
     expect(r.source).toBe("static");
     expect(r.hosts).toEqual(["static-a", "static-b"]);
   });
 
-  test("NO anchor configured → readNodeNames is NEVER called (zero Linear cost)", () => {
-    // anchor env unset; only single-host default expected, no anchor read.
-    let called = false;
-    const readNodeNames = () => {
-      called = true;
-      return { ok: true, names: ["should-not-be-used"] };
-    };
-    const r = resolveClusterHosts({ readNodeNames });
-    expect(called).toBe(false);
+  test("no cluster.json + no static → single-host default makes no cluster read crash", () => {
+    // empty cluster dir, no static, no hosts.json → single-host
+    const r = resolveClusterHosts();
     expect(r).toEqual({ hosts: ["solo-host"], source: "single-host", multiHost: false });
   });
 
-  test("static source when no anchor, before the legacy hosts fallback", () => {
+  test("static source when no cluster-repo, before the legacy hosts fallback", () => {
     writeLayer2({ catalyst: { cluster: { staticRoster: ["a", "b"] } } });
     writeHosts(["legacy"]);
-    const r = resolveClusterHosts({ readNodeNames: () => ({ ok: false, names: [] }) });
+    const r = resolveClusterHosts();
     expect(r).toEqual({ hosts: ["a", "b"], source: "static", multiHost: true });
   });
 
-  test("hosts-fallback (legacy .catalyst/hosts.json) when no anchor + no static", () => {
+  test("hosts-fallback (legacy .catalyst/hosts.json) when no cluster-repo + no static", () => {
     writeHosts(["mini", "mac-studio"]);
-    const r = resolveClusterHosts({ readNodeNames: () => ({ ok: false, names: [] }) });
+    const r = resolveClusterHosts();
     expect(r).toEqual({ hosts: ["mini", "mac-studio"], source: "hosts-fallback", multiHost: true });
   });
 
-  test("single-host default when no anchor, no static, no hosts file", () => {
-    const r = resolveClusterHosts({ readNodeNames: () => ({ ok: false, names: [] }) });
+  test("single-host default when no cluster-repo, no static, no hosts file", () => {
+    const r = resolveClusterHosts();
     expect(r).toEqual({ hosts: ["solo-host"], source: "single-host", multiHost: false });
   });
 
-  test("single-host anchor roster reports multiHost:false", () => {
-    process.env.CATALYST_LIVENESS_ANCHOR_ISSUE = "CTL-1090";
-    const readNodeNames = () => ({ ok: true, names: ["mini"] });
-    expect(resolveClusterHosts({ readNodeNames })).toEqual({
+  test("a single-host cluster-repo roster reports multiHost:false", () => {
+    writeCluster({ schemaVersion: 1, roster: ["mini"] });
+    expect(resolveClusterHosts()).toEqual({
       hosts: ["mini"],
-      source: "anchor",
+      source: "cluster-repo",
       multiHost: false,
     });
+  });
+
+  test("unversioned cluster.json is treated as v1 and read", () => {
+    writeCluster({ roster: ["mini", "mini-2"] });
+    expect(resolveClusterHosts().source).toBe("cluster-repo");
+    expect(resolveClusterHosts().hosts).toEqual(["mini", "mini-2"]);
+  });
+
+  test("filters non-string entries from the cluster roster", () => {
+    writeCluster({ schemaVersion: 1, roster: ["mini", 42, "", "mini-2"] });
+    expect(resolveClusterHosts().hosts).toEqual(["mini", "mini-2"]);
   });
 });
 
 describe("HEARTBEAT_INTERVAL_MS (CTL-859)", () => {
   test("defaults to 30000ms", () => {
     expect(HEARTBEAT_INTERVAL_MS).toBe(30_000);
+  });
+});
+
+describe("CLUSTER_SYNC_INTERVAL_MS (CTL-1274)", () => {
+  test("defaults to 5 minutes when the env override is unset", () => {
+    // EXECUTION_CORE_CLUSTER_SYNC_INTERVAL_MS is not set in the test env.
+    expect(CLUSTER_SYNC_INTERVAL_MS).toBe(5 * 60_000);
   });
 });
 

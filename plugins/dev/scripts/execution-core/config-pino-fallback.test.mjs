@@ -42,10 +42,6 @@ function stageScratch() {
   // (The point of the fixture is that PINO is unresolvable; local siblings must
   // still resolve, so any new sibling import config.mjs gains belongs here.)
   cpSync(resolve(__dirname, "config-schema.mjs"), join(scratch, "config-schema.mjs"));
-  // CTL-1273: config.mjs now also imports the dep-free sibling node-roster-sync.mjs
-  // (node: built-ins only; it path-computes node-roster.mjs but never imports it at
-  // load), so the scratch fixture must resolve that sibling too.
-  cpSync(resolve(__dirname, "node-roster-sync.mjs"), join(scratch, "node-roster-sync.mjs"));
   // type:module + no deps -> pino unresolvable from this directory tree.
   writeFileSync(
     join(scratch, "package.json"),
