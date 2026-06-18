@@ -91,6 +91,21 @@ export const MONITOR_RECENCY_DEGRADED_MS = parseInt(
   process.env.FILTER_MONITOR_RECENCY_DEGRADED_MS ?? "180000", 10);
 export const MONITOR_RECENCY_DOWN_MS = parseInt(
   process.env.FILTER_MONITOR_RECENCY_DOWN_MS ?? "600000", 10);
+// CTL-1122 PR2: github webhook recency. Unlike the monitor's fixed cadence,
+// github traffic idles organically, so these are activity-gated (only judged
+// while a worker is in-flight — see hasActiveWorkers) AND wide: a worker can be
+// mid-implement for many minutes with zero github traffic (work is local before
+// a push), so the gate removes idle-fleet false alarms while the threshold
+// absorbs active-but-pre-push quiet. 15m degraded / 30m down.
+export const GITHUB_RECENCY_DEGRADED_MS = parseInt(
+  process.env.FILTER_GITHUB_RECENCY_DEGRADED_MS ?? "900000", 10);
+export const GITHUB_RECENCY_DOWN_MS = parseInt(
+  process.env.FILTER_GITHUB_RECENCY_DOWN_MS ?? "1800000", 10);
+// linear (catalyst.linear) recency is DEFERRED in PR2 (fork a): the
+// linear-webhook bot-skip guard suppresses bot-authored events pre-log, so the
+// source goes quiet even during active work. Its knobs
+// (FILTER_LINEAR_RECENCY_{DEGRADED,DOWN}_MS) are intentionally not defined until
+// a non-flaky threshold is found and linear is wired into RECENCY_SOURCES.
 // Flap guard: minimum gap between a recovery and the next stale alarm. A death
 // that begins within this window is DEFERRED (re-checked each tick), never
 // dropped — see nextRecencyAlarmState.
