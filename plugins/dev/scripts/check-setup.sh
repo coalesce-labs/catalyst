@@ -69,6 +69,7 @@ OPT_TOOLS=(
     "direnv:direnv"
     "smee:smee-client (webhook tunnel)"
     "mitmproxy:mitmproxy (optional — only needed for catalyst-stack --proxy)"
+    "alloy:Grafana Alloy (log-shipper — installed by install-cli.sh)"
 )
 
 for spec in "${OPT_TOOLS[@]}"; do
@@ -490,6 +491,47 @@ else
     else
         info "Start with: bash plugins/dev/scripts/catalyst-monitor.sh start"
     fi
+fi
+
+# ─── 7b2. Log Shipper (Grafana Alloy) (optional) ───────────────────────────
+# CTL-1263: verify the off-the-shelf Alloy daemon-log shipper is installed +
+# configured + (best-effort) running, consistent with the other daemon checks.
+# Warn/info-level only so a fresh node / non-running shipper never reds the
+# whole health check.
+
+header "Log Shipper (Alloy)"
+
+# Config present — resolve the same way the monitor launcher above is resolved.
+SHIPPER_CONFIG_PATH=""
+if [[ -n "${CLAUDE_PLUGIN_ROOT:-}" && -f "${CLAUDE_PLUGIN_ROOT}/scripts/log-shipper/config.alloy" ]]; then
+    SHIPPER_CONFIG_PATH="${CLAUDE_PLUGIN_ROOT}/scripts/log-shipper/config.alloy"
+elif [[ -f "plugins/dev/scripts/log-shipper/config.alloy" ]]; then
+    SHIPPER_CONFIG_PATH="plugins/dev/scripts/log-shipper/config.alloy"
+fi
+if [[ -n "$SHIPPER_CONFIG_PATH" ]]; then
+    pass "Shipper config present ($SHIPPER_CONFIG_PATH)"
+else
+    warn "Shipper config (log-shipper/config.alloy) not found — set CLAUDE_PLUGIN_ROOT or run from the repo root"
+fi
+
+# Binary present.
+if command -v alloy &>/dev/null; then
+    pass "alloy installed ($(command -v alloy))"
+else
+    warn "alloy not found — run install-cli.sh (installs Grafana Alloy)"
+fi
+
+# Running (best-effort) — read catalyst-stack's pid file.
+SHIPPER_PID_FILE="$CATALYST_DIR/alloy.pid"
+if [[ -f "$SHIPPER_PID_FILE" ]]; then
+    SHIPPER_PID_VAL="$(cat "$SHIPPER_PID_FILE" 2>/dev/null || true)"
+    if [[ -n "$SHIPPER_PID_VAL" ]] && kill -0 "$SHIPPER_PID_VAL" 2>/dev/null; then
+        pass "log-shipper running (pid $SHIPPER_PID_VAL)"
+    else
+        info "log-shipper not running — starts with: catalyst-stack start"
+    fi
+else
+    info "log-shipper not running — starts with: catalyst-stack start"
 fi
 
 # ─── 7c. Execution-core Daemon Env / Proxy Audit (optional) ────────────────

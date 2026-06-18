@@ -414,6 +414,18 @@ do_setup_catalyst() {
 
 do_install_cli() {
   bash "$INSTALL_CLI_SCRIPT"
+  # CTL-1263: install-cli.sh's ensure_alloy provisions the Grafana Alloy
+  # log-shipper binary as part of this stage, so a joined node inherits the
+  # shipper with no extra wiring (do_install_stack's launchd agent then auto-
+  # starts it via `catalyst-stack start`). Surface a LOUD but NON-FATAL warning
+  # if the binary did not land (e.g. a headless Linux box with no brew and a
+  # flaky GitHub download) — install-cli warn+continues by design, so the join
+  # must not hard-fail here. The shipper is optional infra; start_shipper warns
+  # again at start time so the gap is never silent.
+  if ! command -v alloy >/dev/null 2>&1; then
+    warn "alloy not installed by install-cli — log-shipper will not start on this node (install Grafana Alloy manually, then 'catalyst-stack start')"
+  fi
+  return 0
 }
 
 do_setup_plugin_source() {

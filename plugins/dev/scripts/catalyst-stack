@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
 # catalyst-stack — bring the catalyst stack up (or down) on this host.
 #
-# Order on start: mitmproxy → broker → monitor → execution-core
-#               (broker → monitor → exec-core is the dependency order;
+# Order on start: mitmproxy → monitor → broker → execution-core → otel-forward
+#               → log-shipper
+#               (monitor → broker → exec-core is the dependency order;
 #                mitmproxy is independent + first so the proxy env vars
-#                set below have somewhere to forward to)
+#                set below have somewhere to forward to; the log-shipper is
+#                LAST — it only tails the daemons' .log files, CTL-1263)
 # Order on stop: reverse.
 #
 # Idempotent. If a service is already up, it is logged and left alone.
@@ -88,6 +90,19 @@ MITM_CA="${HOME}/.mitmproxy/mitmproxy-ca-cert.pem"
 MITM_ADDON="${HOME}/catalyst/mitm_linear_addon.py"
 MITM_LOG="${HOME}/catalyst/mitm.log"
 
+# ─── Log-shipper (Grafana Alloy) env (CTL-1263) ──────────────────────────────
+# The shipper tails the daemon .log files and ships them OTLP/HTTP to the shared
+# collector (config: log-shipper/config.alloy, CTL-1261). Alloy has no CLI
+# manager, so catalyst-stack owns its pid/log/storage inline (mirroring the
+# mitmproxy primitives below). config.alloy ships beside this script: SCRIPT_DIR
+# is the symlink-walked scripts/ dir (cache/checkout) even via the version-auto
+# wrapper, so log-shipper/config.alloy is always next to it.
+SHIPPER_PID="${CATALYST_DIR:-$HOME/catalyst}/alloy.pid"
+SHIPPER_LOG="${CATALYST_DIR:-$HOME/catalyst}/alloy.log"
+SHIPPER_STORAGE="${CATALYST_DIR:-$HOME/catalyst}/alloy-data"
+SHIPPER_CONFIG="${SCRIPT_DIR}/log-shipper/config.alloy"
+SHIPPER_LAUNCHER="${SCRIPT_DIR}/log-shipper/launch.sh"
+
 # ─── Helpers ────────────────────────────────────────────────────────────────
 log()  { printf '[catalyst-stack] %s\n' "$*"; }
 warn() { printf '[catalyst-stack] WARN: %s\n' "$*" >&2; }
@@ -166,6 +181,92 @@ stop_mitmproxy() {
   else
     log "mitmproxy not running"
   fi
+}
+
+# ─── Log-shipper (Grafana Alloy) primitives (CTL-1263) ───────────────────────
+# shipper_pid — print the live alloy pid recorded in SHIPPER_PID, or nothing.
+# Validates BOTH that the pid is alive AND that the process is actually alloy
+# (guards against pid reuse after a crash + a fresh unrelated process grabbing
+# the same pid). A stale/dead/non-alloy pidfile prints nothing, so start_shipper
+# falls through to a self-healing restart.
+shipper_pid() {
+  local pid
+  [[ -f "$SHIPPER_PID" ]] || return 0
+  pid="$(cat "$SHIPPER_PID" 2>/dev/null || true)"
+  [[ -n "$pid" ]] || return 0
+  pid_alive "$pid" || return 0
+  # Confirm the live pid is actually an alloy process (not pid reuse).
+  if ps -p "$pid" -o command= 2>/dev/null | grep -q alloy; then
+    printf '%s\n' "$pid"
+  fi
+}
+
+start_shipper() {
+  # 1. IDEMPOTENT — never double-start a running shipper.
+  local pid; pid="$(shipper_pid)"
+  if pid_alive "$pid"; then
+    log "log-shipper (alloy) already running (pid $pid)"
+    return 0
+  fi
+
+  # 2. MISSING-BINARY LOUD FAIL — emit to stderr (warn) so the CTL-1166 launchd
+  #    self-heal log surfaces it and can never silently no-op. Non-fatal
+  #    (return 1, not exit) so a missing shipper never blocks the daemons —
+  #    matches start_mitmproxy's posture.
+  if ! command -v alloy >/dev/null 2>&1; then
+    warn "alloy not found — log-shipper NOT started. Install: bash \"${SCRIPT_DIR}/install-cli.sh\" (installs Grafana Alloy), or 'brew install grafana-alloy'"
+    return 1
+  fi
+
+  # 3. Config presence guard.
+  if [[ ! -f "$SHIPPER_CONFIG" ]]; then
+    warn "log-shipper config missing at $SHIPPER_CONFIG — skipping"
+    return 1
+  fi
+
+  # 4. Resolve + export the stable node name (getHostName() semantics; NEVER the
+  #    Tailscale device name). When launchd pins CATALYST_HOST_NAME in the plist
+  #    env, catalyst_host_name returns it verbatim; otherwise it falls back
+  #    through Layer-2 config then the OS hostname's first DNS label.
+  if [[ -f "${SCRIPT_DIR}/lib/host-identity.sh" ]]; then
+    # shellcheck source=lib/host-identity.sh
+    . "${SCRIPT_DIR}/lib/host-identity.sh"
+    local _hn; _hn="$(catalyst_host_name)"
+    export CATALYST_HOST_NAME="$_hn"
+  fi
+
+  # 5. Launch detached. Prefer the launcher (resolves node name + daemon log
+  #    paths in one place); fall back to a bare `alloy run` if it's absent.
+  log "starting log-shipper (alloy) (config: $SHIPPER_CONFIG, log: $SHIPPER_LOG, node: ${CATALYST_HOST_NAME:-<os-hostname>})"
+  mkdir -p "$SHIPPER_STORAGE"
+  if [[ -f "$SHIPPER_LAUNCHER" ]]; then
+    nohup bash "$SHIPPER_LAUNCHER" --config "$SHIPPER_CONFIG" --storage "$SHIPPER_STORAGE" >"$SHIPPER_LOG" 2>&1 &
+  else
+    nohup alloy run "$SHIPPER_CONFIG" --storage.path "$SHIPPER_STORAGE" >"$SHIPPER_LOG" 2>&1 &
+  fi
+  echo $! > "$SHIPPER_PID"
+  disown $! 2>/dev/null || true
+  sleep 1
+  pid="$(shipper_pid)"
+  if pid_alive "$pid"; then
+    log "  → log-shipper started (pid $pid)"
+  else
+    warn "alloy failed to start — see $SHIPPER_LOG"
+    return 1
+  fi
+}
+
+stop_shipper() {
+  local pid; pid="$(shipper_pid)"
+  if pid_alive "$pid"; then
+    log "stopping log-shipper (alloy) (pid $pid)"
+    kill "$pid" 2>/dev/null
+    sleep 1
+    pid_alive "$pid" && kill -9 "$pid" 2>/dev/null || true
+  else
+    log "log-shipper not running"
+  fi
+  rm -f "$SHIPPER_PID"
 }
 
 start_broker()   { catalyst-broker start 2>&1 | sed 's/^/  /'; }
@@ -453,6 +554,13 @@ cmd_start() {
   start_broker
   start_daemon "$use_proxy"
   start_forward
+  # CTL-1263: the log-shipper comes up LAST — it only tails the daemons' .log
+  # files, so it should start after the daemons it observes. start_shipper is
+  # idempotent + non-fatal (warns loudly on a missing binary, returns 1) so the
+  # CTL-1166 launchd keep-alive resurrects a crashed shipper on its interval
+  # without disturbing the other (already-running, independently-idempotent)
+  # daemons.
+  start_shipper || warn "continuing without log-shipper (daemon logs won't be shipped to Loki)"
 
   log ""
   log "stack up — current state:"
@@ -460,6 +568,8 @@ cmd_start() {
 }
 
 cmd_stop() {
+  # Reverse of start order: the shipper started last, so stop it first.
+  stop_shipper
   stop_daemon
   stop_forward
   stop_monitor
@@ -499,6 +609,8 @@ cmd_status() {
   echo -n "  monitor          "; catalyst-monitor status 2>&1 | head -1
   echo -n "  execution-core   "; catalyst-execution-core status 2>&1 | head -1
   echo -n "  otel-forward     "; catalyst-monitor forward-status 2>&1 | head -1
+  local sp; sp="$(shipper_pid)"
+  if pid_alive "$sp"; then echo "  log-shipper      running  pid=$sp"; else echo "  log-shipper      stopped"; fi
 
   # CTL-1084: governance section from the last node.boot event.
   local boot_json
