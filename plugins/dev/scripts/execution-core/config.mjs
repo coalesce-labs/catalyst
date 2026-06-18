@@ -14,10 +14,6 @@ import { readFileSync, existsSync } from "node:fs";
 // dep-free sibling leaf, so this import cannot reintroduce the bun-install crash
 // risk the pino try/catch below guards against.
 import { schemaCompat } from "./config-schema.mjs";
-// CTL-1273: synchronous cluster-anchor roster reader. node-roster-sync.mjs imports
-// only Node builtins (it spawnSync's the async node-roster CLI), so it is a
-// dep-free sibling leaf — same no-bun-install-risk property as config-schema.mjs.
-import { readNodeNamesSync } from "./node-roster-sync.mjs";
 
 // --- Logger (CTL-578) ---
 // Pino is the daemon's runtime logger. A worktree checkout that hasn't run
@@ -243,20 +239,31 @@ export function getStaticRoster() {
   return null;
 }
 
-// readHostsFallbackRoster — the LEGACY migration-fallback roster (CTL-1273): the
-// CTL-1211 cluster-repo cluster.json.roster, then the per-repo
-// .catalyst/hosts.json. This is the lowest-priority real source — the safety net
-// until a later ticket deletes the files + adds the guard. Returns the filtered
-// non-empty array, or null when neither yields a roster. Never throws.
-function readHostsFallbackRoster() {
-  // CTL-1211: cluster-repo-first within the fallback. A cluster.json whose
-  // schemaVersion is newer than this stack supports is ignored (degrade to the
-  // project roster) rather than trusted blindly.
+// readClusterRepoRoster — the PRIMARY roster source (CTL-1274): the
+// catalyst-cluster control-plane repo's cluster.json.roster, read via the
+// existing CTL-1211 machinery (readClusterConfig from getClusterRepoDir =
+// $CATALYST_CLUSTER_DIR || ~/catalyst/catalyst-cluster). Schema-gated: a
+// cluster.json whose schemaVersion is newer than this stack supports is ignored
+// (degrade to the next source) rather than trusted blindly. Returns the filtered
+// non-empty array of host names, or null when the repo/roster is absent, empty,
+// malformed, or too-new. Never throws — FAIL-OPEN, so a read miss falls through
+// (it never empties the roster, which would mass-evict the fleet under HRW).
+function readClusterRepoRoster() {
   const cluster = readClusterConfig();
   if (cluster && schemaCompat(cluster.schemaVersion) !== "too-new" && Array.isArray(cluster.roster)) {
     const hosts = cluster.roster.filter((h) => typeof h === "string" && h.length > 0);
     if (hosts.length > 0) return hosts;
   }
+  return null;
+}
+
+// readHostsFallbackRoster — the LEGACY migration-fallback roster (CTL-1273): the
+// per-repo .catalyst/hosts.json ONLY. This is the lowest-priority real source —
+// the safety net that keeps the live fleet multi-host between landing CTL-1274
+// and the cutover (cloning the cluster repo on every node). A later ticket
+// deletes the file + adds the never-return guard. Returns the filtered non-empty
+// array, or null when no roster resolves. Never throws.
+function readHostsFallbackRoster() {
   try {
     const raw = readFileSync(resolve(getCatalystRepoDir(), "hosts.json"), "utf8");
     const parsed = JSON.parse(raw);
@@ -270,43 +277,39 @@ function readHostsFallbackRoster() {
   return null;
 }
 
-// resolveClusterHosts — the single roster-resolution seam (CTL-1273). Returns
-// { hosts, source, multiHost } so callers (getClusterHosts + the daemon boot
-// assertion) share ONE precedence. Precedence:
-//   1. 'anchor'         — the Linear cluster anchor's node-registration records,
-//                         when an anchor is configured (getLivenessAnchorIssue)
-//                         AND the read succeeds with a non-empty roster.
-//   2. 'static'         — an explicit catalyst.cluster.staticRoster in Layer-2.
-//   3. 'hosts-fallback' — the legacy cluster.json / .catalyst/hosts.json
-//                         (MIGRATION FALLBACK — kept until a later ticket removes
-//                         the files + adds the guard).
+// resolveClusterHosts — the single roster-resolution seam (CTL-1273 seam,
+// CTL-1274 source swap). Returns { hosts, source, multiHost } so callers
+// (getClusterHosts + the daemon boot assertion) share ONE precedence. Precedence:
+//   1. 'cluster-repo'   — the catalyst-cluster repo's cluster.json.roster
+//                         (CTL-1274; the dedicated, versioned, durable home for
+//                         cluster identity — read==write on the cluster repo).
+//   2. 'static'         — an explicit catalyst.cluster.staticRoster in Layer-2
+//                         (machine-local escape hatch for multi-host without the
+//                         cluster repo).
+//   3. 'hosts-fallback' — the legacy .catalyst/hosts.json (MIGRATION FALLBACK —
+//                         kept until the cutover removes the file + adds the guard).
 //   4. 'single-host'    — [getHostName()] when nothing else resolves.
-// FAIL-OPEN: an anchor read error (sync.ok === false) falls through to the next
-// source — it NEVER empties the roster (which would mass-evict the fleet under
-// HRW). A single-host install with no anchor + no static + no hosts file makes
-// NO Linear call. Re-read per call so a live add/remove is honored next tick.
-// `readNodeNames` is injectable for hermetic tests (no spawnSync in unit tests).
-export function resolveClusterHosts({ readNodeNames = readNodeNamesSync } = {}) {
-  // 1. Linear cluster anchor (standard multi-host). Only consulted when an
-  //    anchor is configured — a single-host install pays zero Linear cost.
-  const anchor = getLivenessAnchorIssue();
-  if (anchor) {
-    const res = readNodeNames({ anchorIssue: anchor });
-    // FAIL-OPEN: res.ok === false (Linear unreadable) → fall through, do NOT
-    // empty the roster. res.ok === true with names → use them.
-    if (res && res.ok && Array.isArray(res.names) && res.names.length > 0) {
-      const hosts = res.names.filter((h) => typeof h === "string" && h.length > 0);
-      if (hosts.length > 0) return { hosts, source: "anchor", multiHost: hosts.length > 1 };
-    }
+// FAIL-OPEN: any source read miss/error falls through to the next source — it
+// NEVER empties the roster (which would mass-evict the fleet under HRW). With no
+// cluster clone present, resolution falls through to hosts-fallback, so a restart
+// keeps the live fleet on its committed roster — never silently single-host.
+// Re-read per call so a live add/remove (committed to the cluster repo and pulled
+// by cluster-sync) is honored on the next scheduler tick.
+export function resolveClusterHosts() {
+  // 1. cluster-repo (CTL-1274) — the catalyst-cluster repo's cluster.json.roster.
+  //    Schema-gated + fail-open inside readClusterRepoRoster.
+  const clusterRepo = readClusterRepoRoster();
+  if (clusterRepo) {
+    return { hosts: clusterRepo, source: "cluster-repo", multiHost: clusterRepo.length > 1 };
   }
 
-  // 2. static explicit list (escape hatch for multi-host without the anchor).
+  // 2. static explicit list (escape hatch for multi-host without the cluster repo).
   const staticRoster = getStaticRoster();
   if (staticRoster) {
     return { hosts: staticRoster, source: "static", multiHost: staticRoster.length > 1 };
   }
 
-  // 3. legacy hosts.json / cluster.json migration fallback.
+  // 3. legacy .catalyst/hosts.json migration fallback.
   const fallback = readHostsFallbackRoster();
   if (fallback) {
     return { hosts: fallback, source: "hosts-fallback", multiHost: fallback.length > 1 };
