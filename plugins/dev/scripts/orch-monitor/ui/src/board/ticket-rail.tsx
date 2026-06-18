@@ -35,7 +35,9 @@ import { TicketDepSubGraph } from "./dependency-graph";
 import { RelationStateIcon } from "@/components/relation-state-icon";
 import { PriorityIcon } from "./Board";
 import { useRepoIconMap } from "./repo-icon-context";
-import { resolveEntityIcon } from "./entity-icon";
+import { resolveEntityMark } from "./entity-icon";
+import type { ProjectMark } from "@/lib/project-mark";
+import { ProjectMarkIcon } from "@/components/project-mark-icon";
 import {
   relationHiddenCount,
   RELATION_GROUP_LIMIT,
@@ -103,18 +105,18 @@ function DimDash() {
 
 // ── Properties card ──────────────────────────────────────────────────────────
 /** A shared cheap Property row: undefined value → dimmed, null → "—" lit.
- *  CTL-1012: an optional `iconSrc` renders the 14px project mark before the value
+ *  CTL-1258: an optional `mark` renders the 14px project mark before the value
  *  (Repo/Team rows orient by the same brand the lane headers show). */
 interface RailPropRow {
   label: string;
   value: string | null | undefined;
-  /** CTL-1012: project-icon data URL beside the value; null/absent → no icon. */
-  iconSrc?: string | null;
+  /** CTL-1258: project mark beside the value; absent/none → no icon. */
+  mark?: ProjectMark;
 }
 
 function PropRow({ row }: { row: RailPropRow }) {
   const unplumbed = row.value === undefined;
-  const showIcon = row.iconSrc != null && row.value != null;
+  const showIcon = row.mark != null && row.mark.kind !== "none" && row.value != null;
   return (
     <div
       data-rail-prop={row.label}
@@ -136,14 +138,7 @@ function PropRow({ row }: { row: RailPropRow }) {
           whiteSpace: "nowrap",
         }}
       >
-        {showIcon && (
-          <img
-            src={row.iconSrc ?? undefined}
-            alt=""
-            aria-hidden
-            style={{ width: 14, height: 14, borderRadius: 3, objectFit: "contain", flex: "0 0 auto" }}
-          />
-        )}
+        {showIcon && <ProjectMarkIcon mark={row.mark!} color={C.fg} size={14} />}
         <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
           {row.value == null ? "—" : row.value}
         </span>
@@ -167,15 +162,15 @@ function activeLabel(state: BoardTicket["activeState"], working: boolean): strin
 function ticketRailRows(
   ticket: BoardTicket | undefined,
   linear: LinearTicketState,
-  iconSrc: string | null,
+  mark: ProjectMark,
 ): RailPropRow[] {
   if (ticket) {
     return [
       { label: "Status", value: `${ticket.linearState} · ${activeLabel(ticket.activeState, ticket.working)}` },
       { label: "Phase", value: ticket.phase },
-      // CTL-1012: Repo + Team orient by the project mark (resolved from the repo).
-      { label: "Repo", value: ticket.repo, iconSrc },
-      { label: "Team", value: ticket.team, iconSrc },
+      // CTL-1258: Repo + Team orient by the project mark (glyph or favicon).
+      { label: "Repo", value: ticket.repo, mark },
+      { label: "Team", value: ticket.team, mark },
       { label: "Updated", value: ticket.updatedAt },
       { label: "PR", value: ticket.pr != null ? `#${ticket.pr}` : null },
       { label: "Model (current phase)", value: ticket.model ?? null },
@@ -196,13 +191,13 @@ function ticketRailRows(
 function PropertiesCard({
   ticket,
   linear,
-  iconSrc,
+  mark,
 }: {
   ticket: BoardTicket | undefined;
   linear: LinearTicketState;
-  iconSrc: string | null;
+  mark: ProjectMark;
 }) {
-  const rows = ticketRailRows(ticket, linear, iconSrc);
+  const rows = ticketRailRows(ticket, linear, mark);
   return (
     <RailCard id="properties" title="Properties">
       <div data-rail-properties>
@@ -254,7 +249,7 @@ function LabelsCard({ labels }: { labels: LinearLabel[] | null }) {
 // ── Project card ─────────────────────────────────────────────────────────────
 // CTL-1012: orient by the project mark — the 14px icon (resolved from the ticket's
 // repo) when discovered, else the generic Box glyph as the fail-open fallback.
-function ProjectCard({ project, iconSrc }: { project: string | null; iconSrc: string | null }) {
+function ProjectCard({ project, mark }: { project: string | null; mark: ProjectMark }) {
   return (
     <RailCard id="project" title="Project">
       <div data-rail-project style={{ display: "inline-flex", alignItems: "center", gap: 7 }}>
@@ -262,13 +257,8 @@ function ProjectCard({ project, iconSrc }: { project: string | null; iconSrc: st
           <DimDash />
         ) : (
           <>
-            {iconSrc != null ? (
-              <img
-                src={iconSrc}
-                alt=""
-                aria-hidden
-                style={{ width: 14, height: 14, borderRadius: 3, objectFit: "contain", flex: "0 0 auto" }}
-              />
+            {mark.kind !== "none" ? (
+              <ProjectMarkIcon mark={mark} color={C.fg} size={14} />
             ) : (
               <Box className="size-3.5 text-muted-foreground" />
             )}
@@ -451,10 +441,10 @@ export function TicketRailCards({
 }) {
   // Resident project wins; off-board falls back to the live Linear project.
   const project = ticket ? (ticket.project ?? null) : (linear.project ?? null);
-  // CTL-1012: the project mark for the Properties Repo/Team rows + the Project card,
-  // resolved from the resident ticket's repo (off-board has no repo → null → fallback).
+  // CTL-1258: the project mark for the Properties Repo/Team rows + the Project card,
+  // resolved from the resident ticket's repo (off-board has no repo → none fallback).
   const icons = useRepoIconMap();
-  const iconSrc = resolveEntityIcon(ticket?.repo, icons);
+  const mark = resolveEntityMark(ticket?.repo, icons);
   return (
     // CTL-1048: the floating card rail is a plain flex column inside the Shell's
     // single scrolling body row — it no longer owns its own `overflowY:auto`
@@ -473,9 +463,9 @@ export function TicketRailCards({
         gap: 10,
       }}
     >
-      <PropertiesCard ticket={ticket} linear={linear} iconSrc={iconSrc} />
+      <PropertiesCard ticket={ticket} linear={linear} mark={mark} />
       <LabelsCard labels={linear.labels} />
-      <ProjectCard project={project} iconSrc={iconSrc} />
+      <ProjectCard project={project} mark={mark} />
       <RelationsCard relations={linear.relations} loaded={linear.loaded} />
       {ticket && tickets.length > 0 && (
         <DependenciesCard ticket={ticket} tickets={tickets} />

@@ -34,6 +34,8 @@ import {
   type PagerState,
 } from "./detail-chrome";
 import { C } from "./board-tokens";
+import type { ProjectMark } from "@/lib/project-mark";
+import { ProjectMarkIcon } from "@/components/project-mark-icon";
 import {
   cheatsheetOpenAtom,
   listContextAtom,
@@ -80,10 +82,10 @@ export interface PropertyRow {
   /** A plumbed value (string), a plumbed-but-empty value (null), or an unplumbed
    *  field (undefined → dimmed placeholder, never fabricated). */
   value: string | null | undefined;
-  /** CTL-1012: an optional project-icon data URL rendered before the value (the
-   *  Repo/Team rows orient by the same brand the lane headers show). null/absent →
+  /** CTL-1012/CTL-1258: an optional project mark rendered before the value (the
+   *  Repo/Team rows orient by the same brand the lane headers show). absent/none →
    *  no icon. The icon is suppressed when the value is unplumbed/empty. */
-  iconSrc?: string | null;
+  mark?: ProjectMark;
 }
 
 export interface ShellProps {
@@ -338,9 +340,9 @@ function PropertiesRail({ rows, extra }: { rows: PropertyRow[]; extra?: ReactNod
     >
       {rows.map((r) => {
         const unplumbed = r.value === undefined;
-        // CTL-1012: show the project mark only when both the icon AND a real value
+        // CTL-1258: show the project mark only when both the mark AND a real value
         // are present (never beside a dimmed "—").
-        const showIcon = r.iconSrc != null && r.value != null;
+        const showIcon = r.mark != null && r.mark.kind !== "none" && r.value != null;
         return (
           <div
             key={r.label}
@@ -363,14 +365,7 @@ function PropertiesRail({ rows, extra }: { rows: PropertyRow[]; extra?: ReactNod
                 whiteSpace: "nowrap",
               }}
             >
-              {showIcon && (
-                <img
-                  src={r.iconSrc ?? undefined}
-                  alt=""
-                  aria-hidden
-                  style={{ width: 14, height: 14, borderRadius: 3, objectFit: "contain", flex: "0 0 auto" }}
-                />
-              )}
+              {showIcon && <ProjectMarkIcon mark={r.mark!} color={C.fg} size={14} />}
               {/* unplumbed → dimmed em-dash placeholder, NEVER a fabricated value;
                   a plumbed-but-null value (e.g. no project) reads "—" too but lit. */}
               <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
