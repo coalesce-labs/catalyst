@@ -113,28 +113,32 @@ describe("ticket-rail.tsx — floating cards + readable relations (CTL-1003)", (
   });
 });
 
-// ── CTL-1012: the rail rows orient by the project icon ───────────────────────
-describe("ticket-rail.tsx — Repo/Team/Project rows carry the project icon (CTL-1012)", () => {
+// ── CTL-1012 → CTL-1258: the rail rows orient by the project MARK (glyph|favicon) ─
+// CTL-1258 migrated the rail from a favicon-only `iconSrc: string|null` to the
+// `mark: ProjectMark` union (glyph | favicon | none), rendered via <ProjectMarkIcon>
+// instead of a raw <img>. These assertions track the new wiring (the dedicated
+// board/detail-rail-marks.test.ts covers the same surface from the ui/ side).
+describe("ticket-rail.tsx — Repo/Team/Project rows carry the project mark (CTL-1012/CTL-1258)", () => {
   it("resolves the project mark from the resident ticket's repo via the shared icon context", () => {
     expect(railSrc).toContain("useRepoIconMap");
-    expect(railSrc).toContain("resolveEntityIcon(ticket?.repo, icons)");
+    expect(railSrc).toContain("resolveEntityMark(ticket?.repo, icons)");
   });
 
-  it("the Properties Repo + Team rows carry the resolved iconSrc", () => {
-    // both rows pass the iconSrc through to PropRow (the same brand the lanes show).
-    expect(railSrc).toMatch(/label: "Repo", value: ticket\.repo, iconSrc/);
-    expect(railSrc).toMatch(/label: "Team", value: ticket\.team, iconSrc/);
+  it("the Properties Repo + Team rows carry the resolved mark", () => {
+    // both rows pass the mark through to PropRow (the same brand the lanes show).
+    expect(railSrc).toMatch(/label: "Repo", value: ticket\.repo, mark/);
+    expect(railSrc).toMatch(/label: "Team", value: ticket\.team, mark/);
   });
 
-  it("PropRow renders a 14px icon before the value when iconSrc + a real value are present", () => {
-    // guarded so the icon never shows beside a dimmed em-dash placeholder.
-    expect(railSrc).toContain("row.iconSrc != null && row.value != null");
-    expect(railSrc).toMatch(/width: 14, height: 14, borderRadius: 3, objectFit: "contain"/);
+  it("PropRow renders a ProjectMarkIcon before the value when a real mark + value are present", () => {
+    // guarded (mark present AND not "none") so the icon never shows beside a dimmed em-dash.
+    expect(railSrc).toContain('row.mark != null && row.mark.kind !== "none" && row.value != null');
+    expect(railSrc).toContain("<ProjectMarkIcon");
   });
 
-  it("the Project card prefers the project icon, falling back to the Box glyph", () => {
-    // fail-open: an undiscovered icon (iconSrc null) keeps the generic Box.
-    expect(railSrc).toContain("iconSrc != null ? (");
+  it("the Project card prefers the project mark, falling back to the Box glyph", () => {
+    // fail-open: a "none" mark (no icon discovered) keeps the generic Box.
+    expect(railSrc).toContain('mark.kind !== "none" ? (');
     expect(railSrc).toContain('<Box className="size-3.5 text-muted-foreground" />');
   });
 });
