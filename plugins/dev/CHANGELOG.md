@@ -1,5 +1,33 @@
 # Changelog
 
+## [12.12.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.11.0...catalyst-dev-v12.12.0) (2026-06-17)
+
+
+### Features
+
+* **dev:** cross-host liveness → single control plane (CTL-1251) ([#2197](https://github.com/coalesce-labs/catalyst/issues/2197)) ([4804777](https://github.com/coalesce-labs/catalyst/commit/4804777155340e26c3d067cd25a860b6535a5a7d))
+* **dev:** CTL-1122 — out-of-process ingestion-silence detector (PR1) ([#2216](https://github.com/coalesce-labs/catalyst/issues/2216)) ([be4fa5f](https://github.com/coalesce-labs/catalyst/commit/be4fa5fb5ec7b79c9324c4677b1cde9a6943d73b))
+* **dev:** CTL-1156 parameterize monitor server project config path ([#2213](https://github.com/coalesce-labs/catalyst/issues/2213)) ([6388415](https://github.com/coalesce-labs/catalyst/commit/638841549a1ade1d4088db2c2e31c17260644f27))
+* **dev:** CTL-1223 broker runs bun install after pull when deps changed; surface silent vite-build failures ([#2210](https://github.com/coalesce-labs/catalyst/issues/2210)) ([74650e7](https://github.com/coalesce-labs/catalyst/commit/74650e7669ab54f428dfd92dc827ccd69ad7e941))
+* **dev:** CTL-1240 wire gateway tier into scheduler tick (Linear read-hammer fix) ([#2209](https://github.com/coalesce-labs/catalyst/issues/2209)) ([729cfaf](https://github.com/coalesce-labs/catalyst/commit/729cfaf684a9d68e85a7cf682455ac54863d5489))
+* **dev:** recovery-pass — agent-coordination comments + verify-the-work-not-the-status check ([#2204](https://github.com/coalesce-labs/catalyst/issues/2204)) ([9d03c0b](https://github.com/coalesce-labs/catalyst/commit/9d03c0b8973fc040b7461b377237d324a23ad1e0))
+* **dev:** recovery-pass — context/mode script (signals+log+Linear-cache, HRW-filtered) + sweep SOP ([#2198](https://github.com/coalesce-labs/catalyst/issues/2198)) ([92d49f1](https://github.com/coalesce-labs/catalyst/commit/92d49f1217ebeeb3e85327ae4b7e60878f8bb320))
+* **dev:** recovery-pass — forbid --admin/force-merge past failing CI ([#2202](https://github.com/coalesce-labs/catalyst/issues/2202)) ([ad7fe23](https://github.com/coalesce-labs/catalyst/commit/ad7fe2302964767aaca4d34c3975fd713fd1b68f))
+
+
+### Bug Fixes
+
+* **analytics:** catalyst-agent reads Claude token from credentials file, not just Keychain ([#2219](https://github.com/coalesce-labs/catalyst/issues/2219)) ([30ce8cb](https://github.com/coalesce-labs/catalyst/commit/30ce8cbf17ed83b22167af2ee282cd72a6dd20bc))
+* **dev:** cluster-heartbeat publish actually works + newest-wins liveness merge (CTL-1255) ([#2203](https://github.com/coalesce-labs/catalyst/issues/2203)) ([c52e10a](https://github.com/coalesce-labs/catalyst/commit/c52e10a1bbfa0c66d876ab23e3f1ed8304758fb1))
+* **dev:** CTL-1243 route source_conflict stall to bounded-LLM; add linearTerminal guard ([#2208](https://github.com/coalesce-labs/catalyst/issues/2208)) ([86fd7d9](https://github.com/coalesce-labs/catalyst/commit/86fd7d93f19df3f8cc7ebb8f37262628aed66de5))
+* **dev:** CTL-1252 collapse FQDN host names to first DNS label ([#2218](https://github.com/coalesce-labs/catalyst/issues/2218)) ([4f7ee3d](https://github.com/coalesce-labs/catalyst/commit/4f7ee3d755a0f448bbe1dd04ffe97c4a9add5c17))
+* **dev:** CTL-1253 — show detected repo favicons in the project icon picker ([#2222](https://github.com/coalesce-labs/catalyst/issues/2222)) ([f501512](https://github.com/coalesce-labs/catalyst/commit/f501512706af7882575c0dfa1308aca3bcd0c1ca))
+* **dev:** CTL-1254 — stage+swap monitor UI build so dist chunks don't accumulate ([#2220](https://github.com/coalesce-labs/catalyst/issues/2220)) ([26b236b](https://github.com/coalesce-labs/catalyst/commit/26b236bc84f746dc2ffcea33a4fd513616862f97))
+* **dev:** CTL-1257 — memoize un-ringed event-log readers off the 3s board-recompute (bound monitor RSS) ([#2223](https://github.com/coalesce-labs/catalyst/issues/2223)) ([0d39abb](https://github.com/coalesce-labs/catalyst/commit/0d39abb280344c3c2faea84d1047e4efab0ebd4c))
+* **dev:** monitor repoOwners from registry, not stale committed roster (§13 — fixes Adva icon 404) ([#2189](https://github.com/coalesce-labs/catalyst/issues/2189)) ([8a9275c](https://github.com/coalesce-labs/catalyst/commit/8a9275c43f585b1819c079c2acbe7f1535ac40f2))
+* **dev:** remove CSS Size Containment from virtualizer scroll container (CTL-1254) ([#2211](https://github.com/coalesce-labs/catalyst/issues/2211)) ([5cbcd93](https://github.com/coalesce-labs/catalyst/commit/5cbcd93184e0d118cfaee1131e9839cdd55fcfa9))
+* **dev:** surface recovery-pass/remediate explanation in inbox row + detail card ([#2206](https://github.com/coalesce-labs/catalyst/issues/2206)) ([f41ed2c](https://github.com/coalesce-labs/catalyst/commit/f41ed2c5649c133ab34afe7f47bd9467937ba4bc))
+
 ## [12.11.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.10.0...catalyst-dev-v12.11.0) (2026-06-17)
 
 
