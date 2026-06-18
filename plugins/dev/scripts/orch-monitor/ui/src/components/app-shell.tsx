@@ -59,6 +59,8 @@ import { ticketDetailHref } from "@/board/detail-nav";
 import { useTheme } from "@/lib/theme";
 import { useBrand } from "@/lib/brand";
 import { useBoardSnapshot } from "@/hooks/use-board-snapshot";
+import { useProjects } from "@/hooks/use-projects";
+import { mergeIconRepos } from "@/lib/project-settings-model";
 import {
   Breadcrumb,
   BreadcrumbItem,
@@ -150,7 +152,11 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   }, [scopeSearch, repoScope, setRepoScope]);
   // Repos from the board snapshot for palette navigation group construction.
   const { payload } = useBoardSnapshot();
-  const repos = payload?.repos ?? [];
+  const { projects } = useProjects();
+  const repos = useMemo(
+    () => mergeIconRepos(payload?.repos ?? [], projects),
+    [payload?.repos, projects],
+  );
   // CTL-945: single subscription point for nav + cluster signals. AppSidebar and
   // AppFooter consume NavSignalContext / ClusterSignalContext instead of calling
   // these hooks independently, reducing persistent EventSources from 6 → 4.

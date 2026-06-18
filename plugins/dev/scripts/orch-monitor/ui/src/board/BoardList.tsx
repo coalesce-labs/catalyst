@@ -95,8 +95,10 @@ import {
 } from "./list-group-data";
 import type { Lane } from "./board-grouping";
 import { useRepoIconMap } from "./repo-icon-context";
-import { laneIconSrc } from "./entity-icon";
+import { laneMark } from "./entity-icon";
 import { laneDisplayName } from "@/lib/nav-model";
+import { ProjectMarkIcon } from "@/components/project-mark-icon";
+import type { ProjectMark } from "@/lib/project-mark";
 
 // ── collapse state (CTL-955) ─────────────────────────────────────────────────
 // Jotai atom: a Map<navKind → Set<groupKey>> of collapsed group keys. Atom lives
@@ -525,7 +527,7 @@ function ListTable<E extends { id?: string; name?: string; team?: string | null;
                     // CTL-1012: swimlane lanes carry the spelled-out brand name
                     // ("Adva (ADV)") + project icon (team→repo bridge via meta.repo);
                     // the default stage/activity groups (swimlane="none") keep their
-                    // verbatim label + accent dot (laneDisplayName/laneIconSrc no-op).
+                    // verbatim label + accent dot (laneDisplayName/laneMark no-op).
                     label={laneDisplayName(swimlane, meta.key, meta.label, meta.repo)}
                     count={sorted.length}
                     live={meta.live}
@@ -534,7 +536,7 @@ function ListTable<E extends { id?: string; name?: string; team?: string | null;
                     collapsed={collapsed}
                     onToggle={() => toggleCollapse(meta.key)}
                     hint={hint}
-                    iconSrc={laneIconSrc(swimlane, meta.repo, icons)}
+                    mark={laneMark(swimlane, meta.repo, icons)}
                     laneBg={swimlane !== "none" ? laneSurfaceBg(meta.repo, laneColors) : undefined}
                   />
                   {/* CTL-952: AnimatePresence enables enter/exit for rows that
@@ -651,7 +653,7 @@ function GroupHeaderRow({
   collapsed,
   onToggle,
   hint,
-  iconSrc,
+  mark,
   laneBg,
 }: {
   label: string;
@@ -663,7 +665,7 @@ function GroupHeaderRow({
   collapsed: boolean;
   onToggle: () => void;
   hint?: string | null;
-  iconSrc?: string | null;
+  mark?: ProjectMark;
   /** CTL-1027: per-project tinted background for swimlane group rows. */
   laneBg?: string;
 }) {
@@ -700,10 +702,10 @@ function GroupHeaderRow({
           >
             ▼
           </span>
-          {iconSrc ? (
-            // CTL-1012: 16px project mark (up from CTL-998's 14px favicon).
-            <img src={iconSrc} alt="" aria-hidden
-              style={{ width: 16, height: 16, borderRadius: 4, objectFit: "contain" }} />
+          {mark && mark.kind !== "none" ? (
+            // CTL-1258 / CTL-1208: 16px project mark — glyph (tinted SVG) or favicon (<img>),
+            // mirroring Swimlane.tsx's kanban lane header. Falls back to the live-dot / Dot.
+            <ProjectMarkIcon mark={mark} color={dotColor ?? C.fg} size={16} />
           ) : live === "live" ? (
             <span className="catalyst-live-dot" style={{ width: 8, height: 8, borderRadius: "50%", background: dotColor, display: "inline-block" }} />
           ) : (
