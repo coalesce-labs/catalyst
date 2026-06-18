@@ -1,7 +1,7 @@
 // cli-cluster.test.mjs — CTL-1188. Unit tests for cli/cluster.mjs.
 // Run: cd plugins/dev/scripts/execution-core && bun test cli-cluster.test.mjs
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
-import { mkdtempSync, writeFileSync, readFileSync, rmSync, existsSync } from "node:fs";
+import { mkdtempSync, writeFileSync, readFileSync, rmSync, existsSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -11,7 +11,10 @@ import {
   renameHost,
   setAnchor,
   tune,
+  runAdd,
+  runRemove,
 } from "./cli/cluster.mjs";
+import { getClusterHosts } from "./config.mjs";
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -311,5 +314,73 @@ describe("tune", () => {
     expect(tune("maxParallelCeiling", "8", { writeLayer2: (o) => writes.push(o) }).code).toBe(0);
     expect(writes[0]).toMatchObject({ catalyst: { orchestration: { executionCore: { minParallel: 2 } } } });
     expect(writes[1]).toMatchObject({ catalyst: { orchestration: { executionCore: { maxParallelCeiling: 8 } } } });
+  });
+});
+
+// ── reader/writer agree end-to-end (CTL-1273) ──────────────────────────────
+// The acceptance proof: a `cluster add` (runAdd → getCatalystRepoDirHostsPath →
+// project hosts.json) is immediately visible to the daemon's roster reader
+// (getClusterHosts), through the SAME env-driven path resolution. The writer
+// target stays the project hosts.json; the union reader always honors it, so a
+// stale/absent cluster.json can no longer silently shadow the add.
+
+describe("reader/writer agree end-to-end (CTL-1273)", () => {
+  const ENVS = [
+    "CATALYST_CONFIG_FILE",
+    "CATALYST_CLUSTER_DIR",
+    "CATALYST_HOST_NAME",
+    "CATALYST_LAYER2_CONFIG_FILE",
+    "CATALYST_LIVENESS_ANCHOR_ISSUE",
+    "CATALYST_DIR",
+  ];
+  let saved = {};
+  let repo, clusterDir, catalystDir;
+
+  beforeEach(() => {
+    for (const k of ENVS) { saved[k] = process.env[k]; delete process.env[k]; }
+    repo = mkdtempSync(join(tmpdir(), "ctl1273-e2e-repo-"));
+    clusterDir = mkdtempSync(join(tmpdir(), "ctl1273-e2e-cluster-"));
+    catalystDir = mkdtempSync(join(tmpdir(), "ctl1273-e2e-catalyst-"));
+    mkdirSync(join(repo, ".catalyst"), { recursive: true });
+    process.env.CATALYST_CONFIG_FILE = join(repo, ".catalyst", "config.json");
+    // Default-miss cluster source (mirrors the live fleet: no cluster clone).
+    process.env.CATALYST_CLUSTER_DIR = join(clusterDir, "no-such-cluster");
+    process.env.CATALYST_HOST_NAME = "mini";
+    // No liveness anchor → addHost's default readPeers() degrades to {} (the
+    // peer-heartbeat read fails gracefully without a real subprocess result).
+    process.env.CATALYST_DIR = catalystDir;
+  });
+
+  afterEach(() => {
+    for (const k of ENVS) { if (saved[k] === undefined) delete process.env[k]; else process.env[k] = saved[k]; }
+    saved = {};
+    rmSync(repo, { recursive: true, force: true });
+    rmSync(clusterDir, { recursive: true, force: true });
+    rmSync(catalystDir, { recursive: true, force: true });
+  });
+
+  const seedProject = (arr) => writeFileSync(join(repo, ".catalyst", "hosts.json"), JSON.stringify(arr) + "\n");
+
+  test("a cluster add is immediately visible to the daemon's roster reader", () => {
+    seedProject(["mini"]);
+    expect(runAdd(["mini-2", "--no-commit"])).toBe(0);
+    expect(getClusterHosts()).toEqual(["mini", "mini-2"]);
+  });
+
+  test("an add with a stale cluster.json present is still visible to the reader", () => {
+    // Point CATALYST_CLUSTER_DIR at a real dir containing a stale single-node
+    // cluster.json — the pre-CTL-1273 precedence would shadow the add entirely.
+    process.env.CATALYST_CLUSTER_DIR = clusterDir;
+    writeFileSync(join(clusterDir, "cluster.json"), JSON.stringify({ schemaVersion: 1, roster: ["mini"] }));
+    seedProject(["mini"]);
+    expect(runAdd(["mini-2", "--no-commit"])).toBe(0);
+    expect(getClusterHosts()).toContain("mini-2");
+  });
+
+  test("runRemove then read reflects the removal in the union", () => {
+    seedProject(["mini", "mini-2"]);
+    // self is "mini"; remove the non-self "mini-2" so the in-flight guard is moot.
+    expect(runRemove(["mini-2", "--no-commit"])).toBe(0);
+    expect(getClusterHosts()).not.toContain("mini-2");
   });
 });

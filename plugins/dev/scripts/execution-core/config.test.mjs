@@ -30,6 +30,7 @@ import {
   isDraining,
   getLivenessAnchorIssue,
   LIVENESS_PUBLISH_INTERVAL_MS,
+  log,
 } from "./config.mjs";
 
 const PREV = process.env.CATALYST_WAIT_WATCHER;
@@ -405,6 +406,96 @@ describe("getClusterHosts cluster-repo-first (CTL-1211)", () => {
   test("unversioned cluster.json is treated as v1 and read", () => {
     writeCluster({ roster: ["mini", "mini-2"] });
     expect(getClusterHosts()).toEqual(["mini", "mini-2"]);
+  });
+});
+
+describe("getClusterHosts roster reconcile (CTL-1273)", () => {
+  // Reader/writer agree on ONE enrollment source. getClusterHosts() UNIONs the
+  // cluster.json roster with the project hosts.json (the CLI write target), so a
+  // stale/absent cluster copy can never silently DROP a node and a project-only
+  // `cluster add` is never silently shadowed. Reuse the CTL-1211 repo+cluster
+  // tmpdir + ENV save/restore harness.
+  const ENVS = ["CATALYST_CONFIG_FILE", "CATALYST_HOST_NAME", "CATALYST_LAYER2_CONFIG_FILE", "CATALYST_CLUSTER_DIR"];
+  let saved = {};
+  let repo, cluster;
+
+  beforeEach(() => {
+    for (const k of ENVS) { saved[k] = process.env[k]; delete process.env[k]; }
+    repo = mkdtempSync(join(tmpdir(), "ctl1273-repo-"));
+    cluster = mkdtempSync(join(tmpdir(), "ctl1273-cluster-"));
+    mkdirSync(join(repo, ".catalyst"), { recursive: true });
+    process.env.CATALYST_CONFIG_FILE = join(repo, ".catalyst", "config.json");
+    process.env.CATALYST_CLUSTER_DIR = cluster;
+  });
+
+  afterEach(() => {
+    for (const k of ENVS) { if (saved[k] === undefined) delete process.env[k]; else process.env[k] = saved[k]; }
+    saved = {};
+    rmSync(repo, { recursive: true, force: true });
+    rmSync(cluster, { recursive: true, force: true });
+  });
+
+  const writeCluster = (obj) => writeFileSync(join(cluster, "cluster.json"), JSON.stringify(obj));
+  const writeProject = (arr) => writeFileSync(join(repo, ".catalyst", "hosts.json"), JSON.stringify(arr));
+
+  test("a stale cluster.json does not silently drop a node present in the project roster", () => {
+    // The live landmine: pre-CTL-1273 this returned ["mini"] (cluster-first
+    // replace) and dropped mini-2 fleet-wide. The union must keep mini-2.
+    writeCluster({ schemaVersion: 1, roster: ["mini"] });
+    writeProject(["mini", "mini-2"]);
+    expect(getClusterHosts()).toEqual(["mini", "mini-2"]);
+  });
+
+  test("a node added only to the project roster is visible even when a cluster.json exists", () => {
+    writeCluster({ schemaVersion: 1, roster: ["mini"] });
+    writeProject(["mini", "mini-2"]);
+    expect(getClusterHosts()).toContain("mini-2");
+  });
+
+  test("union is order-stable (cluster first) and de-duplicated across the two sources", () => {
+    writeCluster({ schemaVersion: 1, roster: ["mini", "mini-2"] });
+    writeProject(["mini-2", "mac-studio"]);
+    expect(getClusterHosts()).toEqual(["mini", "mini-2", "mac-studio"]);
+  });
+
+  test("a too-new cluster.json contributes NOTHING to the union; the project roster stands alone", () => {
+    writeCluster({ schemaVersion: 999, roster: ["only-cluster"] });
+    writeProject(["mini", "mini-2"]);
+    expect(getClusterHosts()).toEqual(["mini", "mini-2"]);
+  });
+
+  test("absent cluster + absent project still returns the single-host default [getHostName()]", () => {
+    process.env.CATALYST_HOST_NAME = "solo-host";
+    expect(getClusterHosts()).toEqual(["solo-host"]);
+  });
+
+  test("divergent sources emit a visible warn (non-load-bearing)", () => {
+    writeCluster({ schemaVersion: 1, roster: ["mini"] });
+    writeProject(["mini", "mini-2"]);
+    const seen = [];
+    const orig = log.warn;
+    log.warn = (...args) => { seen.push(args); };
+    try {
+      const result = getClusterHosts();
+      expect(result).toEqual(["mini", "mini-2"]);
+      expect(seen.length).toBeGreaterThanOrEqual(1);
+    } finally {
+      log.warn = orig;
+    }
+  });
+
+  test("identical sources do NOT warn (no false divergence)", () => {
+    writeCluster({ schemaVersion: 1, roster: ["mini", "mini-2"] });
+    writeProject(["mini", "mini-2"]);
+    const seen = [];
+    const orig = log.warn;
+    log.warn = (...args) => { seen.push(args); };
+    try {
+      expect(getClusterHosts()).toEqual(["mini", "mini-2"]);
+      expect(seen.length).toBe(0);
+    } finally {
+      log.warn = orig;
+    }
   });
 });
 

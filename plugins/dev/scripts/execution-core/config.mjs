@@ -211,38 +211,78 @@ export function getHostName() {
   return dot === -1 ? base : base.slice(0, dot);
 }
 
-// getClusterHosts — read the committed cluster roster from
-// <repoRoot>/.catalyst/hosts.json (a JSON array of host names). When the file
-// is absent, unreadable, malformed, or not a non-empty array of strings, fall
-// back to the single-host default ([getHostName()]) — the safe behavior for the
-// current single-primary deployment. Never throws.
+// getClusterHosts — resolve the active enrollment roster from ONE reconciled
+// source. The roster is the union of two enrollment sources:
+//   1. the control-plane repo's cluster.json.roster (CTL-1211), and
+//   2. the project repo's committed .catalyst/hosts.json (the CLI write target).
+// When neither source yields a non-empty roster, fall back to the single-host
+// default ([getHostName()]). Never throws.
+//
+// CTL-1273 — one roster source of truth (no reader/writer divergence). The
+// previous cluster-FIRST-replace precedence let a stale or absent cluster.json
+// silently SHADOW the project roster: every writer (cli/cluster.mjs add/remove
+// via getCatalystRepoDirHostsPath) only ever writes the project hosts.json, so
+// once a cluster clone appeared, a `cluster add` was silently dropped and a
+// stale cluster.json (e.g. ["mini"]) silently re-broke a two-node cluster
+// fleet-wide. Reconciling the two by UNION (instead of replace) means:
+//   - the CLI write target is ALWAYS honored by the reader (no silent shadow),
+//   - no enrollment source can silently SUBTRACT a node (degrade-safe).
+// The CLI write target stays the project hosts.json on purpose — that keeps the
+// reader and writer structurally unable to diverge.
+//
+// Trade-off (deliberate): the union is ADDITIVE — a node intentionally removed
+// from cluster.json but still lingering in a stale project hosts.json would be
+// re-added. Under the enrollment-vs-liveness redesign, "node offline" is
+// liveness (handled separately), NOT a roster edit, so over-inclusion is
+// harmless (HRW just routes to an offline host whose work re-homes). Authoritative
+// subtraction is a separate decision (CTL-1214 fleet-config), out of scope here.
+//
+// Schema policy preserved: a cluster.json whose schemaVersion is newer than this
+// stack supports contributes NOTHING to the union (degrade to the project
+// roster) rather than being trusted blindly.
 export function getClusterHosts() {
-  // CTL-1211: cluster-repo-first. Prefer the control-plane repo's roster
-  // (cluster.json.roster); fall back to the project repo's committed hosts.json;
-  // then the single-host default. A cluster.json whose schemaVersion is newer
-  // than this stack supports is ignored here (degrade to the project roster)
-  // rather than trusted blindly. getCatalystRepoDirHostsPath (the CLI write
-  // target) is deliberately NOT changed, so add/remove writes still land on the
-  // project repo and the reader/writer can never silently diverge.
+  const filterHosts = (arr) =>
+    Array.isArray(arr) ? arr.filter((h) => typeof h === "string" && h.length > 0) : [];
+
+  // Source 1: control-plane cluster.json.roster (gated by schema compat).
   const cluster = readClusterConfig();
-  if (
-    cluster &&
-    schemaCompat(cluster.schemaVersion) !== "too-new" &&
-    Array.isArray(cluster.roster)
-  ) {
-    const hosts = cluster.roster.filter((h) => typeof h === "string" && h.length > 0);
-    if (hosts.length > 0) return hosts;
-  }
+  const clusterRoster =
+    cluster && schemaCompat(cluster.schemaVersion) !== "too-new"
+      ? filterHosts(cluster.roster)
+      : [];
+
+  // Source 2: project-repo committed hosts.json (the CLI write target).
+  let projectRoster = [];
   try {
-    const raw = readFileSync(resolve(getCatalystRepoDir(), "hosts.json"), "utf8");
-    const parsed = JSON.parse(raw);
-    if (Array.isArray(parsed)) {
-      const hosts = parsed.filter((h) => typeof h === "string" && h.length > 0);
-      if (hosts.length > 0) return hosts;
-    }
+    projectRoster = filterHosts(JSON.parse(readFileSync(resolve(getCatalystRepoDir(), "hosts.json"), "utf8")));
   } catch {
-    /* absent/malformed roster → single-host default */
+    /* absent/malformed project roster → empty (contributes nothing) */
   }
+
+  // Union, preserving first-seen order (cluster entries first, then project-only
+  // additions), de-duplicated. Either source contributing nothing is a no-op.
+  const active = [...new Set([...clusterRoster, ...projectRoster])];
+
+  // Make divergence VISIBLE, not silent: when both sources are non-empty and
+  // disagree (as sets), warn once per call. Strictly non-load-bearing — no throw,
+  // no behavior change — so an operator can spot a stale/un-pulled enrollment
+  // copy. Gated so identical sources (the common case) never warn.
+  if (clusterRoster.length > 0 && projectRoster.length > 0) {
+    const cs = new Set(clusterRoster);
+    const ps = new Set(projectRoster);
+    const differ =
+      clusterRoster.length !== projectRoster.length ||
+      clusterRoster.some((h) => !ps.has(h)) ||
+      projectRoster.some((h) => !cs.has(h));
+    if (differ) {
+      log.warn(
+        { cluster: clusterRoster, project: projectRoster, active },
+        "cluster roster divergence: cluster.json.roster and project hosts.json disagree; using their union",
+      );
+    }
+  }
+
+  if (active.length > 0) return active;
   return [getHostName()];
 }
 

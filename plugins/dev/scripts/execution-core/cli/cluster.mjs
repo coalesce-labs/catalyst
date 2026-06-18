@@ -118,6 +118,10 @@ export function addHost(name, {
 export function runAdd(argv = []) {
   const noCommit = argv.includes("--no-commit");
   const name = argv.filter((a) => !a.startsWith("-"))[0];
+  // CTL-1273: the project hosts.json (getCatalystRepoDirHostsPath) is the single
+  // canonical write target; getClusterHosts() now UNIONs it with any cluster.json
+  // roster, so the add is always honored by the reader and can never be silently
+  // shadowed by a stale/absent control-plane copy.
   const res = addHost(name, {
     hostsPath: getCatalystRepoDirHostsPath(),
     self: getHostName(),
