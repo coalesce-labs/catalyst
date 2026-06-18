@@ -896,3 +896,40 @@ export function getStaleWorkers(thresholdMs, nowIso = new Date().toISOString()) 
     )
     .all(cutoff, ...terminal);
 }
+
+// Freshness window for hasActiveWorkers (CTL-1122 PR2). A non-terminal worker
+// whose last event is older than this is treated as crashed/idle, NOT active —
+// so a never-terminal crashed row cannot pin the github/linear ingestion-recency
+// activity-gate open during a dead-fleet lull (plan risk #4). 30 min comfortably
+// absorbs the longest legitimately-quiet phase (a worker mid-implement emits
+// phase events well inside it) while still timing out a genuinely dead worker.
+export const ACTIVE_WORKER_FRESHNESS_MS = 30 * 60 * 1000;
+
+// hasActiveWorkers — is the fleet actually working right now? Returns true iff
+// ≥1 worker_state row is non-terminal (status IS NULL OR NOT IN terminal) AND
+// has emitted an event within `freshnessMs` of `nowIso`. This is the activity
+// gate for the github/linear ingestion-silence detector (CTL-1122 PR2): webhook
+// silence only matters when a worker is in-flight and therefore SHOULD be
+// producing traffic. Freshness-bounded (the complement of getStaleWorkers'
+// predicate among non-terminal rows, AT-cutoff resolving to active) rather than
+// raw non-terminal, so a crashed row that never reached a terminal status does
+// not hold the gate open forever. Single EXISTS — no JS table scan.
+export function hasActiveWorkers(
+  nowIso = new Date().toISOString(),
+  freshnessMs = ACTIVE_WORKER_FRESHNESS_MS
+) {
+  const cutoff = new Date(new Date(nowIso).getTime() - freshnessMs).toISOString();
+  const terminal = [...WORKER_TERMINAL_STATUSES];
+  const placeholders = terminal.map(() => "?").join(", ");
+  const row = ensure()
+    .prepare(
+      `SELECT EXISTS(
+         SELECT 1 FROM worker_state
+         WHERE last_event_ts IS NOT NULL
+           AND last_event_ts >= ?
+           AND (status IS NULL OR status NOT IN (${placeholders}))
+       ) AS active`
+    )
+    .get(cutoff, ...terminal);
+  return row.active === 1;
+}

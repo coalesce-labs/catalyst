@@ -31,6 +31,8 @@ import {
   isIngestionRecencyEnabled,
   MONITOR_RECENCY_DEGRADED_MS,
   MONITOR_RECENCY_DOWN_MS,
+  GITHUB_RECENCY_DEGRADED_MS,
+  GITHUB_RECENCY_DOWN_MS,
   INGESTION_RECENCY_HOLDDOWN_MS,
   INGESTION_SEED_BYTES,
   getPrevMonthEventLogPath,
@@ -72,6 +74,7 @@ import {
   clearTicketHeldSince,
   upsertWaitingSession,
   clearWaitingSession,
+  hasActiveWorkers,
 } from "./broker-state.mjs";
 import { sessionLiveness } from "./session-liveness.mjs";
 import {
@@ -104,6 +107,7 @@ import {
 import { evaluateSource } from "../lib/ingestion-recency.mjs";
 import {
   MONITOR_SERVICE_NAME,
+  GITHUB_SERVICE_NAME,
   initialRecencyAlarmState,
   nextRecencyAlarmState,
   emitIngestionRecencyEvent,
@@ -352,7 +356,49 @@ export function __clearEmittedWakeCacheForTest() {
 // the monitor's own kind:"self" probe reports `up` iff the monitor answers, so
 // it can never observe its own death.
 const _lastSeenByService = new Map(); // service.name -> { ts: epochMs, id: string|null }
-let _monitorRecencyAlarm = initialRecencyAlarmState();
+
+// CTL-1122 PR2: per-source alarm state. PR1 keyed a single _monitorRecencyAlarm;
+// the watchdog now judges several sources (monitor + the activity-gated
+// github/linear webhook ingestion), each with its own edge-trigger/holddown
+// state. service.name -> alarmState (initialRecencyAlarmState shape).
+const _recencyAlarmByService = new Map();
+
+// RECENCY_SOURCES — one descriptor per ingestion source the watchdog evaluates
+// each tick. `gated:true` sources are activity-gated: their silence only alarms
+// while the fleet is actually working (hasActiveWorkers), because they idle
+// organically. The monitor heartbeat is a fixed ~30s cadence → ungated, with
+// PR1's tight 3m/10m thresholds unchanged.
+const RECENCY_SOURCES = [
+  {
+    serviceName: MONITOR_SERVICE_NAME,
+    degradedAfterMs: MONITOR_RECENCY_DEGRADED_MS,
+    downAfterMs: MONITOR_RECENCY_DOWN_MS,
+    gated: false,
+  },
+  {
+    serviceName: GITHUB_SERVICE_NAME,
+    degradedAfterMs: GITHUB_RECENCY_DEGRADED_MS,
+    downAfterMs: GITHUB_RECENCY_DOWN_MS,
+    gated: true,
+  },
+  // linear (catalyst.linear) is DEFERRED in PR2 (fork a): the linear-webhook
+  // bot-skip guard suppresses bot-authored issue events before they reach the
+  // log, so catalyst.linear goes quiet even while a worker is in-flight — an
+  // irreducible false-alarm risk. When a non-flaky threshold is found, it is a
+  // one-line add here ({ serviceName: LINEAR_SERVICE_NAME, ..., gated: true }).
+];
+
+// recencyAlarmFor — lazily materialize (and store) a source's alarm state so a
+// never-ticked source still reads as the initial fail-open state via the test
+// seams. The stored object is what subsequent ticks advance.
+function recencyAlarmFor(serviceName) {
+  let state = _recencyAlarmByService.get(serviceName);
+  if (!state) {
+    state = initialRecencyAlarmState();
+    _recencyAlarmByService.set(serviceName, state);
+  }
+  return state;
+}
 
 // recordLastSeen — fold one ingested event into the per-service last-seen map.
 // Keyed on the canonical resource["service.name"]; legacy flat events (no
@@ -445,21 +491,37 @@ export function seedLastSeenByService({
   }
 }
 
-// checkMonitorRecency — one watchdog-tick evaluation of the monitor heartbeat's
+// checkSourceRecency — one watchdog-tick evaluation of ONE source's ingestion
 // freshness → edge-triggered catalyst.ingestion.{stale,recovered}. Fail-open: a
-// never-seen monitor classifies "unknown" and never alarms. The emit is
+// never-seen source classifies "unknown" and never alarms. The emit is
 // best-effort (emitIngestionRecencyEvent never throws). Returns the emit
 // decision so the wiring test can assert it without parsing the log.
-function checkMonitorRecency(now) {
+//
+// CTL-1122 PR2: generalizes PR1's monitor-only checkMonitorRecency. A `gated`
+// source's silence only matters when the fleet is in-flight — with no active
+// worker, severity is forced to "up" BEFORE the edge-trigger machine, so the
+// source never fires stale and any latched outage clears as a paired recovered
+// (fork c — keeps the stale/recovered ledger balanced for CTL-1123). The gate
+// is a pre-classify override; the alarm machine itself is untouched.
+function checkSourceRecency(source, now) {
   if (!isIngestionRecencyEnabled()) return null;
-  const seen = _lastSeenByService.get(MONITOR_SERVICE_NAME);
-  const prevAlarm = _monitorRecencyAlarm;
-  const { severity } = evaluateSource({
+  const seen = _lastSeenByService.get(source.serviceName);
+  const prevAlarm = recencyAlarmFor(source.serviceName);
+  // The source's OWN freshness, before any gate override — used below to decide
+  // whether a recovery was actually beat-driven (a fresh event arrived) or
+  // gate-driven (the fleet went idle while the source was still silent).
+  const { severity: ungatedSeverity } = evaluateSource({
     lastSeenTs: seen?.ts ?? null,
     nowMs: now,
-    degradedAfterMs: MONITOR_RECENCY_DEGRADED_MS,
-    downAfterMs: MONITOR_RECENCY_DOWN_MS,
+    degradedAfterMs: source.degradedAfterMs,
+    downAfterMs: source.downAfterMs,
   });
+  let severity = ungatedSeverity;
+  if (source.gated && !fleetIsActive(now)) {
+    // Gate closed: the fleet isn't working, so webhook silence is expected, not
+    // a fault. Force "up" → no stale, and a clean clear of any open outage.
+    severity = "up";
+  }
   const { state, emit } = nextRecencyAlarmState(prevAlarm, {
     severity,
     nowMs: now,
@@ -467,6 +529,12 @@ function checkMonitorRecency(now) {
   });
   if (emit) {
     const recovered = emit === "recovered";
+    // A recovery is beat-driven iff the source itself sees a fresh event
+    // (ungated severity up). A gate-driven recovery — the fleet went idle while
+    // the source was still silent — has NO fresh beat that cleared it, so the
+    // forensic link is null rather than the stale pre-silence beat (which would
+    // contradict the recovered contract CTL-1123 reads).
+    const beatDrivenRecovery = recovered && ungatedSeverity === "up";
     // stale describes the silence (age since the last beat, vs the down
     // threshold); recovered describes the outage it CLEARED (its duration, no
     // threshold). ageMs is clamped so clock skew (a future beat) can never emit
@@ -478,15 +546,16 @@ function checkMonitorRecency(now) {
       : seen
         ? Math.max(0, now - seen.ts)
         : null;
+    // stale: the last beat before silence. recovered: the fresh beat that
+    // cleared it (beat-driven only) — null for a gate-driven clear.
+    const forensicSeen = recovered ? (beatDrivenRecovery ? seen : null) : seen;
     const ok = emitIngestionRecencyEvent({
       action: emit,
-      sourceName: MONITOR_SERVICE_NAME,
+      sourceName: source.serviceName,
       ageMs,
-      thresholdMs: recovered ? null : MONITOR_RECENCY_DOWN_MS,
-      lastSeenAt: seen ? new Date(seen.ts).toISOString() : null,
-      // the forensic link: the last beat before silence (stale) / the fresh
-      // beat that cleared it (recovered).
-      causedBy: seen?.id ?? null,
+      thresholdMs: recovered ? null : source.downAfterMs,
+      lastSeenAt: forensicSeen ? new Date(forensicSeen.ts).toISOString() : null,
+      causedBy: forensicSeen?.id ?? null,
     });
     if (!ok) {
       // The append FAILED (e.g. transient ENOSPC/EACCES — conditions correlated
@@ -497,14 +566,28 @@ function checkMonitorRecency(now) {
       return null;
     }
   }
-  _monitorRecencyAlarm = state;
+  _recencyAlarmByService.set(source.serviceName, state);
   return emit;
+}
+
+// fleetIsActive — the activity-gate input for gated recency sources. Defensive
+// wrapper around hasActiveWorkers: a watchdog tick must NEVER throw, and the
+// broker-state DB read could fail (e.g. closed handle in an isolated unit test,
+// or a transient error). On failure, fail the gate CLOSED (treat as no active
+// work) — the no-false-alarm safe default, consistent with the detector's
+// fail-open-to-"up" philosophy.
+function fleetIsActive(now) {
+  try {
+    return hasActiveWorkers(new Date(now).toISOString());
+  } catch {
+    return false;
+  }
 }
 
 // Test seams (CTL-1122) — mirror the _emittedWakeCache __…ForTest pattern.
 export function __clearIngestionRecencyForTest() {
   _lastSeenByService.clear();
-  _monitorRecencyAlarm = initialRecencyAlarmState();
+  _recencyAlarmByService.clear();
 }
 export function __setLastSeenForTest(serviceName, entry) {
   _lastSeenByService.set(serviceName, entry);
@@ -512,8 +595,14 @@ export function __setLastSeenForTest(serviceName, entry) {
 export function __getLastSeenByServiceForTest() {
   return _lastSeenByService;
 }
+// PR1's monitor-scoped accessor, preserved verbatim for the existing wiring
+// tests; reads the monitor entry out of the per-source map.
 export function __getMonitorRecencyAlarmForTest() {
-  return _monitorRecencyAlarm;
+  return recencyAlarmFor(MONITOR_SERVICE_NAME);
+}
+// PR2: per-source accessor for the github/linear isolation tests.
+export function __getRecencyAlarmForTest(serviceName) {
+  return recencyAlarmFor(serviceName);
 }
 
 // CTL-357: one-shot startup event. If the Groq prose path is gated off (the
@@ -1866,9 +1955,10 @@ export function runWatchdogTick({ liveness = sessionLiveness } = {}) {
     setDegradedEmittedAt(null);
   }
 
-  // CTL-1122: judge the orch-monitor's liveness from its heartbeat recency — the
-  // surviving-process observation the 11h silent outage proved we were missing.
-  checkMonitorRecency(now);
+  // CTL-1122: judge each ingestion source's liveness from its event recency —
+  // the surviving-process observation the 11h silent outage proved we were
+  // missing. PR1 = monitor heartbeat; PR2 = activity-gated github webhooks.
+  for (const source of RECENCY_SOURCES) checkSourceRecency(source, now);
 
   let watchdogWoke = false;
 

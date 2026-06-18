@@ -42,6 +42,13 @@ import { getEventLogPath, log } from "./config.mjs";
 // are not a calibratable freshness signal.
 export const MONITOR_SERVICE_NAME = "catalyst.monitor";
 
+// CTL-1122 PR2: the github webhook source identity (orch-monitor
+// webhook-handler.ts emits resource["service.name"]=catalyst.github). Activity-
+// gated in RECENCY_SOURCES. The linear identity (catalyst.linear) is deferred —
+// see the RECENCY_SOURCES note in router.mjs.
+export const GITHUB_SERVICE_NAME = "catalyst.github";
+export const LINEAR_SERVICE_NAME = "catalyst.linear";
+
 // The alarm event names. New namespace `catalyst.ingestion.*` (the documented
 // CTL-1123 contract). stale = ingestion has gone silent past threshold;
 // recovered = a fresh event has been observed again.
