@@ -167,11 +167,11 @@ ensure_alloy() {
   # Prefer brew on Darwin (matches the log-shipper README's documented install).
   if [[ "$(uname -s)" == "Darwin" ]] && command -v brew >/dev/null 2>&1; then
     echo "  Installing Grafana Alloy via brew (log-shipper binary, CTL-1263)…"
-    if brew install grafana-alloy >/dev/null 2>&1 && command -v alloy >/dev/null 2>&1; then
+    if brew install grafana/grafana/alloy >/dev/null 2>&1 && command -v alloy >/dev/null 2>&1; then
       echo "  Installed alloy ($(command -v alloy))"
       return 0
     fi
-    echo "  warning: 'brew install grafana-alloy' failed — log-shipper will not start until alloy is installed" >&2
+    echo "  warning: 'brew install grafana/grafana/alloy' failed — log-shipper will not start until alloy is installed" >&2
     return 0
   fi
 

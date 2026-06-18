@@ -27,9 +27,9 @@
 //   monitor.log is mixed console.* output (NOT JSON) and is shipped best-effort
 //   as unstructured records — never dropped.
 //
-// HOST TAGGING  (load-bearing — see the README "Node name" section)
-//   host.name           = constants.hostname (the OS hostname of this machine)
-//   catalyst.host.name  = the stable Catalyst NODE name, from CATALYST_HOST_NAME
+// MACHINE + NODE TAGGING  (load-bearing — see the README "Node name" section)
+//   host.name           = constants.hostname (the OS hostname — the MACHINE)
+//   catalyst.node.name  = the stable Catalyst NODE name, from CATALYST_HOST_NAME
 //   The launcher (sibling ticket) MUST export CATALYST_HOST_NAME resolved the
 //   SAME way as getHostName() in execution-core/config.mjs:
 //       CATALYST_HOST_NAME env
@@ -95,10 +95,13 @@ otelcol.processor.batch "catalyst" {
 // (below) lift pino fields into log-record attributes (level, name); this OTTL
 // transform turns them into the proper OTel semconv shape:
 //   * numeric pino level -> severity_number + severity_text
-//   * host.name resource attribute          = OS hostname
-//   * catalyst.host.name resource attribute = stable Catalyst node name
-// service.name is set on the resource by the loki receiver from the service_name
-// label (see per-file targets). error_mode = "ignore" keeps a malformed line
+//   * host.name resource attribute          = OS hostname (the MACHINE)
+//   * catalyst.node.name resource attribute = stable Catalyst node name (the NODE)
+//   * service.name resource attribute       = catalyst.<daemon>, promoted from the
+//     per-file service_name label (the loki->otel receiver carries it as a log
+//     attribute, so a "log" statement promotes it to resource.service.name — else
+//     it defaults to "unknown_service" per the OTel logs data model).
+// error_mode = "ignore" keeps a malformed line
 // (e.g. a plain-text monitor.log line with no level) flowing instead of dropped.
 // -----------------------------------------------------------------------------
 
@@ -119,21 +122,29 @@ otelcol.processor.transform "catalyst" {
 			`set(log.severity_text, "WARN")  where log.attributes["level"] == 40`,
 			`set(log.severity_text, "ERROR") where log.attributes["level"] == 50`,
 			`set(log.severity_text, "FATAL") where log.attributes["level"] == 60`,
+			// service.name (RESOURCE): promote the per-file Loki `service_name` label
+			// (carried as a log attribute by the loki->OTLP receiver) to the resource
+			// service.name so Loki's stream label is catalyst.<daemon> — otherwise it
+			// defaults to "unknown_service". Set from the "log" context because the
+			// carried label lives on the log record, not the resource.
+			`set(resource.attributes["service.name"], log.attributes["service_name"]) where log.attributes["service_name"] != nil`,
 		]
 	}
 
-	// --- per-resource: host identities ----------------------------------------
-	// context = "resource" sets attributes on the log record's RESOURCE.
-	// constants.hostname is the OS hostname; CATALYST_HOST_NAME is the stable
-	// Catalyst node name (resolved by the launcher exactly like getHostName()).
+	// --- per-resource: machine + node identity --------------------------------
+	// host.name          = the OS hostname (constants.hostname) — the MACHINE.
+	// catalyst.node.name = the stable Catalyst NODE name (custom + namespaced;
+	//   host.* is the OTel registry machine namespace, so the cluster node uses a
+	//   catalyst.* attribute). Resolved by the launcher exactly like getHostName(),
+	//   and matches the event path so logs + events query by the same node tag.
 	// Falls back to the OS hostname so records are always node-tagged even if the
-	// env var is missing. The values are spliced into the OTTL statement strings
-	// via River string concatenation (OTTL itself cannot read River symbols).
+	// env var is missing. Spliced into the OTTL strings via River concatenation
+	// (OTTL itself cannot read River symbols).
 	log_statements {
 		context    = "resource"
 		statements = [
 			`set(resource.attributes["host.name"], "` + constants.hostname + `")`,
-			`set(resource.attributes["catalyst.host.name"], "` + coalesce(sys.env("CATALYST_HOST_NAME"), constants.hostname) + `")`,
+			`set(resource.attributes["catalyst.node.name"], "` + coalesce(sys.env("CATALYST_HOST_NAME"), constants.hostname) + `")`,
 		]
 	}
 
