@@ -2055,3 +2055,127 @@ describe("CTL-1271 — daemon boot roster announcement + silent-single-host guar
     }
   });
 });
+
+// CTL-1274 — cluster-repo auto-pull: clusterSync at boot + a periodic pull timer,
+// both FAIL-OPEN and injectable. enableClusterSync:false skips both.
+describe("CTL-1274 — cluster-repo auto-pull (boot sync + periodic pull)", () => {
+  const baseOpts = () => ({
+    recover: () => ({}),
+    reconcileBoot: () => {},
+    startMonitor: () => {},
+    startScheduler: () => {},
+    stopMonitor: () => {},
+    stopScheduler: () => {},
+    reconcile: () => {},
+    startAutoTuner: () => () => {},
+    watchRegistry: false,
+    listProjects: () => [],
+    readAllEligible: () => [],
+    // keep the heartbeat/liveness side-channels out of these tests
+    enableHeartbeat: false,
+  });
+
+  const delay = (ms) => new Promise((r) => setTimeout(r, ms));
+
+  test("calls clusterSync exactly once at boot", () => {
+    let syncCalls = 0;
+    startDaemon({
+      ...baseOpts(),
+      clusterSync: () => {
+        syncCalls += 1;
+        return { pull: { pulled: false, reason: "not-a-clone" } };
+      },
+      pullClusterRepo: () => ({ pulled: false, reason: "not-a-clone" }),
+      enableClusterSync: true,
+      clusterSyncIntervalMs: 60_000, // long so the timer never fires during the test
+    });
+    expect(syncCalls).toBe(1);
+  });
+
+  test("FAIL-OPEN: a throw from boot clusterSync does NOT abort daemon boot", () => {
+    expect(() =>
+      startDaemon({
+        ...baseOpts(),
+        clusterSync: () => {
+          throw new Error("boom at boot");
+        },
+        pullClusterRepo: () => ({ pulled: false }),
+        enableClusterSync: true,
+        clusterSyncIntervalMs: 60_000,
+      })
+    ).not.toThrow();
+  });
+
+  test("enableClusterSync:false skips BOTH the boot sync and the timer", async () => {
+    let syncCalls = 0;
+    let pullCalls = 0;
+    startDaemon({
+      ...baseOpts(),
+      clusterSync: () => {
+        syncCalls += 1;
+        return {};
+      },
+      pullClusterRepo: () => {
+        pullCalls += 1;
+        return { pulled: true };
+      },
+      enableClusterSync: false,
+      clusterSyncIntervalMs: 5,
+    });
+    await delay(30);
+    expect(syncCalls).toBe(0);
+    expect(pullCalls).toBe(0);
+  });
+
+  test("the periodic timer git-pulls the clone on its cadence", async () => {
+    let pullCalls = 0;
+    startDaemon({
+      ...baseOpts(),
+      clusterSync: () => ({ pull: { pulled: false } }),
+      pullClusterRepo: () => {
+        pullCalls += 1;
+        return { pulled: true };
+      },
+      enableClusterSync: true,
+      clusterSyncIntervalMs: 5,
+    });
+    await delay(40);
+    expect(pullCalls).toBeGreaterThanOrEqual(1);
+  });
+
+  test("FAIL-OPEN: a throw from a periodic pull does not stop the timer", async () => {
+    let pullCalls = 0;
+    startDaemon({
+      ...baseOpts(),
+      clusterSync: () => ({}),
+      pullClusterRepo: () => {
+        pullCalls += 1;
+        throw new Error("network");
+      },
+      enableClusterSync: true,
+      clusterSyncIntervalMs: 5,
+    });
+    await delay(40);
+    // multiple ticks fired despite every pull throwing — the timer never wedged
+    expect(pullCalls).toBeGreaterThanOrEqual(2);
+  });
+
+  test("stopDaemon clears the cluster-sync timer (no pulls after stop)", async () => {
+    let pullCalls = 0;
+    startDaemon({
+      ...baseOpts(),
+      clusterSync: () => ({}),
+      pullClusterRepo: () => {
+        pullCalls += 1;
+        return { pulled: true };
+      },
+      enableClusterSync: true,
+      clusterSyncIntervalMs: 5,
+    });
+    await delay(30);
+    stopDaemon();
+    const afterStop = pullCalls;
+    await delay(40);
+    expect(pullCalls).toBe(afterStop);
+  });
+});

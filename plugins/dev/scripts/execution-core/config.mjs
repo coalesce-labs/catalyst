@@ -389,6 +389,15 @@ export const HEARTBEAT_INTERVAL_MS =
 export const HEARTBEAT_GRACE_MS =
   Number(process.env.EXECUTION_CORE_HEARTBEAT_GRACE_MS) || 600_000;
 
+// CLUSTER_SYNC_INTERVAL_MS — how often the daemon git-pulls the catalyst-cluster
+// clone so a roster change committed on one node (CTL-1274 cluster cli) reaches
+// every running daemon without a restart. 5 min keeps the pull cheap while
+// bounding propagation lag well inside the heartbeat grace window. Env-overridable
+// for tests/tuning; a pull is fail-open (a failure logs + continues, never breaks
+// the daemon).
+export const CLUSTER_SYNC_INTERVAL_MS =
+  Number(process.env.EXECUTION_CORE_CLUSTER_SYNC_INTERVAL_MS) || 5 * 60_000;
+
 // --- Intervals ---
 // The periodic reconcile poll — the missed-webhook correctness backstop.
 export const RECONCILE_INTERVAL_MS =

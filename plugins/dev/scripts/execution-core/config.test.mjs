@@ -32,6 +32,7 @@ import {
   LIVENESS_PUBLISH_INTERVAL_MS,
   getStaticRoster,
   resolveClusterHosts,
+  CLUSTER_SYNC_INTERVAL_MS,
 } from "./config.mjs";
 
 const PREV = process.env.CATALYST_WAIT_WATCHER;
@@ -581,6 +582,13 @@ describe("resolveClusterHosts (CTL-1274 — cluster-repo source)", () => {
 describe("HEARTBEAT_INTERVAL_MS (CTL-859)", () => {
   test("defaults to 30000ms", () => {
     expect(HEARTBEAT_INTERVAL_MS).toBe(30_000);
+  });
+});
+
+describe("CLUSTER_SYNC_INTERVAL_MS (CTL-1274)", () => {
+  test("defaults to 5 minutes when the env override is unset", () => {
+    // EXECUTION_CORE_CLUSTER_SYNC_INTERVAL_MS is not set in the test env.
+    expect(CLUSTER_SYNC_INTERVAL_MS).toBe(5 * 60_000);
   });
 });
 
