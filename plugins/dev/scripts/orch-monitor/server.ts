@@ -347,6 +347,20 @@ export function isAppRoute(pathname: string): boolean {
   return isDetailDeepLinkPath(pathname);
 }
 
+/**
+ * CTL-1272: the read-only health report served at GET /healthz, hit by the
+ * peer-HTTP liveness probe (execution-core/node-presence.mjs) over the tailnet.
+ * `daemonAlive` mirrors the existing daemon-health classification (!== "offline")
+ * and `lastTickAgeMs` is the local node's `node.heartbeat` freshness (the
+ * daemon's liveness proxy — the heartbeat only emits while the scheduler loop
+ * runs), NOT a literal scheduler-tick counter. null age = no heartbeat heard.
+ */
+export interface HealthSnapshot {
+  host: string;
+  daemonAlive: boolean;
+  lastTickAgeMs: number | null;
+}
+
 export interface CreateServerOptions {
   port?: number;
   hostname?: string;
@@ -418,6 +432,15 @@ export interface CreateServerOptions {
    * inject a deterministic status so the routes don't read the live event log.
    */
   daemonHealthReader?: (() => DaemonHealth | Promise<DaemonHealth>) | null;
+  /**
+   * CTL-1272: override for the read-only GET /healthz reader hit by the peer-HTTP
+   * liveness probe (node-presence.mjs) over the tailnet. Production reuses the
+   * SAME loadDaemonDeps()/readClusterHeartbeats()/deriveDaemonHealth chain the
+   * footer health dot reads (productionDaemonHealth), turning it into a
+   * { host, daemonAlive, lastTickAgeMs } HealthSnapshot. Tests inject a
+   * deterministic snapshot so the route never touches the live event log.
+   */
+  healthReader?: (() => HealthSnapshot | Promise<HealthSnapshot>) | null;
   /**
    * CTL-898 (SHELL8): override for the per-node cluster-health reader that feeds
    * the footer's generalized per-node indicator + node filter (/api/cluster,
@@ -788,6 +811,7 @@ export function createServer(opts: CreateServerOptions): BunServer {
     webhookConfig,
     linearWebhookConfig,
     daemonHealthReader: daemonHealthReaderOpt,
+    healthReader: healthReaderOpt,
     clusterReader: clusterReaderOpt,
     screenLogsExec: screenLogsExecOpt,
     screenPollMs = SCREEN_POLL_MS,
@@ -1374,6 +1398,39 @@ export function createServer(opts: CreateServerOptions): BunServer {
       ? async () => daemonHealthReaderOpt()
       : productionDaemonHealth;
 
+  // CTL-1272: the read-only GET /healthz health report, hit by the peer-HTTP
+  // liveness probe (execution-core/node-presence.mjs) over the tailnet. Reuses
+  // the SAME loadDaemonDeps()/heartbeat-memo/deriveDaemonHealth chain the footer
+  // health dot reads — so `daemonAlive` mirrors deriveDaemonHealth !== "offline"
+  // and `lastTickAgeMs` is the local node's node.heartbeat freshness (the
+  // daemon's liveness proxy; the heartbeat only emits while the scheduler loop
+  // runs). FAIL-OPEN: any read failure / unavailable execution-core degrades to
+  // { daemonAlive:false, lastTickAgeMs:null } rather than throwing out of the
+  // route (a health endpoint must never 5xx).
+  const productionHealth = async (): Promise<HealthSnapshot> => {
+    try {
+      const deps = await loadDaemonDeps();
+      if (!deps) return { host: "", daemonAlive: false, lastTickAgeMs: null };
+      const host = deps.getHostName();
+      const lastSeen = heartbeatMemo.get(deps, {});
+      const healthyWindowMs =
+        Number(process.env.MONITOR_DAEMON_HEALTHY_WINDOW_MS) || undefined;
+      const health = deps.deriveDaemonHealth(lastSeen, host, {
+        intervalMs: healthyWindowMs,
+      });
+      const localLastSeen = lastSeen[host];
+      const parsed = localLastSeen ? Date.parse(localLastSeen) : NaN;
+      const lastTickAgeMs = Number.isNaN(parsed) ? null : Date.now() - parsed;
+      return { host, daemonAlive: health !== "offline", lastTickAgeMs };
+    } catch {
+      return { host: "", daemonAlive: false, lastTickAgeMs: null };
+    }
+  };
+  const readHealth: () => Promise<HealthSnapshot> =
+    healthReaderOpt != null
+      ? async () => healthReaderOpt()
+      : productionHealth;
+
   // assembleNavSignal — project the four nav signals off the board snapshot the
   // read-model already computed, layering the local daemon health. One board read
   // (the shared, reactively-cached snapshot) + one heartbeat classify; NO
@@ -1663,6 +1720,14 @@ export function createServer(opts: CreateServerOptions): BunServer {
 
         if (url.pathname === "/api/version") {
           return Response.json({ version: CATALYST_DEV_VERSION });
+        }
+
+        // CTL-1272: read-only liveness health report over the tailnet. Hit by a
+        // peer's node-presence.mjs probe to classify "daemon up + recent tick".
+        // Cheap (no board read, no Linear/GitHub call) and fail-open — readHealth
+        // never throws. Distinct from /api/health/* (those are namespaced).
+        if (url.pathname === "/healthz") {
+          return Response.json(await readHealth());
         }
 
         if (url.pathname === "/api/snapshot") {
