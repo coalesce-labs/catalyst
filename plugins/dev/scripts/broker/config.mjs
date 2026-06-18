@@ -119,6 +119,25 @@ export const INGESTION_RECENCY_HOLDDOWN_MS = parseInt(
 export const INGESTION_SEED_BYTES = parseInt(
   process.env.FILTER_INGESTION_SEED_BYTES ?? String(16 * 1024 * 1024), 10);
 
+// CTL-1123: broker alert-emit. The broker promotes detector signals into a stable
+// catalyst.alert.{raised,cleared} topic in the event log (otel-forward ships it to
+// the collector → Loki/dash0, where a separate "brain" routes to channels). Emit
+// is default-on with a call-time kill-switch (parity with isIngestionRecencyEnabled
+// — flip without a broker restart). system_down rides the CTL-1122 recency edges;
+// needs_human_pileup is a LEVEL count debounced by threshold + persistence + cooldown.
+export function isAlertEmitEnabled() {
+  return process.env.FILTER_ALERT_ENABLED !== "0";
+}
+// needs_human_pileup: how many active/non-terminal tickets must carry a
+// needs-human/needs-input label, for how long, before one alert fires; and the
+// minimum gap after a clear before it can re-fire (flap guard).
+export const PILEUP_THRESHOLD = parseInt(
+  process.env.FILTER_PILEUP_THRESHOLD ?? "3", 10);
+export const PILEUP_PERSISTENCE_MS = parseInt(
+  process.env.FILTER_PILEUP_PERSISTENCE_MS ?? "300000", 10);
+export const PILEUP_COOLDOWN_MS = parseInt(
+  process.env.FILTER_PILEUP_COOLDOWN_MS ?? "3600000", 10);
+
 // --- Event log ---
 export function getEventLogPath() {
   const now = new Date();

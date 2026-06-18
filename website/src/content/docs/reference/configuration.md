@@ -258,3 +258,14 @@ The broker tails every event, so it is the surviving process that can notice whe
 - `FILTER_INGESTION_RECENCY_HOLDDOWN_MS` (default `600000`) — flap guard: minimum gap between a recovery and the next stale alarm. A sustained outage that begins inside the window is deferred (re-checked each tick), never dropped.
 
 Linear (`catalyst.linear`) recency is intentionally **not** wired: the linear-webhook bot-skip guard suppresses bot-authored events before they reach the log, so the source goes quiet even during active work. Its knobs (`FILTER_LINEAR_RECENCY_*`) are reserved for when a non-flaky threshold is found.
+
+### Out-of-band alert topics (CTL-1123)
+
+The detector above only emits low-level `catalyst.ingestion.*` events. CTL-1123 adds an **alert-policy** layer in the broker: it promotes the operator-actionable subset into a stable, intentional **`catalyst.alert.{raised,cleared}`** topic (`event.entity=alert`, `event.label` = the alert *kind*). Those events flow through the event log → `otel-forward` → the OTel collector → fan-out (Loki, dash0), where a downstream alert rule routes them to a channel. **Delivery is deliberately out of scope** — the broker emits intent only; no channel or credential lives in the daemon. These knobs are env vars on the `catalyst-broker` process:
+
+- `FILTER_ALERT_ENABLED` (default on; set `0` to disable) — master kill-switch for alert emission, read at call time (toggles without a broker restart).
+- The **`system_down`** alert is promoted from a *critical* source's sustained `catalyst.ingestion.stale` (currently `catalyst.monitor` — a dead monitor). It rides that already-debounced recency edge, so it has no thresholds of its own; raised on stale, cleared on recovered.
+- The **`needs_human_pileup`** alert is a level signal: how many **active, non-terminal** tickets carry a `needs-human`/`needs-input` label in the broker's `filter-state.db` (Done/Canceled and removed tickets are excluded so a stale cached label can't pin the count). Knobs:
+  - `FILTER_PILEUP_THRESHOLD` (default `3`) — minimum labelled-ticket count to alert.
+  - `FILTER_PILEUP_PERSISTENCE_MS` (default `300000`) — the count must stay at/above the threshold this long before one alert fires (spike guard).
+  - `FILTER_PILEUP_COOLDOWN_MS` (default `3600000`) — minimum gap after a clear before it can re-fire (flap guard).

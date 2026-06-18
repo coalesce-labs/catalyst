@@ -397,6 +397,18 @@ while a worker is in-flight (a fresh non-terminal `worker_state` row), so an idl
 never false-alarms. Linear is deferred (its bot-skip guard makes the source quiet even
 during active work). See the configuration reference for the env knobs.
 
+**On top of the detector, the broker is the alert-policy layer (CTL-1123).** The
+`catalyst.ingestion.*` events above are low-level; the broker promotes the
+operator-actionable subset into a stable `catalyst.alert.{raised,cleared}` topic
+(`event.label` = the alert kind). `system_down` is promoted from a critical source's
+sustained `catalyst.ingestion.stale` (a dead monitor); `needs_human_pileup` is a level
+alert over the count of active, non-terminal tickets carrying a `needs-human`/`needs-input`
+label in `filter-state.db` (debounced by threshold + persistence + cooldown). These alert
+events ride the same event log → `otel-forward` → OTel collector → fan-out (Loki, dash0),
+where a downstream alert rule routes them to a channel. **Delivery is a separate concern**
+— the broker emits intent only; no channel or credential lives in the daemon, so the
+alerter survives a monitor death without depending on it.
+
 **The execution-core daemon reaper (CTL-649) is the second producer-and-consumer.**
 It consumes the reap-intent requests appended by the reap-intent producers
 (`lib/emit-reap-intent.sh`, `execution-core/reap-intent.mjs`) — `phase.<kind>.reap-requested`,
