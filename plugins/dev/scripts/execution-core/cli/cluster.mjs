@@ -17,6 +17,7 @@ import {
   readClusterConfig,
 } from "../config.mjs";
 import { readPeerHeartbeatsSync } from "../cluster-heartbeat-sync.mjs";
+import { registerNodeSync, deregisterNodeSync } from "../node-roster-sync.mjs"; // CTL-1273: anchor writer
 import { writeSecretConfig } from "../write-secret-config.mjs";
 import { listInFlightTickets } from "../scheduler.mjs";
 import { clusterSync } from "../cluster-sync.mjs";
@@ -97,37 +98,62 @@ export function runStatus(argv = []) {
 export function addHost(name, {
   hostsPath,
   self,
+  // CTL-1273: when an anchor is configured the node enrollment record is written
+  // to the SAME anchor the resolver reads (getClusterHosts → resolveClusterHosts
+  // 'anchor' source) — reader and writer share one source, so the old
+  // reader/writer divergence is structurally impossible. When no anchor is set,
+  // fall back to the legacy committed .catalyst/hosts.json (migration fallback).
+  anchor = getLivenessAnchorIssue(),
+  address = null,
+  registerNode = registerNodeSync,
   readPeers = () => readPeerHeartbeatsSync({ anchorIssue: getLivenessAnchorIssue() }),
   git = defaultGit,
   commit = true,
 } = {}) {
   if (!name) return { code: 2, msg: "add requires <name>" };
-  const roster = readRoster(hostsPath);
-  if (roster.includes(name)) return { code: 2, msg: `'${name}' already in roster` };
   const peers = readPeers();
   if (peers[name]?.last_seen) {
     return { code: 2, msg: `'${name}' is already publishing a live heartbeat` };
   }
+
+  // Anchor path: upsert the catalyst://node/<name> enrollment record.
+  if (anchor) {
+    const res = registerNode({ anchorIssue: anchor, name, address });
+    if (!res?.ok) {
+      return { code: 1, msg: `failed to register '${name}' on anchor ${anchor}: ${res?.error ?? "unknown"}` };
+    }
+    return { code: 0, name, source: "anchor", anchorUnset: false };
+  }
+
+  // Legacy fallback: append to the committed .catalyst/hosts.json.
+  const roster = readRoster(hostsPath);
+  if (roster.includes(name)) return { code: 2, msg: `'${name}' already in roster` };
   const next = [...roster, name];
   writeRosterAtomic(hostsPath, next);
   if (commit) gitCommitRoster(git, hostsPath, `chore(cluster): add ${name} to roster`);
-  const anchorUnset = Object.keys(peers).length === 0 && !getLivenessAnchorIssue();
-  return { code: 0, roster: next, anchorUnset };
+  return { code: 0, roster: next, source: "hosts-fallback", anchorUnset: true };
 }
 
 export function runAdd(argv = []) {
   const noCommit = argv.includes("--no-commit");
-  const name = argv.filter((a) => !a.startsWith("-"))[0];
+  const positional = argv.filter((a) => !a.startsWith("-"));
+  const name = positional[0];
+  const address = positional[1] ?? null; // optional <address> for HRW re-homing
   const res = addHost(name, {
     hostsPath: getCatalystRepoDirHostsPath(),
     self: getHostName(),
+    address,
     commit: !noCommit,
   });
   if (res.code !== 0) {
     process.stderr.write(`catalyst cluster add: ${res.msg}\n`);
     return res.code;
   }
-  process.stdout.write(`Added '${name}' to roster: [${res.roster.join(", ")}]\n`);
+  if (res.source === "anchor") {
+    process.stdout.write(`Enrolled '${name}' on the cluster anchor.\n`);
+  } else {
+    process.stdout.write(`Added '${name}' to roster: [${res.roster.join(", ")}]\n`);
+  }
   process.stdout.write("Takes effect live (next scheduler tick).\n");
   if (res.anchorUnset) {
     process.stderr.write(
@@ -142,21 +168,38 @@ export function runAdd(argv = []) {
 export function removeHost(name, {
   hostsPath,
   self,
+  // CTL-1273: delete the enrollment record from the SAME anchor the resolver
+  // reads when one is configured; else fall back to the legacy committed
+  // .catalyst/hosts.json (migration fallback).
+  anchor = getLivenessAnchorIssue(),
+  deregisterNode = deregisterNodeSync,
   inFlightCount = () => 0,
   git = defaultGit,
   commit = true,
 } = {}) {
   if (!name) return { code: 2, msg: "remove requires <name>" };
-  const roster = readRoster(hostsPath);
-  if (!roster.includes(name)) return { code: 2, msg: `'${name}' not in roster` };
   const count = inFlightCount();
   if (name === self && count > 0) {
     return { code: 2, msg: `refusing to remove self while ${count} ticket(s) in flight` };
   }
+
+  // Anchor path: delete the catalyst://node/<name> enrollment record.
+  if (anchor) {
+    const res = deregisterNode({ anchorIssue: anchor, name });
+    if (!res?.ok) {
+      return { code: 1, msg: `failed to deregister '${name}' on anchor ${anchor}: ${res?.error ?? "unknown"}` };
+    }
+    if (!res.removed) return { code: 2, msg: `'${name}' not in roster` };
+    return { code: 0, name, source: "anchor" };
+  }
+
+  // Legacy fallback: remove from the committed .catalyst/hosts.json.
+  const roster = readRoster(hostsPath);
+  if (!roster.includes(name)) return { code: 2, msg: `'${name}' not in roster` };
   const next = roster.filter((h) => h !== name);
   writeRosterAtomic(hostsPath, next);
   if (commit) gitCommitRoster(git, hostsPath, `chore(cluster): remove ${name} from roster`);
-  return { code: 0, roster: next };
+  return { code: 0, roster: next, source: "hosts-fallback" };
 }
 
 export function runRemove(argv = []) {
@@ -173,7 +216,11 @@ export function runRemove(argv = []) {
     process.stderr.write(`catalyst cluster remove: ${res.msg}\n`);
     return res.code;
   }
-  process.stdout.write(`Removed '${name}' from roster: [${res.roster.join(", ")}]\n`);
+  if (res.source === "anchor") {
+    process.stdout.write(`Deregistered '${name}' from the cluster anchor.\n`);
+  } else {
+    process.stdout.write(`Removed '${name}' from roster: [${res.roster.join(", ")}]\n`);
+  }
   process.stdout.write("Takes effect live (next scheduler tick).\n");
   return 0;
 }

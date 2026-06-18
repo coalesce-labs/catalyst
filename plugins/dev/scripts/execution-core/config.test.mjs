@@ -30,6 +30,8 @@ import {
   isDraining,
   getLivenessAnchorIssue,
   LIVENESS_PUBLISH_INTERVAL_MS,
+  getStaticRoster,
+  resolveClusterHosts,
 } from "./config.mjs";
 
 const PREV = process.env.CATALYST_WAIT_WATCHER;
@@ -405,6 +407,165 @@ describe("getClusterHosts cluster-repo-first (CTL-1211)", () => {
   test("unversioned cluster.json is treated as v1 and read", () => {
     writeCluster({ roster: ["mini", "mini-2"] });
     expect(getClusterHosts()).toEqual(["mini", "mini-2"]);
+  });
+});
+
+// CTL-1273: the roster resolver — anchor → static → hosts-fallback → single-host.
+// All Linear reads are injected (readNodeNames), so these tests are hermetic.
+describe("getStaticRoster (CTL-1273)", () => {
+  const ENVS = ["CATALYST_LAYER2_CONFIG_FILE", "CATALYST_STATIC_ROSTER"];
+  let saved = {};
+  let tmp, cfg;
+
+  beforeEach(() => {
+    for (const k of ENVS) {
+      saved[k] = process.env[k];
+      delete process.env[k];
+    }
+    tmp = mkdtempSync(join(tmpdir(), "ctl1273-static-"));
+    cfg = join(tmp, "config.json");
+    process.env.CATALYST_LAYER2_CONFIG_FILE = cfg;
+  });
+
+  afterEach(() => {
+    for (const k of ENVS) {
+      if (saved[k] === undefined) delete process.env[k];
+      else process.env[k] = saved[k];
+    }
+    saved = {};
+    rmSync(tmp, { recursive: true, force: true });
+  });
+
+  test("reads catalyst.cluster.staticRoster from Layer-2", () => {
+    writeFileSync(cfg, JSON.stringify({ catalyst: { cluster: { staticRoster: ["mini", "mini-2"] } } }));
+    expect(getStaticRoster()).toEqual(["mini", "mini-2"]);
+  });
+
+  test("filters non-string / empty entries", () => {
+    writeFileSync(cfg, JSON.stringify({ catalyst: { cluster: { staticRoster: ["mini", 42, "", "x"] } } }));
+    expect(getStaticRoster()).toEqual(["mini", "x"]);
+  });
+
+  test("unset / empty array / malformed → null", () => {
+    writeFileSync(cfg, JSON.stringify({ catalyst: { cluster: {} } }));
+    expect(getStaticRoster()).toBe(null);
+    writeFileSync(cfg, JSON.stringify({ catalyst: { cluster: { staticRoster: [] } } }));
+    expect(getStaticRoster()).toBe(null);
+    writeFileSync(cfg, "{ not json");
+    expect(getStaticRoster()).toBe(null);
+  });
+
+  test("CATALYST_STATIC_ROSTER env override (comma-separated)", () => {
+    process.env.CATALYST_STATIC_ROSTER = "mini, mini-2 ,";
+    expect(getStaticRoster()).toEqual(["mini", "mini-2"]);
+  });
+});
+
+describe("resolveClusterHosts (CTL-1273)", () => {
+  const ENVS = [
+    "CATALYST_CONFIG_FILE",
+    "CATALYST_HOST_NAME",
+    "CATALYST_LAYER2_CONFIG_FILE",
+    "CATALYST_CLUSTER_DIR",
+    "CATALYST_LIVENESS_ANCHOR_ISSUE",
+    "CATALYST_STATIC_ROSTER",
+  ];
+  let saved = {};
+  let repo, cfg;
+
+  beforeEach(() => {
+    for (const k of ENVS) {
+      saved[k] = process.env[k];
+      delete process.env[k];
+    }
+    repo = mkdtempSync(join(tmpdir(), "ctl1273-resolve-"));
+    mkdirSync(join(repo, ".catalyst"), { recursive: true });
+    cfg = join(repo, "layer2.json");
+    process.env.CATALYST_CONFIG_FILE = join(repo, ".catalyst", "config.json");
+    process.env.CATALYST_CLUSTER_DIR = join(repo, "no-such-cluster");
+    process.env.CATALYST_LAYER2_CONFIG_FILE = cfg;
+    process.env.CATALYST_HOST_NAME = "solo-host";
+  });
+
+  afterEach(() => {
+    for (const k of ENVS) {
+      if (saved[k] === undefined) delete process.env[k];
+      else process.env[k] = saved[k];
+    }
+    saved = {};
+    rmSync(repo, { recursive: true, force: true });
+  });
+
+  const writeHosts = (arr) => writeFileSync(join(repo, ".catalyst", "hosts.json"), JSON.stringify(arr));
+  const writeLayer2 = (obj) => writeFileSync(cfg, JSON.stringify(obj));
+
+  test("anchor source wins when configured and the read succeeds", () => {
+    process.env.CATALYST_LIVENESS_ANCHOR_ISSUE = "CTL-1090";
+    writeHosts(["legacy-should-lose"]); // present but lower priority
+    const readNodeNames = () => ({ ok: true, names: ["mini", "mini-2"] });
+    expect(resolveClusterHosts({ readNodeNames })).toEqual({
+      hosts: ["mini", "mini-2"],
+      source: "anchor",
+      multiHost: true,
+    });
+  });
+
+  test("FAIL-OPEN: anchor read error falls through to the next source (never empties)", () => {
+    process.env.CATALYST_LIVENESS_ANCHOR_ISSUE = "CTL-1090";
+    writeHosts(["mini", "mac-studio"]);
+    const readNodeNames = () => ({ ok: false, names: [] }); // Linear unreadable
+    const r = resolveClusterHosts({ readNodeNames });
+    expect(r.hosts).toEqual(["mini", "mac-studio"]);
+    expect(r.source).toBe("hosts-fallback");
+  });
+
+  test("anchor configured but empty roster falls through (not an empty fleet)", () => {
+    process.env.CATALYST_LIVENESS_ANCHOR_ISSUE = "CTL-1090";
+    writeLayer2({ catalyst: { cluster: { staticRoster: ["static-a", "static-b"] } } });
+    const readNodeNames = () => ({ ok: true, names: [] });
+    const r = resolveClusterHosts({ readNodeNames });
+    expect(r.source).toBe("static");
+    expect(r.hosts).toEqual(["static-a", "static-b"]);
+  });
+
+  test("NO anchor configured → readNodeNames is NEVER called (zero Linear cost)", () => {
+    // anchor env unset; only single-host default expected, no anchor read.
+    let called = false;
+    const readNodeNames = () => {
+      called = true;
+      return { ok: true, names: ["should-not-be-used"] };
+    };
+    const r = resolveClusterHosts({ readNodeNames });
+    expect(called).toBe(false);
+    expect(r).toEqual({ hosts: ["solo-host"], source: "single-host", multiHost: false });
+  });
+
+  test("static source when no anchor, before the legacy hosts fallback", () => {
+    writeLayer2({ catalyst: { cluster: { staticRoster: ["a", "b"] } } });
+    writeHosts(["legacy"]);
+    const r = resolveClusterHosts({ readNodeNames: () => ({ ok: false, names: [] }) });
+    expect(r).toEqual({ hosts: ["a", "b"], source: "static", multiHost: true });
+  });
+
+  test("hosts-fallback (legacy .catalyst/hosts.json) when no anchor + no static", () => {
+    writeHosts(["mini", "mac-studio"]);
+    const r = resolveClusterHosts({ readNodeNames: () => ({ ok: false, names: [] }) });
+    expect(r).toEqual({ hosts: ["mini", "mac-studio"], source: "hosts-fallback", multiHost: true });
+  });
+
+  test("single-host default when no anchor, no static, no hosts file", () => {
+    const r = resolveClusterHosts({ readNodeNames: () => ({ ok: false, names: [] }) });
+    expect(r).toEqual({ hosts: ["solo-host"], source: "single-host", multiHost: false });
+  });
+
+  test("single-host anchor roster reports multiHost:false", () => {
+    process.env.CATALYST_LIVENESS_ANCHOR_ISSUE = "CTL-1090";
+    const readNodeNames = () => ({ ok: true, names: ["mini"] });
+    expect(resolveClusterHosts({ readNodeNames })).toEqual({
+      hosts: ["mini"],
+      source: "anchor",
+      multiHost: false,
+    });
   });
 });
 
