@@ -507,12 +507,16 @@ function checkSourceRecency(source, now) {
   if (!isIngestionRecencyEnabled()) return null;
   const seen = _lastSeenByService.get(source.serviceName);
   const prevAlarm = recencyAlarmFor(source.serviceName);
-  let { severity } = evaluateSource({
+  // The source's OWN freshness, before any gate override — used below to decide
+  // whether a recovery was actually beat-driven (a fresh event arrived) or
+  // gate-driven (the fleet went idle while the source was still silent).
+  const { severity: ungatedSeverity } = evaluateSource({
     lastSeenTs: seen?.ts ?? null,
     nowMs: now,
     degradedAfterMs: source.degradedAfterMs,
     downAfterMs: source.downAfterMs,
   });
+  let severity = ungatedSeverity;
   if (source.gated && !fleetIsActive(now)) {
     // Gate closed: the fleet isn't working, so webhook silence is expected, not
     // a fault. Force "up" → no stale, and a clean clear of any open outage.
@@ -525,6 +529,12 @@ function checkSourceRecency(source, now) {
   });
   if (emit) {
     const recovered = emit === "recovered";
+    // A recovery is beat-driven iff the source itself sees a fresh event
+    // (ungated severity up). A gate-driven recovery — the fleet went idle while
+    // the source was still silent — has NO fresh beat that cleared it, so the
+    // forensic link is null rather than the stale pre-silence beat (which would
+    // contradict the recovered contract CTL-1123 reads).
+    const beatDrivenRecovery = recovered && ungatedSeverity === "up";
     // stale describes the silence (age since the last beat, vs the down
     // threshold); recovered describes the outage it CLEARED (its duration, no
     // threshold). ageMs is clamped so clock skew (a future beat) can never emit
@@ -536,15 +546,16 @@ function checkSourceRecency(source, now) {
       : seen
         ? Math.max(0, now - seen.ts)
         : null;
+    // stale: the last beat before silence. recovered: the fresh beat that
+    // cleared it (beat-driven only) — null for a gate-driven clear.
+    const forensicSeen = recovered ? (beatDrivenRecovery ? seen : null) : seen;
     const ok = emitIngestionRecencyEvent({
       action: emit,
       sourceName: source.serviceName,
       ageMs,
       thresholdMs: recovered ? null : source.downAfterMs,
-      lastSeenAt: seen ? new Date(seen.ts).toISOString() : null,
-      // the forensic link: the last beat before silence (stale) / the fresh
-      // beat that cleared it (recovered).
-      causedBy: seen?.id ?? null,
+      lastSeenAt: forensicSeen ? new Date(forensicSeen.ts).toISOString() : null,
+      causedBy: forensicSeen?.id ?? null,
     });
     if (!ok) {
       // The append FAILED (e.g. transient ENOSPC/EACCES — conditions correlated

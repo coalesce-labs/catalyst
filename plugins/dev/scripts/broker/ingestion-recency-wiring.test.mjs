@@ -322,6 +322,25 @@ describe("github/linear activity-gated recency (CTL-1122 PR2)", () => {
     expect(rec.attributes["event.label"]).toBe(GITHUB_SERVICE_NAME);
     expect(rec.body.payload.thresholdMs).toBeNull();
     expect(rec.body.payload.ageMs).toBeGreaterThanOrEqual(0); // outage duration
+    // gate-driven clear: no fresh beat cleared it, so the forensic link is null
+    // (not the stale pre-silence beat) — the recovered contract for CTL-1123.
+    expect(rec.caused_by).toBeNull();
+    expect(rec.body.payload.lastSeenAt).toBeNull();
+  });
+
+  test("(c') beat-driven recovery (a fresh github event while gated-open) → recovered names the fresh beat", () => {
+    dispatchActiveWorker();
+    __setLastSeenForTest(GITHUB_SERVICE_NAME, { ts: Date.now() - staleGithubMs, id: "gh-old" });
+    runWatchdogTick(); // → stale
+    // a fresh github webhook arrives while the fleet is still working
+    __setLastSeenForTest(GITHUB_SERVICE_NAME, { ts: Date.now(), id: "gh-fresh" });
+    runWatchdogTick(); // → recovered, beat-driven
+    const rec = readIngestionEvents(getEventLogPath()).find(
+      (e) => e.attributes["event.name"] === "catalyst.ingestion.recovered",
+    );
+    expect(rec).toBeDefined();
+    expect(rec.caused_by).toBe("gh-fresh");
+    expect(rec.body.payload.ageMs).toBeGreaterThanOrEqual(0);
   });
 
   test("(d) linear is DEFERRED — a stale catalyst.linear with active work does not alarm", () => {
