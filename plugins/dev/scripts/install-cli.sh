@@ -148,6 +148,78 @@ done
 
 BIN_DIR="$(resolve_bin_dir)"
 
+# ensure_alloy — install the Grafana Alloy binary when absent (CTL-1263).
+#
+# Alloy is the off-the-shelf daemon-log shipper (config at
+# plugins/dev/scripts/log-shipper/config.alloy, CTL-1261). catalyst-stack's
+# start_shipper step launches it; this function makes sure the binary is present
+# on every host install-cli runs on (every node — install-cli is a join stage).
+#
+# Mirrors catalyst-join.sh's ensure_gh exactly: brew on Darwin, GitHub-release
+# download otherwise (arch/OS detect → ~/.local/bin → verify on PATH). It is
+# IDEMPOTENT (no-op if alloy is already on PATH) and WARN+CONTINUE: it never
+# returns non-zero to its caller, because install-cli must never exit non-zero
+# just because the optional log-shipper binary could not be installed (e.g. a
+# headless Linux box with no brew and a flaky GitHub download).
+ensure_alloy() {
+  command -v alloy >/dev/null 2>&1 && return 0
+
+  # Prefer brew on Darwin (matches the log-shipper README's documented install).
+  if [[ "$(uname -s)" == "Darwin" ]] && command -v brew >/dev/null 2>&1; then
+    echo "  Installing Grafana Alloy via brew (log-shipper binary, CTL-1263)…"
+    if brew install grafana-alloy >/dev/null 2>&1 && command -v alloy >/dev/null 2>&1; then
+      echo "  Installed alloy ($(command -v alloy))"
+      return 0
+    fi
+    echo "  warning: 'brew install grafana-alloy' failed — log-shipper will not start until alloy is installed" >&2
+    return 0
+  fi
+
+  # Non-Darwin (or no brew): direct GitHub-release download, mirroring ensure_gh.
+  if ! { command -v curl >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; }; then
+    echo "  warning: cannot install alloy (need curl + jq) — log-shipper will not start until alloy is installed" >&2
+    return 0
+  fi
+  local os arch alloy_os ver tmp asset url
+  os="$(uname -s)"; arch="$(uname -m)"
+  case "$arch" in arm64 | aarch64) arch="arm64" ;; x86_64 | amd64) arch="amd64" ;; esac
+  case "$os" in Darwin) alloy_os="darwin" ;; Linux) alloy_os="linux" ;; *) alloy_os="" ;; esac
+  if [[ -z "$alloy_os" ]]; then
+    echo "  warning: unsupported OS for alloy auto-install ($os) — install Grafana Alloy manually" >&2
+    return 0
+  fi
+  ver="$(curl -fsSL https://api.github.com/repos/grafana/alloy/releases/latest 2>/dev/null | jq -r '.tag_name // empty')"
+  if [[ -z "$ver" ]]; then
+    echo "  warning: could not resolve latest Grafana Alloy release — log-shipper will not start until alloy is installed" >&2
+    return 0
+  fi
+  mkdir -p "$HOME/.local/bin"; tmp="$(mktemp -d)"
+  # Alloy release assets are named alloy-<os>-<arch>; darwin ships zipped, linux gzipped.
+  echo "  Installing Grafana Alloy ${ver} → ~/.local/bin (log-shipper binary, CTL-1263)…"
+  if [[ "$alloy_os" == "darwin" ]]; then
+    asset="alloy-darwin-${arch}.zip"
+    url="https://github.com/grafana/alloy/releases/download/${ver}/${asset}"
+    if curl -fsSL "$url" -o "$tmp/alloy.zip" 2>/dev/null && unzip -q "$tmp/alloy.zip" -d "$tmp" 2>/dev/null; then
+      cp "$tmp/alloy-darwin-${arch}" "$HOME/.local/bin/alloy" 2>/dev/null || true
+    fi
+  else
+    asset="alloy-linux-${arch}.zip"
+    url="https://github.com/grafana/alloy/releases/download/${ver}/${asset}"
+    if curl -fsSL "$url" -o "$tmp/alloy.zip" 2>/dev/null && unzip -q "$tmp/alloy.zip" -d "$tmp" 2>/dev/null; then
+      cp "$tmp/alloy-linux-${arch}" "$HOME/.local/bin/alloy" 2>/dev/null || true
+    fi
+  fi
+  chmod +x "$HOME/.local/bin/alloy" 2>/dev/null || true
+  rm -rf "$tmp"
+  export PATH="$HOME/.local/bin:$PATH"
+  if command -v alloy >/dev/null 2>&1; then
+    echo "  Installed alloy ($(command -v alloy))"
+  else
+    echo "  warning: alloy install failed (download/extract) — log-shipper will not start until alloy is installed" >&2
+  fi
+  return 0
+}
+
 if [[ "$mode" = "uninstall" ]]; then
   if [[ -d "$BIN_DIR" ]]; then
     for entry in "${CLI_ENTRIES[@]}"; do
@@ -433,6 +505,12 @@ EOF
 }
 
 detect_stale_aliases
+
+# Provision the Grafana Alloy log-shipper binary (CTL-1263). Non-fatal by design
+# (warn+continue): a missing/failed Alloy install must never make install-cli
+# exit non-zero, since the shipper is optional infra and catalyst-stack's
+# start_shipper degrades loudly-but-gracefully when alloy is absent.
+ensure_alloy || true
 
 # PATH bootstrap — if BIN_DIR is not on PATH, append an export line to the
 # user's shell rc file. Idempotent: a marker comment guards against duplicate
