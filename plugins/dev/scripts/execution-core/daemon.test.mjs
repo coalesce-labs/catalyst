@@ -1919,3 +1919,139 @@ describe("CTL-862 — daemon boot-log ownership context", () => {
     }
   });
 });
+
+// ── CTL-1271: daemon boot announces roster + source + multiHost, and warns
+// LOUDLY (not refuses) when multi-host was configured but resolution went
+// single-host — never a SILENT one-node cluster.
+describe("CTL-1271 — daemon boot roster announcement + silent-single-host guard", () => {
+  const ANCHOR_ENVS = ["CATALYST_LIVENESS_ANCHOR_ISSUE", "CATALYST_STATIC_ROSTER", "CATALYST_LAYER2_CONFIG_FILE"];
+  let savedEnv = {};
+
+  const baseOpts = () => ({
+    recover: () => ({}),
+    reconcileBoot: () => {},
+    startMonitor: () => {},
+    startScheduler: () => {},
+    stopMonitor: () => {},
+    stopScheduler: () => {},
+    reconcile: () => {},
+    startAutoTuner: () => () => {},
+    watchRegistry: false,
+    listProjects: () => [],
+    readAllEligible: () => [],
+  });
+
+  beforeEach(() => {
+    for (const k of ANCHOR_ENVS) {
+      savedEnv[k] = process.env[k];
+      delete process.env[k];
+    }
+    // point Layer-2 at a guaranteed-absent file so getLivenessAnchorIssue /
+    // getStaticRoster don't read the host's real ~/.config/catalyst/config.json
+    process.env.CATALYST_LAYER2_CONFIG_FILE = join(catalystDir, "no-such-layer2.json");
+  });
+
+  afterEach(() => {
+    for (const k of ANCHOR_ENVS) {
+      if (savedEnv[k] === undefined) delete process.env[k];
+      else process.env[k] = savedEnv[k];
+    }
+    savedEnv = {};
+  });
+
+  test("boot log states roster + source: 'anchor' + multiHost: true", () => {
+    const infoSpy = spyOn(log, "info");
+    process.env.CATALYST_LIVENESS_ANCHOR_ISSUE = "CTL-1090";
+    try {
+      startDaemon({
+        ...baseOpts(),
+        bootHostName: "mini",
+        bootResolve: { hosts: ["mini", "mini-2"], source: "anchor", multiHost: true },
+      });
+      const bootCall = infoSpy.mock.calls.find(
+        (c) => typeof c[1] === "string" && c[1].includes("daemon started")
+      );
+      expect(bootCall).toBeDefined();
+      expect(bootCall[0].source).toBe("anchor");
+      expect(bootCall[0].multiHost).toBe(true);
+      expect(bootCall[0].roster).toEqual(["mini", "mini-2"]);
+    } finally {
+      infoSpy.mockRestore();
+    }
+  });
+
+  test("LOUD warn when an anchor is configured but the roster resolved single-host", () => {
+    const warnSpy = spyOn(log, "warn");
+    process.env.CATALYST_LIVENESS_ANCHOR_ISSUE = "CTL-1090"; // multi-host EXPECTED
+    try {
+      startDaemon({
+        ...baseOpts(),
+        bootHostName: "mini",
+        // resolution degraded to single-host (anchor unreadable, fail-open)
+        bootResolve: { hosts: ["mini"], source: "single-host", multiHost: false },
+      });
+      const warnCall = warnSpy.mock.calls.find(
+        (c) => typeof c[1] === "string" && c[1].includes("multi-host was configured")
+      );
+      expect(warnCall).toBeDefined();
+      expect(warnCall[0].anchorConfigured).toBe(true);
+      expect(warnCall[0].source).toBe("single-host");
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  test("LOUD warn when a static roster is configured but resolved single-host", () => {
+    const warnSpy = spyOn(log, "warn");
+    process.env.CATALYST_STATIC_ROSTER = "mini,mini-2"; // multi-host EXPECTED
+    try {
+      startDaemon({
+        ...baseOpts(),
+        bootHostName: "mini",
+        bootResolve: { hosts: ["mini"], source: "single-host", multiHost: false },
+      });
+      const warnCall = warnSpy.mock.calls.find(
+        (c) => typeof c[1] === "string" && c[1].includes("multi-host was configured")
+      );
+      expect(warnCall).toBeDefined();
+      expect(warnCall[0].staticConfigured).toBe(true);
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  test("SILENT (no warn) for a legitimate single-host install — no anchor, no static", () => {
+    const warnSpy = spyOn(log, "warn");
+    try {
+      startDaemon({
+        ...baseOpts(),
+        bootHostName: "solo",
+        bootResolve: { hosts: ["solo"], source: "single-host", multiHost: false },
+      });
+      const warnCall = warnSpy.mock.calls.find(
+        (c) => typeof c[1] === "string" && c[1].includes("multi-host was configured")
+      );
+      expect(warnCall).toBeUndefined();
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  test("NO silent-single-host warn when an anchor resolved a genuine multi-host roster", () => {
+    const warnSpy = spyOn(log, "warn");
+    process.env.CATALYST_LIVENESS_ANCHOR_ISSUE = "CTL-1090";
+    try {
+      startDaemon({
+        ...baseOpts(),
+        bootHostName: "mini",
+        bootResolve: { hosts: ["mini", "mini-2"], source: "anchor", multiHost: true },
+      });
+      const warnCall = warnSpy.mock.calls.find(
+        (c) => typeof c[1] === "string" && c[1].includes("multi-host was configured")
+      );
+      expect(warnCall).toBeUndefined();
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+});

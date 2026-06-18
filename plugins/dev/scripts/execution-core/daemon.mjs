@@ -43,6 +43,9 @@ import {
   readRatelimitPollerConfig,
   getHostName,      // CTL-862
   getClusterHosts,  // CTL-862
+  resolveClusterHosts, // CTL-1273/CTL-1271: roster + source + multiHost for the boot assertion
+  getLivenessAnchorIssue, // CTL-1271: "multi-host was configured" detector
+  getStaticRoster,        // CTL-1271: "multi-host was configured" detector
 } from "./config.mjs";
 import { ownedBy } from "./hrw.mjs"; // CTL-862: HRW ownership filter
 import { startWaitWatcher as realStartWaitWatcher } from "./wait-watcher.mjs";
@@ -466,6 +469,11 @@ export function startDaemon({
   readAllEligible = readAllEligibleTickets,
   bootHosts = undefined,
   bootHostName = undefined,
+  // CTL-1271: injectable roster-resolution seam for the boot assertion. Tests
+  // inject a fixed { hosts, source, multiHost }; production resolves it from the
+  // real config (resolveClusterHosts). Kept separate from bootHosts so the
+  // CTL-862 ownership-log tests (which inject bootHosts directly) still pass.
+  bootResolve = undefined,
 } = {}) {
   const orchDir = getExecutionCoreDir();
   ensureState(orchDir);
@@ -713,11 +721,53 @@ export function startDaemon({
     log.warn({ err }, "execution-core daemon: registry health check failed (continuing)");
   }
 
-  // CTL-862: report HRW ownership at boot for multi-host observability.
-  const bootRoster = bootHosts ?? getClusterHosts();
+  // CTL-862 / CTL-1271: resolve + ANNOUNCE the cluster roster at boot. The
+  // daemon partitions work by this roster, so it must state what it resolved AND
+  // where that came from — and NEVER silently degrade to a one-node cluster (the
+  // bug that quietly evicted mini-2). resolveClusterHosts returns the single
+  // precedence (anchor → static → hosts-fallback → single-host) shared with
+  // getClusterHosts, so the boot announcement can never disagree with what the
+  // scheduler actually uses.
+  //
+  // bootHosts (the CTL-862 ownership-log test seam) wins when injected; bootResolve
+  // is the CTL-1271 seam for asserting source/multiHost; otherwise resolve for real.
+  const resolved =
+    bootResolve ??
+    (bootHosts
+      ? { hosts: bootHosts, source: "injected", multiHost: bootHosts.length > 1 }
+      : resolveClusterHosts());
+  const bootRoster = resolved.hosts;
+  const bootSource = resolved.source;
+  const bootMultiHost = resolved.multiHost;
   const bootSelf = bootHostName ?? getHostName();
   const bootEligible = readAllEligible();
   const bootOwns = bootEligible.filter((t) => ownedBy(t.identifier, bootRoster, bootSelf)).length;
+
+  // CTL-1271: a multi-host configuration that resolves to a single-host roster is
+  // a SILENT eviction — every peer drops out of HRW and this node owns the whole
+  // fleet's work. Detect "multi-host was EXPECTED" (an anchor or a static roster
+  // is configured) but the resolution yielded single-host, and warn LOUDLY (not a
+  // hard refuse — a transient Linear blip must not block boot; FAIL-OPEN already
+  // kept the prior roster on the read seam). A legitimately single-host install
+  // (no anchor, no static) stays SILENT — single-host is a valid, expected state.
+  const anchorConfigured = Boolean(getLivenessAnchorIssue());
+  const staticConfigured = Boolean(getStaticRoster());
+  const multiHostExpected = anchorConfigured || staticConfigured;
+  if (multiHostExpected && !bootMultiHost) {
+    log.warn(
+      {
+        roster: bootRoster,
+        source: bootSource,
+        anchorConfigured,
+        staticConfigured,
+        host: bootSelf,
+      },
+      "execution-core daemon: multi-host was configured (cluster anchor / static roster) " +
+        "but the roster resolved to a SINGLE host — this node will own the ENTIRE fleet's " +
+        "work under HRW. Check the cluster anchor is reachable and enrolled " +
+        "(`catalyst cluster status`).",
+    );
+  }
   // CTL-1084: emit a structured node.boot event so catalyst-stack status can
   // prove what the restart did (version, effective flags, adopted/cleared/rewalk counts).
   // Fail-open — emitBootEvent never throws. Kept alongside the pino log (not replacing it).
@@ -729,8 +779,18 @@ export function startDaemon({
       rewalkDispatched: _bootResume?.dispatched ?? 0,
     },
   });
+  // CTL-1271: announce roster + source + multiHost at boot so an operator can
+  // always read what the daemon resolved and where it came from.
   log.info(
-    { orchDir, host: bootSelf, owns: bootOwns, eligible: bootEligible.length, roster: bootRoster },
+    {
+      orchDir,
+      host: bootSelf,
+      owns: bootOwns,
+      eligible: bootEligible.length,
+      roster: bootRoster,
+      source: bootSource,
+      multiHost: bootMultiHost,
+    },
     "execution-core daemon started"
   );
 }

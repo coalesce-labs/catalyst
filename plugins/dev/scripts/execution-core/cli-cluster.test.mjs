@@ -85,13 +85,14 @@ describe("buildStatus (CTL-1188)", () => {
 
 // ── addHost ────────────────────────────────────────────────────────────────
 
-describe("addHost", () => {
+describe("addHost (legacy hosts-fallback path, anchor:null)", () => {
   test("appends a new name and commits", () => {
     withRoster(["mini"], (hostsPath, read) => {
       const committed = [];
       const r = addHost("mac-studio", {
         hostsPath,
         self: "mini",
+        anchor: null,
         readPeers: () => ({}),
         git: (args) => committed.push(args),
         commit: true,
@@ -104,7 +105,7 @@ describe("addHost", () => {
 
   test("idempotent: name already in roster → code 2, no write", () => {
     withRoster(["mini"], (hostsPath, read) => {
-      const r = addHost("mini", { hostsPath, self: "mini", readPeers: () => ({}) });
+      const r = addHost("mini", { hostsPath, self: "mini", anchor: null, readPeers: () => ({}) });
       expect(r.code).toBe(2);
       expect(read()).toEqual(["mini"]);
     });
@@ -115,6 +116,7 @@ describe("addHost", () => {
       const r = addHost("ghost", {
         hostsPath,
         self: "mini",
+        anchor: null,
         readPeers: () => ({ ghost: { host: "ghost", last_seen: "2026-06-16T12:00:00Z" } }),
       });
       expect(r.code).toBe(2);
@@ -128,6 +130,7 @@ describe("addHost", () => {
       const r = addHost("mac-studio", {
         hostsPath,
         self: "mini",
+        anchor: null,
         readPeers: () => ({}),
         git,
         commit: false,
@@ -139,7 +142,62 @@ describe("addHost", () => {
 
   test("missing name → code 2", () => {
     withRoster(["mini"], (hostsPath) => {
-      const r = addHost("", { hostsPath, self: "mini", readPeers: () => ({}) });
+      const r = addHost("", { hostsPath, self: "mini", anchor: null, readPeers: () => ({}) });
+      expect(r.code).toBe(2);
+    });
+  });
+});
+
+// CTL-1273: the anchor writer path — add/remove write the catalyst://node/<name>
+// enrollment record on the SAME anchor the resolver reads. registerNode /
+// deregisterNode are injected so nothing touches Linear.
+describe("addHost (anchor writer path, CTL-1273)", () => {
+  test("registers the node on the anchor and does NOT touch hosts.json", () => {
+    withRoster(["mini"], (hostsPath, read) => {
+      const calls = [];
+      const r = addHost("mini-2", {
+        hostsPath,
+        self: "mini",
+        anchor: "CTL-1090",
+        address: "mini-2.rozich.com",
+        registerNode: (args) => {
+          calls.push(args);
+          return { ok: true };
+        },
+        readPeers: () => ({}),
+        git: () => { throw new Error("anchor path must not git-commit hosts.json"); },
+      });
+      expect(r.code).toBe(0);
+      expect(r.source).toBe("anchor");
+      expect(calls[0]).toEqual({ anchorIssue: "CTL-1090", name: "mini-2", address: "mini-2.rozich.com" });
+      // hosts.json untouched — the anchor is the single source of truth
+      expect(read()).toEqual(["mini"]);
+    });
+  });
+
+  test("registerNode failure → code 1 with a diagnostic message", () => {
+    withRoster(["mini"], (hostsPath) => {
+      const r = addHost("mini-2", {
+        hostsPath,
+        self: "mini",
+        anchor: "CTL-1090",
+        registerNode: () => ({ ok: false, error: "exit 1: Linear 401" }),
+        readPeers: () => ({}),
+      });
+      expect(r.code).toBe(1);
+      expect(r.msg).toContain("401");
+    });
+  });
+
+  test("still refuses a name already publishing a live heartbeat on the anchor path", () => {
+    withRoster(["mini"], (hostsPath) => {
+      const r = addHost("ghost", {
+        hostsPath,
+        self: "mini",
+        anchor: "CTL-1090",
+        registerNode: () => { throw new Error("must not register a live-heartbeat name"); },
+        readPeers: () => ({ ghost: { host: "ghost", last_seen: "2026-06-16T12:00:00Z" } }),
+      });
       expect(r.code).toBe(2);
     });
   });
@@ -147,12 +205,13 @@ describe("addHost", () => {
 
 // ── removeHost ─────────────────────────────────────────────────────────────
 
-describe("removeHost", () => {
+describe("removeHost (legacy hosts-fallback path, anchor:null)", () => {
   test("removes a non-self name and commits", () => {
     withRoster(["mini", "mac-studio"], (hostsPath, read) => {
       const r = removeHost("mac-studio", {
         hostsPath,
         self: "mini",
+        anchor: null,
         inFlightCount: () => 0,
         git: () => {},
         commit: true,
@@ -167,6 +226,7 @@ describe("removeHost", () => {
       const r = removeHost("mini", {
         hostsPath,
         self: "mini",
+        anchor: null,
         inFlightCount: () => 2,
       });
       expect(r.code).toBe(2);
@@ -179,6 +239,7 @@ describe("removeHost", () => {
       const r = removeHost("mini", {
         hostsPath,
         self: "mini",
+        anchor: null,
         inFlightCount: () => 0,
         git: () => {},
         commit: false,
@@ -190,14 +251,77 @@ describe("removeHost", () => {
 
   test("name not in roster → code 2", () => {
     withRoster(["mini"], (hostsPath) => {
-      const r = removeHost("nope", { hostsPath, self: "mini", inFlightCount: () => 0 });
+      const r = removeHost("nope", { hostsPath, self: "mini", anchor: null, inFlightCount: () => 0 });
       expect(r.code).toBe(2);
     });
   });
 
   test("missing name → code 2", () => {
     withRoster(["mini"], (hostsPath) => {
-      const r = removeHost("", { hostsPath, self: "mini", inFlightCount: () => 0 });
+      const r = removeHost("", { hostsPath, self: "mini", anchor: null, inFlightCount: () => 0 });
+      expect(r.code).toBe(2);
+    });
+  });
+});
+
+describe("removeHost (anchor writer path, CTL-1273)", () => {
+  test("deregisters the node on the anchor and does NOT touch hosts.json", () => {
+    withRoster(["mini", "mini-2"], (hostsPath, read) => {
+      const calls = [];
+      const r = removeHost("mini-2", {
+        hostsPath,
+        self: "mini",
+        anchor: "CTL-1090",
+        deregisterNode: (args) => {
+          calls.push(args);
+          return { ok: true, removed: true };
+        },
+        inFlightCount: () => 0,
+        git: () => { throw new Error("anchor path must not git-commit hosts.json"); },
+      });
+      expect(r.code).toBe(0);
+      expect(r.source).toBe("anchor");
+      expect(calls[0]).toEqual({ anchorIssue: "CTL-1090", name: "mini-2" });
+      expect(read()).toEqual(["mini", "mini-2"]); // hosts.json untouched
+    });
+  });
+
+  test("absent node on the anchor → code 2 (not in roster)", () => {
+    withRoster(["mini"], (hostsPath) => {
+      const r = removeHost("ghost", {
+        hostsPath,
+        self: "mini",
+        anchor: "CTL-1090",
+        deregisterNode: () => ({ ok: true, removed: false }),
+        inFlightCount: () => 0,
+      });
+      expect(r.code).toBe(2);
+    });
+  });
+
+  test("deregisterNode failure → code 1 with a diagnostic message", () => {
+    withRoster(["mini"], (hostsPath) => {
+      const r = removeHost("mini-2", {
+        hostsPath,
+        self: "mini",
+        anchor: "CTL-1090",
+        deregisterNode: () => ({ ok: false, error: "exit 1: boom" }),
+        inFlightCount: () => 0,
+      });
+      expect(r.code).toBe(1);
+      expect(r.msg).toContain("boom");
+    });
+  });
+
+  test("still refuses removing self while in-flight > 0 on the anchor path", () => {
+    withRoster(["mini"], (hostsPath) => {
+      const r = removeHost("mini", {
+        hostsPath,
+        self: "mini",
+        anchor: "CTL-1090",
+        deregisterNode: () => { throw new Error("must not deregister self with in-flight work"); },
+        inFlightCount: () => 3,
+      });
       expect(r.code).toBe(2);
     });
   });
