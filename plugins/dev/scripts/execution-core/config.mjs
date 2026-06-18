@@ -157,17 +157,37 @@ export function getLayer2ConfigPath() {
   );
 }
 
-// The repo root that owns the committed cluster roster (.catalyst/hosts.json).
-// CATALYST_CONFIG_FILE points at <repoRoot>/.catalyst/config.json (mirrors the
-// reaper-config resolution in daemon.mjs main()); otherwise fall back to the
-// daemon's cwd. Re-resolved per call so tests can redirect via the env var.
-function getCatalystRepoDir() {
+// getCatalystRepoDir — the <repoRoot>/.catalyst directory that owns the committed
+// cluster roster (hosts.json). CTL-1271: this must resolve from a DETERMINISTIC
+// anchor, never bare process.cwd(), or a daemon launched from the wrong directory
+// silently reads a wrong/absent hosts.json and shrinks to a one-node cluster with
+// no error and no log (exactly how mini-2 was knocked out of the fleet).
+//
+// Precedence (re-resolved per call so tests redirect via the env vars):
+//   1. CATALYST_CONFIG_FILE → resolve(cfgFile, "..")  (the daemon's normal path:
+//      CATALYST_CONFIG_FILE points at <repoRoot>/.catalyst/config.json, and
+//      daemon.mjs main() back-writes it before getClusterHosts runs — CTL-862).
+//   2. CATALYST_REPO_ROOT  → resolve(repoRoot, ".catalyst")  (an explicit repo
+//      anchor for launchers/tests that prefer to name the repo, not the config).
+//   3. allowCwd === true   → resolve(process.cwd(), ".catalyst")  (ONLY the CLI
+//      WRITE target opts in — cluster add/remove always runs from inside a repo;
+//      see getCatalystRepoDirHostsPath).
+//   4. otherwise           → null  (UNRESOLVED sentinel). The roster READER
+//      (getClusterHosts) treats null as "no project roster" → single-host
+//      default, and the daemon boot path uses the null/cwd distinction to warn
+//      loudly instead of silently single-hosting (daemon.mjs boot assertion).
+export function getCatalystRepoDir({ allowCwd = false } = {}) {
   const cfgFile = process.env.CATALYST_CONFIG_FILE;
   if (cfgFile) {
     // <repoRoot>/.catalyst/config.json → <repoRoot>/.catalyst
     return resolve(cfgFile, "..");
   }
-  return resolve(process.cwd(), ".catalyst");
+  const repoRoot = process.env.CATALYST_REPO_ROOT;
+  if (typeof repoRoot === "string" && repoRoot.length > 0) {
+    return resolve(repoRoot, ".catalyst");
+  }
+  if (allowCwd) return resolve(process.cwd(), ".catalyst");
+  return null;
 }
 
 // CTL-1211: the cluster control-plane repo (catalyst-cluster) — a pristine clone
@@ -233,15 +253,20 @@ export function getClusterHosts() {
     const hosts = cluster.roster.filter((h) => typeof h === "string" && h.length > 0);
     if (hosts.length > 0) return hosts;
   }
-  try {
-    const raw = readFileSync(resolve(getCatalystRepoDir(), "hosts.json"), "utf8");
-    const parsed = JSON.parse(raw);
-    if (Array.isArray(parsed)) {
-      const hosts = parsed.filter((h) => typeof h === "string" && h.length > 0);
-      if (hosts.length > 0) return hosts;
+  // CTL-1271: only read the project-repo roster when the anchor resolved
+  // deterministically (null = unresolved → never read a cwd-relative hosts.json).
+  const repoDir = getCatalystRepoDir();
+  if (repoDir) {
+    try {
+      const raw = readFileSync(resolve(repoDir, "hosts.json"), "utf8");
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) {
+        const hosts = parsed.filter((h) => typeof h === "string" && h.length > 0);
+        if (hosts.length > 0) return hosts;
+      }
+    } catch {
+      /* absent/malformed roster → single-host default */
     }
-  } catch {
-    /* absent/malformed roster → single-host default */
   }
   return [getHostName()];
 }
@@ -249,9 +274,13 @@ export function getClusterHosts() {
 // getCatalystRepoDirHostsPath — absolute path to the committed cluster roster.
 // Exported so cli/cluster.mjs and its unit tests share one source of truth
 // (avoids drift between the writer and the reader that live in different files).
-// Redirectable via CATALYST_CONFIG_FILE (same as getCatalystRepoDir).
+// Redirectable via CATALYST_CONFIG_FILE / CATALYST_REPO_ROOT (same as
+// getCatalystRepoDir). CTL-1271: this is the CLI WRITE target — `cluster
+// add`/`remove` always runs from inside a repo, so it opts into the cwd anchor
+// (allowCwd) to preserve its existing behavior. The READER (getClusterHosts)
+// does NOT, so a mis-launched daemon can never silently write/read from cwd.
 export function getCatalystRepoDirHostsPath() {
-  return resolve(getCatalystRepoDir(), "hosts.json");
+  return resolve(getCatalystRepoDir({ allowCwd: true }), "hosts.json");
 }
 
 // CTL-1057: a multi-host roster that does NOT include this host means every

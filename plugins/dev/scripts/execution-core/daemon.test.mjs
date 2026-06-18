@@ -24,6 +24,7 @@ import {
   consumeEventTail,
   parseEventTailChunk,
   resolveBootConcurrency,
+  resolveDaemonConfigPath,
   handleCommentWake,
   __resetEventTailCursorForTest,
   __getEventTailLeftoverForTest,
@@ -1875,6 +1876,42 @@ describe("CTL-862 — daemon CATALYST_CONFIG_FILE propagation", () => {
       else process.env.CATALYST_CONFIG_FILE = prev;
     }
   });
+
+  // CTL-1271: main()'s configPath resolution must NOT depend on process.cwd().
+  // resolveDaemonConfigPath is the extracted pure helper main() now uses; it is
+  // unit-tested directly with an injected env + registry + cwd so the resolution
+  // is deterministic and the cwd path is only a flagged last resort.
+  test("CTL-1271: resolveDaemonConfigPath uses the first registry repoRoot, not process.cwd(), when CATALYST_CONFIG_FILE is unset", () => {
+    const res = resolveDaemonConfigPath({
+      env: {}, // CATALYST_CONFIG_FILE unset
+      listProjects: () => [{ team: "CTL", repoRoot: "/srv/catalyst" }],
+      cwd: () => "/some/wrong/dir",
+    });
+    expect(res.configPath).toBe(join("/srv/catalyst", ".catalyst", "config.json"));
+    expect(res.resolutionSource).toBe("registry");
+    expect(res.configPath).not.toBe(join("/some/wrong/dir", ".catalyst", "config.json"));
+  });
+
+  test("CTL-1271: resolveDaemonConfigPath honors CATALYST_CONFIG_FILE when set (env wins over registry/cwd)", () => {
+    const res = resolveDaemonConfigPath({
+      env: { CATALYST_CONFIG_FILE: "/explicit/.catalyst/config.json" },
+      listProjects: () => [{ team: "CTL", repoRoot: "/srv/catalyst" }],
+      cwd: () => "/some/wrong/dir",
+    });
+    expect(res.configPath).toBe("/explicit/.catalyst/config.json");
+    expect(res.resolutionSource).toBe("env");
+  });
+
+  test("CTL-1271: resolveDaemonConfigPath falls back to cwd only as a flagged last resort (no env, empty registry)", () => {
+    const res = resolveDaemonConfigPath({
+      env: {},
+      listProjects: () => [],
+      cwd: () => "/launch/cwd",
+    });
+    expect(res.configPath).toBe(join("/launch/cwd", ".catalyst", "config.json"));
+    // The flag is what lets the boot path warn loudly instead of single-hosting silently.
+    expect(res.resolutionSource).toBe("cwd");
+  });
 });
 
 describe("CTL-862 — daemon boot-log ownership context", () => {
@@ -1916,6 +1953,112 @@ describe("CTL-862 — daemon boot-log ownership context", () => {
       expect(obj.owns).toBeLessThanOrEqual(eligible.length);
     } finally {
       infoSpy.mockRestore();
+    }
+  });
+
+  // CTL-1271: the boot log must additionally state WHERE the roster came from
+  // (sourcePath) and whether multi-host is on (multiHost), so a degraded or
+  // single-host resolution is operator-visible at boot rather than silent.
+  test("CTL-1271: boot log carries sourcePath and multiHost fields", () => {
+    const infoSpy = spyOn(log, "info");
+    const ROSTER = ["mini", "mac-studio"];
+    try {
+      startDaemon({
+        ...baseOpts(),
+        readAllEligible: () => [{ identifier: "ENG-1" }],
+        bootHosts: ROSTER,
+        bootHostName: "mini",
+        bootSourcePath: "/srv/catalyst/.catalyst/hosts.json",
+        bootResolutionSource: "env",
+      });
+      const bootCall = infoSpy.mock.calls.find(
+        (c) => typeof c[1] === "string" && c[1].includes("daemon started")
+      );
+      expect(bootCall).toBeDefined();
+      const obj = bootCall[0];
+      expect(typeof obj.sourcePath).toBe("string");
+      expect(obj.sourcePath.length).toBeGreaterThan(0);
+      expect(obj.multiHost).toBe(true);
+    } finally {
+      infoSpy.mockRestore();
+    }
+  });
+
+  // CTL-1271: the core regression guard. A daemon that meant to be multi-host but
+  // resolved to a single-host roster (or resolved non-deterministically from cwd)
+  // must emit ONE loud warn naming the degraded roster + sourcePath — never a
+  // silent single-node start (exactly how mini-2 was knocked out of the fleet).
+  test("CTL-1271: single-host fallback with a multi-host expectation emits a LOUD warn", () => {
+    const warnSpy = spyOn(log, "warn");
+    try {
+      startDaemon({
+        ...baseOpts(),
+        readAllEligible: () => [{ identifier: "ENG-1" }],
+        bootHosts: ["mini"], // degraded to one node
+        bootHostName: "mini",
+        bootSourcePath: "/launch/cwd/.catalyst/hosts.json",
+        bootResolutionSource: "env",
+        expectedMultiHost: true,
+      });
+      const degradedWarn = warnSpy.mock.calls.find(
+        (c) => typeof c[1] === "string" && /roster/i.test(c[1]) && /single|degrad|one-node|one node/i.test(c[1])
+      );
+      expect(degradedWarn).toBeDefined();
+      // The warn payload names the degraded roster + the resolved source.
+      const obj = degradedWarn[0];
+      expect(Array.isArray(obj.roster)).toBe(true);
+      expect(obj.roster).toEqual(["mini"]);
+      expect(typeof obj.sourcePath).toBe("string");
+      expect(obj.sourcePath.length).toBeGreaterThan(0);
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  // CTL-1271: a non-deterministic resolution (cwd fallback) is ALSO loud, even
+  // without an explicit multi-host expectation — the cwd anchor is the bug.
+  test("CTL-1271: a cwd-resolved boot emits a LOUD warn about non-deterministic resolution", () => {
+    const warnSpy = spyOn(log, "warn");
+    try {
+      startDaemon({
+        ...baseOpts(),
+        readAllEligible: () => [{ identifier: "ENG-1" }],
+        bootHosts: ["mini"],
+        bootHostName: "mini",
+        bootSourcePath: "/launch/cwd/.catalyst/hosts.json",
+        bootResolutionSource: "cwd", // non-deterministic
+      });
+      const degradedWarn = warnSpy.mock.calls.find(
+        (c) => typeof c[1] === "string" && /roster/i.test(c[1])
+      );
+      expect(degradedWarn).toBeDefined();
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  // CTL-1271: a legitimately single-host deployment (deterministic resolution, no
+  // multi-host expectation) must STAY SILENT — the loud assertion must not become
+  // noise on real single-primary hosts (mirrors hostMembershipWarning's
+  // length<=1 → null discipline).
+  test("CTL-1271: a legitimately single-host deployment does NOT warn about the roster", () => {
+    const warnSpy = spyOn(log, "warn");
+    try {
+      startDaemon({
+        ...baseOpts(),
+        readAllEligible: () => [{ identifier: "ENG-1" }],
+        bootHosts: ["mini"],
+        bootHostName: "mini",
+        bootSourcePath: "/srv/catalyst/.catalyst/hosts.json",
+        bootResolutionSource: "env", // deterministic
+        expectedMultiHost: false,
+      });
+      const degradedWarn = warnSpy.mock.calls.find(
+        (c) => typeof c[1] === "string" && /roster/i.test(c[1]) && /single|degrad|one-node|one node|non-deterministic|cwd/i.test(c[1])
+      );
+      expect(degradedWarn).toBeUndefined();
+    } finally {
+      warnSpy.mockRestore();
     }
   });
 });

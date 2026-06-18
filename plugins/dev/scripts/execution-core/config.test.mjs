@@ -24,6 +24,8 @@ import {
   AUTOTUNE_ENABLED,
   getHostName,
   getClusterHosts,
+  getCatalystRepoDir,
+  getCatalystRepoDirHostsPath,
   HEARTBEAT_INTERVAL_MS,
   hostMembershipWarning,
   getDrainFlagPath,
@@ -405,6 +407,104 @@ describe("getClusterHosts cluster-repo-first (CTL-1211)", () => {
   test("unversioned cluster.json is treated as v1 and read", () => {
     writeCluster({ roster: ["mini", "mini-2"] });
     expect(getClusterHosts()).toEqual(["mini", "mini-2"]);
+  });
+});
+
+describe("getCatalystRepoDir deterministic anchor (CTL-1271)", () => {
+  // CTL-1271: the daemon's roster reader must resolve <repoRoot>/.catalyst from a
+  // DETERMINISTIC anchor (CATALYST_CONFIG_FILE, else CATALYST_REPO_ROOT), never
+  // bare process.cwd(). A wrong cwd must NOT silently pick up a wrong/decoy
+  // hosts.json and shrink the daemon to a one-node cluster. These cases save/
+  // restore the roster envs AND the cwd (we process.chdir into a decoy dir),
+  // mirroring the strict save/restore in getClusterHosts above.
+  const ROSTER_ENVS = [
+    "CATALYST_CONFIG_FILE",
+    "CATALYST_REPO_ROOT",
+    "CATALYST_HOST_NAME",
+    "CATALYST_LAYER2_CONFIG_FILE",
+    "CATALYST_CLUSTER_DIR",
+  ];
+  let saved = {};
+  let repo, decoy, prevCwd;
+
+  beforeEach(() => {
+    for (const k of ROSTER_ENVS) {
+      saved[k] = process.env[k];
+      delete process.env[k];
+    }
+    prevCwd = process.cwd();
+    repo = mkdtempSync(join(tmpdir(), "ctl1271-repo-"));
+    mkdirSync(join(repo, ".catalyst"), { recursive: true });
+    // A decoy repo whose .catalyst/hosts.json must NEVER be read just because the
+    // daemon happens to be launched from this directory.
+    decoy = mkdtempSync(join(tmpdir(), "ctl1271-decoy-"));
+    mkdirSync(join(decoy, ".catalyst"), { recursive: true });
+    writeFileSync(join(decoy, ".catalyst", "hosts.json"), JSON.stringify(["decoy-host"]));
+    // Pin the cluster-repo path at a deterministic miss so the project-repo /
+    // anchor path is exercised in isolation (same discipline as CTL-1211 above).
+    process.env.CATALYST_CLUSTER_DIR = join(repo, "no-such-cluster");
+  });
+
+  afterEach(() => {
+    process.chdir(prevCwd);
+    for (const k of ROSTER_ENVS) {
+      if (saved[k] === undefined) delete process.env[k];
+      else process.env[k] = saved[k];
+    }
+    saved = {};
+    rmSync(repo, { recursive: true, force: true });
+    rmSync(decoy, { recursive: true, force: true });
+  });
+
+  test("resolves <repoRoot>/.catalyst from CATALYST_CONFIG_FILE when set (unchanged contract)", () => {
+    process.env.CATALYST_CONFIG_FILE = join(repo, ".catalyst", "config.json");
+    expect(getCatalystRepoDir()).toBe(join(repo, ".catalyst"));
+  });
+
+  test("does NOT fall back to process.cwd() when CATALYST_CONFIG_FILE is unset (decoy cwd never read)", () => {
+    delete process.env.CATALYST_CONFIG_FILE;
+    delete process.env.CATALYST_REPO_ROOT;
+    process.env.CATALYST_HOST_NAME = "solo-host";
+    process.chdir(decoy);
+    // The decoy's hosts.json (["decoy-host"]) lives in cwd — it must NOT leak in.
+    expect(getClusterHosts()).not.toEqual(["decoy-host"]);
+    expect(getClusterHosts()).toEqual(["solo-host"]);
+  });
+
+  test("CATALYST_REPO_ROOT is the deterministic fallback anchor when CATALYST_CONFIG_FILE is unset", () => {
+    delete process.env.CATALYST_CONFIG_FILE;
+    process.env.CATALYST_REPO_ROOT = repo;
+    writeFileSync(join(repo, ".catalyst", "hosts.json"), JSON.stringify(["mini", "mini-2"]));
+    process.chdir(decoy); // cwd points at the decoy, but the anchor must win.
+    expect(getCatalystRepoDir()).toBe(join(repo, ".catalyst"));
+    expect(getClusterHosts()).toEqual(["mini", "mini-2"]);
+  });
+
+  test("with neither CATALYST_CONFIG_FILE nor CATALYST_REPO_ROOT, resolution is unresolved (null), not the cwd roster", () => {
+    delete process.env.CATALYST_CONFIG_FILE;
+    delete process.env.CATALYST_REPO_ROOT;
+    process.env.CATALYST_HOST_NAME = "solo-host";
+    process.chdir(decoy);
+    // The contract: an unresolved anchor returns the sentinel (null), and is
+    // explicitly NOT resolve(cwd, ".catalyst"). This is what lets the daemon's
+    // boot path detect a degraded/non-deterministic resolution loudly.
+    expect(getCatalystRepoDir()).toBeNull();
+    expect(getCatalystRepoDir()).not.toBe(join(decoy, ".catalyst"));
+    // And the reader degrades to the single-host default, never the decoy roster.
+    expect(getClusterHosts()).toEqual(["solo-host"]);
+  });
+
+  test("getCatalystRepoDirHostsPath (CLI writer) keeps its cwd-relative target for in-repo CLI use", () => {
+    // The reader is deterministic, but the CLI write target (cluster add/remove,
+    // always run from inside a repo) must keep resolving against cwd so the
+    // reader/writer divergence guard (CTL-1211) is preserved. Anchor unset →
+    // the writer falls back to <cwd>/.catalyst/hosts.json.
+    delete process.env.CATALYST_CONFIG_FILE;
+    delete process.env.CATALYST_REPO_ROOT;
+    process.chdir(repo);
+    // Compare against process.cwd() (not the raw mkdtemp path) — macOS
+    // canonicalizes /var/folders → /private/var/folders on chdir.
+    expect(getCatalystRepoDirHostsPath()).toBe(join(process.cwd(), ".catalyst", "hosts.json"));
   });
 });
 

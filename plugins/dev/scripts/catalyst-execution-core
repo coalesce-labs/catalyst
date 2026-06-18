@@ -166,6 +166,28 @@ cmd_start() {
 		fi
 		unset _ocid _ocsec _otok
 	fi
+	# CTL-1271: pin a DETERMINISTIC roster anchor before nohup so the daemon's
+	# cwd can NEVER decide the cluster roster. The daemon resolves its roster from
+	# <repoRoot>/.catalyst/hosts.json; if it is launched from the wrong directory
+	# with no CATALYST_CONFIG_FILE, it silently falls back to a one-node cluster
+	# and disables HRW work-sharing with no error (this is how mini-2 was knocked
+	# out of the fleet). Derive the canonical config path from the registry's first
+	# enrolled project repoRoot and export it (plus CATALYST_REPO_ROOT as a
+	# secondary anchor). Best-effort: a failed derivation must NEVER block launch —
+	# the daemon's resolveDaemonConfigPath repeats this derivation and warns loudly
+	# if it cannot resolve deterministically. Honor any value already set.
+	if [[ -z "${CATALYST_CONFIG_FILE-}" ]]; then
+		local _registry="$EC_DIR/registry.json" _repo_root
+		_repo_root="$(jq -r '.projects[0].repoRoot // empty' "$_registry" 2>/dev/null)"
+		if [[ -n "$_repo_root" && -d "$_repo_root/.catalyst" ]]; then
+			export CATALYST_CONFIG_FILE="$_repo_root/.catalyst/config.json"
+			export CATALYST_REPO_ROOT="$_repo_root"
+			echo "catalyst-execution-core: pinned roster anchor CATALYST_CONFIG_FILE=$CATALYST_CONFIG_FILE (CTL-1271)" >&2
+		else
+			echo "catalyst-execution-core: WARNING could not derive a canonical CATALYST_CONFIG_FILE from $_registry — daemon will assert its roster source at boot (CTL-1271)" >&2
+		fi
+		unset _registry _repo_root
+	fi
 	nohup "$runtime" "$DAEMON_SCRIPT" --pid-file "$PID_FILE" >"$LOG_FILE" 2>&1 &
 	local server_pid=$!
 	disown "$server_pid" 2>/dev/null || true

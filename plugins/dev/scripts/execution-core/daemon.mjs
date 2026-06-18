@@ -43,6 +43,7 @@ import {
   readRatelimitPollerConfig,
   getHostName,      // CTL-862
   getClusterHosts,  // CTL-862
+  getCatalystRepoDir, // CTL-1271: deterministic roster-source path for the boot log
 } from "./config.mjs";
 import { ownedBy } from "./hrw.mjs"; // CTL-862: HRW ownership filter
 import { startWaitWatcher as realStartWaitWatcher } from "./wait-watcher.mjs";
@@ -448,6 +449,11 @@ export function startDaemon({
   // once before the scheduler starts and never re-reads. Null in tests that
   // never resolve a config path.
   configPath = null,
+  // CTL-1271: how configPath was resolved by main()'s resolveDaemonConfigPath —
+  // "env" | "registry" | "cwd". "cwd" means a non-deterministic (legacy) anchor;
+  // the boot assertion warns loudly in that case. null in tests that don't drive
+  // main(); the boot path treats null as "not non-deterministic".
+  configResolutionSource = null,
   // CTL-678: machine-canonical Layer-2 path (~/.config/catalyst/config.json).
   // Threaded into startScheduler alongside configPath so the per-tick re-read
   // can apply Layer-2's per-field override on every tick (hot-reload of the
@@ -466,6 +472,15 @@ export function startDaemon({
   readAllEligible = readAllEligibleTickets,
   bootHosts = undefined,
   bootHostName = undefined,
+  // CTL-1271: boot-assertion seams. bootSourcePath = the resolved roster-source
+  // file (production: getCatalystRepoDir()/hosts.json, or "<unresolved>");
+  // bootResolutionSource = how that source resolved ("env"|"registry"|"cwd"),
+  // defaulting to configResolutionSource; expectedMultiHost = an explicit signal
+  // that this deployment intends to be multi-host (so a length-1 roster is a
+  // degradation worth a loud warn, not a legitimate single-primary host).
+  bootSourcePath = undefined,
+  bootResolutionSource = undefined,
+  expectedMultiHost = undefined,
 } = {}) {
   const orchDir = getExecutionCoreDir();
   ensureState(orchDir);
@@ -718,9 +733,26 @@ export function startDaemon({
   const bootSelf = bootHostName ?? getHostName();
   const bootEligible = readAllEligible();
   const bootOwns = bootEligible.filter((t) => ownedBy(t.identifier, bootRoster, bootSelf)).length;
-  // CTL-1084: emit a structured node.boot event so catalyst-stack status can
-  // prove what the restart did (version, effective flags, adopted/cleared/rewalk counts).
-  // Fail-open — emitBootEvent never throws. Kept alongside the pino log (not replacing it).
+
+  // CTL-1271: resolve the boot-assertion inputs.
+  //  - sourcePath: WHERE the roster came from. Production derives it from the
+  //    deterministic anchor (getCatalystRepoDir() → <dir>/hosts.json); a null
+  //    anchor means the roster could not be resolved deterministically.
+  //  - resolutionSource: how the config/roster anchor resolved (from main()).
+  //    "cwd" is the non-deterministic legacy path.
+  //  - multiHost: whether HRW work-sharing is actually on (roster length > 1).
+  const resolvedRepoDir = (() => {
+    try { return getCatalystRepoDir(); } catch { return null; }
+  })();
+  const bootSourcePathResolved =
+    bootSourcePath ?? (resolvedRepoDir ? resolve(resolvedRepoDir, "hosts.json") : "<unresolved>");
+  const bootResolutionSourceResolved = bootResolutionSource ?? configResolutionSource ?? null;
+  const bootMultiHost = Array.isArray(bootRoster) && bootRoster.length > 1;
+
+  // CTL-862/CTL-1084: emit a structured node.boot event so catalyst-stack status
+  // can prove what the restart did (version, effective flags, adopted/cleared/
+  // rewalk counts). Fail-open — emitBootEvent never throws. Kept alongside the
+  // pino log (not replacing it).
   emitBootEvent({
     summary: {
       adoptedWorkers:   _bootReport?.workers?.running?.length ?? 0,
@@ -729,8 +761,47 @@ export function startDaemon({
       rewalkDispatched: _bootResume?.dispatched ?? 0,
     },
   });
+
+  // CTL-1271: BOOT ASSERTION. A daemon must never SILENTLY shrink to a one-node
+  // cluster. Warn loudly (fail-open — never throw mid-boot) when either:
+  //   (a) the config/roster anchor resolved non-deterministically (cwd fallback),
+  //       which is the cwd-dependence bug that knocked mini-2 out of the fleet; OR
+  //   (b) the roster degraded to single-host while this deployment expected
+  //       multi-host (expectedMultiHost === true).
+  // A legitimately single-host deployment (deterministic resolution, no
+  // multi-host expectation) stays SILENT — mirroring hostMembershipWarning's
+  // length<=1 → null discipline so the assertion never becomes noise.
+  const nonDeterministic = bootResolutionSourceResolved === "cwd";
+  const degradedSingleHost = expectedMultiHost === true && !bootMultiHost;
+  if (nonDeterministic || degradedSingleHost) {
+    log.warn(
+      {
+        roster: bootRoster,
+        sourcePath: bootSourcePathResolved,
+        resolutionSource: bootResolutionSourceResolved,
+        multiHost: bootMultiHost,
+        host: bootSelf,
+      },
+      degradedSingleHost
+        ? `execution-core daemon: roster degraded to a single node [${(bootRoster ?? []).join(", ")}] ` +
+            `(source: ${bootSourcePathResolved}) while multi-host was expected — HRW work-sharing is OFF. ` +
+            `This daemon now owns every ticket and shares nothing. Check the roster source and CATALYST_CONFIG_FILE.`
+        : `execution-core daemon: roster resolved NON-DETERMINISTICALLY from cwd ` +
+            `(source: ${bootSourcePathResolved}, roster [${(bootRoster ?? []).join(", ")}]) — a wrong launch ` +
+            `directory can silently single-host the daemon. Export CATALYST_CONFIG_FILE / CATALYST_REPO_ROOT at launch.`
+    );
+  }
+
   log.info(
-    { orchDir, host: bootSelf, owns: bootOwns, eligible: bootEligible.length, roster: bootRoster },
+    {
+      orchDir,
+      host: bootSelf,
+      owns: bootOwns,
+      eligible: bootEligible.length,
+      roster: bootRoster,
+      sourcePath: bootSourcePathResolved, // CTL-1271
+      multiHost: bootMultiHost,           // CTL-1271
+    },
     "execution-core daemon started"
   );
 }
@@ -1203,16 +1274,62 @@ export function resolveBootConcurrency({ layer1Path, layer2Path }) {
   return mergeExecutionCoreConcurrency(layer1, layer2);
 }
 
+// resolveDaemonConfigPath — CTL-1271. Resolve the daemon's config path from a
+// DETERMINISTIC anchor, never bare process.cwd(). Pure helper (env + registry +
+// cwd injected) so it is unit-testable and main() never re-implements it.
+//
+// Precedence:
+//   1. CATALYST_CONFIG_FILE  → verbatim, resolutionSource "env" (the launcher /
+//      the CTL-862 back-write virtually always set this in production).
+//   2. first registry project repoRoot → <repoRoot>/.catalyst/config.json,
+//      resolutionSource "registry" (the registry is the daemon's source of
+//      truth for enrolled projects — a stable anchor independent of cwd).
+//   3. <cwd>/.catalyst/config.json, resolutionSource "cwd" — the LEGACY path,
+//      kept only as a last resort and FLAGGED so the boot path can warn loudly
+//      instead of silently shrinking to a one-node cluster.
+//
+// Returns { configPath, resolutionSource }.
+export function resolveDaemonConfigPath({
+  env = process.env,
+  listProjects = realListProjects,
+  cwd = () => process.cwd(),
+} = {}) {
+  const explicit = env.CATALYST_CONFIG_FILE;
+  if (typeof explicit === "string" && explicit.length > 0) {
+    return { configPath: explicit, resolutionSource: "env" };
+  }
+  let projects = [];
+  try {
+    projects = listProjects() || [];
+  } catch {
+    /* unreadable registry → fall through to the cwd last resort */
+  }
+  const repoRoot = projects.find((p) => typeof p?.repoRoot === "string" && p.repoRoot.length > 0)?.repoRoot;
+  if (repoRoot) {
+    return {
+      configPath: resolve(repoRoot, ".catalyst", "config.json"),
+      resolutionSource: "registry",
+    };
+  }
+  return {
+    configPath: resolve(cwd(), ".catalyst", "config.json"),
+    resolutionSource: "cwd",
+  };
+}
+
 function main() {
   const idx = process.argv.indexOf("--pid-file");
   const pidFile = idx >= 0 ? process.argv[idx + 1] : null;
 
-  // CTL-649 Phase 9: thread the periodic-reaper config from .catalyst/config.json
-  // into the timer. Path is env-overridable (CATALYST_CONFIG_FILE); otherwise
-  // the daemon reads the launch-cwd's config. Absent/partial config falls back
-  // to the built-in defaults (enabled, 600s) inside startReaperAndTimer.
-  const configPath =
-    process.env.CATALYST_CONFIG_FILE || resolve(process.cwd(), ".catalyst", "config.json");
+  // CTL-649 Phase 9 / CTL-1271: thread the periodic-reaper config from
+  // .catalyst/config.json into the timer. Path is resolved from a DETERMINISTIC
+  // anchor (CATALYST_CONFIG_FILE → registry repoRoot → cwd last resort), never
+  // bare process.cwd() — a wrong cwd must not silently pick up a wrong config /
+  // roster (CTL-1271). resolutionSource is carried into startDaemon so the boot
+  // path can warn loudly when resolution degraded to the cwd fallback.
+  // Absent/partial config falls back to the built-in defaults inside
+  // startReaperAndTimer.
+  const { configPath, resolutionSource: configResolutionSource } = resolveDaemonConfigPath();
   const orphanReaperConfig = readOrphanReaperConfig(configPath);
   // CTL-707: read the worktree-refresh config from the same config file.
   const worktreeRefreshConfig = readWorktreeRefreshConfig(configPath);
@@ -1246,7 +1363,7 @@ function main() {
   process.on("unhandledRejection", fatal("unhandled rejection"));
 
   try {
-    startDaemon({ pidFile, orphanReaperConfig, worktreeRefreshConfig, stalePrRescueConfig, orphanPrSweepConfig, concurrency, configPath, layer2Path }); // CTL-676 + CTL-678 + CTL-707 + CTL-782 + CTL-1175
+    startDaemon({ pidFile, orphanReaperConfig, worktreeRefreshConfig, stalePrRescueConfig, orphanPrSweepConfig, concurrency, configPath, configResolutionSource, layer2Path }); // CTL-676 + CTL-678 + CTL-707 + CTL-782 + CTL-1175 + CTL-1271
   } catch (err) {
     log.error({ err }, "execution-core daemon: failed to start");
     process.exit(1);
