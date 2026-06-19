@@ -1,5 +1,26 @@
 # Changelog
 
+## [12.13.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.12.0...catalyst-dev-v12.13.0) (2026-06-19)
+
+
+### Features
+
+* **dev:** CTL-1245 — revive dead-but-running-signalled workers ([#2195](https://github.com/coalesce-labs/catalyst/issues/2195)) ([8c420f8](https://github.com/coalesce-labs/catalyst/commit/8c420f8a23238ae356dcc45f76c163ef08ba147f))
+* **dev:** CTL-1260 — reframe recovery-pass into the board-health delegate ([#2254](https://github.com/coalesce-labs/catalyst/issues/2254)) ([33101d6](https://github.com/coalesce-labs/catalyst/commit/33101d6f44c3e56a762f88f745c16608a3d47753))
+* **dev:** CTL-1262 — tag otel-forward events with stable catalyst.node.name resource attr ([#2242](https://github.com/coalesce-labs/catalyst/issues/2242)) ([c6c0000](https://github.com/coalesce-labs/catalyst/commit/c6c0000e4b4421e60d3f34364c1934c37d915144))
+* **dev:** CTL-1263 — install + register + auto-start the Alloy log-shipper per host ([#2248](https://github.com/coalesce-labs/catalyst/issues/2248)) ([8cd288a](https://github.com/coalesce-labs/catalyst/commit/8cd288a3fd2dab01d055237dcfb2a113e787b3ab))
+* **dev:** CTL-1277 — periodic broker reconcile of board cache state+labels vs live Linear ([#2264](https://github.com/coalesce-labs/catalyst/issues/2264)) ([bbf9b22](https://github.com/coalesce-labs/catalyst/commit/bbf9b229eaea8700d1a62c6758662a4d84f7bf7f))
+* **dev:** CTL-1279 — sensing-substrate cookbook + wire recovery-pass to it ([#2261](https://github.com/coalesce-labs/catalyst/issues/2261)) ([e6479a0](https://github.com/coalesce-labs/catalyst/commit/e6479a05914cca5988b93545d9770e534e3ac27a))
+* **dev:** CTL-1282 — cache reconcile async + re-entrancy guard (non-blocking) ([#2270](https://github.com/coalesce-labs/catalyst/issues/2270)) ([9736317](https://github.com/coalesce-labs/catalyst/commit/97363179cd9dba9ab6844b70766e0fd715ec33a7))
+* **dev:** off-the-shelf Grafana Alloy daemon-log shipper config (CTL-1261) ([#2243](https://github.com/coalesce-labs/catalyst/issues/2243)) ([425356c](https://github.com/coalesce-labs/catalyst/commit/425356cae411f1d4e3891991147fea38722df6f4))
+
+
+### Bug Fixes
+
+* **dev:** CTL-1258 — render resolved project icon (glyph|favicon) consistently across all orch-monitor surfaces ([#2225](https://github.com/coalesce-labs/catalyst/issues/2225)) ([983905d](https://github.com/coalesce-labs/catalyst/commit/983905d1e6bd3152d5ccffe18ea071cef8b7f867))
+* **dev:** CTL-1277 — broker boot-crash (pino logger binding) ([#2265](https://github.com/coalesce-labs/catalyst/issues/2265)) ([472adfe](https://github.com/coalesce-labs/catalyst/commit/472adfe79bde686bf7baa958007b74291fe9a66c))
+* **dev:** log-shipper service.name + catalyst.node.name tagging (semconv) + brew formula ([#2250](https://github.com/coalesce-labs/catalyst/issues/2250)) ([fa9c244](https://github.com/coalesce-labs/catalyst/commit/fa9c24404ae0f6138e91faee4f1b42936c585451))
+
 ## [12.12.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.11.0...catalyst-dev-v12.12.0) (2026-06-17)
 
 
