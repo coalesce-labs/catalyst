@@ -92,25 +92,25 @@ describe("decideReconcile — pure drift decision", () => {
 
 const desc = (over = {}) => ({ ticket: "CTL-1", state: "Todo", labels: [], ...over });
 
-describe("reconcileCacheState — full pass", () => {
-  test("mode=off is a no-op (never fetches or writes)", () => {
+describe("reconcileCacheState — full pass (async, CTL-1282)", () => {
+  test("mode=off is a no-op (never fetches or writes)", async () => {
     let fetched = 0;
-    const out = reconcileCacheState({
+    const out = await reconcileCacheState({
       mode: "off",
       getAll: () => [desc()],
-      fetch: () => { fetched++; return { state: "Implement", labels: [] }; },
+      fetch: async () => { fetched++; return { state: "Implement", labels: [] }; },
       upsert: () => { throw new Error("must not write"); },
     });
     expect(out.scanned).toBe(0);
     expect(fetched).toBe(0);
   });
 
-  test("enforce writes ONLY the drifted field (key-presence)", () => {
+  test("enforce writes ONLY the drifted field (key-presence)", async () => {
     const writes = [];
-    const out = reconcileCacheState({
+    const out = await reconcileCacheState({
       mode: "enforce",
       getAll: () => [desc({ ticket: "CTL-764", state: "Todo", labels: ["x"] })],
-      fetch: () => ({ state: "Implement", labels: ["x"] }),
+      fetch: async () => ({ state: "Implement", labels: ["x"] }),
       upsert: (p) => writes.push(p),
     });
     expect(out.scanned).toBe(1);
@@ -119,47 +119,47 @@ describe("reconcileCacheState — full pass", () => {
     expect("labels" in writes[0]).toBe(false); // labels matched → not written
   });
 
-  test("shadow counts the change but writes nothing", () => {
+  test("shadow counts the change but writes nothing", async () => {
     let wrote = false;
-    const out = reconcileCacheState({
+    const out = await reconcileCacheState({
       mode: "shadow",
       getAll: () => [desc({ state: "Todo" })],
-      fetch: () => ({ state: "Implement", labels: [] }),
+      fetch: async () => ({ state: "Implement", labels: [] }),
       upsert: () => { wrote = true; },
     });
     expect(out.changed).toBe(1);
     expect(wrote).toBe(false);
   });
 
-  test("idempotent: no drift → no write", () => {
+  test("idempotent: no drift → no write", async () => {
     const writes = [];
-    const out = reconcileCacheState({
+    const out = await reconcileCacheState({
       mode: "enforce",
       getAll: () => [desc({ state: "Implement", labels: ["a"] })],
-      fetch: () => ({ state: "Implement", labels: ["a"] }),
+      fetch: async () => ({ state: "Implement", labels: ["a"] }),
       upsert: (p) => writes.push(p),
     });
     expect(out.changed).toBe(0);
     expect(writes).toEqual([]);
   });
 
-  test("terminal tickets are skipped (not fetched)", () => {
+  test("terminal tickets are skipped (not fetched)", async () => {
     let fetched = 0;
-    const out = reconcileCacheState({
+    const out = await reconcileCacheState({
       mode: "enforce",
       getAll: () => [desc({ ticket: "CTL-D", state: "Done" }), desc({ ticket: "CTL-C", state: "Canceled" })],
-      fetch: () => { fetched++; return { state: "Implement", labels: [] }; },
+      fetch: async () => { fetched++; return { state: "Implement", labels: [] }; },
       upsert: () => {},
     });
     expect(out.scanned).toBe(0);
     expect(fetched).toBe(0);
   });
 
-  test("fail-soft: a fetch error counts as failed and never throws", () => {
-    const out = reconcileCacheState({
+  test("fail-soft: a fetch error counts as failed and never throws", async () => {
+    const out = await reconcileCacheState({
       mode: "enforce",
       getAll: () => [desc({ ticket: "CTL-A" }), desc({ ticket: "CTL-B", state: "Todo" })],
-      fetch: (t) => (t === "CTL-A" ? { state: null, labels: null, error: "exit 1" } : { state: "Implement", labels: [] }),
+      fetch: async (t) => (t === "CTL-A" ? { state: null, labels: null, error: "exit 1" } : { state: "Implement", labels: [] }),
       upsert: () => {},
     });
     expect(out.scanned).toBe(2);
@@ -167,25 +167,36 @@ describe("reconcileCacheState — full pass", () => {
     expect(out.changed).toBe(1);
   });
 
-  test("an upsert throw is fail-soft (counted failed, not changed)", () => {
-    const out = reconcileCacheState({
+  test("a REJECTED fetch promise is fail-soft (counted failed, never throws)", async () => {
+    const out = await reconcileCacheState({
+      mode: "enforce",
+      getAll: () => [desc({ ticket: "CTL-A", state: "Todo" })],
+      fetch: async () => { throw new Error("spawn EPIPE"); },
+      upsert: () => {},
+    });
+    expect(out.scanned).toBe(1);
+    expect(out.failed).toBe(1);
+  });
+
+  test("an upsert throw is fail-soft (counted failed, not changed)", async () => {
+    const out = await reconcileCacheState({
       mode: "enforce",
       getAll: () => [desc({ state: "Todo" })],
-      fetch: () => ({ state: "Implement", labels: [] }),
+      fetch: async () => ({ state: "Implement", labels: [] }),
       upsert: () => { throw new Error("db locked"); },
     });
     expect(out.failed).toBe(1);
     expect(out.changed).toBe(0);
   });
 
-  test("perPassCap bounds the work", () => {
+  test("perPassCap bounds the work", async () => {
     const many = Array.from({ length: 10 }, (_, i) => desc({ ticket: `CTL-${i}`, state: "Todo" }));
     let fetched = 0;
-    const out = reconcileCacheState({
+    const out = await reconcileCacheState({
       mode: "enforce",
       perPassCap: 3,
       getAll: () => many,
-      fetch: () => { fetched++; return { state: "Implement", labels: [] }; },
+      fetch: async () => { fetched++; return { state: "Implement", labels: [] }; },
       upsert: () => {},
     });
     expect(out.scanned).toBe(3);
@@ -221,29 +232,48 @@ describe("startCacheReconcileTimer", () => {
     expect(armed).toBe(false);
   });
 
-  test("enabled arms a timer; its pass emits an audit event", () => {
+  test("enabled arms a timer; its async pass emits an audit event", async () => {
     let pass;
     const emits = [];
     startCacheReconcileTimer({
       config: { mode: "enforce", intervalMs: 1000, perPassCap: 10 },
-      reconcile: () => ({ mode: "enforce", scanned: 2, changed: 1, failed: 0, tickets: [] }),
+      reconcile: async () => ({ mode: "enforce", scanned: 2, changed: 1, failed: 0, tickets: [] }),
       emit: (e) => emits.push(e),
       setTimer: (fn) => { pass = fn; return 42; },
     });
     expect(typeof pass).toBe("function");
-    pass();
+    await pass();
     expect(emits).toEqual([{ kind: "cache.reconcile", mode: "enforce", scanned: 2, changed: 1, failed: 0 }]);
   });
 
-  test("a throwing pass is caught (fail-soft) and emit failure never propagates", () => {
+  test("a throwing pass is caught (fail-soft) and emit failure never propagates", async () => {
     let pass;
     startCacheReconcileTimer({
       config: { mode: "enforce", intervalMs: 1000, perPassCap: 10 },
-      reconcile: () => { throw new Error("boom"); },
+      reconcile: async () => { throw new Error("boom"); },
       emit: () => { throw new Error("emit boom"); },
       setTimer: (fn) => { pass = fn; return 1; },
     });
-    expect(() => pass()).not.toThrow();
+    await expect(pass()).resolves.toBeUndefined();
+  });
+
+  test("re-entrancy guard: an overlapping tick is SKIPPED while a pass runs (CTL-1282)", async () => {
+    let pass;
+    let passCount = 0;
+    let release;
+    const gate = new Promise((r) => { release = r; });
+    startCacheReconcileTimer({
+      config: { mode: "enforce", intervalMs: 1, perPassCap: 10 },
+      reconcile: async () => { passCount++; await gate; return { mode: "enforce", scanned: 0, changed: 0, failed: 0, tickets: [] }; },
+      setTimer: (fn) => { pass = fn; return 1; },
+    });
+    const first = pass();      // running=true, awaits the gate
+    await pass();              // fires mid-pass → must skip (no second reconcile)
+    expect(passCount).toBe(1);
+    release();
+    await first;              // first completes, running=false
+    await pass();             // now free → a real second pass runs
+    expect(passCount).toBe(2);
   });
 });
 
@@ -270,17 +300,17 @@ describe("logger binding (broker boot-crash regression)", () => {
     expect(calls.some(([, obj]) => obj && obj.mode === "enforce")).toBe(true);
   });
 
-  test("reconcile pass logs through a pino-like logger without detaching", () => {
+  test("reconcile pass logs through a pino-like logger without detaching", async () => {
     const { logger } = pinoLikeLogger();
-    expect(() =>
+    await expect(
       reconcileCacheState({
         mode: "enforce",
         getAll: () => [{ ticket: "CTL-1", state: "Todo", labels: [] }],
-        fetch: () => ({ state: "Implement", labels: [] }),
+        fetch: async () => ({ state: "Implement", labels: [] }),
         upsert: () => {},
         logger,
       }),
-    ).not.toThrow();
+    ).resolves.toBeDefined();
   });
 
   test("REAL pino logger: off-mode boot does not throw (end-to-end proof)", () => {
@@ -290,10 +320,10 @@ describe("logger binding (broker boot-crash regression)", () => {
     ).not.toThrow();
   });
 
-  test("a garbage / missing logger is a safe no-op (never throws)", () => {
+  test("a garbage / missing logger is a safe no-op (never throws)", async () => {
     expect(() => startCacheReconcileTimer({ config: { mode: "off", intervalMs: 1, perPassCap: 1 } })).not.toThrow();
-    expect(() =>
-      reconcileCacheState({ mode: "enforce", getAll: () => [{ ticket: "X", state: "Todo" }], fetch: () => ({ state: "Done", labels: [] }), upsert: () => {}, logger: 42 }),
-    ).not.toThrow();
+    await expect(
+      reconcileCacheState({ mode: "enforce", getAll: () => [{ ticket: "X", state: "Todo" }], fetch: async () => ({ state: "Done", labels: [] }), upsert: () => {}, logger: 42 }),
+    ).resolves.toBeDefined();
   });
 });

@@ -20,7 +20,7 @@
 // column (assignee, priority, estimate, relations, fence projection) is left
 // untouched.
 
-import { spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import {
   getAllTicketDescriptors,
   upsertTicketDescriptor,
@@ -106,31 +106,47 @@ export function decideReconcile({ current, fetchedState, fetchedLabels }) {
   };
 }
 
-// fetchLive — spawn `linearis issues read <ticket>` and parse its JSON.
-// linearis emits JSON by default (NO --json flag) and EATS STDIN in loops, so
-// we pass stdin "ignore". Returns { state, labels, error }: state/labels null on
-// any failure (fail-soft — leave the row for the next pass).
+// fetchLive — ASYNC `linearis issues read <ticket>` (CTL-1282). Uses non-blocking
+// `spawn` (NOT spawnSync) so a pass never freezes the broker's event loop:
+// webhook routing keeps flowing while we await each read. linearis emits JSON by
+// default (NO --json flag) and EATS STDIN in loops, so stdin is "ignore". Resolves
+// { state, labels, error }: state/labels null on any failure (fail-soft — leave the
+// row for the next pass). NEVER rejects.
 function fetchLive(ticket) {
-  let res;
-  try {
-    res = spawnSync("linearis", ["issues", "read", ticket], {
-      stdio: ["ignore", "pipe", "pipe"],
-      encoding: "utf8",
-      timeout: 30_000,
+  return new Promise((resolve) => {
+    let child;
+    try {
+      child = spawn("linearis", ["issues", "read", ticket], { stdio: ["ignore", "pipe", "pipe"] });
+    } catch (e) {
+      resolve({ state: null, labels: null, error: String(e?.message ?? e) });
+      return;
+    }
+    let out = "";
+    let err = "";
+    let done = false;
+    const finish = (v) => { if (!done) { done = true; clearTimeout(timer); resolve(v); } };
+    const timer = setTimeout(() => {
+      try { child.kill("SIGKILL"); } catch {}
+      finish({ state: null, labels: null, error: "timeout after 30s" });
+    }, 30_000);
+    child.stdout.on("data", (d) => { out += d; });
+    child.stderr.on("data", (d) => { err += d; });
+    child.on("error", (e) => finish({ state: null, labels: null, error: String(e?.message ?? e) }));
+    child.on("close", (code) => {
+      if (code !== 0 || !out) {
+        finish({ state: null, labels: null, error: err.trim() || `exit ${code}` });
+        return;
+      }
+      let json;
+      try {
+        json = JSON.parse(out);
+      } catch (e) {
+        finish({ state: null, labels: null, error: `unparseable JSON: ${String(e)}` });
+        return;
+      }
+      finish({ state: extractState(json), labels: extractLabelNames(json), error: null });
     });
-  } catch (e) {
-    return { state: null, labels: null, error: String(e?.message ?? e) };
-  }
-  if (res.status !== 0 || !res.stdout) {
-    return { state: null, labels: null, error: (res.stderr || "").trim() || `exit ${res.status}` };
-  }
-  let json;
-  try {
-    json = JSON.parse(res.stdout);
-  } catch (e) {
-    return { state: null, labels: null, error: `unparseable JSON: ${String(e)}` };
-  }
-  return { state: extractState(json), labels: extractLabelNames(json), error: null };
+  });
 }
 
 // logSink — normalize a pino-style logger object into a safe (level,obj,msg)
@@ -147,11 +163,13 @@ function logSink(logger) {
   };
 }
 
-// reconcileCacheState — one full pass over the working set. Injectable deps keep
-// it unit-testable with no spawn / no DB. Returns a summary {mode,scanned,changed,
-// failed,tickets[]} for the audit emit. NEVER throws — a per-ticket failure is
-// counted and skipped (fail-soft).
-export function reconcileCacheState({
+// reconcileCacheState — one full pass over the working set. ASYNC (CTL-1282):
+// awaits each fetch SEQUENTIALLY (gentle on the per-host Linear key — the
+// self-constraint) while keeping the event loop free between reads. Injectable
+// deps keep it unit-testable with no spawn / no DB. Returns a summary
+// {mode,scanned,changed,failed,tickets[]} for the audit emit. NEVER throws — a
+// per-ticket failure is counted and skipped (fail-soft).
+export async function reconcileCacheState({
   mode = "off",
   perPassCap = 250,
   getAll = getAllTicketDescriptors,
@@ -182,7 +200,7 @@ export function reconcileCacheState({
     scanned += 1;
     let live;
     try {
-      live = fetch(ticket);
+      live = await fetch(ticket);
     } catch (e) {
       live = { state: null, labels: null, error: String(e?.message ?? e) };
     }
@@ -243,13 +261,25 @@ export function startCacheReconcileTimer({
   }
   log("info", { mode, intervalMs, perPassCap }, "ctl-1277 cache-reconcile: enabled");
 
-  const runPass = () => {
+  // Re-entrancy guard (CTL-1282): the pass is now async and can outlast the
+  // interval. If the previous pass is still running when the timer fires, SKIP
+  // this tick — never run two passes concurrently (double API load + double
+  // writes). A pass that throws still clears the flag (finally).
+  let running = false;
+  const runPass = async () => {
+    if (running) {
+      log("debug", {}, "cache-reconcile: previous pass still running — skipping tick");
+      return;
+    }
+    running = true;
     let summary;
     try {
-      summary = reconcile({ mode, perPassCap, logger });
+      summary = await reconcile({ mode, perPassCap, logger });
     } catch (e) {
       log("warn", { err: String(e?.message ?? e) }, "cache-reconcile: pass threw — caught (fail-soft)");
       return;
+    } finally {
+      running = false;
     }
     try {
       emit({
