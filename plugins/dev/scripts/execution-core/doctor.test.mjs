@@ -22,13 +22,13 @@ import {
 
 // ─── Phase 1: checkHostIdentity ──────────────────────────────────────────────
 
+// CTL-1274: checkHostIdentity validates via the RESOLVED roster
+// (resolveClusterHosts) — it no longer probes a project .catalyst/hosts.json file.
 const hostDeps = (over = {}) => ({
   getHostName: () => "mini",
-  getClusterHosts: () => ["mini", "mac-studio"],
+  resolveRoster: () => ({ hosts: ["mini", "mac-studio"], source: "cluster-repo", multiHost: true }),
   hostMembershipWarning: () => null,
-  hostsFileExists: () => true,
   layer2HasHostName: () => true,
-  osHostname: () => "mini",
   ...over,
 });
 
@@ -60,12 +60,36 @@ describe("checkHostIdentity", () => {
     expect(membership.detail).toContain("not in the cluster roster");
   });
 
-  it("FAILs when .catalyst/hosts.json is absent", () => {
-    const checks = checkHostIdentity(hostDeps({ hostsFileExists: () => false }));
-    const rosterFile = checks.find((c) => c.name === "roster-file");
-    expect(rosterFile).toBeDefined();
-    expect(rosterFile.status).toBe(STATUS.FAIL);
-    // host-membership should be skipped (not present) when roster file is absent
+  it("reports the resolved roster source (cluster-repo) and PASSes roster-source", () => {
+    const checks = checkHostIdentity(hostDeps());
+    const rosterSource = checks.find((c) => c.name === "roster-source");
+    expect(rosterSource).toBeDefined();
+    expect(rosterSource.status).toBe(STATUS.PASS);
+    expect(rosterSource.detail).toContain("cluster-repo");
+    // the legacy file-probe check name is gone
+    expect(checks.find((c) => c.name === "roster-file")).toBeUndefined();
+  });
+
+  it("reports a static roster source", () => {
+    const checks = checkHostIdentity(
+      hostDeps({
+        getHostName: () => "mini",
+        resolveRoster: () => ({ hosts: ["mini", "mac-studio"], source: "static", multiHost: true }),
+      }),
+    );
+    const rosterSource = checks.find((c) => c.name === "roster-source");
+    expect(rosterSource.status).toBe(STATUS.PASS);
+    expect(rosterSource.detail).toContain("static");
+  });
+
+  it("FAILs roster-source and skips membership when the roster resolves empty", () => {
+    const checks = checkHostIdentity(
+      hostDeps({ resolveRoster: () => ({ hosts: [], source: "unknown", multiHost: false }) }),
+    );
+    const rosterSource = checks.find((c) => c.name === "roster-source");
+    expect(rosterSource).toBeDefined();
+    expect(rosterSource.status).toBe(STATUS.FAIL);
+    // host-membership should be skipped (not present) when the roster is empty
     const membership = checks.find((c) => c.name === "host-membership");
     expect(membership).toBeUndefined();
   });
@@ -88,7 +112,7 @@ describe("checkHostIdentity", () => {
   it("single-host roster passes membership trivially when warning is null", () => {
     const checks = checkHostIdentity(
       hostDeps({
-        getClusterHosts: () => ["mini"],
+        resolveRoster: () => ({ hosts: ["mini"], source: "single-host", multiHost: false }),
         hostMembershipWarning: () => null,
       }),
     );
@@ -558,12 +582,12 @@ describe("renderJson", () => {
 describe("renderHuman", () => {
   it("marks fails and includes check details in the output string", () => {
     const checks = [
-      mkCheck("roster-file", STATUS.FAIL, "hosts.json is absent"),
+      mkCheck("roster-source", STATUS.FAIL, "the cluster roster resolved empty"),
       mkCheck("host-name", STATUS.INFO, 'this node identifies as "mini"'),
     ];
     const out = renderHuman(checks);
     expect(out).toContain("FAIL");
-    expect(out).toContain("hosts.json is absent");
+    expect(out).toContain("the cluster roster resolved empty");
     expect(out).toContain("1 check(s) FAILED");
   });
 
