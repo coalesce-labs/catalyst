@@ -29,6 +29,10 @@ import {
   ORCH_STATUS_REPLAY_STALE_MS,
   DETERMINISTIC_INTEREST_TYPES,
   isIngestionRecencyEnabled,
+  isAlertEmitEnabled,
+  PILEUP_THRESHOLD,
+  PILEUP_PERSISTENCE_MS,
+  PILEUP_COOLDOWN_MS,
   MONITOR_RECENCY_DEGRADED_MS,
   MONITOR_RECENCY_DOWN_MS,
   GITHUB_RECENCY_DEGRADED_MS,
@@ -75,6 +79,7 @@ import {
   upsertWaitingSession,
   clearWaitingSession,
   hasActiveWorkers,
+  getAllTicketDescriptors,
 } from "./broker-state.mjs";
 import { sessionLiveness } from "./session-liveness.mjs";
 import {
@@ -112,6 +117,16 @@ import {
   nextRecencyAlarmState,
   emitIngestionRecencyEvent,
 } from "./ingestion-recency.mjs";
+// CTL-1123: the broker alert-emit foundation — promote detector signals into a
+// stable catalyst.alert.* topic in the event log (delivery is a separate story).
+import {
+  ALERT_KIND_SYSTEM_DOWN,
+  ALERT_KIND_NEEDS_HUMAN_PILEUP,
+  NEEDS_HUMAN_LABELS,
+  emitAlertEvent,
+  initialPileupState,
+  nextPileupAlarmState,
+} from "./alert-emit.mjs";
 import { scanEventsChunked } from "../execution-core/event-tail.mjs";
 
 // Identity-stable aliases for the shared maps — the router mutates these; the
@@ -357,6 +372,19 @@ export function __clearEmittedWakeCacheForTest() {
 // it can never observe its own death.
 const _lastSeenByService = new Map(); // service.name -> { ts: epochMs, id: string|null }
 
+// CTL-1123: the needs_human_pileup LEVEL-alarm state (a single broker-wide count,
+// not per-source). Advanced each watchdog tick by checkNeedsHumanPileup.
+let _pileupState = initialPileupState();
+
+// CTL-1123: terminal Linear states excluded from the needs-human pile-up count —
+// a Done/Canceled ticket can still carry a stale needs-human label in the cache
+// (cache-drift, CTL-1161), which would pin the count above threshold forever.
+// These mirror the stateMap done/canceled mappings in .catalyst/config.json; if
+// the team renames those Linear states, update here too (config-drives-behavior —
+// a drift would silently stop excluding terminal tickets → a never-clearing
+// false pile-up). Review #10.
+const TERMINAL_LINEAR_STATES = new Set(["Done", "Canceled"]);
+
 // CTL-1122 PR2: per-source alarm state. PR1 keyed a single _monitorRecencyAlarm;
 // the watchdog now judges several sources (monitor + the activity-gated
 // github/linear webhook ingestion), each with its own edge-trigger/holddown
@@ -374,12 +402,18 @@ const RECENCY_SOURCES = [
     degradedAfterMs: MONITOR_RECENCY_DEGRADED_MS,
     downAfterMs: MONITOR_RECENCY_DOWN_MS,
     gated: false,
+    // CTL-1123: the monitor going sustained-stale IS a stack-health outage — the
+    // broker promotes that recency edge to a catalyst.alert.* system_down topic.
+    alertKind: ALERT_KIND_SYSTEM_DOWN,
   },
   {
     serviceName: GITHUB_SERVICE_NAME,
     degradedAfterMs: GITHUB_RECENCY_DEGRADED_MS,
     downAfterMs: GITHUB_RECENCY_DOWN_MS,
     gated: true,
+    // github silence is a degraded-ingestion signal, not "system down" — no alert
+    // promotion for now (a future kind, e.g. ingestion_degraded, can set this).
+    alertKind: null,
   },
   // linear (catalyst.linear) is DEFERRED in PR2 (fork a): the linear-webhook
   // bot-skip guard suppresses bot-authored issue events before they reach the
@@ -565,8 +599,115 @@ function checkSourceRecency(source, now) {
       // recovered from pairing against a stale that was never appended.)
       return null;
     }
+    // CTL-1123: promote a CRITICAL source's recency edge to a catalyst.alert.*
+    // topic (e.g. the monitor going sustained-stale = a stack-health outage).
+    // Rides the already-debounced ingestion edge (one raised per outage, one
+    // cleared per recovery) — no extra debounce. Best-effort + kill-switched; an
+    // alert-emit failure never affects the (already-appended + latched) recency
+    // state. Only fires once the ingestion emit above SUCCEEDED, keeping the two
+    // streams paired.
+    if (source.alertKind && isAlertEmitEnabled()) {
+      const alertOk = emitAlertEvent({
+        action: recovered ? "cleared" : "raised",
+        kind: source.alertKind,
+        // NOTE (CTL-1123 review #9): if a GATED source is ever given an alertKind,
+        // distinguish a gate-driven recovery (beatDrivenRecovery===false → a null
+        // forensicSeen) from a real one before asserting "recovered" here. The
+        // monitor source is ungated, so today recovered always means a fresh beat.
+        reason: recovered
+          ? `${source.serviceName} ingestion recovered`
+          : `${source.serviceName} ingestion silent past ${source.downAfterMs}ms`,
+        source: source.serviceName,
+        sinceMs: ageMs,
+        causedBy: forensicSeen?.id ?? null,
+      });
+      if (!alertOk) {
+        // KNOWN GAP (CTL-1123 review #7): the recency alarm has already latched
+        // (downEmitted) and we deliberately do NOT couple the alert back into that
+        // latch (re-running would risk re-appending the ingestion event), so this
+        // promotion is not retried for this edge — a failed raise means no
+        // system_down until recovery. Acceptable while catalyst.alert.* has no
+        // pairing consumer; when the alert "brain" lands, add a per-source
+        // alert-pending retry that re-attempts the promotion alone. Logged so the
+        // gap is visible meanwhile (vs the silent discard the review flagged).
+        log.warn(
+          { source: source.serviceName, kind: source.alertKind, action: recovered ? "cleared" : "raised" },
+          "alert-emit: catalyst.alert append failed; promotion skipped for this edge",
+        );
+      }
+    }
   }
   _recencyAlarmByService.set(source.serviceName, state);
+  return emit;
+}
+
+// countNeedsHumanTickets — the surviving-process pile-up signal: how many
+// active/non-terminal tickets carry a needs-human/needs-input label in the
+// broker's OWN filter-state.db. Reads the SAME label source as deriveAttention
+// (board-data.mjs) but does NOT fork it — it deliberately omits the monitor-only
+// prStuck/phaseFailed signals (not in filter-state.db), so this UNDERCOUNTS the
+// dashboard inbox. Scoped to non-removed, non-terminal tickets so a stale
+// needs-human label on a Done/Canceled ticket (cache-drift, CTL-1161) can't pin
+// the count above threshold forever. Best-effort: a db read failure → 0 (no false
+// pile-up alert), consistent with the detector's no-false-alarm posture.
+function countNeedsHumanTickets() {
+  try {
+    let n = 0;
+    for (const d of getAllTicketDescriptors()) {
+      if (d.removed) continue;
+      if (d.state && TERMINAL_LINEAR_STATES.has(d.state)) continue;
+      const labels = Array.isArray(d.labels) ? d.labels : [];
+      if (labels.some((l) => NEEDS_HUMAN_LABELS.includes(l))) n += 1;
+    }
+    return n;
+  } catch {
+    return 0;
+  }
+}
+
+// checkNeedsHumanPileup — one watchdog-tick evaluation of the needs-human pile-up
+// LEVEL signal → edge-triggered catalyst.alert.{raised,cleared}. Kill-switched
+// (isAlertEmitEnabled). The threshold + persistence + cooldown debounce lives in
+// nextPileupAlarmState; this wires the broker count into it and emits. Returns the
+// emit decision for the wiring test.
+function checkNeedsHumanPileup(now) {
+  if (!isAlertEmitEnabled()) return null;
+  const count = countNeedsHumanTickets();
+  const prev = _pileupState;
+  const { state, emit } = nextPileupAlarmState(prev, {
+    count,
+    threshold: PILEUP_THRESHOLD,
+    nowMs: now,
+    persistenceMs: PILEUP_PERSISTENCE_MS,
+    cooldownMs: PILEUP_COOLDOWN_MS,
+  });
+  if (emit) {
+    const raised = emit === "raised";
+    // raised: how long the count had been above threshold; cleared: how long the
+    // alert had been open. Read from prev (pre-advance) so it reflects the elapsed
+    // condition, clamped against clock skew.
+    const sinceMs = raised
+      ? prev.aboveSince != null
+        ? Math.max(0, now - prev.aboveSince)
+        : null
+      : prev.raisedAt != null
+        ? Math.max(0, now - prev.raisedAt)
+        : null;
+    const ok = emitAlertEvent({
+      action: raised ? "raised" : "cleared",
+      kind: ALERT_KIND_NEEDS_HUMAN_PILEUP,
+      reason: raised
+        ? `${count} active tickets need a human (>= ${PILEUP_THRESHOLD})`
+        : `needs-human pile-up cleared (${count} < ${PILEUP_THRESHOLD})`,
+      count,
+      threshold: PILEUP_THRESHOLD,
+      sinceMs,
+    });
+    // Append failed → do NOT advance the level-alarm state; the next tick
+    // re-attempts (a sustained pile-up is never reduced to one lost line).
+    if (!ok) return null;
+  }
+  _pileupState = state;
   return emit;
 }
 
@@ -603,6 +744,20 @@ export function __getMonitorRecencyAlarmForTest() {
 // PR2: per-source accessor for the github/linear isolation tests.
 export function __getRecencyAlarmForTest(serviceName) {
   return recencyAlarmFor(serviceName);
+}
+// CTL-1123: needs-human pile-up alert-state seams.
+export function __clearAlertStateForTest() {
+  _pileupState = initialPileupState();
+}
+export function __getPileupStateForTest() {
+  return _pileupState;
+}
+// Lets the wiring test position the level machine at an edge (e.g. pre-set
+// aboveSince in the past so persistence is satisfied) without driving real
+// wall-clock time through runWatchdogTick — the timing logic itself is covered by
+// the pure nextPileupAlarmState unit tests.
+export function __setPileupStateForTest(state) {
+  _pileupState = { ...initialPileupState(), ...state };
 }
 
 // CTL-357: one-shot startup event. If the Groq prose path is gated off (the
@@ -1959,6 +2114,11 @@ export function runWatchdogTick({ liveness = sessionLiveness } = {}) {
   // the surviving-process observation the 11h silent outage proved we were
   // missing. PR1 = monitor heartbeat; PR2 = activity-gated github webhooks.
   for (const source of RECENCY_SOURCES) checkSourceRecency(source, now);
+
+  // CTL-1123: needs-human pile-up → catalyst.alert.{raised,cleared}. A LEVEL
+  // signal (a count) with its own threshold + persistence + cooldown debounce —
+  // distinct from the per-source recency edges above.
+  checkNeedsHumanPileup(now);
 
   let watchdogWoke = false;
 

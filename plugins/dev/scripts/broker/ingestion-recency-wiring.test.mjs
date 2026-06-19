@@ -19,6 +19,7 @@ import {
   __getLastSeenByServiceForTest,
   __getMonitorRecencyAlarmForTest,
   __getRecencyAlarmForTest,
+  __clearAlertStateForTest,
 } from "./router.mjs";
 import { GITHUB_SERVICE_NAME, LINEAR_SERVICE_NAME } from "./ingestion-recency.mjs";
 import {
@@ -47,6 +48,7 @@ beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), "ingestion-wiring-"));
   process.env.CATALYST_DIR = dir; // getEventLogPath re-reads this per call
   __clearIngestionRecencyForTest();
+  __clearAlertStateForTest(); // CTL-1123: reset the shared pile-up module global
   clearInterests();
   clearLastHeartbeat();
   __resetBrokerStartedAtForTest(); // uptime 0 → no spurious broker.daemon.degraded
