@@ -474,6 +474,35 @@ export const ZOMBIE_STALE_FLOOR_MS =
 export const REVIVE_MAX_AGE_MS =
   Number(process.env.EXECUTION_CORE_REVIVE_MAX_AGE_MS) || 24 * 60 * 60_000;
 
+// CTL-1245 — dead-but-`running`-signalled doc-worker transcript-silence floor.
+//
+// THE GAP this closes: a `--bg` doc-phase worker (triage/research/plan/verify/
+// review) that dies WITHOUT Claude stamping its ~/.claude/jobs/<id>/state.json
+// terminal (SIGKILL/OOM/daemon-kill leaves it frozen at state:"working") reads
+// jobLifecycle === "alive" FOREVER. On the headless enforce host (mini), `claude
+// agents --json` is unreliable (CTL-829) so the CTL-809 fresh-snapshot ghost
+// breaker cannot fire, and the CTL-868 cold-snapshot mtime floor for these
+// doc phases is BUSY_CEILING_MS (6h) — so a genuinely-dead triage/plan corpse
+// sits "alive-suppressed" for up to 6h, starving slots (the 2026-06-17 evidence:
+// CTL-1240/1241/1242/1243 dead at plan/research, 4.5h+ no recovery).
+//
+// The corroborator: a LIVE doc worker mid in-process sub-agent fan-out keeps
+// writing its transcript (and its subagents' transcripts — transcriptAgeMs folds
+// those in), so a fresh transcript proves liveness; a transcript silent beyond
+// this floor on an `alive`-by-state.json worker is a corpse. This lets the
+// cold-snapshot doc-phase branch declare death in MINUTES instead of 6h while
+// staying CTL-662-safe (a busy fan-out is spared by its own transcript writes).
+//
+// Deliberately well above any plausible inter-turn / sub-agent gap (30 min):
+// a healthy doc worker writes its transcript far more often than this. Strictly
+// SUBORDINATE to a fresh agents snapshot (a LISTED worker is never reclaimed by
+// this floor) and to the death MODE gate below (off by default → strict no-op).
+// Env-overridable for tuning. A null transcript age (can't measure — no session,
+// no transcript file) is treated as NOT-silent: the worker is spared (fail to a
+// false-negative, never touch a possibly-live worker — the #1 invariant).
+export const DEAD_DOC_WORKER_TRANSCRIPT_SILENCE_MS =
+  Number(process.env.EXECUTION_CORE_DEAD_DOC_WORKER_SILENCE_MS) || 30 * 60_000;
+
 // CTL-650 — the push-based session wait-state watcher. Default ON; the daemon
 // continuously classifies live sessions and emits agent.waiting_on_user /
 // agent.resumed transition events. CATALYST_WAIT_WATCHER=0 disables it (the
@@ -893,6 +922,42 @@ export function readRecoveryPassConfig() {
   } else if (typeof env === "string" && RECOVERY_PASS_MODES.has(env)) {
     mode = env;
   } else if (typeof l2.mode === "string" && RECOVERY_PASS_MODES.has(l2.mode)) {
+    mode = l2.mode;
+  } else {
+    mode = "off"; // safe default: off — operators opt into shadow then enforce
+  }
+  return { mode };
+}
+
+// CTL-1245: dead-but-running doc-worker reclaim mode reader. Mirrors
+// readRecoveryPassConfig / readUnstuckSweepConfig exactly: env
+// (CATALYST_DEAD_DOC_WORKER_RECLAIM) overrides Layer-2 config
+// (.catalyst.recovery.deadDocWorker.mode), which overrides the safe default
+// 'off'. Ships off (ADR-023): the transcript-silence corroborator that lets the
+// cold-snapshot doc-phase ghost breaker fire in minutes (instead of the 6h busy
+// ceiling) is INERT until an operator opts into shadow then enforce.
+//   off     → strict no-op: behaviour byte-for-byte identical to pre-CTL-1245.
+//   shadow  → measure + LOG the would-be death verdict, take NO action.
+//   enforce → set ghostAbsent and fall through to the existing revive path
+//             (under the CTL-736 progress gate + O_EXCL claim + CTL-638 cooldown).
+const DEAD_DOC_WORKER_MODES = new Set(["off", "shadow", "enforce"]);
+
+function readLayer2DeadDocWorker() {
+  try {
+    const d = JSON.parse(readFileSync(getLayer2ConfigPath(), "utf8"))?.catalyst?.recovery?.deadDocWorker;
+    return d && typeof d === "object" ? d : {};
+  } catch { return {}; }
+}
+
+export function readDeadDocWorkerConfig() {
+  const l2 = readLayer2DeadDocWorker();
+  const env = process.env.CATALYST_DEAD_DOC_WORKER_RECLAIM;
+  let mode;
+  if (env === "0") {
+    mode = "off"; // kill-switch
+  } else if (typeof env === "string" && DEAD_DOC_WORKER_MODES.has(env)) {
+    mode = env;
+  } else if (typeof l2.mode === "string" && DEAD_DOC_WORKER_MODES.has(l2.mode)) {
     mode = l2.mode;
   } else {
     mode = "off"; // safe default: off — operators opt into shadow then enforce

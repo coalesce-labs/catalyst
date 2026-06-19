@@ -1156,6 +1156,192 @@ describe("reclaimDeadWorkIfPossible", () => {
     expect(emit.calls.length).toBe(1);
   });
 
+  // CTL-1245 — DEAD-BUT-RUNNING DOC-WORKER BREAKER. A --bg doc worker
+  // (triage/research/plan/verify/review) that dies WITHOUT Claude stamping its
+  // state.json terminal (SIGKILL/OOM) reads jobLifecycle "alive" forever. On the
+  // headless mini (no fresh agents snapshot — CTL-829) the CTL-868 cold floor for
+  // these phases is the 6h busy ceiling, so a genuinely-dead triage/plan corpse
+  // sits alive-suppressed up to 6h, starving slots (the 2026-06-17 evidence).
+  // The corroborator: a LIVE doc worker keeps WRITING its transcript (subagents
+  // folded in by transcriptAgeMs → fan-out safe); a transcript silent past the
+  // floor on an alive-by-state.json doc worker is a corpse. Gated off-by-default.
+  //
+  // The conjunction (mode≠off ∧ doc phase ∧ mtime floor NOT already tripped ∧
+  // measurable transcript age > floor) sets ghostAbsent and the worker falls
+  // through to the existing branch-(C) revive under the CTL-736 progress gate.
+  const DEAD_DOC_SILENCE = 30 * 60_000; // 30min default
+  // A worker whose state.json mtime is RECENT (within the 2h zombie floor and far
+  // under the 6h doc ceiling) so the mtime-floor branch never fires — isolating
+  // the transcript corroborator as the sole death signal. now is 31min past start.
+  const docNow = STARTED_MS + 31 * 60_000;
+  // Full branch-(C) revive seams (work-not-done) so a corroborated-dead doc worker
+  // routes through the progress gate exactly like any other reclaim-eligible worker.
+  const docReviveSeams = (extra = {}) => ({
+    repoRoot: "/repo",
+    statJob: () => ({ exists: true, state: "working", mtimeMs: docNow - 60_000 }), // mtime fresh → mtime floor inert
+    probes: { research: () => false, plan: () => false, triage: () => false }, // work NOT done → branch (C)
+    emitComplete: recorder({ code: 0 }),
+    appendEvent: recorder(undefined),
+    appendReviveEvent: recorder(true),
+    appendEscalatedEvent: recorder(undefined),
+    appendReviveSuppressedEvent: recorder(undefined),
+    reviveDispatch: recorder({ code: 0 }),
+    applyStalledLabel: recorder({ applied: true }),
+    killBgJob: recorder(undefined),
+    countReviveEvents: recorder(0),
+    writeReviveMarker: recorder(undefined),
+    writeProgressMark: recorder(undefined),
+    resolveSession: () => null,
+    readBootSince: () => undefined,
+    inEscalationCooldownFn: () => false,
+    recordEscalationFn: recorder(undefined),
+    emitReapIntent: () => Promise.resolve(),
+    breaker: { isOpen: () => false },
+    agentsSnapshot: () => ({ agents: [], isFresh: false, ageMs: Infinity }), // mini: cold (CTL-829)
+    ghostGraceMs: GHOST_GRACE,
+    zombieStaleFloorMs: ZOMBIE_FLOOR,
+    busyCeilingMs: BUSY_CEILING,
+    deadDocSilenceMs: DEAD_DOC_SILENCE,
+    now: () => docNow,
+    ...extra,
+  });
+
+  test("CTL-1245: enforce — dead plan worker, transcript silent past floor, no fresh snapshot, work-not-done → REVIVED once (the core fix)", () => {
+    const reviveDispatch = recorder({ code: 0 });
+    const r = reclaimDeadWorkIfPossible(orch, docSignal("plan"), docReviveSeams({
+      deadDocWorkerMode: "enforce",
+      transcriptAgeMs: () => 45 * 60_000, // 45min silent > 30min floor → corpse
+      progressMark: () => 0,
+      readProgressMark: () => -1, // first death, no prior mark → one revive
+      reviveDispatch,
+    }));
+    expect(r).toBe("revived");
+    expect(reviveDispatch.calls.length).toBe(1);
+  });
+
+  test("CTL-1245: enforce — LIVE doc worker mid fan-out (FRESH transcript) → alive-suppressed, NEVER touched (#1 correctness case)", () => {
+    const reviveDispatch = recorder({ code: 0 });
+    const killBgJob = recorder(undefined);
+    const r = reclaimDeadWorkIfPossible(orch, docSignal("research"), docReviveSeams({
+      deadDocWorkerMode: "enforce",
+      transcriptAgeMs: () => 2 * 60_000, // 2min ago — sub-agent fan-out alive < 30min floor
+      reviveDispatch,
+      killBgJob,
+    }));
+    expect(r).toBe("alive-suppressed");
+    expect(reviveDispatch.calls.length).toBe(0);
+    expect(killBgJob.calls.length).toBe(0);
+  });
+
+  test("CTL-1245: mode=off (default) — dead doc worker with silent transcript → alive-suppressed (strict no-op, feature inert)", () => {
+    const reviveDispatch = recorder({ code: 0 });
+    let transcriptCalled = 0;
+    const r = reclaimDeadWorkIfPossible(orch, docSignal("triage"), docReviveSeams({
+      deadDocWorkerMode: "off",
+      transcriptAgeMs: () => { transcriptCalled++; return 99 * 60_000; }, // would be silent
+      reviveDispatch,
+    }));
+    expect(r).toBe("alive-suppressed");
+    expect(reviveDispatch.calls.length).toBe(0);
+    expect(transcriptCalled).toBe(0); // off short-circuits before measuring — strict no-op
+  });
+
+  test("CTL-1245: mode=shadow — dead doc worker with silent transcript → alive-suppressed (measures + logs, takes NO action)", () => {
+    const reviveDispatch = recorder({ code: 0 });
+    let transcriptCalled = 0;
+    const r = reclaimDeadWorkIfPossible(orch, docSignal("plan"), docReviveSeams({
+      deadDocWorkerMode: "shadow",
+      transcriptAgeMs: () => { transcriptCalled++; return 99 * 60_000; }, // silent
+      reviveDispatch,
+    }));
+    expect(r).toBe("alive-suppressed");
+    expect(reviveDispatch.calls.length).toBe(0);
+    expect(transcriptCalled).toBe(1); // shadow DOES measure (to log the would-be verdict)…
+    // …but takes no action: still suppressed.
+  });
+
+  test("CTL-1245: enforce — transcript age NULL (can't measure) → alive-suppressed (fail to false-negative, never touch a possibly-live worker)", () => {
+    const reviveDispatch = recorder({ code: 0 });
+    const r = reclaimDeadWorkIfPossible(orch, docSignal("research"), docReviveSeams({
+      deadDocWorkerMode: "enforce",
+      transcriptAgeMs: () => null, // no session / no transcript file → unmeasurable
+      reviveDispatch,
+    }));
+    expect(r).toBe("alive-suppressed");
+    expect(reviveDispatch.calls.length).toBe(0);
+  });
+
+  test("CTL-1245: enforce — NON-doc phase (implement) is untouched by the corroborator (it keeps the 2h mtime floor only)", () => {
+    const reviveDispatch = recorder({ code: 0 });
+    const r = reclaimDeadWorkIfPossible(orch, docSignal("implement"), docReviveSeams({
+      deadDocWorkerMode: "enforce",
+      probes: { implement: () => false },
+      transcriptAgeMs: () => 99 * 60_000, // silent, but implement is not a doc phase
+      reviveDispatch,
+    }));
+    expect(r).toBe("alive-suppressed"); // mtime fresh + not a doc phase → corroborator never runs
+    expect(reviveDispatch.calls.length).toBe(0);
+  });
+
+  test("CTL-1245: enforce — FRESH snapshot lists the worker → alive-suppressed even with a silent transcript (CTL-662: fresh-present wins)", () => {
+    const reviveDispatch = recorder({ code: 0 });
+    const r = reclaimDeadWorkIfPossible(orch, docSignal("plan", { bgJobId: "807b77bd" }), docReviveSeams({
+      deadDocWorkerMode: "enforce",
+      agentsSnapshot: () => ({
+        agents: [{ sessionId: "807b77bd-0000-0000-0000-000000000000" }], // listed → busy
+        isFresh: true,
+        ageMs: 1_000,
+      }),
+      transcriptAgeMs: () => 99 * 60_000, // silent, but a fresh-present verdict dominates
+      reviveDispatch,
+    }));
+    expect(r).toBe("alive-suppressed");
+    expect(reviveDispatch.calls.length).toBe(0);
+  });
+
+  test("CTL-1245: enforce — corroborated-dead worker that RE-DIES at zero progress hits the gate → no-progress-stopped, NEVER loops", () => {
+    const reviveDispatch = recorder({ code: 0 });
+    const appendEscalatedEvent = recorder(undefined);
+    const killBgJob = recorder(undefined);
+    const r = reclaimDeadWorkIfPossible(orch, docSignal("plan"), docReviveSeams({
+      deadDocWorkerMode: "enforce",
+      transcriptAgeMs: () => 45 * 60_000, // silent → corpse, falls to branch (C)
+      progressMark: () => 0,
+      readProgressMark: () => 0, // first revive already recorded 0; still 0 → STOP (no second revive)
+      reviveDispatch,
+      appendEscalatedEvent,
+      killBgJob,
+    }));
+    expect(r).toBe("no-progress-stopped");
+    expect(reviveDispatch.calls.length).toBe(0); // the futile respawn is suppressed
+    expect(appendEscalatedEvent.calls[0][0].reason).toBe("no-progress");
+    expect(killBgJob.calls.length).toBe(1);
+  });
+
+  test("CTL-1245: storm — N corroborated-dead doc workers each route through the progress gate independently (no batch bypass)", () => {
+    // The fix admits dead doc workers ONE SIGNAL AT A TIME through the existing
+    // reclaim path: there is no new batch/queue, so the per-(ticket,phase) O_EXCL
+    // claim + progress gate bound each independently. A worker that progressed is
+    // revived; a flat one is stopped — exactly as the gate dictates, at any N.
+    const tickets = ["CTL-1240", "CTL-1241", "CTL-1242", "CTL-1243"];
+    const results = tickets.map((t, i) => {
+      const sig = docSignal("plan");
+      sig.ticket = t;
+      sig.raw.ticket = t;
+      sig.raw.orchestrator = t;
+      // even-index workers progressed (revive), odd-index flat (stop) — proving
+      // the gate, not a batch cap, decides each one.
+      const progressed = i % 2 === 0;
+      return reclaimDeadWorkIfPossible(orch, sig, docReviveSeams({
+        deadDocWorkerMode: "enforce",
+        transcriptAgeMs: () => 45 * 60_000,
+        progressMark: () => (progressed ? 3 : 0),
+        readProgressMark: () => (progressed ? 1 : 0),
+      }));
+    });
+    expect(results).toEqual(["revived", "no-progress-stopped", "revived", "no-progress-stopped"]);
+  });
+
   test("'noop' for an unknown signal (no bg_job_id)", () => {
     const sig = implementSignal();
     sig.liveness = { kind: "bg", value: null };

@@ -33,6 +33,8 @@ import {
   getStaticRoster,
   resolveClusterHosts,
   CLUSTER_SYNC_INTERVAL_MS,
+  readDeadDocWorkerConfig,
+  DEAD_DOC_WORKER_TRANSCRIPT_SILENCE_MS,
 } from "./config.mjs";
 
 const PREV = process.env.CATALYST_WAIT_WATCHER;
@@ -749,5 +751,58 @@ describe("getLivenessAnchorIssue (CTL-1090)", () => {
 describe("LIVENESS_PUBLISH_INTERVAL_MS (CTL-1090)", () => {
   test("defaults to 120000ms (2 minutes)", () => {
     expect(LIVENESS_PUBLISH_INTERVAL_MS).toBe(120_000);
+  });
+});
+
+describe("readDeadDocWorkerConfig (CTL-1245)", () => {
+  const DD_ENVS = ["CATALYST_DEAD_DOC_WORKER_RECLAIM", "CATALYST_LAYER2_CONFIG_FILE"];
+  let saved = {}, tmp;
+  beforeEach(() => {
+    for (const k of DD_ENVS) { saved[k] = process.env[k]; delete process.env[k]; }
+    tmp = mkdtempSync(join(tmpdir(), "ctl1245-dd-"));
+    process.env.CATALYST_LAYER2_CONFIG_FILE = join(tmp, "absent.json");
+  });
+  afterEach(() => {
+    for (const k of DD_ENVS) { saved[k] === undefined ? delete process.env[k] : (process.env[k] = saved[k]); }
+    saved = {}; rmSync(tmp, { recursive: true, force: true });
+  });
+
+  test("default: mode=off (ships inert — strict no-op)", () => {
+    expect(readDeadDocWorkerConfig().mode).toBe("off");
+  });
+  test("CATALYST_DEAD_DOC_WORKER_RECLAIM=0 maps to mode:off (kill-switch)", () => {
+    process.env.CATALYST_DEAD_DOC_WORKER_RECLAIM = "0";
+    expect(readDeadDocWorkerConfig().mode).toBe("off");
+  });
+  test("env shadow / enforce are honored", () => {
+    process.env.CATALYST_DEAD_DOC_WORKER_RECLAIM = "shadow";
+    expect(readDeadDocWorkerConfig().mode).toBe("shadow");
+    process.env.CATALYST_DEAD_DOC_WORKER_RECLAIM = "enforce";
+    expect(readDeadDocWorkerConfig().mode).toBe("enforce");
+  });
+  test("reads catalyst.recovery.deadDocWorker.mode from Layer-2", () => {
+    const cfg = join(tmp, "config.json");
+    writeFileSync(cfg, JSON.stringify({ catalyst: { recovery: { deadDocWorker: { mode: "enforce" } } } }));
+    process.env.CATALYST_LAYER2_CONFIG_FILE = cfg;
+    expect(readDeadDocWorkerConfig().mode).toBe("enforce");
+  });
+  test("env wins over Layer-2", () => {
+    const cfg = join(tmp, "config.json");
+    writeFileSync(cfg, JSON.stringify({ catalyst: { recovery: { deadDocWorker: { mode: "enforce" } } } }));
+    process.env.CATALYST_LAYER2_CONFIG_FILE = cfg;
+    process.env.CATALYST_DEAD_DOC_WORKER_RECLAIM = "0";
+    expect(readDeadDocWorkerConfig().mode).toBe("off");
+  });
+  test("invalid mode string → falls back to off", () => {
+    process.env.CATALYST_DEAD_DOC_WORKER_RECLAIM = "banana";
+    expect(readDeadDocWorkerConfig().mode).toBe("off");
+  });
+  test("malformed Layer-2 file → off (never throws)", () => {
+    const cfg = join(tmp, "config.json"); writeFileSync(cfg, "{ not json");
+    process.env.CATALYST_LAYER2_CONFIG_FILE = cfg;
+    expect(readDeadDocWorkerConfig().mode).toBe("off");
+  });
+  test("transcript-silence floor defaults to 30 minutes", () => {
+    expect(DEAD_DOC_WORKER_TRANSCRIPT_SILENCE_MS).toBe(30 * 60_000);
   });
 });
