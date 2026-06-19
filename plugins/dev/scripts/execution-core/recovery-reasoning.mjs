@@ -127,10 +127,29 @@ export function reasoningRecoveryPass(items, opts = {}) {
   // CTL-1176: count of FIX-actions actually taken this invocation (enforce only).
   let fixesThisTick = 0;
 
+  // CTL-1287: per-tick decision visibility. The recovery pass historically emitted
+  // ONLY on action (recovery.fixed / recovery.escalated); every skip was a bare
+  // log() to stdout, invisible to Loki — so a board where every flagged item is
+  // latched-escalated looked identical to a board the delegate never examined.
+  // These counters + skip rosters feed one recovery.tick rollup per invocation
+  // (the "did the delegate fire, and why/why-not" headline); recovery.decision is
+  // emitted per classified item. ledgerSkipped is coarse (cooldown OR escalated-
+  // latch) — splitting it needs the per-tick orchDir ledger read, which only
+  // reaches this pure function via a scheduler.mjs injection (fenced; fast-follow).
+  const tickStats = {
+    queueSize: items.length,
+    processed: 0,
+    decisions: { fix_seam: 0, fix_bounded_llm: 0, escalate: 0 },
+    actions: { fixed: 0, fixFailed: 0, escalated: 0, deferred: 0, errors: 0 },
+    ledgerSkipped: [],
+    terminalSkipped: [],
+  };
+
   for (const item of items) {
     // Check cooldown / already-escalated
     if (shouldSkipItem(item.ticket)) {
       log(`recovery-reasoning: ${item.ticket} skipped (cooldown/escalated)`);
+      tickStats.ledgerSkipped.push(item.ticket);
       continue;
     }
 
@@ -138,6 +157,7 @@ export function reasoningRecoveryPass(items, opts = {}) {
     // Mirrors classifyStalledTicket's linearTerminal skip (unstuck-sweep.mjs:95-97).
     if (item.evidence?.linearTerminal) {
       log(`recovery-reasoning: ${item.ticket} skipped (linear-terminal)`);
+      tickStats.terminalSkipped.push(item.ticket);
       continue;
     }
 
@@ -164,6 +184,7 @@ export function reasoningRecoveryPass(items, opts = {}) {
       classification = classifyTicket(evidence, { log });
     } catch (err) {
       log(`recovery-reasoning: ${item.ticket} classification error: ${err.message}`);
+      tickStats.actions.errors += 1;
       results.push({
         ticket: item.ticket,
         decision: "error",
@@ -173,6 +194,23 @@ export function reasoningRecoveryPass(items, opts = {}) {
     }
 
     const { decision, fix_class, details } = classification;
+
+    // CTL-1287: this item reached the classifier — emit its per-item decision
+    // (rule 1=seam, 2=bounded-llm, 3=escalate) and tally for the recovery.tick
+    // rollup. Emitted in BOTH shadow and enforce: it records the classifier's
+    // verdict, independent of whether the mode then acts on it.
+    tickStats.processed += 1;
+    const rule = decision === "escalate" ? 3 : fix_class === "bounded-llm" ? 2 : 1;
+    if (decision === "escalate") tickStats.decisions.escalate += 1;
+    else if (fix_class === "bounded-llm") tickStats.decisions.fix_bounded_llm += 1;
+    else tickStats.decisions.fix_seam += 1;
+    emitEvent({
+      type: "recovery.decision",
+      ticket: item.ticket,
+      fix_class,
+      reason: details?.reason ?? null,
+      details: { rule, decision, mode },
+    });
 
     // GUARDED-FIX: act based on decision, record outcome
     let outcome = null;
@@ -239,6 +277,7 @@ export function reasoningRecoveryPass(items, opts = {}) {
         // so the next scheduler tick processes them. Bounds a one-sweep storm.
         if (fixesThisTick >= maxFixesPerTick) {
           actionLog.push(`deferred: per-tick fix cap (${maxFixesPerTick}) reached`);
+          tickStats.actions.deferred += 1;
           log(
             `recovery-reasoning: ${item.ticket} deferred — per-tick fix cap ${maxFixesPerTick} reached`,
           );
@@ -300,8 +339,10 @@ export function reasoningRecoveryPass(items, opts = {}) {
 
         if (fixOutcome.success) {
           actionLog.push("emitted recovery.fixed");
+          tickStats.actions.fixed += 1;
         } else {
           actionLog.push("emitted recovery.fix-failed");
+          tickStats.actions.fixFailed += 1;
         }
       } else if (decision === "escalate") {
         const escalationPayload = buildEscalationPayload(item, classification);
@@ -334,6 +375,7 @@ export function reasoningRecoveryPass(items, opts = {}) {
           escalation: escalationPayload,
         });
         actionLog.push("emitted recovery.escalated");
+        tickStats.actions.escalated += 1;
 
         outcome = { decision, reason: classification.details.reason, actionLog, mode: "enforce" };
       }
@@ -341,6 +383,21 @@ export function reasoningRecoveryPass(items, opts = {}) {
 
     results.push(outcome || { ticket: item.ticket, decision, error: "no outcome" });
   }
+
+  // CTL-1287: one rollup per invocation — the "did the delegate fire, and
+  // why/why-not" headline. The scheduler only invokes this pass with a non-empty
+  // queue (scheduler.mjs gates on rItems.length > 0), so this never spams Loki on
+  // a quiet board: a recovery.tick line means there WAS flagged work this tick.
+  // A LogQL filter on `recovery.tick` reconstructs every tick's reasoning across
+  // the fleet — e.g. "queueSize:12 processed:0 ledgerSkipped:[12 tickets]" reads
+  // as "the delegate looked, and everything is latched to a human".
+  emitEvent({
+    type: "recovery.tick",
+    reason: `recovery pass (${mode}): ${tickStats.processed} processed, ${
+      tickStats.ledgerSkipped.length + tickStats.terminalSkipped.length
+    } skipped`,
+    details: { mode, ...tickStats },
+  });
 
   return {
     processed: results.length,

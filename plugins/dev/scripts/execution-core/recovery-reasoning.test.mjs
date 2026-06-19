@@ -669,7 +669,14 @@ describe("reasoningRecoveryPass cooldown skip", () => {
     );
     expect(result.processed).toBe(0);
     expect(acted).toBe(false);
-    expect(events.length).toBe(0);
+    // CTL-1287: the pass now emits ONE recovery.tick rollup per invocation even
+    // when every item is skipped (that's the whole point — a silently-skipped
+    // board is no longer invisible). The skipped ticket appears in ledgerSkipped,
+    // and NO action event (recovery.fixed/escalated/decision) is emitted.
+    const actionEvents = events.filter((e) => e.type !== "recovery.tick");
+    expect(actionEvents.length).toBe(0);
+    const tick = events.find((e) => e.type === "recovery.tick");
+    expect(tick.details.ledgerSkipped).toEqual(["CTL-9"]);
   });
 });
 
@@ -1230,5 +1237,128 @@ describe("CTL-1241 — R12 escalate_human belief wired into recovery evidence", 
     expect(result.decision).toBe("escalate");
     expect(result.fix_class).toBe("human");
     expect(result.details.reason).toContain("Rule belief R12 escalate_human fired");
+  });
+});
+
+// ─── CTL-1287: per-tick decision visibility (recovery.tick / recovery.decision) ─
+describe("reasoningRecoveryPass decision visibility (CTL-1287)", () => {
+  // Common injections that keep the pass pure (no shell-out, no real ledger).
+  const inert = {
+    postComment: () => {},
+    recordIntent: () => {},
+    invokeRemediateCapped: () => ({ success: true, reason: "fixed", details: {} }),
+  };
+
+  test("emits exactly one recovery.tick rollup per invocation, with queueSize", () => {
+    const events = [];
+    reasoningRecoveryPass(
+      [
+        { ticket: "CTL-1", evidence: { logsOutput: "stale main" } },
+        { ticket: "CTL-2", evidence: { logsOutput: "unknown error" } },
+      ],
+      { mode: "enforce", emitEvent: (e) => events.push(e), ...inert },
+    );
+    const ticks = events.filter((e) => e.type === "recovery.tick");
+    expect(ticks.length).toBe(1);
+    expect(ticks[0].details.queueSize).toBe(2);
+    expect(ticks[0].details.mode).toBe("enforce");
+  });
+
+  test("recovery.tick details carry decision + action counters", () => {
+    const events = [];
+    reasoningRecoveryPass(
+      [
+        { ticket: "CTL-1", evidence: { logsOutput: "stale main" } }, // bounded-llm fix
+        { ticket: "CTL-2", evidence: { logsOutput: "unknown error", beliefState: { escalate_human: true } } }, // escalate
+      ],
+      { mode: "enforce", emitEvent: (e) => events.push(e), ...inert },
+    );
+    const tick = events.find((e) => e.type === "recovery.tick").details;
+    expect(tick.processed).toBe(2);
+    expect(tick.decisions.fix_bounded_llm).toBe(1);
+    expect(tick.decisions.escalate).toBe(1);
+    expect(tick.actions.fixed).toBe(1);
+    expect(tick.actions.escalated).toBe(1);
+  });
+
+  test("ledger-skipped items land in ledgerSkipped[] and are NOT processed", () => {
+    const events = [];
+    reasoningRecoveryPass(
+      [
+        { ticket: "CTL-1", evidence: { logsOutput: "stale main" } }, // processed
+        { ticket: "CTL-2", evidence: { logsOutput: "stale main" } }, // skipped
+      ],
+      {
+        mode: "enforce",
+        shouldSkipItem: (t) => t === "CTL-2",
+        emitEvent: (e) => events.push(e),
+        ...inert,
+      },
+    );
+    const tick = events.find((e) => e.type === "recovery.tick").details;
+    expect(tick.ledgerSkipped).toEqual(["CTL-2"]);
+    expect(tick.processed).toBe(1);
+    // a skipped item never reaches the classifier → no recovery.decision for it
+    expect(events.some((e) => e.type === "recovery.decision" && e.ticket === "CTL-2")).toBe(false);
+  });
+
+  test("linear-terminal items land in terminalSkipped[]", () => {
+    const events = [];
+    reasoningRecoveryPass(
+      [{ ticket: "CTL-999", evidence: { linearTerminal: true, signal: {} } }],
+      { mode: "enforce", emitEvent: (e) => events.push(e), ...inert },
+    );
+    const tick = events.find((e) => e.type === "recovery.tick").details;
+    expect(tick.terminalSkipped).toEqual(["CTL-999"]);
+    expect(tick.processed).toBe(0);
+  });
+
+  test("emits a recovery.decision per classified item with the routing rule", () => {
+    const events = [];
+    reasoningRecoveryPass(
+      [
+        { ticket: "CTL-1", evidence: { logsOutput: "push rejected no workflow scope" } }, // seam → rule 1
+        { ticket: "CTL-2", evidence: { logsOutput: "stale main" } }, // bounded-llm → rule 2
+        { ticket: "CTL-3", evidence: { logsOutput: "unknown error", beliefState: { escalate_human: true } } }, // escalate → rule 3
+      ],
+      { mode: "shadow", emitEvent: (e) => events.push(e), postComment: () => {} },
+    );
+    const decisions = events.filter((e) => e.type === "recovery.decision");
+    expect(decisions.length).toBe(3);
+    expect(decisions.find((d) => d.ticket === "CTL-1").details.rule).toBe(1);
+    expect(decisions.find((d) => d.ticket === "CTL-2").details.rule).toBe(2);
+    expect(decisions.find((d) => d.ticket === "CTL-3").details.rule).toBe(3);
+  });
+
+  test("deferred items (fix cap) are counted in actions.deferred", () => {
+    const events = [];
+    reasoningRecoveryPass(
+      Array.from({ length: 4 }, (_, i) => ({ ticket: `CTL-${10 + i}`, evidence: { logsOutput: "stale main" } })),
+      { mode: "enforce", maxFixesPerTick: 2, emitEvent: (e) => events.push(e), ...inert },
+    );
+    const tick = events.find((e) => e.type === "recovery.tick").details;
+    expect(tick.actions.fixed).toBe(2);
+    expect(tick.actions.deferred).toBe(2);
+  });
+
+  test("mode=off emits no recovery.tick (the pass short-circuits)", () => {
+    const events = [];
+    reasoningRecoveryPass([{ ticket: "CTL-1", evidence: {} }], {
+      mode: "off",
+      emitEvent: (e) => events.push(e),
+    });
+    expect(events.length).toBe(0);
+  });
+
+  test("buildRecoveryEnvelope shapes a ticket-less recovery.tick (label null, action 'tick')", () => {
+    const env = buildRecoveryEnvelope({
+      type: "recovery.tick",
+      details: { mode: "enforce", queueSize: 3 },
+    });
+    expect(env.attributes["event.name"]).toBe("recovery.tick");
+    expect(env.attributes["event.action"]).toBe("tick");
+    expect(env.attributes["event.label"]).toBeNull();
+    expect(env.severityText).toBe("INFO");
+    expect(env.body.payload.details.queueSize).toBe(3);
   });
 });
