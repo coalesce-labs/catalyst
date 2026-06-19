@@ -3172,6 +3172,60 @@ describe("dispatch lifecycle event envelopes (CTL-660)", () => {
     expect(env.body.payload.mem_free_pct).toBe(42.5);
     expect(env.body.payload.decision_reason).toBe("converge-to-setpoint");
   });
+
+  // CTL-1291: the gauge numbers must ride out as ATTRIBUTES (not just
+  // body.payload) so a dashboard can chart parallelism + slots-in-use as a
+  // numeric series. Free-text (decision_reason/reason) stays in body.payload —
+  // never promoted (cardinality). body.payload is left intact (dual-write).
+  test("autotune-gauge promotes numeric gauges to attributes (CTL-1291)", () => {
+    const ok = defaultAppendAutotuneGaugeEvent({
+      label: "execution-core",
+      maxParallelEffective: 4,
+      maxParallelTarget: 6,
+      runningWorkers: 3,
+      load1: 2.4,
+      loadPerCore: 0.3,
+      memFreePct: 42.5,
+      reason: "converge-to-setpoint",
+    });
+    expect(ok).toBe(true);
+    const env = readBackEnvelope();
+    const a = env.attributes;
+    expect(a["scheduler.max_parallel_effective"]).toBe(4);
+    expect(a["scheduler.max_parallel_target"]).toBe(6);
+    expect(a["scheduler.running_workers"]).toBe(3);
+    expect(a["scheduler.load1"]).toBe(2.4);
+    expect(a["scheduler.load_per_core"]).toBe(0.3);
+    expect(a["scheduler.mem_free_pct"]).toBe(42.5);
+    // free-text NOT promoted to an attribute (stays in body.payload only)
+    expect(a["scheduler.decision_reason"]).toBeUndefined();
+    expect(a["decision_reason"]).toBeUndefined();
+    // body.payload intact (back-compat)
+    expect(env.body.payload.running_workers).toBe(3);
+    expect(env.body.payload.decision_reason).toBe("converge-to-setpoint");
+  });
+
+  test("parallelism-sampled promotes slots/parallelism to attributes (CTL-1291)", () => {
+    const ok = defaultAppendParallelismSampledEvent({
+      label: "execution-core",
+      load1: 1.5,
+      load5: 1.2,
+      load15: 1.0,
+      memFreePct: 55.0,
+      bgCount: 2,
+      maxParallelCurrent: 5,
+    });
+    expect(ok).toBe(true);
+    const env = readBackEnvelope();
+    const a = env.attributes;
+    expect(a["scheduler.bg_count"]).toBe(2); // slots-in-use
+    expect(a["scheduler.max_parallel_current"]).toBe(5); // parallelism
+    expect(a["scheduler.load1"]).toBe(1.5);
+    expect(a["scheduler.mem_free_pct"]).toBe(55.0);
+    // body.payload intact (back-compat)
+    expect(env.body.payload.bg_count).toBe(2);
+    expect(env.body.payload.maxParallel_current).toBe(5);
+  });
 });
 
 // CTL-1044: the generic operator-event appender. This is the PRODUCTION default

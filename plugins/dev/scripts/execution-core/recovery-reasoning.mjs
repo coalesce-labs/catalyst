@@ -853,6 +853,45 @@ function resolveOrchDir() {
 // what board-data.mjs:loadRecoveryOutcomes matches on. This is the load-bearing
 // half of the emit↔read contract.
 
+// promoteNumericAttrs — CTL-1291. Promote bounded numerics + bounded enums from
+// a recovery event's details{} block into OTel attributes so a dashboard can
+// CHART them. The forwarder ships ONLY attributes (+ event.name) to Loki —
+// body.payload is dropped from the log LINE — so any number left only in
+// details is unqueryable ("the event fired" but not "what it carried"). PURE.
+// Cardinality guard: arrays promote as LENGTH (never the roster); only finite
+// numbers and strings ≤64 chars pass; free-text/high-card stays in body.payload.
+// (CTL-1290 appends a "recovery.board-scan" branch here.)
+function promoteNumericAttrs(type, details) {
+  if (!details || typeof details !== "object") return {};
+  const a = {};
+  const num = (k, v) => {
+    if (typeof v === "number" && Number.isFinite(v)) a[k] = v;
+  };
+  const str = (k, v) => {
+    if (typeof v === "string" && v.length > 0 && v.length <= 64) a[k] = v;
+  };
+  if (type === "recovery.tick") {
+    num("recovery.queue_size", details.queueSize);
+    num("recovery.processed", details.processed);
+    num("recovery.decisions.fix_seam", details.decisions?.fix_seam);
+    num("recovery.decisions.fix_bounded_llm", details.decisions?.fix_bounded_llm);
+    num("recovery.decisions.escalate", details.decisions?.escalate);
+    num("recovery.actions.fixed", details.actions?.fixed);
+    num("recovery.actions.fix_failed", details.actions?.fixFailed);
+    num("recovery.actions.escalated", details.actions?.escalated);
+    num("recovery.actions.deferred", details.actions?.deferred);
+    num("recovery.actions.errors", details.actions?.errors);
+    num("recovery.ledger_skipped", details.ledgerSkipped?.length);
+    num("recovery.terminal_skipped", details.terminalSkipped?.length);
+    str("recovery.mode", details.mode);
+  } else if (type === "recovery.decision") {
+    num("recovery.rule", details.rule);
+    str("recovery.decision", details.decision);
+    str("recovery.mode", details.mode);
+  }
+  return a;
+}
+
 // buildRecoveryEnvelope — pure. Assembles the canonical envelope for a
 // recovery.* event. Exported so tests can assert the contract shape directly.
 export function buildRecoveryEnvelope(event, { now } = {}) {
@@ -889,6 +928,8 @@ export function buildRecoveryEnvelope(event, { now } = {}) {
       // ← the CTL key — what loadRecoveryOutcomes keys its outcome map on.
       "event.label": ticket,
       ...(fix_class != null ? { "recovery.fix_class": fix_class } : {}),
+      // CTL-1291: bounded numerics/enums promoted so the numbers are chartable.
+      ...promoteNumericAttrs(type, details),
     },
     // human-readable mirror; also the reader's fallback ticket-key source.
     body: { payload: { ticket, type, fix_class, reason, details, escalation } },

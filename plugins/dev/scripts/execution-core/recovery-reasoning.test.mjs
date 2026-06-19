@@ -771,6 +771,97 @@ describe("buildRecoveryEnvelope (emit↔read contract)", () => {
   });
 });
 
+// ─── CTL-1291: chartable numeric/enum attribute promotion ───────────────────
+// The forwarder ships ONLY OTel attributes (+ event.name) to Loki; body.payload
+// is dropped from the log line. So the numbers a recovery.tick/decision carries
+// are unqueryable until they ride out as attributes. Promote bounded numerics +
+// bounded enums; arrays promote as LENGTH (never the roster — cardinality).
+describe("buildRecoveryEnvelope numeric/enum promotion (CTL-1291)", () => {
+  test("recovery.tick promotes counts + mode enum to attributes", () => {
+    const details = {
+      mode: "enforce",
+      queueSize: 12,
+      processed: 3,
+      decisions: { fix_seam: 1, fix_bounded_llm: 1, escalate: 1 },
+      actions: { fixed: 2, fixFailed: 0, escalated: 1, deferred: 0, errors: 0 },
+      ledgerSkipped: ["CTL-1", "CTL-2"],
+      terminalSkipped: ["CTL-3"],
+    };
+    const env = buildRecoveryEnvelope({ type: "recovery.tick", ticket: null, reason: "r", details });
+    const a = env.attributes;
+    expect(a["recovery.queue_size"]).toBe(12);
+    expect(a["recovery.processed"]).toBe(3);
+    expect(a["recovery.decisions.fix_seam"]).toBe(1);
+    expect(a["recovery.decisions.fix_bounded_llm"]).toBe(1);
+    expect(a["recovery.decisions.escalate"]).toBe(1);
+    expect(a["recovery.actions.fixed"]).toBe(2);
+    expect(a["recovery.actions.fix_failed"]).toBe(0);
+    expect(a["recovery.actions.escalated"]).toBe(1);
+    expect(a["recovery.actions.deferred"]).toBe(0);
+    expect(a["recovery.actions.errors"]).toBe(0);
+    // arrays promote as LENGTH, never the roster
+    expect(a["recovery.ledger_skipped"]).toBe(2);
+    expect(a["recovery.terminal_skipped"]).toBe(1);
+    expect(a["recovery.mode"]).toBe("enforce");
+    // the rosters themselves must NOT become attributes (cardinality)
+    expect(Array.isArray(a["recovery.ledger_skipped"])).toBe(false);
+    expect(a["recovery.ledgerSkipped"]).toBeUndefined();
+  });
+
+  test("recovery.decision promotes rule (num) + decision/mode (enum)", () => {
+    const env = buildRecoveryEnvelope({
+      type: "recovery.decision",
+      ticket: "CTL-1029",
+      fix_class: "bounded-llm",
+      details: { rule: 2, decision: "fix", mode: "shadow" },
+    });
+    const a = env.attributes;
+    expect(a["recovery.rule"]).toBe(2);
+    expect(a["recovery.decision"]).toBe("fix");
+    expect(a["recovery.mode"]).toBe("shadow");
+    expect(a["event.label"]).toBe("CTL-1029"); // unchanged canonical attr
+  });
+
+  test("body.payload.details stays intact (back-compat / dual-write)", () => {
+    const details = {
+      mode: "enforce",
+      queueSize: 7,
+      processed: 1,
+      decisions: { fix_seam: 0, fix_bounded_llm: 0, escalate: 0 },
+      actions: { fixed: 0, fixFailed: 0, escalated: 0, deferred: 0, errors: 0 },
+      ledgerSkipped: [],
+      terminalSkipped: [],
+    };
+    const env = buildRecoveryEnvelope({ type: "recovery.tick", ticket: null, details });
+    expect(env.body.payload.details).toEqual(details);
+  });
+
+  test("null / malformed details → no promoted attrs, never throws", () => {
+    const env1 = buildRecoveryEnvelope({ type: "recovery.tick", ticket: null, details: null });
+    expect(env1.attributes["recovery.queue_size"]).toBeUndefined();
+    const env2 = buildRecoveryEnvelope({ type: "recovery.tick", ticket: null, details: "nope" });
+    expect(env2.attributes["recovery.queue_size"]).toBeUndefined();
+  });
+
+  test("non-finite numbers and over-long strings are dropped", () => {
+    const env = buildRecoveryEnvelope({
+      type: "recovery.tick",
+      ticket: null,
+      details: { mode: "x".repeat(100), queueSize: Infinity, processed: NaN },
+    });
+    expect(env.attributes["recovery.queue_size"]).toBeUndefined();
+    expect(env.attributes["recovery.processed"]).toBeUndefined();
+    expect(env.attributes["recovery.mode"]).toBeUndefined(); // >64 chars dropped
+  });
+
+  test("unknown recovery.* type promotes nothing (e.g. recovery.fixed)", () => {
+    const env = buildRecoveryEnvelope({ type: "recovery.fixed", ticket: "CTL-9", details: { foo: 1 } });
+    expect(env.attributes["recovery.queue_size"]).toBeUndefined();
+    expect(env.attributes["recovery.rule"]).toBeUndefined();
+    expect(env.attributes["event.name"]).toBe("recovery.fixed"); // canonical attrs intact
+  });
+});
+
 // ─── CTL-1176: host-local cooldown + intent ledger ──────────────────────────
 describe("recovery-intent ledger (cooldown + max-attempts + escalated)", () => {
   let orchDir;
