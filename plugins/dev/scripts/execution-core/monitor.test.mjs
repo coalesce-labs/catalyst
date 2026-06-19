@@ -1687,11 +1687,11 @@ describe("dispatchTriage — CTL-781 respect-assignment + self-assign", () => {
     };
   }
 
-  test("→Triage for a human-assigned ticket → NO dispatch, budget not decremented", () => {
+  test("→Triage UNDELEGATED + human-assigned → delegate-then-hold: NO dispatch, applyAssignee CALLED (assignee irrelevant, CTL-1174)", () => {
     enroll("ENG", { status: "Ready" });
     const dispatch = mock(() => ({ code: 0 }));
     const applyAssignee = mock(() => ({ applied: true, reason: null }));
-    const fetchAssignee = () => ({ known: true, assignee: HUMAN });
+    const fetchAssignee = () => ({ known: true, assignee: HUMAN, delegate: null });
     handleStateChangedEvent(toTriageEvent("ENG-H1"), {
       dispatch,
       orchDir,
@@ -1701,17 +1701,18 @@ describe("dispatchTriage — CTL-781 respect-assignment + self-assign", () => {
       applyAssignee,
       triageBudget: { remaining: 5 },
     });
-    expect(dispatch).not.toHaveBeenCalled();
-    expect(applyAssignee).not.toHaveBeenCalled();
+    expect(dispatch).not.toHaveBeenCalled(); // held — not yet delegated to us
+    expect(applyAssignee).toHaveBeenCalledTimes(1); // delegate-on-Todo: claim by delegating
+    expect(applyAssignee.mock.calls[0][0]).toMatchObject({ ticket: "ENG-H1", userId: BOT });
   });
 
-  test("→Triage for an unassigned ticket → dispatch fires AND applyAssignee called with botWriteId", () => {
+  test("→Triage UNDELEGATED (unassigned) → delegate-then-hold: NO dispatch this tick, applyAssignee called with botWriteId (CTL-1174)", () => {
     enroll("ENG", { status: "Ready" });
     const dispatch = mock(() => ({ code: 0 }));
     const applyTriageStatus = mock(() => ({ applied: true, verified: true, from_state: "Todo", to_state: "Triage", reason: null }));
     const appendEvent = mock(() => {});
     const applyAssignee = mock(() => ({ applied: true, reason: null }));
-    const fetchAssignee = () => ({ known: true, assignee: null });
+    const fetchAssignee = () => ({ known: true, assignee: null, delegate: null });
     handleStateChangedEvent(toTriageEvent("ENG-N1"), {
       dispatch,
       orchDir,
@@ -1723,15 +1724,15 @@ describe("dispatchTriage — CTL-781 respect-assignment + self-assign", () => {
       applyAssignee,
       triageBudget: { remaining: 5 },
     });
-    expect(dispatch).toHaveBeenCalledTimes(1);
+    expect(dispatch).not.toHaveBeenCalled();
     expect(applyAssignee).toHaveBeenCalledTimes(1);
     expect(applyAssignee.mock.calls[0][0]).toMatchObject({ ticket: "ENG-N1", userId: BOT });
   });
 
-  test("→Triage for a bot-assigned ticket → dispatch fires (re-claim of own ticket OK)", () => {
+  test("→Triage DELEGATED to our orchestrator → dispatch fires (even if assignee is a human, CTL-1174)", () => {
     enroll("ENG", { status: "Ready" });
     const dispatch = mock(() => ({ code: 0 }));
-    const fetchAssignee = () => ({ known: true, assignee: BOT });
+    const fetchAssignee = () => ({ known: true, assignee: HUMAN, delegate: BOT });
     handleStateChangedEvent(toTriageEvent("ENG-B1"), {
       dispatch,
       orchDir,
@@ -1770,13 +1771,13 @@ describe("dispatchTriage — CTL-781 respect-assignment + self-assign", () => {
     expect(fetchAssignee).not.toHaveBeenCalled();
   });
 
-  test("applyAssignee absent/failing → dispatch still completes, applyTriageStatus + appendEvent unaffected", () => {
+  test("a DELEGATED ticket dispatches; applyTriageStatus + appendEvent fire (delegate-on-Todo already done, CTL-1174)", () => {
     enroll("ENG", { status: "Ready" });
     const dispatch = mock(() => ({ code: 0 }));
     const applyTriageStatus = mock(() => ({ applied: true, verified: true, from_state: "Todo", to_state: "Triage", reason: null }));
     const appendEvent = mock(() => {});
     const applyAssignee = mock(() => ({ applied: false, reason: "transient" }));
-    const fetchAssignee = () => ({ known: true, assignee: null });
+    const fetchAssignee = () => ({ known: true, assignee: HUMAN, delegate: BOT });
     handleStateChangedEvent(toTriageEvent("ENG-FA1"), {
       dispatch,
       orchDir,
@@ -1793,11 +1794,11 @@ describe("dispatchTriage — CTL-781 respect-assignment + self-assign", () => {
     expect(appendEvent).toHaveBeenCalledTimes(1);
   });
 
-  test("botWriteId absent → applyAssignee still called with userId:undefined (loud-no-op, CTL-1011)", () => {
+  test("botWriteId absent on an UNDELEGATED ticket → delegate-on-Todo calls applyAssignee userId:undefined (loud-no-op, CTL-1011), holds", () => {
     enroll("ENG", { status: "Ready" });
     const dispatch = mock(() => ({ code: 0 }));
     const applyAssignee = mock(() => ({ applied: false, reason: "invalid-user" }));
-    const fetchAssignee = () => ({ known: true, assignee: null });
+    const fetchAssignee = () => ({ known: true, assignee: null, delegate: null });
     handleStateChangedEvent(toTriageEvent("ENG-NU1"), {
       dispatch,
       orchDir,
@@ -1807,7 +1808,7 @@ describe("dispatchTriage — CTL-781 respect-assignment + self-assign", () => {
       applyAssignee,
       triageBudget: { remaining: 5 },
     });
-    expect(dispatch).toHaveBeenCalledTimes(1);
+    expect(dispatch).not.toHaveBeenCalled(); // held — undelegated
     expect(applyAssignee).toHaveBeenCalledTimes(1);
     expect(applyAssignee.mock.calls[0][0]).toMatchObject({ ticket: "ENG-NU1", userId: undefined });
   });

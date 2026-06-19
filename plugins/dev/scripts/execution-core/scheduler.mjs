@@ -4752,14 +4752,28 @@ export function schedulerTick(
       if (!a.known) {
         log.debug(
           { ticket: t.identifier },
-          "ctl-781: assignee/delegate unreadable — holding candidate this tick"
+          "ctl-1174: delegate unreadable — holding candidate this tick"
+        );
+        continue;
+      }
+      if (a.delegate == null) {
+        // CTL-1174 delegate-on-Todo: claim by delegating to the orchestrator now
+        // (assignee is irrelevant); HOLD this tick — dispatches once the
+        // delegate lands in the cache (webhook-projected). Best-effort.
+        safeWrite(() => writeStatus.applyAssignee?.({ ticket: t.identifier, userId: botWriteId }), {
+          ticket: t.identifier,
+          phase: "delegate-on-todo",
+        });
+        log.debug(
+          { ticket: t.identifier },
+          "ctl-1174: undelegated — delegated to orchestrator, holding this tick"
         );
         continue;
       }
       if (!isClaimable(a.assignee, a.delegate, botUserIds)) {
         log.debug(
-          { ticket: t.identifier, assignee: a.assignee, delegate: a.delegate },
-          "ctl-1174: candidate not claimable (assignee/delegate respect-gate) — skipping"
+          { ticket: t.identifier, delegate: a.delegate },
+          "ctl-1174: delegated to another actor — skipping"
         );
         continue;
       }

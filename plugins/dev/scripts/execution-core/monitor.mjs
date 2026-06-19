@@ -617,15 +617,28 @@ function dispatchTriage(
   // (CTL-749 fail-open convention).
   if (botUserIds instanceof Set && botUserIds.size > 0) {
     const a = fetchAssignee(identifier, { gateway });
-    if (!a.known || !isClaimable(a.assignee, a.delegate, botUserIds)) {
+    if (!a.known) {
+      // Unreadable delegate → HOLD (sweepMissingTriage retries next reconcile).
+      log.info({ identifier, known: false }, "monitor: triage dispatch held — delegate unreadable (CTL-1174)");
+      return false;
+    }
+    if (a.delegate == null) {
+      // CTL-1174 DELEGATE-ON-TODO: an undelegated Todo ticket is claimed by
+      // DELEGATING it to the orchestrator now (the assignee is irrelevant), then
+      // HELD this tick — it dispatches once the delegate lands in the cache
+      // (webhook-projected). This is what gets queued-but-untriaged items moving.
+      const d = applyAssignee({ ticket: identifier, userId: botWriteId });
       log.info(
-        {
-          identifier,
-          known: a.known,
-          assignee: a.known ? (a.assignee ?? null) : undefined,
-          delegate: a.known ? (a.delegate ?? null) : undefined,
-        },
-        "monitor: triage dispatch skipped — respect-assignment/delegate (CTL-1174)"
+        { identifier, applied: d.applied, reason: d.reason },
+        "monitor: delegated to orchestrator — will dispatch once delegate lands (CTL-1174)"
+      );
+      return false;
+    }
+    if (!isClaimable(a.assignee, a.delegate, botUserIds)) {
+      // Delegated to a different actor (another bot/human) → not ours.
+      log.info(
+        { identifier, delegate: a.delegate ?? null },
+        "monitor: triage dispatch skipped — delegated to another actor (CTL-1174)"
       );
       return false;
     }

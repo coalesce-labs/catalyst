@@ -537,16 +537,20 @@ export function isAssigneeClaimable(assignee, botUserIds) {
   return botUserIds instanceof Set && botUserIds.has(assignee);
 }
 
-// isClaimable — CTL-1174 delegate-aware claim predicate. A ticket is ours iff
-// BOTH the assignee and the delegate gates pass. Model: assignee = human
-// responsibility (back off); delegate = bot ownership (ours).
-//   claimable iff (assignee ∈ {null,bot}) AND (delegate ∈ {null,bot})
-// undefined delegate is coerced to null (back-compat: old {known,assignee}
-// shape from no-gateway callers treats absent delegate as "unset" = claimable).
+// isClaimable — CTL-1174 (delegate-ONLY claim predicate). The human ASSIGNEE is
+// IRRELEVANT: a Linear bot can never BE an assignee (app-user UUIDs route to
+// Issue.delegate; assigning one returns HTTP 400 "App user not valid"), so a
+// human always holds the assignee and gating on it permanently starves the
+// board (CTL-781's stopgap). A ticket is the daemon's to claim IFF it is
+// DELEGATED to the orchestrator bot.
+//   claimable iff delegate ∈ bot-ids
+// An UNDELEGATED ticket (delegate == null/undefined) is NOT claimable here — it
+// is first delegated by the delegate-on-Todo step at the call sites (which then
+// makes this gate pass next reconcile). The `assignee` arg is retained for
+// call-site/signature compatibility but is deliberately unused.
 export function isClaimable(assignee, delegate, botUserIds) {
   const d = delegate === undefined ? null : delegate;
-  const inBots = (id) => id == null || (botUserIds instanceof Set && botUserIds.has(id));
-  return isAssigneeClaimable(assignee, botUserIds) && inBots(d);
+  return d != null && botUserIds instanceof Set && botUserIds.has(d);
 }
 
 // CTL-1173: raw GraphQL read for Issue.delegate.id — Linear routes an app-user

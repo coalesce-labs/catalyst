@@ -1166,49 +1166,40 @@ describe("fetchTicketDelegate (CTL-1173)", () => {
 
 // ── isClaimable (CTL-1174) ────────────────────────────────────────────────────
 
-describe("isClaimable (CTL-1174)", () => {
+describe("isClaimable (CTL-1174 — delegate-ONLY)", () => {
   const BOT = "bot-uuid-ff78d890";
   const HUMAN = "human-uuid-abcd1234";
   const bots = new Set([BOT]);
 
-  test("(null, null, botSet) → true: unassigned + undelegated is always claimable", () => {
-    expect(isClaimable(null, null, bots)).toBe(true);
-  });
-
-  test("(null, null, empty Set) → true: no bots registered, no foreign owner", () => {
-    expect(isClaimable(null, null, new Set())).toBe(true);
-  });
-
-  test("(null, null, undefined) → true: no botUserIds at all", () => {
-    expect(isClaimable(null, null, undefined)).toBe(true);
-  });
-
-  test("(null, BOT, botSet) → true: our bot holds the delegate slot", () => {
+  test("delegated to our orchestrator → claimable, regardless of assignee", () => {
     expect(isClaimable(null, BOT, bots)).toBe(true);
+    expect(isClaimable(HUMAN, BOT, bots)).toBe(true); // assignee irrelevant — the whole point
   });
 
-  test("(null, 'foreign', botSet) → false: foreign delegate blocks the claim (AC#1)", () => {
-    expect(isClaimable(null, "foreign-uuid-xyz", bots)).toBe(false);
-  });
-
-  test("(BOT, BOT, botSet) → true: bot owns both assignee and delegate", () => {
-    expect(isClaimable(BOT, BOT, bots)).toBe(true);
-  });
-
-  test("(HUMAN, null, botSet) → false: human assignee always blocks regardless of delegate", () => {
+  test("UNDELEGATED → NOT claimable (must be delegated-on-Todo first), regardless of assignee", () => {
+    expect(isClaimable(null, null, bots)).toBe(false);
     expect(isClaimable(HUMAN, null, bots)).toBe(false);
+    expect(isClaimable(BOT, null, bots)).toBe(false);
   });
 
-  test("(HUMAN, BOT, botSet) → false: human assignee wins even with our bot delegate", () => {
-    expect(isClaimable(HUMAN, BOT, bots)).toBe(false);
+  test("undefined delegate coerced to null → NOT claimable (no-gateway shape = not yet delegated)", () => {
+    expect(isClaimable(null, undefined, bots)).toBe(false);
+    expect(isClaimable(BOT, undefined, bots)).toBe(false);
   });
 
-  test("(null, undefined, botSet) → true: undefined coerced to null (back-compat no-gateway shape)", () => {
-    expect(isClaimable(null, undefined, bots)).toBe(true);
+  test("delegated to a DIFFERENT actor → not ours", () => {
+    expect(isClaimable(null, "foreign-uuid-xyz", bots)).toBe(false);
+    expect(isClaimable(HUMAN, "foreign-uuid-xyz", bots)).toBe(false);
   });
 
-  test("(BOT, undefined, botSet) → true: undefined coerced to null, bot assignee passes", () => {
-    expect(isClaimable(BOT, undefined, bots)).toBe(true);
+  test("the human ASSIGNEE is irrelevant — verdict depends only on the delegate", () => {
+    expect(isClaimable(HUMAN, BOT, bots)).toBe(isClaimable(null, BOT, bots));
+    expect(isClaimable(HUMAN, null, bots)).toBe(isClaimable(null, null, bots));
+  });
+
+  test("empty/absent botUserIds → false (the call-site wrapper disables the gate; the predicate itself is strict)", () => {
+    expect(isClaimable(null, BOT, new Set())).toBe(false);
+    expect(isClaimable(null, BOT, undefined)).toBe(false);
   });
 });
 
