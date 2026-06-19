@@ -284,6 +284,21 @@ function defaultEmitComplete({ orchDir, signal }, { spawn = spawnSync } = {}) {
 // `ticketType` is resolved by the caller from triage.json (resolveTicketType);
 // when omitted it defaults to UNKNOWN_TICKET_TYPE so the attribute is ALWAYS
 // present, never inconsistently missing (the gherkin contract).
+// vetAttrs — CTL-1291. Keep only chartable, low-cardinality values (finite
+// numbers + short strings) from a caller's attrExtras, so promoting gauge
+// numbers to attributes can NEVER blow up Loki stream cardinality with
+// free-text or arrays. Free-text (reason/decision_reason) is deliberately not
+// passed in attrExtras and stays in body.payload.
+function vetAttrs(obj) {
+  if (!obj || typeof obj !== "object") return {};
+  const out = {};
+  for (const [k, v] of Object.entries(obj)) {
+    if (typeof v === "number" && Number.isFinite(v)) out[k] = v;
+    else if (typeof v === "string" && v.length > 0 && v.length <= 64) out[k] = v;
+  }
+  return out;
+}
+
 function buildEventEnvelope({
   phase,
   ticket,
@@ -291,6 +306,8 @@ function buildEventEnvelope({
   action,
   reason,
   payloadExtras = {},
+  // CTL-1291: vetted numeric/enum attrs to promote so dashboards can chart them.
+  attrExtras = {},
   severityText = "WARN",
   severityNumber = 13,
   ticketType = UNKNOWN_TICKET_TYPE,
@@ -319,6 +336,7 @@ function buildEventEnvelope({
         "catalyst.orchestration": orchId ?? ticket,
         "linear.issue.identifier": ticket,
         "catalyst.ticket.type": ticketType ?? UNKNOWN_TICKET_TYPE,
+        ...vetAttrs(attrExtras), // CTL-1291: chartable gauge numbers
       },
       body: { payload: { phase, ticket, status: action, reason, ...payloadExtras } },
     }) + "\n"
@@ -1096,6 +1114,14 @@ export function defaultAppendParallelismSampledEvent({
         bg_count: bgCount,
         maxParallel_current: maxParallelCurrent,
       },
+      // CTL-1291: slots-in-use (bg_count) + parallelism (maxParallel_current)
+      // promoted so they're chartable, not just the sampling event's rate.
+      attrExtras: {
+        "scheduler.bg_count": bgCount,
+        "scheduler.max_parallel_current": maxParallelCurrent,
+        "scheduler.load1": load1,
+        "scheduler.mem_free_pct": memFreePct,
+      },
     }),
     "parallelism-sampled"
   );
@@ -1156,6 +1182,19 @@ export function defaultAppendAutotuneGaugeEvent({
         load_per_core: loadPerCore,
         mem_free_pct: memFreePct,
         decision_reason: reason,
+      },
+      // CTL-1291: effective/target parallelism + running_workers (slots-in-use)
+      // promoted to attributes so the gauge renders as a numeric series.
+      // (Real OTLP gauge metrics → Prometheus are deferred as a follow-up;
+      // these Loki structured-metadata series satisfy "chartable as a series".)
+      // decision_reason (free-text) stays in body.payload only — cardinality.
+      attrExtras: {
+        "scheduler.max_parallel_effective": maxParallelEffective,
+        "scheduler.max_parallel_target": maxParallelTarget,
+        "scheduler.running_workers": runningWorkers,
+        "scheduler.load1": load1,
+        "scheduler.load_per_core": loadPerCore,
+        "scheduler.mem_free_pct": memFreePct,
       },
     }),
     "autotune-gauge"
