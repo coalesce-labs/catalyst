@@ -257,44 +257,24 @@ function readClusterRepoRoster() {
   return null;
 }
 
-// readHostsFallbackRoster — the LEGACY migration-fallback roster (CTL-1273): the
-// per-repo .catalyst/hosts.json ONLY. This is the lowest-priority real source —
-// the safety net that keeps the live fleet multi-host between landing CTL-1274
-// and the cutover (cloning the cluster repo on every node). A later ticket
-// deletes the file + adds the never-return guard. Returns the filtered non-empty
-// array, or null when no roster resolves. Never throws.
-function readHostsFallbackRoster() {
-  try {
-    const raw = readFileSync(resolve(getCatalystRepoDir(), "hosts.json"), "utf8");
-    const parsed = JSON.parse(raw);
-    if (Array.isArray(parsed)) {
-      const hosts = parsed.filter((h) => typeof h === "string" && h.length > 0);
-      if (hosts.length > 0) return hosts;
-    }
-  } catch {
-    /* absent/malformed roster → null */
-  }
-  return null;
-}
-
 // resolveClusterHosts — the single roster-resolution seam (CTL-1273 seam,
-// CTL-1274 source swap). Returns { hosts, source, multiHost } so callers
-// (getClusterHosts + the daemon boot assertion) share ONE precedence. Precedence:
-//   1. 'cluster-repo'   — the catalyst-cluster repo's cluster.json.roster
-//                         (CTL-1274; the dedicated, versioned, durable home for
-//                         cluster identity — read==write on the cluster repo).
-//   2. 'static'         — an explicit catalyst.cluster.staticRoster in Layer-2
-//                         (machine-local escape hatch for multi-host without the
-//                         cluster repo).
-//   3. 'hosts-fallback' — the legacy .catalyst/hosts.json (MIGRATION FALLBACK —
-//                         kept until the cutover removes the file + adds the guard).
-//   4. 'single-host'    — [getHostName()] when nothing else resolves.
-// FAIL-OPEN: any source read miss/error falls through to the next source — it
-// NEVER empties the roster (which would mass-evict the fleet under HRW). With no
-// cluster clone present, resolution falls through to hosts-fallback, so a restart
-// keeps the live fleet on its committed roster — never silently single-host.
-// Re-read per call so a live add/remove (committed to the cluster repo and pulled
-// by cluster-sync) is honored on the next scheduler tick.
+// CTL-1274 source swap + per-repo hosts.json retirement). Returns
+// { hosts, source, multiHost } so callers (getClusterHosts + the daemon boot
+// assertion) share ONE precedence. Precedence:
+//   1. 'cluster-repo' — the catalyst-cluster repo's cluster.json.roster (the
+//                       dedicated, versioned, durable home for cluster identity —
+//                       read==write on the cluster repo; CTL-1211/CTL-1274).
+//   2. 'static'       — an explicit catalyst.cluster.staticRoster in Layer-2
+//                       (machine-local escape hatch for multi-host without the
+//                       cluster repo).
+//   3. 'single-host'  — [getHostName()] when nothing else resolves.
+// The legacy 'hosts-fallback' rung (per-repo .catalyst/hosts.json) is RETIRED
+// (CTL-1274) — the roster's single durable home is the catalyst-cluster repo, and
+// a CI guard (hosts-json-retired.test.mjs) fails the build if a project hosts.json
+// reappears or a reader regrows. FAIL-OPEN: any source read miss/error falls
+// through to the next source — it NEVER empties the roster (which would mass-evict
+// the fleet under HRW). Re-read per call so a live add/remove (committed to the
+// cluster repo and pulled by cluster-sync) is honored on the next scheduler tick.
 export function resolveClusterHosts() {
   // 1. cluster-repo (CTL-1274) — the catalyst-cluster repo's cluster.json.roster.
   //    Schema-gated + fail-open inside readClusterRepoRoster.
@@ -309,13 +289,7 @@ export function resolveClusterHosts() {
     return { hosts: staticRoster, source: "static", multiHost: staticRoster.length > 1 };
   }
 
-  // 3. legacy .catalyst/hosts.json migration fallback.
-  const fallback = readHostsFallbackRoster();
-  if (fallback) {
-    return { hosts: fallback, source: "hosts-fallback", multiHost: fallback.length > 1 };
-  }
-
-  // 4. single-host default — no roster source resolved.
+  // 3. single-host default — no roster source resolved.
   return { hosts: [getHostName()], source: "single-host", multiHost: false };
 }
 
