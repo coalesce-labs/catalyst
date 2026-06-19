@@ -81,6 +81,7 @@ import {
   seedLastSeenByService,
 } from "./router.mjs";
 import { seedTailer, startTailing, stopTailing, loadExistingRegistrations } from "./tailer.mjs";
+import { startCacheReconcileTimer } from "./cache-reconcile.mjs";
 import { gcStaleInterests } from "./gc-startup.mjs";
 import { getExecutionCoreDir, getRunsRoot } from "../execution-core/config.mjs";
 import { defaultStatJob } from "../execution-core/recovery.mjs";
@@ -531,6 +532,12 @@ function main() {
   };
   emitBrokerHeartbeat();
   const heartbeatId = setInterval(emitBrokerHeartbeat, BROKER_HEARTBEAT_INTERVAL_MS);
+  // CTL-1277: periodic state+labels reconcile of the board cache vs live Linear.
+  // Off by default; operators opt in via CATALYST_CACHE_RECONCILE=shadow then =enforce.
+  // The summary log line is Loki-queryable (see the sensing-substrate skill).
+  const cacheReconcileId = startCacheReconcileTimer({
+    log: (level, obj, msg) => (log[level] || log.info)(obj, msg),
+  });
   log.info(
     {
       pid: process.pid,
@@ -554,6 +561,7 @@ function main() {
     clearInterval(watchdogId);
     clearInterval(heartbeatId); // CTL-1171: stop the liveness heartbeat
     clearInterval(driftCheckId); // CTL-1161: drift-check backstop timer
+    if (cacheReconcileId) clearInterval(cacheReconcileId); // CTL-1277: cache reconcile
     // CTL-529: the debounce timer handles are router module-internal.
     clearDebounceTimers();
     // CTL-351: emit a parallel shutdown event so subscribers can pair
