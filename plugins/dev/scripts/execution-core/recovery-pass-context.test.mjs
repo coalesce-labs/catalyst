@@ -22,20 +22,22 @@ function runScript(args, env = {}) {
 }
 
 // Build an env that pins a deterministic roster + self host so the sweep's
-// soft HRW tagging is testable end-to-end. The roster lives in
-// <repoRoot>/.catalyst/hosts.json (resolved via CATALYST_CONFIG_FILE); the
-// cluster repo is pointed at an empty dir so getClusterHosts falls through to
-// hosts.json; CATALYST_HOST_NAME pins self.
+// soft HRW tagging is testable end-to-end. CTL-1274: the roster's source is the
+// catalyst-cluster repo's cluster.json (resolved via CATALYST_CLUSTER_DIR) — the
+// per-repo .catalyst/hosts.json fallback is RETIRED. CATALYST_HOST_NAME pins self.
 function rosterEnv(baseDir, roster, self) {
   const catalystCfgDir = join(baseDir, ".catalyst");
   mkdirSync(catalystCfgDir, { recursive: true });
   writeFileSync(join(catalystCfgDir, "config.json"), JSON.stringify({}));
-  writeFileSync(join(catalystCfgDir, "hosts.json"), JSON.stringify(roster));
-  const emptyCluster = join(baseDir, "empty-cluster");
-  mkdirSync(emptyCluster, { recursive: true });
+  const clusterDir = join(baseDir, "cluster");
+  mkdirSync(clusterDir, { recursive: true });
+  writeFileSync(
+    join(clusterDir, "cluster.json"),
+    JSON.stringify({ schemaVersion: 1, roster }),
+  );
   return {
     CATALYST_CONFIG_FILE: join(catalystCfgDir, "config.json"),
-    CATALYST_CLUSTER_DIR: emptyCluster,
+    CATALYST_CLUSTER_DIR: clusterDir,
     CATALYST_HOST_NAME: self,
   };
 }
