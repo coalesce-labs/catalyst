@@ -1,5 +1,19 @@
 # Changelog
 
+## [12.14.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.13.0...catalyst-dev-v12.14.0) (2026-06-19)
+
+
+### Features
+
+* **dev:** CTL-1287 — recovery delegate emits per-tick recovery.tick/recovery.decision ([#2276](https://github.com/coalesce-labs/catalyst/issues/2276)) ([ae419a6](https://github.com/coalesce-labs/catalyst/commit/ae419a6c8dcced9422c55c7059796b45d6023170))
+* **dev:** CTL-1291 — chartable control-loop numerics via OTel attribute promotion ([#2282](https://github.com/coalesce-labs/catalyst/issues/2282)) ([29db3b4](https://github.com/coalesce-labs/catalyst/commit/29db3b40dad0ac6e68f144bda6415ad7082d1df1))
+
+
+### Bug Fixes
+
+* **dev:** CTL-1285 — Alloy log-shipper survives via dedicated KeepAlive LaunchAgent ([#2273](https://github.com/coalesce-labs/catalyst/issues/2273)) ([849929d](https://github.com/coalesce-labs/catalyst/commit/849929d6ea6ef5a55fd8ed01f77f5d9e098f977b))
+* **dev:** CTL-1288 — cache reconcile covers the whole board via per-tier rotation cursors ([#2278](https://github.com/coalesce-labs/catalyst/issues/2278)) ([ca8b808](https://github.com/coalesce-labs/catalyst/commit/ca8b8088411422a32c0ccc93813947c5dd150a98))
+
 ## [12.13.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.12.0...catalyst-dev-v12.13.0) (2026-06-19)
 
 
