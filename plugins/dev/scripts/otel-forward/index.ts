@@ -8,6 +8,7 @@ import { loadForwarderConfig } from "./lib/config.ts";
 import { readCheckpoint, writeCheckpoint } from "./lib/checkpoint.ts";
 import { createTailer } from "./lib/tail.ts";
 import { log } from "./lib/logger.ts";
+import { logDaemonHeartbeat } from "../lib/daemon-heartbeat.mjs";
 import { OtlpSender } from "./lib/destinations/otlp.ts";
 import { PosthogSender } from "./lib/destinations/posthog.ts";
 import { CloudflareAESender } from "./lib/destinations/cloudflare-ae.ts";
@@ -117,6 +118,12 @@ const senders = {
 };
 
 function emitLag(): void {
+  // CTL-1280: deterministic liveness heartbeat to otel-forward.log (Alloy→Loki),
+  // emitted UNCONDITIONALLY each tick — BEFORE the cold-start skip below — so an
+  // idle/quiet forwarder still proves it is alive (it previously wrote only a
+  // startup line then went silent, reading as down). Rides the Alloy .log stream,
+  // independent of the event pipeline this daemon itself ships.
+  logDaemonHeartbeat(log, "otel-forward");
   // Skip on cold start before any event has been processed or delivered
   if (!lastLocalTs && !lastForwardedTs) return;
   try {

@@ -11,6 +11,7 @@ import {
 } from "./lib/state-reader";
 import { readSessionStore } from "./lib/session-store";
 import { readReconcileHealth } from "./lib/reconcile-health-reader"; // CTL-867
+import { DAEMON_HEARTBEAT_MSG } from "../lib/daemon-heartbeat.mjs"; // CTL-1280
 import type { BoardPayload } from "./lib/board-data.mjs";
 import { assembleBoard, _getTranscriptCacheSize } from "./lib/board-data.mjs";
 import { createBoardSnapshotManager } from "./lib/board-snapshot.mjs";
@@ -932,6 +933,11 @@ export function createServer(opts: CreateServerOptions): BunServer {
         // tick or a dead process stops the heartbeat, which the broker's recency check
         // then catches. (No self-descriptor flip → the in-monitor UI is unchanged.)
         void serviceHealthEventLog.append(buildMonitorHeartbeatEvent(new Date().toISOString()));
+        // CTL-1280: deterministic liveness heartbeat to monitor.log (Alloy→Loki),
+        // on the same ~30s tick. monitor.log is the console stream Alloy ships, so a
+        // liveness check can watch for the shared heartbeat marker independent of the
+        // otel-forward event pipeline (the heartbeat EVENT above rides otel-forward).
+        console.info(`${DAEMON_HEARTBEAT_MSG} (monitor)`);
       },
     });
 

@@ -24,6 +24,7 @@ import {
   readGovernanceConfig,
 } from "./config.mjs";
 import { hostName, hostId } from "./lib/host-identity.mjs";
+import { logDaemonHeartbeat } from "../lib/daemon-heartbeat.mjs";
 
 export const HEARTBEAT_EVENT = "node.heartbeat";
 
@@ -107,7 +108,14 @@ export async function emitHeartbeatEvent({ logPath = getEventLogPath(), now, epo
  * @param {string} [opts.logPath]     event-log path (injectable for tests)
  */
 export function startHeartbeat({ intervalMs = HEARTBEAT_INTERVAL_MS, logPath } = {}) {
-  const tick = () => emitHeartbeatEvent({ logPath }).catch(() => {});
+  const tick = () => {
+    // CTL-1280: deterministic liveness heartbeat to daemon.log (Alloy→Loki),
+    // riding the same cadence as the node.heartbeat event but on the .log stream
+    // so a liveness check can watch the heartbeat marker independent of the
+    // otel-forward event pipeline (a quiet-but-healthy daemon must still prove it).
+    logDaemonHeartbeat(log, "execution-core");
+    return emitHeartbeatEvent({ logPath }).catch(() => {});
+  };
   const started = tick(); // emit once at boot; Promise for callers that need to await it
   const timer = setInterval(tick, intervalMs);
   timer.unref?.();
