@@ -55,6 +55,38 @@ function isTerminal(state) {
   return TERMINAL_STATES.has(String(state ?? "").toLowerCase());
 }
 
+// CTL-1288: Backlog is the ONE non-terminal state that is both huge (hundreds of
+// rows) and rarely display-critical (a Backlog ticket is not "stuck"). The
+// active-pipeline non-terminal states (PR/Implement/Todo/Triage/Research/Validate/
+// Remediate) are the VISIBLE board where a stale phantom (cache=PR but live=Done)
+// actually misleads an operator. We reconcile ALL active-pipeline rows every pass
+// and ROTATE a cursor window through Backlog — so phantoms in the visible board
+// clear within one interval while the whole table is still covered over successive
+// passes, all under perPassCap (the rate-limit self-constraint).
+function isBacklog(state) {
+  return String(state ?? "").toLowerCase() === "backlog";
+}
+
+// rotateWindow — take up to n items from a ticket-sorted list, starting at the
+// first ticket strictly greater than `cursor` (resume point), wrapping around.
+// Using `ticket > cursor` (not an index) is resilient to the list changing
+// between passes: if the exact cursor ticket was removed, we resume at the next
+// one. nextCursor is the last ticket taken (drives the next pass), or the
+// unchanged cursor when nothing was taken. No item appears twice in one window
+// (Math.min bound), so a pass never double-fetches the same ticket.
+export function rotateWindow(list, cursor, n) {
+  if (n <= 0 || list.length === 0) return { window: [], nextCursor: cursor };
+  let start = 0;
+  if (cursor != null) {
+    const idx = list.findIndex((d) => d.ticket > cursor);
+    start = idx === -1 ? 0 : idx; // cursor ≥ last ticket → wrap to the start
+  }
+  const take = Math.min(n, list.length);
+  const window = [];
+  for (let i = 0; i < take; i++) window.push(list[(start + i) % list.length]);
+  return { window, nextCursor: window[window.length - 1].ticket };
+}
+
 // extractState — pull the state NAME out of a `linearis issues read` JSON object.
 // linearis returns `state: { id, name }`. Returns the name string, or null when
 // state is absent/malformed (caller treats null as "unknown — do not touch").
@@ -172,23 +204,57 @@ function logSink(logger) {
 export async function reconcileCacheState({
   mode = "off",
   perPassCap = 250,
+  // CTL-1288: TWO rotation cursors (ticket ids), one per tier, threaded across
+  // passes by startCacheReconcileTimer. `{ active, backlog }`; null = start of tier.
+  // A separate cursor per tier means NEITHER tier can starve — active rotates if it
+  // exceeds its budget, and Backlog always gets a reserved floor of the cap.
+  cursor = { active: null, backlog: null },
   getAll = getAllTicketDescriptors,
   fetch = fetchLive,
   upsert = upsertTicketDescriptor,
   logger,
 } = {}) {
   const log = logSink(logger);
-  if (mode === "off") return { mode, scanned: 0, changed: 0, failed: 0, tickets: [] };
+  const inCursor = cursor ?? { active: null, backlog: null };
+  if (mode === "off") return { mode, scanned: 0, changed: 0, failed: 0, tickets: [], nextCursor: inCursor };
 
   let descriptors;
   try {
     descriptors = getAll({ includeRemoved: false }) || [];
   } catch (e) {
     log("warn", { err: String(e?.message ?? e) }, "cache-reconcile: getAll failed — skipping pass");
-    return { mode, scanned: 0, changed: 0, failed: 0, tickets: [] };
+    return { mode, scanned: 0, changed: 0, failed: 0, tickets: [], nextCursor: inCursor };
   }
 
-  const working = descriptors.filter((d) => d && d.ticket && !isTerminal(d.state)).slice(0, perPassCap);
+  // CTL-1288: two-tier selection within perPassCap, each tier rotated by its OWN
+  // cursor so NEITHER starves (the active>=cap hole that a single shared cursor
+  // had: active.slice(cap) starved the active tail AND zeroed Backlog's remainder).
+  //   • Active-pipeline non-terminal (PR/Implement/Todo/… — the VISIBLE board where
+  //     a stale phantom misleads): reconciled every pass when it fits its budget,
+  //     else rotated through over ceil(active/budget) passes — never starved.
+  //   • Backlog (huge, rarely display-critical): a reserved floor of the cap, so it
+  //     ALWAYS makes progress even when active is at/over its budget, rotated to
+  //     cover the whole tier over successive passes.
+  // |window| ≤ activeBudget + (cap-activeBudget) = cap → the rate-limit constraint
+  // holds exactly. Pre-CTL-1288: a single `.slice(0, cap)` with no cursor re-synced
+  // the same alphabetical prefix forever; ~(total-cap) rows never reconciled.
+  // NOTE: the per-tier cursor compares ticket ids with `>` (rotateWindow) and the
+  // descriptors arrive `ORDER BY ticket` (broker-state.mjs) — the SAME lexicographic
+  // collation, so cursor "next" agrees with fetch order. These MUST stay identical.
+  const nonTerminal = descriptors.filter((d) => d && d.ticket && !isTerminal(d.state));
+  const active = nonTerminal.filter((d) => !isBacklog(d.state));
+  const backlog = nonTerminal.filter((d) => isBacklog(d.state));
+  // Reserve ~20% of the cap (≥1 when Backlog is non-empty) so Backlog never starves
+  // even if active overflows its budget; active gets the rest and rotates within it.
+  const backlogReserve = backlog.length === 0 ? 0 : Math.min(backlog.length, Math.max(1, Math.floor(perPassCap / 5)));
+  const activeBudget = Math.max(0, perPassCap - backlogReserve);
+  const { window: activeWin, nextCursor: nextActive } = rotateWindow(active, inCursor.active, activeBudget);
+  // Backlog fills whatever the cap has left after active's actual take (active may
+  // use less than its budget → Backlog gets the leftover too; never less than the reserve).
+  const remaining = perPassCap - activeWin.length;
+  const { window: backlogWin, nextCursor: nextBacklog } = rotateWindow(backlog, inCursor.backlog, remaining);
+  const nextCursor = { active: nextActive, backlog: nextBacklog };
+  const working = [...activeWin, ...backlogWin];
 
   let scanned = 0;
   let changed = 0;
@@ -206,7 +272,15 @@ export async function reconcileCacheState({
     }
     if (live.error || (live.state === null && live.labels === null)) {
       failed += 1;
-      log("debug", { ticket, err: live.error }, "cache-reconcile: fetch unusable — left for next pass");
+      // CTL-1288 trade-off: the cursor advances to the last TAKEN ticket (not the
+      // last SUCCEEDED), so a fetch-failed ticket's retry waits until its tier
+      // wraps rather than next interval. This is DELIBERATE forward progress: a
+      // persistently-failing ticket (malformed, or a hard 429) must NOT freeze the
+      // cursor and block every ticket behind it. Transient correlated failures
+      // (rate-limit windows) wouldn't benefit from an immediate retry anyway —
+      // they're still throttled — and active-tier rows are revisited within ~1
+      // cycle regardless, so the bounded wrap-latency is acceptable.
+      log("debug", { ticket, err: live.error }, "cache-reconcile: fetch unusable — left for next wrap");
       continue;
     }
 
@@ -240,7 +314,7 @@ export async function reconcileCacheState({
     }
   }
 
-  return { mode, scanned, changed, failed, tickets };
+  return { mode, scanned, changed, failed, tickets, nextCursor };
 }
 
 // startCacheReconcileTimer — wire the periodic pass into the broker. Returns the
@@ -266,6 +340,10 @@ export function startCacheReconcileTimer({
   // this tick — never run two passes concurrently (double API load + double
   // writes). A pass that throws still clears the flag (finally).
   let running = false;
+  // CTL-1288: per-tier rotation cursors, persisted across passes for the life of
+  // the broker process (in-memory is sufficient — a restart simply resumes each
+  // tier from its start; coverage stays complete, just re-walks from the top).
+  let cursor = { active: null, backlog: null };
   const runPass = async () => {
     if (running) {
       log("debug", {}, "cache-reconcile: previous pass still running — skipping tick");
@@ -274,7 +352,8 @@ export function startCacheReconcileTimer({
     running = true;
     let summary;
     try {
-      summary = await reconcile({ mode, perPassCap, logger });
+      summary = await reconcile({ mode, perPassCap, cursor, logger });
+      cursor = summary.nextCursor ?? cursor; // advance the Backlog rotation window
     } catch (e) {
       log("warn", { err: String(e?.message ?? e) }, "cache-reconcile: pass threw — caught (fail-soft)");
       return;
