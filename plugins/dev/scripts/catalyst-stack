@@ -22,17 +22,25 @@
 #   catalyst-stack uninstall-services
 #   catalyst-stack services-status
 #
-# install-services (CTL-1166, CTL-1236):
-#   Install TWO launchd LaunchAgents:
+# install-services (CTL-1166, CTL-1236, CTL-1285):
+#   Install THREE launchd LaunchAgents:
 #   1. ai.coalesce.catalyst-stack — runs 'catalyst-stack start' at login (RunAtLoad)
 #      and every --interval seconds (default 600) as an idempotent keep-alive.
 #   2. ai.coalesce.catalyst-thoughts-sync — runs thoughts-pull-sync.sh at login
 #      and every --sync-interval seconds (default 300) to fast-forward all thoughts
 #      checkouts so research agents read fresh peer state. (CTL-1236)
-#   --print emits both plists to stdout without touching launchctl (review / dry-run).
+#   3. ai.coalesce.catalyst-log-shipper — supervises Grafana Alloy directly with
+#      KeepAlive=true (CTL-1285). launch.sh exec's alloy IN PLACE so it becomes the
+#      job's main process: launchd restarts it instantly on death and it SURVIVES
+#      'catalyst-stack stop'/'restart'. This replaces the old model where the stack
+#      keep-alive (re)started Alloy as a short-lived child and launchd reaped it on
+#      job exit (no AbandonProcessGroup) ~4s later — the bug that silently blinded
+#      the uptime dashboard. When this agent is installed, start_shipper/stop_shipper
+#      defer to launchd.
+#   --print emits all three plists to stdout without touching launchctl (review / dry-run).
 #   macOS only.
-#   uninstall-services unloads + removes both agents (leaves running daemons up).
-#   services-status shows whether both agents are installed and loaded.
+#   uninstall-services unloads + removes all three agents (leaves running daemons up).
+#   services-status shows whether all three agents are installed and loaded.
 #
 # --proxy:
 #   Opt-in to mitmproxy and set HTTPS_PROXY / NODE_USE_ENV_PROXY /
@@ -202,6 +210,14 @@ shipper_pid() {
 }
 
 start_shipper() {
+  # 0. DEFER TO LAUNCHD — when the dedicated KeepAlive agent is installed (CTL-1285),
+  #    launchd owns Alloy's lifecycle. Starting a second copy here would double-ship
+  #    every daemon log line to Loki, so skip.
+  if _shipper_agent_installed; then
+    log "log-shipper is launchd-managed (${SHIPPER_AGENT_LABEL}) — deferring to the agent (skip)"
+    return 0
+  fi
+
   # 1. IDEMPOTENT — never double-start a running shipper.
   local pid; pid="$(shipper_pid)"
   if pid_alive "$pid"; then
@@ -257,6 +273,14 @@ start_shipper() {
 }
 
 stop_shipper() {
+  # DEFER TO LAUNCHD — when the dedicated KeepAlive agent is installed (CTL-1285),
+  # leave Alloy running so telemetry stays up across a stack stop/restart (you most
+  # want logs flowing exactly when the daemons are bouncing). Killing it here would
+  # just provoke an immediate KeepAlive respawn — a pointless kill/restart fight.
+  if _shipper_agent_installed; then
+    log "log-shipper is launchd-managed (${SHIPPER_AGENT_LABEL}) — leaving it running (telemetry stays up across stack stop)"
+    return 0
+  fi
   local pid; pid="$(shipper_pid)"
   if pid_alive "$pid"; then
     log "stopping log-shipper (alloy) (pid $pid)"
@@ -556,10 +580,11 @@ cmd_start() {
   start_forward
   # CTL-1263: the log-shipper comes up LAST — it only tails the daemons' .log
   # files, so it should start after the daemons it observes. start_shipper is
-  # idempotent + non-fatal (warns loudly on a missing binary, returns 1) so the
-  # CTL-1166 launchd keep-alive resurrects a crashed shipper on its interval
-  # without disturbing the other (already-running, independently-idempotent)
-  # daemons.
+  # idempotent + non-fatal (warns loudly on a missing binary, returns 1).
+  # CTL-1285: when the dedicated ai.coalesce.catalyst-log-shipper agent is installed,
+  # start_shipper detects it and defers — launchd's KeepAlive (not this keep-alive)
+  # owns shipper resurrection, so it survives stack stop/restart and restarts
+  # instantly on death instead of waiting for the next 600s tick.
   start_shipper || warn "continuing without log-shipper (daemon logs won't be shipped to Loki)"
 
   log ""
@@ -609,8 +634,19 @@ cmd_status() {
   echo -n "  monitor          "; catalyst-monitor status 2>&1 | head -1
   echo -n "  execution-core   "; catalyst-execution-core status 2>&1 | head -1
   echo -n "  otel-forward     "; catalyst-monitor forward-status 2>&1 | head -1
-  local sp; sp="$(shipper_pid)"
-  if pid_alive "$sp"; then echo "  log-shipper      running  pid=$sp"; else echo "  log-shipper      stopped"; fi
+  # CTL-1285: when the dedicated KeepAlive agent owns Alloy it writes no pidfile,
+  # so detect it by plist + a live `alloy run` matching our config. Falling back to
+  # the pidfile-only check would mis-report a launchd-managed shipper as "stopped".
+  if _shipper_agent_installed; then
+    if pgrep -f "alloy run .*${SHIPPER_CONFIG}" >/dev/null 2>&1; then
+      echo "  log-shipper      running  (launchd-managed: ${SHIPPER_AGENT_LABEL})"
+    else
+      echo "  log-shipper      stopped  (launchd-managed; awaiting KeepAlive restart)"
+    fi
+  else
+    local sp; sp="$(shipper_pid)"
+    if pid_alive "$sp"; then echo "  log-shipper      running  pid=$sp"; else echo "  log-shipper      stopped"; fi
+  fi
 
   # CTL-1084: governance section from the last node.boot event.
   local boot_json
@@ -643,6 +679,45 @@ STACK_AGENT_INTERVAL_DEFAULT=600
 SYNC_AGENT_LABEL="ai.coalesce.catalyst-thoughts-sync"
 SYNC_AGENT_PLIST="${HOME}/Library/LaunchAgents/${SYNC_AGENT_LABEL}.plist"
 SYNC_AGENT_INTERVAL_DEFAULT=300
+
+# CTL-1285: dedicated log-shipper LaunchAgent. Supervises Grafana Alloy directly
+# (KeepAlive=true, launch.sh exec's alloy as the job's main process) so launchd
+# restarts it instantly and it survives a stack stop/restart. When this agent is
+# installed, start_shipper/stop_shipper defer to launchd (no pidfile is written).
+SHIPPER_AGENT_LABEL="ai.coalesce.catalyst-log-shipper"
+SHIPPER_AGENT_PLIST="${HOME}/Library/LaunchAgents/${SHIPPER_AGENT_LABEL}.plist"
+
+# _shipper_agent_installed — true when the dedicated KeepAlive shipper agent owns Alloy.
+_shipper_agent_installed() { [[ -f "$SHIPPER_AGENT_PLIST" ]]; }
+
+# _resolve_shipper_launcher — absolute path launchd should exec. There is no
+# ~/.catalyst/bin/catalyst-log-shipper wrapper (install-cli.sh never creates one),
+# so use the in-repo launcher (SHIPPER_LAUNCHER, resolved next to this script).
+_resolve_shipper_launcher() { printf '%s\n' "$SHIPPER_LAUNCHER"; }
+
+# _reap_unmanaged_shipper — kill any stack-started or hand-started (orphaned) Alloy
+# that is NOT agent-managed, so installing the agent never leaves two Alloys
+# double-shipping the same four logs to Loki. Pidfile first, then a pgrep fallback
+# for an orphan with no pidfile (e.g. a node where Alloy was started by hand).
+_reap_unmanaged_shipper() {
+  local pid
+  if [[ -f "$SHIPPER_PID" ]]; then
+    pid="$(cat "$SHIPPER_PID" 2>/dev/null || true)"
+    if [[ -n "$pid" ]] && pid_alive "$pid" \
+       && ps -p "$pid" -o command= 2>/dev/null | grep -q alloy; then
+      log "reaping stack-started alloy (pid $pid) before handing supervision to launchd"
+      kill "$pid" 2>/dev/null; sleep 1
+      pid_alive "$pid" && kill -9 "$pid" 2>/dev/null || true
+    fi
+    rm -f "$SHIPPER_PID"
+  fi
+  # Orphan with no pidfile: match our config so we never kill an unrelated alloy.
+  for pid in $(pgrep -f "alloy run .*${SHIPPER_CONFIG}" 2>/dev/null || true); do
+    log "reaping orphaned alloy (pid $pid) before launchd takes over"
+    kill "$pid" 2>/dev/null; sleep 1
+    pid_alive "$pid" && kill -9 "$pid" 2>/dev/null || true
+  done
+}
 
 # _resolve_thoughts_sync_cmd — absolute path launchd should exec. Prefer the
 # installed CLI symlink; fall back to the in-repo script alongside this file.
@@ -776,11 +851,83 @@ render_stack_plist() {
     <string>${HOME}</string>${host_env}
   </dict>
 
+  <!--
+    CTL-1285: do NOT reap this job's process group when 'catalyst-stack start'
+    exits. Without this, launchd SIGTERMs any daemon the keep-alive just (re)started
+    as a child (broker/exec-core/alloy all spawn via 'nohup … & disown', no setsid),
+    so the keep-alive kills the very daemon it exists to resurrect ~4s later.
+  -->
+  <key>AbandonProcessGroup</key>
+  <true/>
+
   <key>StandardOutPath</key>
   <string>${STACK_AGENT_LOG}</string>
 
   <key>StandardErrorPath</key>
   <string>${STACK_AGENT_LOG}</string>
+</dict>
+</plist>
+PLIST
+}
+
+# render_shipper_plist <launcher> [host_name] — emit the log-shipper LaunchAgent plist
+# XML to stdout. Pure: no filesystem or launchctl side effects. KeepAlive supervises
+# Alloy directly (launch.sh exec's alloy as the job's main process), so there is NO
+# StartInterval and deliberately NO AbandonProcessGroup — launchd OWNS this pgid and
+# restarts the job (alloy) the instant it exits. host_name pins CATALYST_HOST_NAME.
+render_shipper_plist() {
+  local launcher="$1" host_name="${2:-}"
+  local host_env=""
+  if [[ -n "$host_name" ]]; then
+    host_env="
+    <key>CATALYST_HOST_NAME</key>
+    <string>${host_name}</string>"
+  fi
+  cat <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  ${SHIPPER_AGENT_LABEL} — supervise the Grafana Alloy daemon-log shipper (CTL-1285).
+  Generated by 'catalyst-stack install-services'. launchd runs launch.sh in the
+  FOREGROUND (KeepAlive) so Alloy restarts instantly on death and survives
+  'catalyst-stack stop'/'restart'. Decoupled from the catalyst-stack agent on
+  purpose. Remove with 'catalyst-stack uninstall-services'.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>${SHIPPER_AGENT_LABEL}</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>${launcher}</string>
+    <string>--config</string>
+    <string>${SHIPPER_CONFIG}</string>
+    <string>--storage</string>
+    <string>${SHIPPER_STORAGE}</string>
+  </array>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>KeepAlive</key>
+  <true/>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>$(_stack_agent_path)</string>
+    <key>HOME</key>
+    <string>${HOME}</string>${host_env}
+  </dict>
+
+  <key>StandardOutPath</key>
+  <string>${SHIPPER_LOG}</string>
+
+  <key>StandardErrorPath</key>
+  <string>${SHIPPER_LOG}</string>
 </dict>
 </plist>
 PLIST
@@ -801,6 +948,7 @@ cmd_install_services() {
 
   local cmd; cmd="$(_resolve_stack_cmd)"
   local sync_cmd; sync_cmd="$(_resolve_thoughts_sync_cmd)"
+  local shipper_launcher; shipper_launcher="$(_resolve_shipper_launcher)"
   local host_name; host_name="$(_stack_host_name)"
   # Warning goes to stderr: log() writes stdout, and --print emits the plist to
   # stdout — a stdout warning would corrupt `--print` output (CTL-1202 review).
@@ -808,6 +956,7 @@ cmd_install_services() {
   if [[ "$print_only" == "yes" ]]; then
     render_stack_plist "$cmd" "$interval" "$host_name"
     render_thoughts_sync_plist "$sync_cmd" "$sync_interval"
+    render_shipper_plist "$shipper_launcher" "$host_name"
     return 0
   fi
 
@@ -838,7 +987,22 @@ cmd_install_services() {
     fail "launchctl bootstrap failed for $SYNC_AGENT_PLIST"
   fi
 
-  log "verify: catalyst-stack services-status   |   logs: $STACK_AGENT_LOG"
+  # CTL-1285: log-shipper agent. Reap any non-agent Alloy FIRST (a stack-started
+  # child or a hand-started orphan) so KeepAlive+RunAtLoad never bring up a SECOND
+  # Alloy double-shipping the same four logs. The reap runs BEFORE the plist exists,
+  # so the start_shipper/stop_shipper defer-guards don't short-circuit it.
+  _reap_unmanaged_shipper
+  render_shipper_plist "$shipper_launcher" "$host_name" > "$SHIPPER_AGENT_PLIST"
+  log "wrote $SHIPPER_AGENT_PLIST (exec: launch.sh, KeepAlive foreground)"
+
+  launchctl bootout "$guid" "$SHIPPER_AGENT_PLIST" 2>/dev/null || true
+  if launchctl bootstrap "$guid" "$SHIPPER_AGENT_PLIST" 2>&1 | sed 's/^/  /'; then
+    log "loaded $SHIPPER_AGENT_LABEL — KeepAlive supervising alloy"
+  else
+    fail "launchctl bootstrap failed for $SHIPPER_AGENT_PLIST"
+  fi
+
+  log "verify: catalyst-stack services-status   |   logs: $STACK_AGENT_LOG / $SHIPPER_LOG"
 }
 
 cmd_uninstall_services() {
@@ -858,6 +1022,14 @@ cmd_uninstall_services() {
     log "removed $SYNC_AGENT_LABEL ($SYNC_AGENT_PLIST)"
   else
     log "$SYNC_AGENT_LABEL not installed (no $SYNC_AGENT_PLIST)"
+  fi
+  if [[ -f "$SHIPPER_AGENT_PLIST" ]]; then
+    launchctl bootout "$guid" "$SHIPPER_AGENT_PLIST" 2>/dev/null || true
+    rm -f "$SHIPPER_AGENT_PLIST"
+    log "removed $SHIPPER_AGENT_LABEL ($SHIPPER_AGENT_PLIST)"
+    log "note: Alloy was left running — 'catalyst-stack stop' (or the stack keep-alive) now owns it again"
+  else
+    log "$SHIPPER_AGENT_LABEL not installed (no $SHIPPER_AGENT_PLIST)"
   fi
 }
 
@@ -884,6 +1056,18 @@ cmd_services_status() {
       echo -n "  thoughts-sync launchd  "; launchctl list 2>/dev/null | grep "$SYNC_AGENT_LABEL"
     else
       echo "  thoughts-sync launchd  not loaded"
+    fi
+  fi
+  if [[ -f "$SHIPPER_AGENT_PLIST" ]]; then
+    echo "  log-shipper      $SHIPPER_AGENT_PLIST (present)"
+  else
+    echo "  log-shipper      not installed"
+  fi
+  if [[ "$(uname -s)" == "Darwin" ]] && command -v launchctl >/dev/null 2>&1; then
+    if launchctl list 2>/dev/null | grep -q "$SHIPPER_AGENT_LABEL"; then
+      echo -n "  log-shipper launchd    "; launchctl list 2>/dev/null | grep "$SHIPPER_AGENT_LABEL"
+    else
+      echo "  log-shipper launchd    not loaded"
     fi
   fi
 }
