@@ -133,6 +133,20 @@ function fetchLive(ticket) {
   return { state: extractState(json), labels: extractLabelNames(json), error: null };
 }
 
+// logSink — normalize a pino-style logger object into a safe (level,obj,msg)
+// sink. MUST call via member access — `logger[level](obj, msg)` preserves pino's
+// `this`; pulling the method out first (`(logger[level] || logger.info)(...)`)
+// DETACHES it and pino throws `this[msgPrefixSym]` at the first log call, which
+// crashed the broker at boot on the original CTL-1277 wiring. A missing/garbage
+// logger → a no-op sink (telemetry never breaks the reconcile).
+function logSink(logger) {
+  if (!logger || typeof logger !== "object") return () => {};
+  return (level, obj, msg) => {
+    const fn = typeof logger[level] === "function" ? level : "info";
+    if (typeof logger[fn] === "function") logger[fn](obj, msg);
+  };
+}
+
 // reconcileCacheState — one full pass over the working set. Injectable deps keep
 // it unit-testable with no spawn / no DB. Returns a summary {mode,scanned,changed,
 // failed,tickets[]} for the audit emit. NEVER throws — a per-ticket failure is
@@ -143,8 +157,9 @@ export function reconcileCacheState({
   getAll = getAllTicketDescriptors,
   fetch = fetchLive,
   upsert = upsertTicketDescriptor,
-  log = () => {},
+  logger,
 } = {}) {
+  const log = logSink(logger);
   if (mode === "off") return { mode, scanned: 0, changed: 0, failed: 0, tickets: [] };
 
   let descriptors;
@@ -217,9 +232,10 @@ export function startCacheReconcileTimer({
   config = readCacheReconcileConfig(),
   reconcile = reconcileCacheState,
   emit = () => {},
-  log = () => {},
+  logger,
   setTimer = setInterval,
 } = {}) {
+  const log = logSink(logger);
   const { mode, intervalMs, perPassCap } = config;
   if (mode === "off") {
     log("info", { mode }, "ctl-1277 cache-reconcile: disabled (CATALYST_CACHE_RECONCILE=off)");
@@ -230,7 +246,7 @@ export function startCacheReconcileTimer({
   const runPass = () => {
     let summary;
     try {
-      summary = reconcile({ mode, perPassCap, log });
+      summary = reconcile({ mode, perPassCap, logger });
     } catch (e) {
       log("warn", { err: String(e?.message ?? e) }, "cache-reconcile: pass threw — caught (fail-soft)");
       return;

@@ -2,6 +2,7 @@
 // Pure decision + injectable IO: no linearis spawn, no DB.
 
 import { describe, test, expect } from "bun:test";
+import pino from "pino";
 import {
   extractState,
   decideReconcile,
@@ -9,6 +10,20 @@ import {
   readCacheReconcileConfig,
   startCacheReconcileTimer,
 } from "./cache-reconcile.mjs";
+
+// pinoLikeLogger — methods THROW if invoked with the wrong `this`, exactly like
+// pino (which dereferences this[msgPrefixSym]). Reproduces the CTL-1277 broker
+// boot-crash: the old wiring pulled the method out of the logger and called it
+// detached.
+function pinoLikeLogger() {
+  const calls = [];
+  const logger = {
+    info(obj, msg) { if (this !== logger) throw new TypeError("detached this"); calls.push(["info", obj, msg]); },
+    warn(obj, msg) { if (this !== logger) throw new TypeError("detached this"); calls.push(["warn", obj, msg]); },
+    debug(obj, msg) { if (this !== logger) throw new TypeError("detached this"); calls.push(["debug", obj, msg]); },
+  };
+  return { logger, calls };
+}
 
 describe("extractState", () => {
   test("pulls state.name from a linearis read object", () => {
@@ -229,5 +244,56 @@ describe("startCacheReconcileTimer", () => {
       setTimer: (fn) => { pass = fn; return 1; },
     });
     expect(() => pass()).not.toThrow();
+  });
+});
+
+// CTL-1277 hotfix: the broker crashed at boot because the wiring detached the
+// pino method from its instance. These reproduce the exact crash and guard it.
+describe("logger binding (broker boot-crash regression)", () => {
+  test("OFF-mode startup log does NOT throw with a pino-like logger (the prod crash)", () => {
+    const { logger, calls } = pinoLikeLogger();
+    expect(() =>
+      startCacheReconcileTimer({ config: { mode: "off", intervalMs: 1000, perPassCap: 10 }, logger }),
+    ).not.toThrow();
+    expect(calls.some(([lvl]) => lvl === "info")).toBe(true); // the "disabled" line logged, bound
+  });
+
+  test("enabled startup log is bound (this === logger)", () => {
+    const { logger, calls } = pinoLikeLogger();
+    expect(() =>
+      startCacheReconcileTimer({
+        config: { mode: "enforce", intervalMs: 1000, perPassCap: 10 },
+        logger,
+        setTimer: () => 1,
+      }),
+    ).not.toThrow();
+    expect(calls.some(([, obj]) => obj && obj.mode === "enforce")).toBe(true);
+  });
+
+  test("reconcile pass logs through a pino-like logger without detaching", () => {
+    const { logger } = pinoLikeLogger();
+    expect(() =>
+      reconcileCacheState({
+        mode: "enforce",
+        getAll: () => [{ ticket: "CTL-1", state: "Todo", labels: [] }],
+        fetch: () => ({ state: "Implement", labels: [] }),
+        upsert: () => {},
+        logger,
+      }),
+    ).not.toThrow();
+  });
+
+  test("REAL pino logger: off-mode boot does not throw (end-to-end proof)", () => {
+    const realLogger = pino({ level: "silent" });
+    expect(() =>
+      startCacheReconcileTimer({ config: { mode: "off", intervalMs: 1000, perPassCap: 10 }, logger: realLogger }),
+    ).not.toThrow();
+  });
+
+  test("a garbage / missing logger is a safe no-op (never throws)", () => {
+    expect(() => startCacheReconcileTimer({ config: { mode: "off", intervalMs: 1, perPassCap: 1 } })).not.toThrow();
+    expect(() =>
+      reconcileCacheState({ mode: "enforce", getAll: () => [{ ticket: "X", state: "Todo" }], fetch: () => ({ state: "Done", labels: [] }), upsert: () => {}, logger: 42 }),
+    ).not.toThrow();
   });
 });
