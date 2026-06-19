@@ -535,9 +535,7 @@ function main() {
   // CTL-1277: periodic state+labels reconcile of the board cache vs live Linear.
   // Off by default; operators opt in via CATALYST_CACHE_RECONCILE=shadow then =enforce.
   // The summary log line is Loki-queryable (see the sensing-substrate skill).
-  const cacheReconcileId = startCacheReconcileTimer({
-    log: (level, obj, msg) => (log[level] || log.info)(obj, msg),
-  });
+  const cacheReconcileId = startCacheReconcileTimer({ logger: log });
   log.info(
     {
       pid: process.pid,
