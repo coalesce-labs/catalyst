@@ -18,6 +18,7 @@ import { spawnSync, execFileSync } from "node:child_process";
 import {
   getHostName,
   getClusterHosts,
+  resolveClusterHosts,
   hostMembershipWarning,
   getLivenessAnchorIssue,
 } from "./config.mjs";
@@ -70,10 +71,6 @@ function _repoRoot() {
   return resolve(dirname(fileURLToPath(import.meta.url)), "../../../../");
 }
 
-function hostsJsonPath() {
-  return resolve(_repoRoot(), ".catalyst", "hosts.json");
-}
-
 function layer1Path() {
   return resolve(_repoRoot(), ".catalyst", "config.json");
 }
@@ -101,22 +98,25 @@ function layer2HasKey(key) {
 // ─── Phase 1: Host-Identity checks ───────────────────────────────────────────
 
 // checkHostIdentity — verifies host name is explicitly set and present in the
-// cluster roster (.catalyst/hosts.json). Returns an array of Check records.
+// RESOLVED cluster roster. Returns an array of Check records.
+//
+// CTL-1274: the roster's single durable home is the catalyst-cluster repo
+// (resolveClusterHosts source=cluster-repo); the legacy per-repo
+// .catalyst/hosts.json file is RETIRED. This check no longer probes that file —
+// it validates via the resolver: report the source (cluster-repo/static/
+// single-host), PASS when a non-empty roster resolves and this host is in it,
+// and FAIL/WARN when the roster can't be resolved or omits self.
 //
 // Injected deps (all have real defaults):
-//   getHostName         — () => string
-//   getClusterHosts     — () => string[]
+//   getHostName           — () => string
+//   resolveRoster         — () => { hosts: string[], source: string, multiHost: bool }
 //   hostMembershipWarning — (roster, self) => string | null
-//   hostsFileExists     — () => bool  (probes the file directly; getClusterHosts
-//                           fabricates [hostname] when absent so we can't use it)
-//   layer2HasHostName   — () => bool
-//   osHostname          — () => string (for detecting bare-default usage)
+//   layer2HasHostName     — () => bool
 export function checkHostIdentity(deps = {}) {
   const {
     getHostName: _getHostName = getHostName,
-    getClusterHosts: _getClusterHosts = getClusterHosts,
+    resolveRoster = resolveClusterHosts,
     hostMembershipWarning: _hostMembershipWarning = hostMembershipWarning,
-    hostsFileExists = () => existsSync(hostsJsonPath()),
     layer2HasHostName = () =>
       layer2HasKey("catalyst.host.name") ||
       (typeof process.env.CATALYST_HOST_NAME === "string" &&
@@ -150,26 +150,37 @@ export function checkHostIdentity(deps = {}) {
     );
   }
 
-  // roster-file: FAIL when .catalyst/hosts.json is absent
-  if (!hostsFileExists()) {
+  // roster-source: report where the resolved roster came from. resolveClusterHosts
+  // is FAIL-OPEN (it always returns at least the single-host default), so an empty
+  // roster here is an unexpected degenerate state worth FAILing on.
+  const resolved = resolveRoster() ?? {};
+  const roster = Array.isArray(resolved.hosts) ? resolved.hosts : [];
+  const source = resolved.source ?? "unknown";
+
+  if (roster.length === 0) {
     checks.push(
       mkCheck(
-        "roster-file",
+        "roster-source",
         STATUS.FAIL,
-        `.catalyst/hosts.json is absent — create it with a JSON array of host names ` +
-          `(e.g. ["${self}"]) before joining the cluster`,
+        `the cluster roster resolved empty (source=${source}) — the daemon would ` +
+          `own zero tickets under HRW. Check the catalyst-cluster clone ` +
+          `(~/catalyst/catalyst-cluster/cluster.json) or set catalyst.cluster.staticRoster.`,
       ),
     );
-    // Without a roster file we cannot check membership — skip it
     return checks;
   }
 
   checks.push(
-    mkCheck("roster-file", STATUS.PASS, `.catalyst/hosts.json exists`),
+    mkCheck(
+      "roster-source",
+      STATUS.PASS,
+      `roster resolved from ${source}: [${roster.join(", ")}]`,
+    ),
   );
 
-  // host-membership: FAIL when hostMembershipWarning returns a string
-  const roster = _getClusterHosts();
+  // host-membership: FAIL when hostMembershipWarning returns a string (a multi-host
+  // roster that omits self → this daemon owns zero tickets under HRW). Single-host
+  // rosters pass trivially (the warning helper returns null for length <= 1).
   const warning = _hostMembershipWarning(roster, self);
   if (warning) {
     checks.push(mkCheck("host-membership", STATUS.FAIL, warning));

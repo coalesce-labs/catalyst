@@ -1,7 +1,7 @@
 // join-bundle.mjs — CTL-1183. Assembles the SHARED-only cluster join-bundle
 // from Layer-1 + Layer-2 config. Pure function — no network, no side effects.
 
-import { readFileSync, existsSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { execFileSync } from "node:child_process";
 import { homedir } from "node:os";
@@ -23,26 +23,19 @@ function layer2Path() {
 // detached (nohup, cwd=HOME), so a cwd-relative .catalyst/config.json is
 // absent and every layer1Identity field comes back null.
 //
-// The identity-owning repo is the one carrying the committed cluster roster
-// (.catalyst/hosts.json), NOT simply projects[0] — on a multi-team seed (CTL/
-// OTL/EVR/ADV/SLI) the registry order is insertion order and [0] could be a
-// non-coordination team, shipping the WRONG team's identity + roster. Prefer
-// the roster-owner; fall back to [0] only for a single-project registry.
+// CTL-1274: the cluster ROSTER no longer lives in a per-repo .catalyst/hosts.json
+// (RETIRED) — it lives in the catalyst-cluster repo (getClusterHosts reads
+// cluster.json independently of which repoRoot we pick). So this resolver no
+// longer disambiguates by hosts.json ownership; it returns the registry's first
+// project repoRoot (the daemon's primary/coordination team — insertion order),
+// which supplies the Layer-1 identity (projectKey/teamKey/stateMap). On a
+// multi-team seed an operator who needs a non-primary team's identity sets
+// CATALYST_CONFIG_FILE explicitly (it always wins, in layer1Path + assembly).
 function registryRepoRoot() {
   try {
     const projects = listProjects();
     if (!projects.length) return null;
-    const owner = projects.find(
-      (p) => p?.repoRoot && existsSync(resolve(p.repoRoot, ".catalyst", "hosts.json")),
-    );
-    if (owner) return owner.repoRoot;
-    if (projects.length === 1) return projects[0].repoRoot || null;
-    // Multiple projects, none carrying a roster — refuse to guess silently.
-    process.stderr.write(
-      "[join-bundle] WARN: multiple registry projects and none own .catalyst/hosts.json; " +
-        "cannot determine the cluster identity repo. Set CATALYST_CONFIG_FILE explicitly.\n",
-    );
-    return null;
+    return projects[0]?.repoRoot || null;
   } catch {
     return null;
   }
@@ -82,11 +75,13 @@ function resolvePluginSourceUrl(l2) {
 }
 
 export function assembleJoinBundle() {
-  // Pin CATALYST_CONFIG_FILE to the registry repoRoot for the rest of assembly
-  // so the OTHER cwd-dependent read — getClusterHosts() via config.mjs
-  // getCatalystRepoDir() — also resolves <repoRoot>/.catalyst/hosts.json instead
-  // of falling back to the single-host default when this listener runs detached
-  // (PATH-B #3). Guarded so an explicit override (and tests) always win.
+  // Pin CATALYST_CONFIG_FILE to the registry repoRoot so the cwd-dependent
+  // Layer-1 identity read (layer1Path → <repoRoot>/.catalyst/config.json)
+  // resolves the seed's committed identity instead of a missing cwd-relative
+  // file when this listener runs detached (nohup, cwd=HOME; PATH-B #3). The
+  // roster itself comes from the catalyst-cluster repo via getClusterHosts()
+  // (CTL-1274) and is independent of this pin. Guarded so an explicit override
+  // (and tests) always win.
   if (!process.env.CATALYST_CONFIG_FILE) {
     const root = registryRepoRoot();
     if (root)

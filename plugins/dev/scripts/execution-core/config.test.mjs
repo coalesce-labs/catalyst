@@ -282,84 +282,25 @@ describe("getHostName (CTL-859)", () => {
   });
 });
 
-describe("getClusterHosts (CTL-859)", () => {
-  // CTL-1211: CATALYST_CLUSTER_DIR is pinned at a non-existent path so the new
-  // cluster-repo-first branch is a deterministic miss here — these tests assert
-  // the project-repo hosts.json fallback in isolation from any real cluster repo
-  // that may exist at the default ~/catalyst/catalyst-cluster on the test host.
-  const ROSTER_ENVS = ["CATALYST_CONFIG_FILE", "CATALYST_HOST_NAME", "CATALYST_LAYER2_CONFIG_FILE", "CATALYST_CLUSTER_DIR"];
-  let saved = {};
-  let repo;
-
-  beforeEach(() => {
-    for (const k of ROSTER_ENVS) {
-      saved[k] = process.env[k];
-      delete process.env[k];
-    }
-    repo = mkdtempSync(join(tmpdir(), "ctl859-roster-"));
-    mkdirSync(join(repo, ".catalyst"), { recursive: true });
-    // CATALYST_CONFIG_FILE points at <repoRoot>/.catalyst/config.json; the
-    // roster reader resolves hosts.json as its sibling.
-    process.env.CATALYST_CONFIG_FILE = join(repo, ".catalyst", "config.json");
-    process.env.CATALYST_CLUSTER_DIR = join(repo, "no-such-cluster");
-  });
-
-  afterEach(() => {
-    for (const k of ROSTER_ENVS) {
-      if (saved[k] === undefined) delete process.env[k];
-      else process.env[k] = saved[k];
-    }
-    saved = {};
-    rmSync(repo, { recursive: true, force: true });
-  });
-
-  test("reads the roster array from .catalyst/hosts.json when present", () => {
-    writeFileSync(
-      join(repo, ".catalyst", "hosts.json"),
-      JSON.stringify(["mini", "mac-studio"]),
-    );
-    expect(getClusterHosts()).toEqual(["mini", "mac-studio"]);
-  });
-
-  test("absent roster returns the single-host default [getHostName()]", () => {
-    process.env.CATALYST_HOST_NAME = "solo-host";
-    // no hosts.json written
-    expect(getClusterHosts()).toEqual(["solo-host"]);
-  });
-
-  test("malformed roster falls back to the single-host default", () => {
-    writeFileSync(join(repo, ".catalyst", "hosts.json"), "not-json-at-all");
-    process.env.CATALYST_HOST_NAME = "solo-host";
-    expect(getClusterHosts()).toEqual(["solo-host"]);
-  });
-
-  test("empty array roster falls back to the single-host default", () => {
-    writeFileSync(join(repo, ".catalyst", "hosts.json"), "[]");
-    process.env.CATALYST_HOST_NAME = "solo-host";
-    expect(getClusterHosts()).toEqual(["solo-host"]);
-  });
-
-  test("non-string entries are filtered out", () => {
-    writeFileSync(
-      join(repo, ".catalyst", "hosts.json"),
-      JSON.stringify(["mini", 42, "", "mac-studio"]),
-    );
-    expect(getClusterHosts()).toEqual(["mini", "mac-studio"]);
-  });
-});
-
-describe("getClusterHosts cluster-repo-first (CTL-1211)", () => {
+describe("getClusterHosts cluster-repo source (CTL-859 / CTL-1211 / CTL-1274)", () => {
+  // CTL-1274: the per-repo .catalyst/hosts.json roster is RETIRED. The roster's
+  // single durable home is the catalyst-cluster repo's cluster.json. A project
+  // hosts.json (still present on disk in legacy checkouts) MUST be ignored — when
+  // neither cluster-repo nor static resolves, the single-host default is the only
+  // outcome and NO project file is read. CATALYST_CONFIG_FILE is still set so any
+  // accidental regrowth of a project-hosts.json reader would be caught here.
   const ENVS = ["CATALYST_CONFIG_FILE", "CATALYST_HOST_NAME", "CATALYST_LAYER2_CONFIG_FILE", "CATALYST_CLUSTER_DIR"];
   let saved = {};
   let repo, cluster;
 
   beforeEach(() => {
     for (const k of ENVS) { saved[k] = process.env[k]; delete process.env[k]; }
-    repo = mkdtempSync(join(tmpdir(), "ctl1211-repo-"));
-    cluster = mkdtempSync(join(tmpdir(), "ctl1211-cluster-"));
+    repo = mkdtempSync(join(tmpdir(), "ctl1274-repo-"));
+    cluster = mkdtempSync(join(tmpdir(), "ctl1274-cluster-"));
     mkdirSync(join(repo, ".catalyst"), { recursive: true });
     process.env.CATALYST_CONFIG_FILE = join(repo, ".catalyst", "config.json");
     process.env.CATALYST_CLUSTER_DIR = cluster;
+    process.env.CATALYST_HOST_NAME = "solo-host";
   });
 
   afterEach(() => {
@@ -377,27 +318,28 @@ describe("getClusterHosts cluster-repo-first (CTL-1211)", () => {
     expect(getClusterHosts()).toEqual(["mini", "mini-2"]);
   });
 
-  test("cluster.json roster wins over project hosts.json", () => {
+  test("cluster.json roster wins; a present project hosts.json is ignored", () => {
     writeCluster({ schemaVersion: 1, roster: ["mini", "mini-2"] });
-    writeProject(["mini"]);
+    writeProject(["legacy-should-never-win"]);
     expect(getClusterHosts()).toEqual(["mini", "mini-2"]);
   });
 
-  test("falls back to project hosts.json when cluster.json absent", () => {
-    writeProject(["mini", "mac-studio"]);
-    expect(getClusterHosts()).toEqual(["mini", "mac-studio"]);
+  test("single-host default when cluster.json absent — project hosts.json is NOT read", () => {
+    // A legacy hosts.json on disk must be inert (the retired fallback).
+    writeProject(["legacy-a", "legacy-b"]);
+    expect(getClusterHosts()).toEqual(["solo-host"]);
   });
 
-  test("ignores a too-new cluster schemaVersion and degrades to project roster", () => {
+  test("ignores a too-new cluster schemaVersion and degrades to single-host (no project read)", () => {
     writeCluster({ schemaVersion: 999, roster: ["should", "be", "ignored"] });
-    writeProject(["mini"]);
-    expect(getClusterHosts()).toEqual(["mini"]);
+    writeProject(["legacy-ignored"]);
+    expect(getClusterHosts()).toEqual(["solo-host"]);
   });
 
-  test("empty cluster roster degrades to project roster", () => {
+  test("empty cluster roster degrades to single-host (no project read)", () => {
     writeCluster({ schemaVersion: 1, roster: [] });
-    writeProject(["mini"]);
-    expect(getClusterHosts()).toEqual(["mini"]);
+    writeProject(["legacy-ignored"]);
+    expect(getClusterHosts()).toEqual(["solo-host"]);
   });
 
   test("filters non-string entries from the cluster roster", () => {
@@ -411,10 +353,10 @@ describe("getClusterHosts cluster-repo-first (CTL-1211)", () => {
   });
 });
 
-// CTL-1273 seam, CTL-1274 source swap: the roster resolver —
-// cluster-repo → static → hosts-fallback → single-host. Every source is a file
-// read redirected via env (CATALYST_CLUSTER_DIR / CATALYST_LAYER2_CONFIG_FILE /
-// CATALYST_CONFIG_FILE), so these tests are fully hermetic with no spawn/Linear.
+// CTL-1273 seam, CTL-1274 source swap + per-repo hosts.json retirement: the roster
+// resolver — cluster-repo → static → single-host. Every source is a file read
+// redirected via env (CATALYST_CLUSTER_DIR / CATALYST_LAYER2_CONFIG_FILE), so these
+// tests are fully hermetic with no spawn/Linear.
 describe("getStaticRoster (CTL-1273)", () => {
   const ENVS = ["CATALYST_LAYER2_CONFIG_FILE", "CATALYST_STATIC_ROSTER"];
   let saved = {};
@@ -510,7 +452,7 @@ describe("resolveClusterHosts (CTL-1274 — cluster-repo source)", () => {
   test("cluster-repo source wins when cluster.json.roster is present", () => {
     writeCluster({ schemaVersion: 1, roster: ["mini", "mini-2"] });
     writeLayer2({ catalyst: { cluster: { staticRoster: ["static-should-lose"] } } });
-    writeHosts(["legacy-should-lose"]); // both lower priority
+    writeHosts(["legacy-should-lose"]); // both lower priority (legacy file is inert)
     expect(resolveClusterHosts()).toEqual({
       hosts: ["mini", "mini-2"],
       source: "cluster-repo",
@@ -518,12 +460,12 @@ describe("resolveClusterHosts (CTL-1274 — cluster-repo source)", () => {
     });
   });
 
-  test("FAIL-OPEN: a too-new cluster schema falls through (never empties)", () => {
+  test("FAIL-OPEN: a too-new cluster schema falls through to static (never empties)", () => {
     writeCluster({ schemaVersion: 999, roster: ["should", "be", "ignored"] });
-    writeHosts(["mini", "mac-studio"]);
+    writeLayer2({ catalyst: { cluster: { staticRoster: ["static-a", "static-b"] } } });
     const r = resolveClusterHosts();
-    expect(r.hosts).toEqual(["mini", "mac-studio"]);
-    expect(r.source).toBe("hosts-fallback");
+    expect(r.hosts).toEqual(["static-a", "static-b"]);
+    expect(r.source).toBe("static");
   });
 
   test("FAIL-OPEN: an empty cluster roster falls through to static (not an empty fleet)", () => {
@@ -540,17 +482,18 @@ describe("resolveClusterHosts (CTL-1274 — cluster-repo source)", () => {
     expect(r).toEqual({ hosts: ["solo-host"], source: "single-host", multiHost: false });
   });
 
-  test("static source when no cluster-repo, before the legacy hosts fallback", () => {
+  test("static source when no cluster-repo; a legacy hosts.json is NOT consulted", () => {
     writeLayer2({ catalyst: { cluster: { staticRoster: ["a", "b"] } } });
-    writeHosts(["legacy"]);
+    writeHosts(["legacy-ignored"]);
     const r = resolveClusterHosts();
     expect(r).toEqual({ hosts: ["a", "b"], source: "static", multiHost: true });
   });
 
-  test("hosts-fallback (legacy .catalyst/hosts.json) when no cluster-repo + no static", () => {
+  test("hosts-fallback is RETIRED: a legacy .catalyst/hosts.json is never read (single-host, not hosts-fallback)", () => {
     writeHosts(["mini", "mac-studio"]);
     const r = resolveClusterHosts();
-    expect(r).toEqual({ hosts: ["mini", "mac-studio"], source: "hosts-fallback", multiHost: true });
+    expect(r.source).not.toBe("hosts-fallback");
+    expect(r).toEqual({ hosts: ["solo-host"], source: "single-host", multiHost: false });
   });
 
   test("single-host default when no cluster-repo, no static, no hosts file", () => {
