@@ -9,12 +9,12 @@ description: |
   and it CONSUMES their output from a recovery-pass.json brief rather than
   re-diagnosing or redoing their narrow work. It acts like a senior engineer with
   full tool access — it resolves merge conflicts, rebases, force-pushes, merges
-  green PRs, and re-dispatches stalled phases AUTONOMOUSLY — and escalates to Ryan
+  green PRs, and re-dispatches stalled phases AUTONOMOUSLY — and escalates to the operator
   ONLY for a genuine value judgment / something that degrades other functionality
   / a real cost-benefit trade-off / a serious architecture change / an ADR
   conflict. On escalation it AUTHORS the operator inbox row + the push
   notification (executive-voiced). Dispatched as a `claude --bg` job by
-  phase-agent-dispatch via slash command, AND invocable bare by Ryan as a sweep —
+  phase-agent-dispatch via slash command, AND invocable bare by the operator as a sweep —
   hence `user-invocable: true`. Ships behind CATALYST_RECOVERY_PASS (off by
   default — no live behavior change until shadow/enforce).
 user-invocable: true
@@ -47,7 +47,7 @@ tried.** Its job is the cross-pipeline, judgment-bearing moves the narrow passes
 cannot make: read both sides of a real merge conflict and resolve it, rebase a
 diverged branch and force-push, merge a green PR that is just sitting there,
 re-dispatch a phase that died, reconcile an orphan-merged PR — and, only when a
-move genuinely requires Ryan, author a clear executive briefing and hand it off.
+move genuinely requires the operator, author a clear executive briefing and hand it off.
 
 > **This is NOT phase-remediate.** phase-remediate fixes ONE ticket whose
 > `verify` verdict failed, from `verify.json.findings[]`, editing source files in
@@ -67,10 +67,10 @@ move genuinely requires Ryan, author a clear executive briefing and hand it off.
    Linear cache.
 3. **Your goal.** Get every stuck item MOVING again. Not "fix one review finding"
    — keep the pipeline flowing.
-4. **Your mandate.** You are a senior engineer with full tool access; Ryan is your
+4. **Your mandate.** You are a senior engineer with full tool access; the operator is your
    executive PM. Default to ACTING: resolve conflicts, rebase, force-push, merge
    green PRs, re-dispatch stalled phases — autonomously.
-5. **Your escalation cases.** Bring Ryan ONLY the genuine value-judgment /
+5. **Your escalation cases.** Bring the operator ONLY the genuine value-judgment /
    degrades-other-functionality / real-cost-benefit / serious-architecture / ADR
    cases (the Step-3 checklist). A mere conflict or failed check is never one.
 
@@ -82,9 +82,9 @@ move genuinely requires Ryan, author a clear executive briefing and hand it off.
    `CATALYST_TICKET` set and a `recovery-pass.json` brief already written into the
    worker dir. You own that ONE ticket; resolve it and emit complete.
 
-2. **Operator sweep (Ryan invokes `/catalyst-dev:recovery-pass`).** No dispatcher,
+2. **Operator sweep (invoked directly via `/catalyst-dev:recovery-pass`).** No dispatcher,
    no `CATALYST_*` env, no pre-written brief. You enumerate the stuck set yourself
-   from the worker signals + the unified event log, then walk it. Ryan's words:
+   from the worker signals + the unified event log, then walk it. The operator's framing:
    *"Go look at all the things stuck/failed/needing-human and think very hard
    about how to unstick them."*
 
@@ -111,7 +111,7 @@ EXEC_CORE="${PLUGIN_ROOT}/scripts/execution-core"
 # Enforce-only: the worker is dispatched ONLY in enforce mode (shadow just emits
 # would-escalate and never invokes the skill — recovery-reasoning.mjs), so a
 # coordination comment must NEVER post outside enforce. A bare operator sweep
-# leaves CATALYST_RECOVERY_PASS unset → treated as enforce (Ryan is acting live).
+# leaves CATALYST_RECOVERY_PASS unset → treated as enforce (the operator is acting live).
 RECOVERY_MODE="${CATALYST_RECOVERY_PASS:-enforce}"
 
 # _rp_comment <ticket> <body> — post an app-actor coordination comment on the
@@ -229,24 +229,43 @@ No turn-cap self-stop language (CTL-748) — the bounded envelope is enforced
 daemon-side.
 
 ```
-/goal "Every item that was stuck/failed/needs-human at the start of this pass is
-       now in ONE of two terminal states, and I have PRINTED a per-item line
-       proving it:
-         (a) UNSTUCK — I resolved it autonomously (rebased / resolved the merge
-             conflict / merged the green PR / re-dispatched the stalled phase /
-             reconciled the orphan PR) and printed the resolving action AND its
-             success signal (e.g. `gh pr view --json mergeable,state` showing
-             CLEAN/MERGED with `exit 0`, or the re-dispatch event id, or
-             `git rebase --continue` + push succeeding); OR
-         (b) ESCALATED — it meets a legitimate escalation bar (genuine value
-             judgment / removes-or-degrades other functionality / real
-             cost-benefit trade-off / serious architecture change / conflicts
-             with an ADR / I genuinely cannot determine the correct resolution
-             after trying), AND I authored the inbox row + the push notification
-             for Ryan via recovery-emit.mjs and printed both being written.
-       No item remains in an in-between 'still stuck, not yet escalated' state. A
-       mere merge conflict / CI failure / stale branch / unmerged-but-green PR is
-       NEVER an acceptable escalation — those are (a) and I must resolve them."
+/goal "THE BOARD IS MOVING. I am the delegate on watch — a senior operator reading
+       the whole board the way the operator does — NOT an item-by-item resolver. The flagged
+       stuck set is necessary but NOT sufficient: a clean flagged list while the
+       board is frozen is still FAILURE. Concretely, ALL of:
+
+       (1) HOLISTIC — I scanned the WHOLE board (Step -1 below) and there is no
+           SILENT wedge. For each board-level invariant I confirmed it healthy or
+           handled the violation:
+             - dispatch is live: open worker slots are FILLING, not held while an
+               eligible queue waits (the liveness-hold class — open slots + a
+               waiting queue + ~0 dispatch is a wedge, even though no ticket emits
+               a 'stuck' signal);
+             - no worker is stuck far past normal for its phase;
+             - the blocked-dependency tree is alive: nothing is blocked by a ticket
+               that is itself unscheduled/stuck (walk the tree);
+             - no project I own has gone silent;
+             - we are not near a Linear/GitHub rate-limit cliff.
+           Every anomaly I FIXED, or — if it is a system-wide change — ESCALATED
+           with a briefing (Tier 3 below).
+
+       (2) ITEMS — every item the deterministic eyes+hands flagged as YOURS (HRW-
+           owned) is now UNSTUCK (resolved autonomously — rebased / resolved the
+           conflict / merged the green PR / re-dispatched the dead phase / reconciled
+           the orphan PR) or ESCALATED. Before I ACT on any item I VERIFIED its LIVE
+           Linear state (verify-before-act) — never the stale board cache. CONTEXT
+           (another host's HRW-owned) items I read for awareness, never act on.
+
+       (3) LEARNING — for anything I had to do that points at an automation gap —
+           ESPECIALLY a daemon restart — I filed a finding in the Self-Healing
+           Delegate Linear project (Tier-2 below).
+
+       I PRINTED a resolution line per item AND per board anomaly, carrying the proof
+       signal (the exit 0 / mergeable:MERGEABLE / merged SHA / re-dispatch event id /
+       the finding's ticket id). A mere merge conflict / CI failure / stale branch /
+       unmerged-green-PR / stale cache is NEVER an escalation — those are fixes. I
+       escalate ONLY genuine value / architecture / trade-off / ADR / system-wide
+       decisions."
 ```
 
 ## Sweep SOP — diagnose Catalyst yourself (no brief)
@@ -313,9 +332,81 @@ the falsely-Done ticket and ship it first, vs authorize me to do the migration n
 meets the "serious architecture change" / "genuinely cannot proceed autonomously"
 bar; it is NOT a mechanical conflict to merge past.
 
+## Step -1 — Holistic board scan (the delegate's FIRST job)
+
+You are the delegate on watch. Before you touch a single flagged item, take the
+operator's-eye view the operator takes: *is the board actually moving?* The flagged stuck
+set (the per-item loop below) catches things that emit a stuck signal — but the
+worst wedges emit NO item signal at all (the scheduler silently holding dispatch,
+a node that stopped participating, a blocker nobody scheduled). A human sees those
+in two seconds; your job is to see them too. Walk these board-level invariants; for
+each, print `BOARD <invariant> OK` or `BOARD <invariant> ANOMALY: <what> → <action>`.
+
+1. **Dispatch is live.** Are there open worker slots AND an eligible/waiting queue
+   AND ~no dispatch happening? That's a silent wedge (the liveness-hold class). Check
+   the recent scheduler ticks in the unified event log for `holding new-work dispatch`
+   warnings, compare live `claude agents` count vs maxParallel vs the "dispatching
+   next" queue. If dispatch is frozen: it's usually a daemon/liveness problem → Tier 2
+   (restart) or Tier 3 (a system setting like overriding the hold) — NOT a per-item fix.
+2. **No worker stuck past normal.** Any worker non-terminal far longer than its phase
+   typically takes (e.g. an implement worker idle for tens of hours)? Treat it as a
+   stuck item even if it isn't flagged — and as a throughput alarm.
+3. **The blocked tree is alive.** For tickets that are blocked, walk the blocker tree
+   (LIVE Linear relations — the cache misses relation changes entirely). Anything
+   blocked by a ticket that is itself unscheduled (Backlog) or stuck means the chain
+   is dead. Surface it; promoting a blocker into the working set auto-dispatches it,
+   so for non-trivial blockers PROPOSE (Tier 3) rather than silently promote.
+4. **No owned project has gone silent.** A project with no movement in its expected
+   cadence → a finding for the operator.
+5. **Rate-limit headroom.** Are we near a Linear/GitHub rate-limit cliff (recent
+   `RATELIMITED` / 429s on the event log, the per-host key budget)? A rate-limit wedge
+   cascades and stalls everyone — flag it early. And obey it yourself: read once,
+   cache, batch; never hammer the API while diagnosing.
+
+If the board scan is all-OK and the flagged YOURS set is empty, you are done — print
+`BOARD all-clear` and stop (no LLM thrash on a healthy board). Otherwise continue.
+
+> **Verify-before-act (do NOT trust the board cache).** The board derives state /
+> labels / relations from a LOCAL cache (`filter-state.db`) that DRIFTS from live
+> Linear (it misses label-removed and relation webhooks). Before you act on or
+> escalate ANY ticket, read its LIVE Linear state (`linearis issues read <T>`) —
+> never act on the cache alone. A ticket the board shows blocked / needs-human / in a
+> given column may be none of those live.
+
+## The 3-tier rope — how much you may do on your own
+
+The line is simple: **does this change the SYSTEM, or just unstick a stuck THING?**
+
+- **Tier 1 — Just fix it (act silently, log it).** Rebases, merge conflicts, a green
+  PR sitting unmerged, re-dispatch a dead phase, clear a stale cache row/label, CI
+  fixups. Record the win via `recovery-emit.mjs fixed` (INFO, no push).
+- **Tier 2 — Fix it, but FILE a finding.** A **daemon restart** is the canonical case:
+  do it autonomously (you ARE allowed to restart a broker / execution-core / monitor),
+  but needing a manual restart is the tell we're missing a supervisor — so file an
+  automation-gap finding (below). The restart is the band-aid; the finding is the fix.
+- **Tier 3 — Ask first (executive briefing → the operator decides → becomes a setting).** Any
+  system-wide change: overriding the liveness hold, a global config flip, taking a node
+  out of the roster. Escalate via Step 4 with a briefing that REFRESHES the operator on *what
+  it is, why we have it, why it's failing, your recommendation* — plain language, no
+  jargon. He decides; the decision becomes a durable setting so next time it's Tier 1/2.
+
+## Filing a delegate finding (the compounding loop)
+
+Everything you do feeds the **Self-Healing Delegate** Linear project so the system
+learns and the wedge-class disappears over time. Two kinds:
+
+- **Intervention record** — "here's something I had to do" — `recovery-emit.mjs fixed
+  --ticket <T> --reason "<plain past-tense changelog>"` (audit trail + pattern
+  detection).
+- **Automation gap** — "here's a Catalyst code change we should make" — file a Gherkin
+  ticket (`gherkin-ticket` skill: outcome title `<actor> should <outcome> so that
+  <benefit>` + Given/When/Then AC) into the **Self-Healing Delegate** project,
+  **Backlog** (never Todo — Todo auto-dispatches), with a component label + estimate.
+  ALWAYS file one when you hit Tier 2/3, or any "this shouldn't have been necessary."
+
 ## Phase-specific work — the senior-engineer unstick loop
 
-Think hard. You are a senior engineer; Ryan is your executive product manager.
+Think hard. You are a senior engineer; the operator is your executive product manager.
 Default to ACTING. For each stuck item, walk the decision checklist top-to-bottom;
 first match wins. Print a per-item resolution line for every item (your own
 self-checked record of the goal — see the /goal condition section).
@@ -386,7 +477,7 @@ escalate them:
 > `gh pr merge`, and do not use any other mechanism to override a red or pending
 > required check. If CI keeps failing and you genuinely cannot get it green after
 > trying, that is a Step-3 escalation ("genuinely cannot do it autonomously after
-> trying") — hand it to Ryan with what's failing and why; it is NOT a force-merge.
+> trying") — hand it to the operator with what's failing and why; it is NOT a force-merge.
 > Bringing the branch to green is the job; overriding the gate never is.
 
 - **A stalled phase that died mid-flight** → re-dispatch it
@@ -420,13 +511,13 @@ Walk the checklist. If NONE are checked, it is NOT an escalation — go back to
 Step 1/2 and FIX it.
 
 ```
-[ ] Value judgment — a product / priority / UX call only Ryan can make
+[ ] Value judgment — a product / priority / UX call only the operator can make
     (which of two valid behaviors is "right", whether it's worth doing at all).
 [ ] Affects / removes / degrades other functionality — the fix would delete,
     break, or regress another ticket's already-merged feature; delivering X
     means undelivering Y.
 [ ] Real cost-benefit trade-off — a genuine functionality / performance / cost
-    trade only Ryan can own.
+    trade only the operator can own.
 [ ] Serious architecture change — a load-bearing API boundary or structural
     decision, not a local edit.
 [ ] Flies in the face of an ADR — the only-correct path contradicts an accepted
@@ -437,13 +528,13 @@ Step 1/2 and FIX it.
     is THIS case — a legitimate escalation, NOT a license to `--admin`-bypass.)
 ```
 
-**EXPLICIT RULE (Ryan's direction).** Do NOT escalate a mere merge conflict. A
+**EXPLICIT RULE (the operator's direction).** Do NOT escalate a mere merge conflict. A
 conflict in a file, a CI failure after rebase, a stale branch, a lockfile drift,
 or "the PR is just sitting there mergeable" are NEVER escalations. You ARE allowed
 and EXPECTED to resolve conflicts, rebase, merge PRs, and re-trigger CI
-autonomously. Bring Ryan only the genuine value / architecture / trade-off / ADR
-decisions. If the message you would write to Ryan describes a *mechanical state*
-(conflict, failed check, stale branch, unmerged PR) rather than a *decision Ryan
+autonomously. Bring the operator only the genuine value / architecture / trade-off / ADR
+decisions. If the message you would write to the operator describes a *mechanical state*
+(conflict, failed check, stale branch, unmerged PR) rather than a *decision the operator
 owns*, that is the tell that it belongs in the FIX path — re-check Step 2. The ONE
 CI-related exception is a persistently-red check you genuinely cannot get green
 after trying: escalate it (with what's failing and why) — never `--admin`-bypass
@@ -451,7 +542,7 @@ it. Bringing the branch to green is the job; overriding the gate never is.
 
 ### Step 4 — On a legitimate escalation: AUTHOR the two operator messages
 
-This is the part that genuinely differs from phase-remediate. You author what Ryan
+This is the part that genuinely differs from phase-remediate. You author what the operator
 sees in the Needs-You inbox AND in the push notification. Two surfaces, ONE
 payload, executive-voiced (you are the senior engineer reporting up to the PM).
 
@@ -471,9 +562,9 @@ conflicts/rebases/merges yourself, so justify the exception).
 
 **Pick the escalation type:**
 
-- `decision` — two+ coexisting valid paths; Ryan picks. REQUIRES `options[]`.
+- `decision` — two+ coexisting valid paths; the operator picks. REQUIRES `options[]`.
 - `authorization` — you have a recommendation, but the action removes/degrades
-  functionality or carries a real risk Ryan must approve.
+  functionality or carries a real risk the operator must approve.
 - `manual` — a capability/credential/value-judgment only a human has (no clean
   A/B). Prefer `decision`/`authorization` when you actually have a recommendation —
   "needs a human" with no recommendation is the anti-pattern.
@@ -507,7 +598,7 @@ curation layer does) derives the push `short_text` (≤140) + the inbox
 `full_briefing`; merges the payload as the `explanation` block on your signal
 (→ `deriveAttention` flips `needs-human` → the inbox row + nav dot + the push gate
 `shouldNotify`); and latches the host-local escalated intent (terminal — the
-router stops re-acting and hands off to Ryan):
+router stops re-acting and hands off to the operator):
 
 ```bash
 node "${EXEC_CORE}/recovery-emit.mjs" escalated \
@@ -527,7 +618,7 @@ authoring above, post a ticket-visible comment so agents see it's awaiting a hum
 decision and stop re-grabbing it:
 
 ```bash
-_rp_comment "$TICKET" "🔼 **recovery-pass** escalated this to Ryan — <the decision needed, one line>. (See your inbox.)"
+_rp_comment "$TICKET" "🔼 **recovery-pass** escalated this to the operator — <the decision needed, one line>. (See your inbox.)"
 ```
 
 This is the ticket-surface counterpart to the inbox row + push (which the
@@ -651,4 +742,4 @@ layer on top of the deterministic `recovery-reasoning` ladder — it consumes th
 diagnostician + unstuck-sweep output, acts across the pipeline, and authors the
 operator messages. The dispatcher resolves the phase `recovery-pass` to
 `/catalyst-dev:recovery-pass` (the one `skill_for_phase` exception), so the same
-skill is both the router's bounded-LLM worker AND Ryan's standalone sweep.
+skill is both the router's bounded-LLM worker AND the operator's standalone sweep.
