@@ -110,6 +110,7 @@ import {
 // execution-core deps — reused instead of re-reading the whole multi-hundred-MB
 // log per the design-review D2 blocker).
 import { evaluateSource } from "../lib/ingestion-recency.mjs";
+import { logDaemonHeartbeat } from "../lib/daemon-heartbeat.mjs";
 import {
   MONITOR_SERVICE_NAME,
   GITHUB_SERVICE_NAME,
@@ -2081,6 +2082,13 @@ function queueEvent(event) {
 // the legacy heartbeat-ts staleness below, so behavior is unchanged for those.
 export function runWatchdogTick({ liveness = sessionLiveness } = {}) {
   const now = Date.now();
+
+  // CTL-1280: deterministic liveness heartbeat. One fixed-cadence line to
+  // broker.log every watchdog tick (~60s) so an Alloy→Loki liveness check can
+  // watch for the heartbeat marker instead of relying on incidental log volume (a
+  // quiet-but-healthy daemon would otherwise read as silent/down). Rides the
+  // Alloy .log stream → independent of the otel-forward event pipeline.
+  logDaemonHeartbeat(log, "broker");
 
   // CTL-352: empty-interests observability. Warn on every tick when the table
   // is empty so a silently-dead broker is loud in broker.log, and emit a
