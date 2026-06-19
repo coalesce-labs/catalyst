@@ -70,7 +70,7 @@ describe("hosts.json retired (CTL-1274)", () => {
       // legitimate outcome is the single-host default.
       writeFileSync(
         join(repo, ".catalyst", "hosts.json"),
-        JSON.stringify(["legacy-a", "legacy-b"]),
+        JSON.stringify(["legacy-a", "legacy-b"])
       );
       const r = resolveClusterHosts();
       expect(r.source).not.toBe("hosts-fallback");
@@ -81,19 +81,22 @@ describe("hosts.json retired (CTL-1274)", () => {
       // cluster-repo wins when present.
       writeFileSync(
         join(cluster, "cluster.json"),
-        JSON.stringify({ schemaVersion: 1, roster: ["mini", "mini-2"] }),
+        JSON.stringify({ schemaVersion: 1, roster: ["mini", "mini-2"] })
       );
       // Even with a project hosts.json present, cluster-repo is authoritative.
       writeFileSync(
         join(repo, ".catalyst", "hosts.json"),
-        JSON.stringify(["legacy-should-never-win"]),
+        JSON.stringify(["legacy-should-never-win"])
       );
       expect(resolveClusterHosts().source).toBe("cluster-repo");
 
       // Drop the cluster repo → static (Layer-2) takes over, NOT hosts-fallback.
       rmSync(join(cluster, "cluster.json"));
       const l2 = join(repo, "layer2.json");
-      writeFileSync(l2, JSON.stringify({ catalyst: { cluster: { staticRoster: ["s-a", "s-b"] } } }));
+      writeFileSync(
+        l2,
+        JSON.stringify({ catalyst: { cluster: { staticRoster: ["s-a", "s-b"] } } })
+      );
       process.env.CATALYST_LAYER2_CONFIG_FILE = l2;
       expect(resolveClusterHosts().source).toBe("static");
 
