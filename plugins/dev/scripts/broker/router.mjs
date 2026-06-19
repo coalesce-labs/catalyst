@@ -379,6 +379,10 @@ let _pileupState = initialPileupState();
 // CTL-1123: terminal Linear states excluded from the needs-human pile-up count —
 // a Done/Canceled ticket can still carry a stale needs-human label in the cache
 // (cache-drift, CTL-1161), which would pin the count above threshold forever.
+// These mirror the stateMap done/canceled mappings in .catalyst/config.json; if
+// the team renames those Linear states, update here too (config-drives-behavior —
+// a drift would silently stop excluding terminal tickets → a never-clearing
+// false pile-up). Review #10.
 const TERMINAL_LINEAR_STATES = new Set(["Done", "Canceled"]);
 
 // CTL-1122 PR2: per-source alarm state. PR1 keyed a single _monitorRecencyAlarm;
@@ -603,9 +607,13 @@ function checkSourceRecency(source, now) {
     // state. Only fires once the ingestion emit above SUCCEEDED, keeping the two
     // streams paired.
     if (source.alertKind && isAlertEmitEnabled()) {
-      emitAlertEvent({
+      const alertOk = emitAlertEvent({
         action: recovered ? "cleared" : "raised",
         kind: source.alertKind,
+        // NOTE (CTL-1123 review #9): if a GATED source is ever given an alertKind,
+        // distinguish a gate-driven recovery (beatDrivenRecovery===false → a null
+        // forensicSeen) from a real one before asserting "recovered" here. The
+        // monitor source is ungated, so today recovered always means a fresh beat.
         reason: recovered
           ? `${source.serviceName} ingestion recovered`
           : `${source.serviceName} ingestion silent past ${source.downAfterMs}ms`,
@@ -613,6 +621,20 @@ function checkSourceRecency(source, now) {
         sinceMs: ageMs,
         causedBy: forensicSeen?.id ?? null,
       });
+      if (!alertOk) {
+        // KNOWN GAP (CTL-1123 review #7): the recency alarm has already latched
+        // (downEmitted) and we deliberately do NOT couple the alert back into that
+        // latch (re-running would risk re-appending the ingestion event), so this
+        // promotion is not retried for this edge — a failed raise means no
+        // system_down until recovery. Acceptable while catalyst.alert.* has no
+        // pairing consumer; when the alert "brain" lands, add a per-source
+        // alert-pending retry that re-attempts the promotion alone. Logged so the
+        // gap is visible meanwhile (vs the silent discard the review flagged).
+        log.warn(
+          { source: source.serviceName, kind: source.alertKind, action: recovered ? "cleared" : "raised" },
+          "alert-emit: catalyst.alert append failed; promotion skipped for this edge",
+        );
+      }
     }
   }
   _recencyAlarmByService.set(source.serviceName, state);
