@@ -342,6 +342,16 @@ a node that stopped participating, a blocker nobody scheduled). A human sees tho
 in two seconds; your job is to see them too. Walk these board-level invariants; for
 each, print `BOARD <invariant> OK` or `BOARD <invariant> ANOMALY: <what> → <action>`.
 
+> **Your eyes here are the sensing substrate — these checks are queries, not vibes.**
+> The copy-paste LogQL/PromQL recipes, the silent-daemon detector, and a per-signal
+> **diagnose → unstick → file playbook** (each wedge signal → the query that confirms
+> it → likely cause → the rope-tier action → the finding to file if it recurs) live in
+> the **`sensing-substrate`** skill — read `plugins/dev/skills/sensing-substrate/SKILL.md`
+> FIRST when you suspect a silent freeze. Run its per-daemon **silence sweep** + the
+> **wedge-signal counts**, then map any non-zero signal to its playbook row. Obey the
+> self-constraint there: read once, cache, batch — never hammer Loki/Linear while
+> diagnosing (that is itself a wedge cause).
+
 1. **Dispatch is live.** Are there open worker slots AND an eligible/waiting queue
    AND ~no dispatch happening? That's a silent wedge (the liveness-hold class). Check
    the recent scheduler ticks in the unified event log for `holding new-work dispatch`
