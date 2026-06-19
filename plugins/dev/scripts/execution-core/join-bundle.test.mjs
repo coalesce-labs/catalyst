@@ -22,17 +22,27 @@ const BUNDLE_ENVS = [
   // sets it, and assembleJoinBundle() MUTATES CATALYST_CONFIG_FILE as a side
   // effect, so a leak would corrupt later tests.
   "CATALYST_DIR",
+  // CTL-1274: the roster comes from the catalyst-cluster repo (cluster.json),
+  // resolved via CATALYST_CLUSTER_DIR — saved/restored so the fixture clone here
+  // never leaks into other suites that share the default ~/catalyst path.
+  "CATALYST_CLUSTER_DIR",
 ];
 
 let saved = {};
 let repoDir;
+let clusterDir;
 let layer2File;
 
 function writeLayer1(cfg) {
   writeFileSync(join(repoDir, ".catalyst", "config.json"), JSON.stringify(cfg));
 }
-function writeHosts(arr) {
-  writeFileSync(join(repoDir, ".catalyst", "hosts.json"), JSON.stringify(arr));
+// CTL-1274: the join-bundle roster is sourced from the catalyst-cluster repo's
+// cluster.json (NOT a per-repo .catalyst/hosts.json, which is RETIRED).
+function writeClusterRoster(arr) {
+  writeFileSync(
+    join(clusterDir, "cluster.json"),
+    JSON.stringify({ schemaVersion: 1, roster: arr }),
+  );
 }
 function writeLayer2(cfg) {
   writeFileSync(layer2File, JSON.stringify(cfg));
@@ -69,15 +79,17 @@ beforeEach(() => {
   for (const k of BUNDLE_ENVS) { saved[k] = process.env[k]; delete process.env[k]; }
 
   repoDir = mkdtempSync(join(tmpdir(), "jb-test-"));
+  clusterDir = mkdtempSync(join(tmpdir(), "jb-cluster-"));
   mkdirSync(join(repoDir, ".catalyst"), { recursive: true });
   layer2File = join(repoDir, "layer2.json");
 
   process.env.CATALYST_CONFIG_FILE = join(repoDir, ".catalyst", "config.json");
   process.env.CATALYST_LAYER2_CONFIG_FILE = layer2File;
+  process.env.CATALYST_CLUSTER_DIR = clusterDir;
   process.env.CATALYST_HOST_NAME = "mini";
 
   writeLayer1(LAYER1_FIXTURE);
-  writeHosts(["mini", "studio"]);
+  writeClusterRoster(["mini", "studio"]);
   writeLayer2(LAYER2_FIXTURE);
 });
 
@@ -88,6 +100,7 @@ afterEach(() => {
   }
   saved = {};
   rmSync(repoDir, { recursive: true, force: true });
+  rmSync(clusterDir, { recursive: true, force: true });
 });
 
 describe("assembleJoinBundle", () => {
@@ -162,17 +175,20 @@ describe("assembleJoinBundle", () => {
     expect(b.layer1Identity.teamKey).toBeNull();
   });
 
-  // CTL-1214 PATH-B #3 (bug #3): the detached `nohup` join-listener runs with
-  // cwd=HOME and NO CATALYST_CONFIG_FILE in its env. Before the fix, layer1Path()
-  // and getClusterHosts() both resolved <cwd>/.catalyst/* → null projectKey/
-  // teamKey/stateMap and a single-host roster default. The fix resolves both from
-  // the execution-core registry's first project repoRoot (listProjects()[0]).
+  // CTL-1214 PATH-B #3 (bug #3) + CTL-1274: the detached `nohup` join-listener runs
+  // with cwd=HOME and NO CATALYST_CONFIG_FILE in its env. Before the fix, layer1Path()
+  // resolved <cwd>/.catalyst/config.json → null projectKey/teamKey/stateMap. The fix
+  // resolves the Layer-1 identity from the execution-core registry's first project
+  // repoRoot (listProjects()[0]). Post-CTL-1274 the ROSTER no longer comes from a
+  // per-repo hosts.json — it comes from the catalyst-cluster repo (cluster.json,
+  // CATALYST_CLUSTER_DIR set in beforeEach), independent of cwd and of which repoRoot
+  // the registry yields.
   //
-  // The existing beforeEach masks this because it always sets CATALYST_CONFIG_FILE.
-  // This test reproduces the real detached environment: delete the override, chdir
-  // to a non-repo tmp dir, and point the registry (via CATALYST_DIR) at a fixture
-  // repo that owns the committed Layer-1 config + multi-host roster.
-  test("detached listener (no CATALYST_CONFIG_FILE, cwd=non-repo) resolves layer1 + multi-host roster from registry repoRoot", () => {
+  // The existing beforeEach masks the identity bug because it always sets
+  // CATALYST_CONFIG_FILE. This test reproduces the real detached environment: delete
+  // the override, chdir to a non-repo tmp dir, and point the registry (via
+  // CATALYST_DIR) at a fixture repo that owns the committed Layer-1 config.
+  test("detached listener (no CATALYST_CONFIG_FILE, cwd=non-repo) resolves layer1 identity from registry repoRoot; roster from cluster repo", () => {
     // A scratch repoRoot OTHER than repoDir, carrying the committed .catalyst tree.
     const fixtureRepo = mkdtempSync(join(tmpdir(), "jb-registry-repo-"));
     const cwdSandbox = mkdtempSync(join(tmpdir(), "jb-nonrepo-cwd-"));
@@ -184,15 +200,16 @@ describe("assembleJoinBundle", () => {
         join(fixtureRepo, ".catalyst", "config.json"),
         JSON.stringify(LAYER1_FIXTURE),
       );
+
+      // The roster comes from the catalyst-cluster repo (CATALYST_CLUSTER_DIR is
+      // still set by beforeEach). Make it a multi-host list so the assertion below
+      // proves the bundle ships the real cluster roster, not a single-host default.
       const MULTI_HOST_ROSTER = ["mini", "studio", "mini-2"];
-      writeFileSync(
-        join(fixtureRepo, ".catalyst", "hosts.json"),
-        JSON.stringify(MULTI_HOST_ROSTER),
-      );
+      writeClusterRoster(MULTI_HOST_ROSTER);
 
       // Layer-2 is still resolved via CATALYST_LAYER2_CONFIG_FILE (set in
       // beforeEach), so the bot creds / liveness anchor remain available; only
-      // the cwd-relative Layer-1 + roster reads are under test here.
+      // the cwd-relative Layer-1 read is under test here.
 
       // Point the execution-core registry at the fixture repoRoot. getRegistryPath()
       // = <CATALYST_DIR>/execution-core/registry.json.
@@ -217,7 +234,7 @@ describe("assembleJoinBundle", () => {
       expect(b.layer1Identity.teamId).toBe("team-uuid-1234");
       expect(b.layer1Identity.stateMap).toEqual({ Todo: "state-1", "In Progress": "state-2" });
 
-      // Roster must be the committed MULTI-host list, NOT the single-host default.
+      // Roster must be the cluster-repo MULTI-host list, NOT the single-host default.
       expect(b.hostsRoster).toEqual(MULTI_HOST_ROSTER);
       expect(b.hostsRoster.length).toBeGreaterThan(1);
     } finally {
@@ -227,6 +244,61 @@ describe("assembleJoinBundle", () => {
       // value; this prevents the mutation leaking inside this test's own teardown).
       delete process.env.CATALYST_CONFIG_FILE;
       rmSync(fixtureRepo, { recursive: true, force: true });
+      rmSync(cwdSandbox, { recursive: true, force: true });
+      rmSync(catalystDir, { recursive: true, force: true });
+    }
+  });
+
+  // CTL-1274: a multi-team seed (registry has >1 project) no longer disambiguates
+  // the identity repo by hosts.json ownership (RETIRED). registryRepoRoot() returns
+  // the FIRST project's repoRoot (the primary/coordination team). The roster still
+  // comes from the cluster repo, independent of the chosen repoRoot.
+  test("multi-team registry: identity resolves from the first project repoRoot (no hosts.json disambiguation)", () => {
+    const primaryRepo = mkdtempSync(join(tmpdir(), "jb-primary-repo-"));
+    const otherRepo = mkdtempSync(join(tmpdir(), "jb-other-repo-"));
+    const cwdSandbox = mkdtempSync(join(tmpdir(), "jb-multi-cwd-"));
+    const catalystDir = mkdtempSync(join(tmpdir(), "jb-multi-catalyst-"));
+    const originalCwd = process.cwd();
+    try {
+      mkdirSync(join(primaryRepo, ".catalyst"), { recursive: true });
+      writeFileSync(
+        join(primaryRepo, ".catalyst", "config.json"),
+        JSON.stringify(LAYER1_FIXTURE),
+      );
+      mkdirSync(join(otherRepo, ".catalyst"), { recursive: true });
+      writeFileSync(
+        join(otherRepo, ".catalyst", "config.json"),
+        JSON.stringify({ catalyst: { projectKey: "other", linear: { teamKey: "OTL" } } }),
+      );
+
+      writeClusterRoster(["mini", "studio"]);
+
+      process.env.CATALYST_DIR = catalystDir;
+      mkdirSync(join(catalystDir, "execution-core"), { recursive: true });
+      writeFileSync(
+        join(catalystDir, "execution-core", "registry.json"),
+        JSON.stringify({
+          projects: [
+            { team: "CTL", repoRoot: primaryRepo, eligibleQuery: null },
+            { team: "OTL", repoRoot: otherRepo, eligibleQuery: null },
+          ],
+        }),
+      );
+
+      delete process.env.CATALYST_CONFIG_FILE;
+      process.chdir(cwdSandbox);
+
+      const b = assembleJoinBundle();
+
+      // Identity is the FIRST project's (CTL), not the second.
+      expect(b.layer1Identity.projectKey).toBe("catalyst-workspace");
+      expect(b.layer1Identity.teamKey).toBe("CTL");
+      expect(b.hostsRoster).toEqual(["mini", "studio"]);
+    } finally {
+      process.chdir(originalCwd);
+      delete process.env.CATALYST_CONFIG_FILE;
+      rmSync(primaryRepo, { recursive: true, force: true });
+      rmSync(otherRepo, { recursive: true, force: true });
       rmSync(cwdSandbox, { recursive: true, force: true });
       rmSync(catalystDir, { recursive: true, force: true });
     }
