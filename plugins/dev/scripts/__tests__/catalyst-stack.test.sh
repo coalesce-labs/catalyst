@@ -472,8 +472,9 @@ run "install-services --print is side-effect-free (no thoughts-sync plist writte
 run "rendered thoughts-sync plist passes plutil lint (macOS)" bash -c "
   if command -v plutil >/dev/null 2>&1; then
     '${STACK}' install-services --print 2>/dev/null > '${SCRATCH}/full_plists.txt'
-    # Extract the thoughts-sync plist: everything from the second <?xml declaration onward
-    awk '/^<\?xml/{count++} count>=2' '${SCRATCH}/full_plists.txt' > '${SCRATCH}/sync.plist'
+    # Extract ONLY the thoughts-sync plist (the 2nd of three). Bounded to count==2 so
+    # the 3rd (log-shipper, CTL-1285) plist does not concatenate and fail plutil.
+    awk '/^<\?xml/{count++} count==2' '${SCRATCH}/full_plists.txt' > '${SCRATCH}/sync.plist'
     plutil -lint '${SCRATCH}/sync.plist' >/dev/null
   else
     true
@@ -494,20 +495,101 @@ run "services-status reports the thoughts-sync plist line" bash -c "
   HOME=\"\$fh\" '${STACK}' services-status 2>&1 | grep -q 'thoughts-sync'
 "
 
-run "uninstall-services removes both plists" bash -c "
+run "uninstall-services removes all three plists" bash -c "
   if [[ \"\$(uname -s)\" != \"Darwin\" ]]; then true; else
     fh='${SCRATCH}/uninst_home'
     mkdir -p \"\$fh/Library/LaunchAgents\"
     printf '<plist/>' > \"\$fh/Library/LaunchAgents/ai.coalesce.catalyst-stack.plist\"
     printf '<plist/>' > \"\$fh/Library/LaunchAgents/ai.coalesce.catalyst-thoughts-sync.plist\"
+    printf '<plist/>' > \"\$fh/Library/LaunchAgents/ai.coalesce.catalyst-log-shipper.plist\"
     # Run uninstall with a fake launchctl that always exits 0
     mkdir -p '${SCRATCH}/uninst_bin'
     printf '#!/usr/bin/env bash\nexit 0\n' > '${SCRATCH}/uninst_bin/launchctl'
     chmod +x '${SCRATCH}/uninst_bin/launchctl'
     PATH='${SCRATCH}/uninst_bin:${REAL_PATH}' HOME=\"\$fh\" '${STACK}' uninstall-services >/dev/null 2>&1 || true
     [[ ! -e \"\$fh/Library/LaunchAgents/ai.coalesce.catalyst-stack.plist\" ]] && \
-    [[ ! -e \"\$fh/Library/LaunchAgents/ai.coalesce.catalyst-thoughts-sync.plist\" ]]
+    [[ ! -e \"\$fh/Library/LaunchAgents/ai.coalesce.catalyst-thoughts-sync.plist\" ]] && \
+    [[ ! -e \"\$fh/Library/LaunchAgents/ai.coalesce.catalyst-log-shipper.plist\" ]]
   fi
+"
+
+# ── CTL-1285: dedicated log-shipper LaunchAgent (KeepAlive) ───────────────────
+# --print assertions are pure (no launchctl/filesystem), so they run in CI + macOS.
+
+run "install-services --print emits the log-shipper label" bash -c "
+  '${STACK}' install-services --print 2>&1 | grep -q 'ai.coalesce.catalyst-log-shipper'
+"
+
+run "install-services --print log-shipper ProgramArguments run launch.sh" bash -c "
+  out=\$('${STACK}' install-services --print 2>/dev/null)
+  printf '%s\n' \"\$out\" | awk '/^<\?xml/{c++} c==3' | grep -q 'launch.sh'
+"
+
+run "install-services --print log-shipper passes --config" bash -c "
+  out=\$('${STACK}' install-services --print 2>/dev/null)
+  printf '%s\n' \"\$out\" | awk '/^<\?xml/{c++} c==3' | grep -q '<string>--config</string>'
+"
+
+run "install-services --print log-shipper sets KeepAlive true" bash -c "
+  out=\$('${STACK}' install-services --print 2>/dev/null)
+  printf '%s\n' \"\$out\" | awk '/^<\?xml/{c++} c==3' | grep -A1 '<key>KeepAlive</key>' | grep -q '<true/>'
+"
+
+run "install-services --print log-shipper has NO StartInterval (KeepAlive supersedes)" bash -c "
+  out=\$('${STACK}' install-services --print 2>/dev/null)
+  ! printf '%s\n' \"\$out\" | awk '/^<\?xml/{c++} c==3' | grep -q 'StartInterval'
+"
+
+run "install-services --print log-shipper has NO AbandonProcessGroup (launchd owns its pgid)" bash -c "
+  out=\$('${STACK}' install-services --print 2>/dev/null)
+  ! printf '%s\n' \"\$out\" | awk '/^<\?xml/{c++} c==3' | grep -q 'AbandonProcessGroup'
+"
+
+run "install-services --print stack plist DOES set AbandonProcessGroup (CTL-1285 daemon-reap fix)" bash -c "
+  out=\$('${STACK}' install-services --print 2>/dev/null)
+  printf '%s\n' \"\$out\" | awk '/^<\?xml/{c++} c==1' | grep -A1 '<key>AbandonProcessGroup</key>' | grep -q '<true/>'
+"
+
+run "install-services --print log-shipper pins CATALYST_HOST_NAME from config" bash -c "
+  out=\$(HOME='${HOSTCFG_HOME}' '${STACK}' install-services --print 2>/dev/null)
+  printf '%s\n' \"\$out\" | awk '/^<\?xml/{c++} c==3' | grep -A1 'CATALYST_HOST_NAME' | grep -q '<string>mini</string>'
+"
+
+run "rendered log-shipper plist passes plutil lint (macOS)" bash -c "
+  if command -v plutil >/dev/null 2>&1; then
+    '${STACK}' install-services --print 2>/dev/null > '${SCRATCH}/full3.txt'
+    awk '/^<\?xml/{c++} c==3' '${SCRATCH}/full3.txt' > '${SCRATCH}/shipper.plist'
+    plutil -lint '${SCRATCH}/shipper.plist' >/dev/null
+  else
+    true
+  fi
+"
+
+run "install-services --print is side-effect-free (no log-shipper plist written)" bash -c "
+  fh='${SCRATCH}/se_home3'; mkdir -p \"\$fh/Library/LaunchAgents\";
+  HOME=\"\$fh\" '${STACK}' install-services --print >/dev/null 2>&1;
+  [[ ! -e \"\$fh/Library/LaunchAgents/ai.coalesce.catalyst-log-shipper.plist\" ]]
+"
+
+run "services-status reports the log-shipper plist line" bash -c "
+  fh='${SCRATCH}/status_home_ship'; mkdir -p \"\$fh/Library/LaunchAgents\";
+  printf '<plist/>' > \"\$fh/Library/LaunchAgents/ai.coalesce.catalyst-log-shipper.plist\";
+  HOME=\"\$fh\" '${STACK}' services-status 2>&1 | grep -q 'log-shipper'
+"
+
+# Defer-guard: when the shipper agent plist exists, start_shipper/stop_shipper must
+# yield to launchd instead of starting/killing Alloy themselves.
+run "start defers to the shipper agent when its plist is present" bash -c "
+  fh='${SCRATCH}/defer_home'; mkdir -p \"\$fh/Library/LaunchAgents\" \"\$fh/catalyst\";
+  printf '<plist/>' > \"\$fh/Library/LaunchAgents/ai.coalesce.catalyst-log-shipper.plist\";
+  out=\$(PATH='${STUBDIR}:${REAL_PATH}' HOME=\"\$fh\" '${STACK}' start 2>&1)
+  printf '%s\n' \"\$out\" | grep -q 'deferring to the agent' && [[ ! -e \"\$fh/catalyst/alloy.pid\" ]]
+"
+
+run "stop leaves the launchd-managed shipper running when its plist is present" bash -c "
+  fh='${SCRATCH}/defer_home2'; mkdir -p \"\$fh/Library/LaunchAgents\" \"\$fh/catalyst\";
+  printf '<plist/>' > \"\$fh/Library/LaunchAgents/ai.coalesce.catalyst-log-shipper.plist\";
+  PATH='${STUBDIR}:${REAL_PATH}' HOME=\"\$fh\" '${STACK}' stop 2>&1 | grep -q 'leaving it running'
 "
 
 # ── Summary ───────────────────────────────────────────────────────────────────
