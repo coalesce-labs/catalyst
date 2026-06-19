@@ -12,8 +12,8 @@ Do **not** edit this file directly.
 | --- | --- |
 | ✓ Conforming | 20 |
 | → Rename-to | 37 |
-| ● Legitimately Custom | 26 |
-| **Total** | 83 |
+| ● Legitimately Custom | 27 |
+| **Total** | 84 |
 
 ## Classification by Emitter
 
@@ -21,6 +21,7 @@ Do **not** edit this file directly.
 
 | Key | Source | Classification | Target | Cluster | Note |
 | --- | --- | --- | --- | --- | --- |
+| `catalyst.node.name` | `canonical-event.ts:55` | ● custom |  |  | CTL-1262 |
 | `catalyst.orchestration` | `canonical-event.ts:54` | ● custom |  |  |  |
 | `catalyst.orchestrator.id` | `canonical-event.ts:67` | ● custom |  |  |  |
 | `catalyst.phase` | `canonical-event.ts:70` | ● custom |  |  |  |
