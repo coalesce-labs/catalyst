@@ -35,6 +35,14 @@
 // One attachment per ticket; the full url is `${FENCE_URL_PREFIX}<TICKET>`.
 const FENCE_URL_PREFIX = "catalyst://fence/";
 
+// CLAIM_STALE_MS_DEFAULT — a claim held by a DIFFERENT host older than this is
+// definitively stale: triage/dispatch agents complete or fail well within it, so
+// a non-matching owner past this age is an abandoned claim the HRW owner may
+// preempt without the read-back race (CTL-1297). Mirrors the
+// EXECUTION_CORE_CLAIM_TIMEOUT_MS env convention. 5 min default.
+const CLAIM_STALE_MS_DEFAULT =
+  Number(process.env.EXECUTION_CORE_CLAIM_STALE_MS) || 300_000;
+
 // FENCE_ATTACHMENT_TITLE — the human-facing title on the attachment. Constant so
 // the record is always recognisable in the (rare) case a human inspects it.
 const FENCE_ATTACHMENT_TITLE = "catalyst-meta";
@@ -190,9 +198,32 @@ export async function writeClaim(ticket, { owner_host, generation, phase }, { po
 // hostName is a PARAMETER (this lib never imports config — that keeps it pure
 // and PR-order-independent; the caller threads in catalyst.host.name).
 // Returns { won, generation } where generation is the gen we attempted to claim.
-export async function claimTicket(ticket, hostName, phase, { post = defaultPost } = {}) {
+// staleMs and now are injectable seams for unit testing (no Date.now() in tests).
+export async function claimTicket(
+  ticket,
+  hostName,
+  phase,
+  { post = defaultPost, staleMs = CLAIM_STALE_MS_DEFAULT, now = () => Date.now() } = {},
+) {
   const current = await readClaim(ticket, { post });
   const nextGen = (current?.generation ?? 0) + 1;
+
+  // CTL-1297: stale cross-host preemption. If a claim is held by a DIFFERENT host
+  // and is older than staleMs, it is an abandoned claim left by a host that used to
+  // own this ticket under a prior roster. The HRW pre-filter guarantees only the
+  // legitimate owner reaches here, so write unconditionally and skip the
+  // write→read-back race the orphan depends on. A missing/unparseable claimed_at
+  // is treated as NOT stale (conservative) → fall through to the soft-CAS.
+  if (current && current.owner_host && current.owner_host !== hostName) {
+    const claimedAtMs = current.claimed_at ? Date.parse(current.claimed_at) : NaN;
+    if (Number.isFinite(claimedAtMs) && now() - claimedAtMs > staleMs) {
+      await writeClaim(ticket, { owner_host: hostName, generation: nextGen, phase }, { post });
+      return { won: true, generation: nextGen };
+    }
+  }
+
+  // Normal soft-CAS (unchanged): write then read-back; a concurrent host that
+  // wrote last wins the read-back and we back off.
   await writeClaim(ticket, { owner_host: hostName, generation: nextGen, phase }, { post });
   const readback = await readClaim(ticket, { post });
   const won = readback?.owner_host === hostName && readback?.generation === nextGen;
