@@ -248,6 +248,21 @@ The execution-core scheduler protects itself against a single ticket dominating 
 
 The **phantom worker-dir validity sweep** quarantines a `workers/<ticket>/` dir only when all three hold: the ticket is definitively **not-found** in Linear (a clean exit-0 not-found body — a nonzero exit or transient outage classifies as `unknown` and is never quarantined), it is **not in the eligible set**, and it has **no live bg worker**. This conjunction guarantees a transient Linear outage can never quarantine a healthy, resolvable, in-flight ticket. `SCHEDULER_CIRCUIT_BREAKER_THRESHOLD` is the Linear-independent backstop; the runaway knobs are observability only.
 
+### Board-health delegate (CTL-1290)
+
+On a low-frequency cadence the scheduler runs a **whole-board health scan**: a read-only pass that evaluates board-level invariants the per-item signals never surface — a silently-held dispatch (open slots + a waiting queue + no recent dispatch), a worker idling far past its phase-normal age, a ticket blocked by a dead blocker chain, a project gone silent, a rate-limit cliff, a node that owns work but whose reconcile is failing. It emits one **`recovery.board-scan`** event per cadence (the numbers ride out as chartable OTel attributes via CTL-1291) and proposes tiered remediation moves **without acting**.
+
+Mode resolves from the env var (a single operator knob) over Layer-2 over the default. Unlike the rest of the recovery family (which ships `off`), the board-health delegate **defaults to `shadow`**: shadow is itself a dark state — it emits the scan and mutates nothing (the no-mutation guarantee is structural, not configured), so the telemetry that is the feature's whole point ships on.
+
+| Key | Default | Notes |
+|---|---|---|
+| `CATALYST_BOARD_HEALTH` _(env var)_ | `shadow` | `off` / `0` (kill-switch — strict no-op), `shadow` (scan + emit `recovery.board-scan`, take no action), `enforce` (additionally act on proposed moves — **inert in this release**: no actuation seam is wired yet). Garbage values fall back to `shadow`. Overrides Layer-2. |
+| `catalyst.boardHealth.mode` _(Layer-2)_ | `shadow` | Same three values; honored when the env var is unset. |
+| `CATALYST_BH_INTERVAL_MS` | `300000` (5 min) | Cadence floor — the scan runs at most once per interval per host. |
+| `CATALYST_BH_DISPATCH_STALL_MS` | `600000` (10 min) | Dispatch-liveness threshold: free slots + a queue + no dispatch within this window flags a wedge. |
+| `CATALYST_BH_WORKER_AGE_MS` | `14400000` (4 h) | Fallback worker-age threshold (per-phase normals override it). |
+| `CATALYST_BH_PROJECT_SILENCE_MS` | `86400000` (24 h) | Project-silence threshold (no ticket movement in the project past this window). |
+
 ### Ingestion-silence detector (CTL-1122)
 
 The broker tails every event, so it is the surviving process that can notice when an upstream ingestion source has gone silent — the out-of-process check the monitor cannot do for itself (its own health probe reports `up` iff it answers, so it can never observe its own death). Each watchdog tick the broker judges per-source event recency and edge-triggers `catalyst.ingestion.{stale,recovered}` (emit-only — it takes no corrective action; CTL-1123 is the consumer). These knobs are env vars on the `catalyst-broker` process:

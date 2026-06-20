@@ -34,6 +34,7 @@ import {
   resolveClusterHosts,
   CLUSTER_SYNC_INTERVAL_MS,
   readDeadDocWorkerConfig,
+  readBoardHealthConfig,
   DEAD_DOC_WORKER_TRANSCRIPT_SILENCE_MS,
 } from "./config.mjs";
 
@@ -804,5 +805,61 @@ describe("readDeadDocWorkerConfig (CTL-1245)", () => {
   });
   test("transcript-silence floor defaults to 30 minutes", () => {
     expect(DEAD_DOC_WORKER_TRANSCRIPT_SILENCE_MS).toBe(30 * 60_000);
+  });
+});
+
+describe("readBoardHealthConfig (CTL-1290)", () => {
+  const BH_ENVS = ["CATALYST_BOARD_HEALTH", "CATALYST_LAYER2_CONFIG_FILE"];
+  let saved = {}, tmp;
+  beforeEach(() => {
+    for (const k of BH_ENVS) { saved[k] = process.env[k]; delete process.env[k]; }
+    tmp = mkdtempSync(join(tmpdir(), "ctl1290-bh-"));
+    process.env.CATALYST_LAYER2_CONFIG_FILE = join(tmp, "absent.json");
+  });
+  afterEach(() => {
+    for (const k of BH_ENVS) { saved[k] === undefined ? delete process.env[k] : (process.env[k] = saved[k]); }
+    saved = {}; rmSync(tmp, { recursive: true, force: true });
+  });
+
+  test("default: mode=shadow (the CTL-1290 floor — NOT off; shadow mutates nothing)", () => {
+    expect(readBoardHealthConfig().mode).toBe("shadow");
+  });
+  test("CATALYST_BOARD_HEALTH=0 maps to mode:off (kill-switch)", () => {
+    process.env.CATALYST_BOARD_HEALTH = "0";
+    expect(readBoardHealthConfig().mode).toBe("off");
+  });
+  test("env off / shadow / enforce are honored", () => {
+    process.env.CATALYST_BOARD_HEALTH = "off";
+    expect(readBoardHealthConfig().mode).toBe("off");
+    process.env.CATALYST_BOARD_HEALTH = "shadow";
+    expect(readBoardHealthConfig().mode).toBe("shadow");
+    process.env.CATALYST_BOARD_HEALTH = "enforce";
+    expect(readBoardHealthConfig().mode).toBe("enforce");
+  });
+  test("garbage env → falls back to shadow (NOT off)", () => {
+    process.env.CATALYST_BOARD_HEALTH = "banana";
+    expect(readBoardHealthConfig().mode).toBe("shadow");
+  });
+  test("reads catalyst.boardHealth.mode from Layer-2 when env absent", () => {
+    const cfg = join(tmp, "config.json");
+    writeFileSync(cfg, JSON.stringify({ catalyst: { boardHealth: { mode: "off" } } }));
+    process.env.CATALYST_LAYER2_CONFIG_FILE = cfg;
+    expect(readBoardHealthConfig().mode).toBe("off");
+  });
+  test("env wins over Layer-2", () => {
+    const cfg = join(tmp, "config.json");
+    writeFileSync(cfg, JSON.stringify({ catalyst: { boardHealth: { mode: "off" } } }));
+    process.env.CATALYST_LAYER2_CONFIG_FILE = cfg;
+    process.env.CATALYST_BOARD_HEALTH = "enforce";
+    expect(readBoardHealthConfig().mode).toBe("enforce");
+  });
+  test("malformed Layer-2 file → shadow (never throws)", () => {
+    const cfg = join(tmp, "config.json"); writeFileSync(cfg, "{ not json");
+    process.env.CATALYST_LAYER2_CONFIG_FILE = cfg;
+    expect(readBoardHealthConfig().mode).toBe("shadow");
+  });
+  test("accepts an injected env bag (env param overrides process.env)", () => {
+    process.env.CATALYST_BOARD_HEALTH = "shadow";
+    expect(readBoardHealthConfig({ CATALYST_BOARD_HEALTH: "0" }).mode).toBe("off");
   });
 });

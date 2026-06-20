@@ -861,6 +861,64 @@ describe("buildRecoveryEnvelope numeric/enum promotion (CTL-1291)", () => {
     expect(env.attributes["recovery.rule"]).toBeUndefined();
     expect(env.attributes["event.name"]).toBe("recovery.fixed"); // canonical attrs intact
   });
+
+  // ─── CTL-1290: the recovery.board-scan branch ───────────────────────────────
+  test("recovery.board-scan promotes board scalars, gate enums, and per-invariant failed counts", () => {
+    const details = {
+      mode: "shadow",
+      invariantsFailed: 2,
+      gateDecision: "proceed",
+      gateReason: "2 invariant(s) flagged",
+      proposedTier1: 1,
+      proposedTier2: 0,
+      proposedTier3: 1,
+      invariants: {
+        dispatchLiveness: { ok: false, failed: 1, observable: true },
+        projectSilence: { ok: false, failed: 1, observable: true },
+        workerAge: { ok: true, failed: 0, observable: true },
+      },
+      flagged: ["CTL-1", "CTL-2"],
+      tier1Moves: [{ move: "kick-dispatch" }],
+      tier3Moves: [{ project: "P1", move: "escalate-project-silence" }],
+    };
+    const env = buildRecoveryEnvelope({ type: "recovery.board-scan", ticket: null, reason: "r", details });
+    const a = env.attributes;
+    expect(a["recovery.invariants_failed"]).toBe(2);
+    expect(a["recovery.proposed.tier1"]).toBe(1);
+    expect(a["recovery.proposed.tier2"]).toBe(0);
+    expect(a["recovery.proposed.tier3"]).toBe(1);
+    expect(a["recovery.gate_decision"]).toBe("proceed");
+    expect(a["recovery.gate_reason"]).toBe("2 invariant(s) flagged");
+    expect(a["recovery.mode"]).toBe("shadow");
+    // per-invariant failed counts chart individually
+    expect(a["recovery.inv.dispatchLiveness.failed"]).toBe(1);
+    expect(a["recovery.inv.projectSilence.failed"]).toBe(1);
+    expect(a["recovery.inv.workerAge.failed"]).toBe(0);
+    // board-scoped → event.label is null (the board reader ignores it; no per-ticket fold)
+    expect(a["event.label"]).toBeNull();
+  });
+
+  test("recovery.board-scan never promotes rosters/move arrays (cardinality)", () => {
+    const details = {
+      mode: "shadow",
+      invariantsFailed: 1,
+      gateDecision: "proceed",
+      gateReason: "1 invariant(s) flagged",
+      proposedTier1: 1, proposedTier2: 0, proposedTier3: 0,
+      invariants: { dispatchLiveness: { ok: false, failed: 1, observable: true } },
+      flagged: ["CTL-1", "CTL-2", "CTL-3"],
+      tier1Moves: [{ move: "kick-dispatch" }],
+    };
+    const env = buildRecoveryEnvelope({ type: "recovery.board-scan", ticket: null, details });
+    const a = env.attributes;
+    // no attribute value is an array, and the raw rosters are not lifted by key
+    for (const v of Object.values(a)) expect(Array.isArray(v)).toBe(false);
+    expect(a["recovery.flagged"]).toBeUndefined();
+    expect(a["recovery.tier1Moves"]).toBeUndefined();
+    expect(a.flagged).toBeUndefined();
+    // back-compat: the full details object still rides in body.payload
+    expect(env.body.payload.details).toEqual(details);
+  });
 });
 
 // ─── CTL-1176: host-local cooldown + intent ledger ──────────────────────────
@@ -1236,9 +1294,11 @@ describe("defaultInvokeRecoveryPass (CTL-1176 rung 3)", () => {
     const briefPath = pathJoin(wdir, "recovery-pass.json");
     expect(existsSync(briefPath)).toBe(true);
     const brief = JSON.parse(readFileSync(briefPath, "utf8"));
-    expect(brief.schema).toBe("recovery-pass-brief/v1");
+    expect(brief.schema).toBe("recovery-pass-brief/v2");
     expect(brief.ticket).toBe("CTL-501");
     expect(brief.failureReason).toBe("merge-conflict");
+    // CTL-1290: boardContext present (null here — no board scan attached by this caller)
+    expect(brief.boardContext).toBeNull();
     expect(brief.diagnosis.logsOutput).toContain("CONFLICT");
     expect(brief.diagnosis.beliefState).toEqual({ x: 1 });
     // Consumed the hands' history — the two markers, not redone.
@@ -1247,6 +1307,30 @@ describe("defaultInvokeRecoveryPass (CTL-1176 rung 3)", () => {
     expect(brief.guidance).toContain("resolve");
     // No verify.json fake-finding injection.
     expect(existsSync(pathJoin(wdir, "verify.json"))).toBe(false);
+  });
+
+  test("CTL-1290: boardContext from briefObj is written into the v2 brief", () => {
+    const boardContext = {
+      schema: "recovery-board-context/v1",
+      slots: { capacity: 4, inUse: 3, free: 1 },
+      eligibleQueue: { depth: 2, topTickets: ["CTL-1", "CTL-2"] },
+      stuckWorkers: [{ ticket: "CTL-9", phase: "implement", status: "running", ageSeconds: 18000 }],
+      strandedNodes: [],
+      invariants: { dispatchLiveness: { ok: false, failed: 1 } },
+    };
+    const result = defaultInvokeRecoveryPass(
+      "CTL-503",
+      { brief: "x", reason: "stuck", boardContext },
+      {
+        orchDir,
+        eventScanMod: { countRecoveryPassCycles: () => 0 },
+        dispatchMod: { dispatchTicket: () => ({ code: 0, worktreePath: "/tmp/wt", signal: {} }) },
+      },
+    );
+    expect(result.dispatched).toBe(true);
+    const brief = JSON.parse(readFileSync(pathJoin(orchDir, "workers", "CTL-503", "recovery-pass.json"), "utf8"));
+    expect(brief.schema).toBe("recovery-pass-brief/v2");
+    expect(brief.boardContext).toEqual(boardContext);
   });
 
   test("dispatch failure (non-zero code) → success:false, dispatched:false", () => {

@@ -889,6 +889,21 @@ function promoteNumericAttrs(type, details) {
     num("recovery.rule", details.rule);
     str("recovery.decision", details.decision);
     str("recovery.mode", details.mode);
+  } else if (type === "recovery.board-scan") {
+    // CTL-1290: whole-board health scan. Bounded scalars + enums chart; the
+    // per-invariant failed-count rides as recovery.inv.<name>.failed. Rosters and
+    // move-proposal arrays stay in body.payload (cardinality) — only their COUNTS
+    // (invariants_failed, proposed.tier1/2/3) promote.
+    num("recovery.invariants_failed", details.invariantsFailed);
+    num("recovery.proposed.tier1", details.proposedTier1);
+    num("recovery.proposed.tier2", details.proposedTier2);
+    num("recovery.proposed.tier3", details.proposedTier3);
+    str("recovery.gate_decision", details.gateDecision);
+    str("recovery.gate_reason", details.gateReason);
+    str("recovery.mode", details.mode);
+    for (const [name, r] of Object.entries(details.invariants ?? {})) {
+      num(`recovery.inv.${name}.failed`, r?.failed);
+    }
   }
   return a;
 }
@@ -1277,7 +1292,7 @@ export function defaultInvokeRecoveryPass(ticket, briefObj = {}, deps = {}) {
     return { success: false, dispatched: false, attempts: 0, reason: "no orchDir", details: {} };
   }
 
-  const { brief, reason, evidence, phase, bgJobId, failureReason } = briefObj;
+  const { brief, reason, evidence, phase, bgJobId, failureReason, boardContext } = briefObj;
 
   // Lazy imports — same rationale as defaultInvokeRemediateCapped (avoid loading
   // the dispatch graph on the off/shadow paths; no import cycle).
@@ -1317,11 +1332,17 @@ export function defaultInvokeRecoveryPass(ticket, briefObj = {}, deps = {}) {
   //     passes failed instead of redoing them.
   const seamsTried = readUnstuckSeamsTried(orchDir, ticket, phase);
   const recoveryBrief = {
-    schema: "recovery-pass-brief/v1",
+    schema: "recovery-pass-brief/v2", // v2 (CTL-1290): adds the whole-board boardContext block
     ticket,
     phase: phase ?? null,
     bgJobId: bgJobId ?? null,
     failureReason: failureReason ?? null,
+    // CTL-1290: the holistic, read-only board snapshot (slots/queue/stuck-workers/
+    // invariants) produced by board-health.buildBoardContext. Until now the
+    // dispatched delegate got a per-item brief with ZERO board context; this is
+    // how the daemon-side board scan reaches the LLM session. Null when the caller
+    // (e.g. the per-item recovery pass) has no board scan to attach.
+    boardContext: boardContext ?? null,
     // The DIAGNOSE output (read-only): claude logs buffer + bg job state + signal
     // + belief state. The skill reads this instead of re-diagnosing from scratch.
     diagnosis: {

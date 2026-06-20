@@ -10427,3 +10427,7 @@ describe("drained-sentinel emission (CTL-1095)", () => {
     expect(emitDrainedMock).toHaveBeenCalledTimes(2);
   });
 });
+
+// CTL-1290: the board-health scheduler-seam tests live in board-health-seam.test.mjs
+// (a CI-included file) — scheduler.test.mjs is excluded from the CI allowlist for
+// its real-timer suite, so the seam coverage would not run here.
