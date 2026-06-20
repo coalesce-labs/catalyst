@@ -228,7 +228,7 @@ import {
 // to production deps at the unstuckSweep wiring point below. Wiring this does NOT
 // flip enforce on — the mode gate stays at its safe 'off' default (ADR-023).
 import { buildUnstuckActSeams } from "./unstuck-act-seams.mjs";
-import { readUnstuckSweepConfig, readRecoveryPassConfig, isThrottled } from "./config.mjs";
+import { readUnstuckSweepConfig, readRecoveryPassConfig, readBoardHealthConfig, isThrottled } from "./config.mjs";
 // CTL-558: the deterministic Linear status/label write seam. The whole module
 // is injected as `writeStatus` so tests pass fakes; production uses the real
 // module (best-effort — every write swallows its own failures).
@@ -269,7 +269,10 @@ import {
 } from "./config.mjs";
 import { emitDrainedEvent as defaultEmitDrainedEvent } from "./drain-event.mjs"; // CTL-1095: drained sentinel
 import { defaultCheckSequencing } from "./sequencing.mjs"; // CTL-537
-import { ownedBy } from "./hrw.mjs"; // CTL-850: HRW ownership filter (CTL-1191 also uses it for the diagnostician gate)
+import { ownedBy, ownerForTicket } from "./hrw.mjs"; // CTL-850: HRW ownership filter (CTL-1191 also uses it for the diagnostician gate); ownerForTicket: CTL-1290 board-health stranded-node + enforce HRW gate
+import { boardHealthPass } from "./board-health.mjs"; // CTL-1290: the whole-board health delegate (shadow-first)
+import { getAllTicketDescriptors } from "../broker/broker-state.mjs"; // CTL-1290: board snapshot (reads only). bun:sqlite-backed — safe here: scheduler.mjs is daemon-only and NOT in the orch-monitor vite/UI graph (see MEMORY vite_config_bun_sqlite_trap).
+import { readReconcileHealthMarkers } from "./reconcile-health.mjs"; // CTL-1290: stranded-node reconcile signal
 import { claimDispatchSync } from "./cluster-claim-sync.mjs"; // CTL-850: cross-host claim soft-CAS
 // CTL-954: team estimation method — lazy-cached from Linear, used to expand
 // the allowed estimate point set beyond the hard-coded Fibonacci values.
@@ -2527,6 +2530,32 @@ export function defaultClearStall(orchDir, writeStatus) {
   };
 }
 
+// CTL-1290: board-health throttle state (host-local, mirrors the unstuck-sweep /
+// recovery-pass cadence vars). The single-LLM cadence floor lives in
+// BOARD_HEALTH_INTERVAL_MS; this holds the last run ms across ticks.
+let _boardHealthLastRunMs = 0;
+
+// CTL-1290: bounded tail of the unified event log → the records board-health's
+// deriveRing distills (recent dispatch ts, cache.reconcile summary, account
+// rate-limit, reconcile-failing teams). This is the documented FALLBACK for the
+// CTL-1257 shared ring (not yet threadable here). Best-effort: any read/parse
+// error degrades to [] so the dependent invariants flag observable:false rather
+// than throwing the tick.
+function readBoardHealthEventTail(maxLines = 800) {
+  try {
+    const raw = readFileSync(getEventLogPath(), "utf8");
+    const lines = raw.split("\n");
+    const out = [];
+    for (const line of lines.slice(-maxLines)) {
+      if (!line) continue;
+      try { out.push(JSON.parse(line)); } catch { /* skip a partial/garbled line */ }
+    }
+    return out;
+  } catch {
+    return [];
+  }
+}
+
 // schedulerTick — one pull cycle: (1) advancement sweep, (2) new-work pull,
 // (3) terminal-Done sweep (CTL-558). Idempotent and restart-safe — derives
 // every action from filesystem state. `exec` is the injectable seam for the
@@ -2747,6 +2776,14 @@ export function schedulerTick(
     recoveryPass: {
       mode: _recoveryPassMode = undefined,
     } = {},
+    // CTL-1290: board-health delegate seam. Threaded by the daemon (runTick) with
+    // the real-IO seams (board snapshot / event-ring / reconcile markers) — mirrors
+    // the stallJanitor census wiring. Undefined on a bare schedulerTick (unit
+    // tests) → the pass is INERT (does no real IO, never emits). Mode resolves
+    // inside the hook via readBoardHealthConfig (env > Layer-2 > "shadow") unless
+    // the caller pins `boardHealth.mode`. `boardHealthPassFn` is the §9.4 test seam.
+    boardHealth: _boardHealth = undefined,
+    boardHealthPassFn = boardHealthPass,
     // CTL-1095: drain gate — node-level refusal of new-work admission. Default
     // reads the drain flag file from orchDir; tests inject a stub.
     isDraining = () => isDrainingDefault(orchDir),
@@ -3758,6 +3795,47 @@ export function schedulerTick(
   // sweep (subtracting resumedCount in sweep 2) rather than re-shelling-out.
   const maxParallel = readMaxParallel(orchDir, concurrency);
   const liveCount = liveBackgroundCount();
+
+  // CTL-1290: board-health delegate cadence hook — SHADOW-FIRST. Runs ONLY when
+  // the daemon threads the `boardHealth` seam (its real-IO readers); a bare
+  // schedulerTick (unit test) passes none → the pass is inert and does zero real
+  // IO. Every snapshot var is already in scope here (eligible above, roster/self/
+  // multiHost at tick top, maxParallel/liveCount just above) — no re-query. NO
+  // `act` seam is passed → enforce is inert in this ticket (actuation is a
+  // follow-up). Wrapped in try/catch: a board-health failure must never break the
+  // tick. Throttled internally to BOARD_HEALTH_INTERVAL_MS.
+  if (_boardHealth) {
+    const _bhMode = _boardHealth.mode ?? readBoardHealthConfig().mode;
+    if (_bhMode !== "off") {
+      try {
+        const _bhResult = boardHealthPassFn({
+          mode: _bhMode,
+          orchDir,
+          getBoard: _boardHealth.getBoard,
+          getWorkerSignals: () => readWorkerSignals(orchDir),
+          getEligible: () => eligible, // already read this tick
+          roster,
+          self,
+          multiHost,
+          capacity: { maxParallel, liveCount, freeSlots: computeFreeSlots(maxParallel, liveCount) },
+          readEventRing: _boardHealth.readEventRing,
+          ownerForTicket,
+          getReconcileMarkers: _boardHealth.getReconcileMarkers,
+          lastRunMs: _boardHealthLastRunMs,
+          // emit defaults to defaultEmitEvent; NO `act` passed → shadow & enforce
+          // are both mutation-free in this ticket.
+          log: (o, m) => log.warn?.(o, m),
+          now,
+        });
+        if (_bhResult?.ran) _boardHealthLastRunMs = _bhResult.ranAtMs;
+      } catch (err) {
+        log.warn?.(
+          { step: "board-health", err: err.message },
+          "scheduler: board-health pass failed — continuing tick (CTL-1290)",
+        );
+      }
+    }
+  }
 
   // (STEP A) CTL-755 admission-control compute — gate the triage→research
   // promotion by deps + priority + capacity. PURE-COMPUTE + labelOnce escalation
@@ -5547,6 +5625,19 @@ function runTick() {
       // CTL-1150: thread the triage-artifact predicate (undefined → inline
       // existsSync default in schedulerTick; test seam via startScheduler).
       hasTriageArtifact: runningOpts.hasTriageArtifact,
+      // CTL-1290: thread the board-health delegate's real-IO seams. Like the
+      // stallJanitor/unstuckSweep censuses above, these are bound ONLY in the
+      // daemon — a bare schedulerTick (unit test) passes no `boardHealth` so the
+      // pass is inert (no real broker-DB / event-log / reconcile reads). Mode
+      // resolves inside the hook via readBoardHealthConfig (env > Layer-2 >
+      // "shadow"), so the daemon ships shadow-on by default while tests stay
+      // quiet. Operators kill it with CATALYST_BOARD_HEALTH=0/off. NO `act` seam
+      // is threaded → enforce is inert this ticket (actuation is a follow-up).
+      boardHealth: runningOpts.boardHealth ?? {
+        getBoard: () => getAllTicketDescriptors({ includeRemoved: false }),
+        readEventRing: () => readBoardHealthEventTail(),
+        getReconcileMarkers: () => readReconcileHealthMarkers({}),
+      },
     });
     // CTL-935 Phase 2: free-slots / R8 shadow comparator. Runs AFTER schedulerTick
     // (which produces the authoritative freeSlots value) — apples-to-apples because

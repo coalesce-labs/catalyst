@@ -982,6 +982,46 @@ export function readDeadDocWorkerConfig() {
   return { mode };
 }
 
+// CTL-1290: board-health delegate mode reader. Mirrors the recovery-family
+// readers (readRecoveryPassConfig / readDeadDocWorkerConfig) EXACTLY — env
+// (CATALYST_BOARD_HEALTH) overrides Layer-2 (.catalyst.boardHealth.mode) —
+// with ONE deliberate deviation: the safe default is "shadow", not "off".
+// Justification (spec §11.1, ADR-023 deviation, confirmed acceptable): shadow is
+// itself a dark state. It emits ONE throttled `recovery.board-scan` heartbeat per
+// cadence and mutates NOTHING — the no-mutation guarantee is structural in
+// board-health.mjs (no process-spawning import; the `act` seam is enforce-gated
+// and the scheduler supplies none). The ticket's whole value IS that shadow
+// telemetry, so a shadow default ships the feature on; CATALYST_BOARD_HEALTH=0/off
+// is the kill-switch.
+//   off     → strict no-op: behaviour byte-for-byte identical to pre-CTL-1290.
+//   shadow  → scan + emit recovery.board-scan, take NO action (the default).
+//   enforce → additionally act on proposed moves — UNWIRED in CTL-1290 (the
+//             scheduler passes no `act` seam, so enforce is inert until a follow-up).
+export const BOARD_HEALTH_MODES = new Set(["off", "shadow", "enforce"]);
+
+function readLayer2BoardHealth() {
+  try {
+    const b = JSON.parse(readFileSync(getLayer2ConfigPath(), "utf8"))?.catalyst?.boardHealth;
+    return b && typeof b === "object" ? b : {};
+  } catch { return {}; }
+}
+
+export function readBoardHealthConfig(env = process.env) {
+  const l2 = readLayer2BoardHealth();
+  const v = env.CATALYST_BOARD_HEALTH;
+  let mode;
+  if (v === "0") {
+    mode = "off"; // kill-switch
+  } else if (typeof v === "string" && BOARD_HEALTH_MODES.has(v)) {
+    mode = v;
+  } else if (typeof l2.mode === "string" && BOARD_HEALTH_MODES.has(l2.mode)) {
+    mode = l2.mode;
+  } else {
+    mode = "shadow"; // CTL-1290 floor: shadow mutates nothing; garbage → shadow
+  }
+  return { mode };
+}
+
 // --- Governance snapshot for operator visibility (CTL-1062/CTL-1084) ---
 // READ-ONLY, NEVER load-bearing. Recomputes each governance value the same way
 // its per-tick gate site does so the heartbeat payload and the

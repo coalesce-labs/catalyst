@@ -266,6 +266,24 @@ function printDispatchedBrief(ticket, orchDir) {
   }
   console.log("--- guidance ---");
   console.log(brief.guidance || "(none)");
+  // CTL-1290: the whole-board, read-only snapshot (recovery-pass-brief/v2). Gives
+  // the delegate the context the per-item brief never had — slots, queue depth,
+  // which OTHER workers are stuck, which nodes are stranded — so it acts on the
+  // board, not just this one ticket.
+  if (brief.boardContext) {
+    console.log("--- board context (whole-board, read-only) ---");
+    const bc = brief.boardContext;
+    console.log(`slots: ${bc.slots?.inUse}/${bc.slots?.capacity} (${bc.slots?.free} free)`);
+    console.log(`eligible queue depth: ${bc.eligibleQueue?.depth ?? 0}`);
+    if (bc.stuckWorkers?.length) {
+      console.log(
+        `stuck workers: ${bc.stuckWorkers.map((w) => `${w.ticket}(${w.phase},${w.ageSeconds}s)`).join(", ")}`,
+      );
+    }
+    if (bc.strandedNodes?.length) {
+      console.log(`stranded nodes: ${bc.strandedNodes.map((n) => n.host).join(", ")}`);
+    }
+  }
   console.log("--- recent log buffer (tail 40) ---");
   const logs = brief?.diagnosis?.logsOutput || "(no logs captured)";
   const tail = String(logs).split("\n").slice(-40).join("\n");
