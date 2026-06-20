@@ -724,6 +724,120 @@ export function checkSecretsHygiene(deps = {}) {
   return checks;
 }
 
+// ─── Phase 5: Daemon-runtime tool PATH (CTL-1289) ────────────────────────────
+
+// The execution-core daemon is NOT pure OAuth — it shells out to `linearis`
+// (reconcile), `claude` (liveness snapshot) and `node` (linearis's
+// `#!/usr/bin/env node` runtime) every tick. On a `catalyst-join`-joined member
+// those CLIs live under ~/.local/{bin,node/bin}; if the launchd daemon's PATH
+// omits them, every spawn exit-127s and the node strands SILENTLY — it boots
+// clean, emits heartbeats, shows `owns N`, but reconcile freezes, the liveness
+// snapshot never warms (freeSlots=0 → new-work held) and the GC/reaper sweeps
+// fail-closed. This check is the load-bearing daemon-context assertion: it
+// resolves the three CLIs against the DAEMON's PATH — the installed launchd
+// plist's <key>PATH</key>, NOT process.env.PATH, which the join shell enriches
+// (catalyst-join.sh:719) and would FALSE-PASS — and FAILs (not WARNs) so the
+// activation gate fail-closes instead of stranding.
+
+// defaultDaemonPath — extract the PATH the launchd daemon actually runs with,
+// from the installed catalyst-stack plist. Tests the persisted state, so a
+// stale plist (installed before the CTL-1289 fix) is caught. null = not installed.
+function defaultDaemonPath() {
+  const plist = resolve(
+    homedir(), "Library", "LaunchAgents", "ai.coalesce.catalyst-stack.plist",
+  );
+  try {
+    const xml = readFileSync(plist, "utf8");
+    const m = xml.match(/<key>PATH<\/key>\s*<string>([^<]*)<\/string>/);
+    return m ? m[1] : null;
+  } catch {
+    return null;
+  }
+}
+
+// defaultResolveInPath — does `cmd` resolve to an executable under `pathStr`?
+// Uses `command -v` with positional args (no shell injection).
+function defaultResolveInPath(cmd, pathStr) {
+  const r = spawnSync("sh", ["-c", 'command -v "$1" >/dev/null 2>&1', "sh", cmd], {
+    timeout: 5_000,
+    env: { ...process.env, PATH: pathStr },
+  });
+  return r.status === 0;
+}
+
+// defaultSmokeProbe — run `cmd args` under `pathStr` and return the exit code.
+// ENOENT (cmd itself absent) maps to 127; the caller only cares whether the
+// result is the 127 strand signature (a shelled-out dependency unresolved).
+// Auth/network failures surface as a NON-127 exit, so they never false-FAIL.
+function defaultSmokeProbe(cmd, args, pathStr) {
+  const r = spawnSync(cmd, args, {
+    timeout: 12_000,
+    env: { ...process.env, PATH: pathStr },
+  });
+  if (r.error) return r.error.code === "ENOENT" ? 127 : -1;
+  return r.status;
+}
+
+// checkDaemonToolPath — assert the daemon's launchd PATH can resolve and run the
+// CLIs it shells out to. Injectable deps for unit testing.
+export function checkDaemonToolPath(deps = {}) {
+  const {
+    daemonPath = defaultDaemonPath(),
+    resolveInPath = defaultResolveInPath,
+    smokeProbe = defaultSmokeProbe,
+    tools = ["linearis", "node", "claude"],
+  } = deps;
+
+  if (!daemonPath) {
+    return [
+      mkCheck(
+        "daemon-tool-path",
+        STATUS.WARN,
+        "no installed catalyst-stack launchd plist found — cannot assert the daemon's PATH; run `catalyst-stack install-services`",
+      ),
+    ];
+  }
+
+  const missing = tools.filter((t) => !resolveInPath(t, daemonPath));
+  if (missing.length > 0) {
+    return [
+      mkCheck(
+        "daemon-tool-path",
+        STATUS.FAIL,
+        `daemon launchd PATH cannot resolve: ${missing.join(", ")} — the daemon shells out to these every tick; missing → exit-127 silent strand (frozen eligible set, freeSlots=0). PATH=${daemonPath}`,
+      ),
+    ];
+  }
+
+  // All resolve — smoke-probe that they don't exit-127 under the daemon PATH
+  // (catches e.g. linearis resolving but its node runtime not, or a broken wrapper).
+  const probes = [
+    ["linearis", ["issues", "list", "-l", "1"]],
+    ["claude", ["agents", "--json"]],
+  ].filter(([cmd]) => tools.includes(cmd));
+  const exit127 = probes
+    .filter(([cmd, args]) => smokeProbe(cmd, args, daemonPath) === 127)
+    .map(([cmd]) => cmd);
+
+  if (exit127.length > 0) {
+    return [
+      mkCheck(
+        "daemon-tool-path",
+        STATUS.FAIL,
+        `${exit127.join(", ")} exit-127 under the daemon PATH (a shelled-out dependency is unresolved) — the precise strand signature`,
+      ),
+    ];
+  }
+
+  return [
+    mkCheck(
+      "daemon-tool-path",
+      STATUS.PASS,
+      `daemon launchd PATH resolves linearis/node/claude and they run (no exit-127)`,
+    ),
+  ];
+}
+
 // ─── Phase 6: Renderer, exit code, runDoctor ─────────────────────────────────
 
 // summarize — aggregate check results into counts.
@@ -802,7 +916,7 @@ export async function runDoctor(opts = {}) {
     expectedBotUserId = null,
   } = opts;
 
-  // Default check suite — all 5 check functions with real deps
+  // Default check suite — all check functions with real deps
   const defaultChecks = [
     () => checkHostIdentity(),
     () => checkHrwPartition(),
@@ -810,6 +924,7 @@ export async function runDoctor(opts = {}) {
     () => checkBotCredentials({ expectedBotUserId }),
     () => checkConnectivity({ seed, otel }),
     () => checkSecretsHygiene(),
+    () => checkDaemonToolPath(), // CTL-1289: daemon launchd PATH resolves linearis/node/claude
   ];
 
   const fns = checkFns ?? defaultChecks;

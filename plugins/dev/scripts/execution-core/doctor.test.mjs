@@ -13,6 +13,7 @@ import {
   checkBotCredentials,
   checkConnectivity,
   checkSecretsHygiene,
+  checkDaemonToolPath,
   summarize,
   renderJson,
   renderHuman,
@@ -514,6 +515,62 @@ describe("checkSecretsHygiene", () => {
     expect(checks.find((c) => c.name === "layer2-perms")?.status).toBe(STATUS.INFO);
     expect(checks.find((c) => c.name === "config-not-in-git")?.status).toBe(STATUS.INFO);
     expect(checks.find((c) => c.name === "no-secrets-in-layer1")?.status).toBe(STATUS.PASS);
+  });
+});
+
+// ─── Phase 5b: checkDaemonToolPath (CTL-1289) ────────────────────────────────
+
+describe("checkDaemonToolPath", () => {
+  const GOOD_PATH = "/Users/x/.local/node/bin:/Users/x/.local/bin:/usr/bin";
+
+  it("WARNs when no installed launchd plist is found (daemonPath null)", () => {
+    const checks = checkDaemonToolPath({ daemonPath: null });
+    expect(checks).toHaveLength(1);
+    expect(checks[0].name).toBe("daemon-tool-path");
+    expect(checks[0].status).toBe(STATUS.WARN);
+  });
+
+  it("FAILs when the daemon PATH cannot resolve a required CLI", () => {
+    const checks = checkDaemonToolPath({
+      daemonPath: GOOD_PATH,
+      resolveInPath: (cmd) => cmd !== "linearis", // linearis missing
+      smokeProbe: () => 0,
+    });
+    expect(checks[0].status).toBe(STATUS.FAIL);
+    expect(checks[0].detail).toContain("linearis");
+    expect(checks[0].detail).toContain("exit-127");
+  });
+
+  it("FAILs on the exit-127 strand signature even when all CLIs resolve", () => {
+    const checks = checkDaemonToolPath({
+      daemonPath: GOOD_PATH,
+      resolveInPath: () => true,
+      smokeProbe: (cmd) => (cmd === "linearis" ? 127 : 0),
+    });
+    expect(checks[0].status).toBe(STATUS.FAIL);
+    expect(checks[0].detail).toContain("linearis");
+    expect(checks[0].detail).toContain("127");
+  });
+
+  it("does NOT FAIL on a non-127 exit (auth/network failure is not a strand)", () => {
+    const checks = checkDaemonToolPath({
+      daemonPath: GOOD_PATH,
+      resolveInPath: () => true,
+      smokeProbe: () => 1, // e.g. linearis ran but had no token
+    });
+    expect(checks[0].status).toBe(STATUS.PASS);
+  });
+
+  it("PASSes when all CLIs resolve and run without exit-127", () => {
+    const probed = [];
+    const checks = checkDaemonToolPath({
+      daemonPath: GOOD_PATH,
+      resolveInPath: () => true,
+      smokeProbe: (cmd) => { probed.push(cmd); return 0; },
+    });
+    expect(checks[0].status).toBe(STATUS.PASS);
+    // smoke-probes linearis + claude (node is resolution-only)
+    expect(probed).toEqual(["linearis", "claude"]);
   });
 });
 

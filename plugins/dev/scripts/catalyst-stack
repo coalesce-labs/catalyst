@@ -799,8 +799,17 @@ _stack_host_name() {
 
 # _stack_agent_path — PATH for the launchd job so it finds the catalyst CLIs,
 # bun/node, and git in launchd's otherwise-minimal environment.
+#
+# CTL-1289: include the member's npm/user prefix (~/.local/node/bin for node,
+# ~/.local/bin for linearis/claude). A `catalyst-join`-joined member installs
+# those CLIs under ~/.local; the launchd daemon shells out to them every tick
+# (reconcile → linearis, liveness snapshot → claude, linearis runtime → node),
+# so omitting these dirs makes every spawn exit-127 and the node strands
+# silently (frozen eligible set, freeSlots=0). Mirrors the proven join-shell
+# PATH order (catalyst-join.sh:719). Additive: the seed's homebrew/system tools
+# remain on PATH, and prepended member dirs that don't exist are a no-op.
 _stack_agent_path() {
-  printf '%s\n' "${HOME}/.catalyst/bin:${HOME}/.bun/bin:/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+  printf '%s\n' "${HOME}/.catalyst/bin:${HOME}/.local/node/bin:${HOME}/.local/bin:${HOME}/.bun/bin:/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 }
 
 # render_stack_plist <cmd> <interval> [host_name] — emit the LaunchAgent plist XML to stdout.
