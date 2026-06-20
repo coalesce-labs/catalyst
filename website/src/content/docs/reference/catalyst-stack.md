@@ -1,20 +1,24 @@
 ---
 title: catalyst-stack
-description: Reference for the catalyst-stack CLI — start, stop, restart, and hotpatch the four Catalyst services.
+description: Reference for the catalyst-stack CLI — start, stop, restart, and hotpatch the Catalyst service stack.
 sidebar:
   order: 10
 ---
 
-`catalyst-stack` is the canonical command for bringing the Catalyst service stack up and down. It starts the four services in dependency order and is idempotent — already-running services are left alone.
+`catalyst-stack` is the canonical command for bringing the Catalyst service stack up and down. It starts the services in dependency order and is idempotent — already-running services are left alone.
 
 ## Dependency order
 
 | Start order | Stop order |
 |-------------|------------|
-| mitmproxy (opt-in, `--proxy` only) | execution-core |
-| broker | monitor |
-| monitor | broker |
-| execution-core | mitmproxy |
+| mitmproxy (opt-in, `--proxy` only) | log-shipper |
+| monitor | execution-core |
+| broker | otel-forward |
+| execution-core | monitor |
+| otel-forward | broker |
+| log-shipper | mitmproxy |
+
+The core daemons start **monitor → broker → execution-core** (CTL-1084 known-good order; the daemon always comes up last), followed by `otel-forward` and the `log-shipper`. Once `install-services` is run, the log-shipper is supervised by its own launchd `KeepAlive` agent (see below), so `catalyst-stack` defers to launchd for it.
 
 ## Subcommands
 
@@ -24,9 +28,9 @@ sidebar:
 | `stop` | Stop all services in reverse order. |
 | `restart` | Stop then start. Accepts the same flags as `start`. |
 | `status` | Print running/stopped state for each service. |
-| `install-services` | Install a launchd LaunchAgent that auto-starts the stack on boot. macOS only. |
-| `uninstall-services` | Unload and remove the auto-start LaunchAgent (leaves running daemons up). |
-| `services-status` | Show whether the auto-start LaunchAgent is installed and loaded. |
+| `install-services` | Install the launchd LaunchAgents (stack keep-alive, thoughts-sync, log-shipper) that auto-start on boot. macOS only. |
+| `uninstall-services` | Unload and remove the auto-start LaunchAgents (leaves running daemons up). |
+| `services-status` | Show whether the auto-start LaunchAgents are installed and loaded. |
 
 ## Flags
 
@@ -86,18 +90,23 @@ plugins/dev/scripts/setup-plugin-source.sh [--path DIR] [--repo-url URL] [--forc
 
 ### `install-services` / `uninstall-services` / `services-status`
 
-Auto-start the stack on boot via a single launchd LaunchAgent
-(`ai.coalesce.catalyst-stack`), so a reboot never leaves the fleet down.
+Auto-start the stack on boot via **three** launchd LaunchAgents — the stack keep-alive
+(`ai.coalesce.catalyst-stack`), the thoughts-sync agent
+(`ai.coalesce.catalyst-thoughts-sync`, which fast-forwards your thoughts checkouts so
+research agents read fresh peer state), and the log-shipper
+(`ai.coalesce.catalyst-log-shipper`, which supervises Grafana Alloy with `KeepAlive`) —
+so a reboot never leaves the fleet down.
 
 ```bash
-catalyst-stack install-services                 # write + load the agent
-catalyst-stack install-services --interval 300  # keep-alive cadence in seconds (default 600)
-catalyst-stack install-services --print         # print the plist to stdout, install nothing
-catalyst-stack services-status                  # installed? loaded?
-catalyst-stack uninstall-services               # unload + remove (running daemons stay up)
+catalyst-stack install-services                     # write + load all three agents
+catalyst-stack install-services --interval 300      # stack keep-alive cadence, seconds (default 600)
+catalyst-stack install-services --sync-interval 120 # thoughts-sync cadence, seconds (default 300)
+catalyst-stack install-services --print             # print the plists to stdout, install nothing
+catalyst-stack services-status                      # installed? loaded?
+catalyst-stack uninstall-services                   # unload + remove all three (running daemons stay up)
 ```
 
-The agent runs `catalyst-stack start` at login (`RunAtLoad`) and every `--interval`
+The stack agent runs `catalyst-stack start` at login (`RunAtLoad`) and every `--interval`
 seconds. Because `start` is ordered (monitor → broker → execution-core) and no-ops a
 running service, the agent never double-starts and self-heals a daemon that died
 between intervals. It is a **per-user LaunchAgent** (the stack runs as you, with
