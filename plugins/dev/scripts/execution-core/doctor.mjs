@@ -945,6 +945,130 @@ export function checkWebhookIngestion(deps = {}) {
   ];
 }
 
+// ─── Phase 5d: Thoughts provisioning (CTL-1293) ──────────────────────────────
+
+// A cluster MEMBER is a full worker: research/learnings/handoffs must sync to
+// peers via the HumanLayer thoughts repo. A half-provisioned thoughts layer
+// strands silently — worse, a missing/legacy humanlayer.json falls back to a
+// FOREIGN repo (groundworkapp / rightsite-cloud), polluting it with catalyst
+// thoughts. This check gates severity on multiHost (a single-host node has no
+// peers to sync to, so thoughts-push is not activation-gating — matches the
+// webhook gate). On a multiHost member it FAILs loudly when humanlayer.json is
+// absent, resolves to a foreign primary, has empty repoMappings (bg agents then
+// fall back to a global/phantom repo), or the primary clone is missing.
+
+function defaultReadHumanlayer() {
+  try {
+    const p = resolve(homedir(), ".config", "humanlayer", "humanlayer.json");
+    return JSON.parse(readFileSync(p, "utf8"));
+  } catch {
+    return null;
+  }
+}
+
+function defaultThoughtsCloneOk(dir) {
+  try {
+    if (!existsSync(resolve(dir, ".git"))) return false;
+    execFileSync("git", ["-C", dir, "rev-parse", "--verify", "-q", "HEAD"], {
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export function checkThoughts(deps = {}) {
+  const {
+    resolveRoster = resolveClusterHosts,
+    readHumanlayer = defaultReadHumanlayer,
+    cloneOk = defaultThoughtsCloneOk,
+  } = deps;
+
+  const roster = resolveRoster();
+  if (!roster?.multiHost) {
+    return [
+      mkCheck(
+        "thoughts",
+        STATUS.PASS,
+        "single-host node — thoughts peer-sync not activation-gating",
+      ),
+    ];
+  }
+
+  const hl = readHumanlayer();
+  const t = hl?.thoughts;
+  if (!t || typeof t !== "object") {
+    return [
+      mkCheck(
+        "thoughts",
+        STATUS.FAIL,
+        "~/.config/humanlayer/humanlayer.json absent or has no .thoughts — a member's research/learnings/handoffs won't sync",
+      ),
+    ];
+  }
+
+  const checks = [];
+  const thoughtsRepo = typeof t.thoughtsRepo === "string" ? t.thoughtsRepo : "";
+  const defaultProfile = typeof t.defaultProfile === "string" ? t.defaultProfile : "";
+
+  // Pollution guard: primary must be coalesce-labs, NEVER a foreign repo. The
+  // global thoughtsRepo fallback defaulting to groundworkapp/rightsite-cloud is
+  // the exact pollution bug (locked invariant: provision-thoughts-invariant.test.sh).
+  if (/groundworkapp|rightsite-cloud/i.test(thoughtsRepo) || /groundworkapp|rightsite-cloud/i.test(defaultProfile)) {
+    checks.push(
+      mkCheck(
+        "thoughts-primary",
+        STATUS.FAIL,
+        `humanlayer.json primary resolves to a FOREIGN repo (thoughtsRepo="${thoughtsRepo}", defaultProfile="${defaultProfile}") — pollutes groundworkapp/rightsite-cloud; must be coalesce-labs`,
+      ),
+    );
+  } else if (/coalesce-labs/i.test(thoughtsRepo) || defaultProfile === "coalesce-labs") {
+    checks.push(mkCheck("thoughts-primary", STATUS.PASS, "humanlayer.json primary = coalesce-labs"));
+  } else {
+    checks.push(
+      mkCheck(
+        "thoughts-primary",
+        STATUS.WARN,
+        `humanlayer.json primary unrecognized (thoughtsRepo="${thoughtsRepo}", defaultProfile="${defaultProfile}")`,
+      ),
+    );
+  }
+
+  // repoMappings non-empty — headless bg agents resolve their thoughts repo from
+  // this map (no direnv); empty → global/phantom-repo fallback.
+  const mappings = t.repoMappings;
+  const mappingCount =
+    mappings && typeof mappings === "object" && !Array.isArray(mappings)
+      ? Object.keys(mappings).length
+      : 0;
+  checks.push(
+    mappingCount > 0
+      ? mkCheck("thoughts-repo-mappings", STATUS.PASS, `repoMappings present (${mappingCount})`)
+      : mkCheck(
+          "thoughts-repo-mappings",
+          STATUS.FAIL,
+          "humanlayer.json repoMappings empty — headless bg agents fall back to a global/phantom repo",
+        ),
+  );
+
+  // Primary clone present (members keep it under ~/catalyst/hlt/<org>/thoughts;
+  // the seed's embedded-clone layout doesn't, so scope this to the hlt/ layout).
+  if (thoughtsRepo.includes("/hlt/")) {
+    checks.push(
+      cloneOk(thoughtsRepo)
+        ? mkCheck("thoughts-clone", STATUS.PASS, "primary thoughts clone present with a valid HEAD")
+        : mkCheck(
+            "thoughts-clone",
+            STATUS.FAIL,
+            `primary thoughts clone missing or corrupt at ${thoughtsRepo} — read-only/partial strand`,
+          ),
+    );
+  }
+
+  return checks;
+}
+
 // ─── Phase 6: Renderer, exit code, runDoctor ─────────────────────────────────
 
 // summarize — aggregate check results into counts.
@@ -1033,6 +1157,7 @@ export async function runDoctor(opts = {}) {
     () => checkSecretsHygiene(),
     () => checkDaemonToolPath(), // CTL-1289: daemon launchd PATH resolves linearis/node/claude
     () => checkWebhookIngestion(), // CTL-1284: multiHost member ingests webhooks; single-host does not
+    () => checkThoughts(), // CTL-1293: member thoughts repo provisioned + non-foreign primary
   ];
 
   const fns = checkFns ?? defaultChecks;

@@ -532,12 +532,25 @@ do_provision_thoughts() {
   fi
   # provision-thoughts failed — usually push-auth (an M2 precondition), not the
   # clone. If the primary thoughts repo is present AND has a usable HEAD (a real
-  # read-OK clone, not a partial/interrupted one), a Stage-0 SHADOW node can
-  # proceed; push auth must be verified-green before M2 activation. Else fail.
+  # read-OK clone, not a partial/interrupted one), severity depends on whether
+  # this node will own work.
   local primary="${CATALYST_DIR:-$HOME/catalyst}/hlt/coalesce-labs/thoughts"
   if [[ -d "$primary/.git" ]] && git -C "$primary" rev-parse --verify -q HEAD >/dev/null 2>&1; then
-    warn "provision-thoughts: clone OK but push-auth/verify incomplete — acceptable for Stage-0 SHADOW."
-    warn "Configure CATALYST_JOIN_GITHUB_TOKEN (or 'gh auth login') and re-run before M2 activation."
+    # CTL-1293: a multiHost MEMBER (roster>1) WILL own HRW work, and a worker
+    # that can't push thoughts strands its research/learnings/handoffs (peers
+    # never see them) — so an unverified push is a HARD blocker, not a warning.
+    # A single-host / Stage-0 SHADOW node (roster<=1) owns no work and has no
+    # peers to sync to, so it may warn-and-proceed. The previous unconditional
+    # "acceptable for SHADOW" downgrade was the silent strand.
+    local pt_roster_len
+    pt_roster_len="$(echo "$BUNDLE_JSON" | jq '(.hostsRoster // []) | length' 2>/dev/null)"
+    if [[ "${pt_roster_len:-0}" -gt 1 ]]; then
+      fail "provision-thoughts: clone OK but push-auth UNVERIFIED on a multiHost member (roster=${pt_roster_len})."
+      fail "A member that owns work MUST sync thoughts to peers. Set CATALYST_JOIN_GITHUB_TOKEN (or 'gh auth login') and re-run."
+      return 1
+    fi
+    warn "provision-thoughts: clone OK but push-auth/verify incomplete — acceptable for single-host/Stage-0 SHADOW."
+    warn "Configure CATALYST_JOIN_GITHUB_TOKEN (or 'gh auth login') and re-run before activating as a member."
     return 0
   fi
   fail "provision-thoughts failed before a usable primary thoughts clone. Check GitHub auth / network."

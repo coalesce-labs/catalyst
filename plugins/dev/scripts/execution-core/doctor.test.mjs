@@ -15,6 +15,7 @@ import {
   checkSecretsHygiene,
   checkDaemonToolPath,
   checkWebhookIngestion,
+  checkThoughts,
   summarize,
   renderJson,
   renderHuman,
@@ -663,6 +664,84 @@ describe("checkWebhookIngestion", () => {
     });
     expect(checks[0].status).toBe(STATUS.PASS);
     expect(checks[0].detail).toContain("linear keys=2");
+  });
+});
+
+// ─── Phase 5d: checkThoughts (CTL-1293) ──────────────────────────────────────
+
+describe("checkThoughts", () => {
+  const single = () => ({ hosts: ["mini"], source: "single-host", multiHost: false });
+  const multi = () => ({ hosts: ["mini", "mini-2"], source: "cluster-repo", multiHost: true });
+  const cleanHl = () => ({
+    thoughts: {
+      thoughtsRepo: "/Users/x/catalyst/hlt/coalesce-labs/thoughts",
+      defaultProfile: "coalesce-labs",
+      repoMappings: { "/Users/x/repo": { repo: "catalyst-workspace", profile: "coalesce-labs" } },
+    },
+  });
+  const okClone = () => true;
+
+  const verdict = (checks, name) => checks.find((c) => c.name === name)?.status;
+
+  it("PASSes a single-host node regardless of thoughts state (not gating)", () => {
+    const checks = checkThoughts({ resolveRoster: single, readHumanlayer: () => null });
+    expect(checks[0].name).toBe("thoughts");
+    expect(checks[0].status).toBe(STATUS.PASS);
+    expect(checks[0].detail).toContain("single-host");
+  });
+
+  it("FAILs a multiHost member with no humanlayer.json", () => {
+    const checks = checkThoughts({ resolveRoster: multi, readHumanlayer: () => null });
+    expect(checks[0].status).toBe(STATUS.FAIL);
+    expect(checks[0].detail).toContain("humanlayer.json");
+  });
+
+  it("FAILs a multiHost member whose primary resolves to a foreign repo (groundworkapp guard)", () => {
+    const checks = checkThoughts({
+      resolveRoster: multi,
+      readHumanlayer: () => ({
+        thoughts: {
+          thoughtsRepo: "/Users/x/catalyst/hlt/groundworkapp/thoughts",
+          defaultProfile: "rightsite-cloud",
+          repoMappings: { "/r": { repo: "x", profile: "rightsite-cloud" } },
+        },
+      }),
+      cloneOk: okClone,
+    });
+    expect(verdict(checks, "thoughts-primary")).toBe(STATUS.FAIL);
+    expect(checks.find((c) => c.name === "thoughts-primary").detail).toMatch(/foreign|groundworkapp/i);
+  });
+
+  it("FAILs a multiHost member with empty repoMappings", () => {
+    const checks = checkThoughts({
+      resolveRoster: multi,
+      readHumanlayer: () => ({
+        thoughts: {
+          thoughtsRepo: "/Users/x/catalyst/hlt/coalesce-labs/thoughts",
+          defaultProfile: "coalesce-labs",
+          repoMappings: {},
+        },
+      }),
+      cloneOk: okClone,
+    });
+    expect(verdict(checks, "thoughts-repo-mappings")).toBe(STATUS.FAIL);
+  });
+
+  it("FAILs a multiHost member whose primary hlt clone is missing", () => {
+    const checks = checkThoughts({
+      resolveRoster: multi,
+      readHumanlayer: cleanHl,
+      cloneOk: () => false,
+    });
+    expect(verdict(checks, "thoughts-clone")).toBe(STATUS.FAIL);
+  });
+
+  it("PASSes a fully-provisioned multiHost member", () => {
+    const checks = checkThoughts({ resolveRoster: multi, readHumanlayer: cleanHl, cloneOk: okClone });
+    expect(verdict(checks, "thoughts-primary")).toBe(STATUS.PASS);
+    expect(verdict(checks, "thoughts-repo-mappings")).toBe(STATUS.PASS);
+    expect(verdict(checks, "thoughts-clone")).toBe(STATUS.PASS);
+    expect(checks.every((c) => c.status === STATUS.PASS)).toBe(true);
   });
 });
 

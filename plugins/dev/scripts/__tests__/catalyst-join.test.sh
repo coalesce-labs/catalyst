@@ -671,6 +671,45 @@ run "T2.9 single-host roster OMITS webhook block — double-dispatch guard (CTL-
   # monitor block must be absent (or at least carry no smeeChannel)
   ! jq -e '.catalyst.monitor.github.smeeChannel // empty | length > 0' \"\$cfg\" >/dev/null"
 
+# T2.10 / T2.11: (CTL-1293) provision-thoughts that CLONES OK but fails push-auth
+# is FATAL on a multiHost member (roster>1 owns work → must sync thoughts to
+# peers) but warn-and-proceed on a single-host / Stage-0 SHADOW node.
+PT_CLONE_PUSHFAIL_STUB="${STUBS2}/stub-provision-thoughts-pushfail.sh"
+cat > "$PT_CLONE_PUSHFAIL_STUB" <<'EOF'
+#!/usr/bin/env bash
+# Simulate the read-only strand: primary clone present + valid HEAD, exit non-zero.
+prim="${CATALYST_DIR}/hlt/coalesce-labs/thoughts"
+mkdir -p "$prim"
+git -C "$prim" init -q
+git -C "$prim" -c user.email=t@example.com -c user.name=t commit -q --allow-empty -m init
+exit 1
+EOF
+chmod +x "$PT_CLONE_PUSHFAIL_STUB"
+
+run "T2.10 multiHost member: clone-OK + push-fail is FATAL (CTL-1293)" bash -c "
+  env -i HOME='${SCRATCH}/h210' CATALYST_DIR='${SCRATCH}/c210' \
+    CATALYST_JOIN_TOKEN='$GOOD_TOKEN' \
+    CATALYST_JOIN_SETUP_SCRIPT='${STUBS2}/stub-setup-catalyst.sh' \
+    CATALYST_JOIN_INSTALL_CLI_SCRIPT='${STUBS2}/stub-install-cli.sh' \
+    CATALYST_JOIN_PLUGIN_SRC_SCRIPT='${STUBS2}/stub-setup-plugin-source.sh' \
+    CATALYST_JOIN_PROVISION_THOUGHTS_SCRIPT='$PT_CLONE_PUSHFAIL_STUB' \
+    CATALYST_JOIN_STACK_BIN='${STUBS2}/stub-catalyst-stack' \
+    CATALYST_JOIN_DOCTOR_SCRIPT='${STUBS2}/stub-check-setup.sh' \
+    CATALYST_JOIN_REACH_PROBE='${STUBS2}/stub-reach-probe.sh' \
+    bash '$JOIN' --bundle '$MULTIHOST_WH_BUNDLE' >/dev/null 2>&1; [[ \$? -ne 0 ]]"
+
+run "T2.11 single-host node: clone-OK + push-fail warns and proceeds (CTL-1293)" bash -c "
+  env -i HOME='${SCRATCH}/h211' CATALYST_DIR='${SCRATCH}/c211' \
+    CATALYST_JOIN_TOKEN='$GOOD_TOKEN' \
+    CATALYST_JOIN_SETUP_SCRIPT='${STUBS2}/stub-setup-catalyst.sh' \
+    CATALYST_JOIN_INSTALL_CLI_SCRIPT='${STUBS2}/stub-install-cli.sh' \
+    CATALYST_JOIN_PLUGIN_SRC_SCRIPT='${STUBS2}/stub-setup-plugin-source.sh' \
+    CATALYST_JOIN_PROVISION_THOUGHTS_SCRIPT='$PT_CLONE_PUSHFAIL_STUB' \
+    CATALYST_JOIN_STACK_BIN='${STUBS2}/stub-catalyst-stack' \
+    CATALYST_JOIN_DOCTOR_SCRIPT='${STUBS2}/stub-check-setup.sh' \
+    CATALYST_JOIN_REACH_PROBE='${STUBS2}/stub-reach-probe.sh' \
+    bash '$JOIN' --bundle '$SINGLEHOST_WH_BUNDLE' >/dev/null 2>&1"
+
 # ── Phase 3: Provisioner orchestration ────────────────────────────────────────
 
 echo ""
