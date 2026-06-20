@@ -24,12 +24,18 @@ export const PUSH_SUPPORTED: boolean =
 
 // Co-located with the hook; not exported from the barrel so knip is satisfied
 // by the test import.
-export function base64UrlToUint8Array(base64UrlString: string): Uint8Array {
+// Returns a Uint8Array explicitly backed by a (non-shared) ArrayBuffer so it
+// satisfies BufferSource for PushManager.subscribe's applicationServerKey under
+// TS 5.8+'s generic typed-array lib (Uint8Array<ArrayBufferLike> would not be
+// assignable, since ArrayBufferLike admits SharedArrayBuffer).
+export function base64UrlToUint8Array(
+  base64UrlString: string,
+): Uint8Array<ArrayBuffer> {
   // base64url → base64: replace URL-safe chars, then pad to a multiple of 4.
   const base64 = base64UrlString.replace(/-/g, "+").replace(/_/g, "/");
   const padded = base64 + "=".repeat((4 - (base64.length % 4)) % 4);
   const raw = atob(padded);
-  const bytes = new Uint8Array(raw.length);
+  const bytes = new Uint8Array(new ArrayBuffer(raw.length));
   for (let i = 0; i < raw.length; i++) {
     bytes[i] = raw.charCodeAt(i);
   }
@@ -38,18 +44,18 @@ export function base64UrlToUint8Array(base64UrlString: string): Uint8Array {
 
 // ── Hook ──────────────────────────────────────────────────────────────────────
 
-export type PushPushNotificationPermission = "default" | "granted" | "denied";
+export type PushNotificationPermission = "default" | "granted" | "denied";
 
 export interface UsePushSubscriptionResult {
   supported: boolean;
-  permission: PushPushNotificationPermission;
+  permission: PushNotificationPermission;
   subscribed: boolean;
   enable(): Promise<void>;
   error: string | null;
 }
 
 export function usePushSubscription(): UsePushSubscriptionResult {
-  const [permission, setPermission] = useState<PushPushNotificationPermission>(
+  const [permission, setPermission] = useState<PushNotificationPermission>(
     PUSH_SUPPORTED
       ? (Notification.permission as PushNotificationPermission)
       : "default",

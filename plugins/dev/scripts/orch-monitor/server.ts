@@ -2,7 +2,7 @@ import { join, resolve as resolvePath, sep, dirname, basename } from "path";
 import { realpathSync, readFileSync, writeFileSync, unlinkSync, existsSync, mkdirSync } from "fs";
 // CTL-1167: PWA push notifications — VAPID key loader + subscription store
 // + notification filter (shared with the SSE stream + push bridge).
-import { loadOrCreateVapidKeys } from "./lib/vapid";
+import { loadOrCreateVapidKeys, type VapidKeys } from "./lib/vapid";
 import webpush from "web-push";
 import * as pushStore from "./lib/push-subscriptions";
 import {
@@ -837,16 +837,30 @@ export function createServer(opts: CreateServerOptions): BunServer {
   }
 
   // CTL-1167: VAPID keys + push-subscriptions store init.
-  const pushSubsDbPath =
-    pushSubscriptionsDbPath ?? `${CATALYST_DIR}/push-subscriptions.db`;
-  const vapidPath = vapidKeysPath ?? `${CATALYST_DIR}/vapid-keys.json`;
-  const vapidKeys = loadOrCreateVapidKeys(vapidPath);
-  pushStore.openDb(pushSubsDbPath);
-  webpush.setVapidDetails(
-    "mailto:catalyst@localhost",
-    vapidKeys.publicKey,
-    vapidKeys.privateKey,
-  );
+  // Gated so push only initializes when the caller has actually configured it:
+  // either the server-side bridge is enabled (the default for the real monitor)
+  // or the caller supplied explicit push paths (the push-endpoint tests). The
+  // many createServer callers that pass no push options at all (most route
+  // tests) skip this entirely — they neither write a vapid-keys.json into a
+  // possibly-missing CATALYST_DIR nor open the module-level push-subscriptions
+  // singleton, which would otherwise leak across tests in one `bun test` run.
+  const pushConfigured =
+    pushBridgeOpt !== false ||
+    vapidKeysPath != null ||
+    pushSubscriptionsDbPath != null;
+  let vapidKeys: VapidKeys | null = null;
+  if (pushConfigured) {
+    const pushSubsDbPath =
+      pushSubscriptionsDbPath ?? `${CATALYST_DIR}/push-subscriptions.db`;
+    const vapidPath = vapidKeysPath ?? `${CATALYST_DIR}/vapid-keys.json`;
+    vapidKeys = loadOrCreateVapidKeys(vapidPath);
+    pushStore.openDb(pushSubsDbPath);
+    webpush.setVapidDetails(
+      "mailto:catalyst@localhost",
+      vapidKeys.publicKey,
+      vapidKeys.privateKey,
+    );
+  }
 
   // CTL-1100: in-process LRU cache for /api/beliefs/rates (keyed by max tick_id,
   // cap RATES_LRU_CAP=64; beliefs are insert-only so the cached value per max tick
@@ -3985,8 +3999,12 @@ export function createServer(opts: CreateServerOptions): BunServer {
         }
 
         // CTL-1167: serve the VAPID public key so the browser can build the
-        // applicationServerKey for pushManager.subscribe().
+        // applicationServerKey for pushManager.subscribe(). 503 when push was
+        // never initialized for this server instance (push not configured).
         if (url.pathname === "/api/notifications/vapid-public-key") {
+          if (!vapidKeys) {
+            return new Response("push not configured", { status: 503 });
+          }
           return new Response(vapidKeys.publicKey, {
             headers: { "Content-Type": "text/plain" },
           });
@@ -3996,6 +4014,9 @@ export function createServer(opts: CreateServerOptions): BunServer {
         // serialised PushSubscription JSON from the browser). Returns 201 on
         // success; 400 on missing/invalid fields.
         if (url.pathname === "/api/notifications/subscribe" && req.method === "POST") {
+          if (!vapidKeys) {
+            return new Response("push not configured", { status: 503 });
+          }
           let body: unknown;
           try {
             body = await req.json();
@@ -4051,10 +4072,31 @@ export function createServer(opts: CreateServerOptions): BunServer {
           };
           const notifStream = new ReadableStream<Uint8Array>({
             async start(controller) {
-              unsubNotif = boardSnapshot.subscribe((snap) => {
-                void toProjectorBoard(snap).then((pb) =>
-                  emitNotifications(controller, pb),
+              // Emit an immediate `open` frame so the connection is live even
+              // when the fleet yields no notifications. Without a first chunk,
+              // Bun does not resolve fetch()'s response headers (the client —
+              // and the route tests — would hang). Mirrors /api/beliefs/stream.
+              try {
+                controller.enqueue(
+                  encoder.encode(
+                    `event: open\ndata: ${JSON.stringify({ source: "notifications" })}\n\n`,
+                  ),
                 );
+              } catch {
+                closedNotif = true;
+                return;
+              }
+              unsubNotif = boardSnapshot.subscribe((snap) => {
+                // Fire-and-forget projection: a rejected chain here would become
+                // an unhandled rejection (and stall bun:test), so swallow it.
+                void toProjectorBoard(snap)
+                  .then((pb) => emitNotifications(controller, pb))
+                  .catch((err) => {
+                    console.error(
+                      `[server] notifications stream projection failed:`,
+                      err,
+                    );
+                  });
               });
               try {
                 emitNotifications(
@@ -4478,9 +4520,19 @@ export function createServer(opts: CreateServerOptions): BunServer {
       store: pushStore,
       projector: createNotificationProjector(),
     });
-    boardSnapshot.subscribe((snap) => {
-      void toProjectorBoard(snap).then((pb) => bridge.onBoard(pb));
-    });
+    // Register the unsubscribe so server.stop() tears the bridge down BEFORE it
+    // calls pushStore.closeDb(). Otherwise an orphaned board subscription on the
+    // process-global event bus fires after the singleton db is closed and throws
+    // "Database not opened" as an unhandled rejection (it would stall bun:test).
+    unsubscribers.push(
+      boardSnapshot.subscribe((snap) => {
+        void toProjectorBoard(snap)
+          .then((pb) => bridge.onBoard(pb))
+          .catch((err) => {
+            console.error("[server] push bridge onBoard failed:", err);
+          });
+      }),
+    );
   }
 
   if (webhookConfig && webhookHandler) {

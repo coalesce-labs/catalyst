@@ -1,5 +1,12 @@
 import webpush from "web-push";
-import { existsSync, readFileSync, writeFileSync, chmodSync } from "fs";
+import {
+  existsSync,
+  readFileSync,
+  writeFileSync,
+  chmodSync,
+  mkdirSync,
+} from "fs";
+import { dirname } from "path";
 
 export interface VapidKeys {
   publicKey: string;
@@ -20,6 +27,9 @@ export function loadOrCreateVapidKeys(path: string): VapidKeys {
     return parsed as VapidKeys;
   }
   const keys = webpush.generateVAPIDKeys();
+  // Ensure the parent dir exists (e.g. a fresh host where ~/catalyst has not
+  // been created yet) so the first write does not throw ENOENT.
+  mkdirSync(dirname(path), { recursive: true });
   writeFileSync(path, JSON.stringify(keys), { mode: 0o600 });
   // Explicitly chmod after write in case the process umask widened permissions.
   chmodSync(path, 0o600);
