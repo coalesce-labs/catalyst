@@ -110,6 +110,9 @@ function normalizeTicket(node) {
     parent: node.parent?.identifier ?? node.parent ?? null,
     relations: node.relations ?? { nodes: [] },
     inverseRelations: node.inverseRelations ?? { nodes: [] },
+    // CTL-1174: delegate defaults null from linearis (linearis cannot read delegate).
+    // The batched GraphQL enrichment in runEligibleQuery overwrites this.
+    delegate: node.delegate?.id ?? node.delegate ?? null,
   };
 }
 
@@ -479,15 +482,52 @@ export function classifyTicketResolution(
 // fetchTicketAssignee — the CTL-781 respect-assignment read: the ticket's
 // current assignee UUID (or null = unassigned), gateway-first so the hot
 // new-work predicate is rate-free, live `linearis issues read` on a miss.
-// Tri-state return so callers can distinguish "known unassigned" from
-// "couldn't read": { known: true, assignee: string|null } | { known: false }.
-// A not-removed descriptor is trusted regardless of age (the assignment gate
-// is rate-free by design; a stale miss is corrected by the future Reconciler).
-export function fetchTicketAssignee(identifier, { exec = defaultExec, gateway } = {}) {
+// CTL-1174: extends the return shape to include `delegate` when a gateway is
+// provided. Gateway hit: { known:true, assignee, delegate } (delegate coerced
+// undefined→null for pre-Phase-1 DBs). Gateway miss: live assignee read +
+// injected fetchDelegate (default fetchTicketDelegate) — a failed delegate read
+// returns { known:false } (HOLD) so an unknown delegate never triggers a
+// claim. Cost bound: fetchDelegate is NOT called when the assignee read fails.
+// When no gateway is provided the old { known, assignee } shape is returned
+// (back-compat for callers that do not wire the gateway, e.g. CLI tools).
+export function fetchTicketAssignee(
+  identifier,
+  { exec = defaultExec, gateway, fetchDelegate = fetchTicketDelegate } = {}
+) {
   if (gateway) {
     const d = gateway.getDescriptor(identifier);
-    if (d && !d.removed) return { known: true, assignee: d.assignee ?? null };
+    if (d && !d.removed) {
+      const cachedDelegate = d.delegate === undefined ? null : d.delegate;
+      // CTL-1174 LATCH FIX: a cached delegate of null is indistinguishable from
+      // "never projected into the broker store" — and the store is NEVER written
+      // with the orchestrator's own self-delegation (the webhook fold is dormant +
+      // bot-suppressed; cache-reconcile + the eligible batch don't read delegate).
+      // Returning cached-null here makes the delegate-on-Todo gate re-delegate
+      // forever and never observe its own write. So on a cached NULL delegate,
+      // CONFIRM LIVE before treating it as undelegated; a non-null cached delegate
+      // is authoritative (only an actor sets it) and stays rate-free.
+      if (cachedDelegate !== null) {
+        return { known: true, assignee: d.assignee ?? null, delegate: cachedDelegate };
+      }
+      const drHit = fetchDelegate(identifier);
+      if (!drHit.known) return { known: false }; // unreadable → HOLD (never claim on unknown)
+      return { known: true, assignee: d.assignee ?? null, delegate: drHit.delegate ?? null };
+    }
+    // Gateway miss: live read for assignee, then delegate.
+    const { code, stdout } = exec("linearis", ["issues", "read", identifier]);
+    if (code !== 0) return { known: false };
+    let assignee;
+    try {
+      const node = JSON.parse(stdout);
+      assignee = node?.assignee?.id ?? null;
+    } catch {
+      return { known: false };
+    }
+    const dr = fetchDelegate(identifier);
+    if (!dr.known) return { known: false };
+    return { known: true, assignee, delegate: dr.delegate ?? null };
   }
+  // No gateway: old behavior — live read only, no delegate (back-compat).
   const { code, stdout } = exec("linearis", ["issues", "read", identifier]);
   if (code !== 0) return { known: false };
   try {
@@ -505,6 +545,22 @@ export function fetchTicketAssignee(identifier, { exec = defaultExec, gateway } 
 export function isAssigneeClaimable(assignee, botUserIds) {
   if (assignee == null) return true;
   return botUserIds instanceof Set && botUserIds.has(assignee);
+}
+
+// isClaimable — CTL-1174 (delegate-ONLY claim predicate). The human ASSIGNEE is
+// IRRELEVANT: a Linear bot can never BE an assignee (app-user UUIDs route to
+// Issue.delegate; assigning one returns HTTP 400 "App user not valid"), so a
+// human always holds the assignee and gating on it permanently starves the
+// board (CTL-781's stopgap). A ticket is the daemon's to claim IFF it is
+// DELEGATED to the orchestrator bot.
+//   claimable iff delegate ∈ bot-ids
+// An UNDELEGATED ticket (delegate == null/undefined) is NOT claimable here — it
+// is first delegated by the delegate-on-Todo step at the call sites (which then
+// makes this gate pass next reconcile). The `assignee` arg is retained for
+// call-site/signature compatibility but is deliberately unused.
+export function isClaimable(assignee, delegate, botUserIds) {
+  const d = delegate === undefined ? null : delegate;
+  return d != null && botUserIds instanceof Set && botUserIds.has(d);
 }
 
 // CTL-1173: raw GraphQL read for Issue.delegate.id — Linear routes an app-user
@@ -567,11 +623,120 @@ export function fetchTicketDelegate(identifier, { runQuery = runDelegateOnce } =
   return { known: true, delegate: nodes[0]?.delegate?.id ?? null };
 }
 
+// CTL-1174: batched delegate fetch for the eligible-set enrichment path.
+// One GraphQL POST per ≤250-ticket chunk, team-scoped via team key + ticket
+// numbers. Mirrors the CTL-784 BATCH_QUERY / defaultBatchExec pattern.
+// Open Question #2: `number: { in: [...] }` is unverified — if unsupported,
+// exec returns null and the fail-safe collapses to an empty Map (AC#2 not met
+// but no crash, no churn). Confirm via the Phase 10 live-API check.
+const DELEGATE_BATCH_QUERY = `query CtlDelegateBatch($team: String!, $nums: [Float!]) {
+  issues(filter: { team: { key: { eq: $team } }, number: { in: $nums } }, first: ${BATCH_CHUNK_SIZE}) {
+    nodes { identifier delegate { id } }
+  }
+}`;
+
+// buildDelegateBatchCurlArgs — same curl argv skeleton as buildBatchCurlArgs;
+// payload uses team + numeric ticket numbers parsed from identifiers.
+export function buildDelegateBatchCurlArgs(team, identifiers, { token = "", ca } = {}) {
+  const nums = (identifiers ?? [])
+    .map((id) => { const m = /^([A-Za-z][A-Za-z0-9]*)-(\d+)$/.exec(id ?? ""); return m ? Number(m[2]) : null; })
+    .filter((n) => n !== null);
+  const payload = JSON.stringify({ query: DELEGATE_BATCH_QUERY, variables: { team, nums } });
+  const caArgs = ca && existsSync(ca) ? ["--cacert", ca] : [];
+  const args = [
+    "-sS",
+    "--max-time",
+    "30",
+    ...caArgs,
+    "-X",
+    "POST",
+    LINEAR_GRAPHQL_ENDPOINT,
+    "-H",
+    `Authorization: ${authHeader(token)}`,
+    "-H",
+    "Content-Type: application/json",
+    "-w",
+    "\n%{http_code}",
+    "--data",
+    "@-",
+  ];
+  return { args, payload };
+}
+
+function runDelegateBatchOnce(team, identifiers) {
+  const token = process.env.LINEAR_API_TOKEN ?? process.env.LINEAR_API_KEY ?? "";
+  const { args, payload } = buildDelegateBatchCurlArgs(team, identifiers, {
+    token,
+    ca: process.env.NODE_EXTRA_CA_CERTS,
+  });
+  const res = spawnSync("curl", args, { input: payload, encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
+  if (res.status !== 0) {
+    return { nodes: null, auth: false, ratelimit: false, curlFailed: true };
+  }
+  const out = res.stdout ?? "";
+  const nl = out.lastIndexOf("\n");
+  const httpCode = Number(out.slice(nl + 1).trim());
+  const body = out.slice(0, Math.max(0, nl));
+  if (httpCode === 401) return { nodes: null, auth: true, ratelimit: false, curlFailed: false };
+  if (httpCode === 429) return { nodes: null, auth: false, ratelimit: true, curlFailed: false };
+  let parsed;
+  try {
+    parsed = JSON.parse(body);
+  } catch {
+    return { nodes: null, auth: false, ratelimit: false, curlFailed: false };
+  }
+  if (parsed?.errors) {
+    const auth = isBatchAuthError(parsed.errors);
+    const ratelimit = !auth && isBatchRateLimited(parsed.errors);
+    return { nodes: null, auth, ratelimit, curlFailed: false };
+  }
+  return { nodes: parsed?.data?.issues?.nodes ?? [], auth: false, ratelimit: false, curlFailed: false };
+}
+
+// defaultDelegateBatchExec — CTL-1174. Clone of defaultBatchExec for the
+// delegate-batch path: same linearBreaker short-circuit, same auth-retry via
+// linearReminter, same 429 → recordRateLimited. Returns nodes[] or null.
+function defaultDelegateBatchExec(team, identifiers) {
+  if (linearBreaker.isOpen()) return null;
+  let r = runDelegateBatchOnce(team, identifiers);
+  if (r.auth && linearReminter.attempt()) r = runDelegateBatchOnce(team, identifiers);
+  if (r.ratelimit) { linearBreaker.recordRateLimited(); return null; }
+  if (r.nodes == null) return null;
+  linearBreaker.recordSuccess();
+  return r.nodes;
+}
+
+// fetchTicketsDelegateBatch — CTL-1174. Resolve `delegate.id` for a set of
+// identifiers in one or more batched GraphQL POSTs. Returns
+// Map<identifier, string|null>. Absent (not returned) ids are NOT in the Map
+// so callers can distinguish "no delegate found" from "delegate is null".
+// Fail-safe: a null chunk result keeps those ids absent; never throws.
+export function fetchTicketsDelegateBatch(team, identifiers, { exec = defaultDelegateBatchExec } = {}) {
+  const ids = [...new Set((identifiers ?? []).filter(Boolean))];
+  const result = new Map();
+  if (!team || ids.length === 0) return result;
+  for (let i = 0; i < ids.length; i += BATCH_CHUNK_SIZE) {
+    const chunk = ids.slice(i, i + BATCH_CHUNK_SIZE);
+    const nodes = exec(team, chunk);
+    if (!nodes) continue; // fail-safe: these ids stay absent from the Map
+    for (const node of nodes) {
+      if (node?.identifier) {
+        result.set(node.identifier, node.delegate?.id ?? null);
+      }
+    }
+  }
+  return result;
+}
+
 // runEligibleQuery — run the query, parse + normalize, apply the priority
 // floor. A non-zero linearis exit THROWS (never a silent []): a silent empty
 // would let one failed poll flatten a project's eligible set to zero. The
 // caller (Phase 4 reconcile) catches the throw and preserves the prior set.
-export function runEligibleQuery(query, { exec = defaultExec } = {}) {
+// CTL-1174: `delegateExec` is the exec seam for the best-effort delegate
+// batch enrichment. Wrapped in try/catch so a delegate hiccup never blocks
+// the state/priority/relations refresh. An absent key (batch miss) leaves
+// the ticket's delegate field unset; `?? null` in contentKey collapses it.
+export function runEligibleQuery(query, { exec = defaultExec, delegateExec = defaultDelegateBatchExec } = {}) {
   const { code, stdout, stderr } = exec("linearis", buildLinearisArgs(query));
   if (code !== 0) {
     throw new Error(`linearis issues list failed (exit ${code}): ${(stderr || "").trim()}`);
@@ -587,6 +752,23 @@ export function runEligibleQuery(query, { exec = defaultExec } = {}) {
   // (1=Urgent … 4=Low). 0 ("No priority") is always below any floor.
   if (query.priority != null) {
     tickets = tickets.filter((t) => t.priority >= 1 && t.priority <= query.priority);
+  }
+  // CTL-1174: best-effort delegate enrichment from a single batched GraphQL POST.
+  // Never throws — a delegate hiccup must not block the state/priority refresh.
+  if (tickets.length > 0) {
+    try {
+      const dmap = fetchTicketsDelegateBatch(
+        query.team,
+        tickets.map((t) => t.identifier),
+        { exec: delegateExec }
+      );
+      for (const t of tickets) {
+        const d = dmap.get(t.identifier);
+        if (d !== undefined) t.delegate = d;
+      }
+    } catch {
+      /* best-effort: a delegate hiccup never blocks the state/priority/relations refresh */
+    }
   }
   return tickets;
 }

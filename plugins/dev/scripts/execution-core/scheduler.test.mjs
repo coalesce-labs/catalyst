@@ -8178,8 +8178,17 @@ describe("schedulerTick — CTL-781 respect-assignment + self-assign", () => {
     };
   }
 
-  function gatewayStub(assigneeByTicket) {
-    return { getDescriptor: (id) => ({ assignee: assigneeByTicket[id] ?? null, removed: false }) };
+  function gatewayStub(byTicket) {
+    // bare value = assignee (back-compat); object { assignee, delegate } sets both.
+    return {
+      getDescriptor: (id) => {
+        const v = byTicket[id];
+        if (v && typeof v === "object") {
+          return { assignee: v.assignee ?? null, delegate: v.delegate ?? null, removed: false };
+        }
+        return { assignee: v ?? null, delegate: null, removed: false };
+      },
+    };
   }
 
   beforeEach(() => {
@@ -8201,7 +8210,7 @@ describe("schedulerTick — CTL-781 respect-assignment + self-assign", () => {
     expect(existsSync(join(orchDir, ".dispatch-cooldowns", "CTL-H1", "research"))).toBe(false);
   });
 
-  test("null-assignee candidate dispatches AND applyAssignee is called with botWriteId after verify", () => {
+  test("UNDELEGATED candidate → delegate-then-hold: NO dispatch, applyAssignee (delegate-on-Todo) called with botWriteId (CTL-1174)", () => {
     const dispatch = fakeDispatch();
     const assigneeCalls = [];
     const writeStatus = {
@@ -8213,7 +8222,7 @@ describe("schedulerTick — CTL-781 respect-assignment + self-assign", () => {
         return { applied: true, reason: null };
       },
     };
-    const gateway = gatewayStub({ "CTL-N1": null });
+    const gateway = gatewayStub({ "CTL-N1": null }); // assignee=null, delegate=null → undelegated
     schedulerTick(orchDir, {
       readEligible: () => [candidateTicket("CTL-N1")],
       dispatch,
@@ -8223,16 +8232,16 @@ describe("schedulerTick — CTL-781 respect-assignment + self-assign", () => {
       botUserIds: new Set([BOT]),
       botWriteId: BOT,
       gateway,
-      hasTriageArtifact: () => true, // CTL-1150: bypass triage gate, subject is applyAssignee
+      hasTriageArtifact: () => true,
     });
-    expect(dispatch.calls.map((c) => c.ticket)).toEqual(["CTL-N1"]);
+    expect(dispatch.calls).toHaveLength(0); // held — not yet delegated to us
     expect(assigneeCalls).toHaveLength(1);
     expect(assigneeCalls[0]).toMatchObject({ ticket: "CTL-N1", userId: BOT });
   });
 
-  test("bot-assigned candidate (assignee in botUserIds) dispatches normally", () => {
+  test("candidate DELEGATED to our orchestrator dispatches normally (assignee irrelevant, CTL-1174)", () => {
     const dispatch = fakeDispatch();
-    const gateway = gatewayStub({ "CTL-B1": BOT });
+    const gateway = gatewayStub({ "CTL-B1": { assignee: HUMAN, delegate: BOT } });
     schedulerTick(orchDir, {
       readEligible: () => [candidateTicket("CTL-B1")],
       dispatch,
@@ -8240,7 +8249,7 @@ describe("schedulerTick — CTL-781 respect-assignment + self-assign", () => {
       liveBackgroundCount: () => 0,
       botUserIds: new Set([BOT]),
       gateway,
-      hasTriageArtifact: () => true, // CTL-1150: bypass triage gate, subject is bot-assigned dispatch
+      hasTriageArtifact: () => true,
     });
     expect(dispatch.calls.map((c) => c.ticket)).toEqual(["CTL-B1"]);
   });
@@ -8322,7 +8331,7 @@ describe("schedulerTick — CTL-781 respect-assignment + self-assign", () => {
     expect(fetchAssigneeCalls).toHaveLength(0);
   });
 
-  test("botWriteId absent → dispatch proceeds, applyAssignee called with userId:undefined (loud-no-op, CTL-1011)", () => {
+  test("botWriteId absent on UNDELEGATED candidate → delegate-on-Todo calls applyAssignee userId:undefined (loud-no-op), holds (CTL-1174)", () => {
     const dispatch = fakeDispatch();
     const assigneeCalls = [];
     const writeStatus = {
@@ -8343,16 +8352,16 @@ describe("schedulerTick — CTL-781 respect-assignment + self-assign", () => {
       liveBackgroundCount: () => 0,
       botUserIds: new Set([BOT]),
       gateway,
-      hasTriageArtifact: () => true, // CTL-1150: bypass triage gate, subject is botWriteId-absent
+      hasTriageArtifact: () => true,
     });
-    expect(dispatch.calls.map((c) => c.ticket)).toEqual(["CTL-WI1"]);
-    // CTL-1011: applyAssignee is now always invoked; the deduped invalid-user
+    expect(dispatch.calls).toHaveLength(0); // held — undelegated
+    // delegate-on-Todo still invokes applyAssignee; the deduped invalid-user
     // branch handles the null/undefined botWriteId instead of silently skipping.
     expect(assigneeCalls).toHaveLength(1);
     expect(assigneeCalls[0]).toMatchObject({ ticket: "CTL-WI1", userId: undefined });
   });
 
-  test("applyAssignee failure (applied:false) does not fail the dispatch — ticket still advances", () => {
+  test("a DELEGATED candidate dispatches even if the post-dispatch self-assign fails (CTL-1174)", () => {
     const dispatch = fakeDispatch();
     const writeStatus = {
       applyPhaseStatus: () => ({ applied: true, reason: null }),
@@ -8360,7 +8369,7 @@ describe("schedulerTick — CTL-781 respect-assignment + self-assign", () => {
       applyLabel: () => {},
       applyAssignee: () => ({ applied: false, reason: "transient" }),
     };
-    const gateway = gatewayStub({ "CTL-AF1": null });
+    const gateway = gatewayStub({ "CTL-AF1": { delegate: BOT } });
     const r = schedulerTick(orchDir, {
       readEligible: () => [candidateTicket("CTL-AF1")],
       dispatch,

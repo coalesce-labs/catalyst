@@ -121,6 +121,7 @@ export function openBrokerStateDb(dbPath = DEFAULT_DB_PATH) {
     "estimate INTEGER",
     "resolution TEXT",
     "assignee TEXT",
+    "delegate TEXT",
     "uuid TEXT",
     "removed_at TEXT",
     "owner_host TEXT",
@@ -529,6 +530,7 @@ const DESCRIPTOR_COLUMNS = {
   estimate: "estimate",
   resolution: "resolution",
   assignee: "assignee",
+  delegate: "delegate",
   uuid: "uuid",
 };
 
@@ -612,6 +614,7 @@ function rowToTicketDescriptor(row) {
     estimate: typeof row.estimate === "number" ? row.estimate : null,
     resolution: row.resolution ?? null,
     assignee: row.assignee ?? null,
+    delegate: row.delegate ?? null,
     uuid: row.uuid ?? null,
     removed: row.removed_at != null,
     removedAt: row.removed_at ?? null,

@@ -777,3 +777,100 @@ describe("parseLinearWebhookEvent — issueCommentMention", () => {
     expect(result.kind).toBe("ignored");
   });
 });
+
+// ── CTL-1174: toDelegateId extraction + delegate_changed topic ────────────────
+
+describe("parseLinearWebhookEvent — Issue toDelegateId (CTL-1174)", () => {
+  const BOT = "bot-uuid-ff78d890";
+
+  it("extracts toDelegateId from data.delegate.id when present", () => {
+    const ev = parseLinearWebhookEvent(
+      "Issue",
+      issuePayload({
+        updatedFrom: { delegateId: "old-delegate" },
+        data: {
+          id: "i1",
+          identifier: "CTL-210",
+          team: { key: "CTL" },
+          delegate: { id: BOT },
+        },
+      })
+    );
+    if (ev.kind !== "issue") throw new Error("expected issue kind");
+    expect(ev.toDelegateId).toBe(BOT);
+  });
+
+  it("toDelegateId is undefined when data.delegate key is absent (KEY-PRESENCE: keep stored value)", () => {
+    const ev = parseLinearWebhookEvent(
+      "Issue",
+      issuePayload({ updatedFrom: { stateId: "old-state" } })
+    );
+    if (ev.kind !== "issue") throw new Error("expected issue kind");
+    expect(ev.toDelegateId).toBeUndefined();
+  });
+
+  it("toDelegateId is null when data.delegate key is present but null (explicit clear)", () => {
+    const ev = parseLinearWebhookEvent(
+      "Issue",
+      issuePayload({
+        updatedFrom: { delegateId: "old-delegate" },
+        data: {
+          id: "i1",
+          identifier: "CTL-210",
+          team: { key: "CTL" },
+          delegate: null,
+        },
+      })
+    );
+    if (ev.kind !== "issue") throw new Error("expected issue kind");
+    expect(ev.toDelegateId).toBeNull();
+  });
+
+  it("updatedFrom.delegateId → topic 'linear.issue.delegate_changed'", () => {
+    const ev = parseLinearWebhookEvent(
+      "Issue",
+      issuePayload({
+        updatedFrom: { delegateId: "old-delegate" },
+        data: { id: "i1", identifier: "CTL-210", team: { key: "CTL" }, delegate: { id: BOT } },
+      })
+    );
+    if (ev.kind !== "issue") throw new Error("expected issue kind");
+    expect(ev.topic).toBe("linear.issue.delegate_changed");
+  });
+
+  it("delegate_changed is lower priority than assignee_changed", () => {
+    const ev = parseLinearWebhookEvent(
+      "Issue",
+      issuePayload({
+        updatedFrom: { assigneeId: "old-user", delegateId: "old-delegate" },
+        data: {
+          id: "i1",
+          identifier: "CTL-210",
+          team: { key: "CTL" },
+          assignee: { id: "new-user", name: "Alice" },
+          delegate: { id: BOT },
+        },
+      })
+    );
+    if (ev.kind !== "issue") throw new Error("expected issue kind");
+    expect(ev.topic).toBe("linear.issue.assignee_changed");
+  });
+
+  it("assignee-only webhook leaves toDelegateId undefined (real-world safety: no fabricated clear)", () => {
+    const ev = parseLinearWebhookEvent(
+      "Issue",
+      issuePayload({
+        updatedFrom: { assigneeId: "old-user" },
+        data: {
+          id: "i1",
+          identifier: "CTL-210",
+          team: { key: "CTL" },
+          assignee: { id: "new-user", name: "Alice" },
+        },
+      })
+    );
+    if (ev.kind !== "issue") throw new Error("expected issue kind");
+    expect(ev.toDelegateId).toBeUndefined();
+    expect(ev.topic).toBe("linear.issue.assignee_changed");
+  });
+});

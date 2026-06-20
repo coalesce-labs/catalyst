@@ -32,6 +32,7 @@ function descriptor(partial: Partial<TicketDescriptor>): TicketDescriptor {
     fencePhase: partial.fencePhase ?? null,
     claimedAt: partial.claimedAt ?? null,
     heldSince: partial.heldSince ?? null,
+    delegate: partial.delegate ?? null, // CTL-1174
     updatedAt: partial.updatedAt ?? "2026-06-08T12:00:00.000Z",
   };
 }

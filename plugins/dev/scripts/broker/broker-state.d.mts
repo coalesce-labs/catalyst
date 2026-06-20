@@ -21,6 +21,8 @@ export interface TicketDescriptor {
   estimate: number | null;
   resolution: string | null;
   assignee: string | null;
+  /** CTL-1174: Linear delegate UUID (app-user/bot) from broker cache. null = unset. */
+  delegate: string | null;
   uuid: string | null;
   removed: boolean;
   removedAt: string | null;
@@ -44,6 +46,8 @@ export interface UpsertTicketDescriptorInput {
   estimate?: number | null;
   resolution?: string | null;
   assignee?: string | null;
+  /** CTL-1174: delegate UUID (key-presence: absent = keep). */
+  delegate?: string | null;
   uuid?: string | null;
   removed?: boolean;
 }

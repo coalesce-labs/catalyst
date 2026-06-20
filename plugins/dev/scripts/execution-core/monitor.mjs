@@ -41,7 +41,13 @@ import {
 import { ownedBy } from "./hrw.mjs"; // CTL-862: HRW ownership filter
 import { claimDispatchSync } from "./cluster-claim-sync.mjs"; // CTL-862: cross-host claim soft-CAS
 import { listProjects, getProjectConfig, resolveEligibleQuery } from "./registry.mjs";
-import { runEligibleQuery, fetchTicketAssignee, isAssigneeClaimable } from "./linear-query.mjs";
+import {
+  runEligibleQuery,
+  fetchTicketAssignee,
+  isAssigneeClaimable,
+  isClaimable,
+  fetchTicketsDelegateBatch,
+} from "./linear-query.mjs";
 import {
   setProjectEligible,
   removeTicket,
@@ -131,6 +137,14 @@ export function parseIssueUpdatedEvent(event) {
     descriptionChanged: payload.descriptionChanged === true, // CTL-749
     actorId: payload.actorId ?? null, // CTL-749
     actorName: payload.actorName ?? null, // CTL-749
+    // CTL-1174: delegate tri-state (KEY-PRESENCE mirrors toEstimate).
+    // string → bot UUID set; null → explicitly cleared; undefined → absent (keep).
+    toDelegate:
+      typeof payload.toDelegateId === "string"
+        ? payload.toDelegateId
+        : "toDelegateId" in payload
+          ? null
+          : undefined,
   };
 }
 
@@ -197,6 +211,9 @@ export function handleIssueUpdatedEvent(
       // CTL-957: forward estimate into the eligible projection when present
       // (undefined = absent from payload = keep stored value).
       if (parsed.toEstimate !== undefined) upd.estimate = parsed.toEstimate;
+      // CTL-1174: forward delegate into the eligible projection when present
+      // (undefined = absent from payload = keep stored value).
+      if (parsed.toDelegate !== undefined) upd.delegate = parsed.toDelegate;
       upsertTicket(query.team, upd);
     } else {
       removeTicket(query.team, parsed.identifier);
@@ -251,7 +268,7 @@ const knownProjects = new Set();
 // `monitor.reconcile.failing.<TEAM>` event onto the unified event log so the
 // orch-monitor dashboard surfaces the silently-starving team, and a recovering
 // poll clears the alert. `appendHealthEvent` is an injectable test seam.
-export function reconcileProject(team, { exec, appendHealthEvent } = {}) {
+export function reconcileProject(team, { exec, delegateExec, appendHealthEvent } = {}) {
   const entry = getProjectConfig(team);
   if (!entry) {
     log.warn({ team }, "reconcile: no registry entry for team — skipping");
@@ -260,7 +277,7 @@ export function reconcileProject(team, { exec, appendHealthEvent } = {}) {
   const query = resolveEligibleQuery(entry);
   let tickets;
   try {
-    tickets = runEligibleQuery(query, { exec });
+    tickets = runEligibleQuery(query, { exec, delegateExec });
   } catch (err) {
     log.error({ team, err: err.message }, "reconcile poll failed — preserving prior eligible set");
     // CTL-867: escalate persistent failures beyond the buried log line.
@@ -295,10 +312,10 @@ export function reconcileProject(team, { exec, appendHealthEvent } = {}) {
 // reconcileAll — full reconcile of every registered team (the missed-webhook
 // backstop). Re-reads registry.json each call so a team added to the registry
 // is picked up and one removed is dropped within one tick.
-export function reconcileAll({ exec, appendHealthEvent } = {}) {
+export function reconcileAll({ exec, delegateExec, appendHealthEvent } = {}) {
   const projects = listProjects();
   const seen = new Set(projects.map((p) => p.team));
-  for (const p of projects) reconcileProject(p.team, { exec, appendHealthEvent });
+  for (const p of projects) reconcileProject(p.team, { exec, delegateExec, appendHealthEvent });
   for (const stale of knownProjects) {
     if (!seen.has(stale)) {
       dropProject(stale);
@@ -593,16 +610,35 @@ function dispatchTriage(
     );
     return false;
   }
-  // CTL-781: respect-assignment gate — a →Triage/→Todo ticket assigned to a
-  // non-bot is a human's; never claim it. Gateway-first, live read on miss;
-  // unknown holds (sweepMissingTriage retries next reconcile). Empty/absent
-  // botUserIds disables the gate (CTL-749 fail-open convention).
+  // CTL-781/CTL-1174: respect-assignment + delegate gate. A →Triage/→Todo
+  // ticket assigned to a human, or delegated to a non-bot, is not ours.
+  // Gateway-first, live read on miss; unknown holds (sweepMissingTriage
+  // retries next reconcile). Empty/absent botUserIds disables the gate
+  // (CTL-749 fail-open convention).
   if (botUserIds instanceof Set && botUserIds.size > 0) {
     const a = fetchAssignee(identifier, { gateway });
-    if (!a.known || !isAssigneeClaimable(a.assignee, botUserIds)) {
+    if (!a.known) {
+      // Unreadable delegate → HOLD (sweepMissingTriage retries next reconcile).
+      log.info({ identifier, known: false }, "monitor: triage dispatch held — delegate unreadable (CTL-1174)");
+      return false;
+    }
+    if (a.delegate == null) {
+      // CTL-1174 DELEGATE-ON-TODO: an undelegated Todo ticket is claimed by
+      // DELEGATING it to the orchestrator now (the assignee is irrelevant), then
+      // HELD this tick — it dispatches once the delegate lands in the cache
+      // (webhook-projected). This is what gets queued-but-untriaged items moving.
+      const d = applyAssignee({ ticket: identifier, userId: botWriteId });
       log.info(
-        { identifier, known: a.known, assignee: a.known ? (a.assignee ?? null) : undefined },
-        "monitor: triage dispatch skipped — respect-assignment (CTL-781)"
+        { identifier, applied: d.applied, reason: d.reason },
+        "monitor: delegated to orchestrator — will dispatch once delegate lands (CTL-1174)"
+      );
+      return false;
+    }
+    if (!isClaimable(a.assignee, a.delegate, botUserIds)) {
+      // Delegated to a different actor (another bot/human) → not ours.
+      log.info(
+        { identifier, delegate: a.delegate ?? null },
+        "monitor: triage dispatch skipped — delegated to another actor (CTL-1174)"
       );
       return false;
     }

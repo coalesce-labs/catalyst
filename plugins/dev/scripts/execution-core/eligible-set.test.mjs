@@ -232,6 +232,59 @@ describe("setProjectEligible", () => {
     });
     expect(existsSync(projFile("alpha"))).toBe(true);
   });
+
+  test("CTL-1174: a delegate-only delta DOES rewrite the file (delegate is in the content key)", async () => {
+    // Pre-CTL-1174 projection has no delegate; reconcile now carries delegate UUID.
+    // Without delegate in contentKey, the rewrite would be skipped → silent starvation
+    // (a foreign delegate would never trigger the claim guard refresh).
+    setProjectEligible("alpha", [{ identifier: "A-1", state: "Todo", priority: 1, delegate: null }], {
+      source: "reconcile",
+      query: {},
+    });
+    const mtime1 = statSync(projFile("alpha")).mtimeMs;
+    await sleep(15);
+    setProjectEligible(
+      "alpha",
+      [{ identifier: "A-1", state: "Todo", priority: 1, delegate: "bot-uuid-ff78d890" }],
+      { source: "reconcile", query: {} },
+    );
+    expect(statSync(projFile("alpha")).mtimeMs).toBeGreaterThan(mtime1);
+    const doc = JSON.parse(readFileSync(projFile("alpha"), "utf8"));
+    expect(doc.tickets[0].delegate).toBe("bot-uuid-ff78d890");
+  });
+
+  test("CTL-1174: unchanged delegate does NOT rewrite the file (no spurious churn)", async () => {
+    setProjectEligible(
+      "alpha",
+      [{ identifier: "A-1", state: "Todo", priority: 1, delegate: "bot-uuid-ff78d890" }],
+      { source: "reconcile", query: {} },
+    );
+    const mtime1 = statSync(projFile("alpha")).mtimeMs;
+    await sleep(15);
+    // Same delegate — no rewrite expected.
+    setProjectEligible(
+      "alpha",
+      [{ identifier: "A-1", state: "Todo", priority: 1, delegate: "bot-uuid-ff78d890" }],
+      { source: "reconcile", query: {} },
+    );
+    expect(statSync(projFile("alpha")).mtimeMs).toBe(mtime1);
+  });
+
+  test("CTL-1174: undefined delegate treated as null in contentKey (no spurious churn vs null)", async () => {
+    // A ticket freshly read via linearis has no delegate field → undefined → normalized to null.
+    // A second reconcile with delegate:null must NOT trigger a rewrite.
+    setProjectEligible("alpha", [{ identifier: "A-1", state: "Todo", priority: 1 }], {
+      source: "reconcile",
+      query: {},
+    });
+    const mtime1 = statSync(projFile("alpha")).mtimeMs;
+    await sleep(15);
+    setProjectEligible("alpha", [{ identifier: "A-1", state: "Todo", priority: 1, delegate: null }], {
+      source: "reconcile",
+      query: {},
+    });
+    expect(statSync(projFile("alpha")).mtimeMs).toBe(mtime1);
+  });
 });
 
 describe("removeTicket", () => {
