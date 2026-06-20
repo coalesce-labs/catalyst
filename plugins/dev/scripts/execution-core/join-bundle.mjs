@@ -116,6 +116,54 @@ function extractMonitorWebhooks(l2) {
   return Object.keys(out).length > 0 ? out : null;
 }
 
+// CTL-1231: carry a SHARED-only, secret-free slice of the seed's
+// ~/.claude/settings.json so a member's interactive `claude` sessions inherit
+// the cluster's telemetry posture + autonomy defaults. Built from an EXPLICIT
+// allow-list of named keys (never "copy env minus a deny-list"), so a secret
+// can't leak by omission. Deliberately EXCLUDES: secret-bearing env keys
+// (AIRTABLE/SHADCN/*_TOKEN/*_KEY), OTEL_RESOURCE_ATTRIBUTES (per-host —
+// synthesized at merge), OTEL_EXPORTER_OTLP_ENDPOINT (carried via
+// otlpEndpointHint), and absolute laptop paths.
+const CLAUDE_ENV_ALLOW = [
+  "CLAUDE_CODE_ENABLE_TELEMETRY",
+  "OTEL_METRICS_EXPORTER",
+  "OTEL_LOGS_EXPORTER",
+  "OTEL_EXPORTER_OTLP_PROTOCOL",
+  "OTEL_METRIC_EXPORT_INTERVAL",
+  "OTEL_LOGS_EXPORT_INTERVAL",
+  "OTEL_SERVICE_NAME",
+];
+const CLAUDE_TOP_ALLOW = ["model", "cleanupPeriodDays", "alwaysThinkingEnabled", "includeCoAuthoredBy"];
+
+function claudeSettingsPath() {
+  return (
+    process.env.CATALYST_CLAUDE_SETTINGS_FILE ||
+    resolve(homedir(), ".claude", "settings.json")
+  );
+}
+
+function extractClaudeSettings() {
+  let parsed;
+  try {
+    parsed = JSON.parse(readFileSync(claudeSettingsPath(), "utf8"));
+  } catch {
+    return null;
+  }
+  if (!parsed || typeof parsed !== "object") return null;
+  const out = {};
+  for (const k of CLAUDE_TOP_ALLOW) {
+    if (parsed[k] !== undefined) out[k] = parsed[k];
+  }
+  if (parsed.env && typeof parsed.env === "object") {
+    const env = {};
+    for (const k of CLAUDE_ENV_ALLOW) {
+      if (parsed.env[k] !== undefined) env[k] = parsed.env[k];
+    }
+    if (Object.keys(env).length > 0) out.env = env;
+  }
+  return Object.keys(out).length > 0 ? out : null;
+}
+
 export function assembleJoinBundle() {
   // Pin CATALYST_CONFIG_FILE to the registry repoRoot so the cwd-dependent
   // Layer-1 identity read (layer1Path → <repoRoot>/.catalyst/config.json)
@@ -159,6 +207,10 @@ export function assembleJoinBundle() {
     // map). null when the seed has no monitor block. multiHost-gated by the
     // consumer; deliberately NOT in BUNDLE_REQUIRED_KEYS.
     monitorWebhooks: extractMonitorWebhooks(l2),
+    // CTL-1231: allow-listed, secret-free ~/.claude/settings.json slice (telemetry
+    // posture + autonomy defaults). null when the seed has no settings. Optional
+    // (existence-only) — an older seed degrades gracefully.
+    claudeSettings: extractClaudeSettings(),
   };
 }
 

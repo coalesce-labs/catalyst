@@ -1069,6 +1069,91 @@ export function checkThoughts(deps = {}) {
   return checks;
 }
 
+// ─── Phase 5e: Claude settings.json (CTL-1231) ───────────────────────────────
+
+// catalyst-join never wrote ~/.claude/settings.json, so a member's interactive
+// `claude` sessions lacked the OTLP endpoint + telemetry toggles, and — worse —
+// the per-host OTEL_RESOURCE_ATTRIBUTES host.name pin was unset, so telemetry
+// mis-attributed the host. This check (multiHost-gated, like the others) FAILs a
+// member whose settings.json is absent, doesn't pin host.name=<self>, or has no
+// OTLP endpoint in EITHER settings.json or the daemon env file (the latter is
+// what the launchd daemon + bg-workers actually read).
+
+function defaultReadClaudeSettings() {
+  try {
+    return JSON.parse(readFileSync(resolve(homedir(), ".claude", "settings.json"), "utf8"));
+  } catch {
+    return null;
+  }
+}
+
+function defaultDaemonEnvHasOtlp() {
+  try {
+    const txt = readFileSync(resolve(homedir(), ".config", "catalyst", "execution-core.env"), "utf8");
+    return /^OTEL_EXPORTER_OTLP_ENDPOINT=.+/m.test(txt);
+  } catch {
+    return false;
+  }
+}
+
+export function checkClaudeSettings(deps = {}) {
+  const {
+    resolveRoster = resolveClusterHosts,
+    readSettings = defaultReadClaudeSettings,
+    getHost = getHostName,
+    daemonEnvHasOtlp = defaultDaemonEnvHasOtlp,
+  } = deps;
+
+  const roster = resolveRoster();
+  if (!roster?.multiHost) {
+    return [
+      mkCheck(
+        "claude-settings",
+        STATUS.PASS,
+        "single-host node — settings.json provisioning not activation-gating",
+      ),
+    ];
+  }
+
+  const s = readSettings();
+  if (!s || typeof s !== "object") {
+    return [
+      mkCheck(
+        "claude-settings",
+        STATUS.FAIL,
+        "~/.claude/settings.json absent or unparseable — telemetry + host identity unset for interactive sessions",
+      ),
+    ];
+  }
+
+  const checks = [];
+  const self = getHost();
+  const ra = s?.env?.OTEL_RESOURCE_ATTRIBUTES ?? "";
+  checks.push(
+    typeof ra === "string" && ra.includes(`host.name=${self}`)
+      ? mkCheck("claude-settings-host", STATUS.PASS, `settings.json pins host.name=${self}`)
+      : mkCheck(
+          "claude-settings-host",
+          STATUS.FAIL,
+          `settings.json OTEL_RESOURCE_ATTRIBUTES does not pin host.name=${self} (got "${ra}") — telemetry mis-attributes this host`,
+        ),
+  );
+
+  const settingsOtlp = s?.env?.OTEL_EXPORTER_OTLP_ENDPOINT ?? "";
+  const hasOtlp = (typeof settingsOtlp === "string" && settingsOtlp.length > 0) || daemonEnvHasOtlp();
+  checks.push(
+    hasOtlp
+      ? mkCheck("claude-settings-otlp", STATUS.PASS, "OTLP endpoint set (settings.json or daemon env file)")
+      : mkCheck(
+          "claude-settings-otlp",
+          STATUS.FAIL,
+          "OTLP endpoint unset in BOTH settings.json and execution-core.env — daemon + worker telemetry exports nowhere",
+        ),
+  );
+
+  return checks;
+}
+
 // ─── Phase 6: Renderer, exit code, runDoctor ─────────────────────────────────
 
 // summarize — aggregate check results into counts.
@@ -1158,6 +1243,7 @@ export async function runDoctor(opts = {}) {
     () => checkDaemonToolPath(), // CTL-1289: daemon launchd PATH resolves linearis/node/claude
     () => checkWebhookIngestion(), // CTL-1284: multiHost member ingests webhooks; single-host does not
     () => checkThoughts(), // CTL-1293: member thoughts repo provisioned + non-foreign primary
+    () => checkClaudeSettings(), // CTL-1231: member settings.json pins host identity + OTLP endpoint
   ];
 
   const fns = checkFns ?? defaultChecks;

@@ -656,6 +656,56 @@ persist_host_name() {
   PERSISTED_HOST_NAME="$host_name"
 }
 
+# CTL-1231: provision ~/.claude/settings.json (telemetry posture + autonomy
+# defaults) and the daemon's OTLP endpoint. Runs AFTER persist_host_name so the
+# per-host OTEL_RESOURCE_ATTRIBUTES can be synthesized from PERSISTED_HOST_NAME.
+provision_claude_settings() {
+  local host_name="$1"
+  [[ -n "$host_name" ]] || { warn "provision_claude_settings: empty host name — skipping"; return 0; }
+  local settings_dir="$HOME/.claude"
+  local settings="$settings_dir/settings.json"
+  local cs otlp
+  cs="$(echo "$BUNDLE_JSON" | jq '.claudeSettings // null')"
+  otlp="$(bundle_get '.otlpEndpointHint')"
+
+  mkdir -p "$settings_dir"
+  [[ -f "$settings" ]] || echo '{}' > "$settings"
+
+  local tmp
+  tmp="$(mktemp "${settings_dir}/.settings.XXXXXX")"
+  # Deep-merge the shared slice UNDER the existing file ($shared * existing →
+  # existing wins, non-clobber so a hand-tuned member file is preserved), then
+  # ALWAYS synthesize the per-host OTEL_RESOURCE_ATTRIBUTES (never copy the
+  # seed's host.name) and set the OTLP endpoint with //= (member override wins).
+  jq \
+    --argjson cs "$cs" \
+    --arg host "$host_name" \
+    --arg otlp "$otlp" \
+    '
+      ( if $cs == null then {} else $cs end ) as $shared
+      | ($shared * .)
+      | .env //= {}
+      | .env.OTEL_RESOURCE_ATTRIBUTES = ("host.name=" + $host)
+      | ( if $otlp != "" then .env.OTEL_EXPORTER_OTLP_ENDPOINT //= $otlp else . end )
+    ' "$settings" > "$tmp" && mv "$tmp" "$settings" || { rm -f "$tmp"; return 1; }
+  chmod 0644 "$settings" 2>/dev/null || true
+  info "~/.claude/settings.json provisioned (host.name=${host_name})"
+
+  # Daemon-context endpoint: the launchd execution-core daemon and the
+  # bg-workers it spawns read OTEL_EXPORTER_OTLP_ENDPOINT from this env file, NOT
+  # from settings.json. Unset → all worker telemetry exports nowhere. Append
+  # only when absent — NEVER overwrite (preserves proxy/CA lines, etc.).
+  if [[ -n "$otlp" ]]; then
+    local ec_env="$HOME/.config/catalyst/execution-core.env"
+    mkdir -p "$(dirname "$ec_env")"
+    touch "$ec_env"
+    if ! grep -q '^OTEL_EXPORTER_OTLP_ENDPOINT=' "$ec_env" 2>/dev/null; then
+      printf 'OTEL_EXPORTER_OTLP_ENDPOINT=%s\n' "$otlp" >> "$ec_env"
+      info "daemon OTLP endpoint written to execution-core.env"
+    fi
+  fi
+}
+
 write_local_roster() {
   local host_name="$1"
   local local_roster="${CATALYST_DIR}/cluster/local-hosts.json"
@@ -684,6 +734,7 @@ do_config_merge() {
   # the captured value. Same shell — run_stage calls "$@" directly, no subshell.
   PERSISTED_HOST_NAME=""
   persist_host_name || return 1
+  provision_claude_settings "$PERSISTED_HOST_NAME" || return 1
   write_local_roster "$PERSISTED_HOST_NAME" || return 1
 }
 

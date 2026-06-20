@@ -710,6 +710,42 @@ run "T2.11 single-host node: clone-OK + push-fail warns and proceeds (CTL-1293)"
     CATALYST_JOIN_REACH_PROBE='${STUBS2}/stub-reach-probe.sh' \
     bash '$JOIN' --bundle '$SINGLEHOST_WH_BUNDLE' >/dev/null 2>&1"
 
+# T2.12: (CTL-1231) provision ~/.claude/settings.json — synthesize the per-host
+# OTEL_RESOURCE_ATTRIBUTES (NEVER the seed's host.name), carry the allow-listed
+# shared slice, and write the OTLP endpoint into the daemon env file.
+CLAUDE_SETTINGS_BUNDLE="${SCRATCH}/claude-settings.json"
+cat > "$CLAUDE_SETTINGS_BUNDLE" <<'BEOF'
+{
+  "layer1Identity": {"projectKey": "CTL", "teamKey": "T1", "stateMap": {}},
+  "botCreds": {"orchestrator": "tok_orch", "worker": "tok_worker"},
+  "hostsRoster": ["test-node"],
+  "livenessAnchorIssue": "CTL-1",
+  "repoUrl": "https://github.com/example/repo",
+  "pluginSourceUrl": "https://github.com/example/plugins",
+  "otlpEndpointHint": "http://otel.test:4317",
+  "claudeSettings": {"model": "claude-opus-4-8", "env": {"CLAUDE_CODE_ENABLE_TELEMETRY": "1"}}
+}
+BEOF
+
+run "T2.12 provisions settings.json w/ per-host OTEL attrs + daemon OTLP endpoint (CTL-1231)" bash -c "
+  h='${SCRATCH}/h212'
+  env -i HOME=\"\$h\" CATALYST_DIR='${SCRATCH}/c212' CATALYST_HOST_NAME='test-node' \
+    CATALYST_JOIN_TOKEN='$GOOD_TOKEN' \
+    CATALYST_JOIN_SETUP_SCRIPT='${STUBS2}/stub-setup-catalyst.sh' \
+    CATALYST_JOIN_INSTALL_CLI_SCRIPT='${STUBS2}/stub-install-cli.sh' \
+    CATALYST_JOIN_PLUGIN_SRC_SCRIPT='${STUBS2}/stub-setup-plugin-source.sh' \
+    CATALYST_JOIN_PROVISION_THOUGHTS_SCRIPT='${STUBS2}/stub-provision-thoughts.sh' \
+    CATALYST_JOIN_STACK_BIN='${STUBS2}/stub-catalyst-stack' \
+    CATALYST_JOIN_DOCTOR_SCRIPT='${STUBS2}/stub-check-setup.sh' \
+    CATALYST_JOIN_REACH_PROBE='${STUBS2}/stub-reach-probe.sh' \
+    bash '$JOIN' --bundle '$CLAUDE_SETTINGS_BUNDLE' >/dev/null 2>&1
+  s=\"\$h/.claude/settings.json\"
+  jq -e '.env.OTEL_RESOURCE_ATTRIBUTES == \"host.name=test-node\"' \"\$s\" >/dev/null &&
+  jq -e '.env.OTEL_EXPORTER_OTLP_ENDPOINT == \"http://otel.test:4317\"' \"\$s\" >/dev/null &&
+  jq -e '.model == \"claude-opus-4-8\"' \"\$s\" >/dev/null &&
+  jq -e '.env.CLAUDE_CODE_ENABLE_TELEMETRY == \"1\"' \"\$s\" >/dev/null &&
+  grep -q '^OTEL_EXPORTER_OTLP_ENDPOINT=http://otel.test:4317\$' \"\$h/.config/catalyst/execution-core.env\""
+
 # ── Phase 3: Provisioner orchestration ────────────────────────────────────────
 
 echo ""

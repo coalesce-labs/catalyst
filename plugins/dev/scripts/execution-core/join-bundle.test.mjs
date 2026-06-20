@@ -26,6 +26,8 @@ const BUNDLE_ENVS = [
   // resolved via CATALYST_CLUSTER_DIR — saved/restored so the fixture clone here
   // never leaks into other suites that share the default ~/catalyst path.
   "CATALYST_CLUSTER_DIR",
+  // CTL-1231: claude settings.json path override (extractClaudeSettings).
+  "CATALYST_CLAUDE_SETTINGS_FILE",
 ];
 
 let saved = {};
@@ -193,6 +195,55 @@ describe("assembleJoinBundle", () => {
     expect(JSON.stringify(wh)).not.toContain("registeredAt");
     expect(JSON.stringify(wh)).not.toContain("Secret");
     expect(JSON.stringify(wh)).not.toContain("secret");
+  });
+
+  // CTL-1231: allow-listed, secret-free ~/.claude/settings.json slice. The
+  // extractor reads $HOME/.claude/settings.json, so point HOME at a fixture dir.
+  test("claudeSettings carries allow-listed keys and EXCLUDES secrets/per-host/paths", () => {
+    const fakeHome = mkdtempSync(join(tmpdir(), "jb-home-"));
+    mkdirSync(join(fakeHome, ".claude"), { recursive: true });
+    const settingsFile = join(fakeHome, ".claude", "settings.json");
+    writeFileSync(
+      settingsFile,
+      JSON.stringify({
+        model: "claude-opus-4-8",
+        cleanupPeriodDays: 30,
+        alwaysThinkingEnabled: true,
+        env: {
+          CLAUDE_CODE_ENABLE_TELEMETRY: "1",
+          OTEL_METRICS_EXPORTER: "otlp",
+          OTEL_SERVICE_NAME: "catalyst",
+          // these MUST be excluded:
+          AIRTABLE_API_KEY: "secret-airtable",
+          SHADCN_TOKEN: "secret-shadcn",
+          OTEL_RESOURCE_ATTRIBUTES: "host.name=laptop",
+          OTEL_EXPORTER_OTLP_ENDPOINT: "http://laptop:4317",
+          GITHUB_SOURCE_ROOT: "/Users/laptop/code",
+        },
+      }),
+    );
+    const savedSettings = process.env.CATALYST_CLAUDE_SETTINGS_FILE;
+    process.env.CATALYST_CLAUDE_SETTINGS_FILE = settingsFile;
+    try {
+      const cs = assembleJoinBundle().claudeSettings;
+      expect(cs.model).toBe("claude-opus-4-8");
+      expect(cs.cleanupPeriodDays).toBe(30);
+      expect(cs.alwaysThinkingEnabled).toBe(true);
+      expect(cs.env.CLAUDE_CODE_ENABLE_TELEMETRY).toBe("1");
+      expect(cs.env.OTEL_SERVICE_NAME).toBe("catalyst");
+      // exclusions — none of these may appear anywhere in the slice
+      const blob = JSON.stringify(cs);
+      expect(blob).not.toContain("secret-airtable");
+      expect(blob).not.toContain("secret-shadcn");
+      expect(blob).not.toContain("AIRTABLE_API_KEY");
+      expect(blob).not.toContain("OTEL_RESOURCE_ATTRIBUTES");
+      expect(blob).not.toContain("OTEL_EXPORTER_OTLP_ENDPOINT");
+      expect(blob).not.toContain("GITHUB_SOURCE_ROOT");
+    } finally {
+      if (savedSettings === undefined) delete process.env.CATALYST_CLAUDE_SETTINGS_FILE;
+      else process.env.CATALYST_CLAUDE_SETTINGS_FILE = savedSettings;
+      rmSync(fakeHome, { recursive: true, force: true });
+    }
   });
 
   test("missing layer2 produces null/empty fields without throwing", () => {

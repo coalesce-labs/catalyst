@@ -16,6 +16,7 @@ import {
   checkDaemonToolPath,
   checkWebhookIngestion,
   checkThoughts,
+  checkClaudeSettings,
   summarize,
   renderJson,
   renderHuman,
@@ -741,6 +742,68 @@ describe("checkThoughts", () => {
     expect(verdict(checks, "thoughts-primary")).toBe(STATUS.PASS);
     expect(verdict(checks, "thoughts-repo-mappings")).toBe(STATUS.PASS);
     expect(verdict(checks, "thoughts-clone")).toBe(STATUS.PASS);
+    expect(checks.every((c) => c.status === STATUS.PASS)).toBe(true);
+  });
+});
+
+// ─── Phase 5e: checkClaudeSettings (CTL-1231) ────────────────────────────────
+
+describe("checkClaudeSettings", () => {
+  const single = () => ({ hosts: ["mini"], source: "single-host", multiHost: false });
+  const multi = () => ({ hosts: ["mini", "mini-2"], source: "cluster-repo", multiHost: true });
+  const host = () => "mini-2";
+  const verdict = (checks, name) => checks.find((c) => c.name === name)?.status;
+
+  it("PASSes a single-host node regardless of settings (not gating)", () => {
+    const checks = checkClaudeSettings({ resolveRoster: single, readSettings: () => null });
+    expect(checks[0].name).toBe("claude-settings");
+    expect(checks[0].status).toBe(STATUS.PASS);
+  });
+
+  it("FAILs a multiHost member with no settings.json", () => {
+    const checks = checkClaudeSettings({ resolveRoster: multi, readSettings: () => null, getHost: host });
+    expect(checks[0].status).toBe(STATUS.FAIL);
+    expect(checks[0].detail).toContain("settings.json");
+  });
+
+  it("FAILs when host.name is not pinned for this host", () => {
+    const checks = checkClaudeSettings({
+      resolveRoster: multi,
+      getHost: host,
+      readSettings: () => ({ env: { OTEL_RESOURCE_ATTRIBUTES: "host.name=laptop", OTEL_EXPORTER_OTLP_ENDPOINT: "http://o:4317" } }),
+      daemonEnvHasOtlp: () => true,
+    });
+    expect(verdict(checks, "claude-settings-host")).toBe(STATUS.FAIL);
+  });
+
+  it("FAILs when OTLP endpoint is unset in both settings.json and daemon env", () => {
+    const checks = checkClaudeSettings({
+      resolveRoster: multi,
+      getHost: host,
+      readSettings: () => ({ env: { OTEL_RESOURCE_ATTRIBUTES: "host.name=mini-2" } }),
+      daemonEnvHasOtlp: () => false,
+    });
+    expect(verdict(checks, "claude-settings-otlp")).toBe(STATUS.FAIL);
+  });
+
+  it("PASSes when OTLP endpoint is set only in the daemon env file", () => {
+    const checks = checkClaudeSettings({
+      resolveRoster: multi,
+      getHost: host,
+      readSettings: () => ({ env: { OTEL_RESOURCE_ATTRIBUTES: "host.name=mini-2" } }),
+      daemonEnvHasOtlp: () => true,
+    });
+    expect(verdict(checks, "claude-settings-host")).toBe(STATUS.PASS);
+    expect(verdict(checks, "claude-settings-otlp")).toBe(STATUS.PASS);
+  });
+
+  it("PASSes a fully-provisioned member (host pinned + settings.json endpoint)", () => {
+    const checks = checkClaudeSettings({
+      resolveRoster: multi,
+      getHost: host,
+      readSettings: () => ({ env: { OTEL_RESOURCE_ATTRIBUTES: "host.name=mini-2", OTEL_EXPORTER_OTLP_ENDPOINT: "http://o:4317" } }),
+      daemonEnvHasOtlp: () => false,
+    });
     expect(checks.every((c) => c.status === STATUS.PASS)).toBe(true);
   });
 });
