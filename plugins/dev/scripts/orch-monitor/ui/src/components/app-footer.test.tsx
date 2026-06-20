@@ -100,6 +100,33 @@ mock.module("@/components/ui/tooltip", () => ({
   TooltipProvider: passThrough,
 }));
 
+// CTL-1167: push subscription hook — stub usePushSubscription so AppFooter()
+// doesn't call useState (no React dispatcher in direct-call tests). Re-export
+// the real base64UrlToUint8Array so use-push-subscription.test.ts is unaffected
+// when bun runs both files in the same worker thread (mock.module persists in the
+// module registry until afterAll → mock.restore() fires).
+mock.module("@/hooks/use-push-subscription", () => {
+  function base64UrlToUint8Array(base64UrlString: string): Uint8Array {
+    const base64 = base64UrlString.replace(/-/g, "+").replace(/_/g, "/");
+    const padded = base64 + "=".repeat((4 - (base64.length % 4)) % 4);
+    const raw = atob(padded);
+    const bytes = new Uint8Array(raw.length);
+    for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
+    return bytes;
+  }
+  return {
+    PUSH_SUPPORTED: false,
+    base64UrlToUint8Array,
+    usePushSubscription: () => ({
+      supported: false,
+      permission: "default" as "default",
+      subscribed: false,
+      enable: async () => {},
+      error: null,
+    }),
+  };
+});
+
 // Restore module mocks after the file finishes — prevents mock.module from
 // leaking into other test files running in the same bun worker thread.
 afterAll(() => { mock.restore(); });

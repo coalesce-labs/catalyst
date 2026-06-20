@@ -40,6 +40,8 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip";
 import { C, LIVE } from "@/board/board-tokens";
+// CTL-1167: PWA push notification enable control
+import { usePushSubscription } from "@/hooks/use-push-subscription";
 
 const RIGHT_LABEL: Record<ServiceSeverity, string> = {
   up: "HEALTHY",
@@ -53,6 +55,7 @@ export function AppFooter() {
   const nav = useNavSignalContext();
   const cluster = useClusterSignalContext();
   const { services, unavailable } = useServiceHealthContext();
+  const push = usePushSubscription();
 
   const isLive = status === "connected";
 
@@ -153,6 +156,21 @@ export function AppFooter() {
             </span>
           )}
         </span>
+      )}
+
+      {/* CTL-1167: push notifications enable button — visible only when
+          supported (installed PWA) and not yet subscribed. iOS requires a
+          user gesture; this satisfies that requirement. */}
+      {push.supported && !push.subscribed && push.permission !== "denied" && (
+        <button
+          type="button"
+          onClick={() => void push.enable()}
+          className="font-mono text-[10px] tracking-widest"
+          style={{ color: C.fgMuted }}
+          title="Enable push notifications for this dashboard"
+        >
+          ENABLE NOTIFS
+        </button>
       )}
 
       {/* Spacer */}

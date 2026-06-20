@@ -1,5 +1,15 @@
 import { join, resolve as resolvePath, sep, dirname, basename } from "path";
 import { realpathSync, readFileSync, writeFileSync, unlinkSync, existsSync, mkdirSync } from "fs";
+// CTL-1167: PWA push notifications — VAPID key loader + subscription store
+// + notification filter (shared with the SSE stream + push bridge).
+import { loadOrCreateVapidKeys, type VapidKeys } from "./lib/vapid";
+import webpush from "web-push";
+import * as pushStore from "./lib/push-subscriptions";
+import {
+  createNotificationProjector,
+  type ProjectorBoard,
+} from "./lib/notification-filter";
+import { createPushBridge } from "./lib/push-bridge";
 import { subscribe, emit } from "./lib/event-bus";
 import {
   buildSnapshot,
@@ -482,6 +492,13 @@ export interface CreateServerOptions {
      * events. Empty / absent = no enrichment (pre-CTL-362 behaviour). */
     linearTeams?: Array<{ key: string; vcsRepo: string }>;
   } | null;
+  // CTL-1167: PWA push notifications
+  /** false disables the server-side push bridge startup task (useful in tests). Default: true. */
+  pushBridge?: boolean;
+  /** Override for push-subscriptions.db path. Defaults to ${catalystDir}/push-subscriptions.db. */
+  pushSubscriptionsDbPath?: string;
+  /** Override for vapid-keys.json path. Defaults to ${catalystDir}/vapid-keys.json. */
+  vapidKeysPath?: string;
 }
 
 const DEFAULT_PORT = 7400;
@@ -792,6 +809,9 @@ export function createServer(opts: CreateServerOptions): BunServer {
     clusterReader: clusterReaderOpt,
     screenLogsExec: screenLogsExecOpt,
     screenPollMs = SCREEN_POLL_MS,
+    pushBridge: pushBridgeOpt = true,
+    pushSubscriptionsDbPath,
+    vapidKeysPath,
   } = opts;
 
   const buildOpts: BuildSnapshotOptions = { dbPath, runsDir };
@@ -813,6 +833,32 @@ export function createServer(opts: CreateServerOptions): BunServer {
     throw new Error(
       `Failed to open annotations database at ${annDbPath}: ${err instanceof Error ? err.message : String(err)}`,
       { cause: err },
+    );
+  }
+
+  // CTL-1167: VAPID keys + push-subscriptions store init.
+  // Gated so push only initializes when the caller has actually configured it:
+  // either the server-side bridge is enabled (the default for the real monitor)
+  // or the caller supplied explicit push paths (the push-endpoint tests). The
+  // many createServer callers that pass no push options at all (most route
+  // tests) skip this entirely — they neither write a vapid-keys.json into a
+  // possibly-missing CATALYST_DIR nor open the module-level push-subscriptions
+  // singleton, which would otherwise leak across tests in one `bun test` run.
+  const pushConfigured =
+    pushBridgeOpt !== false ||
+    vapidKeysPath != null ||
+    pushSubscriptionsDbPath != null;
+  let vapidKeys: VapidKeys | null = null;
+  if (pushConfigured) {
+    const pushSubsDbPath =
+      pushSubscriptionsDbPath ?? `${CATALYST_DIR}/push-subscriptions.db`;
+    const vapidPath = vapidKeysPath ?? `${CATALYST_DIR}/vapid-keys.json`;
+    vapidKeys = loadOrCreateVapidKeys(vapidPath);
+    pushStore.openDb(pushSubsDbPath);
+    webpush.setVapidDetails(
+      "mailto:catalyst@localhost",
+      vapidKeys.publicKey,
+      vapidKeys.privateKey,
     );
   }
 
@@ -1386,6 +1432,24 @@ export function createServer(opts: CreateServerOptions): BunServer {
   // synchronous per-request scan of the source signal files.
   const assembleNavSignal = async (board: BoardPayload): Promise<NavSignal> =>
     deriveNavSignal(board, { daemon: await readDaemonHealth() });
+
+  // CTL-1167: adapt a BoardPayload to the ProjectorBoard shape needed by the
+  // notification projector (shared by the SSE stream + the push bridge).
+  const toProjectorBoard = async (board: BoardPayload): Promise<ProjectorBoard> => {
+    const nav = await assembleNavSignal(board);
+    return {
+      tickets: board.tickets.map((t) => ({
+        id: t.id,
+        attention: t.attention,
+        attentionSince: t.attentionSince,
+        // humanQuestion lives in explanation.call_to_action (CTL-1130).
+        humanQuestion: t.explanation?.call_to_action ?? undefined,
+        title: t.title,
+      })),
+      daemon: nav.daemon,
+      anomaly: nav.anomaly,
+    };
+  };
 
   // CTL-898 (SHELL8): the per-node cluster-health projection for the footer +
   // node filter. The cluster VIEW (owner_host grouping + heartbeat liveness
@@ -3934,6 +3998,131 @@ export function createServer(opts: CreateServerOptions): BunServer {
           });
         }
 
+        // CTL-1167: serve the VAPID public key so the browser can build the
+        // applicationServerKey for pushManager.subscribe(). 503 when push was
+        // never initialized for this server instance (push not configured).
+        if (url.pathname === "/api/notifications/vapid-public-key") {
+          if (!vapidKeys) {
+            return new Response("push not configured", { status: 503 });
+          }
+          return new Response(vapidKeys.publicKey, {
+            headers: { "Content-Type": "text/plain" },
+          });
+        }
+
+        // CTL-1167: persist a browser push subscription (POST body is the
+        // serialised PushSubscription JSON from the browser). Returns 201 on
+        // success; 400 on missing/invalid fields.
+        if (url.pathname === "/api/notifications/subscribe" && req.method === "POST") {
+          if (!vapidKeys) {
+            return new Response("push not configured", { status: 503 });
+          }
+          let body: unknown;
+          try {
+            body = await req.json();
+          } catch {
+            return new Response("invalid JSON", { status: 400 });
+          }
+          const sub = body as Record<string, unknown>;
+          const keys = sub?.keys as Record<string, unknown> | undefined;
+          if (
+            typeof sub?.endpoint !== "string" ||
+            !sub.endpoint ||
+            typeof keys?.p256dh !== "string" ||
+            !keys.p256dh ||
+            typeof keys?.auth !== "string" ||
+            !keys.auth
+          ) {
+            return new Response("missing endpoint, keys.p256dh or keys.auth", {
+              status: 400,
+            });
+          }
+          pushStore.upsertSubscription({
+            endpoint: sub.endpoint,
+            keys: { p256dh: keys.p256dh, auth: keys.auth },
+          });
+          return new Response(null, { status: 201 });
+        }
+
+        // CTL-1167: SSE stream of novel push-worthy notifications. Mirrors
+        // /api/nav/stream: one per-connection projector, subscribe-first, emit on
+        // every board recompute that yields new notifications. Each event:
+        //   event: notification\ndata: {title,body,deepLink}\n\n
+        if (url.pathname === "/api/notifications/stream") {
+          let unsubNotif: (() => void) | null = null;
+          let closedNotif = false;
+          const notifProjector = createNotificationProjector();
+          const emitNotifications = (
+            controller: ReadableStreamDefaultController<Uint8Array>,
+            pb: ProjectorBoard,
+          ) => {
+            if (closedNotif) return;
+            for (const n of notifProjector.project(pb)) {
+              try {
+                controller.enqueue(
+                  encoder.encode(
+                    `event: notification\ndata: ${JSON.stringify(n)}\n\n`,
+                  ),
+                );
+              } catch {
+                unsubNotif?.();
+                unsubNotif = null;
+              }
+            }
+          };
+          const notifStream = new ReadableStream<Uint8Array>({
+            async start(controller) {
+              // Emit an immediate `open` frame so the connection is live even
+              // when the fleet yields no notifications. Without a first chunk,
+              // Bun does not resolve fetch()'s response headers (the client —
+              // and the route tests — would hang). Mirrors /api/beliefs/stream.
+              try {
+                controller.enqueue(
+                  encoder.encode(
+                    `event: open\ndata: ${JSON.stringify({ source: "notifications" })}\n\n`,
+                  ),
+                );
+              } catch {
+                closedNotif = true;
+                return;
+              }
+              unsubNotif = boardSnapshot.subscribe((snap) => {
+                // Fire-and-forget projection: a rejected chain here would become
+                // an unhandled rejection (and stall bun:test), so swallow it.
+                void toProjectorBoard(snap)
+                  .then((pb) => emitNotifications(controller, pb))
+                  .catch((err) => {
+                    console.error(
+                      `[server] notifications stream projection failed:`,
+                      err,
+                    );
+                  });
+              });
+              try {
+                emitNotifications(
+                  controller,
+                  await toProjectorBoard(await boardSnapshot.getLatest()),
+                );
+              } catch (err) {
+                console.error(`[server] notifications stream initial emit failed:`, err);
+              }
+            },
+            cancel() {
+              closedNotif = true;
+              unsubNotif?.();
+              unsubNotif = null;
+            },
+          });
+          return new Response(notifStream, {
+            headers: {
+              "Content-Type": "text/event-stream",
+              "Cache-Control": "no-cache",
+              Connection: "keep-alive",
+              "Access-Control-Allow-Origin": "*",
+            },
+          });
+        }
+
         // CTL-967 (N5): read-only SSE feed of new belief rows from
         // ~/catalyst/beliefs.db, tailed by a BeliefTail cursor. Each SSE
         // event carries a single belief row (joined with tick.ts_ms/host) in
@@ -4321,6 +4510,31 @@ export function createServer(opts: CreateServerOptions): BunServer {
     serviceHealth.start();
   }
 
+  // CTL-1167: start the server-side push bridge. Gated on pushBridgeOpt so
+  // tests can disable it with { pushBridge: false }. The bridge subscribes to
+  // boardSnapshot in-process (subscriber-gated — zero cost when no subscriptions
+  // are stored) and sends Web Push to every stored subscription for each novel
+  // notification the projector yields.
+  if (pushBridgeOpt !== false) {
+    const bridge = createPushBridge({
+      store: pushStore,
+      projector: createNotificationProjector(),
+    });
+    // Register the unsubscribe so server.stop() tears the bridge down BEFORE it
+    // calls pushStore.closeDb(). Otherwise an orphaned board subscription on the
+    // process-global event bus fires after the singleton db is closed and throws
+    // "Database not opened" as an unhandled rejection (it would stall bun:test).
+    unsubscribers.push(
+      boardSnapshot.subscribe((snap) => {
+        void toProjectorBoard(snap)
+          .then((pb) => bridge.onBoard(pb))
+          .catch((err) => {
+            console.error("[server] push bridge onBoard failed:", err);
+          });
+      }),
+    );
+  }
+
   if (webhookConfig && webhookHandler) {
     const tunnelTarget =
       webhookConfig.target ?? `http://localhost:${server.port}/api/webhook`;
@@ -4417,6 +4631,7 @@ export function createServer(opts: CreateServerOptions): BunServer {
     void webhookTunnel?.stop();
     void linearWebhookTunnel?.stop();
     closeDb();
+    pushStore.closeDb();
     sseClients.clear();
     clearInterval(titleDescSweepTimer);
     if (anchorPollTimer) clearInterval(anchorPollTimer); // CTL-1251 anchor poll
