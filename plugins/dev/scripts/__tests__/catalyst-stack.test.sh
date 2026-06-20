@@ -374,6 +374,19 @@ run "install-services --print injects HOME + catalyst bin on PATH" bash -c "
   '${STACK}' install-services --print 2>&1 | grep -q '.catalyst/bin'
 "
 
+# CTL-1289: the daemon shells out to linearis/node/claude every tick; on a
+# joined member those live under ~/.local. The stack plist PATH must include the
+# member's npm/user prefix, and must STILL carry homebrew/system dirs (seed
+# no-regression — the seed resolves its tools from homebrew).
+run "install-services --print: stack plist PATH includes ~/.local member prefix (CTL-1289)" bash -c "
+  out=\$('${STACK}' install-services --print 2>&1)
+  path_line=\$(printf '%s\n' \"\$out\" | awk '/ai.coalesce.catalyst-stack/{found=1} found' | grep -A1 '<key>PATH</key>' | tail -1)
+  printf '%s' \"\$path_line\" | grep -q '.local/node/bin' &&
+  printf '%s' \"\$path_line\" | grep -q '.local/bin' &&
+  printf '%s' \"\$path_line\" | grep -q '/opt/homebrew/bin' &&
+  printf '%s' \"\$path_line\" | grep -q '/usr/bin'
+"
+
 run "install-services --print is side-effect-free (writes no plist)" bash -c "
   fh='${SCRATCH}/se_home'; mkdir -p \"\$fh/Library/LaunchAgents\";
   HOME=\"\$fh\" '${STACK}' install-services --print >/dev/null 2>&1;

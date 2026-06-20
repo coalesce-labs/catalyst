@@ -532,12 +532,25 @@ do_provision_thoughts() {
   fi
   # provision-thoughts failed — usually push-auth (an M2 precondition), not the
   # clone. If the primary thoughts repo is present AND has a usable HEAD (a real
-  # read-OK clone, not a partial/interrupted one), a Stage-0 SHADOW node can
-  # proceed; push auth must be verified-green before M2 activation. Else fail.
+  # read-OK clone, not a partial/interrupted one), severity depends on whether
+  # this node will own work.
   local primary="${CATALYST_DIR:-$HOME/catalyst}/hlt/coalesce-labs/thoughts"
   if [[ -d "$primary/.git" ]] && git -C "$primary" rev-parse --verify -q HEAD >/dev/null 2>&1; then
-    warn "provision-thoughts: clone OK but push-auth/verify incomplete — acceptable for Stage-0 SHADOW."
-    warn "Configure CATALYST_JOIN_GITHUB_TOKEN (or 'gh auth login') and re-run before M2 activation."
+    # CTL-1293: a multiHost MEMBER (roster>1) WILL own HRW work, and a worker
+    # that can't push thoughts strands its research/learnings/handoffs (peers
+    # never see them) — so an unverified push is a HARD blocker, not a warning.
+    # A single-host / Stage-0 SHADOW node (roster<=1) owns no work and has no
+    # peers to sync to, so it may warn-and-proceed. The previous unconditional
+    # "acceptable for SHADOW" downgrade was the silent strand.
+    local pt_roster_len
+    pt_roster_len="$(echo "$BUNDLE_JSON" | jq '(.hostsRoster // []) | length' 2>/dev/null)"
+    if [[ "${pt_roster_len:-0}" -gt 1 ]]; then
+      fail "provision-thoughts: clone OK but push-auth UNVERIFIED on a multiHost member (roster=${pt_roster_len})."
+      fail "A member that owns work MUST sync thoughts to peers. Set CATALYST_JOIN_GITHUB_TOKEN (or 'gh auth login') and re-run."
+      return 1
+    fi
+    warn "provision-thoughts: clone OK but push-auth/verify incomplete — acceptable for single-host/Stage-0 SHADOW."
+    warn "Configure CATALYST_JOIN_GITHUB_TOKEN (or 'gh auth login') and re-run before activating as a member."
     return 0
   fi
   fail "provision-thoughts failed before a usable primary thoughts clone. Check GitHub auth / network."
@@ -594,6 +607,30 @@ merge_shared_config() {
       | .catalyst.layer1Identity.stateMap //= $la_statemap
     ' "$cfg" > "$tmp" && mv "$tmp" "$cfg" || { rm -f "$tmp"; return 1; }
   info "SHARED config merged into ${cfg}"
+
+  # CTL-1284: webhook ingestion wiring (non-secret smee channels + per-team
+  # webhookId map; HMAC secrets travel via SOPS/cluster-sync, not the bundle).
+  # GATED on multiHost — roster length > 1. At roster length 1, HRW is an
+  # identity no-op AND claimDispatch is skipped, so a single node ingesting
+  # webhooks would actuate every inbound event → double-dispatch. The bundle's
+  # hostsRoster is the conservative, present-at-config-merge-time signal (the
+  # live resolveClusterHosts() may not yet see the cluster-repo roster here).
+  local roster_len monitor_wh
+  roster_len="$(echo "$BUNDLE_JSON" | jq '(.hostsRoster // []) | length')"
+  monitor_wh="$(echo "$BUNDLE_JSON" | jq '.monitorWebhooks // null')"
+  if [[ "${roster_len:-0}" -gt 1 && "$monitor_wh" != "null" ]]; then
+    local tmp2
+    tmp2="$(mktemp "$(dirname "$cfg")/.config.XXXXXX")"
+    # Deep-merge ($wh * existing): existing node-local values WIN (non-clobber),
+    # new keys from the bundle are added.
+    jq --argjson wh "$monitor_wh" '
+        .catalyst //= {}
+        | .catalyst.monitor = ($wh * (.catalyst.monitor // {}))
+      ' "$cfg" > "$tmp2" && mv "$tmp2" "$cfg" || { rm -f "$tmp2"; return 1; }
+    info "webhook ingestion wired (multiHost roster=${roster_len})"
+  else
+    info "webhook ingestion NOT wired (roster=${roster_len:-0}) — single-host double-dispatch guard"
+  fi
 }
 
 persist_host_name() {
@@ -617,6 +654,56 @@ persist_host_name() {
   # a polluted multi-line value and local-hosts.json became
   # ["[join] host.name set to: <h>\n<h>"] instead of ["<h>"] (verify HIGH finding).
   PERSISTED_HOST_NAME="$host_name"
+}
+
+# CTL-1231: provision ~/.claude/settings.json (telemetry posture + autonomy
+# defaults) and the daemon's OTLP endpoint. Runs AFTER persist_host_name so the
+# per-host OTEL_RESOURCE_ATTRIBUTES can be synthesized from PERSISTED_HOST_NAME.
+provision_claude_settings() {
+  local host_name="$1"
+  [[ -n "$host_name" ]] || { warn "provision_claude_settings: empty host name — skipping"; return 0; }
+  local settings_dir="$HOME/.claude"
+  local settings="$settings_dir/settings.json"
+  local cs otlp
+  cs="$(echo "$BUNDLE_JSON" | jq '.claudeSettings // null')"
+  otlp="$(bundle_get '.otlpEndpointHint')"
+
+  mkdir -p "$settings_dir"
+  [[ -f "$settings" ]] || echo '{}' > "$settings"
+
+  local tmp
+  tmp="$(mktemp "${settings_dir}/.settings.XXXXXX")"
+  # Deep-merge the shared slice UNDER the existing file ($shared * existing →
+  # existing wins, non-clobber so a hand-tuned member file is preserved), then
+  # ALWAYS synthesize the per-host OTEL_RESOURCE_ATTRIBUTES (never copy the
+  # seed's host.name) and set the OTLP endpoint with //= (member override wins).
+  jq \
+    --argjson cs "$cs" \
+    --arg host "$host_name" \
+    --arg otlp "$otlp" \
+    '
+      ( if $cs == null then {} else $cs end ) as $shared
+      | ($shared * .)
+      | .env //= {}
+      | .env.OTEL_RESOURCE_ATTRIBUTES = ("host.name=" + $host)
+      | ( if $otlp != "" then .env.OTEL_EXPORTER_OTLP_ENDPOINT //= $otlp else . end )
+    ' "$settings" > "$tmp" && mv "$tmp" "$settings" || { rm -f "$tmp"; return 1; }
+  chmod 0644 "$settings" 2>/dev/null || true
+  info "~/.claude/settings.json provisioned (host.name=${host_name})"
+
+  # Daemon-context endpoint: the launchd execution-core daemon and the
+  # bg-workers it spawns read OTEL_EXPORTER_OTLP_ENDPOINT from this env file, NOT
+  # from settings.json. Unset → all worker telemetry exports nowhere. Append
+  # only when absent — NEVER overwrite (preserves proxy/CA lines, etc.).
+  if [[ -n "$otlp" ]]; then
+    local ec_env="$HOME/.config/catalyst/execution-core.env"
+    mkdir -p "$(dirname "$ec_env")"
+    touch "$ec_env"
+    if ! grep -q '^OTEL_EXPORTER_OTLP_ENDPOINT=' "$ec_env" 2>/dev/null; then
+      printf 'OTEL_EXPORTER_OTLP_ENDPOINT=%s\n' "$otlp" >> "$ec_env"
+      info "daemon OTLP endpoint written to execution-core.env"
+    fi
+  fi
 }
 
 write_local_roster() {
@@ -647,6 +734,7 @@ do_config_merge() {
   # the captured value. Same shell — run_stage calls "$@" directly, no subshell.
   PERSISTED_HOST_NAME=""
   persist_host_name || return 1
+  provision_claude_settings "$PERSISTED_HOST_NAME" || return 1
   write_local_roster "$PERSISTED_HOST_NAME" || return 1
 }
 

@@ -3,7 +3,7 @@
 //
 // Run: cd plugins/dev/scripts/execution-core && bun test doctor.test.mjs
 
-import { describe, it, expect } from "bun:test";
+import { describe, it, expect, beforeEach, afterEach } from "bun:test";
 import {
   STATUS,
   mkCheck,
@@ -13,6 +13,10 @@ import {
   checkBotCredentials,
   checkConnectivity,
   checkSecretsHygiene,
+  checkDaemonToolPath,
+  checkWebhookIngestion,
+  checkThoughts,
+  checkClaudeSettings,
   summarize,
   renderJson,
   renderHuman,
@@ -514,6 +518,293 @@ describe("checkSecretsHygiene", () => {
     expect(checks.find((c) => c.name === "layer2-perms")?.status).toBe(STATUS.INFO);
     expect(checks.find((c) => c.name === "config-not-in-git")?.status).toBe(STATUS.INFO);
     expect(checks.find((c) => c.name === "no-secrets-in-layer1")?.status).toBe(STATUS.PASS);
+  });
+});
+
+// ─── Phase 5b: checkDaemonToolPath (CTL-1289) ────────────────────────────────
+
+describe("checkDaemonToolPath", () => {
+  const GOOD_PATH = "/Users/x/.local/node/bin:/Users/x/.local/bin:/usr/bin";
+
+  it("WARNs when no installed launchd plist is found (daemonPath null)", () => {
+    const checks = checkDaemonToolPath({ daemonPath: null });
+    expect(checks).toHaveLength(1);
+    expect(checks[0].name).toBe("daemon-tool-path");
+    expect(checks[0].status).toBe(STATUS.WARN);
+  });
+
+  it("FAILs when the daemon PATH cannot resolve a required CLI", () => {
+    const checks = checkDaemonToolPath({
+      daemonPath: GOOD_PATH,
+      resolveInPath: (cmd) => cmd !== "linearis", // linearis missing
+      smokeProbe: () => 0,
+    });
+    expect(checks[0].status).toBe(STATUS.FAIL);
+    expect(checks[0].detail).toContain("linearis");
+    expect(checks[0].detail).toContain("exit-127");
+  });
+
+  it("FAILs on the exit-127 strand signature even when all CLIs resolve", () => {
+    const checks = checkDaemonToolPath({
+      daemonPath: GOOD_PATH,
+      resolveInPath: () => true,
+      smokeProbe: (cmd) => (cmd === "linearis" ? 127 : 0),
+    });
+    expect(checks[0].status).toBe(STATUS.FAIL);
+    expect(checks[0].detail).toContain("linearis");
+    expect(checks[0].detail).toContain("127");
+  });
+
+  it("does NOT FAIL on a non-127 exit (auth/network failure is not a strand)", () => {
+    const checks = checkDaemonToolPath({
+      daemonPath: GOOD_PATH,
+      resolveInPath: () => true,
+      smokeProbe: () => 1, // e.g. linearis ran but had no token
+    });
+    expect(checks[0].status).toBe(STATUS.PASS);
+  });
+
+  it("PASSes when all CLIs resolve and run without exit-127", () => {
+    const probed = [];
+    const checks = checkDaemonToolPath({
+      daemonPath: GOOD_PATH,
+      resolveInPath: () => true,
+      smokeProbe: (cmd) => { probed.push(cmd); return 0; },
+    });
+    expect(checks[0].status).toBe(STATUS.PASS);
+    // smoke-probes linearis + claude (node is resolution-only)
+    expect(probed).toEqual(["linearis", "claude"]);
+  });
+});
+
+// ─── Phase 5c: checkWebhookIngestion (CTL-1284) ──────────────────────────────
+
+describe("checkWebhookIngestion", () => {
+  // Isolate the env-var secret fallbacks the check honors (matching
+  // webhook-config.ts) so a dev shell with these set can't mask a dangling key.
+  const SECRET_ENVS = ["CATALYST_WEBHOOK_SECRET", "CATALYST_LINEAR_WEBHOOK_SECRET"];
+  let savedEnv = {};
+  beforeEach(() => {
+    for (const k of SECRET_ENVS) { savedEnv[k] = process.env[k]; delete process.env[k]; }
+  });
+  afterEach(() => {
+    for (const k of SECRET_ENVS) {
+      if (savedEnv[k] === undefined) delete process.env[k];
+      else process.env[k] = savedEnv[k];
+    }
+  });
+
+  const singleHost = () => ({ hosts: ["mini"], source: "single-host", multiHost: false });
+  const multiHost = () => ({ hosts: ["mini", "mini-2"], source: "cluster-repo", multiHost: true });
+  const noSecrets = () => false;
+  const allSecrets = () => true;
+
+  it("PASSes a single-host node regardless of monitor config (double-dispatch guard)", () => {
+    const checks = checkWebhookIngestion({
+      resolveRoster: singleHost,
+      monitor: null,
+      secretFileNonEmpty: noSecrets,
+    });
+    expect(checks[0].name).toBe("webhook-ingestion");
+    expect(checks[0].status).toBe(STATUS.PASS);
+    expect(checks[0].detail).toContain("single-host");
+  });
+
+  it("FAILs a multiHost node with no webhook route enabled", () => {
+    const checks = checkWebhookIngestion({
+      resolveRoster: multiHost,
+      monitor: { github: { smeeChannel: "" }, linear: {} },
+      secretFileNonEmpty: noSecrets,
+    });
+    expect(checks[0].status).toBe(STATUS.FAIL);
+    expect(checks[0].detail).toContain("NO webhook route");
+  });
+
+  it("PASSes a multiHost node with the GitHub route fully wired", () => {
+    const checks = checkWebhookIngestion({
+      resolveRoster: multiHost,
+      monitor: { github: { smeeChannel: "https://smee.io/GH" } },
+      secretFileNonEmpty: (_dir, name) => name === "webhook-secret",
+    });
+    expect(checks[0].status).toBe(STATUS.PASS);
+  });
+
+  it("PASSes a multiHost node with a keyed Linear route fully wired", () => {
+    const checks = checkWebhookIngestion({
+      resolveRoster: multiHost,
+      monitor: { linear: { smeeChannel: "https://smee.io/LIN", ctl: { webhookId: "wh-ctl" } } },
+      secretFileNonEmpty: (_dir, name) => name === "linear-webhook-secret-ctl",
+    });
+    expect(checks[0].status).toBe(STATUS.PASS);
+    expect(checks[0].detail).toContain("linear keys=1");
+  });
+
+  it("FAILs a multiHost node with a half-wired webhookId (id set, secret file missing)", () => {
+    const checks = checkWebhookIngestion({
+      resolveRoster: multiHost,
+      // github route IS wired (so the failure is specifically the dangling key)
+      monitor: {
+        github: { smeeChannel: "https://smee.io/GH" },
+        linear: { smeeChannel: "https://smee.io/LIN", ctl: { webhookId: "wh-ctl" } },
+      },
+      secretFileNonEmpty: (_dir, name) => name === "webhook-secret", // ctl secret absent
+    });
+    expect(checks[0].status).toBe(STATUS.FAIL);
+    expect(checks[0].detail).toContain("half-wired");
+    expect(checks[0].detail).toContain("ctl");
+  });
+
+  it("PASSes when all routes and keyed secrets resolve", () => {
+    const checks = checkWebhookIngestion({
+      resolveRoster: multiHost,
+      monitor: {
+        github: { smeeChannel: "https://smee.io/GH" },
+        linear: { smeeChannel: "https://smee.io/LIN", ctl: { webhookId: "wh-ctl" }, adv: { webhookId: "wh-adv" } },
+      },
+      secretFileNonEmpty: allSecrets,
+    });
+    expect(checks[0].status).toBe(STATUS.PASS);
+    expect(checks[0].detail).toContain("linear keys=2");
+  });
+});
+
+// ─── Phase 5d: checkThoughts (CTL-1293) ──────────────────────────────────────
+
+describe("checkThoughts", () => {
+  const single = () => ({ hosts: ["mini"], source: "single-host", multiHost: false });
+  const multi = () => ({ hosts: ["mini", "mini-2"], source: "cluster-repo", multiHost: true });
+  const cleanHl = () => ({
+    thoughts: {
+      thoughtsRepo: "/Users/x/catalyst/hlt/coalesce-labs/thoughts",
+      defaultProfile: "coalesce-labs",
+      repoMappings: { "/Users/x/repo": { repo: "catalyst-workspace", profile: "coalesce-labs" } },
+    },
+  });
+  const okClone = () => true;
+
+  const verdict = (checks, name) => checks.find((c) => c.name === name)?.status;
+
+  it("PASSes a single-host node regardless of thoughts state (not gating)", () => {
+    const checks = checkThoughts({ resolveRoster: single, readHumanlayer: () => null });
+    expect(checks[0].name).toBe("thoughts");
+    expect(checks[0].status).toBe(STATUS.PASS);
+    expect(checks[0].detail).toContain("single-host");
+  });
+
+  it("FAILs a multiHost member with no humanlayer.json", () => {
+    const checks = checkThoughts({ resolveRoster: multi, readHumanlayer: () => null });
+    expect(checks[0].status).toBe(STATUS.FAIL);
+    expect(checks[0].detail).toContain("humanlayer.json");
+  });
+
+  it("FAILs a multiHost member whose primary resolves to a foreign repo (groundworkapp guard)", () => {
+    const checks = checkThoughts({
+      resolveRoster: multi,
+      readHumanlayer: () => ({
+        thoughts: {
+          thoughtsRepo: "/Users/x/catalyst/hlt/groundworkapp/thoughts",
+          defaultProfile: "rightsite-cloud",
+          repoMappings: { "/r": { repo: "x", profile: "rightsite-cloud" } },
+        },
+      }),
+      cloneOk: okClone,
+    });
+    expect(verdict(checks, "thoughts-primary")).toBe(STATUS.FAIL);
+    expect(checks.find((c) => c.name === "thoughts-primary").detail).toMatch(/foreign|groundworkapp/i);
+  });
+
+  it("FAILs a multiHost member with empty repoMappings", () => {
+    const checks = checkThoughts({
+      resolveRoster: multi,
+      readHumanlayer: () => ({
+        thoughts: {
+          thoughtsRepo: "/Users/x/catalyst/hlt/coalesce-labs/thoughts",
+          defaultProfile: "coalesce-labs",
+          repoMappings: {},
+        },
+      }),
+      cloneOk: okClone,
+    });
+    expect(verdict(checks, "thoughts-repo-mappings")).toBe(STATUS.FAIL);
+  });
+
+  it("FAILs a multiHost member whose primary hlt clone is missing", () => {
+    const checks = checkThoughts({
+      resolveRoster: multi,
+      readHumanlayer: cleanHl,
+      cloneOk: () => false,
+    });
+    expect(verdict(checks, "thoughts-clone")).toBe(STATUS.FAIL);
+  });
+
+  it("PASSes a fully-provisioned multiHost member", () => {
+    const checks = checkThoughts({ resolveRoster: multi, readHumanlayer: cleanHl, cloneOk: okClone });
+    expect(verdict(checks, "thoughts-primary")).toBe(STATUS.PASS);
+    expect(verdict(checks, "thoughts-repo-mappings")).toBe(STATUS.PASS);
+    expect(verdict(checks, "thoughts-clone")).toBe(STATUS.PASS);
+    expect(checks.every((c) => c.status === STATUS.PASS)).toBe(true);
+  });
+});
+
+// ─── Phase 5e: checkClaudeSettings (CTL-1231) ────────────────────────────────
+
+describe("checkClaudeSettings", () => {
+  const single = () => ({ hosts: ["mini"], source: "single-host", multiHost: false });
+  const multi = () => ({ hosts: ["mini", "mini-2"], source: "cluster-repo", multiHost: true });
+  const host = () => "mini-2";
+  const verdict = (checks, name) => checks.find((c) => c.name === name)?.status;
+
+  it("PASSes a single-host node regardless of settings (not gating)", () => {
+    const checks = checkClaudeSettings({ resolveRoster: single, readSettings: () => null });
+    expect(checks[0].name).toBe("claude-settings");
+    expect(checks[0].status).toBe(STATUS.PASS);
+  });
+
+  it("FAILs a multiHost member with no settings.json", () => {
+    const checks = checkClaudeSettings({ resolveRoster: multi, readSettings: () => null, getHost: host });
+    expect(checks[0].status).toBe(STATUS.FAIL);
+    expect(checks[0].detail).toContain("settings.json");
+  });
+
+  it("FAILs when host.name is not pinned for this host", () => {
+    const checks = checkClaudeSettings({
+      resolveRoster: multi,
+      getHost: host,
+      readSettings: () => ({ env: { OTEL_RESOURCE_ATTRIBUTES: "host.name=laptop", OTEL_EXPORTER_OTLP_ENDPOINT: "http://o:4317" } }),
+      daemonEnvHasOtlp: () => true,
+    });
+    expect(verdict(checks, "claude-settings-host")).toBe(STATUS.FAIL);
+  });
+
+  it("FAILs when OTLP endpoint is unset in both settings.json and daemon env", () => {
+    const checks = checkClaudeSettings({
+      resolveRoster: multi,
+      getHost: host,
+      readSettings: () => ({ env: { OTEL_RESOURCE_ATTRIBUTES: "host.name=mini-2" } }),
+      daemonEnvHasOtlp: () => false,
+    });
+    expect(verdict(checks, "claude-settings-otlp")).toBe(STATUS.FAIL);
+  });
+
+  it("PASSes when OTLP endpoint is set only in the daemon env file", () => {
+    const checks = checkClaudeSettings({
+      resolveRoster: multi,
+      getHost: host,
+      readSettings: () => ({ env: { OTEL_RESOURCE_ATTRIBUTES: "host.name=mini-2" } }),
+      daemonEnvHasOtlp: () => true,
+    });
+    expect(verdict(checks, "claude-settings-host")).toBe(STATUS.PASS);
+    expect(verdict(checks, "claude-settings-otlp")).toBe(STATUS.PASS);
+  });
+
+  it("PASSes a fully-provisioned member (host pinned + settings.json endpoint)", () => {
+    const checks = checkClaudeSettings({
+      resolveRoster: multi,
+      getHost: host,
+      readSettings: () => ({ env: { OTEL_RESOURCE_ATTRIBUTES: "host.name=mini-2", OTEL_EXPORTER_OTLP_ENDPOINT: "http://o:4317" } }),
+      daemonEnvHasOtlp: () => false,
+    });
+    expect(checks.every((c) => c.status === STATUS.PASS)).toBe(true);
   });
 });
 

@@ -724,6 +724,436 @@ export function checkSecretsHygiene(deps = {}) {
   return checks;
 }
 
+// ─── Phase 5: Daemon-runtime tool PATH (CTL-1289) ────────────────────────────
+
+// The execution-core daemon is NOT pure OAuth — it shells out to `linearis`
+// (reconcile), `claude` (liveness snapshot) and `node` (linearis's
+// `#!/usr/bin/env node` runtime) every tick. On a `catalyst-join`-joined member
+// those CLIs live under ~/.local/{bin,node/bin}; if the launchd daemon's PATH
+// omits them, every spawn exit-127s and the node strands SILENTLY — it boots
+// clean, emits heartbeats, shows `owns N`, but reconcile freezes, the liveness
+// snapshot never warms (freeSlots=0 → new-work held) and the GC/reaper sweeps
+// fail-closed. This check is the load-bearing daemon-context assertion: it
+// resolves the three CLIs against the DAEMON's PATH — the installed launchd
+// plist's <key>PATH</key>, NOT process.env.PATH, which the join shell enriches
+// (catalyst-join.sh:719) and would FALSE-PASS — and FAILs (not WARNs) so the
+// activation gate fail-closes instead of stranding.
+
+// defaultDaemonPath — extract the PATH the launchd daemon actually runs with,
+// from the installed catalyst-stack plist. Tests the persisted state, so a
+// stale plist (installed before the CTL-1289 fix) is caught. null = not installed.
+function defaultDaemonPath() {
+  const plist = resolve(
+    homedir(), "Library", "LaunchAgents", "ai.coalesce.catalyst-stack.plist",
+  );
+  try {
+    const xml = readFileSync(plist, "utf8");
+    const m = xml.match(/<key>PATH<\/key>\s*<string>([^<]*)<\/string>/);
+    return m ? m[1] : null;
+  } catch {
+    return null;
+  }
+}
+
+// defaultResolveInPath — does `cmd` resolve to an executable under `pathStr`?
+// Uses `command -v` with positional args (no shell injection).
+function defaultResolveInPath(cmd, pathStr) {
+  const r = spawnSync("sh", ["-c", 'command -v "$1" >/dev/null 2>&1', "sh", cmd], {
+    timeout: 5_000,
+    env: { ...process.env, PATH: pathStr },
+  });
+  return r.status === 0;
+}
+
+// defaultSmokeProbe — run `cmd args` under `pathStr` and return the exit code.
+// ENOENT (cmd itself absent) maps to 127; the caller only cares whether the
+// result is the 127 strand signature (a shelled-out dependency unresolved).
+// Auth/network failures surface as a NON-127 exit, so they never false-FAIL.
+function defaultSmokeProbe(cmd, args, pathStr) {
+  const r = spawnSync(cmd, args, {
+    timeout: 12_000,
+    env: { ...process.env, PATH: pathStr },
+  });
+  if (r.error) return r.error.code === "ENOENT" ? 127 : -1;
+  return r.status;
+}
+
+// checkDaemonToolPath — assert the daemon's launchd PATH can resolve and run the
+// CLIs it shells out to. Injectable deps for unit testing.
+export function checkDaemonToolPath(deps = {}) {
+  const {
+    daemonPath = defaultDaemonPath(),
+    resolveInPath = defaultResolveInPath,
+    smokeProbe = defaultSmokeProbe,
+    tools = ["linearis", "node", "claude"],
+  } = deps;
+
+  if (!daemonPath) {
+    return [
+      mkCheck(
+        "daemon-tool-path",
+        STATUS.WARN,
+        "no installed catalyst-stack launchd plist found — cannot assert the daemon's PATH; run `catalyst-stack install-services`",
+      ),
+    ];
+  }
+
+  const missing = tools.filter((t) => !resolveInPath(t, daemonPath));
+  if (missing.length > 0) {
+    return [
+      mkCheck(
+        "daemon-tool-path",
+        STATUS.FAIL,
+        `daemon launchd PATH cannot resolve: ${missing.join(", ")} — the daemon shells out to these every tick; missing → exit-127 silent strand (frozen eligible set, freeSlots=0). PATH=${daemonPath}`,
+      ),
+    ];
+  }
+
+  // All resolve — smoke-probe that they don't exit-127 under the daemon PATH
+  // (catches e.g. linearis resolving but its node runtime not, or a broken wrapper).
+  const probes = [
+    ["linearis", ["issues", "list", "-l", "1"]],
+    ["claude", ["agents", "--json"]],
+  ].filter(([cmd]) => tools.includes(cmd));
+  const exit127 = probes
+    .filter(([cmd, args]) => smokeProbe(cmd, args, daemonPath) === 127)
+    .map(([cmd]) => cmd);
+
+  if (exit127.length > 0) {
+    return [
+      mkCheck(
+        "daemon-tool-path",
+        STATUS.FAIL,
+        `${exit127.join(", ")} exit-127 under the daemon PATH (a shelled-out dependency is unresolved) — the precise strand signature`,
+      ),
+    ];
+  }
+
+  return [
+    mkCheck(
+      "daemon-tool-path",
+      STATUS.PASS,
+      `daemon launchd PATH resolves linearis/node/claude and they run (no exit-127)`,
+    ),
+  ];
+}
+
+// ─── Phase 5c: Webhook ingestion (CTL-1284) ──────────────────────────────────
+
+// A `catalyst-join`-joined MEMBER must ingest inbound GitHub/Linear webhooks —
+// without them monitor-merge CI-waits and comment-wakes degrade to polling. But
+// a SINGLE-host node must NOT ingest: at roster length 1 HRW is an identity
+// no-op and claimDispatch is skipped, so a lone node would actuate every inbound
+// event → double-dispatch. This check asserts: single-host → PASS (ingestion
+// legitimately off); multiHost → at least one webhook route is FULLY wired (smee
+// channel + matching HMAC secret on disk), with no half-wired webhookId (id
+// configured but secret file missing). FAILs so the activation gate fail-closes.
+
+function defaultWebhookConfigDir() {
+  return resolve(homedir(), ".config", "catalyst");
+}
+
+function defaultReadMonitor() {
+  try {
+    const obj = JSON.parse(readFileSync(layer2Path(), "utf8"));
+    return obj?.catalyst?.monitor ?? null;
+  } catch {
+    return null;
+  }
+}
+
+function defaultSecretFileNonEmpty(dir, name) {
+  try {
+    return readFileSync(resolve(dir, name), "utf8").trim().length > 0;
+  } catch {
+    return false;
+  }
+}
+
+export function checkWebhookIngestion(deps = {}) {
+  const {
+    resolveRoster = resolveClusterHosts,
+    monitor = defaultReadMonitor(),
+    configDir = defaultWebhookConfigDir(),
+    secretFileNonEmpty = defaultSecretFileNonEmpty,
+  } = deps;
+
+  const roster = resolveRoster();
+  if (!roster?.multiHost) {
+    return [
+      mkCheck(
+        "webhook-ingestion",
+        STATUS.PASS,
+        "single-host roster — webhook ingestion legitimately disabled (double-dispatch guard)",
+      ),
+    ];
+  }
+
+  const m = monitor ?? {};
+
+  // GitHub route: smee channel + a github HMAC secret (file or env).
+  const ghSmee = typeof m.github?.smeeChannel === "string" ? m.github.smeeChannel : "";
+  const ghSecret =
+    secretFileNonEmpty(configDir, "webhook-secret") ||
+    (process.env.CATALYST_WEBHOOK_SECRET ?? "").length > 0;
+  const githubWired = ghSmee.length > 0 && ghSecret;
+
+  // Linear route: smee channel + ≥1 keyed webhookId whose HMAC secret resolves.
+  const linear =
+    m.linear && typeof m.linear === "object" && !Array.isArray(m.linear) ? m.linear : {};
+  const linSmee = typeof linear.smeeChannel === "string" ? linear.smeeChannel : "";
+  const webhookKeys = Object.keys(linear).filter((k) => {
+    const e = linear[k];
+    return (
+      e && typeof e === "object" && !Array.isArray(e) &&
+      typeof e.webhookId === "string" && e.webhookId.length > 0
+    );
+  });
+  const keySecretWired = (k) =>
+    secretFileNonEmpty(
+      configDir,
+      k === "workspace" ? "linear-webhook-secret" : `linear-webhook-secret-${k}`,
+    ) || (process.env.CATALYST_LINEAR_WEBHOOK_SECRET ?? "").length > 0;
+  const wiredKeys = webhookKeys.filter(keySecretWired);
+  const danglingKeys = webhookKeys.filter((k) => !keySecretWired(k));
+  const linearWired = linSmee.length > 0 && wiredKeys.length > 0;
+
+  if (!githubWired && !linearWired) {
+    return [
+      mkCheck(
+        "webhook-ingestion",
+        STATUS.FAIL,
+        `multiHost member but NO webhook route enabled — github(smee=${ghSmee ? "set" : "unset"},secret=${ghSecret ? "set" : "unset"}) linear(smee=${linSmee ? "set" : "unset"},wiredKeys=${wiredKeys.length}); monitor-merge/comment-wakes will degrade to polling`,
+      ),
+    ];
+  }
+  if (danglingKeys.length > 0) {
+    return [
+      mkCheck(
+        "webhook-ingestion",
+        STATUS.FAIL,
+        `multiHost member with half-wired Linear webhook(s): ${danglingKeys.join(", ")} configured (webhookId) but missing HMAC secret file (linear-webhook-secret-<key>)`,
+      ),
+    ];
+  }
+  return [
+    mkCheck(
+      "webhook-ingestion",
+      STATUS.PASS,
+      `webhook ingestion wired (github=${githubWired}, linear=${linearWired}, linear keys=${wiredKeys.length})`,
+    ),
+  ];
+}
+
+// ─── Phase 5d: Thoughts provisioning (CTL-1293) ──────────────────────────────
+
+// A cluster MEMBER is a full worker: research/learnings/handoffs must sync to
+// peers via the HumanLayer thoughts repo. A half-provisioned thoughts layer
+// strands silently — worse, a missing/legacy humanlayer.json falls back to a
+// FOREIGN repo (groundworkapp / rightsite-cloud), polluting it with catalyst
+// thoughts. This check gates severity on multiHost (a single-host node has no
+// peers to sync to, so thoughts-push is not activation-gating — matches the
+// webhook gate). On a multiHost member it FAILs loudly when humanlayer.json is
+// absent, resolves to a foreign primary, has empty repoMappings (bg agents then
+// fall back to a global/phantom repo), or the primary clone is missing.
+
+function defaultReadHumanlayer() {
+  try {
+    const p = resolve(homedir(), ".config", "humanlayer", "humanlayer.json");
+    return JSON.parse(readFileSync(p, "utf8"));
+  } catch {
+    return null;
+  }
+}
+
+function defaultThoughtsCloneOk(dir) {
+  try {
+    if (!existsSync(resolve(dir, ".git"))) return false;
+    execFileSync("git", ["-C", dir, "rev-parse", "--verify", "-q", "HEAD"], {
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export function checkThoughts(deps = {}) {
+  const {
+    resolveRoster = resolveClusterHosts,
+    readHumanlayer = defaultReadHumanlayer,
+    cloneOk = defaultThoughtsCloneOk,
+  } = deps;
+
+  const roster = resolveRoster();
+  if (!roster?.multiHost) {
+    return [
+      mkCheck(
+        "thoughts",
+        STATUS.PASS,
+        "single-host node — thoughts peer-sync not activation-gating",
+      ),
+    ];
+  }
+
+  const hl = readHumanlayer();
+  const t = hl?.thoughts;
+  if (!t || typeof t !== "object") {
+    return [
+      mkCheck(
+        "thoughts",
+        STATUS.FAIL,
+        "~/.config/humanlayer/humanlayer.json absent or has no .thoughts — a member's research/learnings/handoffs won't sync",
+      ),
+    ];
+  }
+
+  const checks = [];
+  const thoughtsRepo = typeof t.thoughtsRepo === "string" ? t.thoughtsRepo : "";
+  const defaultProfile = typeof t.defaultProfile === "string" ? t.defaultProfile : "";
+
+  // Pollution guard: primary must be coalesce-labs, NEVER a foreign repo. The
+  // global thoughtsRepo fallback defaulting to groundworkapp/rightsite-cloud is
+  // the exact pollution bug (locked invariant: provision-thoughts-invariant.test.sh).
+  if (/groundworkapp|rightsite-cloud/i.test(thoughtsRepo) || /groundworkapp|rightsite-cloud/i.test(defaultProfile)) {
+    checks.push(
+      mkCheck(
+        "thoughts-primary",
+        STATUS.FAIL,
+        `humanlayer.json primary resolves to a FOREIGN repo (thoughtsRepo="${thoughtsRepo}", defaultProfile="${defaultProfile}") — pollutes groundworkapp/rightsite-cloud; must be coalesce-labs`,
+      ),
+    );
+  } else if (/coalesce-labs/i.test(thoughtsRepo) || defaultProfile === "coalesce-labs") {
+    checks.push(mkCheck("thoughts-primary", STATUS.PASS, "humanlayer.json primary = coalesce-labs"));
+  } else {
+    checks.push(
+      mkCheck(
+        "thoughts-primary",
+        STATUS.WARN,
+        `humanlayer.json primary unrecognized (thoughtsRepo="${thoughtsRepo}", defaultProfile="${defaultProfile}")`,
+      ),
+    );
+  }
+
+  // repoMappings non-empty — headless bg agents resolve their thoughts repo from
+  // this map (no direnv); empty → global/phantom-repo fallback.
+  const mappings = t.repoMappings;
+  const mappingCount =
+    mappings && typeof mappings === "object" && !Array.isArray(mappings)
+      ? Object.keys(mappings).length
+      : 0;
+  checks.push(
+    mappingCount > 0
+      ? mkCheck("thoughts-repo-mappings", STATUS.PASS, `repoMappings present (${mappingCount})`)
+      : mkCheck(
+          "thoughts-repo-mappings",
+          STATUS.FAIL,
+          "humanlayer.json repoMappings empty — headless bg agents fall back to a global/phantom repo",
+        ),
+  );
+
+  // Primary clone present (members keep it under ~/catalyst/hlt/<org>/thoughts;
+  // the seed's embedded-clone layout doesn't, so scope this to the hlt/ layout).
+  if (thoughtsRepo.includes("/hlt/")) {
+    checks.push(
+      cloneOk(thoughtsRepo)
+        ? mkCheck("thoughts-clone", STATUS.PASS, "primary thoughts clone present with a valid HEAD")
+        : mkCheck(
+            "thoughts-clone",
+            STATUS.FAIL,
+            `primary thoughts clone missing or corrupt at ${thoughtsRepo} — read-only/partial strand`,
+          ),
+    );
+  }
+
+  return checks;
+}
+
+// ─── Phase 5e: Claude settings.json (CTL-1231) ───────────────────────────────
+
+// catalyst-join never wrote ~/.claude/settings.json, so a member's interactive
+// `claude` sessions lacked the OTLP endpoint + telemetry toggles, and — worse —
+// the per-host OTEL_RESOURCE_ATTRIBUTES host.name pin was unset, so telemetry
+// mis-attributed the host. This check (multiHost-gated, like the others) FAILs a
+// member whose settings.json is absent, doesn't pin host.name=<self>, or has no
+// OTLP endpoint in EITHER settings.json or the daemon env file (the latter is
+// what the launchd daemon + bg-workers actually read).
+
+function defaultReadClaudeSettings() {
+  try {
+    return JSON.parse(readFileSync(resolve(homedir(), ".claude", "settings.json"), "utf8"));
+  } catch {
+    return null;
+  }
+}
+
+function defaultDaemonEnvHasOtlp() {
+  try {
+    const txt = readFileSync(resolve(homedir(), ".config", "catalyst", "execution-core.env"), "utf8");
+    return /^OTEL_EXPORTER_OTLP_ENDPOINT=.+/m.test(txt);
+  } catch {
+    return false;
+  }
+}
+
+export function checkClaudeSettings(deps = {}) {
+  const {
+    resolveRoster = resolveClusterHosts,
+    readSettings = defaultReadClaudeSettings,
+    getHost = getHostName,
+    daemonEnvHasOtlp = defaultDaemonEnvHasOtlp,
+  } = deps;
+
+  const roster = resolveRoster();
+  if (!roster?.multiHost) {
+    return [
+      mkCheck(
+        "claude-settings",
+        STATUS.PASS,
+        "single-host node — settings.json provisioning not activation-gating",
+      ),
+    ];
+  }
+
+  const s = readSettings();
+  if (!s || typeof s !== "object") {
+    return [
+      mkCheck(
+        "claude-settings",
+        STATUS.FAIL,
+        "~/.claude/settings.json absent or unparseable — telemetry + host identity unset for interactive sessions",
+      ),
+    ];
+  }
+
+  const checks = [];
+  const self = getHost();
+  const ra = s?.env?.OTEL_RESOURCE_ATTRIBUTES ?? "";
+  checks.push(
+    typeof ra === "string" && ra.includes(`host.name=${self}`)
+      ? mkCheck("claude-settings-host", STATUS.PASS, `settings.json pins host.name=${self}`)
+      : mkCheck(
+          "claude-settings-host",
+          STATUS.FAIL,
+          `settings.json OTEL_RESOURCE_ATTRIBUTES does not pin host.name=${self} (got "${ra}") — telemetry mis-attributes this host`,
+        ),
+  );
+
+  const settingsOtlp = s?.env?.OTEL_EXPORTER_OTLP_ENDPOINT ?? "";
+  const hasOtlp = (typeof settingsOtlp === "string" && settingsOtlp.length > 0) || daemonEnvHasOtlp();
+  checks.push(
+    hasOtlp
+      ? mkCheck("claude-settings-otlp", STATUS.PASS, "OTLP endpoint set (settings.json or daemon env file)")
+      : mkCheck(
+          "claude-settings-otlp",
+          STATUS.FAIL,
+          "OTLP endpoint unset in BOTH settings.json and execution-core.env — daemon + worker telemetry exports nowhere",
+        ),
+  );
+
+  return checks;
+}
+
 // ─── Phase 6: Renderer, exit code, runDoctor ─────────────────────────────────
 
 // summarize — aggregate check results into counts.
@@ -802,7 +1232,7 @@ export async function runDoctor(opts = {}) {
     expectedBotUserId = null,
   } = opts;
 
-  // Default check suite — all 5 check functions with real deps
+  // Default check suite — all check functions with real deps
   const defaultChecks = [
     () => checkHostIdentity(),
     () => checkHrwPartition(),
@@ -810,6 +1240,10 @@ export async function runDoctor(opts = {}) {
     () => checkBotCredentials({ expectedBotUserId }),
     () => checkConnectivity({ seed, otel }),
     () => checkSecretsHygiene(),
+    () => checkDaemonToolPath(), // CTL-1289: daemon launchd PATH resolves linearis/node/claude
+    () => checkWebhookIngestion(), // CTL-1284: multiHost member ingests webhooks; single-host does not
+    () => checkThoughts(), // CTL-1293: member thoughts repo provisioned + non-foreign primary
+    () => checkClaudeSettings(), // CTL-1231: member settings.json pins host identity + OTLP endpoint
   ];
 
   const fns = checkFns ?? defaultChecks;

@@ -122,6 +122,12 @@ cmd_start() {
 	local _daemon_env="${CATALYST_EXECUTION_CORE_ENV:-${HOME}/.config/catalyst/execution-core.env}"
 	# shellcheck disable=SC1090
 	[[ -f "$_daemon_env" ]] && source "$_daemon_env"
+	# CTL-1289: belt-and-suspenders — a daemon started by hand (not via the
+	# catalyst-stack launchd plist, which already sets _stack_agent_path) inherits
+	# whatever PATH the invoking shell had, which on a fresh member can omit the
+	# npm/user prefix where linearis/node/claude live. Prepend them so the daemon's
+	# per-tick spawns (reconcile/liveness/runtime) resolve regardless of launcher.
+	export PATH="${HOME}/.local/node/bin:${HOME}/.local/bin:${PATH}"
 	# CTL-1084: resolve durable governance flags (Layer-2 + any explicit env override)
 	# and export them so the daemon — and every per-tick gate that reads process.env —
 	# inherits the durable value with no manual re-export ritual. Best-effort: a failure
