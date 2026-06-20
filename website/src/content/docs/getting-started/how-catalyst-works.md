@@ -21,7 +21,7 @@ Set the ticket's priority (Urgent, High, Medium, or Low) and drag it to your **T
 
 ### 3. Catalyst picks it up on its own
 
-You don't run a command. The executor sees the ticket and starts — within seconds, or on its next check (about every 10 minutes). It moves the ticket to **Triage**, sizes it up as small, medium, large, or epic, and posts that estimate as a comment on the ticket. Large and epic tickets automatically get a stronger model and more thinking time during planning.
+You don't run a command. The executor sees the ticket and starts — within seconds, or on its next check (about every 10 minutes). It moves the card into your **in-progress** lane, sizes it up as small, medium, large, or epic, and posts that estimate as a comment on the ticket. Large and epic tickets automatically get a stronger model and more thinking time during planning. (Which lane the card lands in follows your Linear workflow — a separate Triage column only appears if you map one in your `stateMap`.)
 
 ### 4. Watch it ship
 

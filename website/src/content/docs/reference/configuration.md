@@ -122,7 +122,7 @@ For `execution-core` mode, the number of workers comes from a separate committed
 
 ### Which tickets the daemon picks up
 
-In `execution-core` mode, the daemon reads a central registry at `~/catalyst/execution-core/registry.json`. Each project there has an `eligibleQuery` that says which tickets are ready — for example, `status: "Ready"`. The setup tool `setup-execution-core-states.sh` writes this for you; you don't edit it by hand. That mode also needs six Linear states to exist — `Ready`, `Research`, `Plan`, `Implement`, `Validate`, and `PR` — which the same tool creates.
+In `execution-core` mode, the daemon reads a central registry at `~/catalyst/execution-core/registry.json`. Each project there has an `eligibleQuery` that says which tickets the daemon should pick up — `status: "Todo"`. The setup tool `setup-execution-core-states.sh` writes this for you; you don't edit it by hand. That mode also relies on the pipeline states — `Research`, `Plan`, `Implement`, `Validate`, and `PR` — which the same tool creates on top of the `Todo` and `Triage` states your team workflow already has.
 
 If the registry is missing (a fresh or headless host), enroll a project with
 `catalyst-execution-core register --team <TEAM> --repo-root <path>` rather than writing the

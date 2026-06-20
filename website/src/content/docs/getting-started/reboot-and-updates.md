@@ -34,7 +34,10 @@ it. The agent runs `catalyst-stack start` at login (`RunAtLoad`) and again every
 10 minutes as an idempotent keep-alive — because `start` is ordered
 (monitor → broker → execution-core) and no-ops a running daemon, it never
 double-starts and it self-heals a daemon that crashed between intervals. Output
-goes to `~/catalyst/stack-launchd.log`.
+goes to `~/catalyst/stack-launchd.log`. (`install-services` also installs two
+companion agents — `catalyst-thoughts-sync`, which keeps your thoughts checkouts
+fresh, and `catalyst-log-shipper` — so `services-status` lists three agents; see
+the [catalyst-stack reference](/reference/catalyst-stack/).)
 
 ```bash
 catalyst-stack install-services --interval 300   # change the keep-alive cadence (seconds)
@@ -77,8 +80,8 @@ The script **refuses** to register a linked git worktree or a checkout on any
 branch other than `main` — the plugin source must be pristine so the unattended
 ff-only auto-pull always succeeds.
 
-Keep it fresh with `catalyst-stack hotpatch` (below) — and, once it ships, the
-broker auto-refreshes it on every merge to `main`. `catalyst-stack parity`
+Keep it fresh with `catalyst-stack hotpatch` (below) — and the broker
+auto-refreshes it on every merge to `main` (ff-only pull). `catalyst-stack parity`
 flags it as drift if the checkout ever ends up off `main` or becomes a linked
 worktree.
 

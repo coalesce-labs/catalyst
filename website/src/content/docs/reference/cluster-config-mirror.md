@@ -22,23 +22,25 @@ see the [configuration reference](/reference/configuration/).
 
 When you provision a second node, copy everything marked **SHARED** verbatim and regenerate
 everything marked **PER-NODE**. The classification is encoded in
-[`config.mjs:174-185`](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/scripts/execution-core/config.mjs#L174-L185)
-(`getHostName`, PER-NODE),
-[`config.mjs:192-204`](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/scripts/execution-core/config.mjs#L192-L204)
-(`getClusterHosts`, SHARED), and
-[`config.mjs:221-238`](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/scripts/execution-core/config.mjs#L221-L238)
-(`getLivenessAnchorIssue`, SHARED).
+[`config.mjs` `getHostName`](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/scripts/execution-core/config.mjs#L199-L212)
+(PER-NODE),
+[`config.mjs` `resolveClusterHosts`](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/scripts/execution-core/config.mjs#L278-L302)
+(the roster — SHARED, resolved live from the `catalyst-cluster` repo via
+[`readClusterConfig`](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/scripts/execution-core/config.mjs#L183)),
+and
+[`config.mjs` `getLivenessAnchorIssue`](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/scripts/execution-core/config.mjs#L335-L348)
+(SHARED).
 
 | Config item | File / key | Class | On mirror |
 |---|---|---|---|
 | Bot OAuth orchestrator token | `~/.config/catalyst/config.json` → `catalyst.linear.bot.orchestrator.*` | **SHARED** | Copy the whole `catalyst.linear.bot` block (one Linear app per workspace; identical across nodes) |
 | Bot OAuth worker token | `~/.config/catalyst/config.json` → `catalyst.linear.bot.worker.*` | **SHARED** | Same block — worker and orchestrator tokens are workspace-scoped, not host-scoped |
-| Cluster roster | `.catalyst/hosts.json` | **SHARED** | Committed to git; add the new node's name and push |
+| Cluster roster | `catalyst-cluster` repo → `cluster.json` `roster[]` | **SHARED** | Add the new node's name to `cluster.json.roster` and push. `cluster-sync` pulls it and the next scheduler tick honors it — no restart. *(The legacy committed `.catalyst/hosts.json` roster was retired in CTL-1274; the daemon no longer reads it.)* |
 | Layer-1 project config | `.catalyst/config.json` | **SHARED** | Committed to git; present after `git clone` |
 | Liveness anchor issue | `~/.config/catalyst/config.json` → `catalyst.cluster.livenessAnchorIssue` | **SHARED** | Copy from the seed node; one Linear ticket identifier per fleet |
 | Plugin source | `~/catalyst/plugin-source/` | **SHARED** | Pull from the same git remote; `setup-plugin-source.sh` does this |
 | Linear team/state map | Layer-1 `catalyst.linear.teamKey` / `stateMap` | **SHARED** | Present after `git clone` via `.catalyst/config.json` |
-| `catalyst.host.name` | `~/.config/catalyst/config.json` → `catalyst.host.name` | **PER-NODE** | Set to the new node's unique roster entry (must match an entry in `hosts.json`) |
+| `catalyst.host.name` | `~/.config/catalyst/config.json` → `catalyst.host.name` | **PER-NODE** | Set to the new node's unique roster entry (must match an entry in the `catalyst-cluster` repo's `cluster.json.roster`; a name that isn't in the roster owns zero tickets under HRW) |
 | `repoRoot` | `~/catalyst/execution-core/registry.json` → `repoRoot` | **PER-NODE** | The absolute path on the new host; written by `catalyst-execution-core register` |
 | Claude Code account login | macOS Keychain or `~/.claude/.credentials.json` | **PER-NODE** | Run `claude` interactively on the new host; each node uses its own account |
 | OTel endpoints | `~/.config/catalyst/config.json` → OTel keys | **PER-NODE** | Tailscale addresses differ per node; set in Layer-2 on each host |
