@@ -158,6 +158,7 @@ export function buildLinearEventLogEnvelope(
           description: event.description,           // CTL-749
           descriptionChanged: event.descriptionChanged, // CTL-749
           toEstimate: event.toEstimate,            // CTL-957
+          toDelegateId: event.toDelegateId,        // CTL-1174 (undefined drops key from JSON)
         },
       });
     }

@@ -76,6 +76,7 @@ export function createGatewayReader({ dbPath = defaultDbPath() } = {}) {
         priority: row.priority ?? null,
         resolution: row.resolution ?? null,
         assignee: row.assignee ?? null,
+        delegate: row.delegate ?? null,
         uuid: row.uuid ?? null,
         removed: row.removed_at != null,
         removedAt: row.removed_at ?? null,
