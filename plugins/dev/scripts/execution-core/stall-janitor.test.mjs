@@ -12,17 +12,20 @@
 // CTL-729 watchdog split (hung-detector.mjs decision + watchdog-action.mjs effects).
 
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   classifyOrphanWorktree,
   classifyGhostSession,
   classifyStallClear,
+  classifyTerminalSignalGc,
   runStallJanitorPass,
   defaultCollectOrphanCandidates,
   defaultCollectGhostCandidates,
   defaultCollectStallClearCandidates,
+  defaultCollectTerminalSignalGcCandidates,
+  defaultGcTerminalSignals,
   defaultTicketFromCwd,
 } from "./stall-janitor.mjs";
 
@@ -851,5 +854,253 @@ describe("defaultCollectStallClearCandidates (CTL-1005 J3)", () => {
     });
     // The marker file survives the restart — alreadyCleared reads true from disk.
     expect(out[0].alreadyCleared).toBe(true);
+  });
+});
+
+// ===========================================================================
+// J4 (CTL-1242) — GC stale signal dirs for provably terminal/merged tickets
+// ===========================================================================
+
+// ---------------------------------------------------------------------------
+// J4 classifier — classifyTerminalSignalGc (PURE)
+// ---------------------------------------------------------------------------
+describe("classifyTerminalSignalGc (CTL-1242 J4)", () => {
+  const base = {
+    linearTerminalOrMerged: true,
+    liveSessionInWorktree: false,
+    inFlight: false,
+    alreadyGcd: false,
+  };
+
+  test("gc when linear terminal + no live session + not in-flight + not already gc'd", () => {
+    expect(classifyTerminalSignalGc(base).action).toBe("gc");
+  });
+
+  test("skip when not terminal/merged", () => {
+    const d = classifyTerminalSignalGc({ ...base, linearTerminalOrMerged: false });
+    expect(d.action).toBe("skip");
+    expect(d.reason).toBe("not-terminal-or-merged");
+  });
+
+  test("skip when live session in worktree", () => {
+    const d = classifyTerminalSignalGc({ ...base, liveSessionInWorktree: true });
+    expect(d.action).toBe("skip");
+    expect(d.reason).toBe("live-session-in-worktree");
+  });
+
+  test("skip when in-flight (active worker signal)", () => {
+    const d = classifyTerminalSignalGc({ ...base, inFlight: true });
+    expect(d.action).toBe("skip");
+    expect(d.reason).toBe("in-flight");
+  });
+
+  test("skip when already GC'd this worker-dir lifetime", () => {
+    const d = classifyTerminalSignalGc({ ...base, alreadyGcd: true });
+    expect(d.action).toBe("skip");
+    expect(d.reason).toBe("already-gc'd");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// J4 driver — runStallJanitorPass (gcTerminalSignals seam injected)
+// ---------------------------------------------------------------------------
+function makeGcWorld(overrides = {}) {
+  return {
+    orphanCandidates: [],
+    ghostCandidates: [],
+    stallCandidates: [],
+    gcCandidates: [
+      {
+        ticket: "CTL-1242-J4",
+        linearTerminalOrMerged: true,
+        liveSessionInWorktree: false,
+        inFlight: false,
+        alreadyGcd: false,
+      },
+    ],
+    ...overrides,
+  };
+}
+
+function makeGcOpts(world, { mode, events = [], gcd = [] } = {}) {
+  return {
+    mode,
+    collectOrphanCandidates: () => world.orphanCandidates,
+    collectGhostCandidates: () => world.ghostCandidates,
+    collectStallClearCandidates: () => world.stallCandidates,
+    collectTerminalSignalGcCandidates: () => world.gcCandidates,
+    emit: (type, fields) => {
+      events.push({ type, ...fields });
+      return Promise.resolve(true);
+    },
+    gcTerminalSignals: ({ ticket }) => {
+      gcd.push(ticket);
+      return true;
+    },
+  };
+}
+
+describe("runStallJanitorPass — J4 enforce (CTL-1242)", () => {
+  test("gc: calls gcTerminalSignals + emits janitor.signals.gc", async () => {
+    const events = [];
+    const gcd = [];
+    const res = await runStallJanitorPass(makeGcOpts(makeGcWorld(), { mode: "enforce", events, gcd }));
+    expect(gcd).toEqual(["CTL-1242-J4"]);
+    const ev = events.find((e) => e.type === "janitor.signals.gc");
+    expect(ev).toBeDefined();
+    expect(ev.ticket).toBe("CTL-1242-J4");
+    expect(res.signalsGcd).toEqual([{ ticket: "CTL-1242-J4" }]);
+    expect(res.wouldGc).toEqual([]);
+  });
+
+  test("non-terminal ticket: gcTerminalSignals NOT called, no gc event", async () => {
+    const gcd = [];
+    const world = makeGcWorld({
+      gcCandidates: [{ ...makeGcWorld().gcCandidates[0], linearTerminalOrMerged: false }],
+    });
+    const res = await runStallJanitorPass(makeGcOpts(world, { mode: "enforce", gcd }));
+    expect(gcd).toEqual([]);
+    expect(res.signalsGcd).toEqual([]);
+  });
+
+  test("live-session: gcTerminalSignals NOT called", async () => {
+    const gcd = [];
+    const world = makeGcWorld({
+      gcCandidates: [{ ...makeGcWorld().gcCandidates[0], liveSessionInWorktree: true }],
+    });
+    await runStallJanitorPass(makeGcOpts(world, { mode: "enforce", gcd }));
+    expect(gcd).toEqual([]);
+  });
+});
+
+describe("runStallJanitorPass — J4 shadow (CTL-1242)", () => {
+  test("shadow: emits janitor.would.gc, never calls gcTerminalSignals", async () => {
+    const events = [];
+    const gcd = [];
+    const res = await runStallJanitorPass(makeGcOpts(makeGcWorld(), { mode: "shadow", events, gcd }));
+    expect(gcd).toEqual([]);
+    expect(events.filter((e) => e.type === "janitor.signals.gc")).toHaveLength(0);
+    const would = events.find((e) => e.type === "janitor.would.gc");
+    expect(would).toBeDefined();
+    expect(would.ticket).toBe("CTL-1242-J4");
+    expect(res.wouldGc).toEqual([{ ticket: "CTL-1242-J4" }]);
+    expect(res.signalsGcd).toEqual([]);
+  });
+});
+
+describe("runStallJanitorPass — J4 off (CTL-1242)", () => {
+  test("mode:off → J4 census never collected, no gc", async () => {
+    let collected = false;
+    const gcd = [];
+    const world = makeGcWorld();
+    const opts = makeGcOpts(world, { mode: "off", gcd });
+    opts.collectTerminalSignalGcCandidates = () => {
+      collected = true;
+      return world.gcCandidates;
+    };
+    const res = await runStallJanitorPass(opts);
+    expect(collected).toBe(false);
+    expect(gcd).toEqual([]);
+    expect(res.signalsGcd).toEqual([]);
+    expect(res.wouldGc).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// J4 production seams — defaultGcTerminalSignals + defaultCollectTerminalSignalGcCandidates
+// ---------------------------------------------------------------------------
+describe("defaultGcTerminalSignals (CTL-1242 J4 integration)", () => {
+  let orchDir;
+  beforeEach(() => {
+    orchDir = mkdtempSync(join(tmpdir(), "ctl1242-gc-"));
+  });
+  afterEach(() => rmSync(orchDir, { recursive: true, force: true }));
+
+  test("removes the workers/<T>/ dir and returns true", () => {
+    const workerDir = join(orchDir, "workers", "CTL-1242-GC");
+    mkdirSync(workerDir, { recursive: true });
+    writeFileSync(join(workerDir, "phase-implement.json"), JSON.stringify({ status: "failed" }));
+
+    const gc = defaultGcTerminalSignals(orchDir);
+    const result = gc({ ticket: "CTL-1242-GC" });
+
+    expect(result).toBe(true);
+    expect(existsSync(workerDir)).toBe(false);
+  });
+
+  test("never throws on ENOENT (already removed)", () => {
+    const gc = defaultGcTerminalSignals(orchDir);
+    expect(() => gc({ ticket: "CTL-1242-GONE" })).not.toThrow();
+  });
+});
+
+describe("defaultCollectTerminalSignalGcCandidates (CTL-1242 J4)", () => {
+  let orchDir;
+  beforeEach(() => {
+    orchDir = mkdtempSync(join(tmpdir(), "ctl1242-cen-"));
+  });
+  afterEach(() => rmSync(orchDir, { recursive: true, force: true }));
+
+  function mkWorkerSignal(ticket, status = "failed") {
+    const d = join(orchDir, "workers", ticket);
+    mkdirSync(d, { recursive: true });
+    writeFileSync(join(d, "phase-implement.json"), JSON.stringify({ ticket, status }));
+    return d;
+  }
+
+  test("includes a terminal ticket with a failed signal", () => {
+    mkWorkerSignal("CTL-1242-A");
+    const out = defaultCollectTerminalSignalGcCandidates({
+      orchDir,
+      isLinearTerminalOrMerged: (id) => id === "CTL-1242-A",
+    });
+    expect(out.some((c) => c.ticket === "CTL-1242-A")).toBe(true);
+    const c = out.find((c) => c.ticket === "CTL-1242-A");
+    expect(c.linearTerminalOrMerged).toBe(true);
+    expect(c.inFlight).toBe(false);
+    expect(c.liveSessionInWorktree).toBe(false);
+  });
+
+  test("excludes non-terminal tickets", () => {
+    mkWorkerSignal("CTL-1242-B");
+    const out = defaultCollectTerminalSignalGcCandidates({
+      orchDir,
+      isLinearTerminalOrMerged: () => false,
+    });
+    expect(out.some((c) => c.ticket === "CTL-1242-B")).toBe(false);
+  });
+
+  test("excludes in-flight tickets", () => {
+    mkWorkerSignal("CTL-1242-C");
+    const out = defaultCollectTerminalSignalGcCandidates({
+      orchDir,
+      isLinearTerminalOrMerged: () => true,
+      inFlightTickets: new Set(["CTL-1242-C"]),
+    });
+    const c = out.find((o) => o.ticket === "CTL-1242-C");
+    expect(c?.inFlight).toBe(true);
+  });
+
+  test("live-session-in-worktree sets liveSessionInWorktree:true", () => {
+    mkWorkerSignal("CTL-1242-D");
+    const out = defaultCollectTerminalSignalGcCandidates({
+      orchDir,
+      isLinearTerminalOrMerged: () => true,
+      agents: [{ cwd: "/wt/CTL-1242-D/subdir" }],
+      resolveWorktreePath: () => "/wt/CTL-1242-D",
+    });
+    const c = out.find((o) => o.ticket === "CTL-1242-D");
+    expect(c?.liveSessionInWorktree).toBe(true);
+  });
+
+  test("alreadyGcd:true when .janitor-gc.applied marker present", () => {
+    const d = mkWorkerSignal("CTL-1242-E");
+    writeFileSync(join(d, ".janitor-gc.applied"), "");
+    const out = defaultCollectTerminalSignalGcCandidates({
+      orchDir,
+      isLinearTerminalOrMerged: () => true,
+    });
+    const c = out.find((o) => o.ticket === "CTL-1242-E");
+    expect(c?.alreadyGcd).toBe(true);
   });
 });

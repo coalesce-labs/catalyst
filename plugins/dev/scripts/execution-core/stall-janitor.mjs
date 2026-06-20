@@ -34,7 +34,7 @@
 // classifyGhostSession — all evidence injected, no IO) + an action driver
 // (runStallJanitorPass — every side-effect seam injected).
 
-import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { log } from "./config.mjs";
@@ -64,6 +64,8 @@ const JANITOR_EVENT = Object.freeze({
   wouldKillIntent: JANITOR_EVENT_TYPES[3], // "janitor.would.kill-intent"
   stallCleared: JANITOR_EVENT_TYPES[4], // "janitor.stall.cleared"
   wouldClear: JANITOR_EVENT_TYPES[5], // "janitor.would.clear"
+  signalsGcd: JANITOR_EVENT_TYPES[6], // "janitor.signals.gc"
+  wouldGc: JANITOR_EVENT_TYPES[7], // "janitor.would.gc"
 });
 
 // classifyOrphanWorktree (J1) — PURE. Given the fully-resolved evidence for one
@@ -187,6 +189,27 @@ export function classifyStallClear(ctx = {}) {
   return { action: "clear", reason: "prior-artifact-now-complete" };
 }
 
+// classifyTerminalSignalGc (J4, CTL-1242) — PURE. Given a ticket that has been
+// identified as terminal/merged, decide whether its workers/<T>/ signal dir can
+// be GC'd this tick. Safety fences first, then positive "gc" verdict:
+//   "gc"   — ticket is terminal/merged, no live session, not in-flight, not already GC'd.
+//   "skip" — anything ambiguous, live, in-flight, or already removed.
+//
+// ctx fields:
+//   linearTerminalOrMerged — ticket is terminal via Linear state OR merged PR.
+//   liveSessionInWorktree  — a live session has its cwd inside the ticket's worktree.
+//   inFlight               — the ticket has an active (non-terminal) phase worker.
+//   alreadyGcd             — a .janitor-gc.applied marker is present in the worker dir,
+//                            meaning a prior GC write started but the dir wasn't removed
+//                            (e.g., EACCES). Prevents infinite retry.
+export function classifyTerminalSignalGc(ctx = {}) {
+  if (!ctx.linearTerminalOrMerged) return { action: "skip", reason: "not-terminal-or-merged" };
+  if (ctx.liveSessionInWorktree) return { action: "skip", reason: "live-session-in-worktree" };
+  if (ctx.inFlight) return { action: "skip", reason: "in-flight" };
+  if (ctx.alreadyGcd) return { action: "skip", reason: "already-gc'd" };
+  return { action: "gc", reason: "terminal-or-merged-no-live-session" };
+}
+
 // runStallJanitorPass — the action driver. Enumerates the terminal-Done orphan
 // candidates + ghost-session candidates (injected census seams), classifies each,
 // and either ACTS (enforce) or SHADOWS (would.*). Returns a per-tick report:
@@ -225,6 +248,9 @@ export function runStallJanitorPass({
   collectOrphanCandidates = () => [],
   collectGhostCandidates = () => [],
   collectStallClearCandidates = () => [],
+  // CTL-1242 J4: terminal/merged signal dir GC census + action seam.
+  collectTerminalSignalGcCandidates = () => [],
+  gcTerminalSignals = () => false,
   emit = async () => true,
   recordKillIntent = () => false,
   clearStall = () => false,
@@ -232,6 +258,7 @@ export function runStallJanitorPass({
   const report = {
     reaped: [], wouldReap: [], killIntents: [], wouldKill: [], deferred: [],
     stallsCleared: [], wouldClear: [],
+    signalsGcd: [], wouldGc: [],
   };
 
   // off → skip the pass entirely: no census, no events, no intents.
@@ -381,6 +408,47 @@ export function runStallJanitorPass({
       log.warn(
         { ticket: c?.ticket, err: err?.message },
         "stall-janitor: per-stall-clear step failed — continuing (CTL-1005)",
+      );
+    }
+  }
+
+  // ---- J4: terminal/merged signal dir GC → remove workers/<T>/ (CTL-1242) ---
+  // A ticket that reached a terminal Linear state (Done/Canceled) or whose PR
+  // merged without a teardown phase retains stale phase-*.json signal files
+  // forever, keeping the ticket in dead/stale views and in listStartedTickets.
+  // In enforce the gcTerminalSignals seam removes the entire workers/<T>/ dir;
+  // in shadow it emits janitor.would.gc and mutates nothing.
+  let gcCandidates = [];
+  try {
+    gcCandidates = collectTerminalSignalGcCandidates() ?? [];
+  } catch (err) {
+    log.warn({ err: err?.message }, "stall-janitor: gc census threw — skipping J4 (CTL-1242)");
+    gcCandidates = [];
+  }
+  for (const c of gcCandidates) {
+    try {
+      const decision = classifyTerminalSignalGc(c);
+      if (decision.action !== "gc") continue;
+      if (enforce) {
+        gcTerminalSignals({ ticket: c.ticket });
+        fire(
+          JANITOR_EVENT.signalsGcd,
+          { ticket: c.ticket, reason: decision.reason },
+          c.ticket,
+        );
+        report.signalsGcd.push({ ticket: c.ticket });
+      } else {
+        fire(
+          JANITOR_EVENT.wouldGc,
+          { ticket: c.ticket, reason: decision.reason },
+          c.ticket,
+        );
+        report.wouldGc.push({ ticket: c.ticket });
+      }
+    } catch (err) {
+      log.warn(
+        { ticket: c?.ticket, err: err?.message },
+        "stall-janitor: per-gc step failed — continuing (CTL-1242)",
       );
     }
   }
@@ -744,6 +812,79 @@ export function defaultCollectStallClearCandidates({
       });
     } catch (err) {
       log.warn({ ticket, err: err?.message }, "stall-janitor: stall-clear candidate probe threw — skipping (CTL-1005)");
+    }
+  }
+  return out;
+}
+
+// defaultGcTerminalSignals (CTL-1242 J4) — returns the J4 action seam: a
+// function that removes the entire workers/<T>/ signal dir for a terminal
+// ticket. Best-effort (never throws — a failed rmSync is caught and logged).
+// Called by runStallJanitorPass in enforce mode after classifyTerminalSignalGc
+// returns "gc". The dir removal clears the ticket from listStartedTickets
+// and from all dead/stale views in the next tick.
+export function defaultGcTerminalSignals(orchDir) {
+  return ({ ticket }) => {
+    try {
+      rmSync(join(orchDir, "workers", ticket), { recursive: true, force: true });
+      return true;
+    } catch (err) {
+      log.warn({ ticket, err: err?.message }, "stall-janitor: J4 gc rmSync failed — skipping (CTL-1242)");
+      return false;
+    }
+  };
+}
+
+// defaultCollectTerminalSignalGcCandidates (CTL-1242 J4) — read-only census
+// that builds a J4 classify ctx for every ticket with a workers/<T>/ dir.
+// Probes: isLinearTerminalOrMerged (injected), liveSessionInWorktree (warm
+// agents snapshot + optional worktree resolution), inFlight (inFlightTickets
+// set), alreadyGcd (.janitor-gc.applied marker). Any throw per-candidate is
+// caught and skipped — the janitor never escalates on unreadable probes.
+export function defaultCollectTerminalSignalGcCandidates({
+  orchDir,
+  agents = [],
+  inFlightTickets = new Set(),
+  isLinearTerminalOrMerged = () => false,
+  // resolveWorktreePath(ticket) → worktree path or null. Optional: when
+  // omitted, liveSessionInWorktree is always false (conservative).
+  resolveWorktreePath = () => null,
+} = {}) {
+  const out = [];
+  let workerDirs;
+  try {
+    workerDirs = readdirSync(join(orchDir, "workers"), { withFileTypes: true });
+  } catch {
+    return out;
+  }
+
+  for (const d of workerDirs) {
+    if (!d.isDirectory()) continue;
+    const ticket = d.name;
+    try {
+      const workerDir = join(orchDir, "workers", ticket);
+
+      // Pre-filter: only include tickets that are provably terminal/merged.
+      // Non-terminal tickets are never candidates for J4 GC.
+      let terminalOrMerged = false;
+      try { terminalOrMerged = isLinearTerminalOrMerged(ticket) === true; } catch { /* skip */ }
+      if (!terminalOrMerged) continue;
+
+      const worktreePath = (() => { try { return resolveWorktreePath(ticket); } catch { return null; } })();
+      const liveSessionInWorktree =
+        !!worktreePath &&
+        Array.isArray(agents) &&
+        agents.some((a) => cwdUnder(a?.cwd, worktreePath));
+
+      const inFlight = inFlightTickets instanceof Set
+        ? inFlightTickets.has(ticket)
+        : false;
+
+      const alreadyGcd = existsSync(join(workerDir, ".janitor-gc.applied"));
+
+      out.push({ ticket, linearTerminalOrMerged: true, liveSessionInWorktree, inFlight, alreadyGcd });
+    } catch (err) {
+      log.warn({ ticket, err: err?.message }, "stall-janitor: J4 gc candidate probe threw — skipping (CTL-1242)");
     }
   }
   return out;

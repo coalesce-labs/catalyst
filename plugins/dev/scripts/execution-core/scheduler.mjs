@@ -184,6 +184,8 @@ import {
   defaultCollectOrphanCandidates,
   defaultCollectGhostCandidates,
   defaultCollectStallClearCandidates, // CTL-1005 J3
+  defaultCollectTerminalSignalGcCandidates, // CTL-1242 J4
+  defaultGcTerminalSignals, // CTL-1242 J4
 } from "./stall-janitor.mjs";
 // CTL-1064: unstuck-sweep (Pass 0u) — throttled classify-then-act sweep for
 // the stalled/needs-human ticket backlog. Pure classifiers + action driver in
@@ -210,6 +212,10 @@ import {
   reasoningRecoveryPass,
   defaultShouldSkipItem as recoveryShouldSkipItem,
   defaultRecordIntent as recoveryRecordIntent,
+  // CTL-1242 (corrected scope): forget the host-local recovery-intent latch when
+  // a ticket goes terminal so the ledger doesn't accumulate stale finished-ticket
+  // files (called from the terminal-sweep clear branch below).
+  defaultForgetIntent as recoveryForgetIntent,
   defaultInvokeSeam as recoveryInvokeSeam,
   // CTL-1176 rung 3: the bounded-LLM path now dispatches the goal-driven
   // recovery-pass skill (replacing the phase-remediate detour). Bound to the
@@ -2709,6 +2715,11 @@ export function schedulerTick(
       // below. Tests inject stubs to drive J3 in isolation.
       collectStallClearCandidates: _collectStallClearCandidates = undefined,
       clearStall: _clearStall = undefined,
+      // CTL-1242 J4: terminal/merged signal dir GC seams. Defaults undefined →
+      // inert (bare unit tick has no census → skip cleanly); production wires
+      // defaultCollectTerminalSignalGcCandidates + defaultGcTerminalSignals below.
+      collectTerminalSignalGcCandidates: _collectTerminalSignalGcCandidates = undefined,
+      gcTerminalSignals: _gcTerminalSignals = undefined,
       emit: _janitorEmit = emitReapIntent,
       recordKillIntent: _recordKillIntent = undefined,
     } = {},
@@ -3250,6 +3261,8 @@ export function schedulerTick(
   let janitorDeferred = [];
   let janitorStallsCleared = [];
   let janitorWouldClear = [];
+  let janitorSignalsGcd = [];
+  let janitorWouldGc = [];
   // CTL-1064: Pass 0u report arrays (populated below if the pass runs).
   let unstuckActed = [];
   let unstuckWouldAct = [];
@@ -3262,7 +3275,8 @@ export function schedulerTick(
     // startScheduler, or a test injecting it). A bare tick has none → skip cleanly.
     if (
       jMode !== "off" &&
-      (_collectOrphanCandidates || _collectGhostCandidates || _collectStallClearCandidates)
+      (_collectOrphanCandidates || _collectGhostCandidates || _collectStallClearCandidates ||
+        _collectTerminalSignalGcCandidates)
     ) {
       try {
         const jreport = runStallJanitorPass({
@@ -3277,6 +3291,9 @@ export function schedulerTick(
           // .janitor-cleared-<phase>.applied once-marker, and lets the scheduler's
           // normal path re-dispatch. writeStatus carries the removeLabel seam.
           clearStall: _clearStall ?? defaultClearStall(orchDir, writeStatus),
+          // CTL-1242 J4: terminal/merged signal dir GC.
+          collectTerminalSignalGcCandidates: _collectTerminalSignalGcCandidates ?? (() => []),
+          gcTerminalSignals: _gcTerminalSignals ?? (() => false),
           emit: _janitorEmit,
           // Default kill seam: BOTH issues killBgJob AND records the pinned
           // intent (mirrors recovery.mjs intentAwareKill). CTL-1004 J2-enforce
@@ -3293,13 +3310,17 @@ export function schedulerTick(
         janitorDeferred = jreport.deferred;
         janitorStallsCleared = jreport.stallsCleared;
         janitorWouldClear = jreport.wouldClear;
+        janitorSignalsGcd = jreport.signalsGcd;
+        janitorWouldGc = jreport.wouldGc;
         if (
           janitorReaped.length ||
           janitorKillIntents.length ||
           janitorWouldReap.length ||
           janitorWouldKill.length ||
           janitorStallsCleared.length ||
-          janitorWouldClear.length
+          janitorWouldClear.length ||
+          janitorSignalsGcd.length ||
+          janitorWouldGc.length
         ) {
           log.info(
             {
@@ -3311,8 +3332,10 @@ export function schedulerTick(
               deferred: janitorDeferred.length,
               stallsCleared: janitorStallsCleared.length,
               wouldClear: janitorWouldClear.length,
+              signalsGcd: janitorSignalsGcd.length,
+              wouldGc: janitorWouldGc.length,
             },
-            "scheduler: stall-janitor pass (CTL-1004/CTL-1005)"
+            "scheduler: stall-janitor pass (CTL-1004/CTL-1005/CTL-1242)"
           );
         }
       } catch (err) {
@@ -4932,17 +4955,45 @@ export function schedulerTick(
     // above; never (re)apply for a genuinely-shipped ticket (the Done false positive).
     const pipelineDone = signals[TERMINAL_PHASE] === "done";
     if ((anyStalled || anyFailed) && !pipelineDone) {
-      if (fenceGuard({ ticket, orchDir, multiHost })) {
-        labelNeedsHumanUnlessBeliefOwner(orchDir, ticket, writeStatus, { env, site: "terminal-sweep", log });
+      // CTL-1242: a merged/terminal-Linear ticket that skipped teardown must NOT be
+      // re-flagged needs-human. Cheap-first terminal probe (cached Linear read, then
+      // optional gh PR view) runs ONLY on this narrow stalled/failed-not-done set, so
+      // the steady-state-zero-writes invariant holds.
+      const term = isTicketTerminalOrMerged({
+        ticket,
+        signal: signalByTicket.get(ticket),
+        fetchState: (id, o = {}) => fetchTicketState(id, { ...o, cache, gateway }),
+        cache,
+        prAdapter,
+      });
+      if (term.terminal) {
+        // Terminal/merged but teardown never ran → clear the marker+label instead of
+        // re-applying. Marker-guarded so a no-marker terminal ticket fires zero API calls.
+        const base = join(orchDir, "workers", ticket, ".linear-label-needs-human");
+        if (existsSync(`${base}.applied`) || existsSync(`${base}.skipped`)) {
+          clearStalledLabel(orchDir, ticket, "needs-human", retractionWriteStatus);
+        }
+        // CTL-1242 (corrected scope): also forget the host-local recovery-intent
+        // latch so a finished ticket's escalated/cooldown ledger entry doesn't
+        // linger (hygiene — the recovery router already drops terminal tickets).
+        recoveryForgetIntent(ticket, { orchDir });
       } else {
-        log.warn(
-          { ticket },
-          "ctl-863: stale fence — suppressing labelOnce(needs-human/failed-or-stalled) write (zombie guard)"
-        );
+        // Non-terminal stalled/failed ticket → apply the belief-aware needs-human
+        // label (CTL-1241: skipped when the belief engine owns the reclaim).
+        if (fenceGuard({ ticket, orchDir, multiHost })) {
+          labelNeedsHumanUnlessBeliefOwner(orchDir, ticket, writeStatus, { env, site: "terminal-sweep", log });
+        } else {
+          log.warn(
+            { ticket },
+            "ctl-863: stale fence — suppressing labelOnce(needs-human/failed-or-stalled) write (zombie guard)"
+          );
+        }
+        // CTL-868 route (B): emit a canonical orphan-detected event (once) so a
+        // non-terminal stalled/failed-no-recovery ticket is visible on the dashboard
+        // (runs regardless of fence, matching main; the terminal branch above is
+        // excluded so a finished ticket is never re-surfaced as an orphan).
+        emitOrphanDetectedOnce(orchDir, ticket, signals, appendOrphanDetectedEvent);
       }
-      // CTL-868 route (B): also emit a canonical orphan-detected event (once) so a
-      // stalled/failed-no-recovery ticket is visible on the dashboard, not just label-flagged.
-      emitOrphanDetectedOnce(orchDir, ticket, signals, appendOrphanDetectedEvent);
     } else {
       // No failed/stalled phase (or pipeline done) → clear the ratchet if the marker exists.
       // Guard on marker presence so a no-stall/no-fail, no-marker tick fires zero
@@ -5010,6 +5061,8 @@ export function schedulerTick(
     janitorDeferred, // CTL-1004 — dirty worktrees deferred (no removal, no queue)
     janitorStallsCleared, // CTL-1005 — prior-artifact-retry-exhausted stalls CLEARED this tick (enforce)
     janitorWouldClear, // CTL-1005 — stalls that WOULD be cleared (shadow)
+    janitorSignalsGcd, // CTL-1242 — terminal signal dirs GC'd this tick (enforce)
+    janitorWouldGc, // CTL-1242 — signal dirs that WOULD be GC'd (shadow)
     unstuckActed, // CTL-1064 — Pass 0u actions taken this tick (enforce)
     unstuckWouldAct, // CTL-1064 — Pass 0u would-act (shadow)
     unstuckEscalated, // CTL-1064 — Pass 0u escalations this tick (enforce)
@@ -5374,6 +5427,23 @@ function runTick() {
             },
           }),
         clearStall: defaultClearStall(runningOpts.orchDir, runningOpts.writeStatus ?? linearWrite),
+        // CTL-1242 J4: wire the read-only GC census + the production rmSync seam.
+        // The census only probes tickets whose workers/<T>/ dir exists AND whose
+        // Linear state is provably terminal (Done/Canceled). Same closure shape
+        // as J3's isLinearTerminal — cache-first, no extra subprocess.
+        // Mode is the existing jMode (readStallJanitorConfig() → default 'shadow')
+        // so J4 runs in shadow by default; no new config knob needed.
+        collectTerminalSignalGcCandidates: () =>
+          defaultCollectTerminalSignalGcCandidates({
+            orchDir: runningOpts.orchDir,
+            agents: getAgentsCached().agents,
+            inFlightTickets: listInFlightTickets(runningOpts.orchDir),
+            isLinearTerminalOrMerged: (id) => {
+              const state = fetchTicketState(id);
+              return state != null && isLinearTerminal(state);
+            },
+          }),
+        gcTerminalSignals: defaultGcTerminalSignals(runningOpts.orchDir),
       },
       // CTL-1064: wire the unstuck-sweep census (Pass 0u). The census collects
       // stalled/failed workers lazily; the pass only runs when mode !== 'off'
