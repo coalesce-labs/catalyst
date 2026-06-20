@@ -31,6 +31,11 @@ const CLUSTER_CLAIM_CLI = fileURLToPath(new URL("./cluster-claim.mjs", import.me
 // a tick. Overridable for tests / slow networks.
 const CLAIM_TIMEOUT_MS = Number(process.env.EXECUTION_CORE_CLAIM_TIMEOUT_MS) || 15_000;
 
+// EXECUTION_CORE_CLAIM_STALE_MS — mirrors EXECUTION_CORE_CLAIM_TIMEOUT_MS in
+// purpose. Consumed by the claim subprocess (cluster-claim.mjs:CLAIM_STALE_MS_DEFAULT)
+// via the env passthrough at the spawn call below. When set, overrides the
+// 300_000 ms (5 min) default stale-claim preemption threshold (CTL-1297).
+
 // claimDispatchSync — soft-CAS claim `ticket` for `hostName` at `phase`,
 // synchronously. Returns { won, generation }. won:false on any failure
 // (fail-closed). `spawn`/`nodeBin`/`cli`/`env`/`timeout` are injectable so the

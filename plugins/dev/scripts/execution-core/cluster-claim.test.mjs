@@ -300,6 +300,110 @@ describe("claimTicket — soft-CAS via read-back", () => {
   });
 });
 
+describe("claimTicket — stale-claim preemption (CTL-1297)", () => {
+  it("preempts a STALE claim from another host → won:true, generation bumped, no read-back", async () => {
+    const { post, calls } = makeFakeLinear({
+      seed: {
+        "CTL-842": {
+          owner_host: "mini-2",
+          catalyst_generation: 3,
+          phase: "triage",
+          claimed_at: "2026-06-20T00:00:00.000Z",
+        },
+      },
+    });
+    const now = () => Date.parse("2026-06-20T01:00:00.000Z"); // 1h later → stale
+    const res = await claimTicket("CTL-842", "mini", "triage", { post, now, staleMs: 300_000 });
+    expect(res.won).toBe(true);
+    expect(res.generation).toBe(4); // bumped past the dead owner's gen
+    // Preemption skips the read-back: exactly 1 ReadFence call (the initial read),
+    // vs 2 for the normal CAS path (initial + read-back).
+    expect(calls.filter((c) => c.query.includes("ReadFence")).length).toBe(1);
+  });
+
+  it("does NOT preempt a FRESH claim from another host → falls through to soft-CAS (won:false on lost read-back)", async () => {
+    // Fresh claim (30s old) → age < staleMs → no preemption.
+    // Custom post: read-back always shows rival winning, proving the CAS path ran
+    // (preemption would have returned won:true unconditionally, skipping the read-back).
+    const freshClaimedAt = "2026-06-20T00:00:00.000Z";
+    const now = () => Date.parse("2026-06-20T00:00:30.000Z"); // 30s later → fresh
+    let writes = 0;
+    async function post(query) {
+      if (query.includes("ResolveIssueId")) return { issues: { nodes: [{ id: "uuid-CTL-842" }] } };
+      if (query.includes("UpsertFence")) {
+        writes += 1;
+        return { attachmentCreate: { success: true, attachment: {} } };
+      }
+      if (query.includes("ReadFence")) {
+        // Both pre-write and read-back: rival owns gen 1 at the fresh timestamp.
+        return {
+          issue: {
+            attachments: {
+              nodes: [
+                {
+                  id: "f",
+                  url: fenceUrl("CTL-842"),
+                  metadata: { owner_host: "rival", catalyst_generation: 1, phase: "triage", claimed_at: freshClaimedAt },
+                },
+              ],
+            },
+          },
+        };
+      }
+      throw new Error("unexpected");
+    }
+    let readFenceCalls = 0;
+    const wrappedPost = async (q, v) => {
+      if (q.includes("ReadFence")) readFenceCalls++;
+      return post(q, v);
+    };
+    const res = await claimTicket("CTL-842", "mini", "triage", { post: wrappedPost, now, staleMs: 300_000 });
+    expect(res.won).toBe(false); // CAS path ran — rival still owns the read-back, no preemption
+    // CAS path always does pre-read + read-back = 2 ReadFence calls.
+    expect(readFenceCalls).toBe(2);
+  });
+
+  it("a stale claim owned by the SAME host takes the normal soft-CAS path", async () => {
+    const { post } = makeFakeLinear({
+      seed: {
+        "CTL-842": {
+          owner_host: "mini",
+          catalyst_generation: 5,
+          phase: "pr",
+          claimed_at: "2026-06-20T00:00:00.000Z",
+        },
+      },
+    });
+    const res = await claimTicket("CTL-842", "mini", "triage", {
+      post,
+      now: () => Date.parse("2026-06-20T02:00:00.000Z"),
+      staleMs: 300_000,
+    });
+    expect(res).toEqual({ won: true, generation: 6 });
+  });
+
+  it("a claim with unparseable claimed_at is NOT preempted (conservative)", async () => {
+    const { post } = makeFakeLinear({
+      seed: {
+        "CTL-842": { owner_host: "mini-2", catalyst_generation: 2, phase: "triage", claimed_at: null },
+      },
+    });
+    // No preemption → soft-CAS runs → we win (single writer in test)
+    const res = await claimTicket("CTL-842", "mini", "triage", {
+      post,
+      now: () => Date.parse("2026-06-20T05:00:00.000Z"),
+      staleMs: 300_000,
+    });
+    expect(res).toEqual({ won: true, generation: 3 });
+  });
+
+  it("no existing claim → won:true, generation 1 (preemption branch is a no-op)", async () => {
+    const { post } = makeFakeLinear();
+    const res = await claimTicket("CTL-842", "mini", "triage", { post, now: () => 0, staleMs: 300_000 });
+    expect(res).toEqual({ won: true, generation: 1 });
+  });
+});
+
 describe("isFenceCurrent — the pre-side-effect fencing check", () => {
   it("true when the ticket's current generation equals ours", async () => {
     const { post } = makeFakeLinear({
@@ -389,5 +493,27 @@ describe("runCli — the spawnSync CLI surface (CTL-850)", () => {
     const { post } = makeFakeLinear();
     const { code } = await captureStdout(() => runCli(["bogus"], { post }));
     expect(code).toBe(1);
+  });
+
+  it("claim: preempts a stale cross-host claim via the default threshold (CTL-1297)", async () => {
+    // claimed_at at the Unix epoch is centuries stale relative to any real Date.now(),
+    // so the default 300_000ms threshold fires without needing to inject `now`.
+    const { post } = makeFakeLinear({
+      seed: {
+        "CTL-842": {
+          owner_host: "other-host",
+          catalyst_generation: 2,
+          phase: "triage",
+          claimed_at: "1970-01-01T00:00:00.000Z",
+        },
+      },
+    });
+    const { code, out } = await captureStdout(() =>
+      runCli(["claim", "CTL-842", "mini", "triage"], { post }),
+    );
+    expect(code).toBe(0);
+    const result = JSON.parse(out);
+    expect(result.won).toBe(true);
+    expect(result.generation).toBe(3); // bumped past generation 2
   });
 });

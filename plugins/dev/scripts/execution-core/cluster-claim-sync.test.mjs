@@ -125,6 +125,23 @@ describe("fenceCheckSync — argv + exit-code interpretation (CTL-890)", () => {
   });
 });
 
+describe("claimDispatchSync — env passthrough (CTL-1297)", () => {
+  it("forwards EXECUTION_CORE_CLAIM_STALE_MS (and full env) to the claim subprocess", () => {
+    let capturedOpts;
+    const spawn = (bin, args, opts) => {
+      capturedOpts = opts;
+      return { status: 0, stdout: JSON.stringify({ won: true, generation: 1 }) + "\n" };
+    };
+    const env = { ...process.env, EXECUTION_CORE_CLAIM_STALE_MS: "60000" };
+    claimDispatchSync(
+      { ticket: "CTL-7", hostName: "mini", phase: "triage" },
+      { spawn, env },
+    );
+    expect(capturedOpts.env).toBe(env);
+    expect(capturedOpts.env.EXECUTION_CORE_CLAIM_STALE_MS).toBe("60000");
+  });
+});
+
 describe("fenceCheckSync — FAIL-CLOSED on every indeterminate failure", () => {
   it("any other non-zero exit → { current:false, stale:false }", () => {
     const spawn = () => ({ status: 1, stdout: "" });
