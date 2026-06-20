@@ -325,7 +325,20 @@ export function deriveAttention(opts?: {
   prStuckSince?: string | null;
   phaseFailed?: boolean;
   escalationType?: string | null;
+  /** CTL-1239: true when the ticket's live Linear state is terminal (Done/Canceled).
+   *  Short-circuits all attention reasons to null — a shipped/canceled ticket must
+   *  never surface as needs-human / waiting-on-you from a stale phase signal. */
+  linearTerminal?: boolean;
 }): { attention: BoardAttention; attentionSince: string | null; escalationType: string | null };
+
+/** CTL-1239: true when a dead bg-job corpse sits on a Linear-terminal ticket
+ *  (Done/Canceled) — leftover state on a shipped/canceled ticket, not a real dead
+ *  worker. Excluding it drops the corpse from deriveCapacity's `dead` count and the
+ *  UI "Dead / stale" section. PURE. */
+export function isTerminalDeadCorpse(
+  worker: { activeState?: BoardActiveState } | null | undefined,
+  linearState: string | null | undefined
+): boolean;
 
 /** CTL-1180: scan phaseSigs newest-first for the first signal with an
  *  explanation.escalation_type string. Returns it or null. */
