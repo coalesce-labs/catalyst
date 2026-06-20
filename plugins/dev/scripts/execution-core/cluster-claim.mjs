@@ -40,8 +40,15 @@ const FENCE_URL_PREFIX = "catalyst://fence/";
 // a non-matching owner past this age is an abandoned claim the HRW owner may
 // preempt without the read-back race (CTL-1297). Mirrors the
 // EXECUTION_CORE_CLAIM_TIMEOUT_MS env convention. 5 min default.
-const CLAIM_STALE_MS_DEFAULT =
-  Number(process.env.EXECUTION_CORE_CLAIM_STALE_MS) || 300_000;
+// Validate the env override: only a FINITE, STRICTLY POSITIVE value is honored.
+// A zero/negative/NaN value would make `now - claimedAt > staleMs` true for
+// essentially every cross-host claim, collapsing the soft-CAS mutex into
+// last-writer-wins fleet-wide — so any non-positive override falls back to the
+// safe 5 min default rather than silently disabling the serializer (CTL-1297).
+const CLAIM_STALE_MS_DEFAULT = (() => {
+  const raw = Number(process.env.EXECUTION_CORE_CLAIM_STALE_MS);
+  return Number.isFinite(raw) && raw > 0 ? raw : 300_000;
+})();
 
 // FENCE_ATTACHMENT_TITLE — the human-facing title on the attachment. Constant so
 // the record is always recognisable in the (rare) case a human inspects it.
