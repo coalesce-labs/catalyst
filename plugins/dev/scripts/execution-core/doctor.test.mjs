@@ -3,7 +3,7 @@
 //
 // Run: cd plugins/dev/scripts/execution-core && bun test doctor.test.mjs
 
-import { describe, it, expect } from "bun:test";
+import { describe, it, expect, beforeEach, afterEach } from "bun:test";
 import {
   STATUS,
   mkCheck,
@@ -14,6 +14,7 @@ import {
   checkConnectivity,
   checkSecretsHygiene,
   checkDaemonToolPath,
+  checkWebhookIngestion,
   summarize,
   renderJson,
   renderHuman,
@@ -571,6 +572,97 @@ describe("checkDaemonToolPath", () => {
     expect(checks[0].status).toBe(STATUS.PASS);
     // smoke-probes linearis + claude (node is resolution-only)
     expect(probed).toEqual(["linearis", "claude"]);
+  });
+});
+
+// ─── Phase 5c: checkWebhookIngestion (CTL-1284) ──────────────────────────────
+
+describe("checkWebhookIngestion", () => {
+  // Isolate the env-var secret fallbacks the check honors (matching
+  // webhook-config.ts) so a dev shell with these set can't mask a dangling key.
+  const SECRET_ENVS = ["CATALYST_WEBHOOK_SECRET", "CATALYST_LINEAR_WEBHOOK_SECRET"];
+  let savedEnv = {};
+  beforeEach(() => {
+    for (const k of SECRET_ENVS) { savedEnv[k] = process.env[k]; delete process.env[k]; }
+  });
+  afterEach(() => {
+    for (const k of SECRET_ENVS) {
+      if (savedEnv[k] === undefined) delete process.env[k];
+      else process.env[k] = savedEnv[k];
+    }
+  });
+
+  const singleHost = () => ({ hosts: ["mini"], source: "single-host", multiHost: false });
+  const multiHost = () => ({ hosts: ["mini", "mini-2"], source: "cluster-repo", multiHost: true });
+  const noSecrets = () => false;
+  const allSecrets = () => true;
+
+  it("PASSes a single-host node regardless of monitor config (double-dispatch guard)", () => {
+    const checks = checkWebhookIngestion({
+      resolveRoster: singleHost,
+      monitor: null,
+      secretFileNonEmpty: noSecrets,
+    });
+    expect(checks[0].name).toBe("webhook-ingestion");
+    expect(checks[0].status).toBe(STATUS.PASS);
+    expect(checks[0].detail).toContain("single-host");
+  });
+
+  it("FAILs a multiHost node with no webhook route enabled", () => {
+    const checks = checkWebhookIngestion({
+      resolveRoster: multiHost,
+      monitor: { github: { smeeChannel: "" }, linear: {} },
+      secretFileNonEmpty: noSecrets,
+    });
+    expect(checks[0].status).toBe(STATUS.FAIL);
+    expect(checks[0].detail).toContain("NO webhook route");
+  });
+
+  it("PASSes a multiHost node with the GitHub route fully wired", () => {
+    const checks = checkWebhookIngestion({
+      resolveRoster: multiHost,
+      monitor: { github: { smeeChannel: "https://smee.io/GH" } },
+      secretFileNonEmpty: (_dir, name) => name === "webhook-secret",
+    });
+    expect(checks[0].status).toBe(STATUS.PASS);
+  });
+
+  it("PASSes a multiHost node with a keyed Linear route fully wired", () => {
+    const checks = checkWebhookIngestion({
+      resolveRoster: multiHost,
+      monitor: { linear: { smeeChannel: "https://smee.io/LIN", ctl: { webhookId: "wh-ctl" } } },
+      secretFileNonEmpty: (_dir, name) => name === "linear-webhook-secret-ctl",
+    });
+    expect(checks[0].status).toBe(STATUS.PASS);
+    expect(checks[0].detail).toContain("linear keys=1");
+  });
+
+  it("FAILs a multiHost node with a half-wired webhookId (id set, secret file missing)", () => {
+    const checks = checkWebhookIngestion({
+      resolveRoster: multiHost,
+      // github route IS wired (so the failure is specifically the dangling key)
+      monitor: {
+        github: { smeeChannel: "https://smee.io/GH" },
+        linear: { smeeChannel: "https://smee.io/LIN", ctl: { webhookId: "wh-ctl" } },
+      },
+      secretFileNonEmpty: (_dir, name) => name === "webhook-secret", // ctl secret absent
+    });
+    expect(checks[0].status).toBe(STATUS.FAIL);
+    expect(checks[0].detail).toContain("half-wired");
+    expect(checks[0].detail).toContain("ctl");
+  });
+
+  it("PASSes when all routes and keyed secrets resolve", () => {
+    const checks = checkWebhookIngestion({
+      resolveRoster: multiHost,
+      monitor: {
+        github: { smeeChannel: "https://smee.io/GH" },
+        linear: { smeeChannel: "https://smee.io/LIN", ctl: { webhookId: "wh-ctl" }, adv: { webhookId: "wh-adv" } },
+      },
+      secretFileNonEmpty: allSecrets,
+    });
+    expect(checks[0].status).toBe(STATUS.PASS);
+    expect(checks[0].detail).toContain("linear keys=2");
   });
 });
 

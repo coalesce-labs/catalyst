@@ -603,6 +603,74 @@ run "T2.7c null IDENTITY keys (projectKey/teamKey/stateMap=null) rejected (no fa
     CATALYST_JOIN_REACH_PROBE='${STUBS2}/stub-reach-probe.sh' \
     bash '$JOIN' --bundle '$NULL_IDENTITY_BUNDLE' >/dev/null 2>&1; [[ \$? -ne 0 ]]"
 
+# T2.8 / T2.9: (CTL-1284) webhook ingestion is provisioned ONLY on a multiHost
+# member (roster length > 1). On a single-host roster the monitor block must NOT
+# be written — at length 1 HRW is a no-op and claimDispatch is skipped, so
+# ingestion would double-dispatch. The bundle carries non-secret monitorWebhooks.
+MULTIHOST_WH_BUNDLE="${SCRATCH}/multihost-wh.json"
+cat > "$MULTIHOST_WH_BUNDLE" <<'BEOF'
+{
+  "layer1Identity": {"projectKey": "CTL", "teamKey": "T1", "stateMap": {}},
+  "botCreds": {"orchestrator": "tok_orch", "worker": "tok_worker"},
+  "hostsRoster": ["mini", "mini-2"],
+  "livenessAnchorIssue": "CTL-1",
+  "repoUrl": "https://github.com/example/repo",
+  "pluginSourceUrl": "https://github.com/example/plugins",
+  "monitorWebhooks": {
+    "github": {"smeeChannel": "https://smee.io/GH"},
+    "linear": {"smeeChannel": "https://smee.io/LIN", "ctl": {"webhookId": "wh-ctl"}}
+  }
+}
+BEOF
+
+SINGLEHOST_WH_BUNDLE="${SCRATCH}/singlehost-wh.json"
+cat > "$SINGLEHOST_WH_BUNDLE" <<'BEOF'
+{
+  "layer1Identity": {"projectKey": "CTL", "teamKey": "T1", "stateMap": {}},
+  "botCreds": {"orchestrator": "tok_orch", "worker": "tok_worker"},
+  "hostsRoster": ["mini"],
+  "livenessAnchorIssue": "CTL-1",
+  "repoUrl": "https://github.com/example/repo",
+  "pluginSourceUrl": "https://github.com/example/plugins",
+  "monitorWebhooks": {
+    "github": {"smeeChannel": "https://smee.io/GH"},
+    "linear": {"smeeChannel": "https://smee.io/LIN", "ctl": {"webhookId": "wh-ctl"}}
+  }
+}
+BEOF
+
+run "T2.8 multiHost roster provisions catalyst.monitor webhook block (CTL-1284)" bash -c "
+  h='${SCRATCH}/h28'
+  env -i HOME=\"\$h\" CATALYST_DIR='${SCRATCH}/c28' \
+    CATALYST_JOIN_TOKEN='$GOOD_TOKEN' \
+    CATALYST_JOIN_SETUP_SCRIPT='${STUBS2}/stub-setup-catalyst.sh' \
+    CATALYST_JOIN_INSTALL_CLI_SCRIPT='${STUBS2}/stub-install-cli.sh' \
+    CATALYST_JOIN_PLUGIN_SRC_SCRIPT='${STUBS2}/stub-setup-plugin-source.sh' \
+    CATALYST_JOIN_PROVISION_THOUGHTS_SCRIPT='${STUBS2}/stub-provision-thoughts.sh' \
+    CATALYST_JOIN_STACK_BIN='${STUBS2}/stub-catalyst-stack' \
+    CATALYST_JOIN_DOCTOR_SCRIPT='${STUBS2}/stub-check-setup.sh' \
+    CATALYST_JOIN_REACH_PROBE='${STUBS2}/stub-reach-probe.sh' \
+    bash '$JOIN' --bundle '$MULTIHOST_WH_BUNDLE' >/dev/null 2>&1
+  cfg=\"\$h/.config/catalyst/config.json\"
+  jq -e '.catalyst.monitor.github.smeeChannel == \"https://smee.io/GH\"' \"\$cfg\" >/dev/null &&
+  jq -e '.catalyst.monitor.linear.ctl.webhookId == \"wh-ctl\"' \"\$cfg\" >/dev/null"
+
+run "T2.9 single-host roster OMITS webhook block — double-dispatch guard (CTL-1284)" bash -c "
+  h='${SCRATCH}/h29'
+  env -i HOME=\"\$h\" CATALYST_DIR='${SCRATCH}/c29' \
+    CATALYST_JOIN_TOKEN='$GOOD_TOKEN' \
+    CATALYST_JOIN_SETUP_SCRIPT='${STUBS2}/stub-setup-catalyst.sh' \
+    CATALYST_JOIN_INSTALL_CLI_SCRIPT='${STUBS2}/stub-install-cli.sh' \
+    CATALYST_JOIN_PLUGIN_SRC_SCRIPT='${STUBS2}/stub-setup-plugin-source.sh' \
+    CATALYST_JOIN_PROVISION_THOUGHTS_SCRIPT='${STUBS2}/stub-provision-thoughts.sh' \
+    CATALYST_JOIN_STACK_BIN='${STUBS2}/stub-catalyst-stack' \
+    CATALYST_JOIN_DOCTOR_SCRIPT='${STUBS2}/stub-check-setup.sh' \
+    CATALYST_JOIN_REACH_PROBE='${STUBS2}/stub-reach-probe.sh' \
+    bash '$JOIN' --bundle '$SINGLEHOST_WH_BUNDLE' >/dev/null 2>&1
+  cfg=\"\$h/.config/catalyst/config.json\"
+  # monitor block must be absent (or at least carry no smeeChannel)
+  ! jq -e '.catalyst.monitor.github.smeeChannel // empty | length > 0' \"\$cfg\" >/dev/null"
+
 # ── Phase 3: Provisioner orchestration ────────────────────────────────────────
 
 echo ""

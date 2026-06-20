@@ -594,6 +594,30 @@ merge_shared_config() {
       | .catalyst.layer1Identity.stateMap //= $la_statemap
     ' "$cfg" > "$tmp" && mv "$tmp" "$cfg" || { rm -f "$tmp"; return 1; }
   info "SHARED config merged into ${cfg}"
+
+  # CTL-1284: webhook ingestion wiring (non-secret smee channels + per-team
+  # webhookId map; HMAC secrets travel via SOPS/cluster-sync, not the bundle).
+  # GATED on multiHost — roster length > 1. At roster length 1, HRW is an
+  # identity no-op AND claimDispatch is skipped, so a single node ingesting
+  # webhooks would actuate every inbound event → double-dispatch. The bundle's
+  # hostsRoster is the conservative, present-at-config-merge-time signal (the
+  # live resolveClusterHosts() may not yet see the cluster-repo roster here).
+  local roster_len monitor_wh
+  roster_len="$(echo "$BUNDLE_JSON" | jq '(.hostsRoster // []) | length')"
+  monitor_wh="$(echo "$BUNDLE_JSON" | jq '.monitorWebhooks // null')"
+  if [[ "${roster_len:-0}" -gt 1 && "$monitor_wh" != "null" ]]; then
+    local tmp2
+    tmp2="$(mktemp "$(dirname "$cfg")/.config.XXXXXX")"
+    # Deep-merge ($wh * existing): existing node-local values WIN (non-clobber),
+    # new keys from the bundle are added.
+    jq --argjson wh "$monitor_wh" '
+        .catalyst //= {}
+        | .catalyst.monitor = ($wh * (.catalyst.monitor // {}))
+      ' "$cfg" > "$tmp2" && mv "$tmp2" "$cfg" || { rm -f "$tmp2"; return 1; }
+    info "webhook ingestion wired (multiHost roster=${roster_len})"
+  else
+    info "webhook ingestion NOT wired (roster=${roster_len:-0}) — single-host double-dispatch guard"
+  fi
 }
 
 persist_host_name() {

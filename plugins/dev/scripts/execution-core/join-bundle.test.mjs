@@ -160,6 +160,41 @@ describe("assembleJoinBundle", () => {
     expect(b.otlpEndpointHint).toBe("http://from-l2:4318");
   });
 
+  // CTL-1284: non-secret webhook wiring (smee channels + per-team webhookId map).
+  test("monitorWebhooks is null when the seed has no monitor block", () => {
+    expect(assembleJoinBundle().monitorWebhooks).toBeNull();
+  });
+
+  test("monitorWebhooks carries non-secret smee channels + per-team webhookId map", () => {
+    writeLayer2({
+      ...LAYER2_FIXTURE,
+      catalyst: {
+        ...LAYER2_FIXTURE.catalyst,
+        monitor: {
+          github: { smeeChannel: "https://smee.io/GH", webhookSecretEnv: "X" },
+          linear: {
+            smeeChannel: "https://smee.io/LIN",
+            ctl: { webhookId: "wh-ctl", smeeChannel: "https://smee.io/LIN", registeredAt: "2026-01-01", resourceTypes: ["Issue"] },
+            adv: { webhookId: "wh-adv" },
+          },
+        },
+      },
+    });
+    const wh = assembleJoinBundle().monitorWebhooks;
+    expect(wh.github).toEqual({ smeeChannel: "https://smee.io/GH" });
+    expect(wh.linear.smeeChannel).toBe("https://smee.io/LIN");
+    expect(wh.linear.ctl).toEqual({
+      webhookId: "wh-ctl",
+      smeeChannel: "https://smee.io/LIN",
+      resourceTypes: ["Issue"],
+    });
+    expect(wh.linear.adv).toEqual({ webhookId: "wh-adv" });
+    // registeredAt is dropped; no secrets ever appear.
+    expect(JSON.stringify(wh)).not.toContain("registeredAt");
+    expect(JSON.stringify(wh)).not.toContain("Secret");
+    expect(JSON.stringify(wh)).not.toContain("secret");
+  });
+
   test("missing layer2 produces null/empty fields without throwing", () => {
     process.env.CATALYST_LAYER2_CONFIG_FILE = join(repoDir, "absent.json");
     const b = assembleJoinBundle();

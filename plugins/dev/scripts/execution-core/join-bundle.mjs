@@ -74,6 +74,48 @@ function resolvePluginSourceUrl(l2) {
   return null;
 }
 
+// CTL-1284: extract the NON-SECRET webhook wiring a member needs to ingest
+// inbound GitHub/Linear events — smee channel URLs + the per-team webhookId map
+// that readAllLinearSecrets keys on. HMAC secrets are NEVER carried here; they
+// travel via the SOPS secret-files path (cluster-sync.mjs). Returns null when the
+// seed has no monitor block. The CONSUMER (merge_shared_config) gates writing
+// these onto a member by roster length > 1 — a single-host member must NOT
+// ingest webhooks (HRW no-op + claimDispatch skipped → double-dispatch).
+function extractMonitorWebhooks(l2) {
+  const monitor = l2?.catalyst?.monitor;
+  if (!monitor || typeof monitor !== "object") return null;
+  const out = {};
+
+  const ghSmee = monitor.github?.smeeChannel;
+  if (typeof ghSmee === "string" && ghSmee) {
+    out.github = { smeeChannel: ghSmee };
+  }
+
+  const linear = monitor.linear;
+  if (linear && typeof linear === "object" && !Array.isArray(linear)) {
+    const lin = {};
+    if (typeof linear.smeeChannel === "string" && linear.smeeChannel) {
+      lin.smeeChannel = linear.smeeChannel;
+    }
+    // Per-team keyed entries: { ctl: {webhookId, smeeChannel, resourceTypes}, ... }.
+    // Keep only non-secret identifiers; drop registeredAt and anything else.
+    for (const key of Object.keys(linear)) {
+      const entry = linear[key];
+      if (!entry || typeof entry !== "object" || Array.isArray(entry)) continue;
+      if (typeof entry.webhookId !== "string" || !entry.webhookId) continue;
+      const e = { webhookId: entry.webhookId };
+      if (typeof entry.smeeChannel === "string" && entry.smeeChannel) {
+        e.smeeChannel = entry.smeeChannel;
+      }
+      if (Array.isArray(entry.resourceTypes)) e.resourceTypes = entry.resourceTypes;
+      lin[key] = e;
+    }
+    if (Object.keys(lin).length > 0) out.linear = lin;
+  }
+
+  return Object.keys(out).length > 0 ? out : null;
+}
+
 export function assembleJoinBundle() {
   // Pin CATALYST_CONFIG_FILE to the registry repoRoot so the cwd-dependent
   // Layer-1 identity read (layer1Path → <repoRoot>/.catalyst/config.json)
@@ -113,6 +155,10 @@ export function assembleJoinBundle() {
     },
     repoUrl,
     pluginSourceUrl: resolvePluginSourceUrl(l2) || repoUrl,
+    // CTL-1284: non-secret webhook wiring (smee channels + per-team webhookId
+    // map). null when the seed has no monitor block. multiHost-gated by the
+    // consumer; deliberately NOT in BUNDLE_REQUIRED_KEYS.
+    monitorWebhooks: extractMonitorWebhooks(l2),
   };
 }
 

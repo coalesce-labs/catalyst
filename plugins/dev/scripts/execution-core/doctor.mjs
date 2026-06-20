@@ -838,6 +838,113 @@ export function checkDaemonToolPath(deps = {}) {
   ];
 }
 
+// ─── Phase 5c: Webhook ingestion (CTL-1284) ──────────────────────────────────
+
+// A `catalyst-join`-joined MEMBER must ingest inbound GitHub/Linear webhooks —
+// without them monitor-merge CI-waits and comment-wakes degrade to polling. But
+// a SINGLE-host node must NOT ingest: at roster length 1 HRW is an identity
+// no-op and claimDispatch is skipped, so a lone node would actuate every inbound
+// event → double-dispatch. This check asserts: single-host → PASS (ingestion
+// legitimately off); multiHost → at least one webhook route is FULLY wired (smee
+// channel + matching HMAC secret on disk), with no half-wired webhookId (id
+// configured but secret file missing). FAILs so the activation gate fail-closes.
+
+function defaultWebhookConfigDir() {
+  return resolve(homedir(), ".config", "catalyst");
+}
+
+function defaultReadMonitor() {
+  try {
+    const obj = JSON.parse(readFileSync(layer2Path(), "utf8"));
+    return obj?.catalyst?.monitor ?? null;
+  } catch {
+    return null;
+  }
+}
+
+function defaultSecretFileNonEmpty(dir, name) {
+  try {
+    return readFileSync(resolve(dir, name), "utf8").trim().length > 0;
+  } catch {
+    return false;
+  }
+}
+
+export function checkWebhookIngestion(deps = {}) {
+  const {
+    resolveRoster = resolveClusterHosts,
+    monitor = defaultReadMonitor(),
+    configDir = defaultWebhookConfigDir(),
+    secretFileNonEmpty = defaultSecretFileNonEmpty,
+  } = deps;
+
+  const roster = resolveRoster();
+  if (!roster?.multiHost) {
+    return [
+      mkCheck(
+        "webhook-ingestion",
+        STATUS.PASS,
+        "single-host roster — webhook ingestion legitimately disabled (double-dispatch guard)",
+      ),
+    ];
+  }
+
+  const m = monitor ?? {};
+
+  // GitHub route: smee channel + a github HMAC secret (file or env).
+  const ghSmee = typeof m.github?.smeeChannel === "string" ? m.github.smeeChannel : "";
+  const ghSecret =
+    secretFileNonEmpty(configDir, "webhook-secret") ||
+    (process.env.CATALYST_WEBHOOK_SECRET ?? "").length > 0;
+  const githubWired = ghSmee.length > 0 && ghSecret;
+
+  // Linear route: smee channel + ≥1 keyed webhookId whose HMAC secret resolves.
+  const linear =
+    m.linear && typeof m.linear === "object" && !Array.isArray(m.linear) ? m.linear : {};
+  const linSmee = typeof linear.smeeChannel === "string" ? linear.smeeChannel : "";
+  const webhookKeys = Object.keys(linear).filter((k) => {
+    const e = linear[k];
+    return (
+      e && typeof e === "object" && !Array.isArray(e) &&
+      typeof e.webhookId === "string" && e.webhookId.length > 0
+    );
+  });
+  const keySecretWired = (k) =>
+    secretFileNonEmpty(
+      configDir,
+      k === "workspace" ? "linear-webhook-secret" : `linear-webhook-secret-${k}`,
+    ) || (process.env.CATALYST_LINEAR_WEBHOOK_SECRET ?? "").length > 0;
+  const wiredKeys = webhookKeys.filter(keySecretWired);
+  const danglingKeys = webhookKeys.filter((k) => !keySecretWired(k));
+  const linearWired = linSmee.length > 0 && wiredKeys.length > 0;
+
+  if (!githubWired && !linearWired) {
+    return [
+      mkCheck(
+        "webhook-ingestion",
+        STATUS.FAIL,
+        `multiHost member but NO webhook route enabled — github(smee=${ghSmee ? "set" : "unset"},secret=${ghSecret ? "set" : "unset"}) linear(smee=${linSmee ? "set" : "unset"},wiredKeys=${wiredKeys.length}); monitor-merge/comment-wakes will degrade to polling`,
+      ),
+    ];
+  }
+  if (danglingKeys.length > 0) {
+    return [
+      mkCheck(
+        "webhook-ingestion",
+        STATUS.FAIL,
+        `multiHost member with half-wired Linear webhook(s): ${danglingKeys.join(", ")} configured (webhookId) but missing HMAC secret file (linear-webhook-secret-<key>)`,
+      ),
+    ];
+  }
+  return [
+    mkCheck(
+      "webhook-ingestion",
+      STATUS.PASS,
+      `webhook ingestion wired (github=${githubWired}, linear=${linearWired}, linear keys=${wiredKeys.length})`,
+    ),
+  ];
+}
+
 // ─── Phase 6: Renderer, exit code, runDoctor ─────────────────────────────────
 
 // summarize — aggregate check results into counts.
@@ -925,6 +1032,7 @@ export async function runDoctor(opts = {}) {
     () => checkConnectivity({ seed, otel }),
     () => checkSecretsHygiene(),
     () => checkDaemonToolPath(), // CTL-1289: daemon launchd PATH resolves linearis/node/claude
+    () => checkWebhookIngestion(), // CTL-1284: multiHost member ingests webhooks; single-host does not
   ];
 
   const fns = checkFns ?? defaultChecks;
