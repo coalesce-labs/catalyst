@@ -60,8 +60,11 @@ export function buildHeartbeatEnvelope({ now, epochFn, governanceFn } = {}) {
     resource: {
       "service.name": "catalyst.execution-core",
       "service.namespace": "catalyst",
-      "host.name": hostName(),
-      "host.id": hostId(),
+      // CTL-1093 Phase 2: pass the config-aware name as override so resource
+      // and body.payload["host.name"] always agree, even when Layer-2 is pinned
+      // but CATALYST_HOST_NAME env was not yet injected by the boot guard.
+      "host.name": hostName({ override: host }),
+      "host.id": hostId({ override: host }),
     },
     attributes: {
       "event.name": HEARTBEAT_EVENT,

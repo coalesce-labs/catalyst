@@ -211,6 +211,20 @@ export function getHostName() {
   return dot === -1 ? base : base.slice(0, dot);
 }
 
+// isHostNamePinnedFromConfig — returns true when this host's coordination name
+// comes from an explicit pin (CATALYST_HOST_NAME env or Layer-2 catalyst.host.name)
+// rather than os.hostname(). Reads the same sources getHostName() uses so the
+// boot guard and getHostName() never disagree. CTL-1093.
+export function isHostNamePinnedFromConfig() {
+  const env = process.env.CATALYST_HOST_NAME;
+  if (typeof env === "string" && env.length > 0) return true;
+  try {
+    const parsed = JSON.parse(readFileSync(getLayer2ConfigPath(), "utf8"));
+    return typeof parsed?.catalyst?.host?.name === "string" &&
+           parsed.catalyst.host.name.length > 0;
+  } catch { return false; }
+}
+
 // getStaticRoster — the `static` escape-hatch roster (CTL-1273). A multi-host
 // operator who does NOT want the Linear anchor can pin an explicit node list in
 // the Layer-2 machine-local config under catalyst.cluster.staticRoster (a JSON

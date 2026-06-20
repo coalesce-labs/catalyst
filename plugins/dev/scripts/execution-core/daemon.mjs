@@ -42,12 +42,15 @@ import {
   readFleetHealthConfig, // CTL-1165 D5: fleet-health guardrail config (selfHeal default OFF)
   readRatelimitPollerConfig,
   getHostName,      // CTL-862
-  getClusterHosts,  // CTL-862
   resolveClusterHosts, // CTL-1273/CTL-1271: roster + source + multiHost for the boot assertion
   getLivenessAnchorIssue, // CTL-1271: "multi-host was configured" detector
   getStaticRoster,        // CTL-1271: "multi-host was configured" detector
   CLUSTER_SYNC_INTERVAL_MS, // CTL-1274: cluster-repo auto-pull cadence
+  isHostNamePinnedFromConfig, // CTL-1093
+  getCatalystRepoDir,       // CTL-1093 sticky dir
 } from "./config.mjs";
+import { resolveBootIdentity } from "./host-boot-identity.mjs"; // CTL-1093
+import { readStickyIdentity, writeStickyIdentity } from "./host-sticky.mjs"; // CTL-1093
 import { ownedBy } from "./hrw.mjs"; // CTL-862: HRW ownership filter
 import { clusterSync as realClusterSync, pullClusterRepo as realPullClusterRepo } from "./cluster-sync.mjs"; // CTL-1274: cluster-repo auto-pull
 import { startWaitWatcher as realStartWaitWatcher } from "./wait-watcher.mjs";
@@ -778,7 +781,29 @@ export function startDaemon({
   const bootRoster = resolved.hosts;
   const bootSource = resolved.source;
   const bootMultiHost = resolved.multiHost;
-  const bootSelf = bootHostName ?? getHostName();
+  // CTL-1093: resolve sticky/pinned identity before computing bootSelf so
+  // every downstream emitter and child sees the converged coordination name.
+  // Feeds off the CTL-1271 roster resolution above (bootMultiHost) so the
+  // identity decision and the boot announcement share one source of truth.
+  const _stickyDir = getCatalystRepoDir();
+  const _ident = resolveBootIdentity({
+    pinned: isHostNamePinnedFromConfig(),
+    resolvedName: bootHostName ?? getHostName(),
+    sticky: readStickyIdentity({ dir: _stickyDir }),
+    multiHost: bootMultiHost,
+  });
+  if (_ident.warning) log.warn({ host: _ident.name, roster: bootRoster }, _ident.warning);
+  if (_ident.action === "record" || _ident.action === "restore") {
+    writeStickyIdentity({ dir: _stickyDir, name: _ident.name });
+  }
+  // Inject into env so phase-agent-dispatch (child process) inherits the pinned name
+  // via CATALYST_HOST_NAME → catalyst_host_name (host-identity.sh). Only set when
+  // not already env-pinned so an explicit operator override always wins and the
+  // intentional per-tick getHostName() Layer-2 re-read is preserved. CTL-1093.
+  if (_ident.action !== "noop" && !process.env.CATALYST_HOST_NAME) {
+    process.env.CATALYST_HOST_NAME = _ident.name;
+  }
+  const bootSelf = _ident.action === "noop" ? (bootHostName ?? getHostName()) : _ident.name;
   const bootEligible = readAllEligible();
   const bootOwns = bootEligible.filter((t) => ownedBy(t.identifier, bootRoster, bootSelf)).length;
 
