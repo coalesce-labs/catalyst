@@ -497,11 +497,21 @@ export function fetchTicketAssignee(
   if (gateway) {
     const d = gateway.getDescriptor(identifier);
     if (d && !d.removed) {
-      return {
-        known: true,
-        assignee: d.assignee ?? null,
-        delegate: d.delegate === undefined ? null : d.delegate,
-      };
+      const cachedDelegate = d.delegate === undefined ? null : d.delegate;
+      // CTL-1174 LATCH FIX: a cached delegate of null is indistinguishable from
+      // "never projected into the broker store" — and the store is NEVER written
+      // with the orchestrator's own self-delegation (the webhook fold is dormant +
+      // bot-suppressed; cache-reconcile + the eligible batch don't read delegate).
+      // Returning cached-null here makes the delegate-on-Todo gate re-delegate
+      // forever and never observe its own write. So on a cached NULL delegate,
+      // CONFIRM LIVE before treating it as undelegated; a non-null cached delegate
+      // is authoritative (only an actor sets it) and stays rate-free.
+      if (cachedDelegate !== null) {
+        return { known: true, assignee: d.assignee ?? null, delegate: cachedDelegate };
+      }
+      const drHit = fetchDelegate(identifier);
+      if (!drHit.known) return { known: false }; // unreadable → HOLD (never claim on unknown)
+      return { known: true, assignee: d.assignee ?? null, delegate: drHit.delegate ?? null };
     }
     // Gateway miss: live read for assignee, then delegate.
     const { code, stdout } = exec("linearis", ["issues", "read", identifier]);

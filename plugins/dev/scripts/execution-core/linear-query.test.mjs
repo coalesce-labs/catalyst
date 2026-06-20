@@ -1,7 +1,7 @@
 // Unit tests for the execution-core Linear eligible query (CTL-535 Phase 2).
 // Run: cd plugins/dev/scripts/execution-core && bun test linear-query.test.mjs
 
-import { describe, test, expect } from "bun:test";
+import { describe, test, expect, mock } from "bun:test";
 import {
   buildLinearisArgs,
   runEligibleQuery,
@@ -1020,22 +1020,51 @@ describe("fetchTicketState — gateway state-freshness boundary (CTL-823)", () =
 
 describe("fetchTicketAssignee (CTL-781)", () => {
   const BOT = "ff78d890-7906-4c22-b2f5-020bd150c790";
+  const HUMAN = "11111111-1111-1111-1111-111111111111";
 
-  test("gateway descriptor present + !removed → {known:true, assignee:<uuid>, delegate:null}, zero exec", () => {
+  test("gateway hit, delegate cached null → CONFIRMS LIVE via fetchDelegate (latch fix); zero exec", () => {
     const exec = fakeExec({ code: 0, stdout: "{}" });
-    // CTL-1174: gateway hit now returns delegate from descriptor (undefined→null for pre-Phase-1 DBs)
     const gateway = fakeGateway({ ticket: "CTL-1", assignee: BOT, removed: false, updatedAt: FRESH() });
-    const r = fetchTicketAssignee("CTL-1", { exec, gateway });
+    const fetchDelegate = mock(() => ({ known: true, delegate: null }));
+    const r = fetchTicketAssignee("CTL-1", { exec, gateway, fetchDelegate });
     expect(r).toEqual({ known: true, assignee: BOT, delegate: null });
-    expect(exec.calls.length).toBe(0);
+    expect(exec.calls.length).toBe(0); // live confirm uses fetchDelegate (curl), not exec
+    expect(fetchDelegate).toHaveBeenCalledTimes(1); // cached-null is confirmed live (CTL-1174 latch fix)
   });
 
-  test("gateway descriptor present with assignee null → {known:true, assignee:null, delegate:null}, zero exec", () => {
+  test("gateway hit, assignee null + delegate cached null → confirms live; zero exec", () => {
     const exec = fakeExec({ code: 0, stdout: "{}" });
     const gateway = fakeGateway({ ticket: "CTL-2", assignee: null, removed: false, updatedAt: FRESH() });
-    const r = fetchTicketAssignee("CTL-2", { exec, gateway });
+    const fetchDelegate = mock(() => ({ known: true, delegate: null }));
+    const r = fetchTicketAssignee("CTL-2", { exec, gateway, fetchDelegate });
     expect(r).toEqual({ known: true, assignee: null, delegate: null });
     expect(exec.calls.length).toBe(0);
+    expect(fetchDelegate).toHaveBeenCalledTimes(1);
+  });
+
+  test("LATCH FIX: gateway delegate cached null but LIVE delegate is the bot → returns delegate:BOT (gate sees its own write)", () => {
+    const exec = fakeExec({ code: 0, stdout: "{}" });
+    const gateway = fakeGateway({ ticket: "CTL-2b", assignee: HUMAN, removed: false, updatedAt: FRESH() });
+    const fetchDelegate = mock(() => ({ known: true, delegate: BOT })); // delegate landed live after self-delegation
+    const r = fetchTicketAssignee("CTL-2b", { exec, gateway, fetchDelegate });
+    expect(r).toEqual({ known: true, assignee: HUMAN, delegate: BOT });
+  });
+
+  test("LATCH: gateway delegate cached null + live read unreadable → {known:false} (HOLD, never claim on unknown)", () => {
+    const exec = fakeExec({ code: 0, stdout: "{}" });
+    const gateway = fakeGateway({ ticket: "CTL-2c", assignee: null, removed: false, updatedAt: FRESH() });
+    const fetchDelegate = mock(() => ({ known: false }));
+    const r = fetchTicketAssignee("CTL-2c", { exec, gateway, fetchDelegate });
+    expect(r).toEqual({ known: false });
+  });
+
+  test("gateway delegate cached NON-null (BOT) → authoritative, fetchDelegate NOT called (rate-free)", () => {
+    const exec = fakeExec({ code: 0, stdout: "{}" });
+    const gateway = fakeGateway({ ticket: "CTL-2d", assignee: HUMAN, delegate: BOT, removed: false, updatedAt: FRESH() });
+    const fetchDelegate = mock(() => ({ known: true, delegate: null }));
+    const r = fetchTicketAssignee("CTL-2d", { exec, gateway, fetchDelegate });
+    expect(r).toEqual({ known: true, assignee: HUMAN, delegate: BOT });
+    expect(fetchDelegate).not.toHaveBeenCalled(); // non-null cached delegate is authoritative
   });
 
   test("gateway descriptor removed → falls through to live read (CTL-1174: injects fetchDelegate)", () => {
