@@ -108,6 +108,7 @@ jobs:
             autotune-lifecycle.test.mjs \
             autotune-writeback.test.mjs \
             board-health.test.mjs \
+            board-health-seam.test.mjs \
             boot-resume-approval.test.mjs \
             boot-resume.test.mjs \
             claim.test.mjs \

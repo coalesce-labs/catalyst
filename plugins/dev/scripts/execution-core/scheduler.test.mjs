@@ -10428,60 +10428,6 @@ describe("drained-sentinel emission (CTL-1095)", () => {
   });
 });
 
-// ─── CTL-1290: board-health delegate seam (§9.4 — thin) ──────────────────────
-// The pass logic is fully covered by board-health.test.mjs. Here we assert ONLY
-// the scheduler seam: the hook fires the injected boardHealthPassFn with the
-// in-scope capacity + eligible when the daemon threads `boardHealth`, honors the
-// mode gate, and is INERT on a bare tick (the property that keeps every other
-// schedulerTick test from doing real board-health IO).
-describe("schedulerTick — board-health seam (CTL-1290)", () => {
-  test("threads boardHealth → boardHealthPassFn called once with capacity + eligible", () => {
-    const calls = [];
-    schedulerTick(orchDir, {
-      readEligible: () => [{ identifier: "CTL-1" }, { identifier: "CTL-2" }],
-      dispatch: () => ({ code: 0 }),
-      writeStatus: () => {},
-      reclaimDeadWork: () => "noop",
-      concurrency: { maxParallel: 4 },
-      liveBackgroundCount: () => 4, // freeSlots=0 → Pass 2 dispatch is a clean no-op
-      boardHealth: { mode: "shadow" },
-      boardHealthPassFn: (opts) => {
-        calls.push(opts);
-        return { ran: true, ranAtMs: 1 };
-      },
-    });
-    expect(calls.length).toBe(1);
-    const o = calls[0];
-    expect(o.mode).toBe("shadow");
-    expect(o.capacity).toEqual({ maxParallel: 4, liveCount: 4, freeSlots: 0 });
-    expect(o.getEligible().map((e) => e.identifier)).toEqual(["CTL-1", "CTL-2"]);
-    expect(typeof o.getWorkerSignals).toBe("function");
-  });
-
-  test("boardHealth.mode:off → boardHealthPassFn NOT called", () => {
-    const calls = [];
-    schedulerTick(orchDir, {
-      readEligible: () => [],
-      dispatch: () => ({ code: 0 }),
-      writeStatus: () => {},
-      reclaimDeadWork: () => "noop",
-      liveBackgroundCount: () => 0,
-      boardHealth: { mode: "off" },
-      boardHealthPassFn: (opts) => calls.push(opts),
-    });
-    expect(calls.length).toBe(0);
-  });
-
-  test("no boardHealth seam (bare tick) → boardHealthPassFn NOT called (inert)", () => {
-    const calls = [];
-    schedulerTick(orchDir, {
-      readEligible: () => [],
-      dispatch: () => ({ code: 0 }),
-      writeStatus: () => {},
-      reclaimDeadWork: () => "noop",
-      liveBackgroundCount: () => 0,
-      boardHealthPassFn: (opts) => calls.push(opts),
-    });
-    expect(calls.length).toBe(0);
-  });
-});
+// CTL-1290: the board-health scheduler-seam tests live in board-health-seam.test.mjs
+// (a CI-included file) — scheduler.test.mjs is excluded from the CI allowlist for
+// its real-timer suite, so the seam coverage would not run here.

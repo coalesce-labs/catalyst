@@ -17,15 +17,19 @@
 //      param, so this module unit-tests with plain stubs AND never imports
 //      bun:sqlite (the board snapshot reader is bound at the scheduler call
 //      site, which already runs under Bun — see MEMORY vite_config_bun_sqlite_trap).
-//   3. SHADOW TAKES ZERO MUTATING ACTION. This module imports NOTHING that can
-//      spawn a process (no child_process, no gh/git, no dispatch). emit() only
-//      appends a JSONL line (observability, not a board mutation). The only
-//      actuation surface is the injected `act` dep — reachable ONLY in enforce,
-//      and the scheduler does NOT pass one in CTL-1290 (actuation is a follow-up).
+//   3. SHADOW TAKES ZERO MUTATING ACTION. In the shadow path this module performs
+//      NO process spawning and NO board mutation: its only side effect is emit(),
+//      which appends a single JSONL line (observability, not a mutation). It does
+//      not import child_process / gh / git / dispatch directly; the one symbol it
+//      pulls from recovery-reasoning.mjs (defaultEmitEvent) is append-only on this
+//      path (the spawn-bearing recovery helpers there are never reached from here).
+//      The only actuation surface is the injected `act` dep — reachable ONLY in
+//      enforce, and the scheduler passes none in CTL-1290 (actuation is a follow-up).
 //
 // Ships behind CATALYST_BOARD_HEALTH (config.mjs readBoardHealthConfig), default
-// OFF (ADR-023). Operators flip a host to shadow to collect recovery.board-scan
-// telemetry, review it, then a future ticket enables enforce.
+// SHADOW (the deliberate ADR-023 deviation — shadow emits one recovery.board-scan
+// heartbeat per cadence and mutates nothing). CATALYST_BOARD_HEALTH=0/off is the
+// kill-switch; a future ticket wires enforce.
 
 import { isThrottled } from "./config.mjs";
 import { defaultEmitEvent } from "./recovery-reasoning.mjs"; // → buildRecoveryEnvelope (CTL-1291 promotes the numbers)
@@ -123,7 +127,12 @@ function deriveRing(events, nowMs) {
     const name = ev?.attributes?.["event.name"] ?? ev?.["event.name"] ?? ev?.type ?? "";
     const payload = ev?.body?.payload ?? ev?.payload ?? {};
     const tsMs = ev?.ts ? Date.parse(ev.ts) : NaN;
-    if (/\.dispatch(\.|$)|worker[.-]create|new-work/i.test(name)) {
+    // Only dispatch SUCCESS signals count as "the dispatcher is alive". A failing
+    // loop (phase.dispatch.{failed,escalated,runaway}) must NOT clear the silent-
+    // hold wedge — those are the LOUD failure modes other guards catch (circuit
+    // breaker, runaway alert); counting them here would green the invariant exactly
+    // when dispatch is broken. requested|launched = the scheduler actually acting.
+    if (/\.dispatch\.(requested|launched)(\.|$)|worker[.-]create|new-work/i.test(name)) {
       if (Number.isFinite(tsMs)) ring.recentDispatchTs = Math.max(ring.recentDispatchTs ?? 0, tsMs);
     } else if (/cache\.reconcile/i.test(name)) {
       ring.cacheReconcile = {
@@ -484,7 +493,20 @@ export function buildBoardContext(boardState, invariants) {
       topTickets: boardState.eligible.slice(0, 5).map((e) => e.id).filter(Boolean),
     },
     stuckWorkers,
-    strandedNodes: (invariants.strandedNode?.flagged ?? []).map((h) => ({ host: h })),
+    strandedNodes: (invariants.strandedNode?.flagged ?? []).map((host) => ({
+      host,
+      // the tickets HRW-owned by this stranded host — the delegate's actionable
+      // payload (which work is at risk on the node that stopped reconciling).
+      ownedTickets: boardState.ownerForTicket
+        ? [...boardState.ticketsById.keys()].filter((id) => {
+            try {
+              return boardState.ownerForTicket(id, boardState.roster) === host;
+            } catch {
+              return false;
+            }
+          })
+        : [],
+    })),
     invariants: Object.fromEntries(
       Object.entries(invariants).map(([k, v]) => [k, { ok: v.ok, failed: v.failed }]),
     ),

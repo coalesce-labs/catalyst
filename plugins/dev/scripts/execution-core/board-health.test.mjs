@@ -358,6 +358,21 @@ describe("buildBoardContext", () => {
     ]);
     expect(ctx.invariants.workerAge).toEqual({ ok: false, failed: 1 });
   });
+
+  test("strandedNodes carry their HRW-owned tickets (schema {host, ownedTickets})", () => {
+    const board = mkBoard({
+      roster: ["mini", "mini-2"],
+      ticketsById: new Map([
+        ["CTL-A", { identifier: "CTL-A" }],
+        ["CTL-B", { identifier: "CTL-B" }],
+        ["CTL-C", { identifier: "CTL-C" }],
+      ]),
+      ownerForTicket: (id) => (id === "CTL-C" ? "mini" : "mini-2"),
+    });
+    const invs = { ...allGreen(), strandedNode: inv(false, 1, true, ["mini-2"]) };
+    const ctx = buildBoardContext(board, invs);
+    expect(ctx.strandedNodes).toEqual([{ host: "mini-2", ownedTickets: ["CTL-A", "CTL-B"] }]);
+  });
 });
 
 // ─── assembleBoardState — the one impure reader (reads only) ─────────────────
@@ -383,6 +398,33 @@ describe("assembleBoardState", () => {
     // worker-age still flags off the top-level signal fields — no evidence.signal needed
     const r = evaluateInvariants(board);
     expect(r.workerAge.flagged).toEqual(["CTL-A"]);
+  });
+
+  test("deriveRing: dispatch SUCCESS events set recentDispatchTs; failed/escalated/runaway do NOT", () => {
+    const ring = (name) =>
+      assembleBoardState({
+        readEventRing: () => [{ attributes: { "event.name": name }, ts: new Date(NOW - MIN).toISOString() }],
+        now: () => NOW,
+      }).ring.recentDispatchTs;
+    // success / activity signals → counted (dispatcher is alive)
+    expect(ring("phase.dispatch.launched.CTL-1")).toBe(NOW - MIN);
+    expect(ring("phase.dispatch.requested.CTL-1")).toBe(NOW - MIN);
+    expect(ring("new-work")).toBe(NOW - MIN);
+    // loud-failure signals → NOT counted (must not green the silent-hold wedge)
+    expect(ring("phase.dispatch.failed.CTL-1")).toBeNull();
+    expect(ring("phase.dispatch.escalated.CTL-1")).toBeNull();
+    expect(ring("phase.dispatch.runaway.CTL-1")).toBeNull();
+  });
+
+  test("dispatchLiveness stays WEDGED when the only recent dispatch events are failures", () => {
+    const board = assembleBoardState({
+      getEligible: () => [{ identifier: "CTL-1" }],
+      capacity: { maxParallel: 4, liveCount: 0, freeSlots: 4 },
+      // a fail-loop: recent phase.dispatch.failed events, no launched/requested
+      readEventRing: () => [{ attributes: { "event.name": "phase.dispatch.failed.CTL-1" }, ts: new Date(NOW - MIN).toISOString() }],
+      now: () => NOW,
+    });
+    expect(evaluateInvariants(board).dispatchLiveness.ok).toBe(false); // wedge NOT masked by failures
   });
 
   test("each reader fails soft — a throwing dep degrades to []/{}, never throws", () => {
