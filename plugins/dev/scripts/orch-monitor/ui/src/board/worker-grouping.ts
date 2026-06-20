@@ -33,6 +33,20 @@ export const HOST_FILTER_ALL = "all" as const;
  *  that honestly rather than inventing a host id. */
 export const UNATTRIBUTED_HOST = "unattributed" as const;
 
+/** The sentinel label for workers whose host is neither in the roster nor
+ *  currently live (heartbeating). All such "historical" names collapse into
+ *  a single column rather than rendering as phantom dead-node lanes. CTL-1093. */
+export const HISTORICAL_ALIAS_HOST = "historical alias" as const;
+
+/** Context required for historical-alias folding. Both fields come from the
+ *  cluster roster + liveness data already available to Board.tsx. CTL-1093. */
+export interface NodeContext {
+  /** The committed cluster roster (from .catalyst/hosts.json via /api/cluster). */
+  roster: readonly string[];
+  /** Host names currently considered live (heartbeating within grace window). */
+  liveHosts: ReadonlySet<string>;
+}
+
 /** One node column on the Workers grid: the host name (its column label) and the
  *  workers that resolve to it, already ordered by the shared worker comparator. */
 export interface NodeColumn {
@@ -47,24 +61,39 @@ export function workerHostName(w: BoardWorker): string | null {
   return w.host?.name ?? null;
 }
 
+/** Returns true when a host name should be folded into the historical bucket:
+ *  it is neither in the roster nor currently live. When ctx is absent, never folds
+ *  (backward compatibility). CTL-1093. */
+function isHistoricalHost(name: string, ctx?: NodeContext): boolean {
+  if (!ctx) return false;
+  return !ctx.roster.includes(name) && !ctx.liveHosts.has(name);
+}
+
 /**
  * The distinct host names present across the given workers, in stable display
  * order: real host names sorted alphabetically, with the `unattributed` bucket
  * (if any worker lacks a host) appended LAST so a hostless worker never hides a
  * real node. An empty input yields `[]` (no columns) — never a fabricated host.
  *
+ * When `ctx` is supplied, non-roster non-live host names are collapsed into a
+ * single `HISTORICAL_ALIAS_HOST` entry (appended after real names, before
+ * unattributed) so phantom dead columns do not clutter the view. CTL-1093.
+ *
  * SINGLE-HOST: one node ⇒ exactly one entry, so `nodeColumns` collapses to one
  * column — the identity no-op the spec mandates.
  */
-export function workerHostNames(workers: readonly BoardWorker[]): string[] {
+export function workerHostNames(workers: readonly BoardWorker[], ctx?: NodeContext): string[] {
   const named = new Set<string>();
   let hasUnattributed = false;
+  let hasHistorical = false;
   for (const w of workers) {
     const name = workerHostName(w);
-    if (name === null || name === "") hasUnattributed = true;
-    else named.add(name);
+    if (name === null || name === "") { hasUnattributed = true; continue; }
+    if (isHistoricalHost(name, ctx)) { hasHistorical = true; continue; }
+    named.add(name);
   }
   const out = [...named].sort((a, b) => a.localeCompare(b));
+  if (hasHistorical) out.push(HISTORICAL_ALIAS_HOST);
   if (hasUnattributed) out.push(UNATTRIBUTED_HOST);
   return out;
 }
@@ -73,18 +102,27 @@ export function workerHostNames(workers: readonly BoardWorker[]): string[] {
  * Scope a worker list to a single host. `HOST_FILTER_ALL` is a pure identity
  * no-op (returns the same membership, never a copy-induced reorder concern —
  * callers pass the result straight into grouping). `UNATTRIBUTED_HOST` selects
- * exactly the hostless workers. Any other value selects the workers whose
- * `host.name` matches. Returns a new array (never mutates the payload).
+ * exactly the hostless workers. `HISTORICAL_ALIAS_HOST` selects all workers
+ * whose host is historical under ctx (non-roster and non-live). Any other value
+ * selects the workers whose `host.name` matches. Returns a new array (never
+ * mutates the payload).
  */
 export function filterWorkersByHost(
   workers: readonly BoardWorker[],
   host: string,
+  ctx?: NodeContext,
 ): BoardWorker[] {
   if (host === HOST_FILTER_ALL) return [...workers];
   if (host === UNATTRIBUTED_HOST) {
     return workers.filter((w) => {
       const n = workerHostName(w);
       return n === null || n === "";
+    });
+  }
+  if (host === HISTORICAL_ALIAS_HOST) {
+    return workers.filter((w) => {
+      const n = workerHostName(w);
+      return n !== null && n !== "" && isHistoricalHost(n, ctx);
     });
   }
   return workers.filter((w) => workerHostName(w) === host);
@@ -96,14 +134,18 @@ export function filterWorkersByHost(
  * the SAME `sortWorkers` comparator the status/phase lenses and the in-flight
  * queue use, so card order is consistent across every Workers view.
  *
+ * When `ctx` is supplied, non-roster non-live host names collapse into a single
+ * `HISTORICAL_ALIAS_HOST` column rather than rendering as phantom dead-node
+ * lanes. Without `ctx`, behavior is byte-for-byte identical to before. CTL-1093.
+ *
  * SINGLE-HOST IDENTITY NO-OP: with one node this returns a single column whose
  * workers are exactly `sortWorkers(workers)` — byte-for-byte the host-unaware
  * ordering, no extra chrome. An empty input yields `[]`.
  */
-export function nodeColumns(workers: readonly BoardWorker[]): NodeColumn[] {
-  return workerHostNames(workers).map((host) => ({
+export function nodeColumns(workers: readonly BoardWorker[], ctx?: NodeContext): NodeColumn[] {
+  return workerHostNames(workers, ctx).map((host) => ({
     host,
-    workers: sortWorkers(filterWorkersByHost(workers, host)),
+    workers: sortWorkers(filterWorkersByHost(workers, host, ctx)),
   }));
 }
 
