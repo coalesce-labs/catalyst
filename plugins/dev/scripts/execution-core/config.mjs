@@ -161,7 +161,10 @@ export function getLayer2ConfigPath() {
 // CATALYST_CONFIG_FILE points at <repoRoot>/.catalyst/config.json (mirrors the
 // reaper-config resolution in daemon.mjs main()); otherwise fall back to the
 // daemon's cwd. Re-resolved per call so tests can redirect via the env var.
-function getCatalystRepoDir() {
+// CTL-1093 (#1927) added a named import of this in daemon.mjs but landed without
+// the `export`, breaking daemon boot fleet-wide ("Export named 'getCatalystRepoDir'
+// not found"). Export restored so the import resolves.
+export function getCatalystRepoDir() {
   const cfgFile = process.env.CATALYST_CONFIG_FILE;
   if (cfgFile) {
     // <repoRoot>/.catalyst/config.json → <repoRoot>/.catalyst
