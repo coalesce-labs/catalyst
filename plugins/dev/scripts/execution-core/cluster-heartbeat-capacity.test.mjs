@@ -40,7 +40,9 @@ describe("publishHeartbeat metadata capacity fields (CTL-1092)", () => {
     const calls = [];
     const post = async (q, v) => {
       calls.push({ q, v });
-      if (q.includes("ResolveIssue")) return { issues: { nodes: [{ id: "uuid-anchor" }] } };
+      // CTL-1255: resolveIssueId now uses the singular `issue(id:)` query and reads
+      // data.issue.id (the old `issues(filter:)` form 400'd). Mock the new shape.
+      if (q.includes("ResolveIssue")) return { issue: { id: "uuid-anchor" } };
       return { attachmentCreate: { success: true, attachment: { id: "a1" } } };
     };
     const rec = await publishHeartbeat(
@@ -58,7 +60,8 @@ describe("publishHeartbeat metadata capacity fields (CTL-1092)", () => {
 
   test("max_parallel defaults to null when omitted from publishHeartbeat", async () => {
     const post = async (q) => {
-      if (q.includes("ResolveIssue")) return { issues: { nodes: [{ id: "uuid-x" }] } };
+      // CTL-1255: resolveIssueId reads data.issue.id from the singular issue(id:) query.
+      if (q.includes("ResolveIssue")) return { issue: { id: "uuid-x" } };
       return { attachmentCreate: { success: true, attachment: {} } };
     };
     const rec = await publishHeartbeat(

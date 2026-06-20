@@ -39,6 +39,14 @@ export interface AssembleClusterViewArgs extends LivenessThresholds {
   heartbeatReader?: (opts: { logPath?: string }) => Record<string, string>;
   logPath?: string;
   now?: number;
+  /** CTL-1095: per-host drain reader → { draining, inFlightCount }. */
+  drainReader?: ((host: string) => { draining?: boolean; inFlightCount?: number } | null | undefined) | null;
+  /** CTL-1092: per-host capacity reader → { maxParallel, inFlightCount, freeSlots }. */
+  capacityReader?:
+    | ((host: string) => { maxParallel?: number; inFlightCount?: number; freeSlots?: number } | null | undefined)
+    | null;
+  /** CTL-1092: host alias map { oldName → pinnedName } for collapsing pre-pin heartbeat keys. */
+  aliases?: Record<string, string> | null;
 }
 
 export function assembleClusterView(args: AssembleClusterViewArgs): ClusterView;

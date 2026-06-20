@@ -18,23 +18,41 @@ function ticket(id: string): BoardTicket {
     status: "running",
     model: null,
     linearState: "Implement",
-    host: null,
+    workerStatus: "running",
+    activeState: "active",
+    working: true,
+    lastActiveMs: 1000,
+    priority: 2,
+    estimate: null,
+    scope: null,
+    project: null,
+    costUSD: null,
+    tokens: null,
+    turns: null,
+    phaseCosts: null,
+    phaseSummary: [],
     pr: null,
-    startedAt: null,
-    workers: [],
-    costUsd: null,
-    error: null,
+    updatedAt: "2026-06-13T10:00:00.000Z",
+    held: null,
+    blockers: [],
+    heldSince: null,
+    currentPhaseSince: null,
+    attention: null,
+    attentionSince: null,
+    host: null,
+    generation: null,
   };
 }
 
 function board(tickets: BoardTicket[]): BoardPayload {
   return {
     generatedAt: "2026-06-13T10:00:00.000Z",
-    tickets,
+    config: { maxParallel: 6, inFlight: 0, freeSlots: 6, active: 0, working: 0, stuck: 0 },
+    repos: ["catalyst"],
     workers: [],
-    queue: { tickets: [], held: [], slots: [], totalInFlight: 0, totalHeld: 0, config: { maxParallel: 6, inFlight: 0, freeSlots: 6 } } as any,
-    config: { maxParallel: 6, inFlight: 0, freeSlots: 6 },
-  } as any;
+    tickets,
+    queue: [],
+  };
 }
 
 const now = new Date("2026-06-13T10:00:00.000Z").getTime();

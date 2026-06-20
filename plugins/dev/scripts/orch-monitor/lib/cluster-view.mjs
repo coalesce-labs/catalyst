@@ -146,8 +146,20 @@ export function assembleClusterView({
   };
 
   // CTL-1092: resolve capacity per host — offline nodes always get zeros; fail-open.
+  // NOTE: both this and resolveDrain (CTL-1095) surface an `inFlightCount` for the
+  // SAME physical quantity (workers in flight on the host). The node object spreads
+  // drain first, then capacity, so capacity's inFlightCount overrides drain's. That
+  // is correct WHEN a capacityReader is wired (the capacity feed is the authority).
+  // When NO capacityReader is wired at all, capacity must NOT emit inFlightCount —
+  // otherwise its default 0 would clobber the drain reader's count. The offline /
+  // null-reading branches (reader present, no usable value) still emit an explicit
+  // inFlightCount: 0, which is what the capacity callers assert for offline nodes.
   const resolveCapacity = (host, status) => {
-    if (status === "offline" || !capacityReader || host === null) {
+    if (!capacityReader || host === null) {
+      // capacity feature absent → contribute no fields, so drain's inFlightCount survives.
+      return {};
+    }
+    if (status === "offline") {
       return { maxParallel: 0, inFlightCount: 0, freeSlots: 0 };
     }
     try {
