@@ -480,12 +480,28 @@ export function proposeMoves(invariants, b) {
 // eligible queue. Returns null when the board offers no ticket handle at all
 // (a pure stranded-node / project-silence anomaly with an empty queue) — the
 // caller then takes no action this scan (those tier-3 moves are escalate-only).
+//
+// CTL-1302: the anchor MUST be one THIS host HRW-owns. Otherwise, on a multi-host
+// board, picking the first flagged ticket (which may be foreign-owned) and then
+// HRW-skipping at the act site stalls the whole scan even when this host owns a
+// LATER flagged ticket it could act on. So we filter every candidate to self-owned
+// before applying the tier-1 > tier-2 > eligible priority. Single-host (no roster /
+// no ownerForTicket / multiHost false) owns everything → behavior unchanged.
 export function selectAnchor(moves, board) {
-  const firstTicket = (arr) => (arr ?? []).map((m) => m && m.ticket).find(Boolean) ?? null;
+  const owns = (ticket) => {
+    if (!ticket) return false;
+    if (!board || !board.multiHost || typeof board.ownerForTicket !== "function") return true;
+    try {
+      return board.ownerForTicket(ticket, board.roster) === board.self;
+    } catch {
+      return true; // fail-open: a broken HRW read must not block self-owned actuation
+    }
+  };
+  const firstOwned = (arr) => (arr ?? []).map((m) => m && m.ticket).filter(Boolean).find(owns) ?? null;
   return (
-    firstTicket(moves?.tier1) ??
-    firstTicket(moves?.tier2) ??
-    (board?.eligible?.[0]?.id ?? null)
+    firstOwned(moves?.tier1) ??
+    firstOwned(moves?.tier2) ??
+    ((board?.eligible ?? []).map((e) => e && e.id).filter(Boolean).find(owns) ?? null)
   );
 }
 
@@ -619,16 +635,14 @@ export function boardHealthPass({
   // binds is the audited-real, capped, cooldown'd defaultInvokeRecoveryPass.
   let actResult;
   if (mode === "enforce" && typeof act === "function" && dec.gate.decision === "proceed") {
+    // CTL-1302: selectAnchor already HRW-filters to a SELF-OWNED ticket (or null
+    // when this host owns none of the flagged/eligible) — so there is no separate
+    // cross-host skip here. A null anchor means "nothing of mine to act on this
+    // scan" (e.g. all flagged work is owned by other hosts, or only host/project
+    // tier-3 moves with no ticket handle).
     const anchor = selectAnchor(dec.moves, board);
-    let owner = null;
-    if (anchor && multiHost && board.ownerForTicket) {
-      try { owner = board.ownerForTicket(anchor, board.roster); } catch { owner = null; }
-    }
     if (!anchor) {
-      log({ reason: "no-anchor" }, "board-health: proceed but no ticket anchor — no holistic dispatch this scan");
-    } else if (owner && owner !== board.self) {
-      // HRW gate — only the host that owns the anchor dispatches (no cross-host double-act).
-      log({ anchor, owner }, "board-health: anchor owned by another host (HRW) — skipping holistic dispatch");
+      log({ reason: "no-owned-anchor" }, "board-health: proceed but no self-owned ticket anchor — no holistic dispatch this scan");
     } else {
       const boardContext = buildBoardContext(board, invariants);
       try {
