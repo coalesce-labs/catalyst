@@ -990,13 +990,14 @@ export function readDeadDocWorkerConfig() {
 // itself a dark state. It emits ONE throttled `recovery.board-scan` heartbeat per
 // cadence and mutates NOTHING — the no-mutation guarantee is structural in
 // board-health.mjs (no process-spawning import; the `act` seam is enforce-gated
-// and the scheduler supplies none). The ticket's whole value IS that shadow
+// and shadow/off never reach it). The ticket's whole value IS that shadow
 // telemetry, so a shadow default ships the feature on; CATALYST_BOARD_HEALTH=0/off
 // is the kill-switch.
 //   off     → strict no-op: behaviour byte-for-byte identical to pre-CTL-1290.
 //   shadow  → scan + emit recovery.board-scan, take NO action (the default).
-//   enforce → additionally act on proposed moves — UNWIRED in CTL-1290 (the
-//             scheduler passes no `act` seam, so enforce is inert until a follow-up).
+//   enforce → additionally ACT (CTL-1300): on a proceeding scan, dispatch ONE
+//             holistic recovery-pass delegate anchored to a flagged ticket and
+//             carrying the whole-board context. Operator-gated — never auto-enabled.
 export const BOARD_HEALTH_MODES = new Set(["off", "shadow", "enforce"]);
 
 function readLayer2BoardHealth() {

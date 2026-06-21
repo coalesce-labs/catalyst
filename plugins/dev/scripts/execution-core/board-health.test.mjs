@@ -14,6 +14,7 @@ import {
   evaluateInvariants,
   decideBoardHealth,
   proposeMoves,
+  selectAnchor,
   buildBoardContext,
   buildBoardScanEvent,
   boardHealthPass,
@@ -495,18 +496,72 @@ describe("boardHealthPass — mode branching + shadow safety", () => {
     expect(emits[0].details.mode).toBe("enforce");
   });
 
-  test("mode:enforce WITH act stub → act called once per proposed move (future-wiring proof)", () => {
+  test("mode:enforce WITH act → ONE holistic dispatch carrying anchor + boardContext (CTL-1300)", () => {
     const emits = [];
     const acted = [];
-    boardHealthPass(
-      flaggedDeps({ mode: "enforce", emit: (e) => emits.push(e), act: (move) => acted.push(move) }),
+    const r = boardHealthPass(
+      flaggedDeps({
+        mode: "enforce",
+        emit: (e) => emits.push(e),
+        act: (payload) => { acted.push(payload); return { dispatched: true, attempts: 1 }; },
+      }),
     );
-    // the flagged board proposes exactly one tier-1 kick-dispatch
+    // ONE delegate per proceeding scan — NOT one per proposed move.
     expect(acted.length).toBe(1);
-    expect(acted[0].move).toBe("kick-dispatch");
+    // the dispatch-wedge board proposes only a (ticketless) kick-dispatch → anchor
+    // falls back to the top eligible ticket.
+    expect(acted[0].anchor).toBe("CTL-1");
+    // the delegate gets the WHOLE-board context, not a per-item brief.
+    expect(acted[0].boardContext.schema).toBe("recovery-board-context/v1");
+    expect(acted[0].decision.gate.decision).toBe("proceed");
+    // the act result is threaded back into the pass result (observability).
+    expect(r.act).toEqual({ dispatched: true, attempts: 1 });
   });
 
-  test("enforce + multiHost: HRW gate skips a move owned by another host", () => {
+  test("anchor prefers a flagged stuck worker (tier-1 nudge) over the eligible queue", () => {
+    const acted = [];
+    boardHealthPass(
+      flaggedDeps({
+        mode: "enforce",
+        emit: () => {},
+        // a worker idling well past phase-normal → worker-age flags it → tier-1 nudge w/ ticket
+        getWorkerSignals: () => [
+          { ticket: "CTL-STUCK", phase: "implement", status: "running", updatedAt: new Date(NOW - 10 * HOUR).toISOString() },
+        ],
+        act: (payload) => acted.push(payload),
+      }),
+    );
+    expect(acted.length).toBe(1);
+    expect(acted[0].anchor).toBe("CTL-STUCK"); // nudge ticket beats eligible[0]=CTL-1
+  });
+
+  test("proceed but NO ticket anchor (only a host/project move + empty queue) → no dispatch", () => {
+    const acted = [];
+    const r = boardHealthPass({
+      orchDir: "/tmp/x",
+      mode: "enforce",
+      getBoard: () => [{ identifier: "CTL-A" }],
+      getWorkerSignals: () => [],
+      getEligible: () => [], // empty queue → no eligible-fallback anchor
+      roster: ["mini", "mini-2"],
+      self: "mini",
+      multiHost: true,
+      capacity: { maxParallel: 4, liveCount: 1, freeSlots: 3 }, // free>0 → past the no-free-slots gate
+      readEventRing: () => [],
+      ownerForTicket: () => "mini", // mini owns CTL-A
+      getReconcileMarkers: () => ({ mini: { consecutiveFailures: 2 } }), // stranded: owns work + reconcile failing
+      lastRunMs: 0,
+      intervalMs: 0,
+      now: () => NOW,
+      emit: () => {},
+      act: (payload) => acted.push(payload),
+    });
+    // strandedNode → tier-3 host move (no ticket); empty queue → selectAnchor null → no dispatch
+    expect(acted.length).toBe(0);
+    expect(r.ran).toBe(true);
+  });
+
+  test("enforce + multiHost: HRW gate skips when the anchor is owned by another host", () => {
     const acted = [];
     boardHealthPass({
       orchDir: "/tmp/x",
@@ -519,16 +574,24 @@ describe("boardHealthPass — mode branching + shadow safety", () => {
       multiHost: true,
       capacity: { maxParallel: 4, liveCount: 1, freeSlots: 3 },
       readEventRing: () => [],
-      ownerForTicket: () => "mini-2", // every ticket owned by the OTHER host
+      ownerForTicket: () => "mini-2", // the anchor (nudge CTL-OWNED-ELSEWHERE) is owned by the OTHER host
       getReconcileMarkers: () => ({}),
       lastRunMs: 0,
       intervalMs: 0,
       now: () => NOW,
       emit: () => {},
-      act: (move) => acted.push(move),
+      act: (payload) => acted.push(payload),
     });
-    // the only proposed move (nudge CTL-OWNED-ELSEWHERE) is owned by mini-2 → skipped
+    // anchor = CTL-OWNED-ELSEWHERE, owned by mini-2 → HRW gate skips the holistic dispatch
     expect(acted.length).toBe(0);
+  });
+
+  test("selectAnchor: tier-1 nudge > tier-2 re-dispatch-blocker > top eligible > null", () => {
+    const board = { eligible: [{ id: "CTL-ELIG" }] };
+    expect(selectAnchor({ tier1: [{ move: "kick-dispatch" }, { ticket: "CTL-N", move: "nudge" }], tier2: [{ ticket: "CTL-B", move: "re-dispatch-blocker" }], tier3: [] }, board)).toBe("CTL-N");
+    expect(selectAnchor({ tier1: [{ move: "kick-dispatch" }], tier2: [{ ticket: "CTL-B", move: "re-dispatch-blocker" }], tier3: [] }, board)).toBe("CTL-B");
+    expect(selectAnchor({ tier1: [{ move: "kick-dispatch" }], tier2: [], tier3: [{ host: "mini-2" }] }, board)).toBe("CTL-ELIG");
+    expect(selectAnchor({ tier1: [], tier2: [], tier3: [{ host: "mini-2" }] }, { eligible: [] })).toBe(null);
   });
 
   test("throttle: a call within intervalMs returns {ran:false,reason:throttled} with NO emit", () => {

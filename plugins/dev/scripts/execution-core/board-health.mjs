@@ -24,12 +24,14 @@
 //      pulls from recovery-reasoning.mjs (defaultEmitEvent) is append-only on this
 //      path (the spawn-bearing recovery helpers there are never reached from here).
 //      The only actuation surface is the injected `act` dep — reachable ONLY in
-//      enforce, and the scheduler passes none in CTL-1290 (actuation is a follow-up).
+//      enforce. CTL-1300 wires the daemon binding to inject it (a holistic
+//      recovery-pass dispatch); shadow/off and a bare schedulerTick never reach it.
 //
 // Ships behind CATALYST_BOARD_HEALTH (config.mjs readBoardHealthConfig), default
 // SHADOW (the deliberate ADR-023 deviation — shadow emits one recovery.board-scan
 // heartbeat per cadence and mutates nothing). CATALYST_BOARD_HEALTH=0/off is the
-// kill-switch; a future ticket wires enforce.
+// kill-switch; enforce (CTL-1300) dispatches ONE holistic recovery-pass delegate
+// per proceeding scan, anchored + carrying the whole-board context — operator-gated.
 
 import { isThrottled } from "./config.mjs";
 import { defaultEmitEvent } from "./recovery-reasoning.mjs"; // → buildRecoveryEnvelope (CTL-1291 promotes the numbers)
@@ -467,6 +469,26 @@ export function proposeMoves(invariants, b) {
   return { tier1, tier2, tier3 };
 }
 
+// ── selectAnchor — PURE (CTL-1300). The holistic delegate's whole point is that
+// ONE dispatched recovery-pass session reads the WHOLE board (via the injected
+// boardContext) and keeps it moving. But the actuator we reuse
+// (defaultInvokeRecoveryPass) is keyed to a single ticket — it writes
+// workers/<ticket>/recovery-pass.json and dispatches a recovery-pass worker for
+// that ticket. So the holistic pass needs ONE anchor ticket as the dispatch
+// handle. Anchor where the work is most stuck: a flagged worker (tier-1 nudge),
+// else a blocked ticket (tier-2 re-dispatch-blocker), else the top of the
+// eligible queue. Returns null when the board offers no ticket handle at all
+// (a pure stranded-node / project-silence anomaly with an empty queue) — the
+// caller then takes no action this scan (those tier-3 moves are escalate-only).
+export function selectAnchor(moves, board) {
+  const firstTicket = (arr) => (arr ?? []).map((m) => m && m.ticket).find(Boolean) ?? null;
+  return (
+    firstTicket(moves?.tier1) ??
+    firstTicket(moves?.tier2) ??
+    (board?.eligible?.[0]?.id ?? null)
+  );
+}
+
 // ── (5) buildBoardContext — PURE. The whole-board brief the dispatched delegate
 // gets injected into recovery-pass.json (today it gets NONE).
 export function buildBoardContext(boardState, invariants) {
@@ -564,7 +586,7 @@ export function boardHealthPass({
   intervalMs = BOARD_HEALTH_INTERVAL_MS,
   isThrottledFn = isThrottled,
   emit = defaultEmitEvent,
-  act = undefined, // ONLY reachable in enforce; the scheduler passes NOTHING in CTL-1290
+  act = undefined, // ONLY reachable in enforce; the daemon injects it (CTL-1300), shadow/off never do
   now = () => Date.now(),
   log = () => {},
 } = {}) {
@@ -587,20 +609,37 @@ export function boardHealthPass({
     log({ err: err.message }, "board-health: emit failed (continuing)");
   }
 
-  // enforce-ONLY actuation, and only if a caller injected an `act` seam. The
-  // scheduler does NOT in CTL-1290 → enforce is inert here. Guard kept so a
-  // future ticket can wire it without re-touching the safety structure.
+  // enforce-ONLY actuation (CTL-1300), and only if a caller injected an `act`
+  // seam. SHADOW-FIRST is preserved structurally: shadow never reaches here, and
+  // the scheduler injects an `act` ONLY in the daemon binding (operator-gated via
+  // CATALYST_BOARD_HEALTH=enforce). This is the HOLISTIC dispatch — ONE
+  // recovery-pass delegate per proceeding scan, anchored to board-health's chosen
+  // ticket and carrying the whole-board boardContext (the delegate reasons across
+  // the WHOLE board, not once per proposed move). The actuator the scheduler
+  // binds is the audited-real, capped, cooldown'd defaultInvokeRecoveryPass.
+  let actResult;
   if (mode === "enforce" && typeof act === "function" && dec.gate.decision === "proceed") {
-    for (const move of [...dec.moves.tier1, ...dec.moves.tier2, ...dec.moves.tier3]) {
-      if (multiHost && move.ticket && board.ownerForTicket) {
-        let owner;
-        try { owner = board.ownerForTicket(move.ticket, board.roster); } catch { owner = null; }
-        if (owner && owner !== board.self) continue; // HRW gate — don't act on another host's item
+    const anchor = selectAnchor(dec.moves, board);
+    let owner = null;
+    if (anchor && multiHost && board.ownerForTicket) {
+      try { owner = board.ownerForTicket(anchor, board.roster); } catch { owner = null; }
+    }
+    if (!anchor) {
+      log({ reason: "no-anchor" }, "board-health: proceed but no ticket anchor — no holistic dispatch this scan");
+    } else if (owner && owner !== board.self) {
+      // HRW gate — only the host that owns the anchor dispatches (no cross-host double-act).
+      log({ anchor, owner }, "board-health: anchor owned by another host (HRW) — skipping holistic dispatch");
+    } else {
+      const boardContext = buildBoardContext(board, invariants);
+      try {
+        actResult = act({ anchor, boardContext, decision: dec, board }) ?? null;
+        log({ anchor, dispatched: actResult?.dispatched ?? null }, "board-health: holistic recovery-pass delegate actuated");
+      } catch (err) {
+        log({ err: err.message, anchor }, "board-health: act failed (continuing)");
       }
-      try { act(move, board); } catch (err) { log({ err: err.message, move }, "board-health: act failed (continuing)"); }
     }
   }
 
   _lastRunMs = nowMs;
-  return { ran: true, mode, ranAtMs: nowMs, invariants, decision: dec };
+  return { ran: true, mode, ranAtMs: nowMs, invariants, decision: dec, act: actResult ?? null };
 }

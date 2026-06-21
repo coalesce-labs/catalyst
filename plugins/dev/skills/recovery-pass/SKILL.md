@@ -188,6 +188,18 @@ The script's banner is your context:
 - `MODE=dispatched` → the brief block + tail-of-logs is printed; you own that ONE
   ticket. Go to the Step-0..4 fix loop. (Brief missing → it falls through to a
   ticket-scoped sweep and you reconstruct the diagnosis yourself.)
+  - **HOLISTIC dispatch (CTL-1300) — when the brief carries a `board context
+    (whole-board, read-only)` block** (printed under the header
+    `--- board context (whole-board, read-only) ---`): the
+    daemon-side **board-health delegate** (CTL-1290) already ran the Step -1 board
+    scan and dispatched you ON a detected board anomaly. Your `CATALYST_TICKET` is
+    only the **anchor** (the dispatch handle) — your **mandate is the WHOLE board**,
+    exactly like the operator sweep. CONSUME the injected board context as your
+    Step -1 result (its slots / eligible-queue / stuck-workers / stranded-nodes /
+    invariants are the daemon's findings — do NOT re-derive the scan cold), then
+    keep the board moving: walk the anomalies it surfaced and the flagged set, FIX
+    or ESCALATE per the 3-tier rope. Verify-before-act still applies to anything
+    you touch.
 - `MODE=sweep` → a `STUCK YOURS <ticket> [...]` line per owned item, then (when
   multiHost) a `CONTEXT` group of items another host owns, and a
   `TOTAL: N items (M yours, K context)` summary. ACT on the YOURS items — walk
@@ -341,6 +353,17 @@ worst wedges emit NO item signal at all (the scheduler silently holding dispatch
 a node that stopped participating, a blocker nobody scheduled). A human sees those
 in two seconds; your job is to see them too. Walk these board-level invariants; for
 each, print `BOARD <invariant> OK` or `BOARD <invariant> ANOMALY: <what> → <action>`.
+
+> **If your brief carried an injected board context (CTL-1300 holistic dispatch),
+> START FROM IT — don't re-derive cold.** When the daemon-side board-health delegate
+> dispatched you, the `board context (whole-board, read-only)` block already carries
+> this scan's result: per-invariant `{ok, failed}`, the stuck workers + ages, the
+> stranded nodes + their owned tickets, slots, and the eligible-queue depth. Treat
+> those as the daemon's authoritative findings for the invariants below — confirm
+> and ACT on them rather than re-running the full LogQL/PromQL sweep from scratch
+> (the daemon already paid that cost; re-hammering Loki/Linear is itself a wedge
+> cause). Drop to the live queries only to fill a gap the injected context did not
+> cover, or to verify-before-act on a specific item you are about to touch.
 
 > **Your eyes here are the sensing substrate — these checks are queries, not vibes.**
 > The copy-paste LogQL/PromQL recipes, the silent-daemon detector, and a per-signal
