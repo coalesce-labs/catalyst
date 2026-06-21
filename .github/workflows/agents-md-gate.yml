@@ -1,0 +1,17 @@
+name: agents-md-gate
+
+# Guards the context-framework invariant (CTL-1304): CLAUDE.md is a thin bridge
+# that imports the portable, tool-agnostic AGENTS.md, and AGENTS.md never depends
+# on Claude-only features or names a vendor. Cheap; runs on every PR so the
+# structure can't silently regress back into two divergent copies.
+on:
+  pull_request:
+    branches: [main]
+
+jobs:
+  agents-md-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check AGENTS.md / CLAUDE.md bridge invariant
+        run: bash scripts/ci/check-agents-md-bridge.sh
