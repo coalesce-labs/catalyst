@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+# Pre-commit secret scan (CTL-1204). Blocks commits that stage a real secret.
+# No-ops (exit 0) with a warning when the gitleaks binary is not installed, so
+# developers without gitleaks are not blocked — CI is the hard gate.
+set -uo pipefail
+
+if ! command -v gitleaks >/dev/null 2>&1; then
+  echo "gitleaks not installed — skipping local secret scan (CI still gates). " \
+       "Install: https://github.com/gitleaks/gitleaks#installing" >&2
+  exit 0
+fi
+
+REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+CONFIG_ARG=()
+[[ -f "${REPO_ROOT}/.gitleaks.toml" ]] && CONFIG_ARG=(--config "${REPO_ROOT}/.gitleaks.toml")
+
+if ! gitleaks protect --staged --no-banner --redact ${CONFIG_ARG[@]+"${CONFIG_ARG[@]}"}; then
+  echo "gitleaks found a potential secret in staged changes — commit blocked." >&2
+  echo "   Review the finding above. If it is a known-benign fixture, add it to .gitleaks.toml." >&2
+  exit 1
+fi
+exit 0

@@ -1,0 +1,49 @@
+# Gitleaks configuration (CTL-1204).
+# Extends the upstream default ruleset; adds allowlists ONLY for known
+# fake/placeholder tokens in test fixtures and documentation so the baseline
+# scan is clean. Real secrets in non-fixture source remain detectable.
+title = "catalyst gitleaks config"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Known-benign fixtures and documentation placeholders (CTL-1204)"
+
+# Path-based: test directories / co-located test files are fixture-only.
+paths = [
+  '''plugins/dev/scripts/lib/__tests__/.*''',
+  '''plugins/dev/scripts/__tests__/.*''',
+  '''plugins/dev/scripts/orch-monitor/__tests__/.*''',
+  '''plugins/dev/scripts/execution-core/.*\.test\.mjs''',
+  # Co-located unit tests anywhere under scripts/ (e.g. lib/api-key-health.test.mjs,
+  # orch-monitor/ui/src/hooks/use-push-subscription.test.ts) carry fake fixtures.
+  '''plugins/dev/scripts/.*\.test\.(mjs|ts|tsx)''',
+  '''cma/.*''',
+  '''\.gitleaks\.toml''',
+]
+
+# Regex-based: specific fake values + doc placeholders that live outside the
+# path allowlist above (READMEs, website docs, agent prompts, code comments).
+# Matched against the detected secret value. Anchored with ^...$ and length-
+# bounded so they cannot suppress a real token that merely shares a prefix
+# (CTL-1204 verify hardening: unanchored quantifiers over-match by substring).
+regexes = [
+  '''^ghp_test[a-z_]{0,32}$''',
+  '''^ghp_benigntoken123$''',
+  '''^lin_api_test[a-z0-9_]{0,32}$''',
+  '''^lin_api_fake[a-z0-9_]{0,32}$''',
+  '''^lin_api_(abc|xyz|x|tok)$''',
+  '''^test_lin_api_token_x+$''',
+  '''^lin_oauth_[a-z0-9]{1,16}$''',
+  '''^sk-ant-xxx$''',
+  '''^xoxb-fake$''',
+  # Documentation placeholders (NOT real tokens): a bare "YOUR_API_KEY" in
+  # curl examples, and prefixed tokens that trail off in an ellipsis
+  # (e.g. sntrys_abc123..., lin_api_..., github_pat_…).
+  '''^YOUR_API_KEY$''',
+  '''^(lin_api_|github_pat_|sntrys_)[a-z0-9]*(\.\.\.|…)$''',
+  # Public OAuth client identifier in catalyst-agent/accounts.mjs — a public
+  # client_id (not a secret); exact value only.
+  '''^9d1c250a-e61b-44d9-88ed-5944d1962f5e$''',
+]

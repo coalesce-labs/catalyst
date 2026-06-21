@@ -1,0 +1,121 @@
+name: gitleaks
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+  schedule:
+    # Weekly full-history sweep (Mondays 06:00 UTC).
+    - cron: "0 6 * * 1"
+
+permissions:
+  contents: read
+
+# The free OSS gitleaks CLI (MIT) is installed from a pinned official release
+# tarball and verified by SHA-256 before use. Only the gitleaks-ACTION wrapper
+# requires a paid org license; the binary does not. See CTL-1204.
+env:
+  GITLEAKS_VERSION: "8.28.0"
+  # SHA-256 of gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz from the official
+  # gitleaks_${GITLEAKS_VERSION}_checksums.txt release asset. Pin both.
+  GITLEAKS_SHA256: "a65b5253807a68ac0cafa4414031fd740aeb55f54fb7e55f386acb52e6a840eb"
+  # Custom exit code for "leaks found", chosen to be distinct from gitleaks'
+  # default (1), which it overloads for BOTH leaks and operational errors.
+  # With --exit-code 7: 7 == leaks (real red gate); any other nonzero == error.
+  GITLEAKS_LEAK_EXIT: "7"
+
+jobs:
+  gitleaks:
+    name: gitleaks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history so push/schedule scans and PR commit-range diffs resolve.
+          fetch-depth: 0
+
+      - name: Install pinned gitleaks binary (verify checksum)
+        run: |
+          set -euo pipefail
+          tarball="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          url="https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/${tarball}"
+          echo "Downloading ${url}"
+          # --fail => nonzero on HTTP >=400; --retry rides out transient blips.
+          # No failure-swallowing: a failed download MUST fail the step.
+          curl --fail --show-error --silent --location --retry 3 --retry-delay 2 \
+            --output "${tarball}" "${url}"
+          echo "${GITLEAKS_SHA256}  ${tarball}" | sha256sum --check --strict -
+          tar -xzf "${tarball}" gitleaks
+          install -m 0755 gitleaks /usr/local/bin/gitleaks
+          rm -f "${tarball}" gitleaks
+          # Fail loudly if the binary is somehow unusable (defence in depth).
+          # goreleaser builds with {{.Version}}, which strips the leading "v",
+          # so `gitleaks version` prints exactly "8.28.0".
+          installed="$(gitleaks version)"
+          echo "Installed gitleaks ${installed}"
+          test "${installed}" = "${GITLEAKS_VERSION}"
+
+      - name: Scan for secrets
+        env:
+          # PR scans get a tight commit range; everything else scans full history.
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+
+          args=(git
+            --config .gitleaks.toml
+            --redact
+            --no-banner
+            --exit-code "${GITLEAKS_LEAK_EXIT}"
+            --report-format sarif
+            --report-path gitleaks-report.sarif
+          )
+
+          if [ "${GITHUB_EVENT_NAME}" = "pull_request" ]; then
+            # Guard: if the PR SHAs are empty we must NOT silently scan nothing.
+            # An empty range would otherwise make gitleaks inspect zero commits
+            # and exit 0 (false-green). Fail loudly instead.
+            if [ -z "${PR_BASE_SHA}" ] || [ -z "${PR_HEAD_SHA}" ]; then
+              echo "::error::PR base/head SHA missing (base='${PR_BASE_SHA}' head='${PR_HEAD_SHA}') — cannot scope PR scan."
+              exit 1
+            fi
+            echo "PR scan: ${PR_BASE_SHA}..${PR_HEAD_SHA}"
+            # Scan only commits introduced by the PR. base..head excludes the
+            # base tip itself, so only the PR's new commits are inspected.
+            args+=(--log-opts "${PR_BASE_SHA}..${PR_HEAD_SHA}")
+          else
+            echo "Full-history scan (event: ${GITHUB_EVENT_NAME})"
+          fi
+
+          # Run gitleaks WITHOUT `set -e` aborting on its nonzero exit, so we can
+          # branch on the exact code. This is the heart of the true-gate design.
+          set +e
+          gitleaks "${args[@]}"
+          code=$?
+          set -e
+
+          case "${code}" in
+            0)
+              echo "gitleaks: no leaks found."
+              ;;
+            "${GITLEAKS_LEAK_EXIT}")
+              echo "::error::gitleaks found one or more secrets. See annotations / SARIF report."
+              exit 1
+              ;;
+            *)
+              # ANY other nonzero (1, 126, 130, ...) is an operational error:
+              # bad flag, scan crash, corrupt repo, OOM. NEVER pass on error.
+              echo "::error::gitleaks failed to run (exit ${code}) — treating as FAILURE, not a clean pass."
+              exit 1
+              ;;
+          esac
+
+      - name: Upload SARIF report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gitleaks-sarif
+          path: gitleaks-report.sarif
+          if-no-files-found: ignore
