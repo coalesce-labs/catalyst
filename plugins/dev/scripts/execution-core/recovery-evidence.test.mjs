@@ -7,6 +7,7 @@
 
 import { describe, test, expect } from "bun:test";
 import { buildRecoveryItems } from "./recovery-evidence.mjs";
+import { defaultClassifyTicket } from "./recovery-reasoning.mjs";
 
 describe("buildRecoveryItems (CTL-1241)", () => {
   const sig = (ticket, raw = {}) => ({ ticket, phase: "implement", raw });
@@ -47,11 +48,78 @@ describe("buildRecoveryItems (CTL-1241)", () => {
     expect(items[0].evidence.beliefState).toBeUndefined();
   });
 
-  test("handles null raw gracefully — evidence is {} not null", () => {
+  test("handles null raw gracefully — evidence carries signal:null, no raw fields", () => {
     const items = buildRecoveryItems(
       [{ ticket: "CTL-3", phase: "triage", raw: null }],
       { getBeliefs: () => null }
     );
-    expect(items[0].evidence).toEqual({});
+    // CTL-1299: a missing signal file yields signal:null (falsy → classifier's
+    // early-return guard still treats it as "no signal"), and no spurious raw fields.
+    expect(items[0].evidence).toEqual({ signal: null });
+  });
+});
+
+// ─── CTL-1299: evidence.signal starvation fix ────────────────────────────────
+//
+// The bounded-LLM FIX rung was structurally dead in production: buildRecoveryItems
+// spread the raw signal at the TOP level of evidence, but classifyTicket /
+// checkBoundedLlmFixes read `evidence.signal.{failureReason,stalledReason}` →
+// always undefined → every stalled ticket collapsed to escalate-only. The CTL-1241
+// tests above passed because they only checked top-level fields; the regression
+// lived in the GAP between buildRecoveryItems' output shape and what the classifier
+// reads. These tests close that gap by feeding the REAL buildRecoveryItems output
+// to the production classifier — the test that would have caught the prod-dead bug.
+describe("buildRecoveryItems → classifier (CTL-1299 — evidence.signal)", () => {
+  // production signal shape: readWorkerSignals attaches the full signal-file JSON
+  // as `sig.raw`. A stalled/failed worker carries failureReason/stalledReason there.
+  const prodSig = (ticket, raw) => ({ ticket, phase: raw.phase ?? "pr", raw });
+
+  test("evidence.signal carries the raw signal (failureReason/stalledReason resolvable)", () => {
+    const raw = { bg_job_id: "job-1", phase: "pr", status: "stalled", stalledReason: "source_conflict_ctl708_unavailable" };
+    const items = buildRecoveryItems([prodSig("CTL-A", raw)], {});
+    expect(items[0].evidence.signal).toBeDefined();
+    expect(items[0].evidence.signal.stalledReason).toBe("source_conflict_ctl708_unavailable");
+    // top-level spread is retained (back-compat for the deterministic-reason path)
+    expect(items[0].evidence.stalledReason).toBe("source_conflict_ctl708_unavailable");
+    expect(items[0].evidence.bg_job_id).toBe("job-1");
+  });
+
+  test("a source-conflict stall classifies as bounded-llm FIX (not escalate)", () => {
+    const raw = { bg_job_id: "job-2", phase: "pr", status: "stalled", stalledReason: "source_conflict_ctl708_unavailable" };
+    const items = buildRecoveryItems([prodSig("CTL-B", raw)], {});
+    const classification = defaultClassifyTicket(items[0].evidence);
+    expect(classification.decision).toBe("fix");
+    expect(classification.fix_class).toBe("bounded-llm");
+    // the brief (generateRemediateBrief output) is what drives phase-remediate —
+    // guard against a future change that wires the signal but degrades the brief.
+    expect(typeof classification.details.brief).toBe("string");
+    expect(classification.details.brief.length).toBeGreaterThan(0);
+  });
+
+  test("a merge-conflict failure classifies as bounded-llm FIX (not escalate)", () => {
+    const raw = { bg_job_id: "job-3", phase: "pr", status: "failed", failureReason: "merge-conflict" };
+    const items = buildRecoveryItems([prodSig("CTL-C", raw)], {});
+    const classification = defaultClassifyTicket(items[0].evidence);
+    expect(classification.decision).toBe("fix");
+    expect(classification.fix_class).toBe("bounded-llm");
+    expect(typeof classification.details.brief).toBe("string");
+    expect(classification.details.brief.length).toBeGreaterThan(0);
+  });
+
+  test("back-compat: a deterministic-seam reason still classifies as fix via top-level failureReason", () => {
+    // checkDeterministicErrors reads evidence.failureReason (top-level) — the
+    // top-level spread must survive the fix.
+    const raw = { bg_job_id: "job-4", phase: "pr", status: "failed", failureReason: "orphan-sweep-stale" };
+    const items = buildRecoveryItems([prodSig("CTL-D", raw)], {});
+    const classification = defaultClassifyTicket(items[0].evidence);
+    expect(classification.decision).toBe("fix");
+    expect(classification.fix_class).toBe("orphan_stale");
+  });
+
+  test("a stall with no recognizable reason still escalates (fix does not over-fire)", () => {
+    const raw = { bg_job_id: "job-5", phase: "implement", status: "needs-human", failureReason: "design-decision-required" };
+    const items = buildRecoveryItems([prodSig("CTL-E", raw)], {});
+    const classification = defaultClassifyTicket(items[0].evidence);
+    expect(classification.decision).toBe("escalate");
   });
 });
