@@ -250,13 +250,13 @@ The **phantom worker-dir validity sweep** quarantines a `workers/<ticket>/` dir 
 
 ### Board-health delegate (CTL-1290)
 
-On a low-frequency cadence the scheduler runs a **whole-board health scan**: a read-only pass that evaluates board-level invariants the per-item signals never surface — a silently-held dispatch (open slots + a waiting queue + no recent dispatch), a worker idling far past its phase-normal age, a ticket blocked by a dead blocker chain, a project gone silent, a rate-limit cliff, a node that owns work but whose reconcile is failing. It emits one **`recovery.board-scan`** event per cadence (the numbers ride out as chartable OTel attributes via CTL-1291) and proposes tiered remediation moves **without acting**.
+On a low-frequency cadence the scheduler runs a **whole-board health scan**: a read-only pass that evaluates board-level invariants the per-item signals never surface — a silently-held dispatch (open slots + a waiting queue + no recent dispatch), a worker idling far past its phase-normal age, a ticket blocked by a dead blocker chain, a project gone silent, a rate-limit cliff, a node that owns work but whose reconcile is failing. It emits one **`recovery.board-scan`** event per cadence (the numbers ride out as chartable OTel attributes via CTL-1291) and proposes tiered remediation moves. In `shadow` (the default) it takes **no action**; in `enforce` (CTL-1300) a proceeding scan dispatches **one holistic recovery-pass delegate** — see the `enforce` row below.
 
 Mode resolves from the env var (a single operator knob) over Layer-2 over the default. Unlike the rest of the recovery family (which ships `off`), the board-health delegate **defaults to `shadow`**: shadow is itself a dark state — it emits the scan and mutates nothing (the no-mutation guarantee is structural, not configured), so the telemetry that is the feature's whole point ships on.
 
 | Key | Default | Notes |
 |---|---|---|
-| `CATALYST_BOARD_HEALTH` _(env var)_ | `shadow` | `off` / `0` (kill-switch — strict no-op), `shadow` (scan + emit `recovery.board-scan`, take no action), `enforce` (additionally act on proposed moves — **inert in this release**: no actuation seam is wired yet). Garbage values fall back to `shadow`. Overrides Layer-2. |
+| `CATALYST_BOARD_HEALTH` _(env var)_ | `shadow` | `off` / `0` (kill-switch — strict no-op), `shadow` (scan + emit `recovery.board-scan`, take no action), `enforce` (CTL-1300 — on a proceeding scan, dispatch **one holistic recovery-pass delegate** anchored to a flagged ticket and carrying the whole-board context; reuses the capped + cooldown'd recovery-pass actuator. **Operator-gated — never auto-enabled**). Garbage values fall back to `shadow`. Overrides Layer-2. |
 | `catalyst.boardHealth.mode` _(Layer-2)_ | `shadow` | Same three values; honored when the env var is unset. |
 | `CATALYST_BH_INTERVAL_MS` | `300000` (5 min) | Cadence floor — the scan runs at most once per interval per host. |
 | `CATALYST_BH_DISPATCH_STALL_MS` | `600000` (10 min) | Dispatch-liveness threshold: free slots + a queue + no dispatch within this window flags a wedge. |

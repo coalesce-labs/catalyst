@@ -3800,10 +3800,12 @@ export function schedulerTick(
   // the daemon threads the `boardHealth` seam (its real-IO readers); a bare
   // schedulerTick (unit test) passes none → the pass is inert and does zero real
   // IO. Every snapshot var is already in scope here (eligible above, roster/self/
-  // multiHost at tick top, maxParallel/liveCount just above) — no re-query. NO
-  // `act` seam is passed → enforce is inert in this ticket (actuation is a
-  // follow-up). Wrapped in try/catch: a board-health failure must never break the
-  // tick. Throttled internally to BOARD_HEALTH_INTERVAL_MS.
+  // multiHost at tick top, maxParallel/liveCount just above) — no re-query.
+  // CTL-1300: the optional `act` seam is threaded too — supplied ONLY by the
+  // daemon binding (the holistic recovery-pass dispatcher) and reached ONLY in
+  // enforce; a bare tick / shadow passes none → mutation-free. Wrapped in
+  // try/catch: a board-health failure must never break the tick. Throttled
+  // internally to BOARD_HEALTH_INTERVAL_MS.
   if (_boardHealth) {
     const _bhMode = _boardHealth.mode ?? readBoardHealthConfig().mode;
     if (_bhMode !== "off") {
@@ -3822,8 +3824,11 @@ export function schedulerTick(
           ownerForTicket,
           getReconcileMarkers: _boardHealth.getReconcileMarkers,
           lastRunMs: _boardHealthLastRunMs,
-          // emit defaults to defaultEmitEvent; NO `act` passed → shadow & enforce
-          // are both mutation-free in this ticket.
+          // emit defaults to defaultEmitEvent. CTL-1300: thread the optional `act`
+          // seam — supplied ONLY by the daemon binding (the holistic recovery-pass
+          // dispatcher) and reached ONLY in enforce. A bare schedulerTick / shadow
+          // mode passes no `act` → mutation-free (the shadow-first guarantee).
+          act: _boardHealth.act,
           log: (o, m) => log.warn?.(o, m),
           now,
         });
@@ -5631,12 +5636,57 @@ function runTick() {
       // pass is inert (no real broker-DB / event-log / reconcile reads). Mode
       // resolves inside the hook via readBoardHealthConfig (env > Layer-2 >
       // "shadow"), so the daemon ships shadow-on by default while tests stay
-      // quiet. Operators kill it with CATALYST_BOARD_HEALTH=0/off. NO `act` seam
-      // is threaded → enforce is inert this ticket (actuation is a follow-up).
+      // quiet. Operators kill it with CATALYST_BOARD_HEALTH=0/off.
+      //
+      // CTL-1300: the HOLISTIC `act` seam — bound ONLY here (the daemon) and
+      // reached ONLY in enforce (operator-gated via CATALYST_BOARD_HEALTH=enforce;
+      // shadow never calls it). On a proceeding board scan it dispatches ONE
+      // recovery-pass delegate, anchored to board-health's chosen ticket and
+      // carrying the whole-board boardContext, by reusing the audited-real, capped,
+      // cooldown'd defaultInvokeRecoveryPass (recoveryInvokeRecoveryPass) — NOT a
+      // new mutator. The brief's boardContext gives the dispatched delegate
+      // whole-board eyes (printDispatchedBrief renders it; the recovery-pass skill
+      // consumes it as its Step -1 board scan).
+      //
+      // The executor reuses the SAME host-local cooldown ledger the per-item
+      // recovery path uses (recoveryShouldSkipItem/recoveryRecordIntent, the 30-min
+      // RECOVERY_COOLDOWN_MS window): board-health's 5-min interval throttle alone
+      // would re-dispatch a chronically-flagged anchor every 5 min, and the
+      // recovery-pass cap only counts `.complete` events so a repeatedly-FAILING
+      // anchor never trips it. Gating the anchor on the cooldown ledger (skip when
+      // already acted within the window; record the intent after dispatching) bounds
+      // re-dispatch of one anchor to once per cooldown window, exactly like the
+      // per-item path (scheduler.mjs recovery block).
       boardHealth: runningOpts.boardHealth ?? {
         getBoard: () => getAllTicketDescriptors({ includeRemoved: false }),
         readEventRing: () => readBoardHealthEventTail(),
         getReconcileMarkers: () => readReconcileHealthMarkers({}),
+        act: ({ anchor, boardContext, decision }) => {
+          const deps = { orchDir: runningOpts.orchDir };
+          // Reuse the recovery cooldown ledger so we don't re-dispatch the same
+          // anchor every board-health interval (the cap counts only `.complete`).
+          if (recoveryShouldSkipItem(anchor, deps)) {
+            return { dispatched: false, reason: "recovery-cooldown", anchor };
+          }
+          const r = recoveryInvokeRecoveryPass(
+            anchor,
+            {
+              boardContext,
+              reason: `board-health: ${decision?.gate?.reason ?? "board anomaly"} — holistic recovery-pass delegate`,
+            },
+            deps,
+          );
+          // Start the cooldown window on a dispatch attempt (success OR failure) so
+          // a failing anchor isn't re-dispatched until the window elapses.
+          try {
+            recoveryRecordIntent(
+              anchor,
+              { type: "recovery-pass", decision: "fix", fix_class: "board-health", outcome: !!r?.dispatched, source: "board-health" },
+              deps,
+            );
+          } catch { /* ledger write is best-effort — never block the tick */ }
+          return r;
+        },
       },
     });
     // CTL-935 Phase 2: free-slots / R8 shadow comparator. Runs AFTER schedulerTick

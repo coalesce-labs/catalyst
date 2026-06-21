@@ -58,6 +58,26 @@ describe("schedulerTick — board-health seam (CTL-1290 §9.4)", () => {
     expect(typeof o.getWorkerSignals).toBe("function");
   });
 
+  test("threads boardHealth.act through to boardHealthPassFn (CTL-1300 holistic seam)", () => {
+    const calls = [];
+    const actStub = () => ({ dispatched: true });
+    schedulerTick(orchDir, {
+      readEligible: () => [{ identifier: "CTL-1" }],
+      dispatch: () => ({ code: 0 }),
+      writeStatus: () => {},
+      reclaimDeadWork: () => "noop",
+      concurrency: { maxParallel: 4 },
+      liveBackgroundCount: () => 4,
+      boardHealth: { mode: "enforce", act: actStub },
+      boardHealthPassFn: (opts) => {
+        calls.push(opts);
+        return { ran: true, ranAtMs: 1 };
+      },
+    });
+    expect(calls.length).toBe(1);
+    expect(calls[0].act).toBe(actStub); // the daemon-bound act seam reaches the pass
+  });
+
   test("boardHealth.mode:off → boardHealthPassFn NOT called", () => {
     const calls = [];
     schedulerTick(orchDir, {
