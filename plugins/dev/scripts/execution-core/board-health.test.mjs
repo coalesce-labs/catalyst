@@ -561,7 +561,7 @@ describe("boardHealthPass — mode branching + shadow safety", () => {
     expect(r.ran).toBe(true);
   });
 
-  test("enforce + multiHost: HRW gate skips when the anchor is owned by another host", () => {
+  test("enforce + multiHost: no self-owned flagged ticket → no dispatch (CTL-1302: selectAnchor returns null)", () => {
     const acted = [];
     boardHealthPass({
       orchDir: "/tmp/x",
@@ -592,6 +592,75 @@ describe("boardHealthPass — mode branching + shadow safety", () => {
     expect(selectAnchor({ tier1: [{ move: "kick-dispatch" }], tier2: [{ ticket: "CTL-B", move: "re-dispatch-blocker" }], tier3: [] }, board)).toBe("CTL-B");
     expect(selectAnchor({ tier1: [{ move: "kick-dispatch" }], tier2: [], tier3: [{ host: "mini-2" }] }, board)).toBe("CTL-ELIG");
     expect(selectAnchor({ tier1: [], tier2: [], tier3: [{ host: "mini-2" }] }, { eligible: [] })).toBe(null);
+  });
+
+  // ─── CTL-1302: selectAnchor must prefer a SELF-OWNED flagged ticket ──────────
+  // The bug (observed live on mini 2026-06-21): selectAnchor picked the FIRST
+  // flagged ticket regardless of HRW ownership; if that was foreign-owned the act
+  // block HRW-skipped the WHOLE scan instead of trying a later flagged ticket this
+  // host owns. So on a multi-host board, board-health stalled instead of acting on
+  // owned work. selectAnchor must filter to self-owned (single-host owns all).
+  test("selectAnchor (CTL-1302) prefers a self-owned flagged ticket over a foreign-owned earlier one", () => {
+    const board = {
+      self: "mini", multiHost: true, roster: ["mini", "mini-2"],
+      ownerForTicket: (t) => (t === "CTL-MINE" ? "mini" : "mini-2"),
+      eligible: [],
+    };
+    const moves = { tier1: [{ ticket: "CTL-FOREIGN", move: "nudge" }, { ticket: "CTL-MINE", move: "nudge" }], tier2: [], tier3: [] };
+    expect(selectAnchor(moves, board)).toBe("CTL-MINE");
+  });
+
+  test("selectAnchor (CTL-1302) returns null when this host owns NONE of the flagged/eligible", () => {
+    const board = {
+      self: "mini", multiHost: true, roster: ["mini", "mini-2"],
+      ownerForTicket: () => "mini-2", eligible: [{ id: "CTL-E" }],
+    };
+    const moves = { tier1: [{ ticket: "CTL-A", move: "nudge" }], tier2: [{ ticket: "CTL-B", move: "re-dispatch-blocker" }], tier3: [] };
+    expect(selectAnchor(moves, board)).toBe(null);
+  });
+
+  test("selectAnchor (CTL-1302) falls back to a self-owned eligible ticket (skips foreign eligible)", () => {
+    const board = {
+      self: "mini", multiHost: true, roster: ["mini", "mini-2"],
+      ownerForTicket: (t) => (t === "CTL-E2" ? "mini" : "mini-2"),
+      eligible: [{ id: "CTL-E1" }, { id: "CTL-E2" }], // E1 foreign, E2 mine
+    };
+    const moves = { tier1: [{ move: "kick-dispatch" }], tier2: [], tier3: [] };
+    expect(selectAnchor(moves, board)).toBe("CTL-E2");
+  });
+
+  test("selectAnchor (CTL-1302) single-host (no ownerForTicket / multiHost false) owns all — unchanged", () => {
+    expect(selectAnchor({ tier1: [{ ticket: "CTL-X", move: "nudge" }], tier2: [], tier3: [] }, { eligible: [{ id: "CTL-1" }] })).toBe("CTL-X");
+    expect(selectAnchor({ tier1: [{ ticket: "CTL-X", move: "nudge" }], tier2: [], tier3: [] }, { multiHost: false, ownerForTicket: () => "mini-2", self: "mini", eligible: [] })).toBe("CTL-X");
+  });
+
+  test("boardHealthPass (CTL-1302): multiHost dispatches against the self-owned flagged ticket, not the foreign first one", () => {
+    const acted = [];
+    boardHealthPass({
+      orchDir: "/tmp/x",
+      mode: "enforce",
+      // two stalled workers: CTL-FOREIGN (mini-2) flagged first, CTL-MINE (mini) flagged second
+      getBoard: () => [{ identifier: "CTL-FOREIGN" }, { identifier: "CTL-MINE" }],
+      getWorkerSignals: () => [
+        { ticket: "CTL-FOREIGN", phase: "implement", status: "running", updatedAt: new Date(NOW - 6 * HOUR).toISOString() },
+        { ticket: "CTL-MINE", phase: "implement", status: "running", updatedAt: new Date(NOW - 6 * HOUR).toISOString() },
+      ],
+      getEligible: () => [],
+      roster: ["mini", "mini-2"],
+      self: "mini",
+      multiHost: true,
+      capacity: { maxParallel: 4, liveCount: 2, freeSlots: 2 },
+      readEventRing: () => [],
+      ownerForTicket: (t) => (t === "CTL-MINE" ? "mini" : "mini-2"),
+      getReconcileMarkers: () => ({}),
+      lastRunMs: 0,
+      intervalMs: 0,
+      now: () => NOW,
+      emit: () => {},
+      act: (payload) => { acted.push(payload); return { dispatched: true }; },
+    });
+    expect(acted.length).toBe(1);
+    expect(acted[0].anchor).toBe("CTL-MINE"); // NOT CTL-FOREIGN (which it doesn't own)
   });
 
   test("throttle: a call within intervalMs returns {ran:false,reason:throttled} with NO emit", () => {
