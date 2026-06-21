@@ -54,6 +54,16 @@ jobs:
       - name: Install dependencies
         run: bun install
 
+      - name: Verify import graph (bun build resolution check)
+        # CTL-1298: resolve daemon.mjs's full transitive import graph so a missing
+        # named export (the CTL-1093 outage: getCatalystRepoDir added to daemon.mjs
+        # without an export in config.mjs) fails CI before merge. daemon.mjs is not
+        # imported by any included test (daemon.test.mjs is excluded for fs.watch
+        # flakiness), so its import graph is otherwise never validated. bun build
+        # walks the static graph and exits non-zero on any unresolved import without
+        # executing the code; it transitively covers index.mjs -> monitor.mjs too.
+        run: bun build daemon.mjs --target=node --outfile /dev/null
+
       - name: Run stable unit tests
         # EXCLUDED SUITES — do NOT add these back without fixing the underlying
         # timing / sandbox incompatibility:
