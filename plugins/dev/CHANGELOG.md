@@ -1,5 +1,27 @@
 # Changelog
 
+## [12.15.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.14.0...catalyst-dev-v12.15.0) (2026-06-21)
+
+
+### Features
+
+* **dev:** CTL-1030 — Automated stale-worktree reclamation (multi-signal classifier) ([#1827](https://github.com/coalesce-labs/catalyst/issues/1827)) ([8a5b127](https://github.com/coalesce-labs/catalyst/commit/8a5b1271703d23ea3179379a7f7333513046005f))
+* **dev:** CTL-1093 — node identity survives hostname change without splitting fleet history ([#1927](https://github.com/coalesce-labs/catalyst/issues/1927)) ([780cca3](https://github.com/coalesce-labs/catalyst/commit/780cca318f3eafd16bbc8719a19d7af163c1181d))
+* **dev:** CTL-1167 — PWA push notifications for orch-monitor ([#2057](https://github.com/coalesce-labs/catalyst/issues/2057)) ([2b24ebb](https://github.com/coalesce-labs/catalyst/commit/2b24ebb25bbbeacb19246fa447de2a5f20ef0e83))
+* **dev:** CTL-1204 — gitleaks secret-scanning CI gate + optional pre-commit hook ([#2297](https://github.com/coalesce-labs/catalyst/issues/2297)) ([0099e67](https://github.com/coalesce-labs/catalyst/commit/0099e67ea631682368d39ca204bed86a44872bc6))
+* **dev:** CTL-1290 — board-health delegate (shadow-first) ([#2295](https://github.com/coalesce-labs/catalyst/issues/2295)) ([8a6b46b](https://github.com/coalesce-labs/catalyst/commit/8a6b46b0f955134b2e66529437720a404704e524))
+* **dev:** CTL-1292 — catalyst-join provisions a member node to fully-operational state ([#2286](https://github.com/coalesce-labs/catalyst/issues/2286)) ([3fae97e](https://github.com/coalesce-labs/catalyst/commit/3fae97e366514c0b7a5ce370eb8c6daa14a1ebf1))
+
+
+### Bug Fixes
+
+* **dev:** board deriveAttention cross-checks Linear terminal state (CTL-1239) ([#2205](https://github.com/coalesce-labs/catalyst/issues/2205)) ([5c7decd](https://github.com/coalesce-labs/catalyst/commit/5c7decd1158c57f7b40b78364a08fb5637d452a5))
+* **dev:** CTL-1174 — gate dispatch on delegate-ONLY + delegate-on-Todo (unwedge the board) ([#2285](https://github.com/coalesce-labs/catalyst/issues/2285)) ([60c0783](https://github.com/coalesce-labs/catalyst/commit/60c07838d9b9abb6de06d62124276de8a37fbb57))
+* **dev:** CTL-1242 — reap stale signals + needs-human fix for terminal/merged tickets ([#2212](https://github.com/coalesce-labs/catalyst/issues/2212)) ([6136362](https://github.com/coalesce-labs/catalyst/commit/6136362959502fd97106eb82e554887d1fc015db))
+* **dev:** CTL-1297 — HRW owner preempts stale cross-host claim (TTL-based) ([#2296](https://github.com/coalesce-labs/catalyst/issues/2296)) ([848ca4e](https://github.com/coalesce-labs/catalyst/commit/848ca4e628db200220f42a94eac8037d126bd187))
+* **dev:** CTL-1299 — populate evidence.signal so recovery-pass bounded-LLM FIX rung fires ([#2300](https://github.com/coalesce-labs/catalyst/issues/2300)) ([8e7a69d](https://github.com/coalesce-labs/catalyst/commit/8e7a69d21d30f5c8e0860127185707eca56b5e4b))
+* **dev:** restore export on getCatalystRepoDir — daemon boot broken fleet-wide ([#2291](https://github.com/coalesce-labs/catalyst/issues/2291)) ([406f28b](https://github.com/coalesce-labs/catalyst/commit/406f28b80b4407cfdf981000d390e39f7d438734))
+
 ## [12.14.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.13.0...catalyst-dev-v12.14.0) (2026-06-19)
 
 
