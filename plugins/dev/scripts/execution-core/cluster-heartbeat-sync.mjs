@@ -38,7 +38,7 @@ const LIVENESS_TIMEOUT_MS =
 // non-ok as fail-open and never throw.
 // `spawn`/`nodeBin`/`cli`/`env`/`timeout` are injectable for unit tests.
 export function publishHeartbeatSync(
-  { anchorIssue, host, inFlightTickets = [] },
+  { anchorIssue, host, inFlightTickets = [], maxParallel = null },
   {
     spawn = spawnSync,
     nodeBin = process.execPath,
@@ -49,7 +49,12 @@ export function publishHeartbeatSync(
 ) {
   try {
     const ticketsCsv = inFlightTickets.join(",");
-    const res = spawn(nodeBin, [cli, "publish", anchorIssue, host, ticketsCsv], {
+    // CTL-1092: append max_parallel as a 4th arg ONLY when it resolves to a
+    // positive int. A host that can't resolve its slot count still publishes
+    // liveness via the back-compat 3-arg form (the CLI reads it as null).
+    const argv = [cli, "publish", anchorIssue, host, ticketsCsv];
+    if (Number.isInteger(maxParallel) && maxParallel > 0) argv.push(String(maxParallel));
+    const res = spawn(nodeBin, argv, {
       encoding: "utf8",
       env,
       timeout,

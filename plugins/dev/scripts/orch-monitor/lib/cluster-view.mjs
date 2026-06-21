@@ -279,6 +279,16 @@ export function createClusterEntity({
   rosterProvider,
   heartbeatReader,
   logPath,
+  // CTL-1092: injectable capacity reader, forwarded verbatim to assembleClusterView.
+  // (host) -> { maxParallel, inFlightCount, freeSlots } | null. Default null = feature off.
+  capacityReader = null,
+  // CTL-1092: host alias map { oldName -> pinnedName }; forwarded to assembleClusterView
+  // to collapse pre-pin heartbeat keys onto pinned roster names. Default null = no folding.
+  aliases = null,
+  // CTL-1095: injectable drain reader; forwarded verbatim. Default null = drain feature off.
+  // createClusterEntity is the SOLE prod entry, so this param keeps the seam symmetric — a
+  // future live drainReader only needs the server.ts builder, not another edit here.
+  drainReader = null,
   now = () => Date.now(),
 } = {}) {
   // Memoize the lazy execution-core import so repeated assembles don't re-import.
@@ -331,6 +341,12 @@ export function createClusterEntity({
         heartbeatReader: readClusterHeartbeats,
         logPath,
         now: now(),
+        // CTL-1092/1095: forward the injected readers. Without these three lines the
+        // params are accepted but dropped — the exact gap that left the feature dead
+        // in prod while the assembleClusterView unit tests (which inject directly) passed.
+        capacityReader,
+        aliases,
+        drainReader,
       });
     },
   };

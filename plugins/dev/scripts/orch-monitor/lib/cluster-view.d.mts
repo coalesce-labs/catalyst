@@ -60,6 +60,14 @@ export interface ClusterEntityDeps {
   heartbeatReader?: (opts: { logPath?: string }) => Record<string, string>;
   /** Local event-log path forwarded to the heartbeat reader. */
   logPath?: string;
+  /** CTL-1092: live per-host capacity reader, forwarded to assembleClusterView. */
+  capacityReader?:
+    | ((host: string) => { maxParallel?: number; inFlightCount?: number; freeSlots?: number } | null | undefined)
+    | null;
+  /** CTL-1092: host alias map { oldName → pinnedName }, forwarded to assembleClusterView. */
+  aliases?: Record<string, string> | null;
+  /** CTL-1095: live drain reader, forwarded to assembleClusterView. */
+  drainReader?: ((host: string) => { draining?: boolean; inFlightCount?: number } | null | undefined) | null;
   /** Injected clock for tests. */
   now?: () => number;
 }

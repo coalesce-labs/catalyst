@@ -52,6 +52,37 @@ describe("startLivenessPublisher (CTL-1090)", () => {
     });
   });
 
+  test("CTL-1092: publishes this host's currentMaxParallel() with each heartbeat", () => {
+    const calls = [];
+    const h = startLivenessPublisher({
+      roster: ["mini", "laptop"],
+      anchorIssue: "CTL-9",
+      self: "mini",
+      ownedTickets: () => ["CTL-1"],
+      currentMaxParallel: () => 5,
+      publish: (args) => calls.push(args),
+      intervalMs: 60_000,
+    });
+    h.stop();
+    expect(calls[0]).toMatchObject({ host: "mini", inFlightTickets: ["CTL-1"], maxParallel: 5 });
+  });
+
+  test("CTL-1092: a null currentMaxParallel() (unresolved slot count) still publishes liveness", () => {
+    const calls = [];
+    const h = startLivenessPublisher({
+      roster: ["mini", "laptop"],
+      anchorIssue: "CTL-9",
+      self: "mini",
+      ownedTickets: () => [],
+      currentMaxParallel: () => null,
+      publish: (args) => calls.push(args),
+      intervalMs: 60_000,
+    });
+    h.stop();
+    expect(calls.length).toBeGreaterThanOrEqual(1);
+    expect(calls[0]).toMatchObject({ host: "mini", maxParallel: null });
+  });
+
   test("stop() clears the interval (subsequent ticks do NOT fire)", async () => {
     const calls = [];
     const h = startLivenessPublisher({

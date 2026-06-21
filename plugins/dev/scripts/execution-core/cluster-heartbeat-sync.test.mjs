@@ -60,6 +60,40 @@ describe("publishHeartbeatSync — argv + fail-open contract", () => {
     expect(capturedArgs[3]).toBe("mini");
   });
 
+  test("CTL-1092: appends maxParallel as the 4th positional arg when it is a positive int", () => {
+    let capturedArgs;
+    const spawn = (_bin, args) => {
+      capturedArgs = args;
+      return { status: 0, stdout: '{"host":"mini","last_seen":"t","in_flight_tickets":[],"max_parallel":3}\n' };
+    };
+    publishHeartbeatSync(
+      { anchorIssue: "CTL-9", host: "mini", inFlightTickets: ["CTL-1"], maxParallel: 3 },
+      { spawn },
+    );
+    // argv: [cli, "publish", anchor, host, ticketsCsv, maxParallel]
+    expect(capturedArgs[4]).toBe("CTL-1");
+    expect(capturedArgs[5]).toBe("3");
+  });
+
+  test("CTL-1092: omits maxParallel (back-compat 3-arg form) when null/absent/non-positive", () => {
+    const grab = (args) => {
+      let captured;
+      const spawn = (_bin, a) => {
+        captured = a;
+        return { status: 0, stdout: '{"host":"mini","last_seen":"t","in_flight_tickets":[]}\n' };
+      };
+      publishHeartbeatSync({ anchorIssue: "CTL-9", host: "mini", inFlightTickets: [], ...args }, { spawn });
+      return captured;
+    };
+    // ticketsCsv is "" here, so a present maxParallel would be argv[5]; none must be appended.
+    expect(grab({}).length).toBe(5); // no maxParallel
+    expect(grab({ maxParallel: null }).length).toBe(5);
+    expect(grab({ maxParallel: 0 }).length).toBe(5);
+    expect(grab({ maxParallel: -1 }).length).toBe(5);
+    expect(grab({ maxParallel: 2.5 }).length).toBe(5);
+    expect(grab({ maxParallel: 4 }).length).toBe(6); // positive int → appended
+  });
+
   test("fail-open: non-zero exit → ok:false (never throws)", () => {
     const spawn = () => ({ status: 1, stdout: "" });
     expect(publishHeartbeatSync({ anchorIssue: "CTL-9", host: "mini" }, { spawn }).ok).toBe(false);

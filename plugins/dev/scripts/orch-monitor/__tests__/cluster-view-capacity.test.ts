@@ -4,7 +4,7 @@
 // Run: cd plugins/dev/scripts/orch-monitor && bun test
 
 import { describe, it, expect } from "bun:test";
-import { assembleClusterView } from "../lib/cluster-view.mjs";
+import { assembleClusterView, createClusterEntity } from "../lib/cluster-view.mjs";
 import type { BoardPayload, BoardTicket } from "../lib/board-data.mjs";
 
 function ticket(id: string): BoardTicket {
@@ -126,5 +126,57 @@ describe("deriveClusterSignal capacity pass-through (CTL-1092)", () => {
     });
     const sig = deriveClusterSignal(view);
     expect(sig.nodes[0]).toMatchObject({ host: "mini", status: "live", maxParallel: 6, inFlightCount: 2, freeSlots: 4 });
+  });
+});
+
+// CTL-1092 REGRESSION GUARD — exercise the PROD path through createClusterEntity,
+// NOT assembleClusterView directly. The feature was dead in prod because
+// createClusterEntity accepted capacityReader/aliases but never forwarded them to
+// assembleClusterView; the assembleClusterView-only tests above passed regardless,
+// so they could not catch it. These tests fail the instant the forward at
+// cluster-view.mjs project() is removed — because the injected reader's values
+// would silently vanish.
+describe("createClusterEntity forwards capacityReader + aliases through project() (CTL-1092)", () => {
+  it("surfaces per-node capacity via project() — proves the forward, not just the seam", async () => {
+    const entity = createClusterEntity({
+      ownerHostProvider: () => ({ "CTL-1": "mini", "CTL-2": "mini-2" }),
+      rosterProvider: () => ["mini", "mini-2"],
+      heartbeatReader: () => ({
+        mini: new Date(now - 1000).toISOString(),
+        "mini-2": new Date(now - 1000).toISOString(),
+      }),
+      capacityReader: (h) =>
+        h === "mini"
+          ? { maxParallel: 3, inFlightCount: 1 }
+          : h === "mini-2"
+            ? { maxParallel: 4, inFlightCount: 4 }
+            : null,
+      now: () => now,
+    });
+    const view = await entity.project(board([ticket("CTL-1"), ticket("CTL-2")]));
+    expect(view.singleHost).toBe(false);
+    const mini = view.nodes.find((n) => n.host === "mini");
+    const mini2 = view.nodes.find((n) => n.host === "mini-2");
+    // freeSlots is recomputed = max(0, maxParallel − inFlightCount): mini 3−1=2; mini-2 4−4=0.
+    expect(mini).toMatchObject({ maxParallel: 3, inFlightCount: 1, freeSlots: 2 });
+    expect(mini2).toMatchObject({ maxParallel: 4, inFlightCount: 4, freeSlots: 0 });
+  });
+
+  it("forwards the alias map: a pre-pin heartbeat key folds onto the pinned roster node", async () => {
+    const entity = createClusterEntity({
+      ownerHostProvider: () => ({ "CTL-1": "mini" }),
+      rosterProvider: () => ["mini", "mini-2"],
+      heartbeatReader: () => ({
+        "Ryans-Mac-mini-250233": new Date(now - 1000).toISOString(),
+        "mini-2": new Date(now - 1000).toISOString(),
+      }),
+      aliases: { "Ryans-Mac-mini-250233": "mini" },
+      capacityReader: () => ({ maxParallel: 2, inFlightCount: 0 }),
+      now: () => now,
+    });
+    const view = await entity.project(board([ticket("CTL-1")]));
+    // The pre-pin key must NOT appear as its own node; "mini" is live (folded).
+    expect(view.nodes.find((n) => n.host === "Ryans-Mac-mini-250233")).toBeUndefined();
+    expect(view.nodes.find((n) => n.host === "mini")?.status).toBe("live");
   });
 });
