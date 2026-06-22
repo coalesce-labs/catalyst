@@ -4,18 +4,31 @@
 // and the top strip — and every data surface read the SAME value: a selection in
 // one switcher instantly reflects in the other.
 //
-// This hook owns the stale-scope reconciliation: it resolves the persisted scope
-// against the live `repos` list via the pure `resolveScope` (a scope pointing at
-// a repo no longer in the config, or any scope when the config has collapsed to a
-// single repo, falls back to "All") so the surfaces never go inexplicably empty
-// after a config change. The reconciliation is applied on READ (the returned
-// `scope`) AND written back to the atom when it drifts, so the persisted value
-// self-heals without a manual reset.
-import { useEffect } from "react";
+// This hook resolves the active scope against the live repo set via the pure
+// `resolveScope` (a scope pointing at a repo no longer configured, or any scope
+// when there is genuinely nothing to scope between, falls back to "All") so the
+// surfaces never go inexplicably empty after a config change.
+//
+// CTL-1311: the reconciliation list is the configured PROJECT ROSTER (what the
+// left nav offers as scopes — `useProjects`), unioned with any observed repos the
+// caller passes. It previously reconciled ONLY against the caller's observed
+// `BoardPayload.repos`; when the roster has many projects but only one has
+// observed work (single-host mode → `repos === ["catalyst"]`), resolveScope's
+// single-repo rule collapsed EVERY nav scope (adva, otl, even catalyst) to "all".
+//
+// CTL-1311: this hook NO LONGER writes the resolved value back to the atom. Per
+// CTL-989 the atom is a one-way URL mirror (app-shell is its single writer,
+// synced from `?scope`). A self-heal write here was a SECOND writer that fought
+// the mirror: when the URL scope collapsed to "all", app-shell re-forced the URL
+// value while this effect re-forced "all", oscillating until React error #185
+// (max update depth) crashed every `?scope=` view. Reads get the reconciled
+// `resolved`; the URL/atom remain the operator's selection.
+import { useMemo } from "react";
 import { useAtom } from "jotai";
 
 import { repoScopeAtom } from "@/board/nav-store";
 import { resolveScope, type RepoScope } from "@/lib/repo-scope";
+import { useProjects } from "./use-projects";
 
 export interface RepoScopeControl {
   /** The live, reconciled active scope (never a stale/dangling repo). */
@@ -25,24 +38,22 @@ export interface RepoScopeControl {
 }
 
 /**
- * Read + write the shared workspace scope, reconciled against the live repo list.
- * Pass the repos from the resident `BoardPayload.repos`; an empty list (config not
- * yet loaded) leaves a persisted "all" untouched and forces any real scope to
- * "all" (nothing to scope between yet) without clobbering a once-valid selection
- * before the snapshot lands.
+ * Read the shared workspace scope, reconciled against the configured roster (the
+ * nav's scopes) unioned with the caller's observed `repos`. An empty list (config
+ * not yet loaded) forces a real scope to "all" only once there is genuinely
+ * nothing to scope between, never clobbering a once-valid selection.
  */
 export function useRepoScope(repos: readonly string[]): RepoScopeControl {
   const [raw, setRaw] = useAtom(repoScopeAtom);
-  const resolved = resolveScope(raw, repos);
+  const { projects } = useProjects();
 
-  // Self-heal the persisted value when it drifts (e.g. a repo was removed from the
-  // config) — but only once the repo list has actually loaded, so we don't reset a
-  // valid persisted scope to "all" on the first paint before `repos` arrives.
-  useEffect(() => {
-    if (repos.length > 0 && resolved !== raw) {
-      setRaw(resolved);
-    }
-  }, [repos.length, resolved, raw, setRaw]);
+  // Reconcile against the configured roster ∪ the caller's observed repos, so a
+  // configured-but-idle project (no observed work yet) stays a valid scope.
+  const reconcileRepos = useMemo(
+    () => Array.from(new Set([...projects.map((p) => p.repo), ...repos])),
+    [projects, repos],
+  );
+  const resolved = resolveScope(raw, reconcileRepos);
 
   return { scope: resolved, setScope: setRaw };
 }
