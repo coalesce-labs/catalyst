@@ -49,6 +49,11 @@ describe("destForSecret (CTL-1211)", () => {
       resolve("/cfg", "config-catalyst-workspace.json"),
     );
   });
+  test("cluster-cloud maps to cluster-cloud.json (CTL-1307, generic path)", () => {
+    expect(destForSecret("cluster-cloud.sops.json", "/cfg")).toBe(
+      resolve("/cfg", "cluster-cloud.json"),
+    );
+  });
 });
 
 describe("syncClusterSecrets (CTL-1211)", () => {

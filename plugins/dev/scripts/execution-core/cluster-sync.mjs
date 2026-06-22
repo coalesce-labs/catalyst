@@ -15,6 +15,13 @@
 //                                    node-local host.name / cluster anchor /
 //                                    monitor webhook state, overlays bot creds)
 //   config-<projectKey>.sops.json → config-<projectKey>.json
+//   cluster-cloud.sops.json       → cluster-cloud.json  (CTL-1307: the shared
+//                                    catalyst-cloud token { catalyst.cloud.token } —
+//                                    a separate file so its rotation/GC lifecycle is
+//                                    independent of bot creds, superseded per CTC-46.
+//                                    Decrypted by the generic destForSecret path
+//                                    below; cloud-token-env.mjs then projects it into
+//                                    the machine-level environment. No special-casing.)
 //
 // Roster (cluster.json.roster) is read LIVE per tick by config.getClusterHosts();
 // secrets here are decrypted at BOOT. So a roster change needs no restart, but a

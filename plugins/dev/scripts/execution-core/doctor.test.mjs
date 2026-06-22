@@ -18,6 +18,7 @@ import {
   checkThoughts,
   checkClaudeSettings,
   checkReaper,
+  checkCloudTokenEnv,
   summarize,
   renderJson,
   renderHuman,
@@ -1071,5 +1072,94 @@ describe("checkReaper", () => {
     });
     expect(checks[0].name).toBe("reaper-health");
     expect(checks[0].status).toBe(STATUS.PASS);
+  });
+});
+
+// ─── checkCloudTokenEnv (CTL-1307) ───────────────────────────────────────────
+
+describe("checkCloudTokenEnv", () => {
+  const CFG = "/cfg";
+  const ZSH = "/home/.zshenv";
+  const clusterCloud = (token) => JSON.stringify({ catalyst: { cloud: { token } } });
+  const exportLine = (token) => `export CATALYST_CLOUD_TOKEN='${token.replace(/'/g, "'\\''")}'`;
+  // readFile factory: map virtual paths → content; throw (ENOENT) when omitted.
+  const reader =
+    ({ cloud, env, zsh } = {}) =>
+    (p) => {
+      if (p.endsWith("cluster-cloud.json")) {
+        if (cloud === undefined) throw new Error("ENOENT");
+        return cloud;
+      }
+      if (p.endsWith("cluster.env")) {
+        if (env === undefined) throw new Error("ENOENT");
+        return env;
+      }
+      if (p === ZSH) {
+        if (zsh === undefined) throw new Error("ENOENT");
+        return zsh;
+      }
+      throw new Error("ENOENT");
+    };
+
+  it("INFO when no token is decrypted (local-only node)", () => {
+    const checks = checkCloudTokenEnv({ configDir: CFG, zshenvPath: ZSH, readFile: reader({}) });
+    expect(checks[0].name).toBe("cloud-token");
+    expect(checks[0].status).toBe(STATUS.INFO);
+  });
+
+  it("WARN when token decrypted but cluster.env is missing (not projected)", () => {
+    const checks = checkCloudTokenEnv({
+      configDir: CFG,
+      zshenvPath: ZSH,
+      readFile: reader({ cloud: clusterCloud("tok") }),
+    });
+    expect(checks[0].status).toBe(STATUS.WARN);
+    expect(checks[0].detail).toContain("NOT projected");
+  });
+
+  it("WARN when cluster.env holds a STALE token value", () => {
+    const checks = checkCloudTokenEnv({
+      configDir: CFG,
+      zshenvPath: ZSH,
+      readFile: reader({ cloud: clusterCloud("new"), env: exportLine("old") + "\n" }),
+    });
+    expect(checks[0].status).toBe(STATUS.WARN);
+    expect(checks[0].detail).toContain("STALE");
+  });
+
+  it("WARN when cluster.env matches but ~/.zshenv lacks the guard", () => {
+    const checks = checkCloudTokenEnv({
+      configDir: CFG,
+      zshenvPath: ZSH,
+      readFile: reader({ cloud: clusterCloud("tok"), env: exportLine("tok") + "\n", zsh: "export OTHER=1\n" }),
+    });
+    expect(checks[0].status).toBe(STATUS.WARN);
+    expect(checks[0].detail).toContain("source-guard");
+  });
+
+  it("PASS when token is projected and the ~/.zshenv guard is present", () => {
+    const checks = checkCloudTokenEnv({
+      configDir: CFG,
+      zshenvPath: ZSH,
+      readFile: reader({
+        cloud: clusterCloud("tok"),
+        env: exportLine("tok") + "\n",
+        zsh: "# >>> catalyst cloud-token env (CTL-1307) >>>\n. cluster.env\n",
+      }),
+    });
+    expect(checks[0].status).toBe(STATUS.PASS);
+  });
+
+  it("never returns a FAIL status (the token is optional)", () => {
+    // Every branch must be at most WARN — absence/drift must not block activation.
+    const branches = [
+      reader({}),
+      reader({ cloud: clusterCloud("tok") }),
+      reader({ cloud: clusterCloud("new"), env: exportLine("old") + "\n" }),
+    ];
+    for (const readFile of branches) {
+      const checks = checkCloudTokenEnv({ configDir: CFG, zshenvPath: ZSH, readFile });
+      for (const c of checks) expect(c.status).not.toBe(STATUS.FAIL);
+    }
   });
 });

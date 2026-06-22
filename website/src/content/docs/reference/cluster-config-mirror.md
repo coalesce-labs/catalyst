@@ -38,6 +38,7 @@ and
 | Cluster roster | `catalyst-cluster` repo → `cluster.json` `roster[]` | **SHARED** | Add the new node's name to `cluster.json.roster` and push. `cluster-sync` pulls it and the next scheduler tick honors it — no restart. *(The legacy committed `.catalyst/hosts.json` roster was retired in CTL-1274; the daemon no longer reads it.)* |
 | Layer-1 project config | `.catalyst/config.json` | **SHARED** | Committed to git; present after `git clone` |
 | Liveness anchor issue | `~/.config/catalyst/config.json` → `catalyst.cluster.livenessAnchorIssue` | **SHARED** | Copy from the seed node; one Linear ticket identifier per fleet |
+| Cloud token (`CATALYST_CLOUD_TOKEN`) | `catalyst-cluster` repo → `secrets/cluster-cloud.sops.json` `catalyst.cloud.token` | **SHARED** | One shared catalyst-cloud service credential (CTL-1307). Add it once to the cluster repo (SOPS); `cluster-sync` decrypts it to `~/.config/catalyst/cluster-cloud.json` and `cloud-token-env.mjs` projects it to the machine-level env (`cluster.env` + `~/.zshenv` guard) on every node. **Intentionally unread by catalyst core** — a prerequisite for the opt-in cloud path, not a switch that turns it on. |
 | Plugin source | `~/catalyst/plugin-source/` | **SHARED** | Pull from the same git remote; `setup-plugin-source.sh` does this |
 | Linear team/state map | Layer-1 `catalyst.linear.teamKey` / `stateMap` | **SHARED** | Present after `git clone` via `.catalyst/config.json` |
 | `catalyst.host.name` | `~/.config/catalyst/config.json` → `catalyst.host.name` | **PER-NODE** | Set to the new node's unique roster entry (must match an entry in the `catalyst-cluster` repo's `cluster.json.roster`; a name that isn't in the roster owns zero tickets under HRW) |
@@ -56,6 +57,19 @@ and
 > the fleet acts on behalf of the same app. The tokens live in machine-global
 > `~/.config/catalyst/config.json` (not in the per-project `config-<key>.json`) so all nodes can
 > share them without per-project duplication.
+
+> **Why the cloud token is SHARED + machine-level (CTL-1307):** `CATALYST_CLOUD_TOKEN` is a single
+> service credential (the catalyst-cloud `ADMIN_TOKEN`, interim per CTC-27 / ADR-0006) that must be
+> **identical on every node**, so it lives once in the `catalyst-cluster` repo's
+> `secrets/cluster-cloud.sops.json` (a *separate* SOPS file from `cluster-bots` so its rotation/GC
+> lifecycle is independent — it is superseded by per-tenant org-scoped keys per CTC-46). `cluster-sync`
+> decrypts it to `~/.config/catalyst/cluster-cloud.json`; `cloud-token-env.mjs` (run by `catalyst-stack`
+> at boot + keep-alive, or on demand via `catalyst-stack sync-cloud-env`) projects it into the
+> **machine-level environment**: the secret is written to a `0600` `~/.config/catalyst/cluster.env`,
+> and a single non-secret guard line in `~/.zshenv` sources it — so every login shell, and any cloud
+> daemon (re)started in a shell context (this fleet's convention for env-key pickup), inherits
+> `CATALYST_CLOUD_TOKEN`. **Default behavior is unchanged:** nothing in catalyst reads the variable;
+> a node stays fully local-only until the operator separately opts into cloud services.
 
 ---
 

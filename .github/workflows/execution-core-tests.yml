@@ -124,6 +124,7 @@ jobs:
             claim.test.mjs \
             claude-agents.test.mjs \
             claude-ids.test.mjs \
+            cloud-token-env.test.mjs \
             cluster-claim-sync.test.mjs \
             cluster-claim.test.mjs \
             comms-drain.test.mjs \

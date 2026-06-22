@@ -228,6 +228,44 @@ Never commit this. One file per project, linked by `projectKey`. It holds API ke
 
 Only set up the integrations you use — the setup script asks about each one.
 
+## Cluster machine-level cloud token (`CATALYST_CLOUD_TOKEN`, CTL-1307)
+
+`CATALYST_CLOUD_TOKEN` is a single **shared** service credential — the catalyst-cloud
+`ADMIN_TOKEN` (interim, per CTC-27 / ADR-0006) — that must be **identical on every node**. It is an
+**optional extension**: provisioning the token does **not** by itself change Catalyst's behavior.
+Catalyst stays in its normal **local-only** state unless **both** the token is set **and** you have
+specifically configured Catalyst to use the cloud (e.g. local replication + cloud-fed read). Nothing
+in Catalyst reads the variable; only the opt-in cloud host-sync daemon (out-of-repo:
+`catalyst-replica` / `catalyst-cloud`) consumes it. So it is safe to provision cluster-wide without
+altering default behavior.
+
+**Where it lives (shared state):** encrypted in the `catalyst-cluster` repo as
+`secrets/cluster-cloud.sops.json` (a separate SOPS file from `cluster-bots`, so the cloud token can
+rotate / be garbage-collected independently — it is superseded by per-tenant org-scoped keys per
+CTC-46):
+
+```json
+{ "catalyst": { "cloud": { "token": "<catalyst-cloud ADMIN_TOKEN>" } } }
+```
+
+**How it reaches each node's machine-level environment (no manual per-host step):**
+
+1. `cluster-sync` (daemon boot) decrypts it to `~/.config/catalyst/cluster-cloud.json` (mode `0600`),
+   the same path every other cluster-shared secret takes.
+2. `cloud-token-env.mjs` — run by `catalyst-stack start` (boot + keep-alive), or on demand via
+   `catalyst-stack sync-cloud-env` — projects it:
+   - writes the secret to `~/.config/catalyst/cluster.env` (mode `0600`), and
+   - ensures a single **non-secret** guard line in `~/.zshenv` that sources `cluster.env`.
+3. Every login/zsh shell — and any cloud daemon **(re)started in a shell context**, this fleet's
+   convention for env-key pickup — then inherits `CATALYST_CLOUD_TOKEN`.
+
+Rotation is boot-scoped: after the value changes in the cluster repo, run `catalyst cluster sync`
+(or restart the daemon) to re-decrypt, then `catalyst-stack sync-cloud-env`, and restart any cloud
+daemon so it picks up the new value. `catalyst doctor` reports an advisory `cloud-token` WARN if a
+token is decrypted but not yet projected to the machine-level env. The operator runbook for
+adding/rotating the secret in the `catalyst-cluster` repo lives in the `docs/cluster-onboarding.md`
+developer guide ("Provisioning the shared cloud token").
+
 ## GitHub merge rules live in GitHub
 
 Catalyst can open PRs, fix CI, answer review bots, and merge. But GitHub decides what must pass before code lands. Those rules live in **GitHub branch protection or rulesets**, not in `.catalyst/config.json`.
