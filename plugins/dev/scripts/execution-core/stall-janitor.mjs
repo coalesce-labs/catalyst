@@ -192,20 +192,35 @@ export function classifyStallClear(ctx = {}) {
 // classifyTerminalSignalGc (J4, CTL-1242) — PURE. Given a ticket that has been
 // identified as terminal/merged, decide whether its workers/<T>/ signal dir can
 // be GC'd this tick. Safety fences first, then positive "gc" verdict:
-//   "gc"   — ticket is terminal/merged, no live session, not in-flight, not already GC'd.
-//   "skip" — anything ambiguous, live, in-flight, or already removed.
+//   "gc"   — ticket is terminal/merged, no live session, not already GC'd.
+//            A stale in-flight signal does NOT block a terminal ticket (CTL-1315) —
+//            the live-worker fence is liveSessionInWorktree, not the slot-accounting bit.
+//   "skip" — non-terminal, a live session, already removed, or a NON-terminal in-flight.
 //
 // ctx fields:
 //   linearTerminalOrMerged — ticket is terminal via Linear state OR merged PR.
 //   liveSessionInWorktree  — a live session has its cwd inside the ticket's worktree.
-//   inFlight               — the ticket has an active (non-terminal) phase worker.
+//   inFlight               — the ticket holds a worker slot (a non-terminal-phase signal
+//                            that is not failed/stalled/aborted). For a terminal ticket
+//                            this is stale residue, not a live worker (CTL-1315).
 //   alreadyGcd             — a .janitor-gc.applied marker is present in the worker dir,
 //                            meaning a prior GC write started but the dir wasn't removed
 //                            (e.g., EACCES). Prevents infinite retry.
 export function classifyTerminalSignalGc(ctx = {}) {
   if (!ctx.linearTerminalOrMerged) return { action: "skip", reason: "not-terminal-or-merged" };
   if (ctx.liveSessionInWorktree) return { action: "skip", reason: "live-session-in-worktree" };
-  if (ctx.inFlight) return { action: "skip", reason: "in-flight" };
+  // CTL-1315: a Linear-terminal ticket has no legitimately-advancing worker, so a
+  // stale mid-pipeline phase signal (e.g. a stranded triage-done dir whose pipeline
+  // never advanced past triage) must NOT block its reap. The genuine live-worker
+  // protection is liveSessionInWorktree (checked above); ctx.inFlight here is pure
+  // slot-accounting residue from listInFlightTickets (isTicketInFlight treats any
+  // non-terminal-phase `done` as still mid-pipeline). We therefore only honor inFlight
+  // for NON-terminal tickets — but the J4 census pre-filters those out
+  // (linearTerminalOrMerged is hard-coded true on every candidate), so this guard is
+  // effectively dead for J4 and retained only for defensive symmetry. Do NOT "restore"
+  // it to an unconditional skip — that reintroduces the CTL-1246/1249/774 leak.
+  if (ctx.inFlight && !ctx.linearTerminalOrMerged)
+    return { action: "skip", reason: "in-flight" };
   if (ctx.alreadyGcd) return { action: "skip", reason: "already-gc'd" };
   return { action: "gc", reason: "terminal-or-merged-no-live-session" };
 }
@@ -849,8 +864,20 @@ export function defaultCollectTerminalSignalGcCandidates({
   // resolveWorktreePath(ticket) → worktree path or null. Optional: when
   // omitted, liveSessionInWorktree is always false (conservative).
   resolveWorktreePath = () => null,
+  // CTL-1315: liveSessionInWorktree (computed from `agents`) is the SOLE live-worker
+  // fence for a terminal ticket now that the inFlight gate is relaxed in
+  // classifyTerminalSignalGc. The agents snapshot is empty on cold start and
+  // stale-last-good after a failed `claude agents --json` refresh, so reaping on
+  // such a tick could remove a genuinely-running late-phase worker's signal dir.
+  // When the snapshot is not fresh, collect NO candidates — defer every J4 reap to a
+  // tick where the live-worker fence is trustworthy (mirrors the CTL-731 new-work
+  // freshness gate). Defaults true so unit tests that inject a known agents array
+  // keep their explicit behavior.
+  agentsFresh = true,
 } = {}) {
   const out = [];
+  // CTL-1315: bail the whole pass when liveness is unknown — never reap blind.
+  if (!agentsFresh) return out;
   let workerDirs;
   try {
     workerDirs = readdirSync(join(orchDir, "workers"), { withFileTypes: true });

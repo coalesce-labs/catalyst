@@ -5512,20 +5512,50 @@ function runTick() {
         clearStall: defaultClearStall(runningOpts.orchDir, runningOpts.writeStatus ?? linearWrite),
         // CTL-1242 J4: wire the read-only GC census + the production rmSync seam.
         // The census only probes tickets whose workers/<T>/ dir exists AND whose
-        // Linear state is provably terminal (Done/Canceled). Same closure shape
-        // as J3's isLinearTerminal — cache-first, no extra subprocess.
-        // Mode is the existing jMode (readStallJanitorConfig() → default 'shadow')
-        // so J4 runs in shadow by default; no new config knob needed.
-        collectTerminalSignalGcCandidates: () =>
-          defaultCollectTerminalSignalGcCandidates({
+        // Linear state is provably terminal (Done/Canceled). Mode is the existing
+        // jMode (readStallJanitorConfig() → default 'shadow') so J4 runs in shadow
+        // by default; no new config knob needed.
+        collectTerminalSignalGcCandidates: () => {
+          // CTL-1315: read the agents snapshot ONCE and pass both its array and its
+          // freshness. liveSessionInWorktree (the sole live-worker fence for a
+          // terminal ticket once the inFlight gate is relaxed) is only trustworthy
+          // when the snapshot is fresh; on a cold/stale snapshot the census collects
+          // nothing and defers the reap (see defaultCollectTerminalSignalGcCandidates).
+          const agentsSnap = getAgentsCached();
+          return defaultCollectTerminalSignalGcCandidates({
             orchDir: runningOpts.orchDir,
-            agents: getAgentsCached().agents,
+            agents: agentsSnap.agents,
+            agentsFresh: agentsSnap.isFresh,
             inFlightTickets: listInFlightTickets(runningOpts.orchDir),
+            // CTL-1315: 3-tier read (cache → gateway → live linearis), matching the
+            // J3/unstuck/reclaim censuses. The original J4 probe called
+            // fetchTicketState(id) with NO cache/gateway — a live `linearis issues read`
+            // per terminal dir per tick (the comment that claimed "cache-first" was
+            // wrong). The cache/gateway tiers also make the terminal verdict resilient
+            // to a transient live-read miss.
             isLinearTerminalOrMerged: (id) => {
-              const state = fetchTicketState(id);
+              const state = fetchTicketState(id, {
+                cache: runningOpts.cache,
+                gateway: runningOpts.gateway,
+              });
               return state != null && isLinearTerminal(state);
             },
-          }),
+            // CTL-1315: thread the worktree resolver so liveSessionInWorktree is a
+            // REACHABLE live-worker fence. It was previously omitted → defaulted to
+            // () => null → liveSessionInWorktree always false. That fence is now
+            // load-bearing: relaxing the in-flight gate (classifyTerminalSignalGc)
+            // means a Linear-terminal ticket with a genuinely-running late-phase
+            // worker (e.g. teardown, whose cwd is its worktree per CTL-1105) is
+            // protected ONLY by this live-session check. Mirrors the unstuck-sweep
+            // resolver below.
+            resolveWorktreePath: (ticket) => {
+              for (const sig of readWorkerSignals(runningOpts.orchDir)) {
+                if (sig.ticket === ticket && sig.worktreePath) return sig.worktreePath;
+              }
+              return null;
+            },
+          });
+        },
         gcTerminalSignals: defaultGcTerminalSignals(runningOpts.orchDir),
       },
       // CTL-1064: wire the unstuck-sweep census (Pass 0u). The census collects
