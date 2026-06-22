@@ -22,6 +22,12 @@ export type ClusterNodeStatus = "live" | "degraded" | "offline";
 export interface ClusterSignalNode {
   host: string;
   status: ClusterNodeStatus;
+  /** CTL-1092: per-node capacity from the heartbeat fan-in. 0/0/0 for offline nodes. */
+  maxParallel?: number;
+  inFlightCount?: number;
+  freeSlots?: number;
+  /** CTL-1092: in-flight ticket ids from the heartbeat (for remote slot labels). */
+  tickets?: string[];
 }
 
 /** The per-node cluster-health wire shape the footer renders (server's ClusterSignal). */

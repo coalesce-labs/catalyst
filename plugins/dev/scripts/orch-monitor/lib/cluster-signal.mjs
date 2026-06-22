@@ -53,7 +53,11 @@ export function deriveClusterSignal(view) {
     // no daemon to be healthy/offline, so it gets no footer dot.
     if (!n || typeof n.host !== "string" || n.host.length === 0) continue;
     if (n.status !== "live" && n.status !== "degraded" && n.status !== "offline") continue;
-    projected.push({ host: n.host, status: n.status });
+    const node = { host: n.host, status: n.status };
+    if (n.maxParallel != null) node.maxParallel = n.maxParallel;
+    if (n.inFlightCount != null) node.inFlightCount = n.inFlightCount;
+    if (n.freeSlots != null) node.freeSlots = n.freeSlots;
+    projected.push(node);
   }
   return {
     // A malformed/absent view degrades to the single-host empty signal (the footer

@@ -38,9 +38,15 @@ import type { NavSignal, DaemonHealth } from "./lib/nav-signal.mjs";
 // is an exact identity no-op (one node — the local daemon).
 import { createClusterEntity } from "./lib/cluster-view.mjs";
 import type { ClusterView } from "./lib/cluster-view.mjs";
+// CTL-1092: alias loading + resolution for the prod capacity/liveness wiring.
+// loadHostAliases reads catalyst.host.aliases (fail-open {}); resolveHostAlias
+// folds a pre-pin heartbeat key onto its pinned roster name. Pure file/string
+// helpers — safe to import statically (no execution-core network deps).
+import { loadHostAliases, resolveHostAlias } from "../execution-core/host-alias.mjs";
 import { mergeHeartbeatsNewestWins } from "./lib/node-liveness.mjs";
 import { deriveClusterSignal } from "./lib/cluster-signal.mjs";
 import type { ClusterSignal } from "./lib/cluster-signal.mjs";
+import { readCapacityHistory } from "./lib/capacity-history.mjs";
 // CTL-886 (BFF4): run→worker identity — surface every phase-*.json signal as a
 // queryable run entity (/api/ticket-runs/<id>) + serve one signal verbatim
 // (/api/ec-worker/<ticket>/<phase>). Pure file-reads of resident signals — no
@@ -1287,7 +1293,16 @@ export function createServer(opts: CreateServerOptions): BunServer {
   // not just the local event log. readPeerHeartbeatsSync is the same subprocess
   // the working `catalyst cluster status` CLI uses, so Linear creds resolve
   // identically (LINEAR_API_TOKEN in the process env).
-  type AnchorPeerRec = { host?: string; last_seen?: string; in_flight_tickets?: string[] };
+  // CTL-1092: readPeerHeartbeatsSync records carry max_parallel + in_flight_count
+  // (parseHeartbeatMetadata output) — declared here so the capacity cache below
+  // can read them with type safety (the runtime data was always present).
+  type AnchorPeerRec = {
+    host?: string;
+    last_seen?: string;
+    in_flight_tickets?: string[];
+    max_parallel?: number | null;
+    in_flight_count?: number;
+  };
   let daemonDepsPromise: Promise<{
     readClusterHeartbeats: (opts: { logPath?: string }) => Record<string, string>;
     getHostName: () => string;
@@ -1467,6 +1482,15 @@ export function createServer(opts: CreateServerOptions): BunServer {
   // per-request reads merge that cache over the local-log heartbeats synchronously.
   // Production-only: tests inject clusterReaderOpt and never start the poller.
   const anchorHeartbeatCache: { map: Record<string, string> } = { map: {} };
+  // CTL-1092: parallel cache of live per-host capacity from the SAME anchor peer
+  // records. readPeerHeartbeatsSync already returns max_parallel + in_flight_count
+  // (parseHeartbeatMetadata); we were dropping them. This is the real prod data
+  // source for the cluster-capacity feature — populated in the same 60s poll so it
+  // can never skew from the liveness overlay. null max_parallel (a peer that never
+  // published a slot count) is coerced to 0 to match the reader contract.
+  const anchorCapacityCache: {
+    map: Record<string, { maxParallel: number; inFlightCount: number }>;
+  } = { map: {} };
   let execCoreDeps: Awaited<ReturnType<typeof loadDaemonDeps>> = null;
   let anchorPollTimer: ReturnType<typeof setInterval> | null = null;
   const pollAnchorHeartbeats = (): void => {
@@ -1475,18 +1499,26 @@ export function createServer(opts: CreateServerOptions): BunServer {
       const anchor = execCoreDeps.getLivenessAnchorIssue();
       if (!anchor) {
         anchorHeartbeatCache.map = {}; // no anchor configured → no peers
+        anchorCapacityCache.map = {};
         return;
       }
       const peers = execCoreDeps.readPeerHeartbeatsSync({ anchorIssue: anchor });
       const next: Record<string, string> = {};
+      const nextCap: Record<string, { maxParallel: number; inFlightCount: number }> = {};
       for (const [host, rec] of Object.entries(peers)) {
         if (rec && typeof rec.last_seen === "string" && rec.last_seen.length > 0) {
           next[host] = rec.last_seen;
         }
+        if (rec) {
+          const mp = typeof rec.max_parallel === "number" ? rec.max_parallel : 0;
+          const ifc = typeof rec.in_flight_count === "number" ? rec.in_flight_count : 0;
+          nextCap[host] = { maxParallel: mp, inFlightCount: ifc };
+        }
       }
       anchorHeartbeatCache.map = next;
+      anchorCapacityCache.map = nextCap;
     } catch {
-      // fail-open: keep the last cache; stale entries age out via node-liveness
+      // fail-open: keep the last caches; stale entries age out via node-liveness
     }
   };
   if (clusterReaderOpt == null) {
@@ -1498,6 +1530,12 @@ export function createServer(opts: CreateServerOptions): BunServer {
     anchorPollTimer = setInterval(pollAnchorHeartbeats, anchorPollMs);
     anchorPollTimer.unref?.();
   }
+
+  // CTL-1092: the alias map is a static Layer-1 config value (operator-set; a
+  // monitor restart applies a change, like every other loadX(configPath)).
+  // loadHostAliases fail-opens to {} on a missing/malformed config, so a bad
+  // aliases block can never crash the cluster view.
+  const hostAliases = loadHostAliases({ configPath: monitorConfigPath });
 
   // Inject BOTH the roster and a MERGED heartbeat reader (local event log ∪ the
   // anchor peer cache). createClusterEntity then surfaces any node currently live
@@ -1526,6 +1564,17 @@ export function createServer(opts: CreateServerOptions): BunServer {
       // ~2-min cadence must not make a live self-host (fresh ~30s local log)
       // display as degraded.
       return mergeHeartbeatsNewestWins(local, anchorHeartbeatCache.map);
+    },
+    aliases: hostAliases,
+    // CTL-1092: live per-host capacity from the anchor-peer cache. Resolve the
+    // queried host through the SAME alias table so a pre-pin cache key still
+    // matches the pinned node assembleClusterView asks about. No cache entry →
+    // null (resolveCapacity yields zeros for a live host — the fail-open "no data
+    // yet" contract, NOT an error). Offline nodes never reach this reader
+    // (assembleClusterView short-circuits them to zeros first).
+    capacityReader: (host: string) => {
+      const resolved = resolveHostAlias(host, hostAliases);
+      return anchorCapacityCache.map[resolved] ?? anchorCapacityCache.map[host] ?? null;
     },
   });
   const readClusterView = async (board: BoardPayload): Promise<ClusterView> => {
@@ -3933,6 +3982,15 @@ export function createServer(opts: CreateServerOptions): BunServer {
           return Response.json(
             await assembleClusterSignal(await boardSnapshot.getLatest()),
           );
+        }
+
+        // CTL-1092 (Phase 5): per-node capacity change history from the event log.
+        // Read-only; no writes. Scans the current-month JSONL for capacity events.
+        if (url.pathname === "/api/capacity-history") {
+          const month = new Date().toISOString().slice(0, 7); // YYYY-MM
+          const capLogPath = join(CATALYST_DIR, "events", `${month}.jsonl`);
+          const data = readCapacityHistory({ logPath: capLogPath });
+          return Response.json({ data });
         }
 
         // CTL-898 (SHELL8): SSE push of the cluster signal. The footer opens ONE

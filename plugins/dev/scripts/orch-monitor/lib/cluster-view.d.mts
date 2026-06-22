@@ -15,6 +15,12 @@ export interface ClusterNode {
   status: HostLivenessStatus | null;
   lastSeen: string | null;
   tickets: ClusterTicket[];
+  /** CTL-1092: per-node capacity. Present when capacityReader is wired; 0/0/0 for offline nodes. */
+  maxParallel?: number;
+  inFlightCount?: number;
+  freeSlots?: number;
+  /** CTL-1095: drain state. Present when drainReader is wired. */
+  draining?: boolean;
 }
 
 export interface ClusterView {
@@ -33,6 +39,14 @@ export interface AssembleClusterViewArgs extends LivenessThresholds {
   heartbeatReader?: (opts: { logPath?: string }) => Record<string, string>;
   logPath?: string;
   now?: number;
+  /** CTL-1095: per-host drain reader → { draining, inFlightCount }. */
+  drainReader?: ((host: string) => { draining?: boolean; inFlightCount?: number } | null | undefined) | null;
+  /** CTL-1092: per-host capacity reader → { maxParallel, inFlightCount, freeSlots }. */
+  capacityReader?:
+    | ((host: string) => { maxParallel?: number; inFlightCount?: number; freeSlots?: number } | null | undefined)
+    | null;
+  /** CTL-1092: host alias map { oldName → pinnedName } for collapsing pre-pin heartbeat keys. */
+  aliases?: Record<string, string> | null;
 }
 
 export function assembleClusterView(args: AssembleClusterViewArgs): ClusterView;
@@ -46,6 +60,14 @@ export interface ClusterEntityDeps {
   heartbeatReader?: (opts: { logPath?: string }) => Record<string, string>;
   /** Local event-log path forwarded to the heartbeat reader. */
   logPath?: string;
+  /** CTL-1092: live per-host capacity reader, forwarded to assembleClusterView. */
+  capacityReader?:
+    | ((host: string) => { maxParallel?: number; inFlightCount?: number; freeSlots?: number } | null | undefined)
+    | null;
+  /** CTL-1092: host alias map { oldName → pinnedName }, forwarded to assembleClusterView. */
+  aliases?: Record<string, string> | null;
+  /** CTL-1095: live drain reader, forwarded to assembleClusterView. */
+  drainReader?: ((host: string) => { draining?: boolean; inFlightCount?: number } | null | undefined) | null;
   /** Injected clock for tests. */
   now?: () => number;
 }

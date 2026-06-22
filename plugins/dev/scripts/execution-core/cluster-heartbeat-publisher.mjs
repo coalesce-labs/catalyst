@@ -11,6 +11,8 @@
 // signal directory (same predicate defaultOwnedTicketsForHost uses for the
 // fallback path), avoiding a circular dependency on recovery.mjs.
 
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { readWorkerSignals, TERMINAL } from "./signal-reader.mjs";
 import {
   getClusterHosts,
@@ -20,6 +22,24 @@ import {
   log,
 } from "./config.mjs";
 import { publishHeartbeatSync } from "./cluster-heartbeat-sync.mjs";
+
+// readLocalMaxParallel — this host's live parallel-slot count from state.json
+// (the autotuned value the scheduler reads via readMaxParallel). CTL-1092: the
+// heartbeat carries it so the monitor's cluster view can show per-host capacity.
+// Read directly (not via scheduler.mjs) to keep this publisher a leaf module —
+// importing the scheduler would pull its whole dispatch/recovery graph and risk
+// a cycle. Fail-open: any miss → null, so the heartbeat still publishes liveness
+// without claiming a slot count it can't prove (the monitor treats null as "no
+// data", never an error).
+function readLocalMaxParallel(orchDir) {
+  if (!orchDir) return null;
+  try {
+    const n = JSON.parse(readFileSync(join(orchDir, "state.json"), "utf8"))?.maxParallel;
+    return Number.isInteger(n) && n > 0 ? n : null;
+  } catch {
+    return null;
+  }
+}
 
 // localInFlightTickets — return the in-flight ticket IDs for `hostName` from
 // the local worker signal directory. This is the same predicate as the fallback
@@ -58,6 +78,9 @@ export function startLivenessPublisher({
   anchorIssue = getLivenessAnchorIssue(),
   orchDir,
   ownedTickets = () => localInFlightTickets(self, { orchDir }),
+  // CTL-1092: this host's live slot count, published with each heartbeat so the
+  // monitor cluster view can show per-host capacity. Injectable for tests.
+  currentMaxParallel = () => readLocalMaxParallel(orchDir),
   publish = (args) => publishHeartbeatSync(args),
   logger = log, // CTL-1251: injectable so tests can assert publish-outcome logging
 } = {}) {
@@ -86,7 +109,12 @@ export function startLivenessPublisher({
   let consecutiveFailures = 0;
   const tick = () => {
     try {
-      const result = publish({ anchorIssue, host: self, inFlightTickets: ownedTickets() });
+      const result = publish({
+        anchorIssue,
+        host: self,
+        inFlightTickets: ownedTickets(),
+        maxParallel: currentMaxParallel(),
+      });
       if (result && result.ok === false) {
         if (consecutiveFailures === 0) {
           logger.warn(

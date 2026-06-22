@@ -77,20 +77,28 @@ const READ_ATTACHMENTS_QUERY = `query ReadFence($id: String!) {
 
 // parseHeartbeatMetadata — normalise an attachment's metadata into the flat
 // liveness record callers consume. `in_flight_tickets` is normalised to a
-// string array (non-string entries filtered). Exported for unit coverage.
+// string array (non-string entries filtered). CTL-1092: adds max_parallel
+// (finite int or null) and in_flight_count (int ≥ 0). Exported for unit coverage.
 export function parseHeartbeatMetadata(metadata) {
   const m = metadata ?? {};
   const raw = m.in_flight_tickets;
   const tickets = Array.isArray(raw) ? raw.filter((t) => typeof t === "string") : [];
+  const maxP = m.max_parallel;
+  const maxParallel = Number.isInteger(maxP) && maxP > 0 ? maxP : null;
+  const rawCount = m.in_flight_count;
+  const inFlightCount = Number.isInteger(rawCount) && rawCount >= 0 ? rawCount : tickets.length;
   return {
     host: m.host ?? null,
     last_seen: m.last_seen ?? null,
     in_flight_tickets: tickets,
+    max_parallel: maxParallel,
+    in_flight_count: inFlightCount,
   };
 }
 
 // readPeerHeartbeats — read all `catalyst://heartbeat/*` attachments from the
-// anchor issue. Returns { [host]: { host, last_seen, in_flight_tickets } }.
+// anchor issue. Returns { [host]: { host, last_seen, in_flight_tickets,
+// max_parallel, in_flight_count } } (the full parseHeartbeatMetadata record).
 // Best-effort: a missing/erroring anchor yields {}. The caller filters out
 // `self` to avoid treating its own attachment as a peer.
 export async function readPeerHeartbeats({ anchorIssue }, { post = defaultPost } = {}) {
@@ -121,13 +129,19 @@ const WRITE_ATTACHMENT_MUTATION = `mutation UpsertFence($input: AttachmentCreate
 // (resolve issue UUID, then attachmentCreate UPSERT). Returns the parsed
 // heartbeat record written, throwing on a resolution miss or success:false.
 export async function publishHeartbeat(
-  { anchorIssue, host, inFlightTickets = [] },
+  { anchorIssue, host, inFlightTickets = [], maxParallel = null },
   { post = defaultPost, now } = {},
 ) {
   const issueId = await resolveIssueId(anchorIssue, { post });
   if (!issueId) throw new Error(`cluster-heartbeat: no issue found for anchor ${anchorIssue}`);
   const last_seen = now ? now() : new Date().toISOString();
-  const metadata = { host, last_seen, in_flight_tickets: inFlightTickets };
+  const metadata = {
+    host,
+    last_seen,
+    in_flight_tickets: inFlightTickets,
+    max_parallel: maxParallel ?? null,
+    in_flight_count: inFlightTickets.length,
+  };
   const data = await post(WRITE_ATTACHMENT_MUTATION, {
     input: {
       issueId,
@@ -148,13 +162,13 @@ export async function publishHeartbeat(
 // cluster-heartbeat-sync.mjs is the in-process wrapper that spawnSync's
 // `node cluster-heartbeat.mjs <cmd> …`.
 //
-//   publish <anchor> <host> <ticketsCSV>  → stdout JSON record; exit 0
-//   read <anchor>                          → stdout JSON map; exit 0
+//   publish <anchor> <host> <ticketsCSV> [maxParallel]  → stdout JSON record; exit 0
+//   read <anchor>                                        → stdout JSON map; exit 0
 export async function runCli(argv, { post = defaultPost, now } = {}) {
   const [cmd, ...rest] = argv;
   switch (cmd) {
     case "publish": {
-      const [anchor, host, ticketsCsv] = rest;
+      const [anchor, host, ticketsCsv, maxParallelRaw] = rest;
       const inFlightTickets =
         ticketsCsv
           ? ticketsCsv
@@ -162,8 +176,13 @@ export async function runCli(argv, { post = defaultPost, now } = {}) {
               .map((t) => t.trim())
               .filter(Boolean)
           : [];
+      // CTL-1092: optional 4th arg — this host's live max_parallel (slot count).
+      // Absent/blank/non-positive-int → null (back-compat: pre-CTL-1092 callers
+      // pass only 3 args, so the heartbeat still carries max_parallel: null).
+      const mp = maxParallelRaw != null && maxParallelRaw !== "" ? Number(maxParallelRaw) : null;
+      const maxParallel = Number.isInteger(mp) && mp > 0 ? mp : null;
       const rec = await publishHeartbeat(
-        { anchorIssue: anchor, host, inFlightTickets },
+        { anchorIssue: anchor, host, inFlightTickets, maxParallel },
         { post, now },
       );
       process.stdout.write(JSON.stringify(rec) + "\n");
@@ -178,7 +197,7 @@ export async function runCli(argv, { post = defaultPost, now } = {}) {
     default:
       process.stderr.write(
         `cluster-heartbeat.mjs: unknown subcommand: ${cmd ?? "(none)"}\n` +
-          "usage: cluster-heartbeat.mjs <publish <anchor> <host> <ticketsCSV> | read <anchor>>\n",
+          "usage: cluster-heartbeat.mjs <publish <anchor> <host> <ticketsCSV> [maxParallel] | read <anchor>>\n",
       );
       return 1;
   }

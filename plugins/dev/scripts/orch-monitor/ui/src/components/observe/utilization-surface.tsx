@@ -48,6 +48,8 @@ import { Sparkline } from "@/components/sparkline";
 import { fmtRelativeDuration } from "@/lib/formatters";
 import { typeSymbol } from "@/board/type-icon";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
+import { toCapacitySteps } from "@/components/observe/capacity-timeline";
+import type { CapHistory, CapSeries } from "@/components/observe/capacity-timeline";
 
 /** The active-time payload from /api/otel/active-time (mirrors otel-queries
  *  ActiveTimeRatio). */
@@ -87,6 +89,9 @@ export function UtilizationSurface() {
   // CTL-1040: throughput by work type [loki].
   const [throughputByType, setThroughputByType] = useState<Record<string, number> | null>(null);
   const [throughputByTypeReachable, setThroughputByTypeReachable] = useState<boolean>(true);
+
+  // CTL-1092 (Phase 5): per-node capacity history [events].
+  const [capacityHistory, setCapacityHistory] = useState<CapHistory>({});
 
   // Health probe (10s TTL) — drives the ChartCard ladder for the [loki]/[prom]
   // panels. The board-backed hero/badge/idle-list never read it.
@@ -174,15 +179,29 @@ export function UtilizationSurface() {
       }
     }
 
+    // CTL-1092 (Phase 5): capacity history from the event log.
+    async function loadCapacityHistory() {
+      try {
+        const resp = await fetch("/api/capacity-history");
+        if (!resp.ok || !alive) return;
+        const body = (await resp.json()) as { data: CapHistory | null };
+        setCapacityHistory(body.data ?? {});
+      } catch {
+        /* keep last-good data on transient failure */
+      }
+    }
+
     void loadBoard();
     void loadErrors();
     void loadActiveTime();
     void loadThroughputByType();
+    void loadCapacityHistory();
     const id = setInterval(() => {
       void loadBoard();
       void loadErrors();
       void loadActiveTime();
       void loadThroughputByType();
+      void loadCapacityHistory();
     }, refreshIntervalMs(range));
     return () => {
       alive = false;
@@ -193,6 +212,11 @@ export function UtilizationSurface() {
   // ── derivations (all PURE, from the live autotuned config) ──────────────────
   const occPct = occupancyPct(config.inFlight, config.maxParallel);
   const path = pathology(config.freeSlots, queueLen);
+  // CTL-1092 (Phase 5): stepped capacity series for the timeline chart.
+  const capacitySeries: CapSeries = useMemo(
+    () => toCapacitySteps(capacityHistory),
+    [capacityHistory],
+  );
 
   const idleRows = useMemo(() => {
     const inputs: IdleTicketInput[] = tickets.map((t) => ({
@@ -459,19 +483,39 @@ export function UtilizationSurface() {
           })()}
         </ChartCard>
 
-        {/* P_occupancy OCCUPANCY TIMELINE [events] — LOCKED (OBS-15), full-width
-            (bottom). Will be a stepped area of phase.scheduler.parallelism-sampled
-            (bg_count vs maxParallel_current) + autotune-gauge against the SAMPLED
-            autotune capacity line (never a static config read). Until OBS-15: a
-            full-width dashed locked card with the dimmed stepped-area skeleton. */}
+        {/* P_occupancy OCCUPANCY TIMELINE [events] — CTL-1092 Phase 5, unlocked.
+            Shows per-node node.capacity.changed steps (when, old→new, reason)
+            from /api/capacity-history. Empty = no autotune moves this month. */}
         <ChartCard
           title="Occupancy timeline"
           dataSource="[events]"
           health={health}
-          locked={{ reason: "needs event-log reader", ticket: "OBS-15" }}
+          hasData={Object.keys(capacitySeries).length > 0}
           className="lg:col-span-2"
           bodyClassName="min-h-[180px] h-[min(24vh,200px)] p-3"
-        />
+        >
+          <div className="flex h-full flex-col overflow-y-auto">
+            <div className="grid grid-cols-[auto_1fr_auto_1fr] gap-x-3 border-b border-border/40 pb-1 text-[10px] font-medium uppercase tracking-wide text-muted/70">
+              <span>Host</span>
+              <span>Time</span>
+              <span>Capacity</span>
+              <span>Reason</span>
+            </div>
+            {Object.entries(capacitySeries).flatMap(([host, steps]) =>
+              steps.map((s, i) => (
+                <div
+                  key={`${host}-${i}`}
+                  className="grid grid-cols-[auto_1fr_auto_1fr] items-center gap-x-3 border-b border-border/20 py-1 text-[11px] tabular-nums"
+                >
+                  <span className="rounded bg-surface-3 px-1 font-mono text-[10px] text-muted">{host}</span>
+                  <span className="truncate text-muted">{s.ts.replace("T", " ").replace("Z", "")}</span>
+                  <span className="font-mono font-semibold text-fg">{s.old}→{s.value}</span>
+                  <span className="truncate text-muted">{s.reason}</span>
+                </div>
+              ))
+            )}
+          </div>
+        </ChartCard>
       </div>
     </div>
   );

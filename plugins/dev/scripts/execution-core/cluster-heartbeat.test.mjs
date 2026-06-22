@@ -35,7 +35,7 @@ describe("heartbeatUrl", () => {
 describe("parseHeartbeatMetadata", () => {
   test("normalises in_flight_tickets to an array", () => {
     expect(parseHeartbeatMetadata({ host: "mini", last_seen: "2026-06-13T01:00:00Z" }))
-      .toEqual({ host: "mini", last_seen: "2026-06-13T01:00:00Z", in_flight_tickets: [] });
+      .toMatchObject({ host: "mini", last_seen: "2026-06-13T01:00:00Z", in_flight_tickets: [] });
     expect(parseHeartbeatMetadata({ in_flight_tickets: ["CTL-1"] }).in_flight_tickets)
       .toEqual(["CTL-1"]);
   });
@@ -47,12 +47,14 @@ describe("parseHeartbeatMetadata", () => {
   });
 
   test("missing/null metadata returns all-null record with empty tickets", () => {
-    expect(parseHeartbeatMetadata(undefined)).toEqual({
+    expect(parseHeartbeatMetadata(undefined)).toMatchObject({
       host: null,
       last_seen: null,
       in_flight_tickets: [],
+      max_parallel: null,
+      in_flight_count: 0,
     });
-    expect(parseHeartbeatMetadata(null)).toEqual({
+    expect(parseHeartbeatMetadata(null)).toMatchObject({
       host: null,
       last_seen: null,
       in_flight_tickets: [],
@@ -207,6 +209,34 @@ describe("runCli", () => {
     );
     expect(code).toBe(0);
     expect(JSON.parse(out).in_flight_tickets).toEqual([]);
+  });
+
+  test("CTL-1092 publish: 4th arg sets max_parallel (positive int)", async () => {
+    const post = async (q) => {
+      if (q.includes("ResolveIssue")) return { issue: { id: "uuid-x" } };
+      return { attachmentCreate: { success: true, attachment: {} } };
+    };
+    const { code, out } = await captureStdout(() =>
+      runCli(["publish", "CTL-9999", "mini", "CTL-1", "3"], { post, now: () => "2026-06-13T01:00:00Z" }),
+    );
+    expect(code).toBe(0);
+    expect(JSON.parse(out).max_parallel).toBe(3);
+  });
+
+  test("CTL-1092 publish: absent/blank/non-positive 4th arg → max_parallel null (back-compat)", async () => {
+    const post = async (q) => {
+      if (q.includes("ResolveIssue")) return { issue: { id: "uuid-x" } };
+      return { attachmentCreate: { success: true, attachment: {} } };
+    };
+    const run = async (argv) => {
+      const { out } = await captureStdout(() => runCli(argv, { post, now: () => "t" }));
+      return JSON.parse(out).max_parallel;
+    };
+    expect(await run(["publish", "CTL-9999", "mini", "CTL-1"])).toBe(null); // 3-arg form
+    expect(await run(["publish", "CTL-9999", "mini", "CTL-1", ""])).toBe(null);
+    expect(await run(["publish", "CTL-9999", "mini", "CTL-1", "0"])).toBe(null);
+    expect(await run(["publish", "CTL-9999", "mini", "CTL-1", "-2"])).toBe(null);
+    expect(await run(["publish", "CTL-9999", "mini", "CTL-1", "abc"])).toBe(null);
   });
 
   test("read: prints JSON map and exits 0", async () => {
