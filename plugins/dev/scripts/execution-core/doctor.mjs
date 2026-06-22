@@ -1220,6 +1220,89 @@ export function parseArgs(argv) {
   return { json, expectedBotUserId, help };
 }
 
+// defaultReaperLastExit — LastExitStatus of the orphan-sweep LaunchAgent, or null.
+// `launchctl list <label>` prints a dict containing `"LastExitStatus" = N;`.
+function defaultReaperLastExit() {
+  try {
+    const r = spawnSync("launchctl", ["list", "ai.coalesce.catalyst-orphan-sweep"], {
+      encoding: "utf8",
+      timeout: 5_000,
+    });
+    if (r.status !== 0 || !r.stdout) return null;
+    const m = r.stdout.match(/"LastExitStatus"\s*=\s*(-?\d+)/);
+    return m ? parseInt(m[1], 10) : null;
+  } catch {
+    return null;
+  }
+}
+
+// checkReaper (CTL-1306) — the orphan-sweep worktree/cache reaper (CTL-1030) must
+// be installed AND its baked program path must still exist. The original
+// regression baked an ephemeral worktree path that was later deleted, so the
+// LaunchAgent exit-127'd silently every interval for days while debris piled up.
+// This check makes that failure loud:
+//   • plist absent           → WARN  (reaper not installed; debris won't be reaped)
+//   • baked path missing      → FAIL  (the silent-death signature; reinstall)
+//   • last exit 127           → FAIL  (program path unresolved)
+//   • other non-zero exit     → WARN  (check the log)
+//   • path present + exit ok  → PASS
+export function checkReaper(deps = {}) {
+  const {
+    plistPath = resolve(
+      homedir(), "Library", "LaunchAgents", "ai.coalesce.catalyst-orphan-sweep.plist",
+    ),
+    readFile = (p) => readFileSync(p, "utf8"),
+    fileExists = (p) => existsSync(p),
+    lastExit = defaultReaperLastExit,
+  } = deps;
+  const checks = [];
+
+  let xml;
+  try {
+    xml = readFile(plistPath);
+  } catch {
+    checks.push(mkCheck(
+      "reaper-installed", STATUS.WARN,
+      "orphan-sweep reaper not installed — worktree/cache debris won't be reclaimed; run 'catalyst-stack install-services'",
+    ));
+    return checks;
+  }
+
+  const m = xml.match(/<string>([^<]*orphan-sweep\.sh)<\/string>/);
+  const baked = m ? m[1] : null;
+  if (!baked) {
+    checks.push(mkCheck(
+      "reaper-installed", STATUS.WARN,
+      `reaper plist present but no orphan-sweep.sh program path found in ${plistPath}`,
+    ));
+    return checks;
+  }
+
+  if (!fileExists(baked)) {
+    checks.push(mkCheck(
+      "reaper-path", STATUS.FAIL,
+      `reaper points at a path that no longer exists (CTL-1306 silent-death signature): ${baked} — reinstall from the pristine clone ('catalyst-stack install-services')`,
+    ));
+    return checks;
+  }
+
+  const exit = lastExit();
+  if (exit === 127) {
+    checks.push(mkCheck(
+      "reaper-health", STATUS.FAIL,
+      "reaper last exited 127 (program path unresolved) — reinstall from the pristine clone",
+    ));
+  } else if (typeof exit === "number" && exit !== 0) {
+    checks.push(mkCheck(
+      "reaper-health", STATUS.WARN,
+      `reaper last exited ${exit} — check ~/catalyst/orphan-sweep.log`,
+    ));
+  } else {
+    checks.push(mkCheck("reaper-health", STATUS.PASS, `reaper installed and healthy (${baked})`));
+  }
+  return checks;
+}
+
 // runDoctor — orchestrate all checks, render, and return the fail count.
 export async function runDoctor(opts = {}) {
   const {
@@ -1244,6 +1327,7 @@ export async function runDoctor(opts = {}) {
     () => checkWebhookIngestion(), // CTL-1284: multiHost member ingests webhooks; single-host does not
     () => checkThoughts(), // CTL-1293: member thoughts repo provisioned + non-foreign primary
     () => checkClaudeSettings(), // CTL-1231: member settings.json pins host identity + OTLP endpoint
+    () => checkReaper(), // CTL-1306: orphan-sweep reaper installed + baked path still exists (not dead-127)
   ];
 
   const fns = checkFns ?? defaultChecks;

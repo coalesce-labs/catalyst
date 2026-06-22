@@ -22,8 +22,8 @@
 #   catalyst-stack uninstall-services
 #   catalyst-stack services-status
 #
-# install-services (CTL-1166, CTL-1236, CTL-1285):
-#   Install THREE launchd LaunchAgents:
+# install-services (CTL-1166, CTL-1236, CTL-1285, CTL-1306):
+#   Install FOUR launchd LaunchAgents:
 #   1. ai.coalesce.catalyst-stack — runs 'catalyst-stack start' at login (RunAtLoad)
 #      and every --interval seconds (default 600) as an idempotent keep-alive.
 #   2. ai.coalesce.catalyst-thoughts-sync — runs thoughts-pull-sync.sh at login
@@ -37,10 +37,15 @@
 #      job exit (no AbandonProcessGroup) ~4s later — the bug that silently blinded
 #      the uptime dashboard. When this agent is installed, start_shipper/stop_shipper
 #      defer to launchd.
-#   --print emits all three plists to stdout without touching launchctl (review / dry-run).
+#   4. ai.coalesce.catalyst-orphan-sweep — hourly worktree/cache reaper (CTL-1030),
+#      installed via install-orphan-sweep.sh which bakes the canonical pristine-clone
+#      path (never an ephemeral worktree) so it can't silently die when a checkout is
+#      deleted (CTL-1306). This is why a joined member gets the reaper: catalyst-join
+#      runs `catalyst-stack install-services`.
+#   --print emits all plists to stdout without touching launchctl (review / dry-run).
 #   macOS only.
-#   uninstall-services unloads + removes all three agents (leaves running daemons up).
-#   services-status shows whether all three agents are installed and loaded.
+#   uninstall-services unloads + removes all four agents (leaves running daemons up).
+#   services-status shows whether the agents are installed and loaded.
 #
 # --proxy:
 #   Opt-in to mitmproxy and set HTTPS_PROXY / NODE_USE_ENV_PROXY /
@@ -966,6 +971,7 @@ cmd_install_services() {
     render_stack_plist "$cmd" "$interval" "$host_name"
     render_thoughts_sync_plist "$sync_cmd" "$sync_interval"
     render_shipper_plist "$shipper_launcher" "$host_name"
+    [[ -x "${SCRIPT_DIR}/install-orphan-sweep.sh" ]] && bash "${SCRIPT_DIR}/install-orphan-sweep.sh" --print-only 2>/dev/null || true
     return 0
   fi
 
@@ -1011,6 +1017,19 @@ cmd_install_services() {
     fail "launchctl bootstrap failed for $SHIPPER_AGENT_PLIST"
   fi
 
+  # CTL-1306: orphan-sweep reaper (4th agent). Delegated to install-orphan-sweep.sh,
+  # which bakes the canonical pristine-clone path (never an ephemeral worktree) and is
+  # idempotent. Non-fatal — a reaper hiccup must not block the core stack services.
+  if [[ -x "${SCRIPT_DIR}/install-orphan-sweep.sh" ]]; then
+    if bash "${SCRIPT_DIR}/install-orphan-sweep.sh" 2>&1 | sed 's/^/  /'; then
+      log "loaded ai.coalesce.catalyst-orphan-sweep — hourly worktree/cache reaper"
+    else
+      warn "orphan-sweep install skipped/failed (continuing) — install it from the pristine clone"
+    fi
+  else
+    warn "install-orphan-sweep.sh not found next to catalyst-stack — reaper not installed"
+  fi
+
   log "verify: catalyst-stack services-status   |   logs: $STACK_AGENT_LOG / $SHIPPER_LOG"
 }
 
@@ -1031,6 +1050,10 @@ cmd_uninstall_services() {
     log "removed $SYNC_AGENT_LABEL ($SYNC_AGENT_PLIST)"
   else
     log "$SYNC_AGENT_LABEL not installed (no $SYNC_AGENT_PLIST)"
+  fi
+  # CTL-1306: orphan-sweep reaper (delegated; idempotent, safe if not installed).
+  if [[ -x "${SCRIPT_DIR}/install-orphan-sweep.sh" ]]; then
+    bash "${SCRIPT_DIR}/install-orphan-sweep.sh" --uninstall 2>&1 | sed 's/^/  /' || true
   fi
   if [[ -f "$SHIPPER_AGENT_PLIST" ]]; then
     launchctl bootout "$guid" "$SHIPPER_AGENT_PLIST" 2>/dev/null || true

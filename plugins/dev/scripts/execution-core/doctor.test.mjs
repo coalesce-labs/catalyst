@@ -17,6 +17,7 @@ import {
   checkWebhookIngestion,
   checkThoughts,
   checkClaudeSettings,
+  checkReaper,
   summarize,
   renderJson,
   renderHuman,
@@ -984,5 +985,68 @@ describe("runDoctor exit code", () => {
     expect(order).toContain("b");
     expect(order).toContain("c");
     expect(code).toBe(1);
+  });
+});
+
+// ─── checkReaper (CTL-1306) ──────────────────────────────────────────────────
+
+const reaperPlist = (path) =>
+  `<plist><dict><key>ProgramArguments</key><array><string>/bin/bash</string><string>${path}</string></array></dict></plist>`;
+
+describe("checkReaper", () => {
+  it("WARNs when the reaper LaunchAgent is not installed", () => {
+    const checks = checkReaper({
+      readFile: () => { throw new Error("ENOENT"); },
+    });
+    expect(checks).toHaveLength(1);
+    expect(checks[0].name).toBe("reaper-installed");
+    expect(checks[0].status).toBe(STATUS.WARN);
+  });
+
+  it("FAILs when the baked program path no longer exists (CTL-1306 silent-death)", () => {
+    const dead = "/private/tmp/pr1827-wt/plugins/dev/scripts/orphan-sweep.sh";
+    const checks = checkReaper({
+      readFile: () => reaperPlist(dead),
+      fileExists: (p) => p !== dead,
+      lastExit: () => 127,
+    });
+    expect(checks).toHaveLength(1);
+    expect(checks[0].name).toBe("reaper-path");
+    expect(checks[0].status).toBe(STATUS.FAIL);
+    expect(checks[0].detail).toContain(dead);
+  });
+
+  it("FAILs when the baked path exists but last exit was 127", () => {
+    const p = "/Users/x/catalyst/plugin-source/plugins/dev/scripts/orphan-sweep.sh";
+    const checks = checkReaper({
+      readFile: () => reaperPlist(p),
+      fileExists: () => true,
+      lastExit: () => 127,
+    });
+    expect(checks[0].name).toBe("reaper-health");
+    expect(checks[0].status).toBe(STATUS.FAIL);
+  });
+
+  it("WARNs on a non-zero, non-127 exit", () => {
+    const p = "/Users/x/catalyst/plugin-source/plugins/dev/scripts/orphan-sweep.sh";
+    const checks = checkReaper({
+      readFile: () => reaperPlist(p),
+      fileExists: () => true,
+      lastExit: () => 2,
+    });
+    expect(checks[0].name).toBe("reaper-health");
+    expect(checks[0].status).toBe(STATUS.WARN);
+  });
+
+  it("PASSes when installed, baked path exists, and last exit is clean", () => {
+    const p = "/Users/x/catalyst/plugin-source/plugins/dev/scripts/orphan-sweep.sh";
+    const checks = checkReaper({
+      readFile: () => reaperPlist(p),
+      fileExists: () => true,
+      lastExit: () => 0,
+    });
+    expect(checks[0].name).toBe("reaper-health");
+    expect(checks[0].status).toBe(STATUS.PASS);
+    expect(checks[0].detail).toContain(p);
   });
 });

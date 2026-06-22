@@ -17,23 +17,33 @@ Telemetry: one `emit-otel-event.sh` call per reclaimed resource (`catalyst.sweep
 
 ## Installation
 
-### 1. Load the launchd job
+> **Golden rule (CTL-1306): install from the pristine clone, never a worktree.**
+> The LaunchAgent bakes an absolute path to `orphan-sweep.sh` and that path is
+> permanent. It MUST point at the main-only pristine clone `~/catalyst/plugin-source`
+> (what `~/.catalyst/bin/*` and `catalyst.orchestration.pluginDirs` resolve to) —
+> never an ephemeral checkout (a git worktree under `~/catalyst/wt/` or
+> `.claude/worktrees/`, or a `/tmp` dir). A worktree path can be deleted, after
+> which the job exit-127s silently every interval and debris piles up unnoticed —
+> the original regression that killed the reaper on two of three hosts for ~10 days.
+
+### 1. Install the launchd job
+
+Normally the reaper is installed automatically as the 4th agent by
+`catalyst-stack install-services` (which `catalyst-join.sh` runs during
+onboarding), so a joined member gets it for free. To (re)install manually, run
+the installer **from the pristine clone**:
 
 ```bash
-# Copy and edit the plist template
-cp plugins/dev/scripts/orch-monitor/dist/ai.coalesce.catalyst-orphan-sweep.plist \
-   ~/Library/LaunchAgents/
-
-# Edit the file and replace placeholders:
-#   REPLACE_WITH_ABSOLUTE  →  absolute path to orphan-sweep.sh
-#   REPLACE_HOME           →  your home directory (e.g. /Users/you)
-
-# Load it
-launchctl load -w ~/Library/LaunchAgents/ai.coalesce.catalyst-orphan-sweep.plist
-
-# Verify it registered
-launchctl list | grep orphan-sweep
+bash ~/catalyst/plugin-source/plugins/dev/scripts/install-orphan-sweep.sh
+launchctl list | grep orphan-sweep   # LastExit must be 0
 ```
+
+`install-orphan-sweep.sh` is idempotent, prefers the registered `pluginDirs`
+clone, and **refuses** to bake a linked-worktree or `/tmp` path. Preview with
+`--print-only`; remove with `--uninstall`.
+
+If `~/catalyst/plugin-source` is stale (e.g. a non-daemon host with no broker
+auto-pull), fast-forward it first: `bash <repo>/plugins/dev/scripts/setup-plugin-source.sh`.
 
 ### 2. Verify a clean run
 
@@ -63,6 +73,22 @@ launchctl unload ~/Library/LaunchAgents/ai.coalesce.catalyst-orphan-sweep.plist
 | `SWEEP_LINEAR_TEAMS` | `CTL ADV` | Teams to query for Done tickets (vector 2) |
 | `SWEEP_DRY_RUN` | unset | Set to `1` or use `--dry-run` flag |
 | `SWEEP_RUN_ID` | timestamp | Tags all telemetry for one run |
+
+## Health check & troubleshooting
+
+`catalyst-doctor` asserts the reaper is healthy (CTL-1306): `reaper-installed`
+(WARN if the LaunchAgent is absent), `reaper-path` (FAIL if the baked program path
+no longer exists — the silent-death signature), and `reaper-health` (FAIL on a
+`LastExit` of 127).
+
+- **`launchctl list | grep orphan-sweep` shows exit 127**, log full of
+  `No such file or directory` → the baked path was deleted. Re-point from the
+  pristine clone (Installation above). This is the CTL-1306 failure mode.
+- **Debris not shrinking** → SAFE removals are capped per run
+  (`maxRemovalsPerRun`, default 10). For a one-shot drain raise it:
+  `SWEEP_MAX_REMOVALS=50 orphan-sweep.sh`. Remaining trees are protected
+  SALVAGE/dirty — triage by hand, never `rm -rf` (that also leaves stale
+  `.git/worktrees` admin entries; use `git worktree remove` + `git worktree prune`).
 
 ## Relationship to Other Components
 

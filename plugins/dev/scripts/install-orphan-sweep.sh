@@ -20,7 +20,62 @@ while [[ -L "$_SRC" ]]; do _SRC="$(readlink "$_SRC")"; done
 SCRIPT_DIR="$(cd "$(dirname "$_SRC")" && pwd)"
 unset _SRC
 
-TEMPLATE="${SCRIPT_DIR}/orch-monitor/dist/ai.coalesce.catalyst-orphan-sweep.plist"
+# ─── CTL-1306: bake the CANONICAL pristine-clone path, never an ephemeral one ──
+#
+# The plist's program path is permanent. The original bug baked ${SCRIPT_DIR}
+# verbatim, so installing from a throwaway worktree (e.g. /private/tmp/pr1827-wt
+# or ~/catalyst/wt/<TICKET>) wrote a path that later got deleted — the reaper
+# then exit-127'd silently every interval, fleet-wide. Fix:
+#   1. Prefer the registered pristine clone (catalyst.orchestration.pluginDirs →
+#      the main-only ~/catalyst/plugin-source that wrappers + daemons resolve to).
+#   2. HARD-REFUSE to bake a path inside a *linked git worktree* or a temp dir —
+#      those are exactly the paths that vanish. A real clone (plugin-source, a
+#      main checkout) has git-dir == git-common-dir; a linked worktree does not.
+#
+# CATALYST_LAYER2_CONFIG_FILE overridable for tests; CATALYST_FORCE_BAKE_DIR lets
+# tests inject a resolved dir without a real config/clone.
+
+# _pristine_scripts_dir: the scripts dir of the registered pristine clone, or "".
+_pristine_scripts_dir() {
+  local cfg="${CATALYST_LAYER2_CONFIG_FILE:-${HOME}/.config/catalyst/config.json}"
+  [[ -f "$cfg" ]] && command -v jq >/dev/null 2>&1 || return 0
+  local pd
+  pd="$(jq -r '.catalyst.orchestration.pluginDirs // empty' "$cfg" 2>/dev/null || true)"
+  # pluginDirs points at <clone>/plugins/dev; orphan-sweep.sh lives under scripts/.
+  [[ -n "$pd" && -f "${pd}/scripts/orphan-sweep.sh" ]] && echo "${pd}/scripts"
+}
+
+# _is_ephemeral_dir <dir>: true if the dir is a linked git worktree or under a
+# temp root — i.e. a path that can be deleted out from under the LaunchAgent.
+# A linked worktree's git dir is always <main>/.git/worktrees/<name>; a real
+# clone's is <clone>/.git — so the /worktrees/ segment cleanly distinguishes them.
+_is_ephemeral_dir() {
+  local d="$1"
+  case "$d" in
+    /private/tmp/*|/tmp/*|*/.Trash/*) return 0 ;;
+  esac
+  command -v git >/dev/null 2>&1 || return 1
+  local gd
+  gd="$(git -C "$d" rev-parse --absolute-git-dir 2>/dev/null)" || return 1
+  case "$gd" in
+    */worktrees/*) return 0 ;;
+  esac
+  return 1
+}
+
+# BAKE_DIR: prefer the pristine clone; else SCRIPT_DIR. Refuse ephemeral targets.
+BAKE_DIR="${CATALYST_FORCE_BAKE_DIR:-$(_pristine_scripts_dir)}"
+[[ -z "$BAKE_DIR" ]] && BAKE_DIR="$SCRIPT_DIR"
+if _is_ephemeral_dir "$BAKE_DIR"; then
+  echo "install-orphan-sweep.sh: refusing to install from an ephemeral path (CTL-1306):" >&2
+  echo "  $BAKE_DIR" >&2
+  echo "  A linked worktree / temp dir can be deleted, which silently kills the reaper." >&2
+  echo "  Run from the pristine clone (e.g. ~/catalyst/plugin-source/plugins/dev/scripts)," >&2
+  echo "  or register catalyst.orchestration.pluginDirs in ~/.config/catalyst/config.json." >&2
+  exit 1
+fi
+
+TEMPLATE="${BAKE_DIR}/orch-monitor/dist/ai.coalesce.catalyst-orphan-sweep.plist"
 DEST="${HOME}/Library/LaunchAgents/ai.coalesce.catalyst-orphan-sweep.plist"
 LABEL="ai.coalesce.catalyst-orphan-sweep"
 
@@ -92,7 +147,7 @@ _substitute() {
   local interval
   interval="$(_interval_seconds)"
   sed \
-    -e "s|REPLACE_WITH_ABSOLUTE|${SCRIPT_DIR}|g" \
+    -e "s|REPLACE_WITH_ABSOLUTE|${BAKE_DIR}|g" \
     -e "s|REPLACE_HOME|${HOME}|g" \
     -e "s|REPLACE_START_INTERVAL|${interval}|g" \
     "$TEMPLATE"
