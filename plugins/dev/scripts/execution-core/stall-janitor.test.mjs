@@ -888,10 +888,32 @@ describe("classifyTerminalSignalGc (CTL-1242 J4)", () => {
     expect(d.reason).toBe("live-session-in-worktree");
   });
 
-  test("skip when in-flight (active worker signal)", () => {
+  // CTL-1315: a Linear-terminal ticket has no legitimately-advancing worker, so a
+  // stale mid-pipeline signal (e.g. a stranded triage-done dir) must NOT block its
+  // reap. The live-worker protection is liveSessionInWorktree (checked first), not
+  // the stale inFlight slot-accounting bit.
+  test("gc when terminal + in-flight but no live session (stale triage-done)", () => {
     const d = classifyTerminalSignalGc({ ...base, inFlight: true });
+    expect(d.action).toBe("gc");
+    expect(d.reason).toBe("terminal-or-merged-no-live-session");
+  });
+
+  test("skip when terminal + in-flight AND a live session is in the worktree", () => {
+    const d = classifyTerminalSignalGc({ ...base, inFlight: true, liveSessionInWorktree: true });
     expect(d.action).toBe("skip");
-    expect(d.reason).toBe("in-flight");
+    expect(d.reason).toBe("live-session-in-worktree");
+  });
+
+  test("skip when NOT terminal even if in-flight (non-terminal mid-advance never reaped)", () => {
+    const d = classifyTerminalSignalGc({ ...base, linearTerminalOrMerged: false, inFlight: true });
+    expect(d.action).toBe("skip");
+    expect(d.reason).toBe("not-terminal-or-merged");
+  });
+
+  test("skip already-gc'd even when terminal + in-flight (marker still wins)", () => {
+    const d = classifyTerminalSignalGc({ ...base, inFlight: true, alreadyGcd: true });
+    expect(d.action).toBe("skip");
+    expect(d.reason).toBe("already-gc'd");
   });
 
   test("skip when already GC'd this worker-dir lifetime", () => {
@@ -970,6 +992,18 @@ describe("runStallJanitorPass — J4 enforce (CTL-1242)", () => {
     });
     await runStallJanitorPass(makeGcOpts(world, { mode: "enforce", gcd }));
     expect(gcd).toEqual([]);
+  });
+
+  test("terminal + in-flight (stale signal) + no live session: GCs the dir (CTL-1315)", async () => {
+    const events = [];
+    const gcd = [];
+    const world = makeGcWorld({
+      gcCandidates: [{ ...makeGcWorld().gcCandidates[0], inFlight: true }],
+    });
+    const res = await runStallJanitorPass(makeGcOpts(world, { mode: "enforce", events, gcd }));
+    expect(gcd).toEqual(["CTL-1242-J4"]);
+    expect(events.find((e) => e.type === "janitor.signals.gc")?.ticket).toBe("CTL-1242-J4");
+    expect(res.signalsGcd).toEqual([{ ticket: "CTL-1242-J4" }]);
   });
 });
 
@@ -1102,5 +1136,56 @@ describe("defaultCollectTerminalSignalGcCandidates (CTL-1242 J4)", () => {
     });
     const c = out.find((o) => o.ticket === "CTL-1242-E");
     expect(c?.alreadyGcd).toBe(true);
+  });
+
+  test("CTL-1315 repro: triage-done-only terminal dir → census emits an inFlight candidate the classifier now GCs", () => {
+    // The live bug (CTL-1246/1249/774): a worker dir whose ONLY signal is
+    // phase-triage.json (status done) reads as in-flight (triage != TERMINAL_PHASE),
+    // so the census marks inFlight:true. listInFlightTickets computes that Set in
+    // production; here we inject it to keep this a stall-janitor-local unit test.
+    const d = join(orchDir, "workers", "CTL-1315-REPRO");
+    mkdirSync(d, { recursive: true });
+    writeFileSync(
+      join(d, "phase-triage.json"),
+      JSON.stringify({ ticket: "CTL-1315-REPRO", status: "done" }),
+    );
+    const out = defaultCollectTerminalSignalGcCandidates({
+      orchDir,
+      isLinearTerminalOrMerged: () => true,
+      inFlightTickets: new Set(["CTL-1315-REPRO"]),
+    });
+    const c = out.find((o) => o.ticket === "CTL-1315-REPRO");
+    expect(c).toBeDefined();
+    expect(c.linearTerminalOrMerged).toBe(true);
+    expect(c.inFlight).toBe(true);
+    expect(c.liveSessionInWorktree).toBe(false);
+    // Before CTL-1315 this classified as skip "in-flight"; now a Linear-terminal
+    // ticket with a stale in-flight signal and no live session must be reaped.
+    expect(classifyTerminalSignalGc(c).action).toBe("gc");
+  });
+
+  test("CTL-1315 freshness gate: agentsFresh:false collects NO candidates (never reap blind)", () => {
+    // A would-be candidate (terminal, failed signal) that the census normally emits...
+    mkWorkerSignal("CTL-1315-COLD");
+    // ...is withheld entirely when the agents snapshot is not fresh, because
+    // liveSessionInWorktree (the sole live-worker fence for a terminal ticket) is
+    // unreliable on a cold/stale snapshot. Deferring avoids reaping a genuinely-live
+    // late-phase worker's signal dir on a daemon-boot tick.
+    const out = defaultCollectTerminalSignalGcCandidates({
+      orchDir,
+      isLinearTerminalOrMerged: () => true,
+      agentsFresh: false,
+    });
+    expect(out).toEqual([]);
+  });
+
+  test("CTL-1315 freshness gate: agentsFresh:true (the default) still collects candidates", () => {
+    mkWorkerSignal("CTL-1315-WARM");
+    const out = defaultCollectTerminalSignalGcCandidates({
+      orchDir,
+      isLinearTerminalOrMerged: () => true,
+      agentsFresh: true,
+    });
+    expect(out.some((c) => c.ticket === "CTL-1315-WARM")).toBe(true);
   });
 });
