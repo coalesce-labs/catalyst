@@ -21,6 +21,14 @@
 #   catalyst-stack install-services [--interval <sec>] [--sync-interval <sec>] [--print]
 #   catalyst-stack uninstall-services
 #   catalyst-stack services-status
+#   catalyst-stack sync-cloud-env
+#
+# sync-cloud-env (CTL-1307):
+#   Project the cluster-shared CATALYST_CLOUD_TOKEN (decrypted by cluster-sync into
+#   ~/.config/catalyst/cluster-cloud.json) into this node's machine-level env — a
+#   0600 ~/.config/catalyst/cluster.env sourced by a guard line in ~/.zshenv. Run
+#   on demand after a token rotation; otherwise it runs automatically as part of
+#   'catalyst-stack start' (boot + keep-alive). No-op when no token is provisioned.
 #
 # install-services (CTL-1166, CTL-1236, CTL-1285, CTL-1306):
 #   Install FOUR launchd LaunchAgents:
@@ -551,6 +559,37 @@ cmd_parity() {
   exit "$PARITY_DRIFT"
 }
 
+# _cloud_token_env_run [quiet] — CTL-1307. Project the cluster-shared
+# CATALYST_CLOUD_TOKEN into this node's machine-level environment. The token is
+# decrypted by cluster-sync into ~/.config/catalyst/cluster-cloud.json; this
+# delegates to execution-core/cloud-token-env.mjs, which writes the 0600
+# ~/.config/catalyst/cluster.env and ensures a non-secret source-guard in
+# ~/.zshenv. FAIL-OPEN + idempotent: a node with no token decrypted is a no-op,
+# and this NEVER blocks stack start. Default behavior is unchanged — nothing in
+# catalyst reads CATALYST_CLOUD_TOKEN; only the opt-in cloud host-sync daemon does.
+_cloud_token_env_run() {
+  local quiet="${1:-}"
+  local mod="${SCRIPT_DIR}/execution-core/cloud-token-env.mjs"
+  [[ -f "$mod" ]] || return 0
+  local rt=""
+  if command -v bun >/dev/null 2>&1; then rt="bun"
+  elif command -v node >/dev/null 2>&1; then rt="node"
+  else return 0; fi
+  if [[ "$quiet" == "quiet" ]]; then
+    "$rt" "$mod" >/dev/null 2>&1 || true
+  else
+    "$rt" "$mod" || true
+  fi
+}
+
+# cmd_sync_cloud_env — on-demand projection of the cluster cloud token into
+# machine-level env (CTL-1307). Same work the keep-alive does, but surfaces the
+# module's output. Use after rotating the token or to apply it immediately
+# instead of waiting for the next keep-alive tick.
+cmd_sync_cloud_env() {
+  _cloud_token_env_run
+}
+
 # ─── Top-level commands ─────────────────────────────────────────────────────
 cmd_start() {
   local use_proxy="no"
@@ -591,6 +630,11 @@ cmd_start() {
   # owns shipper resurrection, so it survives stack stop/restart and restarts
   # instantly on death instead of waiting for the next 600s tick.
   start_shipper || warn "continuing without log-shipper (daemon logs won't be shipped to Loki)"
+
+  # CTL-1307: project the cluster-shared cloud token into machine-level env, if
+  # one has been decrypted from the catalyst-cluster repo. Quiet + fail-open: a
+  # node not opted into catalyst-cloud has no token and this is a silent no-op.
+  _cloud_token_env_run quiet
 
   log ""
   log "stack up — current state:"
@@ -1114,6 +1158,7 @@ case "${1:-}" in
   install-services)   shift; cmd_install_services "$@" ;;
   uninstall-services) shift; cmd_uninstall_services ;;
   services-status)    shift; cmd_services_status ;;
+  sync-cloud-env)     shift; cmd_sync_cloud_env "$@" ;;
   status|"") cmd_status ;;
   -h|--help)
     sed -n '2,/^$/p' "$0" | sed 's/^# \{0,1\}//'

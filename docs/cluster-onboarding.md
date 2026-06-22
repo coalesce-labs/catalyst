@@ -150,6 +150,77 @@ To activate mini-2 and begin accepting work:
 
 4. **Monitor the reaper** — once activated, mini-2 worktrees are eligible for reaping (CTL-1218). Watch for safe signal+merge patterns before auto-reap.
 
+## Provisioning the shared cloud token (`CATALYST_CLOUD_TOKEN`, CTL-1307)
+
+`CATALYST_CLOUD_TOKEN` is a single **shared** service credential (the catalyst-cloud `ADMIN_TOKEN`,
+interim per CTC-27 / ADR-0006) that must be **identical on every node**. It is an **optional
+extension**: setting it changes nothing on its own — nothing in Catalyst reads it, and a node stays
+fully local-only until the operator separately opts into cloud services. Only the opt-in,
+out-of-repo cloud host-sync daemon (`catalyst-replica` / `catalyst-cloud`) consumes it. It is safe
+to roll out cluster-wide without altering default behavior.
+
+It is stored once in the `catalyst-cluster` repo (encrypted, alongside the other secrets) and flows
+to every node's **machine-level environment** automatically — no manual per-host step.
+
+### Add or rotate the token (laptop only)
+
+Per the cluster repo's write policy, all `secrets/` writes are operator-initiated from the laptop and
+serialized (pull → edit → push); SOPS re-encryption rewrites the whole data-key wrap, so concurrent
+commits don't merge.
+
+```bash
+cd ~/catalyst/catalyst-cluster        # the clone with your age key + sops installed
+git pull --ff-only
+
+# Create/rotate the dedicated cloud-token secret. The existing .sops.yaml rule
+# (path_regex 'secrets/.*\.json$') already covers this filename — no .sops.yaml change.
+cat > /tmp/cluster-cloud.json <<'JSON'
+{ "catalyst": { "cloud": { "token": "<catalyst-cloud ADMIN_TOKEN>" } } }
+JSON
+sops --encrypt --input-type json --output-type json /tmp/cluster-cloud.json \
+  > secrets/cluster-cloud.sops.json
+rm -f /tmp/cluster-cloud.json
+
+git add secrets/cluster-cloud.sops.json
+git commit -m "feat: add shared CATALYST_CLOUD_TOKEN (CTL-1307)"
+git push
+```
+
+### How each node picks it up
+
+Each node converges automatically (prerequisite: the node already has the `catalyst-cluster` repo
+cloned and its age key at `~/.config/catalyst/age.key` — the same prerequisite as every other cluster
+secret):
+
+1. `cluster-sync` (daemon boot, and the periodic pull) decrypts `secrets/cluster-cloud.sops.json` to
+   `~/.config/catalyst/cluster-cloud.json` (mode `0600`).
+2. `catalyst-stack start` (boot + every keep-alive) runs `cloud-token-env.mjs`, which writes the
+   secret to `~/.config/catalyst/cluster.env` (mode `0600`) and adds a non-secret guard line to
+   `~/.zshenv` that sources it.
+3. Every login/zsh shell — and any cloud daemon **(re)started in a shell context** — inherits
+   `CATALYST_CLOUD_TOKEN`.
+
+### Apply immediately (instead of waiting for the keep-alive)
+
+On each node that has opted into cloud services:
+
+```bash
+# 1. re-decrypt (or just restart the daemon)
+catalyst cluster sync
+# 2. project the token into the machine-level env now
+catalyst-stack sync-cloud-env
+# 3. restart the cloud host-sync daemon in a shell context so it inherits the value
+#    (the same pattern used for the per-host Linear keys)
+```
+
+`catalyst doctor` reports an advisory `cloud-token` check: `INFO` when no token is provisioned
+(local-only, expected), `WARN` when a token is decrypted but not yet projected (or is stale), `PASS`
+when it is projected to the machine-level env.
+
+> **Scope note:** `catalyst-join` does not itself clone the `catalyst-cluster` repo or provision the
+> age key (a pre-existing prerequisite shared by *all* cluster secrets, tracked separately). Once
+> those prerequisites are in place, the cloud token is picked up with no per-host step.
+
 ## Troubleshooting
 
 ### Join script fails with "doctor gate failed"

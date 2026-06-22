@@ -1324,6 +1324,96 @@ export function checkReaper(deps = {}) {
   return checks;
 }
 
+// checkCloudTokenEnv — CTL-1307. ADVISORY ONLY (never FAIL): the cluster-shared
+// CATALYST_CLOUD_TOKEN is an OPTIONAL extension — a node stays fully local-only
+// without it, so its absence must NEVER block activation. WARN only on DRIFT: the
+// token has been decrypted from the catalyst-cluster repo (cluster-cloud.json)
+// but is not yet projected into the machine-level env (cluster.env + ~/.zshenv
+// guard). All reads are injectable + fail-open.
+export function checkCloudTokenEnv(deps = {}) {
+  const {
+    configDir = process.env.CATALYST_CONFIG_DIR || resolve(homedir(), ".config", "catalyst"),
+    zshenvPath = process.env.CATALYST_ZSHENV_FILE || resolve(homedir(), ".zshenv"),
+    readFile = (p) => readFileSync(p, "utf8"),
+  } = deps;
+  const checks = [];
+
+  let token = "";
+  try {
+    const obj = JSON.parse(readFile(resolve(configDir, "cluster-cloud.json")));
+    const t = obj?.catalyst?.cloud?.token;
+    token = typeof t === "string" ? t : "";
+  } catch {
+    /* absent / malformed → no token decrypted */
+  }
+
+  if (!token) {
+    checks.push(
+      mkCheck(
+        "cloud-token",
+        STATUS.INFO,
+        "no cluster cloud token decrypted — node is local-only (expected unless opted into catalyst-cloud)",
+      ),
+    );
+    return checks;
+  }
+
+  let clusterEnv = "";
+  try {
+    clusterEnv = readFile(resolve(configDir, "cluster.env"));
+  } catch {
+    /* missing → not projected */
+  }
+  // Expected single-quoted export line (mirrors cloud-token-env.mjs escaping).
+  const expected = `export CATALYST_CLOUD_TOKEN='${token.replace(/'/g, "'\\''")}'`;
+  if (!clusterEnv.includes("export CATALYST_CLOUD_TOKEN=")) {
+    checks.push(
+      mkCheck(
+        "cloud-token",
+        STATUS.WARN,
+        "cloud token decrypted but NOT projected to ~/.config/catalyst/cluster.env — run 'catalyst-stack sync-cloud-env'",
+      ),
+    );
+    return checks;
+  }
+  if (!clusterEnv.includes(expected)) {
+    checks.push(
+      mkCheck(
+        "cloud-token",
+        STATUS.WARN,
+        "cluster.env CATALYST_CLOUD_TOKEN is STALE vs cluster-cloud.json — run 'catalyst-stack sync-cloud-env' and restart cloud daemons",
+      ),
+    );
+    return checks;
+  }
+
+  let zshenv = "";
+  try {
+    zshenv = readFile(zshenvPath);
+  } catch {
+    /* missing → no guard */
+  }
+  if (!zshenv.includes("catalyst cloud-token env")) {
+    checks.push(
+      mkCheck(
+        "cloud-token",
+        STATUS.WARN,
+        "cluster.env present but ~/.zshenv lacks the source-guard — shells (and shell-launched cloud daemons) won't inherit CATALYST_CLOUD_TOKEN",
+      ),
+    );
+    return checks;
+  }
+
+  checks.push(
+    mkCheck(
+      "cloud-token",
+      STATUS.PASS,
+      "cluster cloud token projected to machine-level env (cluster.env + ~/.zshenv guard)",
+    ),
+  );
+  return checks;
+}
+
 // runDoctor — orchestrate all checks, render, and return the fail count.
 export async function runDoctor(opts = {}) {
   const {
@@ -1349,6 +1439,7 @@ export async function runDoctor(opts = {}) {
     () => checkThoughts(), // CTL-1293: member thoughts repo provisioned + non-foreign primary
     () => checkClaudeSettings(), // CTL-1231: member settings.json pins host identity + OTLP endpoint
     () => checkReaper(), // CTL-1306: orphan-sweep reaper installed + baked path still exists (not dead-127)
+    () => checkCloudTokenEnv(), // CTL-1307: cluster cloud token decrypted → projected to machine-level env (advisory)
   ];
 
   const fns = checkFns ?? defaultChecks;
