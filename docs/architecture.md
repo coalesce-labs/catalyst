@@ -2,349 +2,131 @@
 
 ## Three-Layer System
 
-1. **Plugin Source** (`plugins/dev/`, `plugins/meta/`, `plugins/pm/`, etc.)
-   - Canonical definitions of agents and skills
-   - Edit these when making changes
-   - Organized by plugin type
+1. **Plugin Source** (`plugins/dev/`, `plugins/meta/`, `plugins/pm/`, `plugins/legacy/`, …) — canonical agent/skill definitions; edit these.
+2. **Installation Layer** — `.claude/` (symlinks Claude Code reads plugins from) + `.catalyst/` (workflow state: `config.json`, `.workflow-context.json`).
+3. **Thoughts System** — external git-backed context at `~/thoughts/`, shared across worktrees, initialized per-project via `init-project.sh`.
 
-2. **Installation Layer** (`.claude/` + `.catalyst/`)
-   - `.claude/`: Symlinks to local plugin directories, Claude Code reads plugins from here
-   - `.catalyst/`: Catalyst workflow state (`config.json`, `.workflow-context.json`)
+## Memory & Workflow State
 
-3. **Thoughts System** (external, `~/thoughts/`)
-   - Git-backed context management
-   - Shared across all worktrees
-   - Initialized per-project via `init-project.sh`
+Three memory layers manage context across projects:
 
-## Workflow State Management
+1. **Project config** (`.catalyst/config.json`, committable) — ticket prefix, Linear team, etc. HumanLayer maps cwd → profile via `repoMappings`.
+2. **Long-term memory** — HumanLayer thoughts repo (git-backed, synced via `humanlayer thoughts sync`): `shared/research/`, `shared/plans/`, `shared/prs/`, `shared/handoffs/`.
+3. **Short-term memory** (`.catalyst/.workflow-context.json`, per-worktree, not committed) — pointers to recent docs enabling skill chaining: `/research-codebase`→`/create-plan`→`/implement-plan`, `/create-handoff`→`/resume-handoff`. Auto-updated by workflow skills.
 
-Skills track workflow state via `.catalyst/.workflow-context.json`:
-
-- `/research-codebase` saves research -> `/create-plan` auto-references it
-- `/create-plan` saves plan -> `/implement-plan` auto-finds it
-- `/create-handoff` saves handoff -> `/resume-handoff` auto-finds it
-
-Structure:
-
-```json
-{
-  "lastUpdated": "2025-10-26T10:30:00Z",
-  "currentTicket": "PROJ-123",
-  "orchestration": null,
-  "mostRecentDocument": {
-    "type": "plans",
-    "path": "thoughts/shared/plans/2025-10-26-PROJ-123-feature.md",
-    "created": "2025-10-26T10:30:00Z",
-    "ticket": "PROJ-123"
-  },
-  "workflow": {
-    "research": [],
-    "plans": [],
-    "handoffs": [],
-    "prs": []
-  }
-}
+```
+.catalyst/config.json              <- project config (committable)
+   ↓
+~/thoughts/repos/<proj>/{research,plans,prs,handoffs}/   <- long-term (git-backed)
+   ↓
+.catalyst/.workflow-context.json   <- short-term (session pointers)
 ```
 
-Management: Automatically updated by workflow skills. Tracked per-worktree (not committed to git).
+`.workflow-context.json` structure: `{lastUpdated, currentTicket, orchestration, mostRecentDocument:{type,path,created,ticket}, workflow:{research[],plans[],handoffs[],prs[]}}`.
 
 ## Global Orchestrator State
 
-Cross-orchestrator visibility lives at `~/catalyst/state.json` — a single JSON file that all
-orchestrators and workers write to via `catalyst-state.sh` (lock-protected).
+Cross-orchestrator visibility lives at `~/catalyst/state.json` — a single lock-protected JSON file all orchestrators/workers write via `catalyst-state.sh`. It is a **denormalized summary**; per-orchestrator local state in worktrees stays the source of truth for crash recovery (ADR-006).
 
 ```
 ~/catalyst/
-├── state.json              # Active orchestrators (denormalized summary)
-├── catalyst.db             # Durable session store (SQLite, WAL mode)
-├── events/                 # Append-only JSONL event stream, rotated monthly
-│   └── YYYY-MM.jsonl
-├── history/                # Archived orchestrator snapshots
-│   └── <id>--<timestamp>.json
-├── execution-core/         # Execution-core daemon state
-│   └── registry.json       # Central team → repoRoot → eligibleQuery registry
-└── wt/                     # Worktrees (existing)
+├── state.json              # active orchestrators (denormalized summary)
+├── catalyst.db             # durable SQLite session store (WAL)
+├── events/YYYY-MM.jsonl    # append-only JSONL event stream, rotated monthly
+├── history/<id>--<ts>.json # archived orchestrator snapshots
+├── execution-core/registry.json  # team → repoRoot → eligibleQuery registry
+└── wt/                     # worktrees
 ```
 
-- **catalyst.db**: SQLite-backed session store — durable source of truth for agent activity
-  (solo and orchestrated). Managed by `catalyst-db.sh` (low-level CRUD, migrations) and
-  `catalyst-session.sh` (high-level lifecycle CLI used by instrumented skills). Tables:
-  `sessions`, `session_events`, `session_metrics`, `session_tools`, `session_prs`,
-  `schema_migrations`. Writers run in WAL mode so monitor-style readers (including
-  `orch-monitor`) can operate concurrently. `catalyst-state.sh` continues to write JSON/JSONL
-  during the migration period for backward compatibility. Schema lives at
-  `plugins/dev/scripts/db-migrations/`. See ADR-008.
+- **catalyst.db** — durable session source of truth (solo + orchestrated). Managed by `catalyst-db.sh` (CRUD/migrations) and `catalyst-session.sh` (lifecycle CLI). Tables: `sessions`, `session_events`, `session_metrics`, `session_tools`, `session_prs`, `schema_migrations`. WAL mode → concurrent readers (incl. `orch-monitor`). Schema: `plugins/dev/scripts/db-migrations/`. ADR-008. `catalyst-state.sh` still writes JSON/JSONL during the migration period for backward compatibility, so SQLite and the JSONL log coexist.
+- **state.json** — active-orchestrator registry (progress, worker status, attention items). Schema: `plugins/dev/templates/global-state.json`.
+- **events/** — every phase transition, PR creation, verification result, attention item. Schema: `plugins/dev/templates/global-event.json`. Multiple writers, two envelope shapes coexisting:
+  - **v1** (bash, `catalyst-state.sh event`): `{ts, event, orchestrator, worker, detail}`.
+  - **v2 OTel** (`plugins/dev/scripts/orch-monitor/lib/webhook-events.ts` for `github.*`/`linear.*`; `catalyst-comms send` for `comms.message.posted`): `{ts, attributes, body, resource}`.
+  - Consumers: `catalyst-events tail` (stream), `catalyst-events wait-for` (blocking single-event). Both shapes handled. See `website/src/content/docs/observability/catalyst-events.md`.
+- **history/** — full snapshots archived on completion/failure/stale.
+- **execution-core/registry.json** — for `dispatchMode: execution-core` teams, the central `team → repoRoot → eligibleQuery` registry. The Linear-state contract is setup-tooling-owned (D8): `setup-catalyst.sh` ensures contract workflow states, writes the phase→5-state `stateMap`, and upserts each team's entry. Daemon reads the registry directly (D4). The CTL-554 per-repo enrollment under `execution-core/projects/` and the `/orchestrate` enroll step were retired in CTL-582. Access flows through `registry.mjs` `list-projects`/`get-project-config` — the D9 cloud seam (swappable to a hosted table without touching callers).
+- **Heartbeat** — orchestrators write `lastHeartbeat` every 2–3 min; entries stale >10 min are GC'd as `abandoned`.
 
-- **state.json**: Registry of active orchestrators with progress, worker status, and attention
-  items. Queryable with `jq`. Schema: `plugins/dev/templates/global-state.json`.
-- **events/**: Every phase transition, PR creation, verification result, and attention item is
-  logged as a JSONL entry. Schema: `plugins/dev/templates/global-event.json`. The log has
-  multiple writers:
-  - **Bash skill layer** (`catalyst-state.sh event`) — writes v1 envelopes: `{ts, event, orchestrator, worker, detail}`
-  - **TypeScript webhook receiver** (`lib/webhook-events.ts`) — writes v2 OTel-shaped envelopes:
-    `{ts, attributes, body, resource}` for `github.*` and `linear.*` events
-  - **catalyst-comms send** — writes v2 envelopes for `comms.message.posted` events
-  Both shapes coexist in the same files. `catalyst-events` CLI and skills handle both.
-  Consumer interface: `catalyst-events tail` (streaming) and `catalyst-events wait-for`
-  (blocking single-event wait). See `website/src/content/docs/observability/catalyst-events.md`.
-- **history/**: Full orchestrator snapshots archived on completion, failure, or stale detection.
-- **execution-core/registry.json**: For `dispatchMode: execution-core` teams, the central
-  `team → repoRoot → eligibleQuery` registry. The Linear-state contract that drives the
-  execution-core daemon is **setup-tooling-owned** (design decision D8): `setup-catalyst.sh`
-  ensures the contract workflow states, writes the 10-phase → 5-state collapse `stateMap`, and
-  upserts each team's registry entry. The execution-core daemon reads the registry directly
-  (D4); the per-repo enrollment records CTL-554 wrote under `execution-core/projects/` and the
-  `/orchestrate` enroll step they relied on were retired in CTL-582. All access flows through the
-  `registry.mjs` `list-projects` / `get-project-config` interface — the D9 cloud seam, so the
-  store can later become a Supabase table without touching callers.
-- **Heartbeat**: Orchestrators write `lastHeartbeat` every 2-3 min. Stale entries (>10 min) are
-  garbage-collected as `abandoned`.
-
-This is a denormalized summary layer — per-orchestrator local state in worktrees remains the
-source of truth for crash recovery. See ADR-006 for the full design decision.
-
-**Worker signal projection (in migration, ADR-018).** Per-worker
-`workers/<TICKET>.json` files are currently written directly by seven scripts
-with no inter-process locking. CTL-483 begins moving these mutations to a
-`worker.state_changed` command event consumed by the broker, which projects
-the new state to a `<TICKET>.json.projected` shadow file. Phase 1 (this PR)
-ships the broker handler, the writer-side emit helper, and dual-write for
-`orchestrate-auto-rebase`; `orchestrate-shadow-diff` verifies byte-for-byte
-agreement between canonical and shadow files. Phase 2 removes the direct
-writes; Phase 3 mirrors to SQLite per the ADR-011 hybrid pattern. See ADR-018.
-
-## Three-Layer Memory Architecture
-
-Catalyst uses a three-layer memory architecture to manage context across multiple projects:
-
-**1. Project Configuration** (`.catalyst/config.json`)
-
-- Contains project-specific settings (ticket prefix, Linear team, etc.)
-- HumanLayer automatically maps working directories to profiles via `repoMappings`
-
-**2. Long-term Memory** (HumanLayer thoughts repository)
-
-- Git-backed persistent storage shared across worktrees
-- Contains: `shared/research/`, `shared/plans/`, `shared/prs/`, `shared/handoffs/`
-- Synced via `humanlayer thoughts sync`
-
-**3. Short-term Memory** (`.catalyst/.workflow-context.json`)
-
-- Local to each worktree (not committed to git)
-- Contains pointers to recent documents in long-term memory
-- Enables skill chaining (e.g., `/create-plan` auto-finds recent research)
-
-```
-.catalyst/config.json          <- Project config (committable)
-        |
-        v
-~/thoughts/repos/acme/       <- Long-term memory (git-backed)
-  shared/research/
-  shared/plans/
-  shared/prs/
-  shared/handoffs/
-        |
-        v
-.catalyst/.workflow-context.json  <- Short-term memory (session pointers)
-```
+**Worker signal projection (in migration, ADR-018, CTL-483).** Per-worker `workers/<TICKET>.json` files are currently written by ~7 scripts with no inter-process locking. CTL-483 moves these mutations to a `worker.state_changed` command event consumed by the broker, which projects to a shadow `<TICKET>.json.projected`. Phase 1: broker handler + emit helper + dual-write for `orchestrate-auto-rebase` (`orchestrate-shadow-diff` verifies byte-for-byte parity). Phase 2: remove direct writes (broker sole writer). Phase 3: mirror to SQLite per ADR-011. See ADR-018.
 
 ## Agent Teams vs Subagents
 
-Claude Code provides two parallelization mechanisms:
+| Scenario | Subagents | Agent Teams |
+|---|---|---|
+| Parallel research / code analysis / file search | YES | overkill |
+| Complex multi-file implementation | NO (can't nest) | YES |
+| Cross-layer features (FE+BE+tests) | NO | YES |
+| Cost-sensitive | YES | NO |
 
-**Subagents (Task tool)** — Default for most skills:
+- **Subagents (Task tool)** — own context window, results return to caller; cannot nest; lower cost. Default for research/analysis/search.
+- **Agent Teams (TeammateTool, `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1`)** — each teammate is a full session that CAN spawn its own subagents (two-level parallelism); peer messaging; higher cost. For cross-layer/complex work.
 
-- Own context window; results return to caller
-- Cannot spawn other subagents (no nesting)
-- Lower token cost
-- Best for: parallel research gathering, code analysis, file search
-
-**Agent Teams (TeammateTool)** — For complex multi-domain work:
-
-- Each teammate is a full Claude Code session
-- Teammates CAN spawn their own subagents (two-level parallelism)
-- Direct peer-to-peer messaging
-- Higher token cost
-- Best for: cross-layer features, complex implementations
-- Requires `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1`
-
-| Scenario                                          | Use Subagents   | Use Agent Teams |
-| ------------------------------------------------- | --------------- | --------------- |
-| Parallel research gathering                       | YES             | Overkill        |
-| Code analysis / file search                       | YES             | Overkill        |
-| Complex multi-file implementation                 | NO (can't nest) | YES             |
-| Cross-layer features (frontend + backend + tests) | NO              | YES             |
-| Cost-sensitive operations                         | YES             | NO              |
-
-Best practices:
-
-- Lead on Opus, teammates on Sonnet
-- Size tasks at 5-6 per teammate
-- Each teammate owns distinct files (prevent conflicts)
-- Use plan approval gates for risky work
+Best practices: lead on Opus, teammates on Sonnet; ~5–6 tasks/teammate; each teammate owns distinct files; plan-approval gates for risky work.
 
 ## Agent Communication (catalyst-comms)
 
-Agents coordinate across worktrees via `catalyst-comms`, a file-based JSONL messaging system at
-`~/catalyst/comms/channels/<name>.jsonl`. The protocol is **bidirectional** (CTL-249):
-orchestrators broadcast to workers (outbound) and can also send messages directed to individual
-workers (inbound); workers poll for directed messages at each phase boundary.
+File-based JSONL messaging at `~/catalyst/comms/channels/<name>.jsonl`. Bidirectional (CTL-249): orchestrators broadcast to and directly message individual workers; workers poll for directed messages at each phase boundary. `catalyst-comms send` also emits a `comms.message.posted` v2 event to the unified log, so monitoring tools and `catalyst-events wait-for` observe comms from the same file as GitHub/Linear events.
 
 ```bash
-# Orchestrator side (Phase 1 init)
-catalyst-comms join "${ORCH_NAME}" --as orchestrator --capabilities "coordinates workers"
-
-# Worker dispatch env
-CATALYST_COMMS_CHANNEL="${ORCH_NAME}" exec claude -p "/oneshot ${TICKET_ID}"
-
-# Worker side (oneshot startup)
-catalyst-comms join "$CATALYST_COMMS_CHANNEL" --as "$TICKET_ID" --parent orchestrator
-
-# Outbound: orchestrator sends to a specific worker
-catalyst-comms send "${ORCH_NAME}" "CTL-101: skip the migration" \
-  --as orchestrator --to CTL-101 --type info
-
-# Inbound: worker polls for messages addressed to it (at each phase boundary)
-catalyst-comms poll "${ORCH_NAME}" --filter-to "$TICKET_ID" --since "$COMMS_LAST_READ"
-
-# Live tailing (human auditor)
-catalyst-comms watch "${ORCH_NAME}"
+catalyst-comms join "$CHANNEL" --as <id> [--as orchestrator|--parent orchestrator]
+catalyst-comms send "$CHANNEL" "msg" --as orchestrator --to CTL-101 --type info
+catalyst-comms poll "$CHANNEL" --filter-to "$TICKET_ID" --since "$LAST_READ"
+catalyst-comms watch "$CHANNEL"   # live tail (human auditor)
 ```
 
-`catalyst-comms send` also emits a `comms.message.posted` event to the unified event log
-(v2 OTel envelope), so monitoring tools and `catalyst-events wait-for` can observe comms
-traffic from the same log file they use for GitHub/Linear events.
-
-The contract: every worker produces ≥4 messages per run. Signal files remain the authoritative
-state — comms is observability and cross-worker coordination. See
-`plugins/dev/skills/catalyst-comms/SKILL.md` for the full protocol.
+(Legacy `/oneshot` worker examples now live in the `plugins/legacy` plugin — see Phase-Agent Communication for the current model.) Contract: every worker produces ≥4 messages/run. Signal files remain authoritative state; comms is observability + coordination. Full protocol: `plugins/dev/skills/catalyst-comms/SKILL.md`.
 
 ## Phase-Agent Communication
 
-Orchestrators dispatched in `dispatchMode = "phase-agents"` spawn one short-lived `claude --bg`
-job per phase, walking the 10-phase pipeline (triage → research → plan → implement → verify →
-review → pr → monitor-merge → monitor-deploy → teardown — see `docs/orchestrator-overview.md`). Phase
-agents do **not** message each other directly. They communicate by **appending typed events to a
-single shared JSONL log** at `~/catalyst/events/YYYY-MM.jsonl`. The orchestrator wakes on those
-events via the broker (`filter.wake.<ORCH_NAME>`), advances the ticket through the canonical
-sequence in `orchestrate-phase-advance`, and dispatches the next `--bg` job.
+In `dispatchMode = "phase-agents"` (template default; also used internally by the `execution-core` daemon) the orchestrator spawns one short-lived `claude --bg` job per phase, walking the 10-phase pipeline (triage → research → plan → implement → verify → review → pr → monitor-merge → monitor-deploy → teardown — see `docs/orchestrator-overview.md`). Phase agents never message each other; they **append typed events to the shared log** `~/catalyst/events/YYYY-MM.jsonl`. The orchestrator wakes on those events via the broker (`filter.wake.<ORCH_NAME>`), advances the ticket via `orchestrate-phase-advance`, and dispatches the next `--bg` job. Dispatcher: `plugins/dev/scripts/phase-agent-dispatch` (CTL-448). `oneshot-legacy` (single long-lived job/ticket) is the runtime fallback when the key is missing.
 
 ### Dispatch-time rebase (front-load conflict surfacing, CTL-667 + CTL-707)
 
-On a **fresh** dispatch of a **build** phase (`research`, `plan`, `implement`, `verify`,
-`review`), `phase-agent-dispatch` rebases the ticket's worktree (its cwd) onto current
-`origin/<base>` **before** launching the `claude --bg` worker. This front-loads divergence
-detection: the worker starts current with merged sibling work, and a conflict surfaces here
-instead of riding stale assumptions all the way to `monitor-merge` (CTL-608).
+On a **fresh** dispatch of a **build** phase (`research`,`plan`,`implement`,`verify`,`review`), `phase-agent-dispatch` rebases the ticket's worktree onto current `origin/<base>` before launching the worker, so divergence surfaces early instead of riding stale to `monitor-merge` (CTL-608). CTL-707 replaced the binary CTL-667 rebase with a 4-layer strategy:
 
-CTL-707 replaced the binary CTL-667 rebase with a **4-layer strategy**:
+- **L1 — Periodic background refresh** (`execution-core/worktree-refresh-timer.mjs`): keeps idle running worktrees current. Config `catalyst.orchestration.worktreeRefresh.{enabled,intervalSeconds,quietSeconds}`.
+- **L2 — Dispatch-time conflict classifier** (`lib/worktree-rebase.sh:rebase_onto_base_classified`): tests-only → auto-resolve (`--theirs`); noise (`.catalyst/`,`.trunk/`) → `--ours`; `thoughts/**` → stall rc=3; real source → CTL-708 stub (always unavailable) → stall rc=2.
+- **L3 — Phase-aware fallback** (`phase-agent-dispatch`): terminal source conflict (rc=2) on `research`/`plan` → destroy+recreate worktree fresh; same on `implement`/`verify`/`review` → park `needs-human`; thoughts conflict (rc=3) → park on all phases.
+- **L4 — Telemetry** (`lib/rebase-telemetry.sh`):
 
-- **Layer 1 — Periodic background refresh** (`execution-core/worktree-refresh-timer.mjs`):
-  the daemon timer keeps every idle running worktree current with `origin/<base>` so dispatch-time
-  rebases are trivial. Config: `catalyst.orchestration.worktreeRefresh.{enabled, intervalSeconds, quietSeconds}`.
-- **Layer 2 — Dispatch-time conflict classifier** (`lib/worktree-rebase.sh:rebase_onto_base_classified`):
-  on a conflict, enumerates conflicted files and categorizes them. Tests-only → additive
-  auto-resolve (`git checkout --theirs`); noise (`.catalyst/`, `.trunk/`) → `--ours`; `thoughts/**`
-  → stall rc=3; real source → CTL-708 stub (always unavailable) → stall rc=2.
-- **Layer 3 — Phase-aware fallback** (`phase-agent-dispatch`): terminal source conflict (rc=2) on
-  `research`/`plan` → destroy+recreate worktree from `origin/<base>` and re-dispatch fresh (no
-  committed code to lose). Same conflict on `implement`/`verify`/`review` → park to `needs-human`.
-  Thoughts conflict (rc=3) → park on all phases.
-- **Layer 4 — Telemetry** (`lib/rebase-telemetry.sh`): four canonical events emitted by all layers:
+| Event | Severity | Emitter |
+|---|---|---|
+| `phase.<phase>.stale-base-detected.<ticket>` | WARN | L1 |
+| `phase.<phase>.auto-rebased.<ticket>` | INFO | L1 + L2 (clean/additive) |
+| `phase.<phase>.rebase-conflict-categorized.<ticket>` | WARN | L2 (pre-stall) |
+| `phase.<phase>.rebase-conflict-stalled.<ticket>` | ERROR | L2 (terminal) |
 
-| Event name | Severity | Emitted by |
-|------------|----------|------------|
-| `phase.<phase>.stale-base-detected.<ticket>` | WARN | Layer 1 (refresh timer) |
-| `phase.<phase>.auto-rebased.<ticket>` | INFO | Layer 1 + Layer 2 (clean or additive) |
-| `phase.<phase>.rebase-conflict-categorized.<ticket>` | WARN | Layer 2 (before stall decision) |
-| `phase.<phase>.rebase-conflict-stalled.<ticket>` | ERROR | Layer 2 (terminal stall) |
+Loki: `{job="catalyst-events"} | json | attributes["event.name"] =~ "phase\\..*\\.auto-rebased\\..*"` (swap suffix per event).
 
-**Loki queries** (add `| json` before field filters):
-```
-{job="catalyst-events"} | json | attributes["event.name"] =~ "phase\\..*\\.auto-rebased\\..*"
-{job="catalyst-events"} | json | attributes["event.name"] =~ "phase\\..*\\.rebase-conflict-stalled\\..*"
-{job="catalyst-events"} | json | attributes["event.name"] =~ "phase\\..*\\.stale-base-detected\\..*"
-```
-
-The rebase is otherwise unchanged from CTL-667:
-
-- **Fresh-only.** A resume dispatch (`--resume-session` set, CTL-658) skips it — the resumed
-  session assumes the prior tree.
-- **Build-phase-only.** `triage`/`pr`/`remediate` and the `monitor-merge`/`monitor-deploy`/`teardown`
-  phases are exempt. The build-phase set is `is_rebase_phase` in `lib/phase-sequence.sh`.
-- **Local-only.** It never pushes and never touches the open PR; machine-local noise
-  (`.catalyst/config.json`, `.trunk/*`) is stashed across the rebase.
-- **Transient fetch failure → proceed un-rebased.** A flaky `git fetch` (rc=1) is non-fatal.
+Invariants (unchanged from CTL-667): **fresh-only** (resume `--resume-session` skips, CTL-658); **build-phase-only** (`is_rebase_phase` in `lib/phase-sequence.sh`; `triage`/`pr`/`remediate`/`monitor-*`/`teardown` exempt); **local-only** (never pushes/touches the PR; `.catalyst/config.json`,`.trunk/*` stashed across rebase); transient `git fetch` failure (rc=1) → proceed un-rebased.
 
 ### PR as the durable work record (CTL-783)
 
-During an orchestrated implement phase the draft PR is the **off-disk record of active work**,
-visible in GitHub and survives daemon restarts:
+During an orchestrated implement phase the draft PR is the off-disk, restart-surviving record of active work:
 
 | Signal | Meaning |
-|--------|---------|
-| Branch exists, no PR | Worker not yet past first commit |
-| Draft PR open | Implementing (phase-implement in progress) |
-| PR ready (not draft) | In review (phase-pr promoted it) |
-| PR merged | Done |
+|---|---|
+| Branch, no PR | not past first commit |
+| Draft PR open | implementing |
+| PR ready | in review (phase-pr promoted) |
+| PR merged | done |
 
-**Branch naming**: branches come from Linear's `branchName` field (`ryan/<ticket>-slug`); the
-daemon's `create-worktree.sh` never overrides this.
-
-**PR title convention**: `<type>(<scope>): <ticket> ...` (e.g.
-`feat(dev): CTL-783 draft-PR-early first-commit open`). Both `draft_pr_ensure` and
-`create-pr/SKILL.md` Step 7 route through `draft_pr_title` (in
-`plugins/dev/scripts/lib/draft-pr.sh`) which injects the ticket after the conventional prefix
-without fabricating type or scope.
-
-**Lifecycle**:
-
-1. `implement-plan/SKILL.md` runs the `implement-plan-draft-pr-early` fence after **each**
-   plan-phase commit — `draft_pr_push` + `draft_pr_ensure` (idempotent). First call opens the
-   draft PR; later calls just push. Interactive `/implement-plan` runs are gated out by
-   `[[ -n "${CATALYST_PHASE:-}" ]]`.
-2. `phase-implement/SKILL.md` End block runs the `phase-implement-draft-pr` fence as the
-   **idempotent backstop** after all phases complete; this is also the **sole writer** of
-   `.draftPr={number,url,isDraft}` into the phase signal file.
-3. `phase-pr/SKILL.md` calls `draft_pr_promote` to flip the draft PR to ready instead of
-   creating a new PR (avoids the `create-pr` interactive "PR already exists" hang).
-
-**Config**: `orchestration.draftPr.enabled` (default `true`) — set `false` to create the PR
-only at the pr phase (End-block backstop still runs; `draft_pr_push` becomes the only push).
-
-**Deferred**: letting the scheduler read `.draftPr` draft-state as a secondary advancement
-signal (currently phase advancement is driven by signal `status === "done"` only).
+- **Branch naming**: from Linear `branchName` (`ryan/<ticket>-slug`); `create-worktree.sh` never overrides.
+- **PR title**: `<type>(<scope>): <ticket> …` via `draft_pr_title` in `plugins/dev/scripts/lib/draft-pr.sh` (injects ticket after the conventional prefix; both `draft_pr_ensure` and `create-pr` Step 7 route through it).
+- **Lifecycle**: (1) `implement-plan` runs `implement-plan-draft-pr-early` after each plan-phase commit — `draft_pr_push`+`draft_pr_ensure` (idempotent; first opens, later push). Interactive runs gated by `[[ -n "${CATALYST_PHASE:-}" ]]`. (2) `phase-implement` End block runs `phase-implement-draft-pr` as idempotent backstop and is the **sole writer** of `.draftPr={number,url,isDraft}` into the signal file. (3) `phase-pr` calls `draft_pr_promote` to flip draft→ready (avoids `create-pr`'s "PR already exists" hang).
+- **Config**: `orchestration.draftPr.enabled` (default `true`) — set `false` for no early draft, so the PR is created only at the `pr` phase.
+- **Deferred**: reading `.draftPr` draft-state as a secondary advancement signal (advancement currently driven by signal `status === "done"` only).
 
 ### Runaway-loop guards (CTL-671)
 
-`schedulerTick` is hardened against runaway phase-dispatch/reclaim loops on phantom or
-non-resolving tickets — the failure mode where the phantom **CTL-9** (a ticket that does not exist
-in Linear) spammed ~24,560 `phase.*` events over three days, 92% of them per-tick
-`work-done-probe` reclaim storms. Three additive defenses, smallest blast radius first:
+`schedulerTick` is hardened against runaway dispatch/reclaim loops on phantom/non-resolving tickets (phantom CTL-9 once spammed ~24,560 `phase.*` events over 3 days, 92% per-tick `work-done-probe` reclaim storms). Three additive defenses:
 
-- **Pass 0a — phantom worker-dir validity sweep.** Runs *before* the reclaim sweep. Quarantines a
-  `workers/<ticket>/` dir to terminal `stalled` (`stalledReason:"phantom-ticket"`) only when **all
-  three** hold: the ticket is definitively **not-found** in Linear, it is **not in the eligible
-  set**, and it has **no live bg worker**. The conjunction (plus the 3-valued
-  `classifyTicketResolution`, which maps a transient outage to `unknown`, never `not-found`)
-  guarantees a Linear outage can never quarantine a healthy, resolvable, in-flight ticket. This is
-  the path that actually sustained CTL-9 — cut on the first tick that sees it.
-  `classifyTicketResolution`/`isBgJobAlive` are safe no-ops by default in `schedulerTick` and armed
-  with the real impls by the daemon's `runTick`, so a bare unit tick never shells out.
-- **Dispatch circuit breaker.** The CTL-624 cool-down marker now carries a `consecutiveFailures`
-  counter; after `SCHEDULER_CIRCUIT_BREAKER_THRESHOLD` (default 8) consecutive failed dispatches
-  with no forward progress the ticket is quarantined to `stalled`
-  (`stalledReason:"dispatch-circuit-breaker"`). A successful dispatch clears the marker and resets
-  the counter, so a healthy ticket can never trip it. This is the **Linear-independent backstop**.
-- **Runaway-rate alert (observability only).** When a single ticket's `phase.*.<ticket>` event rate
-  crosses `SCHEDULER_RUNAWAY_THRESHOLD` (default 50) within `SCHEDULER_RUNAWAY_WINDOW_MS` (default
-  10 min), the scheduler emits exactly one `phase.dispatch.runaway.<ticket>` event per window
-  (once-per-window marker under `orchDir/.runaway-alerts/`). It surfaces a dominating ticket in the
-  HUD with an attention glyph but does **not** itself quarantine — enforcement stays with the sweep
-  + circuit breaker.
+- **Pass 0a — phantom worker-dir validity sweep** (before reclaim): quarantines `workers/<ticket>/` to terminal `stalled` (`stalledReason:"phantom-ticket"`) only when all three hold: ticket definitively **not-found** in Linear, **not in eligible set**, and **no live bg worker**. The conjunction + 3-valued `classifyTicketResolution` (transient outage → `unknown`, never `not-found`) means a Linear outage can't quarantine a healthy in-flight ticket. `classifyTicketResolution`/`isBgJobAlive` are safe no-ops by default in `schedulerTick`, armed with real impls by the daemon's `runTick`.
+- **Dispatch circuit breaker** (Linear-independent backstop): the CTL-624 cool-down marker carries `consecutiveFailures`; after `SCHEDULER_CIRCUIT_BREAKER_THRESHOLD` (default 8) consecutive failed dispatches with no progress → quarantine `stalled` (`stalledReason:"dispatch-circuit-breaker"`). A successful dispatch clears it.
+- **Runaway-rate alert (observability only)**: when a single ticket's `phase.*.<ticket>` rate crosses `SCHEDULER_RUNAWAY_THRESHOLD` (default 50) within `SCHEDULER_RUNAWAY_WINDOW_MS` (default 10 min), emit one `phase.dispatch.runaway.<ticket>` per window (marker under `orchDir/.runaway-alerts/`). Surfaces in HUD; does not quarantine.
 
-Enforcement reuses the existing mechanism: a `stalled` signal makes `isTicketInFlight` drop the
-ticket and the terminal sweep applies `needs-human` via `labelOnce`.
+Enforcement reuses the sweep + breaker: a `stalled` signal makes `isTicketInFlight` drop the ticket; the terminal sweep applies `needs-human` via `labelOnce`.
 
 ### Unified data-flow
 
@@ -360,13 +142,11 @@ flowchart LR
     BROKER --> EL[~/catalyst/events/<br/>YYYY-MM.jsonl]
     REAPER[execution-core<br/>daemon reaper] -- "emits *.reap-complete<br/>/ *.reap-failed echoes" --> EL
   end
-
   subgraph Surfaces
     HUD[catalyst-hud<br/>Ink TUI]
     OM[orch-monitor<br/>web dashboard]
     CE[catalyst-events tail<br/>raw stream]
   end
-
   SJ --> HUD
   PSF -.not yet scanned.-> HUD
   BI --> HUD
@@ -375,154 +155,75 @@ flowchart LR
   EL -- "tails *.reap-requested<br/>(boot-replay + byte-cursor)" --> REAPER
 ```
 
-Writers — phase-agent workers, `phase-agent-dispatch`, the broker daemon, the TypeScript webhook
-receiver, `catalyst-comms send`, the reap-intent producers
-(`lib/emit-reap-intent.sh` / `execution-core/reap-intent.mjs`), and the execution-core daemon
-reaper (which re-emits `*.reap-complete` / `*.reap-failed` echoes) — all append to
-`~/catalyst/events/YYYY-MM.jsonl`. Readers — `catalyst-events tail`, `catalyst-events wait-for`,
-the broker daemon, the execution-core daemon reaper (CTL-649: it tails the log via boot-replay
-plus an `fs.watch` byte-cursor to drive `claude stop` / `git worktree remove` / `git branch -D`),
-`catalyst-hud`, and the orch-monitor web dashboard — consume that log (plus per-run state files
-and broker registry) without coordinating with one another. The broker and the reaper are each
-both a reader and a writer of the same file.
+Writers (phase-agent workers, `phase-agent-dispatch`, broker daemon, webhook receiver, `catalyst-comms send`, reap-intent producers `lib/emit-reap-intent.sh`/`execution-core/reap-intent.mjs`, and the daemon reaper re-emitting `*.reap-complete`/`*.reap-failed`) all append to `~/catalyst/events/YYYY-MM.jsonl`. Readers (`catalyst-events tail`/`wait-for`, broker daemon, the daemon reaper [CTL-649: boot-replay + `fs.watch` byte-cursor driving `claude stop`/`git worktree remove`/`git branch -D`], `catalyst-hud`, orch-monitor) consume that log plus per-run state and broker registry without coordinating. The broker and the reaper are each both reader and writer of the same file.
 
 ### Linear app-actor self-echo guard (`botUserId`)
 
-When the execution-core daemon mirrors phase-agent output to Linear and wakes on human replies,
-it must tell its **own** Linear comments and updates (posted as the Catalyst app-actor) apart
-from a human's. `catalyst.monitor.linear.botUserId` — the app-actor user UUID, read from the
-project's Layer-1 `.catalyst/config.json` at the flat path `catalyst.monitor.linear.botUserId`
-— is that discriminator. The daemon's `createCommentInboxWriter` / `createUpdateInboxWriter`
-(`daemon.mjs`) and orch-monitor's Linear webhook handler both skip events authored by
-`botUserId`, so the agent's mirror comments don't land in the worker `inbox.jsonl` as a false
-"human replied" signal and bot-authored issue events don't feed back as write loops. Without it
-the system can't distinguish the two, so it is the self-echo / loop-prevention guard for the
-Linear channel. See `docs/configuration.md` for how to obtain and set the value.
+The execution-core daemon mirrors phase-agent output to Linear and wakes on human replies, so it must tell its **own** app-actor comments/updates from a human's. `catalyst.monitor.linear.botUserId` (app-actor user UUID, read flat from Layer-1 `.catalyst/config.json`) is that discriminator. The daemon's `createCommentInboxWriter`/`createUpdateInboxWriter` (`execution-core/daemon.mjs`) and orch-monitor's Linear webhook handler skip events authored by `botUserId`, so mirror comments don't land in worker `inbox.jsonl` as false "human replied" signals and bot events don't feed back as write loops. See `docs/configuration.md` to obtain/set the value.
 
 ### `shouldSkipEvent` self-filter
 
-Because the broker both **reads** and **writes** the same JSONL log, it would otherwise re-ingest
-the `filter.wake.*` and `broker.daemon.*` events it just emitted, creating a feedback loop
-(observed during the 2026-05-12 incident behind CTL-346). To prevent this, the broker classifies
-every event through `shouldSkipEvent` (`plugins/dev/scripts/broker/index.mjs:1338`) before
-processing it. The filter drops:
+The broker both reads and writes the same JSONL log, so it would re-ingest the `filter.wake.*`/`broker.daemon.*` events it emits, creating a feedback loop (CTL-346, 2026-05-12 incident). Every event passes `shouldSkipEvent` (`plugins/dev/scripts/broker/router.mjs:1873`) before processing. It drops:
 
-- Anything where `resource."service.name" === "catalyst.broker"` (the broker's own emissions)
-- Event names starting with `filter.` (wakes, registrations, deregistrations)
-- Event names starting with `broker.daemon` (daemon lifecycle)
-- `session.heartbeat` (liveness pings — also short-circuited earlier in `processEvent`)
+- `resource."service.name" === "catalyst.broker"` (own emissions)
+- names starting `filter.` (wakes, (de)registrations)
+- names starting `broker.daemon` (daemon lifecycle)
+- `session.heartbeat` (also short-circuited earlier in `processEvent`)
 
-`BROKER_INGEST_OWN_EMISSIONS=1` flips the rule to "accept only `filter.*` events" for debugging.
-This self-filter is what makes the single unified log safe to use as both the broker's input and
-its output.
+`BROKER_INGEST_OWN_EMISSIONS=1` flips to "accept only `filter.*`" for debugging. This filter is what makes the single unified log safe as both broker input and output.
 
-### Lifecycle-event namespace contract
+### Lifecycle-event namespace contract (CTL-1142)
 
-The four protected name-spaces below are enforced as a verified invariant (CTL-1142). Only
-`service.name = "catalyst.broker"` may emit events in the first three spaces; the fourth governs
-which phase-slot strings are valid in routing events.
+Four protected name-spaces, enforced as a verified invariant. Only `service.name = "catalyst.broker"` may emit in the first three; the fourth governs valid phase-slot strings.
 
 | Space | Rule |
 |---|---|
-| `filter.*` | Broker interest-management events only. Any non-broker emission here would create a filter-wake feedback loop. |
-| `broker.daemon.*` | Broker operational heartbeats / startup / shutdown only. |
+| `filter.*` | Broker interest-management only (else filter-wake loop). |
+| `broker.daemon.*` | Broker heartbeats/startup/shutdown only. |
 | `session.heartbeat` | Exact match; broker liveness pings only (CTL-401). |
-| `phase.<name>.(complete\|failed\|turn-cap-exhausted\|skipped).<ticket>` | Routing namespace matched by `PHASE_EVENT_PATTERN`. Only names in `KNOWN_PHASES` or `INTENTIONAL_PHASE_SLOT_EXCEPTIONS` may occupy the `<name>` slot. |
+| `phase.<name>.(complete\|failed\|turn-cap-exhausted\|skipped).<ticket>` | Routing namespace matched by `PHASE_EVENT_PATTERN`; `<name>` must be in `KNOWN_PHASES` or `INTENTIONAL_PHASE_SLOT_EXCEPTIONS`. |
 
-**`KNOWN_PHASES`** (canonical 10-phase pipeline, in order): `triage`, `research`, `plan`,
-`implement`, `verify`, `review`, `pr`, `monitor-merge`, `monitor-deploy`, `teardown`.
+**`KNOWN_PHASES`** (canonical 10, in order): `triage`, `research`, `plan`, `implement`, `verify`, `review`, `pr`, `monitor-merge`, `monitor-deploy`, `teardown`.
 
-**Documented `<name>` slot exceptions** — these appear in `recovery.mjs` but are NOT pipeline
-phases; their action suffixes do not match the routing pattern's terminal-status set:
-
-- `dispatch` — `phase.dispatch.failed.<ticket>` marks a dispatch-level failure before a real phase
-  worker starts. The real phase rides `payload.target_phase`. This is the only exception that uses
-  a terminal-status suffix (`failed`) and therefore actually matches `PHASE_EVENT_PATTERN`.
-- `scheduler` — scheduler-internal observability events (`yield-file-skip`, `cooldown-gc`, …).
-  Action suffixes never match `(complete|failed|turn-cap-exhausted|skipped)`.
-- `advance` — phase-advance gate events (`held`). Same: action suffix never matches the routing set.
+**`<name>` slot exceptions** (in `recovery.mjs`, NOT pipeline phases): `dispatch` (`phase.dispatch.failed.<ticket>` — the only exception with a terminal-status suffix that matches the pattern; real phase rides `payload.target_phase`); `scheduler` (internal observability: `yield-file-skip`, `cooldown-gc`, …); `advance` (phase-advance gate `held`). The latter two never match the terminal-status set.
 
 **Enforcement surfaces:**
 
-- `plugins/dev/scripts/broker/namespace-contract.mjs` — single source of truth: exports
-  `FORBIDDEN_PREFIXES`, `PROTECTED_EXACT_NAMES`, `KNOWN_PHASES`,
-  `INTENTIONAL_PHASE_SLOT_EXCEPTIONS`, `PHASE_EVENT_PATTERN`, `isBrokerProtectedName`,
-  `phaseSlotOf`, `isAllowedPhaseSlot`. `router.mjs`'s `shouldSkipEvent` imports from here.
-- `plugins/dev/scripts/broker/namespace-parity.test.mjs` — exec-core producer parity: static-
-  constant event names + a `recovery.mjs` source-scan that snapshots the hardcoded phase-slot set.
-- `plugins/dev/scripts/orch-monitor/__tests__/namespace-parity.test.ts` — orch-monitor producer
-  parity: representative GitHub/Linear/service-health names + prefix-family invariant proof.
+- `plugins/dev/scripts/broker/namespace-contract.mjs` — single source of truth: `FORBIDDEN_PREFIXES`, `PROTECTED_EXACT_NAMES`, `KNOWN_PHASES`, `INTENTIONAL_PHASE_SLOT_EXCEPTIONS`, `PHASE_EVENT_PATTERN`, `isBrokerProtectedName`, `phaseSlotOf`, `isAllowedPhaseSlot`. `router.mjs`'s `shouldSkipEvent` imports from here.
+- `plugins/dev/scripts/broker/namespace-parity.test.mjs` — exec-core producer parity (static names + `recovery.mjs` source-scan).
+- `plugins/dev/scripts/orch-monitor/__tests__/namespace-parity.test.ts` — orch-monitor producer parity (GitHub/Linear/service-health names + prefix-family invariant).
 
-See `thoughts/shared/plans/2026-06-16-ctl-1142.md` §3.8 for the originating design.
+See `thoughts/shared/plans/2026-06-16-ctl-1142.md` §3.8.
 
 ## Context Management Principles
 
-1. **Context is precious** — Use specialized agents, not monoliths
-2. **Just-in-time loading** — Load context dynamically
-3. **Sub-agent architecture** — Parallel research > sequential
-4. **Structured persistence** — Save outside conversation (thoughts/)
-5. **Read files fully** — No partial reads of key documents
-6. **Wait for agents** — Don't proceed until research completes
+1. Context is precious — specialized agents, not monoliths.
+2. Just-in-time loading.
+3. Parallel sub-agents > sequential.
+4. Persist outside the conversation (thoughts/).
+5. Read key documents fully (no partial reads).
+6. Wait for agents before proceeding.
 
-## Artifact Persistence
+## Artifact Persistence (hybrid SQLite + filesystem, ADR-011)
 
-Orchestrator runs produce artifacts that must survive worktree and runtime-directory cleanup:
-SUMMARY.md, wave briefings, per-worker signal files and phase logs, rollup fragments, comms
-channels, and state.json. These are persisted into a **hybrid SQLite + filesystem archive**
-keyed by orchestrator id.
+Orchestrator runs produce artifacts that must survive worktree/runtime cleanup (SUMMARY.md, wave briefings, per-worker signal files + phase logs, rollup fragments, comms channels, state.json), archived keyed by orchestrator id.
 
-### Layout
+- **Index (SQLite)** — `~/catalyst/catalyst.db`, migration `003_archives.sql`: `orchestrators` (one row/orch), `archived_workers` (PK `orch_id,worker_id`), `archived_artifacts` (UNIQUE `orch_id,path`).
+- **Blobs (filesystem)** — `~/catalyst/archives/<orchId>/`: root `metadata.json`/`SUMMARY.md`/`rollup-briefing.md`; `briefings/wave-*.md`; `workers/<ticket>/{signal-final.json,phase-log.jsonl,SUMMARY.md,rollup-fragment.md}`; `comms/<channel>.jsonl`.
 
-- **Index (SQLite)** — `~/catalyst/catalyst.db`, three tables added by migration `003_archives.sql`:
-  - `orchestrators` — one row per archived orchestrator (status, counts, tickets, archive_path).
-  - `archived_workers` — one row per worker, composite PK (`orch_id`, `worker_id`).
-  - `archived_artifacts` — one row per blob, UNIQUE (`orch_id`, `path`) for idempotent upserts.
-- **Blobs (filesystem)** — `~/catalyst/archives/<orchId>/`:
-  - `metadata.json`, `SUMMARY.md`, `rollup-briefing.md` at the root
-  - `briefings/wave-*.md`
-  - `workers/<ticket>/{signal-final.json, phase-log.jsonl, SUMMARY.md, rollup-fragment.md}`
-  - `comms/<channel>.jsonl`
+**Filesystem-first invariant**: blobs land on disk (via `atomicWrite()` = tmp + `rename`) before any SQLite row; INSERTs run in a transaction after all FS writes succeed. So a failed SQLite write leaves recoverable files (picked up by `sync`); a mid-sweep crash leaves only deletable `.tmp` files; re-running is safe (all inserts are `ON CONFLICT … DO UPDATE`).
 
-### Write order (filesystem-first invariant)
-
-Every archive write follows the same rule: **blobs land on disk before SQLite rows exist**. Each
-file is written via `atomicWrite()` (tmp path + `rename`) and the SQLite INSERTs are wrapped in a
-transaction that runs *after* all filesystem writes succeed. The practical consequence:
-
-- If SQLite write fails, files remain on disk and can be picked up by `catalyst-archive sync`.
-- If the process crashes mid-sweep, partial `.tmp` files can be deleted; no row ever points at a
-  file that doesn't exist.
-- Re-running the sweep is safe: all inserts are `ON CONFLICT … DO UPDATE` upserts.
-
-### CLI (`plugins/dev/scripts/orch-monitor/catalyst-archive.ts`)
+**CLI** (`plugins/dev/scripts/orch-monitor/catalyst-archive.ts`, all accept `--dry-run`):
 
 ```
-bun catalyst-archive.ts sweep <orchId>         # archive a single orchestrator
-bun catalyst-archive.ts sync                   # reconcile FS ↔ SQLite (orphans, missing rows)
-bun catalyst-archive.ts prune --older-than 30d # delete archives older than N days
-bun catalyst-archive.ts list [--json]          # list archived orchestrators
-bun catalyst-archive.ts show <orchId>          # show detail (workers + artifacts)
+sweep <orchId>          # archive one orchestrator
+sync                    # reconcile FS ↔ SQLite (orphans, missing rows)
+prune --older-than 30d  # delete archives older than N days
+list [--json] | show <orchId>
 ```
 
-All subcommands accept `--dry-run`. Configuration comes from `.catalyst/config.json` (project
-layer) merged with `~/.config/catalyst/config.json` (user layer) via `archive.*` keys.
+Config from `.catalyst/config.json` merged with `~/.config/catalyst/config.json` via `archive.*` keys.
 
-### Monitor + UI
+**Monitor + UI** — orch-monitor read-only endpoints: `GET /api/archive/orchestrators` (paginated, since/until/ticket/status filters); `GET /api/archive/orchestrators/:id` (detail w/ workers+artifacts); `GET /api/archive/orchestrators/:id/files/:relPath+` (streams a file; paths validated via `isSafeArchivePart`/`isSafeArchiveFileRel` + `realpathSync` against `archive_path` to block symlink escapes — 403/400/404). The `/history` page renders an "Archived Orchestrators" section over these.
 
-The orch-monitor server exposes read-only endpoints:
-
-- `GET /api/archive/orchestrators` — paginated list with since/until/ticket/status filters.
-- `GET /api/archive/orchestrators/:id` — detail including workers + artifacts.
-- `GET /api/archive/orchestrators/:id/files/:relPath+` — streams an archived file. Paths are
-  validated with `isSafeArchivePart` / `isSafeArchiveFileRel` and a `realpathSync` check against
-  `archive_path` prevents symlink escapes (403 on violation, 400 on bad input, 404 on missing).
-
-The `/history` page includes an "Archived Orchestrators" section rendering these endpoints with
-expandable per-orch detail panels.
-
-### Lifecycle integration
-
-- **Orchestrate Phase 7** runs the sweep after the final SUMMARY.md is written and before any
-  worktree cleanup. Re-running is idempotent, so a retry is always safe.
-- **Teardown skill** (`/catalyst-dev:teardown <orchId>`) deletes runtime + worktree state but
-  refuses unless the archive exists and the SQLite row is present (bypass with `--force`).
+**Lifecycle** — Orchestrate Phase 7 runs the sweep after the final SUMMARY.md and before worktree cleanup (idempotent). The teardown skill (`/catalyst-dev:teardown <orchId>`) deletes runtime + worktree state but refuses unless the archive exists and the SQLite row is present (`--force` bypasses).
