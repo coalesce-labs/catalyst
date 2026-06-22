@@ -73,7 +73,7 @@ workflow relationships. Agent (subagent) references always use the full
 - `fix(pm): correct cycle calculation` — catalyst-pm patch bump
 - `feat(dev)!: breaking change` — catalyst-dev MAJOR bump
 - `chore(meta): update docs` — no version bump
-- Valid scopes: `dev`, `pm`, `meta`, `analytics`, `debugging`
+- Valid scopes (one per plugin): `dev`, `pm`, `meta`, `analytics`, `debugging`, `pm-ops`, `meeting-hygiene`, `discovery`, `legacy`, `foundry`
 
 **How release-please routes version bumps (monorepo):**
 
@@ -118,8 +118,8 @@ restarting your agent session.
 ## Orchestration
 
 Catalyst's **execution-core daemon** ships work as **phase-agent workers** — one short-lived
-background agent job per phase, walking a 9-phase pipeline (triage → research → plan → implement →
-verify → review → pr → monitor-merge → monitor-deploy). The legacy wave-orchestration model is
+background agent job per phase, walking a 10-phase pipeline (triage → research → plan → implement →
+verify → review → pr → monitor-merge → monitor-deploy → teardown). The legacy wave-orchestration model is
 preserved in the **catalyst-legacy** plugin as a fallback; the mode is selected by
 `.catalyst/config.json → catalyst.orchestration.dispatchMode`.
 
@@ -127,6 +127,15 @@ Cross-process communication is built on a **single unified event log** at
 `~/catalyst/events/YYYY-MM.jsonl`. Workers, the phase dispatcher, the broker, the webhook
 receiver, and `catalyst-comms send` all append; the broker daemon, the HUD, the orch-monitor web
 dashboard, and `catalyst-events wait-for` all read.
+
+## Pull requests
+
+A pull request is **not mergeable** until BOTH are true:
+
+- **All CI checks pass.** A failing or pending required check blocks the merge.
+- **Every review is resolved.** If the PR has any review (automated code review or human), each review thread/conversation must be addressed and marked resolved. An unresolved review blocks the merge even when checks are green.
+
+So after opening a PR: watch the checks to green, then address every review comment (push fixes), reply, and resolve each thread before considering the PR done.
 
 ## Reference Docs
 
