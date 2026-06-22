@@ -1,5 +1,18 @@
 # Changelog
 
+## [12.16.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.15.0...catalyst-dev-v12.16.0) (2026-06-22)
+
+
+### Features
+
+* **dev:** CTL-1300 — board-health delegate ACTS (holistic recovery-pass dispatch on enforce) ([#2301](https://github.com/coalesce-labs/catalyst/issues/2301)) ([43aaec9](https://github.com/coalesce-labs/catalyst/commit/43aaec90bc129d8e9b0996642f440aba55483762))
+* **dev:** CTL-1307 — machine-level CATALYST_CLOUD_TOKEN from catalyst-cluster repo ([#2316](https://github.com/coalesce-labs/catalyst/issues/2316)) ([9ff454d](https://github.com/coalesce-labs/catalyst/commit/9ff454dec3c314a74cbc1424eafa09a4c4e2d1fc))
+
+
+### Bug Fixes
+
+* **dev:** CTL-1302 — board-health selectAnchor prefers a self-owned ticket (multi-host) ([#2305](https://github.com/coalesce-labs/catalyst/issues/2305)) ([72e4945](https://github.com/coalesce-labs/catalyst/commit/72e49457fadd9ec975fbfaae692e96700f0e4e99))
+
 ## [12.15.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.14.0...catalyst-dev-v12.15.0) (2026-06-21)
 
 
