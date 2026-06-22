@@ -1003,28 +1003,40 @@ describe("checkReaper", () => {
     expect(checks[0].status).toBe(STATUS.WARN);
   });
 
-  it("FAILs when the baked program path no longer exists (CTL-1306 silent-death)", () => {
+  it("WARNs (never FAILs, so it can't block the join activation gate) when the baked program path no longer exists (CTL-1306 silent-death)", () => {
     const dead = "/private/tmp/pr1827-wt/plugins/dev/scripts/orphan-sweep.sh";
     const checks = checkReaper({
       readFile: () => reaperPlist(dead),
       fileExists: (p) => p !== dead,
-      lastExit: () => 127,
+      reaperState: () => ({ loaded: true, lastExit: 127 }),
     });
     expect(checks).toHaveLength(1);
     expect(checks[0].name).toBe("reaper-path");
-    expect(checks[0].status).toBe(STATUS.FAIL);
+    expect(checks[0].status).toBe(STATUS.WARN);
     expect(checks[0].detail).toContain(dead);
   });
 
-  it("FAILs when the baked path exists but last exit was 127", () => {
+  it("WARNs when the plist is present but launchd never loaded the job", () => {
     const p = "/Users/x/catalyst/plugin-source/plugins/dev/scripts/orphan-sweep.sh";
     const checks = checkReaper({
       readFile: () => reaperPlist(p),
       fileExists: () => true,
-      lastExit: () => 127,
+      reaperState: () => ({ loaded: false, lastExit: null }),
+    });
+    expect(checks).toHaveLength(1);
+    expect(checks[0].name).toBe("reaper-loaded");
+    expect(checks[0].status).toBe(STATUS.WARN);
+  });
+
+  it("WARNs (not FAILs) when the baked path exists but last exit was 127", () => {
+    const p = "/Users/x/catalyst/plugin-source/plugins/dev/scripts/orphan-sweep.sh";
+    const checks = checkReaper({
+      readFile: () => reaperPlist(p),
+      fileExists: () => true,
+      reaperState: () => ({ loaded: true, lastExit: 127 }),
     });
     expect(checks[0].name).toBe("reaper-health");
-    expect(checks[0].status).toBe(STATUS.FAIL);
+    expect(checks[0].status).toBe(STATUS.WARN);
   });
 
   it("WARNs on a non-zero, non-127 exit", () => {
@@ -1032,21 +1044,32 @@ describe("checkReaper", () => {
     const checks = checkReaper({
       readFile: () => reaperPlist(p),
       fileExists: () => true,
-      lastExit: () => 2,
+      reaperState: () => ({ loaded: true, lastExit: 2 }),
     });
     expect(checks[0].name).toBe("reaper-health");
     expect(checks[0].status).toBe(STATUS.WARN);
   });
 
-  it("PASSes when installed, baked path exists, and last exit is clean", () => {
+  it("PASSes when loaded, baked path exists, and last exit is clean", () => {
     const p = "/Users/x/catalyst/plugin-source/plugins/dev/scripts/orphan-sweep.sh";
     const checks = checkReaper({
       readFile: () => reaperPlist(p),
       fileExists: () => true,
-      lastExit: () => 0,
+      reaperState: () => ({ loaded: true, lastExit: 0 }),
     });
     expect(checks[0].name).toBe("reaper-health");
     expect(checks[0].status).toBe(STATUS.PASS);
     expect(checks[0].detail).toContain(p);
+  });
+
+  it("PASSes when loaded but never run yet (lastExit null)", () => {
+    const p = "/Users/x/catalyst/plugin-source/plugins/dev/scripts/orphan-sweep.sh";
+    const checks = checkReaper({
+      readFile: () => reaperPlist(p),
+      fileExists: () => true,
+      reaperState: () => ({ loaded: true, lastExit: null }),
+    });
+    expect(checks[0].name).toBe("reaper-health");
+    expect(checks[0].status).toBe(STATUS.PASS);
   });
 });

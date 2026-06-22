@@ -76,10 +76,15 @@ launchctl unload ~/Library/LaunchAgents/ai.coalesce.catalyst-orphan-sweep.plist
 
 ## Health check & troubleshooting
 
-`catalyst-doctor` asserts the reaper is healthy (CTL-1306): `reaper-installed`
-(WARN if the LaunchAgent is absent), `reaper-path` (FAIL if the baked program path
-no longer exists — the silent-death signature), and `reaper-health` (FAIL on a
-`LastExit` of 127).
+`catalyst-doctor` asserts the reaper is healthy (CTL-1306). Every reaper check is
+a **WARN**, never a FAIL — the doctor's exit code gates the `catalyst-join`
+activation gate, which runs *before* `install-services` would reinstall a stale
+plist, so a FAILing reaper check would block a node from self-healing via join:
+`reaper-installed` (WARN if the LaunchAgent is absent), `reaper-path` (WARN if the
+baked program path no longer exists — the silent-death signature), `reaper-loaded`
+(WARN if the plist is present but launchd never loaded the job), and
+`reaper-health` (WARN on a `LastExit` of 127 or any other non-zero exit). A
+loaded job with `LastExit` 0 (or that has never run yet) is `reaper-health` PASS.
 
 - **`launchctl list | grep orphan-sweep` shows exit 127**, log full of
   `No such file or directory` → the baked path was deleted. Re-point from the
