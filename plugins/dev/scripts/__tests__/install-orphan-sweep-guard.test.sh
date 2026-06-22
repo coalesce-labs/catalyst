@@ -58,5 +58,25 @@ REAL="$SCRATCH/realclone/plugins/dev/scripts"; mkdir -p "$REAL"
 out="$(run_guard "$REAL")"
 [[ "$out" != *"refusing to install from an ephemeral path"* ]] && pass "allows a stable non-ephemeral dir" || fail "should NOT refuse a stable dir: $out"
 
+# 5. macOS $TMPDIR (/var/folders) path → refuse
+out="$(run_guard /var/folders/xx/abc/T/foo/plugins/dev/scripts)"; rc=$?
+[[ $rc -ne 0 && "$out" == *"ephemeral path"* ]] && pass "refuses a /var/folders temp path" || fail "should refuse /var/folders path (rc=$rc)"
+
+# 6. ARRAY-form pluginDirs is honored (normalized to .[0]) — the installer must
+#    resolve the pristine clone from a polymorphic pluginDirs, not just a string.
+PRISTINE="$SCRATCH/pristine/plugins/dev"
+mkdir -p "$PRISTINE/scripts/orch-monitor/dist"
+touch "$PRISTINE/scripts/orphan-sweep.sh"
+cp "${REPO_ROOT}/plugins/dev/scripts/orch-monitor/dist/ai.coalesce.catalyst-orphan-sweep.plist" \
+   "$PRISTINE/scripts/orch-monitor/dist/" 2>/dev/null
+cfg="$SCRATCH/config.json"
+printf '{"catalyst":{"orchestration":{"pluginDirs":["%s"]}}}\n' "$PRISTINE" > "$cfg"
+out="$(CATALYST_LAYER2_CONFIG_FILE="$cfg" bash "$INSTALLER" --print-only 2>&1)"
+if [[ "$out" == *"${PRISTINE}/scripts/orphan-sweep.sh"* ]]; then
+  pass "honors array-form pluginDirs (resolves .[0] pristine clone)"
+else
+  fail "array-form pluginDirs not honored: $out"
+fi
+
 echo "  ${PASSES} passed, ${FAILURES} failed"
 [[ $FAILURES -eq 0 ]]

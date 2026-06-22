@@ -40,7 +40,9 @@ _pristine_scripts_dir() {
   local cfg="${CATALYST_LAYER2_CONFIG_FILE:-${HOME}/.config/catalyst/config.json}"
   [[ -f "$cfg" ]] && command -v jq >/dev/null 2>&1 || return 0
   local pd
-  pd="$(jq -r '.catalyst.orchestration.pluginDirs // empty' "$cfg" 2>/dev/null || true)"
+  # pluginDirs is polymorphic (join-bundle.mjs:61): a string, or an array whose
+  # first element is the active dir. Normalize both to a single path.
+  pd="$(jq -r '.catalyst.orchestration.pluginDirs | if type=="array" then .[0] elif type=="string" then . else empty end' "$cfg" 2>/dev/null || true)"
   # pluginDirs points at <clone>/plugins/dev; orphan-sweep.sh lives under scripts/.
   [[ -n "$pd" && -f "${pd}/scripts/orphan-sweep.sh" ]] && echo "${pd}/scripts"
 }
@@ -52,7 +54,7 @@ _pristine_scripts_dir() {
 _is_ephemeral_dir() {
   local d="$1"
   case "$d" in
-    /private/tmp/*|/tmp/*|*/.Trash/*) return 0 ;;
+    /private/tmp/*|/tmp/*|/var/tmp/*|/var/folders/*|*/.Trash/*) return 0 ;;
   esac
   command -v git >/dev/null 2>&1 || return 1
   local gd
