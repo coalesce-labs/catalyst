@@ -21,9 +21,14 @@ export function ThresholdsAppendix() {
     fetch("/api/beliefs/cfg")
       .then((r) => {
         if (!r.ok) throw new Error(`${r.status}`);
-        return r.json() as Promise<{ cfg: CfgRow[] }>;
+        // CTL-1317: the server returns { rows } (server.ts /api/beliefs/cfg), NOT
+        // { cfg }. Reading the wrong key set rows = undefined, which slipped past
+        // the `rows === null` guard below and crashed on rows.length (#185-adjacent
+        // TypeError on every /rules visit). Read `rows`, and fall back to [] so a
+        // future shape drift degrades to "no thresholds" instead of crashing.
+        return r.json() as Promise<{ rows?: CfgRow[] }>;
       })
-      .then((d) => setRows(d.cfg))
+      .then((d) => setRows(d.rows ?? []))
       .catch(() => setUnavailable(true));
   }, []);
 
@@ -34,7 +39,7 @@ export function ThresholdsAppendix() {
       </p>
       {unavailable ? (
         <p className="text-xs text-muted-foreground">Thresholds unavailable.</p>
-      ) : rows === null ? (
+      ) : rows == null ? (
         <p className="text-xs text-muted-foreground">Loading…</p>
       ) : rows.length === 0 ? (
         <p className="text-xs text-muted-foreground">No thresholds configured.</p>
