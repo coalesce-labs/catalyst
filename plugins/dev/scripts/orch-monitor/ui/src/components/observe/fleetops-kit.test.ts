@@ -16,6 +16,7 @@ import {
   hostWorkerCount,
   shortHostName,
   nodeStatusVar,
+  daemonCell,
   SILENCE_STALL_MS,
   type ReapWorkerInput,
 } from "./fleetops-kit";
@@ -244,5 +245,46 @@ describe("hostWorkerCount / shortHostName / nodeStatusVar — host-matrix helper
     expect(nodeStatusVar("live")).toBe("var(--chart-2)");
     expect(nodeStatusVar("degraded")).toBe("var(--chart-3)");
     expect(nodeStatusVar("offline")).toBe("var(--chart-4)");
+  });
+});
+
+describe("daemonCell — admission-aware Daemon cell (CTL-1322)", () => {
+  it("a live node accepting work reads 'live' (green), no title", () => {
+    const cell = daemonCell(node({ status: "live", accepting: true, holdReason: null }));
+    expect(cell.label).toBe("live");
+    expect(cell.color).toBe("var(--chart-2)");
+    expect(cell.title).toBeUndefined();
+  });
+
+  it("a live-but-holding node reads 'holding (<reason>)' in amber — the blind spot", () => {
+    const drain = daemonCell(node({ status: "live", accepting: false, holdReason: "drain" }));
+    expect(drain.label).toBe("holding (drain)");
+    expect(drain.color).toBe("var(--chart-3)"); // amber/warn, NOT red
+    expect(drain.title).toContain("not accepting");
+    const cold = daemonCell(node({ status: "live", accepting: false, holdReason: "liveness-cold" }));
+    expect(cold.label).toBe("holding (liveness-cold)");
+  });
+
+  it("holding with no reason falls back to bare 'holding'", () => {
+    const cell = daemonCell(node({ status: "live", accepting: false, holdReason: null }));
+    expect(cell.label).toBe("holding");
+  });
+
+  it("offline ALWAYS wins — a dead daemon is 'OFFLINE', never 'holding'", () => {
+    const cell = daemonCell(node({ status: "offline", accepting: false, holdReason: "drain" }));
+    expect(cell.label).toBe("OFFLINE");
+    expect(cell.color).toBe("var(--chart-4)");
+  });
+
+  it("absent accepting (remote peer / unknown) → plain liveness word, never a false hold", () => {
+    expect(daemonCell(node({ status: "live" })).label).toBe("live");
+    expect(daemonCell(node({ status: "degraded" })).label).toBe("degraded");
+  });
+
+  it("a degraded node holding work shows the liveness word 'degraded' (liveness wins, matches footer)", () => {
+    const cell = daemonCell(node({ status: "degraded", accepting: false, holdReason: "drain" }));
+    expect(cell.label).toBe("degraded");
+    expect(cell.color).toBe("var(--chart-3)"); // degraded is amber too, but it's the liveness word
+    expect(cell.title).toBeUndefined();
   });
 });

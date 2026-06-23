@@ -180,3 +180,113 @@ describe("createClusterEntity forwards capacityReader + aliases through project(
     expect(view.nodes.find((n) => n.host === "mini")?.status).toBe("live");
   });
 });
+
+describe("assembleClusterView admissionReader seam (CTL-1322)", () => {
+  it("attaches accepting/holdReason via admissionReader", () => {
+    const view = assembleClusterView({
+      board: board([ticket("CTL-1")]),
+      hosts: ["mini", "laptop"],
+      heartbeats: { mini: "2026-06-13T10:00:00Z", laptop: "2026-06-13T10:00:00Z" },
+      admissionReader: (h) =>
+        h === "mini" ? { accepting: false, holdReason: "drain" } : { accepting: true, holdReason: null },
+      now,
+    });
+    expect(view.nodes.find((n) => n.host === "mini")).toMatchObject({ accepting: false, holdReason: "drain" });
+    expect(view.nodes.find((n) => n.host === "laptop")).toMatchObject({ accepting: true, holdReason: null });
+  });
+
+  it("offline node → accepting:false, holdReason:null (never a stale hold word)", () => {
+    const view = assembleClusterView({
+      board: board([ticket("CTL-1")]),
+      hosts: ["mini", "laptop"],
+      heartbeats: { mini: "2026-06-13T10:00:00Z" }, // laptop missing → offline
+      admissionReader: () => ({ accepting: true, holdReason: null }),
+      now,
+    });
+    const laptop = view.nodes.find((n) => n.host === "laptop");
+    expect(laptop?.status).toBe("offline");
+    expect(laptop).toMatchObject({ accepting: false, holdReason: null });
+  });
+
+  it("admissionReader absent → no admission fields (backward compat → renders live)", () => {
+    const view = assembleClusterView({
+      board: board([ticket("CTL-1")]),
+      hosts: ["mini"],
+      heartbeats: { mini: "2026-06-13T10:00:00Z" },
+      now,
+    });
+    const mini = view.nodes.find((n) => n.host === "mini");
+    expect(mini).toBeDefined();
+    expect(mini).not.toHaveProperty("accepting");
+    expect(mini).not.toHaveProperty("holdReason");
+  });
+
+  it("admissionReader returning null / throwing → no admission fields (fail-open)", () => {
+    const viaNull = assembleClusterView({
+      board: board([ticket("CTL-1")]),
+      hosts: ["mini"],
+      heartbeats: { mini: "2026-06-13T10:00:00Z" },
+      admissionReader: () => null,
+      now,
+    });
+    expect(viaNull.nodes.find((n) => n.host === "mini")).not.toHaveProperty("accepting");
+    const viaThrow = assembleClusterView({
+      board: board([ticket("CTL-1")]),
+      hosts: ["mini"],
+      heartbeats: { mini: "2026-06-13T10:00:00Z" },
+      admissionReader: () => {
+        throw new Error("boom");
+      },
+      now,
+    });
+    expect(viaThrow.nodes.find((n) => n.host === "mini")).not.toHaveProperty("accepting");
+  });
+});
+
+describe("deriveClusterSignal admission pass-through (CTL-1322)", () => {
+  it("preserves accepting/holdReason on signal nodes; omits effectiveCapacity/activeWorkers", async () => {
+    const { deriveClusterSignal } = await import("../lib/cluster-signal.mjs");
+    const view = assembleClusterView({
+      board: board([ticket("CTL-1")]),
+      hosts: ["mini"],
+      heartbeats: { mini: "2026-06-13T10:00:00Z" },
+      admissionReader: () => ({ accepting: false, holdReason: "liveness-cold" }),
+      now,
+    });
+    const sig = deriveClusterSignal(view);
+    expect(sig.nodes[0]).toMatchObject({ host: "mini", accepting: false, holdReason: "liveness-cold" });
+    expect(sig.nodes[0]).not.toHaveProperty("effectiveCapacity");
+    expect(sig.nodes[0]).not.toHaveProperty("activeWorkers");
+  });
+
+  it("a node without admission omits both fields (frame stays tiny + back-compat)", async () => {
+    const { deriveClusterSignal } = await import("../lib/cluster-signal.mjs");
+    const view = assembleClusterView({
+      board: board([ticket("CTL-1")]),
+      hosts: ["mini"],
+      heartbeats: { mini: "2026-06-13T10:00:00Z" },
+      now,
+    });
+    const sig = deriveClusterSignal(view);
+    expect(sig.nodes[0]).not.toHaveProperty("accepting");
+    expect(sig.nodes[0]).not.toHaveProperty("holdReason");
+  });
+});
+
+// CTL-1322 REGRESSION GUARD — the SAME prod-dead class as CTL-1092. createClusterEntity
+// must FORWARD admissionReader into assembleClusterView in project(); the seam tests
+// above pass even if the forward is dropped. This test fails the instant the forward at
+// cluster-view.mjs project() is removed.
+describe("createClusterEntity forwards admissionReader through project() (CTL-1322)", () => {
+  it("surfaces per-node accepting/holdReason via project() — proves the forward, not just the seam", async () => {
+    const entity = createClusterEntity({
+      ownerHostProvider: () => ({ "CTL-1": "mini" }),
+      rosterProvider: () => ["mini"],
+      heartbeatReader: () => ({ mini: new Date(now - 1000).toISOString() }),
+      admissionReader: (h) => (h === "mini" ? { accepting: false, holdReason: "drain" } : null),
+      now: () => now,
+    });
+    const view = await entity.project(board([ticket("CTL-1")]));
+    expect(view.nodes.find((n) => n.host === "mini")).toMatchObject({ accepting: false, holdReason: "drain" });
+  });
+});

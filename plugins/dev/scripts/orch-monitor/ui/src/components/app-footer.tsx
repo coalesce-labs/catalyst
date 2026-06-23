@@ -80,6 +80,14 @@ export function AppFooter() {
         for (const n of cluster?.nodes ?? []) {
           if (n.status === "offline" || n.status === "degraded") {
             out.push(nodeStatusLabel(n.host, n.status));
+          } else if (n.accepting === false) {
+            // CTL-1322: a live-but-holding node (drain / liveness-cold) never appears
+            // via the offline/degraded branch — surface it so an operator sees the node
+            // is up but admitting no work. else-if so a node that is BOTH degraded and
+            // holding reports only the worse (degraded) line. worstSeverity (above) is
+            // deliberately NOT bumped: a drain is operator intent, not a fleet alarm —
+            // the pill stays healthy, only the tooltip gains the line (the calm choice).
+            out.push(`${n.host} holding${n.holdReason ? ` (${n.holdReason})` : ""}`);
           }
         }
         if (nav && nav.daemon !== "healthy") out.push(daemonLabel(nav.daemon));

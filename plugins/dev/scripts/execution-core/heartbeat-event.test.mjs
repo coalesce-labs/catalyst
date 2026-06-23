@@ -151,6 +151,28 @@ describe("startHeartbeat (CTL-859)", () => {
       h.stop();
     }
   });
+
+  test("CTL-1322: forwards admissionFn + governanceFn through the tick to the appended line", async () => {
+    process.env.CATALYST_HOST_NAME = "mini";
+    const h = startHeartbeat({
+      intervalMs: 1_000_000,
+      logPath,
+      admissionFn: () => ({ accepting: false, holdReason: "drain", effectiveCapacity: 0, activeWorkers: 0 }),
+      governanceFn: () => ({ beliefsShadow: true }),
+    });
+    try {
+      await h.started;
+      // Guards the startHeartbeat→emitHeartbeatEvent forward — the actual production
+      // path. A dropped seam in tick() would otherwise silently emit admission:null in
+      // prod while the rest of the suite stays green (the half-wired-field class).
+      const line = JSON.parse(readFileSync(logPath, "utf8").trim().split("\n")[0]);
+      expect(line.body.payload.admission.holdReason).toBe("drain");
+      expect(line.body.payload.admission.accepting).toBe(false);
+      expect(line.body.payload.governance.beliefsShadow).toBe(true);
+    } finally {
+      h.stop();
+    }
+  });
 });
 
 describe("readClusterHeartbeats (CTL-859)", () => {
@@ -283,5 +305,59 @@ describe("heartbeat governance block (CTL-1062)", () => {
     const env = buildHeartbeatEnvelope();
     expect(typeof env.body.payload.governance).toBe("object");
     expect(env.body.payload.governance).toHaveProperty("beliefsShadow");
+  });
+});
+
+describe("heartbeat admission block (CTL-1322)", () => {
+  test("payload carries the injected admission state", () => {
+    const env = buildHeartbeatEnvelope({
+      admissionFn: () => ({ accepting: false, holdReason: "drain", effectiveCapacity: 0, activeWorkers: 6 }),
+    });
+    expect(env.body.payload.admission).toEqual({
+      accepting: false, holdReason: "drain", effectiveCapacity: 0, activeWorkers: 6,
+    });
+  });
+
+  test("admission is null when no admissionFn is injected (key always present for consumers)", () => {
+    const env = buildHeartbeatEnvelope({ epochFn: () => 1700000000000 });
+    expect(env.body.payload).toHaveProperty("admission");
+    expect(env.body.payload.admission).toBe(null);
+  });
+
+  test("still carries host.name + epoch + governance alongside admission (no regression)", () => {
+    process.env.CATALYST_HOST_NAME = "mini";
+    const env = buildHeartbeatEnvelope({
+      epochFn: () => 1700000000000,
+      governanceFn: () => ({ beliefsShadow: true }),
+      admissionFn: () => ({ accepting: true, holdReason: null, effectiveCapacity: 6, activeWorkers: 1 }),
+    });
+    expect(env.body.payload["host.name"]).toBe("mini");
+    expect(env.body.payload.epoch).toBe(1700000000000);
+    expect(env.body.payload.governance).toEqual({ beliefsShadow: true });
+    expect(env.body.payload.admission.accepting).toBe(true);
+  });
+});
+
+// CTL-1322: emitHeartbeatEvent previously dropped governanceFn (and had no way to
+// forward admissionFn), so an injected seam never reached buildHeartbeatEnvelope on
+// the production startHeartbeat path — only the builder's default reader ran. Assert
+// both seams now flow through to the appended line.
+describe("emitHeartbeatEvent forwards governanceFn + admissionFn (CTL-1322 seam fix)", () => {
+  let tmp;
+  beforeEach(() => { tmp = mkdtempSync(join(tmpdir(), "hb-seam-")); });
+  afterEach(() => { rmSync(tmp, { recursive: true, force: true }); });
+
+  test("the appended heartbeat line carries the injected governance + admission", async () => {
+    const logPath = join(tmp, "events.jsonl");
+    const ok = await emitHeartbeatEvent({
+      logPath,
+      governanceFn: () => ({ beliefsShadow: true, intentsEnforce: false }),
+      admissionFn: () => ({ accepting: false, holdReason: "liveness-cold", effectiveCapacity: 0, activeWorkers: 0 }),
+    });
+    expect(ok).toBe(true);
+    const line = JSON.parse(readFileSync(logPath, "utf8").trim());
+    expect(line.body.payload.governance.beliefsShadow).toBe(true);
+    expect(line.body.payload.admission.holdReason).toBe("liveness-cold");
+    expect(line.body.payload.admission.accepting).toBe(false);
   });
 });

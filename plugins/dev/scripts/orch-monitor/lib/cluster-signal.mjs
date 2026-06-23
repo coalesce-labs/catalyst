@@ -27,6 +27,8 @@
  * @typedef {object} ClusterSignalNode
  * @property {string} host    the roster host name (the node label)
  * @property {ClusterNodeStatus} status  the node's heartbeat-overlay liveness
+ * @property {boolean} [accepting]  CTL-1322: local node's new-work admission (absent ⇒ unknown/live)
+ * @property {"drain"|"liveness-cold"|null} [holdReason]  CTL-1322: why a non-accepting node is held
  */
 
 /**
@@ -57,6 +59,11 @@ export function deriveClusterSignal(view) {
     if (n.maxParallel != null) node.maxParallel = n.maxParallel;
     if (n.inFlightCount != null) node.inFlightCount = n.inFlightCount;
     if (n.freeSlots != null) node.freeSlots = n.freeSlots;
+    // CTL-1322: per-node admission (local node only). Conditional-copy keeps the SSE
+    // frame tiny + back-compat — a node without admission omits both fields so the UI
+    // renders "live". effectiveCapacity/activeWorkers are intentionally NOT projected.
+    if (typeof n.accepting === "boolean") node.accepting = n.accepting;
+    if (n.holdReason != null) node.holdReason = n.holdReason;
     projected.push(node);
   }
   return {

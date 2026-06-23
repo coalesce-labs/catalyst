@@ -107,6 +107,32 @@ describe("startDaemon boot drain policy (CTL-1321)", () => {
   });
 });
 
+// CTL-1322: the daemon must supply an admissionFn to startHeartbeat so each
+// node.heartbeat carries the live admission block. Without this wiring the
+// heartbeat admission would silently be null in production — the same "field is
+// half-wired → silent no-op" class the ticket exists to prevent.
+describe("startDaemon heartbeat admission wiring (CTL-1322)", () => {
+  test("passes an admissionFn to startHeartbeat that returns the admission shape", () => {
+    let captured = null;
+    startDaemon({
+      recover: () => ({}),
+      reconcileBoot: () => ({}),
+      startMonitor: () => {},
+      startScheduler: () => {},
+      startHeartbeat: (opts) => { captured = opts; return { stop() {}, started: Promise.resolve() }; },
+      watchRegistry: false,
+    });
+    expect(captured).not.toBe(null);
+    expect(typeof captured.admissionFn).toBe("function");
+    let admission;
+    expect(() => { admission = captured.admissionFn(); }).not.toThrow();
+    expect(admission).toHaveProperty("accepting");
+    expect(admission).toHaveProperty("holdReason");
+    expect(admission).toHaveProperty("effectiveCapacity");
+    expect(admission).toHaveProperty("activeWorkers");
+  });
+});
+
 describe("startDaemon", () => {
   test("calls recover, boot, startMonitor, startScheduler exactly once each in order", () => {
     const calls = [];

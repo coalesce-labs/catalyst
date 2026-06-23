@@ -21,6 +21,10 @@ export interface ClusterNode {
   freeSlots?: number;
   /** CTL-1095: drain state. Present when drainReader is wired. */
   draining?: boolean;
+  /** CTL-1322: admission state from the node.heartbeat block. Present when admissionReader
+   *  is wired (LOCAL node only — remote peers omit it and render "live"). */
+  accepting?: boolean;
+  holdReason?: "drain" | "liveness-cold" | null;
 }
 
 export interface ClusterView {
@@ -47,6 +51,10 @@ export interface AssembleClusterViewArgs extends LivenessThresholds {
     | null;
   /** CTL-1092: host alias map { oldName → pinnedName } for collapsing pre-pin heartbeat keys. */
   aliases?: Record<string, string> | null;
+  /** CTL-1322: per-host admission reader → { accepting, holdReason }. */
+  admissionReader?:
+    | ((host: string) => { accepting?: boolean; holdReason?: "drain" | "liveness-cold" | null } | null | undefined)
+    | null;
 }
 
 export function assembleClusterView(args: AssembleClusterViewArgs): ClusterView;
@@ -68,6 +76,10 @@ export interface ClusterEntityDeps {
   aliases?: Record<string, string> | null;
   /** CTL-1095: live drain reader, forwarded to assembleClusterView. */
   drainReader?: ((host: string) => { draining?: boolean; inFlightCount?: number } | null | undefined) | null;
+  /** CTL-1322: live admission reader, forwarded to assembleClusterView. */
+  admissionReader?:
+    | ((host: string) => { accepting?: boolean; holdReason?: "drain" | "liveness-cold" | null } | null | undefined)
+    | null;
   /** Injected clock for tests. */
   now?: () => number;
 }

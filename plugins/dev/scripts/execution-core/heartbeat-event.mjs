@@ -41,13 +41,20 @@ export const HEARTBEAT_EVENT = "node.heartbeat";
  * @param {Function} [opts.now]  injectable timestamp fn (returns ISO string)
  * @param {Function} [opts.epochFn]  injectable epoch fn (returns ms number)
  * @param {Function} [opts.governanceFn]  injectable governance snapshot fn (CTL-1062)
+ * @param {Function} [opts.admissionFn]  injectable admission-state fn (CTL-1322); the
+ *   daemon supplies a closure over orchDir + concurrency. null when not supplied.
  * @returns {object} the envelope object
  */
-export function buildHeartbeatEnvelope({ now, epochFn, governanceFn } = {}) {
+export function buildHeartbeatEnvelope({ now, epochFn, governanceFn, admissionFn } = {}) {
   const ts = now ? now() : new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
   const epoch = epochFn ? epochFn() : Date.now();
   const host = getHostName();
   const governance = governanceFn ? governanceFn() : readGovernanceConfig();
+  // CTL-1322: live admission state — { accepting, holdReason, effectiveCapacity,
+  // activeWorkers } — so a draining/liveness-cold daemon is visible in telemetry
+  // instead of hidden behind a healthy heartbeat. Supplied by the daemon; null for
+  // non-daemon callers/tests so the key is always present for consumers.
+  const admission = admissionFn ? admissionFn() : null;
 
   return {
     ts,
@@ -77,6 +84,7 @@ export function buildHeartbeatEnvelope({ now, epochFn, governanceFn } = {}) {
         "host.name": host,
         epoch,
         governance, // CTL-1062: live governance snapshot for operator visibility
+        admission, // CTL-1322: live new-work admission state (accepting + holdReason)
       },
     },
   };
@@ -88,8 +96,17 @@ export function buildHeartbeatEnvelope({ now, epochFn, governanceFn } = {}) {
  * throws). `logPath` is injectable for tests; defaults to the same
  * getEventLogPath() every other emitter uses (no new log path).
  */
-export async function emitHeartbeatEvent({ logPath = getEventLogPath(), now, epochFn } = {}) {
-  const line = `${JSON.stringify(buildHeartbeatEnvelope({ now, epochFn }))}\n`;
+export async function emitHeartbeatEvent({
+  logPath = getEventLogPath(),
+  now,
+  epochFn,
+  // CTL-1322: thread the injectable seams through to the builder. The prior signature
+  // didn't accept governanceFn (a dormant seam gap), so an injected governanceFn never
+  // reached buildHeartbeatEnvelope from here; now both governanceFn + admissionFn flow.
+  governanceFn,
+  admissionFn,
+} = {}) {
+  const line = `${JSON.stringify(buildHeartbeatEnvelope({ now, epochFn, governanceFn, admissionFn }))}\n`;
   try {
     await mkdir(dirname(logPath), { recursive: true });
     await appendFile(logPath, line);
@@ -109,15 +126,17 @@ export async function emitHeartbeatEvent({ logPath = getEventLogPath(), now, epo
  * @param {object} [opts]
  * @param {number} [opts.intervalMs]  cadence; defaults to HEARTBEAT_INTERVAL_MS
  * @param {string} [opts.logPath]     event-log path (injectable for tests)
+ * @param {Function} [opts.admissionFn]  CTL-1322: live admission-state fn (daemon-supplied)
+ * @param {Function} [opts.governanceFn] CTL-1062: live governance snapshot fn (optional override)
  */
-export function startHeartbeat({ intervalMs = HEARTBEAT_INTERVAL_MS, logPath } = {}) {
+export function startHeartbeat({ intervalMs = HEARTBEAT_INTERVAL_MS, logPath, admissionFn, governanceFn } = {}) {
   const tick = () => {
     // CTL-1280: deterministic liveness heartbeat to daemon.log (Alloy→Loki),
     // riding the same cadence as the node.heartbeat event but on the .log stream
     // so a liveness check can watch the heartbeat marker independent of the
     // otel-forward event pipeline (a quiet-but-healthy daemon must still prove it).
     logDaemonHeartbeat(log, "execution-core");
-    return emitHeartbeatEvent({ logPath }).catch(() => {});
+    return emitHeartbeatEvent({ logPath, admissionFn, governanceFn }).catch(() => {});
   };
   const started = tick(); // emit once at boot; Promise for callers that need to await it
   const timer = setInterval(tick, intervalMs);

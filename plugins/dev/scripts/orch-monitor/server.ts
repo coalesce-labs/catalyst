@@ -1303,8 +1303,15 @@ export function createServer(opts: CreateServerOptions): BunServer {
     max_parallel?: number | null;
     in_flight_count?: number;
   };
+  type NodeAdmission = {
+    accepting: boolean;
+    holdReason: "drain" | "liveness-cold" | null;
+    effectiveCapacity: number;
+    activeWorkers: number;
+  };
   let daemonDepsPromise: Promise<{
     readClusterHeartbeats: (opts: { logPath?: string }) => Record<string, string>;
+    readClusterAdmission: (opts: { logPath?: string }) => Record<string, NodeAdmission>;
     getHostName: () => string;
     getClusterHosts: () => string[];
     getLivenessAnchorIssue: () => string | null;
@@ -1319,7 +1326,10 @@ export function createServer(opts: CreateServerOptions): BunServer {
           const configMod = ["..", "execution-core", "config.mjs"].join("/");
           const heartbeatSyncMod = ["..", "execution-core", "cluster-heartbeat-sync.mjs"].join("/");
           const [recovery, config, heartbeatSync, navSignal] = await Promise.all([
-            import(recoveryMod) as Promise<{ readClusterHeartbeats: (opts: { logPath?: string }) => Record<string, string> }>,
+            import(recoveryMod) as Promise<{
+              readClusterHeartbeats: (opts: { logPath?: string }) => Record<string, string>;
+              readClusterAdmission: (opts: { logPath?: string }) => Record<string, NodeAdmission>;
+            }>,
             import(configMod) as Promise<{
               getHostName: () => string;
               getClusterHosts: () => string[];
@@ -1332,6 +1342,7 @@ export function createServer(opts: CreateServerOptions): BunServer {
           ]);
           return {
             readClusterHeartbeats: recovery.readClusterHeartbeats,
+            readClusterAdmission: recovery.readClusterAdmission,
             getHostName: config.getHostName,
             getClusterHosts: config.getClusterHosts,
             getLivenessAnchorIssue: config.getLivenessAnchorIssue,
@@ -1491,11 +1502,36 @@ export function createServer(opts: CreateServerOptions): BunServer {
   const anchorCapacityCache: {
     map: Record<string, { maxParallel: number; inFlightCount: number }>;
   } = { map: {} };
+  // CTL-1322: LOCAL-node admission cache, read from the local event log's
+  // node.heartbeat admission block (readClusterAdmission). Local-only by design —
+  // the anchor transport carries no admission field, so remote peers stay absent
+  // here and render "live". Refreshed on the same poll as the anchor caches, but
+  // populated BEFORE the no-anchor early-return so it works single-host too.
+  const localAdmissionCache: { map: Record<string, NodeAdmission> } = { map: {} };
   let execCoreDeps: Awaited<ReturnType<typeof loadDaemonDeps>> = null;
   let anchorPollTimer: ReturnType<typeof setInterval> | null = null;
   const pollAnchorHeartbeats = (): void => {
     try {
       if (!execCoreDeps) return;
+      // CTL-1322: refresh local-node admission from the local event log. Runs BEFORE
+      // the no-anchor early-return so single-host installs (no anchor) still surface
+      // their own daemon's hold. The raw heartbeat host key can be an un-pinned OS
+      // hostname (pre-CTL-1093), so fold it through the SAME alias map
+      // assembleClusterView uses — otherwise admissionReader, queried with the PINNED
+      // display name, would miss the raw-keyed entry and the hold would render "live"
+      // (mirrors cluster-view.mjs's lastSeen alias-folding). hostAliases is captured by
+      // closure and resolved at call time (the first poll runs after setup completes).
+      // Fail-open: keep the last cache on any error.
+      try {
+        const rawAdmission = execCoreDeps.readClusterAdmission({}) ?? {};
+        const foldedAdmission: Record<string, NodeAdmission> = {};
+        for (const [host, adm] of Object.entries(rawAdmission)) {
+          foldedAdmission[resolveHostAlias(host, hostAliases)] = adm;
+        }
+        localAdmissionCache.map = foldedAdmission;
+      } catch {
+        /* keep last admission cache */
+      }
       const anchor = execCoreDeps.getLivenessAnchorIssue();
       if (!anchor) {
         anchorHeartbeatCache.map = {}; // no anchor configured → no peers
@@ -1575,6 +1611,14 @@ export function createServer(opts: CreateServerOptions): BunServer {
     capacityReader: (host: string) => {
       const resolved = resolveHostAlias(host, hostAliases);
       return anchorCapacityCache.map[resolved] ?? anchorCapacityCache.map[host] ?? null;
+    },
+    // CTL-1322: live per-node admission from the LOCAL event log (the self host).
+    // Only the local node is in localAdmissionCache → a remote host resolves to null
+    // → resolveAdmission contributes no fields → the peer renders "live" (honest
+    // "unknown", not a false hold). The self host gets accurate accepting/holdReason.
+    admissionReader: (host: string) => {
+      const resolved = resolveHostAlias(host, hostAliases);
+      return localAdmissionCache.map[resolved] ?? localAdmissionCache.map[host] ?? null;
     },
   });
   const readClusterView = async (board: BoardPayload): Promise<ClusterView> => {

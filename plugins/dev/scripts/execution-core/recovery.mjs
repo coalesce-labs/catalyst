@@ -3049,6 +3049,54 @@ export function readClusterHeartbeats({
   return lastSeen;
 }
 
+// CTL-1322: readClusterAdmission — sibling of readClusterHeartbeats that extracts
+// the per-node ADMISSION block (accepting / holdReason / effectiveCapacity /
+// activeWorkers, written by heartbeat-event.mjs at body.payload.admission) so the
+// orch-monitor can surface a draining/liveness-cold-but-live daemon instead of
+// rendering it "live". LOCAL event log ONLY — no cross-host peer merge: the anchor
+// liveness transport carries no admission field yet, so a remote node's hold is
+// unknowable here and such peers render as "unknown"/live (never a false hold).
+// Keeps the NEWEST heartbeat line's admission per host (ISO ts sorts
+// lexicographically for the local second-precision log), so a fresh accepting:true
+// overrides an earlier hold, and a fresh admission:null clears a stale one. A host
+// whose newest admission is null/absent is omitted. Best-effort/fail-open: missing
+// or unreadable log → {}; malformed lines skipped; never throws. `logPath`
+// injectable for tests.
+export function readClusterAdmission({ logPath = getEventLogPath() } = {}) {
+  const byHost = {}; // host -> { ts, admission|null }
+  let raw;
+  try {
+    raw = readFileSync(logPath, "utf8");
+  } catch {
+    return {}; // no event log yet
+  }
+  for (const line of raw.split("\n")) {
+    if (!line) continue;
+    if (!line.includes(HEARTBEAT_EVENT)) continue; // cheap pre-filter
+    let evt;
+    try {
+      evt = JSON.parse(line);
+    } catch {
+      continue; // partial/garbage line
+    }
+    if (evt?.attributes?.["event.name"] !== HEARTBEAT_EVENT) continue;
+    const host = evt?.body?.payload?.["host.name"] ?? evt?.resource?.["host.name"];
+    const ts = evt?.ts;
+    if (typeof host !== "string" || host.length === 0) continue;
+    if (typeof ts !== "string" || ts.length === 0) continue;
+    // Track the newest line per host EVEN IF it carries no admission, so a fresh
+    // heartbeat with admission:null correctly clears a host's stale hold.
+    const admission = evt?.body?.payload?.admission;
+    const prev = byHost[host];
+    if (!prev || ts > prev.ts) byHost[host] = { ts, admission: admission ?? null };
+  }
+  const out = {};
+  for (const [host, rec] of Object.entries(byHost)) {
+    if (rec.admission && typeof rec.admission === "object") out[host] = rec.admission;
+  }
+  return out;
+}
+
 // phaseAlreadyComplete — true when the unified event log already contains a
 // `phase.<phase>.complete.<ticket>` event. The resume path checks this before
 // re-dispatching so a survivor never re-emits a completion the dead host already
