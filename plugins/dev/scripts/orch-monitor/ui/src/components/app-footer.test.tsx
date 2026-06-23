@@ -221,6 +221,44 @@ describe("AppFooter service-health indicator (CTL-1172)", () => {
     expect(containsText(el, "mac-mini offline")).toBe(true);
   });
 
+  it("live-but-holding node → tooltip 'holding (drain)', pill stays HEALTHY (CTL-1322)", () => {
+    // The FleetOps blind spot: a node that is UP but admitting no work never
+    // appears via the offline/degraded branch — CTL-1322 surfaces it in the tooltip.
+    serviceHealthState = { services: [svc({ id: "monitor" })], unavailable: false };
+    navState = { daemon: "healthy", workerCount: 0, queueDepth: 0, anomaly: false, generatedAt: "" };
+    clusterState = {
+      singleHost: true,
+      nodes: [{ host: "mac-mini", status: "live", accepting: false, holdReason: "drain" }],
+      generatedAt: "",
+    };
+    const el = AppFooter();
+    expect(containsText(el, "mac-mini holding (drain)")).toBe(true);
+    // A drain is operator intent, NOT a fleet alarm → worstSeverity unchanged.
+    expect(containsText(el, "HEALTHY")).toBe(true);
+    expect(containsText(el, "DOWN")).toBe(false);
+  });
+
+  it("degraded AND holding node reports only the worse (degraded) line — no dup (CTL-1322)", () => {
+    serviceHealthState = { services: [svc({ id: "monitor" })], unavailable: false };
+    navState = { daemon: "healthy", workerCount: 0, queueDepth: 0, anomaly: false, generatedAt: "" };
+    clusterState = {
+      singleHost: false,
+      nodes: [{ host: "mac-mini", status: "degraded", accepting: false, holdReason: "drain" }],
+      generatedAt: "",
+    };
+    const el = AppFooter();
+    expect(containsText(el, "mac-mini degraded")).toBe(true);
+    expect(containsText(el, "holding")).toBe(false); // else-if: only the worse line
+  });
+
+  it("a node WITHOUT admission renders no hold line (absent ⇒ live, CTL-1322)", () => {
+    serviceHealthState = { services: [svc({ id: "monitor" })], unavailable: false };
+    navState = { daemon: "healthy", workerCount: 0, queueDepth: 0, anomaly: false, generatedAt: "" };
+    clusterState = { singleHost: true, nodes: [{ host: "mac-mini", status: "live" }], generatedAt: "" };
+    const el = AppFooter();
+    expect(containsText(el, "holding")).toBe(false);
+  });
+
   it("degraded service only → DEGRADED (AC-B)", () => {
     serviceHealthState = {
       services: [svc({ id: "loki", label: "Loki", severity: "degraded" })],

@@ -88,6 +88,9 @@ export function assembleClusterView({
   capacityReader = null,
   // CTL-1092: host alias map { oldName → pinnedName } for collapsing pre-pin heartbeat keys.
   aliases = null,
+  // CTL-1322: injectable admission reader. (host) → { accepting, holdReason, … } | null.
+  // Default → no admission info (fields absent → UI renders "live", never a false hold).
+  admissionReader = null,
 }) {
   const roster = Array.isArray(hosts) && hosts.length > 0 ? hosts : [];
   const tickets = Array.isArray(board?.tickets) ? board.tickets : [];
@@ -173,6 +176,23 @@ export function assembleClusterView({
     }
   };
 
+  // CTL-1322: resolve admission state per host — only { accepting, holdReason } (the
+  // two UI surfaces; maxParallel/inFlightCount already come from capacity). Shares NO
+  // field with drain/capacity, so spread order is irrelevant. Offline → not accepting,
+  // no hold reason. Fail-open: no reader / null / throw → contribute NO fields, so a
+  // node without admission data renders "live" rather than a false hold.
+  const resolveAdmission = (host, status) => {
+    if (!admissionReader || host === null) return {};
+    if (status === "offline") return { accepting: false, holdReason: null };
+    try {
+      const a = admissionReader(host);
+      if (!a) return {};
+      return { accepting: Boolean(a.accepting), holdReason: a.holdReason ?? null };
+    } catch {
+      return {};
+    }
+  };
+
   // ── grouping ──────────────────────────────────────────────────────────────
   // A node entry is { host, status, lastSeen, tickets[] }. The `null` host is the
   // synthetic "unassigned" bucket for tickets with no fence owner — used ONLY in
@@ -194,6 +214,7 @@ export function assembleClusterView({
           lastSeen: node.lastSeen,
           ...resolveDrain(host),
           ...resolveCapacity(host, node.status),
+          ...resolveAdmission(host, node.status),
           tickets: tickets.map((t) => makeTicket(t, host)),
         },
       ],
@@ -224,7 +245,7 @@ export function assembleClusterView({
       continue;
     }
     const node = livenessByHost.get(host) ?? { status: "offline", lastSeen: null };
-    nodes.push({ host, status: node.status, lastSeen: node.lastSeen, ...resolveDrain(host), ...resolveCapacity(host, node.status), tickets: groupTickets });
+    nodes.push({ host, status: node.status, lastSeen: node.lastSeen, ...resolveDrain(host), ...resolveCapacity(host, node.status), ...resolveAdmission(host, node.status), tickets: groupTickets });
   }
 
   return {
@@ -289,6 +310,9 @@ export function createClusterEntity({
   // createClusterEntity is the SOLE prod entry, so this param keeps the seam symmetric — a
   // future live drainReader only needs the server.ts builder, not another edit here.
   drainReader = null,
+  // CTL-1322: injectable admission reader; forwarded verbatim to assembleClusterView.
+  // (host) -> { accepting, holdReason, … } | null. Default null = feature off.
+  admissionReader = null,
   now = () => Date.now(),
 } = {}) {
   // Memoize the lazy execution-core import so repeated assembles don't re-import.
@@ -347,6 +371,7 @@ export function createClusterEntity({
         capacityReader,
         aliases,
         drainReader,
+        admissionReader,
       });
     },
   };

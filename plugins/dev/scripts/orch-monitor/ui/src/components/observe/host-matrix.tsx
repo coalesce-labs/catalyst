@@ -16,7 +16,7 @@ import { useNavigate } from "@tanstack/react-router";
 import { Panel, PanelHeader, SectionLabel } from "@/components/ui/panel";
 import type { ClusterSignalNode } from "@/lib/cluster-signal";
 import type { BoardWorker } from "@/board/types";
-import { hostWorkerCount, shortHostName, nodeStatusVar } from "./fleetops-kit";
+import { hostWorkerCount, shortHostName, nodeStatusVar, daemonCell } from "./fleetops-kit";
 
 export interface HostMatrixProps {
   /** The cluster roster (one row per node). null ⇒ cluster signal unreachable. */
@@ -96,12 +96,20 @@ export function HostMatrix({ nodes, workers, maxParallel, boardAgeMs }: HostMatr
                   <span className="truncate font-mono">{shortHostName(n.host)}</span>
                 </span>
 
-                {/* daemon — liveness status word, tone-colored. The UI cluster signal
-                    carries no lastSeen, so we render the status word (not a heartbeat
-                    age — that needs the OBS-15 reader) honestly. */}
-                <span style={{ color: daemonColor }}>
-                  {n.status === "live" ? "live" : n.status === "degraded" ? "degraded" : "OFFLINE"}
-                </span>
+                {/* daemon — liveness word, tone-colored. CTL-1322: a node that is UP
+                    but NOT accepting new work (admission hold) renders
+                    "holding (<reason>)" in amber instead of a misleading "live" — the
+                    exact FleetOps blind spot. The host dot above stays status-colored
+                    (hardware up, gate closed). The UI cluster signal carries no
+                    lastSeen, so we render the word, not a heartbeat age (OBS-15). */}
+                {(() => {
+                  const cell = daemonCell(n);
+                  return (
+                    <span style={{ color: cell.color }} title={cell.title}>
+                      {cell.label}
+                    </span>
+                  );
+                })()}
 
                 {/* broker — board-freshness proxy (the board IS the broker projection). */}
                 <span

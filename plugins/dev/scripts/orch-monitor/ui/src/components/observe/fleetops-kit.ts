@@ -301,3 +301,42 @@ export function nodeStatusVar(status: ClusterNodeStatus): string {
   if (status === "degraded") return "var(--chart-3)";
   return "var(--chart-4)";
 }
+
+/** The rendered FleetOps "Daemon" cell for a node. */
+export interface DaemonCell {
+  /** The cell word: "live" | "degraded" | "OFFLINE" | "holding" | "holding (<reason>)". */
+  label: string;
+  /** The status-color CSS var for the label. */
+  color: string;
+  /** Hover title spelling out a hold reason, else undefined. */
+  title?: string;
+}
+
+/**
+ * The FleetOps "Daemon" cell for a node (CTL-1322). Normally the liveness word,
+ * BUT a LIVE node that is NOT accepting new work (admission `accepting === false`)
+ * is the exact FleetOps blind spot — it would otherwise read "live" while the
+ * new-work gate is shut. Such a node renders "holding (<reason>)" in AMBER (warn),
+ * never red — a drain / liveness-cold hold is operator-intent or transient, not a
+ * failure. Precedence: the liveness word wins when the node is degraded or offline
+ * (a shaky/dead daemon's holding sub-state is less actionable than its liveness) —
+ * matching the footer tooltip's offline/degraded-first ordering, so the two surfaces
+ * agree. The check is STRICT `=== false`, so an ABSENT `accepting` (remote peer /
+ * unknown) falls through to the plain liveness word — never a fabricated hold.
+ * PURE + exported.
+ */
+export function daemonCell(
+  node: Pick<ClusterSignalNode, "status" | "accepting" | "holdReason">,
+): DaemonCell {
+  const { status } = node;
+  if (status === "live" && node.accepting === false) {
+    const reason = node.holdReason ?? null;
+    return {
+      label: reason ? `holding (${reason})` : "holding",
+      color: "var(--chart-3)", // amber/warn — operator-intent hold, not a failure
+      title: `not accepting new work${reason ? ` — ${reason}` : ""}`,
+    };
+  }
+  const label = status === "live" ? "live" : status === "degraded" ? "degraded" : "OFFLINE";
+  return { label, color: nodeStatusVar(status) };
+}

@@ -322,3 +322,25 @@ The detector above only emits low-level `catalyst.ingestion.*` events. CTL-1123 
   - `FILTER_PILEUP_THRESHOLD` (default `3`) — minimum labelled-ticket count to alert.
   - `FILTER_PILEUP_PERSISTENCE_MS` (default `300000`) — the count must stay at/above the threshold this long before one alert fires (spike guard).
   - `FILTER_PILEUP_COOLDOWN_MS` (default `3600000`) — minimum gap after a clear before it can re-fire (flap guard).
+
+### Node admission state on the heartbeat (CTL-1322)
+
+A daemon that is **alive but not accepting new work** (draining, or a liveness-cold hold) otherwise looks fully healthy to uptime monitoring while pulling zero work — the recurring "why isn't work moving?" blind spot. CTL-1322 makes that state **visible in telemetry**: every `node.heartbeat` event now carries an `admission` block in `body.payload`:
+
+```json
+"admission": { "accepting": false, "holdReason": "drain", "effectiveCapacity": 0, "activeWorkers": 6 }
+```
+
+- `accepting` mirrors the scheduler's new-work gate exactly (`livenessFresh && !isDraining()`), so the heartbeat can never disagree with what the daemon actually enforces.
+- `holdReason` is `"drain"` (the persistent operator-intent hold, CTL-1095), `"liveness-cold"` (the transient snapshot-staleness hold, CTL-731), or `null` when accepting. Drain takes precedence when both apply.
+- `effectiveCapacity` is the admission ceiling (`maxParallel` when accepting, `0` when held); `activeWorkers` is the live background-worker count.
+
+The orch-monitor surfaces it for the **local** node: the FleetOps Hosts "Daemon" column renders `holding (<reason>)` (amber) instead of a misleading "live", and the footer health tooltip gains a `<host> holding (<reason>)` line — without bumping the health pill (a drain is operator intent, not a fleet alarm). Remote peers omit the field (the cross-host anchor transport carries no admission yet) and render "live".
+
+**Alerting** is a host-side Loki/Grafana rule over the new field (the same out-of-band, delivery-out-of-scope contract as CTL-1123) — no in-repo change, no secrets in the daemon. The `admission` block rides the `node.heartbeat` **event** (the unified event log → `otel-forward` → Loki as the `{job="catalyst-events"}` stream — *not* the Alloy-shipped daemon `.log` stream, which only carries a bare heartbeat marker with no admission JSON):
+
+```logql
+count_over_time({job="catalyst-events"} | json | attributes["event.name"]="node.heartbeat" |= "\"accepting\":false" [12m]) > 0
+```
+
+with a `for: 10m` window. The host lives inside the JSON body (`body.payload."host.name"`), so scope per node with a body match (e.g. `|= "\"host.name\":\"mini\""`), not a stream label. A daemon-emitted, debounced `catalyst.alert.not_accepting` edge (cleaner raised/cleared semantics) is a planned follow-up.

@@ -60,6 +60,7 @@ import { startFleetHealthProbe as realStartFleetHealthProbe } from "./fleet-heal
 import { startRatelimitPoller as realStartRatelimitPoller } from "./ratelimit-poller.mjs";
 import { listProjects as realListProjects } from "./registry.mjs"; // CTL-854: boot health check
 import { startHeartbeat as realStartHeartbeat } from "./heartbeat-event.mjs"; // CTL-859: node.heartbeat emitter
+import { readAdmissionState } from "./admission-state.mjs"; // CTL-1322: live admission block for the heartbeat
 import { startLivenessPublisher as realStartLivenessPublisher } from "./cluster-heartbeat-publisher.mjs"; // CTL-1090: cross-host liveness
 import { emitBootEvent } from "./boot-event.mjs"; // CTL-1084: node.boot self-report
 import {
@@ -726,7 +727,13 @@ export function startDaemon({
     // silence. ADDITIVE/dormant — pure observability, no behavior consumes it
     // yet. Inside the same try/catch so a throw triggers PID-file cleanup.
     if (enableHeartbeat) {
-      _heartbeat = startHeartbeat();
+      // CTL-1322: supply the live admission-state closure so each heartbeat carries
+      // { accepting, holdReason, effectiveCapacity, activeWorkers } — computed from
+      // the same gate source fns the scheduler enforces (orchDir + concurrency are
+      // both in scope here). Fail-open: readAdmissionState never throws.
+      _heartbeat = startHeartbeat({
+        admissionFn: () => readAdmissionState({ orchDir, concurrency }),
+      });
       // CTL-1090: cross-host liveness publisher (multi-host only; single-host no-op).
       // startLivenessPublisher self-gates on roster.length > 1, so this is always safe.
       _livenessPublisher = startLivenessPublisher({ orchDir });

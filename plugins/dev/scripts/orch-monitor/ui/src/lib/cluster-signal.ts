@@ -18,6 +18,9 @@
 /** One node's heartbeat-overlay liveness — the footer dot color (mirrors the server). */
 export type ClusterNodeStatus = "live" | "degraded" | "offline";
 
+/** CTL-1322: why a live-but-not-accepting node is holding new-work admission. */
+export type HoldReason = "drain" | "liveness-cold";
+
 /** One real roster node in the footer signal: its host name + liveness. */
 export interface ClusterSignalNode {
   host: string;
@@ -28,6 +31,10 @@ export interface ClusterSignalNode {
   freeSlots?: number;
   /** CTL-1092: in-flight ticket ids from the heartbeat (for remote slot labels). */
   tickets?: string[];
+  /** CTL-1322: local node's new-work admission from its heartbeat. ABSENT ⇒ unknown
+   *  (render "live"); a remote peer always omits it. `accepting:false` ⇒ holding. */
+  accepting?: boolean;
+  holdReason?: HoldReason | null;
 }
 
 /** The per-node cluster-health wire shape the footer renders (server's ClusterSignal). */

@@ -67,6 +67,19 @@ describe("cluster-signal UI contract (CTL-898 / SHELL8)", () => {
       expect(decodeClusterSignalFrame("{ not json")).toBeNull();
       expect(decodeClusterSignalFrame(JSON.stringify({ singleHost: 1 }))).toBeNull();
     });
+
+    it("CTL-1322: decodes both a frame WITH admission fields and an OLD frame WITHOUT them (back-compat)", () => {
+      const withAdmission = signal({
+        nodes: [{ host: "mini", status: "live", accepting: false, holdReason: "drain" }],
+      });
+      expect(isClusterSignal(withAdmission)).toBe(true);
+      const decoded = decodeClusterSignalFrame(JSON.stringify(withAdmission));
+      expect(decoded?.nodes[0].accepting).toBe(false);
+      expect(decoded?.nodes[0].holdReason).toBe("drain");
+      // An OLD frame (no admission fields) still decodes — the guard treats them optional.
+      expect(isClusterSignal(signal())).toBe(true);
+      expect(decodeClusterSignalFrame(JSON.stringify(signal()))?.nodes[0].accepting).toBeUndefined();
+    });
   });
 
   describe("nodeDotClass / nodeStatusLabel", () => {
