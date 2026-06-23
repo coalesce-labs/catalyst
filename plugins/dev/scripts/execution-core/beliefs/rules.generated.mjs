@@ -466,31 +466,43 @@ export const RULE_MANIFEST = _deepFreeze({
     {
       "id": 1,
       "label": "S1 ground correlations",
+      "plain_headline": "What we directly observe to be true",
+      "plain_body": "The ground floor — raw facts, lined up per worker. No judgment yet.",
       "prose": "Read obs_* EDB only; establish per-phase session, turn, heartbeat, and job-state correlations."
     },
     {
       "id": 2,
       "label": "S2 liveness verdicts",
+      "plain_headline": "Who is alive, and who is wedged",
+      "plain_body": "Where 'running' becomes 'alive' or 'wedged'.",
       "prose": "Stratified negation over S1 beliefs; derive lease validity, expiry, wedge detection, and board-drift."
     },
     {
       "id": 3,
       "label": "S3 capacity aggregation",
+      "plain_headline": "How much capacity is free",
+      "plain_body": "A headcount of free slots per host.",
       "prose": "Aggregate over S2 lease_valid beliefs and obs_agent to compute free_slots per host."
     },
     {
       "id": 4,
       "label": "S4 escalation ladder",
+      "plain_headline": "When it's time to get a human",
+      "plain_body": "The escalation ladder — cheaper moves first, raise a hand last.",
       "prose": "Negation over intent table; fire diagnostician wake-up, detect action_ineffective, escalate to human."
     },
     {
       "id": 5,
       "label": "S5 recursive dependency beliefs",
+      "plain_headline": "What is blocked by what",
+      "plain_body": "Follows the blocker chain; flags loops that can't resolve.",
       "prose": "Transitive blocker closure (WITH RECURSIVE); derive blocker_rank, cycle_detected, and ready."
     },
     {
       "id": 6,
       "label": "S6 FSM advancement prediction",
+      "plain_headline": "What happens next",
+      "plain_body": "Predicts where each worker advances, spots exhausted cycles.",
       "prose": "Derive advance_to and cycle_exhausted from obs_signal/obs_verdict/obs_cycle; no negation over beliefs."
     }
   ],

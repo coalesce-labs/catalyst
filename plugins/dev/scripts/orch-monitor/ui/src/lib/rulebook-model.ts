@@ -16,6 +16,11 @@ export interface RuleManifestStratum {
   id: number;
   label: string;
   prose: string;
+  /** CTL-1320: plain-language layer that LEADS in the UI (the technical `label`/
+   *  `prose` are demoted to subtext). Sourced from STRATA_META, so the ladder and
+   *  the section headings read one source and the "S{id}" prefix is never doubled. */
+  plain_headline: string;
+  plain_body: string;
 }
 
 export interface RuleManifestRule {
