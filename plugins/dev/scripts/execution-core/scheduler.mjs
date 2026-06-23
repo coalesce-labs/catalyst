@@ -265,6 +265,7 @@ import {
   getClusterHosts,
   hostMembershipWarning,
   isDraining as isDrainingDefault,
+  getDrainedMarkerPath, // CTL-1321: shared resolver for the drain.drained sentinel
   HEARTBEAT_GRACE_MS, // CTL-1191: dead-host grace for surviving-roster recovery gate
 } from "./config.mjs";
 import { emitDrainedEvent as defaultEmitDrainedEvent } from "./drain-event.mjs"; // CTL-1095: drained sentinel
@@ -4707,7 +4708,7 @@ export function schedulerTick(
   // CTL-1095: drained sentinel. Once draining and nothing in flight, emit
   // node.drain.drained exactly once per episode via a marker file. Clears
   // the marker when drain turns off so a subsequent episode re-arms.
-  const drainedMarker = join(orchDir, "drain.drained");
+  const drainedMarker = getDrainedMarkerPath(orchDir);
   if (draining) {
     if (listInFlightTickets(orchDir).size === 0 && !existsSync(drainedMarker)) {
       emitDrained();

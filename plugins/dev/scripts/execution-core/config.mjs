@@ -8,7 +8,7 @@
 
 import { homedir, hostname } from "node:os";
 import { resolve, join } from "node:path";
-import { readFileSync, existsSync } from "node:fs";
+import { readFileSync, existsSync, rmSync, writeFileSync } from "node:fs";
 
 // CTL-1211: schema-version policy for cluster config. config-schema.mjs is a
 // dep-free sibling leaf, so this import cannot reintroduce the bun-install crash
@@ -80,6 +80,43 @@ export function getDrainFlagPath(orchDir) {
 
 export function isDraining(orchDir) {
   return existsSync(getDrainFlagPath(orchDir));
+}
+
+// CTL-1095/CTL-1321: path of the once-per-episode "drained" sentinel marker. The
+// scheduler writes it when a drain episode quiesces (in-flight hits 0) and
+// applyBootDrainPolicy clears it on boot — both go through this one resolver so
+// the two writers can never drift to different filenames (the sentinel was the
+// one drain-family path not previously behind a resolver).
+export function getDrainedMarkerPath(orchDir) {
+  return join(orchDir, "drain.drained");
+}
+
+// CTL-1321: boot drain policy. The `drain` flag is a PERSISTENT file (set by
+// `catalyst-execution-core drain`, cleared only by `drain --off`), so a
+// quiesce→restart otherwise comes back SILENTLY DRAINED — heartbeating healthy
+// while admitting zero new work. On boot we clear the flag (plus the
+// `drain.drained` sentinel a prior drain episode may have left, see
+// scheduler.mjs) so a restart always resumes accepting work. A node deliberately
+// kept out of rotation (laptop/debug) opts in via CATALYST_BOOT_DRAINED=1, which
+// RE-SETS the flag AFTER the clear ("on restart, always set the flag").
+//
+// Scope: this gates only NEW-work admission (the scheduler's `!draining` gate).
+// It does NOT stop boot-resume (CTL-654) from re-adopting already-running
+// in-flight workers — re-adopting a live ticket is not new work. Best-effort and
+// never throws, so a transient fs error cannot abort daemon boot (mirrors
+// writeBootMarker's fail-open contract + setDrain at cli/drain.mjs). `env` is an
+// injectable seam for unit tests; matches the `=== "1"` opt-in idiom used by
+// EXECUTION_CORE_FLEET_SELF_HEAL and the beliefs flags. Returns { drained }.
+export function applyBootDrainPolicy(orchDir, { env = process.env } = {}) {
+  const flag = getDrainFlagPath(orchDir);
+  const drainedMarker = getDrainedMarkerPath(orchDir);
+  try { rmSync(flag, { force: true }); } catch { /* best-effort */ }
+  try { rmSync(drainedMarker, { force: true }); } catch { /* best-effort */ }
+  const drained = env.CATALYST_BOOT_DRAINED === "1";
+  if (drained) {
+    try { writeFileSync(flag, ""); } catch { /* best-effort */ }
+  }
+  return { drained };
 }
 
 export function getEligibleDir() {

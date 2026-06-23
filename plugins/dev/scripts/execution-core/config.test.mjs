@@ -7,7 +7,7 @@
 // Run: cd plugins/dev/scripts/execution-core && bun test config.test.mjs
 
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
-import { mkdtempSync, writeFileSync, rmSync, mkdirSync } from "node:fs";
+import { mkdtempSync, writeFileSync, rmSync, mkdirSync, existsSync } from "node:fs";
 import { tmpdir, hostname } from "node:os";
 import { join } from "node:path";
 import {
@@ -28,6 +28,8 @@ import {
   hostMembershipWarning,
   getDrainFlagPath,
   isDraining,
+  getDrainedMarkerPath,
+  applyBootDrainPolicy,
   getLivenessAnchorIssue,
   LIVENESS_PUBLISH_INTERVAL_MS,
   getStaticRoster,
@@ -688,6 +690,98 @@ describe("getDrainFlagPath + isDraining (CTL-1095)", () => {
     expect(isDraining(tmp)).toBe(true);
     rmSync(flag);
     expect(isDraining(tmp)).toBe(false);
+  });
+});
+
+// CTL-1321: applyBootDrainPolicy — boot accepting work by default. A prior drain
+// leaves a persistent `drain` flag (+ `drain.drained` sentinel) that survives
+// restart; boot must clear them unless CATALYST_BOOT_DRAINED=1 opts the node out
+// of rotation (re-set the flag AFTER the clear).
+describe("applyBootDrainPolicy (CTL-1321)", () => {
+  let tmp;
+
+  beforeEach(() => {
+    tmp = mkdtempSync(join(tmpdir(), "boot-drain-"));
+  });
+
+  afterEach(() => {
+    rmSync(tmp, { recursive: true, force: true });
+  });
+
+  test("getDrainedMarkerPath joins orchDir/drain.drained (shared with scheduler)", () => {
+    expect(getDrainedMarkerPath("/tmp/ec")).toBe(join("/tmp/ec", "drain.drained"));
+  });
+
+  test("default boot clears a pre-existing drain flag → node accepts work", () => {
+    writeFileSync(getDrainFlagPath(tmp), "");
+    const r = applyBootDrainPolicy(tmp, { env: {} });
+    expect(r.drained).toBe(false);
+    expect(existsSync(getDrainFlagPath(tmp))).toBe(false);
+    expect(isDraining(tmp)).toBe(false);
+  });
+
+  test("default boot also removes the drain.drained sentinel", () => {
+    writeFileSync(getDrainFlagPath(tmp), "");
+    writeFileSync(join(tmp, "drain.drained"), "");
+    applyBootDrainPolicy(tmp, { env: {} });
+    expect(existsSync(getDrainFlagPath(tmp))).toBe(false);
+    expect(existsSync(join(tmp, "drain.drained"))).toBe(false);
+  });
+
+  test("CATALYST_BOOT_DRAINED=1 re-sets the drain flag after the default clear", () => {
+    // Stale sentinel only (no drain flag): the opt-in must (re)create the flag
+    // AND clear the sentinel so the once-per-episode dedup latch re-arms.
+    writeFileSync(join(tmp, "drain.drained"), "");
+    const r = applyBootDrainPolicy(tmp, { env: { CATALYST_BOOT_DRAINED: "1" } });
+    expect(r.drained).toBe(true);
+    expect(isDraining(tmp)).toBe(true);
+    expect(existsSync(getDrainFlagPath(tmp))).toBe(true);
+    expect(existsSync(join(tmp, "drain.drained"))).toBe(false);
+  });
+
+  test("CATALYST_BOOT_DRAINED=1 with a pre-existing drain flag keeps it drained (clear-then-set)", () => {
+    // The most direct guard against a set-then-clear inversion: a drain flag that
+    // was already present must remain present (the clear runs first, the re-set last).
+    writeFileSync(getDrainFlagPath(tmp), "");
+    const r = applyBootDrainPolicy(tmp, { env: { CATALYST_BOOT_DRAINED: "1" } });
+    expect(r.drained).toBe(true);
+    expect(existsSync(getDrainFlagPath(tmp))).toBe(true);
+    expect(isDraining(tmp)).toBe(true);
+  });
+
+  test('only the exact string "1" opts in — "true" falls through to clear', () => {
+    writeFileSync(getDrainFlagPath(tmp), "");
+    const r = applyBootDrainPolicy(tmp, { env: { CATALYST_BOOT_DRAINED: "true" } });
+    expect(r.drained).toBe(false);
+    expect(isDraining(tmp)).toBe(false);
+  });
+
+  test('"0" falls through to clear (opt-in idiom, not the kill-switch !== "0")', () => {
+    writeFileSync(getDrainFlagPath(tmp), "");
+    const r = applyBootDrainPolicy(tmp, { env: { CATALYST_BOOT_DRAINED: "0" } });
+    expect(r.drained).toBe(false);
+    expect(isDraining(tmp)).toBe(false);
+  });
+
+  test("idempotent — default applied twice stays live", () => {
+    writeFileSync(getDrainFlagPath(tmp), "");
+    applyBootDrainPolicy(tmp, { env: {} });
+    applyBootDrainPolicy(tmp, { env: {} });
+    expect(isDraining(tmp)).toBe(false);
+  });
+
+  test("idempotent — opt-in applied twice stays drained with sentinel cleared", () => {
+    applyBootDrainPolicy(tmp, { env: { CATALYST_BOOT_DRAINED: "1" } });
+    applyBootDrainPolicy(tmp, { env: { CATALYST_BOOT_DRAINED: "1" } });
+    expect(isDraining(tmp)).toBe(true);
+    expect(existsSync(join(tmp, "drain.drained"))).toBe(false);
+  });
+
+  test("missing-file safety — clean orchDir never throws (default + opt-in)", () => {
+    expect(() => applyBootDrainPolicy(tmp, { env: {} })).not.toThrow();
+    expect(isDraining(tmp)).toBe(false);
+    expect(() => applyBootDrainPolicy(tmp, { env: { CATALYST_BOOT_DRAINED: "1" } })).not.toThrow();
+    expect(isDraining(tmp)).toBe(true);
   });
 });
 

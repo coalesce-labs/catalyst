@@ -65,6 +65,48 @@ afterEach(() => {
   rmSync(catalystDir, { recursive: true, force: true });
 });
 
+// CTL-1321: the boot-drain policy must run AT startDaemon so a quiesce→restart
+// comes up accepting work (clears the persistent drain flag), and a deliberately
+// out-of-rotation node re-arms drain via CATALYST_BOOT_DRAINED=1. This guards the
+// call site: the pure-helper unit tests in config.test.mjs cannot catch a dropped
+// or misordered applyBootDrainPolicy() call (which would silently reintroduce the
+// "drained after restart" bug).
+describe("startDaemon boot drain policy (CTL-1321)", () => {
+  const drainPath = () => join(catalystDir, "execution-core", "drain");
+  const FAKES = {
+    recover: () => ({}),
+    reconcileBoot: () => ({}),
+    startMonitor: () => {},
+    startScheduler: () => {},
+    watchRegistry: false,
+  };
+  let prevBootDrained;
+
+  beforeEach(() => {
+    prevBootDrained = process.env.CATALYST_BOOT_DRAINED;
+  });
+
+  afterEach(() => {
+    if (prevBootDrained === undefined) delete process.env.CATALYST_BOOT_DRAINED;
+    else process.env.CATALYST_BOOT_DRAINED = prevBootDrained;
+  });
+
+  test("clears a stale drain flag on boot (restart resumes accepting work)", () => {
+    delete process.env.CATALYST_BOOT_DRAINED;
+    writeFileSync(drainPath(), "");
+    expect(existsSync(drainPath())).toBe(true);
+    startDaemon({ ...FAKES });
+    expect(existsSync(drainPath())).toBe(false);
+  });
+
+  test("CATALYST_BOOT_DRAINED=1 re-sets the drain flag on boot (out-of-rotation node)", () => {
+    process.env.CATALYST_BOOT_DRAINED = "1";
+    expect(existsSync(drainPath())).toBe(false);
+    startDaemon({ ...FAKES });
+    expect(existsSync(drainPath())).toBe(true);
+  });
+});
+
 describe("startDaemon", () => {
   test("calls recover, boot, startMonitor, startScheduler exactly once each in order", () => {
     const calls = [];

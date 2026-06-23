@@ -335,6 +335,7 @@ hand.
 | `NODE_USE_ENV_PROXY` | Set to `1` to make Node's native `fetch`/undici honor the `*_PROXY` vars. **Required whenever you set a proxy** — see rationale below. |
 | `NODE_EXTRA_CA_CERTS` | Absolute path to a CA cert to trust (e.g. `$HOME/.mitmproxy/mitmproxy-ca-cert.pem`) so a MITM proxy's intercepted TLS validates. |
 | `LINEAR_STATE_CACHE_TTL_MS` | Widen the daemon's in-process Linear workflow-state cache window (milliseconds) to cut per-ticket read volume. Independent of the proxy. |
+| `CATALYST_BOOT_DRAINED` | Set to the literal `1` to boot this node **drained** (heartbeats normally, admits no new work) — for a deliberately parked laptop/debug host. Default (unset or any other value): the daemon clears any leftover `drain` flag on boot so a restart resumes accepting work (CTL-1321). Honored only on `catalyst-execution-core start`/`restart`, which sources this file. |
 
 ### Debugging Linear API rate-limiting (mitmproxy — opt-in, default OFF)
 
