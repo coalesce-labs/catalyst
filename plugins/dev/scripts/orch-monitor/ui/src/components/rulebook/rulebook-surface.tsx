@@ -1,75 +1,122 @@
-// rulebook-surface.tsx — CTL-1103 / CTL-1320: the Belief Engine Rulebook as a
-// calm prose textbook. One capped reading column: plain "why" → ladder of
-// reasoning → per-stratum rule sections (one hoisted perspective toggle) →
-// collapsed thresholds. Live firing counts come from useBeliefsContext() (the
+// rulebook-surface.tsx — CTL-1328: the Belief Engine Rulebook as a swim-lane
+// board (pass-2 of the redesign; v1 was the calm prose textbook, CTL-1320). Six
+// stratum lanes stack S6 (decisions) at the top down to S1 (raw facts) at the
+// bottom, with a layer-cake rail on the left. Each lane's sticky label IS its
+// merged description; the rule cards scroll horizontally and open a source
+// drawer on click. Live firing counts come from useBeliefsContext() (the
 // already-open shared SSE — zero new EventSources, SSE dedup contract CTL-945).
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
+import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from "@/components/ui/collapsible";
+import { ChevronRight } from "lucide-react";
 import { useBeliefsContext } from "@/hooks/use-beliefs";
 import {
   fetchRuleManifest,
   groupRulesByStratum,
   type RuleManifest,
+  type RuleManifestRule,
+  type RuleManifestStratum,
   type StratumGroup,
 } from "@/lib/rulebook-model";
+import {
+  buildNameById,
+  strataTopDown,
+} from "@/lib/rulebook-board-model";
 import { countFiringByRule, subjectsForRule } from "@/lib/rulebook-live";
-import { PrefaceSection } from "./preface-section";
-import { LadderOfReasoning } from "./strata-ladder";
-import { PerspectiveToggle } from "./perspective-toggle";
-import { RuleCard } from "./rule-card";
-import { LiveIndicator } from "./live-indicator";
-import { DerivationsRail } from "./derivations-rail";
+import { SeverityPill } from "./severity-pill";
+import { StratumLane } from "./stratum-lane";
+import { RuleDrawer } from "./rule-drawer";
 import { ThresholdsAppendix } from "./thresholds-appendix";
-import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
-import type { RuleManifestRule } from "@/lib/rulebook-model";
 
-/** "S1 ground correlations" → "ground correlations" (the redundant number prefix
- *  is rendered once, from the id, in the heading — never doubled). */
-function techLabel(label: string): string {
-  return label.replace(/^S\d+\s+/, "");
+/** The vertical layer-cake rail: a tinted spine reading raw facts (bottom) →
+ *  decisions (top), mirroring the lane stacking. */
+function CakeRail() {
+  return (
+    <div className="relative w-[46px] shrink-0 border-r">
+      <div
+        aria-hidden
+        className="absolute left-1/2 top-2 bottom-2 w-[3px] -translate-x-1/2 rounded-full opacity-60"
+        style={{
+          background:
+            "linear-gradient(to top, var(--chart-1), var(--chart-2), var(--chart-3), var(--chart-4), var(--chart-5), var(--chart-6))",
+        }}
+      />
+      <span className="absolute left-0 top-2 [writing-mode:vertical-rl] text-[10px] uppercase tracking-[0.14em] text-muted-foreground/60">
+        decisions ↑
+      </span>
+      <span className="absolute bottom-2 left-0 [writing-mode:vertical-rl] text-[10px] uppercase tracking-[0.14em] text-muted-foreground/60">
+        raw facts
+      </span>
+    </div>
+  );
 }
 
-function StratumSection({
-  group,
-  firingCounts,
-  onSelectRule,
-}: {
-  group: StratumGroup;
-  firingCounts: Map<string, number>;
-  onSelectRule: (id: string) => void;
-}) {
+function Legend() {
   return (
-    <section id={`stratum-${group.stratum.id}`} className="pt-8 scroll-mt-4">
-      {/* The number appears exactly once, leading the plain headline. */}
-      <h2 className="text-lg font-semibold">
-        {group.stratum.id} · {group.stratum.plain_headline}
-      </h2>
-      <p className="mt-0.5 mb-4 font-mono text-xs text-muted-foreground/70">
-        {techLabel(group.stratum.label)} · {group.stratum.prose}
-      </p>
-      {group.rules.map((rule) => {
-        const count = firingCounts.get(rule.rule_id) ?? 0;
-        return (
-          <RuleCard
-            key={rule.rule_id}
-            rule={rule}
-            liveSlot={
-              <LiveIndicator
-                count={count}
-                onSelect={count > 0 ? () => onSelectRule(rule.rule_id) : undefined}
-              />
-            }
-          />
-        );
-      })}
-    </section>
+    <div className="mt-4 flex flex-wrap items-center gap-x-5 gap-y-2 text-[11px] text-muted-foreground">
+      <span className="flex items-center gap-1.5">
+        <SeverityPill severity="info" /> a plain fact
+      </span>
+      <span className="flex items-center gap-1.5">
+        <SeverityPill severity="warn" /> needs watching
+      </span>
+      <span className="flex items-center gap-1.5">
+        <SeverityPill severity="error" /> needs action
+      </span>
+      <span className="text-muted-foreground/40">·</span>
+      <span>
+        <span className="rounded border bg-muted/40 px-1.5 py-px text-[10px]">
+          <span className="text-muted-foreground/50">→</span> name
+        </span>{" "}
+        the next belief this rule feeds
+      </span>
+    </div>
+  );
+}
+
+function HowItWorks() {
+  return (
+    <Collapsible className="rounded-lg border bg-card/40">
+      <CollapsibleTrigger className="group flex w-full items-center gap-2 px-4 py-3 text-sm">
+        <ChevronRight className="size-4 text-muted-foreground transition-transform group-data-[state=open]:rotate-90" />
+        <span>
+          How the rules work{" "}
+          <span className="text-muted-foreground">(the Datalog model)</span>
+        </span>
+        <span className="ml-auto font-mono text-xs text-muted-foreground/70">
+          17 rules · rules.dl
+        </span>
+      </CollapsibleTrigger>
+      <CollapsibleContent>
+        {/* The approved mockup's bespoke calm copy (not the manifest's generic
+            datalog_primer): it carries the within-layer-honesty example
+            (lease_expired only fires when lease_valid did not) the redesign
+            specifically called for. */}
+        <p className="px-4 pb-4 text-sm leading-relaxed text-muted-foreground">
+          Each rule reads beliefs it already trusts and writes a new, named
+          belief. Every tick, the engine evaluates the rules in a fixed order —
+          the six <em>strata</em> from the bottom up, and the rules in order
+          within each stratum — so a rule never depends on anything computed
+          later in the same tick. Most rules build on the layers beneath them; a
+          few also build on an earlier rule in their own layer (for example,{" "}
+          <em>lease_expired</em> fires only when <em>lease_valid</em> did not).
+          That fixed order is what keeps every conclusion finite and traceable —
+          open any belief in the live view to see exactly which facts triggered
+          which rule.
+        </p>
+      </CollapsibleContent>
+    </Collapsible>
   );
 }
 
 function LoadingSkeleton() {
   return (
-    <div className="space-y-4 animate-pulse">
-      {Array.from({ length: 3 }).map((_, i) => (
-        <div key={i} className="h-24 rounded-lg bg-muted" />
+    <div className="animate-pulse space-y-3">
+      {Array.from({ length: 6 }).map((_, i) => (
+        <div key={i} className="h-20 rounded-lg bg-muted" />
       ))}
     </div>
   );
@@ -85,19 +132,35 @@ export function RulebookSurface() {
   const [selectedRuleId, setSelectedRuleId] = useState<string | null>(null);
 
   useEffect(() => {
+    let alive = true;
     fetchRuleManifest()
       .then((m) => {
+        if (!alive) return;
         setManifest(m);
         setGroups(groupRulesByStratum(m));
       })
       .catch((e: unknown) => {
+        if (!alive) return;
         setError(e instanceof Error ? e.message : "Failed to load manifest");
       });
+    return () => {
+      alive = false;
+    };
   }, []);
+
+  const nameById = useMemo(
+    () => buildNameById(manifest?.rules ?? []),
+    [manifest],
+  );
+  const lanes = useMemo(() => strataTopDown(groups), [groups]);
 
   const selectedRule: RuleManifestRule | null =
     selectedRuleId && manifest
       ? (manifest.rules.find((r) => r.rule_id === selectedRuleId) ?? null)
+      : null;
+  const selectedStratum: RuleManifestStratum | null =
+    selectedRule && manifest
+      ? (manifest.strata.find((s) => s.id === selectedRule.stratum) ?? null)
       : null;
 
   if (error) {
@@ -109,87 +172,77 @@ export function RulebookSurface() {
   }
 
   return (
-    <div className="flex flex-1 overflow-hidden">
-      {/* Main reading column — capped measure, centered, calm. */}
+    <div className="flex flex-1 flex-col overflow-hidden">
       <div className="flex-1 overflow-y-auto">
-        <div className="mx-auto max-w-[72ch] px-6 py-10">
-          <header className="mb-7">
+        <div className="mx-auto max-w-[1100px] px-6 py-8">
+          <header className="mb-6">
             <h1 className="text-2xl font-bold tracking-tight">
               Belief Engine Rulebook
             </h1>
             <p className="mt-1 text-sm text-muted-foreground">
-              How the daemon decides who&apos;s working, who&apos;s wedged, and when
-              to call a human.
+              How the daemon decides who&apos;s working, who&apos;s wedged, and
+              when to call a human.
             </p>
-            {/* CTL-1320: Read / Map mode switch. The React Flow strata map is a
-                deferred fast-follow (?view=map) — Map is disabled until it lands. */}
-            <div className="mt-4">
-              <ToggleGroup type="single" size="sm" value="read">
-                <ToggleGroupItem value="read" className="px-3 text-xs">
-                  Read
-                </ToggleGroupItem>
-                <ToggleGroupItem
-                  value="map"
-                  disabled
-                  title="Strata map — coming soon"
-                  className="px-3 text-xs"
-                >
-                  Map
-                </ToggleGroupItem>
-              </ToggleGroup>
-            </div>
+            <p className="mt-4 max-w-[74ch] text-[14.5px] leading-relaxed text-foreground/80">
+              Every few seconds — once per tick — the daemon reasons from{" "}
+              <em>what it can see</em> up to <em>what to do about it</em>. It
+              works in six layers: raw observations enter at the base and rise
+              into decisions. The engine evaluates them in a fixed order — layer
+              by layer, and rule by rule within each layer — so every rule
+              already sees whatever it builds on, whether that&apos;s a layer
+              beneath it or an earlier rule in its own layer. Read each lane as
+              one layer; the cards inside are the rules that fire there.{" "}
+              <span className="text-muted-foreground">
+                Click any rule to read its source.
+              </span>
+            </p>
+            <Legend />
           </header>
 
           {manifest === null ? (
             <LoadingSkeleton />
           ) : (
             <>
-              <PrefaceSection preface={manifest.preface} />
-              <LadderOfReasoning groups={groups} />
+              <div className="flex items-stretch overflow-hidden rounded-xl border bg-card/40">
+                <CakeRail />
+                <div className="min-w-0 flex-1">
+                  {lanes.map((group) => (
+                    <StratumLane
+                      key={group.stratum.id}
+                      group={group}
+                      nameById={nameById}
+                      firingCounts={firingCounts}
+                      onOpenRule={setSelectedRuleId}
+                    />
+                  ))}
+                </div>
+              </div>
 
-              <PerspectiveToggle />
-
-              {groups.map((group) => (
-                <StratumSection
-                  key={group.stratum.id}
-                  group={group}
-                  firingCounts={firingCounts}
-                  onSelectRule={setSelectedRuleId}
-                />
-              ))}
-
-              <ThresholdsAppendix />
+              {/* Supporting collapsibles read in the calm narrow column (the
+                  mockup's `.measure`), while the board above goes full width. */}
+              <div className="mt-7 max-w-[74ch]">
+                <HowItWorks />
+                <ThresholdsAppendix />
+              </div>
             </>
           )}
         </div>
       </div>
 
-      {/* Derivations rail — shown when a firing rule is selected */}
-      {selectedRule && (
-        <div className="w-80 shrink-0 border-l overflow-y-auto p-4">
-          <div className="mb-3 flex items-center justify-between">
-            <span className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
-              Derivations
-            </span>
-            <button
-              type="button"
-              className="text-xs text-muted-foreground hover:text-foreground"
-              onClick={() => setSelectedRuleId(null)}
-            >
-              ×
-            </button>
-          </div>
-          <DerivationsRail
-            ruleId={selectedRule.rule_id}
-            subjects={subjectsForRule(beliefs.store, selectedRule.rule_id)}
-            onOpenSource={(ruleId) => {
-              document
-                .getElementById(`rule-${ruleId}`)
-                ?.scrollIntoView({ behavior: "smooth" });
-            }}
-          />
-        </div>
-      )}
+      <RuleDrawer
+        rule={selectedRule}
+        stratum={selectedStratum}
+        nameById={nameById}
+        firingSubjects={
+          selectedRule
+            ? subjectsForRule(beliefs.store, selectedRule.rule_id)
+            : []
+        }
+        open={selectedRule !== null}
+        onOpenChange={(o) => {
+          if (!o) setSelectedRuleId(null);
+        }}
+      />
     </div>
   );
 }
