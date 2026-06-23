@@ -119,6 +119,7 @@ jobs:
             autotune-writeback.test.mjs \
             board-health.test.mjs \
             board-health-seam.test.mjs \
+            stall-janitor-throttle.test.mjs \
             phantom-worker-dir.test.mjs \
             boot-resume-approval.test.mjs \
             boot-resume.test.mjs \
