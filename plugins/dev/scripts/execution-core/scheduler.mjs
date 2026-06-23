@@ -54,6 +54,7 @@ import {
   TERMINAL_PHASE,
   NEW_WORK_ENTRY_PHASE,
   NON_PREEMPTABLE_PHASES,
+  ANCILLARY_PHASES, // CTL-1323: remediate etc. — still real pipeline work (PHASES is already imported from phase-fsm above)
 } from "../lib/workflow-descriptor.mjs";
 export { STAGE_RANK, NON_PREEMPTABLE_PHASES };
 // CTL-653: the verdict-router reads (verify.json verdict + event-counted cycle
@@ -686,6 +687,44 @@ export function isTicketInFlight(signals) {
   return true;
 }
 
+// CTL-1323: the set of REAL pipeline phases — a signal whose phase is one of these
+// represents genuine pipeline work occupying a slot. Phases NOT in this set (e.g.
+// "recovery-pass", the board-health delegate's inspection sweep) are transient
+// artifacts, not pipeline work.
+const REAL_PIPELINE_PHASES = new Set([...PHASES, ...ANCILLARY_PHASES]);
+
+// CTL-1323: the terminal-SUCCESS statuses that mean a non-pipeline signal is truly
+// inert — no live worker, and no pending operator decision. ONLY these make a dir
+// phantom. We deliberately use a POSITIVE allow-list (not "anything not running"):
+// a recovery-pass that ESCALATED (needs-human), PARKED (needs-input/turn-cap-exhausted),
+// was PREEMPTED, or FAILED must stay held — it surfaces a Needs-You signal or is
+// resumable, and re-pulling it would bury that pending state / abandon recovery context.
+const PHANTOM_TERMINAL_STATUSES = new Set(["done", "complete", "skipped"]);
+
+// CTL-1323: isPhantomWorkerDir — true when a worker dir is a PHANTOM: it carries
+// signals, but NONE is a real pipeline phase AND every signal is terminal-success.
+// The canonical case is a board-health recovery-pass that ran+completed, leaving only
+// `phase-recovery-pass.json:done`. Such a dir is NOT pipeline work — yet bare
+// directory-existence (listStartedTickets) excludes the ticket from the new-work pull
+// FOREVER, and isTicketInFlight counts it as occupying a slot, so the ticket strands in
+// Todo with no live worker (the CTL-1323 wedge: ADV-1398/1400/1306). Treating it as a
+// phantom lets both list functions ignore it so the ticket is re-pulled fresh.
+//
+// A non-pipeline signal that is NOT terminal-success (dispatched/running/preempted/
+// needs-human/needs-input/turn-cap-exhausted/failed/…) makes the dir NON-phantom — it
+// holds a real slot or a pending operator/recovery state we must not clobber. An EMPTY
+// signal set is NOT phantom (conservative — a bare/just-created dir we don't re-pull).
+// Pure over a phase→status map; exported for the CI unit suite.
+export function isPhantomWorkerDir(signals) {
+  const entries = Object.entries(signals ?? {});
+  if (entries.length === 0) return false;
+  for (const [phase, status] of entries) {
+    if (REAL_PIPELINE_PHASES.has(phase)) return false; // a genuine pipeline signal
+    if (!PHANTOM_TERMINAL_STATUSES.has(status)) return false; // active / parked / escalated → not phantom
+  }
+  return true; // only terminal-success non-pipeline signals (e.g. recovery-pass:done)
+}
+
 // listInFlightTickets — Set of ticket ids currently occupying a worker slot.
 export function listInFlightTickets(orchDir) {
   const inFlight = new Set();
@@ -697,7 +736,11 @@ export function listInFlightTickets(orchDir) {
   }
   for (const d of dirs) {
     if (!d.isDirectory()) continue;
-    if (isTicketInFlight(readPhaseSignals(orchDir, d.name))) inFlight.add(d.name);
+    const signals = readPhaseSignals(orchDir, d.name);
+    // CTL-1323: a phantom recovery-pass dir is not real in-flight work — skip it so it
+    // isn't counted as occupying a slot (and so buildGlobalRanking doesn't list it both
+    // as in-flight here AND as a fresh new-work candidate once listStartedTickets drops it).
+    if (isTicketInFlight(signals) && !isPhantomWorkerDir(signals)) inFlight.add(d.name);
   }
   return inFlight;
 }
@@ -1238,6 +1281,10 @@ export function listStartedTickets(orchDir) {
     return new Set(
       readdirSync(join(orchDir, "workers"), { withFileTypes: true })
         .filter((d) => d.isDirectory())
+        // CTL-1323: a phantom recovery-pass dir does NOT count as "started" — otherwise
+        // the new-work pull (buildGlobalRanking) excludes the ticket forever and it
+        // strands in Todo with no live worker. Dropping it here re-pulls it as fresh work.
+        .filter((d) => !isPhantomWorkerDir(readPhaseSignals(orchDir, d.name)))
         .map((d) => d.name)
     );
   } catch {
