@@ -31,6 +31,7 @@ import { homedir } from "node:os";
 import { parseEventTailChunk } from "./event-tail.mjs";
 import {
   getExecutionCoreDir,
+  applyBootDrainPolicy, // CTL-1321: boot accepting work by default
   getRegistryPath,
   getEventLogPath,
   getJobsRoot,      // CTL-1165 D3: job-dir GC root
@@ -506,6 +507,19 @@ export function startDaemon({
   // CTL-736 Phase 3: reset the per-(ticket, phase) progress high-water markers so a
   // stale mark from a prior daemon run cannot false-STOP the first death this run.
   clearProgressMarks(orchDir);
+  // CTL-1321: boot accepting work by default — clear the persistent drain flag
+  // (+ drain.drained sentinel) a prior drain left, so a quiesce→restart resumes
+  // new-work admission instead of coming up silently drained. CATALYST_BOOT_DRAINED=1
+  // re-arms drain for nodes deliberately kept out of rotation. Best-effort/fail-open;
+  // grouped with the writeBootMarker/clearProgressMarks prior-run resets and ahead of
+  // schedulerFn, the sole consumer of the `!draining` new-work gate.
+  const _bootDrain = applyBootDrainPolicy(orchDir);
+  log.info(
+    { drained: _bootDrain.drained },
+    _bootDrain.drained
+      ? "boot: CATALYST_BOOT_DRAINED set — node boots drained, holding new-work admission (CTL-1321)"
+      : "boot: drain flag cleared — node accepting work (CTL-1321)",
+  );
   _stopMonitor = stopMonitorFn;
   _stopScheduler = stopSchedulerFn;
 
