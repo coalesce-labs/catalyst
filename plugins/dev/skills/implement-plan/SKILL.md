@@ -6,9 +6,7 @@ description:
   previously created implementation plan using TDD (Red-Green-Refactor). Supports team mode for
   parallel implementation."
 disable-model-invocation: false
-allowed-tools:
-  Read, Write, Edit, Grep, Glob, Task, TodoWrite, Bash, mcp__deepwiki__ask_question,
-  mcp__deepwiki__read_wiki_structure
+allowed-tools: Read, Write, Edit, Grep, Glob, Task, TodoWrite, Bash
 version: 1.0.0
 ---
 

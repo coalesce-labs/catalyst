@@ -7,8 +7,7 @@ description:
   current session, using agent teams for parallelism when needed."
 disable-model-invocation: false
 allowed-tools:
-  Read, Write, Bash, Task, Grep, Glob, mcp__deepwiki__ask_question,
-  mcp__deepwiki__read_wiki_structure
+  Read, Write, Bash, Task, Grep, Glob
 version: 3.0.0
 ---
 
@@ -587,7 +586,7 @@ This phase runs in the current session to allow user interaction during research
    using the research summary as description, then register the ticket ID:
    `workflow-context.sh set-ticket "NEW-TICKET-ID"`
 5. **Conduct research** — follow the `/catalyst-dev:research-codebase` process exactly. This is the
-   single source of truth for how codebase research works (including DeepWiki orientation, sub-agent
+   single source of truth for how codebase research works (including sub-agent
    spawning, synthesis, and document creation). The research document MUST be written to
    `thoughts/shared/research/` and tracked in workflow context before proceeding to Phase 2.
 

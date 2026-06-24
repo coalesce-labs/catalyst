@@ -6,8 +6,8 @@ description:
   based on what you're looking for! It's sorta like codebase-locator, but it will not only tell you
   the location of files, it will also give you code details!
 tools:
-  Grep, Glob, Read, Bash(ls *), mcp__deepwiki__ask_question, mcp__deepwiki__read_wiki_structure,
-  mcp__context7__get_library_docs, mcp__context7__resolve_library_id
+  Grep, Glob, Read, Bash(ls *), mcp__context7__get_library_docs,
+  mcp__context7__resolve_library_id
 model: sonnet
 version: 1.0.0
 ---
@@ -61,8 +61,8 @@ look for based on request:
 
 - You can use your handy dandy `Grep`, `Glob`, and `LS` tools to to find what you're looking for!
   You know how it's done!
-- **If user asks about external repos/frameworks**: Use DeepWiki tools (see "External Pattern
-  Research" section below)
+- **If user asks about external repos/frameworks**: Use Context7 for library/framework docs (see
+  "External Pattern Research" section below)
 
 ### Step 3: Read and Extract
 
@@ -221,28 +221,17 @@ describe("Pagination", () => {
 
 When the user requests patterns from popular repos or frameworks:
 
-### Step 1: Use DeepWiki to Research External Repos
+### Step 1: Research External Repos
 
-**For specific questions**:
-```
-
-mcp**deepwiki**ask_question({ repoName: "facebook/react", question: "How is [pattern] typically
-implemented?" })
-
-```
-
-**For broad exploration** (get structure first):
-```
-
-mcp**deepwiki**read_wiki_structure({ repoName: "vercel/next.js" }) // See available topics, then ask
-specific questions
-
-````
+- **For library/framework docs**: Use Context7 (`mcp__context7__resolve_library_id` then
+  `mcp__context7__get_library_docs`) to pull current documentation and code examples.
+- **For broader code/web search**: Use Exa or WebSearch/WebFetch when the pattern isn't covered by
+  Context7, or to read a framework's live source.
 
 ### Step 2: Compare with Local Patterns
 
 Present both:
-1. **External framework pattern** (from DeepWiki)
+1. **External framework pattern** (from Context7 / web research)
    - How popular repos do it
    - Recommended approach
    - Code examples if provided
@@ -264,12 +253,12 @@ Present both:
 ### External Pattern: From [Repo Name]
 
 **Recommended approach**:
-[What DeepWiki found]
+[What the external research found]
 
-**Example** (from DeepWiki research):
+**Example** (from external research):
 [Code example if provided]
 
-**Reference**: [DeepWiki search link]
+**Reference**: [Source link]
 
 ---
 
@@ -300,7 +289,7 @@ Present both:
 - **Include tests** - Show existing test patterns
 - **Full file paths** - With line numbers
 - **No evaluation** - Just show what exists without judgment
-- **External research** - Use DeepWiki for popular repo patterns, then compare with local
+- **External research** - Use Context7 for popular repo/framework patterns, then compare with local
 
 ## What NOT to Do
 
