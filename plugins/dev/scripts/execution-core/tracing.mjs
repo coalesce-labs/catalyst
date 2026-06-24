@@ -21,7 +21,22 @@
 // hot loop. See emitTickTrace.
 
 import { hostname as osHostname } from "node:os";
-import { trace, context, SpanKind, SpanStatusCode } from "@opentelemetry/api";
+import { createRequire } from "node:module";
+
+// CTL-1338: load @opentelemetry/api via createRequire (synchronous — the emit helpers
+// below use trace/context/SpanKind/SpanStatusCode on the sync tick path) wrapped in
+// try/catch so a MISSING dep degrades to no-op instead of crashing on module load. This
+// honors the "missing SDK → no spans, never crash" invariant above — a STATIC
+// `import ... from "@opentelemetry/api"` violated it: any importer of scheduler.mjs (e.g.
+// orch-monitor's quality `bun test`, which uses scheduler.mjs's pure helpers but does NOT
+// install the OTel deps) crashed on module load. The other four OTel packages are already
+// lazy-loaded inside initTracing; only `api` was static, inconsistently.
+let trace, context, SpanKind, SpanStatusCode;
+try {
+  ({ trace, context, SpanKind, SpanStatusCode } = createRequire(import.meta.url)("@opentelemetry/api"));
+} catch {
+  // @opentelemetry/api not installed in this consumer's context — tracing stays a no-op.
+}
 
 let _enabled = false;
 let _provider = null;
