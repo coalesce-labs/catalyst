@@ -446,7 +446,7 @@ SELECT ls.tick_id, 6, 'cycle_exhausted', ls.ticket,
    AND COALESCE((SELECT c.remediate_count FROM obs_cycle c
                   WHERE c.tick_id = ls.tick_id AND c.ticket = ls.ticket LIMIT 1), 0) >= 3`;
 
-export const RULES_SHA = '96bc54a6d2cc919c';
+export const RULES_SHA = '800f12ef0394314a';
 
 
 // Deep-freeze helper for RULE_MANIFEST (CTL-1063 Phase 5).
@@ -512,7 +512,25 @@ export const RULE_MANIFEST = _deepFreeze({
       "name": "session_registered",
       "stratum": 1,
       "extern": false,
-      "description": "The signal's background job shows up in the live agents listing — the session is registered.",
+      "description": "Holds when a running phase's background job is found in the live agent listing as a registered session.",
+      "narrative": "A worker can be assigned to a ticket and still never truly come to life, so the harness needs to confirm the agent actually showed up before it expects any progress. This belief confirms exactly that: a phase's background job appears in the live listing of running agents, so its session is registered and accounted for. It is a foundational fact, not a decision — agents don't act on it directly. It is one of the ingredients the never-started check leans on to tell a genuinely stuck worker apart from one that simply was never launched.",
+      "shape": {
+        "subjectDoc": "A running ticket phase, written as ticket-slash-phase like CTL-742/implement.",
+        "values": [
+          {
+            "key": "session_id",
+            "type": "string (id)",
+            "meaning": "the live agent session UUID found in the running-agents listing, e.g. \"sess-9f3a21\""
+          },
+          {
+            "key": "short_id",
+            "type": "string (id)",
+            "meaning": "the phase's background job id that matched into that listing, e.g. \"bg-abc\""
+          }
+        ],
+        "exampleInstance": "session_registered(subject = \"CTL-742/implement\") → { session_id: \"sess-9f3a21\", short_id: \"bg-abc\" }",
+        "exampleNote": "The background job bg-abc dispatched for CTL-742's implement phase actually showed up in the live agent listing as session sess-9f3a21, confirming the worker was genuinely launched rather than merely assigned."
+      },
       "feeds": [],
       "reads": [],
       "negates": [],
@@ -529,7 +547,7 @@ export const RULE_MANIFEST = _deepFreeze({
       "ticket": "CTL-933",
       "src": {
         "file": "beliefs/rules.dl",
-        "line": 45
+        "line": 50
       },
       "arms": [
         {
@@ -574,7 +592,25 @@ export const RULE_MANIFEST = _deepFreeze({
       "name": "turn_started",
       "stratum": 1,
       "extern": false,
-      "description": "The session has produced a transcript, so its prompt actually became a running turn.",
+      "description": "Holds when a running phase's session has produced a transcript, proving its first turn actually started.",
+      "narrative": "There is a real gap between an agent that has been handed a prompt and one that has actually begun working — a session can register and then sit there, never taking its first turn. This belief catches the moment work truly begins: the session has written a transcript, which means its prompt became a running turn rather than a parked job. It is a foundational fact with no judgment attached, and agents don't act on it directly. Its job is to feed the never-started wedge check, which fires only when this signal is absent.",
+      "shape": {
+        "subjectDoc": "A running ticket phase, written as ticket-slash-phase like CTL-742/implement.",
+        "values": [
+          {
+            "key": "session_id",
+            "type": "string (id)",
+            "meaning": "the agent session UUID whose transcript proves work began, e.g. \"sess-9f3a21\""
+          },
+          {
+            "key": "bytes",
+            "type": "integer",
+            "meaning": "the size of the session transcript in bytes, the evidence that a first turn has actually written output, e.g. 4096"
+          }
+        ],
+        "exampleInstance": "turn_started(subject = \"CTL-742/implement\") → { session_id: \"sess-9f3a21\", bytes: 4096 }",
+        "exampleNote": "CTL-742's implement session sess-9f3a21 has written a 4 KB transcript, meaning its prompt became a real running turn instead of a parked job."
+      },
       "feeds": [
         "R4"
       ],
@@ -593,7 +629,7 @@ export const RULE_MANIFEST = _deepFreeze({
       "ticket": "CTL-933",
       "src": {
         "file": "beliefs/rules.dl",
-        "line": 66
+        "line": 77
       },
       "arms": [
         {
@@ -609,7 +645,14 @@ export const RULE_MANIFEST = _deepFreeze({
       "name": "wedged_never_started",
       "stratum": 2,
       "extern": false,
-      "description": "A running phase whose session registered but never started a turn within never_started_ms — a never-started wedge.",
+      "description": "Holds when a phase is still marked running and its session is registered, yet its first turn never appeared within the never-started grace window, and the worker isn't already known to be dead.",
+      "narrative": "A worker can check in, claim a ticket, and look busy on the board while having never actually done a thing. This belief catches exactly that: a phase that registered its session but never produced a first turn, even after waiting longer than a real start should take. That is a true stuck — a never-started wedge, not a slow start. When agents see this, they can tear down the dead session and re-dispatch the phase fresh, or, if it keeps recurring, raise it for a human rather than letting the ticket sit motionless. It only fires once the engine has ruled out that the worker already died, so a retry is the right move and not a wasted one.",
+      "shape": {
+        "subjectDoc": "A running ticket phase, written as ticket-slash-phase like CTL-742/implement, whose worker registered a session but may never have actually begun.",
+        "values": [],
+        "exampleInstance": "wedged_never_started(subject = \"CTL-742/implement\")",
+        "exampleNote": "CTL-742's implement phase has a worker that checked in over a minute ago but never produced a first turn and isn't known to be dead, so it looks busy while having done nothing and should be torn down and re-dispatched fresh."
+      },
       "feeds": [
         "R10"
       ],
@@ -634,7 +677,7 @@ export const RULE_MANIFEST = _deepFreeze({
       "ticket": "CTL-933",
       "src": {
         "file": "beliefs/rules.dl",
-        "line": 113
+        "line": 135
       },
       "arms": [
         {
@@ -686,7 +729,20 @@ export const RULE_MANIFEST = _deepFreeze({
       "name": "progress_evidence",
       "stratum": 1,
       "extern": true,
-      "description": "The most recent positive evidence of work, taken as the max over heartbeat, transcript, and signal timestamps.",
+      "description": "Holds for any running phase that has at least one trace of activity, recording the most recent moment across the worker's heartbeats, its transcript writes, and its signal updates.",
+      "narrative": "Before the harness can say whether a worker is alive or stuck, it needs one honest answer: when did this phase last show any sign of life? A running worker leaves traces in a few different places, and any single one can mislead on its own. This belief gathers every recent sign of activity and keeps only the freshest as the phase's last-seen moment. It makes no judgment yet. Agents don't act on it directly — it is the heartbeat-of-record that the alive-versus-stalled verdicts are built on top of.",
+      "shape": {
+        "subjectDoc": "A running ticket phase, written as ticket-slash-phase like CTL-742/implement.",
+        "values": [
+          {
+            "key": "ts_ms",
+            "type": "timestamp (ms since epoch)",
+            "meaning": "the single freshest sign-of-life moment for this phase, taken as the latest across the worker's last heartbeat, its most recent transcript write, and its most recent signal update, e.g. 1718900400000 (2026-06-20T18:40:00Z)"
+          }
+        ],
+        "exampleInstance": "progress_evidence(subject = \"CTL-742/implement\") → { ts_ms: 1718900400000 }",
+        "exampleNote": "The implement worker on CTL-742 last showed any trace of activity — a heartbeat, a transcript write, or a signal update — at 2026-06-20T18:40:00Z, the sign-of-life moment the alive-versus-stalled checks build on."
+      },
       "feeds": [
         "R5",
         "R6"
@@ -721,7 +777,20 @@ export const RULE_MANIFEST = _deepFreeze({
       "name": "worker_dead",
       "stratum": 1,
       "extern": true,
-      "description": "Claude's own durable verdict that the worker is dead — the job is gone or in a terminal state.",
+      "description": "Holds when a running phase's background job is gone, has reached a terminal moment, or is in a stopped, failed, done, or blocked state.",
+      "narrative": "Many of the harness's harder judgments hinge on one thing being settled first: is this worker actually gone? Without a trustworthy death signal, the engine could keep waiting on a phase that already ended, or escalate one that simply finished. This belief records the durable verdict that a worker is dead — its background job has disappeared or landed in a terminal state. It carries no action by itself, but it is load-bearing: the liveness and lease checks all consult it so they never flag a worker as stuck when it has, in fact, already died.",
+      "shape": {
+        "subjectDoc": "A running ticket phase, written as ticket-slash-phase like CTL-742/implement, whose worker has durably stopped.",
+        "values": [
+          {
+            "key": "reason",
+            "type": "string (enum)",
+            "meaning": "why the worker is judged dead — \"job_gone\" when its background job no longer exists, \"first_terminal_at\" when the job recorded a terminal moment, or \"state:<state>\" naming the terminal state such as \"state:failed\", \"state:done\", \"state:stopped\", or \"state:blocked\""
+          }
+        ],
+        "exampleInstance": "worker_dead(subject = \"CTL-742/implement\") → { reason: \"state:failed\" }",
+        "exampleNote": "The implement worker on CTL-742 has landed in a failed terminal state, so it is durably dead, and the liveness and lease checks consult this so they never flag an already-finished worker as merely stuck."
+      },
       "feeds": [
         "R4",
         "R5",
@@ -741,7 +810,7 @@ export const RULE_MANIFEST = _deepFreeze({
       "ticket": "CTL-933",
       "src": {
         "file": "beliefs/rules.dl",
-        "line": 83
+        "line": 100
       },
       "arms": [
         {
@@ -757,7 +826,25 @@ export const RULE_MANIFEST = _deepFreeze({
       "name": "lease_valid",
       "stratum": 2,
       "extern": true,
-      "description": "The phase has progress evidence inside its freshness window, so its lease is still valid.",
+      "description": "Holds when a running phase's most recent sign of progress falls inside the freshness window for its phase type (longer for doc phases, shorter for build phases), and the worker isn't known to be dead.",
+      "narrative": "Before the harness can decide a worker is stuck, it needs the opposite reading first: solid proof the worker is alive and making progress right now. This belief is that proof — it confirms a running phase has shown a sign of life recently enough to still count, allowing more time for slow thinking phases and less for hands-on build phases. Agents don't act on it directly; it is the all-clear that keeps a healthy worker from being mistaken for a stalled one, and the ingredient the stalled-alive and free-capacity verdicts are computed against.",
+      "shape": {
+        "subjectDoc": "A running ticket phase, written as ticket-slash-phase like CTL-742/implement, whose worker is being confirmed alive and making progress right now.",
+        "values": [
+          {
+            "key": "evidence_ts_ms",
+            "type": "timestamp (ms since epoch)",
+            "meaning": "when the worker last showed a sign of progress, the freshest proof-of-life moment, e.g. 1718900400000 (2026-06-20T18:40:00Z)"
+          },
+          {
+            "key": "window_ms",
+            "type": "integer (duration in ms)",
+            "meaning": "how long this phase is allowed to go quiet before its sign of life is considered stale — wider for doc and thinking phases, tighter for hands-on build phases, e.g. 900000 (15 minutes) for an implement phase"
+          }
+        ],
+        "exampleInstance": "lease_valid(subject = \"CTL-742/implement\") → { evidence_ts_ms: 1718900400000, window_ms: 900000 }",
+        "exampleNote": "CTL-742's implement phase last showed progress at 2026-06-20T18:40:00Z and is allowed a 15-minute window, so its lease is still valid and a healthy worker is not mistaken for a stalled one."
+      },
       "feeds": [
         "R6"
       ],
@@ -784,7 +871,7 @@ export const RULE_MANIFEST = _deepFreeze({
       "ticket": "CTL-933",
       "src": {
         "file": "beliefs/rules.dl",
-        "line": 141
+        "line": 167
       },
       "arms": [
         {
@@ -800,7 +887,14 @@ export const RULE_MANIFEST = _deepFreeze({
       "name": "lease_expired",
       "stratum": 2,
       "extern": true,
-      "description": "A running phase with no valid lease and not dead — its lease has expired (stalled-alive).",
+      "description": "Holds when a phase is still marked running but the engine could not confirm its lease is valid and has no evidence the worker is dead.",
+      "narrative": "The hardest worker to spot is the one that is technically still running but has gone quiet — alive on paper, producing nothing. This belief names that case: a phase still marked running that has no fresh proof of progress yet also isn't dead. That is the stalled-alive state, a worker that has drifted past its freshness window without anyone noticing. When agents see this, they can reclaim the lease and re-dispatch the phase, or escalate if it won't recover — freeing the slot a silent worker was holding. It is deliberately the residual of the alive check: it fires only when the engine could not confirm the worker is making progress.",
+      "shape": {
+        "subjectDoc": "A running ticket phase, written as ticket-slash-phase like CTL-742/implement, that is alive on paper but has gone quiet.",
+        "values": [],
+        "exampleInstance": "lease_expired(subject = \"CTL-742/implement\")",
+        "exampleNote": "CTL-742's implement phase is still marked running but has produced no fresh progress past its freshness window and isn't dead either — the stalled-alive case — so its lease can be reclaimed and the phase re-dispatched to free the slot the silent worker was holding."
+      },
       "feeds": [
         "R10"
       ],
@@ -822,7 +916,7 @@ export const RULE_MANIFEST = _deepFreeze({
       "ticket": "CTL-933",
       "src": {
         "file": "beliefs/rules.dl",
-        "line": 169
+        "line": 201
       },
       "arms": [
         {
@@ -838,7 +932,30 @@ export const RULE_MANIFEST = _deepFreeze({
       "name": "board_drift",
       "stratum": 2,
       "extern": true,
-      "description": "The Linear board state disagrees with what the running phase is actually doing — board drift.",
+      "description": "Holds when a phase is running but the ticket's current board column doesn't match the column that phase expects, and the ticket isn't already done or cancelled.",
+      "narrative": "A worker can be running flawlessly and still be doing the wrong thing, because the board says the ticket is somewhere its phase isn't. This belief catches that mismatch: it maps each running phase to the board column it ought to be in and flags when the board's actual state disagrees. It is how the harness notices a ticket someone moved by hand, or a state transition that silently failed to land. When agents see this, they can reconcile the board with reality before downstream decisions get made against a stale column. Tickets already finished or cancelled are left alone, so a closed-out ticket never trips the alarm.",
+      "shape": {
+        "subjectDoc": "A ticket, written as its id like CTL-742, whose live board column is being checked against where its currently running phase expects it to be.",
+        "values": [
+          {
+            "key": "have",
+            "type": "string (board column name)",
+            "meaning": "the ticket's actual current board column, e.g. \"Plan\""
+          },
+          {
+            "key": "want",
+            "type": "string (board column name)",
+            "meaning": "the board column the running phase expects, mapped from that phase, e.g. \"Implement\" for an implement phase"
+          },
+          {
+            "key": "phase",
+            "type": "string (phase name)",
+            "meaning": "which phase is currently running for the ticket, e.g. \"implement\""
+          }
+        ],
+        "exampleInstance": "board_drift(subject = \"CTL-742\") → { have: \"Plan\", want: \"Implement\", phase: \"implement\" }",
+        "exampleNote": "CTL-742 is actively running its implement phase, which should sit in the Implement column, but the board still shows it parked in Plan, so the column was moved by hand or a transition silently failed to land and needs reconciling before downstream decisions act on it."
+      },
       "feeds": [],
       "reads": [],
       "negates": [],
@@ -856,7 +973,7 @@ export const RULE_MANIFEST = _deepFreeze({
       "ticket": "CTL-933",
       "src": {
         "file": "beliefs/rules.dl",
-        "line": 189
+        "line": 225
       },
       "arms": [
         {
@@ -872,7 +989,50 @@ export const RULE_MANIFEST = _deepFreeze({
       "name": "free_slots",
       "stratum": 3,
       "extern": true,
-      "description": "Free capacity for a host: parallel slots and session slots not currently consumed by valid leases.",
+      "description": "Holds for every host on each tick: free slots equals the smaller of the remaining parallel-work room (the parallelism cap minus the phases currently making progress) and the remaining session room (the session cap minus the background sessions running), never going below zero.",
+      "narrative": "Before a host can pull a new ticket onto the board, the harness has to know whether it actually has room — taking on work it can't run just leaves tickets stranded mid-pipeline. This belief is that headcount: how many free slots a host has right now to start fresh work. It takes the smaller of two ceilings — how many phases can run in parallel, and how many agent sessions can run at once — subtracts what is already in use, and floors the result at zero. It is a foundational capacity reading, not a decision the daemon acts on by itself; the scheduler consults this number to decide whether the host may accept another ticket, and it keeps the full math so you can see exactly why capacity is what it is.",
+      "shape": {
+        "subjectDoc": "A single machine in the fleet on a given tick, written as host:<name> like host:mini-2, that the scheduler asks whether it has room for another ticket.",
+        "values": [
+          {
+            "key": "free_slots",
+            "type": "integer",
+            "meaning": "how many fresh tickets this host can actually start right now — the floored-at-zero smaller of the two headroom figures below, e.g. 1 means room for one more and 0 means the host is full"
+          },
+          {
+            "key": "by_lease",
+            "type": "integer",
+            "meaning": "headroom from the parallel-work angle: the parallelism ceiling minus the phases currently making progress, e.g. with a ceiling of 4 and 3 progressing phases this is 1"
+          },
+          {
+            "key": "by_session_cap",
+            "type": "integer",
+            "meaning": "headroom from the session angle: the session ceiling minus the background agent sessions running, e.g. with a ceiling of 6 and 4 sessions live this is 2"
+          },
+          {
+            "key": "max_parallel",
+            "type": "integer",
+            "meaning": "the configured ceiling on how many phases may run in parallel on this host, e.g. 4"
+          },
+          {
+            "key": "session_cap",
+            "type": "integer",
+            "meaning": "the configured ceiling on how many agent sessions may run at once on this host, e.g. 6"
+          },
+          {
+            "key": "lease_valid_count",
+            "type": "integer",
+            "meaning": "how many phases currently hold a valid lease, i.e. are actively making progress, e.g. 3"
+          },
+          {
+            "key": "bg_session_count",
+            "type": "integer",
+            "meaning": "how many background agent sessions are running on this host right now, e.g. 4"
+          }
+        ],
+        "exampleInstance": "free_slots(subject = \"host:mini-2\") → { free_slots: 1, by_lease: 1, by_session_cap: 2, max_parallel: 4, session_cap: 6, lease_valid_count: 3, bg_session_count: 4 }",
+        "exampleNote": "On this tick mini-2 has just one slot free to pull a new ticket — three of its four parallel-work slots are already busy, which is tighter than the session limit of four-of-six used — so the smaller ceiling wins and the scheduler may admit at most one more ticket."
+      },
       "feeds": [],
       "reads": [],
       "negates": [],
@@ -897,7 +1057,7 @@ export const RULE_MANIFEST = _deepFreeze({
       "ticket": "CTL-933",
       "src": {
         "file": "beliefs/rules.dl",
-        "line": 221
+        "line": 264
       },
       "arms": [
         {
@@ -913,7 +1073,20 @@ export const RULE_MANIFEST = _deepFreeze({
       "name": "wake_diagnostician",
       "stratum": 4,
       "extern": true,
-      "description": "Wake the diagnostician for a never-started wedge (no cooldown intent in the window).",
+      "description": "Holds when a phase has been judged a never-started wedge and no diagnostician has been sent for it within the recent cool-down window.",
+      "narrative": "When a ticket is stuck, the harness tries the cheapest fix first before bothering anyone. This belief fires the opening move on the escalation ladder: for a phase that registered but never took its first turn, it decides to wake a diagnostician agent to look at the worker and try to unstick it. Before deciding, it checks that no diagnostician was already sent for this same phase within the recent cool-down window, so a stuck ticket doesn't get poked over and over. If the diagnostician's nudge doesn't help, this is the step that later justifies escalating to a person.",
+      "shape": {
+        "subjectDoc": "A running ticket phase, written as ticket-slash-phase like CTL-742/implement, that registered a worker but never took its first turn.",
+        "values": [
+          {
+            "key": "reason",
+            "type": "string (enum)",
+            "meaning": "why a diagnostician is being woken — always \"never-started\" here, meaning the phase registered a worker but the worker never took its first turn"
+          }
+        ],
+        "exampleInstance": "wake_diagnostician(subject = \"CTL-742/implement\") → { reason: \"never-started\" }",
+        "exampleNote": "CTL-742's implement phase booted a worker that then sat dead-still and never took a single turn, so the engine sends a diagnostician to poke it — the cheapest first move on the escalation ladder — firing only because none was already sent for this phase within the recent cool-down window."
+      },
       "feeds": [
         "R11",
         "R12"
@@ -940,7 +1113,7 @@ export const RULE_MANIFEST = _deepFreeze({
       "ticket": "CTL-933",
       "src": {
         "file": "beliefs/rules.dl",
-        "line": 258
+        "line": 312
       },
       "arms": [
         {
@@ -961,7 +1134,25 @@ export const RULE_MANIFEST = _deepFreeze({
       "name": "action_ineffective",
       "stratum": 4,
       "extern": true,
-      "description": "An intent has exhausted its max_attempts with no outcome — the action proved ineffective.",
+      "description": "Holds when an attempted fix has been retried up to its allowed number of times and still has no recorded outcome.",
+      "narrative": "A cheap automated fix only helps if you can tell when it has failed. This belief watches the attempts the harness makes to unstick work — for example, waking a diagnostician — and marks one as having proven ineffective once it has been retried up to its allowed limit without ever producing a result. It is the engine's way of admitting an automated move isn't working, rather than retrying forever. Agents don't act on it directly; it is the evidence that, combined with the original attempt, tells the harness it is time to stop trying and get a human.",
+      "shape": {
+        "subjectDoc": "An attempted automated fix, written as kind-then-target like \"wake-diagnostician:CTL-742/implement\", naming the unstick attempt the engine made and which ticket phase it targeted.",
+        "values": [
+          {
+            "key": "kind",
+            "type": "string",
+            "meaning": "which kind of automated fix was attempted, e.g. \"wake-diagnostician\""
+          },
+          {
+            "key": "attempts",
+            "type": "integer",
+            "meaning": "how many times the fix was retried before being declared ineffective — it reaches this point once it has hit the allowed maximum with no recorded outcome, e.g. 3"
+          }
+        ],
+        "exampleInstance": "action_ineffective(subject = \"wake-diagnostician:CTL-742/implement\") → { kind: \"wake-diagnostician\", attempts: 3 }",
+        "exampleNote": "The wake-diagnostician fix for CTL-742's implement phase has been retried three times with no recorded outcome, so the engine admits the automated move isn't working rather than retrying forever — the evidence that later justifies handing the phase to a person."
+      },
       "feeds": [
         "R12"
       ],
@@ -982,7 +1173,7 @@ export const RULE_MANIFEST = _deepFreeze({
       "ticket": "CTL-933",
       "src": {
         "file": "beliefs/rules.dl",
-        "line": 311
+        "line": 375
       },
       "arms": [
         {
@@ -998,7 +1189,20 @@ export const RULE_MANIFEST = _deepFreeze({
       "name": "escalate_human",
       "stratum": 4,
       "extern": true,
-      "description": "The diagnostician was woken and the action was ineffective, so the work escalates to a human.",
+      "description": "Holds when a diagnostician was woken for a stuck phase and that wake-up attempt has been marked ineffective.",
+      "narrative": "This is the last rung of the ladder — the point where the harness stops trying on its own and raises a hand for a person. It fires only when both halves of the story are true: a diagnostician was actually woken to fix the stuck work, and that attempt was judged ineffective after exhausting its retries. Because the cheaper automated move was already tried and failed, this belief is the harness's honest signal that human attention is genuinely needed, and it carries along why the work was stuck in the first place.",
+      "shape": {
+        "subjectDoc": "A stuck ticket phase, written as ticket-slash-phase like CTL-742/implement, where a diagnostician was woken and that attempt was then judged ineffective.",
+        "values": [
+          {
+            "key": "why",
+            "type": "string (enum)",
+            "meaning": "why the work was stuck in the first place, carried forward from the wake-diagnostician reason, e.g. \"never-started\" or \"stalled-alive\""
+          }
+        ],
+        "exampleInstance": "escalate_human(subject = \"CTL-742/implement\") → { why: \"never-started\" }",
+        "exampleNote": "CTL-742's implement phase was a never-started wedge, the engine woke a diagnostician to unstick it, that nudge was retried to exhaustion and judged ineffective, so the engine stops trying on its own and raises a hand for a human while carrying forward that the root problem was a worker that never took its first turn."
+      },
       "feeds": [],
       "reads": [
         "wake_diagnostician",
@@ -1017,7 +1221,7 @@ export const RULE_MANIFEST = _deepFreeze({
       "ticket": "CTL-933",
       "src": {
         "file": "beliefs/rules.dl",
-        "line": 330
+        "line": 400
       },
       "arms": [
         {
@@ -1033,7 +1237,30 @@ export const RULE_MANIFEST = _deepFreeze({
       "name": "blocker_rank",
       "stratum": 5,
       "extern": true,
-      "description": "A ticket's transitive blocker count, computed over the full dependency closure.",
+      "description": "Holds for any ticket that has at least one other ticket blocking it; the value is how many distinct tickets sit in its full blocker chain, with both its direct blockers and the complete chain listed out.",
+      "narrative": "A ticket can look idle when it is actually waiting on a chain of other work to finish first, and you can't tell how deep that wait goes by looking at it alone. This belief walks the whole dependency graph and counts everything standing between a ticket and the start line — not just its direct blockers, but every blocker-of-a-blocker down the chain. It is an ordering signal, not a verdict: the daemon and agents use the count and the named blockers to tell what is genuinely startable now from what is parked behind a long tail, and to prioritize unblocking the tickets that free up the most downstream work.",
+      "shape": {
+        "subjectDoc": "A ticket that has at least one other ticket blocking it, written as its id like CTL-742.",
+        "values": [
+          {
+            "key": "rank",
+            "type": "integer",
+            "meaning": "how many distinct tickets sit in this ticket's entire blocker chain — direct blockers plus every blocker-of-a-blocker down the line, e.g. 4"
+          },
+          {
+            "key": "direct",
+            "type": "array of strings (ticket ids)",
+            "meaning": "the tickets blocking it immediately, the first hop only, e.g. [\"CTL-880\", \"CTL-901\"]"
+          },
+          {
+            "key": "transitive",
+            "type": "array of strings (ticket ids)",
+            "meaning": "every distinct ticket anywhere in the full chain it is waiting behind, e.g. [\"CTL-880\", \"CTL-901\", \"CTL-455\", \"CTL-312\"]"
+          }
+        ],
+        "exampleInstance": "blocker_rank(subject = \"CTL-742\") → { rank: 4, direct: [\"CTL-880\", \"CTL-901\"], transitive: [\"CTL-880\", \"CTL-901\", \"CTL-455\", \"CTL-312\"] }",
+        "exampleNote": "CTL-742 looks idle but is parked behind a four-ticket wall — two tickets block it directly and those drag in two more deeper in the chain — so it cannot start until all four clear."
+      },
       "feeds": [],
       "reads": [],
       "negates": [],
@@ -1051,7 +1278,7 @@ export const RULE_MANIFEST = _deepFreeze({
       "ticket": "CTL-965",
       "src": {
         "file": "beliefs/rules.dl",
-        "line": 350
+        "line": 425
       },
       "arms": [
         {
@@ -1067,7 +1294,20 @@ export const RULE_MANIFEST = _deepFreeze({
       "name": "cycle_detected",
       "stratum": 5,
       "extern": true,
-      "description": "A dependency cycle exists (A blocks B blocks A) in the relations graph.",
+      "description": "Holds when a ticket appears in its own blocker chain — following the blocks-relationships forward eventually leads back to the same ticket — meaning a group of tickets are blocking each other in a closed loop.",
+      "narrative": "Two or more tickets can end up waiting on each other in a loop — A can't start until B finishes, but B is waiting on A — and when that happens nothing in the loop can ever become ready on its own. This belief follows the dependency chain back to its source and flags any ticket that can reach itself, naming every member caught in the loop. It is one of the few dependency findings raised as an error rather than a quiet fact, because no amount of waiting resolves it: an agent or a human has to step in and break the cycle by editing one of the blocking relationships before any of the trapped tickets can move.",
+      "shape": {
+        "subjectDoc": "A ticket that can reach itself by following its blocker chain, caught in a closed dependency loop, written as its id like CTL-901.",
+        "values": [
+          {
+            "key": "members",
+            "type": "array of strings (ticket ids)",
+            "meaning": "every ticket trapped in the same closed loop, including the subject itself, e.g. [\"CTL-901\", \"CTL-880\", \"CTL-742\"]"
+          }
+        ],
+        "exampleInstance": "cycle_detected(subject = \"CTL-901\") → { members: [\"CTL-901\", \"CTL-880\", \"CTL-742\"] }",
+        "exampleNote": "CTL-901 blocks CTL-880, which blocks CTL-742, which blocks CTL-901 again — a three-ticket deadlock where none can become ready on its own, so a human or agent must break one of the blocking links before any of them can move."
+      },
       "feeds": [],
       "reads": [],
       "negates": [],
@@ -1083,7 +1323,7 @@ export const RULE_MANIFEST = _deepFreeze({
       "ticket": "CTL-965",
       "src": {
         "file": "beliefs/rules.dl",
-        "line": 388
+        "line": 470
       },
       "arms": [
         {
@@ -1099,7 +1339,20 @@ export const RULE_MANIFEST = _deepFreeze({
       "name": "ready",
       "stratum": 5,
       "extern": true,
-      "description": "A ticket is in an eligible state with every blocker done — it is ready to start.",
+      "description": "Holds when a ticket is in the configured ready-to-start state and none of its direct blockers are still open — every blocker has been finished or cancelled.",
+      "narrative": "The harness only wants to hand an agent work that can actually move, so it needs to know which tickets are clear to pick up right now. This belief marks a ticket that is sitting in an eligible, pick-up-ready state with no blocker still open — every ticket that was blocking it has reached a finished state, done or cancelled. It is the green light the scheduler reads when choosing what to dispatch next; a ticket that fails this check is held back, either because it isn't in the right state yet or because something it depends on is still in flight.",
+      "shape": {
+        "subjectDoc": "A ticket that is in the configured pick-up-ready state with no open blockers, written as its id like CTL-1015.",
+        "values": [
+          {
+            "key": "ready",
+            "type": "integer (presence flag, always 1)",
+            "meaning": "a presence flag meaning the ticket is clear to dispatch right now; it is always 1 because the belief only exists when the ticket is ready, so the value carries no other detail"
+          }
+        ],
+        "exampleInstance": "ready(subject = \"CTL-1015\") → { ready: 1 }",
+        "exampleNote": "CTL-1015 is sitting in the eligible start state and every ticket that was blocking it has reached Done or Cancelled, so this is the green light the scheduler reads to hand CTL-1015 to a worker next."
+      },
       "feeds": [],
       "reads": [],
       "negates": [],
@@ -1117,7 +1370,7 @@ export const RULE_MANIFEST = _deepFreeze({
       "ticket": "CTL-965",
       "src": {
         "file": "beliefs/rules.dl",
-        "line": 432
+        "line": 519
       },
       "arms": [
         {
@@ -1133,7 +1386,25 @@ export const RULE_MANIFEST = _deepFreeze({
       "name": "advance_to",
       "stratum": 6,
       "extern": true,
-      "description": "The predicted next phase: the normal FSM edge, or the verify-to-remediate detour when verification fails.",
+      "description": "Holds when the ticket's furthest-along phase has finished and either it walks one step forward along the normal pipeline, or — when that phase was a failed verification with retry budget left — it points back to a remediation pass instead; in both cases only if that next phase hasn't already been started and isn't the end of the line.",
+      "narrative": "The harness only earns its keep if every ticket keeps moving to its next step, and the engine has to decide what that step is. This belief names the single phase a ticket should advance to next: usually the normal walk along the pipeline — research after triage, verify after implement, and so on — but when verification just failed and there's still repair budget left, it instead points back to a fix-it pass rather than letting a broken change move forward. When the daemon sees this, it dispatches a worker for exactly that phase — sending the ticket onward when work finished cleanly, or looping it back to remediate when verification turned up problems. It only fires once the current phase has actually finished and the next worker hasn't already been launched.",
+      "shape": {
+        "subjectDoc": "A ticket whose furthest-along pipeline phase just finished, written as its id like CTL-742, naming the single next phase to dispatch.",
+        "values": [
+          {
+            "key": "from",
+            "type": "string (phase name)",
+            "meaning": "the ticket's furthest-along phase that just finished and triggered the decision, e.g. \"implement\""
+          },
+          {
+            "key": "to",
+            "type": "string (phase name)",
+            "meaning": "the one phase to dispatch next — normally the next step along the pipeline such as \"verify\" after \"implement\", or the literal \"remediate\" when a verification failed but repair budget remains"
+          }
+        ],
+        "exampleInstance": "advance_to(subject = \"CTL-742\") → { from: \"implement\", to: \"verify\" }",
+        "exampleNote": "CTL-742 just finished its implement phase cleanly, so the engine's next move is to dispatch a verify worker to check the change before it goes any further."
+      },
       "feeds": [],
       "reads": [],
       "negates": [],
@@ -1150,7 +1421,7 @@ export const RULE_MANIFEST = _deepFreeze({
       "ticket": "CTL-966",
       "src": {
         "file": "beliefs/rules.dl",
-        "line": 474
+        "line": 566
       },
       "arms": [
         {
@@ -1166,7 +1437,30 @@ export const RULE_MANIFEST = _deepFreeze({
       "name": "cycle_exhausted",
       "stratum": 6,
       "extern": true,
-      "description": "The remediate count has reached its cap — no more retries; the cycle is exhausted.",
+      "description": "Holds when the ticket's latest phase is a finished verification that came back failing, and the number of remediation attempts has reached its cap, leaving no retries left.",
+      "narrative": "Retrying a failing fix forever is its own kind of stuck — at some point the harness has to stop looping and admit a ticket can't fix itself. This belief marks a ticket that has burned through all of its allowed repair attempts: verification keeps failing and the retry budget is spent. Because it can no longer self-heal, this is where the engine stops sending it back for another automated fix and the ticket is raised for a human to look at — the last-resort escalation after the cheaper retries have all been tried.",
+      "shape": {
+        "subjectDoc": "A ticket stuck in a failing verify loop, written as its id like CTL-918, that has burned through every allowed remediation retry.",
+        "values": [
+          {
+            "key": "phase",
+            "type": "string (phase name)",
+            "meaning": "the ticket's latest finished phase, which for this belief is always \"verify\" — the failing verification that drove escalation"
+          },
+          {
+            "key": "remediate_count",
+            "type": "integer",
+            "meaning": "how many automated repair passes have already been spent on this ticket, e.g. 3"
+          },
+          {
+            "key": "cap",
+            "type": "integer",
+            "meaning": "the maximum repair passes allowed before the engine gives up, fixed at 3"
+          }
+        ],
+        "exampleInstance": "cycle_exhausted(subject = \"CTL-918\") → { phase: \"verify\", remediate_count: 3, cap: 3 }",
+        "exampleNote": "CTL-918 has failed verification and been sent back for an automated fix three times — the full retry budget — with no success, so the engine stops looping and raises it for a human to take over."
+      },
       "feeds": [],
       "reads": [],
       "negates": [],
@@ -1184,7 +1478,7 @@ export const RULE_MANIFEST = _deepFreeze({
       "ticket": "CTL-966",
       "src": {
         "file": "beliefs/rules.dl",
-        "line": 553
+        "line": 651
       },
       "arms": [
         {

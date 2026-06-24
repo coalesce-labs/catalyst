@@ -102,6 +102,16 @@ describe("GET /api/beliefs/rules — Rulebook copy fields (CTL-1103)", () => {
     }
   });
 
+  // CTL-1328: the longer "why it matters / what an agent does" prose (@narrative)
+  // is the Rulebook detail lead. Guard that no rule ships without one.
+  it("every rule has a non-empty narrative", async () => {
+    const body = await fetchRules() as { rules: Array<{ rule_id: string; narrative?: string }> };
+    for (const r of body.rules) {
+      expect(typeof r.narrative, `${r.rule_id} narrative must be a string`).toBe("string");
+      expect(r.narrative!.length, `${r.rule_id} narrative must be non-empty`).toBeGreaterThan(0);
+    }
+  });
+
   it("manifest carries a top-level preface with problem and datalog_primer", async () => {
     const body = await fetchRules() as { preface?: { problem?: string; datalog_primer?: string } };
     expect(body.preface).toBeDefined();

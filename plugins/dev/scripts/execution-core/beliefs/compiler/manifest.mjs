@@ -150,7 +150,7 @@ function extractAnnotations(source, ruleId) {
   // Find the block for this rule (up to the next rule/extern keyword)
   const startPattern = new RegExp(`\\b(?:rule|extern)\\s+${ruleId}\\b`);
   const startMatch = startPattern.exec(source);
-  if (!startMatch) return { feeds: [], cfg: [], severity: "", since: "", ticket: "", description: "", examples: [] };
+  if (!startMatch) return { feeds: [], cfg: [], severity: "", since: "", ticket: "", description: "", narrative: "", subjectdoc: "", value_docs: [], sample: "", samplenote: "", examples: [] };
 
   const startIdx = startMatch.index;
   // Find end: next rule/extern declaration
@@ -304,6 +304,11 @@ export function buildManifest(ir, dlSource) {
         if (!annot.since && extraAnnot.since) annot.since = extraAnnot.since;
         if (!annot.ticket && extraAnnot.ticket) annot.ticket = extraAnnot.ticket;
         if (!annot.description && extraAnnot.description) annot.description = extraAnnot.description;
+        if (!annot.narrative && extraAnnot.narrative) annot.narrative = extraAnnot.narrative;
+        if (!annot.subjectdoc && extraAnnot.subjectdoc) annot.subjectdoc = extraAnnot.subjectdoc;
+        if ((!annot.value_docs || annot.value_docs.length === 0) && extraAnnot.value_docs?.length) annot.value_docs = extraAnnot.value_docs;
+        if (!annot.sample && extraAnnot.sample) annot.sample = extraAnnot.sample;
+        if (!annot.samplenote && extraAnnot.samplenote) annot.samplenote = extraAnnot.samplenote;
         annot.examples.push(...extraAnnot.examples);
       }
     }
@@ -336,6 +341,17 @@ export function buildManifest(ir, dlSource) {
       stratum: firstIr.stratum,
       extern: isExtern,
       description: annot.description ?? "",
+      narrative: annot.narrative ?? "",
+      // CTL-1328: belief-shape dev-docs (subject + value fields + a realistic
+      // example) rendered in the Rulebook detail's main content.
+      shape: Object.freeze({
+        subjectDoc: annot.subjectdoc ?? "",
+        values: Object.freeze(
+          (annot.value_docs ?? []).map((v) => Object.freeze({ ...v })),
+        ),
+        exampleInstance: annot.sample ?? "",
+        exampleNote: annot.samplenote ?? "",
+      }),
       feeds: Object.freeze(annot.feeds),
       reads: Object.freeze(reads),
       negates: Object.freeze(negates),
