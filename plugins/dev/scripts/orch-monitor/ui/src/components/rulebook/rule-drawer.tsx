@@ -16,6 +16,7 @@ import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { Badge } from "@/components/ui/badge";
 import { strataTone } from "@/lib/rulebook-theme";
 import { feedNames, splitReads } from "@/lib/rulebook-board-model";
+import { highlightRuleSource } from "@/lib/rule-source-highlight";
 import type {
   RuleManifestRule,
   RuleManifestStratum,
@@ -28,9 +29,12 @@ import { LiveIndicator } from "./live-indicator";
 import { DerivationsRail } from "./derivations-rail";
 
 function CodeBlock({ content }: { content: string | null }) {
+  // CTL-1328: darker surface + full-contrast text + color-coded tokens
+  // (highlightRuleSource emits hljs spans themed by `.rulebook-code` in app.css).
+  // Source is the trusted frozen manifest and every token is HTML-escaped.
   return (
-    <pre className="overflow-x-auto rounded-md border bg-muted/40 px-3 py-2.5 text-[11.5px] font-mono leading-relaxed whitespace-pre text-foreground/80">
-      {content}
+    <pre className="rulebook-code overflow-x-auto rounded-md px-3 py-2.5 text-[11.5px] font-mono leading-relaxed whitespace-pre">
+      <code dangerouslySetInnerHTML={{ __html: highlightRuleSource(content) }} />
     </pre>
   );
 }

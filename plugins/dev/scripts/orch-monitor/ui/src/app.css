@@ -739,6 +739,32 @@ body {
   font-family: var(--font-serif);
 }
 
+/* CTL-1328: the Rulebook drawer's Datalog/SQL code block. A DARKER surface than
+   the drawer (operator: the old block was "too light, hard to read") with full-
+   contrast text, and the app's hljs token theme reused for colour-coded source
+   (matches ticket-description code blocks). */
+.rulebook-code {
+  background: var(--color-surface-0);
+  border: 1px solid var(--color-border);
+  color: var(--color-fg);
+}
+.rulebook-code .hljs-keyword {
+  color: var(--color-purple);
+}
+.rulebook-code .hljs-built_in {
+  color: var(--color-blue-soft);
+}
+.rulebook-code .hljs-string {
+  color: var(--color-green-soft);
+}
+.rulebook-code .hljs-number {
+  color: var(--color-yellow-soft);
+}
+.rulebook-code .hljs-comment {
+  color: var(--color-muted);
+  font-style: italic;
+}
+
 /* section headings: semibold, NO underline (Linear), generous top rhythm */
 .ticket-desc h1,
 .ticket-desc h2 {
