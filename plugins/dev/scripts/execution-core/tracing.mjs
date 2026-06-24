@@ -31,9 +31,15 @@ import { createRequire } from "node:module";
 // orch-monitor's quality `bun test`, which uses scheduler.mjs's pure helpers but does NOT
 // install the OTel deps) crashed on module load. The other four OTel packages are already
 // lazy-loaded inside initTracing; only `api` was static, inconsistently.
-let trace, context, SpanKind, SpanStatusCode;
+let trace, context, SpanKind, SpanStatusCode, TraceFlags;
 try {
-  ({ trace, context, SpanKind, SpanStatusCode } = createRequire(import.meta.url)("@opentelemetry/api"));
+  // CTL-1337: TraceFlags joins the lazy-loaded set — emitTickTrace seeds the root
+  // scheduler.tick span with a deterministic per-tick parent SpanContext
+  // ({traceId, spanId, traceFlags: SAMPLED, isRemote}) so the span's trace_id
+  // equals the one stamped on the Tier-1 tick-timing log line (exact per-tick
+  // trace↔logs round-trip). Loaded the SAME try/catch way as the rest so a missing
+  // api degrades to the existing random-id behavior, never crashes.
+  ({ trace, context, SpanKind, SpanStatusCode, TraceFlags } = createRequire(import.meta.url)("@opentelemetry/api"));
 } catch {
   // @opentelemetry/api not installed in this consumer's context — tracing stays a no-op.
 }
@@ -150,11 +156,33 @@ export function __setTracerForTest(tracer) {
 // per trace — a healthy tick is 1 span; a wedged tick shows exactly the offending passes).
 // `laps` = [{name, durationMs, startEpochMs, endEpochMs}]. `attrs` = flat span attributes.
 // Never throws.
-export function emitTickTrace({ tickId, startEpochMs, endEpochMs, laps = [], attrs = {}, slowPassThresholdMs = 50 } = {}) {
+//
+// CTL-1337: when `traceId` (32 hex) + `spanId` (16 hex) are passed, the root span is
+// started in a context whose ACTIVE span is a deterministic per-tick parent SpanContext
+// ({traceId, spanId, traceFlags: SAMPLED, isRemote:true}). The SDK then inherits that
+// traceId for the root (root.spanContext().traceId === traceId), so the span's trace_id
+// equals the per-tick id stamped on the Tier-1 `scheduler: tick timing` log line —
+// trace↔logs round-trips both ways. The per-tick id is DISTINCT per tick (it folds in the
+// tick_id), so this does NOT collapse the daemon's lifetime into one trace. Omit the ids
+// (or run without a usable @opentelemetry/api) and the SDK assigns a random trace_id as
+// before — degrade, never crash.
+export function emitTickTrace({ tickId, startEpochMs, endEpochMs, laps = [], attrs = {}, slowPassThresholdMs = 50, traceId, spanId } = {}) {
   const tracer = getTracer();
   if (!tracer) return;
   try {
-    const root = tracer.startSpan("scheduler.tick", { kind: SpanKind.INTERNAL, startTime: startEpochMs });
+    // CTL-1337: seed the per-tick parent SpanContext so the root inherits `traceId`.
+    // Falls back to context.active() (→ SDK-random trace_id) if ids are absent or the
+    // api primitives needed for the seed aren't available.
+    let startCtx = context.active();
+    if (traceId && spanId && TraceFlags && typeof trace.setSpanContext === "function") {
+      startCtx = trace.setSpanContext(startCtx, {
+        traceId,
+        spanId,
+        traceFlags: TraceFlags.SAMPLED,
+        isRemote: true,
+      });
+    }
+    const root = tracer.startSpan("scheduler.tick", { kind: SpanKind.INTERNAL, startTime: startEpochMs }, startCtx);
     if (tickId != null) root.setAttribute("catalyst.scheduler.tick_id", tickId);
     for (const [k, v] of Object.entries(attrs)) {
       if (v != null) root.setAttribute(k, v);
@@ -205,4 +233,4 @@ export function emitLivenessRefreshSpan({ outcome, startEpochMs, endEpochMs, dea
 }
 
 // Re-export the api primitives callers need so they don't each import @opentelemetry/api.
-export { trace, context, SpanKind, SpanStatusCode };
+export { trace, context, SpanKind, SpanStatusCode, TraceFlags };

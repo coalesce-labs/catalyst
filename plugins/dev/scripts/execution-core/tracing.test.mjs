@@ -81,6 +81,84 @@ describe("emitTickTrace span tree (in-memory exporter)", () => {
     const spans = exporter.getFinishedSpans();
     expect(spans.map((s) => s.name)).toEqual(["scheduler.tick"]);
   });
+
+  // CTL-1337: the per-tick trace↔logs round-trip contract.
+  test("the root scheduler.tick span adopts the passed per-tick traceId", () => {
+    const traceId = "0123456789abcdef0123456789abcdef"; // 32 hex
+    const spanId = "fedcba9876543210"; //                 16 hex
+    emitTickTrace({
+      tickId: 99,
+      traceId,
+      spanId,
+      startEpochMs: 1000,
+      endEpochMs: 1005,
+      laps: [{ name: "advancement", durationMs: 0.3, startEpochMs: 1000, endEpochMs: 1001 }],
+    });
+    const root = exporter.getFinishedSpans().find((s) => s.name === "scheduler.tick");
+    expect(root.spanContext().traceId).toBe(traceId);
+  });
+
+  test("a slow pass child inherits the root's per-tick traceId (whole tick is one trace)", () => {
+    const traceId = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const spanId = "bbbbbbbbbbbbbbbb";
+    emitTickTrace({
+      tickId: 100,
+      traceId,
+      spanId,
+      slowPassThresholdMs: 50,
+      startEpochMs: 1000,
+      endEpochMs: 3000,
+      laps: [{ name: "recovery-pass", durationMs: 1900, startEpochMs: 1001, endEpochMs: 2901 }],
+    });
+    const spans = exporter.getFinishedSpans();
+    expect(spans.map((s) => s.name).sort()).toEqual(["scheduler.pass", "scheduler.tick"]);
+    for (const s of spans) expect(s.spanContext().traceId).toBe(traceId);
+  });
+
+  test("two different ticks yield two different trace_ids (no per-orchestrator collapse)", () => {
+    const a = { traceId: "11111111111111111111111111111111", spanId: "1111111111111111" };
+    const b = { traceId: "22222222222222222222222222222222", spanId: "2222222222222222" };
+    emitTickTrace({ tickId: 1, ...a, startEpochMs: 0, endEpochMs: 2, laps: [] });
+    emitTickTrace({ tickId: 2, ...b, startEpochMs: 10, endEpochMs: 12, laps: [] });
+    const roots = exporter.getFinishedSpans().filter((s) => s.name === "scheduler.tick");
+    expect(roots).toHaveLength(2);
+    const traceIds = roots.map((s) => s.spanContext().traceId);
+    expect(new Set(traceIds).size).toBe(2);
+    expect(traceIds).toContain(a.traceId);
+    expect(traceIds).toContain(b.traceId);
+  });
+
+  test("omitting traceId/spanId still emits a span with an SDK-random trace_id (degrade, never crash)", () => {
+    emitTickTrace({ tickId: 5, startEpochMs: 0, endEpochMs: 1, laps: [] });
+    const root = exporter.getFinishedSpans().find((s) => s.name === "scheduler.tick");
+    expect(root).toBeDefined();
+    expect(root.spanContext().traceId).toMatch(/^[0-9a-f]{32}$/);
+  });
+});
+
+// CTL-1337: the deterministic per-tick id derivation that BOTH the Tier-1 log line and
+// the Tier-3 span seed off of. Imported from scheduler.mjs (its owner) so the test pins
+// the exact contract: same inputs → same ids; different tick → different trace_id.
+describe("deriveTickTraceContext (CTL-1337 — deterministic per-tick id)", () => {
+  test("32-hex traceId / 16-hex spanId, deterministic for the same inputs", async () => {
+    const { deriveTickTraceContext } = await import("./scheduler.mjs");
+    const args = { orchestratorId: "catalyst.execution-core", tickId: 42, node: "mini" };
+    const first = deriveTickTraceContext(args);
+    const second = deriveTickTraceContext(args);
+    expect(first.traceId).toMatch(/^[0-9a-f]{32}$/);
+    expect(first.spanId).toMatch(/^[0-9a-f]{16}$/);
+    expect(first).toEqual(second);
+    // span_id is NOT the traceId prefix — it is a distinct sha256(seed + ":span")
+    expect(first.spanId).not.toBe(first.traceId.slice(0, 16));
+  });
+
+  test("a different tick_id yields a different trace_id (per-tick, not per-orchestrator)", async () => {
+    const { deriveTickTraceContext } = await import("./scheduler.mjs");
+    const base = { orchestratorId: "catalyst.execution-core", node: "mini" };
+    const t1 = deriveTickTraceContext({ ...base, tickId: 1 });
+    const t2 = deriveTickTraceContext({ ...base, tickId: 2 });
+    expect(t1.traceId).not.toBe(t2.traceId);
+  });
 });
 
 describe("emitLivenessRefreshSpan (in-memory exporter)", () => {
