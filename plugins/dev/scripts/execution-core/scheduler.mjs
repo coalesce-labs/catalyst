@@ -124,7 +124,10 @@ import {
   isBgJobAlive as defaultIsBgJobAlive,
   livenessForBgJob as defaultLivenessForBgJob, // CTL-768
   setLivenessLogger, // CTL-1330: wire the liveness-refresh observability sink
+  setLivenessSpanSink, // CTL-1330 Tier 3: wire the liveness.refresh span sink
 } from "./claude-agents.mjs";
+// CTL-1330 Tier 3: OTLP span export (OFF unless CATALYST_TRACING=on).
+import { initTracing, shutdownTracing, emitTickTrace, emitLivenessRefreshSpan } from "./tracing.mjs";
 import { emitReapIntent } from "./reap-intent.mjs";
 // CTL-574: per-tick reclaim of dead-but-work-done phase workers. The default
 // is the real recovery-module function; tests inject a fake. See
@@ -2658,20 +2661,32 @@ function readBoardHealthEventTail(maxLines = 800) {
 // Tier-1 timing is ON by default; CATALYST_TICK_TIMING=off disables it (the lap
 // calls become `tick?.lap(...)` no-ops and the summary line is skipped).
 let _tickSeq = 0;
-export function makeTickTimer(now = () => performance.now()) {
+export function makeTickTimer(now = () => performance.now(), wallNow = Date.now) {
   const t0 = now();
+  // CTL-1330 Tier 3: wall-clock base so per-lap perf offsets convert to absolute epoch
+  // ms for post-hoc span timestamps (the tick is synchronous — spans are reconstructed
+  // AFTER it completes; see emitTickTrace). toEpoch maps a perf.now() reading to epoch ms.
+  const startEpochMs = wallNow();
+  const toEpoch = (perf) => Math.round(startEpochMs + (perf - t0));
   let last = t0;
   const passes = {};
+  const spanLaps = []; // [{name, durationMs, startEpochMs, endEpochMs}] for the span tree
   const round1 = (ms) => Math.round(ms * 10) / 10;
   return {
     tickId: ++_tickSeq,
+    startEpochMs,
     // lap(label) — record ms elapsed since the previous lap (or tick start).
     lap(label) {
       const t = now();
       passes[label] = round1(t - last);
+      spanLaps.push({ name: label, durationMs: round1(t - last), startEpochMs: toEpoch(last), endEpochMs: toEpoch(t) });
       last = t;
     },
     passes,
+    spanLaps,
+    endEpochMs() {
+      return toEpoch(now());
+    },
     totalMs() {
       return round1(now() - t0);
     },
@@ -5378,6 +5393,26 @@ export function schedulerTick(
       },
       "scheduler: tick timing (CTL-1330)"
     );
+
+    // CTL-1330 Tier 3: post-hoc span tree for this tick (no-op unless
+    // CATALYST_TRACING=on). Reconstructed from the recorded lap timings — zero
+    // per-span work inside the synchronous hot loop. Root scheduler.tick + a
+    // scheduler.pass child per pass over the slow threshold (the flame graph).
+    emitTickTrace({
+      tickId: tick.tickId,
+      startEpochMs: tick.startEpochMs,
+      endEpochMs: tick.endEpochMs(),
+      laps: tick.spanLaps,
+      attrs: {
+        "catalyst.scheduler.total_ms": tick.totalMs(),
+        "catalyst.scheduler.slowest_pass": slowest_pass,
+        "catalyst.scheduler.slowest_pass_ms": slowest_pass_ms,
+        "catalyst.scheduler.free_slots": freeSlots,
+        "catalyst.scheduler.eligible_count": eligible.length,
+        "catalyst.scheduler.liveness_fresh": livenessFresh,
+        "catalyst.scheduler.beliefs_shadow": process.env.CATALYST_BELIEFS_SHADOW === "1",
+      },
+    });
   }
 
   return {
@@ -6210,6 +6245,8 @@ export function startScheduler({
     // Liveness-refresh observability is independent of perf_hooks — wire it
     // unconditionally so it survives a runtime that lacks monitorEventLoopDelay.
     setLivenessLogger((rec) => log.info(rec, "liveness: refresh (CTL-1330)"));
+    // CTL-1330 Tier 3: also feed the liveness.refresh span sink (no-op when tracing off).
+    setLivenessSpanSink((rec) => emitLivenessRefreshSpan(rec));
     // Process-wide event-loop delay monitor. perf_hooks.monitorEventLoopDelay is
     // NOT implemented in every runtime — Bun throws "Not implemented" on some
     // versions, and the daemon runs under Bun (CTL-1330 review, P1). Guard it so
@@ -6230,6 +6267,16 @@ export function startScheduler({
       }
     }
   }
+
+  // CTL-1330 Tier 3: bring up OTLP tracing (OFF unless CATALYST_TRACING=on). Async
+  // and fire-and-forget — never blocks startup; emitTickTrace no-ops until the
+  // provider is ready, and a failed init degrades to "no spans". BatchSpanProcessor
+  // only, so the exporter never blocks the tick.
+  initTracing({ serviceName: "catalyst.execution-core" })
+    .then((on) => {
+      if (on) log.info({}, "scheduler: OTLP tracing enabled (CTL-1330 Tier 3)");
+    })
+    .catch(() => {});
 
   runTick(); // authoritative initial pass
   tickTimer = setInterval(runTick, tickIntervalMs);
@@ -6272,6 +6319,10 @@ export function stopScheduler() {
     _eventLoopMonitor = null;
   }
   setLivenessLogger(null);
+  setLivenessSpanSink(null);
+  // CTL-1330 Tier 3: flush + tear down tracing so a wedge tick's spans aren't lost
+  // and a restart re-inits cleanly. Fire-and-forget (stopScheduler is sync).
+  shutdownTracing().catch(() => {});
 }
 
 // __resetForTests — clear daemon state between unit tests. Not part of the

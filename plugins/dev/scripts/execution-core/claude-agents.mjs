@@ -146,6 +146,14 @@ export function setLivenessLogger(fn) {
   _livenessLogger = typeof fn === "function" ? fn : null;
 }
 
+// CTL-1330 Tier 3: optional span sink, wired by the daemon to emit a liveness.refresh
+// OTLP span (ERROR on timeout). Same leaf-pure injection as the logger sink — this
+// module never imports the OTel SDK; the daemon bridges to tracing.mjs.
+let _livenessSpanSink = null;
+export function setLivenessSpanSink(fn) {
+  _livenessSpanSink = typeof fn === "function" ? fn : null;
+}
+
 // backoffWindowMs — 0 below the failure threshold (retry every stale read), then
 // exponential (base × 2^over) capped at LIVENESS_BACKOFF_CAP_MS.
 function backoffWindowMs(failures) {
@@ -258,16 +266,30 @@ export function refreshAgents({
       // CTL-1330 Tier 1: liveness-refresh observability. The wedge signature is
       // outcome:"timeout" with duration_ms≈deadline_ms while a synchronous tick
       // blocks the loop. Best-effort — a throwing sink must never break refresh.
-      if (_livenessLogger) {
+      if (_livenessLogger || _livenessSpanSink) {
         try {
           const populated = _asyncSnap.agents !== null;
-          _livenessLogger({
-            outcome,
-            duration_ms: now() - startMs,
-            deadline_ms: timeoutMs,
-            populated,
-            age_ms: populated ? now() - _asyncSnap.ts : null,
-          });
+          const endMs = now();
+          if (_livenessLogger) {
+            _livenessLogger({
+              outcome,
+              duration_ms: endMs - startMs,
+              deadline_ms: timeoutMs,
+              populated,
+              age_ms: populated ? endMs - _asyncSnap.ts : null,
+            });
+          }
+          // CTL-1330 Tier 3: liveness.refresh span (startMs/endMs are epoch ms).
+          if (_livenessSpanSink) {
+            _livenessSpanSink({
+              outcome,
+              startEpochMs: startMs,
+              endEpochMs: endMs,
+              deadlineMs: timeoutMs,
+              populated,
+              ageMs: populated ? endMs - _asyncSnap.ts : null,
+            });
+          }
         } catch {
           /* observability must never throw out of the refresh */
         }
