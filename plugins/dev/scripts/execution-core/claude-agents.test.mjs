@@ -19,6 +19,7 @@ import {
   claudeStop,
   isBgJobDead,
   defaultStatJobState,
+  setLivenessLogger,
 } from "./claude-agents.mjs";
 
 const agents = [
@@ -735,5 +736,86 @@ describe("refreshAgents + getAgentsCached (Phase 00 hardened liveness read)", ()
     // statJob: allAlive so this test exercises the warm-snapshot path without
     // depending on real ~/.claude/jobs/ state (CTL-1055: default statJob does fs I/O).
     expect(countBackgroundAgents({ now: () => 1000, statJob: () => ({ state: "working", firstTerminalAt: null }) })).toBe(2);
+  });
+});
+
+describe("setLivenessLogger + refreshAgents observability (CTL-1330 Tier 1)", () => {
+  beforeEach(() => {
+    resetLivenessCache();
+    setLivenessLogger(null); // clear any sink between cases
+  });
+
+  test("resolved read records {outcome:'resolved', populated, deadline_ms, duration_ms}", async () => {
+    const records = [];
+    setLivenessLogger((r) => records.push(r));
+    let t = 1000;
+    await refreshAgents({
+      execFileAsync: async () => JSON.stringify(agents),
+      now: () => t,
+      timeoutMs: 3000,
+    });
+    expect(records).toHaveLength(1);
+    expect(records[0].outcome).toBe("resolved");
+    expect(records[0].deadline_ms).toBe(3000);
+    expect(records[0].populated).toBe(true);
+    expect(typeof records[0].duration_ms).toBe("number");
+  });
+
+  test("read error records {outcome:'error'} and still serves last-good (never throws)", async () => {
+    const records = [];
+    setLivenessLogger((r) => records.push(r));
+    const result = await refreshAgents({
+      execFileAsync: async () => {
+        throw new Error("boom");
+      },
+      now: () => 1000,
+      timeoutMs: 3000,
+    });
+    expect(result).toEqual([]); // cold fallback
+    expect(records).toHaveLength(1);
+    expect(records[0].outcome).toBe("error");
+  });
+
+  test("deadline timeout records {outcome:'timeout'} with duration≈deadline", async () => {
+    const records = [];
+    setLivenessLogger((r) => records.push(r));
+    const hanging = () => new Promise(() => {}); // never settles, no .child
+    let timeoutCb = null;
+    const p = refreshAgents({
+      execFileAsync: hanging,
+      now: () => 5000,
+      timeoutMs: 3000,
+      setTimer: (cb) => {
+        timeoutCb = cb;
+        return 1;
+      },
+      clearTimer: () => {},
+      deferDecision: (cb) => cb(), // run the verdict synchronously
+    });
+    timeoutCb(); // fire the deadline
+    await p;
+    expect(records).toHaveLength(1);
+    expect(records[0].outcome).toBe("timeout");
+    expect(records[0].deadline_ms).toBe(3000);
+  });
+
+  test("a null sink (default) never throws out of refreshAgents", async () => {
+    setLivenessLogger(null);
+    const result = await refreshAgents({
+      execFileAsync: async () => JSON.stringify(agents),
+      now: () => 1000,
+    });
+    expect(result).toEqual(agents);
+  });
+
+  test("a THROWING sink never breaks the refresh (best-effort observability)", async () => {
+    setLivenessLogger(() => {
+      throw new Error("sink blew up");
+    });
+    const result = await refreshAgents({
+      execFileAsync: async () => JSON.stringify(agents),
+      now: () => 1000,
+    });
+    expect(result).toEqual(agents);
   });
 });

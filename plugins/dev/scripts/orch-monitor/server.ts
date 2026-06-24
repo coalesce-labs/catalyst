@@ -1691,11 +1691,21 @@ export function createServer(opts: CreateServerOptions): BunServer {
     5 * 60 * 1000,
   );
 
+  // CTL-1330 Tier 1: monitor request-timing. Surface only slow requests
+  // (default >250ms) so healthy traffic doesn't flood the log. ON unless
+  // CATALYST_TICK_TIMING=off. Fields land as structured attributes for the
+  // OTL metrics pipeline.
+  const MONITOR_REQUEST_TIMING = process.env.CATALYST_TICK_TIMING !== "off";
+  const MONITOR_SLOW_REQUEST_MS =
+    Number(process.env.CATALYST_MONITOR_SLOW_REQUEST_MS) || 250;
+
   const server = Bun.serve({
     port,
     hostname,
     idleTimeout: 0,
     async fetch(req) {
+      const _reqT0 = performance.now();
+      const _doFetch = async (): Promise<Response> => {
       try {
         const url = new URL(req.url);
 
@@ -4602,6 +4612,30 @@ export function createServer(opts: CreateServerOptions): BunServer {
         console.error(`[server] fetch handler error:`, err);
         return new Response("Internal Server Error", { status: 500 });
       }
+      };
+      const res = await _doFetch();
+      // CTL-1330: emit one structured line for a slow request — where a monitor
+      // request blocked the loop. status>=500 always emits (it's an error).
+      if (MONITOR_REQUEST_TIMING) {
+        const total_ms = Math.round((performance.now() - _reqT0) * 10) / 10;
+        if (total_ms >= MONITOR_SLOW_REQUEST_MS || res.status >= 500) {
+          let path = "";
+          try {
+            path = new URL(req.url).pathname;
+          } catch {
+            /* unparseable URL — leave path empty */
+          }
+          console.warn(
+            `[server] slow request (CTL-1330) ${JSON.stringify({
+              method: req.method,
+              path,
+              status: res.status,
+              total_ms,
+            })}`,
+          );
+        }
+      }
+      return res;
     },
   });
 

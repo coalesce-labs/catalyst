@@ -25,6 +25,7 @@ import {
   statSync,
 } from "node:fs";
 import { spawnSync } from "node:child_process";
+import { monitorEventLoopDelay } from "node:perf_hooks";
 import { join, dirname, basename } from "node:path";
 import {
   analyzeDependencyGraph,
@@ -122,6 +123,7 @@ import {
   getAgentsCached,
   isBgJobAlive as defaultIsBgJobAlive,
   livenessForBgJob as defaultLivenessForBgJob, // CTL-768
+  setLivenessLogger, // CTL-1330: wire the liveness-refresh observability sink
 } from "./claude-agents.mjs";
 import { emitReapIntent } from "./reap-intent.mjs";
 // CTL-574: per-tick reclaim of dead-but-work-done phase workers. The default
@@ -2645,6 +2647,43 @@ function readBoardHealthEventTail(maxLines = 800) {
   }
 }
 
+// CTL-1330 Tier 1 — per-pass tick timing. The scheduler tick is SYNCHRONOUS, so
+// its wall-clock duration IS the Node event-loop block (and a tick that blocks
+// longer than the 3s liveness-refresh deadline — claude-agents.mjs — starves the
+// `claude agents` refresh → isFresh stays false → new-work admission held at 0
+// slots: the 2026-06-24 dispatch wedge). makeTickTimer records monotonic
+// performance.now() laps at each pass boundary so ONE structured line per tick
+// shows WHERE the time goes. Pure arithmetic — no IO, negligible cost.
+//
+// Tier-1 timing is ON by default; CATALYST_TICK_TIMING=off disables it (the lap
+// calls become `tick?.lap(...)` no-ops and the summary line is skipped).
+let _tickSeq = 0;
+export function makeTickTimer(now = () => performance.now()) {
+  const t0 = now();
+  let last = t0;
+  const passes = {};
+  const round1 = (ms) => Math.round(ms * 10) / 10;
+  return {
+    tickId: ++_tickSeq,
+    // lap(label) — record ms elapsed since the previous lap (or tick start).
+    lap(label) {
+      const t = now();
+      passes[label] = round1(t - last);
+      last = t;
+    },
+    passes,
+    totalMs() {
+      return round1(now() - t0);
+    },
+  };
+}
+
+// CTL-1330: Tier-1 timing gate. ON unless explicitly disabled — it is just
+// better-structured logging shipped to Loki via the existing Alloy pipeline.
+export function tickTimingEnabled(env = process.env) {
+  return env.CATALYST_TICK_TIMING !== "off";
+}
+
 // schedulerTick — one pull cycle: (1) advancement sweep, (2) new-work pull,
 // (3) terminal-Done sweep (CTL-558). Idempotent and restart-safe — derives
 // every action from filesystem state. `exec` is the injectable seam for the
@@ -3162,12 +3201,19 @@ export function schedulerTick(
     return { ok: false, code: r.code, reason, signal: r.signal ?? null };
   }
 
+  // CTL-1330 Tier 1: start the per-pass timer at the top of the executable body
+  // (everything above is param-default + closure definitions — negligible). Null
+  // when timing is disabled, so every `tick?.lap(...)` below is a cheap no-op.
+  const tick = tickTimingEnabled() ? makeTickTimer() : null;
+
   // CTL-671: compute the eligible set ONCE per tick. Consumed by the phantom
   // validity sweep (Pass 0a, below) and the new-work pull (Pass 2). readEligible
   // is the test injection seam; production reads all per-project eligible
   // projections (written exclusively from a live `linearis issues list`).
   const eligible = readEligible ? readEligible() : readAllEligibleTickets();
   const eligibleIds = new Set(eligible.map((t) => t.identifier));
+
+  tick?.lap("eligible-read");
 
   // (0a) CTL-671 phantom/orphan validity sweep — quarantine a worker dir whose
   // ticket is definitively non-existent in Linear, NOT in the eligible set, and
@@ -3212,6 +3258,8 @@ export function schedulerTick(
       );
     }
   }
+
+  tick?.lap("phantom-sweep");
 
   // (0w) CTL-729 progress-watchdog. Force-kill a worker that is running/dispatched
   // with a silent transcript and zero commits past its phase budget. Runs AFTER the
@@ -3323,6 +3371,8 @@ export function schedulerTick(
     }
   }
 
+  tick?.lap("watchdog");
+
   // (0c) CTL-1137 cost-cap watcher. Out-of-process preemption (the daemon, NEVER the
   // worker — watcher-is-the-watched caused the 2026-06-14 outage) of an AUTONOMOUS
   // phase worker whose cumulative Claude-session cost (Prometheus = the single source
@@ -3374,6 +3424,8 @@ export function schedulerTick(
       }
     }
   }
+
+  tick?.lap("cost-cap");
 
   // (0j) CTL-1004 stall-janitor. Collapse already-terminal, unambiguous leftovers
   // the event-driven reaper never names: J1 orphan worktrees (teardown=done +
@@ -3510,6 +3562,8 @@ export function schedulerTick(
     }
   }
 
+  tick?.lap("stall-janitor");
+
   // CTL-1064: Pass 0u — throttled unstuck-sweep. Low-frequency (default 15 min)
   // classify-then-act pass over the stalled/needs-human ticket backlog. A bare tick
   // has no census producer → skip cleanly. Mode='off' by default; operators opt in
@@ -3626,6 +3680,8 @@ export function schedulerTick(
       }
     }
   }
+
+  tick?.lap("unstuck-sweep");
 
   // CTL-1176: Pass 0r — LLM reasoning recovery pass. Low-frequency autonomous
   // triage of the stalled/failed/needs-human/UNKNOWN backlog. Mode resolves from
@@ -3920,7 +3976,11 @@ export function schedulerTick(
   // verify-remediate test timeout). freeSlots is recomputed arithmetically per
   // sweep (subtracting resumedCount in sweep 2) rather than re-shelling-out.
   const maxParallel = readMaxParallel(orchDir, concurrency);
+  tick?.lap("recovery-pass");
+
   const liveCount = liveBackgroundCount();
+
+  tick?.lap("liveness-read");
 
   // CTL-1290: board-health delegate cadence hook — SHADOW-FIRST. Runs ONLY when
   // the daemon threads the `boardHealth` seam (its real-IO readers); a bare
@@ -4302,6 +4362,8 @@ export function schedulerTick(
     }
   }
 
+  tick?.lap("board-health");
+
   // (0.5) Preemption sweep — if slots are saturated AND the top-ranked queued
   // ticket out-ranks the lowest-ranked preemptable in-flight worker, stop that
   // worker and park it for resume when a slot frees. Safety guards prevent
@@ -4486,6 +4548,8 @@ export function schedulerTick(
       );
     }
   }
+
+  tick?.lap("preemption-sweep");
 
   // (1) Advancement sweep — dispatch the FSM-owed next phase per in-flight ticket.
   // CTL-705: preempted workers are skipped — their active status is not "done" so
@@ -4731,6 +4795,8 @@ export function schedulerTick(
       }
     }
   }
+
+  tick?.lap("advancement");
 
   // (2) New-work pull — fill free slots with top-ranked ready tickets. D5:
   // hydrate the live state of every out-of-set blocker first so a Ready ticket
@@ -5091,6 +5157,8 @@ export function schedulerTick(
     }
   }
 
+  tick?.lap("new-work-pull");
+
   // (3) Terminal-Done + label sweep (CTL-558) — one pass over every started
   // ticket. deriveAdvancement returns null once monitor-deploy completes, so
   // terminal `Done` is not a dispatch — it needs this dedicated sweep. In the
@@ -5265,6 +5333,8 @@ export function schedulerTick(
     }
   }
 
+  tick?.lap("terminal-sweep");
+
   // (4) Cooldown GC sweep (CTL-713) — reap expired markers for tickets that
   // have left the eligible set so .dispatch-cooldowns/ self-cleans instead of
   // accumulating orphans. Runs last: GC must not influence this tick's dispatch
@@ -5272,6 +5342,42 @@ export function schedulerTick(
   // phantom-sweep block) and is already in scope here.
   for (const { ticket, phase } of gcDispatchCooldowns(orchDir, eligibleIds, now())) {
     appendCooldownGcEvent({ ticket, orchId: ticket, target_phase: phase });
+  }
+
+  // CTL-1330 Tier 1: one structured line per tick. total_ms IS the synchronous
+  // event-loop block; pass_durations attributes it; free_slots/liveness_fresh
+  // expose whether new-work admission was held this tick (the wedge symptom).
+  // Loki: {service_name="catalyst.execution-core"} | json | total_ms > 3000
+  if (tick) {
+    tick.lap("cooldown-gc");
+    // CTL-1330: flat slowest-pass fields turn "which pass dominated this tick"
+    // into a one-line Loki→Prometheus label (OTL-25 health dashboards) without
+    // unwrapping the nested pass_durations map.
+    let slowest_pass = null;
+    let slowest_pass_ms = 0;
+    for (const [name, ms] of Object.entries(tick.passes)) {
+      if (ms > slowest_pass_ms) {
+        slowest_pass_ms = ms;
+        slowest_pass = name;
+      }
+    }
+    log.info(
+      {
+        tick_id: tick.tickId,
+        total_ms: tick.totalMs(),
+        pass_durations: tick.passes,
+        slowest_pass,
+        slowest_pass_ms,
+        free_slots: freeSlots,
+        // CTL-1330: eligible_count lets the highest-severity alert require
+        // "new-work held WITH work waiting" (held + eligible_count>0) — the exact
+        // condition that masked the week-long wedge when the board was drained.
+        eligible_count: eligible.length,
+        liveness_fresh: livenessFresh,
+        beliefs_shadow: process.env.CATALYST_BELIEFS_SHADOW === "1",
+      },
+      "scheduler: tick timing (CTL-1330)"
+    );
   }
 
   return {
@@ -5372,6 +5478,47 @@ let debounceTimer = null;
 let watcher = null;
 let runningOpts = null;
 
+// CTL-1330 Tier 1: process-wide event-loop delay histogram. Enabled by the
+// daemon (startScheduler) when tick timing is on; null otherwise so direct
+// schedulerTick callers (tests/CLI) never touch perf_hooks. Read+reset once per
+// runTick so each line reports the lag accumulated since the previous tick —
+// crucially the prior SYNCHRONOUS schedulerTick block, which libuv records only
+// after control returns to the loop (i.e. after that tick returned).
+let _eventLoopMonitor = null;
+
+// emitEventLoopDelay — log p50/p99/max (ms) and reset. No-op until the daemon
+// enables the monitor; skips the first, empty read (count 0). perf_hooks reports
+// nanoseconds, so convert to ms for parity with the tick-timing line.
+function emitEventLoopDelay() {
+  const h = _eventLoopMonitor;
+  if (!h) return;
+  try {
+    if (h.count === 0) return;
+    const toMs = (ns) => Math.round((ns / 1e6) * 10) / 10;
+    log.info(
+      {
+        event_loop_p50_ms: toMs(h.percentile(50)),
+        event_loop_p99_ms: toMs(h.percentile(99)),
+        event_loop_max_ms: toMs(h.max),
+        samples: h.count,
+      },
+      "scheduler: event-loop delay (CTL-1330)"
+    );
+    h.reset();
+  } catch (err) {
+    // A runtime that constructed the monitor but can't read it (partial
+    // perf_hooks support) — disable to avoid per-tick noise; tick-timing +
+    // liveness lines are unaffected.
+    log.warn({ err: err?.message }, "scheduler: event-loop delay read failed — disabling (CTL-1330)");
+    try {
+      h.disable?.();
+    } catch {
+      /* best-effort */
+    }
+    _eventLoopMonitor = null;
+  }
+}
+
 // CTL-702: observed yield tombstones for the lifetime of this daemon process.
 // Keyed by absolute path so the same file across multiple ticks emits exactly
 // one event. Cleared only on daemon restart (via __resetForTests in tests).
@@ -5397,6 +5544,10 @@ let _stallJanitorCensusLastRunMs = 0;
 
 function runTick() {
   try {
+    // CTL-1330 Tier 1: emit the event-loop delay accumulated since the previous
+    // tick (which captures that tick's synchronous block) before doing this
+    // tick's work, then reset. Cheap no-op when the monitor is disabled.
+    emitEventLoopDelay();
     // CTL-676 + CTL-678: hot-reload the concurrency knobs by re-reading the
     // project config at the top of every tick. When `configPath` is unset
     // (back-compat scheduler harnesses that never threaded it), fall back to
@@ -6054,6 +6205,32 @@ export function startScheduler({
     log.info({ err: err.message }, "scheduler: preflight wrapper threw — swallowed");
   }
 
+  // CTL-1330 Tier 1 wiring (ON by default).
+  if (tickTimingEnabled()) {
+    // Liveness-refresh observability is independent of perf_hooks — wire it
+    // unconditionally so it survives a runtime that lacks monitorEventLoopDelay.
+    setLivenessLogger((rec) => log.info(rec, "liveness: refresh (CTL-1330)"));
+    // Process-wide event-loop delay monitor. perf_hooks.monitorEventLoopDelay is
+    // NOT implemented in every runtime — Bun throws "Not implemented" on some
+    // versions, and the daemon runs under Bun (CTL-1330 review, P1). Guard it so
+    // a missing API degrades to "no event-loop-delay line" instead of crashing
+    // the daemon on boot — the tick-timing total_ms already measures the
+    // synchronous event-loop block directly.
+    if (!_eventLoopMonitor) {
+      try {
+        const mon = monitorEventLoopDelay({ resolution: 20 });
+        mon.enable();
+        _eventLoopMonitor = mon;
+      } catch (err) {
+        _eventLoopMonitor = null;
+        log.warn(
+          { err: err?.message },
+          "scheduler: event-loop delay monitor unavailable in this runtime — continuing without it (CTL-1330)"
+        );
+      }
+    }
+  }
+
   runTick(); // authoritative initial pass
   tickTimer = setInterval(runTick, tickIntervalMs);
 
@@ -6088,6 +6265,13 @@ export function stopScheduler() {
   watcher = null;
   runningOpts = null;
   rankedAboveSince.clear(); // CTL-705: reset hysteresis state on daemon stop
+  // CTL-1330: tear down the event-loop monitor + liveness sink so a restart
+  // re-arms cleanly (and tests don't leak the pino sink across cases).
+  if (_eventLoopMonitor) {
+    _eventLoopMonitor.disable();
+    _eventLoopMonitor = null;
+  }
+  setLivenessLogger(null);
 }
 
 // __resetForTests — clear daemon state between unit tests. Not part of the
