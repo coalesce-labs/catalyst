@@ -8,7 +8,7 @@
 // reloads.
 import { atomWithStorage } from "jotai/utils";
 
-export type Perspective = "english" | "datalog" | "sql";
+export type Perspective = "english" | "datalog" | "sql" | "example";
 
 /** The active per-rule source lens, shared by the rule drawer. Persisted so a
  *  chosen lens (e.g. an engineer who lives in Datalog) survives a reload. */

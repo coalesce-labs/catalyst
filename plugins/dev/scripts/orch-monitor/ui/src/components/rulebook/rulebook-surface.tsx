@@ -11,7 +11,7 @@ import {
   CollapsibleContent,
   CollapsibleTrigger,
 } from "@/components/ui/collapsible";
-import { ChevronRight } from "lucide-react";
+import { ChevronRight, Activity } from "lucide-react";
 import { useBeliefsContext } from "@/hooks/use-beliefs";
 import {
   fetchRuleManifest,
@@ -23,29 +23,33 @@ import {
 } from "@/lib/rulebook-model";
 import {
   buildNameById,
-  strataTopDown,
+  buildRuleIndex,
+  toDisplayLanes,
+  type DisplayLane,
 } from "@/lib/rulebook-board-model";
+import { strataTone } from "@/lib/rulebook-theme";
 import { countFiringByRule, subjectsForRule } from "@/lib/rulebook-live";
+import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { SeverityPill } from "./severity-pill";
 import { StratumLane } from "./stratum-lane";
 import { RuleDrawer } from "./rule-drawer";
+import { RuleInbox } from "./rule-inbox";
 import { ThresholdsAppendix } from "./thresholds-appendix";
 
-/** The vertical layer-cake rail: a tinted spine reading raw facts (bottom) →
- *  decisions (top), mirroring the lane stacking. */
-function CakeRail() {
+/** The vertical spine — its gradient is built from the LANE colours in display
+ *  order (top → bottom), so it stays consistent with the lane dots after the
+ *  importance reorder (escalations on top → raw facts at the bottom). */
+function CakeRail({ lanes }: { lanes: DisplayLane[] }) {
+  const stops = lanes.map((l) => strataTone(l.stratum.id)).join(", ");
   return (
     <div className="relative w-[46px] shrink-0 border-r">
       <div
         aria-hidden
         className="absolute left-1/2 top-2 bottom-2 w-[3px] -translate-x-1/2 rounded-full opacity-60"
-        style={{
-          background:
-            "linear-gradient(to top, var(--chart-1), var(--chart-2), var(--chart-3), var(--chart-4), var(--chart-5), var(--chart-6))",
-        }}
+        style={{ background: `linear-gradient(to bottom, ${stops})` }}
       />
       <span className="absolute left-0 top-2 [writing-mode:vertical-rl] text-[10px] uppercase tracking-[0.14em] text-muted-foreground/60">
-        decisions ↑
+        escalations ↑
       </span>
       <span className="absolute bottom-2 left-0 [writing-mode:vertical-rl] text-[10px] uppercase tracking-[0.14em] text-muted-foreground/60">
         raw facts
@@ -122,6 +126,101 @@ function LoadingSkeleton() {
   );
 }
 
+// The swim-lane board view (CTL-1328): the reading prose in a calm capped
+// column, the full-bleed layer-cake board, then the supporting collapsibles.
+// The page title now lives in the shared header bar (RulebookSurface), so the
+// board header leads with the subtitle + the layer explanation.
+function BoardView({
+  lanes,
+  nameById,
+  firingCounts,
+  onOpenRule,
+}: {
+  lanes: DisplayLane[];
+  nameById: Map<string, string>;
+  firingCounts: Map<string, number>;
+  onOpenRule: (ruleId: string) => void;
+}) {
+  return (
+    <div className="flex-1 overflow-y-auto py-8">
+      <div className="px-6">
+        <header className="mb-6 max-w-[80ch]">
+          <p className="text-sm text-muted-foreground">
+            How the daemon decides who&apos;s working, who&apos;s wedged, and when
+            to call a human.
+          </p>
+          <p className="rulebook-prose mt-4 max-w-[74ch] text-[15px] leading-relaxed text-foreground/80">
+            Every few seconds — once per tick — the daemon reasons from{" "}
+            <em>what it can see</em> up to <em>what to do about it</em>. It works
+            in six layers: raw observations enter at the base and rise into
+            decisions. The engine evaluates them in a fixed order — layer by
+            layer, and rule by rule within each layer — so every rule already
+            sees whatever it builds on, whether that&apos;s a layer beneath it or
+            an earlier rule in its own layer. Read each lane as one layer; the
+            cards inside are the rules that fire there.{" "}
+            <span className="text-muted-foreground">
+              Click any rule to read its source.
+            </span>
+          </p>
+          <Legend />
+        </header>
+      </div>
+
+      {/* Full-bleed board — edge to edge (CTL-1328). border-y only, no side cap,
+          so the lanes can use the whole viewport width; the reading prose above
+          and below stays in the capped px-6 column. */}
+      <div className="flex items-stretch overflow-hidden border-y bg-card/40">
+        <CakeRail lanes={lanes} />
+        <div className="min-w-0 flex-1">
+          {lanes.map((group) => (
+            <StratumLane
+              key={group.key}
+              group={group}
+              nameById={nameById}
+              firingCounts={firingCounts}
+              onOpenRule={onOpenRule}
+            />
+          ))}
+        </div>
+      </div>
+
+      {/* Supporting collapsibles read in the calm narrow column. */}
+      <div className="mt-7 max-w-[74ch] px-6">
+        <HowItWorks />
+        <ThresholdsAppendix />
+      </div>
+    </div>
+  );
+}
+
+// Monitor (coming soon): the live-beliefs lens — what the engine currently holds
+// true, with provenance, and (later) tick-by-tick rewind. The live belief store
+// already streams (useBeliefsContext / countFiringByRule), so this is the
+// placeholder until that view is built. Shows the current firing count as a teaser.
+function BeliefsMonitorStub({ firingRuleCount }: { firingRuleCount: number }) {
+  return (
+    <div className="flex flex-1 items-center justify-center overflow-y-auto p-10">
+      <div className="max-w-[52ch] text-center">
+        <div className="mx-auto mb-4 grid size-10 place-items-center rounded-full bg-muted/50 text-muted-foreground">
+          <Activity className="size-5" />
+        </div>
+        <h2 className="rulebook-prose text-lg font-semibold">Monitor</h2>
+        <p className="mt-1 text-sm text-muted-foreground">Coming soon</p>
+        <p className="rulebook-prose mt-4 text-[14px] leading-relaxed text-muted-foreground">
+          A live view of the beliefs the engine currently holds — what&apos;s
+          firing right now, the facts that triggered each one, and eventually a
+          tick-by-tick rewind to replay how the picture changed.
+        </p>
+        <p className="mt-4 text-xs text-muted-foreground/70">
+          {firingRuleCount > 0
+            ? `${firingRuleCount} rule${firingRuleCount === 1 ? "" : "s"} firing right now.`
+            : "No rules firing right now."}
+        </p>
+      </div>
+    </div>
+  );
+}
+
 export function RulebookSurface() {
   const beliefs = useBeliefsContext(); // dedup contract: never useBeliefs()
   const firingCounts = countFiringByRule(beliefs.store);
@@ -130,6 +229,10 @@ export function RulebookSurface() {
   const [error, setError] = useState<string | null>(null);
   const [groups, setGroups] = useState<StratumGroup[]>([]);
   const [selectedRuleId, setSelectedRuleId] = useState<string | null>(null);
+  // CTL-1328 (Beliefs IA): Overview (the swim-lane board — orientation/teaching)
+  // · Browse (grouped list + detail page — the reference) · Monitor (live beliefs
+  // — coming soon). Browse is the default reference view.
+  const [view, setView] = useState<"overview" | "browse" | "monitor">("browse");
 
   useEffect(() => {
     let alive = true;
@@ -152,7 +255,13 @@ export function RulebookSurface() {
     () => buildNameById(manifest?.rules ?? []),
     [manifest],
   );
-  const lanes = useMemo(() => strataTopDown(groups), [groups]);
+  // id+name → rule, so the drawer can resolve a relation target (feeds carry
+  // ids, reads/negates carry names) to a clickable, hover-previewable link.
+  const ruleIndex = useMemo(
+    () => buildRuleIndex(manifest?.rules ?? []),
+    [manifest],
+  );
+  const lanes = useMemo(() => toDisplayLanes(groups), [groups]);
 
   const selectedRule: RuleManifestRule | null =
     selectedRuleId && manifest
@@ -171,80 +280,79 @@ export function RulebookSurface() {
     );
   }
 
+  // The selected rule's live firing subjects — shared by the board drawer and
+  // the inbox detail pane.
+  const firingSubjects = selectedRule
+    ? subjectsForRule(beliefs.store, selectedRule.rule_id)
+    : [];
+
   return (
     <div className="flex flex-1 flex-col overflow-hidden">
-      {/* The reading prose stays in a calm capped column (px-6); the board
-          breaks out full-bleed, edge to edge (CTL-1328 — Ryan). */}
-      <div className="flex-1 overflow-y-auto py-8">
-        <div className="px-6">
-          <header className="mb-6 max-w-[80ch]">
-            <h1 className="rulebook-prose text-2xl font-bold tracking-tight">
-              Belief Engine Rulebook
-            </h1>
-            <p className="mt-1 text-sm text-muted-foreground">
-              How the daemon decides who&apos;s working, who&apos;s wedged, and
-              when to call a human.
-            </p>
-            <p className="rulebook-prose mt-4 max-w-[74ch] text-[15px] leading-relaxed text-foreground/80">
-              Every few seconds — once per tick — the daemon reasons from{" "}
-              <em>what it can see</em> up to <em>what to do about it</em>. It
-              works in six layers: raw observations enter at the base and rise
-              into decisions. The engine evaluates them in a fixed order — layer
-              by layer, and rule by rule within each layer — so every rule
-              already sees whatever it builds on, whether that&apos;s a layer
-              beneath it or an earlier rule in its own layer. Read each lane as
-              one layer; the cards inside are the rules that fire there.{" "}
-              <span className="text-muted-foreground">
-                Click any rule to read its source.
-              </span>
-            </p>
-            <Legend />
-          </header>
-        </div>
-
-        {manifest === null ? (
-          <div className="px-6">
-            <LoadingSkeleton />
-          </div>
-        ) : (
-          <>
-            {/* Full-bleed board — edge to edge (CTL-1328). border-y only, no side
-                cap, so the lanes can use the whole viewport width; the reading
-                prose above and below stays in the capped px-6 column. */}
-            <div className="flex items-stretch overflow-hidden border-y bg-card/40">
-              <CakeRail />
-              <div className="min-w-0 flex-1">
-                {lanes.map((group) => (
-                  <StratumLane
-                    key={group.stratum.id}
-                    group={group}
-                    nameById={nameById}
-                    firingCounts={firingCounts}
-                    onOpenRule={setSelectedRuleId}
-                  />
-                ))}
-              </div>
-            </div>
-
-            {/* Supporting collapsibles read in the calm narrow column. */}
-            <div className="mt-7 max-w-[74ch] px-6">
-              <HowItWorks />
-              <ThresholdsAppendix />
-            </div>
-          </>
-        )}
+      {/* Shared header bar: the section title + the Overview · Browse · Monitor
+          sub-nav (the three lenses on the belief domain). */}
+      <div className="flex shrink-0 items-center gap-3 border-b border-border-subtle px-6 py-3">
+        <h1 className="rulebook-prose text-base font-semibold tracking-tight">
+          Agent Beliefs
+        </h1>
+        <ToggleGroup
+          type="single"
+          size="sm"
+          value={view}
+          // A single-select toggle returns "" when the active item is
+          // re-clicked; ignore that so a view is always selected.
+          onValueChange={(v) =>
+            v && setView(v as "overview" | "browse" | "monitor")
+          }
+          className="ml-auto"
+        >
+          <ToggleGroupItem value="overview" className="px-3 text-xs">
+            Overview
+          </ToggleGroupItem>
+          <ToggleGroupItem value="browse" className="px-3 text-xs">
+            Browse
+          </ToggleGroupItem>
+          <ToggleGroupItem value="monitor" className="px-3 text-xs">
+            Monitor
+          </ToggleGroupItem>
+        </ToggleGroup>
       </div>
 
+      {manifest === null ? (
+        <div className="flex-1 overflow-y-auto px-6 py-8">
+          <LoadingSkeleton />
+        </div>
+      ) : view === "browse" ? (
+        <RuleInbox
+          lanes={lanes}
+          firingCounts={firingCounts}
+          ruleIndex={ruleIndex}
+          selectedRule={selectedRule}
+          selectedStratum={selectedStratum}
+          selectedRuleId={selectedRuleId}
+          firingSubjects={firingSubjects}
+          onSelectRule={setSelectedRuleId}
+          onClear={() => setSelectedRuleId(null)}
+        />
+      ) : view === "monitor" ? (
+        <BeliefsMonitorStub firingRuleCount={firingCounts.size} />
+      ) : (
+        <BoardView
+          lanes={lanes}
+          nameById={nameById}
+          firingCounts={firingCounts}
+          onOpenRule={setSelectedRuleId}
+        />
+      )}
+
+      {/* Sheet drawer — OVERVIEW (board) only. Browse renders the detail in its
+          right pane (wide) or a full-width push (narrow); Monitor has none yet. */}
       <RuleDrawer
         rule={selectedRule}
         stratum={selectedStratum}
-        nameById={nameById}
-        firingSubjects={
-          selectedRule
-            ? subjectsForRule(beliefs.store, selectedRule.rule_id)
-            : []
-        }
-        open={selectedRule !== null}
+        ruleIndex={ruleIndex}
+        onSelectRule={setSelectedRuleId}
+        firingSubjects={firingSubjects}
+        open={selectedRule !== null && view === "overview"}
         onOpenChange={(o) => {
           if (!o) setSelectedRuleId(null);
         }}

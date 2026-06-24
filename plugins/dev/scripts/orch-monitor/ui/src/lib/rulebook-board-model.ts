@@ -24,6 +24,33 @@ export function feedNames(
   return rule.feeds.map((id) => nameById.get(id) ?? id);
 }
 
+/** A single index resolving a relation target to its full rule, keyed by BOTH
+ *  the rule's id AND its belief name. `feeds[]` carries rule ids (e.g. "R10")
+ *  while `reads[]`/`negates[]` carry belief names (e.g. "lease_valid") — the two
+ *  key spaces never collide (ids are `R\d+`, names are snake_case), so one map
+ *  resolves every relation kind. Lets the drawer turn a flat relation into a
+ *  clickable, hover-previewable link to the target rule. A target that doesn't
+ *  resolve (an unknown id, or a raw fact) is simply absent from the map and the
+ *  UI renders it as a calm static token. */
+export function buildRuleIndex(
+  rules: RuleManifestRule[],
+): Map<string, RuleManifestRule> {
+  const m = new Map<string, RuleManifestRule>();
+  for (const r of rules) {
+    m.set(r.rule_id, r);
+    m.set(r.name, r);
+  }
+  return m;
+}
+
+/** Whether a rule has compiled Datalog source (vs a hand-authored extern SQL
+ *  block) — true when any arm carries a non-null `datalog` field. Drives the
+ *  "has Datalog" affordance in the Browse list (only the compiled rules show
+ *  the real `:-` clause; externs only have SQL). */
+export function ruleHasDatalog(rule: RuleManifestRule): boolean {
+  return rule.arms.some((arm) => arm.datalog != null);
+}
+
 /** Split a rule's upstream dependencies into the ones it merely reads and the
  *  ones it negates. `negates[]` is (per the manifest) a subset of the names a
  *  rule depends on; keeping them in their own bucket lets the UI be honest about
@@ -46,6 +73,55 @@ export function splitReads(rule: RuleManifestRule): {
  *  order internally; this only flips the lane stacking. */
 export function strataTopDown(groups: StratumGroup[]): StratumGroup[] {
   return [...groups].sort((a, b) => b.stratum.id - a.stratum.id);
+}
+
+/** A display lane on the board / Browse — a (possibly synthetic) stratum group
+ *  plus a stable React key. Structurally a StratumGroup, so the lane/card
+ *  components consume it unchanged; the `key` exists because the synthetic split
+ *  below means `stratum.id` is no longer unique across lanes. */
+export interface DisplayLane extends StratumGroup {
+  key: string;
+}
+
+/** Reorder the strata into OPERATOR-IMPORTANCE display order (CTL-1328 — Ryan):
+ *  a synthetic top "Escalate to a human" lane (the escalate_human belief, lifted
+ *  out of S4), then "When it's time to escalate" (the rest of S4), then the
+ *  remaining strata in their usual decisions→facts order. Falls back to plain
+ *  top-down when S4 / escalate_human is absent. */
+export function toDisplayLanes(groups: StratumGroup[]): DisplayLane[] {
+  const topDown = strataTopDown(groups);
+  const s4 = topDown.find((g) => g.stratum.id === 4);
+  const escalate = s4?.rules.find((r) => r.name === "escalate_human");
+  const lanes: DisplayLane[] = [];
+
+  if (s4 && escalate) {
+    lanes.push({
+      key: "escalate-human",
+      stratum: {
+        ...s4.stratum,
+        plain_headline: "Escalate to a human",
+        plain_body:
+          "The top of the ladder — the automated fixes have been tried and failed, so the engine raises a hand for a person.",
+      },
+      rules: [escalate],
+    });
+    lanes.push({
+      key: "s4",
+      stratum: {
+        ...s4.stratum,
+        plain_headline: "When it's time to escalate",
+        plain_body:
+          "The cheaper automated moves first — wake a diagnostician, then judge whether that worked.",
+      },
+      rules: s4.rules.filter((r) => r.name !== "escalate_human"),
+    });
+  }
+
+  for (const g of topDown) {
+    if (s4 && escalate && g.stratum.id === 4) continue; // split out above
+    lanes.push({ key: `s${g.stratum.id}`, stratum: g.stratum, rules: g.rules });
+  }
+  return lanes;
 }
 
 /** "S1 ground correlations" → "Ground correlations": strip the redundant

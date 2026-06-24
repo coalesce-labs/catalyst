@@ -3,9 +3,12 @@
 import { describe, it, expect } from "bun:test";
 import {
   buildNameById,
+  buildRuleIndex,
+  ruleHasDatalog,
   feedNames,
   splitReads,
   strataTopDown,
+  toDisplayLanes,
   techLabel,
   techHint,
   laneSubtext,
@@ -23,6 +26,7 @@ function rule(p: Partial<RuleManifestRule>): RuleManifestRule {
     stratum: 1,
     extern: false,
     description: "desc",
+    narrative: "",
     feeds: [],
     reads: [],
     negates: [],
@@ -53,6 +57,47 @@ describe("buildNameById", () => {
     ]);
     expect(m.get("R1")).toBe("session_registered");
     expect(m.get("R10")).toBe("wake_diagnostician");
+  });
+});
+
+describe("buildRuleIndex", () => {
+  const rules = [
+    rule({ rule_id: "R5", name: "lease_valid", stratum: 2 }),
+    rule({ rule_id: "R6", name: "lease_expired", stratum: 2 }),
+    rule({ rule_id: "R10", name: "wake_diagnostician", stratum: 4 }),
+  ];
+  const index = buildRuleIndex(rules);
+
+  it("resolves a feeds[] rule id to its full rule", () => {
+    // feeds carry rule ids
+    expect(index.get("R10")?.name).toBe("wake_diagnostician");
+  });
+
+  it("resolves a reads[]/negates[] belief name to its full rule", () => {
+    // reads/negates carry belief names
+    expect(index.get("lease_valid")?.rule_id).toBe("R5");
+    expect(index.get("lease_valid")?.stratum).toBe(2);
+  });
+
+  it("returns undefined for an unresolved target (raw fact / unknown id)", () => {
+    expect(index.get("obs_session_registered")).toBeUndefined();
+    expect(index.get("R99")).toBeUndefined();
+  });
+});
+
+describe("ruleHasDatalog", () => {
+  it("is true when an arm has datalog (a compiled rule)", () => {
+    const r = rule({ arms: [{ arm_id: "R5", datalog: "lease_valid(t) :- ...", sql: "INSERT ..." }] });
+    expect(ruleHasDatalog(r)).toBe(true);
+  });
+
+  it("is false when every arm is datalog-less (a hand-authored extern)", () => {
+    const r = rule({ arms: [{ arm_id: "R13", datalog: null, sql: "WITH RECURSIVE ..." }] });
+    expect(ruleHasDatalog(r)).toBe(false);
+  });
+
+  it("is false when there are no arms", () => {
+    expect(ruleHasDatalog(rule({ arms: [] }))).toBe(false);
   });
 });
 
@@ -115,6 +160,53 @@ describe("strataTopDown", () => {
     }));
     strataTopDown(groups);
     expect(groups.map((g) => g.stratum.id)).toEqual([1, 2]);
+  });
+});
+
+describe("toDisplayLanes", () => {
+  const groups: StratumGroup[] = [
+    {
+      stratum: stratum({ id: 6 }),
+      rules: [rule({ rule_id: "R16", name: "advance_to", stratum: 6 })],
+    },
+    {
+      stratum: stratum({ id: 4 }),
+      rules: [
+        rule({ rule_id: "R10", name: "wake_diagnostician", stratum: 4 }),
+        rule({ rule_id: "R12", name: "escalate_human", stratum: 4 }),
+      ],
+    },
+    {
+      stratum: stratum({ id: 1 }),
+      rules: [rule({ rule_id: "R1", name: "session_registered", stratum: 1 })],
+    },
+  ];
+  const lanes = toDisplayLanes(groups);
+
+  it("lifts escalate_human into a synthetic top lane, then the rest of S4", () => {
+    expect(lanes[0]?.key).toBe("escalate-human");
+    expect(lanes[0]?.stratum.plain_headline).toBe("Escalate to a human");
+    expect(lanes[0]?.rules.map((r) => r.name)).toEqual(["escalate_human"]);
+    expect(lanes[1]?.key).toBe("s4");
+    expect(lanes[1]?.stratum.plain_headline).toBe("When it's time to escalate");
+    expect(lanes[1]?.rules.map((r) => r.name)).toEqual(["wake_diagnostician"]);
+  });
+
+  it("renders the remaining strata after, in decisions→facts order", () => {
+    expect(lanes.slice(2).map((l) => l.key)).toEqual(["s6", "s1"]);
+  });
+
+  it("gives every lane a unique key", () => {
+    const keys = lanes.map((l) => l.key);
+    expect(new Set(keys).size).toBe(keys.length);
+  });
+
+  it("falls back to plain top-down when S4 has no escalate_human", () => {
+    const noEsc: StratumGroup[] = [
+      { stratum: stratum({ id: 2 }), rules: [rule({ stratum: 2 })] },
+      { stratum: stratum({ id: 1 }), rules: [rule({ stratum: 1 })] },
+    ];
+    expect(toDisplayLanes(noEsc).map((l) => l.key)).toEqual(["s2", "s1"]);
   });
 });
 

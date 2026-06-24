@@ -293,16 +293,28 @@ const SURFACE_LABEL: Partial<Record<Surface, string>> = {
   home: "Inbox",
   board: "Tickets",
   workers: "Workers",
+  // CTL-1328: the "rulebook" surface reads as "Beliefs" in the breadcrumb too
+  // (otherwise this scope-aware path falls back to the raw key, "rulebook").
+  rulebook: "Beliefs",
 };
+
+// CTL-1328: the REASON surfaces (how the harness reasons + executes) are not
+// project-scoped, so leading their breadcrumb with a "Overall"/project scope is
+// meaningless. They lead with the harness name instead (per Ryan: "this is the
+// name of the harness and this is how the harness is executing").
+const HARNESS_NAME = "Catalyst";
+const REASON_SURFACES: ReadonlySet<Surface> = new Set(["process", "rulebook"]);
 
 /**
  * Breadcrumb trail for a surface+scope combination.
  * e.g. breadcrumbFor("board", "all") → ["Overall", "Tickets"]
  *      breadcrumbFor("board", "catalyst") → ["catalyst", "Tickets"]
+ *      breadcrumbFor("rulebook", "all") → ["Catalyst", "Beliefs"]
  */
 export function breadcrumbFor(surface: Surface, scope: string): string[] {
-  const scopeLabel = scope === "all" ? "Overall" : scope;
   const surfaceLabel = SURFACE_LABEL[surface] ?? surface;
+  if (REASON_SURFACES.has(surface)) return [HARNESS_NAME, surfaceLabel];
+  const scopeLabel = scope === "all" ? "Overall" : scope;
   return [scopeLabel, surfaceLabel];
 }
 

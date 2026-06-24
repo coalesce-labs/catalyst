@@ -11,6 +11,7 @@ const BASE_RULE: RuleManifestRule = {
   stratum: 1,
   extern: false,
   description: "The session is registered.",
+  narrative: "",
   feeds: [],
   reads: [],
   negates: [],

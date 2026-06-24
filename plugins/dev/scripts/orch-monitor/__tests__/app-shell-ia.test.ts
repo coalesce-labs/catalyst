@@ -283,20 +283,21 @@ describe("brand axis is the second, orthogonal theme dimension (CTL-1099)", () =
   });
 });
 
-// ── CTL-1101: REASON is a third collapsible section (Process + Rulebook) ──────
+// ── CTL-1101: REASON is a third collapsible section (Process + Beliefs) ───────
+// CTL-1328: the rulebook surface is presented as "Beliefs" in the nav.
 describe("REASON is a third collapsible tier in the sidebar (CTL-1101)", () => {
   it("sidebar source contains the REASON collapsible marker", () => {
     expect(sidebarSrc).toContain("REASON — collapsible");
   });
 
-  it("REASON lists Process and Rulebook items", () => {
+  it("REASON lists Process and Beliefs items", () => {
     const reasonIdx = sidebarSrc.indexOf("REASON — collapsible");
     expect(reasonIdx).toBeGreaterThan(-1);
     const reasonBlock = sidebarSrc.slice(reasonIdx);
     const observeIdx = reasonBlock.indexOf("OBSERVE — collapsible");
     const reasonSection = observeIdx > -1 ? reasonBlock.slice(0, observeIdx) : reasonBlock;
     expect(reasonSection).toContain('"Process"');
-    expect(reasonSection).toContain('"Rulebook"');
+    expect(reasonSection).toContain('"Beliefs"');
   });
 
   it("REASON open-state is persisted via navReasonOpenAtom, not useState (CTL-1101)", () => {
