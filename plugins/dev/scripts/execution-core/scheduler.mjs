@@ -27,6 +27,7 @@ import {
 import { spawnSync } from "node:child_process";
 import { monitorEventLoopDelay } from "node:perf_hooks";
 import { join, dirname, basename } from "node:path";
+import { createHash } from "node:crypto"; // CTL-1337: deterministic per-tick trace/span id
 import {
   analyzeDependencyGraph,
   referencedBlockerIds,
@@ -2712,6 +2713,27 @@ export function makeTickTimer(now = () => performance.now(), wallNow = Date.now)
 // better-structured logging shipped to Loki via the existing Alloy pipeline.
 export function tickTimingEnabled(env = process.env) {
   return env.CATALYST_TICK_TIMING !== "off";
+}
+
+// CTL-1337: derive a DETERMINISTIC PER-TICK trace_id + span_id shared by the Tier-1
+// `scheduler: tick timing` log line AND the Tier-3 `scheduler.tick` span, so trace↔logs
+// round-trips both ways (Tempo filterByTraceID → the tick's Loki line; Loki line's
+// trace_id → the Tempo trace). Computed ONCE per tick, BEFORE logging.
+//
+//   traceId = sha256(orchestratorId + ":tick:" + tick_id + ":" + node)[:32]   (32 hex)
+//   spanId  = sha256(orchestratorId + ":tick:" + tick_id + ":" + node + ":span")[:16] (16 hex)
+//
+// We deliberately do NOT reuse canonical-event-shared's deriveTraceId: that id is
+// sha256(orchestratorId)[:32] — PER-ORCHESTRATOR, so seeding every tick's span with it
+// would collapse the daemon's whole lifetime into ONE trace (thousands of scheduler.tick
+// spans under one trace_id — a span-hygiene blowout, per-tick flame graph gone). Folding
+// `tick_id` (and `node`) into the seed makes each tick its OWN trace while staying
+// deterministic, so the same id is reproducible at both the log and the span.
+export function deriveTickTraceContext({ orchestratorId, tickId, node }) {
+  const seed = `${orchestratorId ?? ""}:tick:${tickId}:${node ?? ""}`;
+  const traceId = createHash("sha256").update(seed).digest("hex").slice(0, 32);
+  const spanId = createHash("sha256").update(`${seed}:span`).digest("hex").slice(0, 16);
+  return { traceId, spanId };
 }
 
 // schedulerTick — one pull cycle: (1) advancement sweep, (2) new-work pull,
@@ -5409,9 +5431,22 @@ export function schedulerTick(
         slowest_pass = name;
       }
     }
+    // CTL-1337: ONE deterministic per-tick trace/span id, computed BEFORE logging so the
+    // Tier-1 line below and the Tier-3 span below carry the SAME ids. orchestratorId is
+    // the daemon's service identity; `self` is this node (already resolved once per tick).
+    // Folding tick_id in means every tick is its own trace (no per-orchestrator collapse).
+    const { traceId, spanId } = deriveTickTraceContext({
+      orchestratorId: "catalyst.execution-core",
+      tickId: tick.tickId,
+      node: self,
+    });
     log.info(
       {
         tick_id: tick.tickId,
+        // CTL-1337: stamp the per-tick ids so Loki log→trace (filterByTraceID) resolves
+        // the exact Tempo trace for THIS tick, and Tempo trace→logs lands on THIS line.
+        trace_id: traceId,
+        span_id: spanId,
         total_ms: tick.totalMs(),
         pass_durations: tick.passes,
         slowest_pass,
@@ -5431,8 +5466,12 @@ export function schedulerTick(
     // CATALYST_TRACING=on). Reconstructed from the recorded lap timings — zero
     // per-span work inside the synchronous hot loop. Root scheduler.tick + a
     // scheduler.pass child per pass over the slow threshold (the flame graph).
+    // CTL-1337: seed the root span with the SAME per-tick trace_id/span_id stamped on
+    // the log line above, so the span and the line share one id (trace↔logs round-trip).
     emitTickTrace({
       tickId: tick.tickId,
+      traceId,
+      spanId,
       startEpochMs: tick.startEpochMs,
       endEpochMs: tick.endEpochMs(),
       laps: tick.spanLaps,
