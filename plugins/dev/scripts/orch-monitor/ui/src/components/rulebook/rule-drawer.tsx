@@ -45,7 +45,7 @@ function SourcePane({
   const tabs = ruleCardTabs(rule); // [Plain English, Datalog, SQL]
   if (lens === "english") {
     return (
-      <p className="text-[13.5px] leading-relaxed text-foreground/90">
+      <p className="rulebook-prose text-[14px] leading-relaxed text-foreground/90">
         {rule.description}
       </p>
     );
@@ -142,7 +142,7 @@ function DrawerBody({
 
       {/* Scrollable body */}
       <div className="flex-1 overflow-y-auto px-5 py-4">
-        <p className="mb-4 text-[14px] leading-relaxed text-foreground/90">
+        <p className="rulebook-prose mb-4 text-[15px] leading-relaxed text-foreground/90">
           {rule.description}
         </p>
 

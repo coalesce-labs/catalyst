@@ -731,6 +731,14 @@ body {
 .ticket-desc p {
   margin: 0.7em 0;
 }
+/* CTL-1328: the Rulebook reading voice. Same serif as ticket descriptions
+   (CTL-1071) so the prose surfaces across the app share one editorial voice.
+   Applied to the rulebook header prose, the "how the rules work" copy, and the
+   per-rule descriptions — NOT the dense lane labels / code (those stay sans/mono). */
+.rulebook-prose {
+  font-family: var(--font-serif);
+}
+
 /* section headings: semibold, NO underline (Linear), generous top rhythm */
 .ticket-desc h1,
 .ticket-desc h2 {

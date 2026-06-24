@@ -49,7 +49,7 @@ export function RuleCard({
         )}
       </div>
 
-      <p className="mt-1.5 line-clamp-4 text-[12.5px] leading-snug text-foreground/80">
+      <p className="rulebook-prose mt-1.5 line-clamp-4 text-[12.5px] leading-snug text-foreground/80">
         {rule.description}
       </p>
 
