@@ -226,10 +226,13 @@ const OBSERVE_SOON = [
   { label: "DevOps", icon: CodeIcon },
 ] as const;
 
-// ── REASON items — Process FSM map (CTL-1101) + Rulebook (CTL-1103) ──────────
+// ── REASON items — Process FSM map (CTL-1101) + Beliefs (CTL-1103/CTL-1328) ───
+// The "rulebook" surface is presented as "Beliefs" — the section groups three
+// lenses (Overview · Browse · Monitor) on the belief domain; the surface key +
+// /rules route are unchanged (the typed-Surface contract stays stable).
 const REASON_LIVE: Array<{ surface: Surface; label: string; icon: typeof InboxIcon }> = [
   { surface: "process", label: "Process", icon: WorkflowIcon },
-  { surface: "rulebook", label: "Rulebook", icon: BookOpenIcon },
+  { surface: "rulebook", label: "Beliefs", icon: BookOpenIcon },
 ];
 
 // ── OPERATE items per scope ───────────────────────────────────────────────────
@@ -849,10 +852,10 @@ export function AppSidebar() {
           </SortableContext>
         </DndContext>
 
-        {/* ── REASON — collapsible, defaults open — "Process" + "Rulebook" ─── */}
-        {/* CTL-1101: the REASON tier groups the two analytical/governance surfaces
-            (Process FSM map + Rulebook) below the per-project OPERATE groups and
-            above the OBSERVE analytics tier. Force-opens when a REASON surface is
+        {/* ── REASON — collapsible, defaults open — "Process" + "Beliefs" ─── */}
+        {/* CTL-1101/CTL-1328: the REASON tier groups the two analytical/governance
+            surfaces (Process FSM map + Beliefs) below the per-project OPERATE groups
+            and above the OBSERVE analytics tier. Force-opens when a REASON surface is
             the active route. */}
         <Collapsible
           open={reasonOpen || reasonContainsActive}

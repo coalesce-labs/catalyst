@@ -102,6 +102,16 @@ describe("GET /api/beliefs/rules — Rulebook copy fields (CTL-1103)", () => {
     }
   });
 
+  // CTL-1328: the longer "why it matters / what an agent does" prose (@narrative)
+  // is the Rulebook detail lead. Guard that no rule ships without one.
+  it("every rule has a non-empty narrative", async () => {
+    const body = await fetchRules() as { rules: Array<{ rule_id: string; narrative?: string }> };
+    for (const r of body.rules) {
+      expect(typeof r.narrative, `${r.rule_id} narrative must be a string`).toBe("string");
+      expect(r.narrative!.length, `${r.rule_id} narrative must be non-empty`).toBeGreaterThan(0);
+    }
+  });
+
   it("manifest carries a top-level preface with problem and datalog_primer", async () => {
     const body = await fetchRules() as { preface?: { problem?: string; datalog_primer?: string } };
     expect(body.preface).toBeDefined();
@@ -109,5 +119,44 @@ describe("GET /api/beliefs/rules — Rulebook copy fields (CTL-1103)", () => {
     expect(body.preface!.problem!.length).toBeGreaterThan(0);
     expect(typeof body.preface!.datalog_primer).toBe("string");
     expect(body.preface!.datalog_primer!.length).toBeGreaterThan(0);
+  });
+});
+
+// ─── 4. CTL-1327: parameterized head + real .dl Datalog ─────────────────────
+
+describe("GET /api/beliefs/rules — head atom + real Datalog (CTL-1327)", () => {
+  it("every rule has a head with a string subject and an array of value_keys", async () => {
+    const body = await fetchRules() as {
+      rules: Array<{ rule_id: string; head?: { subject?: unknown; value_keys?: unknown } }>;
+    };
+    for (const r of body.rules) {
+      expect(r.head, `${r.rule_id} must have a head`).toBeDefined();
+      expect(typeof r.head!.subject, `${r.rule_id} head.subject`).toBe("string");
+      expect(Array.isArray(r.head!.value_keys), `${r.rule_id} head.value_keys`).toBe(true);
+    }
+  });
+
+  it("compiled (non-extern) rules expose the real .dl clause (a `:-` body), not compiled SQL", async () => {
+    const body = await fetchRules() as {
+      rules: Array<{ rule_id: string; extern: boolean; arms: Array<{ datalog: string | null }> }>;
+    };
+    const compiled = body.rules.filter((r) => !r.extern);
+    expect(compiled.length).toBeGreaterThan(0);
+    for (const r of compiled) {
+      const dl = r.arms[0]?.datalog ?? "";
+      expect(dl, `${r.rule_id} datalog must be the .dl clause`).toContain(":-");
+      expect(dl, `${r.rule_id} datalog must NOT be the compiled SQL`).not.toContain(
+        "INSERT OR IGNORE INTO belief",
+      );
+    }
+  });
+
+  it("extern rules carry null datalog (no Datalog clause)", async () => {
+    const body = await fetchRules() as {
+      rules: Array<{ rule_id: string; extern: boolean; arms: Array<{ datalog: string | null }> }>;
+    };
+    for (const r of body.rules.filter((x) => x.extern)) {
+      expect(r.arms[0]?.datalog, `${r.rule_id} extern datalog should be null`).toBeNull();
+    }
   });
 });

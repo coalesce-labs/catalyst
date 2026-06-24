@@ -29,6 +29,18 @@ export function parseAnnotations(ruleBlock) {
   let since = "";
   let ticket = "";
   let description = "";
+  // CTL-1328: the longer, plain-language "why this matters / what an agent does"
+  // prose shown in the Rulebook detail. A multi-line block (collapsed to one
+  // paragraph), distinct from the single-line @description (firing conditions).
+  let narrative = "";
+  // CTL-1328: belief-shape dev-docs — what the belief is keyed on, each value
+  // field (name|type|meaning), and a realistic example instance + its real-life
+  // note. Rendered as a dev-docs block in the Rulebook detail.
+  let subjectdoc = "";
+  const value_docs = [];
+  let sample = "";
+  let samplenote = "";
+  let subject = ""; // CTL-1327: head-atom subject label (e.g. "ticket/phase")
   const examples = [];
 
   // Split into lines for easier processing
@@ -56,6 +68,48 @@ export function parseAnnotations(ruleBlock) {
     } else if (line.startsWith("@description ")) {
       description = line.slice("@description ".length).trim();
       i++;
+    } else if (line === "@narrative" || line.startsWith("@narrative ")) {
+      // Multi-line prose block: an optional inline remainder on the @narrative
+      // line, then continuation lines until the next @-tag OR the start of the
+      // rule body/clause. Collapsed to a single paragraph (lines joined by a
+      // space; blank lines dropped).
+      const inline =
+        line === "@narrative" ? "" : line.slice("@narrative ".length).trim();
+      i++;
+      const parts = inline ? [inline] : [];
+      while (i < lines.length) {
+        const nextLine = lines[i].trim();
+        if (
+          nextLine.startsWith("@") ||
+          /^(subject:|value:|:-|sql\b|""")/.test(nextLine)
+        ) {
+          break;
+        }
+        if (nextLine) parts.push(nextLine);
+        i++;
+      }
+      narrative = parts.join(" ").trim();
+    } else if (line.startsWith("@subjectdoc ")) {
+      subjectdoc = line.slice("@subjectdoc ".length).trim();
+      i++;
+    } else if (line.startsWith("@value ")) {
+      // @value <key> | <type> | <meaning> — one value field of the belief record.
+      const parts = line
+        .slice("@value ".length)
+        .split("|")
+        .map((s) => s.trim());
+      const [key = "", type = "", ...rest] = parts;
+      value_docs.push({ key, type, meaning: rest.join(" | ").trim() });
+      i++;
+    } else if (line.startsWith("@sample ")) {
+      sample = line.slice("@sample ".length).trim();
+      i++;
+    } else if (line.startsWith("@samplenote ")) {
+      samplenote = line.slice("@samplenote ".length).trim();
+      i++;
+    } else if (line.startsWith("@subject ")) {
+      subject = line.slice("@subject ".length).trim();
+      i++;
     } else if (line === "@example") {
       // Collect all lines until the next @-tag at the start of a trimmed line
       i++;
@@ -73,7 +127,7 @@ export function parseAnnotations(ruleBlock) {
     }
   }
 
-  return { feeds, cfg, severity, since, ticket, description, examples };
+  return { feeds, cfg, severity, since, ticket, description, narrative, subjectdoc, value_docs, sample, samplenote, subject, examples };
 }
 
 /**

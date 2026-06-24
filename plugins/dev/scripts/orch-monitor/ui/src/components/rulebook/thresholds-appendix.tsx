@@ -1,43 +1,17 @@
-// thresholds-appendix.tsx — CTL-1103 / CTL-1320: the tunable cfg thresholds, now
-// in a closed-by-default Collapsible so the reading column stays calm (the table
-// is reference material, not part of the narrative). Degrades quietly on failure.
-import { useEffect, useState } from "react";
+// thresholds-appendix.tsx — CTL-1103 / CTL-1320 / CTL-1328: the tunable cfg
+// thresholds, in a closed-by-default Collapsible so the reading column stays
+// calm. The cfg data + value rendering + descriptions are shared with the
+// per-belief Thresholds section (rulebook-cfg.tsx).
 import {
   Collapsible,
   CollapsibleContent,
   CollapsibleTrigger,
 } from "@/components/ui/collapsible";
 import { ChevronRight } from "lucide-react";
-
-interface CfgRow {
-  key: string;
-  value_int: number | null;
-  value_text: string | null;
-}
-
-function CfgValue({ row }: { row: CfgRow }) {
-  const v = row.value_int != null ? String(row.value_int) : row.value_text;
-  return <span className="font-mono text-xs">{v ?? "—"}</span>;
-}
+import { CfgValue, cfgDescription, useBeliefCfg } from "./rulebook-cfg";
 
 export function ThresholdsAppendix() {
-  const [rows, setRows] = useState<CfgRow[] | null>(null);
-  const [unavailable, setUnavailable] = useState(false);
-
-  useEffect(() => {
-    fetch("/api/beliefs/cfg")
-      .then((r) => {
-        if (!r.ok) throw new Error(`${r.status}`);
-        // CTL-1317: the server returns { rows } (server.ts /api/beliefs/cfg), NOT
-        // { cfg }. Reading the wrong key set rows = undefined, which slipped past
-        // the `rows == null` guard below and crashed on rows.length. Read `rows`,
-        // and fall back to [] so a future shape drift degrades to "no thresholds".
-        return r.json() as Promise<{ rows?: CfgRow[] }>;
-      })
-      .then((d) => setRows(d.rows ?? []))
-      .catch(() => setUnavailable(true));
-  }, []);
-
+  const { rows, unavailable } = useBeliefCfg();
   const count = rows?.length ?? null;
 
   return (
@@ -64,27 +38,37 @@ export function ThresholdsAppendix() {
             <table className="w-full text-sm">
               <thead>
                 <tr className="border-b">
-                  <th className="pb-2 text-left font-medium text-muted-foreground text-xs">
+                  <th className="pb-2 text-left text-xs font-medium text-muted-foreground">
                     Key
                   </th>
-                  <th className="pb-2 text-right font-medium text-muted-foreground text-xs">
+                  <th className="pb-2 text-right text-xs font-medium text-muted-foreground">
                     Value
                   </th>
                 </tr>
               </thead>
               <tbody>
-                {rows.map((row) => (
-                  <tr
-                    key={row.key}
-                    id={`cfg-${row.key}`}
-                    className="border-b last:border-0"
-                  >
-                    <td className="py-1.5 font-mono text-xs">{row.key}</td>
-                    <td className="py-1.5 text-right">
-                      <CfgValue row={row} />
-                    </td>
-                  </tr>
-                ))}
+                {rows.map((row) => {
+                  const desc = cfgDescription(row.key);
+                  return (
+                    <tr
+                      key={row.key}
+                      id={`cfg-${row.key}`}
+                      className="border-b align-top last:border-0"
+                    >
+                      <td className="py-2 pr-4">
+                        <div className="font-mono text-xs break-all">{row.key}</div>
+                        {desc && (
+                          <div className="rulebook-prose mt-1 max-w-[64ch] text-[12px] leading-snug text-muted-foreground">
+                            {desc}
+                          </div>
+                        )}
+                      </td>
+                      <td className="py-2 text-right whitespace-nowrap">
+                        <CfgValue row={row} />
+                      </td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           )}

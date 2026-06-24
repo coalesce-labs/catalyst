@@ -6,6 +6,8 @@ import {
   groupRulesByStratum,
   severityTone,
   isRuleManifest,
+  prefaceIsComplete,
+  type Preface,
   type RuleManifest,
 } from "./rulebook-model";
 
@@ -17,9 +19,30 @@ const MANIFEST_FIXTURE: RuleManifest = {
     datalog_primer: "Datalog primer text.",
   },
   strata: [
-    { id: 1, label: "S1 ground correlations", prose: "Stratum 1 prose." },
-    { id: 2, label: "S2 liveness verdicts", prose: "Stratum 2 prose." },
-    { id: 3, label: "S3 capacity aggregation", prose: "Stratum 3 prose." },
+    // CTL-1328: plain_headline/plain_body became required on RuleManifestStratum
+    // in CTL-1320 but these fixtures were not updated, leaving the rulebook ui
+    // tsc red. Backfill them here (the test only asserts grouping/ordering).
+    {
+      id: 1,
+      label: "S1 ground correlations",
+      prose: "Stratum 1 prose.",
+      plain_headline: "What we directly observe",
+      plain_body: "Raw facts.",
+    },
+    {
+      id: 2,
+      label: "S2 liveness verdicts",
+      prose: "Stratum 2 prose.",
+      plain_headline: "Who is alive",
+      plain_body: "Liveness.",
+    },
+    {
+      id: 3,
+      label: "S3 capacity aggregation",
+      prose: "Stratum 3 prose.",
+      plain_headline: "How much capacity is free",
+      plain_body: "Headcount.",
+    },
   ],
   rules: [
     {
@@ -28,10 +51,12 @@ const MANIFEST_FIXTURE: RuleManifest = {
       stratum: 1,
       extern: false,
       description: "The session is registered.",
+      narrative: "",
       feeds: [],
       reads: [],
       negates: [],
       cfg_keys: [],
+      head: { subject: "ticket/phase", value_keys: [] },
       severity: "info",
       arms: [
         {
@@ -47,10 +72,12 @@ const MANIFEST_FIXTURE: RuleManifest = {
       stratum: 1,
       extern: false,
       description: "A turn has started.",
+      narrative: "",
       feeds: ["R4"],
       reads: [],
       negates: [],
       cfg_keys: [],
+      head: { subject: "ticket/phase", value_keys: [] },
       severity: "info",
       arms: [
         {
@@ -66,10 +93,12 @@ const MANIFEST_FIXTURE: RuleManifest = {
       stratum: 2,
       extern: false,
       description: "The lease is valid.",
+      narrative: "",
       feeds: [],
       reads: ["R1"],
       negates: [],
       cfg_keys: ["lease_ms"],
+      head: { subject: "ticket/phase", value_keys: [] },
       severity: "info",
       arms: [
         {
@@ -85,10 +114,12 @@ const MANIFEST_FIXTURE: RuleManifest = {
       stratum: 3,
       extern: true,
       description: "Aggregate free slots across hosts.",
+      narrative: "",
       feeds: [],
       reads: [],
       negates: [],
       cfg_keys: [],
+      head: { subject: "ticket/phase", value_keys: [] },
       severity: "info",
       arms: [
         {
@@ -177,5 +208,36 @@ describe("isRuleManifest", () => {
 
   it("returns false for non-array rules", () => {
     expect(isRuleManifest({ preface: {}, strata: [], rules: {} })).toBe(false);
+  });
+});
+
+// ── prefaceIsComplete ─────────────────────────────────────────────────────────
+// CTL-1328: folded in from the (now removed) preface-section.test.ts. The
+// PrefaceSection component was retired with the swim-lane board, but the preface
+// completeness guard stays a model concern, so its coverage lives here.
+describe("prefaceIsComplete", () => {
+  const FULL_PREFACE: Preface = {
+    problem: "The daemon must decide — continuously — which workers are alive.",
+    datalog_primer:
+      "Datalog is a logic programming language where rules derive new facts.",
+  };
+
+  it("returns true when both problem and datalog_primer are non-empty", () => {
+    expect(prefaceIsComplete(FULL_PREFACE)).toBe(true);
+  });
+
+  it("returns false when problem is empty", () => {
+    expect(prefaceIsComplete({ ...FULL_PREFACE, problem: "" })).toBe(false);
+  });
+
+  it("returns false when datalog_primer is empty", () => {
+    expect(prefaceIsComplete({ ...FULL_PREFACE, datalog_primer: "" })).toBe(
+      false,
+    );
+  });
+
+  it("returns false for a null/undefined preface (no throw)", () => {
+    expect(prefaceIsComplete(null as unknown as Preface)).toBe(false);
+    expect(prefaceIsComplete(undefined as unknown as Preface)).toBe(false);
   });
 });

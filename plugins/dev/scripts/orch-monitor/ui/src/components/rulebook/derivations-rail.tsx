@@ -75,7 +75,7 @@ function EntityRow({ subject, onOpenSource }: EntityRowProps) {
   // Surface that it is not addressable instead of pretending to load.
   if (ticket === null) {
     return (
-      <div className="border-b last:border-0">
+      <div className="border-b border-border-subtle last:border-0">
         <div className="flex w-full items-center gap-2 px-3 py-2 text-left text-xs opacity-60">
           <ChevronRight className="h-3 w-3 shrink-0 text-muted-foreground" />
           <span className="font-mono text-xs">{subject}</span>
@@ -88,7 +88,7 @@ function EntityRow({ subject, onOpenSource }: EntityRowProps) {
   }
 
   return (
-    <div className="border-b last:border-0">
+    <div className="border-b border-border-subtle last:border-0">
       <button
         type="button"
         className="flex w-full items-center gap-2 px-3 py-2 text-left text-xs hover:bg-muted/50 transition-colors"
@@ -129,15 +129,15 @@ interface DerivationsRailProps {
 export function DerivationsRail({ ruleId, subjects, onOpenSource }: DerivationsRailProps) {
   if (subjects.length === 0) {
     return (
-      <div className="rounded-lg border bg-card p-4 text-xs text-muted-foreground">
+      <div className="rounded-lg border border-border-subtle bg-card p-4 text-xs text-muted-foreground">
         <span className="font-mono">{ruleId}</span> — not currently firing.
       </div>
     );
   }
 
   return (
-    <div className="rounded-lg border bg-card overflow-hidden">
-      <div className="border-b px-3 py-2 text-xs font-medium text-muted-foreground">
+    <div className="overflow-hidden rounded-lg border border-border-subtle bg-card">
+      <div className="border-b border-border-subtle px-3 py-2 text-xs font-medium text-muted-foreground">
         <span className="font-mono">{ruleId}</span> — {subjects.length} subject
         {subjects.length !== 1 ? "s" : ""} firing
       </div>

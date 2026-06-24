@@ -11,10 +11,12 @@ const BASE_RULE: RuleManifestRule = {
   stratum: 1,
   extern: false,
   description: "The session is registered.",
+  narrative: "",
   feeds: [],
   reads: [],
   negates: [],
   cfg_keys: [],
+  head: { subject: "ticket/phase", value_keys: ["session_id", "short_id"] },
   severity: "info",
   arms: [
     {

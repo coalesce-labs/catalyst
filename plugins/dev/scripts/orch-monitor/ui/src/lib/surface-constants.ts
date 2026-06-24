@@ -37,7 +37,9 @@ export const SURFACE_LABEL: Record<Surface, string> = {
   fleetops: "Fleet Ops",
   devops: "DevOps",
   process: "Process",
-  rulebook: "Rulebook",
+  // CTL-1328: the "rulebook" surface is presented as "Beliefs" (the section
+  // groups Overview · Browse · Monitor). The surface KEY stays "rulebook".
+  rulebook: "Beliefs",
 };
 
 export const SURFACE_CHORD: Record<string, Surface> = {
@@ -63,5 +65,5 @@ export const SURFACE_BREADCRUMB: Record<Surface, string[]> = {
   fleetops: ["Observe", "Fleet Ops"],
   devops: ["Observe", "DevOps"],
   process: ["Reason", "Process"],
-  rulebook: ["Reason", "Rulebook"],
+  rulebook: ["Reason", "Beliefs"],
 };

@@ -1,116 +1,109 @@
-// rule-card.tsx — CTL-1103 / CTL-1320: one rule, shown in the perspective chosen
-// by the single hoisted PerspectiveToggle (Plain English | Datalog | SQL). The
-// per-card Tabs strip is gone — all 17 cards render the same lens, driven by
-// perspectiveAtom — so the page reads as a calm column, not 17 repeating toolbars.
-// The stratum-colored left accent is a thin tick, not a heavy 4px bar.
-import type { ReactNode } from "react";
-import { useAtomValue } from "jotai";
+// rule-card.tsx — CTL-1328: the compact board card. One rule on a swim-lane:
+// id + name + severity pill, a Datalog mark + active-belief count on the right
+// (the same Browse-list affordances), a plain-English one-liner, and aligned
+// feeds/cfg rows. A thin stratum-coloured left tick. The whole card is a button —
+// clicking it opens the source drawer.
+import { Braces } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { Badge } from "@/components/ui/badge";
-import { ruleCardTabs } from "./rule-card-model";
-import { severityTone } from "@/lib/rulebook-model";
-import { stratumColorForId } from "./strata-ladder";
-import { perspectiveAtom } from "./perspective-toggle";
+import { strataTone } from "@/lib/rulebook-theme";
+import { feedNames, ruleHasDatalog } from "@/lib/rulebook-board-model";
 import type { RuleManifestRule } from "@/lib/rulebook-model";
-
-function CodeBlock({ content }: { content: string | null }) {
-  return (
-    <pre className="rounded bg-muted px-3 py-2 text-[11px] font-mono leading-relaxed overflow-x-auto whitespace-pre-wrap">
-      {content}
-    </pre>
-  );
-}
+import { SeverityPill } from "./severity-pill";
 
 export function RuleCard({
   rule,
-  liveSlot,
+  nameById,
+  firingCount,
+  onOpen,
 }: {
   rule: RuleManifestRule;
-  liveSlot?: ReactNode;
+  nameById: Map<string, string>;
+  firingCount: number;
+  onOpen: (ruleId: string) => void;
 }) {
-  const perspective = useAtomValue(perspectiveAtom);
-  const tabs = ruleCardTabs(rule); // [Plain English, Datalog, SQL]
-  const sevClass = severityTone(rule.severity);
-  const stratumColor = stratumColorForId(rule.stratum); // CSS var e.g. "var(--chart-1)"
+  const feeds = feedNames(rule, nameById);
+  const hasDatalog = ruleHasDatalog(rule);
 
   return (
-    <div
-      id={`rule-${rule.rule_id}`}
-      className={cn("rounded-lg border bg-card mb-3 overflow-hidden border-l-2")}
-      style={{ borderLeftColor: stratumColor }}
+    <button
+      type="button"
+      onClick={() => onOpen(rule.rule_id)}
+      aria-label={`${rule.name} (${rule.rule_id}) — open source`}
+      className={cn(
+        "group flex w-[280px] shrink-0 flex-col rounded-lg border border-l-2 bg-card p-3.5 text-left",
+        "transition hover:-translate-y-px hover:border-ring/40 hover:bg-accent/40",
+        "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+      )}
+      style={{ borderLeftColor: strataTone(rule.stratum) }}
     >
-      {/* Header */}
-      <div className="flex items-start gap-3 px-4 pt-3 pb-2">
-        <div className="flex-1 min-w-0">
-          <div className="flex items-center gap-2 flex-wrap">
-            <span className="font-mono text-xs text-muted-foreground shrink-0">
-              {rule.rule_id}
+      <div className="flex items-start gap-2">
+        <span className="font-mono text-[10px] leading-snug text-muted-foreground">
+          {rule.rule_id}
+        </span>
+        <span className="text-[13px] font-medium leading-snug">{rule.name}</span>
+        <SeverityPill severity={rule.severity} />
+        {/* right markers — Datalog affordance + active-belief count (Browse parity) */}
+        <span className="ml-auto flex shrink-0 items-center gap-1.5 pt-px">
+          {hasDatalog && (
+            <span title="Has compiled Datalog source" className="flex">
+              <Braces
+                className="size-3.5 text-muted-foreground/55"
+                aria-label="Has Datalog"
+              />
             </span>
-            <span className="font-medium text-sm truncate">{rule.name}</span>
-            {rule.extern && (
-              <Badge variant="outline" className="text-[10px] h-4 px-1 shrink-0">
-                extern
-              </Badge>
-            )}
-            {rule.severity && (
-              <span className={cn("text-xs font-medium shrink-0", sevClass)}>
-                {rule.severity}
-              </span>
-            )}
-          </div>
-          {rule.feeds.length > 0 && (
-            <div className="mt-1 flex items-center gap-1 flex-wrap">
-              <span className="text-[10px] text-muted-foreground">feeds:</span>
-              {rule.feeds.map((f) => (
-                <a
-                  key={f}
-                  href={`#rule-${f}`}
-                  className="text-[10px] font-mono text-blue-600 dark:text-blue-400 hover:underline"
-                >
-                  {f}
-                </a>
-              ))}
-            </div>
           )}
-          {rule.cfg_keys.length > 0 && (
-            <div className="mt-0.5 flex items-center gap-1 flex-wrap">
-              <span className="text-[10px] text-muted-foreground">cfg:</span>
-              {rule.cfg_keys.map((k) => (
-                <a
-                  key={k}
-                  href={`#cfg-${k}`}
-                  className="text-[10px] font-mono text-muted-foreground hover:underline"
-                >
-                  {k}
-                </a>
-              ))}
-            </div>
+          {firingCount > 0 && (
+            <span
+              title={`${firingCount} active belief${firingCount === 1 ? "" : "s"}`}
+              className="rounded-full bg-muted px-1.5 py-0.5 text-[10px] font-medium tabular-nums text-muted-foreground"
+            >
+              {firingCount}
+            </span>
           )}
-        </div>
-        {/* Phase 4 live indicator slot */}
-        {liveSlot && <div className="shrink-0">{liveSlot}</div>}
+        </span>
       </div>
 
-      {/* Body — the single active perspective (driven by the hoisted toggle) */}
-      <div className="px-4 pb-3">
-        {perspective === "english" && (
-          <p className="text-sm leading-relaxed text-foreground">
-            {tabs[0].content ?? "No description available."}
-          </p>
-        )}
-        {perspective === "datalog" &&
-          (tabs[1].isExtern ? (
-            <p className="text-xs text-muted-foreground italic">
-              This rule embeds hand-authored SQL (an <em>extern</em> block) — no
-              Datalog source is compiled for it.
-            </p>
-          ) : (
-            <CodeBlock content={tabs[1].content} />
-          ))}
-        {perspective === "sql" && (
-          <CodeBlock content={tabs[2].content ?? "-- SQL unavailable"} />
-        )}
-      </div>
-    </div>
+      <p className="rulebook-prose mt-1.5 line-clamp-4 text-[12.5px] leading-snug text-foreground/80">
+        {rule.description}
+      </p>
+
+      {/* feeds / cfg as aligned label→value rows (higher contrast than the old
+          faint chips, labels lined up in a column — CTL-1328 — Ryan). */}
+      {(feeds.length > 0 || rule.cfg_keys.length > 0) && (
+        <dl className="mt-2.5 grid grid-cols-[3rem_1fr] gap-x-2 gap-y-1 text-[11px]">
+          {feeds.length > 0 && (
+            <>
+              <dt className="uppercase tracking-wide text-muted-foreground/55">
+                feeds
+              </dt>
+              <dd className="flex flex-wrap gap-x-2 gap-y-0.5 text-foreground/75">
+                {feeds.map((name) => (
+                  <span key={name} className="inline-flex items-center gap-0.5">
+                    <span className="text-muted-foreground/50">→</span>
+                    {name}
+                  </span>
+                ))}
+              </dd>
+            </>
+          )}
+          {rule.cfg_keys.length > 0 && (
+            <>
+              <dt className="uppercase tracking-wide text-muted-foreground/55">
+                cfg
+              </dt>
+              <dd className="flex flex-wrap gap-x-2 gap-y-0.5 font-mono text-foreground/70">
+                {rule.cfg_keys.map((k) => (
+                  <span key={k}>{k}</span>
+                ))}
+              </dd>
+            </>
+          )}
+        </dl>
+      )}
+
+      <span className="mt-2 text-[10px] text-transparent transition group-hover:text-muted-foreground">
+        view source ›
+      </span>
+    </button>
   );
 }
