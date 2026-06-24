@@ -27,6 +27,7 @@ function rule(p: Partial<RuleManifestRule>): RuleManifestRule {
     reads: [],
     negates: [],
     cfg_keys: [],
+    head: { subject: "ticket/phase", value_keys: [] },
     severity: "info",
     arms: [],
     ...p,

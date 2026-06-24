@@ -111,3 +111,42 @@ describe("GET /api/beliefs/rules — Rulebook copy fields (CTL-1103)", () => {
     expect(body.preface!.datalog_primer!.length).toBeGreaterThan(0);
   });
 });
+
+// ─── 4. CTL-1327: parameterized head + real .dl Datalog ─────────────────────
+
+describe("GET /api/beliefs/rules — head atom + real Datalog (CTL-1327)", () => {
+  it("every rule has a head with a string subject and an array of value_keys", async () => {
+    const body = await fetchRules() as {
+      rules: Array<{ rule_id: string; head?: { subject?: unknown; value_keys?: unknown } }>;
+    };
+    for (const r of body.rules) {
+      expect(r.head, `${r.rule_id} must have a head`).toBeDefined();
+      expect(typeof r.head!.subject, `${r.rule_id} head.subject`).toBe("string");
+      expect(Array.isArray(r.head!.value_keys), `${r.rule_id} head.value_keys`).toBe(true);
+    }
+  });
+
+  it("compiled (non-extern) rules expose the real .dl clause (a `:-` body), not compiled SQL", async () => {
+    const body = await fetchRules() as {
+      rules: Array<{ rule_id: string; extern: boolean; arms: Array<{ datalog: string | null }> }>;
+    };
+    const compiled = body.rules.filter((r) => !r.extern);
+    expect(compiled.length).toBeGreaterThan(0);
+    for (const r of compiled) {
+      const dl = r.arms[0]?.datalog ?? "";
+      expect(dl, `${r.rule_id} datalog must be the .dl clause`).toContain(":-");
+      expect(dl, `${r.rule_id} datalog must NOT be the compiled SQL`).not.toContain(
+        "INSERT OR IGNORE INTO belief",
+      );
+    }
+  });
+
+  it("extern rules carry null datalog (no Datalog clause)", async () => {
+    const body = await fetchRules() as {
+      rules: Array<{ rule_id: string; extern: boolean; arms: Array<{ datalog: string | null }> }>;
+    };
+    for (const r of body.rules.filter((x) => x.extern)) {
+      expect(r.arms[0]?.datalog, `${r.rule_id} extern datalog should be null`).toBeNull();
+    }
+  });
+});

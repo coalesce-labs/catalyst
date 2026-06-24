@@ -15,6 +15,7 @@ const BASE_RULE: RuleManifestRule = {
   reads: [],
   negates: [],
   cfg_keys: [],
+  head: { subject: "ticket/phase", value_keys: ["session_id", "short_id"] },
   severity: "info",
   arms: [
     {

@@ -29,6 +29,7 @@ export function parseAnnotations(ruleBlock) {
   let since = "";
   let ticket = "";
   let description = "";
+  let subject = ""; // CTL-1327: head-atom subject label (e.g. "ticket/phase")
   const examples = [];
 
   // Split into lines for easier processing
@@ -56,6 +57,9 @@ export function parseAnnotations(ruleBlock) {
     } else if (line.startsWith("@description ")) {
       description = line.slice("@description ".length).trim();
       i++;
+    } else if (line.startsWith("@subject ")) {
+      subject = line.slice("@subject ".length).trim();
+      i++;
     } else if (line === "@example") {
       // Collect all lines until the next @-tag at the start of a trimmed line
       i++;
@@ -73,7 +77,7 @@ export function parseAnnotations(ruleBlock) {
     }
   }
 
-  return { feeds, cfg, severity, since, ticket, description, examples };
+  return { feeds, cfg, severity, since, ticket, description, subject, examples };
 }
 
 /**

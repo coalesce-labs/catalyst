@@ -1,6 +1,7 @@
 /* Stratum 1: ground correlations (read obs_* only) */
 
 extern R3 progress_evidence
+@subject ticket/phase
 stratum 1
 @description The most recent positive evidence of work, taken as the max over heartbeat, transcript, and signal timestamps.
 @feeds R5
@@ -42,6 +43,7 @@ JOIN (SELECT subject, MAX(ts) AS ts FROM evidence GROUP BY subject) mx
 GROUP BY e.subject"""
 
 rule R1 session_registered
+@subject ticket/phase
 stratum 1
 @description The signal's background job shows up in the live agents listing — the session is registered.
 @severity info
@@ -62,6 +64,7 @@ value: json_object('session_id', a.session_id, 'short_id', a.short_id)
   provenance [s:s.fact_id, a:a.fact_id].
 
 rule R2 turn_started
+@subject ticket/phase
 stratum 1
 @description The session has produced a transcript, so its prompt actually became a running turn.
 @feeds R4
@@ -78,6 +81,7 @@ value: json_object('session_id', a.session_id, 'bytes', tr.bytes)
   provenance [s:s.fact_id, a:a.fact_id, r:tr.fact_id].
 
 extern R7 worker_dead
+@subject ticket/phase
 stratum 1
 @description Claude's own durable verdict that the worker is dead — the job is gone or in a terminal state.
 @feeds R4
@@ -107,6 +111,7 @@ WHERE t.tick_id = :tick
 /* Stratum 2: liveness verdicts (stratified negation over S1) */
 
 rule R4 wedged_never_started
+@subject ticket/phase
 stratum 2
 @description A running phase whose session registered but never started a turn within never_started_ms — a never-started wedge.
 @feeds R10
@@ -134,6 +139,7 @@ subject: s.ticket || '/' || s.phase
   provenance [b:sr.belief_id, s:s.fact_id, t:t.tick_id].
 
 extern R5 lease_valid
+@subject ticket/phase
 stratum 2
 @description The phase has progress evidence inside its freshness window, so its lease is still valid.
 @feeds R6
@@ -161,6 +167,7 @@ WHERE t.tick_id = :tick
                   AND b.name = 'worker_dead' AND b.subject = s.ticket || '/' || s.phase)"""
 
 extern R6 lease_expired
+@subject ticket/phase
 stratum 2
 @description A running phase with no valid lease and not dead — its lease has expired (stalled-alive).
 @feeds R10
@@ -180,6 +187,7 @@ WHERE t.tick_id = :tick
                   AND b.name = 'worker_dead' AND b.subject = s.ticket || '/' || s.phase)"""
 
 extern R9 board_drift
+@subject ticket
 stratum 2
 @description The Linear board state disagrees with what the running phase is actually doing — board drift.
 @severity warn
@@ -211,6 +219,7 @@ WHERE t.tick_id = :tick
 /* Stratum 3: capacity aggregation */
 
 extern R8 free_slots
+@subject host
 stratum 3
 @description Free capacity for a host: parallel slots and session slots not currently consumed by valid leases.
 @cfg max_parallel
@@ -247,6 +256,7 @@ WHERE t.tick_id = :tick"""
 /* Stratum 4: escalation ladder (stratified negation over intent) */
 
 extern R10a wake_diagnostician
+@subject ticket/phase
 stratum 4
 @description Wake the diagnostician for a never-started wedge (no cooldown intent in the window).
 @feeds R11
@@ -270,6 +280,7 @@ WHERE t.tick_id = :tick
       AND t.now_ms - it.now_ms <= c.value_int)"""
 
 extern R10b wake_diagnostician_stalled_alive
+@subject ticket/phase
 stratum 4
 @description Wake the diagnostician for a stalled-alive phase whose job is still in the working state.
 @feeds R11
@@ -298,6 +309,7 @@ WHERE t.tick_id = :tick
       AND t.now_ms - it.now_ms <= c.value_int)"""
 
 extern R11 action_ineffective
+@subject intent
 stratum 4
 @description An intent has exhausted its max_attempts with no outcome — the action proved ineffective.
 @feeds R12
@@ -316,6 +328,7 @@ JOIN intent i ON i.outcome IS NULL AND i.attempts >= c.value_int
 WHERE t.tick_id = :tick"""
 
 extern R12 escalate_human
+@subject ticket/phase
 stratum 4
 @description The diagnostician was woken and the action was ineffective, so the work escalates to a human.
 @severity error
@@ -335,6 +348,7 @@ WHERE t.tick_id = :tick"""
 /* Stratum 5: recursive dependency beliefs */
 
 extern R13 blocker_rank
+@subject ticket
 stratum 5
 @description A ticket's transitive blocker count, computed over the full dependency closure.
 @severity info
@@ -372,6 +386,7 @@ FROM closure cl
 GROUP BY cl.dependent"""
 
 extern R14 cycle_detected
+@subject ticket
 stratum 5
 @description A dependency cycle exists (A blocks B blocks A) in the relations graph.
 @severity error
@@ -415,6 +430,7 @@ SELECT :tick, 5, 'cycle_detected', sc.t,
 FROM self_cycle sc"""
 
 extern R15 ready
+@subject ticket
 stratum 5
 @description A ticket is in an eligible state with every blocker done — it is ready to start.
 @cfg eligible_state
@@ -456,6 +472,7 @@ WHERE t.tick_id = :tick
 /* are spliced at generate time by compile-rules.mjs importing phase-fsm.mjs.                         */
 
 extern R16 advance_to
+@subject ticket
 stratum 6
 @description The predicted next phase: the normal FSM edge, or the verify-to-remediate detour when verification fails.
 @severity info
@@ -534,6 +551,7 @@ SELECT ls.tick_id, 6, 'advance_to', ls.ticket,
                     WHERE s.tick_id = ls.tick_id AND s.ticket = ls.ticket AND s.phase = n.nextp)"""
 
 extern R17 cycle_exhausted
+@subject ticket
 stratum 6
 @description The remediate count has reached its cap — no more retries; the cycle is exhausted.
 @severity error

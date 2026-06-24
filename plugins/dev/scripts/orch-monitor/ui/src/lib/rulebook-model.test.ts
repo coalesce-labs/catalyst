@@ -55,6 +55,7 @@ const MANIFEST_FIXTURE: RuleManifest = {
       reads: [],
       negates: [],
       cfg_keys: [],
+      head: { subject: "ticket/phase", value_keys: [] },
       severity: "info",
       arms: [
         {
@@ -74,6 +75,7 @@ const MANIFEST_FIXTURE: RuleManifest = {
       reads: [],
       negates: [],
       cfg_keys: [],
+      head: { subject: "ticket/phase", value_keys: [] },
       severity: "info",
       arms: [
         {
@@ -93,6 +95,7 @@ const MANIFEST_FIXTURE: RuleManifest = {
       reads: ["R1"],
       negates: [],
       cfg_keys: ["lease_ms"],
+      head: { subject: "ticket/phase", value_keys: [] },
       severity: "info",
       arms: [
         {
@@ -112,6 +115,7 @@ const MANIFEST_FIXTURE: RuleManifest = {
       reads: [],
       negates: [],
       cfg_keys: [],
+      head: { subject: "ticket/phase", value_keys: [] },
       severity: "info",
       arms: [
         {

@@ -446,7 +446,7 @@ SELECT ls.tick_id, 6, 'cycle_exhausted', ls.ticket,
    AND COALESCE((SELECT c.remediate_count FROM obs_cycle c
                   WHERE c.tick_id = ls.tick_id AND c.ticket = ls.ticket LIMIT 1), 0) >= 3`;
 
-export const RULES_SHA = '68a5a8dbeb2f54da';
+export const RULES_SHA = '96bc54a6d2cc919c';
 
 
 // Deep-freeze helper for RULE_MANIFEST (CTL-1063 Phase 5).
@@ -517,17 +517,24 @@ export const RULE_MANIFEST = _deepFreeze({
       "reads": [],
       "negates": [],
       "cfg_keys": [],
+      "head": {
+        "subject": "ticket/phase",
+        "value_keys": [
+          "session_id",
+          "short_id"
+        ]
+      },
       "severity": "info",
       "since": "2026-06-09",
       "ticket": "CTL-933",
       "src": {
         "file": "beliefs/rules.dl",
-        "line": 44
+        "line": 45
       },
       "arms": [
         {
           "arm_id": "R1",
-          "datalog": "INSERT OR IGNORE INTO belief (tick_id, stratum, name, subject, value, rule_id, source_fact_ids)\nSELECT t.tick_id, 1, 'session_registered', s.ticket || '/' || s.phase,\n       json_object('session_id', a.session_id, 'short_id', a.short_id),\n       'R1', json_array('s' || s.fact_id, 'a' || a.fact_id)\nFROM tick t\nJOIN obs_signal s ON s.tick_id = t.tick_id AND s.bg_job_id IS NOT NULL\nJOIN obs_agent a ON a.tick_id = t.tick_id AND a.short_id = s.bg_job_id AND a.kind = 'background'\nWHERE t.tick_id = :tick",
+          "datalog": "subject: s.ticket || '/' || s.phase\nvalue: json_object('session_id', a.session_id, 'short_id', a.short_id)\n:-\n  tick t,\n  obs_signal s ON s.tick_id = t.tick_id AND s.bg_job_id IS NOT NULL,\n  obs_agent a ON a.tick_id = t.tick_id AND a.short_id = s.bg_job_id AND a.kind = 'background',\n  provenance [s:s.fact_id, a:a.fact_id].",
           "sql": "INSERT OR IGNORE INTO belief (tick_id, stratum, name, subject, value, rule_id, source_fact_ids)\nSELECT t.tick_id, 1, 'session_registered', s.ticket || '/' || s.phase,\n       json_object('session_id', a.session_id, 'short_id', a.short_id),\n       'R1', json_array('s' || s.fact_id, 'a' || a.fact_id)\nFROM tick t\nJOIN obs_signal s ON s.tick_id = t.tick_id AND s.bg_job_id IS NOT NULL\nJOIN obs_agent a ON a.tick_id = t.tick_id AND a.short_id = s.bg_job_id AND a.kind = 'background'\nWHERE t.tick_id = :tick"
         }
       ],
@@ -574,17 +581,24 @@ export const RULE_MANIFEST = _deepFreeze({
       "reads": [],
       "negates": [],
       "cfg_keys": [],
+      "head": {
+        "subject": "ticket/phase",
+        "value_keys": [
+          "session_id",
+          "bytes"
+        ]
+      },
       "severity": "info",
       "since": "2026-06-09",
       "ticket": "CTL-933",
       "src": {
         "file": "beliefs/rules.dl",
-        "line": 64
+        "line": 66
       },
       "arms": [
         {
           "arm_id": "R2",
-          "datalog": "INSERT OR IGNORE INTO belief (tick_id, stratum, name, subject, value, rule_id, source_fact_ids)\nSELECT t.tick_id, 1, 'turn_started', s.ticket || '/' || s.phase,\n       json_object('session_id', a.session_id, 'bytes', tr.bytes),\n       'R2', json_array('s' || s.fact_id, 'a' || a.fact_id, 'r' || tr.fact_id)\nFROM tick t\nJOIN obs_signal s ON s.tick_id = t.tick_id AND s.bg_job_id IS NOT NULL\nJOIN obs_agent a ON a.tick_id = t.tick_id AND a.short_id = s.bg_job_id\nJOIN obs_transcript tr ON tr.tick_id = t.tick_id AND tr.session_id = a.session_id AND tr.exists_flag = 1\nWHERE t.tick_id = :tick",
+          "datalog": "subject: s.ticket || '/' || s.phase\nvalue: json_object('session_id', a.session_id, 'bytes', tr.bytes)\n:-\n  tick t,\n  obs_signal s ON s.tick_id = t.tick_id AND s.bg_job_id IS NOT NULL,\n  obs_agent a ON a.tick_id = t.tick_id AND a.short_id = s.bg_job_id,\n  obs_transcript tr ON tr.tick_id = t.tick_id AND tr.session_id = a.session_id AND tr.exists_flag = 1,\n  provenance [s:s.fact_id, a:a.fact_id, r:tr.fact_id].",
           "sql": "INSERT OR IGNORE INTO belief (tick_id, stratum, name, subject, value, rule_id, source_fact_ids)\nSELECT t.tick_id, 1, 'turn_started', s.ticket || '/' || s.phase,\n       json_object('session_id', a.session_id, 'bytes', tr.bytes),\n       'R2', json_array('s' || s.fact_id, 'a' || a.fact_id, 'r' || tr.fact_id)\nFROM tick t\nJOIN obs_signal s ON s.tick_id = t.tick_id AND s.bg_job_id IS NOT NULL\nJOIN obs_agent a ON a.tick_id = t.tick_id AND a.short_id = s.bg_job_id\nJOIN obs_transcript tr ON tr.tick_id = t.tick_id AND tr.session_id = a.session_id AND tr.exists_flag = 1\nWHERE t.tick_id = :tick"
         }
       ],
@@ -611,17 +625,21 @@ export const RULE_MANIFEST = _deepFreeze({
       "cfg_keys": [
         "never_started_ms"
       ],
+      "head": {
+        "subject": "ticket/phase",
+        "value_keys": []
+      },
       "severity": "warn",
       "since": "2026-06-09",
       "ticket": "CTL-933",
       "src": {
         "file": "beliefs/rules.dl",
-        "line": 109
+        "line": 113
       },
       "arms": [
         {
           "arm_id": "R4",
-          "datalog": "INSERT OR IGNORE INTO belief (tick_id, stratum, name, subject, rule_id, source_fact_ids)\nSELECT t.tick_id, 2, 'wedged_never_started', s.ticket || '/' || s.phase, 'R4',\n       json_array('b' || sr.belief_id, 's' || s.fact_id, 't' || t.tick_id)\nFROM tick t\nJOIN obs_signal s ON s.tick_id = t.tick_id AND s.status = 'running'\nJOIN belief sr ON sr.tick_id = t.tick_id AND sr.name = 'session_registered' AND sr.subject = s.ticket || '/' || s.phase\nJOIN cfg c ON c.key = 'never_started_ms'\nWHERE t.tick_id = :tick\n  AND s.started_at_ms IS NOT NULL\n  AND t.now_ms - s.started_at_ms > c.value_int\n  AND NOT EXISTS (SELECT 1 FROM belief b WHERE b.tick_id = t.tick_id AND b.name = 'turn_started' AND b.subject = sr.subject)\n  AND NOT EXISTS (SELECT 1 FROM belief b WHERE b.tick_id = t.tick_id AND b.name = 'worker_dead' AND b.subject = sr.subject)",
+          "datalog": "subject: s.ticket || '/' || s.phase\n:-\n  tick t,\n  obs_signal s ON s.tick_id = t.tick_id AND s.status = 'running',\n  belief sr ON sr.tick_id = t.tick_id AND sr.name = 'session_registered' AND sr.subject = s.ticket || '/' || s.phase,\n  cfg c ON c.key = 'never_started_ms',\n  guard s.started_at_ms IS NOT NULL,\n  guard t.now_ms - s.started_at_ms > c.value_int,\n  not turn_started(sr.subject),\n  not worker_dead(sr.subject),\n  provenance [b:sr.belief_id, s:s.fact_id, t:t.tick_id].",
           "sql": "INSERT OR IGNORE INTO belief (tick_id, stratum, name, subject, rule_id, source_fact_ids)\nSELECT t.tick_id, 2, 'wedged_never_started', s.ticket || '/' || s.phase, 'R4',\n       json_array('b' || sr.belief_id, 's' || s.fact_id, 't' || t.tick_id)\nFROM tick t\nJOIN obs_signal s ON s.tick_id = t.tick_id AND s.status = 'running'\nJOIN belief sr ON sr.tick_id = t.tick_id AND sr.name = 'session_registered' AND sr.subject = s.ticket || '/' || s.phase\nJOIN cfg c ON c.key = 'never_started_ms'\nWHERE t.tick_id = :tick\n  AND s.started_at_ms IS NOT NULL\n  AND t.now_ms - s.started_at_ms > c.value_int\n  AND NOT EXISTS (SELECT 1 FROM belief b WHERE b.tick_id = t.tick_id AND b.name = 'turn_started' AND b.subject = sr.subject)\n  AND NOT EXISTS (SELECT 1 FROM belief b WHERE b.tick_id = t.tick_id AND b.name = 'worker_dead' AND b.subject = sr.subject)"
         }
       ],
@@ -676,6 +694,12 @@ export const RULE_MANIFEST = _deepFreeze({
       "reads": [],
       "negates": [],
       "cfg_keys": [],
+      "head": {
+        "subject": "ticket/phase",
+        "value_keys": [
+          "ts_ms"
+        ]
+      },
       "severity": "info",
       "since": "2026-06-09",
       "ticket": "CTL-933",
@@ -706,12 +730,18 @@ export const RULE_MANIFEST = _deepFreeze({
       "reads": [],
       "negates": [],
       "cfg_keys": [],
+      "head": {
+        "subject": "ticket/phase",
+        "value_keys": [
+          "reason"
+        ]
+      },
       "severity": "warn",
       "since": "2026-06-09",
       "ticket": "CTL-933",
       "src": {
         "file": "beliefs/rules.dl",
-        "line": 80
+        "line": 83
       },
       "arms": [
         {
@@ -742,12 +772,19 @@ export const RULE_MANIFEST = _deepFreeze({
         "lease_window_doc_ms",
         "lease_window_build_ms"
       ],
+      "head": {
+        "subject": "ticket/phase",
+        "value_keys": [
+          "evidence_ts_ms",
+          "window_ms"
+        ]
+      },
       "severity": "info",
       "since": "2026-06-09",
       "ticket": "CTL-933",
       "src": {
         "file": "beliefs/rules.dl",
-        "line": 136
+        "line": 141
       },
       "arms": [
         {
@@ -776,12 +813,16 @@ export const RULE_MANIFEST = _deepFreeze({
         "worker_dead"
       ],
       "cfg_keys": [],
+      "head": {
+        "subject": "ticket/phase",
+        "value_keys": []
+      },
       "severity": "warn",
       "since": "2026-06-09",
       "ticket": "CTL-933",
       "src": {
         "file": "beliefs/rules.dl",
-        "line": 163
+        "line": 169
       },
       "arms": [
         {
@@ -802,12 +843,20 @@ export const RULE_MANIFEST = _deepFreeze({
       "reads": [],
       "negates": [],
       "cfg_keys": [],
+      "head": {
+        "subject": "ticket",
+        "value_keys": [
+          "have",
+          "want",
+          "phase"
+        ]
+      },
       "severity": "warn",
       "since": "2026-06-09",
       "ticket": "CTL-933",
       "src": {
         "file": "beliefs/rules.dl",
-        "line": 182
+        "line": 189
       },
       "arms": [
         {
@@ -831,12 +880,24 @@ export const RULE_MANIFEST = _deepFreeze({
         "max_parallel",
         "session_cap"
       ],
+      "head": {
+        "subject": "host",
+        "value_keys": [
+          "free_slots",
+          "by_lease",
+          "by_session_cap",
+          "max_parallel",
+          "session_cap",
+          "lease_valid_count",
+          "bg_session_count"
+        ]
+      },
       "severity": "info",
       "since": "2026-06-09",
       "ticket": "CTL-933",
       "src": {
         "file": "beliefs/rules.dl",
-        "line": 213
+        "line": 221
       },
       "arms": [
         {
@@ -868,12 +929,18 @@ export const RULE_MANIFEST = _deepFreeze({
       "cfg_keys": [
         "diag_cooldown_ms"
       ],
+      "head": {
+        "subject": "ticket/phase",
+        "value_keys": [
+          "reason"
+        ]
+      },
       "severity": "warn",
       "since": "2026-06-09",
       "ticket": "CTL-933",
       "src": {
         "file": "beliefs/rules.dl",
-        "line": 249
+        "line": 258
       },
       "arms": [
         {
@@ -903,12 +970,19 @@ export const RULE_MANIFEST = _deepFreeze({
       "cfg_keys": [
         "max_attempts"
       ],
+      "head": {
+        "subject": "intent",
+        "value_keys": [
+          "kind",
+          "attempts"
+        ]
+      },
       "severity": "warn",
       "since": "2026-06-09",
       "ticket": "CTL-933",
       "src": {
         "file": "beliefs/rules.dl",
-        "line": 300
+        "line": 311
       },
       "arms": [
         {
@@ -932,12 +1006,18 @@ export const RULE_MANIFEST = _deepFreeze({
       ],
       "negates": [],
       "cfg_keys": [],
+      "head": {
+        "subject": "ticket/phase",
+        "value_keys": [
+          "why"
+        ]
+      },
       "severity": "error",
       "since": "2026-06-09",
       "ticket": "CTL-933",
       "src": {
         "file": "beliefs/rules.dl",
-        "line": 318
+        "line": 330
       },
       "arms": [
         {
@@ -958,12 +1038,20 @@ export const RULE_MANIFEST = _deepFreeze({
       "reads": [],
       "negates": [],
       "cfg_keys": [],
+      "head": {
+        "subject": "ticket",
+        "value_keys": [
+          "rank",
+          "direct",
+          "transitive"
+        ]
+      },
       "severity": "info",
       "since": "2026-06-09",
       "ticket": "CTL-965",
       "src": {
         "file": "beliefs/rules.dl",
-        "line": 337
+        "line": 350
       },
       "arms": [
         {
@@ -984,12 +1072,18 @@ export const RULE_MANIFEST = _deepFreeze({
       "reads": [],
       "negates": [],
       "cfg_keys": [],
+      "head": {
+        "subject": "ticket",
+        "value_keys": [
+          "members"
+        ]
+      },
       "severity": "error",
       "since": "2026-06-09",
       "ticket": "CTL-965",
       "src": {
         "file": "beliefs/rules.dl",
-        "line": 374
+        "line": 388
       },
       "arms": [
         {
@@ -1012,12 +1106,18 @@ export const RULE_MANIFEST = _deepFreeze({
       "cfg_keys": [
         "eligible_state"
       ],
+      "head": {
+        "subject": "ticket",
+        "value_keys": [
+          "ready"
+        ]
+      },
       "severity": "info",
       "since": "2026-06-09",
       "ticket": "CTL-965",
       "src": {
         "file": "beliefs/rules.dl",
-        "line": 417
+        "line": 432
       },
       "arms": [
         {
@@ -1038,12 +1138,19 @@ export const RULE_MANIFEST = _deepFreeze({
       "reads": [],
       "negates": [],
       "cfg_keys": [],
+      "head": {
+        "subject": "ticket",
+        "value_keys": [
+          "from",
+          "to"
+        ]
+      },
       "severity": "info",
       "since": "2026-06-09",
       "ticket": "CTL-966",
       "src": {
         "file": "beliefs/rules.dl",
-        "line": 458
+        "line": 474
       },
       "arms": [
         {
@@ -1064,12 +1171,20 @@ export const RULE_MANIFEST = _deepFreeze({
       "reads": [],
       "negates": [],
       "cfg_keys": [],
+      "head": {
+        "subject": "ticket",
+        "value_keys": [
+          "phase",
+          "remediate_count",
+          "cap"
+        ]
+      },
       "severity": "error",
       "since": "2026-06-09",
       "ticket": "CTL-966",
       "src": {
         "file": "beliefs/rules.dl",
-        "line": 536
+        "line": 553
       },
       "arms": [
         {

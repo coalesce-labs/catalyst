@@ -12,6 +12,15 @@ export interface RuleArm {
   sql: string | null;
 }
 
+/** CTL-1327: the head atom of a belief — `name(subject) = value{value_keys}`.
+ *  `subject` is the @subject label from rules.dl (e.g. "ticket/phase"); the
+ *  `value_keys` are the fields of the value json_object ([] when the rule writes
+ *  no value). Lets the Rulebook render each belief as a parameterized clause. */
+export interface RuleHead {
+  subject: string;
+  value_keys: string[];
+}
+
 export interface RuleManifestStratum {
   id: number;
   label: string;
@@ -33,6 +42,7 @@ export interface RuleManifestRule {
   reads: string[];
   negates: string[];
   cfg_keys: string[];
+  head: RuleHead;
   severity: string;
   arms: RuleArm[];
 }

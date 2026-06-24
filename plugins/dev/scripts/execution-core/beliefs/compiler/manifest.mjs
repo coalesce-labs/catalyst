@@ -164,6 +164,93 @@ function extractAnnotations(source, ruleId) {
 }
 
 /**
+ * CTL-1327: extract the raw `.dl` clause body for a rule arm — the
+ * `subject:`/`value:`/`:- … .` text the author wrote — for the drawer's Datalog
+ * lens. Returns null for extern rules (no Datalog clause) or when not found.
+ *
+ * @param {string} source — rules.dl
+ * @param {string} armId
+ * @returns {string|null}
+ */
+function extractDatalogClause(source, armId) {
+  if (!source) return null;
+  const startPattern = new RegExp(`\\b(?:rule|extern)\\s+${armId}\\b`);
+  const sm = startPattern.exec(source);
+  if (!sm) return null;
+  const nextPattern = /\b(?:rule|extern)\s+\S+\s+\S+/g;
+  nextPattern.lastIndex = sm.index + 1;
+  const nm = nextPattern.exec(source);
+  const block = source.slice(sm.index, nm ? nm.index : source.length);
+  const lines = block.split("\n");
+  // Clause = from the first `subject:`/`value:`/`:-` line to the line that ends
+  // the clause with a terminating `.`.
+  let start = -1;
+  for (let i = 0; i < lines.length; i++) {
+    const t = lines[i].trim();
+    if (t.startsWith("subject:") || t.startsWith("value:") || t.startsWith(":-")) {
+      start = i;
+      break;
+    }
+  }
+  if (start === -1) return null;
+  let end = -1;
+  for (let i = start; i < lines.length; i++) {
+    if (lines[i].trim().endsWith(".")) { end = i; break; }
+  }
+  if (end === -1) end = lines.length - 1;
+  return lines.slice(start, end + 1).join("\n").trim() || null;
+}
+
+/**
+ * CTL-1327: top-level keys of the belief's value json_object — the fields of the
+ * head atom's value record. Returns [] when the rule writes no value (e.g.
+ * R4/R6 omit the value column). Balanced-paren aware so nested calls (MAX/MIN,
+ * sub-SELECTs) don't break the depth-0 split; keys are the even-position string
+ * literals.
+ *
+ * @param {string} sql
+ * @returns {string[]}
+ */
+function extractValueKeys(sql) {
+  const at = sql.indexOf("json_object(");
+  if (at === -1) return [];
+  let depth = 0;
+  let start = -1;
+  let end = -1;
+  for (let i = at + "json_object".length; i < sql.length; i++) {
+    const ch = sql[i];
+    if (ch === "(") { depth++; if (depth === 1) start = i + 1; }
+    else if (ch === ")") { depth--; if (depth === 0) { end = i; break; } }
+  }
+  if (start === -1 || end === -1) return [];
+  const inner = sql.slice(start, end);
+  const args = [];
+  let d = 0;
+  let inStr = false;
+  let buf = "";
+  for (let k = 0; k < inner.length; k++) {
+    const c = inner[k];
+    if (inStr) {
+      buf += c;
+      if (c === "'") inStr = false;
+    } else if (c === "'") {
+      inStr = true;
+      buf += c;
+    } else if (c === "(") { d++; buf += c; }
+    else if (c === ")") { d--; buf += c; }
+    else if (c === "," && d === 0) { args.push(buf.trim()); buf = ""; }
+    else buf += c;
+  }
+  if (buf.trim()) args.push(buf.trim());
+  const keys = [];
+  for (let a = 0; a < args.length; a += 2) {
+    const m = /^'([^']*)'$/.exec(args[a]);
+    if (m) keys.push(m[1]);
+  }
+  return keys;
+}
+
+/**
  * buildManifest(ir) — build the RULE_MANIFEST from compiler output.
  *
  * @param {{ rules: Map<string, {ir:{ruleId,name,stratum,negations?:[]}, sql:string, extern:boolean}> }} ir
@@ -224,14 +311,23 @@ export function buildManifest(ir, dlSource) {
     // Source line
     const srcLine = source ? findSrcLine(source, armIds[0], firstIr.name) : 0;
 
-    // Build arms
+    // Build arms. CTL-1327: `datalog` is now the REAL `.dl` clause source (not the
+    // compiled SQL — the old lens bug), null for extern rules.
     const arms = armIds.map(armId => {
       const entry = rulesMap.get(armId);
       return {
         arm_id: armId,
-        datalog: entry.extern ? null : entry.sql,
+        datalog: entry.extern ? null : extractDatalogClause(source, armId),
         sql: entry.sql.trim(),
       };
+    });
+
+    // CTL-1327: the head atom — a belief is `name(subject) = value{…}`. The
+    // subject label comes from the @subject annotation; the value's field keys are
+    // parsed from the value json_object in the SQL ([] when the rule writes none).
+    const head = Object.freeze({
+      subject: annot.subject || "",
+      value_keys: Object.freeze(extractValueKeys(allSql)),
     });
 
     rules.push(Object.freeze({
@@ -244,6 +340,7 @@ export function buildManifest(ir, dlSource) {
       reads: Object.freeze(reads),
       negates: Object.freeze(negates),
       cfg_keys: Object.freeze(cfg_keys),
+      head,
       severity: annot.severity,
       since: annot.since,
       ticket: annot.ticket,

@@ -68,6 +68,35 @@ function SourcePane({
   return <CodeBlock content={tabs[2].content ?? "-- SQL unavailable"} />;
 }
 
+// CTL-1327: the belief as a parameterized clause head — `name(subject) → {keys}`.
+// Makes the Horn-clause shape legible: every belief is name(subject) carrying a
+// value record. Rules that write no value (R4, R6) show just `name(subject)`.
+function HeadSignature({ rule }: { rule: RuleManifestRule }) {
+  // Defensive: a stale backend (older manifest, or mid-deploy before the host
+  // rebuilds rules.generated.mjs) may omit `head` — render nothing rather than
+  // crash on a missing field.
+  const head = rule.head;
+  if (!head) return null;
+  const subject = head.subject ?? "";
+  const value_keys = head.value_keys ?? [];
+  if (!subject && value_keys.length === 0) return null;
+  return (
+    <div className="mt-2 font-mono text-[12px] leading-relaxed">
+      <span className="text-foreground/80">{rule.name}</span>
+      <span className="text-muted-foreground/50">(</span>
+      <span className="text-foreground/70">{subject || "subject"}</span>
+      <span className="text-muted-foreground/50">)</span>
+      {value_keys.length > 0 && (
+        <>
+          <span className="text-muted-foreground/50"> → {"{ "}</span>
+          <span className="text-muted-foreground">{value_keys.join(", ")}</span>
+          <span className="text-muted-foreground/50">{" }"}</span>
+        </>
+      )}
+    </div>
+  );
+}
+
 function RelRow({
   label,
   arrow,
@@ -138,6 +167,7 @@ function DrawerBody({
             </Badge>
           )}
         </div>
+        <HeadSignature rule={rule} />
       </div>
 
       {/* Scrollable body */}
