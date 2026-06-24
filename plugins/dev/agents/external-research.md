@@ -30,12 +30,13 @@ libraries, and implementation patterns.
 - Use `mcp__context7__resolve_library_id` then `mcp__context7__get_library_docs`
 
 **For GitHub repository research** (how does X implement Y?):
-- Use `mcp__exa__search_code` to find how the repo implements a feature in real code
-- Use `WebFetch` to read specific files, READMEs, or docs pages directly from the repo
+- Use `WebFetch` to read the repo's files, READMEs, and docs pages directly from GitHub — always available, no extra MCP required
+- Use `WebSearch` to locate the relevant files, issues, or discussions in the repo first
+- Use `mcp__exa__search_code` for deep code search across the repo _if the Exa MCP is configured_
 - Use `mcp__context7__get_library_docs` when the repo ships a documented library
 
 **For code examples and patterns** (show me code that does X):
-- Use `mcp__exa__search_code` — find real code examples across the web
+- Use `mcp__exa__search_code` — find real code examples across the web _if the Exa MCP is configured_; otherwise `WebSearch` + `WebFetch`
 
 **For general web research** (best practices, blog posts, docs):
 - Use `WebSearch` — broad web search for articles, docs, discussions
@@ -43,8 +44,8 @@ libraries, and implementation patterns.
 
 **Decision flow:**
 1. Is it about a library's API/docs? → Context7
-2. Is it about how a specific GitHub repo implements something? → Exa code search, then WebFetch the relevant files
-3. Is it about code patterns across the web? → Exa
+2. Is it about how a specific GitHub repo implements something? → WebFetch the repo's files (+ WebSearch); Exa code search if configured
+3. Is it about code patterns across the web? → Exa if configured, else WebSearch
 4. Is it about best practices, blog posts, or general knowledge? → WebSearch
 5. Need to read a specific URL? → WebFetch
 

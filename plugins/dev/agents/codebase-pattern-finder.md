@@ -7,7 +7,7 @@ description:
   the location of files, it will also give you code details!
 tools:
   Grep, Glob, Read, Bash(ls *), mcp__context7__get_library_docs,
-  mcp__context7__resolve_library_id
+  mcp__context7__resolve_library_id, WebSearch, WebFetch
 model: sonnet
 version: 1.0.0
 ---
@@ -225,8 +225,9 @@ When the user requests patterns from popular repos or frameworks:
 
 - **For library/framework docs**: Use Context7 (`mcp__context7__resolve_library_id` then
   `mcp__context7__get_library_docs`) to pull current documentation and code examples.
-- **For broader code/web search**: Use Exa or WebSearch/WebFetch when the pattern isn't covered by
-  Context7, or to read a framework's live source.
+- **For broader code/web search**: Use `WebFetch`/`WebSearch` to read a framework's live source or
+  find real-world examples when Context7 doesn't cover the pattern (Exa code search too, if the Exa
+  MCP is configured).
 
 ### Step 2: Compare with Local Patterns
 

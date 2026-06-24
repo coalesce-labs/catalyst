@@ -2,7 +2,7 @@
 name: discover-workflows
 description: Research and catalog workflows from external Claude Code repositories
 disable-model-invocation: false
-allowed-tools: Read, Write
+allowed-tools: Read, Write, Task, TodoWrite, WebSearch, WebFetch
 version: 1.0.0
 ---
 
@@ -67,7 +67,7 @@ Use TodoWrite to track the 3 parallel research tasks.
 Use external-research agent:
 "Research {repo-name}. What commands and agents are available? List all workflows with brief descriptions of what each does."
 
-Tools: WebFetch, WebSearch, mcp__exa__web_search_exa
+Tools: WebFetch, WebSearch
 Return: Complete list of all workflows found
 ```
 
@@ -77,7 +77,7 @@ Return: Complete list of all workflows found
 Use external-research agent:
 "Research {repo-name}. What frontmatter format is used for agents and commands? Provide specific examples showing all frontmatter fields used."
 
-Tools: WebFetch, mcp__exa__get_code_context_exa
+Tools: WebFetch, WebSearch
 Return: Frontmatter patterns with concrete examples
 ```
 
@@ -87,7 +87,7 @@ Return: Frontmatter patterns with concrete examples
 Use external-research agent:
 "Research {repo-name}. What are the common implementation patterns, structures, and conventions used across workflows? Include naming conventions, file organization, and any templates."
 
-Tools: WebFetch, mcp__exa__get_code_context_exa
+Tools: WebFetch, WebSearch
 Return: Patterns, templates, conventions observed
 ```
 

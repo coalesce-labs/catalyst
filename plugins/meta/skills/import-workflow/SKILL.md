@@ -2,7 +2,7 @@
 name: import-workflow
 description: Import and adapt a workflow from external repositories
 disable-model-invocation: false
-allowed-tools: Read, Write, Edit
+allowed-tools: Read, Write, Edit, Task, TodoWrite
 version: 1.0.0
 ---
 
@@ -50,7 +50,7 @@ Use TodoWrite to track parallel research.
 Use external-research agent:
 "Research {repo}/{workflow}. Explain what this workflow does, how it works, what tools it uses, and provide the complete implementation including frontmatter."
 
-Tools: mcp__context7__* (library/framework docs), Exa (code/web search), WebSearch, WebFetch (read the repo's files on GitHub)
+Tools: WebFetch / WebSearch (read the repo's files on GitHub — always available), mcp__context7__* (library/framework docs), Exa code search if the Exa MCP is configured
 Return: Full workflow understanding and implementation
 ```
 
