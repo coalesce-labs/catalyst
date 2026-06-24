@@ -25,6 +25,11 @@ import { getInterests } from "./state.mjs";
 // Identity-stable alias — loadExistingRegistrations reports interests.size.
 const interests = getInterests();
 
+// CTL-1330 Tier 1: broker route-timing gate + slow-route threshold. Boot-fixed
+// (daemon env is set at launch); ON unless CATALYST_TICK_TIMING=off.
+const BROKER_ROUTE_TIMING = process.env.CATALYST_TICK_TIMING !== "off";
+const BROKER_SLOW_ROUTE_MS = Number(process.env.CATALYST_BROKER_SLOW_ROUTE_MS) || 100;
+
 // --- Reactive event log tailing ---
 let lastByteOffset = 0;
 let lastLogPath = "";
@@ -93,7 +98,19 @@ function readNewEvents() {
       } catch {
         continue;
       }
-      processEvent(event);
+      // CTL-1330 Tier 1: time each route; surface ONLY slow routes (default
+      // >100ms) so we catch a broker-side hot-loop stall without flooding Loki —
+      // the broker routes every appended event. ON by default (CATALYST_TICK_TIMING).
+      if (BROKER_ROUTE_TIMING) {
+        const t0 = performance.now();
+        processEvent(event);
+        const total_ms = Math.round((performance.now() - t0) * 10) / 10;
+        if (total_ms >= BROKER_SLOW_ROUTE_MS) {
+          log.warn({ event_name: getEventName(event), total_ms }, "broker: slow route (CTL-1330)");
+        }
+      } else {
+        processEvent(event);
+      }
     }
   } catch {
     // Log file not yet created or transient read error

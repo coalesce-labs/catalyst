@@ -135,6 +135,17 @@ let _inflight = null; // (c) single-flight latch — a Promise or null
 let _failures = 0; // (d) consecutive failure counter
 let _backoffUntil = 0; // (d) suppress refresh until now() ≥ this
 
+// CTL-1330 Tier 1: liveness-refresh observability sink. The daemon wires this to
+// its pino logger (setLivenessLogger) so each refresh records {outcome,
+// duration_ms, deadline_ms, populated, age_ms} — the data that makes "refresh
+// aborted at 3000ms because the tick blocked the loop 3.2s" queryable. Null by
+// default so CLI/test callers never log. Kept as an injectable module sink (not a
+// config.mjs import) to keep this leaf module dependency-free and unit-testable.
+let _livenessLogger = null;
+export function setLivenessLogger(fn) {
+  _livenessLogger = typeof fn === "function" ? fn : null;
+}
+
 // backoffWindowMs — 0 below the failure threshold (retry every stale read), then
 // exponential (base × 2^over) capped at LIVENESS_BACKOFF_CAP_MS.
 function backoffWindowMs(failures) {
@@ -193,6 +204,8 @@ export function refreshAgents({
   const controller = new AbortController();
   let timer = null;
   let settled = false; // (b) set the instant the read resolves/rejects
+  const startMs = now(); // CTL-1330: refresh wall-clock start
+  let outcome = "resolved"; // CTL-1330: flipped to timeout/error on the failure paths
   const run = (async () => {
     try {
       // (a) async read, bound to the abort signal for (b). `.child` (when the
@@ -219,6 +232,7 @@ export function refreshAgents({
             if (settled) return; // read already completed — honor it
             const child = readP.child;
             if (!child || (child.exitCode === null && child.signalCode === null)) {
+              outcome = "timeout"; // CTL-1330: deadline aborted a still-running child
               controller.abort();
               reject(new Error("claude agents --json timed out"));
             }
@@ -234,12 +248,30 @@ export function refreshAgents({
       _backoffUntil = 0;
       return parsed;
     } catch {
+      if (outcome !== "timeout") outcome = "error"; // (CTL-1330) read/parse failure vs deadline
       _failures += 1; // (d) arm/extend backoff
       _backoffUntil = now() + backoffWindowMs(_failures);
       return _asyncSnap.agents ?? []; // serve last-good (or [] cold)
     } finally {
       if (timer !== null) clearTimer(timer);
       _inflight = null; // (c) release the latch
+      // CTL-1330 Tier 1: liveness-refresh observability. The wedge signature is
+      // outcome:"timeout" with duration_ms≈deadline_ms while a synchronous tick
+      // blocks the loop. Best-effort — a throwing sink must never break refresh.
+      if (_livenessLogger) {
+        try {
+          const populated = _asyncSnap.agents !== null;
+          _livenessLogger({
+            outcome,
+            duration_ms: now() - startMs,
+            deadline_ms: timeoutMs,
+            populated,
+            age_ms: populated ? now() - _asyncSnap.ts : null,
+          });
+        } catch {
+          /* observability must never throw out of the refresh */
+        }
+      }
     }
   })();
   _inflight = run;
