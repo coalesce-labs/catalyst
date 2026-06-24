@@ -28,7 +28,14 @@
 //   as unstructured records — never dropped.
 //
 // MACHINE + NODE TAGGING  (load-bearing — see the README "Node name" section)
-//   host.name           = constants.hostname (the OS hostname — the MACHINE)
+//   host.name           = constants.hostname's FIRST DNS LABEL (the OS hostname's
+//                         canonical SHORT form, `mini` not `mini.rozich` — the
+//                         MACHINE). constants.hostname is the FQDN on macOS, so we
+//                         take string.split(constants.hostname, ".")[0]. This is the
+//                         SAME normalized short host the metrics + canonical-events
+//                         paths emit (CTL-1252 first-DNS-label collapse), so daemon
+//                         `.log` records JOIN with metrics/events on host.name
+//                         instead of splitting FQDN vs short (CTL-1334).
 //   catalyst.node.name  = the stable Catalyst NODE name, from CATALYST_HOST_NAME
 //   The launcher (sibling ticket) MUST export CATALYST_HOST_NAME resolved the
 //   SAME way as getHostName() in execution-core/config.mjs:
@@ -37,8 +44,8 @@
 //         -> os.hostname() first DNS label
 //   The node name is STABLE and is NEVER derived from the Tailscale device name
 //   (RyansMini250233 != mini). If CATALYST_HOST_NAME is unset, this config
-//   falls back to constants.hostname so records are still tagged (the launcher
-//   is responsible for providing the correct stable value).
+//   falls back to constants.hostname's first DNS label so records are still tagged
+//   (the launcher is responsible for providing the correct stable value).
 //
 // SEMCONV MAPPING  (OTel logs data model)
 //   pino numeric level -> severityNumber / severityText
@@ -95,7 +102,7 @@ otelcol.processor.batch "catalyst" {
 // (below) lift pino fields into log-record attributes (level, name); this OTTL
 // transform turns them into the proper OTel semconv shape:
 //   * numeric pino level -> severity_number + severity_text
-//   * host.name resource attribute          = OS hostname (the MACHINE)
+//   * host.name resource attribute          = OS hostname's first DNS label (short, the MACHINE)
 //   * catalyst.node.name resource attribute = stable Catalyst node name (the NODE)
 //   * service.name resource attribute       = catalyst.<daemon>, promoted from the
 //     per-file service_name label (the loki->otel receiver carries it as a log
@@ -132,19 +139,26 @@ otelcol.processor.transform "catalyst" {
 	}
 
 	// --- per-resource: machine + node identity --------------------------------
-	// host.name          = the OS hostname (constants.hostname) — the MACHINE.
+	// host.name          = the OS hostname's FIRST DNS LABEL — the MACHINE in its
+	//   canonical SHORT form (`mini`, not `mini.rozich`). constants.hostname is the
+	//   FQDN on macOS, so we take string.split(...)[0] to strip the domain. This
+	//   matches the normalized short host the metrics + canonical-events paths emit
+	//   (the CTL-1252 first-DNS-label collapse), so daemon `.log` records JOIN with
+	//   metrics/events on host.name instead of splitting FQDN vs short (CTL-1334).
+	//   string.split always returns a non-empty list — a bare hostname with no "."
+	//   yields [hostname], so [0] is a safe fallback for non-FQDN hosts.
 	// catalyst.node.name = the stable Catalyst NODE name (custom + namespaced;
 	//   host.* is the OTel registry machine namespace, so the cluster node uses a
 	//   catalyst.* attribute). Resolved by the launcher exactly like getHostName(),
 	//   and matches the event path so logs + events query by the same node tag.
-	// Falls back to the OS hostname so records are always node-tagged even if the
-	// env var is missing. Spliced into the OTTL strings via River concatenation
-	// (OTTL itself cannot read River symbols).
+	// Falls back to the OS hostname's first DNS label so records are always
+	// node-tagged even if the env var is missing. Spliced into the OTTL strings via
+	// River concatenation (OTTL itself cannot read River symbols).
 	log_statements {
 		context    = "resource"
 		statements = [
-			`set(resource.attributes["host.name"], "` + constants.hostname + `")`,
-			`set(resource.attributes["catalyst.node.name"], "` + coalesce(sys.env("CATALYST_HOST_NAME"), constants.hostname) + `")`,
+			`set(resource.attributes["host.name"], "` + string.split(constants.hostname, ".")[0] + `")`,
+			`set(resource.attributes["catalyst.node.name"], "` + coalesce(sys.env("CATALYST_HOST_NAME"), string.split(constants.hostname, ".")[0]) + `")`,
 		]
 	}
 
