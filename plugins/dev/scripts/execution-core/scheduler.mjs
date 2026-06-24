@@ -2244,6 +2244,47 @@ function defaultPreflightExec(cmd, args) {
 // worker runs after monitor-deploy completes and performs the evidence-gated
 // teardown as part of the normal phase-agent pipeline.
 
+// CTL-1329: fence-suppress cooldown. The terminal sweep revisits every started
+// worker dir each tick. A stale-fenced dir (claimed generation missing, or no longer
+// current on a multi-host cluster) has its needs-human write suppressed every tick,
+// but the cheap-first terminal probe (a Linear `issues read`) and fenceGuard (a
+// fence-check subprocess) re-run every tick regardless — so the dir burns Linear
+// quota ~2x/sec forever (the 2026-06-23 incident: leftover ADV dirs drained the OAuth
+// bucket → CTL-679 breaker → frozen dispatch). After a suppression we stamp this
+// per-dir cooldown so the probe+write block is skipped for a window. The marker lives
+// in the worker dir (reaped with it), mirroring .terminal-done.applied.
+const FENCE_SUPPRESS_COOLDOWN_MS = (() => {
+  const v = Number(process.env.CATALYST_FENCE_SUPPRESS_COOLDOWN_MS);
+  return Number.isFinite(v) && v > 0 ? v : 15 * 60_000;
+})();
+
+function fenceSuppressMarkerPath(orchDir, ticket) {
+  return join(orchDir, "workers", ticket, ".fence-suppressed");
+}
+
+// stampFenceSuppress — record that we suppressed a fence-guarded write for this dir.
+// Best-effort: a failed write just means we re-probe next tick (no worse than before).
+function stampFenceSuppress(orchDir, ticket, nowMs) {
+  try {
+    writeFileSync(fenceSuppressMarkerPath(orchDir, ticket), JSON.stringify({ ts: nowMs }));
+  } catch {
+    /* best-effort — re-probe next tick */
+  }
+}
+
+// isFenceSuppressFresh — true when a suppression was stamped within the cooldown
+// window, so the caller should skip this dir's probe+write this tick. A missing or
+// unparseable marker, or an expired one, returns false (re-probe), so a fence that
+// becomes current again self-heals after at most one cooldown window.
+function isFenceSuppressFresh(orchDir, ticket, nowMs) {
+  try {
+    const { ts } = JSON.parse(readFileSync(fenceSuppressMarkerPath(orchDir, ticket), "utf8"));
+    return Number.isFinite(ts) && nowMs - ts < FENCE_SUPPRESS_COOLDOWN_MS;
+  } catch {
+    return false;
+  }
+}
+
 // terminalDoneOnce — write the terminal `Done` Linear state for a ticket at
 // most once for the run's lifetime (CTL-597). The terminal sweep revisits every
 // started worker dir each tick, and applyTerminalDone → linear-transition.sh
@@ -5123,44 +5164,64 @@ export function schedulerTick(
     // above; never (re)apply for a genuinely-shipped ticket (the Done false positive).
     const pipelineDone = signals[TERMINAL_PHASE] === "done";
     if ((anyStalled || anyFailed) && !pipelineDone) {
-      // CTL-1242: a merged/terminal-Linear ticket that skipped teardown must NOT be
-      // re-flagged needs-human. Cheap-first terminal probe (cached Linear read, then
-      // optional gh PR view) runs ONLY on this narrow stalled/failed-not-done set, so
-      // the steady-state-zero-writes invariant holds.
-      const term = isTicketTerminalOrMerged({
-        ticket,
-        signal: signalByTicket.get(ticket),
-        fetchState: (id, o = {}) => fetchTicketState(id, { ...o, cache, gateway }),
-        cache,
-        prAdapter,
-      });
-      if (term.terminal) {
-        // Terminal/merged but teardown never ran → clear the marker+label instead of
-        // re-applying. Marker-guarded so a no-marker terminal ticket fires zero API calls.
-        const base = join(orchDir, "workers", ticket, ".linear-label-needs-human");
-        if (existsSync(`${base}.applied`) || existsSync(`${base}.skipped`)) {
-          clearStalledLabel(orchDir, ticket, "needs-human", retractionWriteStatus);
-        }
-        // CTL-1242 (corrected scope): also forget the host-local recovery-intent
-        // latch so a finished ticket's escalated/cooldown ledger entry doesn't
-        // linger (hygiene — the recovery router already drops terminal tickets).
-        recoveryForgetIntent(ticket, { orchDir });
-      } else {
-        // Non-terminal stalled/failed ticket → apply the belief-aware needs-human
-        // label (CTL-1241: skipped when the belief engine owns the reclaim).
-        if (fenceGuard({ ticket, orchDir, multiHost })) {
-          labelNeedsHumanUnlessBeliefOwner(orchDir, ticket, writeStatus, { env, site: "terminal-sweep", log });
-        } else {
-          log.warn(
-            { ticket },
-            "ctl-863: stale fence — suppressing labelOnce(needs-human/failed-or-stalled) write (zombie guard)"
-          );
-        }
-        // CTL-868 route (B): emit a canonical orphan-detected event (once) so a
-        // non-terminal stalled/failed-no-recovery ticket is visible on the dashboard
-        // (runs regardless of fence, matching main; the terminal branch above is
-        // excluded so a finished ticket is never re-surfaced as an orphan).
+      // CTL-1329: a stale-fenced worker dir (its claimed generation is missing or no
+      // longer current on a multi-host cluster) re-runs this whole block every tick —
+      // the cheap-first terminal probe is a Linear `issues read`, and fenceGuard below
+      // spawns a fence-check — yet the needs-human write is always suppressed, so the
+      // work is pure waste. In the 2026-06-23 incident five leftover ADV dirs looped
+      // ~2x/sec, draining the daemon's OAuth bucket until the CTL-679 breaker froze
+      // dispatch fleet-wide. After a fence-suppression we stamp a cooldown and skip the
+      // probe+write block for a window, bounding the burn to once-per-cooldown. The
+      // fence itself is still checked at the original site (immediately before the
+      // write, below) — NOT reordered — so a takeover mid-probe is still caught and no
+      // fence-check runs before we've proven a write is needed.
+      if (isFenceSuppressFresh(orchDir, ticket, now())) {
+        // Still surface the orphan once for the dashboard (the probe/write is what we
+        // skip, not the visibility signal).
         emitOrphanDetectedOnce(orchDir, ticket, signals, appendOrphanDetectedEvent);
+      } else {
+        // CTL-1242: a merged/terminal-Linear ticket that skipped teardown must NOT be
+        // re-flagged needs-human. Cheap-first terminal probe (cached Linear read, then
+        // optional gh PR view) runs ONLY on this narrow stalled/failed-not-done set, so
+        // the steady-state-zero-writes invariant holds.
+        const term = isTicketTerminalOrMerged({
+          ticket,
+          signal: signalByTicket.get(ticket),
+          fetchState: (id, o = {}) => fetchTicketState(id, { ...o, cache, gateway }),
+          cache,
+          prAdapter,
+        });
+        if (term.terminal) {
+          // Terminal/merged but teardown never ran → clear the marker+label instead of
+          // re-applying. Marker-guarded so a no-marker terminal ticket fires zero API calls.
+          const base = join(orchDir, "workers", ticket, ".linear-label-needs-human");
+          if (existsSync(`${base}.applied`) || existsSync(`${base}.skipped`)) {
+            clearStalledLabel(orchDir, ticket, "needs-human", retractionWriteStatus);
+          }
+          // CTL-1242 (corrected scope): also forget the host-local recovery-intent
+          // latch so a finished ticket's escalated/cooldown ledger entry doesn't
+          // linger (hygiene — the recovery router already drops terminal tickets).
+          recoveryForgetIntent(ticket, { orchDir });
+        } else {
+          // Non-terminal stalled/failed ticket → apply the belief-aware needs-human
+          // label (CTL-1241: skipped when the belief engine owns the reclaim).
+          if (fenceGuard({ ticket, orchDir, multiHost })) {
+            labelNeedsHumanUnlessBeliefOwner(orchDir, ticket, writeStatus, { env, site: "terminal-sweep", log });
+          } else {
+            log.warn(
+              { ticket },
+              "ctl-863: stale fence — suppressing labelOnce(needs-human/failed-or-stalled) write (zombie guard)"
+            );
+            // CTL-1329: arm the cooldown so the next ticks skip this dir's probe+fence
+            // instead of re-burning Linear quota every tick until the dir is reaped.
+            stampFenceSuppress(orchDir, ticket, now());
+          }
+          // CTL-868 route (B): emit a canonical orphan-detected event (once) so a
+          // non-terminal stalled/failed-no-recovery ticket is visible on the dashboard
+          // (runs regardless of fence, matching main; the terminal branch above is
+          // excluded so a finished ticket is never re-surfaced as an orphan).
+          emitOrphanDetectedOnce(orchDir, ticket, signals, appendOrphanDetectedEvent);
+        }
       }
     } else {
       // No failed/stalled phase (or pipeline done) → clear the ratchet if the marker exists.

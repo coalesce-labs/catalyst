@@ -229,3 +229,90 @@ describe("defaultPostReclaimMirror fence guard (site 9, CTL-863)", () => {
     expect(posted).toBe(false);
   });
 });
+
+// ── CTL-1329: stale-fenced stalled dir cooldown-skips the terminal probe ────────
+//
+// Regression guard for the 2026-06-23 quota-exhaustion incident. A stalled (non-
+// terminal) worker dir whose fence fails on a multi-host cluster has its needs-human
+// write suppressed — but the per-tick isTicketTerminalOrMerged probe (a Linear
+// `issues read` via fetchTicketState → cache.get) and fenceGuard re-run every tick,
+// burning quota until the breaker freezes dispatch. After the first suppression we
+// stamp a cooldown so subsequent ticks skip the probe+write entirely. The fence is
+// still checked at the write site (not reordered), so a mid-probe takeover is caught.
+// Single-host never suppresses, so it keeps probing — no regression.
+
+describe("schedulerTick terminal probe fence guard (CTL-1329)", () => {
+  let orchDir;
+  let catalystDir;
+  let prevCatalystDir;
+
+  beforeEach(() => {
+    orchDir = mkdtempSync(join(tmpdir(), "ctl1329-"));
+    prevCatalystDir = process.env.CATALYST_DIR;
+    catalystDir = mkdtempSync(join(tmpdir(), "ctl1329-cat-"));
+    process.env.CATALYST_DIR = catalystDir;
+  });
+  afterEach(() => {
+    rmSync(orchDir, { recursive: true, force: true });
+    rmSync(catalystDir, { recursive: true, force: true });
+    if (prevCatalystDir === undefined) delete process.env.CATALYST_DIR;
+    else process.env.CATALYST_DIR = prevCatalystDir;
+  });
+
+  // A started, stalled (non-terminal), generation-less worker dir — the orphan shape.
+  function writeStalled(ticket) {
+    const dir = join(orchDir, "workers", ticket);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "phase-triage.json"),
+      JSON.stringify({ ticket, phase: "triage", status: "done" }));
+    writeFileSync(join(dir, "phase-implement.json"),
+      JSON.stringify({ ticket, phase: "implement", status: "stalled" }));
+  }
+
+  // Run the tick with a spy cache (records the probe's fetchTicketState→cache.get)
+  // and a spy orphan-event sink. The cache returns a non-terminal state so the
+  // probe — when it DOES run — completes without falling through to a live exec.
+  function runTick(hosts) {
+    const cacheGets = [];
+    const orphanEvents = [];
+    const cache = {
+      get: (id) => { cacheGets.push(id); return "Implement"; },
+      set: () => {},
+      stats: () => ({ hits: 0, misses: 0, hitRate: 0 }),
+    };
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: () => ({ code: 0, stdout: "" }),
+      writeStatus: {
+        applyTerminalDone: () => ({ applied: true }),
+        applyPhaseStatus: () => {},
+        applyLabel: () => ({ applied: true }),
+      },
+      liveBackgroundCount: () => 0,
+      teardownWorktree: () => true,
+      cache,
+      appendOrphanDetectedEvent: (e) => { orphanEvents.push(e); return true; },
+      hosts,
+    });
+    return { cacheGets, orphanEvents };
+  }
+
+  test("multi-host + stale fence: probe runs once, then cooldown-skips later ticks", () => {
+    writeStalled("CTL-Z");
+    // Tick 1: probe runs (fence checked at the write site → fails → suppress + stamp).
+    const t1 = runTick(["host-A", "host-B"]);
+    expect(t1.cacheGets).toContain("CTL-Z");
+    expect(t1.orphanEvents.some((e) => e.ticket === "CTL-Z")).toBe(true);
+    // Tick 2: cooldown is fresh → the probe (and fenceGuard) are skipped entirely.
+    const t2 = runTick(["host-A", "host-B"]);
+    expect(t2.cacheGets).not.toContain("CTL-Z");
+  });
+
+  test("single-host: never suppresses, so it keeps probing every tick (no regression)", () => {
+    writeStalled("CTL-Z");
+    const t1 = runTick(["single-host"]);
+    const t2 = runTick(["single-host"]);
+    expect(t1.cacheGets).toContain("CTL-Z");
+    expect(t2.cacheGets).toContain("CTL-Z");
+  });
+});
