@@ -45,8 +45,8 @@
 //       30 = INFO  / 9      40 = WARN  / 13
 //       50 = ERROR / 17     60 = FATAL / 21
 //   pino time(ms)      -> log record timestamp (Alloy converts ms -> nanos)
-//   pino msg           -> log record body
-//   remaining context  -> log-record attributes
+//   full pino JSON line-> log record body (CTL-1332: kept whole so every field —
+//                         msg + all context — is queryable via `| json`)
 //   pino name          -> resource service.name as catalyst.<name>
 //
 // OVERRIDABLE ENV (all optional; safe defaults below)
@@ -197,13 +197,26 @@ loki.source.file "otel_forward" {
 }
 
 // pino-JSON processing, shared by the three structured daemon logs.
-//   * stage.json              — lift level/time/name/msg out of the JSON line
+//   * stage.json              — lift level/time/name out of the JSON line (drives
+//                               severity + service mapping + the record timestamp)
 //   * stage.timestamp         — pino time is Unix MILLISECONDS -> record timestamp
 //   * stage.structured_metadata — keep level + name as attributes (the transform
 //                               reads attributes["level"] to derive severity)
-//   * stage.output            — set the log body to msg (the human-readable text)
+//   (NO stage.output)         — the body stays the FULL original pino JSON line so
+//                               downstream `| json` can parse EVERY field.
 // service_name comes from the source target label above and is preserved, so the
 // otel bridge maps it to the service.name resource attribute (catalyst.<name>).
+//
+// CTL-1332: the body is deliberately the whole pino JSON line, NOT just `msg`. A
+// prior `stage.output { source = "msg" }` discarded every field except msg on-host
+// before OTLP export — so CTL-1330 Tier-1 fields (total_ms, pass_durations,
+// slowest_pass, eligible_count, outcome, event_loop_*…) never reached Loki and the
+// logs→metrics connectors had nothing to read. Keeping the full JSON body makes all
+// fields queryable via `| json` (e.g. `{service_name="catalyst.execution-core"} |
+// json | total_ms > 3000`) for every daemon log, with zero per-field config.
+// Severity/service mapping is unaffected (they read the level/service_name
+// attributes, not the body); `|= "..."` substring grep still matches text inside the
+// JSON body; and msg is recoverable with `| json | line_format "{{.msg}}"`.
 loki.process "pino" {
 	forward_to = [otelcol.receiver.loki.catalyst.receiver]
 
@@ -212,7 +225,6 @@ loki.process "pino" {
 			"level" = "level",
 			"time"  = "time",
 			"name"  = "name",
-			"msg"   = "msg",
 		}
 	}
 
@@ -222,18 +234,13 @@ loki.process "pino" {
 	}
 
 	// Keep the pino level + name as attributes (level drives severity; name is the
-	// context that informed service.name). The whole original line is preserved as
-	// the body until stage.output overrides it with msg below.
+	// context that informed service.name). With no stage.output below, the body
+	// remains the full original pino JSON line.
 	stage.structured_metadata {
 		values = {
 			"level" = "level",
 			"name"  = "name",
 		}
-	}
-
-	// Body of the OTel log record = the pino msg field.
-	stage.output {
-		source = "msg"
 	}
 }
 

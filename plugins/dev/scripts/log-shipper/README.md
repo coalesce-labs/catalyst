@@ -45,7 +45,7 @@ output and is **not** JSON — it ships best-effort as unstructured records and 
 loki.source.file (per file, tags service_name)
         │
         ├── pino logs ──▶ loki.process "pino"  (stage.json → stage.timestamp →
-        │                                        stage.structured_metadata → stage.output=msg)
+        │                                        stage.structured_metadata; body = full JSON line, CTL-1332)
         │
         └── monitor.log ▶ loki.process "plain" (passthrough, body = whole line)
                                    │
@@ -69,8 +69,8 @@ The pino fields are mapped to the OTel logs data model:
 | --------------- | --------------------------------------------- |
 | `level` (30/40/50/60) | `severityNumber` / `severityText` (see below) |
 | `time` (Unix ms)| log record timestamp (Alloy converts ms → ns) |
-| `msg`           | log record **body**                           |
-| other context   | log-record **attributes**                     |
+| full JSON line  | log record **body** (CTL-1332: kept whole so every field — `msg` + all context — is queryable via `\| json`) |
+| `level`, `name` | log-record **attributes** (drive severity + service.name) |
 | `name`          | resource **service.name** as `catalyst.<name>`|
 
 Severity:
@@ -192,7 +192,8 @@ live hosts by this ticket.
    - the correct `host.name` (OS hostname) and `catalyst.host.name` (stable node
      name, e.g. `mini` — **not** `RyansMini250233`),
    - `severityText`/`severityNumber` derived from the pino level,
-   - the pino `msg` as the log body.
+   - the full pino JSON line as the log body — confirm field extraction with
+     `{service_name="catalyst.execution-core"} | json | total_ms > 1000` (CTL-1332).
 
 4. Spot-check `monitor.log`'s plain-text lines arrive under
    `{service_name="catalyst.monitor"}` (unstructured, body = the raw line).
