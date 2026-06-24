@@ -230,15 +230,16 @@ describe("defaultPostReclaimMirror fence guard (site 9, CTL-863)", () => {
   });
 });
 
-// ── CTL-1329: stale-fenced stalled dir skips the terminal Linear probe ──────────
+// ── CTL-1329: stale-fenced stalled dir cooldown-skips the terminal probe ────────
 //
 // Regression guard for the 2026-06-23 quota-exhaustion incident. A stalled (non-
-// terminal) worker dir with no generation fails the fence on a multi-host cluster.
-// The needs-human label write is suppressed either way, so the per-tick
-// isTicketTerminalOrMerged probe (a Linear `issues read` via fetchTicketState →
-// cache.get) is pure quota burn and MUST be skipped. The orphan-detected event is
-// still emitted for dashboard visibility. Single-host (fence always passes) still
-// probes — no regression.
+// terminal) worker dir whose fence fails on a multi-host cluster has its needs-human
+// write suppressed — but the per-tick isTicketTerminalOrMerged probe (a Linear
+// `issues read` via fetchTicketState → cache.get) and fenceGuard re-run every tick,
+// burning quota until the breaker freezes dispatch. After the first suppression we
+// stamp a cooldown so subsequent ticks skip the probe+write entirely. The fence is
+// still checked at the write site (not reordered), so a mid-probe takeover is caught.
+// Single-host never suppresses, so it keeps probing — no regression.
 
 describe("schedulerTick terminal probe fence guard (CTL-1329)", () => {
   let orchDir;
@@ -296,18 +297,22 @@ describe("schedulerTick terminal probe fence guard (CTL-1329)", () => {
     return { cacheGets, orphanEvents };
   }
 
-  test("multi-host + stale fence: terminal probe is skipped, orphan still surfaced", () => {
+  test("multi-host + stale fence: probe runs once, then cooldown-skips later ticks", () => {
     writeStalled("CTL-Z");
-    const { cacheGets, orphanEvents } = runTick(["host-A", "host-B"]);
-    // The probe (isTicketTerminalOrMerged → fetchTicketState → cache.get) never ran.
-    expect(cacheGets).not.toContain("CTL-Z");
-    // But the orphan is still emitted once for the dashboard.
-    expect(orphanEvents.some((e) => e.ticket === "CTL-Z")).toBe(true);
+    // Tick 1: probe runs (fence checked at the write site → fails → suppress + stamp).
+    const t1 = runTick(["host-A", "host-B"]);
+    expect(t1.cacheGets).toContain("CTL-Z");
+    expect(t1.orphanEvents.some((e) => e.ticket === "CTL-Z")).toBe(true);
+    // Tick 2: cooldown is fresh → the probe (and fenceGuard) are skipped entirely.
+    const t2 = runTick(["host-A", "host-B"]);
+    expect(t2.cacheGets).not.toContain("CTL-Z");
   });
 
-  test("single-host: terminal probe still runs (no regression)", () => {
+  test("single-host: never suppresses, so it keeps probing every tick (no regression)", () => {
     writeStalled("CTL-Z");
-    const { cacheGets } = runTick(["single-host"]);
-    expect(cacheGets).toContain("CTL-Z");
+    const t1 = runTick(["single-host"]);
+    const t2 = runTick(["single-host"]);
+    expect(t1.cacheGets).toContain("CTL-Z");
+    expect(t2.cacheGets).toContain("CTL-Z");
   });
 });
