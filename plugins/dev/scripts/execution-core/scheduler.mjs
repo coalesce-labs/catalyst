@@ -5369,6 +5369,10 @@ export function schedulerTick(
         slowest_pass,
         slowest_pass_ms,
         free_slots: freeSlots,
+        // CTL-1330: eligible_count lets the highest-severity alert require
+        // "new-work held WITH work waiting" (held + eligible_count>0) — the exact
+        // condition that masked the week-long wedge when the board was drained.
+        eligible_count: eligible.length,
         liveness_fresh: livenessFresh,
         beliefs_shadow: process.env.CATALYST_BELIEFS_SHADOW === "1",
       },
