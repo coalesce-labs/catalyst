@@ -32,15 +32,22 @@ export function tracingEnabled(env = process.env) {
   return env.CATALYST_TRACING === "on";
 }
 
-// resolveNodeName — match getHostName() in config.mjs so spans tag the SAME stable node
-// name as the logs (CATALYST_HOST_NAME, else the OS hostname's first DNS label).
-function resolveNodeName(env) {
-  if (env.CATALYST_HOST_NAME) return env.CATALYST_HOST_NAME;
+// shortHostName — the OS hostname's first DNS label. CTL data-quality finding: the
+// daemon .log path emits FQDN host.name (mini-2.rozich) while metrics/canonical-events use
+// the SHORT form (mini-2, the CTL-1252 collapse), so logs↔metrics↔traces won't join on host
+// unless every signal uses the SAME canonical short form. Spans use short to join cleanly.
+function shortHostName() {
   try {
     return osHostname().split(".")[0];
   } catch {
     return "unknown";
   }
+}
+
+// resolveNodeName — match getHostName() in config.mjs so spans tag the SAME stable node
+// name as the logs (CATALYST_HOST_NAME, else the short OS hostname).
+function resolveNodeName(env) {
+  return env.CATALYST_HOST_NAME || shortHostName();
 }
 
 // initTracing — construct the provider + OTLP/HTTP exporter + BatchSpanProcessor ONCE.
@@ -52,7 +59,7 @@ export async function initTracing({ serviceName, env = process.env } = {}) {
     const { BasicTracerProvider, BatchSpanProcessor } = await import("@opentelemetry/sdk-trace-base");
     const { OTLPTraceExporter } = await import("@opentelemetry/exporter-trace-otlp-http");
     const { resourceFromAttributes } = await import("@opentelemetry/resources");
-    const { ATTR_SERVICE_NAME } = await import("@opentelemetry/semantic-conventions");
+    const { ATTR_SERVICE_NAME, ATTR_SERVICE_NAMESPACE } = await import("@opentelemetry/semantic-conventions");
 
     // Same collector otel-forward uses. OTEL_EXPORTER_OTLP_ENDPOINT is the base (otel-forward
     // maps :4317->:4318 for HTTP); we append /v1/traces. Traces to this endpoint route to
@@ -65,7 +72,10 @@ export async function initTracing({ serviceName, env = process.env } = {}) {
     _provider = new BasicTracerProvider({
       resource: resourceFromAttributes({
         [ATTR_SERVICE_NAME]: serviceName,
-        "host.name": osHostname(),
+        // service.namespace + the SHORT host.name are the canonical cross-signal join keys
+        // (CTL data-quality finding) — traces previously carried neither.
+        [ATTR_SERVICE_NAMESPACE]: "catalyst",
+        "host.name": shortHostName(),
         "catalyst.node.name": resolveNodeName(env),
       }),
       spanProcessors: [new BatchSpanProcessor(exporter)],
