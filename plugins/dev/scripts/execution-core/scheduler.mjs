@@ -5491,18 +5491,32 @@ let _eventLoopMonitor = null;
 // nanoseconds, so convert to ms for parity with the tick-timing line.
 function emitEventLoopDelay() {
   const h = _eventLoopMonitor;
-  if (!h || h.count === 0) return;
-  const toMs = (ns) => Math.round((ns / 1e6) * 10) / 10;
-  log.info(
-    {
-      event_loop_p50_ms: toMs(h.percentile(50)),
-      event_loop_p99_ms: toMs(h.percentile(99)),
-      event_loop_max_ms: toMs(h.max),
-      samples: h.count,
-    },
-    "scheduler: event-loop delay (CTL-1330)"
-  );
-  h.reset();
+  if (!h) return;
+  try {
+    if (h.count === 0) return;
+    const toMs = (ns) => Math.round((ns / 1e6) * 10) / 10;
+    log.info(
+      {
+        event_loop_p50_ms: toMs(h.percentile(50)),
+        event_loop_p99_ms: toMs(h.percentile(99)),
+        event_loop_max_ms: toMs(h.max),
+        samples: h.count,
+      },
+      "scheduler: event-loop delay (CTL-1330)"
+    );
+    h.reset();
+  } catch (err) {
+    // A runtime that constructed the monitor but can't read it (partial
+    // perf_hooks support) — disable to avoid per-tick noise; tick-timing +
+    // liveness lines are unaffected.
+    log.warn({ err: err?.message }, "scheduler: event-loop delay read failed — disabling (CTL-1330)");
+    try {
+      h.disable?.();
+    } catch {
+      /* best-effort */
+    }
+    _eventLoopMonitor = null;
+  }
 }
 
 // CTL-702: observed yield tombstones for the lifetime of this daemon process.
@@ -6191,16 +6205,30 @@ export function startScheduler({
     log.info({ err: err.message }, "scheduler: preflight wrapper threw — swallowed");
   }
 
-  // CTL-1330 Tier 1: enable the process-wide event-loop delay monitor (ON by
-  // default). resolution:20ms catches a tick blocking the loop past the 3s
-  // liveness deadline with no measurable overhead; emitEventLoopDelay drains it
-  // once per tick.
-  if (tickTimingEnabled() && !_eventLoopMonitor) {
-    _eventLoopMonitor = monitorEventLoopDelay({ resolution: 20 });
-    _eventLoopMonitor.enable();
-    // CTL-1330: route each async liveness refresh to the daemon's pino logger so
-    // an aborted-at-deadline refresh during a blocked tick is queryable in Loki.
+  // CTL-1330 Tier 1 wiring (ON by default).
+  if (tickTimingEnabled()) {
+    // Liveness-refresh observability is independent of perf_hooks — wire it
+    // unconditionally so it survives a runtime that lacks monitorEventLoopDelay.
     setLivenessLogger((rec) => log.info(rec, "liveness: refresh (CTL-1330)"));
+    // Process-wide event-loop delay monitor. perf_hooks.monitorEventLoopDelay is
+    // NOT implemented in every runtime — Bun throws "Not implemented" on some
+    // versions, and the daemon runs under Bun (CTL-1330 review, P1). Guard it so
+    // a missing API degrades to "no event-loop-delay line" instead of crashing
+    // the daemon on boot — the tick-timing total_ms already measures the
+    // synchronous event-loop block directly.
+    if (!_eventLoopMonitor) {
+      try {
+        const mon = monitorEventLoopDelay({ resolution: 20 });
+        mon.enable();
+        _eventLoopMonitor = mon;
+      } catch (err) {
+        _eventLoopMonitor = null;
+        log.warn(
+          { err: err?.message },
+          "scheduler: event-loop delay monitor unavailable in this runtime — continuing without it (CTL-1330)"
+        );
+      }
+    }
   }
 
   runTick(); // authoritative initial pass
