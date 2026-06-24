@@ -229,3 +229,85 @@ describe("defaultPostReclaimMirror fence guard (site 9, CTL-863)", () => {
     expect(posted).toBe(false);
   });
 });
+
+// ── CTL-1329: stale-fenced stalled dir skips the terminal Linear probe ──────────
+//
+// Regression guard for the 2026-06-23 quota-exhaustion incident. A stalled (non-
+// terminal) worker dir with no generation fails the fence on a multi-host cluster.
+// The needs-human label write is suppressed either way, so the per-tick
+// isTicketTerminalOrMerged probe (a Linear `issues read` via fetchTicketState →
+// cache.get) is pure quota burn and MUST be skipped. The orphan-detected event is
+// still emitted for dashboard visibility. Single-host (fence always passes) still
+// probes — no regression.
+
+describe("schedulerTick terminal probe fence guard (CTL-1329)", () => {
+  let orchDir;
+  let catalystDir;
+  let prevCatalystDir;
+
+  beforeEach(() => {
+    orchDir = mkdtempSync(join(tmpdir(), "ctl1329-"));
+    prevCatalystDir = process.env.CATALYST_DIR;
+    catalystDir = mkdtempSync(join(tmpdir(), "ctl1329-cat-"));
+    process.env.CATALYST_DIR = catalystDir;
+  });
+  afterEach(() => {
+    rmSync(orchDir, { recursive: true, force: true });
+    rmSync(catalystDir, { recursive: true, force: true });
+    if (prevCatalystDir === undefined) delete process.env.CATALYST_DIR;
+    else process.env.CATALYST_DIR = prevCatalystDir;
+  });
+
+  // A started, stalled (non-terminal), generation-less worker dir — the orphan shape.
+  function writeStalled(ticket) {
+    const dir = join(orchDir, "workers", ticket);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "phase-triage.json"),
+      JSON.stringify({ ticket, phase: "triage", status: "done" }));
+    writeFileSync(join(dir, "phase-implement.json"),
+      JSON.stringify({ ticket, phase: "implement", status: "stalled" }));
+  }
+
+  // Run the tick with a spy cache (records the probe's fetchTicketState→cache.get)
+  // and a spy orphan-event sink. The cache returns a non-terminal state so the
+  // probe — when it DOES run — completes without falling through to a live exec.
+  function runTick(hosts) {
+    const cacheGets = [];
+    const orphanEvents = [];
+    const cache = {
+      get: (id) => { cacheGets.push(id); return "Implement"; },
+      set: () => {},
+      stats: () => ({ hits: 0, misses: 0, hitRate: 0 }),
+    };
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: () => ({ code: 0, stdout: "" }),
+      writeStatus: {
+        applyTerminalDone: () => ({ applied: true }),
+        applyPhaseStatus: () => {},
+        applyLabel: () => ({ applied: true }),
+      },
+      liveBackgroundCount: () => 0,
+      teardownWorktree: () => true,
+      cache,
+      appendOrphanDetectedEvent: (e) => { orphanEvents.push(e); return true; },
+      hosts,
+    });
+    return { cacheGets, orphanEvents };
+  }
+
+  test("multi-host + stale fence: terminal probe is skipped, orphan still surfaced", () => {
+    writeStalled("CTL-Z");
+    const { cacheGets, orphanEvents } = runTick(["host-A", "host-B"]);
+    // The probe (isTicketTerminalOrMerged → fetchTicketState → cache.get) never ran.
+    expect(cacheGets).not.toContain("CTL-Z");
+    // But the orphan is still emitted once for the dashboard.
+    expect(orphanEvents.some((e) => e.ticket === "CTL-Z")).toBe(true);
+  });
+
+  test("single-host: terminal probe still runs (no regression)", () => {
+    writeStalled("CTL-Z");
+    const { cacheGets } = runTick(["single-host"]);
+    expect(cacheGets).toContain("CTL-Z");
+  });
+});

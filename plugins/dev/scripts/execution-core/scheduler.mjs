@@ -5123,44 +5123,56 @@ export function schedulerTick(
     // above; never (re)apply for a genuinely-shipped ticket (the Done false positive).
     const pipelineDone = signals[TERMINAL_PHASE] === "done";
     if ((anyStalled || anyFailed) && !pipelineDone) {
-      // CTL-1242: a merged/terminal-Linear ticket that skipped teardown must NOT be
-      // re-flagged needs-human. Cheap-first terminal probe (cached Linear read, then
-      // optional gh PR view) runs ONLY on this narrow stalled/failed-not-done set, so
-      // the steady-state-zero-writes invariant holds.
-      const term = isTicketTerminalOrMerged({
-        ticket,
-        signal: signalByTicket.get(ticket),
-        fetchState: (id, o = {}) => fetchTicketState(id, { ...o, cache, gateway }),
-        cache,
-        prAdapter,
-      });
-      if (term.terminal) {
-        // Terminal/merged but teardown never ran → clear the marker+label instead of
-        // re-applying. Marker-guarded so a no-marker terminal ticket fires zero API calls.
-        const base = join(orchDir, "workers", ticket, ".linear-label-needs-human");
-        if (existsSync(`${base}.applied`) || existsSync(`${base}.skipped`)) {
-          clearStalledLabel(orchDir, ticket, "needs-human", retractionWriteStatus);
-        }
-        // CTL-1242 (corrected scope): also forget the host-local recovery-intent
-        // latch so a finished ticket's escalated/cooldown ledger entry doesn't
-        // linger (hygiene — the recovery router already drops terminal tickets).
-        recoveryForgetIntent(ticket, { orchDir });
-      } else {
-        // Non-terminal stalled/failed ticket → apply the belief-aware needs-human
-        // label (CTL-1241: skipped when the belief engine owns the reclaim).
-        if (fenceGuard({ ticket, orchDir, multiHost })) {
-          labelNeedsHumanUnlessBeliefOwner(orchDir, ticket, writeStatus, { env, site: "terminal-sweep", log });
-        } else {
-          log.warn(
-            { ticket },
-            "ctl-863: stale fence — suppressing labelOnce(needs-human/failed-or-stalled) write (zombie guard)"
-          );
-        }
-        // CTL-868 route (B): emit a canonical orphan-detected event (once) so a
-        // non-terminal stalled/failed-no-recovery ticket is visible on the dashboard
-        // (runs regardless of fence, matching main; the terminal branch above is
-        // excluded so a finished ticket is never re-surfaced as an orphan).
+      // CTL-1329: consult the fence BEFORE the terminal probe. On a multi-host
+      // cluster a stale-fenced node cannot write the needs-human label either way
+      // (the CTL-863 guard below suppresses it), so running the cheap-first terminal
+      // probe — a per-tick Linear `issues read` via fetchTicketState — is pure quota
+      // burn. The 2026-06-23 incident: leftover orphan worker dirs with a null
+      // generation re-ran this probe ~2×/sec until the daemon's OAuth bucket emptied
+      // and the CTL-679 breaker froze dispatch. The fence is computed ONCE here (a
+      // finite-but-stale generation makes fenceGuard spawn fenceCheckSync — never
+      // call it twice per tick) and reused at the label site below.
+      const fenceOk = fenceGuard({ ticket, orchDir, multiHost });
+      if (!fenceOk) {
+        log.warn(
+          { ticket },
+          "ctl-1329: stale fence — skipping needs-human terminal probe + sweep (zombie quota guard)"
+        );
+        // CTL-868 route (B): still surface the orphan once for the dashboard — the
+        // probe is what we skip, not the visibility signal (matches the else branch
+        // below, which emits regardless of fence).
         emitOrphanDetectedOnce(orchDir, ticket, signals, appendOrphanDetectedEvent);
+      } else {
+        // CTL-1242: a merged/terminal-Linear ticket that skipped teardown must NOT be
+        // re-flagged needs-human. Cheap-first terminal probe (cached Linear read, then
+        // optional gh PR view) runs ONLY on this narrow stalled/failed-not-done set, so
+        // the steady-state-zero-writes invariant holds.
+        const term = isTicketTerminalOrMerged({
+          ticket,
+          signal: signalByTicket.get(ticket),
+          fetchState: (id, o = {}) => fetchTicketState(id, { ...o, cache, gateway }),
+          cache,
+          prAdapter,
+        });
+        if (term.terminal) {
+          // Terminal/merged but teardown never ran → clear the marker+label instead of
+          // re-applying. Marker-guarded so a no-marker terminal ticket fires zero API calls.
+          const base = join(orchDir, "workers", ticket, ".linear-label-needs-human");
+          if (existsSync(`${base}.applied`) || existsSync(`${base}.skipped`)) {
+            clearStalledLabel(orchDir, ticket, "needs-human", retractionWriteStatus);
+          }
+          // CTL-1242 (corrected scope): also forget the host-local recovery-intent
+          // latch so a finished ticket's escalated/cooldown ledger entry doesn't
+          // linger (hygiene — the recovery router already drops terminal tickets).
+          recoveryForgetIntent(ticket, { orchDir });
+        } else {
+          // Non-terminal stalled/failed ticket, fence current → apply the belief-aware
+          // needs-human label (CTL-1241: skipped when the belief engine owns the reclaim).
+          labelNeedsHumanUnlessBeliefOwner(orchDir, ticket, writeStatus, { env, site: "terminal-sweep", log });
+          // CTL-868 route (B): emit a canonical orphan-detected event (once) so a
+          // non-terminal stalled/failed-no-recovery ticket is visible on the dashboard.
+          emitOrphanDetectedOnce(orchDir, ticket, signals, appendOrphanDetectedEvent);
+        }
       }
     } else {
       // No failed/stalled phase (or pipeline done) → clear the ratchet if the marker exists.

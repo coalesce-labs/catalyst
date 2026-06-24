@@ -138,6 +138,8 @@ jobs:
             event-cursor.test.mjs \
             event-scan.test.mjs \
             event-tail.test.mjs \
+            fence-guard.test.mjs \
+            fence-guard-integration.test.mjs \
             fleet-health-event.test.mjs \
             fleet-health-probe.test.mjs \
             gateway-read.test.mjs \
