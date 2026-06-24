@@ -89,7 +89,12 @@ which are exactly 9/13/17/21.)
 
 Every shipped record carries **two** host identities as resource attributes:
 
-- `host.name` — the **OS hostname** (`constants.hostname`).
+- `host.name` — the **OS hostname's first DNS label** (the canonical SHORT form,
+  `mini` not `mini.rozich`). `constants.hostname` is the FQDN on macOS, so the
+  config emits `string.split(constants.hostname, ".")[0]`. This matches the short
+  host the metrics + canonical-events paths emit (CTL-1252 first-DNS-label
+  collapse), so daemon `.log` records join with metrics/events on `host.name`
+  instead of splitting FQDN vs short (CTL-1334).
 - `catalyst.host.name` — the **stable Catalyst node name**.
 
 ### Node name
@@ -105,9 +110,10 @@ Because Alloy/River cannot read the Layer-2 JSON or compute the first-DNS-label
 reduction itself, **the launcher is responsible for resolving the node name and
 exporting it as `CATALYST_HOST_NAME`** before starting Alloy — using the exact
 `getHostName()` precedence above. The config then reads
-`coalesce(sys.env("CATALYST_HOST_NAME"), constants.hostname)`: if the launcher
-provides the env var (the expected path) it is used verbatim; otherwise it falls
-back to the OS hostname so records are still node-tagged.
+`coalesce(sys.env("CATALYST_HOST_NAME"), string.split(constants.hostname, ".")[0])`:
+if the launcher provides the env var (the expected path) it is used verbatim;
+otherwise it falls back to the OS hostname's first DNS label so records are still
+node-tagged with the short form.
 
 > **The node name is NEVER the Tailscale device name.** Tailscale reports e.g.
 > `RyansMini250233`, but the stable Catalyst node name is `mini`. Deriving the
