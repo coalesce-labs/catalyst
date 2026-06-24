@@ -1357,24 +1357,28 @@ describe("phantom worker-dir validity sweep (CTL-671)", () => {
     expect(classifyCalls).toBe(0); // eligible short-circuits before the Linear probe
   });
 
-  test("does NOT quarantine a not-found ticket whose bg job is still alive", () => {
-    writeSignal("CTL-9", "implement", "running");
-    let classifyCalls = 0;
+  // ── CTL-1336: zero-spawn bg-liveness gate. The skip DECISION (fresh+alive / fresh+dead /
+  // cold→fail-open / no-bg) is a pure exported helper `bgLivenessProtects`, unit-tested in
+  // phantom-worker-dir.test.mjs (CI-gated, no harness interference). Here we only pin the
+  // in-tick WIRING: a bare (no-bg) signal must never fetch the snapshot, so an unarmed tick
+  // stays a true no-op (no async `claude agents` warmer kick). Driving the full tick with a
+  // real bg signal is avoided on purpose — a bg+not-found signal also trips the reclaim/revive/
+  // terminal passes, which would mask Pass 0a's decision. ──
+  test("a bare (no-bg) in-flight signal never fetches the agents snapshot — unarmed tick stays a no-op (CTL-1336)", () => {
+    writeSignal("CTL-9", "implement", "running"); // no bg_job_id → bgId null
+    let getAgentsCalls = 0;
     schedulerTick(orchDir, {
       readEligible: () => [],
       dispatch: () => ({ code: 0 }),
       liveBackgroundCount: () => 0,
-      classifyResolution: () => {
-        classifyCalls++;
-        return "not-found";
+      getAgents: () => {
+        getAgentsCalls++;
+        return { isFresh: true, agents: [] };
       },
-      isBgJobAlive: () => true, // live worker → never touched
+      classifyResolution: resolveTo("unknown"), // bgId null → proceeds here; unknown → no quarantine
+      isBgJobAlive: () => false,
     });
-    expect(
-      JSON.parse(readFileSync(join(orchDir, "workers", "CTL-9", "phase-implement.json"), "utf8"))
-        .status
-    ).toBe("running");
-    expect(classifyCalls).toBe(0); // bg-liveness short-circuits before the Linear probe
+    expect(getAgentsCalls).toBe(0); // bare tick never fetched the snapshot
   });
 
   test("skips already-terminal signals (idempotent / no rework, never probes Linear)", () => {
