@@ -155,7 +155,7 @@ extract key findings" )
 - Researching best practices from open-source
 - Discovering external documentation
 
-**Tools**: mcp**deepwiki**ask_question, mcp**deepwiki**read_wiki_structure
+**Tools**: mcp**context7**resolve-library-id, mcp**context7**query-docs, WebSearch, WebFetch
 
 **Example invocation:**
 
@@ -397,8 +397,8 @@ Agents specify required tools in frontmatter:
 
 **External:**
 
-- `mcp__deepwiki__ask_question` - Query external repos
-- `mcp__deepwiki__read_wiki_structure` - Read external docs
+- `mcp__context7__query-docs` - Library/framework documentation
+- `WebSearch` / `WebFetch` - General web search and page retrieval
 
 ## Troubleshooting
 

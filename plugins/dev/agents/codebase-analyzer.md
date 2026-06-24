@@ -5,7 +5,7 @@ description:
   detailed information about specific components. As always, the more detailed your request prompt,
   the better! :)
 tools:
-  Read, Grep, Glob, Bash(ls *), mcp__deepwiki__ask_question, mcp__context7__get_library_docs,
+  Read, Grep, Glob, Bash(ls *), mcp__context7__get_library_docs,
   mcp__context7__resolve_library_id
 model: sonnet
 version: 1.0.0
@@ -64,17 +64,10 @@ trace data flow, and explain technical workings with precise file:line reference
 
 If the code uses external libraries or frameworks:
 
-- Use `mcp__deepwiki__ask_question` to understand recommended patterns
-- Example: "How does [library] recommend implementing [feature]?"
+- Use Context7 (`mcp__context7__resolve_library_id` then `mcp__context7__get_library_docs`) to look up the library's recommended patterns
 - Compare local implementation against framework best practices
 - Note any deviations or custom approaches
 - **Important**: Only research external repos, not the local codebase
-
-Example questions for DeepWiki:
-
-- "How does Passport.js recommend implementing authentication strategies?"
-- "What's the standard session management pattern in Express?"
-- "How does React Query recommend handling cache invalidation?"
 
 ### Step 3: Document Key Logic
 

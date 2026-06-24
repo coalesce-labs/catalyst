@@ -44,8 +44,6 @@ Catalyst integrates with your development tools through both **CLI-based** (toke
 
 - **Context7** - Library documentation lookup (MCP, ~2k tokens)
   - `catalyst-dev`: Built-in, always available
-- **DeepWiki** - GitHub repository documentation (MCP, ~1.5k tokens)
-  - `catalyst-dev`: Built-in, always available
 - **Exa** - Web research and external documentation (API)
   - `catalyst-dev`: External research agent
 
@@ -80,7 +78,7 @@ and shared memory systems.
 - Linear integration via Linearis CLI
 - CI/automation commands for non-interactive workflows
 - Handoff system for context persistence
-- ~3.5k context (lightweight MCPs: DeepWiki, Context7)
+- ~3.5k context (lightweight MCP: Context7)
 
 **catalyst-pm** (Optional - Enable for product strategy)
 
@@ -370,7 +368,7 @@ When possible, uses CLIs instead of MCPs for token efficiency:
 
 **MCP Tools** (bundled with plugins):
 
-- Context7 & DeepWiki - Built into `catalyst-dev` (~3.5k tokens)
+- Context7 - Built into `catalyst-dev` (~3.5k tokens)
 - PostHog - Built into `catalyst-analytics` (~40k tokens when enabled)
 - Sentry - Built into `catalyst-debugging` (~20k tokens when enabled)
 

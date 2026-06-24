@@ -19,14 +19,6 @@
         "SENTRY_PROJECT": "${SENTRY_PROJECT}"
       }
     },
-    "deepwiki": {
-      "comment": "GitHub repository research - useful for meta workflows. ~1,885 tokens",
-      "command": "npx",
-      "args": ["-y", "@deekard/deepwiki-mcp"],
-      "env": {
-        "GITHUB_TOKEN": "${GITHUB_TOKEN}"
-      }
-    },
     "context7": {
       "comment": "Library documentation - helpful for learning new libraries. ~1,709 tokens",
       "command": "npx",

@@ -425,9 +425,6 @@ Claude Code provides these tools:
 
 - `WebFetch` - Fetch web content
 - `WebSearch` - Search the web
-- `mcp__deepwiki__ask_question` - Query external repos
-- `mcp__deepwiki__read_wiki_structure` - Get repo structure
-- `mcp__deepwiki__read_wiki_contents` - Read repo docs
 
 ### Linear Integration
 

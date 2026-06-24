@@ -16,8 +16,6 @@ allowed-tools:
   - Glob
   - Task
   - Bash
-  - mcp__deepwiki__ask_question
-  - mcp__deepwiki__read_wiki_structure
 ---
 
 # phase-plan

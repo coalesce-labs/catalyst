@@ -2,7 +2,7 @@
 name: discover-workflows
 description: Research and catalog workflows from external Claude Code repositories
 disable-model-invocation: false
-allowed-tools: mcp__deepwiki__ask_question, mcp__deepwiki__read_wiki_structure, Read, Write
+allowed-tools: Read, Write, Task, TodoWrite, WebSearch, WebFetch
 version: 1.0.0
 ---
 
@@ -67,7 +67,7 @@ Use TodoWrite to track the 3 parallel research tasks.
 Use external-research agent:
 "Research {repo-name}. What commands and agents are available? List all workflows with brief descriptions of what each does."
 
-Tools: mcp__deepwiki__read_wiki_structure, mcp__deepwiki__ask_question
+Tools: WebFetch, WebSearch
 Return: Complete list of all workflows found
 ```
 
@@ -77,7 +77,7 @@ Return: Complete list of all workflows found
 Use external-research agent:
 "Research {repo-name}. What frontmatter format is used for agents and commands? Provide specific examples showing all frontmatter fields used."
 
-Tools: mcp__deepwiki__ask_question
+Tools: WebFetch, WebSearch
 Return: Frontmatter patterns with concrete examples
 ```
 
@@ -87,7 +87,7 @@ Return: Frontmatter patterns with concrete examples
 Use external-research agent:
 "Research {repo-name}. What are the common implementation patterns, structures, and conventions used across workflows? Include naming conventions, file organization, and any templates."
 
-Tools: mcp__deepwiki__ask_question
+Tools: WebFetch, WebSearch
 Return: Patterns, templates, conventions observed
 ```
 
@@ -218,7 +218,6 @@ Save research to `thoughts/shared/workflows/{repo-name}/analysis.md`:
 
 ## References
 
-- DeepWiki searches: [links]
 - Repository: {URL}
 - Analyzed on: {date}
 ````
