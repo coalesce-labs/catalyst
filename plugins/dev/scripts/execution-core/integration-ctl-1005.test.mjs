@@ -10,10 +10,14 @@ import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { existsSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { schedulerTick } from "./scheduler.mjs";
+import { schedulerTick, __resetForTests } from "./scheduler.mjs";
 
 let orchDir;
 beforeEach(() => {
+  // CTL-1324: reset the Pass 0j heavy-census throttle (module-level
+  // _stallJanitorCensusLastRunMs) so each test's first tick runs the J3
+  // stall-clear census instead of inheriting a prior test's throttle stamp.
+  __resetForTests();
   orchDir = mkdtempSync(join(tmpdir(), "ctl1005-int-"));
 });
 afterEach(() => {

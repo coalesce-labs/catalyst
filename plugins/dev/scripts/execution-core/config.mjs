@@ -878,6 +878,16 @@ const STALL_JANITOR_MODES = new Set(["off", "shadow", "enforce"]);
 // an idle background session for the same subject is treated as a ghost (J2). The
 // Gherkin pins this at >=600s; matches the orphan-reaper's 600s timer cadence.
 const STALL_JANITOR_DEFAULT_TERMINAL_IDLE_MS = 600_000;
+// CTL-1324: censusIntervalMs — how often the EXPENSIVE worktree-census halves of
+// the stall-janitor pass (J1 orphan-worktree, J3 stall-clear, J4 terminal-signal
+// GC) may run. Each of those censuses fires a synchronous `git worktree list` per
+// repo + a `git status` per terminal worktree; on a host with many worktrees
+// (mini: 61) that ~50–70s of blocking spawnSync per tick ages the daemon's
+// node.heartbeat past the CTL-731 degraded threshold and HOLDS new-work dispatch.
+// Throttling those censuses to a 15-min cadence (mirrors the Pass 0u unstuck-sweep
+// idiom) keeps the hot path cheap while leaving the cheap, urgent J2 ghost-session
+// kill running every tick. Logic is UNCHANGED — only the census FREQUENCY.
+export const STALL_JANITOR_DEFAULT_CENSUS_INTERVAL_MS = 900_000; // 15 minutes
 
 function readLayer2StallJanitor() {
   try {
@@ -906,7 +916,13 @@ export function readStallJanitorConfig() {
     Number(process.env.EXECUTION_CORE_STALL_JANITOR_TERMINAL_IDLE_MS) ||
     (Number(l2.terminalIdleSeconds) || 0) * 1000 ||
     STALL_JANITOR_DEFAULT_TERMINAL_IDLE_MS;
-  return { mode, terminalIdleMs };
+  // CTL-1324: census throttle interval. env > Layer-2 > default 15 min. Same
+  // precedence shape as terminalIdleMs / the unstuck-sweep interval.
+  const censusIntervalMs =
+    Number(process.env.CATALYST_STALL_JANITOR_INTERVAL_MS) ||
+    (Number(l2.censusIntervalSeconds) || 0) * 1000 ||
+    STALL_JANITOR_DEFAULT_CENSUS_INTERVAL_MS;
+  return { mode, terminalIdleMs, censusIntervalMs };
 }
 
 // --- Unstuck sweep (CTL-1064) ---

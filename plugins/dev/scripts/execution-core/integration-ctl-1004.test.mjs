@@ -7,13 +7,17 @@ import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { mkdtempSync, rmSync, readFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { schedulerTick } from "./scheduler.mjs";
+import { schedulerTick, __resetForTests } from "./scheduler.mjs";
 import { openBeliefsDb } from "./beliefs/schema.mjs";
 
 const NOW = Date.parse("2026-06-11T12:00:00Z");
 
 let orchDir;
 beforeEach(() => {
+  // CTL-1324: reset the Pass 0j heavy-census throttle (module-level
+  // _stallJanitorCensusLastRunMs) so each independent tick runs the J1/J3/J4
+  // worktree censuses instead of inheriting a prior test's throttle stamp.
+  __resetForTests();
   orchDir = mkdtempSync(join(tmpdir(), "ctl1004-int-"));
 });
 afterEach(() => {

@@ -2799,6 +2799,15 @@ export function schedulerTick(
       gcTerminalSignals: _gcTerminalSignals = undefined,
       emit: _janitorEmit = emitReapIntent,
       recordKillIntent: _recordKillIntent = undefined,
+      // CTL-1324: census-throttle seams. The J1/J3/J4 worktree censuses each fire
+      // synchronous per-repo `git worktree list` + per-worktree `git status` probes;
+      // on a many-worktree host that ~50–70s/tick blocks the event loop, ages the
+      // node.heartbeat past the CTL-731 degraded threshold, and HOLDS new-work
+      // dispatch. Throttle ONLY those three (default 15 min) — J2 ghost-session kill
+      // is cheap (warm agents snapshot only) and stays every-tick. `censusIntervalMs`
+      // / `nowMs` are injectable so the regression test drives a deterministic clock.
+      censusIntervalMs: _janitorCensusIntervalMs = undefined,
+      nowMs: _janitorNowMs = undefined,
     } = {},
     // CTL-1064: unstuck-sweep seams (Pass 0u). Mode resolves from
     // readUnstuckSweepConfig() (env > Layer-2 > 'off') unless overridden.
@@ -3363,21 +3372,49 @@ export function schedulerTick(
       (_collectOrphanCandidates || _collectGhostCandidates || _collectStallClearCandidates ||
         _collectTerminalSignalGcCandidates)
     ) {
+      // CTL-1324: throttle the EXPENSIVE worktree censuses (J1 orphan, J3
+      // stall-clear, J4 terminal-signal GC) off the per-tick hot path. Each of
+      // those `collect*` seams fires a synchronous `git worktree list` per repo +
+      // a `git status` per terminal worktree; on a many-worktree host that
+      // ~50–70s of blocking spawnSync per tick ages node.heartbeat past the
+      // CTL-731 degraded threshold and HOLDS new-work dispatch. We run them on a
+      // 15-min cadence instead — when throttled, the three census seams are
+      // replaced with `() => []`, so runStallJanitorPass shells out to NO git.
+      // The CHEAP J2 ghost-session census (warm agents snapshot only) is NOT
+      // throttled: it stays every-tick so urgent stall-recovery is never delayed.
+      // Logic is UNCHANGED — only the FREQUENCY of the heavy censuses. The clock
+      // + lastRun are injectable (CTL-1064 Pass 0u idiom) for a deterministic test.
+      const jCensusIntervalMs = _janitorCensusIntervalMs ?? jcfg.censusIntervalMs;
+      const jNowMs = typeof _janitorNowMs === "function" ? _janitorNowMs() : Date.now();
+      const runHeavyCensus = !isThrottled(
+        _stallJanitorCensusLastRunMs,
+        jCensusIntervalMs,
+        jNowMs,
+      );
+      if (runHeavyCensus) _stallJanitorCensusLastRunMs = jNowMs;
       try {
         const jreport = runStallJanitorPass({
           mode: jMode,
           terminalIdleMs: _janitorTerminalIdleMs ?? jcfg.terminalIdleMs,
-          collectOrphanCandidates: _collectOrphanCandidates ?? (() => []),
+          // CTL-1324: J1 orphan-worktree census — git-heavy → throttled.
+          collectOrphanCandidates: runHeavyCensus
+            ? (_collectOrphanCandidates ?? (() => []))
+            : (() => []),
+          // J2 ghost-session census — cheap (warm agents snapshot only) → every tick.
           collectGhostCandidates: _collectGhostCandidates ?? (() => []),
-          // CTL-1005 J3: stall-clear census + unstick seams.
-          collectStallClearCandidates: _collectStallClearCandidates ?? (() => []),
+          // CTL-1005 J3: stall-clear census (git-heavy) → throttled; unstick seam unchanged.
+          collectStallClearCandidates: runHeavyCensus
+            ? (_collectStallClearCandidates ?? (() => []))
+            : (() => []),
           // Default clear seam: deletes the synthetic stalled signal, clears
           // needs-human (+ marker) + .orphan-detected.applied, writes the
           // .janitor-cleared-<phase>.applied once-marker, and lets the scheduler's
           // normal path re-dispatch. writeStatus carries the removeLabel seam.
           clearStall: _clearStall ?? defaultClearStall(orchDir, writeStatus),
-          // CTL-1242 J4: terminal/merged signal dir GC.
-          collectTerminalSignalGcCandidates: _collectTerminalSignalGcCandidates ?? (() => []),
+          // CTL-1242 J4: terminal/merged signal dir GC census (git-heavy) → throttled.
+          collectTerminalSignalGcCandidates: runHeavyCensus
+            ? (_collectTerminalSignalGcCandidates ?? (() => []))
+            : (() => []),
           gcTerminalSignals: _gcTerminalSignals ?? (() => false),
           emit: _janitorEmit,
           // Default kill seam: BOTH issues killBgJob AND records the pinned
@@ -5291,6 +5328,12 @@ const lastHeldEmitState = new Map();
 // Reset to 0 on daemon restart (module reload) or via __resetForTests.
 let _unstuckLastRunMs = 0;
 
+// CTL-1324: Pass 0j heavy-census throttle — epoch-ms of the last run of the
+// EXPENSIVE worktree censuses (J1 orphan / J3 stall-clear / J4 GC). Module-level
+// so the 15-min gate persists across ticks without a db write. Reset to 0 on
+// daemon restart (module reload) or via __resetForTests.
+let _stallJanitorCensusLastRunMs = 0;
+
 function runTick() {
   try {
     // CTL-676 + CTL-678: hot-reload the concurrency knobs by re-reading the
@@ -5993,6 +6036,7 @@ export function __resetForTests() {
   observedYieldFiles.clear(); // CTL-702: reset per-lifetime dedup set between tests
   lastHeldEmitState.clear(); // CTL-755: reset held-event only-on-change dedup
   _unstuckLastRunMs = 0; // CTL-1064: reset Pass 0u throttle between tests
+  _stallJanitorCensusLastRunMs = 0; // CTL-1324: reset Pass 0j census throttle between tests
   // rankedAboveSince is cleared by stopScheduler above (CTL-705)
 }
 
