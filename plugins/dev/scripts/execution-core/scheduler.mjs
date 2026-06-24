@@ -730,6 +730,21 @@ export function isPhantomWorkerDir(signals) {
   return true; // only terminal-success non-pipeline signals (e.g. recovery-pass:done)
 }
 
+// bgLivenessProtects — CTL-1336. The Pass 0a phantom-sweep decision: does the warm
+// `claude agents` snapshot say a worker's bg job is alive (so the destructive quarantine
+// must SKIP it), WITHOUT ever spawning `claude agents` on the synchronous tick? Pure +
+// exported so it's unit-testable in isolation (driving the full tick with a bg signal also
+// trips the reclaim/revive/terminal passes, which mask this decision).
+//   • no bg id          → false (nothing to protect here; fall through to the Linear gate)
+//   • snapshot NOT fresh → true  (cold/stale cache reports a live worker as dead — a boot-time
+//                                 empty snapshot — so FAIL OPEN rather than mis-quarantine)
+//   • snapshot fresh     → whatever the snapshot-backed isBgJobAlive says (zero-spawn)
+export function bgLivenessProtects(bgId, snapshot, isBgJobAlive) {
+  if (!bgId) return false;
+  if (!snapshot?.isFresh) return true; // fail open on a cold/stale snapshot
+  return Boolean(isBgJobAlive(bgId, { agents: snapshot.agents }));
+}
+
 // listInFlightTickets — Set of ticket ids currently occupying a worker slot.
 export function listInFlightTickets(orchDir) {
   const inFlight = new Set();
@@ -2742,6 +2757,12 @@ export function schedulerTick(
     // death trigger now reads each worker's local state.json and never consults
     // the snapshot.)
     livenessIsFresh = () => true,
+    // CTL-1336: the warm `claude agents` snapshot for the Pass 0a phantom-sweep
+    // bg-liveness gate ({ agents, isFresh }). Default reads getAgentsCached (a
+    // never-blocking in-memory read); tests inject a deterministic snapshot so a
+    // unit tick never shells out to `claude`. Only consulted when a worker has a
+    // bg id (see Pass 0a), so a bare/unarmed tick never fetches it.
+    getAgents = () => getAgentsCached(),
     // CTL-611: injectable verifier + audit-event emitter so tests can pin the
     // demotion path independently of fixture choice (fakeDispatch / recorder).
     verifyDispatched = verifyDispatchedSignal,
@@ -3263,7 +3284,19 @@ export function schedulerTick(
 
     if (eligibleIds.has(sig.ticket)) continue; // (a) eligible → real ticket
     const bgId = sig.liveness?.kind === "bg" ? sig.liveness.value : null;
-    if (isBgJobAlive(bgId)) continue; // (c) live worker → cheap check before the Linear call
+    // (c) live worker → skip the Linear probe + quarantine. CTL-1336: read the warm
+    // getAgentsCached() snapshot (zero-spawn) instead of a timeout-less
+    // execFileSync("claude agents") — a hung agents RPC would otherwise wedge the
+    // synchronous tick unboundedly (the audit's finding #4). Two review-driven guards:
+    //   • only consult the snapshot when there IS a bg id, so a bare/unarmed tick stays a
+    //     true no-op (no snapshot fetch, no async `claude agents` warmer kick); and
+    //   • only TRUST a fresh snapshot — a cold/stale cache (daemon boot) reports a live
+    //     worker as DEAD, and quarantine is destructive, so fail OPEN (skip) when the
+    //     snapshot isn't fresh rather than mis-quarantine a real in-flight worker.
+    // Only fetch the snapshot when there IS a bg id → a bare/unarmed tick stays a true no-op
+    // (no snapshot fetch, no async `claude agents` warmer kick). The skip decision (incl. the
+    // cold-cache fail-open) lives in the pure, unit-tested bgLivenessProtects helper.
+    if (bgId && bgLivenessProtects(bgId, getAgents(), isBgJobAlive)) continue;
     if (classifyResolution(sig.ticket, { exec }) !== "not-found") continue; // (b) definitive only
     if (maybeQuarantinePhantom(orchDir, sig.ticket, sig.phase)) {
       quarantinedPhantoms.push({ ticket: sig.ticket, phase: sig.phase });

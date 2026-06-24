@@ -20,6 +20,7 @@ import {
   listStartedTickets,
   listInFlightTickets,
   buildGlobalRanking,
+  bgLivenessProtects,
 } from "./scheduler.mjs";
 
 let orchDir;
@@ -144,5 +145,42 @@ describe("buildGlobalRanking re-pulls a phantom-wedged eligible ticket (CTL-1323
     const adv = buildGlobalRanking(orchDir, eligible).filter((d) => d.identifier === "ADV-esc");
     expect(adv).toHaveLength(1);
     expect(adv[0].inFlight).toBe(true); // the pending Needs-You signal is not buried by a fresh re-pull
+  });
+});
+
+describe("bgLivenessProtects — Pass 0a zero-spawn bg-liveness gate (CTL-1336)", () => {
+  test("no bg id → false (nothing to protect; fall through to the Linear not-found gate)", () => {
+    expect(bgLivenessProtects(null, { isFresh: true, agents: [] }, () => true)).toBe(false);
+    expect(bgLivenessProtects("", { isFresh: true, agents: [] }, () => true)).toBe(false);
+  });
+
+  test("cold/stale snapshot → true (FAIL OPEN — never mis-quarantine a live worker on boot)", () => {
+    let consulted = false;
+    const isBgJobAlive = () => {
+      consulted = true;
+      return false;
+    };
+    expect(bgLivenessProtects("bg-1", { isFresh: false, agents: [] }, isBgJobAlive)).toBe(true);
+    expect(consulted).toBe(false); // short-circuits before isBgJobAlive — zero spawn
+  });
+
+  test("missing/undefined snapshot → true (treated as not-fresh → fail open)", () => {
+    expect(bgLivenessProtects("bg-1", undefined, () => false)).toBe(true);
+  });
+
+  test("fresh snapshot + bg alive → true, threading the warm agents (no spawn)", () => {
+    const seen = [];
+    const isBgJobAlive = (bgId, opts) => {
+      seen.push({ bgId, opts });
+      return true;
+    };
+    const agents = [{ id: "a1" }];
+    expect(bgLivenessProtects("bg-1", { isFresh: true, agents }, isBgJobAlive)).toBe(true);
+    expect(seen[0].bgId).toBe("bg-1");
+    expect(seen[0].opts.agents).toBe(agents); // warm snapshot threaded into isBgJobAlive
+  });
+
+  test("fresh snapshot + bg dead → false (fall through → quarantine path)", () => {
+    expect(bgLivenessProtects("bg-1", { isFresh: true, agents: [] }, () => false)).toBe(false);
   });
 });
