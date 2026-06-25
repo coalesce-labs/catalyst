@@ -265,6 +265,116 @@ export function isHostNamePinnedFromConfig() {
   } catch { return false; }
 }
 
+// --- Node class (CTL-1344) ---
+// catalyst.node.class names WHAT KIND of machine this is — `developer` (a
+// daemonless client you chat on), `worker` (runs the full stack and picks up
+// work), or `monitor` (a reporting host; an enum slot only for now — see the
+// node-classes plan §10). The class sets DEFAULTS for levers that already exist
+// (roster membership, boot-drain, which daemons start, where board reads come
+// from); it adds NO new dispatch gate and the scheduler is unchanged. Stored in
+// Layer-2 (machine-local ~/.config/catalyst/config.json) beside catalyst.host.name
+// — the same repo is checked out on every machine, so the role is per-machine,
+// not per-repo (Layer-1).
+export const NODE_CLASSES = Object.freeze(["developer", "worker", "monitor"]);
+// Absent ⇒ worker ⇒ today's behavior, zero change (the whole fleet is unset until
+// the M6 migration sets it explicitly).
+const NODE_CLASS_DEFAULT = "worker";
+// An EXPLICIT but unrecognized value (a typo'd "developr") must NOT silently
+// become a work-eligible worker (plan §3 footgun guard). It degrades to the most
+// restrictive class — `monitor` starts the fewest services, sits out of the
+// roster, and boots drained — so a typo can never make a node pick up work, and it
+// is flagged recognized:false so `catalyst doctor` (CTL-1355) FAILs until the
+// value is corrected.
+const NODE_CLASS_MOST_RESTRICTIVE = "monitor";
+
+// readLayer2NodeClass — the raw catalyst.node.class value from the Layer-2 file
+// EXACTLY as written (whatever JSON type), or undefined when the key is absent or
+// the file is missing/malformed/unreadable. Never throws (parity with getHostName).
+// resolveNodeClass — not this reader — judges validity, so a present-but-non-string
+// value (`false`, `0`, `[]`) reaches it as an explicit misconfiguration rather than
+// being silently flattened to "absent".
+function readLayer2NodeClass() {
+  try {
+    return JSON.parse(readFileSync(getLayer2ConfigPath(), "utf8"))?.catalyst?.node?.class;
+  } catch {
+    /* missing/malformed Layer-2 file → undefined (default-to-worker) */
+    return undefined;
+  }
+}
+
+// resolveNodeClass — the pure, no-logging node-class resolver. Mirrors
+// getHostName's precedence (CATALYST_NODE_CLASS env → Layer-2 catalyst.node.class
+// → default worker) and never throws. Returns the full resolution detail so
+// hot-path callers stay log-free and doctor (CTL-1355) can FAIL on an unrecognized
+// explicit value:
+//   { class, source, inferred, recognized, raw }
+//   - source     ∈ "env" | "layer2" | "default"
+//   - inferred   = true only for the default (no explicit value anywhere)
+//   - recognized = whether the explicit value named a real class (always true for
+//                  the inferred default; false is what routes doctor to FAIL)
+//   - raw        = the explicit value exactly as written (for the WARN/doctor text)
+//
+// Validity ladder:
+//   - absent (no env + key undefined) OR an explicit null/empty "unset" sentinel
+//     ⇒ benign default-to-worker (inferred; zero behavior change). null is the
+//     codebase's "unset" convention and an empty string mirrors an empty env var.
+//   - a present non-string value (`false`, `0`, `[]`, `{}`) is NOT an absent
+//     default — it is an explicit misconfiguration ⇒ recognized:false (most
+//     restrictive), so a typo'd config can never make a node work-eligible.
+//   - a non-empty string is trimmed + lowercased before the membership check, so
+//     "Worker" / " developer " resolve to their canonical class; only a genuine
+//     non-member ("developr") is recognized:false.
+export function resolveNodeClass() {
+  const envRaw = process.env.CATALYST_NODE_CLASS;
+  const hasEnv = typeof envRaw === "string" && envRaw.trim().length > 0;
+  const raw = hasEnv ? envRaw : readLayer2NodeClass();
+  const source = hasEnv ? "env" : "layer2";
+
+  // Absent / explicit "unset" sentinel (undefined key or JSON null) ⇒ worker.
+  if (raw === undefined || raw === null) {
+    return { class: NODE_CLASS_DEFAULT, source: "default", inferred: true, recognized: true, raw: null };
+  }
+  // Present but not a string ⇒ explicit misconfiguration, never a silent worker.
+  if (typeof raw !== "string") {
+    return { class: NODE_CLASS_MOST_RESTRICTIVE, source, inferred: false, recognized: false, raw };
+  }
+  const normalized = raw.trim().toLowerCase();
+  // Empty/whitespace string ⇒ "cleared" (mirrors an empty env var) ⇒ worker.
+  if (normalized.length === 0) {
+    return { class: NODE_CLASS_DEFAULT, source: "default", inferred: true, recognized: true, raw: null };
+  }
+  if (NODE_CLASSES.includes(normalized)) {
+    return { class: normalized, source, inferred: false, recognized: true, raw };
+  }
+  return { class: NODE_CLASS_MOST_RESTRICTIVE, source, inferred: false, recognized: false, raw };
+}
+
+// getNodeClass — the convenience accessor the rest of the system reads. Returns
+// the resolved class string (developer|worker|monitor). Emits a once-per-process
+// WARN for the two soft-failure cases — an inferred default (so the operator knows
+// the class was never declared) and an unrecognized explicit value (so the typo is
+// visible) — without spamming. Hot-path callers that must stay strictly log-free
+// use resolveNodeClass().class directly. Never throws.
+const _warnedNodeClass = new Set();
+export function getNodeClass() {
+  const r = resolveNodeClass();
+  let msg = null;
+  if (r.inferred) {
+    msg =
+      `catalyst.node.class is not set; inferring "${r.class}" ` +
+      `(set CATALYST_NODE_CLASS or catalyst.node.class in ${getLayer2ConfigPath()} to make the role explicit)`;
+  } else if (!r.recognized) {
+    msg =
+      `catalyst.node.class "${r.raw}" is not one of [${NODE_CLASSES.join(", ")}] — ` +
+      `treating this node as "${r.class}" (most restrictive); catalyst doctor will FAIL until the value is corrected`;
+  }
+  if (msg && !_warnedNodeClass.has(msg)) {
+    _warnedNodeClass.add(msg);
+    log.warn(msg);
+  }
+  return r.class;
+}
+
 // getStaticRoster — the `static` escape-hatch roster (CTL-1273). A multi-host
 // operator who does NOT want the Linear anchor can pin an explicit node list in
 // the Layer-2 machine-local config under catalyst.cluster.staticRoster (a JSON
