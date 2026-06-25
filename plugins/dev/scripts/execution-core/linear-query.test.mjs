@@ -915,6 +915,34 @@ function fakeGateway(descriptor) {
 const FRESH = () => new Date().toISOString();
 const STALE = () => new Date(Date.now() - 11 * 60_000).toISOString();
 
+describe("fetchTicketState — gateway freshness window (CTL-1331 reclaim fix)", () => {
+  test("a STALE descriptor is rejected at the default 60s window → falls to the live read", () => {
+    let execCalls = 0;
+    const exec = () => {
+      execCalls++;
+      return { code: 0, stdout: JSON.stringify({ state: { name: "Done" } }) };
+    };
+    const gateway = fakeGateway({ state: "Todo", removed: false, updatedAt: STALE() });
+    // default gatewayFreshMs (60s) → the 11-min-stale descriptor is rejected → live read.
+    expect(fetchTicketState("CTL-9", { exec, gateway })).toBe("Done");
+    expect(execCalls).toBe(1); // the slow `linearis` exec ran (the reclaim-lap spike)
+  });
+
+  test("a large gatewayFreshMs ACCEPTS a stale descriptor → ZERO live read (the reclaim fix)", () => {
+    let execCalls = 0;
+    const exec = () => {
+      execCalls++;
+      return { code: 0, stdout: JSON.stringify({ state: { name: "Done" } }) };
+    };
+    const gateway = fakeGateway({ state: "Todo", removed: false, updatedAt: STALE() });
+    // unbounded freshness → the stale read-replica descriptor is trusted → no exec.
+    expect(
+      fetchTicketState("CTL-9", { exec, gateway, gatewayFreshMs: Number.MAX_SAFE_INTEGER })
+    ).toBe("Todo");
+    expect(execCalls).toBe(0); // the slow `linearis` exec is NEVER reached
+  });
+});
+
 describe("classifyTicketResolution — gateway short-circuit (CTL-823)", () => {
   test("fresh + present + not-removed → exists with ZERO live reads", () => {
     const exec = fakeExec({ code: 0, stdout: "{}" });
