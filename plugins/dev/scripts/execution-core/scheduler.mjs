@@ -2739,12 +2739,26 @@ export function tickTimingEnabled(env = process.env) {
 // spans under one trace_id — a span-hygiene blowout, per-tick flame graph gone). Folding
 // `tick_id` (and `node`) into the seed makes each tick its OWN trace while staying
 // deterministic, so the same id is reproducible at both the log and the span.
-export function deriveTickTraceContext({ orchestratorId, tickId, node }) {
-  const seed = `${orchestratorId ?? ""}:tick:${tickId}:${node ?? ""}`;
+//
+// CTL-1362 (OTL-30): `tick_id` RESETS to 1 on every daemon restart, so `tick 171` recurs
+// across boots and collapses into ONE Tempo trace (observed: 10 scheduler.tick spans over
+// 17.5h under a single trace, all tick_id=171) — exemplars/slow-tick profiling then link to
+// a multi-tick pile, not the one slow tick. Folding a per-BOOT nonce in makes the id unique
+// per (boot, tick) while staying reproducible at log+span (both get the SAME id, computed
+// once per tick and threaded to both).
+export function deriveTickTraceContext({ orchestratorId, tickId, node, bootNonce }) {
+  const seed = `${orchestratorId ?? ""}:tick:${tickId}:${node ?? ""}:${bootNonce ?? ""}`;
   const traceId = createHash("sha256").update(seed).digest("hex").slice(0, 32);
   const spanId = createHash("sha256").update(`${seed}:span`).digest("hex").slice(0, 16);
   return { traceId, spanId };
 }
+
+// CTL-1362: a per-BOOT nonce captured ONCE at scheduler module load (= once per daemon
+// boot — a fresh process/module load each restart). Stable within a boot so a tick's log
+// line and span derive the SAME trace_id; distinct across boots so tick_id reuse can't
+// collide. This is the daemon scheduler (NOT a workflow context), so Date.now()/pid are
+// fine. Format is opaque — only its per-boot uniqueness + within-boot stability matter.
+export const SCHEDULER_BOOT_NONCE = `${Date.now().toString(36)}.${process.pid.toString(36)}`;
 
 // schedulerTick — one pull cycle: (1) advancement sweep, (2) new-work pull,
 // (3) terminal-Done sweep (CTL-558). Idempotent and restart-safe — derives
@@ -5520,6 +5534,7 @@ export function schedulerTick(
       orchestratorId: "catalyst.execution-core",
       tickId: tick.tickId,
       node: self,
+      bootNonce: SCHEDULER_BOOT_NONCE, // CTL-1362: unique per (boot, tick) — tick_id resets each restart
     });
     log.info(
       {

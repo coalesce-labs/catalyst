@@ -159,6 +159,29 @@ describe("deriveTickTraceContext (CTL-1337 — deterministic per-tick id)", () =
     const t2 = deriveTickTraceContext({ ...base, tickId: 2 });
     expect(t1.traceId).not.toBe(t2.traceId);
   });
+
+  // CTL-1362: tick_id resets to 1 on every daemon restart, so the same tick_id across two
+  // boots must NOT collide — the per-boot nonce makes the id unique per (boot, tick).
+  test("the same tick_id across two boots yields DIFFERENT trace_ids (boot-nonce dedupe)", async () => {
+    const { deriveTickTraceContext } = await import("./scheduler.mjs");
+    const base = { orchestratorId: "catalyst.execution-core", node: "mini", tickId: 171 };
+    const bootA = deriveTickTraceContext({ ...base, bootNonce: "boot-a" });
+    const bootB = deriveTickTraceContext({ ...base, bootNonce: "boot-b" });
+    expect(bootA.traceId).not.toBe(bootB.traceId);
+    expect(bootA.spanId).not.toBe(bootB.spanId);
+  });
+
+  test("same (boot, tick) is reproducible — log line and span derive the SAME id", async () => {
+    const { deriveTickTraceContext } = await import("./scheduler.mjs");
+    const args = { orchestratorId: "catalyst.execution-core", node: "mini", tickId: 171, bootNonce: "boot-a" };
+    expect(deriveTickTraceContext(args)).toEqual(deriveTickTraceContext(args));
+  });
+
+  test("SCHEDULER_BOOT_NONCE is a non-empty per-boot constant", async () => {
+    const { SCHEDULER_BOOT_NONCE } = await import("./scheduler.mjs");
+    expect(typeof SCHEDULER_BOOT_NONCE).toBe("string");
+    expect(SCHEDULER_BOOT_NONCE.length).toBeGreaterThan(0);
+  });
 });
 
 describe("emitLivenessRefreshSpan (in-memory exporter)", () => {
