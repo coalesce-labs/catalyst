@@ -184,6 +184,300 @@ describe("deriveTickTraceContext (CTL-1337 — deterministic per-tick id)", () =
   });
 });
 
+// CTL-1364: the scheduler.op grandchild tier — scheduler.tick → scheduler.pass →
+// scheduler.op. Threshold-gated; op identity rides ATTRIBUTES (3 span names total).
+describe("emitTickTrace scheduler.op tier (CTL-1364)", () => {
+  let exporter;
+  beforeEach(() => {
+    exporter = new InMemorySpanExporter();
+    const provider = new BasicTracerProvider({ spanProcessors: [new SimpleSpanProcessor(exporter)] });
+    __setTracerForTest(provider.getTracer("test"));
+    delete process.env.CATALYST_TRACING_OP_THRESHOLD_MS;
+  });
+  afterEach(() => {
+    __setTracerForTest(null);
+    delete process.env.CATALYST_TRACING_OP_THRESHOLD_MS;
+  });
+
+  test("a slow op nests scheduler.op under its scheduler.pass under scheduler.tick", () => {
+    emitTickTrace({
+      tickId: 1,
+      startEpochMs: 1000,
+      endEpochMs: 4000,
+      slowPassThresholdMs: 50,
+      opThresholdMs: 50,
+      laps: [{ name: "recovery-pass", durationMs: 2000, startEpochMs: 1000, endEpochMs: 3000 }],
+      ops: [
+        {
+          pass: "recovery-pass",
+          name: "terminal-read",
+          startEpochMs: 1100,
+          endEpochMs: 2700,
+          durationMs: 1600,
+          attrs: {
+            "op.sweep": "recovery-filter",
+            "catalyst.ticket": "CTL-9",
+            "recovery.terminal.source": "live",
+            "recovery.terminal.cache_hit": false,
+            "op.exec_ms": 1600,
+            "recovery.terminal.result": "In Progress",
+            "op.timed_out": false,
+          },
+        },
+      ],
+    });
+    const spans = exporter.getFinishedSpans();
+    expect(spans.map((s) => s.name).sort()).toEqual(["scheduler.op", "scheduler.pass", "scheduler.tick"]);
+    const root = spans.find((s) => s.name === "scheduler.tick");
+    const pass = spans.find((s) => s.name === "scheduler.pass");
+    const op = spans.find((s) => s.name === "scheduler.op");
+    // chain: op → pass → tick
+    expect((pass.parentSpanContext?.spanId ?? pass.parentSpanId)).toBe(root.spanContext().spanId);
+    expect((op.parentSpanContext?.spanId ?? op.parentSpanId)).toBe(pass.spanContext().spanId);
+    // op attributes (op identity lives in attrs, not the name)
+    expect(op.attributes["catalyst.scheduler.op"]).toBe("terminal-read");
+    expect(op.attributes["catalyst.scheduler.pass"]).toBe("recovery-pass");
+    expect(op.attributes["catalyst.scheduler.op.duration_ms"]).toBe(1600);
+    expect(op.attributes["op.sweep"]).toBe("recovery-filter");
+    expect(op.attributes["catalyst.ticket"]).toBe("CTL-9");
+    expect(op.attributes["recovery.terminal.source"]).toBe("live");
+    expect(op.attributes["recovery.terminal.result"]).toBe("In Progress");
+    expect(op.status.code).toBe(SpanStatusCode.UNSET);
+  });
+
+  test("an op >= opThresholdMs inside a SUB-threshold pass creates the pass parent on-demand", () => {
+    emitTickTrace({
+      tickId: 2,
+      startEpochMs: 1000,
+      endEpochMs: 2000,
+      slowPassThresholdMs: 500, // the pass (120ms) is UNDER this — no pass span by the lap loop
+      opThresholdMs: 50,
+      laps: [{ name: "reclaim", durationMs: 120, startEpochMs: 1000, endEpochMs: 1120 }],
+      ops: [
+        {
+          pass: "reclaim",
+          name: "terminal-read",
+          startEpochMs: 1010,
+          endEpochMs: 1110,
+          durationMs: 100, // >= opThresholdMs → forces the on-demand pass parent
+          attrs: { "op.sweep": "reclaim-sweep", "catalyst.ticket": "ADV-1", "recovery.reclaim.outcome": "noop" },
+        },
+      ],
+    });
+    const spans = exporter.getFinishedSpans();
+    expect(spans.map((s) => s.name).sort()).toEqual(["scheduler.op", "scheduler.pass", "scheduler.tick"]);
+    const root = spans.find((s) => s.name === "scheduler.tick");
+    const pass = spans.find((s) => s.name === "scheduler.pass");
+    const op = spans.find((s) => s.name === "scheduler.op");
+    expect(pass.attributes["catalyst.scheduler.pass"]).toBe("reclaim");
+    expect((pass.parentSpanContext?.spanId ?? pass.parentSpanId)).toBe(root.spanContext().spanId);
+    expect((op.parentSpanContext?.spanId ?? op.parentSpanId)).toBe(pass.spanContext().spanId);
+    expect(op.attributes["op.sweep"]).toBe("reclaim-sweep");
+    expect(op.attributes["recovery.reclaim.outcome"]).toBe("noop");
+  });
+
+  test("an op BELOW opThresholdMs emits no op span (cache hits / fast ops stay silent)", () => {
+    emitTickTrace({
+      tickId: 3,
+      startEpochMs: 1000,
+      endEpochMs: 1100,
+      slowPassThresholdMs: 50,
+      opThresholdMs: 50,
+      laps: [{ name: "reclaim", durationMs: 60, startEpochMs: 1000, endEpochMs: 1060 }],
+      ops: [
+        { pass: "reclaim", name: "terminal-read", startEpochMs: 1001, endEpochMs: 1011, durationMs: 10, attrs: {} },
+      ],
+    });
+    const names = exporter.getFinishedSpans().map((s) => s.name).sort();
+    expect(names).toEqual(["scheduler.pass", "scheduler.tick"]); // pass slow, op fast → no op span
+  });
+
+  test("op.timed_out:true sets the op span status to ERROR", () => {
+    emitTickTrace({
+      tickId: 4,
+      startEpochMs: 1000,
+      endEpochMs: 20000,
+      slowPassThresholdMs: 50,
+      opThresholdMs: 50,
+      laps: [{ name: "recovery-pass", durationMs: 15000, startEpochMs: 1000, endEpochMs: 16000 }],
+      ops: [
+        {
+          pass: "recovery-pass",
+          name: "terminal-read",
+          startEpochMs: 1000,
+          endEpochMs: 9000,
+          durationMs: 8000,
+          attrs: { "op.sweep": "recovery-filter", "catalyst.ticket": "CTL-9", "op.timed_out": true },
+        },
+      ],
+    });
+    const op = exporter.getFinishedSpans().find((s) => s.name === "scheduler.op");
+    expect(op.status.code).toBe(SpanStatusCode.ERROR);
+    expect(op.attributes["op.timed_out"]).toBe(true);
+  });
+
+  test("ops=[] is byte-identical to today (no op spans, pass behavior unchanged)", () => {
+    emitTickTrace({
+      tickId: 5,
+      startEpochMs: 1000,
+      endEpochMs: 2940,
+      slowPassThresholdMs: 50,
+      laps: [
+        { name: "eligible-read", durationMs: 0.2, startEpochMs: 1000, endEpochMs: 1000 },
+        { name: "recovery-pass", durationMs: 1897, startEpochMs: 1001, endEpochMs: 2898 },
+      ],
+      ops: [],
+    });
+    const names = exporter.getFinishedSpans().map((s) => s.name).sort();
+    expect(names).toEqual(["scheduler.pass", "scheduler.tick"]);
+  });
+
+  test("CATALYST_TRACING_OP_THRESHOLD_MS overrides the default floor", () => {
+    process.env.CATALYST_TRACING_OP_THRESHOLD_MS = "5";
+    emitTickTrace({
+      tickId: 6,
+      startEpochMs: 1000,
+      endEpochMs: 1100,
+      slowPassThresholdMs: 50,
+      // opThresholdMs default 50 — env lowers it to 5, so a 10ms op now crosses
+      laps: [{ name: "reclaim", durationMs: 60, startEpochMs: 1000, endEpochMs: 1060 }],
+      ops: [
+        { pass: "reclaim", name: "terminal-read", startEpochMs: 1001, endEpochMs: 1011, durationMs: 10, attrs: {} },
+      ],
+    });
+    const names = exporter.getFinishedSpans().map((s) => s.name).sort();
+    expect(names).toEqual(["scheduler.op", "scheduler.pass", "scheduler.tick"]);
+  });
+
+  test("a throwing tracer never escapes emitTickTrace (op loop inside the try/catch)", () => {
+    __setTracerForTest({
+      startSpan() {
+        throw new Error("boom");
+      },
+    });
+    expect(() =>
+      emitTickTrace({
+        tickId: 7,
+        startEpochMs: 0,
+        endEpochMs: 100,
+        laps: [{ name: "recovery-pass", durationMs: 99, startEpochMs: 0, endEpochMs: 99 }],
+        ops: [{ pass: "recovery-pass", name: "terminal-read", startEpochMs: 1, endEpochMs: 99, durationMs: 98, attrs: {} }],
+      })
+    ).not.toThrow();
+  });
+});
+
+// CTL-1364 — end-to-end through the REAL makeTickTimer op() recorder + the
+// fetchTicketState onExec seam: the exact wiring the scheduler uses for the
+// recovery-filter terminal-read op (highest-value span). Proves a slow terminal-read
+// on a cache+gateway miss yields exactly one scheduler.op[terminal-read,
+// recovery-filter] chaining op → scheduler.pass[recovery-pass] → scheduler.tick, while
+// a cache hit (no onExec) yields no op span.
+describe("makeTickTimer.op + onExec → emitTickTrace wiring (CTL-1364)", () => {
+  let exporter;
+  beforeEach(() => {
+    exporter = new InMemorySpanExporter();
+    const provider = new BasicTracerProvider({ spanProcessors: [new SimpleSpanProcessor(exporter)] });
+    __setTracerForTest(provider.getTracer("test"));
+  });
+  afterEach(() => __setTracerForTest(null));
+
+  test("a >50ms terminal-read on a cache+gateway MISS produces op→pass[recovery-pass]→tick", async () => {
+    const { makeTickTimer } = await import("./scheduler.mjs");
+    const { fetchTicketState } = await import("./linear-query.mjs");
+    // Controllable clock: 0ms (tick start) → recovery-pass lap closes at 2000ms; the
+    // terminal-read op spans 100→1700 (1600ms, well over the 50ms op floor).
+    let t = 0;
+    const tick = makeTickTimer(() => t, () => 1_700_000_000_000);
+
+    // Mirror the scheduler's recovery-filter wiring exactly:
+    const done = tick.op("recovery-pass", "terminal-read", {
+      "op.sweep": "recovery-filter",
+      "catalyst.ticket": "CTL-9",
+    });
+    t = 100; // op start was captured at t=0 inside op(); advance to the exec window
+    // A cache+gateway+replica MISS → the live exec fires → onExec runs → done() closes.
+    const exec = () => ({
+      code: 0,
+      stdout: JSON.stringify({ identifier: "CTL-9", state: { name: "In Progress" } }),
+    });
+    t = 1700; // exec completes here (the op's end timestamp)
+    const state = fetchTicketState("CTL-9", {
+      exec,
+      onExec: ({ source, execMs, result, timedOut }) =>
+        done({
+          "recovery.terminal.source": source,
+          "recovery.terminal.cache_hit": false,
+          "op.exec_ms": execMs,
+          "recovery.terminal.result": result ?? "null",
+          "op.timed_out": timedOut === true,
+        }),
+    });
+    expect(state).toBe("In Progress");
+    t = 2000;
+    tick.lap("recovery-pass"); // pass spans 0→2000 (slow)
+
+    emitTickTrace({
+      tickId: tick.tickId,
+      startEpochMs: tick.startEpochMs,
+      endEpochMs: tick.endEpochMs(),
+      slowPassThresholdMs: 50,
+      opThresholdMs: 50,
+      laps: tick.spanLaps,
+      ops: tick.spanOps,
+    });
+
+    const spans = exporter.getFinishedSpans();
+    expect(spans.map((s) => s.name).sort()).toEqual(["scheduler.op", "scheduler.pass", "scheduler.tick"]);
+    const root = spans.find((s) => s.name === "scheduler.tick");
+    const pass = spans.find((s) => s.name === "scheduler.pass");
+    const op = spans.find((s) => s.name === "scheduler.op");
+    expect(pass.attributes["catalyst.scheduler.pass"]).toBe("recovery-pass");
+    expect((pass.parentSpanContext?.spanId ?? pass.parentSpanId)).toBe(root.spanContext().spanId);
+    expect((op.parentSpanContext?.spanId ?? op.parentSpanId)).toBe(pass.spanContext().spanId);
+    expect(op.attributes["catalyst.scheduler.op"]).toBe("terminal-read");
+    expect(op.attributes["op.sweep"]).toBe("recovery-filter");
+    expect(op.attributes["catalyst.ticket"]).toBe("CTL-9");
+    expect(op.attributes["recovery.terminal.source"]).toBe("live");
+    expect(op.attributes["recovery.terminal.cache_hit"]).toBe(false);
+    expect(op.attributes["recovery.terminal.result"]).toBe("In Progress");
+    expect(op.attributes["catalyst.scheduler.op.duration_ms"]).toBeGreaterThanOrEqual(50);
+  });
+
+  test("a cache HIT records no op (done never called) → no op span", async () => {
+    const { makeTickTimer } = await import("./scheduler.mjs");
+    const { fetchTicketState } = await import("./linear-query.mjs");
+    const { createTicketStateCache } = await import("./linear-cache.mjs");
+    let t = 0;
+    const tick = makeTickTimer(() => t, () => 1_700_000_000_000);
+    const cache = createTicketStateCache({ now: () => 0 });
+    cache.set("CTL-1", "Done");
+
+    const done = tick.op("recovery-pass", "terminal-read", { "op.sweep": "recovery-filter", "catalyst.ticket": "CTL-1" });
+    const exec = () => ({ code: 0, stdout: "{}" });
+    // cache hit → onExec never fires → done is never called → op not recorded
+    const state = fetchTicketState("CTL-1", {
+      exec,
+      cache,
+      onExec: () => done({ "recovery.terminal.cache_hit": false }),
+    });
+    expect(state).toBe("Done");
+    t = 2000;
+    tick.lap("recovery-pass");
+    expect(tick.spanOps.length).toBe(0); // no op recorded
+
+    emitTickTrace({
+      tickId: tick.tickId,
+      startEpochMs: tick.startEpochMs,
+      endEpochMs: tick.endEpochMs(),
+      laps: tick.spanLaps,
+      ops: tick.spanOps,
+    });
+    const names = exporter.getFinishedSpans().map((s) => s.name).sort();
+    expect(names).toEqual(["scheduler.pass", "scheduler.tick"]); // pass slow, no op span
+  });
+});
+
 describe("emitLivenessRefreshSpan (in-memory exporter)", () => {
   let exporter;
   beforeEach(() => {

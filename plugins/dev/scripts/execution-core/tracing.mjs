@@ -166,10 +166,26 @@ export function __setTracerForTest(tracer) {
 // tick_id), so this does NOT collapse the daemon's lifetime into one trace. Omit the ids
 // (or run without a usable @opentelemetry/api) and the SDK assigns a random trace_id as
 // before — degrade, never crash.
-export function emitTickTrace({ tickId, startEpochMs, endEpochMs, laps = [], attrs = {}, slowPassThresholdMs = 50, traceId, spanId } = {}) {
+// CTL-1364: `ops` adds the THIRD span tier — scheduler.tick → scheduler.pass →
+// scheduler.op — so a slow tick's flame graph auto-attributes its time to the EXACT
+// operation (e.g. a recovery-filter terminal-read that shelled out to a 429-stalled
+// linearis for 15s). `ops` = [{pass, name, startEpochMs, endEpochMs, durationMs,
+// attrs}], each gated by `opThresholdMs` (env CATALYST_TRACING_OP_THRESHOLD_MS, default
+// 50ms) — a healthy op (cache/gateway hit, fast exec) emits NO span. Span-name
+// cardinality stays flat: exactly 3 names total ("scheduler.tick"/"pass"/"op"); op
+// identity (terminal-read / sweep / ticket) rides ATTRIBUTES, never the name.
+export function emitTickTrace({ tickId, startEpochMs, endEpochMs, laps = [], attrs = {}, slowPassThresholdMs = 50, opThresholdMs = 50, ops = [], traceId, spanId } = {}) {
   const tracer = getTracer();
   if (!tracer) return;
   try {
+    // CTL-1364: CATALYST_TRACING_OP_THRESHOLD_MS overrides the op threshold without a
+    // code change (lower it to capture more ops while diagnosing a wedge). The env
+    // wins when set to a valid non-negative number; otherwise the param default holds.
+    const envOp = Number(process.env.CATALYST_TRACING_OP_THRESHOLD_MS);
+    const opFloor =
+      Number.isFinite(envOp) && envOp >= 0 && process.env.CATALYST_TRACING_OP_THRESHOLD_MS !== ""
+        ? envOp
+        : opThresholdMs;
     // CTL-1337: seed the per-tick parent SpanContext so the root inherits `traceId`.
     // Falls back to context.active() (→ SDK-random trace_id) if ids are absent or the
     // api primitives needed for the seed aren't available.
@@ -188,6 +204,11 @@ export function emitTickTrace({ tickId, startEpochMs, endEpochMs, laps = [], att
       if (v != null) root.setAttribute(k, v);
     }
     const rootCtx = trace.setSpan(context.active(), root);
+    // CTL-1364: index pass-name → {span, ctx} so op children parent to their pass span.
+    // A pass span is created when the pass crosses slowPassThresholdMs (today's behavior);
+    // the op loop below ALSO creates it on-demand if an op crosses opFloor inside a pass
+    // that was itself below the slow threshold (so the op always has a parent).
+    const passIndex = new Map();
     for (const lap of laps) {
       if (lap && lap.durationMs >= slowPassThresholdMs) {
         const child = tracer.startSpan(
@@ -197,8 +218,57 @@ export function emitTickTrace({ tickId, startEpochMs, endEpochMs, laps = [], att
         );
         child.setAttribute("catalyst.scheduler.pass", lap.name);
         child.setAttribute("catalyst.scheduler.pass.duration_ms", lap.durationMs);
-        child.end(lap.endEpochMs);
+        passIndex.set(lap.name, { span: child, ctx: trace.setSpan(rootCtx, child) });
       }
+    }
+    // CTL-1364: scheduler.op grandchildren. One INTERNAL span per op >= opFloor,
+    // parented to its pass span (creating that pass span on-demand if the pass itself
+    // was sub-threshold). ERROR status when the op timed out. Whole loop is inside the
+    // outer try/catch — a throw here never escapes the tick.
+    for (const op of ops) {
+      if (!op || !(op.durationMs >= opFloor)) continue;
+      let parent = passIndex.get(op.pass);
+      if (!parent) {
+        // EDGE CASE: the parent pass was below the slow-pass threshold (no pass child
+        // created) but this op crosses opFloor — create the pass child on-demand so the
+        // op nests correctly. Find the lap for timing; fall back to the op's own window.
+        const lap = laps.find((l) => l && l.name === op.pass);
+        const passSpan = tracer.startSpan(
+          "scheduler.pass",
+          { kind: SpanKind.INTERNAL, startTime: lap ? lap.startEpochMs : op.startEpochMs },
+          rootCtx
+        );
+        passSpan.setAttribute("catalyst.scheduler.pass", op.pass);
+        if (lap) passSpan.setAttribute("catalyst.scheduler.pass.duration_ms", lap.durationMs);
+        parent = { span: passSpan, ctx: trace.setSpan(rootCtx, passSpan), onDemand: true, lap };
+        passIndex.set(op.pass, parent);
+      }
+      const opSpan = tracer.startSpan(
+        "scheduler.op",
+        { kind: SpanKind.INTERNAL, startTime: op.startEpochMs },
+        parent.ctx
+      );
+      opSpan.setAttribute("catalyst.scheduler.op", op.name);
+      opSpan.setAttribute("catalyst.scheduler.pass", op.pass);
+      opSpan.setAttribute("catalyst.scheduler.op.duration_ms", op.durationMs);
+      const opAttrs = op.attrs || {};
+      for (const [k, v] of Object.entries(opAttrs)) {
+        if (v != null) opSpan.setAttribute(k, v);
+      }
+      if (opAttrs["op.timed_out"] === true || opAttrs["catalyst.scheduler.op.timed_out"] === true) {
+        opSpan.setStatus({
+          code: SpanStatusCode.ERROR,
+          message: `scheduler op ${op.name} timed out`,
+        });
+      }
+      opSpan.end(op.endEpochMs);
+    }
+    // CTL-1364: end every pass span (including the on-demand ones). Use the lap's
+    // recorded end if known, else the op-derived end already on the on-demand span's
+    // start window — close at the latest known boundary.
+    for (const [name, entry] of passIndex) {
+      const lap = laps.find((l) => l && l.name === name);
+      entry.span.end(lap ? lap.endEpochMs : endEpochMs);
     }
     root.end(endEpochMs);
   } catch {
