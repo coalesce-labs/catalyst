@@ -98,7 +98,13 @@ export function withBreaker(rawExec, { breaker = linearBreaker, now = Date.now }
       return { code: 1, stdout: "", stderr: "circuit-open" };
     }
     const res = rawExec(cmd, args, opts);
-    if (res.code !== 0 && isRateLimitError(res.stderr)) {
+    // CTL-1341: a wall-clock TIMEOUT (the CTL-1339 per-call cap fired) is a
+    // degraded-API signal — open the breaker so the next read in a multi-read
+    // pass short-circuits (`circuit-open`, no spawn) instead of paying the full
+    // cap again. This bounds the per-PASS aggregate to ~1 cap, not N×cap (a
+    // per-call cap alone left recovery-pass at ~N×8s). A >8s linearis read is
+    // genuinely abnormal (healthy reads are sub-second), so the backoff is right.
+    if (res.code !== 0 && (res.timedOut || isRateLimitError(res.stderr))) {
       breaker.recordRateLimited(t);
     } else if (res.code === 0) {
       breaker.recordSuccess();

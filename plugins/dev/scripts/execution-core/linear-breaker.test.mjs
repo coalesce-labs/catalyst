@@ -144,6 +144,46 @@ describe("withBreaker", () => {
     expect(breaker.isOpen()).toBe(false);
   });
 
+  // CTL-1341: a wall-clock TIMEOUT (the CTL-1339 cap fired) is a degraded-API
+  // signal — it must trip the breaker so the next read in a multi-read pass
+  // short-circuits instead of paying the full cap again (bounds the per-PASS
+  // aggregate to ~1 cap, not N×cap).
+  test("a timed-out read (timedOut:true) opens the breaker", () => {
+    const breaker = createLinearBreaker({ logger: silentLogger, baseCooldownMs: 1000 });
+    const raw = () => ({ code: 127, stdout: "", stderr: "spawnSync linearis ETIMEDOUT", timedOut: true });
+    const exec = withBreaker(raw, { breaker, now: () => 0 });
+    exec("linearis", ["issues", "read", "CTL-1"], { timeoutMs: 8000 });
+    expect(breaker.isOpen(0)).toBe(true);
+  });
+
+  test("after a timeout opens the breaker, the next read short-circuits (per-pass bound)", () => {
+    const breaker = createLinearBreaker({ logger: silentLogger, baseCooldownMs: 1000 });
+    const calls = [];
+    const raw = (...all) => {
+      calls.push(all);
+      return { code: 127, stdout: "", stderr: "spawnSync linearis ETIMEDOUT", timedOut: true };
+    };
+    let clock = 0;
+    const exec = withBreaker(raw, { breaker, now: () => clock });
+    // first per-signal read times out → opens the breaker (one real spawn)
+    const first = exec("linearis", ["issues", "read", "CTL-1"], { timeoutMs: 8000 });
+    expect(first.code).toBe(127);
+    expect(calls).toHaveLength(1);
+    // the SAME pass's next per-signal read short-circuits — NO second 8s stall
+    clock = 10;
+    const second = exec("linearis", ["issues", "read", "CTL-2"], { timeoutMs: 8000 });
+    expect(calls).toHaveLength(1); // raw NOT spawned again
+    expect(second.stderr).toBe("circuit-open");
+  });
+
+  test("a non-timeout spawn error (ENOENT, timedOut:false) does NOT open the breaker", () => {
+    const breaker = createLinearBreaker({ logger: silentLogger });
+    const raw = () => ({ code: 127, stdout: "", stderr: "spawnSync linearis ENOENT", timedOut: false });
+    const exec = withBreaker(raw, { breaker });
+    exec("linearis", ["issues", "read", "CTL-1"], { timeoutMs: 8000 });
+    expect(breaker.isOpen()).toBe(false);
+  });
+
   // CTL-1339: the opt-in per-call wall-clock cap rides a 3rd `opts` arg that the
   // wrapper must forward to the inner rawExec untouched.
   test("forwards a 3rd opts arg (e.g. { timeoutMs }) to the inner rawExec", () => {
