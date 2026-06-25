@@ -133,6 +133,7 @@ jobs:
             cluster-claim.test.mjs \
             comms-drain.test.mjs \
             config-pino-fallback.test.mjs \
+            config-node-class.test.mjs \
             config.test.mjs \
             delegate-config-event.test.mjs \
             delegate-queue.test.mjs \

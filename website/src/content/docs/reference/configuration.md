@@ -267,6 +267,42 @@ token is decrypted but not yet projected to the machine-level env. The operator 
 adding/rotating the secret in the `catalyst-cluster` repo lives in the `docs/cluster-onboarding.md`
 developer guide ("Provisioning the shared cloud token").
 
+## Node class (`catalyst.node.class`, CTL-1344)
+
+`catalyst.node.class` names **what kind of machine this is**. It is the front door to per-class
+packaging — one declarative field that sets sensible **defaults for levers that already exist**
+(cluster-roster membership, boot-drain, which daemons start, where board reads come from). It adds
+**no** new dispatch gate; the scheduler is unchanged.
+
+| Class | What it is |
+| --- | --- |
+| `developer` | A daemonless client you chat on. Not in the cluster roster, boots drained, runs no execution-core daemon or broker — it reads board data from a worker's monitor. |
+| `worker` | Runs the full stack and picks up work (the default; a laptop that both runs the daemon and is chatted on is a "head-full worker"). |
+| `monitor` | A reporting host. An **enum slot only** for now — its class-specific build-out is descoped until a real reporting node exists. |
+
+The class is **machine-local**, so it lives in **Layer-2** (`~/.config/catalyst/config.json`) beside
+`catalyst.host.name` — the same repo is checked out on every machine, so the role is per-machine, not
+per-repo:
+
+```json
+{ "catalyst": { "node": { "class": "developer" } } }
+```
+
+**Resolution** mirrors `catalyst.host.name` (`getNodeClass()` in `execution-core/config.mjs`):
+
+| Precedence | Source |
+| --- | --- |
+| 1 | `CATALYST_NODE_CLASS` env var (test/override) |
+| 2 | `catalyst.node.class` in the Layer-2 config |
+| 3 | default `worker` |
+
+- **Absent everywhere ⇒ `worker`** — today's behavior, zero change (the whole fleet is unset until it
+  is migrated explicitly). A WARN notes that the class was inferred.
+- **An explicit but unrecognized value** (a typo'd `developr`) does **not** silently become a
+  work-eligible worker. It is treated as the most restrictive class and `catalyst doctor` **FAILs**
+  until the value is corrected — so a typo can never make a node pick up work.
+- A missing or malformed Layer-2 file never throws; it falls through to the `worker` default.
+
 ## GitHub merge rules live in GitHub
 
 Catalyst can open PRs, fix CI, answer review bots, and merge. But GitHub decides what must pass before code lands. Those rules live in **GitHub branch protection or rulesets**, not in `.catalyst/config.json`.
