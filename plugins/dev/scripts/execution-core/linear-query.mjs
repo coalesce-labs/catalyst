@@ -177,11 +177,26 @@ const GATEWAY_STATE_FRESH_MS = 60_000;
 
 export function fetchTicketState(
   identifier,
-  { exec = defaultExec, cache, gateway, gatewayFreshMs = GATEWAY_STATE_FRESH_MS } = {}
+  { exec = defaultExec, cache, gateway, replica, gatewayFreshMs = GATEWAY_STATE_FRESH_MS } = {}
 ) {
   if (cache) {
     const cached = cache.get(identifier);
     if (cached !== undefined) return cached; // hit
+  }
+  // CTL-1340: flag-gated read-replica tier. Sits BETWEEN the in-mem cache and the
+  // gateway (Tier-2) — a HIT in the local Catalyst-Cloud SQLite replica resolves
+  // the state name sub-ms with no exec. fall-through-on-MISS ONLY: an undefined
+  // lookup (absent/removed row, no db, any throw) FALLS THROUGH to today's
+  // gateway+live path, so a MISS can never make the terminal sweep re-flag a
+  // finished ticket needs-human. When no `replica` is passed (flag off) this
+  // block is fully skipped → byte-identical to the pre-CTL-1340 behavior.
+  if (replica) {
+    const r = replica.lookup(identifier);
+    if (r !== undefined) {
+      if (cache && r.state) cache.set(identifier, r.state); // warm the in-mem tier (never the "" poison)
+      return r.state;
+    }
+    // MISS → fall through to gateway + live read (today's behavior).
   }
   if (gateway) {
     const d = gateway.getDescriptor(identifier);

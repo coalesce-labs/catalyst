@@ -38,6 +38,8 @@ import {
   readDeadDocWorkerConfig,
   readBoardHealthConfig,
   DEAD_DOC_WORKER_TRANSCRIPT_SILENCE_MS,
+  readLinearReplica,
+  getReplicaDbPath,
 } from "./config.mjs";
 
 const PREV = process.env.CATALYST_WAIT_WATCHER;
@@ -955,5 +957,102 @@ describe("readBoardHealthConfig (CTL-1290)", () => {
   test("accepts an injected env bag (env param overrides process.env)", () => {
     process.env.CATALYST_BOARD_HEALTH = "shadow";
     expect(readBoardHealthConfig({ CATALYST_BOARD_HEALTH: "0" }).mode).toBe("off");
+  });
+});
+
+describe("readLinearReplica (CTL-1340)", () => {
+  const LR_ENVS = ["CATALYST_LINEAR_REPLICA", "CATALYST_LAYER2_CONFIG_FILE"];
+  let saved = {}, tmp;
+  beforeEach(() => {
+    for (const k of LR_ENVS) { saved[k] = process.env[k]; delete process.env[k]; }
+    tmp = mkdtempSync(join(tmpdir(), "ctl1340-lr-"));
+    process.env.CATALYST_LAYER2_CONFIG_FILE = join(tmp, "absent.json");
+  });
+  afterEach(() => {
+    for (const k of LR_ENVS) { saved[k] === undefined ? delete process.env[k] : (process.env[k] = saved[k]); }
+    saved = {}; rmSync(tmp, { recursive: true, force: true });
+  });
+
+  test("default (unset): mode=off (ships inert)", () => {
+    expect(readLinearReplica().mode).toBe("off");
+  });
+  test("CATALYST_LINEAR_REPLICA=on → on", () => {
+    process.env.CATALYST_LINEAR_REPLICA = "on";
+    expect(readLinearReplica().mode).toBe("on");
+  });
+  test("CATALYST_LINEAR_REPLICA=1 → on", () => {
+    process.env.CATALYST_LINEAR_REPLICA = "1";
+    expect(readLinearReplica().mode).toBe("on");
+  });
+  test("CATALYST_LINEAR_REPLICA=off → off (explicit kill-switch)", () => {
+    process.env.CATALYST_LINEAR_REPLICA = "off";
+    expect(readLinearReplica().mode).toBe("off");
+  });
+  test("CATALYST_LINEAR_REPLICA=0 → off (explicit kill-switch)", () => {
+    process.env.CATALYST_LINEAR_REPLICA = "0";
+    expect(readLinearReplica().mode).toBe("off");
+  });
+  test("garbage env → off (never silently on)", () => {
+    process.env.CATALYST_LINEAR_REPLICA = "banana";
+    expect(readLinearReplica().mode).toBe("off");
+  });
+  test("reads catalyst.linearReplica.mode=on from Layer-2 when env absent", () => {
+    const cfg = join(tmp, "config.json");
+    writeFileSync(cfg, JSON.stringify({ catalyst: { linearReplica: { mode: "on" } } }));
+    process.env.CATALYST_LAYER2_CONFIG_FILE = cfg;
+    expect(readLinearReplica().mode).toBe("on");
+  });
+  test("Layer-2 mode other than 'on' → off", () => {
+    const cfg = join(tmp, "config.json");
+    writeFileSync(cfg, JSON.stringify({ catalyst: { linearReplica: { mode: "off" } } }));
+    process.env.CATALYST_LAYER2_CONFIG_FILE = cfg;
+    expect(readLinearReplica().mode).toBe("off");
+  });
+  test("env wins over Layer-2 (env off beats Layer-2 on)", () => {
+    const cfg = join(tmp, "config.json");
+    writeFileSync(cfg, JSON.stringify({ catalyst: { linearReplica: { mode: "on" } } }));
+    process.env.CATALYST_LAYER2_CONFIG_FILE = cfg;
+    process.env.CATALYST_LINEAR_REPLICA = "0";
+    expect(readLinearReplica().mode).toBe("off");
+  });
+  test("env wins over Layer-2 (env on beats absent Layer-2)", () => {
+    process.env.CATALYST_LINEAR_REPLICA = "on";
+    expect(readLinearReplica().mode).toBe("on");
+  });
+  test("malformed Layer-2 file → off (never throws)", () => {
+    const cfg = join(tmp, "config.json"); writeFileSync(cfg, "{ not json");
+    process.env.CATALYST_LAYER2_CONFIG_FILE = cfg;
+    expect(readLinearReplica().mode).toBe("off");
+  });
+  test("accepts an injected env bag (env param overrides process.env)", () => {
+    process.env.CATALYST_LINEAR_REPLICA = "on";
+    expect(readLinearReplica({ CATALYST_LINEAR_REPLICA: "0" }).mode).toBe("off");
+  });
+});
+
+describe("getReplicaDbPath (CTL-1340)", () => {
+  const RD_ENVS = ["CATALYST_REPLICA_DB", "CATALYST_DIR"];
+  let saved = {};
+  beforeEach(() => {
+    for (const k of RD_ENVS) { saved[k] = process.env[k]; delete process.env[k]; }
+  });
+  afterEach(() => {
+    for (const k of RD_ENVS) { saved[k] === undefined ? delete process.env[k] : (process.env[k] = saved[k]); }
+    saved = {};
+  });
+
+  test("CATALYST_REPLICA_DB overrides the default path", () => {
+    process.env.CATALYST_REPLICA_DB = "/custom/path/replica.db";
+    expect(getReplicaDbPath()).toBe("/custom/path/replica.db");
+  });
+  test("default: <catalystDir>/catalyst-replica.db (CATALYST_DIR-rooted)", () => {
+    process.env.CATALYST_DIR = "/tmp/ctl1340-dir";
+    expect(getReplicaDbPath()).toBe("/tmp/ctl1340-dir/catalyst-replica.db");
+  });
+  test("re-resolved per call (env change is observed without re-import)", () => {
+    process.env.CATALYST_DIR = "/tmp/a";
+    expect(getReplicaDbPath()).toBe("/tmp/a/catalyst-replica.db");
+    process.env.CATALYST_DIR = "/tmp/b";
+    expect(getReplicaDbPath()).toBe("/tmp/b/catalyst-replica.db");
   });
 });

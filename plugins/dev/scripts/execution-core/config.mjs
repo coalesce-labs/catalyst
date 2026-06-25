@@ -1118,6 +1118,53 @@ export function readReclaimGatewayFreshMs(env = process.env) {
   return Number.isFinite(v) && v > 0 ? v : Number.MAX_SAFE_INTEGER;
 }
 
+// CTL-1340: the Catalyst-Cloud read-replica tier for the scheduler's hot
+// per-signal terminal checks (reclaim / recovery / terminal sweeps). When ON,
+// fetchTicketState reads terminal-ness from a local sub-ms SQLite replica
+// (replica-read.mjs) instead of the rate-limited per-tick `linearis` exec —
+// HIT-only acceleration: a MISS falls through to today's gateway+live path.
+// Ships OFF (the inert seam): the live flip happens once a replica is seeded on
+// the host. Binary on/off (NOT the 3-mode recovery family) — there is no
+// "shadow" middle state for a pure read accelerator.
+//   env CATALYST_LINEAR_REPLICA: "on"/"1" → on; "0"/"off"/unset/garbage → off.
+//   Layer-2 override: .catalyst.linearReplica.mode ("on" enables; anything else off).
+// env wins over Layer-2; default off.
+export const LINEAR_REPLICA_MODES = new Set(["on", "off"]);
+
+function readLayer2LinearReplica() {
+  try {
+    const r = JSON.parse(readFileSync(getLayer2ConfigPath(), "utf8"))?.catalyst?.linearReplica;
+    return r && typeof r === "object" ? r : {};
+  } catch {
+    return {};
+  }
+}
+
+export function readLinearReplica(env = process.env) {
+  const l2 = readLayer2LinearReplica();
+  const v = env.CATALYST_LINEAR_REPLICA;
+  let mode;
+  if (v === "on" || v === "1") {
+    mode = "on"; // explicit operator enable
+  } else if (v === "0" || v === "off") {
+    mode = "off"; // explicit kill-switch
+  } else if (typeof v === "string" && v !== "") {
+    mode = "off"; // garbage env value → off (never silently on)
+  } else if (l2.mode === "on") {
+    mode = "on"; // Layer-2 enable (env unset)
+  } else {
+    mode = "off"; // safe default: off — operators opt in
+  }
+  return { mode };
+}
+
+// CTL-1340: path to the local Catalyst-Cloud SQLite replica. CATALYST_REPLICA_DB
+// overrides; default ~/catalyst/catalyst-replica.db. Re-resolved per call (the
+// catalystDir() idiom) so tests redirect via the env var.
+export function getReplicaDbPath() {
+  return process.env.CATALYST_REPLICA_DB || resolve(catalystDir(), "catalyst-replica.db");
+}
+
 export function readDelegateRunnerConfig(env = process.env) {
   const v = env.CATALYST_DELEGATE_RUNNER;
   let mode;

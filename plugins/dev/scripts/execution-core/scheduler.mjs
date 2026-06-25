@@ -2878,6 +2878,12 @@ export function schedulerTick(
     // fetchState injections below. undefined in bare unit ticks (fail-open —
     // fetchTicketState without gateway behaves exactly as before).
     gateway = undefined,
+    // CTL-1340: the daemon's read-replica tier reader (flag-gated, default off →
+    // undefined). Threaded into the SAME fetchState injections below so a HIT in
+    // the local Catalyst-Cloud replica resolves terminal-ness sub-ms; a MISS
+    // falls through to gateway+live (fall-through-on-MISS). undefined → every
+    // fetchTicketState skips the replica block and behaves exactly as before.
+    replica = undefined,
     // CTL-781: respect-assignment + self-assign. botUserIds is the Set of known
     // bot UUIDs (predicate membership); botWriteId is the single orchestrator
     // UUID written as assignee on claim. undefined / empty Set → the gate and
@@ -3808,7 +3814,7 @@ export function schedulerTick(
                 ticket: sig.ticket,
                 signal: sig,
                 cache,
-                fetchState: (id, o = {}) => fetchTicketState(id, { ...o, cache, gateway }),
+                fetchState: (id, o = {}) => fetchTicketState(id, { ...o, cache, gateway, replica }),
               }).terminal
           );
         // CTL-1241: buildRecoveryItems attaches the current-tick escalate_human
@@ -3994,7 +4000,7 @@ export function schedulerTick(
         repoRoot,
         cache,
         fetchState: (id, o = {}) =>
-          fetchTicketState(id, { ...o, gateway, gatewayFreshMs: reclaimGatewayFreshMs }),
+          fetchTicketState(id, { ...o, gateway, replica, gatewayFreshMs: reclaimGatewayFreshMs }),
         prAdapter,
         // CTL-809 — thread the warm agents snapshot so the reclaim alive-branch can
         // cross-check a jobLifecycle-alive-but-process-gone ghost (getAgentsCached is
@@ -5367,7 +5373,7 @@ export function schedulerTick(
       {
         cache,
         prAdapter,
-        fetchState: (id, o = {}) => fetchTicketState(id, { ...o, gateway }),
+        fetchState: (id, o = {}) => fetchTicketState(id, { ...o, gateway, replica }),
         multiHost,
       }
     );
@@ -5400,7 +5406,7 @@ export function schedulerTick(
         const term = isTicketTerminalOrMerged({
           ticket,
           signal: signalByTicket.get(ticket),
-          fetchState: (id, o = {}) => fetchTicketState(id, { ...o, cache, gateway }),
+          fetchState: (id, o = {}) => fetchTicketState(id, { ...o, cache, gateway, replica }),
           cache,
           prAdapter,
         });
@@ -5902,6 +5908,7 @@ function runTick() {
       writeStatus: runningOpts.writeStatus,
       cache: runningOpts.cache, // CTL-634: shared out-of-set blocker state cache
       gateway: runningOpts.gateway, // CTL-1240/823: enables tier-2 reads in reclaim + reasoning filter
+      replica: runningOpts.replica, // CTL-1340: enables the flag-gated read-replica tier (undefined → inert)
       concurrency, // CTL-665 + CTL-676: per-tick re-read, then threaded into readMaxParallel
       // CTL-676: forward the optional liveBackgroundCount seam (test-only) so
       // a unit test can drive freeSlots deterministically without shelling
@@ -5987,9 +5994,11 @@ function runTick() {
               // CTL-1240: 3-tier read (cache → gateway/filter-state.db → live linearis),
               // matching the reclaim + reasoning-pass paths. TTL/gateway hits suppress
               // the live `linearis issues read` storm this census otherwise caused.
+              // CTL-1340: + the flag-gated read-replica tier (undefined → inert).
               const state = fetchTicketState(id, {
                 cache: runningOpts.cache,
                 gateway: runningOpts.gateway,
+                replica: runningOpts.replica,
               });
               return state != null && isLinearTerminal(state);
             },
@@ -6019,9 +6028,11 @@ function runTick() {
             // wrong). The cache/gateway tiers also make the terminal verdict resilient
             // to a transient live-read miss.
             isLinearTerminalOrMerged: (id) => {
+              // CTL-1340: + the flag-gated read-replica tier (undefined → inert).
               const state = fetchTicketState(id, {
                 cache: runningOpts.cache,
                 gateway: runningOpts.gateway,
+                replica: runningOpts.replica,
               });
               return state != null && isLinearTerminal(state);
             },
@@ -6056,9 +6067,11 @@ function runTick() {
             isLinearTerminal: (id) => {
               // CTL-1240: 3-tier read (cache → gateway → live linearis). Matches
               // the stall-clear census path above and the reclaim/reasoning paths.
+              // CTL-1340: + the flag-gated read-replica tier (undefined → inert).
               const state = fetchTicketState(id, {
                 cache: runningOpts.cache,
                 gateway: runningOpts.gateway,
+                replica: runningOpts.replica,
               });
               return state != null && isLinearTerminal(state);
             },
@@ -6292,6 +6305,7 @@ export function startScheduler({
   writeStatus,
   cache, // CTL-634: shared out-of-set blocker state cache (from startDaemon)
   gateway, // CTL-1240/823: durable filter-state.db reader; threaded into runningOpts → schedulerTick
+  replica, // CTL-1340: flag-gated read-replica reader (undefined unless on); threaded into runningOpts → schedulerTick
   concurrency = {}, // CTL-665 + CTL-676: boot-captured executionCore knobs. When
   // `configPath` is also set (production wiring), runTick re-reads the live
   // file every tick and ignores this object; the boot-captured value is the
@@ -6359,6 +6373,7 @@ export function startScheduler({
     writeStatus,
     cache,
     gateway, // CTL-1240: thread the durable descriptor reader into the per-tick options
+    replica, // CTL-1340: thread the flag-gated read-replica reader into the per-tick options
     concurrency,
     configPath, // CTL-676: per-tick Layer-1 re-read source
     layer2Path, // CTL-678: per-tick Layer-2 re-read source (host-wide override)

@@ -50,6 +50,7 @@ import {
   isHostNamePinnedFromConfig, // CTL-1093
   getCatalystRepoDir,       // CTL-1093 sticky dir
   readDelegateRunnerConfig, // CTL-1331: async board-health delegate runner kill-switch
+  readLinearReplica,        // CTL-1340: read-replica tier flag (inert; default off)
 } from "./config.mjs";
 import { resolveBootIdentity } from "./host-boot-identity.mjs"; // CTL-1093
 import { readStickyIdentity, writeStickyIdentity } from "./host-sticky.mjs"; // CTL-1093
@@ -124,6 +125,7 @@ import { removeLabel as defaultRemoveLabel } from "./linear-write.mjs"; // CTL-5
 // so the phantom worker-dir validity sweep is operative in production.
 import { classifyTicketResolution } from "./linear-query.mjs";
 import { createGatewayReader } from "./gateway-read.mjs";
+import { createReplicaReader } from "./replica-read.mjs"; // CTL-1340: read-replica tier reader
 import { isBgJobAlive, refreshAgents, listClaudeAgentsResult } from "./claude-agents.mjs"; // CTL-1165 D3: fail-closed liveness reader for job-dir GC
 
 const DEFAULT_MAX_PARALLEL = 3;
@@ -597,6 +599,13 @@ export function startDaemon({
     // CTL-823: readonly client over the broker's durable descriptor store
     // (~/catalyst/filter-state.db). Fail-open — see gateway-read.mjs.
     const gatewayReader = createGatewayReader();
+    // CTL-1340: flag-gated read-replica tier (INERT by default). Constructed
+    // ONLY when CATALYST_LINEAR_REPLICA resolves to "on" — otherwise undefined,
+    // so the scheduler's replica block is never reached and behavior is
+    // byte-identical to pre-CTL-1340. HIT-only acceleration of the hot
+    // per-signal terminal reads once a Catalyst-Cloud replica is seeded on host.
+    const replicaReader =
+      readLinearReplica().mode === "on" ? createReplicaReader() : undefined;
     // CTL-565: the monitor needs orchDir to one-shot-dispatch the triage phase
     // agent on a →Triage transition. `dispatch` stays an injectable default
     // (dispatch.mjs) so the daemon's fakes-pass-through pattern still holds.
@@ -646,6 +655,10 @@ export function startDaemon({
       // injections (reclaim + terminal backstop) so the 60s state window is
       // live in production, not just in unit tests.
       gateway: gatewayReader,
+      // CTL-1340: thread the read-replica reader (undefined unless the flag is
+      // on) so the scheduler's per-signal terminal checks can resolve
+      // terminal-ness from the local Catalyst-Cloud replica. undefined → inert.
+      replica: replicaReader,
       isBgJobAlive,
       // CTL-1044: provide the production operator-event appender for the
       // scheduler's `appendIntentEvent` seam (scheduler.mjs:4300). Without this
