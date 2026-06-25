@@ -303,6 +303,28 @@ per-repo:
   until the value is corrected — so a typo can never make a node pick up work.
 - A missing or malformed Layer-2 file never throws; it falls through to the `worker` default.
 
+### Read-replica endpoint (`catalyst.readReplica.baseUrl`, CTL-1346)
+
+Board reads (the HUD, ticket detail, search) come from a monitor's `filter-state.db` replica, which is
+written **only** by a node's local broker. A daemonless `developer` node runs no broker, so its local
+replica is empty — it must read a **worker's** monitor over the network. The read endpoint resolves
+through:
+
+| Precedence | Source |
+| --- | --- |
+| 1 | `CATALYST_MONITOR_URL` env var (explicit override) |
+| 2 | `catalyst.readReplica.baseUrl` in the Layer-2 config (e.g. `http://mini:7400`) |
+| 3 | class-aware default — `developer` ⇒ **no fallback** (explicit error); `worker`/`monitor` ⇒ `http://127.0.0.1:7400` |
+
+```json
+{ "catalyst": { "readReplica": { "baseUrl": "http://mini:7400" } } }
+```
+
+A `developer` node with **no** endpoint configured returns an explicit unset/error rather than silently
+reading an empty `localhost` replica. A `worker` or `monitor` node keeps the `127.0.0.1:7400` default
+(its own broker fills and serves the replica). This is **reads only** — writes still require a host with
+its own Linear key, preserving per-host rate-limit isolation.
+
 ## GitHub merge rules live in GitHub
 
 Catalyst can open PRs, fix CI, answer review bots, and merge. But GitHub decides what must pass before code lands. Those rules live in **GitHub branch protection or rulesets**, not in `.catalyst/config.json`.

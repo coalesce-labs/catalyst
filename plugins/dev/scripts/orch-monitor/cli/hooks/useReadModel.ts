@@ -22,7 +22,11 @@ import {
   type ReadModelStatus,
 } from "../lib/read-model-connection";
 import { createNodeEventSource } from "../lib/node-event-source";
-import { resolveReadModelUrl } from "../lib/read-model-url";
+import {
+  resolveReadModelStreamUrl,
+  type ReadModelStreamUrlResult,
+} from "../lib/read-model-url";
+import { readReplicaBaseUrlFromLayer2, nodeClassForRead } from "../lib/read-replica-config";
 import {
   groupByHost,
   type ReadModelPayload,
@@ -60,19 +64,37 @@ export interface UseReadModelResult {
 export function useReadModel(options: UseReadModelOptions = {}): UseReadModelResult {
   // Host identity is stable for the process lifetime; resolve once.
   const localRef = useRef(localHostRef()).current;
-  const url = useRef(options.url ?? resolveReadModelUrl(process.env)).current;
+  // Resolve the read-replica endpoint once, node-class + Layer-2 aware (CTL-1346).
+  // A developer node with no endpoint configured returns `{ ok:false }` rather than
+  // a localhost URL, so the HUD never silently reads an empty local replica.
+  const resolved = useRef<ReadModelStreamUrlResult>(
+    options.url
+      ? { ok: true, base: options.url, url: options.url }
+      : resolveReadModelStreamUrl({
+          env: process.env,
+          layer2BaseUrl: readReplicaBaseUrlFromLayer2(),
+          nodeClass: nodeClassForRead(),
+        }),
+  ).current;
   const factory = useRef(
     options.eventSourceFactory ?? ((u: string) => createNodeEventSource(u)),
   ).current;
 
-  const [state, setState] = useState<ReadModelConnectionState>({
-    status: "connecting",
-    payload: null,
-  });
+  const [state, setState] = useState<ReadModelConnectionState>(
+    resolved.ok ? { status: "connecting", payload: null } : { status: "down", payload: null },
+  );
 
   useEffect(() => {
+    if (!resolved.ok) {
+      // Developer node with no read-replica endpoint: never connect to localhost
+      // (an empty replica). Report `down` so callers fall back to their raw-file
+      // readers, and surface the reason once.
+      process.stderr.write(`[read-model] ${resolved.reason}\n`);
+      setState({ status: "down", payload: null });
+      return;
+    }
     const conn = createReadModelConnection({
-      url,
+      url: resolved.url,
       eventSourceFactory: factory,
       onChange: setState,
     });
@@ -80,7 +102,7 @@ export function useReadModel(options: UseReadModelOptions = {}): UseReadModelRes
     // Seed initial state in case start() synchronously transitioned.
     setState(conn.snapshot());
     return () => conn.stop();
-  }, [url, factory]);
+  }, [resolved, factory]);
 
   const cluster = state.payload ? groupByHost(state.payload, localRef) : null;
 
