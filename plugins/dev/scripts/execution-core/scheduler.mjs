@@ -245,7 +245,7 @@ import {
 // to production deps at the unstuckSweep wiring point below. Wiring this does NOT
 // flip enforce on — the mode gate stays at its safe 'off' default (ADR-023).
 import { buildUnstuckActSeams } from "./unstuck-act-seams.mjs";
-import { readUnstuckSweepConfig, readRecoveryPassConfig, readBoardHealthConfig, isThrottled } from "./config.mjs";
+import { readUnstuckSweepConfig, readRecoveryPassConfig, readBoardHealthConfig, readReclaimGatewayFreshMs, isThrottled } from "./config.mjs";
 // CTL-558: the deterministic Linear status/label write seam. The whole module
 // is injected as `writeStatus` so tests pass fakes; production uses the real
 // module (best-effort — every write swallows its own failures).
@@ -3928,6 +3928,11 @@ export function schedulerTick(
   // neither pipeline-complete (monitor-deploy done/skipped) nor
   // failed/stalled/aborted" — exactly the set this sweep cares about.
   const inFlightTickets = listInFlightTickets(orchDir);
+  // CTL-1331 follow-up: the reclaim terminal-check trusts the read-replica's
+  // last-known state regardless of age (default unbounded) so STUCK tickets — whose
+  // descriptors age past the 60s default because they get no webhooks — stop forcing
+  // a per-tick `linearis` exec (the reclaim-lap spike). Resolved once per tick.
+  const reclaimGatewayFreshMs = readReclaimGatewayFreshMs();
 
   // CTL-736: the reclaim death trigger is the authoritative LOCAL state.json
   // lifecycle (jobLifecycle), so the reclaim sweep no longer reads the `claude
@@ -3988,7 +3993,8 @@ export function schedulerTick(
       const reclaimOpts = {
         repoRoot,
         cache,
-        fetchState: (id, o = {}) => fetchTicketState(id, { ...o, gateway }),
+        fetchState: (id, o = {}) =>
+          fetchTicketState(id, { ...o, gateway, gatewayFreshMs: reclaimGatewayFreshMs }),
         prAdapter,
         // CTL-809 — thread the warm agents snapshot so the reclaim alive-branch can
         // cross-check a jobLifecycle-alive-but-process-gone ghost (getAgentsCached is

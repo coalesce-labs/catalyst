@@ -1104,6 +1104,20 @@ function readPositiveIntEnv(raw, fallback) {
     : fallback;
 }
 
+// CTL-1331 follow-up: the gateway freshness window for the RECLAIM sweep's per-signal
+// Linear terminal-check (fetchTicketState). The default 60s GATEWAY_STATE_FRESH_MS is
+// far too tight for STUCK tickets: a ticket that isn't changing gets no webhooks, so
+// its read-replica descriptor ages past 60s and every reclaim tick falls back to a
+// slow `linearis` exec (the 3.8-5.3s reclaim-lap spike; ADV-1400's descriptor was 29h
+// stale). The reclaim terminal short-circuit is a best-effort optimization, and a
+// stale "non-terminal" descriptor is reliable — a real terminal transition would have
+// refreshed it via webhook — so the reclaim check TRUSTS the read-replica's last-known
+// state regardless of age. Operator-tunable; unset/0/invalid → effectively unbounded.
+export function readReclaimGatewayFreshMs(env = process.env) {
+  const v = Number(env.CATALYST_RECLAIM_GATEWAY_FRESH_MS);
+  return Number.isFinite(v) && v > 0 ? v : Number.MAX_SAFE_INTEGER;
+}
+
 export function readDelegateRunnerConfig(env = process.env) {
   const v = env.CATALYST_DELEGATE_RUNNER;
   let mode;
