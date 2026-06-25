@@ -211,13 +211,22 @@ function normalizeTicket(node) {
 const GATEWAY_EXISTS_FRESH_MS = 10 * 60_000;
 const GATEWAY_STATE_FRESH_MS = 60_000;
 
+// CTL-1364: optional `onExec` seam — invoked ONLY when this call falls through to the
+// ACTUAL live `linearis issues read` spawn (cache MISS + replica MISS + gateway
+// stale/miss). A cache/gateway/replica HIT returns early WITHOUT calling onExec, so the
+// Tier-3 scheduler.op span is recorded for exactly the reads that shelled out (the
+// 15s-spike drivers) and never for the cheap hits. Signature:
+//   onExec({ source, execMs, code, result, timedOut })
+//     source: "live" (the live exec); execMs: wall-clock of the spawn; code: exit code;
+//     result: "terminal-state-name" | null (parse failure / non-zero); timedOut: bool.
+// Default undefined → zero added cost (no callback). Never throws out (best-effort).
 export function fetchTicketState(
   identifier,
-  { exec = defaultExec, cache, gateway, replica, gatewayFreshMs = GATEWAY_STATE_FRESH_MS } = {}
+  { exec = defaultExec, cache, gateway, replica, gatewayFreshMs = GATEWAY_STATE_FRESH_MS, onExec } = {}
 ) {
   if (cache) {
     const cached = cache.get(identifier);
-    if (cached !== undefined) return cached; // hit
+    if (cached !== undefined) return cached; // hit — no exec, no onExec
   }
   // CTL-1340: flag-gated read-replica tier. Sits BETWEEN the in-mem cache and the
   // gateway (Tier-2) — a HIT in the local Catalyst-Cloud SQLite replica resolves
@@ -248,16 +257,36 @@ export function fetchTicketState(
   }
   // CTL-1339: hot per-signal terminal read — cap the wall-clock so a 429-stalled
   // linearis can't block the synchronous tier-3 reclaim/recovery read its full ~30s.
-  const { code, stdout } = exec("linearis", ["issues", "read", identifier], {
+  // CTL-1364: this is the cache+gateway+replica MISS path — the ONLY place this fn
+  // shells out. Time the spawn for the optional onExec span seam.
+  const execStart = onExec ? Date.now() : 0;
+  const { code, stdout, timedOut } = exec("linearis", ["issues", "read", identifier], {
     timeoutMs: LINEARIS_TERMINAL_READ_TIMEOUT_MS,
   });
-  if (code !== 0) return null; // fail-safe — not cached
+  if (code !== 0) {
+    if (onExec) {
+      try {
+        onExec({ source: "live", execMs: Date.now() - execStart, code, result: null, timedOut: timedOut === true });
+      } catch { /* the op-span seam never throws out of the read */ }
+    }
+    return null; // fail-safe — not cached
+  }
   try {
     const node = JSON.parse(stdout);
     const state = node?.state?.name ?? node?.state ?? null;
     if (cache && state != null) cache.set(identifier, state); // populate on success only
+    if (onExec) {
+      try {
+        onExec({ source: "live", execMs: Date.now() - execStart, code, result: state, timedOut: timedOut === true });
+      } catch { /* the op-span seam never throws out of the read */ }
+    }
     return state;
   } catch {
+    if (onExec) {
+      try {
+        onExec({ source: "live", execMs: Date.now() - execStart, code, result: null, timedOut: timedOut === true });
+      } catch { /* the op-span seam never throws out of the read */ }
+    }
     return null; // unparseable — not cached
   }
 }

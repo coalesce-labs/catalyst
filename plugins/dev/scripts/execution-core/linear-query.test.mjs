@@ -1706,3 +1706,83 @@ describe("CTL-1364 rawExec DEFAULT timeout", () => {
     }
   });
 });
+
+// CTL-1364 — fetchTicketState's `onExec` seam fires ONLY on the live-read path
+// (cache+replica miss + stale/absent gateway). The scheduler's Tier-3 scheduler.op
+// span tier hangs off this callback: a slow terminal-read on a miss gets a span; a
+// cheap cache/gateway/replica hit gets NONE (the callback never fires). This is the
+// seam that lets the flame graph attribute a 15s recovery-filter spike to the exact
+// ticket + source without wrapping the synchronous tick in span-context callbacks.
+describe("fetchTicketState — onExec span seam (CTL-1364)", () => {
+  test("fires onExec on the LIVE read with source/execMs/result/timedOut", () => {
+    const exec = fakeExec({
+      code: 0,
+      stdout: JSON.stringify({ identifier: "CTL-9", state: { name: "In Progress" } }),
+    });
+    let seen = null;
+    const state = fetchTicketState("CTL-9", { exec, onExec: (info) => { seen = info; } });
+    expect(state).toBe("In Progress");
+    expect(seen).not.toBeNull();
+    expect(seen.source).toBe("live");
+    expect(seen.code).toBe(0);
+    expect(seen.result).toBe("In Progress");
+    expect(seen.timedOut).toBe(false);
+    expect(typeof seen.execMs).toBe("number");
+  });
+
+  test("a cache HIT does NOT fire onExec (no op span for a fast hit)", () => {
+    const cache = createTicketStateCache({ now: () => 0 });
+    cache.set("CTL-1", "Done");
+    const exec = fakeExec({ code: 0, stdout: "{}" });
+    let fired = false;
+    const state = fetchTicketState("CTL-1", { exec, cache, onExec: () => { fired = true; } });
+    expect(state).toBe("Done");
+    expect(exec.calls.length).toBe(0); // pure cache hit
+    expect(fired).toBe(false); // seam never fired → no op span
+  });
+
+  test("a replica HIT does NOT fire onExec", () => {
+    const replica = fakeReplica({ terminal: true, state: "Done" });
+    const exec = fakeExec({ code: 0, stdout: "{}" });
+    let fired = false;
+    const state = fetchTicketState("CTL-1", { exec, replica, onExec: () => { fired = true; } });
+    expect(state).toBe("Done");
+    expect(exec.calls.length).toBe(0);
+    expect(fired).toBe(false);
+  });
+
+  test("a fresh gateway HIT does NOT fire onExec", () => {
+    const gateway = fakeGateway({ state: "Todo", removed: false, updatedAt: FRESH() });
+    const exec = fakeExec({ code: 0, stdout: "{}" });
+    let fired = false;
+    const state = fetchTicketState("CTL-9", { exec, gateway, onExec: () => { fired = true; } });
+    expect(state).toBe("Todo");
+    expect(exec.calls.length).toBe(0);
+    expect(fired).toBe(false);
+  });
+
+  test("fires onExec with result:null + code on a non-zero exit (fail-safe path)", () => {
+    const exec = () => ({ code: 1, stdout: "", stderr: "not found" });
+    let seen = null;
+    const state = fetchTicketState("CTL-9", { exec, onExec: (info) => { seen = info; } });
+    expect(state).toBeNull();
+    expect(seen.code).toBe(1);
+    expect(seen.result).toBeNull();
+  });
+
+  test("fires onExec with timedOut:true when the read tripped the wall-clock cap", () => {
+    const exec = () => ({ code: 127, stdout: "", stderr: "killed", timedOut: true });
+    let seen = null;
+    const state = fetchTicketState("CTL-9", { exec, onExec: (info) => { seen = info; } });
+    expect(state).toBeNull();
+    expect(seen.timedOut).toBe(true);
+  });
+
+  test("a throwing onExec never escapes fetchTicketState (best-effort seam)", () => {
+    const exec = fakeExec({ code: 0, stdout: JSON.stringify({ state: { name: "Done" } }) });
+    const onExec = () => { throw new Error("seam boom"); };
+    expect(() => fetchTicketState("CTL-9", { exec, onExec })).not.toThrow();
+    // the read still resolves despite the throwing seam
+    expect(fetchTicketState("CTL-9", { exec, onExec })).toBe("Done");
+  });
+});

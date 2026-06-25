@@ -2697,6 +2697,14 @@ export function makeTickTimer(now = () => performance.now(), wallNow = Date.now)
   let last = t0;
   const passes = {};
   const spanLaps = []; // [{name, durationMs, startEpochMs, endEpochMs}] for the span tree
+  // CTL-1364 Tier-3 grandchild tier: per-OP sub-laps inside a pass. The op() recorder
+  // captures start at call time and returns a done() closure that captures end +
+  // pushes one {pass, name, startEpochMs, endEpochMs, durationMs, attrs} entry. Same
+  // pure-arithmetic cost shape as lap() — no IO, no span work in the synchronous tick;
+  // emitTickTrace reconstructs the scheduler.op spans POST-HOC (threshold-gated, so a
+  // healthy tick emits ZERO op spans). Tick may be null when timing is off, so every
+  // call site uses tick?.op(...) and optional-chains the returned done.
+  const spanOps = [];
   const round1 = (ms) => Math.round(ms * 10) / 10;
   return {
     tickId: ++_tickSeq,
@@ -2708,8 +2716,31 @@ export function makeTickTimer(now = () => performance.now(), wallNow = Date.now)
       spanLaps.push({ name: label, durationMs: round1(t - last), startEpochMs: toEpoch(last), endEpochMs: toEpoch(t) });
       last = t;
     },
+    // op(pass, name, attrsAtStart) — open one operation sub-lap inside `pass`.
+    // Returns done(attrsAtEnd) which closes it. The op is recorded ONLY when done()
+    // is called (a never-closed op is simply absent — no span). startEpochMs is
+    // captured here so the op span nests correctly under its parent pass span.
+    op(pass, name, attrsAtStart) {
+      const opStart = now();
+      const startE = toEpoch(opStart);
+      let recorded = false;
+      return (attrsAtEnd) => {
+        if (recorded) return; // idempotent — a double-done never double-records
+        recorded = true;
+        const opEnd = now();
+        spanOps.push({
+          pass,
+          name,
+          startEpochMs: startE,
+          endEpochMs: toEpoch(opEnd),
+          durationMs: round1(opEnd - opStart),
+          attrs: { ...(attrsAtStart || {}), ...(attrsAtEnd || {}) },
+        });
+      };
+    },
     passes,
     spanLaps,
+    spanOps,
     endEpochMs() {
       return toEpoch(now());
     },
@@ -3822,15 +3853,42 @@ export function schedulerTick(
           // read; fail-open (a thrown/unreadable read → NOT terminal → kept).
           // Threads the SAME per-tick TTL state cache + gateway the reclaim/advance
           // paths use (≤1 Linear read per ticket per tick).
-          .filter(
-            (sig) =>
-              !isTicketTerminalOrMerged({
-                ticket: sig.ticket,
-                signal: sig,
-                cache,
-                fetchState: (id, o = {}) => fetchTicketState(id, { ...o, cache, gateway, replica }),
-              }).terminal
-          );
+          .filter((sig) => {
+            // CTL-1364 Tier-3: record a scheduler.op[terminal-read] sub-lap for THIS
+            // signal's terminal check — but ONLY for the read that actually shells out
+            // (cache+gateway+replica miss → live linearis exec). A hit returns early
+            // and the onExec seam never fires, so `done` is never called → no op span
+            // (matches the "cache hits emit no op span" acceptance criterion). The op
+            // is the HIGHEST-VALUE span: it pins a 15s recovery-filter spike to the
+            // exact ticket + source. tick may be null (timing off) → tick?.op no-op.
+            const done = tick?.op("recovery-pass", "terminal-read", {
+              "op.sweep": "recovery-filter",
+              "catalyst.ticket": sig.ticket,
+            });
+            const result = isTicketTerminalOrMerged({
+              ticket: sig.ticket,
+              signal: sig,
+              cache,
+              fetchState: (id, o = {}) =>
+                fetchTicketState(id, {
+                  ...o,
+                  cache,
+                  gateway,
+                  replica,
+                  onExec: done
+                    ? ({ source, execMs, result: r, timedOut }) =>
+                        done({
+                          "recovery.terminal.source": source,
+                          "recovery.terminal.cache_hit": false,
+                          "op.exec_ms": execMs,
+                          "recovery.terminal.result": r ?? "null",
+                          "op.timed_out": timedOut === true,
+                        })
+                    : undefined,
+                }),
+            });
+            return !result.terminal;
+          });
         // CTL-1241: buildRecoveryItems attaches the current-tick escalate_human
         // belief (if any) as evidence.beliefState so the structurally-dead R12
         // branch in recovery-reasoning.mjs is revived.
@@ -4010,11 +4068,38 @@ export function schedulerTick(
       // NOT a new per-tick API storm). cache may be undefined (legacy tests that
       // don't inject it); fetchTicketState handles an undefined cache by exec-ing
       // every call exactly as before.
+      // CTL-1364 Tier-3: open one scheduler.op[terminal-read, reclaim-sweep] sub-lap
+      // for this signal's reclaim. Its terminal short-circuit calls fetchState, which
+      // shells out ONLY on a cache+gateway+replica miss — exactly the slow path. The
+      // onExec seam fires only on that live exec; we stash its exec_ms/timed_out and
+      // close the op AFTER reclaimDeadWork returns (so the op can carry the reclaim
+      // outcome). A cache/gateway hit never fires onExec, so `_reclaimExecFired` stays
+      // false and the op is never closed → no span (cache hits emit no op span). tick
+      // may be null (timing off) → tick?.op no-op.
+      const reclaimOpDone = tick?.op("reclaim", "terminal-read", {
+        "op.sweep": "reclaim-sweep",
+        "catalyst.ticket": sig.ticket,
+      });
+      let _reclaimExecMs = null;
+      let _reclaimTimedOut = false;
+      let _reclaimExecFired = false;
       const reclaimOpts = {
         repoRoot,
         cache,
         fetchState: (id, o = {}) =>
-          fetchTicketState(id, { ...o, gateway, replica, gatewayFreshMs: reclaimGatewayFreshMs }),
+          fetchTicketState(id, {
+            ...o,
+            gateway,
+            replica,
+            gatewayFreshMs: reclaimGatewayFreshMs,
+            onExec: reclaimOpDone
+              ? ({ execMs, timedOut }) => {
+                  _reclaimExecFired = true;
+                  _reclaimExecMs = execMs;
+                  _reclaimTimedOut = timedOut === true;
+                }
+              : undefined,
+          }),
         prAdapter,
         // CTL-809 — thread the warm agents snapshot so the reclaim alive-branch can
         // cross-check a jobLifecycle-alive-but-process-gone ghost (getAgentsCached is
@@ -4029,6 +4114,17 @@ export function schedulerTick(
       // (revive only while progressing; stop on zero progress) + the Phase-1 O_EXCL
       // claim bound the mass-revive storm structurally.
       const r = reclaimDeadWork(orchDir, sig, reclaimOpts);
+      // CTL-1364: close the reclaim terminal-read op ONLY when the live exec fired
+      // (a cache/gateway/replica hit never set _reclaimExecFired → no span). The op
+      // carries the reclaim outcome so a slow reclaim-sweep spike attributes to the
+      // exact ticket + outcome + exec_ms in the flame graph.
+      if (reclaimOpDone && _reclaimExecFired) {
+        reclaimOpDone({
+          "recovery.reclaim.outcome": r ?? "null",
+          "op.exec_ms": _reclaimExecMs,
+          "op.timed_out": _reclaimTimedOut,
+        });
+      }
       // CTL-935 Phase 3: record raw outcome before the switch coarsens it.
       try { reclaimOutcomes.set(`${sig.ticket}/${sig.phase}`, r); } catch { /* isolation */ }
       const entry = { ticket: sig.ticket, phase: sig.phase };
@@ -5571,6 +5667,10 @@ export function schedulerTick(
       startEpochMs: tick.startEpochMs,
       endEpochMs: tick.endEpochMs(),
       laps: tick.spanLaps,
+      // CTL-1364: the scheduler.op grandchild tier. Threshold-gated (default 50ms,
+      // env CATALYST_TRACING_OP_THRESHOLD_MS) inside emitTickTrace — a healthy tick
+      // (all cache/gateway hits, no slow op) carries an empty spanOps → ZERO op spans.
+      ops: tick.spanOps,
       attrs: {
         "catalyst.scheduler.total_ms": tick.totalMs(),
         "catalyst.scheduler.slowest_pass": slowest_pass,
