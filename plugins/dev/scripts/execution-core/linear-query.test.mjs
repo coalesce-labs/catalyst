@@ -26,6 +26,7 @@ import {
   __rawExecForTest,
 } from "./linear-query.mjs";
 import { createTicketStateCache } from "./linear-cache.mjs";
+import { isLinearTerminal } from "./terminal-state.mjs"; // CTL-1340: replica-tier terminal assertions
 
 // A fake exec returning a canned linearis result. `exec(cmd, args)` ->
 // { code, stdout, stderr } — the injectable seam runEligibleQuery uses so a
@@ -942,6 +943,135 @@ describe("fetchTicketState — gateway freshness window (CTL-1331 reclaim fix)",
       fetchTicketState("CTL-9", { exec, gateway, gatewayFreshMs: Number.MAX_SAFE_INTEGER })
     ).toBe("Todo");
     expect(execCalls).toBe(0); // the slow `linearis` exec is NEVER reached
+  });
+});
+
+// ─── read-replica tier (CTL-1340) ───────────────────────────────────────────
+// fetchTicketState gains a flag-gated `replica` tier between the in-mem cache
+// and the gateway. A HIT returns the replica's state name with NO exec; a MISS
+// (lookup → undefined) FALLS THROUGH to today's gateway+live read path.
+
+// fakeReplica — a lookup stub that records its calls and returns a canned result.
+function fakeReplica(result) {
+  const calls = [];
+  return {
+    calls,
+    lookup(identifier) {
+      calls.push(identifier);
+      return result;
+    },
+  };
+}
+
+describe("fetchTicketState — read-replica tier (CTL-1340)", () => {
+  test("flag-OFF (no replica) is byte-identical: exec runs, no replica consulted", () => {
+    // Mirror the existing fetchTicketState contract test exactly — passing NO
+    // replica must reproduce the live-read behavior verbatim.
+    const exec = (cmd, args) => {
+      expect(cmd).toBe("linearis");
+      expect(args).toEqual(["issues", "read", "CTL-99"]);
+      return {
+        code: 0,
+        stdout: JSON.stringify({ identifier: "CTL-99", state: { name: "Backlog" } }),
+        stderr: "",
+      };
+    };
+    // No `replica` key at all.
+    expect(fetchTicketState("CTL-99", { exec })).toBe("Backlog");
+  });
+
+  test("flag-OFF with a gateway present: replica block is fully skipped", () => {
+    let execCalls = 0;
+    const exec = () => {
+      execCalls++;
+      return { code: 0, stdout: JSON.stringify({ state: { name: "Done" } }) };
+    };
+    const gateway = fakeGateway({ state: "Todo", removed: false, updatedAt: FRESH() });
+    // Fresh gateway hit short-circuits — identical to the pre-CTL-1340 path.
+    expect(fetchTicketState("CTL-9", { exec, gateway })).toBe("Todo");
+    expect(execCalls).toBe(0);
+  });
+
+  test("flag-ON HIT terminal (completed_at → Done): returns 'Done', exec NEVER called", () => {
+    const replica = fakeReplica({ terminal: true, state: "Done" });
+    const exec = fakeExec({ code: 0, stdout: JSON.stringify({ state: { name: "Should-Not-Read" } }) });
+    const state = fetchTicketState("CTL-1", { exec, replica });
+    expect(state).toBe("Done");
+    expect(isLinearTerminal(state)).toBe(true);
+    expect(exec.calls.length).toBe(0); // HIT-only acceleration: no live read
+    expect(replica.calls).toEqual(["CTL-1"]);
+  });
+
+  test("flag-ON HIT terminal (canceled_at → Canceled): returns 'Canceled', exec NEVER called", () => {
+    const replica = fakeReplica({ terminal: true, state: "Canceled" });
+    const exec = fakeExec({ code: 0, stdout: "{}" });
+    const state = fetchTicketState("CTL-2", { exec, replica });
+    expect(state).toBe("Canceled");
+    expect(isLinearTerminal(state)).toBe(true);
+    expect(exec.calls.length).toBe(0);
+  });
+
+  test("flag-ON HIT non-terminal: returns the state name, exec NEVER called", () => {
+    const replica = fakeReplica({ terminal: false, state: "In Progress" });
+    const exec = fakeExec({ code: 0, stdout: "{}" });
+    const state = fetchTicketState("CTL-3", { exec, replica });
+    expect(state).toBe("In Progress");
+    expect(isLinearTerminal(state)).toBe(false);
+    expect(exec.calls.length).toBe(0);
+  });
+
+  test("flag-ON MISS (lookup → undefined): the live exec IS called (fall-through, safety lock)", () => {
+    // THIS encodes the adversarial-review safety decision: a replica MISS must
+    // NOT skip the live read — otherwise the terminal sweep would re-flag a
+    // finished ticket needs-human. fall-through-on-MISS ONLY.
+    const replica = fakeReplica(undefined);
+    const exec = fakeExec({
+      code: 0,
+      stdout: JSON.stringify({ identifier: "CTL-9", state: { name: "Done" } }),
+    });
+    const state = fetchTicketState("CTL-9", { exec, replica });
+    expect(state).toBe("Done"); // resolved via the live read, NOT the replica
+    expect(replica.calls).toEqual(["CTL-9"]); // replica was consulted first
+    expect(exec.calls.length).toBe(1); // then fell through to the live exec
+  });
+
+  test("flag-ON MISS with a gateway: falls through to the gateway tier (not the live exec)", () => {
+    const replica = fakeReplica(undefined);
+    let execCalls = 0;
+    const exec = () => {
+      execCalls++;
+      return { code: 0, stdout: JSON.stringify({ state: { name: "Live" } }) };
+    };
+    const gateway = fakeGateway({ state: "Todo", removed: false, updatedAt: FRESH() });
+    // MISS → gateway tier; a fresh gateway hit short-circuits before the exec.
+    expect(fetchTicketState("CTL-9", { exec, replica, gateway })).toBe("Todo");
+    expect(execCalls).toBe(0);
+  });
+
+  test("flag-ON HIT warms the in-mem cache so a second call hits without re-consulting the replica", () => {
+    const cache = createTicketStateCache({ now: () => 0 });
+    const replica = fakeReplica({ terminal: true, state: "Done" });
+    const exec = fakeExec({ code: 0, stdout: "{}" });
+    expect(fetchTicketState("CTL-1", { exec, replica, cache })).toBe("Done");
+    // Second call: in-mem cache hit short-circuits BEFORE the replica block.
+    expect(fetchTicketState("CTL-1", { exec, replica, cache })).toBe("Done");
+    expect(replica.calls).toEqual(["CTL-1"]); // consulted exactly once
+    expect(exec.calls.length).toBe(0);
+  });
+
+  test("empty-state guard: a HIT with state '' does NOT poison the cache", () => {
+    let setCalls = [];
+    const cache = {
+      get: () => undefined,
+      set: (id, state) => setCalls.push([id, state]),
+    };
+    // A non-terminal HIT whose state is the empty string (a missing state name).
+    const replica = fakeReplica({ terminal: false, state: "" });
+    const exec = fakeExec({ code: 0, stdout: "{}" });
+    const state = fetchTicketState("CTL-7", { exec, replica, cache });
+    expect(state).toBe(""); // the falsy state is returned verbatim
+    expect(exec.calls.length).toBe(0); // still a HIT (no fall-through)
+    expect(setCalls).toEqual([]); // but cache.set was NEVER called with ""
   });
 });
 
