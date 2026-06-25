@@ -230,6 +230,15 @@ import {
   // (mode=off ⇒ the pass never runs), so no live behavior change until opt-in.
   defaultInvokeRecoveryPass as recoveryInvokeRecoveryPass,
 } from "./recovery-reasoning.mjs";
+// CTL-1331: the async board-health delegate queue. countQueuedDelegates is the
+// slot reservation (a queued/claimed delegate has taken a slot its `claude --bg`
+// hasn't filled yet, so it is invisible to liveBackgroundCount); gcDelegateIntents
+// releases terminal/stale reservations. Both are injectable seams on schedulerTick
+// (defaults below) so a bare tick with an empty queue is a strict no-op (Phase A).
+import {
+  countQueuedDelegates as defaultCountQueuedDelegates,
+  gcDelegateIntents as defaultGcDelegateIntents,
+} from "./delegate-queue.mjs";
 // CTL-1219: the per-category enforcement seam registry (dirty-tree /
 // source-conflict / orphan-stale / stale-label). Pure-cored + injectable; bound
 // to production deps at the unstuckSweep wiring point below. Wiring this does NOT
@@ -2769,6 +2778,14 @@ export function schedulerTick(
     // its slot. Interactive sessions are excluded (unlimited). Injectable for
     // tests so a unit tick need not shell out to `claude`.
     liveBackgroundCount = () => countBackgroundAgents(),
+    // CTL-1331: slot-reservation seams for the async board-health delegate queue.
+    // countQueuedDelegates reserves a slot per queued/claimed intent (so the tick
+    // can't admit real work into a slot a queued delegate will claim);
+    // gcDelegateIntents releases terminal/stale reservations. Injectable so a unit
+    // tick injects a deterministic count; the default reads the real
+    // .delegate-queue. Empty queue → 0 → zero behavior change (Phase A inert).
+    countQueuedDelegates = defaultCountQueuedDelegates,
+    gcDelegateIntents = defaultGcDelegateIntents,
     // CTL-731 Phase 00 / CTL-736: `livenessIsFresh` gates new-work admission — a
     // stale/never-populated `claude agents` snapshot means the live count is
     // untrustworthy, so we HOLD new dispatch (fail-safe, never over-spawn) while
@@ -4050,6 +4067,27 @@ export function schedulerTick(
 
   const liveCount = liveBackgroundCount();
 
+  // CTL-1331: a board-health delegate runs async — the tick enqueues an intent and
+  // a detached runner does the heavy spawn later. A queued/claimed intent has
+  // RESERVED a slot it has not yet filled (its `claude --bg` isn't live, so
+  // liveBackgroundCount can't see it). Reserve it here — GC terminal/stale
+  // reservations first — so new-work/promotion/resume admission can't over-fill
+  // past maxParallel into a slot a queued delegate will claim. The reservation
+  // only ever LOWERS freeSlots (conservative-only, §3b); with an empty queue both
+  // calls return 0, so occupiedCount === liveCount (Phase A inert: zero change).
+  try {
+    gcDelegateIntents(orchDir, now());
+  } catch {
+    /* GC is best-effort — never block the tick */
+  }
+  let queuedDelegates = 0;
+  try {
+    queuedDelegates = countQueuedDelegates(orchDir);
+  } catch {
+    /* reservation read is best-effort — fall back to 0 reserved */
+  }
+  const occupiedCount = liveCount + queuedDelegates;
+
   tick?.lap("liveness-read");
 
   // CTL-1290: board-health delegate cadence hook — SHADOW-FIRST. Runs ONLY when
@@ -4075,7 +4113,7 @@ export function schedulerTick(
           roster,
           self,
           multiHost,
-          capacity: { maxParallel, liveCount, freeSlots: computeFreeSlots(maxParallel, liveCount) },
+          capacity: { maxParallel, liveCount, freeSlots: computeFreeSlots(maxParallel, occupiedCount) },
           readEventRing: _boardHealth.readEventRing,
           ownerForTicket,
           getReconcileMarkers: _boardHealth.getReconcileMarkers,
@@ -4210,7 +4248,7 @@ export function schedulerTick(
       // here — they flow through sweep 2; their presence only makes the triaged
       // candidates compete fairly.
       const freeSlotsForPromotion = livenessIsFresh()
-        ? Math.max(0, computeFreeSlots(maxParallel, liveCount))
+        ? Math.max(0, computeFreeSlots(maxParallel, occupiedCount))
         : 0;
       const readyCandidates = rankTickets(admissionPool.filter((t) => readyIds.has(t.identifier)));
       const admittedSlice = selectDispatchablePerProject(
@@ -4441,7 +4479,7 @@ export function schedulerTick(
   // 30s hysteresis. Runs after reclaim (so a just-reclaimed slot is counted)
   // and before advancement (so a preempted signal isn't falsely advanced).
   {
-    if (computeFreeSlots(maxParallel, liveCount) <= 0) {
+    if (computeFreeSlots(maxParallel, occupiedCount) <= 0) {
       // Build the global ranking to find topQueued and potential victim.
       const ranking = buildGlobalRanking(orchDir, eligible);
       const topQueued = ranking.find((d) => !d.inFlight);
@@ -4751,7 +4789,7 @@ export function schedulerTick(
     // tick, before this sweep) and a resume cannot both claim the same free slot.
     // Symmetric to STEP C's sweep-2 subtraction — the same double-fill class CTL-705
     // closed for resume-vs-new-work, now also closed for promotion-vs-resume.
-    let resumeSlots = Math.max(0, computeFreeSlots(maxParallel, liveCount) - promotedCount);
+    let resumeSlots = Math.max(0, computeFreeSlots(maxParallel, occupiedCount) - promotedCount);
     if (resumeSlots > 0) {
       // Collect parked tickets: in-flight tickets with status === PREEMPTED_STATUS.
       const parkedDescriptors = [];
@@ -4926,7 +4964,7 @@ export function schedulerTick(
   // CTL-705: reuse the tick-hoisted liveCount (a single `claude agents --json`
   // read) instead of re-shelling-out — `claude stop` does not deregister within
   // the same tick, so the count is stable since sweep 0.5.
-  const inFlightCount = liveCount;
+  const inFlightCount = occupiedCount; // CTL-1331: + queued delegate slot reservations
   // CTL-665: config-first ceiling — a committed executionCore.maxParallel
   // (threaded via `concurrency`) wins over state.json; clamped to the bounds.
   // CTL-705: subtract resumed slots (sweep 1.5) so resume and new-work don't
