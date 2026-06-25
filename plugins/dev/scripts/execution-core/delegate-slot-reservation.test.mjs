@@ -96,4 +96,27 @@ describe("schedulerTick — CTL-1331 delegate slot reservation (§3/§10b)", () 
     tickCapacity({ maxParallel: 4, live: 0, queued: 0, gcSpy: () => { gcCalls++; } });
     expect(gcCalls).toBe(1);
   });
+
+  // The board-health capacity above proves occupiedCount reaches ONE consumer. The
+  // new-work / promotion / resume gates all derive from inFlightCount =
+  // occupiedCount (scheduler.mjs §3b). Assert the tick RESULT's inFlightCount
+  // directly so a future regression that re-points only the new-work path back to
+  // bare liveCount — which the capacity assertion alone would NOT catch — fails here.
+  test("tick result inFlightCount reflects the reservation (new-work/resume gate lock)", () => {
+    const tick = (queued) =>
+      schedulerTick(orchDir, {
+        readEligible: () => [],
+        dispatch: () => ({ code: 0 }),
+        writeStatus: () => {},
+        reclaimDeadWork: () => "noop",
+        concurrency: { maxParallel: 4 },
+        liveBackgroundCount: () => 1,
+        countQueuedDelegates: () => queued,
+        gcDelegateIntents: () => 0,
+      });
+    expect(tick(0).inFlightCount).toBe(1); // empty queue → inFlightCount === liveCount (inert)
+    expect(tick(2).inFlightCount).toBe(3); // live(1) + queued(2) reservations
+    // …and the reservation withholds new-work headroom.
+    expect(tick(2).freeSlots).toBeLessThan(tick(0).freeSlots);
+  });
 });

@@ -50,7 +50,7 @@ import {
 import { defaultInvokeRecoveryPass } from "./recovery-reasoning.mjs";
 import { countBackgroundAgents as defaultCountBackgroundAgents } from "./claude-agents.mjs";
 import { isBgJobAlive as defaultIsBgJobAlive } from "./claude-agents.mjs";
-import { computeFreeSlots } from "./scheduler.mjs";
+import { computeFreeSlots, readMaxParallel } from "./scheduler.mjs";
 
 const RECOVERY_PASS_PHASE = "recovery-pass";
 
@@ -425,7 +425,12 @@ if (isEntrypoint) {
     process.exit(0);
   }
   try {
-    const r = drainOnce({ orchDir });
+    // Resolve a FINITE maxParallel so the drain-time free-slot re-check (drainOnce
+    // step 3) actually competes for headroom. Without it resolveMaxParallel(undefined)
+    // → Infinity, which would let the runner launch a delegate past maxParallel even
+    // when the board is full. readMaxParallel(orchDir, {}) reads the same state.json
+    // ceiling the scheduler tick uses.
+    const r = drainOnce({ orchDir, maxParallel: readMaxParallel(orchDir, {}) });
     log.info({ ...r }, "delegate-runner-entry: drain complete");
   } catch (err) {
     log.warn({ err: err?.message }, "delegate-runner-entry: drain threw");
