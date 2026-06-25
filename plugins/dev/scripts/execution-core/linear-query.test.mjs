@@ -1647,3 +1647,62 @@ describe("CTL-1339 rawExec timeout wiring (integration)", () => {
     expect(res.timedOut).toBe(false);
   });
 });
+
+// ─── CTL-1364: DEFAULT rawExec Node timeout (caps EVERY linearis spawn) ──────
+// OTEL flagged rawExec as having NO default Node timeout, so any single linearis
+// read (recovery-filter / reclaim-sweep / phantom-probe / assignee-read / poll)
+// could block the synchronous tick its full wall-clock. The default floor caps
+// them all, WITHOUT double-capping the CTL-1339 opt-in (which passes its own).
+describe("CTL-1364 rawExec DEFAULT timeout", () => {
+  test("(a)+(b) a spawn with NO explicit timeoutMs is killed by the default floor (timedOut → breaker-trip)", async () => {
+    // Re-import a fresh module instance with a tiny default floor so the real
+    // `sleep` is killed deterministically in well under 1s. Proves rawExec passes
+    // a default `timeout` to spawnSync and that a default-timeout kill flags
+    // timedOut exactly like the CTL-1339 opt-in (so withBreaker still trips).
+    process.env.CATALYST_LINEARIS_DEFAULT_TIMEOUT_MS = "200";
+    try {
+      const fresh = await import(
+        `./linear-query.mjs?ctl1364-default-floor=${Date.now()}`
+      );
+      const t0 = Date.now();
+      const res = fresh.__rawExecForTest("sleep", ["5"]); // NO timeoutMs — relies on the default
+      const elapsed = Date.now() - t0;
+      expect(res.code).toBe(127); // spawnSync ETIMEDOUT → res.error → code 127
+      expect(elapsed).toBeLessThan(1000); // killed at ~200ms, NOT after 5s
+      expect(res.timedOut).toBe(true); // default-timeout kill trips the breaker too
+    } finally {
+      delete process.env.CATALYST_LINEARIS_DEFAULT_TIMEOUT_MS;
+    }
+  });
+
+  test("(no double-cap) an explicit positive timeoutMs WINS over the default floor", async () => {
+    // With a tiny default floor but a generous explicit cap, a short sleep runs
+    // to completion (exit 0): the explicit value is used verbatim, not stacked
+    // with / overridden by the floor.
+    process.env.CATALYST_LINEARIS_DEFAULT_TIMEOUT_MS = "50";
+    try {
+      const fresh = await import(
+        `./linear-query.mjs?ctl1364-explicit-wins=${Date.now()}`
+      );
+      const res = fresh.__rawExecForTest("sleep", ["0.2"], { timeoutMs: 5000 });
+      expect(res.code).toBe(0); // explicit 5000 > 0.2s sleep → completes, NOT killed at the 50ms floor
+    } finally {
+      delete process.env.CATALYST_LINEARIS_DEFAULT_TIMEOUT_MS;
+    }
+  });
+
+  test("(disable) CATALYST_LINEARIS_DEFAULT_TIMEOUT_MS=0 restores the uncapped path", async () => {
+    // The explicit escape hatch: "0" disables the default floor entirely, so a
+    // short un-timed sleep runs to completion (no kill).
+    process.env.CATALYST_LINEARIS_DEFAULT_TIMEOUT_MS = "0";
+    try {
+      const fresh = await import(
+        `./linear-query.mjs?ctl1364-disabled=${Date.now()}`
+      );
+      const res = fresh.__rawExecForTest("sleep", ["0.2"]); // no opts, floor disabled
+      expect(res.code).toBe(0);
+    } finally {
+      delete process.env.CATALYST_LINEARIS_DEFAULT_TIMEOUT_MS;
+    }
+  });
+});

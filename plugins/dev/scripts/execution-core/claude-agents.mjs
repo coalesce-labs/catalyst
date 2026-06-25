@@ -19,6 +19,25 @@ import { getJobsRoot } from "./config.mjs";
 
 const CLAUDE_BIN = process.env.CATALYST_DISPATCH_CLAUDE_BIN || "claude";
 
+// CTL-1364: bound the SYNCHRONOUS `claude agents --json` spawn. The CTL-731
+// async hot path (refreshAgents) already has its own deadline, but the SYNC
+// reader listClaudeAgentsResult — reached by the phantom-bg-liveness probe
+// (isBgJobAlive → listClaudeAgents) and by reaper/job-dir-gc/worker-dir-gc/
+// proc-reaper/worktree-safety — had NO timeout, so a slow `claude agents` (we
+// saw 66–78s liveness refreshes) could stall a synchronous scheduler tick its
+// full wall-clock. A timed-out execFileSync THROWS (ETIMEDOUT) → caught below →
+// { ok:false } / [], identical to the existing failure fail-safe. The fast path
+// (a sub-timeout read) is byte-for-byte unchanged. env
+// CATALYST_CLAUDE_AGENTS_TIMEOUT_MS: default 5000; "0" disables (no cap).
+function parseAgentsTimeoutMs(raw) {
+  if (raw === "0") return undefined;
+  const n = Number(raw);
+  return n > 0 ? n : 5_000;
+}
+const CLAUDE_AGENTS_TIMEOUT_MS = parseAgentsTimeoutMs(
+  process.env.CATALYST_CLAUDE_AGENTS_TIMEOUT_MS,
+);
+
 // listClaudeAgentsResult — like listClaudeAgents but distinguishes a FAILED read
 // ({ ok:false }) from a genuinely empty fleet ({ ok:true, agents:[] }). The TTL
 // cache (cachedListClaudeAgents) needs that distinction: on a transient
@@ -27,7 +46,15 @@ const CLAUDE_BIN = process.env.CATALYST_DISPATCH_CLAUDE_BIN || "claude";
 // reclaim storm across the whole fleet.
 export function listClaudeAgentsResult({ exec = execFileSync } = {}) {
   try {
-    const out = exec(CLAUDE_BIN, ["agents", "--json"], { encoding: "utf8" });
+    // CTL-1364: bound the spawn. On timeout execFileSync throws (ETIMEDOUT) and
+    // the catch below returns { ok:false, agents:[] } — the same fail-safe as a
+    // missing binary / non-JSON output. Injected test execs ignore the extra opts.
+    const opts = { encoding: "utf8" };
+    if (typeof CLAUDE_AGENTS_TIMEOUT_MS === "number" && CLAUDE_AGENTS_TIMEOUT_MS > 0) {
+      opts.timeout = CLAUDE_AGENTS_TIMEOUT_MS;
+      opts.killSignal = "SIGKILL";
+    }
+    const out = exec(CLAUDE_BIN, ["agents", "--json"], opts);
     const parsed = JSON.parse(out);
     if (!Array.isArray(parsed)) return { ok: false, agents: [] };
     return { ok: true, agents: parsed };

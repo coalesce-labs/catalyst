@@ -71,6 +71,48 @@ describe("listClaudeAgentsResult", () => {
       agents: [],
     });
   });
+
+  // CTL-1364: bound the SYNCHRONOUS `claude agents --json` spawn so a slow read
+  // (we observed 66–78s liveness refreshes) can't stall a synchronous scheduler
+  // tick through the phantom-bg-liveness probe (isBgJobAlive → listClaudeAgents)
+  // or the reaper / *-gc / worktree-safety callers.
+  describe("CTL-1364 bounded spawn", () => {
+    test("passes a default Node timeout + killSignal to the spawn opts", () => {
+      let seenOpts = null;
+      const exec = (_bin, _args, opts) => {
+        seenOpts = opts;
+        return JSON.stringify([]);
+      };
+      listClaudeAgentsResult({ exec });
+      expect(seenOpts).toMatchObject({
+        encoding: "utf8",
+        timeout: 5000,
+        killSignal: "SIGKILL",
+      });
+    });
+
+    test("a timed-out spawn (execFileSync throws ETIMEDOUT) → ok:false fail-safe", () => {
+      // execFileSync throws on a `timeout` kill; the reader must degrade exactly
+      // like a missing binary so the liveness decision falls through safely.
+      const exec = () => {
+        const err = new Error("spawnSync /bin/claude ETIMEDOUT");
+        err.code = "ETIMEDOUT";
+        throw err;
+      };
+      expect(listClaudeAgentsResult({ exec })).toEqual({ ok: false, agents: [] });
+    });
+
+    test("isBgJobAlive degrades to false when the bounded spawn times out", () => {
+      // The phantom-bg-liveness fall-through caller: a timed-out probe must not
+      // throw out of the tick; it returns false (caller falls through to revive).
+      const exec = () => {
+        const err = new Error("ETIMEDOUT");
+        err.code = "ETIMEDOUT";
+        throw err;
+      };
+      expect(isBgJobAlive("22222222", { exec })).toBe(false);
+    });
+  });
 });
 
 describe("cachedListClaudeAgents (CTL-672 TTL liveness cache)", () => {

@@ -34,6 +34,23 @@ const LINEARIS_TERMINAL_READ_TIMEOUT_MS = parseTerminalTimeoutMs(
   process.env.CATALYST_LINEARIS_TERMINAL_TIMEOUT_MS,
 );
 
+// CTL-1364: DEFAULT Node `timeout` for EVERY rawExec/linearis spawn — not just
+// the two CTL-1339 opt-in hot terminal reads. OTEL flagged rawExec (the shared
+// spawnSync behind ALL linearis reads: recovery-filter, reclaim-sweep,
+// phantom-probe, assignee-read, the eligible poll) as having NO Node timeout, so
+// a single 429-stalled `linearis` call could block the synchronous scheduler tick
+// its full ~30s wall-clock with no per-call cap. This default caps ALL of them at
+// once. It is a FLOOR applied only when a caller did NOT pass an explicit
+// { timeoutMs } — so the CTL-1339 opt-in path (which passes its own 8000) is
+// untouched (no double-cap: the caller's value wins via ?? below), and the
+// CTL-1341 timedOut/breaker-trip semantics are identical regardless of which
+// timeout supplied the value. Chosen consistent with CTL-1339's cap (~8s).
+// env CATALYST_LINEARIS_DEFAULT_TIMEOUT_MS: default 8000; "0" disables (no cap),
+// which restores the pre-CTL-1364 uncapped behavior for an explicit escape hatch.
+const RAWEXEC_DEFAULT_TIMEOUT_MS = parseTerminalTimeoutMs(
+  process.env.CATALYST_LINEARIS_DEFAULT_TIMEOUT_MS,
+);
+
 // CTL-784: batched multi-issue read. The Linear GraphQL endpoint, the named
 // operation (so the proxy audit can tell a batch read apart from the per-ticket
 // `GetIssueByIdentifier` storm), and the chunk ceiling (Linear caps a page at
@@ -90,8 +107,20 @@ export function buildLinearisArgs(query) {
 // missing binary produces, which callers already treat as unknown/null.
 function rawExec(cmd, args, { timeoutMs } = {}) {
   const opts = { encoding: "utf8" };
-  if (typeof timeoutMs === "number" && timeoutMs > 0) {
-    opts.timeout = timeoutMs;
+  // CTL-1364: an explicit POSITIVE per-call timeoutMs (CTL-1339 opt-in) WINS;
+  // otherwise fall back to the rawExec default floor so EVERY linearis spawn is
+  // capped, not just the two hot terminal reads. No double-cap: when CTL-1339
+  // passes its own 8000 that value is used verbatim (the floor never stacks).
+  // A caller passing 0 / undefined (e.g. CATALYST_LINEARIS_TERMINAL_TIMEOUT_MS=0
+  // resolves LINEARIS_TERMINAL_READ_TIMEOUT_MS to undefined) drops to the floor —
+  // so the global default still protects the tick; to fully uncap, also set
+  // CATALYST_LINEARIS_DEFAULT_TIMEOUT_MS=0.
+  const effectiveTimeoutMs =
+    typeof timeoutMs === "number" && timeoutMs > 0
+      ? timeoutMs
+      : RAWEXEC_DEFAULT_TIMEOUT_MS;
+  if (typeof effectiveTimeoutMs === "number" && effectiveTimeoutMs > 0) {
+    opts.timeout = effectiveTimeoutMs;
     opts.killSignal = "SIGKILL";
   }
   const res = spawnSync(cmd, args, opts);
