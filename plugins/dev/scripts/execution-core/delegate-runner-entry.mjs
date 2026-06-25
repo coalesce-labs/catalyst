@@ -237,8 +237,21 @@ export function drainOnce(deps = {}) {
     //     semantics), then the worktree provision + claude --bg happens INSIDE
     //     defaultInvokeRecoveryPass, here in the disposable child.
     const claimed = readJsonFile(claimPath) ?? {};
-    const boardContext = claimed.boardContext ?? null;
-    const reason = claimed.reason ?? null;
+    const kind = claimed.kind ?? "board-health";
+
+    // CTL-1331 FU-1: build the invoke args by intent kind. A board-health delegate
+    // carries {boardContext, reason}; a per-item "recovery-item" carries the full
+    // briefObj (diagnostician evidence + failure reason + brief) that
+    // reasoningRecoveryPass assembled on the tick. Either way the dispatched phase
+    // is RECOVERY_PASS_PHASE (defaultInvokeRecoveryPass always dispatches that).
+    const invokeArgs =
+      kind === "recovery-item"
+        ? { ...(claimed.briefObj ?? {}) }
+        : {
+            boardContext: claimed.boardContext ?? null,
+            reason: claimed.reason ?? null,
+            phase: RECOVERY_PASS_PHASE,
+          };
 
     try {
       appendRequested({
@@ -246,7 +259,7 @@ export function drainOnce(deps = {}) {
         orchDir,
         ticket,
         target_phase: RECOVERY_PASS_PHASE,
-        reason: "board-health",
+        reason: kind,
       });
     } catch {
       /* best-effort telemetry — never block the drain */
@@ -254,11 +267,7 @@ export function drainOnce(deps = {}) {
 
     let r;
     try {
-      r = invokeFn(
-        ticket,
-        { boardContext, reason, phase: RECOVERY_PASS_PHASE },
-        { orchDir }
-      );
+      r = invokeFn(ticket, invokeArgs, { orchDir });
     } catch (err) {
       r = { dispatched: false, reason: `invoke threw: ${err?.message}` };
     }

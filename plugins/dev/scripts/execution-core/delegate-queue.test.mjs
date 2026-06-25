@@ -29,6 +29,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   enqueueDelegateIntent,
+  enqueueRecoveryItemDelegate,
   countQueuedDelegates,
   gcDelegateIntents,
   claimIntent,
@@ -99,6 +100,74 @@ const INTENT = {
   boardContext: { anomaly: "wip-spike", anchors: ["CTL-1"] },
   reason: "board-health: wip spike — holistic delegate",
 };
+
+// CTL-1331 FU-1: the per-item recovery brief reasoningRecoveryPass assembles.
+const RECOVERY_BRIEF = {
+  brief: "ticket stuck in verify",
+  reason: "verify-loop",
+  evidence: { logsOutput: "tsc errors", jobState: "dead" },
+  phase: "verify",
+  bgJobId: "bg-dead-7",
+  failureReason: "tsc failed",
+};
+
+// ─── CTL-1331 FU-1: kind:recovery-item payload + the enqueue helper ───────────
+
+describe("enqueueDelegateIntent — carries the kind:recovery-item briefObj (FU-1)", () => {
+  test("persists the per-item briefObj verbatim; board-health intents keep briefObj null", () => {
+    const r = enqueueDelegateIntent(
+      "CTL-RI",
+      { kind: "recovery-item", phase: "recovery-pass", briefObj: RECOVERY_BRIEF, reason: "verify-loop" },
+      deps()
+    );
+    expect(r.enqueued).toBe(true);
+    const intent = readIntent("CTL-RI");
+    expect(intent.kind).toBe("recovery-item");
+    expect(intent.briefObj).toEqual(RECOVERY_BRIEF);
+    expect(intent.boardContext).toBeNull(); // recovery-item carries no board context
+
+    enqueueDelegateIntent("CTL-BH", INTENT, deps());
+    expect(readIntent("CTL-BH").briefObj).toBeNull(); // back-compat: board-health has no brief
+  });
+});
+
+describe("enqueueRecoveryItemDelegate (FU-1 — attemptFix-compatible result)", () => {
+  test("fresh enqueue → success+enqueued, dispatched:false, persists kind:recovery-item + briefObj", () => {
+    const res = enqueueRecoveryItemDelegate("CTL-100", RECOVERY_BRIEF, deps());
+    expect(res.success).toBe(true);
+    expect(res.enqueued).toBe(true);
+    expect(res.dispatched).toBe(false); // NEVER a synchronous dispatch — moved off-tick
+    expect(res.attempts).toBe(1);
+    const intent = readIntent("CTL-100");
+    expect(intent.kind).toBe("recovery-item");
+    expect(intent.briefObj).toEqual(RECOVERY_BRIEF);
+  });
+
+  test("already-pending no-op → still success:true (recovery in flight), no second write", () => {
+    enqueueRecoveryItemDelegate("CTL-101", RECOVERY_BRIEF, deps());
+    const before = readFileSync(intentPath("CTL-101"), "utf8");
+    const res = enqueueRecoveryItemDelegate("CTL-101", RECOVERY_BRIEF, deps());
+    expect(res.success).toBe(true); // attemptFix must NOT treat an in-flight recovery as a failure
+    expect(res.enqueued).toBe(false);
+    expect(res.reason).toBe("already-pending");
+    expect(readFileSync(intentPath("CTL-101"), "utf8")).toBe(before);
+  });
+
+  test("a live recovery-pass worker → success:true (worker-live), no enqueue", () => {
+    seedRecoveryPassSignal("CTL-102", "running", "bg-live");
+    const res = enqueueRecoveryItemDelegate("CTL-102", RECOVERY_BRIEF, deps({ isBgJobAlive: () => true }));
+    expect(res.success).toBe(true);
+    expect(res.enqueued).toBe(false);
+    expect(res.reason).toBe("worker-live");
+  });
+
+  test("a GENUINE enqueue failure (no orchDir) → success:false (NOT 'in flight' — attemptFix may escalate)", () => {
+    const res = enqueueRecoveryItemDelegate("CTL-103", RECOVERY_BRIEF, { /* no orchDir */ });
+    expect(res.success).toBe(false);
+    expect(res.enqueued).toBe(false);
+    expect(res.reason).toBe("no-orch-dir");
+  });
+});
 
 // ─── dir derivation parity with .recovery-intents/ ───────────────────────────
 

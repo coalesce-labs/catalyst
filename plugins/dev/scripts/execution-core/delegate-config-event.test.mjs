@@ -170,6 +170,38 @@ describe("readDelegateRunnerConfig (CTL-1331)", () => {
     expect(cfg.mode).toBe("off");
   });
 
+  // CTL-1331 FU-1: the runner must also be ON when the per-item Pass 0r recovery
+  // is in enforce (not just board-health) — both paths enqueue recovery-pass
+  // intents the runner must drain; if it were off, intents would accumulate and
+  // recovery would silently halt. This is the live mini case:
+  // board-health=shadow + recovery-pass=enforce → runner ON.
+  test("default mode resolves 'on' when recovery-pass is enforce (board-health shadow)", () => {
+    const cfg = readDelegateRunnerConfig({
+      ...NO_L2,
+      CATALYST_BOARD_HEALTH: "shadow",
+      CATALYST_RECOVERY_PASS: "enforce",
+    });
+    expect(cfg.mode).toBe("on");
+  });
+
+  test("default mode resolves 'off' when BOTH board-health and recovery-pass are non-enforce", () => {
+    const cfg = readDelegateRunnerConfig({
+      ...NO_L2,
+      CATALYST_BOARD_HEALTH: "shadow",
+      CATALYST_RECOVERY_PASS: "shadow",
+    });
+    expect(cfg.mode).toBe("off");
+  });
+
+  test("CATALYST_DELEGATE_RUNNER=off overrides even when recovery-pass is enforce", () => {
+    const cfg = readDelegateRunnerConfig({
+      ...NO_L2,
+      CATALYST_RECOVERY_PASS: "enforce",
+      CATALYST_DELEGATE_RUNNER: "off",
+    });
+    expect(cfg.mode).toBe("off");
+  });
+
   test("CATALYST_DELEGATE_RUNNER=off overrides even when board-health is enforce", () => {
     const cfg = readDelegateRunnerConfig({
       ...NO_L2,

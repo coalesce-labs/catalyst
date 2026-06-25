@@ -133,6 +133,10 @@ export function startDelegateRunnerTimer({
       const child = spawn(process.execPath, [entryPath], {
         detached: true,
         stdio: ["ignore", logFd, logFd],
+        // CTL-1331 FU-1: the detached entry resolves its orchDir from
+        // CATALYST_EXECUTION_CORE_DIR — pass it explicitly so the child drains the
+        // correct queue even when the daemon's own env doesn't carry it.
+        env: { ...process.env, CATALYST_EXECUTION_CORE_DIR: orchDir },
       });
       if (child && typeof child.unref === "function") child.unref();
     } catch (err) {

@@ -981,11 +981,14 @@ function readLayer2RecoveryPass() {
   } catch { return {}; }
 }
 
-export function readRecoveryPassConfig() {
+export function readRecoveryPassConfig(envObj = process.env) {
   const l2 = readLayer2RecoveryPass();
   // CATALYST_RECOVERY_PASS is the single operator knob:
   //   "0" → off (kill-switch), off|shadow|enforce → that mode, anything else → off.
-  const env = process.env.CATALYST_RECOVERY_PASS;
+  // CTL-1331 FU-1: env is injectable (default process.env) so readDelegateRunnerConfig
+  // resolves the recovery-pass coupling from the SAME injected env it uses for
+  // board-health — deterministic in tests, identical at runtime (env === process.env).
+  const env = envObj.CATALYST_RECOVERY_PASS;
   let mode;
   if (env === "0") {
     mode = "off";
@@ -1107,8 +1110,17 @@ export function readDelegateRunnerConfig(env = process.env) {
   if (typeof v === "string" && DELEGATE_RUNNER_MODES.has(v)) {
     mode = v; // explicit operator override (on|off)
   } else {
-    // Coupled default: on iff board-health is enforce (the only mode that enqueues).
-    mode = readBoardHealthConfig(env).mode === "enforce" ? "on" : "off";
+    // Coupled default: ON when EITHER async-enqueuing path is in enforce — the
+    // whole-board board-health delegate (CTL-1331 Phase B) OR the per-item Pass 0r
+    // recovery (CTL-1331 FU-1, CATALYST_RECOVERY_PASS). Both enqueue recovery-pass
+    // delegate intents the runner must drain; with the runner off while either is
+    // enforce, intents would accumulate (reserved slots) and never dispatch —
+    // silently halting recovery. (readRecoveryPassConfig reads process.env; on the
+    // daemon env === process.env so this resolves correctly at runtime.)
+    const enqueuingActive =
+      readBoardHealthConfig(env).mode === "enforce" ||
+      readRecoveryPassConfig(env).mode === "enforce";
+    mode = enqueuingActive ? "on" : "off";
   }
   return {
     mode,
