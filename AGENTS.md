@@ -67,6 +67,31 @@ workflow relationships. Agent (subagent) references always use the full
   (CTL-831): `ticket/<date>.md` cross-ticket retros (`catalyst-dev:ticket-retro`);
   `estimate/<YYYY-WW>-compound-log.md` per-PR estimation actuals (`catalyst-dev:compound-estimate`).
 
+## Code Understanding (Serena)
+
+Coding agents orient on this codebase through **Serena** — a self-hosted, local, LSP-backed MCP
+server that provides semantic code retrieval (the replacement for the removed DeepWiki MCP). It lets
+agents answer "where does X live / how is Y wired / who calls Z" in a few precise calls instead of
+many broad `Grep`s, getting up to speed with far fewer tool calls and tokens.
+
+- **Install (per machine):** `uv tool install -p 3.13 serena-agent`, then register it as a
+  **user-scope MCP server** that runs `serena start-mcp-server`. Use the absolute path to the
+  `serena` binary so background worker jobs with a restricted `PATH` can launch it, and run it
+  headless on servers. It connects with no startup project and activates lazily. The exact
+  per-agent registration command lives in the bridge file.
+- **Versioned config (committed):** `.serena/project.yml` (languages `typescript` + `bash`,
+  `read_only: true`, ignores the harness worktree dir / `thoughts` / build output, plus an
+  `initial_prompt` pointer) and
+  `.serena/memories/codebase_map.md` (the directory map agents read via `read_memory("codebase_map")`).
+  The per-machine symbol cache `.serena/cache/` is gitignored; build it with `serena project index`.
+- **Wiring:** the research/analysis agents (`codebase-analyzer`, `codebase-locator`,
+  `codebase-pattern-finder`) and skills (`research-codebase`, `create-plan`, `phase-research`,
+  `phase-plan`) grant the read-only `mcp__serena__*` tools; `research-codebase` Step 0 activates the
+  project, reads the `codebase_map` memory, and maps symbols before spawning sub-agents.
+- **Use it:** `activate_project` (repo root / `.`) → `list_memories` / `read_memory` →
+  `get_symbols_overview`, `find_symbol`, `find_referencing_symbols`, `search_for_pattern`. It is
+  read-only — editing stays with the implement agents' `Edit`/`Write`.
+
 ## Commit Conventions
 
 - `feat(dev): add new skill` — catalyst-dev minor bump

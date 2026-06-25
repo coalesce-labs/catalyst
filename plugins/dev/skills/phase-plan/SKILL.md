@@ -16,6 +16,15 @@ allowed-tools:
   - Glob
   - Task
   - Bash
+  - mcp__serena__activate_project
+  - mcp__serena__list_memories
+  - mcp__serena__read_memory
+  - mcp__serena__get_symbols_overview
+  - mcp__serena__find_symbol
+  - mcp__serena__find_referencing_symbols
+  - mcp__serena__search_for_pattern
+  - mcp__serena__find_file
+  - mcp__serena__list_dir
 ---
 
 # phase-plan

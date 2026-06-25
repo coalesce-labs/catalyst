@@ -426,6 +426,15 @@ Claude Code provides these tools:
 - `WebFetch` - Fetch web content
 - `WebSearch` - Search the web
 
+### Code Understanding (Serena MCP)
+
+- `mcp__serena__activate_project` - Activate the repo so language servers target it
+- `mcp__serena__list_memories` / `mcp__serena__read_memory` - Read persisted project orientation
+- `mcp__serena__get_symbols_overview` - Map a file's top-level symbols
+- `mcp__serena__find_symbol` - Jump to a symbol's definition (semantic, not grep)
+- `mcp__serena__find_referencing_symbols` - Find callers/references of a symbol
+- `mcp__serena__search_for_pattern` / `mcp__serena__find_file` / `mcp__serena__list_dir` - Search/list
+
 ### Linear Integration
 
 - `linear_get_ticket` - Get Linear ticket details

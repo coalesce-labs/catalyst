@@ -6,7 +6,10 @@ description:
   the better! :)
 tools:
   Read, Grep, Glob, Bash(ls *), mcp__context7__get_library_docs,
-  mcp__context7__resolve_library_id
+  mcp__context7__resolve_library_id, mcp__serena__activate_project, mcp__serena__list_memories,
+  mcp__serena__read_memory, mcp__serena__get_symbols_overview, mcp__serena__find_symbol,
+  mcp__serena__find_referencing_symbols, mcp__serena__search_for_pattern, mcp__serena__find_file,
+  mcp__serena__list_dir
 model: sonnet
 version: 1.0.0
 ---
@@ -45,6 +48,13 @@ trace data flow, and explain technical workings with precise file:line reference
    - Find integration points between systems
 
 ## Analysis Strategy
+
+**Navigate with Serena when available.** If the `mcp__serena__*` tools are present (Catalyst's local
+code-understanding MCP), prefer them over raw `Grep` for symbol-level work — they are precise and
+cheaper in tool calls/tokens: `get_symbols_overview` to map a file's top-level symbols,
+`find_symbol` to jump straight to a definition, and `find_referencing_symbols` to trace callers/data
+flow. Fall back to `Grep`/`Read` when Serena is unavailable or for non-symbol text searches. If
+Serena reports no active project, call `activate_project` with the repo root (`.`) first.
 
 ### Step 1: Read Entry Points
 

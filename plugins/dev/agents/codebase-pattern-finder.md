@@ -7,7 +7,9 @@ description:
   the location of files, it will also give you code details!
 tools:
   Grep, Glob, Read, Bash(ls *), mcp__context7__get_library_docs,
-  mcp__context7__resolve_library_id, WebSearch, WebFetch
+  mcp__context7__resolve_library_id, WebSearch, WebFetch, mcp__serena__activate_project,
+  mcp__serena__get_symbols_overview, mcp__serena__find_symbol, mcp__serena__find_referencing_symbols,
+  mcp__serena__search_for_pattern, mcp__serena__find_file, mcp__serena__list_dir
 model: sonnet
 version: 1.0.0
 ---

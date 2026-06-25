@@ -7,7 +7,10 @@ description:
   thoughts/shared/research/ with file:line references."
 disable-model-invocation: false
 allowed-tools:
-  Read, Write, Grep, Glob, Task, TodoWrite, Bash
+  Read, Write, Grep, Glob, Task, TodoWrite, Bash,
+  mcp__serena__activate_project, mcp__serena__list_memories, mcp__serena__read_memory,
+  mcp__serena__get_symbols_overview, mcp__serena__find_symbol, mcp__serena__find_referencing_symbols,
+  mcp__serena__search_for_pattern, mcp__serena__find_file, mcp__serena__list_dir
 version: 1.0.0
 ---
 
@@ -70,6 +73,26 @@ on single-host setups and never blocks research if offline:
 ```
 
 ## Steps to Follow After Receiving the Research Query
+
+### Step 0: Orient with Serena (ALWAYS attempt this first)
+
+Before reading files or spawning sub-agents, get a fast semantic map of the codebase from Serena —
+Catalyst's self-hosted, local code-understanding MCP (the DeepWiki replacement). This is free and
+usually answers "where does X live / how is Y wired" in one call instead of many `Grep`s, so your
+sub-agent prompts come out specific rather than exploratory.
+
+**Prerequisite check** — only do this if the `mcp__serena__*` tools are available (Serena MCP is
+installed). If they are not, skip straight to Step 1 — do not retry or warn the user.
+
+1. **Activate the project** so the language servers target this repo:
+   `mcp__serena__activate_project` with the repo root (the current working directory, or `.`).
+2. **Read the persisted orientation**: `mcp__serena__list_memories`, then
+   `mcp__serena__read_memory("codebase_map")` for the directory map and key concepts.
+3. **Map the relevant area** instead of broad grepping: `mcp__serena__get_symbols_overview` on a key
+   file, `mcp__serena__find_symbol` to jump to a definition, and
+   `mcp__serena__find_referencing_symbols` to see its callers.
+
+Serena's results are a starting point — always verify against live code via the sub-agents below.
 
 ### Step 1: Read any directly mentioned files first
 

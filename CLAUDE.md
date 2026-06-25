@@ -19,6 +19,22 @@ stays tool-agnostic.)
 - Phase-agent workers run as `claude --bg` jobs; the legacy oneshot mode runs a long-lived
   `claude -p /catalyst-legacy:oneshot` per ticket.
 
+### Code understanding (Serena MCP)
+
+Serena is wired into the research/analysis agents for semantic code retrieval — see
+`AGENTS.md` → "Code Understanding (Serena)" for what it is and how it's used. Register it
+once per machine as a **user-scope** MCP (the absolute `serena` path lets restricted-`PATH`
+`claude --bg` phase-agent workers launch it; the headless flags keep it browser-free on servers):
+
+```bash
+uv tool install -p 3.13 serena-agent
+claude mcp add --scope user serena -- "$HOME/.local/bin/serena" start-mcp-server \
+  --context claude-code --enable-web-dashboard False --enable-gui-log-window False
+```
+
+It connects with no startup project and activates lazily, so a fresh session connects fast and pays
+the language-server startup cost only when an agent first calls `activate_project`.
+
 ### Always-loaded reference docs
 
 `@`-imports are a Claude Code feature and load the file in full at session start (they do **not**
