@@ -34,17 +34,23 @@ const LINEARIS_TERMINAL_READ_TIMEOUT_MS = parseTerminalTimeoutMs(
   process.env.CATALYST_LINEARIS_TERMINAL_TIMEOUT_MS,
 );
 
-// CTL-1364: DEFAULT Node `timeout` for EVERY rawExec/linearis spawn — not just
-// the two CTL-1339 opt-in hot terminal reads. OTEL flagged rawExec (the shared
-// spawnSync behind ALL linearis reads: recovery-filter, reclaim-sweep,
-// phantom-probe, assignee-read, the eligible poll) as having NO Node timeout, so
-// a single 429-stalled `linearis` call could block the synchronous scheduler tick
-// its full ~30s wall-clock with no per-call cap. This default caps ALL of them at
-// once. It is a FLOOR applied only when a caller did NOT pass an explicit
-// { timeoutMs } — so the CTL-1339 opt-in path (which passes its own 8000) is
-// untouched (no double-cap: the caller's value wins via ?? below), and the
+// CTL-1364: DEFAULT Node `timeout` for the capped rawExec/linearis spawns — not
+// just the two CTL-1339 opt-in hot terminal reads. OTEL flagged rawExec (the
+// shared spawnSync behind the hot linearis reads: recovery-filter, reclaim-sweep,
+// phantom-probe, assignee-read) as having NO Node timeout, so a single 429-stalled
+// `linearis` call could block the synchronous scheduler tick its full ~30s
+// wall-clock with no per-call cap. This default caps those at once. It is a FLOOR
+// applied only when a caller did NOT pass an explicit { timeoutMs } AND did NOT
+// opt OUT via { uncapped: true } — so the CTL-1339 opt-in path (which passes its
+// own 8000) is untouched (no double-cap: the caller's value wins), and the
 // CTL-1341 timedOut/breaker-trip semantics are identical regardless of which
-// timeout supplied the value. Chosen consistent with CTL-1339's cap (~8s).
+// timeout supplied the value.
+// CTL-1364 SCOPING (regression fix): the eligible-list poll (runEligibleQuery)
+// and other non-hot readers (fetchTicketRelations) pass { uncapped: true } so
+// they stay UNCAPPED — a slow-but-VALID 200-ticket page must NOT be SIGKILLed
+// (it would open the shared breaker via res.timedOut + throw a false
+// monitor.reconcile.failing alert, exactly what CTL-1339 designed against).
+// Chosen consistent with CTL-1339's cap (~8s).
 // env CATALYST_LINEARIS_DEFAULT_TIMEOUT_MS: default 8000; "0" disables (no cap),
 // which restores the pre-CTL-1364 uncapped behavior for an explicit escape hatch.
 const RAWEXEC_DEFAULT_TIMEOUT_MS = parseTerminalTimeoutMs(
@@ -105,13 +111,36 @@ export function buildLinearisArgs(query) {
 // On a `timeout` fire spawnSync sets res.error (ETIMEDOUT) + res.status === null,
 // so the existing res.error branch returns { code: 127 } — the same fail-safe a
 // missing binary produces, which callers already treat as unknown/null.
-function rawExec(cmd, args, { timeoutMs } = {}) {
+function rawExec(cmd, args, { timeoutMs, uncapped } = {}) {
   const opts = { encoding: "utf8" };
+  // CTL-1364 regression fix: an explicit `{ uncapped: true }` sentinel opts the
+  // call OUT of the default floor entirely — NO Node timeout is applied. This
+  // preserves CTL-1339's deliberate scoping: the eligible-list poll
+  // (runEligibleQuery) and other non-hot readers (fetchTicketRelations) must stay
+  // UNCAPPED, because a slow-but-VALID `linearis issues list --limit 200` (a
+  // 200-ticket page + delegate batch, genuinely heavier than a single
+  // `issues read` and plausibly >8s under load WITHOUT a 429) would otherwise be
+  // SIGKILLed at the floor → res.timedOut → withBreaker opens the PROCESS-WIDE
+  // breaker (pausing ALL Linear reads AND writes) AND runEligibleQuery throws →
+  // a false monitor.reconcile.failing.<TEAM> alert. The floor is for the HOT
+  // per-signal terminal reads only.
+  if (uncapped === true) {
+    const res = spawnSync(cmd, args, opts);
+    if (res.error) {
+      const timedOut = res.error.code === "ETIMEDOUT" || res.signal === "SIGKILL";
+      return { code: 127, stdout: "", stderr: res.error.message, timedOut };
+    }
+    return {
+      code: res.status ?? 0,
+      stdout: res.stdout ?? "",
+      stderr: res.stderr ?? "",
+    };
+  }
   // CTL-1364: an explicit POSITIVE per-call timeoutMs (CTL-1339 opt-in) WINS;
-  // otherwise fall back to the rawExec default floor so EVERY linearis spawn is
-  // capped, not just the two hot terminal reads. No double-cap: when CTL-1339
-  // passes its own 8000 that value is used verbatim (the floor never stacks).
-  // A caller passing 0 / undefined (e.g. CATALYST_LINEARIS_TERMINAL_TIMEOUT_MS=0
+  // otherwise fall back to the rawExec default floor so EVERY (capped) linearis
+  // spawn is capped, not just the two hot terminal reads. No double-cap: when
+  // CTL-1339 passes its own 8000 that value is used verbatim (the floor never
+  // stacks). A caller passing 0 / undefined (e.g. CATALYST_LINEARIS_TERMINAL_TIMEOUT_MS=0
   // resolves LINEARIS_TERMINAL_READ_TIMEOUT_MS to undefined) drops to the floor —
   // so the global default still protects the tick; to fully uncap, also set
   // CATALYST_LINEARIS_DEFAULT_TIMEOUT_MS=0.
@@ -328,7 +357,10 @@ export function fetchTicketRelations(identifier, { exec = defaultExec, cache } =
     const hit = cache.getRelations?.(identifier);
     if (hit !== undefined) return hit; // read-through hit — no exec
   }
-  const { code, stdout } = exec("linearis", ["issues", "read", identifier]);
+  // CTL-1364 regression fix: the admission-gate relations hydration is a non-hot
+  // reader (gated behind the CTL-755 cache TTL, not run per-signal per-tick), so
+  // it stays UNCAPPED like the eligible poll — out of the default floor.
+  const { code, stdout } = exec("linearis", ["issues", "read", identifier], { uncapped: true });
   if (code !== 0) return null; // fail-safe — not cached
   try {
     const desc = normalizeRelations(JSON.parse(stdout));
@@ -863,7 +895,13 @@ export function fetchTicketsDelegateBatch(team, identifiers, { exec = defaultDel
 // the state/priority/relations refresh. An absent key (batch miss) leaves
 // the ticket's delegate field unset; `?? null` in contentKey collapses it.
 export function runEligibleQuery(query, { exec = defaultExec, delegateExec = defaultDelegateBatchExec } = {}) {
-  const { code, stdout, stderr } = exec("linearis", buildLinearisArgs(query));
+  // CTL-1364 regression fix: the eligible-list poll MUST stay UNCAPPED. The
+  // CTL-1364 default floor is for the hot per-signal terminal reads only; a
+  // blanket cap here would SIGKILL a slow-but-VALID 200-ticket page, open the
+  // shared process-wide breaker (via res.timedOut), throw, and trip a false
+  // monitor.reconcile.failing alert — exactly the failure mode CTL-1339 designed
+  // against. `{ uncapped: true }` opts this spawn out of the default floor.
+  const { code, stdout, stderr } = exec("linearis", buildLinearisArgs(query), { uncapped: true });
   if (code !== 0) {
     throw new Error(`linearis issues list failed (exit ${code}): ${(stderr || "").trim()}`);
   }

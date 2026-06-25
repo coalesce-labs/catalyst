@@ -1583,22 +1583,27 @@ describe("CTL-1339 terminal-read timeout — opt-in threading scope", () => {
     expect(opts).toEqual({ timeoutMs: 8000 });
   });
 
-  test("runEligibleQuery (non-hot poll) calls exec WITHOUT a timeoutMs (opt-in scoping)", () => {
-    // The eligible-list poll must stay UNCAPPED — a blanket cap would trip false
-    // monitor.reconcile.failing alerts (the adversarial-review finding).
+  test("runEligibleQuery (non-hot poll) calls exec with { uncapped: true } and NO timeoutMs (opt-out scoping)", () => {
+    // The eligible-list poll must stay UNCAPPED — a blanket cap would SIGKILL a
+    // slow-but-VALID 200-ticket page, open the shared breaker, throw, and trip a
+    // false monitor.reconcile.failing alert (the adversarial-review finding).
+    // CTL-1364 regression fix: the caller now passes { uncapped: true } so the
+    // default floor (which rawExec applies to a bare opts) does NOT cap it.
     const exec = recordingExec({ code: 0, stdout: ticketsJson([]) });
     runEligibleQuery({ team: "CTL", status: "Todo" }, { exec, delegateExec: () => null });
     expect(exec.calls).toHaveLength(1);
     const opts = exec.calls[0][2];
-    expect(opts).toBeUndefined();
+    expect(opts).toEqual({ uncapped: true });
+    expect(opts?.timeoutMs).toBeUndefined();
   });
 
-  test("fetchTicketRelations (non-hot reader) calls exec WITHOUT a timeoutMs", () => {
+  test("fetchTicketRelations (non-hot reader) calls exec with { uncapped: true } and NO timeoutMs", () => {
     const exec = recordingExec({ code: 0, stdout: JSON.stringify({ state: { name: "Todo" } }) });
     fetchTicketRelations("CTL-1", { exec });
     expect(exec.calls).toHaveLength(1);
     const opts = exec.calls[0][2];
-    expect(opts).toBeUndefined();
+    expect(opts).toEqual({ uncapped: true });
+    expect(opts?.timeoutMs).toBeUndefined();
   });
 });
 
@@ -1701,6 +1706,89 @@ describe("CTL-1364 rawExec DEFAULT timeout", () => {
       );
       const res = fresh.__rawExecForTest("sleep", ["0.2"]); // no opts, floor disabled
       expect(res.code).toBe(0);
+    } finally {
+      delete process.env.CATALYST_LINEARIS_DEFAULT_TIMEOUT_MS;
+    }
+  });
+});
+
+// ─── CTL-1364 REGRESSION: the eligible poll stays UNCAPPED (production path) ──
+// The earlier opt-in-scoping tests inject a STUB exec, which bypasses rawExec and
+// so cannot catch a floor applied INSIDE rawExec. These drive the REAL rawExec
+// (via __rawExecForTest, NO timeoutMs) under a tiny default floor to prove the
+// { uncapped: true } sentinel actually opts the spawn OUT of the floor — i.e. a
+// slow-but-valid `linearis issues list` is NOT SIGKILLed at the floor (which
+// would open the shared breaker + throw a false monitor.reconcile.failing alert,
+// exactly the failure mode CTL-1339 designed against).
+describe("CTL-1364 regression — { uncapped: true } bypasses the default floor (real rawExec)", () => {
+  test("a slow spawn with { uncapped: true } is NOT killed at the floor (runs to completion)", async () => {
+    // Tiny floor (50ms) + a sleep longer than the floor; { uncapped: true } must
+    // skip the timeout entirely so the command completes (exit 0), proving the
+    // eligible poll's spawn is never capped even under a default floor.
+    process.env.CATALYST_LINEARIS_DEFAULT_TIMEOUT_MS = "50";
+    try {
+      const fresh = await import(
+        `./linear-query.mjs?ctl1364-uncapped=${Date.now()}`
+      );
+      const t0 = Date.now();
+      const res = fresh.__rawExecForTest("sleep", ["0.3"], { uncapped: true });
+      const elapsed = Date.now() - t0;
+      expect(res.code).toBe(0); // NOT killed at the 50ms floor — ran to completion
+      expect(res.timedOut).toBeUndefined(); // no timeout fired → cannot trip the breaker
+      expect(elapsed).toBeGreaterThanOrEqual(250); // it actually slept ~0.3s, not killed at 50ms
+    } finally {
+      delete process.env.CATALYST_LINEARIS_DEFAULT_TIMEOUT_MS;
+    }
+  });
+
+  test("a capped spawn (bare opts) under the SAME tiny floor IS killed — proving the floor is otherwise live", async () => {
+    // Contrast control: with no { uncapped } the floor caps the same slow sleep,
+    // so the previous test's pass is attributable to the sentinel, not to the
+    // floor being inert.
+    process.env.CATALYST_LINEARIS_DEFAULT_TIMEOUT_MS = "50";
+    try {
+      const fresh = await import(
+        `./linear-query.mjs?ctl1364-capped-control=${Date.now()}`
+      );
+      const res = fresh.__rawExecForTest("sleep", ["0.3"]); // NO opts → default floor caps it
+      expect(res.code).toBe(127); // SIGKILLed at the 50ms floor
+      expect(res.timedOut).toBe(true);
+    } finally {
+      delete process.env.CATALYST_LINEARIS_DEFAULT_TIMEOUT_MS;
+    }
+  });
+
+  test("runEligibleQuery → real rawExec: a slow VALID poll is NOT killed at the floor (production path; { uncapped } honored end-to-end)", async () => {
+    // The end-to-end regression guard. We drive runEligibleQuery through an `exec`
+    // that is a THIN shim over the REAL __rawExecForTest — it rewrites the fixed
+    // "linearis" command to a slow `sleep … && echo <valid JSON>` so we exercise
+    // the actual rawExec timeout/floor logic (NOT a stub), while forwarding the
+    // { uncapped: true } opts runEligibleQuery passes. Pre-fix, rawExec applied
+    // the floor to that opts → the slow spawn was SIGKILLed → exit 127 →
+    // runEligibleQuery THROWS. Post-fix the { uncapped: true } sentinel skips the
+    // floor → the page completes → returns the parsed tickets.
+    process.env.CATALYST_LINEARIS_DEFAULT_TIMEOUT_MS = "50";
+    try {
+      const fresh = await import(
+        `./linear-query.mjs?ctl1364-eligible-prod=${Date.now()}`
+      );
+      let observedOpts;
+      // Shim: forward the real opts (so { uncapped: true } is honored by rawExec)
+      // but run a slow valid command instead of the real linearis CLI.
+      const realExec = (_cmd, _args, opts) => {
+        observedOpts = opts;
+        return fresh.__rawExecForTest(
+          "sh",
+          ["-c", "sleep 0.3; echo '{\"nodes\":[]}'"],
+          opts,
+        );
+      };
+      const tickets = fresh.runEligibleQuery(
+        { team: "CTL", status: "Todo" },
+        { exec: realExec, delegateExec: () => null },
+      );
+      expect(observedOpts).toEqual({ uncapped: true }); // the sentinel reached rawExec
+      expect(tickets).toEqual([]); // 0.3s > 50ms floor, yet NOT killed → no throw
     } finally {
       delete process.env.CATALYST_LINEARIS_DEFAULT_TIMEOUT_MS;
     }
