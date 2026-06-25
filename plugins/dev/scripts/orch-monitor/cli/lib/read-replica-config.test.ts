@@ -1,12 +1,13 @@
 // read-replica-config.test.ts — CTL-1346. Exercises the Node-side Layer-2 reads
 // (catalyst.readReplica.baseUrl + node class) that feed the read-replica resolver.
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
-import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { spawnSync } from "node:child_process";
 import { readReplicaBaseUrlFromLayer2, nodeClassForRead } from "./read-replica-config";
 
-const ENV_KEYS = ["CATALYST_NODE_CLASS", "CATALYST_LAYER2_CONFIG_FILE"];
+const ENV_KEYS = ["CATALYST_NODE_CLASS", "CATALYST_LAYER2_CONFIG_FILE", "HOME"];
 let saved: Record<string, string | undefined>;
 let tmp: string;
 
@@ -84,8 +85,40 @@ describe("nodeClassForRead", () => {
     expect(nodeClassForRead()).toBe("developer");
   });
 
-  it("an unrecognized class resolves to worker for read purposes (doctor flags the typo)", () => {
+  it("a present-but-invalid class resolves to monitor (most-restrictive, mirrors config.mjs)", () => {
     process.env.CATALYST_NODE_CLASS = "developr";
+    expect(nodeClassForRead()).toBe("monitor");
+    delete process.env.CATALYST_NODE_CLASS;
+    writeLayer2({ catalyst: { node: { class: "wokrer" } } });
+    expect(nodeClassForRead()).toBe("monitor");
+  });
+
+  it("a present non-string class resolves to monitor; null/blank resolve to worker", () => {
+    writeLayer2({ catalyst: { node: { class: 7 } } });
+    expect(nodeClassForRead()).toBe("monitor");
+    writeLayer2({ catalyst: { node: { class: null } } });
     expect(nodeClassForRead()).toBe("worker");
+    writeLayer2({ catalyst: { node: { class: "  " } } });
+    expect(nodeClassForRead()).toBe("worker");
+  });
+
+  it("an empty CATALYST_LAYER2_CONFIG_FILE falls back to the default ~/.config path", () => {
+    // os.homedir() locks to $HOME at process startup, so redirecting it needs a
+    // fresh subprocess: HOME=temp + an EMPTY override must read temp/.config/...
+    // (the `||` fix) rather than resolving the path to "" (the `??` bug → worker).
+    const home = mkdtempSync(join(tmpdir(), "ctl1346-home-"));
+    mkdirSync(join(home, ".config", "catalyst"), { recursive: true });
+    writeFileSync(
+      join(home, ".config", "catalyst", "config.json"),
+      JSON.stringify({ catalyst: { node: { class: "developer" } } }),
+    );
+    const modulePath = join(import.meta.dir, "read-replica-config.ts");
+    const res = spawnSync(
+      "bun",
+      ["-e", `const m = await import(${JSON.stringify(modulePath)}); console.log(m.nodeClassForRead());`],
+      { env: { ...process.env, HOME: home, CATALYST_LAYER2_CONFIG_FILE: "" }, encoding: "utf8" },
+    );
+    expect(res.stdout.trim()).toBe("developer");
+    rmSync(home, { recursive: true, force: true });
   });
 });

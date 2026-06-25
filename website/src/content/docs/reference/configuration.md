@@ -305,25 +305,29 @@ per-repo:
 
 ### Read-replica endpoint (`catalyst.readReplica.baseUrl`, CTL-1346)
 
-Board reads (the HUD, ticket detail, search) come from a monitor's `filter-state.db` replica, which is
-written **only** by a node's local broker. A daemonless `developer` node runs no broker, so its local
-replica is empty — it must read a **worker's** monitor over the network. The read endpoint resolves
+Board data lives in a monitor's `filter-state.db` replica, which is written **only** by a node's local
+broker. A daemonless `developer` node runs no broker, so its local replica is empty — it must read a
+**worker's** monitor over the network. `catalyst.readReplica.baseUrl` names that endpoint, resolved
 through:
 
 | Precedence | Source |
 | --- | --- |
 | 1 | `CATALYST_MONITOR_URL` env var (explicit override) |
 | 2 | `catalyst.readReplica.baseUrl` in the Layer-2 config (e.g. `http://mini:7400`) |
-| 3 | class-aware default — `developer` ⇒ **no fallback** (explicit error); `worker`/`monitor` ⇒ `http://127.0.0.1:7400` |
+| 3 | class-aware default — `developer`/`monitor` ⇒ **no fallback** (explicit error; both read a remote replica); `worker` ⇒ `http://127.0.0.1:7400` |
 
 ```json
 { "catalyst": { "readReplica": { "baseUrl": "http://mini:7400" } } }
 ```
 
-A `developer` node with **no** endpoint configured returns an explicit unset/error rather than silently
-reading an empty `localhost` replica. A `worker` or `monitor` node keeps the `127.0.0.1:7400` default
-(its own broker fills and serves the replica). This is **reads only** — writes still require a host with
-its own Linear key, preserving per-host rate-limit isolation.
+A `developer` (or `monitor`) node with **no** endpoint configured returns an explicit unset/error rather
+than silently reading an empty `localhost` replica; a `worker` keeps the `127.0.0.1:7400` default (its
+own broker fills and serves the replica). This is **reads only** — writes still require a host with its
+own Linear key, preserving per-host rate-limit isolation.
+
+> **Scope:** this resolver currently backs the **terminal HUD's** board reads. Pointing the browser/PWA
+> ticket-detail and search flows, and the `catalyst monitor` command, at the same remote endpoint is the
+> "split" deployment topology tracked in CTL-1347 / CTL-1354.
 
 ## GitHub merge rules live in GitHub
 

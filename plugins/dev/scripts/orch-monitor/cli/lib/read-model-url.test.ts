@@ -67,27 +67,31 @@ describe("resolveReadModelBase — Layer-2 binding + class-aware fallback (CTL-1
     });
   });
 
-  it("a developer node with NO endpoint configured returns ok:false (no silent localhost)", () => {
-    const r = resolveReadModelBase({ env: {}, nodeClass: "developer" });
-    expect(r.ok).toBe(false);
-    expect(!r.ok && r.reason).toContain("developer node");
-    // the whole point: it must NOT produce a localhost base
-    expect(JSON.stringify(r)).not.toContain("127.0.0.1");
+  it("a developer or monitor node with NO endpoint returns ok:false (no silent localhost)", () => {
+    for (const nodeClass of ["developer", "monitor"] as const) {
+      const r = resolveReadModelBase({ env: {}, nodeClass });
+      expect(r.ok).toBe(false);
+      expect(!r.ok && r.reason).toContain(`${nodeClass} node`);
+      // the whole point: it must NOT produce a localhost base
+      expect(JSON.stringify(r)).not.toContain("127.0.0.1");
+    }
   });
 
-  it("a developer node WITH a configured endpoint resolves normally (env or Layer-2)", () => {
-    expect(resolveReadModelBase({ env: { CATALYST_MONITOR_URL: "http://mini:7400" }, nodeClass: "developer" })).toEqual({
-      ok: true,
-      base: "http://mini:7400",
-    });
-    expect(resolveReadModelBase({ env: {}, layer2BaseUrl: "http://mini:7400", nodeClass: "developer" })).toEqual({
-      ok: true,
-      base: "http://mini:7400",
-    });
+  it("a developer/monitor node WITH a configured endpoint resolves normally (env or Layer-2)", () => {
+    for (const nodeClass of ["developer", "monitor"] as const) {
+      expect(resolveReadModelBase({ env: { CATALYST_MONITOR_URL: "http://mini:7400" }, nodeClass })).toEqual({
+        ok: true,
+        base: "http://mini:7400",
+      });
+      expect(resolveReadModelBase({ env: {}, layer2BaseUrl: "http://mini:7400", nodeClass })).toEqual({
+        ok: true,
+        base: "http://mini:7400",
+      });
+    }
   });
 
-  it("worker / monitor / unknown class with no endpoint keeps the localhost default", () => {
-    for (const nodeClass of ["worker", "monitor", undefined] as const) {
+  it("worker / unknown class with no endpoint keeps the localhost default (reads its own replica)", () => {
+    for (const nodeClass of ["worker", undefined] as const) {
       expect(resolveReadModelBase({ env: {}, nodeClass })).toEqual({
         ok: true,
         base: `http://127.0.0.1:${DEFAULT_MONITOR_PORT}`,

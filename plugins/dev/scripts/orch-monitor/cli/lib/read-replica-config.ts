@@ -14,12 +14,18 @@ import { homedir } from "node:os";
 import type { NodeClass } from "./read-model-url";
 
 const NODE_CLASSES: readonly NodeClass[] = ["developer", "worker", "monitor"];
+// An explicit but unrecognized class degrades to the most restrictive one, exactly
+// as config.mjs resolveNodeClass does, so a typo (e.g. `developr`) never reads the
+// empty localhost replica this resolver exists to avoid.
+const MOST_RESTRICTIVE_CLASS: NodeClass = "monitor";
 
 // Mirrors config.mjs getLayer2ConfigPath(): CATALYST_LAYER2_CONFIG_FILE override,
-// else ~/.config/catalyst/config.json.
+// else ~/.config/catalyst/config.json. Uses `||` (not `??`) so an empty-string
+// override (`CATALYST_LAYER2_CONFIG_FILE=`) falls back to the default path instead
+// of resolving to "" — parity with config.mjs.
 function layer2Path(): string {
   return (
-    process.env.CATALYST_LAYER2_CONFIG_FILE ??
+    process.env.CATALYST_LAYER2_CONFIG_FILE ||
     resolve(homedir(), ".config", "catalyst", "config.json")
   );
 }
@@ -43,22 +49,28 @@ export function readReplicaBaseUrlFromLayer2(): string | null {
 }
 
 /**
- * This node's class for read-resolution. Mirrors config.mjs getNodeClass
- * precedence: `CATALYST_NODE_CLASS` env → `catalyst.node.class` (Layer-2) →
- * default `worker`. The read path only branches on `developer`, so a
- * present-but-unrecognized value resolves to `worker` here (it reads its own
- * replica, the same as today); `catalyst doctor` is what FAILs a typo'd class
- * (see config.mjs resolveNodeClass). Never throws.
+ * This node's class for read-resolution. Mirrors config.mjs resolveNodeClass
+ * precedence and validity ladder: `CATALYST_NODE_CLASS` env → `catalyst.node.class`
+ * (Layer-2) → default `worker`.
+ *   - absent / null / empty-string ⇒ `worker` (the unset, zero-config default).
+ *   - a present-but-invalid value (non-string, or an unknown string like
+ *     `developr`) ⇒ the most-restrictive `monitor`, so a typo can never make a
+ *     developer node silently read the empty localhost replica (it errors instead;
+ *     `catalyst doctor` separately FAILs the typo'd class). Never throws.
  */
 export function nodeClassForRead(): NodeClass {
   const envRaw = process.env.CATALYST_NODE_CLASS;
-  const raw =
-    typeof envRaw === "string" && envRaw.trim().length > 0
-      ? envRaw
-      : (readLayer2() as { catalyst?: { node?: { class?: unknown } } } | null)?.catalyst?.node?.class;
-  if (typeof raw === "string") {
-    const normalized = raw.trim().toLowerCase();
-    if ((NODE_CLASSES as readonly string[]).includes(normalized)) return normalized as NodeClass;
-  }
-  return "worker";
+  const hasEnv = typeof envRaw === "string" && envRaw.trim().length > 0;
+  const raw = hasEnv
+    ? envRaw
+    : (readLayer2() as { catalyst?: { node?: { class?: unknown } } } | null)?.catalyst?.node?.class;
+
+  // Absent / explicit null/empty "unset" sentinel ⇒ worker (reads its own replica).
+  if (raw === undefined || raw === null) return "worker";
+  // Present but not a string ⇒ explicit misconfiguration ⇒ most restrictive.
+  if (typeof raw !== "string") return MOST_RESTRICTIVE_CLASS;
+  const normalized = raw.trim().toLowerCase();
+  if (normalized.length === 0) return "worker"; // empty/blank ⇒ unset (mirrors empty env)
+  if ((NODE_CLASSES as readonly string[]).includes(normalized)) return normalized as NodeClass;
+  return MOST_RESTRICTIVE_CLASS; // present non-empty but unknown ⇒ invalid
 }

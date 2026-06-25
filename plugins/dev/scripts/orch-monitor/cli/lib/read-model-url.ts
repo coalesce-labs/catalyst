@@ -13,10 +13,11 @@
 //   1. `CATALYST_MONITOR_URL` env (explicit override — unchanged, still wins)
 //   2. `catalyst.readReplica.baseUrl` (Layer-2 machine-local config)
 //   3. class-aware default:
-//        - developer ⇒ NO base — refuse the localhost fallback (which would serve
-//          an empty replica); the caller surfaces an explicit unset/error.
-//        - worker / monitor / unknown ⇒ `http://127.0.0.1:<MONITOR_PORT|7400>`
-//          (its own broker fills + serves the local replica).
+//        - developer / monitor ⇒ NO base — refuse the localhost fallback (which
+//          would serve an empty replica); the caller surfaces an explicit
+//          unset/error. Both read a REMOTE replica (design §3 read-source table).
+//        - worker / unknown ⇒ `http://127.0.0.1:<MONITOR_PORT|7400>` (its own
+//          broker fills + serves the local replica).
 //
 // This module stays PURE: the Layer-2 baseUrl + node class are INJECTED (read by
 // read-replica-config.ts on the Node side), so it imports no fs/config and never
@@ -59,8 +60,9 @@ export type ReadModelStreamUrlResult =
  * Resolve the read-replica base URL (no path). Precedence:
  *   1. `CATALYST_MONITOR_URL` env (explicit override)
  *   2. `catalyst.readReplica.baseUrl` (Layer-2)
- *   3. class-aware default — developer ⇒ `{ ok:false }` (no silent localhost);
- *      worker / monitor / unknown ⇒ `http://127.0.0.1:<MONITOR_PORT|7400>`.
+ *   3. class-aware default — developer / monitor ⇒ `{ ok:false }` (no silent
+ *      localhost; both read a remote replica); worker / unknown ⇒
+ *      `http://127.0.0.1:<MONITOR_PORT|7400>`.
  */
 export function resolveReadModelBase(inputs: ReadModelBaseInputs): ReadModelBaseResult {
   const envBase = explicitBase(inputs.env.CATALYST_MONITOR_URL);
@@ -69,12 +71,17 @@ export function resolveReadModelBase(inputs: ReadModelBaseInputs): ReadModelBase
   const layer2Base = explicitBase(inputs.layer2BaseUrl ?? undefined);
   if (layer2Base) return { ok: true, base: layer2Base };
 
-  if (inputs.nodeClass === "developer") {
+  // developer and monitor both read a REMOTE replica (design §3 read-source
+  // table — only worker reads its own local replica). An invalid explicit class
+  // resolves to the most-restrictive `monitor` (read-replica-config.ts), so this
+  // also closes the typo footgun: a misconfigured node never silently reads the
+  // empty localhost replica.
+  if (inputs.nodeClass === "developer" || inputs.nodeClass === "monitor") {
     return {
       ok: false,
       reason:
-        "developer node has no read-replica endpoint — set CATALYST_MONITOR_URL or " +
-        "catalyst.readReplica.baseUrl to a worker's monitor (e.g. http://mini:7400); " +
+        `${inputs.nodeClass} node has no read-replica endpoint — set CATALYST_MONITOR_URL ` +
+        "or catalyst.readReplica.baseUrl to a worker's monitor (e.g. http://mini:7400); " +
         "refusing to fall back to localhost, which would serve an empty replica",
     };
   }
