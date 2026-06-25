@@ -30,6 +30,15 @@ For each ticket it shows:
 
 This is read-only — it shows you what's happening; you act from Linear and GitHub. It's the best view when several tickets run at once.
 
+## Watch from anywhere — even with your laptop closed
+
+In a **split** setup — a developer laptop plus an always-on **worker** machine — the worker is the read-replica host. Its broker is the only process that writes the dashboard's data store (`filter-state.db`) from the live GitHub and Linear webhooks, and its Monitor serves that data read-only over HTTP. The Monitor listens on every network interface, so you reach it from any device on the same network (or Tailscale):
+
+- **From your phone:** open `http://<worker-host>:7400` in the browser, or add it to your home screen as an app. The board, ticket details, and search all render from the worker's fresh replica — so you can check on the work from the couch with your laptop shut.
+- **From your laptop's terminal HUD:** point it at the worker by setting [`catalyst.readReplica.baseUrl`](/reference/configuration/) (or the `CATALYST_MONITOR_URL` environment variable) to `http://<worker-host>:7400`. A developer laptop runs no broker of its own, so without this it has nothing to show — it reads the worker's replica instead of an empty local one.
+
+Everything here is **read-only**. You still act on the work from Linear and GitHub, and writing to Linear still requires a host that has its own Linear key — so pointing more devices at the worker's board never changes who can make changes.
+
 ## A live terminal view
 
 Prefer the terminal? Run `catalyst-hud` for a live stream of events as they happen. On a minimal setup (like SSH from an iPad), use `catalyst-hud-classic` instead.
