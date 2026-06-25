@@ -36,7 +36,7 @@ export interface ReadModelConnectionState {
 }
 
 export interface ReadModelConnectionOptions {
-  /** Absolute SSE URL (see resolveReadModelUrl). */
+  /** Absolute SSE URL (see resolveReadModelStreamUrl). */
   url: string;
   /** Node EventSource factory (createNodeEventSource); tests inject a fake. */
   eventSourceFactory: (url: string) => ReadModelEventSource;
