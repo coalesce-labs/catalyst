@@ -92,6 +92,43 @@ describe("resolveNodeClass", () => {
     expect(r.class).not.toBe("worker");
   });
 
+  // A present-but-non-string Layer-2 value is an explicit misconfiguration, NOT an
+  // absent default — it must take the restrictive path so doctor can FAIL (the
+  // footgun guard; flagged in code review). false / 0 / [] / {}.
+  for (const [label, value] of [
+    ["false", false],
+    ["0", 0],
+    ["empty array", []],
+    ["object", { developer: true }],
+  ]) {
+    test(`present non-string Layer-2 value (${label}) → monitor, recognized:false, NOT worker`, () => {
+      writeLayer2({ catalyst: { node: { class: value } } });
+      const r = resolveNodeClass();
+      expect(r.class).toBe("monitor");
+      expect(r.recognized).toBe(false);
+      expect(r.inferred).toBe(false);
+      expect(r.source).toBe("layer2");
+      expect(r.class).not.toBe("worker");
+    });
+  }
+
+  test("explicit null Layer-2 value → worker (the codebase's unset sentinel)", () => {
+    writeLayer2({ catalyst: { node: { class: null } } });
+    const r = resolveNodeClass();
+    expect(r.class).toBe("worker");
+    expect(r.inferred).toBe(true);
+    expect(r.recognized).toBe(true);
+    expect(r.source).toBe("default");
+  });
+
+  test("empty/whitespace string Layer-2 value → worker (cleared, mirrors empty env)", () => {
+    writeLayer2({ catalyst: { node: { class: "   " } } });
+    const r = resolveNodeClass();
+    expect(r.class).toBe("worker");
+    expect(r.inferred).toBe(true);
+    expect(r.source).toBe("default");
+  });
+
   test("env overrides Layer-2", () => {
     writeLayer2({ catalyst: { node: { class: "worker" } } });
     process.env.CATALYST_NODE_CLASS = "developer";

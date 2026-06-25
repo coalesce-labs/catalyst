@@ -287,16 +287,19 @@ const NODE_CLASS_DEFAULT = "worker";
 // value is corrected.
 const NODE_CLASS_MOST_RESTRICTIVE = "monitor";
 
-// readLayer2NodeClass — the raw catalyst.node.class string from the Layer-2 file,
-// or null when absent/malformed/unreadable. Never throws (parity with getHostName).
+// readLayer2NodeClass — the raw catalyst.node.class value from the Layer-2 file
+// EXACTLY as written (whatever JSON type), or undefined when the key is absent or
+// the file is missing/malformed/unreadable. Never throws (parity with getHostName).
+// resolveNodeClass — not this reader — judges validity, so a present-but-non-string
+// value (`false`, `0`, `[]`) reaches it as an explicit misconfiguration rather than
+// being silently flattened to "absent".
 function readLayer2NodeClass() {
   try {
-    const raw = JSON.parse(readFileSync(getLayer2ConfigPath(), "utf8"))?.catalyst?.node?.class;
-    if (typeof raw === "string" && raw.trim().length > 0) return raw;
+    return JSON.parse(readFileSync(getLayer2ConfigPath(), "utf8"))?.catalyst?.node?.class;
   } catch {
-    /* missing/malformed Layer-2 file → null (default-to-worker) */
+    /* missing/malformed Layer-2 file → undefined (default-to-worker) */
+    return undefined;
   }
-  return null;
 }
 
 // resolveNodeClass — the pure, no-logging node-class resolver. Mirrors
@@ -310,18 +313,36 @@ function readLayer2NodeClass() {
 //   - recognized = whether the explicit value named a real class (always true for
 //                  the inferred default; false is what routes doctor to FAIL)
 //   - raw        = the explicit value exactly as written (for the WARN/doctor text)
-// Values are trimmed + lowercased before the membership check, so "Worker" /
-// " developer " resolve to their canonical class; only a genuine non-member
-// ("developr") is treated as unrecognized.
+//
+// Validity ladder:
+//   - absent (no env + key undefined) OR an explicit null/empty "unset" sentinel
+//     ⇒ benign default-to-worker (inferred; zero behavior change). null is the
+//     codebase's "unset" convention and an empty string mirrors an empty env var.
+//   - a present non-string value (`false`, `0`, `[]`, `{}`) is NOT an absent
+//     default — it is an explicit misconfiguration ⇒ recognized:false (most
+//     restrictive), so a typo'd config can never make a node work-eligible.
+//   - a non-empty string is trimmed + lowercased before the membership check, so
+//     "Worker" / " developer " resolve to their canonical class; only a genuine
+//     non-member ("developr") is recognized:false.
 export function resolveNodeClass() {
   const envRaw = process.env.CATALYST_NODE_CLASS;
   const hasEnv = typeof envRaw === "string" && envRaw.trim().length > 0;
   const raw = hasEnv ? envRaw : readLayer2NodeClass();
-  if (raw === null) {
+  const source = hasEnv ? "env" : "layer2";
+
+  // Absent / explicit "unset" sentinel (undefined key or JSON null) ⇒ worker.
+  if (raw === undefined || raw === null) {
     return { class: NODE_CLASS_DEFAULT, source: "default", inferred: true, recognized: true, raw: null };
   }
-  const source = hasEnv ? "env" : "layer2";
+  // Present but not a string ⇒ explicit misconfiguration, never a silent worker.
+  if (typeof raw !== "string") {
+    return { class: NODE_CLASS_MOST_RESTRICTIVE, source, inferred: false, recognized: false, raw };
+  }
   const normalized = raw.trim().toLowerCase();
+  // Empty/whitespace string ⇒ "cleared" (mirrors an empty env var) ⇒ worker.
+  if (normalized.length === 0) {
+    return { class: NODE_CLASS_DEFAULT, source: "default", inferred: true, recognized: true, raw: null };
+  }
   if (NODE_CLASSES.includes(normalized)) {
     return { class: normalized, source, inferred: false, recognized: true, raw };
   }
