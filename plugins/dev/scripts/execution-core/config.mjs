@@ -8,7 +8,7 @@
 
 import { homedir, hostname } from "node:os";
 import { resolve, join } from "node:path";
-import { readFileSync, existsSync, rmSync, writeFileSync } from "node:fs";
+import { readFileSync, existsSync, rmSync, writeFileSync, readdirSync } from "node:fs";
 
 // CTL-1211: schema-version policy for cluster config. config-schema.mjs is a
 // dep-free sibling leaf, so this import cannot reintroduce the bun-install crash
@@ -1076,6 +1076,84 @@ export function readBoardHealthConfig(env = process.env) {
   return { mode };
 }
 
+// CTL-1331: delegate-runner config reader. Gates the DETACHED process that
+// drains the board-health delegate queue (where the heavy worktree-provision +
+// `claude --bg` spawn moved off the daemon event loop). Mirrors the
+// readBoardHealthConfig style — env override > a default — with the key twist
+// that the runner's default is COUPLED to board-health: it only makes sense to
+// run the drainer when board-health is actually enqueuing intents. So:
+//   mode default = "on"  when board-health resolves to "enforce" (it enqueues)
+//                  "off" otherwise (shadow/off never enqueue → nothing to drain).
+// An explicit CATALYST_DELEGATE_RUNNER ∈ {on,off} overrides the coupling (off =
+// a fully-observable shadow-of-enforce: intents accumulate + emit
+// phase.dispatch.enqueued without any worker launching; on = force-drain). A
+// garbage value falls back to the coupling. Phase A ships with board-health
+// typically shadow, so the default resolves "off" — the runner is INERT and
+// nothing drains until an operator flips board-health to enforce (or sets the
+// runner on explicitly). interval/intentTtl are plain numeric env knobs with
+// the §7 defaults; a non-numeric/empty override falls back to the default.
+export const DELEGATE_RUNNER_MODES = new Set(["on", "off"]);
+
+function readPositiveIntEnv(raw, fallback) {
+  const n = Number(raw);
+  return typeof raw === "string" && raw !== "" && Number.isFinite(n) && n > 0
+    ? n
+    : fallback;
+}
+
+export function readDelegateRunnerConfig(env = process.env) {
+  const v = env.CATALYST_DELEGATE_RUNNER;
+  let mode;
+  if (typeof v === "string" && DELEGATE_RUNNER_MODES.has(v)) {
+    mode = v; // explicit operator override (on|off)
+  } else {
+    // Coupled default: on iff board-health is enforce (the only mode that enqueues).
+    mode = readBoardHealthConfig(env).mode === "enforce" ? "on" : "off";
+  }
+  return {
+    mode,
+    intervalMs: readPositiveIntEnv(env.CATALYST_DELEGATE_RUNNER_INTERVAL_MS, 15000),
+    intentTtlMs: readPositiveIntEnv(env.CATALYST_DELEGATE_INTENT_TTL_MS, 1800000),
+  };
+}
+
+// CTL-1331: read-only delegate-queue depth probe for the governance snapshot.
+// NEVER load-bearing — a pure, best-effort dir scan that counts the reserving
+// intents (`queued|claimed`, the same set countQueuedDelegates folds into the
+// slot reservation; `launched` is excluded because the live `claude --bg`
+// session is already counted by liveBackgroundCount). It reads the on-disk
+// queue artifact directly (no import of delegate-queue.mjs → no coupling to the
+// drainer module's internals and no risk of a missing-module import error while
+// the queue module lands separately in Phase A). Returns 0 when the dir is
+// absent (empty queue / inert Phase A) and 0 on ANY read error — it must never
+// throw into the heartbeat path. The queue lives under the per-host
+// execution-core dir (getExecutionCoreDir() === the daemon's orchDir).
+const DELEGATE_QUEUE_DIRNAME = ".delegate-queue";
+const DELEGATE_RESERVING_STATUSES = new Set(["queued", "claimed"]);
+
+export function readDelegateQueueDepth() {
+  const dir = join(getExecutionCoreDir(), DELEGATE_QUEUE_DIRNAME);
+  let names;
+  try {
+    names = readdirSync(dir);
+  } catch {
+    return 0; // dir absent (empty/inert) or unreadable — report 0, never throw
+  }
+  let depth = 0;
+  for (const name of names) {
+    // Canonical intent files only — skip `<TICKET>.json.claimed-…` sidecars and
+    // `<TICKET>.json.tmp-…` artifacts (mirrors countQueuedDelegates' filter).
+    if (!name.endsWith(".json") || name.includes(".json.")) continue;
+    try {
+      const intent = JSON.parse(readFileSync(join(dir, name), "utf8"));
+      if (DELEGATE_RESERVING_STATUSES.has(intent?.status)) depth += 1;
+    } catch {
+      // a half-written / unparseable intent file — ignore it for the readout
+    }
+  }
+  return depth;
+}
+
 // --- Governance snapshot for operator visibility (CTL-1062/CTL-1084) ---
 // READ-ONLY, NEVER load-bearing. Recomputes each governance value the same way
 // its per-tick gate site does so the heartbeat payload and the
@@ -1126,6 +1204,16 @@ export function readGovernanceConfig(env = process.env) {
     stallJanitor: { mode: readStallJanitorConfig().mode },
     watchdog: { mode: readWatchdogConfig().mode },
     unstuckSweep: { mode: readUnstuckSweepConfig().mode },
+    // CTL-1331: surface the async board-health delegate runner so operators can
+    // see at a glance whether the drainer is on and how deep the intent queue
+    // is. READ-ONLY / NEVER load-bearing (matches every other governance field):
+    // the gate sites keep their own inline reads. `mode` renders in the human
+    // `catalyst-execution-core governance` view (renderGovernance picks .mode);
+    // `queueDepth` is a best-effort dir scan visible in the --json view.
+    delegateRunner: {
+      mode: readDelegateRunnerConfig(env).mode,
+      queueDepth: readDelegateQueueDepth(),
+    },
   };
 }
 

@@ -49,6 +49,7 @@ import {
   CLUSTER_SYNC_INTERVAL_MS, // CTL-1274: cluster-repo auto-pull cadence
   isHostNamePinnedFromConfig, // CTL-1093
   getCatalystRepoDir,       // CTL-1093 sticky dir
+  readDelegateRunnerConfig, // CTL-1331: async board-health delegate runner kill-switch
 } from "./config.mjs";
 import { resolveBootIdentity } from "./host-boot-identity.mjs"; // CTL-1093
 import { readStickyIdentity, writeStickyIdentity } from "./host-sticky.mjs"; // CTL-1093
@@ -83,6 +84,10 @@ import {
   startWorktreeRefreshTimer,
   readWorktreeRefreshConfig,
 } from "./worktree-refresh-timer.mjs";
+// CTL-1331: the async board-health delegate runner timer (kicks the DETACHED
+// drainer that does the heavy worktree-provision + `claude --bg` off the daemon
+// event loop). Gated by readDelegateRunnerConfig; Phase A ships it inert.
+import { startDelegateRunnerTimer } from "./delegate-runner.mjs";
 import {
   startStalePrRescueTimer,
   readStalePrRescueConfig,
@@ -133,6 +138,8 @@ let _reaper = null;
 let _orphanTimer = null;
 // CTL-707: periodic background worktree refresh timer.
 let _refreshTimer = null;
+// CTL-1331: async board-health delegate runner timer (gated CATALYST_DELEGATE_RUNNER).
+let _delegateRunnerTimer = null;
 // CTL-782: periodic stale/conflicting-PR rescue timer.
 let _stalePrRescueTimer = null;
 // CTL-1175: periodic orphan-PR detect+notify sweep timer.
@@ -1058,6 +1065,21 @@ function startReaperAndTimer({
     });
   }
 
+  // CTL-1331: start the async board-health delegate runner timer. Gated by
+  // CATALYST_DELEGATE_RUNNER — readDelegateRunnerConfig().mode resolves "off"
+  // unless board-health is enforce, so Phase A is inert: startDelegateRunnerTimer
+  // returns a no-op { stop } handle and nothing drains. When "on" (Phase B), the
+  // timer kicks a DETACHED child each interval that does the heavy
+  // worktree-provision + `claude --bg` off the daemon event loop. (Phase B also
+  // wires CATALYST_EXECUTION_CORE_DIR onto the child spawn so the entry resolves
+  // orchDir; until then a forced-on child fails safe — "no orchDir" → exit 0.)
+  const delegateRunnerCfg = readDelegateRunnerConfig();
+  _delegateRunnerTimer = startDelegateRunnerTimer({
+    enabled: delegateRunnerCfg.mode === "on",
+    intervalMs: delegateRunnerCfg.intervalMs,
+    orchDir,
+  });
+
   // CTL-782: start the periodic stale/conflicting-PR rescue timer.
   // No orchId / linearWrite threading needed: the timer derives the per-ticket
   // orchestrator id from the phase signal's `.orchestrator` (orchId === ticket
@@ -1242,6 +1264,15 @@ export function stopDaemon() {
       /* timer already stopped */
     }
     _refreshTimer = null;
+  }
+  // CTL-1331: stop the delegate runner timer (no-op handle when gated off).
+  if (_delegateRunnerTimer) {
+    try {
+      _delegateRunnerTimer.stop();
+    } catch {
+      /* timer already stopped */
+    }
+    _delegateRunnerTimer = null;
   }
   if (_stalePrRescueTimer) {
     try {

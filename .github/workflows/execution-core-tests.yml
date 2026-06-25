@@ -134,6 +134,10 @@ jobs:
             comms-drain.test.mjs \
             config-pino-fallback.test.mjs \
             config.test.mjs \
+            delegate-config-event.test.mjs \
+            delegate-queue.test.mjs \
+            delegate-runner.test.mjs \
+            delegate-slot-reservation.test.mjs \
             diagnostician.test.mjs \
             dispatch.test.mjs \
             eligible-set.test.mjs \

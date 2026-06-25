@@ -970,6 +970,47 @@ export function defaultAppendDispatchLaunchedEvent({
   );
 }
 
+// CTL-1331: appendDispatchEnqueuedEvent — phase.dispatch.enqueued.<TICKET>.
+// The creation-telemetry marker for the async board-health delegate (the
+// operator's "log when it's created"). Emitted by the tick `act` seam the
+// moment a delegate intent is written to the queue — BEFORE any worktree
+// provision or `claude --bg` spawn, which now happen out-of-process in the
+// detached delegate-runner. It mirrors defaultAppendDispatchRequestedEvent
+// exactly (phase slot "dispatch", INFO severity, ticketType from triage.json),
+// adding `kind` to the payload so the queue's intent-type rides on the event.
+// The `dispatch` phase slot is an allowed namespace exception, and the
+// "enqueued" action does NOT collide with PHASE_EVENT_PATTERN's terminal set
+// (complete|failed|turn-cap-exhausted|skipped) — same property as the existing
+// dispatch.requested/.launched actions, so it introduces no broker-routing
+// collision. We deliberately do NOT introduce any phase.recovery-pass.*
+// producer here: "recovery-pass" is not an allowed phase slot; the worker (not
+// this emitter) emits the recovery-pass completion. Best-effort like every
+// other audit emitter — no caller gates on the return.
+export function appendDispatchEnqueuedEvent({
+  orchId,
+  orchDir,
+  ticket,
+  target_phase,
+  kind,
+  reason = "board-health",
+}) {
+  return appendEnvelopeBestEffort(
+    buildEventEnvelope({
+      phase: "dispatch",
+      ticket,
+      orchId,
+      action: "enqueued",
+      reason,
+      payloadExtras: { target_phase, kind },
+      severityText: "INFO",
+      severityNumber: 9,
+      // CTL-1023: resolves to "unknown" pre-triage (no triage.json yet) — correct.
+      ticketType: resolveTicketType(orchDir, ticket),
+    }),
+    "dispatch-enqueued"
+  );
+}
+
 // CTL-705: preemption and resume-after-preemption event emitters.
 
 // defaultAppendPreemptedEvent — phase.<phase>.preempted.<TICKET>.
