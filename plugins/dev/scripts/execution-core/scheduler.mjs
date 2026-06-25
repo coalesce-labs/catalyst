@@ -3876,6 +3876,13 @@ export function schedulerTick(
     }
   }
 
+  // CTL-1331 follow-up: close the "recovery-pass" lap HERE so it measures ONLY the
+  // Pass 0r recovery-reasoning pass (the LLM-recovery DECISION + the now-async
+  // enqueue, FU-1). The reclaim sweep below — reclaimDeadWork per in-flight signal,
+  // each a fetchTicketState Linear terminal-check — was previously CONFLATED into
+  // this lap and is the actual multi-second cost; it gets its own "reclaim" lap.
+  tick?.lap("recovery-pass");
+
   // CTL-644: per-tick approval poll — dispatch any gated tickets that now have an
   // approval sentinel. Cheap (directory scan + existsSync per worker); no API calls
   // unless a dispatch fires. Runs before the reclaim sweep so an approved ticket
@@ -4082,7 +4089,12 @@ export function schedulerTick(
   // verify-remediate test timeout). freeSlots is recomputed arithmetically per
   // sweep (subtracting resumedCount in sweep 2) rather than re-shelling-out.
   const maxParallel = readMaxParallel(orchDir, concurrency);
-  tick?.lap("recovery-pass");
+  // CTL-1331 follow-up: this lap now measures the RECLAIM sweep (+ the cheap CTL-644
+  // approval poll) — reclaimDeadWork per in-flight worker signal, each doing a
+  // fetchTicketState Linear terminal-check that falls back to a slow `linearis` exec
+  // on a gateway/cache miss (stuck / foreign-team tickets like ADV-*). This is the
+  // real multi-second driver previously hidden inside the "recovery-pass" lap.
+  tick?.lap("reclaim");
 
   const liveCount = liveBackgroundCount();
 
