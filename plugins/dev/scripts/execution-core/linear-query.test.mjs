@@ -1629,6 +1629,7 @@ describe("CTL-1339 rawExec timeout wiring (integration)", () => {
     const elapsed = Date.now() - t0;
     expect(res.code).toBe(127); // spawnSync ETIMEDOUT → res.error → code 127
     expect(elapsed).toBeLessThan(1000); // killed at ~200ms, NOT after 5s
+    expect(res.timedOut).toBe(true); // CTL-1341: a real timeout flags timedOut → trips the breaker
   });
 
   test("no timeoutMs → the same `sleep` is NOT killed early (uncapped path)", () => {
@@ -1636,5 +1637,13 @@ describe("CTL-1339 rawExec timeout wiring (integration)", () => {
     // (exit 0). Kept short (0.2s) so the suite stays fast.
     const res = __rawExecForTest("sleep", ["0.2"]);
     expect(res.code).toBe(0);
+  });
+
+  test("CTL-1341: a missing binary (ENOENT) returns code 127 but timedOut:false (not a degraded signal)", () => {
+    // The breaker must distinguish a wall-clock timeout (trip) from a spawn error
+    // like binary-not-found (do NOT trip — it's a config error, not rate-limiting).
+    const res = __rawExecForTest("catalyst-no-such-binary-xyz", [], { timeoutMs: 8000 });
+    expect(res.code).toBe(127);
+    expect(res.timedOut).toBe(false);
   });
 });

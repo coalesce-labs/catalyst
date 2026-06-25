@@ -96,7 +96,14 @@ function rawExec(cmd, args, { timeoutMs } = {}) {
   }
   const res = spawnSync(cmd, args, opts);
   if (res.error) {
-    return { code: 127, stdout: "", stderr: res.error.message };
+    // CTL-1341: flag a wall-clock TIMEOUT (the CTL-1339 cap fired) distinctly from
+    // other spawn errors. spawnSync on timeout sets error.code "ETIMEDOUT" +
+    // signal === killSignal ("SIGKILL"); a missing binary sets error.code "ENOENT"
+    // with no signal. withBreaker trips the breaker on `timedOut` (a >8s read is a
+    // degraded-API signal) so the rest of a multi-read pass short-circuits — but
+    // NOT on ENOENT (a config error, not rate-limiting).
+    const timedOut = res.error.code === "ETIMEDOUT" || res.signal === "SIGKILL";
+    return { code: 127, stdout: "", stderr: res.error.message, timedOut };
   }
   return {
     code: res.status ?? 0,
