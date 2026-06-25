@@ -243,6 +243,38 @@ describe("drainOnce — invoke failure → failed", () => {
   });
 });
 
+describe("drainOnce — kind:recovery-item dispatches the per-item briefObj (FU-1)", () => {
+  test("invokes recovery-pass with the full briefObj (NOT a board-health boardContext), launches", () => {
+    const briefObj = {
+      brief: "stuck in verify",
+      reason: "verify-loop",
+      evidence: { logsOutput: "tsc errors", jobState: "dead" },
+      phase: "verify",
+      bgJobId: "bg-dead-9",
+      failureReason: "tsc failed",
+    };
+    seedQueued("CTL-RI", { kind: "recovery-item", briefObj, boardContext: null, reason: "verify-loop" });
+    const invoked = [];
+    const deps = makeDeps();
+    deps.invokeFn = (ticket, brief, d) => {
+      invoked.push({ ticket, brief, d });
+      return { success: true, dispatched: true, attempts: 1, details: { bg_job_id: "bg-x", worktreePath: "/wt/x" } };
+    };
+
+    const res = drainOnce(deps);
+
+    expect(invoked).toHaveLength(1);
+    expect(invoked[0].ticket).toBe("CTL-RI");
+    // the FULL per-item brief is passed through verbatim — never a {boardContext}
+    expect(invoked[0].brief).toEqual(briefObj);
+    expect(invoked[0].brief.boardContext).toBeUndefined();
+    expect(readIntent("CTL-RI").status).toBe("launched");
+    expect(res.drained).toBe(1);
+    // the requested telemetry labels the kind
+    expect(deps._emitted.requested[0].reason).toBe("recovery-item");
+  });
+});
+
 describe("drainOnce — free-slot re-check", () => {
   test("countBackgroundAgents >= maxParallel → un-claims (back to queued), does NOT dispatch", () => {
     seedQueued("CTL-4");
@@ -498,6 +530,9 @@ describe("startDelegateRunnerTimer — detached spawn().unref() kick", () => {
     expect(argv).toEqual(["/fake/delegate-runner-entry.mjs"]);
     expect(opts.detached).toBe(true);
     expect(spy.unrefCount()).toBe(1); // .unref() called on the child
+    // CTL-1331 FU-1: the child must receive orchDir via CATALYST_EXECUTION_CORE_DIR
+    // so the detached entry resolves the right queue (else it exits "no orchDir").
+    expect(opts.env.CATALYST_EXECUTION_CORE_DIR).toBe(orchDir);
   });
 
   test("DETACHED INVARIANT — stdio redirects child stdout/stderr to a log fd, NEVER stdio:'ignore'", () => {

@@ -238,6 +238,7 @@ import {
 import {
   countQueuedDelegates as defaultCountQueuedDelegates,
   gcDelegateIntents as defaultGcDelegateIntents,
+  enqueueRecoveryItemDelegate, // CTL-1331 FU-1: per-item Pass 0r recovery → queue
 } from "./delegate-queue.mjs";
 // CTL-1219: the per-category enforcement seam registry (dirty-tree /
 // source-conflict / orphan-stale / stale-label). Pure-cored + injectable; bound
@@ -3834,8 +3835,26 @@ export function schedulerTick(
               recoveryInvokeSeam(ticket, seamId, brief, { orchDir }),
             // CTL-1176 rung 3: dispatch the recovery-pass skill for the
             // bounded-LLM path (was recoveryInvokeRemediateCapped → phase-remediate).
+            // CTL-1331 FU-1: ENQUEUE the dispatch instead of running the synchronous
+            // createWorktree + spawnSync on the tick — that prelude was ~99% of the
+            // recovery-pass lap (CTL-1330). The detached delegate runner drains the
+            // intent and calls recoveryInvokeRecoveryPass with the SAME briefObj off
+            // the daemon loop. attemptFix reads `.success`: a fresh enqueue OR an
+            // idempotent no-op (already-pending / a recovery-pass worker already
+            // live) both mean recovery is in flight. The runner is auto-enabled
+            // whenever CATALYST_RECOVERY_PASS=enforce (readDelegateRunnerConfig
+            // coupling), so the intents always drain.
             invokeRecoveryPass: (ticket, briefObj) =>
-              recoveryInvokeRecoveryPass(ticket, briefObj, { orchDir }),
+              enqueueRecoveryItemDelegate(ticket, briefObj, {
+                orchDir,
+                // Thread the real (warm-snapshot) bg-liveness probe so the
+                // enqueue-time worker-live idempotency guard actually fires — skip
+                // queuing a redundant intent when a recovery-pass worker for this
+                // ticket is already live. The runner re-checks + supersedes at drain
+                // time too, but this avoids the wasted enqueue→claim→supersede and a
+                // transient slot reservation.
+                isBgJobAlive: (id) => isBgJobAlive(id, { agents: getAgents().agents }),
+              }),
           });
           if (rResult.processed > 0) {
             log.info(

@@ -149,6 +149,11 @@ export function enqueueDelegateIntent(anchor, payload = {}, deps = {}) {
     phase: payload.phase ?? null,
     boardContext: payload.boardContext ?? null,
     reason: payload.reason ?? null,
+    // CTL-1331 FU-1: the kind:"recovery-item" per-item brief (diagnostician
+    // evidence + failure reason + guidance) that reasoningRecoveryPass assembled on
+    // the tick. The runner passes it verbatim to recoveryInvokeRecoveryPass. null
+    // for kind:"board-health" (which carries boardContext instead).
+    briefObj: payload.briefObj ?? null,
     enqueuedAt: now(),
   };
 
@@ -159,6 +164,43 @@ export function enqueueDelegateIntent(anchor, payload = {}, deps = {}) {
     return { enqueued: false, reason: "write-failed" };
   }
   return { enqueued: true, reason: "enqueued" };
+}
+
+// ── enqueueRecoveryItemDelegate (CTL-1331 FU-1) ──────────────────────────────
+//
+// Enqueue a per-item Pass 0r recovery dispatch (kind:"recovery-item") carrying the
+// full per-item briefObj (diagnostician evidence + failure reason + brief) that
+// reasoningRecoveryPass assembled on the tick, and return a result shaped for
+// attemptFix — which reads `.success`. This replaces the synchronous
+// createWorktree + spawnSync that ran on the tick (~99% of the recovery-pass lap,
+// CTL-1330); the detached runner drains the intent and runs
+// recoveryInvokeRecoveryPass off the daemon loop. A fresh enqueue OR an idempotent
+// no-op (`already-pending` / a recovery-pass worker already `worker-live`) both
+// mean recovery is in flight, so both map to success:true — attemptFix must not
+// treat an in-flight recovery as a failure (which would escalate or re-act).
+export function enqueueRecoveryItemDelegate(ticket, briefObj, deps = {}) {
+  const q = enqueueDelegateIntent(
+    ticket,
+    {
+      kind: "recovery-item",
+      phase: "recovery-pass",
+      briefObj,
+      reason: briefObj?.reason ?? "pass-0r-recovery",
+    },
+    deps,
+  );
+  const initiated =
+    !!q?.enqueued ||
+    q?.reason === "already-pending" ||
+    q?.reason === "worker-live";
+  return {
+    success: initiated,
+    dispatched: false,
+    enqueued: !!q?.enqueued,
+    attempts: 1,
+    reason: q?.reason ?? "enqueued",
+    details: { enqueued: !!q?.enqueued, queueReason: q?.reason ?? null },
+  };
 }
 
 // ── countQueuedDelegates (design §3a — the slot reservation) ──────────────────
