@@ -22,6 +22,8 @@ import {
   fetchTicketDelegate,
   buildDelegateBatchCurlArgs,
   fetchTicketsDelegateBatch,
+  parseTerminalTimeoutMs,
+  __rawExecForTest,
 } from "./linear-query.mjs";
 import { createTicketStateCache } from "./linear-cache.mjs";
 
@@ -1394,5 +1396,115 @@ describe("runEligibleQuery — delegate enrichment (CTL-1174)", () => {
     const delegateExec = (...a) => { calls.push(a); return null; };
     runEligibleQuery({ ...query, priority: 2 }, { exec, delegateExec });
     expect(calls).toHaveLength(0);
+  });
+});
+
+// ─── CTL-1339: hot-path per-call wall-clock timeout ──────────────────────────
+// A linearis read that stalls under a Linear 429 would otherwise block the
+// synchronous scheduler tick its full ~30s. The two hot per-signal terminal
+// reads pass an opt-in { timeoutMs } 3rd exec arg; a timed-out read returns
+// code 127 (the spawnSync ETIMEDOUT fail-safe) and the readers fail SAFE.
+
+// recordingExec — captures EVERY positional arg (incl. the 3rd opts) so the
+// threading/opt-in-scope assertions can inspect the timeout. fakeExec above only
+// records { cmd, args } and would miss the 3rd arg.
+function recordingExec({ code = 0, stdout = "", stderr = "" } = {}) {
+  const calls = [];
+  const fn = (...all) => {
+    calls.push(all);
+    return { code, stdout, stderr };
+  };
+  fn.calls = calls;
+  return fn;
+}
+
+describe("CTL-1339 terminal-read timeout — fail-safe on timeout (code 127)", () => {
+  test("classifyTicketResolution: timed-out read (code 127) → 'unknown' (NEVER 'not-found')", () => {
+    // A timeout is indistinguishable from a missing binary: spawnSync sets
+    // res.error → code 127. That MUST NOT quarantine a real ticket.
+    const exec = () => ({ code: 127, stdout: "", stderr: "spawnSync linearis ETIMEDOUT" });
+    expect(classifyTicketResolution("CTL-9", { exec })).toBe("unknown");
+  });
+
+  test("fetchTicketState: timed-out read (code 127) → null (non-terminal, fail-safe)", () => {
+    const exec = () => ({ code: 127, stdout: "", stderr: "spawnSync linearis ETIMEDOUT" });
+    expect(fetchTicketState("CTL-9", { exec })).toBeNull();
+  });
+});
+
+describe("CTL-1339 terminal-read timeout — opt-in threading scope", () => {
+  test("fetchTicketState tier-3 read passes { timeoutMs: 8000 } as the 3rd exec arg", () => {
+    const exec = recordingExec({ code: 0, stdout: JSON.stringify({ state: { name: "Done" } }) });
+    fetchTicketState("CTL-1", { exec });
+    expect(exec.calls).toHaveLength(1);
+    const [cmd, args, opts] = exec.calls[0];
+    expect(cmd).toBe("linearis");
+    expect(args).toEqual(["issues", "read", "CTL-1"]);
+    expect(opts).toEqual({ timeoutMs: 8000 });
+  });
+
+  test("classifyTicketResolution read passes { timeoutMs: 8000 } as the 3rd exec arg", () => {
+    const exec = recordingExec({ code: 0, stdout: JSON.stringify({ identifier: "CTL-1" }) });
+    classifyTicketResolution("CTL-1", { exec });
+    expect(exec.calls).toHaveLength(1);
+    const [cmd, args, opts] = exec.calls[0];
+    expect(cmd).toBe("linearis");
+    expect(args).toEqual(["issues", "read", "CTL-1"]);
+    expect(opts).toEqual({ timeoutMs: 8000 });
+  });
+
+  test("runEligibleQuery (non-hot poll) calls exec WITHOUT a timeoutMs (opt-in scoping)", () => {
+    // The eligible-list poll must stay UNCAPPED — a blanket cap would trip false
+    // monitor.reconcile.failing alerts (the adversarial-review finding).
+    const exec = recordingExec({ code: 0, stdout: ticketsJson([]) });
+    runEligibleQuery({ team: "CTL", status: "Todo" }, { exec, delegateExec: () => null });
+    expect(exec.calls).toHaveLength(1);
+    const opts = exec.calls[0][2];
+    expect(opts).toBeUndefined();
+  });
+
+  test("fetchTicketRelations (non-hot reader) calls exec WITHOUT a timeoutMs", () => {
+    const exec = recordingExec({ code: 0, stdout: JSON.stringify({ state: { name: "Todo" } }) });
+    fetchTicketRelations("CTL-1", { exec });
+    expect(exec.calls).toHaveLength(1);
+    const opts = exec.calls[0][2];
+    expect(opts).toBeUndefined();
+  });
+});
+
+describe("CTL-1339 parseTerminalTimeoutMs — default/disable contract", () => {
+  test("unset (undefined) → 8000 default", () => {
+    expect(parseTerminalTimeoutMs(undefined)).toBe(8000);
+  });
+  test("'0' → undefined (cap disabled — no timeout passed)", () => {
+    expect(parseTerminalTimeoutMs("0")).toBeUndefined();
+  });
+  test("a positive numeric string → that number", () => {
+    expect(parseTerminalTimeoutMs("1500")).toBe(1500);
+  });
+  test("garbage / non-positive → 8000 default", () => {
+    expect(parseTerminalTimeoutMs("abc")).toBe(8000);
+    expect(parseTerminalTimeoutMs("-5")).toBe(8000);
+    expect(parseTerminalTimeoutMs("")).toBe(8000);
+  });
+});
+
+// integration — drives the REAL rawExec/spawnSync path (NOT a stub) to prove the
+// `timeout` option is actually wired to spawnSync. This is the ONLY test that
+// exercises spawnSync; every other test injects an `exec` and bypasses rawExec.
+describe("CTL-1339 rawExec timeout wiring (integration)", () => {
+  test("a real `sleep 5` capped at timeoutMs:200 returns code 127 in well under 1s", () => {
+    const t0 = Date.now();
+    const res = __rawExecForTest("sleep", ["5"], { timeoutMs: 200 });
+    const elapsed = Date.now() - t0;
+    expect(res.code).toBe(127); // spawnSync ETIMEDOUT → res.error → code 127
+    expect(elapsed).toBeLessThan(1000); // killed at ~200ms, NOT after 5s
+  });
+
+  test("no timeoutMs → the same `sleep` is NOT killed early (uncapped path)", () => {
+    // Prove the cap is opt-in: a short sleep with no timeout runs to completion
+    // (exit 0). Kept short (0.2s) so the suite stays fast.
+    const res = __rawExecForTest("sleep", ["0.2"]);
+    expect(res.code).toBe(0);
   });
 });

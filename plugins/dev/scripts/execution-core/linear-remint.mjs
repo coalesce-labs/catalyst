@@ -147,11 +147,14 @@ export const linearReminter = createReminter();
 // re-mint; if a fresh token was applied, retry the call once (the spawned
 // child inherits the updated process.env). Composes UNDER withBreaker so an
 // open breaker still short-circuits before any spawn.
+// CTL-1339: a 3rd `opts` arg (e.g. { timeoutMs }) is forwarded to the wrapped
+// exec on BOTH the initial call AND the post-remint retry, so the opt-in
+// per-call wall-clock cap applies to both attempts. The remint logic is unchanged.
 export function withAuthRemint(rawExec, { reminter = linearReminter, now = Date.now } = {}) {
-  return (cmd, args) => {
-    const res = rawExec(cmd, args);
+  return (cmd, args, opts) => {
+    const res = rawExec(cmd, args, opts);
     if (res.code !== 0 && isAuthError(res.stderr) && reminter.attempt(now())) {
-      return rawExec(cmd, args);
+      return rawExec(cmd, args, opts);
     }
     return res;
   };

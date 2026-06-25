@@ -14,6 +14,26 @@ import { withAuthRemint, linearReminter, isBatchAuthError } from "./linear-remin
 // set without pagination (the reconcile poll runs every 10 min anyway).
 const DEFAULT_LIMIT = 200;
 
+// CTL-1339: per-call wall-clock cap for the HOT per-signal terminal reads
+// (phantom-sweep classifyTicketResolution + recovery/reclaim fetchTicketState tier-3).
+// A linearis read that stalls under a Linear 429 would otherwise block the
+// synchronous scheduler tick its full ~30s wall-clock. Timed-out read fails SAFE
+// (-> code 127 -> classifyTicketResolution "unknown" / fetchTicketState null).
+// env CATALYST_LINEARIS_TERMINAL_TIMEOUT_MS: default 8000; "0" disables (no cap).
+// Opt-in ONLY: applied to exactly the two terminal reads, NOT the eligible-list
+// poll (a blanket cap would trip false monitor.reconcile.failing alerts) or any
+// other linearis call.
+// parseTerminalTimeoutMs — pure env-parse, exported for unit coverage of the
+// default/disable contract (8000 default; "0" → undefined = no cap).
+export function parseTerminalTimeoutMs(raw) {
+  if (raw === "0") return undefined;
+  const n = Number(raw);
+  return n > 0 ? n : 8000;
+}
+const LINEARIS_TERMINAL_READ_TIMEOUT_MS = parseTerminalTimeoutMs(
+  process.env.CATALYST_LINEARIS_TERMINAL_TIMEOUT_MS,
+);
+
 // CTL-784: batched multi-issue read. The Linear GraphQL endpoint, the named
 // operation (so the proxy audit can tell a batch read apart from the per-ticket
 // `GetIssueByIdentifier` storm), and the chunk ceiling (Linear caps a page at
@@ -62,8 +82,19 @@ export function buildLinearisArgs(query) {
 
 // rawExec — thin spawnSync wrapper. Injected in tests so no test ever
 // shells out to the real linearis CLI or touches the network.
-function rawExec(cmd, args) {
-  const res = spawnSync(cmd, args, { encoding: "utf8" });
+// CTL-1339: opt-in per-call wall-clock cap. `timeoutMs` is threaded through the
+// exec chain (withBreaker → withAuthRemint → rawExec) and applied ONLY by the
+// hot per-signal terminal reads; every other call omits it (uncapped, as today).
+// On a `timeout` fire spawnSync sets res.error (ETIMEDOUT) + res.status === null,
+// so the existing res.error branch returns { code: 127 } — the same fail-safe a
+// missing binary produces, which callers already treat as unknown/null.
+function rawExec(cmd, args, { timeoutMs } = {}) {
+  const opts = { encoding: "utf8" };
+  if (typeof timeoutMs === "number" && timeoutMs > 0) {
+    opts.timeout = timeoutMs;
+    opts.killSignal = "SIGKILL";
+  }
+  const res = spawnSync(cmd, args, opts);
   if (res.error) {
     return { code: 127, stdout: "", stderr: res.error.message };
   }
@@ -73,6 +104,12 @@ function rawExec(cmd, args) {
     stderr: res.stderr ?? "",
   };
 }
+
+// CTL-1339: test-only seam. rawExec is module-private (every prod caller injects
+// `exec`), but the integration test must drive the REAL spawnSync path to prove
+// the `timeout` option is actually wired (all stub tests bypass rawExec). Not for
+// production use — callers go through defaultExec/withBreaker.
+export const __rawExecForTest = rawExec;
 
 // defaultExec — rawExec behind the CTL-679 process-wide rate-limit breaker. The
 // eligible poll and per-ticket reads short-circuit without spawning linearis
@@ -158,7 +195,11 @@ export function fetchTicketState(
       return d.state;
     }
   }
-  const { code, stdout } = exec("linearis", ["issues", "read", identifier]);
+  // CTL-1339: hot per-signal terminal read — cap the wall-clock so a 429-stalled
+  // linearis can't block the synchronous tier-3 reclaim/recovery read its full ~30s.
+  const { code, stdout } = exec("linearis", ["issues", "read", identifier], {
+    timeoutMs: LINEARIS_TERMINAL_READ_TIMEOUT_MS,
+  });
   if (code !== 0) return null; // fail-safe — not cached
   try {
     const node = JSON.parse(stdout);
@@ -461,7 +502,12 @@ export function classifyTicketResolution(
     const d = gateway.getDescriptor(identifier);
     if (d && !d.removed && descriptorAgeMs(d) <= gatewayFreshMs) return "exists";
   }
-  const { code, stdout } = exec("linearis", ["issues", "read", identifier]);
+  // CTL-1339: hot per-signal terminal read (phantom-sweep) — cap the wall-clock
+  // so a 429-stalled linearis can't block the synchronous tick. A timed-out read
+  // fails SAFE via the code-127 → "unknown" branch (never a false quarantine).
+  const { code, stdout } = exec("linearis", ["issues", "read", identifier], {
+    timeoutMs: LINEARIS_TERMINAL_READ_TIMEOUT_MS,
+  });
   if (code !== 0) return "unknown"; // nonzero is ambiguous — NEVER not-found
   let node;
   try {

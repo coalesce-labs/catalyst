@@ -143,4 +143,31 @@ describe("withBreaker", () => {
     exec("linearis", ["x"]);
     expect(breaker.isOpen()).toBe(false);
   });
+
+  // CTL-1339: the opt-in per-call wall-clock cap rides a 3rd `opts` arg that the
+  // wrapper must forward to the inner rawExec untouched.
+  test("forwards a 3rd opts arg (e.g. { timeoutMs }) to the inner rawExec", () => {
+    const breaker = createLinearBreaker({ logger: silentLogger });
+    const calls = [];
+    const raw = (...all) => {
+      calls.push(all);
+      return { code: 0, stdout: "", stderr: "" };
+    };
+    const exec = withBreaker(raw, { breaker });
+    exec("linearis", ["issues", "read", "CTL-1"], { timeoutMs: 8000 });
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toEqual(["linearis", ["issues", "read", "CTL-1"], { timeoutMs: 8000 }]);
+  });
+
+  test("omitting the opts arg forwards undefined (uncapped, as before)", () => {
+    const breaker = createLinearBreaker({ logger: silentLogger });
+    const calls = [];
+    const raw = (...all) => {
+      calls.push(all);
+      return { code: 0, stdout: "", stderr: "" };
+    };
+    const exec = withBreaker(raw, { breaker });
+    exec("linearis", ["issues", "list"]);
+    expect(calls[0][2]).toBeUndefined();
+  });
 });
