@@ -87,13 +87,17 @@ export const linearBreaker = createLinearBreaker();
 // synthetic non-zero result (stderr "circuit-open") WITHOUT spawning. After a
 // real spawn: a 429 opens the breaker; a clean exit (code 0) closes it. A
 // non-429 failure leaves the breaker untouched (it is not a rate-limit signal).
+// CTL-1339: a 3rd `opts` arg (e.g. { timeoutMs }) is forwarded to the inner
+// rawExec untouched — opt-in per-call wall-clock cap for the hot terminal reads.
+// The breaker logic is unchanged; an open breaker still short-circuits before
+// any spawn (so the cap is moot when open).
 export function withBreaker(rawExec, { breaker = linearBreaker, now = Date.now } = {}) {
-  return (cmd, args) => {
+  return (cmd, args, opts) => {
     const t = now();
     if (breaker.isOpen(t)) {
       return { code: 1, stdout: "", stderr: "circuit-open" };
     }
-    const res = rawExec(cmd, args);
+    const res = rawExec(cmd, args, opts);
     if (res.code !== 0 && isRateLimitError(res.stderr)) {
       breaker.recordRateLimited(t);
     } else if (res.code === 0) {

@@ -367,6 +367,38 @@ describe("withAuthRemint", () => {
     expect(r.code).toBe(1);
     expect(callN).toBe(2); // original + one retry only
   });
+
+  // CTL-1339: the opt-in per-call wall-clock cap rides a 3rd `opts` arg that the
+  // wrapper must forward to the wrapped exec on BOTH attempts.
+  test("forwards the 3rd opts arg to the wrapped exec on a clean (single) call", () => {
+    const reminter = makeReminter();
+    const calls = [];
+    const raw = (...all) => { calls.push(all); return { code: 0, stdout: "ok", stderr: "" }; };
+    const exec = withAuthRemint(raw, { reminter, now: () => 0 });
+    exec("linearis", ["issues", "read", "CTL-1"], { timeoutMs: 8000 });
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toEqual(["linearis", ["issues", "read", "CTL-1"], { timeoutMs: 8000 }]);
+  });
+
+  test("forwards the 3rd opts arg on BOTH the initial call AND the post-remint retry", () => {
+    const reminter = makeReminter(true); // mint succeeds → retry happens
+    let callN = 0;
+    const calls = [];
+    const raw = (...all) => {
+      callN++;
+      calls.push(all);
+      return callN === 1
+        ? { code: 1, stdout: "", stderr: "Unauthorized" } // initial: auth error
+        : { code: 0, stdout: "retry-ok", stderr: "" }; // retry: success
+    };
+    const exec = withAuthRemint(raw, { reminter, now: () => 0 });
+    const r = exec("linearis", ["issues", "read", "CTL-1"], { timeoutMs: 8000 });
+    expect(r.stdout).toBe("retry-ok");
+    expect(callN).toBe(2);
+    // the opts must reach BOTH spawns — the timeout applies on the retry too.
+    expect(calls[0][2]).toEqual({ timeoutMs: 8000 });
+    expect(calls[1][2]).toEqual({ timeoutMs: 8000 });
+  });
 });
 
 // ── breaker + remint composition ──────────────────────────────────────────────
