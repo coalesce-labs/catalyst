@@ -159,7 +159,12 @@ export function assertSdkAuth({ env = process.env, oauthToken } = {}) {
 // Tests inject a fake async-iterable and never touch the real SDK / network.
 function defaultRunQuery({ prompt, options }) {
   return (async function* () {
-    const { query } = await import("@anthropic-ai/claude-agent-sdk");
+    // Non-literal specifier so bun build's static resolution check (CI import
+    // graph) skips it — literal dynamic imports are still statically resolved
+    // even when lazy (same trap as vite + bun:sqlite, PR #1561). The SDK is an
+    // optionalDependency, loaded only at runtime where the executor=sdk path runs.
+    const sdkPkg = ["@anthropic-ai", "claude-agent-sdk"].join("/");
+    const { query } = await import(sdkPkg);
     for await (const m of query({ prompt, options })) yield m;
   })();
 }
