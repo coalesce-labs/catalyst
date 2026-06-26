@@ -302,5 +302,62 @@ export function emitLivenessRefreshSpan({ outcome, startEpochMs, endEpochMs, dea
   }
 }
 
+// emitUpdaterRefreshSpan — CTL-1350 Tier 3: a span tree for ONE catalyst-updater
+// refresh cycle (the standalone plugin-pull daemon, CTL-1348). Root `updater.refresh`
+// (INTERNAL) with a `updater.checkout` child ONLY for a checkout that changed or failed
+// — same span-hygiene rule as emitTickTrace (a clean refresh where everything is already
+// up to date is exactly 1 span; a refresh that pulled or failed shows the offending
+// checkouts). The git fetch/reset granularity is intentionally NOT a child span here: it
+// lives inside refreshPluginCheckout on the shared broker pull path, which this daemon
+// must not mutate — so children are reconstructed POST-HOC from the per-root results.
+//
+// When `traceId` (32 hex) + `spanId` (16 hex) are passed, the root is seeded with a
+// deterministic parent SpanContext so the span's trace_id equals the id stamped on the
+// updater's refresh log line (trace↔logs round-trip), exactly as emitTickTrace does.
+// `results` = the refreshPluginCheckout result array
+// ([{root, changed, failed, oldSha, newSha}]). Never throws.
+export function emitUpdaterRefreshSpan({ reason, startEpochMs, endEpochMs, roots, pulled, changed, failed, results = [], traceId, spanId } = {}) {
+  const tracer = getTracer();
+  if (!tracer) return;
+  try {
+    let startCtx = context.active();
+    if (traceId && spanId && TraceFlags && typeof trace.setSpanContext === "function") {
+      startCtx = trace.setSpanContext(startCtx, {
+        traceId,
+        spanId,
+        traceFlags: TraceFlags.SAMPLED,
+        isRemote: true,
+      });
+    }
+    const root = tracer.startSpan("updater.refresh", { kind: SpanKind.INTERNAL, startTime: startEpochMs }, startCtx);
+    if (reason != null) root.setAttribute("catalyst.updater.reason", reason);
+    if (roots != null) root.setAttribute("catalyst.updater.roots", roots);
+    if (pulled != null) root.setAttribute("catalyst.updater.pulled", pulled);
+    if (changed != null) root.setAttribute("catalyst.updater.changed", changed);
+    if (failed != null) root.setAttribute("catalyst.updater.failed", failed);
+    const rootCtx = trace.setSpan(context.active(), root);
+    // Child span only for a checkout that actually changed or failed (hygiene: a
+    // no-op refresh stays a single span; a wedged checkout shows exactly itself).
+    for (const r of results) {
+      if (!r || !(r.changed || r.failed)) continue;
+      const child = tracer.startSpan("updater.checkout", { kind: SpanKind.INTERNAL, startTime: startEpochMs }, rootCtx);
+      if (r.root != null) child.setAttribute("catalyst.updater.checkout", r.root);
+      if (r.oldSha) child.setAttribute("catalyst.updater.old_sha", r.oldSha);
+      if (r.newSha) child.setAttribute("catalyst.updater.new_sha", r.newSha);
+      child.setAttribute("catalyst.updater.checkout.changed", !!r.changed);
+      if (r.failed) {
+        child.setStatus({ code: SpanStatusCode.ERROR, message: `plugin checkout refresh failed: ${r.root}` });
+      }
+      child.end(endEpochMs);
+    }
+    if (failed > 0) {
+      root.setStatus({ code: SpanStatusCode.ERROR, message: `${failed} plugin checkout(s) failed to refresh` });
+    }
+    root.end(endEpochMs);
+  } catch {
+    /* observability must never throw */
+  }
+}
+
 // Re-export the api primitives callers need so they don't each import @opentelemetry/api.
 export { trace, context, SpanKind, SpanStatusCode, TraceFlags };
