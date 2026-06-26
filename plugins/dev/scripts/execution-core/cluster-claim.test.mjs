@@ -51,9 +51,19 @@ function makeFakeLinear({ seed = {}, missingIssues = new Set() } = {}) {
     calls.push({ query, variables });
 
     if (query.includes("ResolveIssueId")) {
+      // CTL-1363: the real Linear API returns HTTP 400 on
+      // issues(filter:{identifier:...}) — IssueFilter has no `identifier` field.
+      // Mirror that here so a regression to the broken query shape FAILS the
+      // test instead of silently passing (the mock gap that let the original
+      // fleet-dispatch wedge ship). Only the issue(id:) form is accepted.
+      if (query.includes("identifier")) {
+        throw new Error(
+          'linear graphql http 400: Field "identifier" is not defined by type "IssueFilter"'
+        );
+      }
       const id = variables.id;
-      if (missingIssues.has(id)) return { issues: { nodes: [] } };
-      return { issues: { nodes: [{ id: `uuid-${id}` }] } };
+      if (missingIssues.has(id)) return { issue: null };
+      return { issue: { id: `uuid-${id}` } };
     }
 
     if (query.includes("ReadFence")) {
@@ -142,6 +152,17 @@ describe("resolveIssueId — identifier → UUID", () => {
   it("returns null when no issue matches", async () => {
     const { post } = makeFakeLinear({ missingIssues: new Set(["CTL-999"]) });
     expect(await resolveIssueId("CTL-999", { post })).toBeNull();
+  });
+  // CTL-1363 regression guard: resolveIssueId MUST query via issue(id:), never
+  // the issues(filter:{identifier:{eq}}) form — IssueFilter has no `identifier`
+  // field, so that form is a hard 400 that silently wedged fleet dispatch.
+  it("queries via issue(id:) and never the issues(filter:{identifier}) form (CTL-1363)", async () => {
+    const { post, calls } = makeFakeLinear();
+    await resolveIssueId("CTL-842", { post });
+    const resolveCall = calls.find((c) => c.query.includes("ResolveIssueId"));
+    expect(resolveCall).toBeDefined();
+    expect(resolveCall.query).toContain("issue(id:");
+    expect(resolveCall.query).not.toContain("identifier");
   });
 });
 
@@ -243,7 +264,7 @@ describe("claimTicket — soft-CAS via read-back", () => {
     // modelling a concurrent host that won the serialized write race.
     let writes = 0;
     async function post(query) {
-      if (query.includes("ResolveIssueId")) return { issues: { nodes: [{ id: "uuid-CTL-842" }] } };
+      if (query.includes("ResolveIssueId")) return { issue: { id: "uuid-CTL-842" } };
       if (query.includes("UpsertFence")) {
         writes += 1;
         return { attachmentCreate: { success: true, attachment: {} } };
@@ -269,7 +290,7 @@ describe("claimTicket — soft-CAS via read-back", () => {
   it("read-back shows a HIGHER generation → won:false (we were leapfrogged)", async () => {
     let writes = 0;
     async function post(query) {
-      if (query.includes("ResolveIssueId")) return { issues: { nodes: [{ id: "uuid-CTL-842" }] } };
+      if (query.includes("ResolveIssueId")) return { issue: { id: "uuid-CTL-842" } };
       if (query.includes("UpsertFence")) {
         writes += 1;
         return { attachmentCreate: { success: true, attachment: {} } };
@@ -329,7 +350,7 @@ describe("claimTicket — stale-claim preemption (CTL-1297)", () => {
     const now = () => Date.parse("2026-06-20T00:00:30.000Z"); // 30s later → fresh
     let writes = 0;
     async function post(query) {
-      if (query.includes("ResolveIssueId")) return { issues: { nodes: [{ id: "uuid-CTL-842" }] } };
+      if (query.includes("ResolveIssueId")) return { issue: { id: "uuid-CTL-842" } };
       if (query.includes("UpsertFence")) {
         writes += 1;
         return { attachmentCreate: { success: true, attachment: {} } };
@@ -445,7 +466,7 @@ describe("runCli — the spawnSync CLI surface (CTL-850)", () => {
     // decides not-to-dispatch from the `won:false` it parses out of stdout.
     let writes = 0;
     async function post(query) {
-      if (query.includes("ResolveIssueId")) return { issues: { nodes: [{ id: "uuid-CTL-842" }] } };
+      if (query.includes("ResolveIssueId")) return { issue: { id: "uuid-CTL-842" } };
       if (query.includes("UpsertFence")) {
         writes += 1;
         return { attachmentCreate: { success: true, attachment: {} } };

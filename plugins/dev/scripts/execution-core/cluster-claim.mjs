@@ -99,17 +99,27 @@ async function defaultPost(query, variables) {
 
 // ─── identifier → issue UUID ─────────────────────────────────────────────────
 
+// CTL-1363: resolve via the `issue(id:)` query, which accepts the human
+// identifier ("CTL-842") directly and returns the UUID. The previous
+// `issues(filter:{identifier:{eq}})` form was a hard 400 — IssueFilter has no
+// `identifier` field ("Field 'identifier' is not defined by type 'IssueFilter'")
+// — so resolveIssueId ALWAYS 400'd and every cross-host claim write aborted.
+// When multiHost=true that silently wedged fleet dispatch: the monitor's triage
+// dispatch failed the claim and never wrote triage.json, so the scheduler held
+// every new-work candidate at the CTL-1150 triage gate (all at log.debug, so
+// invisible at INFO). Same bug + fix as cluster-heartbeat.mjs (CTL-1255).
+// READ_ATTACHMENTS_QUERY below already uses `issue(id:)` — which is why reads
+// worked while writes silently 400'd.
 const RESOLVE_ISSUE_QUERY = `query ResolveIssueId($id: String!) {
-  issues(filter: { identifier: { eq: $id } }) { nodes { id } }
+  issue(id: $id) { id }
 }`;
 
 // resolveIssueId — a ticket identifier (e.g. "CTL-842") → its issue UUID, or
-// null when no issue matches. Mirrors lib/linear-comment-post.sh's resolution
-// (issues filter on identifier.eq). attachmentCreate needs the UUID, not the
+// null when no issue matches. attachmentCreate needs the UUID, not the
 // identifier. Exported for unit coverage + reuse.
 export async function resolveIssueId(ticket, { post = defaultPost } = {}) {
   const data = await post(RESOLVE_ISSUE_QUERY, { id: ticket });
-  return data?.issues?.nodes?.[0]?.id ?? null;
+  return data?.issue?.id ?? null;
 }
 
 // ─── read ────────────────────────────────────────────────────────────────────
