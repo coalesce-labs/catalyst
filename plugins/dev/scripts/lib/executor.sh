@@ -30,6 +30,15 @@ executor_claude_bin() {
 	echo "${CATALYST_DISPATCH_CLAUDE_BIN:-claude}"
 }
 
+# executor_kind — CTL-1365a: which phase-worker substrate this node uses
+# (bg|sdk|oneshot-legacy). Reads CATALYST_EXECUTOR; defaults to "bg" when unset —
+# the seam 1b/1c branch on (e.g. executor_reap → no-op under sdk). INERT in this
+# PR: the bg launch verb (executor_claude_bin) and executor_reap are unchanged,
+# so a node with CATALYST_EXECUTOR unset behaves byte-identically to today.
+executor_kind() {
+	echo "${CATALYST_EXECUTOR:-bg}"
+}
+
 # _executor_jobs_root — where `claude --bg` writes per-job state.json dirs.
 _executor_jobs_root() {
 	echo "${CATALYST_EXECUTOR_JOBS_ROOT:-${CLAUDE_BG_JOBS_DIR:-$HOME/.claude/jobs}}"

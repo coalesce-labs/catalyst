@@ -3076,6 +3076,12 @@ export function schedulerTick(
     // `ReferenceError: env is not defined` and aborted the whole tick on any
     // escalation branch.
     env = process.env,
+    // CTL-1365a: catalyst.dispatch.mode telemetry vocab ({phase-agents |
+    // oneshot-legacy | sdk}) stamped on the CTL-1330 Tier-1 tick-timing line so
+    // OTEL's ParseJSON(body)→signaltometrics leg labels the scheduler histograms
+    // by dispatch mode. Default "phase-agents" = today's bg substrate; every
+    // direct-call test keeps the stable label with no wiring.
+    dispatchMode = "phase-agents",
   } = {}
 ) {
   // CTL-850: resolve this host + the cluster roster ONCE per tick (cheap
@@ -5650,6 +5656,11 @@ export function schedulerTick(
         eligible_count: eligible.length,
         liveness_fresh: livenessFresh,
         beliefs_shadow: process.env.CATALYST_BELIEFS_SHADOW === "1",
+        // CTL-1365a: the dispatch-mode dimension. Dotted JSON key so Loki `| json`
+        // + the OTEL signaltometrics leg both yield the frozen metric label
+        // `catalyst_dispatch_mode` (dots→underscores) that the OTEL "Execution-model
+        // A/B" dashboard splits `by (catalyst_dispatch_mode)`.
+        "catalyst.dispatch.mode": dispatchMode,
       },
       "scheduler: tick timing (CTL-1330)"
     );
@@ -6019,6 +6030,7 @@ function runTick() {
     const tickResult = schedulerTick(runningOpts.orchDir, {
       readEligible: runningOpts.readEligible,
       dispatch: runningOpts.dispatch,
+      dispatchMode: runningOpts.dispatchMode, // CTL-1365a: stamp the Tier-1 tick-timing line
       exec: runningOpts.exec,
       writeStatus: runningOpts.writeStatus,
       cache: runningOpts.cache, // CTL-634: shared out-of-set blocker state cache
@@ -6415,6 +6427,12 @@ function scheduleDebouncedTick(debounceMs) {
 export function startScheduler({
   orchDir,
   dispatch,
+  // CTL-1365a: the catalyst.dispatch.mode telemetry vocab ({phase-agents |
+  // oneshot-legacy | sdk}) resolved once by the daemon from the executor flag.
+  // Threaded into runningOpts → the Tier-1 tick-timing log field AND the OTLP
+  // resource attr (initTracing). Default "phase-agents" keeps every direct-call
+  // test + standalone main() on today's label with no wiring.
+  dispatchMode = "phase-agents",
   readEligible,
   exec,
   writeStatus,
@@ -6483,6 +6501,7 @@ export function startScheduler({
   runningOpts = {
     orchDir,
     dispatch,
+    dispatchMode, // CTL-1365a: threaded to schedulerTick (tick-timing log field)
     readEligible,
     exec,
     writeStatus,
@@ -6549,7 +6568,7 @@ export function startScheduler({
   // and fire-and-forget — never blocks startup; emitTickTrace no-ops until the
   // provider is ready, and a failed init degrades to "no spans". BatchSpanProcessor
   // only, so the exporter never blocks the tick.
-  initTracing({ serviceName: "catalyst.execution-core" })
+  initTracing({ serviceName: "catalyst.execution-core", dispatchMode })
     .then((on) => {
       if (on) log.info({}, "scheduler: OTLP tracing enabled (CTL-1330 Tier 3)");
     })
