@@ -77,6 +77,7 @@ The `orchestration.dispatchMode` key picks how Catalyst runs each ticket:
 | Key | Default | What it does |
 | --- | --- | --- |
 | `orchestration.dispatchMode` | `oneshot-legacy` | Which run mode to use (above) |
+| `orchestration.executor` | `bg` | Which substrate runs a phase worker: `bg` (a `claude --bg` background job, today's behavior), `oneshot-legacy`, or `sdk` (the in-process Claude Agent SDK — **not yet implemented; falls back to `bg`**, CTL-1365b). Resolution: `CATALYST_EXECUTOR` env → this key → node-class default (all classes → `bg` today). Distinct from `dispatchMode`. |
 | `orchestration.maxParallel` | `3` | How many tickets run at once |
 | `orchestration.worktreeDir` | `~/catalyst/wt/<projectKey>` | Where worktrees are created |
 | `orchestration.pluginDirs` | unset | Path(s) to the plugin checkout(s) workers run from (`<checkout>/plugins/dev`). Set by `setup-plugin-source.sh`; resolved by `phase-agent-dispatch` and refreshed by `catalyst-stack hotpatch` / merge-to-main. String or `:`-joined array. May also live in the machine config (Layer 2); the `CATALYST_PLUGIN_DIRS` env var overrides both. |
