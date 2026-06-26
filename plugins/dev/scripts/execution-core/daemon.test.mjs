@@ -35,6 +35,7 @@ import {
   _isBotId,
 } from "./daemon.mjs";
 import { getEventLogPath, log } from "./config.mjs";
+import { defaultDispatch, sdkDispatch, makeCommentWakeDispatch } from "./dispatch.mjs";
 import { upsertProjectEntry } from "./registry.mjs";
 import {
   recordHoldStop,
@@ -1820,6 +1821,96 @@ describe("daemon wires onComment and onUpdate to monitorFn (CTL-549 + CTL-749)",
     stopDaemon();
     expect(typeof capturedOpts?.onComment).toBe("function");
     expect(typeof capturedOpts?.onUpdate).toBe("function");
+  });
+});
+
+// ─── CTL-1365b Stage C: executor flag honored at ALL FOUR dispatch entry points ─
+//
+// The daemon resolves the executor ONCE per boot (env → Layer-1 → node-class
+// default) and threads the chosen dispatch into all four sites: (1) the scheduler
+// pull-loop, (2) the monitor's →Triage one-shot, (3) the comment-wake re-dispatch,
+// (4) the boot-resume crash-recovery pass. INVARIANT: executor=bg/unset is
+// byte-identical to today (every site === defaultDispatch); executor=sdk routes
+// every site through sdkDispatch (which injects sdkRunPhaseAgent). No site hardcodes
+// bg — a split-brain (e.g. comment-wakes on bg while the scheduler is on sdk) is
+// exactly the latent defect the plan-review flagged.
+describe("CTL-1365b: executor flag honored at all four dispatch entry points", () => {
+  let prevExecutor;
+  beforeEach(() => { prevExecutor = process.env.CATALYST_EXECUTOR; });
+  afterEach(() => {
+    if (prevExecutor === undefined) delete process.env.CATALYST_EXECUTOR;
+    else process.env.CATALYST_EXECUTOR = prevExecutor;
+  });
+
+  // Capture the dispatch threaded into reconcileBoot (site 4), startMonitor
+  // (site 2 — its →Triage one-shot), and startScheduler (site 1 — the pull loop).
+  const captureThreeSites = () => {
+    const captured = {};
+    startDaemon({
+      recover: () => ({ coldStart: true, workers: {} }),
+      reconcileBoot: (o) => { captured.boot = o.dispatch; return {}; },
+      startMonitor: (o) => { captured.monitor = o.dispatch; captured.onComment = o.onComment; },
+      startScheduler: (o) => { captured.scheduler = o.dispatch; },
+      watchRegistry: false,
+    });
+    stopDaemon();
+    return captured;
+  };
+
+  test("executor=bg → scheduler + monitor + boot-resume all receive defaultDispatch (byte-identical)", () => {
+    process.env.CATALYST_EXECUTOR = "bg";
+    const c = captureThreeSites();
+    expect(c.scheduler).toBe(defaultDispatch); // site 1
+    expect(c.monitor).toBe(defaultDispatch);   // site 2 (→Triage one-shot)
+    expect(c.boot).toBe(defaultDispatch);      // site 4 (boot-resume)
+    expect(typeof c.onComment).toBe("function"); // site 3 wired (routing pinned below)
+  });
+
+  test("executor unset → defaults to bg at all three captured sites (no site hardcodes sdk)", () => {
+    delete process.env.CATALYST_EXECUTOR;
+    const c = captureThreeSites();
+    expect(c.scheduler).toBe(defaultDispatch);
+    expect(c.monitor).toBe(defaultDispatch);
+    expect(c.boot).toBe(defaultDispatch);
+  });
+
+  test("executor=sdk → scheduler + monitor + boot-resume all receive sdkDispatch (none hardcodes bg)", () => {
+    process.env.CATALYST_EXECUTOR = "sdk";
+    const c = captureThreeSites();
+    expect(c.scheduler).toBe(sdkDispatch); // site 1
+    expect(c.monitor).toBe(sdkDispatch);   // site 2
+    expect(c.boot).toBe(sdkDispatch);      // site 4
+    expect(typeof c.onComment).toBe("function"); // site 3 wired
+  });
+
+  // Site 3 (comment-wake) routing: the daemon builds the comment-wake dispatch as
+  // makeCommentWakeDispatch(dispatchFn) — the SAME resolved dispatchFn the three
+  // sites above receive. This pins that the binding routes a parked-ticket
+  // re-dispatch through that executor dispatch (and NOT a hardcoded defaultDispatch),
+  // so flipping the flag flips the comment-wake too.
+  test("site 3: the comment-wake binding routes a needs-input re-dispatch through the resolved executor dispatch", async () => {
+    const orch = mkdtempSync(join(tmpdir(), "ctl-1365b-cw-"));
+    try {
+      const workerDir = join(orch, "workers", "CTL-1");
+      mkdirSync(workerDir, { recursive: true });
+      writeFileSync(
+        join(workerDir, "phase-implement.json"),
+        JSON.stringify({ ticket: "CTL-1", phase: "implement", status: "needs-input", parkedFrom: "implement", handoffPath: "/h.md" }),
+      );
+      const routed = [];
+      // A sentinel standing in for the resolved dispatchFn (sdkDispatch under sdk,
+      // defaultDispatch under bg). makeCommentWakeDispatch is exactly what the daemon
+      // threads into handleCommentWake's `dispatch`.
+      const resolvedDispatchFn = (args) => { routed.push(args); return { code: 0 }; };
+      await handleCommentWake(
+        { ticket: "CTL-1", body: "answer" },
+        { orchDir: orch, dispatch: makeCommentWakeDispatch(resolvedDispatchFn), removeLabel: async () => {} },
+      );
+      expect(routed).toHaveLength(1);
+      expect(routed[0]).toMatchObject({ orchDir: orch, ticket: "CTL-1", phase: "implement", handoffPath: "/h.md" });
+    } finally {
+      rmSync(orch, { recursive: true, force: true });
+    }
   });
 });
 
