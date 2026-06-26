@@ -152,6 +152,21 @@ RESUME_SESSION=""
 # pass higher values once they're plumbed through, but a missing flag must
 # never break dispatch.
 ATTEMPT=1
+# CTL-1365b: the executor seam is the LAUNCH VERB, not the dispatch path. Every
+# executor runs the IDENTICAL pre-launch block below (CTL-736 claim + the
+# status:"dispatched" signal + the CATALYST_GENERATION fencing token + the
+# CTL-667/707 dispatch-time rebase + prompt/env/settings composition); only the
+# final launch differs.
+#   bg (default)     spawn `claude --bg` (this script's existing behavior —
+#                    byte-identical to the pre-CTL-1365b dispatcher).
+#   prelaunch-only   run the shared pre-launch, print the resolved launch spec as
+#                    one JSON line, and exit 0 WITHOUT spawning `claude --bg`. The
+#                    in-process SDK executor (CTL-1365b sdkRunPhaseAgent) invokes
+#                    this script in this mode to reuse the pre-launch, then runs
+#                    the phase skill through an Agent SDK query() itself.
+# Resolves from the --launch-mode flag (precedence) then the
+# CATALYST_DISPATCH_LAUNCH_MODE env (so it survives the CTL-990 recreate exec).
+LAUNCH_MODE="${CATALYST_DISPATCH_LAUNCH_MODE:-}"
 
 while [[ $# -gt 0 ]]; do
 	case "$1" in
@@ -191,6 +206,10 @@ while [[ $# -gt 0 ]]; do
 		RESUME_SESSION="$2"
 		shift 2
 		;;
+	--launch-mode)
+		LAUNCH_MODE="$2"
+		shift 2
+		;;
 	--dry-run)
 		DRY_RUN=1
 		shift
@@ -217,6 +236,18 @@ if [[ ! $TICKET =~ ^[A-Za-z][A-Za-z0-9_]*-[0-9]+$ ]]; then
 fi
 if [[ $PHASE == *.* ]]; then
 	die "invalid --phase: $PHASE (dots are reserved for event name parsing)"
+fi
+
+# CTL-1365b: validate the launch verb. Empty == bg (the default). Export a
+# non-bg mode so it survives the CTL-990 recreate `exec "$0" …` (which re-runs
+# this script WITHOUT re-passing --launch-mode) — otherwise an SDK dispatch that
+# hit the research/plan recreate path would silently fall back to `claude --bg`.
+case "$LAUNCH_MODE" in
+"" | bg | prelaunch-only) ;;
+*) die "invalid --launch-mode: $LAUNCH_MODE (expected bg|prelaunch-only)" ;;
+esac
+if [[ -n $LAUNCH_MODE && $LAUNCH_MODE != "bg" ]]; then
+	export CATALYST_DISPATCH_LAUNCH_MODE="$LAUNCH_MODE"
 fi
 
 # ─── Resolve config path ────────────────────────────────────────────────────
@@ -1070,6 +1101,64 @@ if [[ -z $RESUME_SESSION ]] && is_rebase_phase "$PHASE"; then
 		# monitor-merge still catches divergence). Do NOT block the phase.
 		echo "phase-agent-dispatch: rebase preflight skipped (rc=$REBASE_RC) for ${TICKET}/${PHASE}; proceeding un-rebased" >&2
 	fi
+fi
+
+# ─── Launch verb (executor seam, CTL-1365b) ─────────────────────────────────
+#
+# EVERYTHING ABOVE THIS POINT IS THE SHARED PRE-LAUNCH BLOCK — run identically by
+# every executor:
+#   • the CTL-736 atomic single-flight generation claim,
+#   • the status:"dispatched" signal-file write + the CATALYST_GENERATION
+#     fencing token (the skill template requires this signal to PRE-EXIST —
+#     _phase-agent-template/SKILL.md only flips dispatched→running),
+#   • the CTL-667/707 L1–L4 dispatch-time rebase (+ the CTL-990 recreate exec),
+#   • the prompt + DISPATCH_ENV + --settings + session-name + plugin-dir build.
+#
+# The ONLY thing an executor swaps is the launch verb that follows:
+#   bg (default)     → spawn `claude --bg` (below). Byte-identical to the
+#                      pre-CTL-1365b dispatcher.
+#   prelaunch-only   → print the resolved launch spec as one JSON line and exit
+#                      0 WITHOUT spawning `claude --bg`. The in-process SDK
+#                      executor (CTL-1365b sdkRunPhaseAgent) ran this script in
+#                      this mode purely to reuse the pre-launch; it then reads the
+#                      emitted spec and drives the phase skill through an Agent SDK
+#                      query() itself. The signal is left at "dispatched" (the
+#                      skill flips it to "running"), exactly as for a bg launch
+#                      before its post-spawn bg_job_id record.
+#
+# emit_launch_spec mirrors the --dry-run JSON shape (so consumers parse one shape)
+# but is emitted AFTER the side-effecting pre-launch (claim + signal + rebase),
+# and additionally carries worktreePath/generation/signalFile — the inputs the
+# SDK query() needs (cwd, fencing token, signal to flip).
+emit_launch_spec() {
+	jq -nc \
+		--arg ticket "$TICKET" \
+		--arg phase "$PHASE" \
+		--arg model "$MODEL" \
+		--argjson turnCap "$TURN_CAP" \
+		--arg prompt "$PROMPT" \
+		--arg signal "$SIGNAL_FILE" \
+		--arg sessionName "$SESSION_NAME" \
+		--argjson attempt "$ATTEMPT" \
+		--arg resumeSession "$RESUME_SESSION" \
+		--arg worktreePath "$(pwd)" \
+		--argjson generation "$GENERATION" \
+		--arg pluginDirs "$PLUGIN_DIRS_RESOLVED" \
+		--argjson env "$(printf '%s\n' "${DISPATCH_ENV[@]}" | jq -R . | jq -s .)" \
+		--argjson settings "$(printf '%s' "$WORKER_SETTINGS_JSON" | jq -e . >/dev/null 2>&1 && printf '%s' "$WORKER_SETTINGS_JSON" || echo '{}')" \
+		'{ticket: $ticket, phase: $phase, model: $model, turnCap: $turnCap,
+      bg_job_id: null, prompt: $prompt, signalFile: $signal,
+      sessionName: $sessionName, attempt: $attempt,
+      worktreePath: $worktreePath, generation: $generation,
+      resumeSession: (if $resumeSession == "" then null else $resumeSession end),
+      pluginDirs: (if $pluginDirs == "" then [] else ($pluginDirs | split(":")) end),
+      env: $env, settings: $settings, status: "prelaunch-ready",
+      launchMode: "prelaunch-only", dryRun: false}'
+}
+
+if [[ $LAUNCH_MODE == "prelaunch-only" ]]; then
+	emit_launch_spec
+	exit 0
 fi
 
 # Spawn the phase agent. `claude --bg` writes the new job ID to stdout as

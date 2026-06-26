@@ -120,7 +120,7 @@ import {
 import * as linearWrite from "./linear-write.mjs"; // CTL-1067: writeStatus for defaultClearStall
 import { writeBootMarker, clearProgressMarks, resolvePhaseSessionId, defaultAppendOperatorEvent } from "./recovery.mjs"; // CTL-655: window the revive budget to this run; CTL-736: reset progress high-water; CTL-768: --resume; CTL-1044: operator-event appender for the scheduler's appendIntentEvent seam
 import { startAutoTuner } from "./autotune.mjs"; // CTL-684: side-car maxParallel auto-tuner
-import { dispatchTicket, dispatchForExecutor } from "./dispatch.mjs"; // CTL-549: comment-wake re-dispatch; CTL-1365a: executor→dispatch selection at the launch seam
+import { dispatchTicket, dispatchForExecutor, makeCommentWakeDispatch } from "./dispatch.mjs"; // CTL-549: comment-wake re-dispatch; CTL-1365a/b: executor→dispatch selection at the launch seam + comment-wake executor binding
 import { removeLabel as defaultRemoveLabel } from "./linear-write.mjs"; // CTL-549: clear needs-human on resume
 // CTL-671: the real phantom-sweep seams. startScheduler defaults them to safe
 // no-ops (hermetic for direct-call unit tests); the REAL daemon arms them here
@@ -582,13 +582,33 @@ export function startDaemon({
     // its `coldStart` verdict + worker buckets.
     const report = recover({ orchDir });
     _bootReport = report;
+    // CTL-1365a/b Stage C: resolve the phase-worker executor ONCE per boot (env →
+    // Layer-1 catalyst.orchestration.executor → node-class default; every class
+    // maps to "bg" in Phase 1, so an unset flag is a pure no-op) and select the
+    // dispatch function threaded into ALL FOUR dispatch entry points — the
+    // scheduler pull-loop, the monitor's →Triage one-shot, the comment-wake
+    // re-dispatch, AND the boot-resume crash-recovery pass — so a node never
+    // split-brains (some sites bg, others sdk). Resolved here, BEFORE reconcileBoot,
+    // precisely so boot-resume honors the flag too. For executor=bg/oneshot-legacy
+    // dispatchFn === defaultDispatch (byte-identical to today); "sdk" → sdkDispatch
+    // (injects sdkRunPhaseAgent). dispatchMode is the catalyst.dispatch.mode
+    // telemetry vocab ("phase-agents" for bg) for the scheduler's Tier-1 tick line.
+    const executor = getExecutor(configPath);
+    const dispatchFn = dispatchForExecutor(executor);
+    const dispatchMode = dispatchModeForExecutor(executor);
+    // CTL-1365b: the comment-wake re-dispatch binding — routes a parked ticket's
+    // re-dispatch through the SAME resolved executor (no split-brain).
+    const commentWakeDispatch = makeCommentWakeDispatch(dispatchFn);
     // CTL-654: boot-resume — on a cold start, re-dispatch in-flight tickets whose
     // worktree has no live --bg worker, BEFORE the monitor/scheduler start. This
     // bypasses the per-tick reclaim sweep's revive budget (a clean reboot is not
     // a chronic-failure storm) and is bounded by maxParallel so a reboot never
     // spawns a worker storm. Synchronous and inside the same try/catch so a throw
     // still triggers PID-file cleanup. A non-cold-start restart is a no-op.
-    const bootResume = reconcileBoot({ orchDir, report, concurrency }); // CTL-665: config-first boot-resume ceiling
+    // CTL-1365b: dispatch === dispatchFn so the crash-recovery re-dispatch honors
+    // the executor flag (defaultDispatch under bg — reconcileBootResume's own
+    // default — so byte-identical to today).
+    const bootResume = reconcileBoot({ orchDir, report, concurrency, dispatch: dispatchFn }); // CTL-665: config-first boot-resume ceiling
     _bootResume = bootResume;
     // CTL-644: dispatch any gated tickets that already have an approval sentinel on disk
     // (operator may have dropped the sentinel while the daemon was down).
@@ -618,19 +638,11 @@ export function startDaemon({
     const linearBotUserIds = readLinearBotUserIds(configPath, layer2Path);
     const linearBotWriteId = readLinearBotWriteId(configPath, layer2Path); // CTL-781
     const commentInboxWriter = createCommentInboxWriter(orchDir, linearBotUserIds);
-    // CTL-1365a: resolve the phase-worker executor ONCE at the dispatch seam and
-    // select the dispatch function injected into BOTH the monitor's →Triage
-    // one-shot dispatch and the scheduler's pull loop. Phase 1 is INERT —
-    // getExecutor's node-class default is "bg" for every class, so an unset flag
-    // resolves to "bg" and dispatchForExecutor returns the unchanged
-    // defaultDispatch (byte-identical to today). "sdk" falls back to
-    // defaultDispatch + a once-per-process WARN until sdkRunPhaseAgent lands
-    // (CTL-1365b). The dispatch-mode telemetry vocab ("phase-agents" for bg) is
-    // derived from the same resolution and threaded into the scheduler's Tier-1
-    // tick-timing line + OTLP resource attr.
-    const executor = getExecutor(configPath);
-    const dispatchFn = dispatchForExecutor(executor);
-    const dispatchMode = dispatchModeForExecutor(executor);
+    // CTL-1365a/b: executor + dispatchFn + dispatchMode + commentWakeDispatch are
+    // resolved ONCE above (before reconcileBoot) and threaded into all four dispatch
+    // entry points. The monitor receives dispatchFn for its →Triage one-shot, and
+    // the onComment callback routes comment-wakes through commentWakeDispatch (the
+    // same executor) — no split-brain.
     monitorFn({
       orchDir,
       cache,
@@ -641,7 +653,7 @@ export function startDaemon({
       gateway: gatewayReader, // CTL-781: gateway-first assignee reads
       onComment: (parsed) => {
         commentInboxWriter(parsed); // CTL-749: write to inbox.jsonl for in-flight workers
-        handleCommentWake(parsed, { orchDir, dispatch: dispatchTicket, removeLabel: defaultRemoveLabel, botUserId: linearBotUserIds, clearStall: defaultClearStall(orchDir, linearWrite) }); // CTL-549 + CTL-756: re-dispatch parked tickets; botUserId suppresses self-echo; CTL-1067: J3 stall-clear
+        handleCommentWake(parsed, { orchDir, dispatch: commentWakeDispatch, removeLabel: defaultRemoveLabel, botUserId: linearBotUserIds, clearStall: defaultClearStall(orchDir, linearWrite) }); // CTL-549 + CTL-756 + CTL-1365b: re-dispatch parked tickets through the resolved executor; botUserId suppresses self-echo; CTL-1067: J3 stall-clear
       },
       onUpdate: createUpdateInboxWriter(orchDir, linearBotUserIds), // CTL-749
     }); // CTL-535 + CTL-565 + CTL-634 + CTL-549 + CTL-749 + CTL-716 + CTL-781
