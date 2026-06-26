@@ -5125,10 +5125,11 @@ export function schedulerTick(
   // CTL-695: per-tick reaper telemetry — otel-forward ships this pino line as a
   // gauge (same log-line-only convention as cache.stats / per-project slots).
   log.info(countReapOutcomes(), "scheduler: reap stats");
-  // CTL-1366: read-replica freshness gauge (catalyst.linear.replica.staleness) +
-  // edge-triggered data_stale alert. NO-OP when the replica tier is off (default
-  // install — `replica` undefined) and fully fail-open (never throws out of the
-  // tick). Same log-line-only signaltometrics path as cache.stats above.
+  // CTL-1366: read-replica freshness gauge (catalyst.linear.replica.staleness).
+  // Metric-threshold alerting is owned by Grafana (OTL-36), not the daemon — no
+  // in-code alert here. NO-OP when the replica tier is off (default install —
+  // `replica` undefined) and fully fail-open (never throws out of the tick).
+  // Same log-line-only signaltometrics path as cache.stats above.
   maybeEmitReplicaFreshness({ replica, now, env });
   // CTL-925 Gap 1: a ring among ELIGIBLE tickets (not yet triaged-waiting) lands
   // all members in `blocked`, none in `ready` — computeReadyTickets would
