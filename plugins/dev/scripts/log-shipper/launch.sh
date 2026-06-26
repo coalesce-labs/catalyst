@@ -85,6 +85,9 @@ export CATALYST_BROKER_LOG="${CATALYST_BROKER_LOG:-${CATALYST_DIR}/broker.log}"
 export CATALYST_DAEMON_LOG="${CATALYST_DAEMON_LOG:-${CATALYST_DIR}/execution-core/daemon.log}"
 export CATALYST_OTEL_FORWARD_LOG="${CATALYST_OTEL_FORWARD_LOG:-${CATALYST_DIR}/otel-forward.log}"
 export CATALYST_MONITOR_LOG="${CATALYST_MONITOR_LOG:-${CATALYST_DIR}/monitor.log}"
+# CTL-1348: the standalone catalyst-updater daemon's log (5th Alloy stream). Exported
+# even when no updater agent is installed — Alloy's loki.source.file just tails nothing.
+export CATALYST_UPDATER_LOG="${CATALYST_UPDATER_LOG:-${CATALYST_DIR}/updater.log}"
 
 mkdir -p "$STORAGE"
 
