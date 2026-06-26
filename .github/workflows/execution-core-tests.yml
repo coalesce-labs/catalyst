@@ -203,4 +203,5 @@ jobs:
             worktree.test.mjs \
             recovery-reasoning.test.mjs \
             recovery-evidence.test.mjs \
-            unstuck-act-seams.test.mjs
+            unstuck-act-seams.test.mjs \
+            updater/plugin-pull-defer.test.mjs

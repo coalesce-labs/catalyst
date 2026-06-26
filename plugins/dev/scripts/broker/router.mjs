@@ -89,6 +89,7 @@ import {
   startPluginDriftCheck,
 } from "./plugin-refresh.mjs";
 import { handleStackReloadEvent } from "./stack-reload.mjs";
+import { getEventName } from "./event-name.mjs"; // CTL-1348: leaf so plugin-refresh stays light
 import { getLastByteOffset } from "./tailer.mjs";
 import {
   severityNumber,
@@ -796,9 +797,11 @@ export function maybeEmitProseDisabled() {
 // (data in `attributes` + `body.payload`) as well as legacy flat events
 // (data in `event` + `detail` + `orchestrator`). Resolved here so the
 // rest of the broker can stay shape-agnostic.
-export function getEventName(event) {
-  return event.event ?? event.attributes?.["event.name"] ?? "";
-}
+// CTL-1348: getEventName moved to ./event-name.mjs (a dependency-free leaf so
+// plugin-refresh.mjs / the standalone updater don't import the heavy router);
+// imported above and re-exported here so existing `from "./router.mjs"` callers
+// keep working.
+export { getEventName };
 function getEventPayload(event) {
   return event.detail ?? event.body?.payload ?? {};
 }
