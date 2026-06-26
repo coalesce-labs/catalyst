@@ -17,6 +17,7 @@ import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { getProjectConfig } from "./registry.mjs";
 import { createWorktree as defaultCreateWorktree } from "./worktree.mjs";
+import { log } from "./config.mjs"; // CTL-1365a: once-per-process sdk-fallback WARN
 
 // phase-agent-dispatch sits one directory up from execution-core/.
 const PHASE_AGENT_DISPATCH_BIN = fileURLToPath(new URL("../phase-agent-dispatch", import.meta.url));
@@ -186,6 +187,32 @@ export function defaultDispatch(
     clusterGeneration,
   }); // CTL-761, CTL-864
   return { ...res, worktreePath: wt.worktreePath };
+}
+
+// dispatchForExecutor — CTL-1365a: map a resolved executor (config.mjs:getExecutor)
+// to the dispatch function the daemon injects into startScheduler / startMonitor.
+// Phase 1 is INERT:
+//   - "bg" | "oneshot-legacy" → the unchanged defaultDispatch. Returning
+//     defaultDispatch is IDENTICAL to relying on the dispatch=defaultDispatch
+//     default param, so the existing dispatch.test.mjs arg-array `toEqual`
+//     assertions are completely unaffected — the dispatched behavior is
+//     byte-identical to today.
+//   - "sdk" → sdkRunPhaseAgent does NOT exist yet (it arrives in CTL-1365b). To
+//     keep THIS PR self-contained + mergeable we do NOT import a non-existent
+//     module: we fall back to defaultDispatch and emit a once-per-process WARN.
+//     1b wires the real sdk branch.
+// `warn` is injectable so a unit test can assert the warn fired (and count it)
+// without scraping the logger; it defaults to the execution-core logger.
+const _warnedSdkFallback = new Set();
+export function dispatchForExecutor(executor, { warn = (msg) => log.warn(msg) } = {}) {
+  if (executor === "sdk") {
+    const msg = "executor=sdk not yet implemented (CTL-1365b), using bg";
+    if (!_warnedSdkFallback.has(msg)) {
+      _warnedSdkFallback.add(msg);
+      warn(msg);
+    }
+  }
+  return defaultDispatch;
 }
 
 // dispatchTicket — thin seam over the injectable dispatch function.

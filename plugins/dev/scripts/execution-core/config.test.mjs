@@ -40,6 +40,12 @@ import {
   DEAD_DOC_WORKER_TRANSCRIPT_SILENCE_MS,
   readLinearReplica,
   getReplicaDbPath,
+  EXECUTORS,
+  DISPATCH_MODES,
+  readExecutorLayer1,
+  resolveExecutor,
+  getExecutor,
+  dispatchModeForExecutor,
 } from "./config.mjs";
 
 const PREV = process.env.CATALYST_WAIT_WATCHER;
@@ -410,6 +416,148 @@ describe("getStaticRoster (CTL-1273)", () => {
   test("CATALYST_STATIC_ROSTER env override (comma-separated)", () => {
     process.env.CATALYST_STATIC_ROSTER = "mini, mini-2 ,";
     expect(getStaticRoster()).toEqual(["mini", "mini-2"]);
+  });
+});
+
+describe("executor flag + resolver (CTL-1365a)", () => {
+  // CATALYST_NODE_CLASS + a temp Layer-2 file keep the node-class default
+  // deterministic (worker → "bg" in Phase 1) so the precedence assertions don't
+  // depend on the host's real Layer-2 config.
+  const ENVS = ["CATALYST_EXECUTOR", "CATALYST_NODE_CLASS", "CATALYST_LAYER2_CONFIG_FILE"];
+  let saved = {};
+  let tmp, l1, l2;
+
+  beforeEach(() => {
+    for (const k of ENVS) {
+      saved[k] = process.env[k];
+      delete process.env[k];
+    }
+    tmp = mkdtempSync(join(tmpdir(), "ctl1365-exec-"));
+    l1 = join(tmp, "config.json"); // Layer-1 .catalyst/config.json
+    l2 = join(tmp, "layer2.json"); // Layer-2 machine-local (empty → node-class default worker)
+    process.env.CATALYST_LAYER2_CONFIG_FILE = l2;
+  });
+
+  afterEach(() => {
+    for (const k of ENVS) {
+      if (saved[k] === undefined) delete process.env[k];
+      else process.env[k] = saved[k];
+    }
+    saved = {};
+    rmSync(tmp, { recursive: true, force: true });
+  });
+
+  const writeL1 = (executor) =>
+    writeFileSync(l1, JSON.stringify({ catalyst: { orchestration: { executor } } }));
+
+  test("EXECUTORS + DISPATCH_MODES are frozen closed enums", () => {
+    expect(EXECUTORS).toEqual(["bg", "sdk", "oneshot-legacy"]);
+    expect(Object.isFrozen(EXECUTORS)).toBe(true);
+    expect(DISPATCH_MODES).toEqual(["phase-agents", "oneshot-legacy", "sdk"]);
+    expect(Object.isFrozen(DISPATCH_MODES)).toBe(true);
+    expect(() => {
+      EXECUTORS.push("rogue");
+    }).toThrow();
+  });
+
+  test("dispatchModeForExecutor maps bg→phase-agents, sdk→sdk, oneshot-legacy→oneshot-legacy, unknown→phase-agents", () => {
+    expect(dispatchModeForExecutor("bg")).toBe("phase-agents");
+    expect(dispatchModeForExecutor("sdk")).toBe("sdk");
+    expect(dispatchModeForExecutor("oneshot-legacy")).toBe("oneshot-legacy");
+    expect(dispatchModeForExecutor("nonsense")).toBe("phase-agents");
+    expect(dispatchModeForExecutor(undefined)).toBe("phase-agents");
+  });
+
+  test("node-class default is bg in Phase 1 (no env, no Layer-1)", () => {
+    const r = resolveExecutor(l1); // l1 does not exist yet
+    expect(r.executor).toBe("bg");
+    expect(r.source).toBe("default");
+    expect(r.inferred).toBe(true);
+    expect(r.recognized).toBe(true);
+    expect(getExecutor(l1)).toBe("bg");
+  });
+
+  test("Layer-1 catalyst.orchestration.executor overrides the node-class default", () => {
+    writeL1("sdk");
+    const r = resolveExecutor(l1);
+    expect(r.executor).toBe("sdk");
+    expect(r.source).toBe("layer1");
+    expect(r.inferred).toBe(false);
+    expect(getExecutor(l1)).toBe("sdk");
+  });
+
+  test("CATALYST_EXECUTOR env outranks Layer-1 (env > Layer-1 > node-class default)", () => {
+    writeL1("oneshot-legacy");
+    process.env.CATALYST_EXECUTOR = "sdk";
+    const r = resolveExecutor(l1);
+    expect(r.executor).toBe("sdk");
+    expect(r.source).toBe("env");
+    expect(getExecutor(l1)).toBe("sdk");
+  });
+
+  test("env/Layer-1 values are trimmed + lowercased to canonical executors", () => {
+    process.env.CATALYST_EXECUTOR = "  SDK ";
+    expect(resolveExecutor(l1).executor).toBe("sdk");
+    delete process.env.CATALYST_EXECUTOR;
+    writeL1("ONESHOT-LEGACY");
+    expect(resolveExecutor(l1).executor).toBe("oneshot-legacy");
+  });
+
+  test("unrecognized explicit value → bg (most restrictive) + recognized:false", () => {
+    process.env.CATALYST_EXECUTOR = "bgg";
+    const r = resolveExecutor(l1);
+    expect(r.executor).toBe("bg");
+    expect(r.recognized).toBe(false);
+    expect(r.raw).toBe("bgg");
+  });
+
+  test("getExecutor warns exactly ONCE per unique unrecognized value", () => {
+    const warnings = [];
+    const orig = console.warn;
+    // The console-shim path logs WARN to stderr; capture via process.stderr.write.
+    const origWrite = process.stderr.write.bind(process.stderr);
+    process.stderr.write = (chunk, ...rest) => {
+      warnings.push(String(chunk));
+      return true;
+    };
+    try {
+      process.env.CATALYST_EXECUTOR = "ctl1365-unique-typo-A";
+      getExecutor(l1);
+      getExecutor(l1);
+      getExecutor(l1);
+    } finally {
+      process.stderr.write = origWrite;
+      console.warn = orig;
+    }
+    const hits = warnings.filter((w) => w.includes("ctl1365-unique-typo-A"));
+    expect(hits.length).toBe(1); // warn-once dedupe
+  });
+
+  test("present-but-non-string Layer-1 value → bg + recognized:false (never silent sdk)", () => {
+    writeFileSync(l1, JSON.stringify({ catalyst: { orchestration: { executor: false } } }));
+    const r = resolveExecutor(l1);
+    expect(r.executor).toBe("bg");
+    expect(r.recognized).toBe(false);
+  });
+
+  test("ENOENT / malformed Layer-1 → bg, never throws", () => {
+    // Missing file (readExecutorLayer1 returns undefined → node-class default).
+    expect(() => resolveExecutor(join(tmp, "does-not-exist.json"))).not.toThrow();
+    expect(resolveExecutor(join(tmp, "does-not-exist.json")).executor).toBe("bg");
+    expect(readExecutorLayer1(join(tmp, "does-not-exist.json"))).toBeUndefined();
+    // Malformed JSON.
+    writeFileSync(l1, "{ not json");
+    expect(() => resolveExecutor(l1)).not.toThrow();
+    expect(resolveExecutor(l1).executor).toBe("bg");
+    // No configPath at all.
+    expect(readExecutorLayer1(undefined)).toBeUndefined();
+    expect(resolveExecutor(undefined).executor).toBe("bg");
+  });
+
+  test("empty-string env is 'cleared' → node-class default", () => {
+    process.env.CATALYST_EXECUTOR = "   ";
+    writeL1("sdk"); // empty env falls through to Layer-1
+    expect(resolveExecutor(l1).executor).toBe("sdk");
   });
 });
 

@@ -51,6 +51,8 @@ import {
   getCatalystRepoDir,       // CTL-1093 sticky dir
   readDelegateRunnerConfig, // CTL-1331: async board-health delegate runner kill-switch
   readLinearReplica,        // CTL-1340: read-replica tier flag (inert; default off)
+  getExecutor,              // CTL-1365a: phase-worker executor resolver (env→Layer-1→node-class default; all "bg" in Phase 1)
+  dispatchModeForExecutor,  // CTL-1365a: executor → catalyst.dispatch.mode telemetry vocab
 } from "./config.mjs";
 import { resolveBootIdentity } from "./host-boot-identity.mjs"; // CTL-1093
 import { readStickyIdentity, writeStickyIdentity } from "./host-sticky.mjs"; // CTL-1093
@@ -118,7 +120,7 @@ import {
 import * as linearWrite from "./linear-write.mjs"; // CTL-1067: writeStatus for defaultClearStall
 import { writeBootMarker, clearProgressMarks, resolvePhaseSessionId, defaultAppendOperatorEvent } from "./recovery.mjs"; // CTL-655: window the revive budget to this run; CTL-736: reset progress high-water; CTL-768: --resume; CTL-1044: operator-event appender for the scheduler's appendIntentEvent seam
 import { startAutoTuner } from "./autotune.mjs"; // CTL-684: side-car maxParallel auto-tuner
-import { dispatchTicket } from "./dispatch.mjs"; // CTL-549: comment-wake re-dispatch
+import { dispatchTicket, dispatchForExecutor } from "./dispatch.mjs"; // CTL-549: comment-wake re-dispatch; CTL-1365a: executor→dispatch selection at the launch seam
 import { removeLabel as defaultRemoveLabel } from "./linear-write.mjs"; // CTL-549: clear needs-human on resume
 // CTL-671: the real phantom-sweep seams. startScheduler defaults them to safe
 // no-ops (hermetic for direct-call unit tests); the REAL daemon arms them here
@@ -616,9 +618,23 @@ export function startDaemon({
     const linearBotUserIds = readLinearBotUserIds(configPath, layer2Path);
     const linearBotWriteId = readLinearBotWriteId(configPath, layer2Path); // CTL-781
     const commentInboxWriter = createCommentInboxWriter(orchDir, linearBotUserIds);
+    // CTL-1365a: resolve the phase-worker executor ONCE at the dispatch seam and
+    // select the dispatch function injected into BOTH the monitor's →Triage
+    // one-shot dispatch and the scheduler's pull loop. Phase 1 is INERT —
+    // getExecutor's node-class default is "bg" for every class, so an unset flag
+    // resolves to "bg" and dispatchForExecutor returns the unchanged
+    // defaultDispatch (byte-identical to today). "sdk" falls back to
+    // defaultDispatch + a once-per-process WARN until sdkRunPhaseAgent lands
+    // (CTL-1365b). The dispatch-mode telemetry vocab ("phase-agents" for bg) is
+    // derived from the same resolution and threaded into the scheduler's Tier-1
+    // tick-timing line + OTLP resource attr.
+    const executor = getExecutor(configPath);
+    const dispatchFn = dispatchForExecutor(executor);
+    const dispatchMode = dispatchModeForExecutor(executor);
     monitorFn({
       orchDir,
       cache,
+      dispatch: dispatchFn, // CTL-1365a: →Triage one-shot dispatch substrate (bg today)
       concurrency, // CTL-716: slot-gate uses the same ceiling as the scheduler
       botUserIds: linearBotUserIds, // CTL-781: respect-assignment gate
       botWriteId: linearBotWriteId, // CTL-781: self-assign on claim
@@ -635,6 +651,8 @@ export function startDaemon({
     schedulerFn({
       orchDir,
       cache,
+      dispatch: dispatchFn, // CTL-1365a: scheduler pull-loop dispatch substrate (bg today)
+      dispatchMode, // CTL-1365a: catalyst.dispatch.mode for the Tier-1 tick line + OTLP resource attr
       concurrency,
       configPath,
       layer2Path,

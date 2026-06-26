@@ -6,7 +6,7 @@
 // so no test ever spawns a real script.
 
 import { describe, test, expect } from "bun:test";
-import { dispatchTicket, defaultDispatch, defaultRunPhaseAgent, teamOf } from "./dispatch.mjs";
+import { dispatchTicket, defaultDispatch, defaultRunPhaseAgent, dispatchForExecutor, teamOf } from "./dispatch.mjs";
 
 describe("teamOf", () => {
   test("extracts the team prefix from a ticket identifier", () => {
@@ -366,6 +366,60 @@ describe("defaultRunPhaseAgent — failure diagnostics (CTL-1004/CTL-1056 Bug 2)
     );
     expect(r.signal).toBe("SIGKILL");
     expect(r.stderr).toMatch(/killed mid-run/);
+  });
+});
+
+// CTL-1365a: the executor → dispatch-function selection at the launch seam.
+// Phase 1 is INERT — bg/oneshot-legacy resolve to the unchanged defaultDispatch;
+// sdk falls back to defaultDispatch + a once-per-process WARN (sdkRunPhaseAgent
+// is CTL-1365b). Critically, "bg" must be BYTE-IDENTICAL to today's dispatch.
+describe("dispatchForExecutor (CTL-1365a)", () => {
+  test("bg → the unchanged defaultDispatch (byte-identical to today)", () => {
+    expect(dispatchForExecutor("bg")).toBe(defaultDispatch);
+  });
+
+  test("oneshot-legacy → the unchanged defaultDispatch", () => {
+    expect(dispatchForExecutor("oneshot-legacy")).toBe(defaultDispatch);
+  });
+
+  test("sdk → falls back to defaultDispatch + warns once (no throw, no missing-module import)", () => {
+    const warnings = [];
+    // Distinct module-load means _warnedSdkFallback is empty for this run; the
+    // first sdk call warns, subsequent calls dedupe (once-per-process).
+    expect(() => dispatchForExecutor("sdk", { warn: (m) => warnings.push(m) })).not.toThrow();
+    const fn = dispatchForExecutor("sdk", { warn: (m) => warnings.push(m) });
+    expect(fn).toBe(defaultDispatch);
+    expect(warnings.length).toBe(1); // warn-once: only the FIRST sdk call emitted
+    expect(warnings[0]).toMatch(/executor=sdk not yet implemented \(CTL-1365b\), using bg/);
+  });
+
+  test("the injected bg dispatch behaves IDENTICALLY to defaultDispatch — same arg array reaches runPhaseAgent", () => {
+    // Prove the executor=bg path threads through to runPhaseAgent with the exact
+    // arg array the existing dispatch tests assert, via the same injectable seams.
+    const calls = [];
+    const seams = {
+      resolveProject: () => ({ team: "CTL", repoRoot: "/repo" }),
+      createWorktree: (args) => ({ code: 0, worktreePath: `/wt/${args.ticket}`, stderr: "" }),
+      runPhaseAgent: (args) => {
+        calls.push(args);
+        return { code: 0, stdout: "ok", stderr: "", signal: null };
+      },
+    };
+    const dispatch = dispatchForExecutor("bg"); // === defaultDispatch
+    dispatch(
+      { orchDir: "/ec", ticket: "CTL-1", phase: "implement", clusterGeneration: 7 },
+      seams
+    );
+    expect(calls[0]).toEqual({
+      orchDir: "/ec",
+      ticket: "CTL-1",
+      phase: "implement",
+      worktreePath: "/wt/CTL-1",
+      resumeSession: undefined,
+      handoffPath: undefined,
+      attempt: undefined,
+      clusterGeneration: 7,
+    });
   });
 });
 
