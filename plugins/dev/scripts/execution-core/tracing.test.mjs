@@ -6,6 +6,7 @@ import { mkdtempSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { BasicTracerProvider, InMemorySpanExporter, SimpleSpanProcessor } from "@opentelemetry/sdk-trace-base";
+import { resourceFromAttributes } from "@opentelemetry/resources";
 import { SpanKind, SpanStatusCode } from "@opentelemetry/api";
 import {
   tracingEnabled,
@@ -552,14 +553,25 @@ describe("initTracing tags the trace resource with catalyst.dispatch.mode (CTL-1
     expect(getTracer()).toBeNull();
   });
 
-  test("ON → the resource on emitted spans carries the resolved dispatch mode", async () => {
-    const on = await initTracing({
-      serviceName: "catalyst.execution-core",
-      dispatchMode: "sdk",
-      env: { CATALYST_TRACING: "on" },
-    });
-    expect(on).toBe(true);
-    const span = getTracer().startSpan("ctl1365a-probe");
+  // OFFLINE (CTL-1365a): build a provider from buildTracingResource() + an
+  // InMemorySpanExporter and assert an emitted span carries the resource attr.
+  // Does NOT call the real initTracing — that constructs an OTLPTraceExporter to
+  // the collector + a BatchSpanProcessor whose shutdownTracing() flush hangs ~5s
+  // and times out where the collector is unreachable (CI). buildTracingResource is
+  // exactly what initTracing feeds into its provider's resource, so this proves
+  // the same wiring offline. (resource content is also covered by the pure
+  // buildTracingResource tests above.)
+  test("ON → the resource on emitted spans carries the resolved dispatch mode", () => {
+    const exporter = new InMemorySpanExporter();
+    const resource = resourceFromAttributes(
+      buildTracingResource({
+        serviceName: "catalyst.execution-core",
+        dispatchMode: "sdk",
+        env: { CATALYST_TRACING: "on" },
+      })
+    );
+    const provider = new BasicTracerProvider({ resource, spanProcessors: [new SimpleSpanProcessor(exporter)] });
+    const span = provider.getTracer("test").startSpan("ctl1365a-probe");
     // SDK ReadableSpan carries the provider resource.
     expect(span.resource.attributes["catalyst.dispatch.mode"]).toBe("sdk");
     expect(span.resource.attributes["service.name"]).toBe("catalyst.execution-core");
