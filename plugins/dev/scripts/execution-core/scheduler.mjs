@@ -290,12 +290,6 @@ import { defaultCheckSequencing } from "./sequencing.mjs"; // CTL-537
 import { ownedBy, ownerForTicket } from "./hrw.mjs"; // CTL-850: HRW ownership filter (CTL-1191 also uses it for the diagnostician gate); ownerForTicket: CTL-1290 board-health stranded-node + enforce HRW gate
 import { boardHealthPass } from "./board-health.mjs"; // CTL-1290: the whole-board health delegate (shadow-first)
 import { getAllTicketDescriptors } from "../broker/broker-state.mjs"; // CTL-1290: board snapshot (reads only). bun:sqlite-backed — safe here: scheduler.mjs is daemon-only and NOT in the orch-monitor vite/UI graph (see MEMORY vite_config_bun_sqlite_trap).
-import {
-  emitAlertEvent,
-  ALERT_KIND_DATA_STALE,
-  nextDataStaleAlarmState,
-  initialDataStaleState,
-} from "../broker/alert-emit.mjs"; // CTL-1366: read-replica freshness → data_stale alert (emit-only; daemon-only module, NOT in the UI graph)
 import { readReconcileHealthMarkers } from "./reconcile-health.mjs"; // CTL-1290: stranded-node reconcile signal
 import { claimDispatchSync } from "./cluster-claim-sync.mjs"; // CTL-850: cross-host claim soft-CAS
 // CTL-954: team estimation method — lazy-cached from Linear, used to expand
@@ -2797,39 +2791,26 @@ export function deriveTickTraceContext({ orchestratorId, tickId, node, bootNonce
 // fine. Format is opaque — only its per-boot uniqueness + within-boot stability matter.
 export const SCHEDULER_BOOT_NONCE = `${Date.now().toString(36)}.${process.pid.toString(36)}`;
 
-// CTL-1366: default staleness threshold (seconds) for the data_stale alert —
-// overridable per-install via CATALYST_REPLICA_STALENESS_THRESHOLD_S.
-export const REPLICA_STALENESS_THRESHOLD_DEFAULT_S = 600;
-
-// CTL-1366: module-level edge-trigger latch for the data_stale alert. A simple
-// in-memory flag (per the CTL-1366 contract — a daemon restart re-evaluating is
-// acceptable): emit catalyst.alert.raised once on the up-crossing, .cleared once
-// on recovery. Reset helper is for hermetic unit tests.
-let _replicaStaleAlertState = initialDataStaleState();
-export function _resetReplicaStaleAlertState() {
-  _replicaStaleAlertState = initialDataStaleState();
-}
-
 // maybeEmitReplicaFreshness — CTL-1366. Emit the catalyst.linear.replica.staleness
 // gauge (now − newest mirrored row) as a log.info line (the same log-line-only
-// signaltometrics convention as cache.stats / reap stats), and edge-trigger the
-// data_stale alert when staleness crosses the threshold.
+// signaltometrics convention as cache.stats / reap stats). Metric-threshold
+// alerting on this gauge is owned by Grafana, not in-code.
 //
 // FULLY FAIL-OPEN + NO-OP-when-off — this only EVER ADDS an emit:
 //   - replica reader absent (default install / flag off) → silent no-op.
 //   - freshness() undefined (no db / no rows / any throw) → silent no-op.
-//   - any throw from the emit or the alert is swallowed — it must NEVER escape
-//     the scheduler tick.
+//   - any throw from the emit is swallowed — it must NEVER escape the
+//     scheduler tick.
 //
-// `now`/`env`/`log`/`emitAlert` are injectable so the gauge + edge-trigger are
-// unit-testable without driving a whole tick.
+// `now`/`env`/`log` are injectable so the gauge is unit-testable without
+// driving a whole tick.
 export function maybeEmitReplicaFreshness({
   replica,
   now = Date.now,
   env = process.env,
   log: logger = log,
-  emitAlert = emitAlertEvent,
 } = {}) {
+  void env;
   // NO-OP when the replica tier is off (default for most installs).
   if (!replica || typeof replica.freshness !== "function") return;
   let fresh;
@@ -2850,31 +2831,6 @@ export function maybeEmitReplicaFreshness({
     );
   } catch {
     /* gauge emit must never wedge the tick */
-  }
-  // Edge-triggered data_stale alert (emit-only; no secrets).
-  try {
-    const thresholdSeconds =
-      Number(env.CATALYST_REPLICA_STALENESS_THRESHOLD_S) || REPLICA_STALENESS_THRESHOLD_DEFAULT_S;
-    const { state, emit } = nextDataStaleAlarmState(_replicaStaleAlertState, {
-      stalenessSeconds,
-      thresholdSeconds,
-    });
-    _replicaStaleAlertState = state;
-    if (emit) {
-      emitAlert({
-        action: emit,
-        kind: ALERT_KIND_DATA_STALE,
-        layer: "replica",
-        lagSeconds: stalenessSeconds,
-        threshold: thresholdSeconds,
-        reason:
-          emit === "raised"
-            ? `linear replica stale ${Math.round(stalenessSeconds)}s ≥ ${thresholdSeconds}s`
-            : `linear replica recovered (${Math.round(stalenessSeconds)}s < ${thresholdSeconds}s)`,
-      });
-    }
-  } catch {
-    /* alert emit must never wedge the tick */
   }
 }
 

@@ -9,14 +9,11 @@ import {
   ALERT_CLEARED,
   ALERT_KIND_SYSTEM_DOWN,
   ALERT_KIND_NEEDS_HUMAN_PILEUP,
-  ALERT_KIND_DATA_STALE,
   NEEDS_HUMAN_LABELS,
   buildAlertEnvelope,
   emitAlertEvent,
   initialPileupState,
   nextPileupAlarmState,
-  initialDataStaleState,
-  nextDataStaleAlarmState,
 } from "./alert-emit.mjs";
 // Parity: the canonical taxonomy source (monitor-tree; imported in TEST only).
 import {
@@ -151,74 +148,6 @@ describe("nextPileupAlarmState — level debounce (CTL-1123)", () => {
     expect(r.emit).toBeNull();
     expect(r.state.raised).toBe(false);
     expect(r.state.aboveSince).toBeNull();
-  });
-});
-
-describe("data_stale alert kind + edge-trigger (CTL-1366)", () => {
-  test("ALERT_KIND_DATA_STALE is a stable kind string", () => {
-    expect(ALERT_KIND_DATA_STALE).toBe("data_stale");
-  });
-
-  test("buildAlertEnvelope carries kind/layer/lagSeconds in the payload", () => {
-    const e = buildAlertEnvelope(
-      { action: "raised", kind: ALERT_KIND_DATA_STALE, layer: "replica", lagSeconds: 742, threshold: 600 },
-      { now: NOW },
-    );
-    expect(e.attributes["event.name"]).toBe(ALERT_RAISED);
-    expect(e.attributes["event.label"]).toBe("data_stale");
-    expect(e.body.payload).toMatchObject({
-      kind: "data_stale",
-      layer: "replica",
-      lagSeconds: 742,
-      threshold: 600,
-    });
-  });
-
-  test("layer/lagSeconds default null for existing kinds (additive, byte-stable)", () => {
-    const e = buildAlertEnvelope({ action: "raised", kind: ALERT_KIND_SYSTEM_DOWN }, { now: NOW });
-    expect(e.body.payload.layer).toBeNull();
-    expect(e.body.payload.lagSeconds).toBeNull();
-  });
-
-  const T = 600; // threshold seconds
-  const step = (prev, stalenessSeconds) =>
-    nextDataStaleAlarmState(prev, { stalenessSeconds, thresholdSeconds: T });
-
-  test("below threshold → never raises", () => {
-    const r = step(initialDataStaleState(), 100);
-    expect(r.emit).toBeNull();
-    expect(r.state.raised).toBe(false);
-  });
-
-  test("crossing up raises exactly once; stays held above (no re-raise)", () => {
-    let r = step(initialDataStaleState(), 700); // up-crossing
-    expect(r.emit).toBe("raised");
-    expect(r.state.raised).toBe(true);
-    r = step(r.state, 900); // still above → held, no re-emit
-    expect(r.emit).toBeNull();
-    expect(r.state.raised).toBe(true);
-  });
-
-  test("dropping below clears exactly once; stays clear (no re-clear)", () => {
-    let r = step(initialDataStaleState(), 700); // raised
-    r = step(r.state, 100); // recovery → cleared once
-    expect(r.emit).toBe("cleared");
-    expect(r.state.raised).toBe(false);
-    r = step(r.state, 50); // still below → no re-emit
-    expect(r.emit).toBeNull();
-    expect(r.state.raised).toBe(false);
-  });
-
-  test("a non-finite / missing sample holds prior state and emits nothing (fail-open)", () => {
-    let r = step(initialDataStaleState(), 700); // raised
-    r = nextDataStaleAlarmState(r.state, { stalenessSeconds: undefined, thresholdSeconds: T });
-    expect(r.emit).toBeNull();
-    expect(r.state.raised).toBe(true); // not spuriously cleared
-  });
-
-  test("exactly at threshold raises (>= boundary)", () => {
-    const r = step(initialDataStaleState(), T);
-    expect(r.emit).toBe("raised");
   });
 });
 
