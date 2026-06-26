@@ -14,6 +14,7 @@ import { describe, test, expect } from "bun:test";
 import {
   refreshPluginCheckout,
   refreshAllPluginCheckouts,
+  resolvePluginPullOwner,
 } from "../../broker/plugin-refresh.mjs";
 
 // Scriptable gitFn: records every `<args>` call and answers rev-parse from a
@@ -122,5 +123,43 @@ describe("refreshPluginCheckout pull option (CTL-1348 cutover)", () => {
     });
     expect(git.calls).not.toContain("reset --hard origin/main");
     expect(events.some((e) => e.event === "plugin.checkout.drift")).toBe(true);
+  });
+});
+
+describe("resolvePluginPullOwner (CTL-1348 fail-safe cutover gate)", () => {
+  const noFile = () => { throw new Error("ENOENT"); };
+
+  test("default with nothing set is 'broker' (inert-by-absence: merge changes nothing)", () => {
+    expect(resolvePluginPullOwner({ env: {}, machineConfigPath: undefined })).toBe("broker");
+  });
+
+  test("env CATALYST_PLUGIN_PULL_OWNER=updater → 'updater' (trimmed)", () => {
+    expect(resolvePluginPullOwner({ env: { CATALYST_PLUGIN_PULL_OWNER: "updater" } })).toBe("updater");
+    expect(resolvePluginPullOwner({ env: { CATALYST_PLUGIN_PULL_OWNER: "  updater " } })).toBe("updater");
+  });
+
+  test("any non-'updater' env value → 'broker' (only the exact value defers)", () => {
+    for (const v of ["broker", "Updater", "yes", "1", "", "   "]) {
+      expect(resolvePluginPullOwner({ env: { CATALYST_PLUGIN_PULL_OWNER: v } })).toBe("broker");
+    }
+  });
+
+  test("machine config catalyst.orchestration.pluginPullOwner=updater (when env unset)", () => {
+    const readFileFn = () => JSON.stringify({ catalyst: { orchestration: { pluginPullOwner: "updater" } } });
+    expect(resolvePluginPullOwner({ env: {}, machineConfigPath: "/cfg.json", readFileFn })).toBe("updater");
+  });
+
+  test("machine config 'broker' / absent key / malformed → 'broker'", () => {
+    const broker = () => JSON.stringify({ catalyst: { orchestration: { pluginPullOwner: "broker" } } });
+    const absent = () => JSON.stringify({ catalyst: { host: { name: "mini" } } });
+    expect(resolvePluginPullOwner({ env: {}, machineConfigPath: "/cfg.json", readFileFn: broker })).toBe("broker");
+    expect(resolvePluginPullOwner({ env: {}, machineConfigPath: "/cfg.json", readFileFn: absent })).toBe("broker");
+    expect(resolvePluginPullOwner({ env: {}, machineConfigPath: "/cfg.json", readFileFn: () => "{ not json" })).toBe("broker");
+    expect(resolvePluginPullOwner({ env: {}, machineConfigPath: "/cfg.json", readFileFn: noFile })).toBe("broker");
+  });
+
+  test("env wins over machine config", () => {
+    const cfgUpdater = () => JSON.stringify({ catalyst: { orchestration: { pluginPullOwner: "updater" } } });
+    expect(resolvePluginPullOwner({ env: { CATALYST_PLUGIN_PULL_OWNER: "broker" }, machineConfigPath: "/cfg.json", readFileFn: cfgUpdater })).toBe("broker");
   });
 });

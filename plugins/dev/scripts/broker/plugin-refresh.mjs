@@ -324,6 +324,46 @@ export function isDaemonLocalMergeSignal(event) {
   return MONITOR_MERGE_COMPLETE_RE.test(getEventName(event) ?? "");
 }
 
+// --- plugin-pull ownership (CTL-1348) ----------------------------------------
+
+/**
+ * resolvePluginPullOwner — which process owns the plugin PULL on this node:
+ * "broker" (today's default) or "updater" (the standalone catalyst-updater agent).
+ * The broker DEFERS the actual `reset --hard` pull to the updater ONLY when this
+ * resolves to exactly "updater"; ANY other outcome — env/config absent, unreadable,
+ * malformed, or any other string — returns "broker" so the broker keeps pulling.
+ *
+ * FAIL-SAFE BY CONSTRUCTION: the cutover is inert until install-services explicitly
+ * writes "updater" into the machine-local config. Read precedence env →
+ * machine-local config (a per-NODE deployment fact, so NOT the committed repo config),
+ * default "broker". Read FRESH on each broker tick (never cached) so a running broker
+ * honors a live cutover (or a revert to "broker") without a restart. Never throws.
+ *
+ * @param {object} [opts]
+ * @param {Record<string,string|undefined>} [opts.env]
+ * @param {string} [opts.machineConfigPath]  ~/.config/catalyst/config.json
+ * @param {Function} [opts.readFileFn]
+ * @returns {"broker"|"updater"}
+ */
+export function resolvePluginPullOwner({
+  env = process.env,
+  machineConfigPath,
+  readFileFn = readFileSync,
+} = {}) {
+  const coerce = (v) => (typeof v === "string" && v.trim() === "updater" ? "updater" : "broker");
+  const fromEnv = env.CATALYST_PLUGIN_PULL_OWNER;
+  if (typeof fromEnv === "string" && fromEnv.trim().length > 0) return coerce(fromEnv);
+  if (machineConfigPath) {
+    try {
+      const v = JSON.parse(readFileFn(machineConfigPath, "utf8"))?.catalyst?.orchestration?.pluginPullOwner;
+      if (typeof v === "string" && v.trim().length > 0) return coerce(v);
+    } catch {
+      /* unreadable/malformed machine config → fail safe to broker */
+    }
+  }
+  return "broker";
+}
+
 // --- refresh ----------------------------------------------------------------
 
 /**

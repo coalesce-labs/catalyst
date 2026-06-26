@@ -86,6 +86,7 @@ import {
   handlePluginRefreshEvent,
   resolveRepoFullName,
   refreshAllPluginCheckouts,
+  resolvePluginPullOwner,
   startPluginDriftCheck,
 } from "./plugin-refresh.mjs";
 import { handleStackReloadEvent } from "./stack-reload.mjs";
@@ -2277,12 +2278,19 @@ export function startWatchdog() {
 export function startDriftCheckWatcher() {
   return startPluginDriftCheck({
     tickFn: () => {
+      // CTL-1348: when this node has cut over to the standalone catalyst-updater
+      // (pluginPullOwner=updater, read FRESH so a live cutover needs no broker
+      // restart), the broker DEFERS the pull — detect-only keeps drift observability
+      // but never reset --hard. Default "broker" → today's pull, so the merge is
+      // inert until install-services writes "updater".
+      const pull = resolvePluginPullOwner({ machineConfigPath: __machineConfigPath() }) !== "updater";
       const results = refreshAllPluginCheckouts({
         repoConfigPath: __REPO_CONFIG_PATH,
         machineConfigPath: __machineConfigPath(),
         emitFn: appendEvent,
         loadedCommit: __loadedCommit(),
         loadedCommitRoot: __loadedCommitRoot(),
+        pull,
       });
       handleStackReloadEvent({
         results,
@@ -2316,6 +2324,10 @@ export function processEvent(event) {
   // orchestration is active. handlePluginRefreshEvent never throws and the
   // events it emits carry resource["service.name"]=catalyst.broker, which
   // shouldSkipEvent drops on re-ingest (no self-wake loop).
+  // CTL-1348: same pluginPullOwner defer as the drift-check timer — gate BOTH pull
+  // sites (the event-driven path AND the timer) from one fresh read so a cut-over node
+  // never has the broker racing the updater on the same checkout.
+  const __pull = resolvePluginPullOwner({ machineConfigPath: __machineConfigPath() }) !== "updater";
   const __refreshResults = handlePluginRefreshEvent({
     event,
     repoFullName: __repoFullName(),
@@ -2324,6 +2336,7 @@ export function processEvent(event) {
     emitFn: appendEvent,
     loadedCommit: __loadedCommit(),
     loadedCommitRoot: __loadedCommitRoot(),
+    pull: __pull,
   });
   // CTL-1077: act on the refresh — reload the running stack when the checkout advanced.
   // logPath MUST be threaded through: the broker self-reload handoff records it so the
