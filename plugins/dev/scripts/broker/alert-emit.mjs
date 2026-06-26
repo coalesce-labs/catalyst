@@ -32,6 +32,10 @@ export const ALERT_CLEARED = "catalyst.alert.cleared";
 // Alert KINDS (event.label). Extend here as new policies are added.
 export const ALERT_KIND_SYSTEM_DOWN = "system_down";
 export const ALERT_KIND_NEEDS_HUMAN_PILEUP = "needs_human_pileup";
+// CTL-1366: Linear data-freshness alarm. Raised when a read layer's staleness
+// (now − newest mirrored row) crosses a threshold; the `layer` payload field
+// (e.g. "replica") disambiguates which read tier went stale.
+export const ALERT_KIND_DATA_STALE = "data_stale";
 
 // The needs-human label taxonomy. Canonical source is board-data.mjs
 // (ATTENTION_LABEL_NEEDS_HUMAN/NEEDS_INPUT) — but that is a monitor-tree module
@@ -56,12 +60,25 @@ export const NEEDS_HUMAN_LABELS = ["needs-human", "needs-input"];
  * @param {number|null} [i.threshold] the pile-up threshold that was crossed
  * @param {number|null} [i.sinceMs]  ms the condition has held (raised) / lasted (cleared)
  * @param {string|null} [i.causedBy] forensic link (event id) → caused_by
+ * @param {string|null} [i.layer]    read layer the alert is scoped to (data_stale: "replica")
+ * @param {number|null} [i.lagSeconds] freshness lag in seconds (data_stale)
  * @param {object} [opts]
  * @param {Function} [opts.now]   injectable ISO-timestamp fn (tests)
  * @returns {object} the envelope
  */
 export function buildAlertEnvelope(
-  { action, kind, reason = null, source = null, count = null, threshold = null, sinceMs = null, causedBy = null } = {},
+  {
+    action,
+    kind,
+    reason = null,
+    source = null,
+    count = null,
+    threshold = null,
+    sinceMs = null,
+    causedBy = null,
+    layer = null,
+    lagSeconds = null,
+  } = {},
   { now } = {},
 ) {
   const ts = now ? now() : new Date().toISOString();
@@ -93,7 +110,8 @@ export function buildAlertEnvelope(
       "event.label": kind,
     },
     body: {
-      payload: { kind, reason, source, count, threshold, sinceMs },
+      // layer/lagSeconds default null → byte-stable for existing kinds (CTL-1366).
+      payload: { kind, reason, source, count, threshold, sinceMs, layer, lagSeconds },
     },
   };
 }
@@ -185,4 +203,51 @@ export function nextPileupAlarmState(
   }
 
   return { state: s, emit };
+}
+
+/**
+ * initialDataStaleState — the in-memory latch for the CTL-1366 data_stale edge
+ * trigger. `raised` is true while an un-cleared staleness alarm is held.
+ */
+export function initialDataStaleState() {
+  return { raised: false };
+}
+
+/**
+ * nextDataStaleAlarmState — PURE edge-trigger for the data_stale alarm. Unlike
+ * nextPileupAlarmState this is a bare hysteresis-free edge (no persistence /
+ * cooldown — the staleness signal is itself smooth, sampled once per gauge tick):
+ *
+ *   - not raised AND stalenessSeconds >= thresholdSeconds → emit "raised" (once)
+ *   - raised     AND stalenessSeconds <  thresholdSeconds → emit "cleared" (once)
+ *   - otherwise (still above, still below, or non-finite sample) → emit null
+ *
+ * A non-finite / missing sample (freshness failed) HOLDS the prior state and
+ * emits nothing — fail-open, never a spurious clear.
+ *
+ * @param {object} prev  prior state (initialDataStaleState shape)
+ * @param {object} i
+ * @param {number} i.stalenessSeconds
+ * @param {number} i.thresholdSeconds
+ * @returns {{state: {raised: boolean}, emit: "raised"|"cleared"|null}}
+ */
+export function nextDataStaleAlarmState(prev, { stalenessSeconds, thresholdSeconds } = {}) {
+  const wasRaised = prev?.raised === true;
+  let raised = wasRaised;
+  let emit = null;
+  const sampleOk =
+    typeof stalenessSeconds === "number" &&
+    Number.isFinite(stalenessSeconds) &&
+    typeof thresholdSeconds === "number" &&
+    Number.isFinite(thresholdSeconds);
+  if (sampleOk) {
+    if (!wasRaised && stalenessSeconds >= thresholdSeconds) {
+      emit = "raised";
+      raised = true;
+    } else if (wasRaised && stalenessSeconds < thresholdSeconds) {
+      emit = "cleared";
+      raised = false;
+    }
+  }
+  return { state: { raised }, emit };
 }

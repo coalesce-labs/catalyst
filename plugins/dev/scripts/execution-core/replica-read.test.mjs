@@ -36,21 +36,23 @@ function seed() {
       state        TEXT,
       completed_at TEXT,
       canceled_at  TEXT,
-      removed_at   TEXT
+      removed_at   TEXT,
+      updated_at   INTEGER
     )
   `);
   db.run(`CREATE INDEX idx_issues_identifier ON issues (identifier)`);
+  // updated_at is epoch-ms (CTL-1366 freshness probe); MAX over these rows is 3000.
   // terminal via completed_at (Done category)
-  db.run(`INSERT INTO issues VALUES ('CTL-1', 'Shipped', '2026-06-01T00:00:00Z', NULL, NULL)`);
+  db.run(`INSERT INTO issues VALUES ('CTL-1', 'Shipped', '2026-06-01T00:00:00Z', NULL, NULL, 1000)`);
   // terminal via canceled_at (Canceled category) — even with a completed_at set,
   // canceled wins (canceled_at is checked first).
-  db.run(`INSERT INTO issues VALUES ('CTL-2', 'Abandoned', NULL, '2026-06-02T00:00:00Z', NULL)`);
+  db.run(`INSERT INTO issues VALUES ('CTL-2', 'Abandoned', NULL, '2026-06-02T00:00:00Z', NULL, 2000)`);
   // non-terminal — neither timestamp set; returns the row's actual state name.
-  db.run(`INSERT INTO issues VALUES ('CTL-3', 'In Progress', NULL, NULL, NULL)`);
+  db.run(`INSERT INTO issues VALUES ('CTL-3', 'In Progress', NULL, NULL, NULL, 3000)`);
   // removed (tombstoned) — excluded by removed_at IS NULL → MISS (undefined).
-  db.run(`INSERT INTO issues VALUES ('CTL-4', 'In Review', NULL, NULL, '2026-06-03T00:00:00Z')`);
+  db.run(`INSERT INTO issues VALUES ('CTL-4', 'In Review', NULL, NULL, '2026-06-03T00:00:00Z', 500)`);
   // non-terminal with NULL state — maps to state: null (not "").
-  db.run(`INSERT INTO issues VALUES ('CTL-5', NULL, NULL, NULL, NULL)`);
+  db.run(`INSERT INTO issues VALUES ('CTL-5', NULL, NULL, NULL, NULL, NULL)`);
   db.close();
 }
 
@@ -117,5 +119,48 @@ describe("createReplicaReader — fail-open", () => {
     expect(reader.lookup("CTL-1")).toBeUndefined();
     seed();
     expect(reader.lookup("CTL-3")).toEqual({ terminal: false, state: "In Progress" });
+  });
+});
+
+describe("createReplicaReader.freshness (CTL-1366)", () => {
+  test("seeded db → { maxUpdatedAtMs, rowCount } from MAX(updated_at)/COUNT(*)", () => {
+    seed();
+    reader = createReplicaReader({ dbPath });
+    expect(reader.freshness()).toEqual({ maxUpdatedAtMs: 3000, rowCount: 5 });
+  });
+
+  test("ISO-8601 updated_at strings are parsed to epoch-ms (Date.parse fallback)", () => {
+    const db = new Database(dbPath, { create: true });
+    db.run(`CREATE TABLE issues (identifier TEXT, updated_at TEXT)`);
+    db.run(`INSERT INTO issues VALUES ('CTL-1', '2026-06-01T00:00:00Z')`);
+    db.run(`INSERT INTO issues VALUES ('CTL-2', '2026-06-02T00:00:00Z')`);
+    db.close();
+    reader = createReplicaReader({ dbPath });
+    const f = reader.freshness();
+    expect(f.rowCount).toBe(2);
+    expect(f.maxUpdatedAtMs).toBe(Date.parse("2026-06-02T00:00:00Z"));
+  });
+
+  test("missing DB file → undefined (fail-open), then recovers once created", () => {
+    reader = createReplicaReader({ dbPath });
+    expect(reader.freshness()).toBeUndefined();
+    seed();
+    expect(reader.freshness()).toEqual({ maxUpdatedAtMs: 3000, rowCount: 5 });
+  });
+
+  test("DB exists but lacks the issues table → undefined (query throws → fail-open)", () => {
+    const empty = new Database(dbPath, { create: true });
+    empty.run(`CREATE TABLE unrelated (x INTEGER)`);
+    empty.close();
+    reader = createReplicaReader({ dbPath });
+    expect(reader.freshness()).toBeUndefined();
+  });
+
+  test("empty issues table (no rows / NULL MAX) → undefined", () => {
+    const db = new Database(dbPath, { create: true });
+    db.run(`CREATE TABLE issues (identifier TEXT, updated_at INTEGER)`);
+    db.close();
+    reader = createReplicaReader({ dbPath });
+    expect(reader.freshness()).toBeUndefined();
   });
 });
