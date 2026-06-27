@@ -11,6 +11,7 @@ import {
   loadGlyph,
   glyphLoadState,
   getGlyphError,
+  isManifestLoadFailed,
   pascalToKebab,
   kebabToPascal,
   __resetGlyphCaches,
@@ -237,6 +238,20 @@ describe("importer-manifest retry-hardening (CTL-1370, injected manifest loader)
     await Promise.all([loadGlyph("fire"), loadGlyph("airplane")]);
     await loadGlyph("fire");
     expect(loads).toBe(1); // only the rejection path clears the cache; success stays memoized
+  });
+
+  it("flips isManifestLoadFailed true on a manifest failure and back to false once it loads", async () => {
+    let attempt = 0;
+    __setManifestLoader(() =>
+      ++attempt === 1
+        ? Promise.reject(new Error("manifest chunk 404"))
+        : Promise.resolve({ ICON_IMPORTERS: { fire: () => Promise.resolve({ FireIcon: FakeFire }) } }),
+    );
+    expect(isManifestLoadFailed()).toBe(false); // clean slate
+    await loadGlyph("fire"); // manifest rejects → flag set (drives the picker's Reload affordance)
+    expect(isManifestLoadFailed()).toBe(true);
+    await loadGlyph("fire"); // manifest reloads → flag cleared (picker hides the prompt)
+    expect(isManifestLoadFailed()).toBe(false);
   });
 });
 

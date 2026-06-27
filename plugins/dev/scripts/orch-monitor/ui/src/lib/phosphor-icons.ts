@@ -44,6 +44,18 @@ const _subs = new Map<string, Set<() => void>>();
 // Revived to "idle" the moment the manifest next loads — see reviveManifestErroredGlyphs.
 const _manifestErrored = new Set<string>();
 
+// CTL-1370: reactive "the importer manifest is currently in a failed-load state" flag. The picker
+// subscribes (useManifestLoadFailed) to offer a user-triggered reload — the only reliable recovery
+// when a redeploy changes the manifest chunk's content hash, since the running bundle's import()
+// targets the now-404 old URL and no same-URL refetch can recover (Codex P2).
+let _manifestFailed = false;
+const _manifestSubs = new Set<() => void>();
+function setManifestFailed(failed: boolean): void {
+  if (_manifestFailed === failed) return;
+  _manifestFailed = failed;
+  _manifestSubs.forEach((cb) => cb());
+}
+
 /**
  * The manifest just became available — un-stick every glyph that previously errored *because*
  * the manifest couldn't load. Resetting them to "idle" makes ProjectMarkIcon's idle-branch
@@ -70,11 +82,13 @@ function getImporters(): Promise<ImporterMap> {
   _importersPromise ??= _loadManifest().then(
     (m) => {
       _importers = m.ICON_IMPORTERS;
+      setManifestFailed(false); // CTL-1370: clear the failed-load flag → picker hides the reload prompt
       reviveManifestErroredGlyphs(); // CTL-1370: re-trigger glyphs stranded by the earlier failure
       return _importers;
     },
     (err) => {
       _importersPromise = null;
+      setManifestFailed(true); // CTL-1370: surface a user-triggered reload affordance in the picker
       throw err;
     },
   );
@@ -185,6 +199,23 @@ export function useGlyphLoad(name: string): GlyphLoadState {
   );
 }
 
+/** True while the importer manifest is in a failed-load state (CTL-1370). Plain getter — testable. */
+export function isManifestLoadFailed(): boolean {
+  return _manifestFailed;
+}
+
+/** React subscription: re-render when the manifest's failed-load state flips (CTL-1370). */
+export function useManifestLoadFailed(): boolean {
+  return useSyncExternalStore(
+    (cb) => {
+      _manifestSubs.add(cb);
+      return () => _manifestSubs.delete(cb);
+    },
+    isManifestLoadFailed, // snapshot is a BOOLEAN (stable) — do not return a fresh object
+    isManifestLoadFailed,
+  );
+}
+
 // --- test hooks (bun shares module state across files) ---
 export function __setGlyphImporters(map: ImporterMap | null): void {
   _importers = map;
@@ -196,6 +227,7 @@ export function __setManifestLoader(fn: (() => Promise<ImporterManifest>) | null
   _importers = null;
   _importersPromise = null;
   _manifestErrored.clear();
+  _manifestFailed = false;
 }
 export function __resetGlyphCaches(): void {
   _resolved.clear();
@@ -204,6 +236,8 @@ export function __resetGlyphCaches(): void {
   _error.clear();
   _subs.clear();
   _manifestErrored.clear();
+  _manifestSubs.clear();
+  _manifestFailed = false;
   _importers = null;
   _importersPromise = null;
   _loadManifest = _defaultManifestLoader;
