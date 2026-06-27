@@ -79,7 +79,114 @@ jobs:
               exit 1
               ;;
             BLOCKED|DIRTY|CONFLICTING|UNKNOWN|*)
+              echo "PR #$PR_NUMBER not immediately mergeable (mergeStateStatus=$MERGE_STATE); evaluating auto-resolve eligibility"
+
+              # --------------------------------------------------------------
+              # Auto-resolve path (BLOCKED only): a release PR is a mechanical
+              # version-bump + changelog aggregation. The underlying feature
+              # code was already reviewed on its own PR before it landed on
+              # main, so when the ONLY thing blocking THIS release PR is
+              # unresolved review threads (e.g. the chatgpt-codex-connector bot
+              # leaving changelog nits) AND every status check is green, it is
+              # safe to auto-resolve those threads. We never use --admin and we
+              # only ever touch this single release PR ($PR_NUMBER).
+              # --------------------------------------------------------------
+              OWNER="${REPO%%/*}"
+              NAME="${REPO##*/}"
+
+              # shellcheck disable=SC2016  # $owner/$name/$number are GraphQL variables, must stay literal
+              GQL=$(gh api graphql \
+                -f owner="$OWNER" -f name="$NAME" -F number="$PR_NUMBER" \
+                -f query='
+                  query($owner:String!, $name:String!, $number:Int!) {
+                    repository(owner:$owner, name:$name) {
+                      pullRequest(number:$number) {
+                        reviewDecision
+                        reviewThreads(first:100) { nodes { id isResolved } }
+                        commits(last:1) { nodes { commit { statusCheckRollup { state } } } }
+                      }
+                    }
+                  }' 2>/dev/null) || GQL=""
+
+              REVIEW_DECISION=$(echo "$GQL" | jq -r '.data.repository.pullRequest.reviewDecision // empty' 2>/dev/null || echo "")
+              ROLLUP_STATE=$(echo "$GQL" | jq -r '.data.repository.pullRequest.commits.nodes[0].commit.statusCheckRollup.state // empty' 2>/dev/null || echo "")
+              UNRESOLVED=$(echo "$GQL" | jq -r '[.data.repository.pullRequest.reviewThreads.nodes[] | select(.isResolved==false)] | length' 2>/dev/null || echo "0")
+              [[ "$UNRESOLVED" =~ ^[0-9]+$ ]] || UNRESOLVED=0
+
+              # CHECKS_GREEN: rollup SUCCESS, or empty/null (no checks => no
+              # failing required checks). PENDING / FAILURE / ERROR / EXPECTED
+              # are NOT green.
+              CHECKS_GREEN=false
+              if [[ "$ROLLUP_STATE" == "SUCCESS" || -z "$ROLLUP_STATE" ]]; then
+                CHECKS_GREEN=true
+              fi
+
+              echo "Auto-resolve probe: reviewDecision=${REVIEW_DECISION:-none} statusCheckRollup=${ROLLUP_STATE:-none} checksGreen=$CHECKS_GREEN unresolvedThreads=$UNRESOLVED mergeable=$MERGEABLE"
+
+              if [[ "$MERGE_STATE" == "BLOCKED" && "$MERGEABLE" == "MERGEABLE" && "$CHECKS_GREEN" == "true" && "$UNRESOLVED" -gt 0 ]]; then
+                echo "Release PR #$PR_NUMBER is BLOCKED only on $UNRESOLVED unresolved review thread(s) with green checks — auto-resolving."
+
+                RESOLVED_COUNT=0
+                while IFS= read -r THREAD_ID; do
+                  if [[ -z "$THREAD_ID" ]]; then continue; fi
+                  # gh inside an `if` condition does not trip `set -e`, so one
+                  # failed thread-resolve never aborts the loop.
+                  # shellcheck disable=SC2016  # $threadId is a GraphQL variable, must stay literal
+                  if gh api graphql -f threadId="$THREAD_ID" -f query='
+                    mutation($threadId:ID!) {
+                      resolveReviewThread(input:{threadId:$threadId}) { thread { isResolved } }
+                    }' >/dev/null 2>&1; then
+                    RESOLVED_COUNT=$((RESOLVED_COUNT + 1))
+                  else
+                    echo "::warning::Failed to resolve review thread $THREAD_ID on PR #$PR_NUMBER (continuing)"
+                  fi
+                done < <(echo "$GQL" | jq -r '.data.repository.pullRequest.reviewThreads.nodes[] | select(.isResolved==false) | .id' 2>/dev/null)
+
+                echo "Resolved $RESOLVED_COUNT of $UNRESOLVED unresolved thread(s) on PR #$PR_NUMBER"
+
+                gh pr comment "$PR_NUMBER" --repo "$REPO" \
+                  --body "🤖 scheduled-merge auto-resolved ${RESOLVED_COUNT} unresolved review thread(s) on this mechanical release PR (all status checks green). Release PRs are version-bump + changelog aggregations; the underlying feature code was reviewed on its own PR before landing on main." || true
+
+                # Give GitHub a few seconds to recompute mergeability, then
+                # re-poll mergeStateStatus until it resolves (~6 x 10s).
+                RP_STATE="UNKNOWN"
+                RP_ATTEMPT=0
+                while [[ "$RP_ATTEMPT" -lt 6 ]]; do
+                  sleep 10
+                  RP_STATE=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json mergeStateStatus --jq '.mergeStateStatus' 2>/dev/null || echo "UNKNOWN")
+                  echo "Post-resolve re-poll $((RP_ATTEMPT + 1))/6: mergeStateStatus=$RP_STATE"
+                  if [[ "$RP_STATE" != "UNKNOWN" ]]; then
+                    break
+                  fi
+                  RP_ATTEMPT=$((RP_ATTEMPT + 1))
+                done
+
+                case "$RP_STATE" in
+                  CLEAN|UNSTABLE|HAS_HOOKS)
+                    echo "Merging release PR #$PR_NUMBER after auto-resolving threads"
+                    # No `|| true` here: a failed merge must surface loudly.
+                    gh pr merge "$PR_NUMBER" --repo "$REPO" --squash --delete-branch
+                    echo "Release PR #$PR_NUMBER merged after auto-resolving threads"
+                    exit 0
+                    ;;
+                  *)
+                    echo "::warning::PR #$PR_NUMBER still not mergeable after auto-resolving threads (mergeStateStatus=$RP_STATE); escalating to a human"
+                    ;;
+                esac
+              else
+                echo "Not eligible for thread auto-resolution (requires BLOCKED + MERGEABLE + green checks + unresolved threads) — treating as a genuine block."
+              fi
+
+              # --------------------------------------------------------------
+              # Genuine block (or auto-resolution did not unblock the PR): make
+              # sure the alert actually fires. The previous version silently
+              # no-op'd because `gh issue create --label release-health` failed
+              # when the label did not exist, so a 5-day stall (PR #2317) went
+              # completely unnoticed. Ensure the label exists before filing.
+              # --------------------------------------------------------------
               echo "::error::Release PR #$PR_NUMBER not mergeable (mergeStateStatus=$MERGE_STATE)"
+
+              gh label create release-health --repo "$REPO" --color FBCA04 --description "Release pipeline health" 2>/dev/null || true
 
               EXISTING=$(gh issue list --repo "$REPO" --label "release-health" --state open \
                 --json number --jq '.[0].number // empty')
