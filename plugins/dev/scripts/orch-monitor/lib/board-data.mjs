@@ -22,7 +22,7 @@ import { readFile, readdir, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join, dirname, basename } from "node:path";
 import { promisify } from "node:util";
-import { readLinearCache } from "./linear-cache-reader.mjs";
+import { readLinearCache, readParkedNeedsHumanTickets } from "./linear-cache-reader.mjs";
 import { fillEstimateFallback, getEstimationMethodAsync } from "./linear-estimate-fallback.mjs";
 // CTL-1046: supplemental Linear-title fallback for cross-team (e.g. ADV) records.
 // CTL records carry their title via the eligible projection (eligible/CTL.json),
@@ -1273,6 +1273,63 @@ export function synthesizeOrphanTickets(orphanState, now) {
     });
 }
 
+// synthesizeParkedNeedsHumanTickets — pure helper: one attention card per PARKED
+// needs-human/needs-input ticket that has NO worker-dir / queued / orphan card.
+// The board's ticket set is built from LIVE worker dirs, so a needs-human ticket
+// whose worker dir was torn down is in none of those sets and never reached the
+// inbox — even though deriveAttention already supports the label. This mirrors
+// synthesizeOrphanTickets: it turns the cache-sourced parked descriptors
+// (readParkedNeedsHumanTickets — the broker's countNeedsHumanTickets predicate)
+// into BoardTicket cards that classifyTicket buckets into the inbox "Needs you"
+// (attention) section. `existingIds` is every id ALREADY carded (worker-dir
+// live/between/done + queued + orphan) so a ticket with a real card is NEVER
+// duplicated; a duplicate descriptor within the input is also deduped. Exported so
+// unit tests exercise it without the DB read; `now` is injected for the same reason.
+export function synthesizeParkedNeedsHumanTickets(parked, existingIds, now) {
+  if (!Array.isArray(parked)) return [];
+  const seen = existingIds instanceof Set ? new Set(existingIds) : new Set(existingIds ?? []);
+  const cards = [];
+  for (const p of parked) {
+    if (!p || !p.ticket) continue;
+    if (seen.has(p.ticket)) continue; // already carded (worker-dir / queued / orphan) — never double-count
+    seen.add(p.ticket);
+    const labels = Array.isArray(p.labels) ? p.labels : [];
+    // needs-input reads as "waiting on your input"; needs-human as a generic escalation.
+    const reason =
+      labels.includes(ATTENTION_LABEL_NEEDS_INPUT) && !labels.includes(ATTENTION_LABEL_NEEDS_HUMAN)
+        ? "Parked — waiting on your input (needs-input)."
+        : "Parked — escalated for a human (needs-human).";
+    cards.push({
+      id: p.ticket,
+      title: p.title || p.ticket,
+      type: "parked-needs-human",
+      repo: repoFor(p.ticket),
+      team: teamFor(p.ticket),
+      // No worker dir / phase signal — these are off-board parked tickets. phase
+      // "queued" + the cached Linear state keep the board column honest.
+      phase: "queued", status: "parked", model: null,
+      linearState: typeof p.linearState === "string" ? p.linearState : "",
+      workerStatus: null, activeState: null, working: false,
+      lastActiveMs: null, priority: typeof p.priority === "number" ? p.priority : 0,
+      estimate: null, scope: null, project: null,
+      held: heldFor(labels), heldSince: null, currentPhaseSince: null,
+      // surface as a Needs-You row, reusing the CTL-1158 inbox derivation.
+      attention: "needs-human",
+      // "how long has it needed you" anchor — the descriptor's last-updated stamp
+      // from the cache (honest null when the cache carried none).
+      attentionSince: p.updatedAt ?? null,
+      humanQuestion: reason,
+      explanation: null,
+      pr: null, prUrl: null, mergeStateStatus: null, prStuckReason: null,
+      costUSD: null, tokens: null, turns: null, phaseCosts: null, phaseSummary: [],
+      blockers: [],
+      updatedAt: p.updatedAt ?? new Date(now).toISOString(),
+      host: null, generation: null, failureReason: null,
+    });
+  }
+  return cards;
+}
+
 // ── Linear enrichment: priority / estimate / project / labels / relations /
 // assignee, read EXCLUSIVELY from the broker's durable caches (CTL-883).
 //
@@ -1527,9 +1584,9 @@ async function loadDispatchCooldowns(now) {
 // instead of full-reading the ~190MB log on every 3s recompute. Ring-less
 // callers (tests) pass nothing and keep the legacy readFileSync path.
 export async function assembleBoard({ getPrStatus = null, ring = null } = {}) {
-  const [agents, costs, phaseCostsByTicket, eligible, linfo, mp, catalystSessByUuid, cooldowns] = await Promise.all([
+  const [agents, costs, phaseCostsByTicket, eligible, linfo, mp, catalystSessByUuid, cooldowns, parkedNeedsHuman] = await Promise.all([
     liveAgents(), costByTicket(), costByPhase(), loadEligible(TEAM_REPO), linearInfo(), maxParallel(),
-    catalystSessionByCcUuid(), loadDispatchCooldowns(Date.now()),
+    catalystSessionByCcUuid(), loadDispatchCooldowns(Date.now()), readParkedNeedsHumanTickets(),
   ]);
   const eligibleIndex = Object.fromEntries(eligible.map((e) => [e.id, e]));
 
@@ -1946,6 +2003,18 @@ export async function assembleBoard({ getPrStatus = null, ring = null } = {}) {
   // deriveInbox surfaces them via the existing attention bucket (CTL-1158 reuse).
   const orphanTickets = synthesizeOrphanTickets(readOrphanPrState(), now);
   tickets = [...tickets, ...orphanTickets];
+
+  // Parked needs-human cards. A needs-human/needs-input ticket whose worker dir
+  // was torn down is in NONE of the worker-dir-sourced sets above (live /
+  // between-phases / recent-done / queued / orphan), so it never reached the inbox
+  // even though deriveAttention supports the label. Read the SAME cache the board
+  // enriches from (filter-state.db descriptors, via readParkedNeedsHumanTickets —
+  // the broker's countNeedsHumanTickets predicate) and append one attention card
+  // per parked ticket NOT already carded. Deduped against every existing card id;
+  // terminal/removed excluded by the reader; fail-open ([] on a db read error).
+  const existingCardIds = new Set(tickets.map((t) => t.id));
+  const parkedTickets = synthesizeParkedNeedsHumanTickets(parkedNeedsHuman, existingCardIds, now);
+  tickets = [...tickets, ...parkedTickets];
 
   // priority queue: eligible (not yet in-flight), globally ranked (Queue tab)
   const queue = await Promise.all(
