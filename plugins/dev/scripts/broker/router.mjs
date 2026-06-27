@@ -98,8 +98,7 @@ import {
   deriveSpanId,
   generateEventId,
   synthesizeEventId,
-  hostName,
-  hostId,
+  buildCatalystResource,
 } from "../orch-monitor/lib/canonical-event-shared.ts";
 import {
   PHASE_EVENT_PATTERN as _PHASE_EVENT_PATTERN,
@@ -321,13 +320,10 @@ export function buildCanonicalEnvelope(legacy) {
       (Array.isArray(legacy.detail?.source_event_ids)
         ? legacy.detail.source_event_ids[0] ?? null
         : null),
-    resource: {
-      "service.name": "catalyst.broker",
-      "service.namespace": "catalyst",
-      "service.version": pluginVersion(),
-      "host.name": hostName(),
-      "host.id": hostId(),
-    },
+    resource: buildCatalystResource({
+      serviceName: "catalyst.broker",
+      serviceVersion: pluginVersion(),
+    }),
     attributes,
     body: { payload: legacy.detail ?? null },
   };

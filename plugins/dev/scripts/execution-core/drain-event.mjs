@@ -12,7 +12,7 @@ import { mkdirSync, appendFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { randomBytes } from "node:crypto";
 import { getEventLogPath, getHostName, log } from "./config.mjs";
-import { hostName, hostId } from "./lib/host-identity.mjs";
+import { buildCatalystResource } from "./lib/catalyst-resource.mjs";
 
 export const DRAIN_CHANGED_EVENT = "node.drain.changed";
 export const DRAINED_EVENT = "node.drain.drained";
@@ -31,12 +31,7 @@ export function buildDrainChangedEnvelope({ draining, inFlightCount, now } = {})
     severityNumber: 9,
     traceId: null,
     spanId: null,
-    resource: {
-      "service.name": "catalyst.execution-core",
-      "service.namespace": "catalyst",
-      "host.name": hostName(),
-      "host.id": hostId(),
-    },
+    resource: buildCatalystResource({ serviceName: "catalyst.execution-core" }),
     attributes: {
       "event.name": DRAIN_CHANGED_EVENT,
       "event.entity": "node",
@@ -67,12 +62,7 @@ export function buildDrainedEnvelope({ inFlightCount = 0, now } = {}) {
     severityNumber: 9,
     traceId: null,
     spanId: null,
-    resource: {
-      "service.name": "catalyst.execution-core",
-      "service.namespace": "catalyst",
-      "host.name": hostName(),
-      "host.id": hostId(),
-    },
+    resource: buildCatalystResource({ serviceName: "catalyst.execution-core" }),
     attributes: {
       "event.name": DRAINED_EVENT,
       "event.entity": "node",

@@ -25,7 +25,7 @@ import { homedir } from "node:os";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { randomBytes } from "node:crypto";
-import { hostName, hostId } from "./lib/host-identity.mjs";
+import { buildCatalystResource } from "./lib/catalyst-resource.mjs";
 import {
   getJobsRoot,
   getEventLogPath,
@@ -322,12 +322,7 @@ function buildEventEnvelope({
       severityNumber,
       traceId: randomBytes(16).toString("hex"),
       spanId: randomBytes(8).toString("hex"),
-      resource: {
-        "service.name": "catalyst.execution-core",
-        "service.namespace": "catalyst",
-        "host.name": hostName(),
-        "host.id": hostId(),
-      },
+      resource: buildCatalystResource({ serviceName: "catalyst.execution-core" }),
       attributes: {
         "event.name": `phase.${phase}.${action}.${ticket}`,
         "event.entity": "phase",
@@ -1275,12 +1270,7 @@ export function defaultAppendOperatorEvent(evt) {
         severityNumber: 9,
         traceId: randomBytes(16).toString("hex"),
         spanId: randomBytes(8).toString("hex"),
-        resource: {
-          "service.name": "catalyst.execution-core",
-          "service.namespace": "catalyst",
-          "host.name": hostName(),
-          "host.id": hostId(),
-        },
+        resource: buildCatalystResource({ serviceName: "catalyst.execution-core" }),
         attributes: {
           "event.name": name,
         },

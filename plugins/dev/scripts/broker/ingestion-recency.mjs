@@ -30,8 +30,7 @@ import { dirname } from "node:path";
 import {
   generateEventId,
   severityNumber,
-  hostName,
-  hostId,
+  buildCatalystResource,
 } from "../orch-monitor/lib/canonical-event-shared.ts";
 import { getEventLogPath, log } from "./config.mjs";
 
@@ -97,15 +96,10 @@ export function buildIngestionRecencyEnvelope(
     // (for stale, the final heartbeat before silence; for recovered, the fresh
     // beat that cleared it). null when the source was never observed.
     caused_by: causedBy ?? null,
-    resource: {
-      // The broker is the emitter — the host that OBSERVED the silence. Matches
-      // every other broker emission so the monitor composes the per-host stream
-      // identically.
-      "service.name": "catalyst.broker",
-      "service.namespace": "catalyst",
-      "host.name": hostName(),
-      "host.id": hostId(),
-    },
+    // The broker is the emitter — the host that OBSERVED the silence. Matches
+    // every other broker emission so the monitor composes the per-host stream
+    // identically.
+    resource: buildCatalystResource({ serviceName: "catalyst.broker" }),
     attributes: {
       "event.name": eventName,
       "event.entity": "ingestion",
