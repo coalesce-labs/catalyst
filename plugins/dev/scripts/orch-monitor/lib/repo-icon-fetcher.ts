@@ -25,8 +25,13 @@
 //  22. apps/website/public/favicon.png
 //
 // All matching paths are collected; the best by format (SVG > PNG > ICO) is the default.
+//
+// CTL-1380 (Bug B): when NO favicon is found at any probed path, fall back to the
+// GitHub owner/org AVATAR (resolveOwnerAvatar, via the public /users/<owner> endpoint)
+// so a configured team still shows a real image instead of a blank circle — this also
+// covers PRIVATE repos (the avatar is public even when the repo contents are not).
 // Cache: JSON files in cacheDir (default ~/catalyst/repo-icon-cache/), keyed by
-//   owner-repo slug, TTL 7 days (schema v2 — v1 entries re-probe once). A negative
+//   owner-repo slug, TTL 7 days (schema v3 — older-schema entries re-probe once). A negative
 //   result ("no icon found") is also cached (with a 1-day TTL) so we don't hammer
 //   the GitHub API on every boot.
 //
@@ -106,7 +111,11 @@ export type IconResult =
     }
   | { found: false };
 
-const CACHE_SCHEMA_VERSION = 2; // v2 carries candidates[] (CTL-997)
+const CACHE_SCHEMA_VERSION = 3; // v3 adds the owner-avatar fallback (CTL-1380); v1/v2 entries re-probe once
+
+/** Sentinel `path` for the owner-avatar fallback candidate (CTL-1380, Bug B). Not a
+ *  real in-repo file path, so it never collides with ICON_PATH_PRIORITY entries. */
+export const OWNER_AVATAR_PATH = "owner-avatar";
 
 interface CacheEntry {
   schemaVersion: number;
@@ -170,6 +179,32 @@ export function probeRepoPath(ownerRepo: string, path: string): string | null {
 }
 
 /**
+ * Resolve the GitHub OWNER avatar URL for an `owner/repo` slug (CTL-1380, Bug B).
+ *
+ * Last-resort fallback used by fetchRepoIcon when a repo exposes NO favicon at any
+ * probed path — so a configured team still shows a real image instead of a blank
+ * circle. Queries the public `/users/<owner>` endpoint (NOT `/repos/<owner>/<repo>`),
+ * so it resolves even for PRIVATE repos the token cannot read: the org/user avatar is
+ * public. Returns the avatar URL, or null on any failure (no gh binary, offline,
+ * unknown owner) — the caller then fail-opens to the lucide fallback.
+ */
+export function resolveOwnerAvatar(ownerRepo: string): string | null {
+  const owner = ownerRepo.split("/")[0]?.trim();
+  if (!owner) return null;
+  try {
+    const out = execSync(`gh api "/users/${owner}" --jq ".avatar_url" 2>/dev/null`, {
+      encoding: "utf8",
+      timeout: 8000,
+      stdio: ["pipe", "pipe", "pipe"],
+    }).trim();
+    if (!out || out === "null") return null;
+    return out;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Fetch a URL and convert it to a data URL (base64-encoded) so the browser
  * can render it without cross-origin issues.
  * Returns null on any fetch/encoding failure.
@@ -185,6 +220,33 @@ export async function fetchAsDataUrl(url: string): Promise<string | null> {
   } catch {
     return null;
   }
+}
+
+/**
+ * Build the owner-avatar fallback IconResult (CTL-1380, Bug B). PURE (no I/O) so the
+ * candidate/result shape is unit-testable offline. Returns `{ found: false }` when
+ * either the avatar URL or its fetched data URL is unavailable — the caller then
+ * fail-opens to the lucide fallback.
+ */
+export function buildAvatarIconResult(
+  avatarUrl: string | null,
+  avatarDataUrl: string | null,
+): IconResult {
+  if (!avatarUrl || !avatarDataUrl) return { found: false };
+  const avatar: IconCandidate = {
+    path: OWNER_AVATAR_PATH,
+    format: "png",
+    downloadUrl: avatarUrl,
+    dataUrl: avatarDataUrl,
+  };
+  return {
+    found: true,
+    candidates: [avatar],
+    selectedPath: OWNER_AVATAR_PATH,
+    path: OWNER_AVATAR_PATH,
+    downloadUrl: avatarUrl,
+    dataUrl: avatarDataUrl,
+  };
 }
 
 /**
@@ -228,7 +290,14 @@ export async function fetchRepoIcon(
   try {
     const hits = resolveRepoIconCandidates(ownerRepo);
     if (hits.length === 0) {
-      result = { found: false };
+      // CTL-1380 (Bug B): no favicon at any probed path → fall back to the GitHub
+      // owner/org avatar so the project still renders a real image instead of a blank
+      // circle. Covers favicon-less repos AND private repos (the avatar is public).
+      // If the avatar can't be resolved/fetched (offline, no gh, unknown owner) we
+      // still fail-open to { found: false } → the UI lucide fallback.
+      const avatarUrl = resolveOwnerAvatar(ownerRepo);
+      const avatarDataUrl = avatarUrl ? await fetchAsDataUrl(avatarUrl) : null;
+      result = buildAvatarIconResult(avatarUrl, avatarDataUrl);
     } else {
       const candidates: IconCandidate[] = await Promise.all(
         hits.map(async (h) => ({
