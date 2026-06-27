@@ -61,7 +61,7 @@
 
 import { spawnSync } from "node:child_process";
 import { appendFileSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
-import { dirname } from "node:path";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { getEventLogPath } from "./config.mjs";
 
@@ -113,9 +113,21 @@ export class Semaphore {
     return () => this._release();
   }
   _release() {
-    // CTL-1367 item 10: if a waiter is parked, hand it the slot directly (active
-    // is unchanged — one holder swapped for the next). Only when no one is waiting
-    // does the slot actually free (active--). This closes the exceed-max race.
+    // CTL-1367 P2-H (WITHHOLD on shrink): if a SHRINK left us ABOVE the (lowered)
+    // cap, a release must DRAIN toward the new max — NOT hand the freed slot to a
+    // parked waiter. Handing it over keeps `active` pinned above the cap forever
+    // (active stays constant across a handoff), so the lowered limit would never
+    // take effect. Decrement instead; the waiter stays parked until active has
+    // drained back to/below max (or a later GROW wakes it). Preserves the
+    // exceed-max invariant (active only ever decreases here).
+    if (this._active > this.max) {
+      this._active -= 1;
+      return;
+    }
+    // CTL-1367 item 10: at/below the cap, if a waiter is parked, hand it the slot
+    // directly (active is unchanged — one holder swapped for the next). Only when no
+    // one is waiting does the slot actually free (active--). This closes the
+    // exceed-max race.
     const next = this._waiters.shift();
     if (next) {
       next();
@@ -128,12 +140,15 @@ export class Semaphore {
   // promises never resolved → deadlock). Mutating `max` keeps every parked waiter
   // attached.
   //
-  // CTL-1367 nit (P3): on a GROW, eagerly wake parked waiters into the newly-created
-  // slots (FIFO) instead of leaving them parked until the next `_release`. Each woken
-  // waiter takes a NEW slot, so active++ here (NOT a hand-off transfer like
-  // `_release`, where the count stays constant). The loop condition `_active < max`
-  // bounds it so active can never exceed the (raised) cap. A SHRINK only lowers `max`;
-  // already-held slots drain naturally as their holders release.
+  // CTL-1367 P2-H: on a GROW, eagerly wake parked waiters into the newly-created
+  // slots (FIFO) instead of leaving them parked until the next `_release` — up to
+  // (newMax − active) of them. Each woken waiter takes a NEW slot, so active++ here
+  // (NOT a hand-off transfer like `_release`, where the count stays constant). The
+  // loop condition `_active < max` bounds it so active can never exceed the (raised)
+  // cap. A SHRINK only lowers `max`; held slots drain toward it as their holders
+  // release — `_release` WITHHOLDS the freed slot from waiters while active > max
+  // (see above), so the lowered cap actually takes hold instead of being defeated
+  // by a release→waiter handoff.
   setMax(max) {
     this.max = Math.max(1, Number.isFinite(max) ? Math.floor(max) : 1);
     while (this._active < this.max && this._waiters.length > 0) {
@@ -287,14 +302,29 @@ export function defaultEmitBackstop(
   {
     spawn = spawnSync,
     writeSignalStalled = defaultWriteSignalStalled,
+    writeSignalTerminal = defaultWriteSignalTerminal,
     appendEventLog = defaultAppendEventLog,
   } = {},
 ) {
-  // Step 1 (CTL-1367 item 4): mirror mark_launch_failed — flip the signal to
-  // status:"stalled" BEFORE the event-only emit. The bg path jq-writes stalled
+  // Step 1 (CTL-1367 item 4 + P2-F): mirror mark_launch_failed — flip the signal to
+  // a TERMINAL status BEFORE the event-only emit. The bg path jq-writes stalled
   // first; the SDK backstop used to ONLY emit, so the signal stayed at
   // dispatched/running and reclaim saw the worker in-flight forever.
-  if (signalFile) writeSignalStalled(signalFile, reason);
+  //
+  // CTL-1367 P2-F: the signal status MUST MATCH the backstop's terminal event.
+  // A turn-cap-exhausted backstop emits phase.<phase>.turn-cap-exhausted, so the
+  // signal must read "turn-cap-exhausted" — NOT "stalled". The terminal sweep
+  // applies needs-human to stalled/failed signals, so an unconditional "stalled"
+  // write here would mislabel a max-turns outcome as operator-stalled even though
+  // the event stream says turn-cap-exhausted. Every other abnormal backstop
+  // (failed / overloaded-exhausted) still writes "stalled".
+  if (signalFile) {
+    if (status === "turn-cap-exhausted") {
+      writeSignalTerminal(signalFile, "turn-cap-exhausted", reason);
+    } else {
+      writeSignalStalled(signalFile, reason);
+    }
+  }
 
   // Step 2 (CTL-1367 item 5): emit with --no-signal-update (step 1 owns the
   // signal), then INSPECT the result instead of swallowing it — a missing/failing
@@ -315,18 +345,27 @@ export function defaultEmitBackstop(
   } catch (err) {
     res = { error: err };
   }
-  // CTL-1367 item 5 + P3 (DOCUMENTED DECISION): fall back to the direct event-log
-  // append whenever the emit binary did NOT cleanly succeed — INCLUDING a non-zero
-  // exit, not only a spawn error / ENOENT. A non-zero exit where the binary already
-  // WROTE the event then failed afterward yields a DUPLICATE terminal event, but
-  // phase-advance is IDEMPOTENT (the broker/advance dedupes on the terminal-status
-  // signal), so a duplicate is harmless. The opposite tradeoff — falling back ONLY on
-  // a spawn error — would SILENTLY DROP the terminal event whenever the binary exits
-  // non-zero BEFORE writing (bad args, a pre-write crash), reintroducing the exact
-  // silent-stall this backstop exists to prevent. We deliberately prefer a harmless
-  // duplicate over a possible silent drop.
+  // CTL-1367 item 5 + P2-E + P3 (DOCUMENTED DECISION): fall back to the direct
+  // event-log append whenever the emit binary did NOT cleanly succeed. A clean
+  // success is the ONLY no-fallback case: status === 0, no spawn error, AND no
+  // terminating signal. Everything else falls back:
+  //   • spawn error / ENOENT (res.error)               — binary missing/unspawnable
+  //   • non-zero exit                                   — bad args / pre-write crash
+  //   • CTL-1367 P2-E: SIGKILL/OOM — spawnSync returns status:null + a non-null
+  //     `signal`. The OLD predicate keyed only on `typeof status === "number"`, so a
+  //     signal-killed emit (status null) looked like success and SILENTLY DROPPED the
+  //     terminal event. Treat any non-null signal (or a null/non-number status) as a
+  //     failed emit so the fallback runs.
+  // A non-zero/killed exit where the binary already WROTE the event then died yields
+  // a DUPLICATE terminal event, but phase-advance is IDEMPOTENT (the broker/advance
+  // dedupes on the terminal-status signal), so a duplicate is harmless. We
+  // deliberately prefer a harmless duplicate over a possible silent drop.
   const emitFailed =
-    !res || res.error != null || (typeof res.status === "number" && res.status !== 0);
+    !res ||
+    res.error != null ||
+    res.signal != null ||
+    typeof res.status !== "number" ||
+    res.status !== 0;
   if (emitFailed) {
     appendEventLog({ phase, ticket, status, reason });
   }
@@ -386,8 +425,14 @@ const SIGNAL_TERMINAL_STATUSES = new Set([
 // CTL-1367 P3: refuses to flip a signal whose current on-disk status is already
 // TERMINAL (SIGNAL_TERMINAL_STATUSES) — most importantly a done/complete success
 // the phase skill wrote between the launch and an abnormal-looking termination. The
-// backstop only stalls a still-in-flight (dispatched/running) signal.
-function defaultWriteSignalStalled(signalFile, reason) {
+// backstop only flips a still-in-flight (dispatched/running) signal.
+//
+// CTL-1367 P2-F: defaultWriteSignalTerminal is the generalized writer — it flips the
+// signal to ANY terminal `status` so the on-disk signal MATCHES the backstop's
+// terminal event (a turn-cap-exhausted backstop must leave "turn-cap-exhausted", not
+// "stalled"; the terminal sweep applies needs-human only to stalled/failed). The P3
+// terminal-clobber guard and the atomic tmp+rename are shared by every status.
+function defaultWriteSignalTerminal(signalFile, status, reason) {
   try {
     let sig;
     try {
@@ -399,16 +444,26 @@ function defaultWriteSignalStalled(signalFile, reason) {
     // CTL-1367 P3: never clobber a terminal status (esp. a done/complete success).
     if (SIGNAL_TERMINAL_STATUSES.has(String(sig.status))) return;
     const ts = new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
-    sig.status = "stalled";
+    sig.status = status;
     sig.attentionReason = reason || "sdk-backstop";
     sig.updatedAt = ts;
-    sig.phaseTimestamps = { ...(sig.phaseTimestamps ?? {}), stalled: ts };
+    sig.phaseTimestamps = { ...(sig.phaseTimestamps ?? {}), [status]: ts };
     const tmp = `${signalFile}.tmp.${process.pid}`;
     writeFileSync(tmp, JSON.stringify(sig));
     renameSync(tmp, signalFile);
   } catch {
     /* best-effort — reclaim will still pick up the terminal event */
   }
+}
+
+// defaultWriteSignalStalled — CTL-1367 item 4. Thin back-compat wrapper over
+// defaultWriteSignalTerminal that writes status:"stalled" with an `attentionReason`
+// (NOT `failureReason` — a failureReason trips revive Loop 2's escalate branch,
+// which does NOT retry). Mirror of phase-agent-dispatch's mark_launch_failed. The
+// 2-arg shape is the seam defaultEmitBackstop injects for the failed/overloaded
+// (non-turn-cap) backstops.
+function defaultWriteSignalStalled(signalFile, reason) {
+  return defaultWriteSignalTerminal(signalFile, "stalled", reason);
 }
 
 // defaultAppendEventLog — CTL-1367 item 5. Last-resort terminal-event append when
@@ -736,12 +791,30 @@ export async function sdkRunPhaseAgent(
   // dispatched|running|done signal) is a NO-OP SUCCESS, NOT a failure — the
   // existing or winning worker owns the phase. Returning code 0 (no query, no
   // backstop) keeps a duplicate dispatch from tripping the dispatch-failure ladder.
+  // CTL-1367 P2-G: for a claim-lost loser there is NO local signal (the WINNER owns
+  // it). The consumer's SDK-aware verify treats that as benign via a YOUNG
+  // single-flight claim (signal-reader:hasFreshClaim), so this no-op does not get
+  // mis-recorded as verify_failed:signal_missing.
   if (pre.idempotent) {
     return { code: 0, stdout: "", stderr: "", signal: null };
   }
   if (!pre.ok) {
-    // The pre-launch already owns its own failure event (mark_launch_failed) on a
-    // claim/launch failure; surface its code/stderr without a duplicate backstop.
+    // CTL-1367 P1-B: a prelaunch that DIED (timeout / SIGKILL / spawn error) AFTER
+    // writing its status:"dispatched" signal but BEFORE printing the spec returns
+    // !ok yet leaves a RUNNABLE signal on disk. The synchronous consumer verifies
+    // ONLY that signal (sees "dispatched" → runnable) and the detached settlement
+    // ignores the resolved {code:1}, so the phase is recorded as LAUNCHED FOREVER —
+    // no query, no terminal event, no reclaim. Flip any still-in-flight signal to
+    // "stalled" so the consumer's verify demotes it to a dispatch failure (and the
+    // terminal sweep can reclaim/escalate). defaultWriteSignalStalled's P3 guard
+    // makes this a no-op when the signal is absent (a clean pre-claim failure) or
+    // already terminal (the prelaunch's own mark_launch_failed already stalled it —
+    // no double write). Derive the path: a pre-spec death has no spec.signalFile.
+    const failedSignalFile =
+      pre.spec?.signalFile ?? join(orchDir, "workers", ticket, `phase-${phase}.json`);
+    defaultWriteSignalStalled(failedSignalFile, "sdk-prelaunch-failed");
+    // The pre-launch otherwise owns its own failure event (mark_launch_failed) on a
+    // clean claim/launch failure; surface its code/stderr without a duplicate backstop.
     // CTL-1367 item 11: scrub any token-shaped substrings out of the surfaced
     // stderr (the prelaunch env carries CLAUDE_CODE_OAUTH_TOKEN).
     const secrets = [oauthToken, authEnv.ANTHROPIC_API_KEY, authEnv.ANTHROPIC_AUTH_TOKEN];

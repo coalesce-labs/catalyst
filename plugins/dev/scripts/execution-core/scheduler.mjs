@@ -82,7 +82,7 @@ import { getProjectConfig, listProjects } from "./registry.mjs";
 // The gatedTeardownWorktree import is removed; the teardown phase agent
 // re-implements the gate in bash (merge-confirmation evidence + worktree
 // presweep + non-force `git worktree remove`) in phase-teardown/SKILL.md.
-import { readWorkerSignals, countSdkInflight as defaultCountSdkInflight } from "./signal-reader.mjs";
+import { readWorkerSignals, countSdkInflight as defaultCountSdkInflight, hasFreshClaim } from "./signal-reader.mjs";
 // CTL-933: shadow belief-store fact collector (opt-in CATALYST_BELIEFS_SHADOW=1).
 // CTL-937: getBeliefsDb exposes the module-level db handle for the diagnostician.
 // CTL-1241: getEscalateHumanBelief reads the latest escalate_human belief for the
@@ -2176,6 +2176,16 @@ export function verifyDispatchedSignal(orchDir, ticket, phase, { requireBgJob = 
   try {
     raw = readFileSync(signalPath, "utf8");
   } catch {
+    // CTL-1367 P2-G (SDK path only): a missing signal is NOT a failure when a
+    // YOUNG single-flight claim exists — that is a benign claim-lost (a concurrent
+    // dispatcher won the O_EXCL claim and is mid-dispatch; the loser writes no
+    // signal). Treating it as a no-op success avoids recording
+    // verify_failed:signal_missing + cooldown for a valid concurrent dispatch.
+    // GATED on requireBgJob === false → bg verify is byte-identical (a bg dispatch
+    // always writes its own signal, so this branch is sdk-only).
+    if (requireBgJob === false && hasFreshClaim(orchDir, ticket, phase)) {
+      return { ok: true };
+    }
     return { ok: false, reason: "signal_missing" };
   }
   let signal;

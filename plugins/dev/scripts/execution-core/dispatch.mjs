@@ -20,6 +20,7 @@ import { fileURLToPath } from "node:url";
 import { getProjectConfig } from "./registry.mjs";
 import { createWorktree as defaultCreateWorktree } from "./worktree.mjs";
 import { sdkRunPhaseAgent, defaultEmitBackstop } from "./sdk-run-phase-agent.mjs"; // CTL-1365b: the executor=sdk launch verb (in-process Agent SDK query()); CTL-1367 P1: shared failed-terminal backstop for a rejected async dispatch
+import { hasFreshClaim } from "./signal-reader.mjs"; // CTL-1367 P2-G: a young single-flight claim makes a missing SDK signal a benign claim-lost no-op
 import { log } from "./config.mjs"; // CTL-1367 P1: log a swallowed async-dispatch rejection before the backstop fires
 
 // phase-agent-dispatch sits one directory up from execution-core/.
@@ -306,13 +307,20 @@ export function isThenable(x) {
 // idempotent duplicate dispatch of an already-completed phase). Crucially it does
 // NOT require a bg_job_id — the SDK prelaunch never writes one (E3). false when the
 // signal is absent, unparseable, or failed/stalled (a failed prelaunch).
+//
+// CTL-1367 P2-G: a missing signal is NOT a failure when a YOUNG single-flight claim
+// exists — that is a benign claim-lost (a concurrent dispatcher won the O_EXCL claim
+// and is mid-dispatch; the loser writes no signal). Return runnable so a valid
+// concurrent triage dispatch is a no-op, not a recorded "triage dispatch failed".
+// This function is the SDK verifySync ONLY, so the bg path is untouched.
 export function sdkSignalRunnable(orchDir, ticket, phase) {
   try {
     const sig = JSON.parse(readFileSync(join(orchDir, "workers", ticket, `phase-${phase}.json`), "utf8"));
     const st = sig?.status;
     return st === "dispatched" || st === "running" || st === "done";
   } catch {
-    return false;
+    // signal absent/unparseable → benign only if a fresh claim is in flight (claim-lost).
+    return hasFreshClaim(orchDir, ticket, phase);
   }
 }
 

@@ -11,6 +11,7 @@ import {
   listDispatchedPhases,
   byActivePhase,
   countSdkInflight,
+  hasFreshClaim,
 } from "./signal-reader.mjs";
 
 let orchDir;
@@ -484,5 +485,42 @@ describe("countSdkInflight (CTL-1367 P1)", () => {
   test("no workers/ dir → 0 (never throws)", () => {
     rmSync(join(orchDir, "workers"), { recursive: true, force: true });
     expect(countSdkInflight(orchDir)).toBe(0);
+  });
+});
+
+// CTL-1367 P2-G: hasFreshClaim — a YOUNG single-flight claim (workers/<T>/<phase>
+// .claim.<gen>) makes a missing SDK signal a benign claim-lost (a concurrent
+// dispatcher won the O_EXCL claim and is mid-dispatch; the loser writes no signal).
+describe("hasFreshClaim (CTL-1367 P2-G)", () => {
+  const writeClaim = (ticket, phase, gen = 1) => {
+    const dir = join(workersDir(), ticket);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, `${phase}.claim.${gen}`), JSON.stringify({ generation: gen }));
+  };
+
+  test("a fresh claim → true", () => {
+    writeClaim("CTL-1", "triage");
+    expect(hasFreshClaim(orchDir, "CTL-1", "triage")).toBe(true);
+  });
+
+  test("no claim → false", () => {
+    mkdirSync(join(workersDir(), "CTL-2"), { recursive: true });
+    expect(hasFreshClaim(orchDir, "CTL-2", "triage")).toBe(false);
+  });
+
+  test("an OLD claim (mtime older than the grace window) → false", () => {
+    writeClaim("CTL-3", "research");
+    // Advance `now` past the grace so the just-written claim reads as old.
+    expect(hasFreshClaim(orchDir, "CTL-3", "research", { now: () => Date.now() + 10 * 60 * 1000 })).toBe(false);
+  });
+
+  test("matches the phase prefix exactly", () => {
+    writeClaim("CTL-4", "plan");
+    expect(hasFreshClaim(orchDir, "CTL-4", "triage")).toBe(false);
+    expect(hasFreshClaim(orchDir, "CTL-4", "plan")).toBe(true);
+  });
+
+  test("no worker dir → false (never throws)", () => {
+    expect(hasFreshClaim(orchDir, "CTL-NOPE", "triage")).toBe(false);
   });
 });

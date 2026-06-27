@@ -5,7 +5,7 @@
 // Run: cd plugins/dev/scripts/execution-core && bun test sdk-run-phase-agent.test.mjs
 
 import { describe, test, expect } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync, writeFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -189,6 +189,55 @@ describe("Semaphore", () => {
     await Promise.all(Array.from({ length: 6 }, task));
     expect(peak).toBeLessThanOrEqual(2);
   });
+
+  // CTL-1367 P2-H: resize behavior.
+  const flush = async () => { await Promise.resolve(); await Promise.resolve(); await Promise.resolve(); };
+
+  test("setMax GROW wakes parked waiters into the new slots (up to newMax-active)", async () => {
+    const sem = new Semaphore(1);
+    const r1 = await sem.acquire(); // active=1 (at cap)
+    let w2 = false, w3 = false;
+    const p2 = sem.acquire().then((r) => { w2 = true; return r; }); // parks
+    const p3 = sem.acquire().then((r) => { w3 = true; return r; }); // parks
+    await flush();
+    expect(w2).toBe(false);
+    expect(w3).toBe(false);
+    sem.setMax(3); // grow: active 1, wake the 2 parked waiters into the 2 new slots
+    await flush();
+    expect(w2).toBe(true);
+    expect(w3).toBe(true);
+    expect(sem.active).toBe(3); // exactly the raised cap — never exceeds it
+    r1(); (await p2)(); (await p3)();
+  });
+
+  test("setMax SHRINK withholds released slots — drains to the new cap, never hands them to waiters above it", async () => {
+    const sem = new Semaphore(3);
+    const r1 = await sem.acquire(); // active=1
+    const r2 = await sem.acquire(); // active=2
+    const r3 = await sem.acquire(); // active=3 (at cap)
+    let w4 = false;
+    const p4 = sem.acquire().then((r) => { w4 = true; return r; }); // parks
+    await flush();
+    expect(w4).toBe(false);
+
+    sem.setMax(1); // shrink: active 3 is now ABOVE the new cap of 1
+    // Each release while active > max DRAINS (active--) and WITHHOLDS the slot.
+    r1();
+    await flush();
+    expect(w4).toBe(false); // withheld — active 2 still > 1
+    expect(sem.active).toBe(2);
+    r2();
+    await flush();
+    expect(w4).toBe(false); // withheld — active 1
+    expect(sem.active).toBe(1);
+    // Now at the cap: the next release transfers the slot to the parked waiter
+    // (active stays exactly at the new cap — the exceed-max invariant holds).
+    r3();
+    await flush();
+    expect(w4).toBe(true);
+    expect(sem.active).toBe(1);
+    (await p4)();
+  });
 });
 
 // ── sdkRunPhaseAgent: the three contracts + reuse of the shared pre-launch ────
@@ -363,6 +412,53 @@ describe("sdkRunPhaseAgent — shared pre-launch failure", () => {
     const r = await sdkRunPhaseAgent(ARGS, { ...GOOD_AUTH, spawn, runQuery: fakeQuery([resultMsg()], sink) });
     expect(r.code).toBe(1);
     expect(sink.calls ?? 0).toBe(0); // launch verb never ran — pre-launch owns the failure
+  });
+
+  // CTL-1367 P1-B: a prelaunch SIGKILLed/timed-out AFTER writing status:"dispatched"
+  // but BEFORE printing the spec returns !ok yet leaves a RUNNABLE signal behind. The
+  // synchronous consumer would verify only that signal (dispatched → runnable) and
+  // record the phase as launched forever. The launch verb flips the still-in-flight
+  // signal to "stalled" so the consumer's verify demotes it to a dispatch failure.
+  test("CTL-1367 P1-B: a prelaunch that dies before the spec flips a dispatched signal to stalled", async () => {
+    const orchDir = mkdtempSync(join(tmpdir(), "sdk-p1b-"));
+    const wdir = join(orchDir, "workers", "CTL-100");
+    mkdirSync(wdir, { recursive: true });
+    const signalFile = join(wdir, "phase-implement.json");
+    writeFileSync(signalFile, JSON.stringify({ status: "dispatched", bg_job_id: null, ticket: "CTL-100", phase: "implement" }));
+    const sink = {};
+    // The prelaunch wrote the dispatched signal (above), then died: SIGKILL, no spec.
+    const spawn = (bin) => {
+      if (bin.endsWith("phase-agent-dispatch")) {
+        return { status: null, signal: "SIGKILL", stdout: "", stderr: "killed", error: Object.assign(new Error("ETIMEDOUT"), { code: "ETIMEDOUT" }) };
+      }
+      return { status: 0, stdout: "", stderr: "", error: null };
+    };
+    const r = await sdkRunPhaseAgent(
+      { orchDir, ticket: "CTL-100", phase: "implement", worktreePath: "/wt" },
+      { ...GOOD_AUTH, spawn, runQuery: fakeQuery([resultMsg()], sink) },
+    );
+    expect(r.code).not.toBe(0); // surfaced as a dispatch failure
+    expect(sink.calls ?? 0).toBe(0); // query never ran
+    // P1-B: the runnable signal was flipped to stalled so it can't strand "dispatched".
+    expect(JSON.parse(readFileSync(signalFile, "utf8")).status).toBe("stalled");
+    rmSync(orchDir, { recursive: true, force: true });
+  });
+
+  test("CTL-1367 P1-B: a clean pre-claim failure (no signal on disk) does not fabricate one", async () => {
+    const orchDir = mkdtempSync(join(tmpdir(), "sdk-p1b2-"));
+    mkdirSync(join(orchDir, "workers", "CTL-100"), { recursive: true });
+    const signalFile = join(orchDir, "workers", "CTL-100", "phase-implement.json");
+    const spawn = (bin) =>
+      bin.endsWith("phase-agent-dispatch")
+        ? { status: 1, stdout: "", stderr: "no claim", error: null } // failed before any signal write
+        : { status: 0, stdout: "", stderr: "", error: null };
+    const r = await sdkRunPhaseAgent(
+      { orchDir, ticket: "CTL-100", phase: "implement", worktreePath: "/wt" },
+      { ...GOOD_AUTH, spawn, runQuery: fakeQuery([resultMsg()]) },
+    );
+    expect(r.code).not.toBe(0);
+    expect(existsSync(signalFile)).toBe(false); // no signal fabricated
+    rmSync(orchDir, { recursive: true, force: true });
   });
 });
 
@@ -814,6 +910,70 @@ describe("defaultEmitBackstop — CTL-1367 item 5 (no silent drop)", () => {
       { spawn: () => ({ status: 0, error: null }), writeSignalStalled: () => {}, appendEventLog: (e) => appends.push(e) },
     );
     expect(appends).toHaveLength(0);
+  });
+
+  // CTL-1367 P2-E: a SIGKILL/OOM-terminated emit returns status:null + a non-null
+  // `signal`. The OLD predicate keyed only on `typeof status === "number"`, so this
+  // looked like success and SILENTLY DROPPED the terminal event. It must fall back.
+  test("CTL-1367 P2-E: a signal-killed emit (status:null + signal set) falls back", () => {
+    const appends = [];
+    defaultEmitBackstop(
+      { phase: "implement", ticket: "CTL-4", status: "failed", reason: "oom", orchDir: "/ec", signalFile: null },
+      { spawn: () => ({ status: null, signal: "SIGKILL", error: null }), writeSignalStalled: () => {}, appendEventLog: (e) => appends.push(e) },
+    );
+    expect(appends).toHaveLength(1);
+    expect(appends[0]).toMatchObject({ phase: "implement", ticket: "CTL-4", status: "failed" });
+  });
+
+  test("CTL-1367 P2-E: a non-number/undefined status also falls back", () => {
+    const appends = [];
+    defaultEmitBackstop(
+      { phase: "implement", ticket: "CTL-5", status: "failed", reason: "x", orchDir: "/ec", signalFile: null },
+      { spawn: () => ({ /* no status, no error, no signal */ }), writeSignalStalled: () => {}, appendEventLog: (e) => appends.push(e) },
+    );
+    expect(appends).toHaveLength(1);
+  });
+});
+
+// ── CTL-1367 P2-F: the backstop signal status MATCHES its terminal event ──────
+describe("defaultEmitBackstop — CTL-1367 P2-F (turn-cap-exhausted signal status)", () => {
+  const seed = (status) => {
+    const dir = mkdtempSync(join(tmpdir(), "sdk-p2f-"));
+    const signalFile = join(dir, "phase-implement.json");
+    writeFileSync(signalFile, JSON.stringify({ status, ticket: "CTL-1", phase: "implement" }));
+    return { dir, signalFile };
+  };
+
+  test("a turn-cap-exhausted backstop writes signal status 'turn-cap-exhausted' (NOT 'stalled')", () => {
+    const { dir, signalFile } = seed("running");
+    defaultEmitBackstop(
+      { phase: "implement", ticket: "CTL-1", status: "turn-cap-exhausted", reason: "sdk-error-max-turns", orchDir: "/ec", signalFile },
+      { spawn: () => ({ status: 0, error: null }), appendEventLog: () => {} },
+    );
+    const sig = JSON.parse(readFileSync(signalFile, "utf8"));
+    expect(sig.status).toBe("turn-cap-exhausted");
+    expect(sig.phaseTimestamps["turn-cap-exhausted"]).toBeTruthy();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("a failed backstop STILL writes signal status 'stalled'", () => {
+    const { dir, signalFile } = seed("running");
+    defaultEmitBackstop(
+      { phase: "implement", ticket: "CTL-1", status: "failed", reason: "sdk-threw", orchDir: "/ec", signalFile },
+      { spawn: () => ({ status: 0, error: null }), appendEventLog: () => {} },
+    );
+    expect(JSON.parse(readFileSync(signalFile, "utf8")).status).toBe("stalled");
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("the P3 terminal-clobber guard still applies to a turn-cap write (a 'done' success is preserved)", () => {
+    const { dir, signalFile } = seed("done");
+    defaultEmitBackstop(
+      { phase: "implement", ticket: "CTL-1", status: "turn-cap-exhausted", reason: "x", orchDir: "/ec", signalFile },
+      { spawn: () => ({ status: 0, error: null }), appendEventLog: () => {} },
+    );
+    expect(JSON.parse(readFileSync(signalFile, "utf8")).status).toBe("done"); // never clobbered
+    rmSync(dir, { recursive: true, force: true });
   });
 });
 

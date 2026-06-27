@@ -897,6 +897,26 @@ describe("sdkSignalRunnable (CTL-1367 E3)", () => {
     rmSync(od, { recursive: true, force: true });
     expect(sdkSignalRunnable("/nope", "CTL-1", "implement")).toBe(false);
   });
+
+  // CTL-1367 P2-G: a MISSING signal is benign (claim-lost) when a YOUNG single-flight
+  // claim exists — a concurrent dispatcher won the O_EXCL claim and is mid-dispatch,
+  // so the loser must be a no-op, NOT a recorded "triage dispatch failed".
+  test("CTL-1367 P2-G: a missing signal + a fresh claim → runnable (benign claim-lost)", () => {
+    const od = mkdtempSync(join(tmpdir(), "sdk-sig-claim-"));
+    const wd = join(od, "workers", "CTL-1");
+    mkdirSync(wd, { recursive: true });
+    // No signal file; a fresh claim from the winning concurrent dispatcher.
+    writeFileSync(join(wd, "implement.claim.1"), JSON.stringify({ generation: 1 }));
+    expect(sdkSignalRunnable(od, "CTL-1", "implement")).toBe(true);
+    rmSync(od, { recursive: true, force: true });
+  });
+
+  test("CTL-1367 P2-G: a missing signal + NO claim → still not runnable", () => {
+    const od = mkdtempSync(join(tmpdir(), "sdk-sig-noclaim-"));
+    mkdirSync(join(od, "workers", "CTL-1"), { recursive: true });
+    expect(sdkSignalRunnable(od, "CTL-1", "implement")).toBe(false);
+    rmSync(od, { recursive: true, force: true });
+  });
 });
 
 describe("settleDispatchSync (CTL-1367 P1)", () => {

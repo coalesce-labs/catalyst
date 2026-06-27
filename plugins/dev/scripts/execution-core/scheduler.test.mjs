@@ -5552,6 +5552,39 @@ describe("verifyDispatchedSignal (CTL-611)", () => {
       reason: "status_not_runnable",
     });
   });
+
+  // CTL-1367 P2-G: the SDK path (requireBgJob:false) treats a MISSING signal as a
+  // benign claim-lost when a YOUNG single-flight claim exists (a concurrent
+  // dispatcher won the O_EXCL claim and is mid-dispatch). Without this, a valid
+  // concurrent SDK dispatch records verify_failed:signal_missing + cooldown.
+  test("requireBgJob:false: missing signal + a fresh claim → ok (benign claim-lost)", () => {
+    const dir = join(orchDir, "workers", "CTL-107");
+    mkdirSync(dir, { recursive: true });
+    // No phase-research.json signal; a fresh claim from the winning dispatcher.
+    writeFileSync(join(dir, "research.claim.1"), JSON.stringify({ generation: 1 }));
+    expect(verifyDispatchedSignal(orchDir, "CTL-107", "research", { requireBgJob: false })).toEqual({ ok: true });
+  });
+
+  test("requireBgJob:false: missing signal + NO claim → still signal_missing", () => {
+    const dir = join(orchDir, "workers", "CTL-108");
+    mkdirSync(dir, { recursive: true });
+    expect(verifyDispatchedSignal(orchDir, "CTL-108", "research", { requireBgJob: false })).toEqual({
+      ok: false,
+      reason: "signal_missing",
+    });
+  });
+
+  // The bg path (requireBgJob defaults true) is byte-identical: a fresh claim does
+  // NOT rescue a missing signal (a bg dispatch always writes its own signal).
+  test("requireBgJob:true (bg): a fresh claim does NOT rescue a missing signal", () => {
+    const dir = join(orchDir, "workers", "CTL-109");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "research.claim.1"), JSON.stringify({ generation: 1 }));
+    expect(verifyDispatchedSignal(orchDir, "CTL-109", "research")).toEqual({
+      ok: false,
+      reason: "signal_missing",
+    });
+  });
 });
 
 describe("phase.dispatch.failed event emission (CTL-611)", () => {

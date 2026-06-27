@@ -9,9 +9,47 @@
 //
 // Pure given a filesystem directory: no clock, no network.
 
-import { readdirSync, readFileSync } from "node:fs";
+import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { log } from "./config.mjs";
+
+// CTL-1367 P2-G: the grace window for a "young" single-flight claim — matches
+// phase-agent-dispatch's CTL-837 pre-spawn orphan-reap grace (find -mmin +2). A
+// claim younger than this is a concurrent dispatcher that just won the O_EXCL
+// claim and is milliseconds-to-seconds from writing its signal; an OLDER claim
+// with no signal is an orphan CTL-837 will reap, so it is NOT treated as benign.
+const CLAIM_FRESH_MS = 120_000;
+
+// hasFreshClaim — CTL-1367 P2-G. Does a YOUNG single-flight claim file exist for
+// this ticket/phase? phase-agent-dispatch writes the claim at
+// workers/<ticket>/<phase>.claim.<generation> (CTL-736) BEFORE the dispatched
+// signal. When a concurrent dispatcher loses the O_EXCL race it emits `claim-lost`
+// and writes NO signal — so the loser's local signal-verify would false-fail
+// "signal_missing" for a perfectly valid concurrent dispatch. The SDK-aware verify
+// uses this to treat that window as a benign no-op: signal ABSENT + a fresh claim
+// present ⇒ the winner is mid-dispatch, not a failure. Pure over the filesystem;
+// never throws (returns false on any read error). Used ONLY on the executor=sdk
+// verify path, so the bg verify is byte-identical.
+export function hasFreshClaim(orchDir, ticket, phase, { now = Date.now, graceMs = CLAIM_FRESH_MS } = {}) {
+  const dir = join(orchDir, "workers", ticket);
+  const prefix = `${phase}.claim.`;
+  let names;
+  try {
+    names = readdirSync(dir);
+  } catch {
+    return false; // no worker dir → no claim
+  }
+  const cutoff = now() - graceMs;
+  for (const name of names) {
+    if (!name.startsWith(prefix)) continue;
+    try {
+      if (statSync(join(dir, name)).mtimeMs >= cutoff) return true;
+    } catch {
+      /* claim vanished between readdir and stat — ignore */
+    }
+  }
+  return false;
+}
 
 // Files inside workers/<T>/ that are phase OUTPUTS ONLY (no phase signal
 // collision). Note: `phase-monitor-deploy.json` is intentionally NOT here —
