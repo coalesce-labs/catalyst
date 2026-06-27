@@ -76,6 +76,15 @@ describe("buildInstallEnvelope (the canonical catalyst.install.* event shape)", 
     expect(buildInstallEnvelope({ event: INSTALL_EVENT.failed, severity: "ERROR" }).severityNumber).toBe(17);
     expect(buildInstallEnvelope({ event: INSTALL_EVENT.started }).severityText).toBe("INFO");
   });
+
+  test("carries trace context when seeded (the trace↔log join), null otherwise", () => {
+    const seeded = buildInstallEnvelope({ event: INSTALL_EVENT.started, traceId: "abc", spanId: "def" });
+    expect(seeded.traceId).toBe("abc");
+    expect(seeded.spanId).toBe("def");
+    const bare = buildInstallEnvelope({ event: INSTALL_EVENT.started });
+    expect(bare.traceId).toBeNull();
+    expect(bare.spanId).toBeNull();
+  });
 });
 
 describe("makeInstallEmitFn (appends one JSONL envelope per call)", () => {
@@ -95,6 +104,17 @@ describe("makeInstallEmitFn (appends one JSONL envelope per call)", () => {
   test("an emit failure never throws (best-effort observability)", () => {
     const emit = makeInstallEmitFn({ getLogPathFn: () => "/nonexistent-dir/\0/x.jsonl", nodeClass: "worker", hostNameVal: "mini" });
     expect(() => emit({ event: INSTALL_EVENT.started, operation: "install" })).not.toThrow();
+  });
+
+  test("per-call nodeClass/traceId/spanId override the baked defaults", () => {
+    const logPath = tmpLog();
+    const emit = makeInstallEmitFn({ getLogPathFn: () => logPath, nowFn: () => 0, nodeClass: "worker", hostNameVal: "mini" });
+    // a `reinstall --class developer` on a worker node must stamp the REQUESTED class + the trace
+    emit({ event: INSTALL_EVENT.started, operation: "reinstall", nodeClass: "developer", traceId: "tid", spanId: "sid" });
+    const env = JSON.parse(readFileSync(logPath, "utf8").trim());
+    expect(env.resource["catalyst.node.class"]).toBe("developer"); // override, NOT the baked worker
+    expect(env.traceId).toBe("tid");
+    expect(env.spanId).toBe("sid");
   });
 });
 
@@ -145,6 +165,21 @@ describe("InstallRun (the lifecycle recorder PR2 drives)", () => {
     expect(terminal.event).toBe(INSTALL_EVENT.rolledBack);
     expect(terminal.outcome).toBe("rolled_back");
     expect(terminal.detail.error).toBe("nope");
+  });
+
+  test("every emitted event carries the run's operation + node class + trace context", () => {
+    const events = [];
+    // reinstall --class developer on a node whose config differs: events must stamp developer
+    const run = new InstallRun({ operation: "reinstall", nodeClass: "developer", emit: (e) => events.push(e), traceId: "tid", spanId: "sid", nowFn: () => 0 });
+    run.start();
+    run.fail(new Error("x"));
+    expect(events.length).toBeGreaterThan(0);
+    for (const e of events) {
+      expect(e.operation).toBe("reinstall");
+      expect(e.nodeClass).toBe("developer");
+      expect(e.traceId).toBe("tid");
+      expect(e.spanId).toBe("sid");
+    }
   });
 
   test("INSTALL_PHASES is the locked, ordered phase enum", () => {

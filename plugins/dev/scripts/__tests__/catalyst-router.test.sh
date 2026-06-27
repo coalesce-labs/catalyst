@@ -85,6 +85,20 @@ else
   ok "version (manifest/jq unavailable — skipped)"
 fi
 
+echo "catalyst router — installed-as-symlink resolution (exec through a symlink)"
+# install-cli.sh installs the router as a DIRECT symlink from a local checkout; the router
+# must resolve through it so SCRIPT_DIR finds the manifest + lib/host-identity.sh (regression
+# guard: a bare dirname made `version` print 'unknown' and `class` mis-source the resolver).
+if [[ -r "$manifest" ]] && command -v jq >/dev/null 2>&1; then
+  SYMBIN="$(mktemp -d)"
+  ln -s "$ROUTER" "$SYMBIN/catalyst"
+  expect_eq "version resolves through a symlink (not 'unknown')" "$(jq -r .version "$manifest")" "$("$SYMBIN/catalyst" version 2>/dev/null)"
+  if "$SYMBIN/catalyst" help 2>&1 | grep -q "Lifecycle:"; then ok "help resolves through a symlink"; else fail "help resolves through a symlink" "grouped usage missing"; fi
+  rm -rf "$SYMBIN"
+else
+  ok "symlink resolution (manifest/jq unavailable — skipped)"
+fi
+
 echo "catalyst router — class show/set against a temp Layer-2 config"
 TMP_CFG="$(mktemp -t catalyst-router-cfg.XXXXXX)"
 cleanup() { rm -f "$TMP_CFG" "$TMP_CFG".* 2>/dev/null || true; }
@@ -142,6 +156,16 @@ if command -v jq >/dev/null 2>&1; then
   # show: an unparseable config is flagged (not silently rendered as 'unset ⇒ worker')
   printf 'not json at all {\n' > "$TMP_CFG"
   expect_contains "class show: unparseable config flagged" "$(cmd_class 2>&1)" "UNPARSEABLE"
+
+  # empty / whitespace-only config must PERSIST the class (jq-on-empty emits nothing → would
+  # otherwise write an empty file and lie about success)
+  printf '' > "$TMP_CFG"
+  empty_rc=0; cmd_class developer >/dev/null 2>&1 || empty_rc=$?
+  expect_eq "class set on empty config ⇒ rc 0" "0" "$empty_rc"
+  expect_eq "class set on empty config persists the value" "developer" "$(jq -r '.catalyst.node.class' "$TMP_CFG")"
+  printf '   \n' > "$TMP_CFG"
+  cmd_class worker >/dev/null 2>&1
+  expect_eq "class set on whitespace config persists the value" "worker" "$(jq -r '.catalyst.node.class' "$TMP_CFG")"
 else
   ok "class show/set (jq unavailable — skipped)"
 fi

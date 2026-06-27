@@ -69,6 +69,8 @@ export function buildInstallEnvelope({
   outcome = null,
   detail = null,
   severity = "INFO",
+  traceId = null,
+  spanId = null,
   nowFn = Date.now,
 } = {}) {
   const ts = isoNow(nowFn);
@@ -82,8 +84,11 @@ export function buildInstallEnvelope({
     observedTs: ts,
     severityText: sev,
     severityNumber: SEVERITY_NUMBER[sev] ?? 9,
-    traceId: null,
-    spanId: null,
+    // Carry the run's trace context so the catalyst.install.* log lines join to the root
+    // `catalyst.install` span in Loki/Tempo (these EVENTS are the install's only log, unlike
+    // the updater which also writes a pino refresh line). Null when tracing is off.
+    traceId: traceId ?? null,
+    spanId: spanId ?? null,
     resource: {
       "service.name": INSTALL_SERVICE_NAME,
       "service.namespace": "catalyst",
@@ -114,10 +119,14 @@ export function buildInstallEnvelope({
 export function makeInstallEmitFn({ getLogPathFn = getEventLogPath, nowFn = Date.now, nodeClass, hostNameVal } = {}) {
   const host = hostNameVal ?? getHostName();
   const cls = nodeClass ?? getNodeClass();
-  return ({ event, operation = null, phase = null, outcome = null, detail = null, severity = "INFO" } = {}) => {
+  // Per-call `nodeClass`/`traceId`/`spanId` override the baked defaults so the InstallRun
+  // (which owns the run's class + trace context) stamps every event authoritatively — e.g.
+  // `reinstall --class developer` on a worker node must stamp the REQUESTED class, not the
+  // current config's. Falls back to the baked class when the caller omits it.
+  return ({ event, operation = null, phase = null, outcome = null, detail = null, severity = "INFO", nodeClass: ncOverride, traceId = null, spanId = null } = {}) => {
     try {
       const logPath = getLogPathFn();
-      const envelope = buildInstallEnvelope({ event, operation, nodeClass: cls, hostNameVal: host, phase, outcome, detail, severity, nowFn });
+      const envelope = buildInstallEnvelope({ event, operation, nodeClass: ncOverride ?? cls, hostNameVal: host, phase, outcome, detail, severity, traceId, spanId, nowFn });
       mkdirSync(dirname(logPath), { recursive: true });
       appendFileSync(logPath, `${JSON.stringify(envelope)}\n`);
     } catch {
@@ -146,9 +155,16 @@ export class InstallRun {
     this.startEpochMs = nowFn();
   }
 
+  // _emit — every install event carries the run's operation + node class + trace context, so
+  // the log lines join to the root span (traceId) and are stamped with the REQUESTED class
+  // even when it differs from the node's current config (e.g. `reinstall --class developer`).
+  _emit(fields) {
+    this.emit({ operation: this.operation, nodeClass: this.nodeClass, traceId: this.traceId, spanId: this.spanId, ...fields });
+  }
+
   start(detail = null) {
     this.startEpochMs = this.nowFn();
-    this.emit({ event: INSTALL_EVENT.started, operation: this.operation, detail });
+    this._emit({ event: INSTALL_EVENT.started, detail });
     return this;
   }
 
@@ -160,20 +176,20 @@ export class InstallRun {
       const result = typeof fn === "function" ? await fn() : undefined;
       const endEpochMs = this.nowFn();
       this.phases.push({ name, startEpochMs, endEpochMs, ok: true });
-      this.emit({ event: INSTALL_EVENT.phase, operation: this.operation, phase: name, detail: { duration_ms: endEpochMs - startEpochMs } });
+      this._emit({ event: INSTALL_EVENT.phase, phase: name, detail: { duration_ms: endEpochMs - startEpochMs } });
       return result;
     } catch (err) {
       const endEpochMs = this.nowFn();
       const errMsg = err?.message ?? String(err);
       this.phases.push({ name, startEpochMs, endEpochMs, ok: false, error: errMsg });
-      this.emit({ event: INSTALL_EVENT.phase, operation: this.operation, phase: name, outcome: "failed", severity: "ERROR", detail: { error: errMsg } });
+      this._emit({ event: INSTALL_EVENT.phase, phase: name, outcome: "failed", severity: "ERROR", detail: { error: errMsg } });
       throw err;
     }
   }
 
   complete(detail = null) {
     const endEpochMs = this.nowFn();
-    this.emit({ event: INSTALL_EVENT.completed, operation: this.operation, outcome: "completed", detail });
+    this._emit({ event: INSTALL_EVENT.completed, outcome: "completed", detail });
     emitInstallTrace({
       operation: this.operation,
       nodeClass: this.nodeClass,
@@ -193,9 +209,8 @@ export class InstallRun {
     const endEpochMs = this.nowFn();
     const outcome = rolledBack ? "rolled_back" : "failed";
     const errMsg = err?.message ?? (err != null ? String(err) : null);
-    this.emit({
+    this._emit({
       event: rolledBack ? INSTALL_EVENT.rolledBack : INSTALL_EVENT.failed,
-      operation: this.operation,
       outcome,
       severity: "ERROR",
       detail: { error: errMsg },

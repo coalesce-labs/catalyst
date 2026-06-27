@@ -23,7 +23,12 @@
 #   · cluster · filter · thoughts · execution-core · otel-forward
 set -uo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Resolve through symlinks before deriving SCRIPT_DIR — install-cli.sh installs this router
+# as a DIRECT symlink from a local checkout, so a bare dirname would point at ~/.catalyst/bin
+# (manifest + lib/host-identity.sh lookups would miss). Same idiom as catalyst-stack.
+_SRC="${BASH_SOURCE[0]}"
+while [[ -L "$_SRC" ]]; do _SRC="$(readlink "$_SRC")"; done
+SCRIPT_DIR="$(cd "$(dirname "$_SRC")" && pwd)"
 
 # Bring in catalyst_node_class (CTL-1368 Bash resolver) for `catalyst class` show. Best-effort:
 # the router still dispatches if the lib is missing (the `class` verb degrades gracefully).
@@ -132,12 +137,24 @@ cmd_class() {
   local cfg; cfg="$(layer2_config_path)"
   mkdir -p "$(dirname "$cfg")" 2>/dev/null || true
   local base='{}'
-  [[ -r "$cfg" ]] && base="$(cat "$cfg")"
+  if [[ -r "$cfg" ]]; then
+    base="$(cat "$cfg")"
+    # An empty / whitespace-only config feeds jq zero JSON values → jq emits nothing and
+    # exits 0, which would write an EMPTY file and falsely report success. Treat it as a
+    # fresh object so the class is actually persisted.
+    [[ -z "${base//[[:space:]]/}" ]] && base='{}'
+  fi
   local tmp; tmp="$(mktemp "${cfg}.XXXXXX")" || { err "cannot create temp file next to $cfg"; return 3; }
   # No-clobber: a malformed existing config makes jq fail → abort, leaving it untouched.
   if ! printf '%s' "$base" | jq --arg c "$val" '.catalyst.node.class = $c' > "$tmp" 2>/dev/null; then
     rm -f "$tmp"
     err "failed to update $cfg (is it valid JSON?)"
+    return 3
+  fi
+  # Defence in depth: never move an empty temp into place (jq produced no document).
+  if [[ ! -s "$tmp" ]]; then
+    rm -f "$tmp"
+    err "refusing to write an empty $cfg"
     return 3
   fi
   chmod 600 "$tmp" 2>/dev/null || true
