@@ -123,8 +123,15 @@ jobs:
 
               echo "Auto-resolve probe: reviewDecision=${REVIEW_DECISION:-none} statusCheckRollup=${ROLLUP_STATE:-none} checksGreen=$CHECKS_GREEN unresolvedThreads=$UNRESOLVED mergeable=$MERGEABLE"
 
-              if [[ "$MERGE_STATE" == "BLOCKED" && "$MERGEABLE" == "MERGEABLE" && "$CHECKS_GREEN" == "true" && "$UNRESOLVED" -gt 0 ]]; then
-                echo "Release PR #$PR_NUMBER is BLOCKED only on $UNRESOLVED unresolved review thread(s) with green checks — auto-resolving."
+              # REVIEW_DECISION must NOT be REVIEW_REQUIRED / CHANGES_REQUESTED:
+              # those are genuine human-review blockers that can coexist with
+              # unresolved threads (see merge-blocker-diagnosis.md), and we must
+              # never auto-resolve a human's review conversation. Empty (no
+              # review policy / 0 required approvals) or APPROVED is fine — only
+              # then are unresolved threads the sole remaining blocker.
+              if [[ "$MERGE_STATE" == "BLOCKED" && "$MERGEABLE" == "MERGEABLE" && "$CHECKS_GREEN" == "true" && "$UNRESOLVED" -gt 0 \
+                    && "$REVIEW_DECISION" != "REVIEW_REQUIRED" && "$REVIEW_DECISION" != "CHANGES_REQUESTED" ]]; then
+                echo "Release PR #$PR_NUMBER is BLOCKED only on $UNRESOLVED unresolved review thread(s) with green checks and no pending human review — auto-resolving."
 
                 RESOLVED_COUNT=0
                 while IFS= read -r THREAD_ID; do
@@ -147,17 +154,21 @@ jobs:
                 gh pr comment "$PR_NUMBER" --repo "$REPO" \
                   --body "🤖 scheduled-merge auto-resolved ${RESOLVED_COUNT} unresolved review thread(s) on this mechanical release PR (all status checks green). Release PRs are version-bump + changelog aggregations; the underlying feature code was reviewed on its own PR before landing on main." || true
 
-                # Give GitHub a few seconds to recompute mergeability, then
-                # re-poll mergeStateStatus until it resolves (~6 x 10s).
-                RP_STATE="UNKNOWN"
+                # Poll until GitHub reports a MERGEABLE state (CLEAN/UNSTABLE/
+                # HAS_HOOKS) or the retry budget is exhausted. Do NOT break on
+                # the first non-UNKNOWN value: right after resolving threads,
+                # GitHub often still returns the stale pre-resolution BLOCKED
+                # state once before it recomputes, and breaking there would
+                # escalate an otherwise-unblocked PR until the next run.
+                RP_STATE=""
                 RP_ATTEMPT=0
                 while [[ "$RP_ATTEMPT" -lt 6 ]]; do
                   sleep 10
                   RP_STATE=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json mergeStateStatus --jq '.mergeStateStatus' 2>/dev/null || echo "UNKNOWN")
                   echo "Post-resolve re-poll $((RP_ATTEMPT + 1))/6: mergeStateStatus=$RP_STATE"
-                  if [[ "$RP_STATE" != "UNKNOWN" ]]; then
-                    break
-                  fi
+                  case "$RP_STATE" in
+                    CLEAN|UNSTABLE|HAS_HOOKS) break ;;
+                  esac
                   RP_ATTEMPT=$((RP_ATTEMPT + 1))
                 done
 
