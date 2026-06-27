@@ -127,6 +127,62 @@ export function hostId(opts: { raw?: string; override?: string } = {}): string {
   return sha256Hex(hostName(opts)).slice(0, 16);
 }
 
+const NODE_CLASSES = ["developer", "worker", "monitor"] as const;
+export type NodeClass = (typeof NODE_CLASSES)[number];
+
+/**
+ * Resolve this node's catalyst.node.class as the role STRING — the TS mirror of
+ * execution-core/lib/node-class.mjs nodeClass() (and config.mjs resolveNodeClass). Same
+ * precedence (CATALYST_NODE_CLASS env → Layer-2 catalyst.node.class → worker) and the same
+ * validity ladder (absent/null/empty ⇒ worker; present non-string OR a non-member string ⇒
+ * monitor, the most-restrictive). Inlined here (like layer2HostName) to keep this a leaf.
+ */
+export function nodeClass(): NodeClass {
+  const envRaw = process.env.CATALYST_NODE_CLASS;
+  const hasEnv = typeof envRaw === "string" && envRaw.trim().length > 0;
+  let raw: unknown = hasEnv ? envRaw : undefined;
+  if (!hasEnv) {
+    const path = process.env.CATALYST_LAYER2_CONFIG_FILE ??
+      resolve(homedir(), ".config", "catalyst", "config.json");
+    try {
+      raw = (JSON.parse(readFileSync(path, "utf8")) as
+        { catalyst?: { node?: { class?: unknown } } })?.catalyst?.node?.class;
+    } catch { raw = undefined; }
+  }
+  if (raw === undefined || raw === null) return "worker";
+  if (typeof raw !== "string") return "monitor";
+  const normalized = raw.trim().toLowerCase();
+  if (normalized.length === 0) return "worker";
+  return (NODE_CLASSES as readonly string[]).includes(normalized) ? (normalized as NodeClass) : "monitor";
+}
+
+/**
+ * buildCatalystResource — the TS twin of execution-core/lib/catalyst-resource.mjs. The one
+ * place the broker (3 MJS files import this leaf) and the orch-monitor / otel-forward TS
+ * emitters build their resource block, so catalyst.node.class is stamped once. node.class is
+ * LAST. service.version included only when provided. Extra resource keys (e.g.
+ * otel-forward's catalyst.node.name) are merged AFTER via the `extra` param so node.class
+ * still lands in a stable position.
+ */
+export function buildCatalystResource(opts: {
+  serviceName: string;
+  serviceVersion?: string;
+  host?: string;
+  extra?: Record<string, unknown>;
+}): Record<string, unknown> {
+  const hostOpts = opts.host !== undefined ? { override: opts.host } : {};
+  const resource: Record<string, unknown> = {
+    "service.name": opts.serviceName,
+    "service.namespace": "catalyst",
+  };
+  if (opts.serviceVersion !== undefined) resource["service.version"] = opts.serviceVersion;
+  resource["host.name"] = hostName(hostOpts);
+  resource["host.id"] = hostId(hostOpts);
+  resource["catalyst.node.class"] = nodeClass();
+  if (opts.extra) Object.assign(resource, opts.extra);
+  return resource;
+}
+
 /**
  * Stable synthetic id for legacy records that lack a real `id`. Inputs that
  * are most likely to differ between events: traceId, spanId, ts, event name.
