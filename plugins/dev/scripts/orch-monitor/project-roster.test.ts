@@ -20,7 +20,14 @@ import { describe, it, expect } from "bun:test";
 import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { buildProjects, loadProjects, readProjectsOverlay, applyProjectsOverlay } from "./lib/project-roster";
+import {
+  buildProjects,
+  loadProjects,
+  readProjectsOverlay,
+  applyProjectsOverlay,
+  buildObservedRepoAliases,
+  normalizeObservedRepo,
+} from "./lib/project-roster";
 
 const TEAMS = [
   { key: "CTL", vcsRepo: "coalesce-labs/catalyst" },
@@ -103,6 +110,119 @@ describe("buildProjects (CTL-1152) — UNION rule for unconfigured observed work
   it("does NOT duplicate a configured team's repo even when it is observed", () => {
     const out = buildProjects(TEAMS, {}, [], ["catalyst"]);
     expect(out.filter((p) => p.repo === "catalyst")).toHaveLength(1);
+  });
+});
+
+// ─── CTL-1380 (Bug A): observed-repo normalization / dedupe ───────────────────
+//
+// Regression coverage for the 10-entry nav bug: GET /api/projects returned the 5
+// configured teams PLUS 5 source:"unconfigured" DUPLICATES, because the observed-
+// work repo identifiers (BoardPayload.repos) arrive as lowercased TEAM KEYS ("ctl",
+// "adv", "otl", "sli") and one FULL owner/repo ("coalesce-labs/catalyst") — none of
+// which equal the configured short-names ("catalyst", "adva", …) — so the union rule
+// never collapsed them. buildProjects now normalizes observed repos into the
+// configured short-name key space before the union.
+
+const FIVE_TEAM_LIST = [
+  { key: "CTL", vcsRepo: "coalesce-labs/catalyst" },
+  { key: "ADV", vcsRepo: "rightsite-cloud/Adva" },
+  { key: "OTL", vcsRepo: "coalesce-labs/catalyst-otel" },
+  { key: "SLI", vcsRepo: "ryanrozich/slides" },
+  { key: "EVR", vcsRepo: "coalesce-labs/evergreen" },
+];
+
+describe("buildObservedRepoAliases (CTL-1380)", () => {
+  it("folds short-name, team key, and full owner/repo onto the team short-name", () => {
+    const a = buildObservedRepoAliases(TEAMS, []);
+    expect(a.get("catalyst")).toBe("catalyst"); // identity
+    expect(a.get("ctl")).toBe("catalyst"); // lowercased team key
+    expect(a.get("coalesce-labs/catalyst")).toBe("catalyst"); // full owner/repo
+    expect(a.get("adv")).toBe("adva");
+    expect(a.get("catalyst-otel")).toBe("catalyst-otel");
+    expect(a.get("otl")).toBe("catalyst-otel");
+  });
+
+  it("folds a registry repoRoot basename onto the team short-name (joined by team key)", () => {
+    const a = buildObservedRepoAliases(
+      [{ key: "ADV", vcsRepo: "rightsite-cloud/Adva" }],
+      [{ team: "ADV", repoRoot: "/Users/x/code-repos/github/groundworkapp/Adva" }],
+    );
+    expect(a.get("adva")).toBe("adva"); // basename("…/Adva") lowercased == the short-name
+  });
+});
+
+describe("normalizeObservedRepo (CTL-1380)", () => {
+  const aliases = buildObservedRepoAliases(TEAMS, []);
+  it("maps a lowercased team key to the configured short-name", () => {
+    expect(normalizeObservedRepo("ctl", aliases)).toBe("catalyst");
+    expect(normalizeObservedRepo("adv", aliases)).toBe("adva");
+  });
+  it("maps a full owner/repo to the configured short-name", () => {
+    expect(normalizeObservedRepo("coalesce-labs/catalyst", aliases)).toBe("catalyst");
+  });
+  it("passes through an already-correct short-name", () => {
+    expect(normalizeObservedRepo("catalyst", aliases)).toBe("catalyst");
+  });
+  it("collapses a genuinely-unconfigured full owner/repo to its basename (a '/'-free key)", () => {
+    expect(normalizeObservedRepo("some-org/mystery", aliases)).toBe("mystery");
+  });
+  it("passes through a genuinely-unconfigured short name unchanged (lowercased)", () => {
+    expect(normalizeObservedRepo("Mystery", aliases)).toBe("mystery");
+  });
+});
+
+describe("buildProjects (CTL-1380) — observed work merges into the configured descriptor", () => {
+  it("an observed lowercased TEAM KEY flips the configured team's hasWork — no duplicate lane", () => {
+    const out = buildProjects(TEAMS, {}, [], ["ctl"]);
+    const ctl = out.find((p) => p.key === "CTL")!;
+    expect(ctl.hasWork).toBe(true);
+    expect(ctl.source).toBe("config");
+    // exactly one descriptor for the catalyst repo, and zero unconfigured lanes
+    expect(out.filter((p) => p.repo === "catalyst")).toHaveLength(1);
+    expect(out.some((p) => p.source === "unconfigured")).toBe(false);
+  });
+
+  it("an observed FULL owner/repo merges into the configured descriptor — no duplicate lane", () => {
+    const out = buildProjects(TEAMS, {}, [], ["coalesce-labs/catalyst"]);
+    expect(out.find((p) => p.key === "CTL")!.hasWork).toBe(true);
+    expect(out.some((p) => p.source === "unconfigured")).toBe(false);
+    expect(out.some((p) => p.repo === "coalesce-labs/catalyst")).toBe(false);
+  });
+
+  it("the real-world 5-dupe scenario yields EXACTLY the 5 configured teams, no unconfigured dupes", () => {
+    // The exact observed-repo set the live /api/projects produced pre-fix.
+    const observed = ["adv", "coalesce-labs/catalyst", "ctl", "otl", "sli"];
+    const out = buildProjects(FIVE_TEAM_LIST, {}, [], observed);
+    expect(out).toHaveLength(5);
+    expect(out.every((p) => p.source === "config")).toBe(true);
+    expect(out.map((p) => p.key).sort()).toEqual(["ADV", "CTL", "EVR", "OTL", "SLI"]);
+    // the 4 teams with observed work flip hasWork; evergreen (no work) stays false
+    expect(out.find((p) => p.key === "CTL")!.hasWork).toBe(true);
+    expect(out.find((p) => p.key === "ADV")!.hasWork).toBe(true);
+    expect(out.find((p) => p.key === "OTL")!.hasWork).toBe(true);
+    expect(out.find((p) => p.key === "SLI")!.hasWork).toBe(true);
+    expect(out.find((p) => p.key === "EVR")!.hasWork).toBe(false);
+    // every descriptor keeps a clean, "/"-free icon key
+    expect(out.every((p) => !p.iconUrl.slice("/api/repo-icon/".length).includes("/"))).toBe(true);
+  });
+
+  it("does NOT regress a genuinely-unconfigured observed repo — it still appears once", () => {
+    const out = buildProjects(TEAMS, {}, [], ["ctl", "mystery"]);
+    // configured CTL got the work...
+    expect(out.find((p) => p.key === "CTL")!.hasWork).toBe(true);
+    // ...and the truly-unknown repo still surfaces as its own single unconfigured lane
+    const mystery = out.filter((p) => p.repo === "mystery");
+    expect(mystery).toHaveLength(1);
+    expect(mystery[0].source).toBe("unconfigured");
+    expect(mystery[0].hasWork).toBe(true);
+  });
+
+  it("a genuinely-unconfigured FULL owner/repo surfaces once under its basename key", () => {
+    const out = buildProjects(TEAMS, {}, [], ["some-org/mystery"]);
+    const lanes = out.filter((p) => p.source === "unconfigured");
+    expect(lanes).toHaveLength(1);
+    expect(lanes[0].repo).toBe("mystery");
+    expect(lanes[0].iconUrl).toBe("/api/repo-icon/mystery"); // no slash → endpoint-safe
   });
 });
 
