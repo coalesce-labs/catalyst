@@ -103,11 +103,15 @@ hostile for jq. The sidecar (CTL-306) handles that translation mechanically.
 
 `resource."catalyst.node.class"` (CTL-1368) is the node's ROLE — one of `developer`, `worker`,
 or `monitor` — orthogonal to `host.name`/`host.id` (WHICH machine). It is stamped last in the
-resource block by the shared `buildCatalystResource()` builder, defaulting to `worker` when
-`catalyst.node.class` is unset in Layer-2 config (and overridable via the `CATALYST_NODE_CLASS`
-env var). Low-cardinality, so the OTEL collector surfaces it as a fleet-wide `node_class`
-dashboard dimension. It is optional: external (webhook / broker-daemon) events that build a bare
-resource block may omit it.
+resource block by the canonical builder in EACH runtime — MJS `buildCatalystResource()`
+(`execution-core/lib/catalyst-resource.mjs`), the TS twin (`orch-monitor/lib/canonical-event-shared.ts`),
+and Bash `lib/canonical-event.sh` (via `catalyst_node_class`, which the Bash producers above —
+`catalyst-session.sh`, `catalyst-state.sh`, `catalyst-comms`, the phase-agent emitters — all
+route through). It defaults to `worker` when `catalyst.node.class` is unset in Layer-2 config
+(and is overridable via the `CATALYST_NODE_CLASS` env var); an unrecognized explicit value
+degrades to `monitor`. Low-cardinality, so the OTEL collector surfaces it as a fleet-wide
+`node_class` dashboard dimension. It remains optional in the schema: a few direct emitters that
+build a bare resource block (e.g. some webhook paths) may still omit it.
 
 ---
 

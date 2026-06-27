@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import {
   getEventLogPath, getHostName, log, readGovernanceConfig, readGovernanceSources,
 } from "./config.mjs";
+import { nodeClass } from "./lib/node-class.mjs";
 
 const __dir = dirname(fileURLToPath(import.meta.url));
 // plugins/dev/scripts/execution-core/ → plugins/dev/scripts/ → plugins/dev/
@@ -30,7 +31,9 @@ export function buildBootEnvelope({
   return {
     ts,
     attributes: { "event.name": "node.boot" },
-    resource: { "host.name": host },
+    // node.boot keeps its minimal resource (just host.name) but stamps the core
+    // catalyst.node.class dimension like every other signal (CTL-1368).
+    resource: { "host.name": host, "catalyst.node.class": nodeClass() },
     body: {
       payload: {
         "host.name": host,

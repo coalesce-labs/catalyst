@@ -142,7 +142,9 @@ export function nodeClass(): NodeClass {
   const hasEnv = typeof envRaw === "string" && envRaw.trim().length > 0;
   let raw: unknown = hasEnv ? envRaw : undefined;
   if (!hasEnv) {
-    const path = process.env.CATALYST_LAYER2_CONFIG_FILE ??
+    // `||` (not `??`): an EMPTY CATALYST_LAYER2_CONFIG_FILE must fall back to the default
+    // path — matching config.mjs resolveNodeClass + the MJS leaf (Codex P2 parity).
+    const path = process.env.CATALYST_LAYER2_CONFIG_FILE ||
       resolve(homedir(), ".config", "catalyst", "config.json");
     try {
       raw = (JSON.parse(readFileSync(path, "utf8")) as

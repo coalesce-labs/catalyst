@@ -258,11 +258,12 @@ build_canonical_line() {
       | grep -oE 'project=[^,]+' | head -1 | cut -d= -f2- || true)"
   fi
 
-  local sev_num event_id host_name host_id_val
+  local sev_num event_id host_name host_id_val node_class_val
   sev_num="$(severity_number "$severity")"
   event_id="$(generate_event_id)"
   host_name="$(catalyst_host_name)"
   host_id_val="$(catalyst_host_id)"
+  node_class_val="$(catalyst_node_class)"  # CTL-1368: the node ROLE core dimension
 
   jq -nc \
     --arg ts "$ts" \
@@ -275,6 +276,7 @@ build_canonical_line() {
     --arg svc_ver "$service_version" \
     --arg host_name "$host_name" \
     --arg host_id "$host_id_val" \
+    --arg node_class "$node_class_val" \
     --arg event_name "$event_name" \
     --arg entity "$entity" \
     --arg action "$action" \
@@ -321,7 +323,8 @@ build_canonical_line() {
           "service.namespace": "catalyst",
           "service.version": $svc_ver,
           "host.name": $host_name,
-          "host.id": $host_id
+          "host.id": $host_id,
+          "catalyst.node.class": $node_class
         }
         + (if $project    == "" then {} else { "project": $project } end)
         + (if $linear_key == "" then {} else { "linear.key": $linear_key } end)
