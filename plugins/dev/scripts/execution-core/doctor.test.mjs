@@ -4,7 +4,7 @@
 // Run: cd plugins/dev/scripts/execution-core && bun test doctor.test.mjs
 
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
-import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, writeFileSync, rmSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -30,6 +30,7 @@ import {
   parseArgs,
   runDoctor,
 } from "./doctor.mjs";
+import { validateLayer1Config } from "../lib/validate-catalyst-config.mjs";
 
 // ─── Phase 1: checkHostIdentity ──────────────────────────────────────────────
 
@@ -1277,14 +1278,17 @@ const MINIMAL_LAYER1 = JSON.stringify({
 });
 
 describe("checkConfigScopeLeak (CTL-1214)", () => {
-  it("FAILs on a kitchen-sink Layer-1 still carrying node/cluster keys", () => {
+  it("WARNs (advisory, not FAIL) on a kitchen-sink Layer-1 still carrying node/cluster keys", () => {
+    // Back-compat window (CTL-1214): the leak is advisory (WARN), never FAIL, because
+    // runDoctor's exit code = FAIL count and catalyst-join.sh gates member activation
+    // on doctor exit 0. A FAIL here would fail-close every un-slimmed node's join.
     const checks = checkConfigScopeLeak({
       readLayer1: () => KITCHEN_SINK_LAYER1,
       hostsJsonExists: () => false,
     });
     expect(checks).toHaveLength(1);
     expect(checks[0].name).toBe("config-scope-leak");
-    expect(checks[0].status).toBe(STATUS.FAIL);
+    expect(checks[0].status).toBe(STATUS.WARN);
   });
 
   it("PASSes on a minimal Layer-1 carrying only project-identity fields", () => {
@@ -1314,13 +1318,13 @@ describe("checkConfigScopeLeak (CTL-1214)", () => {
     expect(detail).toContain("catalyst-cluster/cluster.json");
   });
 
-  it("FAILs and names hosts.json when a .catalyst/hosts.json roster file is present", () => {
+  it("WARNs and names hosts.json when a .catalyst/hosts.json roster file is present", () => {
     const checks = checkConfigScopeLeak({
       readLayer1: () => MINIMAL_LAYER1, // config itself is clean…
       hostsJsonExists: () => true, // …but a legacy hosts.json still exists
     });
     expect(checks).toHaveLength(1);
-    expect(checks[0].status).toBe(STATUS.FAIL);
+    expect(checks[0].status).toBe(STATUS.WARN);
     expect(checks[0].detail).toContain("hosts.json");
   });
 
@@ -1346,5 +1350,48 @@ describe("checkConfigScopeLeak (CTL-1214)", () => {
     // runDoctor's default check suite is defined inline in its body; assert the
     // wiring without running the networked default checks.
     expect(runDoctor.toString()).toContain("checkConfigScopeLeak()");
+  });
+
+  // ─── Regression: the doctor-exit / join-gate contract (CTL-1214) ────────────
+  // The committed Layer-1 .catalyst/config.json is NOT yet slimmed (Phase 6
+  // deferred) — it still carries all five relocated categories and no
+  // schemaVersion. Earlier fixtures only ever exercised injected strings, so a
+  // FAIL regression here was invisible while live. These two tests pin the
+  // contract against this repo's ACTUAL committed config: the leak must be
+  // advisory (WARN) and must NOT push runDoctor's exit code above 0, because
+  // catalyst-join.sh do_doctor_gate() gates every cluster-member activation on
+  // `catalyst doctor` exiting 0.
+  const realCommittedConfig = () =>
+    readFileSync(join(import.meta.dir, "..", "..", "..", "..", ".catalyst", "config.json"), "utf8");
+
+  it("WARNs (never FAILs) against this repo's real un-slimmed committed config", () => {
+    const body = realCommittedConfig();
+    // Sanity-guard the fixture: this test only proves anything while the
+    // committed config is still un-slimmed. Once Phase 6 slims it, flip this.
+    const { deprecatedKeys } = validateLayer1Config(JSON.parse(body));
+    expect(deprecatedKeys.length).toBeGreaterThan(0);
+
+    const checks = checkConfigScopeLeak({
+      readLayer1: () => body,
+      hostsJsonExists: () => false,
+    });
+    expect(checks).toHaveLength(1);
+    expect(checks[0].name).toBe("config-scope-leak");
+    expect(checks[0].status).toBe(STATUS.WARN);
+    expect(checks[0].status).not.toBe(STATUS.FAIL);
+  });
+
+  it("keeps runDoctor's exit code at 0 when scope-leak runs against the real committed config", async () => {
+    const body = realCommittedConfig();
+    // Exercise the actual check fn (no FAIL stubs) so the exit-code → join-gate
+    // contract is verified end-to-end, not just the isolated status.
+    const code = await runDoctor({
+      checks: [
+        () => checkConfigScopeLeak({ readLayer1: () => body, hostsJsonExists: () => false }),
+      ],
+      json: true,
+      log: () => {},
+    });
+    expect(code).toBe(0);
   });
 });

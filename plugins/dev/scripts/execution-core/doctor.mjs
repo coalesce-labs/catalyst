@@ -1489,8 +1489,11 @@ export function checkCloudTokenEnv(deps = {}) {
 // pure validator (validateLayer1Config) from lib/validate-catalyst-config.mjs —
 // the same module the Phase-1 schema tests exercise — so there is exactly one
 // definition of "what leaks". Back-compat: presence of a relocated key does NOT
-// invalidate the config at runtime; this check is the migration tracker that tells
-// operators which repos still need slimming.
+// invalidate the config at runtime; this check is an advisory migration tracker
+// (STATUS.WARN, never FAIL during the back-compat window) that tells operators
+// which repos still need slimming. It must stay WARN until Phase 6 slims the
+// committed configs, because runDoctor's exit code = FAIL count and
+// catalyst-join.sh gates member activation on doctor exit 0.
 //
 // Injected deps (all have real defaults):
 //   readLayer1      — () => string   (raw Layer-1 config body; "" when absent)
@@ -1556,8 +1559,19 @@ export function checkConfigScopeLeak(deps = {}) {
   checks.push(
     mkCheck(
       "config-scope-leak",
-      STATUS.FAIL,
-      `Layer-1 .catalyst/config.json leaks node/cluster-scoped keys: ${leaks.join("; ")}. ` +
+      // WARN, not FAIL, during the back-compat migration window (CTL-1214). runDoctor
+      // returns the FAIL count as the process exit code, and catalyst-join.sh
+      // do_doctor_gate() gates cluster-member activation strictly on exit 0
+      // (run_stage "doctor" do_doctor_gate || exit 1). The committed Layer-1
+      // .catalyst/config.json is NOT yet slimmed (Phase 6 deferred), so EVERY node
+      // today still carries these relocated keys. Emitting FAIL here would make
+      // `catalyst doctor` exit non-zero on every host and fail-close the join gate —
+      // a runtime regression, contradicting the "purely observational" contract.
+      // This mirrors checkReaper's deliberate WARN ("a FAILing reaper check would
+      // BLOCK a node from self-healing via join"). Promote to FAIL only after Phase 6
+      // slims the committed configs.
+      STATUS.WARN,
+      `Layer-1 .catalyst/config.json carries node/cluster-scoped keys (advisory migration tracker): ${leaks.join("; ")}. ` +
         `Remediation: run plugins/dev/scripts/migrate-config-to-node.sh to seed the node config ` +
         `(~/.config/catalyst/config.json), move the project roster into ` +
         `catalyst-cluster/cluster.json, then remove these keys from the committed .catalyst/config.json.`,
