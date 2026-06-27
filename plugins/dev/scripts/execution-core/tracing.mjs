@@ -383,5 +383,60 @@ export function emitUpdaterRefreshSpan({ reason, startEpochMs, endEpochMs, roots
   }
 }
 
+// emitInstallTrace — CTL-1369: one TRACE per `catalyst install|uninstall|reinstall` run.
+// Root `catalyst.install` (INTERNAL) + one child span per phase that ran (acquire → backup
+// → write-config → install-agents → start-daemons → healthcheck), plus an `install.rollback`
+// child on a rolled-back run. The OTEL agent's locked turn-01 lifecycle-trace model. Mirrors
+// emitUpdaterRefreshSpan's trace↔log seeding (pass traceId+spanId and the root's trace_id
+// equals the id on the install log lines) and its never-throw discipline. The catalyst.install.*
+// EVENTS + the InstallRun recorder live in lib/install-telemetry.mjs (events near the caller,
+// spans here — the same split as updater.mjs:makeEmitFn + this module's emitUpdaterRefreshSpan).
+// `phases` = [{ name, startEpochMs, endEpochMs, ok, error }].
+export function emitInstallTrace({
+  operation,
+  nodeClass,
+  phases = [],
+  outcome,
+  startEpochMs,
+  endEpochMs,
+  traceId,
+  spanId,
+  rollback = null,
+} = {}) {
+  const tracer = getTracer();
+  if (!tracer) return;
+  try {
+    let startCtx = context.active();
+    if (traceId && spanId && TraceFlags && typeof trace.setSpanContext === "function") {
+      startCtx = trace.setSpanContext(startCtx, { traceId, spanId, traceFlags: TraceFlags.SAMPLED, isRemote: true });
+    }
+    const root = tracer.startSpan("catalyst.install", { kind: SpanKind.INTERNAL, startTime: startEpochMs }, startCtx);
+    if (operation != null) root.setAttribute("catalyst.install.operation", operation);
+    if (nodeClass != null) root.setAttribute("catalyst.node.class", nodeClass);
+    if (outcome != null) root.setAttribute("catalyst.install.outcome", outcome);
+    const rootCtx = trace.setSpan(context.active(), root);
+    for (const p of phases) {
+      if (!p || !p.name) continue;
+      const child = tracer.startSpan(`install.${p.name}`, { kind: SpanKind.INTERNAL, startTime: p.startEpochMs ?? startEpochMs }, rootCtx);
+      child.setAttribute("catalyst.install.phase", p.name);
+      if (p.ok === false || p.error) {
+        child.setStatus({ code: SpanStatusCode.ERROR, message: p.error ? String(p.error) : `install phase failed: ${p.name}` });
+      }
+      child.end(p.endEpochMs ?? endEpochMs);
+    }
+    if (rollback) {
+      const rb = tracer.startSpan("install.rollback", { kind: SpanKind.INTERNAL, startTime: rollback.startEpochMs ?? startEpochMs }, rootCtx);
+      if (rollback.error) rb.setStatus({ code: SpanStatusCode.ERROR, message: String(rollback.error) });
+      rb.end(rollback.endEpochMs ?? endEpochMs);
+    }
+    if (outcome === "failed" || outcome === "rolled_back") {
+      root.setStatus({ code: SpanStatusCode.ERROR, message: `install ${operation} ${outcome}` });
+    }
+    root.end(endEpochMs);
+  } catch {
+    /* observability must never throw */
+  }
+}
+
 // Re-export the api primitives callers need so they don't each import @opentelemetry/api.
 export { trace, context, SpanKind, SpanStatusCode, TraceFlags };

@@ -1,0 +1,212 @@
+#!/usr/bin/env bash
+# catalyst — the single front door to the Catalyst toolchain (CTL-1369; absorbs CTL-1353).
+#
+# Usage: catalyst <command> [args...]
+#
+# A git-style dispatch router. It holds NO business logic: a curated lifecycle verb runs
+# the right tool, and any OTHER <command> execs `catalyst-<command>` by convention — so
+# every existing AND future `catalyst-*` tool is a subcommand for free, with zero upkeep.
+# Single-source-of-truth is preserved: the logic lives in each tool, never duplicated here.
+#
+# Lifecycle:
+#   install | uninstall | reinstall   provision / tear down this node for its class
+#   start | stop | restart | status    class-appropriate services up/down   (→ catalyst-stack)
+#   doctor                             class-aware health / activation grade (→ catalyst-doctor)
+#   update                             refresh plugins now (one-shot pull)   (→ catalyst-stack hotpatch)
+#   drain [--off]                      pause / resume work pickup            (→ catalyst-execution-core)
+#   class [<value>]                    show or set this node's class in Layer-2
+#   version | --version                the installed plugin version
+#   help [command]                     this help, or a tool's own --help
+#
+# Components (auto-delegated, `catalyst <x>` → `catalyst-<x>`):
+#   broker · monitor · events · comms · hud · session · db · state · transitions · why
+#   · cluster · filter · thoughts · execution-core · otel-forward
+set -uo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Bring in catalyst_node_class (CTL-1368 Bash resolver) for `catalyst class` show. Best-effort:
+# the router still dispatches if the lib is missing (the `class` verb degrades gracefully).
+# shellcheck source=lib/host-identity.sh
+[[ -r "${SCRIPT_DIR}/lib/host-identity.sh" ]] && source "${SCRIPT_DIR}/lib/host-identity.sh"
+
+# Component tools surfaced in grouped help. Dispatch is by `catalyst-<x>` convention (not
+# this list) so a NEW catalyst-* tool is picked up automatically — this is help text only.
+readonly COMPONENT_VERBS="broker monitor events comms hud session db state transitions why cluster filter thoughts execution-core otel-forward"
+# Valid node classes. Source of truth: execution-core/config.mjs NODE_CLASSES (mirrored here
+# for the Bash `class` setter, the same way lib/host-identity.sh:catalyst_node_class mirrors it).
+readonly VALID_NODE_CLASSES="developer worker monitor"
+
+err() { printf 'catalyst: %s\n' "$*" >&2; }
+
+# resolve_tool NAME — absolute path to a sibling catalyst-NAME tool: prefer one on PATH
+# (the installed ~/.catalyst/bin wrapper), else the co-located script in this checkout
+# (with or without a .sh suffix). Empty + rc 1 when none exists.
+resolve_tool() {
+  local name="catalyst-$1" p
+  if p="$(command -v "$name" 2>/dev/null)"; then printf '%s' "$p"; return 0; fi
+  if [[ -x "${SCRIPT_DIR}/${name}" ]]; then printf '%s' "${SCRIPT_DIR}/${name}"; return 0; fi
+  if [[ -x "${SCRIPT_DIR}/${name}.sh" ]]; then printf '%s' "${SCRIPT_DIR}/${name}.sh"; return 0; fi
+  return 1
+}
+
+# run_tool TOOL ARGS... — hand the process off to a resolved tool. This is the dispatch
+# SEAM: the router's tests override it to capture the would-be exec instead of replacing
+# the process. In normal use it execs (the router adds zero runtime overhead to the tool).
+run_tool() { exec "$@"; }
+
+# delegate NAME ARGS... — resolve catalyst-NAME and hand off; otherwise print grouped usage
+# (never a stack trace) and fail. This is the auto-delegation that makes every catalyst-*
+# tool a subcommand.
+delegate() {
+  local name="$1"; shift
+  local tool
+  if tool="$(resolve_tool "$name")"; then
+    run_tool "$tool" "$@"
+  else
+    err "unknown command: $name"
+    err "no curated verb and no 'catalyst-$name' on PATH or in ${SCRIPT_DIR}"
+    usage >&2
+    return 127
+  fi
+}
+
+# plugin_version — the installed catalyst-dev plugin version from the plugin manifest.
+plugin_version() {
+  local manifest="${SCRIPT_DIR}/../.claude-plugin/plugin.json"
+  if [[ ! -r "$manifest" ]]; then echo "unknown"; return 0; fi
+  if command -v jq >/dev/null 2>&1; then
+    jq -r '.version // "unknown"' "$manifest" 2>/dev/null || echo "unknown"
+  else
+    # jq-free fallback: first "version": "x.y.z" in the manifest.
+    grep -o '"version"[[:space:]]*:[[:space:]]*"[^"]*"' "$manifest" 2>/dev/null \
+      | head -1 | sed -E 's/.*"([^"]*)"$/\1/' || echo "unknown"
+  fi
+}
+
+# layer2_config_path — the machine-local Layer-2 config (same precedence the rest of the
+# toolchain uses: CATALYST_LAYER2_CONFIG_FILE override, else ~/.config/catalyst/config.json).
+layer2_config_path() {
+  printf '%s' "${CATALYST_LAYER2_CONFIG_FILE:-${HOME}/.config/catalyst/config.json}"
+}
+
+# cmd_class [VALUE] — with no arg, show this node's effective class + its source; with a
+# value, set catalyst.node.class in Layer-2 (validated against VALID_NODE_CLASSES, written
+# atomically, 0600). A restart is required for daemons to pick up the new class.
+cmd_class() {
+  local val="${1:-}"
+  if [[ -z "$val" ]]; then
+    local raw="" source effective
+    if [[ -n "${CATALYST_NODE_CLASS:-}" ]]; then
+      raw="$CATALYST_NODE_CLASS"; source="env (CATALYST_NODE_CLASS)"
+    else
+      local cfg unparseable=false; cfg="$(layer2_config_path)"
+      if [[ -r "$cfg" ]] && command -v jq >/dev/null 2>&1; then
+        # Distinguish "key absent" from "file unparseable" — otherwise a broken config reads
+        # as 'unset ⇒ worker' and the operator never sees WHY their set class isn't taking.
+        if jq -e . "$cfg" >/dev/null 2>&1; then
+          raw="$(jq -r '.catalyst.node.class // empty' "$cfg" 2>/dev/null || true)"
+        else
+          unparseable=true
+        fi
+      fi
+      if [[ "$unparseable" == true ]]; then source="Layer-2 ($cfg) — UNPARSEABLE, treated as default"
+      elif [[ -n "$raw" ]]; then source="Layer-2 ($cfg)"
+      else source="default (unset ⇒ worker)"; fi
+    fi
+    if declare -F catalyst_node_class >/dev/null 2>&1; then effective="$(catalyst_node_class)"; else effective="worker"; fi
+    printf 'node class: %s\n' "$effective"
+    printf '  source:   %s\n' "$source"
+    if [[ -n "$raw" && "$raw" != "$effective" ]]; then
+      printf '  configured: %s (unrecognized ⇒ treated as %s)\n' "$raw" "$effective"
+    fi
+    return 0
+  fi
+
+  val="$(printf '%s' "$val" | tr '[:upper:]' '[:lower:]' | xargs 2>/dev/null || true)"
+  case " $VALID_NODE_CLASSES " in
+    *" $val "*) ;;
+    *) err "invalid node class: '$1' (valid: ${VALID_NODE_CLASSES// /, })"; return 2 ;;
+  esac
+  command -v jq >/dev/null 2>&1 || { err "jq is required to set the node class"; return 3; }
+  local cfg; cfg="$(layer2_config_path)"
+  mkdir -p "$(dirname "$cfg")" 2>/dev/null || true
+  local base='{}'
+  [[ -r "$cfg" ]] && base="$(cat "$cfg")"
+  local tmp; tmp="$(mktemp "${cfg}.XXXXXX")" || { err "cannot create temp file next to $cfg"; return 3; }
+  # No-clobber: a malformed existing config makes jq fail → abort, leaving it untouched.
+  if ! printf '%s' "$base" | jq --arg c "$val" '.catalyst.node.class = $c' > "$tmp" 2>/dev/null; then
+    rm -f "$tmp"
+    err "failed to update $cfg (is it valid JSON?)"
+    return 3
+  fi
+  chmod 600 "$tmp" 2>/dev/null || true
+  # The script runs under `set -uo pipefail` (no `-e`), so a failed `mv` would otherwise fall
+  # through to the success print and return 0 — a config write that lies. Gate on it: clean up
+  # the temp and FAIL CLOSED (e.g. a root-owned / immutable / directory target).
+  if ! mv "$tmp" "$cfg"; then
+    rm -f "$tmp"
+    err "failed to write $cfg (could not replace it — check ownership/permissions)"
+    return 3
+  fi
+  printf 'node class set to %s in %s\n' "$val" "$cfg"
+  printf 'restart services for it to take effect: catalyst restart\n'
+}
+
+# usage — the grouped command list (Lifecycle / Components). Printed for bare `catalyst`,
+# `catalyst help`, and any unknown command.
+usage() {
+  cat <<EOF
+catalyst — the single front door to the Catalyst toolchain.
+
+Usage: catalyst <command> [args...]
+
+Lifecycle:
+  install | uninstall | reinstall   provision / tear down this node for its class
+  start | stop | restart | status   class-appropriate services up/down
+  doctor                            class-aware health / activation grade
+  update                            refresh plugins now (one-shot pull)
+  drain [--off]                     pause / resume work pickup
+  class [<value>]                   show or set this node's class (developer|worker|monitor)
+  version                           the installed plugin version
+  help [command]                    this help, or a tool's own --help
+
+Components ('catalyst <x>' → 'catalyst-<x>'):
+  ${COMPONENT_VERBS// / · }
+
+Any other command delegates to 'catalyst-<command>' when it exists.
+EOF
+}
+
+# cmd_help [TOPIC] — grouped usage, or (when TOPIC resolves to a catalyst-TOPIC tool) that
+# tool's own --help.
+cmd_help() {
+  local topic="${1:-}"
+  if [[ -z "$topic" ]]; then usage; return 0; fi
+  local tool
+  if tool="$(resolve_tool "$topic")"; then run_tool "$tool" --help; else usage; fi
+}
+
+# dispatch COMMAND ARGS... — the router. Curated lifecycle verbs route to their backing
+# tool; everything else auto-delegates to catalyst-<command>.
+dispatch() {
+  local cmd="${1:-}"
+  [[ $# -gt 0 ]] && shift
+  case "$cmd" in
+    ""|help|-h|--help)            cmd_help "$@" ;;
+    version|--version|-v)         plugin_version ;;
+    class)                        cmd_class "$@" ;;
+    start|stop|restart|status)    delegate stack "$cmd" "$@" ;;
+    doctor)                       delegate doctor "$@" ;;
+    update)                       delegate stack hotpatch "$@" ;;
+    drain)                        delegate execution-core drain "$@" ;;
+    install|uninstall|reinstall)  delegate install "$cmd" "$@" ;;
+    *)                            delegate "$cmd" "$@" ;;
+  esac
+}
+
+# Guard so the file can be SOURCED (by __tests__/catalyst-router.test.sh) to reach the pure
+# helpers without dispatching. Executed directly, BASH_SOURCE[0] == $0 and dispatch runs.
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+  dispatch "$@"
+fi

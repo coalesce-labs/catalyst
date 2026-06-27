@@ -13,6 +13,7 @@ import {
   getTracer,
   emitTickTrace,
   emitLivenessRefreshSpan,
+  emitInstallTrace,
   buildTracingResource,
   initTracing,
   shutdownTracing,
@@ -641,5 +642,78 @@ describe("tick-timing log line carries catalyst.dispatch.mode (CTL-1365a)", () =
     const line = captureTickTimingLine({});
     expect(line).not.toBeNull();
     expect(line["catalyst.dispatch.mode"]).toBe("phase-agents");
+  });
+});
+
+// CTL-1369: the catalyst.install lifecycle trace — one root per install run + a child per
+// phase, plus a rollback child on a rolled-back run (the OTEL turn-01 lifecycle model).
+describe("emitInstallTrace span tree (in-memory exporter)", () => {
+  let exporter;
+  beforeEach(() => {
+    exporter = new InMemorySpanExporter();
+    const provider = new BasicTracerProvider({ spanProcessors: [new SimpleSpanProcessor(exporter)] });
+    __setTracerForTest(provider.getTracer("test"));
+  });
+  afterEach(() => __setTracerForTest(null));
+
+  test("OFF (no tracer) ⇒ no spans, never throws", () => {
+    __setTracerForTest(null);
+    expect(() => emitInstallTrace({ operation: "install", phases: [{ name: "acquire", ok: true }], outcome: "completed" })).not.toThrow();
+  });
+
+  test("root catalyst.install + one child per phase; completed ⇒ no ERROR status", () => {
+    emitInstallTrace({
+      operation: "install",
+      nodeClass: "developer",
+      phases: [
+        { name: "acquire", startEpochMs: 0, endEpochMs: 1, ok: true },
+        { name: "healthcheck", startEpochMs: 1, endEpochMs: 2, ok: true },
+      ],
+      outcome: "completed",
+      startEpochMs: 0,
+      endEpochMs: 2,
+    });
+    const spans = exporter.getFinishedSpans();
+    expect(spans.map((s) => s.name).sort()).toEqual(["catalyst.install", "install.acquire", "install.healthcheck"]);
+    const root = spans.find((s) => s.name === "catalyst.install");
+    expect(root.attributes["catalyst.install.operation"]).toBe("install");
+    expect(root.attributes["catalyst.node.class"]).toBe("developer");
+    expect(root.attributes["catalyst.install.outcome"]).toBe("completed");
+    expect(root.status.code).toBe(SpanStatusCode.UNSET);
+    // every phase child carries its low-card phase label
+    expect(spans.find((s) => s.name === "install.acquire").attributes["catalyst.install.phase"]).toBe("acquire");
+  });
+
+  test("child spans nest under the root (shared trace id, parent = root)", () => {
+    emitInstallTrace({ operation: "install", phases: [{ name: "backup", ok: true }], outcome: "completed", startEpochMs: 0, endEpochMs: 1 });
+    const spans = exporter.getFinishedSpans();
+    const root = spans.find((s) => s.name === "catalyst.install");
+    const child = spans.find((s) => s.name === "install.backup");
+    expect(child.spanContext().traceId).toBe(root.spanContext().traceId);
+    expect(child.parentSpanContext?.spanId ?? child.parentSpanId).toBe(root.spanContext().spanId);
+  });
+
+  test("a failed phase + rollback child set ERROR on the right spans", () => {
+    emitInstallTrace({
+      operation: "install",
+      phases: [{ name: "write-config", ok: false, error: "disk full" }],
+      outcome: "rolled_back",
+      startEpochMs: 0,
+      endEpochMs: 3,
+      rollback: { startEpochMs: 2, endEpochMs: 3, error: "disk full" },
+    });
+    const spans = exporter.getFinishedSpans();
+    expect(spans.map((s) => s.name).sort()).toEqual(["catalyst.install", "install.rollback", "install.write-config"]);
+    expect(spans.find((s) => s.name === "install.write-config").status.code).toBe(SpanStatusCode.ERROR);
+    expect(spans.find((s) => s.name === "install.rollback").status.code).toBe(SpanStatusCode.ERROR);
+    expect(spans.find((s) => s.name === "catalyst.install").status.code).toBe(SpanStatusCode.ERROR);
+  });
+
+  test("trace↔log seeding: a passed traceId becomes the root's trace id", () => {
+    const traceId = "0123456789abcdef0123456789abcdef";
+    const spanId = "0123456789abcdef";
+    emitInstallTrace({ operation: "install", phases: [{ name: "acquire", ok: true }], outcome: "completed", startEpochMs: 0, endEpochMs: 1, traceId, spanId });
+    const root = exporter.getFinishedSpans().find((s) => s.name === "catalyst.install");
+    expect(root.spanContext().traceId).toBe(traceId);
   });
 });
