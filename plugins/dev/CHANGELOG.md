@@ -1,5 +1,60 @@
 # Changelog
 
+## [12.17.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.16.0...catalyst-dev-v12.17.0) (2026-06-27)
+
+
+### Features
+
+* **dev:** board sources ticket titles from the CTC replica (real titles, not bare IDs) ([#2421](https://github.com/coalesce-labs/catalyst/issues/2421)) ([f3f3245](https://github.com/coalesce-labs/catalyst/commit/f3f324540cc74e2f59c23c193c6439af8020eb5f))
+* **dev:** CTL-1092 — Cluster Capacity Visibility ([#1942](https://github.com/coalesce-labs/catalyst/issues/1942)) ([aab5b3c](https://github.com/coalesce-labs/catalyst/commit/aab5b3c0d87b04d157303e986689ad3fede4db49))
+* **dev:** CTL-1214 — cluster-driven project roster + config-scope schema/doctor (Phases 1,2,5) ([#2419](https://github.com/coalesce-labs/catalyst/issues/2419)) ([d65e3d9](https://github.com/coalesce-labs/catalyst/commit/d65e3d96bdbcf157b466e44fb6ca3e3f160b5721))
+* **dev:** CTL-1322 — admission state visible in telemetry + UI (heartbeat block + FleetOps holding) ([#2336](https://github.com/coalesce-labs/catalyst/issues/2336)) ([299ba0c](https://github.com/coalesce-labs/catalyst/commit/299ba0cb204c6b18d2b89370474b971555acb438))
+* **dev:** CTL-1328 — Agent Beliefs surface + belief narratives & shape ([#2345](https://github.com/coalesce-labs/catalyst/issues/2345)) ([52312f0](https://github.com/coalesce-labs/catalyst/commit/52312f00fe3cf0b50b0b7b5b8ffc2770d5e5583e))
+* **dev:** CTL-1330 — Tier-1 daemon instrumentation (tick timing + event-loop delay + liveness.refresh logs) ([#2349](https://github.com/coalesce-labs/catalyst/issues/2349)) ([e476ce2](https://github.com/coalesce-labs/catalyst/commit/e476ce2c282327e40871bb00c5234aa1c8a2a666))
+* **dev:** CTL-1330 Tier 3 — execution-core OTLP spans (scheduler.tick flame graph + liveness.refresh) ([#2354](https://github.com/coalesce-labs/catalyst/issues/2354)) ([e75e5e4](https://github.com/coalesce-labs/catalyst/commit/e75e5e4345536282df13aae822fd3db298612265))
+* **dev:** CTL-1331 FU-1 — async the per-item Pass 0r recovery dispatch (recovery-pass p99 crater) ([#2366](https://github.com/coalesce-labs/catalyst/issues/2366)) ([f1fc61a](https://github.com/coalesce-labs/catalyst/commit/f1fc61a28d8a92fadb7a9dd5db990e2fc917a6b4))
+* **dev:** CTL-1331 Phase A — async board-health delegate queue (inert land) ([#2365](https://github.com/coalesce-labs/catalyst/issues/2365)) ([77b6305](https://github.com/coalesce-labs/catalyst/commit/77b63055b5471c35ea0e64f13e5672bd903d6523))
+* **dev:** CTL-1337 — per-tick trace_id shared by scheduler.tick span + tick-timing log ([#2363](https://github.com/coalesce-labs/catalyst/issues/2363)) ([89dfa20](https://github.com/coalesce-labs/catalyst/commit/89dfa206ba5a4ceae565619c80a01a590076086b))
+* **dev:** CTL-1340 — inert read-replica tier for the scheduler's per-signal terminal checks ([#2373](https://github.com/coalesce-labs/catalyst/issues/2373)) ([e6dee9e](https://github.com/coalesce-labs/catalyst/commit/e6dee9ea5dc59d51c6865f52bca5d948cb13204f))
+* **dev:** CTL-1344 — node-class seam (getNodeClass) + Layer-2 catalyst.node.class ([#2399](https://github.com/coalesce-labs/catalyst/issues/2399)) ([32c8bd6](https://github.com/coalesce-labs/catalyst/commit/32c8bd6eabaf39f7d97f1a6db543af96cca3a6d4))
+* **dev:** CTL-1346 — read-replica resolver is node-class + Layer-2 aware ([#2402](https://github.com/coalesce-labs/catalyst/issues/2402)) ([2f5a451](https://github.com/coalesce-labs/catalyst/commit/2f5a4518e322b7c5839d8dc803be4153717080d9))
+* **dev:** CTL-1348 — standalone catalyst-updater daemon (sole plugin-pull owner) + OTel logs/traces/metrics ([#2412](https://github.com/coalesce-labs/catalyst/issues/2412)) ([5b20e9f](https://github.com/coalesce-labs/catalyst/commit/5b20e9fdf8767e226460da5f225b5f3c7011d4c6))
+* **dev:** CTL-1349 — verify-updater, an objective adoption smoke test for GATE-3 ([#2423](https://github.com/coalesce-labs/catalyst/issues/2423)) ([f5347b3](https://github.com/coalesce-labs/catalyst/commit/f5347b34fb46c8c8f16212a876c38499ed64584a))
+* **dev:** CTL-1355 (1/n) — verify-node, a class-aware local node-profile check (all types) ([#2424](https://github.com/coalesce-labs/catalyst/issues/2424)) ([9503378](https://github.com/coalesce-labs/catalyst/commit/9503378724522495ff6fe93ebdca73eb859690d5))
+* **dev:** CTL-1355 (2/n) — catalyst-doctor grades a node against its class-specific rubric ([#2425](https://github.com/coalesce-labs/catalyst/issues/2425)) ([ae33fbb](https://github.com/coalesce-labs/catalyst/commit/ae33fbb89e55e9cfd3fd59839370cf405960abbf))
+* **dev:** CTL-1364 — scheduler.op span tier + default rawExec/claude-agents timeout ([#2404](https://github.com/coalesce-labs/catalyst/issues/2404)) ([60c5837](https://github.com/coalesce-labs/catalyst/commit/60c5837aefe35f61ff0fae8660445f3a58e876ad))
+* **dev:** CTL-1365a — executor flag + resolution seam + catalyst.dispatch.mode telemetry (inert, default bg) ([#2406](https://github.com/coalesce-labs/catalyst/issues/2406)) ([19754bd](https://github.com/coalesce-labs/catalyst/commit/19754bdf97023abfdf9a81a23fe479a1f36414ac))
+* **dev:** CTL-1365b — SDK executor (sdkRunPhaseAgent) + shared pre-launch refactor [HOLD FOR REVIEW] ([#2408](https://github.com/coalesce-labs/catalyst/issues/2408)) ([cf26bbe](https://github.com/coalesce-labs/catalyst/commit/cf26bbe745f444f26c78cebb6036aa0a23f833f2))
+* **dev:** CTL-1366 — Linear-data freshness gauge + data_stale alert (Phase 1) [HOLD FOR REVIEW] ([#2410](https://github.com/coalesce-labs/catalyst/issues/2410)) ([28cf4ad](https://github.com/coalesce-labs/catalyst/commit/28cf4adfbf8b37bedcb74760607c186e8fc0edf1))
+* **dev:** CTL-1367 — SDK executor pre-canary hardening ([#2417](https://github.com/coalesce-labs/catalyst/issues/2417)) ([679deba](https://github.com/coalesce-labs/catalyst/commit/679deba7d60c7d4b3ebb005d46aac8c2412c26f5))
+* **dev:** CTL-1368 — catalyst.node.class as a core fleet-wide resource dimension ([#2422](https://github.com/coalesce-labs/catalyst/issues/2422)) ([e1240be](https://github.com/coalesce-labs/catalyst/commit/e1240be1a801ad8224e79314fe3fc1ba93ed829e))
+* **dev:** inbox surfaces parked needs-human tickets from the cache ([#2414](https://github.com/coalesce-labs/catalyst/issues/2414)) ([a941208](https://github.com/coalesce-labs/catalyst/commit/a9412084b1e31a48e3cd2a7cc7fa310430ce507b))
+* **dev:** split the conflated recovery-pass scheduler lap into recovery-pass + reclaim ([#2367](https://github.com/coalesce-labs/catalyst/issues/2367)) ([c74738b](https://github.com/coalesce-labs/catalyst/commit/c74738baf717dd4d5b47db0b43275cd75c8242d0))
+* **dev:** wire Serena code-understanding MCP into research/analysis agents ([#2369](https://github.com/coalesce-labs/catalyst/issues/2369)) ([c996d95](https://github.com/coalesce-labs/catalyst/commit/c996d9549a4408b5d03e2895834a6c3539ea3816))
+
+
+### Bug Fixes
+
+* **dev:** CTL-1311 — board crashes (React [#185](https://github.com/coalesce-labs/catalyst/issues/185)) on any ?scope= — kill the URL↔atom self-heal loop ([#2322](https://github.com/coalesce-labs/catalyst/issues/2322)) ([c150fae](https://github.com/coalesce-labs/catalyst/commit/c150faefdeba7b18afe62fa803200609e3de5435))
+* **dev:** CTL-1315 — J4 reaper skips terminal triage-done dirs (inFlight gate) ([#2328](https://github.com/coalesce-labs/catalyst/issues/2328)) ([6d2f58d](https://github.com/coalesce-labs/catalyst/commit/6d2f58d4f54ccfb5dca5808d56e06feaa65d92b6))
+* **dev:** CTL-1317 — Rulebook crashes on /rules (undefined s.length) — read cfg as { rows } ([#2327](https://github.com/coalesce-labs/catalyst/issues/2327)) ([f658825](https://github.com/coalesce-labs/catalyst/commit/f6588254a257376ec9e766b63d1a9fe302078f29))
+* **dev:** CTL-1321 — exec-core boots accepting work by default (clear stale drain flag on boot) ([#2335](https://github.com/coalesce-labs/catalyst/issues/2335)) ([d7a9844](https://github.com/coalesce-labs/catalyst/commit/d7a98449ae81cecf6c0768519c9880433731a7c7))
+* **dev:** CTL-1323 — a recovery-pass-only worker dir strands its ticket from the new-work pull ([#2338](https://github.com/coalesce-labs/catalyst/issues/2338)) ([206103e](https://github.com/coalesce-labs/catalyst/commit/206103ea7bde12095eb233f44e59b1dcb44b0bb5))
+* **dev:** CTL-1324 — keep the scheduler responsive while cleaning up old worktrees ([#2344](https://github.com/coalesce-labs/catalyst/issues/2344)) ([81e72ce](https://github.com/coalesce-labs/catalyst/commit/81e72cecff9b44f073c2cf386bbc457c045af524))
+* **dev:** CTL-1329 — stale-fenced orphan dirs no longer burn Linear OAuth quota ([#2347](https://github.com/coalesce-labs/catalyst/issues/2347)) ([37a0581](https://github.com/coalesce-labs/catalyst/commit/37a05817242663ea4a761c304b49a15b9aab9806))
+* **dev:** CTL-1332 — log shipper keeps full pino JSON body so Tier-1 fields reach Loki ([#2352](https://github.com/coalesce-labs/catalyst/issues/2352)) ([14386a3](https://github.com/coalesce-labs/catalyst/commit/14386a3e40050c32044cf12d51366d754d0956f1))
+* **dev:** CTL-1334 — log-shipper emits short host.name (first DNS label) so logs join metrics ([#2362](https://github.com/coalesce-labs/catalyst/issues/2362)) ([d948f56](https://github.com/coalesce-labs/catalyst/commit/d948f56a58f6eeb377acc753b59ff16447721e1d))
+* **dev:** CTL-1336 — thread warm agents snapshot into Pass 0a phantom sweep (zero-spawn liveness) ([#2361](https://github.com/coalesce-labs/catalyst/issues/2361)) ([d03e000](https://github.com/coalesce-labs/catalyst/commit/d03e00057667a4163690defb90840c772f94aa0d))
+* **dev:** CTL-1338 — tracing.mjs degrades to no-op when @opentelemetry/api is absent (unbreak orch-monitor quality) ([#2360](https://github.com/coalesce-labs/catalyst/issues/2360)) ([4a8f6ab](https://github.com/coalesce-labs/catalyst/commit/4a8f6ab51d4588f9adae9669f4f5e9f8b9215014))
+* **dev:** CTL-1339 — cap the hot per-signal linearis read so a 429 stall can't wedge the scheduler tick ([#2371](https://github.com/coalesce-labs/catalyst/issues/2371)) ([2d49bfe](https://github.com/coalesce-labs/catalyst/commit/2d49bfebebecdafc2ef61db6e54688d2f23ae323))
+* **dev:** CTL-1341 — a timed-out linearis read trips the breaker so a degraded pass short-circuits ([#2375](https://github.com/coalesce-labs/catalyst/issues/2375)) ([8e7a428](https://github.com/coalesce-labs/catalyst/commit/8e7a42837f5ff9cf016f7ad69a875253215d7d35))
+* **dev:** CTL-1362 — per-tick trace_id unique across restarts (boot nonce) ([#2397](https://github.com/coalesce-labs/catalyst/issues/2397)) ([bf09451](https://github.com/coalesce-labs/catalyst/commit/bf094513a1e2f13e88860e67c956b353968e3294))
+* **dev:** CTL-1363 — cluster-claim resolveIssueId via issue(id:) (unwedge fleet dispatch) ([#2403](https://github.com/coalesce-labs/catalyst/issues/2403)) ([21a7145](https://github.com/coalesce-labs/catalyst/commit/21a7145a376a5b41af53cf17a9fc16bd89cea006))
+* **dev:** dedupe nav projects + repo icon auto-detect ([#2418](https://github.com/coalesce-labs/catalyst/issues/2418)) ([8eb398e](https://github.com/coalesce-labs/catalyst/commit/8eb398e0a15b8c1e573c23ad61230eb58c51957f))
+* **dev:** orch-monitor project roster reads config cwd-independently ([#2413](https://github.com/coalesce-labs/catalyst/issues/2413)) ([1766666](https://github.com/coalesce-labs/catalyst/commit/17666666a802306ec9f2bd07dd367966a3d3dff3))
+* **dev:** reclaim terminal-check trusts the read-replica regardless of age (crater the reclaim lap) ([#2368](https://github.com/coalesce-labs/catalyst/issues/2368)) ([d5c9b1f](https://github.com/coalesce-labs/catalyst/commit/d5c9b1f5d10b023c904a1d1e0b3bc9eccc2a3f9b))
+* **dev:** repo-icon empty-favicon → avatar fallback (no blank icons) ([#2420](https://github.com/coalesce-labs/catalyst/issues/2420)) ([b7ca52f](https://github.com/coalesce-labs/catalyst/commit/b7ca52f1832ec3e0adb5f99ed43b48bbf3a3805a))
+
 ## [12.16.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.15.0...catalyst-dev-v12.16.0) (2026-06-22)
 
 

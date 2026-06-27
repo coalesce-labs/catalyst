@@ -1,5 +1,12 @@
 # Changelog
 
+## [4.1.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-meta-v4.0.1...catalyst-meta-v4.1.0) (2026-06-27)
+
+
+### Features
+
+* **dev:** wire Serena code-understanding MCP into research/analysis agents ([#2369](https://github.com/coalesce-labs/catalyst/issues/2369)) ([c996d95](https://github.com/coalesce-labs/catalyst/commit/c996d9549a4408b5d03e2895834a6c3539ea3816))
+
 ## [4.0.1](https://github.com/coalesce-labs/catalyst/compare/catalyst-meta-v4.0.0...catalyst-meta-v4.0.1) (2026-04-13)
 
 
