@@ -38,6 +38,7 @@ import { join, basename } from "path";
 import { loadMonitorConfig } from "./monitor-config";
 import { resolveLayer1ConfigPath } from "./config-path";
 import { VALID_HUES } from "./config-writer";
+import { readClusterProjects } from "./cluster-roster";
 
 export interface ProjectDescriptor {
   /** Linear team key, UPPERCASE (verbatim from teams[].key). For an unconfigured
@@ -267,34 +268,10 @@ function isRecord(x: unknown): x is Record<string, unknown> {
   return typeof x === "object" && x !== null && !Array.isArray(x);
 }
 
-// Read catalyst.monitor.linear.teams[] (the IDENTITY authority) from a config
-// file. Fail-open to []. Same lenient parsing webhook-config's readLinearTeams
-// uses — skip entries with empty key or non-owner/repo vcsRepo.
-function readTeams(configPath: string): TeamEntry[] {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(readFileSync(configPath, "utf8"));
-  } catch {
-    return [];
-  }
-  if (!isRecord(parsed)) return [];
-  // tolerate both the Layer-1 { catalyst: { monitor: ... } } and a bare { monitor }
-  const root = isRecord(parsed.catalyst) ? parsed.catalyst : parsed;
-  if (!isRecord(root)) return [];
-  const monitor = root.monitor;
-  if (!isRecord(monitor)) return [];
-  const linear = monitor.linear;
-  if (!isRecord(linear) || !Array.isArray(linear.teams)) return [];
-  const out: TeamEntry[] = [];
-  for (const entry of linear.teams) {
-    if (!isRecord(entry)) continue;
-    const key = typeof entry.key === "string" ? entry.key.trim() : "";
-    const vcsRepo = typeof entry.vcsRepo === "string" ? entry.vcsRepo.trim() : "";
-    if (key.length === 0 || vcsRepo.length === 0 || !vcsRepo.includes("/")) continue;
-    out.push({ key, vcsRepo });
-  }
-  return out;
-}
+// CTL-1214 Phase 2: the IDENTITY-authority roster (teams[]) now comes through the
+// shared readClusterProjects() — cluster.json.projects[] first, Layer-1
+// catalyst.monitor.linear.teams[] as the back-compat fallback — so there is one
+// roster-precedence definition (lib/cluster-roster.ts) instead of a per-file copy.
 
 // Read registry.json projects[] (repoRoot-only enrichment, joined by team key).
 // Fail-open to [].
@@ -470,7 +447,7 @@ export function loadProjects(opts: LoadProjectsOpts = {}): ProjectDescriptor[] {
       opts.registryPath ?? join(catalystDir, "execution-core", "registry.json");
     const observedRepos = opts.observedRepos ?? [];
 
-    const teams = readTeams(configPath);
+    const teams = readClusterProjects({ layer1ConfigPath: configPath });
     const { repoColors } = loadMonitorConfig(configPath);
     const registry = readRegistry(registryPath);
     const overlay = readProjectsOverlay(configPath);

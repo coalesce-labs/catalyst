@@ -4,7 +4,7 @@
 // Run: cd plugins/dev/scripts/execution-core && bun test doctor.test.mjs
 
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
-import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, writeFileSync, rmSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -23,12 +23,14 @@ import {
   checkReaper,
   checkCloudTokenEnv,
   checkSdkExecutorAuth,
+  checkConfigScopeLeak,
   summarize,
   renderJson,
   renderHuman,
   parseArgs,
   runDoctor,
 } from "./doctor.mjs";
+import { validateLayer1Config } from "../lib/validate-catalyst-config.mjs";
 
 // ─── Phase 1: checkHostIdentity ──────────────────────────────────────────────
 
@@ -1240,5 +1242,156 @@ describe("checkSdkExecutorAuth (CTL-1367 item 9)", () => {
       const checks = checkSdkExecutorAuth({ configPath: cfg, env: { ANTHROPIC_API_KEY: "sk" } });
       expect(checks[0].status).toBe(STATUS.INFO);
     });
+  });
+});
+
+// ─── checkConfigScopeLeak (CTL-1214) ─────────────────────────────────────────
+
+// A kitchen-sink Layer-1 config carrying every relocated stanza (the historical
+// leak): the project roster + repoColors + orchestration/feedback/sweep blocks.
+const KITCHEN_SINK_LAYER1 = JSON.stringify({
+  catalyst: {
+    schemaVersion: 1,
+    projectKey: "catalyst-workspace",
+    project: { ticketPrefix: "CTL" },
+    linear: { teamKey: "CTL", teamId: "team-uuid", stateMap: {} },
+    thoughts: { profile: "coalesce-labs", directory: "catalyst-workspace", user: null },
+    monitor: {
+      linear: { teams: [{ teamKey: "CTL", vcsRepo: "coalesce-labs/catalyst" }] },
+      github: { repoColors: { "coalesce-labs/catalyst": "#5b8def" } },
+    },
+    orchestration: { dispatchMode: "phase-agents" },
+    feedback: { autoFile: true },
+    sweep: { idleHours: 48 },
+  },
+});
+
+// The minimal, slimmed Layer-1 config: project-identity fields only.
+const MINIMAL_LAYER1 = JSON.stringify({
+  catalyst: {
+    schemaVersion: 1,
+    projectKey: "catalyst-workspace",
+    project: { ticketPrefix: "CTL" },
+    linear: { teamKey: "CTL", teamId: "team-uuid", stateMap: {} },
+    thoughts: { profile: "coalesce-labs", directory: "catalyst-workspace", user: null },
+  },
+});
+
+describe("checkConfigScopeLeak (CTL-1214)", () => {
+  it("WARNs (advisory, not FAIL) on a kitchen-sink Layer-1 still carrying node/cluster keys", () => {
+    // Back-compat window (CTL-1214): the leak is advisory (WARN), never FAIL, because
+    // runDoctor's exit code = FAIL count and catalyst-join.sh gates member activation
+    // on doctor exit 0. A FAIL here would fail-close every un-slimmed node's join.
+    const checks = checkConfigScopeLeak({
+      readLayer1: () => KITCHEN_SINK_LAYER1,
+      hostsJsonExists: () => false,
+    });
+    expect(checks).toHaveLength(1);
+    expect(checks[0].name).toBe("config-scope-leak");
+    expect(checks[0].status).toBe(STATUS.WARN);
+  });
+
+  it("PASSes on a minimal Layer-1 carrying only project-identity fields", () => {
+    const checks = checkConfigScopeLeak({
+      readLayer1: () => MINIMAL_LAYER1,
+      hostsJsonExists: () => false,
+    });
+    expect(checks).toHaveLength(1);
+    expect(checks[0].name).toBe("config-scope-leak");
+    expect(checks[0].status).toBe(STATUS.PASS);
+  });
+
+  it("names each leaked key category in the remediation message", () => {
+    const checks = checkConfigScopeLeak({
+      readLayer1: () => KITCHEN_SINK_LAYER1,
+      hostsJsonExists: () => false,
+    });
+    const { detail } = checks[0];
+    // every relocated stanza present in the kitchen-sink is named
+    expect(detail).toContain("monitor.linear.teams");
+    expect(detail).toContain("monitor.github.repoColors");
+    expect(detail).toContain("orchestration");
+    expect(detail).toContain("feedback");
+    expect(detail).toContain("sweep");
+    // and it points operators at the migration tooling / cluster destination
+    expect(detail).toContain("migrate-config-to-node.sh");
+    expect(detail).toContain("catalyst-cluster/cluster.json");
+  });
+
+  it("WARNs and names hosts.json when a .catalyst/hosts.json roster file is present", () => {
+    const checks = checkConfigScopeLeak({
+      readLayer1: () => MINIMAL_LAYER1, // config itself is clean…
+      hostsJsonExists: () => true, // …but a legacy hosts.json still exists
+    });
+    expect(checks).toHaveLength(1);
+    expect(checks[0].status).toBe(STATUS.WARN);
+    expect(checks[0].detail).toContain("hosts.json");
+  });
+
+  it("PASSes when the config is absent and no hosts.json exists (nothing to leak)", () => {
+    const checks = checkConfigScopeLeak({
+      readLayer1: () => "",
+      hostsJsonExists: () => false,
+    });
+    expect(checks).toHaveLength(1);
+    expect(checks[0].status).toBe(STATUS.PASS);
+  });
+
+  it("INFO when the Layer-1 config is malformed JSON", () => {
+    const checks = checkConfigScopeLeak({
+      readLayer1: () => "{ not json",
+      hostsJsonExists: () => false,
+    });
+    expect(checks).toHaveLength(1);
+    expect(checks[0].status).toBe(STATUS.INFO);
+  });
+
+  it("runDoctor wires checkConfigScopeLeak into its default Promise.all suite", () => {
+    // runDoctor's default check suite is defined inline in its body; assert the
+    // wiring without running the networked default checks.
+    expect(runDoctor.toString()).toContain("checkConfigScopeLeak()");
+  });
+
+  // ─── Regression: the doctor-exit / join-gate contract (CTL-1214) ────────────
+  // The committed Layer-1 .catalyst/config.json is NOT yet slimmed (Phase 6
+  // deferred) — it still carries all five relocated categories and no
+  // schemaVersion. Earlier fixtures only ever exercised injected strings, so a
+  // FAIL regression here was invisible while live. These two tests pin the
+  // contract against this repo's ACTUAL committed config: the leak must be
+  // advisory (WARN) and must NOT push runDoctor's exit code above 0, because
+  // catalyst-join.sh do_doctor_gate() gates every cluster-member activation on
+  // `catalyst doctor` exiting 0.
+  const realCommittedConfig = () =>
+    readFileSync(join(import.meta.dir, "..", "..", "..", "..", ".catalyst", "config.json"), "utf8");
+
+  it("WARNs (never FAILs) against this repo's real un-slimmed committed config", () => {
+    const body = realCommittedConfig();
+    // Sanity-guard the fixture: this test only proves anything while the
+    // committed config is still un-slimmed. Once Phase 6 slims it, flip this.
+    const { deprecatedKeys } = validateLayer1Config(JSON.parse(body));
+    expect(deprecatedKeys.length).toBeGreaterThan(0);
+
+    const checks = checkConfigScopeLeak({
+      readLayer1: () => body,
+      hostsJsonExists: () => false,
+    });
+    expect(checks).toHaveLength(1);
+    expect(checks[0].name).toBe("config-scope-leak");
+    expect(checks[0].status).toBe(STATUS.WARN);
+    expect(checks[0].status).not.toBe(STATUS.FAIL);
+  });
+
+  it("keeps runDoctor's exit code at 0 when scope-leak runs against the real committed config", async () => {
+    const body = realCommittedConfig();
+    // Exercise the actual check fn (no FAIL stubs) so the exit-code → join-gate
+    // contract is verified end-to-end, not just the isolated status.
+    const code = await runDoctor({
+      checks: [
+        () => checkConfigScopeLeak({ readLayer1: () => body, hostsJsonExists: () => false }),
+      ],
+      json: true,
+      log: () => {},
+    });
+    expect(code).toBe(0);
   });
 });

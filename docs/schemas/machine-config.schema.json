@@ -49,6 +49,17 @@
                   "format": "uri",
                   "description": "Smee.io proxy channel URI for receiving GitHub webhook events on a local machine.",
                   "examples": ["https://smee.io/AbCdEfGhIjKlMnOp"]
+                },
+                "repoColors": {
+                  "type": "object",
+                  "description": "Maps repository full names (owner/repo) to CSS color strings for color-coding in the monitor dashboard. Relocated from Layer-1 catalyst.monitor.github.repoColors (CTL-1214) — a node-scoped operator display preference, not a cluster/repo invariant.",
+                  "additionalProperties": {
+                    "type": "string",
+                    "description": "A CSS color string (e.g. '#4A90E2', 'green')."
+                  },
+                  "examples": [
+                    { "coalesce-labs/catalyst": "green" }
+                  ]
                 }
               }
             },
@@ -126,6 +137,33 @@
           "description": "Orchestration overrides. Concurrency fields here win per-field over Layer-1 values. Use this to tune concurrency per machine without modifying committed config.",
           "additionalProperties": false,
           "properties": {
+            "dispatchMode": {
+              "type": "string",
+              "enum": ["phase-agents", "oneshot-legacy"],
+              "description": "Machine-level orchestration dispatch mode (relocated from Layer-1 catalyst.orchestration.dispatchMode, CTL-1214). 'phase-agents' runs one short-lived claude --bg job per pipeline phase; 'oneshot-legacy' runs a single long-lived claude -p job per ticket. Wins over the Layer-1 value when present; the shell reader falls back to 'oneshot-legacy' only when BOTH layers are absent, so this must be populated before Layer-1 dispatchMode is removed."
+            },
+            "worktreeRefresh": {
+              "type": "object",
+              "description": "Periodic background worktree-refresh settings (relocated from Layer-1 catalyst.orchestration.worktreeRefresh, CTL-1214). Keeps idle running worktrees rebased onto origin/<base> (CTL-707 L1).",
+              "additionalProperties": false,
+              "properties": {
+                "enabled": {
+                  "type": "boolean",
+                  "default": true,
+                  "description": "When false, the periodic worktree-refresh timer is disabled."
+                },
+                "intervalSeconds": {
+                  "type": "number",
+                  "default": 300,
+                  "description": "How often (in seconds) the worktree-refresh timer runs."
+                },
+                "quietSeconds": {
+                  "type": "number",
+                  "default": 30,
+                  "description": "Minimum quiet period (in seconds) since the last worktree write before a refresh is attempted."
+                }
+              }
+            },
             "executionCore": {
               "type": "object",
               "description": "Concurrency override values for the execution-core daemon scheduler. Each field independently wins over the corresponding Layer-1 value when present.",
@@ -145,6 +183,11 @@
                   "type": "integer",
                   "minimum": 1,
                   "description": "Hard upper cap on maxParallel on this machine. Wins over catalyst.orchestration.executionCore.maxParallelCeiling in Layer-1."
+                },
+                "targetParallel": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "description": "Target steady-state concurrency used by the autotune controller on this machine. Wins over any Layer-1 value when present."
                 }
               }
             },
@@ -168,6 +211,56 @@
                   ]
                 }
               }
+            }
+          }
+        },
+        "feedback": {
+          "type": "object",
+          "description": "Automatic feedback-filing settings (relocated from Layer-1 catalyst.feedback, CTL-1214). Node-scoped operator preference. Read Layer-2 first, Layer-1 fallback.",
+          "additionalProperties": false,
+          "properties": {
+            "autoFile": {
+              "type": "boolean",
+              "description": "When true, agents automatically file GitHub issues for feedback events without prompting."
+            },
+            "githubRepo": {
+              "type": "string",
+              "description": "GitHub repository full name (owner/repo) where feedback issues are filed.",
+              "examples": ["coalesce-labs/catalyst"]
+            },
+            "labels": {
+              "type": "array",
+              "description": "List of label strings applied to auto-filed feedback issues.",
+              "items": { "type": "string" },
+              "examples": [["auto-submitted"]]
+            }
+          }
+        },
+        "sweep": {
+          "type": "object",
+          "description": "Orphan-worktree sweep thresholds (relocated from Layer-1 catalyst.sweep, CTL-1214). Node-scoped machine tuning consumed by orphan-sweep.sh. Read Layer-2 first, Layer-1 fallback, then code defaults (48/2/false/20).",
+          "additionalProperties": false,
+          "properties": {
+            "idleHours": {
+              "type": "number",
+              "default": 48,
+              "description": "A worktree must be idle at least this many hours before the orphan sweep removes it."
+            },
+            "intervalHours": {
+              "type": "number",
+              "default": 2,
+              "description": "How often (in hours) the orphan sweep runs."
+            },
+            "salvagePush": {
+              "type": "boolean",
+              "default": false,
+              "description": "When true, the sweep pushes any unpushed commits on a removed worktree's branch before deleting it."
+            },
+            "maxRemovalsPerRun": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 20,
+              "description": "Maximum number of worktrees removed per sweep run."
             }
           }
         }
