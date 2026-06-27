@@ -8,7 +8,7 @@ import { describe, it, expect, beforeEach, afterEach } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
-import { readLinearCache } from "../lib/linear-cache-reader.mjs";
+import { readLinearCache, readReplicaTitles } from "../lib/linear-cache-reader.mjs";
 import {
   openBrokerStateDb,
   closeBrokerStateDb,
@@ -264,5 +264,82 @@ describe("readLinearCache end-to-end against a real filter-state.db", () => {
     expect(byId["CTL-200"].title).toBe("queued"); // BFF9: title from eligible
     // BFF10/BFF11: the fence projection flows through the real bulk descriptor read.
     expect(byId["CTL-101"].generation).toBeNull();
+  });
+});
+
+// CTL-1372: the board's CTC-replica title source. readReplicaTitles is driven with
+// an INJECTED reader factory so the contract is exercised offline (no real
+// catalyst-replica.db) — when a factory is injected the file-presence gate is
+// skipped (the fake reader IS the DB).
+describe("readReplicaTitles (CTL-1372 — board title source from the CTC replica)", () => {
+  // A fake reader that records the ids it was asked for and serves a fixed map.
+  function fakeFactory(map: Record<string, string>, spy?: { ids?: string[]; closed?: boolean }) {
+    return (_opts: { dbPath: string }) => ({
+      titles(ids: string[]) {
+        if (spy) spy.ids = ids;
+        const out: Record<string, string> = {};
+        for (const id of ids) if (map[id]) out[id] = map[id];
+        return out;
+      },
+      close() {
+        if (spy) spy.closed = true;
+      },
+    });
+  }
+
+  it("returns the replica title map for the requested ids (parked ticket → real title)", async () => {
+    const map = { "CTL-1214": "Slim .catalyst/config.json down to the essentials" };
+    const titles = await readReplicaTitles({
+      ids: ["CTL-1214"],
+      readerFactory: fakeFactory(map),
+    });
+    expect(titles["CTL-1214"]).toBe("Slim .catalyst/config.json down to the essentials");
+  });
+
+  it("de-dupes ids, passes the wanted set to the reader, and closes the handle", async () => {
+    const spy: { ids?: string[]; closed?: boolean } = {};
+    const map = { "CTL-1": "one", "ADV-2": "two" };
+    const titles = await readReplicaTitles({
+      ids: ["CTL-1", "CTL-1", "ADV-2", ""], // dup CTL-1 + a falsy "" to drop
+      readerFactory: fakeFactory(map, spy),
+    });
+    expect(titles).toEqual({ "CTL-1": "one", "ADV-2": "two" });
+    expect(spy.ids).toEqual(["CTL-1", "ADV-2"]); // de-duped + falsy dropped
+    expect(spy.closed).toBe(true); // handle always released
+  });
+
+  it("empty / non-array ids → {} without invoking the reader", async () => {
+    let called = false;
+    const factory = () => {
+      called = true;
+      return { titles: () => ({}) };
+    };
+    expect(await readReplicaTitles({ ids: [], readerFactory: factory })).toEqual({});
+    expect(await readReplicaTitles({ ids: undefined, readerFactory: factory })).toEqual({});
+    expect(called).toBe(false);
+  });
+
+  it("fails OPEN to {} when the reader throws (replica unreadable → existing chain preserved)", async () => {
+    const factory = () => ({
+      titles() {
+        throw new Error("replica db corrupt");
+      },
+    });
+    const titles: Record<string, string> | "THREW" = await readReplicaTitles({
+      ids: ["CTL-1"],
+      readerFactory: factory,
+    }).catch(() => "THREW" as const);
+    expect(titles).not.toBe("THREW"); // never leaks the throw
+    expect(titles).toEqual({}); // fail-open empty map
+  });
+
+  it("fails OPEN to {} when a non-existent replica path is used (file-presence gate)", async () => {
+    // No readerFactory → the real computed-specifier import path runs, but the
+    // file-presence gate short-circuits on an absent path (never opens/throws).
+    const titles = await readReplicaTitles({
+      ids: ["CTL-1"],
+      dbPath: "/nonexistent/catalyst-replica.db",
+    });
+    expect(titles).toEqual({});
   });
 });
