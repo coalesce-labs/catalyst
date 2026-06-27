@@ -17,6 +17,44 @@ import { derivePrVariant } from "../../../lib/pr-variant";
 const MAX_EVENTS = 200;
 const STALE_THRESHOLD = 900;
 
+// CTL-1372: cap the dashboard's long-lived dedup refs. seenAttentionRef /
+// briefingSeenRef / prevWaveStatusRef are only ever added to (unlike
+// prevWorkerRef, which is pruned of vanished keys below), so across a multi-hour
+// session they grow monotonically by distinct attention items / waves /
+// briefings. A generous drop-oldest cap keeps them bounded; the live working set
+// per snapshot is tiny, so eviction only ever removes long-stale keys and never
+// re-fires an event for a still-present item.
+const DEDUP_REF_CAP = 5000;
+
+function addBounded<T>(set: Set<T>, key: T, cap = DEDUP_REF_CAP): void {
+  set.add(key);
+  if (set.size > cap) {
+    const it = set.values();
+    for (let drop = set.size - cap; drop > 0; drop--) {
+      const next = it.next();
+      if (next.done) break;
+      set.delete(next.value);
+    }
+  }
+}
+
+function setBounded<K, V>(
+  map: Map<K, V>,
+  key: K,
+  value: V,
+  cap = DEDUP_REF_CAP,
+): void {
+  map.set(key, value);
+  if (map.size > cap) {
+    const it = map.keys();
+    for (let drop = map.size - cap; drop > 0; drop--) {
+      const next = it.next();
+      if (next.done) break;
+      map.delete(next.value);
+    }
+  }
+}
+
 interface WorkerPrev {
   status: string;
   phase: number;
@@ -200,20 +238,20 @@ export function useMonitor() {
                 orch.id,
               );
             }
-            prevWaveStatusRef.current.set(key, w.status);
+            setBounded(prevWaveStatusRef.current, key, w.status);
           }
           // Briefings
           if (orch.briefings && primedRef.current) {
             for (const nStr of Object.keys(orch.briefings)) {
               const bKey = orch.id + ":" + nStr;
               if (!briefingSeenRef.current.has(bKey)) {
-                briefingSeenRef.current.add(bKey);
+                addBounded(briefingSeenRef.current, bKey);
                 addEvent("brief", `Wave ${nStr} briefing written`, undefined, orch.id);
               }
             }
           } else if (orch.briefings) {
             for (const nStr of Object.keys(orch.briefings)) {
-              briefingSeenRef.current.add(orch.id + ":" + nStr);
+              addBounded(briefingSeenRef.current, orch.id + ":" + nStr);
             }
           }
         }
@@ -229,7 +267,7 @@ export function useMonitor() {
                 (raw.ticket as string) ||
                 JSON.stringify(raw));
             if (!seenAttentionRef.current.has(key)) {
-              seenAttentionRef.current.add(key);
+              addBounded(seenAttentionRef.current, key);
               const ticket =
                 (raw.ticket as string) || (raw.workerName as string) || "";
               const reason =
