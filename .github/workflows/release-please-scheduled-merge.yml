@@ -102,7 +102,7 @@ jobs:
                     repository(owner:$owner, name:$name) {
                       pullRequest(number:$number) {
                         reviewDecision
-                        reviewThreads(first:100) { nodes { id isResolved } }
+                        reviewThreads(first:100) { nodes { id isResolved comments(first:1){ nodes { author { login } } } } }
                         commits(last:1) { nodes { commit { statusCheckRollup { state } } } }
                       }
                     }
@@ -113,25 +113,43 @@ jobs:
               UNRESOLVED=$(echo "$GQL" | jq -r '[.data.repository.pullRequest.reviewThreads.nodes[] | select(.isResolved==false)] | length' 2>/dev/null || echo "0")
               [[ "$UNRESOLVED" =~ ^[0-9]+$ ]] || UNRESOLVED=0
 
-              # CHECKS_GREEN: rollup SUCCESS, or empty/null (no checks => no
-              # failing required checks). PENDING / FAILURE / ERROR / EXPECTED
-              # are NOT green.
+              # Only the automated reviewer's OWN threads are eligible for
+              # auto-resolution. A thread opened by anyone else (a human) on the
+              # release PR is a genuine conversation that must NEVER be
+              # auto-resolved — its presence forces escalation instead.
+              BOT_REVIEWER="chatgpt-codex-connector"
+              BOT_UNRESOLVED=$(echo "$GQL" | jq -r --arg bot "$BOT_REVIEWER" '[.data.repository.pullRequest.reviewThreads.nodes[] | select(.isResolved==false) | select((.comments.nodes[0].author.login // "") == $bot)] | length' 2>/dev/null || echo "0")
+              [[ "$BOT_UNRESOLVED" =~ ^[0-9]+$ ]] || BOT_UNRESOLVED=0
+              HUMAN_UNRESOLVED=$(echo "$GQL" | jq -r --arg bot "$BOT_REVIEWER" '[.data.repository.pullRequest.reviewThreads.nodes[] | select(.isResolved==false) | select((.comments.nodes[0].author.login // "") != $bot)] | length' 2>/dev/null || echo "0")
+              [[ "$HUMAN_UNRESOLVED" =~ ^[0-9]+$ ]] || HUMAN_UNRESOLVED=0
+
+              # CHECKS_GREEN requires an explicit SUCCESS rollup. An empty/absent
+              # rollup is NOT green: required checks (docs-gate, Cloudflare Pages)
+              # report asynchronously and some run on GitHub's test-merge ref, so
+              # an empty head rollup can mean "checks haven't reported yet", not
+              # "no checks". PENDING/FAILURE/ERROR/EXPECTED are not green either.
+              # This guarantees we never resolve threads before CI is truly green.
               CHECKS_GREEN=false
-              if [[ "$ROLLUP_STATE" == "SUCCESS" || -z "$ROLLUP_STATE" ]]; then
+              if [[ "$ROLLUP_STATE" == "SUCCESS" ]]; then
                 CHECKS_GREEN=true
               fi
 
-              echo "Auto-resolve probe: reviewDecision=${REVIEW_DECISION:-none} statusCheckRollup=${ROLLUP_STATE:-none} checksGreen=$CHECKS_GREEN unresolvedThreads=$UNRESOLVED mergeable=$MERGEABLE"
+              echo "Auto-resolve probe: reviewDecision=${REVIEW_DECISION:-none} statusCheckRollup=${ROLLUP_STATE:-none} checksGreen=$CHECKS_GREEN unresolvedThreads=$UNRESOLVED (bot=$BOT_UNRESOLVED human=$HUMAN_UNRESOLVED) mergeable=$MERGEABLE"
 
-              # REVIEW_DECISION must NOT be REVIEW_REQUIRED / CHANGES_REQUESTED:
-              # those are genuine human-review blockers that can coexist with
-              # unresolved threads (see merge-blocker-diagnosis.md), and we must
-              # never auto-resolve a human's review conversation. Empty (no
-              # review policy / 0 required approvals) or APPROVED is fine — only
-              # then are unresolved threads the sole remaining blocker.
-              if [[ "$MERGE_STATE" == "BLOCKED" && "$MERGEABLE" == "MERGEABLE" && "$CHECKS_GREEN" == "true" && "$UNRESOLVED" -gt 0 \
-                    && "$REVIEW_DECISION" != "REVIEW_REQUIRED" && "$REVIEW_DECISION" != "CHANGES_REQUESTED" ]]; then
-                echo "Release PR #$PR_NUMBER is BLOCKED only on $UNRESOLVED unresolved review thread(s) with green checks and no pending human review — auto-resolving."
+              # Auto-resolve ONLY when EVERY guard holds:
+              #  - BLOCKED + MERGEABLE        (merge is wanted, just gated)
+              #  - CHECKS_GREEN == true       (explicit SUCCESS rollup; see above)
+              #  - REVIEW_DECISION not REVIEW_REQUIRED/CHANGES_REQUESTED
+              #                               (no pending human review verdict)
+              #  - HUMAN_UNRESOLVED == 0      (no human-authored thread — those
+              #                               are real conversations; their
+              #                               presence forces escalation)
+              #  - BOT_UNRESOLVED > 0         (at least one automated-reviewer
+              #                               thread to clear)
+              if [[ "$MERGE_STATE" == "BLOCKED" && "$MERGEABLE" == "MERGEABLE" && "$CHECKS_GREEN" == "true" \
+                    && "$REVIEW_DECISION" != "REVIEW_REQUIRED" && "$REVIEW_DECISION" != "CHANGES_REQUESTED" \
+                    && "$HUMAN_UNRESOLVED" -eq 0 && "$BOT_UNRESOLVED" -gt 0 ]]; then
+                echo "Release PR #$PR_NUMBER is BLOCKED only on $BOT_UNRESOLVED automated-reviewer thread(s) (no human threads, SUCCESS checks, no pending review verdict) — auto-resolving."
 
                 RESOLVED_COUNT=0
                 while IFS= read -r THREAD_ID; do
@@ -147,12 +165,12 @@ jobs:
                   else
                     echo "::warning::Failed to resolve review thread $THREAD_ID on PR #$PR_NUMBER (continuing)"
                   fi
-                done < <(echo "$GQL" | jq -r '.data.repository.pullRequest.reviewThreads.nodes[] | select(.isResolved==false) | .id' 2>/dev/null)
+                done < <(echo "$GQL" | jq -r --arg bot "$BOT_REVIEWER" '.data.repository.pullRequest.reviewThreads.nodes[] | select(.isResolved==false) | select((.comments.nodes[0].author.login // "") == $bot) | .id' 2>/dev/null)
 
-                echo "Resolved $RESOLVED_COUNT of $UNRESOLVED unresolved thread(s) on PR #$PR_NUMBER"
+                echo "Resolved $RESOLVED_COUNT of $BOT_UNRESOLVED automated-reviewer thread(s) on PR #$PR_NUMBER"
 
                 gh pr comment "$PR_NUMBER" --repo "$REPO" \
-                  --body "🤖 scheduled-merge auto-resolved ${RESOLVED_COUNT} unresolved review thread(s) on this mechanical release PR (all status checks green). Release PRs are version-bump + changelog aggregations; the underlying feature code was reviewed on its own PR before landing on main." || true
+                  --body "🤖 scheduled-merge auto-resolved ${RESOLVED_COUNT} automated-reviewer thread(s) on this mechanical release PR (all status checks SUCCESS, no human threads, no pending review verdict). Release PRs are version-bump + changelog aggregations; the underlying feature code was reviewed on its own PR before landing on main." || true
 
                 # Poll until GitHub reports a MERGEABLE state (CLEAN/UNSTABLE/
                 # HAS_HOOKS) or the retry budget is exhausted. Do NOT break on
