@@ -31,9 +31,18 @@
 // so a configured team still shows a real image instead of a blank circle — this also
 // covers PRIVATE repos (the avatar is public even when the repo contents are not).
 // Cache: JSON files in cacheDir (default ~/catalyst/repo-icon-cache/), keyed by
-//   owner-repo slug, TTL 7 days (schema v3 — older-schema entries re-probe once). A negative
+//   owner-repo slug, TTL 7 days (schema v4 — older-schema entries re-probe once). A negative
 //   result ("no icon found") is also cached (with a 1-day TTL) so we don't hammer
 //   the GitHub API on every boot.
+//
+// A favicon PATH existing does NOT mean it renders: a probed path can fetch to an
+// empty/transiently-failed body, which renders as a BLANK icon. Such candidates are
+// treated as no-icon — filtered out before selection and before caching — and when NO
+// renderable candidate survives we fall through to the SAME owner-avatar fallback used
+// when no favicon path exists at all. Invariant: a cached `found:true` ALWAYS carries at
+// least one renderable (non-empty dataUrl) candidate. (Without this an empty-but-present
+// favicon would positive-cache for 7 days, render blank, AND suppress the avatar fallback
+// forever — because that fallback only fired on zero probed paths.)
 //
 // Fail-open: any error (no gh binary, API rate-limit, no internet) returns null
 // so the UI falls through to the manual-override / lucide fallback.
@@ -62,10 +71,30 @@ export function inferIconFormat(path: string): IconFormat {
   return "png";
 }
 
-/** Best = lowest FORMAT_RANK, tie-broken by ICON_PATH_PRIORITY index. */
+/**
+ * A candidate is RENDERABLE iff its dataUrl carries actual image bytes — i.e. there is
+ * non-empty base64 payload after the `data:<ct>;base64,` separator. A favicon PATH can
+ * resolve while its body is empty/transiently-failed, yielding either a null dataUrl or a
+ * prefix-only `data:image/...;base64,` URL (the latter renders as a BLANK icon). Neither
+ * is renderable, so neither may ever be selected or positive-cached.
+ */
+export function hasRenderableDataUrl(c: Pick<IconCandidate, "dataUrl">): boolean {
+  const u = c.dataUrl;
+  if (!u) return false;
+  const comma = u.indexOf(",");
+  return comma !== -1 && comma < u.length - 1;
+}
+
+/**
+ * Best = lowest FORMAT_RANK, tie-broken by ICON_PATH_PRIORITY index.
+ * Only ever selects a RENDERABLE candidate (hasRenderableDataUrl) — non-renderable
+ * candidates (null/empty dataUrl) are dropped first so a blank icon is never "best".
+ * Returns null when no renderable candidate exists.
+ */
 export function pickBestCandidate(cands: readonly IconCandidate[]): IconCandidate | null {
-  if (cands.length === 0) return null;
-  return [...cands].sort((a, b) => {
+  const renderable = cands.filter(hasRenderableDataUrl);
+  if (renderable.length === 0) return null;
+  return [...renderable].sort((a, b) => {
     const fr = FORMAT_RANK[a.format] - FORMAT_RANK[b.format];
     if (fr !== 0) return fr;
     return ICON_PATH_PRIORITY.indexOf(a.path) - ICON_PATH_PRIORITY.indexOf(b.path);
@@ -111,7 +140,7 @@ export type IconResult =
     }
   | { found: false };
 
-const CACHE_SCHEMA_VERSION = 3; // v3 adds the owner-avatar fallback (CTL-1380); v1/v2 entries re-probe once
+const CACHE_SCHEMA_VERSION = 4; // v4 stops positive-caching empty/unrenderable favicons; v1–v3 entries re-probe once
 
 /** Sentinel `path` for the owner-avatar fallback candidate (CTL-1380, Bug B). Not a
  *  real in-repo file path, so it never collides with ICON_PATH_PRIORITY entries. */
@@ -215,6 +244,10 @@ export async function fetchAsDataUrl(url: string): Promise<string | null> {
     if (!resp.ok) return null;
     const ct = resp.headers.get("content-type") ?? "image/png";
     const buf = await resp.arrayBuffer();
+    // An empty body is NOT a renderable image — a path can exist while the fetch returns
+    // zero bytes (transient failure / placeholder). Returning a prefix-only
+    // `data:...;base64,` URL here would render as a blank icon, so treat it as no-icon.
+    if (buf.byteLength === 0) return null;
     const b64 = Buffer.from(buf).toString("base64");
     return `data:${ct};base64,${b64}`;
   } catch {
@@ -232,7 +265,8 @@ export function buildAvatarIconResult(
   avatarUrl: string | null,
   avatarDataUrl: string | null,
 ): IconResult {
-  if (!avatarUrl || !avatarDataUrl) return { found: false };
+  // Require a RENDERABLE avatar data URL — never emit a found:true that would render blank.
+  if (!avatarUrl || !hasRenderableDataUrl({ dataUrl: avatarDataUrl })) return { found: false };
   const avatar: IconCandidate = {
     path: OWNER_AVATAR_PATH,
     format: "png",
@@ -272,50 +306,88 @@ export function resolveRepoIconCandidates(
  */
 
 /**
+ * Injectable I/O seam for fetchRepoIcon — lets tests run fully offline (no `gh`, no
+ * network) by supplying fakes. Defaults wire the real GitHub-backed implementations.
+ */
+export interface RepoIconDeps {
+  resolveCandidates: (ownerRepo: string) => { path: string; downloadUrl: string }[];
+  resolveAvatar: (ownerRepo: string) => string | null;
+  fetchDataUrl: (url: string) => Promise<string | null>;
+}
+
+const DEFAULT_REPO_ICON_DEPS: RepoIconDeps = {
+  resolveCandidates: resolveRepoIconCandidates,
+  resolveAvatar: resolveOwnerAvatar,
+  fetchDataUrl: fetchAsDataUrl,
+};
+
+/**
  * Fetch the best icon for a GitHub repo, with disk cache.
  * Returns all detected candidates plus the default-best (SVG > PNG > ICO).
  * Legacy top-level path/downloadUrl/dataUrl fields mirror the best candidate.
  * Falls through gracefully (returns `{ found: false }`) on any error.
+ *
+ * Only RENDERABLE candidates (non-empty dataUrl) are kept: a probed favicon PATH whose
+ * body fetched empty/failed is dropped, and if NO renderable candidate survives we fall
+ * through to the SAME owner-avatar fallback used when zero favicon paths exist. So a
+ * cached `found:true` always carries a renderable candidate; a zero-renderable outcome is
+ * either the avatar (found:true, renderable) or a negative (found:false, 1-day) cache —
+ * never a 7-day positive cache of a blank icon.
  */
 export async function fetchRepoIcon(
   ownerRepo: string,
   cacheDir?: string,
+  deps: RepoIconDeps = DEFAULT_REPO_ICON_DEPS,
 ): Promise<IconResult> {
   const dir = cacheDir ?? join(homedir(), "catalyst", "repo-icon-cache");
 
   const cached = readCache(dir, ownerRepo);
   if (cached !== null) return cached;
 
+  // CTL-1380 (Bug B) owner-avatar fallback. Used both when NO favicon path exists AND
+  // when every probed favicon fetched to an empty/unrenderable body. Covers favicon-less
+  // repos AND private repos (the avatar is public). If the avatar can't be resolved/
+  // fetched (offline, no gh, unknown owner) buildAvatarIconResult fails open to
+  // { found: false } → the UI lucide fallback.
+  const avatarFallback = async (): Promise<IconResult> => {
+    const avatarUrl = deps.resolveAvatar(ownerRepo);
+    const avatarDataUrl = avatarUrl ? await deps.fetchDataUrl(avatarUrl) : null;
+    return buildAvatarIconResult(avatarUrl, avatarDataUrl);
+  };
+
   let result: IconResult;
   try {
-    const hits = resolveRepoIconCandidates(ownerRepo);
+    const hits = deps.resolveCandidates(ownerRepo);
     if (hits.length === 0) {
-      // CTL-1380 (Bug B): no favicon at any probed path → fall back to the GitHub
-      // owner/org avatar so the project still renders a real image instead of a blank
-      // circle. Covers favicon-less repos AND private repos (the avatar is public).
-      // If the avatar can't be resolved/fetched (offline, no gh, unknown owner) we
-      // still fail-open to { found: false } → the UI lucide fallback.
-      const avatarUrl = resolveOwnerAvatar(ownerRepo);
-      const avatarDataUrl = avatarUrl ? await fetchAsDataUrl(avatarUrl) : null;
-      result = buildAvatarIconResult(avatarUrl, avatarDataUrl);
+      result = await avatarFallback();
     } else {
       const candidates: IconCandidate[] = await Promise.all(
         hits.map(async (h) => ({
           path: h.path,
           format: inferIconFormat(h.path),
           downloadUrl: h.downloadUrl,
-          dataUrl: await fetchAsDataUrl(h.downloadUrl),
+          dataUrl: await deps.fetchDataUrl(h.downloadUrl),
         })),
       );
-      const best = pickBestCandidate(candidates) ?? candidates[0];
-      result = {
-        found: true,
-        candidates,
-        selectedPath: best.path,
-        path: best.path,
-        downloadUrl: best.downloadUrl,
-        dataUrl: best.dataUrl,
-      };
+      // Keep only candidates that actually fetched a renderable (non-empty) image. A
+      // favicon PATH can exist while its body is empty/transiently-failed; keeping such a
+      // candidate would render a BLANK icon AND (because hits.length > 0) suppress the
+      // owner-avatar fallback forever once positive-cached. Drop them.
+      const renderable = candidates.filter(hasRenderableDataUrl);
+      if (renderable.length === 0) {
+        // Every probed favicon was empty/unfetchable → same fallback as no-favicon.
+        result = await avatarFallback();
+      } else {
+        const best = pickBestCandidate(renderable) ?? renderable[0];
+        result = {
+          found: true,
+          candidates: renderable,
+          selectedPath: best.path,
+          path: best.path,
+          downloadUrl: best.downloadUrl,
+          dataUrl: best.dataUrl,
+        };
+      }
     }
   } catch {
     // Don't cache unexpected errors — let a retry happen next time
