@@ -79,7 +79,143 @@ jobs:
               exit 1
               ;;
             BLOCKED|DIRTY|CONFLICTING|UNKNOWN|*)
+              echo "PR #$PR_NUMBER not immediately mergeable (mergeStateStatus=$MERGE_STATE); evaluating auto-resolve eligibility"
+
+              # --------------------------------------------------------------
+              # Auto-resolve path (BLOCKED only): a release PR is a mechanical
+              # version-bump + changelog aggregation. The underlying feature
+              # code was already reviewed on its own PR before it landed on
+              # main, so when the ONLY thing blocking THIS release PR is
+              # unresolved review threads (e.g. the chatgpt-codex-connector bot
+              # leaving changelog nits) AND every status check is green, it is
+              # safe to auto-resolve those threads. We never use --admin and we
+              # only ever touch this single release PR ($PR_NUMBER).
+              # --------------------------------------------------------------
+              OWNER="${REPO%%/*}"
+              NAME="${REPO##*/}"
+
+              # shellcheck disable=SC2016  # $owner/$name/$number are GraphQL variables, must stay literal
+              GQL=$(gh api graphql \
+                -f owner="$OWNER" -f name="$NAME" -F number="$PR_NUMBER" \
+                -f query='
+                  query($owner:String!, $name:String!, $number:Int!) {
+                    repository(owner:$owner, name:$name) {
+                      pullRequest(number:$number) {
+                        reviewDecision
+                        reviewThreads(first:100) { nodes { id isResolved comments(first:1){ nodes { author { login } } } } }
+                        commits(last:1) { nodes { commit { statusCheckRollup { state } } } }
+                      }
+                    }
+                  }' 2>/dev/null) || GQL=""
+
+              REVIEW_DECISION=$(echo "$GQL" | jq -r '.data.repository.pullRequest.reviewDecision // empty' 2>/dev/null || echo "")
+              ROLLUP_STATE=$(echo "$GQL" | jq -r '.data.repository.pullRequest.commits.nodes[0].commit.statusCheckRollup.state // empty' 2>/dev/null || echo "")
+              UNRESOLVED=$(echo "$GQL" | jq -r '[.data.repository.pullRequest.reviewThreads.nodes[] | select(.isResolved==false)] | length' 2>/dev/null || echo "0")
+              [[ "$UNRESOLVED" =~ ^[0-9]+$ ]] || UNRESOLVED=0
+
+              # Only the automated reviewer's OWN threads are eligible for
+              # auto-resolution. A thread opened by anyone else (a human) on the
+              # release PR is a genuine conversation that must NEVER be
+              # auto-resolved — its presence forces escalation instead.
+              BOT_REVIEWER="chatgpt-codex-connector"
+              BOT_UNRESOLVED=$(echo "$GQL" | jq -r --arg bot "$BOT_REVIEWER" '[.data.repository.pullRequest.reviewThreads.nodes[] | select(.isResolved==false) | select((.comments.nodes[0].author.login // "") == $bot)] | length' 2>/dev/null || echo "0")
+              [[ "$BOT_UNRESOLVED" =~ ^[0-9]+$ ]] || BOT_UNRESOLVED=0
+              HUMAN_UNRESOLVED=$(echo "$GQL" | jq -r --arg bot "$BOT_REVIEWER" '[.data.repository.pullRequest.reviewThreads.nodes[] | select(.isResolved==false) | select((.comments.nodes[0].author.login // "") != $bot)] | length' 2>/dev/null || echo "0")
+              [[ "$HUMAN_UNRESOLVED" =~ ^[0-9]+$ ]] || HUMAN_UNRESOLVED=0
+
+              # CHECKS_GREEN requires an explicit SUCCESS rollup. An empty/absent
+              # rollup is NOT green: required checks (docs-gate, Cloudflare Pages)
+              # report asynchronously and some run on GitHub's test-merge ref, so
+              # an empty head rollup can mean "checks haven't reported yet", not
+              # "no checks". PENDING/FAILURE/ERROR/EXPECTED are not green either.
+              # This guarantees we never resolve threads before CI is truly green.
+              CHECKS_GREEN=false
+              if [[ "$ROLLUP_STATE" == "SUCCESS" ]]; then
+                CHECKS_GREEN=true
+              fi
+
+              echo "Auto-resolve probe: reviewDecision=${REVIEW_DECISION:-none} statusCheckRollup=${ROLLUP_STATE:-none} checksGreen=$CHECKS_GREEN unresolvedThreads=$UNRESOLVED (bot=$BOT_UNRESOLVED human=$HUMAN_UNRESOLVED) mergeable=$MERGEABLE"
+
+              # Auto-resolve ONLY when EVERY guard holds:
+              #  - BLOCKED + MERGEABLE        (merge is wanted, just gated)
+              #  - CHECKS_GREEN == true       (explicit SUCCESS rollup; see above)
+              #  - REVIEW_DECISION not REVIEW_REQUIRED/CHANGES_REQUESTED
+              #                               (no pending human review verdict)
+              #  - HUMAN_UNRESOLVED == 0      (no human-authored thread — those
+              #                               are real conversations; their
+              #                               presence forces escalation)
+              #  - BOT_UNRESOLVED > 0         (at least one automated-reviewer
+              #                               thread to clear)
+              if [[ "$MERGE_STATE" == "BLOCKED" && "$MERGEABLE" == "MERGEABLE" && "$CHECKS_GREEN" == "true" \
+                    && "$REVIEW_DECISION" != "REVIEW_REQUIRED" && "$REVIEW_DECISION" != "CHANGES_REQUESTED" \
+                    && "$HUMAN_UNRESOLVED" -eq 0 && "$BOT_UNRESOLVED" -gt 0 ]]; then
+                echo "Release PR #$PR_NUMBER is BLOCKED only on $BOT_UNRESOLVED automated-reviewer thread(s) (no human threads, SUCCESS checks, no pending review verdict) — auto-resolving."
+
+                RESOLVED_COUNT=0
+                while IFS= read -r THREAD_ID; do
+                  if [[ -z "$THREAD_ID" ]]; then continue; fi
+                  # gh inside an `if` condition does not trip `set -e`, so one
+                  # failed thread-resolve never aborts the loop.
+                  # shellcheck disable=SC2016  # $threadId is a GraphQL variable, must stay literal
+                  if gh api graphql -f threadId="$THREAD_ID" -f query='
+                    mutation($threadId:ID!) {
+                      resolveReviewThread(input:{threadId:$threadId}) { thread { isResolved } }
+                    }' >/dev/null 2>&1; then
+                    RESOLVED_COUNT=$((RESOLVED_COUNT + 1))
+                  else
+                    echo "::warning::Failed to resolve review thread $THREAD_ID on PR #$PR_NUMBER (continuing)"
+                  fi
+                done < <(echo "$GQL" | jq -r --arg bot "$BOT_REVIEWER" '.data.repository.pullRequest.reviewThreads.nodes[] | select(.isResolved==false) | select((.comments.nodes[0].author.login // "") == $bot) | .id' 2>/dev/null)
+
+                echo "Resolved $RESOLVED_COUNT of $BOT_UNRESOLVED automated-reviewer thread(s) on PR #$PR_NUMBER"
+
+                gh pr comment "$PR_NUMBER" --repo "$REPO" \
+                  --body "🤖 scheduled-merge auto-resolved ${RESOLVED_COUNT} automated-reviewer thread(s) on this mechanical release PR (all status checks SUCCESS, no human threads, no pending review verdict). Release PRs are version-bump + changelog aggregations; the underlying feature code was reviewed on its own PR before landing on main." || true
+
+                # Poll until GitHub reports a MERGEABLE state (CLEAN/UNSTABLE/
+                # HAS_HOOKS) or the retry budget is exhausted. Do NOT break on
+                # the first non-UNKNOWN value: right after resolving threads,
+                # GitHub often still returns the stale pre-resolution BLOCKED
+                # state once before it recomputes, and breaking there would
+                # escalate an otherwise-unblocked PR until the next run.
+                RP_STATE=""
+                RP_ATTEMPT=0
+                while [[ "$RP_ATTEMPT" -lt 6 ]]; do
+                  sleep 10
+                  RP_STATE=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json mergeStateStatus --jq '.mergeStateStatus' 2>/dev/null || echo "UNKNOWN")
+                  echo "Post-resolve re-poll $((RP_ATTEMPT + 1))/6: mergeStateStatus=$RP_STATE"
+                  case "$RP_STATE" in
+                    CLEAN|UNSTABLE|HAS_HOOKS) break ;;
+                  esac
+                  RP_ATTEMPT=$((RP_ATTEMPT + 1))
+                done
+
+                case "$RP_STATE" in
+                  CLEAN|UNSTABLE|HAS_HOOKS)
+                    echo "Merging release PR #$PR_NUMBER after auto-resolving threads"
+                    # No `|| true` here: a failed merge must surface loudly.
+                    gh pr merge "$PR_NUMBER" --repo "$REPO" --squash --delete-branch
+                    echo "Release PR #$PR_NUMBER merged after auto-resolving threads"
+                    exit 0
+                    ;;
+                  *)
+                    echo "::warning::PR #$PR_NUMBER still not mergeable after auto-resolving threads (mergeStateStatus=$RP_STATE); escalating to a human"
+                    ;;
+                esac
+              else
+                echo "Not eligible for thread auto-resolution (requires BLOCKED + MERGEABLE + green checks + unresolved threads) — treating as a genuine block."
+              fi
+
+              # --------------------------------------------------------------
+              # Genuine block (or auto-resolution did not unblock the PR): make
+              # sure the alert actually fires. The previous version silently
+              # no-op'd because `gh issue create --label release-health` failed
+              # when the label did not exist, so a 5-day stall (PR #2317) went
+              # completely unnoticed. Ensure the label exists before filing.
+              # --------------------------------------------------------------
               echo "::error::Release PR #$PR_NUMBER not mergeable (mergeStateStatus=$MERGE_STATE)"
+
+              gh label create release-health --repo "$REPO" --color FBCA04 --description "Release pipeline health" 2>/dev/null || true
 
               EXISTING=$(gh issue list --repo "$REPO" --label "release-health" --state open \
                 --json number --jq '.[0].number // empty')
