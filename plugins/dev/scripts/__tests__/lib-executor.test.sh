@@ -140,6 +140,15 @@ CPU=$(executor_job_cpu "nope0000")
 [ -z "$CPU" ] && pass "missing state.json → empty CPU" || fail "missing state.json → empty CPU" "got: '$CPU'"
 teardown
 
+echo "test 10: executor_kind — CATALYST_EXECUTOR (default bg) (CTL-1365a)"
+setup
+unset CATALYST_EXECUTOR
+[ "$(executor_kind)" = "bg" ] && pass "unset → bg" || fail "unset → bg" "got: $(executor_kind)"
+export CATALYST_EXECUTOR="sdk"
+[ "$(executor_kind)" = "sdk" ] && pass "echoes CATALYST_EXECUTOR" || fail "echoes CATALYST_EXECUTOR" "got: $(executor_kind)"
+unset CATALYST_EXECUTOR
+teardown
+
 echo ""
 echo "─────────────────────────────────────────"
 echo "Results: ${PASSES} pass, ${FAILURES} fail"

@@ -71,16 +71,42 @@ function resolveNodeName(env) {
   return env.CATALYST_HOST_NAME || shortHostName();
 }
 
+// buildTracingResource — CTL-1365a: the trace RESOURCE attribute object, factored
+// out so the dispatch-mode dimension is unit-testable WITHOUT standing up an OTLP
+// provider. service.name / service.namespace + the SHORT host.name are the
+// canonical cross-signal join keys (CTL data-quality finding). catalyst.dispatch.mode
+// rides the resource so Tempo splits traces via resource.catalyst.dispatch.mode —
+// deliberately NOT promoted onto metrics (the tick-timing log field is the metric
+// source; promoting the resource attr too re-triggers the OTL-20 duplicate-label
+// collision that silently drops the metric). Pure; never throws. ATTR_SERVICE_NAME /
+// ATTR_SERVICE_NAMESPACE are literally "service.name" / "service.namespace".
+export function buildTracingResource({ serviceName, dispatchMode = "phase-agents", env = process.env } = {}) {
+  return {
+    "service.name": serviceName,
+    "service.namespace": "catalyst",
+    "host.name": shortHostName(),
+    "catalyst.node.name": resolveNodeName(env),
+    "catalyst.dispatch.mode": dispatchMode,
+  };
+}
+
 // initTracing — construct the provider + OTLP/HTTP exporter + BatchSpanProcessor ONCE.
 // Idempotent; a no-op when disabled or already initialized. NEVER throws.
-export async function initTracing({ serviceName, env = process.env } = {}) {
+// CTL-1365a: `dispatchMode` is the catalyst.dispatch.mode telemetry vocab
+// ({phase-agents | oneshot-legacy | sdk}) the daemon resolves once from the
+// executor flag. It rides the trace RESOURCE so Tempo splits traces via
+// `resource.catalyst.dispatch.mode` — deliberately NOT promoted onto metrics
+// (the log field on the tick line is the metric source; promoting the resource
+// attr too re-triggers the OTL-20 duplicate-label collision that drops the
+// metric). OFF-safe: reading the string is the only new work when tracing is off;
+// the SDK/provider work below still short-circuits on the tracingEnabled gate.
+export async function initTracing({ serviceName, dispatchMode = "phase-agents", env = process.env } = {}) {
   if (_enabled) return true;
   if (!tracingEnabled(env)) return false;
   try {
     const { BasicTracerProvider, BatchSpanProcessor } = await import("@opentelemetry/sdk-trace-base");
     const { OTLPTraceExporter } = await import("@opentelemetry/exporter-trace-otlp-http");
     const { resourceFromAttributes } = await import("@opentelemetry/resources");
-    const { ATTR_SERVICE_NAME, ATTR_SERVICE_NAMESPACE } = await import("@opentelemetry/semantic-conventions");
 
     // Same collector otel-forward uses. OTEL_EXPORTER_OTLP_ENDPOINT is the base (otel-forward
     // maps :4317->:4318 for HTTP); we append /v1/traces. Traces to this endpoint route to
@@ -91,14 +117,10 @@ export async function initTracing({ serviceName, env = process.env } = {}) {
     const exporter = new OTLPTraceExporter({ url: `${base}/v1/traces` });
 
     _provider = new BasicTracerProvider({
-      resource: resourceFromAttributes({
-        [ATTR_SERVICE_NAME]: serviceName,
-        // service.namespace + the SHORT host.name are the canonical cross-signal join keys
-        // (CTL data-quality finding) — traces previously carried neither.
-        [ATTR_SERVICE_NAMESPACE]: "catalyst",
-        "host.name": shortHostName(),
-        "catalyst.node.name": resolveNodeName(env),
-      }),
+      // CTL-1365a: resource attrs (incl. catalyst.dispatch.mode) built by the pure,
+      // unit-tested buildTracingResource helper. service.namespace + the SHORT
+      // host.name are the canonical cross-signal join keys (CTL data-quality finding).
+      resource: resourceFromAttributes(buildTracingResource({ serviceName, dispatchMode, env })),
       spanProcessors: [new BatchSpanProcessor(exporter)],
     });
     trace.setGlobalTracerProvider(_provider);

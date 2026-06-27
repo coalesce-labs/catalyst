@@ -2139,6 +2139,99 @@ DRY_OUT_T67=$(cd "${TEST_DIR}/proj" &&
 T67_BG_ISO=$(echo "$DRY_OUT_T67" | jq -r '.settings.worktree.bgIsolation // empty' 2>/dev/null)
 assert_eq "none" "$T67_BG_ISO" "dry-run .settings.worktree.bgIsolation = none"
 
+# ─── CTL-1365b: shared pre-launch / launch-verb seam ────────────────────────
+# The executor seam is the LAUNCH VERB, not the dispatch path. `--launch-mode
+# prelaunch-only` runs the IDENTICAL pre-launch (CTL-736 claim + status:dispatched
+# signal + CATALYST_GENERATION fencing token + rebase + prompt/env build) but
+# stops BEFORE `claude --bg`, emitting the resolved launch spec. These tests pin
+# that (a) prelaunch-only never launches claude and leaves the signal at the same
+# "dispatched"/fenced state the skill template requires to pre-exist, and (b) the
+# pre-launch composition (prompt/env/settings) is byte-for-byte the same one the
+# bg launch verb consumes — so swapping in the SDK launch verb changes nothing
+# upstream of the launch.
+
+echo ""
+echo "Test 68 (CTL-1365b): prelaunch-only runs the shared pre-launch but does NOT spawn claude"
+fresh_env t68
+SPEC=$(cd "${TEST_DIR}/proj" &&
+	"$DISPATCH" --phase triage --ticket CTL-100 --orch-dir "$ORCH_DIR" --orch-id orch-test \
+		--launch-mode prelaunch-only 2>/dev/null)
+SIGNAL="${WORKER_DIR}/phase-triage.json"
+# claude must NOT have been invoked (the bg launch verb is skipped).
+CLAUDE_INVOKED="no"
+[[ -f $CLAUDE_STUB_LOG ]] && CLAUDE_INVOKED="yes"
+assert_eq "no" "$CLAUDE_INVOKED" "prelaunch-only does NOT invoke claude --bg"
+# The shared pre-launch still wrote the status:dispatched signal + fencing token.
+assert_eq "dispatched" "$(jq -r '.status' "$SIGNAL")" "prelaunch-only leaves signal at status=dispatched (skill flips it to running)"
+assert_eq "1" "$(jq -r '.generation' "$SIGNAL")" "prelaunch-only claims fresh generation 1 in the signal"
+assert_eq "null" "$(jq -r '.bg_job_id' "$SIGNAL")" "prelaunch-only signal has no bg_job_id (no bg launch)"
+# The emitted spec carries what the in-process SDK query() needs.
+assert_eq "prelaunch-ready" "$(echo "$SPEC" | jq -r '.status')" "spec.status = prelaunch-ready"
+assert_eq "prelaunch-only" "$(echo "$SPEC" | jq -r '.launchMode')" "spec.launchMode = prelaunch-only"
+assert_eq "1" "$(echo "$SPEC" | jq -r '.generation')" "spec.generation = the claimed fencing token"
+assert_eq "null" "$(echo "$SPEC" | jq -r '.bg_job_id')" "spec.bg_job_id = null"
+assert_eq "${TEST_DIR}/proj" "$(echo "$SPEC" | jq -r '.worktreePath')" "spec.worktreePath = the dispatch cwd (SDK query() cwd)"
+assert_eq "/catalyst-dev:phase-triage CTL-100 --orch-dir ${ORCH_DIR}" \
+	"$(echo "$SPEC" | jq -r '.prompt')" "spec.prompt = the phase slash command"
+
+echo ""
+echo "Test 69 (CTL-1365b): an invalid --launch-mode is rejected"
+fresh_env t69
+"$DISPATCH" --phase triage --ticket CTL-100 --orch-dir "$ORCH_DIR" --orch-id orch-test \
+	--launch-mode bogus >/dev/null 2>"${TEST_DIR}/lm.err"
+RC_LM=$?
+assert_eq "1" "$RC_LM" "invalid --launch-mode exits 1"
+assert_contains "$(cat "${TEST_DIR}/lm.err")" "invalid --launch-mode" "invalid --launch-mode produces a clear error"
+
+echo ""
+echo "Test 70 (CTL-1365b): PRE-LAUNCH PARITY — prelaunch-only emits the same prompt/env/settings the bg launch verb consumes"
+# Two proofs of byte-identical pre-launch composition. ONE fixture (so orch-dir,
+# ticket and cwd — which are embedded in the prompt/env — are identical across
+# runs); the signal + claim files are reset between runs so each gets a fresh
+# gen-1 dispatch instead of an idempotent no-op.
+fresh_env t70
+cat >"${CONFIG_DIR}/config.json" <<EOF
+{ "catalyst": { "projectKey": "test-proj" } }
+EOF
+T70_SIGNAL="${WORKER_DIR}/phase-triage.json"
+reset_t70() { rm -f "$T70_SIGNAL" "${WORKER_DIR}/triage.claim."* 2>/dev/null; }
+
+# (a) the dry-run preview — full composed env array.
+reset_t70
+DRY=$(cd "${TEST_DIR}/proj" &&
+	"$DISPATCH" --phase triage --ticket CTL-100 --orch-dir "$ORCH_DIR" --orch-id orch-test --dry-run 2>/dev/null)
+# (b) prelaunch-only — full composed env array + real claim/signal side effects.
+reset_t70
+SPEC=$(cd "${TEST_DIR}/proj" &&
+	"$DISPATCH" --phase triage --ticket CTL-100 --orch-dir "$ORCH_DIR" --orch-id orch-test \
+		--launch-mode prelaunch-only 2>/dev/null)
+# (c) the bg launch — capture the prompt + env it actually hands to claude --bg.
+reset_t70
+(cd "${TEST_DIR}/proj" &&
+	"$DISPATCH" --phase triage --ticket CTL-100 --orch-dir "$ORCH_DIR" --orch-id orch-test \
+		>/dev/null 2>&1)
+BG_LOG=$(cat "$CLAUDE_STUB_LOG")
+BG_GENERATION=$(jq -r '.generation' "$T70_SIGNAL")
+
+# (1) prompt + core CATALYST_* env parity against the actual bg claude invocation.
+SPEC_PROMPT=$(echo "$SPEC" | jq -r '.prompt')
+assert_contains "$BG_LOG" "$SPEC_PROMPT" "spec.prompt matches the prompt bg passes to claude --bg"
+for KEY in "CATALYST_ORCHESTRATOR_DIR=${ORCH_DIR}" "CATALYST_PHASE=triage" "CATALYST_TICKET=CTL-100"; do
+	SPEC_HAS=$(echo "$SPEC" | jq -r --arg k "$KEY" '.env | index($k) != null')
+	assert_contains "$BG_LOG" "$KEY" "bg env carries $KEY"
+	assert_eq "true" "$SPEC_HAS" "prelaunch spec.env carries $KEY (parity with bg)"
+done
+assert_eq "$BG_GENERATION" "$(echo "$SPEC" | jq -r '.generation')" "prelaunch generation matches the bg path's fresh generation"
+
+# (2) full composed-env / prompt / settings parity against the dry-run preview.
+#     (dry-run.env ≡ bg's claude env is pinned by Tests 10/14, so this is the
+#     transitive byte-identical proof for the WHOLE DISPATCH_ENV array.)
+for FIELD in .env .prompt .settings .model .turnCap .sessionName .pluginDirs; do
+	DRY_VAL=$(echo "$DRY" | jq -cS "$FIELD")
+	PL_VAL=$(echo "$SPEC" | jq -cS "$FIELD")
+	assert_eq "$DRY_VAL" "$PL_VAL" "prelaunch ${FIELD} == dry-run ${FIELD} (pre-launch composition byte-identical)"
+done
+
 echo ""
 echo "─────────────────────────────────────────────"
 echo "phase-agent-dispatch: ${PASSES} passed, ${FAILURES} failed"

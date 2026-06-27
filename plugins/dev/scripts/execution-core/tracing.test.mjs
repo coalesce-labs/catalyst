@@ -2,15 +2,24 @@
 // invariants. Uses an in-memory exporter so nothing hits a real OTLP collector.
 
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
+import { mkdtempSync, mkdirSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { BasicTracerProvider, InMemorySpanExporter, SimpleSpanProcessor } from "@opentelemetry/sdk-trace-base";
+import { resourceFromAttributes } from "@opentelemetry/resources";
 import { SpanKind, SpanStatusCode } from "@opentelemetry/api";
 import {
   tracingEnabled,
   getTracer,
   emitTickTrace,
   emitLivenessRefreshSpan,
+  buildTracingResource,
+  initTracing,
+  shutdownTracing,
   __setTracerForTest,
 } from "./tracing.mjs";
+import { schedulerTick } from "./scheduler.mjs";
+import { dispatchModeForExecutor } from "./config.mjs";
 
 describe("tracingEnabled (CTL-1330 Tier 3 — OFF by default)", () => {
   test("OFF unless CATALYST_TRACING=on", () => {
@@ -502,5 +511,135 @@ describe("emitLivenessRefreshSpan (in-memory exporter)", () => {
     const [span] = exporter.getFinishedSpans();
     expect(span.attributes["catalyst.liveness.outcome"]).toBe("resolved");
     expect(span.status.code).toBe(SpanStatusCode.UNSET);
+  });
+});
+
+// CTL-1365a: the catalyst.dispatch.mode telemetry dimension (OTEL #43/#44, frozen).
+// Resource attr for traces; log field for metrics — each sourced its own way.
+describe("buildTracingResource — catalyst.dispatch.mode (CTL-1365a)", () => {
+  test("defaults to phase-agents (today's bg substrate) when no mode passed", () => {
+    const r = buildTracingResource({ serviceName: "catalyst.execution-core", env: {} });
+    expect(r["catalyst.dispatch.mode"]).toBe("phase-agents");
+    expect(r["service.name"]).toBe("catalyst.execution-core");
+    expect(r["service.namespace"]).toBe("catalyst");
+    expect(typeof r["host.name"]).toBe("string");
+    expect("catalyst.node.name" in r).toBe(true);
+  });
+
+  test("carries the passed mode (sdk) verbatim", () => {
+    const r = buildTracingResource({ serviceName: "x", dispatchMode: "sdk", env: {} });
+    expect(r["catalyst.dispatch.mode"]).toBe("sdk");
+  });
+
+  test("the executor→mode mapping flows through (bg→phase-agents)", () => {
+    const r = buildTracingResource({
+      serviceName: "x",
+      dispatchMode: dispatchModeForExecutor("bg"),
+      env: {},
+    });
+    expect(r["catalyst.dispatch.mode"]).toBe("phase-agents");
+  });
+});
+
+describe("initTracing tags the trace resource with catalyst.dispatch.mode (CTL-1365a)", () => {
+  afterEach(async () => {
+    await shutdownTracing();
+    __setTracerForTest(null);
+  });
+
+  test("OFF (CATALYST_TRACING unset) → returns false, no tracer, no SDK work", async () => {
+    const on = await initTracing({ serviceName: "catalyst.execution-core", dispatchMode: "sdk", env: {} });
+    expect(on).toBe(false);
+    expect(getTracer()).toBeNull();
+  });
+
+  // OFFLINE (CTL-1365a): build a provider from buildTracingResource() + an
+  // InMemorySpanExporter and assert an emitted span carries the resource attr.
+  // Does NOT call the real initTracing — that constructs an OTLPTraceExporter to
+  // the collector + a BatchSpanProcessor whose shutdownTracing() flush hangs ~5s
+  // and times out where the collector is unreachable (CI). buildTracingResource is
+  // exactly what initTracing feeds into its provider's resource, so this proves
+  // the same wiring offline. (resource content is also covered by the pure
+  // buildTracingResource tests above.)
+  test("ON → the resource on emitted spans carries the resolved dispatch mode", () => {
+    const exporter = new InMemorySpanExporter();
+    const resource = resourceFromAttributes(
+      buildTracingResource({
+        serviceName: "catalyst.execution-core",
+        dispatchMode: "sdk",
+        env: { CATALYST_TRACING: "on" },
+      })
+    );
+    const provider = new BasicTracerProvider({ resource, spanProcessors: [new SimpleSpanProcessor(exporter)] });
+    const span = provider.getTracer("test").startSpan("ctl1365a-probe");
+    // SDK ReadableSpan carries the provider resource.
+    expect(span.resource.attributes["catalyst.dispatch.mode"]).toBe("sdk");
+    expect(span.resource.attributes["service.name"]).toBe("catalyst.execution-core");
+    span.end();
+  });
+});
+
+// CTL-1365a: the metric leg — the CTL-1330 tick-timing log line carries the
+// dispatch-mode field (OTEL ParseJSON(body)→signaltometrics labels metrics from it).
+// Drives a real (empty-board) schedulerTick under a temp CATALYST_DIR and captures
+// the pino line off stderr.
+describe("tick-timing log line carries catalyst.dispatch.mode (CTL-1365a)", () => {
+  let prevCatalystDir, catalystDir, orchDir;
+
+  beforeEach(() => {
+    prevCatalystDir = process.env.CATALYST_DIR;
+    catalystDir = mkdtempSync(join(tmpdir(), "ctl1365a-tick-"));
+    if (!catalystDir.startsWith(tmpdir())) {
+      throw new Error(`refused: catalystDir not under tmpdir: ${catalystDir}`);
+    }
+    process.env.CATALYST_DIR = catalystDir;
+    mkdirSync(join(catalystDir, "events"), { recursive: true });
+    orchDir = join(catalystDir, "orch");
+    mkdirSync(join(orchDir, "workers"), { recursive: true });
+  });
+
+  afterEach(() => {
+    if (prevCatalystDir === undefined) delete process.env.CATALYST_DIR;
+    else process.env.CATALYST_DIR = prevCatalystDir;
+    rmSync(catalystDir, { recursive: true, force: true });
+  });
+
+  // Run one empty-board tick, capturing stderr (pino → process.stderr), and return
+  // the parsed "scheduler: tick timing" log object.
+  const captureTickTimingLine = (opts) => {
+    const lines = [];
+    const orig = process.stderr.write.bind(process.stderr);
+    process.stderr.write = (chunk) => {
+      lines.push(String(chunk));
+      return true;
+    };
+    try {
+      schedulerTick(orchDir, {
+        readEligible: () => [],
+        dispatch: () => ({ code: 0 }),
+        writeStatus: {
+          applyPhaseStatus: () => {},
+          applyTerminalDone: () => {},
+          applyLabel: () => ({ applied: true }),
+        },
+        ...opts,
+      });
+    } finally {
+      process.stderr.write = orig;
+    }
+    const raw = lines.join("").split("\n").filter(Boolean).find((l) => l.includes("scheduler: tick timing"));
+    return raw ? JSON.parse(raw) : null;
+  };
+
+  test("stamps the threaded dispatch mode (sdk)", () => {
+    const line = captureTickTimingLine({ dispatchMode: "sdk" });
+    expect(line).not.toBeNull();
+    expect(line["catalyst.dispatch.mode"]).toBe("sdk");
+  });
+
+  test("defaults to phase-agents (bg substrate) when no mode threaded", () => {
+    const line = captureTickTimingLine({});
+    expect(line).not.toBeNull();
+    expect(line["catalyst.dispatch.mode"]).toBe("phase-agents");
   });
 });

@@ -32,6 +32,25 @@ import { getReplicaDbPath } from "./config.mjs";
 // caller falls through to the live read, never a stale terminal verdict).
 const TERMINAL_SELECT = `SELECT state, completed_at, canceled_at FROM issues WHERE identifier = ? AND removed_at IS NULL LIMIT 1`;
 
+// CTL-1366: the cheap freshness probe. One aggregate scan of the replica's
+// `issues` table → the newest mirror timestamp + the row count. Drives the
+// catalyst.linear.replica.staleness gauge (now − maxUpdatedAtMs). Deliberately
+// unindexed/whole-table — it runs on a low cadence (once alongside cache.stats),
+// not in the hot per-signal path.
+const FRESHNESS_SELECT = `SELECT MAX(updated_at) AS maxUpdated, COUNT(*) AS n FROM issues`;
+
+// coerce a replica `updated_at` cell to epoch-ms. Accepts an epoch-ms integer
+// (the cloud change-feed shape) OR an ISO-8601 string (Date.parse fallback).
+// Anything that resolves to neither (null, NaN, garbage) → undefined → the
+// caller fails open (no gauge emitted) rather than reporting a bogus staleness.
+function coerceMs(v) {
+  if (v == null) return undefined;
+  const n = Number(v);
+  if (Number.isFinite(n)) return n; // epoch-ms integer
+  const p = Date.parse(v); // ISO-8601 text
+  return Number.isFinite(p) ? p : undefined;
+}
+
 export function createReplicaReader({ dbPath = getReplicaDbPath() } = {}) {
   let db = null;
 
@@ -74,5 +93,24 @@ export function createReplicaReader({ dbPath = getReplicaDbPath() } = {}) {
     }
   };
 
-  return { lookup, close: dropHandle };
+  // freshness() → { maxUpdatedAtMs, rowCount } | undefined  (CTL-1366)
+  //   HIT (≥1 row, parseable MAX(updated_at)) → { maxUpdatedAtMs, rowCount }
+  //   no db / no rows / null MAX / unparseable / any throw → undefined
+  // Fail-open, mirroring lookup(): a freshness failure must NEVER throw out of
+  // the scheduler tick — the gauge is simply skipped that tick.
+  const freshness = () => {
+    try {
+      const row = open().prepare(FRESHNESS_SELECT).get();
+      if (!row) return undefined;
+      const maxUpdatedAtMs = coerceMs(row.maxUpdated);
+      if (maxUpdatedAtMs === undefined) return undefined; // empty table / unparseable
+      return { maxUpdatedAtMs, rowCount: Number(row.n) || 0 };
+    } catch {
+      // Drop the handle so a later call re-opens fresh (DB may be re-seeded).
+      dropHandle();
+      return undefined;
+    }
+  };
+
+  return { lookup, freshness, close: dropHandle };
 }

@@ -6,7 +6,7 @@
 // so no test ever spawns a real script.
 
 import { describe, test, expect } from "bun:test";
-import { dispatchTicket, defaultDispatch, defaultRunPhaseAgent, teamOf } from "./dispatch.mjs";
+import { dispatchTicket, defaultDispatch, defaultRunPhaseAgent, dispatchForExecutor, sdkDispatch, makeCommentWakeDispatch, teamOf } from "./dispatch.mjs";
 
 describe("teamOf", () => {
   test("extracts the team prefix from a ticket identifier", () => {
@@ -366,6 +366,155 @@ describe("defaultRunPhaseAgent — failure diagnostics (CTL-1004/CTL-1056 Bug 2)
     );
     expect(r.signal).toBe("SIGKILL");
     expect(r.stderr).toMatch(/killed mid-run/);
+  });
+});
+
+// CTL-1365b Stage C: the executor → dispatch-function selection at the launch
+// seam. bg/oneshot-legacy resolve to the unchanged defaultDispatch (the
+// `claude --bg` path, BYTE-IDENTICAL to today); sdk resolves to sdkDispatch, which
+// injects sdkRunPhaseAgent (the in-process Agent SDK worker).
+describe("dispatchForExecutor (CTL-1365b)", () => {
+  test("bg → the unchanged defaultDispatch (byte-identical to today)", () => {
+    expect(dispatchForExecutor("bg")).toBe(defaultDispatch);
+  });
+
+  test("oneshot-legacy → the unchanged defaultDispatch", () => {
+    expect(dispatchForExecutor("oneshot-legacy")).toBe(defaultDispatch);
+  });
+
+  test("sdk → sdkDispatch (identity-stable; the sdk launch verb is wired, not a bg fallback)", () => {
+    expect(dispatchForExecutor("sdk")).toBe(sdkDispatch);
+    // identity-stable: the SAME function object every call, so the daemon's
+    // four-entry-point wiring is assertable by reference.
+    expect(dispatchForExecutor("sdk")).toBe(dispatchForExecutor("sdk"));
+  });
+
+  test("the injected bg dispatch behaves IDENTICALLY to defaultDispatch — same arg array reaches runPhaseAgent", () => {
+    // Prove the executor=bg path threads through to runPhaseAgent with the exact
+    // arg array the existing dispatch tests assert, via the same injectable seams.
+    const calls = [];
+    const seams = {
+      resolveProject: () => ({ team: "CTL", repoRoot: "/repo" }),
+      createWorktree: (args) => ({ code: 0, worktreePath: `/wt/${args.ticket}`, stderr: "" }),
+      runPhaseAgent: (args) => {
+        calls.push(args);
+        return { code: 0, stdout: "ok", stderr: "", signal: null };
+      },
+    };
+    const dispatch = dispatchForExecutor("bg"); // === defaultDispatch
+    dispatch(
+      { orchDir: "/ec", ticket: "CTL-1", phase: "implement", clusterGeneration: 7 },
+      seams
+    );
+    expect(calls[0]).toEqual({
+      orchDir: "/ec",
+      ticket: "CTL-1",
+      phase: "implement",
+      worktreePath: "/wt/CTL-1",
+      resumeSession: undefined,
+      handoffPath: undefined,
+      attempt: undefined,
+      clusterGeneration: 7,
+    });
+  });
+});
+
+// CTL-1365b: sdkDispatch reuses defaultDispatch's resolve→worktree→run pipeline,
+// swapping ONLY the launch verb (defaultRunPhaseAgent → sdkRunPhaseAgent). The
+// runPhaseAgent seam stays injectable for the wiring assertion; the default is the
+// real (async) sdkRunPhaseAgent.
+describe("sdkDispatch (CTL-1365b)", () => {
+  test("forwards through defaultDispatch with an injectable launch verb", () => {
+    const calls = [];
+    const spy = (args) => { calls.push(args); return { code: 0, stdout: "ok", stderr: "", signal: null }; };
+    const r = sdkDispatch(
+      { orchDir: "/ec", ticket: "CTL-1", phase: "implement", clusterGeneration: 7 },
+      {
+        resolveProject: () => ({ team: "CTL", repoRoot: "/repo" }),
+        createWorktree: (a) => ({ code: 0, worktreePath: `/wt/${a.ticket}`, stderr: "" }),
+        runPhaseAgent: spy, // override the sdk verb for a hermetic wiring check
+      },
+    );
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toEqual({
+      orchDir: "/ec",
+      ticket: "CTL-1",
+      phase: "implement",
+      worktreePath: "/wt/CTL-1",
+      resumeSession: undefined,
+      handoffPath: undefined,
+      attempt: undefined,
+      clusterGeneration: 7,
+    });
+    // sync launch verb → defaultDispatch's object branch → sync result + worktreePath.
+    expect(r).toEqual({ code: 0, stdout: "ok", stderr: "", signal: null, worktreePath: "/wt/CTL-1" });
+  });
+
+  test("defaults the launch verb to the real (async) sdkRunPhaseAgent — proven via the auth guard + the thenable result", async () => {
+    // No runPhaseAgent override → the real sdkRunPhaseAgent runs. With no
+    // CLAUDE_CODE_OAUTH_TOKEN and no ANTHROPIC_API_KEY it refuses at the auth guard
+    // BEFORE any spawn/SDK call, so this is hermetic. sdkRunPhaseAgent is async, so
+    // defaultDispatch's THENABLE branch composes worktreePath onto the awaited
+    // result — the sync bg path never reaches that branch (byte-identical).
+    const savedKey = process.env.ANTHROPIC_API_KEY;
+    const savedTok = process.env.CLAUDE_CODE_OAUTH_TOKEN;
+    const savedAuth = process.env.ANTHROPIC_AUTH_TOKEN;
+    delete process.env.ANTHROPIC_API_KEY;
+    delete process.env.ANTHROPIC_AUTH_TOKEN;
+    delete process.env.CLAUDE_CODE_OAUTH_TOKEN;
+    try {
+      const r = sdkDispatch(
+        { orchDir: "/ec", ticket: "CTL-1", phase: "implement" },
+        {
+          resolveProject: () => ({ team: "CTL", repoRoot: "/repo" }),
+          createWorktree: (a) => ({ code: 0, worktreePath: `/wt/${a.ticket}`, stderr: "" }),
+        },
+      );
+      expect(typeof r.then).toBe("function"); // async sdk verb → defaultDispatch returns a Promise
+      const awaited = await r;
+      expect(awaited.code).toBe(1); // auth guard refused
+      expect(awaited.stderr).toMatch(/OAUTH_TOKEN is missing|refusing to dispatch under executor=sdk/);
+      expect(awaited.worktreePath).toBe("/wt/CTL-1"); // defaultDispatch wrapped worktreePath onto the awaited result
+    } finally {
+      if (savedKey !== undefined) process.env.ANTHROPIC_API_KEY = savedKey;
+      if (savedTok !== undefined) process.env.CLAUDE_CODE_OAUTH_TOKEN = savedTok;
+      if (savedAuth !== undefined) process.env.ANTHROPIC_AUTH_TOKEN = savedAuth;
+    }
+  });
+});
+
+// CTL-1365b: makeCommentWakeDispatch binds the resolved executor dispatch into the
+// positional (orchDir,ticket,phase,opts) shape handleCommentWake invokes — the
+// comment-wake entry point honors the SAME executor (no split-brain).
+describe("makeCommentWakeDispatch (CTL-1365b)", () => {
+  test("threads the executor dispatch into dispatchTicket with orchDir/ticket/phase + opts", () => {
+    const calls = [];
+    const fakeDispatch = (args) => { calls.push(args); return { code: 0 }; };
+    const cw = makeCommentWakeDispatch(fakeDispatch);
+    const r = cw("/orch", "CTL-1", "implement", { handoffPath: "/h.md", resumeSession: "u1" });
+    expect(r.code).toBe(0);
+    expect(calls).toHaveLength(1);
+    // dispatchTicket forwarded our executor dispatch (NOT its defaultDispatch default).
+    expect(calls[0]).toEqual({
+      orchDir: "/orch",
+      ticket: "CTL-1",
+      phase: "implement",
+      handoffPath: "/h.md",
+      resumeSession: "u1",
+    });
+  });
+
+  test("bg binding (defaultDispatch) is byte-identical to the prior dispatch:dispatchTicket wiring", () => {
+    // For executor=bg, dispatch === defaultDispatch, which is also dispatchTicket's
+    // OWN default — so makeCommentWakeDispatch(defaultDispatch) routes exactly as the
+    // pre-CTL-1365 `dispatch: dispatchTicket` wiring did.
+    const cw = makeCommentWakeDispatch(defaultDispatch);
+    expect(typeof cw).toBe("function");
+    // No resumeSession/handoffPath → dispatchTicket omits both keys (back-compat).
+    const calls = [];
+    const cw2 = makeCommentWakeDispatch((args) => { calls.push(args); return { code: 0 }; });
+    cw2("/orch", "CTL-2", "triage", {});
+    expect(calls[0]).toEqual({ orchDir: "/orch", ticket: "CTL-2", phase: "triage" });
   });
 });
 

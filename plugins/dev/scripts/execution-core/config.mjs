@@ -375,6 +375,144 @@ export function getNodeClass() {
   return r.class;
 }
 
+// --- CTL-1365a: phase-worker executor selection seam ---
+//
+// `catalyst.orchestration.executor` selects the phase-worker substrate at the
+// dispatch seam. Three substrates:
+//   - "bg"             today's detached `claude --bg` job via phase-agent-dispatch.
+//   - "sdk"            in-process @anthropic-ai/claude-agent-sdk query() worker
+//                      (CTL-1365b). NOT yet implemented — resolves here, but the
+//                      dispatch wiring (dispatch.mjs:dispatchForExecutor) falls
+//                      back to bg + warns until 1b lands.
+//   - "oneshot-legacy" the catalyst-legacy single long-lived job/ticket fallback.
+//
+// Resolution mirrors resolveNodeClass: CATALYST_EXECUTOR env → Layer-1
+// catalyst.orchestration.executor → node-class default. Phase 1: every node-class
+// maps to "bg", so the resolver is a pure no-op (an unset flag never changes
+// behavior) until an operator explicitly flips a node.
+export const EXECUTORS = Object.freeze(["bg", "sdk", "oneshot-legacy"]);
+// The most-restrictive / always-safe substrate. An unrecognized explicit value
+// degrades HERE (never silently to sdk) + warns once, mirroring
+// NODE_CLASS_MOST_RESTRICTIVE — a typo'd flag can never put a node on an
+// unintended substrate.
+const EXECUTOR_DEFAULT = "bg";
+// The node-class default map (Phase 1: all "bg"). Keyed by getNodeClass(); a class
+// absent from the map falls back to EXECUTOR_DEFAULT. This is the ONE place that
+// changes (per class) once Phase 2 validates sdk on a node class.
+const EXECUTOR_BY_NODE_CLASS = Object.freeze({
+  developer: "bg",
+  worker: "bg",
+  monitor: "bg",
+});
+
+// The dispatch-mode telemetry vocab (CTL-1365a / OTEL #43/#44, frozen 2026-06-25).
+// executor → catalyst.dispatch.mode value. Closed enum {phase-agents |
+// oneshot-legacy | sdk}: "bg" maps to the existing "phase-agents" label so the
+// telemetry name is stable across the rename.
+export const DISPATCH_MODES = Object.freeze(["phase-agents", "oneshot-legacy", "sdk"]);
+const DISPATCH_MODE_BY_EXECUTOR = Object.freeze({
+  bg: "phase-agents",
+  sdk: "sdk",
+  "oneshot-legacy": "oneshot-legacy",
+});
+// dispatchModeForExecutor — map a resolved executor to its dispatch-mode telemetry
+// value. Unknown/undefined → "phase-agents" (the safe default that matches today's
+// substrate). Pure; never throws.
+export function dispatchModeForExecutor(executor) {
+  return DISPATCH_MODE_BY_EXECUTOR[executor] ?? "phase-agents";
+}
+
+// readExecutorLayer1 — pull catalyst.orchestration.executor out of a project's
+// Layer-1 .catalyst/config.json. Returns the raw value EXACTLY as written, or
+// undefined when the key is absent or the file is missing/malformed/unreadable
+// (so callers fall back to env/node-class default). Never throws — mirrors
+// readFleetHealthConfigLayer1's ENOENT-tolerant shape. resolveExecutor — not this
+// reader — judges validity, so a present-but-non-string value reaches it as an
+// explicit misconfiguration rather than being flattened to "absent".
+export function readExecutorLayer1(configPath) {
+  if (!configPath) return undefined;
+  try {
+    const parsed = JSON.parse(readFileSync(configPath, "utf8"));
+    return parsed?.catalyst?.orchestration?.executor;
+  } catch (err) {
+    if (err?.code !== "ENOENT") {
+      log.warn(
+        { configPath, err: err.message },
+        "executor: Layer-1 config unreadable; using node-class default"
+      );
+    }
+    return undefined;
+  }
+}
+
+// resolveExecutor — the pure, no-logging executor resolver. Precedence mirrors
+// resolveNodeClass (CATALYST_EXECUTOR env → Layer-1 catalyst.orchestration.executor
+// → node-class default) and never throws. Returns the full resolution detail so
+// the hot dispatch seam stays log-free and getExecutor()/doctor can decide on the
+// warn:
+//   { executor, source, inferred, recognized, raw }
+//   - source     ∈ "env" | "layer1" | "default"
+//   - inferred   = true only for the node-class default (no explicit value anywhere)
+//   - recognized = whether an explicit value named a real executor (true for the
+//                  inferred default; false routes the WARN/doctor to flag the typo)
+//   - raw        = the explicit value exactly as written (for the WARN/doctor text)
+//
+// Validity ladder (mirrors resolveNodeClass):
+//   - absent (no env + key undefined) OR an explicit null/empty "unset" sentinel
+//     ⇒ benign node-class default (inferred; zero behavior change in Phase 1).
+//   - a present non-string value (false/0/[]/{}) ⇒ explicit misconfiguration ⇒
+//     recognized:false (most-restrictive "bg"), never a silent sdk.
+//   - a non-empty string is trimmed + lowercased before the membership check, so
+//     "BG" / " sdk " resolve to their canonical executor; only a genuine
+//     non-member ("bgg") is recognized:false.
+export function resolveExecutor(configPath) {
+  const envRaw = process.env.CATALYST_EXECUTOR;
+  const hasEnv = typeof envRaw === "string" && envRaw.trim().length > 0;
+  const raw = hasEnv ? envRaw : readExecutorLayer1(configPath);
+  const source = hasEnv ? "env" : "layer1";
+
+  const nodeClassDefault = EXECUTOR_BY_NODE_CLASS[resolveNodeClass().class] ?? EXECUTOR_DEFAULT;
+
+  // Absent / explicit "unset" sentinel (undefined key or JSON null) ⇒ node-class default.
+  if (raw === undefined || raw === null) {
+    return { executor: nodeClassDefault, source: "default", inferred: true, recognized: true, raw: null };
+  }
+  // Present but not a string ⇒ explicit misconfiguration, never a silent sdk.
+  if (typeof raw !== "string") {
+    return { executor: EXECUTOR_DEFAULT, source, inferred: false, recognized: false, raw };
+  }
+  const normalized = raw.trim().toLowerCase();
+  // Empty/whitespace string ⇒ "cleared" (mirrors an empty env var) ⇒ node-class default.
+  if (normalized.length === 0) {
+    return { executor: nodeClassDefault, source: "default", inferred: true, recognized: true, raw: null };
+  }
+  if (EXECUTORS.includes(normalized)) {
+    return { executor: normalized, source, inferred: false, recognized: true, raw };
+  }
+  return { executor: EXECUTOR_DEFAULT, source, inferred: false, recognized: false, raw };
+}
+
+// getExecutor — the convenience accessor the dispatch seam reads. Returns the
+// resolved executor string (bg|sdk|oneshot-legacy). Emits a once-per-process WARN
+// ONLY for an unrecognized explicit value (the typo guard — mirrors getNodeClass).
+// An inferred node-class default is silent: in Phase 1 the WHOLE fleet is
+// intentionally defaulted, so there is nothing to declare and a per-boot warn
+// would be pure noise. Never throws.
+const _warnedExecutor = new Set();
+export function getExecutor(configPath) {
+  const r = resolveExecutor(configPath);
+  if (!r.recognized) {
+    const msg =
+      `catalyst.orchestration.executor "${r.raw}" is not one of [${EXECUTORS.join(", ")}] — ` +
+      `falling back to "${r.executor}" (most restrictive)`;
+    if (!_warnedExecutor.has(msg)) {
+      _warnedExecutor.add(msg);
+      log.warn(msg);
+    }
+  }
+  return r.executor;
+}
+
 // getStaticRoster — the `static` escape-hatch roster (CTL-1273). A multi-host
 // operator who does NOT want the Linear anchor can pin an explicit node list in
 // the Layer-2 machine-local config under catalyst.cluster.staticRoster (a JSON

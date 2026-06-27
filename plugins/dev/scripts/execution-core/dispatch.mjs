@@ -17,6 +17,7 @@ import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { getProjectConfig } from "./registry.mjs";
 import { createWorktree as defaultCreateWorktree } from "./worktree.mjs";
+import { sdkRunPhaseAgent } from "./sdk-run-phase-agent.mjs"; // CTL-1365b: the executor=sdk launch verb (in-process Agent SDK query())
 
 // phase-agent-dispatch sits one directory up from execution-core/.
 const PHASE_AGENT_DISPATCH_BIN = fileURLToPath(new URL("../phase-agent-dispatch", import.meta.url));
@@ -185,7 +186,62 @@ export function defaultDispatch(
     attempt,
     clusterGeneration,
   }); // CTL-761, CTL-864
+  // CTL-1365b: the sdk launch verb (sdkRunPhaseAgent) is ASYNC — it returns a
+  // Promise; the bg launch verb (defaultRunPhaseAgent) is SYNCHRONOUS — it returns
+  // a plain object. Detect a thenable and compose worktreePath onto the AWAITED
+  // result so an sdk dispatch resolves to the same {code,…,worktreePath} shape. The
+  // synchronous bg path takes the unchanged object branch below → byte-identical to
+  // today (the existing dispatch.test.mjs `toEqual` assertions use sync stubs and
+  // never reach the thenable branch).
+  if (res && typeof res.then === "function") {
+    return res.then((r) => ({ ...r, worktreePath: wt.worktreePath }));
+  }
   return { ...res, worktreePath: wt.worktreePath };
+}
+
+// sdkDispatch — CTL-1365b: the executor=sdk dispatch function. IDENTICAL to
+// defaultDispatch except the LAUNCH VERB: it injects sdkRunPhaseAgent (the
+// in-process Agent SDK query() worker) in place of defaultRunPhaseAgent (the
+// `claude --bg` spawn). It reuses defaultDispatch's resolve-project →
+// create-worktree → run-phase pipeline verbatim, so the ONLY behavioral delta vs
+// bg is which runPhaseAgent runs (the seam the whole cutover turns on). Because
+// sdkRunPhaseAgent is async, defaultDispatch's thenable branch composes
+// worktreePath onto the awaited result, so sdkDispatch returns a
+// Promise<{code,…,worktreePath}>. `runPhaseAgent` stays an injectable default so
+// the unit test can assert the wiring without the real SDK; the remaining seams
+// (resolveProject/createWorktree/…) pass straight through to defaultDispatch.
+export function sdkDispatch(args, { runPhaseAgent = sdkRunPhaseAgent, ...seams } = {}) {
+  return defaultDispatch(args, { runPhaseAgent, ...seams });
+}
+
+// dispatchForExecutor — CTL-1365b Stage C: map a resolved executor
+// (config.mjs:getExecutor) to the dispatch function the daemon threads into ALL
+// FOUR dispatch entry points (scheduler pull-loop, monitor →Triage one-shot,
+// comment-wake re-dispatch, boot-resume crash-recovery). Resolved ONCE per boot
+// and threaded to every site so a node never split-brains (some sites bg, others
+// sdk).
+//   - "bg" | "oneshot-legacy" → defaultDispatch (the `claude --bg` path). Returned
+//     BY IDENTITY, so the existing dispatch.test.mjs arg-array `toEqual`
+//     assertions are unaffected — the dispatched behavior is byte-identical to
+//     today.
+//   - "sdk" → sdkDispatch (injects sdkRunPhaseAgent — the in-process SDK worker).
+// Pure + identity-stable (the SAME function object per executor) so the daemon's
+// four-entry-point wiring is assertable by reference.
+export function dispatchForExecutor(executor) {
+  return executor === "sdk" ? sdkDispatch : defaultDispatch;
+}
+
+// makeCommentWakeDispatch — CTL-1365b Stage C: bind the resolved executor dispatch
+// into the positional (orchDir,ticket,phase,opts) shape handleCommentWake invokes,
+// so a comment-wake re-dispatch routes through the SAME executor as the
+// scheduler/monitor/boot-resume — closing the split-brain the plan-review flagged
+// (without it, comment-wakes would still route to bg under executor=sdk). For
+// executor=bg, `dispatch` === defaultDispatch, so this is byte-identical to the
+// prior `dispatch: dispatchTicket` wiring (dispatchTicket's own default dispatch IS
+// defaultDispatch).
+export function makeCommentWakeDispatch(dispatch) {
+  return (orchDir, ticket, phase, opts = {}) =>
+    dispatchTicket(orchDir, ticket, phase, { ...opts, dispatch });
 }
 
 // dispatchTicket — thin seam over the injectable dispatch function.
