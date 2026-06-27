@@ -243,9 +243,23 @@ export function dispatchForExecutor(executor) {
 // executor=bg, `dispatch` === defaultDispatch, so this is byte-identical to the
 // prior `dispatch: dispatchTicket` wiring (dispatchTicket's own default dispatch IS
 // defaultDispatch).
-export function makeCommentWakeDispatch(dispatch) {
+//
+// CTL-1367 P2-D: comment-wake is the 6th dispatch entry point and was the ONLY one
+// NOT settling its async (executor=sdk) result. handleCommentWake ignores the
+// returned promise, so a rejection after the synchronous prelaunch wrote
+// status:"dispatched" (e.g. buildSdkEnv/buildQueryOptions throwing) left the
+// no-bg_job_id SDK signal with no terminal event — and surfaced as an unhandled
+// rejection. Settle through settleDispatchSync + backstopOnRejection (exactly like
+// the scheduler/monitor/recovery entry points): on a rejected SDK promise it emits
+// the failed-terminal backstop (stalled signal + phase.<phase>.failed). For the bg
+// path dispatchTicket returns a SYNC result and settleDispatchSync passes it through
+// UNCHANGED (same object reference) → byte-identical.
+export function makeCommentWakeDispatch(dispatch, { emitBackstop } = {}) {
   return (orchDir, ticket, phase, opts = {}) =>
-    dispatchTicket(orchDir, ticket, phase, { ...opts, dispatch });
+    settleDispatchSync(
+      dispatchTicket(orchDir, ticket, phase, { ...opts, dispatch }),
+      { onSettled: backstopOnRejection({ orchDir, ticket, phase, log }, { emitBackstop }) },
+    );
 }
 
 // dispatchTicket — thin seam over the injectable dispatch function.

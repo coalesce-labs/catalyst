@@ -4,6 +4,9 @@
 // Run: cd plugins/dev/scripts/execution-core && bun test doctor.test.mjs
 
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
+import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   STATUS,
   mkCheck,
@@ -1194,5 +1197,48 @@ describe("checkSdkExecutorAuth (CTL-1367 item 9)", () => {
     const checks = checkSdkExecutorAuth({ executor: "sdk", env: {} });
     expect(checks[0].status).toBe(STATUS.FAIL);
     expect(checks[0].detail).toContain("CLAUDE_CODE_OAUTH_TOKEN");
+  });
+
+  // CTL-1367 P2-I: the default executor resolves from the repo Layer-1 config path
+  // (getExecutor(configPath)) so a committed executor=sdk (CATALYST_EXECUTOR unset)
+  // is SEEN — not silently resolved to the node-class default "bg".
+  describe("CTL-1367 P2-I: resolves the executor from the Layer-1 config path", () => {
+    let dir;
+    let prevExec;
+    beforeEach(() => {
+      dir = mkdtempSync(join(tmpdir(), "doctor-p2i-"));
+      prevExec = process.env.CATALYST_EXECUTOR;
+      delete process.env.CATALYST_EXECUTOR; // force resolution to read Layer-1
+    });
+    afterEach(() => {
+      if (prevExec === undefined) delete process.env.CATALYST_EXECUTOR;
+      else process.env.CATALYST_EXECUTOR = prevExec;
+      rmSync(dir, { recursive: true, force: true });
+    });
+
+    it("a committed executor=sdk in Layer-1 is gated (FAIL when the OAuth token is missing)", () => {
+      const cfg = join(dir, "config.json");
+      writeFileSync(cfg, JSON.stringify({ catalyst: { orchestration: { executor: "sdk" } } }));
+      // No explicit `executor` → resolution must read Layer-1 via configPath. env has
+      // no OAuth token, so under sdk this FAILs. With the OLD getExecutor() (no path)
+      // this would have resolved to "bg" → INFO, masking the missing token.
+      const checks = checkSdkExecutorAuth({ configPath: cfg, env: {} });
+      expect(checks[0].status).toBe(STATUS.FAIL);
+      expect(checks[0].detail).toContain("CLAUDE_CODE_OAUTH_TOKEN");
+    });
+
+    it("a committed executor=sdk in Layer-1 PASSes with subscription auth", () => {
+      const cfg = join(dir, "config.json");
+      writeFileSync(cfg, JSON.stringify({ catalyst: { orchestration: { executor: "sdk" } } }));
+      const checks = checkSdkExecutorAuth({ configPath: cfg, env: { CLAUDE_CODE_OAUTH_TOKEN: "tok" } });
+      expect(checks[0].status).toBe(STATUS.PASS);
+    });
+
+    it("Layer-1 with no executor key → bg INFO (gate not applicable)", () => {
+      const cfg = join(dir, "config.json");
+      writeFileSync(cfg, JSON.stringify({ catalyst: {} }));
+      const checks = checkSdkExecutorAuth({ configPath: cfg, env: { ANTHROPIC_API_KEY: "sk" } });
+      expect(checks[0].status).toBe(STATUS.INFO);
+    });
   });
 });

@@ -519,6 +519,41 @@ describe("makeCommentWakeDispatch (CTL-1365b)", () => {
     cw2("/orch", "CTL-2", "triage", {});
     expect(calls[0]).toEqual({ orchDir: "/orch", ticket: "CTL-2", phase: "triage" });
   });
+
+  // CTL-1367 P2-D: comment-wake is the 6th dispatch entry point and was the only one
+  // NOT settling its async (executor=sdk) result. A rejected SDK promise (after the
+  // prelaunch wrote status:"dispatched") was silently swallowed → no terminal event
+  // + an unhandled rejection. It now settles through backstopOnRejection.
+  test("CTL-1367 P2-D: a REJECTED async (sdk) comment-wake fires the failed backstop", async () => {
+    const backstops = [];
+    let rejectQuery;
+    const queryFailed = new Promise((_res, rej) => { rejectQuery = rej; });
+    const cw = makeCommentWakeDispatch(() => queryFailed, { emitBackstop: (a) => backstops.push(a) });
+    cw("/ec", "CTL-9", "implement", {});
+    expect(backstops).toHaveLength(0); // promise still pending
+    rejectQuery(new Error("buildSdkEnv exploded"));
+    await queryFailed.catch(() => {});
+    await Promise.resolve(); await Promise.resolve();
+    expect(backstops).toHaveLength(1);
+    expect(backstops[0]).toMatchObject({ ticket: "CTL-9", phase: "implement", status: "failed" });
+    expect(backstops[0].reason).toMatch(/buildSdkEnv exploded/);
+  });
+
+  test("CTL-1367 P2-D: a RESOLVED async comment-wake does NOT fire the backstop", async () => {
+    const backstops = [];
+    const cw = makeCommentWakeDispatch(() => Promise.resolve({ code: 0 }), { emitBackstop: (a) => backstops.push(a) });
+    cw("/ec", "CTL-9", "implement", {});
+    await Promise.resolve(); await Promise.resolve();
+    expect(backstops).toHaveLength(0); // clean resolution → worker owns its terminal event
+  });
+
+  test("CTL-1367 P2-D: a SYNC (bg) comment-wake passes through UNCHANGED (no backstop)", () => {
+    const backstops = [];
+    const result = { code: 0, worktreePath: "/wt" };
+    const cw = makeCommentWakeDispatch(() => result, { emitBackstop: (a) => backstops.push(a) });
+    expect(cw("/ec", "CTL-9", "implement", {})).toBe(result); // same object ref — byte-identical
+    expect(backstops).toHaveLength(0);
+  });
 });
 
 describe("dispatchTicket", () => {

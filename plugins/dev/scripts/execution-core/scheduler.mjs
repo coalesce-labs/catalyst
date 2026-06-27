@@ -4071,7 +4071,14 @@ export function schedulerTick(
   // approval sentinel. Cheap (directory scan + existsSync per worker); no API calls
   // unless a dispatch fires. Runs before the reclaim sweep so an approved ticket
   // can advance in the same tick it's dispatched.
-  processApprovedResumes({ orchDir });
+  // CTL-1367 P2-C: thread the resolved scheduler `dispatch` so a mid-run approval
+  // launches via the SAME executor the daemon resolved (the boot-time call in
+  // daemon.mjs already does this). Without it the per-tick poll fell back to
+  // processApprovedResumes' default defaultDispatch and launched via `claude --bg`
+  // even under executor=sdk — a split-brain that depended on whether the approval
+  // sentinel existed at boot or appeared later. Under bg `dispatch === defaultDispatch`
+  // so this is byte-identical to the prior call.
+  processApprovedResumes({ orchDir, dispatch });
 
   // (0) Reclaim-dead-work sweep (CTL-574) — close phase signals whose bg worker
   // died but whose work was committed before the death. Runs BEFORE the

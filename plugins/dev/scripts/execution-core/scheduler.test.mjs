@@ -86,6 +86,7 @@ import { WORK_DONE_PROBES } from "./work-done-probes.mjs";
 import { ownerForTicket } from "./hrw.mjs"; // CTL-850: HRW owner computation for the ownership-filter tests
 import { REMEDIATE_CYCLE_CAP } from "../lib/phase-fsm.mjs";
 import { removeLabel as realRemoveLabel } from "./linear-write.mjs"; // CTL-1079: exec-spy harness
+import { bootResumePendingPath, bootResumeApprovedPath } from "./boot-resume.mjs"; // CTL-1367 P2-C: per-tick approval-poll dispatch wiring
 
 let orchDir;
 let catalystDir;
@@ -2121,6 +2122,52 @@ describe("schedulerTick — new-work pull", () => {
     });
     // maxParallel 3 − 2 SDK in-flight = 1 free slot → only ONE new ticket admitted.
     expect(r.dispatched).toHaveLength(1);
+  });
+
+  // CTL-1367 P2-C: the per-tick CTL-644 approval poll must thread the resolved
+  // scheduler `dispatch` so a mid-run approval launches via the SAME executor the
+  // daemon resolved — not processApprovedResumes' default defaultDispatch (which,
+  // under executor=sdk, would split-brain back to `claude --bg`). Proven
+  // behaviorally: with the threaded dispatch the approval dispatches + clears its
+  // sentinels; defaultDispatch (no registry) would never reach the injected fn and
+  // would retain the sentinels.
+  test("per-tick approval poll dispatches through the THREADED dispatch + clears sentinels (CTL-1367 P2-C)", () => {
+    const wdir = join(orchDir, "workers", "CTL-300");
+    mkdirSync(wdir, { recursive: true });
+    writeFileSync(
+      bootResumePendingPath(orchDir, "CTL-300"),
+      JSON.stringify({ ticket: "CTL-300", phase: "implement", worktreePath: "/wt/CTL-300" }),
+    );
+    writeFileSync(bootResumeApprovedPath(orchDir, "CTL-300"), "");
+    // defaultReviveDispatch requires an existing signal it resets to stalled.
+    writeFileSync(
+      join(wdir, "phase-implement.json"),
+      JSON.stringify({ ticket: "CTL-300", phase: "implement", status: "running", bg_job_id: "bg-x" }),
+    );
+    const dispatch = Object.assign(
+      (args) => {
+        dispatch.calls.push(args);
+        // mimic a landed dispatch (runnable signal) so the revive counts success.
+        writeFileSync(
+          join(wdir, "phase-implement.json"),
+          JSON.stringify({ ticket: "CTL-300", phase: "implement", status: "dispatched", bg_job_id: "bg-y" }),
+        );
+        return { code: 0 };
+      },
+      { calls: [] },
+    );
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch,
+      now: () => 1000,
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0,
+    });
+    expect(dispatch.calls.some((c) => c.ticket === "CTL-300" && c.phase === "implement")).toBe(true);
+    // Sentinels cleared ⇒ the approval path ran through the threaded dispatch and
+    // succeeded (defaultDispatch would have failed the registry lookup → retained).
+    expect(existsSync(bootResumeApprovedPath(orchDir, "CTL-300"))).toBe(false);
+    expect(existsSync(bootResumePendingPath(orchDir, "CTL-300"))).toBe(false);
   });
 
   test("dispatchMode=bg: countSdkInflight is NEVER consulted (byte-identical admission)", () => {

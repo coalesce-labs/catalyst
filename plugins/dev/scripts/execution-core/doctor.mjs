@@ -1170,7 +1170,14 @@ export function checkClaudeSettings(deps = {}) {
 // check is an INFO no-op (the api-key path is fine for bg). Injectable for tests.
 export function checkSdkExecutorAuth(deps = {}) {
   const {
-    executor = getExecutor(),
+    // CTL-1367 P2-I: resolve the executor from the repo Layer-1 config path the SAME
+    // way the daemon does (getExecutor(configPath) at boot). Without the path, a
+    // committed executor=sdk with CATALYST_EXECUTOR unset resolved to the node-class
+    // default "bg" here, so the doctor gate reported N/A while the daemon ran sdk —
+    // masking a missing/conflicting subscription token. configPath is injectable for
+    // tests; a test passing an explicit `executor` overrides resolution entirely.
+    configPath = layer1Path(),
+    executor = getExecutor(configPath),
     env = process.env,
     assertAuth = assertSdkAuth,
   } = deps;
