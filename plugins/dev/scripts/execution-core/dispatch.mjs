@@ -14,10 +14,14 @@
 // monitor's →Triage one-shot dispatch share one adapter.
 
 import { spawnSync } from "node:child_process";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { getProjectConfig } from "./registry.mjs";
 import { createWorktree as defaultCreateWorktree } from "./worktree.mjs";
-import { sdkRunPhaseAgent } from "./sdk-run-phase-agent.mjs"; // CTL-1365b: the executor=sdk launch verb (in-process Agent SDK query())
+import { sdkRunPhaseAgent, defaultEmitBackstop } from "./sdk-run-phase-agent.mjs"; // CTL-1365b: the executor=sdk launch verb (in-process Agent SDK query()); CTL-1367 P1: shared failed-terminal backstop for a rejected async dispatch
+import { hasFreshClaim } from "./signal-reader.mjs"; // CTL-1367 P2-G: a young single-flight claim makes a missing SDK signal a benign claim-lost no-op
+import { log } from "./config.mjs"; // CTL-1367 P1: log a swallowed async-dispatch rejection before the backstop fires
 
 // phase-agent-dispatch sits one directory up from execution-core/.
 const PHASE_AGENT_DISPATCH_BIN = fileURLToPath(new URL("../phase-agent-dispatch", import.meta.url));
@@ -239,9 +243,23 @@ export function dispatchForExecutor(executor) {
 // executor=bg, `dispatch` === defaultDispatch, so this is byte-identical to the
 // prior `dispatch: dispatchTicket` wiring (dispatchTicket's own default dispatch IS
 // defaultDispatch).
-export function makeCommentWakeDispatch(dispatch) {
+//
+// CTL-1367 P2-D: comment-wake is the 6th dispatch entry point and was the ONLY one
+// NOT settling its async (executor=sdk) result. handleCommentWake ignores the
+// returned promise, so a rejection after the synchronous prelaunch wrote
+// status:"dispatched" (e.g. buildSdkEnv/buildQueryOptions throwing) left the
+// no-bg_job_id SDK signal with no terminal event — and surfaced as an unhandled
+// rejection. Settle through settleDispatchSync + backstopOnRejection (exactly like
+// the scheduler/monitor/recovery entry points): on a rejected SDK promise it emits
+// the failed-terminal backstop (stalled signal + phase.<phase>.failed). For the bg
+// path dispatchTicket returns a SYNC result and settleDispatchSync passes it through
+// UNCHANGED (same object reference) → byte-identical.
+export function makeCommentWakeDispatch(dispatch, { emitBackstop } = {}) {
   return (orchDir, ticket, phase, opts = {}) =>
-    dispatchTicket(orchDir, ticket, phase, { ...opts, dispatch });
+    settleDispatchSync(
+      dispatchTicket(orchDir, ticket, phase, { ...opts, dispatch }),
+      { onSettled: backstopOnRejection({ orchDir, ticket, phase, log }, { emitBackstop }) },
+    );
 }
 
 // dispatchTicket — thin seam over the injectable dispatch function.
@@ -260,4 +278,124 @@ export function dispatchTicket(
   if (attempt != null) args.attempt = attempt; // CTL-761
   if (clusterGeneration != null) args.clusterGeneration = clusterGeneration; // CTL-864
   return dispatch(args);
+}
+
+// ── CTL-1367 P1: async-dispatch settlement seam ─────────────────────────────
+//
+// The bg launch verb (defaultRunPhaseAgent) is SYNCHRONOUS — it returns a plain
+// result the moment `claude --bg` is launched. The sdk launch verb
+// (sdkRunPhaseAgent) is ASYNC — it returns a Promise that resolves only AFTER the
+// in-process query() runs the WHOLE phase. The dispatch consumers (the scheduler's
+// dispatchAndVerify, the monitor's dispatchTriage, the boot-resume/recovery
+// reviveDispatch) all read `result.code` SYNCHRONOUSLY; under executor=sdk that read
+// saw a Promise (`undefined` code) and recorded a dispatch FAILURE while the query
+// ran detached — the P1 bug.
+//
+// The fix exploits a structural fact: the sdk launch verb runs the SAME synchronous
+// shared pre-launch (spawnSync phase-agent-dispatch --launch-mode prelaunch-only)
+// BEFORE its first `await`, so by the time the Promise is returned the
+// status:"dispatched" signal has ALREADY been written to disk. So a synchronous
+// consumer does NOT need to await the (long-running) query — it treats the sdk
+// dispatch exactly like a bg dispatch: the launch already happened, success is
+// confirmed by the signal file, and the eventual terminal event (emitted by the
+// phase skill, or the backstop on abnormal termination) wakes the orchestrator
+// later — identical to how a `claude --bg` worker's events drive advancement.
+//
+// settleDispatchSync bridges the two:
+//   • a SYNC result → returned unchanged (bg path is byte-identical; the existing
+//     toEqual tests that inject sync stubs never reach the async branch).
+//   • a Promise (sdk) → (a) a DETACHED settle handler is attached so the query runs
+//     to completion in the background and its settlement never escapes as an
+//     unhandled rejection, and (b) a synchronous provisional { code, async:true } is
+//     returned, where `code` reflects whether the synchronously-written prelaunch
+//     signal is runnable (the SDK-aware verification — NO bg_job_id required, since
+//     the SDK prelaunch intentionally has none). The caller then proceeds exactly as
+//     it does for a bg dispatch.
+export function isThenable(x) {
+  return x != null && (typeof x === "object" || typeof x === "function") && typeof x.then === "function";
+}
+
+// sdkSignalRunnable — read workers/<ticket>/phase-<phase>.json and report whether
+// it is in a runnable/launched state for the SDK path. Accepts dispatched|running
+// (the prelaunch wrote dispatched; the skill flips it to running) AND done (an
+// idempotent duplicate dispatch of an already-completed phase). Crucially it does
+// NOT require a bg_job_id — the SDK prelaunch never writes one (E3). false when the
+// signal is absent, unparseable, or failed/stalled (a failed prelaunch).
+//
+// CTL-1367 P2-G: a missing signal is NOT a failure when a YOUNG single-flight claim
+// exists — that is a benign claim-lost (a concurrent dispatcher won the O_EXCL claim
+// and is mid-dispatch; the loser writes no signal). Return runnable so a valid
+// concurrent triage dispatch is a no-op, not a recorded "triage dispatch failed".
+// This function is the SDK verifySync ONLY, so the bg path is untouched.
+export function sdkSignalRunnable(orchDir, ticket, phase) {
+  try {
+    const sig = JSON.parse(readFileSync(join(orchDir, "workers", ticket, `phase-${phase}.json`), "utf8"));
+    const st = sig?.status;
+    return st === "dispatched" || st === "running" || st === "done";
+  } catch {
+    // signal absent/unparseable → benign only if a fresh claim is in flight (claim-lost).
+    return hasFreshClaim(orchDir, ticket, phase);
+  }
+}
+
+export function settleDispatchSync(result, { verifySync, onSettled } = {}) {
+  if (isThenable(result)) {
+    // (a) Detached settle handler — the query runs to completion in the background;
+    // its terminal event is emitted by the worker/backstop. Swallow the settlement
+    // so it can never surface as an unhandled rejection on the daemon event loop.
+    Promise.resolve(result).then(
+      (r) => { if (onSettled) { try { onSettled(r, null); } catch { /* best-effort */ } } },
+      (err) => { if (onSettled) { try { onSettled(null, err); } catch { /* best-effort */ } } },
+    );
+    // (b) Synchronous provisional: the prelaunch signal IS the launch confirmation.
+    const ok = verifySync ? verifySync() !== false : true;
+    return { code: ok ? 0 : 1, async: true };
+  }
+  return result;
+}
+
+// backstopOnRejection — CTL-1367 P1: the `onSettled` handler the THREE async-dispatch
+// entry points (scheduler dispatchAndVerify, monitor dispatchTriage, recovery
+// defaultReviveDispatch) thread into settleDispatchSync. Without it a REJECTED
+// dispatch promise was silently swallowed: the synchronous prelaunch had already
+// written a runnable "dispatched" signal (counted as a successful launch), but an
+// escape that rejects the Promise AFTER that write — e.g. buildSdkEnv /
+// buildQueryOptions throwing in the window between the synchronous prelaunch and the
+// query()'s own try/catch (a non-array spec.env makes `for (const kv of specEnv)`
+// throw) — left the in-process SDK worker (no bg_job_id, no liveness probe) with no
+// terminal event, pinning the ticket at status:"dispatched" until stale GC. This is
+// exactly the silent-stall class this PR exists to eliminate.
+//
+// On a REJECTION (err != null) it (1) logs the swallowed rejection and (2) emits the
+// FAILED terminal backstop — mirroring the SDK worker's own abnormal-termination
+// backstop (defaultEmitBackstop): flip the phase signal to "stalled" (only when
+// non-terminal — the P3 guard in defaultWriteSignalStalled never clobbers a done/
+// complete success) and emit phase.<phase>.failed.<ticket> so the broker wakes the
+// orchestrator and the ticket advances/reclaims instead of stranding. On a clean
+// RESOLUTION (err == null) it is a no-op — the worker/skill emitted its own terminal
+// event. Best-effort throughout; a throw here is swallowed by settleDispatchSync.
+// `emitBackstop` is injectable (default = the real defaultEmitBackstop) so the three
+// entry points are testable without spawning the emit binary.
+export function backstopOnRejection(
+  { orchDir, ticket, phase, log: logger = log },
+  { emitBackstop = defaultEmitBackstop } = {}
+) {
+  return (_res, err) => {
+    if (!err) return; // clean resolution → the worker/skill owns the terminal event
+    const reason = `sdk-dispatch-rejected: ${err?.message ?? String(err)}`;
+    try {
+      logger.warn(
+        { ticket, phase, err: err?.message ?? String(err) },
+        "execution-core: async sdk dispatch promise rejected — emitting failed backstop (stalled signal + phase.<phase>.failed) so the ticket does not strand at dispatched"
+      );
+    } catch {
+      /* logging must never break the detached handler */
+    }
+    try {
+      const signalFile = join(orchDir, "workers", ticket, `phase-${phase}.json`);
+      emitBackstop({ phase, ticket, status: "failed", reason, orchDir, signalFile });
+    } catch {
+      /* best-effort — a failing backstop must not surface as an unhandled rejection */
+    }
+  };
 }

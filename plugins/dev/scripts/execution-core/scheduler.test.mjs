@@ -86,6 +86,7 @@ import { WORK_DONE_PROBES } from "./work-done-probes.mjs";
 import { ownerForTicket } from "./hrw.mjs"; // CTL-850: HRW owner computation for the ownership-filter tests
 import { REMEDIATE_CYCLE_CAP } from "../lib/phase-fsm.mjs";
 import { removeLabel as realRemoveLabel } from "./linear-write.mjs"; // CTL-1079: exec-spy harness
+import { bootResumePendingPath, bootResumeApprovedPath } from "./boot-resume.mjs"; // CTL-1367 P2-C: per-tick approval-poll dispatch wiring
 
 let orchDir;
 let catalystDir;
@@ -2093,6 +2094,104 @@ describe("schedulerTick — new-work pull", () => {
     // CTL-565: new-work enters the pipeline at research, not triage.
     expect(dispatch.calls.every((c) => c.phase === "research")).toBe(true);
     expect(r.dispatched).toEqual(["CTL-8", "CTL-9"]);
+  });
+
+  // CTL-1367 P1: under dispatchMode=sdk the in-process SDK workers (no `claude --bg`
+  // job → invisible to liveBackgroundCount) must consume slot-gate capacity, else
+  // the next tick over-dispatches past maxParallel. The countSdkInflight seam adds
+  // their occupancy, GATED on dispatchMode === "sdk". (scheduler.test.mjs is
+  // CI-excluded; the gating arithmetic is also covered purely + in CI by
+  // sdk-slot-gate.test.mjs and signal-reader.test.mjs.)
+  test("dispatchMode=sdk: SDK in-flight workers reduce new-work free slots", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 3 }));
+    const dispatch = fakeDispatch();
+    const eligible = [
+      { identifier: "CTL-1", priority: 1, createdAt: "x", state: "Todo", relations: { nodes: [] }, inverseRelations: { nodes: [] } },
+      { identifier: "CTL-2", priority: 1, createdAt: "x", state: "Todo", relations: { nodes: [] }, inverseRelations: { nodes: [] } },
+      { identifier: "CTL-3", priority: 1, createdAt: "x", state: "Todo", relations: { nodes: [] }, inverseRelations: { nodes: [] } },
+    ];
+    const r = schedulerTick(orchDir, {
+      readEligible: () => eligible,
+      dispatch,
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0, // no bg jobs
+      countSdkInflight: () => 2, // 2 in-process SDK workers already in flight
+      dispatchMode: "sdk",
+      hasTriageArtifact: () => true,
+      listStartedTickets: () => new Set(),
+    });
+    // maxParallel 3 − 2 SDK in-flight = 1 free slot → only ONE new ticket admitted.
+    expect(r.dispatched).toHaveLength(1);
+  });
+
+  // CTL-1367 P2-C: the per-tick CTL-644 approval poll must thread the resolved
+  // scheduler `dispatch` so a mid-run approval launches via the SAME executor the
+  // daemon resolved — not processApprovedResumes' default defaultDispatch (which,
+  // under executor=sdk, would split-brain back to `claude --bg`). Proven
+  // behaviorally: with the threaded dispatch the approval dispatches + clears its
+  // sentinels; defaultDispatch (no registry) would never reach the injected fn and
+  // would retain the sentinels.
+  test("per-tick approval poll dispatches through the THREADED dispatch + clears sentinels (CTL-1367 P2-C)", () => {
+    const wdir = join(orchDir, "workers", "CTL-300");
+    mkdirSync(wdir, { recursive: true });
+    writeFileSync(
+      bootResumePendingPath(orchDir, "CTL-300"),
+      JSON.stringify({ ticket: "CTL-300", phase: "implement", worktreePath: "/wt/CTL-300" }),
+    );
+    writeFileSync(bootResumeApprovedPath(orchDir, "CTL-300"), "");
+    // defaultReviveDispatch requires an existing signal it resets to stalled.
+    writeFileSync(
+      join(wdir, "phase-implement.json"),
+      JSON.stringify({ ticket: "CTL-300", phase: "implement", status: "running", bg_job_id: "bg-x" }),
+    );
+    const dispatch = Object.assign(
+      (args) => {
+        dispatch.calls.push(args);
+        // mimic a landed dispatch (runnable signal) so the revive counts success.
+        writeFileSync(
+          join(wdir, "phase-implement.json"),
+          JSON.stringify({ ticket: "CTL-300", phase: "implement", status: "dispatched", bg_job_id: "bg-y" }),
+        );
+        return { code: 0 };
+      },
+      { calls: [] },
+    );
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch,
+      now: () => 1000,
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0,
+    });
+    expect(dispatch.calls.some((c) => c.ticket === "CTL-300" && c.phase === "implement")).toBe(true);
+    // Sentinels cleared ⇒ the approval path ran through the threaded dispatch and
+    // succeeded (defaultDispatch would have failed the registry lookup → retained).
+    expect(existsSync(bootResumeApprovedPath(orchDir, "CTL-300"))).toBe(false);
+    expect(existsSync(bootResumePendingPath(orchDir, "CTL-300"))).toBe(false);
+  });
+
+  test("dispatchMode=bg: countSdkInflight is NEVER consulted (byte-identical admission)", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 3 }));
+    const dispatch = fakeDispatch();
+    let sdkCalled = false;
+    const eligible = [
+      { identifier: "CTL-1", priority: 1, createdAt: "x", state: "Todo", relations: { nodes: [] }, inverseRelations: { nodes: [] } },
+      { identifier: "CTL-2", priority: 1, createdAt: "x", state: "Todo", relations: { nodes: [] }, inverseRelations: { nodes: [] } },
+      { identifier: "CTL-3", priority: 1, createdAt: "x", state: "Todo", relations: { nodes: [] }, inverseRelations: { nodes: [] } },
+    ];
+    const r = schedulerTick(orchDir, {
+      readEligible: () => eligible,
+      dispatch,
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0,
+      countSdkInflight: () => { sdkCalled = true; return 99; },
+      // dispatchMode omitted → defaults to "phase-agents" (bg)
+      hasTriageArtifact: () => true,
+      listStartedTickets: () => new Set(),
+    });
+    // bg path: all 3 admitted, the SDK term never even computed.
+    expect(r.dispatched).toHaveLength(3);
+    expect(sdkCalled).toBe(false);
   });
 
   // CTL-665: a committed executionCore.maxParallel threaded via `concurrency`
@@ -5457,6 +5556,82 @@ describe("verifyDispatchedSignal (CTL-611)", () => {
     );
     expect(verifyDispatchedSignal(orchDir, "CTL-103", "research")).toEqual({ ok: true });
   });
+
+  // CTL-1367 E3: the SDK-aware verifier path (requireBgJob:false) accepts the
+  // SDK prelaunch signal, which intentionally has NO bg_job_id.
+  test("requireBgJob:false accepts a dispatched signal with NO bg_job_id (SDK path)", () => {
+    const dir = join(orchDir, "workers", "CTL-104");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, "phase-research.json"),
+      JSON.stringify({ ticket: "CTL-104", phase: "research", status: "dispatched", bg_job_id: null })
+    );
+    // Default (bg) verification still demotes it (the CTL-611 contract is unchanged)…
+    expect(verifyDispatchedSignal(orchDir, "CTL-104", "research")).toEqual({
+      ok: false,
+      reason: "bg_job_id_missing",
+    });
+    // …but the SDK-aware path accepts it.
+    expect(verifyDispatchedSignal(orchDir, "CTL-104", "research", { requireBgJob: false })).toEqual({ ok: true });
+  });
+
+  test("requireBgJob:false also accepts a 'done' signal (idempotent duplicate sdk dispatch)", () => {
+    const dir = join(orchDir, "workers", "CTL-105");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, "phase-research.json"),
+      JSON.stringify({ ticket: "CTL-105", phase: "research", status: "done", bg_job_id: null })
+    );
+    expect(verifyDispatchedSignal(orchDir, "CTL-105", "research", { requireBgJob: false })).toEqual({ ok: true });
+    // bg verification rejects a `done` status as not-runnable (unchanged).
+    expect(verifyDispatchedSignal(orchDir, "CTL-105", "research").ok).toBe(false);
+  });
+
+  test("requireBgJob:false STILL rejects a stalled/failed signal", () => {
+    const dir = join(orchDir, "workers", "CTL-106");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, "phase-research.json"),
+      JSON.stringify({ ticket: "CTL-106", phase: "research", status: "stalled", bg_job_id: null })
+    );
+    expect(verifyDispatchedSignal(orchDir, "CTL-106", "research", { requireBgJob: false })).toEqual({
+      ok: false,
+      reason: "status_not_runnable",
+    });
+  });
+
+  // CTL-1367 P2-G: the SDK path (requireBgJob:false) treats a MISSING signal as a
+  // benign claim-lost when a YOUNG single-flight claim exists (a concurrent
+  // dispatcher won the O_EXCL claim and is mid-dispatch). Without this, a valid
+  // concurrent SDK dispatch records verify_failed:signal_missing + cooldown.
+  test("requireBgJob:false: missing signal + a fresh claim → ok (benign claim-lost)", () => {
+    const dir = join(orchDir, "workers", "CTL-107");
+    mkdirSync(dir, { recursive: true });
+    // No phase-research.json signal; a fresh claim from the winning dispatcher.
+    writeFileSync(join(dir, "research.claim.1"), JSON.stringify({ generation: 1 }));
+    expect(verifyDispatchedSignal(orchDir, "CTL-107", "research", { requireBgJob: false })).toEqual({ ok: true });
+  });
+
+  test("requireBgJob:false: missing signal + NO claim → still signal_missing", () => {
+    const dir = join(orchDir, "workers", "CTL-108");
+    mkdirSync(dir, { recursive: true });
+    expect(verifyDispatchedSignal(orchDir, "CTL-108", "research", { requireBgJob: false })).toEqual({
+      ok: false,
+      reason: "signal_missing",
+    });
+  });
+
+  // The bg path (requireBgJob defaults true) is byte-identical: a fresh claim does
+  // NOT rescue a missing signal (a bg dispatch always writes its own signal).
+  test("requireBgJob:true (bg): a fresh claim does NOT rescue a missing signal", () => {
+    const dir = join(orchDir, "workers", "CTL-109");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "research.claim.1"), JSON.stringify({ generation: 1 }));
+    expect(verifyDispatchedSignal(orchDir, "CTL-109", "research")).toEqual({
+      ok: false,
+      reason: "signal_missing",
+    });
+  });
 });
 
 describe("phase.dispatch.failed event emission (CTL-611)", () => {
@@ -5513,6 +5688,61 @@ describe("phase.dispatch.failed event emission (CTL-611)", () => {
       code: 1,
       reason: "dispatch_nonzero_exit",
     });
+  });
+
+  // CTL-1367 P1: an ASYNC (executor=sdk) dispatch returns a Promise. The scheduler
+  // detects it (dispatchWasAsync), verifies via verifyDispatched(requireBgJob:false),
+  // and — on a REJECTED promise — fires the failed-terminal backstop so the ticket
+  // can't strand at "dispatched". (scheduler.test.mjs is CI-excluded; the core
+  // settleDispatchSync + backstopOnRejection mechanism is also covered in the
+  // CI-included dispatch.test.mjs.)
+  test("a REJECTED async dispatch fires the failed backstop via onSettled (CTL-1367 P1)", async () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    const backstops = [];
+    let rejectQuery;
+    const queryFailed = new Promise((_res, rej) => { rejectQuery = rej; });
+    const dispatch = Object.assign(
+      () => { dispatch.calls.push({}); return queryFailed; }, // async (sdk) shape
+      { calls: [] },
+    );
+    schedulerTick(orchDir, {
+      readEligible: () => eligibleOne("CTL-204"),
+      dispatch,
+      now: () => 1_000,
+      verifyDispatched: () => ({ ok: true }), // async launch confirmed off the provisional signal
+      liveBackgroundCount: () => 0,
+      hasTriageArtifact: () => true, // bypass triage gate → dispatch research
+      emitBackstop: (a) => backstops.push(a),
+    });
+    expect(dispatch.calls).toHaveLength(1);
+    expect(backstops).toHaveLength(0); // nothing yet — the promise is still pending
+    rejectQuery(new Error("buildSdkEnv exploded"));
+    await queryFailed.catch(() => {});
+    await Promise.resolve(); await Promise.resolve();
+    expect(backstops).toHaveLength(1);
+    expect(backstops[0]).toMatchObject({ ticket: "CTL-204", phase: "research", status: "failed" });
+    expect(backstops[0].reason).toMatch(/buildSdkEnv exploded/);
+  });
+
+  test("a RESOLVED async dispatch does NOT fire the backstop (CTL-1367 P1)", async () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    const backstops = [];
+    const dispatch = Object.assign(
+      () => { dispatch.calls.push({}); return Promise.resolve({ code: 0 }); },
+      { calls: [] },
+    );
+    schedulerTick(orchDir, {
+      readEligible: () => eligibleOne("CTL-205"),
+      dispatch,
+      now: () => 1_000,
+      verifyDispatched: () => ({ ok: true }),
+      liveBackgroundCount: () => 0,
+      hasTriageArtifact: () => true,
+      emitBackstop: (a) => backstops.push(a),
+    });
+    expect(dispatch.calls).toHaveLength(1);
+    await Promise.resolve(); await Promise.resolve();
+    expect(backstops).toHaveLength(0); // clean resolution → worker owns its terminal event
   });
 
   test("new-work sweep emits phase.dispatch.failed on rc!=0", () => {

@@ -67,7 +67,7 @@ import {
 import { STAGE_RANK, NEW_WORK_ENTRY_PHASE } from "../lib/workflow-descriptor.mjs";
 import { ownerForTicket } from "./hrw.mjs";
 import { claimDispatchSync } from "./cluster-claim-sync.mjs";
-import { dispatchTicket, defaultDispatch } from "./dispatch.mjs";
+import { dispatchTicket, defaultDispatch, settleDispatchSync, sdkSignalRunnable, backstopOnRejection } from "./dispatch.mjs"; // CTL-1367 P1: settle async (sdk) revive dispatch synchronously + backstop a rejected async dispatch
 import { createWorktree } from "./worktree.mjs";
 import { fenceGuard } from "./fence-guard.mjs";
 import { applyLabel as defaultApplyLabel } from "./linear-write.mjs";
@@ -1319,6 +1319,11 @@ export function defaultReviveDispatch(
     // on the revive path too (the failed path was already covered by CTL-611).
     appendRequested = defaultAppendDispatchRequestedEvent,
     appendLaunched = defaultAppendDispatchLaunchedEvent,
+    // CTL-1367 P1: failed-terminal backstop for a REJECTED async (sdk) revive
+    // dispatch. undefined → backstopOnRejection applies the real defaultEmitBackstop;
+    // tests inject a spy. The bg path is synchronous → never reaches the detached
+    // handler, so this is a no-op on bg (recovery.test.mjs sync stubs are unaffected).
+    emitBackstop,
   } = {}
 ) {
   const signalPath = join(orchDir, "workers", ticket, `phase-${phase}.json`);
@@ -1370,7 +1375,21 @@ export function defaultReviveDispatch(
   // default emitters swallow IO errors (appendEnvelopeBestEffort); the revive
   // proceeds regardless of either return value.
   appendRequested({ orchId, orchDir, ticket, target_phase: phase, reason: "revive" });
-  const res = dispatch(dispatchArgs);
+  // CTL-1367 P1: settle an async (executor=sdk) dispatch synchronously. bg returns a
+  // plain object (passthrough → byte-identical, so the recovery.test.mjs sync stubs
+  // are unaffected). sdk returns a Promise whose synchronous prelaunch already
+  // re-claimed + wrote the `dispatched` signal at the next generation;
+  // settleDispatchSync detaches the in-process query and confirms success from that
+  // signal (SDK-aware: no bg_job_id), so a revive isn't recorded as failed while the
+  // query runs detached.
+  const res = settleDispatchSync(dispatch(dispatchArgs), {
+    verifySync: () => sdkSignalRunnable(orchDir, ticket, phase),
+    // CTL-1367 P1: on a REJECTED async (sdk) revive dispatch, flip the signal to
+    // stalled + emit phase.<phase>.failed.<ticket> so a transient escape (e.g.
+    // buildSdkEnv/buildQueryOptions throwing) can't strand the ticket at "dispatched"
+    // with no bg_job_id/liveness probe — the very stall this revive path exists to fix.
+    onSettled: backstopOnRejection({ orchDir, ticket, phase, log }, { emitBackstop }),
+  });
   if (res && res.code === 0) {
     // Re-read the signal the dispatcher just rewrote (status dispatched/running
     // + bg_job_id + worktreePath) so launched carries the live worker's id.

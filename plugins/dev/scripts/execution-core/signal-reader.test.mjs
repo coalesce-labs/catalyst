@@ -10,6 +10,8 @@ import {
   readAllPhaseSignals,
   listDispatchedPhases,
   byActivePhase,
+  countSdkInflight,
+  hasFreshClaim,
 } from "./signal-reader.mjs";
 
 let orchDir;
@@ -435,5 +437,90 @@ describe("readAllPhaseSignals (CTL-934)", () => {
   test("no workers/ dir → []", () => {
     rmSync(join(orchDir, "workers"), { recursive: true, force: true });
     expect(readAllPhaseSignals(orchDir)).toEqual([]);
+  });
+});
+
+// CTL-1367 P1: countSdkInflight — the executor=sdk occupancy reader. Counts
+// dispatched/running NESTED phase signals with NO bg_job_id (the in-process SDK
+// worker shape) so the scheduler slot gate + monitor triage budget can see SDK
+// workers that have no `claude --bg` job. Never counts a bg worker (it has a
+// bg_job_id) and never counts a flat (legacy oneshot) signal.
+describe("countSdkInflight (CTL-1367 P1)", () => {
+  test("counts dispatched + running nested signals with no bg_job_id", () => {
+    writeNested("CTL-1", "triage", { status: "dispatched", bg_job_id: null });
+    writeNested("CTL-2", "research", { status: "running", bg_job_id: null });
+    expect(countSdkInflight(orchDir)).toBe(2);
+  });
+
+  test("does NOT count a nested signal that carries a bg_job_id (a bg worker)", () => {
+    // bg workers are already counted by liveBackgroundCount; counting them here too
+    // would double-count and under-dispatch.
+    writeNested("CTL-1", "triage", { status: "dispatched", bg_job_id: "job-abc" });
+    writeNested("CTL-2", "research", { status: "running", bg_job_id: "job-def" });
+    expect(countSdkInflight(orchDir)).toBe(0);
+  });
+
+  test("does NOT count terminal statuses (done/failed/stalled/skipped/turn-cap-exhausted)", () => {
+    writeNested("CTL-1", "triage", { status: "done", bg_job_id: null });
+    writeNested("CTL-2", "research", { status: "failed", bg_job_id: null });
+    writeNested("CTL-3", "plan", { status: "stalled", bg_job_id: null });
+    writeNested("CTL-4", "implement", { status: "skipped", bg_job_id: null });
+    writeNested("CTL-5", "verify", { status: "turn-cap-exhausted", bg_job_id: null });
+    expect(countSdkInflight(orchDir)).toBe(0);
+  });
+
+  test("does NOT count flat (legacy oneshot) signals", () => {
+    writeFlat("CTL-9", { status: "dispatched" });
+    expect(countSdkInflight(orchDir)).toBe(0);
+  });
+
+  test("counts every in-flight nested phase across multiple tickets", () => {
+    writeNested("CTL-1", "triage", { status: "done", bg_job_id: null }); // terminal — not counted
+    writeNested("CTL-1", "research", { status: "running", bg_job_id: null }); // counted
+    writeNested("CTL-2", "plan", { status: "dispatched", bg_job_id: null }); // counted
+    writeNested("CTL-3", "implement", { status: "running", bg_job_id: "job-x" }); // bg — not counted
+    expect(countSdkInflight(orchDir)).toBe(2);
+  });
+
+  test("no workers/ dir → 0 (never throws)", () => {
+    rmSync(join(orchDir, "workers"), { recursive: true, force: true });
+    expect(countSdkInflight(orchDir)).toBe(0);
+  });
+});
+
+// CTL-1367 P2-G: hasFreshClaim — a YOUNG single-flight claim (workers/<T>/<phase>
+// .claim.<gen>) makes a missing SDK signal a benign claim-lost (a concurrent
+// dispatcher won the O_EXCL claim and is mid-dispatch; the loser writes no signal).
+describe("hasFreshClaim (CTL-1367 P2-G)", () => {
+  const writeClaim = (ticket, phase, gen = 1) => {
+    const dir = join(workersDir(), ticket);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, `${phase}.claim.${gen}`), JSON.stringify({ generation: gen }));
+  };
+
+  test("a fresh claim → true", () => {
+    writeClaim("CTL-1", "triage");
+    expect(hasFreshClaim(orchDir, "CTL-1", "triage")).toBe(true);
+  });
+
+  test("no claim → false", () => {
+    mkdirSync(join(workersDir(), "CTL-2"), { recursive: true });
+    expect(hasFreshClaim(orchDir, "CTL-2", "triage")).toBe(false);
+  });
+
+  test("an OLD claim (mtime older than the grace window) → false", () => {
+    writeClaim("CTL-3", "research");
+    // Advance `now` past the grace so the just-written claim reads as old.
+    expect(hasFreshClaim(orchDir, "CTL-3", "research", { now: () => Date.now() + 10 * 60 * 1000 })).toBe(false);
+  });
+
+  test("matches the phase prefix exactly", () => {
+    writeClaim("CTL-4", "plan");
+    expect(hasFreshClaim(orchDir, "CTL-4", "triage")).toBe(false);
+    expect(hasFreshClaim(orchDir, "CTL-4", "plan")).toBe(true);
+  });
+
+  test("no worker dir → false (never throws)", () => {
+    expect(hasFreshClaim(orchDir, "CTL-NOPE", "triage")).toBe(false);
   });
 });

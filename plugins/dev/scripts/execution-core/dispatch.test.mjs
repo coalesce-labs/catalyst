@@ -6,7 +6,10 @@
 // so no test ever spawns a real script.
 
 import { describe, test, expect } from "bun:test";
-import { dispatchTicket, defaultDispatch, defaultRunPhaseAgent, dispatchForExecutor, sdkDispatch, makeCommentWakeDispatch, teamOf } from "./dispatch.mjs";
+import { mkdtempSync, writeFileSync, mkdirSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { dispatchTicket, defaultDispatch, defaultRunPhaseAgent, dispatchForExecutor, sdkDispatch, makeCommentWakeDispatch, teamOf, settleDispatchSync, sdkSignalRunnable, isThenable, backstopOnRejection } from "./dispatch.mjs";
 
 describe("teamOf", () => {
   test("extracts the team prefix from a ticket identifier", () => {
@@ -516,6 +519,41 @@ describe("makeCommentWakeDispatch (CTL-1365b)", () => {
     cw2("/orch", "CTL-2", "triage", {});
     expect(calls[0]).toEqual({ orchDir: "/orch", ticket: "CTL-2", phase: "triage" });
   });
+
+  // CTL-1367 P2-D: comment-wake is the 6th dispatch entry point and was the only one
+  // NOT settling its async (executor=sdk) result. A rejected SDK promise (after the
+  // prelaunch wrote status:"dispatched") was silently swallowed → no terminal event
+  // + an unhandled rejection. It now settles through backstopOnRejection.
+  test("CTL-1367 P2-D: a REJECTED async (sdk) comment-wake fires the failed backstop", async () => {
+    const backstops = [];
+    let rejectQuery;
+    const queryFailed = new Promise((_res, rej) => { rejectQuery = rej; });
+    const cw = makeCommentWakeDispatch(() => queryFailed, { emitBackstop: (a) => backstops.push(a) });
+    cw("/ec", "CTL-9", "implement", {});
+    expect(backstops).toHaveLength(0); // promise still pending
+    rejectQuery(new Error("buildSdkEnv exploded"));
+    await queryFailed.catch(() => {});
+    await Promise.resolve(); await Promise.resolve();
+    expect(backstops).toHaveLength(1);
+    expect(backstops[0]).toMatchObject({ ticket: "CTL-9", phase: "implement", status: "failed" });
+    expect(backstops[0].reason).toMatch(/buildSdkEnv exploded/);
+  });
+
+  test("CTL-1367 P2-D: a RESOLVED async comment-wake does NOT fire the backstop", async () => {
+    const backstops = [];
+    const cw = makeCommentWakeDispatch(() => Promise.resolve({ code: 0 }), { emitBackstop: (a) => backstops.push(a) });
+    cw("/ec", "CTL-9", "implement", {});
+    await Promise.resolve(); await Promise.resolve();
+    expect(backstops).toHaveLength(0); // clean resolution → worker owns its terminal event
+  });
+
+  test("CTL-1367 P2-D: a SYNC (bg) comment-wake passes through UNCHANGED (no backstop)", () => {
+    const backstops = [];
+    const result = { code: 0, worktreePath: "/wt" };
+    const cw = makeCommentWakeDispatch(() => result, { emitBackstop: (a) => backstops.push(a) });
+    expect(cw("/ec", "CTL-9", "implement", {})).toBe(result); // same object ref — byte-identical
+    expect(backstops).toHaveLength(0);
+  });
 });
 
 describe("dispatchTicket", () => {
@@ -857,5 +895,193 @@ describe("defaultDispatch — clusterGeneration passthrough (CTL-864)", () => {
       { resolveProject: s.resolveProject, createWorktree: s.createWorktree, runPhaseAgent: s.runPhaseAgent },
     );
     expect(s.calls[0].clusterGeneration).toBeUndefined();
+  });
+});
+
+// ── CTL-1367 P1: settleDispatchSync + sdkSignalRunnable + isThenable ──────────
+
+describe("isThenable (CTL-1367 P1)", () => {
+  test("true for promises, false for plain dispatch results", () => {
+    expect(isThenable(Promise.resolve({ code: 0 }))).toBe(true);
+    expect(isThenable({ then: () => {} })).toBe(true);
+    expect(isThenable({ code: 0 })).toBe(false);
+    expect(isThenable(null)).toBe(false);
+    expect(isThenable(undefined)).toBe(false);
+  });
+});
+
+describe("sdkSignalRunnable (CTL-1367 E3)", () => {
+  let dir;
+  const seed = (status, extra = {}) => {
+    dir = mkdtempSync(join(tmpdir(), "sdk-sig-"));
+    const wd = join(dir, "workers", "CTL-1");
+    mkdirSync(wd, { recursive: true });
+    writeFileSync(join(wd, "phase-implement.json"), JSON.stringify({ status, ...extra }));
+    return dir;
+  };
+  test("accepts dispatched/running/done WITHOUT a bg_job_id (the SDK prelaunch has none)", () => {
+    for (const st of ["dispatched", "running", "done"]) {
+      const od = seed(st); // note: no bg_job_id
+      expect(sdkSignalRunnable(od, "CTL-1", "implement")).toBe(true);
+      rmSync(od, { recursive: true, force: true });
+    }
+  });
+  test("rejects a failed/stalled or missing signal", () => {
+    const od = seed("stalled");
+    expect(sdkSignalRunnable(od, "CTL-1", "implement")).toBe(false);
+    rmSync(od, { recursive: true, force: true });
+    expect(sdkSignalRunnable("/nope", "CTL-1", "implement")).toBe(false);
+  });
+
+  // CTL-1367 P2-G: a MISSING signal is benign (claim-lost) when a YOUNG single-flight
+  // claim exists — a concurrent dispatcher won the O_EXCL claim and is mid-dispatch,
+  // so the loser must be a no-op, NOT a recorded "triage dispatch failed".
+  test("CTL-1367 P2-G: a missing signal + a fresh claim → runnable (benign claim-lost)", () => {
+    const od = mkdtempSync(join(tmpdir(), "sdk-sig-claim-"));
+    const wd = join(od, "workers", "CTL-1");
+    mkdirSync(wd, { recursive: true });
+    // No signal file; a fresh claim from the winning concurrent dispatcher.
+    writeFileSync(join(wd, "implement.claim.1"), JSON.stringify({ generation: 1 }));
+    expect(sdkSignalRunnable(od, "CTL-1", "implement")).toBe(true);
+    rmSync(od, { recursive: true, force: true });
+  });
+
+  test("CTL-1367 P2-G: a missing signal + NO claim → still not runnable", () => {
+    const od = mkdtempSync(join(tmpdir(), "sdk-sig-noclaim-"));
+    mkdirSync(join(od, "workers", "CTL-1"), { recursive: true });
+    expect(sdkSignalRunnable(od, "CTL-1", "implement")).toBe(false);
+    rmSync(od, { recursive: true, force: true });
+  });
+});
+
+describe("settleDispatchSync (CTL-1367 P1)", () => {
+  test("a SYNC result is returned UNCHANGED (bg path byte-identical)", () => {
+    const r = { code: 0, stdout: "x", worktreePath: "/wt" };
+    expect(settleDispatchSync(r)).toBe(r); // same object reference — no wrapping
+  });
+  test("a Promise → synchronous { code:0, async:true } when verifySync passes; query detached", async () => {
+    let settled = false;
+    const p = Promise.resolve({ code: 0 });
+    const r = settleDispatchSync(p, { verifySync: () => true, onSettled: () => { settled = true; } });
+    expect(r).toEqual({ code: 0, async: true }); // resolved SYNCHRONOUSLY
+    await p; await Promise.resolve(); // let the detached handler run
+    expect(settled).toBe(true);
+  });
+  test("a Promise → { code:1 } when verifySync fails (prelaunch never wrote a runnable signal)", () => {
+    const r = settleDispatchSync(Promise.resolve({ code: 1 }), { verifySync: () => false });
+    expect(r).toEqual({ code: 1, async: true });
+  });
+  test("a rejecting Promise never escapes as an unhandled rejection", async () => {
+    let err = null;
+    const r = settleDispatchSync(Promise.reject(new Error("boom")), {
+      verifySync: () => true,
+      onSettled: (_res, e) => { err = e; },
+    });
+    expect(r.code).toBe(0); // launch already happened (signal verified)
+    await Promise.resolve(); await Promise.resolve();
+    expect(err?.message).toBe("boom"); // captured by the detached handler, not thrown
+  });
+});
+
+// ── CTL-1367 P1: backstopOnRejection — the swallowed-rejection backstop ───────
+//
+// The three async-dispatch entry points (scheduler, monitor triage, recovery revive)
+// thread this onSettled handler into settleDispatchSync. A REJECTED async dispatch
+// (e.g. buildSdkEnv/buildQueryOptions throwing AFTER the synchronous prelaunch wrote
+// a runnable "dispatched" signal) must NOT be silently swallowed: the handler logs
+// the rejection and emits the failed-terminal backstop so the ticket can't strand at
+// "dispatched" with no bg_job_id/liveness probe.
+describe("backstopOnRejection (CTL-1367 P1)", () => {
+  const fakeLog = () => {
+    const warns = [];
+    return { warns, warn: (...a) => warns.push(a) };
+  };
+
+  test("on a REJECTION → logs + emits the failed backstop with the composed signalFile", () => {
+    const calls = [];
+    const logger = fakeLog();
+    const handler = backstopOnRejection(
+      { orchDir: "/ec", ticket: "CTL-7", phase: "implement", log: logger },
+      { emitBackstop: (a) => calls.push(a) },
+    );
+    handler(null, new Error("buildSdkEnv exploded"));
+    expect(logger.warns).toHaveLength(1);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toMatchObject({
+      phase: "implement",
+      ticket: "CTL-7",
+      status: "failed",
+      orchDir: "/ec",
+      signalFile: "/ec/workers/CTL-7/phase-implement.json",
+    });
+    expect(calls[0].reason).toMatch(/buildSdkEnv exploded/);
+  });
+
+  test("on a clean RESOLUTION → NO log, NO backstop (the worker/skill owns its terminal event)", () => {
+    const calls = [];
+    const logger = fakeLog();
+    const handler = backstopOnRejection(
+      { orchDir: "/ec", ticket: "CTL-8", phase: "triage", log: logger },
+      { emitBackstop: (a) => calls.push(a) },
+    );
+    handler({ code: 0 }, null);
+    expect(calls).toHaveLength(0);
+    expect(logger.warns).toHaveLength(0);
+  });
+
+  test("a throwing emitBackstop never escapes (best-effort)", () => {
+    const logger = fakeLog();
+    const handler = backstopOnRejection(
+      { orchDir: "/ec", ticket: "CTL-9", phase: "verify", log: logger },
+      { emitBackstop: () => { throw new Error("emit boom"); } },
+    );
+    expect(() => handler(null, new Error("rejected"))).not.toThrow();
+  });
+
+  test("wired through settleDispatchSync: a rejecting Promise drives the backstop", async () => {
+    const calls = [];
+    const logger = fakeLog();
+    const r = settleDispatchSync(Promise.reject(new Error("non-array spec.env")), {
+      verifySync: () => true, // prelaunch signal was runnable → launch already happened
+      onSettled: backstopOnRejection(
+        { orchDir: "/ec", ticket: "CTL-10", phase: "implement", log: logger },
+        { emitBackstop: (a) => calls.push(a) },
+      ),
+    });
+    expect(r).toEqual({ code: 0, async: true }); // provisional success off the prelaunch signal
+    await Promise.resolve(); await Promise.resolve(); // let the detached handler run
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toMatchObject({ ticket: "CTL-10", phase: "implement", status: "failed" });
+    expect(calls[0].reason).toMatch(/non-array spec.env/);
+  });
+});
+
+// ── CTL-1367 P1 end-to-end: sdkDispatch result settles via the prelaunch signal ─
+
+describe("sdkDispatch + settleDispatchSync end-to-end (CTL-1367 P1)", () => {
+  test("an async sdk dispatch is settled synchronously off the signal it wrote", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "sdk-e2e-"));
+    const wd = join(dir, "workers", "CTL-5");
+    mkdirSync(wd, { recursive: true });
+    const signalFile = join(wd, "phase-implement.json");
+    // Fake runPhaseAgent that mimics sdkRunPhaseAgent: writes the dispatched signal
+    // SYNCHRONOUSLY (the prelaunch), then returns a Promise (the detached query).
+    const runPhaseAgent = () => {
+      writeFileSync(signalFile, JSON.stringify({ status: "dispatched", bg_job_id: null }));
+      return Promise.resolve({ code: 0, stdout: "", stderr: "", signal: null });
+    };
+    const dispatch = (args) =>
+      defaultDispatch(args, {
+        resolveProject: () => ({ team: "CTL", repoRoot: "/repo" }),
+        createWorktree: () => ({ code: 0, worktreePath: wd }),
+        runPhaseAgent,
+      });
+    const raw = dispatch({ orchDir: dir, ticket: "CTL-5", phase: "implement" });
+    expect(isThenable(raw)).toBe(true); // the dispatch is async (sdk shape)
+    const settled = settleDispatchSync(raw, { verifySync: () => sdkSignalRunnable(dir, "CTL-5", "implement") });
+    expect(settled.code).toBe(0); // verified off the synchronously-written signal
+    expect(settled.async).toBe(true);
+    await raw; // detached query resolves cleanly
+    rmSync(dir, { recursive: true, force: true });
   });
 });
