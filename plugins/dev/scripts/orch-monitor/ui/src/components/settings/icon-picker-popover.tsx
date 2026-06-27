@@ -27,7 +27,7 @@ import {
 } from "@/components/ui/command";
 import { NAMED_COLORS } from "@/lib/color-palette";
 import { ProjectMarkIcon } from "@/components/project-mark-icon";
-import { enumeratePhosphorGlyphNames } from "@/lib/phosphor-icons";
+import { enumeratePhosphorGlyphNames, useManifestLoadFailed } from "@/lib/phosphor-icons";
 import {
   buildBasePickerItems,
   buildAllGlyphItems,
@@ -183,6 +183,10 @@ export function IconPickerPopover({ value, onChange, candidates, hue }: IconPick
 
   const accentColor = (hue && NAMED_COLORS[hue]?.text) || "currentColor";
   const triggerLabel = resolveActiveIconLabel(value);
+  // CTL-1370: true when the per-glyph importer manifest is in a failed-load state. A redeploy that
+  // re-hashes the manifest chunk strands the running bundle on a 404 URL no in-app retry can recover
+  // — so we surface a user-triggered reload (the reliable recovery; no auto-reload, no loop risk).
+  const manifestFailed = useManifestLoadFailed();
 
   // Base items (Auto + favicons + featured) — memoized on candidates (stable ref).
   const baseItems = useMemo(() => buildBasePickerItems(candidates), [candidates]);
@@ -325,6 +329,22 @@ export function IconPickerPopover({ value, onChange, candidates, hue }: IconPick
             {/* All icons — virtualized; plain buttons (not cmdk items) */}
             <CommandSeparator />
             <CommandGroup heading="All icons">
+              {manifestFailed && (
+                <div
+                  role="status"
+                  className="flex items-center justify-between gap-2 px-2 py-1.5 text-xs text-muted"
+                >
+                  <span>Some icons couldn&apos;t load.</span>
+                  <button
+                    type="button"
+                    onClick={() => window.location.reload()}
+                    title="Reload the page to fetch the latest icon assets"
+                    className="rounded-sm px-1.5 py-0.5 font-medium text-foreground hover:bg-accent focus:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                  >
+                    Reload
+                  </button>
+                </div>
+              )}
               {(() => {
                 const state = resolveAllIconsViewState({
                   namesEmpty: enumeratePhosphorGlyphNames().length === 0,
