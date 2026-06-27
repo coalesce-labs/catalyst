@@ -14,6 +14,15 @@
 //      repo short-name UPPERCASED, vcsRepo/defaultColor/repoRoot null, hasWork=true).
 //      Never dropped, never collapsed to an "other" bucket.
 //
+// CTL-1380 (Bug A): before the union, observed-work repo identifiers are NORMALIZED
+// into the configured short-name key space via buildObservedRepoAliases /
+// normalizeObservedRepo. BoardPayload.repos arrives as lowercased team keys ("ctl",
+// "adv") and/or full owner/repos ("coalesce-labs/catalyst") — none of which equal a
+// configured short-name ("catalyst", "adva") — so without normalization the union
+// never collapsed them and the nav showed a duplicate "unconfigured" lane per
+// configured team. Normalization folds each alias onto the team's short-name so
+// observed work flips the configured descriptor's hasWork instead.
+//
 // Identity authority is config teams[]; registry.json (CATALYST_DIR-relative)
 // contributes repoRoot ONLY, joined by team key — its team identity can DIVERGE
 // from config (e.g. ADV registry repoRoot=groundworkapp/Adva vs config vcsRepo=
@@ -106,6 +115,75 @@ function shortName(vcsRepo: string): string {
 }
 
 /**
+ * CTL-1380 (Bug A): build the alias → configured-short-name lookup that normalizes
+ * observed-work repo identifiers (BoardPayload.repos) into the SAME key space the
+ * configured team descriptors use (the vcsRepo short-name).
+ *
+ * WHY this is needed: BoardPayload.repos does NOT carry configured short-names.
+ * board-data.mjs's repoFor() derives a ticket's repo from its team-key prefix, and
+ * in the daemon-spawned monitor (cwd has no .catalyst/config.json) board-data's own
+ * team→short map loads empty, so repoFor() falls back to the LOWERCASED TEAM KEY
+ * ("ctl", "adv", "otl", "sli"); some tickets also carry an explicit FULL owner/repo
+ * ("coalesce-labs/catalyst"). None of those equal a configured short-name
+ * ("catalyst", "adva", …), so the UNION rule below never collapsed them → duplicate
+ * source:"unconfigured" lanes for teams that ARE configured (the 10-entry nav bug).
+ *
+ * This map folds every known alias of a configured team — its short-name (identity),
+ * its team key, its full owner/repo, and (via registry, joined by team key) its
+ * repoRoot basename — onto that team's short-name, so observed work merges into the
+ * configured descriptor instead of spawning a duplicate.
+ */
+export function buildObservedRepoAliases(
+  teams: TeamEntry[],
+  registry: RegistryEntry[],
+): Map<string, string> {
+  const aliases = new Map<string, string>();
+  const shortByTeamKey = new Map<string, string>();
+  for (const t of teams ?? []) {
+    if (!t || typeof t.key !== "string" || typeof t.vcsRepo !== "string") continue;
+    if (!t.vcsRepo.includes("/")) continue;
+    const short = shortName(t.vcsRepo);
+    shortByTeamKey.set(t.key.toUpperCase(), short);
+    aliases.set(short, short); // short-name → itself (identity)
+    aliases.set(t.key.toLowerCase(), short); // lowercased team key (repoFor fallback)
+    aliases.set(t.vcsRepo.toLowerCase(), short); // full owner/repo (e.g. e.repo passthrough)
+  }
+  // registry repoRoot basename → the team's short-name, joined by team key. Enriches
+  // the alias set so a ticket whose repo was derived from a registry repoRoot path
+  // also folds onto the configured descriptor.
+  for (const r of registry ?? []) {
+    if (!r || typeof r.team !== "string" || typeof r.repoRoot !== "string") continue;
+    const short = shortByTeamKey.get(r.team.toUpperCase());
+    if (!short) continue;
+    const base = basename(r.repoRoot).toLowerCase();
+    if (base) aliases.set(base, short);
+  }
+  return aliases;
+}
+
+/**
+ * Normalize ONE observed-work repo identifier into the configured short-name key
+ * space. An exact alias hit wins; a FULL owner/repo ("owner/name") with no exact
+ * alias collapses to its basename (so it matches a configured team keyed by
+ * basename AND, for a genuinely-unconfigured repo, yields a "/"-free key the
+ * repo-icon endpoint accepts); everything else passes through lowercased so a
+ * genuinely-unconfigured short name still appears once.
+ */
+export function normalizeObservedRepo(
+  raw: string,
+  aliases: Map<string, string>,
+): string {
+  const r = String(raw).trim().toLowerCase();
+  const hit = aliases.get(r);
+  if (hit) return hit;
+  if (r.includes("/")) {
+    const base = basename(r);
+    return aliases.get(base) ?? base;
+  }
+  return r;
+}
+
+/**
  * PURE builder. Iterates configured teams (deriving repo, joining repoColors by
  * owner/repo and registry by team key, computing hasWork), then appends an
  * unconfigured descriptor for every observed repo no team already covers.
@@ -119,7 +197,14 @@ export function buildProjects(
   registry: RegistryEntry[],
   observedRepos: string[],
 ): ProjectDescriptor[] {
-  const observed = new Set((observedRepos ?? []).map((r) => String(r)));
+  // CTL-1380 (Bug A): normalize observed-work repo identifiers into the configured
+  // short-name key space BEFORE the union, so observed work (which arrives as team
+  // keys / full owner-repos) merges into the configured descriptor instead of
+  // spawning a duplicate source:"unconfigured" lane.
+  const aliases = buildObservedRepoAliases(teams ?? [], registry ?? []);
+  const observed = new Set(
+    (observedRepos ?? []).map((r) => normalizeObservedRepo(String(r), aliases)),
+  );
   const repoRootByTeam = new Map<string, string>();
   for (const r of registry ?? []) {
     if (r && typeof r.team === "string" && typeof r.repoRoot === "string") {

@@ -30,11 +30,19 @@ on:
     branches: [main]
     paths:
       - "plugins/dev/scripts/execution-core/**"
+      # CTL-1348: the updater safety tests (updater/plugin-pull-defer.test.mjs) import and
+      # gate the broker cutover invariant in broker/plugin-refresh.mjs, so a PR touching
+      # only the broker must run this suite too (Codex P2).
+      - "plugins/dev/scripts/broker/**"
       - ".github/workflows/execution-core-tests.yml"
   push:
     branches: [main]
     paths:
       - "plugins/dev/scripts/execution-core/**"
+      # CTL-1348: the updater safety tests (updater/plugin-pull-defer.test.mjs) import and
+      # gate the broker cutover invariant in broker/plugin-refresh.mjs, so a PR touching
+      # only the broker must run this suite too (Codex P2).
+      - "plugins/dev/scripts/broker/**"
       - ".github/workflows/execution-core-tests.yml"
 
 jobs:
@@ -63,6 +71,13 @@ jobs:
         # walks the static graph and exits non-zero on any unresolved import without
         # executing the code; it transitively covers index.mjs -> monitor.mjs too.
         run: bun build daemon.mjs --target=node --outfile /dev/null
+
+      - name: Verify updater import graph (bun build resolution check)
+        # CTL-1348: the standalone catalyst-updater agent (updater/updater.mjs) is NOT
+        # in daemon.mjs's import graph — it's a separate launchd entrypoint — so a bad
+        # cross-tree import (../broker/plugin-refresh.mjs, ../tracing.mjs, getNodeClass)
+        # would otherwise only fail at launchd runtime on a node. Walk its static graph.
+        run: bun build updater/updater.mjs --target=node --outfile /dev/null
 
       - name: Run stable unit tests
         # EXCLUDED SUITES — do NOT add these back without fixing the underlying
@@ -207,4 +222,7 @@ jobs:
             worktree.test.mjs \
             recovery-reasoning.test.mjs \
             recovery-evidence.test.mjs \
-            unstuck-act-seams.test.mjs
+            unstuck-act-seams.test.mjs \
+            updater/plugin-pull-defer.test.mjs \
+            updater/updater.test.mjs \
+            updater/updater-tracing.test.mjs

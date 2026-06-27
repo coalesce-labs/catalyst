@@ -210,7 +210,21 @@ loki.source.file "otel_forward" {
 	tail_from_end = true
 }
 
-// pino-JSON processing, shared by the three structured daemon logs.
+// ----- updater.log (pino JSON) -----------------------------------------------
+// CTL-1348: the standalone catalyst-updater daemon (the sole plugin-pull owner once
+// adopted). pino-JSON like the broker/execution-core/otel-forward logs, so it rides the
+// shared pino pipeline — its CTL-1350 metric fields (refresh_duration_ms, roots, pulled,
+// changed, failed) are then queryable via `| json` and feed the logs->metrics connector.
+loki.source.file "updater" {
+	targets = [{
+		__path__     = coalesce(sys.env("CATALYST_UPDATER_LOG"), "/root/catalyst/updater.log"),
+		service_name = "catalyst.updater",
+	}]
+	forward_to    = [loki.process.pino.receiver]
+	tail_from_end = true
+}
+
+// pino-JSON processing, shared by the structured daemon logs.
 //   * stage.json              — lift level/time/name out of the JSON line (drives
 //                               severity + service mapping + the record timestamp)
 //   * stage.timestamp         — pino time is Unix MILLISECONDS -> record timestamp

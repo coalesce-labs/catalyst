@@ -37,7 +37,7 @@ import { readFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { homedir } from "node:os";
 import { resolve } from "node:path";
-import { getEventName } from "./router.mjs";
+import { getEventName } from "./event-name.mjs"; // CTL-1348: leaf, not the heavy router
 
 // Throttle window: at most one pull per N seconds per checkout root. A merge
 // often arrives as both a github.pr.merged AND a github.push to main within the
@@ -64,14 +64,27 @@ export const CHECKOUT_LAG_FAILURE_THRESHOLD =
 const _failuresByRoot = new Map(); // root → { count, since }
 const _lagEmittedByRoot = new Set(); // root → already emitted this stall episode
 
+// CTL-1348: detect-only drift grace. When pluginPullOwner=updater the broker's PERIODIC
+// drift watcher runs the detect-only branch; the updater pulls on its own ~90s cadence, so
+// a checkout can be transiently "behind origin/main" for the few seconds between a merge and
+// the updater's next poll. Emitting plugin.checkout.drift on that transient state would cry
+// wolf on healthy nodes (Codex P2). We only WARN once a checkout has stayed behind LONGER
+// than this grace (i.e. the updater has actually missed its SLA), tracking first-behind per
+// root. Default 180s (> the 90s updater poll); env-overridable.
+const _driftSinceByRoot = new Map(); // root → epoch ms first seen behind (detect-only)
+export const PLUGIN_DRIFT_GRACE_MS =
+  Number(process.env.CATALYST_PLUGIN_DRIFT_GRACE_MS) || 180_000;
+
 export function __clearLagStateForTest() {
   _failuresByRoot.clear();
   _lagEmittedByRoot.clear();
+  _driftSinceByRoot.clear();
 }
 
 function _clearLagState(root) {
   _failuresByRoot.delete(root);
   _lagEmittedByRoot.delete(root);
+  _driftSinceByRoot.delete(root);
 }
 
 // --- default seams (production wiring) ---------------------------------------
@@ -324,6 +337,46 @@ export function isDaemonLocalMergeSignal(event) {
   return MONITOR_MERGE_COMPLETE_RE.test(getEventName(event) ?? "");
 }
 
+// --- plugin-pull ownership (CTL-1348) ----------------------------------------
+
+/**
+ * resolvePluginPullOwner — which process owns the plugin PULL on this node:
+ * "broker" (today's default) or "updater" (the standalone catalyst-updater agent).
+ * The broker DEFERS the actual `reset --hard` pull to the updater ONLY when this
+ * resolves to exactly "updater"; ANY other outcome — env/config absent, unreadable,
+ * malformed, or any other string — returns "broker" so the broker keeps pulling.
+ *
+ * FAIL-SAFE BY CONSTRUCTION: the cutover is inert until install-services explicitly
+ * writes "updater" into the machine-local config. Read precedence env →
+ * machine-local config (a per-NODE deployment fact, so NOT the committed repo config),
+ * default "broker". Read FRESH on each broker tick (never cached) so a running broker
+ * honors a live cutover (or a revert to "broker") without a restart. Never throws.
+ *
+ * @param {object} [opts]
+ * @param {Record<string,string|undefined>} [opts.env]
+ * @param {string} [opts.machineConfigPath]  ~/.config/catalyst/config.json
+ * @param {Function} [opts.readFileFn]
+ * @returns {"broker"|"updater"}
+ */
+export function resolvePluginPullOwner({
+  env = process.env,
+  machineConfigPath,
+  readFileFn = readFileSync,
+} = {}) {
+  const coerce = (v) => (typeof v === "string" && v.trim() === "updater" ? "updater" : "broker");
+  const fromEnv = env.CATALYST_PLUGIN_PULL_OWNER;
+  if (typeof fromEnv === "string" && fromEnv.trim().length > 0) return coerce(fromEnv);
+  if (machineConfigPath) {
+    try {
+      const v = JSON.parse(readFileFn(machineConfigPath, "utf8"))?.catalyst?.orchestration?.pluginPullOwner;
+      if (typeof v === "string" && v.trim().length > 0) return coerce(v);
+    } catch {
+      /* unreadable/malformed machine config → fail safe to broker */
+    }
+  }
+  return "broker";
+}
+
 // --- refresh ----------------------------------------------------------------
 
 /**
@@ -346,6 +399,14 @@ export function refreshPluginCheckout({
   emitFn,
   loadedCommit = null,
   loadedCommitRoot = null,
+  // CTL-1348: pull-owner cutover seam. Default true preserves today's behavior for
+  // every existing caller. pull:false = detect-only — the broker DEFERS the pull to
+  // the standalone catalyst-updater agent (pluginPullOwner=updater) but keeps drift
+  // observability: it fetches + compares HEAD vs origin/main but NEVER reset --hard /
+  // bun install, NEVER touches the throttle slot or the lag/failure state machine, and
+  // ALWAYS returns changed:false so decideStackReload (stack-reload.mjs) stays a no-op
+  // (a behind checkout the broker never pulled must not trigger a stack restart loop).
+  pull = true,
 }) {
   if (!root) return { pulled: false, throttled: false, changed: false, failed: false, root, oldSha: null, newSha: null, restartNeeded: false };
 
@@ -353,6 +414,45 @@ export function refreshPluginCheckout({
   if (last !== undefined && now - last < PLUGIN_REFRESH_THROTTLE_MS) {
     return { pulled: false, throttled: true, changed: false, failed: false, root, oldSha: null, newSha: null, restartNeeded: false };
   }
+
+  // CTL-1348 detect-only: placed BEFORE the throttle reservation so it neither
+  // consumes nor writes throttle state (a detect-only tick must never block a later
+  // real pull within the 60 s window), and it does not enter the reset/lag path below.
+  if (pull === false) {
+    let headSha = null;
+    let originSha = null;
+    try {
+      headSha = gitFn(root, ["rev-parse", "HEAD"]);
+      gitFn(root, ["fetch", "--no-tags", "origin", "main"]);
+      originSha = gitFn(root, ["rev-parse", "origin/main"]);
+    } catch (err) {
+      // Observability-only: a detect-only fetch failure does NOT advance the lag
+      // state machine (the broker no longer owns pulling this checkout; the updater does).
+      return { pulled: false, throttled: false, changed: false, failed: true, root, oldSha: headSha, newSha: null, restartNeeded: false };
+    }
+    if (headSha && originSha && headSha !== originSha) {
+      // The checkout is behind and the broker is NOT pulling it. Only WARN once it has been
+      // behind LONGER than the grace window — within it, the updater is expected to catch up
+      // on its own poll, so staying silent avoids false drift alerts on healthy nodes.
+      const since = _driftSinceByRoot.get(root) ?? now;
+      if (!_driftSinceByRoot.has(root)) _driftSinceByRoot.set(root, now);
+      if (now - since >= PLUGIN_DRIFT_GRACE_MS) {
+        // Past grace — the updater has missed its SLA (fallen behind or died). Surface drift.
+        emitFn({
+          event: "plugin.checkout.drift",
+          orchestrator: null,
+          worker: null,
+          severity: "WARN",
+          detail: { checkout: root, head_sha: headSha, origin_sha: originSha, behind: true, behind_since: since },
+        });
+      }
+      return { pulled: false, throttled: false, changed: false, failed: false, root, oldSha: headSha, newSha: originSha, restartNeeded: false };
+    }
+    // Up to date — clear any prior real-pull stall episode AND the drift-grace tracker.
+    _clearLagState(root);
+    return { pulled: false, throttled: false, changed: false, failed: false, root, oldSha: headSha, newSha: originSha, restartNeeded: false };
+  }
+
   // Reserve the slot BEFORE the (possibly slow) pull so a duplicate event that
   // arrives mid-pull is throttled rather than launching a second git process.
   _lastPullByRoot.set(root, now);
@@ -490,6 +590,7 @@ export function handlePluginRefreshEvent({
   emitFn,
   loadedCommit = null,
   loadedCommitRoot = null,
+  pull = true, // CTL-1348: pass pull:false from the event-driven path when owner=updater
 }) {
   try {
     const isMerge =
@@ -504,7 +605,7 @@ export function handlePluginRefreshEvent({
     });
     const results = [];
     for (const root of roots) {
-      results.push(refreshPluginCheckout({ root, now, gitFn, emitFn, loadedCommit, loadedCommitRoot }));
+      results.push(refreshPluginCheckout({ root, now, gitFn, emitFn, loadedCommit, loadedCommitRoot, pull }));
     }
     return results;
   } catch {
@@ -534,6 +635,7 @@ export function refreshAllPluginCheckouts({
   emitFn,
   loadedCommit = null,
   loadedCommitRoot = null,
+  pull = true, // CTL-1348: pass pull:false from the broker drift-check when owner=updater
 } = {}) {
   try {
     const roots = resolvePluginCheckoutRoots({
@@ -545,7 +647,7 @@ export function refreshAllPluginCheckouts({
     });
     const results = [];
     for (const root of roots) {
-      results.push(refreshPluginCheckout({ root, now, gitFn, emitFn, loadedCommit, loadedCommitRoot }));
+      results.push(refreshPluginCheckout({ root, now, gitFn, emitFn, loadedCommit, loadedCommitRoot, pull }));
     }
     return results;
   } catch {
