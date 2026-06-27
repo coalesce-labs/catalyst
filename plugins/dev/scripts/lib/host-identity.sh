@@ -52,3 +52,26 @@ __host_id_from() {
 
 # catalyst_host_id — sha256(catalyst_host_name)[:16].
 catalyst_host_id() { __host_id_from "$(catalyst_host_name)"; }
+
+# catalyst_node_class — resolve the node ROLE (developer|worker|monitor) for telemetry
+# (CTL-1368). The Bash mirror of execution-core resolveNodeClass / lib/node-class.mjs:
+# CATALYST_NODE_CLASS env → Layer-2 catalyst.node.class → worker; trim + lowercase; a
+# non-member explicit value degrades to the most-restrictive `monitor` (parity with the
+# MJS/TS resolvers). Best-effort (needs jq to read Layer-2); falls back to worker without it.
+catalyst_node_class() {
+  local _raw=""
+  if [[ -n "${CATALYST_NODE_CLASS:-}" ]]; then
+    _raw="$CATALYST_NODE_CLASS"
+  else
+    local _cfg="${CATALYST_LAYER2_CONFIG_FILE:-${HOME}/.config/catalyst/config.json}"
+    if [[ -r "$_cfg" ]] && command -v jq >/dev/null 2>&1; then
+      _raw="$(jq -r '.catalyst.node.class // empty' "$_cfg" 2>/dev/null || true)"
+    fi
+  fi
+  _raw="$(printf '%s' "$_raw" | tr '[:upper:]' '[:lower:]' | xargs 2>/dev/null || true)"
+  case "$_raw" in
+    developer|worker|monitor) printf '%s' "$_raw" ;;
+    "") printf 'worker' ;;
+    *) printf 'monitor' ;;
+  esac
+}

@@ -173,6 +173,13 @@ function projectEnvelope(raw: unknown): CanonicalEvent {
           : "",
       "host.id":
         typeof resource["host.id"] === "string" ? resource["host.id"] : "",
+      // CTL-1368: node CLASS (developer|worker|monitor). Browser normalizer —
+      // CANNOT read Layer-2 from disk, so this is a pure wire pass-through with a
+      // "" fallback, mirroring the host.name/host.id default above (CTL-852).
+      "catalyst.node.class":
+        typeof resource["catalyst.node.class"] === "string"
+          ? resource["catalyst.node.class"]
+          : "",
     },
     attributes: {
       "event.name":

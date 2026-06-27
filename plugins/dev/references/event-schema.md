@@ -34,7 +34,8 @@ Every event in `~/catalyst/events/YYYY-MM.jsonl` has this shape. One canonical e
   "resource": {
     "service.name": "catalyst.github",
     "service.namespace": "catalyst",
-    "service.version": "8.2.0"
+    "service.version": "8.2.0",
+    "catalyst.node.class": "worker"
   },
   "attributes": {
     "event.name": "github.pr.merged",
@@ -99,6 +100,18 @@ hostile for jq. The sidecar (CTL-306) handles that translation mechanically.
 | `catalyst.orchestrator` | Bash (`catalyst-state.sh`, `emit-worker-status-change.sh`) |
 | `catalyst.comms` | Bash (`catalyst-comms`) |
 | `catalyst.broker` | Bash/daemon (`broker/index.mjs`) — see [[broker]]. Supersedes legacy `catalyst.filter` producer (CTL-303). |
+
+`resource."catalyst.node.class"` (CTL-1368) is the node's ROLE — one of `developer`, `worker`,
+or `monitor` — orthogonal to `host.name`/`host.id` (WHICH machine). It is stamped last in the
+resource block by the canonical builder in EACH runtime — MJS `buildCatalystResource()`
+(`execution-core/lib/catalyst-resource.mjs`), the TS twin (`orch-monitor/lib/canonical-event-shared.ts`),
+and Bash `lib/canonical-event.sh` (via `catalyst_node_class`, which the Bash producers above —
+`catalyst-session.sh`, `catalyst-state.sh`, `catalyst-comms`, the phase-agent emitters — all
+route through). It defaults to `worker` when `catalyst.node.class` is unset in Layer-2 config
+(and is overridable via the `CATALYST_NODE_CLASS` env var); an unrecognized explicit value
+degrades to `monitor`. Low-cardinality, so the OTEL collector surfaces it as a fleet-wide
+`node_class` dashboard dimension. It remains optional in the schema: a few direct emitters that
+build a bare resource block (e.g. some webhook paths) may still omit it.
 
 ---
 
@@ -257,7 +270,8 @@ one-time migration, already complete on any installation that ran CTL-300.
   "resource": {
     "service.name": "catalyst.github",
     "service.namespace": "catalyst",
-    "service.version": "8.2.0"
+    "service.version": "8.2.0",
+    "catalyst.node.class": "worker"
   },
   "attributes": {
     "event.name": "github.pr.merged",
@@ -299,7 +313,8 @@ absent and the consumer must check `body.payload.prNumbers`. Use:
   "resource": {
     "service.name": "catalyst.linear",
     "service.namespace": "catalyst",
-    "service.version": "8.2.0"
+    "service.version": "8.2.0",
+    "catalyst.node.class": "worker"
   },
   "attributes": {
     "event.name": "linear.issue.state_changed",
@@ -338,7 +353,8 @@ Update topic selection: `stateId` → `state_changed`; `priority` → `priority_
   "resource": {
     "service.name": "catalyst.session",
     "service.namespace": "catalyst",
-    "service.version": "8.2.0"
+    "service.version": "8.2.0",
+    "catalyst.node.class": "worker"
   },
   "attributes": {
     "event.name": "session.phase",
@@ -380,7 +396,8 @@ mirrors the `to` state so HUD/filter can check it without descending into payloa
   "resource": {
     "service.name": "catalyst.orchestrator",
     "service.namespace": "catalyst",
-    "service.version": "8.2.0"
+    "service.version": "8.2.0",
+    "catalyst.node.class": "worker"
   },
   "attributes": {
     "event.name": "orchestrator.worker.status_terminal",
@@ -415,7 +432,8 @@ Normal posted message (`severityText: "INFO"`):
   "resource": {
     "service.name": "catalyst.comms",
     "service.namespace": "catalyst",
-    "service.version": "8.2.0"
+    "service.version": "8.2.0",
+    "catalyst.node.class": "worker"
   },
   "attributes": {
     "event.name": "comms.message.posted",
@@ -468,7 +486,8 @@ Filters that previously matched `.event == "filter.wake.${id}"` now match:
   "resource": {
     "service.name": "catalyst.filter",
     "service.namespace": "catalyst",
-    "service.version": "8.2.0"
+    "service.version": "8.2.0",
+    "catalyst.node.class": "worker"
   },
   "attributes": {
     "event.name": "filter.wake",
@@ -509,7 +528,8 @@ the event — it's metadata stamped at write time.
   "resource": {
     "service.name": "catalyst.orchestrator",
     "service.namespace": "catalyst",
-    "service.version": "9.3.0"
+    "service.version": "9.3.0",
+    "catalyst.node.class": "worker"
   },
   "attributes": {
     "event.name": "worker.state_changed",

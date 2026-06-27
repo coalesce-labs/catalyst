@@ -52,6 +52,7 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { readClusterHostCount, runFenceCheck } from "./stop-worker.mjs";
 import { PHASE_ORDER } from "./board-data.mjs";
+import { nodeClass } from "./canonical-event-shared.ts";
 
 // The execution-core worker tree root — ~/catalyst/execution-core/workers/<T>/.
 // Byte-identical to ticket-runs.mjs::DEFAULT_WORKERS_DIR and board-data.mjs's
@@ -100,6 +101,10 @@ export function buildResumeEvent({ ticket, response, now = new Date() }) {
     resource: {
       "service.name": "catalyst.orch-monitor",
       "service.namespace": "catalyst",
+      // CTL-1368: node CLASS (developer|worker|monitor). host fields are
+      // deliberately omitted here (this bare resource never carried them);
+      // node.class is the only added key, sourced from nodeClass(), kept LAST.
+      "catalyst.node.class": nodeClass(),
     },
     attributes: {
       "event.name": "linear.comment.created",

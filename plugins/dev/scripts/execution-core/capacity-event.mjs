@@ -7,7 +7,7 @@ import { mkdirSync, appendFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { randomBytes } from "node:crypto";
 import { getEventLogPath, getHostName, log } from "./config.mjs";
-import { hostName, hostId } from "./lib/host-identity.mjs";
+import { buildCatalystResource } from "./lib/catalyst-resource.mjs";
 
 export const CAPACITY_CHANGED_EVENT = "node.capacity.changed";
 
@@ -25,12 +25,7 @@ export function buildCapacityChangedEnvelope({ oldMaxParallel, newMaxParallel, r
     severityNumber: 9,
     traceId: null,
     spanId: null,
-    resource: {
-      "service.name": "catalyst.execution-core",
-      "service.namespace": "catalyst",
-      "host.name": hostName(),
-      "host.id": hostId(),
-    },
+    resource: buildCatalystResource({ serviceName: "catalyst.execution-core" }),
     attributes: {
       "event.name": CAPACITY_CHANGED_EVENT,
       "event.entity": "node",

@@ -26,6 +26,8 @@ export const AUDIT_MANIFEST: AttributeAuditEntry[] = [
   { key: "service.version",   emitter: "ts", source: "canonical-event.ts:45", classification: "conforming" },
   { key: "host.name",         emitter: "ts", source: "canonical-event.ts:47", classification: "conforming" },
   { key: "host.id",           emitter: "ts", source: "canonical-event.ts:48", classification: "conforming" },
+  // CTL-1368: node CLASS (developer|worker|monitor) — fleet-wide role dimension, catalyst.* custom
+  { key: "catalyst.node.class",     emitter: "ts", source: "canonical-event.ts:52", classification: "legitimately-custom", note: "CTL-1368" },
   // CTL-1262: stable Catalyst node name (distinct from the OS host.name) — catalyst.* custom
   { key: "catalyst.node.name",      emitter: "ts", source: "canonical-event.ts:55", classification: "legitimately-custom", note: "CTL-1262" },
   // CTL-636 optional resource context
