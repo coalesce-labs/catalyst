@@ -1,8 +1,23 @@
 // doctor.mjs — catalyst doctor: fail-closed activation gate for new cluster nodes (CTL-1186).
 //
-// Runs a suite of read-only checks that a new node MUST pass before the
-// execution-core daemon is safe to start. Each check is injectable for unit
-// testing; production defaults wire to the real system calls.
+// Runs a suite of read-only checks that a node MUST pass before its role is safe.
+// Each check is injectable for unit testing; production defaults wire to the real
+// system calls.
+//
+// CTL-1355: the suite is CLASS-AWARE. `runDoctor` resolves catalyst.node.class
+// (resolveNodeClass) once and grades the node against its class-specific rubric:
+//   • worker    — the full CTL-1186 activation gate (would-own-work + Linear/bot
+//                 reachable + roster membership + daemon PATH + member provisioning).
+//                 An UNSET class infers `worker` (today's behavior, zero change).
+//   • developer — services healthy + plugins fresh + read-replica REACHABLE + the
+//                 node will NOT pick up work (out of roster / boot-drained). Reuses
+//                 the daemonless + plugins-fresh rows from `catalyst-stack
+//                 verify-node --json`; computes would-not-own-work + read-replica
+//                 reachability natively.
+//   • monitor   — minimal/stub (no monitor host exists yet); reachability + must-not-
+//                 own-work + a fail-closed profile-stub FAIL (doctor refuses to
+//                 certify a monitor node until the monitor rubric lands).
+// An EXPLICIT but unrecognized class (a typo'd "developr") is a single hard FAIL.
 //
 // Usage:
 //   node doctor.mjs [--json] [--dry-run] [--expected-bot-user-id <id>]
@@ -22,6 +37,12 @@ import {
   hostMembershipWarning,
   getLivenessAnchorIssue,
   getExecutor, // CTL-1367 item 9: resolve the phase-worker executor for the sdk-auth gate
+  // CTL-1355: class-aware grading — resolveNodeClass selects the rubric, isDraining
+  // + getExecutionCoreDir drive the developer/monitor "will NOT pick up work" gate.
+  resolveNodeClass,
+  NODE_CLASSES,
+  isDraining,
+  getExecutionCoreDir,
 } from "./config.mjs";
 import { ownedBy } from "./hrw.mjs";
 import { readPeerHeartbeats } from "./cluster-heartbeat.mjs";
@@ -1580,20 +1601,436 @@ export function checkConfigScopeLeak(deps = {}) {
   return checks;
 }
 
-// runDoctor — orchestrate all checks, render, and return the fail count.
-export async function runDoctor(opts = {}) {
+// ─── CTL-1355: class-aware grading ───────────────────────────────────────────
+
+// checkNodeClass — grade catalyst.node.class itself. An EXPLICIT but unrecognized
+// value (resolveNodeClass.recognized === false, e.g. a typo'd "developr") is the
+// single hard FAIL that fail-closes the gate until the value is corrected (the
+// resolver already degraded it to the most-restrictive `monitor`). An INFERRED
+// default (class unset) is a benign INFO — it grades as `worker` (today's
+// behavior, zero change), just noting the role was never declared. An explicit,
+// recognized class PASSes. Injectable for tests.
+export function checkNodeClass(deps = {}) {
+  const { nodeClass = resolveNodeClass() } = deps;
+  const nc = nodeClass;
+  if (!nc.recognized) {
+    return [
+      mkCheck(
+        "node-class",
+        STATUS.FAIL,
+        `catalyst.node.class "${nc.raw}" is not one of [${NODE_CLASSES.join(", ")}] — ` +
+          `treating this node as "${nc.class}" (most restrictive); correct or unset ` +
+          `the value in ~/.config/catalyst/config.json (or CATALYST_NODE_CLASS) (CTL-1355)`,
+      ),
+    ];
+  }
+  if (nc.inferred) {
+    return [
+      mkCheck(
+        "node-class",
+        STATUS.INFO,
+        `catalyst.node.class is not explicitly set — grading as "${nc.class}" ` +
+          `(absent ⇒ worker ⇒ today's behavior, zero change). Set CATALYST_NODE_CLASS ` +
+          `or catalyst.node.class to make the role explicit`,
+      ),
+    ];
+  }
+  return [
+    mkCheck(
+      "node-class",
+      STATUS.PASS,
+      `catalyst.node.class="${nc.class}" (explicit, source=${nc.source})`,
+    ),
+  ];
+}
+
+// ─── Developer/monitor: read-replica REACHABILITY (CTL-1346 + CTL-1355) ───────
+
+// defaultReadReplicaBaseUrl — mirror catalyst-stack _vn_read_replica_base /
+// read-replica-config.ts readReplicaBaseUrlFromLayer2: CATALYST_MONITOR_URL env
+// override, else Layer-2 catalyst.readReplica.baseUrl. Trimmed; null when neither
+// is set (a developer/monitor reads from a worker monitor, never an empty local
+// replica). Never throws.
+function defaultReadReplicaBaseUrl() {
+  const env = process.env.CATALYST_MONITOR_URL;
+  if (typeof env === "string" && env.trim().length > 0) return env.trim();
+  try {
+    const v = JSON.parse(readFileSync(layer2Path(), "utf8"))?.catalyst?.readReplica?.baseUrl;
+    return typeof v === "string" && v.trim().length > 0 ? v.trim() : null;
+  } catch {
+    return null;
+  }
+}
+
+// checkReadReplicaReachable — doctor's value-add over verify-node (which only
+// CLASSIFIES the config): an ACTUAL reachability probe of the read endpoint. A
+// developer/monitor that can't reach its worker monitor serves a stale/empty board.
+//   • unset              → FAIL (no endpoint; resolver refuses to fall back to localhost)
+//   • localhost/127      → FAIL (an empty local replica; point at a worker monitor)
+//   • remote + 2xx       → PASS
+//   • remote + non-2xx   → FAIL (a TCP/any-response check would mask an unhealthy monitor)
+//   • remote + unreach   → FAIL (the probe threw / timed out)
+// GET + 5 s timeout; a 2xx is the health floor (CTL-1355 F4 — was "any response").
+export async function checkReadReplicaReachable(deps = {}) {
+  const { baseUrl = defaultReadReplicaBaseUrl(), fetch: _fetch = globalThis.fetch } = deps;
+  const base = typeof baseUrl === "string" ? baseUrl.trim() : "";
+
+  if (!base) {
+    return [
+      mkCheck(
+        "read-replica",
+        STATUS.FAIL,
+        `no read-replica endpoint (CATALYST_MONITOR_URL / catalyst.readReplica.baseUrl ` +
+          `unset) — a non-worker node reads from a worker monitor (CTL-1346); point it at ` +
+          `one, e.g. http://mini:7400`,
+      ),
+    ];
+  }
+  if (/^https?:\/\/(localhost|127\.0\.0\.1)\b/i.test(base)) {
+    return [
+      mkCheck(
+        "read-replica",
+        STATUS.FAIL,
+        `read-replica endpoint is localhost (${base}) — serves an empty local replica; ` +
+          `point at a worker monitor (e.g. http://mini:7400)`,
+      ),
+    ];
+  }
+  const url = base.replace(/\/+$/, "") + "/api/health";
+  try {
+    const res = await _fetch(url, { method: "GET", signal: AbortSignal.timeout(5000) });
+    // F4 (CTL-1355): a 2xx is the health floor — any other response (404/5xx/…)
+    // means the endpoint answered but is NOT healthy. Honor a real Response.ok;
+    // fall back to a 2xx status-range test when a mock omits `ok`.
+    const status = res?.status;
+    const ok =
+      res?.ok ?? (typeof status === "number" && status >= 200 && status < 300);
+    if (!ok) {
+      return [
+        mkCheck(
+          "read-replica",
+          STATUS.FAIL,
+          `read-replica ${url} returned HTTP ${status ?? "?"} — not healthy (a 2xx is required)`,
+        ),
+      ];
+    }
+    return [
+      mkCheck("read-replica", STATUS.PASS, `read-replica endpoint healthy: ${url} → HTTP ${status}`),
+    ];
+  } catch (err) {
+    return [
+      mkCheck(
+        "read-replica",
+        STATUS.FAIL,
+        `read-replica endpoint ${url} unreachable: ${err?.message ?? err}`,
+      ),
+    ];
+  }
+}
+
+// ─── Developer/monitor: "will NOT pick up work" (CTL-1355) ────────────────────
+
+// checkWontOwnWork — a developer/monitor MUST sit out of the work pipeline. The
+// node class is a LABEL ONLY today — it does not auto-drain or auto-leave the
+// roster (config.mjs applyBootDrainPolicy keys drain off CATALYST_BOOT_DRAINED,
+// resolveClusterHosts is class-blind) — so this is the check that actually proves
+// the node won't be assigned work.
+//
+// FAIL-CLOSED (CTL-1355 F1): resolveClusterHosts is FAIL-OPEN — an absent/stale/
+// malformed cluster-repo clone (the COMMON case on a daemonless dev laptop)
+// collapses to { hosts:[self], source:"single-host", multiHost:false }, so a node
+// that would own 100% of work under HRW must NOT grade as safe. The PASS condition
+// is therefore that we can POSITIVELY confirm the node sits out — never the mere
+// ABSENCE of a confirmed conflict. Structural test (offline, deterministic):
+//   • boot-drained / draining                       → PASS (admits no new work)
+//   • AUTHORITATIVE roster (cluster-repo / static),
+//     node NOT in it                                → PASS (HRW assigns it nothing)
+//   • in the roster, not drained                    → FAIL (HRW would assign work)
+//   • single-host / fail-open / unresolved roster,
+//     not drained                                   → FAIL (can't confirm out-of-roster;
+//                                                      a fail-open collapse = owns 100%)
+// "Authoritative" = a real configured roster source (cluster-repo or an explicit
+// static roster) — NOT the single-host collapse the resolver returns when nothing
+// resolves. If the resolver exposes no source flag (defensive), only multiHost===true
+// is treated as authoritative; a single-host/unflagged roster is the dangerous case.
+// The would-own COUNT is printed separately by checkHrwPartition (kept in every
+// suite for visibility). Injectable for tests.
+export function checkWontOwnWork(deps = {}) {
   const {
-    checks: checkFns = null,
-    json = false,
-    log: _log = (msg) => process.stdout.write(msg + "\n"),
-    host = null,
-    seed = process.env.CATALYST_SEED_HOST ?? null,
-    otel = process.env.OTEL_EXPORTER_OTLP_ENDPOINT ?? null,
+    resolveRoster = resolveClusterHosts,
+    getHostName: _getHostName = getHostName,
+    isDraining: _isDraining = isDraining,
+    orchDir = getExecutionCoreDir(),
+    bootDrained = process.env.CATALYST_BOOT_DRAINED === "1",
+  } = deps;
+
+  const resolved = resolveRoster() ?? {};
+  const hosts = Array.isArray(resolved.hosts) ? resolved.hosts : [];
+  const source = resolved.source;
+  const multiHost = resolved.multiHost === true;
+  const self = _getHostName();
+  const inRoster = hosts.includes(self);
+  const drained = _isDraining(orchDir) || bootDrained;
+
+  // 1. Explicitly drained → PASS (admits no new work regardless of roster).
+  if (drained) {
+    return [
+      mkCheck("would-not-own-work", STATUS.PASS, "drained — will not own work (boot-drained / draining; admits no new work)"),
+    ];
+  }
+
+  // A roster is AUTHORITATIVELY resolved only when it came from a real configured
+  // source (the cluster repo or an explicit static roster). The fail-open
+  // single-host collapse (source==="single-host", or — defensively, if the resolver
+  // exposes no source flag — anything that is not multiHost) is NOT authoritative.
+  const authoritative =
+    source === "cluster-repo" ||
+    source === "static" ||
+    (source === undefined && multiHost);
+
+  // 2. Authoritative roster that does NOT contain this node → PASS (HRW assigns it
+  //    nothing; we can POSITIVELY confirm it sits out).
+  if (authoritative && !inRoster) {
+    return [
+      mkCheck(
+        "would-not-own-work",
+        STATUS.PASS,
+        `"${self}" is not in the authoritative cluster roster [${hosts.join(", ")}] ` +
+          `(source=${source ?? "?"}) — HRW assigns it nothing`,
+      ),
+    ];
+  }
+
+  // 3. Everything else (in the roster, OR a single-host/fail-open/unresolved roster
+  //    we cannot confirm excludes this node) → FAIL, fail-closed.
+  const why = inRoster
+    ? `it is in the cluster roster [${hosts.join(", ")}] (source=${source ?? "?"}) and is NOT drained, ` +
+      `so HRW would assign it work`
+    : `the cluster roster could not be authoritatively confirmed (source=${source ?? "?"}, ` +
+      `multiHost=${multiHost}), so a fail-open single-host collapse means this node would own ` +
+      `100% of tickets if the daemons start`;
+  return [
+    mkCheck(
+      "would-not-own-work",
+      STATUS.FAIL,
+      `"${self}" would own work — a developer/monitor must be drained or out of an authoritative ` +
+        `roster; set CATALYST_BOOT_DRAINED=1 (or drain) — ${why}`,
+    ),
+  ];
+}
+
+// ─── Developer: daemonless + plugins-fresh, folded from verify-node ───────────
+
+// resolveStackBin — the catalyst-stack script. Prefer the sibling in this repo
+// (deterministic, same version as doctor.mjs); fall back to PATH.
+function resolveStackBin() {
+  const sibling = resolve(dirname(fileURLToPath(import.meta.url)), "..", "catalyst-stack");
+  return existsSync(sibling) ? sibling : "catalyst-stack";
+}
+
+// defaultRunVerifyNode — shell out to `catalyst-stack verify-node --json` (a
+// read-only, class-aware LOCAL smoke test) and parse its JSON. verify-node EXITS
+// non-zero when a required check FAILs — that is expected, not a spawn error, so
+// we parse stdout regardless of status; only a missing binary / empty output
+// throws. The child grades the SAME class (env-pinned) so its rows match ours.
+function defaultRunVerifyNode(nodeClass) {
+  const bin = resolveStackBin();
+  const r = spawnSync(bin, ["verify-node", "--json"], {
+    encoding: "utf8",
+    timeout: 120_000,
+    env: { ...process.env, CATALYST_NODE_CLASS: nodeClass },
+  });
+  if (r.error) throw r.error;
+  if (!r.stdout || !r.stdout.trim()) {
+    throw new Error(`verify-node produced no output (status ${r.status}): ${r.stderr?.trim() ?? ""}`);
+  }
+  const parsed = JSON.parse(r.stdout);
+  // F2 (CTL-1355): the child's ACTUAL exit status is the authoritative liveness
+  // signal — capture it (don't discard r.status) so checkDaemonlessLocal can
+  // fail-close on a non-zero exit even when the JSON body omits exit_code.
+  if (typeof parsed.exit_code !== "number" && typeof r.status === "number") {
+    parsed.exit_code = r.status;
+  }
+  return parsed;
+}
+
+// verify-node statuses are UPPERCASE (PASS|FAIL|WARN|SKIP, no INFO); translate to
+// doctor's lowercase STATUS (SKIP has no doctor analogue → INFO).
+const VN_STATUS_MAP = {
+  PASS: STATUS.PASS,
+  FAIL: STATUS.FAIL,
+  WARN: STATUS.WARN,
+  SKIP: STATUS.INFO,
+};
+
+// checkDaemonlessLocal — fold the daemonless + plugins-fresh rows from verify-node
+// into doctor checks rather than re-implementing the broker/exec-core process
+// probes and the entire verify-updater stack.
+//
+// FAIL-CLOSED (CTL-1355 F2): verify-node is the ONLY net that catches a developer
+// actually executing work (running daemons / stale plugins). A spawn error, an
+// empty/unparseable result, jq unavailability, a non-zero child exit, a `fail`
+// verdict, a missing required row, or an unmappable row status all mean we CANNOT
+// certify the node is daemonless + fresh — so each is a FAIL (was WARN, which
+// masked exactly the dangerous states). Injectable for tests (inject a JSON
+// fixture instead of spawning).
+export function checkDaemonlessLocal(deps = {}) {
+  const {
+    nodeClass = "developer",
+    runVerifyNode = defaultRunVerifyNode,
+    rows = ["broker-stopped", "exec-core-stopped", "plugins-fresh"],
+  } = deps;
+
+  let result;
+  try {
+    result = runVerifyNode(nodeClass);
+  } catch (err) {
+    return [
+      mkCheck(
+        "verify-node",
+        STATUS.FAIL,
+        `could not verify daemonless local state — could not run ` +
+          `'catalyst-stack verify-node --json': ${err?.message ?? err}; ` +
+          `cannot certify the developer is daemonless + fresh`,
+      ),
+    ];
+  }
+
+  // A parsed-but-unusable verify-node result cannot certify daemonless+fresh.
+  const checks = Array.isArray(result?.checks) ? result.checks : [];
+  const exit = typeof result?.exit_code === "number" ? result.exit_code : null;
+  if (
+    checks.length === 0 ||
+    result?.jq === false ||
+    (exit !== null && exit !== 0) ||
+    result?.verdict === "fail"
+  ) {
+    return [
+      mkCheck(
+        "verify-node",
+        STATUS.FAIL,
+        `could not verify daemonless local state — verify-node unavailable/failed ` +
+          `(exit ${exit ?? "?"}, verdict ${result?.verdict ?? "?"}, jq ${result?.jq ?? "?"}, ` +
+          `checks ${checks.length}); cannot certify the developer is daemonless + fresh`,
+      ),
+    ];
+  }
+
+  const out = [];
+  for (const name of rows) {
+    const row = checks.find((c) => c?.name === name);
+    if (!row) {
+      out.push(
+        mkCheck(
+          name,
+          STATUS.FAIL,
+          `verify-node did not report "${name}" (class=${result?.node_class ?? "?"}) — ` +
+            `cannot certify daemonless + fresh`,
+        ),
+      );
+      continue;
+    }
+    out.push(mkCheck(name, VN_STATUS_MAP[row.status] ?? STATUS.FAIL, row.detail ?? ""));
+  }
+  return out;
+}
+
+// ─── Suite selection ─────────────────────────────────────────────────────────
+
+// checksForClass — build the check-thunk suite for a resolved node class. This is
+// the single class switch; runDoctor calls it unless an explicit `checks` array is
+// injected. `opts` carries seed/otel/expectedBotUserId plus the injectable seams
+// the developer/monitor checks honor (runVerifyNode, baseUrl, fetch, roster/drain).
+// Undefined seams fall through to each check's real default (JS default params
+// apply for `undefined`), so production passes nothing and tests inject fixtures.
+export function checksForClass(nc, opts = {}) {
+  const {
+    seed = null,
+    otel = null,
     expectedBotUserId = null,
+    runVerifyNode,
+    readReplicaBaseUrl,
+    fetch: _fetch,
+    resolveRoster,
+    isDraining: _isDraining,
+    orchDir,
+    bootDrained,
+    getHostName: _getHostName,
   } = opts;
 
-  // Default check suite — all check functions with real deps
-  const defaultChecks = [
+  const nodeClassCheck = () => checkNodeClass({ nodeClass: nc });
+
+  // Unrecognized explicit class → a single hard FAIL; grade no profile (CTL-1355).
+  if (!nc.recognized) {
+    return [nodeClassCheck];
+  }
+
+  const replicaThunk = () => checkReadReplicaReachable({ baseUrl: readReplicaBaseUrl, fetch: _fetch });
+  const wontOwnThunk = () =>
+    checkWontOwnWork({
+      resolveRoster,
+      isDraining: _isDraining,
+      orchDir,
+      bootDrained,
+      getHostName: _getHostName,
+    });
+
+  if (nc.class === "developer") {
+    // A developer's interactive token need not be the BOT — keep linear-connectivity
+    // as a gate, but downgrade bot-identity FAIL → INFO (worker-only gating).
+    const developerBotCredentials = async () => {
+      const cs = await checkBotCredentials({ expectedBotUserId, fetch: _fetch });
+      return cs.map((c) =>
+        c.name === "bot-identity" && c.status === STATUS.FAIL
+          ? mkCheck(c.name, STATUS.INFO, `${c.detail} (advisory for a developer — interactive token need not be the bot)`)
+          : c,
+      );
+    };
+    return [
+      nodeClassCheck,
+      () => checkConnectivity({ seed, otel, fetch: _fetch }),
+      () => checkSecretsHygiene(),
+      () => checkClaudeSettings(),
+      developerBotCredentials,
+      () => checkHrwPartition(), // would-own count (visibility)
+      () => checkDaemonlessLocal({ nodeClass: nc.class, runVerifyNode }), // broker/exec-core down + plugins fresh
+      replicaThunk,
+      wontOwnThunk,
+      () => checkReaper(), // advisory (never FAIL), class-agnostic
+      () => checkCloudTokenEnv(), // advisory
+      () => checkConfigScopeLeak(), // advisory
+    ];
+  }
+
+  if (nc.class === "monitor") {
+    // Most-restrictive STUB (no monitor host exists yet): reachability + must-not-
+    // own-work + a fail-closed profile stub. monitor grading is unimplemented, so
+    // doctor must REFUSE to certify a monitor node (FAIL, not WARN) — a WARN would
+    // exit 0 and let a misconfigured monitor running the work daemons masquerade as
+    // verified-healthy. This is correct because no real monitor nodes exist yet;
+    // the FAIL is removed when the monitor rubric lands (CTL-1355 F3).
+    return [
+      nodeClassCheck,
+      () => checkConnectivity({ seed, otel, fetch: _fetch }),
+      () => checkHrwPartition(), // would-own count (visibility)
+      replicaThunk,
+      wontOwnThunk,
+      () => [
+        mkCheck(
+          "monitor-profile",
+          STATUS.FAIL,
+          "monitor profile grading is not yet implemented — fail-closed (no monitor host " +
+            "exists yet); a monitor node cannot be certified by doctor until the monitor " +
+            "rubric lands (CTL-1355)",
+        ),
+      ],
+    ];
+  }
+
+  // worker (explicit OR inferred default) → today's full CTL-1186 activation gate,
+  // unchanged, with the node-class check prepended (INFO/PASS — never FAILs here).
+  return [
+    nodeClassCheck,
     () => checkHostIdentity(),
     () => checkHrwPartition(),
     () => checkPeerUniqueness(),
@@ -1609,8 +2046,26 @@ export async function runDoctor(opts = {}) {
     () => checkSdkExecutorAuth(), // CTL-1367 item 9: under executor=sdk, subscription auth must be correct (no api-key metering)
     () => checkConfigScopeLeak(), // CTL-1214: committed Layer-1 .catalyst/config.json must not carry node/cluster scope (roster/orchestration/feedback/sweep/repoColors/hosts.json)
   ];
+}
 
-  const fns = checkFns ?? defaultChecks;
+// runDoctor — orchestrate all checks, render, and return the fail count.
+export async function runDoctor(opts = {}) {
+  const {
+    checks: checkFns = null,
+    json = false,
+    log: _log = (msg) => process.stdout.write(msg + "\n"),
+    host = null,
+    seed = process.env.CATALYST_SEED_HOST ?? null,
+    otel = process.env.OTEL_EXPORTER_OTLP_ENDPOINT ?? null,
+    expectedBotUserId = null,
+    // CTL-1355: the class resolver is injectable so tests can drive each rubric.
+    resolveClass = resolveNodeClass,
+  } = opts;
+
+  // CTL-1355: resolve the node class once, then grade against its rubric. An
+  // explicit `checks` array still bypasses selection entirely (the test seam).
+  const nc = resolveClass();
+  const fns = checkFns ?? checksForClass(nc, { ...opts, seed, otel, expectedBotUserId });
 
   // Run all check functions concurrently
   const results = await Promise.all(fns.map((fn) => Promise.resolve().then(fn)));
