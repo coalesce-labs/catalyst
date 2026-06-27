@@ -90,11 +90,31 @@ echo "catalyst router — installed-as-symlink resolution (exec through a symlin
 # must resolve through it so SCRIPT_DIR finds the manifest + lib/host-identity.sh (regression
 # guard: a bare dirname made `version` print 'unknown' and `class` mis-source the resolver).
 if [[ -r "$manifest" ]] && command -v jq >/dev/null 2>&1; then
+  EXPECTED_VER="$(jq -r .version "$manifest")"
+  # absolute-target symlink
   SYMBIN="$(mktemp -d)"
   ln -s "$ROUTER" "$SYMBIN/catalyst"
-  expect_eq "version resolves through a symlink (not 'unknown')" "$(jq -r .version "$manifest")" "$("$SYMBIN/catalyst" version 2>/dev/null)"
+  expect_eq "version resolves through an absolute symlink (not 'unknown')" "$EXPECTED_VER" "$("$SYMBIN/catalyst" version 2>/dev/null)"
   if "$SYMBIN/catalyst" help 2>&1 | grep -q "Lifecycle:"; then ok "help resolves through a symlink"; else fail "help resolves through a symlink" "grouped usage missing"; fi
   rm -rf "$SYMBIN"
+
+  # RELATIVE-target symlink, invoked from an unrelated $PWD — readlink returns a path relative
+  # to the symlink dir, which must be normalized against THAT dir, not the caller's cwd. NB the
+  # relpath is computed from the PHYSICAL dirs (cd -P) so the link isn't dangling on a platform
+  # where TMPDIR lives behind a symlink (macOS /var → /private/var).
+  REL_ROOT="$(mktemp -d)"
+  mkdir -p "$REL_ROOT/bin"
+  if command -v python3 >/dev/null 2>&1; then
+    phys_bin="$(cd -P "$REL_ROOT/bin" && pwd)"
+    router_real="$(cd -P "$(dirname "$ROUTER")" && pwd)/$(basename "$ROUTER")"
+    rel_target="$(python3 -c "import os,sys;print(os.path.relpath(sys.argv[1],sys.argv[2]))" "$router_real" "$phys_bin")"
+    ln -s "$rel_target" "$REL_ROOT/bin/catalyst"
+    rel_ver="$(cd /tmp && "$REL_ROOT/bin/catalyst" version 2>/dev/null)"
+    expect_eq "version resolves through a RELATIVE symlink from another cwd" "$EXPECTED_VER" "$rel_ver"
+  else
+    ok "relative-symlink test (python3 unavailable — skipped)"
+  fi
+  rm -rf "$REL_ROOT"
 else
   ok "symlink resolution (manifest/jq unavailable — skipped)"
 fi

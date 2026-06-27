@@ -25,10 +25,16 @@ set -uo pipefail
 
 # Resolve through symlinks before deriving SCRIPT_DIR — install-cli.sh installs this router
 # as a DIRECT symlink from a local checkout, so a bare dirname would point at ~/.catalyst/bin
-# (manifest + lib/host-identity.sh lookups would miss). Same idiom as catalyst-stack.
+# (manifest + lib/host-identity.sh lookups would miss). Normalize each hop against the
+# SYMLINK's own directory so a RELATIVE target (e.g. `catalyst -> ../plugins/dev/scripts/catalyst`)
+# resolves correctly regardless of the caller's $PWD, not just absolute targets.
 _SRC="${BASH_SOURCE[0]}"
-while [[ -L "$_SRC" ]]; do _SRC="$(readlink "$_SRC")"; done
-SCRIPT_DIR="$(cd "$(dirname "$_SRC")" && pwd)"
+while [[ -L "$_SRC" ]]; do
+  _DIR="$(cd -P "$(dirname "$_SRC")" && pwd)"
+  _SRC="$(readlink "$_SRC")"
+  [[ "$_SRC" != /* ]] && _SRC="$_DIR/$_SRC"
+done
+SCRIPT_DIR="$(cd -P "$(dirname "$_SRC")" && pwd)"
 
 # Bring in catalyst_node_class (CTL-1368 Bash resolver) for `catalyst class` show. Best-effort:
 # the router still dispatches if the lib is missing (the `class` verb degrades gracefully).
