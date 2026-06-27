@@ -1464,14 +1464,15 @@ describe("checkReadReplicaReachable (CTL-1355)", () => {
     expect(checks[0].status).toBe(STATUS.FAIL);
   });
 
-  it("PASSes a reachable remote endpoint returning 2xx (probes /api/health)", async () => {
+  it("PASSes a reachable remote endpoint returning 2xx (probes /api/version, P1)", async () => {
     let probed = null;
     const checks = await checkReadReplicaReachable({
       baseUrl: "http://mini:7400",
       fetch: async (url) => { probed = url; return { ok: true, status: 200 }; },
     });
     expect(checks[0].status).toBe(STATUS.PASS);
-    expect(probed).toBe("http://mini:7400/api/health");
+    // P1: orch-monitor serves no plain /api/health — probe the lightweight /api/version
+    expect(probed).toBe("http://mini:7400/api/version");
   });
 
   it("FAILs a remote endpoint that answers with a non-2xx status (F4 — 2xx is the floor)", async () => {
@@ -1732,6 +1733,9 @@ describe("checksForClass — suite selection (CTL-1355)", () => {
     expect(s).not.toContain("checkWebhookIngestion()");
     expect(s).not.toContain("checkThoughts()");
     expect(s).not.toContain("checkSdkExecutorAuth()");
+    // P2: checkClaudeSettings is a worker-cluster-MEMBER concern — a developer client
+    // (deliberately out of a multi-host roster) must not be graded against it.
+    expect(s).not.toContain("checkClaudeSettings()");
   });
 
   it("monitor → minimal stub: reachability + wont-own + a fail-closed profile-stub", () => {
@@ -1755,6 +1759,34 @@ describe("checksForClass — suite selection (CTL-1355)", () => {
     expect(out[0].name).toBe("monitor-profile");
     expect(out[0].status).toBe(STATUS.FAIL);
     expect(out[0].detail).toContain("fail-closed");
+  });
+});
+
+describe("developer Linear-token gate (CTL-1355 P3)", () => {
+  const devNc = nodeClassOf({ class: "developer", raw: "developer" });
+  // The developer bot-credentials thunk is the only one whose source references
+  // checkBotCredentials; pull it out of the rubric and run it with an injected token.
+  const botThunkOf = (opts) =>
+    checksForClass(devNc, opts).find((f) => f.toString().includes("checkBotCredentials"));
+
+  it("developer with NO Linear token → linear-connectivity FAILs (fail-closed)", async () => {
+    const thunk = botThunkOf({ linearToken: () => "" });
+    expect(thunk).toBeDefined();
+    const out = await thunk();
+    const conn = out.find((c) => c.name === "linear-connectivity");
+    expect(conn.status).toBe(STATUS.FAIL);
+    expect(conn.detail).toContain("Linear token");
+  });
+
+  it("developer with a working Linear token → linear-connectivity PASSes; bot-identity stays advisory (never FAIL)", async () => {
+    const thunk = botThunkOf({
+      linearToken: () => "lin_api_dev",
+      fetch: fakeFetch({ data: { viewer: { id: "dev-actor", email: "dev@example.com" } } }),
+    });
+    const out = await thunk();
+    expect(out.find((c) => c.name === "linear-connectivity").status).toBe(STATUS.PASS);
+    // a developer's interactive token need not be the bot → bot-identity never gates
+    expect(out.find((c) => c.name === "bot-identity").status).not.toBe(STATUS.FAIL);
   });
 });
 

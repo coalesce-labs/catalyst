@@ -1671,6 +1671,9 @@ function defaultReadReplicaBaseUrl() {
 //   • remote + non-2xx   → FAIL (a TCP/any-response check would mask an unhealthy monitor)
 //   • remote + unreach   → FAIL (the probe threw / timed out)
 // GET + 5 s timeout; a 2xx is the health floor (CTL-1355 F4 — was "any response").
+// Probes the lightweight, always-on GET /api/version (server.ts) — orch-monitor
+// serves no plain /api/health (only the heavier /api/health/{otel,services}), so a
+// /api/health probe would 404 and false-FAIL a healthy read-replica (CTL-1355 P1).
 export async function checkReadReplicaReachable(deps = {}) {
   const { baseUrl = defaultReadReplicaBaseUrl(), fetch: _fetch = globalThis.fetch } = deps;
   const base = typeof baseUrl === "string" ? baseUrl.trim() : "";
@@ -1696,7 +1699,7 @@ export async function checkReadReplicaReachable(deps = {}) {
       ),
     ];
   }
-  const url = base.replace(/\/+$/, "") + "/api/health";
+  const url = base.replace(/\/+$/, "") + "/api/version";
   try {
     const res = await _fetch(url, { method: "GET", signal: AbortSignal.timeout(5000) });
     // F4 (CTL-1355): a 2xx is the health floor — any other response (404/5xx/…)
@@ -1951,6 +1954,7 @@ export function checksForClass(nc, opts = {}) {
     runVerifyNode,
     readReplicaBaseUrl,
     fetch: _fetch,
+    linearToken: _linearToken, // CTL-1355 P3: injectable for the developer Linear-token gate
     resolveRoster,
     isDraining: _isDraining,
     orchDir,
@@ -1976,21 +1980,38 @@ export function checksForClass(nc, opts = {}) {
     });
 
   if (nc.class === "developer") {
-    // A developer's interactive token need not be the BOT — keep linear-connectivity
-    // as a gate, but downgrade bot-identity FAIL → INFO (worker-only gating).
+    // A developer is a FUNCTIONAL node: it reads the board via the read-replica
+    // (CTL-1346) AND its operator's skills write transitions/comments to Linear, so a
+    // working Linear token is REQUIRED (CTL-1355 P3). checkBotCredentials degrades a
+    // missing token to WARN; for a developer that is a fail-closed FAIL on
+    // linear-connectivity (an unreachable token already FAILs upstream). The
+    // bot-identity ACTOR-match, by contrast, stays advisory — a developer's
+    // interactive token need not be the bot — so a FAIL there downgrades to INFO.
     const developerBotCredentials = async () => {
-      const cs = await checkBotCredentials({ expectedBotUserId, fetch: _fetch });
-      return cs.map((c) =>
-        c.name === "bot-identity" && c.status === STATUS.FAIL
-          ? mkCheck(c.name, STATUS.INFO, `${c.detail} (advisory for a developer — interactive token need not be the bot)`)
-          : c,
-      );
+      const cs = await checkBotCredentials({ expectedBotUserId, fetch: _fetch, linearToken: _linearToken });
+      return cs.map((c) => {
+        if (c.name === "linear-connectivity" && c.status === STATUS.WARN) {
+          return mkCheck(
+            c.name,
+            STATUS.FAIL,
+            `${c.detail} — a developer needs a working Linear token to read the board ` +
+              `(read-replica, CTL-1346) and write transitions/comments`,
+          );
+        }
+        if (c.name === "bot-identity" && c.status === STATUS.FAIL) {
+          return mkCheck(c.name, STATUS.INFO, `${c.detail} (advisory for a developer — interactive token need not be the bot)`);
+        }
+        return c;
+      });
     };
+    // NOTE (CTL-1355 P2): no checkClaudeSettings here — that gates worker-cluster-MEMBER
+    // telemetry/host-pin provisioning. A developer is a CLIENT, not a roster member; a
+    // developer deliberately out of a multi-host roster must not be graded against
+    // worker-member Claude settings that don't apply to it.
     return [
       nodeClassCheck,
       () => checkConnectivity({ seed, otel, fetch: _fetch }),
       () => checkSecretsHygiene(),
-      () => checkClaudeSettings(),
       developerBotCredentials,
       () => checkHrwPartition(), // would-own count (visibility)
       () => checkDaemonlessLocal({ nodeClass: nc.class, runVerifyNode }), // broker/exec-core down + plugins fresh
