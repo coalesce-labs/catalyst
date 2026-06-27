@@ -7,14 +7,23 @@
 // so webhook-config, monitor-config, and project-roster all read the same source
 // in the same order instead of each re-reading Layer-1 directly.
 //
-// Precedence (mirrors board-data.mjs:378 `pickTeams(cluster) ?? pickTeams(l1) ?? []`):
+// Resolution (cluster-first, back-compat MERGE — CTL-1214 "lose no value"):
 //   1. cluster.json.projects[]  — {teamKey,vcsRepo,projectKey} mapped to {key,vcsRepo}
 //   2. Layer-1 monitor.linear.teams[] — {key,vcsRepo} (back-compat during migration)
 //   3. []                       — neither source resolves
 //
-// FAIL-OPEN + back-compat-first: the cluster source only WINS when it yields ≥1
-// valid entry, so a missing/malformed cluster.json never empties a roster the
-// running monitor still gets from Layer-1 (the CTL-1214 "lose no value" invariant).
+// The two sources are UNIONED by team key, not replaced wholesale: every valid
+// cluster entry, PLUS any Layer-1 team the cluster doesn't yet cover, with the
+// cluster entry winning on a key conflict. During an INCREMENTAL migration a repo
+// may be added to cluster.json before the rest of the fleet's teams move there;
+// returning the cluster list wholesale would DROP a team still only in Layer-1.
+// The union keeps it (CTL-1214 "lose no value"). Once Phase 6 slims the committed
+// Layer-1 configs (teams[] removed), the Layer-1 side is empty and the union
+// converges to cluster-only.
+//
+// FAIL-OPEN: a missing/malformed cluster.json contributes zero cluster entries, so
+// the result degrades to the Layer-1 roster the running monitor already had — it
+// never empties a roster.
 
 import { readFileSync } from "fs";
 import { homedir } from "os";
@@ -143,21 +152,30 @@ function readLayer1Teams(configPath: string): TeamEntry[] {
 }
 
 /**
- * readClusterProjects — resolve the fleet's project roster as `TeamEntry[]`,
- * cluster.json.projects[] first and Layer-1 monitor.linear.teams[] as the
- * back-compat fallback. The cluster source wins only when it yields ≥1 valid
- * entry, so a missing/malformed cluster.json never strands a roster the monitor
- * still has in Layer-1. Never throws — every read fail-opens to the next source.
+ * readClusterProjects — resolve the fleet's project roster as `TeamEntry[]` by
+ * UNIONING cluster.json.projects[] with the Layer-1 monitor.linear.teams[]
+ * back-compat fallback, keyed by team key (cluster wins on conflict, Layer-1-only
+ * teams retained). A missing/malformed cluster.json contributes nothing, so the
+ * result degrades to the Layer-1 roster the monitor already had. Never throws —
+ * every read fail-opens. Order: cluster entries first (cluster order), then any
+ * Layer-1-only teams (Layer-1 order).
  */
 export function readClusterProjects(opts: ReadClusterProjectsOpts = {}): TeamEntry[] {
   const env = opts.env ?? process.env;
 
-  const cluster = readClusterConfigFile(resolveClusterRepoDir(opts, env));
-  if (cluster !== null) {
-    const fromCluster = parseClusterProjects(cluster.projects);
-    if (fromCluster.length > 0) return fromCluster;
-  }
-
   const layer1Path = opts.layer1ConfigPath ?? resolveLayer1ConfigPath(env);
-  return readLayer1Teams(layer1Path);
+  const fromLayer1 = readLayer1Teams(layer1Path);
+
+  const cluster = readClusterConfigFile(resolveClusterRepoDir(opts, env));
+  const fromCluster = cluster !== null ? parseClusterProjects(cluster.projects) : [];
+
+  // No valid cluster entries → the Layer-1 roster alone (pure back-compat).
+  if (fromCluster.length === 0) return fromLayer1;
+
+  // MERGE (CTL-1214 "lose no value"): cluster entries first, then any Layer-1 team
+  // the cluster doesn't already cover. Case-insensitive key match (team keys are
+  // conventionally upper-case but a stale Layer-1 entry might differ in case).
+  const clusterKeys = new Set(fromCluster.map((t) => t.key.toUpperCase()));
+  const layer1Only = fromLayer1.filter((t) => !clusterKeys.has(t.key.toUpperCase()));
+  return [...fromCluster, ...layer1Only];
 }

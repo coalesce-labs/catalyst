@@ -69,18 +69,38 @@ describe("readClusterProjects (CTL-1214 Phase 2)", () => {
     rmSync(homeDir, { recursive: true, force: true });
   });
 
-  it("returns roster from cluster.json.projects[]", () => {
+  it("returns the cluster roster and wins on a key conflict with Layer-1", () => {
     writeCluster([
       { teamKey: "CTL", vcsRepo: "coalesce-labs/catalyst", projectKey: "catalyst-workspace" },
       { teamKey: "ADV", vcsRepo: "groundworkapp/Adva", projectKey: "adva" },
     ]);
-    // Layer-1 carries a DIFFERENT (stale) roster — cluster must win.
-    writeLayer1Teams([{ key: "OLD", vcsRepo: "stale/repo" }]);
+    // Layer-1 carries a STALE vcsRepo for a team the cluster also defines (CTL) —
+    // the cluster entry must win, and the stale Layer-1 value must not leak.
+    writeLayer1Teams([{ key: "CTL", vcsRepo: "stale/repo" }]);
 
     const roster = readClusterProjects({ layer1ConfigPath: layer1Path() });
     expect(roster).toEqual([
       { key: "CTL", vcsRepo: "coalesce-labs/catalyst" },
       { key: "ADV", vcsRepo: "groundworkapp/Adva" },
+    ]);
+  });
+
+  it("MERGES a Layer-1-only team during incremental migration (lose no value)", () => {
+    // The cluster has been seeded with team CTL only; Layer-1 still carries CTL
+    // (stale) + ADV. The result must keep CTL from the cluster AND ADV from
+    // Layer-1 — a partially-migrated team must never be dropped (CTL-1214 P2 #1).
+    writeCluster([
+      { teamKey: "CTL", vcsRepo: "coalesce-labs/catalyst", projectKey: "catalyst-workspace" },
+    ]);
+    writeLayer1Teams([
+      { key: "CTL", vcsRepo: "stale/repo" }, // key conflict → cluster wins
+      { key: "ADV", vcsRepo: "groundworkapp/Adva" }, // Layer-1-only → retained
+    ]);
+
+    const roster = readClusterProjects({ layer1ConfigPath: layer1Path() });
+    expect(roster).toEqual([
+      { key: "CTL", vcsRepo: "coalesce-labs/catalyst" }, // from cluster
+      { key: "ADV", vcsRepo: "groundworkapp/Adva" }, // from Layer-1
     ]);
   });
 
@@ -140,10 +160,11 @@ describe("readClusterProjects (CTL-1214 Phase 2)", () => {
       { teamKey: "CTL", vcsRepo: "coalesce-labs/catalyst", projectKey: "catalyst-workspace" },
       { teamKey: "ADV", vcsRepo: "groundworkapp/Adva", projectKey: "adva" },
     ]);
-    // Layer-1 has a stale single team; cluster must win for webhook annotation.
+    // Layer-1 has a stale entry for a team the cluster also defines (CTL); the
+    // cluster must win for webhook annotation (no stale Layer-1 value leaks).
     writeFileSync(
       layer1Path(),
-      JSON.stringify({ catalyst: { monitor: { linear: { teams: [{ key: "OLD", vcsRepo: "stale/repo" }] } } } }),
+      JSON.stringify({ catalyst: { monitor: { linear: { teams: [{ key: "CTL", vcsRepo: "stale/repo" }] } } } }),
     );
     writeFileSync(
       join(homeDir, "config.json"),
