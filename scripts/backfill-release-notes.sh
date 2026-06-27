@@ -20,6 +20,11 @@ REPO="${GITHUB_REPOSITORY:-coalesce-labs/catalyst}"
 PROMPT_TEMPLATE="$SCRIPT_DIR/templates/backfill-release-notes-prompt.md"
 API_KEY="${LOCAL_ANTHROPIC_API_KEY:-${ANTHROPIC_API_KEY:-}}"
 
+# Model is overridable so the next Anthropic retirement is a config change, not
+# a code edit. Default is the current drop-in for the retired claude-sonnet-4.
+# Set before call_claude runs (visible inside the function as a top-level var).
+MODEL="${RELEASE_NOTES_MODEL:-claude-sonnet-4-6}"
+
 if [[ -z "$API_KEY" ]]; then
   echo "Error: LOCAL_ANTHROPIC_API_KEY (or ANTHROPIC_API_KEY) not set"
   exit 1
@@ -43,8 +48,9 @@ call_claude() {
   local request_body
   request_body=$(jq -nc \
     --arg content "$prompt_content" \
+    --arg model "$MODEL" \
     '{
-      model: "claude-sonnet-4-20250514",
+      model: $model,
       max_tokens: 4096,
       messages: [{role: "user", content: $content}]
     }')
@@ -59,6 +65,12 @@ call_claude() {
     echo ""
     return
   }
+
+  # Make a model-decommission failure visible (to stderr so it can't pollute the
+  # captured stdout). Non-blocking — the caller still skips and keeps going.
+  if echo "$response" | jq -e '.error.type == "not_found_error"' >/dev/null 2>&1; then
+    echo "::error::Release-notes model '$MODEL' returned not_found_error (model decommissioned?). Update RELEASE_NOTES_MODEL / the default in this script. Response: $response" >&2
+  fi
 
   echo "$response" | jq -r '.content[0].text // empty' 2>/dev/null || echo ""
 }
