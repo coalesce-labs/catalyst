@@ -101,6 +101,10 @@ import {
   readOrphanPrSweepConfig,
 } from "./orphan-pr-sweep-timer.mjs";
 import { DEFAULTS as ORPHAN_DEFAULTS } from "./orphan-pr-sweep.mjs";
+import {
+  startLinearReconcileTimer,
+  readLinearReconcileConfig,
+} from "./linear-reconcile-timer.mjs";
 import { reconcileBootResume, processApprovedResumes } from "./boot-resume.mjs";
 // CTL-665: the committed executionCore concurrency reader — imported directly
 // (not via the index.mjs barrel, mirroring the orphan-reaper-timer import) so
@@ -149,6 +153,8 @@ let _delegateRunnerTimer = null;
 let _stalePrRescueTimer = null;
 // CTL-1175: periodic orphan-PR detect+notify sweep timer.
 let _orphanPrSweepTimer = null;
+// CTL-1371: periodic PR→Linear state reconcile timer.
+let _linearReconcileTimer = null;
 // CTL-650: the push-based session wait-state watcher handle.
 let _waitWatcher = null;
 // CTL-685: per-worker memory sampler handle.
@@ -433,6 +439,8 @@ export function startDaemon({
   stalePrRescueConfig = null,
   // CTL-1175: orphan-PR detect+notify sweep timer config (catalyst.orchestration.orphanPrSweep).
   orphanPrSweepConfig = null,
+  // CTL-1371: PR→Linear state reconcile timer config (catalyst.orchestration.reconcile).
+  linearReconcileConfig = null,
   // CTL-650: the session wait-state watcher. Injectable for tests; gated by a
   // config knob (default-on, CATALYST_WAIT_WATCHER=0 disables) like the reaper.
   startWaitWatcher = realStartWaitWatcher,
@@ -758,7 +766,7 @@ export function startDaemon({
     }
 
     if (enableReaper) {
-      startReaperAndTimer({ orphanReaperConfig, worktreeRefreshConfig, stalePrRescueConfig, orphanPrSweepConfig, debounceMs, pollMs, orchDir, makeReaper });
+      startReaperAndTimer({ orphanReaperConfig, worktreeRefreshConfig, stalePrRescueConfig, orphanPrSweepConfig, linearReconcileConfig, configPath, debounceMs, pollMs, orchDir, makeReaper });
     }
 
     // CTL-650: start the push-based session wait-state watcher. Inside the same
@@ -963,6 +971,8 @@ function startReaperAndTimer({
   worktreeRefreshConfig,
   stalePrRescueConfig,
   orphanPrSweepConfig,
+  linearReconcileConfig,
+  configPath,
   debounceMs,
   orchDir,
   // CTL-769: poll-fallback interval. Defaults to TAILER_POLL_INTERVAL_MS
@@ -1168,6 +1178,25 @@ function startReaperAndTimer({
       config: orphanCfg,
     });
   }
+
+  // CTL-1371: start the periodic PR→Linear state reconcile timer. OPT-IN
+  // (default-off): unlike the read-only/notify twins above this can WRITE Linear
+  // state, so it only starts when mode is explicitly 'notify' or 'write'. Runs on
+  // the daemon event loop, fully separate from schedulerTick (cannot trip the
+  // CTL-671 runaway guards). Ship 'notify' first; flip to 'write' once the
+  // emitted drift events read clean.
+  const reconcileCfg = linearReconcileConfig ?? {};
+  const reconcileMode = reconcileCfg.mode ?? "off";
+  if (reconcileMode === "notify" || reconcileMode === "write") {
+    _linearReconcileTimer = startLinearReconcileTimer({
+      enabled: true,
+      mode: reconcileMode,
+      intervalSeconds: reconcileCfg.intervalSeconds,
+      orchDir,
+      configPath,
+      config: reconcileCfg,
+    });
+  }
 }
 
 // parseEventTailChunk — pure, deterministic split of a freshly-read byte chunk
@@ -1353,6 +1382,14 @@ export function stopDaemon() {
     }
     _orphanPrSweepTimer = null;
   }
+  if (_linearReconcileTimer) {
+    try {
+      _linearReconcileTimer.stop();
+    } catch {
+      /* timer already stopped */
+    }
+    _linearReconcileTimer = null;
+  }
   _reaper = null;
   // CTL-650: stop the wait-state watcher.
   if (_waitWatcher) {
@@ -1473,6 +1510,10 @@ function main() {
   const layer2Path =
     process.env.CATALYST_LAYER2_CONFIG_FILE ||
     resolve(homedir(), ".config", "catalyst", "config.json");
+  // CTL-1371: reconcile config is node-scoped — Layer-2 (+ CATALYST_RECONCILE_MODE
+  // env) overrides the committed Layer-1 seed so an operator can flip the writer
+  // off/notify/write per node.
+  const linearReconcileConfig = readLinearReconcileConfig(configPath, layer2Path);
   const concurrency = resolveBootConcurrency({ layer1Path: configPath, layer2Path });
   log.info(
     { concurrency, layer2Present: existsSync(layer2Path) },
@@ -1490,7 +1531,7 @@ function main() {
   process.on("unhandledRejection", fatal("unhandled rejection"));
 
   try {
-    startDaemon({ pidFile, orphanReaperConfig, worktreeRefreshConfig, stalePrRescueConfig, orphanPrSweepConfig, concurrency, configPath, layer2Path }); // CTL-676 + CTL-678 + CTL-707 + CTL-782 + CTL-1175
+    startDaemon({ pidFile, orphanReaperConfig, worktreeRefreshConfig, stalePrRescueConfig, orphanPrSweepConfig, linearReconcileConfig, concurrency, configPath, layer2Path }); // CTL-676 + CTL-678 + CTL-707 + CTL-782 + CTL-1175 + CTL-1371
   } catch (err) {
     log.error({ err }, "execution-core daemon: failed to start");
     process.exit(1);

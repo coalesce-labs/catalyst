@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# catalyst-linear-reconcile — reconcile Linear ticket state from PR reality (CTL-1371).
+#
+# Thin launcher: resolves its own real location (symlink-safe — install-cli.sh
+# symlinks this onto PATH) and execs the Node CLI in execution-core/. All flags
+# pass through. See `catalyst-linear-reconcile --help`.
+#
+# Maps each PR to its delivered ticket(s) and the Linear state the PR implies
+# (merged -> Done, open non-draft -> In-Review), then reports (default) or, with
+# --write, corrects drift. Idempotent and deterministic; safe to re-run.
+set -euo pipefail
+
+# Resolve symlinks to find the real script directory.
+SOURCE="${BASH_SOURCE[0]}"
+while [[ -L $SOURCE ]]; do
+	DIR="$(cd -P "$(dirname "$SOURCE")" >/dev/null 2>&1 && pwd)"
+	SOURCE="$(readlink "$SOURCE")"
+	[[ $SOURCE != /* ]] && SOURCE="$DIR/$SOURCE"
+done
+DIR="$(cd -P "$(dirname "$SOURCE")" >/dev/null 2>&1 && pwd)"
+
+# Prefer bun: the default cache read (broker-state.mjs) imports bun:sqlite. The
+# node fallback still works for --graphql / --states-file / --prs-file runs (the
+# cache path degrades to unknown-current under node — see the CLI).
+RUNTIME="bun"
+command -v bun >/dev/null 2>&1 || RUNTIME="node"
+exec "$RUNTIME" "$DIR/execution-core/linear-reconcile-cli.mjs" "$@"

@@ -226,6 +226,10 @@ jobs:
             lib/catalyst-resource.test.mjs \
             lib/node-class-parity.test.mjs \
             lib/install-telemetry.test.mjs \
+            linear-reconcile.test.mjs \
+            linear-reconcile-store.test.mjs \
+            linear-reconcile-timer.test.mjs \
+            linear-reconcile-cli.test.mjs \
             updater/plugin-pull-defer.test.mjs \
             updater/updater.test.mjs \
             updater/updater-tracing.test.mjs

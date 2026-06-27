@@ -58,7 +58,9 @@
                     "description": "A CSS color string (e.g. '#4A90E2', 'green')."
                   },
                   "examples": [
-                    { "coalesce-labs/catalyst": "green" }
+                    {
+                      "coalesce-labs/catalyst": "green"
+                    }
                   ]
                 }
               }
@@ -211,6 +213,28 @@
                   ]
                 }
               }
+            },
+            "reconcile": {
+              "type": "object",
+              "description": "Completion-declaration reconcile timer (CTL-1371). Drives Linear from EXPLICIT completion declarations (`catalyst-linear-reconcile declare`), never inferred from PR/merge state. Node-scoped; Layer-2 (~/.config/catalyst/config.json) wins per field.",
+              "additionalProperties": false,
+              "properties": {
+                "mode": {
+                  "type": "string",
+                  "enum": ["off", "notify", "write"],
+                  "default": "off",
+                  "description": "off = inert; notify = emit drift events but never write Linear; write = reconcile declared completions to Linear via the canonical primitive."
+                },
+                "intervalSeconds": {
+                  "type": "number",
+                  "default": 600,
+                  "description": "How often the drain timer ticks (seconds)."
+                },
+                "declarationsDir": {
+                  "type": "string",
+                  "description": "Directory holding durable per-ticket completion markers (default ~/catalyst/completions; env CATALYST_COMPLETIONS_DIR)."
+                }
+              }
             }
           }
         },
@@ -231,7 +255,9 @@
             "labels": {
               "type": "array",
               "description": "List of label strings applied to auto-filed feedback issues.",
-              "items": { "type": "string" },
+              "items": {
+                "type": "string"
+              },
               "examples": [["auto-submitted"]]
             }
           }
