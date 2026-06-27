@@ -28,19 +28,69 @@ export type GlyphLoadState = "idle" | "loading" | "ready" | "missing" | "error";
 const DEFAULT_TIMEOUT_MS = 10_000;
 type ImporterMap = Record<string, () => Promise<Record<string, unknown>>>;
 
+type ImporterManifest = { ICON_IMPORTERS: ImporterMap };
+const _defaultManifestLoader = (): Promise<ImporterManifest> =>
+  import("./phosphor-icon-importers.generated");
+
 let _importers: ImporterMap | null = null; // populated lazily (or via test override)
 let _importersPromise: Promise<ImporterMap> | null = null;
+let _loadManifest: () => Promise<ImporterManifest> = _defaultManifestLoader; // injectable in tests
 const _resolved = new Map<string, Icon>();
 const _inflight = new Map<string, Promise<Icon | null>>();
 const _state = new Map<string, GlyphLoadState>();
 const _error = new Map<string, string>();
 const _subs = new Map<string, Set<() => void>>();
+// CTL-1370: glyphs that errored *because the manifest was unavailable* (vs a per-glyph reason).
+// Revived to "idle" the moment the manifest next loads — see reviveManifestErroredGlyphs.
+const _manifestErrored = new Set<string>();
+
+// CTL-1370: reactive "the importer manifest is currently in a failed-load state" flag. The picker
+// subscribes (useManifestLoadFailed) to offer a user-triggered reload — the only reliable recovery
+// when a redeploy changes the manifest chunk's content hash, since the running bundle's import()
+// targets the now-404 old URL and no same-URL refetch can recover (Codex P2).
+let _manifestFailed = false;
+const _manifestSubs = new Set<() => void>();
+function setManifestFailed(failed: boolean): void {
+  if (_manifestFailed === failed) return;
+  _manifestFailed = failed;
+  _manifestSubs.forEach((cb) => cb());
+}
+
+/**
+ * The manifest just became available — un-stick every glyph that previously errored *because*
+ * the manifest couldn't load. Resetting them to "idle" makes ProjectMarkIcon's idle-branch
+ * re-trigger loadGlyph (the only production caller fires loadGlyph from "idle" only, so without
+ * this an errored glyph would stay a placeholder until a full reload — CTL-1370 Codex P2). This
+ * runs only on the manifest-load *success* transition, so it cannot hot-loop during an outage.
+ */
+function reviveManifestErroredGlyphs(): void {
+  if (_manifestErrored.size === 0) return;
+  for (const name of _manifestErrored) {
+    _error.delete(name);
+    setState(name, "idle");
+  }
+  _manifestErrored.clear();
+}
 
 function getImporters(): Promise<ImporterMap> {
   if (_importers) return Promise.resolve(_importers);
   // Lazy: keeps the ~189 KB importer manifest OUT of the main bundle (loads on first glyph demand).
-  _importersPromise ??= import("./phosphor-icon-importers.generated").then(
-    (m) => (_importers = m.ICON_IMPORTERS),
+  // Retryable (CTL-1370): on rejection, clear the cached promise so the NEXT demand re-imports —
+  // mirrors loadGlyph's retry-hardening. Without this, `??=` keeps a settled-rejected promise (it
+  // only assigns when null), so one transient manifest-chunk 404 poisons the whole session until a
+  // full page reload. Rethrow so loadGlyph still marks the glyph 'error' (retryable).
+  _importersPromise ??= _loadManifest().then(
+    (m) => {
+      _importers = m.ICON_IMPORTERS;
+      setManifestFailed(false); // CTL-1370: clear the failed-load flag → picker hides the reload prompt
+      reviveManifestErroredGlyphs(); // CTL-1370: re-trigger glyphs stranded by the earlier failure
+      return _importers;
+    },
+    (err) => {
+      _importersPromise = null;
+      setManifestFailed(true); // CTL-1370: surface a user-triggered reload affordance in the picker
+      throw err;
+    },
   );
   return _importersPromise;
 }
@@ -82,7 +132,16 @@ export async function loadGlyph(name: string, timeoutMs = DEFAULT_TIMEOUT_MS): P
   const p = (async (): Promise<Icon | null> => {
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
-      const imp = (await getImporters())[name];
+      let importers: ImporterMap;
+      try {
+        importers = await getImporters();
+      } catch (manifestErr) {
+        // The shared manifest chunk (not this glyph's chunk) failed. Tag the glyph so it's revived
+        // to "idle" once the manifest next loads, then fall through to the retryable error state.
+        _manifestErrored.add(name);
+        throw manifestErr;
+      }
+      const imp = importers[name];
       if (!imp) {
         setState(name, "missing");
         return null;
@@ -140,10 +199,35 @@ export function useGlyphLoad(name: string): GlyphLoadState {
   );
 }
 
+/** True while the importer manifest is in a failed-load state (CTL-1370). Plain getter — testable. */
+export function isManifestLoadFailed(): boolean {
+  return _manifestFailed;
+}
+
+/** React subscription: re-render when the manifest's failed-load state flips (CTL-1370). */
+export function useManifestLoadFailed(): boolean {
+  return useSyncExternalStore(
+    (cb) => {
+      _manifestSubs.add(cb);
+      return () => _manifestSubs.delete(cb);
+    },
+    isManifestLoadFailed, // snapshot is a BOOLEAN (stable) — do not return a fresh object
+    isManifestLoadFailed,
+  );
+}
+
 // --- test hooks (bun shares module state across files) ---
 export function __setGlyphImporters(map: ImporterMap | null): void {
   _importers = map;
   _importersPromise = null;
+}
+/** Override the lazy importer-manifest loader (CTL-1370 retry test); null restores the real import. */
+export function __setManifestLoader(fn: (() => Promise<ImporterManifest>) | null): void {
+  _loadManifest = fn ?? _defaultManifestLoader;
+  _importers = null;
+  _importersPromise = null;
+  _manifestErrored.clear();
+  _manifestFailed = false;
 }
 export function __resetGlyphCaches(): void {
   _resolved.clear();
@@ -151,6 +235,10 @@ export function __resetGlyphCaches(): void {
   _state.clear();
   _error.clear();
   _subs.clear();
+  _manifestErrored.clear();
+  _manifestSubs.clear();
+  _manifestFailed = false;
   _importers = null;
   _importersPromise = null;
+  _loadManifest = _defaultManifestLoader;
 }

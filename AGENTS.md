@@ -162,6 +162,13 @@ A pull request is **not mergeable** until BOTH are true:
 
 So after opening a PR: watch the checks to green, then address every review comment (push fixes), reply, and resolve each thread before considering the PR done.
 
+**Reading the automated reviewer's signal.** When the automated code reviewer finds nothing, it
+signals a clean pass with a 👍 reaction (or a brief "no major issues" note) **instead of** opening
+review threads — that counts as a resolved review with nothing to address, not a missing one. The
+clean-pass result may arrive as a reaction or a plain comment rather than a structured review
+object, so detect it via reactions/comments, not only the reviews API. A re-review after a fix
+push may need to be requested explicitly rather than firing automatically.
+
 ## Reference Docs
 
 Read these on demand:
