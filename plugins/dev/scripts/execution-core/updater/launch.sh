@@ -38,13 +38,21 @@ UPDATER_MJS="${SCRIPT_DIR}/updater.mjs"
 [[ -f "$UPDATER_MJS" ]] || fail "updater.mjs not found at $UPDATER_MJS"
 
 # ─── Resolve the stable node name (getHostName() semantics) ──────────────────
+# Pin CATALYST_HOST_NAME only from an AUTHORITATIVE source — the env var, or the Layer-2
+# catalyst.host.name (which host-identity.sh can read ONLY when jq is present). Without jq
+# (and no env), catalyst_host_name() silently falls back to the OS hostname; pinning that
+# would OVERRIDE the Layer-2 name, because updater.mjs getHostName() gives the env var
+# precedence (Codex P2). So when we can't resolve authoritatively, leave it UNSET and let
+# updater.mjs resolve host.name from Layer-2 itself (JS JSON.parse — no jq) + short-reduce,
+# which is strictly better than pinning a fallback.
 # shellcheck source=../../lib/host-identity.sh
-if [[ -f "${SCRIPT_DIR}/../../lib/host-identity.sh" ]]; then
+if [[ -n "${CATALYST_HOST_NAME:-}" ]]; then
+  : # already pinned authoritatively by the caller/plist
+elif [[ -f "${SCRIPT_DIR}/../../lib/host-identity.sh" ]] && command -v jq >/dev/null 2>&1; then
   . "${SCRIPT_DIR}/../../lib/host-identity.sh"
-  _hn="$(catalyst_host_name)"
-  export CATALYST_HOST_NAME="$_hn"
+  export CATALYST_HOST_NAME="$(catalyst_host_name)"
 else
-  warn "lib/host-identity.sh missing — updater telemetry will fall back to the OS hostname for host.name"
+  warn "host.name not authoritatively resolvable here (no jq / no env) — leaving CATALYST_HOST_NAME unset; updater.mjs getHostName() resolves it from Layer-2/OS in JS"
 fi
 
 log "starting updater (node=${CATALYST_HOST_NAME:-<os-hostname>}, poll=${CATALYST_UPDATER_POLL_INTERVAL_MS:-90000}ms)"

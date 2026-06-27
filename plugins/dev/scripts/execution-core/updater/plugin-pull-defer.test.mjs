@@ -10,12 +10,18 @@
 // (broker/*.test.mjs) is wired into NO GitHub workflow, but this cutover safety
 // invariant must be CI-gated. It imports the broker functions under test directly
 // (exec-core -> broker cross-import precedent: scheduler.mjs imports ../broker/broker-state.mjs).
-import { describe, test, expect } from "bun:test";
+import { describe, test, expect, beforeEach } from "bun:test";
 import {
   refreshPluginCheckout,
   refreshAllPluginCheckouts,
   resolvePluginPullOwner,
+  __clearLagStateForTest,
+  PLUGIN_DRIFT_GRACE_MS,
 } from "../../broker/plugin-refresh.mjs";
+
+// Clear the per-root drift-grace + lag state between tests so first-behind timestamps
+// don't leak across cases (the grace tracker is module-level).
+beforeEach(() => __clearLagStateForTest());
 
 // Scriptable gitFn: records every `<args>` call and answers rev-parse from a
 // sequence (HEAD) + a fixed origin/main; fetch/reset/diff return "".
@@ -53,16 +59,14 @@ describe("refreshPluginCheckout pull option (CTL-1348 cutover)", () => {
     expect(events.map((e) => e.event)).toContain("plugin.checkout.updated");
   });
 
-  test("pull:false (detect-only) when BEHIND: fetch + compare, emits plugin.checkout.drift, NEVER reset/install, changed:false", () => {
-    const git = makeGit({ headSeq: ["headsha"], origin: "originsha" });
+  test("pull:false (detect-only) when BEHIND past the grace window: emits plugin.checkout.drift, NEVER reset/install, changed:false", () => {
+    const git = makeGit({ headSeq: ["headsha", "headsha"], origin: "originsha" });
     const events = [];
-    const r = refreshPluginCheckout({
-      root: "/r/behind",
-      gitFn: git,
-      bunInstallFn: banBunInstall,
-      emitFn: (e) => events.push(e),
-      pull: false,
-    });
+    // First detection seeds first-behind; within grace → NO warn.
+    refreshPluginCheckout({ root: "/r/behind", now: 0, gitFn: git, bunInstallFn: banBunInstall, emitFn: (e) => events.push(e), pull: false });
+    expect(events.find((e) => e.event === "plugin.checkout.drift")).toBeUndefined();
+    // Still behind PAST the grace window → the updater missed its SLA → warn now.
+    const r = refreshPluginCheckout({ root: "/r/behind", now: PLUGIN_DRIFT_GRACE_MS + 1, gitFn: git, bunInstallFn: banBunInstall, emitFn: (e) => events.push(e), pull: false });
     expect(git.calls).toContain("fetch --no-tags origin main");
     expect(git.calls).not.toContain("reset --hard origin/main"); // the core invariant
     expect(r.pulled).toBe(false);
@@ -71,7 +75,16 @@ describe("refreshPluginCheckout pull option (CTL-1348 cutover)", () => {
     const drift = events.find((e) => e.event === "plugin.checkout.drift");
     expect(drift).toBeTruthy();
     expect(drift.severity).toBe("WARN");
-    expect(drift.detail).toMatchObject({ checkout: "/r/behind", head_sha: "headsha", origin_sha: "originsha", behind: true });
+    expect(drift.detail).toMatchObject({ checkout: "/r/behind", head_sha: "headsha", origin_sha: "originsha", behind: true, behind_since: 0 });
+  });
+
+  test("pull:false (detect-only) BEHIND but WITHIN the grace window: stays SILENT (no false drift while the updater catches up)", () => {
+    const git = makeGit({ headSeq: ["h", "h"], origin: "o" });
+    const events = [];
+    refreshPluginCheckout({ root: "/r/grace", now: 1000, gitFn: git, bunInstallFn: banBunInstall, emitFn: (e) => events.push(e), pull: false });
+    refreshPluginCheckout({ root: "/r/grace", now: 1000 + PLUGIN_DRIFT_GRACE_MS - 1, gitFn: git, bunInstallFn: banBunInstall, emitFn: (e) => events.push(e), pull: false });
+    expect(events.filter((e) => e.event === "plugin.checkout.drift")).toHaveLength(0);
+    expect(git.calls).not.toContain("reset --hard origin/main");
   });
 
   test("pull:false (detect-only) when UP TO DATE: no drift event, no reset, changed:false", () => {
@@ -111,16 +124,18 @@ describe("refreshPluginCheckout pull option (CTL-1348 cutover)", () => {
     expect(r.restartNeeded).toBe(false);
   });
 
-  test("refreshAllPluginCheckouts threads pull:false to every root (no reset on any)", () => {
-    const git = makeGit({ headSeq: ["h1"], origin: "o1" });
+  test("refreshAllPluginCheckouts threads pull:false to every root (no reset on any; drift after grace)", () => {
+    const git = makeGit({ headSeq: ["h1", "h1"], origin: "o1" });
     const events = [];
-    refreshAllPluginCheckouts({
+    const opts = {
       env: { CATALYST_PLUGIN_DIRS: "/wt/a/plugins/dev" },
       gitToplevelFn: () => "/wt/a",
       gitFn: git,
       emitFn: (e) => events.push(e),
       pull: false,
-    });
+    };
+    refreshAllPluginCheckouts({ ...opts, now: 0 }); // seed first-behind (within grace, silent)
+    refreshAllPluginCheckouts({ ...opts, now: PLUGIN_DRIFT_GRACE_MS + 1 }); // past grace → drift
     expect(git.calls).not.toContain("reset --hard origin/main");
     expect(events.some((e) => e.event === "plugin.checkout.drift")).toBe(true);
   });

@@ -315,6 +315,10 @@ stop_shipper() {
 
 start_broker()   { catalyst-broker start 2>&1 | sed 's/^/  /'; }
 stop_broker()    { catalyst-broker stop  2>&1 | sed 's/^/  /'; }
+# _broker_running — true only when a broker is actually UP. Matches the "running (pid N)"
+# status line (NOT "not running"). Used to avoid catalyst-broker restart (= stop+start)
+# accidentally STARTING a broker on a daemonless developer/monitor node (Codex P2).
+_broker_running() { command -v catalyst-broker >/dev/null 2>&1 && catalyst-broker status 2>/dev/null | grep -qiE 'running \(pid'; }
 start_monitor()  { catalyst-monitor start 2>&1 | sed 's/^/  /'; }
 stop_monitor()   { catalyst-monitor stop  2>&1 | sed 's/^/  /'; }
 start_forward()  { catalyst-monitor forward-start 2>&1 | sed 's/^/  /'; }
@@ -1184,28 +1188,27 @@ cmd_uninstall_services() {
   else
     log "$SHIPPER_AGENT_LABEL not installed (no $SHIPPER_AGENT_PLIST)"
   fi
-  # CTL-1348: catalyst-updater agent (installed by adopt-updater). Removing it MUST also
-  # reset pluginPullOwner back to "broker" (Codex P1): the broker reads that flag fresh and
-  # stays detect-only (pull:false) while it says "updater", so removing the agent without
-  # resetting the flag would leave the node with NO process pulling — the checkout silently
-  # stales.
-  if [[ -f "$UPDATER_AGENT_PLIST" ]]; then
-    launchctl bootout "$guid" "$UPDATER_AGENT_PLIST" 2>/dev/null || true
-    rm -f "$UPDATER_AGENT_PLIST"
-    log "removed $UPDATER_AGENT_LABEL ($UPDATER_AGENT_PLIST)"
-  else
-    log "$UPDATER_AGENT_LABEL not installed (no $UPDATER_AGENT_PLIST)"
-  fi
-  # ALWAYS reconcile ownership — NOT gated on the plist still existing, so a reset that
-  # failed AFTER the plist was already removed is retried on the next uninstall (Codex P1).
-  # No-op when ownership is already broker.
+  # CTL-1348: catalyst-updater agent. Reconcile ownership back to "broker" BEFORE removing
+  # the agent (Codex P1/P2): the broker stays detect-only (pull:false) while the flag says
+  # "updater", so if the reset FAILS we must keep the (still-pulling) agent in place rather
+  # than remove the only puller. Reset-first closes that window; the reset is idempotent +
+  # retryable (no-op when already broker).
   local cfg; cfg="${CATALYST_MACHINE_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/catalyst/config.json}"
   local rc=0; _reset_owner_broker_if_updater "$cfg" || rc=$?
-  if [[ "$rc" == "2" ]]; then
-    log "reset catalyst.orchestration.pluginPullOwner=broker in $cfg — the broker resumes pulling"
-    command -v catalyst-broker >/dev/null 2>&1 && { catalyst-broker restart 2>&1 | sed 's/^/  /' || true; }
-  elif [[ "$rc" == "1" ]]; then
-    warn "FAILED to reset pluginPullOwner=broker in $cfg — the broker is still deferring and NOTHING is pulling. Re-run uninstall-services, or set 'catalyst.orchestration.pluginPullOwner' to 'broker' by hand then 'catalyst-broker restart'."
+  if [[ "$rc" == "1" ]]; then
+    warn "could NOT reset pluginPullOwner=broker in $cfg — LEAVING the $UPDATER_AGENT_LABEL agent in place (it is still the only puller). Fix the config write, then re-run uninstall-services."
+  else
+    if [[ -f "$UPDATER_AGENT_PLIST" ]]; then
+      launchctl bootout "$guid" "$UPDATER_AGENT_PLIST" 2>/dev/null || true
+      rm -f "$UPDATER_AGENT_PLIST"
+      log "removed $UPDATER_AGENT_LABEL ($UPDATER_AGENT_PLIST)"
+    else
+      log "$UPDATER_AGENT_LABEL not installed (no $UPDATER_AGENT_PLIST)"
+    fi
+    if [[ "$rc" == "2" ]]; then
+      log "reset catalyst.orchestration.pluginPullOwner=broker in $cfg — the broker resumes pulling"
+      _broker_running && { catalyst-broker restart 2>&1 | sed 's/^/  /' || true; }
+    fi
   fi
 }
 
@@ -1336,10 +1339,14 @@ cmd_adopt_updater() {
     fi
   fi
 
-  # Nudge the running broker to re-read ownership immediately (it also re-reads fresh each
-  # drift-check tick, so this only shortens the window).
-  if command -v catalyst-broker >/dev/null 2>&1; then
-    catalyst-broker restart 2>&1 | sed 's/^/  /' || warn "catalyst-broker restart failed — the broker will still pick up the flag on its next drift-check tick"
+  # Nudge the broker to re-read ownership immediately — but ONLY if one is already running.
+  # On a daemonless developer/monitor node (the intended target) there is no broker; a bare
+  # `catalyst-broker restart` is stop+start and would START one we don't want (Codex P2). A
+  # broker that comes up later reads pluginPullOwner fresh on its first tick anyway.
+  if _broker_running; then
+    catalyst-broker restart 2>&1 | sed 's/^/  /' || warn "catalyst-broker restart failed — the broker will pick up the flag on its next drift-check tick"
+  else
+    log "no running broker to nudge (daemonless node) — a broker that starts later reads pluginPullOwner fresh"
   fi
   log "cutover complete: catalyst-updater is now the sole plugin-pull owner; the broker DEFERS (detect-only)"
 }

@@ -64,14 +64,27 @@ export const CHECKOUT_LAG_FAILURE_THRESHOLD =
 const _failuresByRoot = new Map(); // root → { count, since }
 const _lagEmittedByRoot = new Set(); // root → already emitted this stall episode
 
+// CTL-1348: detect-only drift grace. When pluginPullOwner=updater the broker's PERIODIC
+// drift watcher runs the detect-only branch; the updater pulls on its own ~90s cadence, so
+// a checkout can be transiently "behind origin/main" for the few seconds between a merge and
+// the updater's next poll. Emitting plugin.checkout.drift on that transient state would cry
+// wolf on healthy nodes (Codex P2). We only WARN once a checkout has stayed behind LONGER
+// than this grace (i.e. the updater has actually missed its SLA), tracking first-behind per
+// root. Default 180s (> the 90s updater poll); env-overridable.
+const _driftSinceByRoot = new Map(); // root → epoch ms first seen behind (detect-only)
+export const PLUGIN_DRIFT_GRACE_MS =
+  Number(process.env.CATALYST_PLUGIN_DRIFT_GRACE_MS) || 180_000;
+
 export function __clearLagStateForTest() {
   _failuresByRoot.clear();
   _lagEmittedByRoot.clear();
+  _driftSinceByRoot.clear();
 }
 
 function _clearLagState(root) {
   _failuresByRoot.delete(root);
   _lagEmittedByRoot.delete(root);
+  _driftSinceByRoot.delete(root);
 }
 
 // --- default seams (production wiring) ---------------------------------------
@@ -418,18 +431,24 @@ export function refreshPluginCheckout({
       return { pulled: false, throttled: false, changed: false, failed: true, root, oldSha: headSha, newSha: null, restartNeeded: false };
     }
     if (headSha && originSha && headSha !== originSha) {
-      // The checkout is behind and the broker is NOT pulling it — surface drift so an
-      // operator/monitor can see a node whose updater has fallen behind or died.
-      emitFn({
-        event: "plugin.checkout.drift",
-        orchestrator: null,
-        worker: null,
-        severity: "WARN",
-        detail: { checkout: root, head_sha: headSha, origin_sha: originSha, behind: true },
-      });
+      // The checkout is behind and the broker is NOT pulling it. Only WARN once it has been
+      // behind LONGER than the grace window — within it, the updater is expected to catch up
+      // on its own poll, so staying silent avoids false drift alerts on healthy nodes.
+      const since = _driftSinceByRoot.get(root) ?? now;
+      if (!_driftSinceByRoot.has(root)) _driftSinceByRoot.set(root, now);
+      if (now - since >= PLUGIN_DRIFT_GRACE_MS) {
+        // Past grace — the updater has missed its SLA (fallen behind or died). Surface drift.
+        emitFn({
+          event: "plugin.checkout.drift",
+          orchestrator: null,
+          worker: null,
+          severity: "WARN",
+          detail: { checkout: root, head_sha: headSha, origin_sha: originSha, behind: true, behind_since: since },
+        });
+      }
       return { pulled: false, throttled: false, changed: false, failed: false, root, oldSha: headSha, newSha: originSha, restartNeeded: false };
     }
-    // Up to date — clear any prior real-pull stall episode for this root.
+    // Up to date — clear any prior real-pull stall episode AND the drift-grace tracker.
     _clearLagState(root);
     return { pulled: false, throttled: false, changed: false, failed: false, root, oldSha: headSha, newSha: originSha, restartNeeded: false };
   }
