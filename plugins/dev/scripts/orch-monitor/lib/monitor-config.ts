@@ -1,6 +1,7 @@
 import { readFileSync } from "fs";
 import { join, basename } from "path";
 import { homedir } from "os";
+import { readClusterProjects } from "./cluster-roster";
 
 export type HudColumnId =
   | "status"
@@ -69,33 +70,30 @@ export function loadMonitorConfig(configPath: string, registryPath?: string): Mo
   const repoColors: Record<string, string> = {};
   const repoOwners: Record<string, string> = {};
 
-  // --- config-derived: repoColors + FALLBACK repoOwners (catalyst.monitor.*) ---
+  // --- config-derived repoColors (catalyst.monitor.github.repoColors) ---
   try {
     const parsed: unknown = JSON.parse(readFileSync(configPath, "utf8"));
     if (isRecord(parsed) && isRecord(parsed.catalyst) && isRecord(parsed.catalyst.monitor)) {
-      const monitor = parsed.catalyst.monitor;
-      // repoColors from catalyst.monitor.github.repoColors
-      const github = monitor.github;
+      const github = parsed.catalyst.monitor.github;
       if (isRecord(github) && isRecord(github.repoColors)) {
         for (const [repo, color] of Object.entries(github.repoColors)) {
           if (typeof color === "string") repoColors[repo] = color;
         }
       }
-      // CTL-961: repoOwners from catalyst.monitor.linear.teams (short-name → owner/repo).
-      // §13: this is now the FALLBACK — the committed roster can be stale (e.g. ADV →
-      // coalesce-labs/adva, a 404). The registry override below corrects it.
-      const linear = monitor.linear;
-      if (isRecord(linear) && Array.isArray(linear.teams)) {
-        for (const team of linear.teams) {
-          if (isRecord(team) && typeof team.vcsRepo === "string" && team.vcsRepo.includes("/")) {
-            const shortName = team.vcsRepo.split("/").at(-1);
-            if (shortName) repoOwners[shortName.toLowerCase()] = team.vcsRepo;
-          }
-        }
-      }
     }
   } catch {
     /* config absent/malformed → registry-derived owners (below) still apply */
+  }
+
+  // --- roster-derived FALLBACK repoOwners (CTL-961, CTL-1214 Phase 2) ---
+  // The team→repo roster now comes through the shared readClusterProjects()
+  // (cluster.json.projects[] first, Layer-1 catalyst.monitor.linear.teams[]
+  // fallback). §13: this stays the FALLBACK for repoOwners — the registry
+  // override below still WINS so a stale committed roster (e.g. ADV →
+  // coalesce-labs/adva, a 404) can't break repo icons.
+  for (const team of readClusterProjects({ layer1ConfigPath: configPath })) {
+    const shortName = team.vcsRepo.split("/").at(-1);
+    if (shortName) repoOwners[shortName.toLowerCase()] = team.vcsRepo;
   }
 
   // --- registry-derived repoOwners OVERRIDE (§13) ---
