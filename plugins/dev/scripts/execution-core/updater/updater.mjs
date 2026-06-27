@@ -40,7 +40,8 @@
 //     host.name, host.id) as every other catalyst signal; service.name=catalyst.updater.
 
 import { appendFileSync, mkdirSync, statSync, readSync, openSync, closeSync } from "node:fs";
-import { dirname } from "node:path";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { randomBytes, createHash } from "node:crypto";
 import { createRequire } from "node:module";
 import {
@@ -70,6 +71,19 @@ const SEVERITY_NUMBER = { TRACE: 1, DEBUG: 5, INFO: 9, WARN: 13, ERROR: 17, FATA
 
 function isoNow(nowFn = Date.now) {
   return new Date(nowFn()).toISOString().replace(/\.\d{3}Z$/, "Z");
+}
+
+// defaultRepoConfigPath — the repo's committed `.catalyst/config.json`, the SAME source
+// the broker threads into resolvePluginCheckoutRoots (router.mjs __REPO_CONFIG_PATH). The
+// updater MUST pass it too: nodes that configure `orchestration.pluginDirs` in the repo
+// config (not Layer-2 / env) would otherwise resolve ZERO roots in the updater and pull
+// nothing — leaving the checkout stale after the broker defers (Codex P1). Honors
+// CATALYST_CONFIG_FILE (what config.mjs/getCatalystRepoDir use); else module-relative
+// (5 dirs up: updater → execution-core → scripts → dev → plugins → repoRoot), robust
+// regardless of the launchd cwd.
+function defaultRepoConfigPath(env = process.env) {
+  if (env.CATALYST_CONFIG_FILE) return resolve(env.CATALYST_CONFIG_FILE);
+  return resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "..", "..", ".catalyst", "config.json");
 }
 
 // defaultLogger — pino to stderr (launchd's StandardErrorPath redirects to updater.log,
@@ -103,11 +117,16 @@ function defaultLogger() {
  * the class). Synchronous (refreshPluginCheckout calls emitFn inline) → appendFileSync.
  * Best-effort: a log-append failure must never break a refresh.
  */
-export function makeEmitFn({ logPath = getEventLogPath(), nowFn = Date.now, nodeClass, hostNameVal } = {}) {
+export function makeEmitFn({ getLogPathFn = getEventLogPath, nowFn = Date.now, nodeClass, hostNameVal } = {}) {
   const host = hostNameVal ?? getHostName();
   const cls = nodeClass ?? getNodeClass()?.class ?? null;
   return ({ event, severity, detail } = {}) => {
     try {
+      // Resolve the event-log path PER CALL: getEventLogPath() rolls over to a new
+      // YYYY-MM.jsonl at the UTC month boundary, and a long-running updater that captured
+      // it once at boot would strand every plugin.checkout.* event in the prior month's
+      // file (current-month consumers would miss updater activity until a restart — Codex P2).
+      const logPath = getLogPathFn();
       const ts = isoNow(nowFn);
       const sev = severity || "INFO";
       const envelope = {
@@ -212,6 +231,7 @@ export function runRefreshOnce({
   nowFn = Date.now,
   nodeClass,
   hostNameVal,
+  repoConfigPath,
   refreshAllFn = refreshAllPluginCheckouts,
   resolveRootsFn = resolvePluginCheckoutRoots,
   state = {},
@@ -223,7 +243,7 @@ export function runRefreshOnce({
   // Surface an unconfigured node ONCE (don't let a no-pluginDirs node be a silent no-op).
   let roots = [];
   try {
-    roots = resolveRootsFn({ env });
+    roots = resolveRootsFn({ env, repoConfigPath });
   } catch {
     roots = [];
   }
@@ -243,7 +263,7 @@ export function runRefreshOnce({
 
   let results = [];
   try {
-    results = refreshAllFn({ env, emitFn }) ?? [];
+    results = refreshAllFn({ env, emitFn, repoConfigPath }) ?? [];
   } catch {
     results = [];
   }
@@ -389,11 +409,12 @@ export function startUpdater({
   refreshAllFn = refreshAllPluginCheckouts,
   resolveRootsFn = resolvePluginCheckoutRoots,
   getLogPathFn = getEventLogPath,
+  repoConfigPath = defaultRepoConfigPath(env),
   repoFullName,
 } = {}) {
   const nodeClass = getNodeClass()?.class ?? null;
   const hostNameVal = getHostName();
-  const emit = emitFn ?? makeEmitFn({ nowFn, nodeClass, hostNameVal });
+  const emit = emitFn ?? makeEmitFn({ getLogPathFn, nowFn, nodeClass, hostNameVal });
   // Resolve the repo once; null cleanly degrades the event path to poll-only.
   let repo = repoFullName;
   if (repo === undefined) {
@@ -416,6 +437,7 @@ export function startUpdater({
       nowFn,
       nodeClass,
       hostNameVal,
+      repoConfigPath,
       refreshAllFn,
       resolveRootsFn,
       state,

@@ -38,6 +38,7 @@ describe("runRefreshOnce (CTL-1348 poll/boot/event refresh)", () => {
       ];
     };
     let t = 1000;
+    let rootsCalledWith = null;
     const { results, checkouts } = runRefreshOnce({
       reason: "poll",
       log,
@@ -45,9 +46,14 @@ describe("runRefreshOnce (CTL-1348 poll/boot/event refresh)", () => {
       nowFn: () => (t += 5),
       nodeClass: "worker",
       hostNameVal: "mini",
+      repoConfigPath: "/repo/.catalyst/config.json",
       refreshAllFn,
-      resolveRootsFn: () => ["/r/a", "/r/b"],
+      resolveRootsFn: (o) => { rootsCalledWith = o; return ["/r/a", "/r/b"]; },
     });
+    // Codex P1: repoConfigPath MUST reach both root resolution and the refresh, else a
+    // node whose pluginDirs live in the repo config resolves zero roots and pulls nothing.
+    expect(rootsCalledWith).toMatchObject({ repoConfigPath: "/repo/.catalyst/config.json" });
+    expect(calledWith).toMatchObject({ repoConfigPath: "/repo/.catalyst/config.json" });
     expect(calledWith).toHaveProperty("emitFn");
     expect(results.length).toBe(2);
     expect(checkouts).toEqual([
@@ -204,7 +210,7 @@ describe("makeEmitFn (canonical v2 envelope, service.name=catalyst.updater)", ()
   test("legacy {event,severity,detail} → canonical OTel envelope on the event log", () => {
     const dir = mkdtempSync(join(tmpdir(), "updater-emit-"));
     const logPath = join(dir, "events.jsonl");
-    const emit = makeEmitFn({ logPath, nowFn: () => 0, nodeClass: "worker", hostNameVal: "mini" });
+    const emit = makeEmitFn({ getLogPathFn: () => logPath, nowFn: () => 0, nodeClass: "worker", hostNameVal: "mini" });
     emit({ event: "plugin.checkout.drift", severity: "WARN", detail: { checkout: "/r/a", head_sha: "h", origin_sha: "o", behind: true } });
     const env = JSON.parse(readFileSync(logPath, "utf8").trim());
     expect(env.resource["service.name"]).toBe(UPDATER_SERVICE_NAME);
@@ -216,6 +222,19 @@ describe("makeEmitFn (canonical v2 envelope, service.name=catalyst.updater)", ()
     expect(env.severityText).toBe("WARN");
     expect(env.severityNumber).toBe(13);
     expect(env.body.payload).toMatchObject({ checkout: "/r/a", behind: true });
+  });
+
+  test("re-resolves the log path PER CALL (month-rollover — events never stranded)", () => {
+    const dir = mkdtempSync(join(tmpdir(), "updater-rollover-"));
+    const a = join(dir, "2026-06.jsonl");
+    const b = join(dir, "2026-07.jsonl");
+    let cur = a;
+    const emit = makeEmitFn({ getLogPathFn: () => cur, nowFn: () => 0, nodeClass: "worker", hostNameVal: "mini" });
+    emit({ event: "plugin.checkout.updated", detail: { checkout: "/r/a" } });
+    cur = b; // UTC month rolls over
+    emit({ event: "plugin.checkout.drift", severity: "WARN", detail: { checkout: "/r/a" } });
+    expect(JSON.parse(readFileSync(a, "utf8").trim()).attributes["event.name"]).toBe("plugin.checkout.updated");
+    expect(JSON.parse(readFileSync(b, "utf8").trim()).attributes["event.name"]).toBe("plugin.checkout.drift");
   });
 });
 

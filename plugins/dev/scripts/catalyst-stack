@@ -1184,18 +1184,43 @@ cmd_uninstall_services() {
   else
     log "$SHIPPER_AGENT_LABEL not installed (no $SHIPPER_AGENT_PLIST)"
   fi
-  # CTL-1348: catalyst-updater agent (installed by adopt-updater). Removing it makes the
-  # broker the sole puller again on the NEXT drift-check tick (the broker reads
-  # pluginPullOwner fresh each tick), so the node keeps pulling even before the operator
-  # flips pluginPullOwner back to broker. We do NOT rewrite the config flag here — that
-  # stays an explicit operator choice.
+  # CTL-1348: catalyst-updater agent (installed by adopt-updater). Removing it MUST also
+  # reset pluginPullOwner back to "broker" (Codex P1): the broker reads that flag fresh and
+  # stays detect-only (pull:false) while it says "updater", so removing the agent without
+  # resetting the flag would leave the node with NO process pulling — the checkout silently
+  # stales. Reset it here (fail-closed) so the broker resumes pulling.
   if [[ -f "$UPDATER_AGENT_PLIST" ]]; then
     launchctl bootout "$guid" "$UPDATER_AGENT_PLIST" 2>/dev/null || true
     rm -f "$UPDATER_AGENT_PLIST"
     log "removed $UPDATER_AGENT_LABEL ($UPDATER_AGENT_PLIST)"
-    log "note: pluginPullOwner left as-is in Layer-2; the broker resumes pulling next tick. Set it back to 'broker' explicitly to make that permanent."
+    local cfg; cfg="${CATALYST_MACHINE_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/catalyst/config.json}"
+    if _write_plugin_pull_owner "$cfg" "broker"; then
+      log "reset catalyst.orchestration.pluginPullOwner=broker in $cfg — the broker resumes pulling"
+      command -v catalyst-broker >/dev/null 2>&1 && { catalyst-broker restart 2>&1 | sed 's/^/  /' || true; }
+    else
+      warn "FAILED to reset pluginPullOwner=broker in $cfg — the broker is still deferring and NOTHING is pulling. Set 'catalyst.orchestration.pluginPullOwner' back to 'broker' by hand, then 'catalyst-broker restart'."
+    fi
   else
     log "$UPDATER_AGENT_LABEL not installed (no $UPDATER_AGENT_PLIST)"
+  fi
+}
+
+# _resolve_node_class — this node's catalyst.node.class: env CATALYST_NODE_CLASS, else the
+# machine-local Layer-2 catalyst.node.class, else "worker" (the fail-safe default — an
+# unset/unknown class is treated as a worker so adopt-updater refuses unless the node is
+# EXPLICITLY developer/monitor). Mirrors getNodeClass() precedence (config.mjs).
+_resolve_node_class() {
+  if [[ -n "${CATALYST_NODE_CLASS:-}" ]]; then printf '%s\n' "$CATALYST_NODE_CLASS"; return 0; fi
+  local cfg="${CATALYST_MACHINE_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/catalyst/config.json}"
+  if command -v bun >/dev/null 2>&1; then
+    CFG_PATH="$cfg" bun -e '
+      const fs = require("fs");
+      let v = null;
+      try { v = JSON.parse(fs.readFileSync(process.env.CFG_PATH, "utf8"))?.catalyst?.node?.class; } catch {}
+      process.stdout.write(typeof v === "string" && v.trim() ? v.trim() : "worker");
+    ' 2>/dev/null || printf 'worker'
+  else
+    printf 'worker'
   fi
 }
 
@@ -1206,12 +1231,19 @@ cmd_uninstall_services() {
 # the agent doesn't come up, we never write the flag, so the broker keeps pulling (the
 # node is never left with NO puller). NOT part of install-services (which is re-run
 # routinely) — this is a deliberate, one-time, operator-run cutover.
+#
+# WORKER GUARD: refuses on a worker-class node. Post-cutover the broker goes detect-only,
+# and the daemon-skew RELOAD of execution-core/monitor onto updater-pulled code is not yet
+# built (tracked follow-up). On a worker the broker already owns pull+reload, so there is
+# no hole to fill — keeping pluginPullOwner=broker is correct. Developer/daemonless nodes
+# (the real hole: no broker → no pull) have no daemon to reload and are fully supported.
 cmd_adopt_updater() {
-  local print_only="no"
+  local print_only="no" force_worker="no"
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --print) print_only="yes"; shift ;;
-      *) fail "unknown adopt-updater arg: $1 (try: --print)" ;;
+      --force-worker) force_worker="yes"; shift ;;
+      *) fail "unknown adopt-updater arg: $1 (try: --print | --force-worker)" ;;
     esac
   done
 
@@ -1222,6 +1254,11 @@ cmd_adopt_updater() {
   if [[ "$print_only" == "yes" ]]; then
     render_updater_plist "$launcher" "$host_name"
     return 0
+  fi
+
+  local node_class; node_class="$(_resolve_node_class)"
+  if [[ "$node_class" == "worker" && "$force_worker" != "yes" ]]; then
+    fail "adopt-updater refuses on a worker-class node (catalyst.node.class=$node_class). Post-cutover the broker stops pulling and nothing yet reloads execution-core/monitor onto the code the updater pulls (tracked follow-up) — a worker would run stale code. On a worker the broker already owns pull+reload; keep pluginPullOwner=broker. This cutover is for developer/monitor (daemonless) nodes — set catalyst.node.class accordingly. Override with --force-worker ONLY if you will manually restart the daemons after each plugin update."
   fi
 
   [[ "$(uname -s)" == "Darwin" ]] || fail "adopt-updater is macOS-only (launchd); this host is $(uname -s). Use --print to preview the plist. (A Linux worker needs a systemd unit.)"
@@ -1292,7 +1329,11 @@ _write_plugin_pull_owner() {
     cfg.catalyst = cfg.catalyst ?? {};
     cfg.catalyst.orchestration = cfg.catalyst.orchestration ?? {};
     cfg.catalyst.orchestration.pluginPullOwner = owner;
-    fs.writeFileSync(out, JSON.stringify(cfg, null, 2) + "\n");
+    // mode 0600 + explicit chmod: the machine-local Layer-2 config can hold API tokens /
+    // secrets and is conventionally 0600. Writing the temp with the default umask (0644)
+    // and mv-ing it over would leave the secrets world-readable (Codex P1). Preserve 0600.
+    fs.writeFileSync(out, JSON.stringify(cfg, null, 2) + "\n", { mode: 0o600 });
+    fs.chmodSync(out, 0o600);
   '; then
     rm -f "$tmp"
     return 1

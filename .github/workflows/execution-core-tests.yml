@@ -30,11 +30,19 @@ on:
     branches: [main]
     paths:
       - "plugins/dev/scripts/execution-core/**"
+      # CTL-1348: the updater safety tests (updater/plugin-pull-defer.test.mjs) import and
+      # gate the broker cutover invariant in broker/plugin-refresh.mjs, so a PR touching
+      # only the broker must run this suite too (Codex P2).
+      - "plugins/dev/scripts/broker/**"
       - ".github/workflows/execution-core-tests.yml"
   push:
     branches: [main]
     paths:
       - "plugins/dev/scripts/execution-core/**"
+      # CTL-1348: the updater safety tests (updater/plugin-pull-defer.test.mjs) import and
+      # gate the broker cutover invariant in broker/plugin-refresh.mjs, so a PR touching
+      # only the broker must run this suite too (Codex P2).
+      - "plugins/dev/scripts/broker/**"
       - ".github/workflows/execution-core-tests.yml"
 
 jobs:

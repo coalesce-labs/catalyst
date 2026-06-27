@@ -2324,20 +2324,26 @@ export function processEvent(event) {
   // orchestration is active. handlePluginRefreshEvent never throws and the
   // events it emits carry resource["service.name"]=catalyst.broker, which
   // shouldSkipEvent drops on re-ingest (no self-wake loop).
-  // CTL-1348: same pluginPullOwner defer as the drift-check timer — gate BOTH pull
-  // sites (the event-driven path AND the timer) from one fresh read so a cut-over node
-  // never has the broker racing the updater on the same checkout.
-  const __pull = resolvePluginPullOwner({ machineConfigPath: __machineConfigPath() }) !== "updater";
-  const __refreshResults = handlePluginRefreshEvent({
-    event,
-    repoFullName: __repoFullName(),
-    machineConfigPath: __machineConfigPath(),
-    repoConfigPath: __REPO_CONFIG_PATH,
-    emitFn: appendEvent,
-    loadedCommit: __loadedCommit(),
-    loadedCommitRoot: __loadedCommitRoot(),
-    pull: __pull,
-  });
+  // CTL-1348: same pluginPullOwner defer as the drift-check timer. When this node has cut
+  // over to the updater, SKIP the event-driven path ENTIRELY — the updater owns the
+  // merge→pull reaction (its own event tail + poll). Running detect-only here on every
+  // merge would fetch + WARN `plugin.checkout.drift` in the seconds-long window before the
+  // updater catches up, manufacturing false drift alerts on healthy nodes (Codex P2). Real
+  // drift (an updater that died / fell behind) is still surfaced by the PERIODIC drift-check
+  // timer's detect-only pass, where being behind for a full interval is genuinely abnormal.
+  const __refreshResults =
+    resolvePluginPullOwner({ machineConfigPath: __machineConfigPath() }) === "updater"
+      ? null
+      : handlePluginRefreshEvent({
+          event,
+          repoFullName: __repoFullName(),
+          machineConfigPath: __machineConfigPath(),
+          repoConfigPath: __REPO_CONFIG_PATH,
+          emitFn: appendEvent,
+          loadedCommit: __loadedCommit(),
+          loadedCommitRoot: __loadedCommitRoot(),
+          pull: true,
+        });
   // CTL-1077: act on the refresh — reload the running stack when the checkout advanced.
   // logPath MUST be threaded through: the broker self-reload handoff records it so the
   // successor's resolveBootByteOffset can confirm it resumes the same month file. Omitting
