@@ -27,6 +27,7 @@ import { readFileSync } from "fs";
 import { homedir } from "os";
 import { join, basename } from "path";
 import { loadMonitorConfig } from "./monitor-config";
+import { resolveLayer1ConfigPath } from "./config-path";
 import { VALID_HUES } from "./config-writer";
 
 export interface ProjectDescriptor {
@@ -355,21 +356,30 @@ export function applyProjectsOverlay(
 export interface LoadProjectsOpts {
   /** Observed-work repos from the live BoardPayload.repos (drives hasWork + union). */
   observedRepos?: string[];
-  /** Override the Layer-1 config path (defaults to `${process.cwd()}/.catalyst/config.json`). */
+  /** Override the Layer-1 config path. Tests inject a temp fixture here. When
+   *  omitted, defaults to resolveLayer1ConfigPath() — env-pointer first
+   *  (CATALYST_CONFIG_FILE > CATALYST_CONFIG_PATH), cwd only as the last resort. */
   configPath?: string;
   /** Override the registry path (defaults to `${CATALYST_DIR}/execution-core/registry.json`). */
   registryPath?: string;
 }
 
 /**
- * I/O wrapper. Reads teams + repoColors from the Layer-1 config (same cwd-relative
- * path /api/config uses) and repoRoot enrichment from registry.json under
- * CATALYST_DIR (process.env.CATALYST_DIR ?? $HOME/catalyst — NEVER process.cwd(),
- * which in a worktree is the worktree not ~/catalyst). Fail-open to [] on ANY error.
+ * I/O wrapper. Reads teams + repoColors from the Layer-1 config and repoRoot
+ * enrichment from registry.json under CATALYST_DIR (process.env.CATALYST_DIR ??
+ * $HOME/catalyst — NEVER process.cwd(), which in a worktree is the worktree not
+ * ~/catalyst). Fail-open to [] on ANY error.
+ *
+ * The config path defaults via resolveLayer1ConfigPath() (CTL-1152 originally hard-
+ * coded `${process.cwd()}/.catalyst/config.json`, which read the WRONG directory
+ * when the daemon spawned the monitor from .../execution-core → zero configured
+ * teams → nav showed only the observed-work repos). The shared helper prefers the
+ * CATALYST_CONFIG_FILE / CATALYST_CONFIG_PATH env pointer the deploy exports, so
+ * project resolution is cwd-independent whenever an env var is set.
  */
 export function loadProjects(opts: LoadProjectsOpts = {}): ProjectDescriptor[] {
   try {
-    const configPath = opts.configPath ?? `${process.cwd()}/.catalyst/config.json`;
+    const configPath = opts.configPath ?? resolveLayer1ConfigPath();
     const catalystDir = process.env.CATALYST_DIR ?? join(homedir(), "catalyst");
     const registryPath =
       opts.registryPath ?? join(catalystDir, "execution-core", "registry.json");
