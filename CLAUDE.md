@@ -19,6 +19,20 @@ stays tool-agnostic.)
 - Phase-agent workers run as `claude --bg` jobs; the legacy oneshot mode runs a long-lived
   `claude -p /catalyst-legacy:oneshot` per ticket.
 
+### Pull request review (Codex)
+
+The repo runs **Codex** (`chatgpt-codex-connector[bot]`) as an automated PR reviewer (this is the
+concrete instance of the tool-agnostic "automated code reviewer" in `AGENTS.md` → "Pull requests").
+
+- **Triggers:** PR opened for review, draft marked ready, or a `@codex review` comment — **not**
+  every push. After a remediation push, request a re-review with `@codex review`.
+- **Findings:** posted as inline **review threads** (P1/P2/P3). Resolve each via GraphQL
+  `addPullRequestReviewThreadReply` + `resolveReviewThread` — never `--admin`.
+- **No findings = a clean pass:** Codex reacts 👍 **or** posts an issue comment "Codex Review:
+  Didn't find any major issues 🎉 / Reviewed commit: `<sha>`". This is a resolved review, not a
+  missing one. Note the clean-pass result is an **issue comment / reaction**, not a `reviews` API
+  node — so a `reviews{}`-only poll misses it; also check `issues/<n>/comments` and reactions.
+
 ### Code understanding (Serena MCP)
 
 Serena is wired into the research/analysis agents for semantic code retrieval — see
