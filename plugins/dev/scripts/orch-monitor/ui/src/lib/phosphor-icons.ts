@@ -28,8 +28,13 @@ export type GlyphLoadState = "idle" | "loading" | "ready" | "missing" | "error";
 const DEFAULT_TIMEOUT_MS = 10_000;
 type ImporterMap = Record<string, () => Promise<Record<string, unknown>>>;
 
+type ImporterManifest = { ICON_IMPORTERS: ImporterMap };
+const _defaultManifestLoader = (): Promise<ImporterManifest> =>
+  import("./phosphor-icon-importers.generated");
+
 let _importers: ImporterMap | null = null; // populated lazily (or via test override)
 let _importersPromise: Promise<ImporterMap> | null = null;
+let _loadManifest: () => Promise<ImporterManifest> = _defaultManifestLoader; // injectable in tests
 const _resolved = new Map<string, Icon>();
 const _inflight = new Map<string, Promise<Icon | null>>();
 const _state = new Map<string, GlyphLoadState>();
@@ -39,8 +44,16 @@ const _subs = new Map<string, Set<() => void>>();
 function getImporters(): Promise<ImporterMap> {
   if (_importers) return Promise.resolve(_importers);
   // Lazy: keeps the ~189 KB importer manifest OUT of the main bundle (loads on first glyph demand).
-  _importersPromise ??= import("./phosphor-icon-importers.generated").then(
+  // Retryable (CTL-1370): on rejection, clear the cached promise so the NEXT demand re-imports —
+  // mirrors loadGlyph's retry-hardening. Without this, `??=` keeps a settled-rejected promise (it
+  // only assigns when null), so one transient manifest-chunk 404 poisons the whole session until a
+  // full page reload. Rethrow so loadGlyph still marks the glyph 'error' (retryable).
+  _importersPromise ??= _loadManifest().then(
     (m) => (_importers = m.ICON_IMPORTERS),
+    (err) => {
+      _importersPromise = null;
+      throw err;
+    },
   );
   return _importersPromise;
 }
@@ -145,6 +158,12 @@ export function __setGlyphImporters(map: ImporterMap | null): void {
   _importers = map;
   _importersPromise = null;
 }
+/** Override the lazy importer-manifest loader (CTL-1370 retry test); null restores the real import. */
+export function __setManifestLoader(fn: (() => Promise<ImporterManifest>) | null): void {
+  _loadManifest = fn ?? _defaultManifestLoader;
+  _importers = null;
+  _importersPromise = null;
+}
 export function __resetGlyphCaches(): void {
   _resolved.clear();
   _inflight.clear();
@@ -153,4 +172,5 @@ export function __resetGlyphCaches(): void {
   _subs.clear();
   _importers = null;
   _importersPromise = null;
+  _loadManifest = _defaultManifestLoader;
 }

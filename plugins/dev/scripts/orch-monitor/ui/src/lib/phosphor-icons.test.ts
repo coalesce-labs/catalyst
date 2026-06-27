@@ -15,6 +15,7 @@ import {
   kebabToPascal,
   __resetGlyphCaches,
   __setGlyphImporters,
+  __setManifestLoader,
 } from "./phosphor-icons";
 import { PHOSPHOR_GLYPH_NAMES } from "./project-glyph-set";
 
@@ -133,6 +134,66 @@ describe("loadGlyph (per-glyph async resolver, injected importers)", () => {
     __setGlyphImporters({ hang: () => new Promise(() => {}) });
     expect(await loadGlyph("hang", 30)).toBeNull(); // injectable small timeout
     expect(glyphLoadState("hang")).toBe("error");
+  });
+});
+
+describe("importer-manifest retry-hardening (CTL-1370, injected manifest loader)", () => {
+  const FakeFire: Icon = forwardRef<SVGSVGElement, IconProps>(() => null);
+
+  it("does NOT cache a rejected manifest — the next render retries and resolves (no page reload)", async () => {
+    let attempt = 0;
+    __setManifestLoader(() =>
+      ++attempt === 1
+        ? Promise.reject(new Error("manifest chunk 404"))
+        : Promise.resolve({
+            ICON_IMPORTERS: { fire: () => Promise.resolve({ FireIcon: FakeFire }) },
+          }),
+    );
+    // First demand: the manifest load fails → the glyph settles to a retryable 'error'.
+    expect(await loadGlyph("fire")).toBeNull();
+    expect(glyphLoadState("fire")).toBe("error");
+    // Second demand (dist healthy again): the manifest re-imports — glyph resolves, no reload.
+    expect(await loadGlyph("fire")).toBe(FakeFire);
+    expect(glyphLoadState("fire")).toBe("ready");
+    expect(attempt).toBe(2); // the rejected manifest promise was cleared, not memoized forever
+  });
+
+  it("a manifest rejection during a concurrent burst never permanently poisons the session", async () => {
+    let attempt = 0;
+    __setManifestLoader(() =>
+      ++attempt === 1
+        ? Promise.reject(new Error("manifest chunk 404"))
+        : Promise.resolve({
+            ICON_IMPORTERS: {
+              // both non-featured, so loadGlyph must go through the manifest (not the sync featured map)
+              fire: () => Promise.resolve({ FireIcon: FakeFire }),
+              airplane: () => Promise.resolve({ AirplaneIcon: FakeFire }),
+            },
+          }),
+    );
+    // A burst of glyph demands (like an icon-search render) races the failing manifest load.
+    await Promise.all([loadGlyph("fire"), loadGlyph("airplane")]);
+    // After the dist heals, a re-render resolves every glyph — no page reload, no sticky rejection.
+    const [fire, airplane] = await Promise.all([loadGlyph("fire"), loadGlyph("airplane")]);
+    expect(fire).toBe(FakeFire); // reference-equality (toEqual deep-compares forwardRef poorly)
+    expect(airplane).toBe(FakeFire);
+  });
+
+  it("caches a RESOLVED manifest — it is imported once across many glyph demands", async () => {
+    let loads = 0;
+    __setManifestLoader(() => {
+      loads++;
+      return Promise.resolve({
+        ICON_IMPORTERS: {
+          // non-featured names so each demand really hits the manifest path
+          fire: () => Promise.resolve({ FireIcon: FakeFire }),
+          airplane: () => Promise.resolve({ AirplaneIcon: FakeFire }),
+        },
+      });
+    });
+    await Promise.all([loadGlyph("fire"), loadGlyph("airplane")]);
+    await loadGlyph("fire");
+    expect(loads).toBe(1); // only the rejection path clears the cache; success stays memoized
   });
 });
 
