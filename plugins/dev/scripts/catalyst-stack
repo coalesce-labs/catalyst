@@ -23,6 +23,7 @@
 #   catalyst-stack services-status
 #   catalyst-stack adopt-updater [--print] [--force-worker]
 #   catalyst-stack verify-updater [--json] [--no-e2e]
+#   catalyst-stack verify-node [--json]
 #   catalyst-stack sync-cloud-env
 #
 # sync-cloud-env (CTL-1307):
@@ -92,6 +93,27 @@
 #   machine-readable summary. Exits non-zero if any required Tier-1 check fails.
 #   NEVER installs or mutates anything. On a non-adopted node it cleanly reports
 #   "not adopted" and exits non-zero, touching nothing.
+#
+# verify-node (CTL-1355):
+#   Read-only, class-aware LOCAL node-profile smoke test — the focused precursor
+#   to the catalyst-doctor rubric. Resolves catalyst.node.class via the canonical
+#   resolveNodeClass() (env > Layer-2 > worker default) and grades this node's
+#   ACTUAL local runtime/config state against the expected profile for its class:
+#     developer — daemonless client: broker + execution-core NOT running, plugins
+#                 fresh (delegates to verify-updater), the read-replica endpoint
+#                 points at a worker monitor (not localhost; CTL-1346), and the
+#                 node would NOT pick up work (out-of-roster / boot-drained).
+#     worker    — full stack (LOCAL subset only): broker + execution-core +
+#                 monitor RUNNING and the broker (not the updater) owns the plugin
+#                 pull. The heavy Linear/bot/HRW/webhook activation-gate grading is
+#                 catalyst-doctor (CTL-1355 doctor.mjs, the follow-up).
+#     monitor   — stub (plan §10 enum slot): node.class only; worker/developer
+#                 checks are skipped.
+#   An EXPLICIT but unrecognized class (recognized:false, e.g. "developr") is a
+#   single hard FAIL naming the raw value (CTL-1344). An unset class infers worker
+#   and WARNs (absent ⇒ worker ⇒ zero behavior change) rather than failing. --json
+#   emits a machine-readable summary. Exits non-zero on any required failure.
+#   READ-ONLY — installs/mutates nothing.
 #
 # --yes:
 #   Non-interactive — auto-approve brew install of mitmproxy under --proxy.
@@ -1473,6 +1495,8 @@ cmd_services_status() {
   fi
   # CTL-1349: objective adoption smoke test for the updater (read-only).
   echo "  verify           catalyst-stack verify-updater   (tiered adoption smoke test)"
+  # CTL-1355: class-aware LOCAL node-profile smoke test (read-only).
+  echo "  verify           catalyst-stack verify-node      (class-aware node-profile smoke test)"
 }
 
 # ─── verify-updater (CTL-1349) ───────────────────────────────────────────────
@@ -2008,6 +2032,464 @@ cmd_verify_updater() {
   return $?
 }
 
+# ─── verify-node (CTL-1355) ──────────────────────────────────────────────────
+# Read-only, class-aware LOCAL node-profile smoke test. Same shape as verify-updater:
+# PURE verdict helpers (_vn_v_*, "STATUS|detail" out, STATUS ∈ PASS|FAIL|WARN|SKIP)
+# fed by overridable PROBE seams (_vn_broker_running / _vn_exec_core_running /
+# _vn_monitor_running / _vn_read_replica_base / _vn_drained / _vn_updater_ec) and the
+# canonical class RESOLVER (_vn_resolve). __tests__/verify-node.test.sh exercises both
+# layers with injected fixtures — NO real adoption, NO mutation.
+#
+# The class→defaults wiring (roster/boot-drain/which-daemons-start) is NOT yet derived
+# from the class in code (those levers are operator-set), so verify-node grades the
+# node's ACTUAL local runtime/config state against the class's expected profile.
+
+# --- string normalizers (PURE bash; NOT xargs) ------------------------------
+# xargs interprets quotes/backslashes as shell syntax, so a value with an unmatched quote
+# (an explicit CATALYST_NODE_CLASS / pluginPullOwner / read-replica URL) would be mangled
+# or error. These trim with parameter expansion and lowercase with tr (portable, bash 3.2).
+# _vn_trim <s> — strip leading/trailing whitespace only (preserves case + inner content).
+_vn_trim() {
+  local s="$1"
+  s="${s#"${s%%[![:space:]]*}"}"   # ltrim
+  s="${s%"${s##*[![:space:]]}"}"   # rtrim
+  printf '%s' "$s"
+}
+# _vn_norm <s> — trim + lowercase (the resolveNodeClass normalization).
+_vn_norm() { _vn_trim "$1" | tr '[:upper:]' '[:lower:]'; }
+
+# --- class + roster resolver -------------------------------------------------
+# _vn_resolve — one TAB line:
+#   <class>\t<source>\t<inferred>\t<recognized>\t<raw>\t<in_roster>\t<multi_host>\t<roster_source>\t<self>
+# Shells out to the CANONICAL resolveNodeClass() + resolveClusterHosts() (config.mjs)
+# so `recognized` (the CTL-1344 FAIL hook) and roster membership match the daemon
+# EXACTLY.
+#
+# EVERY field is emitted non-empty — an empty value becomes the sentinel "-" (F2/F6):
+# `IFS=$'\t' read` treats tab as IFS-whitespace and COLLAPSES runs of it, so a single
+# empty field (e.g. an absent `raw`) would shift every column after it. The "-" sentinel
+# keeps the 9 columns aligned; consumers translate "-" back to empty/unknown.
+#
+# Fallback (no bun / config.mjs unavailable — the daemonless-developer case): we cannot
+# call the canonical resolver, so we resolve the class IN BASH the same way config.mjs
+# resolveNodeClass() does (env CATALYST_NODE_CLASS, else Layer-2 catalyst.node.class via
+# jq; trim + lowercase) and CLASSIFY it — an explicit value is honored, a typo is caught
+# as recognized=false so the CTL-1344 hard-FAIL fires (no blind worker/recognized PASS).
+# Roster membership is unknowable without config.mjs, so the roster fields are the literal
+# "unknown" sentinel (F3 makes would-not-own-work WARN, not a fail-open PASS).
+_vn_resolve() {
+  local cfgmjs="${SCRIPT_DIR}/execution-core/config.mjs"
+  if command -v bun >/dev/null 2>&1 && [[ -f "$cfgmjs" ]]; then
+    if CFG_MJS="$cfgmjs" bun -e '
+      const m = await import(process.env.CFG_MJS);
+      let nc;
+      try { nc = m.resolveNodeClass(); }
+      catch { nc = { class:"worker", source:"fallback", inferred:true, recognized:true, raw:null }; }
+      let hosts = [], rsrc = "unknown", self = "", multi = false;
+      try { const r = m.resolveClusterHosts(); hosts = r.hosts || []; rsrc = r.source; multi = !!r.multiHost; self = m.getHostName(); }
+      catch {}
+      const inRoster = Array.isArray(hosts) && hosts.includes(self);
+      const rawStr = (nc.raw === undefined || nc.raw === null) ? "" : (typeof nc.raw === "string" ? nc.raw : JSON.stringify(nc.raw));
+      const d = (s) => { const t = (s === undefined || s === null) ? "" : String(s); return t === "" ? "-" : t; };
+      process.stdout.write([
+        d(nc.class), d(nc.source), nc.inferred ? "true" : "false", nc.recognized ? "true" : "false",
+        d(rawStr), inRoster ? "yes" : "no", multi ? "yes" : "no", d(rsrc), d(self)
+      ].join("\t"));
+    ' 2>/dev/null; then
+      return 0
+    fi
+  fi
+
+  # --- bash fallback: REAL resolution (config.mjs unavailable) ----------------
+  # Distinguish ABSENT (env unset AND Layer-2 null/key-missing ⇒ worker default) from
+  # PRESENT-but-INVALID. A PRESENT non-string Layer-2 value (false / 0 / [] / {}) is an
+  # explicit misconfiguration, NOT absence: resolveNodeClass() flags it recognized=false
+  # (most-restrictive monitor), and so must we — a bare `// empty` would wrongly swallow it
+  # as a clean worker (#5). The jq prints "" for absent, the string for a string, and the
+  # "__nonstring__" sentinel for a present non-string.
+  local raw="" src="default" nonstring="no"
+  if [[ -n "${CATALYST_NODE_CLASS:-}" ]]; then
+    raw="$CATALYST_NODE_CLASS"; src="env"
+  else
+    local cfg="${CATALYST_LAYER2_CONFIG_FILE:-${XDG_CONFIG_HOME:-$HOME/.config}/catalyst/config.json}"
+    if [[ -f "$cfg" ]] && command -v jq >/dev/null 2>&1; then
+      local jqout
+      jqout="$(jq -r '
+        if   (.catalyst.node.class == null)            then ""
+        elif (.catalyst.node.class | type) == "string" then .catalyst.node.class
+        else "__nonstring__" end
+      ' "$cfg" 2>/dev/null || true)"
+      if [[ "$jqout" == "__nonstring__" ]]; then
+        nonstring="yes"; src="layer2"
+      elif [[ -n "$jqout" ]]; then
+        raw="$jqout"; src="layer2"
+      fi
+    fi
+  fi
+
+  local class source inferred recognized rawout
+  if [[ "$nonstring" == "yes" ]]; then
+    # present but non-string ⇒ explicit misconfiguration, never a silent worker (#5).
+    class="monitor"; source="$src"; inferred="false"; recognized="false"; rawout="<non-string>"
+  else
+    raw="$(_vn_norm "$raw")"   # trim + lowercase, PURE bash (no xargs — #3)
+    if [[ -z "$raw" ]]; then
+      # absent ⇒ worker default, recognized, inferred (CTL-1344: zero change).
+      class="worker"; source="default"; inferred="true"; recognized="true"; rawout="-"
+    elif [[ "$raw" == "developer" || "$raw" == "worker" || "$raw" == "monitor" ]]; then
+      # an explicit, recognized class — honor it (NOT a blind worker).
+      class="$raw"; source="$src"; inferred="false"; recognized="true"; rawout="$raw"
+    else
+      # a non-empty NON-MEMBER (typo) ⇒ most-restrictive monitor + recognized=false so the
+      # CTL-1344 unrecognized→FAIL gate in cmd_verify_node fires (NOT a clean worker PASS).
+      class="monitor"; source="$src"; inferred="false"; recognized="false"; rawout="$raw"
+    fi
+  fi
+  # roster fields cannot be computed without config.mjs ⇒ "unknown" sentinel (F3 → WARN).
+  printf '%s\t%s\t%s\t%s\t%s\tunknown\tunknown\tunknown\t-' \
+    "$class" "$source" "$inferred" "$recognized" "${rawout:--}"
+}
+
+# --- probe seams (overridable in tests; default = real local state, read-only) ---
+_vn_broker_running()    { if _broker_running; then echo yes; else echo no; fi; }
+_vn_exec_core_running() {
+  if command -v catalyst-execution-core >/dev/null 2>&1 \
+     && catalyst-execution-core status 2>/dev/null | grep -q '^running'; then echo yes; else echo no; fi
+}
+_vn_monitor_running() {
+  if command -v catalyst-monitor >/dev/null 2>&1 \
+     && catalyst-monitor status 2>/dev/null | grep -qi 'monitor running'; then echo yes; else echo no; fi
+}
+# _vn_drained — node would refuse new work: persistent drain flag OR boot-drain opt-in.
+_vn_drained() {
+  if [[ -f "${CATALYST_DIR:-$HOME/catalyst}/execution-core/drain" || "${CATALYST_BOOT_DRAINED:-}" == "1" ]]; then
+    echo yes
+  else
+    echo no
+  fi
+}
+# _vn_read_replica_base [cfg] — the resolved read endpoint: CATALYST_MONITOR_URL env
+# override else Layer-2 catalyst.readReplica.baseUrl. The Layer-2 file defaults to the SAME
+# path _vn_resolve / the runtime use (CATALYST_LAYER2_CONFIG_FILE, config.mjs
+# getLayer2ConfigPath) — NOT a hard-coded default — so an overridden Layer-2 location is
+# honored for the read-source too (#1). Empty when neither the env nor the config sets it.
+_vn_read_replica_base() {
+  local cfg="${1:-${CATALYST_LAYER2_CONFIG_FILE:-${XDG_CONFIG_HOME:-$HOME/.config}/catalyst/config.json}}"
+  local base="${CATALYST_MONITOR_URL:-}"
+  if [[ -z "$base" && -f "$cfg" ]] && command -v jq >/dev/null 2>&1; then
+    base="$(jq -r '.catalyst.readReplica.baseUrl // empty' "$cfg" 2>/dev/null || true)"
+  fi
+  printf '%s' "$base"
+}
+# _vn_updater_ec — delegate plugin-freshness to the read-only verify-updater and
+# return ONLY its exit code. Runs in this shell's child via the caller's $(...) so
+# its VU_* globals + stdout stay isolated. Overridden in tests (no real adoption).
+_vn_updater_ec() { cmd_verify_updater --no-e2e >/dev/null 2>&1; printf '%s' "$?"; }
+
+# --- verdict helpers (pure: data in args, "STATUS|detail" out) ----------------
+
+# _vn_v_node_class <expected> <resolved> <inferred:true|false> <source> — class match.
+# inferred (worker default, class unset) → WARN not FAIL (CTL-1344: absent ⇒ worker
+# ⇒ zero change); an explicit class that resolves to something else → FAIL.
+_vn_v_node_class() {
+  local expected="$1" resolved="$2" inferred="$3" source="$4"
+  if [[ "$resolved" != "$expected" ]]; then
+    printf 'FAIL|resolved node.class=%s, expected %s\n' "$resolved" "$expected"
+    return 0
+  fi
+  if [[ "$inferred" == "true" ]]; then
+    printf 'WARN|node.class not explicitly set — inferring "%s" (CTL-1344: absent ⇒ worker ⇒ zero change; set catalyst.node.class to make the role explicit)\n' "$resolved"
+    return 0
+  fi
+  printf 'PASS|node.class=%s (explicit, source=%s)\n' "$resolved" "$source"
+}
+
+# _vn_v_daemon_down <label> <running:yes|no> — developer expects the work daemon DOWN.
+_vn_v_daemon_down() {
+  local label="$1" running="$2"
+  if [[ "$running" == "yes" ]]; then
+    printf 'FAIL|developer node is running worker daemons — %s is UP (a developer must be daemonless; run catalyst-stack stop)\n' "$label"
+  else
+    printf 'PASS|%s not running (daemonless, as a developer should be)\n' "$label"
+  fi
+}
+
+# _vn_v_daemon_up <label> <running:yes|no> — worker expects the daemon UP.
+_vn_v_daemon_up() {
+  local label="$1" running="$2"
+  if [[ "$running" == "yes" ]]; then
+    printf 'PASS|%s running\n' "$label"
+  else
+    printf 'FAIL|%s NOT running — a worker runs the full stack (catalyst-stack start)\n' "$label"
+  fi
+}
+
+# _vn_v_updater <exit_code> — developer plugin freshness == verify-updater all-green.
+_vn_v_updater() {
+  local ec="$1"
+  if [[ "$ec" == "0" ]]; then
+    printf 'PASS|plugins fresh — verify-updater all-green (delegated, read-only)\n'
+  else
+    printf 'FAIL|plugins NOT verified fresh — verify-updater exited %s (run: catalyst-stack verify-updater)\n' "$ec"
+  fi
+}
+
+# _vn_v_read_replica <class> <base> — CTL-1346 read-source. A worker serves its OWN
+# local replica (localhost/unset = correct); developer/monitor MUST point at a worker
+# monitor (the resolver refuses to fall back to an empty local replica). The base is
+# whitespace-TRIMMED first (#2), so a manually-edited " http://localhost:7400 " is still
+# caught as localhost / a padded "" still reads as unset.
+_vn_v_read_replica() {
+  local cls="$1" base; base="$(_vn_trim "$2")"
+  if [[ "$cls" == "worker" ]]; then
+    if [[ -z "$base" ]]; then
+      printf 'PASS|read-source local (no override) — a worker serves its own replica\n'
+    else
+      printf 'PASS|read endpoint -> %s\n' "$base"
+    fi
+    return 0
+  fi
+  case "$base" in
+    "")
+      printf 'FAIL|no read-replica endpoint (CATALYST_MONITOR_URL / catalyst.readReplica.baseUrl unset) — resolver refuses to fall back to localhost (CTL-1346); point at a worker monitor (e.g. http://mini:7400)\n' ;;
+    http://127.0.0.1*|http://localhost*|https://127.0.0.1*|https://localhost*)
+      printf 'FAIL|read endpoint is localhost (%s) — serves an empty local replica; point at a worker monitor (e.g. http://mini:7400)\n' "$base" ;;
+    *)
+      printf 'PASS|read endpoint -> %s (remote, not localhost)\n' "$base" ;;
+  esac
+}
+
+# _vn_v_worker_owner <env_owner> <config_owner> — worker: the BROKER must own the plugin
+# pull (NOT the updater; adopt-updater refuses workers). Mirrors the broker's
+# resolvePluginPullOwner precedence (broker/plugin-refresh.mjs): the env
+# CATALYST_PLUGIN_PULL_OWNER (when non-empty) WINS over the persisted config, so a worker
+# whose env defers the pull to the updater FAILs even when the config still says broker (#4).
+# The resolved owner is trim+lowercase NORMALIZED (F4), so "Updater" / " updater " also FAIL.
+_vn_v_worker_owner() {
+  local env_owner="$1" cfg_owner="${2:-}" resolved norm
+  if [[ -n "$(_vn_trim "$env_owner")" ]]; then resolved="$env_owner"; else resolved="$cfg_owner"; fi
+  norm="$(_vn_norm "$resolved")"
+  if [[ "$norm" == "updater" ]]; then
+    printf 'FAIL|pluginPullOwner resolves to updater on a worker (env CATALYST_PLUGIN_PULL_OWNER takes precedence over config) — adopt-updater refuses workers; the broker should own the pull (set it to broker / unset)\n'
+  else
+    printf 'PASS|pluginPullOwner=%s — broker owns the plugin pull (worker)\n' "${resolved:-<unset>}"
+  fi
+}
+
+# _vn_v_dev_no_work <in_roster:yes|no> <multi_host:yes|no> <drained:yes|no> <roster_source>
+# — a developer must NOT pick up work. Boot-drained → genuinely safe (PASS). Otherwise the
+# verdict TRUSTS the roster state, so it must first confirm that state is real:
+# resolveClusterHosts() FAILS OPEN (a resolve error yields a single-host roster that
+# includes self), so an `unknown`/empty/"-" roster_source — the F1 bash-fallback case, or a
+# canonical-resolver error — is UNVERIFIED → WARN, never a PASS (F3). Only a confirmed roster
+# grades: in a MULTI-host roster and not drained → HRW would assign it work (hard FAIL); a
+# single-host roster includes self by construction → non-fatal WARN (the real guard there is
+# the daemonless checks above); confirmed out-of-roster → safe.
+_vn_v_dev_no_work() {
+  local in_roster="$1" multi_host="$2" drained="$3" roster_src="${4:-}"
+  if [[ "$drained" == "yes" ]]; then
+    printf 'PASS|boot-drained — admits no new work\n'
+    return 0
+  fi
+  if [[ -z "$roster_src" || "$roster_src" == "unknown" || "$roster_src" == "-" || "$in_roster" == "unknown" ]]; then
+    printf 'WARN|developer would-not-own-work UNVERIFIED — roster state could not be confirmed; ensure the node is drained / out of roster\n'
+    return 0
+  fi
+  if [[ "$in_roster" != "yes" ]]; then
+    printf 'PASS|out of the cluster roster — HRW assigns it nothing\n'
+    return 0
+  fi
+  if [[ "$multi_host" == "yes" ]]; then
+    printf 'FAIL|in the multi-host cluster roster and not drained — HRW would assign it work; remove it from the roster or boot-drain it (CATALYST_BOOT_DRAINED=1)\n'
+    return 0
+  fi
+  printf 'WARN|single-host roster includes this node and it is not drained — safe only while the work daemons are down (see broker/exec-core); set CATALYST_BOOT_DRAINED=1 to be explicit\n'
+}
+
+# --- check runner (mirrors the _vu_* runner; adds a non-fatal WARN status) -----
+VN_JSON="no"
+VN_NAMES=(); VN_TIERS=(); VN_REQUIRED=(); VN_STATUSES=(); VN_DETAILS=()
+VN_FAIL_REQUIRED=0
+
+# _vn_record <name> <tier> <required:true|false> <status> <detail>. Only a required
+# FAIL bumps the exit-code counter; WARN/SKIP/PASS never fail the run.
+_vn_record() {
+  local name="$1" tier="$2" required="$3" status="$4" detail="$5"
+  VN_NAMES+=("$name"); VN_TIERS+=("$tier"); VN_REQUIRED+=("$required")
+  VN_STATUSES+=("$status"); VN_DETAILS+=("$detail")
+  if [[ "$status" == "FAIL" && "$required" == "true" ]]; then
+    VN_FAIL_REQUIRED=$((VN_FAIL_REQUIRED + 1))
+  fi
+  if [[ "$VN_JSON" != "yes" ]]; then
+    printf '    [%-4s] %-22s %s\n' "$status" "$name" "$detail"
+  fi
+}
+
+# _vn_emit <name> <tier> <required> <verdict:"STATUS|detail"> — split a verdict + record.
+_vn_emit() {
+  local name="$1" tier="$2" required="$3" v="$4"
+  _vn_record "$name" "$tier" "$required" "${v%%|*}" "${v#*|}"
+}
+
+# _vn_run_developer <in_roster> <multi_host> <source> <roster_source> — daemonless-client
+# profile. roster_source is threaded to the would-not-own-work check so an unverified /
+# fail-open roster WARNs instead of falsely PASSing (F3).
+_vn_run_developer() {
+  local in_roster="$1" multi_host="$2" source="$3" roster_src="${4:-}" drained
+  drained="$(_vn_drained)"
+  if [[ "$VN_JSON" != "yes" ]]; then echo "  Tier 1 — developer profile (daemonless client; required)"; fi
+  _vn_emit "node-class"         T1 true "$(_vn_v_node_class developer developer false "$source")"
+  _vn_emit "broker-stopped"     T1 true "$(_vn_v_daemon_down broker "$(_vn_broker_running)")"
+  _vn_emit "exec-core-stopped"  T1 true "$(_vn_v_daemon_down execution-core "$(_vn_exec_core_running)")"
+  _vn_emit "plugins-fresh"      T1 true "$(_vn_v_updater "$(_vn_updater_ec)")"
+  _vn_emit "read-replica"       T1 true "$(_vn_v_read_replica developer "$(_vn_read_replica_base)")"
+  _vn_emit "would-not-own-work" T1 true "$(_vn_v_dev_no_work "$in_roster" "$multi_host" "$drained" "$roster_src")"
+}
+
+# _vn_run_worker <inferred> <source> — full-stack profile, LOCAL subset only.
+_vn_run_worker() {
+  local inferred="$1" source="$2"
+  if [[ "$VN_JSON" != "yes" ]]; then echo "  Tier 1 — worker profile (full stack; LOCAL subset; required)"; fi
+  _vn_emit "node-class"        T1 true "$(_vn_v_node_class worker worker "$inferred" "$source")"
+  _vn_emit "broker-running"    T1 true "$(_vn_v_daemon_up broker "$(_vn_broker_running)")"
+  _vn_emit "exec-core-running" T1 true "$(_vn_v_daemon_up execution-core "$(_vn_exec_core_running)")"
+  _vn_emit "monitor-running"   T1 true "$(_vn_v_daemon_up monitor "$(_vn_monitor_running)")"
+  _vn_emit "pull-owner"        T1 true "$(_vn_v_worker_owner "${CATALYST_PLUGIN_PULL_OWNER:-}" "$(_vu_read_pull_owner "$VN_CFG")")"
+  if [[ "$VN_JSON" != "yes" ]]; then
+    echo "    note: LOCAL subset only — full activation-gate grading (Linear/bot/HRW/webhook/PATH) is 'catalyst-doctor' (CTL-1355 doctor.mjs, the follow-up)."
+  fi
+}
+
+# _vn_run_monitor <source> — reporting-host profile; a STUB (plan §10 enum slot). It
+# grades nothing beyond the node-class, so the verdict must NOT read as a verified-healthy
+# PASS: the profile-stub note is a loud WARN (F5), not a quiet SKIP, so a monitor node that
+# is wrongly running broker+exec-core cannot masquerade as a clean pass. WARN never bumps
+# required-failures, so the exit code stays 0 — a stub is not a failure, just not a gate.
+_vn_run_monitor() {
+  local source="$1"
+  if [[ "$VN_JSON" != "yes" ]]; then echo "  Tier 1 — monitor profile (reporting host; STUB — NOT a pass gate)"; fi
+  _vn_emit "node-class"   T1 true  "$(_vn_v_node_class monitor monitor false "$source")"
+  _vn_record "profile-stub" T1 false WARN "monitor profile is a STUB — verify-node does NOT yet grade monitor nodes (no monitor host exists); this is NOT a pass gate (full grading lands with catalyst-doctor, CTL-1355)"
+}
+
+# _vn_finish <node_class> — summary (JSON or text) + exit code (non-zero iff a
+# required check FAILed). Mirrors _vu_finish, with a WARN tally.
+_vn_finish() {
+  local node_class="$1" ec=0
+  [[ "$VN_FAIL_REQUIRED" -gt 0 ]] && ec=1
+  if [[ "$VN_JSON" == "yes" ]]; then
+    _vn_json_summary "$node_class" "$ec"
+    return "$ec"
+  fi
+  echo ""
+  local pass=0 failc=0 warn=0 skip=0 i
+  for i in "${!VN_STATUSES[@]}"; do
+    case "${VN_STATUSES[$i]}" in
+      PASS) pass=$((pass + 1)) ;;
+      FAIL) failc=$((failc + 1)) ;;
+      WARN) warn=$((warn + 1)) ;;
+      SKIP) skip=$((skip + 1)) ;;
+    esac
+  done
+  log "summary: ${pass} pass, ${failc} fail, ${warn} warn, ${skip} skip (of ${#VN_NAMES[@]}) — required failures: ${VN_FAIL_REQUIRED}"
+  if [[ "$ec" -eq 0 ]]; then
+    log "verdict: PASS — ${node_class} node profile OK (read-only local smoke test)"
+  else
+    log "verdict: FAIL — ${node_class} node profile has ${VN_FAIL_REQUIRED} required failure(s)"
+  fi
+  return "$ec"
+}
+
+# _vn_json_summary <node_class> <exit_code> — machine-readable summary to stdout.
+_vn_json_summary() {
+  local node_class="$1" ec="$2" i objs=()
+  if ! command -v jq >/dev/null 2>&1; then
+    printf '{"node_class":"%s","verdict":"%s","exit_code":%s,"required_failures":%s,"jq":false,"note":"jq not installed — checks unreliable"}\n' \
+      "$node_class" "$([[ "$ec" == "0" ]] && echo pass || echo fail)" "$ec" "$VN_FAIL_REQUIRED"
+    return 0
+  fi
+  for i in "${!VN_NAMES[@]}"; do
+    objs+=("$(jq -nc \
+      --arg name "${VN_NAMES[$i]}" \
+      --arg tier "${VN_TIERS[$i]}" \
+      --argjson required "${VN_REQUIRED[$i]}" \
+      --arg status "${VN_STATUSES[$i]}" \
+      --arg detail "${VN_DETAILS[$i]}" \
+      '{name:$name,tier:$tier,required:$required,status:$status,detail:$detail}')")
+  done
+  printf '%s\n' "${objs[@]}" | jq -s \
+    --arg node_class "$node_class" \
+    --argjson exit_code "$ec" \
+    --argjson required_failures "$VN_FAIL_REQUIRED" \
+    '{
+       node_class: $node_class,
+       verdict: (if $exit_code == 0 then "pass" else "fail" end),
+       exit_code: $exit_code,
+       required_failures: $required_failures,
+       counts: {
+         pass: ([.[] | select(.status == "PASS")] | length),
+         fail: ([.[] | select(.status == "FAIL")] | length),
+         warn: ([.[] | select(.status == "WARN")] | length),
+         skip: ([.[] | select(.status == "SKIP")] | length)
+       },
+       checks: .
+     }'
+}
+
+cmd_verify_node() {
+  VN_JSON="no"
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --json) VN_JSON="yes"; shift ;;
+      -h|--help)
+        echo "usage: catalyst-stack verify-node [--json]"
+        echo "  read-only, class-aware LOCAL node-profile smoke test (CTL-1355)."
+        echo "  resolves catalyst.node.class and grades this node's actual local state"
+        echo "  (daemons / read-source / pull-owner / drain+roster) against its class profile."
+        echo "  --json    machine-readable summary"
+        return 0
+        ;;
+      *) fail "unknown verify-node arg: $1 (try: --json)" ;;
+    esac
+  done
+
+  # Reset collectors (fresh run; also matters when sourced + invoked in tests).
+  VN_NAMES=(); VN_TIERS=(); VN_REQUIRED=(); VN_STATUSES=(); VN_DETAILS=(); VN_FAIL_REQUIRED=0
+
+  VN_CFG="${CATALYST_MACHINE_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/catalyst/config.json}"
+
+  local class source inferred recognized raw in_roster multi_host roster_src self
+  IFS=$'\t' read -r class source inferred recognized raw in_roster multi_host roster_src self <<<"$(_vn_resolve)"
+  [[ -z "$class" ]] && class="worker"   # ultra-fallback (never empty)
+  # Translate the "-" empty-field sentinel (F2/F6) back to empty for the value fields.
+  [[ "$raw" == "-" ]] && raw=""
+  [[ "$self" == "-" ]] && self=""
+
+  if [[ "$VN_JSON" != "yes" ]]; then
+    log "verify-node — class-aware LOCAL node-profile smoke test (read-only)"
+    log "resolved catalyst.node.class=${class} (source=${source}, recognized=${recognized}, inferred=${inferred})"
+  fi
+
+  # CTL-1344 hook: an EXPLICIT but unrecognized class is a single hard FAIL. The
+  # resolver already degraded it to the most-restrictive class; we name the raw value
+  # and refuse to grade any profile until it is corrected.
+  if [[ "$recognized" == "false" ]]; then
+    _vn_record "node-class" T1 true FAIL \
+      "catalyst.node.class \"${raw}\" is not one of [developer, worker, monitor] — treating as \"${class}\" (most restrictive); correct or unset the value (CTL-1344)"
+    _vn_finish "$class"
+    return $?
+  fi
+
+  case "$class" in
+    developer) _vn_run_developer "$in_roster" "$multi_host" "$source" "$roster_src" ;;
+    monitor)   _vn_run_monitor "$source" ;;
+    worker|*)  _vn_run_worker "$inferred" "$source" ;;
+  esac
+
+  _vn_finish "$class"
+  return $?
+}
+
 # ─── Dispatch ───────────────────────────────────────────────────────────────
 # Guard so the file can be sourced (e.g. by __tests__/verify-updater.test.sh) to
 # reach the pure helpers WITHOUT running a command. When executed directly,
@@ -2023,12 +2505,13 @@ case "${1:-}" in
   uninstall-services) shift; cmd_uninstall_services ;;
   adopt-updater)      shift; cmd_adopt_updater "$@" ;;
   verify-updater)     shift; cmd_verify_updater "$@" ;;
+  verify-node)        shift; cmd_verify_node "$@" ;;
   services-status)    shift; cmd_services_status ;;
   sync-cloud-env)     shift; cmd_sync_cloud_env "$@" ;;
   status|"") cmd_status ;;
   -h|--help)
     sed -n '2,/^$/p' "$0" | sed 's/^# \{0,1\}//'
     ;;
-  *) fail "unknown command: $1 (try: start | stop | restart | status | hotpatch | parity | install-services | uninstall-services | adopt-updater | verify-updater | services-status)" ;;
+  *) fail "unknown command: $1 (try: start | stop | restart | status | hotpatch | parity | install-services | uninstall-services | adopt-updater | verify-updater | verify-node | services-status)" ;;
 esac
 fi
