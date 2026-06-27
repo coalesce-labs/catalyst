@@ -22,6 +22,7 @@
 
 import { hostname as osHostname } from "node:os";
 import { createRequire } from "node:module";
+import { nodeClass } from "./lib/node-class.mjs";
 
 // CTL-1338: load @opentelemetry/api via createRequire (synchronous — the emit helpers
 // below use trace/context/SpanKind/SpanStatusCode on the sync tick path) wrapped in
@@ -87,6 +88,7 @@ export function buildTracingResource({ serviceName, dispatchMode = "phase-agents
     "host.name": shortHostName(),
     "catalyst.node.name": resolveNodeName(env),
     "catalyst.dispatch.mode": dispatchMode,
+    "catalyst.node.class": nodeClass(),
   };
 }
 

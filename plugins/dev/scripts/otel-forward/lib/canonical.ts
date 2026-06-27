@@ -1,5 +1,5 @@
 import type { CanonicalEvent } from "../../orch-monitor/lib/canonical-event.ts";
-import { hostName, hostId } from "../../orch-monitor/lib/canonical-event-shared.ts";
+import { hostName, buildCatalystResource } from "../../orch-monitor/lib/canonical-event-shared.ts";
 
 // CTL-1262: stable Catalyst node name. Identical resolution to
 // execution-core/config.mjs getHostName(): CATALYST_HOST_NAME env ->
@@ -56,24 +56,21 @@ export function buildCanonicalEnvelope(opts: BuildOpts): CanonicalEvent {
     severityNumber: opts.severityNumber ?? 9,
     traceId: null,
     spanId: null,
-    resource: {
-      "service.name": opts.serviceName,
-      "service.namespace": "catalyst",
-      "service.version": opts.serviceVersion ?? "0.0.0",
-      "host.name": hostName(),
-      "host.id": hostId(),
-      // CTL-1262: stable Catalyst node name as a DISTINCT resource attribute so
-      // dashboards / the delegate can attribute signals per node. Resolved the
-      // SAME way as execution-core/config.mjs getHostName() — the shared
-      // hostName() helper applies the identical precedence (CATALYST_HOST_NAME
-      // env -> catalyst.host.name in Layer-2 config -> os.hostname() first DNS
-      // label) and never throws, falling back safely. NOT the Tailscale device
-      // name. Keyed distinctly from the OS hostname (host.name); when the two
-      // resolve to the same value today they remain semantically separate keys.
-      // buildOtlpPayload's generic toAttrArray serializes the whole resource, so
-      // this lands on the OTLP wire with no otlp.ts change.
-      "catalyst.node.name": nodeName(),
-    },
+    // CTL-1368: built through buildCatalystResource so catalyst.node.class (the
+    // node ROLE) is stamped LAST. service.name / service.version / host identity
+    // are unchanged (host resolved via the bare hostName()/hostId() the helper
+    // uses internally with no override). The CTL-1262 catalyst.node.name — a
+    // DISTINCT resource attribute (the stable coordination name HRW / the
+    // delegate key off, resolved the SAME way as getHostName()) — is carried
+    // through `extra` so it lands AFTER node.class on the OTLP wire (toAttrArray
+    // serializes the whole resource generically, so no otlp.ts change).
+    // as unknown as: the shared builder returns Record<string, unknown>; bridge the
+    // index-signature gap (runtime shape is a valid resource — version always set here).
+    resource: buildCatalystResource({
+      serviceName: opts.serviceName,
+      serviceVersion: opts.serviceVersion ?? "0.0.0",
+      extra: { "catalyst.node.name": nodeName() },
+    }) as unknown as CanonicalEvent["resource"],
     attributes: {
       "event.name": opts.eventName,
       ...opts.attributes,

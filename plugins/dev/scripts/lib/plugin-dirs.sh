@@ -54,6 +54,11 @@ __plugin_dirs_from_file() {
 #   RESOLVED_PLUGIN_DIRS        colon-separated dirs, "" when unset anywhere
 #   RESOLVED_PLUGIN_DIRS_SOURCE env | repo-config | machine-config | none
 resolve_plugin_dirs() {
+  # Optional <anchor> dir for the repo-config walk (default $PWD). CTL-1349: verify-updater
+  # passes SCRIPT_DIR so it resolves the SAME checkout the updater daemon does (the daemon
+  # anchors repo-config at updater.mjs, not the operator's cwd) — otherwise running verify
+  # from another directory could check a different checkout's pluginDirs.
+  local anchor="${1:-$PWD}"
   RESOLVED_PLUGIN_DIRS=""
   RESOLVED_PLUGIN_DIRS_SOURCE="none"
 
@@ -64,7 +69,7 @@ resolve_plugin_dirs() {
   fi
 
   local v
-  v="$(__plugin_dirs_from_file "$(plugin_dirs_repo_config_path)")"
+  v="$(__plugin_dirs_from_file "$(plugin_dirs_repo_config_path "$anchor")")"
   if [[ -n "$v" ]]; then
     RESOLVED_PLUGIN_DIRS="$v"
     RESOLVED_PLUGIN_DIRS_SOURCE="repo-config"

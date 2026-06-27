@@ -17,7 +17,7 @@ import { mkdirSync, appendFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { randomBytes } from "node:crypto";
 import { getEventLogPath, log } from "./config.mjs";
-import { hostName, hostId } from "./lib/host-identity.mjs";
+import { buildCatalystResource } from "./lib/catalyst-resource.mjs";
 
 export const FLEET_HEALTH_DEGRADED = "fleet.health.degraded";
 
@@ -49,12 +49,7 @@ export function buildFleetHealthEnvelope(payload = {}, { now } = {}) {
     severityNumber: 13,
     traceId: null,
     spanId: null,
-    resource: {
-      "service.name": "catalyst.execution-core",
-      "service.namespace": "catalyst",
-      "host.name": hostName(),
-      "host.id": hostId(),
-    },
+    resource: buildCatalystResource({ serviceName: "catalyst.execution-core" }),
     attributes: {
       "event.name": FLEET_HEALTH_DEGRADED,
       "event.entity": "fleet",

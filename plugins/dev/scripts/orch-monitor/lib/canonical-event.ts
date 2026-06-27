@@ -20,9 +20,8 @@ import { dirname, resolve } from "node:path";
 
 import {
   type Severity,
+  buildCatalystResource,
   generateEventId,
-  hostId,
-  hostName,
   severityNumber,
 } from "./canonical-event-shared";
 
@@ -46,6 +45,11 @@ export interface Resource {
   // CTL-852: host identity fields, always present on canonical events.
   "host.name": string;
   "host.id": string;
+  // CTL-1368: node CLASS (developer|worker|monitor) — the role this node plays.
+  // Stamped by buildCatalystResource (always present when the resource is built
+  // through it). Optional so external (webhook/broker-daemon) events that build
+  // a bare resource block remain valid.
+  "catalyst.node.class"?: string;
   // CTL-1262: stable Catalyst node name, distinct from the OS hostname
   // (host.name). Resolved the same way as getHostName() / hostName()
   // (CATALYST_HOST_NAME env -> catalyst.host.name Layer-2 config ->
@@ -206,13 +210,13 @@ export function buildCanonicalEvent(input: BuildInput): CanonicalEvent {
   const observedTs = input.observedTs ?? input.ts;
   const version = input.resource["service.version"] ?? pluginVersion();
 
-  const resource: Resource = {
-    "service.name": input.resource["service.name"],
-    "service.namespace": "catalyst",
-    "service.version": version,
-    "host.name": hostName(),
-    "host.id": hostId(),
-  };
+  // `as unknown as Resource`: the shared builder returns Record<string, unknown> (it can't
+  // import the Resource type without a cycle), so bridge the index-signature gap. The
+  // runtime shape IS a valid Resource — serviceVersion is always passed here.
+  const resource: Resource = buildCatalystResource({
+    serviceName: input.resource["service.name"],
+    serviceVersion: version,
+  }) as unknown as Resource;
   // CTL-636: promote orchestration context into resource. Explicit resource
   // input wins; otherwise fall back to the matching attribute (TS emitters
   // already set these) or the ambient env (project only).

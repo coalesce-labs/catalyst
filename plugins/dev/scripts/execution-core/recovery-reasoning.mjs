@@ -43,7 +43,7 @@ import {
   log as defaultLog,
   getEventLogPath,
 } from "./config.mjs";
-import { hostName, hostId } from "./lib/host-identity.mjs";
+import { buildCatalystResource } from "./lib/catalyst-resource.mjs";
 import { captureEvidence } from "./diagnostician.mjs";
 
 // Wrap defaultLog to ensure it's a function (config.mjs may export an object)
@@ -930,12 +930,7 @@ export function buildRecoveryEnvelope(event, { now } = {}) {
     severityNumber: escalated ? 13 : 9,
     traceId: null,
     spanId: null,
-    resource: {
-      "service.name": "catalyst.execution-core",
-      "service.namespace": "catalyst",
-      "host.name": hostName(),
-      "host.id": hostId(),
-    },
+    resource: buildCatalystResource({ serviceName: "catalyst.execution-core" }),
     attributes: {
       // ← THE canonical name. The board reader matches attributes["event.name"].
       "event.name": type,

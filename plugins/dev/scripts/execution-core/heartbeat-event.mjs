@@ -23,7 +23,7 @@ import {
   log,
   readGovernanceConfig,
 } from "./config.mjs";
-import { hostName, hostId } from "./lib/host-identity.mjs";
+import { buildCatalystResource } from "./lib/catalyst-resource.mjs";
 import { logDaemonHeartbeat } from "../lib/daemon-heartbeat.mjs";
 
 export const HEARTBEAT_EVENT = "node.heartbeat";
@@ -64,15 +64,7 @@ export function buildHeartbeatEnvelope({ now, epochFn, governanceFn, admissionFn
     severityNumber: 9,
     traceId: null,
     spanId: null,
-    resource: {
-      "service.name": "catalyst.execution-core",
-      "service.namespace": "catalyst",
-      // CTL-1093 Phase 2: pass the config-aware name as override so resource
-      // and body.payload["host.name"] always agree, even when Layer-2 is pinned
-      // but CATALYST_HOST_NAME env was not yet injected by the boot guard.
-      "host.name": hostName({ override: host }),
-      "host.id": hostId({ override: host }),
-    },
+    resource: buildCatalystResource({ serviceName: "catalyst.execution-core", host }),
     attributes: {
       "event.name": HEARTBEAT_EVENT,
       "event.entity": "node",

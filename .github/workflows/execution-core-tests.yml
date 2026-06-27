@@ -223,6 +223,8 @@ jobs:
             recovery-reasoning.test.mjs \
             recovery-evidence.test.mjs \
             unstuck-act-seams.test.mjs \
+            lib/catalyst-resource.test.mjs \
+            lib/node-class-parity.test.mjs \
             updater/plugin-pull-defer.test.mjs \
             updater/updater.test.mjs \
             updater/updater-tracing.test.mjs

@@ -18,8 +18,7 @@ import { dirname } from "node:path";
 import {
   generateEventId,
   severityNumber,
-  hostName,
-  hostId,
+  buildCatalystResource,
 } from "../orch-monitor/lib/canonical-event-shared.ts";
 import { getEventLogPath, log } from "./config.mjs";
 
@@ -78,13 +77,8 @@ export function buildAlertEnvelope(
     traceId: null,
     spanId: null,
     caused_by: causedBy ?? null,
-    resource: {
-      // the broker is the emitter — the surviving process that raised the alert.
-      "service.name": "catalyst.broker",
-      "service.namespace": "catalyst",
-      "host.name": hostName(),
-      "host.id": hostId(),
-    },
+    // the broker is the emitter — the surviving process that raised the alert.
+    resource: buildCatalystResource({ serviceName: "catalyst.broker" }),
     attributes: {
       "event.name": eventName,
       "event.entity": "alert",
