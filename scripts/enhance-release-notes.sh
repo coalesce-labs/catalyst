@@ -16,6 +16,10 @@ BACKFILL_PROMPT_TEMPLATE="$SCRIPT_DIR/templates/backfill-release-notes-prompt.md
 # Falls back to ANTHROPIC_API_KEY for CI environments.
 API_KEY="${LOCAL_ANTHROPIC_API_KEY:-${ANTHROPIC_API_KEY:-}}"
 
+# Model is overridable so the next Anthropic retirement is a config change, not
+# a code edit. Default is the current drop-in for the retired claude-sonnet-4.
+MODEL="${RELEASE_NOTES_MODEL:-claude-sonnet-4-6}"
+
 if [[ -z "$API_KEY" ]]; then
   echo "::warning::LOCAL_ANTHROPIC_API_KEY (or ANTHROPIC_API_KEY) not set — skipping release notes enhancement"
   exit 0
@@ -110,8 +114,9 @@ prompt_content=$(jq -Rrs \
 
 request_body=$(jq -nc \
   --arg content "$prompt_content" \
+  --arg model "$MODEL" \
   '{
-    model: "claude-sonnet-4-20250514",
+    model: $model,
     max_tokens: 4096,
     messages: [{role: "user", content: $content}]
   }')
@@ -136,6 +141,9 @@ ai_notes=$(echo "$response" | jq -r '.content[0].text // empty' 2>/dev/null) || 
 if [[ -z "$ai_notes" ]]; then
   echo "::warning::Claude API returned empty response — keeping original release notes"
   echo "Response: $response"
+  if echo "$response" | jq -e '.error.type == "not_found_error"' >/dev/null 2>&1; then
+    echo "::error::Release-notes model '$MODEL' returned not_found_error (model decommissioned?). Update RELEASE_NOTES_MODEL / the default in this script. Response: $response"
+  fi
   exit 0
 fi
 
@@ -233,8 +241,9 @@ if [[ -n "$head_branch" ]]; then
 
     plugin_request=$(jq -nc \
       --arg content "$plugin_prompt" \
+      --arg model "$MODEL" \
       '{
-        model: "claude-sonnet-4-20250514",
+        model: $model,
         max_tokens: 1024,
         messages: [{role: "user", content: $content}]
       }')
