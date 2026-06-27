@@ -87,6 +87,9 @@ function defaultReadStateFactory() {
 // Lazy bun:sqlite imports (daemon runs under bun, like scheduler.mjs).
 let openBrokerStateDb = null;
 let getTicketDescriptor = null;
+// One-time "no config stateMap" notice (the fleet daemon resolves per-team via
+// the registry) so the per-tick log isn't spammed.
+let _warnedNoStateMap = false;
 async function ensureCacheReader() {
   if (openBrokerStateDb) return;
   const mod = await import("../broker/broker-state.mjs");
@@ -255,12 +258,22 @@ export function startLinearReconcileTimer({
     try {
       const full = readFullConfig(configPath);
       const stateMap = full?.catalyst?.linear?.stateMap ?? {};
-      // Fail CLOSED on an unreadable/empty config: without a stateMap we can't
-      // resolve target states correctly, so a transient bad config edit must NOT
-      // drive writes off the hardcoded fallback (Codex P2). Skip the tick.
-      if (Object.keys(stateMap).length === 0) {
-        log.warn({ configPath }, "linear-reconcile: empty/unreadable stateMap — skipping tick");
-        return;
+      // The multi-team fleet daemon resolves each team's state PER-TEAM via the
+      // registry, so its own config legitimately has NO single stateMap. That is
+      // fine for completion reconciliation: 'done' → "Done" is contract-universal,
+      // the terminal guards below use literal names, and the actual write resolves
+      // the per-team Done stateId through the registry (applyTerminalDone → team
+      // repoRoot) — so an empty stateMap never drives an off-team write. A
+      // stateMap is only needed to map a NON-'done' declared kind (rare); those
+      // skip per-declaration (decideCorrection → unmapped-target) without blocking
+      // the tick. (This relaxes the earlier blanket fail-closed, which was scoped
+      // to the removed PR-inference model and wrongly made the fleet timer inert.)
+      if (Object.keys(stateMap).length === 0 && !_warnedNoStateMap) {
+        _warnedNoStateMap = true;
+        log.info(
+          { configPath },
+          "linear-reconcile: no config stateMap — reconciling 'done' via contract-universal fallback + per-team registry writes"
+        );
       }
       const terminalStates = [
         ...new Set(

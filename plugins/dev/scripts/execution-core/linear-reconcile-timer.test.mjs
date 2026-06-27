@@ -101,6 +101,45 @@ test("a 'done' declaration with unreadable state is unconfirmed (no write), not 
   expect(res.summary.unconfirmed).toBe(1);
 });
 
+test("fleet/multi-team: a 'done' declaration reconciles with NO config stateMap (literal fallback + per-team write)", async () => {
+  // The multi-team fleet daemon has no single catalyst.linear.stateMap (resolved
+  // per-team via the registry). 'done' → "Done" is contract-universal, so it must
+  // still drain — the write resolves the per-team Done stateId.
+  const h = harness({
+    pending: [{ ticket: "ADV-1", state: "done" }],
+    states: { "ADV-1": "PR" },
+    mode: "write",
+  });
+  h.args.stateMap = {}; // empty (fleet daemon config)
+  h.args.terminalStates = ["Done", "Canceled", "Duplicate"]; // literals
+  const res = await runReconcileDrain(h.args);
+  expect(h.writes).toEqual([{ ticket: "ADV-1", kind: "done" }]);
+  expect(res.summary.corrected).toBe(1);
+});
+
+test("startLinearReconcileTimer: an empty-stateMap config tick still drains (no longer fails closed)", async () => {
+  const clock = fakeClock();
+  const writes = [];
+  startLinearReconcileTimer({
+    mode: "write",
+    orchDir: "/tmp/x",
+    configPath: "/ignored",
+    clock,
+    readFullConfig: () => ({ catalyst: { linear: {} } }), // no stateMap (fleet daemon)
+    listPending: () => [{ ticket: "CTL-9", state: "done" }],
+    readState: async () => "PR",
+    applyCorrection: async ({ ticket, kind }) => {
+      writes.push({ ticket, kind });
+      return { applied: true, action: "transitioned", from_state: "PR", to_state: "Done" };
+    },
+    markReconciledFn: () => {},
+    emit: () => {},
+    persist: () => {},
+  });
+  await clock.tick();
+  expect(writes).toEqual([{ ticket: "CTL-9", kind: "done" }]);
+});
+
 // ── guardedTerminalDone: confirm authoritative state before guard-exempt write ─
 
 test("guardedTerminalDone refuses a Done write when the authoritative read is terminal (stale-cache safety)", () => {
