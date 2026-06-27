@@ -64,6 +64,7 @@ import { appendFileSync, mkdirSync, readFileSync, renameSync, writeFileSync } fr
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { getEventLogPath } from "./config.mjs";
+import { nodeClass } from "./lib/node-class.mjs";
 
 // phase-agent-dispatch + phase-agent-emit-complete sit one directory up.
 const PHASE_AGENT_DISPATCH_BIN = fileURLToPath(
@@ -480,6 +481,7 @@ function defaultAppendEventLog({ phase, ticket, status, reason }) {
       resource: {
         "service.name": "catalyst.execution-core",
         "service.namespace": "catalyst",
+        "catalyst.node.class": nodeClass(),
       },
       attributes: {
         "event.name": `phase.${phase}.${status}.${ticket}`,

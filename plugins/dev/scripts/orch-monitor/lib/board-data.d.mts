@@ -444,12 +444,15 @@ export function derivePhaseWithRemediate(
   remediateSig: unknown | null | undefined
 ): BoardCurrentPhase;
 /** Build a thin Todo-column BoardTicket from an eligible queue entry (CTL-767).
- *  CTL-1152: optional teamRepoMap (from buildTeamRepoMap) for explicit repo resolution. */
+ *  CTL-1152: optional teamRepoMap (from buildTeamRepoMap) for explicit repo resolution.
+ *  CTL-1372: optional replicaTitles ({id→title} from the CTC replica) — preferred
+ *  over the eligible projection's title, consistent with worker-dir cards. */
 export function synthesizeQueuedTicket(
   eligible: unknown,
   linfo: Record<string, unknown>,
   relationBlockerMap?: Map<string, unknown>,
   teamRepoMap?: Record<string, string>,
+  replicaTitles?: Record<string, string>,
 ): BoardTicket;
 /** CTL-1152: PURE prefix→short-repo-name map from catalyst.monitor.linear.teams[].
  *  Maps each {key,vcsRepo} to UPPERCASE-key → lowercased basename; skips entries
@@ -465,24 +468,28 @@ export function repoForWith(map: Record<string, string>, ticket: string): string
 /** CTL-1152: a ticket's team prefix, verbatim (e.g. "CTL-1152" → "CTL"). */
 export function teamFor(ticket: string): string;
 /** CTL-1041: resolve a ticket's display TITLE (the outcome line — leads on every
- *  surface). Priority: explicit triage.title → the authoritative Linear title
- *  (linfo, then the eligible projection) → triage.summary (last-ditch) → the
- *  ticket key. NEVER lets the triage summary (a description) stand in for a real
- *  Linear title. */
+ *  surface). Priority: explicit triage.title → CTL-1372 the CTC replica title
+ *  (catalyst-replica.db — the complete Linear title that fixes parked tickets) →
+ *  the existing durable caches (linfo, then the eligible projection) →
+ *  triage.summary (last-ditch) → the ticket key. NEVER lets the triage summary (a
+ *  description) stand in for a real Linear title. */
 export function ticketTitle(
   ticket: string,
   triage: { title?: string | null; summary?: string | null } | null | undefined,
   eligibleIndex: Record<string, { title?: string | null } | undefined>,
-  linfo?: Record<string, { title?: string | null } | undefined>
+  linfo?: Record<string, { title?: string | null } | undefined>,
+  replicaTitles?: Record<string, string | null | undefined>
 ): string;
-/** CTL-1046: board IDs whose title is null in BOTH sources ticketTitle() consults
- *  (durable linfo cache + eligible projection) — i.e. cross-team (ADV) records that
- *  reach the payload via ticket_state (no title column) with no eligible entry.
- *  De-duped, order preserved. */
+/** CTL-1046: board IDs whose title is null in EVERY source ticketTitle() consults
+ *  (durable linfo cache + eligible projection + CTL-1372 the CTC replica) — i.e.
+ *  cross-team (ADV) records that reach the payload via ticket_state (no title
+ *  column) with no eligible entry and no replica hit. A replica HIT skips the
+ *  on-demand fetch. De-duped, order preserved. */
 export function collectNullTitleIds(
   boardIds: string[],
   linfo?: Record<string, { title?: string | null } | undefined>,
-  eligibleIndex?: Record<string, { title?: string | null } | undefined>
+  eligibleIndex?: Record<string, { title?: string | null } | undefined>,
+  replicaTitles?: Record<string, string | null | undefined>
 ): string[];
 /** CTL-1046: merge fetched Linear titles into linfo in-place (creates a linfo entry
  *  for eligible-only tickets). A null fetched title is left untouched (honest null).

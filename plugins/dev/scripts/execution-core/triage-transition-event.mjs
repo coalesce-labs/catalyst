@@ -8,7 +8,7 @@ import { randomBytes } from "node:crypto";
 import { appendFileSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { getEventLogPath, log } from "./config.mjs";
-import { hostName, hostId } from "./lib/host-identity.mjs";
+import { buildCatalystResource } from "./lib/catalyst-resource.mjs";
 import { UNKNOWN_TICKET_TYPE } from "./ticket-type.mjs"; // CTL-1023: work-type dimension
 
 // defaultAppend — writes a JSONL line to the canonical event log.
@@ -43,12 +43,7 @@ export function buildTriageTransitionEvent({
       severityNumber: 9,
       traceId: randomBytes(16).toString("hex"),
       spanId: randomBytes(8).toString("hex"),
-      resource: {
-        "service.name": "catalyst.execution-core",
-        "service.namespace": "catalyst",
-        "host.name": hostName(),
-        "host.id": hostId(),
-      },
+      resource: buildCatalystResource({ serviceName: "catalyst.execution-core" }),
       attributes: {
         "event.name": `phase.triage.linear-transition.${ticket}`,
         "event.entity": "phase",

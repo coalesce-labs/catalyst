@@ -658,7 +658,8 @@ payload directly rather than making round-trip REST/GraphQL calls.
   "severityNumber": 9,
   "resource": {
     "service.name": "catalyst.broker",
-    "service.namespace": "catalyst"
+    "service.namespace": "catalyst",
+    "catalyst.node.class": "worker"
   },
   "attributes": {
     "event.name": "filter.wake.<interest_id>",

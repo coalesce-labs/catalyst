@@ -156,6 +156,13 @@ LINE="$(build_canonical_line \
 EVENT_NAME="$(echo "$LINE" | jq -r '.attributes."event.name"')"
 expect_eq "build_canonical_line event.name" "session.phase" "$EVENT_NAME"
 
+# CTL-1368: every canonical line carries the node-class core dimension (a valid role)
+NODE_CLASS_OUT="$(echo "$LINE" | jq -r '.resource."catalyst.node.class"')"
+case "$NODE_CLASS_OUT" in
+  developer|worker|monitor) ok "build_canonical_line catalyst.node.class present ($NODE_CLASS_OUT)" ;;
+  *) fail "build_canonical_line catalyst.node.class" "got '$NODE_CLASS_OUT' (expected developer|worker|monitor)" ;;
+esac
+
 # build_canonical_line emits top-level id (CTL-344)
 ID_OUT="$(echo "$LINE" | jq -r '.id')"
 if [[ -n "$ID_OUT" && "$ID_OUT" != "null" && ${#ID_OUT} -ge 16 ]]; then

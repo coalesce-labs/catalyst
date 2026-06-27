@@ -39,6 +39,22 @@ const TERMINAL_SELECT = `SELECT state, completed_at, canceled_at FROM issues WHE
 // not in the hot per-signal path.
 const FRESHNESS_SELECT = `SELECT MAX(updated_at) AS maxUpdated, COUNT(*) AS n FROM issues`;
 
+// CTL-1372: the BATCHED title reader the orch-monitor board sources display
+// titles from. filter-state.db ticket_state has NO title column, and a PARKED
+// ticket (worker dir torn down, no eligible row) has no other durable title
+// source — so its board card otherwise renders as the bare id. The replica's
+// `issues.title` is the complete Linear title for every mirrored ticket, so one
+// index-backed IN-query resolves the whole board at once. Chunked under SQLite's
+// bound-parameter ceiling; removed_at IS NULL drops tombstones (a removed ticket
+// is a MISS → the caller falls through to its existing chain, never a stale
+// title). Built to the SAME fail-open contract as lookup()/freshness().
+const TITLES_CHUNK = 400; // stay well under SQLite's bound-parameter ceiling (999)
+function titlesSelect(n) {
+  return `SELECT identifier, title FROM issues WHERE identifier IN (${Array(n)
+    .fill("?")
+    .join(",")}) AND removed_at IS NULL`;
+}
+
 // coerce a replica `updated_at` cell to epoch-ms. Accepts an epoch-ms integer
 // (the cloud change-feed shape) OR an ISO-8601 string (Date.parse fallback).
 // Anything that resolves to neither (null, NaN, garbage) → undefined → the
@@ -112,5 +128,43 @@ export function createReplicaReader({ dbPath = getReplicaDbPath() } = {}) {
     }
   };
 
-  return { lookup, freshness, close: dropHandle };
+  // titles(identifiers) → { [identifier]: title }  (CTL-1372)
+  //   HIT (non-removed row with a non-empty title) → entry in the map.
+  //   absent / removed / null-or-empty title → OMITTED (the caller falls through
+  //     to its existing title chain — never a fabricated title).
+  //   empty input / no db / any throw → {}  (fail-open, mirroring lookup()).
+  // Batched + chunked under SQLite's bound-parameter ceiling so a whole board
+  // resolves in one (or a few) index-backed reads rather than N per-ticket calls.
+  const titles = (identifiers) => {
+    if (!Array.isArray(identifiers) || identifiers.length === 0) return {};
+    const wanted = [
+      ...new Set(identifiers.filter((id) => typeof id === "string" && id.length > 0)),
+    ];
+    if (wanted.length === 0) return {};
+    const out = {};
+    try {
+      const handle = open();
+      for (let i = 0; i < wanted.length; i += TITLES_CHUNK) {
+        const slice = wanted.slice(i, i + TITLES_CHUNK);
+        const rows = handle.prepare(titlesSelect(slice.length)).all(...slice);
+        for (const row of rows) {
+          if (
+            row &&
+            typeof row.identifier === "string" &&
+            typeof row.title === "string" &&
+            row.title.length > 0
+          ) {
+            out[row.identifier] = row.title;
+          }
+        }
+      }
+      return out;
+    } catch {
+      // Drop the handle so a later call re-opens fresh (DB may be re-seeded).
+      dropHandle();
+      return {};
+    }
+  };
+
+  return { lookup, freshness, titles, close: dropHandle };
 }

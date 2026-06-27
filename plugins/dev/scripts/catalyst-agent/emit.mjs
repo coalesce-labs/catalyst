@@ -25,6 +25,7 @@ import { dirname } from "node:path";
 import { randomBytes } from "node:crypto";
 import { hostname } from "node:os";
 import { hostName, hostId } from "../execution-core/lib/host-identity.mjs";
+import { nodeClass } from "../execution-core/lib/node-class.mjs";
 import { serviceVersion } from "./build-info.mjs";
 
 // shortHostname — os.hostname() with the macOS-appended ".local" suffix
@@ -85,6 +86,7 @@ export function buildAgentEnvelope(name, { entity, label, attrs = {}, payload = 
       hostname: shortHostname(),
       "host.name": hostName(),
       "host.id": hostId(),
+      "catalyst.node.class": nodeClass(),
     },
     body: { payload },
     attributes,
@@ -302,6 +304,7 @@ export function metricResource() {
     hostname: shortHostname(),
     "host.name": hostName(),
     "host.id": hostId(),
+    "catalyst.node.class": nodeClass(),
   };
   // CTL-1235: stamp the running semver (OTel semconv `service.version`) on the
   // shared metric resource so EVERY agent metric can be grouped/filtered by the

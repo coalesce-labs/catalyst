@@ -21,6 +21,8 @@
 #   catalyst-stack install-services [--interval <sec>] [--sync-interval <sec>] [--print]
 #   catalyst-stack uninstall-services
 #   catalyst-stack services-status
+#   catalyst-stack adopt-updater [--print] [--force-worker]
+#   catalyst-stack verify-updater [--json] [--no-e2e]
 #   catalyst-stack sync-cloud-env
 #
 # sync-cloud-env (CTL-1307):
@@ -77,6 +79,19 @@
 #   pluginDirs configured, paths exist and are git checkouts, plugin manifest
 #   parses, working tree clean, remote daemon-fetchable (no ssh), checkout at
 #   origin/main. Exit code = number of drift findings (0 = clean).
+#
+# verify-updater (CTL-1349):
+#   Read-only tiered smoke test that an updater adoption (adopt-updater) actually
+#   took — the objective pass/fail for the supervised GATE-3 cutover. Tier 1
+#   (local, required): the catalyst-updater launchd agent is loaded with a live
+#   pid, pluginPullOwner=updater in the Layer-2 config, the pluginDirs checkout is
+#   at origin/main (a read-only `git fetch`, the load-bearing "verified pulling"
+#   proof), and updater.log + the event log show a fresh heartbeat and a clean
+#   refresh. Tier 2 (end-to-end, optional; --no-e2e to skip, SKIPs when the OTEL
+#   stack is unreachable): the catalyst.updater stream reached Loki. --json emits a
+#   machine-readable summary. Exits non-zero if any required Tier-1 check fails.
+#   NEVER installs or mutates anything. On a non-adopted node it cleanly reports
+#   "not adopted" and exits non-zero, touching nothing.
 #
 # --yes:
 #   Non-interactive — auto-approve brew install of mitmproxy under --proxy.
@@ -1456,9 +1471,548 @@ cmd_services_status() {
       echo "  updater launchd        not loaded"
     fi
   fi
+  # CTL-1349: objective adoption smoke test for the updater (read-only).
+  echo "  verify           catalyst-stack verify-updater   (tiered adoption smoke test)"
+}
+
+# ─── verify-updater (CTL-1349) ───────────────────────────────────────────────
+# Read-only tiered adoption smoke test. The verdict logic is factored into PURE
+# helper fns (_vu_v_*, "verdict") that take the already-extracted data as args and
+# echo "STATUS|detail" (STATUS ∈ PASS|FAIL|SKIP), plus side-effecting EXTRACTORS
+# (_vu_x_*) that parse a given log/event-log path with jq. Both layers are exercised
+# by __tests__/verify-updater.test.sh with injected fixtures — no real adoption.
+
+# --- verdict helpers (pure: data in args, "STATUS|detail" out) ----------------
+
+# _vu_timeout <secs> <cmd...> — run a command under a bounded timeout when one is
+# available (GNU coreutils `timeout`, or `gtimeout` on macOS), else run it unbounded.
+# Portable so a hung `git fetch` (auth prompt / dead remote) can't wedge the verifier.
+# _vu_timeout <secs> <cmd...> — bound a command. Prefers coreutils timeout/gtimeout; on a
+# default macOS box with neither (Codex P2), falls back to a portable watchdog (background +
+# kill) so a stuck `git fetch` can NEVER hang the verifier — it returns non-zero on kill,
+# which the checkout-fresh check correctly treats as "freshness UNVERIFIED".
+_vu_timeout() {
+  local t="$1"; shift
+  if command -v timeout >/dev/null 2>&1; then timeout "$t" "$@"; return; fi
+  if command -v gtimeout >/dev/null 2>&1; then gtimeout "$t" "$@"; return; fi
+  "$@" & local p=$!
+  ( sleep "$t"; kill -TERM "$p" 2>/dev/null; sleep 1; kill -KILL "$p" 2>/dev/null ) & local w=$!
+  local rc=0; wait "$p" 2>/dev/null || rc=$?
+  kill "$w" 2>/dev/null; wait "$w" 2>/dev/null || true
+  return "$rc"
+}
+
+# _vu_v_agent <plist_present:yes|no> <pid> — Check 1: launchd agent loaded + live.
+_vu_v_agent() {
+  local present="$1" pid="$2"
+  if [[ "$present" != "yes" ]]; then
+    printf 'FAIL|updater not adopted — no LaunchAgent plist (%s)\n' "$UPDATER_AGENT_PLIST"
+    return 0
+  fi
+  if [[ -n "$pid" && "$pid" != "-" && "$pid" != "0" ]]; then
+    printf 'PASS|LaunchAgent loaded, live pid %s\n' "$pid"
+  else
+    printf 'FAIL|plist present but no live PID (pid='\''%s'\'') — crash-loop? check %s\n' "$pid" "$UPDATER_LOG"
+  fi
+}
+
+# _vu_v_owner <config_owner> — Check 2: pluginPullOwner flipped to updater in Layer-2.
+# Reads ONLY the persisted Layer-2 value: CATALYST_PLUGIN_PULL_OWNER matters in the
+# BROKER's runtime env, not this verify shell, so reading it here gives false confidence
+# (V5) — the broker would still consult its OWN env regardless of what the verifier sees.
+_vu_v_owner() {
+  local cfg_owner="$1"
+  if [[ "$cfg_owner" != "updater" ]]; then
+    printf 'FAIL|pluginPullOwner=%s in Layer-2 config (expected updater) — broker still owns the pull / adoption incomplete\n' "${cfg_owner:-<unset>}"
+    return 0
+  fi
+  printf 'PASS|pluginPullOwner=updater in Layer-2 (broker defers)\n'
+}
+
+# _vu_v_head <root> <head_sha> <origin_sha> — Check 3: the verified-pulling proof.
+_vu_v_head() {
+  local root="$1" head="$2" origin="$3"
+  if [[ -z "$head" || -z "$origin" ]]; then
+    printf 'FAIL|%s: could not resolve HEAD/origin/main (fetch failed? offline?)\n' "$root"
+    return 0
+  fi
+  if [[ "$head" == "$origin" ]]; then
+    printf 'PASS|%s at origin/main (%s)\n' "$root" "${head:0:8}"
+  else
+    printf 'FAIL|%s NOT fresh — HEAD=%s origin/main=%s (updater is not pulling it)\n' "$root" "${head:0:8}" "${origin:0:8}"
+  fi
+}
+
+# _vu_v_hb_fresh <now_s> <last_ms> <last_pid> <agent_pid> <window_s> — Check 4: the
+# updater.log heartbeat is fresh AND belongs to the CURRENT launchd instance. launch.sh
+# `exec bun`s, so the daemon's pino .pid equals the launchctl pid; a heartbeat carrying a
+# different pid is from a prior instance (the daemon restarted / a zombie is still logging),
+# so a fresh-but-stale-pid marker must not pass (V3).
+_vu_v_hb_fresh() {
+  local now_s="$1" last_ms="$2" last_pid="$3" agent_pid="$4" window="$5"
+  if [[ -z "$last_ms" || ! "$last_ms" =~ ^[0-9]+$ ]]; then
+    printf 'FAIL|no "daemon heartbeat" (component=updater) marker in %s\n' "$UPDATER_LOG"
+    return 0
+  fi
+  if [[ "$last_pid" != "$agent_pid" ]]; then
+    printf 'FAIL|heartbeat is from a prior instance (pid %s != current %s) — daemon restarted/hung\n' "${last_pid:-<none>}" "${agent_pid:-<none>}"
+    return 0
+  fi
+  local age=$(( now_s - last_ms / 1000 ))
+  if (( age < window )); then
+    printf 'PASS|heartbeat %ss ago (< %ss window) — daemon alive\n' "$age" "$window"
+  else
+    printf 'FAIL|stale heartbeat %ss ago (>= %ss window) — daemon hung/dead\n' "$age" "$window"
+  fi
+}
+
+# _vu_v_refresh <now_s> <time_ms> <roots> <failed> <window_s> — Check 5: updater.log shows a
+# RECENT clean refresh. Recency-bounding (V4, which also closes V1) means a stale-good boot
+# refresh whose checkout the broker keeps fresh can no longer carry a false PASS — a stopped
+# updater fails here even when HEAD==origin, so freshness alone can't mask a dead daemon.
+_vu_v_refresh() {
+  local now_s="$1" time_ms="$2" roots="$3" failed="$4" window="$5"
+  if [[ -z "$time_ms" && -z "$roots" ]]; then
+    printf 'FAIL|no "updater: refresh" line in %s yet\n' "$UPDATER_LOG"
+    return 0
+  fi
+  if [[ ! "$time_ms" =~ ^[0-9]+$ ]]; then
+    printf 'FAIL|latest refresh has no parseable timestamp (%s) — cannot bound its recency\n' "${time_ms:-<none>}"
+    return 0
+  fi
+  local age=$(( now_s - time_ms / 1000 ))
+  if (( age >= window )); then
+    printf 'FAIL|latest refresh is stale (%ss ago >= %ss) — the updater stopped pulling\n' "$age" "$window"
+    return 0
+  fi
+  # roots must be a POSITIVE integer — a numeric 0 (no pluginDirs) OR a non-numeric
+  # null/garbage (schema-skewed line) both mean "no usable refresh" (Codex P2).
+  if [[ ! "$roots" =~ ^[0-9]+$ || "$roots" -le 0 ]]; then
+    printf 'FAIL|latest refresh resolved no usable roots (roots=%s) — no pluginDirs / malformed refresh line\n' "${roots:-<none>}"
+    return 0
+  fi
+  if [[ "$failed" =~ ^[0-9]+$ && "$failed" -eq 0 ]]; then
+    printf 'PASS|latest refresh %ss ago: roots=%s failed=0\n' "$age" "$roots"
+  else
+    printf 'FAIL|latest refresh had failed=%s root(s) — git fetch/reset failing (network/auth?)\n' "${failed:-?}"
+  fi
+}
+
+# _vu_v_event_hb <now_s> <epoch_ms> <node_class> <window_s> — Check 6: a recent
+# node.updater.heartbeat event, class-stamped (CTL-1368).
+_vu_v_event_hb() {
+  local now_s="$1" epoch_ms="$2" cls="$3" window="$4"
+  if [[ -z "$epoch_ms" || "$epoch_ms" == "null" ]]; then
+    printf 'FAIL|no node.updater.heartbeat event (service.name=catalyst.updater) in the event log\n'
+    return 0
+  fi
+  if [[ -z "$cls" || "$cls" == "null" ]]; then
+    printf 'FAIL|node.updater.heartbeat present but catalyst.node.class unresolved (CTL-1368)\n'
+    return 0
+  fi
+  if [[ ! "$epoch_ms" =~ ^[0-9]+$ ]]; then
+    printf 'FAIL|node.updater.heartbeat epoch unparseable (%s)\n' "$epoch_ms"
+    return 0
+  fi
+  local age=$(( now_s - epoch_ms / 1000 ))
+  if (( age < window )); then
+    printf 'PASS|node.updater.heartbeat %ss ago, class=%s\n' "$age" "$cls"
+  else
+    printf 'FAIL|node.updater.heartbeat stale %ss ago (>= %ss window)\n' "$age" "$window"
+  fi
+}
+
+# _vu_v_checkout <updater_evt> <updater_cls> <broker_drift> — Check 7 (NOT required):
+# plugin.checkout.* attribution. A broker-emitted drift is a hard fail (SLA miss); an
+# updater-attributed event is a pass (must carry the class); absence is neutral (the
+# event is on-change only, so a steady-state fresh checkout emits nothing here).
+_vu_v_checkout() {
+  local up_evt="$1" up_cls="$2" drift="$3"
+  if [[ -n "$drift" ]]; then
+    printf 'FAIL|broker emitted %s (service.name=catalyst.broker) — updater missed its pull SLA\n' "$drift"
+    return 0
+  fi
+  if [[ -n "$up_evt" ]]; then
+    if [[ -n "$up_cls" && "$up_cls" != "null" ]]; then
+      printf 'PASS|updater %s (class=%s)\n' "$up_evt" "$up_cls"
+    else
+      printf 'FAIL|updater %s missing catalyst.node.class (CTL-1368)\n' "$up_evt"
+    fi
+    return 0
+  fi
+  printf 'SKIP|no plugin.checkout.* events — event-on-change only; steady-state fresh is neutral\n'
+}
+
+# --- extractors (side-effecting: read a given path with jq) --------------------
+
+# _vu_event_log_path — this month's unified event log (UTC month, matches the writer).
+_vu_event_log_path() { printf '%s\n' "${CATALYST_DIR:-$HOME/catalyst}/events/$(date -u +%Y-%m).jsonl"; }
+
+# _vu_read_pull_owner <cfg> — pluginPullOwner from a Layer-2 config (empty if unset).
+_vu_read_pull_owner() {
+  local cfg="$1"
+  [[ -f "$cfg" ]] || return 0
+  command -v jq >/dev/null 2>&1 || return 0
+  jq -r '.catalyst.orchestration.pluginPullOwner // empty' "$cfg" 2>/dev/null || true
+}
+
+# _vu_agent_pid — the launchd pid for the updater agent (the EXACT awk adopt confirms with).
+_vu_agent_pid() {
+  command -v launchctl >/dev/null 2>&1 || return 0
+  launchctl list 2>/dev/null | awk -v l="$UPDATER_AGENT_LABEL" '$3==l {print $1}'
+}
+
+# _vu_x_last_heartbeat_ms <log> — "<time_ms>\t<pid>" of the latest updater heartbeat (pino
+# .time epoch ms + .pid). The pid ties the marker to the current launchd instance so Check 4
+# can reject a fresh heartbeat that a prior/zombie instance wrote.
+_vu_x_last_heartbeat_ms() {
+  local log="$1"
+  [[ -f "$log" ]] || return 0
+  command -v jq >/dev/null 2>&1 || return 0
+  tail -n 5000 "$log" 2>/dev/null \
+    | jq -Rr 'fromjson? // empty | select(.msg=="daemon heartbeat" and .component=="updater") | "\(.time)\t\(.pid)"' 2>/dev/null \
+    | tail -1
+}
+
+# _vu_x_last_refresh <log> — "<time_ms>\t<roots>\t<failed>" of the latest "updater: refresh"
+# line (pino .time epoch ms recency-bounds it, so a stale-good boot refresh fails Check 5).
+_vu_x_last_refresh() {
+  local log="$1"
+  [[ -f "$log" ]] || return 0
+  command -v jq >/dev/null 2>&1 || return 0
+  tail -n 5000 "$log" 2>/dev/null \
+    | jq -Rr 'fromjson? // empty | select(.msg=="updater: refresh (CTL-1350)") | "\(.time)\t\(.roots)\t\(.failed)"' 2>/dev/null \
+    | tail -1
+}
+
+# _vu_x_event_heartbeat <evlog> — "epoch_ms\tclass" of the latest node.updater.heartbeat.
+_vu_x_event_heartbeat() {
+  local f="$1"
+  [[ -f "$f" ]] || return 0
+  command -v jq >/dev/null 2>&1 || return 0
+  jq -Rr 'fromjson? // empty
+    | select(.attributes["event.name"]=="node.updater.heartbeat"
+             and .resource["service.name"]=="catalyst.updater")
+    | "\(.body.payload.epoch // "")\t\(.resource["catalyst.node.class"] // "")"' "$f" 2>/dev/null \
+    | tail -1
+}
+
+# _vu_x_checkout_updater <evlog> — "event.name\tclass" of the latest updater-attributed
+# plugin.checkout.* event (empty when none).
+_vu_x_checkout_updater() {
+  local f="$1"
+  [[ -f "$f" ]] || return 0
+  command -v jq >/dev/null 2>&1 || return 0
+  jq -Rr 'fromjson? // empty
+    | select(.resource["service.name"]=="catalyst.updater"
+             and (.attributes["event.name"]|type=="string")
+             and (.attributes["event.name"]|startswith("plugin.checkout.")))
+    | "\(.attributes["event.name"])\t\(.resource["catalyst.node.class"] // "")"' "$f" 2>/dev/null \
+    | tail -1
+}
+
+# _vu_x_checkout_broker_drift <evlog> — the latest broker-emitted plugin.checkout.drift
+# event name (empty when none) — the updater-missed-SLA signal.
+_vu_x_checkout_broker_drift() {
+  local f="$1"
+  [[ -f "$f" ]] || return 0
+  command -v jq >/dev/null 2>&1 || return 0
+  jq -Rr 'fromjson? // empty
+    | select(.resource["service.name"]=="catalyst.broker"
+             and .attributes["event.name"]=="plugin.checkout.drift")
+    | .attributes["event.name"]' "$f" 2>/dev/null \
+    | tail -1
+}
+
+# --- check runner -------------------------------------------------------------
+VU_JSON="no"
+VU_NAMES=(); VU_TIERS=(); VU_REQUIRED=(); VU_STATUSES=(); VU_DETAILS=()
+VU_FAIL_REQUIRED=0
+
+# _vu_record <name> <tier> <required:true|false> <status> <detail> — collect + (in
+# text mode) print one result line, mirroring cmd_services_status's two-column style.
+_vu_record() {
+  local name="$1" tier="$2" required="$3" status="$4" detail="$5"
+  VU_NAMES+=("$name"); VU_TIERS+=("$tier"); VU_REQUIRED+=("$required")
+  VU_STATUSES+=("$status"); VU_DETAILS+=("$detail")
+  if [[ "$status" == "FAIL" && "$required" == "true" ]]; then
+    VU_FAIL_REQUIRED=$((VU_FAIL_REQUIRED + 1))
+  fi
+  if [[ "$VU_JSON" != "yes" ]]; then
+    printf '    [%-4s] %-28s %s\n' "$status" "$name" "$detail"
+  fi
+}
+
+# _vu_emit <name> <tier> <required> <verdict:"STATUS|detail"> — split a verdict + record.
+_vu_emit() {
+  local name="$1" tier="$2" required="$3" v="$4"
+  _vu_record "$name" "$tier" "$required" "${v%%|*}" "${v#*|}"
+}
+
+# _vu_check_head_origin — Check 3, per resolved pluginDirs checkout root. Read-only:
+# a `git fetch` (never reset --hard), mirroring the daemon's own fetch-then-compare.
+_vu_check_head_origin() {
+  # Anchor the pluginDirs repo-config walk at SCRIPT_DIR (this checkout), NOT the operator's
+  # cwd, so verify checks the SAME checkout the updater daemon pulls (Codex P2).
+  resolve_plugin_dirs "$SCRIPT_DIR"
+  if [[ -z "$RESOLVED_PLUGIN_DIRS" ]]; then
+    _vu_record "checkout-fresh" T1 true FAIL \
+      "no pluginDirs configured (source: ${RESOLVED_PLUGIN_DIRS_SOURCE}) — updater is a no-op, nothing to verify"
+    return 0
+  fi
+  local seen=" " pd root head origin
+  IFS=':' read -r -a _VU_PDS <<<"$RESOLVED_PLUGIN_DIRS"
+  for pd in "${_VU_PDS[@]}"; do
+    [[ -z "$pd" ]] && continue
+    root="$(plugin_checkout_root "$pd" 2>/dev/null || true)"
+    if [[ -z "$root" ]]; then
+      _vu_record "checkout-fresh" T1 true FAIL "pluginDirs entry not inside a git checkout: $pd"
+      continue
+    fi
+    case "$seen" in *" $root "*) continue ;; esac
+    seen="${seen}${root} "
+    # A SWALLOWED fetch failure (offline / no Tailscale / auth) would leave the LOCAL
+    # origin/main tracking ref stale, so comparing against it would falsely report
+    # "at origin/main" (V2). Capture the fetch status under a bounded timeout; on
+    # failure record FAIL and skip the compare — freshness is UNVERIFIED, not proven.
+    if ! GIT_TERMINAL_PROMPT=0 _vu_timeout 8 git -C "$root" fetch --no-tags -q origin main >/dev/null 2>&1; then
+      _vu_record "checkout-fresh[$(basename "$root")]" T1 true FAIL \
+        "$root: git fetch failed (offline / no Tailscale / auth?) — freshness UNVERIFIED"
+      continue
+    fi
+    head="$(git -C "$root" rev-parse HEAD 2>/dev/null || true)"
+    origin="$(git -C "$root" rev-parse origin/main 2>/dev/null || true)"
+    _vu_emit "checkout-fresh[$(basename "$root")]" T1 true "$(_vu_v_head "$root" "$head" "$origin")"
+  done
+}
+
+# _vu_tier2 — end-to-end: did the updater's telemetry reach the OTEL stack? SKIP (never
+# block) when curl is missing or the stack is unreachable. All Tier-2 checks are
+# non-required, so they never affect the exit code.
+_vu_tier2() {
+  local loki="${CATALYST_LOKI_URL:-http://100.65.193.30:3100}"
+  if ! command -v curl >/dev/null 2>&1; then
+    _vu_record "loki-stream" T2 false SKIP "skipped — curl not found"
+    return 0
+  fi
+  if ! curl -s -o /dev/null --max-time 3 "${loki}/ready" 2>/dev/null; then
+    _vu_record "loki-stream" T2 false SKIP "skipped — OTEL stack unreachable (${loki}) — no Tailscale?"
+    return 0
+  fi
+  local end_ns start_ns now_s
+  now_s="$(date +%s)"
+  end_ns="${now_s}000000000"
+  start_ns="$(( now_s - 900 ))000000000"
+  local body n=0
+  body="$(curl -s --max-time 6 -G "${loki}/loki/api/v1/query_range" \
+    --data-urlencode 'query={service_name="catalyst.updater"}' \
+    --data-urlencode "start=${start_ns}" \
+    --data-urlencode "end=${end_ns}" \
+    --data-urlencode 'limit=5' 2>/dev/null || true)"
+  if [[ -n "$body" ]] && command -v jq >/dev/null 2>&1; then
+    n="$(printf '%s' "$body" | jq -r '[.data.result[]?.values[]?] | length' 2>/dev/null || echo 0)"
+  fi
+  [[ "$n" =~ ^[0-9]+$ ]] || n=0
+  if [[ "$n" -gt 0 ]]; then
+    _vu_record "loki-stream" T2 false PASS "catalyst.updater Loki stream has ${n} recent line(s) (last 15m)"
+  else
+    _vu_record "loki-stream" T2 false FAIL "catalyst.updater Loki stream empty (last 15m) — logs not reaching the stack (non-gating)"
+  fi
+
+  # Optional: the heartbeat marker specifically reached the stream (body = full pino JSON,
+  # so `| json` works on this stream).
+  local hbody hn=0
+  hbody="$(curl -s --max-time 6 -G "${loki}/loki/api/v1/query_range" \
+    --data-urlencode 'query={service_name="catalyst.updater"} | json | msg=`daemon heartbeat`' \
+    --data-urlencode "start=${start_ns}" \
+    --data-urlencode "end=${end_ns}" \
+    --data-urlencode 'limit=5' 2>/dev/null || true)"
+  if [[ -n "$hbody" ]] && command -v jq >/dev/null 2>&1; then
+    hn="$(printf '%s' "$hbody" | jq -r '[.data.result[]?.values[]?] | length' 2>/dev/null || echo 0)"
+  fi
+  [[ "$hn" =~ ^[0-9]+$ ]] || hn=0
+  if [[ "$hn" -gt 0 ]]; then
+    _vu_record "loki-heartbeat" T2 false PASS "${hn} heartbeat line(s) reached Loki (last 15m)"
+  else
+    _vu_record "loki-heartbeat" T2 false SKIP "no heartbeat lines in Loki yet (optional / best-effort)"
+  fi
+}
+
+# _vu_finish <adopted:yes|no> — emit the summary (JSON or text) and return the exit code
+# (non-zero iff any required Tier-1 check failed).
+_vu_finish() {
+  local adopted="$1" ec=0
+  [[ "$VU_FAIL_REQUIRED" -gt 0 ]] && ec=1
+  if [[ "$VU_JSON" == "yes" ]]; then
+    _vu_json_summary "$adopted" "$ec"
+    return "$ec"
+  fi
+  echo ""
+  local pass=0 failc=0 skip=0 i
+  for i in "${!VU_STATUSES[@]}"; do
+    case "${VU_STATUSES[$i]}" in
+      PASS) pass=$((pass + 1)) ;;
+      FAIL) failc=$((failc + 1)) ;;
+      SKIP) skip=$((skip + 1)) ;;
+    esac
+  done
+  log "summary: ${pass} pass, ${failc} fail, ${skip} skip (of ${#VU_NAMES[@]}) — required failures: ${VU_FAIL_REQUIRED}"
+  if [[ "$ec" -eq 0 ]]; then
+    log "verdict: PASS — updater adoption verified"
+  elif [[ "$adopted" == "no" ]]; then
+    log "verdict: FAIL — updater NOT adopted on this node (no LaunchAgent); run 'catalyst-stack adopt-updater'"
+  else
+    log "verdict: FAIL — updater adopted but ${VU_FAIL_REQUIRED} required check(s) failing"
+  fi
+  return "$ec"
+}
+
+# _vu_json_summary <adopted:yes|no> <exit_code> — machine-readable summary to stdout.
+_vu_json_summary() {
+  local adopted="$1" ec="$2" i objs=()
+  # jq is optional for the extractors (they degrade to empty); --json must not crash
+  # without it — emit a minimal hand-built summary instead (Codex P2).
+  if ! command -v jq >/dev/null 2>&1; then
+    printf '{"adopted":%s,"verdict":"%s","exit_code":%s,"required_failures":%s,"jq":false,"note":"jq not installed — checks unreliable"}\n' \
+      "$([[ "$adopted" == "yes" ]] && echo true || echo false)" \
+      "$([[ "$ec" == "0" ]] && echo pass || echo fail)" "$ec" "$VU_FAIL_REQUIRED"
+    return 0
+  fi
+  for i in "${!VU_NAMES[@]}"; do
+    objs+=("$(jq -nc \
+      --arg name "${VU_NAMES[$i]}" \
+      --arg tier "${VU_TIERS[$i]}" \
+      --argjson required "${VU_REQUIRED[$i]}" \
+      --arg status "${VU_STATUSES[$i]}" \
+      --arg detail "${VU_DETAILS[$i]}" \
+      '{name:$name,tier:$tier,required:$required,status:$status,detail:$detail}')")
+  done
+  printf '%s\n' "${objs[@]}" | jq -s \
+    --argjson adopted "$([[ "$adopted" == "yes" ]] && echo true || echo false)" \
+    --argjson exit_code "$ec" \
+    --argjson required_failures "$VU_FAIL_REQUIRED" \
+    '{
+       adopted: $adopted,
+       verdict: (if $exit_code == 0 then "pass" else "fail" end),
+       exit_code: $exit_code,
+       required_failures: $required_failures,
+       counts: {
+         pass: ([.[] | select(.status == "PASS")] | length),
+         fail: ([.[] | select(.status == "FAIL")] | length),
+         skip: ([.[] | select(.status == "SKIP")] | length)
+       },
+       checks: .
+     }'
+}
+
+cmd_verify_updater() {
+  local do_e2e="yes"
+  VU_JSON="no"
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --json)   VU_JSON="yes"; shift ;;
+      --no-e2e) do_e2e="no"; shift ;;
+      -h|--help)
+        echo "usage: catalyst-stack verify-updater [--json] [--no-e2e]"
+        echo "  read-only tiered smoke test that an updater adoption took (CTL-1349)."
+        echo "  --json    machine-readable summary   --no-e2e  skip the Tier-2 OTEL-stack checks"
+        return 0
+        ;;
+      *) fail "unknown verify-updater arg: $1 (try: --json | --no-e2e)" ;;
+    esac
+  done
+
+  # Reset collectors (a fresh run; also matters when sourced + invoked in tests).
+  VU_NAMES=(); VU_TIERS=(); VU_REQUIRED=(); VU_STATUSES=(); VU_DETAILS=(); VU_FAIL_REQUIRED=0
+
+  local now_s window cfg evlog plist_present pid
+  now_s="$(date +%s)"
+  # A small multiple of HEARTBEAT_INTERVAL_MS (30s) — a dead/hung daemon must not be
+  # tolerated for 10 min; 120s = 4 intervals (V3).
+  window="${CATALYST_VERIFY_HEARTBEAT_WINDOW_S:-120}"
+  [[ "$window" =~ ^[0-9]+$ ]] || window=120
+  cfg="${CATALYST_MACHINE_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/catalyst/config.json}"
+  evlog="$(_vu_event_log_path)"
+  plist_present="no"; [[ -f "$UPDATER_AGENT_PLIST" ]] && plist_present="yes"
+  pid="$(_vu_agent_pid)"
+
+  if [[ "$VU_JSON" != "yes" ]]; then
+    log "verify-updater — tiered updater-adoption smoke test (read-only)"
+    echo "  Tier 1 — local adoption signals (required)"
+  fi
+
+  # Check 1 — launchd agent loaded with a live pid (also the not-adopted detector).
+  _vu_emit "launchagent-live" T1 true "$(_vu_v_agent "$plist_present" "$pid")"
+
+  # NOT ADOPTED short-circuit: the plist is absent, so there is nothing to verify. Skip
+  # every remaining check cleanly (touch nothing — no git fetch, no log reads), exit non-zero.
+  if [[ "$plist_present" != "yes" ]]; then
+    _vu_record "pull-owner"      T1 true  SKIP "skipped — updater not adopted"
+    _vu_record "checkout-fresh"  T1 true  SKIP "skipped — updater not adopted"
+    _vu_record "log-heartbeat"   T1 true  SKIP "skipped — updater not adopted"
+    _vu_record "log-refresh"     T1 true  SKIP "skipped — updater not adopted"
+    _vu_record "event-heartbeat" T1 true  SKIP "skipped — updater not adopted"
+    _vu_record "event-checkout"  T1 false SKIP "skipped — updater not adopted"
+    if [[ "$VU_JSON" != "yes" ]]; then echo "  Tier 2 — telemetry reached the OTEL stack (optional)"; fi
+    _vu_record "loki-stream"     T2 false SKIP "skipped — updater not adopted"
+    _vu_finish "no"
+    return $?
+  fi
+
+  # Check 2 — pluginPullOwner flipped to "updater" (Layer-2), broker now defers. Only the
+  # persisted value is load-bearing; the verify shell's CATALYST_PLUGIN_PULL_OWNER is
+  # irrelevant (it governs the broker's runtime, not this process) — V5.
+  _vu_emit "pull-owner" T1 true "$(_vu_v_owner "$(_vu_read_pull_owner "$cfg")")"
+
+  # Check 3 — the load-bearing freshness proof: every checkout HEAD == origin/main.
+  _vu_check_head_origin
+
+  # Check 4 — updater.log heartbeat fresh AND from the current launchd pid (daemon alive,
+  # not a restarted/zombie prior instance — V3).
+  local _vu_hb _vu_hb_ms _vu_hb_pid
+  _vu_hb="$(_vu_x_last_heartbeat_ms "$UPDATER_LOG")"
+  IFS=$'\t' read -r _vu_hb_ms _vu_hb_pid <<<"$_vu_hb"
+  _vu_emit "log-heartbeat" T1 true \
+    "$(_vu_v_hb_fresh "$now_s" "$_vu_hb_ms" "$_vu_hb_pid" "$pid" "$window")"
+
+  # Check 5 — updater.log shows a RECENT refresh with failed==0 (freshness path proven in
+  # logs, recency-bounded so a stopped updater fails even when HEAD==origin — V4/V1).
+  local _vu_rr _vu_rtime _vu_roots _vu_failed
+  _vu_rr="$(_vu_x_last_refresh "$UPDATER_LOG")"
+  IFS=$'\t' read -r _vu_rtime _vu_roots _vu_failed <<<"$_vu_rr"
+  _vu_emit "log-refresh" T1 true "$(_vu_v_refresh "$now_s" "$_vu_rtime" "$_vu_roots" "$_vu_failed" "$window")"
+
+  # Check 6 — event log carries a recent, class-stamped node.updater.heartbeat (CTL-1368).
+  local _vu_eh _vu_epoch _vu_class
+  _vu_eh="$(_vu_x_event_heartbeat "$evlog")"
+  IFS=$'\t' read -r _vu_epoch _vu_class <<<"$_vu_eh"
+  _vu_emit "event-heartbeat" T1 true "$(_vu_v_event_hb "$now_s" "$_vu_epoch" "$_vu_class" "$window")"
+
+  # Check 7 (not required) — plugin.checkout.* attribution: updater event = good,
+  # broker drift = SLA miss, absence = neutral.
+  local _vu_cu _vu_cu_evt _vu_cu_cls _vu_drift
+  _vu_cu="$(_vu_x_checkout_updater "$evlog")"
+  IFS=$'\t' read -r _vu_cu_evt _vu_cu_cls <<<"$_vu_cu"
+  _vu_drift="$(_vu_x_checkout_broker_drift "$evlog")"
+  _vu_emit "event-checkout" T1 false "$(_vu_v_checkout "$_vu_cu_evt" "$_vu_cu_cls" "$_vu_drift")"
+
+  # Tier 2 — optional end-to-end (telemetry reached the OTEL stack).
+  if [[ "$VU_JSON" != "yes" ]]; then echo "  Tier 2 — telemetry reached the OTEL stack (optional)"; fi
+  if [[ "$do_e2e" != "yes" ]]; then
+    _vu_record "loki-stream" T2 false SKIP "skipped (--no-e2e)"
+  else
+    _vu_tier2
+  fi
+
+  _vu_finish "yes"
+  return $?
 }
 
 # ─── Dispatch ───────────────────────────────────────────────────────────────
+# Guard so the file can be sourced (e.g. by __tests__/verify-updater.test.sh) to
+# reach the pure helpers WITHOUT running a command. When executed directly,
+# BASH_SOURCE[0] == $0 and the dispatch runs as normal.
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
 case "${1:-}" in
   start)    shift; cmd_start "$@" ;;
   stop)     cmd_stop ;;
@@ -1468,11 +2022,13 @@ case "${1:-}" in
   install-services)   shift; cmd_install_services "$@" ;;
   uninstall-services) shift; cmd_uninstall_services ;;
   adopt-updater)      shift; cmd_adopt_updater "$@" ;;
+  verify-updater)     shift; cmd_verify_updater "$@" ;;
   services-status)    shift; cmd_services_status ;;
   sync-cloud-env)     shift; cmd_sync_cloud_env "$@" ;;
   status|"") cmd_status ;;
   -h|--help)
     sed -n '2,/^$/p' "$0" | sed 's/^# \{0,1\}//'
     ;;
-  *) fail "unknown command: $1 (try: start | stop | restart | status | hotpatch | parity | install-services | uninstall-services | adopt-updater | services-status)" ;;
+  *) fail "unknown command: $1 (try: start | stop | restart | status | hotpatch | parity | install-services | uninstall-services | adopt-updater | verify-updater | services-status)" ;;
 esac
+fi
