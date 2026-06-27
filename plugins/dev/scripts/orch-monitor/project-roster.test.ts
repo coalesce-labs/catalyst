@@ -363,3 +363,149 @@ describe("loadProjects (CTL-1153) — overlay integration", () => {
     }
   });
 });
+
+// ─── cwd-independent default config-path resolution ───────────────────────────
+//
+// Regression coverage for the live bug: GET /api/projects returned only the 2
+// observed-work repos (source:"unconfigured") even though 5 teams were
+// configured. Root cause: loadProjects() defaulted the Layer-1 config path to
+// `${process.cwd()}/.catalyst/config.json`, but the daemon-spawned monitor's cwd
+// (.../plugins/dev/scripts/execution-core) has no such file → readTeams() failed
+// open to [] → zero configured teams. loadProjects() now defaults via
+// resolveLayer1ConfigPath(), which prefers the CATALYST_CONFIG_FILE /
+// CATALYST_CONFIG_PATH env pointer the deploy exports.
+describe("loadProjects — env-pointed default config path (cwd-independent)", () => {
+  const FIVE_TEAMS = {
+    catalyst: {
+      monitor: {
+        linear: {
+          teams: [
+            { key: "CTL", vcsRepo: "coalesce-labs/catalyst" },
+            { key: "ADV", vcsRepo: "coalesce-labs/adva" },
+            { key: "OTL", vcsRepo: "coalesce-labs/catalyst-otel" },
+            { key: "SLI", vcsRepo: "ryanrozich/slides" },
+            { key: "EVR", vcsRepo: "coalesce-labs/evergreen" },
+          ],
+        },
+        github: { repoColors: {} },
+      },
+    },
+  };
+
+  function withEnv(
+    overrides: Record<string, string | undefined>,
+    fn: () => void,
+  ): void {
+    const keys = ["CATALYST_CONFIG_FILE", "CATALYST_CONFIG_PATH"] as const;
+    const saved: Record<string, string | undefined> = {};
+    for (const k of keys) saved[k] = process.env[k];
+    try {
+      for (const [k, v] of Object.entries(overrides)) {
+        if (v === undefined) delete process.env[k];
+        else process.env[k] = v;
+      }
+      // Default the two env pointers to "unset" unless explicitly overridden, so a
+      // stray env var in the runner can't leak into the case under test.
+      for (const k of keys) {
+        if (!(k in overrides)) delete process.env[k];
+      }
+      fn();
+    } finally {
+      for (const k of keys) {
+        if (saved[k] === undefined) delete process.env[k];
+        else process.env[k] = saved[k];
+      }
+    }
+  }
+
+  it("(a) CATALYST_CONFIG_FILE config with 5 teams → loadProjects returns all 5 as source:'config'", () => {
+    const dir = mkdtempSync(join(tmpdir(), "roster-env-"));
+    try {
+      const cfg = join(dir, "config.json");
+      writeFileSync(cfg, JSON.stringify(FIVE_TEAMS));
+      withEnv({ CATALYST_CONFIG_FILE: cfg }, () => {
+        // NO configPath opt → exercises the default resolveLayer1ConfigPath().
+        const out = loadProjects({
+          observedRepos: [],
+          registryPath: "/no/such/registry.json",
+        });
+        expect(out).toHaveLength(5);
+        expect(out.map((p) => p.key).sort()).toEqual(["ADV", "CTL", "EVR", "OTL", "SLI"]);
+        expect(out.every((p) => p.source === "config")).toBe(true);
+      });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("(b) cwd has no .catalyst/config.json, but CATALYST_CONFIG_FILE is set → NOT zero teams", () => {
+    // The cwd under test (the orch-monitor package dir, the bun-test runner cwd)
+    // has no .catalyst/config.json, which under the old cwd-relative default would
+    // yield []. With the env pointer set, the roster is fully populated.
+    const dir = mkdtempSync(join(tmpdir(), "roster-env-"));
+    try {
+      const cfg = join(dir, "config.json");
+      writeFileSync(cfg, JSON.stringify(FIVE_TEAMS));
+      withEnv({ CATALYST_CONFIG_FILE: cfg }, () => {
+        const out = loadProjects({
+          observedRepos: ["adva"],
+          registryPath: "/no/such/registry.json",
+        });
+        expect(out.length).toBeGreaterThan(0);
+        expect(out.some((p) => p.key === "CTL" && p.source === "config")).toBe(true);
+      });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("CATALYST_CONFIG_PATH is also honored as the default pointer", () => {
+    const dir = mkdtempSync(join(tmpdir(), "roster-env-"));
+    try {
+      const cfg = join(dir, "config.json");
+      writeFileSync(cfg, JSON.stringify(FIVE_TEAMS));
+      withEnv({ CATALYST_CONFIG_PATH: cfg }, () => {
+        const out = loadProjects({
+          observedRepos: [],
+          registryPath: "/no/such/registry.json",
+        });
+        expect(out).toHaveLength(5);
+      });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("(c) explicit configPath opt still wins over the env pointer (temp-fixture injection path)", () => {
+    const envDir = mkdtempSync(join(tmpdir(), "roster-env-"));
+    const optDir = mkdtempSync(join(tmpdir(), "roster-opt-"));
+    try {
+      writeFileSync(join(envDir, "config.json"), JSON.stringify(FIVE_TEAMS));
+      // The injected fixture configures a SINGLE distinctive team.
+      writeFileSync(
+        join(optDir, "config.json"),
+        JSON.stringify({
+          catalyst: {
+            monitor: {
+              linear: { teams: [{ key: "ONLYME", vcsRepo: "owner/onlyme" }] },
+              github: { repoColors: {} },
+            },
+          },
+        }),
+      );
+      withEnv({ CATALYST_CONFIG_FILE: join(envDir, "config.json") }, () => {
+        const out = loadProjects({
+          configPath: join(optDir, "config.json"),
+          registryPath: "/no/such/registry.json",
+          observedRepos: [],
+        });
+        // The explicit opt was read, NOT the env pointer's 5-team config.
+        expect(out).toHaveLength(1);
+        expect(out[0].key).toBe("ONLYME");
+      });
+    } finally {
+      rmSync(envDir, { recursive: true, force: true });
+      rmSync(optDir, { recursive: true, force: true });
+    }
+  });
+});
