@@ -191,6 +191,18 @@ if [[ -x "$LINEAR_TRANSITION" ]]; then
 else
   echo "phase-teardown: linear-transition.sh not found at $LINEAR_TRANSITION; skipping Done transition" >&2
 fi
+
+# ─── Durable completion declaration (CTL-1371) ────────────────────────────────
+# Drop a durable "done" completion marker so the completion-signal reconciler's
+# drain backstops this Done state from an off-disk record that survives worker-dir
+# reaping — independent of the scheduler's terminalDoneOnce (which needs the live
+# worker dir + signals[teardown]==='done'). --no-write: the Done write above is
+# authoritative; this only records the declaration. The drain marks it reconciled
+# once Linear shows Done, or re-writes it if the transition above silently failed.
+LINEAR_RECONCILE="${PLUGIN_ROOT}/scripts/catalyst-linear-reconcile"
+if [[ -x "$LINEAR_RECONCILE" ]]; then
+  "$LINEAR_RECONCILE" declare "$TICKET" --state done --by pipeline --no-write >/dev/null 2>&1 || true
+fi
 ```
 
 ```bash phase-teardown-archive

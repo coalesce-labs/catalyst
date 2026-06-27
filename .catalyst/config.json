@@ -65,6 +65,10 @@
         "intervalSeconds": 300,
         "quietSeconds": 30
       },
+      "reconcile": {
+        "mode": "notify",
+        "intervalSeconds": 600
+      },
       "executionCore": {
         "maxParallel": 4,
         "minParallel": 1,
