@@ -78,8 +78,15 @@ expect_eq "read-replica: developer unset → FAIL"   "FAIL" "$(status_of "$(_vn_
 expect_eq "read-replica: developer localhost → FAIL" "FAIL" "$(status_of "$(_vn_v_read_replica developer http://127.0.0.1:7400)")"
 expect_eq "read-replica: developer localhost-name → FAIL" "FAIL" "$(status_of "$(_vn_v_read_replica developer http://localhost:7400)")"
 expect_eq "read-replica: developer remote → PASS"  "PASS" "$(status_of "$(_vn_v_read_replica developer http://mini:7400)")"
+# #2: a whitespace-padded URL is trimmed before grading — padded localhost still FAILs,
+# a padded empty still reads as unset (FAIL for a developer).
+expect_eq "read-replica: developer padded-localhost → FAIL" "FAIL" "$(status_of "$(_vn_v_read_replica developer ' http://localhost:7400 ')")"
+expect_eq "read-replica: developer padded-127 → FAIL" "FAIL" "$(status_of "$(_vn_v_read_replica developer '  http://127.0.0.1:7400')")"
+expect_eq "read-replica: developer whitespace-only → FAIL" "FAIL" "$(status_of "$(_vn_v_read_replica developer '   ')")"
+expect_eq "read-replica: developer padded-remote → PASS" "PASS" "$(status_of "$(_vn_v_read_replica developer '  http://mini:7400  ')")"
 
-# ── _vn_v_worker_owner (broker, not updater, owns the pull) ──────────────────
+# ── _vn_v_worker_owner <env_owner> <config_owner> (broker, not updater, owns the pull) ──
+# Single-arg calls feed env_owner (which takes precedence), exercising the normalize logic.
 expect_eq "worker-owner: updater → FAIL"           "FAIL" "$(status_of "$(_vn_v_worker_owner updater)")"
 expect_eq "worker-owner: broker → PASS"            "PASS" "$(status_of "$(_vn_v_worker_owner broker)")"
 expect_eq "worker-owner: unset → PASS"             "PASS" "$(status_of "$(_vn_v_worker_owner '')")"
@@ -87,6 +94,11 @@ expect_eq "worker-owner: unset → PASS"             "PASS" "$(status_of "$(_vn_
 expect_eq "worker-owner: Updater → FAIL"           "FAIL" "$(status_of "$(_vn_v_worker_owner Updater)")"
 expect_eq "worker-owner: UPDATER → FAIL"           "FAIL" "$(status_of "$(_vn_v_worker_owner UPDATER)")"
 expect_eq "worker-owner: ' updater ' → FAIL"       "FAIL" "$(status_of "$(_vn_v_worker_owner ' updater ')")"
+# #4: the env CATALYST_PLUGIN_PULL_OWNER WINS over the config (mirrors resolvePluginPullOwner).
+expect_eq "worker-owner: env=updater beats config=broker → FAIL" "FAIL" "$(status_of "$(_vn_v_worker_owner updater broker)")"
+expect_eq "worker-owner: env=broker beats config=updater → PASS" "PASS" "$(status_of "$(_vn_v_worker_owner broker updater)")"
+expect_eq "worker-owner: env empty → config=updater FAILs"       "FAIL" "$(status_of "$(_vn_v_worker_owner '' updater)")"
+expect_eq "worker-owner: env empty → config=broker PASSes"       "PASS" "$(status_of "$(_vn_v_worker_owner '' broker)")"
 
 # ── _vn_v_dev_no_work (a developer must not pick up work) ────────────────────
 # 4th arg = roster_source. A CONFIRMED source grades; an unknown/fail-open one WARNs (F3).
@@ -109,6 +121,10 @@ printf '%s\n' '{"catalyst":{"readReplica":{"baseUrl":"http://worker-host:7400"}}
 expect_eq "extract: read-replica from Layer-2" "http://worker-host:7400" "$(unset CATALYST_MONITOR_URL; _vn_read_replica_base "$CFG")"
 expect_eq "extract: read-replica env override wins" "http://override:9000" "$(CATALYST_MONITOR_URL=http://override:9000 _vn_read_replica_base "$CFG")"
 expect_eq "extract: read-replica unset → empty"     "" "$(unset CATALYST_MONITOR_URL; _vn_read_replica_base "${SCRATCH}/nope.json")"
+# #1: with NO cfg arg, the Layer-2 file is resolved from CATALYST_LAYER2_CONFIG_FILE — the
+# SAME path _vn_resolve uses — so an overridden Layer-2 location is honored for read-source.
+expect_eq "extract: read-replica honors CATALYST_LAYER2_CONFIG_FILE" "http://worker-host:7400" \
+  "$(unset CATALYST_MONITOR_URL; CATALYST_LAYER2_CONFIG_FILE="$CFG" _vn_read_replica_base)"
 
 # ── End-to-end cmd_verify_node per class (seams injected in isolating subshells) ──
 # Each subshell redefines the probe seams locally, so cmd_verify_node grades injected
@@ -278,6 +294,28 @@ if printf '%s' "$NOBUN_TYPO_OUT" | jq -r '.checks[0].detail' | grep -q 'developr
 else
   fail "fallback: no-bun typo detail" "missing raw 'developr'"
 fi
+
+# #3: the fallback trim is PURE bash (not xargs), so a value containing a quote is preserved
+# as the raw (xargs would error on the unmatched quote) and resolves recognized=false.
+NOBUN_QUOTE_LINE="$( nobun; CATALYST_NODE_CLASS='wo"rker' _vn_resolve )"
+expect_eq "fallback: quoted value class=monitor"    "monitor"  "$(printf '%s' "$NOBUN_QUOTE_LINE" | cut -f1)"
+expect_eq "fallback: quoted value recognized=false" "false"    "$(printf '%s' "$NOBUN_QUOTE_LINE" | cut -f4)"
+expect_eq "fallback: quoted value raw preserved"    'wo"rker'  "$(printf '%s' "$NOBUN_QUOTE_LINE" | cut -f5)"
+
+# #5: a PRESENT non-string Layer-2 node.class (false) is an explicit misconfiguration, NOT
+# absence — recognized=false (NOT a clean worker), and cmd_verify_node hard-FAILs.
+CFG_FALSE="${SCRATCH}/config-false.json"
+printf '%s\n' '{"catalyst":{"node":{"class":false}}}' > "$CFG_FALSE"
+NOBUN_FALSE_LINE="$( nobun; unset CATALYST_NODE_CLASS; CATALYST_LAYER2_CONFIG_FILE="$CFG_FALSE" _vn_resolve )"
+expect_eq "fallback: layer2 false class=monitor"    "monitor"      "$(printf '%s' "$NOBUN_FALSE_LINE" | cut -f1)"
+expect_eq "fallback: layer2 false source=layer2"    "layer2"       "$(printf '%s' "$NOBUN_FALSE_LINE" | cut -f2)"
+expect_eq "fallback: layer2 false recognized=false" "false"        "$(printf '%s' "$NOBUN_FALSE_LINE" | cut -f4)"
+expect_eq "fallback: layer2 false raw=<non-string>" "<non-string>" "$(printf '%s' "$NOBUN_FALSE_LINE" | cut -f5)"
+
+NOBUN_FALSE_OUT="$( nobun; unset CATALYST_NODE_CLASS; CATALYST_LAYER2_CONFIG_FILE="$CFG_FALSE" cmd_verify_node --json 2>/dev/null )"; NOBUN_FALSE_EC=$?
+expect_eq "fallback: layer2 false exits non-zero"     "1"       "$NOBUN_FALSE_EC"
+expect_eq "fallback: layer2 false verdict=fail"       "fail"    "$(printf '%s' "$NOBUN_FALSE_OUT" | jq -r '.verdict')"
+expect_eq "fallback: layer2 false node_class=monitor" "monitor" "$(printf '%s' "$NOBUN_FALSE_OUT" | jq -r '.node_class')"
 
 rm -rf "$SCRATCH"
 

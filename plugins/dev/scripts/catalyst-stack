@@ -2044,6 +2044,20 @@ cmd_verify_updater() {
 # from the class in code (those levers are operator-set), so verify-node grades the
 # node's ACTUAL local runtime/config state against the class's expected profile.
 
+# --- string normalizers (PURE bash; NOT xargs) ------------------------------
+# xargs interprets quotes/backslashes as shell syntax, so a value with an unmatched quote
+# (an explicit CATALYST_NODE_CLASS / pluginPullOwner / read-replica URL) would be mangled
+# or error. These trim with parameter expansion and lowercase with tr (portable, bash 3.2).
+# _vn_trim <s> — strip leading/trailing whitespace only (preserves case + inner content).
+_vn_trim() {
+  local s="$1"
+  s="${s#"${s%%[![:space:]]*}"}"   # ltrim
+  s="${s%"${s##*[![:space:]]}"}"   # rtrim
+  printf '%s' "$s"
+}
+# _vn_norm <s> — trim + lowercase (the resolveNodeClass normalization).
+_vn_norm() { _vn_trim "$1" | tr '[:upper:]' '[:lower:]'; }
+
 # --- class + roster resolver -------------------------------------------------
 # _vn_resolve — one TAB line:
 #   <class>\t<source>\t<inferred>\t<recognized>\t<raw>\t<in_roster>\t<multi_host>\t<roster_source>\t<self>
@@ -2087,34 +2101,53 @@ _vn_resolve() {
   fi
 
   # --- bash fallback: REAL resolution (config.mjs unavailable) ----------------
-  local raw="" src="default"
+  # Distinguish ABSENT (env unset AND Layer-2 null/key-missing ⇒ worker default) from
+  # PRESENT-but-INVALID. A PRESENT non-string Layer-2 value (false / 0 / [] / {}) is an
+  # explicit misconfiguration, NOT absence: resolveNodeClass() flags it recognized=false
+  # (most-restrictive monitor), and so must we — a bare `// empty` would wrongly swallow it
+  # as a clean worker (#5). The jq prints "" for absent, the string for a string, and the
+  # "__nonstring__" sentinel for a present non-string.
+  local raw="" src="default" nonstring="no"
   if [[ -n "${CATALYST_NODE_CLASS:-}" ]]; then
     raw="$CATALYST_NODE_CLASS"; src="env"
   else
     local cfg="${CATALYST_LAYER2_CONFIG_FILE:-${XDG_CONFIG_HOME:-$HOME/.config}/catalyst/config.json}"
     if [[ -f "$cfg" ]] && command -v jq >/dev/null 2>&1; then
-      raw="$(jq -r '.catalyst.node.class // empty' "$cfg" 2>/dev/null || true)"
-      [[ -n "$raw" ]] && src="layer2"
+      local jqout
+      jqout="$(jq -r '
+        if   (.catalyst.node.class == null)            then ""
+        elif (.catalyst.node.class | type) == "string" then .catalyst.node.class
+        else "__nonstring__" end
+      ' "$cfg" 2>/dev/null || true)"
+      if [[ "$jqout" == "__nonstring__" ]]; then
+        nonstring="yes"; src="layer2"
+      elif [[ -n "$jqout" ]]; then
+        raw="$jqout"; src="layer2"
+      fi
     fi
   fi
-  # trim + lowercase (matches resolveNodeClass: normalized = raw.trim().toLowerCase()).
-  raw="$(printf '%s' "$raw" | tr '[:upper:]' '[:lower:]' | xargs)"
 
-  local class source inferred recognized
-  if [[ -z "$raw" ]]; then
-    # absent ⇒ worker default, recognized, inferred (CTL-1344: zero change).
-    class="worker"; source="default"; inferred="true"; recognized="true"
-  elif [[ "$raw" == "developer" || "$raw" == "worker" || "$raw" == "monitor" ]]; then
-    # an explicit, recognized class — honor it (NOT a blind worker).
-    class="$raw"; source="$src"; inferred="false"; recognized="true"
+  local class source inferred recognized rawout
+  if [[ "$nonstring" == "yes" ]]; then
+    # present but non-string ⇒ explicit misconfiguration, never a silent worker (#5).
+    class="monitor"; source="$src"; inferred="false"; recognized="false"; rawout="<non-string>"
   else
-    # a non-empty NON-MEMBER (typo) ⇒ most-restrictive monitor + recognized=false so the
-    # CTL-1344 unrecognized→FAIL gate in cmd_verify_node fires (NOT a clean worker PASS).
-    class="monitor"; source="$src"; inferred="false"; recognized="false"
+    raw="$(_vn_norm "$raw")"   # trim + lowercase, PURE bash (no xargs — #3)
+    if [[ -z "$raw" ]]; then
+      # absent ⇒ worker default, recognized, inferred (CTL-1344: zero change).
+      class="worker"; source="default"; inferred="true"; recognized="true"; rawout="-"
+    elif [[ "$raw" == "developer" || "$raw" == "worker" || "$raw" == "monitor" ]]; then
+      # an explicit, recognized class — honor it (NOT a blind worker).
+      class="$raw"; source="$src"; inferred="false"; recognized="true"; rawout="$raw"
+    else
+      # a non-empty NON-MEMBER (typo) ⇒ most-restrictive monitor + recognized=false so the
+      # CTL-1344 unrecognized→FAIL gate in cmd_verify_node fires (NOT a clean worker PASS).
+      class="monitor"; source="$src"; inferred="false"; recognized="false"; rawout="$raw"
+    fi
   fi
   # roster fields cannot be computed without config.mjs ⇒ "unknown" sentinel (F3 → WARN).
   printf '%s\t%s\t%s\t%s\t%s\tunknown\tunknown\tunknown\t-' \
-    "$class" "$source" "$inferred" "$recognized" "${raw:--}"
+    "$class" "$source" "$inferred" "$recognized" "${rawout:--}"
 }
 
 # --- probe seams (overridable in tests; default = real local state, read-only) ---
@@ -2135,10 +2168,14 @@ _vn_drained() {
     echo no
   fi
 }
-# _vn_read_replica_base <cfg> — the resolved read endpoint: CATALYST_MONITOR_URL
-# override else Layer-2 catalyst.readReplica.baseUrl (empty when neither is set).
+# _vn_read_replica_base [cfg] — the resolved read endpoint: CATALYST_MONITOR_URL env
+# override else Layer-2 catalyst.readReplica.baseUrl. The Layer-2 file defaults to the SAME
+# path _vn_resolve / the runtime use (CATALYST_LAYER2_CONFIG_FILE, config.mjs
+# getLayer2ConfigPath) — NOT a hard-coded default — so an overridden Layer-2 location is
+# honored for the read-source too (#1). Empty when neither the env nor the config sets it.
 _vn_read_replica_base() {
-  local cfg="$1" base="${CATALYST_MONITOR_URL:-}"
+  local cfg="${1:-${CATALYST_LAYER2_CONFIG_FILE:-${XDG_CONFIG_HOME:-$HOME/.config}/catalyst/config.json}}"
+  local base="${CATALYST_MONITOR_URL:-}"
   if [[ -z "$base" && -f "$cfg" ]] && command -v jq >/dev/null 2>&1; then
     base="$(jq -r '.catalyst.readReplica.baseUrl // empty' "$cfg" 2>/dev/null || true)"
   fi
@@ -2199,9 +2236,11 @@ _vn_v_updater() {
 
 # _vn_v_read_replica <class> <base> — CTL-1346 read-source. A worker serves its OWN
 # local replica (localhost/unset = correct); developer/monitor MUST point at a worker
-# monitor (the resolver refuses to fall back to an empty local replica).
+# monitor (the resolver refuses to fall back to an empty local replica). The base is
+# whitespace-TRIMMED first (#2), so a manually-edited " http://localhost:7400 " is still
+# caught as localhost / a padded "" still reads as unset.
 _vn_v_read_replica() {
-  local cls="$1" base="$2"
+  local cls="$1" base; base="$(_vn_trim "$2")"
   if [[ "$cls" == "worker" ]]; then
     if [[ -z "$base" ]]; then
       printf 'PASS|read-source local (no override) — a worker serves its own replica\n'
@@ -2220,17 +2259,20 @@ _vn_v_read_replica() {
   esac
 }
 
-# _vn_v_worker_owner <owner> — worker: the BROKER must own the plugin pull (NOT the
-# updater; adopt-updater refuses workers). Empty/broker = PASS, updater = FAIL. The owner
-# is trim+lowercase NORMALIZED first (mirrors the resolver), so "Updater" / "UPDATER" /
-# "updater " all FAIL — a case/whitespace variant can no longer slip past as a PASS (F4).
+# _vn_v_worker_owner <env_owner> <config_owner> — worker: the BROKER must own the plugin
+# pull (NOT the updater; adopt-updater refuses workers). Mirrors the broker's
+# resolvePluginPullOwner precedence (broker/plugin-refresh.mjs): the env
+# CATALYST_PLUGIN_PULL_OWNER (when non-empty) WINS over the persisted config, so a worker
+# whose env defers the pull to the updater FAILs even when the config still says broker (#4).
+# The resolved owner is trim+lowercase NORMALIZED (F4), so "Updater" / " updater " also FAIL.
 _vn_v_worker_owner() {
-  local owner="$1" norm
-  norm="$(printf '%s' "$owner" | tr '[:upper:]' '[:lower:]' | xargs)"
+  local env_owner="$1" cfg_owner="${2:-}" resolved norm
+  if [[ -n "$(_vn_trim "$env_owner")" ]]; then resolved="$env_owner"; else resolved="$cfg_owner"; fi
+  norm="$(_vn_norm "$resolved")"
   if [[ "$norm" == "updater" ]]; then
-    printf 'FAIL|pluginPullOwner=updater on a worker — adopt-updater refuses workers; the broker should own the pull (set it to broker / unset)\n'
+    printf 'FAIL|pluginPullOwner resolves to updater on a worker (env CATALYST_PLUGIN_PULL_OWNER takes precedence over config) — adopt-updater refuses workers; the broker should own the pull (set it to broker / unset)\n'
   else
-    printf 'PASS|pluginPullOwner=%s — broker owns the plugin pull (worker)\n' "${owner:-<unset>}"
+    printf 'PASS|pluginPullOwner=%s — broker owns the plugin pull (worker)\n' "${resolved:-<unset>}"
   fi
 }
 
@@ -2300,7 +2342,7 @@ _vn_run_developer() {
   _vn_emit "broker-stopped"     T1 true "$(_vn_v_daemon_down broker "$(_vn_broker_running)")"
   _vn_emit "exec-core-stopped"  T1 true "$(_vn_v_daemon_down execution-core "$(_vn_exec_core_running)")"
   _vn_emit "plugins-fresh"      T1 true "$(_vn_v_updater "$(_vn_updater_ec)")"
-  _vn_emit "read-replica"       T1 true "$(_vn_v_read_replica developer "$(_vn_read_replica_base "$VN_CFG")")"
+  _vn_emit "read-replica"       T1 true "$(_vn_v_read_replica developer "$(_vn_read_replica_base)")"
   _vn_emit "would-not-own-work" T1 true "$(_vn_v_dev_no_work "$in_roster" "$multi_host" "$drained" "$roster_src")"
 }
 
@@ -2312,7 +2354,7 @@ _vn_run_worker() {
   _vn_emit "broker-running"    T1 true "$(_vn_v_daemon_up broker "$(_vn_broker_running)")"
   _vn_emit "exec-core-running" T1 true "$(_vn_v_daemon_up execution-core "$(_vn_exec_core_running)")"
   _vn_emit "monitor-running"   T1 true "$(_vn_v_daemon_up monitor "$(_vn_monitor_running)")"
-  _vn_emit "pull-owner"        T1 true "$(_vn_v_worker_owner "$(_vu_read_pull_owner "$VN_CFG")")"
+  _vn_emit "pull-owner"        T1 true "$(_vn_v_worker_owner "${CATALYST_PLUGIN_PULL_OWNER:-}" "$(_vu_read_pull_owner "$VN_CFG")")"
   if [[ "$VN_JSON" != "yes" ]]; then
     echo "    note: LOCAL subset only — full activation-gate grading (Linear/bot/HRW/webhook/PATH) is 'catalyst-doctor' (CTL-1355 doctor.mjs, the follow-up)."
   fi
