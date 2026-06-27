@@ -1188,40 +1188,52 @@ cmd_uninstall_services() {
   # reset pluginPullOwner back to "broker" (Codex P1): the broker reads that flag fresh and
   # stays detect-only (pull:false) while it says "updater", so removing the agent without
   # resetting the flag would leave the node with NO process pulling — the checkout silently
-  # stales. Reset it here (fail-closed) so the broker resumes pulling.
+  # stales.
   if [[ -f "$UPDATER_AGENT_PLIST" ]]; then
     launchctl bootout "$guid" "$UPDATER_AGENT_PLIST" 2>/dev/null || true
     rm -f "$UPDATER_AGENT_PLIST"
     log "removed $UPDATER_AGENT_LABEL ($UPDATER_AGENT_PLIST)"
-    local cfg; cfg="${CATALYST_MACHINE_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/catalyst/config.json}"
-    if _write_plugin_pull_owner "$cfg" "broker"; then
-      log "reset catalyst.orchestration.pluginPullOwner=broker in $cfg — the broker resumes pulling"
-      command -v catalyst-broker >/dev/null 2>&1 && { catalyst-broker restart 2>&1 | sed 's/^/  /' || true; }
-    else
-      warn "FAILED to reset pluginPullOwner=broker in $cfg — the broker is still deferring and NOTHING is pulling. Set 'catalyst.orchestration.pluginPullOwner' back to 'broker' by hand, then 'catalyst-broker restart'."
-    fi
   else
     log "$UPDATER_AGENT_LABEL not installed (no $UPDATER_AGENT_PLIST)"
   fi
+  # ALWAYS reconcile ownership — NOT gated on the plist still existing, so a reset that
+  # failed AFTER the plist was already removed is retried on the next uninstall (Codex P1).
+  # No-op when ownership is already broker.
+  local cfg; cfg="${CATALYST_MACHINE_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/catalyst/config.json}"
+  local rc=0; _reset_owner_broker_if_updater "$cfg" || rc=$?
+  if [[ "$rc" == "2" ]]; then
+    log "reset catalyst.orchestration.pluginPullOwner=broker in $cfg — the broker resumes pulling"
+    command -v catalyst-broker >/dev/null 2>&1 && { catalyst-broker restart 2>&1 | sed 's/^/  /' || true; }
+  elif [[ "$rc" == "1" ]]; then
+    warn "FAILED to reset pluginPullOwner=broker in $cfg — the broker is still deferring and NOTHING is pulling. Re-run uninstall-services, or set 'catalyst.orchestration.pluginPullOwner' to 'broker' by hand then 'catalyst-broker restart'."
+  fi
 }
 
-# _resolve_node_class — this node's catalyst.node.class: env CATALYST_NODE_CLASS, else the
-# machine-local Layer-2 catalyst.node.class, else "worker" (the fail-safe default — an
-# unset/unknown class is treated as a worker so adopt-updater refuses unless the node is
-# EXPLICITLY developer/monitor). Mirrors getNodeClass() precedence (config.mjs).
+# _resolve_node_class — this node's catalyst.node.class, NORMALIZED the same way the
+# runtime resolveNodeClass() does it: env CATALYST_NODE_CLASS, else the Layer-2
+# catalyst.node.class, then trim + lowercase; empty/unset ⇒ "worker" (the fail-safe
+# default). Honors the SAME Layer-2 path env the runtime uses — CATALYST_LAYER2_CONFIG_FILE
+# (config.mjs getLayer2ConfigPath), NOT CATALYST_MACHINE_CONFIG — so a node whose class is
+# `Worker` / ` worker ` / lives in an overridden Layer-2 path resolves identically (Codex P2).
 _resolve_node_class() {
-  if [[ -n "${CATALYST_NODE_CLASS:-}" ]]; then printf '%s\n' "$CATALYST_NODE_CLASS"; return 0; fi
-  local cfg="${CATALYST_MACHINE_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/catalyst/config.json}"
-  if command -v bun >/dev/null 2>&1; then
-    CFG_PATH="$cfg" bun -e '
-      const fs = require("fs");
-      let v = null;
-      try { v = JSON.parse(fs.readFileSync(process.env.CFG_PATH, "utf8"))?.catalyst?.node?.class; } catch {}
-      process.stdout.write(typeof v === "string" && v.trim() ? v.trim() : "worker");
-    ' 2>/dev/null || printf 'worker'
+  local raw=""
+  if [[ -n "${CATALYST_NODE_CLASS:-}" ]]; then
+    raw="$CATALYST_NODE_CLASS"
   else
-    printf 'worker'
+    local cfg="${CATALYST_LAYER2_CONFIG_FILE:-${XDG_CONFIG_HOME:-$HOME/.config}/catalyst/config.json}"
+    if command -v bun >/dev/null 2>&1; then
+      raw="$(CFG_PATH="$cfg" bun -e '
+        const fs = require("fs");
+        let v = null;
+        try { v = JSON.parse(fs.readFileSync(process.env.CFG_PATH, "utf8"))?.catalyst?.node?.class; } catch {}
+        process.stdout.write(typeof v === "string" ? v : "");
+      ' 2>/dev/null || printf '')"
+    fi
   fi
+  # trim + lowercase (matches resolveNodeClass normalized = raw.trim().toLowerCase()).
+  raw="$(printf '%s' "$raw" | tr '[:upper:]' '[:lower:]' | xargs)"
+  [[ -z "$raw" ]] && raw="worker"
+  printf '%s' "$raw"
 }
 
 # cmd_adopt_updater — the SUPERVISED GATE-3 cutover (CTL-1348). Installs the 5th launchd
@@ -1256,9 +1268,12 @@ cmd_adopt_updater() {
     return 0
   fi
 
+  # ALLOW-LIST guard: only an EXPLICITLY developer/monitor node may adopt. Worker, an
+  # unrecognized/typo'd class, and an unset class (⇒ worker default) all refuse — so a
+  # mis-set class can never silently cut over a worker (Codex P1).
   local node_class; node_class="$(_resolve_node_class)"
-  if [[ "$node_class" == "worker" && "$force_worker" != "yes" ]]; then
-    fail "adopt-updater refuses on a worker-class node (catalyst.node.class=$node_class). Post-cutover the broker stops pulling and nothing yet reloads execution-core/monitor onto the code the updater pulls (tracked follow-up) — a worker would run stale code. On a worker the broker already owns pull+reload; keep pluginPullOwner=broker. This cutover is for developer/monitor (daemonless) nodes — set catalyst.node.class accordingly. Override with --force-worker ONLY if you will manually restart the daemons after each plugin update."
+  if [[ "$node_class" != "developer" && "$node_class" != "monitor" && "$force_worker" != "yes" ]]; then
+    fail "adopt-updater refuses unless catalyst.node.class is developer or monitor (resolved: '$node_class'). Post-cutover the broker stops pulling and nothing yet reloads execution-core/monitor onto the code the updater pulls (tracked follow-up) — a worker would run stale code. On a worker the broker already owns pull+reload; keep pluginPullOwner=broker. This cutover is for developer/monitor (daemonless) nodes — set catalyst.node.class accordingly. Override with --force-worker ONLY if you will manually restart the daemons after each plugin update."
   fi
 
   [[ "$(uname -s)" == "Darwin" ]] || fail "adopt-updater is macOS-only (launchd); this host is $(uname -s). Use --print to preview the plist. (A Linux worker needs a systemd unit.)"
@@ -1269,13 +1284,17 @@ cmd_adopt_updater() {
   mkdir -p "${HOME}/Library/LaunchAgents" "${HOME}/catalyst"
 
   local guid; guid="gui/$(id -u)"
+  # Resolve the Layer-2 config path UP FRONT so every rollback path can reconcile ownership
+  # (a PRIOR partial cutover may have left pluginPullOwner=updater — Codex P1).
+  local cfg="${CATALYST_MACHINE_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/catalyst/config.json}"
   render_updater_plist "$launcher" "$host_name" > "$UPDATER_AGENT_PLIST"
   log "wrote $UPDATER_AGENT_PLIST (exec: launch.sh, KeepAlive foreground)"
 
   launchctl bootout "$guid" "$UPDATER_AGENT_PLIST" 2>/dev/null || true
   if ! launchctl bootstrap "$guid" "$UPDATER_AGENT_PLIST" 2>&1 | sed 's/^/  /'; then
     rm -f "$UPDATER_AGENT_PLIST"
-    fail "launchctl bootstrap failed for $UPDATER_AGENT_PLIST — pluginPullOwner left unchanged (broker keeps pulling)"
+    _reset_owner_broker_if_updater "$cfg" || true
+    fail "launchctl bootstrap failed for $UPDATER_AGENT_PLIST — agent backed out; pluginPullOwner reconciled to broker (broker keeps pulling)"
   fi
 
   # CONFIRM the agent is actually running BEFORE deferring the broker to it. A few short
@@ -1289,20 +1308,33 @@ cmd_adopt_updater() {
   if [[ "$confirmed" != "yes" ]]; then
     launchctl bootout "$guid" "$UPDATER_AGENT_PLIST" 2>/dev/null || true
     rm -f "$UPDATER_AGENT_PLIST"
-    fail "catalyst-updater agent did not reach a running PID — backed it out; pluginPullOwner left unchanged (broker keeps pulling). Check $UPDATER_LOG."
+    _reset_owner_broker_if_updater "$cfg" || true
+    fail "catalyst-updater agent did not reach a running PID — backed it out; pluginPullOwner reconciled to broker (broker keeps pulling). Check $UPDATER_LOG."
   fi
   log "confirmed $UPDATER_AGENT_LABEL running (pid $pid)"
 
   # Write the cutover flag LAST, atomically, into the machine-local Layer-2 config. Only
   # now — with the updater confirmed up — does the broker defer. Fail-closed: any write
-  # failure leaves the flag absent (= broker owns), so we never strand the node.
-  local cfg="${CATALYST_MACHINE_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/catalyst/config.json}"
+  # failure backs out the agent AND reconciles ownership to broker, so we never strand.
   if ! _write_plugin_pull_owner "$cfg" "updater"; then
     launchctl bootout "$guid" "$UPDATER_AGENT_PLIST" 2>/dev/null || true
     rm -f "$UPDATER_AGENT_PLIST"
-    fail "failed to write pluginPullOwner=updater into $cfg — backed out the agent; broker keeps pulling (fail-closed)"
+    _reset_owner_broker_if_updater "$cfg" || true
+    fail "failed to write pluginPullOwner=updater into $cfg — backed out the agent; pluginPullOwner reconciled to broker (fail-closed)"
   fi
   log "wrote catalyst.orchestration.pluginPullOwner=updater into $cfg"
+
+  # CTL-1348 (Codex P2): if the log-shipper (Alloy) is already running, it was started
+  # before the 5th updater.log stream existed in config.alloy — restart it so it begins
+  # tailing updater.log; otherwise the updater's logs never reach Loki (catalyst.updater
+  # stream) until the next shipper restart.
+  if _shipper_agent_installed && command -v launchctl >/dev/null 2>&1; then
+    if launchctl kickstart -k "gui/$(id -u)/${SHIPPER_AGENT_LABEL}" 2>&1 | sed 's/^/  /'; then
+      log "restarted $SHIPPER_AGENT_LABEL so Alloy tails updater.log (catalyst.updater stream)"
+    else
+      warn "could not restart the log-shipper — updater.log won't reach Loki until Alloy restarts (re-run install-services or restart the shipper agent)"
+    fi
+  fi
 
   # Nudge the running broker to re-read ownership immediately (it also re-reads fresh each
   # drift-check tick, so this only shortens the window).
@@ -1324,8 +1356,16 @@ _write_plugin_pull_owner() {
   if ! CFG_PATH="$cfg" CFG_OWNER="$owner" CFG_OUT="$tmp" bun -e '
     const fs = require("fs");
     const path = process.env.CFG_PATH, owner = process.env.CFG_OWNER, out = process.env.CFG_OUT;
+    // Distinguish "file absent" (fine — start fresh) from "file exists but unparseable".
+    // Clobbering a malformed-but-present config would DESTROY a secrets file that merely has
+    // a transient syntax error (Codex P2) — refuse instead, so the caller fails closed.
+    let raw = null;
+    try { raw = fs.readFileSync(path, "utf8"); } catch { raw = null; }
     let cfg = {};
-    try { cfg = JSON.parse(fs.readFileSync(path, "utf8")) ?? {}; } catch {}
+    if (raw !== null) {
+      try { cfg = JSON.parse(raw) ?? {}; }
+      catch { process.stderr.write("refusing to overwrite malformed config at " + path + "\n"); process.exit(2); }
+    }
     cfg.catalyst = cfg.catalyst ?? {};
     cfg.catalyst.orchestration = cfg.catalyst.orchestration ?? {};
     cfg.catalyst.orchestration.pluginPullOwner = owner;
@@ -1340,6 +1380,24 @@ _write_plugin_pull_owner() {
   fi
   mv -f "$tmp" "$cfg" || { rm -f "$tmp"; return 1; }
   return 0
+}
+
+# _reset_owner_broker_if_updater <config-path> — idempotently ensure pluginPullOwner is not
+# left at "updater" with no updater agent. Reads the current owner; ONLY when it is exactly
+# "updater" does it reset to "broker". Safe to call repeatedly (retryable). Return codes:
+#   0 = already broker / unset (no-op)   2 = reset to broker succeeded   1 = reset FAILED.
+_reset_owner_broker_if_updater() {
+  local cfg="$1" cur=""
+  if command -v bun >/dev/null 2>&1; then
+    cur="$(CFG_PATH="$cfg" bun -e '
+      const fs = require("fs");
+      let v = null;
+      try { v = JSON.parse(fs.readFileSync(process.env.CFG_PATH, "utf8"))?.catalyst?.orchestration?.pluginPullOwner; } catch {}
+      process.stdout.write(typeof v === "string" ? v.trim() : "");
+    ' 2>/dev/null || printf '')"
+  fi
+  [[ "$cur" != "updater" ]] && return 0
+  if _write_plugin_pull_owner "$cfg" "broker"; then return 2; else return 1; fi
 }
 
 cmd_services_status() {

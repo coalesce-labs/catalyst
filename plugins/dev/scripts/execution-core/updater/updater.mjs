@@ -119,7 +119,7 @@ function defaultLogger() {
  */
 export function makeEmitFn({ getLogPathFn = getEventLogPath, nowFn = Date.now, nodeClass, hostNameVal } = {}) {
   const host = hostNameVal ?? getHostName();
-  const cls = nodeClass ?? getNodeClass()?.class ?? null;
+  const cls = nodeClass ?? getNodeClass();
   return ({ event, severity, detail } = {}) => {
     try {
       // Resolve the event-log path PER CALL: getEventLogPath() rolls over to a new
@@ -170,7 +170,7 @@ export function makeEmitFn({ getLogPathFn = getEventLogPath, nowFn = Date.now, n
 export function buildUpdaterHeartbeatEnvelope({ nowFn = Date.now, nodeClass, hostNameVal, checkouts = [] } = {}) {
   const ts = isoNow(nowFn);
   const host = hostNameVal ?? getHostName();
-  const cls = nodeClass ?? getNodeClass()?.class ?? null;
+  const cls = nodeClass ?? getNodeClass();
   return {
     ts,
     id: randomBytes(8).toString("hex"),
@@ -237,7 +237,7 @@ export function runRefreshOnce({
   state = {},
 } = {}) {
   const host = hostNameVal ?? getHostName();
-  const cls = nodeClass ?? getNodeClass()?.class ?? null;
+  const cls = nodeClass ?? getNodeClass();
   const t0 = nowFn();
 
   // Surface an unconfigured node ONCE (don't let a no-pluginDirs node be a silent no-op).
@@ -307,7 +307,10 @@ export function runRefreshOnce({
     spanId,
   });
 
-  return { results, checkouts };
+  // rootsResolved distinguishes "0 roots configured" (heartbeat must report none) from a
+  // transient refreshAllFn throw (results=[] but roots were configured) — so the caller
+  // clears a STALE checkout list only on the former (Codex P2).
+  return { results, checkouts, rootsResolved: roots.length };
 }
 
 /**
@@ -345,8 +348,15 @@ export function makeEventTail({
       } catch {
         return;
       }
-      cursor = size;
-      for (const line of slice.split("\n")) {
+      // Only consume COMPLETE lines. If this poll races a writer mid-append, the trailing
+      // bytes have no newline yet — advancing the cursor past them would drop the event when
+      // it completes (Codex P2). Advance only to the last newline; keep the partial for next
+      // poll. (cursor is a byte offset; for the ASCII JSON event log, char index == byte
+      // offset, matching how the existing code already conflates size/slice.)
+      const lastNl = slice.lastIndexOf("\n");
+      if (lastNl === -1) return; // no complete line yet — hold the cursor, wait for the newline
+      cursor += lastNl + 1;
+      for (const line of slice.slice(0, lastNl).split("\n")) {
         const t = line.trim();
         if (!t) continue;
         let ev;
@@ -412,14 +422,16 @@ export function startUpdater({
   repoConfigPath = defaultRepoConfigPath(env),
   repoFullName,
 } = {}) {
-  const nodeClass = getNodeClass()?.class ?? null;
+  const nodeClass = getNodeClass();
   const hostNameVal = getHostName();
   const emit = emitFn ?? makeEmitFn({ getLogPathFn, nowFn, nodeClass, hostNameVal });
-  // Resolve the repo once; null cleanly degrades the event path to poll-only.
+  // Resolve the repo once; null cleanly degrades the event path to poll-only. Thread the
+  // SAME repoConfigPath used for root resolution so a node whose repo identity lives in the
+  // repo .catalyst/config.json still matches merge events (resolver parity — Codex P2).
   let repo = repoFullName;
   if (repo === undefined) {
     try {
-      repo = resolveRepoFullName();
+      repo = resolveRepoFullName({ repoConfigPath });
     } catch {
       repo = null;
     }
@@ -429,7 +441,7 @@ export function startUpdater({
   let lastCheckouts = [];
 
   const refresh = (reason) => {
-    const { checkouts } = runRefreshOnce({
+    const { checkouts, rootsResolved } = runRefreshOnce({
       reason,
       env,
       log,
@@ -442,7 +454,11 @@ export function startUpdater({
       resolveRootsFn,
       state,
     });
-    if (checkouts.length) lastCheckouts = checkouts;
+    // Clear a STALE checkout list when pluginDirs now resolve to zero (config removed /
+    // unreadable) so the heartbeat stops advertising checkouts that are no longer tracked;
+    // otherwise keep the last good list across a transient empty result (Codex P2).
+    if (rootsResolved === 0) lastCheckouts = [];
+    else if (checkouts.length) lastCheckouts = checkouts;
   };
 
   const heartbeat = () => {
@@ -485,6 +501,7 @@ export function startUpdater({
     _refresh: refresh,
     _heartbeat: heartbeat,
     _tail: tail,
+    _lastCheckouts: () => lastCheckouts,
   };
 }
 
@@ -500,7 +517,7 @@ async function main() {
 
   const handle = startUpdater({ log });
   log.info(
-    { poll_interval_ms: UPDATER_POLL_INTERVAL_MS, node_class: getNodeClass()?.class ?? null },
+    { poll_interval_ms: UPDATER_POLL_INTERVAL_MS, node_class: getNodeClass() },
     "updater: started (CTL-1348 — sole plugin-pull owner)"
   );
 

@@ -204,6 +204,18 @@ describe("makeEventTail (CTL-1348 merge-event latency path)", () => {
     h.tail.poll(); // size < cursor → reset to 0 → reads the whole (new) merge line
     expect(h.fired.length).toBe(1);
   });
+
+  test("partial trailing line (no newline yet) is HELD, not consumed, until it completes", () => {
+    const h = harness();
+    // a merge line written WITHOUT its trailing newline (writer mid-append)
+    h.set("/log/A", mergeLine);
+    h.tail.poll();
+    expect(h.fired.length).toBe(0); // no complete line → cursor held, nothing consumed
+    // the writer finishes the line (appends the newline)
+    h.set("/log/A", mergeLine + "\n");
+    h.tail.poll();
+    expect(h.fired.length).toBe(1); // now complete → fired (not dropped)
+  });
 });
 
 describe("makeEmitFn (canonical v2 envelope, service.name=catalyst.updater)", () => {
@@ -222,6 +234,19 @@ describe("makeEmitFn (canonical v2 envelope, service.name=catalyst.updater)", ()
     expect(env.severityText).toBe("WARN");
     expect(env.severityNumber).toBe(13);
     expect(env.body.payload).toMatchObject({ checkout: "/r/a", behind: true });
+  });
+
+  test("node class falls back to getNodeClass() as a STRING (regression: getNodeClass returns a string, not {class})", () => {
+    // CTL-1365a refactored getNodeClass() to return the class string (resolveNodeClass()
+    // returns the object). A `getNodeClass()?.class` deref would make this null — guard it.
+    const dir = mkdtempSync(join(tmpdir(), "updater-cls-"));
+    const logPath = join(dir, "events.jsonl");
+    const emit = makeEmitFn({ getLogPathFn: () => logPath, nowFn: () => 0 }); // NO nodeClass injected
+    emit({ event: "plugin.checkout.updated", detail: { checkout: "/r/a" } });
+    const cls = JSON.parse(readFileSync(logPath, "utf8").trim()).resource["catalyst.node.class"];
+    expect(typeof cls).toBe("string");
+    expect(cls).not.toBeNull();
+    expect(cls.length).toBeGreaterThan(0);
   });
 
   test("re-resolves the log path PER CALL (month-rollover — events never stranded)", () => {
@@ -314,5 +339,27 @@ describe("startUpdater wiring (CTL-1348 three-timer loop)", () => {
     expect(refreshCount).toBe(2);
     handle.stop();
     expect(timers.every((t) => t.cleared)).toBe(true);
+  });
+
+  test("a later zero-roots refresh CLEARS the stale heartbeat checkout list (Codex P2)", () => {
+    const { setIntervalFn, clearIntervalFn, timers } = captureTimers();
+    let roots = ["/r/a"]; // first refresh sees one checkout
+    const handle = startUpdater({
+      log: fakeLog(),
+      setIntervalFn,
+      clearIntervalFn,
+      emitFn: () => {},
+      refreshAllFn: () => roots.map((r) => ({ root: r, pulled: true, changed: false, failed: false, oldSha: "s", newSha: "s" })),
+      resolveRootsFn: () => roots,
+      getLogPathFn: () => join(mkdtempSync(join(tmpdir(), "updater-clr-")), "events.jsonl"),
+      repoFullName: "coalesce-labs/catalyst",
+    });
+    expect(handle._lastCheckouts()).toEqual([{ root: "/r/a", headSha: "s" }]); // boot refresh recorded it
+    // pluginDirs removed → roots now resolve to zero
+    roots = [];
+    const poll = timers.find((t) => t.ms === 90_000);
+    poll.fn();
+    expect(handle._lastCheckouts()).toEqual([]); // stale checkout list cleared, not retained
+    handle.stop();
   });
 });
