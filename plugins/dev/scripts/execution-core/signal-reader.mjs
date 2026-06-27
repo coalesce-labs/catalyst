@@ -146,6 +146,38 @@ export function listDispatchedPhases(orchDir, ticket) {
   return phases;
 }
 
+// SDK_INFLIGHT_STATUSES — the non-terminal worker statuses an in-process SDK
+// phase worker passes through: the shared pre-launch writes "dispatched"; the
+// phase skill flips it to "running". Both are "occupying a slot".
+const SDK_INFLIGHT_STATUSES = new Set(["dispatched", "running"]);
+
+// countSdkInflight — CTL-1367 P1: the executor=sdk occupancy analogue of
+// liveBackgroundCount (claude-agents.mjs:countBackgroundAgents). Under executor=sdk
+// a phase worker runs as an IN-PROCESS query() with NO `claude --bg` job, so it is
+// invisible to the bg liveness count the scheduler slot gate + monitor triage budget
+// derive capacity from. Without counting it, a recorded SDK launch leaves the next
+// tick/drain seeing ZERO occupied slots and admitting MORE tickets past maxParallel —
+// each writing a `dispatched` signal and queuing behind the SDK semaphore (the P1
+// over-dispatch). This counts every NESTED phase signal still in a runnable state
+// (dispatched|running) that carries NO bg_job_id — exactly the SDK worker shape (the
+// prelaunch writes status:"dispatched" with bg_job_id:null; the skill flips it to
+// "running", still with no bg id). A bg worker ALWAYS carries a bg_job_id once it has
+// launched, so the no-bg-id filter never counts a live bg worker (which
+// liveBackgroundCount already counts) — preventing double-counting. Callers gate this
+// term on executor==="sdk" (dispatchMode==="sdk") so it is provably inert under bg/
+// oneshot-legacy: the term is simply never added. Pure over the filesystem; never
+// throws (a missing workers/ dir → 0).
+export function countSdkInflight(orchDir) {
+  let n = 0;
+  for (const s of readAllPhaseSignals(orchDir)) {
+    if (s.layout !== "nested") continue;
+    if (!SDK_INFLIGHT_STATUSES.has(s.status)) continue;
+    if (s.liveness?.value) continue; // has a bg_job_id → a bg worker, not SDK
+    n += 1;
+  }
+  return n;
+}
+
 // readNestedDir — collect workers/<T>/phase-*.json, drop artifacts, and pick
 // the active phase: the latest updatedAt, preferring a non-terminal status so
 // a freshly-written terminal signal never shadows an in-flight phase.

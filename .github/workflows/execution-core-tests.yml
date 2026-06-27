@@ -184,7 +184,9 @@ jobs:
             scan.test.mjs \
             scheduler-perproject.test.mjs \
             scheduler-rank.test.mjs \
+            scheduler-replica-freshness.test.mjs \
             sdk-run-phase-agent.test.mjs \
+            sdk-slot-gate.test.mjs \
             sequencing.test.mjs \
             session-recency.test.mjs \
             signal-reader.test.mjs \

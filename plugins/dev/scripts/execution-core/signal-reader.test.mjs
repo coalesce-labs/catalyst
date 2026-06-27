@@ -10,6 +10,7 @@ import {
   readAllPhaseSignals,
   listDispatchedPhases,
   byActivePhase,
+  countSdkInflight,
 } from "./signal-reader.mjs";
 
 let orchDir;
@@ -435,5 +436,53 @@ describe("readAllPhaseSignals (CTL-934)", () => {
   test("no workers/ dir → []", () => {
     rmSync(join(orchDir, "workers"), { recursive: true, force: true });
     expect(readAllPhaseSignals(orchDir)).toEqual([]);
+  });
+});
+
+// CTL-1367 P1: countSdkInflight — the executor=sdk occupancy reader. Counts
+// dispatched/running NESTED phase signals with NO bg_job_id (the in-process SDK
+// worker shape) so the scheduler slot gate + monitor triage budget can see SDK
+// workers that have no `claude --bg` job. Never counts a bg worker (it has a
+// bg_job_id) and never counts a flat (legacy oneshot) signal.
+describe("countSdkInflight (CTL-1367 P1)", () => {
+  test("counts dispatched + running nested signals with no bg_job_id", () => {
+    writeNested("CTL-1", "triage", { status: "dispatched", bg_job_id: null });
+    writeNested("CTL-2", "research", { status: "running", bg_job_id: null });
+    expect(countSdkInflight(orchDir)).toBe(2);
+  });
+
+  test("does NOT count a nested signal that carries a bg_job_id (a bg worker)", () => {
+    // bg workers are already counted by liveBackgroundCount; counting them here too
+    // would double-count and under-dispatch.
+    writeNested("CTL-1", "triage", { status: "dispatched", bg_job_id: "job-abc" });
+    writeNested("CTL-2", "research", { status: "running", bg_job_id: "job-def" });
+    expect(countSdkInflight(orchDir)).toBe(0);
+  });
+
+  test("does NOT count terminal statuses (done/failed/stalled/skipped/turn-cap-exhausted)", () => {
+    writeNested("CTL-1", "triage", { status: "done", bg_job_id: null });
+    writeNested("CTL-2", "research", { status: "failed", bg_job_id: null });
+    writeNested("CTL-3", "plan", { status: "stalled", bg_job_id: null });
+    writeNested("CTL-4", "implement", { status: "skipped", bg_job_id: null });
+    writeNested("CTL-5", "verify", { status: "turn-cap-exhausted", bg_job_id: null });
+    expect(countSdkInflight(orchDir)).toBe(0);
+  });
+
+  test("does NOT count flat (legacy oneshot) signals", () => {
+    writeFlat("CTL-9", { status: "dispatched" });
+    expect(countSdkInflight(orchDir)).toBe(0);
+  });
+
+  test("counts every in-flight nested phase across multiple tickets", () => {
+    writeNested("CTL-1", "triage", { status: "done", bg_job_id: null }); // terminal — not counted
+    writeNested("CTL-1", "research", { status: "running", bg_job_id: null }); // counted
+    writeNested("CTL-2", "plan", { status: "dispatched", bg_job_id: null }); // counted
+    writeNested("CTL-3", "implement", { status: "running", bg_job_id: "job-x" }); // bg — not counted
+    expect(countSdkInflight(orchDir)).toBe(2);
+  });
+
+  test("no workers/ dir → 0 (never throws)", () => {
+    rmSync(join(orchDir, "workers"), { recursive: true, force: true });
+    expect(countSdkInflight(orchDir)).toBe(0);
   });
 });

@@ -1389,6 +1389,49 @@ describe("sweepMissingTriage — CTL-716 slot gate", () => {
     });
     expect(dispatch).not.toHaveBeenCalled();
   });
+
+  // CTL-1367 P1: under dispatchMode=sdk the in-process SDK workers (no `claude --bg`
+  // job → invisible to liveBackgroundCount) must consume the triage budget too,
+  // else repeated →Triage events / sweeps dispatch past maxParallel.
+  test("CTL-1367 P1: dispatchMode=sdk — SDK in-flight workers consume the triage budget", () => {
+    enroll("ENG", { status: "Ready" });
+    const realOrchDir = join(catalystDir, "execution-core");
+    const exec = execReturning({ ENG: [node("ENG-1"), node("ENG-2"), node("ENG-3")] });
+    reconcileAll({ exec });
+    const dispatch = mock(() => ({ code: 0 }));
+    sweepMissingTriage({
+      orchDir: realOrchDir,
+      dispatch,
+      applyTriageStatus: () => ({ applied: false, verified: false, from_state: null, to_state: null, reason: null }),
+      appendEvent: () => {},
+      readMaxParallelFn: () => 3,
+      liveBackgroundCount: () => 0, // no bg jobs
+      dispatchMode: "sdk",
+      countSdkInflight: () => 2, // 2 in-process SDK workers in flight → 1 free
+    });
+    expect(dispatch.mock.calls.length).toBe(1);
+  });
+
+  test("CTL-1367 P1: dispatchMode=bg — countSdkInflight is NOT consulted (byte-identical)", () => {
+    enroll("ENG", { status: "Ready" });
+    const realOrchDir = join(catalystDir, "execution-core");
+    const exec = execReturning({ ENG: [node("ENG-1"), node("ENG-2"), node("ENG-3")] });
+    reconcileAll({ exec });
+    const dispatch = mock(() => ({ code: 0 }));
+    let sdkCalled = false;
+    sweepMissingTriage({
+      orchDir: realOrchDir,
+      dispatch,
+      applyTriageStatus: () => ({ applied: false, verified: false, from_state: null, to_state: null, reason: null }),
+      appendEvent: () => {},
+      readMaxParallelFn: () => 3,
+      liveBackgroundCount: () => 0,
+      // dispatchMode omitted → "phase-agents" (bg)
+      countSdkInflight: () => { sdkCalled = true; return 99; },
+    });
+    expect(dispatch.mock.calls.length).toBe(3); // all 3 admitted
+    expect(sdkCalled).toBe(false); // SDK term never computed under bg
+  });
 });
 
 // --- CTL-681 Phase 3: parseIssueUpdatedEvent + handleIssueUpdatedEvent ------

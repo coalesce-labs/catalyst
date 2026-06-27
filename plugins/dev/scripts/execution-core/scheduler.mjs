@@ -82,7 +82,7 @@ import { getProjectConfig, listProjects } from "./registry.mjs";
 // The gatedTeardownWorktree import is removed; the teardown phase agent
 // re-implements the gate in bash (merge-confirmation evidence + worktree
 // presweep + non-force `git worktree remove`) in phase-teardown/SKILL.md.
-import { readWorkerSignals } from "./signal-reader.mjs";
+import { readWorkerSignals, countSdkInflight as defaultCountSdkInflight } from "./signal-reader.mjs";
 // CTL-933: shadow belief-store fact collector (opt-in CATALYST_BELIEFS_SHADOW=1).
 // CTL-937: getBeliefsDb exposes the module-level db handle for the diagnostician.
 // CTL-1241: getEscalateHumanBelief reads the latest escalate_human belief for the
@@ -2888,6 +2888,15 @@ export function schedulerTick(
     // .delegate-queue. Empty queue → 0 → zero behavior change (Phase A inert).
     countQueuedDelegates = defaultCountQueuedDelegates,
     gcDelegateIntents = defaultGcDelegateIntents,
+    // CTL-1367 P1: the executor=sdk occupancy reader — the in-process SDK-worker
+    // analogue of liveBackgroundCount. An SDK phase worker has NO `claude --bg`
+    // job, so liveBackgroundCount can't see it; without counting it the slot gate
+    // sees zero occupied slots after an SDK launch and over-dispatches past
+    // maxParallel. Counts dispatched/running nested phase signals with no bg_job_id
+    // (the SDK worker shape). ONLY added to occupancy when dispatchMode === "sdk"
+    // (see below), so it is provably inert under bg/oneshot-legacy. Injectable so a
+    // unit tick injects a deterministic count.
+    countSdkInflight = defaultCountSdkInflight,
     // CTL-731 Phase 00 / CTL-736: `livenessIsFresh` gates new-work admission — a
     // stale/never-populated `claude agents` snapshot means the live count is
     // untrustworthy, so we HOLD new dispatch (fail-safe, never over-spawn) while
@@ -4326,7 +4335,21 @@ export function schedulerTick(
   } catch {
     /* reservation read is best-effort — fall back to 0 reserved */
   }
-  const occupiedCount = liveCount + queuedDelegates;
+  // CTL-1367 P1: under executor=sdk the in-process SDK workers have NO `claude --bg`
+  // job, so liveCount is blind to them. Add their occupancy (dispatched/running
+  // nested signals with no bg_job_id) so the slot gate counts them like bg jobs and
+  // can't admit MORE tickets past maxParallel (each queuing behind the SDK
+  // semaphore). GATED on dispatchMode === "sdk": under bg/oneshot-legacy the term is
+  // 0 (countSdkInflight is never called), so occupiedCount is byte-identical to today.
+  let sdkInflight = 0;
+  if (dispatchMode === "sdk") {
+    try {
+      sdkInflight = countSdkInflight(orchDir);
+    } catch {
+      /* best-effort — never block the tick on a signal-scan failure */
+    }
+  }
+  const occupiedCount = liveCount + queuedDelegates + sdkInflight;
 
   tick?.lap("liveness-read");
 

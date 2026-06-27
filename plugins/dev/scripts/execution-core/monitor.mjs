@@ -65,6 +65,7 @@ import {
 import { appendTriageTransitionEvent as defaultAppendEvent } from "./triage-transition-event.mjs";
 import { countBackgroundAgents, resetLivenessCache } from "./claude-agents.mjs";
 import { readMaxParallel, computeFreeSlots, writeClusterGeneration } from "./scheduler.mjs";
+import { countSdkInflight as defaultCountSdkInflight } from "./signal-reader.mjs"; // CTL-1367 P1: executor=sdk occupancy reader for the triage budget
 import {
   recordReconcileSuccess,
   recordReconcileFailure,
@@ -375,6 +376,11 @@ export function handleStateChangedEvent(
     concurrency = {},
     readMaxParallelFn = readMaxParallel,
     liveBackgroundCount = () => countBackgroundAgents(),
+    // CTL-1367 P1: dispatch mode + SDK-occupancy reader for the triage budget when
+    // this call computes its own (no shared triageBudget). Default "phase-agents" →
+    // byte-identical bg budget. Threaded from startMonitor via tailerOpts.
+    dispatchMode = "phase-agents",
+    countSdkInflight = defaultCountSdkInflight,
     triageBudget,
     // CTL-781: respect-assignment + self-assign seams.
     botUserIds,
@@ -407,7 +413,7 @@ export function handleStateChangedEvent(
   // single call. Either way, the budget gates all dispatchTriage calls below.
   const budget =
     triageBudget ??
-    computeTriageBudget({ orchDir, concurrency, readMaxParallelFn, liveBackgroundCount });
+    computeTriageBudget({ orchDir, concurrency, readMaxParallelFn, liveBackgroundCount, dispatchMode, countSdkInflight });
   for (const p of listProjects()) {
     const query = resolveEligibleQuery(p);
     if (query.team !== parsed.teamKey) continue;
@@ -537,15 +543,34 @@ export function handleStateChangedEvent(
 // a mutable budget the caller spends across a single event-drain or sweep.
 // Mirrors schedulerTick's per-tick single read (CTL-716). Defaults source the
 // same primitives the scheduler uses; tests inject both to stay deterministic.
-function computeTriageBudget({
+// CTL-1367 P1: exported so the SDK-occupancy gating is unit-testable in CI.
+export function computeTriageBudget({
   orchDir,
   concurrency = {},
   readMaxParallelFn = readMaxParallel,
   liveBackgroundCount = () => countBackgroundAgents(),
+  // CTL-1367 P1: catalyst.dispatch.mode for this node ("sdk" under executor=sdk).
+  // Gates the SDK-occupancy term so the bg/oneshot-legacy budget is byte-identical.
+  dispatchMode = "phase-agents",
+  // CTL-1367 P1: executor=sdk occupancy reader (in-process SDK workers have no
+  // `claude --bg` job → invisible to liveBackgroundCount). Injectable for tests.
+  countSdkInflight = defaultCountSdkInflight,
 } = {}) {
   const maxParallel = readMaxParallelFn(orchDir, concurrency);
   const live = liveBackgroundCount();
-  return { remaining: computeFreeSlots(maxParallel, live) };
+  // CTL-1367 P1: under executor=sdk add the in-process SDK workers' occupancy so the
+  // →Triage budget counts them like bg jobs and a webhook drain / sweepMissingTriage
+  // can't dispatch past maxParallel while prior SDK triage queries run/queue behind
+  // the semaphore. GATED on dispatchMode === "sdk" → 0 under bg (byte-identical).
+  let sdkInflight = 0;
+  if (dispatchMode === "sdk") {
+    try {
+      sdkInflight = countSdkInflight(orchDir);
+    } catch {
+      /* best-effort — never block triage admission on a signal-scan failure */
+    }
+  }
+  return { remaining: computeFreeSlots(maxParallel, live + sdkInflight) };
 }
 
 // dispatchTriage — fire the triage phase agent for a →Triage transition. Guards
@@ -756,6 +781,10 @@ export function sweepMissingTriage({
   concurrency = {},
   readMaxParallelFn = readMaxParallel,
   liveBackgroundCount = () => countBackgroundAgents(),
+  // CTL-1367 P1: dispatch mode + SDK-occupancy reader for the budget (default
+  // "phase-agents" → byte-identical bg budget). Threaded from startMonitor.
+  dispatchMode = "phase-agents",
+  countSdkInflight = defaultCountSdkInflight,
   // CTL-781: respect-assignment + self-assign seams.
   botUserIds,
   botWriteId,
@@ -780,6 +809,8 @@ export function sweepMissingTriage({
     concurrency,
     readMaxParallelFn,
     liveBackgroundCount,
+    dispatchMode, // CTL-1367 P1
+    countSdkInflight, // CTL-1367 P1
   });
   for (const p of listProjects()) {
     for (const t of getEligibleSet(p.team)) {
@@ -919,6 +950,8 @@ export function readNewEvents({ foldOnly = false } = {}) {
           concurrency: tailerOpts.concurrency,
           readMaxParallelFn: tailerOpts.readMaxParallelFn,
           liveBackgroundCount: tailerOpts.liveBackgroundCount,
+          dispatchMode: tailerOpts.dispatchMode, // CTL-1367 P1
+          countSdkInflight: tailerOpts.countSdkInflight, // CTL-1367 P1
         });
     for (const line of lines) {
       if (!line.trim()) continue;
@@ -982,6 +1015,11 @@ export function startMonitor({
   concurrency = {},
   readMaxParallelFn,
   liveBackgroundCount,
+  // CTL-1367 P1: dispatch mode ("sdk" under executor=sdk) + the SDK-occupancy
+  // reader, threaded into tailerOpts + sweepMissingTriage so the triage budget
+  // counts in-process SDK workers. Default "phase-agents" → byte-identical bg.
+  dispatchMode = "phase-agents",
+  countSdkInflight = defaultCountSdkInflight,
   // CTL-781: respect-assignment + self-assign seams.
   botUserIds,
   botWriteId,
@@ -1005,6 +1043,8 @@ export function startMonitor({
     concurrency,
     readMaxParallelFn,
     liveBackgroundCount,
+    dispatchMode, // CTL-1367 P1
+    countSdkInflight, // CTL-1367 P1
     botUserIds,
     botWriteId,
     gateway,
@@ -1016,6 +1056,8 @@ export function startMonitor({
     concurrency,
     readMaxParallelFn,
     liveBackgroundCount,
+    dispatchMode, // CTL-1367 P1
+    countSdkInflight, // CTL-1367 P1
     botUserIds,
     botWriteId,
     gateway,
@@ -1051,6 +1093,8 @@ export function startMonitor({
       concurrency,
       readMaxParallelFn,
       liveBackgroundCount,
+      dispatchMode, // CTL-1367 P1
+      countSdkInflight, // CTL-1367 P1
       botUserIds,
       botWriteId,
       gateway,

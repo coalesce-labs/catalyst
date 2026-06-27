@@ -2095,6 +2095,58 @@ describe("schedulerTick — new-work pull", () => {
     expect(r.dispatched).toEqual(["CTL-8", "CTL-9"]);
   });
 
+  // CTL-1367 P1: under dispatchMode=sdk the in-process SDK workers (no `claude --bg`
+  // job → invisible to liveBackgroundCount) must consume slot-gate capacity, else
+  // the next tick over-dispatches past maxParallel. The countSdkInflight seam adds
+  // their occupancy, GATED on dispatchMode === "sdk". (scheduler.test.mjs is
+  // CI-excluded; the gating arithmetic is also covered purely + in CI by
+  // sdk-slot-gate.test.mjs and signal-reader.test.mjs.)
+  test("dispatchMode=sdk: SDK in-flight workers reduce new-work free slots", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 3 }));
+    const dispatch = fakeDispatch();
+    const eligible = [
+      { identifier: "CTL-1", priority: 1, createdAt: "x", state: "Todo", relations: { nodes: [] }, inverseRelations: { nodes: [] } },
+      { identifier: "CTL-2", priority: 1, createdAt: "x", state: "Todo", relations: { nodes: [] }, inverseRelations: { nodes: [] } },
+      { identifier: "CTL-3", priority: 1, createdAt: "x", state: "Todo", relations: { nodes: [] }, inverseRelations: { nodes: [] } },
+    ];
+    const r = schedulerTick(orchDir, {
+      readEligible: () => eligible,
+      dispatch,
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0, // no bg jobs
+      countSdkInflight: () => 2, // 2 in-process SDK workers already in flight
+      dispatchMode: "sdk",
+      hasTriageArtifact: () => true,
+      listStartedTickets: () => new Set(),
+    });
+    // maxParallel 3 − 2 SDK in-flight = 1 free slot → only ONE new ticket admitted.
+    expect(r.dispatched).toHaveLength(1);
+  });
+
+  test("dispatchMode=bg: countSdkInflight is NEVER consulted (byte-identical admission)", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 3 }));
+    const dispatch = fakeDispatch();
+    let sdkCalled = false;
+    const eligible = [
+      { identifier: "CTL-1", priority: 1, createdAt: "x", state: "Todo", relations: { nodes: [] }, inverseRelations: { nodes: [] } },
+      { identifier: "CTL-2", priority: 1, createdAt: "x", state: "Todo", relations: { nodes: [] }, inverseRelations: { nodes: [] } },
+      { identifier: "CTL-3", priority: 1, createdAt: "x", state: "Todo", relations: { nodes: [] }, inverseRelations: { nodes: [] } },
+    ];
+    const r = schedulerTick(orchDir, {
+      readEligible: () => eligible,
+      dispatch,
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0,
+      countSdkInflight: () => { sdkCalled = true; return 99; },
+      // dispatchMode omitted → defaults to "phase-agents" (bg)
+      hasTriageArtifact: () => true,
+      listStartedTickets: () => new Set(),
+    });
+    // bg path: all 3 admitted, the SDK term never even computed.
+    expect(r.dispatched).toHaveLength(3);
+    expect(sdkCalled).toBe(false);
+  });
+
   // CTL-665: a committed executionCore.maxParallel threaded via `concurrency`
   // drives the new-work ceiling end-to-end, overriding a smaller state.json value.
   test("concurrency.maxParallel overrides state.json for the new-work ceiling (CTL-665)", () => {
