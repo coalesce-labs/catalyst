@@ -1487,7 +1487,20 @@ cmd_services_status() {
 # _vu_timeout <secs> <cmd...> — run a command under a bounded timeout when one is
 # available (GNU coreutils `timeout`, or `gtimeout` on macOS), else run it unbounded.
 # Portable so a hung `git fetch` (auth prompt / dead remote) can't wedge the verifier.
-_vu_timeout() { local t="$1"; shift; if command -v timeout >/dev/null 2>&1; then timeout "$t" "$@"; elif command -v gtimeout >/dev/null 2>&1; then gtimeout "$t" "$@"; else "$@"; fi; }
+# _vu_timeout <secs> <cmd...> — bound a command. Prefers coreutils timeout/gtimeout; on a
+# default macOS box with neither (Codex P2), falls back to a portable watchdog (background +
+# kill) so a stuck `git fetch` can NEVER hang the verifier — it returns non-zero on kill,
+# which the checkout-fresh check correctly treats as "freshness UNVERIFIED".
+_vu_timeout() {
+  local t="$1"; shift
+  if command -v timeout >/dev/null 2>&1; then timeout "$t" "$@"; return; fi
+  if command -v gtimeout >/dev/null 2>&1; then gtimeout "$t" "$@"; return; fi
+  "$@" & local p=$!
+  ( sleep "$t"; kill -TERM "$p" 2>/dev/null; sleep 1; kill -KILL "$p" 2>/dev/null ) & local w=$!
+  local rc=0; wait "$p" 2>/dev/null || rc=$?
+  kill "$w" 2>/dev/null; wait "$w" 2>/dev/null || true
+  return "$rc"
+}
 
 # _vu_v_agent <plist_present:yes|no> <pid> — Check 1: launchd agent loaded + live.
 _vu_v_agent() {
@@ -1572,8 +1585,10 @@ _vu_v_refresh() {
     printf 'FAIL|latest refresh is stale (%ss ago >= %ss) — the updater stopped pulling\n' "$age" "$window"
     return 0
   fi
-  if [[ "$roots" =~ ^[0-9]+$ && "$roots" -eq 0 ]]; then
-    printf 'FAIL|latest refresh resolved 0 roots — no pluginDirs configured (updater is a silent no-op)\n'
+  # roots must be a POSITIVE integer — a numeric 0 (no pluginDirs) OR a non-numeric
+  # null/garbage (schema-skewed line) both mean "no usable refresh" (Codex P2).
+  if [[ ! "$roots" =~ ^[0-9]+$ || "$roots" -le 0 ]]; then
+    printf 'FAIL|latest refresh resolved no usable roots (roots=%s) — no pluginDirs / malformed refresh line\n' "${roots:-<none>}"
     return 0
   fi
   if [[ "$failed" =~ ^[0-9]+$ && "$failed" -eq 0 ]]; then
@@ -1737,7 +1752,9 @@ _vu_emit() {
 # _vu_check_head_origin — Check 3, per resolved pluginDirs checkout root. Read-only:
 # a `git fetch` (never reset --hard), mirroring the daemon's own fetch-then-compare.
 _vu_check_head_origin() {
-  resolve_plugin_dirs
+  # Anchor the pluginDirs repo-config walk at SCRIPT_DIR (this checkout), NOT the operator's
+  # cwd, so verify checks the SAME checkout the updater daemon pulls (Codex P2).
+  resolve_plugin_dirs "$SCRIPT_DIR"
   if [[ -z "$RESOLVED_PLUGIN_DIRS" ]]; then
     _vu_record "checkout-fresh" T1 true FAIL \
       "no pluginDirs configured (source: ${RESOLVED_PLUGIN_DIRS_SOURCE}) — updater is a no-op, nothing to verify"
@@ -1853,6 +1870,14 @@ _vu_finish() {
 # _vu_json_summary <adopted:yes|no> <exit_code> — machine-readable summary to stdout.
 _vu_json_summary() {
   local adopted="$1" ec="$2" i objs=()
+  # jq is optional for the extractors (they degrade to empty); --json must not crash
+  # without it — emit a minimal hand-built summary instead (Codex P2).
+  if ! command -v jq >/dev/null 2>&1; then
+    printf '{"adopted":%s,"verdict":"%s","exit_code":%s,"required_failures":%s,"jq":false,"note":"jq not installed — checks unreliable"}\n' \
+      "$([[ "$adopted" == "yes" ]] && echo true || echo false)" \
+      "$([[ "$ec" == "0" ]] && echo pass || echo fail)" "$ec" "$VU_FAIL_REQUIRED"
+    return 0
+  fi
   for i in "${!VU_NAMES[@]}"; do
     objs+=("$(jq -nc \
       --arg name "${VU_NAMES[$i]}" \
