@@ -62,3 +62,29 @@ export interface ReadLinearCacheOptions {
 }
 
 export function readLinearCache(opts?: ReadLinearCacheOptions): Promise<LinearCacheById>;
+
+/** CTL-1372: a batched replica title reader — `factory({dbPath})` returns an object
+ *  whose `titles(ids)` yields an { identifier → title } map of HITS only. Injected
+ *  in tests so the contract is driven offline (no real catalyst-replica.db). */
+export interface ReplicaTitleReader {
+  titles(ids: string[]): Record<string, string>;
+  close?: () => void;
+}
+
+export interface ReadReplicaTitlesOptions {
+  /** Board ticket ids to resolve titles for (de-duped; empty/falsy skipped). */
+  ids?: string[];
+  /** Replica DB path; defaults to CATALYST_REPLICA_DB || ~/catalyst/catalyst-replica.db. */
+  dbPath?: string;
+  /** Test seam: a `factory({dbPath})` → ReplicaTitleReader. When set, the
+   *  file-presence gate is skipped (the injected reader IS the DB). */
+  readerFactory?: ((opts: { dbPath: string }) => ReplicaTitleReader) | null;
+}
+
+/** CTL-1372: source authoritative ticket titles from the CTC replica
+ *  (catalyst-replica.db) — the durable source that fixes PARKED tickets
+ *  (filter-state.db ticket_state has no title column). Gates on FILE PRESENCE only
+ *  (NOT the dispatch-side catalyst.linearReplica.mode flag — the board is a
+ *  read-only display) and is FAIL-OPEN: any error returns {} so the existing title
+ *  chain is preserved. Returns { identifier → title } of HITS only. Never throws. */
+export function readReplicaTitles(opts?: ReadReplicaTitlesOptions): Promise<Record<string, string>>;

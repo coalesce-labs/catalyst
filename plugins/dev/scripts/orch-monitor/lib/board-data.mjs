@@ -22,7 +22,7 @@ import { readFile, readdir, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join, dirname, basename } from "node:path";
 import { promisify } from "node:util";
-import { readLinearCache, readParkedNeedsHumanTickets } from "./linear-cache-reader.mjs";
+import { readLinearCache, readParkedNeedsHumanTickets, readReplicaTitles } from "./linear-cache-reader.mjs";
 import { fillEstimateFallback, getEstimationMethodAsync } from "./linear-estimate-fallback.mjs";
 // CTL-1046: supplemental Linear-title fallback for cross-team (e.g. ADV) records.
 // CTL records carry their title via the eligible projection (eligible/CTL.json),
@@ -288,11 +288,18 @@ export const PHASE_TO_LINEAR = {
 // synthesizeQueuedTicket — build a thin BoardTicket from an eligible queue entry
 // so it renders in the "Todo" Kanban column (CTL-767). All agent/cost/phase-summary
 // fields default to null / empty since there is no worker dir for these tickets.
-export function synthesizeQueuedTicket(e, linfo, relationBlockerMap = new Map(), teamRepoMap = {}) {
+export function synthesizeQueuedTicket(e, linfo, relationBlockerMap = new Map(), teamRepoMap = {}, replicaTitles = {}) {
   const li = linfo[e.id] ?? {};
+  // CTL-1372: prefer the CTC replica's complete Linear title over the eligible
+  // projection's (and the bare-id fallback) — keeps queued cards consistent with
+  // the worker-dir cards' replica-first title resolution. Replica miss → e.title.
+  const replicaTitle =
+    typeof replicaTitles?.[e.id] === "string" && replicaTitles[e.id].length > 0
+      ? replicaTitles[e.id]
+      : null;
   return {
     id: e.id,
-    title: e.title || e.id,
+    title: replicaTitle || e.title || e.id,
     type: "task",
     repo: e.repo || repoForWith(teamRepoMap, e.id),
     team: e.team || teamFor(e.id),
@@ -1010,14 +1017,24 @@ export function deriveExplanation(phaseSigs) {
 // CTL-1041: the TITLE is the outcome line and must lead on every surface (slot
 // cards, inbox detail, holding rows). The triage `summary` is the DESCRIPTION
 // (e.g. "Live probe confirmed the unified event log…") and must NEVER stand in
-// for the title — leading with it is the CTL-1041 bug. Priority:
+// for the title — leading with it is the CTL-1041 bug.
+//
+// CTL-1372: the durable title chain. filter-state.db ticket_state has NO title
+// column, and a PARKED ticket has no eligible row, so the local caches alone
+// resolve a parked card to its bare id ("CTL-1214"). The CTC replica
+// (catalyst-replica.db) carries every Linear title, so it slots in as the
+// authoritative source right after the triage-recorded title. Priority:
 //   1. an explicit triage.title (a real title the triage pass recorded),
-//   2. the authoritative Linear title (durable cache via linfo, else the
-//      eligible projection),
-//   3. only then the triage.summary (last-ditch when no Linear title exists),
-//   4. the ticket key itself.
-export function ticketTitle(ticket, triage, eligibleIndex, linfo = {}) {
+//   2. the CTC replica title (catalyst-replica.db — the complete Linear title;
+//      this is what fixes parked tickets),
+//   3. the existing durable caches (linfo, then the eligible projection — which
+//      also carries the on-demand Linear fetch merged in by mergeTitleFallback),
+//   4. only then the triage.summary (last-ditch when no title exists anywhere),
+//   5. the ticket key itself.
+export function ticketTitle(ticket, triage, eligibleIndex, linfo = {}, replicaTitles = {}) {
   if (triage?.title) return triage.title;
+  const replicaTitle = replicaTitles?.[ticket];
+  if (typeof replicaTitle === "string" && replicaTitle.length > 0) return replicaTitle;
   const linearTitle = linfo[ticket]?.title ?? eligibleIndex[ticket]?.title ?? null;
   if (linearTitle) return linearTitle;
   if (triage?.summary) return triage.summary;
@@ -1029,11 +1046,18 @@ export function ticketTitle(ticket, triage, eligibleIndex, linfo = {}) {
 // OR the eligible projection). CTL tickets carry their title via the eligible
 // projection; cross-team (ADV) records reach the payload only through ticket_state
 // (no title column) and have no eligible entry → both sources null → fetch needed.
+// CTL-1372: a replica HIT also counts as "present" — the replica is preferred over
+// the on-demand Linear fetch, so a replica-resolved title skips the API call
+// entirely (the on-demand fetch stays the LAST resort for replica MISSES only).
 // Returns a de-duped array (order preserved).
-export function collectNullTitleIds(boardIds, linfo = {}, eligibleIndex = {}) {
+export function collectNullTitleIds(boardIds, linfo = {}, eligibleIndex = {}, replicaTitles = {}) {
   return [
     ...new Set(
-      boardIds.filter((id) => (linfo[id]?.title ?? eligibleIndex[id]?.title ?? null) === null)
+      boardIds.filter((id) => {
+        const replicaTitle = replicaTitles?.[id];
+        if (typeof replicaTitle === "string" && replicaTitle.length > 0) return false;
+        return (linfo[id]?.title ?? eligibleIndex[id]?.title ?? null) === null;
+      })
     ),
   ];
 }
@@ -1285,7 +1309,11 @@ export function synthesizeOrphanTickets(orphanState, now) {
 // live/between/done + queued + orphan) so a ticket with a real card is NEVER
 // duplicated; a duplicate descriptor within the input is also deduped. Exported so
 // unit tests exercise it without the DB read; `now` is injected for the same reason.
-export function synthesizeParkedNeedsHumanTickets(parked, existingIds, now) {
+// CTL-1372: `replicaTitles` ({id→title} from the CTC replica) is the FIX for the
+// bare-id parked card — the parked descriptor (readParkedNeedsHumanTickets) carries
+// NO title, so without the replica these cards rendered as "CTL-1214". Replica miss
+// → p.title (always absent here) → the bare ticket id (honest last resort).
+export function synthesizeParkedNeedsHumanTickets(parked, existingIds, now, replicaTitles = {}) {
   if (!Array.isArray(parked)) return [];
   const seen = existingIds instanceof Set ? new Set(existingIds) : new Set(existingIds ?? []);
   const cards = [];
@@ -1299,9 +1327,13 @@ export function synthesizeParkedNeedsHumanTickets(parked, existingIds, now) {
       labels.includes(ATTENTION_LABEL_NEEDS_INPUT) && !labels.includes(ATTENTION_LABEL_NEEDS_HUMAN)
         ? "Parked — waiting on your input (needs-input)."
         : "Parked — escalated for a human (needs-human).";
+    const replicaTitle =
+      typeof replicaTitles?.[p.ticket] === "string" && replicaTitles[p.ticket].length > 0
+        ? replicaTitles[p.ticket]
+        : null;
     cards.push({
       id: p.ticket,
-      title: p.title || p.ticket,
+      title: replicaTitle || p.title || p.ticket,
       type: "parked-needs-human",
       repo: repoFor(p.ticket),
       team: teamFor(p.ticket),
@@ -1716,6 +1748,22 @@ export async function assembleBoard({ getPrStatus = null, ring = null } = {}) {
   // union of card sources, so a between-phases ticket still gets a BoardTicket.
   const cardTicketIds = new Set([...workers.map((w) => w.ticket), ...workerDirs]);
 
+  // CTL-1372: source authoritative ticket titles from the CTC replica
+  // (catalyst-replica.db). filter-state.db ticket_state has NO title column, and a
+  // PARKED ticket (worker dir torn down, no eligible row) has no other durable
+  // title source — so its card otherwise renders as the bare id ("CTL-1214"
+  // instead of "Slim .catalyst/config.json…"). ONE batched read resolves titles
+  // for every board id (worker-dir ∪ eligible ∪ parked) at once. FAIL-OPEN: a
+  // missing/unreadable replica → {} and the existing title chain (triage.title →
+  // linfo/eligible → on-demand fetch → id) is preserved unchanged.
+  const replicaTitles = await readReplicaTitles({
+    ids: [
+      ...cardTicketIds,
+      ...eligible.map((e) => e.id),
+      ...parkedNeedsHuman.map((p) => p.ticket),
+    ],
+  });
+
   // CTL-974: supplemental estimate fallback — tickets whose durable-cache estimate
   // is null may have an estimate set in Linear that the broker's webhook path has
   // not yet projected (old tickets pre-dating CTL-957, or tickets never touched by
@@ -1799,9 +1847,11 @@ export async function assembleBoard({ getPrStatus = null, ring = null } = {}) {
   // resolves to null here, so ticketTitle()'s honest summary/key fallback still runs.
   await (async () => {
     const allBoardIds = [...[...cardTicketIds], ...eligible.map((e) => e.id)];
-    // Only fetch titles for IDs that have NO title from either source the title
-    // resolver consults (durable linfo cache OR the eligible projection).
-    const nullTitleIds = collectNullTitleIds(allBoardIds, linfo, eligibleIndex);
+    // Only fetch titles for IDs that have NO title from any source the title
+    // resolver consults (durable linfo cache OR the eligible projection OR the CTC
+    // replica). CTL-1372: a replica HIT skips the on-demand Linear fetch entirely —
+    // the fetch is now the LAST resort, for replica MISSES only.
+    const nullTitleIds = collectNullTitleIds(allBoardIds, linfo, eligibleIndex, replicaTitles);
     if (nullTitleIds.length === 0) return;
 
     // Batch-fetch titles (and descriptions/labels/relations) for null-title IDs,
@@ -1873,7 +1923,7 @@ export async function assembleBoard({ getPrStatus = null, ring = null } = {}) {
       });
       return {
         id,
-        title: ticketTitle(id, triage, eligibleIndex, linfo),
+        title: ticketTitle(id, triage, eligibleIndex, linfo, replicaTitles),
         type: ticketType(triage),
         repo: repoFor(id),
         team: teamFor(id),
@@ -1995,7 +2045,7 @@ export async function assembleBoard({ getPrStatus = null, ring = null } = {}) {
   // ANY worker dir is already surfaced as live / between-phases above, so it is
   // excluded here (cardTicketIds) — it is accounted for, not duplicated.
   const notInFlight = eligible.filter((e) => !cardTicketIds.has(e.id));
-  const queuedTickets = notInFlight.map((e) => synthesizeQueuedTicket(e, linfo, relationBlockerMap, TEAM_REPO));
+  const queuedTickets = notInFlight.map((e) => synthesizeQueuedTicket(e, linfo, relationBlockerMap, TEAM_REPO, replicaTitles));
   tickets = [...liveTickets, ...betweenPhases, ...recentDone, ...queuedTickets];
 
   // CTL-1175: orphan-PR Needs-You rows. Synthetic cards (no worker dir, never in
@@ -2013,7 +2063,7 @@ export async function assembleBoard({ getPrStatus = null, ring = null } = {}) {
   // per parked ticket NOT already carded. Deduped against every existing card id;
   // terminal/removed excluded by the reader; fail-open ([] on a db read error).
   const existingCardIds = new Set(tickets.map((t) => t.id));
-  const parkedTickets = synthesizeParkedNeedsHumanTickets(parkedNeedsHuman, existingCardIds, now);
+  const parkedTickets = synthesizeParkedNeedsHumanTickets(parkedNeedsHuman, existingCardIds, now, replicaTitles);
   tickets = [...tickets, ...parkedTickets];
 
   // priority queue: eligible (not yet in-flight), globally ranked (Queue tab)

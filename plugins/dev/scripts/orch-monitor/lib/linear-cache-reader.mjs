@@ -28,18 +28,36 @@
 // module ever blocking on a refresh.
 
 import { readFile, readdir } from "node:fs/promises";
+import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
 const HOME = homedir();
 const DEFAULT_DB_PATH = join(HOME, "catalyst", "filter-state.db");
 const DEFAULT_ELIGIBLE_DIR = join(HOME, "catalyst", "execution-core", "eligible");
+// CTL-1372: the CTC replica (catalyst-replica.db) — the SDK's live Linear mirror,
+// the only durable source that carries every ticket's title. CATALYST_REPLICA_DB
+// overrides (mirrors getReplicaDbPath in execution-core/config.mjs), default
+// ~/catalyst/catalyst-replica.db. Resolved per call so a test env override works.
+const DEFAULT_REPLICA_DB_PATH = join(HOME, "catalyst", "catalyst-replica.db");
 
 // broker-state.mjs carries a top-level `import { Database } from "bun:sqlite"`.
 // We reach it ONLY through the lazy `import()` in readTicketStateById, but the
 // specifier MUST be computed (not a string literal) — see the long note there.
 // Kept as a module constant so the path lives in one place and reads cleanly.
 const BROKER_STATE_MODULE = ["..", "..", "broker", "broker-state.mjs"].join("/");
+
+// CTL-1372: execution-core/replica-read.mjs ALSO carries a top-level
+// `import { Database } from "bun:sqlite"`, so it is reached ONLY through the same
+// computed-specifier lazy `import()` (never a string literal) for the exact reason
+// BROKER_STATE_MODULE is — board-data.mjs statically imports THIS module, and
+// ui/vite.config.ts statically imports board-data.mjs; a literal
+// `import("../../execution-core/replica-read.mjs")` would let esbuild follow the
+// relative graph and pull bun:sqlite into the Node-evaluated vite config bundle,
+// which throws ERR_UNSUPPORTED_ESM_URL_SCHEME on `bun:` and breaks `vite build`
+// (the monitor's deploy path; the CTL-1561 trap). The computed specifier stays an
+// opaque runtime `import()` esbuild can't follow. DO NOT inline this to a literal.
+const REPLICA_READ_MODULE = ["..", "..", "execution-core", "replica-read.mjs"].join("/");
 
 // Normalize a stored ticket_state descriptor priority to the 0..4 Linear scale.
 // ticket_state stores it as an INTEGER (0 = no priority, 1 = urgent .. 4 = low);
@@ -179,6 +197,68 @@ export async function readParkedNeedsHumanTickets({
     });
   }
   return out;
+}
+
+// ── CTC replica titles (CTL-1372) ───────────────────────────────────────────
+// readReplicaTitles — the board's authoritative TITLE source. filter-state.db
+// ticket_state has NO title column, and a PARKED ticket (worker dir torn down, no
+// eligible row) has no other durable title source — so its board card otherwise
+// renders as the bare id (e.g. "CTL-1214" instead of "Slim .catalyst/config.json…").
+// The CTC replica (catalyst-replica.db) is the SDK's live Linear mirror and carries
+// every title, so one BATCHED read over the board's ids resolves them all.
+//
+// GATING + FAIL-OPEN (board posture, NOT the dispatch path): the board is a
+// read-only display, so this gates on FILE PRESENCE only — it does NOT consult the
+// dispatch-side catalyst.linearReplica.mode flag (that flag governs the daemon's
+// hot terminal-check, a correctness path; a display read has no such risk). When the
+// replica is present it is used; ANY failure (absent file, unreadable, bad schema,
+// lock) returns {} so the existing title chain (triage.title → linfo/eligible →
+// on-demand fetch → id) is preserved EXACTLY. The board must never break or hang on
+// the replica.
+//
+// The replica module (execution-core/replica-read.mjs) carries a top-level
+// bun:sqlite import and is reached ONLY through the computed REPLICA_READ_MODULE
+// specifier — same vite-graph trap-avoidance as readTicketStateById's
+// BROKER_STATE_MODULE. `readerFactory` is injectable so unit tests drive the
+// {id→title} contract offline (no real DB); when injected, the file-presence gate
+// is skipped (the fake reader IS the DB).
+//
+// Returns { [identifier]: title } of HITS only (a miss is simply absent → caller
+// falls through). Never throws.
+export async function readReplicaTitles({
+  ids = [],
+  dbPath = process.env.CATALYST_REPLICA_DB || DEFAULT_REPLICA_DB_PATH,
+  readerFactory = null,
+} = {}) {
+  const wanted = [...new Set((Array.isArray(ids) ? ids : []).filter(Boolean))];
+  if (wanted.length === 0) return {};
+  // File-presence gate (skipped when a test injects a reader). When the replica
+  // isn't on this node, go straight to the existing chain — never open/throw.
+  if (!readerFactory) {
+    try {
+      if (!existsSync(dbPath)) return {};
+    } catch {
+      return {};
+    }
+  }
+  let reader = null;
+  try {
+    let factory = readerFactory;
+    if (!factory) {
+      ({ createReplicaReader: factory } = await import(REPLICA_READ_MODULE));
+    }
+    reader = factory({ dbPath });
+    const titles = reader.titles(wanted);
+    return titles && typeof titles === "object" ? titles : {};
+  } catch {
+    return {}; // any failure → fail-open to the existing title chain
+  } finally {
+    try {
+      reader?.close?.();
+    } catch {
+      /* already closed */
+    }
+  }
 }
 
 // Read the scheduler's eligible projections for priority/project/relations on

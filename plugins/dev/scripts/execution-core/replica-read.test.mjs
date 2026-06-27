@@ -164,3 +164,89 @@ describe("createReplicaReader.freshness (CTL-1366)", () => {
     expect(reader.freshness()).toBeUndefined();
   });
 });
+
+// seedTitles — build a minimal `issues` table carrying titles + the removed_at
+// tombstone column the batched title reader reads (CTL-1372).
+function seedTitles() {
+  const db = new Database(dbPath, { create: true });
+  db.run(`CREATE TABLE issues (identifier TEXT, title TEXT, removed_at TEXT)`);
+  db.run(`CREATE INDEX idx_issues_identifier ON issues (identifier)`);
+  db.run(`INSERT INTO issues VALUES ('CTL-1214', 'Slim .catalyst/config.json down to the essentials', NULL)`);
+  db.run(`INSERT INTO issues VALUES ('CTL-1215', 'Bound the title-desc cache', NULL)`);
+  // removed (tombstoned) — excluded by removed_at IS NULL → MISS (omitted).
+  db.run(`INSERT INTO issues VALUES ('CTL-9000', 'Tombstoned ticket', '2026-06-03T00:00:00Z')`);
+  // null title → omitted (caller falls through to its existing chain).
+  db.run(`INSERT INTO issues VALUES ('CTL-8000', NULL, NULL)`);
+  db.close();
+}
+
+describe("createReplicaReader.titles (CTL-1372 — batched board title source)", () => {
+  test("returns an { identifier → title } map for HITS", () => {
+    seedTitles();
+    reader = createReplicaReader({ dbPath });
+    expect(reader.titles(["CTL-1214", "CTL-1215"])).toEqual({
+      "CTL-1214": "Slim .catalyst/config.json down to the essentials",
+      "CTL-1215": "Bound the title-desc cache",
+    });
+  });
+
+  test("the parked-ticket repro: a single id resolves to its real Linear title", () => {
+    seedTitles();
+    reader = createReplicaReader({ dbPath });
+    // The exact live-diagnosed case — CTL-1214 must NOT render as the bare id.
+    expect(reader.titles(["CTL-1214"])["CTL-1214"]).toBe(
+      "Slim .catalyst/config.json down to the essentials",
+    );
+  });
+
+  test("omits absent ids, tombstoned rows, and null titles (MISS → caller falls through)", () => {
+    seedTitles();
+    reader = createReplicaReader({ dbPath });
+    const map = reader.titles(["CTL-1214", "CTL-9000", "CTL-8000", "CTL-404"]);
+    expect(map).toEqual({ "CTL-1214": "Slim .catalyst/config.json down to the essentials" });
+    expect("CTL-9000" in map).toBe(false); // tombstoned
+    expect("CTL-8000" in map).toBe(false); // null title
+    expect("CTL-404" in map).toBe(false); // absent
+  });
+
+  test("empty / non-array / all-falsy input → {} without touching the DB", () => {
+    reader = createReplicaReader({ dbPath });
+    expect(reader.titles([])).toEqual({});
+    expect(reader.titles(null)).toEqual({});
+    expect(reader.titles(["", null, undefined])).toEqual({});
+  });
+
+  test("de-dupes the requested ids", () => {
+    seedTitles();
+    reader = createReplicaReader({ dbPath });
+    expect(reader.titles(["CTL-1214", "CTL-1214", "CTL-1214"])).toEqual({
+      "CTL-1214": "Slim .catalyst/config.json down to the essentials",
+    });
+  });
+
+  test("chunks beyond the bound-parameter ceiling (>400 ids) without throwing", () => {
+    seedTitles();
+    reader = createReplicaReader({ dbPath });
+    const many = Array.from({ length: 950 }, (_, i) => `CTL-${i}`);
+    many.push("CTL-1214"); // one real hit amid the misses
+    const map = reader.titles(many);
+    expect(map["CTL-1214"]).toBe("Slim .catalyst/config.json down to the essentials");
+  });
+
+  test("fail-open: missing DB → {}, then recovers once created", () => {
+    reader = createReplicaReader({ dbPath });
+    expect(reader.titles(["CTL-1214"])).toEqual({}); // no db yet → fail-open
+    seedTitles();
+    expect(reader.titles(["CTL-1214"])).toEqual({
+      "CTL-1214": "Slim .catalyst/config.json down to the essentials",
+    });
+  });
+
+  test("fail-open: DB without the issues table → {} (query throws → fail-open)", () => {
+    const empty = new Database(dbPath, { create: true });
+    empty.run(`CREATE TABLE unrelated (x INTEGER)`);
+    empty.close();
+    reader = createReplicaReader({ dbPath });
+    expect(reader.titles(["CTL-1214"])).toEqual({});
+  });
+});
