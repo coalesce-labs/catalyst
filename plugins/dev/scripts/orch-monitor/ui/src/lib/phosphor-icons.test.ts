@@ -179,6 +179,49 @@ describe("importer-manifest retry-hardening (CTL-1370, injected manifest loader)
     expect(airplane).toBe(FakeFire);
   });
 
+  it("revives a manifest-errored glyph to 'idle' when the manifest later loads (UI self-heal)", async () => {
+    // ProjectMarkIcon only calls loadGlyph from the "idle" state, so a glyph left in "error" would
+    // never retry. When the manifest reloads (via any other glyph's demand), the stranded glyph must
+    // be reset to "idle" so the component's idle-branch re-triggers it — without an explicit retry.
+    let attempt = 0;
+    __setManifestLoader(() =>
+      ++attempt === 1
+        ? Promise.reject(new Error("manifest chunk 404"))
+        : Promise.resolve({
+            ICON_IMPORTERS: {
+              fire: () => Promise.resolve({ FireIcon: FakeFire }),
+              airplane: () => Promise.resolve({ AirplaneIcon: FakeFire }),
+            },
+          }),
+    );
+    // "fire" hits the failing manifest and is stranded in "error".
+    expect(await loadGlyph("fire")).toBeNull();
+    expect(glyphLoadState("fire")).toBe("error");
+    // A *different* glyph re-probes after the dist heals; loading the manifest revives "fire".
+    expect(await loadGlyph("airplane")).toBe(FakeFire);
+    expect(glyphLoadState("fire")).toBe("idle"); // back to idle → the UI re-triggers it
+    expect(getGlyphError("fire")).toBeNull(); // the stale manifest error was cleared
+    // …and the revived glyph then resolves on the (now idle-driven) re-trigger.
+    expect(await loadGlyph("fire")).toBe(FakeFire);
+  });
+
+  it("a per-glyph error (not the manifest) is NOT revived by a later manifest reload", async () => {
+    // A glyph whose own export is missing failed for a per-glyph reason, not a manifest outage —
+    // a manifest reload must leave it in "error" (only manifest-stranded glyphs are revived).
+    __setManifestLoader(() =>
+      Promise.resolve({
+        ICON_IMPORTERS: {
+          fire: () => Promise.resolve({}), // present importer, but no Fire/FireIcon export
+          airplane: () => Promise.resolve({ AirplaneIcon: FakeFire }),
+        },
+      }),
+    );
+    expect(await loadGlyph("fire")).toBeNull();
+    expect(glyphLoadState("fire")).toBe("error");
+    expect(await loadGlyph("airplane")).toBe(FakeFire); // re-enters the (already-loaded) manifest
+    expect(glyphLoadState("fire")).toBe("error"); // still error — not a manifest casualty
+  });
+
   it("caches a RESOLVED manifest — it is imported once across many glyph demands", async () => {
     let loads = 0;
     __setManifestLoader(() => {
