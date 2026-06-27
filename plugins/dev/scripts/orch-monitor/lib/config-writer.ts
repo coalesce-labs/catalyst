@@ -13,6 +13,7 @@
 // edit is worse than a visible error for server-authoritative settings.
 
 import { readFileSync, writeFileSync, renameSync } from "fs";
+import { readClusterProjects } from "./cluster-roster";
 
 // Server-side mirror of the 8 UI NAMED_COLORS hues (ui/src/lib/color-palette.ts:10).
 // The server must NOT import ui/ (excluded from this tsconfig).
@@ -93,30 +94,45 @@ export function updateCatalystConfig(
  * sections are shallow-spread and thus preserved).
  *
  * Behavior:
- *  - Unknown key (∉ teams[] AND ∉ existing projects[]) → { ok: false, reason: "unknown-key" }
- *  - First edit: copies vcsRepo from the matching teams[] entry, creates projects[] if absent
+ *  - Unknown key (∉ team roster AND ∉ existing projects[]) → { ok: false, reason: "unknown-key" }
+ *  - First edit: copies vcsRepo from the matching team-roster entry, creates projects[] if absent
  *  - Patch field: undefined ⇒ leave alone; null/"" ⇒ delete the key; value ⇒ set (trimmed)
  *  - color is validated against VALID_HUES (defense-in-depth; validator already gates this)
  *  - stateMap keys validated against STATEMAP_KEYS (unknown key → throws for defense-in-depth)
+ *
+ * The team roster is Layer-1 catalyst.monitor.linear.teams[] PLUS the optional
+ * `roster` arg (the cluster-sourced project roster). Pass the cluster roster so a
+ * CLUSTER-backed team — present in cluster.json.projects[] but not in Layer-1
+ * teams[] — is editable instead of 404 (CTL-1214 P2 #4). Default [] preserves the
+ * pre-cluster behavior.
  */
 export function upsertProject(
   config: Record<string, unknown>,
   key: string,
   patch: ProjectPatch,
+  roster: ReadonlyArray<{ key: string; vcsRepo: string }> = [],
 ): { ok: true; config: Record<string, unknown> } | { ok: false; reason: "unknown-key" } {
   const upperKey = key.toUpperCase();
 
   const catalyst = isRecord(config.catalyst) ? config.catalyst : {};
 
-  // Find the matching teams[] entry to seed vcsRepo on first edit
+  // Known-team roster used to (a) decide whether `key` is a real team and (b) seed
+  // vcsRepo on first edit. Layer-1 catalyst.monitor.linear.teams[] is the
+  // back-compat base; the passed cluster `roster` is overlaid (cluster wins on
+  // key conflict). Keyed by uppercase team key.
+  const teamsByKey = new Map<string, string>();
   const monitor = isRecord(catalyst.monitor) ? catalyst.monitor : {};
   const linearSection = isRecord(monitor.linear) ? monitor.linear : {};
-  const teams: Array<{ key: string; vcsRepo: string }> = [];
   if (Array.isArray(linearSection.teams)) {
     for (const t of linearSection.teams) {
       if (isRecord(t) && typeof t.key === "string" && typeof t.vcsRepo === "string") {
-        teams.push({ key: t.key.toUpperCase(), vcsRepo: t.vcsRepo });
+        teamsByKey.set(t.key.toUpperCase(), t.vcsRepo);
       }
+    }
+  }
+  for (const t of roster) {
+    if (t && typeof t.key === "string" && typeof t.vcsRepo === "string") {
+      teamsByKey.set(t.key.toUpperCase(), t.vcsRepo);
     }
   }
 
@@ -128,20 +144,20 @@ export function upsertProject(
     }
   }
 
-  // Check if key is known (either in teams[] or already in projects[])
-  const teamEntry = teams.find((t) => t.key === upperKey);
+  // Check if key is known (in the team roster or already in projects[])
+  const teamVcsRepo = teamsByKey.get(upperKey);
   const existingEntry = existing.find(
     (p) => typeof p.key === "string" && p.key.toUpperCase() === upperKey,
   );
 
-  if (!teamEntry && !existingEntry) {
+  if (teamVcsRepo === undefined && !existingEntry) {
     return { ok: false, reason: "unknown-key" };
   }
 
   // Build the new entry
   const base: Record<string, unknown> = existingEntry
     ? { ...existingEntry }
-    : { key: upperKey, vcsRepo: teamEntry?.vcsRepo ?? null };
+    : { key: upperKey, vcsRepo: teamVcsRepo ?? null };
 
   // Ensure key is canonical uppercase
   base.key = upperKey;
@@ -289,17 +305,22 @@ export function validateProjectPatch(body: unknown):
 /**
  * I/O wrapper the route calls: read → upsertProject → write (atomic).
  * THROWS on read/parse/write errors (→ 500). Returns { ok: false, reason: "unknown-key" }
- * when the key doesn't exist in teams[] or projects[] (→ 404). Never writes on unknown-key
- * (throws from inside mutate so updateCatalystConfig never reaches atomicWriteJson).
+ * when the key doesn't exist in the team roster or projects[] (→ 404). Never writes on
+ * unknown-key (throws from inside mutate so updateCatalystConfig never reaches atomicWriteJson).
+ *
+ * Resolves the cluster-sourced roster (cluster.json.projects[] → Layer-1 teams[])
+ * and passes it to upsertProject so a cluster-backed team is editable and aligned
+ * with what GET /api/projects lists (CTL-1214 P2 #4). readClusterProjects fail-opens.
  */
 export function writeProjectPatch(
   configPath: string,
   key: string,
   patch: ProjectPatch,
 ): { ok: true } | { ok: false; reason: "unknown-key" } {
+  const roster = readClusterProjects({ layer1ConfigPath: configPath });
   try {
     updateCatalystConfig(configPath, (cfg) => {
-      const result = upsertProject(cfg, key, patch);
+      const result = upsertProject(cfg, key, patch, roster);
       if (!result.ok) {
         // Throw a tagged error so updateCatalystConfig aborts before atomicWriteJson
         throw Object.assign(new Error("unknown-key"), { code: "unknown-key" });
