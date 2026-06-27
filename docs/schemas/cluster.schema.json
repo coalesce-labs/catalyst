@@ -1,0 +1,40 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/coalesce-labs/catalyst-cluster/schema/cluster.schema.json",
+  "title": "Catalyst cluster.json",
+  "description": "Schema for catalyst-cluster/cluster.json — the cluster-scope config. The canonical copy lives in the private coalesce-labs/catalyst-cluster repo (schema/cluster.schema.json); this is a vendored copy kept in the catalyst repo so all three Catalyst config scopes (repo = catalyst-config.schema.json, node = machine-config.schema.json, cluster = this file) are documented and testable together (CTL-1214). The project roster (projects[]) is the relocation target for each repo's deprecated Layer-1 monitor.linear.teams[]; the node roster (roster[]) is the relocation target for the retired .catalyst/hosts.json.",
+  "type": "object",
+  "required": ["schemaVersion", "roster"],
+  "additionalProperties": false,
+  "properties": {
+    "schemaVersion": { "type": "integer", "minimum": 1 },
+    "roster": {
+      "type": "array",
+      "description": "Node roster — host names that are live cluster members (HRW ownership domain).",
+      "items": { "type": "string", "minLength": 1 }
+    },
+    "anchorIssue": {
+      "type": ["string", "null"],
+      "description": "Linear issue key used as the cluster liveness/quota anchor."
+    },
+    "defaults": {
+      "type": "object",
+      "description": "Cluster-wide non-secret defaults (host-overridable).",
+      "additionalProperties": true
+    },
+    "projects": {
+      "type": "array",
+      "description": "Project roster — the fleet's team→repo→projectKey map (relocated from each project repo's monitor.linear.teams, design §13).",
+      "items": {
+        "type": "object",
+        "required": ["teamKey", "vcsRepo", "projectKey"],
+        "additionalProperties": false,
+        "properties": {
+          "teamKey": { "type": "string" },
+          "vcsRepo": { "type": "string" },
+          "projectKey": { "type": "string" }
+        }
+      }
+    }
+  }
+}

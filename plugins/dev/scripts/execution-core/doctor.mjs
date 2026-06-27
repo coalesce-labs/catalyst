@@ -29,6 +29,10 @@ import { readPeerHeartbeats } from "./cluster-heartbeat.mjs";
 // (sdk-run-phase-agent.mjs imports only node:* + config.mjs — no bun: protocol —
 // so it is safe to pull into this node-runnable doctor).
 import { assertSdkAuth } from "./sdk-run-phase-agent.mjs";
+// CTL-1214: reuse the single-source-of-truth Layer-1 scope-leak validator
+// (pure, no-I/O) shared with the Phase-1 config-schema tests. Lives in
+// plugins/dev/scripts/lib/ (sibling of execution-core/).
+import { validateLayer1Config, RELOCATED_LAYER1_KEYS } from "../lib/validate-catalyst-config.mjs";
 
 // readLinearBotUserIds — inlined from daemon.mjs to avoid pulling in the full
 // daemon dependency chain (which includes bun: protocol imports incompatible
@@ -1471,6 +1475,111 @@ export function checkCloudTokenEnv(deps = {}) {
   return checks;
 }
 
+// checkConfigScopeLeak — CTL-1214. Flags a committed Layer-1 .catalyst/config.json
+// that still carries node/cluster-scoped keys, or a legacy .catalyst/hosts.json
+// roster file. `.catalyst/config.json` is committed per-repo and must carry ONLY
+// project-identity fields; the project roster (monitor.linear.teams[]) belongs in
+// the CLUSTER scope (catalyst-cluster/cluster.json → projects[]), and repoColors /
+// the orchestration.*/feedback.*/sweep.* stanzas belong in the NODE scope
+// (~/.config/catalyst/config.json). Carrying them in the committed repo config
+// leaks machine/cluster state into version control (and violates CLAUDE.md's
+// "keep PROJ / keep null / don't commit Linear IDs" rule).
+//
+// Reuses the single-source-of-truth leak-category list (RELOCATED_LAYER1_KEYS) +
+// pure validator (validateLayer1Config) from lib/validate-catalyst-config.mjs —
+// the same module the Phase-1 schema tests exercise — so there is exactly one
+// definition of "what leaks". Back-compat: presence of a relocated key does NOT
+// invalidate the config at runtime; this check is an advisory migration tracker
+// (STATUS.WARN, never FAIL during the back-compat window) that tells operators
+// which repos still need slimming. It must stay WARN until Phase 6 slims the
+// committed configs, because runDoctor's exit code = FAIL count and
+// catalyst-join.sh gates member activation on doctor exit 0.
+//
+// Injected deps (all have real defaults):
+//   readLayer1      — () => string   (raw Layer-1 config body; "" when absent)
+//   hostsJsonExists — () => boolean  (.catalyst/hosts.json present in this repo?)
+export function checkConfigScopeLeak(deps = {}) {
+  const {
+    readLayer1 = () => {
+      try {
+        return readFileSync(layer1Path(), "utf8");
+      } catch {
+        return "";
+      }
+    },
+    hostsJsonExists = () => existsSync(resolve(_repoRoot(), ".catalyst", "hosts.json")),
+  } = deps;
+
+  const checks = [];
+
+  const body = readLayer1();
+  let parsed = null;
+  if (body) {
+    try {
+      parsed = JSON.parse(body);
+    } catch {
+      checks.push(
+        mkCheck(
+          "config-scope-leak",
+          STATUS.INFO,
+          "Layer-1 .catalyst/config.json is unreadable/malformed — cannot check for scope leaks",
+        ),
+      );
+      return checks;
+    }
+  }
+
+  const { deprecatedKeys } = validateLayer1Config(parsed ?? {});
+  const hostsLeak = hostsJsonExists();
+
+  if (deprecatedKeys.length === 0 && !hostsLeak) {
+    checks.push(
+      mkCheck(
+        "config-scope-leak",
+        STATUS.PASS,
+        "Layer-1 .catalyst/config.json carries only project-identity fields (no node/cluster scope leak)",
+      ),
+    );
+    return checks;
+  }
+
+  // Name each leaked stanza + its correct destination so the remediation is actionable.
+  const leaks = [];
+  for (const key of deprecatedKeys) {
+    const entry = RELOCATED_LAYER1_KEYS.find((e) => e.path === key);
+    const dest = entry ? `${entry.scope} scope → ${entry.destination}` : "node/cluster scope";
+    leaks.push(`catalyst.${key} (relocate to ${dest})`);
+  }
+  if (hostsLeak) {
+    leaks.push(
+      ".catalyst/hosts.json (roster relocates to cluster scope → catalyst-cluster/cluster.json → roster)",
+    );
+  }
+
+  checks.push(
+    mkCheck(
+      "config-scope-leak",
+      // WARN, not FAIL, during the back-compat migration window (CTL-1214). runDoctor
+      // returns the FAIL count as the process exit code, and catalyst-join.sh
+      // do_doctor_gate() gates cluster-member activation strictly on exit 0
+      // (run_stage "doctor" do_doctor_gate || exit 1). The committed Layer-1
+      // .catalyst/config.json is NOT yet slimmed (Phase 6 deferred), so EVERY node
+      // today still carries these relocated keys. Emitting FAIL here would make
+      // `catalyst doctor` exit non-zero on every host and fail-close the join gate —
+      // a runtime regression, contradicting the "purely observational" contract.
+      // This mirrors checkReaper's deliberate WARN ("a FAILing reaper check would
+      // BLOCK a node from self-healing via join"). Promote to FAIL only after Phase 6
+      // slims the committed configs.
+      STATUS.WARN,
+      `Layer-1 .catalyst/config.json carries node/cluster-scoped keys (advisory migration tracker): ${leaks.join("; ")}. ` +
+        `Remediation: run plugins/dev/scripts/migrate-config-to-node.sh to seed the node config ` +
+        `(~/.config/catalyst/config.json), move the project roster into ` +
+        `catalyst-cluster/cluster.json, then remove these keys from the committed .catalyst/config.json.`,
+    ),
+  );
+  return checks;
+}
+
 // runDoctor — orchestrate all checks, render, and return the fail count.
 export async function runDoctor(opts = {}) {
   const {
@@ -1498,6 +1607,7 @@ export async function runDoctor(opts = {}) {
     () => checkReaper(), // CTL-1306: orphan-sweep reaper installed + baked path still exists (not dead-127)
     () => checkCloudTokenEnv(), // CTL-1307: cluster cloud token decrypted → projected to machine-level env (advisory)
     () => checkSdkExecutorAuth(), // CTL-1367 item 9: under executor=sdk, subscription auth must be correct (no api-key metering)
+    () => checkConfigScopeLeak(), // CTL-1214: committed Layer-1 .catalyst/config.json must not carry node/cluster scope (roster/orchestration/feedback/sweep/repoColors/hosts.json)
   ];
 
   const fns = checkFns ?? defaultChecks;

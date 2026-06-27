@@ -3,7 +3,7 @@
 // signal-writer.test.ts). Pure functions (upsertProject, validateProjectPatch)
 // are exercised here as well as via the Phase 2 endpoint tests.
 
-import { describe, it, expect } from "bun:test";
+import { describe, it, expect, beforeEach, afterEach } from "bun:test";
 import { mkdtempSync, writeFileSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -188,6 +188,31 @@ describe("upsertProject (CTL-1153)", () => {
     const entry = ((r as any).config.catalyst.projects as Array<Record<string, unknown>>)[0];
     expect(entry.stateMap).toEqual({ inReview: "Code Review" });
   });
+
+  it("CTL-1214 P2 #4: a cluster-backed team (roster arg, not Layer-1 teams[]) is editable + seeds vcsRepo", () => {
+    // BASE_CONFIG's Layer-1 teams[] only carries CTL; ADV exists only in the
+    // cluster roster. Passing it via the roster arg makes ADV a known, editable key
+    // and seeds its vcsRepo from the cluster entry.
+    const r = upsertProject(cfg as Record<string, unknown>, "ADV", { color: "blue" }, [
+      { key: "ADV", vcsRepo: "groundworkapp/Adva" },
+    ]);
+    expect(r.ok).toBe(true);
+    const entry = ((r as { config: Record<string, unknown> }).config.catalyst as Record<string, unknown>)
+      .projects as Array<Record<string, unknown>>;
+    expect(entry.find((p) => p.key === "ADV")).toEqual({
+      key: "ADV",
+      vcsRepo: "groundworkapp/Adva",
+      color: "blue",
+    });
+  });
+
+  it("CTL-1214 P2 #4: a key absent from BOTH Layer-1 teams[] and the roster is still unknown-key", () => {
+    const r = upsertProject(cfg as Record<string, unknown>, "NOPE", { color: "green" }, [
+      { key: "ADV", vcsRepo: "groundworkapp/Adva" },
+    ]);
+    expect(r.ok).toBe(false);
+    expect((r as { reason: string }).reason).toBe("unknown-key");
+  });
 });
 
 // ── validateProjectPatch ──────────────────────────────────────────────────────
@@ -322,6 +347,49 @@ describe("writeProjectPatch (CTL-1153)", () => {
       expect(ctl?.icon).toBeUndefined();
     } finally {
       rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+// ── writeProjectPatch — cluster-backed roster (CTL-1214 P2 #4) ──────────────────
+
+describe("writeProjectPatch — cluster-backed roster (CTL-1214 P2 #4)", () => {
+  let savedClusterDir: string | undefined;
+  beforeEach(() => {
+    savedClusterDir = process.env.CATALYST_CLUSTER_DIR;
+  });
+  afterEach(() => {
+    if (savedClusterDir === undefined) delete process.env.CATALYST_CLUSTER_DIR;
+    else process.env.CATALYST_CLUSTER_DIR = savedClusterDir;
+  });
+
+  it("persists an overlay for a team that exists only in cluster.json (not Layer-1 teams[])", () => {
+    const clusterDir = mkdtempSync(join(tmpdir(), "cw-cluster-"));
+    const repoDir = mkdtempSync(join(tmpdir(), "cw-repo-"));
+    try {
+      writeFileSync(
+        join(clusterDir, "cluster.json"),
+        JSON.stringify({
+          schemaVersion: 1,
+          roster: ["mini"],
+          projects: [{ teamKey: "ADV", vcsRepo: "groundworkapp/Adva", projectKey: "adva" }],
+        }),
+      );
+      process.env.CATALYST_CLUSTER_DIR = clusterDir;
+      // Layer-1 carries NO monitor.linear.teams[] — ADV is known ONLY via the cluster
+      // roster, so the pre-CTL-1214 PUT path would 404 it.
+      const layer1 = join(repoDir, "config.json");
+      writeFileSync(layer1, JSON.stringify({ catalyst: { projectKey: "x" } }, null, 2) + "\n");
+
+      const r = writeProjectPatch(layer1, "ADV", { color: "blue" });
+      expect(r.ok).toBe(true);
+      const after = JSON.parse(readFileSync(layer1, "utf8"));
+      expect(after.catalyst.projects).toContainEqual(
+        expect.objectContaining({ key: "ADV", vcsRepo: "groundworkapp/Adva", color: "blue" }),
+      );
+    } finally {
+      rmSync(clusterDir, { recursive: true, force: true });
+      rmSync(repoDir, { recursive: true, force: true });
     }
   });
 });

@@ -13,6 +13,12 @@
       "additionalProperties": false,
       "required": [],
       "properties": {
+        "schemaVersion": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Config schema version (CTL-1214). RECOMMENDED, not required, during the back-compat migration window: a not-yet-slimmed config that omits it still validates (Phase 6 — which slims the committed configs and promotes schemaVersion to required — is deferred). When present it must be an integer >= 1. Version 1 is the slimmed project-identity schema: only projectKey, project.ticketPrefix, linear.{teamKey,teamId,stateMap,stateIds}, monitor.linear.botUserId/monitor.suppressVersionWarning, and thoughts.* are canonical Layer-1 fields. The monitor.linear.teams project roster relocates to the cluster scope (catalyst-cluster/cluster.json.projects[]); monitor.github.repoColors and the orchestration.* / feedback.* / sweep.* stanzas relocate to the node scope (~/.config/catalyst/config.json). Those relocated keys are marked deprecated but remain permitted during the back-compat migration window and are flagged by `catalyst doctor`.",
+          "examples": [1]
+        },
         "projectKey": {
           "type": "string",
           "description": "Short identifier for this project, used as a namespace for machine-config lookup (~/.config/catalyst/config-{projectKey}.json) and as a display label.",
@@ -114,7 +120,8 @@
               "properties": {
                 "repoColors": {
                   "type": "object",
-                  "description": "Maps repository full names (owner/repo) to CSS color strings for color-coding in the monitor dashboard.",
+                  "deprecated": true,
+                  "description": "DEPRECATED (CTL-1214) — relocated to the node scope ~/.config/catalyst/config.json → catalyst.monitor.github.repoColors. A node-scoped operator display preference, not a repo invariant. Still permitted here during the back-compat window. Maps repository full names (owner/repo) to CSS color strings for color-coding in the monitor dashboard.",
                   "additionalProperties": {
                     "type": "string",
                     "description": "A CSS color string (e.g. '#4A90E2', 'blue')."
@@ -132,7 +139,8 @@
               "properties": {
                 "teams": {
                   "type": "array",
-                  "description": "List of Linear teams to display in the monitor, each linked to a VCS repository.",
+                  "deprecated": true,
+                  "description": "DEPRECATED (CTL-1214) — relocated to the cluster scope catalyst-cluster/cluster.json → projects[] ({teamKey,vcsRepo,projectKey}). The project roster is a fleet/cluster invariant, not per-repo. Still permitted here during the back-compat window (monitor readers prefer the cluster roster and fall back to this). List of Linear teams to display in the monitor, each linked to a VCS repository.",
                   "items": {
                     "type": "object",
                     "required": ["key", "vcsRepo"],
@@ -161,7 +169,8 @@
         },
         "orchestration": {
           "type": "object",
-          "description": "Orchestration engine settings controlling how Catalyst dispatches and manages agent work.",
+          "deprecated": true,
+          "description": "DEPRECATED (CTL-1214) — relocated to the node scope ~/.config/catalyst/config.json → catalyst.orchestration.*. Node/machine tuning, not a repo invariant. Still permitted here during the back-compat window (readers prefer Layer-2 and fall back to this). Orchestration engine settings controlling how Catalyst dispatches and manages agent work.",
           "additionalProperties": false,
           "properties": {
             "dispatchMode": {
@@ -169,6 +178,28 @@
               "enum": ["phase-agents", "oneshot-legacy"],
               "default": "phase-agents",
               "description": "Selects the orchestration strategy. 'phase-agents' runs one short-lived claude --bg job per pipeline phase (triage→research→plan→implement→verify→review→pr→monitor-merge→monitor-deploy→teardown). 'oneshot-legacy' runs a single long-lived claude -p /catalyst-legacy:oneshot job per ticket. Default is 'phase-agents'."
+            },
+            "worktreeRefresh": {
+              "type": "object",
+              "description": "Periodic background worktree-refresh settings (CTL-707 L1). Keeps idle running worktrees rebased onto origin/<base>. Relocated to the node scope ~/.config/catalyst/config.json with this Layer-1 location retained as fallback.",
+              "additionalProperties": false,
+              "properties": {
+                "enabled": {
+                  "type": "boolean",
+                  "default": true,
+                  "description": "When false, the periodic worktree-refresh timer is disabled."
+                },
+                "intervalSeconds": {
+                  "type": "number",
+                  "default": 300,
+                  "description": "How often (in seconds) the worktree-refresh timer runs."
+                },
+                "quietSeconds": {
+                  "type": "number",
+                  "default": 30,
+                  "description": "Minimum quiet period (in seconds) since the last worktree write before a refresh is attempted."
+                }
+              }
             },
             "executionCore": {
               "type": "object",
@@ -404,7 +435,8 @@
         },
         "feedback": {
           "type": "object",
-          "description": "Automatic feedback filing settings. When enabled, agents can file issues to a GitHub repository when they encounter unexpected behavior.",
+          "deprecated": true,
+          "description": "DEPRECATED (CTL-1214) — relocated to the node scope ~/.config/catalyst/config.json → catalyst.feedback.*. A node-scoped operator preference, not a repo invariant. Still permitted here during the back-compat window (readers prefer Layer-2 and fall back to this). Automatic feedback filing settings. When enabled, agents can file issues to a GitHub repository when they encounter unexpected behavior.",
           "additionalProperties": false,
           "properties": {
             "autoFile": {
@@ -423,6 +455,35 @@
                 "type": "string"
               },
               "examples": [["auto-filed", "agent-feedback"]]
+            }
+          }
+        },
+        "sweep": {
+          "type": "object",
+          "deprecated": true,
+          "description": "DEPRECATED (CTL-1214) — relocated to the node scope ~/.config/catalyst/config.json → catalyst.sweep.*. Node-scoped machine tuning consumed by orphan-sweep.sh, not a repo invariant. Still permitted here during the back-compat window (readers prefer Layer-2, fall back to this, then code defaults 48/2/false/20). Orphan-worktree sweep thresholds.",
+          "additionalProperties": false,
+          "properties": {
+            "idleHours": {
+              "type": "number",
+              "default": 48,
+              "description": "A worktree must be idle at least this many hours before the orphan sweep removes it."
+            },
+            "intervalHours": {
+              "type": "number",
+              "default": 2,
+              "description": "How often (in hours) the orphan sweep runs."
+            },
+            "salvagePush": {
+              "type": "boolean",
+              "default": false,
+              "description": "When true, the sweep pushes any unpushed commits on a removed worktree's branch before deleting it."
+            },
+            "maxRemovalsPerRun": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 20,
+              "description": "Maximum number of worktrees removed per sweep run."
             }
           }
         },

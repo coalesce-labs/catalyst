@@ -1,5 +1,6 @@
 import { readFileSync } from "fs";
 import { join } from "path";
+import { readClusterProjects, type TeamEntry } from "./cluster-roster";
 
 export interface WebhookCliConfig {
   smeeChannel: string;
@@ -44,15 +45,18 @@ export interface WebhookCliConfig {
    */
   linearBotUserIds: ReadonlySet<string>;
   /**
-   * Optional team→repo mapping read from `catalyst.monitor.linear.teams[]` in
-   * Layer 1 (project config). Each entry is `{ key, vcsRepo }` where `key` is
+   * Optional team→repo roster. Each entry is `{ key, vcsRepo }` where `key` is
    * the Linear team short key (e.g. "CTL") and `vcsRepo` is the canonical
    * `owner/repo` string written into `attributes["vcs.repository.name"]` for
    * issue/comment/cycle events from that team. Empty array when not configured —
    * the Linear webhook handler then leaves the repo attribute unset (current
    * pre-CTL-362 behaviour). CTL-362.
+   *
+   * CTL-1214 Phase 2: sourced through the shared `readClusterProjects()` —
+   * cluster.json.projects[] first, Layer-1 `catalyst.monitor.linear.teams[]` as
+   * the back-compat fallback — so the roster precedence is defined in one place.
    */
-  linearTeams: Array<{ key: string; vcsRepo: string }>;
+  linearTeams: TeamEntry[];
   /**
    * OAuth app-actor credentials for the Catalyst Linear identity (CTL-550).
    * Loaded from the project-specific Layer-2 config
@@ -80,8 +84,6 @@ interface FileExtract {
   linearSmeeChannel: string | null;
   /** Linear bot user UUID for loop prevention, from Layer 1 (project). CTL-263. */
   linearBotUserId: string | null; // single string; assembled into a Set in loadWebhookConfig
-  /** Linear team→repo map from Layer 1 (project). CTL-362. */
-  linearTeams: Array<{ key: string; vcsRepo: string }>;
 }
 
 let warnedDeprecatedSmeeChannel = false;
@@ -203,42 +205,10 @@ function isRecord(x: unknown): x is Record<string, unknown> {
   return typeof x === "object" && x !== null && !Array.isArray(x);
 }
 
-// CTL-362: parse `catalyst.monitor.linear.teams[]` into a list of
-// `{ key, vcsRepo }` pairs. Skips entries with missing keys or repos that
-// don't match the `owner/repo` shape — same lenient-with-warnings behaviour
-// as `readWatchRepos`. Deduplicates by `key` (last entry wins, with a warn).
-function readLinearTeams(
-  linear: Record<string, unknown>,
-): Array<{ key: string; vcsRepo: string }> {
-  const raw = linear.teams;
-  if (!Array.isArray(raw)) return [];
-  const byKey = new Map<string, string>();
-  for (const entry of raw) {
-    if (!isRecord(entry)) {
-      console.warn(`[webhook-config] Ignoring linear.teams entry — not an object: ${JSON.stringify(entry)}`);
-      continue;
-    }
-    const key = typeof entry.key === "string" ? entry.key.trim() : "";
-    const vcsRepo = typeof entry.vcsRepo === "string" ? entry.vcsRepo.trim() : "";
-    if (key.length === 0) {
-      console.warn(`[webhook-config] Ignoring linear.teams entry with empty "key"`);
-      continue;
-    }
-    if (vcsRepo.length === 0 || !REPO_SHAPE.test(vcsRepo)) {
-      console.warn(
-        `[webhook-config] Ignoring linear.teams entry for key "${key}" — vcsRepo "${vcsRepo}" must match "owner/repo".`,
-      );
-      continue;
-    }
-    if (byKey.has(key)) {
-      console.warn(
-        `[webhook-config] Duplicate linear.teams entry for key "${key}" — last entry wins ("${vcsRepo}").`,
-      );
-    }
-    byKey.set(key, vcsRepo);
-  }
-  return Array.from(byKey.entries()).map(([key, vcsRepo]) => ({ key, vcsRepo }));
-}
+// CTL-362 / CTL-1214 Phase 2: the team→repo roster is no longer parsed here.
+// It is resolved once, in `loadWebhookConfig`, through the shared
+// `readClusterProjects()` (cluster.json.projects[] → Layer-1 monitor.linear.teams[]),
+// so the roster precedence lives in a single place (lib/cluster-roster.ts).
 
 // Extract the Linear smee channel URL from a linear config object. Prefers the
 // top-level smeeChannel (legacy / current normal case) and falls back to the
@@ -302,7 +272,6 @@ function readGithubSection(filePath: string): FileExtract | null {
     linear !== null && typeof linear.botUserId === "string" && linear.botUserId.length > 0
       ? linear.botUserId
       : null;
-  const linearTeams = linear !== null ? readLinearTeams(linear) : [];
 
   return {
     smeeChannel,
@@ -311,7 +280,6 @@ function readGithubSection(filePath: string): FileExtract | null {
     linearWebhookSecretEnv,
     linearSmeeChannel,
     linearBotUserId,
-    linearTeams,
   };
 }
 
@@ -486,8 +454,11 @@ export function loadWebhookConfig(
   const layer1BotUserId = projectExtract?.linearBotUserId ?? "";
   if (layer1BotUserId.length > 0) linearBotUserIds.add(layer1BotUserId);
 
-  // Linear team→repo map. Layer 1 only — team-shared, committed. CTL-362.
-  const linearTeams = projectExtract?.linearTeams ?? [];
+  // Linear team→repo roster. CTL-1214 Phase 2: resolved through the shared
+  // readClusterProjects() — cluster.json.projects[] first, Layer-1
+  // catalyst.monitor.linear.teams[] (the projectConfigPath) as the back-compat
+  // fallback. One precedence definition for every roster consumer. CTL-362.
+  const linearTeams = readClusterProjects({ layer1ConfigPath: projectConfigPath });
 
   // Linear app-actor credentials. Project-specific Layer-2 only. CTL-550.
   const linearAgentConfig = loadLinearAgentConfig(homeConfigDir, projectKey);
