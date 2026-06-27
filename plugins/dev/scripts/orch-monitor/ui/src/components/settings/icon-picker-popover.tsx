@@ -28,6 +28,7 @@ import {
 import { NAMED_COLORS } from "@/lib/color-palette";
 import { ProjectMarkIcon } from "@/components/project-mark-icon";
 import { enumeratePhosphorGlyphNames, useManifestLoadFailed } from "@/lib/phosphor-icons";
+import { hardRecoverAndReload } from "@/lib/sw-recovery";
 import {
   buildBasePickerItems,
   buildAllGlyphItems,
@@ -337,8 +338,8 @@ export function IconPickerPopover({ value, onChange, candidates, hue }: IconPick
                   <span>Some icons couldn&apos;t load.</span>
                   <button
                     type="button"
-                    onClick={() => window.location.reload()}
-                    title="Reload the page to fetch the latest icon assets"
+                    onClick={() => void hardRecoverAndReload()}
+                    title="Clear the cached app shell and reload to fetch the latest icon assets"
                     className="rounded-sm px-1.5 py-0.5 font-medium text-foreground hover:bg-accent focus:outline-none focus-visible:ring-1 focus-visible:ring-ring"
                   >
                     Reload
