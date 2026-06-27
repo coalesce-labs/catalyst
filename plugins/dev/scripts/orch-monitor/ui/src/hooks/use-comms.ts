@@ -5,6 +5,14 @@ import type {
   CommsMessage,
 } from "@/lib/types";
 
+// CTL-1372: cap the per-connection retained comms-message buffer. The `message`
+// SSE handler below appends every newly-streamed message; without a bound a
+// long-lived, continuously-connected channel view grows the array (and its
+// non-virtualized DOM list) without limit over hours. Matches the sibling SSE
+// hooks' caps (use-monitor MAX_EVENTS=200, use-activity MAX_EVENTS=500, board
+// live-tail LIVE_BUFFER_CAP=500). Drop-oldest, retaining the newest 500.
+const MAX_COMMS_MESSAGES = 500;
+
 export type CommsStatus = "loading" | "ok" | "empty" | "error";
 
 interface UseCommsChannelsResult {
@@ -141,7 +149,11 @@ export function useCommsStream(
           const current = detailRef.current;
           if (!current) return;
           if (current.messages.some((m) => m.id === msg.id)) return;
-          const nextMessages = [...current.messages, msg];
+          const appended = [...current.messages, msg];
+          const nextMessages =
+            appended.length > MAX_COMMS_MESSAGES
+              ? appended.slice(appended.length - MAX_COMMS_MESSAGES)
+              : appended;
           const nextDetail: CommsChannelDetail = {
             ...current,
             messages: nextMessages,

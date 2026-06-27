@@ -96,6 +96,13 @@ export function TokenDonutPanel({ tokens, cacheHitRate }: TokenDonutPanelProps) 
             outerRadius={78}
             strokeWidth={2}
             paddingAngle={2}
+            // CTL-1372: disable per-refresh animation. This panel re-renders on
+            // the 15s OBSERVE poll cadence; recharts' react-smooth animation
+            // manager allocates tween state + retains the prior SVG subtree on
+            // every re-animation, which over a long-lived (overnight) session
+            // ratchets renderer memory. Matches the board charts' hardening
+            // (activity-timeline.tsx / worker-burn-chart.tsx).
+            isAnimationActive={false}
           >
             <Label
               content={({ viewBox }) => {
