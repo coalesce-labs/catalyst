@@ -22,6 +22,7 @@ const ENVS = [
   "CATALYST_CONFIG_FILE",
   "CATALYST_CONFIG_PATH",
   "CATALYST_WEBHOOK_SECRET",
+  "CATALYST_LAYER2_CONFIG_FILE",
 ];
 
 describe("readClusterProjects (CTL-1214 Phase 2)", () => {
@@ -57,6 +58,9 @@ describe("readClusterProjects (CTL-1214 Phase 2)", () => {
     // test writes one. Point the resolver at it so the host's real cluster repo
     // is never consulted.
     process.env.CATALYST_CLUSTER_DIR = clusterDir;
+    // Isolate loadMonitorConfig's default Layer-2 read from the host's real
+    // ~/.config/catalyst/config.json (CTL-1214 P2 #3 reads repoColors from Layer-2).
+    process.env.CATALYST_LAYER2_CONFIG_FILE = join(homeDir, "no-layer2.json");
   });
 
   afterEach(() => {
@@ -197,6 +201,63 @@ describe("readClusterProjects (CTL-1214 Phase 2)", () => {
       adva: "groundworkapp/Adva",
     });
     // repoColors still read from Layer-1.
+    expect(cfg.repoColors["coalesce-labs/catalyst"]).toBe("green");
+  });
+
+  it("monitor-config reads repoColors from Layer-2 first, falling back to Layer-1 (CTL-1214 P2 #3)", () => {
+    const layer1 = layer1Path();
+    const layer2 = join(homeDir, "layer2.json");
+    // Layer-1 (back-compat) carries colors for two repos; Layer-2 (node scope)
+    // OVERRIDES one and adds a third. The merge: Layer-2 wins per-key, Layer-1-only
+    // survives.
+    writeFileSync(
+      layer1,
+      JSON.stringify({
+        catalyst: {
+          monitor: {
+            github: {
+              repoColors: {
+                "coalesce-labs/catalyst": "green", // overridden by Layer-2
+                "coalesce-labs/legacy": "amber", // Layer-1-only → retained
+              },
+            },
+          },
+        },
+      }),
+    );
+    writeFileSync(
+      layer2,
+      JSON.stringify({
+        catalyst: {
+          monitor: {
+            github: {
+              repoColors: {
+                "coalesce-labs/catalyst": "blue", // Layer-2 wins
+                "coalesce-labs/adva": "red", // Layer-2-only
+              },
+            },
+          },
+        },
+      }),
+    );
+    const noRegistry = join(repoDir, "no-registry.json");
+    const cfg = loadMonitorConfig(layer1, noRegistry, layer2);
+    expect(cfg.repoColors["coalesce-labs/catalyst"]).toBe("blue"); // Layer-2 override wins
+    expect(cfg.repoColors["coalesce-labs/adva"]).toBe("red"); // Layer-2-only
+    expect(cfg.repoColors["coalesce-labs/legacy"]).toBe("amber"); // Layer-1 fallback retained
+  });
+
+  it("monitor-config repoColors falls back to Layer-1 when Layer-2 has none (back-compat)", () => {
+    const layer1 = layer1Path();
+    writeFileSync(
+      layer1,
+      JSON.stringify({
+        catalyst: { monitor: { github: { repoColors: { "coalesce-labs/catalyst": "green" } } } },
+      }),
+    );
+    const noRegistry = join(repoDir, "no-registry.json");
+    // Layer-2 path is absent → Layer-1 colors stand.
+    const cfg = loadMonitorConfig(layer1, noRegistry, join(homeDir, "absent-layer2.json"));
     expect(cfg.repoColors["coalesce-labs/catalyst"]).toBe("green");
   });
 
