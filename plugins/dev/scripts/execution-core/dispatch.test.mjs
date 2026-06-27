@@ -9,7 +9,7 @@ import { describe, test, expect } from "bun:test";
 import { mkdtempSync, writeFileSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { dispatchTicket, defaultDispatch, defaultRunPhaseAgent, dispatchForExecutor, sdkDispatch, makeCommentWakeDispatch, teamOf, settleDispatchSync, sdkSignalRunnable, isThenable } from "./dispatch.mjs";
+import { dispatchTicket, defaultDispatch, defaultRunPhaseAgent, dispatchForExecutor, sdkDispatch, makeCommentWakeDispatch, teamOf, settleDispatchSync, sdkSignalRunnable, isThenable, backstopOnRejection } from "./dispatch.mjs";
 
 describe("teamOf", () => {
   test("extracts the team prefix from a ticket identifier", () => {
@@ -925,6 +925,79 @@ describe("settleDispatchSync (CTL-1367 P1)", () => {
     expect(r.code).toBe(0); // launch already happened (signal verified)
     await Promise.resolve(); await Promise.resolve();
     expect(err?.message).toBe("boom"); // captured by the detached handler, not thrown
+  });
+});
+
+// ── CTL-1367 P1: backstopOnRejection — the swallowed-rejection backstop ───────
+//
+// The three async-dispatch entry points (scheduler, monitor triage, recovery revive)
+// thread this onSettled handler into settleDispatchSync. A REJECTED async dispatch
+// (e.g. buildSdkEnv/buildQueryOptions throwing AFTER the synchronous prelaunch wrote
+// a runnable "dispatched" signal) must NOT be silently swallowed: the handler logs
+// the rejection and emits the failed-terminal backstop so the ticket can't strand at
+// "dispatched" with no bg_job_id/liveness probe.
+describe("backstopOnRejection (CTL-1367 P1)", () => {
+  const fakeLog = () => {
+    const warns = [];
+    return { warns, warn: (...a) => warns.push(a) };
+  };
+
+  test("on a REJECTION → logs + emits the failed backstop with the composed signalFile", () => {
+    const calls = [];
+    const logger = fakeLog();
+    const handler = backstopOnRejection(
+      { orchDir: "/ec", ticket: "CTL-7", phase: "implement", log: logger },
+      { emitBackstop: (a) => calls.push(a) },
+    );
+    handler(null, new Error("buildSdkEnv exploded"));
+    expect(logger.warns).toHaveLength(1);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toMatchObject({
+      phase: "implement",
+      ticket: "CTL-7",
+      status: "failed",
+      orchDir: "/ec",
+      signalFile: "/ec/workers/CTL-7/phase-implement.json",
+    });
+    expect(calls[0].reason).toMatch(/buildSdkEnv exploded/);
+  });
+
+  test("on a clean RESOLUTION → NO log, NO backstop (the worker/skill owns its terminal event)", () => {
+    const calls = [];
+    const logger = fakeLog();
+    const handler = backstopOnRejection(
+      { orchDir: "/ec", ticket: "CTL-8", phase: "triage", log: logger },
+      { emitBackstop: (a) => calls.push(a) },
+    );
+    handler({ code: 0 }, null);
+    expect(calls).toHaveLength(0);
+    expect(logger.warns).toHaveLength(0);
+  });
+
+  test("a throwing emitBackstop never escapes (best-effort)", () => {
+    const logger = fakeLog();
+    const handler = backstopOnRejection(
+      { orchDir: "/ec", ticket: "CTL-9", phase: "verify", log: logger },
+      { emitBackstop: () => { throw new Error("emit boom"); } },
+    );
+    expect(() => handler(null, new Error("rejected"))).not.toThrow();
+  });
+
+  test("wired through settleDispatchSync: a rejecting Promise drives the backstop", async () => {
+    const calls = [];
+    const logger = fakeLog();
+    const r = settleDispatchSync(Promise.reject(new Error("non-array spec.env")), {
+      verifySync: () => true, // prelaunch signal was runnable → launch already happened
+      onSettled: backstopOnRejection(
+        { orchDir: "/ec", ticket: "CTL-10", phase: "implement", log: logger },
+        { emitBackstop: (a) => calls.push(a) },
+      ),
+    });
+    expect(r).toEqual({ code: 0, async: true }); // provisional success off the prelaunch signal
+    await Promise.resolve(); await Promise.resolve(); // let the detached handler run
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toMatchObject({ ticket: "CTL-10", phase: "implement", status: "failed" });
+    expect(calls[0].reason).toMatch(/non-array spec.env/);
   });
 });
 

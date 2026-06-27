@@ -126,9 +126,21 @@ export class Semaphore {
   // CTL-1367 item 10: re-size in place. The old sharedSemaphore() replaced the
   // whole instance when maxParallel changed, abandoning parked waiters (their
   // promises never resolved → deadlock). Mutating `max` keeps every parked waiter
-  // attached; a raised cap is observed by the next `_release`/`acquire`.
+  // attached.
+  //
+  // CTL-1367 nit (P3): on a GROW, eagerly wake parked waiters into the newly-created
+  // slots (FIFO) instead of leaving them parked until the next `_release`. Each woken
+  // waiter takes a NEW slot, so active++ here (NOT a hand-off transfer like
+  // `_release`, where the count stays constant). The loop condition `_active < max`
+  // bounds it so active can never exceed the (raised) cap. A SHRINK only lowers `max`;
+  // already-held slots drain naturally as their holders release.
   setMax(max) {
     this.max = Math.max(1, Number.isFinite(max) ? Math.floor(max) : 1);
+    while (this._active < this.max && this._waiters.length > 0) {
+      const next = this._waiters.shift();
+      this._active += 1;
+      next();
+    }
   }
 }
 
@@ -185,6 +197,54 @@ export function assertSdkAuth({ env = process.env, oauthToken } = {}) {
     };
   }
   return { ok: true, reason: null };
+}
+
+// resolveSdkBootExecutor — CTL-1367 item 9 + P3 observability. The DAEMON-BOOT
+// executor gate: if executor=sdk but the subscription-auth precondition fails
+// (ANTHROPIC_API_KEY set → would silently meter, or CLAUDE_CODE_OAUTH_TOKEN missing →
+// nothing to authenticate the subscription), degrade the WHOLE boot to "bg" rather
+// than letting every per-dispatch sdk attempt refuse/meter. Beyond the existing WARN
+// log it ALSO emits a structured observability event so the silent bg-fallback is
+// VISIBLE in monitoring — this matters because the daemon's launchd env can diverge
+// from doctor's PASS (the operator shell that ran doctor has the OAuth token; the
+// daemon may not), and without an event the divergence is invisible. Pure +
+// best-effort: `assertAuth`/`emitEvent`/`log` are injectable; emit/log throws are
+// swallowed; returns the effective executor regardless. For executor != "sdk" it is
+// a pure pass-through (no auth check, no event) → byte-identical to bg/oneshot-legacy.
+export function resolveSdkBootExecutor(
+  executor,
+  {
+    env = process.env,
+    oauthToken = env.CLAUDE_CODE_OAUTH_TOKEN,
+    assertAuth = assertSdkAuth,
+    emitEvent, // ({ "event.name", payload }) => append to the unified event log
+    log: logger,
+  } = {},
+) {
+  if (executor !== "sdk") return { executor, fellBack: false, reason: null };
+  const auth = assertAuth({ env, oauthToken });
+  if (auth.ok) return { executor, fellBack: false, reason: null };
+  if (logger?.warn) {
+    try {
+      logger.warn(
+        { reason: auth.reason },
+        "execution-core: executor=sdk requested but the subscription-auth precondition FAILED — falling back to executor=bg for this boot (fix the env and restart to arm sdk)",
+      );
+    } catch {
+      /* logging must never break boot */
+    }
+  }
+  if (emitEvent) {
+    try {
+      emitEvent({
+        "event.name": "execution-core.executor.bg-fallback",
+        payload: { requested: "sdk", effective: "bg", reason: auth.reason },
+      });
+    } catch {
+      /* best-effort observability — never break boot */
+    }
+  }
+  return { executor: "bg", fellBack: true, reason: auth.reason };
 }
 
 // ── Default seams (overridable for tests; default = real) ───────────────────
@@ -255,6 +315,16 @@ export function defaultEmitBackstop(
   } catch (err) {
     res = { error: err };
   }
+  // CTL-1367 item 5 + P3 (DOCUMENTED DECISION): fall back to the direct event-log
+  // append whenever the emit binary did NOT cleanly succeed — INCLUDING a non-zero
+  // exit, not only a spawn error / ENOENT. A non-zero exit where the binary already
+  // WROTE the event then failed afterward yields a DUPLICATE terminal event, but
+  // phase-advance is IDEMPOTENT (the broker/advance dedupes on the terminal-status
+  // signal), so a duplicate is harmless. The opposite tradeoff — falling back ONLY on
+  // a spawn error — would SILENTLY DROP the terminal event whenever the binary exits
+  // non-zero BEFORE writing (bad args, a pre-write crash), reintroducing the exact
+  // silent-stall this backstop exists to prevent. We deliberately prefer a harmless
+  // duplicate over a possible silent drop.
   const emitFailed =
     !res || res.error != null || (typeof res.status === "number" && res.status !== 0);
   if (emitFailed) {
@@ -288,11 +358,35 @@ export function scrubSecrets(s, secrets = []) {
   return out;
 }
 
+// CTL-1367 P3: the phase-signal statuses the backstop must NEVER clobber — a
+// TERMINAL status the phase SKILL (or a prior backstop) already wrote. Flipping a
+// done/complete SUCCESS to "stalled" would falsely strand a phase that actually
+// finished; the backstop's job is only to rescue a still-in-flight
+// (dispatched/running) signal whose worker died without emitting its own terminal
+// event. Mirrors signal-reader.mjs's TERMINAL set (done/failed/stalled/skipped/
+// turn-cap-exhausted) plus the success synonyms a skill might write (complete/
+// completed). failed/stalled/turn-cap-exhausted are already-terminal too, so
+// re-flipping them is a pointless write we also skip.
+const SIGNAL_TERMINAL_STATUSES = new Set([
+  "done",
+  "complete",
+  "completed",
+  "failed",
+  "stalled",
+  "skipped",
+  "turn-cap-exhausted",
+]);
+
 // defaultWriteSignalStalled — CTL-1367 item 4. Mirror phase-agent-dispatch's
 // mark_launch_failed: flip the phase signal to status:"stalled" with an
 // `attentionReason` (NOT `failureReason` — a failureReason trips revive Loop 2's
 // escalate branch, which does NOT retry). Atomic write (tmp + rename) so a
 // concurrent reader never sees a half-written file. Best-effort; never throws.
+//
+// CTL-1367 P3: refuses to flip a signal whose current on-disk status is already
+// TERMINAL (SIGNAL_TERMINAL_STATUSES) — most importantly a done/complete success
+// the phase skill wrote between the launch and an abnormal-looking termination. The
+// backstop only stalls a still-in-flight (dispatched/running) signal.
 function defaultWriteSignalStalled(signalFile, reason) {
   try {
     let sig;
@@ -302,6 +396,8 @@ function defaultWriteSignalStalled(signalFile, reason) {
       return; // no signal to flip (prelaunch never wrote one) — nothing to do
     }
     if (!sig || typeof sig !== "object") return;
+    // CTL-1367 P3: never clobber a terminal status (esp. a done/complete success).
+    if (SIGNAL_TERMINAL_STATUSES.has(String(sig.status))) return;
     const ts = new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
     sig.status = "stalled";
     sig.attentionReason = reason || "sdk-backstop";

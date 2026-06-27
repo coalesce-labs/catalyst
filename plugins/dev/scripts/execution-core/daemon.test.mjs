@@ -1876,11 +1876,53 @@ describe("CTL-1365b: executor flag honored at all four dispatch entry points", (
 
   test("executor=sdk → scheduler + monitor + boot-resume all receive sdkDispatch (none hardcodes bg)", () => {
     process.env.CATALYST_EXECUTOR = "sdk";
-    const c = captureThreeSites();
-    expect(c.scheduler).toBe(sdkDispatch); // site 1
-    expect(c.monitor).toBe(sdkDispatch);   // site 2
-    expect(c.boot).toBe(sdkDispatch);      // site 4
-    expect(typeof c.onComment).toBe("function"); // site 3 wired
+    // CTL-1367 item 9 + P3: the daemon boot auth gate (resolveSdkBootExecutor)
+    // degrades sdk→bg unless the subscription-auth precondition holds. Provide a
+    // valid env (OAuth token set, no ANTHROPIC_* override) so the wiring assertion
+    // observes the armed sdk path rather than the bg fallback.
+    const savedTok = process.env.CLAUDE_CODE_OAUTH_TOKEN;
+    const savedKey = process.env.ANTHROPIC_API_KEY;
+    const savedAuth = process.env.ANTHROPIC_AUTH_TOKEN;
+    process.env.CLAUDE_CODE_OAUTH_TOKEN = "tok";
+    delete process.env.ANTHROPIC_API_KEY;
+    delete process.env.ANTHROPIC_AUTH_TOKEN;
+    try {
+      const c = captureThreeSites();
+      expect(c.scheduler).toBe(sdkDispatch); // site 1
+      expect(c.monitor).toBe(sdkDispatch);   // site 2
+      expect(c.boot).toBe(sdkDispatch);      // site 4
+      expect(typeof c.onComment).toBe("function"); // site 3 wired
+    } finally {
+      if (savedTok === undefined) delete process.env.CLAUDE_CODE_OAUTH_TOKEN;
+      else process.env.CLAUDE_CODE_OAUTH_TOKEN = savedTok;
+      if (savedKey === undefined) delete process.env.ANTHROPIC_API_KEY;
+      else process.env.ANTHROPIC_API_KEY = savedKey;
+      if (savedAuth === undefined) delete process.env.ANTHROPIC_AUTH_TOKEN;
+      else process.env.ANTHROPIC_AUTH_TOKEN = savedAuth;
+    }
+  });
+
+  // CTL-1367 item 9 + P3: the daemon-boot auth gate degrades executor=sdk→bg when
+  // the subscription-auth precondition fails (e.g. the daemon's launchd env lacks
+  // CLAUDE_CODE_OAUTH_TOKEN). All four sites then receive defaultDispatch — proving
+  // a node never split-brains across the fallback (some sites sdk, others bg).
+  test("executor=sdk + failing boot auth → degrades to bg at all sites (CTL-1367 item 9)", () => {
+    process.env.CATALYST_EXECUTOR = "sdk";
+    const savedTok = process.env.CLAUDE_CODE_OAUTH_TOKEN;
+    const savedKey = process.env.ANTHROPIC_API_KEY;
+    delete process.env.CLAUDE_CODE_OAUTH_TOKEN; // no subscription token → auth gate fails
+    delete process.env.ANTHROPIC_API_KEY;
+    try {
+      const c = captureThreeSites();
+      expect(c.scheduler).toBe(defaultDispatch);
+      expect(c.monitor).toBe(defaultDispatch);
+      expect(c.boot).toBe(defaultDispatch);
+    } finally {
+      if (savedTok === undefined) delete process.env.CLAUDE_CODE_OAUTH_TOKEN;
+      else process.env.CLAUDE_CODE_OAUTH_TOKEN = savedTok;
+      if (savedKey === undefined) delete process.env.ANTHROPIC_API_KEY;
+      else process.env.ANTHROPIC_API_KEY = savedKey;
+    }
   });
 
   // Site 3 (comment-wake) routing: the daemon builds the comment-wake dispatch as

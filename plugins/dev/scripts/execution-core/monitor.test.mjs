@@ -445,6 +445,49 @@ describe("handleStateChangedEvent — CTL-565 two-state trigger", () => {
     expect(dispatch).toHaveBeenCalledWith({ orchDir, ticket: "ENG-1", phase: "triage" });
   });
 
+  // CTL-1367 P1: a REJECTED async (executor=sdk) triage dispatch must NOT be
+  // silently swallowed — the onSettled backstop emits the failed-terminal event
+  // (stalled signal + phase.triage.failed) so the ticket can't strand at
+  // "dispatched". (monitor.test.mjs is CI-excluded; the core settleDispatchSync +
+  // backstopOnRejection mechanism is also covered in the CI-included dispatch.test.mjs.)
+  test("CTL-1367 P1: a REJECTED async triage dispatch fires the failed backstop", async () => {
+    enroll("ENG", { status: "Ready" });
+    const backstops = [];
+    let rejectQuery;
+    const queryFailed = new Promise((_res, rej) => { rejectQuery = rej; });
+    const dispatch = mock(() => queryFailed); // async (sdk) shape
+    handleStateChangedEvent(
+      {
+        event: "linear.issue.state_changed",
+        detail: { ticket: "ENG-1", teamKey: "ENG", toState: "Triage" },
+      },
+      { dispatch, orchDir, emitBackstop: (a) => backstops.push(a) }
+    );
+    expect(dispatch).toHaveBeenCalled();
+    expect(backstops).toHaveLength(0); // promise still pending
+    rejectQuery(new Error("buildQueryOptions exploded"));
+    await queryFailed.catch(() => {});
+    await Promise.resolve(); await Promise.resolve();
+    expect(backstops).toHaveLength(1);
+    expect(backstops[0]).toMatchObject({ ticket: "ENG-1", phase: "triage", status: "failed" });
+    expect(backstops[0].reason).toMatch(/buildQueryOptions exploded/);
+  });
+
+  test("CTL-1367 P1: a RESOLVED async triage dispatch does NOT fire the backstop", async () => {
+    enroll("ENG", { status: "Ready" });
+    const backstops = [];
+    const dispatch = mock(() => Promise.resolve({ code: 0 }));
+    handleStateChangedEvent(
+      {
+        event: "linear.issue.state_changed",
+        detail: { ticket: "ENG-1", teamKey: "ENG", toState: "Triage" },
+      },
+      { dispatch, orchDir, emitBackstop: (a) => backstops.push(a) }
+    );
+    await Promise.resolve(); await Promise.resolve();
+    expect(backstops).toHaveLength(0); // clean resolution → worker owns its terminal event
+  });
+
   test("CTL-681: →Ready with an existing triage.json is a no-op (was: debounced reconcile, now: 10-min reconcile picks it up)", async () => {
     enroll("ENG", { status: "Ready" });
     const realOrchDir = join(catalystDir, "execution-core"); // real dir (beforeEach made it)

@@ -11,6 +11,7 @@ import { join } from "node:path";
 import {
   sdkRunPhaseAgent,
   assertSdkAuth,
+  resolveSdkBootExecutor,
   buildSdkEnv,
   buildQueryOptions,
   resolveMaxParallel,
@@ -534,6 +535,42 @@ describe("Semaphore — CTL-1367 item 10 (hand-off + re-size)", () => {
     r2();
     expect(sem.active).toBe(0);
   });
+
+  // CTL-1367 nit (P3): a GROW eagerly wakes parked waiters into the newly-created
+  // slots (FIFO) WITHOUT waiting for the held slot to release — bounded so active
+  // never exceeds the raised cap.
+  test("setMax GROW wakes parked waiters immediately into the new slots", async () => {
+    const sem = new Semaphore(1);
+    const r1 = await sem.acquire(); // holds the only slot (active=1)
+    const acquired = [];
+    const p2 = sem.acquire().then((r) => { acquired.push("p2"); return r; });
+    const p3 = sem.acquire().then((r) => { acquired.push("p3"); return r; });
+    await Promise.resolve();
+    expect(acquired).toEqual([]); // both parked behind the single slot
+    sem.setMax(3); // grow → 2 free slots → wake BOTH parked waiters (FIFO), held slot untouched
+    const r2 = await p2;
+    const r3 = await p3;
+    expect(acquired).toEqual(["p2", "p3"]); // woken in FIFO order, before r1 released
+    expect(sem.active).toBe(3); // 3 held: r1 + the two woken waiters — never exceeds the cap
+    r1(); r2(); r3();
+    expect(sem.active).toBe(0); // every slot drains cleanly
+  });
+
+  test("setMax GROW never wakes more waiters than the new cap allows", async () => {
+    const sem = new Semaphore(1);
+    const r1 = await sem.acquire(); // active=1
+    const ps = [sem.acquire(), sem.acquire(), sem.acquire()]; // 3 parked
+    await Promise.resolve();
+    sem.setMax(2); // only ONE new slot → wake exactly one waiter
+    expect(sem.active).toBe(2); // r1 + one woken — capped at 2
+    const r2 = await ps[0];
+    r1(); r2();
+    // The two still-parked waiters drain as slots free.
+    const r3 = await ps[1];
+    const r4 = await ps[2];
+    r3(); r4();
+    expect(sem.active).toBe(0);
+  });
 });
 
 // ── CTL-1367 item 10 (coverage): slot released on ALL error paths (no deadlock) ─
@@ -777,6 +814,126 @@ describe("defaultEmitBackstop — CTL-1367 item 5 (no silent drop)", () => {
       { spawn: () => ({ status: 0, error: null }), writeSignalStalled: () => {}, appendEventLog: (e) => appends.push(e) },
     );
     expect(appends).toHaveLength(0);
+  });
+});
+
+// ── CTL-1367 P3: the backstop must NEVER clobber a TERMINAL success ────────────
+// defaultWriteSignalStalled (exercised via the real default inside defaultEmitBackstop)
+// flips a still-in-flight (dispatched/running) signal to "stalled", but refuses to
+// overwrite a done/complete success the phase skill already wrote — otherwise the
+// backstop would falsely strand a phase that actually finished.
+describe("defaultEmitBackstop → defaultWriteSignalStalled terminal-status guard (CTL-1367 P3)", () => {
+  const seedSignal = (status) => {
+    const dir = mkdtempSync(join(tmpdir(), "sdk-p3-"));
+    const signalFile = join(dir, "phase-implement.json");
+    writeFileSync(signalFile, JSON.stringify({ status, ticket: "CTL-1", phase: "implement" }));
+    return { dir, signalFile };
+  };
+  // Real defaultWriteSignalStalled (NOT injected); inject only spawn (no real emit
+  // binary) + a noop appendEventLog so nothing touches the real event log.
+  const emit = (signalFile) =>
+    defaultEmitBackstop(
+      { phase: "implement", ticket: "CTL-1", status: "failed", reason: "sdk-threw", orchDir: "/ec", signalFile },
+      { spawn: () => ({ status: 0, error: null }), appendEventLog: () => {} },
+    );
+
+  test("a non-terminal 'running' signal IS flipped to stalled (the rescue path)", () => {
+    const { dir, signalFile } = seedSignal("running");
+    emit(signalFile);
+    expect(JSON.parse(readFileSync(signalFile, "utf8")).status).toBe("stalled");
+    rmSync(dir, { recursive: true, force: true });
+  });
+  test("a non-terminal 'dispatched' signal IS flipped to stalled", () => {
+    const { dir, signalFile } = seedSignal("dispatched");
+    emit(signalFile);
+    expect(JSON.parse(readFileSync(signalFile, "utf8")).status).toBe("stalled");
+    rmSync(dir, { recursive: true, force: true });
+  });
+  test("a terminal 'done' success is NOT clobbered to stalled", () => {
+    const { dir, signalFile } = seedSignal("done");
+    emit(signalFile);
+    expect(JSON.parse(readFileSync(signalFile, "utf8")).status).toBe("done"); // preserved
+    rmSync(dir, { recursive: true, force: true });
+  });
+  test("'complete' / 'completed' success synonyms are preserved too", () => {
+    for (const st of ["complete", "completed"]) {
+      const { dir, signalFile } = seedSignal(st);
+      emit(signalFile);
+      expect(JSON.parse(readFileSync(signalFile, "utf8")).status).toBe(st);
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+// ── CTL-1367 item 9 + P3: resolveSdkBootExecutor (daemon-boot auth gate + event) ─
+describe("resolveSdkBootExecutor (CTL-1367 item 9 + P3 observability)", () => {
+  test("executor != sdk → pure pass-through (no auth check, no event)", () => {
+    const events = [];
+    let authChecked = false;
+    const out = resolveSdkBootExecutor("bg", {
+      assertAuth: () => { authChecked = true; return { ok: false, reason: "should-not-run" }; },
+      emitEvent: (e) => events.push(e),
+    });
+    expect(out).toEqual({ executor: "bg", fellBack: false, reason: null });
+    expect(authChecked).toBe(false);
+    expect(events).toHaveLength(0);
+  });
+
+  test("executor=sdk + good auth → stays sdk, NO warn, NO event", () => {
+    const events = [];
+    const warns = [];
+    const out = resolveSdkBootExecutor("sdk", {
+      env: { CLAUDE_CODE_OAUTH_TOKEN: "tok" },
+      oauthToken: "tok",
+      emitEvent: (e) => events.push(e),
+      log: { warn: (...a) => warns.push(a) },
+    });
+    expect(out).toEqual({ executor: "sdk", fellBack: false, reason: null });
+    expect(events).toHaveLength(0);
+    expect(warns).toHaveLength(0);
+  });
+
+  test("executor=sdk + missing OAuth token → falls back to bg, WARNs, emits execution-core.executor.bg-fallback", () => {
+    const events = [];
+    const warns = [];
+    const out = resolveSdkBootExecutor("sdk", {
+      env: {}, // no CLAUDE_CODE_OAUTH_TOKEN
+      oauthToken: undefined,
+      emitEvent: (e) => events.push(e),
+      log: { warn: (...a) => warns.push(a) },
+    });
+    expect(out.executor).toBe("bg");
+    expect(out.fellBack).toBe(true);
+    expect(out.reason).toMatch(/OAUTH_TOKEN is missing/);
+    expect(warns).toHaveLength(1);
+    expect(events).toHaveLength(1);
+    expect(events[0]["event.name"]).toBe("execution-core.executor.bg-fallback");
+    expect(events[0].payload).toMatchObject({ requested: "sdk", effective: "bg" });
+    expect(events[0].payload.reason).toMatch(/OAUTH_TOKEN is missing/);
+  });
+
+  test("executor=sdk + ANTHROPIC_API_KEY set → falls back to bg + emits (would silently meter)", () => {
+    const events = [];
+    const out = resolveSdkBootExecutor("sdk", {
+      env: { ANTHROPIC_API_KEY: "sk-zzz", CLAUDE_CODE_OAUTH_TOKEN: "tok" },
+      oauthToken: "tok",
+      emitEvent: (e) => events.push(e),
+    });
+    expect(out.executor).toBe("bg");
+    expect(events[0]["event.name"]).toBe("execution-core.executor.bg-fallback");
+    expect(events[0].payload.reason).toMatch(/ANTHROPIC_API_KEY/);
+  });
+
+  test("a throwing emitEvent never breaks boot (best-effort) — still returns bg", () => {
+    let out;
+    expect(() => {
+      out = resolveSdkBootExecutor("sdk", {
+        env: {},
+        oauthToken: undefined,
+        emitEvent: () => { throw new Error("log write boom"); },
+      });
+    }).not.toThrow();
+    expect(out.executor).toBe("bg");
   });
 });
 

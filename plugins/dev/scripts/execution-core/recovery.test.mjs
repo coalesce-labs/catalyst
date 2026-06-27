@@ -2708,6 +2708,47 @@ describe("defaultReviveDispatch — signal-reset behaviour", () => {
     void signalPath;
   });
 
+  // CTL-1367 P1: a REJECTED async (sdk) revive dispatch must NOT be silently
+  // swallowed — the onSettled backstop logs it AND emits the failed-terminal
+  // backstop (flip signal stalled + phase.<phase>.failed) so the ticket can't strand
+  // at "dispatched". This is the third of the three async-dispatch entry points.
+  test("a REJECTED async dispatch fires the failed backstop (CTL-1367 P1)", async () => {
+    seed("CTL-rej", "implement", { status: "running", bg_job_id: "bg-r" });
+    const backstops = [];
+    let rejectQuery;
+    const queryFailed = new Promise((_res, rej) => { rejectQuery = rej; });
+    // The dispatch returns a rejecting Promise (e.g. buildSdkEnv throwing after the
+    // prelaunch). It writes no runnable signal, so the synchronous result is code:1.
+    const dispatch = () => queryFailed;
+    const r = defaultReviveDispatch(
+      { orchDir, ticket: "CTL-rej", phase: "implement" },
+      { dispatch, emitBackstop: (a) => backstops.push(a) },
+    );
+    expect(r.code).toBe(1); // the reset-to-stalled signal is not runnable
+    rejectQuery(new Error("buildSdkEnv exploded"));
+    await queryFailed.catch(() => {}); // settle the rejection
+    await Promise.resolve(); await Promise.resolve(); // let the detached handler run
+    expect(backstops).toHaveLength(1);
+    expect(backstops[0]).toMatchObject({ ticket: "CTL-rej", phase: "implement", status: "failed" });
+    expect(backstops[0].reason).toMatch(/buildSdkEnv exploded/);
+  });
+
+  test("a RESOLVED async dispatch does NOT fire the backstop (CTL-1367 P1)", async () => {
+    const signalPath = seed("CTL-ok", "implement", { status: "running", bg_job_id: "bg-ok" });
+    const backstops = [];
+    const dispatch = () => {
+      writeFileSync(signalPath, JSON.stringify({ ticket: "CTL-ok", phase: "implement", status: "dispatched", bg_job_id: null }));
+      return Promise.resolve({ code: 0 });
+    };
+    const r = defaultReviveDispatch(
+      { orchDir, ticket: "CTL-ok", phase: "implement" },
+      { dispatch, emitBackstop: (a) => backstops.push(a) },
+    );
+    expect(r.code).toBe(0);
+    await Promise.resolve(); await Promise.resolve();
+    expect(backstops).toHaveLength(0); // clean resolution → worker owns its terminal event
+  });
+
   test("signal.worktreePath is forwarded to dispatch as expectedWorktreePath (CTL-615)", () => {
     seed("CTL-15", "implement", {
       status: "running",

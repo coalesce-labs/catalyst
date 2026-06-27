@@ -65,7 +65,7 @@ export { STAGE_RANK, NON_PREEMPTABLE_PHASES };
 import { readVerifyVerdict } from "./work-done-probes.mjs";
 import { countRemediateCycles, countTicketEventsInWindow } from "./event-scan.mjs";
 import { rankTickets, compareTickets } from "./scheduler-rank.mjs";
-import { defaultDispatch, dispatchTicket, teamOf, settleDispatchSync, isThenable } from "./dispatch.mjs"; // CTL-1367 P1: settle async (sdk) dispatch synchronously
+import { defaultDispatch, dispatchTicket, teamOf, settleDispatchSync, isThenable, backstopOnRejection } from "./dispatch.mjs"; // CTL-1367 P1: settle async (sdk) dispatch synchronously + backstop a rejected async dispatch
 import {
   fetchTicketState,
   fetchTicketsBatch,
@@ -2913,6 +2913,11 @@ export function schedulerTick(
     // confirms a live worker. Both best-effort — no branch gates on the return.
     appendDispatchRequestedEvent = defaultAppendDispatchRequestedEvent,
     appendDispatchLaunchedEvent = defaultAppendDispatchLaunchedEvent,
+    // CTL-1367 P1: failed-terminal backstop for a REJECTED async (sdk) dispatch
+    // promise. undefined → backstopOnRejection applies the real defaultEmitBackstop;
+    // tests inject a spy. A SYNC (bg) dispatch never reaches the detached settle
+    // handler, so this is a pure no-op on the bg path.
+    emitBackstop,
     // CTL-702: injectable yield-file-skip emitter. Deduped by observedYieldFiles
     // (module-level set) so only the first observation per daemon lifetime fires.
     appendYieldFileSkipEvent = defaultAppendYieldFileSkipEvent,
@@ -3289,19 +3294,15 @@ export function schedulerTick(
       clusterGeneration,
     });
     const dispatchWasAsync = isThenable(rawDispatch);
+    // CTL-1367 P1: on a REJECTED async (sdk) dispatch the detached handler logs the
+    // rejection AND emits the failed-terminal backstop (stalled signal +
+    // phase.<phase>.failed) so the ticket can't strand at "dispatched" with no
+    // bg_job_id/liveness probe. settleDispatchSync (verifySync omitted here on
+    // purpose — see below) returns a provisional sync result; the REAL launch gate is
+    // the verifyDispatched(requireBgJob:false) call below, which demotes a stale/
+    // un-runnable prelaunch signal to a dispatch failure.
     const r = settleDispatchSync(rawDispatch, {
-      onSettled: (res, err) => {
-        if (err) {
-          try {
-            log.warn(
-              { ticket, phase, err: err?.message ?? String(err) },
-              "scheduler: sdk dispatch promise rejected — the worker's terminal event still drives advancement"
-            );
-          } catch {
-            /* logging must never break the detached handler */
-          }
-        }
-      },
+      onSettled: backstopOnRejection({ orchDir, ticket, phase, log }, { emitBackstop }),
     });
     if (r.code === 0) {
       // CTL-611: verify the dispatch actually produced a live worker before

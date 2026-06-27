@@ -56,7 +56,7 @@ import {
   upsertTicket,
 } from "./eligible-set.mjs";
 import { loadCursor, saveCursor, resolveStartOffset } from "./event-cursor.mjs";
-import { dispatchTicket, settleDispatchSync, sdkSignalRunnable } from "./dispatch.mjs"; // CTL-1367 P1: settle async (sdk) triage dispatch synchronously
+import { dispatchTicket, settleDispatchSync, sdkSignalRunnable, backstopOnRejection } from "./dispatch.mjs"; // CTL-1367 P1: settle async (sdk) triage dispatch synchronously + backstop a rejected async dispatch
 import { abortWorker as defaultAbortWorker } from "./abort-worker.mjs";
 import {
   applyTriageStatus as defaultApplyTriageStatus,
@@ -388,6 +388,9 @@ export function handleStateChangedEvent(
     claimDispatch = claimDispatchSync,
     // CTL-1095: drain gate seam — thread through to dispatchTriage.
     isDraining = (dir) => isDrainingDefault(dir),
+    // CTL-1367 P1: failed-terminal backstop for a rejected async (sdk) triage
+    // dispatch — threaded through to dispatchTriage (undefined → real default).
+    emitBackstop,
   } = {}
 ) {
   const parsed = parseStateChangedEvent(event);
@@ -432,6 +435,7 @@ export function handleStateChangedEvent(
           hostName,
           claimDispatch, // CTL-862
           isDraining, // CTL-1095
+          emitBackstop, // CTL-1367 P1
         });
       }
     } else if (!parsed.toState || parsed.toState === query.status) {
@@ -487,6 +491,7 @@ export function handleStateChangedEvent(
           hostName,
           claimDispatch, // CTL-862
           isDraining, // CTL-1095
+          emitBackstop, // CTL-1367 P1
         });
       } else {
         log.debug(
@@ -571,6 +576,11 @@ function dispatchTriage(
     claimDispatch = claimDispatchSync,
     // CTL-1095: drain gate — node-level refusal of new-triage admission.
     isDraining = (dir) => isDrainingDefault(dir),
+    // CTL-1367 P1: failed-terminal backstop for a REJECTED async (sdk) triage
+    // dispatch. undefined → backstopOnRejection applies the real defaultEmitBackstop;
+    // tests inject a spy. The bg path is synchronous → the detached handler never
+    // fires, so this is a no-op on bg.
+    emitBackstop,
   }
 ) {
   if (!orchDir) {
@@ -669,7 +679,16 @@ function dispatchTriage(
   // as a failure while the query runs detached.
   const r = settleDispatchSync(
     dispatchTicket(orchDir, identifier, "triage", { dispatch, clusterGeneration }),
-    { verifySync: () => sdkSignalRunnable(orchDir, identifier, "triage") },
+    {
+      verifySync: () => sdkSignalRunnable(orchDir, identifier, "triage"),
+      // CTL-1367 P1: on a REJECTED async (sdk) triage dispatch, flip the triage
+      // signal to stalled + emit phase.triage.failed.<ticket> so the ticket can't
+      // strand at "dispatched"; sweepMissingTriage re-attempts on the next reconcile.
+      onSettled: backstopOnRejection(
+        { orchDir, ticket: identifier, phase: "triage", log },
+        { emitBackstop },
+      ),
+    },
   );
   if (r.code !== 0) {
     log.warn({ identifier, code: r.code }, "monitor: triage dispatch failed");
@@ -747,6 +766,9 @@ export function sweepMissingTriage({
   hosts = undefined,
   hostName = undefined,
   claimDispatch = claimDispatchSync,
+  // CTL-1367 P1: failed-terminal backstop for a rejected async (sdk) triage
+  // dispatch — threaded through to dispatchTriage (undefined → real default).
+  emitBackstop,
 } = {}) {
   if (!orchDir) {
     log.debug("sweepMissingTriage: no orchDir wired — skipping triage sweep");
@@ -778,6 +800,7 @@ export function sweepMissingTriage({
         hosts,
         hostName,
         claimDispatch, // CTL-862
+        emitBackstop, // CTL-1367 P1
       });
     }
   }

@@ -5558,6 +5558,61 @@ describe("phase.dispatch.failed event emission (CTL-611)", () => {
     });
   });
 
+  // CTL-1367 P1: an ASYNC (executor=sdk) dispatch returns a Promise. The scheduler
+  // detects it (dispatchWasAsync), verifies via verifyDispatched(requireBgJob:false),
+  // and — on a REJECTED promise — fires the failed-terminal backstop so the ticket
+  // can't strand at "dispatched". (scheduler.test.mjs is CI-excluded; the core
+  // settleDispatchSync + backstopOnRejection mechanism is also covered in the
+  // CI-included dispatch.test.mjs.)
+  test("a REJECTED async dispatch fires the failed backstop via onSettled (CTL-1367 P1)", async () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    const backstops = [];
+    let rejectQuery;
+    const queryFailed = new Promise((_res, rej) => { rejectQuery = rej; });
+    const dispatch = Object.assign(
+      () => { dispatch.calls.push({}); return queryFailed; }, // async (sdk) shape
+      { calls: [] },
+    );
+    schedulerTick(orchDir, {
+      readEligible: () => eligibleOne("CTL-204"),
+      dispatch,
+      now: () => 1_000,
+      verifyDispatched: () => ({ ok: true }), // async launch confirmed off the provisional signal
+      liveBackgroundCount: () => 0,
+      hasTriageArtifact: () => true, // bypass triage gate → dispatch research
+      emitBackstop: (a) => backstops.push(a),
+    });
+    expect(dispatch.calls).toHaveLength(1);
+    expect(backstops).toHaveLength(0); // nothing yet — the promise is still pending
+    rejectQuery(new Error("buildSdkEnv exploded"));
+    await queryFailed.catch(() => {});
+    await Promise.resolve(); await Promise.resolve();
+    expect(backstops).toHaveLength(1);
+    expect(backstops[0]).toMatchObject({ ticket: "CTL-204", phase: "research", status: "failed" });
+    expect(backstops[0].reason).toMatch(/buildSdkEnv exploded/);
+  });
+
+  test("a RESOLVED async dispatch does NOT fire the backstop (CTL-1367 P1)", async () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    const backstops = [];
+    const dispatch = Object.assign(
+      () => { dispatch.calls.push({}); return Promise.resolve({ code: 0 }); },
+      { calls: [] },
+    );
+    schedulerTick(orchDir, {
+      readEligible: () => eligibleOne("CTL-205"),
+      dispatch,
+      now: () => 1_000,
+      verifyDispatched: () => ({ ok: true }),
+      liveBackgroundCount: () => 0,
+      hasTriageArtifact: () => true,
+      emitBackstop: (a) => backstops.push(a),
+    });
+    expect(dispatch.calls).toHaveLength(1);
+    await Promise.resolve(); await Promise.resolve();
+    expect(backstops).toHaveLength(0); // clean resolution → worker owns its terminal event
+  });
+
   test("new-work sweep emits phase.dispatch.failed on rc!=0", () => {
     writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
     const dispatch = fakeDispatch({ code: 1 });

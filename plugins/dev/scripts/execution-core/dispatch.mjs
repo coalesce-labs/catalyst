@@ -19,7 +19,8 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { getProjectConfig } from "./registry.mjs";
 import { createWorktree as defaultCreateWorktree } from "./worktree.mjs";
-import { sdkRunPhaseAgent } from "./sdk-run-phase-agent.mjs"; // CTL-1365b: the executor=sdk launch verb (in-process Agent SDK query())
+import { sdkRunPhaseAgent, defaultEmitBackstop } from "./sdk-run-phase-agent.mjs"; // CTL-1365b: the executor=sdk launch verb (in-process Agent SDK query()); CTL-1367 P1: shared failed-terminal backstop for a rejected async dispatch
+import { log } from "./config.mjs"; // CTL-1367 P1: log a swallowed async-dispatch rejection before the backstop fires
 
 // phase-agent-dispatch sits one directory up from execution-core/.
 const PHASE_AGENT_DISPATCH_BIN = fileURLToPath(new URL("../phase-agent-dispatch", import.meta.url));
@@ -329,4 +330,50 @@ export function settleDispatchSync(result, { verifySync, onSettled } = {}) {
     return { code: ok ? 0 : 1, async: true };
   }
   return result;
+}
+
+// backstopOnRejection — CTL-1367 P1: the `onSettled` handler the THREE async-dispatch
+// entry points (scheduler dispatchAndVerify, monitor dispatchTriage, recovery
+// defaultReviveDispatch) thread into settleDispatchSync. Without it a REJECTED
+// dispatch promise was silently swallowed: the synchronous prelaunch had already
+// written a runnable "dispatched" signal (counted as a successful launch), but an
+// escape that rejects the Promise AFTER that write — e.g. buildSdkEnv /
+// buildQueryOptions throwing in the window between the synchronous prelaunch and the
+// query()'s own try/catch (a non-array spec.env makes `for (const kv of specEnv)`
+// throw) — left the in-process SDK worker (no bg_job_id, no liveness probe) with no
+// terminal event, pinning the ticket at status:"dispatched" until stale GC. This is
+// exactly the silent-stall class this PR exists to eliminate.
+//
+// On a REJECTION (err != null) it (1) logs the swallowed rejection and (2) emits the
+// FAILED terminal backstop — mirroring the SDK worker's own abnormal-termination
+// backstop (defaultEmitBackstop): flip the phase signal to "stalled" (only when
+// non-terminal — the P3 guard in defaultWriteSignalStalled never clobbers a done/
+// complete success) and emit phase.<phase>.failed.<ticket> so the broker wakes the
+// orchestrator and the ticket advances/reclaims instead of stranding. On a clean
+// RESOLUTION (err == null) it is a no-op — the worker/skill emitted its own terminal
+// event. Best-effort throughout; a throw here is swallowed by settleDispatchSync.
+// `emitBackstop` is injectable (default = the real defaultEmitBackstop) so the three
+// entry points are testable without spawning the emit binary.
+export function backstopOnRejection(
+  { orchDir, ticket, phase, log: logger = log },
+  { emitBackstop = defaultEmitBackstop } = {}
+) {
+  return (_res, err) => {
+    if (!err) return; // clean resolution → the worker/skill owns the terminal event
+    const reason = `sdk-dispatch-rejected: ${err?.message ?? String(err)}`;
+    try {
+      logger.warn(
+        { ticket, phase, err: err?.message ?? String(err) },
+        "execution-core: async sdk dispatch promise rejected — emitting failed backstop (stalled signal + phase.<phase>.failed) so the ticket does not strand at dispatched"
+      );
+    } catch {
+      /* logging must never break the detached handler */
+    }
+    try {
+      const signalFile = join(orchDir, "workers", ticket, `phase-${phase}.json`);
+      emitBackstop({ phase, ticket, status: "failed", reason, orchDir, signalFile });
+    } catch {
+      /* best-effort — a failing backstop must not surface as an unhandled rejection */
+    }
+  };
 }
