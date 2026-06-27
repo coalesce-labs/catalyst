@@ -2,6 +2,13 @@
 
 ## [12.17.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.16.0...catalyst-dev-v12.17.0) (2026-06-27)
 
+<!-- ai-enhanced -->
+
+### Node-Class Awareness & Fleet Observability
+
+This release introduces node classes (`developer`, `worker`, `monitor`) as a first-class concept across the fleet — every telemetry signal now carries `catalyst.node.class`, and `catalyst-doctor` grades nodes against their class-specific rubric instead of treating every machine as a worker activation gate. The standalone `catalyst-updater` daemon ships as the new sole plugin-pull owner for daemonless developer nodes, with `verify-updater` and `verify-node` providing objective pass/fail smoke tests for the GATE-3 cutover. Scheduler reliability gets significant hardening: stale-fenced orphan dirs no longer burn Linear OAuth quota, timed-out `linearis` reads now trip the circuit breaker so a degraded pass short-circuits instead of paying the full cap N times, and the board now sources real ticket titles from the CTC replica instead of falling back to bare IDs.
+
+
 
 ### Features
 
@@ -57,6 +64,13 @@
 
 ## [12.16.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.15.0...catalyst-dev-v12.16.0) (2026-06-22)
 
+<!-- ai-enhanced -->
+
+### Board-Health Holistic Dispatch & Cloud Token Provisioning
+
+Board-health now dispatches a single holistic recovery-pass delegate on enforce scans, carrying full board context to the anchored ticket rather than triggering per-move fan-out. A multi-host correctness fix ensures `selectAnchor` only picks tickets this host owns via HRW, so a foreign-owned anchor no longer silently blocks actuation of self-owned work. Separately, `CATALYST_CLOUD_TOKEN` is now provisioned into the machine-level environment from the cluster repo via a new projection script, with an advisory `doctor` check — local-only behavior is unchanged until you opt into the cloud path.
+
+
 
 ### Features
 
@@ -69,6 +83,13 @@
 * **dev:** CTL-1302 — board-health selectAnchor prefers a self-owned ticket (multi-host) ([#2305](https://github.com/coalesce-labs/catalyst/issues/2305)) ([72e4945](https://github.com/coalesce-labs/catalyst/commit/72e49457fadd9ec975fbfaae692e96700f0e4e99))
 
 ## [12.15.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.14.0...catalyst-dev-v12.15.0) (2026-06-21)
+
+<!-- ai-enhanced -->
+
+### Stale Worktree Reclamation & Fleet Hardening
+
+The automated stale-worktree sweeper now uses a multi-signal classifier to distinguish safe-to-delete, salvageable, and active worktrees — with battery-aware deferral, a per-run removal cap, and OTel instrumentation per sweep. Alongside that, several fleet-reliability fixes land: the board dispatch gate now routes on delegate instead of assignee (unwedging boards where human assignment blocked every Todo ticket), the recovery-pass bounded-LLM FIX rung is repaired after a missing `evidence.signal` field made it structurally dead in production, and a daemon boot-breaking missing export from `config.mjs` is resolved. PWA push notifications for the orch-monitor and a gitleaks CI secret-scanning gate round out the release.
+
 
 
 ### Features
@@ -92,6 +113,13 @@
 
 ## [12.14.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.13.0...catalyst-dev-v12.14.0) (2026-06-19)
 
+<!-- ai-enhanced -->
+
+### Recovery Observability & Cache Coverage
+
+The recovery delegate now emits `recovery.tick` and `recovery.decision` events to Loki on every pass, so you can finally distinguish a board where the delegate examined items and handed them to humans from one it silently never processed. Control-loop numerics from those events — plus scheduler parallelism and autotune gauges — are promoted into OTel attributes, making queue depth, action breakdowns, and decision rules chartable in dashboards. The board-cache reconciler also fixes a starvation bug where only the alphabetical prefix of tickets ever reconciled; per-tier rotation cursors now ensure both active-pipeline and Backlog tickets are covered across passes, which should clear the phantom "stuck" tickets that were showing as open PRs despite being done.
+
+
 
 ### Features
 
@@ -105,6 +133,13 @@
 * **dev:** CTL-1288 — cache reconcile covers the whole board via per-tier rotation cursors ([#2278](https://github.com/coalesce-labs/catalyst/issues/2278)) ([ca8b808](https://github.com/coalesce-labs/catalyst/commit/ca8b8088411422a32c0ccc93813947c5dd150a98))
 
 ## [12.13.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.12.0...catalyst-dev-v12.13.0) (2026-06-19)
+
+<!-- ai-enhanced -->
+
+### Board Health & Log Observability
+
+The broker now periodically reconciles board cache state and labels against live Linear, closing the gap where a missed webhook left tickets lying about their status indefinitely. Dead doc-phase workers that go transcript-silent are detected and reclaimed, unblocking slots that previously sat starved for up to six hours. Grafana Alloy is installed and auto-started per host to ship daemon logs into Loki, queryable by stable node name alongside the existing OTel event streams.
+
 
 
 ### Features
@@ -126,6 +161,13 @@
 * **dev:** log-shipper service.name + catalyst.node.name tagging (semconv) + brew formula ([#2250](https://github.com/coalesce-labs/catalyst/issues/2250)) ([fa9c244](https://github.com/coalesce-labs/catalyst/commit/fa9c24404ae0f6138e91faee4f1b42936c585451))
 
 ## [12.12.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.11.0...catalyst-dev-v12.12.0) (2026-06-17)
+
+<!-- ai-enhanced -->
+
+### Cross-Host Control Plane & Monitor Stability
+
+This release lands the cross-host single control plane: multiple machines now publish and merge liveness heartbeats correctly, fixing a Linear GraphQL bug that silently blocked all cross-host heartbeat writes and a merge-ordering issue that caused the self-host to appear degraded. The broker now detects when the monitor goes silent (via an out-of-process ingestion-silence detector) and raises a disk-readable alarm instead of staying falsely green. A batch of monitor stability fixes ships alongside: RSS no longer ratchets to multi-GB from repeated full event-log reads, the icon picker's virtualizer scroll container renders correctly, stale dist chunks no longer accumulate across rebuilds, and the broker now runs `bun install` automatically when dependencies change after a pull.
+
 
 
 ### Features
@@ -154,6 +196,13 @@
 * **dev:** surface recovery-pass/remediate explanation in inbox row + detail card ([#2206](https://github.com/coalesce-labs/catalyst/issues/2206)) ([f41ed2c](https://github.com/coalesce-labs/catalyst/commit/f41ed2c5649c133ab34afe7f47bd9467937ba4bc))
 
 ## [12.11.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.10.0...catalyst-dev-v12.11.0) (2026-06-17)
+
+<!-- ai-enhanced -->
+
+### Cluster Control Plane & Autonomous Recovery
+
+This release lands two major systems: a GitOps cluster control plane (`catalyst cluster sync`, `cluster-repo-first roster`, SOPS-encrypted secrets) and a fully wired autonomous recovery pass that now acts on stalled tickets rather than just classifying them — resolving merge conflicts, rebasing, and re-dispatching phases before escalating to a human. The reaper also gains the ability to auto-remove squash-merged worktrees, and N dashboard clients now share a single backend SSE tail instead of spawning separate full-log reads per connection.
+
 
 
 ### Features
@@ -187,6 +236,13 @@
 * **dev:** CTL-1237 — stamp host.name on bg-worker OTEL attrs (claude_code host_name=null) ([#2167](https://github.com/coalesce-labs/catalyst/issues/2167)) ([768d5ac](https://github.com/coalesce-labs/catalyst/commit/768d5acf5efa1569a6883ad9ad7e5a8332dab5bf))
 
 ## [12.10.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.9.0...catalyst-dev-v12.10.0) (2026-06-16)
+
+<!-- ai-enhanced -->
+
+### Multi-Node Cluster Onboarding & Failed-Phase Escalation
+
+Two gaps that let work fall through silently are closed in this release: failed phases now surface identically to stalled ones — inbox row, amber nav dot, `/queue` Needs You bucket, and a Linear `needs-human` label with the worker's structured explanation attached. On the infrastructure side, `catalyst-join.sh` and `catalyst cluster join-token` make adding a second node a one-line operation: mint a short-TTL token on the seed, run the `curl | bash` on the joining node, and the script handles Tailscale preflight, bundle fetch, config merge, and service installation with full resumability on retry. This release also ships worker-dir GC to prevent per-tick I/O blowup as worker directories accumulate, the orch-monitor as an installable PWA, launchd auto-start via `catalyst-stack install-services`, and editable project settings saved server-side from the monitor.
+
 
 
 ### Features
@@ -245,6 +301,13 @@ Click any worker row in the orch-monitor to see its real-time metrics and activi
 
 ## [12.8.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.7.0...catalyst-dev-v12.8.0) (2026-06-14)
 
+<!-- ai-enhanced -->
+
+### Execution Tab & Governance Rulebook
+
+Open any ticket in the orch-monitor and click the new Execution tab to see a structured breakdown of what happened — current phase, a narrative summary, phase Gantt with timings and idle gaps, artifacts table, and an exceptions list — without digging through logs. The Governance Rulebook (`/rules`, keyboard shortcut `g r`) surfaces all 17 belief-engine rules across 6 strata in Plain English, Datalog, and the exact SQL the engine runs, with live firing-rate badges when belief recording is active. Escalated tickets that hit the remediate cycle cap now show a CTA-led explanation card in the detail pane with the blocking finding, why the worker gave up, and what you need to decide — no more bare Respond buttons with no context. This release also fixes a silent 12-hour plugin-checkout outage caused by dirty worktrees, adds self-healing refresh with a checkout-lag alarm after consecutive failures, and patches a bash 3.2 crash that left the entire fleet down after a `catalyst-stack restart` with no arguments.
+
+
 
 ### Features
 
@@ -267,6 +330,13 @@ Click any worker row in the orch-monitor to see its real-time metrics and activi
 * **dev:** self-healing plugin-checkout refresh (CTL-1106 Phase 1) — fetch+reset --hard ([70fe374](https://github.com/coalesce-labs/catalyst/commit/70fe37498fd4d1bdc4b633337136fa2082689e18))
 
 ## [12.7.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.6.0...catalyst-dev-v12.7.0) (2026-06-13)
+
+<!-- ai-enhanced -->
+
+### Workers Dispatch/Board Split & Node Drain Mode
+
+The Workers surface now splits into two dedicated screens — Dispatch (ControlTower) and Board (WorkerSwimlaneBoard) — toggled from the app-shell header, eliminating the sticky column header overlap and giving each view its own scroll container. Node drain mode lands alongside it: run `catalyst-execution-core drain` to stop a node from accepting new tickets while in-flight work finishes, with a HUD display and `--off` toggle to resume. This release also fixes phase workers stranding commits on transient `bgIsolation` branches, hardens the artifact gate to resolve paths against the ticket worktree rather than the process cwd, and prevents stale-ref PRs by push-verifying HEAD before announce and merge.
+
 
 
 ### Features
@@ -295,6 +365,13 @@ Click any worker row in the orch-monitor to see its real-time metrics and activi
 * **dev:** CTL-1105 — stop phase workers stranding commits on transient bgIsolation branches ([#1945](https://github.com/coalesce-labs/catalyst/issues/1945)) ([c308f99](https://github.com/coalesce-labs/catalyst/commit/c308f993d8bbb95025e3301e61598347412f6a8b))
 
 ## [12.6.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.5.0...catalyst-dev-v12.6.0) (2026-06-12)
+
+<!-- ai-enhanced -->
+
+### Dispatch Board & Stall-Janitor Overhaul
+
+This release is dense. The Queue surface is renamed Dispatch (with a `/queue` redirect for bookmarks), and the board now distinguishes held, retrying, and gave-up tickets with distinct chips and buckets instead of a blanket "waiting" label. A new stall-janitor (Pass 0j) detects orphaned worktrees and ghost sessions, auto-clears artifact-retry-exhausted stalls once a prior-phase artifact arrives, and ships a classify-then-act unstuck sweep (Pass 0u, opt-in via `CATALYST_UNSTUCK_SWEEP`) for the stalled/needs-human backlog. On the UI side, Cmd+K now covers actions, settings commands, and live ticket search; the sidebar shows per-project worker presence dots and inbox attention badges; and dead ghost sessions are correctly excluded from the admission-gate slot count so work stops getting blocked by terminal sessions that were never cleaned up.
+
 
 
 ### Features
@@ -342,6 +419,13 @@ Click any worker row in the orch-monitor to see its real-time metrics and activi
 * **dev:** janitor shadow verdicts reach the log + dispatch failures carry stderr ([#1847](https://github.com/coalesce-labs/catalyst/issues/1847)) ([eb84808](https://github.com/coalesce-labs/catalyst/commit/eb84808657fd41618acb7001400aca41022a6b63))
 
 ## [12.5.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.4.0...catalyst-dev-v12.5.0) (2026-06-11)
+
+<!-- ai-enhanced -->
+
+### Observe Suite, Redesigned Shell & Agent Reliability
+
+This release ships the full OBSERVE analytics suite (Telemetry, FinOps, and FleetOps surfaces with live Prometheus/Loki charts, cost breakdowns, and host health), a heavily reworked shell with unified routing, Linear-quality ticket detail pages, and a new swimlane board that shares one scroll axis across all groups. On the reliability side, workers now fence irreversible side-effects against cluster takeover, parked needs-input workers release their concurrency slot and resume when unblocked, and a belief-store rule layer tracks liveness, blocker rank, and escalation decisions each tick. The dirty-worktree rebase storm, boot-resume no-op, and stale eligible-projection bugs are also fixed.
+
 
 
 ### Features
@@ -455,6 +539,13 @@ Click any worker row in the orch-monitor to see its real-time metrics and activi
 
 ## [12.4.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.3.0...catalyst-dev-v12.4.0) (2026-06-09)
 
+<!-- ai-enhanced -->
+
+### Cache-Backed Read-Model & Board Redesign Foundation
+
+This release lays the architectural foundation for the upcoming board and detail-page redesign. The orchestration monitor's read-model now assembles once from durable caches and fans out to all clients — no more synchronous Linear API calls per request — and every BFF endpoint (ticket detail, artifacts, search, ticket run history) reads exclusively from broker-cached data. Alongside that, the board gains deep-linkable routes via TanStack Router, a single ordering source shared between the board and the detail pager, a typed read-model client contract enforced at compile time across the web UI and terminal HUD, and an edge-to-edge app shell built on the shadcn Sidebar primitive. Two dependency bugs are also fixed: epic-to-child deadlocks and false blockers from prose-scraped ticket mentions.
+
+
 ### Features
 
 - **dev:** BFF1 cache-backed read-model core (CTL-883)
@@ -505,6 +596,13 @@ Click any worker row in the orch-monitor to see its real-time metrics and activi
 
 ## [12.3.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.2.0...catalyst-dev-v12.3.0) (2026-06-08)
 
+<!-- ai-enhanced -->
+
+### Gherkin-Ticket Standard in Ticket Creation
+
+New tickets created via the `linear` and `create-tickets` skills now automatically follow the gherkin-ticket format — outcome-first titles, use-case openers, and tiered Gherkin bodies with technical detail tucked under `## Technical notes`. Both paths enforce this as a hard gate, so the backlog can't drift back to mechanism-first titles. The `phase-triage` skill also assesses conformance and flags non-conformant tickets in triage comments, without touching classification logic or auto-rewriting anything.
+
+
 ### Features
 
 - **dev:** CTL-880 wire gherkin-ticket standard into ticket-creation skills
@@ -512,6 +610,13 @@ Click any worker row in the orch-monitor to see its real-time metrics and activi
   ([4b21363](https://github.com/coalesce-labs/catalyst/commit/4b21363b49ea74853f701d2329e07f61cd23334d))
 
 ## [12.2.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.1.0...catalyst-dev-v12.2.0) (2026-06-08)
+
+<!-- ai-enhanced -->
+
+### Gherkin Tickets & Scheduler Hardening
+
+The new `gherkin-ticket` skill rewrites ticket authoring around use cases first: actor-led titles, tiered Gherkin scenarios, and a REWRITE mode that reorganizes without dropping technical detail. Auto-fires on ticket-creation language or invoke it directly as `/catalyst-dev:gherkin-ticket`. This release also closes several scheduler reliability gaps: pre-spawn orphan claims that wedged phases indefinitely are now reaped and retried, persistent per-team reconcile failures surface as visible events instead of silent starvation, and workspace-scoped label preflight no longer fires false alarms on every boot.
+
 
 ### Features
 
@@ -544,6 +649,13 @@ Click any worker row in the orch-monitor to see its real-time metrics and activi
   ([9d8fd84](https://github.com/coalesce-labs/catalyst/commit/9d8fd84fbb84018db59604b4e5c27e75413e214c))
 
 ## [12.1.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.0.0...catalyst-dev-v12.1.0) (2026-06-08)
+
+<!-- ai-enhanced -->
+
+### Distributed Orchestration & Daemon Hardening
+
+This release lays the foundation for multi-host orchestration: the scheduler now uses rendezvous hashing to partition ticket ownership across a cluster roster and soft-claims each ticket before dispatch, becoming a safe no-op on single-host setups until you add a second host to `.catalyst/hosts.json`. Alongside that, the daemon gets significant reliability improvements — phase workers now self-stop after emitting complete (eliminating 7-hour idle zombies), cold-start recovery distinguishes cheap phases (auto-resume) from expensive ones (operator greenlight required), and a new standalone `catalyst-agent` samples host metrics and Claude account rate-limit usage across multiple accounts. Fresh-machine setup is also substantially more reliable, with no-sudo install fallbacks, correct humanlayer and `gh` CLI install paths, and a vendored replacement for the crashing `humanlayer thoughts init` command.
+
 
 ### Features
 
@@ -652,6 +764,13 @@ Click any worker row in the orch-monitor to see its real-time metrics and activi
 
 ## [12.0.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v11.0.1...catalyst-dev-v12.0.0) (2026-06-06)
 
+<!-- ai-enhanced -->
+
+### Compound Engineering Loop & Daemon Reliability
+
+This release introduces the Compound Engineering MVP (Slice 1): phase skills now log per-ticket friction as work happens, `phase-research` injects relevant past learnings before starting, and the morning briefing surfaces a friction digest and pending compound decisions for approval. Alongside that, a significant batch of daemon reliability fixes lands — worktree removal now requires positive evidence of merged+clean+no-session+provenance before any deletion (closing a real data-loss vector), liveness snapshot wedges that held new-work dispatch indefinitely are resolved at both the population and in-tick aging layers, and per-tick Linear reads are batched into a single query to collapse what was ~3,000–4,400 individual ticket reads per hour down to one batched request per TTL window. The plugin layout also reorganizes: `catalyst-foundry` is a new plugin for framework setup skills, `catalyst-legacy` topology is corrected, and `compound` is renamed `compound-estimate` — update any slash-command references accordingly.
+
+
 ### ⚠ BREAKING CHANGES
 
 - **dev:** plugin reorg — catalyst-foundry plugin, legacy topology fix, compound-estimate rename
@@ -699,6 +818,13 @@ Click any worker row in the orch-monitor to see its real-time metrics and activi
 
 ## [11.0.1](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v11.0.0...catalyst-dev-v11.0.1) (2026-06-05)
 
+<!-- ai-enhanced -->
+
+### Pre-Push Hook Suppression Fix
+
+Automated phase-agent pushes no longer trigger locally-installed pre-push hooks (trunk, trufflehog, fmt, tests) that were causing CPU and memory spikes during concurrent worktree dispatches. The fix passes `-c core.hooksPath=/dev/null` per git call — no persistent config changes, no `--no-verify` — so your interactive pushes are completely unaffected.
+
+
 ### Bug Fixes
 
 - **dev:** CTL-693 suppress pre-push hooks on automated phase-agent pushes
@@ -706,6 +832,13 @@ Click any worker row in the orch-monitor to see its real-time metrics and activi
   ([c831e58](https://github.com/coalesce-labs/catalyst/commit/c831e58001a79eb127c213f3bb31e998c725305b))
 
 ## [11.0.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v10.6.0...catalyst-dev-v11.0.0) (2026-06-05)
+
+<!-- ai-enhanced -->
+
+### Ticket Gantt, Smarter Autotuner & Signal Reliability
+
+Clicking a ticket card in the orchestration monitor now opens a three-tab drawer — a wall-clock Gantt of per-phase spans colored by phase type, a cost and token breakdown, and the full comms stream for that ticket. The autotuner gets two significant fixes: macOS hosts no longer false-clamp `maxParallel` to 1 due to `os.freemem()` under-reporting available memory, and scale decisions now attribute CPU and memory to Claude's own process tree so the tuner holds steady when another process is causing host pressure rather than shedding workers unnecessarily. A longstanding wedge where phase workers silently skipped the signal-file flip on `claude --bg` dispatch is also resolved by threading orchestrator context through the surviving `settings.env` channel.
+
 
 ### Features
 
@@ -745,6 +878,13 @@ Click any worker row in the orch-monitor to see its real-time metrics and activi
 
 ## [10.6.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v10.5.0...catalyst-dev-v10.6.0) (2026-06-04)
 
+<!-- ai-enhanced -->
+
+### Autotuning Execution Core & Per-Worker Observability
+
+The execution core now includes a setpoint-seeking autotuner that converges `maxParallel` toward a host-configurable target — including at idle, where it previously stalled at 1. Per-worker OpenTelemetry is fully wired into the background-worker model, so phase workers now emit correctly tagged metrics in Grafana, Dash0, and Honeycomb instead of untagged or mis-attributed signal. A reaper poll-fallback fix stops predecessor workers from leaking into `liveCount` and starving the parallel queue.
+
+
 ### Features
 
 - **dev:** CTL-760 per-worker OpenTelemetry for the background-worker execution model
@@ -764,6 +904,13 @@ Click any worker row in the orch-monitor to see its real-time metrics and activi
   ([3cc5c99](https://github.com/coalesce-labs/catalyst/commit/3cc5c99211f583d73fd2aade90fb9323f56a722a))
 
 ## [10.5.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v10.4.0...catalyst-dev-v10.5.0) (2026-06-03)
+
+<!-- ai-enhanced -->
+
+### Point-Driven Effort & Pipeline Reliability
+
+Ticket point estimates now drive `--effort` flags and `/workflows` postamble automatically across the plan, implement, verify, and review phases — 1pt maps to medium, 3/5pt to high, and 8/13pt to xhigh with workflows. Four reliability fixes ship alongside: workers that die before their first turn now self-heal by re-issuing the phase command on revive; the orchestration monitor's Done column no longer surfaces mid-pipeline tickets that haven't reached monitor-deploy; parked workers no longer spuriously re-dispatch when the bot posts its own clarifying question; and `workflow_id` in the sessions table is no longer polluted with stale daemon session ids, making per-run cost attribution queries accurate.
+
 
 ### Features
 
@@ -788,6 +935,13 @@ Click any worker row in the orch-monitor to see its real-time metrics and activi
 
 ## [10.4.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v10.3.0...catalyst-dev-v10.4.0) (2026-05-31)
 
+<!-- ai-enhanced -->
+
+### Deterministic Worker Lifecycle Engine
+
+The revive-storm guard stack — roughly 14 heuristic dampers that tried to guess whether a worker was dead — is replaced by three deterministic primitives: an atomic single-flight claim with fencing tokens, a `state.json` death trigger that reads local lifecycle state instead of the eventually-consistent `claude agents` snapshot, and a progress probe that stops futile respawns by checking whether a worker actually made commits or produced output before deciding to revive it. Separately, per-step model, effort, and preamble overrides are now live in dispatch via a small rules engine in the workflow descriptor, so large or epic tickets can launch the plan worker with max effort and a different model while every other case stays byte-identical to before. The board real-time client also shifts to a SharedWorker with an IndexedDB cache, cutting upstream SSE connections to one per browser instead of one per tab.
+
+
 ### Features
 
 - **dev:** atomic single-flight worker claim + fencing token (CTL-736 Phase 1)
@@ -810,6 +964,13 @@ Click any worker row in the orch-monitor to see its real-time metrics and activi
   ([5c50ded](https://github.com/coalesce-labs/catalyst/commit/5c50dedaf41c0a051c9c1ab3d359797e5eb4c04c))
 
 ## [10.3.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v10.2.2...catalyst-dev-v10.3.0) (2026-05-30)
+
+<!-- ai-enhanced -->
+
+### Live Worker/Ticket Board
+
+The monitor now serves a real-time Worker and Ticket board at the default `/` route, replacing the old polling dashboard as the primary view (legacy dashboard still available at `/legacy`). Board data is pushed over SSE from a single shared snapshot — no more per-tab polling hammering the server — with updates triggered reactively on state changes rather than a fixed tick. The Workers view also gains a Status ↔ Pipeline column toggle so you can group live workers by liveness or by phase, and worker cards now show a session short-code to distinguish revived duplicate workers from the same ticket.
+
 
 ### Features
 
@@ -840,6 +1001,13 @@ Click any worker row in the orch-monitor to see its real-time metrics and activi
 
 ## [10.2.2](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v10.2.1...catalyst-dev-v10.2.2) (2026-05-28)
 
+<!-- ai-enhanced -->
+
+### Startup Triage Sweep Fix
+
+Tickets already in an eligible state when the dev daemon boots — or that appear between webhook deliveries — now get triage dispatched automatically. Previously, these fell into a permanent retry loop because the startup reconcile never checked for missing triage artifacts; manual intervention was required after every daemon restart. No migration needed.
+
+
 ### Bug Fixes
 
 - **dev:** auto-dispatch triage for pre-existing eligible tickets at startup (CTL-711)
@@ -848,6 +1016,13 @@ Click any worker row in the orch-monitor to see its real-time metrics and activi
 
 ## [10.2.1](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v10.2.0...catalyst-dev-v10.2.1) (2026-05-28)
 
+<!-- ai-enhanced -->
+
+### Scheduler Test Isolation Fix
+
+Eight scheduler tests were silently failing on any machine with active background workers — CI passed because it runs sandboxed, masking a regression introduced by the CTL-705 preemption sweep. The fix injects `liveBackgroundCount: () => 0` into the affected test fixtures so local dev environments with live pipelines no longer see false failures. No production code changed and no migration is needed.
+
+
 ### Bug Fixes
 
 - **dev:** inject liveBackgroundCount in scheduler tests broken by CTL-705 preemption (CTL-715)
@@ -855,6 +1030,13 @@ Click any worker row in the orch-monitor to see its real-time metrics and activi
   ([9e1dedf](https://github.com/coalesce-labs/catalyst/commit/9e1dedfa6dc3edf1efe3c47123c5807710f1fd8d))
 
 ## [10.2.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v10.1.0...catalyst-dev-v10.2.0) (2026-05-28)
+
+<!-- ai-enhanced -->
+
+### Session Continuity & Linear Stability
+
+This release focuses on two things: keeping phase workers alive across reboots and machine restarts, and stopping the Linear API rate-limit storms that were halting the execution-core daemon. Boot-resume now passes `--resume-session` so in-flight workers pick up where they left off instead of starting fresh, with a dual-schema fallback that handles both old and new Claude Code state formats. On the Linear side, a circuit breaker throttles retries on 429s, cross-team label errors are correctly classified as unrecoverable (ending the per-tick retry loops against ADV tickets), and per-event scoping polls are replaced with webhook-captured fields — cutting the baseline Linear call volume significantly. Several correctness fixes also land: the one-worker-per-ticket invariant is now enforced with a liveness gate, yield tombstones no longer crash the scheduler tick, and sub-agent costs are included in phase mirror footers.
+
 
 ### Features
 
@@ -930,6 +1112,13 @@ Click any worker row in the orch-monitor to see its real-time metrics and activi
 
 ## [10.1.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v10.0.0...catalyst-dev-v10.1.0) (2026-05-18)
 
+<!-- ai-enhanced -->
+
+### OTEL Cost Attribution for Phase-Agent Workers
+
+Phase-agent workers spawned via `claude --bg` now inherit `OTEL_RESOURCE_ATTRIBUTES` from the orchestrator, so Grafana cost panels correctly attribute their spend to the right Linear ticket, branch, and project. Previously, those labels were empty and the "Cost by Linear Ticket" panel silently dropped phase-agent costs — in one dogfood run, ~75% of spend went unattributed. No migration steps required.
+
+
 ### Features
 
 - **dev:** propagate OTEL_RESOURCE_ATTRIBUTES to phase-agent claude --bg children (CTL-492)
@@ -937,6 +1126,13 @@ Click any worker row in the orch-monitor to see its real-time metrics and activi
   ([19166f0](https://github.com/coalesce-labs/catalyst/commit/19166f0bf7e97ac547eb8afe4364282d41f9dca3))
 
 ## [10.0.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v9.3.0...catalyst-dev-v10.0.0) (2026-05-18)
+
+<!-- ai-enhanced -->
+
+### Phase-Agent Pipeline Launch
+
+This release ships the full 9-phase agent pipeline: triage → research → plan → implement → verify → review → PR → merge → deploy monitoring. Orchestrations now dispatch each phase as a `claude --bg` worker, advance automatically via broker `phase_lifecycle` events, and resume when a phase hits its turn cap rather than burning the error-recovery budget. Two blocking dispatch bugs (a skill gate that rejected slash-command invocation and a bg job ID parser that captured `backgrounded` instead of the hex ID) are also fixed, meaning this is the first release where phase workers can actually run end-to-end.
+
 
 ### ⚠ BREAKING CHANGES
 
@@ -1034,6 +1230,13 @@ Click any worker row in the orch-monitor to see its real-time metrics and activi
   ([3807a0f](https://github.com/coalesce-labs/catalyst/commit/3807a0f696bdbf4dbd88baceccbf5173e398246a))
 
 ## [9.3.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v9.2.0...catalyst-dev-v9.3.0) (2026-05-15)
+
+<!-- ai-enhanced -->
+
+### HUD Overhaul & Broker Observability
+
+This release is a substantial rework of the orchestration monitor HUD — raw event names in their own column, a unified Claude Code-style prompt input, sortable Workers/Orchestrators tabs, a new Runs tab showing the full orchestrator → worker hierarchy, and progressive Escape to undo one filter layer at a time. On the broker side, workers in wait states are now visible (with countdown timers in the HUD), stale-heartbeat wakes are batched per interest instead of flooding per session, and duplicate wakes are suppressed when CI conclusion hasn't changed. Every `catalyst-*` CLI now accepts `--version` to show the build SHA and source path, and `catalyst-broker probe` gives a fast O(1) daemon health check.
+
 
 ### Features
 
@@ -1187,6 +1390,13 @@ Click any worker row in the orch-monitor to see its real-time metrics and activi
 
 ## [9.2.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v9.1.0...catalyst-dev-v9.2.0) (2026-05-14)
 
+<!-- ai-enhanced -->
+
+### Claude Code Session Metadata & HUD Overhaul
+
+Session context is now tracked and surfaced throughout the toolchain: `catalyst-statusline.sh` emits `session.context` events with model, context %, token count, cost, and turn number on every status bar render, and the HUD and web UI display them inline per worker. The monitor HUD also gets a round of focused improvements — the SOURCE and EVENT columns are merged into a single responsive column, the `/` filter now substring-matches across every field in the raw event JSON (with AND semantics for multi-token queries), the footer compacts to two lines with width-responsive hotkey hints, and the scroll anchor bug that hid filter matches above the viewport is fixed. Run `catalyst-db.sh init` after updating to apply the new `claude_session_id` and `last_context_pct` columns.
+
+
 ### Features
 
 - **dev:** broaden HUD `/` filter to substring-match across all event fields (CTL-367)
@@ -1236,6 +1446,13 @@ Click any worker row in the orch-monitor to see its real-time metrics and activi
   ([1bd684d](https://github.com/coalesce-labs/catalyst/commit/1bd684dfdaf75523e65fede45352c935aeb5fa3a))
 
 ## [9.1.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v9.0.0...catalyst-dev-v9.1.0) (2026-05-13)
+
+<!-- ai-enhanced -->
+
+### Broker Reliability & HUD Observability Overhaul
+
+This release fixes a cascade of broker routing failures where canonical OTel event envelopes were being misread at multiple sites — `filter.register` events were silently ignored, deterministic PR routes never fired, and the Groq prose classifier was generating ~95% false positives (now gated off by default via `CATALYST_BROKER_PROSE_ENABLED=0`). The HUD gets substantial polish alongside: wake rows now show the target orchestrator and wake reason in context, SOURCE icons pick up Nerd Font glyphs, column widths adapt to terminal size, and a broker health chip surfaces interest count and API key status at a glance. Run `plugins/dev/scripts/clean-prose-interests.sh && catalyst-monitor restart` after updating to clear any stale test-residue interests from `~/catalyst/broker-interests.json`.
+
 
 ### Features
 
