@@ -226,6 +226,9 @@ import { loadOtelConfig } from "./lib/otel-config";
 import { loadWebhookConfig } from "./lib/webhook-config";
 import { detectProjectKey, detectProjectKeyFromConfig } from "./lib/project-key";
 import { loadMonitorConfig } from "./lib/monitor-config";
+// Shared Layer-1 config-path resolver (env pointer > cwd) — keeps
+// projectsConfigPath / monitorConfigPath / resolveProjectConfigPath in lockstep.
+import { resolveLayer1ConfigPath } from "./lib/config-path";
 // CTL-1152: config-driven project roster behind GET /api/projects.
 import { loadProjects } from "./lib/project-roster";
 // CTL-1153 (M2): config mutation for PUT /api/projects/:key.
@@ -404,13 +407,13 @@ export interface CreateServerOptions {
   annotationsDbPath?: string;
   /**
    * CTL-1153 (M2): injectable path for PUT /api/projects/:key and GET /api/projects.
-   * Defaults to `${process.cwd()}/.catalyst/config.json`. Tests inject a temp fixture
-   * so the endpoint round-trip never rewrites the committed workspace config.
+   * Defaults to resolveLayer1ConfigPath() (env pointer > cwd). Tests inject a temp
+   * fixture so the endpoint round-trip never rewrites the committed workspace config.
    */
   projectsConfigPath?: string;
   /**
    * CTL-1156: injectable project config path for /api/config and /api/repo-icon/:key.
-   * Defaults to `${process.cwd()}/.catalyst/config.json`.
+   * Defaults to resolveLayer1ConfigPath() (env pointer > cwd).
    */
   monitorConfigPath?: string;
   /**
@@ -827,9 +830,12 @@ export function createServer(opts: CreateServerOptions): BunServer {
   const annDbPath = annotationsDbPath ?? `${CATALYST_DIR}/annotations.db`;
   // CTL-1153 (M2): injectable config path for PUT /api/projects/:key + GET /api/projects.
   // Injected in tests to avoid rewriting the committed workspace config.json.
-  const projectsConfigPath = projectsConfigPathOpt ?? `${process.cwd()}/.catalyst/config.json`;
+  // Default resolution is cwd-INDEPENDENT (env pointer > cwd) so a daemon-spawned
+  // monitor (cwd = .../execution-core, no .catalyst/config.json) still finds the
+  // configured teams — see resolveLayer1ConfigPath + project-roster.ts.
+  const projectsConfigPath = projectsConfigPathOpt ?? resolveLayer1ConfigPath();
   // CTL-1156: injectable config path for /api/config and /api/repo-icon/:key.
-  const monitorConfigPath = monitorConfigPathOpt ?? `${process.cwd()}/.catalyst/config.json`;
+  const monitorConfigPath = monitorConfigPathOpt ?? resolveLayer1ConfigPath();
   // CTL-889: the broker's durable ticket_state cache the detail/search routes
   // read (filter-state.db). Defaults to the broker's own default path.
   const filterStateDb = filterStateDbPath ?? `${CATALYST_DIR}/filter-state.db`;
@@ -4824,7 +4830,13 @@ export function startTerminalOnly(
   };
 }
 
-/** CTL-1156: resolve the project config path from argv > env > cwd default. */
+/**
+ * CTL-1156: resolve the project config path from argv > env > cwd default.
+ * Precedence: `--config <path>` flag first (tests / explicit override), then the
+ * shared env-aware resolver (CATALYST_CONFIG_FILE > CATALYST_CONFIG_PATH > cwd).
+ * The CATALYST_CONFIG_FILE env is what the execution-core daemon / deploy exports,
+ * so a daemon-spawned monitor resolves the real Layer-1 config regardless of cwd.
+ */
 export function resolveProjectConfigPath(
   argv: string[],
   env: NodeJS.ProcessEnv,
@@ -4832,8 +4844,7 @@ export function resolveProjectConfigPath(
 ): string {
   const i = argv.indexOf("--config");
   if (i !== -1 && argv[i + 1] && !argv[i + 1].startsWith("--")) return argv[i + 1];
-  if (env.CATALYST_CONFIG_PATH) return env.CATALYST_CONFIG_PATH;
-  return `${cwd}/.catalyst/config.json`;
+  return resolveLayer1ConfigPath(env, cwd);
 }
 
 if (import.meta.main) {
