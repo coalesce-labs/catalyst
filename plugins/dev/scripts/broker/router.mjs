@@ -86,9 +86,11 @@ import {
   handlePluginRefreshEvent,
   resolveRepoFullName,
   refreshAllPluginCheckouts,
+  resolvePluginPullOwner,
   startPluginDriftCheck,
 } from "./plugin-refresh.mjs";
 import { handleStackReloadEvent } from "./stack-reload.mjs";
+import { getEventName } from "./event-name.mjs"; // CTL-1348: leaf so plugin-refresh stays light
 import { getLastByteOffset } from "./tailer.mjs";
 import {
   severityNumber,
@@ -796,9 +798,11 @@ export function maybeEmitProseDisabled() {
 // (data in `attributes` + `body.payload`) as well as legacy flat events
 // (data in `event` + `detail` + `orchestrator`). Resolved here so the
 // rest of the broker can stay shape-agnostic.
-export function getEventName(event) {
-  return event.event ?? event.attributes?.["event.name"] ?? "";
-}
+// CTL-1348: getEventName moved to ./event-name.mjs (a dependency-free leaf so
+// plugin-refresh.mjs / the standalone updater don't import the heavy router);
+// imported above and re-exported here so existing `from "./router.mjs"` callers
+// keep working.
+export { getEventName };
 function getEventPayload(event) {
   return event.detail ?? event.body?.payload ?? {};
 }
@@ -2274,12 +2278,19 @@ export function startWatchdog() {
 export function startDriftCheckWatcher() {
   return startPluginDriftCheck({
     tickFn: () => {
+      // CTL-1348: when this node has cut over to the standalone catalyst-updater
+      // (pluginPullOwner=updater, read FRESH so a live cutover needs no broker
+      // restart), the broker DEFERS the pull — detect-only keeps drift observability
+      // but never reset --hard. Default "broker" → today's pull, so the merge is
+      // inert until install-services writes "updater".
+      const pull = resolvePluginPullOwner({ machineConfigPath: __machineConfigPath() }) !== "updater";
       const results = refreshAllPluginCheckouts({
         repoConfigPath: __REPO_CONFIG_PATH,
         machineConfigPath: __machineConfigPath(),
         emitFn: appendEvent,
         loadedCommit: __loadedCommit(),
         loadedCommitRoot: __loadedCommitRoot(),
+        pull,
       });
       handleStackReloadEvent({
         results,
@@ -2313,15 +2324,26 @@ export function processEvent(event) {
   // orchestration is active. handlePluginRefreshEvent never throws and the
   // events it emits carry resource["service.name"]=catalyst.broker, which
   // shouldSkipEvent drops on re-ingest (no self-wake loop).
-  const __refreshResults = handlePluginRefreshEvent({
-    event,
-    repoFullName: __repoFullName(),
-    machineConfigPath: __machineConfigPath(),
-    repoConfigPath: __REPO_CONFIG_PATH,
-    emitFn: appendEvent,
-    loadedCommit: __loadedCommit(),
-    loadedCommitRoot: __loadedCommitRoot(),
-  });
+  // CTL-1348: same pluginPullOwner defer as the drift-check timer. When this node has cut
+  // over to the updater, SKIP the event-driven path ENTIRELY — the updater owns the
+  // merge→pull reaction (its own event tail + poll). Running detect-only here on every
+  // merge would fetch + WARN `plugin.checkout.drift` in the seconds-long window before the
+  // updater catches up, manufacturing false drift alerts on healthy nodes (Codex P2). Real
+  // drift (an updater that died / fell behind) is still surfaced by the PERIODIC drift-check
+  // timer's detect-only pass, where being behind for a full interval is genuinely abnormal.
+  const __refreshResults =
+    resolvePluginPullOwner({ machineConfigPath: __machineConfigPath() }) === "updater"
+      ? null
+      : handlePluginRefreshEvent({
+          event,
+          repoFullName: __repoFullName(),
+          machineConfigPath: __machineConfigPath(),
+          repoConfigPath: __REPO_CONFIG_PATH,
+          emitFn: appendEvent,
+          loadedCommit: __loadedCommit(),
+          loadedCommitRoot: __loadedCommitRoot(),
+          pull: true,
+        });
   // CTL-1077: act on the refresh — reload the running stack when the checkout advanced.
   // logPath MUST be threaded through: the broker self-reload handoff records it so the
   // successor's resolveBootByteOffset can confirm it resumes the same month file. Omitting
