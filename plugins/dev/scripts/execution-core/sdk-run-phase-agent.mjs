@@ -60,7 +60,10 @@
 // (never a silent drop).
 
 import { spawnSync } from "node:child_process";
+import { appendFileSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { getEventLogPath } from "./config.mjs";
 
 // phase-agent-dispatch + phase-agent-emit-complete sit one directory up.
 const PHASE_AGENT_DISPATCH_BIN = fileURLToPath(
@@ -69,6 +72,16 @@ const PHASE_AGENT_DISPATCH_BIN = fileURLToPath(
 const EMIT_COMPLETE_BIN = fileURLToPath(
   new URL("../phase-agent-emit-complete", import.meta.url),
 );
+
+// CTL-1367 item 12: the SAME ceiling the bg dispatcher (dispatch.mjs
+// getDispatchTimeoutMs / phase-agent-dispatch via CATALYST_DISPATCH_TIMEOUT_MS)
+// puts on the synchronous phase-agent-dispatch spawn. The SDK path runs the
+// IDENTICAL prelaunch via spawnSync; without this bound a wedged
+// worktree/rebase/recreate in the shared prelaunch blocks the whole daemon
+// indefinitely (no rc, no failure ladder). Read lazily so tests/operators can
+// override at runtime.
+const getPrelaunchTimeoutMs = () =>
+  Number(process.env.CATALYST_DISPATCH_TIMEOUT_MS) || 15 * 60 * 1000;
 
 // ── Async semaphore ─────────────────────────────────────────────────────────
 // A minimal counting semaphore: acquire() resolves when a slot is free, the
@@ -91,14 +104,31 @@ export class Semaphore {
       this._active += 1;
       return () => this._release();
     }
+    // CTL-1367 item 10: park until a slot is HANDED to us. We do NOT increment
+    // _active after the await — `_release` keeps the count constant across the
+    // handoff (the departing holder's slot transfers straight to this waiter), so
+    // a concurrent `acquire()` can never slip into the decrement→increment gap and
+    // push active past max.
     await new Promise((resolve) => this._waiters.push(resolve));
-    this._active += 1;
     return () => this._release();
   }
   _release() {
-    this._active -= 1;
+    // CTL-1367 item 10: if a waiter is parked, hand it the slot directly (active
+    // is unchanged — one holder swapped for the next). Only when no one is waiting
+    // does the slot actually free (active--). This closes the exceed-max race.
     const next = this._waiters.shift();
-    if (next) next();
+    if (next) {
+      next();
+    } else {
+      this._active -= 1;
+    }
+  }
+  // CTL-1367 item 10: re-size in place. The old sharedSemaphore() replaced the
+  // whole instance when maxParallel changed, abandoning parked waiters (their
+  // promises never resolved → deadlock). Mutating `max` keeps every parked waiter
+  // attached; a raised cap is observed by the next `_release`/`acquire`.
+  setMax(max) {
+    this.max = Math.max(1, Number.isFinite(max) ? Math.floor(max) : 1);
   }
 }
 
@@ -107,7 +137,12 @@ export class Semaphore {
 // fleet-wide concurrency cap. Tests inject their own Semaphore.
 let _sharedSemaphore = null;
 function sharedSemaphore(maxParallel) {
-  if (_sharedSemaphore && _sharedSemaphore.max === maxParallel) return _sharedSemaphore;
+  if (_sharedSemaphore) {
+    // CTL-1367 item 10: mutate in place — NEVER re-create — so parked waiters are
+    // never abandoned when maxParallel changes between ticks.
+    if (_sharedSemaphore.max !== maxParallel) _sharedSemaphore.setMax(maxParallel);
+    return _sharedSemaphore;
+  }
   _sharedSemaphore = new Semaphore(maxParallel);
   return _sharedSemaphore;
 }
@@ -187,20 +222,124 @@ function defaultEmitEvent(name, payload) {
 // phase-agent-dispatch:mark_launch_failed (phase-agent-emit-complete with
 // --no-signal-update so the skill/pre-launch keeps ownership of the signal file).
 // Best-effort; never throws.
-function defaultEmitBackstop({ phase, ticket, status, reason, orchDir }, { spawn = spawnSync } = {}) {
+export function defaultEmitBackstop(
+  { phase, ticket, status, reason, orchDir, signalFile },
+  {
+    spawn = spawnSync,
+    writeSignalStalled = defaultWriteSignalStalled,
+    appendEventLog = defaultAppendEventLog,
+  } = {},
+) {
+  // Step 1 (CTL-1367 item 4): mirror mark_launch_failed — flip the signal to
+  // status:"stalled" BEFORE the event-only emit. The bg path jq-writes stalled
+  // first; the SDK backstop used to ONLY emit, so the signal stayed at
+  // dispatched/running and reclaim saw the worker in-flight forever.
+  if (signalFile) writeSignalStalled(signalFile, reason);
+
+  // Step 2 (CTL-1367 item 5): emit with --no-signal-update (step 1 owns the
+  // signal), then INSPECT the result instead of swallowing it — a missing/failing
+  // emit binary falls back to a direct event-log append so the terminal event is
+  // never silently dropped.
+  const args = [
+    "--phase", phase,
+    "--ticket", ticket,
+    "--status", status,
+    "--orch-dir", orchDir,
+    "--orch-id", ticket,
+    "--no-signal-update",
+  ];
+  if (reason) args.push("--reason", reason);
+  let res;
   try {
-    const args = [
-      "--phase", phase,
-      "--ticket", ticket,
-      "--status", status,
-      "--orch-dir", orchDir,
-      "--orch-id", ticket,
-      "--no-signal-update",
-    ];
-    if (reason) args.push("--reason", reason);
-    spawn(EMIT_COMPLETE_BIN, args, { encoding: "utf8" });
+    res = spawn(EMIT_COMPLETE_BIN, args, { encoding: "utf8" });
+  } catch (err) {
+    res = { error: err };
+  }
+  const emitFailed =
+    !res || res.error != null || (typeof res.status === "number" && res.status !== 0);
+  if (emitFailed) {
+    appendEventLog({ phase, ticket, status, reason });
+  }
+}
+
+// ── Secret scrubbing (CTL-1367 item 11) ─────────────────────────────────────
+// Returned stderr (thrown error messages, pre.stderr) can echo the env we built —
+// which carries CLAUDE_CODE_OAUTH_TOKEN and may transit ANTHROPIC_* keys. Scrub
+// token-shaped substrings AND any known literal secrets before returning so a
+// dispatch-failure log / event never leaks a credential. Pure; never throws.
+export function scrubSecrets(s, secrets = []) {
+  if (typeof s !== "string" || s.length === 0) return s;
+  let out = s;
+  // Redact known literal secret values first (most precise).
+  for (const sec of secrets) {
+    if (typeof sec === "string" && sec.length >= 8) {
+      out = out.split(sec).join("[redacted]");
+    }
+  }
+  // Then redact token-SHAPED substrings the SDK / CLI might surface independently.
+  out = out
+    .replace(/sk-ant-[A-Za-z0-9_-]{8,}/g, "[redacted-token]")
+    .replace(/\bsk-[A-Za-z0-9_-]{16,}/g, "[redacted-token]")
+    .replace(/\blin_(?:oauth|api)_[A-Za-z0-9]{8,}/g, "[redacted-token]")
+    .replace(
+      /\b(ANTHROPIC_API_KEY|ANTHROPIC_AUTH_TOKEN|CLAUDE_CODE_OAUTH_TOKEN)=\S+/g,
+      "$1=[redacted]",
+    );
+  return out;
+}
+
+// defaultWriteSignalStalled — CTL-1367 item 4. Mirror phase-agent-dispatch's
+// mark_launch_failed: flip the phase signal to status:"stalled" with an
+// `attentionReason` (NOT `failureReason` — a failureReason trips revive Loop 2's
+// escalate branch, which does NOT retry). Atomic write (tmp + rename) so a
+// concurrent reader never sees a half-written file. Best-effort; never throws.
+function defaultWriteSignalStalled(signalFile, reason) {
+  try {
+    let sig;
+    try {
+      sig = JSON.parse(readFileSync(signalFile, "utf8"));
+    } catch {
+      return; // no signal to flip (prelaunch never wrote one) — nothing to do
+    }
+    if (!sig || typeof sig !== "object") return;
+    const ts = new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
+    sig.status = "stalled";
+    sig.attentionReason = reason || "sdk-backstop";
+    sig.updatedAt = ts;
+    sig.phaseTimestamps = { ...(sig.phaseTimestamps ?? {}), stalled: ts };
+    const tmp = `${signalFile}.tmp.${process.pid}`;
+    writeFileSync(tmp, JSON.stringify(sig));
+    renameSync(tmp, signalFile);
   } catch {
-    /* best-effort */
+    /* best-effort — reclaim will still pick up the terminal event */
+  }
+}
+
+// defaultAppendEventLog — CTL-1367 item 5. Last-resort terminal-event append when
+// the phase-agent-emit-complete binary is missing or fails. Writes one canonical
+// v2 envelope `phase.<phase>.<status>.<ticket>` to the unified event log so the
+// terminal event is NEVER silently dropped (the broker routes on
+// attributes["event.name"]). Best-effort; never throws.
+function defaultAppendEventLog({ phase, ticket, status, reason }) {
+  try {
+    const path = getEventLogPath();
+    mkdirSync(dirname(path), { recursive: true });
+    const line = JSON.stringify({
+      ts: new Date().toISOString(),
+      resource: {
+        "service.name": "catalyst.execution-core",
+        "service.namespace": "catalyst",
+      },
+      attributes: {
+        "event.name": `phase.${phase}.${status}.${ticket}`,
+        "linear.issue.identifier": ticket,
+        "catalyst.worker.ticket": ticket,
+      },
+      body: { message: reason ?? `sdk backstop: ${status}` },
+    });
+    appendFileSync(path, line + "\n");
+  } catch {
+    /* best-effort — the emit binary is the primary path */
   }
 }
 
@@ -249,11 +388,48 @@ function backoffMs(i, { baseMs = 1000, capMs = 30000, random = Math.random } = {
 
 // ── The run loop ────────────────────────────────────────────────────────────
 
+// ── Prelaunch-spec recovery contract (CTL-1367 item 15) ─────────────────────
+// The prelaunch emits the resolved launch spec as a JSON line on stdout. The
+// original parser took the LAST parseable JSON line, which is brittle: a trailing
+// log line that happens to be valid JSON would be mis-selected as the spec.
+//
+// CONTRACT (documented decision): we do NOT prefix the spec with a sentinel or
+// move it to a dedicated fd, because the protected phase-agent-dispatch test
+// (Test 68/70) asserts the prelaunch-only stdout is RAW JSON (`echo "$SPEC" | jq`)
+// — a prefix would break it. Instead we select STRUCTURALLY: scanning from the
+// last line, the spec is the JSON object that carries the dispatch-spec shape
+// (string `ticket` + `phase` + `status`, with `status` in the closed set of
+// dispatch statuses). A stray JSON log line lacks that shape and is skipped. This
+// is an explicit contract on the object's STRUCTURE rather than its POSITION.
+const PRELAUNCH_SPEC_STATUSES = new Set([
+  "prelaunch-ready", // a fresh dispatch — proceed to query()
+  "dispatched",      // idempotent: an in-flight worker already owns this phase
+  "running",         // idempotent: ditto
+  "done",            // idempotent: already completed
+  "claim-lost",      // idempotent: a concurrent dispatcher won the single-flight claim
+]);
+
+function isLaunchSpec(obj) {
+  return (
+    obj != null &&
+    typeof obj === "object" &&
+    typeof obj.ticket === "string" &&
+    typeof obj.phase === "string" &&
+    typeof obj.status === "string" &&
+    PRELAUNCH_SPEC_STATUSES.has(obj.status)
+  );
+}
+
 // runPrelaunch — invoke phase-agent-dispatch in prelaunch-only mode (the Stage-A
 // shared pre-launch) and return the parsed launch spec. Builds the SAME arg array
 // + env as dispatch.mjs:defaultRunPhaseAgent (so the pre-launch behaves
 // identically) plus `--launch-mode prelaunch-only`. Returns
-// { ok, spec, code, stderr }.
+// { ok, idempotent, spec, code, stderr }:
+//   • ok          — a fresh prelaunch-ready spec; the caller drives query().
+//   • idempotent  — the prelaunch was a NO-OP (an existing dispatched/running/done
+//                   signal, or a lost single-flight claim). NOT a failure (item 18):
+//                   the existing/winning worker owns the phase; the caller returns
+//                   success without launching query().
 function runPrelaunch(
   { orchDir, ticket, phase, worktreePath, resumeSession, handoffPath, attempt, clusterGeneration },
   { spawn = spawnSync } = {},
@@ -284,18 +460,24 @@ function runPrelaunch(
     cwd: worktreePath,
     encoding: "utf8",
     env,
+    // CTL-1367 item 12: bound the synchronous prelaunch exactly like the bg
+    // dispatcher does — a wedged worktree/rebase/recreate must surface as a failed
+    // dispatch, not block the daemon. SIGKILL because a wedged dispatch may ignore
+    // SIGTERM mid-exec-loop (mirrors dispatch.mjs defaultRunPhaseAgent).
+    timeout: getPrelaunchTimeoutMs(),
+    killSignal: "SIGKILL",
   });
   const code = res.error ? 127 : (res.status ?? 0);
   const stderr = res.error
     ? (res.stderr && res.stderr.length ? res.stderr : res.error.message)
     : (res.stderr ?? "");
-  // The spec is the last JSON object line printed on stdout.
+  // Structural spec recovery (item 15): the LAST line that is a valid launch spec.
   let spec = null;
   const lines = String(res.stdout ?? "").trim().split("\n").filter(Boolean);
   for (let i = lines.length - 1; i >= 0; i--) {
     try {
       const obj = JSON.parse(lines[i]);
-      if (obj && typeof obj === "object") {
+      if (isLaunchSpec(obj)) {
         spec = obj;
         break;
       }
@@ -304,15 +486,34 @@ function runPrelaunch(
     }
   }
   const ok = code === 0 && spec != null && spec.status === "prelaunch-ready";
-  return { ok, spec, code, stderr };
+  // CTL-1367 item 18: an exit-0 prelaunch whose spec is an idempotent no-op
+  // (claim-lost, or an existing dispatched/running/done signal) is SUCCESS, not a
+  // "shared pre-launch failed". Distinguish it so the caller can return cleanly.
+  const idempotent =
+    code === 0 &&
+    spec != null &&
+    spec.status !== "prelaunch-ready" &&
+    (spec.idempotent === true || PRELAUNCH_SPEC_STATUSES.has(spec.status));
+  return { ok, idempotent, spec, code, stderr };
 }
 
 // buildSdkEnv — the env handed to query(), built from the shared-pre-launch spec's
 // composed env array (KEY=VALUE strings: CATALYST_* + CATALYST_GENERATION fencing
 // token + OTEL attrs) layered over process.env, with the auth guards applied. This
 // is plain env (Contract 3) — it REPLACES the CTL-760/777 --settings bridge.
-export function buildSdkEnv(specEnv, { base = process.env, oauthToken } = {}) {
+export function buildSdkEnv(specEnv, { base = process.env, oauthToken, settingsEnv } = {}) {
   const env = { ...base };
+  // CTL-1367 item 8: layer the spec's settings.env FIRST — this is the object the
+  // bg path threads through `claude --bg --settings '{"env":{…}}'` and it carries
+  // the telemetry keys (OTEL_* / CLAUDE_CODE_ENABLE_TELEMETRY). Without layering it
+  // the in-process SDK worker would run telemetry-DISABLED. The spec.env ARRAY
+  // (post-composition CATALYST_* + fencing token + OTEL_RESOURCE_ATTRIBUTES) is
+  // layered AFTER so its explicit values win on any overlap.
+  if (settingsEnv && typeof settingsEnv === "object") {
+    for (const [k, v] of Object.entries(settingsEnv)) {
+      if (typeof k === "string" && k.length > 0) env[k] = String(v);
+    }
+  }
   for (const kv of specEnv ?? []) {
     const idx = String(kv).indexOf("=");
     if (idx <= 0) continue;
@@ -327,6 +528,18 @@ export function buildSdkEnv(specEnv, { base = process.env, oauthToken } = {}) {
   return env;
 }
 
+// pluginsForSdk — map the prelaunch spec's pluginDirs (an array of absolute paths)
+// to the Agent SDK `plugins` option shape (CTL-1367 item 8). Verified against
+// @anthropic-ai/claude-agent-sdk sdk.d.ts: `plugins?: SdkPluginConfig[]` where
+// `SdkPluginConfig = { type: 'local', path: string }`. Without this the
+// /catalyst-dev:phase-* plugin skills the prompt invokes never resolve.
+function pluginsForSdk(pluginDirs) {
+  if (!Array.isArray(pluginDirs)) return [];
+  return pluginDirs
+    .filter((p) => typeof p === "string" && p.length > 0)
+    .map((path) => ({ type: "local", path }));
+}
+
 // buildQueryOptions — the query() options. `--bare` is NEVER set; settingSources is
 // always ["user","project"] (NEVER [] — that hides the plugin phase skills).
 export function buildQueryOptions(spec, env, { turnCap } = {}) {
@@ -336,9 +549,27 @@ export function buildQueryOptions(spec, env, { turnCap } = {}) {
     executable: "bun", // #266: avoid "Bun is not defined" under a Node spawn
     settingSources: ["user", "project"], // REQUIRED so plugin phase skills resolve
     permissionMode: "bypassPermissions", // unattended; skills self-gate via frontmatter
+    // CTL-1367 item 13: bypassPermissions REQUIRES allowDangerouslySkipPermissions
+    // (verified in sdk.d.ts: "Must be set to true when using
+    // permissionMode: 'bypassPermissions'"). It is the in-process equivalent of the
+    // bg path's `--dangerously-skip-permissions`; without it an unattended SDK
+    // worker would prompt/fail on the first tool use.
+    allowDangerouslySkipPermissions: true,
     systemPrompt: { type: "preset", preset: "claude_code" }, // keep CLI behavior
   };
-  if (turnCap != null) options.maxTurns = turnCap; // → error_max_turns → turn-cap-exhausted
+  // CTL-1367 item 6: bound the run by the per-phase turn cap. Precedence: an
+  // explicit option override (tests/tuning), else the spec's turnCap (the value
+  // phase-agent-dispatch resolved for this phase). Without this the SDK ran
+  // unbounded and turn-cap-exhausted could never fire.
+  const cap = turnCap ?? spec.turnCap;
+  if (cap != null) options.maxTurns = cap; // → error_max_turns → turn-cap-exhausted
+  // CTL-1367 item 7: pin the per-phase model the dispatcher resolved (else the SDK
+  // falls back to its own default model, ignoring per-phase model selection).
+  if (typeof spec.model === "string" && spec.model.length > 0) options.model = spec.model;
+  // CTL-1367 item 8: forward the resolved plugin dirs so /catalyst-dev:phase-*
+  // skills resolve in-process.
+  const plugins = pluginsForSdk(spec.pluginDirs);
+  if (plugins.length > 0) options.plugins = plugins;
   if (spec.resumeSession) options.resume = spec.resumeSession; // cwd === worktreePath (set above)
   return options;
 }
@@ -405,22 +636,44 @@ export async function sdkRunPhaseAgent(
     { orchDir, ticket, phase, worktreePath, resumeSession, handoffPath, attempt, clusterGeneration },
     { spawn },
   );
+  // CTL-1367 item 18: an idempotent prelaunch (claim-lost / existing
+  // dispatched|running|done signal) is a NO-OP SUCCESS, NOT a failure — the
+  // existing or winning worker owns the phase. Returning code 0 (no query, no
+  // backstop) keeps a duplicate dispatch from tripping the dispatch-failure ladder.
+  if (pre.idempotent) {
+    return { code: 0, stdout: "", stderr: "", signal: null };
+  }
   if (!pre.ok) {
     // The pre-launch already owns its own failure event (mark_launch_failed) on a
     // claim/launch failure; surface its code/stderr without a duplicate backstop.
+    // CTL-1367 item 11: scrub any token-shaped substrings out of the surfaced
+    // stderr (the prelaunch env carries CLAUDE_CODE_OAUTH_TOKEN).
+    const secrets = [oauthToken, authEnv.ANTHROPIC_API_KEY, authEnv.ANTHROPIC_AUTH_TOKEN];
     return {
       code: pre.code || 1,
       stdout: "",
-      stderr: pre.stderr || "sdk: shared pre-launch failed (no launch spec)",
+      stderr: scrubSecrets(pre.stderr, secrets) || "sdk: shared pre-launch failed (no launch spec)",
       signal: null,
     };
   }
   const spec = pre.spec;
+  const signalFile = spec.signalFile; // CTL-1367 item 4: the file the backstop flips to stalled
+  const secrets = [oauthToken, authEnv.ANTHROPIC_API_KEY, authEnv.ANTHROPIC_AUTH_TOKEN];
 
-  const env = buildSdkEnv(spec.env, { base: authEnv, oauthToken });
+  const env = buildSdkEnv(spec.env, { base: authEnv, oauthToken, settingsEnv: spec.settings?.env });
   const options = buildQueryOptions(spec, env, { turnCap });
 
   // ── LAUNCH VERB: the in-process query() loop, under the concurrency cap ───
+  //
+  // CTL-1367 item 16 (semaphore scope — DOCUMENTED DECISION): the cap wraps ONLY
+  // query() — NOT runPrelaunch/rebase, which ran (synchronously) above before we
+  // acquire. This is deliberate: the prelaunch is the cheap, fast, single-flight
+  // claim + signal write (it must NOT queue behind long-running query() slots, or a
+  // duplicate-dispatch no-op would block on a full semaphore); query() is the
+  // expensive in-process phase run that actually consumes a model/concurrency slot.
+  // Capping query() only also matches the bg path, where phase-agent-dispatch
+  // (prelaunch+spawn) is never concurrency-capped — only the live `claude --bg`
+  // workers are, by the scheduler's maxParallel admission gate upstream.
   const sem = semaphore ?? sharedSemaphore(maxParallel);
   const release = await sem.acquire();
   try {
@@ -438,8 +691,20 @@ export async function sdkRunPhaseAgent(
         thrown = err;
       }
 
-      // 429/529 → bounded backoff + retry.
-      const overloaded = thrown ? isOverloadedError(thrown) : isOverloadedResult(result);
+      // 429/529 → bounded backoff + retry. Check BOTH a thrown error AND a captured
+      // terminal result (the overload can surface either way).
+      //
+      // CTL-1367 item 17 (overload-retry idempotency — DOCUMENTED GUARANTEE): the
+      // shared pre-launch (single-flight claim + "dispatched" signal + rebase) ran
+      // EXACTLY ONCE, above the retry loop; only query() is retried. query() resumes
+      // the SAME session (options.resume is set on a resume dispatch; a fresh
+      // dispatch's first turns are establishment) against the SAME worktree + signal,
+      // so a 429/529 retry never re-claims, never re-rebases, and never re-writes the
+      // dispatched signal. The phase skill itself is idempotent across turns (it flips
+      // dispatched→running once and checkpoints its own progress), so re-entering
+      // query() after an overload cannot double-apply partial phase progress.
+      const overloaded =
+        (thrown && isOverloadedError(thrown)) || isOverloadedResult(result);
       if (overloaded) {
         lastOverload = thrown ?? result;
         if (i < maxRetries) {
@@ -454,7 +719,7 @@ export async function sdkRunPhaseAgent(
         emitEvent("execution-core.sdk.overloaded", {
           ticket, phase, attempt: i, exhausted: true, status: statusOf(lastOverload),
         });
-        emitBackstop({ phase, ticket, status: "failed", reason: "sdk-overloaded-exhausted", orchDir }, { spawn });
+        emitBackstop({ phase, ticket, status: "failed", reason: "sdk-overloaded-exhausted", orchDir, signalFile }, { spawn });
         return {
           code: 1,
           stdout: "",
@@ -463,16 +728,26 @@ export async function sdkRunPhaseAgent(
         };
       }
 
-      // A non-overloaded thrown error → failed (with backstop).
-      if (thrown) {
-        emitBackstop({ phase, ticket, status: "failed", reason: "sdk-threw", orchDir }, { spawn });
-        return { code: 1, stdout: "", stderr: String(thrown?.message ?? thrown), signal: null };
+      // CTL-1367 item 14: a terminal result captured BEFORE the iterator raised is
+      // the REAL outcome — map it. Only a throw with NO captured result is a generic
+      // failure. Without this, a single-message query that yields error_max_turns and
+      // then raises on iterator cleanup was reported as generic sdk-threw (failed)
+      // instead of turn-cap-exhausted (because the thrown branch returned before
+      // mapResult).
+      if (thrown && !result) {
+        emitBackstop({ phase, ticket, status: "failed", reason: "sdk-threw", orchDir, signalFile }, { spawn });
+        return {
+          code: 1,
+          stdout: "",
+          stderr: scrubSecrets(String(thrown?.message ?? thrown), secrets),
+          signal: null,
+        };
       }
 
       // Terminal result → map + (conditional) backstop emit.
       const { result: mapped, backstop } = mapResult(result);
       if (backstop) {
-        emitBackstop({ phase, ticket, status: backstop.status, reason: backstop.reason, orchDir }, { spawn });
+        emitBackstop({ phase, ticket, status: backstop.status, reason: backstop.reason, orchDir, signalFile }, { spawn });
       }
       return mapped;
     }

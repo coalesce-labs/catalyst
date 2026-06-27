@@ -6,7 +6,10 @@
 // so no test ever spawns a real script.
 
 import { describe, test, expect } from "bun:test";
-import { dispatchTicket, defaultDispatch, defaultRunPhaseAgent, dispatchForExecutor, sdkDispatch, makeCommentWakeDispatch, teamOf } from "./dispatch.mjs";
+import { mkdtempSync, writeFileSync, mkdirSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { dispatchTicket, defaultDispatch, defaultRunPhaseAgent, dispatchForExecutor, sdkDispatch, makeCommentWakeDispatch, teamOf, settleDispatchSync, sdkSignalRunnable, isThenable } from "./dispatch.mjs";
 
 describe("teamOf", () => {
   test("extracts the team prefix from a ticket identifier", () => {
@@ -857,5 +860,100 @@ describe("defaultDispatch — clusterGeneration passthrough (CTL-864)", () => {
       { resolveProject: s.resolveProject, createWorktree: s.createWorktree, runPhaseAgent: s.runPhaseAgent },
     );
     expect(s.calls[0].clusterGeneration).toBeUndefined();
+  });
+});
+
+// ── CTL-1367 P1: settleDispatchSync + sdkSignalRunnable + isThenable ──────────
+
+describe("isThenable (CTL-1367 P1)", () => {
+  test("true for promises, false for plain dispatch results", () => {
+    expect(isThenable(Promise.resolve({ code: 0 }))).toBe(true);
+    expect(isThenable({ then: () => {} })).toBe(true);
+    expect(isThenable({ code: 0 })).toBe(false);
+    expect(isThenable(null)).toBe(false);
+    expect(isThenable(undefined)).toBe(false);
+  });
+});
+
+describe("sdkSignalRunnable (CTL-1367 E3)", () => {
+  let dir;
+  const seed = (status, extra = {}) => {
+    dir = mkdtempSync(join(tmpdir(), "sdk-sig-"));
+    const wd = join(dir, "workers", "CTL-1");
+    mkdirSync(wd, { recursive: true });
+    writeFileSync(join(wd, "phase-implement.json"), JSON.stringify({ status, ...extra }));
+    return dir;
+  };
+  test("accepts dispatched/running/done WITHOUT a bg_job_id (the SDK prelaunch has none)", () => {
+    for (const st of ["dispatched", "running", "done"]) {
+      const od = seed(st); // note: no bg_job_id
+      expect(sdkSignalRunnable(od, "CTL-1", "implement")).toBe(true);
+      rmSync(od, { recursive: true, force: true });
+    }
+  });
+  test("rejects a failed/stalled or missing signal", () => {
+    const od = seed("stalled");
+    expect(sdkSignalRunnable(od, "CTL-1", "implement")).toBe(false);
+    rmSync(od, { recursive: true, force: true });
+    expect(sdkSignalRunnable("/nope", "CTL-1", "implement")).toBe(false);
+  });
+});
+
+describe("settleDispatchSync (CTL-1367 P1)", () => {
+  test("a SYNC result is returned UNCHANGED (bg path byte-identical)", () => {
+    const r = { code: 0, stdout: "x", worktreePath: "/wt" };
+    expect(settleDispatchSync(r)).toBe(r); // same object reference — no wrapping
+  });
+  test("a Promise → synchronous { code:0, async:true } when verifySync passes; query detached", async () => {
+    let settled = false;
+    const p = Promise.resolve({ code: 0 });
+    const r = settleDispatchSync(p, { verifySync: () => true, onSettled: () => { settled = true; } });
+    expect(r).toEqual({ code: 0, async: true }); // resolved SYNCHRONOUSLY
+    await p; await Promise.resolve(); // let the detached handler run
+    expect(settled).toBe(true);
+  });
+  test("a Promise → { code:1 } when verifySync fails (prelaunch never wrote a runnable signal)", () => {
+    const r = settleDispatchSync(Promise.resolve({ code: 1 }), { verifySync: () => false });
+    expect(r).toEqual({ code: 1, async: true });
+  });
+  test("a rejecting Promise never escapes as an unhandled rejection", async () => {
+    let err = null;
+    const r = settleDispatchSync(Promise.reject(new Error("boom")), {
+      verifySync: () => true,
+      onSettled: (_res, e) => { err = e; },
+    });
+    expect(r.code).toBe(0); // launch already happened (signal verified)
+    await Promise.resolve(); await Promise.resolve();
+    expect(err?.message).toBe("boom"); // captured by the detached handler, not thrown
+  });
+});
+
+// ── CTL-1367 P1 end-to-end: sdkDispatch result settles via the prelaunch signal ─
+
+describe("sdkDispatch + settleDispatchSync end-to-end (CTL-1367 P1)", () => {
+  test("an async sdk dispatch is settled synchronously off the signal it wrote", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "sdk-e2e-"));
+    const wd = join(dir, "workers", "CTL-5");
+    mkdirSync(wd, { recursive: true });
+    const signalFile = join(wd, "phase-implement.json");
+    // Fake runPhaseAgent that mimics sdkRunPhaseAgent: writes the dispatched signal
+    // SYNCHRONOUSLY (the prelaunch), then returns a Promise (the detached query).
+    const runPhaseAgent = () => {
+      writeFileSync(signalFile, JSON.stringify({ status: "dispatched", bg_job_id: null }));
+      return Promise.resolve({ code: 0, stdout: "", stderr: "", signal: null });
+    };
+    const dispatch = (args) =>
+      defaultDispatch(args, {
+        resolveProject: () => ({ team: "CTL", repoRoot: "/repo" }),
+        createWorktree: () => ({ code: 0, worktreePath: wd }),
+        runPhaseAgent,
+      });
+    const raw = dispatch({ orchDir: dir, ticket: "CTL-5", phase: "implement" });
+    expect(isThenable(raw)).toBe(true); // the dispatch is async (sdk shape)
+    const settled = settleDispatchSync(raw, { verifySync: () => sdkSignalRunnable(dir, "CTL-5", "implement") });
+    expect(settled.code).toBe(0); // verified off the synchronously-written signal
+    expect(settled.async).toBe(true);
+    await raw; // detached query resolves cleanly
+    rmSync(dir, { recursive: true, force: true });
   });
 });

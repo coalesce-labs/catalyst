@@ -2676,6 +2676,38 @@ describe("defaultReviveDispatch — signal-reset behaviour", () => {
     });
   });
 
+  // CTL-1367 P1: an ASYNC (executor=sdk) dispatch returns a Promise whose
+  // synchronous prelaunch already wrote the `dispatched` signal. defaultReviveDispatch
+  // must settle it synchronously off that signal (NOT see `undefined` code and record
+  // a revive failure). This exercises the injected fn's BEHAVIOR end-to-end.
+  test("an async dispatch is settled synchronously off the prelaunch signal (code 0)", async () => {
+    const signalPath = seed("CTL-async", "implement", { status: "running", bg_job_id: "bg-a" });
+    let resolveQuery;
+    const queryDone = new Promise((res) => { resolveQuery = res; });
+    // Mimic the SDK launch verb: synchronously (before returning the Promise)
+    // re-write the signal to dispatched (the prelaunch), then return a Promise.
+    const dispatch = (args) => {
+      expect(args.ticket).toBe("CTL-async"); // routed through the injected fn
+      writeFileSync(signalPath, JSON.stringify({ ticket: "CTL-async", phase: "implement", status: "dispatched", bg_job_id: null }));
+      return queryDone;
+    };
+    const r = defaultReviveDispatch({ orchDir, ticket: "CTL-async", phase: "implement" }, { dispatch });
+    expect(r.code).toBe(0); // settled synchronously off the dispatched signal
+    expect(r.async).toBe(true);
+    resolveQuery({ code: 0 }); // detached query completes
+    await queryDone;
+  });
+
+  test("an async dispatch whose prelaunch left NO runnable signal settles to code 1", async () => {
+    const signalPath = seed("CTL-asyncfail", "implement", { status: "running", bg_job_id: "bg-b" });
+    // dispatch returns a Promise but does NOT write a dispatched signal (prelaunch
+    // failed) — defaultReviveDispatch resets to stalled, so sdkSignalRunnable is false.
+    const dispatch = () => Promise.resolve({ code: 1 });
+    const r = defaultReviveDispatch({ orchDir, ticket: "CTL-asyncfail", phase: "implement" }, { dispatch });
+    expect(r.code).toBe(1); // the reset-to-stalled signal is not runnable → failure
+    void signalPath;
+  });
+
   test("signal.worktreePath is forwarded to dispatch as expectedWorktreePath (CTL-615)", () => {
     seed("CTL-15", "implement", {
       status: "running",

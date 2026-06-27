@@ -14,6 +14,8 @@
 // monitor's →Triage one-shot dispatch share one adapter.
 
 import { spawnSync } from "node:child_process";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { getProjectConfig } from "./registry.mjs";
 import { createWorktree as defaultCreateWorktree } from "./worktree.mjs";
@@ -260,4 +262,71 @@ export function dispatchTicket(
   if (attempt != null) args.attempt = attempt; // CTL-761
   if (clusterGeneration != null) args.clusterGeneration = clusterGeneration; // CTL-864
   return dispatch(args);
+}
+
+// ── CTL-1367 P1: async-dispatch settlement seam ─────────────────────────────
+//
+// The bg launch verb (defaultRunPhaseAgent) is SYNCHRONOUS — it returns a plain
+// result the moment `claude --bg` is launched. The sdk launch verb
+// (sdkRunPhaseAgent) is ASYNC — it returns a Promise that resolves only AFTER the
+// in-process query() runs the WHOLE phase. The dispatch consumers (the scheduler's
+// dispatchAndVerify, the monitor's dispatchTriage, the boot-resume/recovery
+// reviveDispatch) all read `result.code` SYNCHRONOUSLY; under executor=sdk that read
+// saw a Promise (`undefined` code) and recorded a dispatch FAILURE while the query
+// ran detached — the P1 bug.
+//
+// The fix exploits a structural fact: the sdk launch verb runs the SAME synchronous
+// shared pre-launch (spawnSync phase-agent-dispatch --launch-mode prelaunch-only)
+// BEFORE its first `await`, so by the time the Promise is returned the
+// status:"dispatched" signal has ALREADY been written to disk. So a synchronous
+// consumer does NOT need to await the (long-running) query — it treats the sdk
+// dispatch exactly like a bg dispatch: the launch already happened, success is
+// confirmed by the signal file, and the eventual terminal event (emitted by the
+// phase skill, or the backstop on abnormal termination) wakes the orchestrator
+// later — identical to how a `claude --bg` worker's events drive advancement.
+//
+// settleDispatchSync bridges the two:
+//   • a SYNC result → returned unchanged (bg path is byte-identical; the existing
+//     toEqual tests that inject sync stubs never reach the async branch).
+//   • a Promise (sdk) → (a) a DETACHED settle handler is attached so the query runs
+//     to completion in the background and its settlement never escapes as an
+//     unhandled rejection, and (b) a synchronous provisional { code, async:true } is
+//     returned, where `code` reflects whether the synchronously-written prelaunch
+//     signal is runnable (the SDK-aware verification — NO bg_job_id required, since
+//     the SDK prelaunch intentionally has none). The caller then proceeds exactly as
+//     it does for a bg dispatch.
+export function isThenable(x) {
+  return x != null && (typeof x === "object" || typeof x === "function") && typeof x.then === "function";
+}
+
+// sdkSignalRunnable — read workers/<ticket>/phase-<phase>.json and report whether
+// it is in a runnable/launched state for the SDK path. Accepts dispatched|running
+// (the prelaunch wrote dispatched; the skill flips it to running) AND done (an
+// idempotent duplicate dispatch of an already-completed phase). Crucially it does
+// NOT require a bg_job_id — the SDK prelaunch never writes one (E3). false when the
+// signal is absent, unparseable, or failed/stalled (a failed prelaunch).
+export function sdkSignalRunnable(orchDir, ticket, phase) {
+  try {
+    const sig = JSON.parse(readFileSync(join(orchDir, "workers", ticket, `phase-${phase}.json`), "utf8"));
+    const st = sig?.status;
+    return st === "dispatched" || st === "running" || st === "done";
+  } catch {
+    return false;
+  }
+}
+
+export function settleDispatchSync(result, { verifySync, onSettled } = {}) {
+  if (isThenable(result)) {
+    // (a) Detached settle handler — the query runs to completion in the background;
+    // its terminal event is emitted by the worker/backstop. Swallow the settlement
+    // so it can never surface as an unhandled rejection on the daemon event loop.
+    Promise.resolve(result).then(
+      (r) => { if (onSettled) { try { onSettled(r, null); } catch { /* best-effort */ } } },
+      (err) => { if (onSettled) { try { onSettled(null, err); } catch { /* best-effort */ } } },
+    );
+    // (b) Synchronous provisional: the prelaunch signal IS the launch confirmation.
+    const ok = verifySync ? verifySync() !== false : true;
+    return { code: ok ? 0 : 1, async: true };
+  }
+  return result;
 }

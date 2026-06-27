@@ -121,6 +121,7 @@ import * as linearWrite from "./linear-write.mjs"; // CTL-1067: writeStatus for 
 import { writeBootMarker, clearProgressMarks, resolvePhaseSessionId, defaultAppendOperatorEvent } from "./recovery.mjs"; // CTL-655: window the revive budget to this run; CTL-736: reset progress high-water; CTL-768: --resume; CTL-1044: operator-event appender for the scheduler's appendIntentEvent seam
 import { startAutoTuner } from "./autotune.mjs"; // CTL-684: side-car maxParallel auto-tuner
 import { dispatchTicket, dispatchForExecutor, makeCommentWakeDispatch } from "./dispatch.mjs"; // CTL-549: comment-wake re-dispatch; CTL-1365a/b: executor→dispatch selection at the launch seam + comment-wake executor binding
+import { assertSdkAuth } from "./sdk-run-phase-agent.mjs"; // CTL-1367 item 9: boot auth assertion (subscription-only) before arming executor=sdk
 import { removeLabel as defaultRemoveLabel } from "./linear-write.mjs"; // CTL-549: clear needs-human on resume
 // CTL-671: the real phantom-sweep seams. startScheduler defaults them to safe
 // no-ops (hermetic for direct-call unit tests); the REAL daemon arms them here
@@ -593,7 +594,23 @@ export function startDaemon({
     // dispatchFn === defaultDispatch (byte-identical to today); "sdk" → sdkDispatch
     // (injects sdkRunPhaseAgent). dispatchMode is the catalyst.dispatch.mode
     // telemetry vocab ("phase-agents" for bg) for the scheduler's Tier-1 tick line.
-    const executor = getExecutor(configPath);
+    let executor = getExecutor(configPath);
+    // CTL-1367 item 9: DAEMON-BOOT auth assertion. assertSdkAuth also runs at
+    // dispatch time (no claim, no signal on a bad env), but a boot-time check fails
+    // LOUD once and gracefully degrades the WHOLE boot to bg rather than letting
+    // every sdk dispatch silently meter / refuse. If executor=sdk but the env would
+    // silently meter (ANTHROPIC_API_KEY set) or cannot authenticate the subscription
+    // (CLAUDE_CODE_OAUTH_TOKEN unset), log it and fall back to bg for this boot.
+    if (executor === "sdk") {
+      const auth = assertSdkAuth({ env: process.env, oauthToken: process.env.CLAUDE_CODE_OAUTH_TOKEN });
+      if (!auth.ok) {
+        log.warn(
+          { reason: auth.reason },
+          "execution-core: executor=sdk requested but the subscription-auth precondition FAILED — falling back to executor=bg for this boot (fix the env and restart to arm sdk)",
+        );
+        executor = "bg";
+      }
+    }
     const dispatchFn = dispatchForExecutor(executor);
     const dispatchMode = dispatchModeForExecutor(executor);
     // CTL-1365b: the comment-wake re-dispatch binding — routes a parked ticket's
@@ -612,7 +629,10 @@ export function startDaemon({
     _bootResume = bootResume;
     // CTL-644: dispatch any gated tickets that already have an approval sentinel on disk
     // (operator may have dropped the sentinel while the daemon was down).
-    processApprovedResumes({ orchDir });
+    // CTL-1367 item E2: thread the resolved executor dispatch — this is the 5th
+    // dispatch entry point and previously defaulted to defaultDispatch, so an
+    // approved-resume ticket launched via bg even under executor=sdk (split-brain).
+    processApprovedResumes({ orchDir, dispatch: dispatchFn });
     // CTL-634: one shared TTL state cache. The monitor write-through populates
     // it on every state_changed event; the scheduler read path consults it
     // during out-of-set blocker hydration. A single instance threaded into

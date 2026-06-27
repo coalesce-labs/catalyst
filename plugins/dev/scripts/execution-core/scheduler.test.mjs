@@ -5457,6 +5457,49 @@ describe("verifyDispatchedSignal (CTL-611)", () => {
     );
     expect(verifyDispatchedSignal(orchDir, "CTL-103", "research")).toEqual({ ok: true });
   });
+
+  // CTL-1367 E3: the SDK-aware verifier path (requireBgJob:false) accepts the
+  // SDK prelaunch signal, which intentionally has NO bg_job_id.
+  test("requireBgJob:false accepts a dispatched signal with NO bg_job_id (SDK path)", () => {
+    const dir = join(orchDir, "workers", "CTL-104");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, "phase-research.json"),
+      JSON.stringify({ ticket: "CTL-104", phase: "research", status: "dispatched", bg_job_id: null })
+    );
+    // Default (bg) verification still demotes it (the CTL-611 contract is unchanged)…
+    expect(verifyDispatchedSignal(orchDir, "CTL-104", "research")).toEqual({
+      ok: false,
+      reason: "bg_job_id_missing",
+    });
+    // …but the SDK-aware path accepts it.
+    expect(verifyDispatchedSignal(orchDir, "CTL-104", "research", { requireBgJob: false })).toEqual({ ok: true });
+  });
+
+  test("requireBgJob:false also accepts a 'done' signal (idempotent duplicate sdk dispatch)", () => {
+    const dir = join(orchDir, "workers", "CTL-105");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, "phase-research.json"),
+      JSON.stringify({ ticket: "CTL-105", phase: "research", status: "done", bg_job_id: null })
+    );
+    expect(verifyDispatchedSignal(orchDir, "CTL-105", "research", { requireBgJob: false })).toEqual({ ok: true });
+    // bg verification rejects a `done` status as not-runnable (unchanged).
+    expect(verifyDispatchedSignal(orchDir, "CTL-105", "research").ok).toBe(false);
+  });
+
+  test("requireBgJob:false STILL rejects a stalled/failed signal", () => {
+    const dir = join(orchDir, "workers", "CTL-106");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, "phase-research.json"),
+      JSON.stringify({ ticket: "CTL-106", phase: "research", status: "stalled", bg_job_id: null })
+    );
+    expect(verifyDispatchedSignal(orchDir, "CTL-106", "research", { requireBgJob: false })).toEqual({
+      ok: false,
+      reason: "status_not_runnable",
+    });
+  });
 });
 
 describe("phase.dispatch.failed event emission (CTL-611)", () => {

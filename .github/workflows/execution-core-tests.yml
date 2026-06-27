@@ -141,6 +141,7 @@ jobs:
             delegate-slot-reservation.test.mjs \
             diagnostician.test.mjs \
             dispatch.test.mjs \
+            doctor.test.mjs \
             eligible-set.test.mjs \
             event-cursor.test.mjs \
             event-scan.test.mjs \
@@ -183,6 +184,7 @@ jobs:
             scan.test.mjs \
             scheduler-perproject.test.mjs \
             scheduler-rank.test.mjs \
+            sdk-run-phase-agent.test.mjs \
             sequencing.test.mjs \
             session-recency.test.mjs \
             signal-reader.test.mjs \

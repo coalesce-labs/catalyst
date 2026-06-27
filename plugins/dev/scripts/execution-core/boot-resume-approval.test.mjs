@@ -12,14 +12,23 @@ import {
   bootResumePendingPath,
   bootResumeApprovedPath,
 } from "./boot-resume.mjs";
+import { defaultReviveDispatch } from "./recovery.mjs"; // CTL-1367 P1: real revive seam for the async-dispatch behavior test
 
 let orchDir;
+let prevCatalystDir;
 
 beforeEach(() => {
   orchDir = mkdtempSync(join(tmpdir(), "boot-resume-approval-"));
+  // Keep the real defaultReviveDispatch's default lifecycle emits out of the
+  // operator's ~/catalyst/events log when a test uses the real revive seam.
+  prevCatalystDir = process.env.CATALYST_DIR;
+  process.env.CATALYST_DIR = orchDir;
+  mkdirSync(join(orchDir, "events"), { recursive: true });
 });
 
 afterEach(() => {
+  if (prevCatalystDir === undefined) delete process.env.CATALYST_DIR;
+  else process.env.CATALYST_DIR = prevCatalystDir;
   rmSync(orchDir, { recursive: true, force: true });
 });
 
@@ -104,6 +113,39 @@ describe("processApprovedResumes (CTL-644)", () => {
     // reviveDispatch is invoked; raw dispatch is NOT invoked directly.
     expect(reviveDispatch.calls.length).toBe(1);
     expect(rawDispatch.calls.length).toBe(0);
+  });
+
+  // CTL-1367 P1 + E2: with the REAL defaultReviveDispatch, an approved-resume routed
+  // through an ASYNC (executor=sdk) dispatch must settle synchronously off the
+  // prelaunch signal — counted dispatched, sentinels cleared — NOT recorded as a
+  // failure because the dispatch returned a Promise. Proves the injected dispatch fn
+  // actually drives the re-dispatch (behavior, not just param-passed) AND the E2
+  // wiring (processApprovedResumes threads `dispatch` → reviveDispatch).
+  test("an async (sdk) dispatch through the real reviveDispatch settles + clears sentinels", async () => {
+    writePendingMarker(orchDir, "CTL-async", "implement", "/wt/CTL-async");
+    writeApprovedMarker(orchDir, "CTL-async");
+    // Seed the phase signal defaultReviveDispatch resets, then the async dispatch
+    // synchronously re-writes it to dispatched (the SDK prelaunch) and returns a Promise.
+    const signalPath = join(orchDir, "workers", "CTL-async", "phase-implement.json");
+    writeFileSync(signalPath, JSON.stringify({ ticket: "CTL-async", phase: "implement", status: "running", bg_job_id: "bg-x" }));
+    let resolveQuery;
+    const queryDone = new Promise((res) => { resolveQuery = res; });
+    const dispatch = () => {
+      writeFileSync(signalPath, JSON.stringify({ ticket: "CTL-async", phase: "implement", status: "dispatched", bg_job_id: null }));
+      return queryDone; // detached in-process query
+    };
+    const result = processApprovedResumes({
+      orchDir,
+      reviveDispatch: defaultReviveDispatch, // the REAL seam
+      dispatch, // async (sdk-shaped)
+      appendEvent: () => true,
+    });
+    expect(result.dispatched).toBe(1);
+    expect(result.failed).toBe(0);
+    expect(existsSync(bootResumePendingPath(orchDir, "CTL-async"))).toBe(false);
+    expect(existsSync(bootResumeApprovedPath(orchDir, "CTL-async"))).toBe(false);
+    resolveQuery({ code: 0 });
+    await queryDone;
   });
 
   // CTL-639 verify: cover the dispatch-failure retry contract and the edge

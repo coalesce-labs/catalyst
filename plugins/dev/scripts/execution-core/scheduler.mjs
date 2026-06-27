@@ -65,7 +65,7 @@ export { STAGE_RANK, NON_PREEMPTABLE_PHASES };
 import { readVerifyVerdict } from "./work-done-probes.mjs";
 import { countRemediateCycles, countTicketEventsInWindow } from "./event-scan.mjs";
 import { rankTickets, compareTickets } from "./scheduler-rank.mjs";
-import { defaultDispatch, dispatchTicket, teamOf } from "./dispatch.mjs";
+import { defaultDispatch, dispatchTicket, teamOf, settleDispatchSync, isThenable } from "./dispatch.mjs"; // CTL-1367 P1: settle async (sdk) dispatch synchronously
 import {
   fetchTicketState,
   fetchTicketsBatch,
@@ -2162,7 +2162,15 @@ export function readDispatchFailureReason(orchDir, ticket, phase) {
   return typeof reason === "string" && reason.length > 0 ? reason : null;
 }
 
-export function verifyDispatchedSignal(orchDir, ticket, phase) {
+// CTL-1367 item E3: `requireBgJob` gates the bg_job_id check. The bg launch verb
+// records a bg_job_id in the signal (the `claude --bg` job id); the SDK launch verb
+// runs the worker IN-PROCESS and intentionally writes NO bg_job_id, so under
+// executor=sdk requiring one demoted EVERY launch to verify_failed:bg_job_id_missing.
+// dispatchAndVerify passes requireBgJob:false when the dispatch result was async
+// (the SDK path — see settleDispatchSync), leaving bg verification (the default,
+// requireBgJob:true) byte-identical. For the SDK path `done` is also a runnable
+// terminal state (an idempotent duplicate dispatch of an already-completed phase).
+export function verifyDispatchedSignal(orchDir, ticket, phase, { requireBgJob = true } = {}) {
   const signalPath = join(orchDir, "workers", ticket, `phase-${phase}.json`);
   let raw;
   try {
@@ -2177,12 +2185,17 @@ export function verifyDispatchedSignal(orchDir, ticket, phase) {
     return { ok: false, reason: "signal_unparseable" };
   }
   const status = signal?.status;
-  if (status !== "dispatched" && status !== "running") {
+  const runnable = requireBgJob
+    ? status === "dispatched" || status === "running"
+    : status === "dispatched" || status === "running" || status === "done";
+  if (!runnable) {
     return { ok: false, reason: "status_not_runnable" };
   }
-  const bgJob = signal?.bg_job_id;
-  if (typeof bgJob !== "string" || bgJob.length === 0) {
-    return { ok: false, reason: "bg_job_id_missing" };
+  if (requireBgJob) {
+    const bgJob = signal?.bg_job_id;
+    if (typeof bgJob !== "string" || bgJob.length === 0) {
+      return { ok: false, reason: "bg_job_id_missing" };
+    }
   }
   return { ok: true };
 }
@@ -3263,16 +3276,40 @@ export function schedulerTick(
 
     // CTL-864: forward the cross-host fence token. dispatchTicket drops the key
     // when clusterGeneration == null (single-host / no persisted claim → no-op).
-    const r = dispatchTicket(orchDir, ticket, phase, {
+    // CTL-1367 P1: settle an async (executor=sdk) dispatch synchronously. The bg
+    // path returns a plain object (settleDispatchSync passes it through unchanged →
+    // byte-identical). The sdk path returns a Promise whose synchronous prelaunch has
+    // ALREADY written the dispatched signal; settleDispatchSync attaches a detached
+    // completion handler (the query runs detached; its terminal event wakes the
+    // orchestrator) and returns a sync { code, async:true }. `dispatchWasAsync` then
+    // selects the SDK-aware verifier (E3 — no bg_job_id required).
+    const rawDispatch = dispatchTicket(orchDir, ticket, phase, {
       dispatch,
       resumeSession,
       clusterGeneration,
     });
+    const dispatchWasAsync = isThenable(rawDispatch);
+    const r = settleDispatchSync(rawDispatch, {
+      onSettled: (res, err) => {
+        if (err) {
+          try {
+            log.warn(
+              { ticket, phase, err: err?.message ?? String(err) },
+              "scheduler: sdk dispatch promise rejected — the worker's terminal event still drives advancement"
+            );
+          } catch {
+            /* logging must never break the detached handler */
+          }
+        }
+      },
+    });
     if (r.code === 0) {
       // CTL-611: verify the dispatch actually produced a live worker before
       // declaring success. A --dry-run leak / mark_launch_failed half-write
-      // returns rc=0 with no usable signal; !ok demotes to failure.
-      const v = verifyDispatched(orchDir, ticket, phase);
+      // returns rc=0 with no usable signal; !ok demotes to failure. CTL-1367 E3:
+      // the SDK prelaunch signal has no bg_job_id, so the async path must not
+      // require one.
+      const v = verifyDispatched(orchDir, ticket, phase, { requireBgJob: !dispatchWasAsync });
       if (v.ok) {
         clearDispatchCooldown(orchDir, ticket, phase); // CTL-624: success clears any prior cool-down
         // CTL-660: record the VERIFIED launch. Re-read the signal for the

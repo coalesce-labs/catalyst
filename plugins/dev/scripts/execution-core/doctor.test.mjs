@@ -19,6 +19,7 @@ import {
   checkClaudeSettings,
   checkReaper,
   checkCloudTokenEnv,
+  checkSdkExecutorAuth,
   summarize,
   renderJson,
   renderHuman,
@@ -1161,5 +1162,37 @@ describe("checkCloudTokenEnv", () => {
       const checks = checkCloudTokenEnv({ configDir: CFG, zshenvPath: ZSH, readFile });
       for (const c of checks) expect(c.status).not.toBe(STATUS.FAIL);
     }
+  });
+});
+
+describe("checkSdkExecutorAuth (CTL-1367 item 9)", () => {
+  it("INFO no-op when executor is bg (gate not applicable)", () => {
+    const checks = checkSdkExecutorAuth({ executor: "bg", env: { ANTHROPIC_API_KEY: "sk" } });
+    expect(checks).toHaveLength(1);
+    expect(checks[0].name).toBe("sdk-executor-auth");
+    expect(checks[0].status).toBe(STATUS.INFO);
+  });
+
+  it("PASSes under executor=sdk with subscription auth (token set, no api key)", () => {
+    const checks = checkSdkExecutorAuth({
+      executor: "sdk",
+      env: { CLAUDE_CODE_OAUTH_TOKEN: "tok" },
+    });
+    expect(checks[0].status).toBe(STATUS.PASS);
+  });
+
+  it("FAILs under executor=sdk when ANTHROPIC_API_KEY is set (would meter)", () => {
+    const checks = checkSdkExecutorAuth({
+      executor: "sdk",
+      env: { ANTHROPIC_API_KEY: "sk", CLAUDE_CODE_OAUTH_TOKEN: "tok" },
+    });
+    expect(checks[0].status).toBe(STATUS.FAIL);
+    expect(checks[0].detail).toContain("ANTHROPIC_API_KEY");
+  });
+
+  it("FAILs under executor=sdk when CLAUDE_CODE_OAUTH_TOKEN is missing", () => {
+    const checks = checkSdkExecutorAuth({ executor: "sdk", env: {} });
+    expect(checks[0].status).toBe(STATUS.FAIL);
+    expect(checks[0].detail).toContain("CLAUDE_CODE_OAUTH_TOKEN");
   });
 });

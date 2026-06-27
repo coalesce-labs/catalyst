@@ -56,7 +56,7 @@ import {
   upsertTicket,
 } from "./eligible-set.mjs";
 import { loadCursor, saveCursor, resolveStartOffset } from "./event-cursor.mjs";
-import { dispatchTicket } from "./dispatch.mjs";
+import { dispatchTicket, settleDispatchSync, sdkSignalRunnable } from "./dispatch.mjs"; // CTL-1367 P1: settle async (sdk) triage dispatch synchronously
 import { abortWorker as defaultAbortWorker } from "./abort-worker.mjs";
 import {
   applyTriageStatus as defaultApplyTriageStatus,
@@ -661,7 +661,16 @@ function dispatchTriage(
     }
     clusterGeneration = claim.generation; // CTL-1028: forward to worker (mirrors CTL-864)
   }
-  const r = dispatchTicket(orchDir, identifier, "triage", { dispatch, clusterGeneration });
+  // CTL-1367 P1: settle an async (executor=sdk) dispatch synchronously. bg returns a
+  // plain object (passthrough → byte-identical). sdk returns a Promise whose
+  // synchronous prelaunch already wrote the triage `dispatched` signal;
+  // settleDispatchSync detaches the in-process query and confirms success from that
+  // signal (SDK-aware: no bg_job_id required) so the triage dispatch isn't recorded
+  // as a failure while the query runs detached.
+  const r = settleDispatchSync(
+    dispatchTicket(orchDir, identifier, "triage", { dispatch, clusterGeneration }),
+    { verifySync: () => sdkSignalRunnable(orchDir, identifier, "triage") },
+  );
   if (r.code !== 0) {
     log.warn({ identifier, code: r.code }, "monitor: triage dispatch failed");
     return false;
