@@ -51,20 +51,55 @@
               "description": "Maps canonical Catalyst phase names to Linear workflow state name strings. All values must exactly match the state names configured in your Linear team.",
               "additionalProperties": false,
               "properties": {
-                "backlog":     { "type": "string", "description": "Linear state name for backlog items." },
-                "todo":        { "type": "string", "description": "Linear state name for to-do / ready items." },
-                "triage":      { "type": "string", "description": "Linear state name while in the triage phase." },
-                "research":    { "type": "string", "description": "Linear state name while in the research phase." },
-                "planning":    { "type": "string", "description": "Linear state name while in the plan phase." },
-                "inProgress":  { "type": "string", "description": "Linear state name while in the implement phase." },
-                "verifying":   { "type": "string", "description": "Linear state name while in the verify phase." },
-                "reviewing":   { "type": "string", "description": "Linear state name while in the review phase." },
-                "remediating": { "type": "string", "description": "Linear state name while in the remediate phase." },
-                "inReview":    { "type": "string", "description": "Linear state name after a PR is open (monitor-merge phase)." },
-                "done":        { "type": "string", "description": "Linear state name for completed tickets." },
-                "canceled":    { "type": "string", "description": "Linear state name for canceled tickets." }
-              },
-              "additionalProperties": false
+                "backlog": {
+                  "type": "string",
+                  "description": "Linear state name for backlog items."
+                },
+                "todo": {
+                  "type": "string",
+                  "description": "Linear state name for to-do / ready items."
+                },
+                "triage": {
+                  "type": "string",
+                  "description": "Linear state name while in the triage phase."
+                },
+                "research": {
+                  "type": "string",
+                  "description": "Linear state name while in the research phase."
+                },
+                "planning": {
+                  "type": "string",
+                  "description": "Linear state name while in the plan phase."
+                },
+                "inProgress": {
+                  "type": "string",
+                  "description": "Linear state name while in the implement phase."
+                },
+                "verifying": {
+                  "type": "string",
+                  "description": "Linear state name while in the verify phase."
+                },
+                "reviewing": {
+                  "type": "string",
+                  "description": "Linear state name while in the review phase."
+                },
+                "remediating": {
+                  "type": "string",
+                  "description": "Linear state name while in the remediate phase."
+                },
+                "inReview": {
+                  "type": "string",
+                  "description": "Linear state name after a PR is open (monitor-merge phase)."
+                },
+                "done": {
+                  "type": "string",
+                  "description": "Linear state name for completed tickets."
+                },
+                "canceled": {
+                  "type": "string",
+                  "description": "Linear state name for canceled tickets."
+                }
+              }
             },
             "stateIds": {
               "type": "object",
@@ -127,7 +162,10 @@
                     "description": "A CSS color string (e.g. '#4A90E2', 'blue')."
                   },
                   "examples": [
-                    { "coalesce-labs/catalyst": "#4A90E2", "coalesce-labs/adva": "#E24A4A" }
+                    {
+                      "coalesce-labs/catalyst": "#4A90E2",
+                      "coalesce-labs/adva": "#E24A4A"
+                    }
                   ]
                 }
               }
@@ -376,7 +414,9 @@
                     },
                     "allowlistPatterns": {
                       "type": "array",
-                      "items": { "type": "string" },
+                      "items": {
+                        "type": "string"
+                      },
                       "default": [],
                       "description": "Extra case-insensitive argv substrings to never kill, on top of the built-in allowlist (daemon, broker/index.mjs, orch-monitor/server.ts, the live-agent tree, Tailscale, pid 1, foreign-uid processes)."
                     }
@@ -428,6 +468,28 @@
                   "type": "number",
                   "default": 2,
                   "description": "Number of consecutive degraded ticks before self-heal fires (once per breach episode, re-armed after a healthy tick)."
+                }
+              }
+            },
+            "reconcile": {
+              "type": "object",
+              "description": "Completion-declaration reconcile timer (CTL-1371). Drives Linear from EXPLICIT completion declarations (`catalyst-linear-reconcile declare`), never inferred from PR/merge state. Node-scoped; Layer-2 (~/.config/catalyst/config.json) wins per field.",
+              "additionalProperties": false,
+              "properties": {
+                "mode": {
+                  "type": "string",
+                  "enum": ["off", "notify", "write"],
+                  "default": "off",
+                  "description": "off = inert; notify = emit drift events but never write Linear; write = reconcile declared completions to Linear via the canonical primitive."
+                },
+                "intervalSeconds": {
+                  "type": "number",
+                  "default": 600,
+                  "description": "How often the drain timer ticks (seconds)."
+                },
+                "declarationsDir": {
+                  "type": "string",
+                  "description": "Directory holding durable per-ticket completion markers (default ~/catalyst/completions; env CATALYST_COMPLETIONS_DIR)."
                 }
               }
             }

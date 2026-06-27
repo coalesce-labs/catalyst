@@ -17,26 +17,38 @@
 import { readFileSync, writeFileSync, renameSync, appendFileSync } from "node:fs";
 import { join } from "node:path";
 import { log, getEventLogPath } from "./config.mjs";
+import { buildCatalystResource } from "./lib/catalyst-resource.mjs";
 import { DEFAULTS, reconcileDeclarations, orderedStatesForMap } from "./linear-reconcile.mjs";
 import { listDeclarations, markReconciled } from "./linear-reconcile-store.mjs";
 import { applyTerminalDone, applyPhaseStatus } from "./linear-write.mjs";
+import { fetchTicketState } from "./linear-query.mjs";
+import { isLinearTerminal } from "./terminal-state.mjs";
 
-// readLinearReconcileConfig — catalyst.orchestration.reconcile.* from a config
-// file. Returns {} for missing/unreadable/absent key.
-export function readLinearReconcileConfig(configPath) {
-  if (!configPath) return {};
-  try {
-    const parsed = JSON.parse(readFileSync(configPath, "utf8"));
-    return parsed?.catalyst?.orchestration?.reconcile ?? {};
-  } catch (err) {
-    if (err?.code !== "ENOENT") {
-      log.warn(
-        { configPath, err: err.message },
-        "linear-reconcile: config unreadable; using defaults"
-      );
+// readLinearReconcileConfig — catalyst.orchestration.reconcile.* merged across
+// Layer-1 (repo .catalyst/config.json) and Layer-2 (node-scoped
+// ~/.config/catalyst/config.json), with Layer-2 winning per field, plus a
+// CATALYST_RECONCILE_MODE env override (the per-node safety switch for this
+// WRITER — Codex P2). Returns {} for missing/unreadable/absent keys.
+export function readLinearReconcileConfig(layer1Path, layer2Path) {
+  const readOne = (p) => {
+    if (!p) return {};
+    try {
+      return JSON.parse(readFileSync(p, "utf8"))?.catalyst?.orchestration?.reconcile ?? {};
+    } catch (err) {
+      if (err?.code !== "ENOENT") {
+        log.warn(
+          { configPath: p, err: err.message },
+          "linear-reconcile: config unreadable; ignoring"
+        );
+      }
+      return {};
     }
-    return {};
-  }
+  };
+  // Layer-2 wins per field (node-scoped override of the committed Layer-1 seed).
+  const merged = { ...readOne(layer1Path), ...readOne(layer2Path) };
+  const envMode = process.env.CATALYST_RECONCILE_MODE;
+  if (envMode) merged.mode = envMode; // hardest per-node override
+  return merged;
 }
 
 function readFullCatalystConfig(configPath) {
@@ -94,16 +106,47 @@ export function makeApplyCorrection({ applyTerminalDone: done, applyPhaseStatus:
       : toPhase({ ticket, phase: kind === "inReview" ? "pr" : kind });
 }
 
-const defaultApplyCorrection = makeApplyCorrection();
+// guardedTerminalDone — the in-daemon Done writer confirms the ticket is NOT
+// already terminal via an AUTHORITATIVE read before the guard-exempt
+// applyTerminalDone, so a STALE broker cache (which decideCorrection read) can't
+// resurrect a manually-Canceled/Duplicate ticket to Done (Codex P2). Injectable
+// fetchState/applyDone for tests. A failed confirming read falls through to the
+// write (best-effort; the shell still no-ops if already at target).
+export function guardedTerminalDone({
+  ticket,
+  fetchState = fetchTicketState,
+  applyDone = applyTerminalDone,
+} = {}) {
+  try {
+    const cur = fetchState(ticket);
+    if (cur != null && isLinearTerminal(cur)) {
+      return { applied: false, skipped: "terminal-not-target", action: "skipped", from_state: cur };
+    }
+  } catch {
+    /* confirming read failed → fall through; applyTerminalDone is best-effort */
+  }
+  return applyDone({ ticket });
+}
 
-// defaultEmit — append a bare event envelope (best-effort). Suffix is a
-// non-terminal-status word so it never matches PHASE_EVENT_PATTERN (CTL-1142).
+// defaultApplyCorrection — done → confirmed terminal write; else → guarded phase write.
+const defaultApplyCorrection = ({ ticket, kind }) =>
+  kind === "done"
+    ? guardedTerminalDone({ ticket })
+    : applyPhaseStatus({ ticket, phase: kind === "inReview" ? "pr" : kind });
+
+// defaultEmit — append a canonical OTel envelope (best-effort) so the event name
+// lands in attributes["event.name"] where catalyst-events filters + phase-event
+// scanners read it (Codex P2). The name suffix is a non-terminal-status word so
+// it never matches PHASE_EVENT_PATTERN (CTL-1142).
 function defaultEmit(name, payload) {
   try {
-    appendFileSync(
-      getEventLogPath(),
-      JSON.stringify({ name, ...payload, ts: new Date().toISOString() }) + "\n"
-    );
+    const env = {
+      ts: new Date().toISOString(),
+      resource: buildCatalystResource({ serviceName: "catalyst.execution-core" }),
+      attributes: { "event.name": name, ...payload },
+      body: { payload },
+    };
+    appendFileSync(getEventLogPath(), JSON.stringify(env) + "\n");
   } catch {
     /* best-effort */
   }
@@ -212,6 +255,13 @@ export function startLinearReconcileTimer({
     try {
       const full = readFullConfig(configPath);
       const stateMap = full?.catalyst?.linear?.stateMap ?? {};
+      // Fail CLOSED on an unreadable/empty config: without a stateMap we can't
+      // resolve target states correctly, so a transient bad config edit must NOT
+      // drive writes off the hardcoded fallback (Codex P2). Skip the tick.
+      if (Object.keys(stateMap).length === 0) {
+        log.warn({ configPath }, "linear-reconcile: empty/unreadable stateMap — skipping tick");
+        return;
+      }
       const terminalStates = [
         ...new Set(
           [stateMap.done, stateMap.canceled, "Done", "Canceled", "Duplicate"].filter(Boolean)

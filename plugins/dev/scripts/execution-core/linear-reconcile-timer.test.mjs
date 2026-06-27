@@ -4,6 +4,7 @@ import {
   startLinearReconcileTimer,
   readLinearReconcileConfig,
   makeApplyCorrection,
+  guardedTerminalDone,
 } from "./linear-reconcile-timer.mjs";
 
 const CTL_MAP = {
@@ -98,6 +99,49 @@ test("a 'done' declaration with unreadable state is unconfirmed (no write), not 
   const res = await runReconcileDrain(h.args);
   expect(h.writes).toEqual([]);
   expect(res.summary.unconfirmed).toBe(1);
+});
+
+// ── guardedTerminalDone: confirm authoritative state before guard-exempt write ─
+
+test("guardedTerminalDone refuses a Done write when the authoritative read is terminal (stale-cache safety)", () => {
+  let wrote = false;
+  // cache may have said non-terminal, but the confirming read shows Canceled.
+  const res = guardedTerminalDone({
+    ticket: "CTL-1",
+    fetchState: () => "Canceled",
+    applyDone: () => {
+      wrote = true;
+      return { applied: true };
+    },
+  });
+  expect(wrote).toBe(false);
+  expect(res.skipped).toBe("terminal-not-target");
+});
+
+test("guardedTerminalDone writes when the authoritative read is non-terminal; falls through on read failure", () => {
+  let wrote = 0;
+  expect(
+    guardedTerminalDone({
+      ticket: "CTL-1",
+      fetchState: () => "Implement",
+      applyDone: () => {
+        wrote += 1;
+        return { applied: true };
+      },
+    }).applied
+  ).toBe(true);
+  // a throwing confirming read falls through to the write (best-effort)
+  guardedTerminalDone({
+    ticket: "CTL-1",
+    fetchState: () => {
+      throw new Error("429");
+    },
+    applyDone: () => {
+      wrote += 1;
+      return { applied: true };
+    },
+  });
+  expect(wrote).toBe(2);
 });
 
 // ── makeApplyCorrection routing ──────────────────────────────────────────────

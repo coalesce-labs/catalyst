@@ -1501,8 +1501,6 @@ function main() {
   const stalePrRescueConfig = readStalePrRescueConfig(configPath);
   // CTL-1175: read the orphan-PR sweep config from the same config file.
   const orphanPrSweepConfig = readOrphanPrSweepConfig(configPath);
-  // CTL-1371: read the PR→Linear reconcile config from the same config file.
-  const linearReconcileConfig = readLinearReconcileConfig(configPath);
   // CTL-665 / CTL-678: resolve the executionCore concurrency knobs once here
   // and thread them into startDaemon → scheduler + boot-resume. The
   // machine-canonical Layer-2 file (~/.config/catalyst/config.json) wins
@@ -1512,6 +1510,10 @@ function main() {
   const layer2Path =
     process.env.CATALYST_LAYER2_CONFIG_FILE ||
     resolve(homedir(), ".config", "catalyst", "config.json");
+  // CTL-1371: reconcile config is node-scoped — Layer-2 (+ CATALYST_RECONCILE_MODE
+  // env) overrides the committed Layer-1 seed so an operator can flip the writer
+  // off/notify/write per node.
+  const linearReconcileConfig = readLinearReconcileConfig(configPath, layer2Path);
   const concurrency = resolveBootConcurrency({ layer1Path: configPath, layer2Path });
   log.info(
     { concurrency, layer2Present: existsSync(layer2Path) },

@@ -16,6 +16,7 @@ import { dirname, join } from "node:path";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { reconcileDeclarations, orderedStatesForMap } from "./linear-reconcile.mjs";
+import { buildCatalystResource } from "./lib/catalyst-resource.mjs";
 import {
   declare as storeDeclare,
   listDeclarations,
@@ -198,16 +199,16 @@ function emitDeclared(decl, enabled) {
     const file = join(dir, "events", `${month}.jsonl`);
     mkdirSync(dirname(file), { recursive: true });
     const name = `ticket.completion.declared.${decl.ticket}`;
-    appendFileSync(
-      file,
-      JSON.stringify({
-        name,
-        ticket: decl.ticket,
-        state: decl.state,
-        by: decl.declaredBy,
-        ts: d.toISOString(),
-      }) + "\n"
-    );
+    // Canonical OTel envelope so the name lands in attributes["event.name"] where
+    // catalyst-events filters + scanners read it (Codex P2).
+    const payload = { ticket: decl.ticket, state: decl.state, by: decl.declaredBy };
+    const env = {
+      ts: d.toISOString(),
+      resource: buildCatalystResource({ serviceName: "catalyst.execution-core" }),
+      attributes: { "event.name": name, ...payload },
+      body: { payload },
+    };
+    appendFileSync(file, JSON.stringify(env) + "\n");
   } catch {
     /* best-effort observability */
   }
