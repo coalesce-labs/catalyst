@@ -21,9 +21,14 @@ import {
   resolveClusterHosts,
   hostMembershipWarning,
   getLivenessAnchorIssue,
+  getExecutor, // CTL-1367 item 9: resolve the phase-worker executor for the sdk-auth gate
 } from "./config.mjs";
 import { ownedBy } from "./hrw.mjs";
 import { readPeerHeartbeats } from "./cluster-heartbeat.mjs";
+// CTL-1367 item 9: reuse the single-source-of-truth subscription-auth predicate
+// (sdk-run-phase-agent.mjs imports only node:* + config.mjs — no bun: protocol —
+// so it is safe to pull into this node-runnable doctor).
+import { assertSdkAuth } from "./sdk-run-phase-agent.mjs";
 
 // readLinearBotUserIds — inlined from daemon.mjs to avoid pulling in the full
 // daemon dependency chain (which includes bun: protocol imports incompatible
@@ -1154,6 +1159,58 @@ export function checkClaudeSettings(deps = {}) {
   return checks;
 }
 
+// ─── Phase 5f: SDK-executor subscription auth (CTL-1367 item 9) ──────────────
+
+// checkSdkExecutorAuth — when the phase-worker executor resolves to "sdk", the
+// in-process Agent SDK worker MUST authenticate via the subscription OAuth token
+// ONLY. A set ANTHROPIC_API_KEY (or ANTHROPIC_AUTH_TOKEN) would silently METER in
+// headless mode; a missing CLAUDE_CODE_OAUTH_TOKEN leaves nothing to authenticate
+// the subscription. This FAILs (the daemon also boot-asserts + dispatch-asserts,
+// but doctor surfaces it before activation). For executor=bg/oneshot-legacy the
+// check is an INFO no-op (the api-key path is fine for bg). Injectable for tests.
+export function checkSdkExecutorAuth(deps = {}) {
+  const {
+    // CTL-1367 P2-I: resolve the executor from the repo Layer-1 config path the SAME
+    // way the daemon does (getExecutor(configPath) at boot). Without the path, a
+    // committed executor=sdk with CATALYST_EXECUTOR unset resolved to the node-class
+    // default "bg" here, so the doctor gate reported N/A while the daemon ran sdk —
+    // masking a missing/conflicting subscription token. configPath is injectable for
+    // tests; a test passing an explicit `executor` overrides resolution entirely.
+    configPath = layer1Path(),
+    executor = getExecutor(configPath),
+    env = process.env,
+    assertAuth = assertSdkAuth,
+  } = deps;
+
+  if (executor !== "sdk") {
+    return [
+      mkCheck(
+        "sdk-executor-auth",
+        STATUS.INFO,
+        `executor="${executor}" — subscription-auth gate not applicable (only enforced under executor=sdk)`,
+      ),
+    ];
+  }
+
+  const auth = assertAuth({ env, oauthToken: env.CLAUDE_CODE_OAUTH_TOKEN });
+  if (!auth.ok) {
+    return [
+      mkCheck(
+        "sdk-executor-auth",
+        STATUS.FAIL,
+        `executor=sdk but the subscription-auth precondition fails: ${auth.reason}`,
+      ),
+    ];
+  }
+  return [
+    mkCheck(
+      "sdk-executor-auth",
+      STATUS.PASS,
+      "executor=sdk and subscription auth is correct (CLAUDE_CODE_OAUTH_TOKEN set, no ANTHROPIC_API_KEY/ANTHROPIC_AUTH_TOKEN)",
+    ),
+  ];
+}
+
 // ─── Phase 6: Renderer, exit code, runDoctor ─────────────────────────────────
 
 // summarize — aggregate check results into counts.
@@ -1440,6 +1497,7 @@ export async function runDoctor(opts = {}) {
     () => checkClaudeSettings(), // CTL-1231: member settings.json pins host identity + OTLP endpoint
     () => checkReaper(), // CTL-1306: orphan-sweep reaper installed + baked path still exists (not dead-127)
     () => checkCloudTokenEnv(), // CTL-1307: cluster cloud token decrypted → projected to machine-level env (advisory)
+    () => checkSdkExecutorAuth(), // CTL-1367 item 9: under executor=sdk, subscription auth must be correct (no api-key metering)
   ];
 
   const fns = checkFns ?? defaultChecks;

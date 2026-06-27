@@ -65,7 +65,7 @@ export { STAGE_RANK, NON_PREEMPTABLE_PHASES };
 import { readVerifyVerdict } from "./work-done-probes.mjs";
 import { countRemediateCycles, countTicketEventsInWindow } from "./event-scan.mjs";
 import { rankTickets, compareTickets } from "./scheduler-rank.mjs";
-import { defaultDispatch, dispatchTicket, teamOf } from "./dispatch.mjs";
+import { defaultDispatch, dispatchTicket, teamOf, settleDispatchSync, isThenable, backstopOnRejection } from "./dispatch.mjs"; // CTL-1367 P1: settle async (sdk) dispatch synchronously + backstop a rejected async dispatch
 import {
   fetchTicketState,
   fetchTicketsBatch,
@@ -82,7 +82,7 @@ import { getProjectConfig, listProjects } from "./registry.mjs";
 // The gatedTeardownWorktree import is removed; the teardown phase agent
 // re-implements the gate in bash (merge-confirmation evidence + worktree
 // presweep + non-force `git worktree remove`) in phase-teardown/SKILL.md.
-import { readWorkerSignals } from "./signal-reader.mjs";
+import { readWorkerSignals, countSdkInflight as defaultCountSdkInflight, hasFreshClaim } from "./signal-reader.mjs";
 // CTL-933: shadow belief-store fact collector (opt-in CATALYST_BELIEFS_SHADOW=1).
 // CTL-937: getBeliefsDb exposes the module-level db handle for the diagnostician.
 // CTL-1241: getEscalateHumanBelief reads the latest escalate_human belief for the
@@ -2162,12 +2162,30 @@ export function readDispatchFailureReason(orchDir, ticket, phase) {
   return typeof reason === "string" && reason.length > 0 ? reason : null;
 }
 
-export function verifyDispatchedSignal(orchDir, ticket, phase) {
+// CTL-1367 item E3: `requireBgJob` gates the bg_job_id check. The bg launch verb
+// records a bg_job_id in the signal (the `claude --bg` job id); the SDK launch verb
+// runs the worker IN-PROCESS and intentionally writes NO bg_job_id, so under
+// executor=sdk requiring one demoted EVERY launch to verify_failed:bg_job_id_missing.
+// dispatchAndVerify passes requireBgJob:false when the dispatch result was async
+// (the SDK path — see settleDispatchSync), leaving bg verification (the default,
+// requireBgJob:true) byte-identical. For the SDK path `done` is also a runnable
+// terminal state (an idempotent duplicate dispatch of an already-completed phase).
+export function verifyDispatchedSignal(orchDir, ticket, phase, { requireBgJob = true } = {}) {
   const signalPath = join(orchDir, "workers", ticket, `phase-${phase}.json`);
   let raw;
   try {
     raw = readFileSync(signalPath, "utf8");
   } catch {
+    // CTL-1367 P2-G (SDK path only): a missing signal is NOT a failure when a
+    // YOUNG single-flight claim exists — that is a benign claim-lost (a concurrent
+    // dispatcher won the O_EXCL claim and is mid-dispatch; the loser writes no
+    // signal). Treating it as a no-op success avoids recording
+    // verify_failed:signal_missing + cooldown for a valid concurrent dispatch.
+    // GATED on requireBgJob === false → bg verify is byte-identical (a bg dispatch
+    // always writes its own signal, so this branch is sdk-only).
+    if (requireBgJob === false && hasFreshClaim(orchDir, ticket, phase)) {
+      return { ok: true };
+    }
     return { ok: false, reason: "signal_missing" };
   }
   let signal;
@@ -2177,12 +2195,17 @@ export function verifyDispatchedSignal(orchDir, ticket, phase) {
     return { ok: false, reason: "signal_unparseable" };
   }
   const status = signal?.status;
-  if (status !== "dispatched" && status !== "running") {
+  const runnable = requireBgJob
+    ? status === "dispatched" || status === "running"
+    : status === "dispatched" || status === "running" || status === "done";
+  if (!runnable) {
     return { ok: false, reason: "status_not_runnable" };
   }
-  const bgJob = signal?.bg_job_id;
-  if (typeof bgJob !== "string" || bgJob.length === 0) {
-    return { ok: false, reason: "bg_job_id_missing" };
+  if (requireBgJob) {
+    const bgJob = signal?.bg_job_id;
+    if (typeof bgJob !== "string" || bgJob.length === 0) {
+      return { ok: false, reason: "bg_job_id_missing" };
+    }
   }
   return { ok: true };
 }
@@ -2875,6 +2898,15 @@ export function schedulerTick(
     // .delegate-queue. Empty queue → 0 → zero behavior change (Phase A inert).
     countQueuedDelegates = defaultCountQueuedDelegates,
     gcDelegateIntents = defaultGcDelegateIntents,
+    // CTL-1367 P1: the executor=sdk occupancy reader — the in-process SDK-worker
+    // analogue of liveBackgroundCount. An SDK phase worker has NO `claude --bg`
+    // job, so liveBackgroundCount can't see it; without counting it the slot gate
+    // sees zero occupied slots after an SDK launch and over-dispatches past
+    // maxParallel. Counts dispatched/running nested phase signals with no bg_job_id
+    // (the SDK worker shape). ONLY added to occupancy when dispatchMode === "sdk"
+    // (see below), so it is provably inert under bg/oneshot-legacy. Injectable so a
+    // unit tick injects a deterministic count.
+    countSdkInflight = defaultCountSdkInflight,
     // CTL-731 Phase 00 / CTL-736: `livenessIsFresh` gates new-work admission — a
     // stale/never-populated `claude agents` snapshot means the live count is
     // untrustworthy, so we HOLD new dispatch (fail-safe, never over-spawn) while
@@ -2900,6 +2932,11 @@ export function schedulerTick(
     // confirms a live worker. Both best-effort — no branch gates on the return.
     appendDispatchRequestedEvent = defaultAppendDispatchRequestedEvent,
     appendDispatchLaunchedEvent = defaultAppendDispatchLaunchedEvent,
+    // CTL-1367 P1: failed-terminal backstop for a REJECTED async (sdk) dispatch
+    // promise. undefined → backstopOnRejection applies the real defaultEmitBackstop;
+    // tests inject a spy. A SYNC (bg) dispatch never reaches the detached settle
+    // handler, so this is a pure no-op on the bg path.
+    emitBackstop,
     // CTL-702: injectable yield-file-skip emitter. Deduped by observedYieldFiles
     // (module-level set) so only the first observation per daemon lifetime fires.
     appendYieldFileSkipEvent = defaultAppendYieldFileSkipEvent,
@@ -3263,16 +3300,36 @@ export function schedulerTick(
 
     // CTL-864: forward the cross-host fence token. dispatchTicket drops the key
     // when clusterGeneration == null (single-host / no persisted claim → no-op).
-    const r = dispatchTicket(orchDir, ticket, phase, {
+    // CTL-1367 P1: settle an async (executor=sdk) dispatch synchronously. The bg
+    // path returns a plain object (settleDispatchSync passes it through unchanged →
+    // byte-identical). The sdk path returns a Promise whose synchronous prelaunch has
+    // ALREADY written the dispatched signal; settleDispatchSync attaches a detached
+    // completion handler (the query runs detached; its terminal event wakes the
+    // orchestrator) and returns a sync { code, async:true }. `dispatchWasAsync` then
+    // selects the SDK-aware verifier (E3 — no bg_job_id required).
+    const rawDispatch = dispatchTicket(orchDir, ticket, phase, {
       dispatch,
       resumeSession,
       clusterGeneration,
     });
+    const dispatchWasAsync = isThenable(rawDispatch);
+    // CTL-1367 P1: on a REJECTED async (sdk) dispatch the detached handler logs the
+    // rejection AND emits the failed-terminal backstop (stalled signal +
+    // phase.<phase>.failed) so the ticket can't strand at "dispatched" with no
+    // bg_job_id/liveness probe. settleDispatchSync (verifySync omitted here on
+    // purpose — see below) returns a provisional sync result; the REAL launch gate is
+    // the verifyDispatched(requireBgJob:false) call below, which demotes a stale/
+    // un-runnable prelaunch signal to a dispatch failure.
+    const r = settleDispatchSync(rawDispatch, {
+      onSettled: backstopOnRejection({ orchDir, ticket, phase, log }, { emitBackstop }),
+    });
     if (r.code === 0) {
       // CTL-611: verify the dispatch actually produced a live worker before
       // declaring success. A --dry-run leak / mark_launch_failed half-write
-      // returns rc=0 with no usable signal; !ok demotes to failure.
-      const v = verifyDispatched(orchDir, ticket, phase);
+      // returns rc=0 with no usable signal; !ok demotes to failure. CTL-1367 E3:
+      // the SDK prelaunch signal has no bg_job_id, so the async path must not
+      // require one.
+      const v = verifyDispatched(orchDir, ticket, phase, { requireBgJob: !dispatchWasAsync });
       if (v.ok) {
         clearDispatchCooldown(orchDir, ticket, phase); // CTL-624: success clears any prior cool-down
         // CTL-660: record the VERIFIED launch. Re-read the signal for the
@@ -4014,7 +4071,14 @@ export function schedulerTick(
   // approval sentinel. Cheap (directory scan + existsSync per worker); no API calls
   // unless a dispatch fires. Runs before the reclaim sweep so an approved ticket
   // can advance in the same tick it's dispatched.
-  processApprovedResumes({ orchDir });
+  // CTL-1367 P2-C: thread the resolved scheduler `dispatch` so a mid-run approval
+  // launches via the SAME executor the daemon resolved (the boot-time call in
+  // daemon.mjs already does this). Without it the per-tick poll fell back to
+  // processApprovedResumes' default defaultDispatch and launched via `claude --bg`
+  // even under executor=sdk — a split-brain that depended on whether the approval
+  // sentinel existed at boot or appeared later. Under bg `dispatch === defaultDispatch`
+  // so this is byte-identical to the prior call.
+  processApprovedResumes({ orchDir, dispatch });
 
   // (0) Reclaim-dead-work sweep (CTL-574) — close phase signals whose bg worker
   // died but whose work was committed before the death. Runs BEFORE the
@@ -4288,7 +4352,21 @@ export function schedulerTick(
   } catch {
     /* reservation read is best-effort — fall back to 0 reserved */
   }
-  const occupiedCount = liveCount + queuedDelegates;
+  // CTL-1367 P1: under executor=sdk the in-process SDK workers have NO `claude --bg`
+  // job, so liveCount is blind to them. Add their occupancy (dispatched/running
+  // nested signals with no bg_job_id) so the slot gate counts them like bg jobs and
+  // can't admit MORE tickets past maxParallel (each queuing behind the SDK
+  // semaphore). GATED on dispatchMode === "sdk": under bg/oneshot-legacy the term is
+  // 0 (countSdkInflight is never called), so occupiedCount is byte-identical to today.
+  let sdkInflight = 0;
+  if (dispatchMode === "sdk") {
+    try {
+      sdkInflight = countSdkInflight(orchDir);
+    } catch {
+      /* best-effort — never block the tick on a signal-scan failure */
+    }
+  }
+  const occupiedCount = liveCount + queuedDelegates + sdkInflight;
 
   tick?.lap("liveness-read");
 

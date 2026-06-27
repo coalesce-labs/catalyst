@@ -112,6 +112,67 @@ describe("pickBestCandidate", () => {
   });
 });
 
+// ── owner-avatar fallback (CTL-1380, Bug B) ───────────────────────────────────
+
+import {
+  OWNER_AVATAR_PATH,
+  buildAvatarIconResult,
+  resolveOwnerAvatar,
+} from "../lib/repo-icon-fetcher";
+
+describe("OWNER_AVATAR_PATH (CTL-1380)", () => {
+  it("is a sentinel that never collides with a real probed icon path", () => {
+    expect(OWNER_AVATAR_PATH).toBe("owner-avatar");
+    expect(ICON_PATH_PRIORITY).not.toContain(OWNER_AVATAR_PATH);
+  });
+});
+
+describe("buildAvatarIconResult (CTL-1380, Bug B)", () => {
+  it("builds a found:true single-candidate result keyed on the avatar sentinel", () => {
+    const res = buildAvatarIconResult(
+      "https://avatars.githubusercontent.com/u/123?v=4",
+      "data:image/png;base64,AAAA",
+    );
+    expect(res.found).toBe(true);
+    if (!res.found) throw new Error("unreachable");
+    expect(res.candidates).toHaveLength(1);
+    expect(res.candidates[0].path).toBe(OWNER_AVATAR_PATH);
+    expect(res.candidates[0].format).toBe("png");
+    expect(res.candidates[0].dataUrl).toBe("data:image/png;base64,AAAA");
+    // selectedPath + legacy mirror fields all point at the avatar
+    expect(res.selectedPath).toBe(OWNER_AVATAR_PATH);
+    expect(res.path).toBe(OWNER_AVATAR_PATH);
+    expect(res.downloadUrl).toBe("https://avatars.githubusercontent.com/u/123?v=4");
+    expect(res.dataUrl).toBe("data:image/png;base64,AAAA");
+  });
+
+  it("fails open to found:false when the avatar URL is missing", () => {
+    expect(buildAvatarIconResult(null, "data:image/png;base64,AAAA")).toEqual({ found: false });
+  });
+
+  it("fails open to found:false when the avatar data URL could not be fetched", () => {
+    expect(buildAvatarIconResult("https://avatars.githubusercontent.com/u/1", null)).toEqual({
+      found: false,
+    });
+  });
+
+  it("the avatar candidate is renderable by pickBestCandidate (path absent from priority list)", () => {
+    const res = buildAvatarIconResult("https://x/avatar", "data:image/png;base64,AAAA");
+    if (!res.found) throw new Error("unreachable");
+    expect(pickBestCandidate(res.candidates)?.path).toBe(OWNER_AVATAR_PATH);
+  });
+});
+
+describe("resolveOwnerAvatar (CTL-1380) — owner extraction guards", () => {
+  it("returns null for an empty slug without shelling out", () => {
+    expect(resolveOwnerAvatar("")).toBeNull();
+  });
+
+  it("returns null when the owner segment is empty ('/repo')", () => {
+    expect(resolveOwnerAvatar("/repo")).toBeNull();
+  });
+});
+
 // ── buildRepoOwnerMap ─────────────────────────────────────────────────────────
 
 describe("buildRepoOwnerMap", () => {

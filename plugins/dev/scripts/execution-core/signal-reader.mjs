@@ -9,9 +9,47 @@
 //
 // Pure given a filesystem directory: no clock, no network.
 
-import { readdirSync, readFileSync } from "node:fs";
+import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { log } from "./config.mjs";
+
+// CTL-1367 P2-G: the grace window for a "young" single-flight claim — matches
+// phase-agent-dispatch's CTL-837 pre-spawn orphan-reap grace (find -mmin +2). A
+// claim younger than this is a concurrent dispatcher that just won the O_EXCL
+// claim and is milliseconds-to-seconds from writing its signal; an OLDER claim
+// with no signal is an orphan CTL-837 will reap, so it is NOT treated as benign.
+const CLAIM_FRESH_MS = 120_000;
+
+// hasFreshClaim — CTL-1367 P2-G. Does a YOUNG single-flight claim file exist for
+// this ticket/phase? phase-agent-dispatch writes the claim at
+// workers/<ticket>/<phase>.claim.<generation> (CTL-736) BEFORE the dispatched
+// signal. When a concurrent dispatcher loses the O_EXCL race it emits `claim-lost`
+// and writes NO signal — so the loser's local signal-verify would false-fail
+// "signal_missing" for a perfectly valid concurrent dispatch. The SDK-aware verify
+// uses this to treat that window as a benign no-op: signal ABSENT + a fresh claim
+// present ⇒ the winner is mid-dispatch, not a failure. Pure over the filesystem;
+// never throws (returns false on any read error). Used ONLY on the executor=sdk
+// verify path, so the bg verify is byte-identical.
+export function hasFreshClaim(orchDir, ticket, phase, { now = Date.now, graceMs = CLAIM_FRESH_MS } = {}) {
+  const dir = join(orchDir, "workers", ticket);
+  const prefix = `${phase}.claim.`;
+  let names;
+  try {
+    names = readdirSync(dir);
+  } catch {
+    return false; // no worker dir → no claim
+  }
+  const cutoff = now() - graceMs;
+  for (const name of names) {
+    if (!name.startsWith(prefix)) continue;
+    try {
+      if (statSync(join(dir, name)).mtimeMs >= cutoff) return true;
+    } catch {
+      /* claim vanished between readdir and stat — ignore */
+    }
+  }
+  return false;
+}
 
 // Files inside workers/<T>/ that are phase OUTPUTS ONLY (no phase signal
 // collision). Note: `phase-monitor-deploy.json` is intentionally NOT here —
@@ -144,6 +182,38 @@ export function listDispatchedPhases(orchDir, ticket) {
     if (m) phases.push(m[1]);
   }
   return phases;
+}
+
+// SDK_INFLIGHT_STATUSES — the non-terminal worker statuses an in-process SDK
+// phase worker passes through: the shared pre-launch writes "dispatched"; the
+// phase skill flips it to "running". Both are "occupying a slot".
+const SDK_INFLIGHT_STATUSES = new Set(["dispatched", "running"]);
+
+// countSdkInflight — CTL-1367 P1: the executor=sdk occupancy analogue of
+// liveBackgroundCount (claude-agents.mjs:countBackgroundAgents). Under executor=sdk
+// a phase worker runs as an IN-PROCESS query() with NO `claude --bg` job, so it is
+// invisible to the bg liveness count the scheduler slot gate + monitor triage budget
+// derive capacity from. Without counting it, a recorded SDK launch leaves the next
+// tick/drain seeing ZERO occupied slots and admitting MORE tickets past maxParallel —
+// each writing a `dispatched` signal and queuing behind the SDK semaphore (the P1
+// over-dispatch). This counts every NESTED phase signal still in a runnable state
+// (dispatched|running) that carries NO bg_job_id — exactly the SDK worker shape (the
+// prelaunch writes status:"dispatched" with bg_job_id:null; the skill flips it to
+// "running", still with no bg id). A bg worker ALWAYS carries a bg_job_id once it has
+// launched, so the no-bg-id filter never counts a live bg worker (which
+// liveBackgroundCount already counts) — preventing double-counting. Callers gate this
+// term on executor==="sdk" (dispatchMode==="sdk") so it is provably inert under bg/
+// oneshot-legacy: the term is simply never added. Pure over the filesystem; never
+// throws (a missing workers/ dir → 0).
+export function countSdkInflight(orchDir) {
+  let n = 0;
+  for (const s of readAllPhaseSignals(orchDir)) {
+    if (s.layout !== "nested") continue;
+    if (!SDK_INFLIGHT_STATUSES.has(s.status)) continue;
+    if (s.liveness?.value) continue; // has a bg_job_id → a bg worker, not SDK
+    n += 1;
+  }
+  return n;
 }
 
 // readNestedDir — collect workers/<T>/phase-*.json, drop artifacts, and pick

@@ -113,6 +113,74 @@ async function readTicketStateById(dbPath) {
   }
 }
 
+// ── parked needs-human tickets (off-board attention) ─────────────────────────
+// The board's ticket set is built from LIVE worker dirs (liveTickets +
+// betweenPhases + recentDone + queued + orphan-PR synthetics). A needs-human /
+// needs-input ticket whose worker dir was torn down (the PARKED case — most
+// parked tickets) is in NONE of those sets, so it never enters payload.tickets
+// and never reaches the inbox — even though deriveAttention already supports the
+// label. This reader is the cache source for that missing set: it mirrors
+// router.mjs::countNeedsHumanTickets EXACTLY — SAME accessor
+// (getAllTicketDescriptors → filter-state.db) and SAME predicate (non-removed,
+// non-terminal, carries a needs-human/needs-input label) — so the inbox surfaces
+// precisely the set the broker's pile-up signal counts.
+//
+// Labels + the Linear terminal set are mirrored LOCALLY (from
+// broker/alert-emit.mjs NEEDS_HUMAN_LABELS + execution-core/terminal-state.mjs)
+// so this cache reader pulls in nothing from the broker beyond the descriptor
+// accessor — keeping the vite config graph free of bun:sqlite (see the long note
+// in readTicketStateById).
+const NEEDS_HUMAN_LABELS = ["needs-human", "needs-input"];
+const TERMINAL_LINEAR_STATES = new Set(["Done", "Canceled"]);
+
+// readAllTicketDescriptors — the SAME bulk descriptor accessor readTicketStateById
+// uses, via the SAME computed-specifier lazy import (BROKER_STATE_MODULE — never a
+// string literal, see that note). Returns the full descriptor rows (incl.
+// updatedAt + removed) the parked filter below needs.
+async function readAllTicketDescriptors(dbPath) {
+  const { openBrokerStateDb, getAllTicketDescriptors } = await import(BROKER_STATE_MODULE);
+  openBrokerStateDb(dbPath);
+  return getAllTicketDescriptors();
+}
+
+// readParkedNeedsHumanTickets — the cache-sourced parked needs-human set. Returns
+// minimal descriptors { ticket, labels, linearState, priority, updatedAt } for
+// every non-removed, non-terminal ticket carrying a needs-human/needs-input label.
+// Fail-OPEN: any read error degrades to [] — the inbox keeps its current
+// worker-dir-sourced behavior and never throws out of the assemble (CTL-883
+// posture, consistent with countNeedsHumanTickets returning 0 on a db error).
+// `descriptorReader` is injectable so unit tests drive the predicate without a DB.
+export async function readParkedNeedsHumanTickets({
+  dbPath = DEFAULT_DB_PATH,
+  descriptorReader = readAllTicketDescriptors,
+} = {}) {
+  let descriptors;
+  try {
+    descriptors = await descriptorReader(dbPath);
+  } catch {
+    return []; // db locked/absent → no parked cards (degrade to current behavior)
+  }
+  if (!Array.isArray(descriptors)) return [];
+  const out = [];
+  for (const d of descriptors) {
+    if (!d || !d.ticket) continue;
+    if (d.removed) continue; // tombstoned (getAllTicketDescriptors excludes these by default)
+    if (d.state && TERMINAL_LINEAR_STATES.has(d.state)) continue; // Done/Canceled
+    const labels = Array.isArray(d.labels) ? d.labels.filter(Boolean) : [];
+    if (!labels.some((l) => NEEDS_HUMAN_LABELS.includes(l))) continue;
+    out.push({
+      ticket: d.ticket,
+      labels,
+      linearState: typeof d.state === "string" ? d.state : null,
+      priority: normPriority(d.priority),
+      // The freshest cache stamp on the descriptor — the honest "how long parked"
+      // anchor for the inbox attention row. null when the row carried none.
+      updatedAt: typeof d.updatedAt === "string" ? d.updatedAt : null,
+    });
+  }
+  return out;
+}
+
 // Read the scheduler's eligible projections for priority/project/relations on
 // tickets that may not have a ticket_state row yet (queued, not-yet-worked).
 async function readEligibleById(eligibleDir) {
