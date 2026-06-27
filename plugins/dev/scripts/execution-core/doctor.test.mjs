@@ -23,6 +23,7 @@ import {
   checkReaper,
   checkCloudTokenEnv,
   checkSdkExecutorAuth,
+  checkConfigScopeLeak,
   summarize,
   renderJson,
   renderHuman,
@@ -1240,5 +1241,110 @@ describe("checkSdkExecutorAuth (CTL-1367 item 9)", () => {
       const checks = checkSdkExecutorAuth({ configPath: cfg, env: { ANTHROPIC_API_KEY: "sk" } });
       expect(checks[0].status).toBe(STATUS.INFO);
     });
+  });
+});
+
+// ─── checkConfigScopeLeak (CTL-1214) ─────────────────────────────────────────
+
+// A kitchen-sink Layer-1 config carrying every relocated stanza (the historical
+// leak): the project roster + repoColors + orchestration/feedback/sweep blocks.
+const KITCHEN_SINK_LAYER1 = JSON.stringify({
+  catalyst: {
+    schemaVersion: 1,
+    projectKey: "catalyst-workspace",
+    project: { ticketPrefix: "CTL" },
+    linear: { teamKey: "CTL", teamId: "team-uuid", stateMap: {} },
+    thoughts: { profile: "coalesce-labs", directory: "catalyst-workspace", user: null },
+    monitor: {
+      linear: { teams: [{ teamKey: "CTL", vcsRepo: "coalesce-labs/catalyst" }] },
+      github: { repoColors: { "coalesce-labs/catalyst": "#5b8def" } },
+    },
+    orchestration: { dispatchMode: "phase-agents" },
+    feedback: { autoFile: true },
+    sweep: { idleHours: 48 },
+  },
+});
+
+// The minimal, slimmed Layer-1 config: project-identity fields only.
+const MINIMAL_LAYER1 = JSON.stringify({
+  catalyst: {
+    schemaVersion: 1,
+    projectKey: "catalyst-workspace",
+    project: { ticketPrefix: "CTL" },
+    linear: { teamKey: "CTL", teamId: "team-uuid", stateMap: {} },
+    thoughts: { profile: "coalesce-labs", directory: "catalyst-workspace", user: null },
+  },
+});
+
+describe("checkConfigScopeLeak (CTL-1214)", () => {
+  it("FAILs on a kitchen-sink Layer-1 still carrying node/cluster keys", () => {
+    const checks = checkConfigScopeLeak({
+      readLayer1: () => KITCHEN_SINK_LAYER1,
+      hostsJsonExists: () => false,
+    });
+    expect(checks).toHaveLength(1);
+    expect(checks[0].name).toBe("config-scope-leak");
+    expect(checks[0].status).toBe(STATUS.FAIL);
+  });
+
+  it("PASSes on a minimal Layer-1 carrying only project-identity fields", () => {
+    const checks = checkConfigScopeLeak({
+      readLayer1: () => MINIMAL_LAYER1,
+      hostsJsonExists: () => false,
+    });
+    expect(checks).toHaveLength(1);
+    expect(checks[0].name).toBe("config-scope-leak");
+    expect(checks[0].status).toBe(STATUS.PASS);
+  });
+
+  it("names each leaked key category in the remediation message", () => {
+    const checks = checkConfigScopeLeak({
+      readLayer1: () => KITCHEN_SINK_LAYER1,
+      hostsJsonExists: () => false,
+    });
+    const { detail } = checks[0];
+    // every relocated stanza present in the kitchen-sink is named
+    expect(detail).toContain("monitor.linear.teams");
+    expect(detail).toContain("monitor.github.repoColors");
+    expect(detail).toContain("orchestration");
+    expect(detail).toContain("feedback");
+    expect(detail).toContain("sweep");
+    // and it points operators at the migration tooling / cluster destination
+    expect(detail).toContain("migrate-config-to-node.sh");
+    expect(detail).toContain("catalyst-cluster/cluster.json");
+  });
+
+  it("FAILs and names hosts.json when a .catalyst/hosts.json roster file is present", () => {
+    const checks = checkConfigScopeLeak({
+      readLayer1: () => MINIMAL_LAYER1, // config itself is clean…
+      hostsJsonExists: () => true, // …but a legacy hosts.json still exists
+    });
+    expect(checks).toHaveLength(1);
+    expect(checks[0].status).toBe(STATUS.FAIL);
+    expect(checks[0].detail).toContain("hosts.json");
+  });
+
+  it("PASSes when the config is absent and no hosts.json exists (nothing to leak)", () => {
+    const checks = checkConfigScopeLeak({
+      readLayer1: () => "",
+      hostsJsonExists: () => false,
+    });
+    expect(checks).toHaveLength(1);
+    expect(checks[0].status).toBe(STATUS.PASS);
+  });
+
+  it("INFO when the Layer-1 config is malformed JSON", () => {
+    const checks = checkConfigScopeLeak({
+      readLayer1: () => "{ not json",
+      hostsJsonExists: () => false,
+    });
+    expect(checks).toHaveLength(1);
+    expect(checks[0].status).toBe(STATUS.INFO);
+  });
+
+  it("runDoctor wires checkConfigScopeLeak into its default Promise.all suite", () => {
+    // runDoctor's default check suite is defined inline in its body; assert the
+    // wiring without running the networked default checks.
+    expect(runDoctor.toString()).toContain("checkConfigScopeLeak()");
   });
 });
