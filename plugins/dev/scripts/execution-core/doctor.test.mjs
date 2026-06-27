@@ -24,6 +24,11 @@ import {
   checkCloudTokenEnv,
   checkSdkExecutorAuth,
   checkConfigScopeLeak,
+  checkNodeClass,
+  checkReadReplicaReachable,
+  checkWontOwnWork,
+  checkDaemonlessLocal,
+  checksForClass,
   summarize,
   renderJson,
   renderHuman,
@@ -1346,10 +1351,10 @@ describe("checkConfigScopeLeak (CTL-1214)", () => {
     expect(checks[0].status).toBe(STATUS.INFO);
   });
 
-  it("runDoctor wires checkConfigScopeLeak into its default Promise.all suite", () => {
-    // runDoctor's default check suite is defined inline in its body; assert the
-    // wiring without running the networked default checks.
-    expect(runDoctor.toString()).toContain("checkConfigScopeLeak()");
+  it("checksForClass wires checkConfigScopeLeak into the worker suite (CTL-1355: the suite moved out of runDoctor)", () => {
+    // The default (worker) suite is built by checksForClass now; assert the wiring
+    // without running the networked default checks.
+    expect(checksForClass.toString()).toContain("checkConfigScopeLeak()");
   });
 
   // ─── Regression: the doctor-exit / join-gate contract (CTL-1214) ────────────
@@ -1393,5 +1398,454 @@ describe("checkConfigScopeLeak (CTL-1214)", () => {
       log: () => {},
     });
     expect(code).toBe(0);
+  });
+});
+
+// ─── CTL-1355: class-aware grading ───────────────────────────────────────────
+
+const nodeClassOf = (over = {}) => ({
+  class: "worker",
+  source: "layer2",
+  inferred: false,
+  recognized: true,
+  raw: "worker",
+  ...over,
+});
+
+describe("checkNodeClass (CTL-1355)", () => {
+  it("PASSes an explicit, recognized class", () => {
+    const checks = checkNodeClass({ nodeClass: nodeClassOf({ class: "developer", raw: "developer" }) });
+    expect(checks).toHaveLength(1);
+    expect(checks[0].name).toBe("node-class");
+    expect(checks[0].status).toBe(STATUS.PASS);
+    expect(checks[0].detail).toContain("developer");
+  });
+
+  it("INFO-notes an inferred (unset) class — graded as worker, not a fail", () => {
+    const checks = checkNodeClass({
+      nodeClass: nodeClassOf({ class: "worker", source: "default", inferred: true, recognized: true, raw: null }),
+    });
+    expect(checks[0].status).toBe(STATUS.INFO);
+    expect(checks[0].detail).toContain("not explicitly set");
+  });
+
+  it("FAILs an explicit, UNRECOGNIZED class and names the raw value", () => {
+    const checks = checkNodeClass({
+      nodeClass: nodeClassOf({ class: "monitor", source: "env", inferred: false, recognized: false, raw: "developr" }),
+    });
+    expect(checks[0].status).toBe(STATUS.FAIL);
+    expect(checks[0].detail).toContain("developr");
+    expect(checks[0].detail).toContain("not one of");
+  });
+});
+
+describe("checkReadReplicaReachable (CTL-1355)", () => {
+  it("FAILs when no endpoint is configured", async () => {
+    const checks = await checkReadReplicaReachable({ baseUrl: null, fetch: async () => ({ status: 200 }) });
+    expect(checks[0].name).toBe("read-replica");
+    expect(checks[0].status).toBe(STATUS.FAIL);
+    expect(checks[0].detail).toContain("unset");
+  });
+
+  it("FAILs a localhost endpoint (empty local replica)", async () => {
+    const checks = await checkReadReplicaReachable({
+      baseUrl: "http://localhost:7400",
+      fetch: async () => ({ status: 200 }),
+    });
+    expect(checks[0].status).toBe(STATUS.FAIL);
+    expect(checks[0].detail).toContain("localhost");
+  });
+
+  it("FAILs a 127.0.0.1 endpoint", async () => {
+    const checks = await checkReadReplicaReachable({
+      baseUrl: " http://127.0.0.1:7400 ", // padded — trimmed first
+      fetch: async () => ({ status: 200 }),
+    });
+    expect(checks[0].status).toBe(STATUS.FAIL);
+  });
+
+  it("PASSes a reachable remote endpoint returning 2xx (probes /api/version, P1)", async () => {
+    let probed = null;
+    const checks = await checkReadReplicaReachable({
+      baseUrl: "http://mini:7400",
+      fetch: async (url) => { probed = url; return { ok: true, status: 200 }; },
+    });
+    expect(checks[0].status).toBe(STATUS.PASS);
+    // P1: orch-monitor serves no plain /api/health — probe the lightweight /api/version
+    expect(probed).toBe("http://mini:7400/api/version");
+  });
+
+  it("FAILs a remote endpoint that answers with a non-2xx status (F4 — 2xx is the floor)", async () => {
+    const checks = await checkReadReplicaReachable({
+      baseUrl: "http://mini:7400",
+      fetch: async () => ({ ok: false, status: 503 }),
+    });
+    expect(checks[0].status).toBe(STATUS.FAIL);
+    expect(checks[0].detail).toContain("503");
+    expect(checks[0].detail).toContain("not healthy");
+  });
+
+  it("FAILs a remote endpoint that is unreachable", async () => {
+    const checks = await checkReadReplicaReachable({
+      baseUrl: "http://mini:7400",
+      fetch: async () => { throw new Error("ECONNREFUSED"); },
+    });
+    expect(checks[0].status).toBe(STATUS.FAIL);
+    expect(checks[0].detail).toContain("ECONNREFUSED");
+  });
+});
+
+describe("checkWontOwnWork (CTL-1355 — fail-closed F1)", () => {
+  const multiInRoster = () => ({ hosts: ["mini", "laptop"], source: "cluster-repo", multiHost: true });
+  const outOfRoster = () => ({ hosts: ["mini", "mini-2"], source: "cluster-repo", multiHost: true });
+  const staticOutOfRoster = () => ({ hosts: ["mini", "mini-2"], source: "static", multiHost: true });
+  // The COMMON dangerous case: resolveClusterHosts is FAIL-OPEN, so an
+  // absent/stale cluster-repo clone collapses to a single-host roster of self.
+  const singleSelf = () => ({ hosts: ["laptop"], source: "single-host", multiHost: false });
+  // A source-less, non-multiHost roster that omits self (defensive: resolver
+  // exposes no source flag) — NOT authoritative, so out-of-roster can't be confirmed.
+  const sourcelessSingle = () => ({ hosts: ["mini"], multiHost: false });
+
+  it("PASSes when boot-drained (admits no new work)", () => {
+    const checks = checkWontOwnWork({
+      resolveRoster: multiInRoster,
+      getHostName: () => "laptop",
+      isDraining: () => false,
+      bootDrained: true,
+    });
+    expect(checks[0].name).toBe("would-not-own-work");
+    expect(checks[0].status).toBe(STATUS.PASS);
+    expect(checks[0].detail).toContain("drained");
+  });
+
+  it("PASSes when the drain flag file is present", () => {
+    const checks = checkWontOwnWork({
+      resolveRoster: multiInRoster,
+      getHostName: () => "laptop",
+      isDraining: () => true,
+      bootDrained: false,
+    });
+    expect(checks[0].status).toBe(STATUS.PASS);
+  });
+
+  it("PASSes when confirmed out of an AUTHORITATIVE (cluster-repo) roster — HRW assigns nothing", () => {
+    const checks = checkWontOwnWork({
+      resolveRoster: outOfRoster,
+      getHostName: () => "laptop",
+      isDraining: () => false,
+      bootDrained: false,
+    });
+    expect(checks[0].status).toBe(STATUS.PASS);
+    expect(checks[0].detail).toContain("not in the authoritative cluster roster");
+  });
+
+  it("PASSes when confirmed out of an explicit static roster (also authoritative)", () => {
+    const checks = checkWontOwnWork({
+      resolveRoster: staticOutOfRoster,
+      getHostName: () => "laptop",
+      isDraining: () => false,
+      bootDrained: false,
+    });
+    expect(checks[0].status).toBe(STATUS.PASS);
+  });
+
+  it("FAILs when in a roster and not drained (HRW would assign work)", () => {
+    const checks = checkWontOwnWork({
+      resolveRoster: multiInRoster,
+      getHostName: () => "laptop",
+      isDraining: () => false,
+      bootDrained: false,
+    });
+    expect(checks[0].status).toBe(STATUS.FAIL);
+    expect(checks[0].detail).toContain("would own work");
+    expect(checks[0].detail).toContain("CATALYST_BOOT_DRAINED");
+  });
+
+  it("FAILs (not WARN) a fail-open single-host roster including self, not drained — the common dev-laptop collapse", () => {
+    const checks = checkWontOwnWork({
+      resolveRoster: singleSelf,
+      getHostName: () => "laptop",
+      isDraining: () => false,
+      bootDrained: false,
+    });
+    expect(checks[0].status).toBe(STATUS.FAIL);
+    expect(checks[0].detail).toContain("would own work");
+  });
+
+  it("FAILs a non-authoritative source-less roster that omits self, not drained (can't confirm out-of-roster → fail-open 100%)", () => {
+    const checks = checkWontOwnWork({
+      resolveRoster: sourcelessSingle,
+      getHostName: () => "laptop",
+      isDraining: () => false,
+      bootDrained: false,
+    });
+    expect(checks[0].status).toBe(STATUS.FAIL);
+    // not in the (non-authoritative) roster → the "can't confirm" fail-open reason
+    expect(checks[0].detail).toContain("100%");
+  });
+});
+
+describe("checkDaemonlessLocal (CTL-1355 — folds verify-node --json)", () => {
+  const vnFixture = (statusFor = {}) => ({
+    node_class: "developer",
+    verdict: "pass",
+    exit_code: 0,
+    required_failures: 0,
+    checks: [
+      { name: "node-class", tier: "T1", required: true, status: "PASS", detail: "node.class=developer" },
+      { name: "broker-stopped", tier: "T1", required: true, status: statusFor["broker-stopped"] ?? "PASS", detail: "broker not running" },
+      { name: "exec-core-stopped", tier: "T1", required: true, status: statusFor["exec-core-stopped"] ?? "PASS", detail: "exec-core not running" },
+      { name: "plugins-fresh", tier: "T1", required: true, status: statusFor["plugins-fresh"] ?? "PASS", detail: "verify-updater all-green" },
+      { name: "read-replica", tier: "T1", required: true, status: "PASS", detail: "remote" },
+      { name: "would-not-own-work", tier: "T1", required: true, status: "PASS", detail: "out of roster" },
+    ],
+  });
+
+  it("folds the daemonless + plugins-fresh rows, all PASS", () => {
+    const checks = checkDaemonlessLocal({ runVerifyNode: () => vnFixture() });
+    expect(checks.map((c) => c.name)).toEqual(["broker-stopped", "exec-core-stopped", "plugins-fresh"]);
+    expect(checks.every((c) => c.status === STATUS.PASS)).toBe(true);
+    // it does NOT fold read-replica / would-not-own-work (doctor computes those natively)
+    expect(checks.find((c) => c.name === "read-replica")).toBeUndefined();
+  });
+
+  it("translates a verify-node FAIL row to a doctor FAIL", () => {
+    const checks = checkDaemonlessLocal({ runVerifyNode: () => vnFixture({ "broker-stopped": "FAIL" }) });
+    const broker = checks.find((c) => c.name === "broker-stopped");
+    expect(broker.status).toBe(STATUS.FAIL);
+  });
+
+  it("translates a plugins-fresh FAIL (stale plugins) to a doctor FAIL", () => {
+    const checks = checkDaemonlessLocal({ runVerifyNode: () => vnFixture({ "plugins-fresh": "FAIL" }) });
+    expect(checks.find((c) => c.name === "plugins-fresh").status).toBe(STATUS.FAIL);
+  });
+
+  it("translates an uppercase SKIP to INFO", () => {
+    const checks = checkDaemonlessLocal({ runVerifyNode: () => vnFixture({ "broker-stopped": "SKIP" }) });
+    expect(checks.find((c) => c.name === "broker-stopped").status).toBe(STATUS.INFO);
+  });
+
+  it("FAILs (fail-closed, F2) when a required row is missing from verify-node output", () => {
+    const checks = checkDaemonlessLocal({
+      runVerifyNode: () => ({ node_class: "developer", checks: [{ name: "node-class", status: "PASS" }] }),
+    });
+    expect(checks.every((c) => c.status === STATUS.FAIL)).toBe(true);
+  });
+
+  it("FAILs (fail-closed, F2) an unmappable row status", () => {
+    const checks = checkDaemonlessLocal({
+      runVerifyNode: () => vnFixture({ "broker-stopped": "BOGUS" }),
+    });
+    expect(checks.find((c) => c.name === "broker-stopped").status).toBe(STATUS.FAIL);
+  });
+
+  it("FAILs (fail-closed, F2) when verify-node cannot be run (spawn error)", () => {
+    const checks = checkDaemonlessLocal({
+      runVerifyNode: () => { throw new Error("catalyst-stack: command not found"); },
+    });
+    expect(checks).toHaveLength(1);
+    expect(checks[0].name).toBe("verify-node");
+    expect(checks[0].status).toBe(STATUS.FAIL);
+    expect(checks[0].detail).toContain("cannot certify");
+  });
+
+  it("FAILs (fail-closed, F2) when verify-node returns an empty checks array", () => {
+    const checks = checkDaemonlessLocal({
+      runVerifyNode: () => ({ node_class: "developer", exit_code: 0, checks: [] }),
+    });
+    expect(checks).toHaveLength(1);
+    expect(checks[0].name).toBe("verify-node");
+    expect(checks[0].status).toBe(STATUS.FAIL);
+  });
+
+  it("FAILs (fail-closed, F2) when verify-node reports jq:false", () => {
+    const checks = checkDaemonlessLocal({
+      runVerifyNode: () => ({ ...vnFixture(), jq: false }),
+    });
+    expect(checks).toHaveLength(1);
+    expect(checks[0].name).toBe("verify-node");
+    expect(checks[0].status).toBe(STATUS.FAIL);
+  });
+
+  it("FAILs (fail-closed, F2) when verify-node exits non-zero (captured child status)", () => {
+    const checks = checkDaemonlessLocal({
+      runVerifyNode: () => ({ ...vnFixture(), exit_code: 2 }),
+    });
+    expect(checks).toHaveLength(1);
+    expect(checks[0].name).toBe("verify-node");
+    expect(checks[0].status).toBe(STATUS.FAIL);
+    expect(checks[0].detail).toContain("exit 2");
+  });
+
+  it("FAILs (fail-closed, F2) when verify-node reports a fail verdict", () => {
+    const checks = checkDaemonlessLocal({
+      runVerifyNode: () => ({ ...vnFixture(), verdict: "fail" }),
+    });
+    expect(checks).toHaveLength(1);
+    expect(checks[0].status).toBe(STATUS.FAIL);
+  });
+});
+
+describe("checksForClass — suite selection (CTL-1355)", () => {
+  // Each suite is an array of THUNKS; .toString() reveals which check each calls.
+  const src = (nc, opts = {}) => checksForClass(nc, opts).map((f) => f.toString()).join("\n");
+
+  it("unrecognized class → exactly one thunk (the node-class FAIL), nothing graded", async () => {
+    const nc = nodeClassOf({ recognized: false, raw: "developr", class: "monitor" });
+    const suite = checksForClass(nc);
+    expect(suite).toHaveLength(1);
+    const out = (await suite[0]());
+    expect(out[0].name).toBe("node-class");
+    expect(out[0].status).toBe(STATUS.FAIL);
+  });
+
+  it("worker (explicit) → today's full CTL-1186 gate (host-identity, daemon-PATH, peer, sdk, scope-leak)", () => {
+    const s = src(nodeClassOf({ class: "worker", raw: "worker" }));
+    expect(s).toContain("checkHostIdentity()");
+    expect(s).toContain("checkDaemonToolPath()");
+    expect(s).toContain("checkPeerUniqueness()");
+    expect(s).toContain("checkWebhookIngestion()");
+    expect(s).toContain("checkThoughts()");
+    expect(s).toContain("checkSdkExecutorAuth()");
+    expect(s).toContain("checkConfigScopeLeak()");
+    expect(s).toContain("checkHrwPartition()"); // would-own visibility
+  });
+
+  it("an inferred (unset) class grades as the worker suite (zero change)", () => {
+    const inferred = nodeClassOf({ class: "worker", source: "default", inferred: true, recognized: true, raw: null });
+    const s = src(inferred);
+    expect(s).toContain("checkHostIdentity()");
+    expect(s).toContain("checkDaemonToolPath()");
+  });
+
+  it("developer → daemonless fold + read-replica + wont-own + Linear; EXCLUDES worker-only gates", () => {
+    const s = src(nodeClassOf({ class: "developer", raw: "developer" }));
+    // developer value-add + reused checks
+    expect(s).toContain("checkDaemonlessLocal");
+    expect(s).toContain("checkReadReplicaReachable");
+    expect(s).toContain("checkWontOwnWork");
+    expect(s).toContain("checkBotCredentials"); // Linear reachable (bot-identity downgraded)
+    expect(s).toContain("checkHrwPartition()"); // would-own visibility
+    // worker-only gates are excluded
+    expect(s).not.toContain("checkHostIdentity()");
+    expect(s).not.toContain("checkDaemonToolPath()");
+    expect(s).not.toContain("checkPeerUniqueness()");
+    expect(s).not.toContain("checkWebhookIngestion()");
+    expect(s).not.toContain("checkThoughts()");
+    expect(s).not.toContain("checkSdkExecutorAuth()");
+    // P2: checkClaudeSettings is a worker-cluster-MEMBER concern — a developer client
+    // (deliberately out of a multi-host roster) must not be graded against it.
+    expect(s).not.toContain("checkClaudeSettings()");
+  });
+
+  it("monitor → minimal stub: reachability + wont-own + a fail-closed profile-stub", () => {
+    const nc = nodeClassOf({ class: "monitor", raw: "monitor" });
+    const s = src(nc);
+    expect(s).toContain("checkReadReplicaReachable");
+    expect(s).toContain("checkWontOwnWork");
+    expect(s).toContain("checkHrwPartition()");
+    expect(s).toContain("monitor-profile"); // the fail-closed stub
+    expect(s).not.toContain("checkHostIdentity()");
+    expect(s).not.toContain("checkDaemonlessLocal"); // monitor doesn't fold verify-node
+  });
+
+  it("monitor → monitor-profile is a fail-closed FAIL (F3 — doctor refuses to certify monitors)", async () => {
+    const nc = nodeClassOf({ class: "monitor", raw: "monitor" });
+    const suite = checksForClass(nc);
+    // The profile-stub is the only thunk whose source mentions monitor-profile.
+    const profileThunk = suite.find((f) => f.toString().includes("monitor-profile"));
+    expect(profileThunk).toBeDefined();
+    const out = await profileThunk();
+    expect(out[0].name).toBe("monitor-profile");
+    expect(out[0].status).toBe(STATUS.FAIL);
+    expect(out[0].detail).toContain("fail-closed");
+  });
+});
+
+describe("developer Linear-token gate (CTL-1355 P3)", () => {
+  const devNc = nodeClassOf({ class: "developer", raw: "developer" });
+  // The developer bot-credentials thunk is the only one whose source references
+  // checkBotCredentials; pull it out of the rubric and run it with an injected token.
+  const botThunkOf = (opts) =>
+    checksForClass(devNc, opts).find((f) => f.toString().includes("checkBotCredentials"));
+
+  it("developer with NO Linear token → linear-connectivity FAILs (fail-closed)", async () => {
+    const thunk = botThunkOf({ linearToken: () => "" });
+    expect(thunk).toBeDefined();
+    const out = await thunk();
+    const conn = out.find((c) => c.name === "linear-connectivity");
+    expect(conn.status).toBe(STATUS.FAIL);
+    expect(conn.detail).toContain("Linear token");
+  });
+
+  it("developer with a working Linear token → linear-connectivity PASSes; bot-identity stays advisory (never FAIL)", async () => {
+    const thunk = botThunkOf({
+      linearToken: () => "lin_api_dev",
+      fetch: fakeFetch({ data: { viewer: { id: "dev-actor", email: "dev@example.com" } } }),
+    });
+    const out = await thunk();
+    expect(out.find((c) => c.name === "linear-connectivity").status).toBe(STATUS.PASS);
+    // a developer's interactive token need not be the bot → bot-identity never gates
+    expect(out.find((c) => c.name === "bot-identity").status).not.toBe(STATUS.FAIL);
+  });
+});
+
+describe("runDoctor — class-aware routing (CTL-1355)", () => {
+  it("unrecognized class → single node-class FAIL, exit 1", async () => {
+    const logs = [];
+    const code = await runDoctor({
+      resolveClass: () => nodeClassOf({ class: "monitor", source: "env", inferred: false, recognized: false, raw: "developr" }),
+      json: true,
+      log: (m) => logs.push(m),
+    });
+    expect(code).toBe(1);
+    const parsed = JSON.parse(logs[0]);
+    expect(parsed.checks).toHaveLength(1);
+    expect(parsed.checks[0].name).toBe("node-class");
+    expect(parsed.checks[0].status).toBe(STATUS.FAIL);
+  });
+
+  it("developer rubric (daemonless+fresh+replica+wont-own all green) → exit 0", async () => {
+    // Build the deterministic developer value-add subset and run it end-to-end so the
+    // exit-code contract is exercised without touching real network/process state.
+    const vn = () => ({
+      node_class: "developer",
+      checks: [
+        { name: "broker-stopped", status: "PASS", detail: "down" },
+        { name: "exec-core-stopped", status: "PASS", detail: "down" },
+        { name: "plugins-fresh", status: "PASS", detail: "fresh" },
+      ],
+    });
+    const code = await runDoctor({
+      checks: [
+        () => checkDaemonlessLocal({ runVerifyNode: vn }),
+        () => checkReadReplicaReachable({ baseUrl: "http://mini:7400", fetch: async () => ({ status: 200 }) }),
+        () =>
+          checkWontOwnWork({
+            resolveRoster: () => ({ hosts: ["mini", "mini-2"], multiHost: true }),
+            getHostName: () => "laptop",
+            isDraining: () => false,
+            bootDrained: false,
+          }),
+      ],
+      log: () => {},
+    });
+    expect(code).toBe(0);
+  });
+
+  it("developer that WOULD pick up work (in multi-host roster, not drained) → non-zero exit", async () => {
+    const code = await runDoctor({
+      checks: [
+        () =>
+          checkWontOwnWork({
+            resolveRoster: () => ({ hosts: ["mini", "laptop"], multiHost: true }),
+            getHostName: () => "laptop",
+            isDraining: () => false,
+            bootDrained: false,
+          }),
+      ],
+      log: () => {},
+    });
+    expect(code).toBe(1);
   });
 });
