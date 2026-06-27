@@ -17,6 +17,49 @@ import { derivePrVariant } from "../../../lib/pr-variant";
 const MAX_EVENTS = 200;
 const STALE_THRESHOLD = 900;
 
+// CTL-1372: cap the dashboard's long-lived dedup structures with LRU (drop-oldest)
+// eviction. seenAttentionRef / briefingSeenRef / prevWaveStatusRef are only ever
+// added to (unlike prevWorkerRef, which is pruned of vanished keys below), so across
+// a multi-hour session they grow monotonically by distinct attention items / waves /
+// briefings. Eviction REFRESHES recency on every observation so a still-present key
+// is never the oldest — otherwise a long-active item could be evicted past the cap
+// and then re-emit its one-time `attn`/`brief` event as a phantom duplicate, in
+// exactly the long busy sessions this hardens (PR #2434 review).
+const DEDUP_REF_CAP = 5000;
+
+function evictOldest<T>(coll: Set<T> | Map<T, unknown>, cap: number): void {
+  if (coll.size <= cap) return;
+  const it = coll.keys();
+  for (let drop = coll.size - cap; drop > 0; drop--) {
+    const next = it.next();
+    if (next.done) break;
+    coll.delete(next.value);
+  }
+}
+
+// Mark `key` as observed in the current snapshot: refresh its recency (move it to the
+// newest position so an active key is never the eviction target) and add it if new,
+// then cap. Returns true ONLY when the key was not already present, so the caller
+// emits its one-time event exactly once.
+function markSeen<T>(set: Set<T>, key: T, cap = DEDUP_REF_CAP): boolean {
+  const isNew = !set.has(key);
+  if (!isNew) set.delete(key);
+  set.add(key);
+  evictOldest(set, cap);
+  return isNew;
+}
+
+function setBounded<K, V>(
+  map: Map<K, V>,
+  key: K,
+  value: V,
+  cap = DEDUP_REF_CAP,
+): void {
+  map.delete(key); // refresh recency (no-op if absent) so active keys aren't evicted
+  map.set(key, value);
+  evictOldest(map, cap);
+}
+
 interface WorkerPrev {
   status: string;
   phase: number;
@@ -200,20 +243,19 @@ export function useMonitor() {
                 orch.id,
               );
             }
-            prevWaveStatusRef.current.set(key, w.status);
+            setBounded(prevWaveStatusRef.current, key, w.status);
           }
           // Briefings
           if (orch.briefings && primedRef.current) {
             for (const nStr of Object.keys(orch.briefings)) {
               const bKey = orch.id + ":" + nStr;
-              if (!briefingSeenRef.current.has(bKey)) {
-                briefingSeenRef.current.add(bKey);
+              if (markSeen(briefingSeenRef.current, bKey)) {
                 addEvent("brief", `Wave ${nStr} briefing written`, undefined, orch.id);
               }
             }
           } else if (orch.briefings) {
             for (const nStr of Object.keys(orch.briefings)) {
-              briefingSeenRef.current.add(orch.id + ":" + nStr);
+              markSeen(briefingSeenRef.current, orch.id + ":" + nStr);
             }
           }
         }
@@ -228,8 +270,7 @@ export function useMonitor() {
               ((raw.id as string) ||
                 (raw.ticket as string) ||
                 JSON.stringify(raw));
-            if (!seenAttentionRef.current.has(key)) {
-              seenAttentionRef.current.add(key);
+            if (markSeen(seenAttentionRef.current, key)) {
               const ticket =
                 (raw.ticket as string) || (raw.workerName as string) || "";
               const reason =
