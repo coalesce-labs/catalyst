@@ -11,12 +11,12 @@
       "type": "object",
       "description": "Root namespace for all Catalyst configuration.",
       "additionalProperties": false,
-      "required": ["schemaVersion"],
+      "required": [],
       "properties": {
         "schemaVersion": {
           "type": "integer",
           "minimum": 1,
-          "description": "Config schema version (CTL-1214). Version 1 is the slimmed project-identity schema: only projectKey, project.ticketPrefix, linear.{teamKey,teamId,stateMap,stateIds}, monitor.linear.botUserId/monitor.suppressVersionWarning, and thoughts.* are canonical Layer-1 fields. The monitor.linear.teams project roster relocates to the cluster scope (catalyst-cluster/cluster.json.projects[]); monitor.github.repoColors and the orchestration.* / feedback.* / sweep.* stanzas relocate to the node scope (~/.config/catalyst/config.json). Those relocated keys are marked deprecated but remain permitted during the back-compat migration window and are flagged by `catalyst doctor`.",
+          "description": "Config schema version (CTL-1214). RECOMMENDED, not required, during the back-compat migration window: a not-yet-slimmed config that omits it still validates (Phase 6 — which slims the committed configs and promotes schemaVersion to required — is deferred). When present it must be an integer >= 1. Version 1 is the slimmed project-identity schema: only projectKey, project.ticketPrefix, linear.{teamKey,teamId,stateMap,stateIds}, monitor.linear.botUserId/monitor.suppressVersionWarning, and thoughts.* are canonical Layer-1 fields. The monitor.linear.teams project roster relocates to the cluster scope (catalyst-cluster/cluster.json.projects[]); monitor.github.repoColors and the orchestration.* / feedback.* / sweep.* stanzas relocate to the node scope (~/.config/catalyst/config.json). Those relocated keys are marked deprecated but remain permitted during the back-compat migration window and are flagged by `catalyst doctor`.",
           "examples": [1]
         },
         "projectKey": {

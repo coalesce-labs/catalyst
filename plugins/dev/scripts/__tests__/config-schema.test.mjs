@@ -192,11 +192,19 @@ describe("validateLayer1Config (CTL-1214)", () => {
     expect(r.valid).toBe(true);
   });
 
-  test("schemaVersion is required and must be >= 1", () => {
+  test("schemaVersion is recommended (back-compat) but a PRESENT value must be >= 1", () => {
+    // Back-compat window (CTL-1214 P2 #2): a config WITHOUT schemaVersion still
+    // validates — every not-yet-slimmed config lacks it (Phase 6 deferred) — and is
+    // surfaced as a recommendation, not a failure.
     const missing = minimalLayer1();
     delete missing.catalyst.schemaVersion;
-    expect(validateLayer1Config(missing).valid).toBe(false);
+    const missingResult = validateLayer1Config(missing);
+    expect(missingResult.valid).toBe(true);
+    expect(missingResult.errors).toEqual([]);
+    expect(missingResult.recommendations.length).toBeGreaterThan(0);
+    expect(missingResult.recommendations.join(" ")).toContain("schemaVersion");
 
+    // A PRESENT-but-malformed value is still a hard error (set it correctly).
     const zero = minimalLayer1();
     zero.catalyst.schemaVersion = 0;
     expect(validateLayer1Config(zero).valid).toBe(false);
@@ -205,7 +213,10 @@ describe("validateLayer1Config (CTL-1214)", () => {
     nonInt.catalyst.schemaVersion = 1.5;
     expect(validateLayer1Config(nonInt).valid).toBe(false);
 
-    expect(validateLayer1Config(minimalLayer1()).valid).toBe(true);
+    // A present, well-formed version validates with no recommendation.
+    const ok = validateLayer1Config(minimalLayer1());
+    expect(ok.valid).toBe(true);
+    expect(ok.recommendations).toEqual([]);
   });
 
   test("teamId may be null (template) without affecting validity", () => {
@@ -246,11 +257,19 @@ describe("catalyst-config.schema.json (Layer-1 schema)", () => {
     expect(validateAgainstSchema(minimalLayer1(), catalystConfigSchema)).toEqual([]);
   });
 
-  test("schemaVersion is a required, integer-typed property in the schema", () => {
+  test("schemaVersion is an integer property, recommended (NOT required) during back-compat", () => {
+    // CTL-1214 P2 #2: it must NOT be in `required` during the back-compat window,
+    // so editors/validators don't flag every not-yet-slimmed config as invalid.
     const catalystProps = catalystConfigSchema.properties.catalyst;
-    expect(catalystProps.required).toContain("schemaVersion");
+    expect(catalystProps.required ?? []).not.toContain("schemaVersion");
     expect(catalystProps.properties.schemaVersion.type).toBe("integer");
     expect(catalystProps.properties.schemaVersion.minimum).toBe(1);
+  });
+
+  test("a config WITHOUT schemaVersion still conforms to the schema (back-compat)", () => {
+    const noVersion = minimalLayer1();
+    delete noVersion.catalyst.schemaVersion;
+    expect(validateAgainstSchema(noVersion, catalystConfigSchema)).toEqual([]);
   });
 
   test("the relocated stanzas are still permitted but annotated deprecated", () => {
