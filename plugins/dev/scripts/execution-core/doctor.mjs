@@ -43,6 +43,9 @@ import {
   NODE_CLASSES,
   isDraining,
   getExecutionCoreDir,
+  // CTL-1375: configured-repo discovery for the repo-icon token-scope advisory.
+  getRegistryPath,
+  readClusterConfig,
 } from "./config.mjs";
 import { ownedBy } from "./hrw.mjs";
 import { readPeerHeartbeats } from "./cluster-heartbeat.mjs";
@@ -1601,6 +1604,175 @@ export function checkConfigScopeLeak(deps = {}) {
   return checks;
 }
 
+// ─── CTL-1375: repo-icon token-scope advisory ────────────────────────────────
+
+// _ownerRepoFromRepoRoot — extract "owner/repo" from a repoRoot filesystem path that
+// contains a /github/<owner>/<repo> segment (mirrors monitor-config's registry derivation,
+// e.g. "/Users/x/code-repos/github/groundworkapp/Adva" → "groundworkapp/Adva"). Returns
+// null when there is no such segment.
+function _ownerRepoFromRepoRoot(repoRoot) {
+  if (typeof repoRoot !== "string") return null;
+  const i = repoRoot.indexOf("/github/");
+  if (i === -1) return null;
+  const seg = repoRoot
+    .slice(i + "/github/".length)
+    .split("/")
+    .filter(Boolean);
+  return seg.length >= 2 ? `${seg[0]}/${seg[1]}` : null;
+}
+
+// _isOwnerRepo — a bare "owner/repo" slug (exactly one slash, no whitespace/path).
+function _isOwnerRepo(s) {
+  return typeof s === "string" && /^[^/\s]+\/[^/\s]+$/.test(s.trim());
+}
+
+// defaultConfiguredRepos — the union of "owner/repo" slugs the monitor daemon would resolve
+// favicons for, drawn from the same three sources monitor-config unions: Layer-1
+// .catalyst/config.json monitor.linear.teams[].vcsRepo, the execution-core registry
+// projects[].repoRoot (the override the live daemon actually resolves through), and the
+// cluster.json projects[]. Every read fail-opens to skip; result is de-duped.
+function defaultConfiguredRepos() {
+  const repos = new Set();
+  // 1. Layer-1 monitor.linear.teams[].vcsRepo
+  try {
+    const obj = JSON.parse(readFileSync(layer1Path(), "utf8"));
+    const teams = obj?.catalyst?.monitor?.linear?.teams;
+    if (Array.isArray(teams)) {
+      for (const t of teams) if (_isOwnerRepo(t?.vcsRepo)) repos.add(t.vcsRepo.trim());
+    }
+  } catch {
+    /* absent/malformed Layer-1 → skip */
+  }
+  // 2. execution-core registry projects[].repoRoot (the live daemon's resolved override)
+  try {
+    const reg = JSON.parse(readFileSync(getRegistryPath(), "utf8"));
+    if (Array.isArray(reg?.projects)) {
+      for (const p of reg.projects) {
+        const or = _ownerRepoFromRepoRoot(p?.repoRoot);
+        if (or) repos.add(or);
+      }
+    }
+  } catch {
+    /* absent/malformed registry → skip */
+  }
+  // 3. cluster.json projects[] (vcsRepo slug and/or repoRoot path)
+  try {
+    const cluster = readClusterConfig();
+    if (Array.isArray(cluster?.projects)) {
+      for (const p of cluster.projects) {
+        if (_isOwnerRepo(p?.vcsRepo)) repos.add(p.vcsRepo.trim());
+        const or = _ownerRepoFromRepoRoot(p?.repoRoot);
+        if (or) repos.add(or);
+      }
+    }
+  } catch {
+    /* absent/malformed cluster config → skip */
+  }
+  return [...repos];
+}
+
+// defaultProbeContents — does the effective `gh` token resolve the PRIVATE
+// /repos/<owner>/<repo>/contents endpoint? (the exact endpoint repo-icon-fetcher probes).
+// gh ENOENT → { ghMissing: true } (environmental, skip); else { ok, status }.
+function defaultProbeContents(ownerRepo) {
+  const r = spawnSync("gh", ["api", `/repos/${ownerRepo}/contents`, "--silent"], {
+    timeout: 8000,
+    encoding: "utf8",
+  });
+  if (r.error && r.error.code === "ENOENT") return { ghMissing: true };
+  return { ok: r.status === 0, status: r.status };
+}
+
+// checkRepoIconTokenScope — CTL-1375. ADVISORY ONLY (never FAIL). The orch-monitor daemon
+// auto-detects each configured team's repo favicon by probing /repos/<owner>/<repo>/contents
+// with the effective `gh` token (repo-icon-fetcher.ts). For a PRIVATE repo (e.g.
+// rightsite-cloud/Adva) that probe needs an org-read token; if the daemon's token cannot
+// read it, the fetcher silently falls back to the PUBLIC org AVATAR — the picker then shows
+// the org logo, never the real favicon. This check probes each configured repo and WARNs
+// (never FAILs — runDoctor's exit code = FAIL count and catalyst-join gates activation on
+// exit 0, so a cosmetic favicon must never block a node, same rationale as checkReaper /
+// checkConfigScopeLeak), naming the unreadable repos and telling the operator to provision
+// an org-read GH_TOKEN/GITHUB_TOKEN in the MONITOR DAEMON env. All reads injectable +
+// fail-open; never throws.
+//
+// Injected deps (all have real defaults):
+//   configuredRepos — () => string[]                ("owner/repo" per configured team)
+//   probeContents   — (ownerRepo) => { ok?, status?, ghMissing? }
+export function checkRepoIconTokenScope(deps = {}) {
+  const { configuredRepos = defaultConfiguredRepos, probeContents = defaultProbeContents } = deps;
+  const checks = [];
+
+  let repos;
+  try {
+    repos = configuredRepos();
+  } catch {
+    repos = [];
+  }
+  if (!Array.isArray(repos) || repos.length === 0) {
+    checks.push(
+      mkCheck(
+        "repo-icon-token",
+        STATUS.INFO,
+        "no configured team repos found — repo-icon token scope not checked",
+      ),
+    );
+    return checks;
+  }
+
+  const unreadable = [];
+  try {
+    for (const ownerRepo of repos) {
+      const r = probeContents(ownerRepo);
+      if (r && r.ghMissing) {
+        // gh absent is environmental and the fetcher already fail-opens to the lucide
+        // fallback — an INFO skip, not a token problem.
+        checks.push(
+          mkCheck(
+            "repo-icon-token",
+            STATUS.INFO,
+            "gh CLI not found on PATH — skipping repo-icon token-scope probe (the fetcher fail-opens)",
+          ),
+        );
+        return checks;
+      }
+      if (!r || !r.ok) unreadable.push(ownerRepo);
+    }
+  } catch {
+    checks.push(
+      mkCheck(
+        "repo-icon-token",
+        STATUS.INFO,
+        "repo-icon token-scope probe errored — skipped (advisory only)",
+      ),
+    );
+    return checks;
+  }
+
+  if (unreadable.length === 0) {
+    checks.push(
+      mkCheck(
+        "repo-icon-token",
+        STATUS.PASS,
+        `gh token can read contents of all ${repos.length} configured repo(s) — repo-icon favicon detection works`,
+      ),
+    );
+    return checks;
+  }
+
+  checks.push(
+    mkCheck(
+      "repo-icon-token",
+      STATUS.WARN,
+      `gh token cannot read contents of ${unreadable.join(", ")} (private repo without an ` +
+        `org-read token, or repo moved/renamed) — repo-icon detection falls back to the public ` +
+        `org avatar instead of the real favicon. Provision an org-read GH_TOKEN/GITHUB_TOKEN in ` +
+        `the MONITOR DAEMON environment (launchd plist EnvironmentVariables / the shell that ` +
+        `starts catalyst-monitor.sh), not just your interactive shell.`,
+    ),
+  );
+  return checks;
+}
+
 // ─── CTL-1355: class-aware grading ───────────────────────────────────────────
 
 // checkNodeClass — grade catalyst.node.class itself. An EXPLICIT but unrecognized
@@ -2066,6 +2238,7 @@ export function checksForClass(nc, opts = {}) {
     () => checkCloudTokenEnv(), // CTL-1307: cluster cloud token decrypted → projected to machine-level env (advisory)
     () => checkSdkExecutorAuth(), // CTL-1367 item 9: under executor=sdk, subscription auth must be correct (no api-key metering)
     () => checkConfigScopeLeak(), // CTL-1214: committed Layer-1 .catalyst/config.json must not carry node/cluster scope (roster/orchestration/feedback/sweep/repoColors/hosts.json)
+    () => checkRepoIconTokenScope(), // CTL-1375: monitor daemon's gh token can read configured private repos' contents (else favicons fall back to the org avatar) — advisory (never FAIL)
   ];
 }
 

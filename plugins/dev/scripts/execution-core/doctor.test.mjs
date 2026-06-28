@@ -24,6 +24,7 @@ import {
   checkCloudTokenEnv,
   checkSdkExecutorAuth,
   checkConfigScopeLeak,
+  checkRepoIconTokenScope,
   checkNodeClass,
   checkReadReplicaReachable,
   checkWontOwnWork,
@@ -1686,6 +1687,74 @@ describe("checkDaemonlessLocal (CTL-1355 — folds verify-node --json)", () => {
   });
 });
 
+describe("checkRepoIconTokenScope (CTL-1375)", () => {
+  const verdict = (checks) => checks[0];
+
+  it("INFO-skips when no team repos are configured", () => {
+    const checks = checkRepoIconTokenScope({ configuredRepos: () => [], probeContents: () => ({ ok: true }) });
+    expect(checks).toHaveLength(1);
+    expect(verdict(checks).name).toBe("repo-icon-token");
+    expect(verdict(checks).status).toBe(STATUS.INFO);
+    expect(verdict(checks).detail).toContain("no configured team repos");
+  });
+
+  it("PASSes when the token can read every configured repo's contents", () => {
+    const probed = [];
+    const checks = checkRepoIconTokenScope({
+      configuredRepos: () => ["coalesce-labs/catalyst", "rightsite-cloud/Adva"],
+      probeContents: (r) => (probed.push(r), { ok: true, status: 0 }),
+    });
+    expect(probed).toEqual(["coalesce-labs/catalyst", "rightsite-cloud/Adva"]);
+    expect(verdict(checks).status).toBe(STATUS.PASS);
+    expect(verdict(checks).detail).toContain("2 configured repo");
+  });
+
+  it("WARNs (never FAIL) naming the unreadable repo + the daemon-env remediation", () => {
+    const checks = checkRepoIconTokenScope({
+      configuredRepos: () => ["coalesce-labs/catalyst", "rightsite-cloud/Adva"],
+      probeContents: (r) => ({ ok: r === "coalesce-labs/catalyst", status: r === "coalesce-labs/catalyst" ? 0 : 404 }),
+    });
+    expect(verdict(checks).status).toBe(STATUS.WARN);
+    expect(verdict(checks).detail).toContain("rightsite-cloud/Adva");
+    expect(verdict(checks).detail).not.toContain("coalesce-labs/catalyst"); // only the unreadable one
+    expect(verdict(checks).detail).toContain("org-read");
+    expect(verdict(checks).detail).toContain("MONITOR DAEMON");
+  });
+
+  it("INFO-skips when gh is missing (environmental — the fetcher fail-opens)", () => {
+    const checks = checkRepoIconTokenScope({
+      configuredRepos: () => ["coalesce-labs/catalyst"],
+      probeContents: () => ({ ghMissing: true }),
+    });
+    expect(verdict(checks).status).toBe(STATUS.INFO);
+    expect(verdict(checks).detail).toContain("gh CLI not found");
+  });
+
+  it("never throws / never FAILs — a throwing probe degrades to a single INFO", () => {
+    const checks = checkRepoIconTokenScope({
+      configuredRepos: () => ["coalesce-labs/catalyst"],
+      probeContents: () => {
+        throw new Error("boom");
+      },
+    });
+    expect(checks).toHaveLength(1);
+    expect(verdict(checks).status).toBe(STATUS.INFO);
+  });
+
+  it("never yields STATUS.FAIL across any of the above (must not gate catalyst-join)", () => {
+    const scenarios = [
+      { configuredRepos: () => [], probeContents: () => ({ ok: true }) },
+      { configuredRepos: () => ["a/b"], probeContents: () => ({ ok: true }) },
+      { configuredRepos: () => ["a/b"], probeContents: () => ({ ok: false, status: 404 }) },
+      { configuredRepos: () => ["a/b"], probeContents: () => ({ ghMissing: true }) },
+      { configuredRepos: () => { throw new Error("x"); } },
+    ];
+    for (const deps of scenarios) {
+      for (const c of checkRepoIconTokenScope(deps)) expect(c.status).not.toBe(STATUS.FAIL);
+    }
+  });
+});
+
 describe("checksForClass — suite selection (CTL-1355)", () => {
   // Each suite is an array of THUNKS; .toString() reveals which check each calls.
   const src = (nc, opts = {}) => checksForClass(nc, opts).map((f) => f.toString()).join("\n");
@@ -1708,6 +1777,7 @@ describe("checksForClass — suite selection (CTL-1355)", () => {
     expect(s).toContain("checkThoughts()");
     expect(s).toContain("checkSdkExecutorAuth()");
     expect(s).toContain("checkConfigScopeLeak()");
+    expect(s).toContain("checkRepoIconTokenScope()"); // CTL-1375: monitor-serving class
     expect(s).toContain("checkHrwPartition()"); // would-own visibility
   });
 
@@ -1733,6 +1803,9 @@ describe("checksForClass — suite selection (CTL-1355)", () => {
     expect(s).not.toContain("checkWebhookIngestion()");
     expect(s).not.toContain("checkThoughts()");
     expect(s).not.toContain("checkSdkExecutorAuth()");
+    // CTL-1375: repo-icon token scope is a monitor-SERVING (worker) concern — a developer
+    // reads icons via the remote read-replica, not by probing repos locally.
+    expect(s).not.toContain("checkRepoIconTokenScope()");
     // P2: checkClaudeSettings is a worker-cluster-MEMBER concern — a developer client
     // (deliberately out of a multi-host roster) must not be graded against it.
     expect(s).not.toContain("checkClaudeSettings()");
