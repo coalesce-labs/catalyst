@@ -1,5 +1,5 @@
 // preload-recovery.test.ts — CTL-1374. Unit-tests the vite:preloadError self-recovery
-// without jsdom by injecting a fake window + a controllable clock.
+// without jsdom by injecting a fake window (storage + location.href + history) and a clock.
 import { describe, it, expect } from "bun:test";
 import {
   installPreloadRecovery,
@@ -17,17 +17,19 @@ interface FakeWin {
   /** the handler installPreloadRecovery registered (defaults to a no-op until install) */
   handler: (ev: Event) => void;
   reloads: () => number;
+  /** the current URL (so a test can carry it across a simulated reload) */
+  href: () => string;
 }
 
 // Build a fake window. `storage` controls the seam: a Map (default), `null` (absent), or a
-// thrower (private mode). `navType` injects a Navigation Timing stub — "reload" marks the
-// current load as a reload (guard #3), "navigate" a fresh load; undefined omits `performance`
-// entirely (currentLoadWasReload → false).
+// thrower (private mode). `href` seeds the initial URL (so a test can replay a reload that
+// carried the recovery marker). history.replaceState mutates the URL in place (no navigation).
 function makeWin(
   storage: "map" | "none" | "throws" = "map",
-  navType?: "reload" | "navigate",
+  opts: { href?: string } = {},
 ): FakeWin {
   let reloads = 0;
+  let href = opts.href ?? "https://monitor.test/board";
   const map = new Map<string, string>();
   const sessionStorage =
     storage === "none"
@@ -53,15 +55,23 @@ function makeWin(
         if (type === "vite:preloadError") ref.handler = listener;
       },
       location: {
+        get href() {
+          return href;
+        },
         reload: () => {
           reloads++;
         },
       },
+      history: {
+        replaceState: (_data, _unused, url) => {
+          href = new URL(url, href).href;
+        },
+      },
       sessionStorage,
-      ...(navType ? { performance: { getEntriesByType: () => [{ type: navType }] } } : {}),
     },
     handler: NOOP,
     reloads: () => reloads,
+    href: () => href,
   };
   return ref;
 }
@@ -97,15 +107,6 @@ describe("installPreloadRecovery (CTL-1374)", () => {
     expect(prevented).toBe(0); // default NOT prevented → the chunk error can surface
   });
 
-  it("does NOT preventDefault when guard #3 suppresses a reload load (blocked storage)", () => {
-    const f = makeWin("throws", "reload");
-    installPreloadRecovery(f.win, () => START);
-    let prevented = 0;
-    f.handler(fakeEvent(() => prevented++));
-    expect(f.reloads()).toBe(0);
-    expect(prevented).toBe(0);
-  });
-
   it("reloads again once the guard window has elapsed (multi-redeploy recovery)", () => {
     const f = makeWin();
     let now = START;
@@ -127,12 +128,9 @@ describe("installPreloadRecovery (CTL-1374)", () => {
     const f = makeWin("throws");
     installPreloadRecovery(f.win, () => START);
     expect(() => f.handler(fakeEvent())).not.toThrow();
-    expect(f.reloads()).toBe(1); // getItem throwing → treated as never-reloaded → reloads
+    expect(f.reloads()).toBe(1);
   });
 
-  // CTL-1374, Codex P2: with blocked storage the persisted timestamp is lost, so without an
-  // in-memory fallback a persistently-404ing chunk would reload-loop. The in-memory guard
-  // keeps the one-per-window rule holding within the page load.
   it("with throwing sessionStorage, the in-memory fallback still enforces the guard within the window", () => {
     const f = makeWin("throws");
     installPreloadRecovery(f.win, () => START);
@@ -141,68 +139,67 @@ describe("installPreloadRecovery (CTL-1374)", () => {
     expect(f.reloads()).toBe(1);
   });
 
-  it("with throwing sessionStorage, it reloads again only after the window elapses", () => {
-    const f = makeWin("throws");
-    let now = START;
-    installPreloadRecovery(f.win, () => now);
-    f.handler(fakeEvent());
-    now = START + RELOAD_WINDOW_MS + 1;
-    f.handler(fakeEvent());
-    expect(f.reloads()).toBe(2);
-  });
+  // ── URL-marker cross-reload guard (Codex P2 re-review #1/#3/#4) ───────────────────────
+  // The in-memory timestamp is wiped by the reload, so the cross-reload loop guard rides a
+  // URL marker we set right before reloading and adopt+strip on the next load. It is set
+  // ONLY by us, so a tab the user opened via the browser Reload button is not mistaken for
+  // our reload (that was the bug with the Navigation Timing approach).
 
-  // CTL-1374, Codex P2 (re-review): the closure timestamp is wiped by location.reload(), so
-  // with blocked storage a still-missing chunk would reload-loop ACROSS reloads. Guard #3
-  // (navigation-type) breaks it: when there's no persisted timestamp AND this load is itself
-  // a reload, suppress.
-  it("blocked storage + current load IS a reload → suppresses (storage-free loop breaker)", () => {
-    const f = makeWin("throws", "reload");
+  it("writes the recovery marker to the URL before reloading", () => {
+    const f = makeWin();
     installPreloadRecovery(f.win, () => START);
     f.handler(fakeEvent());
-    expect(f.reloads()).toBe(0); // we've already auto-reloaded once → don't loop
+    expect(f.href()).toContain(`__catalyst_plr=${START}`);
   });
 
-  it("blocked storage + fresh (navigate) load → still reloads on the first error", () => {
-    const f = makeWin("throws", "navigate");
+  it("adopts the URL marker on the next load and STRIPS it (router never sees it)", () => {
+    // Simulate a load that arrived via a recovery reload (marker present in the URL).
+    const seeded = `https://monitor.test/board?__catalyst_plr=${START}`;
+    const f = makeWin("map", { href: seeded });
     installPreloadRecovery(f.win, () => START);
-    f.handler(fakeEvent());
-    expect(f.reloads()).toBe(1);
-  });
-
-  it("supports the legacy performance.navigation.type === 1 (reload) loop breaker", () => {
-    let reloads = 0;
-    let handler: (ev: Event) => void = NOOP;
-    const win: PreloadRecoveryWindow = {
-      addEventListener: (type, listener) => {
-        if (type === "vite:preloadError") handler = listener;
-      },
-      location: { reload: () => { reloads++; } },
-      sessionStorage: {
-        getItem: () => { throw new Error("blocked"); },
-        setItem: () => { throw new Error("blocked"); },
-      },
-      performance: { navigation: { type: 1 } }, // legacy TYPE_RELOAD, no getEntriesByType
-    };
-    installPreloadRecovery(win, () => START);
-    handler(fakeEvent());
-    expect(reloads).toBe(0);
-  });
-
-  it("a reload load with no recorded reload suppresses (manual reload defers to the banner), even with working storage", () => {
-    // A page that LOADED via reload (manual Cmd-R or our own) with no persisted timestamp
-    // yet → guard #3 suppresses an immediate auto-reload regardless of storage working. This
-    // is intentional: re-reloading right after a reload that didn't fix the chunk would loop;
-    // the manual "Reload" banner (CTL-1373) stays the escape hatch.
-    const f = makeWin("map", "reload");
-    installPreloadRecovery(f.win, () => START);
+    expect(f.href()).not.toContain("__catalyst_plr"); // stripped on adopt, before render
+    // …and the adopted marker suppresses an immediate re-error within the window.
     f.handler(fakeEvent());
     expect(f.reloads()).toBe(0);
   });
 
-  it("a fresh (navigate) load with working storage reloads normally", () => {
-    const f = makeWin("map", "navigate");
+  it("the marker survives a simulated reload and breaks the loop even with BLOCKED storage", () => {
+    // 1st page load, storage blocked: the error reloads and stamps the URL marker.
+    const f1 = makeWin("throws");
+    installPreloadRecovery(f1.win, () => START);
+    f1.handler(fakeEvent());
+    expect(f1.reloads()).toBe(1);
+    const urlAfterReload = f1.href();
+    expect(urlAfterReload).toContain("__catalyst_plr=");
+
+    // 2nd load lands on that URL (still blocked storage): the adopted marker suppresses the
+    // immediate re-error → no cross-reload loop.
+    const f2 = makeWin("throws", { href: urlAfterReload });
+    installPreloadRecovery(f2.win, () => START);
+    f2.handler(fakeEvent());
+    expect(f2.reloads()).toBe(0);
+  });
+
+  it("a tab loaded via the browser Reload button (no marker) STILL recovers on a later redeploy", () => {
+    // The regression the Navigation Timing approach caused: a reload-loaded tab must still
+    // self-recover. With the marker-only signal it does, because we never set the marker.
+    const f = makeWin("map", { href: "https://monitor.test/board" }); // no marker
     installPreloadRecovery(f.win, () => START);
     f.handler(fakeEvent());
     expect(f.reloads()).toBe(1);
+  });
+
+  it("after the window elapses, a blocked-storage session reloads again (paced, not stormed)", () => {
+    const f1 = makeWin("throws");
+    let now = START;
+    installPreloadRecovery(f1.win, () => now);
+    f1.handler(fakeEvent());
+    const url = f1.href();
+
+    const f2 = makeWin("throws", { href: url });
+    now = START + RELOAD_WINDOW_MS + 1;
+    installPreloadRecovery(f2.win, () => now);
+    f2.handler(fakeEvent());
+    expect(f2.reloads()).toBe(1); // window elapsed → one more paced reload
   });
 });

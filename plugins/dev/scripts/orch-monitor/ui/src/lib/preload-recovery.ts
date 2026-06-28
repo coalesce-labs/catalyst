@@ -5,101 +5,103 @@
 // lazy chunks and the surface goes permanently blank.
 //
 // Vite fires a `vite:preloadError` event on `window` when a dynamic import's preload
-// fails. We suppress the resulting unhandled rejection and reload ONCE to pick up the
-// fresh chunk graph — index.html is served `no-cache` (server.ts, CTL-1374), so the reload
-// lands on the current build, not a stale shell.
+// fails. On the recovery branch we suppress the resulting unhandled rejection and reload to
+// pick up the fresh chunk graph — index.html is served `no-cache` (server.ts, CTL-1374), so
+// the reload lands on the current build.
 //
-// Reload-storm guards (a persistently-missing chunk — offline / a bad deploy — must not
-// loop the page):
-//   1. PRIMARY — a sessionStorage timestamp, one reload per RELOAD_WINDOW_MS. It survives
-//      the reload, so it bounds reloads across page loads when storage is available.
-//   2. In-memory fallback — a closure-scoped timestamp (one per page load) keeps the guard
-//      holding WITHIN a load when storage can't be written (it can't survive the reload).
-//   3. Navigation-type loop breaker — when NO persisted timestamp is available (storage
-//      blocked → last===0) and THIS page load is itself a reload, we've almost certainly
-//      already auto-reloaded once for a still-missing chunk, so we suppress instead of
-//      looping. This is the storage-free cross-reload guard (no URL/cookie pollution). The
-//      manual "Reload" banner (CTL-1373) remains the user's escape hatch.
+// Reload-storm guards (a persistently-missing chunk — offline / a bad deploy — must not loop
+// the page) — the "last reload time" is taken as the max of three sources:
+//   1. sessionStorage — survives the reload; the primary guard when storage works.
+//   2. A closure in-memory timestamp — bounds reloads WITHIN a page load (storage can't be
+//      written in private mode, and it can't survive the reload anyway).
+//   3. A URL marker (`__catalyst_plr=<ts>`) we set right before reloading and ADOPT + STRIP
+//      on the next load — the storage-FREE cross-reload guard. It is set ONLY by us, so
+//      (unlike the Navigation Timing `type==="reload"` signal) a tab the user opened via the
+//      browser Reload button is NOT mistaken for our own reload, and recovery still runs for
+//      it. The marker is stripped before React renders, so the router never sees it and it
+//      doesn't linger in the address bar.
+//
+// preventDefault() is called ONLY on the reload branch: it stops Vite re-throwing the import
+// failure, so on a SUPPRESSED error we let it propagate to the router's retry UI / an error
+// boundary instead of silently swallowing a genuinely-broken chunk.
 //
 // DOM-light by construction: `win` + `now` are injectable so the logic is unit-testable
 // without jsdom, and main.tsx stays a one-line side-effect call.
 
 const RELOAD_KEY = "catalyst:preload-reload";
+const RELOAD_PARAM = "__catalyst_plr";
 
-/** Max one recovery reload per this window (ms), keyed in sessionStorage. */
+/** Max one recovery reload per this window (ms). */
 export const RELOAD_WINDOW_MS = 10_000;
 
 /** The slice of `window` this module touches — kept minimal so tests can fake it. */
 export interface PreloadRecoveryWindow {
   addEventListener(type: string, listener: (ev: Event) => void): void;
-  location: { reload: () => void };
+  location: { href: string; reload: () => void };
+  history?: { replaceState(data: unknown, unused: string, url: string): void };
   sessionStorage?: Pick<Storage, "getItem" | "setItem">;
-  // Method syntax (bivariant params) + ReadonlyArray so the real `window.performance`
-  // (whose getEntriesByType returns PerformanceEntryList) structurally satisfies this.
-  performance?: {
-    // `name` is included only to share a property with the real PerformanceEntry (dodges
-    // TS's weak-type check); we read `.type` (present on PerformanceNavigationTiming).
-    getEntriesByType?(type: string): ReadonlyArray<{ readonly name?: string; readonly type?: string }>;
-    // legacy fallback (deprecated PerformanceNavigation.type === 1 means TYPE_RELOAD)
-    navigation?: { readonly type?: number };
-  };
 }
 
-/** Was the current page load itself a reload? (Navigation Timing API, with the legacy
- *  fallback.) Used as a storage-free loop breaker. Never throws → false on any uncertainty. */
-function currentLoadWasReload(win: PreloadRecoveryWindow): boolean {
+/** Parse the `RELOAD_PARAM` timestamp out of a URL string; 0 when absent/malformed. */
+function markerTs(href: string): number {
   try {
-    const entries = win.performance?.getEntriesByType?.("navigation");
-    const navType = entries && entries.length > 0 ? entries[0]?.type : undefined;
-    if (typeof navType === "string") return navType === "reload";
-    return win.performance?.navigation?.type === 1; // legacy TYPE_RELOAD
+    return Number(new URL(href).searchParams.get(RELOAD_PARAM) ?? 0) || 0;
   } catch {
-    return false;
+    return 0;
+  }
+}
+
+/** Write the URL marker (or strip it when `ts` is 0) via history.replaceState — no navigation. */
+function writeMarker(win: PreloadRecoveryWindow, ts: number): void {
+  try {
+    const url = new URL(win.location.href);
+    if (ts > 0) url.searchParams.set(RELOAD_PARAM, String(ts));
+    else url.searchParams.delete(RELOAD_PARAM);
+    win.history?.replaceState(null, "", url.pathname + url.search + url.hash);
+  } catch {
+    /* no history / malformed URL → fall back to storage + in-memory only */
   }
 }
 
 /**
  * Register the `vite:preloadError` self-recovery handler. Idempotent in practice because
- * main.tsx calls it once at module scope. Never throws — storage access is wrapped so a
- * disabled/again-throwing sessionStorage (private mode) degrades gracefully.
+ * main.tsx calls it once at module scope (before render). Never throws.
  */
 export function installPreloadRecovery(
   win: PreloadRecoveryWindow = window,
   now: () => number = () => Date.now(),
 ): void {
-  // Closure-scoped in-memory fallback (one per page load) — see guard #2 above.
-  let memLast = 0;
+  // Adopt a recovery marker that rode the reload in the URL as the last-reload time, then
+  // STRIP it immediately — install runs before React renders, so the router never sees it and
+  // it doesn't linger. This is what makes the guard survive a reload even without storage.
+  let memLast = markerTs(win.location.href);
+  if (memLast > 0) writeMarker(win, 0);
 
   win.addEventListener("vite:preloadError", (ev: Event) => {
-    // Last reload = the most recent we know about, from storage OR the in-memory fallback.
     let last = memLast;
     try {
       const stored = Number(win.sessionStorage?.getItem(RELOAD_KEY) ?? 0) || 0;
       if (stored > last) last = stored;
     } catch {
-      /* storage blocked → rely on the in-memory + navigation-type guards */
+      /* storage blocked → memLast (incl. the adopted URL marker) is the fallback */
     }
 
     const t = now();
-    // Guard #1/#2: `last === 0` is the never-reloaded sentinel (Date.now() is never 0), so
-    // always recover on the first error; otherwise only once the window has elapsed.
-    // Guard #3: with no persisted timestamp (storage blocked) AND this load is itself a
-    // reload, we've already auto-reloaded once for a still-missing chunk → don't loop.
-    // In BOTH suppressed cases we deliberately DON'T call preventDefault — `preventDefault()`
-    // stops Vite from re-throwing the import failure, so swallowing it here would hide a
-    // genuinely-broken chunk from the router's retry UI / an error boundary. Only the reload
-    // branch (the actual recovery) suppresses the default.
+    // `last === 0` is the never-reloaded sentinel (Date.now() is never 0), so always recover
+    // on the first error; otherwise only once the window has elapsed. On the SUPPRESSED path
+    // we deliberately do NOT preventDefault, so a genuinely-broken chunk still surfaces to the
+    // router retry UI / an error boundary instead of being silently swallowed.
     if (last !== 0 && t - last < RELOAD_WINDOW_MS) return;
-    if (last === 0 && currentLoadWasReload(win)) return;
 
-    // We are recovering by reload, so suppress Vite's default unhandled-rejection surfacing.
+    // Recovering by reload → suppress Vite's default unhandled-rejection surfacing.
     ev.preventDefault?.();
-    memLast = t; // record in memory first — survives a failed storage write
+    memLast = t;
     try {
       win.sessionStorage?.setItem(RELOAD_KEY, String(t));
     } catch {
-      /* best-effort — the in-memory + navigation-type guards still bound reloads */
+      /* best-effort — the URL marker + in-memory copy still bound reloads */
     }
+    writeMarker(win, t); // carry the reload time across the reload, storage-free
     win.location.reload();
   });
 }
