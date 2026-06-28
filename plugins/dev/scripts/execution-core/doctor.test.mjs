@@ -1722,6 +1722,27 @@ describe("defaultConfiguredRepos — mirrors the monitor's repoOwners resolution
     expect(repos).not.toContain("coalesce-labs/adva");
   });
 
+  it("cluster rename to a DIFFERENT basename replaces the stale Layer-1 slug BY TEAM KEY (Codex P3 #2)", () => {
+    const repos = defaultConfiguredRepos({
+      readLayer1: () => layer1([{ key: "ADV", vcsRepo: "old-org/old-name" }]),
+      readCluster: () => ({ projects: [{ teamKey: "ADV", vcsRepo: "new-org/new-name" }] }),
+      readRegistry: boom,
+    });
+    expect(repos).toContain("new-org/new-name");
+    // deduped by team key (not basename) → the stale slug is REPLACED, never probed.
+    expect(repos).not.toContain("old-org/old-name");
+  });
+
+  it("reads a bare { monitor: { linear: { teams } } } Layer-1 shape, no catalyst wrapper (Codex P3 #3)", () => {
+    const repos = defaultConfiguredRepos({
+      readLayer1: () =>
+        JSON.stringify({ monitor: { linear: { teams: [{ key: "CTL", vcsRepo: "coalesce-labs/catalyst" }] } } }),
+      readCluster: () => null,
+      readRegistry: boom,
+    });
+    expect(repos).toEqual(["coalesce-labs/catalyst"]);
+  });
+
   it("returns the Layer-1 set when there is no cluster/registry override", () => {
     const repos = defaultConfiguredRepos({
       readLayer1: () => layer1([{ key: "CTL", vcsRepo: "coalesce-labs/catalyst" }]),

@@ -1627,24 +1627,33 @@ function _isOwnerRepo(s) {
 }
 
 // resolveDoctorLayer1Path — mirror monitor-config's resolveLayer1ConfigPath (CTL-1375,
-// Codex P2 #3) so the check reads the SAME Layer-1 roster the running monitor resolves:
-// honor the CATALYST_CONFIG_FILE / CATALYST_CONFIG_PATH env pointers the daemon/deploy sets
-// before falling back to the plugin-repo config — instead of hardcoding the Catalyst
-// checkout's teams, which a daemon-spawned / multi-project monitor would not be using.
+// Codex P2 #3 / P3 #1) so the check reads the SAME Layer-1 roster the running monitor
+// resolves: honor the CATALYST_CONFIG_FILE / CATALYST_CONFIG_PATH env pointers the
+// daemon/deploy sets, then fall back to ${cwd}/.catalyst/config.json EXACTLY like the
+// monitor (not the plugin-repo config) — so an interactive `catalyst doctor` from a project
+// repo checks that repo's roster, not Catalyst's checked-in teams.
 function resolveDoctorLayer1Path() {
-  return process.env.CATALYST_CONFIG_FILE || process.env.CATALYST_CONFIG_PATH || layer1Path();
+  return (
+    process.env.CATALYST_CONFIG_FILE ||
+    process.env.CATALYST_CONFIG_PATH ||
+    resolve(process.cwd(), ".catalyst", "config.json")
+  );
 }
 
 // defaultConfiguredRepos — the "owner/repo" slugs the monitor daemon ACTUALLY resolves
-// favicons for. Mirrors monitor-config's loadMonitorConfig repoOwners EXACTLY (CTL-1375,
-// Codex P2 #1/#3): build a short-name → owner/repo map where Layer-1
-// monitor.linear.teams[].vcsRepo is the base, cluster.json projects[] {teamKey,vcsRepo}
-// override, and the execution-core registry's repoRoot OVERRIDES on top — keyed by the repo
-// short-name. So a stale committed Layer-1 vcsRepo (e.g. ADV → coalesce-labs/adva, a dead
-// 404) is REPLACED by the registry's real slug for that short-name, never additionally
-// probed. Returns the resolved values (the daemon's set), NOT a union of every source — so
-// the check never WARNs about a repo the monitor doesn't use. IO is injectable for tests;
-// every read fail-opens.
+// favicons for. Mirrors monitor-config's loadMonitorConfig repoOwners FAITHFULLY (CTL-1375,
+// Codex P2 #1/#3 + P3 #1/#2/#3):
+//   • Build a team-key → owner/repo map first — Layer-1 monitor.linear.teams[] as the base,
+//     cluster.json projects[] {teamKey,vcsRepo} overriding BY TEAM KEY (P3 #2: mirrors
+//     readClusterProjects, so a cluster rename ADV→new-org/new-name REPLACES the stale
+//     Layer-1 slug even when the basename differs, instead of probing both).
+//   • Derive a short-name → owner/repo map from that, then the execution-core registry's
+//     repoRoot OVERRIDES on top BY SHORT NAME (the live daemon's final override).
+//   • Read Layer-1 teams from `(obj.catalyst ?? obj).monitor.linear.teams` so the bare
+//     `{ monitor: { linear: { teams } } }` shape works too (P3 #3, mirrors readLayer1Teams).
+// Returns the resolved values (the daemon's set), NOT a union of every source — so the
+// check never WARNs about a repo the monitor doesn't use. IO is injectable for tests; every
+// read fail-opens.
 export function defaultConfiguredRepos(io = {}) {
   const {
     readLayer1 = () => readFileSync(resolveDoctorLayer1Path(), "utf8"),
@@ -1652,35 +1661,46 @@ export function defaultConfiguredRepos(io = {}) {
     readRegistry = () => readFileSync(getRegistryPath(), "utf8"),
   } = io;
 
-  // short-name(lowercased) → owner/repo; later sources override earlier (registry wins),
-  // exactly as loadMonitorConfig keys repoOwners by shortName.toLowerCase().
-  const byShort = new Map();
-  const addSlug = (slug) => {
-    if (!_isOwnerRepo(slug)) return;
-    const short = slug.trim().split("/").at(-1)?.toLowerCase();
-    if (short) byShort.set(short, slug.trim());
+  // team-key(UPPERCASED) → owner/repo: Layer-1 base, cluster overrides by team key
+  // (mirrors readClusterProjects' byKey dedup, cluster wins).
+  const byTeam = new Map();
+  const setTeam = (key, slug) => {
+    if (!_isOwnerRepo(slug) || key == null || String(key).trim() === "") return;
+    byTeam.set(String(key).trim().toUpperCase(), slug.trim());
   };
 
-  // 1. Layer-1 monitor.linear.teams[].vcsRepo (base / back-compat fallback)
+  // 1. Layer-1 monitor.linear.teams[] — bare {monitor…} OR {catalyst:{monitor…}} (P3 #3).
   try {
     const obj = JSON.parse(readLayer1());
-    const teams = obj?.catalyst?.monitor?.linear?.teams;
-    if (Array.isArray(teams)) for (const t of teams) addSlug(t?.vcsRepo);
+    const teams = (obj?.catalyst ?? obj)?.monitor?.linear?.teams;
+    if (Array.isArray(teams)) for (const t of teams) setTeam(t?.key, t?.vcsRepo);
   } catch {
     /* absent/malformed Layer-1 → skip */
   }
-  // 2. cluster.json projects[] {teamKey, vcsRepo} (override)
+  // 2. cluster.json projects[] {teamKey, vcsRepo} — override by team key (P3 #2).
   try {
     const cluster = readCluster();
-    if (Array.isArray(cluster?.projects)) for (const p of cluster.projects) addSlug(p?.vcsRepo);
+    if (Array.isArray(cluster?.projects)) for (const p of cluster.projects) setTeam(p?.teamKey, p?.vcsRepo);
   } catch {
     /* absent/malformed cluster config → skip */
   }
-  // 3. execution-core registry projects[].repoRoot (the live override — WINS, by short-name)
+
+  // short-name(lowercased) → owner/repo, derived from the team-resolved set; then the
+  // registry OVERRIDES by short-name, exactly as loadMonitorConfig keys repoOwners.
+  const byShort = new Map();
+  const setShort = (slug) => {
+    const short = slug.split("/").at(-1)?.toLowerCase();
+    if (short) byShort.set(short, slug);
+  };
+  for (const slug of byTeam.values()) setShort(slug);
+  // 3. execution-core registry projects[].repoRoot (the live override — WINS, by short-name).
   try {
     const reg = JSON.parse(readRegistry());
     if (Array.isArray(reg?.projects)) {
-      for (const p of reg.projects) addSlug(_ownerRepoFromRepoRoot(p?.repoRoot));
+      for (const p of reg.projects) {
+        const slug = _ownerRepoFromRepoRoot(p?.repoRoot);
+        if (slug) setShort(slug);
+      }
     }
   } catch {
     /* absent/malformed registry → skip */
