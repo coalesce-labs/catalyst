@@ -102,4 +102,25 @@ describe("installPreloadRecovery (CTL-1374)", () => {
     expect(() => f.handler(fakeEvent())).not.toThrow();
     expect(f.reloads()).toBe(1); // getItem throwing → treated as never-reloaded → reloads
   });
+
+  // CTL-1374, Codex P2: with blocked storage the persisted timestamp is lost, so without an
+  // in-memory fallback a persistently-404ing chunk would reload-loop. The in-memory guard
+  // keeps the one-per-window rule holding within the page load.
+  it("with throwing sessionStorage, the in-memory fallback still enforces the guard within the window", () => {
+    const f = makeWin("throws");
+    installPreloadRecovery(f.win, () => START);
+    f.handler(fakeEvent()); // first → reloads, records the timestamp in memory
+    f.handler(fakeEvent()); // second, same instant → in-memory guard blocks the reload-storm
+    expect(f.reloads()).toBe(1);
+  });
+
+  it("with throwing sessionStorage, it reloads again only after the window elapses", () => {
+    const f = makeWin("throws");
+    let now = START;
+    installPreloadRecovery(f.win, () => now);
+    f.handler(fakeEvent());
+    now = START + RELOAD_WINDOW_MS + 1;
+    f.handler(fakeEvent());
+    expect(f.reloads()).toBe(2);
+  });
 });

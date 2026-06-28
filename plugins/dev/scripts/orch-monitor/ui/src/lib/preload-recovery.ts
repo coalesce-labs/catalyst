@@ -36,15 +36,24 @@ export function installPreloadRecovery(
   win: PreloadRecoveryWindow = window,
   now: () => number = () => Date.now(),
 ): void {
+  // In-memory fallback timestamp (closure-scoped → one per page load). sessionStorage is the
+  // PRIMARY guard because it survives the reload; but when Web Storage is blocked/throws
+  // (private mode), the write is lost and every subsequent error would see last=0 and reload
+  // again — a reload-storm. This in-memory copy keeps the one-per-window guard holding WITHIN
+  // a page load even when storage can't be written.
+  let memLast = 0;
+
   win.addEventListener("vite:preloadError", (ev: Event) => {
     // We handle recovery here, so stop Vite's default unhandled-rejection surfacing.
     ev.preventDefault?.();
 
-    let last = 0;
+    // Last reload = the most recent we know about, from storage OR the in-memory fallback.
+    let last = memLast;
     try {
-      last = Number(win.sessionStorage?.getItem(RELOAD_KEY) ?? 0) || 0;
+      const stored = Number(win.sessionStorage?.getItem(RELOAD_KEY) ?? 0) || 0;
+      if (stored > last) last = stored;
     } catch {
-      last = 0; // storage threw (private mode / disabled) → treat as never-reloaded
+      /* storage blocked → rely on the in-memory fallback */
     }
 
     const t = now();
@@ -52,10 +61,11 @@ export function installPreloadRecovery(
     // on the first error; otherwise only once the window has elapsed (don't reload-storm).
     if (last !== 0 && t - last < RELOAD_WINDOW_MS) return;
 
+    memLast = t; // record in memory first — survives a failed storage write
     try {
       win.sessionStorage?.setItem(RELOAD_KEY, String(t));
     } catch {
-      /* best-effort — a failed write just means the next error may reload again */
+      /* best-effort — the in-memory fallback still enforces the guard this page load */
     }
     win.location.reload();
   });
