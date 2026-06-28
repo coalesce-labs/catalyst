@@ -1,5 +1,22 @@
 # Changelog
 
+## [12.18.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.17.0...catalyst-dev-v12.18.0) (2026-06-28)
+
+
+### Features
+
+* **dev:** CTL-1369 (1/n) — top-level `catalyst` CLI router + catalyst.install.* telemetry contract ([#2429](https://github.com/coalesce-labs/catalyst/issues/2429)) ([3734d01](https://github.com/coalesce-labs/catalyst/commit/3734d01fc3de44e52c17320ae08b9dbe12d841a2))
+* **dev:** CTL-1369 (2/n) — catalyst-backup: capture/restore a node's restorable state ([#2446](https://github.com/coalesce-labs/catalyst/issues/2446)) ([76e1266](https://github.com/coalesce-labs/catalyst/commit/76e1266fc0eba9672fe4aa81a1d8df724a0888ac))
+* **dev:** CTL-1371 — deterministic PR→Linear state reconciler (no native automation) ([#2431](https://github.com/coalesce-labs/catalyst/issues/2431)) ([70feab0](https://github.com/coalesce-labs/catalyst/commit/70feab0f4fb0cfa4265ebda8ec8557a402f68e68))
+
+
+### Bug Fixes
+
+* **dev:** CTL-1370 — icon-picker manifest load self-heals after a transient chunk failure ([#2428](https://github.com/coalesce-labs/catalyst/issues/2428)) ([88f26e5](https://github.com/coalesce-labs/catalyst/commit/88f26e52175df326f981f435c360b81f78939024))
+* **dev:** CTL-1371 — make the reconcile timer multi-team/fleet-functional ([#2443](https://github.com/coalesce-labs/catalyst/issues/2443)) ([7adecc6](https://github.com/coalesce-labs/catalyst/commit/7adecc65b489f847a2b75e249b74201725fb9ae2))
+* **dev:** CTL-1372 — bound orch-monitor renderer memory growth on long sessions ([#2434](https://github.com/coalesce-labs/catalyst/issues/2434)) ([1a8fd3e](https://github.com/coalesce-labs/catalyst/commit/1a8fd3eb6e941fc145ac1880b58ddc4e288beefb))
+* **dev:** CTL-1373 — icon-picker Reload hard-recovers the PWA (unregister SW + clear caches) ([#2441](https://github.com/coalesce-labs/catalyst/issues/2441)) ([6bf17cb](https://github.com/coalesce-labs/catalyst/commit/6bf17cb9d6a7d70673d2e7064ebbb013c54ce44b))
+
 ## [12.17.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.16.0...catalyst-dev-v12.17.0) (2026-06-27)
 
 <!-- ai-enhanced -->
