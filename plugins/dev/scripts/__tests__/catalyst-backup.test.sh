@@ -21,7 +21,9 @@ expect_eq()       { if [[ "$2" == "$3" ]]; then ok "$1"; else fail "$1" "expecte
 expect_contains() { if [[ "$2" == *"$3"* ]]; then ok "$1"; else fail "$1" "'$2' lacks '$3'"; fi; }
 expect_file()     { if [[ -f "$2" ]]; then ok "$1"; else fail "$1" "missing file: $2"; fi; }
 expect_absent()   { if [[ ! -e "$2" ]]; then ok "$1"; else fail "$1" "should not exist: $2"; fi; }
-perms() { stat -f '%Lp' "$1" 2>/dev/null || stat -c '%a' "$1" 2>/dev/null; }
+# GNU stat uses `-c %a`; BSD/macOS stat uses `-f %Lp`. Try GNU first (on BSD `-c` errors out;
+# on GNU `-f` means file-system status and would wrongly succeed) so we get mode bits on both.
+perms() { stat -c '%a' "$1" 2>/dev/null || stat -f '%Lp' "$1" 2>/dev/null; }
 
 command -v jq >/dev/null 2>&1 || { echo "jq required for these tests — skipping"; exit 0; }
 
@@ -84,7 +86,9 @@ fi
 
 echo "catalyst-backup — manifest + db integrity"
 expect_eq "manifest nodeClass"  "developer" "$(jq -r .nodeClass "$BUNDLE/manifest.json")"
-expect_eq "manifest captured count" "9" "$(jq '.captured|length' "$BUNDLE/manifest.json")"
+# >=8 deterministic artifacts (the launchctl snapshot is macOS-only + best-effort, so don't pin exact)
+CCOUNT="$(jq '.captured|length' "$BUNDLE/manifest.json")"
+expect_eq "manifest captured >= 8 required artifacts" "yes" "$([[ "${CCOUNT:-0}" -ge 8 ]] && echo yes || echo no)"
 expect_eq "backed-up db is a valid sqlite snapshot" "2" "$(sqlite3 "$BUNDLE/runtime/catalyst.db" 'SELECT count(*) FROM sessions' 2>/dev/null)"
 
 echo "catalyst-backup — secret perms (bundle 0700, secret files 0600)"
@@ -141,22 +145,57 @@ echo "catalyst-backup — restore rejects a non-bundle"
 rc=0; tgt_env "$BACKUP" restore "$SB/not-a-bundle" >/dev/null 2>&1 || rc=$?
 expect_eq "restore non-bundle ⇒ non-zero" "1" "$rc"
 
-echo "catalyst-backup — backup FAILS LOUDLY when a present source can't be captured"
-RO="$SB/ro-bundle"; mkdir -p "$RO/config"; chmod 500 "$RO/config"
-rc=0; out="$(src_env "$BACKUP" backup --out "$RO" 2>&1)" || rc=$?
-chmod 700 "$RO/config" 2>/dev/null || true
-expect_eq "uncapturable present source ⇒ non-zero exit" "yes" "$([[ "$rc" -ne 0 ]] && echo yes || echo no)"
-expect_contains "backup reports INCOMPLETE" "$out" "INCOMPLETE"
+# NB: these inject failure via read-only DIR mode bits, which uid 0 ignores — so skip under root.
+if [[ "$(id -u)" != "0" ]]; then
+  echo "catalyst-backup — backup FAILS LOUDLY when a present source can't be captured"
+  RO="$SB/ro-bundle"; mkdir -p "$RO/config"; chmod 500 "$RO/config"
+  rc=0; out="$(src_env "$BACKUP" backup --out "$RO" 2>&1)" || rc=$?
+  chmod 700 "$RO/config" 2>/dev/null || true
+  expect_eq "uncapturable present source ⇒ non-zero exit" "yes" "$([[ "$rc" -ne 0 ]] && echo yes || echo no)"
+  expect_contains "backup reports INCOMPLETE" "$out" "INCOMPLETE"
 
-echo "catalyst-backup — restore FAILS LOUDLY when a dest can't be written"
-RT="$SB/ro-target"; mkdir -p "$RT/.config/catalyst"; chmod 500 "$RT/.config/catalyst"
+  echo "catalyst-backup — restore FAILS LOUDLY when a dest can't be written"
+  RT="$SB/ro-target"; mkdir -p "$RT/.config/catalyst"; chmod 500 "$RT/.config/catalyst"
+  rc=0
+  out="$(CATALYST_DIR="$RT/c" CATALYST_LAYER2_CONFIG_FILE="$RT/.config/catalyst/config.json" \
+    CATALYST_HUMANLAYER_CONFIG="$RT/hl.json" CATALYST_DB_FILE="$RT/c/x.db" CATALYST_LAUNCHAGENTS_DIR="$RT/LA" \
+    CATALYST_ASSUME_NO_DAEMONS=1 "$BACKUP" restore "$BUNDLE" 2>&1)" || rc=$?
+  chmod 700 "$RT/.config/catalyst" 2>/dev/null || true
+  expect_eq "unwritable dest ⇒ non-zero exit" "yes" "$([[ "$rc" -ne 0 ]] && echo yes || echo no)"
+  expect_contains "restore reports INCOMPLETE" "$out" "INCOMPLETE"
+else
+  ok "loud-fail injection tests (skipped under root — dir mode bits don't block uid 0)"
+fi
+
+echo "catalyst-backup — captures per-project config-<key>.json secrets (Codex P1)"
+printf '{"linear":{"token":"lin_secret"}}\n' > "$SB/.config/catalyst/config-CTL.json"
+PB="$(src_env "$BACKUP" backup 2>/dev/null | tail -1)"
+expect_file "per-project config-CTL.json captured" "$PB/config/config-CTL.json"
+expect_eq "config-CTL.json is 0600" "600" "$(perms "$PB/config/config-CTL.json")"
+rm -f "$SB/.config/catalyst/config-CTL.json"
+
+echo "catalyst-backup — restore rejects a malformed manifest (no captured array)"
+BAD="$SB/bad-bundle"; mkdir -p "$BAD"; printf '{"schemaVersion":1}\n' > "$BAD/manifest.json"
+rc=0; tgt_env "$BACKUP" restore "$BAD" >/dev/null 2>&1 || rc=$?
+expect_eq "malformed manifest ⇒ non-zero" "yes" "$([[ "$rc" -ne 0 ]] && echo yes || echo no)"
+
+echo "catalyst-backup — restore fails when a manifest-listed file is missing from the bundle"
+MB="$SB/missing-bundle"; cp -R "$BUNDLE" "$MB"; rm -f "$MB/runtime/state.json"
+TM="$SB/missing-target"; mkdir -p "$TM"
 rc=0
-out="$(CATALYST_DIR="$RT/c" CATALYST_LAYER2_CONFIG_FILE="$RT/.config/catalyst/config.json" \
-  CATALYST_HUMANLAYER_CONFIG="$RT/hl.json" CATALYST_DB_FILE="$RT/c/x.db" CATALYST_LAUNCHAGENTS_DIR="$RT/LA" \
-  CATALYST_ASSUME_NO_DAEMONS=1 "$BACKUP" restore "$BUNDLE" 2>&1)" || rc=$?
-chmod 700 "$RT/.config/catalyst" 2>/dev/null || true
-expect_eq "unwritable dest ⇒ non-zero exit" "yes" "$([[ "$rc" -ne 0 ]] && echo yes || echo no)"
-expect_contains "restore reports INCOMPLETE" "$out" "INCOMPLETE"
+out="$(CATALYST_DIR="$TM/c" CATALYST_LAYER2_CONFIG_FILE="$TM/.config/catalyst/config.json" \
+  CATALYST_HUMANLAYER_CONFIG="$TM/hl.json" CATALYST_DB_FILE="$TM/c/x.db" CATALYST_LAUNCHAGENTS_DIR="$TM/LA" \
+  CATALYST_ASSUME_NO_DAEMONS=1 "$BACKUP" restore "$MB" 2>&1)" || rc=$?
+expect_eq "manifest-listed-but-missing ⇒ non-zero" "yes" "$([[ "$rc" -ne 0 ]] && echo yes || echo no)"
+expect_contains "restore flags the missing artifact" "$out" "missing"
+
+echo "catalyst-backup — restore fails on a non-regular-file dest (dir at a config path)"
+DD="$SB/dir-target"; mkdir -p "$DD/.config/catalyst/config.json"  # config.json is a DIRECTORY
+rc=0
+CATALYST_DIR="$DD/c" CATALYST_LAYER2_CONFIG_FILE="$DD/.config/catalyst/config.json" \
+  CATALYST_HUMANLAYER_CONFIG="$DD/hl.json" CATALYST_DB_FILE="$DD/c/x.db" CATALYST_LAUNCHAGENTS_DIR="$DD/LA" \
+  CATALYST_ASSUME_NO_DAEMONS=1 "$BACKUP" restore "$BUNDLE" --force >/dev/null 2>&1 || rc=$?
+expect_eq "dir-at-dest ⇒ non-zero (no mv-into-dir)" "yes" "$([[ "$rc" -ne 0 ]] && echo yes || echo no)"
 
 echo "catalyst-backup — daemons_running fails SAFE (sourced helpers)"
 # shellcheck disable=SC1090
