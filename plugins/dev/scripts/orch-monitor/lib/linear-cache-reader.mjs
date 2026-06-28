@@ -37,9 +37,15 @@ const DEFAULT_DB_PATH = join(HOME, "catalyst", "filter-state.db");
 const DEFAULT_ELIGIBLE_DIR = join(HOME, "catalyst", "execution-core", "eligible");
 // CTL-1372: the CTC replica (catalyst-replica.db) — the SDK's live Linear mirror,
 // the only durable source that carries every ticket's title. CATALYST_REPLICA_DB
-// overrides (mirrors getReplicaDbPath in execution-core/config.mjs), default
-// ~/catalyst/catalyst-replica.db. Resolved per call so a test env override works.
-const DEFAULT_REPLICA_DB_PATH = join(HOME, "catalyst", "catalyst-replica.db");
+// overrides; otherwise default to $CATALYST_DIR/catalyst-replica.db.
+// CTL-1378 (#2421 edge): resolve this PER CALL and honor CATALYST_DIR so it EXACTLY
+// mirrors execution-core/config.mjs::getReplicaDbPath. The old frozen `join(HOME,
+// "catalyst", …)` const ignored CATALYST_DIR, so a node configured with CATALYST_DIR
+// set (but CATALYST_REPLICA_DB unset) had its real replica silently ignored and
+// readReplicaTitles() returned {} — disabling the title tier.
+function defaultReplicaDbPath() {
+  return join(process.env.CATALYST_DIR || join(HOME, "catalyst"), "catalyst-replica.db");
+}
 
 // broker-state.mjs carries a top-level `import { Database } from "bun:sqlite"`.
 // We reach it ONLY through the lazy `import()` in readTicketStateById, but the
@@ -227,7 +233,7 @@ export async function readParkedNeedsHumanTickets({
 // falls through). Never throws.
 export async function readReplicaTitles({
   ids = [],
-  dbPath = process.env.CATALYST_REPLICA_DB || DEFAULT_REPLICA_DB_PATH,
+  dbPath = process.env.CATALYST_REPLICA_DB || defaultReplicaDbPath(),
   readerFactory = null,
 } = {}) {
   const wanted = [...new Set((Array.isArray(ids) ? ids : []).filter(Boolean))];

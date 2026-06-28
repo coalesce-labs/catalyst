@@ -175,7 +175,7 @@ describe("assembleBoard wiring — parked needs-human synthetic tickets", () => 
   });
 
   it("assembleBoard dedupes against existing card ids and appends parkedTickets", () => {
-    expect(boardDataSrc).toContain("synthesizeParkedNeedsHumanTickets(parkedNeedsHuman, existingCardIds, now, replicaTitles)");
+    expect(boardDataSrc).toContain("synthesizeParkedNeedsHumanTickets(parkedNeedsHuman, existingCardIds, now, replicaTitles, linfo)");
     expect(boardDataSrc).toContain("...parkedTickets");
   });
 });

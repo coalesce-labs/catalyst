@@ -12,10 +12,12 @@
 // ticketTitle, collectNullTitleIds, synthesizeQueuedTicket, and
 // synthesizeParkedNeedsHumanTickets — with an in-memory replica map (no DB).
 import { describe, expect, it } from "bun:test";
+import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import {
   collectNullTitleIds,
+  resolveQueuedTitle,
   synthesizeQueuedTicket,
   ticketTitle,
 } from "../lib/board-data.mjs";
@@ -31,6 +33,7 @@ const synthesizeParkedNeedsHumanTickets = (boardMod as Record<string, unknown>)
   existingIds: unknown,
   now: number,
   replicaTitles?: Record<string, string>,
+  linfo?: Record<string, { title?: string | null }>,
 ) => Array<{ id: string; title: string }>;
 
 const KEY = "CTL-1214";
@@ -126,6 +129,64 @@ describe("synthesizeParkedNeedsHumanTickets — replica title (CTL-1372 — the 
   it("is back-compat when called without a replica map", () => {
     const cards = synthesizeParkedNeedsHumanTickets([parked()], new Set<string>(), 600_000);
     expect(cards[0].title).toBe(KEY);
+  });
+
+  // CTL-1378 (#2421 edge): on a replica MISS, the parked card now uses the on-demand
+  // title the board fetched into linfo (parked IDs are included in the title fallback)
+  // before falling through to the bare id.
+  it("on a replica MISS, uses the on-demand title fetched into linfo (CTL-1378)", () => {
+    const linfo = { [KEY]: { title: "On-demand fetched title" } };
+    const cards = synthesizeParkedNeedsHumanTickets([parked()], new Set<string>(), 600_000, {}, linfo);
+    expect(cards[0].title).toBe("On-demand fetched title");
+    expect(cards[0].title).not.toBe(KEY);
+  });
+
+  it("prefers the replica title over the linfo fallback (CTL-1378)", () => {
+    const linfo = { [KEY]: { title: "linfo title" } };
+    const cards = synthesizeParkedNeedsHumanTickets(
+      [parked()],
+      new Set<string>(),
+      600_000,
+      { [KEY]: REPLICA_TITLE },
+      linfo,
+    );
+    expect(cards[0].title).toBe(REPLICA_TITLE);
+  });
+
+  it("ignores an empty linfo title and falls through to the bare id (CTL-1378)", () => {
+    const cards = synthesizeParkedNeedsHumanTickets(
+      [parked()],
+      new Set<string>(),
+      600_000,
+      {},
+      { [KEY]: { title: "" } },
+    );
+    expect(cards[0].title).toBe(KEY);
+  });
+});
+
+describe("resolveQueuedTitle — shared queue/card title resolver (CTL-1378, #2421 edge)", () => {
+  it("prefers the replica title", () => {
+    expect(resolveQueuedTitle({ id: KEY, title: ELIGIBLE_TITLE }, { [KEY]: REPLICA_TITLE })).toBe(
+      REPLICA_TITLE,
+    );
+  });
+
+  it("falls back to e.title on a replica miss, then the bare id", () => {
+    expect(resolveQueuedTitle({ id: KEY, title: ELIGIBLE_TITLE }, {})).toBe(ELIGIBLE_TITLE);
+    expect(resolveQueuedTitle({ id: KEY }, {})).toBe(KEY);
+  });
+
+  it("ignores an empty replica title (treated as a miss)", () => {
+    expect(resolveQueuedTitle({ id: KEY, title: ELIGIBLE_TITLE }, { [KEY]: "" })).toBe(ELIGIBLE_TITLE);
+  });
+
+  it("the Todo card AND the dispatch-queue payload both resolve titles through this same path", () => {
+    // Source-scan guard: synthesizeQueuedTicket (the Tickets card) and the `queue`
+    // payload both call resolveQueuedTitle(e, replicaTitles), so they can never disagree.
+    const src = readFileSync(join(HERE, "..", "lib", "board-data.mjs"), "utf8");
+    const occurrences = src.split("resolveQueuedTitle(e, replicaTitles)").length - 1;
+    expect(occurrences).toBeGreaterThanOrEqual(2);
   });
 });
 
