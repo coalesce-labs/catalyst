@@ -25,6 +25,7 @@ import {
   checkSdkExecutorAuth,
   checkConfigScopeLeak,
   checkRepoIconTokenScope,
+  defaultConfiguredRepos,
   checkNodeClass,
   checkReadReplicaReachable,
   checkWontOwnWork,
@@ -1684,6 +1685,65 @@ describe("checkDaemonlessLocal (CTL-1355 — folds verify-node --json)", () => {
     });
     expect(checks).toHaveLength(1);
     expect(checks[0].status).toBe(STATUS.FAIL);
+  });
+});
+
+describe("defaultConfiguredRepos — mirrors the monitor's repoOwners resolution (CTL-1375)", () => {
+  const layer1 = (teams) => JSON.stringify({ catalyst: { monitor: { linear: { teams } } } });
+  const boom = () => {
+    throw new Error("unreadable");
+  };
+
+  it("registry repoRoot OVERRIDES a stale Layer-1 vcsRepo for the same short-name (Codex P2 #1 — no double-probe)", () => {
+    const repos = defaultConfiguredRepos({
+      readLayer1: () =>
+        layer1([
+          { key: "CTL", vcsRepo: "coalesce-labs/catalyst" },
+          { key: "ADV", vcsRepo: "coalesce-labs/adva" }, // stale 404
+        ]),
+      readCluster: () => null,
+      readRegistry: () =>
+        JSON.stringify({
+          projects: [{ team: "ADV", repoRoot: "/home/ci/code-repos/github/groundworkapp/Adva" }],
+        }),
+    });
+    expect(repos).toContain("groundworkapp/Adva"); // registry wins by short-name "adva"
+    expect(repos).not.toContain("coalesce-labs/adva"); // stale slug REPLACED, not also probed
+    expect(repos).toContain("coalesce-labs/catalyst");
+  });
+
+  it("cluster.json vcsRepo overrides a Layer-1 vcsRepo for the same short-name", () => {
+    const repos = defaultConfiguredRepos({
+      readLayer1: () => layer1([{ key: "ADV", vcsRepo: "coalesce-labs/adva" }]),
+      readCluster: () => ({ projects: [{ teamKey: "ADV", vcsRepo: "rightsite-cloud/Adva" }] }),
+      readRegistry: boom,
+    });
+    expect(repos).toContain("rightsite-cloud/Adva");
+    expect(repos).not.toContain("coalesce-labs/adva");
+  });
+
+  it("returns the Layer-1 set when there is no cluster/registry override", () => {
+    const repos = defaultConfiguredRepos({
+      readLayer1: () => layer1([{ key: "CTL", vcsRepo: "coalesce-labs/catalyst" }]),
+      readCluster: () => null,
+      readRegistry: boom,
+    });
+    expect(repos).toEqual(["coalesce-labs/catalyst"]);
+  });
+
+  it("fail-opens to [] when every source read throws", () => {
+    expect(
+      defaultConfiguredRepos({ readLayer1: boom, readCluster: boom, readRegistry: boom }),
+    ).toEqual([]);
+  });
+
+  it("ignores non-owner/repo vcsRepo and registry repoRoots without a /github/ segment", () => {
+    const repos = defaultConfiguredRepos({
+      readLayer1: () => layer1([{ key: "X", vcsRepo: "no-slash" }]),
+      readCluster: () => null,
+      readRegistry: () => JSON.stringify({ projects: [{ team: "Y", repoRoot: "/local/no-github" }] }),
+    });
+    expect(repos).toEqual([]);
   });
 });
 

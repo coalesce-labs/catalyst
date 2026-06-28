@@ -1626,49 +1626,66 @@ function _isOwnerRepo(s) {
   return typeof s === "string" && /^[^/\s]+\/[^/\s]+$/.test(s.trim());
 }
 
-// defaultConfiguredRepos — the union of "owner/repo" slugs the monitor daemon would resolve
-// favicons for, drawn from the same three sources monitor-config unions: Layer-1
-// .catalyst/config.json monitor.linear.teams[].vcsRepo, the execution-core registry
-// projects[].repoRoot (the override the live daemon actually resolves through), and the
-// cluster.json projects[]. Every read fail-opens to skip; result is de-duped.
-function defaultConfiguredRepos() {
-  const repos = new Set();
-  // 1. Layer-1 monitor.linear.teams[].vcsRepo
+// resolveDoctorLayer1Path — mirror monitor-config's resolveLayer1ConfigPath (CTL-1375,
+// Codex P2 #3) so the check reads the SAME Layer-1 roster the running monitor resolves:
+// honor the CATALYST_CONFIG_FILE / CATALYST_CONFIG_PATH env pointers the daemon/deploy sets
+// before falling back to the plugin-repo config — instead of hardcoding the Catalyst
+// checkout's teams, which a daemon-spawned / multi-project monitor would not be using.
+function resolveDoctorLayer1Path() {
+  return process.env.CATALYST_CONFIG_FILE || process.env.CATALYST_CONFIG_PATH || layer1Path();
+}
+
+// defaultConfiguredRepos — the "owner/repo" slugs the monitor daemon ACTUALLY resolves
+// favicons for. Mirrors monitor-config's loadMonitorConfig repoOwners EXACTLY (CTL-1375,
+// Codex P2 #1/#3): build a short-name → owner/repo map where Layer-1
+// monitor.linear.teams[].vcsRepo is the base, cluster.json projects[] {teamKey,vcsRepo}
+// override, and the execution-core registry's repoRoot OVERRIDES on top — keyed by the repo
+// short-name. So a stale committed Layer-1 vcsRepo (e.g. ADV → coalesce-labs/adva, a dead
+// 404) is REPLACED by the registry's real slug for that short-name, never additionally
+// probed. Returns the resolved values (the daemon's set), NOT a union of every source — so
+// the check never WARNs about a repo the monitor doesn't use. IO is injectable for tests;
+// every read fail-opens.
+export function defaultConfiguredRepos(io = {}) {
+  const {
+    readLayer1 = () => readFileSync(resolveDoctorLayer1Path(), "utf8"),
+    readCluster = () => readClusterConfig(),
+    readRegistry = () => readFileSync(getRegistryPath(), "utf8"),
+  } = io;
+
+  // short-name(lowercased) → owner/repo; later sources override earlier (registry wins),
+  // exactly as loadMonitorConfig keys repoOwners by shortName.toLowerCase().
+  const byShort = new Map();
+  const addSlug = (slug) => {
+    if (!_isOwnerRepo(slug)) return;
+    const short = slug.trim().split("/").at(-1)?.toLowerCase();
+    if (short) byShort.set(short, slug.trim());
+  };
+
+  // 1. Layer-1 monitor.linear.teams[].vcsRepo (base / back-compat fallback)
   try {
-    const obj = JSON.parse(readFileSync(layer1Path(), "utf8"));
+    const obj = JSON.parse(readLayer1());
     const teams = obj?.catalyst?.monitor?.linear?.teams;
-    if (Array.isArray(teams)) {
-      for (const t of teams) if (_isOwnerRepo(t?.vcsRepo)) repos.add(t.vcsRepo.trim());
-    }
+    if (Array.isArray(teams)) for (const t of teams) addSlug(t?.vcsRepo);
   } catch {
     /* absent/malformed Layer-1 → skip */
   }
-  // 2. execution-core registry projects[].repoRoot (the live daemon's resolved override)
+  // 2. cluster.json projects[] {teamKey, vcsRepo} (override)
   try {
-    const reg = JSON.parse(readFileSync(getRegistryPath(), "utf8"));
+    const cluster = readCluster();
+    if (Array.isArray(cluster?.projects)) for (const p of cluster.projects) addSlug(p?.vcsRepo);
+  } catch {
+    /* absent/malformed cluster config → skip */
+  }
+  // 3. execution-core registry projects[].repoRoot (the live override — WINS, by short-name)
+  try {
+    const reg = JSON.parse(readRegistry());
     if (Array.isArray(reg?.projects)) {
-      for (const p of reg.projects) {
-        const or = _ownerRepoFromRepoRoot(p?.repoRoot);
-        if (or) repos.add(or);
-      }
+      for (const p of reg.projects) addSlug(_ownerRepoFromRepoRoot(p?.repoRoot));
     }
   } catch {
     /* absent/malformed registry → skip */
   }
-  // 3. cluster.json projects[] (vcsRepo slug and/or repoRoot path)
-  try {
-    const cluster = readClusterConfig();
-    if (Array.isArray(cluster?.projects)) {
-      for (const p of cluster.projects) {
-        if (_isOwnerRepo(p?.vcsRepo)) repos.add(p.vcsRepo.trim());
-        const or = _ownerRepoFromRepoRoot(p?.repoRoot);
-        if (or) repos.add(or);
-      }
-    }
-  } catch {
-    /* absent/malformed cluster config → skip */
-  }
-  return [...repos];
+  return [...byShort.values()];
 }
 
 // defaultProbeContents — does the effective `gh` token resolve the PRIVATE
@@ -1753,7 +1770,13 @@ export function checkRepoIconTokenScope(deps = {}) {
       mkCheck(
         "repo-icon-token",
         STATUS.PASS,
-        `gh token can read contents of all ${repos.length} configured repo(s) — repo-icon favicon detection works`,
+        // Honest scope (CTL-1375, Codex P2 #2): this probes with the token available to the
+        // CALLER's environment. The monitor DAEMON is started separately (launchd / the shell
+        // running catalyst-monitor.sh) and may carry a different token, so a PASS here does
+        // not by itself prove the daemon can read these repos.
+        `the gh token available HERE can read contents of all ${repos.length} configured repo(s) — ` +
+          `ensure the MONITOR DAEMON's environment carries the same token (launchd plist EnvironmentVariables / ` +
+          `the shell that starts catalyst-monitor.sh); a daemon lacking it still falls back to the org avatar`,
       ),
     );
     return checks;
