@@ -71,9 +71,6 @@ export function installPreloadRecovery(
   let memLast = 0;
 
   win.addEventListener("vite:preloadError", (ev: Event) => {
-    // We handle recovery here, so stop Vite's default unhandled-rejection surfacing.
-    ev.preventDefault?.();
-
     // Last reload = the most recent we know about, from storage OR the in-memory fallback.
     let last = memLast;
     try {
@@ -86,12 +83,17 @@ export function installPreloadRecovery(
     const t = now();
     // Guard #1/#2: `last === 0` is the never-reloaded sentinel (Date.now() is never 0), so
     // always recover on the first error; otherwise only once the window has elapsed.
-    if (last !== 0 && t - last < RELOAD_WINDOW_MS) return;
-
     // Guard #3: with no persisted timestamp (storage blocked) AND this load is itself a
     // reload, we've already auto-reloaded once for a still-missing chunk → don't loop.
+    // In BOTH suppressed cases we deliberately DON'T call preventDefault — `preventDefault()`
+    // stops Vite from re-throwing the import failure, so swallowing it here would hide a
+    // genuinely-broken chunk from the router's retry UI / an error boundary. Only the reload
+    // branch (the actual recovery) suppresses the default.
+    if (last !== 0 && t - last < RELOAD_WINDOW_MS) return;
     if (last === 0 && currentLoadWasReload(win)) return;
 
+    // We are recovering by reload, so suppress Vite's default unhandled-rejection surfacing.
+    ev.preventDefault?.();
     memLast = t; // record in memory first — survives a failed storage write
     try {
       win.sessionStorage?.setItem(RELOAD_KEY, String(t));

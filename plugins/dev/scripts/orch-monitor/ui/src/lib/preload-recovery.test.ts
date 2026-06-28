@@ -84,6 +84,28 @@ describe("installPreloadRecovery (CTL-1374)", () => {
     expect(f.reloads()).toBe(1);
   });
 
+  // CTL-1374, Codex P2 (re-review #2): preventDefault() stops Vite re-throwing the import
+  // error, so it must fire ONLY on the reload branch — a suppressed error must propagate to
+  // the router retry UI / an error boundary, not be silently swallowed.
+  it("does NOT preventDefault when it SUPPRESSES the reload (lets the app's error UI surface it)", () => {
+    const f = makeWin();
+    installPreloadRecovery(f.win, () => START);
+    f.handler(fakeEvent()); // first → reloads (this one DOES preventDefault)
+    let prevented = 0;
+    f.handler(fakeEvent(() => prevented++)); // second, same instant → suppressed
+    expect(f.reloads()).toBe(1);
+    expect(prevented).toBe(0); // default NOT prevented → the chunk error can surface
+  });
+
+  it("does NOT preventDefault when guard #3 suppresses a reload load (blocked storage)", () => {
+    const f = makeWin("throws", "reload");
+    installPreloadRecovery(f.win, () => START);
+    let prevented = 0;
+    f.handler(fakeEvent(() => prevented++));
+    expect(f.reloads()).toBe(0);
+    expect(prevented).toBe(0);
+  });
+
   it("reloads again once the guard window has elapsed (multi-redeploy recovery)", () => {
     const f = makeWin();
     let now = START;
