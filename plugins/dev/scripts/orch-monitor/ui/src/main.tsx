@@ -2,7 +2,13 @@ import { StrictMode, Suspense, lazy } from "react";
 import { createRoot } from "react-dom/client";
 import { RouterProvider } from "@tanstack/react-router";
 import { router } from "./app-router";
+import { installPreloadRecovery } from "./lib/preload-recovery";
 import "./app.css";
+
+// CTL-1374: self-recover an open session when a lazy route/glyph chunk 404s after a
+// redeploy swapped the dist (reload once onto the fresh, no-cache shell). Registered
+// before render so it covers both the Sandbox and RouterProvider branches.
+installPreloadRecovery();
 
 // CTL-989: ONE TanStack Router mounted from index.html (#root). The rootRoute
 // renders <AppShell><Outlet/></AppShell>, so AppShell is the LAYOUT wrapping

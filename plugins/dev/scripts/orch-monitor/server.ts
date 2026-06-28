@@ -752,6 +752,21 @@ function contentTypeForExt(ext: string): string {
   }
 }
 
+// CTL-1374: PWA deploy-hygiene cache directives. The HTML shell, the SPA fallback, the
+// web manifest and the SW must REVALIDATE on every navigation so a redeploy is picked up
+// instead of being heuristically frozen by the browser — `no-cache` = store-but-always-
+// revalidate (a cheap 304 when unchanged). Content-hashed /assets/* are immutable: a
+// changed file is a NEW filename, so it can be cached forever; this keeps the entry script
+// in index.html always pointing at a live chunk (never an rm -rf'd one after the atomic
+// swap). Non-hashed /public/* assets (icons) revalidate so a redeploy can update them.
+const CACHE_REVALIDATE = "no-cache";
+const CACHE_IMMUTABLE = "public, max-age=31536000, immutable";
+
+// cacheControlForStatic — immutable for content-hashed /assets/*, revalidate otherwise.
+function cacheControlForStatic(pathname: string): string {
+  return pathname.startsWith("/assets/") ? CACHE_IMMUTABLE : CACHE_REVALIDATE;
+}
+
 // OBS-7: a Loki query that returns null is NOT necessarily "Loki unavailable".
 // loki.ts collapses both a failed /ready probe AND a non-2xx query response (e.g. a
 // LogQL 400) to null. Distinguish them honestly so a query error is never
@@ -3227,7 +3242,10 @@ export function createServer(opts: CreateServerOptions): BunServer {
           const file = Bun.file(join(publicDir, "manifest.webmanifest"));
           if (await file.exists()) {
             return new Response(file, {
-              headers: { "Content-Type": "application/manifest+json; charset=utf-8" },
+              headers: {
+                "Content-Type": "application/manifest+json; charset=utf-8",
+                "Cache-Control": CACHE_REVALIDATE, // CTL-1374
+              },
             });
           }
           return new Response("manifest not found", { status: 404 });
@@ -3259,7 +3277,10 @@ export function createServer(opts: CreateServerOptions): BunServer {
           const file = Bun.file(join(publicDir, "index.html"));
           if (await file.exists()) {
             return new Response(file, {
-              headers: { "Content-Type": "text/html; charset=utf-8" },
+              headers: {
+                "Content-Type": "text/html; charset=utf-8",
+                "Cache-Control": CACHE_REVALIDATE, // CTL-1374: always revalidate the shell
+              },
             });
           }
           return new Response("index.html not found", { status: 500 });
@@ -3280,7 +3301,10 @@ export function createServer(opts: CreateServerOptions): BunServer {
           const file = Bun.file(join(publicDir, "index.html"));
           if (await file.exists()) {
             return new Response(file, {
-              headers: { "Content-Type": "text/html; charset=utf-8" },
+              headers: {
+                "Content-Type": "text/html; charset=utf-8",
+                "Cache-Control": CACHE_REVALIDATE, // CTL-1374: always revalidate the shell
+              },
             });
           }
           return new Response("index.html not found", { status: 500 });
@@ -3296,7 +3320,10 @@ export function createServer(opts: CreateServerOptions): BunServer {
           const file = Bun.file(join(publicDir, htmlFile));
           if (await file.exists()) {
             return new Response(file, {
-              headers: { "Content-Type": "text/html; charset=utf-8" },
+              headers: {
+                "Content-Type": "text/html; charset=utf-8",
+                "Cache-Control": CACHE_REVALIDATE, // CTL-1374
+              },
             });
           }
           return new Response(`${htmlFile} not found`, { status: 500 });
@@ -3307,7 +3334,10 @@ export function createServer(opts: CreateServerOptions): BunServer {
           const file = Bun.file(join(publicDir, "mockups", "index.html"));
           if (await file.exists()) {
             return new Response(file, {
-              headers: { "Content-Type": "text/html; charset=utf-8" },
+              headers: {
+                "Content-Type": "text/html; charset=utf-8",
+                "Cache-Control": CACHE_REVALIDATE, // CTL-1374
+              },
             });
           }
         }
@@ -3323,7 +3353,10 @@ export function createServer(opts: CreateServerOptions): BunServer {
             const dot = safe.lastIndexOf(".");
             const ext = dot >= 0 ? safe.slice(dot).toLowerCase() : "";
             return new Response(file, {
-              headers: { "Content-Type": contentTypeForExt(ext) },
+              headers: {
+                "Content-Type": contentTypeForExt(ext),
+                "Cache-Control": CACHE_REVALIDATE, // CTL-1374: mockups aren't content-hashed
+              },
             });
           }
         }
@@ -3341,7 +3374,12 @@ export function createServer(opts: CreateServerOptions): BunServer {
             const dot = safe.lastIndexOf(".");
             const ext = dot >= 0 ? safe.slice(dot).toLowerCase() : "";
             return new Response(file, {
-              headers: { "Content-Type": contentTypeForExt(ext) },
+              headers: {
+                "Content-Type": contentTypeForExt(ext),
+                // CTL-1374: content-hashed /assets/* are immutable (forever-cacheable);
+                // non-hashed /public/* icons revalidate so a redeploy can update them.
+                "Cache-Control": cacheControlForStatic(url.pathname),
+              },
             });
           }
         }
