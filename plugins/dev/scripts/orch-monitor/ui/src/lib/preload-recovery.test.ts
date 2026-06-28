@@ -19,10 +19,14 @@ interface FakeWin {
   reloads: () => number;
 }
 
-// Build a fake window. `sessionStorage` controls the storage seam: a Map (default),
-// `null` (absent), or a thrower (private mode).
-function makeWin(storage: "map" | "none" | "throws" = "map"): FakeWin {
-  let handler: (ev: Event) => void = NOOP;
+// Build a fake window. `storage` controls the seam: a Map (default), `null` (absent), or a
+// thrower (private mode). `navType` injects a Navigation Timing stub — "reload" marks the
+// current load as a reload (guard #3), "navigate" a fresh load; undefined omits `performance`
+// entirely (currentLoadWasReload → false).
+function makeWin(
+  storage: "map" | "none" | "throws" = "map",
+  navType?: "reload" | "navigate",
+): FakeWin {
   let reloads = 0;
   const map = new Map<string, string>();
   const sessionStorage =
@@ -54,6 +58,7 @@ function makeWin(storage: "map" | "none" | "throws" = "map"): FakeWin {
         },
       },
       sessionStorage,
+      ...(navType ? { performance: { getEntriesByType: () => [{ type: navType }] } } : {}),
     },
     handler: NOOP,
     reloads: () => reloads,
@@ -122,5 +127,60 @@ describe("installPreloadRecovery (CTL-1374)", () => {
     now = START + RELOAD_WINDOW_MS + 1;
     f.handler(fakeEvent());
     expect(f.reloads()).toBe(2);
+  });
+
+  // CTL-1374, Codex P2 (re-review): the closure timestamp is wiped by location.reload(), so
+  // with blocked storage a still-missing chunk would reload-loop ACROSS reloads. Guard #3
+  // (navigation-type) breaks it: when there's no persisted timestamp AND this load is itself
+  // a reload, suppress.
+  it("blocked storage + current load IS a reload → suppresses (storage-free loop breaker)", () => {
+    const f = makeWin("throws", "reload");
+    installPreloadRecovery(f.win, () => START);
+    f.handler(fakeEvent());
+    expect(f.reloads()).toBe(0); // we've already auto-reloaded once → don't loop
+  });
+
+  it("blocked storage + fresh (navigate) load → still reloads on the first error", () => {
+    const f = makeWin("throws", "navigate");
+    installPreloadRecovery(f.win, () => START);
+    f.handler(fakeEvent());
+    expect(f.reloads()).toBe(1);
+  });
+
+  it("supports the legacy performance.navigation.type === 1 (reload) loop breaker", () => {
+    let reloads = 0;
+    let handler: (ev: Event) => void = NOOP;
+    const win: PreloadRecoveryWindow = {
+      addEventListener: (type, listener) => {
+        if (type === "vite:preloadError") handler = listener;
+      },
+      location: { reload: () => { reloads++; } },
+      sessionStorage: {
+        getItem: () => { throw new Error("blocked"); },
+        setItem: () => { throw new Error("blocked"); },
+      },
+      performance: { navigation: { type: 1 } }, // legacy TYPE_RELOAD, no getEntriesByType
+    };
+    installPreloadRecovery(win, () => START);
+    handler(fakeEvent());
+    expect(reloads).toBe(0);
+  });
+
+  it("a reload load with no recorded reload suppresses (manual reload defers to the banner), even with working storage", () => {
+    // A page that LOADED via reload (manual Cmd-R or our own) with no persisted timestamp
+    // yet → guard #3 suppresses an immediate auto-reload regardless of storage working. This
+    // is intentional: re-reloading right after a reload that didn't fix the chunk would loop;
+    // the manual "Reload" banner (CTL-1373) stays the escape hatch.
+    const f = makeWin("map", "reload");
+    installPreloadRecovery(f.win, () => START);
+    f.handler(fakeEvent());
+    expect(f.reloads()).toBe(0);
+  });
+
+  it("a fresh (navigate) load with working storage reloads normally", () => {
+    const f = makeWin("map", "navigate");
+    installPreloadRecovery(f.win, () => START);
+    f.handler(fakeEvent());
+    expect(f.reloads()).toBe(1);
   });
 });

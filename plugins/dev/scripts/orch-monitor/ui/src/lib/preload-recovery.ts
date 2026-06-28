@@ -7,10 +7,19 @@
 // Vite fires a `vite:preloadError` event on `window` when a dynamic import's preload
 // fails. We suppress the resulting unhandled rejection and reload ONCE to pick up the
 // fresh chunk graph — index.html is served `no-cache` (server.ts, CTL-1374), so the reload
-// lands on the current build, not a stale shell. A sessionStorage timestamp caps reloads
-// to one per RELOAD_WINDOW_MS so a persistently-broken chunk (or an offline session whose
-// SW re-serves the stale '/') can't reload-storm; each genuinely fresh redeploy still gets
-// its single recovery reload once the window elapses.
+// lands on the current build, not a stale shell.
+//
+// Reload-storm guards (a persistently-missing chunk — offline / a bad deploy — must not
+// loop the page):
+//   1. PRIMARY — a sessionStorage timestamp, one reload per RELOAD_WINDOW_MS. It survives
+//      the reload, so it bounds reloads across page loads when storage is available.
+//   2. In-memory fallback — a closure-scoped timestamp (one per page load) keeps the guard
+//      holding WITHIN a load when storage can't be written (it can't survive the reload).
+//   3. Navigation-type loop breaker — when NO persisted timestamp is available (storage
+//      blocked → last===0) and THIS page load is itself a reload, we've almost certainly
+//      already auto-reloaded once for a still-missing chunk, so we suppress instead of
+//      looping. This is the storage-free cross-reload guard (no URL/cookie pollution). The
+//      manual "Reload" banner (CTL-1373) remains the user's escape hatch.
 //
 // DOM-light by construction: `win` + `now` are injectable so the logic is unit-testable
 // without jsdom, and main.tsx stays a one-line side-effect call.
@@ -25,22 +34,40 @@ export interface PreloadRecoveryWindow {
   addEventListener(type: string, listener: (ev: Event) => void): void;
   location: { reload: () => void };
   sessionStorage?: Pick<Storage, "getItem" | "setItem">;
+  // Method syntax (bivariant params) + ReadonlyArray so the real `window.performance`
+  // (whose getEntriesByType returns PerformanceEntryList) structurally satisfies this.
+  performance?: {
+    // `name` is included only to share a property with the real PerformanceEntry (dodges
+    // TS's weak-type check); we read `.type` (present on PerformanceNavigationTiming).
+    getEntriesByType?(type: string): ReadonlyArray<{ readonly name?: string; readonly type?: string }>;
+    // legacy fallback (deprecated PerformanceNavigation.type === 1 means TYPE_RELOAD)
+    navigation?: { readonly type?: number };
+  };
+}
+
+/** Was the current page load itself a reload? (Navigation Timing API, with the legacy
+ *  fallback.) Used as a storage-free loop breaker. Never throws → false on any uncertainty. */
+function currentLoadWasReload(win: PreloadRecoveryWindow): boolean {
+  try {
+    const entries = win.performance?.getEntriesByType?.("navigation");
+    const navType = entries && entries.length > 0 ? entries[0]?.type : undefined;
+    if (typeof navType === "string") return navType === "reload";
+    return win.performance?.navigation?.type === 1; // legacy TYPE_RELOAD
+  } catch {
+    return false;
+  }
 }
 
 /**
  * Register the `vite:preloadError` self-recovery handler. Idempotent in practice because
  * main.tsx calls it once at module scope. Never throws — storage access is wrapped so a
- * disabled/again-throwing sessionStorage (private mode) degrades to "never reloaded".
+ * disabled/again-throwing sessionStorage (private mode) degrades gracefully.
  */
 export function installPreloadRecovery(
   win: PreloadRecoveryWindow = window,
   now: () => number = () => Date.now(),
 ): void {
-  // In-memory fallback timestamp (closure-scoped → one per page load). sessionStorage is the
-  // PRIMARY guard because it survives the reload; but when Web Storage is blocked/throws
-  // (private mode), the write is lost and every subsequent error would see last=0 and reload
-  // again — a reload-storm. This in-memory copy keeps the one-per-window guard holding WITHIN
-  // a page load even when storage can't be written.
+  // Closure-scoped in-memory fallback (one per page load) — see guard #2 above.
   let memLast = 0;
 
   win.addEventListener("vite:preloadError", (ev: Event) => {
@@ -53,19 +80,23 @@ export function installPreloadRecovery(
       const stored = Number(win.sessionStorage?.getItem(RELOAD_KEY) ?? 0) || 0;
       if (stored > last) last = stored;
     } catch {
-      /* storage blocked → rely on the in-memory fallback */
+      /* storage blocked → rely on the in-memory + navigation-type guards */
     }
 
     const t = now();
-    // `last === 0` is the never-reloaded sentinel (Date.now() is never 0), so always recover
-    // on the first error; otherwise only once the window has elapsed (don't reload-storm).
+    // Guard #1/#2: `last === 0` is the never-reloaded sentinel (Date.now() is never 0), so
+    // always recover on the first error; otherwise only once the window has elapsed.
     if (last !== 0 && t - last < RELOAD_WINDOW_MS) return;
+
+    // Guard #3: with no persisted timestamp (storage blocked) AND this load is itself a
+    // reload, we've already auto-reloaded once for a still-missing chunk → don't loop.
+    if (last === 0 && currentLoadWasReload(win)) return;
 
     memLast = t; // record in memory first — survives a failed storage write
     try {
       win.sessionStorage?.setItem(RELOAD_KEY, String(t));
     } catch {
-      /* best-effort — the in-memory fallback still enforces the guard this page load */
+      /* best-effort — the in-memory + navigation-type guards still bound reloads */
     }
     win.location.reload();
   });
