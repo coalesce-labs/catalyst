@@ -56,6 +56,7 @@ CLI_ENTRIES=(
   "catalyst-hud-classic.sh:catalyst-hud-classic"
   "catalyst-stack:catalyst-stack"
   "catalyst-doctor:catalyst-doctor"
+  "catalyst-backup:catalyst-backup"
   "catalyst:catalyst"
   "thoughts-pull-sync.sh:thoughts-pull-sync"
   "../hooks/emit-lifecycle-event.sh:emit-lifecycle-event"
