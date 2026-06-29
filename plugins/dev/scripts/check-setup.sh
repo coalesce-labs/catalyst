@@ -722,21 +722,32 @@ else
     info "CATALYST_LINEAR_REPLICA off (this node reads Linear directly)"
 fi
 
-# Per-node cloud token PRESENCE — by NAME only, NEVER echo the value. Resolve the node's
-# token env-var NAME via config.mjs (same resolver the writer uses), then test presence.
+# Per-node cloud token PRESENCE — by NAME only, NEVER echo the value. Predict the LAUNCHD
+# writer's actual view (source the 0600 files launch.sh sources, strip interactive/direnv
+# overrides launchd won't inherit), so a PASS means the supervised writer can authenticate —
+# not merely that the token happens to be in this interactive shell.
 _cfg_scripts="${CLAUDE_PLUGIN_ROOT:+$CLAUDE_PLUGIN_ROOT/scripts}"
 [[ -z "$_cfg_scripts" ]] && _cfg_scripts="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 _cfg_mjs="$_cfg_scripts/execution-core/config.mjs"
 if command -v bun >/dev/null 2>&1 && [[ -f "$_cfg_mjs" ]]; then
-    _token_env=$(CFG_MJS="$_cfg_mjs" bun -e '
-      const m = await import(process.env.CFG_MJS);
-      process.stdout.write(m.resolveNodeCloudTokenEnv().envVar);
-    ' 2>/dev/null || echo "")
+    _probe=$( set +u
+      unset CATALYST_CLOUD_TOKEN_ENV CATALYST_LAYER2_CONFIG_FILE 2>/dev/null || true
+      [[ -r "$HOME/.config/catalyst/cluster.env" ]] && . "$HOME/.config/catalyst/cluster.env"
+      [[ -r "$HOME/.config/catalyst/replica-writer.env" ]] && . "$HOME/.config/catalyst/replica-writer.env"
+      _name=$(CFG_MJS="$_cfg_mjs" bun -e '
+        const m = await import(process.env.CFG_MJS);
+        process.stdout.write(m.resolveNodeCloudTokenEnv().envVar);
+      ' 2>/dev/null || echo "")
+      _present="no"; [[ -n "${!_name:-}" ]] && _present="yes"
+      printf '%s|%s' "$_name" "$_present"
+    )
+    _token_env="${_probe%%|*}"
+    _token_present="${_probe##*|}"
     if [[ -n "$_token_env" ]]; then
-        if [[ -n "${!_token_env:-}" ]]; then
-            pass "cloud token $_token_env is set (len>0)"
+        if [[ "$_token_present" == "yes" ]]; then
+            pass "cloud token $_token_env present in the launchd-sourced 0600 files (len>0)"
         else
-            info "cloud token $_token_env not set in this shell — provision it in a 0600 file for the launchd writer"
+            info "cloud token $_token_env not in the launchd-sourced files — provision it in ~/.config/catalyst/replica-writer.env (chmod 600) so the supervised writer can authenticate"
         fi
     fi
 fi

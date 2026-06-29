@@ -77,23 +77,40 @@ describe("checkReplicaWriter", () => {
     expect(m["replica-fresh"].detail).toMatch(/tiny|seed/i);
   });
 
-  test("db stale (old mtime) → replica-fresh WARN", () => {
+  test("all mtimes old incl the writer-lock (heartbeat stopped) → replica-fresh WARN (likely down)", () => {
     const m = byName(checkReplicaWriter(deps({ statFile: () => ({ size: 64_000_000, mtimeMs: NOW - 600_000 }) })));
     expect(m["replica-fresh"].status).toBe("warn");
-    expect(m["replica-fresh"].detail).toMatch(/stale/i);
+    expect(m["replica-fresh"].detail).toMatch(/heartbeat stale|likely down/i);
   });
 
-  test("fresh -wal sidecar keeps a checkpointed (older main-db mtime) replica fresh", () => {
-    // main db mtime is stale, but the writer's non-empty -wal was just appended → fresh.
+  // THE CORE FIX (my adversarial review): the DB/-wal mtime freezes on a quiet feed (the SDK
+  // has no idle keepalive), but the writer-lock heartbeat keeps ticking — so a live writer on
+  // a quiet feed must NOT be reported "down" just because no change landed recently.
+  test("live writer-lock keeps a quiet-feed replica healthy — no false 'writer down' on stale DB mtime", () => {
     const recs = checkReplicaWriter(
       deps({
         statFile: (p) =>
-          p.endsWith("-wal")
-            ? { size: 4096, mtimeMs: NOW - 2_000 }
-            : { size: 64_000_000, mtimeMs: NOW - 600_000 },
+          p.endsWith(".writer.lock")
+            ? { size: 256, mtimeMs: NOW - 4_000 } // heartbeat ~4s ago = provably alive
+            : { size: 64_000_000, mtimeMs: NOW - 1_800_000 }, // db/-wal 30 min stale (quiet feed)
       }),
     );
-    expect(byName(recs)["replica-fresh"].status).toBe("pass");
+    const m = byName(recs);
+    expect(m["replica-fresh"].status).toBe("pass");
+    expect(m["replica-fresh"].detail).toMatch(/writer live/i);
+    expect(m["replica-fresh"].detail).not.toMatch(/down/i);
+  });
+
+  test("no writer-lock (guard disabled): stale db → ambiguous WARN; fresh db → PASS", () => {
+    const noLock = (mtime) => (p) => {
+      if (p.endsWith(".writer.lock")) throw new Error("no lock");
+      return { size: 64_000_000, mtimeMs: mtime };
+    };
+    const stale = byName(checkReplicaWriter(deps({ statFile: noLock(NOW - 600_000) })));
+    expect(stale["replica-fresh"].status).toBe("warn");
+    expect(stale["replica-fresh"].detail).toMatch(/no writer-lock/i);
+    const fresh = byName(checkReplicaWriter(deps({ statFile: noLock(NOW - 5_000) })));
+    expect(fresh["replica-fresh"].status).toBe("pass");
   });
 
   test("writer healthy + flag OFF → replica-read-flag WARN (flip it on)", () => {

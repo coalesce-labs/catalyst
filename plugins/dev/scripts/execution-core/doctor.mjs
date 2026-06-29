@@ -1536,6 +1536,11 @@ export function checkReplicaWriter(deps = {}) {
     env = process.env,
     now = Date.now(),
     staleMs = Number(process.env.CATALYST_REPLICA_STALE_MS) || 120_000,
+    // The writer-lock heartbeat is the FEED-INDEPENDENT liveness signal: the live writer
+    // rewrites <db>.writer.lock every ~5s (SDK heartbeatMs) regardless of Linear activity,
+    // whereas the DB/-wal mtime only advances when a change frame lands. A generous default
+    // (4× the SDK's 15s lock-stale) absorbs heartbeat jitter; > this ⇒ heartbeat stopped.
+    lockStaleMs = Number(process.env.CATALYST_REPLICA_LOCK_STALE_MS) || 60_000,
     sizeFloorBytes = 65_536,
   } = deps;
 
@@ -1560,23 +1565,39 @@ export function checkReplicaWriter(deps = {}) {
     checks.push(mkCheck("replica-writer", STATUS.WARN, "agent installed but no writer process found — KeepAlive may be retrying; check ~/catalyst/replica-writer.log"));
   }
 
-  // (b) replica freshness — file-mtime only (the freshest of the DB + its non-empty -wal
-  // sidecar; a writer's WAL appends land in -wal between checkpoints). Absent / tiny / stale
-  // each WARN; a healthy fresh file PASSes.
+  // (b) replica freshness + writer liveness. KEY INSIGHT: the DB + -wal mtime only advance
+  // when a change FRAME is applied, so a quiet Linear feed (no ticket changes) freezes them
+  // even though the writer is perfectly alive — the SDK has no idle keepalive. So DB mtime
+  // measures "time since last mirrored change", NOT writer liveness. The feed-independent
+  // liveness signal is the writer-lock HEARTBEAT (<db>.writer.lock), rewritten ~every 5s.
+  // Gate liveness on the lock heartbeat; report the data-age as info only, never as "down".
   if (!dbPresent) {
     checks.push(mkCheck("replica-fresh", STATUS.WARN, "replica db not present — writer has not seeded yet (not connected)"));
   } else {
     let size = 0;
-    let newest = 0;
-    try { const s = statFile(dbPath); size = s.size; newest = s.mtimeMs; } catch { /* unreadable → handled as not-fresh below */ }
-    try { const w = statFile(`${dbPath}-wal`); if (w.size > 0) newest = Math.max(newest, w.mtimeMs); } catch { /* no -wal sidecar */ }
+    let dataNewest = 0; // newest of DB + non-empty -wal mtime = last mirrored change
+    try { const s = statFile(dbPath); size = s.size; dataNewest = s.mtimeMs; } catch { /* unreadable → handled below */ }
+    try { const w = statFile(`${dbPath}-wal`); if (w.size > 0) dataNewest = Math.max(dataNewest, w.mtimeMs); } catch { /* no -wal sidecar */ }
+    let lockMtime = 0;
+    try { lockMtime = statFile(`${dbPath}.writer.lock`).mtimeMs; } catch { /* no lock: guard disabled / writer not started */ }
+    const dataAge = dataNewest ? `${Math.round((now - dataNewest) / 1000)}s` : "unknown";
+
     if (size < sizeFloorBytes) {
       checks.push(mkCheck("replica-fresh", STATUS.WARN, "replica present but tiny — snapshot seed not applied yet (not connected)"));
-    } else if (newest === 0 || now - newest > staleMs) {
-      const ageS = newest ? `${Math.round((now - newest) / 1000)}s` : "unknown";
-      checks.push(mkCheck("replica-fresh", STATUS.WARN, `replica stale (last write ${ageS} ago > ${Math.round(staleMs / 1000)}s) — writer may be down`));
+    } else if (lockMtime > 0) {
+      // Writer-lock heartbeat is the truth (feed-independent). A quiet feed never trips this.
+      const lockAge = Math.round((now - lockMtime) / 1000);
+      if (now - lockMtime <= lockStaleMs) {
+        checks.push(mkCheck("replica-fresh", STATUS.PASS, `writer live (heartbeat ${lockAge}s ago); last mirrored change ${dataAge} ago`));
+      } else {
+        checks.push(mkCheck("replica-fresh", STATUS.WARN, `writer heartbeat stale (${lockAge}s > ${Math.round(lockStaleMs / 1000)}s) — writer likely down`));
+      }
+    } else if (dataNewest === 0 || now - dataNewest > staleMs) {
+      // No writer-lock (guard disabled / not started) — fall back to the DB data-mtime as a
+      // COARSE proxy, but word it ambiguously since a quiet feed is indistinguishable here.
+      checks.push(mkCheck("replica-fresh", STATUS.WARN, `no writer-lock + no mirrored change in ${dataAge} — writer may be down (or the feed is quiet)`));
     } else {
-      checks.push(mkCheck("replica-fresh", STATUS.PASS, `replica fresh (last write ${Math.round((now - newest) / 1000)}s ago)`));
+      checks.push(mkCheck("replica-fresh", STATUS.PASS, `replica updated ${dataAge} ago (no writer-lock present)`));
     }
   }
 
@@ -2360,7 +2381,12 @@ function defaultUpdaterProcessAlive() {
 // pgrep the writer entrypoint; honors the CATALYST_ASSUME_NO_DAEMONS test seam.
 function defaultReplicaWriterProcessAlive() {
   if (process.env.CATALYST_ASSUME_NO_DAEMONS === "1") return false;
-  const r = spawnSync("pgrep", ["-f", "execution-core/replica-writer\\.mjs"], { timeout: 5_000 });
+  // Match the basename, not the full dir path: the launcher execs the writer via
+  // `${SCRIPT_DIR}/../replica-writer.mjs`, so the live argv is
+  // `.../replica-writer/../replica-writer.mjs` — a `execution-core/replica-writer.mjs`
+  // pattern would miss it (Codex P2). `replica-writer.mjs` matches the writer process and
+  // not the launcher (`.../replica-writer/launch.sh` has no `.mjs`).
+  const r = spawnSync("pgrep", ["-f", "replica-writer\\.mjs"], { timeout: 5_000 });
   return !r.error && r.status === 0;
 }
 

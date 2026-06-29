@@ -1515,24 +1515,29 @@ cmd_adopt_replica_writer() {
   command -v bun >/dev/null 2>&1 || fail "bun not found on PATH — the replica writer needs it"
   [[ -f "$launcher" ]] || fail "replica-writer launcher not found at $launcher"
 
-  # Resolve THIS node's token env-var NAME the same way the writer does (config.mjs
-  # resolveNodeCloudTokenEnv), then predict the launchd writer's token visibility by
-  # checking ONLY the 0600 files the launcher will source — NOT this interactive shell's
-  # env (direnv may set the token here while launchd, which sees neither direnv nor
-  # ~/.zshenv, would not). A missing token → WARN (the writer idles), never a hard fail.
-  local token_env
-  token_env="$(CATALYST_HOST_NAME="$host_name" CFG_DIR="${SCRIPT_DIR}/execution-core" bun -e '
-    const m = await import(process.env.CFG_DIR + "/config.mjs");
-    process.stdout.write(m.resolveNodeCloudTokenEnv().envVar);
-  ' 2>/dev/null || printf 'CATALYST_CLOUD_TOKEN')"
-  local token_present="no"
-  if ( set +u
-       unset "$token_env" 2>/dev/null || true
-       [[ -r "$HOME/.config/catalyst/cluster.env" ]] && . "$HOME/.config/catalyst/cluster.env"
-       [[ -r "$HOME/.config/catalyst/replica-writer.env" ]] && . "$HOME/.config/catalyst/replica-writer.env"
-       [[ -n "${!token_env:-}" ]] ); then
-    token_present="yes"
-  fi
+  # Predict the LAUNCHD writer's token resolution faithfully: resolve BOTH the env-var NAME
+  # and its presence inside ONE subshell that mirrors launch.sh's view — NOT this interactive
+  # shell's (direnv/~/.zshenv set vars launchd never sees). The subshell (1) strips the
+  # interactive CATALYST_CLOUD_TOKEN_ENV / CATALYST_LAYER2_CONFIG_FILE overrides launchd won't
+  # inherit, (2) pins the plist host name, (3) sources the same 0600 files launch.sh does
+  # (which may themselves set the override name), THEN resolves the NAME + checks presence.
+  # So an override that lives only in the 0600 file is honored, and one that lives only in the
+  # interactive shell is correctly reported absent (Codex P2). Missing token → WARN, never fail.
+  local probe
+  probe="$( set +u
+    unset CATALYST_CLOUD_TOKEN_ENV CATALYST_LAYER2_CONFIG_FILE 2>/dev/null || true
+    export CATALYST_HOST_NAME="$host_name"
+    [[ -r "$HOME/.config/catalyst/cluster.env" ]] && . "$HOME/.config/catalyst/cluster.env"
+    [[ -r "$HOME/.config/catalyst/replica-writer.env" ]] && . "$HOME/.config/catalyst/replica-writer.env"
+    name="$(CFG_DIR="${SCRIPT_DIR}/execution-core" bun -e '
+      const m = await import(process.env.CFG_DIR + "/config.mjs");
+      process.stdout.write(m.resolveNodeCloudTokenEnv().envVar);
+    ' 2>/dev/null || printf 'CATALYST_CLOUD_TOKEN')"
+    present="no"; [[ -n "${!name:-}" ]] && present="yes"
+    printf '%s|%s' "$name" "$present"
+  )"
+  local token_env="${probe%%|*}"
+  local token_present="${probe##*|}"
 
   mkdir -p "${HOME}/Library/LaunchAgents" "${HOME}/catalyst"
 

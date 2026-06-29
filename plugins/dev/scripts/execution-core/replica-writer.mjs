@@ -46,10 +46,16 @@ function scrub(s) {
 const baseUrl = process.env.CATALYST_CLOUD_BASE_URL || DEFAULT_BASE_URL;
 const account = process.env.CATALYST_CLOUD_ACCOUNT || DEFAULT_ACCOUNT;
 // startTimeoutMs (sdk 0.2.1): reject start() if 'live' isn't reached within this — a
-// wedged cold /snapshot or unreachable host then fails fast → exit 1 → launchd restarts,
-// instead of a supervised process hanging forever. Generous default (a real cold seed is
-// seconds, but a large/slow tenant gets headroom); 0/unset disables.
-const startTimeoutMs = Number(process.env.CATALYST_REPLICA_START_TIMEOUT_MS) || 120_000;
+// wedged cold /snapshot or unreachable host fails fast → exit 1 → launchd restarts, instead
+// of a supervised process hanging forever. A positive override wins; an explicit `0` DISABLES
+// the timeout (for a known-slow cold seed — pass `undefined` so the SDK uses no timeout, NOT
+// 0 which the SDK would treat as "time out immediately"); unset/non-numeric → 120_000 default.
+function resolveStartTimeoutMs(raw) {
+  if (raw === "0") return undefined; // explicit disable → omit (SDK default = no timeout)
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 ? n : 120_000;
+}
+const startTimeoutMs = resolveStartTimeoutMs(process.env.CATALYST_REPLICA_START_TIMEOUT_MS);
 const dbPath = getReplicaDbPath();
 const { envVar, source } = resolveNodeCloudTokenEnv();
 const token = process.env[envVar];
@@ -96,8 +102,9 @@ process.on("SIGINT", () => shutdown("SIGINT"));
 
 console.log(`${TAG} starting (db=${dbPath}, account=${account}, token=${envVar}, base=${baseUrl})`);
 try {
-  // Resolves on the FIRST 'live' (caught-up + seed-complete). No built-in timeout —
-  // onStatus drives progress visibility; a stalled /snapshot just delays 'live'.
+  // Resolves on the FIRST 'live' (caught-up + seed-complete). Bounded by startTimeoutMs
+  // (above) unless disabled — a wedged /snapshot rejects and we exit 1 → launchd restarts;
+  // onStatus drives progress visibility meanwhile.
   await replica.start();
 } catch (err) {
   // A second live writer on this path, an unreachable host, or a seed failure lands

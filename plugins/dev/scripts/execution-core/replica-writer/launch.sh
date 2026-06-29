@@ -26,8 +26,29 @@ export CATALYST_DIR
 
 # ─── Preflight ───────────────────────────────────────────────────────────────
 command -v bun >/dev/null 2>&1 || fail "bun not found on PATH — install it (https://bun.sh) or run install-cli.sh"
-WRITER_MJS="${SCRIPT_DIR}/../replica-writer.mjs"
+# CANONICALIZE the writer path (collapse the `..`) so the launched argv is a clean
+# `.../execution-core/replica-writer.mjs` — otherwise pgrep-by-path liveness checks
+# (catalyst doctor, catalyst-stack) see `replica-writer/../replica-writer.mjs` and miss it.
+WRITER_MJS="$(cd "${SCRIPT_DIR}/.." 2>/dev/null && pwd)/replica-writer.mjs"
 [[ -f "$WRITER_MJS" ]] || fail "replica-writer.mjs not found at $WRITER_MJS"
+
+# ─── Secret-hygiene: refuse to leak a group/world-readable token file ─────────
+# The whole point of sourcing the token from a 0600 file (not the world-readable plist)
+# is that no other local user can read the cloud token. If the operator forgot `chmod 600`,
+# warn LOUDLY (but still source it, so a perms slip doesn't strand the writer).
+_warn_if_readable() {
+  local f="$1"
+  [[ -r "$f" ]] || return 0
+  # stat perms portably (BSD/macOS -f%Lp, GNU -c%a). Last two octal digits = group + other;
+  # if either has the read bit (4) set, the secret is exposed to other local users.
+  local mode
+  mode="$(stat -f '%Lp' "$f" 2>/dev/null || stat -c '%a' "$f" 2>/dev/null || echo '')"
+  [[ "$mode" =~ ^[0-7]+$ ]] || return 0
+  local grp=$(( ${mode: -2:1} )) oth=$(( ${mode: -1:1} ))
+  if (( (grp & 4) != 0 || (oth & 4) != 0 )); then
+    printf '[catalyst-replica] WARN: %s is group/other-readable (mode %s) — chmod 600 it so the cloud token cannot be read by other local users\n' "$f" "$mode" >&2
+  fi
+}
 
 # ─── Source the per-node token from a 0600 file (launchd can't see ~/.zshenv/direnv) ──
 # Order: cluster.env (the existing shared-token projection, CTL-1307) then the dedicated
@@ -36,7 +57,9 @@ WRITER_MJS="${SCRIPT_DIR}/../replica-writer.mjs"
 # A node with neither file (or a token only in an interactive-shell secret store) reaches
 # the writer with the var UNSET → the writer fail-open no-ops and doctor surfaces the gap.
 set +u
+_warn_if_readable "$HOME/.config/catalyst/cluster.env"
 [[ -r "$HOME/.config/catalyst/cluster.env" ]] && . "$HOME/.config/catalyst/cluster.env"
+_warn_if_readable "$HOME/.config/catalyst/replica-writer.env"
 [[ -r "$HOME/.config/catalyst/replica-writer.env" ]] && . "$HOME/.config/catalyst/replica-writer.env"
 set -u
 
