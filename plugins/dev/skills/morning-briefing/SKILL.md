@@ -47,6 +47,8 @@ echo "Output path: $OUT_PATH"
 
 ## Step 2: Gather "yesterday" — parallel MCP/CLI queries
 
+> **Read source:** the `linearis` queries below are the standard-node direct read. On a Catalyst Cloud node the local replica is read first (evidence-based fallback to `linearis`) — see the `linearis` skill's "Reading Linear" section.
+
 Launch the five gather helpers in parallel. Each prints a JSON fragment to its own scratch file;
 each degrades silently to `{}` if its credentials are absent so the briefing always renders.
 

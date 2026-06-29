@@ -317,7 +317,8 @@ sits at `needs-human`/`failed`/`stalled`, or its worker died with the signal fro
   mergeable,mergeStateStatus,reviewDecision,statusCheckRollup`: is there a PR, is
   it green, is it BEHIND/CONFLICTING, is it just sitting there mergeable.
 - **The Linear cache** — the `linear-state=…` / `labels=…` the context script
-  printed for the item (from the webhook-fed cache; no direct Linear call needed).
+  printed for the item (orientation snapshot only; always verify with `linearis
+  issues read <T>` before acting — see the Verify-before-act callout).
 
 **Then diagnose like a senior engineer.** From those: what phase is it in? what
 failed — a conflict, a failed check, a dead worker, an un-merged green PR, a
@@ -399,12 +400,15 @@ each, print `BOARD <invariant> OK` or `BOARD <invariant> ANOMALY: <what> → <ac
 If the board scan is all-OK and the flagged YOURS set is empty, you are done — print
 `BOARD all-clear` and stop (no LLM thrash on a healthy board). Otherwise continue.
 
-> **Verify-before-act (do NOT trust the board cache).** The board derives state /
-> labels / relations from a LOCAL cache (`filter-state.db`) that DRIFTS from live
-> Linear (it misses label-removed and relation webhooks). Before you act on or
-> escalate ANY ticket, read its LIVE Linear state (`linearis issues read <T>`) —
-> never act on the cache alone. A ticket the board shows blocked / needs-human / in a
-> given column may be none of those live.
+> **Verify-before-act (do NOT trust the context-script snapshot).** The
+> `linear-state=…` / `labels=…` values the context script printed are an orientation
+> snapshot that may lag live Linear. Before you act on or escalate ANY ticket, read
+> its LIVE Linear state (`linearis issues read <T>`) — never act on the snapshot
+> alone. A ticket the context shows blocked / needs-human / in a given column may be
+> none of those live. (Reading Linear: on a standard Catalyst node `linearis issues
+> read` is always the direct source; on a Catalyst Cloud node the local replica is
+> authoritative — see the `linearis` skill's "Reading Linear" section for the
+> two-mode rule.)
 
 ## The 3-tier rope — how much you may do on your own
 

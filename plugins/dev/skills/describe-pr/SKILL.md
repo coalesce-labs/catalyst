@@ -513,4 +513,4 @@ keys.
 - **Run verification** — attempt all automated checks
 - **Link Linear** — extract ticket, update status
 - **Metadata tracking** — commit history, timestamps
-- For Linearis CLI syntax, see the `linearis` skill reference
+- For Linearis CLI syntax and the two-mode read rule (standard vs Cloud node), see the `linearis` skill's "Reading Linear" section

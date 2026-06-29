@@ -117,6 +117,11 @@ else
     FILTER_MISMATCH=true
   fi
 
+  # The smee→monitor webhook tunnel is the GitHub-event ingestion path and is NOT yet
+  # retired (Linear smee retires first; GitHub smee is gated on CTC-134). A dead tunnel
+  # produces zero events while the monitor keeps heartbeating — so without this check a
+  # worker would treat infra as healthy and enter the 2-hour Phase 2 wait. Tunnel down →
+  # skip the extension and rely on the authoritative REST confirmation below.
   TUNNEL_STATE=$(catalyst-monitor status --json 2>/dev/null | jq -r '.webhookTunnel.connected // false')
   [ "$TUNNEL_STATE" != "true" ] && { echo "WARN: Webhook tunnel not running"; STALLED=true; }
 

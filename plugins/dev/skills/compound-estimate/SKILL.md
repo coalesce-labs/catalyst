@@ -172,6 +172,7 @@ what_surprised_me: "Prometheus integration wasn't plumbed; local state.json suff
 - **Primary cost source** is local: the `catalyst-state.sh` worker-usage aggregate (when orchestrated) or `catalyst-session.sh history` (standalone). This is deliberate — `claude-code-otel` + Prometheus is referenced in the original spec but not yet wired up in this repo.
 - **Prometheus overlay** is gated by `CATALYST_PROMETHEUS_URL`. When set, the helper logs a note to stderr; the HTTP client itself is a follow-up ticket.
 - **Linear estimate** is read as an integer from `linearis issues read`. The team's estimation config (T-shirt, Fibonacci, linear) is applied client-side when re-scoring in step 3.
+- **Read source:** `linearis issues read` is the standard-node direct read; on a Catalyst Cloud node the replica is read first (evidence-based fallback to `linearis`) — see the `linearis` skill's "Reading Linear" section.
 
 ## Testing
 
