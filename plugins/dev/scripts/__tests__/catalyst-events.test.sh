@@ -57,10 +57,12 @@ write_event() {
 
 echo "catalyst-events tests"
 
-# ── 1. help exits 0 ─────────────────────────────────────────────────────────
-run "help exits 0 and prints usage" bash -c "
-  out=\$($EVENTS help 2>&1)
-  echo \"\$out\" | grep -q 'tail and wait-for'
+# ── 1. help exits 0 and prints a real usage block (CTL-1383 replaces the
+#       CTL-382 brittle phrase grep) ─────────────────────────────────────────
+run "help exits 0" expect_exit 0 "$EVENTS" help
+run "help names the tool and prints a usage block" bash -c "
+  out=\$($EVENTS help 2>&1) || exit 1
+  echo \"\$out\" | grep -q 'catalyst-events' && echo \"\$out\" | grep -q 'Usage:'
 "
 
 # ── 2. unknown subcommand exits 2 ───────────────────────────────────────────
