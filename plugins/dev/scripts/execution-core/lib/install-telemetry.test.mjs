@@ -186,3 +186,65 @@ describe("InstallRun (the lifecycle recorder PR2 drives)", () => {
     expect(INSTALL_PHASES).toEqual(["acquire", "backup", "write-config", "install-agents", "start-daemons", "healthcheck"]);
   });
 });
+
+// CTL-1369 PR4 / OTEL turn 21: per-phase duration promoted to a top-level attribute so the OTEL
+// histogram connector (gates on event_name=="catalyst.install.phase", reads
+// attributes["catalyst.install.phase_duration_ms"], divides ÷1000) can build
+// catalyst_install_duration_seconds{operation,phase}. The attribute is MILLISECONDS, null elsewhere.
+describe("phase_duration_ms promotion (the OTEL histogram input)", () => {
+  test("buildInstallEnvelope promotes a finite phaseDurationMs to the top-level attribute (ms)", () => {
+    const env = buildInstallEnvelope({ event: INSTALL_EVENT.phase, operation: "install", phase: "backup", phaseDurationMs: 42 });
+    expect(env.attributes["catalyst.install.phase_duration_ms"]).toBe(42);
+    // It is a measurement attribute, NOT one of the low-card label dims.
+    expect(env.attributes["catalyst.install.phase"]).toBe("backup");
+  });
+
+  test("the attribute is null on a non-phase event (and when phaseDurationMs is omitted)", () => {
+    expect(buildInstallEnvelope({ event: INSTALL_EVENT.started, operation: "install" }).attributes["catalyst.install.phase_duration_ms"]).toBeNull();
+    expect(buildInstallEnvelope({ event: INSTALL_EVENT.completed, outcome: "completed" }).attributes["catalyst.install.phase_duration_ms"]).toBeNull();
+    // a non-finite value (e.g. NaN/Infinity) degrades to null, never leaks a bad number to the connector.
+    expect(buildInstallEnvelope({ event: INSTALL_EVENT.phase, phaseDurationMs: Number.NaN }).attributes["catalyst.install.phase_duration_ms"]).toBeNull();
+  });
+
+  test("makeInstallEmitFn writes the phase_duration_ms attribute to the JSONL line", () => {
+    const logPath = tmpLog();
+    const emit = makeInstallEmitFn({ getLogPathFn: () => logPath, nowFn: () => 0, nodeClass: "worker", hostNameVal: "mini" });
+    emit({ event: INSTALL_EVENT.phase, operation: "install", phase: "acquire", phaseDurationMs: 7 });
+    const env = JSON.parse(readFileSync(logPath, "utf8").trim());
+    expect(env.attributes["catalyst.install.phase_duration_ms"]).toBe(7);
+  });
+
+  test("InstallRun.phase emits the measured duration as the top-level attribute (ms) on success", async () => {
+    const events = [];
+    // increment-by-1 clock (the file's idiom): phase-start and phase-end are consecutive nowFn calls,
+    // so the measured delta is a positive integer. We assert the PROMOTED value === the body's measured
+    // duration (both = endEpochMs-startEpochMs), proving the promotion carries the same timed delta.
+    const run = new InstallRun({
+      operation: "install",
+      nodeClass: "worker",
+      emit: (e) => events.push(e),
+      nowFn: (() => { let t = 0; return () => (t += 1); })(),
+    });
+    run.start();
+    await run.phase("acquire", () => "ok");
+    const phaseEvent = events.find((e) => e.event === INSTALL_EVENT.phase);
+    expect(phaseEvent.phaseDurationMs).toBeGreaterThan(0);
+    expect(phaseEvent.phaseDurationMs).toBe(phaseEvent.detail.duration_ms);
+  });
+
+  test("a FAILED phase also carries phase_duration_ms (the histogram buckets by phase regardless of outcome)", async () => {
+    const events = [];
+    const run = new InstallRun({
+      operation: "install",
+      nodeClass: "worker",
+      emit: (e) => events.push(e),
+      nowFn: (() => { let t = 0; return () => (t += 1); })(),
+    });
+    run.start();
+    await expect(run.phase("backup", () => { throw new Error("boom"); })).rejects.toThrow("boom");
+    const phaseEvent = events.find((e) => e.event === INSTALL_EVENT.phase);
+    expect(phaseEvent.outcome).toBe("failed");
+    expect(typeof phaseEvent.phaseDurationMs).toBe("number");
+    expect(phaseEvent.phaseDurationMs).toBeGreaterThanOrEqual(0);
+  });
+});

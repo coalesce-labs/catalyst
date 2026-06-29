@@ -93,6 +93,9 @@ export function resolveScripts(env = process.env) {
     setup: env.CATALYST_INSTALL_SETUP_SCRIPT || join(REPO_ROOT, "setup-catalyst.sh"),
     installCli: env.CATALYST_INSTALL_CLI_SCRIPT || join(SCRIPTS_DIR, "install-cli.sh"),
     stack: env.CATALYST_INSTALL_STACK_BIN || join(SCRIPTS_DIR, "catalyst-stack"),
+    // CTL-1369 PR4: the class-aware doctor, run as the install's pre-state observation + post-install
+    // verification (catalyst-doctor --profile install). Env-override seam for tests.
+    doctor: env.CATALYST_INSTALL_DOCTOR_BIN || join(SCRIPTS_DIR, "catalyst-doctor"),
   };
 }
 
@@ -273,7 +276,14 @@ export function planPhases({ operation, nodeClass, scripts, opts = {} }) {
 
   const healthcheck = () => ({
     phase: "healthcheck",
-    steps: [{ label: "verify-node", kind: "healthcheck", argv: [scripts.stack, "verify-node"] }],
+    steps: [
+      { label: "verify-node", kind: "healthcheck", argv: [scripts.stack, "verify-node"] },
+      // CTL-1369 PR4: the class-aware post-install verification — node-class + correct launchd agent
+      // SET + sane pluginPullOwner for the class (catalyst-doctor --profile install). Complements
+      // verify-node (daemon liveness + plugins-fresh). NON-fatal for rollback, but its verdict folds
+      // into healthOk → the command exit code, so a mis-provisioned node (wrong agents/owner) fails.
+      { label: "doctor", kind: "doctor", argv: [scripts.doctor, "--profile", "install", "--json"] },
+    ],
   });
 
   const stopDaemons = () => ({
@@ -518,6 +528,31 @@ function defaultProbeDrained({ scripts, env = process.env } = {}) {
   }
 }
 
+// runDoctorPass — CTL-1369 PR4. Run `catalyst-doctor --profile install --json` and parse its summary.
+// doctor's exit code is its FAIL count; its stdout is { ok, counts:{pass,warn,fail}, checks:[...] }.
+// Best-effort: an unrunnable/unparseable doctor returns { ok: null } (advisory — never fails an
+// otherwise-good install on a doctor/telemetry hiccup; the install IS done). Drives BOTH the
+// pre-install before-snapshot (observe-only) and the post-install verification (folds into healthOk).
+// Injectable runStep for tests.
+function defaultRunDoctorPass({ argv, env, runStep = defaultRunStep }) {
+  const r = runStep({ argv, env });
+  let parsed = null;
+  try {
+    parsed = JSON.parse(r.stdout);
+  } catch {
+    /* unparseable doctor output → advisory (ok:null) */
+  }
+  const fails = Array.isArray(parsed?.checks)
+    ? parsed.checks.filter((c) => c?.status === "fail").map((c) => c?.name)
+    : null;
+  return {
+    ok: parsed && typeof parsed.ok === "boolean" ? parsed.ok : null, // null = could not determine (advisory)
+    rc: r.code,
+    counts: parsed?.counts ?? null,
+    fails,
+  };
+}
+
 export function buildDefaultDeps(env) {
   const scripts = resolveScripts(env);
   return {
@@ -568,7 +603,7 @@ function isTeardown(operation) {
  *   InstallRunCtor.
  */
 export async function runInstallLifecycle({ operation, nodeClass, opts = {} }, deps) {
-  const { scripts, env, layer2, runStep, emit, nowFn, genTraceId, genSpanId, probeDaemons, probeResidualAgents, probeDrained, bundleHasCapturedAgents, scriptExists, binExists, probeUpdaterAgent, probeWorkerAgents, probeCliInstalled, log, InstallRunCtor } = deps;
+  const { scripts, env, layer2, runStep, runDoctorPass, emit, nowFn, genTraceId, genSpanId, probeDaemons, probeResidualAgents, probeDrained, bundleHasCapturedAgents, scriptExists, binExists, probeUpdaterAgent, probeWorkerAgents, probeCliInstalled, log, InstallRunCtor } = deps;
 
   // Every composed step inherits (a) the RESOLVED class so the bash tools (which re-derive class
   // env-first) cannot diverge from the lifecycle's target — e.g. `install --class developer` on a
@@ -586,6 +621,14 @@ export async function runInstallLifecycle({ operation, nodeClass, opts = {} }, d
   const cliBinDir = env.CATALYST_BIN_DIR || env.CATALYST_CLI_BIN_DIR || `${home}/.catalyst/bin`;
   const seededPath = [cliBinDir, `${home}/.bun/bin`, `${home}/.local/bin`, env.PATH].filter(Boolean).join(":");
   const stepEnv = { ...env, CATALYST_NODE_CLASS: nodeClass, CATALYST_LAYER2_CONFIG_FILE: layer2, CATALYST_MACHINE_CONFIG: layer2, PATH: seededPath };
+
+  // CTL-1369 PR4: the doctor pre/post passes route through the lifecycle's INJECTED runStep by default
+  // (so a test stubbing runStep automatically stubs doctor too — no separate spawn), and remain
+  // overridable via deps.runDoctorPass for focused tests. Production passes neither → real runStep.
+  const callDoctor = (argv) =>
+    typeof runDoctorPass === "function"
+      ? runDoctorPass({ argv, env: stepEnv })
+      : defaultRunDoctorPass({ argv, env: stepEnv, runStep });
 
   // Pre-flight live-node guard (teardown only) — refuse BEFORE starting a run.
   if (isTeardown(operation) && !opts.force) {
@@ -647,9 +690,29 @@ export async function runInstallLifecycle({ operation, nodeClass, opts = {} }, d
     return { outcome: "refused", reason: "live-worker-stack" };
   }
 
+  // CTL-1369 PR4: pre-install doctor — capture the node's BEFORE-state on the SAME class-aware
+  // install rubric the post-install verification uses, so the install trace shows before→after (the
+  // "SEE an install run" thesis). OBSERVE-ONLY: a fresh node legitimately FAILs the install profile
+  // (no agents yet), so this never refuses — the lifecycle's typed guards above (stale-updater /
+  // live-worker-stack / live-node) are the refusal mechanism for a genuinely bad pre-state. Only
+  // install/reinstall (the provisioning ops, which have doctor in their plan) get a before-snapshot.
+  // Best-effort (ok:null when doctor can't run); the summary rides the started event's body payload.
+  let preDoctor = null;
+  if (operation === "install" || operation === "reinstall") {
+    try {
+      preDoctor = callDoctor([scripts.doctor, "--profile", "install", "--json"]);
+      if (preDoctor) {
+        const c = preDoctor.counts;
+        log(`catalyst-install: pre-install doctor (--profile install): ${preDoctor.ok === null ? "could not run (advisory)" : preDoctor.ok ? "PASS" : `${c ? c.fail : "?"} fail`} (before-state)`);
+      }
+    } catch {
+      preDoctor = null; // observation must never break an install
+    }
+  }
+
   const traceId = genTraceId();
   const spanId = genSpanId();
-  const run = new InstallRunCtor({ operation, nodeClass, emit, traceId, spanId, nowFn }).start({ class: nodeClass });
+  const run = new InstallRunCtor({ operation, nodeClass, emit, traceId, spanId, nowFn }).start({ class: nodeClass, preDoctor });
 
   // Snapshot the node's PRE-RUN state BEFORE the first phase (acquire) writes anything. Used by
   // rollback: a fresh node (no managed keys / no CLI before the run) gets those artifacts removed,
@@ -668,7 +731,7 @@ export async function runInstallLifecycle({ operation, nodeClass, opts = {} }, d
     pluginDirs: readDeepKey(preCfg, "catalyst.orchestration.pluginDirs") ?? null,
   };
 
-  const ctx = { bundlePath: null, healthOk: true, healthRc: null, cleanOk: true, teardownRan: false };
+  const ctx = { bundlePath: null, healthOk: true, healthRc: null, cleanOk: true, teardownRan: false, doctorOk: true, doctorRc: null, doctorSummary: null };
 
   const runOneStep = async (step) => {
     switch (step.kind) {
@@ -722,6 +785,35 @@ export async function runInstallLifecycle({ operation, nodeClass, opts = {} }, d
         log(`catalyst-install: healthcheck (verify-node) ${ctx.healthOk ? "PASS" : `FAIL (rc ${r.code})`}`);
         return;
       }
+      case "doctor": {
+        // CTL-1369 PR4: post-install class-aware verification. NON-fatal for rollback (the node IS
+        // installed), but its verdict folds into healthOk → the command exit code. Best-effort: a
+        // doctor that can't run / can't be parsed (ok:null) is ADVISORY — it must not fail an
+        // otherwise-good install on a doctor hiccup; only an explicit doctor FAIL (ok:false) does.
+        // Best-effort + fail-safe: a doctor pass that THROWS (a future runStep/runDoctorPass contract
+        // change, or an injected stub that throws) must NOT propagate out of run.phase("healthcheck")
+        // into the outer catch — that would ROLL BACK an already-fully-provisioned node. Degrade to
+        // advisory (ok:null) instead, symmetric with the try/catch-guarded pre-install pass.
+        let summary;
+        try {
+          summary = callDoctor(step.argv) || { ok: null, rc: null, counts: null, fails: null };
+        } catch (e) {
+          summary = { ok: null, rc: null, counts: null, fails: null };
+          log(`catalyst-install: post-install doctor errored (advisory — install not failed): ${e?.message ?? e}`);
+        }
+        ctx.doctorSummary = summary;
+        ctx.doctorRc = summary.rc;
+        ctx.doctorOk = summary.ok !== false; // null (couldn't determine) → advisory PASS; false → fail
+        log(
+          `catalyst-install: doctor (--profile install) ` +
+            (summary.ok === null
+              ? "could not run (advisory — install not failed on this)"
+              : summary.ok
+                ? "PASS (node-class + agent set + pull-owner correct for class)"
+                : `FAIL [${(summary.fails || []).join(", ") || `rc ${summary.rc}`}] — node provisioned but not class-correct`),
+        );
+        return;
+      }
       case "verify-clean": {
         // NON-fatal for rollback, but the verdict drives the exit code for teardown ops (see main()).
         // Uses the residual-agent probe (NOT probeDaemons) so it honestly catches the updater agent —
@@ -758,8 +850,11 @@ export async function runInstallLifecycle({ operation, nodeClass, opts = {} }, d
       run.fail(e, { rolledBack: false, detail: { reason: "dirty-teardown", cleanOk: false } });
       return { outcome: "failed", error: e.message, healthOk: ctx.healthOk, healthRc: ctx.healthRc, cleanOk: false, bundlePath: ctx.bundlePath, traceId };
     }
-    run.complete({ class: nodeClass, healthOk: ctx.healthOk, cleanOk: ctx.cleanOk, bundle: ctx.bundlePath });
-    return { outcome: "completed", healthOk: ctx.healthOk, healthRc: ctx.healthRc, cleanOk: ctx.cleanOk, bundlePath: ctx.bundlePath, traceId };
+    // CTL-1369 PR4: the completed event carries BOTH doctor summaries (before via started, after here)
+    // so the install trace shows the node's health change. doctorOk folds into the command exit code
+    // (in main), so a node that provisioned but is NOT class-correct (wrong agents/owner) exits non-zero.
+    run.complete({ class: nodeClass, healthOk: ctx.healthOk, doctorOk: ctx.doctorOk, cleanOk: ctx.cleanOk, bundle: ctx.bundlePath, postDoctor: ctx.doctorSummary });
+    return { outcome: "completed", healthOk: ctx.healthOk, healthRc: ctx.healthRc, doctorOk: ctx.doctorOk, doctorRc: ctx.doctorRc, doctorFails: ctx.doctorSummary?.fails ?? null, cleanOk: ctx.cleanOk, bundlePath: ctx.bundlePath, traceId };
   } catch (err) {
     let rolledBack = false;
     // disposition: "none" = nothing to undo (failed before/at backup) → benign abort; "ok" = fully
@@ -1085,10 +1180,15 @@ export async function main(argv, depsOverride) {
   switch (result.outcome) {
     case "completed":
       // A dirty teardown (verify-clean found residual agents) is returned as outcome "failed" by
-      // runInstallLifecycle, so a "completed" install/uninstall here is genuinely clean. An unhealthy
-      // verify-node is still "completed" (the node IS installed) but exits 1.
+      // runInstallLifecycle, so a "completed" install/uninstall here is genuinely clean. A node that
+      // installed but is UNHEALTHY (verify-node) or NOT class-correct (post-install doctor FAIL —
+      // CTL-1369 PR4) is still "completed" (the node IS installed) but exits 1. doctorOk===false is an
+      // explicit doctor FAIL; doctorOk:true also covers the advisory "couldn't run" (ok:null) case.
       if (!result.healthOk) {
         errOut(`catalyst-install: ${args.operation} completed but verify-node reported the node UNHEALTHY (rc ${result.healthRc ?? "?"}).`);
+        code = 1;
+      } else if (result.doctorOk === false) {
+        errOut(`catalyst-install: ${args.operation} completed but the post-install doctor (--profile install) reported the node is NOT class-correct${result.doctorFails?.length ? ` [${result.doctorFails.join(", ")}]` : ""} — verify the launchd agent set + pluginPullOwner for class '${nodeClass}'.`);
         code = 1;
       } else {
         if (!args.json) out(`catalyst-install: ${args.operation} (${nodeClass}) completed.`);

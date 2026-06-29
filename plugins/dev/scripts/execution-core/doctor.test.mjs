@@ -31,7 +31,10 @@ import {
   checkMonitorProductionBuild,
   checkWontOwnWork,
   checkDaemonlessLocal,
+  checkAgentsForClass,
+  checkPluginPullOwner,
   checksForClass,
+  installChecksForClass,
   summarize,
   renderJson,
   renderHuman,
@@ -39,6 +42,8 @@ import {
   runDoctor,
 } from "./doctor.mjs";
 import { validateLayer1Config } from "../lib/validate-catalyst-config.mjs";
+// CTL-1369 PR4: parity source for doctor's inlined defaultPluginPullOwner.
+import { resolvePluginPullOwner } from "../broker/plugin-refresh.mjs";
 
 // ─── Phase 1: checkHostIdentity ──────────────────────────────────────────────
 
@@ -2051,5 +2056,254 @@ describe("runDoctor — class-aware routing (CTL-1355)", () => {
       log: () => {},
     });
     expect(code).toBe(1);
+  });
+});
+
+// ─── CTL-1369 PR4: install-correctness checks ────────────────────────────────
+
+describe("checkAgentsForClass (CTL-1369 PR4)", () => {
+  const only = (deps) => checkAgentsForClass(deps)[0];
+
+  describe("worker", () => {
+    it("stack agent installed, no updater → PASS", () => {
+      const c = only({ nodeClass: "worker", hasStackAgent: true, hasUpdaterAgent: false });
+      expect(c.name).toBe("agents-for-class");
+      expect(c.status).toBe(STATUS.PASS);
+    });
+    it("updater agent present on a worker → FAIL (two-puller hazard), regardless of stack", () => {
+      expect(only({ nodeClass: "worker", hasStackAgent: true, hasUpdaterAgent: true }).status).toBe(STATUS.FAIL);
+      expect(only({ nodeClass: "worker", hasStackAgent: false, hasUpdaterAgent: true }).status).toBe(STATUS.FAIL);
+    });
+    it("no agents → WARN in activation (strict:false), FAIL under strict (post-install)", () => {
+      expect(only({ nodeClass: "worker", hasStackAgent: false, hasUpdaterAgent: false, strict: false }).status).toBe(STATUS.WARN);
+      expect(only({ nodeClass: "worker", hasStackAgent: false, hasUpdaterAgent: false, strict: true }).status).toBe(STATUS.FAIL);
+    });
+  });
+
+  describe("developer / monitor", () => {
+    for (const nodeClass of ["developer", "monitor"]) {
+      it(`${nodeClass}: updater installed, no stack → PASS`, () => {
+        expect(only({ nodeClass, hasStackAgent: false, hasUpdaterAgent: true }).status).toBe(STATUS.PASS);
+      });
+      it(`${nodeClass}: worker stack present → FAIL (must not run broker/exec-core), regardless of updater`, () => {
+        expect(only({ nodeClass, hasStackAgent: true, hasUpdaterAgent: true }).status).toBe(STATUS.FAIL);
+        expect(only({ nodeClass, hasStackAgent: true, hasUpdaterAgent: false }).status).toBe(STATUS.FAIL);
+      });
+      it(`${nodeClass}: no agents → WARN in activation, FAIL under strict`, () => {
+        expect(only({ nodeClass, hasStackAgent: false, hasUpdaterAgent: false, strict: false }).status).toBe(STATUS.WARN);
+        expect(only({ nodeClass, hasStackAgent: false, hasUpdaterAgent: false, strict: true }).status).toBe(STATUS.FAIL);
+      });
+    }
+  });
+});
+
+describe("checkPluginPullOwner (CTL-1369 PR4)", () => {
+  const only = (deps) => checkPluginPullOwner(deps)[0];
+
+  it("worker + owner=broker → PASS; worker + owner=updater → FAIL (broker defers to absent updater)", () => {
+    expect(only({ nodeClass: "worker", owner: "broker" }).status).toBe(STATUS.PASS);
+    const fail = only({ nodeClass: "worker", owner: "updater" });
+    expect(fail.status).toBe(STATUS.FAIL);
+    expect(fail.name).toBe("plugin-pull-owner");
+  });
+
+  for (const nodeClass of ["developer", "monitor"]) {
+    it(`${nodeClass} + owner=updater → PASS`, () => {
+      expect(only({ nodeClass, owner: "updater" }).status).toBe(STATUS.PASS);
+    });
+    it(`${nodeClass} + owner=broker → WARN in activation, FAIL under strict`, () => {
+      expect(only({ nodeClass, owner: "broker", strict: false }).status).toBe(STATUS.WARN);
+      expect(only({ nodeClass, owner: "broker", strict: true }).status).toBe(STATUS.FAIL);
+    });
+  }
+});
+
+// Parity: doctor's inlined defaultPluginPullOwner must agree with the canonical
+// broker/plugin-refresh.mjs::resolvePluginPullOwner across representative inputs. We can't call the
+// (unexported) inline directly, so we exercise it END-TO-END via checkPluginPullOwner's default
+// `owner` seam (omit owner → it reads via defaultPluginPullOwner) and compare the resulting verdict
+// to what the canonical resolver would yield for the same env/config.
+describe("defaultPluginPullOwner ↔ resolvePluginPullOwner parity (CTL-1369 PR4)", () => {
+  let dir;
+  beforeEach(() => { dir = mkdtempSync(join(tmpdir(), "doctor-pull-owner-")); });
+  afterEach(() => { rmSync(dir, { recursive: true, force: true }); });
+
+  const cases = [
+    { name: "env=updater wins", env: { CATALYST_PLUGIN_PULL_OWNER: "updater" }, cfg: null },
+    { name: "env=broker", env: { CATALYST_PLUGIN_PULL_OWNER: "broker" }, cfg: null },
+    { name: "env garbage coerces to broker", env: { CATALYST_PLUGIN_PULL_OWNER: "weird" }, cfg: null },
+    { name: "config updater (no env)", env: {}, cfg: { catalyst: { orchestration: { pluginPullOwner: "updater" } } } },
+    { name: "config broker (no env)", env: {}, cfg: { catalyst: { orchestration: { pluginPullOwner: "broker" } } } },
+    { name: "unset everywhere → broker", env: {}, cfg: {} },
+    { name: "malformed config → broker", env: {}, cfg: "MALFORMED" },
+  ];
+
+  for (const tc of cases) {
+    it(tc.name, () => {
+      const cfgPath = join(dir, "config.json");
+      if (tc.cfg !== null) writeFileSync(cfgPath, tc.cfg === "MALFORMED" ? "{not json" : JSON.stringify(tc.cfg));
+      const env = { ...tc.env, CATALYST_LAYER2_CONFIG_FILE: cfgPath };
+      const canonical = resolvePluginPullOwner({ env, machineConfigPath: cfgPath });
+      // Drive doctor's inline via its default seam: set process.env to match, omit `owner`.
+      const savedEnv = process.env.CATALYST_PLUGIN_PULL_OWNER;
+      const savedCfg = process.env.CATALYST_LAYER2_CONFIG_FILE;
+      try {
+        if ("CATALYST_PLUGIN_PULL_OWNER" in tc.env) process.env.CATALYST_PLUGIN_PULL_OWNER = tc.env.CATALYST_PLUGIN_PULL_OWNER;
+        else delete process.env.CATALYST_PLUGIN_PULL_OWNER;
+        process.env.CATALYST_LAYER2_CONFIG_FILE = cfgPath;
+        // A worker grades owner=broker→PASS, owner=updater→FAIL — so the verdict encodes the resolved owner.
+        const verdict = checkPluginPullOwner({ nodeClass: "worker" })[0].status;
+        const expected = canonical === "updater" ? STATUS.FAIL : STATUS.PASS;
+        expect(verdict).toBe(expected);
+      } finally {
+        if (savedEnv === undefined) delete process.env.CATALYST_PLUGIN_PULL_OWNER;
+        else process.env.CATALYST_PLUGIN_PULL_OWNER = savedEnv;
+        if (savedCfg === undefined) delete process.env.CATALYST_LAYER2_CONFIG_FILE;
+        else process.env.CATALYST_LAYER2_CONFIG_FILE = savedCfg;
+      }
+    });
+  }
+});
+
+describe("checksForClass wires the PR4 install-correctness checks into every arm (CTL-1369 PR4)", () => {
+  const srcOf = (nc, opts = {}) => checksForClass(nc, opts).map((f) => f.toString()).join("\n");
+  for (const cls of ["worker", "developer", "monitor"]) {
+    it(`${cls} suite includes checkAgentsForClass + checkPluginPullOwner`, () => {
+      const s = srcOf(nodeClassOf({ class: cls, raw: cls }));
+      expect(s).toContain("checkAgentsForClass");
+      expect(s).toContain("checkPluginPullOwner");
+    });
+  }
+  // E2E: EXECUTE the thunks checksForClass actually builds (not a source-string match) so the
+  // strict:false default + correct nc.class are pinned through the real wiring. This is the load-bearing
+  // join-gate invariant: catalyst-join do_doctor_gate runs doctor BEFORE install-services and exits
+  // non-zero on any FAIL, so a fresh/not-yet-provisioned node MUST grade WARN here. A regression that
+  // wired strict:true (or the wrong class) into the activation arm would FAIL this test.
+  // We source-match ONLY to SELECT the two thunks, then EXECUTE them to assert behavior.
+  const runPicked = async (suite, needle) => {
+    const picked = suite.filter((f) => f.toString().includes(needle));
+    return (await Promise.all(picked.map((f) => Promise.resolve().then(f)))).flat();
+  };
+  it("worker activation arm runs agents/pull-owner at strict:false (fresh worker → agents WARN, owner=broker PASS)", async () => {
+    const suite = checksForClass(nodeClassOf({ class: "worker", raw: "worker" }), { hasStackAgent: false, hasUpdaterAgent: false, pluginPullOwner: "broker" });
+    const agents = (await runPicked(suite, "checkAgentsForClass")).find((c) => c.name === "agents-for-class");
+    const owner = (await runPicked(suite, "checkPluginPullOwner")).find((c) => c.name === "plugin-pull-owner");
+    expect(agents.status).toBe(STATUS.WARN); // NOT FAIL — would fail-close the join gate on a fresh node
+    expect(owner.status).toBe(STATUS.PASS); // worker + broker = correct
+  });
+  it("developer activation arm runs agents/pull-owner at strict:false (fresh developer → both WARN, not FAIL)", async () => {
+    const suite = checksForClass(nodeClassOf({ class: "developer", raw: "developer" }), { hasStackAgent: false, hasUpdaterAgent: false, pluginPullOwner: "broker" });
+    const agents = (await runPicked(suite, "checkAgentsForClass")).find((c) => c.name === "agents-for-class");
+    const owner = (await runPicked(suite, "checkPluginPullOwner")).find((c) => c.name === "plugin-pull-owner");
+    expect(agents.status).toBe(STATUS.WARN); // not-yet-adopted developer → advisory, not FAIL
+    expect(owner.status).toBe(STATUS.WARN); // developer + broker (not updater) → advisory in activation
+  });
+});
+
+describe("installChecksForClass — the focused post-install verification (CTL-1369 PR4)", () => {
+  it("unrecognized class → single node-class check", () => {
+    const fns = installChecksForClass(nodeClassOf({ recognized: false, raw: "developr", class: "monitor" }));
+    expect(fns).toHaveLength(1);
+  });
+
+  it("grades node-class + agents + pull-owner, and OMITS the network/operational checks", () => {
+    const s = installChecksForClass(nodeClassOf({ class: "worker", raw: "worker" })).map((f) => f.toString()).join("\n");
+    expect(s).toContain("checkNodeClass");
+    expect(s).toContain("checkAgentsForClass");
+    expect(s).toContain("checkPluginPullOwner");
+    // deliberately excluded — operational/network checks an install can't guarantee:
+    expect(s).not.toContain("checkReadReplicaReachable");
+    expect(s).not.toContain("checkBotCredentials");
+    expect(s).not.toContain("checkWebhookIngestion");
+  });
+
+  it("grades the agent/owner checks strict:true (a not-yet-provisioned worker FAILs, unlike activation)", async () => {
+    // Execute the install-profile thunks for a worker with NO agents + unset owner. Under strict the
+    // missing agent + unset owner are FAILs (post-install they must be correct), where the activation
+    // rubric would only WARN.
+    const fns = installChecksForClass(nodeClassOf({ class: "worker", raw: "worker" }), {
+      hasStackAgent: false,
+      hasUpdaterAgent: false,
+      pluginPullOwner: "broker", // a worker w/ broker is fine; the FAIL here is the missing stack agent
+    });
+    const results = (await Promise.all(fns.map((f) => Promise.resolve().then(f)))).flat();
+    const agents = results.find((c) => c.name === "agents-for-class");
+    expect(agents.status).toBe(STATUS.FAIL);
+  });
+
+  it("FAILs a worker post-install whose updater agent is still present (mixed profile)", async () => {
+    const code = await runDoctor({
+      checks: installChecksForClass(nodeClassOf({ class: "worker", raw: "worker" }), {
+        hasStackAgent: true,
+        hasUpdaterAgent: true, // the two-puller hazard
+        pluginPullOwner: "broker",
+      }),
+      log: () => {},
+    });
+    expect(code).toBe(1);
+  });
+
+  it("PASSes a correctly-provisioned worker post-install (stack only, owner=broker)", async () => {
+    const code = await runDoctor({
+      resolveClass: () => nodeClassOf({ class: "worker", raw: "worker" }),
+      profile: "install",
+      hasStackAgent: true,
+      hasUpdaterAgent: false,
+      pluginPullOwner: "broker",
+      log: () => {},
+    });
+    expect(code).toBe(0);
+  });
+
+  it("PASSes a correctly-provisioned developer post-install (updater only, owner=updater)", async () => {
+    const code = await runDoctor({
+      resolveClass: () => nodeClassOf({ class: "developer", source: "layer2", raw: "developer" }),
+      profile: "install",
+      hasStackAgent: false,
+      hasUpdaterAgent: true,
+      pluginPullOwner: "updater",
+      log: () => {},
+    });
+    expect(code).toBe(0);
+  });
+});
+
+describe("parseArgs --profile / --install (CTL-1369 PR4)", () => {
+  it("defaults to the activation profile", () => {
+    expect(parseArgs([]).profile).toBe("activation");
+  });
+  it("--profile install selects the install profile", () => {
+    expect(parseArgs(["--profile", "install"]).profile).toBe("install");
+  });
+  it("--install is shorthand for --profile install", () => {
+    expect(parseArgs(["--install"]).profile).toBe("install");
+  });
+  it("an unknown/typo'd --profile value leaves the default (never silently weakens the gate)", () => {
+    expect(parseArgs(["--profile", "instal"]).profile).toBe("activation");
+    expect(parseArgs(["--profile"]).profile).toBe("activation");
+  });
+});
+
+describe("runDoctor profile routing (CTL-1369 PR4)", () => {
+  it("profile:install routes to installChecksForClass (the focused subset), not the full rubric", async () => {
+    const logs = [];
+    const code = await runDoctor({
+      resolveClass: () => nodeClassOf({ class: "worker", raw: "worker" }),
+      profile: "install",
+      json: true,
+      hasStackAgent: true,
+      hasUpdaterAgent: false,
+      pluginPullOwner: "broker",
+      log: (m) => logs.push(m),
+    });
+    const parsed = JSON.parse(logs[0]);
+    const names = parsed.checks.map((c) => c.name);
+    expect(names).toContain("node-class");
+    expect(names).toContain("agents-for-class");
+    expect(names).toContain("plugin-pull-owner");
+    // the heavy activation-only checks must NOT appear in the install subset:
+    expect(names).not.toContain("host-identity");
+    expect(names).not.toContain("webhook-ingestion");
+    expect(code).toBe(0);
   });
 });

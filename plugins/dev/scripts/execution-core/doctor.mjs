@@ -1281,6 +1281,10 @@ Exit code equals the number of FAIL-level checks (0 = safe to activate).
 
 Options:
   --json                      Emit machine-readable JSON ({ok, counts, checks[]})
+  --profile <activation|install>  activation (default — the full class rubric) | install
+                              (the focused post-install verification: node-class + agent-set +
+                              pull-owner, fail-closed). 'catalyst install' runs --profile install.
+  --install                   Shorthand for --profile install
   --dry-run                   No-op flag (all checks are already read-only)
   --expected-bot-user-id <id> Assert that the configured token belongs to <id>
   --help, -h                  Print this help and exit 0
@@ -1292,17 +1296,25 @@ export function parseArgs(argv) {
   let json = false;
   let expectedBotUserId = null;
   let help = false;
+  // CTL-1369 PR4: "activation" (default) | "install" (the post-install verification subset).
+  let profile = "activation";
   // --dry-run is the default behavior (no separate code path); accept it silently
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
     if (a === "--json") json = true;
     else if (a === "--dry-run") { /* default behavior; no-op */ }
     else if (a === "--help" || a === "-h") help = true;
-    else if (a === "--expected-bot-user-id") {
+    else if (a === "--install") profile = "install";
+    else if (a === "--profile") {
+      const v = args[++i];
+      // Only the two recognized profiles take effect; an unknown/missing value leaves the default
+      // "activation" (a typo must never silently weaken the gate to a smaller suite).
+      if (v === "install" || v === "activation") profile = v;
+    } else if (a === "--expected-bot-user-id") {
       expectedBotUserId = args[++i] ?? null;
     }
   }
-  return { json, expectedBotUserId, help };
+  return { json, expectedBotUserId, help, profile };
 }
 
 // defaultReaperState — load state + last exit of the orphan-sweep LaunchAgent.
@@ -2192,6 +2204,151 @@ export function checkDaemonlessLocal(deps = {}) {
   return out;
 }
 
+// ─── CTL-1369 PR4: install-correctness checks (agent-set + pull-owner per class) ──
+//
+// These two checks make `catalyst install` self-verifying: they assert the node ended up with the
+// CORRECT launchd agent SET and plugin-pull owner for its class — the heart of the per-class
+// invariant (catalyst-stack work-stack ⟺ worker; catalyst-updater + pluginPullOwner=updater ⟺
+// developer/monitor). A genuine class MISMATCH (the two-puller / mixed-profile hazard) is always a
+// FAIL. The `strict` flag governs only the NOT-YET-PROVISIONED case: in the always-on activation
+// rubric (strict:false) a missing agent / unset owner is a WARN (a fresh node legitimately has
+// neither, and catalyst-join's do_doctor_gate runs BEFORE install-services — a FAIL would fail-close
+// the join gate, the same trap checkReaper/checkConfigScopeLeak avoid). In the install-verification
+// profile (strict:true, run by `catalyst install` as its post-install pass) a missing agent / unset
+// owner is a FAIL — post-install the agents + owner MUST be correct or the install did not take.
+
+const STACK_AGENT_LABEL = "ai.coalesce.catalyst-stack"; // the worker work-stack supervisor (broker/exec-core/monitor)
+const UPDATER_AGENT_LABEL = "ai.coalesce.catalyst-updater"; // the 5th updater agent (sole puller) on developer/monitor
+
+function defaultLaunchAgentsDir() {
+  return process.env.CATALYST_LAUNCHAGENTS_DIR || resolve(homedir(), "Library", "LaunchAgents");
+}
+
+// defaultAgentInstalled — is the launchd plist for <label> present? Deterministic file probe
+// (mirrors install-lifecycle.mjs defaultProbeWorkerAgents/defaultProbeUpdaterAgent). Honors
+// CATALYST_LAUNCHAGENTS_DIR for sandbox tests.
+function defaultAgentInstalled(label, dir = defaultLaunchAgentsDir()) {
+  try {
+    return existsSync(resolve(dir, `${label}.plist`));
+  } catch {
+    return false;
+  }
+}
+
+// checkAgentsForClass — assert the correct launchd agent SET for the class. The two discriminators
+// are the worker stack agent and the developer/monitor updater agent; their PRESENCE is mutually
+// exclusive (a node running both is the CTL-1348 two-puller hazard). Injectable for tests.
+export function checkAgentsForClass(deps = {}) {
+  const {
+    nodeClass,
+    strict = false,
+    hasStackAgent = defaultAgentInstalled(STACK_AGENT_LABEL),
+    hasUpdaterAgent = defaultAgentInstalled(UPDATER_AGENT_LABEL),
+  } = deps;
+
+  if (nodeClass === "worker") {
+    // A worker's broker owns the pull; the updater agent must NOT be present (two-puller race).
+    if (hasUpdaterAgent) {
+      return [
+        mkCheck(
+          "agents-for-class",
+          STATUS.FAIL,
+          `worker node has the developer/monitor updater agent (${UPDATER_AGENT_LABEL}) installed — ` +
+            `the two-puller hazard (the broker AND the updater would both pull the plugin checkout). ` +
+            `Run 'catalyst reinstall --class worker' (its teardown removes the updater) or 'catalyst-stack uninstall-services'`,
+        ),
+      ];
+    }
+    if (hasStackAgent) {
+      return [mkCheck("agents-for-class", STATUS.PASS, `worker work-stack agent (${STACK_AGENT_LABEL}) installed; no updater agent (correct for class=worker)`)];
+    }
+    return [
+      mkCheck(
+        "agents-for-class",
+        strict ? STATUS.FAIL : STATUS.WARN,
+        `no worker work-stack agent (${STACK_AGENT_LABEL}) installed — this node is not yet provisioned as a worker; run 'catalyst install --class worker'`,
+      ),
+    ];
+  }
+
+  // developer / monitor: the updater agent is the sole puller; the worker stack must NOT be present.
+  if (hasStackAgent) {
+    return [
+      mkCheck(
+        "agents-for-class",
+        STATUS.FAIL,
+        `${nodeClass} node has the worker work-stack agent (${STACK_AGENT_LABEL}) installed — a developer/monitor must NOT run ` +
+          `the broker/execution-core (it would pick up work). Run 'catalyst reinstall --class ${nodeClass}' (its teardown removes the worker stack)`,
+      ),
+    ];
+  }
+  if (hasUpdaterAgent) {
+    return [mkCheck("agents-for-class", STATUS.PASS, `updater agent (${UPDATER_AGENT_LABEL}) installed; no worker work-stack agent (correct for class=${nodeClass})`)];
+  }
+  return [
+    mkCheck(
+      "agents-for-class",
+      strict ? STATUS.FAIL : STATUS.WARN,
+      `no updater agent (${UPDATER_AGENT_LABEL}) installed — this ${nodeClass} node has no plugin-freshness puller; run 'catalyst install --class ${nodeClass}' (or 'catalyst-stack adopt-updater')`,
+    ),
+  ];
+}
+
+// defaultPluginPullOwner — which process owns the plugin pull on this node: "broker" (default) or
+// "updater". MIRRORS broker/plugin-refresh.mjs::resolvePluginPullOwner (env CATALYST_PLUGIN_PULL_OWNER
+// → Layer-2 catalyst.orchestration.pluginPullOwner → default "broker"; any non-"updater" value
+// coerces to "broker"). Inlined — like readLinearBotUserIds above — to keep doctor's runtime dep
+// surface minimal (doctor runs under bare `node`); a parity test pins it to the canonical resolver.
+function defaultPluginPullOwner(env = process.env) {
+  const coerce = (v) => (typeof v === "string" && v.trim() === "updater" ? "updater" : "broker");
+  const fromEnv = env.CATALYST_PLUGIN_PULL_OWNER;
+  if (typeof fromEnv === "string" && fromEnv.trim().length > 0) return coerce(fromEnv);
+  try {
+    const v = JSON.parse(readFileSync(layer2Path(), "utf8"))?.catalyst?.orchestration?.pluginPullOwner;
+    if (typeof v === "string" && v.trim().length > 0) return coerce(v);
+  } catch {
+    /* unreadable/malformed Layer-2 → fail safe to broker (matches resolvePluginPullOwner) */
+  }
+  return "broker";
+}
+
+// checkPluginPullOwner — assert pluginPullOwner is sane for the class. worker → broker (its broker
+// pulls); developer/monitor → updater (the standalone updater agent pulls; the node runs no broker).
+// A class MISMATCH is always a FAIL. For a developer/monitor an UNSET owner (resolves to broker) is a
+// WARN in the activation rubric (not yet adopted) and a FAIL under strict (post-install it must be
+// updater). Injectable for tests.
+export function checkPluginPullOwner(deps = {}) {
+  const { nodeClass, strict = false, owner = defaultPluginPullOwner() } = deps;
+
+  if (nodeClass === "worker") {
+    if (owner === "updater") {
+      return [
+        mkCheck(
+          "plugin-pull-owner",
+          STATUS.FAIL,
+          `pluginPullOwner=updater on a worker — the broker DEFERS the pull to a catalyst-updater agent a worker does not run, ` +
+            `so the plugin checkout goes stale. Reset it to broker (a 'catalyst install --class worker' does this; or set ` +
+            `catalyst.orchestration.pluginPullOwner=broker / unset it)`,
+        ),
+      ];
+    }
+    return [mkCheck("plugin-pull-owner", STATUS.PASS, `pluginPullOwner resolves to broker — the worker's broker owns plugin freshness (correct for class=worker)`)];
+  }
+
+  // developer / monitor
+  if (owner === "updater") {
+    return [mkCheck("plugin-pull-owner", STATUS.PASS, `pluginPullOwner=updater — the standalone catalyst-updater agent owns the pull (correct for class=${nodeClass}, which runs no broker)`)];
+  }
+  return [
+    mkCheck(
+      "plugin-pull-owner",
+      strict ? STATUS.FAIL : STATUS.WARN,
+      `pluginPullOwner resolves to broker on a ${nodeClass} node — a developer/monitor runs no broker, so NOTHING pulls the plugin ` +
+        `checkout (it goes stale). Run 'catalyst-stack adopt-updater' (sets pluginPullOwner=updater)`,
+    ),
+  ];
+}
+
 // ─── Suite selection ─────────────────────────────────────────────────────────
 
 // checksForClass — build the check-thunk suite for a resolved node class. This is
@@ -2214,6 +2371,13 @@ export function checksForClass(nc, opts = {}) {
     orchDir,
     bootDrained,
     getHostName: _getHostName,
+    // CTL-1369 PR4: install-correctness seams (agent-set + pull-owner). `strict` is false in the
+    // always-on activation rubric (missing agent / unset owner = WARN, safe for the pre-install join
+    // gate) and true in installChecksForClass (the post-install verification pass).
+    strict = false,
+    hasStackAgent,
+    hasUpdaterAgent,
+    pluginPullOwner,
   } = opts;
 
   const nodeClassCheck = () => checkNodeClass({ nodeClass: nc });
@@ -2222,6 +2386,12 @@ export function checksForClass(nc, opts = {}) {
   if (!nc.recognized) {
     return [nodeClassCheck];
   }
+
+  // CTL-1369 PR4: the install-correctness thunks, shared by all class arms. The agent-set + pull-owner
+  // for the resolved class; `strict` distinguishes the activation rubric (advisory) from the
+  // post-install verification (fail-closed). Seams (undefined in production) fall through to defaults.
+  const agentsThunk = () => checkAgentsForClass({ nodeClass: nc.class, strict, hasStackAgent, hasUpdaterAgent });
+  const pullOwnerThunk = () => checkPluginPullOwner({ nodeClass: nc.class, strict, owner: pluginPullOwner });
 
   const replicaThunk = () => checkReadReplicaReachable({ baseUrl: readReplicaBaseUrl, fetch: _fetch });
   const wontOwnThunk = () =>
@@ -2269,6 +2439,8 @@ export function checksForClass(nc, opts = {}) {
       developerBotCredentials,
       () => checkHrwPartition(), // would-own count (visibility)
       () => checkDaemonlessLocal({ nodeClass: nc.class, runVerifyNode }), // broker/exec-core down + plugins fresh
+      agentsThunk, // CTL-1369 PR4: updater agent installed, no worker stack (correct class agent set)
+      pullOwnerThunk, // CTL-1369 PR4: pluginPullOwner=updater (a developer runs no broker)
       replicaThunk,
       wontOwnThunk,
       () => checkReaper(), // advisory (never FAIL), class-agnostic
@@ -2289,6 +2461,8 @@ export function checksForClass(nc, opts = {}) {
       nodeClassCheck,
       () => checkConnectivity({ seed, otel, fetch: _fetch }),
       () => checkHrwPartition(), // would-own count (visibility)
+      agentsThunk, // CTL-1369 PR4: updater agent installed, no worker stack (monitor is adopt-updater-shaped)
+      pullOwnerThunk, // CTL-1369 PR4: pluginPullOwner=updater
       replicaThunk,
       wontOwnThunk,
       () => [
@@ -2314,6 +2488,8 @@ export function checksForClass(nc, opts = {}) {
     () => checkConnectivity({ seed, otel }),
     () => checkSecretsHygiene(),
     () => checkDaemonToolPath(), // CTL-1289: daemon launchd PATH resolves linearis/node/claude
+    agentsThunk, // CTL-1369 PR4: worker work-stack agent installed, no updater agent (correct class agent set)
+    pullOwnerThunk, // CTL-1369 PR4: pluginPullOwner=broker (the worker's broker owns the pull)
     () => checkWebhookIngestion(), // CTL-1284: multiHost member ingests webhooks; single-host does not
     () => checkThoughts(), // CTL-1293: member thoughts repo provisioned + non-foreign primary
     () => checkClaudeSettings(), // CTL-1231: member settings.json pins host identity + OTLP endpoint
@@ -2323,6 +2499,26 @@ export function checksForClass(nc, opts = {}) {
     () => checkConfigScopeLeak(), // CTL-1214: committed Layer-1 .catalyst/config.json must not carry node/cluster scope (roster/orchestration/feedback/sweep/repoColors/hosts.json)
     () => checkRepoIconTokenScope(), // CTL-1375: monitor daemon's gh token can read configured private repos' contents (else favicons fall back to the org avatar) — advisory (never FAIL)
     () => checkMonitorProductionBuild(), // CTL-1372: warn if the local monitor serves a dev-build React bundle (leaks via performance.measure) — advisory (never FAIL)
+  ];
+}
+
+// installChecksForClass — CTL-1369 PR4: the FOCUSED install-verification rubric, run by
+// `catalyst install` as its post-install pass (`catalyst-doctor --profile install`). Unlike the
+// activation rubric, it grades ONLY what an install actually CONTROLS and lands deterministically +
+// offline: the node-class itself (CTL-1355 unrecognized → FAIL), the correct launchd agent SET, and a
+// sane plugin-pull owner — each `strict:true` (a not-yet-provisioned agent/owner is a FAIL, because
+// post-install it MUST be correct). It deliberately OMITS the network/operational checks (Linear/bot/
+// read-replica reachability/webhooks/thoughts): those depend on remote nodes + tokens an install
+// can't guarantee, so failing them would mis-attribute an operational gap to the install run.
+export function installChecksForClass(nc, opts = {}) {
+  const { hasStackAgent, hasUpdaterAgent, pluginPullOwner } = opts;
+  const nodeClassCheck = () => checkNodeClass({ nodeClass: nc });
+  // Unrecognized explicit class → the single hard FAIL, same as the activation rubric.
+  if (!nc.recognized) return [nodeClassCheck];
+  return [
+    nodeClassCheck,
+    () => checkAgentsForClass({ nodeClass: nc.class, strict: true, hasStackAgent, hasUpdaterAgent }),
+    () => checkPluginPullOwner({ nodeClass: nc.class, strict: true, owner: pluginPullOwner }),
   ];
 }
 
@@ -2336,6 +2532,9 @@ export async function runDoctor(opts = {}) {
     seed = process.env.CATALYST_SEED_HOST ?? null,
     otel = process.env.OTEL_EXPORTER_OTLP_ENDPOINT ?? null,
     expectedBotUserId = null,
+    // CTL-1369 PR4: "activation" (default — the full class rubric) | "install" (the focused
+    // post-install verification subset). Selects which suite builder runDoctor uses.
+    profile = "activation",
     // CTL-1355: the class resolver is injectable so tests can drive each rubric.
     resolveClass = resolveNodeClass,
   } = opts;
@@ -2343,7 +2542,11 @@ export async function runDoctor(opts = {}) {
   // CTL-1355: resolve the node class once, then grade against its rubric. An
   // explicit `checks` array still bypasses selection entirely (the test seam).
   const nc = resolveClass();
-  const fns = checkFns ?? checksForClass(nc, { ...opts, seed, otel, expectedBotUserId });
+  const fns =
+    checkFns ??
+    (profile === "install"
+      ? installChecksForClass(nc, { ...opts })
+      : checksForClass(nc, { ...opts, seed, otel, expectedBotUserId }));
 
   // Run all check functions concurrently
   const results = await Promise.all(fns.map((fn) => Promise.resolve().then(fn)));
