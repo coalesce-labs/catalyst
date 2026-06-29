@@ -2171,6 +2171,60 @@ describe("schedulerTick — new-work pull", () => {
     expect(dispatch.calls).toEqual([{ orchDir, ticket: "CTL-7", phase: "plan" }]);
   });
 
+  // CTL-1367 P2 (item b, Codex follow-up): a CLAIM-ONLY triage→research promotion must
+  // still withhold the slot. When an SDK triage→research promotion LOSES the single-flight
+  // race, verifyDispatchedSignal counts it a success (promotedCount++) but the WINNER writes
+  // the phase signal — so countSdkInflight (and the re-sample) never see it. The freeSlots
+  // SDK branch therefore takes min(re-sample budget, tick-top − resumed − promoted): the
+  // promotedCount floor catches exactly this claim-only case the re-sample misses. Real
+  // guard — without the floor (re-sample alone reads 0) CTL-X would be admitted at maxParallel=1.
+  test("dispatchMode=sdk: a CLAIM-ONLY triage→research promotion still holds the slot (Codex P2 — promotedCount floor)", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    // CTL-7 in-flight at triage:done → the advancement sweep promotes triage→research (a
+    // promotedCount edge) via SDK.
+    writeSignal("CTL-7", "triage", "done");
+    // CTL-X is the eligible NEW ticket. The triage→research promotion is admission-gated
+    // (STEP A): the triaged-waiting candidate (CTL-7) competes with eligible new work for
+    // the SAME free-slot ceiling via rankTickets. At maxParallel=1 there is ONE promotion
+    // slot, so CTL-X must rank BELOW CTL-7 or it would win the slot and the promotion would
+    // never fire (admittedThisTick empty → r.advanced === []). CTL-7's promotion descriptor
+    // takes priority 2 (relUnblocked default, below) → give CTL-X priority 3 so CTL-7 wins
+    // the single slot. CTL-X's priority is immaterial to the guard under test (the slot
+    // budget), only to which ticket wins the STEP-A competition.
+    const eligible = [
+      { identifier: "CTL-X", priority: 3, createdAt: "x", state: "Todo", relations: { nodes: [] }, inverseRelations: { nodes: [] } },
+    ];
+    // CLAIM-ONLY success: the promotion's dispatch returns ok (→ verifyOk → promotedCount++)
+    // but LOSES the single-flight race, so the WINNER (a different dispatcher) writes the
+    // phase signal — this dispatch writes NONE. countSdkInflight therefore stays 0: the
+    // re-sample cannot see this promotion, so only the promotedCount floor can withhold its slot.
+    const dispatch = Object.assign(
+      (args) => {
+        dispatch.calls.push(args);
+        return { code: 0 }; // NOTE: no sdkInflight increment — models the lost-race claim
+      },
+      { calls: [] },
+    );
+    const r = schedulerTick(orchDir, {
+      readEligible: () => eligible,
+      dispatch,
+      verifyDispatched: verifyOk,
+      // CTL-755: the triage→research promotion is admission-gated by deps — stub
+      // fetchBatch (unblocked) + a free slot so the gate admits CTL-7's promotion.
+      fetchBatch: mkBatch(() => relUnblocked()),
+      liveBackgroundCount: () => 0,
+      countSdkInflight: () => 0, // claim-only: re-sample never sees the lost-race promotion
+      dispatchMode: "sdk",
+      hasTriageArtifact: () => true,
+      listStartedTickets: () => new Set(),
+    });
+    // The triage→research promotion fired (admission-gated, took the slot)…
+    expect(r.advanced).toEqual([{ ticket: "CTL-7", phase: "research" }]);
+    // …and the promotedCount floor withholds the slot the re-sample (0) missed → CTL-X held.
+    expect(r.dispatched).toEqual([]);
+    expect(dispatch.calls).toEqual([{ orchDir, ticket: "CTL-7", phase: "research" }]);
+  });
+
   // CTL-1367 P2-C: the per-tick CTL-644 approval poll must thread the resolved
   // scheduler `dispatch` so a mid-run approval launches via the SAME executor the
   // daemon resolved — not processApprovedResumes' default defaultDispatch (which,

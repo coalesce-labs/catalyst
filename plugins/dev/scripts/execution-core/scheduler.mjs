@@ -5303,13 +5303,27 @@ export function schedulerTick(
   const freeSlots =
     livenessFresh && !draining
       ? dispatchMode === "sdk"
-        ? // CTL-1367 P2 (item b): under executor=sdk the re-sampled SDK count
-          // (sdkInFlightCount) ALREADY INCLUDES this tick's promoted (triage→research)
-          // and resumed dispatches — each wrote a `dispatched` nested signal the
-          // re-sample now counts — so subtracting promotedCount/resumedCount here would
-          // withhold those slots a SECOND time (the double-subtract requirement-2 warns
-          // about). The re-sample subsumes both terms; Math.max(0,…) still clamps.
-          Math.max(0, computeFreeSlots(maxParallel, sdkInFlightCount))
+        ? // CTL-1367 P2 (item b): under executor=sdk take the MIN of two budgets so
+          // whichever formula correctly accounts for the slot the other missed wins:
+          //  (1) the re-sampled SDK count (sdkInFlightCount) — catches same-tick
+          //      NON-research advances (research→plan, …) that wrote a `dispatched`
+          //      signal but that promotedCount (triage→research only) never tracks;
+          //  (2) the original tick-top budget minus resumedCount/promotedCount —
+          //      catches a CLAIM-ONLY promotion success (Codex P2): when a
+          //      triage→research SDK promotion LOSES the single-flight race,
+          //      verifyDispatchedSignal still counts it (promotedCount++) but the
+          //      WINNER writes the phase signal, so countSdkInflight (hence the
+          //      re-sample) cannot see it. Without this floor sdkInFlightCount stays
+          //      0 and a new ticket is admitted while the winner takes the slot.
+          // min is conservative (never over-admits) and never double-subtracts — it
+          // picks ONE budget, not their sum. Math.max(0,…) clamps.
+          Math.max(
+            0,
+            Math.min(
+              computeFreeSlots(maxParallel, sdkInFlightCount),
+              computeFreeSlots(maxParallel, inFlightCount) - resumedCount - promotedCount,
+            ),
+          )
         : Math.max(0, computeFreeSlots(maxParallel, inFlightCount) - resumedCount - promotedCount)
       : 0;
   if (!livenessFresh) {
