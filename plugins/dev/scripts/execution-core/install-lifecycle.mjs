@@ -147,9 +147,18 @@ export function resolveRequestedClass({ optsClass, env = process.env, layer2, cu
     return { nodeClass: normalized, source: "env" };
   }
   if (typeof currentFn === "function") return { nodeClass: currentFn(), source: "config" };
-  const raw = readNodeClassRaw(layer2);
-  if (raw == null || raw.trim() === "") return { nodeClass: "worker", source: "config-default" };
-  const normalized = raw.trim().toLowerCase();
+  // Read the config DIRECTLY (not readNodeClassRaw, which swallows errors) so a MALFORMED config
+  // FAILS CLOSED — refusing before any side effect — rather than reading as absent ⇒ worker and then
+  // running the worker path on a developer/monitor node.
+  let cfg;
+  try {
+    cfg = readLayer2(layer2);
+  } catch (e) {
+    throw new Error(`Layer-2 config at ${layer2} is unreadable/malformed (${e.message}) — fix it or pass --class`);
+  }
+  const raw = cfg?.catalyst?.node?.class;
+  if (raw == null || String(raw).trim() === "") return { nodeClass: "worker", source: "config-default" };
+  const normalized = String(raw).trim().toLowerCase();
   if (!NODE_CLASSES.includes(normalized)) {
     throw new Error(`unrecognized node class in ${layer2}: '${raw}' (valid: ${NODE_CLASSES.join(", ")}) — pass --class to override`);
   }
@@ -424,15 +433,26 @@ function defaultBundleHasCapturedAgents(bundlePath) {
   }
 }
 
-// probeDrained — is this node draining (admitting 0 new work)? Best-effort; unknown ⇒ false (the
-// guard then requires --force on a live node, the safe default).
+// probeDrained — is this node FULLY drained, i.e. admitting 0 new work AND with 0 in-flight tickets?
+// `draining:true` alone is NOT enough — a worker can be draining with work still landing, and stopping
+// its daemon then would kill in-flight work. So the teardown guard only treats the node as drained
+// when an explicit drained sentinel is set OR draining is on with inFlightCount === 0. Best-effort;
+// unknown ⇒ false (the guard then requires --force on a live node, the safe default).
+// isDrainedStatus — PURE interpretation of `catalyst-execution-core drain --json` output: fully
+// drained iff an explicit `drained` sentinel is set, OR `draining` is on with ZERO in-flight tickets.
+export function isDrainedStatus(parsed) {
+  if (!parsed || typeof parsed !== "object") return false;
+  if (parsed.drained === true) return true;
+  const inFlight = Number(parsed.inFlightCount ?? parsed.inflight ?? 0);
+  return parsed.draining === true && Number.isFinite(inFlight) && inFlight === 0;
+}
+
 function defaultProbeDrained({ scripts, env = process.env } = {}) {
   if (env.CATALYST_ASSUME_DRAINED === "1") return true;
   const res = spawnSync(scripts.catalyst, ["drain", "--status-read", "--json"], { encoding: "utf8" });
   if (res.error || res.status !== 0 || !res.stdout) return false;
   try {
-    const parsed = JSON.parse(res.stdout);
-    return parsed.draining === true || parsed.drained === true;
+    return isDrainedStatus(JSON.parse(res.stdout));
   } catch {
     return false;
   }
@@ -623,22 +643,37 @@ export async function runInstallLifecycle({ operation, nodeClass, opts = {} }, d
     if (autoRollbacks(operation) && ctx.bundlePath) {
       log(`catalyst-install: ${operation} failed — rolling back from ${ctx.bundlePath}`);
       // `catalyst-backup restore` is ADDITIVE — it re-lays captured config/db/plist FILES but never
-      // re-bootstraps launchd agents or restarts daemons. So rollback has three cases:
+      // DELETES plists created after the snapshot, nor re-bootstraps/restarts agents. So rollback has
+      // three cases, keyed first on whether the node's ORIGINAL state (the backup) had launchd agents.
       const teardownRan = ctx.teardownRan; // a reinstall already booted out the node's agents this run
       const hadAgents = bundleHasCapturedAgents(ctx.bundlePath);
-      if (teardownRan) {
-        // (3) reinstall failed AFTER remove-agents. Restore the captured state. Then, ONLY if the
-        // node actually HAD agents (the backup captured plists), RE-BOOTSTRAP them — the teardown
-        // booted them out and restore alone can't bring them back. If the node had NO agents
-        // (config-only node), restore is the full rollback; re-bootstrapping would install agents the
-        // snapshot never had.
-        const restore = runStep({ argv: [scripts.backup, "restore", ctx.bundlePath, "--force"], env: stepEnv });
+      const restoreNode = () => runStep({ argv: [scripts.backup, "restore", ctx.bundlePath, "--force"], env: stepEnv });
+      if (!hadAgents) {
+        // ORIGINAL node had NO agents (a fresh install, or a config-only reinstall). Anything present
+        // now was installed THIS run — even if provisioning reached install-agents before failing at
+        // start-daemons — and restore won't delete it (and a worker's stack keep-alive would restart
+        // it). Boot it out, then restore. No re-bootstrap: the snapshot had no agents to bring back.
+        const unsvc = runStep({ argv: [scripts.stack, "uninstall-services"], env: stepEnv });
+        if (unsvc.code !== 0) log(`catalyst-install: rollback note — uninstall-services rc ${unsvc.code} (agents may remain): ${unsvc.stderr.trim()}`);
+        const stop = runStep({ argv: [scripts.stack, "stop"], env: stepEnv });
+        if (stop.code !== 0) log(`catalyst-install: rollback note — stop rc ${stop.code}`);
+        const restore = restoreNode();
+        rolledBack = restore.code === 0;
+        rollbackDisposition = rolledBack ? "ok" : "failed";
+        log(
+          rolledBack
+            ? `catalyst-install: rolled back — restored ${ctx.bundlePath} + tore down agents installed this run (verify launchd/daemon state)`
+            : `catalyst-install: rollback INCOMPLETE (restore rc ${restore.code}) — node is in a PARTIAL state; bundle at ${ctx.bundlePath}`,
+        );
+      } else if (teardownRan) {
+        // reinstall failed AFTER remove-agents booted out the node's PRE-EXISTING agents. Restore the
+        // captured state, then RE-BOOTSTRAP — restore alone can't re-load launchd. Re-bootstrap to the
+        // RESTORED class (absent ⇒ worker default), NOT the requested reinstall target — else a failed
+        // `reinstall --class developer` of an original default-worker node would come back as developer
+        // (adopt-updater/drain) and lose the worker's broker/exec-core stack.
+        const restore = restoreNode();
         let bringupOk = true;
-        if (restore.code === 0 && hadAgents) {
-          // Re-bootstrap to the RESTORED class: read it from the restored config, defaulting an
-          // ABSENT class to worker (the unset/default), NOT the requested reinstall target — else a
-          // failed `reinstall --class developer` of an original default-worker node would re-bring-up
-          // as developer (adopt-updater/drain) and lose the worker's broker/exec-core stack.
+        if (restore.code === 0) {
           const rawClass = readNodeClassRaw(layer2);
           const restoredClass = rawClass && NODE_CLASSES.includes(rawClass.trim().toLowerCase()) ? rawClass.trim().toLowerCase() : "worker";
           const bringupEnv = { ...stepEnv, CATALYST_NODE_CLASS: restoredClass };
@@ -660,25 +695,16 @@ export async function runInstallLifecycle({ operation, nodeClass, opts = {} }, d
         rollbackDisposition = rolledBack ? "ok" : "failed";
         log(
           rolledBack
-            ? `catalyst-install: rolled back — restored ${ctx.bundlePath}${hadAgents ? " + re-bootstrapped the torn-down agents" : ""} (verify launchd/daemon state)`
+            ? `catalyst-install: rolled back — restored ${ctx.bundlePath} + re-bootstrapped the torn-down agents (verify launchd/daemon state)`
             : `catalyst-install: rollback INCOMPLETE — config restored from ${ctx.bundlePath} but launchd agents are NOT fully re-bootstrapped; re-run 'catalyst install' or 'catalyst-stack install-services && catalyst-stack start' to bring the node back`,
         );
       } else {
-        // (1) FRESH node (no pre-existing agents captured): boot out whatever provisioning installed
-        // this run (a worker's stack keep-alive would otherwise restart it), then stop survivors. Or
-        // (2) install on an EXISTING node (agents not removed this run): leave the pre-existing agents
-        // running untouched — tearing them down would leave a working node's services down with no
-        // re-bootstrap. (install-cli symlinks are left in place either way — not in the backup, so
-        // removing them would be an unrecoverable loss, not a reversal.)
-        if (hadAgents) {
-          log(`catalyst-install: rollback — backup captured pre-existing launchd agents; leaving them in place (restore re-lays their config; reload them if needed)`);
-        } else {
-          const unsvc = runStep({ argv: [scripts.stack, "uninstall-services"], env: stepEnv });
-          if (unsvc.code !== 0) log(`catalyst-install: rollback note — uninstall-services rc ${unsvc.code} (agents may remain): ${unsvc.stderr.trim()}`);
-          const stop = runStep({ argv: [scripts.stack, "stop"], env: stepEnv });
-          if (stop.code !== 0) log(`catalyst-install: rollback note — stop rc ${stop.code}`);
-        }
-        const restore = runStep({ argv: [scripts.backup, "restore", ctx.bundlePath, "--force"], env: stepEnv });
+        // install on an EXISTING node: its pre-existing agents were NOT touched this run — leave them
+        // running untouched (tearing them down would down a working node with no re-bootstrap) and just
+        // restore. (install-cli symlinks are left in place — not in the backup, so removing them would
+        // be an unrecoverable loss, not a reversal.)
+        log(`catalyst-install: rollback — backup captured pre-existing launchd agents; leaving them in place (restore re-lays their config; reload them if needed)`);
+        const restore = restoreNode();
         rolledBack = restore.code === 0;
         rollbackDisposition = rolledBack ? "ok" : "failed";
         log(

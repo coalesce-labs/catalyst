@@ -16,6 +16,7 @@ import {
   INSTALL_MANAGED_KEYS,
   resolveScripts,
   layer2Path,
+  isDrainedStatus,
   resolveRequestedClass,
   resolveReadReplica,
   setDeepKey,
@@ -155,6 +156,23 @@ describe("resolveRequestedClass", () => {
     expect(resolveRequestedClass({ env: {}, layer2: tmpCfg({ catalyst: { node: { class: "developer" } } }) }).nodeClass).toBe("developer");
     expect(resolveRequestedClass({ env: {}, layer2: tmpCfg({}) }).nodeClass).toBe("worker"); // absent ⇒ worker
     expect(() => resolveRequestedClass({ env: {}, layer2: tmpCfg({ catalyst: { node: { class: "develper" } } }) })).toThrow(/unrecognized node class in/);
+  });
+  test("a MALFORMED config fails closed (does not silently default to worker)", () => {
+    const bad = join(tmpdir(), `install-lifecycle-bad-${process.pid}-${tmpCounter++}.json`);
+    tmpFiles.push(bad);
+    writeFileSync(bad, "{ not valid json");
+    expect(() => resolveRequestedClass({ env: {}, layer2: bad })).toThrow(/unreadable|malformed/);
+  });
+});
+
+describe("isDrainedStatus (teardown guard requires zero in-flight, not just draining)", () => {
+  test("draining with zero in-flight ⇒ drained; with in-flight ⇒ not drained", () => {
+    expect(isDrainedStatus({ draining: true, inFlightCount: 0 })).toBe(true);
+    expect(isDrainedStatus({ draining: true, inFlightCount: 3 })).toBe(false); // work still landing
+    expect(isDrainedStatus({ draining: true })).toBe(true); // no count ⇒ treat as 0
+    expect(isDrainedStatus({ drained: true, inFlightCount: 5 })).toBe(true); // explicit sentinel wins
+    expect(isDrainedStatus({ draining: false })).toBe(false);
+    expect(isDrainedStatus(null)).toBe(false);
   });
 });
 
@@ -396,7 +414,7 @@ describe("runInstallLifecycle — reinstall", () => {
     expect(res.outcome).toBe("failed");
     expect(res.rollbackDisposition).toBe("failed");
   });
-  test("reinstall on a config-only node (no captured agents) → rollback restores WITHOUT re-bootstrapping agents", async () => {
+  test("reinstall on a config-only node (no captured agents) failing BEFORE install-agents → restore, no re-bootstrap", async () => {
     const { deps, calls } = withRealRun(makeDeps({ bundleHadAgents: false, failOn: (a) => (a.join(" ") === "SETUP --non-interactive" ? 1 : 0) }));
     const res = await runInstallLifecycle({ operation: "reinstall", nodeClass: "developer", opts: { force: true } }, deps);
     expect(res.outcome).toBe("rolled_back");
@@ -404,6 +422,19 @@ describe("runInstallLifecycle — reinstall", () => {
     const restoreIdx = joined.findIndex((c) => c.startsWith("BACKUP restore"));
     // no agent bring-up after restore (the snapshot had none)
     expect(joined.slice(restoreIdx + 1).some((c) => c === "STACK install-services" || c === "STACK adopt-updater")).toBe(false);
+  });
+  test("reinstall on a config-only node that INSTALLS agents then fails → rollback boots out the newly-installed agents", async () => {
+    // worker reinstall, no captured agents, install-agents (install-services) succeeds, start fails.
+    const { deps, calls } = withRealRun(makeDeps({ bundleHadAgents: false, failOn: (a) => (a.join(" ") === "STACK start --yes" ? 1 : 0) }));
+    const res = await runInstallLifecycle({ operation: "reinstall", nodeClass: "worker", opts: { force: true } }, deps);
+    expect(res.outcome).toBe("rolled_back");
+    const joined = calls.map((a) => a.join(" "));
+    const provisionIdx = joined.lastIndexOf("STACK install-services");
+    const restoreIdx = joined.findIndex((c) => c.startsWith("BACKUP restore"));
+    expect(provisionIdx).toBeGreaterThanOrEqual(0); // provisioning installed the agents this run
+    // rollback booted them out (uninstall-services) AFTER provisioning, BEFORE restore
+    const bootedOut = joined.some((c, i) => c === "STACK uninstall-services" && i > provisionIdx && i < restoreIdx);
+    expect(bootedOut).toBe(true);
   });
 });
 
