@@ -1413,6 +1413,51 @@ export function getReplicaDbPath() {
   return process.env.CATALYST_REPLICA_DB || resolve(catalystDir(), "catalyst-replica.db");
 }
 
+// --- Per-node Catalyst-Cloud token resolution (CTL-1394) ---
+// The supervised replica writer needs THIS node's own cloud token. Per-node tokens
+// for the same tenant-0 feed are NOT uniformly named (mini-2 → MINI_1, office-desk →
+// WORKSTATION), so the host→env-var-NAME map is a table, not an algorithm. This
+// resolver returns the env-var NAME (+ where it came from) ONLY — it never reads or
+// returns the secret VALUE (the writer reads process.env[name]; doctor checks
+// presence by name). Keys match getHostName() output (the first DNS label / Layer-2
+// catalyst.host.name pin), so `laptop` and `office-desk` both map to the workstation
+// token. A node absent from the table falls back to the shared CATALYST_CLOUD_TOKEN.
+const NODE_CLOUD_TOKEN_ENV_TABLE = Object.freeze({
+  laptop: "CATALYST_CLOUD_WORKSTATION_TOKEN",
+  "office-desk": "CATALYST_CLOUD_WORKSTATION_TOKEN",
+  mini: "CATALYST_MINI_ACCOUNT_TOKEN",
+  "mini-2": "CATALYST_MINI_1_ACCOUNT_TOKEN",
+});
+
+// readLayer2CloudTokenEnv — the raw catalyst.cloud.tokenEnv string from the Layer-2
+// file, or undefined (absent/malformed/non-string). Never throws (parity with
+// readLayer2NodeClass). Lets a new fleet node name its token var without a code change.
+function readLayer2CloudTokenEnv() {
+  try {
+    const v = JSON.parse(readFileSync(getLayer2ConfigPath(), "utf8"))?.catalyst?.cloud?.tokenEnv;
+    return typeof v === "string" && v.length > 0 ? v : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+// resolveNodeCloudTokenEnv — resolve the env-var NAME that holds this node's cloud
+// token. Precedence mirrors getHostName/getNodeClass: env override → Layer-2 override
+// → hardcoded host table → shared-token fallback. Returns { envVar, source } where
+// source ∈ "env" | "layer2" | "table" | "fallback". Pure + NAME-only: it never reads
+// process.env[envVar] (the secret value), so it is safe to log the result.
+export function resolveNodeCloudTokenEnv({ hostName = getHostName(), env = process.env } = {}) {
+  const override = env.CATALYST_CLOUD_TOKEN_ENV;
+  if (typeof override === "string" && override.length > 0) {
+    return { envVar: override, source: "env" };
+  }
+  const l2 = readLayer2CloudTokenEnv();
+  if (l2) return { envVar: l2, source: "layer2" };
+  const fromTable = NODE_CLOUD_TOKEN_ENV_TABLE[hostName];
+  if (fromTable) return { envVar: fromTable, source: "table" };
+  return { envVar: "CATALYST_CLOUD_TOKEN", source: "fallback" };
+}
+
 export function readDelegateRunnerConfig(env = process.env) {
   const v = env.CATALYST_DELEGATE_RUNNER;
   let mode;
