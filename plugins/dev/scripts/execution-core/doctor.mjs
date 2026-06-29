@@ -1838,7 +1838,7 @@ export function checkRepoIconTokenScope(deps = {}) {
 // behavior, zero change), just noting the role was never declared. An explicit,
 // recognized class PASSes. Injectable for tests.
 export function checkNodeClass(deps = {}) {
-  const { nodeClass = resolveNodeClass() } = deps;
+  const { nodeClass = resolveNodeClass(), strict = false } = deps;
   const nc = nodeClass;
   if (!nc.recognized) {
     return [
@@ -1852,6 +1852,21 @@ export function checkNodeClass(deps = {}) {
     ];
   }
   if (nc.inferred) {
+    // CTL-1369 PR4 (Codex P2): under the install-verification profile (strict), an INFERRED class is a
+    // FAIL — the install's write-config (`catalyst class <x>`) must have PERSISTED catalyst.node.class,
+    // so an inferred/absent class means the class write did not take (else later daemons boot as the
+    // default worker). In the activation rubric (non-strict) it stays INFO (absent ⇒ worker, zero change).
+    if (strict) {
+      return [
+        mkCheck(
+          "node-class",
+          STATUS.FAIL,
+          `catalyst.node.class is NOT explicitly persisted (inferred "${nc.class}") — the install's ` +
+            `write-config must persist it into the Layer-2 config; an inferred class means the ` +
+            `'catalyst class <x>' write did not take (the node would boot as the default worker)`,
+        ),
+      ];
+    }
     return [
       mkCheck(
         "node-class",
@@ -2235,6 +2250,17 @@ function defaultAgentInstalled(label, dir = defaultLaunchAgentsDir()) {
   }
 }
 
+// defaultUpdaterProcessAlive — is a catalyst-updater daemon RUNNING, even with its plist removed?
+// Mirrors install-lifecycle.mjs defaultProbeUpdaterAgent (CTL-1369 PR4 Codex P2): a manual/partial
+// cleanup can leave the updater process alive without its plist — still the CTL-1348 two-puller hazard
+// — so the strict post-install verification must catch it, not just the plist. Honors the
+// CATALYST_ASSUME_NO_DAEMONS test seam (same as install-lifecycle).
+function defaultUpdaterProcessAlive() {
+  if (process.env.CATALYST_ASSUME_NO_DAEMONS === "1") return false;
+  const r = spawnSync("pgrep", ["-f", "execution-core/updater/updater\\.mjs"], { timeout: 5_000 });
+  return !r.error && r.status === 0;
+}
+
 // checkAgentsForClass — assert the correct launchd agent SET for the class. The two discriminators
 // are the worker stack agent and the developer/monitor updater agent; their PRESENCE is mutually
 // exclusive (a node running both is the CTL-1348 two-puller hazard). Injectable for tests.
@@ -2243,7 +2269,12 @@ export function checkAgentsForClass(deps = {}) {
     nodeClass,
     strict = false,
     hasStackAgent = defaultAgentInstalled(STACK_AGENT_LABEL),
-    hasUpdaterAgent = defaultAgentInstalled(UPDATER_AGENT_LABEL),
+    // injectable updater-process probe (so the plist-gone-but-process-alive path is testable).
+    updaterProcessAlive = defaultUpdaterProcessAlive,
+    // updater present = plist OR a live updater process (plist-gone-but-process-alive is still the
+    // CTL-1348 two-puller hazard). `updaterProcessAlive` is in scope (earlier destructure) for this default.
+    hasUpdaterAgent = defaultAgentInstalled(UPDATER_AGENT_LABEL) ||
+      (typeof updaterProcessAlive === "function" ? updaterProcessAlive() : !!updaterProcessAlive),
   } = deps;
 
   if (nodeClass === "worker") {
@@ -2520,7 +2551,9 @@ export function checksForClass(nc, opts = {}) {
 // can't guarantee, so failing them would mis-attribute an operational gap to the install run.
 export function installChecksForClass(nc, opts = {}) {
   const { hasStackAgent, hasUpdaterAgent, pluginPullOwner } = opts;
-  const nodeClassCheck = () => checkNodeClass({ nodeClass: nc });
+  // strict:true — under install verification an INFERRED/unpersisted class is a FAIL (the install's
+  // write-config must have persisted catalyst.node.class), not the activation INFO (CTL-1369 PR4 Codex P2).
+  const nodeClassCheck = () => checkNodeClass({ nodeClass: nc, strict: true });
   // Unrecognized explicit class → the single hard FAIL, same as the activation rubric.
   if (!nc.recognized) return [nodeClassCheck];
   return [

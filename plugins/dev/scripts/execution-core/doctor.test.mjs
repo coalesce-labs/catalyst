@@ -2367,3 +2367,43 @@ describe("runDoctor profile routing (CTL-1369 PR4)", () => {
     expect(code).toBe(0);
   });
 });
+
+// ─── CTL-1369 PR4 / Codex round 3: verify PERSISTED installed state rigorously ───
+describe("checkAgentsForClass detects a live updater PROCESS, not just the plist (CTL-1369 PR4 / Codex P2)", () => {
+  let emptyLA, savedLA;
+  beforeEach(() => {
+    emptyLA = mkdtempSync(join(tmpdir(), "doctor-la-"));
+    savedLA = process.env.CATALYST_LAUNCHAGENTS_DIR;
+    process.env.CATALYST_LAUNCHAGENTS_DIR = emptyLA; // no plists on disk
+  });
+  afterEach(() => {
+    if (savedLA === undefined) delete process.env.CATALYST_LAUNCHAGENTS_DIR;
+    else process.env.CATALYST_LAUNCHAGENTS_DIR = savedLA;
+    rmSync(emptyLA, { recursive: true, force: true });
+  });
+  it("a live updater process with NO plist → worker FAIL (the two-puller hazard install-lifecycle also probes)", () => {
+    const c = checkAgentsForClass({ nodeClass: "worker", hasStackAgent: true, updaterProcessAlive: () => true })[0];
+    expect(c.status).toBe(STATUS.FAIL);
+  });
+  it("no plist and no live process → worker grades on the stack only (PASS)", () => {
+    const c = checkAgentsForClass({ nodeClass: "worker", hasStackAgent: true, updaterProcessAlive: () => false })[0];
+    expect(c.status).toBe(STATUS.PASS);
+  });
+});
+
+describe("strict node-class — install profile requires an explicitly persisted class (CTL-1369 PR4 / Codex P2)", () => {
+  const inferred = nodeClassOf({ class: "worker", source: "default", inferred: true, recognized: true, raw: null });
+  it("checkNodeClass: inferred → FAIL under strict, INFO in activation", () => {
+    expect(checkNodeClass({ nodeClass: inferred, strict: true })[0].status).toBe(STATUS.FAIL);
+    expect(checkNodeClass({ nodeClass: inferred, strict: false })[0].status).toBe(STATUS.INFO);
+    // an explicitly-persisted class still PASSes under strict.
+    expect(checkNodeClass({ nodeClass: nodeClassOf({ class: "worker", raw: "worker" }), strict: true })[0].status).toBe(STATUS.PASS);
+  });
+  it("installChecksForClass FAILs an inferred/unpersisted class even when agents + owner look correct", async () => {
+    // a worker-shaped node (stack agent present, owner broker) but catalyst.node.class never persisted →
+    // the post-install verifier must FAIL (the class write did not take), not exit 0.
+    const fns = installChecksForClass(inferred, { hasStackAgent: true, hasUpdaterAgent: false, pluginPullOwner: "broker" });
+    const results = (await Promise.all(fns.map((f) => Promise.resolve().then(f)))).flat();
+    expect(results.find((c) => c.name === "node-class").status).toBe(STATUS.FAIL);
+  });
+});

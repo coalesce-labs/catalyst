@@ -622,13 +622,19 @@ export async function runInstallLifecycle({ operation, nodeClass, opts = {} }, d
   const seededPath = [cliBinDir, `${home}/.bun/bin`, `${home}/.local/bin`, env.PATH].filter(Boolean).join(":");
   const stepEnv = { ...env, CATALYST_NODE_CLASS: nodeClass, CATALYST_LAYER2_CONFIG_FILE: layer2, CATALYST_MACHINE_CONFIG: layer2, PATH: seededPath };
 
-  // CTL-1369 PR4: the doctor pre/post passes route through the lifecycle's INJECTED runStep by default
-  // (so a test stubbing runStep automatically stubs doctor too — no separate spawn), and remain
-  // overridable via deps.runDoctorPass for focused tests. Production passes neither → real runStep.
+  // CTL-1369 PR4: the doctor pre/post passes verify the node's PERSISTED installed state. The composed
+  // bash tools get CATALYST_NODE_CLASS pinned to the REQUESTED class (they must act on the target), but
+  // the DOCTOR must NOT — resolveNodeClass reads CATALYST_NODE_CLASS before Layer-2, so pinning it would
+  // make the node-class check PASS from the requested class even if write-config never persisted
+  // catalyst.node.class (Codex P2). So doctorEnv clears it (empty ⇒ resolveNodeClass falls through to the
+  // Layer-2 the install wrote, which CATALYST_LAYER2_CONFIG_FILE still points at). The doctor passes route
+  // through the lifecycle's INJECTED runStep by default (so a test stubbing runStep stubs doctor too) and
+  // remain overridable via deps.runDoctorPass for focused tests.
+  const doctorEnv = { ...stepEnv, CATALYST_NODE_CLASS: "" };
   const callDoctor = (argv) =>
     typeof runDoctorPass === "function"
-      ? runDoctorPass({ argv, env: stepEnv })
-      : defaultRunDoctorPass({ argv, env: stepEnv, runStep });
+      ? runDoctorPass({ argv, env: doctorEnv })
+      : defaultRunDoctorPass({ argv, env: doctorEnv, runStep });
 
   // Pre-flight live-node guard (teardown only) — refuse BEFORE starting a run.
   if (isTeardown(operation) && !opts.force) {

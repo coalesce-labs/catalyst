@@ -391,6 +391,23 @@ describe("runInstallLifecycle — doctor pre/post-install pass (CTL-1369 PR4)", 
     expect(res.outcome).toBe("completed");
     expect(res.doctorOk).toBe(true); // doctor couldn't run → advisory (ok:null)
   });
+
+  // Codex P2 (round 3): the doctor must verify the PERSISTED class, not the requested class pinned in env.
+  test("the doctor pre/post passes CLEAR CATALYST_NODE_CLASS (verify Layer-2 class) but keep CATALYST_LAYER2_CONFIG_FILE", async () => {
+    const bag = withRealRun(makeDeps());
+    bag.deps.env = { ...bag.deps.env, CATALYST_NODE_CLASS: "worker" }; // operator shell exports a conflicting class
+    const doctorEnvs = [];
+    bag.deps.runDoctorPass = ({ env }) => { doctorEnvs.push(env); return { ok: true, rc: 0, counts: { pass: 3, warn: 0, fail: 0 }, fails: [] }; };
+    await runInstallLifecycle({ operation: "install", nodeClass: "developer", opts: {} }, bag.deps);
+    expect(doctorEnvs.length).toBeGreaterThan(0); // pre + post
+    for (const env of doctorEnvs) {
+      expect(env.CATALYST_NODE_CLASS).toBe(""); // cleared → resolveNodeClass falls through to Layer-2 (the persisted class)
+      expect(env.CATALYST_LAYER2_CONFIG_FILE).toBe(bag.layer2); // but still points at the install's config
+    }
+    // the COMPOSED bash tools, by contrast, still get the requested class pinned (adopt-updater must act on it).
+    const adopt = bag.stepCalls.find((c) => c.argv.join(" ") === "STACK adopt-updater");
+    expect(adopt.env.CATALYST_NODE_CLASS).toBe("developer");
+  });
 });
 
 // ───────────────────────── runInstallLifecycle: telemetry + behavior ─────────────────────────
