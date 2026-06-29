@@ -411,12 +411,21 @@ function defaultProbeResidualAgents(env = process.env) {
   }
   if (env.CATALYST_ASSUME_NO_DAEMONS === "1") return false;
   // Covers every stack daemon, not just broker/exec-core: the monitor (orch-monitor/server.ts) and
-  // otel-forward (otel-forward/index.ts) are nohup children of the stack — if `catalyst-stack stop`
-  // failed to kill them after the plists were removed, an uninstall would otherwise look clean.
-  const pattern = "broker/index.mjs|execution-core/(daemon|index|updater/updater)\\.mjs|orch-monitor/server\\.ts|otel-forward/index\\.ts";
+  // otel-forward (otel-forward/index.ts) are nohup children of the stack, and Alloy (the log-shipper)
+  // is deliberately LEFT running by `catalyst-stack stop`/`uninstall-services` — so if a teardown
+  // didn't reap them, an uninstall must not look clean.
+  const pattern = "broker/index.mjs|execution-core/(daemon|index|updater/updater)\\.mjs|orch-monitor/server\\.ts|otel-forward/index\\.ts|alloy run ";
   const res = spawnSync("pgrep", ["-f", pattern], { encoding: "utf8" });
   if (res.error) return false; // can't probe processes; the plist check above already ran
   return res.status === 0;
+}
+
+// probeUpdaterAgent — is the developer/monitor catalyst-updater LaunchAgent installed? Used to refuse
+// a `install --class worker` that would otherwise leave the updater running alongside the broker (the
+// CTL-1348 two-puller race). Honors CATALYST_LAUNCHAGENTS_DIR.
+function defaultProbeUpdaterAgent(env = process.env) {
+  const laDir = env.CATALYST_LAUNCHAGENTS_DIR || join(homedir(), "Library", "LaunchAgents");
+  return existsSync(join(laDir, "ai.coalesce.catalyst-updater.plist"));
 }
 
 // bundleHasCapturedAgents — did the backup snapshot any launchd agent plists? If so the node had
@@ -474,6 +483,11 @@ export function buildDefaultDeps(env) {
     probeDrained: () => defaultProbeDrained({ scripts, env }),
     bundleHasCapturedAgents: (p) => defaultBundleHasCapturedAgents(p),
     scriptExists: (p) => existsSync(p),
+    binExists: (name) => {
+      const r = spawnSync("sh", ["-c", `command -v "${name}" >/dev/null 2>&1`]);
+      return !r.error && r.status === 0;
+    },
+    probeUpdaterAgent: () => defaultProbeUpdaterAgent(env),
     log: (msg) => process.stderr.write(`${msg}\n`),
     InstallRunCtor: InstallRun,
   };
@@ -501,16 +515,20 @@ function isTeardown(operation) {
  *   InstallRunCtor.
  */
 export async function runInstallLifecycle({ operation, nodeClass, opts = {} }, deps) {
-  const { scripts, env, layer2, runStep, emit, nowFn, genTraceId, genSpanId, probeDaemons, probeResidualAgents, probeDrained, bundleHasCapturedAgents, scriptExists, log, InstallRunCtor } = deps;
+  const { scripts, env, layer2, runStep, emit, nowFn, genTraceId, genSpanId, probeDaemons, probeResidualAgents, probeDrained, bundleHasCapturedAgents, scriptExists, binExists, probeUpdaterAgent, log, InstallRunCtor } = deps;
 
   // Every composed step inherits (a) the RESOLVED class so the bash tools (which re-derive class
   // env-first) cannot diverge from the lifecycle's target — e.g. `install --class developer` on a
   // shell exporting CATALYST_NODE_CLASS=worker must still adopt-updater (mirrors doctor.mjs pinning
-  // CATALYST_NODE_CLASS for verify-node); and (b) the driver's exact Layer-2 file under BOTH config
-  // env names the child tools honor, so the whole run reads/writes ONE config (else an XDG/
+  // CATALYST_NODE_CLASS for verify-node); (b) the driver's exact Layer-2 file under BOTH config env
+  // names the child tools honor, so the whole run reads/writes ONE config (else an XDG/
   // CATALYST_MACHINE_CONFIG redirect would split node.class/readReplica and pluginDirs/pluginPullOwner
-  // across two files and break rollback's single restorable state).
-  const stepEnv = { ...env, CATALYST_NODE_CLASS: nodeClass, CATALYST_LAYER2_CONFIG_FILE: layer2, CATALYST_MACHINE_CONFIG: layer2 };
+  // across two files and break rollback's single restorable state); and (c) the standard install-bin
+  // dirs on PATH so a later step (e.g. adopt-updater's `command -v bun` preflight) finds a tool that
+  // setup-catalyst just installed into ~/.bun/bin / ~/.local/bin within its own child process.
+  const home = (env.HOME || homedir());
+  const seededPath = [`${home}/.bun/bin`, `${home}/.local/bin`, env.PATH].filter(Boolean).join(":");
+  const stepEnv = { ...env, CATALYST_NODE_CLASS: nodeClass, CATALYST_LAYER2_CONFIG_FILE: layer2, CATALYST_MACHINE_CONFIG: layer2, PATH: seededPath };
 
   // Pre-flight live-node guard (teardown only) — refuse BEFORE starting a run.
   if (isTeardown(operation) && !opts.force) {
@@ -536,6 +554,28 @@ export async function runInstallLifecycle({ operation, nodeClass, opts = {} }, d
         `Run from a repo checkout (not the plugin cache), or set the CATALYST_INSTALL_*_SCRIPT overrides.`,
     );
     return { outcome: "refused", reason: "missing-script", missing: missingScripts };
+  }
+
+  // Pre-flight: the hard CLI prerequisites the early phases need (acquire's setup-plugin-source and
+  // the backup both `require_cmd jq`/git). The installer is a checkout-context op, not a bare-metal
+  // bootstrapper — fail fast with an actionable message rather than dying mid-acquire.
+  const missingBins = ["git", "jq"].filter((b) => !binExists(b));
+  if (missingBins.length) {
+    log(`catalyst-install: refusing ${operation} — required tool(s) not on PATH: ${missingBins.join(", ")}. Install them first (e.g. brew install ${missingBins.join(" ")}).`);
+    return { outcome: "refused", reason: "missing-prereq", missing: missingBins };
+  }
+
+  // Pre-flight: a `install --class worker` on a node that still has the developer/monitor updater
+  // agent would run BOTH the broker AND the updater pulling the plugin checkout (the CTL-1348
+  // two-puller race) — resetting pluginPullOwner alone doesn't STOP the updater daemon. Refuse and
+  // steer to `reinstall` (whose teardown removes the updater), unless --force.
+  if (operation === "install" && isWorker(nodeClass) && !opts.force && probeUpdaterAgent()) {
+    log(
+      `catalyst-install: refusing install --class worker — a developer/monitor updater agent is still ` +
+        `installed (the two-puller hazard). Switch profiles with 'catalyst reinstall --class worker' ` +
+        `(its teardown removes the updater), or pass --force.`,
+    );
+    return { outcome: "refused", reason: "stale-updater" };
   }
 
   const traceId = genTraceId();
@@ -658,6 +698,13 @@ export async function runInstallLifecycle({ operation, nodeClass, opts = {} }, d
         const stop = runStep({ argv: [scripts.stack, "stop"], env: stepEnv });
         if (stop.code !== 0) log(`catalyst-install: rollback note — stop rc ${stop.code}`);
         const restore = restoreNode();
+        // A reinstall's remove-agents ran `install-cli --uninstall` (the symlinks are NOT in the
+        // backup), so even on a config-only node a teardown leaves the box without `catalyst` on PATH.
+        // Reinstall the CLI symlinks (idempotent) so rollback truly restores the node.
+        if (ctx.teardownRan && restore.code === 0) {
+          const cli = runStep({ argv: [scripts.installCli], env: stepEnv });
+          if (cli.code !== 0) log(`catalyst-install: rollback note — re-installing CLI symlinks rc ${cli.code}: ${cli.stderr.trim()}`);
+        }
         rolledBack = restore.code === 0;
         rollbackDisposition = rolledBack ? "ok" : "failed";
         log(

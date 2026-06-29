@@ -59,7 +59,7 @@ const SCRIPTS = {
 
 // makeDeps — a fully-stubbed dep set. `failOn` is a predicate (argv|joined → truthy = fail with
 // that rc). `bundle` is the path catalyst-backup "prints". probeDaemons/probeDrained are flags.
-function makeDeps({ failOn, bundle = "/tmp/bundle-xyz", daemonsLive = false, residual = false, drained = false, bundleHadAgents = false, layer2Initial } = {}) {
+function makeDeps({ failOn, bundle = "/tmp/bundle-xyz", daemonsLive = false, residual = false, drained = false, bundleHadAgents = false, updaterAgent = false, missingBins = [], layer2Initial } = {}) {
   const events = [];
   const calls = [];
   const stepCalls = []; // {argv, env} per spawned step — lets tests assert the pinned step env
@@ -86,7 +86,9 @@ function makeDeps({ failOn, bundle = "/tmp/bundle-xyz", daemonsLive = false, res
     probeResidualAgents: () => residual,
     probeDrained: () => drained,
     bundleHasCapturedAgents: () => bundleHadAgents,
+    probeUpdaterAgent: () => updaterAgent,
     scriptExists: () => true,
+    binExists: (name) => !missingBins.includes(name),
     log: () => {},
     InstallRunCtor: undefined, // filled below with the real InstallRun
   };
@@ -456,6 +458,47 @@ describe("node-class env pinning (composed tools cannot diverge from --class)", 
       expect(c.env.CATALYST_LAYER2_CONFIG_FILE).toBe(bag.layer2);
       expect(c.env.CATALYST_MACHINE_CONFIG).toBe(bag.layer2);
     }
+  });
+});
+
+describe("fresh-node bootstrap + profile-switch guards (Codex round 5)", () => {
+  test("spawned steps get ~/.bun/bin + ~/.local/bin seeded on PATH (so a post-setup tool is found)", async () => {
+    const bag = withRealRun(makeDeps());
+    bag.deps.env = { CATALYST_ASSUME_NO_DAEMONS: "1", HOME: "/home/me", PATH: "/usr/bin" };
+    await runInstallLifecycle({ operation: "install", nodeClass: "developer", opts: {} }, bag.deps);
+    const adopt = bag.stepCalls.find((c) => c.argv.join(" ") === "STACK adopt-updater");
+    expect(adopt.env.PATH).toContain("/home/me/.bun/bin");
+    expect(adopt.env.PATH).toContain("/usr/bin"); // original PATH preserved at the end
+  });
+  test("refuses fast when a hard prerequisite (jq) is missing — before any step runs", async () => {
+    const bag = withRealRun(makeDeps({ missingBins: ["jq"] }));
+    const res = await runInstallLifecycle({ operation: "install", nodeClass: "worker", opts: {} }, bag.deps);
+    expect(res.outcome).toBe("refused");
+    expect(res.reason).toBe("missing-prereq");
+    expect(res.missing).toContain("jq");
+    expect(bag.calls).toHaveLength(0);
+  });
+  test("install --class worker REFUSES on a node with a stale updater agent (two-puller hazard) → use reinstall", async () => {
+    const bag = withRealRun(makeDeps({ updaterAgent: true }));
+    const res = await runInstallLifecycle({ operation: "install", nodeClass: "worker", opts: {} }, bag.deps);
+    expect(res.outcome).toBe("refused");
+    expect(res.reason).toBe("stale-updater");
+    expect(bag.calls).toHaveLength(0);
+  });
+  test("--force overrides the stale-updater guard; reinstall is never blocked by it", async () => {
+    const forced = withRealRun(makeDeps({ updaterAgent: true }));
+    expect((await runInstallLifecycle({ operation: "install", nodeClass: "worker", opts: { force: true } }, forced.deps)).outcome).toBe("completed");
+    const re = withRealRun(makeDeps({ updaterAgent: true }));
+    expect((await runInstallLifecycle({ operation: "reinstall", nodeClass: "worker", opts: { force: true } }, re.deps)).outcome).toBe("completed");
+  });
+  test("config-only reinstall rollback re-installs the CLI symlinks the teardown removed", async () => {
+    // bundleHadAgents:false (config-only), fail at write-config; teardown ran install-cli --uninstall.
+    const { deps, calls } = withRealRun(makeDeps({ bundleHadAgents: false, failOn: (a) => (a.join(" ") === "SETUP --non-interactive" ? 1 : 0) }));
+    const res = await runInstallLifecycle({ operation: "reinstall", nodeClass: "worker", opts: { force: true } }, deps);
+    expect(res.outcome).toBe("rolled_back");
+    const joined = calls.map((a) => a.join(" "));
+    const restoreIdx = joined.findIndex((c) => c.startsWith("BACKUP restore"));
+    expect(joined.slice(restoreIdx + 1)).toContain("INSTALL_CLI"); // symlinks re-installed after restore
   });
 });
 
