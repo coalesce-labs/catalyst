@@ -28,6 +28,7 @@ import {
   defaultConfiguredRepos,
   checkNodeClass,
   checkReadReplicaReachable,
+  checkMonitorProductionBuild,
   checkWontOwnWork,
   checkDaemonlessLocal,
   checksForClass,
@@ -1494,6 +1495,55 @@ describe("checkReadReplicaReachable (CTL-1355)", () => {
     });
     expect(checks[0].status).toBe(STATUS.FAIL);
     expect(checks[0].detail).toContain("ECONNREFUSED");
+  });
+});
+
+describe("checkMonitorProductionBuild (CTL-1372)", () => {
+  const htmlWithAsset = '<script type="module" src="/assets/main-abc123.js"></script>';
+  const servedFetch = (jsBody) => async (url) =>
+    url.endsWith(".js")
+      ? { ok: true, status: 200, text: async () => jsBody }
+      : { ok: true, status: 200, text: async () => htmlWithAsset };
+
+  it("PASSes a production bundle (no dev react-dom)", async () => {
+    const checks = await checkMonitorProductionBuild({
+      baseUrl: "http://localhost:7400",
+      fetch: servedFetch("var x=1;/* production */"),
+    });
+    expect(checks[0].name).toBe("monitor-build");
+    expect(checks[0].status).toBe(STATUS.PASS);
+  });
+
+  it("WARNs (never FAILs) when the served bundle is a development react-dom", async () => {
+    const checks = await checkMonitorProductionBuild({
+      baseUrl: "http://localhost:7400",
+      fetch: servedFetch("loaded react-dom-client.development chunk"),
+    });
+    expect(checks[0].status).toBe(STATUS.WARN);
+    expect(checks[0].detail).toContain("DEVELOPMENT");
+    expect(checks[0].detail).toContain("CTL-1372");
+  });
+
+  it("INFO-skips when no local monitor is serving (non-2xx root)", async () => {
+    const checks = await checkMonitorProductionBuild({
+      baseUrl: "http://localhost:7400",
+      fetch: async () => ({ ok: false, status: 502 }),
+    });
+    expect(checks[0].status).toBe(STATUS.INFO);
+  });
+
+  it("INFO-skips when the monitor is unreachable", async () => {
+    const checks = await checkMonitorProductionBuild({
+      baseUrl: "http://localhost:7400",
+      fetch: async () => {
+        throw new Error("ECONNREFUSED");
+      },
+    });
+    expect(checks[0].status).toBe(STATUS.INFO);
+  });
+
+  it("is wired into the worker + developer suites as an advisory check", () => {
+    expect(checksForClass.toString()).toContain("checkMonitorProductionBuild");
   });
 });
 

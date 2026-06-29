@@ -182,6 +182,24 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   // at rest and never shift layout.
   useEffect(() => installOverlayScroll(), []);
 
+  // CTL-1372: bound the User Timing buffer. The monitor is a long-lived PWA (runs
+  // for days); any performance.measure()/mark() emitter — e.g. a stray React dev
+  // build, which marks every render — accumulates PerformanceMeasure entries that
+  // are never GC'd (1.8M / 12 GB observed in a leaked tab). A production build emits
+  // ~none, so this is a cheap no-op there and a hard backstop if a dev bundle ships.
+  useEffect(() => {
+    const clear = () => {
+      try {
+        performance.clearMeasures();
+        performance.clearMarks();
+      } catch {
+        /* User Timing API unavailable — nothing to clear */
+      }
+    };
+    const id = window.setInterval(clear, 30_000);
+    return () => window.clearInterval(id);
+  }, []);
+
   // CTL-1025: surface jump + create actions, built once per navigate change.
   // Declared BEFORE the keydown effect below — that effect reads `surfaceActions`
   // in its dependency array, so the const must already be initialized. A later

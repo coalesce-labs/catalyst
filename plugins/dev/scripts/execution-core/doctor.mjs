@@ -1946,6 +1946,45 @@ export async function checkReadReplicaReachable(deps = {}) {
   }
 }
 
+// ─── Monitor build hygiene (CTL-1372) ─────────────────────────────────────────
+// checkMonitorProductionBuild — flag a DEVELOPMENT react-dom bundle served by the
+// LOCAL monitor. A dev build calls performance.measure() on every render and never
+// clears the User Timing buffer, so PerformanceMeasure entries accumulate unbounded
+// in Blink's native buffer (12 GB / 1.8M entries observed in a long-lived PWA tab).
+// ADVISORY (never FAIL): a leaky monitor must not block the work daemon from
+// activating, but operators should see it. INFO-skips when no local monitor serves.
+export async function checkMonitorProductionBuild(deps = {}) {
+  const {
+    baseUrl = `http://localhost:${process.env.MONITOR_PORT || 7400}`,
+    fetch: _fetch = globalThis.fetch,
+  } = deps;
+  const base = (typeof baseUrl === "string" ? baseUrl : "").replace(/\/+$/, "");
+  const skip = (why) => [mkCheck("monitor-build", STATUS.INFO, why)];
+  try {
+    const rootRes = await _fetch(base + "/", { method: "GET", signal: AbortSignal.timeout(5000) });
+    if (!(rootRes?.ok ?? false)) return skip(`no local monitor serving at ${base} — skipping production-build check`);
+    const html = (await rootRes.text()) || "";
+    const asset = html.match(/\/assets\/[A-Za-z0-9._-]+\.js/);
+    if (!asset) return skip(`monitor at ${base} served no /assets bundle — skipping production-build check`);
+    const jsRes = await _fetch(base + asset[0], { method: "GET", signal: AbortSignal.timeout(5000) });
+    const js = (await jsRes.text()) || "";
+    if (js.includes("react-dom-client.development")) {
+      return [
+        mkCheck(
+          "monitor-build",
+          STATUS.WARN,
+          `local monitor serves a DEVELOPMENT React bundle (${asset[0]}) — it leaks memory via ` +
+            `performance.measure() per render and never clears the User Timing buffer (CTL-1372); ` +
+            `rebuild production: MONITOR_FORCE_BUILD=1 catalyst-monitor restart`,
+        ),
+      ];
+    }
+    return [mkCheck("monitor-build", STATUS.PASS, `local monitor is a production React build (${asset[0]})`)];
+  } catch (err) {
+    return skip(`local monitor at ${base} unreachable (${err?.message ?? err}) — skipping production-build check`);
+  }
+}
+
 // ─── Developer/monitor: "will NOT pick up work" (CTL-1355) ────────────────────
 
 // checkWontOwnWork — a developer/monitor MUST sit out of the work pipeline. The
@@ -2233,6 +2272,7 @@ export function checksForClass(nc, opts = {}) {
       replicaThunk,
       wontOwnThunk,
       () => checkReaper(), // advisory (never FAIL), class-agnostic
+      () => checkMonitorProductionBuild({ fetch: _fetch }), // CTL-1372: warn on a dev-build monitor (advisory)
       () => checkCloudTokenEnv(), // advisory
       () => checkConfigScopeLeak(), // advisory
     ];
@@ -2282,6 +2322,7 @@ export function checksForClass(nc, opts = {}) {
     () => checkSdkExecutorAuth(), // CTL-1367 item 9: under executor=sdk, subscription auth must be correct (no api-key metering)
     () => checkConfigScopeLeak(), // CTL-1214: committed Layer-1 .catalyst/config.json must not carry node/cluster scope (roster/orchestration/feedback/sweep/repoColors/hosts.json)
     () => checkRepoIconTokenScope(), // CTL-1375: monitor daemon's gh token can read configured private repos' contents (else favicons fall back to the org avatar) — advisory (never FAIL)
+    () => checkMonitorProductionBuild(), // CTL-1372: warn if the local monitor serves a dev-build React bundle (leaks via performance.measure) — advisory (never FAIL)
   ];
 }
 
