@@ -51,5 +51,24 @@ TMP="$(mktemp -d)"; ( cd "$TMP" && "${SCRIPTS}/workflow-context.sh" --help >/dev
 if [[ -e "$TMP/.catalyst" ]]; then fail "wc-dev --help does no work" ".catalyst created"; else ok "wc-dev --help does no work"; fi
 rm -rf "$TMP"
 
+# --- catalyst-why: -h/--help → stdout exit 0; bare → usage stderr exit 1 ---
+echo "catalyst-why"
+out="$("${SCRIPTS}/catalyst-why" --help 2>/dev/null)"; rc=$?
+expect_eq "why: --help exits 0" "0" "$rc"
+expect_contains "why: --help names the tool" "$out" "catalyst-why"
+expect_contains "why: --help has Usage block" "$out" "Usage:"
+out="$("${SCRIPTS}/catalyst-why" 2>&1 >/dev/null)"; rc=$?
+expect_ne "why: bare exits non-zero" "0" "$rc"
+expect_contains "why: bare prints usage to stderr" "$out" "Usage:"
+
+# --- catalyst-otel-forward: -h/--help only (bare = daemon, NOT tested) ---
+echo "catalyst-otel-forward"
+out="$("${SCRIPTS}/catalyst-otel-forward" --help 2>/dev/null)"; rc=$?
+expect_eq "otel: --help exits 0" "0" "$rc"
+expect_contains "otel: --help names the tool" "$out" "catalyst-otel-forward"
+expect_contains "otel: --help has Usage block" "$out" "Usage:"
+out="$("${SCRIPTS}/catalyst-otel-forward" -h 2>/dev/null)"; rc=$?
+expect_eq "otel: -h alias exits 0" "0" "$rc"
+
 echo; echo "RESULTS: $PASSES passed, $FAILURES failed"
 [[ "$FAILURES" -eq 0 ]]

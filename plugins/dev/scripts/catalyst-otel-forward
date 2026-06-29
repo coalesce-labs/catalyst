@@ -1,5 +1,28 @@
 #!/usr/bin/env bash
 # catalyst-otel-forward — entry wrapper for the otel-forward daemon
 set -euo pipefail
+
+print_help() {
+  cat <<'EOF'
+catalyst-otel-forward — tail the Catalyst event log and forward events to OTLP / PostHog /
+Cloudflare destinations (long-lived forwarder daemon).
+
+Usage: catalyst-otel-forward [options]
+
+Runs as a daemon with no subcommand. Destinations + behavior come from
+~/.config/catalyst/config-<project>.json (CATALYST_CONFIG_PATH overrides).
+
+Options:
+  -h, --help    Show this help and exit
+
+Environment:
+  CATALYST_DIR, CATALYST_EVENTS_DIR, CATALYST_CONFIG_PATH, CATALYST_PROJECT_KEY
+EOF
+}
+
+case "${1:-}" in
+  -h|--help|help) print_help; exit 0 ;;
+esac
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 exec bun run "${SCRIPT_DIR}/otel-forward/index.ts" "$@"
