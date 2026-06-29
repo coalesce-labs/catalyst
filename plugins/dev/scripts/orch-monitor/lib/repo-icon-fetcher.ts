@@ -1,39 +1,22 @@
 // repo-icon-fetcher.ts — auto-detect per-repo favicon/icon via GitHub API (CTL-961).
 //
 // Priority order for icon path discovery (mirrors conductor.build-style detection):
-//   1. favicon.ico
-//   2. public/favicon.ico
-//   3. public/favicon.svg
-//   4. public/favicon.png
-//   5. public/icon.svg
-//   6. public/icon.png
-//   7. icon.svg
-//   8. icon.png
-//   9. logo.svg
-//  10. logo.png
-//  11. apple-touch-icon.png
-//  12. .github/logo.svg
-//  13. .github/logo.png
-//  14. static/favicon.ico
-//  15. static/favicon.svg
-//  16. static/favicon.png
-//  17. apps/web/public/favicon.ico   (CTL-979: monorepo web app layout, e.g. Adva)
-//  18. apps/web/public/favicon.svg
-//  19. apps/web/public/favicon.png
-//  20. apps/website/public/favicon.ico
-//  21. apps/website/public/favicon.svg
-//  22. apps/website/public/favicon.png
-//
-// All matching paths are collected; the best by format (SVG > PNG > ICO) is the default.
+// see the ICON_PATH_PRIORITY array below — the single source of truth — for the full,
+// ordered probe list (root favicons/logos, then static/, then the apps/web|website
+// monorepo layouts; CTL-979, CTL-1375). All matching paths are collected; the best by
+// format (SVG > PNG > ICO) is the default.
 //
 // CTL-1380 (Bug B): when NO favicon is found at any probed path, fall back to the
 // GitHub owner/org AVATAR (resolveOwnerAvatar, via the public /users/<owner> endpoint)
 // so a configured team still shows a real image instead of a blank circle — this also
 // covers PRIVATE repos (the avatar is public even when the repo contents are not).
 // Cache: JSON files in cacheDir (default ~/catalyst/repo-icon-cache/), keyed by
-//   owner-repo slug, TTL 7 days (schema v4 — older-schema entries re-probe once). A negative
-//   result ("no icon found") is also cached (with a 1-day TTL) so we don't hammer
-//   the GitHub API on every boot.
+//   owner-repo slug, TTL 7 days for a real favicon hit (schema v4 — older-schema entries
+//   re-probe once). A negative result ("no icon found") is cached with a 1-day TTL so we
+//   don't hammer the GitHub API on every boot. CTL-1375: the owner-avatar FALLBACK is a
+//   DEGRADED result, so it caches for only 1 day (AVATAR_TTL_MS) — once the daemon's gh
+//   token gains org-read scope (or the repo/mapping is fixed) the real favicon surfaces
+//   within a day instead of being stranded behind the cached org avatar for a week.
 //
 // A favicon PATH existing does NOT mean it renders: a probed path can fetch to an
 // empty/transiently-failed body, which renders as a BLANK icon. Such candidates are
@@ -114,6 +97,12 @@ export const ICON_PATH_PRIORITY: readonly string[] = [
   "logo.svg",
   "logo.png",
   "apple-touch-icon.png",
+  // CTL-1375: additional standard favicon / PWA-icon filenames. Colored variants only.
+  // safari-pinned-tab.svg is deliberately EXCLUDED: it is a monochrome MASK (single-color
+  // silhouette), and FORMAT_RANK ranks any svg above every png — including it would wrongly
+  // outrank a repo's real colored apple-touch-icon.png / favicon.png.
+  "favicon-transparent.svg",
+  "icon-512.png",
   ".github/logo.svg",
   ".github/logo.png",
   "static/favicon.ico",
@@ -123,6 +112,8 @@ export const ICON_PATH_PRIORITY: readonly string[] = [
   "apps/web/public/favicon.ico",
   "apps/web/public/favicon.svg",
   "apps/web/public/favicon.png",
+  "apps/web/public/favicon-transparent.svg", // CTL-1375
+  "apps/web/public/icon-512.png", // CTL-1375
   "apps/website/public/favicon.ico",
   "apps/website/public/favicon.svg",
   "apps/website/public/favicon.png",
@@ -152,8 +143,23 @@ interface CacheEntry {
   result: IconResult;
 }
 
-const POSITIVE_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
-const NEGATIVE_TTL_MS = 24 * 60 * 60 * 1000; // 1 day
+export const POSITIVE_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days — a real favicon hit
+export const NEGATIVE_TTL_MS = 24 * 60 * 60 * 1000; // 1 day — a "no icon found" result
+// CTL-1375: the owner-avatar fallback re-probes on a SHORT (1-day) cadence — not the full
+// 7-day positive TTL — so a fixed gh-token scope / repo mapping surfaces the real favicon
+// within a day instead of pinning behind the cached org avatar for a week.
+export const AVATAR_TTL_MS = 24 * 60 * 60 * 1000; // 1 day — owner-avatar fallback
+
+/**
+ * Per-result cache TTL. A real favicon hit lives the full POSITIVE_TTL_MS; a negative
+ * (no-icon) result the NEGATIVE_TTL_MS; the DEGRADED owner-avatar fallback (CTL-1380) only
+ * AVATAR_TTL_MS, so it re-probes daily and a later-reachable real favicon isn't stranded
+ * behind it for a week (CTL-1375). Pure — depends only on the result shape.
+ */
+export function cacheTtlForResult(result: IconResult): number {
+  if (!result.found) return NEGATIVE_TTL_MS;
+  return result.selectedPath === OWNER_AVATAR_PATH ? AVATAR_TTL_MS : POSITIVE_TTL_MS;
+}
 
 function slugify(ownerRepo: string): string {
   return ownerRepo.replace(/\//g, "--");
@@ -169,7 +175,7 @@ function readCache(cacheDir: string, ownerRepo: string): IconResult | null {
     const raw = readFileSync(file, "utf8");
     const entry: CacheEntry = JSON.parse(raw) as CacheEntry;
     if (entry.schemaVersion !== CACHE_SCHEMA_VERSION) return null; // legacy v1 → re-probe
-    const ttl = entry.result.found ? POSITIVE_TTL_MS : NEGATIVE_TTL_MS;
+    const ttl = cacheTtlForResult(entry.result);
     if (Date.now() - entry.cachedAt < ttl) return entry.result;
   } catch {
     // missing or malformed — treat as cache miss
