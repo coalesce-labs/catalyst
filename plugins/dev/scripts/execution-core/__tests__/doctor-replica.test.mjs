@@ -8,7 +8,7 @@ import { checkReplicaWriter } from "../doctor.mjs";
 
 const NOW = 1_800_000_000_000;
 const DB = "/tmp/ctl1394/catalyst-replica.db";
-const TOKEN_ENV = { envVar: "CATALYST_MINI_ACCOUNT_TOKEN", source: "table" };
+const TOKEN_ENV = { envVar: "CATALYST_CLOUD_TOKEN", source: "default" };
 
 // "healthy" defaults; override per test.
 function deps(over = {}) {

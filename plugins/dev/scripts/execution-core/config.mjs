@@ -1413,25 +1413,21 @@ export function getReplicaDbPath() {
   return process.env.CATALYST_REPLICA_DB || resolve(catalystDir(), "catalyst-replica.db");
 }
 
-// --- Per-node Catalyst-Cloud token resolution (CTL-1394) ---
-// The supervised replica writer needs THIS node's own cloud token. Per-node tokens
-// for the same tenant-0 feed are NOT uniformly named (mini-2 → MINI_1, office-desk →
-// WORKSTATION), so the host→env-var-NAME map is a table, not an algorithm. This
-// resolver returns the env-var NAME (+ where it came from) ONLY — it never reads or
-// returns the secret VALUE (the writer reads process.env[name]; doctor checks
-// presence by name). Keys match getHostName() output (the first DNS label / Layer-2
-// catalyst.host.name pin), so `laptop` and `office-desk` both map to the workstation
-// token. A node absent from the table falls back to the shared CATALYST_CLOUD_TOKEN.
-const NODE_CLOUD_TOKEN_ENV_TABLE = Object.freeze({
-  laptop: "CATALYST_CLOUD_WORKSTATION_TOKEN",
-  "office-desk": "CATALYST_CLOUD_WORKSTATION_TOKEN",
-  mini: "CATALYST_MINI_ACCOUNT_TOKEN",
-  "mini-2": "CATALYST_MINI_1_ACCOUNT_TOKEN",
-});
+// --- Catalyst-Cloud token resolution (CTL-1394) ---
+// The supervised replica writer reads its cloud token from a STANDARD env-var NAME —
+// `CATALYST_CLOUD_TOKEN` — on EVERY host (the same name cloud-token-env.mjs / CTL-1307
+// already projects into cluster.env). The per-node-ness is the VALUE the operator
+// provisions into that host's 0600 replica-writer.env, NOT the name — so this installs
+// on arbitrary hosts with ZERO code changes (no host names baked into the source). An
+// optional override (env `CATALYST_CLOUD_TOKEN_ENV` / Layer-2 `catalyst.cloud.tokenEnv`)
+// lets a host point at a differently-named var. NAME-ONLY: this never reads or returns the
+// secret VALUE (the writer reads process.env[name]; doctor checks presence by name), so the
+// result is safe to log.
+const DEFAULT_CLOUD_TOKEN_ENV = "CATALYST_CLOUD_TOKEN";
 
 // readLayer2CloudTokenEnv — the raw catalyst.cloud.tokenEnv string from the Layer-2
 // file, or undefined (absent/malformed/non-string). Never throws (parity with
-// readLayer2NodeClass). Lets a new fleet node name its token var without a code change.
+// readLayer2NodeClass). The per-host escape hatch — name your token var without a code change.
 function readLayer2CloudTokenEnv() {
   try {
     const v = JSON.parse(readFileSync(getLayer2ConfigPath(), "utf8"))?.catalyst?.cloud?.tokenEnv;
@@ -1441,21 +1437,19 @@ function readLayer2CloudTokenEnv() {
   }
 }
 
-// resolveNodeCloudTokenEnv — resolve the env-var NAME that holds this node's cloud
-// token. Precedence mirrors getHostName/getNodeClass: env override → Layer-2 override
-// → hardcoded host table → shared-token fallback. Returns { envVar, source } where
-// source ∈ "env" | "layer2" | "table" | "fallback". Pure + NAME-only: it never reads
-// process.env[envVar] (the secret value), so it is safe to log the result.
-export function resolveNodeCloudTokenEnv({ hostName = getHostName(), env = process.env } = {}) {
+// resolveNodeCloudTokenEnv — resolve the env-var NAME that holds this host's cloud token:
+// env override → Layer-2 override → the standard `CATALYST_CLOUD_TOKEN`. Returns
+// { envVar, source } where source ∈ "env" | "layer2" | "default". Pure + NAME-only: it never
+// reads process.env[envVar] (the secret value), so it is safe to log the result. No host
+// names are hardcoded — the resolver is host-agnostic by design.
+export function resolveNodeCloudTokenEnv({ env = process.env } = {}) {
   const override = env.CATALYST_CLOUD_TOKEN_ENV;
   if (typeof override === "string" && override.length > 0) {
     return { envVar: override, source: "env" };
   }
   const l2 = readLayer2CloudTokenEnv();
   if (l2) return { envVar: l2, source: "layer2" };
-  const fromTable = NODE_CLOUD_TOKEN_ENV_TABLE[hostName];
-  if (fromTable) return { envVar: fromTable, source: "table" };
-  return { envVar: "CATALYST_CLOUD_TOKEN", source: "fallback" };
+  return { envVar: DEFAULT_CLOUD_TOKEN_ENV, source: "default" };
 }
 
 export function readDelegateRunnerConfig(env = process.env) {

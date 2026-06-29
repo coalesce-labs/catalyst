@@ -361,11 +361,12 @@ launcher sources it from a `0600` file at run time.
 | --- | --- | --- |
 | `CATALYST_LINEAR_REPLICA` env / `catalyst.linearReplica.mode` (Layer-2) | The **read flag** — `on` makes the scheduler + `catalyst-linear` trust the local replica; `off`/unset reads `linearis` directly. Env (`on`/`1` on, else off) wins over Layer-2 (`mode: "on"`). | off |
 | `CATALYST_REPLICA_DB` env | Replica file path. | `~/catalyst/catalyst-replica.db` |
-| `CATALYST_CLOUD_TOKEN_ENV` env / `catalyst.cloud.tokenEnv` (Layer-2) | Override the env-var **name** holding this node's cloud token. Otherwise resolved by host: `laptop`/`office-desk`→`CATALYST_CLOUD_WORKSTATION_TOKEN`, `mini`→`CATALYST_MINI_ACCOUNT_TOKEN`, `mini-2`→`CATALYST_MINI_1_ACCOUNT_TOKEN`; unmapped → shared `CATALYST_CLOUD_TOKEN`. | host table |
+| `CATALYST_CLOUD_TOKEN` (the token itself) | The host's cloud token — read by a **standard name on every host** (sourced from the `0600` `replica-writer.env`, or `cluster.env`). The per-host-ness is the **value** you provision, not the name — so the writer installs on arbitrary hosts with no code change. | — |
+| `CATALYST_CLOUD_TOKEN_ENV` env / `catalyst.cloud.tokenEnv` (Layer-2) | Optional escape hatch — point the writer at a **differently-named** token var on a specific host (per-host config, not code). | `CATALYST_CLOUD_TOKEN` |
 | `CATALYST_CLOUD_BASE_URL` / `CATALYST_CLOUD_ACCOUNT` env | Cloud feed coordinates. | `https://api.catalyst-cloud.coalescelabs.ai/api/v1` / `tenant-0` |
 
-**Seed-before-flip runbook** (per node): provision the node's token into `~/.config/catalyst/replica-writer.env`
-(`chmod 600`) → `catalyst-stack adopt-replica-writer` → wait for a verified seed (`catalyst doctor`'s
+**Seed-before-flip runbook** (per host): provision the host's token as `export CATALYST_CLOUD_TOKEN=…`
+in `~/.config/catalyst/replica-writer.env` (`chmod 600`) → `catalyst-stack adopt-replica-writer` → wait for a verified seed (`catalyst doctor`'s
 `replica-fresh` PASS, or `sqlite3 ~/catalyst/catalyst-replica.db 'SELECT COUNT(*) FROM issues'` > 0) →
 **then** set `CATALYST_LINEAR_REPLICA=on` (and restart execution-core on a worker so the scheduler builds
 the reader). Flipping the flag before the seed completes is harmless — reads simply MISS through to
