@@ -46,6 +46,8 @@ import {
   // CTL-1375: configured-repo discovery for the repo-icon token-scope advisory.
   getRegistryPath,
   readClusterConfig,
+  // CTL-1396 item A: unified event-log path for the recent sdk→bg silent-degrade scan.
+  getEventLogPath,
 } from "./config.mjs";
 import { ownedBy } from "./hrw.mjs";
 import { readPeerHeartbeats } from "./cluster-heartbeat.mjs";
@@ -1237,6 +1239,211 @@ export function checkSdkExecutorAuth(deps = {}) {
       "executor=sdk and subscription auth is correct (CLAUDE_CODE_OAUTH_TOKEN set, no ANTHROPIC_API_KEY/ANTHROPIC_AUTH_TOKEN)",
     ),
   ];
+}
+
+// defaultReadDaemonProcEnv — read the RUNNING exec-core daemon's process env via
+// `ps eww <pid>` (the BSD/macOS spelling that appends the process environment
+// after the command). Returns the raw `ps` stdout (which DOES contain secret
+// values) or null when the pid is dead / not ours / ps fails. The CALLER must
+// only ever extract booleans from this — never surface the raw text or any token
+// VALUE (see checkSdkDaemonEnv). Injectable in tests so nothing shells out.
+function defaultReadDaemonProcEnv(pid) {
+  try {
+    const r = spawnSync("ps", ["eww", String(pid)], { encoding: "utf8", timeout: 5_000 });
+    if (r.status !== 0 || !r.stdout) return null;
+    return r.stdout;
+  } catch {
+    return null;
+  }
+}
+
+// scanRecentBgFallback — CTL-1396 item A (3): the daemon-boot auth gate
+// (resolveSdkBootExecutor) emits `execution-core.executor.bg-fallback` to the
+// unified event log when executor=sdk but the daemon's own env fails the
+// subscription-auth precondition (token missing OR ANTHROPIC_API_KEY set) — it
+// then silently degrades the WHOLE boot to bg. A presence-of-token probe alone
+// can MISS the api-key-induced fallback (token present + api-key set still
+// degrades), so this complementary scan surfaces any recent degrade as a WARN.
+// All reads are injectable + fail-open (a missing/unreadable log → PASS, never
+// throws). Returns a single Check.
+function scanRecentBgFallback({ eventLogPath, readEventLog, now, recentWindowMs }) {
+  let body = "";
+  try {
+    body = readEventLog(eventLogPath);
+  } catch {
+    body = ""; // absent/unreadable → treat as "no degrades observed" (fail-open)
+  }
+  const cutoff = now() - recentWindowMs;
+  const hours = Math.round(recentWindowMs / 3_600_000);
+  let recent = 0;
+  let latestTs = null;
+  for (const line of body.split("\n")) {
+    const s = line.trim();
+    if (!s) continue;
+    let evt;
+    try {
+      evt = JSON.parse(s);
+    } catch {
+      continue; // tolerate partial/corrupt lines
+    }
+    if (evt?.attributes?.["event.name"] !== "execution-core.executor.bg-fallback") continue;
+    const t = Date.parse(evt?.ts ?? evt?.observedTs ?? "");
+    if (Number.isNaN(t)) continue;
+    if (t >= cutoff) {
+      recent++;
+      if (latestTs === null || t > latestTs) latestTs = t;
+    }
+  }
+  if (recent > 0) {
+    return mkCheck(
+      "sdk-bg-fallback",
+      STATUS.WARN,
+      `executor=sdk but ${recent} execution-core.executor.bg-fallback event(s) in the last ${hours}h — ` +
+        `the daemon silently degraded sdk→bg at boot (most recent ${new Date(latestTs).toISOString()}); ` +
+        `fix the daemon's auth env (CLAUDE_CODE_OAUTH_TOKEN, no ANTHROPIC_API_KEY) and restart`,
+    );
+  }
+  return mkCheck(
+    "sdk-bg-fallback",
+    STATUS.PASS,
+    `no recent execution-core.executor.bg-fallback events (sdk did not silently degrade to bg in the last ${hours}h)`,
+  );
+}
+
+// checkSdkDaemonEnv — CTL-1396 item A. checkSdkExecutorAuth verifies the OPERATOR
+// SHELL env, but the RUNNING daemon arms CLAUDE_CODE_OAUTH_TOKEN only on a restart
+// that inherited ~/.zshenv — so doctor can PASS while the live daemon has
+// token-in-env=0 and silently degraded sdk→bg. A reinstalled/flipped node then
+// looks healthy but isn't. This check closes that gap by inspecting the RUNNING
+// exec-core daemon's process env (not the operator shell), and surfacing recent
+// silent degrades from the unified event log.
+//
+// Only bites under executor=sdk (INFO no-op otherwise — the whole fleet is bg in
+// Phase 1, so this is a pure pass-through until a node is explicitly flipped).
+//
+// Severities (the running-daemon env check):
+//   • executor != sdk                         → INFO  (not applicable)
+//   • no pid-file / unparseable pid           → WARN  (daemon not running; can't verify)
+//   • pid present but process not found        → WARN  (stale pid; can't verify)
+//   • daemon alive, NO CLAUDE_CODE_OAUTH_TOKEN  → FAIL  (clearly broken — sdk degrades to bg)
+//   • daemon alive, token present, CATALYST_EXECUTOR=sdk → PASS
+//   • daemon alive, token present, CATALYST_EXECUTOR != sdk → WARN (can't confirm sdk)
+// Plus a second `sdk-bg-fallback` check from the event-log scan (WARN on a recent
+// degrade, else PASS) — see scanRecentBgFallback.
+//
+// SECURITY: the token VALUE is NEVER printed or returned — only a boolean
+// "present". Detail strings carry the pid and the (non-secret) CATALYST_EXECUTOR
+// value only.
+//
+// All external access is an INJECTABLE SEAM with a real default (executor
+// resolution, pid-file read, process-env read, event-log read, clock) so tests
+// never shell out or touch the real daemon.
+export function checkSdkDaemonEnv(deps = {}) {
+  const {
+    // Resolve the executor the SAME way the daemon does (getExecutor(configPath));
+    // an explicit `executor` overrides resolution entirely (test seam).
+    configPath = layer1Path(),
+    executor = getExecutor(configPath),
+    // The daemon is launched with `--pid-file <orchDir>/daemon.pid`.
+    pidFilePath = resolve(getExecutionCoreDir(), "daemon.pid"),
+    readPidFile = (p) => readFileSync(p, "utf8"),
+    // (pid) => raw `ps eww` env text | null. Default reads the real process; tests
+    // inject a synthetic env string and never shell out.
+    readProcEnv = defaultReadDaemonProcEnv,
+    // Recent sdk→bg silent-degrade scan over the unified event log.
+    eventLogPath = getEventLogPath(),
+    readEventLog = (p) => readFileSync(p, "utf8"),
+    now = () => Date.now(),
+    recentWindowMs = 24 * 60 * 60 * 1000, // 24h
+  } = deps;
+
+  if (executor !== "sdk") {
+    return [
+      mkCheck(
+        "sdk-daemon-env",
+        STATUS.INFO,
+        `executor="${executor}" — running-daemon SDK-env gate not applicable (only enforced under executor=sdk)`,
+      ),
+    ];
+  }
+
+  const checks = [];
+
+  // ── (1) RUNNING-daemon process env ──
+  let pid = null;
+  try {
+    pid = parseInt(String(readPidFile(pidFilePath)).trim(), 10);
+  } catch {
+    pid = null; // pid-file absent/unreadable
+  }
+
+  if (!pid || Number.isNaN(pid)) {
+    checks.push(
+      mkCheck(
+        "sdk-daemon-env",
+        STATUS.WARN,
+        `executor=sdk but no live exec-core daemon pid-file at ${pidFilePath} — cannot verify the ` +
+          `RUNNING daemon's SDK auth env (start the daemon, then re-run doctor)`,
+      ),
+    );
+  } else {
+    let envText = null;
+    try {
+      envText = readProcEnv(pid);
+    } catch {
+      envText = null;
+    }
+    if (!envText) {
+      checks.push(
+        mkCheck(
+          "sdk-daemon-env",
+          STATUS.WARN,
+          `executor=sdk but the exec-core daemon process (pid ${pid}) was not found — the pid-file is ` +
+            `stale; cannot verify its SDK auth env (restart the daemon)`,
+        ),
+      );
+    } else {
+      // Presence-only parse — NEVER capture/return the token VALUE. `\S` after the
+      // `=` confirms a non-empty value without binding it.
+      const hasToken = /(?:^|\s)CLAUDE_CODE_OAUTH_TOKEN=\S/.test(envText);
+      const execMatch = envText.match(/(?:^|\s)CATALYST_EXECUTOR=(\S+)/);
+      const execEnv = execMatch ? execMatch[1] : null;
+      if (!hasToken) {
+        checks.push(
+          mkCheck(
+            "sdk-daemon-env",
+            STATUS.FAIL,
+            `executor=sdk but the RUNNING exec-core daemon (pid ${pid}) has NO CLAUDE_CODE_OAUTH_TOKEN ` +
+              `in its process env — SDK auth will silently degrade to bg (the daemon did not inherit ` +
+              `~/.zshenv; restart it from a login shell that exports the subscription token)`,
+          ),
+        );
+      } else if (execEnv === "sdk") {
+        checks.push(
+          mkCheck(
+            "sdk-daemon-env",
+            STATUS.PASS,
+            `the RUNNING exec-core daemon (pid ${pid}) carries CLAUDE_CODE_OAUTH_TOKEN and CATALYST_EXECUTOR=sdk`,
+          ),
+        );
+      } else {
+        checks.push(
+          mkCheck(
+            "sdk-daemon-env",
+            STATUS.WARN,
+            `the RUNNING exec-core daemon (pid ${pid}) carries CLAUDE_CODE_OAUTH_TOKEN but its env does ` +
+              `not advertise CATALYST_EXECUTOR=sdk (CATALYST_EXECUTOR=${execEnv ?? "<unset>"}) — it may ` +
+              `have resolved sdk from Layer-1, or may be running bg; restart with CATALYST_EXECUTOR=sdk to confirm`,
+          ),
+        );
+      }
+    }
+  }
+
+  // ── (2) recent silent sdk→bg degrades from the unified event log ──
+  checks.push(scanRecentBgFallback({ eventLogPath, readEventLog, now, recentWindowMs }));
+
+  return checks;
 }
 
 // ─── Phase 6: Renderer, exit code, runDoctor ─────────────────────────────────
@@ -2548,6 +2755,7 @@ export function checksForClass(nc, opts = {}) {
     () => checkReaper(), // CTL-1306: orphan-sweep reaper installed + baked path still exists (not dead-127)
     () => checkCloudTokenEnv(), // CTL-1307: cluster cloud token decrypted → projected to machine-level env (advisory)
     () => checkSdkExecutorAuth(), // CTL-1367 item 9: under executor=sdk, subscription auth must be correct (no api-key metering)
+    () => checkSdkDaemonEnv(), // CTL-1396 item A: under executor=sdk, the RUNNING daemon's process env must carry CLAUDE_CODE_OAUTH_TOKEN (not just the operator shell) + surface recent silent sdk→bg degrades
     () => checkConfigScopeLeak(), // CTL-1214: committed Layer-1 .catalyst/config.json must not carry node/cluster scope (roster/orchestration/feedback/sweep/repoColors/hosts.json)
     () => checkRepoIconTokenScope(), // CTL-1375: monitor daemon's gh token can read configured private repos' contents (else favicons fall back to the org avatar) — advisory (never FAIL)
     () => checkMonitorProductionBuild(), // CTL-1372: warn if the local monitor serves a dev-build React bundle (leaks via performance.measure) — advisory (never FAIL)

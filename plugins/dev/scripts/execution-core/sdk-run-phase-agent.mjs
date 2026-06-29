@@ -756,6 +756,16 @@ function mapResult(result) {
   };
 }
 
+// extractNumTurns — CTL-1396 item B. `num_turns` is a standard Claude Agent SDK
+// terminal-result field (how many turns the run actually took). Return it only when
+// it is a finite number; otherwise null (older SDK / no terminal result / malformed
+// value). Pure + total — never throws — so the phase-turns telemetry stays
+// best-effort regardless of the SDK's result shape.
+function extractNumTurns(result) {
+  const n = result?.num_turns;
+  return typeof n === "number" && Number.isFinite(n) ? n : null;
+}
+
 // sdkRunPhaseAgent — the executor=sdk launch verb. async (the in-process query loop
 // awaits the SDK stream), returns the defaultRunPhaseAgent shape.
 export async function sdkRunPhaseAgent(
@@ -917,6 +927,25 @@ export async function sdkRunPhaseAgent(
 
       // Terminal result → map + (conditional) backstop emit.
       const { result: mapped, backstop } = mapResult(result);
+      // CTL-1396 item B: record the ACTUAL turn count the SDK reported for this
+      // phase run so the per-phase turn caps can be calibrated from real usage
+      // (set arbitrarily high while we measure, so turn-cap-exhausted won't fire).
+      // Fires once per phase run for EVERY terminal subtype routed through mapResult
+      // — success, error_max_turns (turns-at-exhaustion), and other error/cancelled.
+      // execution-core.* is outside every broker-protected namespace (NOT filter.*,
+      // broker.daemon.*, session.heartbeat, or phase.<name>.<terminal>.<ticket>), so
+      // it cannot collide with the routing/feedback spaces. Additive telemetry only:
+      // does NOT change mapResult's return contract or the dispatch behavior.
+      // Best-effort via the emitEvent seam (defaultEmitEvent never throws), exactly
+      // like the execution-core.sdk.overloaded calls above; num_turns is guarded to
+      // null when absent/non-numeric.
+      emitEvent("execution-core.sdk.phase-turns", {
+        ticket,
+        phase,
+        num_turns: extractNumTurns(result),
+        subtype: result?.subtype ?? null,
+        turnCap: turnCap ?? spec.turnCap,
+      });
       if (backstop) {
         emitBackstop({ phase, ticket, status: backstop.status, reason: backstop.reason, orchDir, signalFile }, { spawn });
       }
