@@ -203,9 +203,12 @@ export class InstallRun {
     return this;
   }
 
-  // fail(err, {rolledBack}) — terminal event + trace for a failed run. rolledBack:true emits
-  // catalyst.install.rolled_back (+ an install.rollback span); else catalyst.install.failed.
-  fail(err, { rolledBack = false } = {}) {
+  // fail(err, {rolledBack, detail}) — terminal event + trace for a failed run. rolledBack:true emits
+  // catalyst.install.rolled_back (+ an install.rollback span); else catalyst.install.failed. `detail`
+  // merges extra HIGH-CARD body fields (e.g. rollback disposition + bundle path) so a partial-state
+  // node — provisioning failed AND rollback failed — is distinguishable from a benign safe-abort on a
+  // dashboard. These stay in body.payload, never on a label (the OTEL cardinality contract).
+  fail(err, { rolledBack = false, detail = null } = {}) {
     const endEpochMs = this.nowFn();
     const outcome = rolledBack ? "rolled_back" : "failed";
     const errMsg = err?.message ?? (err != null ? String(err) : null);
@@ -213,7 +216,7 @@ export class InstallRun {
       event: rolledBack ? INSTALL_EVENT.rolledBack : INSTALL_EVENT.failed,
       outcome,
       severity: "ERROR",
-      detail: { error: errMsg },
+      detail: { error: errMsg, ...(detail || {}) },
     });
     emitInstallTrace({
       operation: this.operation,

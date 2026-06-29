@@ -79,6 +79,14 @@ jobs:
         # would otherwise only fail at launchd runtime on a node. Walk its static graph.
         run: bun build updater/updater.mjs --target=node --outfile /dev/null
 
+      - name: Verify install-lifecycle import graph (bun build resolution check)
+        # CTL-1369 PR3: the catalyst-install lifecycle driver (install-lifecycle.mjs) is a
+        # separate CLI entrypoint (the catalyst-install bash launcher execs it), NOT in
+        # daemon.mjs's import graph — so a bad cross-module import (./lib/install-telemetry.mjs,
+        # ./config.mjs, ../tracing.mjs) would otherwise only fail at install runtime on a node.
+        # Walk its static graph.
+        run: bun build install-lifecycle.mjs --target=node --outfile /dev/null
+
       - name: Run stable unit tests
         # EXCLUDED SUITES — do NOT add these back without fixing the underlying
         # timing / sandbox incompatibility:
@@ -226,6 +234,7 @@ jobs:
             lib/catalyst-resource.test.mjs \
             lib/node-class-parity.test.mjs \
             lib/install-telemetry.test.mjs \
+            install-lifecycle.test.mjs \
             linear-reconcile.test.mjs \
             linear-reconcile-store.test.mjs \
             linear-reconcile-timer.test.mjs \

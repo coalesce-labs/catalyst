@@ -57,6 +57,7 @@ CLI_ENTRIES=(
   "catalyst-stack:catalyst-stack"
   "catalyst-doctor:catalyst-doctor"
   "catalyst-backup:catalyst-backup"
+  "catalyst-install:catalyst-install"
   "catalyst:catalyst"
   "thoughts-pull-sync.sh:thoughts-pull-sync"
   "../hooks/emit-lifecycle-event.sh:emit-lifecycle-event"
