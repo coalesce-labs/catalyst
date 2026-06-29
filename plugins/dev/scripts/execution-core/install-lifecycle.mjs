@@ -280,8 +280,19 @@ function writeLayer2Atomic(path, obj) {
   renameSync(tmp, path);
 }
 
-function setDeepKey(obj, dottedKey, value) {
+// Reject the JS prototype-chain keys so a dotted path can never walk into Object.prototype
+// (prototype-pollution guard — the install-managed keys are all hardcoded constants today, but this
+// keeps setDeepKey/deleteDeepKey safe by construction for any future caller).
+const UNSAFE_KEY_SEGMENTS = new Set(["__proto__", "prototype", "constructor"]);
+function assertSafeSegments(parts) {
+  for (const p of parts) {
+    if (UNSAFE_KEY_SEGMENTS.has(p)) throw new Error(`unsafe config key segment: '${p}'`);
+  }
+}
+
+export function setDeepKey(obj, dottedKey, value) {
   const parts = dottedKey.split(".");
+  assertSafeSegments(parts);
   let cur = obj;
   for (let i = 0; i < parts.length - 1; i++) {
     if (typeof cur[parts[i]] !== "object" || cur[parts[i]] == null) cur[parts[i]] = {};
@@ -290,8 +301,9 @@ function setDeepKey(obj, dottedKey, value) {
   cur[parts[parts.length - 1]] = value;
 }
 
-function deleteDeepKey(obj, dottedKey) {
+export function deleteDeepKey(obj, dottedKey) {
   const parts = dottedKey.split(".");
+  assertSafeSegments(parts);
   let cur = obj;
   for (let i = 0; i < parts.length - 1; i++) {
     if (typeof cur[parts[i]] !== "object" || cur[parts[i]] == null) return false; // path absent → nothing to delete

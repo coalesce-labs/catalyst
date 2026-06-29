@@ -17,6 +17,8 @@ import {
   resolveScripts,
   resolveRequestedClass,
   resolveReadReplica,
+  setDeepKey,
+  deleteDeepKey,
   planPhases,
   runInstallLifecycle,
   buildDefaultDeps,
@@ -545,5 +547,19 @@ describe("invariants", () => {
   test("usage() names all three operations", () => {
     const u = usage();
     for (const op of ["install", "uninstall", "reinstall"]) expect(u).toContain(op);
+  });
+  test("setDeepKey / deleteDeepKey reject prototype-chain segments (prototype-pollution guard)", () => {
+    for (const bad of ["__proto__.polluted", "a.__proto__.x", "constructor.prototype.x", "a.prototype.b"]) {
+      expect(() => setDeepKey({}, bad, 1)).toThrow(/unsafe config key segment/);
+      expect(() => deleteDeepKey({}, bad)).toThrow(/unsafe config key segment/);
+    }
+    // Object.prototype is not polluted by a normal call
+    const o = {};
+    setDeepKey(o, "catalyst.node.class", "developer");
+    expect(o.catalyst.node.class).toBe("developer");
+    expect({}.polluted).toBeUndefined();
+  });
+  test("INSTALL_MANAGED_KEYS contains no unsafe segments", () => {
+    for (const k of INSTALL_MANAGED_KEYS) for (const seg of k.split(".")) expect(["__proto__", "prototype", "constructor"]).not.toContain(seg);
   });
 });
