@@ -548,16 +548,21 @@ describe("invariants", () => {
     const u = usage();
     for (const op of ["install", "uninstall", "reinstall"]) expect(u).toContain(op);
   });
-  test("setDeepKey / deleteDeepKey reject prototype-chain segments (prototype-pollution guard)", () => {
+  test("setDeepKey rejects prototype-chain segments (the pollution vector) and writes normal keys", () => {
+    // setDeepKey creates intermediates, so an unsafe segment anywhere in the path is always reached.
     for (const bad of ["__proto__.polluted", "a.__proto__.x", "constructor.prototype.x", "a.prototype.b"]) {
       expect(() => setDeepKey({}, bad, 1)).toThrow(/unsafe config key segment/);
-      expect(() => deleteDeepKey({}, bad)).toThrow(/unsafe config key segment/);
     }
-    // Object.prototype is not polluted by a normal call
+    expect({}.polluted).toBeUndefined(); // Object.prototype untouched
     const o = {};
     setDeepKey(o, "catalyst.node.class", "developer");
     expect(o.catalyst.node.class).toBe("developer");
-    expect({}.polluted).toBeUndefined();
+  });
+  test("deleteDeepKey refuses an unsafe segment when reached; safely no-ops an absent path", () => {
+    for (const bad of ["__proto__", "constructor.x", "__proto__.x"]) {
+      expect(() => deleteDeepKey({}, bad)).toThrow(/unsafe config key segment/);
+    }
+    expect(deleteDeepKey({}, "a.b.c")).toBe(false); // absent intermediate → safe no-op (no throw, no write)
   });
   test("INSTALL_MANAGED_KEYS contains no unsafe segments", () => {
     for (const k of INSTALL_MANAGED_KEYS) for (const seg of k.split(".")) expect(["__proto__", "prototype", "constructor"]).not.toContain(seg);

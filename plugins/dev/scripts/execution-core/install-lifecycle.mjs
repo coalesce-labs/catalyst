@@ -282,34 +282,38 @@ function writeLayer2Atomic(path, obj) {
 
 // Reject the JS prototype-chain keys so a dotted path can never walk into Object.prototype
 // (prototype-pollution guard — the install-managed keys are all hardcoded constants today, but this
-// keeps setDeepKey/deleteDeepKey safe by construction for any future caller).
-const UNSAFE_KEY_SEGMENTS = new Set(["__proto__", "prototype", "constructor"]);
-function assertSafeSegments(parts) {
-  for (const p of parts) {
-    if (UNSAFE_KEY_SEGMENTS.has(p)) throw new Error(`unsafe config key segment: '${p}'`);
-  }
+// keeps setDeepKey/deleteDeepKey safe by construction for any future caller). The check is INLINED
+// at each computed-member access (not factored into a helper) so static analysis recognises it as a
+// sanitiser of the very key used in the bracket write.
+function isUnsafeKey(k) {
+  return k === "__proto__" || k === "prototype" || k === "constructor";
 }
 
 export function setDeepKey(obj, dottedKey, value) {
   const parts = dottedKey.split(".");
-  assertSafeSegments(parts);
   let cur = obj;
   for (let i = 0; i < parts.length - 1; i++) {
-    if (typeof cur[parts[i]] !== "object" || cur[parts[i]] == null) cur[parts[i]] = {};
-    cur = cur[parts[i]];
+    const k = parts[i];
+    if (isUnsafeKey(k)) throw new Error(`unsafe config key segment: '${k}'`);
+    if (typeof cur[k] !== "object" || cur[k] == null) cur[k] = {};
+    cur = cur[k];
   }
-  cur[parts[parts.length - 1]] = value;
+  const leaf = parts[parts.length - 1];
+  if (isUnsafeKey(leaf)) throw new Error(`unsafe config key segment: '${leaf}'`);
+  cur[leaf] = value;
 }
 
 export function deleteDeepKey(obj, dottedKey) {
   const parts = dottedKey.split(".");
-  assertSafeSegments(parts);
   let cur = obj;
   for (let i = 0; i < parts.length - 1; i++) {
-    if (typeof cur[parts[i]] !== "object" || cur[parts[i]] == null) return false; // path absent → nothing to delete
-    cur = cur[parts[i]];
+    const k = parts[i];
+    if (isUnsafeKey(k)) throw new Error(`unsafe config key segment: '${k}'`);
+    if (typeof cur[k] !== "object" || cur[k] == null) return false; // path absent → nothing to delete
+    cur = cur[k];
   }
   const leaf = parts[parts.length - 1];
+  if (isUnsafeKey(leaf)) throw new Error(`unsafe config key segment: '${leaf}'`);
   if (Object.prototype.hasOwnProperty.call(cur, leaf)) {
     delete cur[leaf];
     return true;
