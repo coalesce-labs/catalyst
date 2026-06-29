@@ -253,7 +253,16 @@ bootstrap() {
           # keep the previous (good) dist rather than swapping in a leaky bundle.
           if grep -rq "react-dom-client.development" "$_ui_stage" 2>/dev/null; then
             rm -rf "$_ui_stage"
-            echo "error: orch-monitor build produced a DEVELOPMENT React bundle (leaks memory via performance.measure) — keeping previous dist" >&2
+            # Fail-closed: if there is no known-good PRODUCTION dist to fall back to — a
+            # cold host with no prior build, or a prior dist that is itself the leaky dev
+            # bundle from the incident — we have nothing safe to serve, so abort rather
+            # than start a monitor that 404s or leaks. (With NODE_ENV=production pinned
+            # above, this branch should never fire; it is a backstop.)
+            if [[ ! -f "$MONITOR_UI_DIST_DIR/index.html" ]] || grep -rq "react-dom-client.development" "$MONITOR_UI_DIST_DIR" 2>/dev/null; then
+              echo "error: orch-monitor build produced a DEVELOPMENT React bundle and no known-good production dist exists — aborting start (rebuild with NODE_ENV=production)" >&2
+              exit 1
+            fi
+            echo "error: orch-monitor build produced a DEVELOPMENT React bundle (leaks memory via performance.measure) — keeping previous (production) dist" >&2
           else
             # Swap fresh build into place (drops ALL stale chunks); the static-asset copy
             # step below re-populates PWA manifest/sw/icons. mv is atomic on one filesystem.

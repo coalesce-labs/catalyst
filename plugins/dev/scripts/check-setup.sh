@@ -498,9 +498,12 @@ fi
 # Timing buffer → unbounded PerformanceMeasure growth (12 GB / 1.8M entries observed
 # in a long-lived PWA tab). The production build emits none. Sniff the served bundle.
 if (echo >/dev/tcp/localhost/"$MONITOR_PORT") 2>/dev/null && command -v curl &>/dev/null; then
-    _main_js=$(curl -s "http://localhost:$MONITOR_PORT/" 2>/dev/null | grep -oE '/assets/[A-Za-z0-9._-]+\.js' | head -1)
+    # `|| true`: a missing /assets match (older build / error page) must not abort the
+    # script under `set -euo pipefail`. `--max-time 3`: a stalled monitor must not hang
+    # the health check (matches the OTel probes above).
+    _main_js=$(curl -s --max-time 3 "http://localhost:$MONITOR_PORT/" 2>/dev/null | grep -oE '/assets/[A-Za-z0-9._-]+\.js' | head -1 || true)
     if [[ -n "$_main_js" ]]; then
-        if curl -s "http://localhost:$MONITOR_PORT$_main_js" 2>/dev/null | grep -q "react-dom-client.development"; then
+        if curl -s --max-time 3 "http://localhost:$MONITOR_PORT$_main_js" 2>/dev/null | grep -q "react-dom-client.development"; then
             fail "Monitor UI is a DEVELOPMENT React build — leaks memory via performance.measure()"
             info "Rebuild production: MONITOR_FORCE_BUILD=1 bash ${LAUNCHER:-plugins/dev/scripts/catalyst-monitor.sh} restart"
         else
