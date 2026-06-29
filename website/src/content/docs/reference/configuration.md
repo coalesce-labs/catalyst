@@ -310,8 +310,9 @@ per-repo:
 
 ### Read-replica endpoint (`catalyst.readReplica.baseUrl`, CTL-1346)
 
-> **Scope — board UI display only.** `catalyst.readReplica.baseUrl` governs the terminal HUD and
-> browser board/search display. It is **not** the agent Linear read path. For how agents read Linear
+> **Scope — board UI display only.** `catalyst.readReplica.baseUrl` governs the terminal HUD's board
+> reads today (pointing the browser/PWA ticket-detail and search flows at the same endpoint is the
+> forthcoming "split" topology — CTL-1347 / CTL-1354). It is **not** the agent Linear read path. For how agents read Linear
 > ticket data, see the `catalyst-dev:linearis` skill's "Reading Linear" section (two-mode rule:
 > standard node → `linearis issues read|list|search` directly; Catalyst Cloud node →
 > `@catalyst-cloud/sdk`-managed local replica first, with `linearis` as the evidence-triggered

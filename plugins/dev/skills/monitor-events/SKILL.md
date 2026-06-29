@@ -117,6 +117,14 @@ else
     FILTER_MISMATCH=true
   fi
 
+  # The smee→monitor webhook tunnel is the GitHub-event ingestion path and is NOT yet
+  # retired (Linear smee retires first; GitHub smee is gated on CTC-134). A dead tunnel
+  # produces zero events while the monitor keeps heartbeating — so without this check a
+  # worker would treat infra as healthy and enter the 2-hour Phase 2 wait. Tunnel down →
+  # skip the extension and rely on the authoritative REST confirmation below.
+  TUNNEL_STATE=$(catalyst-monitor status --json 2>/dev/null | jq -r '.webhookTunnel.connected // false')
+  [ "$TUNNEL_STATE" != "true" ] && { echo "WARN: Webhook tunnel not running"; STALLED=true; }
+
   if [ "$FILTER_MISMATCH" = "false" ] && [ "$STALLED" = "false" ]; then
     # Infrastructure healthy — extend to Phase 2.
     EVENT=$(catalyst-events wait-for \
@@ -623,7 +631,7 @@ flowing normally.
 ### Prefer status JSON when available
 
 Once CTL-244 lands, `catalyst-monitor status --json` will expose a `webhookTunnel`
-object (`{connected, lastEventAt, eventCount24h, eventCount24hByRepo}`). That
+object (`{connected, smeeUrl, lastEventAt, eventCount24h, eventCount24hByRepo}`). That
 is the structured first diagnostic step and should be checked before reaching for the
 recipes above. The diagnostic recipes here are the manual deep-dive when status JSON is
 unavailable, insufficient, or contradicts what you expect.

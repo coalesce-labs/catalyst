@@ -29,17 +29,26 @@ linearis cycles usage         # Just cycle operations
 
 ## Reading Linear
 
-**Two-mode rule — pick your read source by deployment context. Writes never change.**
+**The read source is decided by whether the local Catalyst Cloud replica is opted in
+*and* live — NOT by whether the node has a Cloud key. Writes never change.** The easiest
+way to honor this rule is to call **`catalyst-linear read|list|search`** (CTL-1391): it
+resolves the source itself and fails open to `linearis`, so you never decide based on
+node identity.
 
-### Mode 1 — Standard node (no Catalyst Cloud key)
+### Mode 1 — Direct (default)
 
-Read Linear **directly**: `linearis issues read|list|search`. There is **no local
-mirror**. (The broker's `filter-state.db` still exists for orchestration fencing and
-the board UI, but it is **not** a Linear read path — do not read ticket state from it.)
+When the replica is **not opted in** (`CATALYST_LINEAR_REPLICA` unset/`off` *and* Layer-2
+`catalyst.linearReplica.mode` not `on`) **or** no fresh replica file is present, read Linear
+**directly**: `linearis issues read|list|search`. There is **no local mirror**. A node that
+*has* a Cloud key but has not flipped the replica flag on is in this mode. (The broker's
+`filter-state.db` still exists for orchestration fencing and the board UI, but it is **not**
+a Linear read path — do not read ticket state from it.)
 
-### Mode 2 — Catalyst Cloud node (`@catalyst-cloud/sdk` replica active)
+### Mode 2 — Replica-first (opted in *and* a live replica present)
 
-A live local SQLite replica is kept current by the Cloud change-feed.
+When the replica is **opted in** (`CATALYST_LINEAR_REPLICA=on` or Layer-2
+`catalyst.linearReplica.mode=on`) **and** a fresh local SQLite replica — kept current by
+the Cloud change-feed — is present:
 
 - **Read the replica FIRST** and **trust it** as the authoritative local copy.
 - Do **NOT** reflexively re-verify against live Linear — that defeats the cache and
@@ -61,17 +70,19 @@ through `linearis`. The replica is **read-only** in both modes.
 
 - **Daemon read paths** resolve the mode automatically via the read-source seam
   (CTL-1390) — callers do not choose.
-- **Agent / skill ad-hoc reads:** prefer the replica-backed read on a Cloud node;
-  `linearis` is the direct path on a standard node and the evidence-triggered fallback
-  on a Cloud node.
+- **Agent / skill ad-hoc reads:** use **`catalyst-linear read <ID>`** (CTL-1391). It
+  applies the rule above for you — replica-first when opted in *and* fresh, automatic
+  fail-open to `linearis` otherwise — so the **same command is correct on every node**.
+  Output matches `linearis` JSON plus an additive `_meta` (read source + replica
+  freshness). `list`/`search` are `linearis` passthrough today (a replica-backed list
+  view is a follow-up).
 
-> **Mechanism note (honest status).** A first-class replica-aware read command for
-> ad-hoc agent use is **forthcoming** (CTL-1391, child of CTL-1390). Until it ships,
-> `linearis issues read|list|search` is the concrete command in both modes: the direct
-> path on a standard node, and the manual path on a Cloud node (you will not yet get
-> automatic replica-first behavior for ad-hoc reads — only the daemon does, via the
-> seam). Write this rule against the intent; use `linearis` as the executable command
-> today.
+> **Mechanism note.** `catalyst-linear` is the executable form of this rule (read-model
+> over the replica first, `linearis` fallback). Plain `linearis issues read|list|search`
+> stays correct everywhere — it is exactly what `catalyst-linear` falls back to — so
+> existing direct calls are fine. Prefer `catalyst-linear` for ad-hoc reads so a node
+> that *has* opted into the replica actually gets replica-first behavior automatically,
+> instead of every caller re-deciding from node identity.
 
 ## Gotchas & Traps
 
