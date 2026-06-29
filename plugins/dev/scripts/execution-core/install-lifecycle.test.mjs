@@ -59,7 +59,7 @@ const SCRIPTS = {
 
 // makeDeps — a fully-stubbed dep set. `failOn` is a predicate (argv|joined → truthy = fail with
 // that rc). `bundle` is the path catalyst-backup "prints". probeDaemons/probeDrained are flags.
-function makeDeps({ failOn, bundle = "/tmp/bundle-xyz", daemonsLive = false, residual = false, drained = false, bundleHadAgents = false, updaterAgent = false, missingBins = [], layer2Initial } = {}) {
+function makeDeps({ failOn, bundle = "/tmp/bundle-xyz", daemonsLive = false, residual = false, drained = false, bundleHadAgents = false, bundleEmpty = true, updaterAgent = false, missingBins = [], layer2Initial } = {}) {
   const events = [];
   const calls = [];
   const stepCalls = []; // {argv, env} per spawned step — lets tests assert the pinned step env
@@ -86,6 +86,7 @@ function makeDeps({ failOn, bundle = "/tmp/bundle-xyz", daemonsLive = false, res
     probeResidualAgents: () => residual,
     probeDrained: () => drained,
     bundleHasCapturedAgents: () => bundleHadAgents,
+    bundleIsEmpty: () => bundleEmpty,
     probeUpdaterAgent: () => updaterAgent,
     scriptExists: () => true,
     binExists: (name) => !missingBins.includes(name),
@@ -522,8 +523,8 @@ describe("fresh-node bootstrap + profile-switch guards (Codex round 5)", () => {
     expect(joined.slice(0, restoreIdx)).toContain("STACK stop"); // stopped before restore
     expect(joined.slice(restoreIdx + 1)).toContain("STACK start --yes"); // restarted after
   });
-  test("fresh-node rollback removes the install-managed config keys + uninstalls the CLI symlinks", async () => {
-    const { deps, calls, layer2 } = withRealRun(makeDeps({ bundleHadAgents: false, failOn: (a) => (a.join(" ") === "STACK install-services" ? 1 : 0) }));
+  test("fresh-node rollback (EMPTY backup) removes the install-managed config keys + uninstalls the CLI symlinks", async () => {
+    const { deps, calls, layer2 } = withRealRun(makeDeps({ bundleHadAgents: false, bundleEmpty: true, failOn: (a) => (a.join(" ") === "STACK install-services" ? 1 : 0) }));
     const res = await runInstallLifecycle({ operation: "install", nodeClass: "worker", opts: {} }, deps);
     expect(res.outcome).toBe("rolled_back");
     const joined = calls.map((a) => a.join(" "));
@@ -531,6 +532,30 @@ describe("fresh-node bootstrap + profile-switch guards (Codex round 5)", () => {
     expect(joined.slice(restoreIdx + 1)).toContain("INSTALL_CLI --uninstall"); // symlinks removed
     const cfg = JSON.parse(readFileSync(layer2, "utf8") || "{}");
     expect(cfg.catalyst?.orchestration?.pluginPullOwner).toBeUndefined(); // managed key stripped
+  });
+  test("config-only daemonless install rollback (NON-empty backup) PRESERVES the node's saved settings", async () => {
+    // install (not reinstall) on a configured-but-daemonless developer node that fails; the backup
+    // captured its config (non-empty) → restore re-lays it → rollback must NOT strip node.class.
+    const initial = { catalyst: { node: { class: "developer" }, readReplica: { baseUrl: "http://mini:7400" } } };
+    const { deps, calls, layer2 } = withRealRun(makeDeps({ bundleHadAgents: false, bundleEmpty: false, layer2Initial: initial, failOn: (a) => (a.join(" ") === "STACK adopt-updater" ? 1 : 0) }));
+    const res = await runInstallLifecycle({ operation: "install", nodeClass: "developer", opts: {} }, deps);
+    expect(res.outcome).toBe("rolled_back");
+    const joined = calls.map((a) => a.join(" "));
+    expect(joined.some((c) => c === "INSTALL_CLI --uninstall")).toBe(false); // symlinks NOT removed
+    const cfg = JSON.parse(readFileSync(layer2, "utf8") || "{}");
+    expect(cfg.catalyst.node.class).toBe("developer"); // saved setting preserved
+    expect(cfg.catalyst.readReplica.baseUrl).toBe("http://mini:7400");
+  });
+  test("install retry on an existing developer node whose updater step backed out → rollback re-bootstraps the updater", async () => {
+    // hadAgents (updater plist captured), install (teardownRan=false), fail BEFORE install-agents so the
+    // re-bootstrap's adopt-updater succeeds and brings the updater back.
+    const initial = { catalyst: { node: { class: "developer" } } };
+    const { deps, calls } = withRealRun(makeDeps({ bundleHadAgents: true, layer2Initial: initial, failOn: (a) => (a.join(" ") === "SETUP --non-interactive" ? 1 : 0) }));
+    const res = await runInstallLifecycle({ operation: "install", nodeClass: "developer", opts: {} }, deps);
+    expect(res.outcome).toBe("rolled_back");
+    const joined = calls.map((a) => a.join(" "));
+    const restoreIdx = joined.findIndex((c) => c.startsWith("BACKUP restore"));
+    expect(joined.slice(restoreIdx + 1)).toContain("STACK adopt-updater"); // updater re-bootstrapped after restore
   });
 });
 
@@ -582,13 +607,12 @@ describe("rollback is a true reversal + partial-state telemetry", () => {
     expect(last.detail.rollback).toBe("failed"); // partial-state disposition in body
     expect(last.detail.bundle).toBe("/tmp/bundle-xyz"); // recovery pointer for the operator
   });
-  test("rollback does NOT tear down PRE-EXISTING agents (backup captured plists → retry on a working node)", async () => {
-    const { deps, calls } = withRealRun(makeDeps({ bundleHadAgents: true, failOn: (a) => (a.join(" ") === "STACK install-services" ? 3 : 0) }));
+  test("rollback on a working node with pre-existing agents NEVER boots them out (uninstall-services)", async () => {
+    const { deps, calls } = withRealRun(makeDeps({ bundleHadAgents: true, daemonsLive: true, failOn: (a) => (a.join(" ") === "STACK install-services" ? 3 : 0) }));
     const res = await runInstallLifecycle({ operation: "install", nodeClass: "worker", opts: {} }, deps);
     expect(res.outcome).toBe("rolled_back");
     const joined = calls.map((a) => a.join(" "));
-    expect(joined).not.toContain("STACK uninstall-services"); // pre-existing agents left in place
-    expect(joined).not.toContain("STACK stop");
+    expect(joined).not.toContain("STACK uninstall-services"); // pre-existing agents never torn down
     expect(joined.some((c) => c.startsWith("BACKUP restore"))).toBe(true); // still restored
   });
   test("a benign abort (backup fails) carries rollback disposition 'none' (distinguishable from partial-state)", async () => {
