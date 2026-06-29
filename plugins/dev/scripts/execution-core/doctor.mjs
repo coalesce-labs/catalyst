@@ -2269,29 +2269,30 @@ export function checkAgentsForClass(deps = {}) {
     nodeClass,
     strict = false,
     hasStackAgent = defaultAgentInstalled(STACK_AGENT_LABEL),
-    // injectable updater-process probe (so the plist-gone-but-process-alive path is testable).
+    // the DURABLE updater LaunchAgent plist (survives reboot/logout) — REQUIRED for a developer/monitor PASS.
+    hasUpdaterAgent = defaultAgentInstalled(UPDATER_AGENT_LABEL),
+    // a live updater PROCESS (may exist WITHOUT a plist after a partial cleanup). Used ONLY to catch the
+    // worker two-puller hazard (CTL-1369 PR4 Codex P2); a process with no plist is NOT a durable install.
     updaterProcessAlive = defaultUpdaterProcessAlive,
-    // updater present = plist OR a live updater process (plist-gone-but-process-alive is still the
-    // CTL-1348 two-puller hazard). `updaterProcessAlive` is in scope (earlier destructure) for this default.
-    hasUpdaterAgent = defaultAgentInstalled(UPDATER_AGENT_LABEL) ||
-      (typeof updaterProcessAlive === "function" ? updaterProcessAlive() : !!updaterProcessAlive),
   } = deps;
+  const updaterProc = typeof updaterProcessAlive === "function" ? updaterProcessAlive() : !!updaterProcessAlive;
 
   if (nodeClass === "worker") {
-    // A worker's broker owns the pull; the updater agent must NOT be present (two-puller race).
-    if (hasUpdaterAgent) {
+    // A worker's broker owns the pull; an updater present in ANY form — durable plist OR a live process
+    // (a manual cleanup can leave the process without its plist) — is the two-puller race.
+    if (hasUpdaterAgent || updaterProc) {
       return [
         mkCheck(
           "agents-for-class",
           STATUS.FAIL,
-          `worker node has the developer/monitor updater agent (${UPDATER_AGENT_LABEL}) installed — ` +
+          `worker node has a developer/monitor updater ${hasUpdaterAgent ? `agent (${UPDATER_AGENT_LABEL})` : "process running (no plist)"} present — ` +
             `the two-puller hazard (the broker AND the updater would both pull the plugin checkout). ` +
             `Run 'catalyst reinstall --class worker' (its teardown removes the updater) or 'catalyst-stack uninstall-services'`,
         ),
       ];
     }
     if (hasStackAgent) {
-      return [mkCheck("agents-for-class", STATUS.PASS, `worker work-stack agent (${STACK_AGENT_LABEL}) installed; no updater agent (correct for class=worker)`)];
+      return [mkCheck("agents-for-class", STATUS.PASS, `worker work-stack agent (${STACK_AGENT_LABEL}) installed; no updater agent/process (correct for class=worker)`)];
     }
     return [
       mkCheck(
@@ -2313,8 +2314,20 @@ export function checkAgentsForClass(deps = {}) {
       ),
     ];
   }
+  // A developer/monitor PASS REQUIRES the DURABLE plist — a live process with NO plist won't restart
+  // after reboot/logout, so it is not a provisioned node (CTL-1369 PR4 Codex P2).
   if (hasUpdaterAgent) {
     return [mkCheck("agents-for-class", STATUS.PASS, `updater agent (${UPDATER_AGENT_LABEL}) installed; no worker work-stack agent (correct for class=${nodeClass})`)];
+  }
+  if (updaterProc) {
+    return [
+      mkCheck(
+        "agents-for-class",
+        strict ? STATUS.FAIL : STATUS.WARN,
+        `${nodeClass} node has a live updater process but NO ${UPDATER_AGENT_LABEL} plist — it will NOT restart after ` +
+          `reboot/logout (not durably installed). Run 'catalyst install --class ${nodeClass}' (or 'catalyst-stack adopt-updater')`,
+      ),
+    ];
   }
   return [
     mkCheck(

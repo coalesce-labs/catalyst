@@ -3,7 +3,7 @@
 //
 // Run: cd plugins/dev/scripts/execution-core && bun test doctor.test.mjs
 
-import { describe, it, expect, beforeEach, afterEach } from "bun:test";
+import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from "bun:test";
 import { mkdtempSync, writeFileSync, rmSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -44,6 +44,13 @@ import {
 import { validateLayer1Config } from "../lib/validate-catalyst-config.mjs";
 // CTL-1369 PR4: parity source for doctor's inlined defaultPluginPullOwner.
 import { resolvePluginPullOwner } from "../broker/plugin-refresh.mjs";
+
+// CTL-1369 PR4: checkAgentsForClass's updater-process probe (defaultUpdaterProcessAlive) pgreps the real
+// host. Pin CATALYST_ASSUME_NO_DAEMONS=1 for the whole file so it deterministically returns false (this
+// box may actually be running the updater); tests that exercise the process path inject updaterProcessAlive.
+let _savedAssumeNoDaemons;
+beforeAll(() => { _savedAssumeNoDaemons = process.env.CATALYST_ASSUME_NO_DAEMONS; process.env.CATALYST_ASSUME_NO_DAEMONS = "1"; });
+afterAll(() => { if (_savedAssumeNoDaemons === undefined) delete process.env.CATALYST_ASSUME_NO_DAEMONS; else process.env.CATALYST_ASSUME_NO_DAEMONS = _savedAssumeNoDaemons; });
 
 // ─── Phase 1: checkHostIdentity ──────────────────────────────────────────────
 
@@ -2388,6 +2395,18 @@ describe("checkAgentsForClass detects a live updater PROCESS, not just the plist
   it("no plist and no live process → worker grades on the stack only (PASS)", () => {
     const c = checkAgentsForClass({ nodeClass: "worker", hasStackAgent: true, updaterProcessAlive: () => false })[0];
     expect(c.status).toBe(STATUS.PASS);
+  });
+  // Codex P2 round 4: a developer/monitor PASS REQUIRES the durable plist — a live process with no plist
+  // won't restart after reboot/logout, so it is not a provisioned node.
+  it("developer with a live updater PROCESS but NO plist → not durably installed → FAIL (strict), WARN (activation)", () => {
+    const noPlist = { nodeClass: "developer", hasStackAgent: false, hasUpdaterAgent: false, updaterProcessAlive: () => true };
+    const failStrict = checkAgentsForClass({ ...noPlist, strict: true })[0];
+    expect(failStrict.status).toBe(STATUS.FAIL);
+    expect(failStrict.detail).toMatch(/no .*plist|won.t restart/i);
+    expect(checkAgentsForClass({ ...noPlist, strict: false })[0].status).toBe(STATUS.WARN);
+    // the durable plist still PASSes (the success case requires it).
+    const withPlist = checkAgentsForClass({ nodeClass: "developer", hasStackAgent: false, hasUpdaterAgent: true, updaterProcessAlive: () => true })[0];
+    expect(withPlist.status).toBe(STATUS.PASS);
   });
 });
 
