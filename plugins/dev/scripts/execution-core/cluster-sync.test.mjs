@@ -20,6 +20,12 @@ import {
   syncSecretFiles,
   pullClusterRepo,
   destForSecret,
+  // CTL-1393: durable change-detection + periodic refresh.
+  refreshClusterSecretsIfChanged,
+  resolveSopsBin,
+  readClusterSyncState,
+  writeClusterSyncState,
+  clusterSync,
 } from "./cluster-sync.mjs";
 
 const QUIET = { warn() {}, info() {} };
@@ -207,5 +213,385 @@ describe("pullClusterRepo (CTL-1211)", () => {
       logger: QUIET,
     });
     expect(res).toEqual({ pulled: false, reason: "pull-failed" });
+  });
+});
+
+// ─── CTL-1393: durable change-detection marker + periodic auto-refresh ────────
+
+describe("resolveSopsBin (CTL-1393 PATH-robust sops)", () => {
+  test("picks the first absolute candidate that exists (PATH cannot break it)", () => {
+    const seen = (p) => p === "/usr/local/bin/sops"; // homebrew missing, /usr/local present
+    const bin = resolveSopsBin({ fileExists: seen, pathEnv: "" });
+    expect(bin).toBe("/usr/local/bin/sops");
+  });
+
+  test("falls back to a PATH scan when no known candidate exists", () => {
+    const bin = resolveSopsBin({
+      candidates: ["/opt/homebrew/bin/sops", "/usr/local/bin/sops", "/usr/bin/sops"],
+      fileExists: (p) => p === "/custom/tools/sops",
+      pathEnv: "/custom/tools:/somewhere/else",
+      pathSep: ":",
+    });
+    expect(bin).toBe(resolve("/custom/tools", "sops"));
+  });
+
+  test("returns null when sops is found nowhere (LOUD: caller emits refresh-failed)", () => {
+    const bin = resolveSopsBin({ fileExists: () => false, pathEnv: "/a:/b", pathSep: ":" });
+    expect(bin).toBeNull();
+  });
+});
+
+describe("cluster-sync marker read/write (CTL-1393)", () => {
+  test("write → read round-trips the marker shape", () => {
+    const statePath = join(configDir, ".cluster-sync-state.json");
+    const marker = {
+      lastDecryptedSha: "abc123",
+      lastDecryptedAt: "2026-06-29T00:00:00Z",
+      written: ["github-token"],
+      synced: ["config.json"],
+    };
+    expect(writeClusterSyncState(statePath, marker, QUIET)).toBe(true);
+    expect(readClusterSyncState(statePath)).toEqual(marker);
+  });
+
+  test("absent / malformed marker → null (never throws)", () => {
+    expect(readClusterSyncState(join(configDir, "does-not-exist.json"))).toBeNull();
+    writeFileSync(join(configDir, "broken.json"), "{not json");
+    expect(readClusterSyncState(join(configDir, "broken.json"))).toBeNull();
+  });
+
+  test("marker file is written mode 0600 (posture parity with secret files)", () => {
+    const statePath = join(configDir, ".cluster-sync-state-mode.json");
+    expect(
+      writeClusterSyncState(
+        statePath,
+        { lastDecryptedSha: "abc", lastDecryptedAt: "t", written: [], synced: [] },
+        QUIET,
+      ),
+    ).toBe(true);
+    expect(statSync(statePath).mode & 0o777).toBe(0o600);
+  });
+});
+
+describe("refreshClusterSecretsIfChanged (CTL-1393)", () => {
+  // gitCapture stub: rev-parse → HEAD; diff --quiet → status 1 (changed) / 0 (same).
+  const makeGitCapture = (head, secretsChanged) => (args) => {
+    if (args.includes("rev-parse")) return { status: 0, stdout: `${head}\n` };
+    if (args.includes("diff")) return { status: secretsChanged ? 1 : 0, stdout: "" };
+    return { status: 0, stdout: "" };
+  };
+  const baseGit = () => {}; // no-op mutating git (pullClusterRepo)
+
+  const seedClone = () => mkdirSync(join(clusterDir, ".git"), { recursive: true });
+  const writeMarker = (statePath, sha) =>
+    writeFileSync(
+      statePath,
+      JSON.stringify({ lastDecryptedSha: sha, lastDecryptedAt: "old", written: [], synced: [] }),
+    );
+
+  test("(a) HEAD unchanged → SKIP decrypt (no sops spawn) and no marker rewrite", () => {
+    seedClone();
+    const statePath = join(configDir, ".state.json");
+    writeMarker(statePath, "HEADSHA");
+    let decryptCalls = 0;
+    let resolveCalls = 0;
+    const res = refreshClusterSecretsIfChanged({
+      clusterDir,
+      configDir,
+      statePath,
+      git: baseGit,
+      gitCapture: makeGitCapture("HEADSHA", false),
+      resolveSops: () => {
+        resolveCalls += 1;
+        return "/opt/homebrew/bin/sops";
+      },
+      decrypt: () => {
+        decryptCalls += 1;
+        return {};
+      },
+      emit: () => {},
+      now: () => "now",
+      node: "test-node",
+      logger: QUIET,
+    });
+    expect(res.changed).toBe(false);
+    expect(res.reason).toBe("head-unchanged");
+    expect(decryptCalls).toBe(0); // no sops spawn
+    expect(resolveCalls).toBe(0);
+  });
+
+  test("(b) only non-secrets/ files changed → SKIP decrypt, advance marker to HEAD", () => {
+    seedClone();
+    const statePath = join(configDir, ".state.json");
+    writeMarker(statePath, "OLDSHA");
+    let decryptCalls = 0;
+    const res = refreshClusterSecretsIfChanged({
+      clusterDir,
+      configDir,
+      statePath,
+      git: baseGit,
+      gitCapture: makeGitCapture("NEWSHA", false), // diff --quiet secrets/ → unchanged
+      resolveSops: () => "/opt/homebrew/bin/sops",
+      decrypt: () => {
+        decryptCalls += 1;
+        return {};
+      },
+      emit: () => {},
+      now: () => "t1",
+      node: "test-node",
+      logger: QUIET,
+    });
+    expect(res.reason).toBe("secrets-unchanged");
+    expect(decryptCalls).toBe(0); // no sops spawn
+    // marker advanced to the new HEAD so we don't re-diff the same range forever
+    expect(readClusterSyncState(statePath).lastDecryptedSha).toBe("NEWSHA");
+  });
+
+  test("(c) secrets/ changed → re-decrypt + OVERWRITE stale placeholder + emit refreshed", () => {
+    seedClone();
+    writeClusterJson({ schemaVersion: 1, roster: ["mini"] });
+    touchSecret("cluster-bots.sops.json");
+    // pre-existing config.json carries a STALE placeholder token
+    writeFileSync(
+      join(configDir, "config.json"),
+      JSON.stringify({ catalyst: { linear: { bot: { worker: { accessToken: "STALE" } } } } }),
+    );
+    const statePath = join(configDir, ".state.json");
+    writeMarker(statePath, "OLDSHA");
+
+    const emits = [];
+    const res = refreshClusterSecretsIfChanged({
+      clusterDir,
+      configDir,
+      statePath,
+      git: baseGit,
+      gitCapture: makeGitCapture("NEWSHA", true), // secrets/ changed
+      // decrypt returns the freshly-ROTATED value
+      decrypt: () => ({ catalyst: { linear: { bot: { worker: { accessToken: "FRESH" } } } } }),
+      emit: (e) => emits.push(e),
+      now: () => "2026-06-29T00:00:00Z",
+      node: "test-node",
+      logger: QUIET,
+    });
+
+    expect(res.changed).toBe(true);
+    expect(res.synced).toEqual(["config.json"]);
+    // overwrite: the filled value replaced the stale placeholder
+    const merged = JSON.parse(readFileSync(join(configDir, "config.json"), "utf8"));
+    expect(merged.catalyst.linear.bot.worker.accessToken).toBe("FRESH");
+    // marker advanced + timestamp from the injected clock
+    const marker = readClusterSyncState(statePath);
+    expect(marker.lastDecryptedSha).toBe("NEWSHA");
+    expect(marker.lastDecryptedAt).toBe("2026-06-29T00:00:00Z");
+    // refreshed event emitted with the from→to shas
+    expect(emits).toHaveLength(1);
+    expect(emits[0].name).toBe("refreshed");
+    expect(emits[0].payload).toMatchObject({ fromSha: "OLDSHA", toSha: "NEWSHA", synced: ["config.json"] });
+  });
+
+  test("(e1) sops UNRESOLVABLE on a changed HEAD → fail-open + refresh-failed event, marker NOT advanced", () => {
+    seedClone();
+    writeClusterJson({ schemaVersion: 1, roster: ["mini"] });
+    touchSecret("cluster-bots.sops.json");
+    const statePath = join(configDir, ".state.json");
+    writeMarker(statePath, "OLDSHA");
+
+    const emits = [];
+    let res;
+    expect(() => {
+      res = refreshClusterSecretsIfChanged({
+        clusterDir,
+        configDir,
+        statePath,
+        git: baseGit,
+        gitCapture: makeGitCapture("NEWSHA", true),
+        resolveSops: () => null, // sops not found anywhere — the silent-stale root cause
+        // no decrypt injected → forces the resolver path
+        emit: (e) => emits.push(e),
+        now: () => "t",
+        node: "test-node",
+        logger: QUIET,
+      });
+    }).not.toThrow();
+    expect(res.ok).toBe(false);
+    expect(res.reason).toBe("sops-unresolved");
+    expect(emits).toHaveLength(1);
+    expect(emits[0].name).toBe("refresh-failed");
+    expect(emits[0].payload.reason).toBe("sops-unresolved");
+    // marker stays at the old sha so the next tick retries
+    expect(readClusterSyncState(statePath).lastDecryptedSha).toBe("OLDSHA");
+  });
+
+  test("(e2) decrypt throws (bad mac) on a changed HEAD → fail-open + refresh-failed event", () => {
+    seedClone();
+    writeClusterJson({ schemaVersion: 1, roster: ["mini"] });
+    touchSecret("cluster-bots.sops.json");
+    const statePath = join(configDir, ".state.json");
+    writeMarker(statePath, "OLDSHA");
+
+    const emits = [];
+    let res;
+    expect(() => {
+      res = refreshClusterSecretsIfChanged({
+        clusterDir,
+        configDir,
+        statePath,
+        git: baseGit,
+        gitCapture: makeGitCapture("NEWSHA", true),
+        resolveSops: () => "/opt/homebrew/bin/sops",
+        decrypt: () => {
+          throw new Error("bad mac");
+        },
+        emit: (e) => emits.push(e),
+        now: () => "t",
+        node: "test-node",
+        logger: QUIET,
+      });
+    }).not.toThrow();
+    expect(res.ok).toBe(false);
+    expect(res.reason).toBe("decrypt-failed");
+    expect(emits.map((e) => e.name)).toContain("refresh-failed");
+    // marker NOT advanced — retry next tick
+    expect(readClusterSyncState(statePath).lastDecryptedSha).toBe("OLDSHA");
+  });
+
+  test("not a clone (no HEAD) → no-op, never throws, no event", () => {
+    const statePath = join(configDir, ".state.json");
+    const emits = [];
+    const res = refreshClusterSecretsIfChanged({
+      clusterDir, // no .git seeded
+      configDir,
+      statePath,
+      git: baseGit,
+      gitCapture: makeGitCapture("X", true),
+      resolveSops: () => null,
+      emit: (e) => emits.push(e),
+      now: () => "t",
+      node: "test-node",
+      logger: QUIET,
+    });
+    expect(res.reason).toBe("no-head");
+    expect(emits).toHaveLength(0);
+  });
+});
+
+describe("clusterSync boot (CTL-1393 conditional marker seed)", () => {
+  // rev-parse → HEAD; everything else status 0. Boot only ever rev-parses.
+  const makeGitCapture = (head) => (args) =>
+    args.includes("rev-parse") ? { status: 0, stdout: `${head}\n` } : { status: 0, stdout: "" };
+  const baseGit = () => {}; // no-op mutating git (pullClusterRepo)
+  const seedClone = () => mkdirSync(join(clusterDir, ".git"), { recursive: true });
+  const touchNodeFiles = () =>
+    writeFileSync(join(clusterDir, "secrets", "node-secret-files.sops.json"), "{cipher}");
+
+  test("boot decrypt fails WHOLESALE → marker NOT seeded + refresh-failed emitted (never throws)", () => {
+    seedClone();
+    writeClusterJson({ schemaVersion: 1, roster: ["mini"] });
+    touchSecret("cluster-bots.sops.json"); // the only JSON secret → all-skipped on throw
+    touchNodeFiles(); // bare-file bundle present → files.reason === "decrypt-failed" on throw
+    const statePath = join(configDir, ".state.json");
+
+    const writeCalls = [];
+    const emits = [];
+    let res;
+    expect(() => {
+      res = clusterSync({
+        clusterDir,
+        configDir,
+        statePath,
+        git: baseGit,
+        gitCapture: makeGitCapture("NEWSHA"),
+        // every decrypt throws → JSON secret skipped (synced empty) AND bundle fails
+        decrypt: () => {
+          throw new Error("bad mac");
+        },
+        writeState: (sp, state) => {
+          writeCalls.push(state);
+          return true;
+        },
+        emit: (e) => emits.push(e),
+        now: () => "t",
+        node: "test-node",
+        logger: QUIET,
+      });
+    }).not.toThrow();
+
+    // marker NOT advanced — the silent-stale failure mode is averted
+    expect(writeCalls).toHaveLength(0);
+    // and the failure is LOUD via the same envelope the refresh path uses
+    expect(emits.map((e) => e.name)).toContain("refresh-failed");
+    expect(emits[0].payload.reason).toBe("decrypt-failed");
+    expect(emits[0].payload.toSha).toBe("NEWSHA");
+    // return shape stays {pull, sync, files}
+    expect(res).toHaveProperty("pull");
+    expect(res).toHaveProperty("sync");
+    expect(res).toHaveProperty("files");
+  });
+
+  test("boot decrypt SUCCEEDS → marker seeded to HEAD, no refresh-failed (guard against over-correcting)", () => {
+    seedClone();
+    writeClusterJson({ schemaVersion: 1, roster: ["mini"] });
+    touchSecret("cluster-bots.sops.json");
+    const statePath = join(configDir, ".state.json");
+
+    const writeCalls = [];
+    const emits = [];
+    const res = clusterSync({
+      clusterDir,
+      configDir,
+      statePath,
+      git: baseGit,
+      gitCapture: makeGitCapture("BOOTSHA"),
+      decrypt: () => ({ catalyst: { linear: { bot: { worker: { accessToken: "tok" } } } } }),
+      writeState: (sp, state) => {
+        writeCalls.push(state);
+        return true;
+      },
+      emit: (e) => emits.push(e),
+      now: () => "t1",
+      node: "test-node",
+      logger: QUIET,
+    });
+
+    // success path still seeds the marker at the clone's HEAD
+    expect(writeCalls).toHaveLength(1);
+    expect(writeCalls[0].lastDecryptedSha).toBe("BOOTSHA");
+    expect(writeCalls[0].synced).toEqual(["config.json"]);
+    // boot success does not alarm
+    expect(emits.map((e) => e.name)).not.toContain("refresh-failed");
+    expect(res.sync.synced).toEqual(["config.json"]);
+  });
+
+  test("fresh node, EMPTY secrets repo (nothing to decrypt) → still seeds marker (not a failure)", () => {
+    seedClone();
+    writeClusterJson({ schemaVersion: 1, roster: ["mini"] });
+    // no secret files touched, no node-secret-files bundle → nothing skipped, nothing failed
+    const statePath = join(configDir, ".state.json");
+
+    const writeCalls = [];
+    const emits = [];
+    const res = clusterSync({
+      clusterDir,
+      configDir,
+      statePath,
+      git: baseGit,
+      gitCapture: makeGitCapture("EMPTYSHA"),
+      decrypt: () => {
+        throw new Error("should never be called — no secrets present");
+      },
+      writeState: (sp, state) => {
+        writeCalls.push(state);
+        return true;
+      },
+      emit: (e) => emits.push(e),
+      now: () => "t2",
+      node: "test-node",
+      logger: QUIET,
+    });
+
+    expect(writeCalls).toHaveLength(1);
+    expect(writeCalls[0].lastDecryptedSha).toBe("EMPTYSHA");
+    expect(emits.map((e) => e.name)).not.toContain("refresh-failed");
+    expect(res.sync.synced).toEqual([]);
   });
 });
