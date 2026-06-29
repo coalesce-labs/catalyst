@@ -122,6 +122,19 @@ cmd_start() {
 	local _daemon_env="${CATALYST_EXECUTION_CORE_ENV:-${HOME}/.config/catalyst/execution-core.env}"
 	# shellcheck disable=SC1090
 	[[ -f "$_daemon_env" ]] && source "$_daemon_env"
+	# CTL-1398: arm the SDK subscription token on EVERY daemon start (not just login
+	# shells) so executor=sdk survives NON-login restarts (deploy / broker reload /
+	# launchd / fresh boot) on every host. The token lives in claude-accounts.env
+	# (SOPS-provisioned, per-node); execution-core.env above only carries
+	# CATALYST_EXECUTOR. Mirrors ~/.zshenv: unset the API-key vars that would make the
+	# SDK silently meter (resolveSdkBootExecutor degrades to bg when either is set),
+	# THEN source the placeholder-guarded account env (absent OR an unfilled
+	# PASTE_TOKEN_HERE slot = no-op → node stays bg cleanly). Minimal-touch: only
+	# sources the existing SOPS-managed file; never reads/echoes the token value.
+	unset ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN
+	local _accounts_env="${HOME}/.config/catalyst/claude-accounts.env"
+	# shellcheck disable=SC1090
+	[[ -f "$_accounts_env" ]] && source "$_accounts_env"
 	# CTL-1289: belt-and-suspenders — a daemon started by hand (not via the
 	# catalyst-stack launchd plist, which already sets _stack_agent_path) inherits
 	# whatever PATH the invoking shell had, which on a fresh member can omit the
