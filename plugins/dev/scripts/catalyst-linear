@@ -1,0 +1,57 @@
+#!/usr/bin/env bash
+# catalyst-linear — CTL-1391: the agent-facing REPLICA-FIRST Linear read CLI.
+#
+# Reads Linear from the local Catalyst-Cloud SDK replica when one is present +
+# fresh + opted-in (CATALYST_LINEAR_REPLICA=on / Layer-2 catalyst.linearReplica.mode),
+# and falls back to a direct `linearis` read otherwise. Output matches `linearis`
+# JSON + an additive `_meta`. Reads only — WRITES go through `linearis`.
+#
+# Thin launcher → execution-core/linear-cli.mjs driver. bun is preferred (the
+# replica path imports bun:sqlite + @catalyst-cloud/read-model); node still runs
+# the linearis-fallback + write-rejection paths (the driver guards all bun-only
+# imports behind dynamic import()).
+set -euo pipefail
+
+# Resolve this script's directory through symlinks (matches catalyst-broker /
+# catalyst-execution-core), so the driver resolves whether invoked from the repo,
+# a ~/.catalyst/bin symlink, or the cached plugin.
+_SRC="${BASH_SOURCE[0]}"
+while [[ -L $_SRC ]]; do _SRC="$(readlink "$_SRC")"; done
+SCRIPT_DIR="$(cd "$(dirname "$_SRC")" && pwd)"
+unset _SRC
+
+# CTL-390 contract: --version handled here, BEFORE the JS driver dispatch, so this
+# registered CLI prints the standard catalyst version block like every sibling
+# catalyst-* command (the driver otherwise treats --version as an unknown flag and
+# exits 1 with usage). SCRIPT_DIR is already symlink-resolved above.
+case "${1:-}" in
+--version | -V)
+	if [[ -f "${SCRIPT_DIR}/lib/catalyst-version.sh" ]]; then
+		# shellcheck source=/dev/null
+		. "${SCRIPT_DIR}/lib/catalyst-version.sh"
+		catalyst_print_version "catalyst-linear" "${BASH_SOURCE[0]}" && exit 0
+	fi
+	echo "error: catalyst-version helper missing at ${SCRIPT_DIR}/lib/catalyst-version.sh" >&2
+	exit 1
+	;;
+esac
+
+DRIVER_MJS="${CATALYST_LINEAR_DRIVER:-${SCRIPT_DIR}/execution-core/linear-cli.mjs}"
+if [[ ! -f $DRIVER_MJS ]]; then
+	echo "error: catalyst-linear driver not found: $DRIVER_MJS" >&2
+	exit 1
+fi
+
+RUNTIME="${CATALYST_LINEAR_RUNTIME-}"
+if [[ -z $RUNTIME ]]; then
+	if command -v bun >/dev/null 2>&1; then
+		RUNTIME="bun"
+	elif command -v node >/dev/null 2>&1; then
+		RUNTIME="node"
+	else
+		echo "error: neither bun nor node found on PATH" >&2
+		exit 1
+	fi
+fi
+
+exec "$RUNTIME" "$DRIVER_MJS" "$@"

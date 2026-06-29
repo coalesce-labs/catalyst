@@ -54,6 +54,7 @@ catalyst-thoughts|Thoughts|1|Repair and verify the HumanLayer thoughts system fo
 register-thought|Thoughts|0|PostToolUse Write hook that auto-registers thoughts/shared writes (reads hook JSON on stdin).
 thoughts-pull-sync|Thoughts|0|Fast-forward every HumanLayer thoughts checkout so cross-host research reads fresh peer state.
 catalyst-cluster|Cluster & Linear|1|Cluster administration — join tokens, roster, drain, concurrency tuning.
+catalyst-linear|Cluster & Linear|1|Replica-first Linear READ CLI — reads the local Catalyst-Cloud SQLite replica when opted in (CATALYST_LINEAR_REPLICA=on), else linearis; read-only (writes via linearis).
 catalyst-linear-reconcile|Cluster & Linear|1|Reconcile Linear ticket state from PR reality (merged→Done, open→In-Review); report or --write.
 catalyst-statusline|HUD & display|0|Claude Code statusLine wrapper that also emits session.context events (reads JSON on stdin each tick).
 catalyst-hud|HUD & display|0|Ink TUI for the catalyst event stream (bare invocation starts the full-screen TUI).

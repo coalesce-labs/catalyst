@@ -39,6 +39,7 @@ on:
       # `catalyst install|uninstall|reinstall`; changing them must run the smoke test below.
       - "plugins/dev/scripts/catalyst-install"
       - "plugins/dev/scripts/catalyst"
+      - "plugins/dev/scripts/catalyst-linear"
       - "plugins/dev/scripts/install-cli.sh"
       - "plugins/dev/scripts/check-setup.sh"
       - "plugins/dev/scripts/__tests__/**"
@@ -58,6 +59,7 @@ on:
       # CTL-1369: launcher / router / CLI-registration entry path (see PR-trigger note above).
       - "plugins/dev/scripts/catalyst-install"
       - "plugins/dev/scripts/catalyst"
+      - "plugins/dev/scripts/catalyst-linear"
       - "plugins/dev/scripts/install-cli.sh"
       - "plugins/dev/scripts/check-setup.sh"
       - "plugins/dev/scripts/__tests__/**"
@@ -107,6 +109,15 @@ jobs:
         # ./config.mjs, ../tracing.mjs) would otherwise only fail at install runtime on a node.
         # Walk its static graph.
         run: bun build install-lifecycle.mjs --target=node --outfile /dev/null
+
+      - name: Verify catalyst-linear import graph (node-loadability contract, CTL-1391)
+        # CTL-1391: linear-cli.mjs is the catalyst-linear driver, a separate CLI entrypoint
+        # NOT in daemon.mjs's graph. Its node-loadability is load-bearing — the write-reject +
+        # linearis-fallback paths must load under node (worker/dev hosts without bun), which is
+        # why bun:sqlite + @catalyst-cloud/read-model are DYNAMIC imports. A future static
+        # bun-only import would silently break that; --target=node walks the static graph and
+        # exits non-zero if any bun-only import leaked into it.
+        run: bun build linear-cli.mjs --target=node --outfile /dev/null
 
       - name: catalyst-install launcher + router smoke test
         # CTL-1369 PR3: exercises the REAL catalyst-install bash launcher (symlink resolution →
@@ -276,6 +287,7 @@ jobs:
             linear-reconcile-store.test.mjs \
             linear-reconcile-timer.test.mjs \
             linear-reconcile-cli.test.mjs \
+            linear-cli.test.mjs \
             updater/plugin-pull-defer.test.mjs \
             updater/updater.test.mjs \
             updater/updater-tracing.test.mjs
