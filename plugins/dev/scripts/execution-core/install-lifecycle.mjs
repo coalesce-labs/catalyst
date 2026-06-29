@@ -646,7 +646,10 @@ export async function runInstallLifecycle({ operation, nodeClass, opts = {} }, d
   // Pre-flight: every composed script the plan will shell out to must exist. setup-catalyst.sh lives
   // at the repo root (NOT packaged in the plugin cache), so a cache-context run would otherwise take
   // a full backup — or, on reinstall, TEAR THE NODE DOWN — and only then fail. Fail fast instead.
-  const planScripts = [...new Set(plan.flatMap((p) => p.steps).filter((s) => s.argv).map((s) => s.argv[0]))];
+  // EXCEPTION: the kind:"doctor" step is ADVISORY (best-effort) — an absent catalyst-doctor binary must
+  // degrade the doctor pass to ok:null (defaultRunDoctorPass), NOT refuse an otherwise-valid install
+  // (CTL-1369 PR4 Codex P2). So it is excluded from this hard-prerequisite preflight.
+  const planScripts = [...new Set(plan.flatMap((p) => p.steps).filter((s) => s.argv && s.kind !== "doctor").map((s) => s.argv[0]))];
   const missingScripts = planScripts.filter((p) => !scriptExists(p));
   if (missingScripts.length) {
     log(

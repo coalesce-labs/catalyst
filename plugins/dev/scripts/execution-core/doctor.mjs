@@ -2294,20 +2294,35 @@ export function checkAgentsForClass(deps = {}) {
   ];
 }
 
-// defaultPluginPullOwner — which process owns the plugin pull on this node: "broker" (default) or
-// "updater". MIRRORS broker/plugin-refresh.mjs::resolvePluginPullOwner (env CATALYST_PLUGIN_PULL_OWNER
-// → Layer-2 catalyst.orchestration.pluginPullOwner → default "broker"; any non-"updater" value
-// coerces to "broker"). Inlined — like readLinearBotUserIds above — to keep doctor's runtime dep
-// surface minimal (doctor runs under bare `node`); a parity test pins it to the canonical resolver.
+// pullOwnerConfigPath — the Layer-2 machine config the install ACTUALLY wrote pluginPullOwner into,
+// resolved with the SAME precedence as install-lifecycle.layer2Path() (CATALYST_LAYER2_CONFIG_FILE >
+// CATALYST_MACHINE_CONFIG > XDG_CONFIG_HOME > ~/.config). doctor's generic layer2Path() honors only
+// CATALYST_LAYER2_CONFIG_FILE/~/.config, so a standalone `catalyst-doctor --profile install` run with
+// only CATALYST_MACHINE_CONFIG/XDG selecting the config would otherwise read the WRONG file and
+// misreport the owner (CTL-1369 PR4 Codex P2). This mirrors the resolver the broker is handed.
+function pullOwnerConfigPath(env = process.env) {
+  return (
+    env.CATALYST_LAYER2_CONFIG_FILE ||
+    env.CATALYST_MACHINE_CONFIG ||
+    resolve(env.XDG_CONFIG_HOME || resolve(homedir(), ".config"), "catalyst", "config.json")
+  );
+}
+
+// defaultPluginPullOwner — the PERSISTED plugin-pull owner this node was INSTALLED with: the Layer-2
+// catalyst.orchestration.pluginPullOwner value (any non-"updater" / unset ⇒ "broker"). Deliberately
+// reads ONLY the persisted config — NOT the transient CATALYST_PLUGIN_PULL_OWNER env that
+// broker/plugin-refresh.mjs::resolvePluginPullOwner honors at runtime (CTL-1369 PR4 Codex P2): the
+// install writes the owner into the config (adopt-updater / write-config) and the launchd updater
+// agent does NOT inherit a caller's shell env, so a stray `CATALYST_PLUGIN_PULL_OWNER=broker` in the
+// operator's shell must not make a correctly-adopted developer's post-install doctor falsely FAIL.
+// The doctor verifies INSTALLED STATE, not a runtime override. Inlined (doctor runs under bare node).
 function defaultPluginPullOwner(env = process.env) {
   const coerce = (v) => (typeof v === "string" && v.trim() === "updater" ? "updater" : "broker");
-  const fromEnv = env.CATALYST_PLUGIN_PULL_OWNER;
-  if (typeof fromEnv === "string" && fromEnv.trim().length > 0) return coerce(fromEnv);
   try {
-    const v = JSON.parse(readFileSync(layer2Path(), "utf8"))?.catalyst?.orchestration?.pluginPullOwner;
+    const v = JSON.parse(readFileSync(pullOwnerConfigPath(env), "utf8"))?.catalyst?.orchestration?.pluginPullOwner;
     if (typeof v === "string" && v.trim().length > 0) return coerce(v);
   } catch {
-    /* unreadable/malformed Layer-2 → fail safe to broker (matches resolvePluginPullOwner) */
+    /* unreadable/malformed/absent Layer-2 → fail safe to broker */
   }
   return "broker";
 }

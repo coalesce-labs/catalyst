@@ -4,7 +4,7 @@
 // Run: cd plugins/dev/scripts/execution-core && bun test doctor.test.mjs
 
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
-import { mkdtempSync, writeFileSync, rmSync, readFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -2118,51 +2118,88 @@ describe("checkPluginPullOwner (CTL-1369 PR4)", () => {
   }
 });
 
-// Parity: doctor's inlined defaultPluginPullOwner must agree with the canonical
-// broker/plugin-refresh.mjs::resolvePluginPullOwner across representative inputs. We can't call the
-// (unexported) inline directly, so we exercise it END-TO-END via checkPluginPullOwner's default
-// `owner` seam (omit owner → it reads via defaultPluginPullOwner) and compare the resulting verdict
-// to what the canonical resolver would yield for the same env/config.
-describe("defaultPluginPullOwner ↔ resolvePluginPullOwner parity (CTL-1369 PR4)", () => {
+// doctor's pull-owner read = the PERSISTED INSTALLED STATE (CTL-1369 PR4 + Codex P2). It reads ONLY the
+// Layer-2 catalyst.orchestration.pluginPullOwner value the install wrote — it deliberately IGNORES the
+// transient CATALYST_PLUGIN_PULL_OWNER env (which the launchd updater agent never inherits), and it
+// honors the SAME config-path precedence as install-lifecycle.layer2Path (CATALYST_LAYER2_CONFIG_FILE >
+// CATALYST_MACHINE_CONFIG > XDG > ~/.config). We drive the unexported inline END-TO-END via
+// checkPluginPullOwner's default `owner` seam (omit owner → it reads via defaultPluginPullOwner).
+describe("doctor pull-owner reads persisted installed state (CTL-1369 PR4 / Codex P2)", () => {
   let dir;
   beforeEach(() => { dir = mkdtempSync(join(tmpdir(), "doctor-pull-owner-")); });
   afterEach(() => { rmSync(dir, { recursive: true, force: true }); });
 
-  const cases = [
-    { name: "env=updater wins", env: { CATALYST_PLUGIN_PULL_OWNER: "updater" }, cfg: null },
-    { name: "env=broker", env: { CATALYST_PLUGIN_PULL_OWNER: "broker" }, cfg: null },
-    { name: "env garbage coerces to broker", env: { CATALYST_PLUGIN_PULL_OWNER: "weird" }, cfg: null },
-    { name: "config updater (no env)", env: {}, cfg: { catalyst: { orchestration: { pluginPullOwner: "updater" } } } },
-    { name: "config broker (no env)", env: {}, cfg: { catalyst: { orchestration: { pluginPullOwner: "broker" } } } },
-    { name: "unset everywhere → broker", env: {}, cfg: {} },
-    { name: "malformed config → broker", env: {}, cfg: "MALFORMED" },
-  ];
+  // Set the given env keys (deleting absent ones), run fn, then restore — so process.env can't leak.
+  const ENV_KEYS = ["CATALYST_PLUGIN_PULL_OWNER", "CATALYST_LAYER2_CONFIG_FILE", "CATALYST_MACHINE_CONFIG", "XDG_CONFIG_HOME"];
+  const withEnv = (vars, fn) => {
+    const saved = {};
+    for (const k of ENV_KEYS) saved[k] = process.env[k];
+    try {
+      for (const k of ENV_KEYS) { if (k in vars) process.env[k] = vars[k]; else delete process.env[k]; }
+      return fn();
+    } finally {
+      for (const k of ENV_KEYS) { if (saved[k] === undefined) delete process.env[k]; else process.env[k] = saved[k]; }
+    }
+  };
+  const ownerVerdict = (nodeClass) => checkPluginPullOwner({ nodeClass })[0].status;
+  const writeCfg = (owner, d = dir) => {
+    const p = join(d, "config.json");
+    writeFileSync(p, JSON.stringify(owner == null ? {} : { catalyst: { orchestration: { pluginPullOwner: owner } } }));
+    return p;
+  };
 
-  for (const tc of cases) {
-    it(tc.name, () => {
-      const cfgPath = join(dir, "config.json");
-      if (tc.cfg !== null) writeFileSync(cfgPath, tc.cfg === "MALFORMED" ? "{not json" : JSON.stringify(tc.cfg));
-      const env = { ...tc.env, CATALYST_LAYER2_CONFIG_FILE: cfgPath };
-      const canonical = resolvePluginPullOwner({ env, machineConfigPath: cfgPath });
-      // Drive doctor's inline via its default seam: set process.env to match, omit `owner`.
-      const savedEnv = process.env.CATALYST_PLUGIN_PULL_OWNER;
-      const savedCfg = process.env.CATALYST_LAYER2_CONFIG_FILE;
-      try {
-        if ("CATALYST_PLUGIN_PULL_OWNER" in tc.env) process.env.CATALYST_PLUGIN_PULL_OWNER = tc.env.CATALYST_PLUGIN_PULL_OWNER;
-        else delete process.env.CATALYST_PLUGIN_PULL_OWNER;
-        process.env.CATALYST_LAYER2_CONFIG_FILE = cfgPath;
-        // A worker grades owner=broker→PASS, owner=updater→FAIL — so the verdict encodes the resolved owner.
-        const verdict = checkPluginPullOwner({ nodeClass: "worker" })[0].status;
-        const expected = canonical === "updater" ? STATUS.FAIL : STATUS.PASS;
-        expect(verdict).toBe(expected);
-      } finally {
-        if (savedEnv === undefined) delete process.env.CATALYST_PLUGIN_PULL_OWNER;
-        else process.env.CATALYST_PLUGIN_PULL_OWNER = savedEnv;
-        if (savedCfg === undefined) delete process.env.CATALYST_LAYER2_CONFIG_FILE;
-        else process.env.CATALYST_LAYER2_CONFIG_FILE = savedCfg;
-      }
+  it("reads config=updater (worker → FAIL stale-pull; developer → PASS)", () => {
+    const p = writeCfg("updater");
+    withEnv({ CATALYST_LAYER2_CONFIG_FILE: p }, () => {
+      expect(ownerVerdict("worker")).toBe(STATUS.FAIL);
+      expect(ownerVerdict("developer")).toBe(STATUS.PASS);
     });
-  }
+  });
+  it("config=broker / unset / malformed → broker (worker PASS, developer WARN; fail-safe)", () => {
+    for (const owner of ["broker", null]) {
+      const p = writeCfg(owner);
+      withEnv({ CATALYST_LAYER2_CONFIG_FILE: p }, () => {
+        expect(ownerVerdict("worker")).toBe(STATUS.PASS);
+        expect(ownerVerdict("developer")).toBe(STATUS.WARN);
+      });
+    }
+    const bad = join(dir, "config.json"); writeFileSync(bad, "{not json");
+    withEnv({ CATALYST_LAYER2_CONFIG_FILE: bad }, () => expect(ownerVerdict("worker")).toBe(STATUS.PASS));
+  });
+  // Codex P2 (thread 3): a transient CATALYST_PLUGIN_PULL_OWNER env must NOT override the persisted config.
+  it("IGNORES the transient CATALYST_PLUGIN_PULL_OWNER env (installed state, not a runtime override)", () => {
+    const up = writeCfg("updater");
+    // env says broker, config says updater → a correctly-adopted developer still PASSes (env ignored).
+    withEnv({ CATALYST_LAYER2_CONFIG_FILE: up, CATALYST_PLUGIN_PULL_OWNER: "broker" }, () => {
+      expect(ownerVerdict("developer")).toBe(STATUS.PASS);
+    });
+    const br = writeCfg("broker");
+    // env says updater, config says broker → a worker still PASSes (no stale-pull false FAIL from a stray env).
+    withEnv({ CATALYST_LAYER2_CONFIG_FILE: br, CATALYST_PLUGIN_PULL_OWNER: "updater" }, () => {
+      expect(ownerVerdict("worker")).toBe(STATUS.PASS);
+    });
+  });
+  // Codex P2 (thread 2): honor CATALYST_MACHINE_CONFIG / XDG when CATALYST_LAYER2_CONFIG_FILE is unset.
+  it("honors CATALYST_MACHINE_CONFIG and XDG_CONFIG_HOME for the config path (parity with install-lifecycle.layer2Path)", () => {
+    const p = writeCfg("updater");
+    withEnv({ CATALYST_MACHINE_CONFIG: p }, () => expect(ownerVerdict("developer")).toBe(STATUS.PASS));
+    const xdg = mkdtempSync(join(tmpdir(), "doctor-xdg-"));
+    mkdirSync(join(xdg, "catalyst"), { recursive: true });
+    writeFileSync(join(xdg, "catalyst", "config.json"), JSON.stringify({ catalyst: { orchestration: { pluginPullOwner: "updater" } } }));
+    withEnv({ XDG_CONFIG_HOME: xdg }, () => expect(ownerVerdict("developer")).toBe(STATUS.PASS));
+    rmSync(xdg, { recursive: true, force: true });
+  });
+  // Narrow parity: with NO transient env, doctor's config read agrees with the canonical resolver's config read.
+  it("agrees with resolvePluginPullOwner on the CONFIG value when no transient env is set", () => {
+    for (const owner of ["updater", "broker", null]) {
+      const p = writeCfg(owner);
+      const canonical = resolvePluginPullOwner({ env: {}, machineConfigPath: p });
+      withEnv({ CATALYST_LAYER2_CONFIG_FILE: p }, () => {
+        const expected = canonical === "updater" ? STATUS.FAIL : STATUS.PASS; // worker verdict encodes the owner
+        expect(ownerVerdict("worker")).toBe(expected);
+      });
+    }
+  });
 });
 
 describe("checksForClass wires the PR4 install-correctness checks into every arm (CTL-1369 PR4)", () => {

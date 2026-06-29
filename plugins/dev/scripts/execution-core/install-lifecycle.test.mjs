@@ -381,6 +381,16 @@ describe("runInstallLifecycle — doctor pre/post-install pass (CTL-1369 PR4)", 
     expect(res.outcome).toBe("completed"); // a throwing doctor must NOT propagate → rollback
     expect(res.doctorOk).toBe(true); // degraded to advisory
   });
+
+  // Codex P2 (thread 1): the advisory doctor binary is NOT a hard install prerequisite.
+  test("an ABSENT catalyst-doctor binary does NOT refuse the install (excluded from the missing-script preflight)", async () => {
+    const bag = withRealRun(makeDeps());
+    bag.deps.scriptExists = (p) => p !== "DOCTOR"; // doctor missing, every other composed script present
+    const res = await runInstallLifecycle({ operation: "install", nodeClass: "worker", opts: {} }, bag.deps);
+    expect(res.outcome).not.toBe("refused"); // a missing advisory verifier must not block provisioning
+    expect(res.outcome).toBe("completed");
+    expect(res.doctorOk).toBe(true); // doctor couldn't run → advisory (ok:null)
+  });
 });
 
 // ───────────────────────── runInstallLifecycle: telemetry + behavior ─────────────────────────
