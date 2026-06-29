@@ -42,6 +42,10 @@ on:
       - "plugins/dev/scripts/install-cli.sh"
       - "plugins/dev/scripts/check-setup.sh"
       - "plugins/dev/scripts/__tests__/**"
+      # CTL-1387: the CLI-reference generator + the page it drives are guarded by
+      # cli-reference-drift.test.sh below; a change to either must run this suite.
+      - "plugins/dev/scripts/gen-cli-reference.sh"
+      - "website/src/content/docs/reference/catalyst-cli.md"
       - ".github/workflows/execution-core-tests.yml"
   push:
     branches: [main]
@@ -57,6 +61,9 @@ on:
       - "plugins/dev/scripts/install-cli.sh"
       - "plugins/dev/scripts/check-setup.sh"
       - "plugins/dev/scripts/__tests__/**"
+      # CTL-1387: see the pull_request note above.
+      - "plugins/dev/scripts/gen-cli-reference.sh"
+      - "website/src/content/docs/reference/catalyst-cli.md"
       - ".github/workflows/execution-core-tests.yml"
 
 jobs:
@@ -108,6 +115,14 @@ jobs:
         # CLI registration) that the unit tests bypass.
         working-directory: plugins/dev/scripts
         run: bash __tests__/catalyst-install.test.sh
+
+      - name: CLI reference doc drift test
+        # CTL-1387: asserts website/src/content/docs/reference/catalyst-cli.md
+        # documents EXACTLY install-cli.sh's CLI_ENTRIES (and that the page, the
+        # gen-cli-reference.sh manifest, and CLI_ENTRIES agree) — so adding a CLI
+        # without documenting it fails CI. Pure string assertions; runs no CLIs.
+        working-directory: plugins/dev/scripts
+        run: bash __tests__/cli-reference-drift.test.sh
 
       - name: Run stable unit tests
         # EXCLUDED SUITES — do NOT add these back without fixing the underlying

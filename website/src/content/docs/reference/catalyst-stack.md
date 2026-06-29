@@ -161,5 +161,6 @@ catalyst-stack install-services
 
 ## See also
 
+- [catalyst CLI reference](/reference/catalyst-cli/) — full list of every `catalyst-*` tool with purpose + key subcommands
 - [Post-reboot and updates](/getting-started/reboot-and-updates/) — day-to-day workflow for booting and updating
 - [Install Catalyst](/getting-started/) — initial setup including `catalyst-stack start` as step 4
