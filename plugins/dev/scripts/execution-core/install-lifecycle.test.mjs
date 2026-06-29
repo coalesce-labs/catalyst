@@ -183,13 +183,19 @@ describe("resolveRequestedClass", () => {
     writeFileSync(bad, "{ not valid json");
     expect(() => resolveRequestedClass({ env: {}, layer2: bad })).toThrow(/unreadable|malformed/);
   });
+  test("a present-but-non-string config class fails closed (no String() coercion to worker / bogus class)", () => {
+    expect(() => resolveRequestedClass({ env: {}, layer2: tmpCfg({ catalyst: { node: { class: [] } } }) })).toThrow(/malformed node class/);
+    expect(() => resolveRequestedClass({ env: {}, layer2: tmpCfg({ catalyst: { node: { class: ["developer"] } } }) })).toThrow(/malformed node class/);
+    expect(() => resolveRequestedClass({ env: {}, layer2: tmpCfg({ catalyst: { node: { class: 0 } } }) })).toThrow(/malformed node class/);
+  });
 });
 
 describe("isDrainedStatus (teardown guard requires zero in-flight, not just draining)", () => {
-  test("draining with zero in-flight ⇒ drained; with in-flight ⇒ not drained", () => {
+  test("draining with zero in-flight ⇒ drained; with in-flight or UNKNOWN count ⇒ not drained", () => {
     expect(isDrainedStatus({ draining: true, inFlightCount: 0 })).toBe(true);
     expect(isDrainedStatus({ draining: true, inFlightCount: 3 })).toBe(false); // work still landing
-    expect(isDrainedStatus({ draining: true })).toBe(true); // no count ⇒ treat as 0
+    expect(isDrainedStatus({ draining: true })).toBe(false); // MISSING count ⇒ unknown ⇒ fail closed
+    expect(isDrainedStatus({ draining: true, inflight: 0 })).toBe(true); // alternate key name
     expect(isDrainedStatus({ drained: true, inFlightCount: 5 })).toBe(true); // explicit sentinel wins
     expect(isDrainedStatus({ draining: false })).toBe(false);
     expect(isDrainedStatus(null)).toBe(false);
@@ -556,10 +562,11 @@ describe("fresh-node bootstrap + profile-switch guards (Codex round 5)", () => {
     const start = stepCalls.find((c) => c.argv.join(" ") === "STACK start --yes");
     expect(start.env.CATALYST_NODE_CLASS).toBe("worker"); // restored class, NOT the requested developer
   });
-  test("fresh-node rollback whose boot-out (cleanup) FAILS → incomplete rollback (outcome failed)", async () => {
-    const { deps } = withRealRun(makeDeps({ bundleHadAgents: false, failOn: (a) => (["STACK install-services", "STACK uninstall-services"].includes(a.join(" ")) ? 1 : 0) }));
+  test("fresh-node rollback whose boot-out (cleanup) FAILS → incomplete + SKIPS the restore (no --force over live daemons)", async () => {
+    const { deps, calls } = withRealRun(makeDeps({ bundleHadAgents: false, failOn: (a) => (["STACK install-services", "STACK uninstall-services"].includes(a.join(" ")) ? 1 : 0) }));
     const res = await runInstallLifecycle({ operation: "install", nodeClass: "worker", opts: {} }, deps);
-    expect(res.outcome).toBe("failed"); // restore may succeed but agents could still be running
+    expect(res.outcome).toBe("failed");
+    expect(calls.some((a) => a[0] === "BACKUP" && a[1] === "restore")).toBe(false); // never restored over possibly-live daemons
   });
   test("backup failing AFTER acquire repointed pluginDirs still restores the prior value (no bundle)", async () => {
     const { deps, layer2 } = withRealRun(

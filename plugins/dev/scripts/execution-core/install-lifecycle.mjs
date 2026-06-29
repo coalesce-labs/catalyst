@@ -157,8 +157,14 @@ export function resolveRequestedClass({ optsClass, env = process.env, layer2, cu
     throw new Error(`Layer-2 config at ${layer2} is unreadable/malformed (${e.message}) — fix it or pass --class`);
   }
   const raw = cfg?.catalyst?.node?.class;
-  if (raw == null || String(raw).trim() === "") return { nodeClass: "worker", source: "config-default" };
-  const normalized = String(raw).trim().toLowerCase();
+  if (raw == null) return { nodeClass: "worker", source: "config-default" };
+  // A present-but-non-string class (e.g. [] / ["developer"] / 0 from a malformed config) must FAIL
+  // CLOSED, not be String()-coerced into "" (→ worker) or a bogus class.
+  if (typeof raw !== "string") {
+    throw new Error(`malformed node class in ${layer2}: expected a string, got ${JSON.stringify(raw)} — fix it or pass --class`);
+  }
+  if (raw.trim() === "") return { nodeClass: "worker", source: "config-default" };
+  const normalized = raw.trim().toLowerCase();
   if (!NODE_CLASSES.includes(normalized)) {
     throw new Error(`unrecognized node class in ${layer2}: '${raw}' (valid: ${NODE_CLASSES.join(", ")}) — pass --class to override`);
   }
@@ -493,7 +499,11 @@ function defaultProbeCliInstalled(env = process.env) {
 export function isDrainedStatus(parsed) {
   if (!parsed || typeof parsed !== "object") return false;
   if (parsed.drained === true) return true;
-  const inFlight = Number(parsed.inFlightCount ?? parsed.inflight ?? 0);
+  // draining:true alone is NOT drained — require an explicit, present, finite in-flight count of 0.
+  // A MISSING count (skewed/degraded status) is UNKNOWN ⇒ fail closed (the guard requires --force).
+  const rawCount = parsed.inFlightCount ?? parsed.inflight;
+  if (rawCount == null) return false;
+  const inFlight = Number(rawCount);
   return parsed.draining === true && Number.isFinite(inFlight) && inFlight === 0;
 }
 
@@ -813,29 +823,36 @@ export async function runInstallLifecycle({ operation, nodeClass, opts = {} }, d
         // The node's ORIGINAL state had NO launchd agents (a fresh install, or a config-only node).
         // Boot out anything provisioning installed this run, then restore.
         const bootOk = bootOutAgents();
-        restore = restoreNode();
-        if (restore.code === 0) {
-          if (teardownRan) {
-            // config-only reinstall: teardown ran `install-cli --uninstall`; re-install the symlinks
-            // (not captured in the backup) so the restored node still has `catalyst` on PATH.
-            const cli = runStep({ argv: [scripts.installCli], env: stepEnv });
-            if (cli.code !== 0) log(`catalyst-install: rollback note — re-install CLI symlinks rc ${cli.code}: ${cli.stderr.trim()}`);
-          } else {
-            // install on a no-agent node. Remove ONLY the artifacts THIS run created, determined from
-            // the PRE-RUN snapshot (NOT the post-acquire bundle, whose pluginDirs write makes it look
-            // non-empty even on a fresh node). A node that already had these keeps them (restore re-laid
-            // its config). Per-project secret files are left either way — re-usable, not operational.
-            if (!preInstall.hadCli) {
-              const cli = runStep({ argv: [scripts.installCli, "--uninstall"], env: stepEnv });
-              if (cli.code !== 0) log(`catalyst-install: rollback note — uninstall CLI symlinks rc ${cli.code}: ${cli.stderr.trim()}`);
+        if (!bootOk) {
+          // Cleanup could NOT stop the agents/daemons it tried to remove — do NOT force a config/db
+          // restore over possibly-live broker/exec-core (corruption). Report incomplete (same guard as
+          // the live had-agents path). The catch-level pluginDirs restore below still runs.
+          log(`catalyst-install: rollback INCOMPLETE — could not boot out the agents this run installed; NOT restoring over possibly-live daemons. Stop the stack and 'catalyst-backup restore ${ctx.bundlePath} --force' manually.`);
+          restore = { code: 1 };
+          rolledBack = false;
+        } else {
+          restore = restoreNode();
+          if (restore.code === 0) {
+            if (teardownRan) {
+              // config-only reinstall: teardown ran `install-cli --uninstall`; re-install the symlinks
+              // (not captured in the backup) so the restored node still has `catalyst` on PATH.
+              const cli = runStep({ argv: [scripts.installCli], env: stepEnv });
+              if (cli.code !== 0) log(`catalyst-install: rollback note — re-install CLI symlinks rc ${cli.code}: ${cli.stderr.trim()}`);
+            } else {
+              // install on a no-agent node. Remove ONLY the artifacts THIS run created, determined from
+              // the PRE-RUN snapshot (NOT the post-acquire bundle, whose pluginDirs write makes it look
+              // non-empty even on a fresh node). A node that already had these keeps them (restore re-laid
+              // its config). Per-project secret files are left either way — re-usable, not operational.
+              if (!preInstall.hadCli) {
+                const cli = runStep({ argv: [scripts.installCli, "--uninstall"], env: stepEnv });
+                if (cli.code !== 0) log(`catalyst-install: rollback note — uninstall CLI symlinks rc ${cli.code}: ${cli.stderr.trim()}`);
+              }
+              if (!preInstall.hadManagedKeys) stripManagedKeys();
             }
-            if (!preInstall.hadManagedKeys) stripManagedKeys();
           }
+          rolledBack = restore.code === 0;
+          log(rolledBack ? `catalyst-install: rolled back — restored ${ctx.bundlePath} (verify launchd/daemon state)` : `catalyst-install: rollback INCOMPLETE (restore rc ${restore.code}); bundle at ${ctx.bundlePath}`);
         }
-        // A failed boot-out (agents possibly still running) makes the rollback INCOMPLETE even if the
-        // file restore succeeded.
-        rolledBack = restore.code === 0 && bootOk;
-        log(rolledBack ? `catalyst-install: rolled back — restored ${ctx.bundlePath} (verify launchd/daemon state)` : `catalyst-install: rollback INCOMPLETE (restore rc ${restore.code}, cleanup ${bootOk ? "ok" : "FAILED"}); bundle at ${ctx.bundlePath}`);
       } else {
         // The node HAD agents: a reinstall teardown booted out PRE-EXISTING agents, OR an install-retry
         // where a failed provisioning step (adopt-updater/install-services) backed an agent out. If the
