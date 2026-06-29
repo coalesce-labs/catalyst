@@ -34,6 +34,14 @@ on:
       # gate the broker cutover invariant in broker/plugin-refresh.mjs, so a PR touching
       # only the broker must run this suite too (Codex P2).
       - "plugins/dev/scripts/broker/**"
+      # CTL-1369: the catalyst-install launcher, the `catalyst` router, and the CLI
+      # registration (install-cli.sh / check-setup.sh) are the production entry path to
+      # `catalyst install|uninstall|reinstall`; changing them must run the smoke test below.
+      - "plugins/dev/scripts/catalyst-install"
+      - "plugins/dev/scripts/catalyst"
+      - "plugins/dev/scripts/install-cli.sh"
+      - "plugins/dev/scripts/check-setup.sh"
+      - "plugins/dev/scripts/__tests__/**"
       - ".github/workflows/execution-core-tests.yml"
   push:
     branches: [main]
@@ -43,6 +51,12 @@ on:
       # gate the broker cutover invariant in broker/plugin-refresh.mjs, so a PR touching
       # only the broker must run this suite too (Codex P2).
       - "plugins/dev/scripts/broker/**"
+      # CTL-1369: launcher / router / CLI-registration entry path (see PR-trigger note above).
+      - "plugins/dev/scripts/catalyst-install"
+      - "plugins/dev/scripts/catalyst"
+      - "plugins/dev/scripts/install-cli.sh"
+      - "plugins/dev/scripts/check-setup.sh"
+      - "plugins/dev/scripts/__tests__/**"
       - ".github/workflows/execution-core-tests.yml"
 
 jobs:
@@ -78,6 +92,22 @@ jobs:
         # cross-tree import (../broker/plugin-refresh.mjs, ../tracing.mjs, getNodeClass)
         # would otherwise only fail at launchd runtime on a node. Walk its static graph.
         run: bun build updater/updater.mjs --target=node --outfile /dev/null
+
+      - name: Verify install-lifecycle import graph (bun build resolution check)
+        # CTL-1369 PR3: the catalyst-install lifecycle driver (install-lifecycle.mjs) is a
+        # separate CLI entrypoint (the catalyst-install bash launcher execs it), NOT in
+        # daemon.mjs's import graph — so a bad cross-module import (./lib/install-telemetry.mjs,
+        # ./config.mjs, ../tracing.mjs) would otherwise only fail at install runtime on a node.
+        # Walk its static graph.
+        run: bun build install-lifecycle.mjs --target=node --outfile /dev/null
+
+      - name: catalyst-install launcher + router smoke test
+        # CTL-1369 PR3: exercises the REAL catalyst-install bash launcher (symlink resolution →
+        # node → driver) and the `catalyst` router dispatch end-to-end via --dry-run. The mjs unit
+        # suite tests the driver directly; this covers the production entry path (launcher / router /
+        # CLI registration) that the unit tests bypass.
+        working-directory: plugins/dev/scripts
+        run: bash __tests__/catalyst-install.test.sh
 
       - name: Run stable unit tests
         # EXCLUDED SUITES — do NOT add these back without fixing the underlying
@@ -226,6 +256,7 @@ jobs:
             lib/catalyst-resource.test.mjs \
             lib/node-class-parity.test.mjs \
             lib/install-telemetry.test.mjs \
+            install-lifecycle.test.mjs \
             linear-reconcile.test.mjs \
             linear-reconcile-store.test.mjs \
             linear-reconcile-timer.test.mjs \

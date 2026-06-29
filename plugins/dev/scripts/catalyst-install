@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+# catalyst-install — provision / tear down this node for its class (CTL-1369 PR3).
+#
+# Thin launcher: resolves its own real location (symlink-safe — install-cli.sh
+# symlinks this onto PATH) and execs the Node lifecycle driver in execution-core/.
+# All flags pass through. Invoked via the router as `catalyst install|uninstall|
+# reinstall …` (the router passes the operation as the first arg). See
+# `catalyst-install --help`.
+#
+# Composes the existing setup scripts per node class and drives the catalyst.install.*
+# telemetry contract so each run is an observable trace. worker → the full work stack;
+# developer/monitor → the updater agent + boot-drain (never broker/exec-core).
+set -euo pipefail
+
+# Resolve symlinks to find the real script directory (same idiom as
+# catalyst-linear-reconcile / catalyst-stack).
+SOURCE="${BASH_SOURCE[0]}"
+while [[ -L $SOURCE ]]; do
+	DIR="$(cd -P "$(dirname "$SOURCE")" >/dev/null 2>&1 && pwd)"
+	SOURCE="$(readlink "$SOURCE")"
+	[[ $SOURCE != /* ]] && SOURCE="$DIR/$SOURCE"
+done
+DIR="$(cd -P "$(dirname "$SOURCE")" >/dev/null 2>&1 && pwd)"
+
+# Prefer node: the driver uses only Node-standard APIs (no bun:* imports), and some Bun versions
+# crash on a direct `bun <file>.mjs` run of this CLI (observed exit 132), so Bun would otherwise kill
+# `catalyst install` before it even prints help. Fall back to bun only if node is unavailable.
+RUNTIME="node"
+command -v node >/dev/null 2>&1 || RUNTIME="bun"
+exec "$RUNTIME" "$DIR/execution-core/install-lifecycle.mjs" "$@"
