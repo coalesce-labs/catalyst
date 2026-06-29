@@ -548,3 +548,164 @@ describe("loadMonitorConfig — repoOwners extraction (CTL-961)", () => {
     expect(cfg.repoOwners).toEqual({});
   });
 });
+
+// ── ICON_PATH_PRIORITY — CTL-1375 additions ───────────────────────────────────
+
+import {
+  cacheTtlForResult,
+  AVATAR_TTL_MS,
+  POSITIVE_TTL_MS,
+  NEGATIVE_TTL_MS,
+} from "../lib/repo-icon-fetcher";
+
+describe("ICON_PATH_PRIORITY — CTL-1375 additions", () => {
+  it("includes the new colored favicon/PWA-icon filenames (root + apps/web)", () => {
+    expect(ICON_PATH_PRIORITY).toContain("favicon-transparent.svg");
+    expect(ICON_PATH_PRIORITY).toContain("icon-512.png");
+    expect(ICON_PATH_PRIORITY).toContain("apps/web/public/favicon-transparent.svg");
+    expect(ICON_PATH_PRIORITY).toContain("apps/web/public/icon-512.png");
+  });
+
+  it("deliberately EXCLUDES safari-pinned-tab.svg (a monochrome mask would outrank a colored png via FORMAT_RANK)", () => {
+    expect(ICON_PATH_PRIORITY).not.toContain("safari-pinned-tab.svg");
+    expect(ICON_PATH_PRIORITY).not.toContain("apps/web/public/safari-pinned-tab.svg");
+  });
+
+  it("ranks each root variant before its apps/web/public nested variant", () => {
+    expect(ICON_PATH_PRIORITY.indexOf("favicon-transparent.svg")).toBeLessThan(
+      ICON_PATH_PRIORITY.indexOf("apps/web/public/favicon-transparent.svg"),
+    );
+    expect(ICON_PATH_PRIORITY.indexOf("icon-512.png")).toBeLessThan(
+      ICON_PATH_PRIORITY.indexOf("apps/web/public/icon-512.png"),
+    );
+  });
+
+  it("keeps favicon.ico at index 0 and contains no duplicates after the additions", () => {
+    expect(ICON_PATH_PRIORITY[0]).toBe("favicon.ico");
+    expect(new Set(ICON_PATH_PRIORITY).size).toBe(ICON_PATH_PRIORITY.length);
+  });
+
+  it("does not let icon-512.png outrank a real apple-touch-icon.png (same format → earlier priority wins)", () => {
+    expect(ICON_PATH_PRIORITY.indexOf("apple-touch-icon.png")).toBeLessThan(
+      ICON_PATH_PRIORITY.indexOf("icon-512.png"),
+    );
+  });
+});
+
+// ── cacheTtlForResult / avatar short TTL (CTL-1375) ───────────────────────────
+
+describe("cacheTtlForResult (CTL-1375)", () => {
+  const avatarResult: IconResult = buildAvatarIconResult(
+    "https://avatars.githubusercontent.com/u/1?v=4",
+    "data:image/png;base64,QVZBVEFS",
+  );
+  const faviconResult: IconResult = {
+    found: true,
+    candidates: [],
+    selectedPath: "public/favicon.svg",
+    path: "public/favicon.svg",
+    downloadUrl: "https://x/public/favicon.svg",
+    dataUrl: "data:image/svg+xml;base64,AAAA",
+  };
+
+  it("a negative (not-found) result gets the 1-day NEGATIVE_TTL_MS", () => {
+    expect(cacheTtlForResult({ found: false })).toBe(NEGATIVE_TTL_MS);
+  });
+  it("the owner-avatar fallback gets the short AVATAR_TTL_MS", () => {
+    expect(cacheTtlForResult(avatarResult)).toBe(AVATAR_TTL_MS);
+  });
+  it("a real favicon hit keeps the 7-day POSITIVE_TTL_MS", () => {
+    expect(cacheTtlForResult(faviconResult)).toBe(POSITIVE_TTL_MS);
+  });
+  it("the avatar TTL is strictly shorter than the positive TTL (the whole point)", () => {
+    expect(AVATAR_TTL_MS).toBeLessThan(POSITIVE_TTL_MS);
+  });
+});
+
+describe("fetchRepoIcon — avatar fallback re-probes on the short TTL (CTL-1375)", () => {
+  let cacheDir: string;
+  beforeEach(() => {
+    cacheDir = join(tmpdir(), `repo-icon-ttl-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+  });
+  afterEach(() => {
+    rmSync(cacheDir, { recursive: true, force: true });
+  });
+
+  const AVATAR_URL = "https://avatars.githubusercontent.com/u/1?v=4";
+  const AVATAR_DATA = "data:image/png;base64,QVZBVEFS";
+  const FAVICON = "data:image/svg+xml;base64,PHN2Zz48L3N2Zz4=";
+
+  // Write a v4 cache entry for a slug aged by `ageMs` (so we cross a TTL boundary deterministically).
+  const writeEntry = (ownerRepo: string, result: IconResult, ageMs: number): void => {
+    mkdirSync(cacheDir, { recursive: true });
+    const file = join(cacheDir, `${ownerRepo.replace(/\//g, "--")}.json`);
+    writeFileSync(
+      file,
+      JSON.stringify({ schemaVersion: 4, cachedAt: Date.now() - ageMs, result }, null, 2),
+    );
+  };
+
+  it("a >1-day-old avatar cache RE-PROBES and picks up a now-reachable favicon", async () => {
+    writeEntry("rightsite-cloud/Adva", buildAvatarIconResult(AVATAR_URL, AVATAR_DATA), AVATAR_TTL_MS + 60_000);
+    let probes = 0;
+    const deps: RepoIconDeps = {
+      resolveCandidates: () => {
+        probes++;
+        return [{ path: "apps/web/public/favicon.svg", downloadUrl: "https://repo/favicon.svg" }];
+      },
+      resolveAvatar: () => AVATAR_URL,
+      fetchDataUrl: () => Promise.resolve(FAVICON),
+    };
+    const res = await fetchRepoIcon("rightsite-cloud/Adva", cacheDir, deps);
+    expect(probes).toBe(1); // stale avatar → re-probed
+    expect(res.found).toBe(true);
+    if (!res.found) throw new Error("unreachable");
+    expect(res.selectedPath).toBe("apps/web/public/favicon.svg"); // real favicon, not the avatar
+  });
+
+  it("a FRESH avatar cache (<1 day) is served without re-probing", async () => {
+    writeEntry("rightsite-cloud/Adva", buildAvatarIconResult(AVATAR_URL, AVATAR_DATA), 60 * 60 * 1000); // 1h old
+    let probes = 0;
+    const deps: RepoIconDeps = {
+      resolveCandidates: () => {
+        probes++;
+        return [{ path: "favicon.ico", downloadUrl: "https://repo/favicon.ico" }];
+      },
+      resolveAvatar: () => AVATAR_URL,
+      fetchDataUrl: () => Promise.resolve(FAVICON),
+    };
+    const res = await fetchRepoIcon("rightsite-cloud/Adva", cacheDir, deps);
+    expect(probes).toBe(0); // fresh avatar served from cache
+    expect(res.found).toBe(true);
+    if (!res.found) throw new Error("unreachable");
+    expect(res.selectedPath).toBe(OWNER_AVATAR_PATH);
+  });
+
+  it("a 2-day-old REAL favicon cache is still served (7-day positive TTL is unaffected)", async () => {
+    const favicon: IconResult = {
+      found: true,
+      candidates: [
+        { path: "public/favicon.svg", format: "svg", downloadUrl: "https://x", dataUrl: FAVICON },
+      ],
+      selectedPath: "public/favicon.svg",
+      path: "public/favicon.svg",
+      downloadUrl: "https://x",
+      dataUrl: FAVICON,
+    };
+    writeEntry("coalesce-labs/catalyst", favicon, 2 * 24 * 60 * 60 * 1000);
+    let probes = 0;
+    const deps: RepoIconDeps = {
+      resolveCandidates: () => {
+        probes++;
+        return [];
+      },
+      resolveAvatar: () => null,
+      fetchDataUrl: () => Promise.resolve(null),
+    };
+    const res = await fetchRepoIcon("coalesce-labs/catalyst", cacheDir, deps);
+    expect(probes).toBe(0); // still within the 7-day positive TTL
+    expect(res.found).toBe(true);
+    if (!res.found) throw new Error("unreachable");
+    expect(res.selectedPath).toBe("public/favicon.svg");
+  });
+});

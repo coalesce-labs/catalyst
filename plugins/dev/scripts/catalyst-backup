@@ -1,0 +1,346 @@
+#!/usr/bin/env bash
+# catalyst-backup — capture / restore a Catalyst node's restorable state (CTL-1369 PR2).
+#
+# Usage:
+#   catalyst-backup backup [--out <dir>] [--label <name>]   capture a timestamped bundle
+#   catalyst-backup restore <bundle> [--force] [--dry-run]   restore a bundle's files
+#   catalyst-backup list [--json]                            list available bundles
+#
+# Captures everything needed to restore a node's IDENTITY + state (NOT large transient logs):
+#   - Layer-2 machine config  (~/.config/catalyst/{config,cluster-cloud}.json, cluster.env)  [secrets]
+#   - thoughts creds          (~/.config/humanlayer/humanlayer.json)                          [secrets]
+#   - launchd agent inventory (~/Library/LaunchAgents/ai.coalesce.catalyst-*.plist + a launchctl snapshot)
+#   - catalyst.db             (WAL-safe via `sqlite3 .backup`; falls back to a file copy)
+#   - runtime pointers        (state.json, execution-core/registry.json — denormalized, small)
+#
+# This is the foundation the install lifecycle (PR3) composes — `catalyst install/uninstall/
+# reinstall` back up before they overwrite/tear down, so the node is reversible.
+#
+# Bundles + every file they hold may contain SECRETS (config tokens, creds) → umask 077,
+# bundle dirs 0700, files 0600. All paths are env-overridable (testability + non-standard homes).
+set -uo pipefail
+umask 077
+
+# Resolve symlinks before deriving SCRIPT_DIR (install-cli installs this as a symlink) — same
+# idiom as catalyst / catalyst-stack: normalize each hop against the symlink's own directory.
+_SRC="${BASH_SOURCE[0]}"
+while [[ -L "$_SRC" ]]; do
+  _DIR="$(cd -P "$(dirname "$_SRC")" && pwd)"
+  _SRC="$(readlink "$_SRC")"
+  [[ "$_SRC" != /* ]] && _SRC="$_DIR/$_SRC"
+done
+SCRIPT_DIR="$(cd -P "$(dirname "$_SRC")" && pwd)"
+# host.name / node.class for the manifest (best-effort; the lib is optional).
+# shellcheck source=lib/host-identity.sh
+[[ -r "${SCRIPT_DIR}/lib/host-identity.sh" ]] && source "${SCRIPT_DIR}/lib/host-identity.sh"
+
+# ── path resolution (all env-overridable; defaults match the rest of the toolchain) ──
+catalyst_dir()      { printf '%s' "${CATALYST_DIR:-$HOME/catalyst}"; }
+layer2_config()     { printf '%s' "${CATALYST_LAYER2_CONFIG_FILE:-$HOME/.config/catalyst/config.json}"; }
+layer2_dir()        { dirname "$(layer2_config)"; }
+launchagents_dir()  { printf '%s' "${CATALYST_LAUNCHAGENTS_DIR:-$HOME/Library/LaunchAgents}"; }
+humanlayer_config() { printf '%s' "${CATALYST_HUMANLAYER_CONFIG:-$HOME/.config/humanlayer/humanlayer.json}"; }
+db_file()           { printf '%s' "${CATALYST_DB_FILE:-$(catalyst_dir)/catalyst.db}"; }
+backups_root()      { printf '%s' "${CATALYST_BACKUPS_DIR:-$(catalyst_dir)/backups}"; }
+
+err() { printf 'catalyst-backup: %s\n' "$*" >&2; }
+log() { printf '  %s\n' "$*"; }
+
+# plugin_version — for the manifest; same source the router reads.
+plugin_version() {
+  local manifest="${SCRIPT_DIR}/../.claude-plugin/plugin.json"
+  if [[ -r "$manifest" ]] && command -v jq >/dev/null 2>&1; then
+    jq -r '.version // "unknown"' "$manifest" 2>/dev/null || echo "unknown"
+  else
+    echo "unknown"
+  fi
+}
+
+node_host()  { if declare -F catalyst_host_name >/dev/null 2>&1; then catalyst_host_name; else hostname -s 2>/dev/null || echo node; fi; }
+node_class() { if declare -F catalyst_node_class >/dev/null 2>&1; then catalyst_node_class; else echo unknown; fi; }
+
+# cmd_backup — capture a bundle. Prints progress; LAST stdout line is the bundle path so a
+# caller (the install command) can `bundle="$(catalyst-backup backup ... | tail -1)"`. Exits
+# NON-ZERO if any PRESENT source failed to capture — so the install lifecycle aborts before it
+# overwrites a node it couldn't back up (an absent source is a legitimate, silent skip).
+cmd_backup() {
+  local out="" label="node"
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --out)   out="$2"; shift 2 ;;
+      --label) label="$2"; shift 2 ;;
+      -h|--help) usage; return 0 ;;
+      *) err "backup: unknown flag: $1"; return 2 ;;
+    esac
+  done
+  command -v jq >/dev/null 2>&1 || { err "jq is required"; return 3; }
+
+  local host ts bundle n
+  host="$(node_host)"; ts="$(date -u +%Y%m%dT%H%M%SZ)"
+  bundle="${out:-$(backups_root)/${host}-${ts}}"
+  # Collision-resistant: the timestamp is second-granular, so two backups in the same second
+  # (or two processes) would otherwise overwrite each other's restore point. Append a counter.
+  if [[ -z "$out" && -e "$bundle" ]]; then n=1; while [[ -e "${bundle}-${n}" ]]; do n=$((n+1)); done; bundle="${bundle}-${n}"; fi
+  mkdir -p "$bundle"/config "$bundle"/humanlayer "$bundle"/launchagents "$bundle"/runtime \
+    || { err "cannot create bundle dir: $bundle"; return 1; }
+
+  local -a captured=() failed=() degraded=()
+  local f l2dir l2base la db cdir plist sx
+
+  # capture SRC RELDEST — ABSENT source ⇒ legitimate skip (no-op); PRESENT-but-unreadable
+  # (perms/ownership) or a failed copy ⇒ recorded in failed[] so the run fails loudly (a secret
+  # we can't read is NOT the same as one that isn't there).
+  capture() {
+    local src="$1" rel="$2"
+    [[ -e "$src" ]] || return 0
+    if [[ ! -r "$src" ]]; then failed+=("$rel"); err "FAILED — present but unreadable: $src"; return 0; fi
+    if cp -p "$src" "$bundle/$rel" 2>/dev/null; then
+      captured+=("$rel")
+    else
+      rm -f "$bundle/$rel" 2>/dev/null
+      failed+=("$rel"); err "FAILED to capture present source: $src → $rel"
+    fi
+  }
+
+  # 1. Layer-2 machine config (secrets) — config.json AND the per-project config-<key>.json files
+  # (API/webhook tokens live there too), plus cluster files. Also the configured basename if it's
+  # non-standard (CATALYST_LAYER2_CONFIG_FILE pointed elsewhere).
+  l2dir="$(layer2_dir)"; l2base="$(basename "$(layer2_config)")"
+  shopt -s nullglob
+  for f in "$l2dir"/config*.json "$l2dir/cluster-cloud.json" "$l2dir/cluster.env"; do
+    capture "$f" "config/$(basename "$f")"
+  done
+  shopt -u nullglob
+  case "$l2base" in config*.json) : ;; *) capture "$l2dir/$l2base" "config/$l2base" ;; esac
+
+  # 2. thoughts creds (secrets)
+  capture "$(humanlayer_config)" "humanlayer/humanlayer.json"
+
+  # 3. launchd agents + the loaded inventory
+  la="$(launchagents_dir)"
+  shopt -s nullglob
+  for plist in "$la"/ai.coalesce.catalyst-*.plist; do capture "$plist" "launchagents/$(basename "$plist")"; done
+  shopt -u nullglob
+  if command -v launchctl >/dev/null 2>&1; then  # auxiliary inventory — best-effort, never fails the run
+    launchctl list 2>/dev/null | grep -i "ai.coalesce.catalyst" > "$bundle/launchagents/launchctl-snapshot.txt" 2>/dev/null || true
+    if [[ -s "$bundle/launchagents/launchctl-snapshot.txt" ]]; then captured+=("launchagents/launchctl-snapshot.txt"); else rm -f "$bundle/launchagents/launchctl-snapshot.txt"; fi
+  fi
+
+  # 4. catalyst.db — WAL-safe snapshot via `.backup` (one consistent file, no sidecars). If that
+  # is unavailable/fails, DEGRADE to a plain copy of the db PLUS its -wal/-shm sidecars (a live
+  # WAL db copied without them loses un-checkpointed commits) and mark it degraded. If BOTH fail,
+  # record it as failed (the both-fail path is real: a full disk dooms .backup and cp alike).
+  db="$(db_file)"
+  if [[ -e "$db" && ! -r "$db" ]]; then
+    failed+=("runtime/catalyst.db"); err "FAILED — present but unreadable: $db"
+  elif [[ -r "$db" ]]; then
+    if command -v sqlite3 >/dev/null 2>&1 && sqlite3 "$db" ".backup '$bundle/runtime/catalyst.db'" 2>/dev/null; then
+      captured+=("runtime/catalyst.db")
+    else
+      local db_ok=true
+      cp -p "$db" "$bundle/runtime/catalyst.db" 2>/dev/null || db_ok=false
+      for sx in -wal -shm; do
+        if [[ -r "${db}${sx}" ]]; then cp -p "${db}${sx}" "$bundle/runtime/catalyst.db${sx}" 2>/dev/null || db_ok=false; fi
+      done
+      if $db_ok; then
+        captured+=("runtime/catalyst.db"); degraded+=("runtime/catalyst.db")
+        [[ -r "${db}-wal" ]] && captured+=("runtime/catalyst.db-wal")
+        [[ -r "${db}-shm" ]] && captured+=("runtime/catalyst.db-shm")
+        err "WARN: sqlite3 .backup unavailable/failed — copied catalyst.db + WAL sidecars (DEGRADED snapshot)"
+      else
+        rm -f "$bundle/runtime/catalyst.db" "$bundle/runtime/catalyst.db-wal" "$bundle/runtime/catalyst.db-shm"
+        failed+=("runtime/catalyst.db"); err "FAILED to capture catalyst.db (sqlite3 .backup AND cp both failed)"
+      fi
+    fi
+  fi
+
+  # 5. runtime pointers (small, denormalized — NOT the events log)
+  cdir="$(catalyst_dir)"
+  capture "$cdir/state.json" "runtime/state.json"
+  capture "$cdir/execution-core/registry.json" "runtime/registry.json"
+
+  # manifest (validated) — entries are recorded ONLY for successful copies, so it never overstates.
+  local cap_json deg_json
+  cap_json="[]"; [[ ${#captured[@]} -gt 0 ]] && cap_json="$(printf '%s\n' "${captured[@]}" | jq -R . | jq -s .)"
+  deg_json="[]"; [[ ${#degraded[@]} -gt 0 ]] && deg_json="$(printf '%s\n' "${degraded[@]}" | jq -R . | jq -s .)"
+  jq -n --argjson sv 1 --arg ts "$ts" --arg host "$host" --arg nc "$(node_class)" \
+        --arg label "$label" --arg ver "$(plugin_version)" --argjson cap "$cap_json" --argjson deg "$deg_json" \
+        '{schemaVersion:$sv, created:$ts, host:$host, nodeClass:$nc, label:$label, pluginVersion:$ver, captured:$cap, degraded:$deg}' \
+        > "$bundle/manifest.json" 2>/dev/null
+  if ! jq -e . "$bundle/manifest.json" >/dev/null 2>&1; then err "FAILED to write a valid manifest.json"; return 1; fi
+  chmod -R go-rwx "$bundle" 2>/dev/null || true
+
+  if [[ ${#failed[@]} -gt 0 ]]; then
+    err "backup INCOMPLETE — ${#failed[@]} present artifact(s) could not be captured: ${failed[*]}"
+    err "bundle (partial): $bundle"
+    return 1
+  fi
+  [[ ${#captured[@]} -eq 0 ]] && err "WARN: backup captured 0 artifacts — nothing present to back up at this node"
+  log "backup complete — ${#captured[@]} artifact(s)$([[ ${#degraded[@]} -gt 0 ]] && printf ' (%s degraded)' "${#degraded[@]}") → $bundle"
+  printf '%s\n' "$bundle"
+}
+
+# ── restore ──────────────────────────────────────────────────────────────────
+RESTORE_FORCE=false
+RESTORE_DRYRUN=false
+
+# daemons_running — true if a broker/execution-core daemon is live (restoring config/db over
+# them is unsafe). Honors CATALYST_ASSUME_NO_DAEMONS=1 as a test seam. FAILS SAFE: if liveness
+# can't be determined (pgrep missing), assume LIVE so restore refuses without --force.
+daemons_running() {
+  [[ "${CATALYST_ASSUME_NO_DAEMONS:-}" == "1" ]] && return 1
+  command -v pgrep >/dev/null 2>&1 || { err "cannot determine daemon state (pgrep missing) — assuming LIVE"; return 0; }
+  pgrep -f "broker/index.mjs|execution-core/(daemon|index)\.mjs" >/dev/null 2>&1
+}
+
+# rel_to_dest BUNDLE_REL — the live destination for a bundle-relative captured path (or rc 1 if
+# the manifest names an artifact this version doesn't know how to place).
+rel_to_dest() {
+  # NB: command substitution strips trailing newlines, so this composes clean single-line paths
+  # (layer2_dir uses dirname, which would otherwise inject a newline mid-path).
+  case "$1" in
+    config/*)                   printf '%s/%s' "$(layer2_dir)" "$(basename "$1")" ;;
+    humanlayer/humanlayer.json) printf '%s' "$(humanlayer_config)" ;;
+    runtime/catalyst.db)        printf '%s' "$(db_file)" ;;
+    runtime/catalyst.db-wal)    printf '%s-wal' "$(db_file)" ;;
+    runtime/catalyst.db-shm)    printf '%s-shm' "$(db_file)" ;;
+    runtime/state.json)         printf '%s/state.json' "$(catalyst_dir)" ;;
+    runtime/registry.json)      printf '%s/execution-core/registry.json' "$(catalyst_dir)" ;;
+    launchagents/*.plist)       printf '%s/%s' "$(launchagents_dir)" "$(basename "$1")" ;;
+    *) return 1 ;;
+  esac
+}
+
+# restore_one SRC DEST → 0 restored | 10 absent in bundle | 11 skip-exists | 12 write failure.
+restore_one() {
+  local src="$1" dest="$2"
+  [[ -r "$src" ]] || return 10
+  if $RESTORE_DRYRUN; then log "would restore → $dest"; return 0; fi
+  if [[ -e "$dest" ]] && ! $RESTORE_FORCE; then err "skip (exists; use --force) → $dest"; return 11; fi
+  # A non-regular-file destination (e.g. a directory at the config/db path) can't be safely
+  # replaced — `mv` would move the staged file INSIDE it and falsely report success.
+  if [[ -e "$dest" && ! -f "$dest" ]]; then err "dest exists and is not a regular file → $dest"; return 12; fi
+  mkdir -p "$(dirname "$dest")" || return 12
+  local tmp; tmp="$(mktemp "${dest}.XXXXXX")" || { err "cannot stage → $dest"; return 12; }
+  if cp -p "$src" "$tmp" && mv "$tmp" "$dest"; then log "restored → $dest"; return 0; fi
+  rm -f "$tmp"; err "failed to restore → $dest"; return 12
+}
+
+cmd_restore() {
+  local bundle=""
+  RESTORE_FORCE=false; RESTORE_DRYRUN=false
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --force)   RESTORE_FORCE=true; shift ;;
+      --dry-run) RESTORE_DRYRUN=true; shift ;;
+      -h|--help) usage; return 0 ;;
+      -*) err "restore: unknown flag: $1"; return 2 ;;
+      *) bundle="$1"; shift ;;
+    esac
+  done
+  command -v jq >/dev/null 2>&1 || { err "jq is required"; return 3; }
+  [[ -n "$bundle" ]] || { err "restore: bundle path required (see 'catalyst-backup list')"; return 2; }
+  [[ -d "$bundle" ]] || { err "not a backup bundle: $bundle"; return 1; }
+  jq -e . "$bundle/manifest.json" >/dev/null 2>&1 || { err "not a backup bundle (missing/invalid manifest.json): $bundle"; return 1; }
+  jq -e '.captured | type == "array"' "$bundle/manifest.json" >/dev/null 2>&1 || { err "manifest.json has no valid 'captured' array — refusing to restore a malformed bundle: $bundle"; return 1; }
+
+  # Restoring config/db over a LIVE node is unsafe — refuse unless --force.
+  if ! $RESTORE_DRYRUN && daemons_running; then
+    err "catalyst daemons appear to be running — stop them first (catalyst-stack stop)"
+    $RESTORE_FORCE || { err "refusing to restore over a live node without --force"; return 1; }
+  fi
+
+  # Drive restore from the manifest's `captured` list (the recorded source of truth) — never
+  # from on-disk debris a partially-failed backup might have left behind.
+  local rel dest restored=0 skipped=0 failures=0
+  while IFS= read -r rel; do
+    [[ -n "$rel" ]] || continue
+    if ! dest="$(rel_to_dest "$rel")"; then err "manifest names an unknown artifact, skipping: $rel"; continue; fi
+    restore_one "$bundle/$rel" "$dest"
+    case $? in
+      0)
+        restored=$((restored+1))
+        # Only AFTER the db was actually overwritten: clear stale -wal/-shm at the destination
+        # so a clean .backup snapshot isn't silently overlaid by leftover sidecars from a prior
+        # unclean shutdown. (Doing this before the no-clobber decision would drop live WAL data
+        # on a skipped restore — Codex P1.) Bundle-carried sidecars, if any, restore in later
+        # iterations and overwrite these.
+        [[ "$rel" == "runtime/catalyst.db" ]] && rm -f "${dest}-wal" "${dest}-shm" 2>/dev/null
+        ;;
+      11) skipped=$((skipped+1)) ;;
+      10) failures=$((failures+1)); err "manifest lists $rel but it is missing/unreadable in the bundle" ;;
+      *)  failures=$((failures+1)) ;;
+    esac
+  done < <(jq -r '.captured[]' "$bundle/manifest.json")
+
+  if $RESTORE_DRYRUN; then
+    log "dry-run — $restored file(s) would be restored from $bundle"
+    return 0
+  fi
+  log "restore from $bundle: $restored restored, $skipped skipped (exists), $failures failed"
+  if [[ $failures -gt 0 ]]; then
+    err "restore INCOMPLETE — $failures file(s) failed to write; the node is NOT fully restored"
+    return 1
+  fi
+  log "next: reload launchd (launchctl) + restart the stack as needed — restore does NOT touch running daemons"
+}
+
+cmd_list() {
+  local json=false; [[ "${1:-}" == "--json" ]] && json=true
+  command -v jq >/dev/null 2>&1 || { err "jq is required"; return 3; }
+  local root d; root="$(backups_root)"
+  if [[ ! -d "$root" ]]; then $json && printf '[]\n' || log "no backups at $root"; return 0; fi
+  if $json; then
+    local first=true; printf '['
+    for d in "$root"/*/; do
+      [[ -r "${d}manifest.json" ]] || continue
+      $first || printf ','; first=false
+      jq -c --arg path "${d%/}" '. + {path:$path}' "${d}manifest.json"
+    done
+    printf ']\n'
+  else
+    local found=false
+    for d in "$root"/*/; do
+      [[ -r "${d}manifest.json" ]] || continue; found=true
+      printf '  %s  host=%s class=%s artifacts=%s\n    %s\n' \
+        "$(jq -r .created "${d}manifest.json")" "$(jq -r .host "${d}manifest.json")" \
+        "$(jq -r .nodeClass "${d}manifest.json")" "$(jq '.captured|length' "${d}manifest.json")" "${d%/}"
+    done
+    $found || log "no backups at $root"
+  fi
+}
+
+usage() {
+  cat <<EOF
+catalyst-backup — capture / restore a Catalyst node's restorable state.
+
+Usage (direct, or via the router as 'catalyst backup …'):
+  catalyst-backup [backup] [--out <dir>] [--label <name>]   capture a timestamped bundle (default)
+  catalyst-backup restore <bundle> [--force] [--dry-run]    restore a bundle's files
+  catalyst-backup list [--json]                             list available bundles
+
+Via the top-level CLI: 'catalyst backup' (create), 'catalyst backup restore <bundle>',
+'catalyst backup list'.
+
+Captures: Layer-2 config (secrets), thoughts creds (secrets), launchd agents,
+catalyst.db (WAL-safe), and runtime pointers (state.json, registry.json).
+Bundles are 0700/0600 (they hold secrets). restore refuses to clobber without --force
+and refuses a live node (running daemons) without --force.
+EOF
+}
+
+# Dispatch — guarded so tests can source the file to reach pure helpers without running.
+# `backup` is the DEFAULT verb: a bare invocation (which is what `catalyst backup` becomes after
+# the router's auto-delegate, `catalyst <x> → catalyst-<x>`) creates a backup. `restore`/`list`
+# are sub-verbs (`catalyst backup restore <bundle>`, `catalyst backup list`). Backup is safe +
+# non-destructive, so defaulting to it on a bare call is fine.
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+  case "${1:-}" in
+    backup)        shift; cmd_backup "$@" ;;
+    restore)       shift; cmd_restore "$@" ;;
+    list)          shift; cmd_list "$@" ;;
+    -h|--help)     usage ;;
+    ""|--*)        cmd_backup "$@" ;;
+    *) err "unknown command: $1 (try: backup | restore | list)"; usage >&2; exit 2 ;;
+  esac
+fi
