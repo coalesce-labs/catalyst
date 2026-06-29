@@ -204,6 +204,12 @@ describe("planPhases — per-class correctness (pure)", () => {
   test("install phase order EXACTLY matches the OTEL-locked INSTALL_PHASES", () => {
     expect(phaseNames(planPhases({ operation: "install", nodeClass: "worker", scripts: SCRIPTS }))).toEqual([...INSTALL_PHASES]);
   });
+  test("uninstall remove-agents reaps the log-shipper (a `stop` after the plist is removed)", () => {
+    const ra = planPhases({ operation: "uninstall", nodeClass: "worker", scripts: SCRIPTS }).find((p) => p.phase === "remove-agents");
+    const labels = ra.steps.map((s) => s.label);
+    expect(labels).toContain("reap-shipper");
+    expect(labels.indexOf("uninstall-services")).toBeLessThan(labels.indexOf("reap-shipper"));
+  });
   test("uninstall / reinstall phase orders match their exported enums", () => {
     expect(phaseNames(planPhases({ operation: "uninstall", nodeClass: "worker", scripts: SCRIPTS }))).toEqual([...UNINSTALL_PHASES]);
     expect(phaseNames(planPhases({ operation: "reinstall", nodeClass: "developer", scripts: SCRIPTS }))).toEqual([...REINSTALL_PHASES]);
@@ -499,6 +505,32 @@ describe("fresh-node bootstrap + profile-switch guards (Codex round 5)", () => {
     const joined = calls.map((a) => a.join(" "));
     const restoreIdx = joined.findIndex((c) => c.startsWith("BACKUP restore"));
     expect(joined.slice(restoreIdx + 1)).toContain("INSTALL_CLI"); // symlinks re-installed after restore
+  });
+  test("install --class developer over a LIVE worker stack REFUSES (mixed-profile guard)", async () => {
+    const { deps, calls } = withRealRun(makeDeps({ daemonsLive: true }));
+    const res = await runInstallLifecycle({ operation: "install", nodeClass: "developer", opts: {} }, deps);
+    expect(res.outcome).toBe("refused");
+    expect(res.reason).toBe("live-worker-stack");
+    expect(calls).toHaveLength(0);
+  });
+  test("install retry on a LIVE existing node STOPS the worker stack around the restore (no live-restore corruption)", async () => {
+    const { deps, calls } = withRealRun(makeDeps({ bundleHadAgents: true, daemonsLive: true, failOn: (a) => (a.join(" ") === "STACK install-services" ? 1 : 0) }));
+    const res = await runInstallLifecycle({ operation: "install", nodeClass: "worker", opts: {} }, deps);
+    expect(res.outcome).toBe("rolled_back");
+    const joined = calls.map((a) => a.join(" "));
+    const restoreIdx = joined.findIndex((c) => c.startsWith("BACKUP restore"));
+    expect(joined.slice(0, restoreIdx)).toContain("STACK stop"); // stopped before restore
+    expect(joined.slice(restoreIdx + 1)).toContain("STACK start --yes"); // restarted after
+  });
+  test("fresh-node rollback removes the install-managed config keys + uninstalls the CLI symlinks", async () => {
+    const { deps, calls, layer2 } = withRealRun(makeDeps({ bundleHadAgents: false, failOn: (a) => (a.join(" ") === "STACK install-services" ? 1 : 0) }));
+    const res = await runInstallLifecycle({ operation: "install", nodeClass: "worker", opts: {} }, deps);
+    expect(res.outcome).toBe("rolled_back");
+    const joined = calls.map((a) => a.join(" "));
+    const restoreIdx = joined.findIndex((c) => c.startsWith("BACKUP restore"));
+    expect(joined.slice(restoreIdx + 1)).toContain("INSTALL_CLI --uninstall"); // symlinks removed
+    const cfg = JSON.parse(readFileSync(layer2, "utf8") || "{}");
+    expect(cfg.catalyst?.orchestration?.pluginPullOwner).toBeUndefined(); // managed key stripped
   });
 });
 
