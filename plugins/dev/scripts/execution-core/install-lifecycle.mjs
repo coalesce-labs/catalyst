@@ -36,7 +36,7 @@ import { homedir } from "node:os";
 
 import { InstallRun, makeInstallEmitFn, INSTALL_SERVICE_NAME } from "./lib/install-telemetry.mjs";
 import { initTracing, shutdownTracing } from "./tracing.mjs";
-import { NODE_CLASSES, getNodeClass } from "./config.mjs";
+import { NODE_CLASSES } from "./config.mjs";
 
 // ── phase enums ───────────────────────────────────────────────────────────────
 // install: the PR1 locked set (acquire → backup → write-config → install-agents →
@@ -111,13 +111,27 @@ export function layer2Path(env = process.env) {
   );
 }
 
+/** readNodeClassRaw — the raw catalyst.node.class string stored in a Layer-2 file (or null). */
+export function readNodeClassRaw(layer2) {
+  try {
+    const v = readLayer2(layer2)?.catalyst?.node?.class;
+    return typeof v === "string" ? v : null;
+  } catch {
+    return null;
+  }
+}
+
 /**
  * resolveRequestedClass — the class this lifecycle run targets. Precedence:
- *   explicit --class > CATALYST_NODE_CLASS env > current Layer-2 class (getNodeClass).
- * An explicit but UNRECOGNIZED --class is a hard error (the §3 footgun fix — never silently
- * fall back to worker on a typo'd developer node). Returns { nodeClass, source }.
+ *   explicit --class > CATALYST_NODE_CLASS env > the class IN THE SELECTED Layer-2 file.
+ * The config fallback reads the SAME file the driver resolved (`layer2`) — NOT getNodeClass(),
+ * which only honors CATALYST_LAYER2_CONFIG_FILE/~/.config and would mis-resolve a developer config
+ * supplied via CATALYST_MACHINE_CONFIG/XDG as worker. An explicit-but-UNRECOGNIZED class (from
+ * --class, env, OR the config) is a hard error (the §3 footgun — never silently fall back to worker
+ * on a typo'd developer node); an ABSENT config class ⇒ worker (the zero-config default).
+ * Returns { nodeClass, source }. (A test may inject `currentFn` to stub the config read.)
  */
-export function resolveRequestedClass({ optsClass, env = process.env, currentFn = getNodeClass } = {}) {
+export function resolveRequestedClass({ optsClass, env = process.env, layer2, currentFn } = {}) {
   if (optsClass != null && optsClass !== "") {
     const normalized = String(optsClass).trim().toLowerCase();
     if (!NODE_CLASSES.includes(normalized)) {
@@ -132,7 +146,14 @@ export function resolveRequestedClass({ optsClass, env = process.env, currentFn 
     }
     return { nodeClass: normalized, source: "env" };
   }
-  return { nodeClass: currentFn(), source: "config" };
+  if (typeof currentFn === "function") return { nodeClass: currentFn(), source: "config" };
+  const raw = readNodeClassRaw(layer2);
+  if (raw == null || raw.trim() === "") return { nodeClass: "worker", source: "config-default" };
+  const normalized = raw.trim().toLowerCase();
+  if (!NODE_CLASSES.includes(normalized)) {
+    throw new Error(`unrecognized node class in ${layer2}: '${raw}' (valid: ${NODE_CLASSES.join(", ")}) — pass --class to override`);
+  }
+  return { nodeClass: normalized, source: "config" };
 }
 
 /**
@@ -191,10 +212,16 @@ export function planPhases({ operation, nodeClass, scripts, opts = {} }) {
       { label: "set-class", kind: "run", argv: [scripts.catalyst, "class", nodeClass] },
       { label: "setup-catalyst", kind: "run", argv: [scripts.setup, "--non-interactive"] },
     ];
-    // A developer/monitor node reads a worker's monitor over HTTP — bind it when given. (Worker
-    // reads its own local replica, so the key is meaningless there.) Optional: a missing endpoint
-    // is surfaced by the developer verify-node rubric, not a hard install failure.
-    if (!worker && opts.readReplica) {
+    if (worker) {
+      // The worker path never runs adopt-updater (the broker is the puller), and install-services
+      // doesn't touch pluginPullOwner — so a node promoted from developer would keep
+      // pluginPullOwner=updater and the broker would defer pulls to a now-absent updater. Reset it to
+      // broker so the worker's broker owns plugin freshness.
+      steps.push({ label: "pull-owner", kind: "setkey", key: "catalyst.orchestration.pluginPullOwner", value: "broker" });
+    } else if (opts.readReplica) {
+      // A developer/monitor node reads a worker's monitor over HTTP — bind it when given. (Worker
+      // reads its own local replica, so the key is meaningless there.) A missing endpoint is
+      // surfaced by the developer verify-node rubric, not a hard install failure.
       steps.push({ label: "read-replica", kind: "setkey", key: "catalyst.readReplica.baseUrl", value: opts.readReplica });
     }
     return { phase: "write-config", steps };
@@ -278,7 +305,7 @@ export function planPhases({ operation, nodeClass, scripts, opts = {} }) {
 
 // ── Layer-2 surgical edits (mjs-internal, jq-free, atomic) ──────────────────────
 function readLayer2(path) {
-  if (!existsSync(path)) return {};
+  if (!path || !existsSync(path)) return {};
   const raw = readFileSync(path, "utf8");
   if (!raw.trim()) return {};
   return JSON.parse(raw); // a malformed config is a real error — let it throw (fail closed)
@@ -575,6 +602,16 @@ export async function runInstallLifecycle({ operation, nodeClass, opts = {} }, d
         }
       });
     }
+    if (!ctx.cleanOk) {
+      // A teardown that left catalyst agents/daemons present is a FAILED teardown: emit `failed`
+      // telemetry (NOT `completed`) so dashboards/alerts keyed on the low-card terminal outcome don't
+      // count a dirty uninstall as a success. (verify-clean is non-fatal for ROLLBACK — it never
+      // triggers a restore — but the run's OUTCOME is a failure.) cleanOk is only ever false for
+      // uninstall (the only op with a verify-clean phase).
+      const e = new Error("verify-clean: catalyst agents/daemons still present after teardown — node not fully torn down");
+      run.fail(e, { rolledBack: false, detail: { reason: "dirty-teardown", cleanOk: false } });
+      return { outcome: "failed", error: e.message, healthOk: ctx.healthOk, healthRc: ctx.healthRc, cleanOk: false, bundlePath: ctx.bundlePath, traceId };
+    }
     run.complete({ class: nodeClass, healthOk: ctx.healthOk, cleanOk: ctx.cleanOk, bundle: ctx.bundlePath });
     return { outcome: "completed", healthOk: ctx.healthOk, healthRc: ctx.healthRc, cleanOk: ctx.cleanOk, bundlePath: ctx.bundlePath, traceId };
   } catch (err) {
@@ -590,19 +627,24 @@ export async function runInstallLifecycle({ operation, nodeClass, opts = {} }, d
       const teardownRan = ctx.teardownRan; // a reinstall already booted out the node's agents this run
       const hadAgents = bundleHasCapturedAgents(ctx.bundlePath);
       if (teardownRan) {
-        // (3) reinstall failed AFTER remove-agents: the agents are already DOWN; restore alone can't
-        // bring them back. Restore the captured state, then RE-BOOTSTRAP the node to its restored class.
+        // (3) reinstall failed AFTER remove-agents. Restore the captured state. Then, ONLY if the
+        // node actually HAD agents (the backup captured plists), RE-BOOTSTRAP them — the teardown
+        // booted them out and restore alone can't bring them back. If the node had NO agents
+        // (config-only node), restore is the full rollback; re-bootstrapping would install agents the
+        // snapshot never had.
         const restore = runStep({ argv: [scripts.backup, "restore", ctx.bundlePath, "--force"], env: stepEnv });
-        let bringupOk = false;
-        if (restore.code === 0) {
-          // The restored config carries the node's original class; re-run install-agents + start-daemons
-          // for it so the node comes back up (idempotent; catalyst-stack re-renders + bootstraps).
-          const restoredClass = readLayer2(layer2)?.catalyst?.node?.class || nodeClass;
+        let bringupOk = true;
+        if (restore.code === 0 && hadAgents) {
+          // Re-bootstrap to the RESTORED class: read it from the restored config, defaulting an
+          // ABSENT class to worker (the unset/default), NOT the requested reinstall target — else a
+          // failed `reinstall --class developer` of an original default-worker node would re-bring-up
+          // as developer (adopt-updater/drain) and lose the worker's broker/exec-core stack.
+          const rawClass = readNodeClassRaw(layer2);
+          const restoredClass = rawClass && NODE_CLASSES.includes(rawClass.trim().toLowerCase()) ? rawClass.trim().toLowerCase() : "worker";
           const bringupEnv = { ...stepEnv, CATALYST_NODE_CLASS: restoredClass };
           const bringup = planPhases({ operation: "install", nodeClass: restoredClass, scripts, opts: {} }).filter(
             (p) => p.phase === "install-agents" || p.phase === "start-daemons",
           );
-          bringupOk = true;
           for (const ph of bringup) {
             for (const s of ph.steps) {
               if (s.kind !== "run") continue;
@@ -618,7 +660,7 @@ export async function runInstallLifecycle({ operation, nodeClass, opts = {} }, d
         rollbackDisposition = rolledBack ? "ok" : "failed";
         log(
           rolledBack
-            ? `catalyst-install: rolled back — restored ${ctx.bundlePath} + re-bootstrapped the torn-down agents (verify launchd/daemon state)`
+            ? `catalyst-install: rolled back — restored ${ctx.bundlePath}${hadAgents ? " + re-bootstrapped the torn-down agents" : ""} (verify launchd/daemon state)`
             : `catalyst-install: rollback INCOMPLETE — config restored from ${ctx.bundlePath} but launchd agents are NOT fully re-bootstrapped; re-run 'catalyst install' or 'catalyst-stack install-services && catalyst-stack start' to bring the node back`,
         );
       } else {
@@ -783,7 +825,7 @@ export async function main(argv, depsOverride) {
 
   let nodeClass;
   try {
-    ({ nodeClass } = resolveRequestedClass({ optsClass: args.class, env }));
+    ({ nodeClass } = resolveRequestedClass({ optsClass: args.class, env, layer2: deps.layer2 }));
   } catch (e) {
     errOut(`catalyst-install: ${e.message}`);
     return 2;
@@ -823,13 +865,11 @@ export async function main(argv, depsOverride) {
   let code;
   switch (result.outcome) {
     case "completed":
+      // A dirty teardown (verify-clean found residual agents) is returned as outcome "failed" by
+      // runInstallLifecycle, so a "completed" install/uninstall here is genuinely clean. An unhealthy
+      // verify-node is still "completed" (the node IS installed) but exits 1.
       if (!result.healthOk) {
         errOut(`catalyst-install: ${args.operation} completed but verify-node reported the node UNHEALTHY (rc ${result.healthRc ?? "?"}).`);
-        code = 1;
-      } else if (isTeardown(args.operation) && result.cleanOk === false) {
-        // A teardown that left catalyst agents/daemons present is a FAILED teardown — surface it as a
-        // non-zero exit (symmetric with the healthOk treatment above), not a silent "completed".
-        errOut(`catalyst-install: ${args.operation} completed but verify-clean found catalyst agents/daemons STILL PRESENT — node not fully torn down (run 'catalyst-stack stop' / 'catalyst-stack uninstall-services').`);
         code = 1;
       } else {
         if (!args.json) out(`catalyst-install: ${args.operation} (${nodeClass}) completed.`);

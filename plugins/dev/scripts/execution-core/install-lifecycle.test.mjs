@@ -148,8 +148,13 @@ describe("resolveRequestedClass", () => {
     expect(resolveRequestedClass({ env: { CATALYST_NODE_CLASS: "worker" } }).nodeClass).toBe("worker");
     expect(() => resolveRequestedClass({ env: { CATALYST_NODE_CLASS: "nope" } })).toThrow(/unrecognized CATALYST_NODE_CLASS/);
   });
-  test("falls back to the current configured class", () => {
+  test("falls back to the current configured class (injected currentFn)", () => {
     expect(resolveRequestedClass({ env: {}, currentFn: () => "monitor" }).nodeClass).toBe("monitor");
+  });
+  test("config fallback reads the class from the SELECTED layer2 file (consistent with the children, not getNodeClass)", () => {
+    expect(resolveRequestedClass({ env: {}, layer2: tmpCfg({ catalyst: { node: { class: "developer" } } }) }).nodeClass).toBe("developer");
+    expect(resolveRequestedClass({ env: {}, layer2: tmpCfg({}) }).nodeClass).toBe("worker"); // absent ⇒ worker
+    expect(() => resolveRequestedClass({ env: {}, layer2: tmpCfg({ catalyst: { node: { class: "develper" } } }) })).toThrow(/unrecognized node class in/);
   });
 });
 
@@ -195,6 +200,13 @@ describe("planPhases — per-class correctness (pure)", () => {
     expect(worker).not.toContain("read-replica");
     const devNoUrl = stepLabels(planPhases({ operation: "install", nodeClass: "developer", scripts: SCRIPTS }));
     expect(devNoUrl).not.toContain("read-replica");
+  });
+  test("worker install resets pluginPullOwner to broker; developer/monitor never do (adopt-updater owns it)", () => {
+    const wc = planPhases({ operation: "install", nodeClass: "worker", scripts: SCRIPTS }).find((p) => p.phase === "write-config");
+    const po = wc.steps.find((s) => s.label === "pull-owner");
+    expect(po).toMatchObject({ kind: "setkey", key: "catalyst.orchestration.pluginPullOwner", value: "broker" });
+    const devWc = planPhases({ operation: "install", nodeClass: "developer", scripts: SCRIPTS }).find((p) => p.phase === "write-config");
+    expect(devWc.steps.some((s) => s.label === "pull-owner")).toBe(false);
   });
   test("backup label carries operation + class", () => {
     const plan = planPhases({ operation: "install", nodeClass: "developer", scripts: SCRIPTS });
@@ -341,11 +353,13 @@ describe("runInstallLifecycle — uninstall", () => {
     const res = await runInstallLifecycle({ operation: "uninstall", nodeClass: "worker", opts: { force: true } }, deps);
     expect(res.cleanOk).toBe(true);
   });
-  test("verify-clean FAILS (cleanOk=false) when a residual agent survives — e.g. the updater on a developer node", async () => {
-    const { deps } = withRealRun(makeDeps({ residual: true }));
+  test("a dirty teardown (residual agent survives) → outcome failed + catalyst.install.failed telemetry", async () => {
+    const { deps, events } = withRealRun(makeDeps({ residual: true }));
     const res = await runInstallLifecycle({ operation: "uninstall", nodeClass: "developer", opts: { force: true } }, deps);
-    expect(res.outcome).toBe("completed");
+    expect(res.outcome).toBe("failed"); // NOT completed — a dirty teardown is a failure
     expect(res.cleanOk).toBe(false);
+    expect(events.at(-1).event).toBe("catalyst.install.failed");
+    expect(events.at(-1).detail.reason).toBe("dirty-teardown");
   });
 });
 
@@ -360,25 +374,36 @@ describe("runInstallLifecycle — reinstall", () => {
     expect(joined).toContain("STACK adopt-updater"); // provisioning
     for (const e of events) expect(e.operation).toBe("reinstall");
   });
-  test("reinstall fails BEFORE install-agents → rollback restores AND re-bootstraps the torn-down agents", async () => {
-    // Fail at write-config (setup-catalyst); teardown already booted out the agents. Rollback must
-    // restore + re-run install-agents/start-daemons so the node comes back up → rolled_back.
-    const { deps, calls } = withRealRun(makeDeps({ layer2Initial: { catalyst: { node: { class: "developer" } } }, failOn: (a) => (a.join(" ") === "SETUP --non-interactive" ? 1 : 0) }));
+  test("reinstall fails after teardown → rollback re-bootstraps to the RESTORED class (default worker), not the requested target", async () => {
+    // `reinstall --class developer` on an ORIGINAL default-worker node (no node.class) that captured
+    // agents; fail at write-config (before install-agents). After restore re-lays the classless config,
+    // re-bootstrap must bring up the WORKER stack (install-services), NOT the requested developer's
+    // adopt-updater — else the rolled-back worker loses its broker/exec-core.
+    const { deps, calls } = withRealRun(makeDeps({ bundleHadAgents: true, failOn: (a) => (a.join(" ") === "SETUP --non-interactive" ? 1 : 0) }));
     const res = await runInstallLifecycle({ operation: "reinstall", nodeClass: "developer", opts: { force: true } }, deps);
     expect(res.outcome).toBe("rolled_back");
     expect(res.rollbackDisposition).toBe("ok");
     const joined = calls.map((a) => a.join(" "));
-    expect(joined.some((c) => c.startsWith("BACKUP restore"))).toBe(true);
-    // re-bootstrap ran adopt-updater (developer install-agents) AFTER the restore
     const restoreIdx = joined.findIndex((c) => c.startsWith("BACKUP restore"));
-    const adoptIdx = joined.lastIndexOf("STACK adopt-updater");
-    expect(adoptIdx).toBeGreaterThan(restoreIdx);
+    expect(restoreIdx).toBeGreaterThanOrEqual(0);
+    expect(joined.lastIndexOf("STACK install-services")).toBeGreaterThan(restoreIdx); // worker re-bootstrap
+    expect(joined.some((c) => c === "STACK adopt-updater")).toBe(false); // NOT the requested developer
   });
   test("reinstall whose failure PERSISTS through re-bootstrap → outcome failed (honest, not a false rolled_back)", async () => {
-    const { deps } = withRealRun(makeDeps({ layer2Initial: { catalyst: { node: { class: "developer" } } }, failOn: (a) => (a.join(" ") === "STACK adopt-updater" ? 1 : 0) }));
-    const res = await runInstallLifecycle({ operation: "reinstall", nodeClass: "developer", opts: { force: true } }, deps);
-    expect(res.outcome).toBe("failed"); // adopt-updater fails in provisioning AND in re-bootstrap
+    // Worker reinstall, captured agents, install-services fails in BOTH provisioning and re-bootstrap.
+    const { deps } = withRealRun(makeDeps({ bundleHadAgents: true, failOn: (a) => (a.join(" ") === "STACK install-services" ? 1 : 0) }));
+    const res = await runInstallLifecycle({ operation: "reinstall", nodeClass: "worker", opts: { force: true } }, deps);
+    expect(res.outcome).toBe("failed");
     expect(res.rollbackDisposition).toBe("failed");
+  });
+  test("reinstall on a config-only node (no captured agents) → rollback restores WITHOUT re-bootstrapping agents", async () => {
+    const { deps, calls } = withRealRun(makeDeps({ bundleHadAgents: false, failOn: (a) => (a.join(" ") === "SETUP --non-interactive" ? 1 : 0) }));
+    const res = await runInstallLifecycle({ operation: "reinstall", nodeClass: "developer", opts: { force: true } }, deps);
+    expect(res.outcome).toBe("rolled_back");
+    const joined = calls.map((a) => a.join(" "));
+    const restoreIdx = joined.findIndex((c) => c.startsWith("BACKUP restore"));
+    // no agent bring-up after restore (the snapshot had none)
+    expect(joined.slice(restoreIdx + 1).some((c) => c === "STACK install-services" || c === "STACK adopt-updater")).toBe(false);
   });
 });
 
