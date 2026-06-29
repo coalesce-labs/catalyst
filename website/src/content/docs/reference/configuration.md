@@ -281,7 +281,7 @@ packaging — one declarative field that sets sensible **defaults for levers tha
 
 | Class | What it is |
 | --- | --- |
-| `developer` | A daemonless client you chat on. Not in the cluster roster, boots drained, runs no execution-core daemon or broker — it reads board data from a worker's monitor. |
+| `developer` | A daemonless client you chat on. Not in the cluster roster, boots drained, runs no execution-core daemon or broker — it reads board UI data from a worker's monitor (agent Linear reads follow the two-mode rule — see the `catalyst-dev:linearis` skill's "Reading Linear" section). |
 | `worker` | Runs the full stack and picks up work (the default; a laptop that both runs the daemon and is chatted on is a "head-full worker"). |
 | `monitor` | A reporting host. An **enum slot only** for now — its class-specific build-out is descoped until a real reporting node exists. |
 
@@ -309,6 +309,13 @@ per-repo:
 - A missing or malformed Layer-2 file never throws; it falls through to the `worker` default.
 
 ### Read-replica endpoint (`catalyst.readReplica.baseUrl`, CTL-1346)
+
+> **Scope — board UI display only.** `catalyst.readReplica.baseUrl` governs the terminal HUD and
+> browser board/search display. It is **not** the agent Linear read path. For how agents read Linear
+> ticket data, see the `catalyst-dev:linearis` skill's "Reading Linear" section (two-mode rule:
+> standard node → `linearis issues read|list|search` directly; Catalyst Cloud node →
+> `@catalyst-cloud/sdk`-managed local replica first, with `linearis` as the evidence-triggered
+> fallback — CTL-1390). Writes always go through `linearis` in both modes.
 
 Board data lives in a monitor's `filter-state.db` replica, which is written **only** by a node's local
 broker. A daemonless `developer` node runs no broker, so its local replica is empty — it must read a

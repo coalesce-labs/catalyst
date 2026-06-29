@@ -56,6 +56,8 @@ For exact command syntax, run `linearis <domain> usage` (e.g., `linearis issues 
 `linearis cycles usage`, `linearis milestones usage`). The `/catalyst-dev:linearis` skill is the
 authoritative reference — **do not guess or improvise commands**.
 
+**Read-source mode**: Follow the two-mode Linear read rule in the `catalyst-dev:linearis` skill ("Reading Linear" section) — standard nodes call `linearis` directly; Catalyst Cloud nodes prefer the local replica first and escalate to `linearis` only on concrete evidence of staleness.
+
 ## Examples
 
 ### Example 1: Get Active Cycle

@@ -117,9 +117,6 @@ else
     FILTER_MISMATCH=true
   fi
 
-  TUNNEL_STATE=$(catalyst-monitor status --json 2>/dev/null | jq -r '.webhookTunnel.connected // false')
-  [ "$TUNNEL_STATE" != "true" ] && { echo "WARN: Webhook tunnel not running"; STALLED=true; }
-
   if [ "$FILTER_MISMATCH" = "false" ] && [ "$STALLED" = "false" ]; then
     # Infrastructure healthy — extend to Phase 2.
     EVENT=$(catalyst-events wait-for \
@@ -626,7 +623,7 @@ flowing normally.
 ### Prefer status JSON when available
 
 Once CTL-244 lands, `catalyst-monitor status --json` will expose a `webhookTunnel`
-object (`{connected, smeeUrl, lastEventAt, eventCount24h, eventCount24hByRepo}`). That
+object (`{connected, lastEventAt, eventCount24h, eventCount24hByRepo}`). That
 is the structured first diagnostic step and should be checked before reaching for the
 recipes above. The diagnostic recipes here are the manual deep-dive when status JSON is
 unavailable, insufficient, or contradicts what you expect.

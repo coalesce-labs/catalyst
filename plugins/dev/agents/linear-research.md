@@ -46,6 +46,8 @@ not guess or improvise commands**.
 
 All linearis output is JSON — use jq for filtering and transformation.
 
+**Read-source mode**: Follow the two-mode Linear read rule in the `catalyst-dev:linearis` skill ("Reading Linear" section) — standard nodes call `linearis` directly; Catalyst Cloud nodes prefer the local replica first and escalate to `linearis` only on concrete evidence of staleness.
+
 ## Output Format
 
 Present findings as structured data:

@@ -27,6 +27,52 @@ linearis milestones usage     # Just milestone operations
 linearis cycles usage         # Just cycle operations
 ```
 
+## Reading Linear
+
+**Two-mode rule — pick your read source by deployment context. Writes never change.**
+
+### Mode 1 — Standard node (no Catalyst Cloud key)
+
+Read Linear **directly**: `linearis issues read|list|search`. There is **no local
+mirror**. (The broker's `filter-state.db` still exists for orchestration fencing and
+the board UI, but it is **not** a Linear read path — do not read ticket state from it.)
+
+### Mode 2 — Catalyst Cloud node (`@catalyst-cloud/sdk` replica active)
+
+A live local SQLite replica is kept current by the Cloud change-feed.
+
+- **Read the replica FIRST** and **trust it** as the authoritative local copy.
+- Do **NOT** reflexively re-verify against live Linear — that defeats the cache and
+  burns the API budget.
+- **Evidence-based escalation only.** Fall back to a direct `linearis` read for a
+  specific item *only* when you have concrete evidence the replica read is wrong:
+  it contradicts something you just directly observed; the replica freshness/staleness
+  signal shows it is behind; or a ticket you expect is missing. When you escalate:
+  - (a) read that item directly with `linearis`, **and**
+  - (b) **surface the staleness as an issue** — a stale replica read signals a mirror
+    gap (e.g. a missed webhook) worth investigating, not just a one-off retry.
+
+### Writes — always `linearis`, both modes
+
+`create` / `update` / state transitions / `discuss` / estimate / label **always** go
+through `linearis`. The replica is **read-only** in both modes.
+
+### How reads resolve
+
+- **Daemon read paths** resolve the mode automatically via the read-source seam
+  (CTL-1390) — callers do not choose.
+- **Agent / skill ad-hoc reads:** prefer the replica-backed read on a Cloud node;
+  `linearis` is the direct path on a standard node and the evidence-triggered fallback
+  on a Cloud node.
+
+> **Mechanism note (honest status).** A first-class replica-aware read command for
+> ad-hoc agent use is **forthcoming** (CTL-1391, child of CTL-1390). Until it ships,
+> `linearis issues read|list|search` is the concrete command in both modes: the direct
+> path on a standard node, and the manual path on a Cloud node (you will not yet get
+> automatic replica-first behavior for ad-hoc reads — only the daemon does, via the
+> seam). Write this rule against the intent; use `linearis` as the executable command
+> today.
+
 ## Gotchas & Traps
 
 These are non-obvious behaviors that silently produce wrong results. Verified empirically against
