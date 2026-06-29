@@ -12,7 +12,7 @@ sidebar:
 
 Every `catalyst-*` CLI is installed onto your `PATH` by
 [`install-cli.sh`](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/scripts/install-cli.sh) (into
-`~/.catalyst/bin` by default). This page lists all 28 of them — one line of
+`~/.catalyst/bin` by default). This page lists all 29 of them — one line of
 purpose plus the key subcommands — grouped by area. Run any tool with `--help`
 for full syntax. The richer tools have their own reference pages (e.g.
 [catalyst-stack](/reference/catalyst-stack/)).
@@ -156,6 +156,14 @@ Cluster administration — join tokens, roster, drain, concurrency tuning.
 **Key subcommands:** _(run `catalyst-cluster --help`)_
 
 [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/scripts/catalyst-cluster)
+
+### catalyst-linear
+
+Replica-first Linear READ CLI — reads the local Catalyst-Cloud SQLite replica when opted in (CATALYST_LINEAR_REPLICA=on), else linearis; read-only (writes via linearis).
+
+**Key subcommands:** _(run `catalyst-linear --help`)_
+
+[Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/scripts/catalyst-linear)
 
 ### catalyst-linear-reconcile
 
