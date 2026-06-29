@@ -288,18 +288,23 @@ export const PHASE_TO_LINEAR = {
 // synthesizeQueuedTicket — build a thin BoardTicket from an eligible queue entry
 // so it renders in the "Todo" Kanban column (CTL-767). All agent/cost/phase-summary
 // fields default to null / empty since there is no worker dir for these tickets.
+// resolveQueuedTitle — the replica-first title chain shared by the Todo-column card
+// (synthesizeQueuedTicket) AND the dispatch-queue payload, so the Tickets card and the
+// "Dispatching next" queue never disagree (CTL-1378, #2421 edge): CTC replica title →
+// eligible-projection title → bare id. Replica miss → e.title → e.id.
+export function resolveQueuedTitle(e, replicaTitles = {}) {
+  const replicaTitle = replicaTitles?.[e?.id];
+  if (typeof replicaTitle === "string" && replicaTitle.length > 0) return replicaTitle;
+  return e?.title || e?.id;
+}
+
 export function synthesizeQueuedTicket(e, linfo, relationBlockerMap = new Map(), teamRepoMap = {}, replicaTitles = {}) {
   const li = linfo[e.id] ?? {};
-  // CTL-1372: prefer the CTC replica's complete Linear title over the eligible
-  // projection's (and the bare-id fallback) — keeps queued cards consistent with
-  // the worker-dir cards' replica-first title resolution. Replica miss → e.title.
-  const replicaTitle =
-    typeof replicaTitles?.[e.id] === "string" && replicaTitles[e.id].length > 0
-      ? replicaTitles[e.id]
-      : null;
   return {
     id: e.id,
-    title: replicaTitle || e.title || e.id,
+    // CTL-1372/CTL-1378: replica-first title via the shared resolver (same path the
+    // dispatch-queue payload uses, so the two never disagree). Replica miss → e.title.
+    title: resolveQueuedTitle(e, replicaTitles),
     type: "task",
     repo: e.repo || repoForWith(teamRepoMap, e.id),
     team: e.team || teamFor(e.id),
@@ -1313,7 +1318,7 @@ export function synthesizeOrphanTickets(orphanState, now) {
 // bare-id parked card — the parked descriptor (readParkedNeedsHumanTickets) carries
 // NO title, so without the replica these cards rendered as "CTL-1214". Replica miss
 // → p.title (always absent here) → the bare ticket id (honest last resort).
-export function synthesizeParkedNeedsHumanTickets(parked, existingIds, now, replicaTitles = {}) {
+export function synthesizeParkedNeedsHumanTickets(parked, existingIds, now, replicaTitles = {}, linfo = {}) {
   if (!Array.isArray(parked)) return [];
   const seen = existingIds instanceof Set ? new Set(existingIds) : new Set(existingIds ?? []);
   const cards = [];
@@ -1331,9 +1336,16 @@ export function synthesizeParkedNeedsHumanTickets(parked, existingIds, now, repl
       typeof replicaTitles?.[p.ticket] === "string" && replicaTitles[p.ticket].length > 0
         ? replicaTitles[p.ticket]
         : null;
+    // CTL-1378 (#2421 edge): on a replica MISS, use the on-demand live title the board
+    // fetched into linfo (parked IDs are now included in the title fallback) before
+    // falling through to the bare id.
+    const linfoTitle =
+      typeof linfo?.[p.ticket]?.title === "string" && linfo[p.ticket].title.length > 0
+        ? linfo[p.ticket].title
+        : null;
     cards.push({
       id: p.ticket,
-      title: replicaTitle || p.title || p.ticket,
+      title: replicaTitle || linfoTitle || p.title || p.ticket,
       type: "parked-needs-human",
       repo: repoFor(p.ticket),
       team: teamFor(p.ticket),
@@ -1846,7 +1858,15 @@ export async function assembleBoard({ getPrStatus = null, ring = null } = {}) {
   // the Linear title for ALL teams. A ticket genuinely missing a Linear title still
   // resolves to null here, so ticketTitle()'s honest summary/key fallback still runs.
   await (async () => {
-    const allBoardIds = [...[...cardTicketIds], ...eligible.map((e) => e.id)];
+    // CTL-1378 (#2421 edge): include parkedNeedsHuman IDs so a PARKED needs-human card
+    // with a replica MISS still gets the on-demand live-title last resort — its title is
+    // then read from linfo by synthesizeParkedNeedsHumanTickets. Without this the parked
+    // fallback only saw worker-dir ∪ eligible IDs, so a parked replica-miss showed the bare id.
+    const allBoardIds = [
+      ...[...cardTicketIds],
+      ...eligible.map((e) => e.id),
+      ...parkedNeedsHuman.map((p) => p.ticket),
+    ];
     // Only fetch titles for IDs that have NO title from any source the title
     // resolver consults (durable linfo cache OR the eligible projection OR the CTC
     // replica). CTL-1372: a replica HIT skips the on-demand Linear fetch entirely —
@@ -2063,7 +2083,7 @@ export async function assembleBoard({ getPrStatus = null, ring = null } = {}) {
   // per parked ticket NOT already carded. Deduped against every existing card id;
   // terminal/removed excluded by the reader; fail-open ([] on a db read error).
   const existingCardIds = new Set(tickets.map((t) => t.id));
-  const parkedTickets = synthesizeParkedNeedsHumanTickets(parkedNeedsHuman, existingCardIds, now, replicaTitles);
+  const parkedTickets = synthesizeParkedNeedsHumanTickets(parkedNeedsHuman, existingCardIds, now, replicaTitles, linfo);
   tickets = [...tickets, ...parkedTickets];
 
   // priority queue: eligible (not yet in-flight), globally ranked (Queue tab)
@@ -2075,6 +2095,11 @@ export async function assembleBoard({ getPrStatus = null, ring = null } = {}) {
         // BoardQueueItem type now declares it so the SURF2 node column / lane
         // grouping can read it (CTL-922 / BFF10).
         ...e,
+        // CTL-1378 (#2421 edge): resolve the queue item's title through the SAME
+        // replica-first path as the Todo card (synthesizeQueuedTicket), so the
+        // "Dispatching next" queue and the Tickets card never show different titles
+        // for the same queued ticket (replica HIT vs the eligible projection's `e.title`).
+        title: resolveQueuedTitle(e, replicaTitles),
         rank: i + 1,
         priority: linfo[e.id]?.priority ?? e.priority ?? 0,
         estimate: linfo[e.id]?.estimate ?? null,

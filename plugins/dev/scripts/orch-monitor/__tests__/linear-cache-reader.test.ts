@@ -308,6 +308,52 @@ describe("readReplicaTitles (CTL-1372 — board title source from the CTC replic
     expect(spy.closed).toBe(true); // handle always released
   });
 
+  // CTL-1378 (#2421 edge): the default replica path must honor CATALYST_DIR so it
+  // EXACTLY mirrors execution-core/config.mjs::getReplicaDbPath. The injected factory
+  // captures the dbPath the default resolution produced (the file-presence gate is
+  // skipped under a factory, so the default path is still computed + threaded through).
+  it("honors CATALYST_DIR for the default replica path (CTL-1378)", async () => {
+    const savedDir = process.env.CATALYST_DIR;
+    const savedDb = process.env.CATALYST_REPLICA_DB;
+    try {
+      delete process.env.CATALYST_REPLICA_DB;
+      process.env.CATALYST_DIR = join(tmpdir(), "ctl1378-catalyst-dir");
+      let captured = "";
+      const factory = (opts: { dbPath: string }) => {
+        captured = opts.dbPath;
+        return { titles: () => ({}), close: () => {} };
+      };
+      await readReplicaTitles({ ids: ["CTL-1"], readerFactory: factory });
+      expect(captured).toBe(join(process.env.CATALYST_DIR, "catalyst-replica.db"));
+    } finally {
+      if (savedDir === undefined) delete process.env.CATALYST_DIR;
+      else process.env.CATALYST_DIR = savedDir;
+      if (savedDb === undefined) delete process.env.CATALYST_REPLICA_DB;
+      else process.env.CATALYST_REPLICA_DB = savedDb;
+    }
+  });
+
+  it("CATALYST_REPLICA_DB still wins over CATALYST_DIR (CTL-1378)", async () => {
+    const savedDir = process.env.CATALYST_DIR;
+    const savedDb = process.env.CATALYST_REPLICA_DB;
+    try {
+      process.env.CATALYST_DIR = join(tmpdir(), "ignored-dir");
+      process.env.CATALYST_REPLICA_DB = join(tmpdir(), "explicit", "my-replica.db");
+      let captured = "";
+      const factory = (opts: { dbPath: string }) => {
+        captured = opts.dbPath;
+        return { titles: () => ({}), close: () => {} };
+      };
+      await readReplicaTitles({ ids: ["CTL-1"], readerFactory: factory });
+      expect(captured).toBe(process.env.CATALYST_REPLICA_DB);
+    } finally {
+      if (savedDir === undefined) delete process.env.CATALYST_DIR;
+      else process.env.CATALYST_DIR = savedDir;
+      if (savedDb === undefined) delete process.env.CATALYST_REPLICA_DB;
+      else process.env.CATALYST_REPLICA_DB = savedDb;
+    }
+  });
+
   it("empty / non-array ids → {} without invoking the reader", async () => {
     let called = false;
     const factory = () => {
