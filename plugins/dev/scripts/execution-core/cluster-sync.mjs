@@ -251,6 +251,14 @@ function defaultWriteFile(path, content) {
 // directly under ~/.config/catalyst. This covers the secrets that live outside
 // the JSON configs (the .env / bare-file surface). Fail-open; never throws.
 // Path-traversal-safe: only bare basenames are written into configDir.
+//
+// Return shape (CTL-1393 / Codex-A): `written[]` is the subset that materialized
+// AND `failed[]` is the subset that was REQUESTED (a valid basename with string
+// content) but whose write threw. A non-empty `failed[]` is a PARTIAL bare-file
+// failure — the change-detection marker must NOT advance over it (else the stale
+// fast-path strands the un-written secret forever). `failed[]` deliberately
+// excludes unsafe/path-traversal names and non-string values: those are invalid
+// INPUT we refuse, not materialization failures. Backward-compatible additive field.
 export function syncSecretFiles(opts = {}) {
   const {
     clusterDir = getClusterRepoDir(),
@@ -261,7 +269,7 @@ export function syncSecretFiles(opts = {}) {
     logger = log,
   } = opts;
 
-  const result = { written: [], skipped: false, reason: null };
+  const result = { written: [], failed: [], skipped: false, reason: null };
   const src = resolve(clusterDir, "secrets", "node-secret-files.sops.json");
   if (!existsSync(src)) {
     result.reason = "absent";
@@ -299,6 +307,9 @@ export function syncSecretFiles(opts = {}) {
       result.written.push(name);
     } catch (err) {
       logger.warn(`[cluster-sync] write ${name} failed (${err?.message ?? err})`);
+      // Partial bare-file failure: a REQUESTED file decrypted but did not
+      // materialize. Surfaced so the marker does not advance over it (Codex-A).
+      result.failed.push(name);
     }
   }
   return result;
@@ -401,6 +412,56 @@ export function emitClusterSecretEvent(opts = {}, io = {}) {
   }
 }
 
+// ENV_BACKED_SECRET_FILES — bare secret files whose VALUE is consumed from
+// process.env at boot (sourced by the daemon launcher), NOT re-read from disk per
+// use. CTL-1398: the launcher sources claude-accounts.env to export
+// CLAUDE_CODE_OAUTH_TOKEN, which resolveSdkBootExecutor + sdkRunPhaseAgent read from
+// process.env. Re-materializing such a file on disk does NOT make the new value live
+// in the running daemon — only a restart re-sources it. So when a refresh touches one
+// of these, we must emit a DISTINCT "restart-required" signal rather than let the
+// "refreshed" event imply the env secret is already applied (Codex-B).
+export const ENV_BACKED_SECRET_FILES = new Set(["claude-accounts.env"]);
+
+// assessMaterialization — Codex-A. Decide whether a refresh/boot decrypt FULLY
+// succeeded, given the syncClusterSecrets (`sync`) and syncSecretFiles (`files`)
+// results. The durable change-detection marker may advance ONLY on full success;
+// any partial shortfall must keep the marker behind so the lastSha===HEAD fast-path
+// retries on the next tick instead of stranding an un-applied rotation forever.
+//
+// "Fully succeeded" = config sync did not refuse (sync.ok !== false) AND no JSON
+// secret was skipped (sync.skipped empty) AND every REQUESTED bare file was written
+// (files.failed empty AND the bundle did not wholesale-fail). A too-new schema is an
+// INTENTIONAL fail-closed, NOT a failure — it keeps the current behavior (counts as
+// success-for-marker so a deliberate refusal does not alarm or thrash the retry loop).
+//
+// Returns { fullSuccess, reason }; `reason` names the shortfall when not full:
+//   decrypt-failed   — wholesale: every JSON secret skipped, or the bare bundle failed
+//   config-refused   — syncClusterSecrets refused (sync.ok === false), empty skipped
+//   secrets-skipped  — a JSON secret was skipped while another succeeded (partial)
+//   bare-write-failed — a bare file decrypted but its write failed (partial)
+function assessMaterialization({ sync, files }) {
+  // Schema too-new is fail-CLOSED by design — treat as success for the marker.
+  if (sync?.schemaSkipped === true) return { fullSuccess: true, reason: null };
+
+  const synced = Array.isArray(sync?.synced) ? sync.synced : [];
+  const skipped = Array.isArray(sync?.skipped) ? sync.skipped : [];
+  const bareFailed = Array.isArray(files?.failed) ? files.failed : [];
+  const bundleDecryptFailed = files?.reason === "decrypt-failed";
+
+  // Wholesale failure first — preserve the legacy "decrypt-failed" reason (every
+  // JSON secret skipped with none synced, or the bare-file bundle failed entirely).
+  if ((skipped.length > 0 && synced.length === 0) || bundleDecryptFailed) {
+    return { fullSuccess: false, reason: "decrypt-failed" };
+  }
+  // Config sync refused entirely (e.g. missing/malformed cluster.json), empty skipped.
+  if (sync?.ok === false) return { fullSuccess: false, reason: "config-refused" };
+  // A JSON secret was skipped while another succeeded (partial JSON failure).
+  if (skipped.length > 0) return { fullSuccess: false, reason: "secrets-skipped" };
+  // A bare file decrypted but its write failed (partial bare-file failure).
+  if (bareFailed.length > 0) return { fullSuccess: false, reason: "bare-write-failed" };
+  return { fullSuccess: true, reason: null };
+}
+
 // refreshClusterSecretsIfChanged — CTL-1393. The periodic-timer entrypoint and the
 // root-cause fix for silent-stale nodes. Pulls the clone, then uses the persisted
 // marker to decide whether secrets actually changed BEFORE spending a single sops
@@ -432,7 +493,7 @@ export function refreshClusterSecretsIfChanged(opts = {}) {
 
   const status = {
     changed: false, ok: true, reason: null,
-    fromSha: null, toSha: null, written: [], synced: [],
+    fromSha: null, toSha: null, written: [], synced: [], restartRequired: [],
   };
 
   // 1. Refresh the clone (reuse pullClusterRepo — fail-open; no-op when not a clone).
@@ -500,21 +561,22 @@ export function refreshClusterSecretsIfChanged(opts = {}) {
   status.synced = Array.isArray(sync?.synced) ? sync.synced : [];
   status.written = Array.isArray(files?.written) ? files.written : [];
 
-  // 7. Detect a wholesale decrypt failure (every JSON secret skipped, or the bare
-  // bundle failed). A too-new schema is fail-CLOSED, not a decrypt failure, so it
-  // does not alarm.
-  const jsonAllFailed =
-    Array.isArray(sync?.skipped) && sync.skipped.length > 0 && status.synced.length === 0;
-  const filesFailed = files?.reason === "decrypt-failed";
-  if (!sync?.schemaSkipped && (jsonAllFailed || filesFailed)) {
+  // 7. Advance the marker ONLY on FULL materialization success (Codex-A). A PARTIAL
+  // shortfall (a single JSON secret skipped while another succeeded, the config sync
+  // refused with empty skipped, or a bare file that decrypted but failed to write) is
+  // a failure too: advancing the marker over it would make lastSha===HEAD skip the
+  // retry forever, stranding the un-applied rotation. On ANY shortfall: emit
+  // refresh-failed naming the shortfall, do NOT advance the marker, return ok:false.
+  const { fullSuccess, reason: shortfall } = assessMaterialization({ sync, files });
+  if (!fullSuccess) {
     status.ok = false;
-    status.reason = "decrypt-failed";
-    emit({ name: "refresh-failed", node, now, payload: { reason: "decrypt-failed", toSha: head } });
+    status.reason = shortfall;
+    emit({ name: "refresh-failed", node, now, payload: { reason: shortfall, toSha: head } });
     // Do NOT advance the marker — retry on the next tick.
     return status;
   }
 
-  // 8. Success — advance the marker and (on a REAL change) emit refreshed.
+  // 8. Full success — advance the marker and (on a REAL change) emit refreshed.
   writeState(
     statePath,
     {
@@ -535,6 +597,23 @@ export function refreshClusterSecretsIfChanged(opts = {}) {
       now,
       payload: { fromSha: lastSha, toSha: head, written: status.written, synced: status.synced },
     });
+  }
+
+  // 8b. Codex-B: a rotated ENV-BACKED secret file (sourced into process.env at boot)
+  // is NOT live in the running daemon until a restart — the SDK path reads
+  // CLAUDE_CODE_OAUTH_TOKEN from process.env, captured at boot. Emit a DISTINCT loud
+  // signal so the "refreshed" event above is never mistaken for "the env secret is
+  // applied". This is the timer's restart-required surface (the daemon timer calls
+  // this fn); best-effort like every other emit here. Auto-restart is out of scope
+  // (CTL-1398 re-sources the file on the next start, so a manual restart re-arms it).
+  const restartRequired = status.written.filter((f) => ENV_BACKED_SECRET_FILES.has(f));
+  status.restartRequired = restartRequired;
+  for (const file of restartRequired) {
+    logger?.warn?.(
+      `[cluster-sync] env-backed secret rotated (${file}) — daemon restart required to apply ` +
+        "(CLAUDE_CODE_OAUTH_TOKEN is read from process.env at boot)",
+    );
+    emit({ name: "restart-required", node, now, payload: { file, fromSha: lastSha, toSha: head } });
   }
   return status;
 }
@@ -571,20 +650,21 @@ export function clusterSync(opts = {}) {
   const sync = syncClusterSecrets(opts);
   const files = syncSecretFiles(opts);
 
-  // Detect a WHOLESALE decrypt failure with the SAME signal the periodic refresh
-  // uses (every JSON secret skipped, or the bare-file bundle failed). A too-new
-  // schema is fail-CLOSED, not a decrypt failure, so it does not alarm. An empty
-  // secrets repo (no JSON secrets to skip, no bare-file bundle) is NOT a failure.
+  // Seed the marker ONLY when boot materialization FULLY succeeded — the SAME
+  // hardened predicate the periodic refresh uses (Codex-A). A WHOLESALE failure (sops
+  // unresolvable / every secret skipped / bundle failed) AND any PARTIAL shortfall (a
+  // single JSON secret skipped, config sync refused, or a bare file that failed to
+  // write) must keep the marker behind, so the periodic refresh keeps retrying and
+  // doctor keeps flagging instead of masking the un-applied rotation. A too-new schema
+  // stays fail-CLOSED (intentional, not a failure) and still seeds. An empty secrets
+  // repo (nothing to decrypt) is full success and still seeds.
   const synced = Array.isArray(sync?.synced) ? sync.synced : [];
-  const jsonAllFailed =
-    Array.isArray(sync?.skipped) && sync.skipped.length > 0 && synced.length === 0;
-  const filesFailed = files?.reason === "decrypt-failed";
-  const decryptFailed = !sync?.schemaSkipped && (jsonAllFailed || filesFailed);
+  const { fullSuccess, reason: shortfall } = assessMaterialization({ sync, files });
 
   try {
     const head = gitRevParseHead({ clusterDir, gitCapture });
-    if (head && !decryptFailed) {
-      // Success path (unchanged): seed/refresh the marker to the clone's HEAD.
+    if (head && fullSuccess) {
+      // Success path: seed/refresh the marker to the clone's HEAD.
       writeState(
         statePath,
         {
@@ -595,14 +675,14 @@ export function clusterSync(opts = {}) {
         },
         logger,
       );
-    } else if (head && decryptFailed) {
-      // Wholesale boot decrypt failure: DON'T seed the marker (so the periodic
+    } else if (head && !fullSuccess) {
+      // Boot materialization shortfall: DON'T seed the marker (so the periodic
       // refresh keeps retrying and doctor keeps flagging), make it LOUD.
       logger?.warn?.(
-        "[cluster-sync] boot decrypt failed wholesale (sops unresolvable or every secret skipped) — " +
+        `[cluster-sync] boot decrypt did not fully succeed (${shortfall}) — ` +
           "NOT seeding the change-detection marker; keeping node-local plaintext and retrying on the refresh timer",
       );
-      emit({ name: "refresh-failed", node, now, payload: { reason: "decrypt-failed", toSha: head } });
+      emit({ name: "refresh-failed", node, now, payload: { reason: shortfall, toSha: head } });
     }
   } catch (err) {
     logger?.warn?.(`[cluster-sync] boot marker seed failed (${err?.message ?? err})`);

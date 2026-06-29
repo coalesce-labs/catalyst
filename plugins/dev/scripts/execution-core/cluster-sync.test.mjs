@@ -182,6 +182,22 @@ describe("syncSecretFiles (CTL-1211)", () => {
     expect(res.skipped).toBe(true);
     expect(res.reason).toBe("decrypt-failed");
   });
+
+  test("partial write failure → records the name in failed[], keeps the rest (Codex-A)", () => {
+    writeNodeFiles();
+    const decrypt = () => ({ good: "x", bad: "y" });
+    // a writeFile that throws for the "bad" entry only — the decrypt succeeded but
+    // materialization of one REQUESTED file failed (a partial bare-file failure).
+    const writeFile = (path) => {
+      if (path.endsWith("/bad") || path.endsWith("\\bad")) throw new Error("EIO");
+    };
+    const res = syncSecretFiles({ clusterDir, configDir, decrypt, writeFile, logger: QUIET });
+    expect(res.written).toEqual(["good"]);
+    expect(res.failed).toEqual(["bad"]);
+    // not a wholesale decrypt failure — the bundle decrypted fine
+    expect(res.reason).toBeNull();
+    expect(res.skipped).toBe(false);
+  });
 });
 
 describe("pullClusterRepo (CTL-1211)", () => {
@@ -473,6 +489,182 @@ describe("refreshClusterSecretsIfChanged (CTL-1393)", () => {
     expect(res.reason).toBe("no-head");
     expect(emits).toHaveLength(0);
   });
+
+  // ── Codex-A: advance the marker ONLY on FULL materialization success ──────────
+
+  test("(a) one JSON secret skipped while another succeeds → marker NOT advanced, refresh-failed(secrets-skipped)", () => {
+    seedClone();
+    writeClusterJson({ schemaVersion: 1, roster: ["mini"] });
+    touchSecret("cluster-bots.sops.json"); // succeeds → config.json
+    touchSecret("config-adva.sops.json"); // fails → skipped
+    const statePath = join(configDir, ".state.json");
+    writeMarker(statePath, "OLDSHA");
+
+    const emits = [];
+    const res = refreshClusterSecretsIfChanged({
+      clusterDir,
+      configDir,
+      statePath,
+      git: baseGit,
+      gitCapture: makeGitCapture("NEWSHA", true),
+      decrypt: (p) => {
+        if (p.endsWith("config-adva.sops.json")) throw new Error("bad mac");
+        return { ok: true };
+      },
+      emit: (e) => emits.push(e),
+      now: () => "t",
+      node: "test-node",
+      logger: QUIET,
+    });
+
+    expect(res.ok).toBe(false);
+    expect(res.reason).toBe("secrets-skipped");
+    expect(emits).toHaveLength(1);
+    expect(emits[0].name).toBe("refresh-failed");
+    expect(emits[0].payload.reason).toBe("secrets-skipped");
+    // marker stays at the old sha so the next tick retries the skipped secret
+    expect(readClusterSyncState(statePath).lastDecryptedSha).toBe("OLDSHA");
+  });
+
+  test("(b) config sync refused (sync.ok:false, empty skipped) → marker NOT advanced, refresh-failed(config-refused)", () => {
+    seedClone();
+    // NO cluster.json → syncClusterSecrets refuses entirely (no-cluster-repo): ok:false,
+    // synced:[], skipped:[] — the empty-skipped refusal the old predicate let slip through.
+    const statePath = join(configDir, ".state.json");
+    writeMarker(statePath, "OLDSHA");
+
+    const emits = [];
+    const res = refreshClusterSecretsIfChanged({
+      clusterDir,
+      configDir,
+      statePath,
+      git: baseGit,
+      gitCapture: makeGitCapture("NEWSHA", true),
+      decrypt: () => ({}),
+      emit: (e) => emits.push(e),
+      now: () => "t",
+      node: "test-node",
+      logger: QUIET,
+    });
+
+    expect(res.ok).toBe(false);
+    expect(res.reason).toBe("config-refused");
+    expect(emits.map((e) => e.name)).toContain("refresh-failed");
+    expect(emits[0].payload.reason).toBe("config-refused");
+    expect(readClusterSyncState(statePath).lastDecryptedSha).toBe("OLDSHA");
+  });
+
+  test("(c) partial bare-file write failure → marker NOT advanced, refresh-failed(bare-write-failed)", () => {
+    seedClone();
+    writeClusterJson({ schemaVersion: 1, roster: ["mini"] });
+    touchSecret("cluster-bots.sops.json"); // JSON secret succeeds (not wholesale)
+    writeFileSync(join(clusterDir, "secrets", "node-secret-files.sops.json"), "{cipher}");
+    // Force a write failure for one bare file: pre-create a DIRECTORY at its dest so
+    // the real writeFileSync throws EISDIR while the sibling write succeeds.
+    mkdirSync(join(configDir, "github-token"), { recursive: true });
+    const statePath = join(configDir, ".state.json");
+    writeMarker(statePath, "OLDSHA");
+
+    const emits = [];
+    const res = refreshClusterSecretsIfChanged({
+      clusterDir,
+      configDir,
+      statePath,
+      git: baseGit,
+      gitCapture: makeGitCapture("NEWSHA", true),
+      decrypt: (p) =>
+        p.endsWith("node-secret-files.sops.json")
+          ? { "cma-api-key": "ok", "github-token": "tok" }
+          : { catalyst: { linear: { bot: { worker: { accessToken: "FRESH" } } } } },
+      emit: (e) => emits.push(e),
+      now: () => "t",
+      node: "test-node",
+      logger: QUIET,
+    });
+
+    expect(res.ok).toBe(false);
+    expect(res.reason).toBe("bare-write-failed");
+    expect(res.written).toEqual(["cma-api-key"]); // the sibling still materialized
+    expect(emits.map((e) => e.name)).toContain("refresh-failed");
+    expect(emits[0].payload.reason).toBe("bare-write-failed");
+    expect(readClusterSyncState(statePath).lastDecryptedSha).toBe("OLDSHA");
+  });
+
+  test("(e) FULL success (JSON + bare both materialize) → marker advances, refreshed, no refresh-failed", () => {
+    seedClone();
+    writeClusterJson({ schemaVersion: 1, roster: ["mini"] });
+    touchSecret("cluster-bots.sops.json");
+    writeFileSync(join(clusterDir, "secrets", "node-secret-files.sops.json"), "{cipher}");
+    const statePath = join(configDir, ".state.json");
+    writeMarker(statePath, "OLDSHA");
+
+    const emits = [];
+    const res = refreshClusterSecretsIfChanged({
+      clusterDir,
+      configDir,
+      statePath,
+      git: baseGit,
+      gitCapture: makeGitCapture("NEWSHA", true),
+      decrypt: (p) =>
+        p.endsWith("node-secret-files.sops.json")
+          ? { "github-token": "tok" }
+          : { catalyst: { linear: { bot: { worker: { accessToken: "FRESH" } } } } },
+      emit: (e) => emits.push(e),
+      now: () => "t",
+      node: "test-node",
+      logger: QUIET,
+    });
+
+    expect(res.ok).toBe(true);
+    expect(res.changed).toBe(true);
+    expect(res.synced).toEqual(["config.json"]);
+    expect(res.written).toEqual(["github-token"]);
+    // full success advances the marker (guard against over-correcting the predicate)
+    expect(readClusterSyncState(statePath).lastDecryptedSha).toBe("NEWSHA");
+    expect(emits.map((e) => e.name)).toContain("refreshed");
+    expect(emits.map((e) => e.name)).not.toContain("refresh-failed");
+    // a non-env-backed bare file does NOT trigger a restart-required signal
+    expect(emits.map((e) => e.name)).not.toContain("restart-required");
+  });
+
+  // ── Codex-B: a rotated ENV-BACKED secret needs a daemon restart to apply ──────
+
+  test("(f) env-backed secret (claude-accounts.env) changed → restart-required emitted (distinct from refreshed)", () => {
+    seedClone();
+    writeClusterJson({ schemaVersion: 1, roster: ["mini"] });
+    writeFileSync(join(clusterDir, "secrets", "node-secret-files.sops.json"), "{cipher}");
+    const statePath = join(configDir, ".state.json");
+    writeMarker(statePath, "OLDSHA");
+
+    const emits = [];
+    const res = refreshClusterSecretsIfChanged({
+      clusterDir,
+      configDir,
+      statePath,
+      git: baseGit,
+      gitCapture: makeGitCapture("NEWSHA", true),
+      decrypt: (p) =>
+        p.endsWith("node-secret-files.sops.json")
+          ? { "claude-accounts.env": "CLAUDE_CODE_OAUTH_TOKEN=newtok\n" }
+          : {},
+      emit: (e) => emits.push(e),
+      now: () => "t",
+      node: "test-node",
+      logger: QUIET,
+    });
+
+    expect(res.ok).toBe(true);
+    expect(res.written).toEqual(["claude-accounts.env"]);
+    expect(res.restartRequired).toEqual(["claude-accounts.env"]);
+    // BOTH signals fire: refreshed (file on disk) AND restart-required (env not live)
+    const names = emits.map((e) => e.name);
+    expect(names).toContain("refreshed");
+    expect(names).toContain("restart-required");
+    const rr = emits.find((e) => e.name === "restart-required");
+    expect(rr.payload).toMatchObject({ file: "claude-accounts.env", fromSha: "OLDSHA", toSha: "NEWSHA" });
+    // the marker still advances — the file IS materialized; only the env needs a restart
+    expect(readClusterSyncState(statePath).lastDecryptedSha).toBe("NEWSHA");
+  });
 });
 
 describe("clusterSync boot (CTL-1393 conditional marker seed)", () => {
@@ -593,5 +785,45 @@ describe("clusterSync boot (CTL-1393 conditional marker seed)", () => {
     expect(writeCalls[0].lastDecryptedSha).toBe("EMPTYSHA");
     expect(emits.map((e) => e.name)).not.toContain("refresh-failed");
     expect(res.sync.synced).toEqual([]);
+  });
+
+  test("(d) boot PARTIAL failure (one JSON skipped, another ok) → marker NOT seeded + refresh-failed(secrets-skipped)", () => {
+    seedClone();
+    writeClusterJson({ schemaVersion: 1, roster: ["mini"] });
+    touchSecret("cluster-bots.sops.json"); // succeeds → config.json
+    touchSecret("config-adva.sops.json"); // fails → skipped (partial, not wholesale)
+    const statePath = join(configDir, ".state.json");
+
+    const writeCalls = [];
+    const emits = [];
+    let res;
+    expect(() => {
+      res = clusterSync({
+        clusterDir,
+        configDir,
+        statePath,
+        git: baseGit,
+        gitCapture: makeGitCapture("NEWSHA"),
+        decrypt: (p) => {
+          if (p.endsWith("config-adva.sops.json")) throw new Error("bad mac");
+          return { ok: true };
+        },
+        writeState: (sp, state) => {
+          writeCalls.push(state);
+          return true;
+        },
+        emit: (e) => emits.push(e),
+        now: () => "t",
+        node: "test-node",
+        logger: QUIET,
+      });
+    }).not.toThrow();
+
+    // a PARTIAL boot decrypt must NOT seed the marker (the silent-stale fast-path trap)
+    expect(writeCalls).toHaveLength(0);
+    expect(emits.map((e) => e.name)).toContain("refresh-failed");
+    expect(emits[0].payload.reason).toBe("secrets-skipped");
+    expect(res.sync.synced).toEqual(["config.json"]);
+    expect(res.sync.skipped).toEqual(["config-adva.sops.json"]);
   });
 });
