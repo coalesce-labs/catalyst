@@ -2294,32 +2294,25 @@ export function checkAgentsForClass(deps = {}) {
   ];
 }
 
-// pullOwnerConfigPath — the Layer-2 machine config the install ACTUALLY wrote pluginPullOwner into,
-// resolved with the SAME precedence as install-lifecycle.layer2Path() (CATALYST_LAYER2_CONFIG_FILE >
-// CATALYST_MACHINE_CONFIG > XDG_CONFIG_HOME > ~/.config). doctor's generic layer2Path() honors only
-// CATALYST_LAYER2_CONFIG_FILE/~/.config, so a standalone `catalyst-doctor --profile install` run with
-// only CATALYST_MACHINE_CONFIG/XDG selecting the config would otherwise read the WRONG file and
-// misreport the owner (CTL-1369 PR4 Codex P2). This mirrors the resolver the broker is handed.
-function pullOwnerConfigPath(env = process.env) {
-  return (
-    env.CATALYST_LAYER2_CONFIG_FILE ||
-    env.CATALYST_MACHINE_CONFIG ||
-    resolve(env.XDG_CONFIG_HOME || resolve(homedir(), ".config"), "catalyst", "config.json")
-  );
-}
-
 // defaultPluginPullOwner — the PERSISTED plugin-pull owner this node was INSTALLED with: the Layer-2
-// catalyst.orchestration.pluginPullOwner value (any non-"updater" / unset ⇒ "broker"). Deliberately
-// reads ONLY the persisted config — NOT the transient CATALYST_PLUGIN_PULL_OWNER env that
-// broker/plugin-refresh.mjs::resolvePluginPullOwner honors at runtime (CTL-1369 PR4 Codex P2): the
-// install writes the owner into the config (adopt-updater / write-config) and the launchd updater
-// agent does NOT inherit a caller's shell env, so a stray `CATALYST_PLUGIN_PULL_OWNER=broker` in the
-// operator's shell must not make a correctly-adopted developer's post-install doctor falsely FAIL.
-// The doctor verifies INSTALLED STATE, not a runtime override. Inlined (doctor runs under bare node).
-function defaultPluginPullOwner(env = process.env) {
+// catalyst.orchestration.pluginPullOwner value (any non-"updater" / unset ⇒ "broker"). Two deliberate
+// properties (both from Codex P2):
+//   (1) It reads from doctor's UNIFORM Layer-2 path — layer2Path() (CATALYST_LAYER2_CONFIG_FILE →
+//       ~/.config) — which is exactly the path resolveNodeClass uses for the CLASS. Reading class AND
+//       owner from one config file is what keeps them from skewing (round 2): an earlier revision honored
+//       CATALYST_MACHINE_CONFIG here but NOT in the class resolver, so a config selected only via
+//       CATALYST_MACHINE_CONFIG graded the class as an inferred worker while the owner read developer.
+//       install-lifecycle pins CATALYST_LAYER2_CONFIG_FILE (= its own layer2Path) in the doctor step env,
+//       so this reads the node's actual installed config.
+//   (2) It IGNORES the transient CATALYST_PLUGIN_PULL_OWNER env that broker/plugin-refresh.mjs honors at
+//       runtime (round 1): the launchd updater agent never inherits a caller's shell env, so a stray
+//       `CATALYST_PLUGIN_PULL_OWNER=broker` must not make a correctly-adopted developer's post-install
+//       doctor falsely FAIL. The doctor verifies INSTALLED STATE, not a runtime override.
+// Inlined (doctor runs under bare node).
+function defaultPluginPullOwner() {
   const coerce = (v) => (typeof v === "string" && v.trim() === "updater" ? "updater" : "broker");
   try {
-    const v = JSON.parse(readFileSync(pullOwnerConfigPath(env), "utf8"))?.catalyst?.orchestration?.pluginPullOwner;
+    const v = JSON.parse(readFileSync(layer2Path(), "utf8"))?.catalyst?.orchestration?.pluginPullOwner;
     if (typeof v === "string" && v.trim().length > 0) return coerce(v);
   } catch {
     /* unreadable/malformed/absent Layer-2 → fail safe to broker */

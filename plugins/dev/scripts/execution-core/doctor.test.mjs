@@ -4,7 +4,7 @@
 // Run: cd plugins/dev/scripts/execution-core && bun test doctor.test.mjs
 
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync } from "node:fs";
+import { mkdtempSync, writeFileSync, rmSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -2130,16 +2130,19 @@ describe("doctor pull-owner reads persisted installed state (CTL-1369 PR4 / Code
   afterEach(() => { rmSync(dir, { recursive: true, force: true }); });
 
   // Set the given env keys (deleting absent ones), run fn, then restore — so process.env can't leak.
-  const ENV_KEYS = ["CATALYST_PLUGIN_PULL_OWNER", "CATALYST_LAYER2_CONFIG_FILE", "CATALYST_MACHINE_CONFIG", "XDG_CONFIG_HOME"];
+  // Await-aware: if fn returns a promise, restore only after it settles (else an async runDoctor would
+  // see the env restored mid-flight).
+  const ENV_KEYS = ["CATALYST_PLUGIN_PULL_OWNER", "CATALYST_LAYER2_CONFIG_FILE", "CATALYST_MACHINE_CONFIG", "XDG_CONFIG_HOME", "CATALYST_NODE_CLASS"];
   const withEnv = (vars, fn) => {
     const saved = {};
     for (const k of ENV_KEYS) saved[k] = process.env[k];
-    try {
-      for (const k of ENV_KEYS) { if (k in vars) process.env[k] = vars[k]; else delete process.env[k]; }
-      return fn();
-    } finally {
-      for (const k of ENV_KEYS) { if (saved[k] === undefined) delete process.env[k]; else process.env[k] = saved[k]; }
-    }
+    const restore = () => { for (const k of ENV_KEYS) { if (saved[k] === undefined) delete process.env[k]; else process.env[k] = saved[k]; } };
+    for (const k of ENV_KEYS) { if (k in vars) process.env[k] = vars[k]; else delete process.env[k]; }
+    let r;
+    try { r = fn(); } catch (e) { restore(); throw e; }
+    if (r && typeof r.then === "function") return r.then((v) => { restore(); return v; }, (e) => { restore(); throw e; });
+    restore();
+    return r;
   };
   const ownerVerdict = (nodeClass) => checkPluginPullOwner({ nodeClass })[0].status;
   const writeCfg = (owner, d = dir) => {
@@ -2179,17 +2182,20 @@ describe("doctor pull-owner reads persisted installed state (CTL-1369 PR4 / Code
       expect(ownerVerdict("worker")).toBe(STATUS.PASS);
     });
   });
-  // Codex P2 (thread 2): honor CATALYST_MACHINE_CONFIG / XDG when CATALYST_LAYER2_CONFIG_FILE is unset.
-  it("honors CATALYST_MACHINE_CONFIG and XDG_CONFIG_HOME for the config path (parity with install-lifecycle.layer2Path)", () => {
-    const p = writeCfg("updater");
-    withEnv({ CATALYST_MACHINE_CONFIG: p }, () => expect(ownerVerdict("developer")).toBe(STATUS.PASS));
-    const xdg = mkdtempSync(join(tmpdir(), "doctor-xdg-"));
-    mkdirSync(join(xdg, "catalyst"), { recursive: true });
-    writeFileSync(join(xdg, "catalyst", "config.json"), JSON.stringify({ catalyst: { orchestration: { pluginPullOwner: "updater" } } }));
-    withEnv({ XDG_CONFIG_HOME: xdg }, () => expect(ownerVerdict("developer")).toBe(STATUS.PASS));
-    rmSync(xdg, { recursive: true, force: true });
+  // Codex P2 (round 2): the owner reads via CATALYST_LAYER2_CONFIG_FILE — the SAME path resolveNodeClass
+  // uses for the CLASS — and does NOT consult CATALYST_MACHINE_CONFIG, so class + owner never skew.
+  it("reads via CATALYST_LAYER2_CONFIG_FILE and does NOT consult CATALYST_MACHINE_CONFIG (no class/owner skew)", () => {
+    const mcDir = mkdtempSync(join(tmpdir(), "doctor-mc-"));
+    const updaterAt = writeCfg("updater", mcDir); // CATALYST_MACHINE_CONFIG would point here
+    const brokerAt = writeCfg("broker"); // CATALYST_LAYER2_CONFIG_FILE points here
+    // LAYER2 says broker, MACHINE_CONFIG says updater → the owner MUST come from LAYER2 (broker), the
+    // same path the class resolver reads — so a worker grades PASS (not a stale-pull FAIL from MACHINE_CONFIG).
+    withEnv({ CATALYST_LAYER2_CONFIG_FILE: brokerAt, CATALYST_MACHINE_CONFIG: updaterAt }, () => {
+      expect(ownerVerdict("worker")).toBe(STATUS.PASS);
+    });
+    rmSync(mcDir, { recursive: true, force: true });
   });
-  // Narrow parity: with NO transient env, doctor's config read agrees with the canonical resolver's config read.
+  // Narrow parity: with no transient env, doctor's config read agrees with the canonical resolver's config read.
   it("agrees with resolvePluginPullOwner on the CONFIG value when no transient env is set", () => {
     for (const owner of ["updater", "broker", null]) {
       const p = writeCfg(owner);
@@ -2199,6 +2205,23 @@ describe("doctor pull-owner reads persisted installed state (CTL-1369 PR4 / Code
         expect(ownerVerdict("worker")).toBe(expected);
       });
     }
+  });
+  // Codex P2 (round 2): end-to-end — the install profile resolves the CLASS and the OWNER from the SAME
+  // CATALYST_LAYER2_CONFIG_FILE, so a developer config is graded as a developer (not an inferred worker).
+  it("install profile resolves class + owner from one config (developer config → developer rubric, all PASS)", async () => {
+    const cfg = join(dir, "config.json");
+    writeFileSync(cfg, JSON.stringify({ catalyst: { node: { class: "developer" }, orchestration: { pluginPullOwner: "updater" } } }));
+    const logs = [];
+    await withEnv({ CATALYST_LAYER2_CONFIG_FILE: cfg }, async () => {
+      // real resolveNodeClass + real defaultPluginPullOwner (both read CATALYST_LAYER2_CONFIG_FILE);
+      // only the launchd agent probe is injected (it is env-dependent).
+      const code = await runDoctor({ profile: "install", json: true, hasStackAgent: false, hasUpdaterAgent: true, log: (m) => logs.push(m) });
+      const parsed = JSON.parse(logs[0]);
+      expect(parsed.checks.map((c) => c.name)).toEqual(["node-class", "agents-for-class", "plugin-pull-owner"]);
+      expect(parsed.checks.find((c) => c.name === "node-class").detail).toContain("developer"); // class from the SAME file
+      expect(parsed.ok).toBe(true); // class + owner consistent → developer rubric PASSes
+      expect(code).toBe(0);
+    });
   });
 });
 
