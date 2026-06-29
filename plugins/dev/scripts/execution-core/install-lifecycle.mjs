@@ -34,7 +34,8 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { homedir } from "node:os";
 
-import { InstallRun, makeInstallEmitFn } from "./lib/install-telemetry.mjs";
+import { InstallRun, makeInstallEmitFn, INSTALL_SERVICE_NAME } from "./lib/install-telemetry.mjs";
+import { initTracing, shutdownTracing } from "./tracing.mjs";
 import { NODE_CLASSES, getNodeClass } from "./config.mjs";
 
 // ── phase enums ───────────────────────────────────────────────────────────────
@@ -330,6 +331,10 @@ function defaultRunStep({ argv, env, cwd }) {
   const res = spawnSync(argv[0], argv.slice(1), {
     encoding: "utf8",
     cwd: cwd || REPO_ROOT,
+    // The composed setup tools (setup-catalyst.sh, install-cli.sh, brew/git helpers) are chatty;
+    // the default 1 MB pipe buffer would make spawnSync ENOBUFS-error on a verbose-but-successful
+    // child and the lifecycle would wrongly treat it as a failure. 64 MB headroom.
+    maxBuffer: 64 * 1024 * 1024,
     env: { ...process.env, ...(env || {}) },
   });
   if (res.error) return { code: 127, stdout: "", stderr: String(res.error.message || res.error) };
@@ -359,9 +364,27 @@ function defaultProbeResidualAgents(env = process.env) {
     /* launchagents dir absent → no agents */
   }
   if (env.CATALYST_ASSUME_NO_DAEMONS === "1") return false;
-  const res = spawnSync("pgrep", ["-f", "broker/index.mjs|execution-core/(daemon|index|updater/updater)\\.mjs"], { encoding: "utf8" });
+  // Covers every stack daemon, not just broker/exec-core: the monitor (orch-monitor/server.ts) and
+  // otel-forward (otel-forward/index.ts) are nohup children of the stack — if `catalyst-stack stop`
+  // failed to kill them after the plists were removed, an uninstall would otherwise look clean.
+  const pattern = "broker/index.mjs|execution-core/(daemon|index|updater/updater)\\.mjs|orch-monitor/server\\.ts|otel-forward/index\\.ts";
+  const res = spawnSync("pgrep", ["-f", pattern], { encoding: "utf8" });
   if (res.error) return false; // can't probe processes; the plist check above already ran
   return res.status === 0;
+}
+
+// bundleHasCapturedAgents — did the backup snapshot any launchd agent plists? If so the node had
+// PRE-EXISTING agents before this run (a retry/reinstall on a working node), so rollback must NOT
+// boot them out (catalyst-backup restore re-lays the plist FILES but never re-bootstraps them, so a
+// teardown would leave a previously-working node's services down). When false (a fresh node, no
+// agents captured) rollback safely removes whatever provisioning installed this run.
+function defaultBundleHasCapturedAgents(bundlePath) {
+  try {
+    const m = JSON.parse(readFileSync(join(bundlePath, "manifest.json"), "utf8"));
+    return Array.isArray(m.captured) && m.captured.some((p) => p.startsWith("launchagents/") && p.endsWith(".plist"));
+  } catch {
+    return false; // unreadable manifest → treat as fresh (safe to tear down newly-installed agents)
+  }
 }
 
 // probeDrained — is this node draining (admitting 0 new work)? Best-effort; unknown ⇒ false (the
@@ -392,6 +415,7 @@ export function buildDefaultDeps(env) {
     probeDaemons: () => defaultProbeDaemons(env),
     probeResidualAgents: () => defaultProbeResidualAgents(env),
     probeDrained: () => defaultProbeDrained({ scripts, env }),
+    bundleHasCapturedAgents: (p) => defaultBundleHasCapturedAgents(p),
     scriptExists: (p) => existsSync(p),
     log: (msg) => process.stderr.write(`${msg}\n`),
     InstallRunCtor: InstallRun,
@@ -419,13 +443,16 @@ function isTeardown(operation) {
  *   probeDaemons, probeResidualAgents, probeDrained, scriptExists, log, InstallRunCtor.
  */
 export async function runInstallLifecycle({ operation, nodeClass, opts = {} }, deps) {
-  const { scripts, env, layer2, runStep, emit, nowFn, genTraceId, genSpanId, probeDaemons, probeResidualAgents, probeDrained, scriptExists, log, InstallRunCtor } = deps;
+  const { scripts, env, layer2, runStep, emit, nowFn, genTraceId, genSpanId, probeDaemons, probeResidualAgents, probeDrained, bundleHasCapturedAgents, scriptExists, log, InstallRunCtor } = deps;
 
-  // Every composed step inherits the RESOLVED class so the bash tools (which re-derive class env-
-  // first) cannot diverge from the lifecycle's target — e.g. `install --class developer` on a shell
-  // exporting CATALYST_NODE_CLASS=worker must still adopt-updater, not hit the worker refusal. Mirrors
-  // doctor.mjs pinning CATALYST_NODE_CLASS when it spawns verify-node.
-  const stepEnv = { ...env, CATALYST_NODE_CLASS: nodeClass };
+  // Every composed step inherits (a) the RESOLVED class so the bash tools (which re-derive class
+  // env-first) cannot diverge from the lifecycle's target — e.g. `install --class developer` on a
+  // shell exporting CATALYST_NODE_CLASS=worker must still adopt-updater (mirrors doctor.mjs pinning
+  // CATALYST_NODE_CLASS for verify-node); and (b) the driver's exact Layer-2 file under BOTH config
+  // env names the child tools honor, so the whole run reads/writes ONE config (else an XDG/
+  // CATALYST_MACHINE_CONFIG redirect would split node.class/readReplica and pluginDirs/pluginPullOwner
+  // across two files and break rollback's single restorable state).
+  const stepEnv = { ...env, CATALYST_NODE_CLASS: nodeClass, CATALYST_LAYER2_CONFIG_FILE: layer2, CATALYST_MACHINE_CONFIG: layer2 };
 
   // Pre-flight live-node guard (teardown only) — refuse BEFORE starting a run.
   if (isTeardown(operation) && !opts.force) {
@@ -544,16 +571,23 @@ export async function runInstallLifecycle({ operation, nodeClass, opts = {} }, d
     let rollbackDisposition = "none";
     if (autoRollbacks(operation) && ctx.bundlePath) {
       log(`catalyst-install: ${operation} failed — rolling back from ${ctx.bundlePath}`);
-      // A restore alone is ADDITIVE — it re-lays captured config/db/plist FILES but cannot un-bootstrap
-      // launchd agents that provisioning just installed (and a worker's stack keep-alive would restart
-      // the daemon). So tear those down FIRST (boot out agents, then stop any survivors), THEN restore
-      // the captured state. Both teardown steps are best-effort; the restore is the authoritative
-      // "node state put back" signal. NB: install-cli symlinks are intentionally left in place — they
-      // are not captured in the backup, so removing them would be an unrecoverable, not a reversal.
-      const unsvc = runStep({ argv: [scripts.stack, "uninstall-services"], env: stepEnv });
-      if (unsvc.code !== 0) log(`catalyst-install: rollback note — uninstall-services rc ${unsvc.code} (agents may remain): ${unsvc.stderr.trim()}`);
-      const stop = runStep({ argv: [scripts.stack, "stop"], env: stepEnv });
-      if (stop.code !== 0) log(`catalyst-install: rollback note — stop rc ${stop.code}`);
+      // A restore alone is ADDITIVE — it re-lays captured config/db/plist FILES but cannot
+      // un-bootstrap launchd agents provisioning just installed (and a worker's stack keep-alive would
+      // restart the daemon). So when this run installed agents onto a FRESH node, tear them down first
+      // (boot out, then stop survivors) before restoring. But if the backup captured PRE-EXISTING
+      // agents (a retry/reinstall on a working node), DON'T tear them down: restore re-lays their plist
+      // files but never re-bootstraps them, so a teardown would leave a previously-working node's
+      // services down. Either way the restore is the authoritative "state put back" signal. (install-cli
+      // symlinks are intentionally left in place — not captured in the backup, so removing them would be
+      // an unrecoverable loss, not a reversal.)
+      if (bundleHasCapturedAgents(ctx.bundlePath)) {
+        log(`catalyst-install: rollback — backup captured pre-existing launchd agents; leaving them in place (restore re-lays their config; reload them if needed)`);
+      } else {
+        const unsvc = runStep({ argv: [scripts.stack, "uninstall-services"], env: stepEnv });
+        if (unsvc.code !== 0) log(`catalyst-install: rollback note — uninstall-services rc ${unsvc.code} (agents may remain): ${unsvc.stderr.trim()}`);
+        const stop = runStep({ argv: [scripts.stack, "stop"], env: stepEnv });
+        if (stop.code !== 0) log(`catalyst-install: rollback note — stop rc ${stop.code}`);
+      }
       const restore = runStep({ argv: [scripts.backup, "restore", ctx.bundlePath, "--force"], env: stepEnv });
       rolledBack = restore.code === 0;
       rollbackDisposition = rolledBack ? "ok" : "failed";
@@ -572,8 +606,19 @@ export async function runInstallLifecycle({ operation, nodeClass, opts = {} }, d
 
 // ── CLI ─────────────────────────────────────────────────────────────────────
 export function parseArgs(argv) {
-  const a = { operation: null, class: null, readReplica: null, force: false, dryRun: false, json: false, help: false };
+  const a = { operation: null, class: null, readReplica: null, force: false, dryRun: false, json: false, help: false, errors: [] };
   const rest = [...argv];
+  // takeValue — consume the next token as FLAG's value; a missing value (end of args, or the next
+  // token is itself a flag) is an error, not a silent null — otherwise `catalyst install --class`
+  // would fall back to the current/default class and a typo could provision the wrong node.
+  const takeValue = (i, flag) => {
+    const next = rest[i + 1];
+    if (next === undefined || next.startsWith("-")) {
+      a.errors.push(`${flag} requires a value`);
+      return [null, i];
+    }
+    return [next, i + 1];
+  };
   // First non-flag token is the operation (the router passes it as argv[0]).
   for (let i = 0; i < rest.length; i++) {
     const v = rest[i];
@@ -593,16 +638,24 @@ export function parseArgs(argv) {
         a.json = true;
         break;
       case "--class":
-        a.class = rest[++i] ?? null;
+        [a.class, i] = takeValue(i, "--class");
         break;
       case "--read-replica":
-        a.readReplica = rest[++i] ?? null;
+        [a.readReplica, i] = takeValue(i, "--read-replica");
         break;
       default:
-        if (v.startsWith("--class=")) a.class = v.slice("--class=".length);
-        else if (v.startsWith("--read-replica=")) a.readReplica = v.slice("--read-replica=".length);
-        else if (!v.startsWith("-") && a.operation == null) a.operation = v;
-        // unknown flags are ignored (forward-compat); an unknown operation is caught by validation
+        if (v.startsWith("--class=")) {
+          const val = v.slice("--class=".length);
+          if (val === "") a.errors.push("--class requires a value");
+          else a.class = val;
+        } else if (v.startsWith("--read-replica=")) {
+          const val = v.slice("--read-replica=".length);
+          if (val === "") a.errors.push("--read-replica requires a value");
+          else a.readReplica = val;
+        } else if (!v.startsWith("-") && a.operation == null) {
+          a.operation = v;
+        }
+        // other unknown flags are ignored (forward-compat); an unknown operation is caught by validation
         break;
     }
   }
@@ -666,6 +719,11 @@ export async function main(argv, depsOverride) {
     out(usage());
     return 0;
   }
+  if (args.errors?.length) {
+    for (const e of args.errors) errOut(`catalyst-install: ${e}`);
+    errOut(usage());
+    return 2;
+  }
   if (!args.operation || !LIFECYCLE_OPERATIONS.includes(args.operation)) {
     errOut(`catalyst-install: expected one of ${LIFECYCLE_OPERATIONS.join(" | ")}${args.operation ? ` (got '${args.operation}')` : ""}`);
     errOut(usage());
@@ -695,34 +753,51 @@ export async function main(argv, depsOverride) {
     return 0;
   }
 
+  // Install the OTLP tracer BEFORE the run so InstallRun.complete()/fail() → emitInstallTrace()
+  // actually export the catalyst.install root/phase spans (the tracer is a no-op until initTracing
+  // runs). Off-first: only when CATALYST_TRACING=on, matching updater.mjs. Flushed below.
+  const tracingOn = env.CATALYST_TRACING === "on";
+  if (tracingOn) await initTracing({ serviceName: INSTALL_SERVICE_NAME });
+
   const result = await runInstallLifecycle({ operation: args.operation, nodeClass, opts }, deps);
 
+  // With --json the result JSON is the ONLY thing on stdout — the human success line is suppressed
+  // so automation can parse stdout as a single document. (Error/warning lines go to stderr.)
   if (args.json) out(JSON.stringify(result));
+
+  let code;
   switch (result.outcome) {
     case "completed":
       if (!result.healthOk) {
         errOut(`catalyst-install: ${args.operation} completed but verify-node reported the node UNHEALTHY (rc ${result.healthRc ?? "?"}).`);
-        return 1;
-      }
-      // A teardown that left catalyst agents/daemons present is a FAILED teardown — surface it as a
-      // non-zero exit (symmetric with the healthOk treatment above), not a silent "completed".
-      if (isTeardown(args.operation) && result.cleanOk === false) {
+        code = 1;
+      } else if (isTeardown(args.operation) && result.cleanOk === false) {
+        // A teardown that left catalyst agents/daemons present is a FAILED teardown — surface it as a
+        // non-zero exit (symmetric with the healthOk treatment above), not a silent "completed".
         errOut(`catalyst-install: ${args.operation} completed but verify-clean found catalyst agents/daemons STILL PRESENT — node not fully torn down (run 'catalyst-stack stop' / 'catalyst-stack uninstall-services').`);
-        return 1;
+        code = 1;
+      } else {
+        if (!args.json) out(`catalyst-install: ${args.operation} (${nodeClass}) completed.`);
+        code = 0;
       }
-      out(`catalyst-install: ${args.operation} (${nodeClass}) completed.`);
-      return 0;
+      break;
     case "rolled_back":
       errOut(`catalyst-install: ${args.operation} failed and was rolled back: ${result.error}`);
-      return 1;
+      code = 1;
+      break;
     case "failed":
       errOut(`catalyst-install: ${args.operation} failed: ${result.error}`);
-      return 1;
+      code = 1;
+      break;
     case "refused":
-      return 2;
+      code = 2;
+      break;
     default:
-      return 1;
+      code = 1;
   }
+
+  if (tracingOn) await shutdownTracing(); // flush spans before the process exits
+  return code;
 }
 
 // Direct-exec guard: run main() only when invoked as a script (not when imported by tests).

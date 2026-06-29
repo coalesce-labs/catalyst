@@ -57,7 +57,7 @@ const SCRIPTS = {
 
 // makeDeps — a fully-stubbed dep set. `failOn` is a predicate (argv|joined → truthy = fail with
 // that rc). `bundle` is the path catalyst-backup "prints". probeDaemons/probeDrained are flags.
-function makeDeps({ failOn, bundle = "/tmp/bundle-xyz", daemonsLive = false, residual = false, drained = false, layer2Initial } = {}) {
+function makeDeps({ failOn, bundle = "/tmp/bundle-xyz", daemonsLive = false, residual = false, drained = false, bundleHadAgents = false, layer2Initial } = {}) {
   const events = [];
   const calls = [];
   const stepCalls = []; // {argv, env} per spawned step — lets tests assert the pinned step env
@@ -83,6 +83,7 @@ function makeDeps({ failOn, bundle = "/tmp/bundle-xyz", daemonsLive = false, res
     probeDaemons: () => daemonsLive,
     probeResidualAgents: () => residual,
     probeDrained: () => drained,
+    bundleHasCapturedAgents: () => bundleHadAgents,
     scriptExists: () => true,
     log: () => {},
     InstallRunCtor: undefined, // filled below with the real InstallRun
@@ -124,6 +125,13 @@ describe("parseArgs", () => {
   test("unknown flags are ignored (forward-compat)", () => {
     const a = parseArgs(["install", "--future-flag", "x"]);
     expect(a.operation).toBe("install");
+  });
+  test("a trailing --class / --read-replica with no value is an error (not a silent fallback)", () => {
+    expect(parseArgs(["install", "--class"]).errors).toContain("--class requires a value");
+    expect(parseArgs(["install", "--class", "--dry-run"]).errors).toContain("--class requires a value");
+    expect(parseArgs(["reinstall", "--read-replica"]).errors).toContain("--read-replica requires a value");
+    expect(parseArgs(["install", "--class="]).errors).toContain("--class requires a value");
+    expect(parseArgs(["install", "--class", "developer"]).errors).toHaveLength(0);
   });
 });
 
@@ -370,6 +378,14 @@ describe("node-class env pinning (composed tools cannot diverge from --class)", 
     const verify = bag.stepCalls.find((c) => c.argv.join(" ") === "STACK verify-node");
     expect(verify.env.CATALYST_NODE_CLASS).toBe("developer");
   });
+  test("spawned steps are pinned to the driver's Layer-2 file under BOTH config env names", async () => {
+    const bag = withRealRun(makeDeps());
+    await runInstallLifecycle({ operation: "install", nodeClass: "worker", opts: {} }, bag.deps);
+    for (const c of bag.stepCalls) {
+      expect(c.env.CATALYST_LAYER2_CONFIG_FILE).toBe(bag.layer2);
+      expect(c.env.CATALYST_MACHINE_CONFIG).toBe(bag.layer2);
+    }
+  });
 });
 
 describe("script preflight (fail fast before backup/teardown)", () => {
@@ -419,6 +435,15 @@ describe("rollback is a true reversal + partial-state telemetry", () => {
     expect(last.event).toBe("catalyst.install.failed");
     expect(last.detail.rollback).toBe("failed"); // partial-state disposition in body
     expect(last.detail.bundle).toBe("/tmp/bundle-xyz"); // recovery pointer for the operator
+  });
+  test("rollback does NOT tear down PRE-EXISTING agents (backup captured plists → retry on a working node)", async () => {
+    const { deps, calls } = withRealRun(makeDeps({ bundleHadAgents: true, failOn: (a) => (a.join(" ") === "STACK install-services" ? 3 : 0) }));
+    const res = await runInstallLifecycle({ operation: "install", nodeClass: "worker", opts: {} }, deps);
+    expect(res.outcome).toBe("rolled_back");
+    const joined = calls.map((a) => a.join(" "));
+    expect(joined).not.toContain("STACK uninstall-services"); // pre-existing agents left in place
+    expect(joined).not.toContain("STACK stop");
+    expect(joined.some((c) => c.startsWith("BACKUP restore"))).toBe(true); // still restored
   });
   test("a benign abort (backup fails) carries rollback disposition 'none' (distinguishable from partial-state)", async () => {
     const { deps, events } = withRealRun(makeDeps({ failOn: (a) => (a[0] === "BACKUP" && a[1] === "backup" ? 1 : 0) }));
@@ -520,6 +545,18 @@ describe("main — CLI exit codes", () => {
     expect(code).toBe(0);
     const cfg = JSON.parse(readFileSync(d.bag.layer2, "utf8"));
     expect(cfg.catalyst.readReplica.baseUrl).toBe("http://mini:7400");
+  });
+  test("--json on a successful run emits ONE stdout document (no trailing human line)", async () => {
+    const d = execDeps();
+    const code = await main(["install", "--class", "developer", "--json"], d.depsOverride);
+    expect(code).toBe(0);
+    expect(d.out).toHaveLength(1); // only the JSON, no "… completed." line
+    expect(() => JSON.parse(d.out[0])).not.toThrow();
+    expect(JSON.parse(d.out[0]).outcome).toBe("completed");
+  });
+  test("missing --class value → exit 2", async () => {
+    const c = capture();
+    expect(await main(["install", "--class"], c.depsOverride)).toBe(2);
   });
 });
 
