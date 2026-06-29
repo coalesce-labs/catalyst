@@ -1,8 +1,8 @@
 #!/usr/bin/env bun
-// replica-writer.mjs — CTL-1394: the per-node SUPERVISED Linear-replica writer.
+// cloud-sync.mjs — CTL-1394: the per-node SUPERVISED catalyst-cloud-sync daemon (maintains the local Linear replica).
 //
 // A single long-lived process (one per host, run under launchd KeepAlive via
-// replica-writer/launch.sh) that maintains a fresh local SQLite replica at the
+// cloud-sync/launch.sh) that maintains a fresh local SQLite replica at the
 // canonical path (~/catalyst/catalyst-replica.db) from the Catalyst-Cloud change
 // feed, using THIS node's own cloud token. Once it has seeded + is live, the
 // scheduler's replica read tier (replica-read.mjs, CTL-1340, when
@@ -29,7 +29,7 @@
 import { CatalystReplica } from "@catalyst-cloud/sdk/node";
 import { getHostName, getReplicaDbPath, resolveNodeCloudTokenEnv } from "./config.mjs";
 
-const TAG = "[catalyst-replica]";
+const TAG = "[catalyst-cloud-sync]";
 const DEFAULT_BASE_URL = "https://api.catalyst-cloud.coalescelabs.ai/api/v1";
 const DEFAULT_ACCOUNT = "tenant-0";
 

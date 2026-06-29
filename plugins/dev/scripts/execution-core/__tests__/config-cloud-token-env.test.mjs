@@ -9,7 +9,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { resolveNodeCloudTokenEnv } from "../config.mjs";
 
-const ENV_KEYS = ["CATALYST_CLOUD_TOKEN_ENV", "CATALYST_LAYER2_CONFIG_FILE", "CATALYST_HOST_NAME"];
+const ENV_KEYS = ["CATALYST_CLOUD_TOKEN_ENV", "CATALYST_CLOUD_TOKEN", "CATALYST_LAYER2_CONFIG_FILE", "CATALYST_HOST_NAME"];
 let saved;
 let tmp;
 
@@ -37,94 +37,61 @@ function writeLayer2(obj) {
   process.env.CATALYST_LAYER2_CONFIG_FILE = p;
 }
 
-describe("resolveNodeCloudTokenEnv — host table", () => {
-  // The table is deliberately not algorithmic (mini-2 → MINI_1, office-desk/laptop →
-  // WORKSTATION); assert each non-derivable mapping explicitly.
-  for (const [host, envVar] of [
-    ["laptop", "CATALYST_CLOUD_WORKSTATION_TOKEN"],
-    ["office-desk", "CATALYST_CLOUD_WORKSTATION_TOKEN"],
-    ["mini", "CATALYST_MINI_ACCOUNT_TOKEN"],
-    ["mini-2", "CATALYST_MINI_1_ACCOUNT_TOKEN"],
-  ]) {
-    test(`host "${host}" → ${envVar}, source=table`, () => {
-      expect(resolveNodeCloudTokenEnv({ hostName: host })).toEqual({ envVar, source: "table" });
-    });
-  }
+describe("resolveNodeCloudTokenEnv — default (host-agnostic, no node names in code)", () => {
+  test("no overrides → standard CATALYST_CLOUD_TOKEN, source=default (same on every host)", () => {
+    expect(resolveNodeCloudTokenEnv()).toEqual({ envVar: "CATALYST_CLOUD_TOKEN", source: "default" });
+  });
 
-  test("unknown host, no overrides → shared CATALYST_CLOUD_TOKEN, source=fallback", () => {
-    expect(resolveNodeCloudTokenEnv({ hostName: "some-new-node" })).toEqual({
-      envVar: "CATALYST_CLOUD_TOKEN",
-      source: "fallback",
-    });
+  test("the result does NOT depend on the host name (portable to arbitrary hosts)", () => {
+    // Pinning any host identity must not change the resolved NAME — proves no node names
+    // are baked into the resolver (the whole point of this change).
+    for (const host of ["mini", "mini-2", "laptop", "some-brand-new-box", "ci-runner-7"]) {
+      process.env.CATALYST_HOST_NAME = host;
+      expect(resolveNodeCloudTokenEnv()).toEqual({ envVar: "CATALYST_CLOUD_TOKEN", source: "default" });
+    }
   });
 });
 
-describe("resolveNodeCloudTokenEnv — overrides", () => {
-  test("CATALYST_CLOUD_TOKEN_ENV env override wins over table", () => {
+describe("resolveNodeCloudTokenEnv — overrides (per-host config, not code)", () => {
+  test("CATALYST_CLOUD_TOKEN_ENV env override wins over the default", () => {
     process.env.CATALYST_CLOUD_TOKEN_ENV = "MY_CUSTOM_TOKEN";
-    expect(resolveNodeCloudTokenEnv({ hostName: "mini" })).toEqual({
-      envVar: "MY_CUSTOM_TOKEN",
-      source: "env",
-    });
+    expect(resolveNodeCloudTokenEnv()).toEqual({ envVar: "MY_CUSTOM_TOKEN", source: "env" });
   });
 
-  test("empty env override is ignored (falls through to table)", () => {
+  test("empty env override is ignored (falls through to the default)", () => {
     process.env.CATALYST_CLOUD_TOKEN_ENV = "";
-    expect(resolveNodeCloudTokenEnv({ hostName: "mini" })).toEqual({
-      envVar: "CATALYST_MINI_ACCOUNT_TOKEN",
-      source: "table",
-    });
+    expect(resolveNodeCloudTokenEnv()).toEqual({ envVar: "CATALYST_CLOUD_TOKEN", source: "default" });
   });
 
-  test("Layer-2 catalyst.cloud.tokenEnv override (env unset) wins over table", () => {
+  test("Layer-2 catalyst.cloud.tokenEnv override (env unset) wins over the default", () => {
     writeLayer2({ catalyst: { cloud: { tokenEnv: "L2_TOKEN" } } });
-    expect(resolveNodeCloudTokenEnv({ hostName: "mini" })).toEqual({
-      envVar: "L2_TOKEN",
-      source: "layer2",
-    });
+    expect(resolveNodeCloudTokenEnv()).toEqual({ envVar: "L2_TOKEN", source: "layer2" });
   });
 
   test("env override beats Layer-2 override", () => {
     writeLayer2({ catalyst: { cloud: { tokenEnv: "L2_TOKEN" } } });
     process.env.CATALYST_CLOUD_TOKEN_ENV = "ENV_TOKEN";
-    expect(resolveNodeCloudTokenEnv({ hostName: "mini" })).toEqual({
-      envVar: "ENV_TOKEN",
-      source: "env",
-    });
+    expect(resolveNodeCloudTokenEnv()).toEqual({ envVar: "ENV_TOKEN", source: "env" });
   });
 
-  test("malformed Layer-2 file never throws → falls through to table", () => {
+  test("malformed Layer-2 file never throws → falls through to the default", () => {
     const p = join(tmp, "config.json");
     writeFileSync(p, "{ not json");
     process.env.CATALYST_LAYER2_CONFIG_FILE = p;
-    expect(resolveNodeCloudTokenEnv({ hostName: "mini-2" })).toEqual({
-      envVar: "CATALYST_MINI_1_ACCOUNT_TOKEN",
-      source: "table",
-    });
+    expect(resolveNodeCloudTokenEnv()).toEqual({ envVar: "CATALYST_CLOUD_TOKEN", source: "default" });
   });
 });
 
 describe("resolveNodeCloudTokenEnv — NAME-only invariant", () => {
   test("never reads the secret VALUE (resolves even when the var holds a sentinel)", () => {
-    // Set the resolved var to a sentinel; the resolver must return the NAME and never
-    // surface the value anywhere in its result.
     const SENTINEL = "lin_secret_should_never_appear";
-    process.env.CATALYST_MINI_ACCOUNT_TOKEN = SENTINEL;
+    process.env.CATALYST_CLOUD_TOKEN = SENTINEL;
     try {
-      const r = resolveNodeCloudTokenEnv({ hostName: "mini" });
-      expect(r).toEqual({ envVar: "CATALYST_MINI_ACCOUNT_TOKEN", source: "table" });
+      const r = resolveNodeCloudTokenEnv();
+      expect(r).toEqual({ envVar: "CATALYST_CLOUD_TOKEN", source: "default" });
       expect(JSON.stringify(r)).not.toContain(SENTINEL);
     } finally {
-      delete process.env.CATALYST_MINI_ACCOUNT_TOKEN;
+      delete process.env.CATALYST_CLOUD_TOKEN;
     }
-  });
-
-  test("defaults hostName from getHostName() when omitted (no throw)", () => {
-    // With CATALYST_HOST_NAME pinned, the default-arg path resolves deterministically.
-    process.env.CATALYST_HOST_NAME = "mini-2";
-    expect(resolveNodeCloudTokenEnv()).toEqual({
-      envVar: "CATALYST_MINI_1_ACCOUNT_TOKEN",
-      source: "table",
-    });
   });
 });
