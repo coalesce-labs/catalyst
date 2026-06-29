@@ -1014,7 +1014,45 @@ describe("backstopOnRejection (CTL-1367 P1)", () => {
       orchDir: "/ec",
       signalFile: "/ec/workers/CTL-7/phase-implement.json",
     });
-    expect(calls[0].reason).toMatch(/buildSdkEnv exploded/);
+    // CTL-1367 item 11: non-token text passes through the scrub READABLY (the scrub is
+    // a no-op for a message with no token-shaped substrings) — same prefix, same body,
+    // and no redaction marker leaks into either the backstop reason or the warn payload.
+    expect(calls[0].reason).toBe("sdk-dispatch-rejected: buildSdkEnv exploded");
+    expect(calls[0].reason).not.toMatch(/\[redacted/);
+    expect(logger.warns[0][0].err).toBe("buildSdkEnv exploded");
+  });
+
+  test("on a REJECTION whose message embeds a token → scrubbed out of BOTH the backstop reason AND the warn payload", () => {
+    const FAKE_TOKEN = "sk-ant-oat01-FAKE000deadbeef";
+    const prior = process.env.CLAUDE_CODE_OAUTH_TOKEN;
+    process.env.CLAUDE_CODE_OAUTH_TOKEN = FAKE_TOKEN; // the env value the scrub redacts as a literal secret
+    try {
+      const calls = [];
+      const logger = fakeLog();
+      const handler = backstopOnRejection(
+        { orchDir: "/ec", ticket: "CTL-11", phase: "implement", log: logger },
+        { emitBackstop: (a) => calls.push(a) },
+      );
+      handler(
+        null,
+        new Error(`buildSdkEnv exploded: CLAUDE_CODE_OAUTH_TOKEN=${FAKE_TOKEN}`),
+      );
+      expect(calls).toHaveLength(1);
+      const { reason } = calls[0];
+      const warnedErr = logger.warns[0][0].err;
+      // The raw token must NOT survive into the persisted reason (signal + event) NOR the log.
+      expect(reason).not.toContain(FAKE_TOKEN);
+      expect(warnedErr).not.toContain(FAKE_TOKEN);
+      // scrubSecrets' redaction marker IS present in both.
+      expect(reason).toContain("[redacted]");
+      expect(warnedErr).toContain("[redacted]");
+      // The non-token portion of the message remains readable, behind the same prefix.
+      expect(reason).toBe("sdk-dispatch-rejected: buildSdkEnv exploded: CLAUDE_CODE_OAUTH_TOKEN=[redacted]");
+      expect(warnedErr).toContain("buildSdkEnv exploded");
+    } finally {
+      if (prior === undefined) delete process.env.CLAUDE_CODE_OAUTH_TOKEN;
+      else process.env.CLAUDE_CODE_OAUTH_TOKEN = prior;
+    }
   });
 
   test("on a clean RESOLUTION → NO log, NO backstop (the worker/skill owns its terminal event)", () => {

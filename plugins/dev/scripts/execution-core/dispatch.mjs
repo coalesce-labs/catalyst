@@ -19,7 +19,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { getProjectConfig } from "./registry.mjs";
 import { createWorktree as defaultCreateWorktree } from "./worktree.mjs";
-import { sdkRunPhaseAgent, defaultEmitBackstop } from "./sdk-run-phase-agent.mjs"; // CTL-1365b: the executor=sdk launch verb (in-process Agent SDK query()); CTL-1367 P1: shared failed-terminal backstop for a rejected async dispatch
+import { sdkRunPhaseAgent, defaultEmitBackstop, scrubSecrets } from "./sdk-run-phase-agent.mjs"; // CTL-1365b: the executor=sdk launch verb (in-process Agent SDK query()); CTL-1367 P1: shared failed-terminal backstop for a rejected async dispatch; CTL-1367 item 11: scrub token-shaped substrings out of a rejected-dispatch reason before it is backstopped/logged
 import { hasFreshClaim } from "./signal-reader.mjs"; // CTL-1367 P2-G: a young single-flight claim makes a missing SDK signal a benign claim-lost no-op
 import { log } from "./config.mjs"; // CTL-1367 P1: log a swallowed async-dispatch rejection before the backstop fires
 
@@ -382,10 +382,25 @@ export function backstopOnRejection(
 ) {
   return (_res, err) => {
     if (!err) return; // clean resolution → the worker/skill owns the terminal event
-    const reason = `sdk-dispatch-rejected: ${err?.message ?? String(err)}`;
+    // CTL-1367 item 11 (security): this DETACHED-rejection path bypasses the
+    // resolved-result scrub (sdkRunPhaseAgent scrubs its returned stderr), so a
+    // rejection whose message echoes the SDK env we built (CLAUDE_CODE_OAUTH_TOKEN /
+    // ANTHROPIC_*) would otherwise persist a credential into BOTH the worker signal
+    // file AND the unified event log (emitBackstop writes `reason` into the stalled
+    // signal and the --reason event arg) — and into the warn log. Scrub the actual
+    // env token VALUES + token-shaped substrings out of the rejection text BEFORE
+    // composing `reason` and BEFORE logging, mirroring the sdkRunPhaseAgent
+    // resolved-result call style: scrubSecrets(text, secrets).
+    const secrets = [
+      process.env.CLAUDE_CODE_OAUTH_TOKEN,
+      process.env.ANTHROPIC_API_KEY,
+      process.env.ANTHROPIC_AUTH_TOKEN,
+    ];
+    const scrubbed = scrubSecrets(err?.message ?? String(err), secrets);
+    const reason = `sdk-dispatch-rejected: ${scrubbed}`;
     try {
       logger.warn(
-        { ticket, phase, err: err?.message ?? String(err) },
+        { ticket, phase, err: scrubbed },
         "execution-core: async sdk dispatch promise rejected — emitting failed backstop (stalled signal + phase.<phase>.failed) so the ticket does not strand at dispatched"
       );
     } catch {
