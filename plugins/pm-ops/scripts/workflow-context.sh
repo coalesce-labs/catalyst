@@ -3,6 +3,30 @@
 
 set -euo pipefail
 
+print_help() {
+  cat <<'EOF'
+workflow-context.sh — manage the per-worktree workflow context (.catalyst/.workflow-context.json).
+
+Usage: workflow-context.sh <command> [args]
+
+Commands:
+  init                          Initialize the context file if absent
+  add <type> <path> [ticket]    Record a workflow document pointer
+  recent <type>                 Print recent documents of a type
+  most-recent                   Print the most recent document
+  set-ticket <ticket>           Set the current ticket
+  ticket <ticket>               Print documents for a ticket
+
+Options:
+  -h, --help    Show this help and exit
+EOF
+}
+
+case "${1:-}" in
+  -h|--help|help) print_help; exit 0 ;;
+  "")             print_help >&2; exit 1 ;;
+esac
+
 # Primary: .catalyst/ — Fallback: .claude/ (deprecated)
 if [[ -f ".catalyst/.workflow-context.json" ]]; then
 	CONTEXT_FILE=".catalyst/.workflow-context.json"
@@ -121,7 +145,8 @@ ticket)
 	get_by_ticket "$2"
 	;;
 *)
-	echo "Usage: $0 {init|add|recent|most-recent|set-ticket|ticket}"
+	echo "error: unknown command: $1" >&2
+	print_help >&2
 	exit 1
 	;;
 esac

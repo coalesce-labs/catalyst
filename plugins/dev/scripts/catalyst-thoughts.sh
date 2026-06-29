@@ -18,6 +18,24 @@
 
 set -uo pipefail
 
+print_help() {
+  cat <<'EOF'
+catalyst-thoughts.sh — repair and verify the humanlayer thoughts system for a Catalyst project.
+
+Usage: catalyst-thoughts.sh <command>
+
+Commands:
+  init-or-repair   Create or repair thoughts/ for a Catalyst project. Re-uses humanlayer
+                   when configured; fails loudly if thoughts/shared exists as a regular
+                   directory (the symlink-clobbered bug state).
+  check            Verify thoughts/ state; non-zero on any broken state.
+
+Options:
+  -h, --help    Show this help and exit
+  -V, --version Print version and exit
+EOF
+}
+
 # CTL-390: --version handling (early, before any arg parsing or stdin reads).
 case "${1:-}" in
   --version|-V)
@@ -32,6 +50,11 @@ case "${1:-}" in
     echo "error: catalyst-version helper missing at ${_CV_DIR}/lib/catalyst-version.sh" >&2
     exit 1
     ;;
+esac
+
+case "${1:-}" in
+  -h|--help|help) print_help; exit 0 ;;
+  "")             print_help >&2; exit 1 ;;
 esac
 
 CMD="${1:-}"
@@ -203,15 +226,8 @@ case "$CMD" in
 	init-or-repair) cmd_init_or_repair "$@" ;;
 	check) cmd_check "$@" ;;
 	*)
-		cat >&2 <<EOF
-Usage: catalyst-thoughts.sh {init-or-repair|check}
-
-  init-or-repair   Create or repair thoughts/ for a Catalyst project.
-                   Re-uses humanlayer when configured; fails loudly if thoughts/shared
-                   exists as a regular directory (the symlink-clobbered bug state).
-
-  check            Verify thoughts/ state; non-zero on any broken state.
-EOF
-		exit 64
+		echo "error: unknown command: $CMD" >&2
+		print_help >&2
+		exit 1
 		;;
 esac

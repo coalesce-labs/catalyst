@@ -16,6 +16,27 @@
 
 set -uo pipefail
 
+print_help() {
+  cat <<'EOF'
+catalyst-broker — manage the Catalyst event broker daemon.
+
+Usage: catalyst-broker <command> [args]
+
+Commands:
+  start         Start broker daemon in background (idempotent)
+  stop          Stop broker daemon
+  restart       Stop then start
+  probe         Exit 0 if daemon responsive, non-zero otherwise (silent)
+  status        Print running/stopped + pid   [--json]
+  logs          Tail daemon log (follows)
+  run [args]    Run daemon in foreground (debugging)
+
+Options:
+  -h, --help    Show this help and exit
+  -V, --version Print version and exit
+EOF
+}
+
 # CTL-390: --version handling (early, before any arg parsing or stdin reads).
 case "${1:-}" in
   --version|-V)
@@ -30,6 +51,11 @@ case "${1:-}" in
     echo "error: catalyst-version helper missing at ${_CV_DIR}/lib/catalyst-version.sh" >&2
     exit 1
     ;;
+esac
+
+case "${1:-}" in
+  -h|--help|help) print_help; exit 0 ;;
+  "")             print_help >&2; exit 1 ;;
 esac
 
 CATALYST_DIR="${CATALYST_DIR:-$HOME/catalyst}"
@@ -174,7 +200,8 @@ case "${1:-}" in
   logs)    cmd_logs ;;
   run)     shift; cmd_run "$@" ;;
   *)
-    echo "Usage: catalyst-broker {start|stop|restart|probe|status|logs|run}" >&2
+    echo "error: unknown command: $1" >&2
+    print_help >&2
     exit 1
     ;;
 esac
