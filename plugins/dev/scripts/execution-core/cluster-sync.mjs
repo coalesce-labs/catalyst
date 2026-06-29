@@ -434,31 +434,50 @@ export const ENV_BACKED_SECRET_FILES = new Set(["claude-accounts.env"]);
 // INTENTIONAL fail-closed, NOT a failure — it keeps the current behavior (counts as
 // success-for-marker so a deliberate refusal does not alarm or thrash the retry loop).
 //
+// CTL-1393 (Codex P2 re-review of caf6b0e2): the BARE-FILE failure conditions are
+// evaluated BEFORE the schemaSkipped short-circuit. A too-new `cluster.json` (which
+// fails the JSON config sync CLOSED → schemaSkipped) must NOT mask a concurrent
+// bare-bundle failure: when `secrets/` rotates the bare `node-secret-files.sops.json`
+// alongside a too-new schema, returning success-for-marker on schemaSkipped would
+// advance the durable marker over the FAILED bare secret, stranding the un-applied
+// rotation forever (lastSha===HEAD then skips the retry). So the bundle/partial
+// bare-file checks run first; only once the bare-file part is confirmed OK does the
+// intentional schemaSkipped fail-closed count as success-for-marker.
+//
 // Returns { fullSuccess, reason }; `reason` names the shortfall when not full:
-//   decrypt-failed   — wholesale: every JSON secret skipped, or the bare bundle failed
+//   decrypt-failed   — wholesale: the bare bundle failed, or every JSON secret skipped
 //   config-refused   — syncClusterSecrets refused (sync.ok === false), empty skipped
 //   secrets-skipped  — a JSON secret was skipped while another succeeded (partial)
 //   bare-write-failed — a bare file decrypted but its write failed (partial)
 function assessMaterialization({ sync, files }) {
-  // Schema too-new is fail-CLOSED by design — treat as success for the marker.
-  if (sync?.schemaSkipped === true) return { fullSuccess: true, reason: null };
-
   const synced = Array.isArray(sync?.synced) ? sync.synced : [];
   const skipped = Array.isArray(sync?.skipped) ? sync.skipped : [];
   const bareFailed = Array.isArray(files?.failed) ? files.failed : [];
-  const bundleDecryptFailed = files?.reason === "decrypt-failed";
 
-  // Wholesale failure first — preserve the legacy "decrypt-failed" reason (every
-  // JSON secret skipped with none synced, or the bare-file bundle failed entirely).
-  if ((skipped.length > 0 && synced.length === 0) || bundleDecryptFailed) {
+  // 1. Bare-bundle wholesale failure — the whole node-secret-files.sops.json bundle
+  //    failed to decrypt. Checked BEFORE schemaSkipped so a too-new JSON schema can
+  //    never mask it.
+  if (files?.reason === "decrypt-failed") {
     return { fullSuccess: false, reason: "decrypt-failed" };
   }
-  // Config sync refused entirely (e.g. missing/malformed cluster.json), empty skipped.
+  // 2. Partial bare-file failure — a bare file decrypted but its write failed. Also
+  //    checked BEFORE schemaSkipped (same masking rationale).
+  if (bareFailed.length > 0) {
+    return { fullSuccess: false, reason: "bare-write-failed" };
+  }
+  // 3. Schema too-new is fail-CLOSED by design — treat as success for the marker.
+  //    Reaching here means the bare-file part is already confirmed OK (1–2 above), so
+  //    the intentional JSON refusal does not alarm or thrash the retry loop.
+  if (sync?.schemaSkipped === true) return { fullSuccess: true, reason: null };
+  // 4. Config sync refused entirely (e.g. missing/malformed cluster.json), empty skipped.
   if (sync?.ok === false) return { fullSuccess: false, reason: "config-refused" };
-  // A JSON secret was skipped while another succeeded (partial JSON failure).
+  // 5. Every JSON secret skipped with none synced — wholesale JSON failure. Preserve
+  //    the legacy "decrypt-failed" reason for this all-skipped case.
+  if (skipped.length > 0 && synced.length === 0) {
+    return { fullSuccess: false, reason: "decrypt-failed" };
+  }
+  // 6. A JSON secret was skipped while another succeeded (partial JSON failure).
   if (skipped.length > 0) return { fullSuccess: false, reason: "secrets-skipped" };
-  // A bare file decrypted but its write failed (partial bare-file failure).
-  if (bareFailed.length > 0) return { fullSuccess: false, reason: "bare-write-failed" };
   return { fullSuccess: true, reason: null };
 }
 

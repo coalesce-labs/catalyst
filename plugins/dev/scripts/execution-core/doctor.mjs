@@ -46,7 +46,7 @@ import {
   // CTL-1375: configured-repo discovery for the repo-icon token-scope advisory.
   getRegistryPath,
   readClusterConfig,
-  // CTL-1394: the supervised replica-writer health check. All node-safe (node:fs/os/path) —
+  // CTL-1394: the supervised cloud-sync health check. All node-safe (node:fs/os/path) —
   // do NOT import replica-read.mjs (it pulls bun:sqlite; doctor runs under bare node).
   getReplicaDbPath,
   readLinearReplica,
@@ -1520,18 +1520,18 @@ export function checkCloudTokenEnv(deps = {}) {
   return checks;
 }
 
-// checkReplicaWriter — CTL-1394. Advisory health of the per-node supervised Linear-replica
+// checkCloudSync — CTL-1394. Advisory health of the per-node supervised Linear-replica
 // writer + its read tier. EVERY condition is WARN/INFO/PASS, NEVER FAIL: doctor's exit code
 // is the FAIL count and gates catalyst-join activation — a FAIL here would block a node that
 // simply hasn't opted into the replica yet. All deps injectable so tests touch no
 // fs/pgrep/launchctl. NODE-SAFE: file-mtime freshness only (no bun:sqlite); rowcount /
 // MAX(updated_at) freshness is check-setup.sh's richer job.
-export function checkReplicaWriter(deps = {}) {
+export function checkCloudSync(deps = {}) {
   const {
-    label = REPLICA_WRITER_AGENT_LABEL,
+    label = CLOUD_SYNC_AGENT_LABEL,
     laDir = defaultLaunchAgentsDir(),
     agentInstalled = defaultAgentInstalled,
-    processAlive = defaultReplicaWriterProcessAlive,
+    processAlive = defaultCloudSyncProcessAlive,
     dbPath = getReplicaDbPath(),
     fileExists = (p) => existsSync(p),
     statFile = (p) => statSync(p),
@@ -1554,19 +1554,19 @@ export function checkReplicaWriter(deps = {}) {
   // Gate: a node with NO writer agent, the read flag OFF, and NO replica file is simply not
   // on the replica tier — one INFO and out, so this check is safe to wire into every class.
   if (!installed && mode !== "on" && !dbPresent) {
-    return [mkCheck("replica-writer", STATUS.INFO, "local Linear replica tier not enabled on this node")];
+    return [mkCheck("cloud-sync", STATUS.INFO, "local Linear replica tier not enabled on this node")];
   }
 
   const checks = [];
 
   // (a) writer agent — installed + process alive (+ writer-lock as a corroborator).
   if (!installed) {
-    checks.push(mkCheck("replica-writer", STATUS.WARN, "agent not installed (run: catalyst-stack adopt-replica-writer) — reads fall back to live linearis"));
+    checks.push(mkCheck("cloud-sync", STATUS.WARN, "agent not installed (run: catalyst-stack adopt-cloud-sync) — reads fall back to live linearis"));
   } else if (processAlive()) {
     const lockHeld = fileExists(`${dbPath}.writer.lock`);
-    checks.push(mkCheck("replica-writer", STATUS.PASS, `agent installed + running${lockHeld ? " (writer-lock held)" : ""}`));
+    checks.push(mkCheck("cloud-sync", STATUS.PASS, `agent installed + running${lockHeld ? " (writer-lock held)" : ""}`));
   } else {
-    checks.push(mkCheck("replica-writer", STATUS.WARN, "agent installed but no writer process found — KeepAlive may be retrying; check ~/catalyst/replica-writer.log"));
+    checks.push(mkCheck("cloud-sync", STATUS.WARN, "agent installed but no writer process found — KeepAlive may be retrying; check ~/catalyst/cloud-sync.log"));
   }
 
   // (b) replica freshness + writer liveness. KEY INSIGHT: the DB + -wal mtime only advance
@@ -2462,7 +2462,7 @@ export function checkDaemonlessLocal(deps = {}) {
 
 const STACK_AGENT_LABEL = "ai.coalesce.catalyst-stack"; // the worker work-stack supervisor (broker/exec-core/monitor)
 const UPDATER_AGENT_LABEL = "ai.coalesce.catalyst-updater"; // the 5th updater agent (sole puller) on developer/monitor
-const REPLICA_WRITER_AGENT_LABEL = "ai.coalesce.catalyst-replica-writer"; // CTL-1394 (keep in sync w/ catalyst-stack + check-setup.sh)
+const CLOUD_SYNC_AGENT_LABEL = "ai.coalesce.catalyst-cloud-sync"; // CTL-1394 (keep in sync w/ catalyst-stack + check-setup.sh)
 
 function defaultLaunchAgentsDir() {
   return process.env.CATALYST_LAUNCHAGENTS_DIR || resolve(homedir(), "Library", "LaunchAgents");
@@ -2490,16 +2490,16 @@ function defaultUpdaterProcessAlive() {
   return !r.error && r.status === 0;
 }
 
-// defaultReplicaWriterProcessAlive — is the supervised replica writer RUNNING? (CTL-1394)
+// defaultCloudSyncProcessAlive — is the supervised cloud-sync daemon RUNNING? (CTL-1394)
 // pgrep the writer entrypoint; honors the CATALYST_ASSUME_NO_DAEMONS test seam.
-function defaultReplicaWriterProcessAlive() {
+function defaultCloudSyncProcessAlive() {
   if (process.env.CATALYST_ASSUME_NO_DAEMONS === "1") return false;
   // Match the basename, not the full dir path: the launcher execs the writer via
-  // `${SCRIPT_DIR}/../replica-writer.mjs`, so the live argv is
-  // `.../replica-writer/../replica-writer.mjs` — a `execution-core/replica-writer.mjs`
-  // pattern would miss it (Codex P2). `replica-writer.mjs` matches the writer process and
-  // not the launcher (`.../replica-writer/launch.sh` has no `.mjs`).
-  const r = spawnSync("pgrep", ["-f", "replica-writer\\.mjs"], { timeout: 5_000 });
+  // `${SCRIPT_DIR}/../cloud-sync.mjs`, so the live argv is
+  // `.../cloud-sync/../cloud-sync.mjs` — a `execution-core/cloud-sync.mjs`
+  // pattern would miss it (Codex P2). `cloud-sync.mjs` matches the writer process and
+  // not the launcher (`.../cloud-sync/launch.sh` has no `.mjs`).
+  const r = spawnSync("pgrep", ["-f", "cloud-sync\\.mjs"], { timeout: 5_000 });
   return !r.error && r.status === 0;
 }
 
@@ -2741,7 +2741,7 @@ export function checksForClass(nc, opts = {}) {
       () => checkMonitorProductionBuild({ fetch: _fetch }), // CTL-1372: warn on a dev-build monitor (advisory)
       () => checkCloudTokenEnv(), // advisory
       () => checkClusterSecretFreshness(), // CTL-1393: warn if running on stale rotated secrets (advisory)
-      () => checkReplicaWriter(), // CTL-1394: developer nodes read Linear from the local replica too (advisory)
+      () => checkCloudSync(), // CTL-1394: developer nodes read Linear from the local replica too (advisory)
       () => checkConfigScopeLeak(), // advisory
     ];
   }
@@ -2792,7 +2792,7 @@ export function checksForClass(nc, opts = {}) {
     () => checkReaper(), // CTL-1306: orphan-sweep reaper installed + baked path still exists (not dead-127)
     () => checkCloudTokenEnv(), // CTL-1307: cluster cloud token decrypted → projected to machine-level env (advisory)
     () => checkClusterSecretFreshness(), // CTL-1393: warn if the node is running on stale rotated secrets (advisory)
-    () => checkReplicaWriter(), // CTL-1394: supervised replica writer + read tier on the worker hot path (advisory)
+    () => checkCloudSync(), // CTL-1394: supervised cloud-sync daemon + read tier on the worker hot path (advisory)
     () => checkSdkExecutorAuth(), // CTL-1367 item 9: under executor=sdk, subscription auth must be correct (no api-key metering)
     () => checkConfigScopeLeak(), // CTL-1214: committed Layer-1 .catalyst/config.json must not carry node/cluster scope (roster/orchestration/feedback/sweep/repoColors/hosts.json)
     () => checkRepoIconTokenScope(), // CTL-1375: monitor daemon's gh token can read configured private repos' contents (else favicons fall back to the org avatar) — advisory (never FAIL)

@@ -670,16 +670,16 @@ fi
 header "Linear Read-Replica (writer + flag, optional)"
 
 REPLICA_DB="${CATALYST_REPLICA_DB:-$CATALYST_DIR/catalyst-replica.db}"
-REPLICA_WRITER_LABEL="ai.coalesce.catalyst-replica-writer"
+CLOUD_SYNC_LABEL="ai.coalesce.catalyst-cloud-sync"
 _replica_mode=$(jq -r '.catalyst.linearReplica.mode // empty' "${CATALYST_CONFIG}/config.json" 2>/dev/null)
 [[ "${CATALYST_LINEAR_REPLICA:-}" == "on" || "${CATALYST_LINEAR_REPLICA:-}" == "1" ]] && _replica_mode="on"
 
 # Writer agent liveness (the first launchctl probe in this script).
 if [[ "$(uname -s)" == "Darwin" ]] && command -v launchctl >/dev/null 2>&1; then
-    if launchctl list "$REPLICA_WRITER_LABEL" &>/dev/null; then
-        pass "replica-writer agent loaded ($REPLICA_WRITER_LABEL)"
+    if launchctl list "$CLOUD_SYNC_LABEL" &>/dev/null; then
+        pass "cloud-sync agent loaded ($CLOUD_SYNC_LABEL)"
     else
-        info "replica-writer agent not loaded — adopt with: catalyst-stack adopt-replica-writer"
+        info "cloud-sync agent not loaded — adopt with: catalyst-stack adopt-cloud-sync"
     fi
 fi
 
@@ -733,7 +733,7 @@ if command -v bun >/dev/null 2>&1 && [[ -f "$_cfg_mjs" ]]; then
     _probe=$( set +u
       unset CATALYST_CLOUD_TOKEN_ENV CATALYST_LAYER2_CONFIG_FILE 2>/dev/null || true
       [[ -r "$HOME/.config/catalyst/cluster.env" ]] && . "$HOME/.config/catalyst/cluster.env"
-      [[ -r "$HOME/.config/catalyst/replica-writer.env" ]] && . "$HOME/.config/catalyst/replica-writer.env"
+      [[ -r "$HOME/.config/catalyst/cloud-sync.env" ]] && . "$HOME/.config/catalyst/cloud-sync.env"
       _name=$(CFG_MJS="$_cfg_mjs" bun -e '
         const m = await import(process.env.CFG_MJS);
         process.stdout.write(m.resolveNodeCloudTokenEnv().envVar);
@@ -747,7 +747,7 @@ if command -v bun >/dev/null 2>&1 && [[ -f "$_cfg_mjs" ]]; then
         if [[ "$_token_present" == "yes" ]]; then
             pass "cloud token $_token_env present in the launchd-sourced 0600 files (len>0)"
         else
-            info "cloud token $_token_env not in the launchd-sourced files — provision it in ~/.config/catalyst/replica-writer.env (chmod 600) so the supervised writer can authenticate"
+            info "cloud token $_token_env not in the launchd-sourced files — provision it in ~/.config/catalyst/cloud-sync.env (chmod 600) so the supervised writer can authenticate"
         fi
     fi
 fi

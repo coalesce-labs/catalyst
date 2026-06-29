@@ -665,6 +665,109 @@ describe("refreshClusterSecretsIfChanged (CTL-1393)", () => {
     // the marker still advances — the file IS materialized; only the env needs a restart
     expect(readClusterSyncState(statePath).lastDecryptedSha).toBe("NEWSHA");
   });
+
+  // ── CTL-1393 (Codex P2 re-review of caf6b0e2): a too-new cluster.json
+  //    (schemaSkipped) must NOT mask a FAILED bare bundle. The schemaSkipped
+  //    short-circuit used to run FIRST and advance the marker over the un-applied
+  //    bare secret, stranding the rotation forever; bare-file failure is now assessed
+  //    BEFORE schemaSkipped. ──────────────────────────────────────────────────────
+
+  test("schemaSkipped JSON config + FAILED bare bundle (decrypt-failed) → marker NOT advanced (bare failure not masked)", () => {
+    seedClone();
+    writeClusterJson({ schemaVersion: 999, roster: ["mini"] }); // too-new → schemaSkipped
+    writeFileSync(join(clusterDir, "secrets", "node-secret-files.sops.json"), "{cipher}");
+    const statePath = join(configDir, ".state.json");
+    writeMarker(statePath, "OLDSHA");
+
+    const emits = [];
+    const res = refreshClusterSecretsIfChanged({
+      clusterDir,
+      configDir,
+      statePath,
+      git: baseGit,
+      gitCapture: makeGitCapture("NEWSHA", true),
+      // bundle decrypt fails → files.reason === "decrypt-failed" (JSON sync is
+      // schema-refused before decrypt, so this throw only hits the bare bundle)
+      decrypt: () => {
+        throw new Error("bad mac");
+      },
+      emit: (e) => emits.push(e),
+      now: () => "t",
+      node: "test-node",
+      logger: QUIET,
+    });
+
+    expect(res.ok).toBe(false);
+    expect(res.reason).toBe("decrypt-failed");
+    expect(emits.map((e) => e.name)).toContain("refresh-failed");
+    expect(emits[0].payload.reason).toBe("decrypt-failed");
+    // marker NOT advanced — the schemaSkipped short-circuit no longer masks the
+    // bare-bundle failure, so the next tick retries the rotated secret
+    expect(readClusterSyncState(statePath).lastDecryptedSha).toBe("OLDSHA");
+  });
+
+  test("schemaSkipped JSON config + FAILED bare bundle (partial bare-write) → marker NOT advanced (bare failure not masked)", () => {
+    seedClone();
+    writeClusterJson({ schemaVersion: 999, roster: ["mini"] }); // too-new → schemaSkipped
+    writeFileSync(join(clusterDir, "secrets", "node-secret-files.sops.json"), "{cipher}");
+    // pre-create a DIRECTORY at the bare-file dest so its write throws EISDIR
+    mkdirSync(join(configDir, "github-token"), { recursive: true });
+    const statePath = join(configDir, ".state.json");
+    writeMarker(statePath, "OLDSHA");
+
+    const emits = [];
+    const res = refreshClusterSecretsIfChanged({
+      clusterDir,
+      configDir,
+      statePath,
+      git: baseGit,
+      gitCapture: makeGitCapture("NEWSHA", true),
+      decrypt: (p) =>
+        p.endsWith("node-secret-files.sops.json") ? { "github-token": "tok" } : {},
+      emit: (e) => emits.push(e),
+      now: () => "t",
+      node: "test-node",
+      logger: QUIET,
+    });
+
+    expect(res.ok).toBe(false);
+    expect(res.reason).toBe("bare-write-failed");
+    expect(emits.map((e) => e.name)).toContain("refresh-failed");
+    expect(emits[0].payload.reason).toBe("bare-write-failed");
+    // marker NOT advanced — a too-new JSON schema must not mask the bare-write failure
+    expect(readClusterSyncState(statePath).lastDecryptedSha).toBe("OLDSHA");
+  });
+
+  test("schemaSkipped JSON config + bare bundle OK → marker advances (intentional fail-closed still success-for-marker)", () => {
+    seedClone();
+    writeClusterJson({ schemaVersion: 999, roster: ["mini"] }); // too-new → schemaSkipped
+    writeFileSync(join(clusterDir, "secrets", "node-secret-files.sops.json"), "{cipher}");
+    const statePath = join(configDir, ".state.json");
+    writeMarker(statePath, "OLDSHA");
+
+    const emits = [];
+    const res = refreshClusterSecretsIfChanged({
+      clusterDir,
+      configDir,
+      statePath,
+      git: baseGit,
+      gitCapture: makeGitCapture("NEWSHA", true),
+      decrypt: (p) =>
+        p.endsWith("node-secret-files.sops.json") ? { "github-token": "tok" } : {},
+      emit: (e) => emits.push(e),
+      now: () => "t",
+      node: "test-node",
+      logger: QUIET,
+    });
+
+    expect(res.ok).toBe(true);
+    expect(res.written).toEqual(["github-token"]);
+    // schemaSkipped is an INTENTIONAL fail-closed; with the bare files OK it still
+    // counts as success-for-marker, so the marker advances (regression guard against
+    // over-correcting the predicate)
+    expect(readClusterSyncState(statePath).lastDecryptedSha).toBe("NEWSHA");
+    expect(emits.map((e) => e.name)).not.toContain("refresh-failed");
+  });
 });
 
 describe("clusterSync boot (CTL-1393 conditional marker seed)", () => {
