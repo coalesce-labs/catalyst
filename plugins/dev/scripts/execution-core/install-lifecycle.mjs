@@ -570,7 +570,11 @@ export async function runInstallLifecycle({ operation, nodeClass, opts = {} }, d
   // dirs on PATH so a later step (e.g. adopt-updater's `command -v bun` preflight) finds a tool that
   // setup-catalyst just installed into ~/.bun/bin / ~/.local/bin within its own child process.
   const home = (env.HOME || homedir());
-  const seededPath = [`${home}/.bun/bin`, `${home}/.local/bin`, env.PATH].filter(Boolean).join(":");
+  // Seed the catalyst CLI bin dir (where install-cli.sh just created the symlinks) + the standard
+  // install-bin dirs, so a later step finds tools this run installed — e.g. `catalyst-stack start`
+  // shells out to catalyst-broker/monitor/execution-core by name, and adopt-updater's `command -v bun`.
+  const cliBinDir = env.CATALYST_BIN_DIR || env.CATALYST_CLI_BIN_DIR || `${home}/.catalyst/bin`;
+  const seededPath = [cliBinDir, `${home}/.bun/bin`, `${home}/.local/bin`, env.PATH].filter(Boolean).join(":");
   const stepEnv = { ...env, CATALYST_NODE_CLASS: nodeClass, CATALYST_LAYER2_CONFIG_FILE: layer2, CATALYST_MACHINE_CONFIG: layer2, PATH: seededPath };
 
   // Pre-flight live-node guard (teardown only) — refuse BEFORE starting a run.
@@ -760,31 +764,15 @@ export async function runInstallLifecycle({ operation, nodeClass, opts = {} }, d
       // state (the backup) had launchd agents and whether this run already tore the node down.
       const teardownRan = ctx.teardownRan;
       const hadAgents = bundleHasCapturedAgents(ctx.bundlePath);
-      const restoreNode = () => {
-        const r = runStep({ argv: [scripts.backup, "restore", ctx.bundlePath, "--force"], env: stepEnv });
-        // On `install`, acquire overwrites pluginDirs BEFORE the backup, so the bundle holds the NEW
-        // value; restore the node's original pre-run pluginDirs if it differed (a custom/older
-        // checkout), so a failed install doesn't permanently repoint it. (reinstall backs up first, so
-        // its bundle already has the original — this is a no-op there.)
-        if (r.code === 0 && preInstall.pluginDirs) {
-          try {
-            const cfg = readLayer2(layer2);
-            if (readDeepKey(cfg, "catalyst.orchestration.pluginDirs") !== preInstall.pluginDirs) {
-              setDeepKey(cfg, "catalyst.orchestration.pluginDirs", preInstall.pluginDirs);
-              writeLayer2Atomic(layer2, cfg);
-              log(`catalyst-install: rollback — restored prior pluginDirs ${preInstall.pluginDirs}`);
-            }
-          } catch (e) {
-            log(`catalyst-install: rollback note — could not restore prior pluginDirs: ${e.message}`);
-          }
-        }
-        return r;
-      };
+      const restoreNode = () => runStep({ argv: [scripts.backup, "restore", ctx.bundlePath, "--force"], env: stepEnv });
+      // bootOutAgents → true iff BOTH uninstall-services and stop succeeded. A failed cleanup must drop
+      // the rollback to incomplete (agents could still be running), so the caller folds this into rolledBack.
       const bootOutAgents = () => {
         const unsvc = runStep({ argv: [scripts.stack, "uninstall-services"], env: stepEnv });
         if (unsvc.code !== 0) log(`catalyst-install: rollback note — uninstall-services rc ${unsvc.code} (agents may remain): ${unsvc.stderr.trim()}`);
         const stop = runStep({ argv: [scripts.stack, "stop"], env: stepEnv });
         if (stop.code !== 0) log(`catalyst-install: rollback note — stop rc ${stop.code}`);
+        return unsvc.code === 0 && stop.code === 0;
       };
       const stripManagedKeys = () => {
         try {
@@ -824,7 +812,7 @@ export async function runInstallLifecycle({ operation, nodeClass, opts = {} }, d
       if (!hadAgents) {
         // The node's ORIGINAL state had NO launchd agents (a fresh install, or a config-only node).
         // Boot out anything provisioning installed this run, then restore.
-        bootOutAgents();
+        const bootOk = bootOutAgents();
         restore = restoreNode();
         if (restore.code === 0) {
           if (teardownRan) {
@@ -844,8 +832,10 @@ export async function runInstallLifecycle({ operation, nodeClass, opts = {} }, d
             if (!preInstall.hadManagedKeys) stripManagedKeys();
           }
         }
-        rolledBack = restore.code === 0;
-        log(rolledBack ? `catalyst-install: rolled back — restored ${ctx.bundlePath} (verify launchd/daemon state)` : `catalyst-install: rollback INCOMPLETE (restore rc ${restore.code}); bundle at ${ctx.bundlePath}`);
+        // A failed boot-out (agents possibly still running) makes the rollback INCOMPLETE even if the
+        // file restore succeeded.
+        rolledBack = restore.code === 0 && bootOk;
+        log(rolledBack ? `catalyst-install: rolled back — restored ${ctx.bundlePath} (verify launchd/daemon state)` : `catalyst-install: rollback INCOMPLETE (restore rc ${restore.code}, cleanup ${bootOk ? "ok" : "FAILED"}); bundle at ${ctx.bundlePath}`);
       } else {
         // The node HAD agents: a reinstall teardown booted out PRE-EXISTING agents, OR an install-retry
         // where a failed provisioning step (adopt-updater/install-services) backed an agent out. If the
@@ -885,6 +875,22 @@ export async function runInstallLifecycle({ operation, nodeClass, opts = {} }, d
       rollbackDisposition = rolledBack ? "ok" : "failed";
     } else if (ctx.bundlePath) {
       log(`catalyst-install: ${operation} failed — NOT auto-rolled-back; restore manually from ${ctx.bundlePath} if needed`);
+    }
+    // Restore the node's prior pluginDirs that acquire overwrote — UNCONDITIONALLY, even when there is
+    // no bundle (the install backup itself failed AFTER acquire repointed it, so the bundle-driven
+    // restore above never ran). The catch-level restore above re-laid the post-acquire value; this puts
+    // the original back. (No-op for reinstall — it backs up before acquire — and for a fresh node.)
+    if (preInstall.pluginDirs) {
+      try {
+        const cfg = readLayer2(layer2);
+        if (readDeepKey(cfg, "catalyst.orchestration.pluginDirs") !== preInstall.pluginDirs) {
+          setDeepKey(cfg, "catalyst.orchestration.pluginDirs", preInstall.pluginDirs);
+          writeLayer2Atomic(layer2, cfg);
+          log(`catalyst-install: rollback — restored prior pluginDirs ${preInstall.pluginDirs}`);
+        }
+      } catch (e) {
+        log(`catalyst-install: rollback note — could not restore prior pluginDirs: ${e.message}`);
+      }
     }
     run.fail(err, { rolledBack, detail: { rollback: rollbackDisposition, bundle: ctx.bundlePath } });
     return { outcome: rolledBack ? "rolled_back" : "failed", error: err.message, rolledBack, rollbackDisposition, bundlePath: ctx.bundlePath, traceId };

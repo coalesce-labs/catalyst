@@ -59,7 +59,7 @@ const SCRIPTS = {
 
 // makeDeps — a fully-stubbed dep set. `failOn` is a predicate (argv|joined → truthy = fail with
 // that rc). `bundle` is the path catalyst-backup "prints". probeDaemons/probeDrained are flags.
-function makeDeps({ failOn, bundle = "/tmp/bundle-xyz", daemonsLive = false, residual = false, drained = false, bundleHadAgents = false, updaterAgent = false, workerAgents = false, cliInstalled = false, restorePluginDirs, missingBins = [], layer2Initial } = {}) {
+function makeDeps({ failOn, bundle = "/tmp/bundle-xyz", daemonsLive = false, residual = false, drained = false, bundleHadAgents = false, updaterAgent = false, workerAgents = false, cliInstalled = false, restorePluginDirs, acquireWritesPluginDirs, missingBins = [], layer2Initial } = {}) {
   const events = [];
   const calls = [];
   const stepCalls = []; // {argv, env} per spawned step — lets tests assert the pinned step env
@@ -75,6 +75,14 @@ function makeDeps({ failOn, bundle = "/tmp/bundle-xyz", daemonsLive = false, res
       const joined = argv.join(" ");
       const rc = typeof failOn === "function" ? failOn(argv, joined) : 0;
       if (rc) return { code: rc, stdout: "", stderr: `stub fail ${joined}` };
+      if (argv[0] === "PLUGIN_SRC" && acquireWritesPluginDirs !== undefined) {
+        // simulate setup-plugin-source.sh repointing pluginDirs to the canonical checkout (pre-backup)
+        const cfg = JSON.parse(readFileSync(layer2, "utf8") || "{}");
+        cfg.catalyst = cfg.catalyst || {};
+        cfg.catalyst.orchestration = cfg.catalyst.orchestration || {};
+        cfg.catalyst.orchestration.pluginDirs = acquireWritesPluginDirs;
+        writeFileSync(layer2, JSON.stringify(cfg));
+      }
       if (argv[0] === "BACKUP" && argv[1] === "backup") return { code: 0, stdout: `capturing…\n${bundle}\n`, stderr: "" };
       if (argv[0] === "BACKUP" && argv[1] === "restore" && restorePluginDirs !== undefined) {
         // simulate restore re-laying the captured (post-acquire) pluginDirs into the config
@@ -483,6 +491,7 @@ describe("fresh-node bootstrap + profile-switch guards (Codex round 5)", () => {
     bag.deps.env = { CATALYST_ASSUME_NO_DAEMONS: "1", HOME: "/home/me", PATH: "/usr/bin" };
     await runInstallLifecycle({ operation: "install", nodeClass: "developer", opts: {} }, bag.deps);
     const adopt = bag.stepCalls.find((c) => c.argv.join(" ") === "STACK adopt-updater");
+    expect(adopt.env.PATH).toContain("/home/me/.catalyst/bin"); // CLI bin dir (just-installed symlinks)
     expect(adopt.env.PATH).toContain("/home/me/.bun/bin");
     expect(adopt.env.PATH).toContain("/usr/bin"); // original PATH preserved at the end
   });
@@ -546,6 +555,25 @@ describe("fresh-node bootstrap + profile-switch guards (Codex round 5)", () => {
     await runInstallLifecycle({ operation: "reinstall", nodeClass: "developer", opts: { force: true } }, deps);
     const start = stepCalls.find((c) => c.argv.join(" ") === "STACK start --yes");
     expect(start.env.CATALYST_NODE_CLASS).toBe("worker"); // restored class, NOT the requested developer
+  });
+  test("fresh-node rollback whose boot-out (cleanup) FAILS → incomplete rollback (outcome failed)", async () => {
+    const { deps } = withRealRun(makeDeps({ bundleHadAgents: false, failOn: (a) => (["STACK install-services", "STACK uninstall-services"].includes(a.join(" ")) ? 1 : 0) }));
+    const res = await runInstallLifecycle({ operation: "install", nodeClass: "worker", opts: {} }, deps);
+    expect(res.outcome).toBe("failed"); // restore may succeed but agents could still be running
+  });
+  test("backup failing AFTER acquire repointed pluginDirs still restores the prior value (no bundle)", async () => {
+    const { deps, layer2 } = withRealRun(
+      makeDeps({
+        layer2Initial: { catalyst: { orchestration: { pluginDirs: "/custom/checkout/plugins/dev" } } },
+        acquireWritesPluginDirs: "/canonical/plugin-source/plugins/dev",
+        failOn: (a) => (a[0] === "BACKUP" && a[1] === "backup" ? 1 : 0),
+      }),
+    );
+    const res = await runInstallLifecycle({ operation: "install", nodeClass: "worker", opts: {} }, deps);
+    expect(res.outcome).toBe("failed"); // backup abort (no rollback bundle)
+    expect(res.bundlePath).toBeNull();
+    const cfg = JSON.parse(readFileSync(layer2, "utf8") || "{}");
+    expect(cfg.catalyst.orchestration.pluginDirs).toBe("/custom/checkout/plugins/dev"); // prior value restored even without a bundle
   });
   test("install rollback restores the node's prior pluginDirs that acquire overwrote", async () => {
     // node had a custom pluginDirs; restore re-lays the post-acquire (canonical) value → rollback writes back custom.
