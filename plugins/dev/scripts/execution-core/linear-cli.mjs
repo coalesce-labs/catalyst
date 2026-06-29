@@ -208,7 +208,12 @@ function runLinearis(args) {
         error: `linearis ${args.join(" ")} failed`,
         status: r.status ?? null,
         timedOut,
-        detail: (r.stderr || r.error?.message || "").slice(0, 500),
+        // Defense-in-depth: redact any Linear token shape from linearis's own stderr
+        // before it lands in our error envelope (the replica/CLI never handles tokens,
+        // but linearis carries LINEAR_API_TOKEN — never echo one through us).
+        detail: (r.stderr || r.error?.message || "")
+          .replace(/\blin_(?:api|oauth)_[A-Za-z0-9_-]+/g, "lin_***")
+          .slice(0, 500),
       },
     });
   }
