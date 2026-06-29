@@ -62,11 +62,16 @@ case "${1:-}" in
   "")             print_help >&2; exit 1 ;;
 esac
 
-# Resolve this script's directory through symlinks.
+# Resolve this script's directory through symlinks. Normalize each hop against the symlink's own dir
+# so a RELATIVE target resolves too (canonical idiom shared with catalyst / catalyst-install).
 _SRC="${BASH_SOURCE[0]}"
-while [[ -L $_SRC ]]; do _SRC="$(readlink "$_SRC")"; done
-SCRIPT_DIR="$(cd "$(dirname "$_SRC")" && pwd)"
-unset _SRC
+while [[ -L $_SRC ]]; do
+  _DIR="$(cd -P "$(dirname "$_SRC")" && pwd)"
+  _SRC="$(readlink "$_SRC")"
+  [[ "$_SRC" != /* ]] && _SRC="$_DIR/$_SRC"
+done
+SCRIPT_DIR="$(cd -P "$(dirname "$_SRC")" && pwd)"
+unset _SRC _DIR
 
 WHY_SCRIPT="${SCRIPT_DIR}/execution-core/beliefs/why.mjs"
 

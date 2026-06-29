@@ -10,7 +10,18 @@
 # --dry-run accepted (documented as default read-only behavior, no separate code path).
 set -uo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Resolve symlinks before deriving SCRIPT_DIR — install-cli.sh installs this as a symlink in the bin
+# dir (~/.catalyst/bin), so a bare dirname would point there and the execution-core/doctor.mjs lookup
+# would miss ("catalyst doctor: missing <bin>/execution-core/doctor.mjs"). Normalize each hop against
+# the symlink's own dir so a RELATIVE target resolves too (same idiom as catalyst / catalyst-install /
+# catalyst-backup).
+_SRC="${BASH_SOURCE[0]}"
+while [[ -L "$_SRC" ]]; do
+  _DIR="$(cd -P "$(dirname "$_SRC")" && pwd)"
+  _SRC="$(readlink "$_SRC")"
+  [[ "$_SRC" != /* ]] && _SRC="$_DIR/$_SRC"
+done
+SCRIPT_DIR="$(cd -P "$(dirname "$_SRC")" && pwd)"
 DOCTOR_MJS="${DOCTOR_MJS:-${SCRIPT_DIR}/execution-core/doctor.mjs}"
 
 # Resolve a JS runtime (bun preferred, node fallback) — matches sibling .mjs CLIs.

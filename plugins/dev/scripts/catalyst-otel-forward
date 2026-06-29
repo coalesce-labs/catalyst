@@ -24,5 +24,14 @@ case "${1:-}" in
   -h|--help|help) print_help; exit 0 ;;
 esac
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Resolve symlinks before deriving SCRIPT_DIR — install-cli.sh installs this as a symlink in the bin
+# dir, so a bare dirname would point at ~/.catalyst/bin and miss otel-forward/index.ts. Normalize each
+# hop against the symlink's own dir so a RELATIVE target resolves too (same idiom as catalyst-install).
+_SRC="${BASH_SOURCE[0]}"
+while [[ -L "$_SRC" ]]; do
+  _DIR="$(cd -P "$(dirname "$_SRC")" && pwd)"
+  _SRC="$(readlink "$_SRC")"
+  [[ "$_SRC" != /* ]] && _SRC="$_DIR/$_SRC"
+done
+SCRIPT_DIR="$(cd -P "$(dirname "$_SRC")" && pwd)"
 exec bun run "${SCRIPT_DIR}/otel-forward/index.ts" "$@"
