@@ -661,6 +661,86 @@ else
     fi
 fi
 
+# ─── 7c2. Linear Read-Replica (supervised writer + read flag, CTL-1394) ─────────
+#
+# The per-node CatalystReplica writer keeps ~/catalyst/catalyst-replica.db fresh from the
+# Catalyst-Cloud change feed; with CATALYST_LINEAR_REPLICA=on the scheduler hot path
+# (replica-read.mjs) + `catalyst-linear` read it locally instead of rate-limited linearis.
+# Entirely advisory (warn/info, never fail) — a node that hasn't opted in is fine.
+header "Linear Read-Replica (writer + flag, optional)"
+
+REPLICA_DB="${CATALYST_REPLICA_DB:-$CATALYST_DIR/catalyst-replica.db}"
+REPLICA_WRITER_LABEL="ai.coalesce.catalyst-replica-writer"
+_replica_mode=$(jq -r '.catalyst.linearReplica.mode // empty' "${CATALYST_CONFIG}/config.json" 2>/dev/null)
+[[ "${CATALYST_LINEAR_REPLICA:-}" == "on" || "${CATALYST_LINEAR_REPLICA:-}" == "1" ]] && _replica_mode="on"
+
+# Writer agent liveness (the first launchctl probe in this script).
+if [[ "$(uname -s)" == "Darwin" ]] && command -v launchctl >/dev/null 2>&1; then
+    if launchctl list "$REPLICA_WRITER_LABEL" &>/dev/null; then
+        pass "replica-writer agent loaded ($REPLICA_WRITER_LABEL)"
+    else
+        info "replica-writer agent not loaded — adopt with: catalyst-stack adopt-replica-writer"
+    fi
+fi
+
+# Replica DB presence + content freshness (rowcount + newest mirror timestamp).
+if [[ -f "$REPLICA_DB" ]]; then
+    if command -v sqlite3 >/dev/null 2>&1; then
+        _n=$(sqlite3 "$REPLICA_DB" "SELECT COUNT(*) FROM issues;" 2>/dev/null || echo "")
+        if [[ -z "$_n" ]]; then
+            warn "replica db present but unreadable (locked/corrupt?) — reads fall back to linearis"
+        elif [[ "$_n" == "0" ]]; then
+            warn "replica db empty (0 issues) — writer not connected/seeded yet"
+        else
+            pass "replica db has $_n issues"
+            _mx=$(sqlite3 "$REPLICA_DB" "SELECT MAX(updated_at) FROM issues;" 2>/dev/null || echo "")
+            # updated_at is epoch-ms; warn if the newest mirrored change is > 1h old (likely a dead writer).
+            if [[ -n "$_mx" && "$_mx" =~ ^[0-9]+$ ]]; then
+                _age_s=$(( ( $(date +%s) * 1000 - _mx ) / 1000 ))
+                if (( _age_s > 3600 )); then
+                    warn "replica newest change is ${_age_s}s old (>1h) — writer may be down/stale"
+                else
+                    pass "replica fresh (newest change ${_age_s}s ago)"
+                fi
+            fi
+        fi
+    fi
+else
+    info "no local replica db at $REPLICA_DB — writer not connected yet (this node reads Linear directly)"
+fi
+
+# Read flag <-> writer consistency.
+if [[ "$_replica_mode" == "on" ]]; then
+    if [[ -f "$REPLICA_DB" ]]; then
+        pass "CATALYST_LINEAR_REPLICA=on with a local replica — reads served locally"
+    else
+        warn "CATALYST_LINEAR_REPLICA=on but no local replica db — reads MISS through to live linearis"
+    fi
+elif [[ -f "$REPLICA_DB" ]]; then
+    warn "local replica present but CATALYST_LINEAR_REPLICA is off — flip it on to read from the replica"
+else
+    info "CATALYST_LINEAR_REPLICA off (this node reads Linear directly)"
+fi
+
+# Per-node cloud token PRESENCE — by NAME only, NEVER echo the value. Resolve the node's
+# token env-var NAME via config.mjs (same resolver the writer uses), then test presence.
+_cfg_scripts="${CLAUDE_PLUGIN_ROOT:+$CLAUDE_PLUGIN_ROOT/scripts}"
+[[ -z "$_cfg_scripts" ]] && _cfg_scripts="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+_cfg_mjs="$_cfg_scripts/execution-core/config.mjs"
+if command -v bun >/dev/null 2>&1 && [[ -f "$_cfg_mjs" ]]; then
+    _token_env=$(CFG_MJS="$_cfg_mjs" bun -e '
+      const m = await import(process.env.CFG_MJS);
+      process.stdout.write(m.resolveNodeCloudTokenEnv().envVar);
+    ' 2>/dev/null || echo "")
+    if [[ -n "$_token_env" ]]; then
+        if [[ -n "${!_token_env:-}" ]]; then
+            pass "cloud token $_token_env is set (len>0)"
+        else
+            info "cloud token $_token_env not set in this shell — provision it in a 0600 file for the launchd writer"
+        fi
+    fi
+fi
+
 # ─── 7d. Proxy leak into interactive shells (CTL-869, CTL-846 regression class) ──
 #
 # The mitmproxy HTTP(S)_PROXY in execution-core.env is DAEMON-launch-scoped only:

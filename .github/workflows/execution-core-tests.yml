@@ -40,6 +40,7 @@ on:
       - "plugins/dev/scripts/catalyst-install"
       - "plugins/dev/scripts/catalyst"
       - "plugins/dev/scripts/catalyst-linear"
+      - "plugins/dev/scripts/catalyst-stack"
       - "plugins/dev/scripts/install-cli.sh"
       - "plugins/dev/scripts/check-setup.sh"
       - "plugins/dev/scripts/__tests__/**"
@@ -60,6 +61,7 @@ on:
       - "plugins/dev/scripts/catalyst-install"
       - "plugins/dev/scripts/catalyst"
       - "plugins/dev/scripts/catalyst-linear"
+      - "plugins/dev/scripts/catalyst-stack"
       - "plugins/dev/scripts/install-cli.sh"
       - "plugins/dev/scripts/check-setup.sh"
       - "plugins/dev/scripts/__tests__/**"
@@ -119,6 +121,13 @@ jobs:
         # exits non-zero if any bun-only import leaked into it.
         run: bun build linear-cli.mjs --target=node --outfile /dev/null
 
+      - name: Verify replica-writer import graph (bun build resolution check, CTL-1394)
+        # CTL-1394: replica-writer.mjs is the supervised Linear-replica writer, a separate
+        # launchd entrypoint (replica-writer/launch.sh execs `bun` on it) NOT in daemon.mjs's
+        # graph. Walk its static graph so a bad cross-import (./config.mjs,
+        # @catalyst-cloud/sdk/node) fails CI before it strands a node at launchd runtime.
+        run: bun build replica-writer.mjs --target=node --outfile /dev/null
+
       - name: catalyst-install launcher + router smoke test
         # CTL-1369 PR3: exercises the REAL catalyst-install bash launcher (symlink resolution →
         # node → driver) and the `catalyst` router dispatch end-to-end via --dry-run. The mjs unit
@@ -134,6 +143,13 @@ jobs:
         # without documenting it fails CI. Pure string assertions; runs no CLIs.
         working-directory: plugins/dev/scripts
         run: bash __tests__/cli-reference-drift.test.sh
+
+      - name: catalyst-stack replica-writer plist render test
+        # CTL-1394: unit-tests the PURE render_replica_writer_plist (KeepAlive shape,
+        # no StartInterval, and the secret-hygiene invariant that the world-readable
+        # plist carries no token). Pure string assertions; installs nothing.
+        working-directory: plugins/dev/scripts
+        run: bash __tests__/catalyst-stack-replica-writer-plist.test.sh
 
       - name: Run stable unit tests
         # EXCLUDED SUITES — do NOT add these back without fixing the underlying
@@ -205,6 +221,7 @@ jobs:
             comms-drain.test.mjs \
             config-pino-fallback.test.mjs \
             config-node-class.test.mjs \
+            config-cloud-token-env.test.mjs \
             config.test.mjs \
             delegate-config-event.test.mjs \
             delegate-queue.test.mjs \
@@ -213,6 +230,7 @@ jobs:
             diagnostician.test.mjs \
             dispatch.test.mjs \
             doctor.test.mjs \
+            doctor-replica.test.mjs \
             eligible-set.test.mjs \
             event-cursor.test.mjs \
             event-scan.test.mjs \

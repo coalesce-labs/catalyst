@@ -342,6 +342,40 @@ own Linear key, preserving per-host rate-limit isolation.
 > ticket-detail and search flows, and the `catalyst monitor` command, at the same remote endpoint is the
 > "split" deployment topology tracked in CTL-1347 / CTL-1354.
 
+### Local Linear replica writer (`catalyst.linearReplica`, CTL-1394)
+
+> **Not the same thing as `readReplica`.** `catalyst.readReplica.baseUrl` (above) is the **HTTP board
+> endpoint** the terminal HUD reads. `catalyst.linearReplica` is the **local SQLite Linear-read tier** —
+> a per-node `~/catalyst/catalyst-replica.db` kept fresh from the Catalyst Cloud change feed by a
+> supervised writer, read by the scheduler's hot terminal checks (`replica-read.mjs`) and the
+> `catalyst-linear` CLI. It exists to take Linear **reads** off the rate-limited `linearis` path (the
+> 429 unblock), and is opt-in.
+
+**The writer** is a supervised launchd LaunchAgent (`catalyst-stack adopt-replica-writer`) that runs
+`@catalyst-cloud/sdk`'s `CatalystReplica` with **this node's own cloud token**. It runs on **every node
+class** — workers (mini/mini-2) read the replica from the scheduler hot path; developer nodes (your
+laptop) read it via `catalyst-linear`. The token is never placed in the (world-readable) plist; the
+launcher sources it from a `0600` file at run time.
+
+| Key / env | Purpose | Default |
+| --- | --- | --- |
+| `CATALYST_LINEAR_REPLICA` env / `catalyst.linearReplica.mode` (Layer-2) | The **read flag** — `on` makes the scheduler + `catalyst-linear` trust the local replica; `off`/unset reads `linearis` directly. Env (`on`/`1` on, else off) wins over Layer-2 (`mode: "on"`). | off |
+| `CATALYST_REPLICA_DB` env | Replica file path. | `~/catalyst/catalyst-replica.db` |
+| `CATALYST_CLOUD_TOKEN_ENV` env / `catalyst.cloud.tokenEnv` (Layer-2) | Override the env-var **name** holding this node's cloud token. Otherwise resolved by host: `laptop`/`office-desk`→`CATALYST_CLOUD_WORKSTATION_TOKEN`, `mini`→`CATALYST_MINI_ACCOUNT_TOKEN`, `mini-2`→`CATALYST_MINI_1_ACCOUNT_TOKEN`; unmapped → shared `CATALYST_CLOUD_TOKEN`. | host table |
+| `CATALYST_CLOUD_BASE_URL` / `CATALYST_CLOUD_ACCOUNT` env | Cloud feed coordinates. | `https://api.catalyst-cloud.coalescelabs.ai/api/v1` / `tenant-0` |
+
+**Seed-before-flip runbook** (per node): provision the node's token into `~/.config/catalyst/replica-writer.env`
+(`chmod 600`) → `catalyst-stack adopt-replica-writer` → wait for a verified seed (`catalyst doctor`'s
+`replica-fresh` PASS, or `sqlite3 ~/catalyst/catalyst-replica.db 'SELECT COUNT(*) FROM issues'` > 0) →
+**then** set `CATALYST_LINEAR_REPLICA=on` (and restart execution-core on a worker so the scheduler builds
+the reader). Flipping the flag before the seed completes is harmless — reads simply MISS through to
+`linearis` (no relief) until the replica is populated. `catalyst doctor` + `catalyst-stack services-status`
+report writer liveness, replica freshness, and token presence (by name — never the value).
+
+```json
+{ "catalyst": { "linearReplica": { "mode": "on" } } }
+```
+
 ## GitHub merge rules live in GitHub
 
 Catalyst can open PRs, fix CI, answer review bots, and merge. But GitHub decides what must pass before code lands. Those rules live in **GitHub branch protection or rulesets**, not in `.catalyst/config.json`.
