@@ -9,7 +9,7 @@ import { readFileSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { INSTALL_PHASES } from "./lib/install-telemetry.mjs";
+import { INSTALL_PHASES, INSTALL_EVENT } from "./lib/install-telemetry.mjs";
 import {
   UNINSTALL_PHASES,
   REINSTALL_PHASES,
@@ -55,6 +55,7 @@ const SCRIPTS = {
   setup: "SETUP",
   installCli: "INSTALL_CLI",
   stack: "STACK",
+  doctor: "DOCTOR", // CTL-1369 PR4: the pre/post-install doctor pass (catalyst-doctor --profile install)
 };
 
 // makeDeps — a fully-stubbed dep set. `failOn` is a predicate (argv|joined → truthy = fail with
@@ -265,6 +266,147 @@ describe("planPhases — per-class correctness (pure)", () => {
   });
   test("unknown operation throws", () => {
     expect(() => planPhases({ operation: "frobnicate", nodeClass: "worker", scripts: SCRIPTS })).toThrow(/unknown operation/);
+  });
+  // CTL-1369 PR4: the healthcheck phase runs verify-node AND the class-aware doctor (--profile install).
+  test("install/reinstall healthcheck runs verify-node then doctor (--profile install); uninstall has neither", () => {
+    for (const operation of ["install", "reinstall"]) {
+      const hc = planPhases({ operation, nodeClass: "worker", scripts: SCRIPTS }).find((p) => p.phase === "healthcheck");
+      const labels = hc.steps.map((s) => s.label);
+      expect(labels).toEqual(["verify-node", "doctor"]);
+      const doctorStep = hc.steps.find((s) => s.label === "doctor");
+      expect(doctorStep.kind).toBe("doctor");
+      expect(doctorStep.argv).toEqual(["DOCTOR", "--profile", "install", "--json"]);
+    }
+    // uninstall ends with verify-clean — no healthcheck phase, no doctor step.
+    expect(planPhases({ operation: "uninstall", nodeClass: "worker", scripts: SCRIPTS }).some((p) => p.phase === "healthcheck")).toBe(false);
+    expect(stepLabels(planPhases({ operation: "uninstall", nodeClass: "worker", scripts: SCRIPTS }))).not.toContain("doctor");
+  });
+});
+
+// ───────────────────────── CTL-1369 PR4: doctor pre/post-install pass ─────────────────────────
+describe("runInstallLifecycle — doctor pre/post-install pass (CTL-1369 PR4)", () => {
+  // Inject a runDoctorPass returning a fixed summary so the pre/post passes are deterministic.
+  const withDoctor = (summary, over = {}) => {
+    const bag = withRealRun(makeDeps(over));
+    bag.deps.runDoctorPass = () => summary;
+    return bag;
+  };
+
+  // Both provisioning ops (install AND reinstall) capture the before-snapshot — parametrized so the
+  // `|| operation === "reinstall"` arm is genuinely exercised (a future narrowing to install-only fails here).
+  for (const operation of ["install", "reinstall"]) {
+    test(`the ${operation} started event carries the pre-install doctor before-snapshot; completed carries the after`, async () => {
+      const summary = { ok: false, rc: 1, counts: { pass: 1, warn: 0, fail: 1 }, fails: ["agents-for-class"] };
+      const { deps, events } = withDoctor(summary); // makeDeps default daemonsLive=false → reinstall passes the teardown guard
+      await runInstallLifecycle({ operation, nodeClass: "worker", opts: {} }, deps);
+      const started = events.find((e) => e.event === INSTALL_EVENT.started);
+      const completed = events.find((e) => e.event === INSTALL_EVENT.completed);
+      expect(started.detail.preDoctor).toEqual(summary); // before-state observable in the trace
+      expect(completed.detail.postDoctor).toEqual(summary); // after-state too
+    });
+  }
+
+  test("a post-install doctor FAIL → outcome completed (node IS installed) but doctorOk=false", async () => {
+    const { deps } = withDoctor({ ok: false, rc: 1, counts: { pass: 1, warn: 0, fail: 1 }, fails: ["agents-for-class"] });
+    const res = await runInstallLifecycle({ operation: "install", nodeClass: "worker", opts: {} }, deps);
+    expect(res.outcome).toBe("completed");
+    expect(res.doctorOk).toBe(false);
+    expect(res.doctorFails).toEqual(["agents-for-class"]);
+  });
+
+  test("a post-install doctor PASS → doctorOk=true", async () => {
+    const { deps } = withDoctor({ ok: true, rc: 0, counts: { pass: 3, warn: 0, fail: 0 }, fails: [] });
+    const res = await runInstallLifecycle({ operation: "install", nodeClass: "worker", opts: {} }, deps);
+    expect(res.outcome).toBe("completed");
+    expect(res.doctorOk).toBe(true);
+  });
+
+  test("a doctor that can't run (ok:null) is ADVISORY — doctorOk stays true (never fails a good install)", async () => {
+    const { deps } = withDoctor({ ok: null, rc: 127, counts: null, fails: null });
+    const res = await runInstallLifecycle({ operation: "install", nodeClass: "worker", opts: {} }, deps);
+    expect(res.outcome).toBe("completed");
+    expect(res.doctorOk).toBe(true);
+  });
+
+  test("uninstall does NOT run a pre-install doctor (no before-snapshot on a teardown-only op)", async () => {
+    const { deps, events } = withDoctor({ ok: true, rc: 0, counts: { pass: 3, warn: 0, fail: 0 }, fails: [] }, { drained: true });
+    await runInstallLifecycle({ operation: "uninstall", nodeClass: "worker", opts: { force: true } }, deps);
+    const started = events.find((e) => e.event === INSTALL_EVENT.started);
+    expect(started.detail.preDoctor ?? null).toBeNull();
+  });
+
+  test("the pre-install doctor is OBSERVE-only — a FAIL before-state does NOT refuse a fresh install", async () => {
+    // Fresh worker: pre-install doctor FAILs (no agents yet) but the install must still proceed.
+    const { deps } = withDoctor({ ok: false, rc: 1, counts: { pass: 0, warn: 0, fail: 2 }, fails: ["agents-for-class", "node-class"] });
+    const res = await runInstallLifecycle({ operation: "install", nodeClass: "worker", opts: {} }, deps);
+    expect(res.outcome).toBe("completed"); // proceeded despite the FAIL before-state
+  });
+
+  // The PRODUCTION parser (defaultRunDoctorPass) — exercised by OMITTING deps.runDoctorPass and feeding
+  // representative `catalyst-doctor --json` stdout through the lifecycle's runStep seam. This pins the
+  // load-bearing coupling to doctor's renderJson shape (status==="fail" ↔ STATUS.FAIL, ok/counts/checks).
+  const withDoctorStdout = ({ code, stdout }) => {
+    const bag = withRealRun(makeDeps());
+    const orig = bag.deps.runStep;
+    bag.deps.runStep = (call) => (call.argv[0] === "DOCTOR" ? { code, stdout, stderr: "" } : orig(call));
+    // NB: deliberately NOT setting bag.deps.runDoctorPass → defaultRunDoctorPass parses for real.
+    return bag;
+  };
+
+  test("defaultRunDoctorPass parses real doctor JSON into { ok, rc, counts, fails }", async () => {
+    const doctorJson = JSON.stringify({
+      ok: false,
+      counts: { pass: 1, warn: 0, fail: 1 },
+      checks: [{ name: "agents-for-class", status: "fail" }, { name: "node-class", status: "pass" }],
+    });
+    const { deps, events } = withDoctorStdout({ code: 1, stdout: doctorJson });
+    const res = await runInstallLifecycle({ operation: "install", nodeClass: "worker", opts: {} }, deps);
+    expect(res.doctorOk).toBe(false);
+    expect(res.doctorFails).toEqual(["agents-for-class"]); // only the fail-status check names
+    const completed = events.find((e) => e.event === INSTALL_EVENT.completed);
+    expect(completed.detail.postDoctor).toMatchObject({ ok: false, rc: 1, counts: { pass: 1, warn: 0, fail: 1 }, fails: ["agents-for-class"] });
+  });
+
+  test("defaultRunDoctorPass degrades unparseable doctor stdout to ok:null (advisory — install not failed)", async () => {
+    const { deps } = withDoctorStdout({ code: 2, stdout: "{not valid json" });
+    const res = await runInstallLifecycle({ operation: "install", nodeClass: "worker", opts: {} }, deps);
+    expect(res.outcome).toBe("completed");
+    expect(res.doctorOk).toBe(true); // ok:null → advisory
+  });
+
+  test("a post-install doctor that THROWS is advisory — the install completes, NOT rolled back (best-effort invariant)", async () => {
+    const bag = withRealRun(makeDeps());
+    bag.deps.runDoctorPass = () => { throw new Error("doctor blew up"); };
+    const res = await runInstallLifecycle({ operation: "install", nodeClass: "worker", opts: {} }, bag.deps);
+    expect(res.outcome).toBe("completed"); // a throwing doctor must NOT propagate → rollback
+    expect(res.doctorOk).toBe(true); // degraded to advisory
+  });
+
+  // Codex P2 (thread 1): the advisory doctor binary is NOT a hard install prerequisite.
+  test("an ABSENT catalyst-doctor binary does NOT refuse the install (excluded from the missing-script preflight)", async () => {
+    const bag = withRealRun(makeDeps());
+    bag.deps.scriptExists = (p) => p !== "DOCTOR"; // doctor missing, every other composed script present
+    const res = await runInstallLifecycle({ operation: "install", nodeClass: "worker", opts: {} }, bag.deps);
+    expect(res.outcome).not.toBe("refused"); // a missing advisory verifier must not block provisioning
+    expect(res.outcome).toBe("completed");
+    expect(res.doctorOk).toBe(true); // doctor couldn't run → advisory (ok:null)
+  });
+
+  // Codex P2 (round 3): the doctor must verify the PERSISTED class, not the requested class pinned in env.
+  test("the doctor pre/post passes CLEAR CATALYST_NODE_CLASS (verify Layer-2 class) but keep CATALYST_LAYER2_CONFIG_FILE", async () => {
+    const bag = withRealRun(makeDeps());
+    bag.deps.env = { ...bag.deps.env, CATALYST_NODE_CLASS: "worker" }; // operator shell exports a conflicting class
+    const doctorEnvs = [];
+    bag.deps.runDoctorPass = ({ env }) => { doctorEnvs.push(env); return { ok: true, rc: 0, counts: { pass: 3, warn: 0, fail: 0 }, fails: [] }; };
+    await runInstallLifecycle({ operation: "install", nodeClass: "developer", opts: {} }, bag.deps);
+    expect(doctorEnvs.length).toBeGreaterThan(0); // pre + post
+    for (const env of doctorEnvs) {
+      expect(env.CATALYST_NODE_CLASS).toBe(""); // cleared → resolveNodeClass falls through to Layer-2 (the persisted class)
+      expect(env.CATALYST_LAYER2_CONFIG_FILE).toBe(bag.layer2); // but still points at the install's config
+    }
+    // the COMPOSED bash tools, by contrast, still get the requested class pinned (adopt-updater must act on it).
+    const adopt = bag.stepCalls.find((c) => c.argv.join(" ") === "STACK adopt-updater");
+    expect(adopt.env.CATALYST_NODE_CLASS).toBe("developer");
   });
 });
 
@@ -812,20 +954,48 @@ describe("main — CLI exit codes", () => {
     const c = capture();
     expect(await main(["install", "--class"], c.depsOverride)).toBe(2);
   });
+  // CTL-1369 PR4: the post-install doctor verdict folds into the command exit code.
+  test("completed install but post-install doctor FAIL → exit 1, with a class-correctness message", async () => {
+    const d = execDeps();
+    const code = await main(["install", "--class", "worker"], {
+      ...d.depsOverride,
+      runDoctorPass: () => ({ ok: false, rc: 1, counts: { pass: 1, warn: 0, fail: 1 }, fails: ["agents-for-class"] }),
+    });
+    expect(code).toBe(1);
+    expect(d.errOut.join("\n")).toMatch(/NOT class-correct.*agents-for-class/);
+  });
+  test("completed install, doctor PASS → exit 0", async () => {
+    const d = execDeps();
+    const code = await main(["install", "--class", "worker"], {
+      ...d.depsOverride,
+      runDoctorPass: () => ({ ok: true, rc: 0, counts: { pass: 3, warn: 0, fail: 0 }, fails: [] }),
+    });
+    expect(code).toBe(0);
+  });
+  test("completed install, doctor advisory (ok:null, couldn't run) → exit 0 (never fails a good install)", async () => {
+    const d = execDeps();
+    const code = await main(["install", "--class", "worker"], {
+      ...d.depsOverride,
+      runDoctorPass: () => ({ ok: null, rc: 127, counts: null, fails: null }),
+    });
+    expect(code).toBe(0);
+  });
 });
 
 // ───────────────────────── seams + invariants ─────────────────────────
 describe("resolveScripts seams", () => {
   test("env overrides win over computed defaults", () => {
-    const s = resolveScripts({ CATALYST_INSTALL_SETUP_SCRIPT: "/custom/setup.sh", CATALYST_INSTALL_STACK_BIN: "/custom/stack" });
+    const s = resolveScripts({ CATALYST_INSTALL_SETUP_SCRIPT: "/custom/setup.sh", CATALYST_INSTALL_STACK_BIN: "/custom/stack", CATALYST_INSTALL_DOCTOR_BIN: "/custom/doctor" });
     expect(s.setup).toBe("/custom/setup.sh");
     expect(s.stack).toBe("/custom/stack");
+    expect(s.doctor).toBe("/custom/doctor"); // CTL-1369 PR4 seam
   });
   test("computed defaults resolve real toolchain paths", () => {
     const s = resolveScripts({});
     expect(s.installCli).toMatch(/install-cli\.sh$/);
     expect(s.setup).toMatch(/setup-catalyst\.sh$/);
     expect(s.backup).toMatch(/catalyst-backup$/);
+    expect(s.doctor).toMatch(/catalyst-doctor$/); // CTL-1369 PR4
   });
   test("layer2Path honors CATALYST_LAYER2_CONFIG_FILE > CATALYST_MACHINE_CONFIG > XDG (no silent clobber)", () => {
     expect(layer2Path({ CATALYST_LAYER2_CONFIG_FILE: "/a.json", CATALYST_MACHINE_CONFIG: "/b.json" })).toBe("/a.json");

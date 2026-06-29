@@ -45,7 +45,7 @@ claude plugin install catalyst-dev@catalyst
 
 ## 3. Install the command-line tools
 
-Several Catalyst features call shell tools by name (`catalyst-monitor`, `catalyst-hud`, `catalyst-events`, and more). Install them onto your PATH:
+Several Catalyst features call shell tools by name (`catalyst-monitor`, `catalyst-hud`, `catalyst-events`, and more — see the full [CLI command reference](/reference/cli/)). Install them onto your PATH:
 
 ```bash
 shopt -s nullglob

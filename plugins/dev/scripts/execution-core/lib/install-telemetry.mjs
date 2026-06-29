@@ -67,6 +67,13 @@ export function buildInstallEnvelope({
   hostNameVal,
   phase = null,
   outcome = null,
+  // CTL-1369 PR4: per-phase duration PROMOTED to a top-level attribute (see the attributes block)
+  // so the OTEL histogram connector — which gates on event_name=="catalyst.install.phase" and reads
+  // attributes["catalyst.install.phase_duration_ms"] — can build
+  // catalyst_install_duration_seconds{operation,phase}. Kept in MILLISECONDS (the connector divides
+  // by 1000); null on every non-phase event. (catalyst-updater-otel md-channel turn 21: name + unit
+  // LOCKED.) It is NOT a low-card label dim — it is a numeric measurement the connector reads.
+  phaseDurationMs = null,
   detail = null,
   severity = "INFO",
   traceId = null,
@@ -105,6 +112,10 @@ export function buildInstallEnvelope({
       "catalyst.install.phase": phase,
       "catalyst.install.outcome": outcome,
       "event.label": operation,
+      // CTL-1369 PR4 / OTEL turn 21: per-phase duration in MILLISECONDS, top-level so the histogram
+      // connector reads it directly. null on non-phase events (the connector only reads it on
+      // catalyst.install.phase). A measurement, not a label — kept out of the low-card dims above.
+      "catalyst.install.phase_duration_ms": Number.isFinite(phaseDurationMs) ? phaseDurationMs : null,
     },
     body: { payload: detail ?? {} },
     caused_by: null,
@@ -123,10 +134,10 @@ export function makeInstallEmitFn({ getLogPathFn = getEventLogPath, nowFn = Date
   // (which owns the run's class + trace context) stamps every event authoritatively — e.g.
   // `reinstall --class developer` on a worker node must stamp the REQUESTED class, not the
   // current config's. Falls back to the baked class when the caller omits it.
-  return ({ event, operation = null, phase = null, outcome = null, detail = null, severity = "INFO", nodeClass: ncOverride, traceId = null, spanId = null } = {}) => {
+  return ({ event, operation = null, phase = null, outcome = null, phaseDurationMs = null, detail = null, severity = "INFO", nodeClass: ncOverride, traceId = null, spanId = null } = {}) => {
     try {
       const logPath = getLogPathFn();
-      const envelope = buildInstallEnvelope({ event, operation, nodeClass: ncOverride ?? cls, hostNameVal: host, phase, outcome, detail, severity, traceId, spanId, nowFn });
+      const envelope = buildInstallEnvelope({ event, operation, nodeClass: ncOverride ?? cls, hostNameVal: host, phase, outcome, phaseDurationMs, detail, severity, traceId, spanId, nowFn });
       mkdirSync(dirname(logPath), { recursive: true });
       appendFileSync(logPath, `${JSON.stringify(envelope)}\n`);
     } catch {
@@ -176,13 +187,18 @@ export class InstallRun {
       const result = typeof fn === "function" ? await fn() : undefined;
       const endEpochMs = this.nowFn();
       this.phases.push({ name, startEpochMs, endEpochMs, ok: true });
-      this._emit({ event: INSTALL_EVENT.phase, phase: name, detail: { duration_ms: endEpochMs - startEpochMs } });
+      // duration_ms stays in body.payload (back-compat) AND is promoted to the top-level
+      // catalyst.install.phase_duration_ms attribute the OTEL histogram connector reads (PR4).
+      this._emit({ event: INSTALL_EVENT.phase, phase: name, phaseDurationMs: endEpochMs - startEpochMs, detail: { duration_ms: endEpochMs - startEpochMs } });
       return result;
     } catch (err) {
       const endEpochMs = this.nowFn();
       const errMsg = err?.message ?? String(err);
       this.phases.push({ name, startEpochMs, endEpochMs, ok: false, error: errMsg });
-      this._emit({ event: INSTALL_EVENT.phase, phase: name, outcome: "failed", severity: "ERROR", detail: { error: errMsg } });
+      // A FAILED phase still has a measured duration — promote it too so the histogram captures the
+      // time spent before the failure (the connector buckets by {operation,phase} regardless of outcome).
+      // duration_ms also rides the body here (parity with the success emit), alongside the error.
+      this._emit({ event: INSTALL_EVENT.phase, phase: name, outcome: "failed", severity: "ERROR", phaseDurationMs: endEpochMs - startEpochMs, detail: { error: errMsg, duration_ms: endEpochMs - startEpochMs } });
       throw err;
     }
   }

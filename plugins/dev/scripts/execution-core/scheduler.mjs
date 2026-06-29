@@ -5251,6 +5251,29 @@ export function schedulerTick(
   // read) instead of re-shelling-out — `claude stop` does not deregister within
   // the same tick, so the count is stable since sweep 0.5.
   const inFlightCount = occupiedCount; // CTL-1331: + queued delegate slot reservations
+  // CTL-1367 P2 (item b): re-sample SDK occupancy AFTER the advancement (sweep 1) +
+  // resume (sweep 1.5) sweeps so the new-work budget below reflects SAME-TICK SDK
+  // dispatches. The tick-top `sdkInflight` sample (folded into occupiedCount /
+  // inFlightCount above) predates those sweeps; under executor=sdk each advance/resume
+  // writes a fresh `dispatched` nested signal (no bg_job_id) synchronously in its
+  // prelaunch (dispatch.mjs settleDispatchSync), so without this re-sample a non-research
+  // advance (e.g. research→plan) PLUS a new-work pull could BOTH fire in one tick at
+  // maxParallel=1 — a 2nd SDK signal beyond parallelism for one tick. The predecessor
+  // teardown via emitPredecessorReap is async, so the just-finished predecessor signal is
+  // still on disk this tick — but it is terminal (done/skipped) and countSdkInflight only
+  // counts dispatched|running, so the re-sample is never inflated by it. GATED strictly on
+  // dispatchMode === "sdk": the bg/oneshot-legacy path never recomputes (sdkInFlightCount
+  // stays === inFlightCount) and keeps the byte-identical freeSlots formula below.
+  let sdkInFlightCount = inFlightCount;
+  if (dispatchMode === "sdk") {
+    let resampledSdkInflight = sdkInflight;
+    try {
+      resampledSdkInflight = countSdkInflight(orchDir);
+    } catch {
+      /* best-effort — never block the tick on a signal-scan failure (mirrors tick-top) */
+    }
+    sdkInFlightCount = liveCount + queuedDelegates + resampledSdkInflight;
+  }
   // CTL-665: config-first ceiling — a committed executionCore.maxParallel
   // (threaded via `concurrency`) wins over state.json; clamped to the bounds.
   // CTL-705: subtract resumed slots (sweep 1.5) so resume and new-work don't
@@ -5279,7 +5302,29 @@ export function schedulerTick(
   // loss; the slot frees naturally next tick via getAgentsCached deregistration).
   const freeSlots =
     livenessFresh && !draining
-      ? Math.max(0, computeFreeSlots(maxParallel, inFlightCount) - resumedCount - promotedCount)
+      ? dispatchMode === "sdk"
+        ? // CTL-1367 P2 (item b): under executor=sdk take the MIN of two budgets so
+          // whichever formula correctly accounts for the slot the other missed wins:
+          //  (1) the re-sampled SDK count (sdkInFlightCount) — catches same-tick
+          //      NON-research advances (research→plan, …) that wrote a `dispatched`
+          //      signal but that promotedCount (triage→research only) never tracks;
+          //  (2) the original tick-top budget minus resumedCount/promotedCount —
+          //      catches a CLAIM-ONLY promotion success (Codex P2): when a
+          //      triage→research SDK promotion LOSES the single-flight race,
+          //      verifyDispatchedSignal still counts it (promotedCount++) but the
+          //      WINNER writes the phase signal, so countSdkInflight (hence the
+          //      re-sample) cannot see it. Without this floor sdkInFlightCount stays
+          //      0 and a new ticket is admitted while the winner takes the slot.
+          // min is conservative (never over-admits) and never double-subtracts — it
+          // picks ONE budget, not their sum. Math.max(0,…) clamps.
+          Math.max(
+            0,
+            Math.min(
+              computeFreeSlots(maxParallel, sdkInFlightCount),
+              computeFreeSlots(maxParallel, inFlightCount) - resumedCount - promotedCount,
+            ),
+          )
+        : Math.max(0, computeFreeSlots(maxParallel, inFlightCount) - resumedCount - promotedCount)
       : 0;
   if (!livenessFresh) {
     log.warn(
