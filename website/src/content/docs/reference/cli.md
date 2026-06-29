@@ -191,10 +191,15 @@ Commands: `join-token` (mint a one-time join token), `status`, `add`, `remove`,
 
 ### catalyst-linear-reconcile
 
-**Reconciles Linear ticket state from PR reality.** Maps each PR to its delivered
-ticket(s) and the Linear state the PR implies (merged → Done, open non-draft →
-In-Review), then reports drift by default or corrects it with `--write`.
-Idempotent and deterministic; safe to re-run.
+**Keeps Linear in sync from explicit completion declarations** — Linear state is
+driven by declarations, never inferred from PR/merge state. An agent, model, or
+human declares a ticket done and the reconciler drains that signal to Linear.
+
+Commands: `declare <TICKET> [--state <key>]` (persist a durable "done" declaration,
+emit `ticket.completion.declared`, and write Linear now unless `--no-write`),
+`reconcile [--write]` (drain pending declarations to Linear, retrying writes that
+failed; dry-run unless `--write`), and `status` (list pending declarations).
+Safe by default — `reconcile` is dry-run without `--write`.
 
 ## Setup & maintenance tools
 
