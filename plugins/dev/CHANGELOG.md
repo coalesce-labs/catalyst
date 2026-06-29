@@ -1,15 +1,20 @@
 # Changelog
 
-## [12.19.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.18.0...catalyst-dev-v12.19.0) (2026-06-29)
+## [12.19.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.18.0...catalyst-dev-v12.19.0)
+
+Jun 29, 2026
+
+<!-- ai-enhanced -->
+
+### Per-Class Install Lifecycle
+
+`catalyst install`, `uninstall`, and `reinstall` now work per node class — worker nodes get broker/exec-core/monitor daemons, developer and monitor nodes get the updater agent, and the distinction is enforced. Each run is a fully observable OTEL trace with phase-by-phase telemetry, automatic backup before any overwrite, and rollback to a known-good state if provisioning fails mid-flight. Use `--dry-run` to print the resolved plan for your node class before touching anything.
 
 
-### Features
+
+### PRs
 
 * **dev:** CTL-1369 (3/n) — `catalyst install|uninstall|reinstall` per node class ([#2452](https://github.com/coalesce-labs/catalyst/issues/2452)) ([35339bb](https://github.com/coalesce-labs/catalyst/commit/35339bb8835cec1b4ad0105a4b9489ce74f5423c))
-
-
-### Bug Fixes
-
 * **dev:** CTL-1374 — PWA self-recovers stale lazy chunks after a redeploy (cache-control + preloadError reload) ([#2447](https://github.com/coalesce-labs/catalyst/issues/2447)) ([416ecb9](https://github.com/coalesce-labs/catalyst/commit/416ecb986acd2a0b57640399c7770f355f581dc9))
 * **dev:** CTL-1375 — private-repo favicons re-probe past the cached org avatar + token-scope doctor check ([#2445](https://github.com/coalesce-labs/catalyst/issues/2445)) ([01b5208](https://github.com/coalesce-labs/catalyst/commit/01b5208b825a53b04c83a8922659d639273cde8b))
 * **dev:** CTL-1378 — board replica-title edges (parked fallback, queue payload, CATALYST_DIR) ([#2449](https://github.com/coalesce-labs/catalyst/issues/2449)) ([bb772a5](https://github.com/coalesce-labs/catalyst/commit/bb772a52828c501b90acf6ccae1822aeb1a1691a))
