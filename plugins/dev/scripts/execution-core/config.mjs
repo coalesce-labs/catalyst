@@ -1414,10 +1414,10 @@ export function getReplicaDbPath() {
 }
 
 // --- Catalyst-Cloud token resolution (CTL-1394) ---
-// The supervised replica writer reads its cloud token from a STANDARD env-var NAME —
+// The supervised cloud-sync daemon reads its cloud token from a STANDARD env-var NAME —
 // `CATALYST_CLOUD_TOKEN` — on EVERY host (the same name cloud-token-env.mjs / CTL-1307
 // already projects into cluster.env). The per-node-ness is the VALUE the operator
-// provisions into that host's 0600 replica-writer.env, NOT the name — so this installs
+// provisions into that host's 0600 cloud-sync.env, NOT the name — so this installs
 // on arbitrary hosts with ZERO code changes (no host names baked into the source). An
 // optional override (env `CATALYST_CLOUD_TOKEN_ENV` / Layer-2 `catalyst.cloud.tokenEnv`)
 // lets a host point at a differently-named var. NAME-ONLY: this never reads or returns the

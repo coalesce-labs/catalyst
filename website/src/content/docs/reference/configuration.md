@@ -342,7 +342,7 @@ own Linear key, preserving per-host rate-limit isolation.
 > ticket-detail and search flows, and the `catalyst monitor` command, at the same remote endpoint is the
 > "split" deployment topology tracked in CTL-1347 / CTL-1354.
 
-### Local Linear replica writer (`catalyst.linearReplica`, CTL-1394)
+### Local Linear replica + cloud-sync writer (`catalyst.linearReplica`, CTL-1394)
 
 > **Not the same thing as `readReplica`.** `catalyst.readReplica.baseUrl` (above) is the **HTTP board
 > endpoint** the terminal HUD reads. `catalyst.linearReplica` is the **local SQLite Linear-read tier** —
@@ -351,7 +351,7 @@ own Linear key, preserving per-host rate-limit isolation.
 > `catalyst-linear` CLI. It exists to take Linear **reads** off the rate-limited `linearis` path (the
 > 429 unblock), and is opt-in.
 
-**The writer** is a supervised launchd LaunchAgent (`catalyst-stack adopt-replica-writer`) that runs
+**The writer** is a supervised launchd LaunchAgent (`catalyst-stack adopt-cloud-sync`) that runs
 `@catalyst-cloud/sdk`'s `CatalystReplica` with **this node's own cloud token**. It runs on **every node
 class** — workers (mini/mini-2) read the replica from the scheduler hot path; developer nodes (your
 laptop) read it via `catalyst-linear`. The token is never placed in the (world-readable) plist; the
@@ -361,12 +361,12 @@ launcher sources it from a `0600` file at run time.
 | --- | --- | --- |
 | `CATALYST_LINEAR_REPLICA` env / `catalyst.linearReplica.mode` (Layer-2) | The **read flag** — `on` makes the scheduler + `catalyst-linear` trust the local replica; `off`/unset reads `linearis` directly. Env (`on`/`1` on, else off) wins over Layer-2 (`mode: "on"`). | off |
 | `CATALYST_REPLICA_DB` env | Replica file path. | `~/catalyst/catalyst-replica.db` |
-| `CATALYST_CLOUD_TOKEN` (the token itself) | The host's cloud token — read by a **standard name on every host** (sourced from the `0600` `replica-writer.env`, or `cluster.env`). The per-host-ness is the **value** you provision, not the name — so the writer installs on arbitrary hosts with no code change. | — |
+| `CATALYST_CLOUD_TOKEN` (the token itself) | The host's cloud token — read by a **standard name on every host** (sourced from the `0600` `cloud-sync.env`, or `cluster.env`). The per-host-ness is the **value** you provision, not the name — so the writer installs on arbitrary hosts with no code change. | — |
 | `CATALYST_CLOUD_TOKEN_ENV` env / `catalyst.cloud.tokenEnv` (Layer-2) | Optional escape hatch — point the writer at a **differently-named** token var on a specific host (per-host config, not code). | `CATALYST_CLOUD_TOKEN` |
 | `CATALYST_CLOUD_BASE_URL` / `CATALYST_CLOUD_ACCOUNT` env | Cloud feed coordinates. | `https://api.catalyst-cloud.coalescelabs.ai/api/v1` / `tenant-0` |
 
 **Seed-before-flip runbook** (per host): provision the host's token as `export CATALYST_CLOUD_TOKEN=…`
-in `~/.config/catalyst/replica-writer.env` (`chmod 600`) → `catalyst-stack adopt-replica-writer` → wait for a verified seed (`catalyst doctor`'s
+in `~/.config/catalyst/cloud-sync.env` (`chmod 600`) → `catalyst-stack adopt-cloud-sync` → wait for a verified seed (`catalyst doctor`'s
 `replica-fresh` PASS, or `sqlite3 ~/catalyst/catalyst-replica.db 'SELECT COUNT(*) FROM issues'` > 0) →
 **then** set `CATALYST_LINEAR_REPLICA=on` (and restart execution-core on a worker so the scheduler builds
 the reader). Flipping the flag before the seed completes is harmless — reads simply MISS through to

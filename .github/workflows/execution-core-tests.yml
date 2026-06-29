@@ -121,12 +121,12 @@ jobs:
         # exits non-zero if any bun-only import leaked into it.
         run: bun build linear-cli.mjs --target=node --outfile /dev/null
 
-      - name: Verify replica-writer import graph (bun build resolution check, CTL-1394)
-        # CTL-1394: replica-writer.mjs is the supervised Linear-replica writer, a separate
-        # launchd entrypoint (replica-writer/launch.sh execs `bun` on it) NOT in daemon.mjs's
+      - name: Verify cloud-sync import graph (bun build resolution check, CTL-1394)
+        # CTL-1394: cloud-sync.mjs is the supervised catalyst-cloud-sync daemon, a separate
+        # launchd entrypoint (cloud-sync/launch.sh execs `bun` on it) NOT in daemon.mjs's
         # graph. Walk its static graph so a bad cross-import (./config.mjs,
         # @catalyst-cloud/sdk/node) fails CI before it strands a node at launchd runtime.
-        run: bun build replica-writer.mjs --target=node --outfile /dev/null
+        run: bun build cloud-sync.mjs --target=node --outfile /dev/null
 
       - name: catalyst-install launcher + router smoke test
         # CTL-1369 PR3: exercises the REAL catalyst-install bash launcher (symlink resolution →
@@ -144,12 +144,12 @@ jobs:
         working-directory: plugins/dev/scripts
         run: bash __tests__/cli-reference-drift.test.sh
 
-      - name: catalyst-stack replica-writer plist render test
-        # CTL-1394: unit-tests the PURE render_replica_writer_plist (KeepAlive shape,
+      - name: catalyst-stack cloud-sync plist render test
+        # CTL-1394: unit-tests the PURE render_cloud_sync_plist (KeepAlive shape,
         # no StartInterval, and the secret-hygiene invariant that the world-readable
         # plist carries no token). Pure string assertions; installs nothing.
         working-directory: plugins/dev/scripts
-        run: bash __tests__/catalyst-stack-replica-writer-plist.test.sh
+        run: bash __tests__/catalyst-stack-cloud-sync-plist.test.sh
 
       - name: Run stable unit tests
         # EXCLUDED SUITES — do NOT add these back without fixing the underlying

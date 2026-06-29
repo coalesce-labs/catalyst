@@ -1,10 +1,10 @@
-// doctor-replica.test.mjs — CTL-1394. Tests for checkReplicaWriter() in doctor.mjs.
+// doctor-replica.test.mjs — CTL-1394. Tests for checkCloudSync() in doctor.mjs.
 // All deps are injected so the test touches no fs/pgrep/launchctl. The load-bearing
 // invariants: NEVER emit a FAIL record (it would block the catalyst-join activation
 // gate), and NEVER leak a token VALUE. Run:
 //   cd plugins/dev/scripts/execution-core && bun test doctor-replica
 import { describe, test, expect } from "bun:test";
-import { checkReplicaWriter } from "../doctor.mjs";
+import { checkCloudSync } from "../doctor.mjs";
 
 const NOW = 1_800_000_000_000;
 const DB = "/tmp/ctl1394/catalyst-replica.db";
@@ -13,7 +13,7 @@ const TOKEN_ENV = { envVar: "CATALYST_CLOUD_TOKEN", source: "default" };
 // "healthy" defaults; override per test.
 function deps(over = {}) {
   return {
-    label: "ai.coalesce.catalyst-replica-writer",
+    label: "ai.coalesce.catalyst-cloud-sync",
     laDir: "/tmp/la",
     agentInstalled: () => true,
     processAlive: () => true,
@@ -32,18 +32,18 @@ function deps(over = {}) {
 const byName = (recs) => Object.fromEntries(recs.map((r) => [r.name, r]));
 const noFail = (recs) => recs.every((r) => r.status !== "fail");
 
-describe("checkReplicaWriter", () => {
+describe("checkCloudSync", () => {
   test("feature-off node (no agent, mode off, no db) → single INFO, no FAIL", () => {
-    const recs = checkReplicaWriter(deps({ agentInstalled: () => false, mode: "off", fileExists: () => false }));
+    const recs = checkCloudSync(deps({ agentInstalled: () => false, mode: "off", fileExists: () => false }));
     expect(recs).toHaveLength(1);
-    expect(recs[0].name).toBe("replica-writer");
+    expect(recs[0].name).toBe("cloud-sync");
     expect(recs[0].status).toBe("info");
     expect(noFail(recs)).toBe(true);
   });
 
   test("healthy: agent running + fresh db + token set + flag on → all PASS", () => {
-    const m = byName(checkReplicaWriter(deps()));
-    expect(m["replica-writer"].status).toBe("pass");
+    const m = byName(checkCloudSync(deps()));
+    expect(m["cloud-sync"].status).toBe("pass");
     expect(m["replica-fresh"].status).toBe("pass");
     expect(m["replica-token"].status).toBe("pass");
     expect(m["replica-read-flag"].status).toBe("pass");
@@ -51,7 +51,7 @@ describe("checkReplicaWriter", () => {
 
   test("token unset → replica-token WARN; the value never leaks", () => {
     const SECRET = "lin_should_never_appear";
-    const recs = checkReplicaWriter(deps({ env: { SOME_OTHER: SECRET } }));
+    const recs = checkCloudSync(deps({ env: { SOME_OTHER: SECRET } }));
     const m = byName(recs);
     expect(m["replica-token"].status).toBe("warn");
     expect(m["replica-token"].detail).toContain(TOKEN_ENV.envVar);
@@ -60,25 +60,25 @@ describe("checkReplicaWriter", () => {
 
   test("token set to a sentinel → PASS reports only the NAME, never the value", () => {
     const SECRET = "lin_value_must_not_print";
-    const recs = checkReplicaWriter(deps({ env: { [TOKEN_ENV.envVar]: SECRET } }));
+    const recs = checkCloudSync(deps({ env: { [TOKEN_ENV.envVar]: SECRET } }));
     expect(JSON.stringify(recs)).not.toContain(SECRET);
     expect(byName(recs)["replica-token"].status).toBe("pass");
   });
 
   test("db absent → replica-fresh WARN (not connected)", () => {
-    const m = byName(checkReplicaWriter(deps({ fileExists: () => false })));
+    const m = byName(checkCloudSync(deps({ fileExists: () => false })));
     expect(m["replica-fresh"].status).toBe("warn");
     expect(m["replica-fresh"].detail).toMatch(/not connected|seeded/i);
   });
 
   test("db tiny → replica-fresh WARN (seed not applied)", () => {
-    const m = byName(checkReplicaWriter(deps({ statFile: () => ({ size: 1000, mtimeMs: NOW }) })));
+    const m = byName(checkCloudSync(deps({ statFile: () => ({ size: 1000, mtimeMs: NOW }) })));
     expect(m["replica-fresh"].status).toBe("warn");
     expect(m["replica-fresh"].detail).toMatch(/tiny|seed/i);
   });
 
   test("all mtimes old incl the writer-lock (heartbeat stopped) → replica-fresh WARN (likely down)", () => {
-    const m = byName(checkReplicaWriter(deps({ statFile: () => ({ size: 64_000_000, mtimeMs: NOW - 600_000 }) })));
+    const m = byName(checkCloudSync(deps({ statFile: () => ({ size: 64_000_000, mtimeMs: NOW - 600_000 }) })));
     expect(m["replica-fresh"].status).toBe("warn");
     expect(m["replica-fresh"].detail).toMatch(/heartbeat stale|likely down/i);
   });
@@ -87,7 +87,7 @@ describe("checkReplicaWriter", () => {
   // has no idle keepalive), but the writer-lock heartbeat keeps ticking — so a live writer on
   // a quiet feed must NOT be reported "down" just because no change landed recently.
   test("live writer-lock keeps a quiet-feed replica healthy — no false 'writer down' on stale DB mtime", () => {
-    const recs = checkReplicaWriter(
+    const recs = checkCloudSync(
       deps({
         statFile: (p) =>
           p.endsWith(".writer.lock")
@@ -106,28 +106,28 @@ describe("checkReplicaWriter", () => {
       if (p.endsWith(".writer.lock")) throw new Error("no lock");
       return { size: 64_000_000, mtimeMs: mtime };
     };
-    const stale = byName(checkReplicaWriter(deps({ statFile: noLock(NOW - 600_000) })));
+    const stale = byName(checkCloudSync(deps({ statFile: noLock(NOW - 600_000) })));
     expect(stale["replica-fresh"].status).toBe("warn");
     expect(stale["replica-fresh"].detail).toMatch(/no writer-lock/i);
-    const fresh = byName(checkReplicaWriter(deps({ statFile: noLock(NOW - 5_000) })));
+    const fresh = byName(checkCloudSync(deps({ statFile: noLock(NOW - 5_000) })));
     expect(fresh["replica-fresh"].status).toBe("pass");
   });
 
   test("writer healthy + flag OFF → replica-read-flag WARN (flip it on)", () => {
-    const m = byName(checkReplicaWriter(deps({ mode: "off" })));
+    const m = byName(checkCloudSync(deps({ mode: "off" })));
     expect(m["replica-read-flag"].status).toBe("warn");
     expect(m["replica-read-flag"].detail).toMatch(/flip it on/i);
   });
 
   test("flag ON but db absent → replica-read-flag WARN (MISS-fallthrough)", () => {
-    const m = byName(checkReplicaWriter(deps({ fileExists: () => false })));
+    const m = byName(checkCloudSync(deps({ fileExists: () => false })));
     expect(m["replica-read-flag"].status).toBe("warn");
     expect(m["replica-read-flag"].detail).toMatch(/MISS/i);
   });
 
-  test("agent installed but process dead → replica-writer WARN", () => {
-    const m = byName(checkReplicaWriter(deps({ processAlive: () => false, fileExists: (p) => p === DB })));
-    expect(m["replica-writer"].status).toBe("warn");
+  test("agent installed but process dead → cloud-sync WARN", () => {
+    const m = byName(checkCloudSync(deps({ processAlive: () => false, fileExists: (p) => p === DB })));
+    expect(m["cloud-sync"].status).toBe("warn");
   });
 
   test("INVARIANT: no permutation ever yields a FAIL record", () => {
@@ -143,7 +143,7 @@ describe("checkReplicaWriter", () => {
           for (const fileExists of bools)
             for (const statFile of stats)
               for (const env of [{ [TOKEN_ENV.envVar]: "x" }, {}]) {
-                const recs = checkReplicaWriter(deps({ agentInstalled, processAlive, mode, fileExists, statFile, env }));
+                const recs = checkCloudSync(deps({ agentInstalled, processAlive, mode, fileExists, statFile, env }));
                 expect(recs.every((r) => r.status !== "fail")).toBe(true);
               }
   });
