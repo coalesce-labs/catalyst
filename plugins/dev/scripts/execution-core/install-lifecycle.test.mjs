@@ -15,6 +15,7 @@ import {
   REINSTALL_PHASES,
   INSTALL_MANAGED_KEYS,
   resolveScripts,
+  layer2Path,
   resolveRequestedClass,
   resolveReadReplica,
   setDeepKey,
@@ -359,11 +360,25 @@ describe("runInstallLifecycle — reinstall", () => {
     expect(joined).toContain("STACK adopt-updater"); // provisioning
     for (const e of events) expect(e.operation).toBe("reinstall");
   });
-  test("reinstall rolls back from the backup if provisioning fails after teardown", async () => {
-    const { deps, calls } = withRealRun(makeDeps({ daemonsLive: false, failOn: (a) => (a.join(" ") === "STACK adopt-updater" ? 1 : 0) }));
+  test("reinstall fails BEFORE install-agents → rollback restores AND re-bootstraps the torn-down agents", async () => {
+    // Fail at write-config (setup-catalyst); teardown already booted out the agents. Rollback must
+    // restore + re-run install-agents/start-daemons so the node comes back up → rolled_back.
+    const { deps, calls } = withRealRun(makeDeps({ layer2Initial: { catalyst: { node: { class: "developer" } } }, failOn: (a) => (a.join(" ") === "SETUP --non-interactive" ? 1 : 0) }));
     const res = await runInstallLifecycle({ operation: "reinstall", nodeClass: "developer", opts: { force: true } }, deps);
     expect(res.outcome).toBe("rolled_back");
-    expect(calls.some((a) => a[1] === "restore")).toBe(true);
+    expect(res.rollbackDisposition).toBe("ok");
+    const joined = calls.map((a) => a.join(" "));
+    expect(joined.some((c) => c.startsWith("BACKUP restore"))).toBe(true);
+    // re-bootstrap ran adopt-updater (developer install-agents) AFTER the restore
+    const restoreIdx = joined.findIndex((c) => c.startsWith("BACKUP restore"));
+    const adoptIdx = joined.lastIndexOf("STACK adopt-updater");
+    expect(adoptIdx).toBeGreaterThan(restoreIdx);
+  });
+  test("reinstall whose failure PERSISTS through re-bootstrap → outcome failed (honest, not a false rolled_back)", async () => {
+    const { deps } = withRealRun(makeDeps({ layer2Initial: { catalyst: { node: { class: "developer" } } }, failOn: (a) => (a.join(" ") === "STACK adopt-updater" ? 1 : 0) }));
+    const res = await runInstallLifecycle({ operation: "reinstall", nodeClass: "developer", opts: { force: true } }, deps);
+    expect(res.outcome).toBe("failed"); // adopt-updater fails in provisioning AND in re-bootstrap
+    expect(res.rollbackDisposition).toBe("failed");
   });
 });
 
@@ -572,6 +587,11 @@ describe("resolveScripts seams", () => {
     expect(s.installCli).toMatch(/install-cli\.sh$/);
     expect(s.setup).toMatch(/setup-catalyst\.sh$/);
     expect(s.backup).toMatch(/catalyst-backup$/);
+  });
+  test("layer2Path honors CATALYST_LAYER2_CONFIG_FILE > CATALYST_MACHINE_CONFIG > XDG (no silent clobber)", () => {
+    expect(layer2Path({ CATALYST_LAYER2_CONFIG_FILE: "/a.json", CATALYST_MACHINE_CONFIG: "/b.json" })).toBe("/a.json");
+    expect(layer2Path({ CATALYST_MACHINE_CONFIG: "/b.json" })).toBe("/b.json");
+    expect(layer2Path({ XDG_CONFIG_HOME: "/xdg" })).toBe("/xdg/catalyst/config.json");
   });
 });
 

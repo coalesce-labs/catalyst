@@ -22,8 +22,9 @@ while [[ -L $SOURCE ]]; do
 done
 DIR="$(cd -P "$(dirname "$SOURCE")" >/dev/null 2>&1 && pwd)"
 
-# Prefer bun (the toolchain default); node is a fine fallback — the driver uses no
-# bun-only APIs of its own (install-telemetry/config are plain ESM).
-RUNTIME="bun"
-command -v bun >/dev/null 2>&1 || RUNTIME="node"
+# Prefer node: the driver uses only Node-standard APIs (no bun:* imports), and some Bun versions
+# crash on a direct `bun <file>.mjs` run of this CLI (observed exit 132), so Bun would otherwise kill
+# `catalyst install` before it even prints help. Fall back to bun only if node is unavailable.
+RUNTIME="node"
+command -v node >/dev/null 2>&1 || RUNTIME="bun"
 exec "$RUNTIME" "$DIR/execution-core/install-lifecycle.mjs" "$@"

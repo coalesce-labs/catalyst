@@ -96,9 +96,19 @@ export function resolveScripts(env = process.env) {
   };
 }
 
-/** layer2Path — the Layer-2 machine config (same precedence the rest of the toolchain uses). */
+/**
+ * layer2Path — the Layer-2 machine config, resolved the way the WHOLE toolchain resolves it so the
+ * driver and every child tool agree on one file: CATALYST_LAYER2_CONFIG_FILE (config.mjs runtime) >
+ * CATALYST_MACHINE_CONFIG (setup-plugin-source / lib/plugin-dirs.sh / catalyst-stack pluginPullOwner)
+ * > XDG_CONFIG_HOME/catalyst/config.json > ~/.config/catalyst/config.json. Honoring CATALYST_MACHINE_CONFIG
+ * here is what keeps a caller that set ONLY that var from having the run silently target ~/.config.
+ */
 export function layer2Path(env = process.env) {
-  return env.CATALYST_LAYER2_CONFIG_FILE || join(homedir(), ".config", "catalyst", "config.json");
+  return (
+    env.CATALYST_LAYER2_CONFIG_FILE ||
+    env.CATALYST_MACHINE_CONFIG ||
+    join(env.XDG_CONFIG_HOME || join(homedir(), ".config"), "catalyst", "config.json")
+  );
 }
 
 /**
@@ -440,7 +450,8 @@ function isTeardown(operation) {
  * throws for a normal lifecycle failure (the outcome is in the return). Telemetry is best-effort.
  *
  * deps (all injectable): scripts, env, layer2, runStep, emit, nowFn, genTraceId, genSpanId,
- *   probeDaemons, probeResidualAgents, probeDrained, scriptExists, log, InstallRunCtor.
+ *   probeDaemons, probeResidualAgents, probeDrained, bundleHasCapturedAgents, scriptExists, log,
+ *   InstallRunCtor.
  */
 export async function runInstallLifecycle({ operation, nodeClass, opts = {} }, deps) {
   const { scripts, env, layer2, runStep, emit, nowFn, genTraceId, genSpanId, probeDaemons, probeResidualAgents, probeDrained, bundleHasCapturedAgents, scriptExists, log, InstallRunCtor } = deps;
@@ -484,7 +495,7 @@ export async function runInstallLifecycle({ operation, nodeClass, opts = {} }, d
   const spanId = genSpanId();
   const run = new InstallRunCtor({ operation, nodeClass, emit, traceId, spanId, nowFn }).start({ class: nodeClass });
 
-  const ctx = { bundlePath: null, healthOk: true, healthRc: null, cleanOk: true };
+  const ctx = { bundlePath: null, healthOk: true, healthRc: null, cleanOk: true, teardownRan: false };
 
   const runOneStep = async (step) => {
     switch (step.kind) {
@@ -499,6 +510,9 @@ export async function runInstallLifecycle({ operation, nodeClass, opts = {} }, d
       }
       case "run": {
         const r = runStep({ argv: step.argv, env: stepEnv });
+        // Record that this run booted out the node's launchd agents (the reinstall teardown), so the
+        // rollback handler knows the agents are DOWN and must re-bootstrap rather than file-restore alone.
+        if (step.label === "uninstall-services" && r.code === 0) ctx.teardownRan = true;
         if (r.code !== 0) {
           if (step.optional) {
             log(`catalyst-install: WARN — optional step '${step.label}' failed (rc ${r.code}), continuing: ${r.stderr.trim()}`);
@@ -571,31 +585,66 @@ export async function runInstallLifecycle({ operation, nodeClass, opts = {} }, d
     let rollbackDisposition = "none";
     if (autoRollbacks(operation) && ctx.bundlePath) {
       log(`catalyst-install: ${operation} failed — rolling back from ${ctx.bundlePath}`);
-      // A restore alone is ADDITIVE — it re-lays captured config/db/plist FILES but cannot
-      // un-bootstrap launchd agents provisioning just installed (and a worker's stack keep-alive would
-      // restart the daemon). So when this run installed agents onto a FRESH node, tear them down first
-      // (boot out, then stop survivors) before restoring. But if the backup captured PRE-EXISTING
-      // agents (a retry/reinstall on a working node), DON'T tear them down: restore re-lays their plist
-      // files but never re-bootstraps them, so a teardown would leave a previously-working node's
-      // services down. Either way the restore is the authoritative "state put back" signal. (install-cli
-      // symlinks are intentionally left in place — not captured in the backup, so removing them would be
-      // an unrecoverable loss, not a reversal.)
-      if (bundleHasCapturedAgents(ctx.bundlePath)) {
-        log(`catalyst-install: rollback — backup captured pre-existing launchd agents; leaving them in place (restore re-lays their config; reload them if needed)`);
+      // `catalyst-backup restore` is ADDITIVE — it re-lays captured config/db/plist FILES but never
+      // re-bootstraps launchd agents or restarts daemons. So rollback has three cases:
+      const teardownRan = ctx.teardownRan; // a reinstall already booted out the node's agents this run
+      const hadAgents = bundleHasCapturedAgents(ctx.bundlePath);
+      if (teardownRan) {
+        // (3) reinstall failed AFTER remove-agents: the agents are already DOWN; restore alone can't
+        // bring them back. Restore the captured state, then RE-BOOTSTRAP the node to its restored class.
+        const restore = runStep({ argv: [scripts.backup, "restore", ctx.bundlePath, "--force"], env: stepEnv });
+        let bringupOk = false;
+        if (restore.code === 0) {
+          // The restored config carries the node's original class; re-run install-agents + start-daemons
+          // for it so the node comes back up (idempotent; catalyst-stack re-renders + bootstraps).
+          const restoredClass = readLayer2(layer2)?.catalyst?.node?.class || nodeClass;
+          const bringupEnv = { ...stepEnv, CATALYST_NODE_CLASS: restoredClass };
+          const bringup = planPhases({ operation: "install", nodeClass: restoredClass, scripts, opts: {} }).filter(
+            (p) => p.phase === "install-agents" || p.phase === "start-daemons",
+          );
+          bringupOk = true;
+          for (const ph of bringup) {
+            for (const s of ph.steps) {
+              if (s.kind !== "run") continue;
+              const r = runStep({ argv: s.argv, env: bringupEnv });
+              if (r.code !== 0 && !s.optional) {
+                bringupOk = false;
+                log(`catalyst-install: rollback re-bootstrap step '${s.label}' failed (rc ${r.code}): ${r.stderr.trim()}`);
+              }
+            }
+          }
+        }
+        rolledBack = restore.code === 0 && bringupOk;
+        rollbackDisposition = rolledBack ? "ok" : "failed";
+        log(
+          rolledBack
+            ? `catalyst-install: rolled back — restored ${ctx.bundlePath} + re-bootstrapped the torn-down agents (verify launchd/daemon state)`
+            : `catalyst-install: rollback INCOMPLETE — config restored from ${ctx.bundlePath} but launchd agents are NOT fully re-bootstrapped; re-run 'catalyst install' or 'catalyst-stack install-services && catalyst-stack start' to bring the node back`,
+        );
       } else {
-        const unsvc = runStep({ argv: [scripts.stack, "uninstall-services"], env: stepEnv });
-        if (unsvc.code !== 0) log(`catalyst-install: rollback note — uninstall-services rc ${unsvc.code} (agents may remain): ${unsvc.stderr.trim()}`);
-        const stop = runStep({ argv: [scripts.stack, "stop"], env: stepEnv });
-        if (stop.code !== 0) log(`catalyst-install: rollback note — stop rc ${stop.code}`);
+        // (1) FRESH node (no pre-existing agents captured): boot out whatever provisioning installed
+        // this run (a worker's stack keep-alive would otherwise restart it), then stop survivors. Or
+        // (2) install on an EXISTING node (agents not removed this run): leave the pre-existing agents
+        // running untouched — tearing them down would leave a working node's services down with no
+        // re-bootstrap. (install-cli symlinks are left in place either way — not in the backup, so
+        // removing them would be an unrecoverable loss, not a reversal.)
+        if (hadAgents) {
+          log(`catalyst-install: rollback — backup captured pre-existing launchd agents; leaving them in place (restore re-lays their config; reload them if needed)`);
+        } else {
+          const unsvc = runStep({ argv: [scripts.stack, "uninstall-services"], env: stepEnv });
+          if (unsvc.code !== 0) log(`catalyst-install: rollback note — uninstall-services rc ${unsvc.code} (agents may remain): ${unsvc.stderr.trim()}`);
+          const stop = runStep({ argv: [scripts.stack, "stop"], env: stepEnv });
+          if (stop.code !== 0) log(`catalyst-install: rollback note — stop rc ${stop.code}`);
+        }
+        const restore = runStep({ argv: [scripts.backup, "restore", ctx.bundlePath, "--force"], env: stepEnv });
+        rolledBack = restore.code === 0;
+        rollbackDisposition = rolledBack ? "ok" : "failed";
+        log(
+          rolledBack
+            ? `catalyst-install: rolled back — restored ${ctx.bundlePath} (verify launchd/daemon state)`
+            : `catalyst-install: rollback INCOMPLETE (restore rc ${restore.code}) — node is in a PARTIAL state; bundle at ${ctx.bundlePath}`,
+        );
       }
-      const restore = runStep({ argv: [scripts.backup, "restore", ctx.bundlePath, "--force"], env: stepEnv });
-      rolledBack = restore.code === 0;
-      rollbackDisposition = rolledBack ? "ok" : "failed";
-      log(
-        rolledBack
-          ? `catalyst-install: rolled back — restored ${ctx.bundlePath} + tore down provisioned agents (verify launchd/daemon state)`
-          : `catalyst-install: rollback INCOMPLETE (restore rc ${restore.code}) — node is in a PARTIAL state; bundle at ${ctx.bundlePath}`,
-      );
     } else if (ctx.bundlePath) {
       log(`catalyst-install: ${operation} failed — NOT auto-rolled-back; restore manually from ${ctx.bundlePath} if needed`);
     }
@@ -755,9 +804,15 @@ export async function main(argv, depsOverride) {
 
   // Install the OTLP tracer BEFORE the run so InstallRun.complete()/fail() → emitInstallTrace()
   // actually export the catalyst.install root/phase spans (the tracer is a no-op until initTracing
-  // runs). Off-first: only when CATALYST_TRACING=on, matching updater.mjs. Flushed below.
+  // runs). Off-first: only when CATALYST_TRACING=on, matching updater.mjs. Flushed below. Pin
+  // CATALYST_NODE_CLASS to the REQUESTED class first so the tracer resource's catalyst.node.class
+  // (built from process config via lib/node-class.mjs) matches the run's class on a fresh/reclassed
+  // node, instead of the old/default config value — so dashboards bucket the spans correctly.
   const tracingOn = env.CATALYST_TRACING === "on";
-  if (tracingOn) await initTracing({ serviceName: INSTALL_SERVICE_NAME });
+  if (tracingOn) {
+    process.env.CATALYST_NODE_CLASS = nodeClass;
+    await initTracing({ serviceName: INSTALL_SERVICE_NAME });
+  }
 
   const result = await runInstallLifecycle({ operation: args.operation, nodeClass, opts }, deps);
 
