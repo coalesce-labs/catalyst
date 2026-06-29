@@ -59,7 +59,7 @@ const SCRIPTS = {
 
 // makeDeps — a fully-stubbed dep set. `failOn` is a predicate (argv|joined → truthy = fail with
 // that rc). `bundle` is the path catalyst-backup "prints". probeDaemons/probeDrained are flags.
-function makeDeps({ failOn, bundle = "/tmp/bundle-xyz", daemonsLive = false, residual = false, drained = false, bundleHadAgents = false, bundleEmpty = true, updaterAgent = false, missingBins = [], layer2Initial } = {}) {
+function makeDeps({ failOn, bundle = "/tmp/bundle-xyz", daemonsLive = false, residual = false, drained = false, bundleHadAgents = false, updaterAgent = false, workerAgents = false, cliInstalled = false, restorePluginDirs, missingBins = [], layer2Initial } = {}) {
   const events = [];
   const calls = [];
   const stepCalls = []; // {argv, env} per spawned step — lets tests assert the pinned step env
@@ -76,6 +76,14 @@ function makeDeps({ failOn, bundle = "/tmp/bundle-xyz", daemonsLive = false, res
       const rc = typeof failOn === "function" ? failOn(argv, joined) : 0;
       if (rc) return { code: rc, stdout: "", stderr: `stub fail ${joined}` };
       if (argv[0] === "BACKUP" && argv[1] === "backup") return { code: 0, stdout: `capturing…\n${bundle}\n`, stderr: "" };
+      if (argv[0] === "BACKUP" && argv[1] === "restore" && restorePluginDirs !== undefined) {
+        // simulate restore re-laying the captured (post-acquire) pluginDirs into the config
+        const cfg = JSON.parse(readFileSync(layer2, "utf8") || "{}");
+        cfg.catalyst = cfg.catalyst || {};
+        cfg.catalyst.orchestration = cfg.catalyst.orchestration || {};
+        cfg.catalyst.orchestration.pluginDirs = restorePluginDirs;
+        writeFileSync(layer2, JSON.stringify(cfg));
+      }
       return { code: 0, stdout: "", stderr: "" };
     },
     emit: (f) => events.push(f),
@@ -86,8 +94,9 @@ function makeDeps({ failOn, bundle = "/tmp/bundle-xyz", daemonsLive = false, res
     probeResidualAgents: () => residual,
     probeDrained: () => drained,
     bundleHasCapturedAgents: () => bundleHadAgents,
-    bundleIsEmpty: () => bundleEmpty,
     probeUpdaterAgent: () => updaterAgent,
+    probeWorkerAgents: () => workerAgents,
+    probeCliInstalled: () => cliInstalled,
     scriptExists: () => true,
     binExists: (name) => !missingBins.includes(name),
     log: () => {},
@@ -514,6 +523,46 @@ describe("fresh-node bootstrap + profile-switch guards (Codex round 5)", () => {
     expect(res.reason).toBe("live-worker-stack");
     expect(calls).toHaveLength(0);
   });
+  test("install --class developer over a STOPPED-but-installed worker stack also REFUSES", async () => {
+    const { deps } = withRealRun(makeDeps({ daemonsLive: false, workerAgents: true }));
+    const res = await runInstallLifecycle({ operation: "install", nodeClass: "developer", opts: {} }, deps);
+    expect(res.outcome).toBe("refused");
+    expect(res.reason).toBe("live-worker-stack");
+  });
+  test("live-agent rollback: a FAILED stop skips the restore (no --force over live daemons) → failed", async () => {
+    const { deps, calls } = withRealRun(makeDeps({ bundleHadAgents: true, daemonsLive: true, failOn: (a) => (["STACK install-services", "STACK stop"].includes(a.join(" ")) ? 1 : 0) }));
+    const res = await runInstallLifecycle({ operation: "install", nodeClass: "worker", opts: {} }, deps);
+    expect(res.outcome).toBe("failed");
+    expect(calls.some((a) => a[0] === "BACKUP" && a[1] === "restore")).toBe(false); // never restored over a live stack
+  });
+  test("live-agent rollback: a FAILED restart → incomplete rollback (outcome failed)", async () => {
+    const { deps } = withRealRun(makeDeps({ bundleHadAgents: true, daemonsLive: true, failOn: (a) => (["STACK install-services", "STACK start --yes"].includes(a.join(" ")) ? 1 : 0) }));
+    const res = await runInstallLifecycle({ operation: "install", nodeClass: "worker", opts: {} }, deps);
+    expect(res.outcome).toBe("failed"); // restore ok but the stack didn't come back up
+  });
+  test("live-agent rollback restarts with the RESTORED class env, not the requested target", async () => {
+    // reinstall --class developer over a worker whose stop didn't quiesce (daemonsLive stays true).
+    const { deps, stepCalls } = withRealRun(makeDeps({ bundleHadAgents: true, daemonsLive: true, layer2Initial: { catalyst: { node: { class: "worker" } } }, failOn: (a) => (a.join(" ") === "STACK adopt-updater" ? 1 : 0) }));
+    await runInstallLifecycle({ operation: "reinstall", nodeClass: "developer", opts: { force: true } }, deps);
+    const start = stepCalls.find((c) => c.argv.join(" ") === "STACK start --yes");
+    expect(start.env.CATALYST_NODE_CLASS).toBe("worker"); // restored class, NOT the requested developer
+  });
+  test("install rollback restores the node's prior pluginDirs that acquire overwrote", async () => {
+    // node had a custom pluginDirs; restore re-lays the post-acquire (canonical) value → rollback writes back custom.
+    const { deps, layer2 } = withRealRun(
+      makeDeps({
+        bundleHadAgents: false,
+        cliInstalled: true,
+        layer2Initial: { catalyst: { node: { class: "developer" }, orchestration: { pluginDirs: "/custom/checkout/plugins/dev" } } },
+        restorePluginDirs: "/canonical/plugin-source/plugins/dev",
+        failOn: (a) => (a.join(" ") === "STACK adopt-updater" ? 1 : 0),
+      }),
+    );
+    const res = await runInstallLifecycle({ operation: "install", nodeClass: "developer", opts: {} }, deps);
+    expect(res.outcome).toBe("rolled_back");
+    const cfg = JSON.parse(readFileSync(layer2, "utf8") || "{}");
+    expect(cfg.catalyst.orchestration.pluginDirs).toBe("/custom/checkout/plugins/dev"); // prior value restored
+  });
   test("install retry on a LIVE existing node STOPS the worker stack around the restore (no live-restore corruption)", async () => {
     const { deps, calls } = withRealRun(makeDeps({ bundleHadAgents: true, daemonsLive: true, failOn: (a) => (a.join(" ") === "STACK install-services" ? 1 : 0) }));
     const res = await runInstallLifecycle({ operation: "install", nodeClass: "worker", opts: {} }, deps);
@@ -524,7 +573,7 @@ describe("fresh-node bootstrap + profile-switch guards (Codex round 5)", () => {
     expect(joined.slice(restoreIdx + 1)).toContain("STACK start --yes"); // restarted after
   });
   test("fresh-node rollback (EMPTY backup) removes the install-managed config keys + uninstalls the CLI symlinks", async () => {
-    const { deps, calls, layer2 } = withRealRun(makeDeps({ bundleHadAgents: false, bundleEmpty: true, failOn: (a) => (a.join(" ") === "STACK install-services" ? 1 : 0) }));
+    const { deps, calls, layer2 } = withRealRun(makeDeps({ bundleHadAgents: false, cliInstalled: false, failOn: (a) => (a.join(" ") === "STACK install-services" ? 1 : 0) }));
     const res = await runInstallLifecycle({ operation: "install", nodeClass: "worker", opts: {} }, deps);
     expect(res.outcome).toBe("rolled_back");
     const joined = calls.map((a) => a.join(" "));
@@ -537,7 +586,7 @@ describe("fresh-node bootstrap + profile-switch guards (Codex round 5)", () => {
     // install (not reinstall) on a configured-but-daemonless developer node that fails; the backup
     // captured its config (non-empty) → restore re-lays it → rollback must NOT strip node.class.
     const initial = { catalyst: { node: { class: "developer" }, readReplica: { baseUrl: "http://mini:7400" } } };
-    const { deps, calls, layer2 } = withRealRun(makeDeps({ bundleHadAgents: false, bundleEmpty: false, layer2Initial: initial, failOn: (a) => (a.join(" ") === "STACK adopt-updater" ? 1 : 0) }));
+    const { deps, calls, layer2 } = withRealRun(makeDeps({ bundleHadAgents: false, cliInstalled: true, layer2Initial: initial, failOn: (a) => (a.join(" ") === "STACK adopt-updater" ? 1 : 0) }));
     const res = await runInstallLifecycle({ operation: "install", nodeClass: "developer", opts: {} }, deps);
     expect(res.outcome).toBe("rolled_back");
     const joined = calls.map((a) => a.join(" "));

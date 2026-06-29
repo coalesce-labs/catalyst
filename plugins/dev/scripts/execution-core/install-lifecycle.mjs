@@ -217,6 +217,12 @@ export function planPhases({ operation, nodeClass, scripts, opts = {} }) {
   });
 
   const writeConfig = () => {
+    // NB: setup-catalyst.sh writes per-project secrets to the DEFAULT ~/.config/catalyst/config-<key>.json
+    // path regardless of a CATALYST_LAYER2_CONFIG_FILE / CATALYST_MACHINE_CONFIG redirect (it does not
+    // honor a config-dir override). On a real node the selected scope IS ~/.config/catalyst, so there is
+    // no split; the split is only possible under a non-default config scope (a test/sandbox seam), where
+    // those secrets land outside the backup/restore scope. A scoped-secrets override belongs in
+    // setup-catalyst.sh, not here. set-class / pluginPullOwner / readReplica all stay under the selected scope.
     const steps = [
       { label: "set-class", kind: "run", argv: [scripts.catalyst, "class", nodeClass] },
       { label: "setup-catalyst", kind: "run", argv: [scripts.setup, "--non-interactive"] },
@@ -339,6 +345,16 @@ function isUnsafeKey(k) {
   return k === "__proto__" || k === "prototype" || k === "constructor";
 }
 
+// readDeepKey — value at a dotted path (or undefined). Read-only; no prototype-walk risk.
+export function readDeepKey(obj, dottedKey) {
+  let cur = obj;
+  for (const k of dottedKey.split(".")) {
+    if (cur == null || typeof cur !== "object") return undefined;
+    cur = cur[k];
+  }
+  return cur;
+}
+
 export function setDeepKey(obj, dottedKey, value) {
   const parts = dottedKey.split(".");
   let cur = obj;
@@ -451,16 +467,20 @@ function defaultBundleHasCapturedAgents(bundlePath) {
   }
 }
 
-// bundleIsEmpty — did the backup capture NOTHING (a truly fresh node)? When false the node had prior
-// state (config/db) that restore re-lays, so rollback must NOT strip install-managed keys / uninstall
-// CLI symlinks (they may have pre-existed). Unreadable/absent manifest ⇒ treat as empty (fresh).
-function defaultBundleIsEmpty(bundlePath) {
-  try {
-    const m = JSON.parse(readFileSync(join(bundlePath, "manifest.json"), "utf8"));
-    return !Array.isArray(m.captured) || m.captured.length === 0;
-  } catch {
-    return true;
-  }
+// probeWorkerAgents — is the worker stack LaunchAgent installed (even if its daemons are stopped)?
+// A stopped-but-installed worker stack would RunAtLoad/StartInterval broker/exec-core back, so a
+// developer/monitor install must refuse it, not just a currently-LIVE stack. Honors CATALYST_LAUNCHAGENTS_DIR.
+function defaultProbeWorkerAgents(env = process.env) {
+  const laDir = env.CATALYST_LAUNCHAGENTS_DIR || join(homedir(), "Library", "LaunchAgents");
+  return existsSync(join(laDir, "ai.coalesce.catalyst-stack.plist"));
+}
+
+// probeCliInstalled — was a `catalyst` CLI symlink already on the node before this run? Used to decide
+// whether a fresh-install rollback should uninstall the symlinks (created this run) or leave them
+// (pre-existed). Honors CATALYST_BIN_DIR (the install-cli target).
+function defaultProbeCliInstalled(env = process.env) {
+  const binDir = env.CATALYST_BIN_DIR || env.CATALYST_CLI_BIN_DIR || join(homedir(), ".catalyst", "bin");
+  return existsSync(join(binDir, "catalyst"));
 }
 
 // probeDrained — is this node FULLY drained, i.e. admitting 0 new work AND with 0 in-flight tickets?
@@ -503,7 +523,8 @@ export function buildDefaultDeps(env) {
     probeResidualAgents: () => defaultProbeResidualAgents(env),
     probeDrained: () => defaultProbeDrained({ scripts, env }),
     bundleHasCapturedAgents: (p) => defaultBundleHasCapturedAgents(p),
-    bundleIsEmpty: (p) => defaultBundleIsEmpty(p),
+    probeWorkerAgents: () => defaultProbeWorkerAgents(env),
+    probeCliInstalled: () => defaultProbeCliInstalled(env),
     scriptExists: (p) => existsSync(p),
     binExists: (name) => {
       const r = spawnSync("sh", ["-c", `command -v "${name}" >/dev/null 2>&1`]);
@@ -537,7 +558,7 @@ function isTeardown(operation) {
  *   InstallRunCtor.
  */
 export async function runInstallLifecycle({ operation, nodeClass, opts = {} }, deps) {
-  const { scripts, env, layer2, runStep, emit, nowFn, genTraceId, genSpanId, probeDaemons, probeResidualAgents, probeDrained, bundleHasCapturedAgents, bundleIsEmpty, scriptExists, binExists, probeUpdaterAgent, log, InstallRunCtor } = deps;
+  const { scripts, env, layer2, runStep, emit, nowFn, genTraceId, genSpanId, probeDaemons, probeResidualAgents, probeDrained, bundleHasCapturedAgents, scriptExists, binExists, probeUpdaterAgent, probeWorkerAgents, probeCliInstalled, log, InstallRunCtor } = deps;
 
   // Every composed step inherits (a) the RESOLVED class so the bash tools (which re-derive class
   // env-first) cannot diverge from the lifecycle's target — e.g. `install --class developer` on a
@@ -599,15 +620,15 @@ export async function runInstallLifecycle({ operation, nodeClass, opts = {} }, d
     );
     return { outcome: "refused", reason: "stale-updater" };
   }
-  // The symmetric case: a `install --class developer|monitor` over a LIVE worker stack would set the
-  // class + adopt the updater while leaving broker/exec-core running — the exact mixed profile the
-  // per-class invariant forbids (verify-node would only flag it AFTER the changes landed). Refuse and
-  // steer to `reinstall` (whose teardown stops the worker stack), unless --force.
-  if (operation === "install" && !isWorker(nodeClass) && !opts.force && probeDaemons()) {
+  // The symmetric case: a `install --class developer|monitor` over a worker stack would set the class +
+  // adopt the updater while leaving the worker stack in place — the exact mixed profile the per-class
+  // invariant forbids. Check both LIVE daemons AND an INSTALLED-but-stopped stack agent (which would
+  // RunAtLoad/StartInterval the daemons back on a developer node). Refuse → reinstall, unless --force.
+  if (operation === "install" && !isWorker(nodeClass) && !opts.force && (probeDaemons() || probeWorkerAgents())) {
     log(
-      `catalyst-install: refusing install --class ${nodeClass} — broker/execution-core are running ` +
-        `(this looks like a worker). Switch profiles with 'catalyst reinstall --class ${nodeClass}' ` +
-        `(its teardown stops the worker stack), or pass --force.`,
+      `catalyst-install: refusing install --class ${nodeClass} — a worker stack (broker/execution-core ` +
+        `daemons or their LaunchAgent) is present. Switch profiles with 'catalyst reinstall --class ` +
+        `${nodeClass}' (its teardown removes the worker stack), or pass --force.`,
     );
     return { outcome: "refused", reason: "live-worker-stack" };
   }
@@ -615,6 +636,23 @@ export async function runInstallLifecycle({ operation, nodeClass, opts = {} }, d
   const traceId = genTraceId();
   const spanId = genSpanId();
   const run = new InstallRunCtor({ operation, nodeClass, emit, traceId, spanId, nowFn }).start({ class: nodeClass });
+
+  // Snapshot the node's PRE-RUN state BEFORE the first phase (acquire) writes anything. Used by
+  // rollback: a fresh node (no managed keys / no CLI before the run) gets those artifacts removed,
+  // and a custom pre-existing pluginDirs (which acquire overwrites before the install backup) is
+  // restored. (Captured from the live config now, not from the backup — acquire runs before the
+  // install backup, so the bundle already reflects acquire's pluginDirs write.)
+  let preCfg = {};
+  try {
+    preCfg = readLayer2(layer2);
+  } catch {
+    /* malformed pre-run config — resolveRequestedClass already failed closed; treat as empty here */
+  }
+  const preInstall = {
+    hadManagedKeys: INSTALL_MANAGED_KEYS.some((k) => readDeepKey(preCfg, k) != null),
+    hadCli: probeCliInstalled(),
+    pluginDirs: readDeepKey(preCfg, "catalyst.orchestration.pluginDirs") ?? null,
+  };
 
   const ctx = { bundlePath: null, healthOk: true, healthRc: null, cleanOk: true, teardownRan: false };
 
@@ -722,7 +760,26 @@ export async function runInstallLifecycle({ operation, nodeClass, opts = {} }, d
       // state (the backup) had launchd agents and whether this run already tore the node down.
       const teardownRan = ctx.teardownRan;
       const hadAgents = bundleHasCapturedAgents(ctx.bundlePath);
-      const restoreNode = () => runStep({ argv: [scripts.backup, "restore", ctx.bundlePath, "--force"], env: stepEnv });
+      const restoreNode = () => {
+        const r = runStep({ argv: [scripts.backup, "restore", ctx.bundlePath, "--force"], env: stepEnv });
+        // On `install`, acquire overwrites pluginDirs BEFORE the backup, so the bundle holds the NEW
+        // value; restore the node's original pre-run pluginDirs if it differed (a custom/older
+        // checkout), so a failed install doesn't permanently repoint it. (reinstall backs up first, so
+        // its bundle already has the original — this is a no-op there.)
+        if (r.code === 0 && preInstall.pluginDirs) {
+          try {
+            const cfg = readLayer2(layer2);
+            if (readDeepKey(cfg, "catalyst.orchestration.pluginDirs") !== preInstall.pluginDirs) {
+              setDeepKey(cfg, "catalyst.orchestration.pluginDirs", preInstall.pluginDirs);
+              writeLayer2Atomic(layer2, cfg);
+              log(`catalyst-install: rollback — restored prior pluginDirs ${preInstall.pluginDirs}`);
+            }
+          } catch (e) {
+            log(`catalyst-install: rollback note — could not restore prior pluginDirs: ${e.message}`);
+          }
+        }
+        return r;
+      };
       const bootOutAgents = () => {
         const unsvc = runStep({ argv: [scripts.stack, "uninstall-services"], env: stepEnv });
         if (unsvc.code !== 0) log(`catalyst-install: rollback note — uninstall-services rc ${unsvc.code} (agents may remain): ${unsvc.stderr.trim()}`);
@@ -775,14 +832,16 @@ export async function runInstallLifecycle({ operation, nodeClass, opts = {} }, d
             // (not captured in the backup) so the restored node still has `catalyst` on PATH.
             const cli = runStep({ argv: [scripts.installCli], env: stepEnv });
             if (cli.code !== 0) log(`catalyst-install: rollback note — re-install CLI symlinks rc ${cli.code}: ${cli.stderr.trim()}`);
-          } else if (bundleIsEmpty(ctx.bundlePath)) {
-            // TRULY fresh node (empty backup — nothing to restore): the config keys + symlinks present
-            // were all created THIS run, so delete them. (We do NOT do this when the backup captured
-            // prior config — restore re-laid the node's pre-existing settings; stripping would erase
-            // them. Per-project secret files are left either way — re-usable, not an operational footprint.)
-            const cli = runStep({ argv: [scripts.installCli, "--uninstall"], env: stepEnv });
-            if (cli.code !== 0) log(`catalyst-install: rollback note — uninstall CLI symlinks rc ${cli.code}: ${cli.stderr.trim()}`);
-            stripManagedKeys();
+          } else {
+            // install on a no-agent node. Remove ONLY the artifacts THIS run created, determined from
+            // the PRE-RUN snapshot (NOT the post-acquire bundle, whose pluginDirs write makes it look
+            // non-empty even on a fresh node). A node that already had these keeps them (restore re-laid
+            // its config). Per-project secret files are left either way — re-usable, not operational.
+            if (!preInstall.hadCli) {
+              const cli = runStep({ argv: [scripts.installCli, "--uninstall"], env: stepEnv });
+              if (cli.code !== 0) log(`catalyst-install: rollback note — uninstall CLI symlinks rc ${cli.code}: ${cli.stderr.trim()}`);
+            }
+            if (!preInstall.hadManagedKeys) stripManagedKeys();
           }
         }
         rolledBack = restore.code === 0;
@@ -796,11 +855,26 @@ export async function runInstallLifecycle({ operation, nodeClass, opts = {} }, d
         const live = probeDaemons();
         if (live) {
           const stop = runStep({ argv: [scripts.stack, "stop"], env: stepEnv });
-          if (stop.code !== 0) log(`catalyst-install: rollback note — stop-before-restore rc ${stop.code}`);
-          restore = restoreNode();
-          const start = runStep({ argv: [scripts.stack, "start", "--yes"], env: stepEnv });
-          if (start.code !== 0) log(`catalyst-install: rollback note — restart-after-restore rc ${start.code} (run 'catalyst-stack start')`);
-          rolledBack = restore.code === 0;
+          if (stop.code !== 0) {
+            // The stack did NOT stop — do NOT force a restore over still-live broker/exec-core (it can
+            // corrupt config/db). Leave the node as-is and report an incomplete rollback for manual recovery.
+            log(`catalyst-install: rollback INCOMPLETE — could not stop the live worker stack (rc ${stop.code}); NOT restoring over live daemons. Stop the stack and 'catalyst-backup restore ${ctx.bundlePath} --force' manually.`);
+            restore = stop; // non-zero → rolledBack stays false
+            rolledBack = false;
+          } else {
+            restore = restoreNode();
+            if (restore.code === 0) {
+              // Restart with the RESTORED class (not the requested target pinned in stepEnv), so the
+              // started daemons stamp the node's actual class.
+              const rawClass = readNodeClassRaw(layer2);
+              const restoredClass = rawClass && NODE_CLASSES.includes(rawClass.trim().toLowerCase()) ? rawClass.trim().toLowerCase() : "worker";
+              const start = runStep({ argv: [scripts.stack, "start", "--yes"], env: { ...stepEnv, CATALYST_NODE_CLASS: restoredClass } });
+              if (start.code !== 0) log(`catalyst-install: rollback note — restart-after-restore rc ${start.code} (run 'catalyst-stack start')`);
+              rolledBack = start.code === 0; // the original stack must come back up for a clean rollback
+            } else {
+              rolledBack = false;
+            }
+          }
         } else {
           restore = restoreNode();
           const bringupOk = restore.code === 0 ? reBootstrapRestoredClass() : false;
