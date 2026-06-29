@@ -241,13 +241,27 @@ bootstrap() {
         # the build fails (preserving the warn-and-serve-previous behaviour below).
         _ui_stage="${MONITOR_UI_DIST_DIR%/}.staging.$$"
         rm -rf "$_ui_stage"
-        if (cd "$MONITOR_DIR/ui" && MONITOR_UI_DIST_DIR="$_ui_stage" bunx vite build); then
-          # Swap fresh build into place (drops ALL stale chunks); the static-asset copy
-          # step below re-populates PWA manifest/sw/icons. mv is atomic on one filesystem.
-          rm -rf "$MONITOR_UI_DIST_DIR"
-          mv "$_ui_stage" "$MONITOR_UI_DIST_DIR"
-          # Record the built source SHA ONLY on success so a failed build retries next start.
-          [[ -n "$ui_source_sha" ]] && printf '%s\n' "$ui_source_sha" > "$built_sha_file"
+        # CTL-1372: force a PRODUCTION React build. Without NODE_ENV=production, Vite
+        # resolves react-dom's `development` export — which calls performance.measure()
+        # on EVERY render — and the User Timing buffer is never cleared, leaking GBs over
+        # a long-lived PWA session (12 GB / 1.8M PerformanceMeasure entries observed). The
+        # build inherits whatever NODE_ENV the daemon was spawned with (no Catalyst code
+        # sets it; a dependency side effect can leave it "development"), so pin it here.
+        if (cd "$MONITOR_DIR/ui" && MONITOR_UI_DIST_DIR="$_ui_stage" NODE_ENV=production bunx vite build); then
+          # CTL-1372: refuse to serve a development react-dom bundle even if one is somehow
+          # produced — it is the memory-leak signature. Assert on the staged build; on a hit
+          # keep the previous (good) dist rather than swapping in a leaky bundle.
+          if grep -rq "react-dom-client.development" "$_ui_stage" 2>/dev/null; then
+            rm -rf "$_ui_stage"
+            echo "error: orch-monitor build produced a DEVELOPMENT React bundle (leaks memory via performance.measure) — keeping previous dist" >&2
+          else
+            # Swap fresh build into place (drops ALL stale chunks); the static-asset copy
+            # step below re-populates PWA manifest/sw/icons. mv is atomic on one filesystem.
+            rm -rf "$MONITOR_UI_DIST_DIR"
+            mv "$_ui_stage" "$MONITOR_UI_DIST_DIR"
+            # Record the built source SHA ONLY on success so a failed build retries next start.
+            [[ -n "$ui_source_sha" ]] && printf '%s\n' "$ui_source_sha" > "$built_sha_file"
+          fi
         else
           rm -rf "$_ui_stage"
           echo "warning: orch-monitor vite build failed — serving previous dist (will retry next restart)" >&2
