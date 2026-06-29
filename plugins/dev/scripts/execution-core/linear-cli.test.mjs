@@ -76,6 +76,26 @@ function installFakeLinearis(dir, { payload, exitCode = 0 } = {}) {
   process.env.PATH = `${dir}:${process.env.PATH}`;
 }
 
+// Fake `linearis` that echoes the argv it received (as `_args`) so a test can assert
+// flag passthrough. `$*` is the space-joined args (e.g. "issues read CTL-TEST --x").
+function installArgEchoLinearis(dir) {
+  const script = join(dir, "linearis");
+  const body = `#!/usr/bin/env bash\nargs="$*"\ncat <<JSON\n{"identifier":"CTL-TEST","_args":"$args"}\nJSON\n`;
+  writeFileSync(script, body);
+  chmodSync(script, 0o755);
+  process.env.PATH = `${dir}:${process.env.PATH}`;
+}
+
+// Fake `linearis` that sleeps `ms` before emitting — to prove the read cap fires
+// while list/search passthrough stays uncapped.
+function installSlowLinearis(dir, ms) {
+  const script = join(dir, "linearis");
+  const body = `#!/usr/bin/env bash\nsleep ${ms / 1000}\ncat <<'JSON'\n{"identifier":"CTL-SLOW","nodes":[]}\nJSON\n`;
+  writeFileSync(script, body);
+  chmodSync(script, 0o755);
+  process.env.PATH = `${dir}:${process.env.PATH}`;
+}
+
 // Run main(argv), capturing stdout. Returns { code, out (parsed JSON or null), raw }.
 async function runMain(argv) {
   const chunks = [];
@@ -101,7 +121,7 @@ async function runMain(argv) {
 // ── env isolation ────────────────────────────────────────────────────────
 let tmp;
 const SAVED = {};
-const ENV_KEYS = ["CATALYST_LINEAR_REPLICA", "CATALYST_REPLICA_DB", "CATALYST_LINEAR_REPLICA_STALE_MS", "PATH", "CATALYST_DIR"];
+const ENV_KEYS = ["CATALYST_LINEAR_REPLICA", "CATALYST_REPLICA_DB", "CATALYST_LINEAR_REPLICA_STALE_MS", "CATALYST_LINEARIS_TIMEOUT_MS", "CATALYST_LAYER2_CONFIG_FILE", "PATH", "CATALYST_DIR"];
 beforeEach(() => {
   for (const k of ENV_KEYS) SAVED[k] = process.env[k];
   tmp = mkdtempSync(join(tmpdir(), "catalyst-linear-test-"));
@@ -110,6 +130,8 @@ beforeEach(() => {
   delete process.env.CATALYST_LINEAR_REPLICA;
   delete process.env.CATALYST_REPLICA_DB;
   delete process.env.CATALYST_LINEAR_REPLICA_STALE_MS;
+  delete process.env.CATALYST_LINEARIS_TIMEOUT_MS;
+  delete process.env.CATALYST_LAYER2_CONFIG_FILE;
 });
 afterEach(() => {
   for (const k of ENV_KEYS) {
@@ -158,6 +180,20 @@ describe("resolveReplicaMode", () => {
     const cfg = join(tmp, "config-off.json");
     writeFileSync(cfg, JSON.stringify({ catalyst: {} }));
     expect(resolveReplicaMode({}, cfg)).toBe("off");
+  });
+  // Codex P2: honor CATALYST_LAYER2_CONFIG_FILE for parity with config.mjs —
+  // a node launched with a non-default Layer-2 path resolves mode from THAT file.
+  test('unset + CATALYST_LAYER2_CONFIG_FILE → mode:"on" → on', () => {
+    const cfg = join(tmp, "layer2-on.json");
+    writeFileSync(cfg, JSON.stringify({ catalyst: { linearReplica: { mode: "on" } } }));
+    expect(resolveReplicaMode({ CATALYST_LAYER2_CONFIG_FILE: cfg })).toBe("on");
+  });
+  test("cfgPathOverride beats CATALYST_LAYER2_CONFIG_FILE", () => {
+    const override = join(tmp, "override-off.json");
+    writeFileSync(override, JSON.stringify({ catalyst: {} }));
+    const envFile = join(tmp, "env-on.json");
+    writeFileSync(envFile, JSON.stringify({ catalyst: { linearReplica: { mode: "on" } } }));
+    expect(resolveReplicaMode({ CATALYST_LAYER2_CONFIG_FILE: envFile }, override)).toBe("off");
   });
 });
 
@@ -298,9 +334,9 @@ describe("replica reads", () => {
   test("STALE: old file mtime → linearis (skip=stale)", async () => {
     const dbPath = join(tmp, "catalyst-replica.db");
     seedReplica(dbPath, { updatedAt: Date.now() });
-    // age the DB AND its WAL/SHM sidecars far beyond the threshold — the gate takes
-    // the freshest of all three (WAL-mode writes land in -wal), so aging only .db
-    // would (correctly) still read fresh from the sidecars.
+    // age the DB AND its WAL sidecar far beyond the threshold — the gate takes the
+    // freshest of the DB + a non-empty -wal (WAL-mode writes land in -wal), so aging
+    // only .db would (correctly) still read fresh from a populated sidecar.
     const old = (Date.now() - 3_600_000) / 1000;
     for (const ext of ["", "-wal", "-shm"]) { try { utimesSync(dbPath + ext, old, old); } catch { /* sidecar absent */ } }
     process.env.CATALYST_LINEAR_REPLICA = "on";
@@ -310,6 +346,44 @@ describe("replica reads", () => {
     const { out } = await runMain(["read", "CTL-TEST"]);
     expect(out._meta.source).toBe("linearis");
     expect(out._meta.replica_skip).toBe("stale");
+  });
+
+  // Codex P2: a read-only consumer opening a checkpointed DB can create FRESH but
+  // EMPTY -wal/-shm sidecars. The gate must ignore them (empty -wal + -shm entirely)
+  // so a long-dead replica can't be made to look fresh by a mere reader open.
+  test("WAL spoof-resistance: stale .db + freshly-touched EMPTY -wal/-shm → still stale", async () => {
+    const dbPath = join(tmp, "catalyst-replica.db");
+    seedReplica(dbPath, { updatedAt: Date.now() });
+    const oldSec = (Date.now() - 3_600_000) / 1000; // writer dead an hour ago
+    utimesSync(dbPath, oldSec, oldSec);
+    const nowSec = Date.now() / 1000;
+    for (const ext of ["-wal", "-shm"]) {
+      writeFileSync(dbPath + ext, ""); // zero-length reader artifact
+      utimesSync(dbPath + ext, nowSec, nowSec); // bumped to NOW
+    }
+    process.env.CATALYST_LINEAR_REPLICA = "on";
+    process.env.CATALYST_REPLICA_DB = dbPath;
+    process.env.CATALYST_LINEAR_REPLICA_STALE_MS = "300000";
+    installFakeLinearis(tmp, { payload: { identifier: "CTL-TEST", state: { name: "Implement" } } });
+    const { out } = await runMain(["read", "CTL-TEST"]);
+    expect(out._meta.source).toBe("linearis");
+    expect(out._meta.replica_skip).toBe("stale");
+  });
+
+  // Codex P2: read flags (e.g. --with-attachments, used by phase-research) must
+  // reach linearis unchanged. The replica serves only the flagless detail shape, so
+  // a flagged read bypasses the replica entirely (parity > acceleration).
+  test("read flags bypass a FRESH replica → linearis passthrough preserves the flag", async () => {
+    const dbPath = join(tmp, "catalyst-replica.db");
+    seedReplica(dbPath); // fresh + mode on → would normally HIT
+    process.env.CATALYST_LINEAR_REPLICA = "on";
+    process.env.CATALYST_REPLICA_DB = dbPath;
+    installArgEchoLinearis(tmp);
+    const { code, out } = await runMain(["read", "CTL-TEST", "--with-attachments"]);
+    expect(code).toBe(0);
+    expect(out._meta.source).toBe("linearis"); // replica bypassed despite being fresh
+    expect(out._meta.replica_skip).toBe("read-flags");
+    expect(out._args).toBe("issues read CTL-TEST --with-attachments");
   });
 });
 
@@ -343,6 +417,31 @@ describe("list / search / errors", () => {
     const env = JSON.parse(err.trim().split("\n").pop());
     expect(env.error).toContain("linearis issues read CTL-1 failed");
     expect(env.status).toBe(1);
+  });
+});
+
+// ── linearis timeout scoping (Codex P2: read capped, list/search uncapped) ───
+describe("linearis timeout scoping", () => {
+  test("read honors CATALYST_LINEARIS_TIMEOUT_MS — slow linearis → timeout, exit 1", async () => {
+    process.env.CATALYST_LINEARIS_TIMEOUT_MS = "100";
+    installSlowLinearis(tmp, 600); // 600ms > 100ms cap → SIGKILL
+    const { code, err } = await runMain(["read", "CTL-SLOW"]);
+    expect(code).toBe(1);
+    expect(JSON.parse(err.trim().split("\n").pop()).timedOut).toBe(true);
+  });
+  test("list is UNCAPPED — slow linearis completes despite a tiny read cap", async () => {
+    process.env.CATALYST_LINEARIS_TIMEOUT_MS = "100";
+    installSlowLinearis(tmp, 400); // would be killed at 100ms IF the cap applied
+    const { code, out } = await runMain(["list"]);
+    expect(code).toBe(0);
+    expect(out._meta.source).toBe("linearis");
+  });
+  test("search is UNCAPPED — slow linearis completes despite a tiny read cap", async () => {
+    process.env.CATALYST_LINEARIS_TIMEOUT_MS = "100";
+    installSlowLinearis(tmp, 400);
+    const { code, out } = await runMain(["search", "auth bug"]);
+    expect(code).toBe(0);
+    expect(out._meta.source).toBe("linearis");
   });
 });
 

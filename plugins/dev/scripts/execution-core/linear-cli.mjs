@@ -60,7 +60,13 @@ export function resolveReplicaMode(env = process.env, cfgPathOverride) {
   }
   try {
     const home = env.HOME || homedir();
-    const cfgPath = cfgPathOverride || resolve(home, ".config", "catalyst", "config.json");
+    // Honor CATALYST_LAYER2_CONFIG_FILE for parity with config.mjs's
+    // getLayer2ConfigPath() — a node launched with a non-default Layer-2 path
+    // must resolve linearReplica.mode from THAT file, not the hardcoded default.
+    const cfgPath =
+      cfgPathOverride ||
+      env.CATALYST_LAYER2_CONFIG_FILE ||
+      resolve(home, ".config", "catalyst", "config.json");
     if (!existsSync(cfgPath)) return "off";
     const cfg = JSON.parse(readFileSync(cfgPath, "utf8"));
     return cfg?.catalyst?.linearReplica?.mode === "on" ? "on" : "off";
@@ -137,12 +143,21 @@ async function openFreshReplica() {
   let mtimeAgeMs;
   try {
     // WAL mode: the writer's appends land in the `-wal` sidecar; the main DB file's
-    // mtime only advances on checkpoint. Take the freshest of the DB + its -wal/-shm
-    // sidecars so an actively-writing-to-WAL replica is not falsely judged stale.
+    // mtime only advances on checkpoint. Take the freshest of the DB + its `-wal`.
+    //
+    // Spoof-resistance (Codex P2): a read-only consumer that merely OPENS a
+    // checkpointed DB can create fresh, EMPTY `-wal`/`-shm` sidecars, which would
+    // make a long-dead replica look fresh. So we (a) drop `-shm` entirely — it is a
+    // reader-touched shared-memory index, never a writer-liveness signal — and (b)
+    // only trust `-wal` when it is NON-EMPTY: a writer's active WAL carries frames,
+    // while a reader artifact is zero-length. Right after a checkpoint+truncate the
+    // WAL is briefly empty, but the checkpoint just WROTE the main DB file, so its
+    // mtime is fresh in that window — no false-stale.
     let newest = statSync(dbPath).mtimeMs;
-    for (const ext of ["-wal", "-shm"]) {
-      try { newest = Math.max(newest, statSync(dbPath + ext).mtimeMs); } catch { /* sidecar absent */ }
-    }
+    try {
+      const wal = statSync(dbPath + "-wal");
+      if (wal.size > 0) newest = Math.max(newest, wal.mtimeMs);
+    } catch { /* -wal absent → main DB mtime only */ }
     mtimeAgeMs = Date.now() - newest;
   } catch {
     return { skip: "stat-failed" };
@@ -187,20 +202,27 @@ function flagPairs(flags) {
 }
 // Throws a tagged error on failure (NOT process.exit — that would be untestable
 // and kill any embedding process); main() catches `_linearis` and returns code 1.
-function runLinearis(args) {
+//
+// timeoutMs: the single-ticket `read` fallback caps a 429-stalled / hung linearis so
+// the hot read can never block indefinitely (mirrors linear-query.mjs's
+// CTL-1339/CTL-1364 8s cap); on timeout we fail safe → exit 1. Pass `timeoutMs: 0`
+// (or any non-positive value) to leave the call UNCAPPED — the `list`/`search`
+// passthrough must match direct `linearis`, where a broad `--limit 200` page or an
+// expensive search legitimately exceeds 8s and must not be SIGKILLed into a failure.
+function runLinearis(args, { timeoutMs } = {}) {
   // env: process.env is explicit (not just inherited) so the CURRENT PATH resolves
   // `linearis` — bun's spawnSync snapshots PATH for bare-command lookup otherwise.
-  // timeout: a 429-stalled / hung linearis must never block the read indefinitely
-  // (mirrors linear-query.mjs's CTL-1339/CTL-1364 8s cap); on timeout we fail safe → exit 1.
-  const timeoutMs = Number(process.env.CATALYST_LINEARIS_TIMEOUT_MS) || 8_000;
-  const r = spawnSync("linearis", args, {
+  const cap =
+    timeoutMs === undefined ? Number(process.env.CATALYST_LINEARIS_TIMEOUT_MS) || 8_000 : timeoutMs;
+  const opts = {
     input: "",
     encoding: "utf8",
     maxBuffer: 64 * 1024 * 1024,
     env: process.env,
-    timeout: timeoutMs,
     killSignal: "SIGKILL",
-  });
+  };
+  if (cap > 0) opts.timeout = cap; // uncapped when cap <= 0 (list/search passthrough)
+  const r = spawnSync("linearis", args, opts);
   const timedOut = r.error?.code === "ETIMEDOUT" || r.signal === "SIGKILL" || r.signal === "SIGTERM";
   if (r.error || r.status !== 0) {
     throw Object.assign(new Error(`linearis ${args.join(" ")} failed`), {
@@ -335,10 +357,24 @@ function metaFor(source, replica, extra = {}) {
 }
 
 // ── command handlers ──
-async function cmdRead(id, replica) {
+async function cmdRead(id, replica, flags = {}) {
   if (!id) {
     process.stderr.write(JSON.stringify({ error: "read: missing <ID> (e.g. catalyst-linear read CTL-1)" }) + "\n");
     return 2;
+  }
+  // Preserve caller-passed `linearis issues read` flags (e.g. --with-attachments,
+  // used by phase-research to fetch linked plan references). The replica serves only
+  // the flagless normalized detail shape, so a flagged read CANNOT be honored by the
+  // replica without silently returning a different, incomplete payload. When any read
+  // flag is present we bypass the replica and passthrough to linearis so the caller
+  // gets the EXACT requested payload (parity > acceleration).
+  const flagArgs = flagPairs(flags);
+  const readArgs = ["issues", "read", id, ...flagArgs];
+  if (flagArgs.length > 0) {
+    if (replica?.db) { try { replica.db.close(); } catch { /* already closed */ } }
+    warnFallback("read-flags", id);
+    emit(runLinearis(readArgs), metaFor("linearis", null, { replica_skip: "read-flags" }));
+    return 0;
   }
   if (replica?.db) {
     let view = null;
@@ -358,12 +394,12 @@ async function cmdRead(id, replica) {
     // _meta.source so monitoring can tell a clean cache-miss from a broken replica.
     replica.db.close();
     warnFallback(threw ? "replica-exception" : "miss", id);
-    emit(runLinearis(["issues", "read", id]), metaFor(threw ? "linearis_exception" : "linearis_miss", replica));
+    emit(runLinearis(readArgs), metaFor(threw ? "linearis_exception" : "linearis_miss", replica));
     return 0;
   }
   // No usable replica: linearis is the direct path. warn only if the operator opted in.
   warnFallback(replica?.skip ?? "replica-absent", id);
-  emit(runLinearis(["issues", "read", id]), metaFor("linearis", null, { replica_skip: replica?.skip ?? null }));
+  emit(runLinearis(readArgs), metaFor("linearis", null, { replica_skip: replica?.skip ?? null }));
   return 0;
 }
 
@@ -372,7 +408,8 @@ async function cmdRead(id, replica) {
 // preserves linearis's exact shape and just annotates _meta, so they are correct
 // today on every node; they simply aren't replica-accelerated yet.
 function cmdList(flags) {
-  emit(runLinearis(["issues", "list", ...flagPairs(flags)]), metaFor("linearis", null, { list_replica: "pending" }));
+  // timeoutMs: 0 — uncapped, matching direct `linearis issues list` (broad pages can exceed 8s).
+  emit(runLinearis(["issues", "list", ...flagPairs(flags)], { timeoutMs: 0 }), metaFor("linearis", null, { list_replica: "pending" }));
   return 0;
 }
 function cmdSearch(query, flags) {
@@ -380,7 +417,8 @@ function cmdSearch(query, flags) {
     process.stderr.write(JSON.stringify({ error: 'search: missing <query> (e.g. catalyst-linear search "auth bug")' }) + "\n");
     return 2;
   }
-  emit(runLinearis(["issues", "search", query, ...flagPairs(flags)]), metaFor("linearis", null, { search_replica: "pending" }));
+  // timeoutMs: 0 — uncapped, matching direct `linearis issues search` (expensive searches can exceed 8s).
+  emit(runLinearis(["issues", "search", query, ...flagPairs(flags)], { timeoutMs: 0 }), metaFor("linearis", null, { search_replica: "pending" }));
   return 0;
 }
 
@@ -421,7 +459,7 @@ export async function main(argv) {
   try {
     if (cmd === "read") {
       replica = await openFreshReplica();
-      return await cmdRead(positionals[0], replica);
+      return await cmdRead(positionals[0], replica, flags);
     }
     if (cmd === "list") return cmdList(flags);
     return cmdSearch(positionals[0], flags);

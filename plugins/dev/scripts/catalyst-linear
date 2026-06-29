@@ -20,6 +20,22 @@ while [[ -L $_SRC ]]; do _SRC="$(readlink "$_SRC")"; done
 SCRIPT_DIR="$(cd "$(dirname "$_SRC")" && pwd)"
 unset _SRC
 
+# CTL-390 contract: --version handled here, BEFORE the JS driver dispatch, so this
+# registered CLI prints the standard catalyst version block like every sibling
+# catalyst-* command (the driver otherwise treats --version as an unknown flag and
+# exits 1 with usage). SCRIPT_DIR is already symlink-resolved above.
+case "${1:-}" in
+--version | -V)
+	if [[ -f "${SCRIPT_DIR}/lib/catalyst-version.sh" ]]; then
+		# shellcheck source=/dev/null
+		. "${SCRIPT_DIR}/lib/catalyst-version.sh"
+		catalyst_print_version "catalyst-linear" "${BASH_SOURCE[0]}" && exit 0
+	fi
+	echo "error: catalyst-version helper missing at ${SCRIPT_DIR}/lib/catalyst-version.sh" >&2
+	exit 1
+	;;
+esac
+
 DRIVER_MJS="${CATALYST_LINEAR_DRIVER:-${SCRIPT_DIR}/execution-core/linear-cli.mjs}"
 if [[ ! -f $DRIVER_MJS ]]; then
 	echo "error: catalyst-linear driver not found: $DRIVER_MJS" >&2
