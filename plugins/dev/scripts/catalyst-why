@@ -34,6 +34,34 @@ case "${1:-}" in
     ;;
 esac
 
+print_help() {
+  cat <<'EOF'
+catalyst-why — explain why the daemon believes a worker is alive, stuck, or dead
+(the belief → rule → source-facts trace for a ticket).
+
+Usage:
+  catalyst-why <ticket> [--tick N] [--json]
+  catalyst why  <ticket> [--tick N] [--json]
+
+Arguments:
+  <ticket>        Linear ticket id (e.g. CTL-1383)
+
+Options:
+  --tick N        Trace a specific tick instead of the latest
+  --json          Emit the raw trace as JSON
+  -h, --help      Show this help and exit
+  -V, --version   Print version and exit
+
+Reads the read-only shadow belief store at
+${CATALYST_BELIEFS_DB:-$CATALYST_DIR/beliefs.db}. Never writes.
+EOF
+}
+
+case "${1:-}" in
+  -h|--help|help) print_help; exit 0 ;;
+  "")             print_help >&2; exit 1 ;;
+esac
+
 # Resolve this script's directory through symlinks.
 _SRC="${BASH_SOURCE[0]}"
 while [[ -L $_SRC ]]; do _SRC="$(readlink "$_SRC")"; done

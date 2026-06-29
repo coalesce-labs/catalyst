@@ -3,6 +3,27 @@
 
 set -euo pipefail
 
+print_help() {
+  cat <<'EOF'
+workflow-context.sh — manage the per-worktree workflow context (.catalyst/.workflow-context.json).
+
+Usage: workflow-context.sh <command> [args]
+
+Commands:
+  init                          Initialize the context file if absent
+  add <type> <path> [ticket]    Record a workflow document pointer
+  recent <type>                 Print recent documents of a type
+  most-recent                   Print the most recent document
+  set-ticket <ticket>           Set the current ticket
+  set-orchestration <json>      Set orchestration metadata
+  ticket <ticket>               Print documents for a ticket
+
+Options:
+  -h, --help    Show this help and exit
+  -V, --version Print version and exit
+EOF
+}
+
 # CTL-390: --version handling (early, before any arg parsing).
 case "${1:-}" in
   --version|-V)
@@ -17,6 +38,11 @@ case "${1:-}" in
     echo "error: catalyst-version helper missing at ${_CV_DIR}/lib/catalyst-version.sh" >&2
     exit 1
     ;;
+esac
+
+case "${1:-}" in
+  -h|--help|help) print_help; exit 0 ;;
+  "")             print_help >&2; exit 1 ;;
 esac
 
 # Resolve project root from git, then fall back to CWD
@@ -164,7 +190,8 @@ ticket)
 	get_by_ticket "$2"
 	;;
 *)
-	echo "Usage: $0 {init|add|recent|most-recent|set-ticket|set-orchestration|ticket}"
+	echo "error: unknown command: $1" >&2
+	print_help >&2
 	exit 1
 	;;
 esac
