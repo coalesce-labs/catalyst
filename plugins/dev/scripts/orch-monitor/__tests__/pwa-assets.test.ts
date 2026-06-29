@@ -103,6 +103,9 @@ beforeAll(() => {
     readFileSync(join(PUBLIC, "service-worker.js")),
   );
   writeFileSync(join(publicDir, "icon-192.png"), "\x89PNG\r\n\x1a\nfake");
+  // CTL-1374: a content-hashed asset, so we can assert the immutable cache header.
+  mkdirSync(join(publicDir, "assets"), { recursive: true });
+  writeFileSync(join(publicDir, "assets", "main-abc123.js"), "console.log(1)");
 
   server = createServer({
     port: 0,
@@ -153,5 +156,45 @@ describe("PWA icons over the existing /public route (CTL-1133)", () => {
     const res = await fetch(`${baseUrl}/public/icon-192.png`);
     expect(res.status).toBe(200);
     expect(res.headers.get("content-type")).toContain("image/png");
+  });
+});
+
+// ── Cache-Control deploy hygiene (CTL-1374) ───────────────────────────────────
+// The shell + manifest must REVALIDATE so a redeploy is picked up (never frozen by the
+// browser); content-hashed /assets/* are immutable (forever-cacheable, new file = new
+// name); non-hashed /public/* icons revalidate.
+describe("Cache-Control headers (CTL-1374)", () => {
+  it("GET / revalidates the shell (no-cache)", async () => {
+    const res = await fetch(`${baseUrl}/`);
+    expect(res.status).toBe(200);
+    expect(res.headers.get("cache-control")).toContain("no-cache");
+  });
+
+  it("GET /index.html revalidates the shell (no-cache)", async () => {
+    const res = await fetch(`${baseUrl}/index.html`);
+    expect(res.status).toBe(200);
+    expect(res.headers.get("cache-control")).toContain("no-cache");
+  });
+
+  it("GET /manifest.webmanifest revalidates (no-cache)", async () => {
+    const res = await fetch(`${baseUrl}/manifest.webmanifest`);
+    expect(res.status).toBe(200);
+    expect(res.headers.get("cache-control")).toContain("no-cache");
+  });
+
+  it("GET /assets/<hashed> is immutable + long-lived", async () => {
+    const res = await fetch(`${baseUrl}/assets/main-abc123.js`);
+    expect(res.status).toBe(200);
+    const cc = res.headers.get("cache-control") ?? "";
+    expect(cc).toContain("immutable");
+    expect(cc).toContain("max-age=31536000");
+  });
+
+  it("GET /public/<icon> revalidates (no-cache, NOT immutable) — not content-hashed", async () => {
+    const res = await fetch(`${baseUrl}/public/icon-192.png`);
+    expect(res.status).toBe(200);
+    const cc = res.headers.get("cache-control") ?? "";
+    expect(cc).toContain("no-cache");
+    expect(cc).not.toContain("immutable");
   });
 });

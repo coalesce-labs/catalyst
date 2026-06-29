@@ -24,6 +24,8 @@ import {
   checkCloudTokenEnv,
   checkSdkExecutorAuth,
   checkConfigScopeLeak,
+  checkRepoIconTokenScope,
+  defaultConfiguredRepos,
   checkNodeClass,
   checkReadReplicaReachable,
   checkWontOwnWork,
@@ -1686,6 +1688,154 @@ describe("checkDaemonlessLocal (CTL-1355 — folds verify-node --json)", () => {
   });
 });
 
+describe("defaultConfiguredRepos — mirrors the monitor's repoOwners resolution (CTL-1375)", () => {
+  const layer1 = (teams) => JSON.stringify({ catalyst: { monitor: { linear: { teams } } } });
+  const boom = () => {
+    throw new Error("unreadable");
+  };
+
+  it("registry repoRoot OVERRIDES a stale Layer-1 vcsRepo for the same short-name (Codex P2 #1 — no double-probe)", () => {
+    const repos = defaultConfiguredRepos({
+      readLayer1: () =>
+        layer1([
+          { key: "CTL", vcsRepo: "coalesce-labs/catalyst" },
+          { key: "ADV", vcsRepo: "coalesce-labs/adva" }, // stale 404
+        ]),
+      readCluster: () => null,
+      readRegistry: () =>
+        JSON.stringify({
+          projects: [{ team: "ADV", repoRoot: "/home/ci/code-repos/github/groundworkapp/Adva" }],
+        }),
+    });
+    expect(repos).toContain("groundworkapp/Adva"); // registry wins by short-name "adva"
+    expect(repos).not.toContain("coalesce-labs/adva"); // stale slug REPLACED, not also probed
+    expect(repos).toContain("coalesce-labs/catalyst");
+  });
+
+  it("cluster.json vcsRepo overrides a Layer-1 vcsRepo for the same short-name", () => {
+    const repos = defaultConfiguredRepos({
+      readLayer1: () => layer1([{ key: "ADV", vcsRepo: "coalesce-labs/adva" }]),
+      readCluster: () => ({ projects: [{ teamKey: "ADV", vcsRepo: "rightsite-cloud/Adva" }] }),
+      readRegistry: boom,
+    });
+    expect(repos).toContain("rightsite-cloud/Adva");
+    expect(repos).not.toContain("coalesce-labs/adva");
+  });
+
+  it("cluster rename to a DIFFERENT basename replaces the stale Layer-1 slug BY TEAM KEY (Codex P3 #2)", () => {
+    const repos = defaultConfiguredRepos({
+      readLayer1: () => layer1([{ key: "ADV", vcsRepo: "old-org/old-name" }]),
+      readCluster: () => ({ projects: [{ teamKey: "ADV", vcsRepo: "new-org/new-name" }] }),
+      readRegistry: boom,
+    });
+    expect(repos).toContain("new-org/new-name");
+    // deduped by team key (not basename) → the stale slug is REPLACED, never probed.
+    expect(repos).not.toContain("old-org/old-name");
+  });
+
+  it("reads a bare { monitor: { linear: { teams } } } Layer-1 shape, no catalyst wrapper (Codex P3 #3)", () => {
+    const repos = defaultConfiguredRepos({
+      readLayer1: () =>
+        JSON.stringify({ monitor: { linear: { teams: [{ key: "CTL", vcsRepo: "coalesce-labs/catalyst" }] } } }),
+      readCluster: () => null,
+      readRegistry: boom,
+    });
+    expect(repos).toEqual(["coalesce-labs/catalyst"]);
+  });
+
+  it("returns the Layer-1 set when there is no cluster/registry override", () => {
+    const repos = defaultConfiguredRepos({
+      readLayer1: () => layer1([{ key: "CTL", vcsRepo: "coalesce-labs/catalyst" }]),
+      readCluster: () => null,
+      readRegistry: boom,
+    });
+    expect(repos).toEqual(["coalesce-labs/catalyst"]);
+  });
+
+  it("fail-opens to [] when every source read throws", () => {
+    expect(
+      defaultConfiguredRepos({ readLayer1: boom, readCluster: boom, readRegistry: boom }),
+    ).toEqual([]);
+  });
+
+  it("ignores non-owner/repo vcsRepo and registry repoRoots without a /github/ segment", () => {
+    const repos = defaultConfiguredRepos({
+      readLayer1: () => layer1([{ key: "X", vcsRepo: "no-slash" }]),
+      readCluster: () => null,
+      readRegistry: () => JSON.stringify({ projects: [{ team: "Y", repoRoot: "/local/no-github" }] }),
+    });
+    expect(repos).toEqual([]);
+  });
+});
+
+describe("checkRepoIconTokenScope (CTL-1375)", () => {
+  const verdict = (checks) => checks[0];
+
+  it("INFO-skips when no team repos are configured", () => {
+    const checks = checkRepoIconTokenScope({ configuredRepos: () => [], probeContents: () => ({ ok: true }) });
+    expect(checks).toHaveLength(1);
+    expect(verdict(checks).name).toBe("repo-icon-token");
+    expect(verdict(checks).status).toBe(STATUS.INFO);
+    expect(verdict(checks).detail).toContain("no configured team repos");
+  });
+
+  it("PASSes when the token can read every configured repo's contents", () => {
+    const probed = [];
+    const checks = checkRepoIconTokenScope({
+      configuredRepos: () => ["coalesce-labs/catalyst", "rightsite-cloud/Adva"],
+      probeContents: (r) => (probed.push(r), { ok: true, status: 0 }),
+    });
+    expect(probed).toEqual(["coalesce-labs/catalyst", "rightsite-cloud/Adva"]);
+    expect(verdict(checks).status).toBe(STATUS.PASS);
+    expect(verdict(checks).detail).toContain("2 configured repo");
+  });
+
+  it("WARNs (never FAIL) naming the unreadable repo + the daemon-env remediation", () => {
+    const checks = checkRepoIconTokenScope({
+      configuredRepos: () => ["coalesce-labs/catalyst", "rightsite-cloud/Adva"],
+      probeContents: (r) => ({ ok: r === "coalesce-labs/catalyst", status: r === "coalesce-labs/catalyst" ? 0 : 404 }),
+    });
+    expect(verdict(checks).status).toBe(STATUS.WARN);
+    expect(verdict(checks).detail).toContain("rightsite-cloud/Adva");
+    expect(verdict(checks).detail).not.toContain("coalesce-labs/catalyst"); // only the unreadable one
+    expect(verdict(checks).detail).toContain("org-read");
+    expect(verdict(checks).detail).toContain("MONITOR DAEMON");
+  });
+
+  it("INFO-skips when gh is missing (environmental — the fetcher fail-opens)", () => {
+    const checks = checkRepoIconTokenScope({
+      configuredRepos: () => ["coalesce-labs/catalyst"],
+      probeContents: () => ({ ghMissing: true }),
+    });
+    expect(verdict(checks).status).toBe(STATUS.INFO);
+    expect(verdict(checks).detail).toContain("gh CLI not found");
+  });
+
+  it("never throws / never FAILs — a throwing probe degrades to a single INFO", () => {
+    const checks = checkRepoIconTokenScope({
+      configuredRepos: () => ["coalesce-labs/catalyst"],
+      probeContents: () => {
+        throw new Error("boom");
+      },
+    });
+    expect(checks).toHaveLength(1);
+    expect(verdict(checks).status).toBe(STATUS.INFO);
+  });
+
+  it("never yields STATUS.FAIL across any of the above (must not gate catalyst-join)", () => {
+    const scenarios = [
+      { configuredRepos: () => [], probeContents: () => ({ ok: true }) },
+      { configuredRepos: () => ["a/b"], probeContents: () => ({ ok: true }) },
+      { configuredRepos: () => ["a/b"], probeContents: () => ({ ok: false, status: 404 }) },
+      { configuredRepos: () => ["a/b"], probeContents: () => ({ ghMissing: true }) },
+      { configuredRepos: () => { throw new Error("x"); } },
+    ];
+    for (const deps of scenarios) {
+      for (const c of checkRepoIconTokenScope(deps)) expect(c.status).not.toBe(STATUS.FAIL);
+    }
+  });
+});
+
 describe("checksForClass — suite selection (CTL-1355)", () => {
   // Each suite is an array of THUNKS; .toString() reveals which check each calls.
   const src = (nc, opts = {}) => checksForClass(nc, opts).map((f) => f.toString()).join("\n");
@@ -1708,6 +1858,7 @@ describe("checksForClass — suite selection (CTL-1355)", () => {
     expect(s).toContain("checkThoughts()");
     expect(s).toContain("checkSdkExecutorAuth()");
     expect(s).toContain("checkConfigScopeLeak()");
+    expect(s).toContain("checkRepoIconTokenScope()"); // CTL-1375: monitor-serving class
     expect(s).toContain("checkHrwPartition()"); // would-own visibility
   });
 
@@ -1733,6 +1884,9 @@ describe("checksForClass — suite selection (CTL-1355)", () => {
     expect(s).not.toContain("checkWebhookIngestion()");
     expect(s).not.toContain("checkThoughts()");
     expect(s).not.toContain("checkSdkExecutorAuth()");
+    // CTL-1375: repo-icon token scope is a monitor-SERVING (worker) concern — a developer
+    // reads icons via the remote read-replica, not by probing repos locally.
+    expect(s).not.toContain("checkRepoIconTokenScope()");
     // P2: checkClaudeSettings is a worker-cluster-MEMBER concern — a developer client
     // (deliberately out of a multi-host roster) must not be graded against it.
     expect(s).not.toContain("checkClaudeSettings()");
