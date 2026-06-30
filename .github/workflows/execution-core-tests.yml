@@ -228,6 +228,7 @@ jobs:
             delegate-runner.test.mjs \
             delegate-slot-reservation.test.mjs \
             diagnostician.test.mjs \
+            cloud-sync-telemetry.test.mjs \
             dispatch.test.mjs \
             doctor.test.mjs \
             doctor-replica.test.mjs \

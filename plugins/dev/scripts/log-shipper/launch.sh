@@ -89,6 +89,10 @@ export CATALYST_MONITOR_LOG="${CATALYST_MONITOR_LOG:-${CATALYST_DIR}/monitor.log
 # even when no updater agent is installed — Alloy's loki.source.file just tails nothing.
 export CATALYST_UPDATER_LOG="${CATALYST_UPDATER_LOG:-${CATALYST_DIR}/updater.log}"
 
+# CTL-1395: the catalyst-cloud-sync writer's log (6th Alloy stream). Exported even when no
+# cloud-sync agent is installed — Alloy's loki.source.file just tails nothing.
+export CATALYST_CLOUD_SYNC_LOG="${CATALYST_CLOUD_SYNC_LOG:-${CATALYST_DIR}/cloud-sync.log}"
+
 mkdir -p "$STORAGE"
 
 log "starting alloy (node=${CATALYST_HOST_NAME:-<os-hostname>}, config=$CONFIG, storage=$STORAGE)"
