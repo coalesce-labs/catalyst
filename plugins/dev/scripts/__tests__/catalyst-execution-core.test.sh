@@ -213,6 +213,49 @@ else
 fi
 teardown
 
+echo "test 10 (CTL-1404): _default_otel_from_user_settings fills unset OTLP keys from settings.json"
+# helper already sourced in test 5. Needs jq (the function no-ops without it).
+if ! command -v jq >/dev/null 2>&1; then
+	echo "  SKIP: jq not installed"
+else
+	SETTINGS_DIR="$(mktemp -d)"
+	cat >"$SETTINGS_DIR/settings.json" <<'JSON'
+{ "env": {
+  "OTEL_EXPORTER_OTLP_ENDPOINT": "http://collector.example:4318",
+  "OTEL_EXPORTER_OTLP_PROTOCOL": "http/protobuf",
+  "OTEL_METRICS_EXPORTER": "otlp",
+  "OTEL_LOGS_EXPORTER": "otlp",
+  "CLAUDE_CODE_ENABLE_TELEMETRY": "1"
+} }
+JSON
+	export CLAUDE_SETTINGS_JSON="$SETTINGS_DIR/settings.json"
+	# (a) unset → filled from settings.json
+	unset OTEL_EXPORTER_OTLP_ENDPOINT OTEL_EXPORTER_OTLP_PROTOCOL OTEL_METRICS_EXPORTER OTEL_LOGS_EXPORTER CLAUDE_CODE_ENABLE_TELEMETRY
+	_default_otel_from_user_settings
+	if [ "${OTEL_EXPORTER_OTLP_ENDPOINT:-}" = "http://collector.example:4318" ]; then pass "fills endpoint from settings.json"; else fail "fills endpoint from settings.json" "got=${OTEL_EXPORTER_OTLP_ENDPOINT:-<unset>}"; fi
+	if [ "${OTEL_EXPORTER_OTLP_PROTOCOL:-}" = "http/protobuf" ]; then pass "fills protocol from settings.json"; else fail "fills protocol from settings.json" "got=${OTEL_EXPORTER_OTLP_PROTOCOL:-<unset>}"; fi
+	if [ "${CLAUDE_CODE_ENABLE_TELEMETRY:-}" = "1" ]; then pass "fills enable-telemetry"; else fail "fills enable-telemetry" "got=${CLAUDE_CODE_ENABLE_TELEMETRY:-<unset>}"; fi
+	# (b) already set → NOT overridden (execution-core.env wins)
+	export OTEL_EXPORTER_OTLP_ENDPOINT="http://daemon-env-wins:4318"
+	_default_otel_from_user_settings
+	if [ "${OTEL_EXPORTER_OTLP_ENDPOINT}" = "http://daemon-env-wins:4318" ]; then pass "does not override an already-set endpoint"; else fail "does not override an already-set endpoint" "got=${OTEL_EXPORTER_OTLP_ENDPOINT}"; fi
+	# (d) Codex P1: a BARE (non-exported) value sourced from execution-core.env — e.g.
+	# catalyst-join.sh's `OTEL_EXPORTER_OTLP_ENDPOINT=...` without export — must be PROMOTED to
+	# exported so the nohup'd daemon child inherits it (else SDK workers start endpoint-less).
+	unset OTEL_EXPORTER_OTLP_ENDPOINT
+	OTEL_EXPORTER_OTLP_ENDPOINT="http://bare-sourced:4318" # bare assignment, NOT exported
+	_default_otel_from_user_settings
+	CHILD_SEES="$(bash -c 'printf %s "${OTEL_EXPORTER_OTLP_ENDPOINT-}"')"
+	if [ "$CHILD_SEES" = "http://bare-sourced:4318" ]; then pass "promotes a bare daemon-env value to exported (child inherits)"; else fail "promotes a bare daemon-env value to exported" "child_sees=$CHILD_SEES"; fi
+	# (c) settings file absent → no-op success, env untouched
+	unset OTEL_EXPORTER_OTLP_ENDPOINT
+	export CLAUDE_SETTINGS_JSON="$SETTINGS_DIR/does-not-exist.json"
+	if _default_otel_from_user_settings; then pass "absent settings.json → no-op success"; else fail "absent settings.json → no-op success"; fi
+	if [ -z "${OTEL_EXPORTER_OTLP_ENDPOINT:-}" ]; then pass "absent settings.json leaves env unset"; else fail "absent settings.json leaves env unset" "got=${OTEL_EXPORTER_OTLP_ENDPOINT}"; fi
+	unset CLAUDE_SETTINGS_JSON OTEL_EXPORTER_OTLP_ENDPOINT OTEL_EXPORTER_OTLP_PROTOCOL OTEL_METRICS_EXPORTER OTEL_LOGS_EXPORTER CLAUDE_CODE_ENABLE_TELEMETRY
+	rm -rf "$SETTINGS_DIR"
+fi
+
 echo ""
 echo "─────────────────────────────────────────"
 echo "Results: ${PASSES} pass, ${FAILURES} fail"
