@@ -361,6 +361,23 @@ case "\$1" in
 esac
 EOF
 chmod +x "$DISCUSS_429_DIR/bin/linearis"
+# CTL-1397: triage reads via `catalyst-linear` now — stub it (read → fixture) so
+# the body's ticket read succeeds and reaches the best-effort comment-post path
+# this case exercises (without it, the body falls through to the real binary on
+# PATH and the test is non-hermetic / red in CI).
+cat >"$DISCUSS_429_DIR/bin/catalyst-linear" <<EOF
+#!/usr/bin/env bash
+case "\$1" in
+  read)
+    cat "$FIXTURE_429"
+    ;;
+  *)
+    echo "catalyst-linear stub: unsupported subcommand: \$1" >&2
+    exit 2
+    ;;
+esac
+EOF
+chmod +x "$DISCUSS_429_DIR/bin/catalyst-linear"
 linear_comment_post_stub_install_failing "$DISCUSS_429_DIR/bin" "$DISCUSS_429_DIR/comment-post-calls.log"
 
 PATH="$DISCUSS_429_DIR/bin:$PATH" \
