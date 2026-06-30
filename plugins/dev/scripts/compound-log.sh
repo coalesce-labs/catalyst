@@ -98,7 +98,8 @@ probe_pr() {
 
 probe_linear_estimate() {
   local ticket="$1" json
-  json=$(linearis issues read "$ticket" 2>/dev/null) || return 1
+  # CTL-1397: read the estimate through the replica wrapper, never bare linearis.
+  json=$(catalyst-linear read "$ticket" 2>/dev/null) || return 1
   [ -z "$json" ] && return 1
   echo "$json" | jq -r '.estimate // empty'
 }

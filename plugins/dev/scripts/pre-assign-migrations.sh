@@ -59,14 +59,15 @@ fi
 
 # Build ticket JSON if not supplied.
 if [ -z "$TICKETS_JSON" ]; then
-  if ! command -v linearis >/dev/null 2>&1; then
-    echo "error: --tickets requires linearis CLI; pass --tickets-json instead" >&2
+  # CTL-1397: ticket reads go through the replica wrapper (catalyst-linear).
+  if ! command -v catalyst-linear >/dev/null 2>&1; then
+    echo "error: --tickets requires the catalyst-linear CLI; pass --tickets-json instead" >&2
     exit 1
   fi
   TICKETS_JSON="["
   FIRST=1
   for T in $TICKETS; do
-    RAW=$(linearis issues read "$T" 2>/dev/null || echo '{}')
+    RAW=$(catalyst-linear read "$T" 2>/dev/null || echo '{}')
     OBJ=$(echo "$RAW" | jq -c --arg id "$T" '{
       id: $id,
       title: (.title // ""),

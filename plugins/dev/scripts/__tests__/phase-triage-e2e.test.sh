@@ -295,12 +295,14 @@ fi
 
 FAIL_DIR="$TMPROOT/lin-fail"
 mkdir -p "$FAIL_DIR/bin"
-cat >"$FAIL_DIR/bin/linearis" <<'EOF'
+# CTL-1397: the triage body now reads via `catalyst-linear read`, so the
+# read-failure case stubs a failing catalyst-linear (not linearis).
+cat >"$FAIL_DIR/bin/catalyst-linear" <<'EOF'
 #!/usr/bin/env bash
-echo "linearis stub: simulated failure" >&2
+echo "catalyst-linear stub: simulated read failure" >&2
 exit 1
 EOF
-chmod +x "$FAIL_DIR/bin/linearis"
+chmod +x "$FAIL_DIR/bin/catalyst-linear"
 
 PATH="$FAIL_DIR/bin:$PATH" \
 	TICKET=CTL-9001 \

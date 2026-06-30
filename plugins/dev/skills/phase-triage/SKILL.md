@@ -92,19 +92,20 @@ WORKER_DIR="${WORKER_DIR:-${ORCH_DIR:+${ORCH_DIR}/workers/${TICKET}}}"
 WORKER_DIR="${WORKER_DIR:-$(pwd)}"
 mkdir -p "$WORKER_DIR"
 
-# 1. Read ticket via linearis (test stubs override $PATH).
+# 1. Read ticket via the replica wrapper (catalyst-linear; CTL-1397 — never bare
+#    linearis for reads). Test stubs override $PATH.
 TICKET_JSON_FILE="$(mktemp)"
 trap 'rm -f "$TICKET_JSON_FILE"' EXIT
 
-if ! linearis issues read "$TICKET" > "$TICKET_JSON_FILE" 2>/dev/null; then
+if ! catalyst-linear read "$TICKET" > "$TICKET_JSON_FILE" 2>/dev/null; then
   emit_phase_complete --phase triage --ticket "$TICKET" --status failed \
-    --reason "linearis issues read failed"
+    --reason "catalyst-linear read failed"
   exit 1
 fi
 
 if ! jq -e . "$TICKET_JSON_FILE" >/dev/null 2>&1; then
   emit_phase_complete --phase triage --ticket "$TICKET" --status failed \
-    --reason "linearis returned non-JSON output"
+    --reason "catalyst-linear returned non-JSON output"
   exit 1
 fi
 

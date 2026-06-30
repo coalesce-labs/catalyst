@@ -212,7 +212,9 @@ try_linearis() {
 
   # Fetch URL if the create response didn't include one.
   if [ -z "$linear_url" ]; then
-    linear_url=$(linearis issues read "$identifier" --output json 2>/dev/null \
+    # CTL-1397: read through the replica wrapper (catalyst-linear is JSON by
+    # default; dropping --output json avoids the flag parity-bypass to linearis).
+    linear_url=$(catalyst-linear read "$identifier" 2>/dev/null \
       | jq -r '.url // empty' 2>/dev/null || echo "")
   fi
 
