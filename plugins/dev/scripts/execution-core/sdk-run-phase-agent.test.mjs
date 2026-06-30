@@ -555,6 +555,49 @@ describe("sdkRunPhaseAgent — CTL-1406 context-window emit", () => {
     expect(ctx[0].pct).toBe(100);
   });
 
+  test("picks the dominant (max-input) model's context window in a mixed-model result (Codex P2)", async () => {
+    const { spawn } = spawnReturningSpec({ spec: makeSpec() });
+    const ctx = [];
+    await sdkRunPhaseAgent(ARGS, {
+      ...GOOD_AUTH,
+      spawn,
+      runQuery: fakeQuery([
+        resultMsg({
+          num_turns: 3,
+          usage: { iterations: [{ input_tokens: 500000 }] },
+          modelUsage: {
+            "claude-haiku-helper": { inputTokens: 200, contextWindow: 200000 },
+            "claude-opus-4-8": { inputTokens: 480000, contextWindow: 1000000 },
+          },
+        }),
+      ]),
+      emitContextEvent: (p) => ctx.push(p),
+    });
+    // dominant model = opus (1M); 500000/1_000_000 = 50% — NOT divided by the 200k helper (→100%)
+    expect(ctx[0].pct).toBe(50);
+    expect(ctx[0].max).toBe(1000000);
+  });
+
+  test("includes the final turn's output_tokens in the context fill (Codex P2)", async () => {
+    const { spawn } = spawnReturningSpec({ spec: makeSpec() });
+    const ctx = [];
+    await sdkRunPhaseAgent(ARGS, {
+      ...GOOD_AUTH,
+      spawn,
+      runQuery: fakeQuery([
+        resultMsg({
+          num_turns: 2,
+          usage: { iterations: [{ input_tokens: 100000, output_tokens: 100000 }] },
+          modelUsage: { "claude-opus-4-8": { inputTokens: 100000, contextWindow: 1000000 } },
+        }),
+      ]),
+      emitContextEvent: (p) => ctx.push(p),
+    });
+    // (100000 input + 100000 output) / 1_000_000 = 20%
+    expect(ctx[0].pct).toBe(20);
+    expect(ctx[0].tokens).toBe(200000);
+  });
+
   test("does NOT emit when the result lacks usage/modelUsage (older SDK / no data)", async () => {
     const { spawn } = spawnReturningSpec({ spec: makeSpec() });
     const ctx = [];

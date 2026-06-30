@@ -781,13 +781,29 @@ function extractContextUsage(result) {
   const lastIter = Array.isArray(iters) && iters.length > 0 ? iters[iters.length - 1] : null;
   const u = lastIter ?? result?.usage ?? null;
   if (!u) return null;
+  // Context fill at the final turn = the last call's input side (prompt + cache) PLUS its
+  // output_tokens — those are appended to the transcript and count toward the window on any
+  // resume/next turn, which is why the SDK's own compaction threshold includes them. Summing
+  // input/cache only underreports the %. (CTL-1406, Codex P2.)
   const used =
     (Number(u.input_tokens) || 0) +
     (Number(u.cache_read_input_tokens) || 0) +
-    (Number(u.cache_creation_input_tokens) || 0);
-  const models = result?.modelUsage ?? {};
-  const firstModel = Object.keys(models)[0];
-  const contextWindow = firstModel ? Number(models[firstModel]?.contextWindow) : Number.NaN;
+    (Number(u.cache_creation_input_tokens) || 0) +
+    (Number(u.output_tokens) || 0);
+  // Use the PRIMARY phase model's window — NOT modelUsage's first key. A mixed-model run (e.g.
+  // a Haiku/Sonnet helper at 200k alongside the Opus phase model at 1M) would otherwise divide
+  // the final-turn tokens by the wrong window and inflate/cap the %. The phase model dominates
+  // token volume, so pick the modelUsage entry with the most input tokens. (CTL-1406, Codex P2.)
+  let contextWindow = Number.NaN;
+  let bestInput = -1;
+  for (const m of Object.values(result?.modelUsage ?? {})) {
+    const inTok = Number(m?.inputTokens) || 0;
+    const cw = Number(m?.contextWindow);
+    if (inTok > bestInput && Number.isFinite(cw) && cw > 0) {
+      bestInput = inTok;
+      contextWindow = cw;
+    }
+  }
   if (!Number.isFinite(used) || used <= 0 || !Number.isFinite(contextWindow) || contextWindow <= 0) {
     return null;
   }
