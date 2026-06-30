@@ -26,6 +26,8 @@ import {
   readClusterSyncState,
   writeClusterSyncState,
   clusterSync,
+  buildClusterSecretEnvelope,
+  ENV_BACKED_SECRET_FILES,
 } from "./cluster-sync.mjs";
 
 const QUIET = { warn() {}, info() {} };
@@ -928,5 +930,35 @@ describe("clusterSync boot (CTL-1393 conditional marker seed)", () => {
     expect(emits[0].payload.reason).toBe("secrets-skipped");
     expect(res.sync.synced).toEqual(["config.json"]);
     expect(res.sync.skipped).toEqual(["config-adva.sops.json"]);
+  });
+});
+
+// CTL-1393 Codex re-review fixes (P1 env-backed restart detection + P2 canonical severity).
+describe("cluster-secret event severity + env-backed set (Codex re-review)", () => {
+  test("refresh-failed carries ERROR severity (17) for severity-based alert queries", () => {
+    const ev = buildClusterSecretEnvelope({
+      name: "refresh-failed",
+      node: "n1",
+      now: () => "t",
+      payload: { reason: "decrypt-failed" },
+    });
+    expect(ev.severityText).toBe("ERROR");
+    expect(ev.severityNumber).toBe(17);
+    expect(ev.attributes["event.name"]).toBe("catalyst.cluster.secrets.refresh-failed");
+  });
+
+  test("restart-required is WARN (13), refreshed/other is INFO (9)", () => {
+    const warn = buildClusterSecretEnvelope({ name: "restart-required", node: "n1", now: () => "t" });
+    expect(warn.severityText).toBe("WARN");
+    expect(warn.severityNumber).toBe(13);
+    const info = buildClusterSecretEnvelope({ name: "refreshed", node: "n1", now: () => "t" });
+    expect(info.severityText).toBe("INFO");
+    expect(info.severityNumber).toBe(9);
+  });
+
+  test("ENV_BACKED_SECRET_FILES covers both launcher-sourced files", () => {
+    // Membership rule: every file the daemon launcher `source`s into its boot env.
+    expect(ENV_BACKED_SECRET_FILES.has("claude-accounts.env")).toBe(true);
+    expect(ENV_BACKED_SECRET_FILES.has("execution-core.env")).toBe(true);
   });
 });

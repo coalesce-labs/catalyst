@@ -384,9 +384,25 @@ export function writeClusterSyncState(statePath, state, logger = log) {
 // broker-protected filter.* / broker.daemon.* / session.heartbeat / phase.* spaces,
 // and resource.service.name is "catalyst.execution-core" (NOT "catalyst.broker"), so
 // the broker's shouldSkipEvent self-filter passes it through.
+// CTL-1393 (Codex P2): canonical OTel log severity per event name. otel-forward's
+// OTLP destination forwards `ev.severityText` / `ev.severityNumber` verbatim (top-level
+// fields), so without these the loud stale-secret signals land at no severity and
+// severity-based alert queries miss the only remote indication a node is stuck.
+// refresh-failed = the stuck-node failure (ERROR/17); restart-required = a rotated
+// env-backed secret that needs a restart to go live (WARN/13); everything else
+// (refreshed, …) is informational (INFO/9).
+const CLUSTER_SECRET_SEVERITY = {
+  "refresh-failed": { severityText: "ERROR", severityNumber: 17 },
+  "restart-required": { severityText: "WARN", severityNumber: 13 },
+};
+const DEFAULT_CLUSTER_SECRET_SEVERITY = { severityText: "INFO", severityNumber: 9 };
+
 export function buildClusterSecretEnvelope({ name, node, now = defaultNow, payload = {} }) {
+  const severity = CLUSTER_SECRET_SEVERITY[name] ?? DEFAULT_CLUSTER_SECRET_SEVERITY;
   return {
     ts: now(),
+    severityText: severity.severityText,
+    severityNumber: severity.severityNumber,
     attributes: { "event.name": `catalyst.cluster.secrets.${name}` },
     resource: {
       "service.name": "catalyst.execution-core",
@@ -420,7 +436,17 @@ export function emitClusterSecretEvent(opts = {}, io = {}) {
 // in the running daemon — only a restart re-sources it. So when a refresh touches one
 // of these, we must emit a DISTINCT "restart-required" signal rather than let the
 // "refreshed" event imply the env secret is already applied (Codex-B).
-export const ENV_BACKED_SECRET_FILES = new Set(["claude-accounts.env"]);
+//
+// CTL-1393 (Codex P1 re-review): the membership rule is "every file the launcher
+// `source`s into the daemon's boot env" — and `catalyst-execution-core` sources BOTH
+// claude-accounts.env AND execution-core.env (the CATALYST_EXECUTOR lever + machine
+// settings). So execution-core.env belongs here too: if it is ever delivered via the
+// cluster secret bundle (node-secret-files.sops.json), a rotation must signal a
+// restart, since the daemon only re-reads CATALYST_EXECUTOR on (re)start. Today
+// execution-core.env is machine-local (not in the bundle), so this entry is an inert
+// no-op — it only ever matches when execution-core.env appears in `status.written` —
+// but encoding it keeps the set faithful to its own contract and future-proofs that path.
+export const ENV_BACKED_SECRET_FILES = new Set(["claude-accounts.env", "execution-core.env"]);
 
 // assessMaterialization — Codex-A. Decide whether a refresh/boot decrypt FULLY
 // succeeded, given the syncClusterSecrets (`sync`) and syncSecretFiles (`files`)
