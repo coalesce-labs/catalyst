@@ -153,6 +153,55 @@ Cross-process communication is built on a **single unified event log** at
 receiver, and `catalyst-comms send` all append; the broker daemon, the HUD, the orch-monitor web
 dashboard, and `catalyst-events wait-for` all read.
 
+## Observability (OpenTelemetry: Loki · Tempo · Prometheus · Grafana)
+
+The Catalyst daemons and the underlying AI coding agent emit OpenTelemetry signals through a shared
+OTel Collector that fans out to three backends, all visualized and alerted in Grafana. **Traces
+EXPLAIN; metrics DETECT + LOCALIZE** — and the scheduler-health (RED) metrics are derived from the
+*unsampled* Tier-1 logs (via Collector connectors), so never wire health metrics off the
+tail-sampled spans. Other metrics (the native `catalyst.agent` host gauges, the agent's own native
+counters) are emitted *directly* to the OTLP metrics pipeline, not log-derived.
+
+- **Logs & events → Loki (LogQL).** Catalyst events (forwarded by the `otel-forward` service) and the
+  Tier-1 daemon `.log` lines (shipped by Alloy) both land in Loki — confirm a given event/field is
+  present before alerting on it. Only `service_name` and `service_namespace` are stream labels
+  (the cheap selectors and the
+  cross-signal join key); every other field (`host_name`, `event_*`, `catalyst_node_name`, …) is
+  **structured metadata** — filter with `| field="x"`, aggregate with `sum by (field)`;
+  `label_values(field)` returns empty for it. The log body is a plain string — do **not** `| json` it
+  unless the line is a full-JSON daemon `.log`. Use `absent_over_time` for silence detection
+  (a fully-dead daemon is a missing series, which `count_over_time == 0` cannot assert).
+- **Traces → Tempo (TraceQL).** Daemon spans are live: `scheduler.tick` (root) with threshold-gated
+  `scheduler.pass` children and `liveness.refresh`, plus per-run `install` and context-engine
+  `index.run` traces. Tempo serves the per-tick/per-run flame graph that explains a wedge after the
+  metrics localize it; the metrics-generator is off and trace↔log correlation does not fully
+  round-trip yet (disjoint id spaces).
+- **Metrics → Prometheus (PromQL).** OTel dotted names become underscores and counters gain a
+  `_total` suffix; counters need `rate()`/`increase()` **innermost** then `sum by (...)` outermost —
+  never graph the raw counter. `signal_to_metrics` gauges are last-value and expire ~15m at rest.
+  Cross-signal joins go through the normalized labels `service_name`/`service_namespace` (underscore
+  form — the dotted `service.name` is the semantic-convention name, not the Prometheus label); host
+  identity is only reliable within `catalyst.*` (short `host_name`).
+- **Alerting → Grafana.** Alert rules are **file-provisioned** (`provisioning/alerting/*.yaml`) and
+  **upsert-only** — a malformed rule file crash-loops the *shared* Grafana, so validate any change
+  against a throwaway Grafana before deploying. Active rules cover the scheduler wedge
+  (tick / recovery-pass / liveness-timeout), needs-human pileup, slot starvation, and install/updater
+  failures.
+
+**Signal catalog — the data dictionary.** The authoritative, signal-by-signal reference (every
+metric, log/event, trace span, and alert — with dimensions, gotchas, and copy-pasteable query
+patterns) lives in the sister repo **`catalyst-otel`** at `docs/data-dictionary.md`. **Read it before
+designing telemetry or trusting a query.** That repo (`collector-config.yaml`,
+`grafana-datasources.yml`, `tempo.yaml`, `dashboards/`, `provisioning/alerting/`) is the authoritative
+stack topology. For a copy-paste-runnable diagnose→unstick→file playbook against the live stack, see
+the `sensing-substrate` skill.
+
+**Endpoints are environment-specific.** Backend addresses are resolved from environment variables —
+`OTEL_EXPORTER_OTLP_ENDPOINT` / `CATALYST_OTLP_ENDPOINT` for the daemons (collector ingest), and
+`CATALYST_AGENT_OTLP_ENDPOINT` / `CATALYST_AGENT_METRICS_ENDPOINT` for the standalone `catalyst-agent`
+emitter (which stays silent if those are unset). The concrete addresses for a given deployment live in
+that deployment's config and the team's notes, not in this repository.
+
 ## Pull requests
 
 A pull request is **not mergeable** until BOTH are true:
@@ -177,3 +226,5 @@ Read these on demand:
 - **Run lifecycle** — `docs/orchestrator-overview.md`
 - **Decision records (ADRs)** — `docs/adrs.md`
 - **Release process** — `docs/releases.md`
+- **Observability signal catalog** — `catalyst-otel/docs/data-dictionary.md` (sister repo: every
+  metric, log/event, trace, and alert; see the Observability section above)
