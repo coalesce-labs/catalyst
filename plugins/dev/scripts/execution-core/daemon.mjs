@@ -57,7 +57,10 @@ import {
 import { resolveBootIdentity } from "./host-boot-identity.mjs"; // CTL-1093
 import { readStickyIdentity, writeStickyIdentity } from "./host-sticky.mjs"; // CTL-1093
 import { ownedBy } from "./hrw.mjs"; // CTL-862: HRW ownership filter
-import { clusterSync as realClusterSync, pullClusterRepo as realPullClusterRepo } from "./cluster-sync.mjs"; // CTL-1274: cluster-repo auto-pull
+import {
+  clusterSync as realClusterSync,
+  refreshClusterSecretsIfChanged as realRefreshClusterSecrets, // CTL-1393: change-detecting secret re-decrypt
+} from "./cluster-sync.mjs"; // CTL-1274: cluster-repo auto-pull
 import { startWaitWatcher as realStartWaitWatcher } from "./wait-watcher.mjs";
 import { startMemorySampler as realStartMemorySampler } from "./memory-sampler.mjs";
 import { startFleetHealthProbe as realStartFleetHealthProbe } from "./fleet-health-probe.mjs"; // CTL-1165 D5: pre-exhaustion fleet-health guardrail
@@ -470,14 +473,19 @@ export function startDaemon({
   // CTL-1090: cross-host liveness publisher. Injectable for tests. Single-host
   // installs get an inert no-op handle from startLivenessPublisher itself.
   startLivenessPublisher = realStartLivenessPublisher,
-  // CTL-1274: cluster-repo auto-pull. clusterSync runs once at boot (pull +
-  // decrypt secrets); pullClusterRepo runs on a cadence so a roster change
-  // committed on one node reaches every running daemon without a restart. Both
-  // are FAIL-OPEN (a failure logs + continues, never breaks the daemon) and
-  // injectable for hermetic tests. enableClusterSync=false disables both (test
-  // default + a CATALYST_CLUSTER_SYNC=0 kill-switch).
+  // CTL-1274 + CTL-1393: cluster-repo auto-refresh. clusterSync runs once at boot
+  // (pull + decrypt secrets + seed the change-detection marker); refreshClusterSecrets
+  // runs on a cadence — it pulls AND, when the clone's HEAD moved with a secrets/
+  // change, re-decrypts the rotated secrets and refreshes the on-disk plaintext
+  // (advancing the durable .cluster-sync-state.json marker). This closes the
+  // silent-stale window where a rotated secret reached the clone but stayed invisible
+  // to the running daemon until a manual restart, AND still propagates roster changes
+  // (the next scheduler tick re-reads cluster.json.roster). Both are FAIL-OPEN (a
+  // failure logs + continues, never breaks the daemon) and injectable for hermetic
+  // tests. enableClusterSync=false disables both (test default + a CATALYST_CLUSTER_SYNC=0
+  // kill-switch).
   clusterSync = realClusterSync,
-  pullClusterRepo = realPullClusterRepo,
+  refreshClusterSecrets = realRefreshClusterSecrets,
   clusterSyncIntervalMs = CLUSTER_SYNC_INTERVAL_MS,
   enableClusterSync = process.env.CATALYST_CLUSTER_SYNC !== "0",
   // CTL-665: committed executionCore concurrency knobs resolved in main() from
@@ -833,14 +841,17 @@ export function startDaemon({
       _livenessPublisher = startLivenessPublisher({ orchDir });
     }
 
-    // CTL-1274: cluster-repo auto-pull. Refresh the catalyst-cluster clone at boot
-    // (clusterSync = pull + decrypt secrets) and then on a periodic timer
-    // (pullClusterRepo = git pull --ff-only) so a roster change committed on one
-    // node (cluster cli) propagates to this running daemon — the next scheduler
-    // tick re-reads cluster.json.roster. FAIL-OPEN: both calls already swallow
-    // errors and return a status object (never throw); the extra try/catch here
-    // is belt-and-suspenders so a cluster-sync hiccup can NEVER abort daemon boot
-    // or wedge a timer tick. A pull is a no-op ("not-a-clone") when no clone exists.
+    // CTL-1274 + CTL-1393: cluster-repo auto-refresh. Refresh the catalyst-cluster
+    // clone at boot (clusterSync = pull + decrypt secrets + seed the change-detection
+    // marker) and then on a periodic timer (refreshClusterSecretsIfChanged = pull +
+    // re-decrypt ONLY when the clone's HEAD moved with a secrets/ change). A roster
+    // change committed on one node (cluster cli) still propagates — the next scheduler
+    // tick re-reads cluster.json.roster — and now a ROTATED SECRET also re-materializes
+    // on this running daemon without a manual restart (the CTL-1393 silent-stale fix).
+    // FAIL-OPEN: both calls swallow errors and return a status object (never throw);
+    // the extra try/catch here is belt-and-suspenders so a cluster-sync hiccup can
+    // NEVER abort daemon boot or wedge a timer tick. Refresh is a no-op ("no-head")
+    // when no clone exists, and skips the sops spawn entirely when HEAD is unchanged.
     if (enableClusterSync) {
       try {
         const bootSync = clusterSync();
@@ -850,9 +861,9 @@ export function startDaemon({
       }
       _clusterSyncTimer = setInterval(() => {
         try {
-          pullClusterRepo();
+          refreshClusterSecrets();
         } catch (err) {
-          log.warn({ err: err?.message }, "cluster-sync timer: pull threw (continuing)");
+          log.warn({ err: err?.message }, "cluster-sync timer: refresh threw (continuing)");
         }
       }, clusterSyncIntervalMs);
       _clusterSyncTimer.unref?.();

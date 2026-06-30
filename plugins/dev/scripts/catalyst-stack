@@ -1575,6 +1575,18 @@ cmd_adopt_cloud_sync() {
   else
     warn "$CLOUD_SYNC_AGENT_LABEL did not reach a running PID within 5s — KeepAlive will retry. Check $CLOUD_SYNC_LOG (token '$token_env' may be unreadable, or the seed is slow)."
   fi
+
+  # CTL-1395: if the log-shipper (Alloy) is already running, it was started before the 6th
+  # cloud-sync.log stream existed in config.alloy — restart it so it begins tailing
+  # cloud-sync.log (catalyst.cloud-sync stream: the daemon-heartbeat uptime tile + freshness
+  # metrics). Mirrors adopt-updater's CTL-1348 kickstart. Best-effort.
+  if _shipper_agent_installed && command -v launchctl >/dev/null 2>&1; then
+    if launchctl kickstart -k "gui/$(id -u)/${SHIPPER_AGENT_LABEL}" 2>&1 | sed 's/^/  /'; then
+      log "restarted $SHIPPER_AGENT_LABEL so Alloy tails cloud-sync.log (catalyst.cloud-sync stream)"
+    else
+      warn "could not restart the log-shipper — cloud-sync.log won't reach Loki until Alloy restarts (re-run install-services or restart the shipper agent)"
+    fi
+  fi
 }
 
 # _write_plugin_pull_owner <config-path> <owner> — atomically merge
