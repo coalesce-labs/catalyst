@@ -222,7 +222,12 @@ export function defaultDispatch(
 // (other callers / unit tests) → sdkRunPhaseAgent keeps its dependency-free stderr
 // default, byte-identical to before.
 export function sdkDispatch(args, { runPhaseAgent = sdkRunPhaseAgent, emitEvent, ...seams } = {}) {
-  const launch = emitEvent ? (a) => runPhaseAgent({ ...a, emitEvent }) : runPhaseAgent;
+  // CTL-1405: sdkRunPhaseAgent reads `emitEvent` from its SECOND (options) param,
+  // NOT the first (input) object — so bind it there. The prior CTL-1396 shape
+  // `runPhaseAgent({ ...a, emitEvent })` spread it into the input object, where
+  // sdkRunPhaseAgent never reads it → it silently kept the stderr defaultEmitEvent,
+  // so phase-turns/overloaded/auth telemetry never reached the JSONL event log.
+  const launch = emitEvent ? (a) => runPhaseAgent(a, { emitEvent }) : runPhaseAgent;
   return defaultDispatch(args, { runPhaseAgent: launch, ...seams });
 }
 
