@@ -1279,6 +1279,23 @@ cmd_install_services() {
     warn "install-orphan-sweep.sh not found next to catalyst-stack — reaper not installed"
   fi
 
+  # CTL-1407: per-account rate-limit usage sampler (5th agent). Until now com.catalyst.agent
+  # was only ever hand-installed (mini-2 alone), so the dashboard's Per-Account Rate-Limit
+  # Scoreboard read No-data on every other host. Provision it here so `catalyst-stack
+  # install-services` (and `catalyst install`, which calls it for worker nodes) brings it up on
+  # every host at the plist's steady 5-min StartInterval cadence. Idempotent (install.sh boots out
+  # then re-bootstraps) + non-fatal — a sampler hiccup (e.g. node missing on PATH) must not block
+  # the core stack. pipefail is on (set -uo pipefail above) so the pipe preserves install.sh's rc.
+  if [[ -x "${SCRIPT_DIR}/catalyst-agent/install.sh" ]]; then
+    if bash "${SCRIPT_DIR}/catalyst-agent/install.sh" 2>&1 | sed 's/^/  /'; then
+      log "loaded com.catalyst.agent — per-account rate-limit usage sampler (5-min cadence)"
+    else
+      warn "catalyst-agent install skipped/failed (continuing) — install it manually if per-account rate-limit telemetry is needed"
+    fi
+  else
+    warn "catalyst-agent/install.sh not found under ${SCRIPT_DIR}/catalyst-agent — usage sampler not installed"
+  fi
+
   log "verify: catalyst-stack services-status   |   logs: $STACK_AGENT_LOG / $SHIPPER_LOG"
 }
 
