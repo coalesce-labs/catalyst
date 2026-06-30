@@ -317,8 +317,8 @@ sits at `needs-human`/`failed`/`stalled`, or its worker died with the signal fro
   mergeable,mergeStateStatus,reviewDecision,statusCheckRollup`: is there a PR, is
   it green, is it BEHIND/CONFLICTING, is it just sitting there mergeable.
 - **The Linear cache** — the `linear-state=…` / `labels=…` the context script
-  printed for the item (orientation snapshot only; always verify with `linearis
-  issues read <T>` before acting — see the Verify-before-act callout).
+  printed for the item (orientation snapshot only; always verify with `catalyst-linear
+  read <T>` before acting — see the Verify-before-act callout).
 
 **Then diagnose like a senior engineer.** From those: what phase is it in? what
 failed — a conflict, a failed check, a dead worker, an un-merged green PR, a
@@ -403,12 +403,13 @@ If the board scan is all-OK and the flagged YOURS set is empty, you are done —
 > **Verify-before-act (do NOT trust the context-script snapshot).** The
 > `linear-state=…` / `labels=…` values the context script printed are an orientation
 > snapshot that may lag live Linear. Before you act on or escalate ANY ticket, read
-> its LIVE Linear state (`linearis issues read <T>`) — never act on the snapshot
+> its LIVE Linear state (`catalyst-linear read <T>`) — never act on the snapshot
 > alone. A ticket the context shows blocked / needs-human / in a given column may be
-> none of those live. (Reading Linear: on a standard Catalyst node `linearis issues
-> read` is always the direct source; on a Catalyst Cloud node the local replica is
-> authoritative — see the `linearis` skill's "Reading Linear" section for the
-> two-mode rule.)
+> none of those live. (Reading Linear: reads → `catalyst-linear`, never bare
+> linearis — `catalyst-linear` serves the local Catalyst Cloud replica when one is
+> present + fresh + opted-in and falls back to a direct linearis read otherwise, so
+> it is the correct read on both a standard node and a Catalyst Cloud node; see the
+> `linearis` skill's mandatory read rule / "Reading Linear" section.)
 
 ## The 3-tier rope — how much you may do on your own
 

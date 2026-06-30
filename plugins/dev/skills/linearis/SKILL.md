@@ -57,7 +57,9 @@ the Cloud change-feed — is present:
   specific item *only* when you have concrete evidence the replica read is wrong:
   it contradicts something you just directly observed; the replica freshness/staleness
   signal shows it is behind; or a ticket you expect is missing. When you escalate:
-  - (a) read that item directly with `linearis`, **and**
+  - (a) read that item with a **direct `linearis issues read <ID>`** — a deliberate *live* read
+    for ground truth. This is the one case bare `linearis` is correct: `catalyst-linear read`
+    would just re-serve the same (suspect) replica row (it has no force-live option), **and**
   - (b) **surface the staleness as an issue** — a stale replica read signals a mirror
     gap (e.g. a missed webhook) worth investigating, not just a one-off retry.
 
@@ -68,21 +70,21 @@ through `linearis`. The replica is **read-only** in both modes.
 
 ### How reads resolve
 
-- **Daemon read paths** resolve the mode automatically via the read-source seam
-  (CTL-1390) — callers do not choose.
-- **Agent / skill ad-hoc reads:** use **`catalyst-linear read <ID>`** (CTL-1391). It
-  applies the rule above for you — replica-first when opted in *and* fresh, automatic
-  fail-open to `linearis` otherwise — so the **same command is correct on every node**.
-  Output matches `linearis` JSON plus an additive `_meta` (read source + replica
-  freshness). `list`/`search` are `linearis` passthrough today (a replica-backed list
-  view is a follow-up).
+- **Daemon read paths** resolve the mode automatically via the read-source seam (CTL-1390) — callers do not choose.
+- **Agent / skill / script ad-hoc reads — MANDATORY:** read Linear **only** through
+  **`catalyst-linear read|list|search`** (CTL-1391) — never bare `linearis issues read|list|search`.
+  `read` is **replica-first** when opted in *and* fresh — that is the quota win. `list`/`search`
+  are **`linearis` passthrough today** (routed through `catalyst-linear` for one uniform rule and a
+  future replica-backed list, but they still hit Linear — **no rate-limit relief yet**). The same
+  command is correct on every node and fails open to `linearis`; output matches `linearis` JSON plus
+  an additive `_meta`. **Three deliberate exceptions still use bare `linearis`:** (1) a **live
+  re-verification** of a row you have evidence is stale/wrong (the Mode 2 escalation above —
+  `catalyst-linear` can't force a live read); (2) **child-ticket discovery** — the replica has no
+  children table, so `catalyst-linear read` returns `children:{nodes:[]}`; fetch children with a
+  live `linearis issues read` or a `list`/`search` query; (3) **non-issue domains**
+  (`cycles`/`projects`/`milestones`) — `catalyst-linear` is issue-scoped. Writes are always `linearis`.
 
-> **Mechanism note.** `catalyst-linear` is the executable form of this rule (read-model
-> over the replica first, `linearis` fallback). Plain `linearis issues read|list|search`
-> stays correct everywhere — it is exactly what `catalyst-linear` falls back to — so
-> existing direct calls are fine. Prefer `catalyst-linear` for ad-hoc reads so a node
-> that *has* opted into the replica actually gets replica-first behavior automatically,
-> instead of every caller re-deciding from node identity.
+> **Why mandatory, not "preferred".** Bare `linearis` reads always hit Linear directly and bypass the replica entirely — even on a node that opted in. On the rate-limited worker minis that burns the shared Linear quota and 429s the fleet. `catalyst-linear` is the executable form of the read rule; routing **all** reads through it is what makes "every client reads the replica" actually true. (Writes are unaffected — always `linearis`.)
 
 ## Gotchas & Traps
 
@@ -130,17 +132,27 @@ v2026.4.9.
 
 ## Core Operations
 
+> **Reads run through `catalyst-linear`.** The examples below document the CLI **syntax** — the
+> flags carry over verbatim, so **run issue reads via `catalyst-linear read|list|search`** (it
+> shares linearis's flags and fails open to linearis). The replica serves the common fields,
+> **including `estimate` and `relations`/`inverseRelations` (by type + identifier)**, labels, and
+> comments. Stay on bare `linearis` only for the documented gaps — **child tickets** (`children`
+> is always `[]`), relation/state/team/cycle **UUIDs or names** (`state.id`, `team.key`,
+> `parent.title`, `cycle.name`) — a **live re-verification**, or non-issue domains
+> (`cycles`/`projects`/`milestones`). Any `linearis issues read|list|search` shown below is a
+> **syntax reference**: run it through `catalyst-linear`.
+
 ### Read a ticket
 
 ```bash
-linearis issues read ENG-123
+catalyst-linear read ENG-123        # replica-first; fails open to linearis
 ```
 
 ### Search tickets
 
 ```bash
-linearis issues search "keyword"
-linearis issues search "auth bug" --team ENG --status "Todo"
+catalyst-linear search "keyword"
+catalyst-linear search "auth bug" --team ENG --status "Todo"
 ```
 
 ### Create a ticket

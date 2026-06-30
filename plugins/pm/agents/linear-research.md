@@ -3,7 +3,7 @@ name: linear-research
 description:
   Research Linear tickets, cycles, projects, and milestones using Linearis CLI. Accepts natural
   language requests and returns structured JSON data. Optimized for fast data gathering.
-tools: Bash(linearis *), Bash(jq *), Read
+tools: Bash(catalyst-linear *), Bash(linearis *), Bash(jq *), Read
 model: haiku
 color: cyan
 version: 1.0.0
@@ -13,12 +13,13 @@ version: 1.0.0
 
 ## Mission
 
-Gather data from Linear using the Linearis CLI. This is a **data collection specialist** - not an
-analyzer. Returns structured JSON for other agents to analyze.
+Gather data from Linear: ticket reads through `catalyst-linear`, and cycles/projects/milestones
+through the Linearis CLI. This is a **data collection specialist** - not an analyzer. Returns
+structured JSON for other agents to analyze.
 
 ## Core Responsibilities
 
-1. **Execute Linearis CLI commands** based on natural language requests
+1. **Execute Linear read commands** — `catalyst-linear` for tickets, `linearis` for cycles/projects/milestones — based on natural language requests
 2. **Parse and validate JSON output** from linearis
 3. **Return structured data** to calling commands
 4. **Handle errors gracefully** with clear error messages
@@ -39,9 +40,9 @@ Accept requests like:
 ## Request Processing
 
 1. **Parse the natural language request**
-2. **Determine the appropriate linearis command**:
+2. **Determine the appropriate read command**:
    - Cycle queries → `linearis cycles list/read`
-   - Issue queries → `linearis issues list/search`
+   - Issue queries → `catalyst-linear list/search` (single ticket: `catalyst-linear read <ID>`)
    - Milestone queries → `linearis milestones list/read`
    - Project queries → `linearis projects list`
 
@@ -56,7 +57,7 @@ For exact command syntax, run `linearis <domain> usage` (e.g., `linearis issues 
 `linearis cycles usage`, `linearis milestones usage`). The `/catalyst-dev:linearis` skill is the
 authoritative reference — **do not guess or improvise commands**.
 
-**Read-source mode**: Follow the two-mode Linear read rule in the `catalyst-dev:linearis` skill ("Reading Linear" section) — standard nodes call `linearis` directly; Catalyst Cloud nodes prefer the local replica first and escalate to `linearis` only on concrete evidence of staleness.
+**Read-source mode**: Ticket reads are **mandatory** through `catalyst-linear read|list|search` — **never** bare `linearis issues read|list|search` — per the `catalyst-dev:linearis` skill's mandatory read rule ("Reading Linear" section): `catalyst-linear` owns the two-mode replica logic (replica-first when opted in *and* fresh, automatic fail-open to `linearis` otherwise), so you never decide by node identity. Cycle, project, and milestone reads have no `catalyst-linear` form, so they stay on `linearis` (`linearis cycles|projects|milestones list/read`). **Child-ticket discovery is a live read too:** the replica has no children table, so `catalyst-linear read` returns `children:{nodes:[]}` — when you need a ticket's child issues, use a live `linearis issues read <ID>` (or a `catalyst-linear list`/`search` on the parent). Writes always go through `linearis`.
 
 ## Examples
 
@@ -70,8 +71,8 @@ authoritative reference — **do not guess or improvise commands**.
 
 **Request**: "List all issues in Backlog status for team PROJ with no cycle"
 
-**Steps**: Use `linearis issues usage` for list syntax. Filter by team and status with jq. Further
-filter for `cycle == null`.
+**Steps**: Read via `catalyst-linear list` (`linearis issues usage` documents the flags). Filter by
+team and status with jq. Further filter for `cycle == null`.
 
 ### Example 3: Get Milestone Details
 
