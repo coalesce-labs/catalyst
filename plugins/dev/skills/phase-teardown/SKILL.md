@@ -168,6 +168,80 @@ for signal_f in "$WORKER_DIR"/phase-*.json; do
 done
 ```
 
+## Done-judgment — verify the ticket is GENUINELY done before you tear down (CTL-1157)
+
+You are a phase agent that CAN reason, and teardown is the LAST gate before the
+ticket is marked Done and its worktree destroyed. **Before you write Done, verify
+the ticket is genuinely done — do NOT trust "monitor-merge merged a PR" as proof
+the whole ticket is complete.** A ticket commonly has more than one PR (a second
+PR, a human PR opened outside the pipeline, an abandoned spike); monitor-merge
+tracked only the pipeline's OWN PR. Marking Done while another PR that is part of
+the solution is still open is the silent-rot failure CTL-1157 exists to prevent.
+
+This is the same open-PR remediation rubric the recovery-pass delegate uses —
+applied here as **"teardown verifies it's done."** It complements (does not
+replace) the merge safety-gate above.
+
+**STEP 1 — Enumerate the ticket's OPEN PRs (the facts).** The fence below runs the
+CTL-1157 open-PR ENUMERATOR (`open-pr-gate.mjs` — the single source of truth that
+UNIONs the ticket-key search + the branch-head pass + the Linear-attachment pass,
+confirming OPEN via `gh`) and prints any still-open PRs. It is a FACTS source, not
+a block: it never aborts teardown on its own (alarm-not-block). YOU read its output.
+
+**STEP 2 — Reason about EACH open PR and remediate it yourself.** For every PR the
+enumerator printed:
+
+- **Still needed / part of the solution** → FINISH it (rebase onto base, fix CI,
+  merge it) before you proceed. Do NOT tear down with deliverable work unmerged.
+- **Abandoned / superseded** (a later PR replaced it, a dead spike, a duplicate) →
+  CLOSE it yourself: `gh pr close <n> --comment "<why — superseded by #X /
+  abandoned / duplicate of #Y>"`. Closing a dead PR is autonomous, not an escalation.
+- **Genuine judgment call** (the open PR conflicts with an ADR/principle, or you
+  cannot safely decide needed-vs-abandoned) → do NOT mark Done; emit
+  `phase.teardown.failed.${TICKET}` via the failure template with a concrete reason
+  so the stuck PR surfaces (the scheduler/recovery layer then escalates it). This
+  is the rare case — mechanically-resolvable PRs you finish/close yourself.
+
+**STEP 3 — Only once no open PR remains that SHOULD remain**, continue to the Linear
+Done transition below and tear down. A clean teardown (every open PR finished or
+closed) leaves the backstops silent; tearing down with an open PR still present
+fires the loud `recovery.done-applied-with-open-pr` alarm — which is exactly the
+signal that you skipped this verification.
+
+```bash phase-teardown-open-pr-verify
+# ─── Done-judgment: enumerate the ticket's open PRs (FACTS, non-blocking) ──────
+# CTL-1157: print any still-open PRs for this ticket so the agent can reason about
+# each (finish/merge the needed, close the abandoned) BEFORE the Done write below.
+# Runs the shared open-PR ENUMERATOR; this is alarm-not-block — it NEVER aborts
+# teardown by itself. The agent's reasoning (STEP 2 above) is what acts.
+EXEC_CORE_TD="${PLUGIN_ROOT}/scripts/execution-core"
+OPEN_PR_ENUM="${EXEC_CORE_TD}/open-pr-gate.mjs"
+TD_BRANCH="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")"
+if [[ -f "$OPEN_PR_ENUM" ]] && command -v node >/dev/null 2>&1; then
+  # Invoke the enumerator's defaultCheckOpenPrs; print the open-PR list as JSON.
+  # Best-effort: any failure prints an empty result and never blocks teardown.
+  TD_OPEN_PRS="$(OPEN_PR_ENUM="$OPEN_PR_ENUM" TICKET="$TICKET" TD_BRANCH="$TD_BRANCH" \
+    node --input-type=module -e '
+      const { defaultCheckOpenPrs } = await import(process.env.OPEN_PR_ENUM);
+      const t = process.env.TICKET;
+      const branchName = process.env.TD_BRANCH || undefined;
+      try {
+        const r = defaultCheckOpenPrs(t, { branchName });
+        process.stdout.write(JSON.stringify(r.prs || []));
+      } catch { process.stdout.write("[]"); }
+    ' 2>/dev/null || echo "[]")"
+  [[ -n "$TD_OPEN_PRS" ]] || TD_OPEN_PRS="[]"
+  TD_OPEN_COUNT="$(printf '%s' "$TD_OPEN_PRS" | jq 'length' 2>/dev/null || echo 0)"
+  if [[ "$TD_OPEN_COUNT" =~ ^[0-9]+$ && "$TD_OPEN_COUNT" -gt 0 ]]; then
+    echo "phase-teardown: CTL-1157 Done-judgment — ${TD_OPEN_COUNT} OPEN PR(s) still exist for ${TICKET}:" >&2
+    printf '%s\n' "$TD_OPEN_PRS" | jq -r '.[] | "  #\(.number) [\(.state)] \(.title // "")"' 2>/dev/null >&2 || true
+    echo "phase-teardown: reason about EACH (STEP 2): finish/merge the needed, close the abandoned (gh pr close <n> --comment ...), or fail-out on a genuine judgment call — BEFORE the Done transition below." >&2
+  else
+    echo "phase-teardown: CTL-1157 Done-judgment — no open PR remains for ${TICKET}; proceeding to Done." >&2
+  fi
+fi
+```
+
 ```bash phase-teardown-linear-done
 # ─── Linear Done transition ───────────────────────────────────────────────────
 # THIS IS THE ONLY Done writer when phase-teardown is in the pipeline.
