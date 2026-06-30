@@ -60,6 +60,7 @@ const SCRIPTS = {
   installCli: "INSTALL_CLI",
   stack: "STACK",
   doctor: "DOCTOR", // CTL-1369 PR4: the pre/post-install doctor pass (catalyst-doctor --profile install)
+  execCore: "EXECCORE", // CTL-1401: the exec-core launcher (restart-execcore on a live-worker executor change)
 };
 
 // makeDeps — a fully-stubbed dep set. `failOn` is a predicate (argv|joined → truthy = fail with
@@ -453,6 +454,28 @@ describe("runInstallLifecycle — CTL-1401 executor + cloud-sync provisioning (i
     bag.deps.isDarwin = false; // non-launchd OS — adopt-cloud-sync is macOS-only by design
     const res = await runInstallLifecycle({ operation: "install", nodeClass: "worker", opts: {} }, bag.deps);
     expect(res.cloudSyncOk).toBe(true);
+  });
+  test("Codex P2 (re-review#2): restart fires on the EFFECTIVE (last) executor — a sdk-then-bg file is really bg", async () => {
+    const ecEnv = tmpCfg();
+    writeFileSync(ecEnv, "export CATALYST_EXECUTOR=sdk\nCATALYST_EXECUTOR=bg\n"); // bash last-wins ⇒ effective = bg
+    const bag = withRealRun(makeDeps());
+    await runInstallLifecycle({ operation: "install", nodeClass: "worker", opts: { executor: "sdk", execCoreEnv: ecEnv } }, bag.deps);
+    // effective old = bg, new = sdk → CHANGED → exec-core is restarted to apply it
+    expect(bag.calls.some((a) => a[0] === "EXECCORE" && a[1] === "restart")).toBe(true);
+  });
+  test("Codex P2 (re-review#2): restart is SKIPPED when the effective executor already matches (no needless interrupt)", async () => {
+    const ecEnv = tmpCfg();
+    writeFileSync(ecEnv, "export CATALYST_EXECUTOR=bg\nCATALYST_EXECUTOR=sdk\n"); // effective = sdk
+    const bag = withRealRun(makeDeps());
+    await runInstallLifecycle({ operation: "install", nodeClass: "worker", opts: { executor: "sdk", execCoreEnv: ecEnv } }, bag.deps);
+    expect(bag.calls.some((a) => a[0] === "EXECCORE" && a[1] === "restart")).toBe(false);
+  });
+  test("Codex P2 (re-review#2): rollback re-bootstrap does NOT re-adopt cloud-sync (additive — would leave an agent the pre-run node lacked)", async () => {
+    // hadAgents + !live → the rollback path re-bootstraps the restored class; fail start-stack so it triggers.
+    const bag = withRealRun(makeDeps({ failOn: (argv) => (argv[1] === "start" ? 9 : 0), bundleHadAgents: true, daemonsLive: false }));
+    await runInstallLifecycle({ operation: "install", nodeClass: "worker", opts: {} }, bag.deps);
+    // adopt-cloud-sync ran ONCE in the forward install-agents; the re-bootstrap must skip it (no 2nd call)
+    expect(bag.calls.filter((a) => a[0] === "STACK" && a[1] === "adopt-cloud-sync")).toHaveLength(1);
   });
 });
 

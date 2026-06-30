@@ -925,10 +925,14 @@ export async function runInstallLifecycle({ operation, nodeClass, opts = {} }, d
         }
         ctx.envUndos.push({ file: step.file, priorContent });
         // CTL-1401 (Codex P2): note whether the executor lever actually CHANGED, so an additive install
-        // only restarts a live exec-core when needed (an unchanged re-run must not interrupt work).
+        // only restarts a live exec-core when needed (an unchanged re-run must not interrupt work). The
+        // pre-upsert EFFECTIVE value is the LAST assignment, not the first — bash sources the whole file
+        // top-to-bottom so a later duplicate wins (the exact case upsertEnvFile dedupes). Reading the
+        // first match here would miss a `sdk`-then-`bg` file and skip the needed restart (Codex P2).
         if (step.key === "CATALYST_EXECUTOR") {
-          const m = (priorContent || "").match(/^\s*(?:export\s+)?CATALYST_EXECUTOR=["']?([^"'\s]+)/m);
-          ctx.executorChanged = (m ? m[1] : null) !== step.value;
+          const matches = [...(priorContent || "").matchAll(/^\s*(?:export\s+)?CATALYST_EXECUTOR=["']?([^"'\s]+)/gm)];
+          const effectiveOld = matches.length ? matches[matches.length - 1][1] : null;
+          ctx.executorChanged = effectiveOld !== step.value;
         }
         upsertEnvFile(step.file, step.key, step.value);
         log(`catalyst-install: set ${step.key}=${step.value} in ${step.file}`);
@@ -1094,6 +1098,12 @@ export async function runInstallLifecycle({ operation, nodeClass, opts = {} }, d
         for (const ph of bringup) {
           for (const s of ph.steps) {
             if (s.kind !== "run") continue;
+            // CTL-1401 (Codex P2): adopt-cloud-sync is ADDITIVE — re-running it here would adopt the
+            // cloud-sync agent on a rolled-back node whose ORIGINAL (pre-run) state had no cloud-sync,
+            // so the "rolled_back" outcome would leave a new agent behind (not a true reversal). Skip it
+            // in the rollback bring-up: rollback restores the captured state, it does not add agents.
+            // (A node that genuinely had cloud-sync gets it back from the bundle restore / next install.)
+            if (s.label === "adopt-cloud-sync") continue;
             const r = runStep({ argv: s.argv, env: bringupEnv });
             if (r.code !== 0 && !s.optional) {
               ok = false;
@@ -1269,9 +1279,9 @@ export function usage() {
   return `catalyst-install — provision / tear down this node for its class (CTL-1369).
 
 Usage (normally via the router: 'catalyst install|uninstall|reinstall …'):
-  catalyst-install install   [--class developer|worker|monitor] [--read-replica <url>] [--executor bg|sdk] [--dry-run]
+  catalyst-install install   [--class developer|worker|monitor] [--read-replica <url>] [--executor bg|sdk|oneshot-legacy] [--dry-run]
   catalyst-install uninstall [--force] [--dry-run]
-  catalyst-install reinstall [--class …] [--read-replica <url>] [--executor bg|sdk] [--force] [--dry-run]
+  catalyst-install reinstall [--class …] [--read-replica <url>] [--executor bg|sdk|oneshot-legacy] [--force] [--dry-run]
 
 Options:
   --class <c>          target node class (install: declares it; un/reinstall: defaults to current)
