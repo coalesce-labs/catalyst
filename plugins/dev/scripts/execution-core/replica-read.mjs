@@ -25,6 +25,7 @@
 // even if a team's terminal workflow state carries a custom display name. A
 // non-terminal HIT returns the row's actual `state` name (or null).
 import { Database } from "bun:sqlite";
+import { statSync } from "node:fs";
 import { getReplicaDbPath } from "./config.mjs";
 
 // The light terminal SELECT. Index-backed by idx_issues_identifier (confirmed).
@@ -65,6 +66,62 @@ function coerceMs(v) {
   if (Number.isFinite(n)) return n; // epoch-ms integer
   const p = Date.parse(v); // ISO-8601 text
   return Number.isFinite(p) ? p : undefined;
+}
+
+// CTL-1397: the replica-backed board-list / eligible discovery query. The
+// daemon's per-tick reconcile runs this INSTEAD of `linearis issues list --team
+// X --status Y` — the linearis discovery query burns the shared Linear quota and
+// trips the CTL-679 circuit breaker, freezing board discovery fleet-wide. Reading
+// the local sub-ms replica makes discovery immune to the breaker/quota.
+//
+// The `issues` table has team_id (UUID) but NO team_key column, so we filter by
+// the Linear identifier prefix: identifiers are `<teamKey>-<number>`, so
+// `identifier LIKE 'CTL-%'` selects exactly team CTL (the hyphen disambiguates
+// CTL- from CTC-). state is the workflow-state NAME string (matches query.status).
+// removed_at IS NULL drops tombstones. LIMIT 200 matches linear-query DEFAULT_LIMIT.
+const ELIGIBLE_SELECT = `SELECT i.identifier, i.title, i.state, i.priority, i.estimate, i.updated_at, i.created_at, i.parent_identifier, i.delegate_id, i.delegate_name, p.name AS project_name FROM issues i LEFT JOIN projects p ON p.id = i.project_id WHERE i.identifier LIKE ? AND i.state = ? AND i.removed_at IS NULL ORDER BY i.updated_at DESC LIMIT ?`;
+const ELIGIBLE_LIMIT = 200;
+// Relation enrichment, mirroring normalizeDetail in linear-cli.mjs. forward:
+// edges this issue OWNS (relatedIssue is the target); inverse: edges that point
+// AT this issue (the blocked-by edge the scheduler gates on).
+const RELATIONS_FORWARD_SELECT = `SELECT type, related_identifier FROM relations WHERE issue_identifier = ?`;
+const RELATIONS_INVERSE_SELECT = `SELECT type, issue_identifier FROM relations WHERE related_identifier = ?`;
+
+// CTL-1397 (P1 fix) — the SEED-COMPLETENESS gate. The mtime gate
+// (isReplicaFresh) proves the cloud-sync writer is LIVE; it does NOT prove the
+// seed is COMPLETE. The writer's forced re-seed (the exact quota/outage-recovery
+// path this feature exists to survive) TRUNCATES + batch-repopulates the `issues`
+// table while the file mtime stays fresh, so a read landing mid-reseed sees either
+// an EMPTY table (→ would zero the board) or a PARTIAL table (→ a trusted
+// incomplete set). The writer DELETES the `sync_meta` cursor row at re-seed start
+// and re-writes it only on completion (@catalyst-cloud/sdk: catalyst-replica.ts +
+// replicate.ts), so a present, non-empty cursor IS the seed-completeness signal:
+// cursor-present = seed complete; cursor-absent/empty = mid-reseed → don't serve.
+const SEED_COMPLETE_SELECT = `SELECT 1 FROM sync_meta WHERE key = 'cursor' AND value IS NOT NULL AND value <> '' LIMIT 1`;
+
+// The eligible freshness GATE — the SAME mtime-based writer-liveness proxy as
+// linear-cli.mjs's openFreshReplica. A dead writer stops touching the file →
+// stale mtime → fall through to linearis (correct answer, just un-accelerated).
+// WAL mode: appends land in the `-wal` sidecar; the main DB mtime only advances
+// on checkpoint, so take the freshest of the DB + a NON-EMPTY `-wal` (an empty
+// `-wal` is a reader artifact, never a writer-liveness signal — see the spoof-
+// resistance note in linear-cli.mjs). Threshold = CATALYST_LINEAR_REPLICA_STALE_MS
+// (default 5 min). Returns true when fresh, false when absent/stale/unstattable.
+function isReplicaFresh(dbPath) {
+  let newest;
+  try {
+    newest = statSync(dbPath).mtimeMs; // throws if the file is absent → not fresh
+  } catch {
+    return false;
+  }
+  try {
+    const wal = statSync(dbPath + "-wal");
+    if (wal.size > 0) newest = Math.max(newest, wal.mtimeMs);
+  } catch {
+    /* -wal absent → main DB mtime only */
+  }
+  const thresholdMs = Number(process.env.CATALYST_LINEAR_REPLICA_STALE_MS) || 300_000;
+  return Date.now() - newest <= thresholdMs;
 }
 
 export function createReplicaReader({ dbPath = getReplicaDbPath() } = {}) {
@@ -166,5 +223,105 @@ export function createReplicaReader({ dbPath = getReplicaDbPath() } = {}) {
     }
   };
 
-  return { lookup, freshness, titles, close: dropHandle };
+  // eligible(query) → { nodes: [...] } | undefined  (CTL-1397)
+  //   A VALID answer is { nodes: [...] } — even { nodes: [] } (a fresh replica
+  //   with genuinely zero eligible tickets is a REAL answer, NOT a miss; the
+  //   caller must NOT fall through and re-run linearis for it).
+  //   undefined = "fall through to linearis" — returned when:
+  //     - the query is missing team or status (can't build the filter), OR
+  //     - query.project or query.label is set (v1 scope: filtered queries stay
+  //       on linearis — the replica filter is team+state only), OR
+  //     - the replica file is absent OR STALE by mtime (writer-liveness gate), OR
+  //     - any throw (→ dropHandle + undefined).
+  //   Fail-open everywhere: this tier can only ACCELERATE; any doubt falls
+  //   through to today's linearis behavior, never makes discovery WORSE.
+  const eligible = (query) => {
+    // Guard: need both filter dimensions, and v1 does NOT serve project/label
+    // filtered queries (the SQL filters team+state only — a project/label query
+    // would silently over-return, so fall through to linearis instead).
+    if (!query || !query.team || !query.status) return undefined;
+    if (query.project != null || query.label != null) return undefined;
+    // Freshness GATE (writer-liveness proxy) — a stale/absent replica falls
+    // through so a dead writer can never freeze discovery on a stale board.
+    if (!isReplicaFresh(dbPath)) return undefined;
+    try {
+      const handle = open();
+      // CTL-1397 (P1 fix #2, Codex review) — read the SEED-COMPLETENESS cursor
+      // AND the board/relation rows inside ONE deferred read transaction, so the
+      // whole answer comes from a single consistent snapshot. As separate
+      // autocommit reads (the prior shape), the cursor check and the data SELECTs
+      // could straddle a forced re-seed: the writer DELETEs the cursor +
+      // TRUNCATEs `issues` + batch-repopulates, so the gate would pass on the
+      // pre-reseed cursor, then the SELECTs would observe a partially-repopulated
+      // table — the exact partial board the gate exists to reject, which
+      // runEligibleQuery would then trust (it serves any non-empty replica
+      // result). A deferred read transaction pins one snapshot across the cursor,
+      // issues, and relation reads, so within it cursor-present ⟺ a complete seed.
+      // bun:sqlite's transaction() defaults to BEGIN DEFERRED (read-only — never
+      // attempts a write lock, so it is safe on the readonly handle) and
+      // COMMIT/ROLLBACKs automatically; a throw inside rolls back + rethrows into
+      // the outer catch → dropHandle + undefined (fail-open). Holds in WAL (prod)
+      // and rollback-journal (test fixture) alike.
+      const readSnapshot = handle.transaction(() => {
+        // SEED-COMPLETENESS gate (see SEED_COMPLETE_SELECT): cursor present = seed
+        // complete; absent/empty = mid-reseed → don't serve. Now read in the SAME
+        // snapshot as the board below so a re-seed can't slip between the two.
+        // undefined here = gate failed → fall through to linearis.
+        if (!handle.prepare(SEED_COMPLETE_SELECT).get()) return undefined;
+        const rows = handle
+          .prepare(ELIGIBLE_SELECT)
+          .all(`${query.team}-%`, query.status, ELIGIBLE_LIMIT);
+        const fwdStmt = handle.prepare(RELATIONS_FORWARD_SELECT);
+        const invStmt = handle.prepare(RELATIONS_INVERSE_SELECT);
+        return rows.map((row) => {
+          // forward relations this issue owns; linearis's forward `relations`
+          // nodes carry `relatedIssue` (live consumers read relatedIssue.identifier).
+          const relations = {
+            nodes: fwdStmt.all(row.identifier).map((r) => ({
+              type: r.type,
+              relatedIssue: { identifier: r.related_identifier },
+            })),
+          };
+          // inverse relations (the blocked-by edge the scheduler gates on);
+          // linearis's inverseRelations nodes carry `issue` (issue.identifier).
+          const inverseRelations = {
+            nodes: invStmt.all(row.identifier).map((r) => ({
+              type: r.type,
+              issue: { identifier: r.issue_identifier },
+            })),
+          };
+          // epoch-ms → ISO-8601 (the scheduler tie-break compares these as the
+          // linearis path emits them); uncoercible → null.
+          const updMs = coerceMs(row.updated_at);
+          const creMs = coerceMs(row.created_at);
+          return {
+            identifier: row.identifier,
+            title: row.title,
+            state: row.state,
+            priority: row.priority,
+            estimate: row.estimate,
+            updatedAt: updMs === undefined ? null : new Date(updMs).toISOString(),
+            createdAt: creMs === undefined ? null : new Date(creMs).toISOString(),
+            project: row.project_name ?? null,
+            parent: row.parent_identifier ?? null,
+            relations,
+            inverseRelations,
+            // delegate is already populated by the replica, so the linear-query
+            // replica tier skips the GraphQL delegate batch entirely.
+            delegate: row.delegate_id != null ? { id: row.delegate_id, name: row.delegate_name ?? null } : null,
+          };
+        });
+      });
+      const nodes = readSnapshot();
+      // undefined = the seed-completeness gate failed inside the snapshot → fall
+      // through to linearis (never serve an empty/partial board on a re-seed).
+      return nodes === undefined ? undefined : { nodes };
+    } catch {
+      // Drop the handle so a later call re-opens fresh (DB may be re-seeded).
+      dropHandle();
+      return undefined;
+    }
+  };
+
+  return { lookup, freshness, titles, eligible, close: dropHandle };
 }

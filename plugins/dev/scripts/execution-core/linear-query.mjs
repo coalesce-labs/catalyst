@@ -894,7 +894,56 @@ export function fetchTicketsDelegateBatch(team, identifiers, { exec = defaultDel
 // batch enrichment. Wrapped in try/catch so a delegate hiccup never blocks
 // the state/priority/relations refresh. An absent key (batch miss) leaves
 // the ticket's delegate field unset; `?? null` in contentKey collapses it.
-export function runEligibleQuery(query, { exec = defaultExec, delegateExec = defaultDelegateBatchExec } = {}) {
+// CTL-1397: `replica` (createReplicaReader, with an eligible() method) is the
+// board-list discovery accelerator. When present and it RETURNS { nodes } (a
+// valid answer — even { nodes: [] }), the query is served from the local
+// Catalyst-Cloud SQLite replica WITHOUT shelling out to `linearis issues list`,
+// so per-tick discovery is immune to the shared Linear quota + the CTL-679
+// circuit breaker that froze the fleet board. FAIL-OPEN: the tier can only
+// ACCELERATE — undefined / any throw falls through to the UNCHANGED linearis
+// path. `onSource("replica"|"linearis", count)` is the OTEL/Loki verification
+// marker (the daemon logs eligible_source so a query can confirm WHICH source
+// served). The replica already populates delegate, so a replica HIT skips the
+// GraphQL delegate batch.
+export function runEligibleQuery(
+  query,
+  { exec = defaultExec, delegateExec = defaultDelegateBatchExec, replica, onSource } = {}
+) {
+  // CTL-1397: replica-backed board-list tier. Fail-open: a throw out of
+  // eligible() is swallowed → local undefined → fall through to linearis.
+  if (replica?.eligible) {
+    let local;
+    try {
+      local = replica.eligible(query);
+    } catch {
+      local = undefined; // any replica failure → fall through to linearis
+    }
+    if (local && Array.isArray(local.nodes)) {
+      let tickets = local.nodes.map(normalizeTicket);
+      // Apply the SAME priority floor the linearis path applies below.
+      if (query.priority != null) {
+        tickets = tickets.filter((t) => t.priority >= 1 && t.priority <= query.priority);
+      }
+      // CTL-1397 (P1 fix) — DISTRUST a replica-empty. Serve from the replica ONLY
+      // when it yields a NON-EMPTY result. A confident "the board is empty" verdict
+      // can zero a team's dispatch set fleet-wide, and a feed-hole (CTL-139
+      // replica-hole: cursor present but a team's rows dropped) presents exactly as
+      // a replica-empty — so an empty result FALLS THROUGH to linearis, the source
+      // of truth for "is this board really empty". If the breaker is open during a
+      // crunch, that linearis call throws → reconcileProject's catch preserves the
+      // prior eligible set (correct — never zeroes). The OLD reasoning ("fresh-empty
+      // {nodes:[]} is a real answer — return without touching linearis") is REVERSED
+      // by the P1 review: only a non-empty replica result is trusted locally.
+      if (tickets.length > 0) {
+        // The replica already populated delegate (no GraphQL batch needed).
+        onSource?.("replica", tickets.length);
+        return tickets;
+      }
+      // Replica-empty (or filtered-to-empty) → fall through to the linearis
+      // confirmation below (which reports onSource("linearis") itself).
+    }
+    // MISS (undefined) / replica-empty → fall through to the UNCHANGED linearis path below.
+  }
   // CTL-1364 regression fix: the eligible-list poll MUST stay UNCAPPED. The
   // CTL-1364 default floor is for the hot per-signal terminal reads only; a
   // blanket cap here would SIGKILL a slow-but-VALID 200-ticket page, open the
@@ -934,5 +983,8 @@ export function runEligibleQuery(query, { exec = defaultExec, delegateExec = def
       /* best-effort: a delegate hiccup never blocks the state/priority/relations refresh */
     }
   }
+  // CTL-1397: mark the source (linearis) for the same verification seam as the
+  // replica HIT above, so the daemon can log eligible_source for both paths.
+  onSource?.("linearis", tickets.length);
   return tickets;
 }

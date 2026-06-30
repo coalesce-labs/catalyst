@@ -38,6 +38,14 @@ import {
   hostMembershipWarning, // CTL-1057
   isDraining as isDrainingDefault, // CTL-1095: drain gate
 } from "./config.mjs";
+// CTL-1397 (Node-loadability): monitor.mjs MUST NOT import replica-read.mjs — that
+// module statically imports `bun:sqlite`, which the Node ESM loader rejects at
+// module-load (the broker entrypoint is `#!/usr/bin/env node` and loads
+// broker/index.mjs → recovery.mjs → monitor.mjs). So the replica reader is
+// constructed in daemon.mjs (a bun-only context, mode-gated) and INJECTED into
+// startMonitor — exactly the param-injection pattern the per-signal tier uses
+// (linear-query.mjs never imports replica-read.mjs either; daemon.mjs:681 builds
+// the reader and passes it in). monitor.mjs stays Node-loadable.
 import { ownedBy } from "./hrw.mjs"; // CTL-862: HRW ownership filter
 import { claimDispatchSync } from "./cluster-claim-sync.mjs"; // CTL-862: cross-host claim soft-CAS
 import { listProjects, getProjectConfig, resolveEligibleQuery } from "./registry.mjs";
@@ -250,6 +258,14 @@ export function handleCommentCreatedEvent(event, { onComment } = {}) {
 
 // --- Reconcile -----------------------------------------------------------
 
+// CTL-1397: the replica-backed board-list discovery reader, INJECTED by the
+// daemon (daemon.mjs constructs `readLinearReplica().mode === "on" ?
+// createReplicaReader() : undefined` in its bun-only context and passes it into
+// startMonitor — see the Node-loadability note at the import block). `null` =
+// no reader (mode off, or the Node broker which never injects one) → the reconcile
+// path falls to the linearis exec, byte-identical to pre-CTL-1397.
+let _injectedEligibleReplica = null;
+
 // Teams that have been reconciled at least once — used by reconcileAll to
 // detect teams dropped from the registry that must be dropProject'd.
 const knownProjects = new Set();
@@ -269,7 +285,7 @@ const knownProjects = new Set();
 // `monitor.reconcile.failing.<TEAM>` event onto the unified event log so the
 // orch-monitor dashboard surfaces the silently-starving team, and a recovering
 // poll clears the alert. `appendHealthEvent` is an injectable test seam.
-export function reconcileProject(team, { exec, delegateExec, appendHealthEvent } = {}) {
+export function reconcileProject(team, { exec, delegateExec, appendHealthEvent, replica, onSource } = {}) {
   const entry = getProjectConfig(team);
   if (!entry) {
     log.warn({ team }, "reconcile: no registry entry for team — skipping");
@@ -278,7 +294,21 @@ export function reconcileProject(team, { exec, delegateExec, appendHealthEvent }
   const query = resolveEligibleQuery(entry);
   let tickets;
   try {
-    tickets = runEligibleQuery(query, { exec, delegateExec });
+    // CTL-1397: pass the replica-backed board-list reader (injectable for tests,
+    // else the mode-gated module singleton) so discovery reads the local replica
+    // instead of `linearis issues list` — immune to the shared Linear quota + the
+    // CTL-679 circuit breaker. onSource logs a structured eligible_source marker
+    // (value "replica"|"linearis") so OTEL/Loki can verify which source served.
+    const eligibleSource =
+      onSource ??
+      ((source, count) =>
+        log.info({ team, eligible_source: source, eligible_count: count }, "eligible: source"));
+    tickets = runEligibleQuery(query, {
+      exec,
+      delegateExec,
+      replica: replica ?? _injectedEligibleReplica,
+      onSource: eligibleSource,
+    });
   } catch (err) {
     log.error({ team, err: err.message }, "reconcile poll failed — preserving prior eligible set");
     // CTL-867: escalate persistent failures beyond the buried log line.
@@ -1024,7 +1054,14 @@ export function startMonitor({
   botUserIds,
   botWriteId,
   gateway,
+  // CTL-1397: the daemon-injected replica-backed board-list reader (constructed
+  // in daemon.mjs's bun context, mode-gated). undefined/absent → the reconcile
+  // path uses linearis (the Node broker never injects one, so monitor.mjs needs
+  // no bun:sqlite import). Stored module-level so reconcileAll/reconcileProject
+  // (which the reconcile timer drives) read it without re-threading.
+  eligibleReplica,
 } = {}) {
+  _injectedEligibleReplica = eligibleReplica ?? null;
   // CTL-565: orchDir + dispatch + abortWorker are stored in tailerOpts so the
   // tailer-driven readNewEvents → handleStateChangedEvent path can one-shot-
   // dispatch triage and abort a dragged-out worker. When abortWorker is left
@@ -1138,4 +1175,5 @@ export function __resetForTests() {
   tailerOpts = {};
   resetLivenessCache();
   __resetReconcileHealthForTests(); // CTL-867: clear per-team reconcile-health map
+  _injectedEligibleReplica = null; // CTL-1397: drop the daemon-injected board-list replica reader
 }
