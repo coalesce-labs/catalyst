@@ -1281,13 +1281,21 @@ cmd_install_services() {
 
   # CTL-1407: per-account rate-limit usage sampler (5th agent). Until now com.catalyst.agent
   # was only ever hand-installed (mini-2 alone), so the dashboard's Per-Account Rate-Limit
-  # Scoreboard read No-data on every other host. Provision it here so `catalyst-stack
-  # install-services` (and `catalyst install`, which calls it for worker nodes) brings it up on
-  # every host at the plist's steady 5-min StartInterval cadence. Idempotent (install.sh boots out
-  # then re-bootstraps) + non-fatal — a sampler hiccup (e.g. node missing on PATH) must not block
-  # the core stack. pipefail is on (set -uo pipefail above) so the pipe preserves install.sh's rc.
+  # Scoreboard read No-data across the rest of the WORKER fleet. Provision it here so `catalyst-stack
+  # install-services` (and `catalyst install`'s install-agents phase, which calls it for worker
+  # nodes) brings it up at the plist's steady 5-min StartInterval cadence. Idempotent (install.sh
+  # boots out then re-bootstraps) + non-fatal — a sampler hiccup must not block the core stack.
+  # pipefail is on (set -uo pipefail above) so the pipe preserves install.sh's rc.
+  #   - node PATH (Codex P2): install.sh gates on `command -v node` and bakes the live PATH into the
+  #     plist, but `catalyst install`'s install-services PATH omits ~/.local/node/bin (where joined
+  #     members install node), so the installer would exit "node not found" on the very worker hosts
+  #     we target. Prepend the node prefix for the install.sh call (mirrors catalyst-execution-core).
+  #   - dev/monitor coverage: install-lifecycle routes non-worker classes through adopt-updater (not
+  #     install-services), so this provisions the WORKER fleet (the dark cohort). Dev/monitor (laptop)
+  #     sampler coverage is a deliberate follow-up — the laptop already emits claude_code_* interactively.
   if [[ -x "${SCRIPT_DIR}/catalyst-agent/install.sh" ]]; then
-    if bash "${SCRIPT_DIR}/catalyst-agent/install.sh" 2>&1 | sed 's/^/  /'; then
+    if PATH="${HOME}/.local/node/bin:${HOME}/.local/bin:${PATH}" \
+        bash "${SCRIPT_DIR}/catalyst-agent/install.sh" 2>&1 | sed 's/^/  /'; then
       log "loaded com.catalyst.agent — per-account rate-limit usage sampler (5-min cadence)"
     else
       warn "catalyst-agent install skipped/failed (continuing) — install it manually if per-account rate-limit telemetry is needed"
@@ -1329,6 +1337,19 @@ cmd_uninstall_services() {
   else
     log "$SHIPPER_AGENT_LABEL not installed (no $SHIPPER_AGENT_PLIST)"
   fi
+  # CTL-1407: per-account rate-limit usage sampler (com.catalyst.agent), now installed by
+  # install-services. Symmetric teardown so `catalyst uninstall` / a failed worker-install
+  # rollback don't leave it polling + emitting every 5 min (Codex P2). It's a pure emitter
+  # with no pull authority, so no owner-reset ritual (unlike the updater below).
+  local agent_plist="${HOME}/Library/LaunchAgents/com.catalyst.agent.plist"
+  if [[ -f "$agent_plist" ]]; then
+    launchctl bootout "$guid" "$agent_plist" 2>/dev/null || true
+    rm -f "$agent_plist"
+    log "removed com.catalyst.agent ($agent_plist)"
+  else
+    log "com.catalyst.agent not installed (no $agent_plist)"
+  fi
+
   # CTL-1348: catalyst-updater agent. Reconcile ownership back to "broker" BEFORE removing
   # the agent (Codex P1/P2): the broker stays detect-only (pull:false) while the flag says
   # "updater", so if the reset FAILS we must keep the (still-pulling) agent in place rather
