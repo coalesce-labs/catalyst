@@ -886,6 +886,21 @@ export function fetchTicketsDelegateBatch(team, identifiers, { exec = defaultDel
   return result;
 }
 
+// CTL-1397 (3/n) — empty-board re-confirm cadence. A SEED-COMPLETE replica-empty
+// is trusted locally (so empty Todo boards — the steady state — don't shell out
+// to the rate-limited `linearis issues list` every tick and pin the CTL-679
+// breaker). The only concession to a rare feed-hole (CTL-139: cursor present but
+// a team's rows dropped, which also presents as empty) is a LOW-CADENCE linearis
+// re-confirm: at most once per team per this window, and only when the breaker is
+// closed. Env-overridable; default 5 min (matches the replica staleness window).
+const EMPTY_RECONFIRM_MS = Number(process.env.CATALYST_ELIGIBLE_EMPTY_RECONFIRM_MS) || 300_000;
+// team → epoch-ms of the last linearis empty-confirm. Module-scoped (the daemon
+// is long-lived; bounded by team count). Reset between tests via the export below.
+const _eligibleEmptyConfirmAt = new Map();
+export function __resetEligibleEmptyConfirm() {
+  _eligibleEmptyConfirmAt.clear();
+}
+
 // runEligibleQuery — run the query, parse + normalize, apply the priority
 // floor. A non-zero linearis exit THROWS (never a silent []): a silent empty
 // would let one failed poll flatten a project's eligible set to zero. The
@@ -907,7 +922,17 @@ export function fetchTicketsDelegateBatch(team, identifiers, { exec = defaultDel
 // GraphQL delegate batch.
 export function runEligibleQuery(
   query,
-  { exec = defaultExec, delegateExec = defaultDelegateBatchExec, replica, onSource } = {}
+  {
+    exec = defaultExec,
+    delegateExec = defaultDelegateBatchExec,
+    replica,
+    onSource,
+    // Injectable seams (default to production) so the empty-trust cadence is
+    // deterministically testable: `now` is the clock, `isBreakerOpen` reports the
+    // shared CTL-679 Linear breaker state.
+    now = Date.now,
+    isBreakerOpen = () => linearBreaker.isOpen(),
+  } = {}
 ) {
   // CTL-1397: replica-backed board-list tier. Fail-open: a throw out of
   // eligible() is swallowed → local undefined → fall through to linearis.
@@ -924,25 +949,47 @@ export function runEligibleQuery(
       if (query.priority != null) {
         tickets = tickets.filter((t) => t.priority >= 1 && t.priority <= query.priority);
       }
-      // CTL-1397 (P1 fix) — DISTRUST a replica-empty. Serve from the replica ONLY
-      // when it yields a NON-EMPTY result. A confident "the board is empty" verdict
-      // can zero a team's dispatch set fleet-wide, and a feed-hole (CTL-139
-      // replica-hole: cursor present but a team's rows dropped) presents exactly as
-      // a replica-empty — so an empty result FALLS THROUGH to linearis, the source
-      // of truth for "is this board really empty". If the breaker is open during a
-      // crunch, that linearis call throws → reconcileProject's catch preserves the
-      // prior eligible set (correct — never zeroes). The OLD reasoning ("fresh-empty
-      // {nodes:[]} is a real answer — return without touching linearis") is REVERSED
-      // by the P1 review: only a non-empty replica result is trusted locally.
+      // A NON-EMPTY replica result is always trusted (the replica already
+      // populated delegate, so no GraphQL batch is needed).
       if (tickets.length > 0) {
-        // The replica already populated delegate (no GraphQL batch needed).
         onSource?.("replica", tickets.length);
         return tickets;
       }
-      // Replica-empty (or filtered-to-empty) → fall through to the linearis
-      // confirmation below (which reports onSource("linearis") itself).
+      // CTL-1397 (3/n) — a SEED-COMPLETE replica-empty. The reader only returns a
+      // defined { nodes } when the replica is fresh AND the sync_meta cursor is
+      // present (seed complete; the snapshot-consistent gate rules out a mid-reseed
+      // truncation), so this empty is a real "0 eligible", NOT a truncation
+      // artifact. Empty Todo boards are the STEADY STATE, so the previous policy of
+      // confirming EVERY empty via `linearis issues list` made discovery hit the
+      // rate-limited API every tick — defeating the breaker-immunity this tier
+      // exists for and keeping the CTL-679 breaker pinned (the live fleet board
+      // freeze: 100% eligible_source=linearis with the breaker oscillating). So
+      // TRUST the replica-empty, with a LOW-CADENCE linearis re-confirm as the only
+      // concession to a rare feed-hole (CTL-139: cursor present but a team's rows
+      // dropped, which also presents as empty):
+      //   - breaker OPEN  → trust (a confirm would only fast-fail circuit-open and
+      //                     keep the breaker oscillating; during a storm the API
+      //                     can't answer anyway).
+      //   - re-confirmed within EMPTY_RECONFIRM_MS for this team → trust (bounds the
+      //                     empty-board linearis rate to ≤1 call/team/window).
+      //   - else (breaker closed + window elapsed) → fall through to ONE linearis
+      //                     confirm, so a genuine hole is caught within the window
+      //                     when quota allows. A non-empty confirm serves the real
+      //                     board; an empty confirm just re-affirms []. If that call
+      //                     throws (breaker trips mid-call), reconcileProject's catch
+      //                     preserves the prior set — never zeroes.
+      const dueForReconfirm =
+        now() - (_eligibleEmptyConfirmAt.get(query.team) ?? 0) >= EMPTY_RECONFIRM_MS;
+      if (isBreakerOpen() || !dueForReconfirm) {
+        onSource?.("replica", 0);
+        return tickets; // [] — trusted seed-complete replica-empty (breaker-immune)
+      }
+      // Record the attempt up-front so a mid-call breaker trip still spaces the
+      // next re-confirm by the full window, then fall through to linearis below.
+      _eligibleEmptyConfirmAt.set(query.team, now());
     }
-    // MISS (undefined) / replica-empty → fall through to the UNCHANGED linearis path below.
+    // MISS (undefined) / due empty re-confirm → fall through to the UNCHANGED
+    // linearis path below.
   }
   // CTL-1364 regression fix: the eligible-list poll MUST stay UNCAPPED. The
   // CTL-1364 default floor is for the hot per-signal terminal reads only; a

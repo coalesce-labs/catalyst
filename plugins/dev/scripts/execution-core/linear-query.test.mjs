@@ -1,10 +1,11 @@
 // Unit tests for the execution-core Linear eligible query (CTL-535 Phase 2).
 // Run: cd plugins/dev/scripts/execution-core && bun test linear-query.test.mjs
 
-import { describe, test, expect, mock } from "bun:test";
+import { describe, test, expect, mock, beforeEach } from "bun:test";
 import {
   buildLinearisArgs,
   runEligibleQuery,
+  __resetEligibleEmptyConfirm,
   fetchTicketState,
   fetchTicketLabels,
   readTicketLabels,
@@ -226,6 +227,11 @@ describe("runEligibleQuery", () => {
 describe("runEligibleQuery — replica tier (CTL-1397)", () => {
   const query = { team: "CTL", status: "Todo", project: null, label: null, priority: null };
 
+  // CTL-1397 (3/n): the empty-board re-confirm cadence is module-scoped state —
+  // clear it before each test so an empty result is always "due" for re-confirm
+  // (the deterministic baseline), regardless of test order.
+  beforeEach(() => __resetEligibleEmptyConfirm());
+
   // A replica stub whose eligible() returns a canned linearis-list-shaped result.
   function replicaReturning(nodes) {
     const calls = [];
@@ -298,51 +304,125 @@ describe("runEligibleQuery — replica tier (CTL-1397)", () => {
     expect(tickets.map((t) => t.identifier).sort()).toEqual(["CTL-1", "CTL-2"]);
   });
 
-  // CTL-1397 (P1 fix) — a replica-EMPTY is NOT trusted. A confident "the board
-  // is empty" verdict can zero a team's dispatch set fleet-wide; a feed-hole
-  // (CTL-139 replica-hole: cursor present but a team's rows dropped) presents as
-  // a replica-empty. So an empty replica result FALLS THROUGH to linearis (the
-  // source of truth for "is this board really empty") — only a NON-EMPTY replica
-  // result is served locally.
-  test("replica-EMPTY ({ nodes: [] }) FALLS THROUGH to linearis (confirmation), records onSource('linearis')", () => {
+  // CTL-1397 (3/n) — a SEED-COMPLETE replica-empty is TRUSTED locally (so empty
+  // Todo boards — the steady state — stay breaker-immune instead of confirming
+  // via the rate-limited linearis every tick). The only concession to a rare
+  // feed-hole (CTL-139: cursor present but a team's rows dropped, which also
+  // presents as empty) is a LOW-CADENCE linearis re-confirm: at most once per team
+  // per EMPTY_RECONFIRM_MS, and only when the breaker is CLOSED.
+
+  test("replica-EMPTY, breaker CLOSED + DUE (first time) → ONE linearis re-confirm (catches a feed-hole)", () => {
     const replica = replicaReturning([]);
     const exec = fakeExec({
-      // The confirmation: linearis says the board is NOT actually empty.
+      // The re-confirm: linearis says the board is NOT actually empty (a hole).
       stdout: ticketsJson([{ identifier: "CTL-9", state: { name: "Todo" }, priority: 2 }]),
     });
     const sources = [];
     const tickets = runEligibleQuery(query, {
       exec,
       replica,
+      isBreakerOpen: () => false,
       onSource: (source, count) => sources.push([source, count]),
     });
-    expect(exec.calls).toHaveLength(1); // linearis WAS called to confirm
-    // The linearis result (not the replica-empty) is what served.
-    expect(tickets.map((t) => t.identifier)).toEqual(["CTL-9"]);
+    expect(exec.calls).toHaveLength(1); // linearis WAS called to re-confirm
+    expect(tickets.map((t) => t.identifier)).toEqual(["CTL-9"]); // the hole's ticket served
     expect(sources).toEqual([["linearis", 1]]);
   });
 
-  test("replica filters to EMPTY via the priority floor → also falls through to linearis", () => {
-    // Replica returns rows, but the priority floor drops them all → empty result.
+  test("replica-EMPTY, breaker OPEN → TRUSTS the replica-empty (no exec), records onSource('replica', 0)", () => {
+    const replica = replicaReturning([]);
+    const sources = [];
+    const tickets = runEligibleQuery(query, {
+      exec: execMustNotRun(), // a doomed linearis call during a storm must NOT happen
+      replica,
+      isBreakerOpen: () => true,
+      onSource: (source, count) => sources.push([source, count]),
+    });
+    expect(tickets).toEqual([]); // trusted seed-complete empty
+    expect(replica.calls).toEqual([query]);
+    expect(sources).toEqual([["replica", 0]]);
+  });
+
+  test("replica-EMPTY, breaker CLOSED but NOT due (re-confirmed within the window) → TRUSTS the replica (no exec)", () => {
+    const replica = replicaReturning([]);
+    let clock = 1_000_000;
+    const now = () => clock;
+    // First empty: due → re-confirms via linearis (confirms genuinely empty).
+    runEligibleQuery(query, {
+      exec: fakeExec({ stdout: ticketsJson([]) }),
+      replica,
+      isBreakerOpen: () => false,
+      now,
+    });
+    // Second empty 1s later (well within EMPTY_RECONFIRM_MS): NOT due → trust replica.
+    clock += 1_000;
+    const sources = [];
+    const tickets = runEligibleQuery(query, {
+      exec: execMustNotRun(),
+      replica,
+      isBreakerOpen: () => false,
+      now,
+      onSource: (source, count) => sources.push([source, count]),
+    });
+    expect(tickets).toEqual([]);
+    expect(sources).toEqual([["replica", 0]]);
+  });
+
+  test("cadence: empty re-confirms via linearis at most once per EMPTY_RECONFIRM_MS per team", () => {
+    const replica = replicaReturning([]);
+    let clock = 5_000_000;
+    const now = () => clock;
+    const execCalls = [];
+    const mkExec = () => {
+      const fn = () => {
+        execCalls.push(clock);
+        return { code: 0, stdout: ticketsJson([]), stderr: "" };
+      };
+      return fn;
+    };
+    const call = () =>
+      runEligibleQuery(query, { exec: mkExec(), replica, isBreakerOpen: () => false, now });
+    call(); // t0: due → linearis
+    clock += 60_000; call(); // +1m: not due → trust replica
+    clock += 60_000; call(); // +2m: not due → trust replica
+    clock += 200_000; call(); // +5m20s past t0: due again → linearis
+    expect(execCalls).toEqual([5_000_000, 5_320_000]); // exactly two re-confirms
+  });
+
+  test("replica-EMPTY filtered by the priority floor → treated as empty (trusts replica when not due)", () => {
+    // Replica returns rows, but the priority floor drops them all → empty result;
+    // the empty-trust cadence applies (here: NOT due after a prior confirm → trust).
     const replica = replicaReturning([
       { identifier: "CTL-3", state: "Todo", priority: 3 },
       { identifier: "CTL-4", state: "Todo", priority: 4 },
     ]);
-    const exec = fakeExec({
-      stdout: ticketsJson([{ identifier: "CTL-2", state: { name: "Todo" }, priority: 2 }]),
+    let clock = 9_000_000;
+    const now = () => clock;
+    runEligibleQuery({ ...query, priority: 2 }, {
+      exec: fakeExec({ stdout: ticketsJson([]) }),
+      replica,
+      isBreakerOpen: () => false,
+      now,
+    }); // first: due → linearis confirm (genuinely empty)
+    clock += 1_000;
+    const tickets = runEligibleQuery({ ...query, priority: 2 }, {
+      exec: execMustNotRun(),
+      replica,
+      isBreakerOpen: () => false,
+      now,
     });
-    const tickets = runEligibleQuery({ ...query, priority: 2 }, { exec, replica });
-    expect(exec.calls).toHaveLength(1); // empty-after-filter → linearis confirms
-    expect(tickets.map((t) => t.identifier)).toEqual(["CTL-2"]);
+    expect(tickets).toEqual([]); // not due → trusts the filtered-empty replica result
   });
 
-  test("replica-EMPTY AND linearis throws (circuit open) → the throw PROPAGATES (caller preserves prior set)", () => {
+  test("replica-EMPTY, breaker CLOSED + due, AND linearis throws → the throw PROPAGATES (caller preserves prior set)", () => {
     const replica = replicaReturning([]);
-    // linearis exits non-zero (e.g. breaker open / auth failure) — runEligibleQuery
-    // throws, exactly as the linearis-only path does today. reconcileProject's
-    // catch then PRESERVES the prior eligible set (never zeroes the board).
-    const exec = fakeExec({ code: 1, stderr: "linearis: circuit open" });
-    expect(() => runEligibleQuery(query, { exec, replica })).toThrow(/exit 1/);
+    // linearis exits non-zero (e.g. auth failure) on the due re-confirm —
+    // runEligibleQuery throws exactly as the linearis-only path does today, and
+    // reconcileProject's catch PRESERVES the prior eligible set (never zeroes).
+    const exec = fakeExec({ code: 1, stderr: "linearis: boom" });
+    expect(() =>
+      runEligibleQuery(query, { exec, replica, isBreakerOpen: () => false }),
+    ).toThrow(/exit 1/);
   });
 
   test("MISS (eligible() → undefined): falls through to the linearis exec, records onSource('linearis')", () => {
