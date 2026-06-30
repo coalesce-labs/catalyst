@@ -34,7 +34,11 @@ import {
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { log } from "./config.mjs";
+import { log, getExecutor } from "./config.mjs";
+// CTL-1157 F3: route the detached delegate's dispatch through the node's executor
+// (sdk vs bg) instead of the hardcoded bg path baked into defaultInvokeRecoveryPass.
+import { dispatchForExecutor, dispatchTicket as dispatchTicketSeam } from "./dispatch.mjs";
+import { resolveSdkBootExecutor } from "./sdk-run-phase-agent.mjs"; // auth-aware sdk→bg degrade (this detached child does NOT run the daemon-boot gate)
 import {
   delegateQueueDir,
   claimIntent as defaultClaimIntent,
@@ -439,8 +443,23 @@ if (isEntrypoint) {
     // → Infinity, which would let the runner launch a delegate past maxParallel even
     // when the board is full. readMaxParallel(orchDir, {}) reads the same state.json
     // ceiling the scheduler tick uses.
-    const r = drainOnce({ orchDir, maxParallel: readMaxParallel(orchDir, {}) });
-    log.info({ ...r }, "delegate-runner-entry: drain complete");
+    // CTL-1157 F3: re-resolve the executor in this DETACHED child (it does NOT run
+    // the daemon-boot resolveSdkBootExecutor gate), degrading sdk→bg when the
+    // subscription-auth precondition fails (no CLAUDE_CODE_OAUTH_TOKEN) so a
+    // detached delegate never attempts an sdk launch it can't authenticate. On a
+    // bg fleet this is a pure no-op (dispatchForExecutor("bg") === defaultDispatch),
+    // so the launched delegate is byte-identical to today. The invokeFn wrapper
+    // curries the resolved dispatch into defaultInvokeRecoveryPass via its
+    // deps.dispatchTicket seam.
+    const { executor } = resolveSdkBootExecutor(getExecutor(), { log });
+    const executorDispatch = dispatchForExecutor(executor);
+    const invokeFn = (ticket, briefObj, invokeDeps) =>
+      defaultInvokeRecoveryPass(ticket, briefObj, {
+        ...invokeDeps,
+        dispatchTicket: (o, t, p) => dispatchTicketSeam(o, t, p, { dispatch: executorDispatch }),
+      });
+    const r = drainOnce({ orchDir, maxParallel: readMaxParallel(orchDir, {}), invokeFn });
+    log.info({ ...r, executor }, "delegate-runner-entry: drain complete");
   } catch (err) {
     log.warn({ err: err?.message }, "delegate-runner-entry: drain threw");
   } finally {

@@ -229,6 +229,12 @@ import {
   // tick's orchDir at the call site. Still entirely behind CATALYST_RECOVERY_PASS
   // (mode=off ⇒ the pass never runs), so no live behavior change until opt-in.
   defaultInvokeRecoveryPass as recoveryInvokeRecoveryPass,
+  // CTL-1157: the curated-escalation signal writer (Workstream C) + the defer
+  // attempts reader (Workstream B). Bound to the tick's orchDir at the call site
+  // (like recordIntent) — the daemon never sets CATALYST_ORCHESTRATOR_DIR on its
+  // own process, so the env-resolving defaults would otherwise no-op.
+  defaultWriteEscalationSignal as recoveryWriteEscalationSignal,
+  defaultReadIntentAttempts as recoveryReadIntentAttempts,
 } from "./recovery-reasoning.mjs";
 // CTL-1331: the async board-health delegate queue. countQueuedDelegates is the
 // slot reservation (a queued/claimed delegate has taken a slot its `claude --bg`
@@ -289,7 +295,7 @@ import { emitDrainedEvent as defaultEmitDrainedEvent } from "./drain-event.mjs";
 import { defaultCheckSequencing } from "./sequencing.mjs"; // CTL-537
 import { ownedBy, ownerForTicket } from "./hrw.mjs"; // CTL-850: HRW ownership filter (CTL-1191 also uses it for the diagnostician gate); ownerForTicket: CTL-1290 board-health stranded-node + enforce HRW gate
 import { boardHealthPass } from "./board-health.mjs"; // CTL-1290: the whole-board health delegate (shadow-first)
-import { getAllTicketDescriptors } from "../broker/broker-state.mjs"; // CTL-1290: board snapshot (reads only). bun:sqlite-backed — safe here: scheduler.mjs is daemon-only and NOT in the orch-monitor vite/UI graph (see MEMORY vite_config_bun_sqlite_trap).
+import { getAllTicketDescriptors, getAllPrStatuses } from "../broker/broker-state.mjs"; // CTL-1290: board snapshot (reads only). bun:sqlite-backed — safe here: scheduler.mjs is daemon-only and NOT in the orch-monitor vite/UI graph (see MEMORY vite_config_bun_sqlite_trap). CTL-1157: getAllPrStatuses = the filter_state PR-lifecycle reader for the phantom/orphaned-PR invariants.
 import { readReconcileHealthMarkers } from "./reconcile-health.mjs"; // CTL-1290: stranded-node reconcile signal
 import { claimDispatchSync } from "./cluster-claim-sync.mjs"; // CTL-850: cross-host claim soft-CAS
 // CTL-954: team estimation method — lazy-cached from Linear, used to expand
@@ -4015,6 +4021,14 @@ export function schedulerTick(
             shouldSkipItem: (ticket) => recoveryShouldSkipItem(ticket, { orchDir }),
             recordIntent: (ticket, intent) =>
               recoveryRecordIntent(ticket, intent, { orchDir }),
+            // CTL-1157 Workstream C: write the curated 6-field explanation signal
+            // on enforce escalates (bound to this tick's orchDir).
+            writeEscalationSignal: (ticket, payload) =>
+              recoveryWriteEscalationSignal(ticket, payload, { orchDir }),
+            // CTL-1157 Workstream B: read prior attempts so a defer marker pins
+            // them (no auto-increment, no budget burn).
+            readIntentAttempts: (ticket) =>
+              recoveryReadIntentAttempts(ticket, { orchDir }),
             invokeSeam: (ticket, seamId, brief) =>
               recoveryInvokeSeam(ticket, seamId, brief, { orchDir }),
             // CTL-1176 rung 3: dispatch the recovery-pass skill for the
@@ -4397,6 +4411,12 @@ export function schedulerTick(
           readEventRing: _boardHealth.readEventRing,
           ownerForTicket,
           getReconcileMarkers: _boardHealth.getReconcileMarkers,
+          // CTL-1157: thread the PR-status reader + the provably-dead host set.
+          // Both are daemon-bound (the binding below); a bare tick passes neither
+          // → empty-Map / empty-array defaults keep the new invariants
+          // observable:false and the holistic failover unreachable (shadow-safe).
+          getPrStatusMap: _boardHealth.getPrStatusMap,
+          deadHosts: _boardHealth.deadHosts ? _boardHealth.deadHosts(roster) : [],
           lastRunMs: _boardHealthLastRunMs,
           // emit defaults to defaultEmitEvent. CTL-1300: thread the optional `act`
           // seam — supplied ONLY by the daemon binding (the holistic recovery-pass
@@ -6488,31 +6508,52 @@ function runTick() {
         getBoard: () => getAllTicketDescriptors({ includeRemoved: false }),
         readEventRing: () => readBoardHealthEventTail(),
         getReconcileMarkers: () => readReconcileHealthMarkers({}),
-        act: ({ anchor, boardContext, decision }) => {
-          const deps = { orchDir: runningOpts.orchDir };
-          // Reuse the recovery cooldown ledger so we don't re-dispatch the same
-          // anchor every board-health interval (the cap counts only `.complete`).
-          if (recoveryShouldSkipItem(anchor, deps)) {
-            return { dispatched: false, reason: "recovery-cooldown", anchor };
-          }
-          const r = recoveryInvokeRecoveryPass(
-            anchor,
-            {
-              boardContext,
-              reason: `board-health: ${decision?.gate?.reason ?? "board anomaly"} — holistic recovery-pass delegate`,
-            },
-            deps,
-          );
-          // Start the cooldown window on a dispatch attempt (success OR failure) so
-          // a failing anchor isn't re-dispatched until the window elapses.
-          try {
-            recoveryRecordIntent(
-              anchor,
-              { type: "recovery-pass", decision: "fix", fix_class: "board-health", outcome: !!r?.dispatched, source: "board-health" },
+        // CTL-1157 (A11): the filter_state PR-status reader (phantom/orphaned-PR
+        // invariants) + the provably-dead host set for the HRW-safe holistic
+        // failover. computeSurvivingRoster already exists (scheduler.mjs) and
+        // returns the roster unchanged for roster ≤ 1 → empty dead set at N=1.
+        getPrStatusMap: () => getAllPrStatuses(),
+        deadHosts: (roster) => roster.filter((h) => !computeSurvivingRoster(roster).includes(h)),
+        // CTL-1157 (MUST-FIX 2): iterate the ordered candidate list and dispatch
+        // the FIRST actionable (non-cooldown/non-latched) candidate — instead of
+        // returning {dispatched:false} on the first skip, which wedged the whole
+        // holistic pass on one latched anchor and starved the rest of the cohort.
+        // The per-candidate cooldown gate + the recovery-pass intent ledger
+        // (decision:"fix" auto-increments attempts; cap 2 + 30-min cooldown) are
+        // preserved verbatim inside the loop — still exactly ONE dispatch per scan.
+        // CTL-1157 (F1): thread the executor-resolved dispatch fn (runningOpts.dispatch)
+        // through dispatchTicket so a delegate launches under the node's executor
+        // (sdk vs bg) instead of a hardcoded claude --bg. On a bg fleet this is a
+        // pure no-op (dispatchForExecutor("bg") === defaultDispatch).
+        act: ({ anchor, candidates = [], boardContext, decision }) => {
+          const deps = {
+            orchDir: runningOpts.orchDir,
+            dispatchTicket: (o, t, p) => dispatchTicket(o, t, p, { dispatch: runningOpts.dispatch }),
+          };
+          const ordered = candidates.length ? candidates : (anchor ? [anchor] : []);
+          for (const cand of ordered) {
+            // cooldown/attempts-latched → try the next candidate (MUST-FIX 2).
+            if (recoveryShouldSkipItem(cand, deps)) continue;
+            const r = recoveryInvokeRecoveryPass(
+              cand,
+              {
+                boardContext,
+                reason: `board-health: ${decision?.gate?.reason ?? "board anomaly"} — holistic recovery-pass delegate`,
+              },
               deps,
             );
-          } catch { /* ledger write is best-effort — never block the tick */ }
-          return r;
+            // Start the cooldown window on a dispatch attempt (success OR failure)
+            // so a failing anchor isn't re-dispatched until the window elapses.
+            try {
+              recoveryRecordIntent(
+                cand,
+                { type: "recovery-pass", decision: "fix", fix_class: "board-health", outcome: !!r?.dispatched, source: "board-health" },
+                deps,
+              );
+            } catch { /* ledger write is best-effort — never block the tick */ }
+            return r; // exactly ONE dispatch per scan
+          }
+          return { dispatched: false, reason: "all-candidates-cooldown" };
         },
       },
     });
