@@ -30,6 +30,7 @@ import {
   upsertEnvFile,
   execCoreEnvPath,
   VALID_EXECUTORS,
+  RESIDUAL_AGENT_PATTERN,
 } from "./install-lifecycle.mjs";
 
 let tmpCounter = 0;
@@ -327,6 +328,25 @@ describe("planPhases — CTL-1401 cloud-sync + executor levers (pure)", () => {
       }
     }
   });
+  test("Codex P2 (re-review): restart-execcore is planned ONLY for `install --class worker --executor` (a reinstall restarts via teardown; no flag ⇒ no restart)", () => {
+    const ia = (operation, opts) => stepLabels(planPhases({ operation, nodeClass: "worker", scripts: SCRIPTS, opts }));
+    expect(ia("install", { executor: "sdk", execCoreEnv: "/tmp/ec.env" })).toContain("restart-execcore");
+    // a reinstall already stops+starts exec-core in its teardown → no extra restart step
+    expect(ia("reinstall", { executor: "sdk", execCoreEnv: "/tmp/ec.env" })).not.toContain("restart-execcore");
+    // no --executor ⇒ nothing to apply ⇒ no restart
+    expect(ia("install", {})).not.toContain("restart-execcore");
+    // developer/monitor don't run exec-core ⇒ no restart step
+    expect(stepLabels(planPhases({ operation: "install", nodeClass: "developer", scripts: SCRIPTS, opts: { executor: "sdk", execCoreEnv: "/tmp/ec.env" } }))).not.toContain("restart-execcore");
+  });
+});
+
+describe("RESIDUAL_AGENT_PATTERN — CTL-1401 (Codex P2: uninstall verify-clean catches a leftover cloud-sync)", () => {
+  test("the residual-process pattern includes cloud-sync (so a failed bootout can't pass verify-clean)", () => {
+    expect(RESIDUAL_AGENT_PATTERN).toContain("cloud-sync");
+    // and still covers the other stack daemons
+    expect(RESIDUAL_AGENT_PATTERN).toContain("broker/index.mjs");
+    expect(RESIDUAL_AGENT_PATTERN).toContain("execution-core/");
+  });
 });
 
 describe("upsertEnvFile — CTL-1401 idempotent env-file upsert", () => {
@@ -359,6 +379,14 @@ describe("upsertEnvFile — CTL-1401 idempotent env-file upsert", () => {
     const out = readFileSync(f, "utf8");
     expect(out.match(/CATALYST_EXECUTOR=/g)).toHaveLength(1);
     expect(out).toBe("export CATALYST_EXECUTOR=sdk\nexport OTHER=1\n");
+  });
+  test("Codex P2 (re-review): drops an INDENTED stale duplicate (bash applies it when sourcing)", () => {
+    const f = tmpCfg();
+    writeFileSync(f, "export CATALYST_EXECUTOR=sdk\n  CATALYST_EXECUTOR=bg\n"); // indented trailing dup
+    upsertEnvFile(f, "CATALYST_EXECUTOR", "sdk");
+    const out = readFileSync(f, "utf8");
+    expect(out.match(/CATALYST_EXECUTOR=/g)).toHaveLength(1);
+    expect(out).toBe("export CATALYST_EXECUTOR=sdk\n");
   });
 });
 

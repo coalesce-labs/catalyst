@@ -96,6 +96,9 @@ export function resolveScripts(env = process.env) {
     // CTL-1369 PR4: the class-aware doctor, run as the install's pre-state observation + post-install
     // verification (catalyst-doctor --profile install). Env-override seam for tests.
     doctor: env.CATALYST_INSTALL_DOCTOR_BIN || join(SCRIPTS_DIR, "catalyst-doctor"),
+    // CTL-1401: the exec-core launcher — used to restart exec-core after an additive `install --executor`
+    // changed the lever (a live daemon won't pick up a new CATALYST_EXECUTOR without a restart).
+    execCore: env.CATALYST_INSTALL_EXECCORE_BIN || join(SCRIPTS_DIR, "catalyst-execution-core"),
   };
 }
 
@@ -304,16 +307,25 @@ export function planPhases({ operation, nodeClass, scripts, opts = {} }) {
     ],
   });
 
-  const startDaemons = () => ({
-    phase: "start-daemons",
-    steps: [
+  const startDaemons = () => {
+    const steps = [
       worker
         ? { label: "start-stack", kind: "run", argv: [scripts.stack, "start", "--yes"] }
         : // developer/monitor: boot-drain so a mis-rostered node still admits 0 work. Best-effort
           // (CTL-1352 auto-boot-drain is unbuilt) — verify-node confirms it took.
           { label: "drain", kind: "run", argv: [scripts.catalyst, "drain"], optional: true },
-    ],
-  });
+    ];
+    // CTL-1401 (Codex P2): on an ADDITIVE worker install with --executor, `catalyst-stack start --yes`
+    // is idempotent and won't restart an already-live exec-core, so the daemon keeps the OLD executor
+    // until a manual restart — the install would report the lever set while new work runs on the old
+    // executor. Restart exec-core to apply it (no-op at runtime if the lever didn't actually change).
+    // A REINSTALL doesn't need this: its teardown already stopped exec-core, so start-stack brings up a
+    // fresh daemon that sources the new env.
+    if (worker && operation === "install" && opts.executor) {
+      steps.push({ label: "restart-execcore", kind: "restart-execcore", argv: [scripts.execCore, "restart"] });
+    }
+    return { phase: "start-daemons", steps };
+  };
 
   const healthcheck = () => ({
     phase: "healthcheck",
@@ -404,7 +416,9 @@ export function upsertEnvFile(file, key, value) {
   } catch {
     /* missing → create fresh */
   }
-  const re = new RegExp(`^(?:export\\s+)?${key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}=`);
+  // Match optional leading whitespace too: bash applies an INDENTED `  KEY=…` line when it sources
+  // the file, so an indented stale duplicate must also be replaced/dropped or it would win (Codex P2).
+  const re = new RegExp(`^\\s*(?:export\\s+)?${key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}=`);
   const lines = content.length ? content.split("\n") : [];
   // Drop a single trailing empty line (from a prior terminal newline) so we re-add exactly one.
   if (lines.length && lines[lines.length - 1] === "") lines.pop();
@@ -538,6 +552,13 @@ function defaultProbeDaemons(env = process.env) {
 // the honest verify-clean check: it also catches the updater agent (the ONLY daemon a developer/
 // monitor node runs) and any residual launchd plist. Deterministic on the plist files; the process
 // pgrep is best-effort. Honors CATALYST_LAUNCHAGENTS_DIR + CATALYST_ASSUME_NO_DAEMONS test seams.
+// RESIDUAL_AGENT_PATTERN — every catalyst stack PROCESS an uninstall's verify-clean must find if a
+// teardown left it running (the monitor + otel-forward are nohup children; the Alloy log-shipper is
+// deliberately left up by `stop`). CTL-1401 (Codex P2): includes `cloud-sync` now that every install
+// adopts it — a failed `launchctl bootout` can leave the writer running with no plist on disk.
+export const RESIDUAL_AGENT_PATTERN =
+  "broker/index.mjs|execution-core/(daemon|index|updater/updater|cloud-sync)\\.mjs|orch-monitor/server\\.ts|otel-forward/index\\.ts|alloy run .*log-shipper";
+
 function defaultProbeResidualAgents(env = process.env) {
   const laDir = env.CATALYST_LAUNCHAGENTS_DIR || join(homedir(), "Library", "LaunchAgents");
   try {
@@ -551,8 +572,7 @@ function defaultProbeResidualAgents(env = process.env) {
   // log-shipper (matched by its log-shipper config path, NOT any Alloy on the host) is deliberately
   // LEFT running by `catalyst-stack stop`/`uninstall-services` — so if a teardown didn't reap them,
   // an uninstall must not look clean.
-  const pattern = "broker/index.mjs|execution-core/(daemon|index|updater/updater)\\.mjs|orch-monitor/server\\.ts|otel-forward/index\\.ts|alloy run .*log-shipper";
-  const res = spawnSync("pgrep", ["-f", pattern], { encoding: "utf8" });
+  const res = spawnSync("pgrep", ["-f", RESIDUAL_AGENT_PATTERN], { encoding: "utf8" });
   if (res.error) return false; // can't probe processes; the plist check above already ran
   return res.status === 0;
 }
@@ -845,7 +865,7 @@ export async function runInstallLifecycle({ operation, nodeClass, opts = {} }, d
     pluginDirs: readDeepKey(preCfg, "catalyst.orchestration.pluginDirs") ?? null,
   };
 
-  const ctx = { bundlePath: null, healthOk: true, healthRc: null, cleanOk: true, teardownRan: false, doctorOk: true, doctorRc: null, doctorSummary: null, cloudSyncOk: true, envUndos: [] };
+  const ctx = { bundlePath: null, healthOk: true, healthRc: null, cleanOk: true, teardownRan: false, doctorOk: true, doctorRc: null, doctorSummary: null, cloudSyncOk: true, envUndos: [], executorChanged: false };
 
   const runOneStep = async (step) => {
     switch (step.kind) {
@@ -904,6 +924,12 @@ export async function runInstallLifecycle({ operation, nodeClass, opts = {} }, d
           /* file did not exist → undo = delete */
         }
         ctx.envUndos.push({ file: step.file, priorContent });
+        // CTL-1401 (Codex P2): note whether the executor lever actually CHANGED, so an additive install
+        // only restarts a live exec-core when needed (an unchanged re-run must not interrupt work).
+        if (step.key === "CATALYST_EXECUTOR") {
+          const m = (priorContent || "").match(/^\s*(?:export\s+)?CATALYST_EXECUTOR=["']?([^"'\s]+)/m);
+          ctx.executorChanged = (m ? m[1] : null) !== step.value;
+        }
         upsertEnvFile(step.file, step.key, step.value);
         log(`catalyst-install: set ${step.key}=${step.value} in ${step.file}`);
         return;
@@ -955,6 +981,23 @@ export async function runInstallLifecycle({ operation, nodeClass, opts = {} }, d
                 ? "PASS (node-class + agent set + pull-owner correct for class)"
                 : `FAIL [${(summary.fails || []).join(", ") || `rc ${summary.rc}`}] — node provisioned but not class-correct`),
         );
+        return;
+      }
+      case "restart-execcore": {
+        // CTL-1401 (Codex P2): apply an executor change to a LIVE exec-core. Only restarts when the
+        // setenv actually changed the lever (an unchanged re-run must not interrupt running work).
+        // NON-fatal: the lever is already persisted in execution-core.env, so a failed restart just
+        // means the change takes effect on the next start — surface it loudly, never roll back on it.
+        if (!ctx.executorChanged) {
+          log(`catalyst-install: executor unchanged — exec-core restart not needed`);
+          return;
+        }
+        const r = runStep({ argv: step.argv, env: stepEnv });
+        if (r.code !== 0) {
+          log(`catalyst-install: WARN — exec-core restart failed (rc ${r.code}); the new executor is persisted and applies on the next start — restart manually to apply now: ${r.stderr.trim()}`);
+        } else {
+          log(`catalyst-install: restarted exec-core to apply the executor change`);
+        }
         return;
       }
       case "verify-clean": {
