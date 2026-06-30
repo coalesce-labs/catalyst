@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.2.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-pm-ops-v2.1.1...catalyst-pm-ops-v2.2.0) (2026-06-30)
+
+
+### Features
+
+* **dev:** CTL-1383 — uniform -h/--help + bare-usage on user-facing catalyst-* CLIs ([#2459](https://github.com/coalesce-labs/catalyst/issues/2459)) ([0b137a8](https://github.com/coalesce-labs/catalyst/commit/0b137a8bc35a7aea467f7fb79044f62e07f4b727))
+
 ## [2.1.1](https://github.com/coalesce-labs/catalyst/compare/catalyst-pm-ops-v2.1.0...catalyst-pm-ops-v2.1.1) (2026-06-09)
 
 
