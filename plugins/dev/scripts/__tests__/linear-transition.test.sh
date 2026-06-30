@@ -75,10 +75,10 @@ build_config() {
 EOF
 }
 
-# Install a fake `linearis` on PATH that records calls and returns a canned
-# issue state. Controlled by env vars:
-#   FAKE_LINEARIS_STATE      - state to report for `issues read`
-#   FAKE_LINEARIS_LOG        - path where commands get appended
+# Install a fake `linearis` (writes) + `catalyst-linear` (reads) on PATH that
+# record calls and return a canned issue state. Controlled by env vars:
+#   FAKE_LINEARIS_STATE       - state to report for `catalyst-linear read`
+#   FAKE_LINEARIS_LOG         - path where commands get appended
 #   FAKE_LINEARIS_UPDATE_EXIT - exit code for `issues update` (default 0)
 install_fake_linearis() {
   local bin_dir="$1"
@@ -103,6 +103,23 @@ fi
 exit 0
 EOF
   chmod +x "${bin_dir}/linearis"
+
+  # CTL-1397: linear-transition.sh now reads current state through the replica
+  # wrapper (`catalyst-linear read`) for the idempotency check; writes still go
+  # through `linearis issues update`. This shim mirrors the linearis `read` arm.
+  cat > "${bin_dir}/catalyst-linear" <<'EOF'
+#!/usr/bin/env bash
+echo "catalyst-linear $*" >> "${FAKE_LINEARIS_LOG:-/dev/null}"
+if [ "$1" = "read" ]; then
+  STATE="${FAKE_LINEARIS_STATE:-In Review}"
+  cat <<JSON
+{"identifier":"${2:-TST-1}","title":"Fake","state":{"name":"${STATE}"}}
+JSON
+  exit 0
+fi
+exit 0
+EOF
+  chmod +x "${bin_dir}/catalyst-linear"
 }
 
 # Install a fake `curl` that echoes a canned GraphQL response, so the real
@@ -192,8 +209,8 @@ run "idempotent: skips update when state matches" \
 run "idempotent: no update call recorded when already Done" \
   bash -c "! grep -q 'issues update' '$LOG4'"
 
-run "idempotent: read call IS recorded (check was performed)" \
-  expect_contains "$LOG4" "linearis issues read TST-4"
+run "idempotent: read call IS recorded (check was performed via replica)" \
+  expect_contains "$LOG4" "catalyst-linear read TST-4"
 
 # ─── Test 5: --force bypasses idempotency check ────────────────────────────
 WORK5="${SCRATCH}/t5"
