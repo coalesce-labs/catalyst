@@ -5445,6 +5445,64 @@ describe("schedulerTick — terminal-Done once-marker (CTL-597)", () => {
     // No marker on a thrown apply → retried next tick.
     expect(existsSync(join(orchDir, "workers", "CTL-23", ".terminal-done.applied"))).toBe(false);
   });
+
+  // CTL-1157: the terminal sweep writes Done DIRECTLY (it does not go through the
+  // gated `declare` CLI), so it runs the SAME universal open-PR gate. A still-open
+  // PR for the ticket (e.g. a second non-standard-branch PR) REFUSES the Done write
+  // and leaves NO once-marker → it self-heals on a later tick once the PR is resolved.
+  test("CTL-1157: an OPEN PR refuses the terminal-sweep Done write and leaves no marker (retries next tick)", () => {
+    writeSignal("CTL-24", "teardown", "done");
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    const dones = [];
+    const writeStatus = { ...terminalNoWrites(), applyTerminalDone: (a) => dones.push(a) };
+    const checkOpenPrs = () => ({ ok: false, prs: [{ number: 321, state: "OPEN" }] });
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: fakeDispatch(),
+      writeStatus,
+      checkOpenPrs,
+    });
+    expect(dones).toHaveLength(0); // gate refused → no Done write
+    expect(existsSync(join(orchDir, "workers", "CTL-24", ".terminal-done.applied"))).toBe(false);
+  });
+
+  test("CTL-1157: an UNVERIFIABLE gate (fail-closed) also refuses the terminal-sweep Done write", () => {
+    writeSignal("CTL-25", "teardown", "done");
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    const dones = [];
+    const writeStatus = { ...terminalNoWrites(), applyTerminalDone: (a) => dones.push(a) };
+    const checkOpenPrs = () => ({ ok: false, reason: "`gh` not authenticated", prs: [] });
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: fakeDispatch(),
+      writeStatus,
+      checkOpenPrs,
+    });
+    expect(dones).toHaveLength(0);
+    expect(existsSync(join(orchDir, "workers", "CTL-25", ".terminal-done.applied"))).toBe(false);
+  });
+
+  test("CTL-1157: no open PR (gate ok) ALLOWS the terminal-sweep Done write + stamps the marker", () => {
+    writeSignal("CTL-26", "teardown", "done");
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    const dones = [];
+    const writeStatus = {
+      ...terminalNoWrites(),
+      applyTerminalDone: (a) => {
+        dones.push(a);
+        return { applied: true };
+      },
+    };
+    const checkOpenPrs = () => ({ ok: true, prs: [] });
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: fakeDispatch(),
+      writeStatus,
+      checkOpenPrs,
+    });
+    expect(dones).toHaveLength(1); // legitimate completion preserved
+    expect(existsSync(join(orchDir, "workers", "CTL-26", ".terminal-done.applied"))).toBe(true);
+  });
 });
 
 // ─── CTL-653: end-to-end verify⇄remediate cycle through schedulerTick ───

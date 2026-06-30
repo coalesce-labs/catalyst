@@ -15,7 +15,6 @@ import { readFileSync, existsSync, appendFileSync, mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
-import { spawnSync } from "node:child_process";
 import { reconcileDeclarations, orderedStatesForMap } from "./linear-reconcile.mjs";
 import { buildCatalystResource } from "./lib/catalyst-resource.mjs";
 import {
@@ -24,6 +23,11 @@ import {
   markReconciled,
   completionsDir,
 } from "./linear-reconcile-store.mjs";
+// CTL-1157: the open-PR Done gate lives in its own module so the execution-core
+// terminal sweep (scheduler.mjs terminalDoneOnce) runs the IDENTICAL check. Kept
+// re-exported here for back-compat (tests import defaultCheckOpenPrs from the CLI).
+import { defaultCheckOpenPrs, defaultDeriveBranchName } from "./open-pr-gate.mjs";
+export { defaultCheckOpenPrs, defaultDeriveBranchName };
 
 const TICKET_RE = /^[A-Za-z][A-Za-z0-9_]*-\d+$/;
 
@@ -73,7 +77,7 @@ export function parseArgs(argv) {
         break; // optional: known Linear branchName for the open-PR head pass
       case "--require-prs-merged":
         a.requirePrsMerged = true;
-        break; // opt-in open-PR gate (always on for --by recovery-pass; see cmdDeclare)
+        break; // no-op opt-in: the open-PR gate is now UNIVERSAL for `--state done` (CTL-1157)
       case "--states-file":
         a.statesFile = next();
         break; // offline/test read seam
@@ -119,10 +123,14 @@ Options:
   --write           reconcile: actually write (default dry-run)
   --no-write        declare: persist + emit only, don't write Linear now
   --require-prs-merged
-                    declare: refuse the Done write (fail-closed, exit 2) if ANY
-                    unmerged PR for the ticket is still open. ALWAYS enforced when
-                    --by is 'recovery-pass' (the autonomous delegate) — H1/CTL-1157.
-  --branch <name>   declare: known Linear branchName for the open-PR head pass
+                    no-op (retained for back-compat): the open-PR gate is now
+                    UNIVERSAL — EVERY '--state done' declare (any --by: recovery-pass,
+                    pipeline/teardown, model, human) refuses the Done write
+                    (fail-closed, exit 2) if ANY unmerged PR for the ticket is still
+                    open. Merge/close the open PR first. (CTL-1157)
+  --branch <name>   declare: known Linear branchName for the open-PR head pass.
+                    Optional — when omitted the gate derives it from the local
+                    replica/cache (catalyst-linear source:replica, never linearis).
   --graphql         read current state via Linear GraphQL ($LINEAR_API_TOKEN)
                     for tickets absent from the local cache (unenrolled repos)
   --json            machine-readable output
@@ -237,74 +245,6 @@ function resolveConfig(args) {
   return { configPath, stateMap, teamKeys, terminalStates };
 }
 
-// ── open-PR gate (H1 / CTL-1157) ────────────────────────────────────────────────
-//
-// The autonomous recovery-pass delegate may move a ticket to Done, but ONLY after
-// every PR for that ticket is merged. A wrong Done write clears the needs-human
-// label and stops all scheduler attention, and is hard to undo — exactly the
-// false-positive that got the GitHub-PR→Done automation removed (one merged PR +
-// one still-open PR on a non-standard branch → falsely Done). This gate is the
-// deterministic CODE backstop for that scenario; it is NOT a prompt step the LLM
-// could forget. Authoritative source is GitHub (never the local cache), and it is
-// FAIL-CLOSED: an unverifiable PR set (gh missing/auth/network) refuses the write.
-//
-// Returns { ok:true, prs:[] } when no unmerged PR remains; { ok:false, prs:[…] }
-// when open PRs exist; { ok:false, reason } when the check itself could not run.
-export function defaultCheckOpenPrs(ticket, { branchName, cwd } = {}) {
-  const runGh = (ghArgs) => {
-    const r = spawnSync("gh", ghArgs, { encoding: "utf8", cwd: cwd || process.cwd() });
-    if (r.error || r.status !== 0) {
-      const detail = (r.stderr || r.error?.message || `exit ${r.status}`).toString().trim();
-      throw new Error(`\`gh ${ghArgs.join(" ")}\` failed: ${detail}`);
-    }
-    try {
-      return JSON.parse(r.stdout || "[]");
-    } catch {
-      throw new Error(`\`gh ${ghArgs.join(" ")}\` returned unparseable JSON`);
-    }
-  };
-  const fields = "number,state,isDraft,title";
-  const seen = new Map();
-  try {
-    // Primary check: any OPEN PR mentioning the ticket key (title/body/branch via
-    // gh search). `--state open` ⇒ every returned PR is unmerged-and-open.
-    for (const p of runGh([
-      "pr",
-      "list",
-      "--search",
-      ticket,
-      "--state",
-      "open",
-      "--json",
-      fields,
-      "--limit",
-      "100",
-    ]))
-      if (p && p.number != null) seen.set(p.number, p);
-    // Secondary net: open PRs on the ticket's known branch (catches a PR whose
-    // title omits the ticket key but whose branch is the canonical one).
-    if (branchName) {
-      for (const p of runGh([
-        "pr",
-        "list",
-        "--head",
-        branchName,
-        "--state",
-        "open",
-        "--json",
-        fields,
-        "--limit",
-        "100",
-      ]))
-        if (p && p.number != null) seen.set(p.number, p);
-    }
-  } catch (err) {
-    return { ok: false, reason: err?.message || String(err), prs: [] };
-  }
-  const prs = [...seen.values()];
-  return { ok: prs.length === 0, prs };
-}
-
 // ── commands ──────────────────────────────────────────────────────────────────
 
 async function cmdDeclare(args, deps = {}) {
@@ -314,16 +254,28 @@ async function cmdDeclare(args, deps = {}) {
     return 2;
   }
 
-  // H1 (CTL-1157): MANDATORY, non-bypassable open-PR gate for the autonomous
-  // recovery-pass delegate. Keyed on the DECLARER IDENTITY (`--by recovery-pass`)
-  // so it cannot be skipped by forgetting a flag; `--require-prs-merged` opts any
-  // other caller in. Runs BEFORE storeDeclare so a refusal persists NO durable
+  // CTL-1157 (UNIVERSAL gate): MANDATORY, non-bypassable open-PR gate for EVERY
+  // declaration that targets terminal Done — regardless of `--by`. The owner's #1
+  // rule is "NEVER mark a ticket Done while it still has an open/unmerged PR", so
+  // the gate is keyed on the TARGET STATE (`done`), not the declarer identity: the
+  // autonomous recovery-pass delegate, the teardown/pipeline completion-signal path
+  // (`--by pipeline`), the default `--by model`, and a human all run it. A wrong
+  // Done write clears the needs-human label and stops all scheduler attention, and
+  // is hard to undo — exactly the false-positive that got the GitHub-PR→Done
+  // automation removed (one merged PR + one still-open PR on a NON-standard branch →
+  // falsely Done). This is the deterministic CODE backstop, NOT a prompt step the
+  // LLM could forget. Runs BEFORE storeDeclare so a refusal persists NO durable
   // marker — otherwise a later `reconcile --write` drain could land the Done write
-  // unchecked. Teardown / CTL-1371 reconciler use other `--by` values and are
-  // unaffected (byte-identical) unless they pass the flag.
-  const openPrGateRequired = args.by === "recovery-pass" || args.requirePrsMerged === true;
+  // unchecked (THAT is what makes the drain safe by construction). It is FAIL-CLOSED:
+  // an unverifiable PR set (gh missing/auth/network) refuses the write. A non-`done`
+  // target (e.g. `--state canceled` / a phase state) is NOT gated — only completion.
+  // `--require-prs-merged` is retained as a no-op opt-in for callers/tests.
+  const openPrGateRequired = args.state === "done";
   if (openPrGateRequired) {
     const checkOpenPrs = deps.checkOpenPrs || defaultCheckOpenPrs;
+    // branchName is ALWAYS resolved (CTL-1157): use --branch when passed, else the
+    // gate derives it from the local replica/cache (catalyst-linear source:replica,
+    // NEVER bare linearis) so a non-standard-branch PR is still caught.
     const gate = checkOpenPrs(ticket, { branchName: args.branch });
     if (!gate || !gate.ok) {
       const detail = gate?.reason

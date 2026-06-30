@@ -119,6 +119,11 @@ import { executeEscalations } from "./beliefs/escalate.mjs";
 // never per-tick / per-ticket — the gh subprocess only fires from inside prView
 // on the rare merged-zombie / drift path, not on construction.
 import { makePrView } from "./scan-adapters.mjs";
+// CTL-1157: the SAME deterministic open-PR Done gate the completion-declaration CLI
+// runs, so the terminal sweep's direct Done write (terminalDoneOnce) also refuses to
+// Done a ticket that still has an open/unmerged PR (e.g. a second non-standard-branch
+// PR). Permissive no-op default in schedulerTick; armed with this real impl by runTick.
+import { defaultCheckOpenPrs } from "./open-pr-gate.mjs";
 import {
   countBackgroundAgents,
   getAgentsCached,
@@ -2362,7 +2367,7 @@ function terminalDoneOnce(
   ticket,
   writeStatus,
   emitStateWrite,
-  { multiHost = false } = {}
+  { multiHost = false, checkOpenPrs } = {}
 ) {
   const marker = join(orchDir, "workers", ticket, ".terminal-done.applied");
   if (existsSync(marker)) return;
@@ -2372,6 +2377,34 @@ function terminalDoneOnce(
       "ctl-863: stale fence — suppressing terminalDoneOnce write (zombie guard)"
     );
     return;
+  }
+  // CTL-1157 (UNIVERSAL gate): the terminal sweep writes Done DIRECTLY (it does not
+  // go through the gated `declare` CLI), so it must run the IDENTICAL open-PR check
+  // here — otherwise a second still-open PR on a non-standard branch (the pipeline's
+  // own PR is merged by the time teardown completes) would be falsely Done'd. The gate
+  // is dep-injected: schedulerTick's permissive no-op default keeps bare unit ticks
+  // unchanged; runTick arms the real, FAIL-CLOSED defaultCheckOpenPrs in production.
+  // On a refusal (open PR OR an unverifiable gh) we skip the write and DON'T stamp the
+  // once-marker → the sweep re-checks next tick and self-heals once the PR is resolved.
+  if (typeof checkOpenPrs === "function") {
+    let gate;
+    try {
+      gate = checkOpenPrs(ticket, {});
+    } catch (err) {
+      gate = { ok: false, reason: err?.message || String(err), prs: [] };
+    }
+    if (!gate || !gate.ok) {
+      const detail = gate?.reason
+        ? `open-PR set unverifiable (${gate.reason})`
+        : `${gate?.prs?.length ?? 0} open PR(s): ${(gate?.prs ?? [])
+            .map((p) => `#${p.number}`)
+            .join(", ")}`;
+      log.warn(
+        { ticket, detail },
+        "ctl-1157: terminal-sweep Done write REFUSED — ticket still has an open/unmerged PR; retrying next tick"
+      );
+      return;
+    }
   }
   try {
     const res = writeStatus.applyTerminalDone({ ticket });
@@ -2995,6 +3028,14 @@ export function schedulerTick(
     // runningOpts.prAdapter → runTick, so both paths fire live. Injectable so
     // tests can exercise the pr-merged branch without shelling out to `gh`.
     prAdapter = undefined,
+    // CTL-1157: the open-PR Done gate for the terminal sweep's DIRECT Done write
+    // (terminalDoneOnce). The DEFAULT here is a deliberately PERMISSIVE no-op (always
+    // ok) so a bare unit tick never shells out to `gh`/`catalyst-linear` and keeps its
+    // existing terminal-Done behavior. PRODUCTION wires the real, FAIL-CLOSED
+    // defaultCheckOpenPrs via startScheduler → runningOpts.checkOpenPrs → runTick, so
+    // a ticket with an open/unmerged PR is never Done'd by the sweep. Injectable so the
+    // gate-refusal branch is testable without shelling out.
+    checkOpenPrs = () => ({ ok: true, prs: [] }),
     // CTL-671: phantom worker-dir validity sweep seams. classifyResolution is
     // the 3-valued Linear probe (exists|not-found|unknown); isBgJobAlive maps a
     // dead worker's bg_job_id to a live `claude agents` session. The DEFAULTS
@@ -5662,7 +5703,7 @@ export function schedulerTick(
       // CTL-863: thread multiHost so terminalDoneOnce's internal fence guard
       // suppresses a post-takeover zombie's terminal Done write on a multi-host
       // cluster (no-op single-host: multiHost=false → guard always passes).
-      terminalDoneOnce(orchDir, ticket, writeStatus, emitStateWrite, { multiHost });
+      terminalDoneOnce(orchDir, ticket, writeStatus, emitStateWrite, { multiHost, checkOpenPrs });
       // CTL-646: terminal Done unconditionally clears needs-human (belt + teardown path).
       // CTL-703: worktree teardown is now the `teardown` FSM phase (teardownWorktreeOnce
       // removed) — only the label clear remains inline here.
@@ -6265,6 +6306,11 @@ function runTick() {
       // A test may inject its own via startScheduler({ prAdapter }); production
       // gets the real makePrView-backed adapter.
       prAdapter: runningOpts.prAdapter,
+      // CTL-1157: arm the real, FAIL-CLOSED open-PR Done gate in production so the
+      // terminal sweep's direct Done write refuses a ticket with an open/unmerged PR.
+      // A test may inject its own via startScheduler({ checkOpenPrs }); a bare unit
+      // tick (no runningOpts override) gets schedulerTick's permissive no-op default.
+      checkOpenPrs: runningOpts.checkOpenPrs ?? defaultCheckOpenPrs,
       // CTL-671: phantom-sweep seams threaded from startScheduler. Undefined for
       // a direct startScheduler caller that did not opt in (unit tests) →
       // schedulerTick's SAFE no-op defaults apply, so a bare daemon tick never
@@ -6691,6 +6737,10 @@ export function startScheduler({
     }),
   },
   preflight = preflightWorkspaceLabels, // CTL-585
+  // CTL-1157: optional override for the terminal-sweep open-PR Done gate.
+  // Undefined → runTick arms the real defaultCheckOpenPrs (production); a test may
+  // inject its own to exercise the gate-refusal branch hermetically.
+  checkOpenPrs,
   // CTL-671: phantom-sweep seams. Undefined → schedulerTick's safe no-op
   // defaults (hermetic for unit tests that call startScheduler directly). The
   // real daemon (startDaemon) and the standalone main() pass the real impls.
@@ -6730,6 +6780,7 @@ export function startScheduler({
     fetchBatch, // CTL-755/784: optional admission-gate batch hydration seam
     appendPhaseAdvanceHeldEvent, // CTL-755: optional held-indicator emit seam
     prAdapter, // CTL-642/758: live PR-merged adapter (built once above), threaded per-tick
+    checkOpenPrs, // CTL-1157: optional terminal-sweep open-PR gate override (runTick arms the real one)
     classifyResolution, // CTL-671: optional phantom-sweep Linear-probe seam
     isBgJobAlive, // CTL-671: optional phantom-sweep bg-liveness seam
     botUserIds, // CTL-781: respect-assignment predicate membership set
