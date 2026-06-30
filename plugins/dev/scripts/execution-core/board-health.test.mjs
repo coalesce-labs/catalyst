@@ -350,7 +350,7 @@ describe("buildBoardContext", () => {
     const invs = { ...allGreen(), workerAge: inv(false, 1, true, ["CTL-OLD"]) };
     const ctx = buildBoardContext(board, invs);
 
-    expect(ctx.schema).toBe("recovery-board-context/v1");
+    expect(ctx.schema).toBe("recovery-board-context/v2");
     expect(ctx.slots).toEqual({ capacity: 4, inUse: 2, free: 2 });
     expect(ctx.eligibleQueue.depth).toBe(2);
     expect(ctx.eligibleQueue.topTickets).toEqual(["CTL-1", "CTL-2"]);
@@ -512,7 +512,7 @@ describe("boardHealthPass — mode branching + shadow safety", () => {
     // falls back to the top eligible ticket.
     expect(acted[0].anchor).toBe("CTL-1");
     // the delegate gets the WHOLE-board context, not a per-item brief.
-    expect(acted[0].boardContext.schema).toBe("recovery-board-context/v1");
+    expect(acted[0].boardContext.schema).toBe("recovery-board-context/v2");
     expect(acted[0].decision.gate.decision).toBe("proceed");
     // the act result is threaded back into the pass result (observability).
     expect(r.act).toEqual({ dispatched: true, attempts: 1 });

@@ -649,6 +649,27 @@ export function getAllTicketDescriptors({ includeRemoved = false } = {}) {
   return ensure().prepare(sql).all().map(rowToTicketDescriptor);
 }
 
+// getAllPrStatuses — CTL-1157: one batch read of the filter_state lifecycle
+// table for board-health's phantom-merged-PR / orphaned-open-PR invariants. A
+// PR's status walks a monotone lifecycle (open → merged → deploying → deployed/
+// failed), so for each pr_number the most-recently-updated row is the current
+// status. ORDER BY updated_at DESC + first-row-per-pr_number wins. Returns
+// Map<number,{status,updatedAt}> (frozen once at board-assemble time). Empty map
+// when filter_state has no rows → the new invariants stay observable:false
+// (shadow-safe by default).
+export function getAllPrStatuses() {
+  const rows = ensure()
+    .prepare(`SELECT pr_number, status, updated_at FROM filter_state ORDER BY updated_at DESC`)
+    .all();
+  const map = new Map();
+  for (const row of rows) {
+    if (row.pr_number != null && !map.has(row.pr_number)) {
+      map.set(row.pr_number, { status: row.status, updatedAt: row.updated_at });
+    }
+  }
+  return map;
+}
+
 // getTicketDescriptorByUuid — the UUID→identifier index lookup. Linear's
 // `remove` webhook payload carries only the entityId UUID; this resolves it to
 // the descriptor row populated by earlier create/update webhooks.
