@@ -2438,38 +2438,48 @@ function terminalDoneOnce(
     // success so the once-semantics stay testable without a real result.
     if (res === undefined || res?.applied) {
       writeFileSync(marker, "");
-      // CTL-1157 SLICE 3 (Done-moves panel): the Done write LANDED — emit the broad
-      // recovery.done-applied on EVERY terminal-sweep Done so OTEL charts the move
-      // and watches the open_prs_at_done>0 red-line. This pure-code path has no agent
-      // to reason about PRs, so prs_closed/prs_kept are 0; open_prs_at_done carries
-      // the enumerated count (the red-line). Best-effort — never aborts the tick.
-      try {
-        emitDoneApplied({
-          ticket,
-          openPrsAtDone: openPrs.length,
-          prsClosed: 0,
-          prsKept: 0,
-          recoveryMode: "enforce", // a real terminal-sweep write is always enforce
-          by: "terminal-sweep",
-        });
-      } catch {
-        /* observability must never break the sweep */
-      }
-      // CTL-1157 (ALARM-NOT-BLOCK): the Done write LANDED. Fire the loud alarm when
-      // the ticket still has ≥1 open PR OR the open-PR check was UNVERIFIABLE (a Done
-      // that landed without confirming the board was clean is the same silent-Done
-      // risk this alarm exists to surface). Best-effort; never throws, never aborts
-      // the tick. A clean, CONFIRMED Done (0 open PRs, verifiable) emits nothing.
-      if (openPrs.length >= 1 || unverifiable) {
+      // CTL-1157 GROUP B (Done-event accuracy): only emit on a REAL Done write. An
+      // idempotent terminal SKIP (Linear already Done) returns {applied:true,
+      // action:"skipped"} and performs NO actual write — so emitting done-applied
+      // here would corrupt OTEL's before/after Done-move counts, and the open-PR
+      // alarm could fire for an already-Done ticket carrying a stale open PR. The
+      // marker still lands above (once-semantics). A test-stub `undefined` result is
+      // treated as a real write so the emit/alarm stay unit-testable.
+      const realDoneWrite = res === undefined || res?.action !== "skipped";
+      if (realDoneWrite) {
+        // CTL-1157 SLICE 3 (Done-moves panel): the Done write LANDED — emit the broad
+        // recovery.done-applied on EVERY terminal-sweep Done so OTEL charts the move
+        // and watches the open_prs_at_done>0 red-line. This pure-code path has no agent
+        // to reason about PRs, so prs_closed/prs_kept are 0; open_prs_at_done carries
+        // the enumerated count (the red-line). Best-effort — never aborts the tick.
         try {
-          emitDoneWithOpenPr({ ticket, openPrs, by: "terminal-sweep", unverifiable });
+          emitDoneApplied({
+            ticket,
+            openPrsAtDone: openPrs.length,
+            prsClosed: 0,
+            prsKept: 0,
+            recoveryMode: "enforce", // a real terminal-sweep write is always enforce
+            by: "terminal-sweep",
+          });
         } catch {
           /* observability must never break the sweep */
         }
-        log.warn(
-          { ticket, open_prs_count: openPrs.length, unverifiable },
-          "ctl-1157: terminal-sweep wrote Done while an open PR still exists or the check was unverifiable — alarm emitted (recovery.done-applied-with-open-pr)"
-        );
+        // CTL-1157 (ALARM-NOT-BLOCK): the Done write LANDED. Fire the loud alarm when
+        // the ticket still has ≥1 open PR OR the open-PR check was UNVERIFIABLE (a Done
+        // that landed without confirming the board was clean is the same silent-Done
+        // risk this alarm exists to surface). Best-effort; never throws, never aborts
+        // the tick. A clean, CONFIRMED Done (0 open PRs, verifiable) emits nothing.
+        if (openPrs.length >= 1 || unverifiable) {
+          try {
+            emitDoneWithOpenPr({ ticket, openPrs, by: "terminal-sweep", unverifiable });
+          } catch {
+            /* observability must never break the sweep */
+          }
+          log.warn(
+            { ticket, open_prs_count: openPrs.length, unverifiable },
+            "ctl-1157: terminal-sweep wrote Done while an open PR still exists or the check was unverifiable — alarm emitted (recovery.done-applied-with-open-pr)"
+          );
+        }
       }
     }
   } catch (err) {

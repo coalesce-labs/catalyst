@@ -339,7 +339,18 @@ async function cmdDeclare(args, deps = {}) {
     // Only a real done transition (or a no-write declaration) emits a move; an
     // idempotent already-Done noop is not a "move".
     const realDone = wrote && wrote.kind === "done" && wrote.applied && wrote.writeAction !== "skipped";
-    if (args.noWrite || realDone) {
+    // CTL-1157 GROUP B (Done-event accuracy): distinguish a TRUE shadow/no-write
+    // declaration from a record-only marker. phase-teardown records durable
+    // completion with `declare --state done --by pipeline --no-write` AFTER it has
+    // ALREADY performed the real Linear Done (via linear-transition.sh) — that
+    // --no-write is a record-only marker, NOT a shadow. Emitting the
+    // recovery.would-done-applied SHADOW event for it would pollute shadow telemetry
+    // and undercount real Done moves. Suppress the shadow emit for the pipeline
+    // record-only marker; the genuine shadow path (any other actor's true no-write
+    // declaration) and a real applied Done are unaffected.
+    const pipelineRecordOnly =
+      args.noWrite && String(args.by).toLowerCase() === "pipeline";
+    if ((args.noWrite && !pipelineRecordOnly) || realDone) {
       try {
         emitDoneApplied({
           ticket,

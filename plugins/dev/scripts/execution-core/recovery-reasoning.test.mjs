@@ -783,7 +783,7 @@ describe("buildRecoveryEnvelope numeric/enum promotion (CTL-1291)", () => {
       mode: "enforce",
       queueSize: 12,
       processed: 3,
-      decisions: { fix_seam: 1, fix_bounded_llm: 1, escalate: 1 },
+      decisions: { fix_seam: 1, fix_bounded_llm: 1, escalate: 1, defer: 4 },
       actions: { fixed: 2, fixFailed: 0, escalated: 1, deferred: 0, errors: 0 },
       ledgerSkipped: ["CTL-1", "CTL-2"],
       terminalSkipped: ["CTL-3"],
@@ -795,6 +795,9 @@ describe("buildRecoveryEnvelope numeric/enum promotion (CTL-1291)", () => {
     expect(a["recovery.decisions.fix_seam"]).toBe(1);
     expect(a["recovery.decisions.fix_bounded_llm"]).toBe(1);
     expect(a["recovery.decisions.escalate"]).toBe(1);
+    // CTL-1157 GROUP B: the defer counter must be promoted so defer volume is
+    // queryable after otel-forward (else it's left only in body.payload.details).
+    expect(a["recovery.decisions.defer"]).toBe(4);
     expect(a["recovery.actions.fixed"]).toBe(2);
     expect(a["recovery.actions.fix_failed"]).toBe(0);
     expect(a["recovery.actions.escalated"]).toBe(1);

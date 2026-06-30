@@ -5567,6 +5567,60 @@ describe("schedulerTick — terminal-Done once-marker (CTL-597)", () => {
     expect(existsSync(join(orchDir, "workers", "CTL-26", ".terminal-done.applied"))).toBe(true);
     expect(alarms).toEqual([]); // clean Done is silent
   });
+
+  // CTL-1157 GROUP B (Done-event accuracy): an idempotent terminal SKIP (Linear
+  // already Done) returns {applied:true, action:"skipped"} and performs NO actual
+  // write. Emitting recovery.done-applied for it would corrupt OTEL's Done-move
+  // counts, and the open-PR alarm could fire for an already-Done ticket carrying a
+  // stale open PR. The marker still lands (once-semantics), but NEITHER emit fires.
+  test("CTL-1157: an idempotent SKIP (action:'skipped') stamps the marker but emits NO done-applied and NO alarm — even with a stale open PR", () => {
+    writeSignal("CTL-28", "teardown", "done");
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    const writeStatus = {
+      ...terminalNoWrites(),
+      // already-Done in Linear → no real write, just the idempotent skip outcome.
+      applyTerminalDone: () => ({ applied: true, action: "skipped" }),
+    };
+    // A stale open PR is present — would have alarmed on a REAL Done write.
+    const checkOpenPrs = () => ({ ok: false, prs: [{ number: 999, state: "OPEN" }] });
+    const doneApplied = [];
+    const alarms = [];
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: fakeDispatch(),
+      writeStatus,
+      checkOpenPrs,
+      emitDoneApplied: (ev) => doneApplied.push(ev),
+      emitDoneWithOpenPr: (ev) => alarms.push(ev),
+    });
+    // Once-semantics: the marker still lands on the confirming tick.
+    expect(existsSync(join(orchDir, "workers", "CTL-28", ".terminal-done.applied"))).toBe(true);
+    // But a SKIP is not a "move" — no done-applied, no open-PR alarm.
+    expect(doneApplied).toEqual([]);
+    expect(alarms).toEqual([]);
+  });
+
+  // CTL-1157 GROUP B: a REAL Done write (no action:"skipped") still emits the broad
+  // recovery.done-applied move (guards against the skipped-gate over-suppressing).
+  test("CTL-1157: a REAL terminal-sweep Done (applied, not skipped) DOES emit recovery.done-applied", () => {
+    writeSignal("CTL-29", "teardown", "done");
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    const writeStatus = {
+      ...terminalNoWrites(),
+      applyTerminalDone: () => ({ applied: true, action: "applied" }),
+    };
+    const doneApplied = [];
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: fakeDispatch(),
+      writeStatus,
+      checkOpenPrs: () => ({ ok: true, prs: [] }),
+      emitDoneApplied: (ev) => doneApplied.push(ev),
+    });
+    expect(doneApplied).toHaveLength(1);
+    expect(doneApplied[0].ticket).toBe("CTL-29");
+    expect(doneApplied[0].by).toBe("terminal-sweep");
+  });
 });
 
 // ─── CTL-653: end-to-end verify⇄remediate cycle through schedulerTick ───

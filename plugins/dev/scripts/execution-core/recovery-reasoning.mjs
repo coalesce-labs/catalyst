@@ -1038,6 +1038,7 @@ function promoteNumericAttrs(type, details) {
     num("recovery.decisions.fix_seam", details.decisions?.fix_seam);
     num("recovery.decisions.fix_bounded_llm", details.decisions?.fix_bounded_llm);
     num("recovery.decisions.escalate", details.decisions?.escalate);
+    num("recovery.decisions.defer", details.decisions?.defer);
     num("recovery.actions.fixed", details.actions?.fixed);
     num("recovery.actions.fix_failed", details.actions?.fixFailed);
     num("recovery.actions.escalated", details.actions?.escalated);

@@ -358,6 +358,25 @@ test("DECLARE done-applied: the agent's own Done carries its PR-2 tallies (by=re
   });
 });
 
+test("DECLARE done-applied: a pipeline record-only marker (--by pipeline --no-write) emits NO would-done shadow event", async () => {
+  // CTL-1157 GROUP B: phase-teardown records durable completion with
+  // `declare --state done --by pipeline --no-write` AFTER it has ALREADY performed
+  // the real Linear Done (via linear-transition.sh). That --no-write is a
+  // record-only marker, NOT a shadow — emitting recovery.would-done-applied here
+  // would pollute shadow telemetry and undercount real Done moves.
+  const dir = mkdtempSync(join(tmpdir(), "decl-"));
+  const moves = [];
+  const { code } = await runCli(
+    [
+      "declare", "CTL-9", "--by", "pipeline", "--state", "done", "--no-write",
+      "--decls-dir", dir,
+    ],
+    { emitDoneApplied: (f) => moves.push(f), checkOpenPrs: PASS }
+  );
+  expect(code).toBe(0);
+  expect(moves).toEqual([]); // record-only marker → no shadow would-done event
+});
+
 test("DECLARE done-applied: --no-emit suppresses the move event", async () => {
   const dir = mkdtempSync(join(tmpdir(), "decl-"));
   const moves = [];
