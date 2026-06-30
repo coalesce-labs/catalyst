@@ -224,6 +224,22 @@ loki.source.file "updater" {
 	tail_from_end = true
 }
 
+// ----- cloud-sync.log (pino JSON) --------------------------------------------
+// CTL-1395: the per-host catalyst-cloud-sync writer (the local Linear replica). Its
+// CTL-1280 `daemon heartbeat` line drives the uptime tile (same heartbeat-freshness
+// query as the other daemons), and its `cloud-sync: freshness` line carries the
+// catalyst.linear.replica.{staleness,rows,status,cursor} fields — queryable via `| json`,
+// feeding the logs->metrics connector (the OTL-40 reads-recovered signal). Runs on every
+// node class, so this stream covers dev nodes + the seed window the scheduler gauge misses.
+loki.source.file "cloud_sync" {
+	targets = [{
+		__path__     = coalesce(sys.env("CATALYST_CLOUD_SYNC_LOG"), "/root/catalyst/cloud-sync.log"),
+		service_name = "catalyst.cloud-sync",
+	}]
+	forward_to    = [loki.process.pino.receiver]
+	tail_from_end = true
+}
+
 // pino-JSON processing, shared by the structured daemon logs.
 //   * stage.json              — lift level/time/name out of the JSON line (drives
 //                               severity + service mapping + the record timestamp)

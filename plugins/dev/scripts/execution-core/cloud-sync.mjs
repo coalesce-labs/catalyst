@@ -27,9 +27,28 @@
 //   • start() throws / fatal     → exit 1  (launchd restarts with backoff; a stale
 //                                   self-lock auto-reclaims after ~15s)
 import { CatalystReplica } from "@catalyst-cloud/sdk/node";
-import { getHostName, getReplicaDbPath, resolveNodeCloudTokenEnv } from "./config.mjs";
+import { getHostName, getReplicaDbPath, resolveNodeCloudTokenEnv, HEARTBEAT_INTERVAL_MS } from "./config.mjs";
+import { logDaemonHeartbeat } from "../lib/daemon-heartbeat.mjs";
+import { freshnessFields, readReplicaCounts } from "./cloud-sync-telemetry.mjs";
+import { createRequire } from "node:module";
 
 const TAG = "[catalyst-cloud-sync]";
+
+// hbLogger — pino to stderr (the plist redirects StandardError → cloud-sync.log, which
+// Alloy ships under service_name=catalyst.cloud-sync). Mirrors updater.mjs's defensive
+// pattern: a missing pino degrades to a JSON-on-stderr shim, never crashes the daemon.
+function hbLogger() {
+  try {
+    const pino = createRequire(import.meta.url)("pino");
+    return pino({ name: "cloud-sync", level: process.env.LOG_LEVEL ?? "info" }, process.stderr);
+  } catch {
+    return {
+      info: (a, b) => {
+        try { process.stderr.write(`${TAG} ${typeof a === "string" ? a : JSON.stringify(a)} ${typeof b === "string" ? b : ""}\n`); } catch { /* best-effort */ }
+      },
+    };
+  }
+}
 const DEFAULT_BASE_URL = "https://api.catalyst-cloud.coalescelabs.ai/api/v1";
 const DEFAULT_ACCOUNT = "tenant-0";
 
@@ -90,13 +109,16 @@ const replica = new CatalystReplica({
 });
 
 let closing = false;
+let hbTimer = null;
 const shutdown = (sig) => {
   if (closing) return;
   closing = true;
+  if (hbTimer) clearInterval(hbTimer);
   console.log(`${TAG} ${sig} — closing (releasing writer lock)`);
   // close() is idempotent: stops the socket, releases the lock, closes the DB.
   void replica.close().finally(() => process.exit(0));
 };
+const hlog = hbLogger();
 process.on("SIGTERM", () => shutdown("SIGTERM"));
 process.on("SIGINT", () => shutdown("SIGINT"));
 
@@ -113,6 +135,26 @@ try {
   process.exit(1);
 }
 console.log(`${TAG} live — replica seeded + tailing the change feed (cursor=${replica.cursor})`);
+
+// CTL-1395: liveness + freshness telemetry. Every HEARTBEAT_INTERVAL_MS emit (a) the
+// CTL-1280 `daemon heartbeat` marker — feed-independent proof the writer is alive, → the
+// uptime tile (same Loki heartbeat-freshness query as the other daemons) — and (b) a
+// freshness line (staleness/rows/status/cursor). This runs on EVERY node class and from
+// the writer itself, so it closes the dev-node + seed-window blind spots the scheduler-only
+// CTL-1366 gauge misses, and is the continuous OTL-40 "reads recovered" signal. FAIL-OPEN:
+// a probe error (DB locked, mid-reconnect) must NEVER crash the writer — emit what we have.
+const emitTelemetry = () => {
+  try { logDaemonHeartbeat(hlog, "cloud-sync"); } catch { /* best-effort */ }
+  try {
+    const { rows, maxUpdatedMs } = readReplicaCounts(replica.sql);
+    hlog.info(
+      freshnessFields({ rows, maxUpdatedMs, status: replica.status, cursor: replica.cursor, hostName: getHostName() }),
+      "cloud-sync: freshness",
+    );
+  } catch { /* best-effort — telemetry must never crash the writer */ }
+};
+emitTelemetry();
+hbTimer = setInterval(emitTelemetry, HEARTBEAT_INTERVAL_MS);
 
 // Keep the process alive: start() has resolved but background sync continues until
 // close(). Without this the process would exit 0 and launchd would not restart it
