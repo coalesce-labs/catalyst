@@ -5446,43 +5446,68 @@ describe("schedulerTick — terminal-Done once-marker (CTL-597)", () => {
     expect(existsSync(join(orchDir, "workers", "CTL-23", ".terminal-done.applied"))).toBe(false);
   });
 
-  // CTL-1157: the terminal sweep writes Done DIRECTLY (it does not go through the
-  // gated `declare` CLI), so it runs the SAME universal open-PR gate. A still-open
-  // PR for the ticket (e.g. a second non-standard-branch PR) REFUSES the Done write
-  // and leaves NO once-marker → it self-heals on a later tick once the PR is resolved.
-  test("CTL-1157: an OPEN PR refuses the terminal-sweep Done write and leaves no marker (retries next tick)", () => {
+  // CTL-1157 (THE REVERSAL — ALARM-NOT-BLOCK): the terminal sweep writes Done
+  // DIRECTLY (no agent to reason). It no longer REFUSES on an open PR — it PROCEEDS
+  // (never wedges the board) and emits the loud recovery.done-applied-with-open-pr
+  // alarm so observability would justify adding a hard block later. A clean Done is
+  // silent.
+  test("CTL-1157: an OPEN PR does NOT block the terminal-sweep Done write — it PROCEEDS and fires the alarm", () => {
     writeSignal("CTL-24", "teardown", "done");
     writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
     const dones = [];
-    const writeStatus = { ...terminalNoWrites(), applyTerminalDone: (a) => dones.push(a) };
+    const writeStatus = {
+      ...terminalNoWrites(),
+      applyTerminalDone: (a) => {
+        dones.push(a);
+        return { applied: true };
+      },
+    };
     const checkOpenPrs = () => ({ ok: false, prs: [{ number: 321, state: "OPEN" }] });
+    const alarms = [];
     schedulerTick(orchDir, {
       readEligible: () => [],
       dispatch: fakeDispatch(),
       writeStatus,
       checkOpenPrs,
+      emitDoneWithOpenPr: (ev) => alarms.push(ev),
     });
-    expect(dones).toHaveLength(0); // gate refused → no Done write
-    expect(existsSync(join(orchDir, "workers", "CTL-24", ".terminal-done.applied"))).toBe(false);
+    expect(dones).toHaveLength(1); // proceeds — board never wedges
+    expect(existsSync(join(orchDir, "workers", "CTL-24", ".terminal-done.applied"))).toBe(true);
+    // The alarm fired with the ticket, the open PR list, and the backstop label.
+    expect(alarms).toHaveLength(1);
+    expect(alarms[0].ticket).toBe("CTL-24");
+    expect(alarms[0].by).toBe("terminal-sweep");
+    expect(alarms[0].openPrs.map((p) => p.number)).toEqual([321]);
   });
 
-  test("CTL-1157: an UNVERIFIABLE gate (fail-closed) also refuses the terminal-sweep Done write", () => {
+  test("CTL-1157: an UNVERIFIABLE enumeration (gh failure) still PROCEEDS and emits NO alarm (no longer fail-closed)", () => {
     writeSignal("CTL-25", "teardown", "done");
     writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
     const dones = [];
-    const writeStatus = { ...terminalNoWrites(), applyTerminalDone: (a) => dones.push(a) };
-    const checkOpenPrs = () => ({ ok: false, reason: "`gh` not authenticated", prs: [] });
+    const writeStatus = {
+      ...terminalNoWrites(),
+      applyTerminalDone: (a) => {
+        dones.push(a);
+        return { applied: true };
+      },
+    };
+    const checkOpenPrs = () => {
+      throw new Error("`gh` not authenticated");
+    };
+    const alarms = [];
     schedulerTick(orchDir, {
       readEligible: () => [],
       dispatch: fakeDispatch(),
       writeStatus,
       checkOpenPrs,
+      emitDoneWithOpenPr: (ev) => alarms.push(ev),
     });
-    expect(dones).toHaveLength(0);
-    expect(existsSync(join(orchDir, "workers", "CTL-25", ".terminal-done.applied"))).toBe(false);
+    expect(dones).toHaveLength(1); // proceeds — unverifiable is no longer fatal
+    expect(existsSync(join(orchDir, "workers", "CTL-25", ".terminal-done.applied"))).toBe(true);
+    expect(alarms).toEqual([]); // no known open PR ⇒ no alarm
   });
 
-  test("CTL-1157: no open PR (gate ok) ALLOWS the terminal-sweep Done write + stamps the marker", () => {
+  test("CTL-1157: no open PR (clean) writes Done, stamps the marker, and is SILENT (no alarm)", () => {
     writeSignal("CTL-26", "teardown", "done");
     writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
     const dones = [];
@@ -5494,14 +5519,17 @@ describe("schedulerTick — terminal-Done once-marker (CTL-597)", () => {
       },
     };
     const checkOpenPrs = () => ({ ok: true, prs: [] });
+    const alarms = [];
     schedulerTick(orchDir, {
       readEligible: () => [],
       dispatch: fakeDispatch(),
       writeStatus,
       checkOpenPrs,
+      emitDoneWithOpenPr: (ev) => alarms.push(ev),
     });
     expect(dones).toHaveLength(1); // legitimate completion preserved
     expect(existsSync(join(orchDir, "workers", "CTL-26", ".terminal-done.applied"))).toBe(true);
+    expect(alarms).toEqual([]); // clean Done is silent
   });
 });
 

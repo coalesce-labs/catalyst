@@ -155,161 +155,221 @@ test("reconcile over an already-Done ticket is in-sync (idempotent), exit 0", as
   expect(JSON.parse(out).summary.drift).toBe(0);
 });
 
-// ── UNIVERSAL open-PR gate (CTL-1157) ─────────────────────────────────────────
-// NO declarer may move a ticket to Done while any PR for it is still open. The gate
-// is keyed on the TARGET STATE (`--state done`), not the declarer — it fires for
-// recovery-pass, pipeline/teardown, the default model, and humans alike. It runs
-// BEFORE any durable marker is persisted, and is fail-closed.
+// ── CTL-1157 THE REVERSAL: agent judgment, not a mechanical block ─────────────
+// The Done-safety mechanism is AGENT JUDGMENT. The senior-engineer delegate
+// enumerates a ticket's open PRs and resolves them ITSELF (finish/merge the needed
+// ones, CLOSE the abandoned ones) BEFORE it declares Done — so `declare` is NOT
+// gated and NEVER refuses. The hard block is held in reserve. The two pure-code
+// backstops (terminal sweep + reconcile drain) PROCEED but emit the loud
+// `recovery.done-applied-with-open-pr` alarm when they land a Done with an open PR.
 
-test("parseArgs: --require-prs-merged / --branch", () => {
+test("parseArgs: --require-prs-merged / --branch (retained as no-op back-compat)", () => {
   const a = parseArgs(["declare", "CTL-9", "--require-prs-merged", "--branch", "ryan/ctl-9-x"]);
   expect(a.requirePrsMerged).toBe(true);
   expect(a.branch).toBe("ryan/ctl-9-x");
 });
 
-test("H1: recovery-pass Done is REFUSED when a non-standard-branch PR is still open (one merged + one open)", async () => {
+test("REVERSAL: declare PROCEEDS (exit 0, marker persists) even with an open PR — the agent already reasoned", async () => {
   const dir = mkdtempSync(join(tmpdir(), "decl-"));
-  // The false-Done scenario: #100 already merged, #101 still open on a weird branch.
-  // The gate sees the OPEN PR and must refuse — nothing written, nothing persisted.
-  const calls = [];
-  const checkOpenPrs = (ticket, opts) => {
-    calls.push({ ticket, opts });
-    return { ok: false, prs: [{ number: 101, state: "OPEN", isDraft: false, title: "wip" }] };
-  };
-  const { code, err } = await runCli(
-    ["declare", "CTL-9", "--by", "recovery-pass", "--no-emit", "--decls-dir", dir],
-    { checkOpenPrs }
-  );
-  expect(code).toBe(2);
-  expect(err).toContain("refusing Done declaration");
-  expect(err).toContain("#101");
-  expect(calls).toHaveLength(1);
-  expect(calls[0].ticket).toBe("CTL-9");
-  // Fail-closed: NO durable declaration marker is left behind for the drain to land.
-  expect(listDeclarations({ dir, pendingOnly: true })).toEqual([]);
-});
-
-test("H1: recovery-pass Done is ALLOWED when the ticket's only PR is merged (no open PRs)", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "decl-"));
-  let called = 0;
+  // An open PR is present, but the senior-engineer delegate decided (autonomously)
+  // to mark Done. The CLI must NOT refuse, and must NOT consult any PR gate.
+  let consulted = 0;
   const checkOpenPrs = () => {
-    called++;
-    return { ok: true, prs: [] };
+    consulted++;
+    return { ok: false, prs: [{ number: 101, state: "OPEN", isDraft: false, title: "wip" }] };
   };
   const { code, out } = await runCli(
     ["declare", "CTL-9", "--by", "recovery-pass", "--no-write", "--no-emit", "--decls-dir", dir],
     { checkOpenPrs }
   );
-  expect(code).toBe(0);
+  expect(code).toBe(0); // no handcuff — proceeds
   expect(out).toContain("declared (no write)");
-  expect(called).toBe(1);
-  // Gate cleared ⇒ the declaration proceeds and the durable marker persists.
-  const d = readDeclaration("CTL-9", dir);
-  expect(d.state).toBe("done");
+  expect(consulted).toBe(0); // the agent declare path does NOT consult the enumerator
+  // The durable marker persists (no fail-closed swallow).
+  expect(readDeclaration("CTL-9", dir).state).toBe("done");
   expect(listDeclarations({ dir, pendingOnly: true }).map((x) => x.ticket)).toEqual(["CTL-9"]);
 });
 
-test("H1: gate is FAIL-CLOSED — an unverifiable PR set (gh failure) refuses the write", async () => {
+test("REVERSAL: a clean Done declaration (no open PR) proceeds exactly as before", async () => {
   const dir = mkdtempSync(join(tmpdir(), "decl-"));
-  const checkOpenPrs = () => ({ ok: false, reason: "`gh pr list` failed: not authenticated", prs: [] });
-  const { code, err } = await runCli(
-    ["declare", "CTL-9", "--by", "recovery-pass", "--no-emit", "--decls-dir", dir],
-    { checkOpenPrs }
-  );
-  expect(code).toBe(2);
-  expect(err).toContain("could not be verified");
-  expect(listDeclarations({ dir, pendingOnly: true })).toEqual([]);
-});
-
-test("H1: the gate cannot be bypassed via --no-write (refusal happens before the marker is dropped)", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "decl-"));
-  const checkOpenPrs = () => ({ ok: false, prs: [{ number: 7, state: "OPEN", isDraft: false }] });
-  const { code } = await runCli(
-    ["declare", "CTL-9", "--by", "recovery-pass", "--no-write", "--no-emit", "--decls-dir", dir],
-    { checkOpenPrs }
-  );
-  expect(code).toBe(2);
-  // No poison marker ⇒ a later `reconcile --write` drain has nothing to land.
-  expect(listDeclarations({ dir, pendingOnly: true })).toEqual([]);
-});
-
-test("H1: --require-prs-merged opts a non-delegate declarer into the same gate", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "decl-"));
-  const checkOpenPrs = () => ({ ok: false, prs: [{ number: 9, state: "OPEN", isDraft: false }] });
-  const { code } = await runCli(
-    ["declare", "CTL-9", "--by", "model", "--require-prs-merged", "--no-emit", "--decls-dir", dir],
-    { checkOpenPrs }
-  );
-  expect(code).toBe(2);
-  expect(listDeclarations({ dir, pendingOnly: true })).toEqual([]);
-});
-
-test("UNIVERSAL (a): --by pipeline (teardown) with one merged + one open PR is REFUSED (exit 2, no marker)", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "decl-"));
-  // Teardown's completion-signal path is now gated too: #100 merged, #101 still open.
-  const calls = [];
-  const checkOpenPrs = (ticket, opts) => {
-    calls.push({ ticket, opts });
-    return { ok: false, prs: [{ number: 101, state: "OPEN", isDraft: false, title: "wip" }] };
-  };
-  const { code, err } = await runCli(
-    ["declare", "CTL-9", "--by", "pipeline", "--no-emit", "--decls-dir", dir],
-    { checkOpenPrs }
-  );
-  expect(code).toBe(2);
-  expect(err).toContain("refusing Done declaration");
-  expect(err).toContain("#101");
-  expect(calls).toHaveLength(1); // the universal gate WAS consulted for --by pipeline
-  // Fail-closed: nothing persisted ⇒ the reconcile drain has nothing to land.
-  expect(listDeclarations({ dir, pendingOnly: true })).toEqual([]);
-});
-
-test("UNIVERSAL (b): --by pipeline (teardown) with only a MERGED PR is ALLOWED — legitimate completion preserved", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "decl-"));
-  let called = 0;
-  const checkOpenPrs = () => {
-    called++;
-    return { ok: true, prs: [] }; // only-merged ⇒ no open PR
-  };
   const { code, out } = await runCli(
     ["declare", "CTL-9", "--by", "pipeline", "--no-write", "--no-emit", "--decls-dir", dir],
-    { checkOpenPrs }
+    { checkOpenPrs: PASS }
   );
   expect(code).toBe(0);
   expect(out).toContain("declared (no write)");
-  expect(called).toBe(1);
   expect(readDeclaration("CTL-9", dir).state).toBe("done");
 });
 
-test("UNIVERSAL (c): the default --by model with an open PR is REFUSED", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "decl-"));
-  const checkOpenPrs = () => ({ ok: false, prs: [{ number: 42, state: "OPEN", isDraft: false }] });
-  // No --by ⇒ defaults to model; the gate still fires on --state done.
-  const { code, err } = await runCli(
-    ["declare", "CTL-9", "--no-emit", "--decls-dir", dir],
-    { checkOpenPrs }
-  );
-  expect(code).toBe(2);
-  expect(err).toContain("#42");
-  expect(listDeclarations({ dir, pendingOnly: true })).toEqual([]);
+// ── Reconcile drain backstop: ALARM-NOT-BLOCK ────────────────────────────────
+// The pure-code drain has no agent to reason. It PROCEEDS (always writes), but when
+// it lands a real Done transition for a ticket that still has ≥1 OPEN PR it fires
+// recovery.done-applied-with-open-pr. A clean Done emits nothing.
+
+// applyCorrectionDone — a fake Linear write that reports a real Done transition.
+const applyCorrectionDone = ({ ticket, target }) => ({
+  applied: true,
+  action: "transitioned",
+  from_state: "Implement",
+  to_state: target,
+  ticket,
 });
 
-test("UNIVERSAL: a NON-done target (--state canceled) is NOT gated", async () => {
+test("DRAIN: emits recovery.done-applied-with-open-pr when it writes Done with an open PR present", async () => {
   const dir = mkdtempSync(join(tmpdir(), "decl-"));
-  let called = 0;
-  const checkOpenPrs = () => {
-    called++;
-    return { ok: false, prs: [{ number: 7, state: "OPEN" }] };
-  };
-  const { code } = await runCli(
-    ["declare", "CTL-9", "--state", "canceled", "--no-write", "--no-emit", "--decls-dir", dir],
-    { checkOpenPrs }
+  const statesFile = join(dir, "states.json");
+  writeFileSync(statesFile, JSON.stringify({ "CTL-9": "Implement" })); // drifted ⇒ a real Done write
+  await runCli(["declare", "CTL-9", "--no-write", "--no-emit", "--decls-dir", dir], {
+    checkOpenPrs: PASS,
+  });
+
+  const alarms = [];
+  const { code, out } = await runCli(
+    [
+      "reconcile",
+      "--write",
+      "--decls-dir",
+      dir,
+      "--states-file",
+      statesFile,
+      "--config",
+      configFixture(),
+      "--json",
+    ],
+    {
+      applyCorrection: applyCorrectionDone,
+      checkOpenPrs: () => ({ ok: false, prs: [{ number: 101, state: "OPEN", isDraft: false }] }),
+      emitDoneWithOpenPr: (ev) => alarms.push(ev),
+    }
   );
   expect(code).toBe(0);
-  expect(called).toBe(0); // canceling is not a completion claim ⇒ gate never consulted
+  const parsed = JSON.parse(out);
+  expect(parsed.summary.corrected).toBe(1); // the drain PROCEEDED — Done was written
+  // The alarm fired with the ticket, the open PR list, and the backstop label.
+  expect(alarms).toHaveLength(1);
+  expect(alarms[0].ticket).toBe("CTL-9");
+  expect(alarms[0].by).toBe("reconcile-drain");
+  expect(alarms[0].openPrs.map((p) => p.number)).toEqual([101]);
 });
 
-test("UNIVERSAL (d): a non-standard-branch open PR (title omits the ticket key) is caught via the branchName head pass", () => {
+test("DRAIN: a CLEAN Done (0 open PRs) emits NO alarm", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "decl-"));
+  const statesFile = join(dir, "states.json");
+  writeFileSync(statesFile, JSON.stringify({ "CTL-9": "Implement" }));
+  await runCli(["declare", "CTL-9", "--no-write", "--no-emit", "--decls-dir", dir], {
+    checkOpenPrs: PASS,
+  });
+
+  const alarms = [];
+  const { code } = await runCli(
+    [
+      "reconcile",
+      "--write",
+      "--decls-dir",
+      dir,
+      "--states-file",
+      statesFile,
+      "--config",
+      configFixture(),
+      "--json",
+    ],
+    {
+      applyCorrection: applyCorrectionDone,
+      checkOpenPrs: () => ({ ok: true, prs: [] }), // clean
+      emitDoneWithOpenPr: (ev) => alarms.push(ev),
+    }
+  );
+  expect(code).toBe(0);
+  expect(alarms).toEqual([]); // clean Done is silent
+});
+
+test("DRAIN: an idempotent already-Done write (writeAction=skipped) emits NO alarm", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "decl-"));
+  const statesFile = join(dir, "states.json");
+  // Current state is already past target in a way that yields an applied:skipped write.
+  writeFileSync(statesFile, JSON.stringify({ "CTL-9": "Implement" }));
+  await runCli(["declare", "CTL-9", "--no-write", "--no-emit", "--decls-dir", dir], {
+    checkOpenPrs: PASS,
+  });
+  const alarms = [];
+  const applyCorrectionNoop = ({ ticket, target }) => ({
+    applied: true,
+    action: "skipped", // idempotent: already Done before this drain
+    to_state: target,
+    ticket,
+  });
+  await runCli(
+    [
+      "reconcile",
+      "--write",
+      "--decls-dir",
+      dir,
+      "--states-file",
+      statesFile,
+      "--config",
+      configFixture(),
+      "--json",
+    ],
+    {
+      applyCorrection: applyCorrectionNoop,
+      checkOpenPrs: () => ({ ok: false, prs: [{ number: 7, state: "OPEN" }] }),
+      emitDoneWithOpenPr: (ev) => alarms.push(ev),
+    }
+  );
+  expect(alarms).toEqual([]); // not a real transition ⇒ no alarm
+});
+
+test("DRAIN: a dry-run reconcile never alarms (no write landed)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "decl-"));
+  const statesFile = join(dir, "states.json");
+  writeFileSync(statesFile, JSON.stringify({ "CTL-9": "Implement" }));
+  await runCli(["declare", "CTL-9", "--no-write", "--no-emit", "--decls-dir", dir], {
+    checkOpenPrs: PASS,
+  });
+  const alarms = [];
+  await runCli(
+    ["reconcile", "--decls-dir", dir, "--states-file", statesFile, "--config", configFixture(), "--json"],
+    {
+      checkOpenPrs: () => ({ ok: false, prs: [{ number: 9, state: "OPEN" }] }),
+      emitDoneWithOpenPr: (ev) => alarms.push(ev),
+    }
+  );
+  expect(alarms).toEqual([]); // dry-run wrote nothing
+});
+
+test("UNIVERSAL: a NON-done target (--state canceled) is never alarmed by the drain", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "decl-"));
+  const statesFile = join(dir, "states.json");
+  writeFileSync(statesFile, JSON.stringify({ "CTL-9": "Implement" }));
+  await runCli(
+    ["declare", "CTL-9", "--state", "canceled", "--no-write", "--no-emit", "--decls-dir", dir],
+    { checkOpenPrs: PASS }
+  );
+  const alarms = [];
+  await runCli(
+    [
+      "reconcile",
+      "--write",
+      "--decls-dir",
+      dir,
+      "--states-file",
+      statesFile,
+      "--config",
+      configFixture(),
+      "--json",
+    ],
+    {
+      applyCorrection: applyCorrectionDone,
+      checkOpenPrs: () => ({ ok: false, prs: [{ number: 7, state: "OPEN" }] }),
+      emitDoneWithOpenPr: (ev) => alarms.push(ev),
+    }
+  );
+  expect(alarms).toEqual([]); // kind!=="done" ⇒ never alarmed
+});
+
+// ── Enumerator (open-pr-gate): FACTS, three discovery passes ──────────────────
+
+test("ENUMERATOR: a non-standard-branch open PR (title omits the ticket key) is caught via the branchName head pass", () => {
   // The ticket-key SEARCH pass returns nothing (the PR title/body never mention
   // CTL-9), but the HEAD pass on the derived branchName finds the open PR. Inject
   // both gh + branch-derivation seams so the union logic is exercised hermetically.
@@ -321,7 +381,11 @@ test("UNIVERSAL (d): a non-standard-branch open PR (title omits the ticket key) 
     return [];
   };
   const deriveBranchName = () => "ryan/some-unconventional-branch";
-  const r = defaultCheckOpenPrs("CTL-9", { runGh, deriveBranchName });
+  const r = defaultCheckOpenPrs("CTL-9", {
+    runGh,
+    deriveBranchName,
+    deriveAttachmentPrNumbers: () => [],
+  });
   expect(r.ok).toBe(false);
   expect(r.prs.map((p) => p.number)).toEqual([555]);
   expect(r.branchName).toBe("ryan/some-unconventional-branch");
@@ -329,41 +393,53 @@ test("UNIVERSAL (d): a non-standard-branch open PR (title omits the ticket key) 
   expect(calls.some((a) => a.includes("--head") && a.includes("ryan/some-unconventional-branch"))).toBe(true);
 });
 
-test("UNIVERSAL (e): the reconcile drain cannot land a Done while a PR is open (no poison marker to drain)", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "decl-"));
-  const checkOpenPrs = () => ({ ok: false, prs: [{ number: 9, state: "OPEN", isDraft: false }] });
-  // Step 1: a Done declaration is REFUSED while the PR is open → no marker persists.
-  const refused = await runCli(
-    ["declare", "CTL-9", "--by", "pipeline", "--no-emit", "--decls-dir", dir],
-    { checkOpenPrs }
-  );
-  expect(refused.code).toBe(2);
-  expect(listDeclarations({ dir, pendingOnly: true })).toEqual([]);
-  // Step 2: `reconcile --write` over the same store has NOTHING pending → it cannot
-  // write Done. The drain is safe by construction: the ONLY producer of a Done
-  // marker is the gated declare, which refused above.
-  const statesFile = join(dir, "states.json");
-  writeFileSync(statesFile, JSON.stringify({ "CTL-9": "Implement" }));
-  const { code, out } = await runCli([
-    "reconcile",
-    "--write",
-    "--decls-dir",
-    dir,
-    "--states-file",
-    statesFile,
-    "--config",
-    configFixture(),
-    "--json",
-  ]);
-  expect(code).toBe(0);
-  const parsed = JSON.parse(out);
-  expect(parsed.summary.tickets).toBe(0); // nothing drained → no Done written
-  expect(parsed.rows).toEqual([]);
+test("ENUMERATOR (slice 4): a PR with no key + non-standard branch but a Linear attachment is caught via the attachment pass", () => {
+  // Search misses (no key in text); head pass misses (no branch). The PR is only
+  // discoverable through Linear's own attachment — gh pr view confirms it OPEN.
+  const viewed = [];
+  const runGh = (args) => {
+    if (args.includes("list") && args.includes("--search")) return [];
+    if (args.includes("list") && args.includes("--head")) return [];
+    if (args.includes("view")) {
+      viewed.push(args);
+      return { number: 808, state: "OPEN", isDraft: false, title: "attachment-linked" };
+    }
+    return [];
+  };
+  const r = defaultCheckOpenPrs("CTL-9", {
+    runGh,
+    deriveBranchName: () => null,
+    deriveAttachmentPrNumbers: () => [808],
+  });
+  expect(r.ok).toBe(false);
+  expect(r.prs.map((p) => p.number)).toEqual([808]);
+  expect(viewed.some((a) => a.includes("808"))).toBe(true);
 });
 
-test("defaultCheckOpenPrs is fail-closed when `gh` is unavailable", () => {
-  // No gh binary on a clean PATH ⇒ spawnSync errors ⇒ the gate refuses (ok:false).
-  // deriveBranchName is stubbed null so the test stays hermetic (no catalyst-linear spawn).
-  const r = defaultCheckOpenPrs("CTL-9", { cwd: tmpdir(), deriveBranchName: () => null });
+test("ENUMERATOR (slice 4): a MERGED attachment PR does not count (gh pr view reports non-OPEN)", () => {
+  const runGh = (args) => {
+    if (args.includes("list")) return [];
+    if (args.includes("view")) return { number: 808, state: "MERGED", isDraft: false };
+    return [];
+  };
+  const r = defaultCheckOpenPrs("CTL-9", {
+    runGh,
+    deriveBranchName: () => null,
+    deriveAttachmentPrNumbers: () => [808],
+  });
+  expect(r.ok).toBe(true); // merged attachment ⇒ no open PR
+  expect(r.prs).toEqual([]);
+});
+
+test("ENUMERATOR: reports unverifiable (ok:false, reason) when `gh` list is unavailable", () => {
+  // No gh binary on a clean PATH ⇒ spawnSync errors ⇒ the list pass throws ⇒ the
+  // enumeration is unverifiable. (Callers no longer refuse on this — they proceed.)
+  // deriveBranchName/attachment stubbed so the test stays hermetic (no spawn).
+  const r = defaultCheckOpenPrs("CTL-9", {
+    cwd: tmpdir(),
+    deriveBranchName: () => null,
+    deriveAttachmentPrNumbers: () => [],
+  });
   expect(r.ok).toBe(false);
+  expect(r.reason).toBeTruthy();
 });

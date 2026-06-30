@@ -23,10 +23,16 @@ import {
   markReconciled,
   completionsDir,
 } from "./linear-reconcile-store.mjs";
-// CTL-1157: the open-PR Done gate lives in its own module so the execution-core
-// terminal sweep (scheduler.mjs terminalDoneOnce) runs the IDENTICAL check. Kept
-// re-exported here for back-compat (tests import defaultCheckOpenPrs from the CLI).
+// CTL-1157: the open-PR ENUMERATOR lives in its own module (open-pr-gate.mjs). It
+// is a FACTS source, NOT a refuse-gate (see THE REVERSAL there). The agent `declare`
+// path does NOT consult it — the senior-engineer delegate already enumerated and
+// reasoned about the ticket's open PRs (finishing/merging the needed ones, closing
+// the abandoned ones) BEFORE calling declare. The reconciler drain (cmdReconcile)
+// consults it only to fire the LOUD `recovery.done-applied-with-open-pr` alarm when
+// a pure-code Done write lands while an open PR still exists. Re-exported for
+// back-compat (tests import defaultCheckOpenPrs from the CLI).
 import { defaultCheckOpenPrs, defaultDeriveBranchName } from "./open-pr-gate.mjs";
+import { appendRecoveryDoneOpenPrEvent } from "./recovery-done-open-pr-event.mjs";
 export { defaultCheckOpenPrs, defaultDeriveBranchName };
 
 const TICKET_RE = /^[A-Za-z][A-Za-z0-9_]*-\d+$/;
@@ -123,14 +129,15 @@ Options:
   --write           reconcile: actually write (default dry-run)
   --no-write        declare: persist + emit only, don't write Linear now
   --require-prs-merged
-                    no-op (retained for back-compat): the open-PR gate is now
-                    UNIVERSAL — EVERY '--state done' declare (any --by: recovery-pass,
-                    pipeline/teardown, model, human) refuses the Done write
-                    (fail-closed, exit 2) if ANY unmerged PR for the ticket is still
-                    open. Merge/close the open PR first. (CTL-1157)
-  --branch <name>   declare: known Linear branchName for the open-PR head pass.
-                    Optional — when omitted the gate derives it from the local
-                    replica/cache (catalyst-linear source:replica, never linearis).
+                    no-op (retained for back-compat). CTL-1157 REVERSED the old
+                    fail-closed gate: declare no longer refuses a Done write when an
+                    open PR exists — the senior-engineer delegate enumerates and
+                    resolves the ticket's open PRs itself BEFORE declaring. The
+                    reconcile drain (pure code) instead emits the loud
+                    recovery.done-applied-with-open-pr event when it lands a Done
+                    while a PR is still open.
+  --branch <name>   no-op (retained for back-compat): the open-PR ENUMERATOR derives
+                    the branchName from the local replica/cache itself.
   --graphql         read current state via Linear GraphQL ($LINEAR_API_TOKEN)
                     for tickets absent from the local cache (unenrolled repos)
   --json            machine-readable output
@@ -254,44 +261,17 @@ async function cmdDeclare(args, deps = {}) {
     return 2;
   }
 
-  // CTL-1157 (UNIVERSAL gate): MANDATORY, non-bypassable open-PR gate for EVERY
-  // declaration that targets terminal Done — regardless of `--by`. The owner's #1
-  // rule is "NEVER mark a ticket Done while it still has an open/unmerged PR", so
-  // the gate is keyed on the TARGET STATE (`done`), not the declarer identity: the
-  // autonomous recovery-pass delegate, the teardown/pipeline completion-signal path
-  // (`--by pipeline`), the default `--by model`, and a human all run it. A wrong
-  // Done write clears the needs-human label and stops all scheduler attention, and
-  // is hard to undo — exactly the false-positive that got the GitHub-PR→Done
-  // automation removed (one merged PR + one still-open PR on a NON-standard branch →
-  // falsely Done). This is the deterministic CODE backstop, NOT a prompt step the
-  // LLM could forget. Runs BEFORE storeDeclare so a refusal persists NO durable
-  // marker — otherwise a later `reconcile --write` drain could land the Done write
-  // unchecked (THAT is what makes the drain safe by construction). It is FAIL-CLOSED:
-  // an unverifiable PR set (gh missing/auth/network) refuses the write. A non-`done`
-  // target (e.g. `--state canceled` / a phase state) is NOT gated — only completion.
-  // `--require-prs-merged` is retained as a no-op opt-in for callers/tests.
-  const openPrGateRequired = args.state === "done";
-  if (openPrGateRequired) {
-    const checkOpenPrs = deps.checkOpenPrs || defaultCheckOpenPrs;
-    // branchName is ALWAYS resolved (CTL-1157): use --branch when passed, else the
-    // gate derives it from the local replica/cache (catalyst-linear source:replica,
-    // NEVER bare linearis) so a non-standard-branch PR is still caught.
-    const gate = checkOpenPrs(ticket, { branchName: args.branch });
-    if (!gate || !gate.ok) {
-      const detail = gate?.reason
-        ? `open-PR set could not be verified (${gate.reason})`
-        : `${gate?.prs?.length ?? 0} unmerged PR(s) still open (${(gate?.prs ?? [])
-            .map((p) => `#${p.number}`)
-            .join(", ")})`;
-      process.stderr.write(
-        `error: ${ticket} refusing Done declaration — ${detail}; merge/close the open PR(s) first\n`
-      );
-      // Fail-closed: nothing persisted, nothing written. The delegate gates on this
-      // non-zero exit and escalates (Rubric Three) instead of advertising Done.
-      return 2;
-    }
-  }
-
+  // CTL-1157 (THE REVERSAL): the agent `declare` path is NOT gated. The
+  // Done-safety mechanism is AGENT JUDGMENT, not a mechanical fail-closed block.
+  // By the time the senior-engineer recovery-pass delegate calls `declare --state
+  // done` it has ALREADY enumerated this ticket's open PRs (open-pr-gate.mjs) and
+  // reasoned about each — finishing/merging the ones that are part of the solution,
+  // CLOSING the abandoned/superseded ones itself — then decided, autonomously, to
+  // mark Done. Handcuffing that decision with a refuse-gate (the prior behavior,
+  // now removed) would override a senior engineer's judgment and force needless
+  // human escalation. The hard block is held IN RESERVE; the `reconcile` drain
+  // backstop (cmdReconcile) carries the observability alarm that would justify
+  // adding it. `--require-prs-merged` / `--branch` are retained as no-op back-compat.
   const dir = args.declsDir || completionsDir();
   const decl = storeDeclare(
     { ticket, state: args.state, declaredBy: args.by, note: args.note },
@@ -337,7 +317,7 @@ async function cmdDeclare(args, deps = {}) {
   return 0;
 }
 
-async function cmdReconcile(args) {
+async function cmdReconcile(args, deps = {}) {
   const { configPath, stateMap, terminalStates } = resolveConfig(args);
   const dir = args.declsDir || completionsDir();
   const pending = listDeclarations({ dir, pendingOnly: true });
@@ -345,8 +325,14 @@ async function cmdReconcile(args) {
 
   let applyCorrection;
   if (args.write) {
-    const { applyTerminalDone, applyPhaseStatus } = await import("./linear-write.mjs");
-    applyCorrection = buildApplyCorrection(configPath, { applyTerminalDone, applyPhaseStatus });
+    // Test seam: deps.applyCorrection lets a test simulate the Linear write without
+    // shelling to linearis. Production passes none → the real linear-write primitive.
+    if (deps.applyCorrection) {
+      applyCorrection = deps.applyCorrection;
+    } else {
+      const { applyTerminalDone, applyPhaseStatus } = await import("./linear-write.mjs");
+      applyCorrection = buildApplyCorrection(configPath, { applyTerminalDone, applyPhaseStatus });
+    }
   }
 
   const { rows, summary } = await reconcileDeclarations({
@@ -363,6 +349,37 @@ async function cmdReconcile(args) {
   for (const r of rows) {
     const satisfied = r.decision === "in-sync" || (r.decision === "correct" && r.applied);
     if (satisfied) markReconciled(r.ticket, r.to_state ?? r.target ?? r.currentState, { dir });
+  }
+
+  // CTL-1157 (ALARM-NOT-BLOCK): the `reconcile` drain is a PURE-CODE backstop — no
+  // agent reasons here. Per THE REVERSAL it PROCEEDS (never wedges the board, never
+  // escalates), but when it just LANDED a real Done transition for a ticket that
+  // still has ≥1 OPEN PR, it emits the loud `recovery.done-applied-with-open-pr`
+  // event so we get the signal that would justify adding a hard block later. A clean
+  // Done (0 open PRs) emits nothing. Best-effort: enumeration/emit failure NEVER
+  // affects the drain's outcome. Only runs on a real write (`--write`).
+  if (args.write) {
+    const checkOpenPrs = deps.checkOpenPrs || defaultCheckOpenPrs;
+    const emit = deps.emitDoneWithOpenPr || appendRecoveryDoneOpenPrEvent;
+    for (const r of rows) {
+      // A real Done transition that actually changed state (not an idempotent
+      // already-Done noop, not a dry-run, not a failed/skip row).
+      if (r.kind !== "done" || !r.applied || r.writeAction === "skipped") continue;
+      let openPrs = [];
+      try {
+        const facts = checkOpenPrs(r.ticket, {});
+        if (facts && Array.isArray(facts.prs)) openPrs = facts.prs;
+      } catch {
+        openPrs = []; // unverifiable ⇒ no alarm (we no longer fail closed)
+      }
+      if (openPrs.length >= 1) {
+        try {
+          emit({ ticket: r.ticket, openPrs, by: "reconcile-drain" });
+        } catch {
+          /* observability must never break the drain */
+        }
+      }
+    }
   }
 
   const mode = args.write ? "write" : "dry-run";
@@ -427,7 +444,7 @@ export async function main(argv = process.argv.slice(2), deps = {}) {
   }
   const cmd = args._[0];
   if (cmd === "declare") return cmdDeclare(args, deps);
-  if (cmd === "reconcile") return cmdReconcile(args);
+  if (cmd === "reconcile") return cmdReconcile(args, deps);
   if (cmd === "status") return cmdStatus(args);
   // Back-compat alias: `--team`/`--repo`-style PR sweeps are GONE; guide the user.
   process.stderr.write(`error: unknown command '${cmd}'. Use declare | reconcile | status.\n`);
