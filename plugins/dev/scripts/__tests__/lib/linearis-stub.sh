@@ -86,6 +86,43 @@ esac
 EOF
 	fi
 	chmod +x "${bin_dir}/linearis"
+
+	# CTL-1397: scripts and phase-bodies now read Linear through `catalyst-linear`
+	# (replica-first), so the read path needs a `catalyst-linear` shim alongside
+	# the `linearis` one. `read|list|search` return the same fixture/`{}` the
+	# linearis `issues read` arm does; writes still go through the linearis shim.
+	if [ -n "$read_fixture" ]; then
+		cat >"${bin_dir}/catalyst-linear" <<EOF
+#!/usr/bin/env bash
+LOG="${log_file}"
+printf '%s\n' "catalyst-linear" "\$@" >> "\$LOG"
+case "\$1" in
+  read|list|search)
+    cat "${read_fixture}"
+    ;;
+  *)
+    printf 'catalyst-linear stub: unsupported subcommand: %s\n' "\$1" >&2
+    exit 2
+    ;;
+esac
+EOF
+	else
+		cat >"${bin_dir}/catalyst-linear" <<EOF
+#!/usr/bin/env bash
+LOG="${log_file}"
+printf '%s\n' "catalyst-linear" "\$@" >> "\$LOG"
+case "\$1" in
+  read|list|search)
+    echo '{}'
+    ;;
+  *)
+    printf 'catalyst-linear stub: unsupported subcommand: %s\n' "\$1" >&2
+    exit 2
+    ;;
+esac
+EOF
+	fi
+	chmod +x "${bin_dir}/catalyst-linear"
 }
 
 linearis_stub_install_failing() {

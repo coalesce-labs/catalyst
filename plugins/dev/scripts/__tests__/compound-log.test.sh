@@ -61,6 +61,20 @@ fi
 exit 0
 EOF
   chmod +x "${bin_dir}/linearis"
+
+  # CTL-1397: compound-log now reads the estimate via `catalyst-linear read`.
+  cat > "${bin_dir}/catalyst-linear" <<'EOF'
+#!/usr/bin/env bash
+if [ "$1" = "read" ]; then
+  if [ -n "${FAKE_LINEARIS_JSON:-}" ]; then
+    echo "$FAKE_LINEARIS_JSON"
+    exit 0
+  fi
+  exit 1
+fi
+exit 0
+EOF
+  chmod +x "${bin_dir}/catalyst-linear"
 }
 
 # Set up an isolated scratch project: thoughts root + fake-bin PATH prefix +
