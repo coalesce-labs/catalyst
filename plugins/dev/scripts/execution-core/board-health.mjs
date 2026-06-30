@@ -500,6 +500,10 @@ function checkPhantomMergedPr(b) {
     const prNum = prNumberOf(d);
     if (prNum == null) continue;
     const pr = map.get(prNum);
+    // CTL-1157 multi-repo: a PR number that collides across repos is `ambiguous` —
+    // we cannot tell WHICH repo's #N this ticket points at, so skip rather than
+    // borrow the wrong repo's `merged` status and manufacture a false phantom.
+    if (pr && pr.ambiguous) continue;
     if (pr && PR_MERGED_RE.test(String(pr.status))) flagged.push(id);
   }
   return invariant(
@@ -532,6 +536,9 @@ function checkOrphanedOpenPr(b, t) {
     const prNum = prNumberOf(d);
     if (prNum == null) continue;
     const pr = map.get(prNum);
+    // CTL-1157 multi-repo: an ambiguous (cross-repo collision) PR number can't be
+    // matched to this ticket's repo — skip it rather than read another repo's status.
+    if (pr && pr.ambiguous) continue;
     if (!pr || String(pr.status).toLowerCase() !== "open") continue;
     if (liveTickets.has(id)) continue; // a worker is on it → not orphaned
     const updatedMs = pr.updatedAt ? Date.parse(pr.updatedAt) : NaN;

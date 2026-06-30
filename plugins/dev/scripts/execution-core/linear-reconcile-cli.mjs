@@ -415,16 +415,25 @@ async function cmdReconcile(args, deps = {}) {
     const checkOpenPrs = deps.checkOpenPrs || defaultCheckOpenPrs;
     const emit = deps.emitDoneWithOpenPr || appendRecoveryDoneOpenPrEvent;
     const emitDoneApplied = deps.emitDoneApplied || appendRecoveryDoneAppliedEvent;
+    // CTL-1157 fix #2: run the gh enumeration in the TICKET's repository. The drain
+    // knows the project repoRoot from its --config (.catalyst/config.json lives at
+    // <repoRoot>/.catalyst/config.json), so pass it as the gh cwd — multi-repo /
+    // per-project installs must query the right repo, NEVER bare linearis and never
+    // the process cwd. When config is absent, defaultCheckOpenPrs falls back to its
+    // own registry-based repo derivation (and reports unverifiable if that fails).
+    const drainRepoRoot = existsSync(configPath) ? dirname(dirname(configPath)) : null;
     for (const r of rows) {
       // A real Done transition that actually changed state (not an idempotent
       // already-Done noop, not a dry-run, not a failed/skip row).
       if (r.kind !== "done" || !r.applied || r.writeAction === "skipped") continue;
       let openPrs = [];
+      let unverifiable = false;
       try {
-        const facts = checkOpenPrs(r.ticket, {});
+        const facts = checkOpenPrs(r.ticket, drainRepoRoot ? { cwd: drainRepoRoot } : {});
+        if (facts && facts.unverifiable) unverifiable = true;
         if (facts && Array.isArray(facts.prs)) openPrs = facts.prs;
       } catch {
-        openPrs = []; // unverifiable ⇒ no alarm (we no longer fail closed)
+        unverifiable = true; // could not confirm clean ⇒ surface (don't assume zero)
       }
       // CTL-1157 SLICE 3 (Done-moves panel): emit the broad recovery.done-applied on
       // EVERY drained Done (not just the open-PR subset). The drain is a pure-code
@@ -442,9 +451,13 @@ async function cmdReconcile(args, deps = {}) {
       } catch {
         /* observability must never break the drain */
       }
-      if (openPrs.length >= 1) {
+      // CTL-1157 (ALARM-NOT-BLOCK): alarm when ≥1 open PR remains OR the open-PR
+      // check was UNVERIFIABLE — a Done that landed without confirming the board was
+      // clean is the silent-Done risk this alarm surfaces. A clean, CONFIRMED Done is
+      // silent.
+      if (openPrs.length >= 1 || unverifiable) {
         try {
-          emit({ ticket: r.ticket, openPrs, by: "reconcile-drain" });
+          emit({ ticket: r.ticket, openPrs, by: "reconcile-drain", unverifiable });
         } catch {
           /* observability must never break the drain */
         }

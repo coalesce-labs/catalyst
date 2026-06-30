@@ -5480,7 +5480,11 @@ describe("schedulerTick — terminal-Done once-marker (CTL-597)", () => {
     expect(alarms[0].openPrs.map((p) => p.number)).toEqual([321]);
   });
 
-  test("CTL-1157: an UNVERIFIABLE enumeration (gh failure) still PROCEEDS and emits NO alarm (no longer fail-closed)", () => {
+  // CTL-1157 (Codex GROUP-A fix #1 — UNVERIFIABLE ≠ CLEAN): a thrown/unverifiable
+  // enumeration is NOT a clean list. Per alarm-not-block the sweep still PROCEEDS
+  // (never wedges), but it now SURFACES the unverifiable Done via the loud alarm
+  // (flagged unverifiable) rather than silently assuming zero open PRs.
+  test("CTL-1157: an UNVERIFIABLE enumeration (gh throw) PROCEEDS and FIRES the alarm (unverifiable, surfaced not silent)", () => {
     writeSignal("CTL-25", "teardown", "done");
     writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
     const dones = [];
@@ -5502,9 +5506,41 @@ describe("schedulerTick — terminal-Done once-marker (CTL-597)", () => {
       checkOpenPrs,
       emitDoneWithOpenPr: (ev) => alarms.push(ev),
     });
-    expect(dones).toHaveLength(1); // proceeds — unverifiable is no longer fatal
+    expect(dones).toHaveLength(1); // proceeds — alarm-not-block (never wedges)
     expect(existsSync(join(orchDir, "workers", "CTL-25", ".terminal-done.applied"))).toBe(true);
-    expect(alarms).toEqual([]); // no known open PR ⇒ no alarm
+    // unverifiable ⇒ could-not-confirm-clean ⇒ surface it (not silent).
+    expect(alarms).toHaveLength(1);
+    expect(alarms[0].ticket).toBe("CTL-25");
+    expect(alarms[0].by).toBe("terminal-sweep");
+    expect(alarms[0].unverifiable).toBe(true);
+    expect(alarms[0].openPrs).toEqual([]); // no KNOWN open PR, but still alarmed
+  });
+
+  // The structured {ok:false, unverifiable:true} return (no throw) — e.g. the
+  // attachment-view-failure path or an underivable repo — alarms the same way.
+  test("CTL-1157: a RETURNED unverifiable fact (no throw) also PROCEEDS and FIRES the alarm", () => {
+    writeSignal("CTL-27", "teardown", "done");
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    const dones = [];
+    const writeStatus = {
+      ...terminalNoWrites(),
+      applyTerminalDone: (a) => {
+        dones.push(a);
+        return { applied: true };
+      },
+    };
+    const checkOpenPrs = () => ({ ok: false, unverifiable: true, reason: "repo-underivable", prs: [] });
+    const alarms = [];
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: fakeDispatch(),
+      writeStatus,
+      checkOpenPrs,
+      emitDoneWithOpenPr: (ev) => alarms.push(ev),
+    });
+    expect(dones).toHaveLength(1);
+    expect(alarms).toHaveLength(1);
+    expect(alarms[0].unverifiable).toBe(true);
   });
 
   test("CTL-1157: no open PR (clean) writes Done, stamps the marker, and is SILENT (no alarm)", () => {

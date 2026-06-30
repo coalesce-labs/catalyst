@@ -23,6 +23,7 @@ import {
   upsertFilterStateOpen,
   setFilterStateMerged,
   getFilterStateByInterest,
+  getAllPrStatuses,
 } from "./broker-state.mjs";
 
 let tmpDir;
@@ -199,5 +200,35 @@ describe("filter_state (CTL-284 backward compat)", () => {
     expect(getFilterStateByInterest("coexist-1")).not.toBeNull();
     expect(getAgentBySession("coexist-agent")).not.toBeNull();
     expect(getTicketState("CTL-1")).not.toBeNull();
+  });
+});
+
+// ─── getAllPrStatuses — (repo, pr_number) keying / collision (CTL-1157) ───────
+
+describe("getAllPrStatuses — multi-repo PR-number collision (CTL-1157)", () => {
+  test("a cross-repo PR-number collision is marked ambiguous (no silent shadow)", () => {
+    // #42 exists in TWO GitHub repos: merged in org/x, still open in org/y. They
+    // are DIFFERENT PRs. Keying by pr_number alone would let org/x's `merged`
+    // shadow org/y's `open` (the false-phantom / hidden-orphan bug). Both repos
+    // sharing #42 ⇒ the entry is ambiguous.
+    upsertFilterStateOpen({ interestId: "x-42", prNumber: 42, repo: "org/x" });
+    setFilterStateMerged("x-42", "sha-x");
+    upsertFilterStateOpen({ interestId: "y-42", prNumber: 42, repo: "org/y" });
+    const map = getAllPrStatuses();
+    expect(map.get(42).ambiguous).toBe(true);
+  });
+
+  test("a SAME-repo repeated PR number is NOT ambiguous (older lifecycle state, not a collision)", () => {
+    upsertFilterStateOpen({ interestId: "z-7a", prNumber: 7, repo: "org/z" });
+    upsertFilterStateOpen({ interestId: "z-7b", prNumber: 7, repo: "org/z" });
+    const map = getAllPrStatuses();
+    expect(map.get(7).ambiguous).toBe(false);
+    expect(map.get(7).repo).toBe("org/z");
+  });
+
+  test("a non-colliding PR carries its repo + status and stays unambiguous", () => {
+    upsertFilterStateOpen({ interestId: "solo-9", prNumber: 9, repo: "org/solo" });
+    const map = getAllPrStatuses();
+    expect(map.get(9)).toMatchObject({ status: "open", repo: "org/solo", ambiguous: false });
   });
 });

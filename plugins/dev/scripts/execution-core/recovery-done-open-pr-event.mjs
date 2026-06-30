@@ -50,8 +50,19 @@ function normalizePrNumbers(openPrs = []) {
 // buildRecoveryDoneOpenPrEvent — canonical OTel envelope (string + "\n"). The
 // dimensions land in `attributes` so they forward to Loki as STRUCTURED METADATA
 // (per-line, not stream labels): open_prs_count [value], pr_numbers [value],
-// by [label], and event.label = ticket. severity WARN (loud).
-export function buildRecoveryDoneOpenPrEvent({ ticket, openPrs = [], by = "unknown" } = {}) {
+// by [label], unverifiable [label], and event.label = ticket. severity WARN (loud).
+//
+// CTL-1157: `unverifiable:true` carries the case where the open-PR enumeration
+// itself could not be completed (a `gh` failure, or the ticket's repo could not be
+// derived). UNVERIFIABLE ≠ CLEAN — a backstop that lands a Done on an unverified
+// check is exactly the silent-Done risk this alarm exists to surface, so the alarm
+// fires even when no OPEN PR number is known (`open_prs_count` may be 0).
+export function buildRecoveryDoneOpenPrEvent({
+  ticket,
+  openPrs = [],
+  by = "unknown",
+  unverifiable = false,
+} = {}) {
   const ts = new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
   const prNumbers = normalizePrNumbers(openPrs);
   return (
@@ -74,11 +85,19 @@ export function buildRecoveryDoneOpenPrEvent({ ticket, openPrs = [], by = "unkno
         // [value] dimensions:
         open_prs_count: prNumbers.length,
         pr_numbers: prNumbers.map((n) => `#${n}`).join(","),
-        // [label] dimension: WHICH pure-code backstop wrote the Done.
+        // [label] dimensions: WHICH pure-code backstop wrote the Done; whether the
+        // open-PR check was unverifiable (Done landed without confirming clean).
         by,
+        unverifiable: !!unverifiable,
       },
       body: {
-        payload: { ticket, by, open_prs_count: prNumbers.length, pr_numbers: prNumbers },
+        payload: {
+          ticket,
+          by,
+          open_prs_count: prNumbers.length,
+          pr_numbers: prNumbers,
+          unverifiable: !!unverifiable,
+        },
       },
     }) + "\n"
   );
@@ -88,10 +107,12 @@ export function buildRecoveryDoneOpenPrEvent({ ticket, openPrs = [], by = "unkno
 // (observability must NEVER abort a write or wedge the tick). The `append` seam
 // defaults to the real file write; inject a recorder in tests. Returns true on
 // success, false on any error. No-op (returns false, emits nothing) when there are
-// zero open PRs — a clean Done is silent.
+// zero open PRs AND the check was verifiable — a clean, confirmed Done is silent.
+// CTL-1157: an UNVERIFIABLE check still alarms even with zero known open PRs (the
+// Done landed without confirming the board was clean).
 export function appendRecoveryDoneOpenPrEvent({ append = defaultAppend, ...fields } = {}) {
   try {
-    if (normalizePrNumbers(fields.openPrs).length === 0) return false;
+    if (normalizePrNumbers(fields.openPrs).length === 0 && !fields.unverifiable) return false;
     append(buildRecoveryDoneOpenPrEvent(fields));
     return true;
   } catch {

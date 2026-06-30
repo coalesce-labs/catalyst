@@ -20,15 +20,23 @@
 // the local Catalyst-Cloud REPLICA/cache via `catalyst-linear read`
 // (source:replica) — NEVER bare `linearis` (rate-limited; stalls the fleet).
 //
-// Returns { ok:true,  prs:[] }            when no unmerged PR remains
-//         { ok:false, prs:[…] }           when ≥1 open PR exists
-//         { ok:false, reason, prs:[] }     when the GitHub check itself could not run.
-// `ok` is now ADVISORY ("are there zero open PRs?"), retained for back-compat with
+// Returns { ok:true,  prs:[] }                          when no unmerged PR remains
+//         { ok:false, prs:[…] }                         when ≥1 open PR exists
+//         { ok:false, unverifiable:true, reason, prs }  when the authoritative GitHub
+//           check could NOT be completed — a `gh` list/view failure, OR the ticket's
+//           repo could not be derived (so we refuse to run gh in the wrong repo).
+//           UNVERIFIABLE ≠ CLEAN: an unverifiable authoritative check is never a clean
+//           list. Callers/backstops MUST treat it as "could not confirm zero open PRs"
+//           — surface it / fire the alarm — and never assume an empty list. (`prs` may
+//           carry the PRs discovered before the failure; the load-bearing field is
+//           `unverifiable`.)
+// `ok` is ADVISORY ("are there zero open PRs?"), retained for back-compat with
 // callers/tests; it no longer implies any refusal.
 import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { getProjectConfig } from "./registry.mjs";
 
 // readTicketReplica — read a ticket's record from the local REPLICA/cache via
 // `catalyst-linear read <TICKET>` (replica-first; the CLI itself degrades to its
@@ -46,6 +54,33 @@ export function readTicketReplica(ticket, { cwd } = {}) {
     });
     if (r.status !== 0 || !r.stdout) return null;
     return JSON.parse(r.stdout);
+  } catch {
+    return null;
+  }
+}
+
+// teamOf — "CTL-123" → "CTL". The registry key that resolves a ticket to its
+// project repo. Null for anything not <prefix>-<n>. (Inlined here rather than
+// imported from dispatch.mjs to keep this enumerator off the daemon-heavy
+// dispatch import graph — it must stay loadable from the plain-node reconcile CLI.)
+const TEAM_RE = /^([A-Za-z][A-Za-z0-9_]*)-[0-9]+$/;
+function teamOf(ticket) {
+  const m = TEAM_RE.exec(ticket ?? "");
+  return m ? m[1] : null;
+}
+
+// defaultDeriveRepoRoot — resolve a ticket's project repoRoot from the
+// execution-core REGISTRY (the `.catalyst` project config: team → repoRoot),
+// NEVER bare linearis (rate-limited; stalls the fleet) and never the Linear API.
+// The gh enumeration runs in THIS cwd so a multi-repo / per-project install
+// queries the ticket's OWN repository — not the daemon's process cwd, which would
+// report zero open PRs for tickets whose PRs live in a different repo. Best-effort:
+// null on a malformed ticket, a missing registry entry, or any read failure.
+export function defaultDeriveRepoRoot(ticket) {
+  try {
+    const team = teamOf(ticket);
+    if (!team) return null;
+    return getProjectConfig(team)?.repoRoot ?? null;
   } catch {
     return null;
   }
@@ -139,17 +174,37 @@ export function defaultCheckOpenPrs(
     cwd,
     deriveBranchName = defaultDeriveBranchName,
     deriveAttachmentPrNumbers = defaultDeriveAttachmentPrNumbers,
+    deriveRepoRoot = defaultDeriveRepoRoot,
     runGh,
   } = {}
 ) {
-  const gh = runGh || ((args) => defaultRunGh(args, cwd));
+  // Resolve the cwd the REAL gh calls run in so the enumeration queries the
+  // TICKET's repository, not the daemon's process cwd (multi-repo / per-project
+  // correctness — CTL-1157). An explicit `cwd` wins; otherwise derive the repoRoot
+  // from the registry (the `.catalyst` project config, NEVER bare linearis). When
+  // we must spawn real gh (no `runGh` seam injected) and cannot pin a repo, the
+  // check is UNVERIFIABLE — running in the wrong repo would falsely report zero
+  // open PRs and let a backstop mark Done with no alarm. (When `runGh` is injected,
+  // the test controls gh entirely and the repo cwd is moot.)
+  let repoCwd = cwd;
+  if (!runGh && !repoCwd) {
+    try {
+      repoCwd = deriveRepoRoot(ticket) || null;
+    } catch {
+      repoCwd = null;
+    }
+    if (!repoCwd) {
+      return { ok: false, unverifiable: true, reason: "repo-underivable", prs: [] };
+    }
+  }
+  const gh = runGh || ((args) => defaultRunGh(args, repoCwd));
   const fields = "number,state,isDraft,title";
   // Resolve a branchName for the head pass — derive from the replica/cache when not
   // supplied (NEVER bare linearis). Derivation failure ⇒ head pass skipped.
   let head = branchName;
   if (!head) {
     try {
-      head = deriveBranchName(ticket, { cwd });
+      head = deriveBranchName(ticket, { cwd: repoCwd });
     } catch {
       head = null;
     }
@@ -184,13 +239,12 @@ export function defaultCheckOpenPrs(
       ]))
         if (p && p.number != null) seen.set(p.number, p);
     }
-    // Pass 3: Linear-attachment PRs (best-effort). Confirm OPEN state via gh so a
-    // merged/closed attachment never falsely counts. A view failure for one PR is
-    // swallowed (that single PR is just not added) — it must not turn the whole
-    // enumeration unverifiable.
+    // Pass 3: Linear-attachment PRs. Confirm OPEN state via gh so a merged/closed
+    // attachment never falsely counts. Deriving the attachment numbers is
+    // best-effort (a derivation failure just means we have no attachment hints).
     let attachmentNums = [];
     try {
-      attachmentNums = deriveAttachmentPrNumbers(ticket, { cwd }) || [];
+      attachmentNums = deriveAttachmentPrNumbers(ticket, { cwd: repoCwd }) || [];
     } catch {
       attachmentNums = [];
     }
@@ -199,8 +253,20 @@ export function defaultCheckOpenPrs(
       let view;
       try {
         view = gh(["pr", "view", String(n), "--json", fields]);
-      } catch {
-        continue; // undiscoverable state for this one attachment — skip, don't fail
+      } catch (err) {
+        // CTL-1157: an attachment-linked PR we KNOW exists (Linear recorded it) but
+        // cannot view — a transient GitHub/auth/rate-limit failure — makes the whole
+        // enumeration UNVERIFIABLE. We cannot confirm this PR is merged/closed, so
+        // the list is NOT a clean "zero open PRs". Swallowing the error and returning
+        // {ok:true,prs:[]} here would let a backstop mark Done with NO alarm on an
+        // unverified check. Surface it instead — never silently drop the PR.
+        return {
+          ok: false,
+          unverifiable: true,
+          reason: `attachment PR #${n} view failed: ${err?.message || String(err)}`,
+          prs: [...seen.values()],
+          branchName: head ?? null,
+        };
       }
       // `gh pr view --json` returns a single object (not an array).
       const pr = Array.isArray(view) ? view[0] : view;
@@ -209,7 +275,9 @@ export function defaultCheckOpenPrs(
       }
     }
   } catch (err) {
-    return { ok: false, reason: err?.message || String(err), prs: [] };
+    // An authoritative gh list/view pass failed — the enumeration is UNVERIFIABLE,
+    // never a clean list. Keep this CONSISTENT with the attachment-view path above.
+    return { ok: false, unverifiable: true, reason: err?.message || String(err), prs: [] };
   }
   const prs = [...seen.values()];
   return { ok: prs.length === 0, prs, branchName: head ?? null };

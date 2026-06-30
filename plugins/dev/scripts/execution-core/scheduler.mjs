@@ -2402,14 +2402,19 @@ function terminalDoneOnce(
   // justify adding a real hard block later (held in reserve). The enumerator is
   // dep-injected: schedulerTick's permissive no-op default keeps bare unit ticks
   // silent; runTick arms the real defaultCheckOpenPrs in production. An unverifiable
-  // enumeration (gh failure) is no longer fatal — we proceed without an alarm.
+  // enumeration (a `gh` failure, or the ticket's repo could not be derived) is no
+  // longer FATAL — we still PROCEED (alarm-not-block) — but UNVERIFIABLE ≠ CLEAN: we
+  // could not confirm zero open PRs, so we surface it via the loud alarm rather than
+  // silently assuming an empty list.
   let openPrs = [];
+  let unverifiable = false;
   if (typeof checkOpenPrs === "function") {
     try {
       const facts = checkOpenPrs(ticket, {});
+      if (facts && facts.unverifiable) unverifiable = true;
       if (facts && Array.isArray(facts.prs)) openPrs = facts.prs;
     } catch {
-      openPrs = []; // unverifiable ⇒ proceed, no alarm (no longer fail-closed)
+      unverifiable = true; // could not confirm clean ⇒ surface (don't assume zero)
     }
   }
   try {
@@ -2450,18 +2455,20 @@ function terminalDoneOnce(
       } catch {
         /* observability must never break the sweep */
       }
-      // CTL-1157 (ALARM-NOT-BLOCK): the Done write LANDED. If the ticket still has
-      // ≥1 open PR, fire the loud alarm (best-effort; never throws, never aborts the
-      // tick). A clean Done (0 open PRs) emits nothing.
-      if (openPrs.length >= 1) {
+      // CTL-1157 (ALARM-NOT-BLOCK): the Done write LANDED. Fire the loud alarm when
+      // the ticket still has ≥1 open PR OR the open-PR check was UNVERIFIABLE (a Done
+      // that landed without confirming the board was clean is the same silent-Done
+      // risk this alarm exists to surface). Best-effort; never throws, never aborts
+      // the tick. A clean, CONFIRMED Done (0 open PRs, verifiable) emits nothing.
+      if (openPrs.length >= 1 || unverifiable) {
         try {
-          emitDoneWithOpenPr({ ticket, openPrs, by: "terminal-sweep" });
+          emitDoneWithOpenPr({ ticket, openPrs, by: "terminal-sweep", unverifiable });
         } catch {
           /* observability must never break the sweep */
         }
         log.warn(
-          { ticket, open_prs_count: openPrs.length },
-          "ctl-1157: terminal-sweep wrote Done while an open PR still exists — alarm emitted (recovery.done-applied-with-open-pr)"
+          { ticket, open_prs_count: openPrs.length, unverifiable },
+          "ctl-1157: terminal-sweep wrote Done while an open PR still exists or the check was unverifiable — alarm emitted (recovery.done-applied-with-open-pr)"
         );
       }
     }

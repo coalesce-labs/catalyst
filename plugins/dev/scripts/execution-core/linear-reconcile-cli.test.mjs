@@ -527,4 +527,40 @@ test("ENUMERATOR: reports unverifiable (ok:false, reason) when `gh` list is unav
   });
   expect(r.ok).toBe(false);
   expect(r.reason).toBeTruthy();
+  expect(r.unverifiable).toBe(true); // an unparseable/failed authoritative check is unverifiable
+});
+
+// CTL-1157 (Codex GROUP-A fix #1): an attachment-discovered PR we KNOW exists but
+// cannot `gh pr view` (transient GitHub/auth/rate-limit) makes the WHOLE
+// enumeration unverifiable — it must NOT be silently dropped into a clean empty
+// list, which would let a backstop mark Done with no alarm on an unverified check.
+test("ENUMERATOR (CTL-1157): an attachment `gh pr view` FAILURE → UNVERIFIABLE, never a clean empty list", () => {
+  const runGh = (args) => {
+    if (args.includes("list")) return []; // search + head passes find nothing
+    if (args.includes("view")) throw new Error("gh: API rate limit exceeded");
+    return [];
+  };
+  const r = defaultCheckOpenPrs("CTL-9", {
+    runGh,
+    deriveBranchName: () => null,
+    deriveAttachmentPrNumbers: () => [808], // Linear says #808 is attached
+  });
+  expect(r.ok).toBe(false);
+  expect(r.unverifiable).toBe(true);
+  expect(r.reason).toMatch(/808/); // names the attachment PR it could not view
+});
+
+// CTL-1157 (Codex GROUP-A fix #2): when we must spawn REAL gh (no runGh seam) but
+// cannot derive the ticket's repo, the check is UNVERIFIABLE — we refuse to run gh
+// in the daemon's cwd (which would falsely report zero open PRs for a multi-repo
+// ticket). The repo is derived from the registry/config, NEVER bare linearis.
+test("ENUMERATOR (CTL-1157): an UNDERIVABLE repo is UNVERIFIABLE (never runs gh in the wrong repo)", () => {
+  const r = defaultCheckOpenPrs("CTL-9", {
+    deriveRepoRoot: () => null, // registry has no entry for this ticket's team
+    deriveBranchName: () => null,
+    deriveAttachmentPrNumbers: () => [],
+  });
+  expect(r.ok).toBe(false);
+  expect(r.unverifiable).toBe(true);
+  expect(r.reason).toBe("repo-underivable");
 });

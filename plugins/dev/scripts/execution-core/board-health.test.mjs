@@ -39,6 +39,10 @@ function mkBoard(o = {}) {
     mode: o.mode,
     capacity: { maxParallel: 4, liveCount: 0, freeSlots: 4, ...(o.capacity ?? {}) },
     reconcileMarkers: o.reconcileMarkers ?? {},
+    // CTL-1157: the filter_state PR-lifecycle map (number → {status,updatedAt,repo,
+    // ambiguous}). Default empty Map ⇒ the phantom/orphaned-PR cohorts stay
+    // observable:false, exactly like an unwired board.
+    prStatusMap: o.prStatusMap ?? new Map(),
     ring: {
       recentDispatchTs: null,
       cacheReconcile: null,
@@ -279,6 +283,55 @@ describe("CTL-1157 off-gate — cohort invariants + PR SELECT are dark in off", 
       now: () => NOW,
     });
     expect(called).toBe(1);
+  });
+});
+
+// ─── CTL-1157 (Codex GROUP-A fix #3): multi-repo PR-number collision ─────────
+// A (repo, pr_number) pair — not pr_number alone — identifies a PR. When the same
+// number exists in two repos, getAllPrStatuses marks the entry `ambiguous` and the
+// cohorts must SKIP it rather than borrow the wrong repo's status (which would
+// manufacture a false phantom-merged PR or hide a genuinely-orphaned open one).
+describe("CTL-1157 multi-repo collision — ambiguous PR numbers are not misclassified", () => {
+  test("checkPhantomMergedPr does NOT flag a ticket whose PR number is ambiguous (cross-repo collision)", () => {
+    const ticketsById = new Map([
+      // CTL-Y sits in a PR/in-review state and points at #42 — but #42 collides
+      // across repos (merged in repo X, open in repo Y) → ambiguous.
+      ["CTL-Y", { identifier: "CTL-Y", state: "In Review", prNumber: 42 }],
+    ]);
+    const ambiguous = mkBoard({
+      ticketsById,
+      prStatusMap: new Map([[42, { status: "merged", repo: "org/x", ambiguous: true }]]),
+    });
+    const r = evaluateInvariants(ambiguous, { mode: "shadow" });
+    expect(r.phantomMergedPr.flagged).not.toContain("CTL-Y"); // no false phantom
+    expect(r.phantomMergedPr.ok).toBe(true);
+  });
+
+  test("control: the SAME ticket+number IS flagged when the PR number is unambiguous (single repo, merged)", () => {
+    const ticketsById = new Map([
+      ["CTL-Y", { identifier: "CTL-Y", state: "In Review", prNumber: 42 }],
+    ]);
+    const unambiguous = mkBoard({
+      ticketsById,
+      prStatusMap: new Map([[42, { status: "merged", repo: "org/x", ambiguous: false }]]),
+    });
+    const r = evaluateInvariants(unambiguous, { mode: "shadow" });
+    expect(r.phantomMergedPr.flagged).toContain("CTL-Y"); // genuine phantom is still caught
+  });
+
+  test("checkOrphanedOpenPr skips an ambiguous (cross-repo collision) PR number", () => {
+    const ticketsById = new Map([
+      ["CTL-Z", { identifier: "CTL-Z", prNumber: 99 }],
+    ]);
+    const board = mkBoard({
+      ticketsById,
+      // open + stale + no live worker would normally flag — but ambiguous ⇒ skip.
+      prStatusMap: new Map([
+        [99, { status: "open", repo: "org/x", ambiguous: true, updatedAt: new Date(NOW - 100 * HOUR).toISOString() }],
+      ]),
+    });
+    const r = evaluateInvariants(board, { mode: "shadow" });
+    expect(r.orphanedOpenPr.flagged).not.toContain("CTL-Z");
   });
 });
 

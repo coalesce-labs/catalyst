@@ -54,6 +54,23 @@ test("append: a clean Done (0 open PRs) emits NOTHING and returns false", () => 
   expect(lines).toEqual([]);
 });
 
+test("append: an UNVERIFIABLE check alarms even with ZERO known open PRs (CTL-1157)", () => {
+  const lines = [];
+  const ok = appendRecoveryDoneOpenPrEvent({
+    ticket: "CTL-9",
+    by: "terminal-sweep",
+    openPrs: [], // no KNOWN open PR…
+    unverifiable: true, // …but the check could not confirm clean → surface it
+    append: (l) => lines.push(l),
+  });
+  expect(ok).toBe(true);
+  expect(lines).toHaveLength(1);
+  const a = JSON.parse(lines[0]).attributes;
+  expect(a.unverifiable).toBe(true);
+  expect(a.open_prs_count).toBe(0);
+  expect(a.by).toBe("terminal-sweep");
+});
+
 test("append: never throws (swallows an emitter error)", () => {
   expect(
     appendRecoveryDoneOpenPrEvent({

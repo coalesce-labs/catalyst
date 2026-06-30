@@ -653,18 +653,43 @@ export function getAllTicketDescriptors({ includeRemoved = false } = {}) {
 // table for board-health's phantom-merged-PR / orphaned-open-PR invariants. A
 // PR's status walks a monotone lifecycle (open → merged → deploying → deployed/
 // failed), so for each pr_number the most-recently-updated row is the current
-// status. ORDER BY updated_at DESC + first-row-per-pr_number wins. Returns
-// Map<number,{status,updatedAt}> (frozen once at board-assemble time). Empty map
-// when filter_state has no rows → the new invariants stay observable:false
-// (shadow-safe by default).
+// status. ORDER BY updated_at DESC + first-row-per-pr_number wins.
+//
+// MULTI-REPO COLLISION (CTL-1157): a (repo, pr_number) pair — NOT pr_number alone
+// — identifies a PR. With filter_state rows from >1 GitHub repo, PR numbers
+// collide: a merged #42 in repo X and an open #42 in repo Y are DIFFERENT PRs.
+// Keying by pr_number alone would let repo X's `merged` shadow repo Y's `open`
+// (the board would treat Y's #42 as merged → false phantom, or hide its orphaned
+// open PR). Since the board descriptor carries no per-ticket repo, we cannot say
+// WHICH #42 a ticket points at — so a number seen in TWO distinct repos is marked
+// `ambiguous:true`, and board-health skips it rather than borrow the wrong repo's
+// status. Each entry also carries its `repo` for downstream repo+number matching.
+//
+// Returns Map<number,{status,updatedAt,repo,ambiguous}> (frozen once at
+// board-assemble time). Empty map when filter_state has no rows → the new
+// invariants stay observable:false (shadow-safe by default).
 export function getAllPrStatuses() {
   const rows = ensure()
-    .prepare(`SELECT pr_number, status, updated_at FROM filter_state ORDER BY updated_at DESC`)
+    .prepare(`SELECT pr_number, repo, status, updated_at FROM filter_state ORDER BY updated_at DESC`)
     .all();
   const map = new Map();
   for (const row of rows) {
-    if (row.pr_number != null && !map.has(row.pr_number)) {
-      map.set(row.pr_number, { status: row.status, updatedAt: row.updated_at });
+    if (row.pr_number == null) continue;
+    const existing = map.get(row.pr_number);
+    if (!existing) {
+      map.set(row.pr_number, {
+        status: row.status,
+        updatedAt: row.updated_at,
+        repo: row.repo ?? null,
+        ambiguous: false,
+      });
+      continue;
+    }
+    // A repeated row for the SAME repo is just an older lifecycle state — the
+    // most-recent already won. A row for a DIFFERENT repo is a colliding PR number
+    // across repos → ambiguous (board-health must not match it to one repo).
+    if (row.repo != null && existing.repo != null && row.repo !== existing.repo) {
+      existing.ambiguous = true;
     }
   }
   return map;
