@@ -86,6 +86,36 @@ _neutralize_otel_attrs() {
 	printf '%s' "$out"
 }
 
+# CTL-1404: the executor=sdk path runs phase agents via the Agent SDK's query(), which
+# spawns the instrumented `claude` CLI as a child process. That child emits Claude Code's
+# built-in claude_code_* OTel metrics (token/cost/session) ONLY when OTEL_EXPORTER_OTLP_ENDPOINT
+# is present in its process env. The bg path inherited it because `claude --bg` RPCs to the user
+# claude daemon, which sources ~/.claude/settings.json (where the OTEL_* keys live); the in-process
+# SDK daemon never had them (execution-core.env carries no OTEL keys), so SDK worker token/cost
+# telemetry went dark. Default the OTLP telemetry env from the single per-node source of truth —
+# ~/.claude/settings.json's .env block — for any key the daemon env hasn't already set
+# (execution-core.env, sourced first, wins). Self-heals every node on restart, no per-node
+# provisioning and no reinstall. tracing.mjs normalizes a grpc :4317 endpoint to http :4318 for its
+# own spans, so propagating settings.json's value verbatim is safe for both signals. jq or the
+# settings file absent → no-op (env left as-is). Verified live (CTL-1404): with the endpoint armed,
+# a 1-turn SDK query() emitted claude_code_cost_usage_USD_total{host_name=...}.
+_default_otel_from_user_settings() {
+	local settings="${CLAUDE_SETTINGS_JSON:-${HOME}/.claude/settings.json}"
+	[[ -f "$settings" ]] || return 0
+	command -v jq >/dev/null 2>&1 || return 0
+	local key val
+	for key in \
+		OTEL_EXPORTER_OTLP_ENDPOINT \
+		OTEL_EXPORTER_OTLP_PROTOCOL \
+		OTEL_METRICS_EXPORTER \
+		OTEL_LOGS_EXPORTER \
+		CLAUDE_CODE_ENABLE_TELEMETRY; do
+		[[ -n "${!key:-}" ]] && continue # execution-core.env / inherited env win — fill gaps only
+		val="$(jq -r --arg k "$key" '.env[$k] // empty' "$settings" 2>/dev/null)" || continue
+		[[ -n "$val" ]] && export "$key=$val"
+	done
+}
+
 # CTL-846: is host:port accepting TCP connections? bash /dev/tcp first, nc fallback.
 # Used to gate mitmproxy proxy vars so a down proxy degrades to direct mode instead of
 # breaking every daemon/worker API call with "connection refused".
@@ -122,6 +152,10 @@ cmd_start() {
 	local _daemon_env="${CATALYST_EXECUTION_CORE_ENV:-${HOME}/.config/catalyst/execution-core.env}"
 	# shellcheck disable=SC1090
 	[[ -f "$_daemon_env" ]] && source "$_daemon_env"
+	# CTL-1404: after the machine-local env wins, fill any unset OTLP telemetry keys from
+	# ~/.claude/settings.json so the SDK-path child `claude` CLI can export claude_code_* metrics
+	# (token/cost/session). No-op when the keys are already set or settings.json/jq are absent.
+	_default_otel_from_user_settings
 	# CTL-1398: arm the SDK subscription token on EVERY daemon start (not just login
 	# shells) so executor=sdk survives NON-login restarts (deploy / broker reload /
 	# launchd / fresh boot) on every host. The token lives in claude-accounts.env
