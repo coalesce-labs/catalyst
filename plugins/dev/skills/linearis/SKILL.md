@@ -57,7 +57,7 @@ the Cloud change-feed — is present:
   specific item *only* when you have concrete evidence the replica read is wrong:
   it contradicts something you just directly observed; the replica freshness/staleness
   signal shows it is behind; or a ticket you expect is missing. When you escalate:
-  - (a) read that item directly with `linearis`, **and**
+  - (a) read that item through `catalyst-linear read <ID>` (it still surfaces staleness via `_meta` and fails open to a direct `linearis` read), **and**
   - (b) **surface the staleness as an issue** — a stale replica read signals a mirror
     gap (e.g. a missed webhook) worth investigating, not just a one-off retry.
 
@@ -68,21 +68,10 @@ through `linearis`. The replica is **read-only** in both modes.
 
 ### How reads resolve
 
-- **Daemon read paths** resolve the mode automatically via the read-source seam
-  (CTL-1390) — callers do not choose.
-- **Agent / skill ad-hoc reads:** use **`catalyst-linear read <ID>`** (CTL-1391). It
-  applies the rule above for you — replica-first when opted in *and* fresh, automatic
-  fail-open to `linearis` otherwise — so the **same command is correct on every node**.
-  Output matches `linearis` JSON plus an additive `_meta` (read source + replica
-  freshness). `list`/`search` are `linearis` passthrough today (a replica-backed list
-  view is a follow-up).
+- **Daemon read paths** resolve the mode automatically via the read-source seam (CTL-1390) — callers do not choose.
+- **Agent / skill / script ad-hoc reads — MANDATORY:** read Linear **only** through **`catalyst-linear read|list|search`** (CTL-1391). **Never call bare `linearis issues read|list|search` to read** — not in agent or skill instructions, not in helper scripts. The same `catalyst-linear` command is correct on every node: replica-first when opted in *and* fresh, automatic fail-open to `linearis` otherwise. Output matches `linearis` JSON plus an additive `_meta` (read source + replica freshness).
 
-> **Mechanism note.** `catalyst-linear` is the executable form of this rule (read-model
-> over the replica first, `linearis` fallback). Plain `linearis issues read|list|search`
-> stays correct everywhere — it is exactly what `catalyst-linear` falls back to — so
-> existing direct calls are fine. Prefer `catalyst-linear` for ad-hoc reads so a node
-> that *has* opted into the replica actually gets replica-first behavior automatically,
-> instead of every caller re-deciding from node identity.
+> **Why mandatory, not "preferred".** Bare `linearis` reads always hit Linear directly and bypass the replica entirely — even on a node that opted in. On the rate-limited worker minis that burns the shared Linear quota and 429s the fleet. `catalyst-linear` is the executable form of the read rule; routing **all** reads through it is what makes "every client reads the replica" actually true. (Writes are unaffected — always `linearis`.)
 
 ## Gotchas & Traps
 
@@ -130,10 +119,16 @@ v2026.4.9.
 
 ## Core Operations
 
+> **Reads run through `catalyst-linear`.** The `linearis issues read|list|search` examples
+> below document the CLI **syntax** — the flags carry over verbatim. Per the mandatory read
+> rule above, **run issue reads via `catalyst-linear read|list|search`** (it shares linearis's
+> flags and fails open to linearis). Stay on bare `linearis` only for reads that need fields
+> the replica omits (relations, estimate) or non-issue domains (`cycles`/`projects`/`milestones`).
+
 ### Read a ticket
 
 ```bash
-linearis issues read ENG-123
+catalyst-linear read ENG-123        # replica-first; fails open to linearis
 ```
 
 ### Search tickets

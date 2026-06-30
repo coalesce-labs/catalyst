@@ -237,7 +237,8 @@ in prose. The own ticket's `Fixes https://linear.app/...` line is correct and st
 that link/transition is intended. Sibling neutralization is handled mechanically by the
 guard block appended at write-back time (see below).
 
-Get Linear ticket details using the Linearis CLI (run `linearis issues usage` for read syntax).
+Get Linear ticket details with `catalyst-linear read <ticket>` — reads go through `catalyst-linear`
+(replica-first, never bare `linearis`); see the `linearis` skill's "Reading Linear" section.
 Extract title and description with jq. Use ticket title and description for context.
 
 ### 9. Generate updated title
@@ -245,9 +246,9 @@ Extract title and description with jq. Use ticket title and description for cont
 **Title generation rules:**
 
 ```bash
-# If ticket exists and linearis available, read ticket title (see `linearis issues usage`)
-if [[ "$ticket" ]] && command -v linearis &>/dev/null; then
-    ticket_title=$(linearis issues read "$ticket" | jq -r '.title')
+# If ticket exists, read ticket title via catalyst-linear (reads → catalyst-linear, never bare linearis)
+if [[ "$ticket" ]] && command -v catalyst-linear &>/dev/null; then
+    ticket_title=$(catalyst-linear read "$ticket" | jq -r '.title')
     title="$ticket: ${ticket_title:0:60}"
 elif [[ "$ticket" ]]; then
     # Fallback: generate title from branch name + commits
