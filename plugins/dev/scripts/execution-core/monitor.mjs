@@ -37,9 +37,15 @@ import {
   getClusterHosts, // CTL-862
   hostMembershipWarning, // CTL-1057
   isDraining as isDrainingDefault, // CTL-1095: drain gate
-  readLinearReplica, // CTL-1397: replica-backed board-list discovery (mode gate)
 } from "./config.mjs";
-import { createReplicaReader } from "./replica-read.mjs"; // CTL-1397
+// CTL-1397 (Node-loadability): monitor.mjs MUST NOT import replica-read.mjs — that
+// module statically imports `bun:sqlite`, which the Node ESM loader rejects at
+// module-load (the broker entrypoint is `#!/usr/bin/env node` and loads
+// broker/index.mjs → recovery.mjs → monitor.mjs). So the replica reader is
+// constructed in daemon.mjs (a bun-only context, mode-gated) and INJECTED into
+// startMonitor — exactly the param-injection pattern the per-signal tier uses
+// (linear-query.mjs never imports replica-read.mjs either; daemon.mjs:681 builds
+// the reader and passes it in). monitor.mjs stays Node-loadable.
 import { ownedBy } from "./hrw.mjs"; // CTL-862: HRW ownership filter
 import { claimDispatchSync } from "./cluster-claim-sync.mjs"; // CTL-862: cross-host claim soft-CAS
 import { listProjects, getProjectConfig, resolveEligibleQuery } from "./registry.mjs";
@@ -252,29 +258,13 @@ export function handleCommentCreatedEvent(event, { onComment } = {}) {
 
 // --- Reconcile -----------------------------------------------------------
 
-// CTL-1397: the replica-backed board-list discovery reader, mode-gated EXACTLY
-// like the daemon's per-signal replica tier (daemon.mjs:681 —
-// readLinearReplica().mode === "on" ? createReplicaReader() : null). Lazily
-// resolved ONCE: `undefined` = not-yet-resolved, `null` = resolved-off (flag off
-// or construction failed). When off the reconcile path never touches the replica,
-// so behavior is byte-identical to pre-CTL-1397. Fail-open: a construction throw
-// resolves to null → linearis path.
-let _eligibleReplica; // undefined = not yet resolved
-function eligibleReplica() {
-  if (_eligibleReplica !== undefined) return _eligibleReplica;
-  try {
-    _eligibleReplica = readLinearReplica().mode === "on" ? createReplicaReader() : null;
-  } catch {
-    _eligibleReplica = null; // any resolution failure → linearis path
-  }
-  return _eligibleReplica;
-}
-
-// __resetEligibleReplicaForTests — drop the memoized singleton so a test that
-// flips the mode flag (or injects its own replica) starts from a clean slate.
-export function __resetEligibleReplicaForTests() {
-  _eligibleReplica = undefined;
-}
+// CTL-1397: the replica-backed board-list discovery reader, INJECTED by the
+// daemon (daemon.mjs constructs `readLinearReplica().mode === "on" ?
+// createReplicaReader() : undefined` in its bun-only context and passes it into
+// startMonitor — see the Node-loadability note at the import block). `null` =
+// no reader (mode off, or the Node broker which never injects one) → the reconcile
+// path falls to the linearis exec, byte-identical to pre-CTL-1397.
+let _injectedEligibleReplica = null;
 
 // Teams that have been reconciled at least once — used by reconcileAll to
 // detect teams dropped from the registry that must be dropProject'd.
@@ -316,7 +306,7 @@ export function reconcileProject(team, { exec, delegateExec, appendHealthEvent, 
     tickets = runEligibleQuery(query, {
       exec,
       delegateExec,
-      replica: replica ?? eligibleReplica(),
+      replica: replica ?? _injectedEligibleReplica,
       onSource: eligibleSource,
     });
   } catch (err) {
@@ -1064,7 +1054,14 @@ export function startMonitor({
   botUserIds,
   botWriteId,
   gateway,
+  // CTL-1397: the daemon-injected replica-backed board-list reader (constructed
+  // in daemon.mjs's bun context, mode-gated). undefined/absent → the reconcile
+  // path uses linearis (the Node broker never injects one, so monitor.mjs needs
+  // no bun:sqlite import). Stored module-level so reconcileAll/reconcileProject
+  // (which the reconcile timer drives) read it without re-threading.
+  eligibleReplica,
 } = {}) {
+  _injectedEligibleReplica = eligibleReplica ?? null;
   // CTL-565: orchDir + dispatch + abortWorker are stored in tailerOpts so the
   // tailer-driven readNewEvents → handleStateChangedEvent path can one-shot-
   // dispatch triage and abort a dragged-out worker. When abortWorker is left
@@ -1178,5 +1175,5 @@ export function __resetForTests() {
   tailerOpts = {};
   resetLivenessCache();
   __resetReconcileHealthForTests(); // CTL-867: clear per-team reconcile-health map
-  _eligibleReplica = undefined; // CTL-1397: drop the memoized board-list replica singleton
+  _injectedEligibleReplica = null; // CTL-1397: drop the daemon-injected board-list replica reader
 }

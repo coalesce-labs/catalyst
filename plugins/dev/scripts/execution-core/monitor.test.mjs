@@ -269,6 +269,31 @@ describe("reconcileProject — replica tier (CTL-1397)", () => {
       infoSpy.mockRestore();
     }
   });
+
+  // CTL-1397 (Node-loadability fix) — the reader is constructed in daemon.mjs
+  // (bun-only) and INJECTED into startMonitor, NOT imported by monitor.mjs (which
+  // the Node broker loads). startMonitor stores the injected reader, and a later
+  // reconcileProject with no explicit `replica` opt uses it.
+  test("startMonitor({ eligibleReplica }) injects the reader; a later reconcileProject uses it", () => {
+    enroll("ENG", { status: "Todo" });
+    const replica = replicaReturning({
+      nodes: [{ identifier: "ENG-200", state: "Todo", priority: 2 }],
+    });
+    // startMonitor seeds the module-level injected reader (reconcileAll inside it
+    // runs once; then we reconcile again WITHOUT passing replica in the opts).
+    startMonitor({ exec: execMustNotRun(), eligibleReplica: replica, reconcileIntervalMs: 60_000 });
+    reconcileProject("ENG", { exec: execMustNotRun() }); // no opts.replica → uses the injected reader
+    expect(getEligibleSet("ENG").map((t) => t.identifier)).toEqual(["ENG-200"]);
+  });
+
+  test("no eligibleReplica injected (Node broker / mode off): reconcileProject falls to the linearis path", () => {
+    enroll("ENG", { status: "Todo" });
+    const exec = execReturning({ ENG: [node("ENG-9")] });
+    // startMonitor without eligibleReplica leaves the injected reader null.
+    startMonitor({ exec, reconcileIntervalMs: 60_000 });
+    expect(getEligibleSet("ENG").map((t) => t.identifier)).toEqual(["ENG-9"]);
+    expect(exec.calls).toBeGreaterThan(0); // linearis served (no replica)
+  });
 });
 
 // --- CTL-867: per-team reconcile-health escalation --------------------------

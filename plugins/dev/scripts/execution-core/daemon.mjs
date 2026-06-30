@@ -708,7 +708,15 @@ export function startDaemon({
         handleCommentWake(parsed, { orchDir, dispatch: commentWakeDispatch, removeLabel: defaultRemoveLabel, botUserId: linearBotUserIds, clearStall: defaultClearStall(orchDir, linearWrite) }); // CTL-549 + CTL-756 + CTL-1365b: re-dispatch parked tickets through the resolved executor; botUserId suppresses self-echo; CTL-1067: J3 stall-clear
       },
       onUpdate: createUpdateInboxWriter(orchDir, linearBotUserIds), // CTL-749
-    }); // CTL-535 + CTL-565 + CTL-634 + CTL-549 + CTL-749 + CTL-716 + CTL-781
+      // CTL-1397: inject the SAME mode-gated replica reader the scheduler uses
+      // (constructed above, bun-only) so the monitor's board-list discovery
+      // reconcile reads the local Catalyst-Cloud replica instead of `linearis
+      // issues list` — immune to the shared Linear quota + the CTL-679 breaker.
+      // undefined when the flag is off → the monitor falls to the linearis path.
+      // Injecting here (not importing in monitor.mjs) keeps the Node broker's
+      // monitor/recovery import path free of the bun:sqlite static import.
+      eligibleReplica: replicaReader,
+    }); // CTL-535 + CTL-565 + CTL-634 + CTL-549 + CTL-749 + CTL-716 + CTL-781 + CTL-1397
     // CTL-558: the scheduler writes Linear status via its default `writeStatus`
     // (linear-write.mjs) on every committed phase transition — no daemon wiring
     // needed; production uses the real module, tests inject fakes.
