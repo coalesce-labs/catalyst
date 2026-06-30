@@ -114,6 +114,25 @@ export function layer2Path(env = process.env) {
   );
 }
 
+// CTL-1401: valid executor levers (mirrors config.mjs's resolver — bg | sdk | oneshot-legacy). The
+// install's `--executor` flag provisions one of these into execution-core.env so the node's executor
+// is install-set, not dependent on a hand-edit surviving.
+export const VALID_EXECUTORS = Object.freeze(["bg", "sdk", "oneshot-legacy"]);
+
+/**
+ * execCoreEnvPath — the daemon env file the execution-core launcher sources on EVERY start, and from
+ * which CTL-1398's token-arm reads `CATALYST_EXECUTOR`. Resolved the same way the launcher + doctor
+ * resolve it: CATALYST_EXECUTION_CORE_ENV override > XDG/.config/catalyst/execution-core.env. This
+ * file is NOT a Layer-2 key and is never stripped by remove-config, so a value written here survives
+ * a reinstall — write-config (re)asserts it so the executor lever is install-provisioned.
+ */
+export function execCoreEnvPath(env = process.env) {
+  return (
+    env.CATALYST_EXECUTION_CORE_ENV ||
+    join(env.XDG_CONFIG_HOME || join(homedir(), ".config"), "catalyst", "execution-core.env")
+  );
+}
+
 /** readNodeClassRaw — the raw catalyst.node.class string stored in a Layer-2 file (or null). */
 export function readNodeClassRaw(layer2) {
   try {
@@ -248,6 +267,20 @@ export function planPhases({ operation, nodeClass, scripts, opts = {} }) {
       // surfaced by the developer verify-node rubric, not a hard install failure.
       steps.push({ label: "read-replica", kind: "setkey", key: "catalyst.readReplica.baseUrl", value: opts.readReplica });
     }
+    // CTL-1401: when an executor is requested, durably provision the lever into execution-core.env —
+    // the file the launcher sources on every start and whose CATALYST_EXECUTOR value arms CTL-1398's
+    // SDK token path. execution-core.env is never stripped by remove-config, so this both survives a
+    // reinstall AND makes the executor install-set rather than dependent on a fragile hand-edit. No
+    // flag ⇒ no step ⇒ the node's existing executor (or the bg default) is preserved untouched.
+    if (opts.executor) {
+      steps.push({
+        label: "set-executor",
+        kind: "setenv",
+        file: opts.execCoreEnv || execCoreEnvPath(),
+        key: "CATALYST_EXECUTOR",
+        value: opts.executor,
+      });
+    }
     return { phase: "write-config", steps };
   };
 
@@ -260,6 +293,14 @@ export function planPhases({ operation, nodeClass, scripts, opts = {} }) {
           { label: "install-services", kind: "run", argv: [scripts.stack, "install-services"] }
         : // developer/monitor: the 5th updater agent as sole pull owner. NEVER install-services.
           { label: "adopt-updater", kind: "run", argv: [scripts.stack, "adopt-updater"] },
+      // CTL-1401: the per-host cloud-sync replica writer runs on EVERY class (adopt-cloud-sync has no
+      // node-class guard — workers read the replica from the scheduler hot path, dev/monitor via
+      // catalyst-linear). Teardown's uninstall-services boots it OUT, so a reinstall MUST re-adopt it
+      // or the node loses its local Linear replica and the 429 read-block returns. Idempotent (boots
+      // out any existing agent first) and best-effort (optional): macOS-only launchd, and a tokenless
+      // node installs the plist + idles cleanly. Ordered AFTER the class step so install-services has
+      // already laid down the log-shipper that adopt-cloud-sync kickstarts for the 6th Loki stream.
+      { label: "adopt-cloud-sync", kind: "run", argv: [scripts.stack, "adopt-cloud-sync"], optional: true },
     ],
   });
 
@@ -350,6 +391,31 @@ function writeLayer2Atomic(path, obj) {
   const tmp = `${path}.${randomBytes(6).toString("hex")}.tmp`;
   writeFileSync(tmp, `${JSON.stringify(obj, null, 2)}\n`, { mode: 0o600 });
   renameSync(tmp, path);
+}
+
+// upsertEnvFile — CTL-1401. Idempotently set `export KEY=value` in a shell env file (execution-core.env,
+// which the daemon launcher `source`s on every start). Replaces an existing KEY= line (with or without a
+// leading `export`), otherwise appends; preserves all other lines and comments. Atomic (tmp + rename) and
+// 0600 (the file can hold secrets). Matches the `export KEY=val` form the launcher + doctor parser expect.
+export function upsertEnvFile(file, key, value) {
+  let content = "";
+  try {
+    content = readFileSync(file, "utf8");
+  } catch {
+    /* missing → create fresh */
+  }
+  const re = new RegExp(`^(?:export\\s+)?${key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}=`);
+  const lines = content.length ? content.split("\n") : [];
+  // Drop a single trailing empty line (from a prior terminal newline) so we re-add exactly one.
+  if (lines.length && lines[lines.length - 1] === "") lines.pop();
+  const newLine = `export ${key}=${value}`;
+  const idx = lines.findIndex((l) => re.test(l));
+  if (idx >= 0) lines[idx] = newLine;
+  else lines.push(newLine);
+  mkdirSync(dirname(file), { recursive: true });
+  const tmp = `${file}.${randomBytes(6).toString("hex")}.tmp`;
+  writeFileSync(tmp, `${lines.join("\n")}\n`, { mode: 0o600 });
+  renameSync(tmp, file);
 }
 
 // Reject the JS prototype-chain keys so a dotted path can never walk into Object.prototype
@@ -774,6 +840,13 @@ export async function runInstallLifecycle({ operation, nodeClass, opts = {} }, d
         log(`catalyst-install: set ${step.key} = ${step.value}`);
         return;
       }
+      case "setenv": {
+        // CTL-1401: idempotent upsert into the daemon env file (execution-core.env). Not a Layer-2
+        // key, so it survives remove-config; the launcher sources it on the next start to apply.
+        upsertEnvFile(step.file, step.key, step.value);
+        log(`catalyst-install: set ${step.key}=${step.value} in ${step.file}`);
+        return;
+      }
       case "removeconfig": {
         const cfg = readLayer2(layer2);
         const removed = [];
@@ -1020,7 +1093,7 @@ export async function runInstallLifecycle({ operation, nodeClass, opts = {} }, d
 
 // ── CLI ─────────────────────────────────────────────────────────────────────
 export function parseArgs(argv) {
-  const a = { operation: null, class: null, readReplica: null, force: false, dryRun: false, json: false, help: false, errors: [] };
+  const a = { operation: null, class: null, readReplica: null, executor: null, force: false, dryRun: false, json: false, help: false, errors: [] };
   const rest = [...argv];
   // takeValue — consume the next token as FLAG's value; a missing value (end of args, or the next
   // token is itself a flag) is an error, not a silent null — otherwise `catalyst install --class`
@@ -1057,6 +1130,9 @@ export function parseArgs(argv) {
       case "--read-replica":
         [a.readReplica, i] = takeValue(i, "--read-replica");
         break;
+      case "--executor":
+        [a.executor, i] = takeValue(i, "--executor");
+        break;
       default:
         if (v.startsWith("--class=")) {
           const val = v.slice("--class=".length);
@@ -1066,6 +1142,10 @@ export function parseArgs(argv) {
           const val = v.slice("--read-replica=".length);
           if (val === "") a.errors.push("--read-replica requires a value");
           else a.readReplica = val;
+        } else if (v.startsWith("--executor=")) {
+          const val = v.slice("--executor=".length);
+          if (val === "") a.errors.push("--executor requires a value");
+          else a.executor = val;
         } else if (!v.startsWith("-") && a.operation == null) {
           a.operation = v;
         }
@@ -1080,13 +1160,15 @@ export function usage() {
   return `catalyst-install — provision / tear down this node for its class (CTL-1369).
 
 Usage (normally via the router: 'catalyst install|uninstall|reinstall …'):
-  catalyst-install install   [--class developer|worker|monitor] [--read-replica <url>] [--dry-run]
+  catalyst-install install   [--class developer|worker|monitor] [--read-replica <url>] [--executor bg|sdk] [--dry-run]
   catalyst-install uninstall [--force] [--dry-run]
-  catalyst-install reinstall [--class …] [--read-replica <url>] [--force] [--dry-run]
+  catalyst-install reinstall [--class …] [--read-replica <url>] [--executor bg|sdk] [--force] [--dry-run]
 
 Options:
   --class <c>          target node class (install: declares it; un/reinstall: defaults to current)
   --read-replica <url> developer/monitor: a worker monitor's base URL to read from (e.g. http://host:7400)
+  --executor <e>       durably provision the daemon executor (bg|sdk|oneshot-legacy) into
+                       execution-core.env; omit to leave the node's existing executor untouched
   --force              teardown a live, non-drained node (uninstall/reinstall guard override)
   --dry-run, --print   resolve + print the per-class step plan; run NOTHING (no side effects)
   --json               machine-readable output (with --dry-run, prints the plan as JSON)
@@ -1108,11 +1190,13 @@ function printPlan(plan, { operation, nodeClass }, json, out) {
       const desc =
         s.kind === "setkey"
           ? `set ${s.key}=${s.value}`
-          : s.kind === "removeconfig"
-            ? `remove Layer-2 keys [${s.keys.join(", ")}] (secrets preserved)`
-            : s.kind === "verify-clean"
-              ? "verify no daemons/agents remain"
-              : (s.argv || []).join(" ");
+          : s.kind === "setenv"
+            ? `upsert ${s.key}=${s.value} in ${s.file}`
+            : s.kind === "removeconfig"
+              ? `remove Layer-2 keys [${s.keys.join(", ")}] (secrets preserved)`
+              : s.kind === "verify-clean"
+                ? "verify no daemons/agents remain"
+                : (s.argv || []).join(" ");
       out(`    - ${s.label}${s.optional ? " (optional)" : ""}: ${desc}`);
     }
   }
@@ -1159,7 +1243,15 @@ export async function main(argv, depsOverride) {
   // without this a reinstall WITHOUT --read-replica would silently drop a developer/monitor node's
   // configured endpoint (and then verify-node would FAIL on the missing read source).
   const readReplica = resolveReadReplica({ flag: args.readReplica, env, layer2: deps.layer2 });
-  const opts = { force: args.force, readReplica };
+
+  // CTL-1401: --executor durably provisions the daemon executor lever into execution-core.env. Reject
+  // an unrecognized value (a typo must not silently leave the node on a default executor — the whole
+  // point of the lever is to make the executor explicit + install-set). No flag ⇒ executor untouched.
+  if (args.executor != null && !VALID_EXECUTORS.includes(args.executor)) {
+    errOut(`catalyst-install: --executor must be one of ${VALID_EXECUTORS.join(" | ")} (got '${args.executor}')`);
+    return 2;
+  }
+  const opts = { force: args.force, readReplica, executor: args.executor, execCoreEnv: execCoreEnvPath(env) };
 
   if (args.dryRun) {
     const plan = planPhases({ operation: args.operation, nodeClass, scripts: deps.scripts, opts });
