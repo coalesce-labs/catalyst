@@ -5,7 +5,7 @@
 // uninstall live-node guard, dry-run side-effect-freedom, and CLI exit codes. Every step shells
 // out through an injected runStep stub, so nothing real is provisioned.
 import { describe, test, expect, afterEach } from "bun:test";
-import { readFileSync, writeFileSync, rmSync } from "node:fs";
+import { readFileSync, writeFileSync, rmSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -27,6 +27,10 @@ import {
   parseArgs,
   usage,
   main,
+  upsertEnvFile,
+  execCoreEnvPath,
+  VALID_EXECUTORS,
+  RESIDUAL_AGENT_PATTERN,
 } from "./install-lifecycle.mjs";
 
 let tmpCounter = 0;
@@ -56,6 +60,7 @@ const SCRIPTS = {
   installCli: "INSTALL_CLI",
   stack: "STACK",
   doctor: "DOCTOR", // CTL-1369 PR4: the pre/post-install doctor pass (catalyst-doctor --profile install)
+  execCore: "EXECCORE", // CTL-1401: the exec-core launcher (restart-execcore on a live-worker executor change)
 };
 
 // makeDeps — a fully-stubbed dep set. `failOn` is a predicate (argv|joined → truthy = fail with
@@ -155,6 +160,15 @@ describe("parseArgs", () => {
     expect(parseArgs(["reinstall", "--read-replica"]).errors).toContain("--read-replica requires a value");
     expect(parseArgs(["install", "--class="]).errors).toContain("--class requires a value");
     expect(parseArgs(["install", "--class", "developer"]).errors).toHaveLength(0);
+  });
+  test("CTL-1401: --executor parses (space + equals forms); missing value is an error", () => {
+    expect(parseArgs(["install", "--executor", "sdk"]).executor).toBe("sdk");
+    expect(parseArgs(["reinstall", "--executor=bg"]).executor).toBe("bg");
+    expect(parseArgs(["install"]).executor).toBeNull(); // omitted ⇒ null ⇒ untouched
+    expect(parseArgs(["install", "--executor"]).errors).toContain("--executor requires a value");
+    expect(parseArgs(["install", "--executor="]).errors).toContain("--executor requires a value");
+    // the valid set the install accepts (asserted against the exported constant)
+    expect(VALID_EXECUTORS).toEqual(["bg", "sdk", "oneshot-legacy"]);
   });
 });
 
@@ -280,6 +294,188 @@ describe("planPhases — per-class correctness (pure)", () => {
     // uninstall ends with verify-clean — no healthcheck phase, no doctor step.
     expect(planPhases({ operation: "uninstall", nodeClass: "worker", scripts: SCRIPTS }).some((p) => p.phase === "healthcheck")).toBe(false);
     expect(stepLabels(planPhases({ operation: "uninstall", nodeClass: "worker", scripts: SCRIPTS }))).not.toContain("doctor");
+  });
+});
+
+// ───────────────────────── CTL-1401: cloud-sync + executor provisioning ─────────────────────────
+describe("planPhases — CTL-1401 cloud-sync + executor levers (pure)", () => {
+  test("adopt-cloud-sync is in install-agents for EVERY class (install + reinstall), ordered AFTER the class step", () => {
+    for (const operation of ["install", "reinstall"]) {
+      for (const nodeClass of ["worker", "developer", "monitor"]) {
+        const ia = planPhases({ operation, nodeClass, scripts: SCRIPTS }).find((p) => p.phase === "install-agents");
+        const labels = ia.steps.map((s) => s.label);
+        expect(labels).toContain("adopt-cloud-sync");
+        // it must come after the per-class agent step so install-services has laid down the log-shipper
+        const classStep = nodeClass === "worker" ? "install-services" : "adopt-updater";
+        expect(labels.indexOf("adopt-cloud-sync")).toBeGreaterThan(labels.indexOf(classStep));
+        const step = ia.steps.find((s) => s.label === "adopt-cloud-sync");
+        expect(step).toMatchObject({ kind: "run", argv: ["STACK", "adopt-cloud-sync"], optional: true });
+      }
+    }
+  });
+  test("set-executor setenv step appears in write-config ONLY when --executor is given", () => {
+    const withExec = planPhases({ operation: "install", nodeClass: "worker", scripts: SCRIPTS, opts: { executor: "sdk", execCoreEnv: "/tmp/ec.env" } }).find((p) => p.phase === "write-config");
+    const setExec = withExec.steps.find((s) => s.label === "set-executor");
+    expect(setExec).toMatchObject({ kind: "setenv", file: "/tmp/ec.env", key: "CATALYST_EXECUTOR", value: "sdk" });
+    // no flag ⇒ no step ⇒ the node's existing executor is left untouched
+    const noExec = planPhases({ operation: "install", nodeClass: "worker", scripts: SCRIPTS }).find((p) => p.phase === "write-config");
+    expect(noExec.steps.some((s) => s.label === "set-executor")).toBe(false);
+  });
+  test("set-executor works for every class + on reinstall (the lever is class-agnostic)", () => {
+    for (const operation of ["install", "reinstall"]) {
+      for (const nodeClass of ["worker", "developer", "monitor"]) {
+        const wc = planPhases({ operation, nodeClass, scripts: SCRIPTS, opts: { executor: "bg", execCoreEnv: "/tmp/ec.env" } }).find((p) => p.phase === "write-config");
+        expect(wc.steps.some((s) => s.label === "set-executor" && s.value === "bg")).toBe(true);
+      }
+    }
+  });
+  test("Codex P2 (re-review): restart-execcore is planned ONLY for `install --class worker --executor` (a reinstall restarts via teardown; no flag ⇒ no restart)", () => {
+    const ia = (operation, opts) => stepLabels(planPhases({ operation, nodeClass: "worker", scripts: SCRIPTS, opts }));
+    expect(ia("install", { executor: "sdk", execCoreEnv: "/tmp/ec.env" })).toContain("restart-execcore");
+    // a reinstall already stops+starts exec-core in its teardown → no extra restart step
+    expect(ia("reinstall", { executor: "sdk", execCoreEnv: "/tmp/ec.env" })).not.toContain("restart-execcore");
+    // no --executor ⇒ nothing to apply ⇒ no restart
+    expect(ia("install", {})).not.toContain("restart-execcore");
+    // developer/monitor don't run exec-core ⇒ no restart step
+    expect(stepLabels(planPhases({ operation: "install", nodeClass: "developer", scripts: SCRIPTS, opts: { executor: "sdk", execCoreEnv: "/tmp/ec.env" } }))).not.toContain("restart-execcore");
+  });
+});
+
+describe("RESIDUAL_AGENT_PATTERN — CTL-1401 (Codex P2: uninstall verify-clean catches a leftover cloud-sync)", () => {
+  test("the residual-process pattern includes cloud-sync (so a failed bootout can't pass verify-clean)", () => {
+    expect(RESIDUAL_AGENT_PATTERN).toContain("cloud-sync");
+    // and still covers the other stack daemons
+    expect(RESIDUAL_AGENT_PATTERN).toContain("broker/index.mjs");
+    expect(RESIDUAL_AGENT_PATTERN).toContain("execution-core/");
+  });
+});
+
+describe("upsertEnvFile — CTL-1401 idempotent env-file upsert", () => {
+  test("creates a fresh file with export KEY=value", () => {
+    const f = tmpCfg();
+    upsertEnvFile(f, "CATALYST_EXECUTOR", "sdk");
+    expect(readFileSync(f, "utf8")).toBe("export CATALYST_EXECUTOR=sdk\n");
+  });
+  test("replaces an existing KEY line (with or without `export`) and preserves all other lines", () => {
+    const f = tmpCfg();
+    writeFileSync(f, "# header\nexport OTEL_EXPORTER_OTLP_ENDPOINT=http://h:4318\nCATALYST_EXECUTOR=bg\nexport CATALYST_LINEAR_REPLICA=on\n");
+    upsertEnvFile(f, "CATALYST_EXECUTOR", "sdk");
+    const out = readFileSync(f, "utf8");
+    expect(out).toBe("# header\nexport OTEL_EXPORTER_OTLP_ENDPOINT=http://h:4318\nexport CATALYST_EXECUTOR=sdk\nexport CATALYST_LINEAR_REPLICA=on\n");
+  });
+  test("is idempotent (re-running yields byte-identical content, single line)", () => {
+    const f = tmpCfg();
+    upsertEnvFile(f, "CATALYST_EXECUTOR", "sdk");
+    const once = readFileSync(f, "utf8");
+    upsertEnvFile(f, "CATALYST_EXECUTOR", "sdk");
+    expect(readFileSync(f, "utf8")).toBe(once);
+    expect(readFileSync(f, "utf8").match(/CATALYST_EXECUTOR=/g)).toHaveLength(1);
+  });
+  test("Codex P2: DEDUPES — replaces the first assignment in place and drops trailing duplicates (so no stale later line wins)", () => {
+    const f = tmpCfg();
+    // a hand-edited file with TWO CATALYST_EXECUTOR lines; the launcher sources the whole file so the
+    // trailing `bg` would win — the upsert must leave exactly one (the canonical sdk), no later override.
+    writeFileSync(f, "export CATALYST_EXECUTOR=sdk\nexport OTHER=1\nCATALYST_EXECUTOR=bg\n");
+    upsertEnvFile(f, "CATALYST_EXECUTOR", "sdk");
+    const out = readFileSync(f, "utf8");
+    expect(out.match(/CATALYST_EXECUTOR=/g)).toHaveLength(1);
+    expect(out).toBe("export CATALYST_EXECUTOR=sdk\nexport OTHER=1\n");
+  });
+  test("Codex P2 (re-review): drops an INDENTED stale duplicate (bash applies it when sourcing)", () => {
+    const f = tmpCfg();
+    writeFileSync(f, "export CATALYST_EXECUTOR=sdk\n  CATALYST_EXECUTOR=bg\n"); // indented trailing dup
+    upsertEnvFile(f, "CATALYST_EXECUTOR", "sdk");
+    const out = readFileSync(f, "utf8");
+    expect(out.match(/CATALYST_EXECUTOR=/g)).toHaveLength(1);
+    expect(out).toBe("export CATALYST_EXECUTOR=sdk\n");
+  });
+});
+
+describe("execCoreEnvPath — CTL-1401 (Codex P2: matches the launcher default, ignores XDG)", () => {
+  test("honors CATALYST_EXECUTION_CORE_ENV override; otherwise ~/.config (NOT XDG_CONFIG_HOME)", () => {
+    expect(execCoreEnvPath({ CATALYST_EXECUTION_CORE_ENV: "/custom/ec.env" })).toBe("/custom/ec.env");
+    // the launcher hard-codes ${HOME}/.config — XDG must NOT redirect us, or the daemon reads a
+    // different file than we wrote and never sees the executor.
+    const withXdg = execCoreEnvPath({ XDG_CONFIG_HOME: "/xdg" });
+    expect(withXdg).not.toContain("/xdg");
+    expect(withXdg).toContain("/.config/catalyst/execution-core.env");
+  });
+});
+
+describe("runInstallLifecycle — CTL-1401 executor + cloud-sync provisioning (integration)", () => {
+  test("worker install --executor sdk writes execution-core.env AND adopts cloud-sync", async () => {
+    const ecEnv = tmpCfg(); // empty/absent → upsert creates it fresh
+    const bag = withRealRun(makeDeps());
+    await runInstallLifecycle({ operation: "install", nodeClass: "worker", opts: { executor: "sdk", execCoreEnv: ecEnv } }, bag.deps);
+    // the SDK executor lever is durably provisioned into execution-core.env
+    expect(readFileSync(ecEnv, "utf8")).toContain("export CATALYST_EXECUTOR=sdk");
+    // and the cloud-sync writer was adopted (the regression fix)
+    expect(bag.calls.some((argv) => argv[0] === "STACK" && argv[1] === "adopt-cloud-sync")).toBe(true);
+  });
+  test("a reinstall WITHOUT --executor never touches execution-core.env (preserve, not clobber)", async () => {
+    const ecEnv = tmpCfg();
+    writeFileSync(ecEnv, "export CATALYST_EXECUTOR=sdk\nexport CATALYST_LINEAR_REPLICA=on\n");
+    const before = readFileSync(ecEnv, "utf8");
+    const bag = withRealRun(makeDeps());
+    await runInstallLifecycle({ operation: "reinstall", nodeClass: "worker", opts: { execCoreEnv: ecEnv } }, bag.deps);
+    expect(readFileSync(ecEnv, "utf8")).toBe(before); // survived byte-for-byte
+    // cloud-sync is still re-adopted on a reinstall (teardown removed it)
+    expect(bag.calls.some((argv) => argv[0] === "STACK" && argv[1] === "adopt-cloud-sync")).toBe(true);
+  });
+  test("Codex P2: rollback REVERTS the --executor env mutation to its pre-image (true reversal)", async () => {
+    const ecEnv = tmpCfg();
+    writeFileSync(ecEnv, "export CATALYST_EXECUTOR=bg\n"); // node was bg before
+    const before = readFileSync(ecEnv, "utf8");
+    // fail a step AFTER write-config's setenv (install-services) so the run takes the rollback path
+    const bag = withRealRun(makeDeps({ failOn: (argv) => (argv[1] === "install-services" ? 7 : 0), bundleHadAgents: true }));
+    const res = await runInstallLifecycle({ operation: "install", nodeClass: "worker", opts: { executor: "sdk", execCoreEnv: ecEnv } }, bag.deps);
+    // the run did NOT complete (it hit the rollback path — outcome is rolled_back or, if the stubbed
+    // re-bootstrap also fails, failed; either way the env revert runs at the top of the catch)
+    expect(res.outcome).not.toBe("completed");
+    // the executor lever was reverted to bg — NOT left flipped to sdk for the next daemon start
+    expect(readFileSync(ecEnv, "utf8")).toBe(before);
+  });
+  test("Codex P2: rollback DELETES execution-core.env if --executor created it fresh (pre-image was absent)", async () => {
+    const ecEnv = tmpCfg(); // does not exist yet
+    rmSync(ecEnv, { force: true });
+    const bag = withRealRun(makeDeps({ failOn: (argv) => (argv[1] === "install-services" ? 7 : 0), bundleHadAgents: true }));
+    await runInstallLifecycle({ operation: "install", nodeClass: "worker", opts: { executor: "sdk", execCoreEnv: ecEnv } }, bag.deps);
+    expect(existsSync(ecEnv)).toBe(false); // created-then-reverted ⇒ gone
+  });
+  test("Codex P2: a destructive adopt-cloud-sync failure on macOS → completed-but-degraded (cloudSyncOk=false), NOT silent success", async () => {
+    const bag = withRealRun(makeDeps({ failOn: (argv) => (argv[1] === "adopt-cloud-sync" ? 1 : 0) }));
+    bag.deps.isDarwin = true; // pin macOS so the failure is treated as genuine
+    const res = await runInstallLifecycle({ operation: "install", nodeClass: "worker", opts: {} }, bag.deps);
+    expect(res.outcome).toBe("completed"); // the node IS installed…
+    expect(res.cloudSyncOk).toBe(false); // …but degraded — the writer may be down
+  });
+  test("off macOS, an adopt-cloud-sync non-zero stays a benign optional skip (cloudSyncOk=true)", async () => {
+    const bag = withRealRun(makeDeps({ failOn: (argv) => (argv[1] === "adopt-cloud-sync" ? 1 : 0) }));
+    bag.deps.isDarwin = false; // non-launchd OS — adopt-cloud-sync is macOS-only by design
+    const res = await runInstallLifecycle({ operation: "install", nodeClass: "worker", opts: {} }, bag.deps);
+    expect(res.cloudSyncOk).toBe(true);
+  });
+  test("Codex P2 (re-review#2): restart fires on the EFFECTIVE (last) executor — a sdk-then-bg file is really bg", async () => {
+    const ecEnv = tmpCfg();
+    writeFileSync(ecEnv, "export CATALYST_EXECUTOR=sdk\nCATALYST_EXECUTOR=bg\n"); // bash last-wins ⇒ effective = bg
+    const bag = withRealRun(makeDeps());
+    await runInstallLifecycle({ operation: "install", nodeClass: "worker", opts: { executor: "sdk", execCoreEnv: ecEnv } }, bag.deps);
+    // effective old = bg, new = sdk → CHANGED → exec-core is restarted to apply it
+    expect(bag.calls.some((a) => a[0] === "EXECCORE" && a[1] === "restart")).toBe(true);
+  });
+  test("Codex P2 (re-review#2): restart is SKIPPED when the effective executor already matches (no needless interrupt)", async () => {
+    const ecEnv = tmpCfg();
+    writeFileSync(ecEnv, "export CATALYST_EXECUTOR=bg\nCATALYST_EXECUTOR=sdk\n"); // effective = sdk
+    const bag = withRealRun(makeDeps());
+    await runInstallLifecycle({ operation: "install", nodeClass: "worker", opts: { executor: "sdk", execCoreEnv: ecEnv } }, bag.deps);
+    expect(bag.calls.some((a) => a[0] === "EXECCORE" && a[1] === "restart")).toBe(false);
+  });
+  test("Codex P2 (re-review#2): rollback re-bootstrap does NOT re-adopt cloud-sync (additive — would leave an agent the pre-run node lacked)", async () => {
+    // hadAgents + !live → the rollback path re-bootstraps the restored class; fail start-stack so it triggers.
+    const bag = withRealRun(makeDeps({ failOn: (argv) => (argv[1] === "start" ? 9 : 0), bundleHadAgents: true, daemonsLive: false }));
+    await runInstallLifecycle({ operation: "install", nodeClass: "worker", opts: {} }, bag.deps);
+    // adopt-cloud-sync ran ONCE in the forward install-agents; the re-bootstrap must skip it (no 2nd call)
+    expect(bag.calls.filter((a) => a[0] === "STACK" && a[1] === "adopt-cloud-sync")).toHaveLength(1);
   });
 });
 
@@ -897,6 +1093,11 @@ describe("main — CLI exit codes", () => {
     const c = capture();
     expect(await main(["install", "--class", "nope"], c.depsOverride)).toBe(2);
   });
+  test("CTL-1401: invalid --executor → exit 2 (a typo must not silently leave the node on a default)", async () => {
+    const c = capture();
+    expect(await main(["install", "--class", "worker", "--executor", "turbo"], c.depsOverride)).toBe(2);
+    expect(c.errOut.join("\n")).toContain("--executor must be one of");
+  });
   test("--dry-run prints the plan and runs nothing → exit 0", async () => {
     const c = capture();
     const code = await main(["install", "--class", "developer", "--dry-run"], c.depsOverride);
@@ -905,6 +1106,24 @@ describe("main — CLI exit codes", () => {
     expect(text).toContain("dry-run");
     expect(text).toContain("adopt-updater");
     expect(text).not.toContain("install-services");
+  });
+  test("CTL-1401: --dry-run renders the set-executor setenv + adopt-cloud-sync steps (value shown, no crash)", async () => {
+    const c = capture();
+    const code = await main(["install", "--class", "worker", "--executor", "sdk", "--dry-run"], c.depsOverride);
+    expect(code).toBe(0);
+    const text = c.out.join("\n");
+    expect(text).toContain("adopt-cloud-sync");
+    expect(text).toContain("set-executor");
+    expect(text).toContain("CATALYST_EXECUTOR=sdk");
+  });
+  test("CTL-1401 (Codex P2): a destructive adopt-cloud-sync failure → completed but exit 1 (degraded, not silent)", async () => {
+    const bag = withRealRun(makeDeps({ failOn: (argv) => (argv[1] === "adopt-cloud-sync" ? 1 : 0) }));
+    bag.deps.isDarwin = true;
+    const out = [];
+    const errOut = [];
+    const code = await main(["install", "--class", "worker"], { ...bag.deps, out: (m) => out.push(m), errOut: (m) => errOut.push(m) });
+    expect(code).toBe(1);
+    expect(errOut.join("\n")).toContain("adopt-cloud-sync FAILED");
   });
 
   // Execute-path exit codes via full stub deps.
