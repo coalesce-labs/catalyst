@@ -334,6 +334,56 @@ describe("drainOnce — free-slot re-check", () => {
     drainOnce(deps);
     expect(readIntent("CTL-5").status).toBe("launched");
   });
+
+  // GROUP C: an sdk dispatch settles synchronously with NO bg job, so countBg
+  // cannot see this pass's launches. drainOnce must count them locally so it does
+  // not overrun maxParallel across multiple queued intents in one drain.
+  test("executor=sdk: with maxParallel=1 and two queued intents, only ONE launches (the second un-claims)", () => {
+    seedQueued("CTL-SDK-1");
+    seedQueued("CTL-SDK-2");
+    let invokes = 0;
+    const deps = makeDeps({
+      maxParallel: 1,
+      executor: "sdk",
+      // sdk dispatch is synchronous & invisible to countBg — it stays 0 the
+      // whole pass, exactly the condition that used to let BOTH intents launch.
+      countBackgroundAgents: () => 0,
+      invokeFn: () => {
+        invokes++;
+        return { dispatched: true, details: {} }; // sdk: no bg_job_id
+      },
+    });
+
+    const res = drainOnce(deps);
+
+    expect(invokes).toBe(1); // slot limit honored despite the static bg count
+    expect(res.drained).toBe(1);
+    const statuses = ["CTL-SDK-1", "CTL-SDK-2"].map((t) => readIntent(t).status).sort();
+    expect(statuses).toEqual(["launched", "queued"]); // one launched, one held
+    expect(deps._emitted.launched).toHaveLength(1);
+  });
+
+  // The bg path is unchanged: localLaunched is never consulted (executor != sdk),
+  // so the per-intent countBg check governs exactly as before.
+  test("executor=bg: localLaunched is NOT consulted (bg jobs surface in countBg)", () => {
+    seedQueued("CTL-BG-1");
+    seedQueued("CTL-BG-2");
+    let invokes = 0;
+    const deps = makeDeps({
+      maxParallel: 8,
+      executor: "bg",
+      countBackgroundAgents: () => 0, // plenty of headroom for both
+      invokeFn: (ticket) => {
+        invokes++;
+        return { dispatched: true, details: { bg_job_id: `bg-${ticket}` } };
+      },
+    });
+
+    const res = drainOnce(deps);
+
+    expect(invokes).toBe(2);
+    expect(res.drained).toBe(2);
+  });
 });
 
 describe("drainOnce — live-worker supersede (idempotency)", () => {

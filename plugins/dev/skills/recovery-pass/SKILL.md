@@ -460,7 +460,8 @@ governs deciding a human is genuinely needed and authoring the brief for them.
 > call you cannot safely decide — never just because an open PR exists.
 >
 > **STEP PR-1 — Enumerate ALL the ticket's PRs (open + merged + closed) — the FACTS.** Run `gh pr
-> list --search "<TICKET>" --state all --json number,title,state,merged,mergedAt,isDraft,reviewDecision`.
+> list --search "<TICKET>" --state all --json number,title,state,mergedAt,isDraft,reviewDecision` (a PR
+> is merged when `state == "MERGED"` / `mergedAt` is non-null — there is no `merged` JSON field).
 > Also read `workers/<T>/phase-pr.json` and `workers/<T>/phase-monitor-merge.json` for `.pr.number`;
 > also check `gh pr list --head "<branch>"` (the `ryan/<ticket>-slug` Linear branch — catches human
 > PRs whose title omits the key); and the ticket's **Linear attachments** (linked PRs) via

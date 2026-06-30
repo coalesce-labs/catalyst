@@ -165,6 +165,16 @@ export function drainOnce(deps = {}) {
     ? deps.claimCeilingMs
     : DEFAULT_CLAIM_CEILING_MS;
   const max = resolveMaxParallel(deps.maxParallel);
+  // CTL-1157 GROUP C: the executor this drain dispatches through. An sdk dispatch
+  // settles SYNCHRONOUSLY with no bg job, so countBg cannot see it on the next
+  // loop iteration — without a local counter, multiple queued intents would each
+  // pass the free-slot check and overrun the scheduler's slot limit at
+  // maxParallel=1. Track the synchronous launches already performed in THIS pass
+  // and count them toward the capacity check when executor==="sdk". bg launches
+  // DO surface in countBg, so for bg this counter is unused and behavior is
+  // byte-identical.
+  const executor = deps.executor ?? null;
+  let localLaunched = 0;
 
   // (0) Crash safety: reclaim claimed-* sidecars older than one ceiling window
   //     back to queued so a dead runner doesn't strand an intent forever.
@@ -224,7 +234,12 @@ export function drainOnce(deps = {}) {
         "delegate-runner: bg count failed — un-claiming (fail-closed, no launch on unknown count)"
       );
     }
-    if (!countOk || computeFreeSlots(max, live) <= 0) {
+    // Under sdk, fold this pass's synchronous launches into the live count so the
+    // slot limit is honored across multiple queued intents in one drain (bg jobs
+    // already show up in countBg, so localLaunched stays 0 there).
+    const effectiveLive =
+      executor === "sdk" ? (live ?? 0) + localLaunched : live;
+    if (!countOk || computeFreeSlots(max, effectiveLive) <= 0) {
       try {
         transitionFn(orchDir, ticket, { from: claimPath, status: "queued" });
       } catch (err) {
@@ -306,6 +321,10 @@ export function drainOnce(deps = {}) {
       } catch {
         /* best-effort */
       }
+      // Count this dispatch toward the in-pass slot reservation. Only consulted
+      // when executor==="sdk" (synchronous, invisible to countBg); for bg the
+      // launched job is counted by countBg on the next iteration instead.
+      localLaunched++;
       result.drained++;
     } else {
       const failReason = r?.reason ?? "dispatch-failed";
@@ -458,7 +477,7 @@ if (isEntrypoint) {
         ...invokeDeps,
         dispatchTicket: (o, t, p) => dispatchTicketSeam(o, t, p, { dispatch: executorDispatch }),
       });
-    const r = drainOnce({ orchDir, maxParallel: readMaxParallel(orchDir, {}), invokeFn });
+    const r = drainOnce({ orchDir, maxParallel: readMaxParallel(orchDir, {}), invokeFn, executor });
     log.info({ ...r, executor }, "delegate-runner-entry: drain complete");
   } catch (err) {
     log.warn({ err: err?.message }, "delegate-runner-entry: drain threw");
