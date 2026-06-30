@@ -1,9 +1,18 @@
 # Changelog
 
-## [7.3.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-pm-v7.2.0...catalyst-pm-v7.3.0) (2026-06-30)
+## [7.3.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-pm-v7.2.0...catalyst-pm-v7.3.0)
+
+Jun 30, 2026
+
+<!-- ai-enhanced -->
+
+### Evidence-Based Linear Read Path
+
+Agents now follow a single canonical rule for reading Linear: on standard nodes they call `linearis` directly, and on Catalyst Cloud nodes they read the replica first and only escalate to a direct read if there's concrete evidence of staleness. This eliminates the scattered, conflicting guidance that was pointing agents at the retired read mirror. No migration needed — the daemon already handles mode resolution automatically.
 
 
-### Features
+
+### PRs
 
 * **dev:** CTL-1392 — agents read the Catalyst Cloud replica first (evidence-based fallback) ([#2474](https://github.com/coalesce-labs/catalyst/issues/2474)) ([5599fe9](https://github.com/coalesce-labs/catalyst/commit/5599fe954ac859adc2db153a0c93a55eceb8780c))
 
