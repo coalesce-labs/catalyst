@@ -246,58 +246,76 @@ export function createReplicaReader({ dbPath = getReplicaDbPath() } = {}) {
     if (!isReplicaFresh(dbPath)) return undefined;
     try {
       const handle = open();
-      // CTL-1397 (P1 fix) — SEED-COMPLETENESS gate, BEFORE the eligible SELECT.
-      // A fresh mtime only proves the writer is live; mid-reseed the `issues`
-      // table is truncated/partial while the cursor row is absent. If the cursor
-      // is missing/empty the seed is not known-complete → fall through to linearis
-      // rather than serve an empty/partial board. Inside the try so a missing
-      // `sync_meta` table (or any throw) routes to the catch → dropHandle +
-      // undefined (fail-open).
-      if (!handle.prepare(SEED_COMPLETE_SELECT).get()) return undefined;
-      const rows = handle
-        .prepare(ELIGIBLE_SELECT)
-        .all(`${query.team}-%`, query.status, ELIGIBLE_LIMIT);
-      const fwdStmt = handle.prepare(RELATIONS_FORWARD_SELECT);
-      const invStmt = handle.prepare(RELATIONS_INVERSE_SELECT);
-      const nodes = rows.map((row) => {
-        // forward relations this issue owns; linearis's forward `relations`
-        // nodes carry `relatedIssue` (live consumers read relatedIssue.identifier).
-        const relations = {
-          nodes: fwdStmt.all(row.identifier).map((r) => ({
-            type: r.type,
-            relatedIssue: { identifier: r.related_identifier },
-          })),
-        };
-        // inverse relations (the blocked-by edge the scheduler gates on);
-        // linearis's inverseRelations nodes carry `issue` (issue.identifier).
-        const inverseRelations = {
-          nodes: invStmt.all(row.identifier).map((r) => ({
-            type: r.type,
-            issue: { identifier: r.issue_identifier },
-          })),
-        };
-        // epoch-ms → ISO-8601 (the scheduler tie-break compares these as the
-        // linearis path emits them); uncoercible → null.
-        const updMs = coerceMs(row.updated_at);
-        const creMs = coerceMs(row.created_at);
-        return {
-          identifier: row.identifier,
-          title: row.title,
-          state: row.state,
-          priority: row.priority,
-          estimate: row.estimate,
-          updatedAt: updMs === undefined ? null : new Date(updMs).toISOString(),
-          createdAt: creMs === undefined ? null : new Date(creMs).toISOString(),
-          project: row.project_name ?? null,
-          parent: row.parent_identifier ?? null,
-          relations,
-          inverseRelations,
-          // delegate is already populated by the replica, so the linear-query
-          // replica tier skips the GraphQL delegate batch entirely.
-          delegate: row.delegate_id != null ? { id: row.delegate_id, name: row.delegate_name ?? null } : null,
-        };
+      // CTL-1397 (P1 fix #2, Codex review) — read the SEED-COMPLETENESS cursor
+      // AND the board/relation rows inside ONE deferred read transaction, so the
+      // whole answer comes from a single consistent snapshot. As separate
+      // autocommit reads (the prior shape), the cursor check and the data SELECTs
+      // could straddle a forced re-seed: the writer DELETEs the cursor +
+      // TRUNCATEs `issues` + batch-repopulates, so the gate would pass on the
+      // pre-reseed cursor, then the SELECTs would observe a partially-repopulated
+      // table — the exact partial board the gate exists to reject, which
+      // runEligibleQuery would then trust (it serves any non-empty replica
+      // result). A deferred read transaction pins one snapshot across the cursor,
+      // issues, and relation reads, so within it cursor-present ⟺ a complete seed.
+      // bun:sqlite's transaction() defaults to BEGIN DEFERRED (read-only — never
+      // attempts a write lock, so it is safe on the readonly handle) and
+      // COMMIT/ROLLBACKs automatically; a throw inside rolls back + rethrows into
+      // the outer catch → dropHandle + undefined (fail-open). Holds in WAL (prod)
+      // and rollback-journal (test fixture) alike.
+      const readSnapshot = handle.transaction(() => {
+        // SEED-COMPLETENESS gate (see SEED_COMPLETE_SELECT): cursor present = seed
+        // complete; absent/empty = mid-reseed → don't serve. Now read in the SAME
+        // snapshot as the board below so a re-seed can't slip between the two.
+        // undefined here = gate failed → fall through to linearis.
+        if (!handle.prepare(SEED_COMPLETE_SELECT).get()) return undefined;
+        const rows = handle
+          .prepare(ELIGIBLE_SELECT)
+          .all(`${query.team}-%`, query.status, ELIGIBLE_LIMIT);
+        const fwdStmt = handle.prepare(RELATIONS_FORWARD_SELECT);
+        const invStmt = handle.prepare(RELATIONS_INVERSE_SELECT);
+        return rows.map((row) => {
+          // forward relations this issue owns; linearis's forward `relations`
+          // nodes carry `relatedIssue` (live consumers read relatedIssue.identifier).
+          const relations = {
+            nodes: fwdStmt.all(row.identifier).map((r) => ({
+              type: r.type,
+              relatedIssue: { identifier: r.related_identifier },
+            })),
+          };
+          // inverse relations (the blocked-by edge the scheduler gates on);
+          // linearis's inverseRelations nodes carry `issue` (issue.identifier).
+          const inverseRelations = {
+            nodes: invStmt.all(row.identifier).map((r) => ({
+              type: r.type,
+              issue: { identifier: r.issue_identifier },
+            })),
+          };
+          // epoch-ms → ISO-8601 (the scheduler tie-break compares these as the
+          // linearis path emits them); uncoercible → null.
+          const updMs = coerceMs(row.updated_at);
+          const creMs = coerceMs(row.created_at);
+          return {
+            identifier: row.identifier,
+            title: row.title,
+            state: row.state,
+            priority: row.priority,
+            estimate: row.estimate,
+            updatedAt: updMs === undefined ? null : new Date(updMs).toISOString(),
+            createdAt: creMs === undefined ? null : new Date(creMs).toISOString(),
+            project: row.project_name ?? null,
+            parent: row.parent_identifier ?? null,
+            relations,
+            inverseRelations,
+            // delegate is already populated by the replica, so the linear-query
+            // replica tier skips the GraphQL delegate batch entirely.
+            delegate: row.delegate_id != null ? { id: row.delegate_id, name: row.delegate_name ?? null } : null,
+          };
+        });
       });
-      return { nodes };
+      const nodes = readSnapshot();
+      // undefined = the seed-completeness gate failed inside the snapshot → fall
+      // through to linearis (never serve an empty/partial board on a re-seed).
+      return nodes === undefined ? undefined : { nodes };
     } catch {
       // Drop the handle so a later call re-opens fresh (DB may be re-seeded).
       dropHandle();

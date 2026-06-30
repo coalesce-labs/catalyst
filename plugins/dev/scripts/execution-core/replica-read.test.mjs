@@ -509,4 +509,39 @@ describe("createReplicaReader.eligible (CTL-1397 board-list)", () => {
     // responsibilities stay distinct.
     expect(reader.eligible({ team: "ZZZ", status: "Todo" })).toEqual({ nodes: [] });
   });
+
+  // CTL-1397 (P1 fix #2, Codex review) — the cursor gate + board + relation reads
+  // now run inside ONE deferred read transaction so a forced re-seed can't slip
+  // between the gate and the data SELECTs (serving a partial board). The race is
+  // single-snapshot SQLite isolation that a synchronous fixture can't interleave,
+  // so these lock the OBSERVABLE properties of the wrapped path: it works in WAL
+  // (prod journal mode), it commits/releases the snapshot every call (a botched
+  // COMMIT would leak a read txn → the second call's BEGIN nests/throws or the WAL
+  // never releases), and the gate still composes inside the transaction.
+  test("WAL journal mode (prod shape): repeated eligible() calls each commit/release the snapshot and return the consistent board", () => {
+    const db = new Database(dbPath, { create: true });
+    db.run(`PRAGMA journal_mode = WAL`); // exercise the prod journal mode the snapshot fix targets
+    db.run(`CREATE TABLE issues (identifier TEXT, title TEXT, state TEXT, priority INTEGER, estimate INTEGER, project_id TEXT, parent_identifier TEXT, delegate_id TEXT, delegate_name TEXT, removed_at TEXT, updated_at INTEGER, created_at INTEGER)`);
+    db.run(`CREATE INDEX idx_issues_identifier ON issues (identifier)`);
+    db.run(`CREATE TABLE relations (type TEXT, issue_identifier TEXT, related_identifier TEXT)`);
+    db.run(`CREATE TABLE projects (id TEXT, name TEXT)`);
+    db.run(`CREATE TABLE sync_meta (key TEXT PRIMARY KEY, value TEXT)`);
+    db.run(`INSERT INTO sync_meta VALUES ('cursor', '42')`);
+    db.run(`INSERT INTO issues VALUES ('CTL-100', 'Repoint board-list', 'Todo', 2, 3, NULL, NULL, NULL, NULL, NULL, 3000, 100)`);
+    db.run(`INSERT INTO issues VALUES ('CTL-101', 'Second todo', 'Todo', 0, NULL, NULL, NULL, NULL, NULL, NULL, 2000, 90)`);
+    db.run(`INSERT INTO relations VALUES ('blocks', 'CTL-7', 'CTL-100')`);
+    db.close();
+    freshen();
+    reader = createReplicaReader({ dbPath });
+    const first = reader.eligible({ team: "CTL", status: "Todo" });
+    expect(first.nodes.map((n) => n.identifier)).toEqual(["CTL-100", "CTL-101"]);
+    // A second call must succeed identically — proving the prior call's read
+    // transaction was committed/released (not left open pinning the WAL snapshot).
+    const second = reader.eligible({ team: "CTL", status: "Todo" });
+    expect(second.nodes.map((n) => n.identifier)).toEqual(["CTL-100", "CTL-101"]);
+    // The inverse (blocked-by) relation, enriched INSIDE the same snapshot, survives.
+    expect(second.nodes[0].inverseRelations.nodes).toEqual([
+      { type: "blocks", issue: { identifier: "CTL-7" } },
+    ]);
+  });
 });
