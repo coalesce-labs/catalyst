@@ -127,7 +127,10 @@ import { makePrView } from "./scan-adapters.mjs";
 import { defaultCheckOpenPrs } from "./open-pr-gate.mjs";
 // CTL-1157 (ALARM-NOT-BLOCK): the loud `recovery.done-applied-with-open-pr` event
 // the pure-code terminal sweep emits when it lands a Done while an open PR exists.
-import { appendRecoveryDoneOpenPrEvent } from "./recovery-done-open-pr-event.mjs";
+import {
+  appendRecoveryDoneOpenPrEvent,
+  appendRecoveryDoneAppliedEvent,
+} from "./recovery-done-open-pr-event.mjs";
 import {
   countBackgroundAgents,
   getAgentsCached,
@@ -2371,7 +2374,14 @@ function terminalDoneOnce(
   ticket,
   writeStatus,
   emitStateWrite,
-  { multiHost = false, checkOpenPrs, emitDoneWithOpenPr = appendRecoveryDoneOpenPrEvent } = {}
+  {
+    multiHost = false,
+    checkOpenPrs,
+    emitDoneWithOpenPr = appendRecoveryDoneOpenPrEvent,
+    // CTL-1157 SLICE 3: the broad "Done-moves" emitter — fires on EVERY confirmed
+    // terminal-sweep Done (not just the open-PR subset). Injectable for tests.
+    emitDoneApplied = appendRecoveryDoneAppliedEvent,
+  } = {}
 ) {
   const marker = join(orchDir, "workers", ticket, ".terminal-done.applied");
   if (existsSync(marker)) return;
@@ -2423,6 +2433,23 @@ function terminalDoneOnce(
     // success so the once-semantics stay testable without a real result.
     if (res === undefined || res?.applied) {
       writeFileSync(marker, "");
+      // CTL-1157 SLICE 3 (Done-moves panel): the Done write LANDED — emit the broad
+      // recovery.done-applied on EVERY terminal-sweep Done so OTEL charts the move
+      // and watches the open_prs_at_done>0 red-line. This pure-code path has no agent
+      // to reason about PRs, so prs_closed/prs_kept are 0; open_prs_at_done carries
+      // the enumerated count (the red-line). Best-effort — never aborts the tick.
+      try {
+        emitDoneApplied({
+          ticket,
+          openPrsAtDone: openPrs.length,
+          prsClosed: 0,
+          prsKept: 0,
+          recoveryMode: "enforce", // a real terminal-sweep write is always enforce
+          by: "terminal-sweep",
+        });
+      } catch {
+        /* observability must never break the sweep */
+      }
       // CTL-1157 (ALARM-NOT-BLOCK): the Done write LANDED. If the ticket still has
       // ≥1 open PR, fire the loud alarm (best-effort; never throws, never aborts the
       // tick). A clean Done (0 open PRs) emits nothing.
@@ -3049,6 +3076,9 @@ export function schedulerTick(
     // CTL-1157: the alarm emitter for the terminal sweep (default = real append to
     // the unified event log). Injectable so tests record the alarm without writing.
     emitDoneWithOpenPr = appendRecoveryDoneOpenPrEvent,
+    // CTL-1157 SLICE 3: the broad Done-moves emitter for the terminal sweep (fires on
+    // EVERY confirmed Done, not just the open-PR subset). Injectable for tests.
+    emitDoneApplied = appendRecoveryDoneAppliedEvent,
     // CTL-671: phantom worker-dir validity sweep seams. classifyResolution is
     // the 3-valued Linear probe (exists|not-found|unknown); isBgJobAlive maps a
     // dead worker's bg_job_id to a live `claude agents` session. The DEFAULTS
@@ -5720,6 +5750,7 @@ export function schedulerTick(
         multiHost,
         checkOpenPrs,
         emitDoneWithOpenPr,
+        emitDoneApplied,
       });
       // CTL-646: terminal Done unconditionally clears needs-human (belt + teardown path).
       // CTL-703: worktree teardown is now the `teardown` FSM phase (teardownWorktreeOnce

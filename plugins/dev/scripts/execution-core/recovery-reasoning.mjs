@@ -1065,6 +1065,13 @@ function promoteNumericAttrs(type, details) {
     for (const [name, r] of Object.entries(details.invariants ?? {})) {
       num(`recovery.inv.${name}.failed`, r?.failed);
     }
+    // CTL-1157 SLICE 3 (OTEL turn-56): promote the three stuck-cohort failed-counts
+    // under the AGREED underscored top-level names so the Done-safety dashboards bind
+    // to a stable contract (not the camelCase recovery.inv.<key>.failed mirror above).
+    // These are the cohorts board-health was blind to before CTL-1157.
+    num("cohort_phantom_merged_pr", details.invariants?.phantomMergedPr?.failed);
+    num("cohort_orphaned_pr", details.invariants?.orphanedOpenPr?.failed);
+    num("cohort_frozen_needs_human", details.invariants?.frozenNeedsHuman?.failed);
   }
   return a;
 }

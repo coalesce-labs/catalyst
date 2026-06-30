@@ -32,7 +32,10 @@ import {
 // a pure-code Done write lands while an open PR still exists. Re-exported for
 // back-compat (tests import defaultCheckOpenPrs from the CLI).
 import { defaultCheckOpenPrs, defaultDeriveBranchName } from "./open-pr-gate.mjs";
-import { appendRecoveryDoneOpenPrEvent } from "./recovery-done-open-pr-event.mjs";
+import {
+  appendRecoveryDoneOpenPrEvent,
+  appendRecoveryDoneAppliedEvent,
+} from "./recovery-done-open-pr-event.mjs";
 export { defaultCheckOpenPrs, defaultDeriveBranchName };
 
 const TICKET_RE = /^[A-Za-z][A-Za-z0-9_]*-\d+$/;
@@ -90,6 +93,20 @@ export function parseArgs(argv) {
       case "--no-emit":
         a.noEmit = true;
         break; // offline/test
+      // CTL-1157 SLICE 3: the delegate's PR-2 remediation counts, threaded into the
+      // recovery.done-applied "Done-moves" event. The agent enumerated + reasoned
+      // about every open PR before declaring; these record WHAT it did (closed N,
+      // kept N) and how many were STILL open at the Done (open-at-done>0 = red-line).
+      // Default 0 (a non-agent declare emits a clean 0/0/0 move).
+      case "--prs-closed":
+        a.prsClosed = Number(next());
+        break;
+      case "--prs-kept":
+        a.prsKept = Number(next());
+        break;
+      case "--open-prs-at-done":
+        a.openPrsAtDone = Number(next());
+        break;
       case "-h":
       case "--help":
         a.help = true;
@@ -124,6 +141,12 @@ Options:
   --state <key>     target stateMap key for declare (default 'done')
   --note <text>     freeform note stored with the declaration
   --by <who>        who declared it (default 'model')
+  --prs-closed <n>  declare: # of the ticket's PRs the agent CLOSED during PR-2
+                    remediation — recorded on the recovery.done-applied event
+  --prs-kept <n>    declare: # of PRs the agent finished/merged as part-of-solution
+  --open-prs-at-done <n>
+                    declare: # of PRs STILL open at the Done (>0 = the red-line the
+                    Done-moves panel alarms on; a clean delegate Done is 0)
   --config <path>   .catalyst/config.json supplying stateMap + repoRoot
                     (default: <cwd>/.catalyst/config.json)
   --write           reconcile: actually write (default dry-run)
@@ -303,6 +326,36 @@ async function cmdDeclare(args, deps = {}) {
       markReconciled(ticket, wrote.to_state ?? wrote.target ?? wrote.currentState, { dir });
   }
 
+  // CTL-1157 SLICE 3 (Done-moves panel): emit the broad recovery.done-applied for
+  // the delegate's OWN autonomous Done. This carries the agent's PR-2 remediation
+  // counts (prs_closed / prs_kept) and how many PRs were STILL open at the Done
+  // (open_prs_at_done > 0 = the red-line). The agent supplies them via flags — this
+  // path NEVER consults the open-PR enumerator (THE REVERSAL: declare is not gated),
+  // so the count comes from the agent's own prior enumeration, not a re-scan here.
+  // Shadow-safe: --no-write (no actual Done write) emits the would-apply telemetry
+  // variant; a real applied Done transition emits the enforce variant. Best-effort.
+  if (!args.noEmit && String(args.state).toLowerCase() === "done") {
+    const emitDoneApplied = deps.emitDoneApplied || appendRecoveryDoneAppliedEvent;
+    // Only a real done transition (or a no-write declaration) emits a move; an
+    // idempotent already-Done noop is not a "move".
+    const realDone = wrote && wrote.kind === "done" && wrote.applied && wrote.writeAction !== "skipped";
+    if (args.noWrite || realDone) {
+      try {
+        emitDoneApplied({
+          ticket,
+          openPrsAtDone: Number.isFinite(args.openPrsAtDone) ? args.openPrsAtDone : 0,
+          prsClosed: Number.isFinite(args.prsClosed) ? args.prsClosed : 0,
+          prsKept: Number.isFinite(args.prsKept) ? args.prsKept : 0,
+          // --no-write = no actual Done write yet (the drain lands it) → shadow/would.
+          recoveryMode: args.noWrite ? "shadow" : "enforce",
+          by: args.by,
+        });
+      } catch {
+        /* observability must never break declare */
+      }
+    }
+  }
+
   if (args.json) {
     process.stdout.write(JSON.stringify({ declared: decl, write: wrote }, null, 2) + "\n");
   } else {
@@ -361,6 +414,7 @@ async function cmdReconcile(args, deps = {}) {
   if (args.write) {
     const checkOpenPrs = deps.checkOpenPrs || defaultCheckOpenPrs;
     const emit = deps.emitDoneWithOpenPr || appendRecoveryDoneOpenPrEvent;
+    const emitDoneApplied = deps.emitDoneApplied || appendRecoveryDoneAppliedEvent;
     for (const r of rows) {
       // A real Done transition that actually changed state (not an idempotent
       // already-Done noop, not a dry-run, not a failed/skip row).
@@ -371,6 +425,22 @@ async function cmdReconcile(args, deps = {}) {
         if (facts && Array.isArray(facts.prs)) openPrs = facts.prs;
       } catch {
         openPrs = []; // unverifiable ⇒ no alarm (we no longer fail closed)
+      }
+      // CTL-1157 SLICE 3 (Done-moves panel): emit the broad recovery.done-applied on
+      // EVERY drained Done (not just the open-PR subset). The drain is a pure-code
+      // backstop with no agent to reason about PRs → prs_closed/prs_kept are 0;
+      // open_prs_at_done carries the enumerated count (the red-line). Best-effort.
+      try {
+        emitDoneApplied({
+          ticket: r.ticket,
+          openPrsAtDone: openPrs.length,
+          prsClosed: 0,
+          prsKept: 0,
+          recoveryMode: "enforce", // the drain only ever does real writes
+          by: "reconcile-drain",
+        });
+      } catch {
+        /* observability must never break the drain */
       }
       if (openPrs.length >= 1) {
         try {

@@ -898,6 +898,31 @@ describe("buildRecoveryEnvelope numeric/enum promotion (CTL-1291)", () => {
     expect(a["event.label"]).toBeNull();
   });
 
+  // CTL-1157 SLICE 3 (OTEL turn-56): the three stuck-cohort failed-counts promote
+  // under the AGREED underscored top-level names (queryable structured metadata, not
+  // body-buried), in ADDITION to the camelCase recovery.inv.<key>.failed mirror.
+  test("recovery.board-scan promotes the three cohort failed-counts under cohort_* names", () => {
+    const details = {
+      mode: "shadow",
+      invariantsFailed: 3,
+      gateDecision: "proceed",
+      gateReason: "3 invariant(s) flagged",
+      proposedTier1: 0, proposedTier2: 0, proposedTier3: 0,
+      invariants: {
+        phantomMergedPr: { ok: false, failed: 2, observable: true },
+        orphanedOpenPr: { ok: false, failed: 1, observable: true },
+        frozenNeedsHuman: { ok: false, failed: 4, observable: true },
+        needsHumanPile: { ok: true, failed: 0, observable: true },
+      },
+    };
+    const a = buildRecoveryEnvelope({ type: "recovery.board-scan", ticket: null, details }).attributes;
+    expect(a.cohort_phantom_merged_pr).toBe(2);
+    expect(a.cohort_orphaned_pr).toBe(1);
+    expect(a.cohort_frozen_needs_human).toBe(4);
+    // the camelCase per-invariant mirror still rides alongside (back-compat)
+    expect(a["recovery.inv.phantomMergedPr.failed"]).toBe(2);
+  });
+
   test("recovery.board-scan never promotes rosters/move arrays (cardinality)", () => {
     const details = {
       mode: "shadow",

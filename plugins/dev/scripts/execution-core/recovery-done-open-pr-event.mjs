@@ -23,6 +23,7 @@ import { appendFileSync, mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { homedir } from "node:os";
 import { buildCatalystResource } from "./lib/catalyst-resource.mjs";
+import { hostName } from "./lib/host-identity.mjs";
 
 // defaultAppend — append a JSONL line to the canonical unified event log. Path is
 // resolved the same way the rest of the reconciler emits (CATALYST_DIR, monthly
@@ -92,6 +93,104 @@ export function appendRecoveryDoneOpenPrEvent({ append = defaultAppend, ...field
   try {
     if (normalizePrNumbers(fields.openPrs).length === 0) return false;
     append(buildRecoveryDoneOpenPrEvent(fields));
+    return true;
+  } catch {
+    return false; // never throw from an observability emit
+  }
+}
+
+// ── CTL-1157 SLICE 3 — the broad "Done-moves" event: `recovery.done-applied` ───
+//
+// Unlike the loud `recovery.done-applied-with-open-pr` alarm above (the open-PR
+// SUBSET), THIS event fires on EVERY autonomous Done so OTEL has a "Done-moves"
+// panel — the delegate's clean Done declarations AND the two pure-code backstops.
+// The red-line is `open_prs_at_done > 0`: a clean Done (the agent finished/closed
+// every open PR before declaring) carries 0 and is INFO; a Done that lands while a
+// PR is still open carries >0 and is WARN — the same signal the alarm watches, now
+// also visible as a chartable rate across every Done. open_prs_at_done is the
+// count STILL open at the Done write; prs_closed / prs_kept are what the agent did
+// during its PR-2 remediation (0/0 for the no-agent pure-code paths).
+//
+// SHADOW-SAFE: in shadow the delegate does not write Done — the caller passes
+// recoveryMode:"shadow" and we emit `recovery.would-done-applied` (would-apply
+// telemetry, INFO, no write happened). In enforce the real write emits
+// `recovery.done-applied`. recoveryMode is BOTH the name selector and the
+// recovery_mode label, mirroring the recovery-reasoning shadow/enforce precedent.
+//
+// Loki (structured metadata — `| field="…"`, NOT `{}` stream labels):
+//   {service_namespace="catalyst"} | event_name="recovery.done-applied"
+//     | open_prs_at_done > 0           ← the red-line
+//   sum by (by) (count_over_time({…} | event_name="recovery.done-applied" [1d]))
+//
+// dimensions: open_prs_at_done [value] · prs_closed [value] · prs_kept [value] ·
+//             recovery_mode [label] · host_name [label] · by [label] ·
+//             event.label = ticket.
+const toCount = (v) => (Number.isFinite(Number(v)) ? Math.max(0, Math.trunc(Number(v))) : 0);
+
+export function buildRecoveryDoneAppliedEvent({
+  ticket,
+  openPrsAtDone = 0,
+  prsClosed = 0,
+  prsKept = 0,
+  recoveryMode = "enforce",
+  by = "unknown",
+  host = hostName(),
+} = {}) {
+  const ts = new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
+  const openCount = toCount(openPrsAtDone);
+  const shadow = recoveryMode === "shadow";
+  const name = shadow ? "recovery.would-done-applied" : "recovery.done-applied";
+  const action = shadow ? "would-done-applied" : "done-applied";
+  // The red-line: a Done that lands with ≥1 open PR is WARN (mirrors the alarm's
+  // severity). A clean Done — and any shadow would-apply — stays INFO.
+  const redLine = !shadow && openCount > 0;
+  return (
+    JSON.stringify({
+      ts,
+      id: randomBytes(8).toString("hex"),
+      observedTs: ts,
+      severityText: redLine ? "WARN" : "INFO",
+      severityNumber: redLine ? 13 : 9,
+      channel: "execution-core",
+      resource: buildCatalystResource({ serviceName: "catalyst.execution-core" }),
+      attributes: {
+        "event.name": name,
+        "event.entity": "linear",
+        "event.action": action,
+        // ticket = event_label (the owner's spec); lower-cased mirror kept too.
+        "event.label": ticket,
+        ticket,
+        // [value] dimensions — chartable counts:
+        open_prs_at_done: openCount,
+        prs_closed: toCount(prsClosed),
+        prs_kept: toCount(prsKept),
+        // [label] dimensions:
+        recovery_mode: recoveryMode,
+        host_name: host,
+        by,
+      },
+      body: {
+        payload: {
+          ticket,
+          by,
+          open_prs_at_done: openCount,
+          prs_closed: toCount(prsClosed),
+          prs_kept: toCount(prsKept),
+          recovery_mode: recoveryMode,
+          host_name: host,
+        },
+      },
+    }) + "\n"
+  );
+}
+
+// appendRecoveryDoneAppliedEvent — emit the Done-moves event. Best-effort +
+// swallow-on-error (observability must NEVER abort a Done write or wedge a tick).
+// Unlike the open-PR alarm this is NOT conditional on open PRs — it fires on every
+// autonomous Done. Returns true on success, false on any error.
+export function appendRecoveryDoneAppliedEvent({ append = defaultAppend, ...fields } = {}) {
+  try {
+    append(buildRecoveryDoneAppliedEvent(fields));
     return true;
   } catch {
     return false; // never throw from an observability emit

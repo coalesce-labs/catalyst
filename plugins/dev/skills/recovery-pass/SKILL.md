@@ -519,8 +519,16 @@ governs deciding a human is genuinely needed and authoring the brief for them.
 >
 > ```bash
 > node "${EXEC_CORE}/linear-reconcile-cli.mjs" declare "$TICKET" \
->   --by "recovery-pass" --state done ${BRANCH:+--branch "$BRANCH"}
+>   --by "recovery-pass" --state done ${BRANCH:+--branch "$BRANCH"} \
+>   --prs-closed "$PRS_CLOSED" --prs-kept "$PRS_KEPT" --open-prs-at-done "$PRS_STILL_OPEN"
 > ```
+>
+> Pass your PR-2 tallies so the **Done-moves panel** (SLICE 3) records WHAT you did: `--prs-closed`
+> = how many abandoned/superseded PRs you closed; `--prs-kept` = how many you finished/merged as
+> part-of-solution; `--open-prs-at-done` = how many are STILL open at the Done (this should be **0**
+> for a clean delegate Done — every open PR was finished or closed in PR-2 — and `>0` is the red-line
+> that fires the `recovery.done-applied` WARN). These ride the `recovery.done-applied` event
+> (`recovery_mode=enforce`, `by=recovery-pass`); they default to 0 if omitted.
 >
 > This **now just WRITES** — there is NO refuse-gate and it exits 0; the durable declaration is
 > dropped regardless of the immediate Linear write (a pending write is retried by the reconcile
@@ -533,11 +541,16 @@ governs deciding a human is genuinely needed and authoring the brief for them.
 > _rp_comment "$TICKET" "✅ **recovery-pass** resolved every open PR (merged the needed, closed the abandoned) + verified the plan deliverable → declared Done."
 > ```
 >
-> **The Done write itself no longer fires any alarm** — that's the point of having done the PR-2 work.
-> The observability from SLICE 3 (`recovery.done-applied-with-open-pr`, WARN) is emitted only by the
-> pure-code backstops (`terminalDoneOnce` / the reconcile drain) IF a Done ever lands while an open PR
-> still exists. A clean Done (every open PR finished or closed) is silent; a Done-with-open-PR is
-> loud. So PR-2 is load-bearing: enumerate-and-remediate is what keeps your Done writes silent.
+> **The Done write itself no longer fires any ALARM** — that's the point of having done the PR-2 work.
+> Two SLICE 3 events distinguish a clean Done from a dirty one: (1) EVERY autonomous Done — yours and
+> the pure-code backstops' — emits the broad `recovery.done-applied` (INFO) "Done-moves" event with
+> your `prs_closed` / `prs_kept` tallies and `open_prs_at_done`; (2) the loud
+> `recovery.done-applied-with-open-pr` (WARN) alarm fires ONLY from the pure-code backstops
+> (`terminalDoneOnce` / the reconcile drain) IF a Done lands while an open PR still exists. For YOUR
+> Done, `open_prs_at_done` should be **0** — every open PR finished or closed in PR-2 — which keeps the
+> Done-moves event INFO and fires no WARN. A Done that lands with `open_prs_at_done > 0` flips the
+> event to WARN and is the red-line the panel alarms on. So PR-2 is load-bearing: enumerate-and-remediate
+> is what keeps `open_prs_at_done` at 0 and your Done alarm-silent.
 >
 > **STEP PR-7 — When to escalate instead of Done (genuine judgment ONLY → Rubric Three):**
 > a. An open PR conflicts with an ADR/principle you must not override.

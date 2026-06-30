@@ -283,6 +283,91 @@ test("DRAIN: a CLEAN Done (0 open PRs) emits NO alarm", async () => {
   expect(alarms).toEqual([]); // clean Done is silent
 });
 
+// ── CTL-1157 SLICE 3 — the broad recovery.done-applied "Done-moves" event ──────
+// Unlike the open-PR alarm, this fires on EVERY autonomous Done (clean or not).
+
+test("DRAIN done-applied: fires on EVERY drained Done (clean too), by=reconcile-drain, 0/0 counts", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "decl-"));
+  const statesFile = join(dir, "states.json");
+  writeFileSync(statesFile, JSON.stringify({ "CTL-9": "Implement" }));
+  await runCli(["declare", "CTL-9", "--no-write", "--no-emit", "--decls-dir", dir], {
+    checkOpenPrs: PASS,
+  });
+  const moves = [];
+  const { code } = await runCli(
+    ["reconcile", "--write", "--decls-dir", dir, "--states-file", statesFile, "--config", configFixture(), "--json"],
+    {
+      applyCorrection: applyCorrectionDone,
+      checkOpenPrs: () => ({ ok: true, prs: [] }), // CLEAN — alarm stays silent
+      emitDoneApplied: (f) => moves.push(f),
+    }
+  );
+  expect(code).toBe(0);
+  expect(moves).toHaveLength(1); // the move event fires even on a clean Done
+  expect(moves[0]).toMatchObject({
+    ticket: "CTL-9",
+    by: "reconcile-drain",
+    openPrsAtDone: 0,
+    prsClosed: 0,
+    prsKept: 0,
+    recoveryMode: "enforce",
+  });
+});
+
+test("DRAIN done-applied: open_prs_at_done carries the red-line count when a PR is still open", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "decl-"));
+  const statesFile = join(dir, "states.json");
+  writeFileSync(statesFile, JSON.stringify({ "CTL-9": "Implement" }));
+  await runCli(["declare", "CTL-9", "--no-write", "--no-emit", "--decls-dir", dir], {
+    checkOpenPrs: PASS,
+  });
+  const moves = [];
+  await runCli(
+    ["reconcile", "--write", "--decls-dir", dir, "--states-file", statesFile, "--config", configFixture(), "--json"],
+    {
+      applyCorrection: applyCorrectionDone,
+      checkOpenPrs: () => ({ ok: false, prs: [{ number: 101, state: "OPEN" }] }),
+      emitDoneApplied: (f) => moves.push(f),
+    }
+  );
+  expect(moves).toHaveLength(1);
+  expect(moves[0].openPrsAtDone).toBe(1); // >0 = the red-line
+});
+
+test("DECLARE done-applied: the agent's own Done carries its PR-2 tallies (by=recovery-pass)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "decl-"));
+  const moves = [];
+  const { code } = await runCli(
+    [
+      "declare", "CTL-9", "--by", "recovery-pass", "--state", "done", "--no-write",
+      "--prs-closed", "2", "--prs-kept", "1", "--open-prs-at-done", "0",
+      "--decls-dir", dir,
+    ],
+    { emitDoneApplied: (f) => moves.push(f), checkOpenPrs: PASS }
+  );
+  expect(code).toBe(0);
+  expect(moves).toHaveLength(1);
+  expect(moves[0]).toMatchObject({
+    ticket: "CTL-9",
+    by: "recovery-pass",
+    prsClosed: 2,
+    prsKept: 1,
+    openPrsAtDone: 0,
+    // --no-write ⇒ no actual Done write yet ⇒ shadow/would-apply telemetry
+    recoveryMode: "shadow",
+  });
+});
+
+test("DECLARE done-applied: --no-emit suppresses the move event", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "decl-"));
+  const moves = [];
+  await runCli(
+    ["declare", "CTL-9", "--by", "recovery-pass", "--no-write", "--no-emit", "--decls-dir", dir],
+    { emitDoneApplied: (f) => moves.push(f), checkOpenPrs: PASS }
+  );
+  expect(moves).toEqual([]);
+});
+
 test("DRAIN: an idempotent already-Done write (writeAction=skipped) emits NO alarm", async () => {
   const dir = mkdtempSync(join(tmpdir(), "decl-"));
   const statesFile = join(dir, "states.json");
