@@ -215,6 +215,182 @@ describe("runEligibleQuery", () => {
   });
 });
 
+// CTL-1397 — the replica-backed board-list tier. When a `replica` with an
+// eligible() method is injected and it RETURNS { nodes } (a valid answer), the
+// query is served from the local Catalyst-Cloud SQLite replica WITHOUT shelling
+// out to `linearis issues list` — the durable fix for the fleet board-freeze
+// (the linearis discovery query burns the shared quota + trips the CTL-679
+// breaker). The linearis path stays UNCHANGED as the fall-through when the
+// replica does not serve (undefined). `onSource("replica"|"linearis", n)` is the
+// OTEL/Loki verification marker.
+describe("runEligibleQuery — replica tier (CTL-1397)", () => {
+  const query = { team: "CTL", status: "Todo", project: null, label: null, priority: null };
+
+  // A replica stub whose eligible() returns a canned linearis-list-shaped result.
+  function replicaReturning(nodes) {
+    const calls = [];
+    return {
+      calls,
+      eligible: (q) => {
+        calls.push(q);
+        return { nodes };
+      },
+    };
+  }
+
+  // An exec that fails the test if it is ever called — proves the replica path
+  // does NOT shell out to linearis.
+  function execMustNotRun() {
+    const fn = () => {
+      throw new Error("linearis exec must NOT run on a replica HIT");
+    };
+    return fn;
+  }
+
+  test("HIT: serves from the replica, never calls exec, normalizes + records onSource('replica')", () => {
+    const replica = replicaReturning([
+      {
+        identifier: "CTL-100",
+        title: "Repoint board-list",
+        state: "Todo",
+        priority: 2,
+        estimate: 3,
+        project: "Harden the core",
+        updatedAt: "2026-06-01T00:00:00Z",
+        createdAt: "2026-05-01T00:00:00Z",
+        parent: "CTL-1",
+        relations: { nodes: [] },
+        inverseRelations: { nodes: [] },
+        delegate: { id: "del-1", name: "Bot" },
+      },
+    ]);
+    const sources = [];
+    const tickets = runEligibleQuery(query, {
+      exec: execMustNotRun(),
+      replica,
+      onSource: (source, count) => sources.push([source, count]),
+    });
+    expect(tickets).toHaveLength(1);
+    expect(tickets[0]).toMatchObject({
+      identifier: "CTL-100",
+      state: "Todo",
+      priority: 2,
+      estimate: 3,
+      project: "Harden the core",
+      parent: "CTL-1",
+      delegate: "del-1", // normalizeTicket flattens delegate.id
+    });
+    expect(replica.calls).toEqual([query]); // eligible() received the query
+    expect(sources).toEqual([["replica", 1]]);
+  });
+
+  test("HIT applies the priority floor (same filter as the linearis path)", () => {
+    const replica = replicaReturning([
+      { identifier: "CTL-1", state: "Todo", priority: 1 },
+      { identifier: "CTL-2", state: "Todo", priority: 2 },
+      { identifier: "CTL-3", state: "Todo", priority: 3 },
+      { identifier: "CTL-0", state: "Todo", priority: 0 },
+    ]);
+    const tickets = runEligibleQuery({ ...query, priority: 2 }, {
+      exec: execMustNotRun(),
+      replica,
+    });
+    expect(tickets.map((t) => t.identifier).sort()).toEqual(["CTL-1", "CTL-2"]);
+  });
+
+  // CTL-1397 (P1 fix) — a replica-EMPTY is NOT trusted. A confident "the board
+  // is empty" verdict can zero a team's dispatch set fleet-wide; a feed-hole
+  // (CTL-139 replica-hole: cursor present but a team's rows dropped) presents as
+  // a replica-empty. So an empty replica result FALLS THROUGH to linearis (the
+  // source of truth for "is this board really empty") — only a NON-EMPTY replica
+  // result is served locally.
+  test("replica-EMPTY ({ nodes: [] }) FALLS THROUGH to linearis (confirmation), records onSource('linearis')", () => {
+    const replica = replicaReturning([]);
+    const exec = fakeExec({
+      // The confirmation: linearis says the board is NOT actually empty.
+      stdout: ticketsJson([{ identifier: "CTL-9", state: { name: "Todo" }, priority: 2 }]),
+    });
+    const sources = [];
+    const tickets = runEligibleQuery(query, {
+      exec,
+      replica,
+      onSource: (source, count) => sources.push([source, count]),
+    });
+    expect(exec.calls).toHaveLength(1); // linearis WAS called to confirm
+    // The linearis result (not the replica-empty) is what served.
+    expect(tickets.map((t) => t.identifier)).toEqual(["CTL-9"]);
+    expect(sources).toEqual([["linearis", 1]]);
+  });
+
+  test("replica filters to EMPTY via the priority floor → also falls through to linearis", () => {
+    // Replica returns rows, but the priority floor drops them all → empty result.
+    const replica = replicaReturning([
+      { identifier: "CTL-3", state: "Todo", priority: 3 },
+      { identifier: "CTL-4", state: "Todo", priority: 4 },
+    ]);
+    const exec = fakeExec({
+      stdout: ticketsJson([{ identifier: "CTL-2", state: { name: "Todo" }, priority: 2 }]),
+    });
+    const tickets = runEligibleQuery({ ...query, priority: 2 }, { exec, replica });
+    expect(exec.calls).toHaveLength(1); // empty-after-filter → linearis confirms
+    expect(tickets.map((t) => t.identifier)).toEqual(["CTL-2"]);
+  });
+
+  test("replica-EMPTY AND linearis throws (circuit open) → the throw PROPAGATES (caller preserves prior set)", () => {
+    const replica = replicaReturning([]);
+    // linearis exits non-zero (e.g. breaker open / auth failure) — runEligibleQuery
+    // throws, exactly as the linearis-only path does today. reconcileProject's
+    // catch then PRESERVES the prior eligible set (never zeroes the board).
+    const exec = fakeExec({ code: 1, stderr: "linearis: circuit open" });
+    expect(() => runEligibleQuery(query, { exec, replica })).toThrow(/exit 1/);
+  });
+
+  test("MISS (eligible() → undefined): falls through to the linearis exec, records onSource('linearis')", () => {
+    const replica = { eligible: () => undefined };
+    const exec = fakeExec({
+      stdout: ticketsJson([{ identifier: "CTL-9", state: { name: "Todo" }, priority: 2 }]),
+    });
+    const sources = [];
+    const tickets = runEligibleQuery(query, {
+      exec,
+      replica,
+      onSource: (source, count) => sources.push([source, count]),
+    });
+    expect(exec.calls).toHaveLength(1); // linearis WAS called
+    expect(exec.calls[0].cmd).toBe("linearis");
+    expect(tickets.map((t) => t.identifier)).toEqual(["CTL-9"]);
+    expect(sources).toEqual([["linearis", 1]]);
+  });
+
+  test("a replica whose eligible() THROWS falls through to linearis (fail-open)", () => {
+    const replica = {
+      eligible: () => {
+        throw new Error("replica blew up");
+      },
+    };
+    const exec = fakeExec({
+      stdout: ticketsJson([{ identifier: "CTL-9", state: { name: "Todo" } }]),
+    });
+    const tickets = runEligibleQuery(query, { exec, replica });
+    expect(exec.calls).toHaveLength(1);
+    expect(tickets.map((t) => t.identifier)).toEqual(["CTL-9"]);
+  });
+
+  test("no replica injected: behaves exactly like today (linearis path), onSource('linearis') still fires", () => {
+    const exec = fakeExec({
+      stdout: ticketsJson([{ identifier: "CTL-9", state: { name: "Todo" } }]),
+    });
+    const sources = [];
+    const tickets = runEligibleQuery(query, {
+      exec,
+      onSource: (source, count) => sources.push([source, count]),
+    });
+    expect(exec.calls).toHaveLength(1);
+    expect(tickets.map((t) => t.identifier)).toEqual(["CTL-9"]);
+    expect(sources).toEqual([["linearis", 1]]);
+  });
+});
+
 // CTL-565 D5 — fetchTicketState wraps `linearis issues read <id>` to hydrate
 // an out-of-set blocker's live Linear state. linearis emits JSON by default
 // (its header: "CLI for Linear.app with JSON output") — no --json flag exists.

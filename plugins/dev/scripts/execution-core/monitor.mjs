@@ -37,7 +37,9 @@ import {
   getClusterHosts, // CTL-862
   hostMembershipWarning, // CTL-1057
   isDraining as isDrainingDefault, // CTL-1095: drain gate
+  readLinearReplica, // CTL-1397: replica-backed board-list discovery (mode gate)
 } from "./config.mjs";
+import { createReplicaReader } from "./replica-read.mjs"; // CTL-1397
 import { ownedBy } from "./hrw.mjs"; // CTL-862: HRW ownership filter
 import { claimDispatchSync } from "./cluster-claim-sync.mjs"; // CTL-862: cross-host claim soft-CAS
 import { listProjects, getProjectConfig, resolveEligibleQuery } from "./registry.mjs";
@@ -250,6 +252,30 @@ export function handleCommentCreatedEvent(event, { onComment } = {}) {
 
 // --- Reconcile -----------------------------------------------------------
 
+// CTL-1397: the replica-backed board-list discovery reader, mode-gated EXACTLY
+// like the daemon's per-signal replica tier (daemon.mjs:681 —
+// readLinearReplica().mode === "on" ? createReplicaReader() : null). Lazily
+// resolved ONCE: `undefined` = not-yet-resolved, `null` = resolved-off (flag off
+// or construction failed). When off the reconcile path never touches the replica,
+// so behavior is byte-identical to pre-CTL-1397. Fail-open: a construction throw
+// resolves to null → linearis path.
+let _eligibleReplica; // undefined = not yet resolved
+function eligibleReplica() {
+  if (_eligibleReplica !== undefined) return _eligibleReplica;
+  try {
+    _eligibleReplica = readLinearReplica().mode === "on" ? createReplicaReader() : null;
+  } catch {
+    _eligibleReplica = null; // any resolution failure → linearis path
+  }
+  return _eligibleReplica;
+}
+
+// __resetEligibleReplicaForTests — drop the memoized singleton so a test that
+// flips the mode flag (or injects its own replica) starts from a clean slate.
+export function __resetEligibleReplicaForTests() {
+  _eligibleReplica = undefined;
+}
+
 // Teams that have been reconciled at least once — used by reconcileAll to
 // detect teams dropped from the registry that must be dropProject'd.
 const knownProjects = new Set();
@@ -269,7 +295,7 @@ const knownProjects = new Set();
 // `monitor.reconcile.failing.<TEAM>` event onto the unified event log so the
 // orch-monitor dashboard surfaces the silently-starving team, and a recovering
 // poll clears the alert. `appendHealthEvent` is an injectable test seam.
-export function reconcileProject(team, { exec, delegateExec, appendHealthEvent } = {}) {
+export function reconcileProject(team, { exec, delegateExec, appendHealthEvent, replica, onSource } = {}) {
   const entry = getProjectConfig(team);
   if (!entry) {
     log.warn({ team }, "reconcile: no registry entry for team — skipping");
@@ -278,7 +304,21 @@ export function reconcileProject(team, { exec, delegateExec, appendHealthEvent }
   const query = resolveEligibleQuery(entry);
   let tickets;
   try {
-    tickets = runEligibleQuery(query, { exec, delegateExec });
+    // CTL-1397: pass the replica-backed board-list reader (injectable for tests,
+    // else the mode-gated module singleton) so discovery reads the local replica
+    // instead of `linearis issues list` — immune to the shared Linear quota + the
+    // CTL-679 circuit breaker. onSource logs a structured eligible_source marker
+    // (value "replica"|"linearis") so OTEL/Loki can verify which source served.
+    const eligibleSource =
+      onSource ??
+      ((source, count) =>
+        log.info({ team, eligible_source: source, eligible_count: count }, "eligible: source"));
+    tickets = runEligibleQuery(query, {
+      exec,
+      delegateExec,
+      replica: replica ?? eligibleReplica(),
+      onSource: eligibleSource,
+    });
   } catch (err) {
     log.error({ team, err: err.message }, "reconcile poll failed — preserving prior eligible set");
     // CTL-867: escalate persistent failures beyond the buried log line.
@@ -1138,4 +1178,5 @@ export function __resetForTests() {
   tailerOpts = {};
   resetLivenessCache();
   __resetReconcileHealthForTests(); // CTL-867: clear per-team reconcile-health map
+  _eligibleReplica = undefined; // CTL-1397: drop the memoized board-list replica singleton
 }

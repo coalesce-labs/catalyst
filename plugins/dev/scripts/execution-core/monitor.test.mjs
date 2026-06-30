@@ -5,10 +5,10 @@
 // (registry.mjs) and keys the eligible projection on Linear team — the
 // per-repo enrollment records are gone.
 
-import { describe, test, expect, beforeEach, afterEach, mock } from "bun:test";
+import { describe, test, expect, beforeEach, afterEach, mock, spyOn } from "bun:test";
 import { ownerForTicket } from "./hrw.mjs"; // CTL-862: HRW owner computation for ownership-filter tests
 import { readClusterGeneration } from "./scheduler.mjs"; // CTL-1028: persistence assertion
-import { mkdtempSync, rmSync, mkdirSync, writeFileSync, appendFileSync, statSync, existsSync } from "node:fs";
+import { mkdtempSync, rmSync, mkdirSync, writeFileSync, appendFileSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -28,6 +28,7 @@ import {
   __tailerOffset,
   __resetForTests,
 } from "./monitor.mjs";
+import { log } from "./config.mjs"; // CTL-1397: spy on the shared logger for the eligible_source marker
 import { setProjectEligible, getEligibleSet, dropProject } from "./eligible-set.mjs";
 import { loadCursor, saveCursor } from "./event-cursor.mjs";
 import { createTicketStateCache } from "./linear-cache.mjs";
@@ -204,6 +205,69 @@ describe("reconcileProject", () => {
     writeFileSync(join(projDir, "sentinel"), "x");
     expect(() => reconcileProject("ENG", { exec })).not.toThrow();
     rmSync(projDir, { recursive: true, force: true });
+  });
+});
+
+// --- CTL-1397: replica-backed board-list discovery --------------------------
+//
+// reconcileProject threads an injectable `replica` into runEligibleQuery so the
+// per-tick eligible discovery reads the local Catalyst-Cloud SQLite replica
+// instead of `linearis issues list --team X --status Y` — the durable fix for
+// the fleet board-freeze (the linearis discovery query burns the shared Linear
+// quota + trips the CTL-679 circuit breaker). A replica HIT must NOT shell out
+// to linearis; a MISS falls through unchanged.
+describe("reconcileProject — replica tier (CTL-1397)", () => {
+  // A replica stub whose eligible() returns a canned eligible answer (or
+  // undefined to fall through). Shaped so normalizeTicket consumes it directly.
+  function replicaReturning(nodesOrUndefined) {
+    return { eligible: () => nodesOrUndefined };
+  }
+
+  // An exec that fails the test if it is ever called — proves the replica HIT
+  // path does NOT shell out to linearis.
+  function execMustNotRun() {
+    return () => {
+      throw new Error("linearis exec must NOT run on a replica HIT");
+    };
+  }
+
+  test("a replica HIT writes the eligible set WITHOUT calling the linearis exec", () => {
+    enroll("ENG", { status: "Todo" });
+    const replica = replicaReturning({
+      nodes: [
+        { identifier: "ENG-100", state: "Todo", priority: 2 },
+        { identifier: "ENG-101", state: "Todo", priority: 2 },
+      ],
+    });
+    reconcileProject("ENG", { exec: execMustNotRun(), replica });
+    expect(getEligibleSet("ENG").map((t) => t.identifier)).toEqual(["ENG-100", "ENG-101"]);
+  });
+
+  test("a replica MISS (undefined) falls through to the injected linearis exec", () => {
+    enroll("ENG", { status: "Todo" });
+    const replica = replicaReturning(undefined);
+    const exec = execReturning({ ENG: [node("ENG-9")] });
+    reconcileProject("ENG", { exec, replica });
+    expect(exec.calls).toBe(1); // linearis WAS called on the miss
+    expect(getEligibleSet("ENG").map((t) => t.identifier)).toEqual(["ENG-9"]);
+  });
+
+  test("emits a structured eligible_source marker via the logger (replica HIT)", () => {
+    enroll("ENG", { status: "Todo" });
+    const replica = replicaReturning({ nodes: [{ identifier: "ENG-100", state: "Todo", priority: 2 }] });
+    const infoSpy = spyOn(log, "info");
+    try {
+      reconcileProject("ENG", { exec: execMustNotRun(), replica });
+      // The eligible_source field is the OTEL/Loki verification marker.
+      const marked = infoSpy.mock.calls.find(
+        ([obj]) => obj && typeof obj === "object" && obj.eligible_source !== undefined,
+      );
+      expect(marked).toBeDefined();
+      expect(marked[0].eligible_source).toBe("replica");
+      expect(marked[0].eligible_count).toBe(1);
+    } finally {
+      infoSpy.mockRestore();
+    }
   });
 });
 

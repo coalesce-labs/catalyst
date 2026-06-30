@@ -6,7 +6,7 @@
 
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { Database } from "bun:sqlite";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createReplicaReader } from "./replica-read.mjs";
@@ -248,5 +248,265 @@ describe("createReplicaReader.titles (CTL-1372 — batched board title source)",
     empty.close();
     reader = createReplicaReader({ dbPath });
     expect(reader.titles(["CTL-1214"])).toEqual({});
+  });
+});
+
+// CTL-1397 — board-list / eligible() tests. The replica-backed discovery query
+// the daemon's reconcile uses instead of `linearis issues list --team X --status
+// Y` (which burns the shared Linear quota + trips the CTL-679 circuit breaker,
+// freezing board discovery fleet-wide). The fixture mirrors the cloud schema's
+// eligible-relevant columns + relations + projects so the SQL + enrichment +
+// timestamp coercion are exercised against REAL bun:sqlite.
+
+// fresh — bump the DB + a NON-EMPTY -wal sidecar's mtime to NOW so the
+// mtime-based staleness gate (writer-liveness proxy) reads the fixture as fresh.
+// Without this, a fixture written "in the past" relative to the 5-min threshold
+// would (correctly) fall through, masking the row assertions we're after.
+function freshen() {
+  const now = new Date();
+  utimesSync(dbPath, now, now);
+  try {
+    // open + WAL-checkpoint leaves a -wal sidecar; if it's empty the gate ignores
+    // it (reader artifact). Write a byte so its mtime counts, then touch it now.
+    writeFileSync(dbPath + "-wal", "x");
+    utimesSync(dbPath + "-wal", now, now);
+  } catch {
+    /* best-effort: the DB mtime alone is enough when -wal is absent */
+  }
+}
+
+// seedEligible — the full eligible fixture: issues (with team-prefixed
+// identifiers, state, priority, estimate, project_id, parent_identifier,
+// delegate, removed_at, timestamps), a relations table (forward + inverse), and
+// a projects table (LEFT JOIN name source).
+function seedEligible() {
+  const db = new Database(dbPath, { create: true });
+  db.run(`
+    CREATE TABLE issues (
+      identifier        TEXT,
+      title             TEXT,
+      state             TEXT,
+      priority          INTEGER,
+      estimate          INTEGER,
+      project_id        TEXT,
+      parent_identifier TEXT,
+      delegate_id       TEXT,
+      delegate_name     TEXT,
+      removed_at        TEXT,
+      updated_at        INTEGER,
+      created_at        INTEGER
+    )
+  `);
+  db.run(`CREATE INDEX idx_issues_identifier ON issues (identifier)`);
+  db.run(`CREATE TABLE relations (type TEXT, issue_identifier TEXT, related_identifier TEXT)`);
+  db.run(`CREATE TABLE projects (id TEXT, name TEXT)`);
+  // CTL-1397: sync_meta carries the seed-completeness cursor. The cloud-sync
+  // writer DELETES the cursor row at re-seed start and re-writes it only on
+  // completion, so cursor-present = seed complete (the gate eligible() checks).
+  db.run(`CREATE TABLE sync_meta (key TEXT PRIMARY KEY, value TEXT)`);
+  db.run(`INSERT INTO sync_meta VALUES ('cursor', '42')`);
+  db.run(`INSERT INTO projects VALUES ('proj-1', 'Harden the core')`);
+  // CTL-100: Todo, priority 2, in a project, has a parent + a delegate, newest.
+  db.run(
+    `INSERT INTO issues VALUES ('CTL-100', 'Repoint board-list', 'Todo', 2, 3, 'proj-1', 'CTL-1', 'del-1', 'Bot', NULL, 3000, 100)`,
+  );
+  // CTL-101: Todo, priority 0 (no priority), no project/parent/delegate, older.
+  db.run(
+    `INSERT INTO issues VALUES ('CTL-101', 'Second todo', 'Todo', 0, NULL, NULL, NULL, NULL, NULL, NULL, 2000, 90)`,
+  );
+  // CTL-102: Backlog (NOT Todo) — excluded by the state filter.
+  db.run(
+    `INSERT INTO issues VALUES ('CTL-102', 'Backlogged', 'Backlog', 1, NULL, NULL, NULL, NULL, NULL, NULL, 2500, 80)`,
+  );
+  // CTL-103: Todo but tombstoned (removed_at set) — excluded by removed_at IS NULL.
+  db.run(
+    `INSERT INTO issues VALUES ('CTL-103', 'Removed todo', 'Todo', 2, NULL, NULL, NULL, NULL, NULL, '2026-06-03T00:00:00Z', 2600, 70)`,
+  );
+  // CTC-100: a DIFFERENT team (the hyphen disambiguates CTL- from CTC-) — must
+  // not leak into a CTL query via a naive prefix match.
+  db.run(
+    `INSERT INTO issues VALUES ('CTC-100', 'Other team todo', 'Todo', 2, NULL, NULL, NULL, NULL, NULL, NULL, 2700, 60)`,
+  );
+  // relations: CTL-100 blocks CTL-9 (forward); CTL-7 blocks CTL-100 (inverse).
+  db.run(`INSERT INTO relations VALUES ('blocks', 'CTL-100', 'CTL-9')`);
+  db.run(`INSERT INTO relations VALUES ('blocks', 'CTL-7', 'CTL-100')`);
+  db.close();
+  freshen();
+}
+
+describe("createReplicaReader.eligible (CTL-1397 board-list)", () => {
+  test("returns { nodes } filtered by identifier-prefix + state, excludes removed + other teams", () => {
+    seedEligible();
+    reader = createReplicaReader({ dbPath });
+    const res = reader.eligible({ team: "CTL", status: "Todo" });
+    expect(Array.isArray(res?.nodes)).toBe(true);
+    // CTL-100 (newest) then CTL-101 (ORDER BY updated_at DESC). NOT CTL-102
+    // (Backlog), NOT CTL-103 (removed), NOT CTC-100 (other team).
+    expect(res.nodes.map((n) => n.identifier)).toEqual(["CTL-100", "CTL-101"]);
+  });
+
+  test("builds a node normalizeTicket consumes: state/priority/estimate/project/parent/delegate + ISO timestamps", () => {
+    seedEligible();
+    reader = createReplicaReader({ dbPath });
+    const res = reader.eligible({ team: "CTL", status: "Todo" });
+    const n = res.nodes.find((x) => x.identifier === "CTL-100");
+    expect(n.title).toBe("Repoint board-list");
+    expect(n.state).toBe("Todo");
+    expect(n.priority).toBe(2);
+    expect(n.estimate).toBe(3);
+    expect(n.project).toBe("Harden the core");
+    expect(n.parent).toBe("CTL-1");
+    expect(n.delegate).toEqual({ id: "del-1", name: "Bot" });
+    // epoch-ms → ISO-8601 string (the scheduler tie-break compares these).
+    expect(n.updatedAt).toBe(new Date(3000).toISOString());
+    expect(n.createdAt).toBe(new Date(100).toISOString());
+  });
+
+  test("enriches relations (forward) + inverseRelations from the relations table", () => {
+    seedEligible();
+    reader = createReplicaReader({ dbPath });
+    const res = reader.eligible({ team: "CTL", status: "Todo" });
+    const n = res.nodes.find((x) => x.identifier === "CTL-100");
+    expect(n.relations.nodes).toEqual([
+      { type: "blocks", relatedIssue: { identifier: "CTL-9" } },
+    ]);
+    expect(n.inverseRelations.nodes).toEqual([
+      { type: "blocks", issue: { identifier: "CTL-7" } },
+    ]);
+  });
+
+  test("a row with no project/parent/delegate maps those to null + empty relation node lists", () => {
+    seedEligible();
+    reader = createReplicaReader({ dbPath });
+    const res = reader.eligible({ team: "CTL", status: "Todo" });
+    const n = res.nodes.find((x) => x.identifier === "CTL-101");
+    expect(n.project).toBeNull();
+    expect(n.parent).toBeNull();
+    expect(n.delegate).toBeNull();
+    expect(n.priority).toBe(0);
+    expect(n.estimate).toBeNull();
+    expect(n.relations.nodes).toEqual([]);
+    expect(n.inverseRelations.nodes).toEqual([]);
+  });
+
+  test("fresh-empty (no matching rows) → { nodes: [] }, NOT undefined", () => {
+    seedEligible();
+    reader = createReplicaReader({ dbPath });
+    // A team with zero Todo rows: a fresh replica genuinely has no eligible
+    // tickets — that is a REAL answer, not a fall-through miss.
+    const res = reader.eligible({ team: "ZZZ", status: "Todo" });
+    expect(res).toEqual({ nodes: [] });
+  });
+
+  test("returns undefined (fall through) when team is missing", () => {
+    seedEligible();
+    reader = createReplicaReader({ dbPath });
+    expect(reader.eligible({ status: "Todo" })).toBeUndefined();
+  });
+
+  test("returns undefined (fall through) when status is missing", () => {
+    seedEligible();
+    reader = createReplicaReader({ dbPath });
+    expect(reader.eligible({ team: "CTL" })).toBeUndefined();
+  });
+
+  test("returns undefined (v1 scope) when query.project is set", () => {
+    seedEligible();
+    reader = createReplicaReader({ dbPath });
+    expect(reader.eligible({ team: "CTL", status: "Todo", project: "Harden" })).toBeUndefined();
+  });
+
+  test("returns undefined (v1 scope) when query.label is set", () => {
+    seedEligible();
+    reader = createReplicaReader({ dbPath });
+    expect(reader.eligible({ team: "CTL", status: "Todo", label: "bug" })).toBeUndefined();
+  });
+
+  test("returns undefined when the replica file is absent", () => {
+    reader = createReplicaReader({ dbPath });
+    expect(reader.eligible({ team: "CTL", status: "Todo" })).toBeUndefined();
+  });
+
+  test("returns undefined when the replica is STALE by mtime", () => {
+    seedEligible();
+    // Backdate the DB + -wal well past the default 5-min staleness threshold.
+    const old = new Date(Date.now() - 10 * 60_000);
+    utimesSync(dbPath, old, old);
+    try { utimesSync(dbPath + "-wal", old, old); } catch { /* -wal may be absent */ }
+    reader = createReplicaReader({ dbPath });
+    expect(reader.eligible({ team: "CTL", status: "Todo" })).toBeUndefined();
+  });
+
+  test("honors CATALYST_LINEAR_REPLICA_STALE_MS override for the freshness gate", () => {
+    seedEligible();
+    const old = new Date(Date.now() - 2 * 60_000); // 2 min old
+    utimesSync(dbPath, old, old);
+    try { utimesSync(dbPath + "-wal", old, old); } catch { /* -wal may be absent */ }
+    const prev = process.env.CATALYST_LINEAR_REPLICA_STALE_MS;
+    process.env.CATALYST_LINEAR_REPLICA_STALE_MS = "60000"; // 1 min threshold → 2-min-old is stale
+    try {
+      reader = createReplicaReader({ dbPath });
+      expect(reader.eligible({ team: "CTL", status: "Todo" })).toBeUndefined();
+    } finally {
+      if (prev === undefined) delete process.env.CATALYST_LINEAR_REPLICA_STALE_MS;
+      else process.env.CATALYST_LINEAR_REPLICA_STALE_MS = prev;
+    }
+  });
+
+  test("fail-open: DB without the issues table → undefined (query throws)", () => {
+    const empty = new Database(dbPath, { create: true });
+    empty.run(`CREATE TABLE unrelated (x INTEGER)`);
+    empty.close();
+    freshen();
+    reader = createReplicaReader({ dbPath });
+    expect(reader.eligible({ team: "CTL", status: "Todo" })).toBeUndefined();
+  });
+
+  // CTL-1397 (P1 fix) — seed-completeness gate. The mtime gate proves the writer
+  // is LIVE, not that the seed is COMPLETE. The cloud-sync forced re-seed
+  // truncates + batch-repopulates `issues` while the mtime stays fresh, so a
+  // mid-reseed read would (a) see an EMPTY table → trusted-empty zeroes the board
+  // or (b) see a PARTIAL table → trusted-incomplete set. The writer deletes the
+  // `sync_meta` cursor row at re-seed start and re-writes it only on completion,
+  // so cursor-absent = mid-reseed → eligible() must NOT serve (fall through).
+
+  test("cursor row ABSENT (mid-reseed) on a fresh+populated DB → undefined (fall through)", () => {
+    seedEligible(); // fresh + populated + cursor present
+    // Simulate the writer mid-reseed: it deletes the cursor row at re-seed start.
+    const db = new Database(dbPath);
+    db.run(`DELETE FROM sync_meta WHERE key = 'cursor'`);
+    db.close();
+    freshen(); // the writer is STILL live (fresh mtime) — only the seed is incomplete
+    reader = createReplicaReader({ dbPath });
+    // Even though CTL-100/CTL-101 rows are present, a missing cursor means the
+    // seed is not known-complete → do not trust the read.
+    expect(reader.eligible({ team: "CTL", status: "Todo" })).toBeUndefined();
+  });
+
+  test("cursor present (seed complete) + matching rows → returns { nodes } as before", () => {
+    seedEligible();
+    reader = createReplicaReader({ dbPath });
+    const res = reader.eligible({ team: "CTL", status: "Todo" });
+    expect(res.nodes.map((n) => n.identifier)).toEqual(["CTL-100", "CTL-101"]);
+  });
+
+  test("cursor present but EMPTY value (key exists, value '') → undefined (mid-reseed sentinel)", () => {
+    seedEligible();
+    const db = new Database(dbPath);
+    db.run(`UPDATE sync_meta SET value = '' WHERE key = 'cursor'`);
+    db.close();
+    freshen();
+    reader = createReplicaReader({ dbPath });
+    expect(reader.eligible({ team: "CTL", status: "Todo" })).toBeUndefined();
+  });
+
+  test("cursor present + ZERO matching rows → still { nodes: [] } at the READER level (empty-distrust lives in runEligibleQuery, not here)", () => {
+    seedEligible(); // cursor present, but no ZZZ-team rows
+    reader = createReplicaReader({ dbPath });
+    // The reader's contract is unchanged for a genuinely-empty, seed-complete
+    // result: it returns { nodes: [] }. The decision to DISTRUST a replica-empty
+    // (and confirm via linearis) belongs to runEligibleQuery — the two layers'
+    // responsibilities stay distinct.
+    expect(reader.eligible({ team: "ZZZ", status: "Todo" })).toEqual({ nodes: [] });
   });
 });
