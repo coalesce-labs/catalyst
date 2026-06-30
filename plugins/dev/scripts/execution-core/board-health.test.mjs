@@ -24,6 +24,25 @@ const NOW = Date.parse("2026-06-20T12:00:00Z");
 const MIN = 60_000;
 const HOUR = 3_600_000;
 
+// mkPrStatusMap — build the composite `Map<number, Map<repoKey, entry>>` shape
+// (CTL-1157, Codex #4) that broker-state.getAllPrStatuses now returns, from flat
+// {prNumber, repo, status, updatedAt} rows. Mirrors how the real reader nests
+// per-(repo, number); multiple rows with the same number but different repos form
+// the collision case.
+function mkPrStatusMap(rows = []) {
+  const map = new Map();
+  for (const { prNumber, repo = null, status, updatedAt } of rows) {
+    const key = repo ?? "";
+    let byRepo = map.get(prNumber);
+    if (!byRepo) {
+      byRepo = new Map();
+      map.set(prNumber, byRepo);
+    }
+    byRepo.set(key, { status, updatedAt, repo });
+  }
+  return map;
+}
+
 // A complete, default-healthy boardState shape (the frozen output assembleBoardState
 // produces). Overrides are shallow-merged per top-level key.
 function mkBoard(o = {}) {
@@ -39,9 +58,10 @@ function mkBoard(o = {}) {
     mode: o.mode,
     capacity: { maxParallel: 4, liveCount: 0, freeSlots: 4, ...(o.capacity ?? {}) },
     reconcileMarkers: o.reconcileMarkers ?? {},
-    // CTL-1157: the filter_state PR-lifecycle map (number → {status,updatedAt,repo,
-    // ambiguous}). Default empty Map ⇒ the phantom/orphaned-PR cohorts stay
-    // observable:false, exactly like an unwired board.
+    // CTL-1157 (Codex #4): the filter_state PR-lifecycle map — composite
+    // `Map<number, Map<repoKey, {status,updatedAt,repo}>>`. Default empty Map ⇒ the
+    // phantom/orphaned-PR cohorts stay observable:false, exactly like an unwired
+    // board. `mkPrStatusMap` below builds the nested shape from flat rows.
     prStatusMap: o.prStatusMap ?? new Map(),
     ring: {
       recentDispatchTs: null,
@@ -51,6 +71,8 @@ function mkBoard(o = {}) {
       ...(o.ring ?? {}),
     },
     ownerForTicket: o.ownerForTicket ?? null,
+    // CTL-1157 (Codex #4): ticket→owner/repo resolver for the composite lookup.
+    repoForTicket: o.repoForTicket ?? null,
     now: o.now ?? NOW,
   };
 }
@@ -286,52 +308,97 @@ describe("CTL-1157 off-gate — cohort invariants + PR SELECT are dark in off", 
   });
 });
 
-// ─── CTL-1157 (Codex GROUP-A fix #3): multi-repo PR-number collision ─────────
-// A (repo, pr_number) pair — not pr_number alone — identifies a PR. When the same
-// number exists in two repos, getAllPrStatuses marks the entry `ambiguous` and the
-// cohorts must SKIP it rather than borrow the wrong repo's status (which would
-// manufacture a false phantom-merged PR or hide a genuinely-orphaned open one).
-describe("CTL-1157 multi-repo collision — ambiguous PR numbers are not misclassified", () => {
-  test("checkPhantomMergedPr does NOT flag a ticket whose PR number is ambiguous (cross-repo collision)", () => {
-    const ticketsById = new Map([
-      // CTL-Y sits in a PR/in-review state and points at #42 — but #42 collides
-      // across repos (merged in repo X, open in repo Y) → ambiguous.
-      ["CTL-Y", { identifier: "CTL-Y", state: "In Review", prNumber: 42 }],
+// ─── CTL-1157 (Codex #4): multi-repo PR-number collision — composite keying ──
+// A (repo, pr_number) pair — not pr_number alone — identifies a PR. getAllPrStatuses
+// now returns a composite Map<number, Map<repo, status>>; board-health resolves the
+// stuck ticket's repo (repoForTicket) and looks up the EXACT (repo, number). A
+// cross-repo #-collision is disambiguated by the ticket's repo — it NO LONGER hides
+// a genuine orphaned open PR. Only a collision whose repo is genuinely underivable
+// stays the ambiguous skip (the documented true residual).
+describe("CTL-1157 multi-repo collision — composite (repo,number) disambiguation", () => {
+  // #42 collides: MERGED in org/x, OPEN in org/y — two different PRs.
+  const COLLIDE_42 = () =>
+    mkPrStatusMap([
+      { prNumber: 42, repo: "org/x", status: "merged" },
+      { prNumber: 42, repo: "org/y", status: "open" },
     ]);
-    const ambiguous = mkBoard({
-      ticketsById,
-      prStatusMap: new Map([[42, { status: "merged", repo: "org/x", ambiguous: true }]]),
-    });
-    const r = evaluateInvariants(ambiguous, { mode: "shadow" });
-    expect(r.phantomMergedPr.flagged).not.toContain("CTL-Y"); // no false phantom
+
+  test("phantom-merged: a ticket in org/x (the MERGED repo) IS flagged despite the collision", () => {
+    const ticketsById = new Map([["CTL-Y", { identifier: "CTL-Y", state: "In Review", prNumber: 42 }]]);
+    const r = evaluateInvariants(
+      mkBoard({ ticketsById, prStatusMap: COLLIDE_42(), repoForTicket: () => "org/x" }),
+      { mode: "shadow" },
+    );
+    expect(r.phantomMergedPr.flagged).toContain("CTL-Y"); // genuine phantom still caught
+  });
+
+  test("phantom-merged: a ticket in org/y (the OPEN repo) is NOT flagged — no false phantom from org/x's merged", () => {
+    const ticketsById = new Map([["CTL-Y", { identifier: "CTL-Y", state: "In Review", prNumber: 42 }]]);
+    const r = evaluateInvariants(
+      mkBoard({ ticketsById, prStatusMap: COLLIDE_42(), repoForTicket: () => "org/y" }),
+      { mode: "shadow" },
+    );
+    expect(r.phantomMergedPr.flagged).not.toContain("CTL-Y"); // org/y's #42 is open, not merged
     expect(r.phantomMergedPr.ok).toBe(true);
   });
 
-  test("control: the SAME ticket+number IS flagged when the PR number is unambiguous (single repo, merged)", () => {
-    const ticketsById = new Map([
-      ["CTL-Y", { identifier: "CTL-Y", state: "In Review", prNumber: 42 }],
-    ]);
-    const unambiguous = mkBoard({
-      ticketsById,
-      prStatusMap: new Map([[42, { status: "merged", repo: "org/x", ambiguous: false }]]),
-    });
-    const r = evaluateInvariants(unambiguous, { mode: "shadow" });
-    expect(r.phantomMergedPr.flagged).toContain("CTL-Y"); // genuine phantom is still caught
+  test("phantom-merged: collision + repo UNDERIVABLE (no repoForTicket) → ambiguous skip (true residual)", () => {
+    const ticketsById = new Map([["CTL-Y", { identifier: "CTL-Y", state: "In Review", prNumber: 42 }]]);
+    const r = evaluateInvariants(
+      mkBoard({ ticketsById, prStatusMap: COLLIDE_42() /* repoForTicket: null */ }),
+      { mode: "shadow" },
+    );
+    expect(r.phantomMergedPr.flagged).not.toContain("CTL-Y"); // can't pick → skip, never borrow
   });
 
-  test("checkOrphanedOpenPr skips an ambiguous (cross-repo collision) PR number", () => {
-    const ticketsById = new Map([
-      ["CTL-Z", { identifier: "CTL-Z", prNumber: 99 }],
+  // THE HEADLINE FIX (Codex #4 missed-detection): a genuine orphaned open PR in the
+  // ticket's OWN repo must be flagged even when an UNRELATED repo reuses the number.
+  test("orphaned-open: a stale open PR in org/y IS flagged even though org/x reuses #99 (no longer hidden)", () => {
+    const ticketsById = new Map([["CTL-Z", { identifier: "CTL-Z", prNumber: 99 }]]);
+    const prStatusMap = mkPrStatusMap([
+      // org/x's #99 is merged & fresh — the unrelated collision that used to hide CTL-Z.
+      { prNumber: 99, repo: "org/x", status: "merged", updatedAt: new Date(NOW - 1 * HOUR).toISOString() },
+      // org/y's #99 — CTL-Z's real PR: open, stale, no live worker → orphaned.
+      { prNumber: 99, repo: "org/y", status: "open", updatedAt: new Date(NOW - 100 * HOUR).toISOString() },
     ]);
-    const board = mkBoard({
-      ticketsById,
-      // open + stale + no live worker would normally flag — but ambiguous ⇒ skip.
-      prStatusMap: new Map([
-        [99, { status: "open", repo: "org/x", ambiguous: true, updatedAt: new Date(NOW - 100 * HOUR).toISOString() }],
-      ]),
-    });
-    const r = evaluateInvariants(board, { mode: "shadow" });
-    expect(r.orphanedOpenPr.flagged).not.toContain("CTL-Z");
+    const r = evaluateInvariants(
+      mkBoard({ ticketsById, prStatusMap, repoForTicket: () => "org/y" }),
+      { mode: "shadow" },
+    );
+    expect(r.orphanedOpenPr.flagged).toContain("CTL-Z"); // detection no longer hidden
+  });
+
+  test("orphaned-open: collision + repo UNDERIVABLE → ambiguous skip (true residual)", () => {
+    const ticketsById = new Map([["CTL-Z", { identifier: "CTL-Z", prNumber: 99 }]]);
+    const prStatusMap = mkPrStatusMap([
+      { prNumber: 99, repo: "org/x", status: "merged", updatedAt: new Date(NOW - 1 * HOUR).toISOString() },
+      { prNumber: 99, repo: "org/y", status: "open", updatedAt: new Date(NOW - 100 * HOUR).toISOString() },
+    ]);
+    const r = evaluateInvariants(
+      mkBoard({ ticketsById, prStatusMap /* repoForTicket: null */ }),
+      { mode: "shadow" },
+    );
+    expect(r.orphanedOpenPr.flagged).not.toContain("CTL-Z"); // can't pick → skip
+  });
+
+  // N=1 / single-repo: NO collision (one inner entry per number) → number-only
+  // resolution, byte-identical whether or not the ticket's repo was derived.
+  test("single-repo (N=1): phantom-merged still flags with NO repoForTicket bound", () => {
+    const ticketsById = new Map([["CTL-Y", { identifier: "CTL-Y", state: "In Review", prNumber: 42 }]]);
+    const r = evaluateInvariants(
+      mkBoard({ ticketsById, prStatusMap: mkPrStatusMap([{ prNumber: 42, repo: "org/solo", status: "merged" }]) }),
+      { mode: "shadow" },
+    );
+    expect(r.phantomMergedPr.flagged).toContain("CTL-Y");
+  });
+
+  test("single-repo (N=1): orphaned-open still flags with NO repoForTicket bound", () => {
+    const ticketsById = new Map([["CTL-Z", { identifier: "CTL-Z", prNumber: 99 }]]);
+    const prStatusMap = mkPrStatusMap([
+      { prNumber: 99, repo: "org/solo", status: "open", updatedAt: new Date(NOW - 100 * HOUR).toISOString() },
+    ]);
+    const r = evaluateInvariants(mkBoard({ ticketsById, prStatusMap }), { mode: "shadow" });
+    expect(r.orphanedOpenPr.flagged).toContain("CTL-Z");
   });
 });
 

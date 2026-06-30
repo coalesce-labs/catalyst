@@ -79,11 +79,56 @@ const PR_MERGED_RE = /^(merged|deployed)$/i;
 const NEEDS_HUMAN_LABEL_RE = /needs.?human/i;
 const NEEDS_HUMAN_STATUSES = new Set(["needs-human", "needs_human", "stalled"]);
 
-// prNumberOf / prStatusOf — read a ticket descriptor's linked PR number and its
-// current lifecycle status from the frozen prStatusMap (keyed by pr_number).
+// prNumberOf — read a ticket descriptor's linked PR number.
 function prNumberOf(d) {
   const n = d?.prNumber ?? d?.pr_number ?? null;
   return n == null ? null : Number(n);
+}
+
+// lookupPrStatus — resolve the lifecycle status of (prNumber, repo) against the
+// composite prStatusMap (`Map<number, Map<repoKey, {status,updatedAt,repo}>>`,
+// produced by broker-state.getAllPrStatuses). The disambiguation rules (CTL-1157,
+// Codex #4):
+//   • No entry for the number → null (not observable for this ticket).
+//   • Exactly ONE repo holds the number → return it (no collision; this is the
+//     N=1 / single-repo path → byte-identical to the old number-only lookup,
+//     whether or not the ticket's repo was derived).
+//   • The number COLLIDES across repos AND the ticket's repo is known → return
+//     that repo's entry (or null when the ticket's own repo has no such PR). A
+//     cross-repo #-collision NO LONGER hides the ticket's real PR.
+//   • The number collides AND the ticket's repo is genuinely underivable → the
+//     TRUE residual: we cannot pick → return {ambiguous:true} so the cohort skips
+//     rather than borrow the wrong repo's status.
+// `repo` is the ticket's GitHub "owner/repo" (or null when underivable).
+function lookupPrStatus(map, prNumber, repo) {
+  if (!(map instanceof Map)) return null;
+  const byRepo = map.get(prNumber);
+  if (!(byRepo instanceof Map) || byRepo.size === 0) return null;
+  // No collision: exactly one repo owns this number → number-only resolution.
+  if (byRepo.size === 1) {
+    const [only] = byRepo.values();
+    return only;
+  }
+  // Collision: ≥2 repos share this number. Disambiguate by the ticket's repo.
+  if (repo != null && repo !== "") {
+    // Known repo → the ticket's OWN repo's #N, or null when it has none.
+    return byRepo.get(repo) ?? null;
+  }
+  // Repo underivable + collision → the documented true residual: ambiguous skip.
+  return { status: null, updatedAt: null, repo: null, ambiguous: true };
+}
+
+// safeRepoOf — call the injected ticket→owner/repo resolver, fail-open to null
+// (a throwing/absent resolver must never abort an invariant; null → number-only
+// lookup, i.e. the pre-CTL-1157 behavior).
+function safeRepoOf(resolver, id) {
+  if (typeof resolver !== "function") return null;
+  try {
+    const r = resolver(id);
+    return typeof r === "string" && r.length > 0 ? r : null;
+  } catch {
+    return null;
+  }
 }
 function labelsOf(d) {
   const l = d?.labels;
@@ -201,6 +246,13 @@ export function assembleBoardState({
   capacity = { maxParallel: 0, liveCount: 0, freeSlots: 0 },
   readEventRing = () => [],
   ownerForTicket = null,
+  // CTL-1157 (Codex #4): resolve a stuck ticket → its GitHub "owner/repo" so the
+  // phantom/orphaned-PR cohorts look up the EXACT (repo, number) entry in the
+  // composite prStatusMap instead of skipping a cross-repo #-collision. Daemon-
+  // bound at the scheduler call site (teamOf → registry repoRoot →
+  // ownerRepoFromRepoRoot); null default ⇒ repo underivable ⇒ number-only lookup
+  // (N=1 byte-identical; a true collision with no repo stays the ambiguous skip).
+  repoForTicket = null,
   getReconcileMarkers = () => ({}),
   // CTL-1157: PR-lifecycle status map (filter_state). Empty Map default ⇒ the
   // phantom-merged-PR / orphaned-open-PR invariants stay observable:false (the
@@ -279,6 +331,9 @@ export function assembleBoardState({
     prStatusMap: mode === "off" ? new Map() : safe(() => getPrStatusMap(), new Map()),
     ring: deriveRing(safe(() => readEventRing({ orchDir }), []), nowMs),
     ownerForTicket: typeof ownerForTicket === "function" ? ownerForTicket : null,
+    // CTL-1157 (Codex #4): the ticket→owner/repo resolver for the composite
+    // (repo, number) PR-status lookup. Null when unbound (number-only fallback).
+    repoForTicket: typeof repoForTicket === "function" ? repoForTicket : null,
     now: nowMs,
   });
 }
@@ -499,10 +554,12 @@ function checkPhantomMergedPr(b) {
     if (!state || !PR_STATE_RE.test(String(state))) continue;
     const prNum = prNumberOf(d);
     if (prNum == null) continue;
-    const pr = map.get(prNum);
-    // CTL-1157 multi-repo: a PR number that collides across repos is `ambiguous` —
-    // we cannot tell WHICH repo's #N this ticket points at, so skip rather than
-    // borrow the wrong repo's `merged` status and manufacture a false phantom.
+    // CTL-1157 (Codex #4) multi-repo: resolve the ticket's repo and look up the
+    // EXACT (repo, number) status. A cross-repo #-collision is disambiguated by
+    // the ticket's repo; only a collision with a genuinely underivable repo stays
+    // `ambiguous` and is skipped (never borrow the wrong repo's `merged` status).
+    const repo = b.repoForTicket ? safeRepoOf(b.repoForTicket, id) : null;
+    const pr = lookupPrStatus(map, prNum, repo);
     if (pr && pr.ambiguous) continue;
     if (pr && PR_MERGED_RE.test(String(pr.status))) flagged.push(id);
   }
@@ -535,9 +592,12 @@ function checkOrphanedOpenPr(b, t) {
   for (const [id, d] of b.ticketsById) {
     const prNum = prNumberOf(d);
     if (prNum == null) continue;
-    const pr = map.get(prNum);
-    // CTL-1157 multi-repo: an ambiguous (cross-repo collision) PR number can't be
-    // matched to this ticket's repo — skip it rather than read another repo's status.
+    // CTL-1157 (Codex #4) multi-repo: resolve the ticket's repo and look up the
+    // EXACT (repo, number) status. With the repo known, a cross-repo #-collision
+    // NO LONGER hides the ticket's genuine orphaned open PR (the missed-detection
+    // bug); only a collision whose repo is genuinely underivable stays `ambiguous`.
+    const repo = b.repoForTicket ? safeRepoOf(b.repoForTicket, id) : null;
+    const pr = lookupPrStatus(map, prNum, repo);
     if (pr && pr.ambiguous) continue;
     if (!pr || String(pr.status).toLowerCase() !== "open") continue;
     if (liveTickets.has(id)) continue; // a worker is on it → not orphaned
@@ -865,6 +925,7 @@ export function boardHealthPass({
   capacity,
   readEventRing,
   ownerForTicket,
+  repoForTicket, // CTL-1157 (Codex #4): ticket→owner/repo resolver (daemon-bound)
   getReconcileMarkers,
   getPrStatusMap, // CTL-1157: filter_state PR-status reader (daemon-bound)
   deadHosts, // CTL-1157: provably-dead host set (daemon-computed)
@@ -884,7 +945,7 @@ export function boardHealthPass({
 
   const board = assembleBoardState({
     orchDir, getBoard, getWorkerSignals, getEligible,
-    roster, self, multiHost, capacity, readEventRing, ownerForTicket, getReconcileMarkers,
+    roster, self, multiHost, capacity, readEventRing, ownerForTicket, repoForTicket, getReconcileMarkers,
     getPrStatusMap, deadHosts, mode, now,
   });
   const invariants = evaluateInvariants(board, { mode });

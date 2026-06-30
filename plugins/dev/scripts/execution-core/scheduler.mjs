@@ -76,7 +76,7 @@ import {
   readTicketLabels,
 } from "./linear-query.mjs";
 import { gatewayLabelsHit } from "./gateway-read.mjs"; // CTL-1079
-import { getProjectConfig, listProjects } from "./registry.mjs";
+import { getProjectConfig, listProjects, ownerRepoFromRepoRoot } from "./registry.mjs"; // CTL-1157: ownerRepoFromRepoRoot reconciles registry repoRoot → GitHub owner/repo for board-health's composite (repo,number) PR-status lookup
 // CTL-703: worktree teardown is now handled by the dedicated phase-teardown
 // phase agent (the 10th pipeline phase), not the scheduler's terminal sweep.
 // The gatedTeardownWorktree import is removed; the teardown phase agent
@@ -4511,6 +4511,10 @@ export function schedulerTick(
           capacity: { maxParallel, liveCount, freeSlots: computeFreeSlots(maxParallel, occupiedCount) },
           readEventRing: _boardHealth.readEventRing,
           ownerForTicket,
+          // CTL-1157 (Codex #4): ticket→owner/repo resolver for the composite
+          // (repo, number) PR-status lookup. Daemon-bound below; a bare tick
+          // passes none → null → number-only fallback (N=1 byte-identical).
+          repoForTicket: _boardHealth.repoForTicket,
           getReconcileMarkers: _boardHealth.getReconcileMarkers,
           // CTL-1157: thread the PR-status reader + the provably-dead host set.
           // Both are daemon-bound (the binding below); a bare tick passes neither
@@ -6625,6 +6629,22 @@ function runTick() {
         // failover. computeSurvivingRoster already exists (scheduler.mjs) and
         // returns the roster unchanged for roster ≤ 1 → empty dead set at N=1.
         getPrStatusMap: () => getAllPrStatuses(),
+        // CTL-1157 (Codex #4): resolve a stuck ticket → its GitHub "owner/repo" so
+        // the phantom/orphaned-PR cohorts disambiguate a cross-repo #-collision by
+        // the ticket's repo (registry repoRoot → ownerRepoFromRepoRoot) instead of
+        // skipping it and hiding a genuine orphaned open PR. NEVER bare linearis
+        // (QUOTA rule): teamOf + the local registry only. Null when the team/
+        // repoRoot is unknown or the path carries no /github/<owner>/<repo> segment
+        // (the documented true residual → number-only/ambiguous fallback).
+        repoForTicket: (ticket) => {
+          try {
+            const team = teamOf(ticket);
+            if (!team) return null;
+            return ownerRepoFromRepoRoot(getProjectConfig(team)?.repoRoot ?? null);
+          } catch {
+            return null;
+          }
+        },
         deadHosts: (roster) => roster.filter((h) => !computeSurvivingRoster(roster).includes(h)),
         // CTL-1157 (MUST-FIX 2): iterate the ordered candidate list and dispatch
         // the FIRST actionable (non-cooldown/non-latched) candidate — instead of

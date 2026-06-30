@@ -652,22 +652,29 @@ export function getAllTicketDescriptors({ includeRemoved = false } = {}) {
 // getAllPrStatuses — CTL-1157: one batch read of the filter_state lifecycle
 // table for board-health's phantom-merged-PR / orphaned-open-PR invariants. A
 // PR's status walks a monotone lifecycle (open → merged → deploying → deployed/
-// failed), so for each pr_number the most-recently-updated row is the current
-// status. ORDER BY updated_at DESC + first-row-per-pr_number wins.
+// failed), so for each (repo, pr_number) the most-recently-updated row is the
+// current status. ORDER BY updated_at DESC + first-row-per-(repo,number) wins.
 //
-// MULTI-REPO COLLISION (CTL-1157): a (repo, pr_number) pair — NOT pr_number alone
-// — identifies a PR. With filter_state rows from >1 GitHub repo, PR numbers
-// collide: a merged #42 in repo X and an open #42 in repo Y are DIFFERENT PRs.
-// Keying by pr_number alone would let repo X's `merged` shadow repo Y's `open`
-// (the board would treat Y's #42 as merged → false phantom, or hide its orphaned
-// open PR). Since the board descriptor carries no per-ticket repo, we cannot say
-// WHICH #42 a ticket points at — so a number seen in TWO distinct repos is marked
-// `ambiguous:true`, and board-health skips it rather than borrow the wrong repo's
-// status. Each entry also carries its `repo` for downstream repo+number matching.
+// MULTI-REPO COLLISION (CTL-1157, Codex #4): a (repo, pr_number) pair — NOT
+// pr_number alone — identifies a PR. With filter_state rows from >1 GitHub repo,
+// PR numbers collide: a merged #42 in repo X and an open #42 in repo Y are
+// DIFFERENT PRs. Keying by pr_number ALONE forced an `ambiguous` skip whenever a
+// number appeared in two repos — which is safe for phantom-merged (no false
+// phantom) but HID a genuine orphaned open PR whenever an unrelated repo happened
+// to reuse the number. The proper fix is COMPOSITE keying: this returns a nested
+// `Map<number, Map<repo, {status,updatedAt,repo}>>`, so a caller that knows the
+// ticket's repo (board-health resolves it from the registry) can look up the
+// EXACT (repo, number) entry and never confuse two repos' #42. The number-only
+// `ambiguous` fallback now exists ONLY at lookup time and ONLY when the ticket's
+// repo is genuinely underivable AND the number collides (board-health's
+// lookupPrStatus owns that last-resort).
 //
-// Returns Map<number,{status,updatedAt,repo,ambiguous}> (frozen once at
-// board-assemble time). Empty map when filter_state has no rows → the new
-// invariants stay observable:false (shadow-safe by default).
+// Returns Map<number, Map<repoKey, {status,updatedAt,repo}>> (frozen once at
+// board-assemble time). The inner key is the repo string ("" for a null/empty
+// repo) so single-repo installs always have exactly one inner entry per number
+// (no collision → number-only lookup stays byte-identical). Empty outer map when
+// filter_state has no rows → the new invariants stay observable:false
+// (shadow-safe by default).
 export function getAllPrStatuses() {
   const rows = ensure()
     .prepare(`SELECT pr_number, repo, status, updated_at FROM filter_state ORDER BY updated_at DESC`)
@@ -675,22 +682,21 @@ export function getAllPrStatuses() {
   const map = new Map();
   for (const row of rows) {
     if (row.pr_number == null) continue;
-    const existing = map.get(row.pr_number);
-    if (!existing) {
-      map.set(row.pr_number, {
-        status: row.status,
-        updatedAt: row.updated_at,
-        repo: row.repo ?? null,
-        ambiguous: false,
-      });
-      continue;
+    const repo = row.repo ?? null;
+    const repoKey = repo ?? "";
+    let byRepo = map.get(row.pr_number);
+    if (!byRepo) {
+      byRepo = new Map();
+      map.set(row.pr_number, byRepo);
     }
-    // A repeated row for the SAME repo is just an older lifecycle state — the
-    // most-recent already won. A row for a DIFFERENT repo is a colliding PR number
-    // across repos → ambiguous (board-health must not match it to one repo).
-    if (row.repo != null && existing.repo != null && row.repo !== existing.repo) {
-      existing.ambiguous = true;
-    }
+    // First row for a given (repo, number) wins (ORDER BY updated_at DESC); a later
+    // row for the SAME (repo, number) is an older lifecycle state → keep the newer.
+    if (byRepo.has(repoKey)) continue;
+    byRepo.set(repoKey, {
+      status: row.status,
+      updatedAt: row.updated_at,
+      repo,
+    });
   }
   return map;
 }

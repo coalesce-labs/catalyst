@@ -203,32 +203,37 @@ describe("filter_state (CTL-284 backward compat)", () => {
   });
 });
 
-// ─── getAllPrStatuses — (repo, pr_number) keying / collision (CTL-1157) ───────
+// ─── getAllPrStatuses — composite (repo, pr_number) keying (CTL-1157, Codex #4) ─
 
-describe("getAllPrStatuses — multi-repo PR-number collision (CTL-1157)", () => {
-  test("a cross-repo PR-number collision is marked ambiguous (no silent shadow)", () => {
+describe("getAllPrStatuses — composite (repo, pr_number) keying (CTL-1157)", () => {
+  test("a cross-repo PR-number collision keeps BOTH repos' statuses (no shadowing)", () => {
     // #42 exists in TWO GitHub repos: merged in org/x, still open in org/y. They
-    // are DIFFERENT PRs. Keying by pr_number alone would let org/x's `merged`
-    // shadow org/y's `open` (the false-phantom / hidden-orphan bug). Both repos
-    // sharing #42 ⇒ the entry is ambiguous.
+    // are DIFFERENT PRs. The old number-only keying forced an `ambiguous` skip; the
+    // composite shape keeps a per-repo entry so a caller that knows the ticket's
+    // repo resolves the EXACT (repo, number) — org/x→merged, org/y→open — and never
+    // confuses the two (the false-phantom / hidden-orphan bug is gone at the source).
     upsertFilterStateOpen({ interestId: "x-42", prNumber: 42, repo: "org/x" });
     setFilterStateMerged("x-42", "sha-x");
     upsertFilterStateOpen({ interestId: "y-42", prNumber: 42, repo: "org/y" });
-    const map = getAllPrStatuses();
-    expect(map.get(42).ambiguous).toBe(true);
+    const byRepo = getAllPrStatuses().get(42);
+    expect(byRepo).toBeInstanceOf(Map);
+    expect(byRepo.size).toBe(2);
+    expect(byRepo.get("org/x")).toMatchObject({ status: "merged", repo: "org/x" });
+    expect(byRepo.get("org/y")).toMatchObject({ status: "open", repo: "org/y" });
   });
 
-  test("a SAME-repo repeated PR number is NOT ambiguous (older lifecycle state, not a collision)", () => {
+  test("a SAME-repo repeated PR number collapses to ONE inner entry (most-recent wins, not a collision)", () => {
     upsertFilterStateOpen({ interestId: "z-7a", prNumber: 7, repo: "org/z" });
     upsertFilterStateOpen({ interestId: "z-7b", prNumber: 7, repo: "org/z" });
-    const map = getAllPrStatuses();
-    expect(map.get(7).ambiguous).toBe(false);
-    expect(map.get(7).repo).toBe("org/z");
+    const byRepo = getAllPrStatuses().get(7);
+    expect(byRepo.size).toBe(1); // single repo → no collision
+    expect(byRepo.get("org/z")).toMatchObject({ status: "open", repo: "org/z" });
   });
 
-  test("a non-colliding PR carries its repo + status and stays unambiguous", () => {
+  test("a non-colliding PR carries its repo + status under its repo key", () => {
     upsertFilterStateOpen({ interestId: "solo-9", prNumber: 9, repo: "org/solo" });
-    const map = getAllPrStatuses();
-    expect(map.get(9)).toMatchObject({ status: "open", repo: "org/solo", ambiguous: false });
+    const byRepo = getAllPrStatuses().get(9);
+    expect(byRepo.size).toBe(1);
+    expect(byRepo.get("org/solo")).toMatchObject({ status: "open", repo: "org/solo" });
   });
 });
