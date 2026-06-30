@@ -512,6 +512,62 @@ describe("sdkRunPhaseAgent — execution-core.sdk.phase-turns telemetry", () => 
   });
 });
 
+// ── CTL-1406: session.context emit (dashboard panels 50/51) ───────────────────
+
+describe("sdkRunPhaseAgent — CTL-1406 context-window emit", () => {
+  const withUsage = (over = {}) =>
+    resultMsg({
+      num_turns: 4,
+      usage: {
+        iterations: [{ input_tokens: 100000, cache_read_input_tokens: 50000, cache_creation_input_tokens: 0 }],
+      },
+      modelUsage: { "claude-opus-4-8": { contextWindow: 1000000 } },
+      ...over,
+    });
+
+  test("emits context % (used/contextWindow) + turn when the SDK result carries usage + modelUsage", async () => {
+    const { spawn } = spawnReturningSpec({ spec: makeSpec() });
+    const ctx = [];
+    await sdkRunPhaseAgent(ARGS, {
+      ...GOOD_AUTH,
+      spawn,
+      runQuery: fakeQuery([withUsage()]),
+      emitContextEvent: (p) => ctx.push(p),
+    });
+    expect(ctx.length).toBe(1);
+    // (100000 + 50000 + 0) / 1000000 = 15%
+    expect(ctx[0].pct).toBe(15);
+    expect(ctx[0].turn).toBe(4);
+    expect(ctx[0].tokens).toBe(150000);
+    expect(ctx[0].max).toBe(1000000);
+    expect(ctx[0].ticket).toBe("CTL-100");
+  });
+
+  test("caps the percentage at 100 when used tokens exceed the window", async () => {
+    const { spawn } = spawnReturningSpec({ spec: makeSpec() });
+    const ctx = [];
+    await sdkRunPhaseAgent(ARGS, {
+      ...GOOD_AUTH,
+      spawn,
+      runQuery: fakeQuery([withUsage({ usage: { iterations: [{ input_tokens: 2000000 }] } })]),
+      emitContextEvent: (p) => ctx.push(p),
+    });
+    expect(ctx[0].pct).toBe(100);
+  });
+
+  test("does NOT emit when the result lacks usage/modelUsage (older SDK / no data)", async () => {
+    const { spawn } = spawnReturningSpec({ spec: makeSpec() });
+    const ctx = [];
+    await sdkRunPhaseAgent(ARGS, {
+      ...GOOD_AUTH,
+      spawn,
+      runQuery: fakeQuery([resultMsg({ num_turns: 2 })]), // no usage/modelUsage
+      emitContextEvent: (p) => ctx.push(p),
+    });
+    expect(ctx.length).toBe(0);
+  });
+});
+
 // ── Pre-launch failure surfaces (no query) ────────────────────────────────────
 
 describe("sdkRunPhaseAgent — shared pre-launch failure", () => {

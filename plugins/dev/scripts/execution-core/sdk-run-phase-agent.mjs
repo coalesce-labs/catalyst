@@ -60,10 +60,12 @@
 // (never a silent drop).
 
 import { spawnSync } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import { appendFileSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { getEventLogPath } from "./config.mjs";
+import { buildCatalystResource } from "./lib/catalyst-resource.mjs";
 import { nodeClass } from "./lib/node-class.mjs";
 
 // phase-agent-dispatch + phase-agent-emit-complete sit one directory up.
@@ -766,6 +768,82 @@ function extractNumTurns(result) {
   return typeof n === "number" && Number.isFinite(n) ? n : null;
 }
 
+// extractContextUsage — CTL-1406. Derive context-window fill from the SDK terminal result
+// so detached SDK workers can populate dashboard panels 50/51 (Context Window % / Turn),
+// which the interactive statusline (catalyst-session.sh cmd_emit_context) never reaches in a
+// background/SDK run. The used context at the final turn is the LAST iteration's input side
+// (input + cache_read + cache_creation); the model's window is
+// result.modelUsage[<model>].contextWindow (e.g. 1_000_000 for opus-4-8). Verified live
+// against @anthropic-ai/claude-agent-sdk@0.3.195. Pure + total — returns null when the result
+// lacks the fields (older SDK / no terminal result / zero usage) so the emit stays best-effort.
+function extractContextUsage(result) {
+  const iters = result?.usage?.iterations;
+  const lastIter = Array.isArray(iters) && iters.length > 0 ? iters[iters.length - 1] : null;
+  const u = lastIter ?? result?.usage ?? null;
+  if (!u) return null;
+  const used =
+    (Number(u.input_tokens) || 0) +
+    (Number(u.cache_read_input_tokens) || 0) +
+    (Number(u.cache_creation_input_tokens) || 0);
+  const models = result?.modelUsage ?? {};
+  const firstModel = Object.keys(models)[0];
+  const contextWindow = firstModel ? Number(models[firstModel]?.contextWindow) : Number.NaN;
+  if (!Number.isFinite(used) || used <= 0 || !Number.isFinite(contextWindow) || contextWindow <= 0) {
+    return null;
+  }
+  return { pct: Math.min(100, Math.round((used / contextWindow) * 100)), tokens: used, max: contextWindow };
+}
+
+// defaultEmitContextEvent — CTL-1406. Append a `session.context` event so detached SDK phase
+// workers feed dashboard panels 50/51. The panels select {service_name="catalyst.session"}
+// |= "session.context" and unwrap `claude_context_used_pct` + `claude_turn` (the dotted attrs
+// below become those underscored Loki structured-metadata names via the Alloy transform), with
+// a {{linear_key}} legend (resource linear.key). So we emit that EXACT shape directly to the
+// unified event log — distinct from emitEvent's defaultAppendOperatorEvent, which stamps
+// service.name=catalyst.execution-core (the panels' selector would miss it). Best-effort: never
+// throws — telemetry must not break a dispatch (mirrors defaultEmitEvent).
+function defaultEmitContextEvent({ ticket, phase, pct, turn, tokens, max } = {}) {
+  try {
+    if (!Number.isFinite(pct)) return false;
+    const ts = new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
+    const resource = buildCatalystResource({ serviceName: "catalyst.session" });
+    if (ticket) resource["linear.key"] = ticket;
+    const attributes = { "event.name": "session.context", "claude.context.used_pct": pct };
+    if (Number.isFinite(turn)) attributes["claude.turn"] = turn;
+    if (Number.isFinite(tokens)) attributes["claude.context.tokens"] = tokens;
+    if (ticket) attributes["linear.issue.identifier"] = ticket;
+    const line =
+      JSON.stringify({
+        ts,
+        id: randomBytes(8).toString("hex"),
+        observedTs: ts,
+        severityText: "INFO",
+        severityNumber: 9,
+        traceId: randomBytes(16).toString("hex"),
+        spanId: randomBytes(8).toString("hex"),
+        resource,
+        attributes,
+        body: {
+          message: `session.context ${ticket ?? ""}`.trim(),
+          payload: {
+            context_pct: pct,
+            context_tokens: Number.isFinite(tokens) ? tokens : null,
+            context_max: Number.isFinite(max) ? max : null,
+            turn: Number.isFinite(turn) ? turn : null,
+            phase: phase ?? null,
+          },
+        },
+      }) + "\n";
+    const path = getEventLogPath();
+    mkdirSync(dirname(path), { recursive: true });
+    appendFileSync(path, line);
+    return true;
+  } catch {
+    /* best-effort — a write/serialize failure must never break a dispatch */
+    return false;
+  }
+}
+
 // sdkRunPhaseAgent — the executor=sdk launch verb. async (the in-process query loop
 // awaits the SDK stream), returns the defaultRunPhaseAgent shape.
 export async function sdkRunPhaseAgent(
@@ -779,6 +857,7 @@ export async function sdkRunPhaseAgent(
     semaphore, // injectable; defaults to the process-wide shared one
     maxParallel = resolveMaxParallel(),
     emitEvent = defaultEmitEvent,
+    emitContextEvent = defaultEmitContextEvent, // CTL-1406: session.context for panels 50/51
     emitBackstop = defaultEmitBackstop,
     sleep = defaultSleep,
     random = Math.random,
@@ -946,6 +1025,21 @@ export async function sdkRunPhaseAgent(
         subtype: result?.subtype ?? null,
         turnCap: turnCap ?? spec.turnCap,
       });
+      // CTL-1406: emit context-window % so detached SDK workers populate dashboard panels
+      // 50/51 (the interactive statusline never runs here). Best-effort + only when the SDK
+      // result carries usage + a model context window; a null extract is silently skipped.
+      const ctxUsage = extractContextUsage(result);
+      if (ctxUsage) {
+        const numTurns = extractNumTurns(result);
+        emitContextEvent({
+          ticket,
+          phase,
+          pct: ctxUsage.pct,
+          turn: typeof numTurns === "number" ? numTurns : undefined,
+          tokens: ctxUsage.tokens,
+          max: ctxUsage.max,
+        });
+      }
       if (backstop) {
         emitBackstop({ phase, ticket, status: backstop.status, reason: backstop.reason, orchDir, signalFile }, { spawn });
       }
