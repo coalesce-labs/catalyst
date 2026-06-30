@@ -5,7 +5,7 @@
 // uninstall live-node guard, dry-run side-effect-freedom, and CLI exit codes. Every step shells
 // out through an injected runStep stub, so nothing real is provisioned.
 import { describe, test, expect, afterEach } from "bun:test";
-import { readFileSync, writeFileSync, rmSync } from "node:fs";
+import { readFileSync, writeFileSync, rmSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -28,6 +28,7 @@ import {
   usage,
   main,
   upsertEnvFile,
+  execCoreEnvPath,
   VALID_EXECUTORS,
 } from "./install-lifecycle.mjs";
 
@@ -349,6 +350,27 @@ describe("upsertEnvFile — CTL-1401 idempotent env-file upsert", () => {
     expect(readFileSync(f, "utf8")).toBe(once);
     expect(readFileSync(f, "utf8").match(/CATALYST_EXECUTOR=/g)).toHaveLength(1);
   });
+  test("Codex P2: DEDUPES — replaces the first assignment in place and drops trailing duplicates (so no stale later line wins)", () => {
+    const f = tmpCfg();
+    // a hand-edited file with TWO CATALYST_EXECUTOR lines; the launcher sources the whole file so the
+    // trailing `bg` would win — the upsert must leave exactly one (the canonical sdk), no later override.
+    writeFileSync(f, "export CATALYST_EXECUTOR=sdk\nexport OTHER=1\nCATALYST_EXECUTOR=bg\n");
+    upsertEnvFile(f, "CATALYST_EXECUTOR", "sdk");
+    const out = readFileSync(f, "utf8");
+    expect(out.match(/CATALYST_EXECUTOR=/g)).toHaveLength(1);
+    expect(out).toBe("export CATALYST_EXECUTOR=sdk\nexport OTHER=1\n");
+  });
+});
+
+describe("execCoreEnvPath — CTL-1401 (Codex P2: matches the launcher default, ignores XDG)", () => {
+  test("honors CATALYST_EXECUTION_CORE_ENV override; otherwise ~/.config (NOT XDG_CONFIG_HOME)", () => {
+    expect(execCoreEnvPath({ CATALYST_EXECUTION_CORE_ENV: "/custom/ec.env" })).toBe("/custom/ec.env");
+    // the launcher hard-codes ${HOME}/.config — XDG must NOT redirect us, or the daemon reads a
+    // different file than we wrote and never sees the executor.
+    const withXdg = execCoreEnvPath({ XDG_CONFIG_HOME: "/xdg" });
+    expect(withXdg).not.toContain("/xdg");
+    expect(withXdg).toContain("/.config/catalyst/execution-core.env");
+  });
 });
 
 describe("runInstallLifecycle — CTL-1401 executor + cloud-sync provisioning (integration)", () => {
@@ -370,6 +392,39 @@ describe("runInstallLifecycle — CTL-1401 executor + cloud-sync provisioning (i
     expect(readFileSync(ecEnv, "utf8")).toBe(before); // survived byte-for-byte
     // cloud-sync is still re-adopted on a reinstall (teardown removed it)
     expect(bag.calls.some((argv) => argv[0] === "STACK" && argv[1] === "adopt-cloud-sync")).toBe(true);
+  });
+  test("Codex P2: rollback REVERTS the --executor env mutation to its pre-image (true reversal)", async () => {
+    const ecEnv = tmpCfg();
+    writeFileSync(ecEnv, "export CATALYST_EXECUTOR=bg\n"); // node was bg before
+    const before = readFileSync(ecEnv, "utf8");
+    // fail a step AFTER write-config's setenv (install-services) so the run takes the rollback path
+    const bag = withRealRun(makeDeps({ failOn: (argv) => (argv[1] === "install-services" ? 7 : 0), bundleHadAgents: true }));
+    const res = await runInstallLifecycle({ operation: "install", nodeClass: "worker", opts: { executor: "sdk", execCoreEnv: ecEnv } }, bag.deps);
+    // the run did NOT complete (it hit the rollback path — outcome is rolled_back or, if the stubbed
+    // re-bootstrap also fails, failed; either way the env revert runs at the top of the catch)
+    expect(res.outcome).not.toBe("completed");
+    // the executor lever was reverted to bg — NOT left flipped to sdk for the next daemon start
+    expect(readFileSync(ecEnv, "utf8")).toBe(before);
+  });
+  test("Codex P2: rollback DELETES execution-core.env if --executor created it fresh (pre-image was absent)", async () => {
+    const ecEnv = tmpCfg(); // does not exist yet
+    rmSync(ecEnv, { force: true });
+    const bag = withRealRun(makeDeps({ failOn: (argv) => (argv[1] === "install-services" ? 7 : 0), bundleHadAgents: true }));
+    await runInstallLifecycle({ operation: "install", nodeClass: "worker", opts: { executor: "sdk", execCoreEnv: ecEnv } }, bag.deps);
+    expect(existsSync(ecEnv)).toBe(false); // created-then-reverted ⇒ gone
+  });
+  test("Codex P2: a destructive adopt-cloud-sync failure on macOS → completed-but-degraded (cloudSyncOk=false), NOT silent success", async () => {
+    const bag = withRealRun(makeDeps({ failOn: (argv) => (argv[1] === "adopt-cloud-sync" ? 1 : 0) }));
+    bag.deps.isDarwin = true; // pin macOS so the failure is treated as genuine
+    const res = await runInstallLifecycle({ operation: "install", nodeClass: "worker", opts: {} }, bag.deps);
+    expect(res.outcome).toBe("completed"); // the node IS installed…
+    expect(res.cloudSyncOk).toBe(false); // …but degraded — the writer may be down
+  });
+  test("off macOS, an adopt-cloud-sync non-zero stays a benign optional skip (cloudSyncOk=true)", async () => {
+    const bag = withRealRun(makeDeps({ failOn: (argv) => (argv[1] === "adopt-cloud-sync" ? 1 : 0) }));
+    bag.deps.isDarwin = false; // non-launchd OS — adopt-cloud-sync is macOS-only by design
+    const res = await runInstallLifecycle({ operation: "install", nodeClass: "worker", opts: {} }, bag.deps);
+    expect(res.cloudSyncOk).toBe(true);
   });
 });
 
@@ -1009,6 +1064,15 @@ describe("main — CLI exit codes", () => {
     expect(text).toContain("adopt-cloud-sync");
     expect(text).toContain("set-executor");
     expect(text).toContain("CATALYST_EXECUTOR=sdk");
+  });
+  test("CTL-1401 (Codex P2): a destructive adopt-cloud-sync failure → completed but exit 1 (degraded, not silent)", async () => {
+    const bag = withRealRun(makeDeps({ failOn: (argv) => (argv[1] === "adopt-cloud-sync" ? 1 : 0) }));
+    bag.deps.isDarwin = true;
+    const out = [];
+    const errOut = [];
+    const code = await main(["install", "--class", "worker"], { ...bag.deps, out: (m) => out.push(m), errOut: (m) => errOut.push(m) });
+    expect(code).toBe(1);
+    expect(errOut.join("\n")).toContain("adopt-cloud-sync FAILED");
   });
 
   // Execute-path exit codes via full stub deps.

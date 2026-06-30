@@ -29,7 +29,7 @@
 
 import { spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { readFileSync, writeFileSync, mkdirSync, renameSync, existsSync, readdirSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdirSync, renameSync, existsSync, readdirSync, rmSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { homedir } from "node:os";
@@ -121,16 +121,16 @@ export const VALID_EXECUTORS = Object.freeze(["bg", "sdk", "oneshot-legacy"]);
 
 /**
  * execCoreEnvPath — the daemon env file the execution-core launcher sources on EVERY start, and from
- * which CTL-1398's token-arm reads `CATALYST_EXECUTOR`. Resolved the same way the launcher + doctor
- * resolve it: CATALYST_EXECUTION_CORE_ENV override > XDG/.config/catalyst/execution-core.env. This
- * file is NOT a Layer-2 key and is never stripped by remove-config, so a value written here survives
- * a reinstall — write-config (re)asserts it so the executor lever is install-provisioned.
+ * which CTL-1398's token-arm reads `CATALYST_EXECUTOR`. Resolved EXACTLY the way the launcher
+ * (catalyst-execution-core) and doctor (defaultExecCoreEnvPath) resolve it: the
+ * `CATALYST_EXECUTION_CORE_ENV` override, else `~/.config/catalyst/execution-core.env`. NB: the
+ * launcher does NOT honor `XDG_CONFIG_HOME` for this file — it hard-codes `${HOME}/.config` — so we
+ * must NOT either, or `--executor` would write a lever the restarted daemon never reads (Codex P2).
+ * This file is not a Layer-2 key and is never stripped by remove-config, so a value written here
+ * survives a reinstall — write-config (re)asserts it so the executor lever is install-provisioned.
  */
 export function execCoreEnvPath(env = process.env) {
-  return (
-    env.CATALYST_EXECUTION_CORE_ENV ||
-    join(env.XDG_CONFIG_HOME || join(homedir(), ".config"), "catalyst", "execution-core.env")
-  );
+  return env.CATALYST_EXECUTION_CORE_ENV || join(homedir(), ".config", "catalyst", "execution-core.env");
 }
 
 /** readNodeClassRaw — the raw catalyst.node.class string stored in a Layer-2 file (or null). */
@@ -409,13 +409,48 @@ export function upsertEnvFile(file, key, value) {
   // Drop a single trailing empty line (from a prior terminal newline) so we re-add exactly one.
   if (lines.length && lines[lines.length - 1] === "") lines.pop();
   const newLine = `export ${key}=${value}`;
-  const idx = lines.findIndex((l) => re.test(l));
-  if (idx >= 0) lines[idx] = newLine;
-  else lines.push(newLine);
+  // Replace the FIRST existing assignment in place and DROP every later duplicate. The launcher
+  // `source`s the whole file, so a stale trailing `KEY=…` from a prior hand-edit would otherwise
+  // win — leaving exactly one occurrence is what makes the lever deterministic (Codex P2).
+  const out = [];
+  let placed = false;
+  for (const l of lines) {
+    if (re.test(l)) {
+      if (!placed) {
+        out.push(newLine);
+        placed = true;
+      }
+      // else: a duplicate assignment — drop it
+    } else {
+      out.push(l);
+    }
+  }
+  if (!placed) out.push(newLine);
   mkdirSync(dirname(file), { recursive: true });
   const tmp = `${file}.${randomBytes(6).toString("hex")}.tmp`;
-  writeFileSync(tmp, `${lines.join("\n")}\n`, { mode: 0o600 });
+  writeFileSync(tmp, `${out.join("\n")}\n`, { mode: 0o600 });
   renameSync(tmp, file);
+}
+
+// revertEnvUndos — CTL-1401 rollback support. Restores each env file mutated by a `setenv` step to the
+// pre-image captured before the write: re-writes the prior content, or deletes the file if it did not
+// exist. Best-effort + atomic; applied in REVERSE so the earliest pre-image wins if a file was touched
+// twice. Used only on the rollback path so a failed install/reinstall is a true reversal.
+export function revertEnvUndos(undos, log = () => {}) {
+  for (const { file, priorContent } of [...(undos || [])].reverse()) {
+    try {
+      if (priorContent === null) {
+        rmSync(file, { force: true });
+      } else {
+        mkdirSync(dirname(file), { recursive: true });
+        const tmp = `${file}.${randomBytes(6).toString("hex")}.tmp`;
+        writeFileSync(tmp, priorContent, { mode: 0o600 });
+        renameSync(tmp, file);
+      }
+    } catch (e) {
+      log(`catalyst-install: rollback note — could not revert env file ${file}: ${e?.message ?? e}`);
+    }
+  }
 }
 
 // Reject the JS prototype-chain keys so a dotted path can never walk into Object.prototype
@@ -670,6 +705,10 @@ function isTeardown(operation) {
  */
 export async function runInstallLifecycle({ operation, nodeClass, opts = {} }, deps) {
   const { scripts, env, layer2, runStep, runDoctorPass, emit, nowFn, genTraceId, genSpanId, probeDaemons, probeResidualAgents, probeDrained, bundleHasCapturedAgents, scriptExists, binExists, probeUpdaterAgent, probeWorkerAgents, probeCliInstalled, log, InstallRunCtor } = deps;
+  // CTL-1401: only on macOS is an adopt-cloud-sync non-zero a GENUINE failure (a launchctl error that
+  // may have left the writer torn down) — on a non-launchd OS it is the expected "macOS-only" skip, so
+  // there it stays a benign optional warn. Injectable for tests.
+  const isDarwin = deps.isDarwin ?? process.platform === "darwin";
 
   // Every composed step inherits (a) the RESOLVED class so the bash tools (which re-derive class
   // env-first) cannot diverge from the lifecycle's target — e.g. `install --class developer` on a
@@ -806,7 +845,7 @@ export async function runInstallLifecycle({ operation, nodeClass, opts = {} }, d
     pluginDirs: readDeepKey(preCfg, "catalyst.orchestration.pluginDirs") ?? null,
   };
 
-  const ctx = { bundlePath: null, healthOk: true, healthRc: null, cleanOk: true, teardownRan: false, doctorOk: true, doctorRc: null, doctorSummary: null };
+  const ctx = { bundlePath: null, healthOk: true, healthRc: null, cleanOk: true, teardownRan: false, doctorOk: true, doctorRc: null, doctorSummary: null, cloudSyncOk: true, envUndos: [] };
 
   const runOneStep = async (step) => {
     switch (step.kind) {
@@ -826,7 +865,18 @@ export async function runInstallLifecycle({ operation, nodeClass, opts = {} }, d
         if (step.label === "uninstall-services" && r.code === 0) ctx.teardownRan = true;
         if (r.code !== 0) {
           if (step.optional) {
-            log(`catalyst-install: WARN — optional step '${step.label}' failed (rc ${r.code}), continuing: ${r.stderr.trim()}`);
+            // CTL-1401 (Codex P2): adopt-cloud-sync is optional for PORTABILITY (it hard-fails as
+            // macOS-only off launchd), but on macOS a non-zero is a REAL failure — and cmd_adopt_cloud_sync
+            // boots the existing agent out BEFORE re-bootstrapping, so a mid-failure can leave the node
+            // WITHOUT cloud-sync (the local-replica regression we're fixing). The install profile doctor
+            // doesn't check cloud-sync, so don't silently swallow it: record it so the run reports
+            // completed-but-degraded (exit 1) instead of a clean success. Still non-fatal for rollback.
+            if (step.label === "adopt-cloud-sync" && isDarwin) {
+              ctx.cloudSyncOk = false;
+              log(`catalyst-install: WARN — adopt-cloud-sync FAILED on macOS (rc ${r.code}) — the cloud-sync writer may be DOWN; node's local Linear replica is at risk: ${r.stderr.trim()}`);
+            } else {
+              log(`catalyst-install: WARN — optional step '${step.label}' failed (rc ${r.code}), continuing: ${r.stderr.trim()}`);
+            }
             return;
           }
           throw new Error(`step '${step.label}' failed (rc ${r.code}): ${r.stderr.trim()}`);
@@ -843,6 +893,17 @@ export async function runInstallLifecycle({ operation, nodeClass, opts = {} }, d
       case "setenv": {
         // CTL-1401: idempotent upsert into the daemon env file (execution-core.env). Not a Layer-2
         // key, so it survives remove-config; the launcher sources it on the next start to apply.
+        // Codex P2 — execution-core.env is NOT in the catalyst-backup capture set, so a later-phase
+        // failure would roll back the bundle while leaving this lever flipped. Capture the pre-image
+        // (the file's prior content, or null if it didn't exist) so the rollback handler can revert
+        // this exact mutation and the run is a TRUE reversal.
+        let priorContent = null;
+        try {
+          priorContent = readFileSync(step.file, "utf8");
+        } catch {
+          /* file did not exist → undo = delete */
+        }
+        ctx.envUndos.push({ file: step.file, priorContent });
         upsertEnvFile(step.file, step.key, step.value);
         log(`catalyst-install: set ${step.key}=${step.value} in ${step.file}`);
         return;
@@ -935,10 +996,15 @@ export async function runInstallLifecycle({ operation, nodeClass, opts = {} }, d
     // CTL-1369 PR4: the completed event carries BOTH doctor summaries (before via started, after here)
     // so the install trace shows the node's health change. doctorOk folds into the command exit code
     // (in main), so a node that provisioned but is NOT class-correct (wrong agents/owner) exits non-zero.
-    run.complete({ class: nodeClass, healthOk: ctx.healthOk, doctorOk: ctx.doctorOk, cleanOk: ctx.cleanOk, bundle: ctx.bundlePath, postDoctor: ctx.doctorSummary });
-    return { outcome: "completed", healthOk: ctx.healthOk, healthRc: ctx.healthRc, doctorOk: ctx.doctorOk, doctorRc: ctx.doctorRc, doctorFails: ctx.doctorSummary?.fails ?? null, cleanOk: ctx.cleanOk, bundlePath: ctx.bundlePath, traceId };
+    run.complete({ class: nodeClass, healthOk: ctx.healthOk, doctorOk: ctx.doctorOk, cleanOk: ctx.cleanOk, cloudSyncOk: ctx.cloudSyncOk, bundle: ctx.bundlePath, postDoctor: ctx.doctorSummary });
+    return { outcome: "completed", healthOk: ctx.healthOk, healthRc: ctx.healthRc, doctorOk: ctx.doctorOk, doctorRc: ctx.doctorRc, doctorFails: ctx.doctorSummary?.fails ?? null, cleanOk: ctx.cleanOk, cloudSyncOk: ctx.cloudSyncOk, bundlePath: ctx.bundlePath, traceId };
   } catch (err) {
     let rolledBack = false;
+    // CTL-1401 (Codex P2): revert any execution-core.env mutation made by a `setenv` step (the
+    // `--executor` lever) BEFORE the bundle restore. execution-core.env is outside catalyst-backup's
+    // capture set, so without this a rolled-back run would leave CATALYST_EXECUTOR flipped for the next
+    // daemon start. No-op when no setenv ran.
+    revertEnvUndos(ctx.envUndos, log);
     // disposition: "none" = nothing to undo (failed before/at backup) → benign abort; "ok" = fully
     // reverted; "failed" = restore failed → node in a PARTIAL state. Stamped into the terminal event
     // so a dashboard can tell a safe abort from a node that needs manual recovery (the riskiest case).
@@ -1290,6 +1356,12 @@ export async function main(argv, depsOverride) {
         code = 1;
       } else if (result.doctorOk === false) {
         errOut(`catalyst-install: ${args.operation} completed but the post-install doctor (--profile install) reported the node is NOT class-correct${result.doctorFails?.length ? ` [${result.doctorFails.join(", ")}]` : ""} — verify the launchd agent set + pluginPullOwner for class '${nodeClass}'.`);
+        code = 1;
+      } else if (result.cloudSyncOk === false) {
+        // CTL-1401 (Codex P2): adopt-cloud-sync failed on macOS — the node may have lost its cloud-sync
+        // writer (local Linear replica). The node IS installed, but degraded: exit 1 so this is never
+        // reported as a clean success (the install-profile doctor does not check cloud-sync).
+        errOut(`catalyst-install: ${args.operation} completed but adopt-cloud-sync FAILED — the cloud-sync writer (local Linear replica) may be DOWN; re-run \`catalyst-stack adopt-cloud-sync\` and verify with \`catalyst-doctor\`.`);
         code = 1;
       } else {
         if (!args.json) out(`catalyst-install: ${args.operation} (${nodeClass}) completed.`);
