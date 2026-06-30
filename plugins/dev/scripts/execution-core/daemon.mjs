@@ -626,7 +626,23 @@ export function startDaemon({
       log,
     });
     const executor = bootExec.executor;
-    const dispatchFn = dispatchForExecutor(executor);
+    // CTL-1396 (Codex P2): under executor=sdk, inject the unified-event-log appender
+    // into the dispatch path so sdkRunPhaseAgent's telemetry (execution-core.sdk.phase-turns
+    // — the turn-cap calibration signal — plus .overloaded/.auth.misconfigured) lands in
+    // the JSONL event log / Loki, not just daemon.log's stderr. sdkRunPhaseAgent's emitEvent
+    // is the two-arg (name, payload) shape; defaultAppendOperatorEvent takes the one-arg
+    // {event.name,payload} envelope, so adapt. bg/oneshot-legacy → identity pass-through
+    // (no sdk launch verb → byte-identical to today).
+    const rawDispatchFn = dispatchForExecutor(executor);
+    const dispatchFn =
+      executor === "sdk"
+        ? (args, seams = {}) =>
+            rawDispatchFn(args, {
+              emitEvent: (name, payload) =>
+                defaultAppendOperatorEvent({ "event.name": name, payload }),
+              ...seams,
+            })
+        : rawDispatchFn;
     const dispatchMode = dispatchModeForExecutor(executor);
     // CTL-1365b: the comment-wake re-dispatch binding — routes a parked ticket's
     // re-dispatch through the SAME resolved executor (no split-brain).

@@ -402,6 +402,116 @@ describe("sdkRunPhaseAgent — result mapping + backstop", () => {
   });
 });
 
+// ── Per-phase turn-count telemetry (CTL-1396 item B) ──────────────────────────
+
+describe("sdkRunPhaseAgent — execution-core.sdk.phase-turns telemetry", () => {
+  const phaseTurns = (events) =>
+    events.filter(([name]) => name === "execution-core.sdk.phase-turns").map(([, p]) => p);
+
+  test("success → emits phase-turns with the SDK's num_turns, phase, subtype, and turnCap", async () => {
+    const { spawn } = spawnReturningSpec();
+    const events = [];
+    const r = await sdkRunPhaseAgent(ARGS, {
+      ...GOOD_AUTH, spawn,
+      runQuery: fakeQuery([resultMsg({ result: "great", num_turns: 7 })]),
+      emitEvent: (name, payload) => events.push([name, payload]),
+      emitBackstop: () => {},
+    });
+    expect(r.code).toBe(0);
+    const turns = phaseTurns(events);
+    expect(turns).toHaveLength(1);
+    expect(turns[0].num_turns).toBe(7);
+    expect(turns[0].phase).toBe("implement");
+    expect(turns[0].ticket).toBe("CTL-100");
+    expect(turns[0].subtype).toBe("success");
+  });
+
+  test("error_max_turns → emits phase-turns carrying the turns-at-exhaustion", async () => {
+    const { spawn } = spawnReturningSpec();
+    const events = [];
+    const r = await sdkRunPhaseAgent(ARGS, {
+      ...GOOD_AUTH, spawn,
+      runQuery: fakeQuery([resultMsg({ subtype: "error_max_turns", is_error: true, num_turns: 200 })]),
+      emitEvent: (name, payload) => events.push([name, payload]),
+      emitBackstop: () => {},
+    });
+    expect(r.code).toBe(1);
+    const turns = phaseTurns(events);
+    expect(turns).toHaveLength(1);
+    expect(turns[0].num_turns).toBe(200);
+    expect(turns[0].subtype).toBe("error_max_turns");
+    expect(turns[0].phase).toBe("implement");
+  });
+
+  test("turnCap reflects the spec's cap (200) by default and an explicit override when given", async () => {
+    const { spawn } = spawnReturningSpec();
+    const ev1 = [];
+    await sdkRunPhaseAgent(ARGS, {
+      ...GOOD_AUTH, spawn,
+      runQuery: fakeQuery([resultMsg({ num_turns: 3 })]),
+      emitEvent: (name, payload) => ev1.push([name, payload]),
+      emitBackstop: () => {},
+    });
+    expect(phaseTurns(ev1)[0].turnCap).toBe(200);
+
+    const ev2 = [];
+    await sdkRunPhaseAgent(ARGS, {
+      ...GOOD_AUTH, spawn, turnCap: 999,
+      runQuery: fakeQuery([resultMsg({ num_turns: 3 })]),
+      emitEvent: (name, payload) => ev2.push([name, payload]),
+      emitBackstop: () => {},
+    });
+    expect(phaseTurns(ev2)[0].turnCap).toBe(999);
+  });
+
+  test("an absent num_turns does NOT throw and emits num_turns: null", async () => {
+    const { spawn } = spawnReturningSpec();
+    const events = [];
+    const r = await sdkRunPhaseAgent(ARGS, {
+      ...GOOD_AUTH, spawn,
+      // resultMsg has no num_turns field at all (older SDK terminal result).
+      runQuery: fakeQuery([resultMsg({ result: "ok" })]),
+      emitEvent: (name, payload) => events.push([name, payload]),
+      emitBackstop: () => {},
+    });
+    expect(r.code).toBe(0);
+    const turns = phaseTurns(events);
+    expect(turns).toHaveLength(1);
+    expect(turns[0].num_turns).toBeNull();
+  });
+
+  test("a non-numeric num_turns is coerced to null (never NaN / never throws)", async () => {
+    const { spawn } = spawnReturningSpec();
+    const events = [];
+    const r = await sdkRunPhaseAgent(ARGS, {
+      ...GOOD_AUTH, spawn,
+      runQuery: fakeQuery([resultMsg({ num_turns: "lots" })]),
+      emitEvent: (name, payload) => events.push([name, payload]),
+      emitBackstop: () => {},
+    });
+    expect(r.code).toBe(0);
+    expect(phaseTurns(events)[0].num_turns).toBeNull();
+  });
+
+  test("the phase-turns name passes the broker namespace contract (not a protected/phase.* space)", async () => {
+    const { spawn } = spawnReturningSpec();
+    const events = [];
+    await sdkRunPhaseAgent(ARGS, {
+      ...GOOD_AUTH, spawn,
+      runQuery: fakeQuery([resultMsg({ num_turns: 5 })]),
+      emitEvent: (name, payload) => events.push([name, payload]),
+      emitBackstop: () => {},
+    });
+    const [name] = events.find(([n]) => n === "execution-core.sdk.phase-turns");
+    expect(name).toBe("execution-core.sdk.phase-turns");
+    expect(name.startsWith("filter.")).toBe(false);
+    expect(name.startsWith("broker.daemon")).toBe(false);
+    expect(name).not.toBe("session.heartbeat");
+    // The phase routing pattern requires a literal `phase.` prefix — this name has none.
+    expect(name.startsWith("phase.")).toBe(false);
+  });
+});
+
 // ── Pre-launch failure surfaces (no query) ────────────────────────────────────
 
 describe("sdkRunPhaseAgent — shared pre-launch failure", () => {
@@ -493,7 +603,16 @@ describe("sdkRunPhaseAgent — 429/529 backoff", () => {
     expect(attempt).toBe(3); // 2 overloads + 1 success
     expect(sleeps.length).toBe(2); // backed off twice
     expect(sleeps[1]).toBeGreaterThan(sleeps[0]); // exponential
-    expect(events.every(([n]) => n === "execution-core.sdk.overloaded")).toBe(true);
+    // Two overloads fire execution-core.sdk.overloaded; the recovered terminal
+    // result then fires one execution-core.sdk.phase-turns (CTL-1396 item B). No
+    // other event types appear.
+    expect(events.filter(([n]) => n === "execution-core.sdk.overloaded")).toHaveLength(2);
+    expect(events.filter(([n]) => n === "execution-core.sdk.phase-turns")).toHaveLength(1);
+    expect(
+      events.every(([n]) =>
+        n === "execution-core.sdk.overloaded" || n === "execution-core.sdk.phase-turns",
+      ),
+    ).toBe(true);
     expect(backstops.length).toBe(0); // success → no backstop
   });
 
