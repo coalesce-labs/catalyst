@@ -453,13 +453,15 @@ describe("sdkDispatch (CTL-1365b)", () => {
     expect(r).toEqual({ code: 0, stdout: "ok", stderr: "", signal: null, worktreePath: "/wt/CTL-1" });
   });
 
-  test("CTL-1396 (Codex P2): an injected emitEvent is bound onto the launch verb (phase-turns reaches the unified log, not stderr)", () => {
+  test("CTL-1405: an injected emitEvent reaches sdkRunPhaseAgent's SECOND (options) param (phase-turns reaches the unified log, not stderr)", () => {
     const emitted = [];
     const emitEvent = (name, payload) => emitted.push({ name, payload });
-    // The launch verb stands in for sdkRunPhaseAgent: it emits phase-turns via the
-    // injected emitEvent exactly as the real one does at sdk-run-phase-agent.mjs:942.
-    const spy = (args) => {
-      args.emitEvent("execution-core.sdk.phase-turns", { ticket: args.ticket, num_turns: 5 });
+    // The stub mirrors the REAL sdkRunPhaseAgent signature: (input, opts) where
+    // emitEvent lives in opts (sdk-run-phase-agent.mjs:771). It emits phase-turns via
+    // opts.emitEvent exactly as the real one does at :942. Reading it from `input`
+    // (the CTL-1396 bug) would silently fall back to defaultEmitEvent → stderr.
+    const spy = (input, opts = {}) => {
+      opts.emitEvent("execution-core.sdk.phase-turns", { ticket: input.ticket, num_turns: 5 });
       return { code: 0, stdout: "", stderr: "", signal: null };
     };
     sdkDispatch(
@@ -474,11 +476,24 @@ describe("sdkDispatch (CTL-1365b)", () => {
     expect(emitted).toHaveLength(1);
     expect(emitted[0].name).toBe("execution-core.sdk.phase-turns");
     expect(emitted[0].payload.ticket).toBe("CTL-1");
+    // Guard against the CTL-1396 regression: emitEvent must NOT be smuggled into the
+    // input object (where the real sdkRunPhaseAgent never reads it).
+    const inputSeen = [];
+    sdkDispatch(
+      { orchDir: "/ec", ticket: "CTL-2", phase: "implement" },
+      {
+        resolveProject: () => ({ team: "CTL", repoRoot: "/repo" }),
+        createWorktree: (a) => ({ code: 0, worktreePath: `/wt/${a.ticket}`, stderr: "" }),
+        runPhaseAgent: (input) => { inputSeen.push("emitEvent" in input); return { code: 0, stdout: "", stderr: "", signal: null }; },
+        emitEvent,
+      },
+    );
+    expect(inputSeen[0]).toBe(false); // emitEvent is in opts, never the input object
   });
 
-  test("CTL-1396: without an injected emitEvent the launch verb keeps its own stderr default (non-daemon callers unchanged)", () => {
+  test("CTL-1396: without an injected emitEvent the launch verb gets no opts.emitEvent (non-daemon callers unchanged)", () => {
     let received = "unset";
-    const spy = (args) => { received = args.emitEvent; return { code: 0, stdout: "", stderr: "", signal: null }; };
+    const spy = (_input, opts = {}) => { received = opts.emitEvent; return { code: 0, stdout: "", stderr: "", signal: null }; };
     sdkDispatch(
       { orchDir: "/ec", ticket: "CTL-1", phase: "implement" },
       {
