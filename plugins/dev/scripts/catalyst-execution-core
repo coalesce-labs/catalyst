@@ -122,6 +122,33 @@ cmd_start() {
 	local _daemon_env="${CATALYST_EXECUTION_CORE_ENV:-${HOME}/.config/catalyst/execution-core.env}"
 	# shellcheck disable=SC1090
 	[[ -f "$_daemon_env" ]] && source "$_daemon_env"
+	# CTL-1398: arm the SDK subscription token on EVERY daemon start (not just login
+	# shells) so executor=sdk survives NON-login restarts (deploy / broker reload /
+	# launchd / fresh boot) on every host. The token lives in claude-accounts.env
+	# (SOPS-provisioned, per-node); execution-core.env above only carries
+	# CATALYST_EXECUTOR. Mirrors ~/.zshenv: unset the API-key vars that would make the
+	# SDK silently meter (resolveSdkBootExecutor degrades to bg when either is set),
+	# THEN source the placeholder-guarded account env (absent OR an unfilled
+	# PASTE_TOKEN_HERE slot = no-op → node stays bg cleanly). Minimal-touch: only
+	# sources the existing SOPS-managed file; never reads/echoes the token value.
+	#
+	# SDK-PATH-ONLY (Codex P2 ×2): scope the whole arm to executor=sdk. On a bg /
+	# oneshot-legacy node, scrubbing ANTHROPIC_API_KEY/ANTHROPIC_AUTH_TOKEN would
+	# strip the API-key credentials those workers are allowed to use (the daemon
+	# passes process.env through to phase-agent-dispatch). CATALYST_EXECUTOR is the
+	# value sourced from execution-core.env just above — the documented sdk-node
+	# lever; for any node that selects sdk elsewhere (Layer-1 config / class default)
+	# the daemon's resolveSdkBootExecutor remains the backstop (degrades→bg + emits
+	# the observable execution-core.executor.bg-fallback). And clear any inherited
+	# CLAUDE_CODE_OAUTH_TOKEN BEFORE sourcing so claude-accounts.env is authoritative:
+	# otherwise an absent/placeholder per-node file would still boot sdk under a stale
+	# or operator-shell token instead of cleanly staying bg.
+	if [[ "${CATALYST_EXECUTOR:-}" == "sdk" ]]; then
+		unset ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN CLAUDE_CODE_OAUTH_TOKEN
+		local _accounts_env="${HOME}/.config/catalyst/claude-accounts.env"
+		# shellcheck disable=SC1090
+		[[ -f "$_accounts_env" ]] && source "$_accounts_env"
+	fi
 	# CTL-1289: belt-and-suspenders — a daemon started by hand (not via the
 	# catalyst-stack launchd plist, which already sets _stack_agent_path) inherits
 	# whatever PATH the invoking shell had, which on a fresh member can omit the
