@@ -34,6 +34,9 @@ function mkBoard(o = {}) {
     roster: o.roster ?? [],
     self: o.self ?? "mini",
     multiHost: o.multiHost ?? false,
+    // CTL-1157: assembleBoardState now records the run mode on the board so
+    // evaluateInvariants can default-gate the cohort checks (off → dark).
+    mode: o.mode,
     capacity: { maxParallel: 4, liveCount: 0, freeSlots: 4, ...(o.capacity ?? {}) },
     reconcileMarkers: o.reconcileMarkers ?? {},
     ring: {
@@ -206,6 +209,76 @@ describe("evaluateInvariants — per-invariant green/fail", () => {
     // the rest of the scan still completed
     expect(r.dispatchLiveness).toBeDefined();
     expect(r.workerAge).toBeDefined();
+  });
+});
+
+// ─── CTL-1157 off-gate: off = truly dark (no cohort code, no PR SELECT) ──────
+describe("CTL-1157 off-gate — cohort invariants + PR SELECT are dark in off", () => {
+  const COHORT_KEYS = ["phantomMergedPr", "orphanedOpenPr", "frozenNeedsHuman", "needsHumanPile"];
+
+  test("evaluateInvariants(mode:off) omits ALL four cohort invariants (legacy set only)", () => {
+    const r = evaluateInvariants(mkBoard(), { mode: "off" });
+    for (const k of COHORT_KEYS) expect(r[k]).toBeUndefined();
+    // the legacy invariants still all ran → byte-identical key set to origin/main.
+    expect(Object.keys(r).sort()).toEqual(
+      [
+        "blockedTree",
+        "cacheCoherence",
+        "dispatchLiveness",
+        "projectSilence",
+        "rateLimitHeadroom",
+        "strandedNode",
+        "workerAge",
+      ].sort(),
+    );
+  });
+
+  test("evaluateInvariants(mode:shadow) RUNS all four cohort invariants (telemetry)", () => {
+    const r = evaluateInvariants(mkBoard(), { mode: "shadow" });
+    for (const k of COHORT_KEYS) expect(r[k]).toBeDefined();
+    // needsHumanPile is the status-based catch-all → observable in shadow (it judges
+    // the signal-status set, always present), exactly like its siblings when wired.
+    expect(r.needsHumanPile.observable).toBe(true);
+  });
+
+  test("evaluateInvariants picks up board.mode (off) when no explicit mode passed", () => {
+    const r = evaluateInvariants(mkBoard({ mode: "off" }));
+    for (const k of COHORT_KEYS) expect(r[k]).toBeUndefined();
+  });
+
+  test("assembleBoardState(mode:off) NEVER invokes getPrStatusMap (no getAllPrStatuses SELECT)", () => {
+    let called = 0;
+    const board = assembleBoardState({
+      orchDir: "/tmp/x",
+      getBoard: () => [],
+      getWorkerSignals: () => [],
+      getEligible: () => [],
+      getPrStatusMap: () => {
+        called += 1;
+        return new Map([[1, { status: "merged" }]]);
+      },
+      mode: "off",
+      now: () => NOW,
+    });
+    expect(called).toBe(0); // the filter_state SELECT did not run
+    expect(board.prStatusMap.size).toBe(0); // empty Map → invariants would be inert anyway
+  });
+
+  test("assembleBoardState(mode:shadow) DOES invoke getPrStatusMap (telemetry needs it)", () => {
+    let called = 0;
+    assembleBoardState({
+      orchDir: "/tmp/x",
+      getBoard: () => [],
+      getWorkerSignals: () => [],
+      getEligible: () => [],
+      getPrStatusMap: () => {
+        called += 1;
+        return new Map();
+      },
+      mode: "shadow",
+      now: () => NOW,
+    });
+    expect(called).toBe(1);
   });
 });
 
@@ -486,6 +559,13 @@ describe("boardHealthPass — mode branching + shadow safety", () => {
     expect(emits.length).toBe(1);
     expect(emits[0].type).toBe("recovery.board-scan");
     expect(emits[0].details.mode).toBe("shadow");
+    // CTL-1157: shadow telemetry carries the cohort counts (OTEL before/after
+    // baseline) — present in the scan event, but the act seam threw and was never
+    // reached → telemetry-only, zero action.
+    for (const k of ["phantomMergedPr", "orphanedOpenPr", "frozenNeedsHuman", "needsHumanPile"]) {
+      expect(emits[0].details.invariants[k]).toBeDefined();
+    }
+    expect(r.act).toBeNull();
   });
 
   test("mode:enforce with NO act seam (the scheduler reality) → emits, mutates nothing, no throw", () => {

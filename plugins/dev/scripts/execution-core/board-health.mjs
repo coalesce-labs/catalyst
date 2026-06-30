@@ -206,6 +206,11 @@ export function assembleBoardState({
   // phantom-merged-PR / orphaned-open-PR invariants stay observable:false (the
   // shadow-first seam: wiring lands before the invariants begin observing).
   getPrStatusMap = () => new Map(),
+  // CTL-1157 off-gate: the run mode threads in so `off` is provably DARK. In off
+  // we never invoke getPrStatusMap() (the getAllPrStatuses() filter_state SELECT
+  // must not run), and evaluateInvariants reads board.mode to skip the cohort
+  // checks — together making an off scan byte-identical to origin/main.
+  mode = undefined,
   now = () => Date.now(),
 } = {}) {
   const nowMs = now();
@@ -259,13 +264,19 @@ export function assembleBoardState({
     deadHosts: Array.isArray(deadHosts) ? deadHosts : [],
     self: self ?? "",
     multiHost: !!multiHost,
+    // CTL-1157 off-gate: carried so evaluateInvariants can skip the cohort checks
+    // in off without re-threading mode through every call site.
+    mode,
     capacity: {
       maxParallel: capacity?.maxParallel ?? 0,
       liveCount: capacity?.liveCount ?? 0,
       freeSlots: capacity?.freeSlots ?? 0,
     },
     reconcileMarkers: safe(() => getReconcileMarkers(), {}),
-    prStatusMap: safe(() => getPrStatusMap(), new Map()),
+    // CTL-1157 off-gate: in off the filter_state PR-status SELECT must NOT run —
+    // skip getPrStatusMap() entirely so off is byte-identical to origin/main (the
+    // phantom/orphaned-PR invariants also stay out of evaluateInvariants in off).
+    prStatusMap: mode === "off" ? new Map() : safe(() => getPrStatusMap(), new Map()),
     ring: deriveRing(safe(() => readEventRing({ orchDir }), []), nowMs),
     ownerForTicket: typeof ownerForTicket === "function" ? ownerForTicket : null,
     now: nowMs,
@@ -273,7 +284,7 @@ export function assembleBoardState({
 }
 
 // ── (2) evaluateInvariants — PURE. Each check fails-open on a throw. ─────────
-export function evaluateInvariants(boardState, { thresholds = DEFAULT_THRESHOLDS } = {}) {
+export function evaluateInvariants(boardState, { thresholds = DEFAULT_THRESHOLDS, mode = boardState?.mode } = {}) {
   const checks = {
     cacheCoherence: () => checkCacheCoherence(boardState),
     dispatchLiveness: () => checkDispatchLiveness(boardState, thresholds),
@@ -282,13 +293,27 @@ export function evaluateInvariants(boardState, { thresholds = DEFAULT_THRESHOLDS
     projectSilence: () => checkProjectSilence(boardState, thresholds),
     rateLimitHeadroom: () => checkRateLimitHeadroom(boardState),
     strandedNode: () => checkStrandedNode(boardState),
-    // CTL-1157: the three stuck cohorts board-health was blind to + the
-    // status-based needs-human catch-all (Workstream B).
-    phantomMergedPr: () => checkPhantomMergedPr(boardState),
-    orphanedOpenPr: () => checkOrphanedOpenPr(boardState, thresholds),
-    frozenNeedsHuman: () => checkFrozenNeedsHuman(boardState, thresholds),
-    needsHumanPile: () => checkNeedsHumanPile(boardState),
   };
+  // CTL-1157 off-gate: the four NEW cohort invariants run ONLY in shadow/enforce
+  // — never in off. In off this set is omitted entirely, so the board-scan event's
+  // details.invariants is byte-identical to origin/main (the legacy 7 keys only),
+  // and checkNeedsHumanPile (always-observable, status-based) no longer runs in
+  // off — it is gated here exactly like its three cohort siblings. SHADOW DOES run
+  // them: that is intentional read-only telemetry (the OTEL before/after baseline);
+  // the no-action guarantee is enforced separately in boardHealthPass (act is
+  // reached ONLY in enforce). `mode` defaults from boardState.mode (set by
+  // assembleBoardState); an undefined mode (bare unit call) keeps the legacy
+  // behavior of running them.
+  if (mode !== "off") {
+    Object.assign(checks, {
+      // CTL-1157: the three stuck cohorts board-health was blind to + the
+      // status-based needs-human catch-all (Workstream B).
+      phantomMergedPr: () => checkPhantomMergedPr(boardState),
+      orphanedOpenPr: () => checkOrphanedOpenPr(boardState, thresholds),
+      frozenNeedsHuman: () => checkFrozenNeedsHuman(boardState, thresholds),
+      needsHumanPile: () => checkNeedsHumanPile(boardState),
+    });
+  }
   const out = {};
   for (const [name, fn] of Object.entries(checks)) {
     try {
@@ -608,7 +633,7 @@ function decision(gateDecision, reason, invariantsFailed, moves) {
 
 // ── (4) proposeMoves — PURE. Maps failed invariants → tiered proposals. Never
 // executes. The tier is "does this change the SYSTEM or just unstick a THING?"
-export function proposeMoves(invariants, b) {
+export function proposeMoves(invariants, _b) {
   const tier1 = [];
   const tier2 = [];
   const tier3 = [];
@@ -853,9 +878,9 @@ export function boardHealthPass({
   const board = assembleBoardState({
     orchDir, getBoard, getWorkerSignals, getEligible,
     roster, self, multiHost, capacity, readEventRing, ownerForTicket, getReconcileMarkers,
-    getPrStatusMap, deadHosts, now,
+    getPrStatusMap, deadHosts, mode, now,
   });
-  const invariants = evaluateInvariants(board, {});
+  const invariants = evaluateInvariants(board, { mode });
   const dec = decideBoardHealth(invariants, board);
 
   try {
