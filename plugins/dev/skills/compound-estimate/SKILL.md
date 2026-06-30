@@ -81,7 +81,7 @@ plugins/dev/scripts/compound-log.sh write "$TICKET_ID" \
 
 The helper resolves the rest:
 - `pr_number`, `merged_at`, `created_at` via `gh pr view`
-- `estimate_at_start` via `linearis issues read <ticket> | jq .estimate`
+- `estimate_at_start` via `catalyst-linear read <ticket> | jq .estimate`
 - `cost_usd` from `catalyst-state.sh` worker aggregate (orchestrator mode) or `catalyst-session.sh history --ticket` (local fallback)
 - `wall_time_hours` computed from PR `createdAt` → `mergedAt`
 
@@ -171,8 +171,8 @@ what_surprised_me: "Prometheus integration wasn't plumbed; local state.json suff
 
 - **Primary cost source** is local: the `catalyst-state.sh` worker-usage aggregate (when orchestrated) or `catalyst-session.sh history` (standalone). This is deliberate — `claude-code-otel` + Prometheus is referenced in the original spec but not yet wired up in this repo.
 - **Prometheus overlay** is gated by `CATALYST_PROMETHEUS_URL`. When set, the helper logs a note to stderr; the HTTP client itself is a follow-up ticket.
-- **Linear estimate** is read as an integer from `linearis issues read`. The team's estimation config (T-shirt, Fibonacci, linear) is applied client-side when re-scoring in step 3.
-- **Read source:** `linearis issues read` is the standard-node direct read; on a Catalyst Cloud node the replica is read first (evidence-based fallback to `linearis`) — see the `linearis` skill's "Reading Linear" section.
+- **Linear estimate** is read as an integer from `catalyst-linear read`. The team's estimation config (T-shirt, Fibonacci, linear) is applied client-side when re-scoring in step 3.
+- **Read source:** reads go through `catalyst-linear read` (replica-first when opted in *and* fresh, automatic fail-open to a direct `linearis` read otherwise) — see the `linearis` skill's "Reading Linear" section.
 
 ## Testing
 
