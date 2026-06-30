@@ -1,5 +1,35 @@
 # Changelog
 
+## [12.20.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.19.0...catalyst-dev-v12.20.0)
+
+Jun 30, 2026
+
+<!-- ai-enhanced -->
+
+### Linear Replica & SDK Executor Hardening
+
+This release wires up the full infrastructure for agents to read Linear from a local Catalyst Cloud replica instead of hitting the rate-limited API directly — including the new `catalyst-linear` CLI that reads the replica first and falls back to `linearis`, and a supervised per-node replica writer that keeps the local DB fresh on every node class. The SDK executor path gets two security and correctness fixes (token scrubbing on rejection, same-tick slot budget), plus a daemon launcher fix that ensures the OAuth token survives non-login restarts so `executor=sdk` no longer silently falls back to `bg`. Run `catalyst install --executor sdk` to provision the executor lever and cloud-sync writer together without regression.
+
+
+
+### PRs
+
+* **dev:** CTL-1369 (4/n) — class-aware doctor install verification + phase_duration_ms promotion ([#2469](https://github.com/coalesce-labs/catalyst/issues/2469)) ([99e3231](https://github.com/coalesce-labs/catalyst/commit/99e32314016c8716260c56a6e67406771171df88))
+* **dev:** CTL-1383 — uniform -h/--help + bare-usage on user-facing catalyst-* CLIs ([#2459](https://github.com/coalesce-labs/catalyst/issues/2459)) ([0b137a8](https://github.com/coalesce-labs/catalyst/commit/0b137a8bc35a7aea467f7fb79044f62e07f4b727))
+* **dev:** CTL-1387 — consolidated catalyst CLI reference page + cannot-drift guard ([#2468](https://github.com/coalesce-labs/catalyst/issues/2468)) ([d989dc0](https://github.com/coalesce-labs/catalyst/commit/d989dc0fb264c460586f84f53532ee5535524db1))
+* **dev:** CTL-1391 — catalyst-linear, the replica-first Linear read CLI (linearis fallback) ([#2477](https://github.com/coalesce-labs/catalyst/issues/2477)) ([f1746ad](https://github.com/coalesce-labs/catalyst/commit/f1746ad1dde713a56c0d8ae276e7ff5cca1d34f5))
+* **dev:** CTL-1392 — agents read the Catalyst Cloud replica first (evidence-based fallback) ([#2474](https://github.com/coalesce-labs/catalyst/issues/2474)) ([5599fe9](https://github.com/coalesce-labs/catalyst/commit/5599fe954ac859adc2db153a0c93a55eceb8780c))
+* **dev:** CTL-1393 — cluster nodes auto-detect + refresh rotated SOPS secrets (loudly) ([#2478](https://github.com/coalesce-labs/catalyst/issues/2478)) ([bc652ee](https://github.com/coalesce-labs/catalyst/commit/bc652ee8f7356e4deceadc7b3e009b16a55e69b7))
+* **dev:** CTL-1394 — per-node supervised CatalystReplica writer (unblock mini/mini-2 Linear rate limits) ([#2481](https://github.com/coalesce-labs/catalyst/issues/2481)) ([5cca4c5](https://github.com/coalesce-labs/catalyst/commit/5cca4c5bffa1b3be04edd39b704d7ebaead17ebd))
+* **dev:** CTL-1395 (1/n) — catalyst-cloud-sync heartbeat + freshness → Loki (uptime tile + OTL-40 signal) ([#2488](https://github.com/coalesce-labs/catalyst/issues/2488)) ([dbd79d6](https://github.com/coalesce-labs/catalyst/commit/dbd79d6f626b09311a9429e422ae55ceaca88b09))
+* **dev:** CTL-1396 — make the SDK-executor rollout verifiable (doctor running-daemon check + phase-turns telemetry) ([#2484](https://github.com/coalesce-labs/catalyst/issues/2484)) ([59ac079](https://github.com/coalesce-labs/catalyst/commit/59ac0794be31bf0098ee762450342e446328af36))
+* **dev:** CTL-1401 — catalyst install/reinstall provisions the cloud-sync + executor levers (no reinstall regression) ([#2492](https://github.com/coalesce-labs/catalyst/issues/2492)) ([e964afe](https://github.com/coalesce-labs/catalyst/commit/e964afedda503e0cf1765eb1675bb6b460f608f9))
+* **dev:** CTL-1367 — close the 2 final pre-canary SDK-executor gates (token-scrub on rejection path + same-tick SDK slot budget) ([#2475](https://github.com/coalesce-labs/catalyst/issues/2475)) ([160df09](https://github.com/coalesce-labs/catalyst/commit/160df094535a9a30e21c64f17f5292a5eddf3a57))
+* **dev:** CTL-1372 — serve orch-monitor as a production React build (root-cause leak fix) ([#2453](https://github.com/coalesce-labs/catalyst/issues/2453)) ([0df476b](https://github.com/coalesce-labs/catalyst/commit/0df476b5e91398b0e63b6dc994e4cf5480fc381e))
+* **dev:** CTL-1382 — thin-launcher catalyst CLIs resolve their symlink before locating their driver ([#2465](https://github.com/coalesce-labs/catalyst/issues/2465)) ([3e8d78c](https://github.com/coalesce-labs/catalyst/commit/3e8d78c7e0115e8c92c9e979467430bd6f693cd5))
+* **dev:** CTL-1385 — board rows use wrong design tokens (bright dividers + selected-state bg) ([#2462](https://github.com/coalesce-labs/catalyst/issues/2462)) ([0e223b7](https://github.com/coalesce-labs/catalyst/commit/0e223b78ec62dddf9e03784658218c66bd92d44f))
+* **dev:** CTL-1398 — daemon launcher sources claude-accounts.env so executor=sdk survives non-login restarts on every host ([#2487](https://github.com/coalesce-labs/catalyst/issues/2487)) ([bf5087e](https://github.com/coalesce-labs/catalyst/commit/bf5087e7d332fb38de50dee92aa7bd78a0319a9e))
+
 ## [12.19.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.18.0...catalyst-dev-v12.19.0)
 
 Jun 29, 2026

@@ -1,5 +1,21 @@
 # Changelog
 
+## [2.2.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-pm-ops-v2.1.1...catalyst-pm-ops-v2.2.0)
+
+Jun 30, 2026
+
+<!-- ai-enhanced -->
+
+### Uniform CLI Help Contract
+
+Every user-facing `catalyst-*` CLI now responds to `-h`/`--help` with a real usage block and exits cleanly, and bare invocation prints usage to stderr with a non-zero exit. Tools like `catalyst-broker`, `catalyst-thoughts`, `catalyst-why`, and `workflow-context` previously fell through to error handling or ignored the flag entirely, giving coding agents inconsistent results when probing tool usage. No migration steps required.
+
+
+
+### PRs
+
+* **dev:** CTL-1383 — uniform -h/--help + bare-usage on user-facing catalyst-* CLIs ([#2459](https://github.com/coalesce-labs/catalyst/issues/2459)) ([0b137a8](https://github.com/coalesce-labs/catalyst/commit/0b137a8bc35a7aea467f7fb79044f62e07f4b727))
+
 ## [2.1.1](https://github.com/coalesce-labs/catalyst/compare/catalyst-pm-ops-v2.1.0...catalyst-pm-ops-v2.1.1) (2026-06-09)
 
 
