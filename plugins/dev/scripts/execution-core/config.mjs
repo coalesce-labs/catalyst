@@ -218,6 +218,18 @@ export function getClusterRepoDir() {
   return process.env.CATALYST_CLUSTER_DIR || resolve(catalystDir(), "catalyst-cluster");
 }
 
+// CTL-1393: the durable change-detection marker for cluster secret auto-refresh.
+// Lives next to the decrypted Layer-2 plaintext (~/.config/catalyst) as a hidden
+// JSON file: { lastDecryptedSha, lastDecryptedAt, written[], synced[] }. The
+// daemon's periodic cluster-secret refresh diffs the cluster clone's HEAD against
+// lastDecryptedSha to decide whether a rotated secret needs re-decrypting WITHOUT
+// re-spawning sops every tick. Co-located with the config dir (so it honors the
+// CATALYST_LAYER2_CONFIG_FILE override that getLayer2ConfigPath resolves) and
+// re-resolved per call so tests redirect via that env var.
+export function getClusterSyncStatePath() {
+  return resolve(getLayer2ConfigPath(), "..", ".cluster-sync-state.json");
+}
+
 // readClusterConfig(dir) — parse <clusterRepoDir>/cluster.json. Returns the
 // parsed object, or null when absent/malformed. Never throws.
 export function readClusterConfig(dir = getClusterRepoDir()) {

@@ -2257,9 +2257,10 @@ describe("CTL-1271 — daemon boot roster announcement + silent-single-host guar
   });
 });
 
-// CTL-1274 — cluster-repo auto-pull: clusterSync at boot + a periodic pull timer,
-// both FAIL-OPEN and injectable. enableClusterSync:false skips both.
-describe("CTL-1274 — cluster-repo auto-pull (boot sync + periodic pull)", () => {
+// CTL-1274 + CTL-1393 — cluster-repo auto-refresh: clusterSync at boot + a periodic
+// refresh timer (refreshClusterSecretsIfChanged), both FAIL-OPEN and injectable.
+// enableClusterSync:false skips both.
+describe("CTL-1274 — cluster-repo auto-refresh (boot sync + periodic refresh)", () => {
   const baseOpts = () => ({
     recover: () => ({}),
     reconcileBoot: () => {},
@@ -2286,7 +2287,6 @@ describe("CTL-1274 — cluster-repo auto-pull (boot sync + periodic pull)", () =
         syncCalls += 1;
         return { pull: { pulled: false, reason: "not-a-clone" } };
       },
-      pullClusterRepo: () => ({ pulled: false, reason: "not-a-clone" }),
       enableClusterSync: true,
       clusterSyncIntervalMs: 60_000, // long so the timer never fires during the test
     });
@@ -2300,7 +2300,6 @@ describe("CTL-1274 — cluster-repo auto-pull (boot sync + periodic pull)", () =
         clusterSync: () => {
           throw new Error("boom at boot");
         },
-        pullClusterRepo: () => ({ pulled: false }),
         enableClusterSync: true,
         clusterSyncIntervalMs: 60_000,
       })
@@ -2309,74 +2308,74 @@ describe("CTL-1274 — cluster-repo auto-pull (boot sync + periodic pull)", () =
 
   test("enableClusterSync:false skips BOTH the boot sync and the timer", async () => {
     let syncCalls = 0;
-    let pullCalls = 0;
+    let refreshCalls = 0;
     startDaemon({
       ...baseOpts(),
       clusterSync: () => {
         syncCalls += 1;
         return {};
       },
-      pullClusterRepo: () => {
-        pullCalls += 1;
-        return { pulled: true };
+      refreshClusterSecrets: () => {
+        refreshCalls += 1;
+        return { changed: false };
       },
       enableClusterSync: false,
       clusterSyncIntervalMs: 5,
     });
     await delay(30);
     expect(syncCalls).toBe(0);
-    expect(pullCalls).toBe(0);
+    expect(refreshCalls).toBe(0);
   });
 
-  test("the periodic timer git-pulls the clone on its cadence", async () => {
-    let pullCalls = 0;
+  test("the periodic timer refreshes cluster secrets on its cadence", async () => {
+    let refreshCalls = 0;
     startDaemon({
       ...baseOpts(),
       clusterSync: () => ({ pull: { pulled: false } }),
-      pullClusterRepo: () => {
-        pullCalls += 1;
-        return { pulled: true };
+      refreshClusterSecrets: () => {
+        refreshCalls += 1;
+        return { changed: false };
       },
       enableClusterSync: true,
       clusterSyncIntervalMs: 5,
     });
     await delay(40);
-    expect(pullCalls).toBeGreaterThanOrEqual(1);
+    expect(refreshCalls).toBeGreaterThanOrEqual(1);
   });
 
-  test("FAIL-OPEN: a throw from a periodic pull does not stop the timer", async () => {
-    let pullCalls = 0;
+  test("FAIL-OPEN: a throw from a periodic refresh does not stop the timer", async () => {
+    let refreshCalls = 0;
     startDaemon({
       ...baseOpts(),
       clusterSync: () => ({}),
-      pullClusterRepo: () => {
-        pullCalls += 1;
+      refreshClusterSecrets: () => {
+        refreshCalls += 1;
         throw new Error("network");
       },
       enableClusterSync: true,
       clusterSyncIntervalMs: 5,
     });
     await delay(40);
-    // multiple ticks fired despite every pull throwing — the timer never wedged
-    expect(pullCalls).toBeGreaterThanOrEqual(2);
+    // multiple ticks fired despite every refresh throwing — the timer never wedged
+    expect(refreshCalls).toBeGreaterThanOrEqual(2);
   });
 
-  test("stopDaemon clears the cluster-sync timer (no pulls after stop)", async () => {
-    let pullCalls = 0;
+  test("stopDaemon clears the cluster-sync timer (no refreshes after stop)", async () => {
+    let refreshCalls = 0;
     startDaemon({
       ...baseOpts(),
       clusterSync: () => ({}),
-      pullClusterRepo: () => {
-        pullCalls += 1;
-        return { pulled: true };
+      refreshClusterSecrets: () => {
+        refreshCalls += 1;
+        return { changed: false };
       },
       enableClusterSync: true,
       clusterSyncIntervalMs: 5,
     });
     await delay(30);
     stopDaemon();
-    const afterStop = pullCalls;
+    const afterStop = refreshCalls;
     await delay(40);
-    expect(pullCalls).toBe(afterStop);
+    expect(refreshCalls).toBe(afterStop);
   });
 });

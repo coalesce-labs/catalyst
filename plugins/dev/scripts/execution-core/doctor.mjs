@@ -51,6 +51,10 @@ import {
   getReplicaDbPath,
   readLinearReplica,
   resolveNodeCloudTokenEnv,
+  // CTL-1393: cluster-secret freshness check — clone dir + the durable
+  // change-detection marker the daemon's auto-refresh writes.
+  getClusterRepoDir,
+  getClusterSyncStatePath,
 } from "./config.mjs";
 import { ownedBy } from "./hrw.mjs";
 import { readPeerHeartbeats } from "./cluster-heartbeat.mjs";
@@ -1626,6 +1630,115 @@ export function checkCloudSync(deps = {}) {
   return checks;
 }
 
+// defaultClusterGit — a capturing git runner for the freshness check. Returns
+// { status, stdout }; never throws. Injectable so the check stays hermetic.
+function defaultClusterGit(args) {
+  try {
+    const r = spawnSync("git", args, { encoding: "utf8", timeout: 5_000 });
+    return { status: r.status ?? (r.error ? 1 : 0), stdout: r.stdout ?? "" };
+  } catch {
+    return { status: 1, stdout: "" };
+  }
+}
+
+// checkClusterSecretFreshness — CTL-1393. ADVISORY ONLY (never FAILs — runDoctor's
+// exit code = FAIL count and catalyst-join gates activation on exit 0, so a
+// transient staleness must never block a node; the running daemon self-heals within
+// ~5 min via refreshClusterSecretsIfChanged, same WARN-not-FAIL rationale as
+// checkReaper / checkCloudTokenEnv). Compares the durable .cluster-sync-state.json
+// marker's lastDecryptedSha against the cluster clone's HEAD: when secrets/ changed
+// between them, the node is running on STALE secrets (a rotation reached the clone
+// but not the running daemon). All reads are injectable + fail-open.
+export function checkClusterSecretFreshness(deps = {}) {
+  const {
+    clusterDir = getClusterRepoDir(),
+    statePath = getClusterSyncStatePath(),
+    git = defaultClusterGit,
+    fileExists = (p) => existsSync(p),
+    readState = (p) => {
+      try {
+        return JSON.parse(readFileSync(p, "utf8"));
+      } catch {
+        return null;
+      }
+    },
+  } = deps;
+  const checks = [];
+  const NAME = "cluster-secret-freshness";
+
+  // No clone → node is not on the GitOps secret control plane. INFO (never blocks).
+  if (!fileExists(resolve(clusterDir, ".git"))) {
+    checks.push(
+      mkCheck(
+        NAME,
+        STATUS.INFO,
+        "no catalyst-cluster clone — node is not on the GitOps secret control plane (expected for a standalone node)",
+      ),
+    );
+    return checks;
+  }
+
+  const headRes = git(["-C", clusterDir, "rev-parse", "HEAD"]);
+  const head = headRes?.status === 0 ? (headRes.stdout || "").trim() : "";
+  if (!head) {
+    checks.push(
+      mkCheck(NAME, STATUS.INFO, "catalyst-cluster clone present but HEAD unresolved — nothing to compare"),
+    );
+    return checks;
+  }
+
+  const state = readState(statePath);
+  const lastSha = typeof state?.lastDecryptedSha === "string" ? state.lastDecryptedSha : null;
+  if (!lastSha) {
+    checks.push(
+      mkCheck(
+        NAME,
+        STATUS.WARN,
+        `no cluster-sync marker (${statePath}) — the daemon has not recorded a secret decrypt; ` +
+          "restart the execution-core daemon (or run a cluster sync) to materialize current secrets",
+      ),
+    );
+    return checks;
+  }
+
+  if (lastSha === head) {
+    checks.push(
+      mkCheck(
+        NAME,
+        STATUS.PASS,
+        `cluster secrets current at HEAD ${head.slice(0, 8)} (last decrypted ${state?.lastDecryptedAt ?? "unknown"})`,
+      ),
+    );
+    return checks;
+  }
+
+  // HEAD advanced past the last decrypt — did secrets/ actually change? exit 0 =
+  // identical (not stale); anything else (changed, or an unknown/force-pushed sha) =
+  // treat as stale and surface it.
+  const diff = git(["-C", clusterDir, "diff", "--quiet", lastSha, head, "--", "secrets/"]);
+  if (diff?.status === 0) {
+    checks.push(
+      mkCheck(
+        NAME,
+        STATUS.PASS,
+        `cluster HEAD advanced ${lastSha.slice(0, 8)}→${head.slice(0, 8)} but secrets/ unchanged — node secrets are current`,
+      ),
+    );
+    return checks;
+  }
+
+  checks.push(
+    mkCheck(
+      NAME,
+      STATUS.WARN,
+      `running on STALE secrets — secrets/ changed between the last decrypt (${lastSha.slice(0, 8)}) and ` +
+        `cluster HEAD (${head.slice(0, 8)}); the running daemon refreshes within ~5 min, else restart the ` +
+        "execution-core daemon or run a cluster sync",
+    ),
+  );
+  return checks;
+}
+
 // checkConfigScopeLeak — CTL-1214. Flags a committed Layer-1 .catalyst/config.json
 // that still carries node/cluster-scoped keys, or a legacy .catalyst/hosts.json
 // roster file. `.catalyst/config.json` is committed per-repo and must carry ONLY
@@ -2627,6 +2740,7 @@ export function checksForClass(nc, opts = {}) {
       () => checkReaper(), // advisory (never FAIL), class-agnostic
       () => checkMonitorProductionBuild({ fetch: _fetch }), // CTL-1372: warn on a dev-build monitor (advisory)
       () => checkCloudTokenEnv(), // advisory
+      () => checkClusterSecretFreshness(), // CTL-1393: warn if running on stale rotated secrets (advisory)
       () => checkCloudSync(), // CTL-1394: developer nodes read Linear from the local replica too (advisory)
       () => checkConfigScopeLeak(), // advisory
     ];
@@ -2677,6 +2791,7 @@ export function checksForClass(nc, opts = {}) {
     () => checkClaudeSettings(), // CTL-1231: member settings.json pins host identity + OTLP endpoint
     () => checkReaper(), // CTL-1306: orphan-sweep reaper installed + baked path still exists (not dead-127)
     () => checkCloudTokenEnv(), // CTL-1307: cluster cloud token decrypted → projected to machine-level env (advisory)
+    () => checkClusterSecretFreshness(), // CTL-1393: warn if the node is running on stale rotated secrets (advisory)
     () => checkCloudSync(), // CTL-1394: supervised cloud-sync daemon + read tier on the worker hot path (advisory)
     () => checkSdkExecutorAuth(), // CTL-1367 item 9: under executor=sdk, subscription auth must be correct (no api-key metering)
     () => checkConfigScopeLeak(), // CTL-1214: committed Layer-1 .catalyst/config.json must not carry node/cluster scope (roster/orchestration/feedback/sweep/repoColors/hosts.json)

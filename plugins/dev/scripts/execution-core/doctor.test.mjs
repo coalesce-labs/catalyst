@@ -22,6 +22,7 @@ import {
   checkClaudeSettings,
   checkReaper,
   checkCloudTokenEnv,
+  checkClusterSecretFreshness,
   checkSdkExecutorAuth,
   checkConfigScopeLeak,
   checkRepoIconTokenScope,
@@ -2424,5 +2425,71 @@ describe("strict node-class — install profile requires an explicitly persisted
     const fns = installChecksForClass(inferred, { hasStackAgent: true, hasUpdaterAgent: false, pluginPullOwner: "broker" });
     const results = (await Promise.all(fns.map((f) => Promise.resolve().then(f)))).flat();
     expect(results.find((c) => c.name === "node-class").status).toBe(STATUS.FAIL);
+  });
+});
+
+// ─── checkClusterSecretFreshness (CTL-1393) ──────────────────────────────────
+describe("checkClusterSecretFreshness", () => {
+  const gitFor = (head, secretsChanged) => (args) => {
+    if (args.includes("rev-parse")) return { status: 0, stdout: `${head}\n` };
+    if (args.includes("diff")) return { status: secretsChanged ? 1 : 0, stdout: "" };
+    return { status: 0, stdout: "" };
+  };
+
+  it("no clone → INFO (never blocks a standalone node)", () => {
+    const [c] = checkClusterSecretFreshness({ fileExists: () => false });
+    expect(c.status).toBe(STATUS.INFO);
+  });
+
+  it("marker sha === HEAD → PASS (secrets current)", () => {
+    const [c] = checkClusterSecretFreshness({
+      fileExists: () => true,
+      git: gitFor("SAME", false),
+      readState: () => ({ lastDecryptedSha: "SAME", lastDecryptedAt: "t" }),
+    });
+    expect(c.status).toBe(STATUS.PASS);
+  });
+
+  it("HEAD advanced but secrets/ unchanged → PASS", () => {
+    const [c] = checkClusterSecretFreshness({
+      fileExists: () => true,
+      git: gitFor("NEW", false),
+      readState: () => ({ lastDecryptedSha: "OLD" }),
+    });
+    expect(c.status).toBe(STATUS.PASS);
+  });
+
+  it("secrets/ changed since last decrypt → WARN (running on stale secrets)", () => {
+    const [c] = checkClusterSecretFreshness({
+      fileExists: () => true,
+      git: gitFor("NEW", true),
+      readState: () => ({ lastDecryptedSha: "OLD" }),
+    });
+    expect(c.status).toBe(STATUS.WARN);
+    expect(c.detail).toMatch(/stale secrets/i);
+  });
+
+  it("clone present but no marker → WARN (daemon never recorded a decrypt)", () => {
+    const [c] = checkClusterSecretFreshness({
+      fileExists: () => true,
+      git: gitFor("HEAD", false),
+      readState: () => null,
+    });
+    expect(c.status).toBe(STATUS.WARN);
+  });
+
+  it("never FAILs (advisory) — exit-code-safe for the join activation gate", async () => {
+    const code = await runDoctor({
+      checks: [
+        () =>
+          checkClusterSecretFreshness({
+            fileExists: () => true,
+            git: gitFor("NEW", true),
+            readState: () => ({ lastDecryptedSha: "OLD" }),
+          }),
+      ],
+      log: () => {},
+    });
+    expect(code).toBe(0); // WARN, not FAIL
   });
 });
