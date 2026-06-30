@@ -214,8 +214,16 @@ export function defaultDispatch(
 // Promise<{code,…,worktreePath}>. `runPhaseAgent` stays an injectable default so
 // the unit test can assert the wiring without the real SDK; the remaining seams
 // (resolveProject/createWorktree/…) pass straight through to defaultDispatch.
-export function sdkDispatch(args, { runPhaseAgent = sdkRunPhaseAgent, ...seams } = {}) {
-  return defaultDispatch(args, { runPhaseAgent, ...seams });
+// CTL-1396 (Codex P2): `emitEvent` is the unified-event-log appender the DAEMON
+// injects (see daemon.mjs's dispatchFn binding). When present, bind it onto the
+// async sdk launch verb so sdkRunPhaseAgent's telemetry — `execution-core.sdk.phase-turns`
+// (the turn-cap calibration signal) plus .overloaded/.auth.misconfigured — reaches the
+// JSONL event log / Loki instead of only sdkRunPhaseAgent's stderr default. Absent
+// (other callers / unit tests) → sdkRunPhaseAgent keeps its dependency-free stderr
+// default, byte-identical to before.
+export function sdkDispatch(args, { runPhaseAgent = sdkRunPhaseAgent, emitEvent, ...seams } = {}) {
+  const launch = emitEvent ? (a) => runPhaseAgent({ ...a, emitEvent }) : runPhaseAgent;
+  return defaultDispatch(args, { runPhaseAgent: launch, ...seams });
 }
 
 // dispatchForExecutor — CTL-1365b Stage C: map a resolved executor

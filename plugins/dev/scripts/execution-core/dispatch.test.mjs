@@ -453,6 +453,43 @@ describe("sdkDispatch (CTL-1365b)", () => {
     expect(r).toEqual({ code: 0, stdout: "ok", stderr: "", signal: null, worktreePath: "/wt/CTL-1" });
   });
 
+  test("CTL-1396 (Codex P2): an injected emitEvent is bound onto the launch verb (phase-turns reaches the unified log, not stderr)", () => {
+    const emitted = [];
+    const emitEvent = (name, payload) => emitted.push({ name, payload });
+    // The launch verb stands in for sdkRunPhaseAgent: it emits phase-turns via the
+    // injected emitEvent exactly as the real one does at sdk-run-phase-agent.mjs:942.
+    const spy = (args) => {
+      args.emitEvent("execution-core.sdk.phase-turns", { ticket: args.ticket, num_turns: 5 });
+      return { code: 0, stdout: "", stderr: "", signal: null };
+    };
+    sdkDispatch(
+      { orchDir: "/ec", ticket: "CTL-1", phase: "implement" },
+      {
+        resolveProject: () => ({ team: "CTL", repoRoot: "/repo" }),
+        createWorktree: (a) => ({ code: 0, worktreePath: `/wt/${a.ticket}`, stderr: "" }),
+        runPhaseAgent: spy,
+        emitEvent, // what the daemon injects under executor=sdk
+      },
+    );
+    expect(emitted).toHaveLength(1);
+    expect(emitted[0].name).toBe("execution-core.sdk.phase-turns");
+    expect(emitted[0].payload.ticket).toBe("CTL-1");
+  });
+
+  test("CTL-1396: without an injected emitEvent the launch verb keeps its own stderr default (non-daemon callers unchanged)", () => {
+    let received = "unset";
+    const spy = (args) => { received = args.emitEvent; return { code: 0, stdout: "", stderr: "", signal: null }; };
+    sdkDispatch(
+      { orchDir: "/ec", ticket: "CTL-1", phase: "implement" },
+      {
+        resolveProject: () => ({ team: "CTL", repoRoot: "/repo" }),
+        createWorktree: (a) => ({ code: 0, worktreePath: `/wt/${a.ticket}`, stderr: "" }),
+        runPhaseAgent: spy,
+      },
+    );
+    expect(received).toBeUndefined(); // no override → sdkRunPhaseAgent falls back to defaultEmitEvent
+  });
+
   test("defaults the launch verb to the real (async) sdkRunPhaseAgent — proven via the auth guard + the thenable result", async () => {
     // No runPhaseAgent override → the real sdkRunPhaseAgent runs. With no
     // CLAUDE_CODE_OAUTH_TOKEN and no ANTHROPIC_API_KEY it refuses at the auth guard

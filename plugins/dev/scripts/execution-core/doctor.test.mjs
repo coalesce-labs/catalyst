@@ -1270,9 +1270,10 @@ describe("checkSdkDaemonEnv (CTL-1396 item A)", () => {
   const SECRET = "oauth-tok-super-secret-DO-NOT-LEAK";
   // A synthetic `ps eww` env line. The token VALUE is embedded so we can assert it
   // never leaks into any returned detail.
-  const procEnv = ({ token = true, exec = "sdk" } = {}) => {
+  const procEnv = ({ token = true, exec = "sdk", apiKey = false } = {}) => {
     const parts = ["12345 ??  S  0:01.23 node", "daemon.mjs", "--pid-file", "/x/daemon.pid"];
     if (token) parts.push(`CLAUDE_CODE_OAUTH_TOKEN=${SECRET}`);
+    if (apiKey) parts.push("ANTHROPIC_API_KEY=sk-ant-should-not-be-here");
     if (exec !== null) parts.push(`CATALYST_EXECUTOR=${exec}`);
     return parts.join(" ");
   };
@@ -1284,8 +1285,15 @@ describe("checkSdkDaemonEnv (CTL-1396 item A)", () => {
       body: { payload: { requested: "sdk", effective: "bg", reason: "no token" } },
     });
   // Healthy seams: alive daemon, token + CATALYST_EXECUTOR=sdk, empty event log.
+  // platform "linux" so the ps-eww proc-env probe is exercised deterministically
+  // regardless of the host (macOS defers to the self-report — see its own test);
+  // pidFilePath matches the procEnv fixture's `--pid-file` so procIsDaemon passes;
+  // readEnvFile empty so the executor resolves from the explicit `executor` seam.
   const healthy = (over = {}) => ({
     executor: "sdk",
+    platform: "linux",
+    pidFilePath: "/x/daemon.pid",
+    readEnvFile: () => "",
     readPidFile: () => "12345\n",
     readProcEnv: () => procEnv(),
     readEventLog: () => "",
@@ -1381,6 +1389,9 @@ describe("checkSdkDaemonEnv (CTL-1396 item A)", () => {
       // is alive but tokenless → FAIL (the CTL-1396 silent-degrade signature).
       const checks = checkSdkDaemonEnv({
         configPath: cfg,
+        platform: "linux",
+        pidFilePath: "/x/daemon.pid",
+        readEnvFile: () => "", // no execution-core.env override → resolution reads Layer-1
         readPidFile: () => "999\n",
         readProcEnv: () => procEnv({ token: false }),
         readEventLog: () => "",
@@ -1406,6 +1417,67 @@ describe("checkSdkDaemonEnv (CTL-1396 item A)", () => {
       log: (m) => logs.push(m),
     });
     expect(code).toBe(1);
+  });
+
+  // ── Codex P2 re-review fixes ──
+
+  it("on macOS the proc-env probe is INFO (unverifiable), never a false FAIL", () => {
+    // ps eww strips env on darwin: a healthy SDK daemon would read as tokenless.
+    const checks = checkSdkDaemonEnv(healthy({ platform: "darwin", readProcEnv: () => procEnv({ token: false }) }));
+    const env = checks.find((c) => c.name === "sdk-daemon-env");
+    expect(env.status).toBe(STATUS.INFO);
+    expect(env.detail).toContain("macOS");
+    // the authoritative self-report still runs (PASS on an empty log)
+    expect(checks.find((c) => c.name === "sdk-bg-fallback").status).toBe(STATUS.PASS);
+  });
+
+  it("WARNs (not PASS/FAIL) when the pid was reused by an unrelated process", () => {
+    // A reused pid's ps output lacks the daemon.mjs --pid-file markers — even if it
+    // happens to carry an OAuth token, it must not be parsed as the daemon's env.
+    const checks = checkSdkDaemonEnv(
+      healthy({ readProcEnv: () => `999 ??  S  0:00.10 node some-other-tool.mjs CLAUDE_CODE_OAUTH_TOKEN=${SECRET}` }),
+    );
+    const env = checks.find((c) => c.name === "sdk-daemon-env");
+    expect(env.status).toBe(STATUS.WARN);
+    expect(env.detail).toContain("does not look like the exec-core daemon");
+    expect(env.detail).not.toContain(SECRET);
+  });
+
+  it("FAILs when token present but a conflicting ANTHROPIC_* var is also set", () => {
+    const checks = checkSdkDaemonEnv(healthy({ readProcEnv: () => procEnv({ apiKey: true }) }));
+    const env = checks.find((c) => c.name === "sdk-daemon-env");
+    expect(env.status).toBe(STATUS.FAIL);
+    expect(env.detail).toContain("ANTHROPIC_API_KEY/ANTHROPIC_AUTH_TOKEN");
+  });
+
+  it("detects SDK from the daemon env file when the doctor shell never set it", () => {
+    // executor omitted; Layer-1 absent → getExecutor would default to bg, but the
+    // execution-core.env the launcher sources says sdk, so the gate still engages.
+    const checks = checkSdkDaemonEnv({
+      configPath: "/nonexistent/config.json",
+      platform: "linux",
+      pidFilePath: "/x/daemon.pid",
+      readEnvFile: () => "export CATALYST_EXECUTOR=sdk\n",
+      readPidFile: () => "12345\n",
+      readProcEnv: () => procEnv({ token: false }), // alive but tokenless → FAIL proves the gate ran
+      readEventLog: () => "",
+      now: () => Date.parse("2026-06-29T00:00:00Z"),
+    });
+    expect(checks.find((c) => c.name === "sdk-daemon-env").status).toBe(STATUS.FAIL);
+  });
+
+  it("scans the PREVIOUS month's log when the 24h cutoff crosses a UTC month boundary", () => {
+    // now = Jul 1 00:30Z, fallback at Jun 30 23:50Z (inside 24h, in last month's file).
+    const fb = fallbackLine("2026-06-30T23:50:00Z");
+    const checks = checkSdkDaemonEnv(
+      healthy({
+        now: () => Date.parse("2026-07-01T00:30:00Z"),
+        // path-aware: only the June file carries the degrade.
+        readEventLog: (p) => (p.includes("2026-06.jsonl") ? fb + "\n" : ""),
+      }),
+    );
+    const fbCheck = checks.find((c) => c.name === "sdk-bg-fallback");
+    expect(fbCheck.status).toBe(STATUS.WARN);
   });
 });
 

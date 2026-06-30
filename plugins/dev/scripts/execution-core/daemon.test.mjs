@@ -35,7 +35,7 @@ import {
   _isBotId,
 } from "./daemon.mjs";
 import { getEventLogPath, log } from "./config.mjs";
-import { defaultDispatch, sdkDispatch, makeCommentWakeDispatch } from "./dispatch.mjs";
+import { defaultDispatch, makeCommentWakeDispatch } from "./dispatch.mjs";
 import { upsertProjectEntry } from "./registry.mjs";
 import {
   recordHoldStop,
@@ -1888,10 +1888,15 @@ describe("CTL-1365b: executor flag honored at all four dispatch entry points", (
     delete process.env.ANTHROPIC_AUTH_TOKEN;
     try {
       const c = captureThreeSites();
-      expect(c.scheduler).toBe(sdkDispatch); // site 1
-      expect(c.monitor).toBe(sdkDispatch);   // site 2
-      expect(c.boot).toBe(sdkDispatch);      // site 4
-      expect(typeof c.onComment).toBe("function"); // site 3 wired
+      // CTL-1396 (Codex P2): under executor=sdk the daemon wraps sdkDispatch to
+      // inject the unified-event-log appender (so sdkRunPhaseAgent's phase-turns
+      // telemetry reaches the JSONL log, not just stderr). The four sites therefore
+      // receive that SAME wrapped sdk dispatch — consistent (no split-brain) and NOT
+      // the bg defaultDispatch. (The bg-fallback sibling test pins the all-bg case.)
+      expect(c.scheduler).not.toBe(defaultDispatch); // site 1 — sdk path, not bg
+      expect(c.monitor).toBe(c.scheduler);           // site 2 — same dispatch (no split-brain)
+      expect(c.boot).toBe(c.scheduler);              // site 4 — same dispatch
+      expect(typeof c.onComment).toBe("function");   // site 3 wired
     } finally {
       if (savedTok === undefined) delete process.env.CLAUDE_CODE_OAUTH_TOKEN;
       else process.env.CLAUDE_CODE_OAUTH_TOKEN = savedTok;
