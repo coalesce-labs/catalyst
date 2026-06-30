@@ -27,6 +27,63 @@ linearis milestones usage     # Just milestone operations
 linearis cycles usage         # Just cycle operations
 ```
 
+## Reading Linear
+
+**The read source is decided by whether the local Catalyst Cloud replica is opted in
+*and* live — NOT by whether the node has a Cloud key. Writes never change.** The easiest
+way to honor this rule is to call **`catalyst-linear read|list|search`** (CTL-1391): it
+resolves the source itself and fails open to `linearis`, so you never decide based on
+node identity.
+
+### Mode 1 — Direct (default)
+
+When the replica is **not opted in** (`CATALYST_LINEAR_REPLICA` unset/`off` *and* Layer-2
+`catalyst.linearReplica.mode` not `on`) **or** no fresh replica file is present, read Linear
+**directly**: `linearis issues read|list|search`. There is **no local mirror**. A node that
+*has* a Cloud key but has not flipped the replica flag on is in this mode. (The broker's
+`filter-state.db` still exists for orchestration fencing and the board UI, but it is **not**
+a Linear read path — do not read ticket state from it.)
+
+### Mode 2 — Replica-first (opted in *and* a live replica present)
+
+When the replica is **opted in** (`CATALYST_LINEAR_REPLICA=on` or Layer-2
+`catalyst.linearReplica.mode=on`) **and** a fresh local SQLite replica — kept current by
+the Cloud change-feed — is present:
+
+- **Read the replica FIRST** and **trust it** as the authoritative local copy.
+- Do **NOT** reflexively re-verify against live Linear — that defeats the cache and
+  burns the API budget.
+- **Evidence-based escalation only.** Fall back to a direct `linearis` read for a
+  specific item *only* when you have concrete evidence the replica read is wrong:
+  it contradicts something you just directly observed; the replica freshness/staleness
+  signal shows it is behind; or a ticket you expect is missing. When you escalate:
+  - (a) read that item directly with `linearis`, **and**
+  - (b) **surface the staleness as an issue** — a stale replica read signals a mirror
+    gap (e.g. a missed webhook) worth investigating, not just a one-off retry.
+
+### Writes — always `linearis`, both modes
+
+`create` / `update` / state transitions / `discuss` / estimate / label **always** go
+through `linearis`. The replica is **read-only** in both modes.
+
+### How reads resolve
+
+- **Daemon read paths** resolve the mode automatically via the read-source seam
+  (CTL-1390) — callers do not choose.
+- **Agent / skill ad-hoc reads:** use **`catalyst-linear read <ID>`** (CTL-1391). It
+  applies the rule above for you — replica-first when opted in *and* fresh, automatic
+  fail-open to `linearis` otherwise — so the **same command is correct on every node**.
+  Output matches `linearis` JSON plus an additive `_meta` (read source + replica
+  freshness). `list`/`search` are `linearis` passthrough today (a replica-backed list
+  view is a follow-up).
+
+> **Mechanism note.** `catalyst-linear` is the executable form of this rule (read-model
+> over the replica first, `linearis` fallback). Plain `linearis issues read|list|search`
+> stays correct everywhere — it is exactly what `catalyst-linear` falls back to — so
+> existing direct calls are fine. Prefer `catalyst-linear` for ad-hoc reads so a node
+> that *has* opted into the replica actually gets replica-first behavior automatically,
+> instead of every caller re-deciding from node identity.
+
 ## Gotchas & Traps
 
 These are non-obvious behaviors that silently produce wrong results. Verified empirically against

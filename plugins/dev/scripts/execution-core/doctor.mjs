@@ -48,6 +48,11 @@ import {
   readClusterConfig,
   // CTL-1396 item A: unified event-log path for the recent sdk→bg silent-degrade scan.
   getEventLogPath,
+  // CTL-1394: the supervised cloud-sync health check. All node-safe (node:fs/os/path) —
+  // do NOT import replica-read.mjs (it pulls bun:sqlite; doctor runs under bare node).
+  getReplicaDbPath,
+  readLinearReplica,
+  resolveNodeCloudTokenEnv,
 } from "./config.mjs";
 import { ownedBy } from "./hrw.mjs";
 import { readPeerHeartbeats } from "./cluster-heartbeat.mjs";
@@ -1718,6 +1723,116 @@ export function checkCloudTokenEnv(deps = {}) {
   return checks;
 }
 
+// checkCloudSync — CTL-1394. Advisory health of the per-node supervised Linear-replica
+// writer + its read tier. EVERY condition is WARN/INFO/PASS, NEVER FAIL: doctor's exit code
+// is the FAIL count and gates catalyst-join activation — a FAIL here would block a node that
+// simply hasn't opted into the replica yet. All deps injectable so tests touch no
+// fs/pgrep/launchctl. NODE-SAFE: file-mtime freshness only (no bun:sqlite); rowcount /
+// MAX(updated_at) freshness is check-setup.sh's richer job.
+export function checkCloudSync(deps = {}) {
+  const {
+    label = CLOUD_SYNC_AGENT_LABEL,
+    laDir = defaultLaunchAgentsDir(),
+    agentInstalled = defaultAgentInstalled,
+    processAlive = defaultCloudSyncProcessAlive,
+    dbPath = getReplicaDbPath(),
+    fileExists = (p) => existsSync(p),
+    statFile = (p) => statSync(p),
+    mode = readLinearReplica().mode,
+    tokenEnv = resolveNodeCloudTokenEnv(),
+    env = process.env,
+    now = Date.now(),
+    staleMs = Number(process.env.CATALYST_REPLICA_STALE_MS) || 120_000,
+    // The writer-lock heartbeat is the FEED-INDEPENDENT liveness signal: the live writer
+    // rewrites <db>.writer.lock every ~5s (SDK heartbeatMs) regardless of Linear activity,
+    // whereas the DB/-wal mtime only advances when a change frame lands. A generous default
+    // (4× the SDK's 15s lock-stale) absorbs heartbeat jitter; > this ⇒ heartbeat stopped.
+    lockStaleMs = Number(process.env.CATALYST_REPLICA_LOCK_STALE_MS) || 60_000,
+    sizeFloorBytes = 65_536,
+  } = deps;
+
+  const installed = agentInstalled(label, laDir);
+  const dbPresent = fileExists(dbPath);
+
+  // Gate: a node with NO writer agent, the read flag OFF, and NO replica file is simply not
+  // on the replica tier — one INFO and out, so this check is safe to wire into every class.
+  if (!installed && mode !== "on" && !dbPresent) {
+    return [mkCheck("cloud-sync", STATUS.INFO, "local Linear replica tier not enabled on this node")];
+  }
+
+  const checks = [];
+
+  // (a) writer agent — installed + process alive (+ writer-lock as a corroborator).
+  if (!installed) {
+    checks.push(mkCheck("cloud-sync", STATUS.WARN, "agent not installed (run: catalyst-stack adopt-cloud-sync) — reads fall back to live linearis"));
+  } else if (processAlive()) {
+    const lockHeld = fileExists(`${dbPath}.writer.lock`);
+    checks.push(mkCheck("cloud-sync", STATUS.PASS, `agent installed + running${lockHeld ? " (writer-lock held)" : ""}`));
+  } else {
+    checks.push(mkCheck("cloud-sync", STATUS.WARN, "agent installed but no writer process found — KeepAlive may be retrying; check ~/catalyst/cloud-sync.log"));
+  }
+
+  // (b) replica freshness + writer liveness. KEY INSIGHT: the DB + -wal mtime only advance
+  // when a change FRAME is applied, so a quiet Linear feed (no ticket changes) freezes them
+  // even though the writer is perfectly alive — the SDK has no idle keepalive. So DB mtime
+  // measures "time since last mirrored change", NOT writer liveness. The feed-independent
+  // liveness signal is the writer-lock HEARTBEAT (<db>.writer.lock), rewritten ~every 5s.
+  // Gate liveness on the lock heartbeat; report the data-age as info only, never as "down".
+  if (!dbPresent) {
+    checks.push(mkCheck("replica-fresh", STATUS.WARN, "replica db not present — writer has not seeded yet (not connected)"));
+  } else {
+    let size = 0;
+    let dataNewest = 0; // newest of DB + non-empty -wal mtime = last mirrored change
+    try { const s = statFile(dbPath); size = s.size; dataNewest = s.mtimeMs; } catch { /* unreadable → handled below */ }
+    try { const w = statFile(`${dbPath}-wal`); if (w.size > 0) dataNewest = Math.max(dataNewest, w.mtimeMs); } catch { /* no -wal sidecar */ }
+    let lockMtime = 0;
+    try { lockMtime = statFile(`${dbPath}.writer.lock`).mtimeMs; } catch { /* no lock: guard disabled / writer not started */ }
+    const dataAge = dataNewest ? `${Math.round((now - dataNewest) / 1000)}s` : "unknown";
+
+    if (size < sizeFloorBytes) {
+      checks.push(mkCheck("replica-fresh", STATUS.WARN, "replica present but tiny — snapshot seed not applied yet (not connected)"));
+    } else if (lockMtime > 0) {
+      // Writer-lock heartbeat is the truth (feed-independent). A quiet feed never trips this.
+      const lockAge = Math.round((now - lockMtime) / 1000);
+      if (now - lockMtime <= lockStaleMs) {
+        checks.push(mkCheck("replica-fresh", STATUS.PASS, `writer live (heartbeat ${lockAge}s ago); last mirrored change ${dataAge} ago`));
+      } else {
+        checks.push(mkCheck("replica-fresh", STATUS.WARN, `writer heartbeat stale (${lockAge}s > ${Math.round(lockStaleMs / 1000)}s) — writer likely down`));
+      }
+    } else if (dataNewest === 0 || now - dataNewest > staleMs) {
+      // No writer-lock (guard disabled / not started) — fall back to the DB data-mtime as a
+      // COARSE proxy, but word it ambiguously since a quiet feed is indistinguishable here.
+      checks.push(mkCheck("replica-fresh", STATUS.WARN, `no writer-lock + no mirrored change in ${dataAge} — writer may be down (or the feed is quiet)`));
+    } else {
+      checks.push(mkCheck("replica-fresh", STATUS.PASS, `replica updated ${dataAge} ago (no writer-lock present)`));
+    }
+  }
+
+  // (c) token presence — by NAME only, NEVER the value.
+  const tokenVal = env[tokenEnv.envVar];
+  const tokenSet = typeof tokenVal === "string" && tokenVal.length > 0;
+  checks.push(
+    tokenSet
+      ? mkCheck("replica-token", STATUS.PASS, `${tokenEnv.envVar} is set (len>0, source=${tokenEnv.source})`)
+      : mkCheck("replica-token", STATUS.WARN, `${tokenEnv.envVar} not set — the writer cannot authenticate (idle no-op); provision it in a 0600 file the launcher sources`),
+  );
+
+  // (d) read-flag ↔ writer consistency.
+  if (mode === "on") {
+    checks.push(
+      dbPresent
+        ? mkCheck("replica-read-flag", STATUS.PASS, "CATALYST_LINEAR_REPLICA=on with a local replica present — reads served locally")
+        : mkCheck("replica-read-flag", STATUS.WARN, "CATALYST_LINEAR_REPLICA=on but no local replica db — every read MISSES through to live linearis (no relief)"),
+    );
+  } else if (installed && dbPresent) {
+    checks.push(mkCheck("replica-read-flag", STATUS.WARN, "writer running + replica present but CATALYST_LINEAR_REPLICA=off — flip it on to read from the replica"));
+  } else {
+    checks.push(mkCheck("replica-read-flag", STATUS.INFO, "replica read tier off (CATALYST_LINEAR_REPLICA unset/off)"));
+  }
+
+  return checks;
+}
+
 // checkConfigScopeLeak — CTL-1214. Flags a committed Layer-1 .catalyst/config.json
 // that still carries node/cluster-scoped keys, or a legacy .catalyst/hosts.json
 // roster file. `.catalyst/config.json` is committed per-repo and must carry ONLY
@@ -2441,6 +2556,7 @@ export function checkDaemonlessLocal(deps = {}) {
 
 const STACK_AGENT_LABEL = "ai.coalesce.catalyst-stack"; // the worker work-stack supervisor (broker/exec-core/monitor)
 const UPDATER_AGENT_LABEL = "ai.coalesce.catalyst-updater"; // the 5th updater agent (sole puller) on developer/monitor
+const CLOUD_SYNC_AGENT_LABEL = "ai.coalesce.catalyst-cloud-sync"; // CTL-1394 (keep in sync w/ catalyst-stack + check-setup.sh)
 
 function defaultLaunchAgentsDir() {
   return process.env.CATALYST_LAUNCHAGENTS_DIR || resolve(homedir(), "Library", "LaunchAgents");
@@ -2465,6 +2581,19 @@ function defaultAgentInstalled(label, dir = defaultLaunchAgentsDir()) {
 function defaultUpdaterProcessAlive() {
   if (process.env.CATALYST_ASSUME_NO_DAEMONS === "1") return false;
   const r = spawnSync("pgrep", ["-f", "execution-core/updater/updater\\.mjs"], { timeout: 5_000 });
+  return !r.error && r.status === 0;
+}
+
+// defaultCloudSyncProcessAlive — is the supervised cloud-sync daemon RUNNING? (CTL-1394)
+// pgrep the writer entrypoint; honors the CATALYST_ASSUME_NO_DAEMONS test seam.
+function defaultCloudSyncProcessAlive() {
+  if (process.env.CATALYST_ASSUME_NO_DAEMONS === "1") return false;
+  // Match the basename, not the full dir path: the launcher execs the writer via
+  // `${SCRIPT_DIR}/../cloud-sync.mjs`, so the live argv is
+  // `.../cloud-sync/../cloud-sync.mjs` — a `execution-core/cloud-sync.mjs`
+  // pattern would miss it (Codex P2). `cloud-sync.mjs` matches the writer process and
+  // not the launcher (`.../cloud-sync/launch.sh` has no `.mjs`).
+  const r = spawnSync("pgrep", ["-f", "cloud-sync\\.mjs"], { timeout: 5_000 });
   return !r.error && r.status === 0;
 }
 
@@ -2705,6 +2834,7 @@ export function checksForClass(nc, opts = {}) {
       () => checkReaper(), // advisory (never FAIL), class-agnostic
       () => checkMonitorProductionBuild({ fetch: _fetch }), // CTL-1372: warn on a dev-build monitor (advisory)
       () => checkCloudTokenEnv(), // advisory
+      () => checkCloudSync(), // CTL-1394: developer nodes read Linear from the local replica too (advisory)
       () => checkConfigScopeLeak(), // advisory
     ];
   }
@@ -2754,6 +2884,7 @@ export function checksForClass(nc, opts = {}) {
     () => checkClaudeSettings(), // CTL-1231: member settings.json pins host identity + OTLP endpoint
     () => checkReaper(), // CTL-1306: orphan-sweep reaper installed + baked path still exists (not dead-127)
     () => checkCloudTokenEnv(), // CTL-1307: cluster cloud token decrypted → projected to machine-level env (advisory)
+    () => checkCloudSync(), // CTL-1394: supervised cloud-sync daemon + read tier on the worker hot path (advisory)
     () => checkSdkExecutorAuth(), // CTL-1367 item 9: under executor=sdk, subscription auth must be correct (no api-key metering)
     () => checkSdkDaemonEnv(), // CTL-1396 item A: under executor=sdk, the RUNNING daemon's process env must carry CLAUDE_CODE_OAUTH_TOKEN (not just the operator shell) + surface recent silent sdk→bg degrades
     () => checkConfigScopeLeak(), // CTL-1214: committed Layer-1 .catalyst/config.json must not carry node/cluster scope (roster/orchestration/feedback/sweep/repoColors/hosts.json)

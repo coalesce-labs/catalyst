@@ -39,6 +39,7 @@ CLI_ENTRIES=(
   "catalyst-events:catalyst-events"
   "catalyst-execution-core:catalyst-execution-core"
   "catalyst-filter:catalyst-filter"
+  "catalyst-linear:catalyst-linear"
   "catalyst-linear-reconcile:catalyst-linear-reconcile"
   "catalyst-otel-forward:catalyst-otel-forward"
   "catalyst-transitions:catalyst-transitions"

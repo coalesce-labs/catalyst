@@ -1413,6 +1413,45 @@ export function getReplicaDbPath() {
   return process.env.CATALYST_REPLICA_DB || resolve(catalystDir(), "catalyst-replica.db");
 }
 
+// --- Catalyst-Cloud token resolution (CTL-1394) ---
+// The supervised cloud-sync daemon reads its cloud token from a STANDARD env-var NAME —
+// `CATALYST_CLOUD_TOKEN` — on EVERY host (the same name cloud-token-env.mjs / CTL-1307
+// already projects into cluster.env). The per-node-ness is the VALUE the operator
+// provisions into that host's 0600 cloud-sync.env, NOT the name — so this installs
+// on arbitrary hosts with ZERO code changes (no host names baked into the source). An
+// optional override (env `CATALYST_CLOUD_TOKEN_ENV` / Layer-2 `catalyst.cloud.tokenEnv`)
+// lets a host point at a differently-named var. NAME-ONLY: this never reads or returns the
+// secret VALUE (the writer reads process.env[name]; doctor checks presence by name), so the
+// result is safe to log.
+const DEFAULT_CLOUD_TOKEN_ENV = "CATALYST_CLOUD_TOKEN";
+
+// readLayer2CloudTokenEnv — the raw catalyst.cloud.tokenEnv string from the Layer-2
+// file, or undefined (absent/malformed/non-string). Never throws (parity with
+// readLayer2NodeClass). The per-host escape hatch — name your token var without a code change.
+function readLayer2CloudTokenEnv() {
+  try {
+    const v = JSON.parse(readFileSync(getLayer2ConfigPath(), "utf8"))?.catalyst?.cloud?.tokenEnv;
+    return typeof v === "string" && v.length > 0 ? v : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+// resolveNodeCloudTokenEnv — resolve the env-var NAME that holds this host's cloud token:
+// env override → Layer-2 override → the standard `CATALYST_CLOUD_TOKEN`. Returns
+// { envVar, source } where source ∈ "env" | "layer2" | "default". Pure + NAME-only: it never
+// reads process.env[envVar] (the secret value), so it is safe to log the result. No host
+// names are hardcoded — the resolver is host-agnostic by design.
+export function resolveNodeCloudTokenEnv({ env = process.env } = {}) {
+  const override = env.CATALYST_CLOUD_TOKEN_ENV;
+  if (typeof override === "string" && override.length > 0) {
+    return { envVar: override, source: "env" };
+  }
+  const l2 = readLayer2CloudTokenEnv();
+  if (l2) return { envVar: l2, source: "layer2" };
+  return { envVar: DEFAULT_CLOUD_TOKEN_ENV, source: "default" };
+}
+
 export function readDelegateRunnerConfig(env = process.env) {
   const v = env.CATALYST_DELEGATE_RUNNER;
   let mode;

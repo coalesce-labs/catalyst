@@ -39,6 +39,8 @@ In a **split** setup — a developer laptop plus an always-on **worker** machine
 
 Everything here is **read-only**. You still act on the work from Linear and GitHub, and writing to Linear still requires a host that has its own Linear key — so pointing more devices at the worker's board never changes who can make changes.
 
+This dashboard is for **human visibility** — it is *not* how Catalyst's agents read Linear during a workflow. Agent reads follow the two-mode rule in the `catalyst-dev:linearis` skill's "Reading Linear" section (standard node → direct `linearis`; Catalyst Cloud node → the SDK-managed local replica first, with `linearis` as the evidence-triggered fallback).
+
 ## A live terminal view
 
 Prefer the terminal? Run `catalyst-hud` for a live stream of events as they happen. On a minimal setup (like SSH from an iPad), use `catalyst-hud-classic` instead.
