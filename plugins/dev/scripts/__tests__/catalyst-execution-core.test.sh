@@ -239,6 +239,14 @@ JSON
 	export OTEL_EXPORTER_OTLP_ENDPOINT="http://daemon-env-wins:4318"
 	_default_otel_from_user_settings
 	if [ "${OTEL_EXPORTER_OTLP_ENDPOINT}" = "http://daemon-env-wins:4318" ]; then pass "does not override an already-set endpoint"; else fail "does not override an already-set endpoint" "got=${OTEL_EXPORTER_OTLP_ENDPOINT}"; fi
+	# (d) Codex P1: a BARE (non-exported) value sourced from execution-core.env — e.g.
+	# catalyst-join.sh's `OTEL_EXPORTER_OTLP_ENDPOINT=...` without export — must be PROMOTED to
+	# exported so the nohup'd daemon child inherits it (else SDK workers start endpoint-less).
+	unset OTEL_EXPORTER_OTLP_ENDPOINT
+	OTEL_EXPORTER_OTLP_ENDPOINT="http://bare-sourced:4318" # bare assignment, NOT exported
+	_default_otel_from_user_settings
+	CHILD_SEES="$(bash -c 'printf %s "${OTEL_EXPORTER_OTLP_ENDPOINT-}"')"
+	if [ "$CHILD_SEES" = "http://bare-sourced:4318" ]; then pass "promotes a bare daemon-env value to exported (child inherits)"; else fail "promotes a bare daemon-env value to exported" "child_sees=$CHILD_SEES"; fi
 	# (c) settings file absent → no-op success, env untouched
 	unset OTEL_EXPORTER_OTLP_ENDPOINT
 	export CLAUDE_SETTINGS_JSON="$SETTINGS_DIR/does-not-exist.json"
