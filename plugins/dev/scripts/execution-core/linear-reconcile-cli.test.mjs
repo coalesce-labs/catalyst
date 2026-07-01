@@ -358,12 +358,14 @@ test("DECLARE done-applied: the agent's own Done carries its PR-2 tallies (by=re
   });
 });
 
-test("DECLARE done-applied: a pipeline record-only marker (--by pipeline --no-write) emits NO would-done shadow event", async () => {
-  // CTL-1157 GROUP B: phase-teardown records durable completion with
-  // `declare --state done --by pipeline --no-write` AFTER it has ALREADY performed
-  // the real Linear Done (via linear-transition.sh). That --no-write is a
-  // record-only marker, NOT a shadow — emitting recovery.would-done-applied here
-  // would pollute shadow telemetry and undercount real Done moves.
+test("DECLARE done-applied: a pipeline record-only marker (--by pipeline --no-write) emits an ENFORCE done-applied, never a shadow would-event", async () => {
+  // CTL-1157 GROUP 1 (observable teardown Done): phase-teardown records durable
+  // completion with `declare --state done --by pipeline --no-write` AFTER it has
+  // ALREADY performed the real Linear Done (via linear-transition.sh, no telemetry).
+  // That --no-write is the RECORD OF A REAL EXTERNAL DONE, NOT a shadow — it must
+  // emit recovery.done-applied in ENFORCE mode (so the normal-pipeline teardown Done
+  // is observable, not SILENT), and must NOT emit the recovery.would-done-applied
+  // shadow variant (Codex round-1 #7).
   const dir = mkdtempSync(join(tmpdir(), "decl-"));
   const moves = [];
   const { code } = await runCli(
@@ -374,7 +376,87 @@ test("DECLARE done-applied: a pipeline record-only marker (--by pipeline --no-wr
     { emitDoneApplied: (f) => moves.push(f), checkOpenPrs: PASS }
   );
   expect(code).toBe(0);
-  expect(moves).toEqual([]); // record-only marker → no shadow would-done event
+  expect(moves).toHaveLength(1); // the teardown Done is observable — not silent
+  expect(moves[0]).toMatchObject({
+    ticket: "CTL-9",
+    by: "pipeline",
+    openPrsAtDone: 0,
+    prsClosed: 0,
+    prsKept: 0,
+    // the real Done ALREADY landed externally ⇒ enforce, NOT a shadow would-event
+    recoveryMode: "enforce",
+  });
+});
+
+test("DECLARE (GROUP 1): a pipeline record-only Done WITH an open PR is observable + alarmed — not silent", async () => {
+  // The Problem-A regression: real teardown Done (external) → pipeline record-only
+  // marker → later terminal-sweep sees already-Done → skipped. WITHOUT this fix the
+  // teardown Done with an open PR emitted NEITHER done-applied NOR the open-PR alarm.
+  // Now the record-only marker enumerates open PRs itself and fires both.
+  const dir = mkdtempSync(join(tmpdir(), "decl-"));
+  const moves = [];
+  const alarms = [];
+  const { code } = await runCli(
+    [
+      "declare", "CTL-9", "--by", "pipeline", "--state", "done", "--no-write",
+      "--decls-dir", dir,
+    ],
+    {
+      emitDoneApplied: (f) => moves.push(f),
+      emitDoneWithOpenPr: (ev) => alarms.push(ev),
+      checkOpenPrs: () => ({ ok: false, prs: [{ number: 202, state: "OPEN", isDraft: false }] }),
+    }
+  );
+  expect(code).toBe(0);
+  // done-applied fires (enforce) carrying the red-line open count
+  expect(moves).toHaveLength(1);
+  expect(moves[0]).toMatchObject({ ticket: "CTL-9", recoveryMode: "enforce", openPrsAtDone: 1 });
+  // and the loud recovery.done-applied-with-open-pr alarm fires
+  expect(alarms).toHaveLength(1);
+  expect(alarms[0]).toMatchObject({ ticket: "CTL-9", by: "pipeline-teardown", unverifiable: false });
+  expect(alarms[0].openPrs.map((p) => p.number)).toEqual([202]);
+});
+
+test("DECLARE (GROUP 1): a pipeline record-only Done with an UNVERIFIABLE open-PR check still alarms (unverifiable ≠ clean)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "decl-"));
+  const moves = [];
+  const alarms = [];
+  const { code } = await runCli(
+    [
+      "declare", "CTL-9", "--by", "pipeline", "--state", "done", "--no-write",
+      "--decls-dir", dir,
+    ],
+    {
+      emitDoneApplied: (f) => moves.push(f),
+      emitDoneWithOpenPr: (ev) => alarms.push(ev),
+      checkOpenPrs: () => ({ ok: false, unverifiable: true, reason: "repo-underivable", prs: [] }),
+    }
+  );
+  expect(code).toBe(0);
+  expect(moves).toHaveLength(1); // still observable
+  expect(moves[0].openPrsAtDone).toBe(0);
+  expect(alarms).toHaveLength(1); // unverifiable ⇒ surfaced, not silently assumed clean
+  expect(alarms[0]).toMatchObject({ ticket: "CTL-9", by: "pipeline-teardown", unverifiable: true });
+});
+
+test("DECLARE (GROUP 1): a CLEAN pipeline record-only Done emits done-applied but NO alarm", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "decl-"));
+  const moves = [];
+  const alarms = [];
+  const { code } = await runCli(
+    [
+      "declare", "CTL-9", "--by", "pipeline", "--state", "done", "--no-write",
+      "--decls-dir", dir,
+    ],
+    {
+      emitDoneApplied: (f) => moves.push(f),
+      emitDoneWithOpenPr: (ev) => alarms.push(ev),
+      checkOpenPrs: PASS, // verifiably clean
+    }
+  );
+  expect(code).toBe(0);
+  expect(moves).toHaveLength(1); // observable
+  expect(alarms).toEqual([]); // clean, confirmed Done is silent
 });
 
 test("DECLARE done-applied: --no-emit suppresses the move event", async () => {

@@ -188,6 +188,18 @@ UNIONs the ticket-key search + the branch-head pass + the Linear-attachment pass
 confirming OPEN via `gh`) and prints any still-open PRs. It is a FACTS source, not
 a block: it never aborts teardown on its own (alarm-not-block). YOU read its output.
 
+**STEP 1½ — If the check came back UNVERIFIABLE, do NOT treat it as clean.** The
+enumerator returns `unverifiable:true` (with a reason) when the authoritative GitHub
+check could not be completed — the ticket's repo could not be derived, a `gh`
+list/view failed, or an attachment-linked PR could not be viewed. The fence surfaces
+that state explicitly ("open-PR verification was UNVERIFIABLE … (reason)") instead of
+collapsing it to an empty list. **UNVERIFIABLE ≠ CLEAN.** An unverifiable check is
+NOT "no open PR remains" — do not mark Done and remove the worktree on it. Finish the
+verification (re-run the enumerator, or eyeball the ticket's PRs by hand) and, if you
+still cannot confirm the board is clean, fail-out per STEP 2's genuine-judgment path
+(emit `phase.teardown.failed.${TICKET}` with the reason) so the unverified teardown
+surfaces rather than proceeding silently.
+
 **STEP 2 — Reason about EACH open PR and remediate it yourself.** For every PR the
 enumerator printed:
 
@@ -218,24 +230,38 @@ EXEC_CORE_TD="${PLUGIN_ROOT}/scripts/execution-core"
 OPEN_PR_ENUM="${EXEC_CORE_TD}/open-pr-gate.mjs"
 TD_BRANCH="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")"
 if [[ -f "$OPEN_PR_ENUM" ]] && command -v node >/dev/null 2>&1; then
-  # Invoke the enumerator's defaultCheckOpenPrs; print the open-PR list as JSON.
-  # Best-effort: any failure prints an empty result and never blocks teardown.
-  TD_OPEN_PRS="$(OPEN_PR_ENUM="$OPEN_PR_ENUM" TICKET="$TICKET" TD_BRANCH="$TD_BRANCH" \
+  # Invoke the enumerator's defaultCheckOpenPrs; print the FULL result as JSON —
+  # both the open-PR list AND the `unverifiable` flag + reason. UNVERIFIABLE ≠ CLEAN:
+  # if we serialized only `r.prs`, an unverifiable result (repo underivable / gh
+  # failed) would collapse to an empty list and falsely read as "no open PR remains".
+  # Best-effort: any throw is itself UNVERIFIABLE (never a silent clean list).
+  TD_OPEN_RESULT="$(OPEN_PR_ENUM="$OPEN_PR_ENUM" TICKET="$TICKET" TD_BRANCH="$TD_BRANCH" \
     node --input-type=module -e '
       const { defaultCheckOpenPrs } = await import(process.env.OPEN_PR_ENUM);
       const t = process.env.TICKET;
       const branchName = process.env.TD_BRANCH || undefined;
       try {
         const r = defaultCheckOpenPrs(t, { branchName });
-        process.stdout.write(JSON.stringify(r.prs || []));
-      } catch { process.stdout.write("[]"); }
-    ' 2>/dev/null || echo "[]")"
-  [[ -n "$TD_OPEN_PRS" ]] || TD_OPEN_PRS="[]"
+        process.stdout.write(JSON.stringify({ prs: r.prs || [], unverifiable: !!r.unverifiable, reason: r.reason || "" }));
+      } catch (e) {
+        process.stdout.write(JSON.stringify({ prs: [], unverifiable: true, reason: String((e && e.message) || e) }));
+      }
+    ' 2>/dev/null || echo "{\"prs\":[],\"unverifiable\":true,\"reason\":\"enumerator invocation failed\"}")"
+  [[ -n "$TD_OPEN_RESULT" ]] || TD_OPEN_RESULT="{\"prs\":[],\"unverifiable\":true,\"reason\":\"empty enumerator output\"}"
+  TD_OPEN_PRS="$(printf '%s' "$TD_OPEN_RESULT" | jq -c '.prs // []' 2>/dev/null || echo "[]")"
+  TD_UNVERIFIABLE="$(printf '%s' "$TD_OPEN_RESULT" | jq -r '.unverifiable // false' 2>/dev/null || echo "false")"
+  TD_UNVERIF_REASON="$(printf '%s' "$TD_OPEN_RESULT" | jq -r '.reason // ""' 2>/dev/null || echo "")"
   TD_OPEN_COUNT="$(printf '%s' "$TD_OPEN_PRS" | jq 'length' 2>/dev/null || echo 0)"
   if [[ "$TD_OPEN_COUNT" =~ ^[0-9]+$ && "$TD_OPEN_COUNT" -gt 0 ]]; then
     echo "phase-teardown: CTL-1157 Done-judgment — ${TD_OPEN_COUNT} OPEN PR(s) still exist for ${TICKET}:" >&2
     printf '%s\n' "$TD_OPEN_PRS" | jq -r '.[] | "  #\(.number) [\(.state)] \(.title // "")"' 2>/dev/null >&2 || true
     echo "phase-teardown: reason about EACH (STEP 2): finish/merge the needed, close the abandoned (gh pr close <n> --comment ...), or fail-out on a genuine judgment call — BEFORE the Done transition below." >&2
+  elif [[ "$TD_UNVERIFIABLE" == "true" ]]; then
+    # UNVERIFIABLE ≠ CLEAN. The authoritative gh check could NOT confirm zero open PRs
+    # (repo underivable, gh/auth/rate-limit failure, or an attachment PR we could not
+    # view). Do NOT let this read as clean — surface it so the agent reasons (STEP 1½).
+    echo "phase-teardown: CTL-1157 Done-judgment — open-PR verification was UNVERIFIABLE for ${TICKET} (${TD_UNVERIF_REASON:-reason unknown})." >&2
+    echo "phase-teardown: UNVERIFIABLE ≠ CLEAN — the authoritative gh check could NOT confirm zero open PRs. Do NOT assume the board is clean and do NOT silently mark Done + remove the worktree. Finish the verification (re-run the enumerator / eyeball the ticket's PRs by hand) or, on a genuine judgment call, fail-out: emit phase.teardown.failed.${TICKET} via the failure template carrying this reason so the unverified teardown surfaces." >&2
   else
     echo "phase-teardown: CTL-1157 Done-judgment — no open PR remains for ${TICKET}; proceeding to Done." >&2
   fi

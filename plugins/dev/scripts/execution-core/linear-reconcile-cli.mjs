@@ -326,31 +326,77 @@ async function cmdDeclare(args, deps = {}) {
       markReconciled(ticket, wrote.to_state ?? wrote.target ?? wrote.currentState, { dir });
   }
 
-  // CTL-1157 SLICE 3 (Done-moves panel): emit the broad recovery.done-applied for
-  // the delegate's OWN autonomous Done. This carries the agent's PR-2 remediation
-  // counts (prs_closed / prs_kept) and how many PRs were STILL open at the Done
-  // (open_prs_at_done > 0 = the red-line). The agent supplies them via flags — this
-  // path NEVER consults the open-PR enumerator (THE REVERSAL: declare is not gated),
-  // so the count comes from the agent's own prior enumeration, not a re-scan here.
-  // Shadow-safe: --no-write (no actual Done write) emits the would-apply telemetry
-  // variant; a real applied Done transition emits the enforce variant. Best-effort.
+  // CTL-1157 SLICE 3 (Done-moves panel) + GROUP 1 (observable teardown Done): emit
+  // the broad recovery.done-applied so OTEL charts every autonomous Done. Three shapes:
+  //
+  //  (a) PIPELINE RECORD-ONLY marker (`--no-write --by pipeline`): phase-teardown has
+  //      ALREADY performed the REAL Linear Done (via linear-transition.sh, no
+  //      telemetry) and is now dropping a durable record. This is the RECORD OF A REAL
+  //      EXTERNAL DONE — NOT a shadow. Emit recovery.done-applied in ENFORCE mode (a
+  //      real applied Done, NOT a would-event — re-introducing a shadow here was Codex
+  //      round-1 #7) AND run the open-PR enumeration → fire the loud
+  //      recovery.done-applied-with-open-pr alarm if ≥1 open PR (or unverifiable). This
+  //      is the ONLY observability for a normal-pipeline teardown Done: the real Done
+  //      emits nothing, the later terminal-sweep sees already-Done → action:"skipped"
+  //      → emits nothing, so WITHOUT this a teardown Done with an open PR is SILENT.
+  //      No agent supplied PR tallies here (this is pure-pipeline, not the delegate),
+  //      so prs_closed/prs_kept are 0 and open_prs_at_done carries the enumerated count
+  //      — observable + alarmed exactly like the two pure-code backstops (drain +
+  //      terminal sweep).
+  //  (b) GENUINE SHADOW (any other actor's true --no-write declaration): the delegate
+  //      does not write Done → emit the recovery.would-done-applied SHADOW variant
+  //      (telemetry only, no write, no enumeration/alarm). The agent supplies its own
+  //      PR-2 remediation tallies (prs_closed / prs_kept / open_prs_at_done) via flags.
+  //  (c) REAL APPLIED DONE on this path (not --no-write): emit recovery.done-applied
+  //      (enforce) with the agent-supplied tallies. An idempotent already-Done noop is
+  //      not a "move" and emits nothing.
   if (!args.noEmit && String(args.state).toLowerCase() === "done") {
     const emitDoneApplied = deps.emitDoneApplied || appendRecoveryDoneAppliedEvent;
-    // Only a real done transition (or a no-write declaration) emits a move; an
-    // idempotent already-Done noop is not a "move".
     const realDone = wrote && wrote.kind === "done" && wrote.applied && wrote.writeAction !== "skipped";
-    // CTL-1157 GROUP B (Done-event accuracy): distinguish a TRUE shadow/no-write
-    // declaration from a record-only marker. phase-teardown records durable
-    // completion with `declare --state done --by pipeline --no-write` AFTER it has
-    // ALREADY performed the real Linear Done (via linear-transition.sh) — that
-    // --no-write is a record-only marker, NOT a shadow. Emitting the
-    // recovery.would-done-applied SHADOW event for it would pollute shadow telemetry
-    // and undercount real Done moves. Suppress the shadow emit for the pipeline
-    // record-only marker; the genuine shadow path (any other actor's true no-write
-    // declaration) and a real applied Done are unaffected.
     const pipelineRecordOnly =
       args.noWrite && String(args.by).toLowerCase() === "pipeline";
-    if ((args.noWrite && !pipelineRecordOnly) || realDone) {
+    if (pipelineRecordOnly) {
+      // (a) record of a REAL external Done — enumerate open PRs so the teardown Done is
+      // observable + alarmed. Best-effort; observability must never break declare.
+      const checkOpenPrs = deps.checkOpenPrs || defaultCheckOpenPrs;
+      const emitDoneWithOpenPr = deps.emitDoneWithOpenPr || appendRecoveryDoneOpenPrEvent;
+      const { configPath } = resolveConfig(args);
+      const repoRoot = existsSync(configPath) ? dirname(dirname(configPath)) : null;
+      let openPrs = [];
+      let unverifiable = false;
+      try {
+        const facts = checkOpenPrs(ticket, repoRoot ? { cwd: repoRoot } : {});
+        if (facts && facts.unverifiable) unverifiable = true;
+        if (facts && Array.isArray(facts.prs)) openPrs = facts.prs;
+      } catch {
+        unverifiable = true; // could not confirm clean ⇒ surface (don't assume zero)
+      }
+      try {
+        emitDoneApplied({
+          ticket,
+          openPrsAtDone: openPrs.length,
+          prsClosed: 0,
+          prsKept: 0,
+          // The real Done ALREADY landed via linear-transition.sh — this is a genuine
+          // applied Done, so enforce (NOT shadow). Codex round-1 #7: no would-event here.
+          recoveryMode: "enforce",
+          by: args.by,
+        });
+      } catch {
+        /* observability must never break declare */
+      }
+      // ALARM-NOT-BLOCK: a Done that landed while ≥1 open PR remains — OR whose open-PR
+      // check was UNVERIFIABLE (a Done that landed without confirming the board was
+      // clean) — fires the loud alarm. A clean, CONFIRMED teardown Done stays silent.
+      if (openPrs.length >= 1 || unverifiable) {
+        try {
+          emitDoneWithOpenPr({ ticket, openPrs, by: "pipeline-teardown", unverifiable });
+        } catch {
+          /* observability must never break declare */
+        }
+      }
+    } else if (args.noWrite || realDone) {
+      // (b) genuine shadow would-apply, or (c) a real applied Done on this path.
       try {
         emitDoneApplied({
           ticket,
