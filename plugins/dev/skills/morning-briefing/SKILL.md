@@ -76,7 +76,7 @@ Populate the `decisions:` array from four sources:
    that drift from the codebase. See [ADR-DRIFT.md](./ADR-DRIFT.md).
 2. **Blocked PRs** — `gh search prs --review-requested @me --state open --json …` filtered to
    PRs with no commit in the last 48h. Each becomes one `{type: blocked_pr, …}` decision.
-3. **Judgment-call Linear tickets** — `catalyst-linear list --team <team> --status "Triage,In Progress" --label needs-decision` (label name is informational; substitute whatever signal the operator uses).
+3. **Judgment-call Linear tickets** — `linearis issues list --team <team> --status "Triage,In Progress" --label needs-decision` (label name is informational; substitute whatever signal the operator uses).
 4. **Pending compound-engineering ADR proposals** — the `ticket-compound` curator queues
    APPROVE-gated ADR changes at `thoughts/shared/compound/pending/<TICKET>.md`. Each pending file
    becomes one decision the morning ritual can approve via `briefing-followup`'s
@@ -219,7 +219,7 @@ fi
 
 ## Step 4: Gather "today"
 
-- In-progress Linear tickets — `catalyst-linear list --team <team> --status "In Progress" --limit 20`
+- In-progress Linear tickets — `linearis issues list --team <team> --status "In Progress" --limit 20`
 - Today's calendar — already gathered in Step 2, reuse `$SCRATCH/calendar.json`
 - Follow-ups — extract action items from the prior day's Granola notes (`$SCRATCH/granola.json`)
   via a Claude-side synthesis pass
@@ -261,7 +261,7 @@ jq -nc --slurpfile rs <(jq -sc '.' "$SCRATCH/retro-signals.jsonl") \
 Query Linear for tickets that look ready for `/catalyst-legacy:orchestrate`:
 
 ```bash
-catalyst-linear list \
+linearis issues list \
   --team "$(jq -r '.catalyst.linear.teamKey' .catalyst/config.json)" \
   --status "Triage,Backlog" \
   --priority 1 --priority 2 \
