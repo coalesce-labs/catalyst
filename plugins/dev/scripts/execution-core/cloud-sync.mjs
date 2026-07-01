@@ -10,13 +10,22 @@
 // serve Linear reads from this local DB instead of the rate-limited `linearis` —
 // the unblock for nodes drowning in 429s.
 //
-// ENGINE: @catalyst-cloud/sdk@0.3.1 `CatalystReplica` — `start()` opens + migrates +
+// ENGINE: @catalyst-cloud/sdk@0.4.0 `CatalystReplica` — `start()` opens + migrates +
 // stream-seeds (/snapshot) + live-applies, resolving on the FIRST 'live' (seed
 // complete); background sync then runs until close(). The SDK owns reconnect/backoff
 // and a single-writer lock (<dbPath>.writer.lock, pid+heartbeat) — so a second
 // concurrent writer throws loudly rather than corrupting the file.
 //
-// APPLY-RESULT TELEMETRY (CTL-1402): 0.3.1's `applyFrame` records ONE outcome per live
+// #127 SCHEMA-SKEW FIX (0.4.0 + schema@0.1.3 + replicate@0.1.3): a mirror AHEAD of the
+// client's bundled schema no longer errno:1s. (1) the apply path DROPS a column the local
+// schema lacks instead of throwing (forward-compat by construction — additive mirror
+// column-adds can't recur this failure); (2) when a column-ADDING migration runs on boot,
+// start() forces ONE `/snapshot` re-seed to BACKFILL rows written before the column existed
+// (so already-stale rows — the CTL-1397 Backlog-vs-Done casualty — self-heal); (3) a
+// warn-once "mirror is ahead: dropping unknown column(s)" drift log. Expect a one-time
+// snapshot re-pull per node on the first boot after this bump — normal, not a stall.
+//
+// APPLY-RESULT TELEMETRY (CTL-1402): `applyFrame` records ONE outcome per live
 // frame via a structured `catalyst.replica.apply` LOG line through our `log` callback below
 // — `{result: applied|skipped|failed, seq, entity, source, err_message?}`. This REPLACES the
 // old string-interpolated "apply failed for … seq=" line (no in-repo bridge, no double-emit),
