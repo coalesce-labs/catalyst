@@ -5,9 +5,14 @@ Thumbs.db
 # Editor files
 .vscode/
 .idea/
+.obsidian/
 *.swp
 *.swo
 *~
+
+# Local AI-tool state (not shared with team)
+.codex/
+.playwright-mcp/
 
 # Temporary files
 *.tmp
@@ -68,3 +73,14 @@ plugins/dev/scripts/orch-monitor/node_modules/
 .serena/cache/
 .serena/project.local.yml
 .serena/logs/
+
+# mockups/: HTML mockups are reviewed source and stay tracked; the screenshots
+# captured while iterating on them are ephemeral and don't belong in history.
+mockups/**/*.png
+
+# Ad hoc root-level package install (e.g. `npm install linearis` for local CLI use)
+/node_modules/
+
+# Worktree-safety machine-local noise marker (see MACHINE_LOCAL_NOISE in
+# plugins/dev/scripts/execution-core/worktree-safety.mjs)
+.orphaned_at
