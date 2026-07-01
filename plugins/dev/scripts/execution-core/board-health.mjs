@@ -641,6 +641,14 @@ function checkOrphanedOpenPr(b, t) {
   for (const [id, d] of b.ticketsById) {
     const prNum = prNumberOf(d);
     if (prNum == null) continue;
+    // CTL-1157 (Codex round-6): skip a ticket already in a terminal Linear state
+    // (Done/Canceled/Duplicate). getBoard = getAllTicketDescriptors({includeRemoved:false})
+    // only drops removed_at rows, NOT terminal ones, so a terminal ticket whose PR was
+    // never merged/closed still carries an "open" filter_state row — without this guard
+    // it becomes a tier-1 orphaned-PR anchor and gets a recovery-pass dispatched on
+    // already-finished work (a wasted slot, recurring every cooldown). Mirrors the
+    // terminal exclusion the frozen-needs-human + needs-human-pile cohorts already apply.
+    if (isTerminalLinearState(d)) continue;
     // CTL-1157 (Codex #4) multi-repo: resolve the ticket's repo and look up the
     // EXACT (repo, number) status. With the repo known, a cross-repo #-collision
     // NO LONGER hides the ticket's genuine orphaned open PR (the missed-detection

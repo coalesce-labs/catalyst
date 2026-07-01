@@ -307,7 +307,7 @@ import { emitDrainedEvent as defaultEmitDrainedEvent } from "./drain-event.mjs";
 import { defaultCheckSequencing } from "./sequencing.mjs"; // CTL-537
 import { ownedBy, ownerForTicket } from "./hrw.mjs"; // CTL-850: HRW ownership filter (CTL-1191 also uses it for the diagnostician gate); ownerForTicket: CTL-1290 board-health stranded-node + enforce HRW gate
 import { boardHealthPass } from "./board-health.mjs"; // CTL-1290: the whole-board health delegate (shadow-first)
-import { getAllTicketDescriptors, getAllPrStatuses } from "../broker/broker-state.mjs"; // CTL-1290: board snapshot (reads only). bun:sqlite-backed — safe here: scheduler.mjs is daemon-only and NOT in the orch-monitor vite/UI graph (see MEMORY vite_config_bun_sqlite_trap). CTL-1157: getAllPrStatuses = the filter_state PR-lifecycle reader for the phantom/orphaned-PR invariants.
+import { getAllTicketDescriptors, getAllPrStatuses, openBrokerStateDb } from "../broker/broker-state.mjs"; // CTL-1290: board snapshot (reads only). bun:sqlite-backed — safe here: scheduler.mjs is daemon-only and NOT in the orch-monitor vite/UI graph (see MEMORY vite_config_bun_sqlite_trap). CTL-1157: getAllPrStatuses = the filter_state PR-lifecycle reader for the phantom/orphaned-PR invariants. openBrokerStateDb (CTL-1157 Codex round-6): the exec-core daemon must open the broker DB handle before these readers — ensure() throws otherwise and assembleBoardState swallows it, leaving the board/PR maps empty and the cohorts inert.
 import { readReconcileHealthMarkers } from "./reconcile-health.mjs"; // CTL-1290: stranded-node reconcile signal
 import { claimDispatchSync } from "./cluster-claim-sync.mjs"; // CTL-850: cross-host claim soft-CAS
 // CTL-954: team estimation method — lazy-cached from Linear, used to expand
@@ -6643,14 +6643,30 @@ function runTick() {
       // re-dispatch of one anchor to once per cooldown window, exactly like the
       // per-item path (scheduler.mjs recovery block).
       boardHealth: runningOpts.boardHealth ?? {
-        getBoard: () => getAllTicketDescriptors({ includeRemoved: false }),
+        // CTL-1157 (Codex round-6, P1): OPEN the broker DB handle before any reader.
+        // getAllTicketDescriptors + getAllPrStatuses both go through broker-state's
+        // ensure(), which THROWS when the module-level handle was never opened — and
+        // the exec-core daemon never opens it here (only the separate reconcile timer
+        // does, on a boot-order that isn't guaranteed before the first board-health
+        // tick). assembleBoardState swallows the throw, so the board AND the PR-status
+        // map silently come back empty and the phantom-merged / orphaned-open-PR cohorts
+        // this change adds are unobservable in BOTH shadow and enforce. openBrokerStateDb
+        // is idempotent (returns the existing handle) and read-safe under WAL, so calling
+        // it per reader is cheap and correct whether or not another opener ran first.
+        getBoard: () => {
+          try { openBrokerStateDb(); } catch { /* best-effort — empty board on open failure */ }
+          return getAllTicketDescriptors({ includeRemoved: false });
+        },
         readEventRing: () => readBoardHealthEventTail(),
         getReconcileMarkers: () => readReconcileHealthMarkers({}),
         // CTL-1157 (A11): the filter_state PR-status reader (phantom/orphaned-PR
         // invariants) + the provably-dead host set for the HRW-safe holistic
         // failover. computeSurvivingRoster already exists (scheduler.mjs) and
         // returns the roster unchanged for roster ≤ 1 → empty dead set at N=1.
-        getPrStatusMap: () => getAllPrStatuses(),
+        getPrStatusMap: () => {
+          try { openBrokerStateDb(); } catch { /* best-effort — empty PR map on open failure */ }
+          return getAllPrStatuses();
+        },
         // CTL-1157 (Codex #4): resolve a stuck ticket → its GitHub "owner/repo" so
         // the phantom/orphaned-PR cohorts disambiguate a cross-repo #-collision by
         // the ticket's repo (registry repoRoot → ownerRepoFromRepoRoot) instead of

@@ -36,7 +36,7 @@ import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { getProjectConfig } from "./registry.mjs";
+import { getProjectConfig, ownerRepoFromRepoRoot } from "./registry.mjs";
 
 // CTL-1157 F #7 (Codex round-4): a finite cap on every enumeration subprocess. In
 // production `defaultCheckOpenPrs` runs on the SYNCHRONOUS terminal sweep before the
@@ -47,8 +47,17 @@ import { getProjectConfig } from "./registry.mjs";
 // defaultCheckOpenPrs collapses it to {unverifiable:true} (never a false clean list);
 // the replica read is best-effort → null. Env-overridable; "0" disables the cap.
 const ENUM_SUBPROCESS_TIMEOUT_MS = (() => {
-  const raw = Number(process.env.CATALYST_OPEN_PR_GATE_TIMEOUT_MS);
-  if (Number.isFinite(raw) && raw >= 0) return raw; // 0 → disabled (no timeout)
+  // CTL-1157 (Codex round-6): guard the EMPTY/whitespace case. Number("") and
+  // Number("  ") are 0 (NOT NaN), which would pass the isFinite && >=0 test and
+  // silently DISABLE the cap (spawnSync timeout:0 = no limit) — reintroducing the
+  // scheduler-tick wedge this cap exists to prevent. A set-but-empty env var
+  // (CATALYST_OPEN_PR_GATE_TIMEOUT_MS= in an env file) is the plausible misconfig.
+  // Treat a blank value as UNSET → the 15s default; only an explicit non-blank numeric
+  // literal (including "0" to intentionally disable) is honored.
+  const rawStr = process.env.CATALYST_OPEN_PR_GATE_TIMEOUT_MS;
+  if (rawStr == null || String(rawStr).trim() === "") return 15_000;
+  const raw = Number(rawStr);
+  if (Number.isFinite(raw) && raw >= 0) return raw; // explicit 0 → disabled (no timeout)
   return 15_000;
 })();
 
@@ -311,6 +320,17 @@ export function defaultCheckOpenPrs(
     } catch {
       attachmentPrs = [];
     }
+    // CTL-1157 (Codex round-6): the ticket's OWN GitHub "owner/repo", so a same-repo
+    // attachment URL dedups against the bare-number key the ticket-key/head list passes
+    // used (they ran in the ticket repo and key by p.number). Null when underivable
+    // (explicit cwd / non-registry path) → the sameRepo test is false → the old
+    // owner/repo#n keying stands (over-report, never under-report). NEVER bare linearis.
+    let ticketRepoSlug = null;
+    try {
+      ticketRepoSlug = ownerRepoFromRepoRoot(repoCwd) || null;
+    } catch {
+      ticketRepoSlug = null;
+    }
     for (const item of attachmentPrs) {
       // Normalize both shapes: an object carries the attachment's OWN (owner/repo,
       // number) parsed from the GitHub URL; a bare number means "PR <n> in the
@@ -321,10 +341,14 @@ export function defaultCheckOpenPrs(
       const owner = isObj ? item.owner ?? null : null;
       const repo = isObj ? item.repo ?? null : null;
       const repoSlug = owner && repo ? `${owner}/${repo}` : null;
-      // Dedup key: a cross-repo attachment is a DIFFERENT PR than a same-numbered PR
-      // caught by the ticket-repo list/head passes (keyed by bare number), so key it
-      // by owner/repo#number; a bare-number attachment shares the numeric key.
-      const key = repoSlug ? `${repoSlug}#${n}` : n;
+      // Dedup key: a CROSS-repo attachment is a DIFFERENT PR than a same-numbered PR
+      // caught by the ticket-repo list/head passes (keyed by bare number), so key it by
+      // owner/repo#number. But an attachment in the ticket's OWN repo IS that same PR —
+      // CTL-1157 (Codex round-6): key it by the bare number too so a single same-repo
+      // open PR isn't counted twice (which would inflate open_prs_at_done + the alarm).
+      // A bare-number attachment already shares the numeric key.
+      const isCrossRepo = repoSlug != null && repoSlug !== ticketRepoSlug;
+      const key = isCrossRepo ? `${repoSlug}#${n}` : n;
       if (seen.has(key)) continue;
       // Target the attachment's OWN repo (-R owner/repo) so a multi-repo / #-collision
       // does NOT check <n> in the ticket repo and falsely report it closed/absent (a
@@ -362,8 +386,18 @@ export function defaultCheckOpenPrs(
     }
   } catch (err) {
     // An authoritative gh list/view pass failed — the enumeration is UNVERIFIABLE,
-    // never a clean list. Keep this CONSISTENT with the attachment-view path above.
-    return { ok: false, unverifiable: true, reason: err?.message || String(err), prs: [] };
+    // never a clean list. CTL-1157 (Codex round-6): PRESERVE the PRs already discovered
+    // by an EARLIER pass (e.g. the ticket-key search found open PRs, then the head pass
+    // threw) — return [...seen.values()], matching the attachment-view failure path
+    // above. Returning [] here would make the pure-code Done paths emit openPrsAtDone:0
+    // + an alarm with no PR numbers even though known-open PRs exist.
+    return {
+      ok: false,
+      unverifiable: true,
+      reason: err?.message || String(err),
+      prs: [...seen.values()],
+      branchName: head ?? null,
+    };
   }
   const prs = [...seen.values()];
   return { ok: prs.length === 0, prs, branchName: head ?? null };

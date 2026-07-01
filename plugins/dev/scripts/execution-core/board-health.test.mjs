@@ -464,6 +464,33 @@ describe("CTL-1157 cohort correctness — dead-worker orphans + terminal stale-l
     expect(r.orphanedOpenPr.flagged).toContain("CTL-STALL");
   });
 
+  // CTL-1157 (Codex round-6): a TERMINAL ticket (Done/Canceled/Duplicate) whose PR was
+  // never merged/closed still carries an "open" filter_state row, but must NOT be flagged
+  // as an orphaned-PR anchor — dispatching a recovery-pass on already-finished work wastes
+  // a slot. Mirrors the terminal exclusion the needs-human cohorts already apply.
+  test("orphaned-open: a TERMINAL (Canceled) ticket with a stale open PR is NOT flagged", () => {
+    const ticketsById = new Map([["CTL-TERM", { identifier: "CTL-TERM", prNumber: 7, state: "Canceled" }]]);
+    const r = evaluateInvariants(
+      mkBoard({
+        ticketsById,
+        prStatusMap: mkPrStatusMap([staleOpen]),
+        signals: [{ ticket: "CTL-TERM", phase: "implement", status: "failed" }],
+      }),
+      { mode: "shadow" },
+    );
+    expect(r.orphanedOpenPr.flagged).not.toContain("CTL-TERM"); // terminal → not a recovery anchor
+    expect(r.orphanedOpenPr.ok).toBe(true);
+  });
+
+  test("orphaned-open: a Done ticket with a stale open PR is NOT flagged", () => {
+    const ticketsById = new Map([["CTL-DONE", { identifier: "CTL-DONE", prNumber: 7, state: "Done" }]]);
+    const r = evaluateInvariants(
+      mkBoard({ ticketsById, prStatusMap: mkPrStatusMap([staleOpen]), signals: [] }),
+      { mode: "shadow" },
+    );
+    expect(r.orphanedOpenPr.flagged).not.toContain("CTL-DONE");
+  });
+
   test("orphaned-open: a LIVE (running) worker still masks the PR as not-orphaned", () => {
     const ticketsById = new Map([["CTL-LIVE", { identifier: "CTL-LIVE", prNumber: 7 }]]);
     const r = evaluateInvariants(

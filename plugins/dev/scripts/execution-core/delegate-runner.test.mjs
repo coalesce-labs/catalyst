@@ -409,6 +409,69 @@ describe("drainOnce — free-slot re-check", () => {
     expect(invokes).toBe(2);
     expect(res.drained).toBe(2);
   });
+
+  // CTL-1157 (Codex round-6): the sdk slot budget is countBg + a ONCE-sampled
+  // pre-existing sdk baseline + localLaunched — three DISJOINT terms. The earlier
+  // round-6 attempt re-read countSdkInflight per iteration AND added localLaunched,
+  // which double-counted each launch (the synchronous prelaunch signal is on disk
+  // before invokeFn returns, so a per-iteration re-read already sees this pass's
+  // launches) and halved effective parallelism at maxParallel>=2.
+  test("executor=sdk: baseline sampled ONCE — all queued intents launch when slots are free (no halving)", () => {
+    seedQueued("CTL-SDK-A");
+    seedQueued("CTL-SDK-B");
+    seedQueued("CTL-SDK-C");
+    let sdkCalls = 0;
+    const deps = makeDeps({
+      maxParallel: 3,
+      executor: "sdk",
+      countBackgroundAgents: () => 0,
+      countSdkInflight: () => {
+        sdkCalls++;
+        return 0; // no pre-existing sdk work
+      },
+      invokeFn: () => ({ dispatched: true, details: { bg_job_id: null, worktreePath: "/wt", pendingSdk: null } }),
+    });
+
+    const res = drainOnce(deps);
+
+    expect(res.drained).toBe(3); // ALL three — not ceil(3/2)=2 (the double-count bug)
+    expect(sdkCalls).toBe(1); // sampled ONCE as a baseline, never re-read per iteration
+  });
+
+  test("executor=sdk: PRE-EXISTING sdk workers (baseline) consume slots — only free slots launch", () => {
+    seedQueued("CTL-SDK-A");
+    seedQueued("CTL-SDK-B");
+    seedQueued("CTL-SDK-C");
+    const deps = makeDeps({
+      maxParallel: 3,
+      executor: "sdk",
+      countBackgroundAgents: () => 0,
+      countSdkInflight: () => 2, // two sdk phase workers already in flight → 1 free slot
+      invokeFn: () => ({ dispatched: true, details: { bg_job_id: null, worktreePath: "/wt", pendingSdk: null } }),
+    });
+
+    const res = drainOnce(deps);
+
+    expect(res.drained).toBe(1); // only the one genuinely-free slot launches
+  });
+
+  test("executor=sdk: a baseline sdk count failure fails CLOSED (holds every intent)", () => {
+    seedQueued("CTL-SDK-A");
+    const deps = makeDeps({
+      maxParallel: 3,
+      executor: "sdk",
+      countBackgroundAgents: () => 0,
+      countSdkInflight: () => {
+        throw new Error("signal scan failed");
+      },
+      invokeFn: () => ({ dispatched: true, details: {} }),
+    });
+
+    const res = drainOnce(deps);
+
+    expect(res.drained).toBe(0); // never launch on an untrustworthy sdk occupancy count
+    expect(readIntent("CTL-SDK-A").status).toBe("queued"); // un-claimed back to queued
+  });
 });
 
 describe("drainOnce — live-worker supersede (idempotency)", () => {

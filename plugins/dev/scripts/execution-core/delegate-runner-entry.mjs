@@ -54,6 +54,7 @@ import {
 import { defaultInvokeRecoveryPass } from "./recovery-reasoning.mjs";
 import { countBackgroundAgents as defaultCountBackgroundAgents } from "./claude-agents.mjs";
 import { isBgJobAlive as defaultIsBgJobAlive } from "./claude-agents.mjs";
+import { countSdkInflight as defaultCountSdkInflight } from "./signal-reader.mjs"; // CTL-1157 Codex round-6: existing dispatched/running sdk workers occupancy (no bg job → countBg misses them)
 import { computeFreeSlots, readMaxParallel } from "./scheduler.mjs";
 
 const RECOVERY_PASS_PHASE = "recovery-pass";
@@ -159,6 +160,7 @@ export function drainOnce(deps = {}) {
   const reclaimFn = deps.reclaimFn ?? defaultReclaimStaleClaims;
   const invokeFn = deps.invokeFn ?? defaultInvokeRecoveryPass;
   const countBg = deps.countBackgroundAgents ?? defaultCountBackgroundAgents;
+  const countSdkInflight = deps.countSdkInflight ?? defaultCountSdkInflight;
   const isBgJobAlive = deps.isBgJobAlive ?? defaultIsBgJobAlive;
   const appendRequested =
     deps.appendRequested ?? defaultAppendDispatchRequestedEvent;
@@ -180,6 +182,18 @@ export function drainOnce(deps = {}) {
   // byte-identical.
   const executor = deps.executor ?? null;
   let localLaunched = 0;
+  // CTL-1157 (Codex round-6, corrected): the sdk slot budget is the SUM of three
+  // DISJOINT terms — countBg (bg workers, re-read per iteration) + the PRE-EXISTING
+  // sdk in-flight workers sampled ONCE below + localLaunched (this pass's sdk launches).
+  // This mirrors the scheduler's sample-once occupiedCount + per-launch increment
+  // (scheduler.mjs). The tempting one-liner "re-read countSdkInflight each iteration AND
+  // add localLaunched" DOUBLE-COUNTS every launch: an sdk dispatch's synchronous
+  // prelaunch writes workers/<ticket>/phase-<phase>.json (dispatched, no bg_job_id)
+  // BEFORE invokeFn returns, so a per-iteration countSdkInflight already sees this pass's
+  // launches — adding localLaunched on top halves effective parallelism at maxParallel≥2.
+  // Sampling ONCE here (no this-pass launch has happened yet) keeps the two terms disjoint.
+  let sdkInflightBaseline = 0;
+  let sdkBaselineOk = true;
   // CTL-1157 F P1: under executor=sdk each dispatch launches an IN-PROCESS query()
   // that settles asynchronously (invokeFn returns the settled chain in
   // details.pendingSdk). This disposable child must await those before exiting or
@@ -194,6 +208,23 @@ export function drainOnce(deps = {}) {
     result.reclaimed = reclaimFn(orchDir, now(), ceilingMs);
   } catch (err) {
     log.warn({ err: err?.message }, "delegate-runner: reclaim failed");
+  }
+
+  // (0b) Sample the PRE-EXISTING sdk in-flight occupancy ONCE (dispatched/running sdk
+  // phase workers, no bg job → invisible to countBg). Disjoint from localLaunched below.
+  // A count failure fails CLOSED (the drain holds every intent), matching the per-item
+  // countBg posture (CTL-731: never over-spawn on an untrustworthy live count). bg stays
+  // 0 (bg workers surface in countBg) → byte-identical to before.
+  if (executor === "sdk") {
+    try {
+      sdkInflightBaseline = countSdkInflight(orchDir) ?? 0;
+    } catch (err) {
+      sdkBaselineOk = false;
+      log.warn(
+        { err: err?.message },
+        "delegate-runner: sdk in-flight baseline count failed — fail-closed (holding all intents this pass)"
+      );
+    }
   }
 
   for (const ticket of listQueuedTickets(orchDir)) {
@@ -246,12 +277,15 @@ export function drainOnce(deps = {}) {
         "delegate-runner: bg count failed — un-claiming (fail-closed, no launch on unknown count)"
       );
     }
-    // Under sdk, fold this pass's synchronous launches into the live count so the
-    // slot limit is honored across multiple queued intents in one drain (bg jobs
-    // already show up in countBg, so localLaunched stays 0 there).
+    // effectiveLive = live bg workers (re-read each iteration) + PRE-EXISTING sdk
+    // workers (sampled once in step 0b) + THIS pass's sdk launches (localLaunched). All
+    // three are disjoint, so the slot limit is honored across queued intents AND
+    // concurrent sdk phase workers with no double-count. bg path is byte-identical
+    // (sdkInflightBaseline and localLaunched both stay 0). A failed sdk baseline sample
+    // (sdkBaselineOk=false) holds every intent this pass (fail-closed).
     const effectiveLive =
-      executor === "sdk" ? (live ?? 0) + localLaunched : live;
-    if (!countOk || computeFreeSlots(max, effectiveLive) <= 0) {
+      executor === "sdk" ? (live ?? 0) + sdkInflightBaseline + localLaunched : live;
+    if (!countOk || !sdkBaselineOk || computeFreeSlots(max, effectiveLive) <= 0) {
       try {
         transitionFn(orchDir, ticket, { from: claimPath, status: "queued" });
       } catch (err) {

@@ -480,10 +480,15 @@ governs deciding a human is genuinely needed and authoring the brief for them.
 > - **Still needed / part of the solution** (it carries deliverable scope that hasn't landed
 >   elsewhere) → **FINISH it**: rebase, fix CI, merge it via **Rubric Two**'s rc=0/1/2/3 flow
 >   (`rebase_onto_base_classified` + `draft_pr_push_verify` + the green-PR merge). Do NOT close it.
+>   If the enumerator printed it as `owner/repo#n` (cross-repo), pass `-R <owner/repo>` on the merge
+>   (see Rubric Two) so you don't merge the ticket-repo's same-numbered PR instead.
 > - **Abandoned / superseded** (a later PR replaced it, a dead spike, a duplicate, scope dropped) →
->   **CLOSE it yourself**: `gh pr close <n> --comment "<why — superseded by #X / abandoned spike /
->   duplicate of #Y / scope moved to CTL-NNN>"`. Closing a dead PR is an autonomous senior-engineer
->   call, NOT an escalation.
+>   **CLOSE it yourself**: `gh pr close <n> -R <owner/repo> --comment "<why — superseded by #X /
+>   abandoned spike / duplicate of #Y / scope moved to CTL-NNN>"`. ALWAYS pass `-R <owner/repo>` when
+>   the open-PR enumerator reported the PR in a repo OTHER than the ticket's own (a cross-repo Linear
+>   attachment prints as `owner/repo#n`) — a bare `gh pr close <n>` runs against the ticket's repo and
+>   would close the wrong same-numbered PR while leaving the attached one open. Closing a dead PR is an
+>   autonomous senior-engineer call, NOT an escalation.
 > - **Genuine judgment call** — the open PR conflicts with an ADR/principle you must not override, OR
 >   you genuinely cannot safely decide needed-vs-abandoned (e.g. it has truly diverged from a sibling
 >   change and only one can coexist, or it's a release-cut decision) → **escalate (Rubric Three)**.
@@ -519,7 +524,14 @@ governs deciding a human is genuinely needed and authoring the brief for them.
 > There is no `--ticket` flag; an unknown `--` flag makes the CLI error out.**
 >
 > ```bash
-> node "${EXEC_CORE}/linear-reconcile-cli.mjs" declare "$TICKET" \
+> # Use the catalyst-linear-reconcile WRAPPER (prefers bun, node fallback) — NOT bare
+> # `node`. The CLI's default current-state reader imports bun:sqlite; under node it
+> # degrades to unknown-current, so a `--state done` write is SKIPPED as
+> # "unknown-current-unsafe" WHILE the CLI still exits 0 (it persisted the declaration).
+> # That records the ticket Done while Linear stays non-terminal until a later drain —
+> # exactly the silent false-Done this rubric must avoid. The wrapper runs bun so the
+> # current-state read is real and the Done write actually lands.
+> "${EXEC_CORE%/*}/catalyst-linear-reconcile" declare "$TICKET" \
 >   --by "recovery-pass" --state done ${BRANCH:+--branch "$BRANCH"} \
 >   --prs-closed "$PRS_CLOSED" --prs-kept "$PRS_KEPT" --open-prs-at-done "$PRS_STILL_OPEN"
 > ```
@@ -583,9 +595,13 @@ governs deciding a human is genuinely needed and authoring the brief for them.
 >     This is bounded-LLM engineering, NOT an automatic escalation.
 > - Green PR just sitting there → `gh pr view <n> --json mergeable,mergeStateStatus,reviewDecision`,
 >   then run the cluster fence guard (`"${PLUGIN_ROOT}/scripts/lib/cluster-fence-guard.sh" --phase
->   recovery-pass --ticket <T>`), then `gh pr merge <n> --squash --delete-branch`. Verify the merge
->   via REST (`gh api repos/<repo>/pulls/<n> --jq '.merged'`) — `--delete-branch` exits non-zero from
->   a worktree even when the squash succeeded.
+>   recovery-pass --ticket <T>`), then `gh pr merge <n> --squash --delete-branch`. **When the open-PR
+>   enumerator printed this PR as `owner/repo#n` (a cross-repo Linear attachment, a DIFFERENT repo than
+>   the ticket's), you MUST pass `-R <owner/repo>` on the view AND the merge (`gh pr merge <n> -R
+>   <owner/repo> …`)** — a bare `gh pr merge <n>` runs against the ticket's repo and would merge the
+>   wrong same-numbered PR (landing unintended code + deleting its branch) while the attached one stays
+>   open. Verify the merge via REST (`gh api repos/<owner/repo>/pulls/<n> --jq '.merged'`) —
+>   `--delete-branch` exits non-zero from a worktree even when the squash succeeded.
 > - Red CI with a deterministic cause (type error, lint, a flaky test) → fix it, push, re-check
 >   (bounded by the attempts cap of 2 — after honest attempts that still fail on a *genuine design
 >   incompatibility*, it becomes an escalation, below).
@@ -726,7 +742,10 @@ then declare Done autonomously via `declare --by recovery-pass`, which now just 
   cause (type error / lint / test), commit, push to re-trigger.
 - **A green PR just sitting there** → verify it is CLEAN
   (`gh pr view <n> --json mergeable,mergeStateStatus,reviewDecision`), then
-  `gh pr merge <n> --squash --delete-branch`.
+  `gh pr merge <n> --squash --delete-branch`. **For a cross-repo PR the enumerator
+  printed as `owner/repo#n`, pass `-R <owner/repo>` on both** (`gh pr merge <n> -R
+  <owner/repo> …`) — a bare merge targets the ticket's repo and would land the wrong
+  same-numbered PR while the attached one stays open.
 
 > **NEVER `--admin` / force-merge past a failing or pending check.** You may merge
 > a PR ONLY when its required checks are genuinely GREEN (`gh pr checks <n>` all

@@ -206,8 +206,14 @@ enumerator printed:
 - **Still needed / part of the solution** → FINISH it (rebase onto base, fix CI,
   merge it) before you proceed. Do NOT tear down with deliverable work unmerged.
 - **Abandoned / superseded** (a later PR replaced it, a dead spike, a duplicate) →
-  CLOSE it yourself: `gh pr close <n> --comment "<why — superseded by #X /
-  abandoned / duplicate of #Y>"`. Closing a dead PR is autonomous, not an escalation.
+  CLOSE it yourself: `gh pr close <n> -R <owner/repo> --comment "<why — superseded by
+  #X / abandoned / duplicate of #Y>"`. Closing a dead PR is autonomous, not an escalation.
+- **Cross-repo PRs (CTL-1157):** when the enumerator printed a PR as `owner/repo#n`
+  (a cross-repo Linear attachment — a DIFFERENT repo than this ticket's), you MUST
+  target that repo explicitly on BOTH paths — `gh pr merge <n> -R <owner/repo> …` and
+  `gh pr close <n> -R <owner/repo> …`. A bare `gh pr merge/close <n>` runs against the
+  ticket's repo and would merge/close the wrong same-numbered PR while leaving the
+  attached `owner/repo#n` open (this matches the fence's own `-R` warning above).
 - **Genuine judgment call** (the open PR conflicts with an ADR/principle, or you
   cannot safely decide needed-vs-abandoned) → do NOT mark Done; emit
   `phase.teardown.failed.${TICKET}` via the failure template with a concrete reason
