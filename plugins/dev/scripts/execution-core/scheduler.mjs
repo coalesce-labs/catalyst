@@ -4153,6 +4153,11 @@ export function schedulerTick(
                 // time too, but this avoids the wasted enqueue→claim→supersede and a
                 // transient slot reservation.
                 isBgJobAlive: (id) => isBgJobAlive(id, { agents: getAgents().agents }),
+                // CTL-1157 (GROUP-3 #2): make the enqueue-time worker-live probe
+                // sdk-aware so a dispatched|running sdk recovery-pass worker (no
+                // bg_job_id) dedups a re-enqueue instead of double-dispatching. Inert
+                // under bg/oneshot-legacy (executor stays null → byte-identical).
+                executor: dispatchMode === "sdk" ? "sdk" : null,
               }),
           });
           if (rResult.processed > 0) {
@@ -4457,7 +4462,12 @@ export function schedulerTick(
   // only ever LOWERS freeSlots (conservative-only, §3b); with an empty queue both
   // calls return 0, so occupiedCount === liveCount (Phase A inert: zero change).
   try {
-    gcDelegateIntents(orchDir, now());
+    // CTL-1157 (GROUP-3 #2): pass the resolved executor so the GC keeps a launched
+    // sdk delegate intent (in-process query(), no bg_job_id) LIVE instead of dropping
+    // it as a dead bg job — dropping it would free the reservation/existence guard and
+    // let the next scan re-dispatch the same in-flight ticket. Inert under bg (executor
+    // null → the no-bg_job_id launched intent still drops exactly as today).
+    gcDelegateIntents(orchDir, now(), { executor: dispatchMode === "sdk" ? "sdk" : null });
   } catch {
     /* GC is best-effort — never block the tick */
   }
@@ -6662,30 +6672,14 @@ function runTick() {
             orchDir: runningOpts.orchDir,
             dispatchTicket: (o, t, p) => dispatchTicket(o, t, p, { dispatch: runningOpts.dispatch }),
           };
-          const ordered = candidates.length ? candidates : (anchor ? [anchor] : []);
-          for (const cand of ordered) {
-            // cooldown/attempts-latched → try the next candidate (MUST-FIX 2).
-            if (recoveryShouldSkipItem(cand, deps)) continue;
-            const r = recoveryInvokeRecoveryPass(
-              cand,
-              {
-                boardContext,
-                reason: `board-health: ${decision?.gate?.reason ?? "board anomaly"} — holistic recovery-pass delegate`,
-              },
-              deps,
-            );
-            // Start the cooldown window on a dispatch attempt (success OR failure)
-            // so a failing anchor isn't re-dispatched until the window elapses.
-            try {
-              recoveryRecordIntent(
-                cand,
-                { type: "recovery-pass", decision: "fix", fix_class: "board-health", outcome: !!r?.dispatched, source: "board-health" },
-                deps,
-              );
-            } catch { /* ledger write is best-effort — never block the tick */ }
-            return r; // exactly ONE dispatch per scan
-          }
-          return { dispatched: false, reason: "all-candidates-cooldown" };
+          return holisticBoardHealthAct(
+            { anchor, candidates, boardContext, decision },
+            {
+              shouldSkipItem: (cand) => recoveryShouldSkipItem(cand, deps),
+              invokeRecoveryPass: (cand, ctx) => recoveryInvokeRecoveryPass(cand, ctx, deps),
+              recordIntent: (cand, intent) => recoveryRecordIntent(cand, intent, deps),
+            },
+          );
         },
       },
     });
@@ -6760,6 +6754,49 @@ function runTick() {
 function scheduleDebouncedTick(debounceMs) {
   clearTimeout(debounceTimer);
   debounceTimer = setTimeout(runTick, debounceMs);
+}
+
+// holisticBoardHealthAct — CTL-1157 (MUST-FIX 2 + GROUP-3 #3): the board-health
+// holistic `act` loop, extracted pure so it is unit-testable (the daemon wiring
+// binds the real recovery seams around it). Walk the ordered candidate cohort and
+// perform EXACTLY ONE real recovery-pass dispatch per scan. A candidate is SKIPPED
+// (continue to the next) when EITHER:
+//   (a) the intent-LEDGER cooldown/attempts gate latches it (shouldSkipItem), OR
+//   (b) the invoke RESULT is a NON-dispatch — recovery-pass-cycle-cap-exhausted /
+//       latched / no-op. The ledger gate (a) does NOT see the event-counted recovery
+//       cycle cap, so a candidate can pass (a) yet not dispatch; returning that result
+//       would wedge the whole pass on one cap-exhausted anchor and starve the cohort.
+// recordIntent starts the cooldown window on EVERY real invoke attempt (success or
+// non-dispatch) so a chronically-flagged anchor isn't re-hammered next scan. Only a
+// REAL dispatch (r.dispatched) ends the scan. Returns the dispatching candidate's
+// result, or {dispatched:false, reason:"all-candidates-cooldown"} when none dispatched.
+export function holisticBoardHealthAct(
+  { anchor = null, candidates = [], boardContext, decision } = {},
+  { shouldSkipItem, invokeRecoveryPass, recordIntent } = {}
+) {
+  const ordered = candidates.length ? candidates : (anchor ? [anchor] : []);
+  for (const cand of ordered) {
+    // (a) cooldown/attempts-latched → try the next candidate (MUST-FIX 2).
+    if (shouldSkipItem(cand)) continue;
+    const r = invokeRecoveryPass(cand, {
+      boardContext,
+      reason: `board-health: ${decision?.gate?.reason ?? "board anomaly"} — holistic recovery-pass delegate`,
+    });
+    // Start the cooldown window on a dispatch attempt (success OR failure).
+    try {
+      recordIntent(cand, {
+        type: "recovery-pass",
+        decision: "fix",
+        fix_class: "board-health",
+        outcome: !!r?.dispatched,
+        source: "board-health",
+      });
+    } catch { /* ledger write is best-effort — never block the tick */ }
+    // (b) a NON-dispatch RESULT is a SKIP, not this scan's dispatch — CONTINUE.
+    if (!r?.dispatched) continue;
+    return r; // exactly ONE real dispatch per scan
+  }
+  return { dispatched: false, reason: "all-candidates-cooldown" };
 }
 
 // startScheduler — immediate authoritative tick, arm the periodic timer, then

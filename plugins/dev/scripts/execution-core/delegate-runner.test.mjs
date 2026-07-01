@@ -416,6 +416,32 @@ describe("drainOnce — live-worker supersede (idempotency)", () => {
     drainOnce(deps);
     expect(readIntent("CTL-7").status).toBe("launched");
   });
+
+  // CTL-1157 (GROUP-3 #2): under executor=sdk the recovery-pass worker runs in-process
+  // with NO bg_job_id — a dispatched|running signal there is LIVE. A second drain scan
+  // must SUPERSEDE (not re-launch) it, otherwise the same ticket double-dispatches.
+  test("sdk: a running recovery-pass worker with NO bg_job_id → superseded (no re-dispatch) when executor==='sdk'", () => {
+    seedQueued("CTL-sdk");
+    seedRecoveryPassSignal("CTL-sdk", "running", null); // sdk shape: no bg id
+    const deps = makeDeps({ executor: "sdk", isBgJobAlive: () => false });
+    let invoked = false;
+    deps.invokeFn = () => {
+      invoked = true;
+      return { dispatched: true, details: {} };
+    };
+    const res = drainOnce(deps);
+    expect(invoked).toBe(false);
+    expect(existsSync(intentPath("CTL-sdk"))).toBe(false); // GC'd, not launched
+    expect(res.superseded).toBe(1);
+  });
+
+  test("bg (default): a running worker with NO bg_job_id does NOT supersede → dispatches (byte-identical)", () => {
+    seedQueued("CTL-bgnull");
+    seedRecoveryPassSignal("CTL-bgnull", "running", null);
+    const deps = makeDeps({ isBgJobAlive: () => false }); // no executor → bg
+    drainOnce(deps);
+    expect(readIntent("CTL-bgnull").status).toBe("launched");
+  });
 });
 
 describe("drainOnce — single-flight (two concurrent drains)", () => {

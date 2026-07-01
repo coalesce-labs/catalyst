@@ -84,14 +84,19 @@ function readJsonFile(path) {
 // bg_job_id is alive. Mirrors delegate-queue's enqueue-time live-worker check so
 // the runner re-checks the same condition at DRAIN time (the worker may have
 // launched between enqueue and drain).
-function recoveryPassWorkerLive(orchDir, ticket, isBgJobAlive) {
+//
+// CTL-1157 (GROUP-3 #2): sdk-aware. Under executor=sdk the recovery-pass worker
+// runs IN-PROCESS with no bg_job_id (dispatch.mjs E3); a dispatched|running sdk
+// signal with no bg_job_id is LIVE, so a second drain scan dedups it instead of
+// re-launching the same ticket. Under bg the discriminator is absent → byte-identical.
+function recoveryPassWorkerLive(orchDir, ticket, isBgJobAlive, executor) {
   const sig = readJsonFile(
     join(orchDir, "workers", ticket, "phase-recovery-pass.json")
   );
   if (!sig) return false;
   if (sig.status !== "dispatched" && sig.status !== "running") return false;
   const bgJobId = sig.bg_job_id ?? null;
-  if (!bgJobId) return false;
+  if (!bgJobId) return executor === "sdk"; // sdk in-process worker: live with no bg id
   try {
     return isBgJobAlive(bgJobId) === true;
   } catch {
@@ -202,7 +207,7 @@ export function drainOnce(deps = {}) {
     //     (the work it would have started already exists), so it is removed:
     //     it must NOT keep reserving a slot, and there is nothing to re-drain.
     //     We unlink the consumed claim sidecar and the canonical intent file.
-    if (recoveryPassWorkerLive(orchDir, ticket, isBgJobAlive)) {
+    if (recoveryPassWorkerLive(orchDir, ticket, isBgJobAlive, executor)) {
       for (const p of [claimPath, intentPath(orchDir, ticket)]) {
         try {
           unlinkSync(p);

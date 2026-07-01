@@ -16,7 +16,7 @@ import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { schedulerTick } from "./scheduler.mjs";
+import { schedulerTick, holisticBoardHealthAct } from "./scheduler.mjs";
 
 let orchDir;
 let catalystDir;
@@ -103,5 +103,97 @@ describe("schedulerTick — board-health seam (CTL-1290 §9.4)", () => {
       boardHealthPassFn: (opts) => calls.push(opts),
     });
     expect(calls.length).toBe(0);
+  });
+});
+
+// CTL-1157 (MUST-FIX 2 + GROUP-3 #3): the holistic board-health `act` loop, tested
+// pure via the extracted holisticBoardHealthAct (the daemon binds the real recovery
+// seams around it).
+describe("holisticBoardHealthAct — one real dispatch per scan, skip non-dispatch (CTL-1157)", () => {
+  const ctx = { candidates: [], boardContext: { anomaly: "wip" }, decision: { gate: { reason: "wip-spike" } } };
+
+  test("dispatches the FIRST actionable candidate and stops (exactly one dispatch)", () => {
+    const invoked = [];
+    const recorded = [];
+    const r = holisticBoardHealthAct(
+      { ...ctx, candidates: ["CTL-1", "CTL-2", "CTL-3"] },
+      {
+        shouldSkipItem: () => false,
+        invokeRecoveryPass: (cand) => { invoked.push(cand); return { dispatched: true, ticket: cand }; },
+        recordIntent: (cand, intent) => recorded.push({ cand, intent }),
+      },
+    );
+    expect(r.dispatched).toBe(true);
+    expect(r.ticket).toBe("CTL-1");
+    expect(invoked).toEqual(["CTL-1"]); // stopped after the first real dispatch
+    expect(recorded).toHaveLength(1);
+    expect(recorded[0].intent.outcome).toBe(true);
+  });
+
+  test("a ledger-latched candidate (shouldSkipItem) is skipped without invoking (MUST-FIX 2)", () => {
+    const invoked = [];
+    const r = holisticBoardHealthAct(
+      { ...ctx, candidates: ["CTL-latched", "CTL-ok"] },
+      {
+        shouldSkipItem: (cand) => cand === "CTL-latched",
+        invokeRecoveryPass: (cand) => { invoked.push(cand); return { dispatched: true, ticket: cand }; },
+        recordIntent: () => {},
+      },
+    );
+    expect(invoked).toEqual(["CTL-ok"]); // latched one never invoked
+    expect(r.ticket).toBe("CTL-ok");
+  });
+
+  test("a NON-dispatch RESULT (cap-exhausted) is a SKIP → CONTINUE to the next candidate (GROUP-3 #3)", () => {
+    // CTL-1 passes the ledger gate but its RESULT is a cap-exhausted no-op; the loop
+    // must NOT return there (which would starve the cohort) — it dispatches CTL-2.
+    const invoked = [];
+    const recorded = [];
+    const r = holisticBoardHealthAct(
+      { ...ctx, candidates: ["CTL-1", "CTL-2"] },
+      {
+        shouldSkipItem: () => false, // ledger gate does NOT see the event-counted cycle cap
+        invokeRecoveryPass: (cand) => {
+          invoked.push(cand);
+          return cand === "CTL-1"
+            ? { dispatched: false, reason: "recovery-pass-cycle-cap-exhausted" }
+            : { dispatched: true, ticket: cand };
+        },
+        recordIntent: (cand, intent) => recorded.push({ cand, intent }),
+      },
+    );
+    expect(invoked).toEqual(["CTL-1", "CTL-2"]); // continued past the cap-exhausted one
+    expect(r.dispatched).toBe(true);
+    expect(r.ticket).toBe("CTL-2");
+    // Both attempts recorded an intent (cooldown started on the failure too).
+    expect(recorded.map((x) => x.cand)).toEqual(["CTL-1", "CTL-2"]);
+    expect(recorded[0].intent.outcome).toBe(false);
+  });
+
+  test("ALL candidates non-dispatch → {dispatched:false, all-candidates-cooldown} (no starvation, no false dispatch)", () => {
+    const r = holisticBoardHealthAct(
+      { ...ctx, candidates: ["CTL-1", "CTL-2"] },
+      {
+        shouldSkipItem: () => false,
+        invokeRecoveryPass: () => ({ dispatched: false, reason: "recovery-pass-cycle-cap-exhausted" }),
+        recordIntent: () => {},
+      },
+    );
+    expect(r.dispatched).toBe(false);
+    expect(r.reason).toBe("all-candidates-cooldown");
+  });
+
+  test("empty cohort falls back to the anchor", () => {
+    const invoked = [];
+    const r = holisticBoardHealthAct(
+      { anchor: "CTL-anchor", candidates: [], boardContext: null, decision: null },
+      {
+        shouldSkipItem: () => false,
+        invokeRecoveryPass: (cand) => { invoked.push(cand); return { dispatched: true, ticket: cand }; },
+        recordIntent: () => {},
+      },
+    );
+    expect(invoked).toEqual(["CTL-anchor"]);
+    expect(r.ticket).toBe("CTL-anchor");
   });
 });

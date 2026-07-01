@@ -96,23 +96,30 @@ export function defaultDeriveBranchName(ticket, { cwd, read = readTicketReplica 
   }
 }
 
-// PR_URL_RE — pull a GitHub PR number out of a `.../pull/<n>` URL.
-const PR_URL_RE = /github\.com\/[^/\s]+\/[^/\s]+\/pull\/(\d+)/i;
+// PR_URL_RE — pull the (owner, repo, number) out of a `github.com/<owner>/<repo>/pull/<n>`
+// URL. CTL-1157 (GROUP-3 #1): the owner/repo are load-bearing — an attached PR lives
+// in the repo NAMED BY ITS URL, which in a multi-repo install is NOT necessarily the
+// ticket's project repo. Capturing them lets the attachment pass `gh pr view -R
+// <owner/repo>` against the PR's OWN repo instead of the ticket repo (where the same
+// number could be a different PR, or absent → a false clean).
+const PR_URL_RE = /github\.com\/([^/\s]+)\/([^/\s]+)\/pull\/(\d+)/i;
 
-// defaultDeriveAttachmentPrNumbers — CTL-1157 (Path 2 / slice 4): enumerate the
-// ticket's PRs from LINEAR'S OWN attachments / linked-PR records via the replica.
-// This is the third discovery source, UNIONed with the gh ticket-key search and
-// the branch-head pass — it catches a PR that has NO ticket key in its title/body
-// AND a non-standard head branch, but that IS attached to the Linear issue (the
-// common GitHub<>Linear auto-link). Best-effort: returns a number[] of PR numbers
-// parsed from any attachment whose url/href/subtitle points at a `/pull/<n>`.
+// defaultDeriveAttachmentPrs — CTL-1157 (Path 2 / slice 4 + GROUP-3 #1): enumerate
+// the ticket's PRs from LINEAR'S OWN attachments / linked-PR records via the replica,
+// preserving each PR's OWN GitHub repo. This is the third discovery source, UNIONed
+// with the gh ticket-key search and the branch-head pass — it catches a PR that has
+// NO ticket key in its title/body AND a non-standard head branch, but that IS attached
+// to the Linear issue (the common GitHub<>Linear auto-link). Best-effort: returns
+// `{owner, repo, number}[]` — `owner`/`repo` are non-null when parsed from a full
+// `/<owner>/<repo>/pull/<n>` URL, and null for a bare numeric attachment (no recorded
+// cross-repo linkage → treated as the ticket's own repo by the caller).
 //
 // KNOWN RESIDUAL (documented, not a logic bug): a PR with ZERO discoverable
 // linkage — no ticket key in its text, a non-standard head branch, AND no Linear
 // attachment — is genuinely undiscoverable from data. All three of our sources key
 // off SOME recorded linkage; an orphan PR records none. That is an
 // input-completeness limit, not a gap in this enumerator.
-export function defaultDeriveAttachmentPrNumbers(ticket, { cwd, read = readTicketReplica } = {}) {
+export function defaultDeriveAttachmentPrs(ticket, { cwd, read = readTicketReplica } = {}) {
   try {
     const rec = read(ticket, { cwd });
     if (!rec) return [];
@@ -122,24 +129,41 @@ export function defaultDeriveAttachmentPrNumbers(ticket, { cwd, read = readTicke
       .concat(rec.attachments?.nodes ?? rec.attachments ?? [])
       .concat(rec.pullRequests?.nodes ?? rec.pullRequests ?? [])
       .concat(rec.prLinks ?? []);
-    const nums = new Set();
+    const out = [];
+    const seen = new Set();
+    const push = (owner, repo, number) => {
+      if (!Number.isFinite(number)) return;
+      // A cross-repo attachment is a DISTINCT PR from a same-numbered ticket-repo PR,
+      // so key dedup by owner/repo#number when the repo is known; bare numbers by #n.
+      const key = owner && repo ? `${owner}/${repo}#${number}` : `#${number}`;
+      if (seen.has(key)) return;
+      seen.add(key);
+      out.push({ owner: owner ?? null, repo: repo ?? null, number });
+    };
     for (const a of atts) {
       if (a == null) continue;
-      // A plain number / numeric string is taken as a PR number directly.
+      // A plain number / numeric string is taken as a PR number in the ticket's repo.
       if (typeof a === "number" && Number.isFinite(a)) {
-        nums.add(a);
+        push(null, null, a);
         continue;
       }
       const hay = [a.url, a.href, a.sourceUrl, a.subtitle, a.title, typeof a === "string" ? a : null]
         .filter(Boolean)
         .join(" ");
       const m = PR_URL_RE.exec(hay);
-      if (m) nums.add(Number(m[1]));
+      if (m) push(m[1], m[2], Number(m[3]));
     }
-    return [...nums];
+    return out;
   } catch {
     return [];
   }
+}
+
+// defaultDeriveAttachmentPrNumbers — back-compat: the bare PR numbers (repo dropped).
+// Retained for any caller/test that only needs the numbers; the enumerator itself
+// uses defaultDeriveAttachmentPrs so it can target each PR's own repo.
+export function defaultDeriveAttachmentPrNumbers(ticket, opts) {
+  return defaultDeriveAttachmentPrs(ticket, opts).map((p) => p.number);
 }
 
 function defaultRunGh(ghArgs, cwd) {
@@ -162,18 +186,20 @@ function defaultRunGh(ghArgs, cwd) {
 //   2. branch-head pass    — `gh pr list --head <branchName> --state open` (branch
 //      derived from the replica when not supplied — catches a PR whose text omits
 //      the key).
-//   3. attachment pass     — for each PR number from Linear's attachments (replica)
-//      not already seen, `gh pr view <n>` and include it iff still OPEN (catches a
-//      PR with neither the key nor a matching branch, but linked in Linear).
+//   3. attachment pass     — for each PR from Linear's attachments (replica) not
+//      already seen, `gh pr view <n> -R <owner/repo>` against the ATTACHMENT'S OWN
+//      repo (CTL-1157 GROUP-3 #1) and include it iff still OPEN (catches a PR with
+//      neither the key nor a matching branch, but linked in Linear — possibly in a
+//      DIFFERENT repo than the ticket's project repo).
 // `--state open` ⇒ every returned PR is unmerged-and-open. `runGh` /
-// `deriveBranchName` / `deriveAttachmentPrNumbers` are injectable seams for tests.
+// `deriveBranchName` / `deriveAttachmentPrs` are injectable seams for tests.
 export function defaultCheckOpenPrs(
   ticket,
   {
     branchName,
     cwd,
     deriveBranchName = defaultDeriveBranchName,
-    deriveAttachmentPrNumbers = defaultDeriveAttachmentPrNumbers,
+    deriveAttachmentPrs = defaultDeriveAttachmentPrs,
     deriveRepoRoot = defaultDeriveRepoRoot,
     runGh,
   } = {}
@@ -240,30 +266,50 @@ export function defaultCheckOpenPrs(
         if (p && p.number != null) seen.set(p.number, p);
     }
     // Pass 3: Linear-attachment PRs. Confirm OPEN state via gh so a merged/closed
-    // attachment never falsely counts. Deriving the attachment numbers is
-    // best-effort (a derivation failure just means we have no attachment hints).
-    let attachmentNums = [];
+    // attachment never falsely counts. Deriving the attachments is best-effort (a
+    // derivation failure just means we have no attachment hints).
+    let attachmentPrs = [];
     try {
-      attachmentNums = deriveAttachmentPrNumbers(ticket, { cwd: repoCwd }) || [];
+      attachmentPrs = deriveAttachmentPrs(ticket, { cwd: repoCwd }) || [];
     } catch {
-      attachmentNums = [];
+      attachmentPrs = [];
     }
-    for (const n of attachmentNums) {
-      if (seen.has(n)) continue;
+    for (const item of attachmentPrs) {
+      // Normalize both shapes: an object carries the attachment's OWN (owner/repo,
+      // number) parsed from the GitHub URL; a bare number means "PR <n> in the
+      // ticket's own repo" (no cross-repo linkage recorded).
+      const isObj = typeof item === "object" && item !== null;
+      const n = isObj ? Number(item.number) : Number(item);
+      if (!Number.isFinite(n)) continue;
+      const owner = isObj ? item.owner ?? null : null;
+      const repo = isObj ? item.repo ?? null : null;
+      const repoSlug = owner && repo ? `${owner}/${repo}` : null;
+      // Dedup key: a cross-repo attachment is a DIFFERENT PR than a same-numbered PR
+      // caught by the ticket-repo list/head passes (keyed by bare number), so key it
+      // by owner/repo#number; a bare-number attachment shares the numeric key.
+      const key = repoSlug ? `${repoSlug}#${n}` : n;
+      if (seen.has(key)) continue;
+      // Target the attachment's OWN repo (-R owner/repo) so a multi-repo / #-collision
+      // does NOT check <n> in the ticket repo and falsely report it closed/absent (a
+      // false clean). A bare number stays in the ticket-repo cwd (its recorded repo).
+      const viewArgs = ["pr", "view", String(n), "--json", fields];
+      if (repoSlug) viewArgs.push("-R", repoSlug);
       let view;
       try {
-        view = gh(["pr", "view", String(n), "--json", fields]);
+        view = gh(viewArgs);
       } catch (err) {
         // CTL-1157: an attachment-linked PR we KNOW exists (Linear recorded it) but
-        // cannot view — a transient GitHub/auth/rate-limit failure — makes the whole
-        // enumeration UNVERIFIABLE. We cannot confirm this PR is merged/closed, so
-        // the list is NOT a clean "zero open PRs". Swallowing the error and returning
-        // {ok:true,prs:[]} here would let a backstop mark Done with NO alarm on an
-        // unverified check. Surface it instead — never silently drop the PR.
+        // cannot view — a transient GitHub/auth/rate-limit failure, OR a repo we are
+        // not authorized against — makes the whole enumeration UNVERIFIABLE. We cannot
+        // confirm this PR is merged/closed, so the list is NOT a clean "zero open PRs".
+        // Swallowing the error and returning {ok:true,prs:[]} here would let a backstop
+        // mark Done with NO alarm on an unverified check. Surface it instead — never
+        // silently drop the PR (nor collapse it to the ticket repo).
+        const label = repoSlug ? `${repoSlug}#${n}` : `#${n}`;
         return {
           ok: false,
           unverifiable: true,
-          reason: `attachment PR #${n} view failed: ${err?.message || String(err)}`,
+          reason: `attachment PR ${label} view failed: ${err?.message || String(err)}`,
           prs: [...seen.values()],
           branchName: head ?? null,
         };
@@ -271,7 +317,10 @@ export function defaultCheckOpenPrs(
       // `gh pr view --json` returns a single object (not an array).
       const pr = Array.isArray(view) ? view[0] : view;
       if (pr && pr.number != null && String(pr.state).toUpperCase() === "OPEN") {
-        seen.set(pr.number, pr);
+        // Annotate the resolving repo so a caller keying by (repo,number) can
+        // disambiguate a cross-repo open PR (scheduler composite key, CTL-1157).
+        if (repoSlug && pr.repo == null) pr.repo = repoSlug;
+        seen.set(key, pr);
       }
     }
   } catch (err) {

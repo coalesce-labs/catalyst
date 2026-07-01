@@ -3,6 +3,7 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseArgs, main, defaultCheckOpenPrs } from "./linear-reconcile-cli.mjs";
+import { defaultDeriveAttachmentPrs } from "./open-pr-gate.mjs";
 import { readDeclaration, listDeclarations } from "./linear-reconcile-store.mjs";
 
 // The open-PR Done gate is now UNIVERSAL (CTL-1157): every `--state done` declare
@@ -570,7 +571,7 @@ test("ENUMERATOR: a non-standard-branch open PR (title omits the ticket key) is 
   const r = defaultCheckOpenPrs("CTL-9", {
     runGh,
     deriveBranchName,
-    deriveAttachmentPrNumbers: () => [],
+    deriveAttachmentPrs: () => [],
   });
   expect(r.ok).toBe(false);
   expect(r.prs.map((p) => p.number)).toEqual([555]);
@@ -595,7 +596,7 @@ test("ENUMERATOR (slice 4): a PR with no key + non-standard branch but a Linear 
   const r = defaultCheckOpenPrs("CTL-9", {
     runGh,
     deriveBranchName: () => null,
-    deriveAttachmentPrNumbers: () => [808],
+    deriveAttachmentPrs: () => [808],
   });
   expect(r.ok).toBe(false);
   expect(r.prs.map((p) => p.number)).toEqual([808]);
@@ -611,10 +612,111 @@ test("ENUMERATOR (slice 4): a MERGED attachment PR does not count (gh pr view re
   const r = defaultCheckOpenPrs("CTL-9", {
     runGh,
     deriveBranchName: () => null,
-    deriveAttachmentPrNumbers: () => [808],
+    deriveAttachmentPrs: () => [808],
   });
   expect(r.ok).toBe(true); // merged attachment ⇒ no open PR
   expect(r.prs).toEqual([]);
+});
+
+// CTL-1157 (GROUP-3 #1): an attached OPEN PR that lives in a DIFFERENT repo than the
+// ticket's project repo must be `gh pr view`'d against ITS OWN repo (-R owner/repo).
+// The ticket-repo passes see nothing (or a same-numbered UNRELATED PR); collapsing the
+// attachment to the ticket repo would check #808 in the wrong repo → report it
+// closed/absent → a FALSE clean. -R org/other confirms it OPEN.
+test("ENUMERATOR (CTL-1157 GROUP-3 #1): a cross-repo attachment PR is viewed with -R against its OWN repo", () => {
+  const viewed = [];
+  const runGh = (args) => {
+    if (args.includes("list")) return []; // ticket-repo search + head find nothing
+    if (args.includes("view")) {
+      viewed.push(args);
+      return { number: 808, state: "OPEN", isDraft: false, title: "cross-repo open PR" };
+    }
+    return [];
+  };
+  const r = defaultCheckOpenPrs("CTL-9", {
+    runGh,
+    deriveBranchName: () => null,
+    deriveAttachmentPrs: () => [{ owner: "org", repo: "other", number: 808 }],
+  });
+  expect(r.ok).toBe(false); // the open cross-repo PR is caught, not falsely clean
+  expect(r.prs.map((p) => p.number)).toEqual([808]);
+  // The view targeted the attachment's OWN repo, not the ticket repo cwd.
+  const viewCall = viewed.find((a) => a.includes("808"));
+  expect(viewCall).toBeTruthy();
+  const rIdx = viewCall.indexOf("-R");
+  expect(rIdx).toBeGreaterThan(-1);
+  expect(viewCall[rIdx + 1]).toBe("org/other");
+  // The resolving repo is annotated on the returned PR (composite-key disambiguation).
+  expect(r.prs[0].repo).toBe("org/other");
+});
+
+// CTL-1157 (GROUP-3 #1): a cross-repo attachment (#808 in org/other) is NOT deduped
+// against a same-numbered OPEN PR the ticket-repo passes already found — they are
+// DISTINCT PRs. Both are reported (keyed by repo#number vs bare number).
+test("ENUMERATOR (CTL-1157 GROUP-3 #1): a cross-repo attachment is not collapsed onto a same-numbered ticket-repo PR", () => {
+  const runGh = (args) => {
+    // The ticket-repo key-search already found #808 (a DIFFERENT PR that happens to
+    // share the number).
+    if (args.includes("list") && args.includes("--search"))
+      return [{ number: 808, state: "OPEN", isDraft: false, title: "ticket-repo #808" }];
+    if (args.includes("list")) return [];
+    // -R org/other resolves the cross-repo attachment (also #808, but distinct).
+    if (args.includes("view")) return { number: 808, state: "OPEN", isDraft: false, title: "org/other #808" };
+    return [];
+  };
+  const r = defaultCheckOpenPrs("CTL-9", {
+    runGh,
+    deriveBranchName: () => null,
+    deriveAttachmentPrs: () => [{ owner: "org", repo: "other", number: 808 }],
+  });
+  expect(r.ok).toBe(false);
+  // Both the ticket-repo #808 and the cross-repo org/other#808 are present — the
+  // composite key kept them distinct instead of hiding the orphaned open PR.
+  expect(r.prs.length).toBe(2);
+});
+
+// CTL-1157 (GROUP-3 #1): defaultDeriveAttachmentPrs preserves each attachment's OWN
+// (owner/repo, number) from a full GitHub PR URL, and yields {owner:null,repo:null}
+// for a bare numeric attachment.
+test("ENUMERATOR (CTL-1157 GROUP-3 #1): defaultDeriveAttachmentPrs parses owner/repo/number from the URL", () => {
+  const rec = {
+    attachments: {
+      nodes: [
+        { url: "https://github.com/org/other/pull/808" },
+        { sourceUrl: "https://github.com/coalesce-labs/catalyst/pull/42" },
+        1234, // bare number → ticket repo (owner/repo null)
+      ],
+    },
+  };
+  const out = defaultDeriveAttachmentPrs("CTL-9", { read: () => rec });
+  expect(out).toEqual([
+    { owner: "org", repo: "other", number: 808 },
+    { owner: "coalesce-labs", repo: "catalyst", number: 42 },
+    { owner: null, repo: null, number: 1234 },
+  ]);
+});
+
+// CTL-1157 (GROUP-3 #1): a bare-number attachment (no recorded repo URL) keeps the
+// legacy behavior — viewed in the ticket-repo cwd with NO -R.
+test("ENUMERATOR (CTL-1157 GROUP-3 #1): a bare-number attachment is viewed WITHOUT -R (ticket repo)", () => {
+  const viewed = [];
+  const runGh = (args) => {
+    if (args.includes("list")) return [];
+    if (args.includes("view")) {
+      viewed.push(args);
+      return { number: 808, state: "OPEN", isDraft: false };
+    }
+    return [];
+  };
+  const r = defaultCheckOpenPrs("CTL-9", {
+    runGh,
+    deriveBranchName: () => null,
+    deriveAttachmentPrs: () => [808],
+  });
+  expect(r.ok).toBe(false);
+  expect(r.prs.map((p) => p.number)).toEqual([808]);
+  const viewCall = viewed.find((a) => a.includes("808"));
+  expect(viewCall.includes("-R")).toBe(false);
 });
 
 test("ENUMERATOR: reports unverifiable (ok:false, reason) when `gh` list is unavailable", () => {
@@ -624,7 +726,7 @@ test("ENUMERATOR: reports unverifiable (ok:false, reason) when `gh` list is unav
   const r = defaultCheckOpenPrs("CTL-9", {
     cwd: tmpdir(),
     deriveBranchName: () => null,
-    deriveAttachmentPrNumbers: () => [],
+    deriveAttachmentPrs: () => [],
   });
   expect(r.ok).toBe(false);
   expect(r.reason).toBeTruthy();
@@ -644,7 +746,7 @@ test("ENUMERATOR (CTL-1157): an attachment `gh pr view` FAILURE → UNVERIFIABLE
   const r = defaultCheckOpenPrs("CTL-9", {
     runGh,
     deriveBranchName: () => null,
-    deriveAttachmentPrNumbers: () => [808], // Linear says #808 is attached
+    deriveAttachmentPrs: () => [808], // Linear says #808 is attached
   });
   expect(r.ok).toBe(false);
   expect(r.unverifiable).toBe(true);
@@ -659,7 +761,7 @@ test("ENUMERATOR (CTL-1157): an UNDERIVABLE repo is UNVERIFIABLE (never runs gh 
   const r = defaultCheckOpenPrs("CTL-9", {
     deriveRepoRoot: () => null, // registry has no entry for this ticket's team
     deriveBranchName: () => null,
-    deriveAttachmentPrNumbers: () => [],
+    deriveAttachmentPrs: () => [],
   });
   expect(r.ok).toBe(false);
   expect(r.unverifiable).toBe(true);

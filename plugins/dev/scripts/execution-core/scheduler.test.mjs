@@ -55,6 +55,7 @@ import {
   verifyDispatchedSignal,
   gcDispatchCooldowns,
   maybeEscalateDispatchFailures,
+  holisticBoardHealthAct,
   __resetForTests,
   __getRunningOpts,
   // CTL-705: Phase 2 helpers
