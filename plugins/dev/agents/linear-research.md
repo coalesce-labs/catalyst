@@ -3,7 +3,7 @@ name: linear-research
 description:
   Research Linear tickets, cycles, projects, and milestones using Linearis CLI. Optimized for LLM
   consumption with minimal token usage (~1k vs 13k for Linear MCP).
-tools: Bash(sqlite3 *), Bash(linearis *), Read, Grep
+tools: Bash(sqlite3 *), Bash(stat *), Bash(date *), Bash(linearis *), Read, Grep
 model: haiku
 version: 1.0.0
 ---

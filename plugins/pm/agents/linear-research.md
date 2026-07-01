@@ -3,7 +3,7 @@ name: linear-research
 description:
   Research Linear tickets, cycles, projects, and milestones using Linearis CLI. Accepts natural
   language requests and returns structured JSON data. Optimized for fast data gathering.
-tools: Bash(sqlite3 *), Bash(linearis *), Bash(jq *), Read
+tools: Bash(sqlite3 *), Bash(stat *), Bash(date *), Bash(linearis *), Bash(jq *), Read
 model: haiku
 color: cyan
 version: 1.0.0

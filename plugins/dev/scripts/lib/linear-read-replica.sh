@@ -30,12 +30,35 @@
 [[ -n "${_CATALYST_LINEAR_READ_REPLICA_SH:-}" ]] && return 0
 _CATALYST_LINEAR_READ_REPLICA_SH=1
 
-: "${CATALYST_REPLICA_DB:=${HOME:-}/catalyst/catalyst-replica.db}"
+# Resolve the replica DB path the SAME way the daemon does (config.mjs
+# getReplicaDbPath): CATALYST_REPLICA_DB overrides; else $CATALYST_DIR/…; else
+# $HOME/catalyst/… — so an install that sets CATALYST_DIR is honored.
+: "${CATALYST_REPLICA_DB:=${CATALYST_DIR:-${HOME:-}/catalyst}/catalyst-replica.db}"
 # Freshness threshold in ms (matches the daemon env var); default 5 min.
 : "${CATALYST_LINEAR_REPLICA_STALE_MS:=300000}"
+# Live-read fallback cap in ms (matches catalyst-linear's runLinearis); default 8s.
+: "${CATALYST_LINEARIS_TIMEOUT_MS:=8000}"
 
-# _lrr_mtime <path> → epoch-seconds mtime (portable macOS/Linux); empty if absent.
-_lrr_mtime() { stat -f %m "$1" 2>/dev/null || stat -c %Y "$1" 2>/dev/null; }
+# _lrr_live_read <ID> → run the linearis fallback, CAPPED so a 429-stalled / hung
+# linearis can't block the caller forever (parity with catalyst-linear's runLinearis
+# 8s cap). Uses `timeout` when present (GNU coreutils on the fleet); on timeout the
+# non-zero exit propagates so callers fail safe. macOS without `timeout` runs bare.
+_lrr_live_read() {
+  local id="$1" cap_ms="${CATALYST_LINEARIS_TIMEOUT_MS:-8000}" secs
+  if command -v timeout >/dev/null 2>&1 && [[ "$cap_ms" =~ ^[0-9]+$ ]] && ((cap_ms > 0)); then
+    secs=$(((cap_ms + 999) / 1000)) # ceil ms → whole seconds, min 1
+    timeout "${secs}s" linearis issues read "$id" </dev/null
+  else
+    linearis issues read "$id" </dev/null
+  fi
+}
+
+# _lrr_mtime <path> → epoch-seconds mtime; empty if absent. GNU (`stat -c %Y`)
+# FIRST, BSD (`stat -f %m`) as the fallback: on GNU/Linux `-f` means
+# `--file-system` (it would NOT error, it prints filesystem text), so probing BSD
+# first would yield garbage on the Linux fleet. macOS lacks `-c`, so it errors
+# cleanly and falls through to `-f`.
+_lrr_mtime() { stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null; }
 
 # replica_fresh [db] → rc 0 when the replica is safe to read:
 #   • sqlite3 available, and
@@ -90,6 +113,7 @@ linear_read_ticket() {
   else
     printf '[linear-read-replica] replica STALE/ABSENT (writer heartbeat >%ds or seed incomplete) — falling back to linearis for %s; this is a writer/mirror gap to fix, not a retry.\n' "$(( ${CATALYST_LINEAR_REPLICA_STALE_MS:-300000} / 1000 ))" "$id" >&2
   fi
-  # Loud fallback — one un-accelerated live read. Writes stay on linearis elsewhere.
-  linearis issues read "$id" </dev/null
+  # Loud fallback — one un-accelerated, timeout-capped live read. Writes stay on
+  # linearis elsewhere.
+  _lrr_live_read "$id"
 }

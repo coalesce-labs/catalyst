@@ -123,6 +123,10 @@ if replica_fresh; then ok "cursor restored: replica_fresh → true"; else fail "
 linear_read_ticket "not-a-ticket" >/dev/null 2>&1
 assert_eq "bad id: rc 2" "2" "$?"
 
+# ── 10. DB path resolution honors CATALYST_DIR (matches daemon getReplicaDbPath) ─
+RESOLVED="$(env -u CATALYST_REPLICA_DB CATALYST_DIR=/custom/dir bash -c 'source "'"$HELPER"'"; printf "%s" "$CATALYST_REPLICA_DB"')"
+assert_eq "resolves \$CATALYST_DIR when REPLICA_DB unset" "/custom/dir/catalyst-replica.db" "$RESOLVED"
+
 echo "─────────────────────────────────────────"
 echo "Results: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

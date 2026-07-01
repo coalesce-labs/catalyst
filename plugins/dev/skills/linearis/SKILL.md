@@ -74,11 +74,13 @@ read**, including the label/relation joins the old CLI couldn't. This supersedes
 ### Freshness gate (copy-paste, portable macOS/Linux)
 
 ```bash
-DB="$HOME/catalyst/catalyst-replica.db"
+# Resolve the DB the way the daemon does: $CATALYST_REPLICA_DB, else $CATALYST_DIR, else $HOME.
+DB="${CATALYST_REPLICA_DB:-${CATALYST_DIR:-$HOME/catalyst}/catalyst-replica.db}"
 replica_fresh() {
   local lock="$DB.writer.lock" now age
   [[ -f "$lock" ]] || return 1
-  now=$(date +%s); age=$(( now - $(stat -f %m "$lock" 2>/dev/null || stat -c %Y "$lock") ))
+  # GNU `stat -c %Y` first, BSD `stat -f %m` fallback (on Linux `-f` is --file-system, not mtime).
+  now=$(date +%s); age=$(( now - $(stat -c %Y "$lock" 2>/dev/null || stat -f %m "$lock") ))
   (( age < 300 )) || return 1                                    # writer heartbeat < 5 min
   [[ -n "$(sqlite3 "$DB" "SELECT 1 FROM sync_meta WHERE key='cursor' AND value<>'' LIMIT 1;")" ]]  # seed complete
 }
@@ -109,8 +111,11 @@ sqlite3 -json "$DB" "
   SELECT i.identifier, i.title, i.state, i.estimate,
          (SELECT group_concat(l.name, ', ') FROM issue_labels il
             JOIN labels l ON l.id = il.label_id WHERE il.issue_id = i.id) AS labels
-  FROM issues i WHERE i.identifier = 'ENG-123';"
+  FROM issues i WHERE i.identifier = 'ENG-123' AND i.removed_at IS NULL;"
 ```
+
+> `AND removed_at IS NULL` is REQUIRED: a tombstoned (removed) issue must read as a
+> MISS → fall back to live Linear, never as a stale hit.
 
 ### Still needs `linearis` (no issue-shaped replica form)
 
@@ -190,8 +195,8 @@ v2026.4.9.
 
 ```bash
 # Preferred — direct SQL (gate on freshness first; see Reading Linear)
-sqlite3 -json "$HOME/catalyst/catalyst-replica.db" \
-  "SELECT identifier, title, state, estimate FROM issues WHERE identifier='ENG-123';"
+sqlite3 -json "${CATALYST_REPLICA_DB:-${CATALYST_DIR:-$HOME/catalyst}/catalyst-replica.db}" \
+  "SELECT identifier, title, state, estimate FROM issues WHERE identifier='ENG-123' AND removed_at IS NULL;"
 
 # Fallback only (replica stale/absent) — and surface it as an anomaly + file a ticket
 linearis issues read ENG-123
