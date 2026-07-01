@@ -19,6 +19,13 @@ PASSES=0
 SCRATCH="$(mktemp -d)"
 trap 'rm -rf "$SCRATCH"' EXIT
 
+# CTL-1397: compound-log reads the estimate via direct SQL (linear_read_ticket).
+# Point the replica at a nonexistent path so the helper deterministically falls
+# back to the `linearis issues read` stub on PATH — hermetic, independent of any
+# real replica in the runner's HOME. The direct-SQL HIT path is covered by
+# linear-read-replica.test.sh.
+export CATALYST_REPLICA_DB="${SCRATCH}/no-such-replica.db"
+
 pass() { PASSES=$((PASSES+1)); echo "  PASS: $1"; }
 fail() {
   FAILURES=$((FAILURES+1))
@@ -61,20 +68,6 @@ fi
 exit 0
 EOF
   chmod +x "${bin_dir}/linearis"
-
-  # CTL-1397: compound-log now reads the estimate via `catalyst-linear read`.
-  cat > "${bin_dir}/catalyst-linear" <<'EOF'
-#!/usr/bin/env bash
-if [ "$1" = "read" ]; then
-  if [ -n "${FAKE_LINEARIS_JSON:-}" ]; then
-    echo "$FAKE_LINEARIS_JSON"
-    exit 0
-  fi
-  exit 1
-fi
-exit 0
-EOF
-  chmod +x "${bin_dir}/catalyst-linear"
 }
 
 # Set up an isolated scratch project: thoughts root + fake-bin PATH prefix +

@@ -237,22 +237,26 @@ in prose. The own ticket's `Fixes https://linear.app/...` line is correct and st
 that link/transition is intended. Sibling neutralization is handled mechanically by the
 guard block appended at write-back time (see below).
 
-Get Linear ticket details with `catalyst-linear read <ticket>` — reads go through `catalyst-linear`
-(replica-first, never bare `linearis`); see the `linearis` skill's "Reading Linear" section.
-Extract title and description with jq. Use ticket title and description for context.
+Get Linear ticket details via direct SQL against the replica (see the `linearis` skill's
+"Reading Linear" section). Extract title and description with jq. Use ticket title and
+description for context.
 
 ### 9. Generate updated title
 
 **Title generation rules:**
 
 ```bash
-# If ticket exists, read ticket title via catalyst-linear (reads → catalyst-linear, never bare linearis)
-if [[ "$ticket" ]] && command -v catalyst-linear &>/dev/null; then
-    ticket_title=$(catalyst-linear read "$ticket" | jq -r '.title')
-    title="$ticket: ${ticket_title:0:60}"
-elif [[ "$ticket" ]]; then
-    # Fallback: generate title from branch name + commits
-    title="$ticket: $(echo "$branch" | sed "s/^.*$ticket-//" | tr '-' ' ')"
+# If ticket exists, read its title via direct SQL against the replica
+# (linear_read_ticket — replica-first, loud linearis fallback; CTL-1397).
+source "${CLAUDE_PLUGIN_ROOT}/scripts/lib/linear-read-replica.sh"
+if [[ "$ticket" ]]; then
+    ticket_title=$(linear_read_ticket "$ticket" 2>/dev/null | jq -r '.title // empty')
+    if [[ -n "$ticket_title" ]]; then
+        title="$ticket: ${ticket_title:0:60}"
+    else
+        # Fallback: generate title from branch name + commits
+        title="$ticket: $(echo "$branch" | sed "s/^.*$ticket-//" | tr '-' ' ')"
+    fi
 else
     # No ticket: generate from primary change
     title="Brief summary of main change"
@@ -514,4 +518,4 @@ keys.
 - **Run verification** — attempt all automated checks
 - **Link Linear** — extract ticket, update status
 - **Metadata tracking** — commit history, timestamps
-- For Linearis CLI syntax and the two-mode read rule (standard vs Cloud node), see the `linearis` skill's "Reading Linear" section
+- For Linearis CLI syntax and the direct-SQLite read rule (reads → replica, writes → linearis), see the `linearis` skill's "Reading Linear" section

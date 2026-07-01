@@ -45,7 +45,7 @@ For `<TICKET>`, collect:
    - `thoughts/shared/friction/<TICKET>.md` — the dedicated per-phase friction log (primary friction source).
 2. **The diff** — `git log --oneline origin/main..HEAD` and `git diff --stat origin/main..HEAD`
    (or the merged SHA from `phase-monitor-merge.json`).
-3. **Ticket** — `catalyst-linear read <TICKET>` (title, description, final state, estimate) — reads go through `catalyst-linear` (replica-first, never bare `linearis`); see the `linearis` skill's "Reading Linear" section.
+3. **Ticket** — read via direct SQL against the replica (title, description, final state, estimate); see the `linearis` skill's "Reading Linear" section.
 4. **Event trail** (optional) — the ticket's lines in `~/catalyst/events/YYYY-MM.jsonl`.
 
 Capture learnings from **failed/abandoned** tickets too — the dead-ends are high-signal ("what

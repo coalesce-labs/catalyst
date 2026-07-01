@@ -415,7 +415,7 @@ syntax.
 
 ---
 
-For Linearis CLI syntax, see the `linearis` skill reference. For the two-mode read rule (standard node direct `linearis` reads vs Catalyst Cloud replica-first reads), see the "Reading Linear" section of the `linearis` skill (`/catalyst-dev:linearis`).
+For Linearis CLI syntax, see the `linearis` skill reference. For the Linear read rule (reads → the local replica via direct SQL; writes → `linearis`), see the "Reading Linear" section of the `linearis` skill (`/catalyst-dev:linearis`).
 
 ---
 

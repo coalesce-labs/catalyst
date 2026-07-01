@@ -43,7 +43,7 @@ No build process — this is markdown files and bash scripts.
 - **Wait for all agents before synthesizing** — Don't proceed until research completes
 - **Config drives behavior** — No hardcoded values
 - **Single source of truth** — Don't duplicate information across files:
-  - CLI syntax lives in skills (e.g., the `linearis` skill, which also defines the two-mode rule for agent Linear reads — standard vs. Catalyst Cloud node) — reference it, don't copy
+  - CLI syntax lives in skills (e.g., the `linearis` skill, which also defines the direct-SQLite read rule for agent Linear reads — reads → the local replica, writes → `linearis`) — reference it, don't copy
   - Workflow logic lives in skills — each skill owns its own state transitions
   - Config schema lives in `website/src/content/docs/reference/configuration.md`
 - **Spawn parallel agents** — Maximize efficiency

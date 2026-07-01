@@ -32,6 +32,8 @@ set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CONSENT_SCRIPT="${SCRIPT_DIR}/feedback-consent.sh"
+# CTL-1397: direct-SQLite Linear reads (replica-first, loud linearis fallback).
+source "${SCRIPT_DIR}/lib/linear-read-replica.sh"
 
 TITLE=""
 BODY=""
@@ -212,9 +214,8 @@ try_linearis() {
 
   # Fetch URL if the create response didn't include one.
   if [ -z "$linear_url" ]; then
-    # CTL-1397: read through the replica wrapper (catalyst-linear is JSON by
-    # default; dropping --output json avoids the flag parity-bypass to linearis).
-    linear_url=$(catalyst-linear read "$identifier" 2>/dev/null \
+    # CTL-1397: read via direct SQL against the replica (loud linearis fallback).
+    linear_url=$(linear_read_ticket "$identifier" 2>/dev/null \
       | jq -r '.url // empty' 2>/dev/null || echo "")
   fi
 
