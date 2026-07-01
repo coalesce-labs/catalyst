@@ -442,6 +442,7 @@ describe("createReplicaReader.eligible (CTL-1397 board-list)", () => {
     const old = new Date(Date.now() - 2 * 60_000); // 2 min old
     utimesSync(dbPath, old, old);
     try { utimesSync(dbPath + "-wal", old, old); } catch { /* -wal may be absent */ }
+    // no writer.lock in this fixture → the gate falls back to the db/-wal mtime.
     const prev = process.env.CATALYST_LINEAR_REPLICA_STALE_MS;
     process.env.CATALYST_LINEAR_REPLICA_STALE_MS = "60000"; // 1 min threshold → 2-min-old is stale
     try {
@@ -451,6 +452,36 @@ describe("createReplicaReader.eligible (CTL-1397 board-list)", () => {
       if (prev === undefined) delete process.env.CATALYST_LINEAR_REPLICA_STALE_MS;
       else process.env.CATALYST_LINEAR_REPLICA_STALE_MS = prev;
     }
+  });
+
+  // CTL-1397 (4/n) — the freshness gate prefers the writer's HEARTBEAT lock
+  // (`<db>.writer.lock`) over the db/-wal mtime, so a QUIET feed (live writer, no
+  // issue updates → stale -wal) still serves discovery from the replica instead of
+  // false-falling-through to linearis.
+  test("QUIET FEED: fresh .writer.lock + STALE db/-wal → still serves the replica (no linearis fallback)", () => {
+    seedEligible();
+    // Simulate a quiet feed: the db + -wal went stale (no recent apply)…
+    const old = new Date(Date.now() - 10 * 60_000);
+    utimesSync(dbPath, old, old);
+    try { utimesSync(dbPath + "-wal", old, old); } catch { /* -wal may be absent */ }
+    // …but the writer is alive and heartbeated its lock just now.
+    writeFileSync(dbPath + ".writer.lock", "");
+    utimesSync(dbPath + ".writer.lock", new Date(), new Date());
+    reader = createReplicaReader({ dbPath });
+    const res = reader.eligible({ team: "CTL", status: "Todo" });
+    expect(res?.nodes.map((n) => n.identifier)).toEqual(["CTL-100", "CTL-101"]);
+  });
+
+  test("DEAD WRITER: STALE .writer.lock is authoritative → undefined even if db/-wal is fresh", () => {
+    seedEligible(); // db + -wal fresh (a recent apply just before the writer died)
+    // The writer died: its lock stopped heartbeating and is now well past the threshold.
+    const old = new Date(Date.now() - 10 * 60_000);
+    writeFileSync(dbPath + ".writer.lock", "");
+    utimesSync(dbPath + ".writer.lock", old, old);
+    reader = createReplicaReader({ dbPath });
+    // A present-but-stale lock means the writer is gone → do NOT serve (the data
+    // will only drift from here), even though the db/-wal mtime is fresh.
+    expect(reader.eligible({ team: "CTL", status: "Todo" })).toBeUndefined();
   });
 
   test("fail-open: DB without the issues table → undefined (query throws)", () => {
