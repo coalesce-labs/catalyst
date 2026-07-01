@@ -1,0 +1,1551 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Rulebook — Reason · orch-monitor — Direction A "Textbook calm"</title>
+<style>
+/* ── Tokens — app shell on the shadcn warm-graphite theme; reading column
+      adopts the living-textbook warm ink ramp + clay accent (same family). ── */
+:root{
+  --canvas:#161513;
+  --sidebar-bg:#11100e;
+  --panel:#1b1a17;
+  --surface:#1e1d1a;
+  --surface-2:#242220;
+  --code-bg:#100f0d;            /* one step darker than the page */
+  --border:#2e2c27;
+  --border-soft:#262420;
+  --hairline:#34312a;
+
+  --ink:#e9e5dc;
+  --ink-dim:#a39d91;
+  --ink-faint:#6f6a5f;
+
+  --clay:#e8ad4a;               /* kicker numerals · live highlights */
+  --clay-dim:#6b5224;
+  --ok:#6fbe87;
+  --neg:#d98a82;                /* ¬ / not */
+  --cfg:#b2a0e0;                /* cfg() / thresholds */
+
+  --s1:#8fa7c0; --s2:#e8ad4a; --s3:#7fbe8e;
+  --s4:#d97f6f; --s5:#b09ddb; --s6:#7fb6c9;
+
+  --serif:"Iowan Old Style","Palatino Linotype",Palatino,"Book Antiqua",Georgia,serif;
+  --mono:ui-monospace,"SF Mono","Cascadia Code",Menlo,Consolas,monospace;
+  --sans:-apple-system,"SF Pro Text",system-ui,"Segoe UI",sans-serif;
+
+  --doc-w:740px; --toc-w:150px; --marg-w:190px; --marg-gap:44px; --col-gap:46px;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html{scroll-behavior:smooth}
+body{
+  background:var(--canvas);color:var(--ink);
+  font-family:var(--serif);font-size:16px;line-height:1.62;
+  -webkit-font-smoothing:antialiased;display:flex;min-height:100vh;
+}
+a{color:inherit}
+.mono{font-family:var(--mono)}
+::selection{background:rgba(232,173,74,.28)}
+
+/* ════ sidebar (fake app chrome) ════ */
+.sidebar{
+  width:188px;flex:0 0 188px;background:var(--sidebar-bg);
+  border-right:1px solid var(--border-soft);
+  display:flex;flex-direction:column;padding:10px 8px;
+  font-family:var(--sans);font-size:12.5px;
+  position:sticky;top:0;height:100vh;
+}
+.brand{display:flex;align-items:center;gap:8px;padding:4px 8px 12px}
+.brand-mark{width:18px;height:18px;border-radius:5px;background:linear-gradient(135deg,#e8ad4a,#b06c34);display:flex;align-items:center;justify-content:center;font-weight:700;font-size:10px;color:#161513}
+.brand-name{font-weight:600;font-size:13px;letter-spacing:.01em}
+.nav-group{margin-top:10px}
+.nav-group-label{display:flex;align-items:center;justify-content:space-between;padding:3px 8px;color:var(--ink-faint);font-size:11px;font-weight:600;letter-spacing:.02em}
+.nav-group-label .twistie{font-size:9px;opacity:.7}
+.nav-item{display:flex;align-items:center;gap:8px;padding:4px 8px;border-radius:6px;color:var(--ink-dim);margin:1px 0;cursor:default;line-height:1.5}
+.nav-item svg{width:14px;height:14px;flex:0 0 14px;stroke:currentColor;fill:none;stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round}
+.nav-item:hover{background:rgba(255,255,255,.035)}
+.nav-item.active{background:var(--surface-2);color:var(--ink)}
+.nav-item.active svg{color:var(--clay)}
+.nav-item .chord{margin-left:auto;font-family:var(--mono);font-size:9.5px;color:var(--ink-faint);opacity:0}
+.nav-item.active .chord{opacity:.9}
+.nav-spacer{flex:1}
+.nav-footer{border-top:1px solid var(--border-soft);padding-top:8px}
+.nav-lock{margin-left:auto;font-size:9px;opacity:.6}
+
+/* ════ main shell ════ */
+.main{flex:1;min-width:0;display:flex;flex-direction:column}
+.topbar{
+  height:48px;flex:0 0 48px;display:flex;align-items:center;gap:10px;
+  padding:0 20px;border-bottom:1px solid var(--border-soft);
+  font-family:var(--sans);font-size:13px;
+  position:sticky;top:0;background:var(--canvas);z-index:20;
+}
+.crumb{display:flex;align-items:center;gap:7px}
+.crumb .root{color:var(--ink-dim)}
+.crumb .sep{color:var(--ink-faint)}
+.crumb .leaf{color:var(--ink);font-weight:600}
+.topbar-right{margin-left:auto;display:flex;align-items:center;gap:14px}
+.gov-flags{display:flex;gap:5px}
+.gov-chip{
+  font-family:var(--mono);font-size:10px;color:var(--ink-dim);
+  border:1px solid var(--border-soft);border-radius:5px;padding:2.5px 7px;
+  background:var(--panel);display:flex;align-items:center;gap:5px;white-space:nowrap;
+}
+.gov-chip .on{color:var(--ok);font-size:8px}
+.gov-chip .off{color:var(--ink-faint);font-size:8px;opacity:.85}
+.host-pick{font-size:12px;color:var(--ink);background:var(--panel);border:1px solid var(--border-soft);border-radius:6px;padding:4px 10px;display:flex;align-items:center;gap:6px;cursor:default}
+.host-pick .caret{color:var(--ink-faint);font-size:9px}
+.range-toggle{display:flex;background:var(--panel);border:1px solid var(--border-soft);border-radius:7px;padding:2px}
+.range-toggle span{font-family:var(--mono);font-size:10.5px;color:var(--ink-faint);padding:3px 10px;border-radius:5px;cursor:default}
+.range-toggle span.active{background:var(--surface-2);color:var(--ink)}
+
+/* engine strip — one mono sentence, no continuous animation */
+.engine-strip{
+  border-bottom:1px solid var(--border-soft);padding:8px 20px;
+  font-family:var(--mono);font-size:11.5px;color:var(--ink-dim);
+  white-space:nowrap;overflow:hidden;background:var(--canvas);
+  position:sticky;top:48px;z-index:19;
+}
+.engine-strip b{color:var(--ink);font-weight:600}
+.engine-strip .tickdot{color:var(--ok)}
+.engine-strip .dark-flag{color:var(--clay);font-weight:700}
+.engine-strip .dot-sep{opacity:.45;padding:0 4px}
+
+/* ════ document grid ════ */
+.doc-grid{
+  display:grid;
+  grid-template-columns:var(--toc-w) minmax(0,var(--doc-w)) var(--marg-w);
+  justify-content:center;column-gap:var(--col-gap);
+  padding:0 28px 140px;
+}
+
+/* ── C · margin TOC — pure text, no borders, no backgrounds ── */
+.toc{position:sticky;top:118px;align-self:start;font-family:var(--sans);padding-top:64px}
+.toc a{
+  display:flex;align-items:baseline;gap:8px;text-decoration:none;
+  font-size:11px;color:var(--ink-faint);padding:4px 0;letter-spacing:.02em;
+}
+.toc a .t-lab{white-space:nowrap}
+.toc a .t-fill{flex:1}
+.toc a .t-dot{width:5px;height:5px;border-radius:50%;background:var(--c,transparent);align-self:center;flex:0 0 5px}
+.toc a .t-n{font-family:var(--mono);font-size:10.5px;text-align:right;min-width:18px}
+.toc a.active{color:var(--ink)}
+.toc a.active .t-n{color:var(--ink)}
+.toc a:hover{color:var(--ink-dim)}
+.toc a.active:hover{color:var(--ink)}
+.toc .t-kick{font-size:9.5px;letter-spacing:.18em;text-transform:uppercase;color:var(--ink-faint);opacity:.75;margin-bottom:8px}
+
+/* stratum chip-row (below lg only) */
+.chip-row{display:none;font-family:var(--mono);font-size:10.5px;color:var(--ink-faint);gap:14px;margin-top:18px}
+.chip-row b{color:var(--ink-dim);font-weight:500}
+
+/* ── D · the document ── */
+.doc{min-width:0}
+
+.masthead{padding:56px 0 0}
+.kicker-row{display:flex;align-items:baseline;gap:14px}
+.kicker{font-family:var(--sans);font-size:11px;letter-spacing:.22em;text-transform:uppercase;color:var(--ink-faint)}
+.kicker b{color:var(--clay);font-weight:600;letter-spacing:.22em}
+.kicker-row .spacer{flex:1}
+.sqlpref{font-family:var(--sans);font-size:11px;color:var(--ink-faint);display:flex;align-items:center;gap:6px;cursor:pointer;white-space:nowrap}
+.sqlpref input{accent-color:var(--clay);width:11px;height:11px;cursor:pointer}
+.sqlpref:hover{color:var(--ink-dim)}
+h1{font-size:38px;line-height:1.14;font-weight:600;letter-spacing:-.012em;margin-top:16px}
+h1 .amp{color:var(--ink-faint);font-style:italic;font-weight:400}
+.deck{margin-top:16px;font-size:18px;line-height:1.58;color:var(--ink-dim);font-style:italic;max-width:70ch}
+.deck b{color:var(--ink);font-style:normal;font-weight:500}
+.deck code{font-family:var(--mono);font-size:.82em;font-style:normal;color:var(--ink-dim)}
+
+/* stratum sections — hairlines appear ONLY here */
+section.stratum{margin-top:80px}
+.sec-label{
+  font-family:var(--sans);font-size:11px;letter-spacing:.22em;text-transform:uppercase;
+  color:var(--ink-faint);display:flex;align-items:center;gap:14px;margin-bottom:12px;
+}
+.sec-label::after{content:"";flex:1;height:1px;background:var(--hairline)}
+.sec-label .n{color:var(--clay);font-family:var(--mono);font-size:11px;letter-spacing:.08em}
+h2{font-size:24px;font-weight:600;letter-spacing:-.008em}
+.lede{margin-top:8px;color:var(--ink-dim);font-style:italic;max-width:70ch;font-size:16px}
+.lede b{color:var(--ink);font-style:normal;font-weight:500}
+.lede .negg{color:var(--neg);font-style:normal}
+.lede code{font-family:var(--mono);font-size:.82em;font-style:normal;color:var(--ink-dim)}
+
+/* ── rule entries — prose, not cards ── */
+.entry{position:relative;margin-top:32px;scroll-margin-top:130px;padding-top:8px}
+.entry.first{margin-top:36px}
+.entry.focused::before{content:"";position:absolute;left:-20px;top:10px;bottom:6px;width:2px;background:var(--clay-dim);border-radius:1px}
+.e-head{display:flex;align-items:baseline;gap:10px}
+.rid{font-family:var(--mono);font-size:12px;font-weight:700;letter-spacing:.02em}
+.rid.t1{color:var(--s1)}.rid.t2{color:var(--s2)}.rid.t3{color:var(--s3)}
+.rid.t4{color:var(--s4)}.rid.t5{color:var(--s5)}.rid.t6{color:var(--s6)}
+.ename{font-family:var(--mono);font-size:14px;color:var(--ink);font-weight:500}
+.applies{font-family:var(--sans);font-size:11px;color:var(--ink-faint);margin-top:3px;letter-spacing:.01em}
+.applies em{font-style:italic}
+.applies .eg{font-family:var(--mono);font-size:10px}
+.sentence{margin-top:10px;font-size:16px;max-width:70ch}
+.sentence em{color:var(--ink-dim)}
+.cfgv{
+  font-family:var(--mono);font-size:.8em;color:var(--cfg);text-decoration:none;
+  border-bottom:1px dotted var(--ink-faint);white-space:nowrap;
+}
+.cfgv:hover{border-bottom-color:var(--cfg)}
+
+/* the Datalog — always visible, quiet block */
+pre.datalog{
+  margin-top:12px;font-family:var(--mono);font-size:12px;line-height:1.7;
+  color:var(--ink-dim);background:var(--code-bg);border-radius:8px;
+  padding:12px 16px;overflow-x:auto;white-space:pre;
+}
+pre.datalog b{color:var(--ink);font-weight:500}
+pre.datalog .kn{color:var(--neg)}
+pre.datalog .kc{color:var(--cfg)}
+.armlab{font-family:var(--sans);font-size:10.5px;letter-spacing:.14em;text-transform:uppercase;color:var(--ink-faint);margin-top:14px}
+.armlab b{color:var(--ink-dim);font-weight:600;letter-spacing:.14em}
+
+/* SQL disclosure — a text affordance, not a control */
+details.sql{margin-top:8px}
+details.sql>summary{
+  list-style:none;cursor:pointer;font-family:var(--sans);font-size:11.5px;
+  color:var(--ink-faint);display:inline-flex;align-items:center;gap:5px;
+}
+details.sql>summary::-webkit-details-marker{display:none}
+details.sql>summary:hover{color:var(--ink-dim)}
+details.sql>summary .chev{font-size:12px;transition:transform .15s}
+details.sql[open]>summary .chev{transform:rotate(90deg)}
+.sqlwrap{position:relative;margin-top:8px}
+.sqlwrap pre{
+  font-family:var(--mono);font-size:11px;line-height:1.6;color:var(--ink-dim);
+  background:var(--code-bg);border-radius:8px;padding:12px 16px;
+  max-height:280px;overflow:auto;white-space:pre;
+}
+.copy-btn{
+  position:absolute;top:8px;right:8px;font-family:var(--mono);font-size:10px;
+  color:var(--ink-faint);background:var(--surface-2);border:1px solid var(--border-soft);
+  border-radius:5px;padding:3px 8px;cursor:pointer;
+}
+.copy-btn:hover{color:var(--ink)}
+.sqlnote{font-family:var(--sans);font-size:10.5px;color:var(--ink-faint);margin-top:6px;font-style:italic}
+
+/* meta — prose-adjacent, not chips */
+.meta{font-family:var(--sans);font-size:11px;color:var(--ink-faint);margin-top:10px;line-height:1.7}
+.meta .mono{font-size:10.5px}
+.meta a{color:var(--ink-dim);text-decoration:none;border-bottom:1px dotted var(--ink-faint)}
+.meta a:hover{color:var(--ink)}
+.meta .negk{color:var(--neg)}
+
+/* conclusions line (live) */
+.conc{font-family:var(--sans);font-size:12.5px;color:var(--ink-dim);margin-top:12px;line-height:1.8}
+.conc .lab{color:var(--ink);font-weight:500}
+.conc em{color:var(--ink-faint)}
+.conc .ent{
+  font-family:var(--mono);font-size:11px;color:var(--ink);cursor:pointer;
+  border-bottom:1px dotted var(--ink-faint);background:none;border-top:none;border-left:none;border-right:none;padding:0;
+}
+.conc .ent:hover{color:var(--clay);border-bottom-color:var(--clay)}
+.conc .ent.open{color:var(--clay);border-bottom-color:var(--clay-dim)}
+.conc .more{font-family:var(--mono);font-size:11px;color:var(--ink-faint)}
+.conc .xlink{color:var(--ink-dim);text-decoration:none;border-bottom:1px dotted var(--ink-faint)}
+.conc .xlink:hover{color:var(--ink)}
+.never{font-family:var(--sans);font-size:12.5px;color:var(--ink-dim);margin-top:12px}
+.never>summary{list-style:none;cursor:pointer;display:inline}
+.never>summary::-webkit-details-marker{display:none}
+.never .deg{color:var(--clay);font-size:.85em;vertical-align:super}
+.never .foot{font-size:11.5px;color:var(--ink-faint);font-style:italic;margin-top:5px;max-width:64ch}
+
+/* incident signature — a sentence, never a banner */
+.sig{margin-top:8px;font-style:italic;font-size:13.5px;color:var(--clay);max-width:70ch}
+
+/* derivation — indented prose tree, one left rule, no node cards */
+.deriv{margin-top:14px}
+.deriv.hidden{display:none}
+.d-root{font-size:15px;color:var(--ink)}
+.d-root .mono{font-size:.85em}
+.d-root .about{color:var(--clay)}
+.d-body{margin:8px 0 0 6px;padding-left:18px;border-left:1px solid var(--hairline)}
+.d-line{font-family:var(--mono);font-size:11.5px;line-height:1.65;color:var(--ink);margin-top:6px}
+.d-line .ref{color:var(--ink-faint);text-decoration:none;border-bottom:1px dotted transparent}
+.d-line .ref:hover{color:var(--ink-dim);border-bottom-color:var(--ink-faint)}
+.d-line .d-val{color:var(--ink-faint)}
+.d-line.fact{color:var(--ink-dim)}
+.d-line.fact .fid{color:var(--ink-faint)}
+.d-sub{margin:0 0 0 4px;padding-left:16px}
+.d-line .ng{color:var(--neg);font-weight:600}
+.d-note{display:block;font-size:10.5px;color:var(--ink-faint);margin-left:14px}
+.d-line.guard .okk{color:var(--ok)}
+.d-foot{
+  margin-top:10px;font-family:var(--sans);font-size:11.5px;color:var(--ink-faint);
+  display:flex;flex-wrap:wrap;gap:6px 14px;align-items:baseline;
+}
+.d-foot .feeds{color:var(--ink-dim);text-decoration:none;border-bottom:1px dotted var(--ink-faint)}
+.d-foot .feeds:hover{color:var(--ink)}
+.d-foot .cmd{font-family:var(--mono);font-size:10.5px;color:var(--ink-faint)}
+.d-foot .pin{font-family:var(--mono);font-size:10px;color:var(--ink-faint);margin-left:auto}
+
+/* ── E · marginalia ── */
+.marg{
+  position:absolute;left:calc(100% + var(--marg-gap));top:10px;width:var(--marg-w);
+  font-family:var(--mono);font-size:11px;color:var(--ink-dim);line-height:1.5;
+}
+.marg .m-top{display:flex;align-items:center;gap:8px}
+.marg .m-count{white-space:nowrap}
+.marg .m-dot{width:6px;height:6px;border-radius:50%;background:var(--clay);flex:0 0 6px}
+.marg .m-dot.pulse{animation:pulse-once .3s ease-out 1}
+@keyframes pulse-once{0%{box-shadow:0 0 0 0 rgba(232,173,74,.6)}100%{box-shadow:0 0 0 7px rgba(232,173,74,0)}}
+.marg .m-sub{color:var(--ink-faint);font-size:10.5px;margin-top:2px}
+.marg.quiet{color:var(--ink-faint)}
+.marg .spark{display:block;flex:0 0 48px}
+
+/* ── appendices ── */
+table.thr{width:100%;border-collapse:collapse;margin-top:20px}
+table.thr th{
+  text-align:left;font-family:var(--sans);font-size:10px;font-weight:600;
+  letter-spacing:.14em;text-transform:uppercase;color:var(--ink-faint);
+  padding:8px 14px 8px 0;border-bottom:1px solid var(--hairline);
+}
+table.thr td{padding:10px 14px 10px 0;border-bottom:1px solid var(--border-soft);vertical-align:baseline}
+table.thr tr:last-child td{border-bottom:none}
+td.k{font-family:var(--mono);font-size:11.5px;color:var(--cfg);white-space:nowrap}
+td.v{font-family:var(--mono);font-size:11.5px;color:var(--ink);text-align:right;white-space:nowrap}
+td.p{font-family:var(--serif);font-style:italic;font-size:13.5px;color:var(--ink-dim)}
+td.c{font-family:var(--mono);font-size:11px;color:var(--ink-dim);white-space:nowrap}
+td.c a{text-decoration:none;border-bottom:1px dotted var(--ink-faint);color:inherit}
+td.c a:hover{color:var(--ink)}
+tr.fired td.k,tr.fired td.v{color:var(--clay)}
+tr.fired td.c a{color:var(--clay);border-bottom-color:var(--clay-dim)}
+.tbl-note{font-family:var(--sans);font-size:11.5px;color:var(--ink-faint);margin-top:14px;line-height:1.7;max-width:70ch}
+.tbl-note code{font-family:var(--mono);font-size:10.5px;color:var(--ink-dim)}
+
+.legend p{margin-top:14px;max-width:70ch;color:var(--ink-dim);font-size:15px}
+.legend p b{color:var(--ink);font-weight:600}
+.legend p .mono{font-size:.85em}
+.legend p .ng{color:var(--neg)}
+.legend p .cf{color:var(--cfg);font-family:var(--mono);font-size:.85em}
+
+footer{
+  margin-top:88px;padding-top:20px;border-top:1px solid var(--hairline);
+  font-family:var(--sans);font-size:11.5px;color:var(--ink-faint);line-height:1.9;max-width:70ch;
+}
+footer code{font-family:var(--mono);font-size:10.5px;color:var(--ink-dim)}
+footer kbd{
+  font-family:var(--mono);font-size:10px;color:var(--ink-dim);
+  border:1px solid var(--border-soft);border-radius:4px;padding:0 4px;background:var(--panel);
+}
+
+/* ── responsive ── */
+@media (max-width:1540px){
+  :root{--doc-w:680px;--toc-w:128px;--marg-w:172px;--marg-gap:26px;--col-gap:26px}
+}
+@media (max-width:1279px){
+  .doc-grid{grid-template-columns:var(--toc-w) minmax(0,var(--doc-w))}
+  .marg{position:static;width:auto;display:flex;align-items:center;gap:12px;margin-top:6px}
+  .marg .m-sub{margin-top:0}
+}
+@media (max-width:1023px){
+  .doc-grid{grid-template-columns:minmax(0,var(--doc-w))}
+  .toc{display:none}
+  .chip-row{display:flex;flex-wrap:wrap}
+}
+</style>
+</head>
+<body>
+
+<!-- ════ SIDEBAR (fake app chrome — placement context) ════ -->
+<nav class="sidebar">
+  <div class="brand"><div class="brand-mark">C</div><div class="brand-name">Catalyst</div></div>
+
+  <div class="nav-group">
+    <div class="nav-group-label"><span>Overall</span><span class="twistie">▾</span></div>
+    <div class="nav-item"><svg viewBox="0 0 24 24"><path d="M22 12h-6l-2 3h-4l-2-3H2"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/></svg>Inbox</div>
+    <div class="nav-item"><svg viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/></svg>Tickets</div>
+    <div class="nav-item"><svg viewBox="0 0 24 24"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>Workers</div>
+    <div class="nav-item"><svg viewBox="0 0 24 24"><line x1="10" y1="6" x2="21" y2="6"/><line x1="10" y1="12" x2="21" y2="12"/><line x1="10" y1="18" x2="21" y2="18"/><path d="M4 6h1v4"/><path d="M4 10h2"/><path d="M6 18H4c0-1 2-2 2-3s-1-1.5-2-1"/></svg>Queue</div>
+  </div>
+
+  <div class="nav-group">
+    <div class="nav-group-label"><span>Reason</span><span class="twistie">▾</span></div>
+    <div class="nav-item"><svg viewBox="0 0 24 24"><rect x="3" y="3" width="6" height="6" rx="1"/><rect x="15" y="15" width="6" height="6" rx="1"/><path d="M9 6h6a2 2 0 0 1 2 2v3"/><path d="M15 18H9a2 2 0 0 1-2-2v-3"/></svg>Process<span class="chord">g p</span></div>
+    <div class="nav-item active"><svg viewBox="0 0 24 24"><path d="M12 7v14"/><path d="M16 12h2"/><path d="M16 8h2"/><path d="M3 18a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h5a4 4 0 0 1 4 4 4 4 0 0 1 4-4h5a1 1 0 0 1 1 1v13a1 1 0 0 1-1 1h-6a3 3 0 0 0-3 3 3 3 0 0 0-3-3z"/><path d="M6 12h2"/><path d="M6 8h2"/></svg>Rulebook<span class="chord">g r</span></div>
+  </div>
+
+  <div class="nav-group">
+    <div class="nav-group-label"><span>Observe</span><span class="twistie">▾</span></div>
+    <div class="nav-item"><svg viewBox="0 0 24 24"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>Telemetry</div>
+    <div class="nav-item"><svg viewBox="0 0 24 24"><path d="m12 14 4-4"/><path d="M3.34 19a10 10 0 1 1 17.32 0"/></svg>Utilization</div>
+    <div class="nav-item"><svg viewBox="0 0 24 24"><path d="M21 12V7H5a2 2 0 0 1 0-4h14v4"/><path d="M3 5v14a2 2 0 0 0 2 2h16v-5"/><path d="M18 12a2 2 0 0 0 0 4h4v-4Z"/></svg>FinOps</div>
+    <div class="nav-item"><svg viewBox="0 0 24 24"><rect x="2" y="2" width="20" height="8" rx="2"/><rect x="2" y="14" width="20" height="8" rx="2"/><line x1="6" y1="6" x2="6.01" y2="6"/><line x1="6" y1="18" x2="6.01" y2="18"/></svg>Fleet Ops</div>
+    <div class="nav-item"><svg viewBox="0 0 24 24"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg>DevOps<span class="nav-lock">🔒</span></div>
+  </div>
+
+  <div class="nav-spacer"></div>
+  <div class="nav-footer">
+    <div class="nav-item"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 1v4M12 19v4M4.2 4.2l2.8 2.8M17 17l2.8 2.8M1 12h4M19 12h4M4.2 19.8 7 17M17 7l2.8-2.8"/></svg>Settings</div>
+  </div>
+</nav>
+
+<!-- ════ MAIN ════ -->
+<div class="main">
+
+  <!-- A · header -->
+  <header class="topbar">
+    <div class="crumb"><span class="root">Reason</span><span class="sep">/</span><span class="leaf">Rulebook</span></div>
+    <div class="topbar-right">
+      <div class="gov-flags">
+        <span class="gov-chip">shadow <span class="on">●</span></span>
+        <span class="gov-chip">diag <span class="off">○</span></span>
+        <span class="gov-chip">intents <span class="off">○</span></span>
+        <span class="gov-chip">advance <span class="off">○</span></span>
+      </div>
+      <div class="host-pick">mini <span class="caret">▾</span></div>
+      <div class="range-toggle"><span>NOW</span><span class="active">24H</span><span>7D</span></div>
+    </div>
+  </header>
+
+  <!-- B · engine strip -->
+  <div class="engine-strip">
+    <span class="tickdot">●</span>&nbsp; tick <b>#6951</b><span class="dot-sep">·</span>2s ago<span class="dot-sep">·</span>host <b>mini</b><span class="dot-sep">·</span><b>41</b> beliefs this tick<span class="dot-sep">·</span>recording <b>ON</b>, enforcement <span class="dark-flag">DARK</span>
+  </div>
+
+  <div class="doc-grid">
+
+    <!-- C · margin TOC -->
+    <nav class="toc" id="toc">
+      <a href="#preface"><span class="t-dot"></span><span class="t-lab">Preface</span><span class="t-fill"></span><span class="t-n"></span></a>
+      <div style="height:18px"></div>
+      <div class="t-kick">Strata</div>
+      <a href="#s1"><span class="t-dot" style="--c:var(--s1)"></span><span class="t-lab">S1 · Ground</span><span class="t-fill"></span><span class="t-n">16</span></a>
+      <a href="#s2"><span class="t-dot" style="--c:var(--s2)"></span><span class="t-lab">S2 · Verdicts</span><span class="t-fill"></span><span class="t-n">6</span></a>
+      <a href="#s3"><span class="t-dot" style="--c:var(--s3)"></span><span class="t-lab">S3 · Capacity</span><span class="t-fill"></span><span class="t-n">1</span></a>
+      <a href="#s4"><span class="t-dot"></span><span class="t-lab">S4 · Escalation</span><span class="t-fill"></span><span class="t-n">—</span></a>
+      <a href="#s5"><span class="t-dot" style="--c:var(--s5)"></span><span class="t-lab">S5 · Dependencies</span><span class="t-fill"></span><span class="t-n">12</span></a>
+      <a href="#s6"><span class="t-dot" style="--c:var(--s6)"></span><span class="t-lab">S6 · Advancement</span><span class="t-fill"></span><span class="t-n">6</span></a>
+      <div style="height:18px"></div>
+      <a href="#thresholds"><span class="t-dot"></span><span class="t-lab">Thresholds</span><span class="t-fill"></span><span class="t-n">8</span></a>
+      <a href="#legend"><span class="t-dot"></span><span class="t-lab">How to read</span><span class="t-fill"></span><span class="t-n"></span></a>
+    </nav>
+
+    <!-- D · the document -->
+    <main class="doc">
+
+      <!-- masthead -->
+      <div class="masthead">
+        <div class="kicker-row">
+          <div class="kicker"><b>Execution-core</b> · belief engine · 17 rules, six strata</div>
+          <span class="spacer"></span>
+          <label class="sqlpref"><input type="checkbox" id="sqlpref"> always show SQL</label>
+        </div>
+        <h1>How the daemon thinks<span class="amp">, shown thinking.</span></h1>
+        <p class="deck">Every five seconds the daemon discards what it believed and derives a fresh
+        belief base over a <b>partially observable world</b> — seventeen stratified Datalog rules,
+        compiled to SQL, evaluated in order inside one transaction. This page is that program
+        written out as prose it generates itself; the margins show it running. With recording dark
+        the book still reads — <b>the margins simply go quiet</b>.</p>
+        <div class="chip-row">
+          <span><b>S1</b> 16</span><span><b>S2</b> 6</span><span><b>S3</b> 1</span><span><b>S4</b> —</span><span><b>S5</b> 12</span><span><b>S6</b> 6</span>
+        </div>
+      </div>
+
+      <!-- ════ Preface · problem + Datalog primer ════ -->
+      <section class="stratum" id="preface" style="margin-top:52px">
+        <div class="sec-label"><span class="n">Preface</span> The problem, and the language</div>
+        <h2>Why rules, not code</h2>
+        <p class="lede">This system runs AI coding agents — <b>workers</b> — that carry each
+        ticket through a nine-phase pipeline: triage, research, plan, implement, verify,
+        review, PR, merge, deploy. The daemon keeps dozens in flight at once, and its world
+        is only <b>partially observable</b>: it cannot see inside a worker, only the traces
+        work leaves behind — a status file, a process listing, a fresh commit. Observations
+        lag, go missing, or stop without explanation. Silence is ambiguous: a worker that has
+        written nothing for two minutes may be thinking, or dead.</p>
+
+        <p>Judging that world in ordinary procedural code goes badly. The judgments scatter
+        into if-statements, the same fact gets re-derived in five places — and, the deeper
+        flaw, code cannot distinguish <i>absent because I checked</i> from <i>absent because
+        I never looked</i>. So the judgments live here instead: seventeen rules, kept
+        separate from the machinery that acts on them, each one an inspectable sentence
+        whose every conclusion carries its chain of evidence.</p>
+
+        <p><b><a href="https://en.wikipedia.org/wiki/Datalog">Datalog</a>, in one minute.</b>
+        The rules are written in Datalog, a small declarative logic language — Prolog&rsquo;s
+        tamer cousin (same <span class="mono">conclusion&nbsp;:-&nbsp;premises</span> shape,
+        but restricted so evaluation always terminates). Capital letters are variables: read
+        <span class="mono">T</span> as a ticket, <span class="mono">P</span> as the pipeline
+        phase it is in. Predicates named <span class="mono">obs_*</span> are raw observations
+        (<span class="mono">obs_signal</span> is the status file a worker last wrote,
+        <span class="mono">obs_agent</span> the live process listing); everything else is a
+        conclusion some rule derived. Where TypeScript says <i>how</i> — fetch this, loop
+        over that, return early here — a rule says only <i>what must be true</i>:</p>
+
+        <pre class="datalog"><b>wedged_never_started</b>(T,P) :- session_registered(T,P), ¬turn_started(T,P), older_than(2m).</pre>
+
+        <p>&ldquo;A worker on ticket <span class="mono">T</span> in phase
+        <span class="mono">P</span> is wedged if it registered, never started its first turn
+        of work, and two minutes have passed.&rdquo; The engine finds every
+        <span class="mono">(T,P)</span> satisfying those conditions at once: no ordering, no
+        early returns, no hidden state — nowhere for a judgment to hide.</p>
+
+        <p>Conclusions then build on conclusions. Ground rules read only observations; each
+        later layer may build on — and, crucially, <i>negate</i> — the layers beneath it.
+        (These six reasoning <b>strata</b> are not the nine pipeline phases: the pipeline is
+        the world being watched; the strata are the layers of thought about it.)
+        <span class="mono">¬turn_started</span> is an honest claim only because the layer
+        that derives <span class="mono">turn_started</span> is already complete when it is
+        checked — absence as evidence, never oversight.</p>
+
+        <p>Is a logic engine extra machinery? The opposite: the complexity lives in the
+        problem — distributed, asynchronous, partially observable — and the rules contain
+        it. Seventeen sentences replace a thicket of conditionals; the same observations
+        always derive the same beliefs; evaluation cannot loop forever; and because a rule
+        states conditions rather than steps, <b>the premises that held are the why</b> — the
+        explanation is the computation, not logging bolted on afterward. Each rule compiles
+        to a single SQL statement the engine executes verbatim: flip any card below to
+        confirm that the sentence you just read is the program that ran.</p>
+      </section>
+
+      <!-- ════ S1 ════ -->
+      <section class="stratum" id="s1">
+        <div class="sec-label"><span class="n">Stratum 1</span> Ground correlations — reads observations only</div>
+        <h2>Ground correlations</h2>
+        <p class="lede">Nothing in this stratum judges. Four rules correlate raw observations into
+        facts about workers; because no rule here negates anything, they may run in any order — and
+        because they run <b>first</b>, every later stratum may safely negate them.</p>
+
+        <!-- R1 -->
+        <article class="entry first" id="r1">
+          <div class="e-head"><span class="rid t1">R1</span><span class="ename">session_registered</span></div>
+          <div class="marg">
+            <div class="m-top">
+              <svg class="spark" width="48" height="14" viewBox="0 0 48 14"><rect x="0" y="6" width="7" height="8" rx="1" fill="#6f6a5f" opacity=".55"/><rect x="10" y="6" width="7" height="8" rx="1" fill="#6f6a5f" opacity=".55"/><rect x="20" y="6" width="7" height="8" rx="1" fill="#6f6a5f" opacity=".55"/><rect x="30" y="6" width="7" height="8" rx="1" fill="#6f6a5f" opacity=".55"/><rect x="40" y="6" width="7" height="8" rx="1" fill="#6f6a5f" opacity=".8"/></svg>
+              <span class="m-count">6 now</span>
+            </div>
+            <div class="m-sub">oldest held 9h39m</div>
+          </div>
+          <div class="applies">applies to each ticket-phase <span class="eg">(e.g. CTL-722/plan)</span> · derives <span class="eg">{session_id, short_id}</span></div>
+          <p class="sentence">A session is registered when the phase signal’s background job appears
+          in the live agents listing — <em>the worker exists, as far as Claude Code is concerned.</em></p>
+          <pre class="datalog"><b>session_registered</b>(T,P,Sid) :- obs_signal(T,P,_,Job,_),
+    short_of(Job,Short), obs_agent(Sid,Short, kind:"background").</pre>
+          <details class="sql"><summary>show the executed SQL <span class="chev">›</span></summary>
+            <div class="sqlwrap"><button class="copy-btn">copy</button><pre>INSERT OR IGNORE INTO belief (tick_id, stratum, name, subject, value, rule_id, source_fact_ids)
+SELECT t.tick_id, 1, 'session_registered', s.ticket || '/' || s.phase,
+       json_object('session_id', a.session_id, 'short_id', a.short_id),
+       'R1', json_array('s' || s.fact_id, 'a' || a.fact_id)
+FROM tick t
+JOIN obs_signal s ON s.tick_id = t.tick_id AND s.bg_job_id IS NOT NULL
+JOIN obs_agent  a ON a.tick_id = t.tick_id AND a.short_id = s.bg_job_id
+                 AND a.kind = 'background'
+WHERE t.tick_id = :tick</pre></div>
+            <div class="sqlnote">the verbatim executed constant — identical by construction.</div>
+          </details>
+          <p class="meta">reads <span class="mono">obs_signal</span>, <span class="mono">obs_agent</span> · negated by <a href="#r4">[R4]</a> via its own conclusions · src <span class="mono">rules.mjs:83</span></p>
+          <div class="conc"><span class="lab">Concluding now,</span> about 6 entities:
+            <button class="ent">CTL-722/plan</button>, <button class="ent">CTL-731/implement</button>, <button class="ent">CTL-745/verify</button>, <span class="more">+3 more →</span>
+          </div>
+        </article>
+
+        <!-- R2 -->
+        <article class="entry" id="r2">
+          <div class="e-head"><span class="rid t1">R2</span><span class="ename">turn_started</span></div>
+          <div class="marg quiet"><div class="m-top"><span class="m-count">—</span></div></div>
+          <div class="applies">applies to each ticket-phase <span class="eg">(e.g. CTL-722/plan)</span> · derives <span class="eg">{session_id, bytes}</span></div>
+          <p class="sentence">A turn has started when the registered session’s transcript file
+          exists. <em>Healthy sessions create it about 0.3 seconds after spawn; wedged ones never
+          do</em> — which is why R4 reads this rule’s absence, not its presence.</p>
+          <pre class="datalog"><b>turn_started</b>(T,P) :- obs_signal(T,P,_,Job,_), session_of(Job,Sid),
+    obs_transcript(Sid, exists:1).</pre>
+          <details class="sql"><summary>show the executed SQL <span class="chev">›</span></summary>
+            <div class="sqlwrap"><button class="copy-btn">copy</button><pre>INSERT OR IGNORE INTO belief (tick_id, stratum, name, subject, value, rule_id, source_fact_ids)
+SELECT t.tick_id, 1, 'turn_started', s.ticket || '/' || s.phase,
+       json_object('session_id', a.session_id, 'bytes', tr.bytes),
+       'R2', json_array('s' || s.fact_id, 'a' || a.fact_id, 'r' || tr.fact_id)
+FROM tick t
+JOIN obs_signal     s  ON s.tick_id = t.tick_id AND s.bg_job_id IS NOT NULL
+JOIN obs_agent      a  ON a.tick_id = t.tick_id AND a.short_id = s.bg_job_id
+JOIN obs_transcript tr ON tr.tick_id = t.tick_id AND tr.session_id = a.session_id
+                      AND tr.exists_flag = 1
+WHERE t.tick_id = :tick</pre></div>
+          </details>
+          <p class="meta">reads <span class="mono">obs_signal</span>, <span class="mono">obs_agent</span>, <span class="mono">obs_transcript</span> · negated by <a href="#r4">[R4]</a> · src <span class="mono">rules.mjs:99</span></p>
+          <div class="conc"><span class="lab">Nothing concluded this tick.</span> <em>Six registered sessions have no transcript — that absence is exactly what R4 negates.</em></div>
+        </article>
+
+        <!-- R3 -->
+        <article class="entry" id="r3">
+          <div class="e-head"><span class="rid t1">R3</span><span class="ename">progress_evidence</span></div>
+          <div class="marg">
+            <div class="m-top">
+              <svg class="spark" width="48" height="14" viewBox="0 0 48 14"><rect x="0" y="4" width="7" height="10" rx="1" fill="#6f6a5f" opacity=".55"/><rect x="10" y="4" width="7" height="10" rx="1" fill="#6f6a5f" opacity=".55"/><rect x="20" y="5" width="7" height="9" rx="1" fill="#6f6a5f" opacity=".55"/><rect x="30" y="4" width="7" height="10" rx="1" fill="#6f6a5f" opacity=".55"/><rect x="40" y="4" width="7" height="10" rx="1" fill="#6f6a5f" opacity=".8"/></svg>
+              <span class="m-count">8 now</span>
+            </div>
+            <div class="m-sub">oldest held 14h13m</div>
+          </div>
+          <div class="applies">applies to each ticket-phase <span class="eg">(e.g. CTL-722/plan)</span> · derives <span class="eg">{ts_ms}</span> — the freshest channel wins</div>
+          <p class="sentence">Progress evidence is the newest positive sign of work on any channel —
+          a heartbeat, transcript growth, or a signal update. <em>The max picks the value;
+          provenance keeps the full evidence set,</em> so the lease rules and
+          <span class="mono" style="font-size:.85em">catalyst why</span> can both say which channel won.</p>
+          <pre class="datalog"><b>progress_evidence</b>(T,P,max(Ts)) :- obs_heartbeat(T,P,_,_,Ts)
+  ; obs_transcript(session_of_signal(T,P), mtime:Ts)
+  ; obs_signal(T,P, updated_at:Ts).</pre>
+          <details class="sql"><summary>show the executed SQL <span class="chev">›</span></summary>
+            <div class="sqlwrap"><button class="copy-btn">copy</button><pre>INSERT OR IGNORE INTO belief (tick_id, stratum, name, subject, value, rule_id, source_fact_ids)
+WITH evidence(tick_id, subject, ts, ref, channel) AS (
+  -- signal updatedAt (always present for a running phase). ref is pre-TAGGED
+  -- per channel ('s'/'r'/'h') so the per-table fact_id collision can't bite.
+  SELECT t.tick_id, s.ticket || '/' || s.phase, s.updated_at_ms, 's' || s.fact_id, 'signal'
+  FROM tick t JOIN obs_signal s ON s.tick_id = t.tick_id
+  WHERE t.tick_id = :tick AND s.updated_at_ms IS NOT NULL
+  UNION ALL
+  -- transcript mtime, mapped phase←signal(bg)←agent(short)→transcript(session)
+  SELECT t.tick_id, s.ticket || '/' || s.phase, tr.mtime_ms, 'r' || tr.fact_id, 'transcript'
+  FROM tick t
+  JOIN obs_signal     s  ON s.tick_id = t.tick_id AND s.bg_job_id IS NOT NULL
+  JOIN obs_agent      a  ON a.tick_id = t.tick_id AND a.short_id = s.bg_job_id
+  JOIN obs_transcript tr ON tr.tick_id = t.tick_id AND tr.session_id = a.session_id
+                        AND tr.exists_flag = 1 AND tr.mtime_ms IS NOT NULL
+  WHERE t.tick_id = :tick
+  UNION ALL
+  -- worker.heartbeat ts (own time axis; matched by ticket/phase)
+  SELECT t.tick_id, s.ticket || '/' || s.phase, h.ts_ms, 'h' || h.fact_id, 'heartbeat'
+  FROM tick t
+  JOIN obs_signal s ON s.tick_id = t.tick_id
+  JOIN obs_heartbeat h ON h.ticket = s.ticket AND h.phase = s.phase
+  WHERE t.tick_id = :tick
+)
+SELECT e.tick_id, 1, 'progress_evidence', e.subject,
+       json_object('ts_ms', mx.ts),
+       'R3', (SELECT json_group_array(ref) FROM evidence e2 WHERE e2.subject = e.subject)
+FROM evidence e
+JOIN (SELECT subject, MAX(ts) AS ts FROM evidence GROUP BY subject) mx
+  ON mx.subject = e.subject AND mx.ts = e.ts
+GROUP BY e.subject</pre></div>
+          </details>
+          <p class="meta">reads <span class="mono">obs_signal</span>, <span class="mono">obs_transcript</span>, <span class="mono">obs_heartbeat</span> · src <span class="mono">rules.mjs:122</span></p>
+          <div class="conc"><span class="lab">Concluding now,</span> about 8 entities:
+            <button class="ent">CTL-722/plan</button>, <button class="ent">CTL-731/implement</button>, <span class="more">+6 more →</span>
+            <em>— newest evidence is signal.updated_at only; no transcripts, no heartbeats.</em>
+          </div>
+        </article>
+
+        <!-- R7 -->
+        <article class="entry" id="r7">
+          <div class="e-head"><span class="rid t1">R7</span><span class="ename">worker_dead</span></div>
+          <div class="marg">
+            <div class="m-top">
+              <svg class="spark" width="48" height="14" viewBox="0 0 48 14"><rect x="0" y="11" width="7" height="3" rx="1" fill="#6f6a5f" opacity=".55"/><rect x="10" y="11" width="7" height="3" rx="1" fill="#6f6a5f" opacity=".55"/><rect x="20" y="11" width="7" height="3" rx="1" fill="#6f6a5f" opacity=".55"/><rect x="30" y="11" width="7" height="3" rx="1" fill="#6f6a5f" opacity=".55"/><rect x="40" y="11" width="7" height="3" rx="1" fill="#6f6a5f" opacity=".8"/></svg>
+              <span class="m-count">2 now</span>
+            </div>
+            <div class="m-sub">oldest held 14h13m</div>
+          </div>
+          <div class="applies">applies to each ticket-phase <span class="eg">(e.g. CTL-718/monitor-merge)</span> · derives <span class="eg">{reason}</span></div>
+          <p class="sentence">A worker is dead when Claude Code itself says so: the job directory is
+          gone, a terminal timestamp is set, or the state is terminal. <em>The daemon never invents
+          a death; it only believes a durable verdict.</em></p>
+          <pre class="datalog"><b>worker_dead</b>(T,P) :- obs_signal(T,P,_,Job,_),
+    ( obs_job(Job, exists:0)
+    ; obs_job(Job, first_terminal_at:FT), FT != null
+    ; obs_job(Job, state:S), S in ["stopped","failed","done","blocked"] ).</pre>
+          <details class="sql"><summary>show the executed SQL <span class="chev">›</span></summary>
+            <div class="sqlwrap"><button class="copy-btn">copy</button><pre>INSERT OR IGNORE INTO belief (tick_id, stratum, name, subject, value, rule_id, source_fact_ids)
+SELECT t.tick_id, 1, 'worker_dead', s.ticket || '/' || s.phase,
+       json_object('reason',
+         CASE
+           WHEN j.exists_flag = 0 THEN 'job_gone'
+           WHEN j.first_terminal_at IS NOT NULL THEN 'first_terminal_at'
+           ELSE 'state:' || j.state
+         END),
+       'R7', json_array('s' || s.fact_id, 'j' || j.fact_id)
+FROM tick t
+JOIN obs_signal s ON s.tick_id = t.tick_id AND s.bg_job_id IS NOT NULL
+JOIN obs_job    j ON j.tick_id = t.tick_id AND j.bg_job_id = s.bg_job_id
+WHERE t.tick_id = :tick
+  AND ( j.exists_flag = 0
+     OR j.first_terminal_at IS NOT NULL
+     OR j.state IN ('stopped','failed','done','blocked') )</pre></div>
+          </details>
+          <p class="meta">reads <span class="mono">obs_signal</span>, <span class="mono">obs_job</span> · negated by <a href="#r4">[R4]</a>, <a href="#r5">[R5]</a>, <a href="#r6">[R6]</a> · src <span class="mono">rules.mjs:161</span></p>
+          <div class="conc"><span class="lab">Concluding now,</span> about 2 entities:
+            <button class="ent">CTL-718/monitor-merge</button>, <button class="ent">CTL-696/verify</button>
+            <em>— first_terminal_at set on both.</em>
+          </div>
+        </article>
+      </section>
+
+      <!-- ════ S2 ════ -->
+      <section class="stratum" id="s2">
+        <div class="sec-label"><span class="n">Stratum 2</span> Liveness verdicts — negation over S1</div>
+        <h2>Liveness verdicts</h2>
+        <p class="lede">Here the engine is allowed to conclude — and negation is safe only because
+        S1 has <b>already finished inserting</b>. A NOT EXISTS over a complete lower stratum is a
+        closed-world test, not a race. Throughout this book <span class="negg">¬</span> means
+        <b>checked, absent this tick</b>: an absence the engine went looking for, given the same
+        weight as anything it found.</p>
+
+        <!-- R4 — the exemplar, live -->
+        <article class="entry first" id="r4">
+          <div class="e-head"><span class="rid t2">R4</span><span class="ename">wedged_never_started</span></div>
+          <div class="marg">
+            <div class="m-top">
+              <svg class="spark" width="48" height="14" viewBox="0 0 48 14"><rect x="0" y="11" width="7" height="3" rx="1" fill="#e8ad4a" opacity=".3"/><rect x="10" y="9" width="7" height="5" rx="1" fill="#e8ad4a" opacity=".3"/><rect x="20" y="11" width="7" height="3" rx="1" fill="#e8ad4a" opacity=".3"/><rect x="30" y="4" width="7" height="10" rx="1" fill="#e8ad4a" opacity=".65"/><rect x="40" y="0" width="7" height="14" rx="1" fill="#e8ad4a"/></svg>
+              <span class="m-count" style="color:var(--clay)">6 now</span>
+              <span class="m-dot pulse"></span>
+            </div>
+            <div class="m-sub">oldest held 9h39m</div>
+          </div>
+          <div class="applies">applies to each ticket-phase <span class="eg">(e.g. CTL-722/plan)</span> · derives no value — <em>its existence is the verdict</em></div>
+          <p class="sentence">A worker that registered a session, is old enough — older than
+          <a class="cfgv" href="#thresholds" title="cfg never_started_ms — live value 120,000 · jump to thresholds">120,000&nbsp;ms (2m)</a>
+          — never produced a turn, and isn’t dead, is <em>wedged before its first turn.</em>
+          The 2026-06-09 incident class: the prompt was delivered to a session that never began to think.</p>
+          <pre class="datalog"><b>wedged_never_started</b>(T,P) :- session_registered(T,P,_),
+    obs_signal(T,P, started_at:S), older(S, <span class="kc">cfg(never_started_ms)</span>),
+    <span class="kn">not</span> turn_started(T,P), <span class="kn">not</span> worker_dead(T,P).</pre>
+          <details class="sql"><summary>show the executed SQL <span class="chev">›</span></summary>
+            <div class="sqlwrap"><button class="copy-btn">copy</button><pre>INSERT OR IGNORE INTO belief (tick_id, stratum, name, subject, rule_id, source_fact_ids)
+SELECT t.tick_id, 2, 'wedged_never_started', s.ticket || '/' || s.phase, 'R4',
+       json_array('b' || sr.belief_id, 's' || s.fact_id, 't' || t.tick_id)
+FROM tick t
+JOIN obs_signal s ON s.tick_id = t.tick_id AND s.status = 'running'
+JOIN belief sr    ON sr.tick_id = t.tick_id AND sr.name = 'session_registered'
+                 AND sr.subject = s.ticket || '/' || s.phase
+JOIN cfg c        ON c.key = 'never_started_ms'
+WHERE t.tick_id = :tick
+  AND s.started_at_ms IS NOT NULL
+  AND t.now_ms - s.started_at_ms &gt; c.value_int
+  AND NOT EXISTS (SELECT 1 FROM belief b WHERE b.tick_id = t.tick_id
+                  AND b.name = 'turn_started' AND b.subject = sr.subject)
+  AND NOT EXISTS (SELECT 1 FROM belief b WHERE b.tick_id = t.tick_id
+                  AND b.name = 'worker_dead' AND b.subject = sr.subject)</pre></div>
+            <div class="sqlnote">the verbatim executed constant — identical by construction.</div>
+          </details>
+          <p class="meta">reads <span class="mono">obs_signal</span>, session_registered <a href="#r1">[R1]</a> · <span class="negk">checks absent:</span> turn_started <a href="#r2">[R2]</a>, worker_dead <a href="#r7">[R7]</a> · cfg <a class="cfgv" href="#thresholds">never_started_ms</a> · src <span class="mono">rules.mjs:187</span></p>
+          <div class="conc"><span class="lab">Concluding now,</span> about 6 entities:
+            <button class="ent open" data-deriv="d-722">CTL-722/plan</button>,
+            <button class="ent" data-deriv="d-731">CTL-731/implement</button>,
+            <button class="ent" data-deriv="d-745">CTL-745/verify</button>,
+            <button class="ent" data-deriv="d-748">CTL-748/implement</button>,
+            <button class="ent" data-deriv="d-756">CTL-756/plan</button>,
+            <button class="ent" data-deriv="d-760">CTL-760/research</button>
+          </div>
+          <p class="sig">Six entities entered this belief in one tick — simultaneity suggests a shared cause.</p>
+
+          <!-- derivation · CTL-722/plan (expanded) -->
+          <div class="deriv" id="d-722">
+            <div class="d-root">Concluded <span class="mono">wedged_never_started</span> about <span class="mono about">CTL-722/plan</span> because:</div>
+            <div class="d-body">
+              <div class="d-line">session_registered — about CTL-722/plan <a class="ref" href="#r1">[R1 · S1]</a> <span class="d-val">{short_id: "5ad5c1ff"}</span></div>
+              <div class="d-sub">
+                <div class="d-line fact">▪ obs_signal <span class="fid">#101</span> — status=running · bg=5ad5c1ff · started 08:56:24Z</div>
+                <div class="d-line fact">▪ obs_agent <span class="fid">#102</span> — 5ad5c1ff · kind=background · state=blocked</div>
+              </div>
+              <div class="d-line"><span class="ng">¬</span> turn_started — checked, absent this tick
+                <span class="d-note">obs_transcript 5ad5c1ff: exists_flag=0 at T+9h39m — healthy sessions write it in ~0.3 s</span></div>
+              <div class="d-line"><span class="ng">¬</span> worker_dead — checked, absent this tick
+                <span class="d-note">obs_job 5ad5c1ff: state=working · first_terminal_at=null — no reclaim path may touch it</span></div>
+              <div class="d-line guard">now − started_at = 34,724,000 ms &gt; 120,000 ms <span class="okk">✓</span></div>
+            </div>
+            <div class="d-foot">
+              <a class="feeds" href="#r10">feeds ↑ R10 wake_diagnostician →</a>
+              <span class="cmd">⧉ catalyst why CTL-722 --tick 6951</span>
+              <span class="pin">pinned · tick #6951</span>
+            </div>
+          </div>
+
+          <!-- derivation · CTL-731/implement (collapsed; click to expand) -->
+          <div class="deriv hidden" id="d-731">
+            <div class="d-root">Concluded <span class="mono">wedged_never_started</span> about <span class="mono about">CTL-731/implement</span> because:</div>
+            <div class="d-body">
+              <div class="d-line">session_registered — about CTL-731/implement <a class="ref" href="#r1">[R1 · S1]</a> <span class="d-val">{short_id: "9c20e4aa"}</span></div>
+              <div class="d-sub">
+                <div class="d-line fact">▪ obs_signal <span class="fid">#107</span> — status=running · bg=9c20e4aa · started 09:04:11Z</div>
+                <div class="d-line fact">▪ obs_agent <span class="fid">#108</span> — 9c20e4aa · kind=background · state=blocked</div>
+              </div>
+              <div class="d-line"><span class="ng">¬</span> turn_started — checked, absent this tick</div>
+              <div class="d-line"><span class="ng">¬</span> worker_dead — checked, absent this tick</div>
+              <div class="d-line guard">now − started_at = 34,257,000 ms &gt; 120,000 ms <span class="okk">✓</span></div>
+            </div>
+            <div class="d-foot">
+              <a class="feeds" href="#r10">feeds ↑ R10 wake_diagnostician →</a>
+              <span class="cmd">⧉ catalyst why CTL-731 --tick 6951</span>
+              <span class="pin">pinned · tick #6951</span>
+            </div>
+          </div>
+        </article>
+
+        <!-- R5 -->
+        <article class="entry" id="r5">
+          <div class="e-head"><span class="rid t2">R5</span><span class="ename">lease_valid</span></div>
+          <div class="marg quiet"><div class="m-top"><span class="m-count">—</span></div></div>
+          <div class="applies">applies to each ticket-phase <span class="eg">(e.g. CTL-722/plan)</span> · derives <span class="eg">{evidence_ts_ms, window_ms}</span></div>
+          <p class="sentence">A lease holds while progress evidence is younger than the phase-class
+          window — <a class="cfgv" href="#thresholds" title="cfg lease_window_build_ms — live value 1,800,000">1,800,000&nbsp;ms (30m)</a>
+          for build phases, <a class="cfgv" href="#thresholds" title="cfg lease_window_doc_ms — live value 2,700,000">2,700,000&nbsp;ms (45m)</a>
+          for doc phases. <em>Leases, not processes, are the capacity unit.</em></p>
+          <pre class="datalog"><b>lease_valid</b>(T) :- obs_signal(T,P, status:"running"),
+    progress_evidence(T,P,Ts), <span class="kn">not</span> older(Ts, <span class="kc">lease_window(P)</span>),
+    <span class="kn">not</span> worker_dead(T,P).</pre>
+          <details class="sql"><summary>show the executed SQL <span class="chev">›</span></summary>
+            <div class="sqlwrap"><button class="copy-btn">copy</button><pre>INSERT OR IGNORE INTO belief (tick_id, stratum, name, subject, value, rule_id, source_fact_ids)
+SELECT t.tick_id, 2, 'lease_valid', s.ticket || '/' || s.phase,
+       json_object('evidence_ts_ms', CAST(json_extract(pe.value, '$.ts_ms') AS INTEGER),
+                   'window_ms', win.value_int),
+       'R5', json_array('b' || pe.belief_id, 's' || s.fact_id, 't' || t.tick_id)
+FROM tick t
+JOIN obs_signal s ON s.tick_id = t.tick_id AND s.status = 'running'
+JOIN belief pe    ON pe.tick_id = t.tick_id AND pe.name = 'progress_evidence'
+                 AND pe.subject = s.ticket || '/' || s.phase
+JOIN cfg win ON win.key = CASE
+      WHEN s.phase IN ('triage','research','plan','pr','monitor-merge','monitor-deploy')
+        THEN 'lease_window_doc_ms' ELSE 'lease_window_build_ms' END
+WHERE t.tick_id = :tick
+  AND t.now_ms - CAST(json_extract(pe.value, '$.ts_ms') AS INTEGER) &lt;= win.value_int
+  AND NOT EXISTS (SELECT 1 FROM belief b WHERE b.tick_id = t.tick_id
+                  AND b.name = 'worker_dead' AND b.subject = s.ticket || '/' || s.phase)</pre></div>
+          </details>
+          <p class="meta">reads <span class="mono">obs_signal</span>, progress_evidence <a href="#r3">[R3]</a> · <span class="negk">checks absent:</span> worker_dead <a href="#r7">[R7]</a> · cfg <a class="cfgv" href="#thresholds">lease_window_build_ms</a>, <a class="cfgv" href="#thresholds">lease_window_doc_ms</a> · src <span class="mono">rules.mjs:212</span></p>
+          <div class="conc"><span class="lab">Nothing concluded in range</span> <em>— no worker currently holds a valid lease.</em></div>
+        </article>
+
+        <!-- R6 -->
+        <article class="entry" id="r6">
+          <div class="e-head"><span class="rid t2">R6</span><span class="ename">lease_expired</span></div>
+          <div class="marg quiet"><div class="m-top"><span class="m-count">—</span></div></div>
+          <div class="applies">applies to each ticket-phase <span class="eg">(e.g. CTL-722/plan)</span> · derives no value — <em>its existence is the verdict</em></div>
+          <p class="sentence">A running phase that is neither lease-valid nor dead holds an expired
+          lease — <em>its evidence has gone stale, or never existed.</em> Same stratum as R5, but R5
+          inserts first, so the negation below sees the complete set.</p>
+          <pre class="datalog"><b>lease_expired</b>(T,P) :- obs_signal(T,P, status:"running"),
+    <span class="kn">not</span> lease_valid(T), <span class="kn">not</span> worker_dead(T,P).</pre>
+          <details class="sql"><summary>show the executed SQL <span class="chev">›</span></summary>
+            <div class="sqlwrap"><button class="copy-btn">copy</button><pre>INSERT OR IGNORE INTO belief (tick_id, stratum, name, subject, rule_id, source_fact_ids)
+SELECT t.tick_id, 2, 'lease_expired', s.ticket || '/' || s.phase, 'R6',
+       json_array('s' || s.fact_id, 't' || t.tick_id)
+FROM tick t
+JOIN obs_signal s ON s.tick_id = t.tick_id AND s.status = 'running'
+WHERE t.tick_id = :tick
+  AND NOT EXISTS (SELECT 1 FROM belief b WHERE b.tick_id = t.tick_id
+                  AND b.name = 'lease_valid' AND b.subject = s.ticket || '/' || s.phase)
+  AND NOT EXISTS (SELECT 1 FROM belief b WHERE b.tick_id = t.tick_id
+                  AND b.name = 'worker_dead' AND b.subject = s.ticket || '/' || s.phase)</pre></div>
+          </details>
+          <p class="meta">reads <span class="mono">obs_signal</span> · <span class="negk">checks absent:</span> lease_valid <a href="#r5">[R5]</a>, worker_dead <a href="#r7">[R7]</a> · src <span class="mono">rules.mjs:236</span></p>
+          <details class="never"><summary><span class="lab" style="color:var(--ink)">Never observed</span><span class="deg">°</span></summary>
+            <div class="foot">° zero conclusions since recording began on this host (2026-06-04). Not
+            necessarily broken — a rule that has never fired may simply describe a state the fleet
+            has never entered; its preconditions have never co-occurred here.</div>
+          </details>
+        </article>
+
+        <!-- R9 -->
+        <article class="entry" id="r9">
+          <div class="e-head"><span class="rid t2">R9</span><span class="ename">board_drift</span></div>
+          <div class="marg quiet"><div class="m-top"><span class="m-count">—</span></div></div>
+          <div class="applies">applies to each ticket <span class="eg">(e.g. CTL-722)</span> · derives <span class="eg">{have, want, phase}</span></div>
+          <p class="sentence">Linear disagrees with the durable running signal: the board says one
+          thing, the signals say another. <em>Terminal Done is exempt — the engine never writes a
+          board state backward.</em></p>
+          <pre class="datalog"><b>board_drift</b>(T,Want) :- obs_signal(T,P, status:"running"),
+    linear_key_for(P,Want), obs_linear(T,Have), Have != Want,
+    <span class="kn">not</span> linear_terminal(Have).</pre>
+          <details class="sql"><summary>show the executed SQL <span class="chev">›</span></summary>
+            <div class="sqlwrap"><button class="copy-btn">copy</button><pre>INSERT OR IGNORE INTO belief (tick_id, stratum, name, subject, value, rule_id, source_fact_ids)
+SELECT t.tick_id, 2, 'board_drift', s.ticket,
+       json_object('have', l.state, 'want', want.k, 'phase', s.phase),
+       'R9', json_array('s' || s.fact_id, 'l' || l.fact_id)
+FROM tick t
+JOIN obs_signal s ON s.tick_id = t.tick_id AND s.status = 'running'
+JOIN obs_linear l ON l.tick_id = t.tick_id AND l.ticket = s.ticket
+                 AND l.state IS NOT NULL
+JOIN (SELECT 'triage' AS phase, 'Research' AS k UNION ALL
+      SELECT 'research','Research' UNION ALL
+      SELECT 'plan','Plan' UNION ALL
+      SELECT 'implement','Implement' UNION ALL
+      SELECT 'verify','Validate' UNION ALL
+      SELECT 'review','Validate' UNION ALL
+      SELECT 'remediate','Validate' UNION ALL
+      SELECT 'pr','PR' UNION ALL
+      SELECT 'monitor-merge','PR' UNION ALL
+      SELECT 'monitor-deploy','PR') want ON want.phase = s.phase
+WHERE t.tick_id = :tick
+  AND l.state &lt;&gt; want.k
+  AND l.state NOT IN ('Done','Canceled','Cancelled')</pre></div>
+          </details>
+          <p class="meta">reads <span class="mono">obs_signal</span>, <span class="mono">obs_linear</span> · src <span class="mono">rules.mjs:259</span></p>
+          <div class="conc"><span class="lab">Nothing concluded in range</span> <em>— the board and the signals agree.</em></div>
+        </article>
+      </section>
+
+      <!-- ════ S3 ════ -->
+      <section class="stratum" id="s3">
+        <div class="sec-label"><span class="n">Stratum 3</span> Capacity — aggregation over S2</div>
+        <h2>Capacity</h2>
+        <p class="lede">One rule, one number, both terms shown. The aggregation runs after S2
+        completes, so the lease count is a fact about this tick, not a sample — and the belief’s
+        value <b>is</b> the admission decision record.</p>
+
+        <!-- R8 -->
+        <article class="entry first" id="r8">
+          <div class="e-head"><span class="rid t3">R8</span><span class="ename">free_slots</span></div>
+          <div class="marg">
+            <div class="m-top">
+              <svg class="spark" width="48" height="14" viewBox="0 0 48 14"><rect x="0" y="6" width="7" height="8" rx="1" fill="#6f6a5f" opacity=".55"/><rect x="10" y="6" width="7" height="8" rx="1" fill="#6f6a5f" opacity=".55"/><rect x="20" y="6" width="7" height="8" rx="1" fill="#6f6a5f" opacity=".55"/><rect x="30" y="6" width="7" height="8" rx="1" fill="#6f6a5f" opacity=".55"/><rect x="40" y="6" width="7" height="8" rx="1" fill="#6f6a5f" opacity=".8"/></svg>
+              <span class="m-count">1 now</span>
+            </div>
+            <div class="m-sub">free_slots = 4</div>
+          </div>
+          <div class="applies">applies to the host <span class="eg">(host:mini)</span> · derives <span class="eg">{free_slots, by_lease, by_session_cap, …}</span></div>
+          <p class="sentence">Free slots are the lesser of unspent leases —
+          <a class="cfgv" href="#thresholds" title="cfg max_parallel — live value 6">max_parallel 6</a> —
+          and unspent session cap — <a class="cfgv" href="#thresholds" title="cfg session_cap — live value 10">session_cap 10</a>.
+          <em>Wedged workers consume sessions but never leases</em> — so the board drains instead of
+          starving, and the over-spawn guard survives.</p>
+          <pre class="datalog"><b>free_slots</b> = max(0, min(<span class="kc">cfg(max_parallel)</span> − count{T : lease_valid(T)},
+                        <span class="kc">cfg(session_cap)</span>  − count{S : obs_agent(S, kind:"background")})).</pre>
+          <details class="sql"><summary>show the executed SQL <span class="chev">›</span></summary>
+            <div class="sqlwrap"><button class="copy-btn">copy</button><pre>INSERT OR IGNORE INTO belief (tick_id, stratum, name, subject, value, rule_id, source_fact_ids)
+SELECT t.tick_id, 3, 'free_slots', 'host:' || t.host,
+       json_object(
+         'free_slots', MAX(0, MIN(mp.value_int - lv.n, sc.value_int - bg.n)),
+         'by_lease',   mp.value_int - lv.n,
+         'by_session_cap', sc.value_int - bg.n,
+         'max_parallel', mp.value_int,
+         'session_cap', sc.value_int,
+         'lease_valid_count', lv.n,
+         'bg_session_count', bg.n),
+       'R8',
+       json_array(
+         (SELECT json_group_array('b' || belief_id) FROM belief
+            WHERE tick_id = t.tick_id AND name = 'lease_valid'),
+         (SELECT json_group_array('a' || fact_id) FROM obs_agent
+            WHERE tick_id = t.tick_id AND kind = 'background'))
+FROM tick t
+JOIN cfg mp ON mp.key = 'max_parallel'
+JOIN cfg sc ON sc.key = 'session_cap'
+JOIN (SELECT COUNT(*) AS n FROM belief
+        WHERE tick_id = :tick AND name = 'lease_valid') lv
+JOIN (SELECT COUNT(*) AS n FROM obs_agent
+        WHERE tick_id = :tick AND kind = 'background') bg
+WHERE t.tick_id = :tick</pre></div>
+          </details>
+          <p class="meta">reads lease_valid <a href="#r5">[R5]</a>, <span class="mono">obs_agent</span> · cfg <a class="cfgv" href="#thresholds">max_parallel</a>, <a class="cfgv" href="#thresholds">session_cap</a> · src <span class="mono">rules.mjs:290</span></p>
+          <div class="conc"><span class="lab">Concluding now,</span> about the host:
+            <button class="ent">host:mini</button> — free_slots = 4 · by_lease 6 − 0 = 6 · by_session_cap 10 − 6 = 4; <em>the session cap binds.</em>
+          </div>
+        </article>
+      </section>
+
+      <!-- ════ S4 ════ -->
+      <section class="stratum" id="s4">
+        <div class="sec-label"><span class="n">Stratum 4</span> Escalation ladder — negation over intent</div>
+        <h2>Escalation ladder</h2>
+        <p class="lede">The daemon detects; the agent interprets; the human is a conclusion of last
+        resort. The negation here runs over the <b>intent</b> table rather than over beliefs —
+        cooldowns and attempt budgets are facts, so storms and retry loops are
+        <b>unrepresentable</b> rather than discouraged.</p>
+
+        <!-- R10 — one rule, two arms -->
+        <article class="entry first" id="r10">
+          <div class="e-head"><span class="rid t4">R10</span><span class="ename">wake_diagnostician</span></div>
+          <div class="marg quiet"><div class="m-top"><span class="m-count">—</span></div><div class="m-sub">in cooldown</div></div>
+          <div class="applies">applies to each ticket-phase <span class="eg">(e.g. CTL-722/plan)</span> · derives <span class="eg">{reason}</span> · one rule, two arms</div>
+          <p class="sentence">Wake the diagnostician for states the daemon cannot resolve
+          deterministically — <em>never kill an alive worker on suspicion.</em> The cooldown —
+          <a class="cfgv" href="#thresholds" title="cfg diag_cooldown_ms — live value 600,000">600,000&nbsp;ms (10m)</a>
+          — is an intent fact negated below, so wake storms are structurally impossible.</p>
+
+          <div class="armlab"><b>arm a</b> — never-started</div>
+          <pre class="datalog"><b>wake_diagnostician</b>(T,P,"never-started") :- wedged_never_started(T,P),
+    <span class="kn">not</span> recent_intent("wake-diagnostician",T,P, <span class="kc">cfg(diag_cooldown_ms)</span>).</pre>
+          <details class="sql"><summary>show the executed SQL <span class="chev">›</span></summary>
+            <div class="sqlwrap"><button class="copy-btn">copy</button><pre>INSERT OR IGNORE INTO belief (tick_id, stratum, name, subject, value, rule_id, source_fact_ids)
+SELECT t.tick_id, 4, 'wake_diagnostician', w.subject,
+       json_object('reason', 'never-started'),
+       'R10', json_array('b' || w.belief_id)
+FROM tick t
+JOIN belief w ON w.tick_id = t.tick_id AND w.name = 'wedged_never_started'
+WHERE t.tick_id = :tick
+  AND NOT EXISTS (
+    SELECT 1 FROM intent i JOIN tick it ON it.tick_id = i.tick_id, cfg c
+    WHERE c.key = 'diag_cooldown_ms'
+      AND i.kind = 'wake-diagnostician' AND i.subject = w.subject
+      AND t.now_ms - it.now_ms &lt;= c.value_int)</pre></div>
+          </details>
+
+          <div class="armlab"><b>arm b</b> — stalled-alive</div>
+          <pre class="datalog"><b>wake_diagnostician</b>(T,P,"stalled-alive") :- lease_expired(T,P),
+    obs_job(job_of(T,P), state:"working"),
+    <span class="kn">not</span> recent_intent("wake-diagnostician",T,P, <span class="kc">cfg(diag_cooldown_ms)</span>).</pre>
+          <details class="sql"><summary>show the executed SQL <span class="chev">›</span></summary>
+            <div class="sqlwrap"><button class="copy-btn">copy</button><pre>INSERT OR IGNORE INTO belief (tick_id, stratum, name, subject, value, rule_id, source_fact_ids)
+SELECT t.tick_id, 4, 'wake_diagnostician', le.subject,
+       json_object('reason', 'stalled-alive'),
+       'R10', json_array('b' || le.belief_id, 'j' || j.fact_id)
+FROM tick t
+JOIN belief le ON le.tick_id = t.tick_id AND le.name = 'lease_expired'
+JOIN obs_signal s ON s.tick_id = t.tick_id AND s.ticket || '/' || s.phase = le.subject
+JOIN obs_job   j  ON j.tick_id = t.tick_id AND j.bg_job_id = s.bg_job_id
+                 AND j.state = 'working'
+WHERE t.tick_id = :tick
+  AND NOT EXISTS (SELECT 1 FROM belief b WHERE b.tick_id = t.tick_id
+                  AND b.name = 'wake_diagnostician' AND b.subject = le.subject)
+  AND NOT EXISTS (
+    SELECT 1 FROM intent i JOIN tick it ON it.tick_id = i.tick_id, cfg c
+    WHERE c.key = 'diag_cooldown_ms'
+      AND i.kind = 'wake-diagnostician' AND i.subject = le.subject
+      AND t.now_ms - it.now_ms &lt;= c.value_int)</pre></div>
+          </details>
+          <p class="meta">reads wedged_never_started <a href="#r4">[R4]</a>, lease_expired <a href="#r6">[R6]</a>, <span class="mono">obs_job</span> · <span class="negk">checks absent:</span> recent intent <span class="mono">wake-diagnostician</span> · cfg <a class="cfgv" href="#thresholds">diag_cooldown_ms</a> · src <span class="mono">rules.mjs:330, 344</span></p>
+          <div class="conc"><span class="lab">Nothing concluded this tick</span> <em>— the 18:27:40
+          wake for CTL-722/plan (intent i17) is 7m31s into its 10m cooldown; re-firing inside the
+          window is unrepresentable, not merely discouraged.</em></div>
+        </article>
+
+        <!-- R11 -->
+        <article class="entry" id="r11">
+          <div class="e-head"><span class="rid t4">R11</span><span class="ename">action_ineffective</span></div>
+          <div class="marg quiet"><div class="m-top"><span class="m-count">—</span></div></div>
+          <div class="applies">applies to each attempted action <span class="eg">(e.g. wake-diagnostician:CTL-722/plan)</span> · derives <span class="eg">{kind, attempts}</span></div>
+          <p class="sentence">We acted and the world didn’t change: an intent with
+          <a class="cfgv" href="#thresholds" title="cfg max_attempts — live value 2">2</a> attempts
+          and no recorded outcome. <em>Stop retrying this channel; escalate the next one.</em>
+          This rule retired the eight-hour stop-storm class.</p>
+          <pre class="datalog"><b>action_ineffective</b>(Kind,Subj) :- intent(Kind,Subj, attempts:N, outcome:null),
+    N &gt;= <span class="kc">cfg(max_attempts)</span>.</pre>
+          <details class="sql"><summary>show the executed SQL <span class="chev">›</span></summary>
+            <div class="sqlwrap"><button class="copy-btn">copy</button><pre>INSERT OR IGNORE INTO belief (tick_id, stratum, name, subject, value, rule_id, source_fact_ids)
+SELECT t.tick_id, 4, 'action_ineffective', i.kind || ':' || i.subject,
+       json_object('kind', i.kind, 'attempts', i.attempts),
+       'R11', json_array('i' || i.intent_id)
+FROM tick t
+JOIN cfg c ON c.key = 'max_attempts'
+JOIN intent i ON i.outcome IS NULL AND i.attempts &gt;= c.value_int
+WHERE t.tick_id = :tick</pre></div>
+          </details>
+          <p class="meta">reads <span class="mono">intent</span> · cfg <a class="cfgv" href="#thresholds">max_attempts</a> · src <span class="mono">rules.mjs:371</span></p>
+          <div class="conc"><span class="lab">Nothing concluded in range.</span></div>
+        </article>
+
+        <!-- R12 -->
+        <article class="entry" id="r12">
+          <div class="e-head"><span class="rid t4">R12</span><span class="ename">escalate_human</span></div>
+          <div class="marg quiet"><div class="m-top"><span class="m-count">—</span></div></div>
+          <div class="applies">applies to each ticket-phase <span class="eg">(e.g. CTL-722/plan)</span> · derives <span class="eg">{why}</span></div>
+          <p class="sentence">The second line: the diagnostician already ran — or its action proved
+          ineffective — and the state persists. <em>needs-human is a conclusion with a provenance
+          chain now, not a label write lost in a branch.</em></p>
+          <pre class="datalog"><b>escalate_human</b>(T,P,Why) :- ( diagnosis_unresolved(T,P,Why)
+    ; wake_diagnostician(T,P,Why), action_ineffective("wake-diagnostician", T/P) ).</pre>
+          <details class="sql"><summary>show the executed SQL <span class="chev">›</span></summary>
+            <div class="sqlwrap"><button class="copy-btn">copy</button><pre>INSERT OR IGNORE INTO belief (tick_id, stratum, name, subject, value, rule_id, source_fact_ids)
+SELECT t.tick_id, 4, 'escalate_human', wd.subject,
+       json_object('why', json_extract(wd.value, '$.reason')),
+       'R12', json_array('b' || wd.belief_id, 'b' || ai.belief_id)
+FROM tick t
+JOIN belief wd ON wd.tick_id = t.tick_id AND wd.name = 'wake_diagnostician'
+JOIN belief ai ON ai.tick_id = t.tick_id AND ai.name = 'action_ineffective'
+              AND ai.subject = 'wake-diagnostician:' || wd.subject
+WHERE t.tick_id = :tick</pre></div>
+          </details>
+          <p class="meta">reads wake_diagnostician <a href="#r10">[R10]</a>, action_ineffective <a href="#r11">[R11]</a> · src <span class="mono">rules.mjs:390</span></p>
+          <div class="conc"><span class="lab">Nothing concluded in range</span> <em>— the ladder is holding.</em></div>
+        </article>
+      </section>
+
+      <!-- ════ S5 ════ -->
+      <section class="stratum" id="s5">
+        <div class="sec-label"><span class="n">Stratum 5</span> Dependencies — recursive, no negation</div>
+        <h2>Dependency beliefs</h2>
+        <p class="lede">The only recursion in the program, and it crosses no negation: a
+        transitive-blocker closure over <code>obs_relation</code>, deduped with <b>UNION</b> so even
+        a cyclic graph reaches a fixpoint and halts. These rules read the relation and Linear
+        observations only — no belief is negated here.</p>
+
+        <!-- R13 -->
+        <article class="entry first" id="r13">
+          <div class="e-head"><span class="rid t5">R13</span><span class="ename">blocker_rank</span></div>
+          <div class="marg">
+            <div class="m-top">
+              <svg class="spark" width="48" height="14" viewBox="0 0 48 14"><rect x="0" y="7" width="7" height="7" rx="1" fill="#6f6a5f" opacity=".55"/><rect x="10" y="7" width="7" height="7" rx="1" fill="#6f6a5f" opacity=".55"/><rect x="20" y="8" width="7" height="6" rx="1" fill="#6f6a5f" opacity=".55"/><rect x="30" y="7" width="7" height="7" rx="1" fill="#6f6a5f" opacity=".55"/><rect x="40" y="7" width="7" height="7" rx="1" fill="#6f6a5f" opacity=".8"/></svg>
+              <span class="m-count">5 now</span>
+            </div>
+            <div class="m-sub">oldest held 3d 4h</div>
+          </div>
+          <div class="applies">applies to each ticket <span class="eg">(e.g. CTL-996)</span> · derives <span class="eg">{rank, direct, transitive}</span></div>
+          <p class="sentence">Every ticket with at least one direct blocker gets a rank — <em>the
+          count of its distinct transitive blockers.</em> Direct blockers are a subset of the
+          transitive set; the rank orders the queue’s untangling.</p>
+          <pre class="datalog"><b>blocker_rank</b>(A) :- direct-blocker(A,_).
+rank(A) = |{ B : A depends_on⁺ B }|   <span style="color:var(--ink-faint)">% transitive closure, deduped</span></pre>
+          <details class="sql"><summary>show the executed SQL <span class="chev">›</span></summary>
+            <div class="sqlwrap"><button class="copy-btn">copy</button><pre>INSERT OR IGNORE INTO belief (tick_id, stratum, name, subject, value, rule_id, source_fact_ids)
+
+WITH RECURSIVE
+  edges(dependent, dependency, fact_id) AS (
+    SELECT target_ticket, source_ticket, fact_id
+      FROM obs_relation
+     WHERE tick_id = :tick AND relation_type = 'blocks'
+  ),
+  closure(dependent, dependency, depth) AS (
+    -- base: each direct edge (A depends_on B) is depth 1
+    SELECT dependent, dependency, 1 FROM edges
+    UNION
+    -- step: A depends_on B, B depends_on C  ⇒  A depends_on C
+    SELECT c.dependent, e.dependency, c.depth + 1
+      FROM closure c
+      JOIN edges e ON e.dependent = c.dependency
+     WHERE c.depth &lt; (SELECT COUNT(*) FROM edges) + 1
+  )
+SELECT :tick, 5, 'blocker_rank', cl.dependent,
+       json_object(
+         'rank', COUNT(DISTINCT cl.dependency),
+         'direct', (SELECT json_group_array(e.dependency)
+                      FROM edges e WHERE e.dependent = cl.dependent),
+         'transitive', json_group_array(DISTINCT cl.dependency)),
+       'R13',
+       (SELECT json_group_array('x' || e.fact_id)
+          FROM edges e WHERE e.dependent = cl.dependent)
+FROM closure cl
+GROUP BY cl.dependent</pre></div>
+          </details>
+          <p class="meta">reads <span class="mono">obs_relation</span> · src <span class="mono">rules.mjs:464</span></p>
+          <div class="conc"><span class="lab">Concluding now,</span> about 5 entities:
+            <button class="ent">CTL-996</button> <span class="more">(rank 3)</span>,
+            <button class="ent">CTL-881</button> <span class="more">(rank 2)</span>, <span class="more">+3 more →</span>
+          </div>
+        </article>
+
+        <!-- R14 -->
+        <article class="entry" id="r14">
+          <div class="e-head"><span class="rid t5">R14</span><span class="ename">cycle_detected</span></div>
+          <div class="marg quiet"><div class="m-top"><span class="m-count">—</span></div></div>
+          <div class="applies">applies to each ticket <span class="eg">(e.g. CTL-722)</span> · derives <span class="eg">{members}</span></div>
+          <p class="sentence">A ticket that transitively depends on itself is in a cycle — <em>the
+          closure contains the pair (A,&nbsp;A).</em> The members list names every ticket that loops
+          back; the alert is a derived belief, never a Linear write.</p>
+          <pre class="datalog"><b>cycle_detected</b>(A) :- depends_on⁺(A, A).</pre>
+          <details class="sql"><summary>show the executed SQL <span class="chev">›</span></summary>
+            <div class="sqlwrap"><button class="copy-btn">copy</button><pre>INSERT OR IGNORE INTO belief (tick_id, stratum, name, subject, value, rule_id, source_fact_ids)
+
+WITH RECURSIVE
+  edges(dependent, dependency, fact_id) AS (
+    SELECT target_ticket, source_ticket, fact_id
+      FROM obs_relation
+     WHERE tick_id = :tick AND relation_type = 'blocks'
+  ),
+  closure(dependent, dependency, depth) AS (
+    SELECT dependent, dependency, 1 FROM edges
+    UNION
+    SELECT c.dependent, e.dependency, c.depth + 1
+      FROM closure c
+      JOIN edges e ON e.dependent = c.dependency
+     WHERE c.depth &lt; (SELECT COUNT(*) FROM edges) + 1
+  ),
+  -- A is in a cycle iff (A,A) is in the closure
+  self_cycle(t) AS (SELECT DISTINCT dependent FROM closure WHERE dependent = dependency)
+SELECT :tick, 5, 'cycle_detected', sc.t,
+       json_object('members',
+         (SELECT json_group_array(DISTINCT m) FROM (
+            SELECT sc.t AS m
+            UNION
+            -- every D that A reaches AND that reaches back to A
+            SELECT c1.dependency AS m
+              FROM closure c1
+              JOIN closure c2 ON c2.dependent = c1.dependency
+                             AND c2.dependency = sc.t
+             WHERE c1.dependent = sc.t
+         ))),
+       'R14',
+       (SELECT json_group_array('x' || e.fact_id) FROM edges e)
+FROM self_cycle sc</pre></div>
+          </details>
+          <p class="meta">reads <span class="mono">obs_relation</span> · src <span class="mono">rules.mjs:484</span></p>
+          <div class="conc"><span class="lab">Nothing concluded in range</span> <em>— the dependency graph is acyclic.</em></div>
+        </article>
+
+        <!-- R15 -->
+        <article class="entry" id="r15">
+          <div class="e-head"><span class="rid t5">R15</span><span class="ename">ready</span></div>
+          <div class="marg">
+            <div class="m-top">
+              <svg class="spark" width="48" height="14" viewBox="0 0 48 14"><rect x="0" y="6" width="7" height="8" rx="1" fill="#6f6a5f" opacity=".55"/><rect x="10" y="5" width="7" height="9" rx="1" fill="#6f6a5f" opacity=".55"/><rect x="20" y="6" width="7" height="8" rx="1" fill="#6f6a5f" opacity=".55"/><rect x="30" y="6" width="7" height="8" rx="1" fill="#6f6a5f" opacity=".55"/><rect x="40" y="5" width="7" height="9" rx="1" fill="#6f6a5f" opacity=".8"/></svg>
+              <span class="m-count">7 now</span>
+            </div>
+            <div class="m-sub">oldest held 11h02m</div>
+          </div>
+          <div class="applies">applies to each ticket <span class="eg">(e.g. CTL-1010)</span> · derives <span class="eg">{ready: 1}</span></div>
+          <p class="sentence">A ticket in the eligible Linear state —
+          <a class="cfgv" href="#thresholds" title="cfg eligible_state — live value 'Todo'">'Todo'</a> —
+          with no direct blocker the engine can <em>see</em> to be non-terminal, is ready.
+          <em>An unknown blocker state never counts as blocking: the engine refuses to assert
+          “blocked” from an absence of information.</em></p>
+          <pre class="datalog"><b>ready</b>(A) :- obs_linear(A, <span class="kc">eligible_state</span>),
+    <span class="kn">not</span> exists direct-blocker B of A with obs_linear(B,S), S non-terminal.</pre>
+          <details class="sql"><summary>show the executed SQL <span class="chev">›</span></summary>
+            <div class="sqlwrap"><button class="copy-btn">copy</button><pre>INSERT OR IGNORE INTO belief (tick_id, stratum, name, subject, value, rule_id, source_fact_ids)
+SELECT t.tick_id, 5, 'ready', la.ticket,
+       json_object('ready', 1),
+       'R15',
+       COALESCE(
+         (SELECT json_group_array('x' || r.fact_id)
+            FROM obs_relation r
+           WHERE r.tick_id = t.tick_id AND r.relation_type = 'blocks'
+             AND r.target_ticket = la.ticket),
+         json_array())
+FROM tick t
+JOIN cfg es ON es.key = 'eligible_state'
+JOIN obs_linear la ON la.tick_id = t.tick_id
+                  AND la.state IS NOT NULL
+                  AND la.state = es.value_text
+WHERE t.tick_id = :tick
+  AND NOT EXISTS (
+    -- a direct blocker B of A (obs_relation source=B, target=A) whose OWN
+    -- obs_linear state this tick is non-terminal
+    SELECT 1
+      FROM obs_relation r
+      JOIN obs_linear lb ON lb.tick_id = t.tick_id
+                        AND lb.ticket = r.source_ticket
+                        AND lb.state IS NOT NULL
+                        AND lb.state NOT IN ('Done','Canceled','Cancelled')
+     WHERE r.tick_id = t.tick_id
+       AND r.relation_type = 'blocks'
+       AND r.target_ticket = la.ticket)</pre></div>
+          </details>
+          <p class="meta">reads <span class="mono">obs_linear</span>, <span class="mono">obs_relation</span> · cfg <a class="cfgv" href="#thresholds">eligible_state</a> · src <span class="mono">rules.mjs:520</span></p>
+          <div class="conc"><span class="lab">Concluding now,</span> about 7 entities:
+            <button class="ent">CTL-1010</button>, <button class="ent">CTL-1024</button>, <button class="ent">CTL-1032</button>, <span class="more">+4 more →</span>
+          </div>
+        </article>
+      </section>
+
+      <!-- ════ S6 ════ -->
+      <section class="stratum" id="s6">
+        <div class="sec-label"><span class="n">Stratum 6</span> FSM advancement — derive-only</div>
+        <h2>Advancement prediction</h2>
+        <p class="lede"><code>advance_to</code> is a <b>prediction</b> — the phase the procedural
+        scheduler would dispatch next — never a dispatch, a signal delete, or a Linear write. The
+        rank and successor maps below are compiled from <code>phase-fsm.mjs</code> at module load;
+        a drift test pins them byte-equal to the live FSM.</p>
+
+        <!-- R16 -->
+        <article class="entry first" id="r16">
+          <div class="e-head"><span class="rid t6">R16</span><span class="ename">advance_to</span></div>
+          <div class="marg">
+            <div class="m-top">
+              <svg class="spark" width="48" height="14" viewBox="0 0 48 14"><rect x="0" y="8" width="7" height="6" rx="1" fill="#6f6a5f" opacity=".55"/><rect x="10" y="7" width="7" height="7" rx="1" fill="#6f6a5f" opacity=".55"/><rect x="20" y="8" width="7" height="6" rx="1" fill="#6f6a5f" opacity=".55"/><rect x="30" y="6" width="7" height="8" rx="1" fill="#6f6a5f" opacity=".55"/><rect x="40" y="7" width="7" height="7" rx="1" fill="#6f6a5f" opacity=".8"/></svg>
+              <span class="m-count">5 now</span>
+            </div>
+            <div class="m-sub">oldest held 4m12s</div>
+          </div>
+          <div class="applies">applies to each ticket <span class="eg">(e.g. CTL-958)</span> · derives <span class="eg">{from, to}</span> · two arms, mutually exclusive</div>
+          <p class="sentence">The phase the procedural scheduler would dispatch next — <em>a
+          prediction, never a dispatch.</em> Arm <em>a</em> takes the verify&nbsp;→&nbsp;remediate
+          detour while budget remains; arm <em>b</em> walks the normal FSM edge. The shadow
+          comparator logs any disagreement with the live oracle; it acts on nothing.</p>
+          <pre class="datalog"><b>advance_to</b>(A, remediate) :- latest(A, verify, done), obs_verdict(A, fail),   <span style="color:var(--ink-faint)">% arm a</span>
+    obs_cycle(A, N), N &lt; cap(3), <span class="kn">no</span> remediate signal yet.
+<b>advance_to</b>(A, Next) :- latest(A, P, done | skipped@monitor-deploy),          <span style="color:var(--ink-faint)">% arm b</span>
+    next_phase(P, Next), Next != done, <span class="kn">no</span> signal for (A, Next) yet.</pre>
+          <details class="sql"><summary>show the executed SQL <span class="chev">›</span></summary>
+            <div class="sqlwrap"><button class="copy-btn">copy</button><pre>INSERT OR IGNORE INTO belief (tick_id, stratum, name, subject, value, rule_id, source_fact_ids)
+WITH
+  rank(phase, r) AS (VALUES ('triage', 0), ('research', 1), ('plan', 2), ('implement', 3), ('verify', 4), ('review', 5), ('pr', 6), ('monitor-merge', 7), ('monitor-deploy', 8), ('teardown', 9)),
+  nxt(cur, nextp) AS (VALUES ('triage', 'research'), ('research', 'plan'), ('plan', 'implement'), ('implement', 'verify'), ('verify', 'review'), ('review', 'pr'), ('pr', 'monitor-merge'), ('monitor-merge', 'monitor-deploy'), ('monitor-deploy', 'teardown'), ('teardown', 'done')),
+  -- latest(ticket) = the max-FSM-rank phase present in obs_signal this tick.
+  -- remediate is excluded by the rank JOIN (no rank row), matching the oracle's
+  -- PHASES-only latest-selection loop.
+  latest(tick_id, ticket, phase, r) AS (
+    SELECT s.tick_id, s.ticket, s.phase, rk.r
+      FROM obs_signal s
+      JOIN rank rk ON rk.phase = s.phase
+     WHERE s.tick_id = :tick
+       AND rk.r = (SELECT MAX(rk2.r)
+                     FROM obs_signal s2
+                     JOIN rank rk2 ON rk2.phase = s2.phase
+                    WHERE s2.tick_id = s.tick_id AND s2.ticket = s.ticket)
+  ),
+  latest_sig(tick_id, ticket, phase, status, sig_fact_id) AS (
+    SELECT l.tick_id, l.ticket, l.phase, s.status, MIN(s.fact_id)
+      FROM latest l
+      JOIN obs_signal s ON s.tick_id = l.tick_id AND s.ticket = l.ticket AND s.phase = l.phase
+     GROUP BY l.tick_id, l.ticket, l.phase, s.status
+  )
+-- arm A: verify→remediate detour
+SELECT ls.tick_id, 6, 'advance_to', ls.ticket,
+       json_object('from', ls.phase, 'to', 'remediate'),
+       'R16',
+       json_array('s' || ls.sig_fact_id,
+                  (SELECT 'v' || v.fact_id FROM obs_verdict v
+                     WHERE v.tick_id = ls.tick_id AND v.ticket = ls.ticket LIMIT 1),
+                  (SELECT 'c' || c.fact_id FROM obs_cycle c
+                     WHERE c.tick_id = ls.tick_id AND c.ticket = ls.ticket LIMIT 1))
+  FROM latest_sig ls
+ WHERE ls.tick_id = :tick
+   AND ls.phase = 'verify'
+   AND ls.status = 'done'
+   AND EXISTS (SELECT 1 FROM obs_verdict v
+                WHERE v.tick_id = ls.tick_id AND v.ticket = ls.ticket AND v.verdict = 'fail')
+   -- budget left: remediate_count &lt; cap (count==cap-1 advances; count==cap does not)
+   AND COALESCE((SELECT c.remediate_count FROM obs_cycle c
+                  WHERE c.tick_id = ls.tick_id AND c.ticket = ls.ticket LIMIT 1), 0) &lt; 3
+   -- remediate not already dispatched this cycle (no remediate signal present)
+   AND NOT EXISTS (SELECT 1 FROM obs_signal s
+                    WHERE s.tick_id = ls.tick_id AND s.ticket = ls.ticket AND s.phase = 'remediate')
+UNION ALL
+-- arm B: normal FSM edge
+SELECT ls.tick_id, 6, 'advance_to', ls.ticket,
+       json_object('from', ls.phase, 'to', n.nextp),
+       'R16',
+       json_array('s' || ls.sig_fact_id)
+  FROM latest_sig ls
+  JOIN nxt n ON n.cur = ls.phase
+ WHERE ls.tick_id = :tick
+   -- advance-eligible: done, OR monitor-deploy skipped (CTL-703 carve-out)
+   AND ( ls.status = 'done'
+      OR (ls.status = 'skipped' AND ls.phase = 'monitor-deploy') )
+   -- NOT the verify→remediate detour (arm A owns it)
+   AND NOT ( ls.phase = 'verify'
+             AND EXISTS (SELECT 1 FROM obs_verdict v
+                          WHERE v.tick_id = ls.tick_id AND v.ticket = ls.ticket AND v.verdict = 'fail') )
+   -- next non-terminal (teardown→done suppresses the advance off teardown)
+   AND n.nextp &lt;&gt; 'done'
+   -- successor not already dispatched
+   AND NOT EXISTS (SELECT 1 FROM obs_signal s
+                    WHERE s.tick_id = ls.tick_id AND s.ticket = ls.ticket AND s.phase = n.nextp)</pre></div>
+            <div class="sqlnote">the VALUES rows are compiled from phase-fsm.mjs at module load — never a divergent literal.</div>
+          </details>
+          <p class="meta">reads <span class="mono">obs_signal</span>, <span class="mono">obs_verdict</span>, <span class="mono">obs_cycle</span> · FSM maps compiled from <span class="mono">phase-fsm.mjs</span> · src <span class="mono">rules.mjs:610</span></p>
+          <div class="conc"><span class="lab">Concluding now,</span> about 5 entities:
+            <button class="ent">CTL-958</button> <span class="more">(implement → verify)</span>,
+            <button class="ent">CTL-1015</button> <span class="more">(pr → monitor-merge)</span>, <span class="more">+3 more →</span>
+            · <a class="xlink" href="#">see this transition in Process →</a>
+          </div>
+        </article>
+
+        <!-- R17 -->
+        <article class="entry" id="r17">
+          <div class="e-head"><span class="rid t6">R17</span><span class="ename">cycle_exhausted</span></div>
+          <div class="marg">
+            <div class="m-top">
+              <svg class="spark" width="48" height="14" viewBox="0 0 48 14"><rect x="0" y="14" width="7" height="0" rx="1" fill="#6f6a5f" opacity=".55"/><rect x="10" y="14" width="7" height="0" rx="1" fill="#6f6a5f" opacity=".55"/><rect x="20" y="11" width="7" height="3" rx="1" fill="#6f6a5f" opacity=".55"/><rect x="30" y="11" width="7" height="3" rx="1" fill="#6f6a5f" opacity=".55"/><rect x="40" y="11" width="7" height="3" rx="1" fill="#6f6a5f" opacity=".8"/></svg>
+              <span class="m-count">1 now</span>
+            </div>
+            <div class="m-sub">held 38m</div>
+          </div>
+          <div class="applies">applies to each ticket <span class="eg">(e.g. CTL-729)</span> · derives <span class="eg">{phase, remediate_count, cap}</span></div>
+          <p class="sentence">The remediation budget is spent: verify failed again and the cycle
+          count reached its cap of
+          <a class="cfgv" href="#thresholds" title="REMEDIATE_CYCLE_CAP — compiled from the workflow descriptor">3</a>.
+          <em>No advance fires — this belief, not a hidden branch, owns the stall.</em></p>
+          <pre class="datalog"><b>cycle_exhausted</b>(A) :- latest(A, verify, done), obs_verdict(A, fail),
+    obs_cycle(A, N), N &gt;= cap(3).</pre>
+          <details class="sql"><summary>show the executed SQL <span class="chev">›</span></summary>
+            <div class="sqlwrap"><button class="copy-btn">copy</button><pre>INSERT OR IGNORE INTO belief (tick_id, stratum, name, subject, value, rule_id, source_fact_ids)
+WITH
+  rank(phase, r) AS (VALUES ('triage', 0), ('research', 1), ('plan', 2), ('implement', 3), ('verify', 4), ('review', 5), ('pr', 6), ('monitor-merge', 7), ('monitor-deploy', 8), ('teardown', 9)),
+  latest(tick_id, ticket, phase, r) AS (
+    SELECT s.tick_id, s.ticket, s.phase, rk.r
+      FROM obs_signal s
+      JOIN rank rk ON rk.phase = s.phase
+     WHERE s.tick_id = :tick
+       AND rk.r = (SELECT MAX(rk2.r)
+                     FROM obs_signal s2
+                     JOIN rank rk2 ON rk2.phase = s2.phase
+                    WHERE s2.tick_id = s.tick_id AND s2.ticket = s.ticket)
+  ),
+  latest_sig(tick_id, ticket, phase, status, sig_fact_id) AS (
+    SELECT l.tick_id, l.ticket, l.phase, s.status, MIN(s.fact_id)
+      FROM latest l
+      JOIN obs_signal s ON s.tick_id = l.tick_id AND s.ticket = l.ticket AND s.phase = l.phase
+     GROUP BY l.tick_id, l.ticket, l.phase, s.status
+  )
+SELECT ls.tick_id, 6, 'cycle_exhausted', ls.ticket,
+       json_object('phase', ls.phase, 'remediate_count',
+         COALESCE((SELECT c.remediate_count FROM obs_cycle c
+                    WHERE c.tick_id = ls.tick_id AND c.ticket = ls.ticket LIMIT 1), 0),
+         'cap', 3),
+       'R17',
+       json_array('s' || ls.sig_fact_id,
+                  (SELECT 'v' || v.fact_id FROM obs_verdict v
+                     WHERE v.tick_id = ls.tick_id AND v.ticket = ls.ticket LIMIT 1),
+                  (SELECT 'c' || c.fact_id FROM obs_cycle c
+                     WHERE c.tick_id = ls.tick_id AND c.ticket = ls.ticket LIMIT 1))
+  FROM latest_sig ls
+ WHERE ls.tick_id = :tick
+   AND ls.phase = 'verify'
+   AND ls.status = 'done'
+   AND EXISTS (SELECT 1 FROM obs_verdict v
+                WHERE v.tick_id = ls.tick_id AND v.ticket = ls.ticket AND v.verdict = 'fail')
+   AND COALESCE((SELECT c.remediate_count FROM obs_cycle c
+                  WHERE c.tick_id = ls.tick_id AND c.ticket = ls.ticket LIMIT 1), 0) &gt;= 3</pre></div>
+          </details>
+          <p class="meta">reads <span class="mono">obs_signal</span>, <span class="mono">obs_verdict</span>, <span class="mono">obs_cycle</span> · FSM maps compiled from <span class="mono">phase-fsm.mjs</span> · src <span class="mono">rules.mjs:694</span></p>
+          <div class="conc"><span class="lab">Concluding now,</span> about 1 entity:
+            <button class="ent">CTL-729</button> — remediate_count 3 of cap 3
+            · <a class="xlink" href="#">see this transition in Process →</a>
+          </div>
+        </article>
+      </section>
+
+      <!-- ════ Appendix · thresholds ════ -->
+      <section class="stratum" id="thresholds">
+        <div class="sec-label"><span class="n">Appendix A</span> Thresholds — tuning is data, not code</div>
+        <h2>Eight numbers govern everything above</h2>
+        <p class="lede">Every window and cap is a <code>cfg</code> fact, read live at render — so a
+        derivation can always show the exact number that was compared, as it was at that tick.
+        Rows whose consuming rule fired this tick are tinted.</p>
+
+        <table class="thr">
+          <thead><tr><th>key</th><th style="text-align:right">live value</th><th style="padding-left:14px">plainly</th><th>consumed by</th></tr></thead>
+          <tbody>
+            <tr class="fired"><td class="k">never_started_ms</td><td class="v">120,000</td><td class="p" style="padding-left:14px">a healthy first turn arrives in under a third of a second; two minutes is generous</td><td class="c"><a href="#r4">R4</a></td></tr>
+            <tr><td class="k">lease_window_build_ms</td><td class="v">1,800,000</td><td class="p" style="padding-left:14px">a build phase silent for thirty minutes has stopped building</td><td class="c"><a href="#r5">R5</a> <a href="#r6">R6</a></td></tr>
+            <tr><td class="k">lease_window_doc_ms</td><td class="v">2,700,000</td><td class="p" style="padding-left:14px">research and planning think longer between keystrokes — forty-five minutes</td><td class="c"><a href="#r5">R5</a> <a href="#r6">R6</a></td></tr>
+            <tr class="fired"><td class="k">max_parallel</td><td class="v">6</td><td class="p" style="padding-left:14px">leases the host may hold at once — the capacity unit</td><td class="c"><a href="#r8">R8</a></td></tr>
+            <tr class="fired"><td class="k">session_cap</td><td class="v">10</td><td class="p" style="padding-left:14px">background sessions the host may carry, wedged or not — the over-spawn guard</td><td class="c"><a href="#r8">R8</a></td></tr>
+            <tr><td class="k">diag_cooldown_ms</td><td class="v">600,000</td><td class="p" style="padding-left:14px">one diagnostician wake per entity per ten minutes — storms unrepresentable</td><td class="c"><a href="#r10">R10</a></td></tr>
+            <tr><td class="k">max_attempts</td><td class="v">2</td><td class="p" style="padding-left:14px">twice with no observed effect, then stop and climb the ladder</td><td class="c"><a href="#r11">R11</a></td></tr>
+            <tr class="fired"><td class="k">eligible_state</td><td class="v">'Todo'</td><td class="p" style="padding-left:14px">the Linear state from which work may be admitted</td><td class="c"><a href="#r15">R15</a></td></tr>
+          </tbody>
+        </table>
+        <p class="tbl-note">Values are read live from <code>/api/beliefs/cfg</code> at render
+        (<code>hb_cursor:*</code> bookkeeping keys filtered out). A key missing from the database
+        renders its code default with a <code>(default)</code> suffix — the page never hardcodes a
+        number the engine isn’t actually using. The <i>consumed by</i> column is computed from the
+        rules manifest, so it cannot drift from the rules.</p>
+      </section>
+
+      <!-- ════ Appendix · how to read ════ -->
+      <section class="stratum legend" id="legend">
+        <div class="sec-label"><span class="n">Appendix B</span> How to read this page</div>
+        <h2>The vocabulary, in six words</h2>
+
+        <p><b>Belief.</b> A conclusion the engine derived this tick, stored as a row with full
+        provenance — the rule that fired and every fact and belief it consumed. Beliefs are
+        re-derived fresh every five seconds; nothing is remembered, everything is re-earned.</p>
+
+        <p><b>Entity.</b> What a belief is <b>about</b> — a ticket-phase
+        (<span class="mono">CTL-722/plan</span>), a ticket (<span class="mono">CTL-722</span>), or a
+        host (<span class="mono">host:mini</span>). The storage column and the API keep their old
+        name, <span class="mono">subject</span> (<span class="mono">?subject=</span> still works);
+        this page retires the word because in logic it has no stable meaning.</p>
+
+        <p><b>Because (premises).</b> The rule’s body — the conditions that all held. Every
+        derivation on this page reads as a sentence: <i>concluded X about E because…</i>, followed
+        by the premises, one per line.</p>
+
+        <p><b><span class="ng">¬</span> Checked, absent.</b> Stratified negation: an absence the
+        engine explicitly went looking for and documented — never an absence it failed to notice.
+        Negative premises carry the same weight as positive ones; strata exist precisely so that a
+        rule only negates a set that is already complete.</p>
+
+        <p><b>Threshold.</b> A <span class="cf">cfg</span> fact — a live number with a humane
+        reading, listed in Appendix A. Rules compare against thresholds by joining the
+        <span class="mono">cfg</span> table, so retuning the daemon is a config edit with
+        provenance, not a deploy.</p>
+
+        <p><b>Concludes / derives.</b> The rule’s head — what it asserts when the premises hold.
+        Some rules derive a value (<span class="mono">{free_slots: 4}</span>); for others the
+        existence of the belief is itself the verdict, written here as <i>derives no value — its
+        existence is the verdict</i>.</p>
+
+        <p><b>Stratum.</b> The evaluation order. S1 inserts before S2 reads it, and so on through
+        S6 — which is the entire reason the ¬ above is sound. Hairlines in this book appear only at
+        stratum boundaries, because they are the only boundaries that matter.</p>
+      </section>
+
+      <footer>
+        Route <code>/rules</code> · surface key <code>rulebook</code> · <kbd>g r</kbd> opens this
+        page · <kbd>j</kbd>/<kbd>k</kbd> move between entries · <kbd>Enter</kbd> expands
+        conclusions · <kbd>s</kbd> toggles SQL · deep links: <code>?rule=R4</code>
+        <code>?subject=CTL-722/plan</code> <code>?belief=wedged_never_started</code>
+        <code>?tick=6951</code> (the API keeps the name <code>subject</code>; only the display
+        vocabulary changed).<br>
+        Generated from the CTL-1063 compiler manifest over
+        <code>plugins/dev/scripts/execution-core/beliefs/rules.mjs</code> — prose, Datalog,
+        applies-to, reads/negates, cfg keys and src refs all come from one constant; there is no
+        second copy to drift. An unknown <code>rule_id</code> renders an honest generic entry.
+        Recording dark renders this same book with quiet margins. Incident facts: host
+        <code>mini</code>, 2026-06-09, tick #6951.
+      </footer>
+    </main>
+
+    <!-- E · marginalia gutter (space reserved; entries position into it) -->
+    <div></div>
+  </div>
+</div>
+
+<script>
+(function(){
+  // ── scrollspy for the margin TOC ──
+  var links = Array.prototype.slice.call(document.querySelectorAll('.toc a'));
+  var secs = links.map(function(a){ return document.querySelector(a.getAttribute('href')); });
+  function spy(){
+    var y = window.scrollY + 160, active = 0;
+    for (var i = 0; i < secs.length; i++) if (secs[i] && secs[i].offsetTop <= y) active = i;
+    links.forEach(function(a, i){ a.classList.toggle('active', i === active); });
+  }
+  window.addEventListener('scroll', spy, {passive:true});
+  spy();
+
+  // ── "always show SQL" preference (persisted) ──
+  var pref = document.getElementById('sqlpref');
+  function applySqlPref(on){
+    document.querySelectorAll('details.sql').forEach(function(d){ d.open = on; });
+  }
+  try {
+    var saved = localStorage.getItem('rulebook-sql-pref') === '1';
+    pref.checked = saved; if (saved) applySqlPref(true);
+  } catch(e){}
+  pref.addEventListener('change', function(){
+    applySqlPref(pref.checked);
+    try { localStorage.setItem('rulebook-sql-pref', pref.checked ? '1' : '0'); } catch(e){}
+  });
+
+  // ── copy affordance ──
+  document.querySelectorAll('.copy-btn').forEach(function(btn){
+    btn.addEventListener('click', function(ev){
+      ev.preventDefault();
+      var pre = btn.parentElement.querySelector('pre');
+      if (navigator.clipboard) navigator.clipboard.writeText(pre.textContent).catch(function(){});
+      btn.textContent = 'copied';
+      setTimeout(function(){ btn.textContent = 'copy'; }, 1200);
+    });
+  });
+
+  // ── entity click → expand derivation in place (R4 demo) ──
+  document.querySelectorAll('.conc .ent[data-deriv]').forEach(function(ent){
+    ent.addEventListener('click', function(){
+      var d = document.getElementById(ent.getAttribute('data-deriv'));
+      if (!d) return;
+      var nowHidden = d.classList.toggle('hidden');
+      ent.classList.toggle('open', !nowHidden);
+      if (!nowHidden) d.scrollIntoView({block:'nearest'});
+    });
+  });
+
+  // ── j/k entry navigation · s toggles SQL · Enter expands conclusions ──
+  var entries = Array.prototype.slice.call(document.querySelectorAll('.entry'));
+  var idx = -1;
+  function focusEntry(i){
+    if (idx >= 0) entries[idx].classList.remove('focused');
+    idx = Math.max(0, Math.min(entries.length - 1, i));
+    entries[idx].classList.add('focused');
+    entries[idx].scrollIntoView({block:'center'});
+  }
+  document.addEventListener('keydown', function(ev){
+    if (ev.target.tagName === 'INPUT' || ev.metaKey || ev.ctrlKey || ev.altKey) return;
+    if (ev.key === 'j') focusEntry(idx + 1);
+    else if (ev.key === 'k') focusEntry(idx - 1);
+    else if (ev.key === 's' && idx >= 0) {
+      var ds = entries[idx].querySelectorAll('details.sql');
+      var anyOpen = Array.prototype.some.call(ds, function(d){ return d.open; });
+      ds.forEach(function(d){ d.open = !anyOpen; });
+      ev.preventDefault();
+    } else if (ev.key === 'Enter' && idx >= 0) {
+      var first = entries[idx].querySelector('.conc .ent[data-deriv]');
+      if (first) first.click();
+    }
+  });
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,864 @@
+<!doctype html>
+<html lang="en" class="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>CTL-1003 · Execution — orch-monitor</title>
+<style>
+  /* ─── tokens (board-tokens.ts + app.css .dark, verbatim) ───────────── */
+  :root{
+    --chrome:#0e1116; --canvas:#181d24; --subtle:#20262f; --card:#2b333d;
+    --elev:#39424f; --hover:#434d5b;
+    --border:rgba(255,255,255,0.11); --border-sub:rgba(255,255,255,0.07);
+    --fg:#edf1f7; --muted:#9ba6b5; --dim:#6e7a8a;
+    --green:#41bd7d; --blue:#5e9ee8; --red:#e36b6b; --yellow:#d9a843;
+    --purple:#a98ee3; --info:#4ea1ff; --live:#53cde2;
+    /* canonical PHASE map (board-tokens.ts) */
+    --ph-triage:#8492a4; --ph-research:#5e9ee8; --ph-plan:#a98ee3;
+    --ph-implement:#45c08a; --ph-verify:#dba14f; --ph-remediate:#d98ab2;
+    --ph-review:#cdb84e; --ph-pr:#45bcab; --ph-mm:#5e9ee8; --ph-md:#41bd7d;
+    --ph-teardown:#788596; --ph-stalled:#d9a843; --ph-failed:#e36b6b;
+    --shadow-card:inset 0 1px 0 rgba(255,255,255,0.07), 0 1px 4px rgba(0,0,0,0.35);
+    --shadow-elev:inset 0 1px 0 rgba(255,255,255,0.06), 0 8px 24px rgba(0,0,0,0.45);
+    --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif;
+    --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;padding:0}
+  body{background:var(--canvas);color:var(--fg);font-family:var(--sans);
+       -webkit-font-smoothing:antialiased;min-width:980px}
+  .mono{font-family:var(--mono)}
+  a{text-decoration:none}
+
+  /* app.css keyframes, verbatim */
+  @keyframes gantt-pulse{0%,100%{opacity:.2}50%{opacity:.95}}
+  @keyframes catalystLivePing{
+    0%{box-shadow:0 0 0 0 rgba(83,205,226,.6)}
+    70%{box-shadow:0 0 0 6px rgba(83,205,226,0)}
+    100%{box-shadow:0 0 0 0 rgba(83,205,226,0)}}
+
+  .app{display:flex;min-height:100vh}
+
+  /* ─── 2a sidebar ───────────────────────────────────────────────────── */
+  .sidebar{width:220px;flex:0 0 220px;background:var(--chrome);
+    border-right:1px solid var(--border-sub);padding:10px 10px 12px;
+    display:flex;flex-direction:column;gap:2px;font-size:12.5px}
+  .brand{display:flex;align-items:center;gap:8px;padding:4px 8px 12px}
+  .brand .mark{width:20px;height:20px;border-radius:5px;
+    background:linear-gradient(135deg,#5e9ee8,#a98ee3);
+    display:flex;align-items:center;justify-content:center;
+    font-size:11px;font-weight:700;color:#0e1116}
+  .brand .bn{font-weight:600;font-size:13px;letter-spacing:.2px}
+  .brand .bs{font-size:10px;color:var(--dim);font-family:var(--mono)}
+  .ngroup{margin-top:10px}
+  .nglabel{display:flex;align-items:center;gap:6px;padding:2px 8px 4px;
+    font-size:10px;font-weight:600;letter-spacing:1.1px;color:var(--dim);
+    text-transform:uppercase}
+  .nglabel .chev{margin-left:auto;opacity:.55;font-size:8px}
+  .nglabel .gdot{width:7px;height:7px;border-radius:50%}
+  .nitem{display:flex;align-items:center;gap:9px;padding:5.5px 8px;border-radius:6px;
+    color:var(--muted);cursor:default;line-height:1}
+  .nitem svg{width:14px;height:14px;flex:0 0 14px;opacity:.85}
+  .nitem:hover{background:rgba(255,255,255,0.03)}
+  .nitem.active{background:var(--subtle);color:var(--fg)}
+  .nitem.active svg{color:var(--blue)}
+  .nitem.soon{opacity:.5}
+  .sb-foot{margin-top:auto;padding:9px 8px 0;border-top:1px solid var(--border-sub);
+    display:flex;align-items:center;gap:7px;font-size:10px;color:var(--dim);
+    font-family:var(--mono)}
+  .sb-foot .hdot{width:6px;height:6px;border-radius:50%;background:var(--green)}
+
+  .main{flex:1;min-width:0;display:flex;flex-direction:column}
+
+  /* ─── 2b header (the SINGLE h-12 strip) ────────────────────────────── */
+  .topbar{height:48px;flex:0 0 48px;background:var(--chrome);
+    border-bottom:1px solid var(--border);display:flex;align-items:center;
+    padding:0 14px;gap:10px}
+  .sbtrigger{width:26px;height:26px;border-radius:6px;border:0;background:transparent;
+    color:var(--muted);display:flex;align-items:center;justify-content:center;cursor:default}
+  .sbtrigger:hover{background:rgba(255,255,255,0.05);color:var(--fg)}
+  .crumb{display:flex;align-items:center;gap:8px;font-size:12.5px;color:var(--muted)}
+  .crumb .back{color:var(--muted);cursor:pointer}
+  .crumb .back:hover{color:var(--fg);text-decoration:underline}
+  .crumb .sep{opacity:.45;font-size:11px}
+  .crumb .ck{font-family:var(--mono);color:var(--fg);font-size:12px}
+  .top-right{margin-left:auto;display:flex;align-items:center;gap:6px}
+  .pager{font-family:var(--mono);font-size:11px;color:var(--muted);margin-right:2px}
+  .ghosticon{width:24px;height:24px;border-radius:6px;border:1px solid var(--border-sub);
+    background:transparent;color:var(--muted);display:flex;align-items:center;
+    justify-content:center;cursor:default;padding:0}
+  .ghosticon:hover{color:var(--fg);border-color:var(--border)}
+  .ghosticon svg{width:13px;height:13px}
+  .kchip{font-family:var(--mono);font-size:10.5px;color:var(--muted);
+    border:1px solid var(--border-sub);border-radius:6px;padding:4px 8px;
+    background:transparent;margin-left:6px;cursor:default}
+
+  /* ─── 2d body: reading column + rail ───────────────────────────────── */
+  .body{flex:1;display:flex;align-items:flex-start;background:var(--canvas)}
+  .readwrap{flex:1;min-width:0}
+  .col{max-width:680px;margin:0 auto;padding-top:24px;padding-bottom:56px}
+
+  /* ─── 3 reading header ─────────────────────────────────────────────── */
+  h1.tt{margin:0 0 14px;color:var(--fg);letter-spacing:-0.01em;
+    font:600 21px/1.35 var(--sans)}
+  .typepill{margin-left:10px;vertical-align:3px;display:inline-block;
+    font-size:11px;font-weight:500;color:var(--red);
+    background:rgba(227,107,107,0.14);border:1px solid rgba(227,107,107,0.4);
+    border-radius:5px;padding:1px 7px;line-height:1.5}
+  .statusrow{display:flex;align-items:center;gap:14px;flex-wrap:wrap;font-size:12px}
+  .statedot{width:8px;height:8px;border-radius:50%;background:var(--info);
+    display:inline-block}
+  .statetxt{color:var(--info);font-weight:500}
+  .phasechip{display:inline-flex;align-items:center;gap:6px;height:22px;
+    padding:0 10px;border-radius:999px;border:1px solid var(--border);
+    background:transparent;color:var(--muted);font-size:12px;cursor:default}
+  .phasechip .pdot{width:8px;height:8px;border-radius:50%;background:var(--ph-verify)}
+  .prio{display:inline-flex;align-items:flex-end;gap:5px}
+  .prio .bars{display:inline-flex;align-items:flex-end;gap:1.5px;height:12px}
+  .prio .bars i{display:block;width:3px;background:var(--muted);border-radius:1px}
+  .prio .ptxt{color:var(--muted)}
+  .scopechip{font-family:var(--mono);font-size:11px;color:var(--muted);
+    border:1px solid var(--border-sub);border-radius:5px;padding:1.5px 7px}
+  .linlink{font-family:var(--mono);font-size:12px;color:var(--info)}
+
+  /* ─── 4 PillTabs ───────────────────────────────────────────────────── */
+  .tabs{margin-top:20px;display:flex;align-items:center;gap:4px}
+  .tab{height:28px;padding:0 12px;border-radius:6px;border:1px solid transparent;
+    background:transparent;color:var(--muted);font-size:12px;font-weight:500;
+    font-family:var(--sans);cursor:default;display:inline-flex;align-items:center}
+  .tab:hover{color:var(--fg)}
+  .tab.active{background:var(--elev);border-color:var(--border);color:var(--fg);
+    box-shadow:0 1px 2px rgba(0,0,0,0.3)}
+  .tabbody{padding-top:16px}
+
+  /* section label idiom */
+  .seclabel{display:flex;align-items:center;gap:9px;
+    font:10px var(--mono);letter-spacing:1px;color:var(--muted);
+    text-transform:uppercase;margin:0 0 8px}
+  .bchip{font-family:var(--mono);font-size:10px;color:var(--dim);
+    border:1px solid var(--border-sub);border-radius:5px;padding:2px 6px;
+    text-transform:none;letter-spacing:0}
+  .maplink{margin-left:auto;font-family:var(--mono);font-size:10px;
+    color:var(--blue);letter-spacing:0;text-transform:none;cursor:pointer}
+  .maplink:hover{text-decoration:underline}
+
+  /* ─── 5a NOW verdict strip ─────────────────────────────────────────── */
+  .nowcard{background:var(--card);border:1px solid var(--border-sub);
+    border-radius:8px;padding:12px 14px;box-shadow:var(--shadow-card);
+    display:flex;align-items:flex-start;gap:11px}
+  .nowdot{width:8px;height:8px;border-radius:50%;background:var(--live);
+    flex:0 0 8px;margin-top:5px;animation:catalystLivePing 1.9s infinite}
+  .nowprose{font-size:13px;line-height:1.6;color:var(--fg);flex:1}
+  .nowprose .m{font-family:var(--mono);font-size:12px;color:var(--fg)}
+  .nowprose .dimt{color:var(--muted)}
+  .nowprose .failt{color:var(--red)}
+  .hostchip{font-family:var(--mono);font-size:10px;color:var(--fg);opacity:.85;
+    border:1px solid var(--border-sub);border-radius:5px;padding:2px 8px;
+    flex:0 0 auto;margin-top:2px}
+
+  /* ─── 5b/5c the 1056 breakout band ─────────────────────────────────── */
+  .breakout{width:100%;margin:22px 0 0}
+  /* round-3: summary / artifacts / exceptions */
+  .story{margin-top:18px;font-size:13.5px;line-height:1.62;color:var(--ink);max-width:64ch}
+  .story .m{font-family:var(--mono);font-size:12px}
+  .story b{font-weight:600}
+  .proclink{margin-top:10px;font-size:12px;color:var(--ink-dim)}
+  .proclink a{color:var(--accent);text-decoration:none;cursor:pointer}
+  .artrow,.exrow{display:flex;align-items:center;gap:10px;padding:7px 2px;border-bottom:1px solid var(--border-sub);font-size:12.5px}
+  .artrow:last-child,.exrow:last-child{border-bottom:none}
+  .adot{width:7px;height:7px;border-radius:2px;flex:0 0 7px;background:var(--hc,#8492a4)}
+  .aname{font-weight:550;white-space:nowrap}
+  .apath{font-family:var(--mono);font-size:11px;color:var(--ink-dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;min-width:0}
+  .ameta{font-family:var(--mono);font-size:10.5px;color:var(--ink-dim);white-space:nowrap}
+  .aopen{font-size:11px;color:var(--accent);white-space:nowrap;cursor:pointer}
+  .edot{width:8px;height:8px;border-radius:50%;flex:0 0 8px;margin-top:1px}
+  .edot.warn{background:#dba14f}.edot.bad{background:#e36b6b}.edot.ok{background:#45c08a}
+  .exrow{align-items:flex-start}
+  .extime{font-family:var(--mono);font-size:10.5px;color:var(--ink-dim);flex:0 0 78px;padding-top:1px}
+  .extext{flex:1;min-width:0;line-height:1.5}
+  .extext .m{font-family:var(--mono);font-size:11px}
+  .exstate{font-family:var(--mono);font-size:10px;padding:1px 7px;border-radius:9px;white-space:nowrap;margin-top:1px}
+  .exstate.open{color:#dba14f;background:rgba(219,161,79,.12);border:1px solid rgba(219,161,79,.3)}
+  .exstate.res{color:#45c08a;background:rgba(69,192,138,.10);border:1px solid rgba(69,192,138,.28)}
+
+
+  .strip{position:relative;overflow:hidden;width:1056px;height:200px;
+    background:var(--subtle);border:1px solid var(--border-sub);border-radius:8px;
+    background-image:radial-gradient(rgba(255,255,255,0.045) 1px,transparent 1px);
+    background-size:22px 22px;background-position:4px 6px}
+  .strip svg.edges{position:absolute;inset:0;width:1056px;height:200px;
+    pointer-events:none}
+  .node{position:absolute;width:82px;height:36px;background:var(--card);
+    border:1px solid rgba(255,255,255,0.08);border-left:3px solid var(--pc,#8492a4);
+    border-radius:6px;padding:4px 3px 4px 7px;z-index:3}
+  .node .nl{font-size:11.5px;font-weight:600;color:var(--fg);line-height:1.1;
+    white-space:nowrap}
+  .node .nl.sm{font-size:9.5px;padding-top:1px}
+  .node .ns{font-family:var(--mono);font-size:8.5px;color:var(--dim);margin-top:3px;
+    white-space:nowrap;letter-spacing:-.1px}
+  .node.dimmed{opacity:.45}
+  .node.current{width:88px;box-shadow:0 0 0 2px var(--live), 0 0 14px rgba(83,205,226,.18)}
+  .node.current .ns{color:#bfe9f2;font-size:8px;letter-spacing:-.3px}
+  .curdot{position:absolute;width:8px;height:8px;border-radius:50%;
+    background:var(--live);right:-4px;top:-4px;z-index:4;
+    animation:catalystLivePing 1.9s infinite}
+  .pill{position:absolute;height:24px;border-radius:12px;border:1px solid var(--border);
+    font-family:var(--mono);font-size:9.5px;color:var(--dim);display:flex;
+    align-items:center;justify-content:center;padding:0 4px;z-index:3;
+    background:var(--card)}
+  .pill.donep{border-color:rgba(65,189,125,.4);color:var(--green);
+    background:rgba(65,189,125,.08);opacity:.45}
+  .pill.stalledp{border-color:rgba(227,107,107,.5);color:var(--red);
+    background:rgba(227,107,107,.09)}
+  .gchip2{position:absolute;font-family:var(--mono);font-size:10px;
+    color:var(--dim);background:#1c222b;border:1px solid var(--border-sub);
+    border-radius:5px;padding:2px 6px;white-space:nowrap;z-index:5;
+    transform:translateX(-50%)}
+  .gchip2.redc{color:var(--red);border-color:rgba(227,107,107,.35);
+    background:rgba(227,107,107,.07)}
+  .ts{position:absolute;font-family:var(--mono);font-size:9.5px;color:var(--dim);
+    transform:translateX(-50%);z-index:2}
+  .edgelabel{position:absolute;font-family:var(--mono);font-size:9px;
+    color:var(--dim);z-index:2;white-space:nowrap}
+  .stall-label{position:absolute;font-family:var(--mono);font-size:10px;
+    color:var(--red);transform:translateX(-50%);z-index:4;white-space:nowrap}
+  .cyclebadge{position:absolute;right:-10px;top:-10px;font-family:var(--mono);
+    font-size:9px;color:var(--ph-remediate);background:var(--elev);
+    border:1px solid rgba(217,138,178,.45);border-radius:8px;padding:1.5px 6px;z-index:5}
+  .reviveglyph{position:absolute;font-family:var(--mono);font-size:9px;
+    color:var(--dim);z-index:5;background:#1c222b;border:1px solid var(--border-sub);
+    border-radius:4px;padding:0.5px 4px}
+  .siding{position:absolute;border:1.5px dashed rgba(139,149,163,.55);
+    border-radius:7px;background:rgba(139,149,163,.04);color:var(--dim);
+    font-family:var(--mono);font-size:10px;display:flex;align-items:center;
+    justify-content:center;z-index:3}
+
+  /* ─── 5c gantt (ticket-gantt.tsx idiom) ────────────────────────────── */
+  .ganttwrap{margin-top:10px}
+  .gantt{font-family:var(--mono);padding:8px 10px;border-radius:6px;
+    background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.07)}
+  .gaxis{position:relative;height:16px;margin:0 224px 2px 82px;
+    border-bottom:1px solid rgba(255,255,255,0.08)}
+  .gaxis .tick{position:absolute;top:0;transform:translateX(-50%);
+    font-size:9px;color:rgba(255,255,255,0.3);white-space:nowrap}
+  .grow2{display:flex;align-items:center;gap:8px;margin-bottom:5px}
+  .glabel{width:74px;flex-shrink:0;font-size:10px;color:rgba(255,255,255,0.55);
+    overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:right;
+    padding-right:6px}
+  .gtrack{flex:1;position:relative;height:16px;border-radius:3px;
+    background:rgba(255,255,255,0.05)}
+  .gbar{position:absolute;top:0;bottom:0;border-radius:3px;opacity:.78}
+  .gbar.run{opacity:.95}
+  .gcap{position:absolute;inset:0 0 0 auto;width:3px;
+    background:rgba(255,255,255,0.45);border-radius:0 3px 3px 0;
+    animation:gantt-pulse 1.4s ease-in-out infinite}
+  .gdur{width:48px;flex-shrink:0;font-size:10px;opacity:.4;text-align:right;
+    white-space:nowrap}
+  .gcost{width:56px;flex-shrink:0;font-size:10px;text-align:right;
+    white-space:nowrap;color:rgba(255,255,255,0.55)}
+  .gcost.none{color:rgba(255,255,255,0.18)}
+  .gmodel{width:96px;flex-shrink:0;font-size:10px;opacity:.6;text-align:right;
+    white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .gmodel.none{opacity:.28}
+  .gfoot{font-size:11px;color:var(--dim);padding:4px 10px;opacity:.85;
+    font-family:var(--sans)}
+
+  /* ─── 5d hop log (back in the 680 column) ──────────────────────────── */
+  .hoplog{margin-top:26px}
+  .hrow{display:grid;grid-template-columns:14px minmax(180px,1fr) 64px 84px 40px 52px;
+    gap:10px;align-items:center;padding:9px 8px;
+    border-bottom:1px solid rgba(255,255,255,0.05);border-radius:6px}
+  .hrow:hover{background:rgba(255,255,255,0.025)}
+  .hdot{width:8px;height:8px;border-radius:50%;background:var(--hc,#8492a4)}
+  .hdot.now{background:transparent;border:2px solid var(--live);width:9px;height:9px;
+    box-shadow:0 0 6px rgba(83,205,226,.4)}
+  .hedge{font-family:var(--mono);font-size:12px;color:var(--fg);display:flex;
+    align-items:center;gap:8px;white-space:nowrap}
+  .hedge .dimt{color:var(--dim)}
+  .hedge .x3{font-family:var(--mono);font-size:9px;color:var(--ph-remediate);
+    border:1px solid rgba(217,138,178,.45);background:rgba(217,138,178,.08);
+    border-radius:8px;padding:1px 6px}
+  .schip{font-family:var(--mono);font-size:10px;border-radius:5px;padding:2.5px 7px;
+    text-align:center;white-space:nowrap;justify-self:start;
+    color:var(--dim);border:1px solid var(--border-sub);background:rgba(255,255,255,0.02)}
+  .schip.run{color:var(--fg);border-color:var(--border);display:inline-flex;
+    align-items:center;gap:5px}
+  .schip.run .rdot{width:6px;height:6px;border-radius:50%;background:var(--live);
+    animation:catalystLivePing 1.9s infinite}
+  .schip.ffix{color:var(--yellow);border-color:rgba(217,168,67,.3);
+    background:rgba(217,168,67,.05)}
+  .hclock{font-family:var(--mono);font-size:11px;color:var(--muted)}
+  .hdur{font-family:var(--mono);font-size:11px;color:var(--fg);opacity:.85}
+  .hmodel{font-family:var(--mono);font-size:9.5px;color:var(--dim);
+    border:1px solid var(--border-sub);border-radius:5px;padding:2px 6px;
+    justify-self:start;white-space:nowrap}
+  .hcaption{font-size:11px;color:var(--dim);margin-top:12px;padding:0 8px;opacity:.85}
+
+  /* ─── 6 right rail ─────────────────────────────────────────────────── */
+  .rail{width:280px;flex:0 0 280px;background:transparent;padding:12px;
+    display:flex;flex-direction:column;gap:10px}
+  .rcard{background:var(--canvas);border:1px solid var(--border);border-radius:8px;
+    padding:12px 14px}
+  .rhead{display:flex;align-items:center;gap:7px}
+  .rhead .rt{font-size:13px;font-weight:500;color:var(--fg)}
+  .rhead .chev{margin-left:auto;color:var(--muted);font-size:9px}
+  .rhead .chev.closed{transform:rotate(-90deg)}
+  .rbody{margin-top:8px}
+  .rulechip{font-family:var(--mono);font-size:9.5px;color:#aab4c2;
+    background:rgba(139,149,163,.13);border:1px solid rgba(139,149,163,.3);
+    border-radius:4px;padding:1px 5px}
+  .whylink{font-family:var(--mono);font-size:10px;color:var(--blue);
+    border:1px solid rgba(94,158,232,.3);border-radius:5px;padding:2px 7px;
+    cursor:pointer;background:rgba(94,158,232,.06);margin-left:auto}
+  .whylink:hover{background:rgba(94,158,232,.14)}
+  .nexthead{font-size:14px;font-weight:600;color:var(--red);line-height:1.35;
+    margin:2px 0 8px}
+  .nextfoot{font-size:11px;color:var(--dim)}
+  .grow{display:grid;grid-template-columns:16px 1fr;gap:8px;align-items:baseline;
+    padding:7px 0;border-bottom:1px solid rgba(255,255,255,0.05)}
+  .grow:last-of-type{border-bottom:0}
+  .gmark{font-family:var(--mono);font-size:12px;text-align:center}
+  .gmark.ok{color:var(--green)} .gmark.bad{color:var(--red)}
+  .gtext{font-size:12.5px;color:var(--fg);line-height:1.5}
+  .gtext .gm{font-family:var(--mono);font-size:11.5px}
+  .gtext .neg{font-family:var(--mono)}
+  .gtext .bad{color:var(--red)}
+  .gsrc{font-family:var(--mono);font-size:9.5px;color:var(--dim);
+    border:1px solid var(--border-sub);border-radius:5px;padding:1px 5px;
+    white-space:nowrap;margin-left:4px}
+  .unblock{margin-top:10px;padding-top:10px;border-top:1px solid rgba(255,255,255,0.06)}
+  .unblock .ul{font-size:10.5px;font-weight:600;letter-spacing:.8px;color:var(--dim);
+    margin-bottom:5px}
+  .unblock .uv{font-size:12px;color:var(--fg);opacity:.85;line-height:1.55}
+  .unblock .uv .m{font-family:var(--mono);font-size:11px}
+  .proprow{display:flex;justify-content:space-between;gap:12px;padding:3px 0;
+    font-size:12px}
+  .proprow .pl{color:var(--muted)}
+  .proprow .pv{font-family:var(--mono);font-size:11px;color:var(--fg);
+    text-align:right;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .proprow .pv.none{color:var(--dim)}
+  .lblrow{display:flex;flex-wrap:wrap;gap:6px}
+  .lpill{font-size:11px;border-radius:999px;padding:2px 9px;border:1px solid;
+    line-height:1.5}
+  .projrow{display:flex;align-items:center;gap:8px;font-size:12.5px;color:var(--fg)}
+  .projrow svg{width:14px;height:14px;color:var(--muted)}
+  .relgroup{font:10px var(--mono);letter-spacing:1px;text-transform:uppercase;
+    color:var(--dim);margin-bottom:6px}
+  .relrow{display:flex;align-items:center;gap:8px;font-size:12.5px;color:var(--fg)}
+  .relrow .ricon{width:10px;height:10px;border-radius:50%;
+    border:2px solid var(--yellow);flex:0 0 10px}
+  .relrow .rk{font-family:var(--mono);font-size:10.5px;color:var(--dim);
+    margin-left:auto}
+
+  /* ─── 2c footer ────────────────────────────────────────────────────── */
+  .appfoot{height:28px;flex:0 0 28px;background:var(--chrome);
+    border-top:1px solid var(--border-sub);display:flex;align-items:center;
+    padding:0 14px;gap:10px}
+  .livedot{width:8px;height:8px;border-radius:50%;background:var(--live);
+    animation:catalystLivePing 1.9s infinite}
+  .livetxt{font-family:var(--mono);font-size:10px;letter-spacing:1.5px;color:var(--live)}
+  .foot-dim{font-family:var(--mono);font-size:10px;color:var(--dim)}
+  .foot-right{margin-left:auto;display:flex;align-items:center;gap:7px}
+  .foot-right .ok{width:6px;height:6px;border-radius:50%;background:var(--green)}
+
+  /* ─── 7 WHY drawer ─────────────────────────────────────────────────── */
+  .whydrawer{position:fixed;right:24px;top:120px;width:560px;z-index:40;
+    background:var(--card);border:1px solid var(--border);border-radius:11px;
+    box-shadow:var(--shadow-elev);padding:14px 16px 13px;display:block}
+  .whydrawer.closed{display:none}
+  .wdhead{display:flex;align-items:center;gap:8px;margin-bottom:11px}
+  .wdhead .wt{font-size:13px;font-weight:600;color:var(--fg)}
+  .wdhead .wsub{font-size:11px;color:var(--dim)}
+  .wdclose{margin-left:auto;background:transparent;border:1px solid var(--border-sub);
+    color:var(--dim);border-radius:5px;width:20px;height:20px;font-size:11px;
+    line-height:1;cursor:pointer}
+  .wdclose:hover{color:var(--fg);border-color:var(--border)}
+  .wtree{font-family:var(--mono);font-size:11px;line-height:1.5;color:var(--fg)}
+  .wtree summary{list-style:none;cursor:pointer;display:flex;align-items:center;
+    gap:7px;flex-wrap:wrap;row-gap:3px}
+  .wtree summary::-webkit-details-marker{display:none}
+  .wtree summary .twist{color:var(--dim);font-size:9px;width:9px}
+  details[open] .twist::before{content:"▾"}
+  details:not([open]) .twist::before{content:"▸"}
+  .beliefdot{color:var(--blue)}
+  .beliefname{color:var(--blue)}
+  .valjson{color:var(--dim);font-size:10px}
+  .wleaf{display:flex;align-items:baseline;gap:7px;padding:4.5px 0 0 2px;
+    flex-wrap:nowrap;white-space:nowrap;font-size:10px}
+  .treeline{color:rgba(139,149,163,.55);flex:0 0 auto}
+  .factchip{font-size:9.5px;color:var(--green);background:rgba(65,189,125,.09);
+    border:1px solid rgba(65,189,125,.35);border-radius:4px;padding:1px 5px;
+    flex:0 0 auto}
+  .cfgchip{font-size:9.5px;color:#aab4c2;background:rgba(139,149,163,.13);
+    border:1px solid rgba(139,149,163,.3);border-radius:4px;padding:1px 5px;
+    flex:0 0 auto}
+  .leaftxt{color:var(--fg);overflow:hidden;text-overflow:ellipsis}
+  .leafts{color:var(--dim);font-size:9px;flex:0 0 auto}
+  .guardok{color:var(--green)}
+  .wlegend{margin-top:11px;padding-top:9px;border-top:1px solid rgba(255,255,255,.07);
+    font-family:var(--mono);font-size:9px;color:var(--dim);display:flex;gap:11px;
+    align-items:center;flex-wrap:wrap}
+  .wlegend .lg{color:var(--green)} .wlegend .lb{color:var(--blue)}
+  .wlegend .ln{border:1px solid var(--border);border-radius:3px;padding:0 4px}
+</style>
+</head>
+<body class="dark">
+<div class="app">
+
+  <!-- ═══ 2a sidebar ═══ -->
+  <aside class="sidebar">
+    <div class="brand">
+      <div class="mark">C</div>
+      <div><div class="bn">Catalyst</div><div class="bs">orch-monitor</div></div>
+    </div>
+
+    <div class="ngroup">
+      <div class="nglabel">Overall <span class="chev">▾</span></div>
+      <div class="nitem"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 12h-6l-2 3h-4l-2-3H2"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/></svg>Inbox</div>
+      <div class="nitem active"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/></svg>Tickets</div>
+      <div class="nitem"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>Workers</div>
+      <div class="nitem"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="10" y1="6" x2="21" y2="6"/><line x1="10" y1="12" x2="21" y2="12"/><line x1="10" y1="18" x2="21" y2="18"/><path d="M4 6h1v4"/><path d="M4 10h2"/><path d="M6 18H4c0-1 2-2 2-3s-1-1.5-2-1"/></svg>Queue</div>
+    </div>
+
+    <div class="ngroup">
+      <div class="nglabel"><span class="gdot" style="background:#5e9ee8"></span>catalyst <span class="chev">▸</span></div>
+    </div>
+    <div class="ngroup" style="margin-top:4px">
+      <div class="nglabel"><span class="gdot" style="background:#a98ee3"></span>adva <span class="chev">▸</span></div>
+    </div>
+
+    <div class="ngroup">
+      <div class="nglabel">Observe <span class="chev">▾</span></div>
+      <div class="nitem soon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>Telemetry</div>
+      <div class="nitem soon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m12 14 4-4"/><path d="M3.34 19a10 10 0 1 1 17.32 0"/></svg>Utilization</div>
+      <div class="nitem soon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12V7H5a2 2 0 0 1 0-4h14v4"/><path d="M3 5v14a2 2 0 0 0 2 2h16v-5"/><path d="M18 12a2 2 0 0 0 0 4h4v-4Z"/></svg>FinOps</div>
+      <div class="nitem soon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="2" width="20" height="8" rx="2"/><rect x="2" y="14" width="20" height="8" rx="2"/><line x1="6" y1="6" x2="6.01" y2="6"/><line x1="6" y1="18" x2="6.01" y2="18"/></svg>Fleet Ops</div>
+      <div class="nitem soon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>DevOps</div>
+    </div>
+
+    <div class="sb-foot"><span class="hdot"></span>mini · daemon ok</div>
+  </aside>
+
+  <div class="main">
+
+    <!-- ═══ 2b header: the SINGLE h-12 strip ═══ -->
+    <header class="topbar">
+      <button class="sbtrigger" title="Toggle sidebar">
+        <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="9" y1="3" x2="9" y2="21"/></svg>
+      </button>
+      <div class="crumb">
+        <span class="back">Board</span><span class="sep">›</span>
+        <span class="ck">CTL-1003</span>
+      </div>
+      <div class="top-right">
+        <span class="pager">3 / 12</span>
+        <button class="ghosticon" title="Previous ticket">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="18 15 12 9 6 15"/></svg>
+        </button>
+        <button class="ghosticon" title="Next ticket">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>
+        </button>
+        <span class="kchip">⌘K</span>
+      </div>
+    </header>
+
+    <!-- ═══ 2d body ═══ -->
+    <div class="body">
+      <div class="readwrap">
+        <div class="col">
+
+          <!-- ═══ 3 reading header ═══ -->
+          <h1 class="tt">Phase-monitor deploy gate hangs on canary timeout<span class="typepill">bug</span></h1>
+          <div class="statusrow">
+            <span style="display:inline-flex;align-items:center;gap:6px">
+              <span class="statedot"></span><span class="statetxt">In Progress</span>
+            </span>
+            <span class="phasechip" title="Phase 5 of 10 — see Process map">
+              <span class="pdot"></span>Verify
+            </span>
+            <span class="prio">
+              <span class="bars"><i style="height:5px"></i><i style="height:8px"></i><i style="height:11px"></i></span>
+              <span class="ptxt">P2</span>
+            </span>
+            <span class="scopechip">5</span>
+            <span style="flex:1"></span>
+            <a class="linlink" href="#">↗ Linear</a>
+          </div>
+
+          <!-- ═══ 4 PillTabs: Spec · Execution · Cost · Activity ═══ -->
+          <div class="tabs">
+            <span class="tab">Spec</span>
+            <span class="tab active">Execution</span>
+            <span class="tab">Cost</span>
+            <span class="tab">Activity</span>
+          </div>
+
+          <div class="tabbody">
+
+            <!-- ═══ 5a NOW verdict strip ═══ -->
+            <div class="nowcard">
+              <span class="nowdot"></span>
+              <div class="nowprose">
+                <span class="m">CTL-1003</span> is in <b>verify</b> <span class="dimt">(4th entry)</span>,
+                running <span class="m">12m</span> on <span class="m">gen 5</span>.
+                Worker live <span class="dimt">(bg <span class="m">7f3a2c1d</span>)</span> on
+                <span class="m">mini</span>. Last verdict:
+                <span class="failt">fail</span> — <span class="m">regression_risk 6 ≥ 5</span>,
+                <span class="m">2 high</span> findings.
+              </div>
+              <span class="hostchip">mini</span>
+            </div>
+
+            <!-- ═══ 5b + 5c the dense 1056 band ═══ -->
+            <div class="breakout">
+
+              <!-- ═══ 5b SUMMARY (round-3: graph dropped — lives on the Process surface) ═══ -->
+              <div class="seclabel">SUMMARY <span class="bchip">[events · signals]</span></div>
+              <div class="story">
+                Entered the pipeline at <span class="m">09:14</span> and flew clean through
+                triage, research, plan and implement — <b>3h27m</b>, producing the research
+                doc, the plan and <span class="m">14 commits</span> on branch
+                <span class="m">CTL-1003</span>. The first verify <b>failed</b>
+                (<span class="m">regression_risk 6 ≥ 5</span>, 2 high findings), starting
+                three fix-and-recheck rounds over <b>2h31m</b>. The longest pause was a
+                <span class="m">28m</span> dispatch cooldown before the current attempt.
+                Now in its <b>4th verify</b>, <span class="m">12m</span> in — one round from
+                the cycle cap, after which the daemon will stop retrying and ask for help.
+              </div>
+              <div class="proclink">Follows the standard nine-phase pipeline · <a>view the process map ↗</a></div>
+
+              <!-- ═══ 5c GANTT ═══ -->
+              <div class="ganttwrap">
+                <div class="seclabel">
+                  EXECUTION
+                  <span class="bchip">[signals]</span>
+                  <span class="bchip">wall-clock 09:14–15:46</span>
+                </div>
+                <div class="gantt">
+                  <div class="gaxis">
+                    <span class="tick" style="left:11.73%">10:00</span>
+                    <span class="tick" style="left:27.04%">11:00</span>
+                    <span class="tick" style="left:42.35%">12:00</span>
+                    <span class="tick" style="left:57.65%">13:00</span>
+                    <span class="tick" style="left:72.96%">14:00</span>
+                    <span class="tick" style="left:88.27%">15:00</span>
+                  </div>
+
+                  <div class="grow2">
+                    <div class="glabel">triage</div>
+                    <div class="gtrack"><div class="gbar" style="left:0%;width:0.51%;background:var(--ph-triage)" title="triage · 09:14–09:16 · 2m"></div></div>
+                    <div class="gdur">2m</div><div class="gcost none">—</div><div class="gmodel none">—</div>
+                  </div>
+                  <div class="grow2">
+                    <div class="glabel">research</div>
+                    <div class="gtrack"><div class="gbar" style="left:1.79%;width:9.69%;background:var(--ph-research)" title="research · 09:21–09:59 · 38m · $0.84"></div></div>
+                    <div class="gdur">38m</div><div class="gcost">$0.84</div><div class="gmodel">sonnet</div>
+                  </div>
+                  <div class="grow2">
+                    <div class="glabel">plan</div>
+                    <div class="gtrack"><div class="gbar" style="left:12.24%;width:9.95%;background:var(--ph-plan)" title="plan · 10:02–10:41 · 39m · $2.31"></div></div>
+                    <div class="gdur">39m</div><div class="gcost">$2.31</div><div class="gmodel">opus</div>
+                  </div>
+                  <div class="grow2">
+                    <div class="glabel">implement</div>
+                    <div class="gtrack"><div class="gbar" style="left:22.19%;width:22.45%;background:var(--ph-implement)" title="implement · 10:41–12:09 · 88m · $6.80"></div></div>
+                    <div class="gdur">88m</div><div class="gcost">$6.80</div><div class="gmodel">opus</div>
+                  </div>
+                  <div class="grow2">
+                    <div class="glabel">verify ①</div>
+                    <div class="gtrack"><div class="gbar" style="left:44.64%;width:10.46%;background:var(--ph-verify)" title="verify ① · 12:09–12:50 · 41m · $1.12"></div></div>
+                    <div class="gdur">41m</div><div class="gcost">$1.12</div><div class="gmodel">sonnet</div>
+                  </div>
+                  <div class="grow2">
+                    <div class="glabel">remediate ①</div>
+                    <div class="gtrack"><div class="gbar" style="left:55.10%;width:9.44%;background:var(--ph-remediate)" title="remediate ① · 12:50–13:27 · 37m · $1.94"></div></div>
+                    <div class="gdur">37m</div><div class="gcost">$1.94</div><div class="gmodel">opus</div>
+                  </div>
+                  <div class="grow2">
+                    <div class="glabel">verify ②</div>
+                    <div class="gtrack"><div class="gbar" style="left:65.56%;width:5.61%;background:var(--ph-verify)" title="verify ② · 13:31–13:53 · 22m · $0.61"></div></div>
+                    <div class="gdur">22m</div><div class="gcost">$0.61</div><div class="gmodel">sonnet</div>
+                  </div>
+                  <div class="grow2">
+                    <div class="glabel">remediate ②</div>
+                    <div class="gtrack"><div class="gbar" style="left:72.45%;width:6.38%;background:var(--ph-remediate)" title="remediate ② · 13:58–14:23 · 25m · $1.21"></div></div>
+                    <div class="gdur">25m</div><div class="gcost">$1.21</div><div class="gmodel">opus</div>
+                  </div>
+                  <div class="grow2">
+                    <div class="glabel">verify ③</div>
+                    <div class="gtrack"><div class="gbar" style="left:80.36%;width:4.59%;background:var(--ph-verify)" title="verify ③ · 14:29–14:47 · 18m · $0.48"></div></div>
+                    <div class="gdur">18m</div><div class="gcost">$0.48</div><div class="gmodel">sonnet</div>
+                  </div>
+                  <div class="grow2">
+                    <div class="glabel">remediate ③</div>
+                    <div class="gtrack"><div class="gbar" style="left:86.22%;width:3.57%;background:var(--ph-remediate)" title="remediate ③ · 14:52–15:06 · 14m · $0.92"></div></div>
+                    <div class="gdur">14m</div><div class="gcost">$0.92</div><div class="gmodel">opus</div>
+                  </div>
+                  <div class="grow2" style="margin-bottom:2px">
+                    <div class="glabel">verify ④</div>
+                    <div class="gtrack"><div class="gbar run" style="left:96.94%;width:3.06%;background:var(--ph-verify)" title="verify ④ · 15:34–now · 12m · $0.18"><div class="gcap"></div></div></div>
+                    <div class="gdur">12m</div><div class="gcost">$0.18</div><div class="gmodel">sonnet</div>
+                  </div>
+                </div>
+                <div class="gfoot">gaps = wall-clock idle between hops · largest: 28m before verify ④ (dispatch cooldown)</div>
+              </div>
+            </div>
+
+            <!-- ═══ 5d ARTIFACTS (round-3) ═══ -->
+            <div class="hoplog">
+              <div class="seclabel">ARTIFACTS <span class="bchip">[thoughts · git]</span></div>
+              <div class="artrow" style="--hc:var(--ph-research)"><span class="adot"></span><span class="aname">Research</span><span class="apath">thoughts/shared/research/2026-06-09-ctl-1003.md</span><span class="ameta">09:59 · 412 lines</span><span class="aopen">open ↗</span></div>
+              <div class="artrow" style="--hc:var(--ph-plan)"><span class="adot"></span><span class="aname">Plan</span><span class="apath">thoughts/shared/plans/2026-06-09-ctl-1003.md</span><span class="ameta">10:41 · 5 phases</span><span class="aopen">open ↗</span></div>
+              <div class="artrow" style="--hc:var(--ph-implement)"><span class="adot"></span><span class="aname">Branch</span><span class="apath">CTL-1003 · 14 commits + 3 remediation</span><span class="ameta">12:09–15:06</span><span class="aopen">diff ↗</span></div>
+              <div class="artrow" style="--hc:var(--ph-verify)"><span class="adot"></span><span class="aname">Verify verdict</span><span class="apath">verify.json · regression_risk 6 · 2 high, 3 low findings</span><span class="ameta">15:21 · gen 4</span><span class="aopen">open ↗</span></div>
+              <div class="artrow"><span class="adot" style="background:var(--border-sub)"></span><span class="aname" style="color:var(--ink-dim)">Pull request</span><span class="apath">not yet opened — created at the pr phase</span><span class="ameta">—</span><span></span></div>
+            </div>
+
+            <!-- ═══ 5e EXCEPTIONS & DECISIONS (round-3) ═══ -->
+            <div class="hoplog">
+              <div class="seclabel">EXCEPTIONS &amp; DECISIONS <span class="bchip">[events · beliefs]</span></div>
+              <div class="exrow"><span class="edot bad"></span><span class="extime">12:50</span><span class="extext">verify <b>failed</b> — <span class="m">regression_risk 6 ≥ 5</span> with 2 high findings; entered the fix-and-recheck loop</span><span class="exstate res">resolved ×2</span></div>
+              <div class="exrow"><span class="edot warn"></span><span class="extime">15:06–15:34</span><span class="extext"><span class="m">28m</span> idle before verify ④ — dispatch cooldown after three rapid cycles</span><span class="exstate res">resolved</span></div>
+              <div class="exrow"><span class="edot ok"></span><span class="extime">15:06</span><span class="extext">stale <span class="m">needs-human</span> label cleared automatically — escalation was a false alarm from an earlier revive</span><span class="exstate res">unstuck</span></div>
+              <div class="exrow"><span class="edot warn"></span><span class="extime">predicted</span><span class="extext">one verify round from the <b>cycle cap (3/3)</b> — if this verify fails, the daemon stops retrying and asks a human to decide: fix the findings, reset the cycle file, or park the ticket</span><span class="exstate open">decision ahead</span></div>
+            </div>
+
+            <!-- ═══ 5d HOP LOG ═══ -->
+            <div class="hoplog">
+              <div class="seclabel">HOP LOG <span class="bchip">[events]</span></div>
+
+              <div class="hrow" style="--hc:var(--ph-triage)">
+                <span class="hdot"></span>
+                <span class="hedge">queued → triage</span>
+                <span class="schip">done</span>
+                <span class="hclock">09:14</span>
+                <span class="hdur">2m</span>
+                <span></span>
+              </div>
+              <div class="hrow" style="--hc:var(--ph-research)">
+                <span class="hdot"></span>
+                <span class="hedge">triage → research</span>
+                <span class="schip">done</span>
+                <span class="hclock">09:21</span>
+                <span class="hdur">38m</span>
+                <span class="hmodel">sonnet</span>
+              </div>
+              <div class="hrow" style="--hc:var(--ph-plan)">
+                <span class="hdot"></span>
+                <span class="hedge">research → plan</span>
+                <span class="schip">done</span>
+                <span class="hclock">10:02</span>
+                <span class="hdur">39m</span>
+                <span class="hmodel">opus</span>
+              </div>
+              <div class="hrow" style="--hc:var(--ph-implement)">
+                <span class="hdot"></span>
+                <span class="hedge">plan → implement</span>
+                <span class="schip">done</span>
+                <span class="hclock">10:41</span>
+                <span class="hdur">88m</span>
+                <span class="hmodel">opus</span>
+              </div>
+              <div class="hrow" style="--hc:var(--ph-verify)">
+                <span class="hdot"></span>
+                <span class="hedge">implement → verify</span>
+                <span class="schip">done</span>
+                <span class="hclock">12:09</span>
+                <span class="hdur">41m</span>
+                <span class="hmodel">sonnet</span>
+              </div>
+              <div class="hrow" style="--hc:var(--ph-remediate)">
+                <span class="hdot"></span>
+                <span class="hedge">verify ⇄ remediate <span class="x3">×3</span></span>
+                <span class="schip ffix">fail→fix</span>
+                <span class="hclock">12:50–15:21</span>
+                <span class="hdur"></span>
+                <span></span>
+              </div>
+              <div class="hrow" style="--hc:var(--ph-verify)">
+                <span class="hdot now"></span>
+                <span class="hedge">verify <span class="dimt">(now)</span></span>
+                <span class="schip run"><span class="rdot"></span>running</span>
+                <span class="hclock">15:34</span>
+                <span class="hdur">12m</span>
+                <span class="hmodel">gen 5</span>
+              </div>
+
+              <div class="hcaption">gate evaluations are not stored historically; showing recorded transitions</div>
+            </div>
+
+          </div><!-- /tabbody -->
+        </div><!-- /col -->
+      </div><!-- /readwrap -->
+
+      <!-- ═══ 6 right rail ═══ -->
+      <aside class="rail">
+
+        <!-- 6a NEXT -->
+        <div class="rcard">
+          <div class="rhead">
+            <span class="rt">Next</span>
+            <span class="bchip">[beliefs]</span><span class="rulechip">R17</span>
+            <span class="whylink" onclick="toggleDrawer(true)">why ▸</span>
+          </div>
+          <div class="rbody">
+            <div class="nexthead">Will stall: remediate-cycle-cap-exhausted (3/3)</div>
+            <div class="nextfoot">shadow — prediction only, router decides</div>
+          </div>
+        </div>
+
+        <!-- 6b GATE CHECKLIST -->
+        <div class="rcard">
+          <div class="rhead">
+            <span class="rt">Gate checklist</span>
+            <span class="bchip" style="margin-left:auto">verify → next</span>
+          </div>
+          <div class="rbody">
+            <div class="grow">
+              <span class="gmark ok">✓</span>
+              <span class="gtext">latest signal = <span class="gm">verify</span> · status <span class="gm">done</span> <span class="gsrc">[signals]</span></span>
+            </div>
+            <div class="grow">
+              <span class="gmark bad">✗</span>
+              <span class="gtext">verdict pass — <span class="gm bad">fail</span>: <span class="gm">regression_risk 6 ≥ 5</span> · <span class="gm">2 high</span> <span class="gsrc">[verify.json]</span></span>
+            </div>
+            <div class="grow">
+              <span class="gmark bad">✗</span>
+              <span class="gtext">cycles <span class="gm">3 &lt; 3</span> — cap reached <span class="gsrc">[events ×3]</span></span>
+            </div>
+            <div class="grow">
+              <span class="gmark ok">✓</span>
+              <span class="gtext"><span class="neg">¬</span> remediate signal — checked, absent <span class="gsrc">[signals]</span></span>
+            </div>
+
+            <div class="unblock">
+              <div class="ul">WHAT WOULD UNBLOCK</div>
+              <div class="uv">fix the 2 high findings on the branch ·
+                operator <span class="m mono" style="font-size:11px">cycle-file reset</span> ·
+                <span class="m mono" style="font-size:11px">park → resume</span></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- 6c Properties -->
+        <div class="rcard">
+          <div class="rhead"><span class="rt">Properties</span><span class="chev">▼</span></div>
+          <div class="rbody">
+            <div class="proprow"><span class="pl">Status</span><span class="pv">In Progress · Working</span></div>
+            <div class="proprow"><span class="pl">Phase</span><span class="pv">verify</span></div>
+            <div class="proprow"><span class="pl">Repo</span><span class="pv">catalyst</span></div>
+            <div class="proprow"><span class="pl">Team</span><span class="pv">CTL</span></div>
+            <div class="proprow"><span class="pl">Updated</span><span class="pv">15:46</span></div>
+            <div class="proprow"><span class="pl">PR</span><span class="pv none">—</span></div>
+            <div class="proprow"><span class="pl">Model (current phase)</span><span class="pv">sonnet</span></div>
+          </div>
+        </div>
+
+        <!-- Labels -->
+        <div class="rcard">
+          <div class="rhead"><span class="rt">Labels</span><span class="chev">▼</span></div>
+          <div class="rbody lblrow">
+            <span class="lpill" style="color:#e36b6b;background:rgba(227,107,107,0.14);border-color:rgba(227,107,107,0.3)">bug</span>
+            <span class="lpill" style="color:#5e9ee8;background:rgba(94,158,232,0.14);border-color:rgba(94,158,232,0.3)">phase-agent</span>
+            <span class="lpill" style="color:#a98ee3;background:rgba(169,142,227,0.14);border-color:rgba(169,142,227,0.3)">orchestrator</span>
+          </div>
+        </div>
+
+        <!-- Project -->
+        <div class="rcard">
+          <div class="rhead"><span class="rt">Project</span><span class="chev">▼</span></div>
+          <div class="rbody projrow">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/></svg>
+            Catalyst
+          </div>
+        </div>
+
+        <!-- Relations -->
+        <div class="rcard">
+          <div class="rhead"><span class="rt">Relations</span><span class="chev">▼</span></div>
+          <div class="rbody">
+            <div class="relgroup">Related</div>
+            <div class="relrow">
+              <span class="ricon"></span>
+              <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">Verify⇄remediate self-heal loop</span>
+              <span class="rk">CTL-653</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Dependencies — collapsed -->
+        <div class="rcard">
+          <div class="rhead"><span class="rt">Dependencies</span><span class="chev closed">▼</span></div>
+        </div>
+
+      </aside>
+    </div><!-- /body -->
+
+    <!-- ═══ 2c footer ═══ -->
+    <footer class="appfoot">
+      <span class="livedot"></span><span class="livetxt">LIVE</span>
+      <span class="foot-dim">last frame 2s ago</span>
+      <div class="foot-right">
+        <span class="ok"></span><span class="ok"></span>
+        <span class="foot-dim">events ok · board ok</span>
+      </div>
+    </footer>
+
+  </div><!-- /main -->
+</div><!-- /app -->
+
+<!-- ═══ 7 WHY drawer — closed by default ═══ -->
+<div class="whydrawer closed" id="whyDrawer">
+  <div class="wdhead">
+    <span class="wt">Why?</span><span class="wsub">— derivation</span>
+    <button class="wdclose" onclick="toggleDrawer(false)">✕</button>
+  </div>
+  <div class="wtree">
+    <details open>
+      <summary>
+        <span class="twist"></span>
+        <span class="beliefdot">●</span>
+        <span class="beliefname">cycle_exhausted(CTL-1003)</span>
+        <span class="rulechip">R17 · S6</span>
+        <span class="valjson">{phase:"verify", remediate_count:3, cap:3}</span>
+      </summary>
+      <div class="wleaf">
+        <span class="treeline">├─</span>
+        <span class="factchip">s obs_signal #40291</span>
+        <span class="leaftxt">CTL-1003/verify status=done bg=7f3a2c1d</span>
+        <span class="leafts">@ 2026-06-11T15:21:07Z</span>
+      </div>
+      <div class="wleaf">
+        <span class="treeline">├─</span>
+        <span class="factchip">v obs_verdict #2231</span>
+        <span class="leaftxt">CTL-1003 verdict=fail</span>
+        <span class="leafts">@ 2026-06-11T15:21:07Z</span>
+      </div>
+      <div class="wleaf">
+        <span class="treeline">├─</span>
+        <span class="factchip">c obs_cycle #9871</span>
+        <span class="leaftxt">CTL-1003 remediate_count=3</span>
+        <span class="leafts">@ 2026-06-11T15:21:07Z</span>
+      </div>
+      <div class="wleaf">
+        <span class="treeline">└─</span>
+        <span class="leaftxt">remediate_count 3 ≥ cap 3 <span class="guardok">✓</span></span>
+        <span class="cfgchip">cfg · workflow.default.json cycles.maxCount</span>
+      </div>
+    </details>
+  </div>
+  <div class="wlegend">
+    <span><span class="lg">●</span> ground fact</span>
+    <span><span class="lb">●</span> derived belief</span>
+    <span><span class="rulechip" style="padding:0 4px">R</span> rule</span>
+    <span><span class="ln">¬</span> negation</span>
+  </div>
+</div>
+
+<script>
+  function toggleDrawer(open){
+    document.getElementById('whyDrawer').classList.toggle('closed', !open);
+  }
+</script>
+</body>
+</html>
