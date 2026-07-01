@@ -10,11 +10,21 @@
 // serve Linear reads from this local DB instead of the rate-limited `linearis` —
 // the unblock for nodes drowning in 429s.
 //
-// ENGINE: @catalyst-cloud/sdk@0.2.0 `CatalystReplica` — `start()` opens + migrates +
+// ENGINE: @catalyst-cloud/sdk@0.3.1 `CatalystReplica` — `start()` opens + migrates +
 // stream-seeds (/snapshot) + live-applies, resolving on the FIRST 'live' (seed
 // complete); background sync then runs until close(). The SDK owns reconnect/backoff
 // and a single-writer lock (<dbPath>.writer.lock, pid+heartbeat) — so a second
 // concurrent writer throws loudly rather than corrupting the file.
+//
+// APPLY-RESULT TELEMETRY (CTL-1402): 0.3.1's `applyFrame` records ONE outcome per live
+// frame via a structured `catalyst.replica.apply` LOG line through our `log` callback below
+// — `{result: applied|skipped|failed, seq, entity, source, err_message?}`. This REPLACES the
+// old string-interpolated "apply failed for … seq=" line (no in-repo bridge, no double-emit),
+// makes the errno:1 apply-drift (catalyst-cloud#127) observable in Loki, and carries the
+// untruncated `err_message` that pins the drifted column. `telemetry:true` additionally arms
+// a `result`-tagged `catalyst.replica.applied` OTLP counter — a no-op today (the fleet runs no
+// in-process MeterProvider; OTEL materializes the signal from the Loki line) but durable for
+// when one is adopted. The Loki line emits regardless of the flag; the flag is forward-compat.
 //
 // SECRETS: the token is read by NAME (resolveNodeCloudTokenEnv) and passed ONLY into
 // auth.token. It is NEVER logged; the structured-log callback scrubs any token-bearing
@@ -100,6 +110,12 @@ const replica = new CatalystReplica({
   // crash. Default two-writer protection is unchanged for any writer without an ownerKey
   // (a second LIVE writer with a DIFFERENT ownerKey still throws loudly).
   writerGuard: { ownerKey: `${getHostName()}-${account}` },
+  // CTL-1402: arm the SDK's opt-in telemetry. The apply-result signal the fleet consumes is
+  // the structured `catalyst.replica.apply` LOG line (via the `log` callback below), which emits
+  // regardless of this flag; enabling it additionally arms the `catalyst.replica.applied` OTLP
+  // counter — a no-op today (no in-process MeterProvider) but durable when one is adopted. No
+  // MeterProvider is stood up here, so no OTLP exporter is created (OTEL's guidance).
+  telemetry: true,
   onStatus: (status) => console.log(`${TAG} status=${status}`),
   log: (level, msg, extra) => {
     const line = `${TAG} ${level}: ${scrub(msg)}`;
