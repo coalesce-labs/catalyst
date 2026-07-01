@@ -22,14 +22,33 @@ import { resolve, dirname } from "node:path";
 import { mkdirSync } from "node:fs";
 
 let db = null;
+// CTL-1157 (Codex round-6 follow-up): track the path the singleton handle is open on.
+// openBrokerStateDb ignored a NEW dbPath when a handle was already open, so a caller
+// that left the singleton open on path A (e.g. the exec-core scheduler's board-health
+// binding, which now opens the DB every tick) would hand path A's handle to a later
+// caller/test that asked for path B — its reads/writes then silently hit the wrong DB
+// (the gateway-read cross-file test pollution). Reopen when the requested path differs.
+// Production is unaffected: every real caller uses DEFAULT_DB_PATH, so the path always
+// matches and the handle is reused verbatim.
+let dbOpenPath = null;
 
 const CATALYST_DIR = process.env.CATALYST_DIR ?? `${homedir()}/catalyst`;
 const DEFAULT_DB_PATH = resolve(CATALYST_DIR, "filter-state.db");
 
 export function openBrokerStateDb(dbPath = DEFAULT_DB_PATH) {
-  if (db) return db;
+  if (db && dbOpenPath === dbPath) return db; // already open on the SAME path → reuse
+  if (db && dbOpenPath !== dbPath) {
+    // Open on a DIFFERENT path → close the stale handle and reopen on the requested one.
+    try {
+      db.close();
+    } catch {
+      /* best-effort */
+    }
+    db = null;
+  }
   mkdirSync(dirname(dbPath), { recursive: true });
   db = new Database(dbPath, { create: true });
+  dbOpenPath = dbPath;
   db.run("PRAGMA journal_mode=WAL");
   // CTL-821: don't fail instantly on transient WAL contention (live broker +
   // orch-monitor + test drivers can hold handles on the same file).
@@ -229,6 +248,7 @@ export function closeBrokerStateDb() {
     db.close();
     db = null;
   }
+  dbOpenPath = null;
 }
 
 function ensure() {
