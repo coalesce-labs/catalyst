@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.4.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-pm-v7.3.0...catalyst-pm-v7.4.0) (2026-07-01)
+
+
+### Features
+
+* **dev:** CTL-1397 (1/n) — mandate Linear reads via catalyst-linear (linearis skill + research agents) ([#2496](https://github.com/coalesce-labs/catalyst/issues/2496)) ([27ab1fe](https://github.com/coalesce-labs/catalyst/commit/27ab1fe5e242f7ac69bc9d7750b1dbd4ee79c1f8))
+
 ## [7.3.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-pm-v7.2.0...catalyst-pm-v7.3.0)
 
 Jun 30, 2026
