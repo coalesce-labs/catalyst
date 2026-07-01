@@ -699,6 +699,56 @@ REASON=$(echo "$LINE" | jq -r '.body.payload.failure_reason' 2>/dev/null || echo
 assert_eq "phase.plan.failed.CTL-1097" "$EVENT_NAME" "genuine miss in worktreePath → failed"
 assert_eq "artifact_not_gate_visible" "$REASON" "genuine miss preserves artifact_not_gate_visible reason"
 
+# ─── CTL-1410 Phase A: --payload-json (event-only phases migrate onto this wrapper) ─
+# The caller's terminal-artifact JSON merges into body.payload (caller as base;
+# canonical fields overlay and win; phase_name injected). Absent → byte-identical
+# default. Malformed → fail-open to the base payload (the event is never dropped).
+
+echo ""
+echo "Test 46 (CTL-1410): --payload-json merges caller fields + injects phase_name; canonical fields win"
+fresh_env t46
+"$EMIT_SCRIPT" --phase triage --ticket CTL-100 --status complete \
+	--payload-json '{"classification":"bug","estimated_scope":"small","status":"SHOULD-LOSE","ticket":"SHOULD-LOSE"}' \
+	>/dev/null 2>&1
+LINE=$(read_event_line)
+if [[ -z $LINE ]]; then
+	fail "Test 46: no event line emitted"
+else
+	P_CLASS=$(echo "$LINE" | jq -r '.body.payload.classification')
+	P_SCOPE=$(echo "$LINE" | jq -r '.body.payload.estimated_scope')
+	P_NAME=$(echo "$LINE" | jq -r '.body.payload.phase_name')
+	P_STATUS=$(echo "$LINE" | jq -r '.body.payload.status')
+	P_TICKET=$(echo "$LINE" | jq -r '.body.payload.ticket')
+	assert_eq "bug" "$P_CLASS" "caller field classification carried in body.payload"
+	assert_eq "small" "$P_SCOPE" "caller field estimated_scope carried in body.payload"
+	assert_eq "triage" "$P_NAME" "phase_name injected (lib-helper parity)"
+	assert_eq "complete" "$P_STATUS" "canonical status overlays the caller's"
+	assert_eq "CTL-100" "$P_TICKET" "canonical ticket overlays the caller's"
+fi
+
+echo ""
+echo "Test 47 (CTL-1410): absent --payload-json → byte-identical default payload (no phase_name)"
+fresh_env t47
+"$EMIT_SCRIPT" --phase research --ticket CTL-100 --status complete >/dev/null 2>&1
+LINE=$(read_event_line)
+PAYLOAD_KEYS=$(echo "$LINE" | jq -cS '.body.payload | keys')
+assert_eq '["phase","status","ticket"]' "$PAYLOAD_KEYS" "default payload keys unchanged (no phase_name leak)"
+
+echo ""
+echo "Test 48 (CTL-1410): malformed --payload-json fails open to the base payload"
+fresh_env t48
+"$EMIT_SCRIPT" --phase triage --ticket CTL-100 --status failed --reason "boom" \
+	--payload-json 'NOT VALID JSON {' >/dev/null 2>&1
+LINE=$(read_event_line)
+if [[ -z $LINE ]]; then
+	fail "Test 48: malformed payload dropped the event entirely (must fail open)"
+else
+	EVENT_NAME=$(echo "$LINE" | jq -r '.attributes."event.name"')
+	P_REASON=$(echo "$LINE" | jq -r '.body.payload.failure_reason')
+	assert_eq "phase.triage.failed.CTL-100" "$EVENT_NAME" "malformed payload: event still emitted"
+	assert_eq "boom" "$P_REASON" "malformed payload: base failure_reason preserved"
+fi
+
 echo ""
 echo "─────────────────────────────────────────────"
 echo "phase-agent-emit-complete: ${PASSES} passed, ${FAILURES} failed"

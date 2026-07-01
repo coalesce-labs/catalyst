@@ -18,6 +18,7 @@ import {
   Semaphore,
   scrubSecrets,
   defaultEmitBackstop,
+  flipSignalDoneOnSuccess,
 } from "./sdk-run-phase-agent.mjs";
 
 // ── Fakes ───────────────────────────────────────────────────────────────────
@@ -1087,6 +1088,177 @@ describe("sdkRunPhaseAgent — CTL-1367 item 4 (backstop → stalled signal)", (
     expect(after.status).toBe("stalled");
     expect(after.attentionReason).toBe("sdk-threw"); // NOT failureReason (revive retries)
     expect("failureReason" in after).toBe(false);
+    rmSync(dir, { recursive: true, force: true });
+  });
+});
+
+// ── CTL-1410 Phase A: SDK success-branch signal flip ──────────────────────────
+// mapResult subtype==="success" returns backstop:null — historically the ONE
+// abstaining branch (the skill was solely responsible for its own flip). With the
+// event-only phases migrated onto the wrapper, this in-process net flips a
+// still-in-flight (dispatched|running) signal to done so occupancy releases and
+// deriveAdvancement sees a terminal status even if a skill skipped its wrapper
+// call. It must NEVER clobber a terminal status, resurrect a parked hold, nor
+// act on a stale generation (superseded worker).
+
+describe("flipSignalDoneOnSuccess — CTL-1410 Phase A truth table", () => {
+  const flipCase = (startStatus) => {
+    const dir = mkdtempSync(join(tmpdir(), "sdk-flip-"));
+    const signalFile = join(dir, "phase-triage.json");
+    writeFileSync(signalFile, JSON.stringify({ status: startStatus, ticket: "CTL-1", phase: "triage" }));
+    flipSignalDoneOnSuccess(signalFile);
+    const after = JSON.parse(readFileSync(signalFile, "utf8"));
+    rmSync(dir, { recursive: true, force: true });
+    return after;
+  };
+
+  test("dispatched (in-flight) → done + completedAt, no attentionReason", () => {
+    const after = flipCase("dispatched");
+    expect(after.status).toBe("done");
+    expect(typeof after.completedAt).toBe("string");
+    expect("attentionReason" in after).toBe(false);
+    expect("failureReason" in after).toBe(false);
+  });
+
+  test("running (in-flight) → done", () => {
+    expect(flipCase("running").status).toBe("done");
+  });
+
+  test("needs-input (parked) is NEVER resurrected to done", () => {
+    const after = flipCase("needs-input");
+    expect(after.status).toBe("needs-input");
+    expect("completedAt" in after).toBe(false);
+  });
+
+  for (const terminal of ["done", "failed", "stalled", "skipped", "turn-cap-exhausted"]) {
+    test(`already-terminal '${terminal}' is not clobbered`, () => {
+      const after = flipCase(terminal);
+      expect(after.status).toBe(terminal);
+      expect("completedAt" in after).toBe(false);
+    });
+  }
+
+  test("missing / empty / null signalFile never throws", () => {
+    expect(() => {
+      flipSignalDoneOnSuccess("/nonexistent/dir/sig.json");
+      flipSignalDoneOnSuccess("");
+      flipSignalDoneOnSuccess(null);
+    }).not.toThrow();
+  });
+
+  // CTL-736 generation fence (adversarial-review catch): a stale superseded
+  // worker's late success must NOT flip the newer dispatch's in-flight signal.
+  const fenceCase = (mine, sigGen) => {
+    const dir = mkdtempSync(join(tmpdir(), "sdk-fence-"));
+    const signalFile = join(dir, "phase-implement.json");
+    const sig = { status: "dispatched", ticket: "CTL-1", phase: "implement" };
+    if (sigGen !== undefined) sig.generation = sigGen;
+    writeFileSync(signalFile, JSON.stringify(sig));
+    flipSignalDoneOnSuccess(signalFile, mine);
+    const after = JSON.parse(readFileSync(signalFile, "utf8"));
+    rmSync(dir, { recursive: true, force: true });
+    return after.status;
+  };
+
+  test("stale generation (mine < signal) bows out — signal stays in-flight", () => {
+    expect(fenceCase(5, 6)).toBe("dispatched");
+  });
+
+  test("current generation (mine == signal) flips", () => {
+    expect(fenceCase(6, 6)).toBe("done");
+  });
+
+  test("newer generation (mine > signal) flips (fail-open, matches isCurrentGeneration)", () => {
+    expect(fenceCase(7, 6)).toBe("done");
+  });
+
+  test("missing own generation fails open (legacy/unfenced dispatch) — flips", () => {
+    expect(fenceCase(undefined, 6)).toBe("done");
+  });
+
+  test("missing signal generation fails open — flips", () => {
+    expect(fenceCase(5, undefined)).toBe("done");
+  });
+
+  test("non-numeric generations fail open — flips", () => {
+    expect(fenceCase("garbage", "alsogarbage")).toBe("done");
+  });
+});
+
+describe("sdkRunPhaseAgent — CTL-1410 Phase A (success flips in-flight signal to done)", () => {
+  test("success + signal still 'dispatched' → flipped to done (the safety net)", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "sdk-flip-e2e-"));
+    const signalFile = join(dir, "phase-triage.json");
+    const spec = makeSpec({ signalFile });
+    const { spawn } = spawnReturningSpec({ spec, signalFile });
+    const backstops = [];
+    const r = await sdkRunPhaseAgent(ARGS, {
+      ...GOOD_AUTH, spawn,
+      runQuery: fakeQuery([resultMsg()]),
+      emitBackstop: (e) => backstops.push(e),
+    });
+    expect(r.code).toBe(0);
+    expect(backstops).toHaveLength(0);
+    const after = JSON.parse(readFileSync(signalFile, "utf8"));
+    expect(after.status).toBe("done");
+    expect(typeof after.completedAt).toBe("string");
+    expect("attentionReason" in after).toBe(false);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("success + skill already flipped (done) → untouched (primary path wins)", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "sdk-flip-e2e-"));
+    const signalFile = join(dir, "phase-triage.json");
+    const spec = makeSpec({ signalFile });
+    // Prelaunch writes dispatched; the fake query simulates the skill's own
+    // wrapper flip (status done + its own completedAt) before resolving success.
+    const { spawn } = spawnReturningSpec({ spec, signalFile });
+    const skillFlip = () => (async function* () {
+      writeFileSync(signalFile, JSON.stringify({ status: "done", completedAt: "2026-07-01T00:00:00Z", ticket: "CTL-100" }));
+      yield resultMsg();
+    })();
+    const r = await sdkRunPhaseAgent(ARGS, { ...GOOD_AUTH, spawn, runQuery: skillFlip });
+    expect(r.code).toBe(0);
+    const after = JSON.parse(readFileSync(signalFile, "utf8"));
+    expect(after.status).toBe("done");
+    expect(after.completedAt).toBe("2026-07-01T00:00:00Z"); // NOT overwritten
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("success + parked (needs-input) → NOT flipped (in-flight-only precondition)", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "sdk-flip-e2e-"));
+    const signalFile = join(dir, "phase-triage.json");
+    const spec = makeSpec({ signalFile });
+    const { spawn } = spawnReturningSpec({ spec, signalFile });
+    const parkThenSucceed = () => (async function* () {
+      writeFileSync(signalFile, JSON.stringify({ status: "needs-input", parkedFrom: "triage", ticket: "CTL-100" }));
+      yield resultMsg();
+    })();
+    const r = await sdkRunPhaseAgent(ARGS, { ...GOOD_AUTH, spawn, runQuery: parkThenSucceed });
+    expect(r.code).toBe(0);
+    const after = JSON.parse(readFileSync(signalFile, "utf8"));
+    expect(after.status).toBe("needs-input");
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("stale-generation success (superseded worker) does NOT flip the newer dispatch's signal", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "sdk-flip-e2e-"));
+    const signalFile = join(dir, "phase-triage.json");
+    // This run carries generation 1; a newer dispatch has since claimed the
+    // signal at generation 2 (preempt→re-dispatch / revive supersede). The stale
+    // run's clean success must bow out exactly like the wrapper's fence does.
+    const spec = makeSpec({ signalFile, generation: 1 });
+    const { spawn } = spawnReturningSpec({ spec, signalFile });
+    const supersede = () => (async function* () {
+      writeFileSync(signalFile, JSON.stringify({ status: "dispatched", generation: 2, ticket: "CTL-100" }));
+      yield resultMsg();
+    })();
+    const r = await sdkRunPhaseAgent(ARGS, { ...GOOD_AUTH, spawn, runQuery: supersede });
+    expect(r.code).toBe(0);
+    const after = JSON.parse(readFileSync(signalFile, "utf8"));
+    expect(after.status).toBe("dispatched"); // the gen-2 worker still owns it
+    expect(after.generation).toBe(2);
+    expect("completedAt" in after).toBe(false);
     rmSync(dir, { recursive: true, force: true });
   });
 });

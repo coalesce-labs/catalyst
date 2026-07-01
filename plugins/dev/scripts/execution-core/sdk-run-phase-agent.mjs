@@ -469,6 +469,72 @@ function defaultWriteSignalStalled(signalFile, reason) {
   return defaultWriteSignalTerminal(signalFile, "stalled", reason);
 }
 
+// CTL-1410 Phase A: the SDK success-branch signal flip. When query() resolves
+// subtype==="success", mapResult returns backstop:null — historically the phase
+// SKILL was solely responsible for flipping its own signal to done (via the
+// phase-agent-emit-complete wrapper). That holds now that the two event-only
+// phases (triage, monitor-deploy) route their terminal emit through the wrapper,
+// but this is the in-process belt-and-suspenders net: on a clean success, if the
+// signal is STILL in-flight (dispatched|running) — the skill exited 0 without its
+// own flip — flip it to done here so occupancy (countSdkInflight) releases the
+// slot and deriveAdvancement sees a terminal status. Under executor=sdk there is
+// no bg reclaim path to synthesize the flip, so without this a success that
+// skipped its wrapper call would strand the slot.
+//
+// Distinct from defaultWriteSignalTerminal on purpose:
+//   - acts ONLY on an in-flight (dispatched|running) signal — it NEVER resurrects
+//     a parked (needs-input) hold into done, and never clobbers an already-terminal
+//     status (done/failed/skipped/turn-cap-exhausted);
+//   - honors the CTL-736 generation fence — a stale superseded worker must NOT
+//     write an outcome (see below);
+//   - writes status:"done" + completedAt (a SUCCESS terminal), no attentionReason
+//     (an attentionReason/failureReason would trip revive's escalate branch).
+const SIGNAL_INFLIGHT_STATUSES = new Set(["dispatched", "running"]);
+
+// Plain-integer test shared by the generation fence — mirrors the bash
+// `[[ $x =~ ^[0-9]+$ ]]` in phase-agent-emit-complete and claim.mjs's
+// isCurrentGeneration semantics exactly.
+const isPlainInt = (v) => /^[0-9]+$/.test(String(v));
+
+export function flipSignalDoneOnSuccess(signalFile, generation) {
+  if (!signalFile) return;
+  try {
+    let sig;
+    try {
+      sig = JSON.parse(readFileSync(signalFile, "utf8"));
+    } catch {
+      return; // no signal on disk (prelaunch never wrote one) — nothing to flip
+    }
+    if (!sig || typeof sig !== "object") return;
+    // In-flight-only precondition. A terminal signal is already correct; a
+    // needs-input (parked) signal must stay parked.
+    if (!SIGNAL_INFLIGHT_STATUSES.has(String(sig.status))) return;
+    // CTL-736 generation fence (adversarial-review catch, CTL-1410 Phase A): an
+    // in-process query cannot be killed (preemption's killBgJob(null) is a no-op,
+    // the per-attempt AbortController is not externally wired), so a preempt→
+    // re-dispatch or revive leaves a stale gen-N query floating while gen-N+1 owns
+    // the SAME signal path. That stale worker's skill correctly bows out at the
+    // wrapper's fence — this flip must not override that refusal by flipping the
+    // newer dispatch's in-flight signal to done (slot over-admission + premature
+    // advancement). Bow out ONLY when both generations are plain integers AND
+    // mine < signal's; anything missing/non-numeric fails open so legacy and
+    // unfenced dispatches are unaffected (isCurrentGeneration parity).
+    if (isPlainInt(generation) && isPlainInt(sig.generation) && Number(generation) < Number(sig.generation)) {
+      return;
+    }
+    const ts = new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
+    sig.status = "done";
+    sig.completedAt = ts;
+    sig.updatedAt = ts;
+    sig.phaseTimestamps = { ...(sig.phaseTimestamps ?? {}), done: ts };
+    const tmp = `${signalFile}.tmp.${process.pid}`;
+    writeFileSync(tmp, JSON.stringify(sig));
+    renameSync(tmp, signalFile);
+  } catch {
+    /* best-effort — the skill's own wrapper flip is the primary path */
+  }
+}
+
 // defaultAppendEventLog — CTL-1367 item 5. Last-resort terminal-event append when
 // the phase-agent-emit-complete binary is missing or fails. Writes one canonical
 // v2 envelope `phase.<phase>.<status>.<ticket>` to the unified event log so the
@@ -1058,6 +1124,12 @@ export async function sdkRunPhaseAgent(
       }
       if (backstop) {
         emitBackstop({ phase, ticket, status: backstop.status, reason: backstop.reason, orchDir, signalFile }, { spawn });
+      } else if (signalFile) {
+        // CTL-1410 Phase A: clean SDK success (no backstop) — in-process safety
+        // net that flips a still-in-flight signal to done. No-op when the phase
+        // SKILL already flipped it via the wrapper (the primary path), or when
+        // this run's generation is stale (superseded by a newer dispatch).
+        flipSignalDoneOnSuccess(signalFile, spec.generation);
       }
       return mapped;
     }

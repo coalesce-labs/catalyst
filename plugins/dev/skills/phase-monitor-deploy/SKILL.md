@@ -83,21 +83,15 @@ set -uo pipefail
 __PM_SCRIPT_PATH="${BASH_SOURCE[0]:-${0}}"
 __PM_SKILL_DIR="$(cd "$(dirname "$__PM_SCRIPT_PATH")" && pwd 2>/dev/null || pwd)"
 __PM_REPO_ROOT="${PHASE_AGENT_REPO_ROOT:-$(cd "$__PM_SKILL_DIR/../../../.." 2>/dev/null && pwd || pwd)}"
-__PM_LIB="${PHASE_EMIT_HELPER:-${__PM_REPO_ROOT}/plugins/dev/scripts/lib/phase-emit-complete.sh}"
-# CTL-512: emit terminal events via the production wrapper so the signal
-# file's `status` field is written canonically. The lib helper at
-# $__PM_LIB only emits events — it never touches the signal file, which
-# is why pre-CTL-512 skipped runs relied on orchestrate-revive to
-# synthesize a `done` status. The wrapper also handles the broker emit,
-# the session DB close, and the completedAt timestamp.
+# CTL-512 → CTL-1410 Phase A: every terminal event goes through the production
+# wrapper (phase-agent-emit-complete) so the phase signal file's `status` field is
+# written canonically in-band. CTL-512 first moved the `skipped` branch here;
+# CTL-1410 completes the migration for complete+failed so monitor-deploy →
+# teardown advances under executor=sdk — the event-only phase-emit-complete.sh lib
+# helper (which only emitted events and never touched the signal file, leaving the
+# terminal status to the bg-only reclaim path that silently no-ops under sdk) is no
+# longer sourced. The wrapper also owns the broker emit, session DB close, completedAt.
 __PM_WRAPPER="${PHASE_EMIT_WRAPPER:-${__PM_REPO_ROOT}/plugins/dev/scripts/phase-agent-emit-complete}"
-
-if [[ ! -r "$__PM_LIB" ]]; then
-  echo "phase-monitor-deploy: cannot find phase-emit-complete.sh at $__PM_LIB" >&2
-  exit 1
-fi
-# shellcheck disable=SC1090
-. "$__PM_LIB"
 
 if [[ ! -x "$__PM_WRAPPER" ]]; then
   echo "phase-monitor-deploy: cannot find phase-agent-emit-complete wrapper at $__PM_WRAPPER" >&2
@@ -117,7 +111,7 @@ CANARY_CMD="${PHASE_CANARY_CMD:-claude --model haiku -p /canary --output-format 
 # 1. Read merge SHA from phase-monitor-merge.json (the prior phase artifact).
 MERGE_FILE="$WORKER_DIR/phase-monitor-merge.json"
 if [[ ! -f "$MERGE_FILE" ]]; then
-  emit_phase_complete --phase monitor-deploy --ticket "$TICKET" --status failed \
+  "$__PM_WRAPPER" --phase monitor-deploy --ticket "$TICKET" --status failed \
     --reason "phase-monitor-merge.json missing at $MERGE_FILE"
   exit 1
 fi
@@ -132,19 +126,19 @@ if [[ -z "$MERGE_SHA" ]]; then
     PR_NUMBER="$(jq -r '.pr.number // empty' "$PR_FILE" 2>/dev/null)"
   fi
   if [[ -z "$PR_NUMBER" ]]; then
-    emit_phase_complete --phase monitor-deploy --ticket "$TICKET" --status failed \
+    "$__PM_WRAPPER" --phase monitor-deploy --ticket "$TICKET" --status failed \
       --reason "phase-monitor-merge.json has empty .pr.mergeCommitSha and no PR number available for gh REST fallback"
     exit 1
   fi
   REPO="$(gh repo view --json nameWithOwner --jq '.nameWithOwner' 2>/dev/null || echo "")"
   if [[ -z "$REPO" ]]; then
-    emit_phase_complete --phase monitor-deploy --ticket "$TICKET" --status failed \
+    "$__PM_WRAPPER" --phase monitor-deploy --ticket "$TICKET" --status failed \
       --reason "phase-monitor-merge.json has empty .pr.mergeCommitSha and gh repo view returned empty"
     exit 1
   fi
   MERGE_SHA="$(gh api "repos/${REPO}/pulls/${PR_NUMBER}" --jq '.merge_commit_sha // empty' 2>/dev/null || echo "")"
   if [[ -z "$MERGE_SHA" ]]; then
-    emit_phase_complete --phase monitor-deploy --ticket "$TICKET" --status failed \
+    "$__PM_WRAPPER" --phase monitor-deploy --ticket "$TICKET" --status failed \
       --reason "phase-monitor-merge.json has empty .pr.mergeCommitSha and gh REST fallback also returned empty for pr#${PR_NUMBER}"
     exit 1
   fi
@@ -229,7 +223,7 @@ case "$DEPLOY_STATE" in
         canary_result: null,
         completed_at: $ts
       }' > "$WORKER_DIR/phase-monitor-deploy.json"
-    emit_phase_complete --phase monitor-deploy --ticket "$TICKET" --status failed \
+    "$__PM_WRAPPER" --phase monitor-deploy --ticket "$TICKET" --status failed \
       --reason "deployment_status reported state=$DEPLOY_STATE for $MERGE_SHA on $DEPLOY_ENV" \
       --payload-json "$(cat "$WORKER_DIR/phase-monitor-deploy.json")"
     exit 1
@@ -238,7 +232,7 @@ case "$DEPLOY_STATE" in
     # pending / in_progress / queued — wait-for already filtered terminal states
     # via the test fixture, so this branch is mainly defensive. Treat as failed
     # to escalate; future work can re-enter the wait loop instead.
-    emit_phase_complete --phase monitor-deploy --ticket "$TICKET" --status failed \
+    "$__PM_WRAPPER" --phase monitor-deploy --ticket "$TICKET" --status failed \
       --reason "unexpected non-terminal deployment state: $DEPLOY_STATE"
     exit 1
     ;;
@@ -252,13 +246,13 @@ CANARY_OUT_FILE="$WORKER_DIR/canary-output.json"
 CANARY_STDERR_FILE="$WORKER_DIR/canary-stderr.log"
 
 if ! eval "$CANARY_CMD" > "$CANARY_OUT_FILE" 2> "$CANARY_STDERR_FILE"; then
-  emit_phase_complete --phase monitor-deploy --ticket "$TICKET" --status failed \
+  "$__PM_WRAPPER" --phase monitor-deploy --ticket "$TICKET" --status failed \
     --reason "canary command exited non-zero (see $CANARY_STDERR_FILE)"
   exit 1
 fi
 
 if ! jq -e . "$CANARY_OUT_FILE" >/dev/null 2>&1; then
-  emit_phase_complete --phase monitor-deploy --ticket "$TICKET" --status failed \
+  "$__PM_WRAPPER" --phase monitor-deploy --ticket "$TICKET" --status failed \
     --reason "canary stdout did not parse as JSON"
   exit 1
 fi
@@ -314,7 +308,14 @@ ${MIRROR_FOOTER}"
   fi
   # CTL-864: cross-host fence — bow out if a takeover superseded us. No-op single-host.
   "${__PM_REPO_ROOT}/plugins/dev/scripts/lib/cluster-fence-guard.sh" --phase "${CATALYST_PHASE:-monitor-deploy}" --ticket "$TICKET" || exit 10
-  COMMENT_POST="${CATALYST_COMMENT_POST_HELPER:-${PLUGIN_ROOT}/scripts/lib/linear-comment-post.sh}"
+  # CTL-1410 Phase A bug fix (pre-existing since CTL-550): this line referenced
+  # ${PLUGIN_ROOT}, which this body never defines (unlike the model-driven phase
+  # skills, which resolve it from CLAUDE_PLUGIN_ROOT in an early step). Under the
+  # body's `set -u` the unbound expansion killed the SUCCESS path right here —
+  # after the artifact write, before the terminal emit — so no complete event was
+  # ever emitted. Resolve from __PM_REPO_ROOT (this body's own root idiom),
+  # mirroring phase-triage's __PT_COMMENT_POST.
+  COMMENT_POST="${CATALYST_COMMENT_POST_HELPER:-${__PM_REPO_ROOT}/plugins/dev/scripts/lib/linear-comment-post.sh}"
   if [[ ! -x "$COMMENT_POST" ]]; then COMMENT_POST="$(command -v linear-comment-post.sh 2>/dev/null || true)"; fi
   if [[ -n "$COMMENT_POST" && -x "$COMMENT_POST" ]] && "$COMMENT_POST" "${TICKET}" "${MIRROR_BODY}" >/dev/null; then
     : > "${LINEAR_MIRROR_MARKER}"
@@ -323,14 +324,17 @@ ${MIRROR_FOOTER}"
   fi
 fi
 
-# 6. Emit the canonical phase event based on canary status.
+# 6. Emit the canonical phase event based on canary status. CTL-1410 Phase A: via
+#    $__PM_WRAPPER so the signal file's terminal `status` is flipped in-band under
+#    executor=sdk (the artifact write above already landed the same file, so the
+#    wrapper merges status/completedAt on top without clobbering deploy_* fields).
 if [[ "$CANARY_STATUS" == "success" ]]; then
-  emit_phase_complete --phase monitor-deploy --ticket "$TICKET" --status complete \
+  "$__PM_WRAPPER" --phase monitor-deploy --ticket "$TICKET" --status complete \
     --payload-json "$(cat "$RESULT_FILE")"
   exit 0
 fi
 
-emit_phase_complete --phase monitor-deploy --ticket "$TICKET" --status failed \
+"$__PM_WRAPPER" --phase monitor-deploy --ticket "$TICKET" --status failed \
   --reason "canary status=${CANARY_STATUS:-unknown}" \
   --payload-json "$(cat "$RESULT_FILE")"
 exit 1
