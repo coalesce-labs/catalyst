@@ -374,7 +374,7 @@ and your job here is the second one:
 2. **Triage as a SECOND PAIR OF EYES (your job).** You are NOT a parser. Do **not** add a dependency
    because an id appears in the prose. Instead: read the ticket's intent, then **examine the
    relevant backlog** — `linearis issues list` for the ticket's team / area (and
-   `linearis issues read <id>` to confirm a candidate) — and judge whether any in-flight or planned
+   `catalyst-linear read <id>` to confirm a candidate) — and judge whether any in-flight or planned
    work is a **true prerequisite the author may have missed**: work that must reach a terminal state
    before this ticket can sensibly start (a shared interface not yet built, a migration that must
    land first, an explicit "must follow" sequencing). Record **only** blockers you can justify, in
@@ -399,8 +399,8 @@ STEP E, `scheduler.mjs` — it reads `triage.json.dependencies`, re-validates ea
 **cross-team (CTL-838)** ids before writing the durable edge with `applyBlockedByRelation`). Keeping
 the write scheduler-side preserves the CTL-497/CTL-558 contract — the phase-triage e2e negative
 guard fails the build if this skill ever emits a `linearis issues update` call.
-`linearis issues read` is read-only and is fine. STEP E tolerates BOTH the flat-string and the rich
-`{id}` shapes.
+The `catalyst-linear read` (and the `linearis issues list` backlog scan) reads above are read-only
+and are fine. STEP E tolerates BOTH the flat-string and the rich `{id}` shapes.
 
 3. If the refined fields differ materially, post a follow-up `linearis issues discuss` comment
    marking the refinement.
