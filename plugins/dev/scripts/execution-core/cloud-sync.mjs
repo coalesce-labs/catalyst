@@ -39,6 +39,7 @@
 import { CatalystReplica } from "@catalyst-cloud/sdk/node";
 import { getHostName, getReplicaDbPath, resolveNodeCloudTokenEnv, HEARTBEAT_INTERVAL_MS } from "./config.mjs";
 import { logDaemonHeartbeat } from "../lib/daemon-heartbeat.mjs";
+import { sdkLogRecord } from "./cloud-sync-log.mjs";
 import { freshnessFields, readReplicaCounts } from "./cloud-sync-telemetry.mjs";
 import { createRequire } from "node:module";
 
@@ -52,11 +53,18 @@ function hbLogger() {
     const pino = createRequire(import.meta.url)("pino");
     return pino({ name: "cloud-sync", level: process.env.LOG_LEVEL ?? "info" }, process.stderr);
   } catch {
-    return {
-      info: (a, b) => {
-        try { process.stderr.write(`${TAG} ${typeof a === "string" ? a : JSON.stringify(a)} ${typeof b === "string" ? b : ""}\n`); } catch { /* best-effort */ }
-      },
+    // Defensive shim (pino is a hard dep, so this is rare): still emit a full-JSON line per
+    // level — `time` in ms + top-level fields — so Alloy's `| json` parses fields even here
+    // (CTL-1402: the apply-result fields must never degrade to an unqueryable prefixed string).
+    const emit = (level) => (a, b) => {
+      try {
+        const rec = { level, name: "cloud-sync", time: Date.now() };
+        if (a && typeof a === "object") { Object.assign(rec, a); if (typeof b === "string") rec.msg = b; }
+        else rec.msg = typeof a === "string" ? a : JSON.stringify(a);
+        process.stderr.write(JSON.stringify(rec) + "\n");
+      } catch { /* best-effort */ }
     };
+    return { info: emit("info"), warn: emit("warn"), error: emit("error") };
   }
 }
 const DEFAULT_BASE_URL = "https://api.catalyst-cloud.coalescelabs.ai/api/v1";
@@ -98,6 +106,9 @@ if (!token) {
   process.exit(0);
 }
 
+// hlog defined BEFORE construction so the SDK `log` callback below routes through pino.
+const hlog = hbLogger();
+
 const replica = new CatalystReplica({
   baseUrl,
   account,
@@ -117,10 +128,16 @@ const replica = new CatalystReplica({
   // MeterProvider is stood up here, so no OTLP exporter is created (OTEL's guidance).
   telemetry: true,
   onStatus: (status) => console.log(`${TAG} status=${status}`),
+  // CTL-1402: route SDK logs through the pino logger (full JSON → stderr → cloud-sync.log →
+  // Alloy `loki.process.pino` keeps the full body → `| json`), so the structured
+  // `catalyst.replica.apply` fields (result/seq/entity/source/err_message) are QUERYABLE. A
+  // prefixed `console.log` string is shipped as an opaque body and its fields never register —
+  // which would defeat this whole change. Object `extra` → top-level pino fields; string extra →
+  // a `detail` field; scrub token-bearing strings defensively (values + message).
   log: (level, msg, extra) => {
-    const line = `${TAG} ${level}: ${scrub(msg)}`;
-    if (extra === undefined) console.log(line);
-    else console.log(`${line} ${scrub(typeof extra === "string" ? extra : JSON.stringify(extra))}`);
+    const r = sdkLogRecord(level, msg, extra, scrub);
+    if (r.fields === undefined) hlog[r.level](r.msg);
+    else hlog[r.level](r.fields, r.msg);
   },
 });
 
@@ -134,7 +151,6 @@ const shutdown = (sig) => {
   // close() is idempotent: stops the socket, releases the lock, closes the DB.
   void replica.close().finally(() => process.exit(0));
 };
-const hlog = hbLogger();
 process.on("SIGTERM", () => shutdown("SIGTERM"));
 process.on("SIGINT", () => shutdown("SIGINT"));
 
