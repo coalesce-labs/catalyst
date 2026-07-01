@@ -229,6 +229,7 @@ jobs:
             delegate-slot-reservation.test.mjs \
             diagnostician.test.mjs \
             cloud-sync-telemetry.test.mjs \
+            cloud-sync-log.test.mjs \
             dispatch.test.mjs \
             doctor.test.mjs \
             doctor-replica.test.mjs \
