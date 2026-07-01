@@ -77,14 +77,19 @@ set -uo pipefail
 __PT_SCRIPT_PATH="${BASH_SOURCE[0]:-${0}}"
 __PT_SKILL_DIR="$(cd "$(dirname "$__PT_SCRIPT_PATH")" && pwd 2>/dev/null || pwd)"
 __PT_REPO_ROOT="${PHASE_AGENT_REPO_ROOT:-$(cd "$__PT_SKILL_DIR/../../../.." 2>/dev/null && pwd || pwd)}"
-__PT_LIB="${PHASE_EMIT_HELPER:-${__PT_REPO_ROOT}/plugins/dev/scripts/lib/phase-emit-complete.sh}"
+# CTL-1410 Phase A: terminal events go through the production wrapper
+# (phase-agent-emit-complete) instead of the event-only phase-emit-complete.sh
+# lib helper, so the phase signal file's `status` field is flipped to done/failed
+# canonically in-band. Triage previously delegated that flip to the bg-only
+# reclaim path, which silently no-ops under executor=sdk (bg_job_id null →
+# classifyWorker "unknown" → reclaim "noop") — the strand this phase closes. The
+# wrapper also owns the broker emit, the session-DB close, and completedAt.
+__PT_WRAPPER="${PHASE_EMIT_WRAPPER:-${__PT_REPO_ROOT}/plugins/dev/scripts/phase-agent-emit-complete}"
 
-if [[ ! -r "$__PT_LIB" ]]; then
-  echo "phase-triage: cannot find phase-emit-complete.sh at $__PT_LIB" >&2
+if [[ ! -x "$__PT_WRAPPER" ]]; then
+  echo "phase-triage: cannot find phase-agent-emit-complete wrapper at $__PT_WRAPPER" >&2
   exit 1
 fi
-# shellcheck disable=SC1090
-. "$__PT_LIB"
 
 # CTL-1397: direct-SQLite Linear reads (replica-first, loud linearis fallback).
 __PT_READ_LIB="${PHASE_LINEAR_READ_HELPER:-${__PT_REPO_ROOT}/plugins/dev/scripts/lib/linear-read-replica.sh}"
@@ -110,13 +115,13 @@ TICKET_JSON_FILE="$(mktemp)"
 trap 'rm -f "$TICKET_JSON_FILE"' EXIT
 
 if ! linear_read_ticket "$TICKET" > "$TICKET_JSON_FILE"; then
-  emit_phase_complete --phase triage --ticket "$TICKET" --status failed \
+  "$__PT_WRAPPER" --phase triage --ticket "$TICKET" --status failed \
     --reason "linear read failed"
   exit 1
 fi
 
 if ! jq -e . "$TICKET_JSON_FILE" >/dev/null 2>&1; then
-  emit_phase_complete --phase triage --ticket "$TICKET" --status failed \
+  "$__PT_WRAPPER" --phase triage --ticket "$TICKET" --status failed \
     --reason "linear read returned non-JSON output"
   exit 1
 fi
@@ -301,8 +306,9 @@ fi
 #    (Historical note for anyone grepping CTL-558: the old coordinator label
 #    sweep that tagged `triaged` was removed.)
 
-# 6. Emit the canonical phase event.
-emit_phase_complete --phase triage --ticket "$TICKET" --status complete \
+# 6. Emit the canonical phase event + flip the signal to done (CTL-1410 Phase A:
+#    via the wrapper, so the terminal status is written in-band under executor=sdk).
+"$__PT_WRAPPER" --phase triage --ticket "$TICKET" --status complete \
   --payload-json "$(cat "$TRIAGE_FILE")"
 
 # Self-halt after complete to prevent zombie workers (CTL-778 step 2).

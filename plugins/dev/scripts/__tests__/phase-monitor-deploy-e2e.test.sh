@@ -24,7 +24,8 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../../../.." && pwd)"
 SKILL_FILE="${REPO_ROOT}/plugins/dev/skills/phase-monitor-deploy/SKILL.md"
-EMIT_HELPER="${REPO_ROOT}/plugins/dev/scripts/lib/phase-emit-complete.sh"
+# CTL-1410 Phase A: every terminal emit rides the production wrapper now.
+EMIT_WRAPPER="${REPO_ROOT}/plugins/dev/scripts/phase-agent-emit-complete"
 # shellcheck source=lib/linearis-stub.sh
 source "${SCRIPT_DIR}/lib/linearis-stub.sh"
 
@@ -36,13 +37,24 @@ fail() { FAIL=$((FAIL+1)); printf '  FAIL: %s\n    %s\n' "$1" "$2"; }
 assert_eq() { if [ "$2" = "$3" ]; then ok "$1"; else fail "$1" "expected '$2' got '$3'"; fi; }
 assert_file_exists() { if [ -f "$2" ]; then ok "$1"; else fail "$1" "missing file: $2"; fi; }
 
+# CTL-1410 Phase A: every terminal emit now flows through the phase-agent-emit-complete
+# wrapper, which appends to $CATALYST_DIR/events/YYYY-MM.jsonl (not the lib-only
+# $CATALYST_EVENTS_FILE). Read the last phase event line from a case's catalyst dir.
+read_phase_event_line() {
+  local catalyst_dir="$1" month
+  month=$(date -u +%Y-%m)
+  local logfile="${catalyst_dir}/events/${month}.jsonl"
+  [ -f "$logfile" ] || { echo ""; return 1; }
+  grep -F '"event.name":"phase.' "$logfile" | tail -1
+}
+
 if ! command -v catalyst-events >/dev/null 2>&1; then
   echo "SKIP: catalyst-events not on PATH — phase-monitor-deploy needs it" >&2
   exit 0
 fi
 
 [ -f "$SKILL_FILE" ]  || { echo "FAIL: skill missing: $SKILL_FILE";   exit 1; }
-[ -f "$EMIT_HELPER" ] || { echo "FAIL: helper missing: $EMIT_HELPER"; exit 1; }
+[ -x "$EMIT_WRAPPER" ] || { echo "FAIL: wrapper missing/not executable: $EMIT_WRAPPER"; exit 1; }
 
 # Extract the executable bash body delimited by ```bash phase-monitor-deploy-body```.
 SKILL_BODY_FILE="$(mktemp -t phase-monitor-deploy-body.XXXXXX.sh)"
@@ -156,10 +168,16 @@ jq -nc --arg s "$canary_status" '{status: \$s, observations: ["fixture"]}'
 EOF
   chmod +x "$case_dir/bin/canary-stub"
 
-  # linearis stub (CTL-632 deploy mirror): keep the skill's `linearis issues
-  # discuss` call hermetic — case_dir/bin is first on PATH so this shadows any
-  # real linearis. Logs each call so we can assert the mirror posted.
+  # linearis stub (CTL-632 deploy mirror): keep the skill hermetic —
+  # case_dir/bin is first on PATH so this shadows any real linearis.
   linearis_stub_install "$case_dir/bin" "$case_dir/linearis-calls.log"
+
+  # CTL-550/CTL-1410: the mirror posts through linear-comment-post.sh (app-actor
+  # API), NOT `linearis issues discuss` — stub it and point the skill's
+  # CATALYST_COMMENT_POST_HELPER override at it so the "mirror posted" assertion
+  # is hermetic (independent of machine credentials). The stub logs its args
+  # (ticket, body) to comment-post-calls.log and exits 0.
+  linear_comment_post_stub_install "$case_dir/bin" "$case_dir/comment-post-calls.log"
 
   # Run the skill body in the background so we can append the deploy event
   # AFTER catalyst-events wait-for has begun watching from EOF. This mirrors
@@ -185,11 +203,11 @@ EOF
     CATALYST_ORCHESTRATOR_DIR="$orch_dir" \
     CATALYST_ORCHESTRATOR_ID="orch-test" \
     CATALYST_EVENTS_FILE="$events_file" \
+    CATALYST_COMMENT_POST_HELPER="$case_dir/bin/linear-comment-post.sh" \
     PHASE_DEPLOY_TIMEOUT_SEC="$timeout_sec" \
     PHASE_DEPLOY_ENV="production" \
     PHASE_CANARY_CMD="$case_dir/bin/canary-stub" \
     PHASE_AGENT_REPO_ROOT="$REPO_ROOT" \
-    PHASE_EMIT_HELPER="$EMIT_HELPER" \
       bash "$SKILL_BODY_FILE" > "$case_dir/stdout.log" 2> "$case_dir/stderr.log"
     echo $? > "$case_dir/exit-code"
   ) &
@@ -238,27 +256,35 @@ if [ -f "$CASE_DIR/orch/workers/CTL-9999/phase-monitor-deploy.json" ]; then
 fi
 
 # CTL-632 deploy mirror: a Linear comment was posted with the env + preview URL.
-if grep -q '^discuss$' "$CASE_DIR/linearis-calls.log" 2>/dev/null; then
+# CTL-550/CTL-1410: the mirror rides linear-comment-post.sh (app-actor API), not
+# `linearis issues discuss` — assert against the comment-post stub's log.
+if grep -q 'CTL-9999' "$CASE_DIR/comment-post-calls.log" 2>/dev/null; then
   ok "success: deploy mirror posted to Linear"
 else
-  fail "success: deploy mirror posted" "no discuss in $(cat "$CASE_DIR/linearis-calls.log" 2>/dev/null)"
+  fail "success: deploy mirror posted" "no call in $(cat "$CASE_DIR/comment-post-calls.log" 2>/dev/null)"
 fi
-if grep -q 'Phase Monitor-Deploy' "$CASE_DIR/linearis-calls.log" 2>/dev/null \
-   && grep -q 'preview.example.dev/ctl-9999' "$CASE_DIR/linearis-calls.log" 2>/dev/null; then
+if grep -q 'Phase Monitor-Deploy' "$CASE_DIR/comment-post-calls.log" 2>/dev/null \
+   && grep -q 'preview.example.dev/ctl-9999' "$CASE_DIR/comment-post-calls.log" 2>/dev/null; then
   ok "success: deploy mirror body has header + preview URL"
 else
-  fail "success: deploy mirror body" "log: $(cat "$CASE_DIR/linearis-calls.log" 2>/dev/null)"
+  fail "success: deploy mirror body" "log: $(cat "$CASE_DIR/comment-post-calls.log" 2>/dev/null)"
 fi
 
 # Canary stub was invoked exactly once
 INVOCATIONS="$(wc -l < "$CASE_DIR/canary-invocations.log" 2>/dev/null | tr -d ' ')"
 assert_eq "success: canary stub invoked once" "1" "${INVOCATIONS:-0}"
 
-# Emitted event shape
-EVENT_NAME="$(jq -r '.attributes."event.name"' "$CASE_DIR/events.jsonl" \
-              | tail -1)"
+# Emitted event shape (CTL-1410: from the wrapper sink)
+EVENT_NAME="$(read_phase_event_line "$CASE_DIR/catalyst" \
+              | jq -r '.attributes."event.name"' 2>/dev/null)"
 assert_eq "success: emitted phase event name" \
   "phase.monitor-deploy.complete.CTL-9999" "$EVENT_NAME"
+
+# CTL-1410 Phase A: the wrapper flips the signal file's status to done in-band
+# (merged onto the artifact write, preserving deploy_state/canary_result).
+SUCCESS_SIG_STATUS="$(jq -r '.status' \
+  "$CASE_DIR/orch/workers/CTL-9999/phase-monitor-deploy.json" 2>/dev/null)"
+assert_eq "success: signal status flipped to done (CTL-1410)" "done" "$SUCCESS_SIG_STATUS"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Case 2: deploy failure → phase.monitor-deploy.failed, canary NOT invoked
@@ -279,10 +305,16 @@ else
   fail "failure: canary not invoked" "canary log exists with $(wc -l < "$CASE_DIR2/canary-invocations.log") lines"
 fi
 
-FAIL_EVENT="$(jq -r '.attributes."event.name"' "$CASE_DIR2/events.jsonl" \
-              | tail -1)"
+FAIL_EVENT="$(read_phase_event_line "$CASE_DIR2/catalyst" \
+              | jq -r '.attributes."event.name"' 2>/dev/null)"
 assert_eq "failure: emitted failed event" \
   "phase.monitor-deploy.failed.CTL-9999" "$FAIL_EVENT"
+
+# CTL-1410 Phase A: the deploy-failure branch writes the artifact then the wrapper
+# flips the signal's status to failed in-band (merged onto the artifact).
+FAIL_SIG_STATUS="$(jq -r '.status' \
+  "$CASE_DIR2/orch/workers/CTL-9999/phase-monitor-deploy.json" 2>/dev/null)"
+assert_eq "failure: signal status flipped to failed (CTL-1410)" "failed" "$FAIL_SIG_STATUS"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Case 3: no deploy event arrives within timeout → phase.monitor-deploy.skipped
@@ -320,15 +352,19 @@ assert_eq "skipped: emitted skipped event" \
 # Case 4: phase-monitor-merge.json missing → failed event + non-zero
 
 MISS_DIR="$TMPROOT/missing"
-mkdir -p "$MISS_DIR/worker"  # but NO phase-monitor-merge.json
+MISS_ORCH="$MISS_DIR/orch"
+MISS_WORKER="$MISS_ORCH/workers/CTL-8888"
+MISS_CATALYST="$MISS_DIR/catalyst"
+mkdir -p "$MISS_WORKER" "$MISS_CATALYST/events"  # but NO phase-monitor-merge.json
 
 PATH="$PATH" \
 TICKET=CTL-8888 \
-WORKER_DIR="$MISS_DIR/worker" \
-CATALYST_EVENTS_FILE="$MISS_DIR/events.jsonl" \
+WORKER_DIR="$MISS_WORKER" \
+CATALYST_DIR="$MISS_CATALYST" \
+CATALYST_ORCHESTRATOR_DIR="$MISS_ORCH" \
+CATALYST_ORCHESTRATOR_ID="orch-test" \
 PHASE_DEPLOY_TIMEOUT_SEC=1 \
 PHASE_AGENT_REPO_ROOT="$REPO_ROOT" \
-PHASE_EMIT_HELPER="$EMIT_HELPER" \
   bash "$SKILL_BODY_FILE" > "$MISS_DIR/stdout.log" 2> "$MISS_DIR/stderr.log"
 MISS_EXIT=$?
 
@@ -338,15 +374,15 @@ else
   fail "missing-merge: exit code" "expected non-zero, got $MISS_EXIT"
 fi
 
-MISS_EVENT="$(jq -r '.attributes."event.name"' "$MISS_DIR/events.jsonl" 2>/dev/null \
-              | tail -1)"
+MISS_LINE="$(read_phase_event_line "$MISS_CATALYST")"
+MISS_EVENT="$(printf '%s' "$MISS_LINE" | jq -r '.attributes."event.name"' 2>/dev/null)"
 assert_eq "missing-merge: emits failed event" \
   "phase.monitor-deploy.failed.CTL-8888" "$MISS_EVENT"
 
-# Failure reason should cite the new file, not phase-pr.json. The emit helper
-# stores the --reason text in body.message of the canonical event line.
-MISS_REASON="$(jq -r '.body.message // empty' \
-              "$MISS_DIR/events.jsonl" 2>/dev/null | tail -1)"
+# Failure reason should cite the new file, not phase-pr.json. CTL-1410: the
+# wrapper carries the --reason text in body.payload.failure_reason (body.message
+# is a generic "Phase … failed on …" string).
+MISS_REASON="$(printf '%s' "$MISS_LINE" | jq -r '.body.payload.failure_reason // empty' 2>/dev/null)"
 case "$MISS_REASON" in
   *phase-monitor-merge.json*) ok "missing-merge: failure reason cites phase-monitor-merge.json" ;;
   *) fail "missing-merge: failure reason" "expected reason to mention phase-monitor-merge.json, got: $MISS_REASON" ;;
@@ -373,8 +409,8 @@ if [ -f "$CASE_DIR5/orch/workers/CTL-9999/phase-monitor-deploy.json" ]; then
     "fallbeef" "$DSHA5"
 fi
 
-CMPL5="$(jq -r '.attributes."event.name"' "$CASE_DIR5/events.jsonl" \
-         | tail -1)"
+CMPL5="$(read_phase_event_line "$CASE_DIR5/catalyst" \
+         | jq -r '.attributes."event.name"' 2>/dev/null)"
 assert_eq "fallback: emitted complete event after fallback" \
   "phase.monitor-deploy.complete.CTL-9999" "$CMPL5"
 
@@ -393,8 +429,8 @@ else
   fail "fallback-fail: exit code" "expected non-zero, got $EXIT6"
 fi
 
-REASON6="$(jq -r '.body.message // empty' \
-          "$CASE_DIR6/events.jsonl" 2>/dev/null | tail -1)"
+REASON6="$(read_phase_event_line "$CASE_DIR6/catalyst" \
+          | jq -r '.body.payload.failure_reason // empty' 2>/dev/null)"
 case "$REASON6" in
   *gh*|*REST*|*fallback*|*empty*) ok "fallback-fail: failure reason mentions fallback path" ;;
   *) fail "fallback-fail: reason" "expected reason to mention gh/REST/fallback/empty, got: $REASON6" ;;
