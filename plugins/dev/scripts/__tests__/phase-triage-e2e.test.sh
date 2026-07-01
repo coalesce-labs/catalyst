@@ -84,6 +84,12 @@ fi
 TMPROOT="$(mktemp -d -t phase-triage-test.XXXXXX)"
 trap 'rm -rf "$TMPROOT" "$SKILL_BODY_FILE"' EXIT
 
+# CTL-1397: the triage body reads via direct SQL (linear_read_ticket). Point the
+# replica at a path that does not exist so `replica_fresh` is always false and the
+# helper deterministically falls back to the `linearis` stub installed on PATH —
+# hermetic, independent of any real replica in the runner's HOME.
+export CATALYST_REPLICA_DB="$TMPROOT/no-such-replica.db"
+
 run_case() {
 	local case_name="$1" fixture="$2" ticket="$3"
 	local body_file="${4:-$SKILL_BODY_FILE}"
@@ -295,14 +301,16 @@ fi
 
 FAIL_DIR="$TMPROOT/lin-fail"
 mkdir -p "$FAIL_DIR/bin"
-# CTL-1397: the triage body now reads via `catalyst-linear read`, so the
-# read-failure case stubs a failing catalyst-linear (not linearis).
-cat >"$FAIL_DIR/bin/catalyst-linear" <<'EOF'
+# CTL-1397: the triage body reads via direct SQL and falls back to `linearis`
+# when the replica is absent (which it is here — CATALYST_REPLICA_DB points at a
+# nonexistent file). Simulate a hard read failure by stubbing a failing
+# `linearis issues read`.
+cat >"$FAIL_DIR/bin/linearis" <<'EOF'
 #!/usr/bin/env bash
-echo "catalyst-linear stub: simulated read failure" >&2
+echo "linearis stub: simulated read failure" >&2
 exit 1
 EOF
-chmod +x "$FAIL_DIR/bin/catalyst-linear"
+chmod +x "$FAIL_DIR/bin/linearis"
 
 PATH="$FAIL_DIR/bin:$PATH" \
 	TICKET=CTL-9001 \
@@ -361,23 +369,9 @@ case "\$1" in
 esac
 EOF
 chmod +x "$DISCUSS_429_DIR/bin/linearis"
-# CTL-1397: triage reads via `catalyst-linear` now — stub it (read → fixture) so
-# the body's ticket read succeeds and reaches the best-effort comment-post path
-# this case exercises (without it, the body falls through to the real binary on
-# PATH and the test is non-hermetic / red in CI).
-cat >"$DISCUSS_429_DIR/bin/catalyst-linear" <<EOF
-#!/usr/bin/env bash
-case "\$1" in
-  read)
-    cat "$FIXTURE_429"
-    ;;
-  *)
-    echo "catalyst-linear stub: unsupported subcommand: \$1" >&2
-    exit 2
-    ;;
-esac
-EOF
-chmod +x "$DISCUSS_429_DIR/bin/catalyst-linear"
+# CTL-1397: triage reads via direct SQL now; CATALYST_REPLICA_DB is absent so the
+# read falls back to the `linearis issues read` stub above (→ fixture), reaching
+# the best-effort comment-post path this case exercises.
 linear_comment_post_stub_install_failing "$DISCUSS_429_DIR/bin" "$DISCUSS_429_DIR/comment-post-calls.log"
 
 PATH="$DISCUSS_429_DIR/bin:$PATH" \

@@ -86,26 +86,38 @@ fi
 # shellcheck disable=SC1090
 . "$__PT_LIB"
 
+# CTL-1397: direct-SQLite Linear reads (replica-first, loud linearis fallback).
+__PT_READ_LIB="${PHASE_LINEAR_READ_HELPER:-${__PT_REPO_ROOT}/plugins/dev/scripts/lib/linear-read-replica.sh}"
+if [[ ! -r "$__PT_READ_LIB" ]]; then
+  echo "phase-triage: cannot find linear-read-replica.sh at $__PT_READ_LIB" >&2
+  exit 1
+fi
+# shellcheck disable=SC1090
+. "$__PT_READ_LIB"
+
 : "${TICKET:?phase-triage: TICKET env var required}"
 
 WORKER_DIR="${WORKER_DIR:-${ORCH_DIR:+${ORCH_DIR}/workers/${TICKET}}}"
 WORKER_DIR="${WORKER_DIR:-$(pwd)}"
 mkdir -p "$WORKER_DIR"
 
-# 1. Read ticket via the replica wrapper (catalyst-linear; CTL-1397 — never bare
-#    linearis for reads). Test stubs override $PATH.
+# 1. Read ticket via direct SQL against the replica (CTL-1397 — never bare
+#    linearis; the helper falls back loudly to linearis when the replica is
+#    stale/absent). stderr is left visible so the loud fallback surfaces in the
+#    phase log. Test stubs point CATALYST_REPLICA_DB at a nonexistent path to
+#    force the deterministic linearis-stub fallback.
 TICKET_JSON_FILE="$(mktemp)"
 trap 'rm -f "$TICKET_JSON_FILE"' EXIT
 
-if ! catalyst-linear read "$TICKET" > "$TICKET_JSON_FILE" 2>/dev/null; then
+if ! linear_read_ticket "$TICKET" > "$TICKET_JSON_FILE"; then
   emit_phase_complete --phase triage --ticket "$TICKET" --status failed \
-    --reason "catalyst-linear read failed"
+    --reason "linear read failed"
   exit 1
 fi
 
 if ! jq -e . "$TICKET_JSON_FILE" >/dev/null 2>&1; then
   emit_phase_complete --phase triage --ticket "$TICKET" --status failed \
-    --reason "catalyst-linear returned non-JSON output"
+    --reason "linear read returned non-JSON output"
   exit 1
 fi
 
@@ -373,9 +385,10 @@ and your job here is the second one:
 
 2. **Triage as a SECOND PAIR OF EYES (your job).** You are NOT a parser. Do **not** add a dependency
    because an id appears in the prose. Instead: read the ticket's intent, then **examine the
-   relevant backlog** — `linearis issues list` for the ticket's team / area (and
-   `catalyst-linear read <id>` to confirm a candidate) — and judge whether any in-flight or planned
-   work is a **true prerequisite the author may have missed**: work that must reach a terminal state
+   relevant backlog** — query the replica for the ticket's team / area, and read any candidate
+   ticket, via direct SQL (see the `linearis` skill's "Reading Linear" section) — and judge whether
+   any in-flight or planned work is a **true prerequisite the author may have missed**: work that
+   must reach a terminal state
    before this ticket can sensibly start (a shared interface not yet built, a migration that must
    land first, an explicit "must follow" sequencing). Record **only** blockers you can justify, in
    the rich shape with a `reason`:
@@ -399,8 +412,8 @@ STEP E, `scheduler.mjs` — it reads `triage.json.dependencies`, re-validates ea
 **cross-team (CTL-838)** ids before writing the durable edge with `applyBlockedByRelation`). Keeping
 the write scheduler-side preserves the CTL-497/CTL-558 contract — the phase-triage e2e negative
 guard fails the build if this skill ever emits a `linearis issues update` call.
-The `catalyst-linear read` (and the `linearis issues list` backlog scan) reads above are read-only
-and are fine. STEP E tolerates BOTH the flat-string and the rich `{id}` shapes.
+The replica SQL reads above (ticket detail + backlog scan) are read-only and are fine. STEP E
+tolerates BOTH the flat-string and the rich `{id}` shapes.
 
 3. If the refined fields differ materially, post a follow-up `linearis issues discuss` comment
    marking the refinement.

@@ -46,6 +46,10 @@
 
 set -uo pipefail
 
+# CTL-1397: direct-SQLite Linear reads (replica-first, loud linearis fallback).
+_COMPOUND_LOG_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${_COMPOUND_LOG_DIR}/lib/linear-read-replica.sh"
+
 # ─── utilities ──────────────────────────────────────────────────────────────
 
 err() { echo "error: $*" >&2; }
@@ -98,8 +102,8 @@ probe_pr() {
 
 probe_linear_estimate() {
   local ticket="$1" json
-  # CTL-1397: read the estimate through the replica wrapper, never bare linearis.
-  json=$(catalyst-linear read "$ticket" 2>/dev/null) || return 1
+  # CTL-1397: read the estimate via direct SQL against the replica, never bare linearis.
+  json=$(linear_read_ticket "$ticket" 2>/dev/null) || return 1
   [ -z "$json" ] && return 1
   echo "$json" | jq -r '.estimate // empty'
 }

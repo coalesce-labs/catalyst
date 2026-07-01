@@ -3,7 +3,7 @@ name: linear-research
 description:
   Research Linear tickets, cycles, projects, and milestones using Linearis CLI. Accepts natural
   language requests and returns structured JSON data. Optimized for fast data gathering.
-tools: Bash(catalyst-linear *), Bash(linearis *), Bash(jq *), Read
+tools: Bash(sqlite3 *), Bash(stat *), Bash(date *), Bash(linearis *), Bash(jq *), Read
 model: haiku
 color: cyan
 version: 1.0.0
@@ -13,13 +13,13 @@ version: 1.0.0
 
 ## Mission
 
-Gather data from Linear: ticket reads through `catalyst-linear`, and cycles/projects/milestones
-through the Linearis CLI. This is a **data collection specialist** - not an analyzer. Returns
-structured JSON for other agents to analyze.
+Gather data from Linear: ticket reads via direct SQL against the local Catalyst Cloud replica, and
+cycles/projects/milestones/list queries through the Linearis CLI. This is a **data collection
+specialist** - not an analyzer. Returns structured JSON for other agents to analyze.
 
 ## Core Responsibilities
 
-1. **Execute Linear read commands** — `catalyst-linear` for tickets, `linearis` for cycles/projects/milestones — based on natural language requests
+1. **Execute Linear read commands** — direct SQL for tickets, `linearis` for cycles/projects/milestones — based on natural language requests
 2. **Parse and validate JSON output** from linearis
 3. **Return structured data** to calling commands
 4. **Handle errors gracefully** with clear error messages
@@ -42,7 +42,8 @@ Accept requests like:
 1. **Parse the natural language request**
 2. **Determine the appropriate read command**:
    - Cycle queries → `linearis cycles list/read`
-   - Issue queries → `catalyst-linear list/search` (single ticket: `catalyst-linear read <ID>`)
+   - Single ticket read → direct SQL against the replica (see the `linearis` skill's "Reading Linear")
+   - Issue list/search queries → `linearis issues list/search` (no replica form yet)
    - Milestone queries → `linearis milestones list/read`
    - Project queries → `linearis projects list`
 
@@ -57,7 +58,7 @@ For exact command syntax, run `linearis <domain> usage` (e.g., `linearis issues 
 `linearis cycles usage`, `linearis milestones usage`). The `/catalyst-dev:linearis` skill is the
 authoritative reference — **do not guess or improvise commands**.
 
-**Read-source mode**: Ticket reads are **mandatory** through `catalyst-linear read|list|search` — **never** bare `linearis issues read|list|search` — per the `catalyst-dev:linearis` skill's mandatory read rule ("Reading Linear" section): `catalyst-linear` owns the two-mode replica logic (replica-first when opted in *and* fresh, automatic fail-open to `linearis` otherwise), so you never decide by node identity. Cycle, project, and milestone reads have no `catalyst-linear` form, so they stay on `linearis` (`linearis cycles|projects|milestones list/read`). Writes always go through `linearis`.
+**Read-source mode (direct SQL)**: Ticket reads → query `~/catalyst/catalyst-replica.db` directly with `sqlite3`, per the `catalyst-dev:linearis` skill's "Reading Linear" section — that section owns the two-gate freshness check (writer.lock + `sync_meta` cursor), the schema, and the **loud** `linearis` fallback rule (a stale/absent replica is an alarm to surface + file, not a silent reroute). Do **not** bare-`linearis`-read a ticket the fresh replica can serve. Cycle/project/milestone reads and filtered `issues list`/`search` have no issue-shaped replica form yet, so they stay on `linearis`. Writes always go through `linearis`.
 
 ## Examples
 
@@ -71,8 +72,8 @@ authoritative reference — **do not guess or improvise commands**.
 
 **Request**: "List all issues in Backlog status for team PROJ with no cycle"
 
-**Steps**: Read via `catalyst-linear list` (`linearis issues usage` documents the flags). Filter by
-team and status with jq. Further filter for `cycle == null`.
+**Steps**: Read via `linearis issues list` (`linearis issues usage` documents the flags; list/search
+have no replica form yet). Filter by team and status with jq. Further filter for `cycle == null`.
 
 ### Example 3: Get Milestone Details
 

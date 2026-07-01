@@ -30,6 +30,9 @@ set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# CTL-1397: direct-SQLite Linear reads (replica-first, loud linearis fallback).
+source "${SCRIPT_DIR}/lib/linear-read-replica.sh"
+
 # ─── Default state fallbacks (when config doesn't specify them) ────────────
 # These match the defaults documented in oneshot/orchestrate skills.
 default_state_for() {
@@ -185,13 +188,13 @@ fi
 # ─── Idempotency check (read current state first) ──────────────────────────
 CURRENT_STATE=""
 if [ "$FORCE" -ne 1 ] && command -v jq >/dev/null 2>&1; then
-  # CTL-1397: read current state through the replica wrapper (`catalyst-linear
-  # read`), never bare `linearis` — keeps this per-transition idempotency read
-  # off the shared Linear quota. `catalyst-linear` is replica-first and fails
-  # open to linearis internally. If it is not installed at all the read returns
-  # empty, the check is skipped, and the transition proceeds (a same-state write
-  # is a Linear no-op), so the swap degrades safely.
-  READ_JSON=$(catalyst-linear read "$TICKET" 2>/dev/null || echo "")
+  # CTL-1397: read current state via direct SQL against the replica
+  # (`linear_read_ticket`), never bare `linearis` — keeps this per-transition
+  # idempotency read off the shared Linear quota. The helper is replica-first and
+  # falls back loudly to linearis when the replica is stale/absent. If the read
+  # returns empty the check is skipped and the transition proceeds (a same-state
+  # write is a Linear no-op), so it degrades safely.
+  READ_JSON=$(linear_read_ticket "$TICKET" 2>/dev/null || echo "")
   if [ -n "$READ_JSON" ]; then
     CURRENT_STATE=$(echo "$READ_JSON" | jq -r '.state.name // empty' 2>/dev/null || echo "")
   fi

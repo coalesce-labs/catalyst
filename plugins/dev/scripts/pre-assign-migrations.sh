@@ -29,6 +29,10 @@
 
 set -euo pipefail
 
+# CTL-1397: direct-SQLite Linear reads (replica-first, loud linearis fallback).
+_PAM_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${_PAM_DIR}/lib/linear-read-replica.sh"
+
 TICKETS=""
 TICKETS_JSON=""
 MIG_DIR="supabase/migrations"
@@ -59,15 +63,17 @@ fi
 
 # Build ticket JSON if not supplied.
 if [ -z "$TICKETS_JSON" ]; then
-  # CTL-1397: ticket reads go through the replica wrapper (catalyst-linear).
-  if ! command -v catalyst-linear >/dev/null 2>&1; then
-    echo "error: --tickets requires the catalyst-linear CLI; pass --tickets-json instead" >&2
+  # CTL-1397: ticket reads go through direct SQL against the replica
+  # (linear_read_ticket, loud linearis fallback). Needs sqlite3 (replica) or
+  # linearis (fallback); tests bypass both via --tickets-json.
+  if ! command -v sqlite3 >/dev/null 2>&1 && ! command -v linearis >/dev/null 2>&1; then
+    echo "error: --tickets requires sqlite3 (replica) or linearis; pass --tickets-json instead" >&2
     exit 1
   fi
   TICKETS_JSON="["
   FIRST=1
   for T in $TICKETS; do
-    RAW=$(catalyst-linear read "$T" 2>/dev/null || echo '{}')
+    RAW=$(linear_read_ticket "$T" 2>/dev/null || echo '{}')
     OBJ=$(echo "$RAW" | jq -c --arg id "$T" '{
       id: $id,
       title: (.title // ""),

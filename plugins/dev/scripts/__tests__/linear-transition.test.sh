@@ -19,6 +19,13 @@ PASSES=0
 SCRATCH="$(mktemp -d)"
 trap 'rm -rf "$SCRATCH"' EXIT
 
+# CTL-1397: linear-transition reads current state via direct SQL (linear_read_ticket).
+# Point the replica at a nonexistent path so the helper deterministically falls back
+# to the `linearis issues read` stub on PATH — hermetic, independent of any real
+# replica in the runner's HOME. The direct-SQL HIT path is covered by
+# linear-read-replica.test.sh.
+export CATALYST_REPLICA_DB="${SCRATCH}/no-such-replica.db"
+
 # CTL-577: the stateIds UUID cache is a machine-level registry at
 # $HOME/.config/catalyst/linear-state-ids.json. Fake HOME so the registry path
 # is hermetic — an absent registry makes every transition fall back to the
@@ -103,23 +110,6 @@ fi
 exit 0
 EOF
   chmod +x "${bin_dir}/linearis"
-
-  # CTL-1397: linear-transition.sh now reads current state through the replica
-  # wrapper (`catalyst-linear read`) for the idempotency check; writes still go
-  # through `linearis issues update`. This shim mirrors the linearis `read` arm.
-  cat > "${bin_dir}/catalyst-linear" <<'EOF'
-#!/usr/bin/env bash
-echo "catalyst-linear $*" >> "${FAKE_LINEARIS_LOG:-/dev/null}"
-if [ "$1" = "read" ]; then
-  STATE="${FAKE_LINEARIS_STATE:-In Review}"
-  cat <<JSON
-{"identifier":"${2:-TST-1}","title":"Fake","state":{"name":"${STATE}"}}
-JSON
-  exit 0
-fi
-exit 0
-EOF
-  chmod +x "${bin_dir}/catalyst-linear"
 }
 
 # Install a fake `curl` that echoes a canned GraphQL response, so the real
@@ -209,8 +199,8 @@ run "idempotent: skips update when state matches" \
 run "idempotent: no update call recorded when already Done" \
   bash -c "! grep -q 'issues update' '$LOG4'"
 
-run "idempotent: read call IS recorded (check was performed via replica)" \
-  expect_contains "$LOG4" "catalyst-linear read TST-4"
+run "idempotent: read call IS recorded (state check happened before the write)" \
+  expect_contains "$LOG4" "issues read TST-4"
 
 # ─── Test 5: --force bypasses idempotency check ────────────────────────────
 WORK5="${SCRATCH}/t5"

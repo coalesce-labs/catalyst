@@ -29,49 +29,116 @@ linearis cycles usage         # Just cycle operations
 
 ## Reading Linear
 
-**The read source is decided by whether the local Catalyst Cloud replica is opted in
-*and* live — NOT by whether the node has a Cloud key. Writes never change.** The easiest
-way to honor this rule is to call **`catalyst-linear read|list|search`** (CTL-1391): it
-resolves the source itself and fails open to `linearis`, so you never decide based on
-node identity.
+> **This is the single source of the Linear read rule.** Other skills/agents reference this
+> section — they do **not** restate it.
 
-### Mode 1 — Direct (default)
+**Linear READS → query the local Catalyst Cloud replica directly with SQL. Linear WRITES →
+always `linearis`.** The replica (`~/catalyst/catalyst-replica.db`, a SQLite mirror kept
+current by the per-host `catalyst-cloud-sync` change-feed writer) holds every issue field plus
+labels, relations, projects, cycles, users, and PR/review state — so **one SQL query serves ANY
+read**, including the label/relation joins the old CLI couldn't. This supersedes the
+`catalyst-linear` wrapper (now deprecated — see below) for agent/skill ad-hoc reads.
 
-When the replica is **not opted in** (`CATALYST_LINEAR_REPLICA` unset/`off` *and* Layer-2
-`catalyst.linearReplica.mode` not `on`) **or** no fresh replica file is present, read Linear
-**directly**: `linearis issues read|list|search`. There is **no local mirror**. A node that
-*has* a Cloud key but has not flipped the replica flag on is in this mode. (The broker's
-`filter-state.db` still exists for orchestration fencing and the board UI, but it is **not**
-a Linear read path — do not read ticket state from it.)
+> **Why direct SQL, not bare `linearis`.** Bare `linearis` reads always hit the rate-limited
+> Linear API. On the shared-quota fleet that burns budget and 429s everyone. The replica is a
+> sub-ms local copy that already has the answer — reading it is what makes "every client reads
+> the replica" actually true.
 
-### Mode 2 — Replica-first (opted in *and* a live replica present)
+### The rule
 
-When the replica is **opted in** (`CATALYST_LINEAR_REPLICA=on` or Layer-2
-`catalyst.linearReplica.mode=on`) **and** a fresh local SQLite replica — kept current by
-the Cloud change-feed — is present:
+1. **Confirm the replica is FRESH + SEEDED** — both gates (mirrors the daemon's `isReplicaFresh`,
+   `execution-core/replica-read.mjs`):
+   - **Writer alive:** `<db>.writer.lock` mtime is **< 5 min** old. The writer heartbeats this
+     file every few seconds regardless of Linear activity, so it tracks *liveness*, not
+     data-change cadence — do **NOT** gate on the `.db`/`-wal` mtime (a quiet feed makes those
+     look stale even when the mirror is perfectly current).
+   - **Seed complete:** `sync_meta` has a **non-empty `cursor` row**. The writer deletes it at
+     the start of a re-seed and rewrites it on completion, so its presence means you are not
+     reading a half-truncated table mid-reseed.
+2. **Fresh + seeded → query the replica and TRUST it.** Do **not** re-verify against live
+   Linear — that defeats the cache and re-burns the quota.
+3. **Not fresh / not seeded / your row missing → this is an ALARM, not a silent reroute.** Say
+   so loudly, fall back to `linearis` for that one read, **and file a ticket** — a stale/absent
+   replica signals a writer or mirror gap worth fixing, not a one-off retry.
 
-- **Read the replica FIRST** and **trust it** as the authoritative local copy.
-- Do **NOT** reflexively re-verify against live Linear — that defeats the cache and
-  burns the API budget.
-- **Evidence-based escalation only.** Fall back to a direct `linearis` read for a
-  specific item *only* when you have concrete evidence the replica read is wrong:
-  it contradicts something you just directly observed; the replica freshness/staleness
-  signal shows it is behind; or a ticket you expect is missing. When you escalate:
-  - (a) read that item through `catalyst-linear read <ID>` (it still surfaces staleness via `_meta` and fails open to a direct `linearis` read), **and**
-  - (b) **surface the staleness as an issue** — a stale replica read signals a mirror
-    gap (e.g. a missed webhook) worth investigating, not just a one-off retry.
+> **Caveat — the gates prove writer-liveness + seed-completeness, NOT per-row apply success.**
+> A rare class of rows (~0.7%) can be *present but stale* because their change-feed apply silently
+> failed (the `errno:1` apply-drift, catalyst-cloud#127 / CTL-1402) — the writer heartbeats and the
+> cursor advances past them, so the freshness gate reads green while that one row holds an old value.
+> Direct SQL cannot make this loud on its own. So: if a specific field **contradicts something you
+> just directly observed** (e.g. a state you just wrote), treat that one field as an anomaly —
+> re-read it via `linearis`, use the live value, and surface it. This is the residual reason
+> **writer reliability + apply-failure telemetry** (CTL-1402) matter; it is not license to re-verify
+> reads that don't contradict anything.
 
-### Writes — always `linearis`, both modes
+### Freshness gate (copy-paste, portable macOS/Linux)
 
-`create` / `update` / state transitions / `discuss` / estimate / label **always** go
-through `linearis`. The replica is **read-only** in both modes.
+```bash
+# Resolve the DB the way the daemon does: $CATALYST_REPLICA_DB, else $CATALYST_DIR, else $HOME.
+DB="${CATALYST_REPLICA_DB:-${CATALYST_DIR:-$HOME/catalyst}/catalyst-replica.db}"
+replica_fresh() {
+  local lock="$DB.writer.lock" now age
+  [[ -f "$lock" ]] || return 1
+  # GNU `stat -c %Y` first, BSD `stat -f %m` fallback (on Linux `-f` is --file-system, not mtime).
+  now=$(date +%s); age=$(( now - $(stat -c %Y "$lock" 2>/dev/null || stat -f %m "$lock") ))
+  (( age < 300 )) || return 1                                    # writer heartbeat < 5 min
+  [[ -n "$(sqlite3 "$DB" "SELECT 1 FROM sync_meta WHERE key='cursor' AND value<>'' LIMIT 1;")" ]]  # seed complete
+}
+```
 
-### How reads resolve
+Scripts should use the shared helper instead of re-implementing this: source
+`plugins/dev/scripts/lib/linear-read-replica.sh` and call `linear_read_ticket <ID>` (freshness
+gate → SQL → loud `linearis` fallback).
 
-- **Daemon read paths** resolve the mode automatically via the read-source seam (CTL-1390) — callers do not choose.
-- **Agent / skill / script ad-hoc reads — MANDATORY:** read Linear **only** through **`catalyst-linear read|list|search`** (CTL-1391). **Never call bare `linearis issues read|list|search` to read** — not in agent or skill instructions, not in helper scripts. The same `catalyst-linear` command is correct on every node: replica-first when opted in *and* fresh, automatic fail-open to `linearis` otherwise. Output matches `linearis` JSON plus an additive `_meta` (read source + replica freshness).
+### Querying (discover the schema — don't guess columns)
 
-> **Why mandatory, not "preferred".** Bare `linearis` reads always hit Linear directly and bypass the replica entirely — even on a node that opted in. On the rate-limited worker minis that burns the shared Linear quota and 429s the fleet. `catalyst-linear` is the executable form of the read rule; routing **all** reads through it is what makes "every client reads the replica" actually true. (Writes are unaffected — always `linearis`.)
+Run `sqlite3 "$DB" .schema` (or `.schema issues`) to see the live columns. Verified 2026-07-01:
+
+- `issues.state` is the **state NAME** directly (`Backlog`/`Implement`/`PR`/`Done`…) — no join.
+- `issues` also has: `identifier`, `title`, `estimate`, `priority`/`priority_label`,
+  `description`, `url`, `branch_name`, `parent_identifier`, `project_id`, `cycle_id`, `team_id`,
+  `assignee_id`, the timestamp columns, and a **`raw`** column with the full Linear JSON.
+- **Labels:** `issue_labels ⋈ labels` — `JOIN labels l ON l.id = il.label_id WHERE il.issue_id = i.id`.
+- **Relations (blocks / blocked-by / …):** the `relations` table (`type, issue_identifier,
+  related_identifier`). **Relations lag ≤ 5 min** (reconcile poll, no webhook) — everything
+  else is real-time.
+- **Any uncolumned field:** `json_extract(raw,'$.path')` (e.g. `json_extract(raw,'$.state.type')`).
+
+Representative read — identifier, title, state, estimate, and labels in one query:
+
+```bash
+sqlite3 -json "$DB" "
+  SELECT i.identifier, i.title, i.state, i.estimate,
+         (SELECT group_concat(l.name, ', ') FROM issue_labels il
+            JOIN labels l ON l.id = il.label_id WHERE il.issue_id = i.id) AS labels
+  FROM issues i WHERE i.identifier = 'ENG-123' AND i.removed_at IS NULL;"
+```
+
+> `AND removed_at IS NULL` is REQUIRED: a tombstoned (removed) issue must read as a
+> MISS → fall back to live Linear, never as a stale hit.
+
+### Still needs `linearis` (no issue-shaped replica form)
+
+- **Non-issue domains:** `cycles` / `projects` / `milestones` / `initiatives` list & read — use
+  `linearis` (Core Operations below). Simple `cycles`/`projects` lookups can use those replica
+  tables, but the linearis commands are the full path.
+- **Genuinely unmirrored gaps:** cross-team-unsynced parent/child, plus a few unselected fields
+  (`relation.id`, `cycle.name` — CTC-147; `state.id`, `team.key` — CTC-148; `children` is always
+  `[]`). These are **closeable gaps, not permanent carve-outs** — file/track them; don't route
+  around the replica by habit.
+
+### Writes — always `linearis`
+
+`create` / `update` / state transitions / `discuss` / estimate / label **always** go through
+`linearis`. The replica is **read-only**.
+
+### `catalyst-linear` CLI — DEPRECATED
+
+The `catalyst-linear read|list|search` wrapper (CTL-1391) is **superseded by direct SQL** for
+agent/skill reads and retained only as a fail-open compatibility shim. Prefer direct SQL.
+(`list`/`search` were always `linearis` passthrough — no replica benefit — and the wrapper's
+additive `_meta` field + duplicate-flag collapsing broke bare-`linearis` jq pipelines.) The
+daemon's own read paths use `replica-read.mjs` directly and are unaffected by this deprecation.
 
 ## Gotchas & Traps
 
@@ -119,16 +186,20 @@ v2026.4.9.
 
 ## Core Operations
 
-> **Reads run through `catalyst-linear`.** The `linearis issues read|list|search` examples
-> below document the CLI **syntax** — the flags carry over verbatim. Per the mandatory read
-> rule above, **run issue reads via `catalyst-linear read|list|search`** (it shares linearis's
-> flags and fails open to linearis). Stay on bare `linearis` only for reads that need fields
-> the replica omits (relations, estimate) or non-issue domains (`cycles`/`projects`/`milestones`).
+> **Reads → direct SQL against the replica** (see [Reading Linear](#reading-linear)). The
+> `linearis issues read|list|search` examples below document the CLI **syntax** for the cases
+> that still use it — the stale/absent fallback path, non-issue domains, and writes. The flags
+> carry over verbatim.
 
 ### Read a ticket
 
 ```bash
-catalyst-linear read ENG-123        # replica-first; fails open to linearis
+# Preferred — direct SQL (gate on freshness first; see Reading Linear)
+sqlite3 -json "${CATALYST_REPLICA_DB:-${CATALYST_DIR:-$HOME/catalyst}/catalyst-replica.db}" \
+  "SELECT identifier, title, state, estimate FROM issues WHERE identifier='ENG-123' AND removed_at IS NULL;"
+
+# Fallback only (replica stale/absent) — and surface it as an anomaly + file a ticket
+linearis issues read ENG-123
 ```
 
 ### Search tickets
