@@ -163,6 +163,18 @@ export function defaultDeriveAttachmentPrs(ticket, { cwd, read = readTicketRepli
         push(null, null, a);
         continue;
       }
+      // CTL-1157 F #3 (Codex round-5): a BARE numeric string ("42" / "#42") is the
+      // "numeric string" case the comment promises — the replica can expose a linked PR
+      // as a bare number. Without this it fell through to the URL regex (no match) and
+      // was silently dropped, so a Linear-attached PR with no ticket-key mention and a
+      // non-standard branch escaped the enumeration → a false-clean open-PR check.
+      if (typeof a === "string") {
+        const bare = a.trim().match(/^#?(\d+)$/);
+        if (bare) {
+          push(null, null, Number(bare[1]));
+          continue;
+        }
+      }
       const hay = [a.url, a.href, a.sourceUrl, a.subtitle, a.title, typeof a === "string" ? a : null]
         .filter(Boolean)
         .join(" ");

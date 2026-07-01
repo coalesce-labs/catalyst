@@ -4491,7 +4491,10 @@ export function schedulerTick(
       /* best-effort — never block the tick on a signal-scan failure */
     }
   }
-  const occupiedCount = liveCount + queuedDelegates + sdkInflight;
+  // `let` (not const): a successful board-health enforce dispatch below reserves a
+  // slot by incrementing this AFTER the sample — see the board-health pass (CTL-1157
+  // Codex round-5). Every other read of occupiedCount is downstream of that point.
+  let occupiedCount = liveCount + queuedDelegates + sdkInflight;
 
   tick?.lap("liveness-read");
 
@@ -4542,6 +4545,15 @@ export function schedulerTick(
           now,
         });
         if (_bhResult?.ran) _boardHealthLastRunMs = _bhResult.ranAtMs;
+        // CTL-1157 (Codex round-5): a successful board-health ENFORCE dispatch enqueued
+        // a recovery-pass delegate intent AFTER occupiedCount was sampled (queuedDelegates
+        // is now stale by one). RESERVE that slot here so the same tick's resume + new-work
+        // admission (every computeFreeSlots(maxParallel, occupiedCount) below) cannot fill
+        // the slot board-health just claimed — otherwise at maxParallel=1 with one free
+        // slot the tick launches board-health's delegate AND promotes/admits another worker,
+        // overrunning the limit. holisticBoardHealthAct dispatches exactly ONE per scan, so
+        // reserve one. shadow/off never reach `act` → dispatched is never true → no reserve.
+        if (_bhResult?.act?.dispatched === true) occupiedCount += 1;
       } catch (err) {
         log.warn?.(
           { step: "board-health", err: err.message },

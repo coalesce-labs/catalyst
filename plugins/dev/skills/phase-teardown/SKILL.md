@@ -254,8 +254,12 @@ if [[ -f "$OPEN_PR_ENUM" ]] && command -v node >/dev/null 2>&1; then
   TD_OPEN_COUNT="$(printf '%s' "$TD_OPEN_PRS" | jq 'length' 2>/dev/null || echo 0)"
   if [[ "$TD_OPEN_COUNT" =~ ^[0-9]+$ && "$TD_OPEN_COUNT" -gt 0 ]]; then
     echo "phase-teardown: CTL-1157 Done-judgment — ${TD_OPEN_COUNT} OPEN PR(s) still exist for ${TICKET}:" >&2
-    printf '%s\n' "$TD_OPEN_PRS" | jq -r '.[] | "  #\(.number) [\(.state)] \(.title // "")"' 2>/dev/null >&2 || true
-    echo "phase-teardown: reason about EACH (STEP 2): finish/merge the needed, close the abandoned (gh pr close <n> --comment ...), or fail-out on a genuine judgment call — BEFORE the Done transition below." >&2
+    # CTL-1157 (Codex round-5): print the PR's OWN repo (owner/repo#n) when the
+    # enumerator recorded it — a cross-repo Linear attachment is a DIFFERENT PR than a
+    # same-numbered PR in the ticket's repo. Printing a bare "#n" would let the agent
+    # inspect/close the ticket-repo's #n while leaving the attached org/other#n open.
+    printf '%s\n' "$TD_OPEN_PRS" | jq -r '.[] | "  " + (if .repo then .repo + "#" else "#" end) + (.number|tostring) + " [" + (.state // "?") + "] " + (.title // "")' 2>/dev/null >&2 || true
+    echo "phase-teardown: reason about EACH (STEP 2): finish/merge the needed, close the abandoned, or fail-out on a genuine judgment call — BEFORE the Done transition below. IMPORTANT: for any entry printed as owner/repo#n, target THAT repo explicitly — 'gh pr close <n> -R <owner/repo> --comment ...' — never a bare 'gh pr close <n>' (which would act on the ticket repo's same-numbered PR)." >&2
   elif [[ "$TD_UNVERIFIABLE" == "true" ]]; then
     # UNVERIFIABLE ≠ CLEAN. The authoritative gh check could NOT confirm zero open PRs
     # (repo underivable, gh/auth/rate-limit failure, or an attachment PR we could not

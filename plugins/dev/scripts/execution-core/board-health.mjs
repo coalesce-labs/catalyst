@@ -710,7 +710,17 @@ function checkNeedsHumanPile(b) {
   for (const s of b.signals) {
     if (!s.ticket) continue;
     const st = s.status != null ? String(s.status).toLowerCase() : null;
-    if (st && NEEDS_HUMAN_STATUSES.has(st)) flagged.push(s.ticket);
+    if (!(st && NEEDS_HUMAN_STATUSES.has(st))) continue;
+    // CTL-1157 F (Codex round-5): a Done/Canceled/Duplicate ticket can retain a stale
+    // needs-human/stalled worker signal, and signal-reader prefers a NON-terminal
+    // needs-human signal over the terminal phase signal — so without this an already-
+    // terminal ticket becomes a tier-1 board-health anchor and gets a recovery-pass
+    // dispatched in enforce. Mirror the label path's terminal exclusion (line ~684).
+    // Fail-OPEN when the descriptor is absent (uncached): we skip ONLY when we can
+    // CONFIRM the ticket is terminal, never dropping a genuinely stuck ticket.
+    const d = b.ticketsById?.get?.(s.ticket) ?? null;
+    if (d && isTerminalLinearState(d)) continue;
+    flagged.push(s.ticket);
   }
   return invariant(
     flagged.length === 0,

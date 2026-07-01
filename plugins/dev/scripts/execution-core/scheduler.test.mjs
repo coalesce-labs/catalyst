@@ -9602,9 +9602,10 @@ describe("CTL-1191 — recovery passes HRW-gated over the surviving roster (Pass
 //
 // The reasoning pass must NOT reason over a ticket already finished (terminal
 // Linear state / merged PR) — doing so burns cooldown + re-posts diagnoses on a
-// Done ticket. The pass writes a per-ticket marker under .recovery-intents/ for
-// every item it processes (shadow mode), so the marker's presence/absence is the
-// observable. Single-host so the ownership gate is identity (we isolate the
+// Done ticket. In shadow the pass emits a per-item recovery.would-* event for every
+// item it processes (CTL-1157 F #5 retired the .recovery-intents cooldown marker in
+// shadow), so the event's presence/absence is the observable. Single-host so the
+// ownership gate is identity (we isolate the
 // terminal filter). A gateway descriptor supplies the Linear state without any
 // network — "Done" ⇒ terminal ⇒ filtered; "In Progress" ⇒ kept.
 describe("CTL-1191 — reasoning pass skips terminal tickets (Pass 0r terminal-state filter)", () => {
@@ -9642,12 +9643,19 @@ describe("CTL-1191 — reasoning pass skips terminal tickets (Pass 0r terminal-s
         applyTerminalDone: () => {},
         applyLabel: () => ({ applied: true }),
       },
-      recoveryPass: { mode: "shadow" }, // shadow still writes the cooldown marker
+      recoveryPass: { mode: "shadow" },
     });
 
-    // The in-flight ticket was reasoned over (marker written); the Done ticket
-    // was filtered BEFORE the pass (no marker — never processed).
-    expect(existsSync(recoveryIntentMarker("CTL-LIVE"))).toBe(true);
+    // CTL-1157 F #5: shadow no longer writes a cooldown marker for a DEFERRED (untyped
+    // stuck) item — that would mutate enforce scheduler state. So the observable that
+    // the in-flight CTL-LIVE was PROCESSED is now its recovery.would-defer EVENT; the
+    // terminal CTL-DONE, filtered BEFORE the pass, has NO per-item reasoning event
+    // (recovery.decision / recovery.would-*) and is never cooled down.
+    const events = readEventLog().map((e) => JSON.stringify(e));
+    expect(events.some((e) => e.includes("CTL-LIVE") && e.includes("would-defer"))).toBe(true);
+    expect(
+      events.some((e) => e.includes("CTL-DONE") && (e.includes("recovery.decision") || e.includes("would-"))),
+    ).toBe(false);
     expect(existsSync(recoveryIntentMarker("CTL-DONE"))).toBe(false);
   });
 });
