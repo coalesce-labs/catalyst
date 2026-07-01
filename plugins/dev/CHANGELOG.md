@@ -1,5 +1,30 @@
 # Changelog
 
+## [12.21.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.20.0...catalyst-dev-v12.21.0)
+
+Jul 01, 2026
+
+<!-- ai-enhanced -->
+
+### Linear Replica Board Discovery
+
+All Linear reads in dispatched agents now route through the local Catalyst Cloud replica via `catalyst-linear`, eliminating the rate-limit burns and board freezes that were stalling the fleet. Discovery now gates on the writer heartbeat lock rather than WAL mtime, so quiet feeds stay replica-served instead of falling through to the API. Two telemetry gaps are also fixed: phase-turns events were wired to the wrong parameter and never reached the event log, and SDK workers were missing their Claude Code OTel metrics because the daemon env lacked the OTLP endpoint.
+
+
+
+### PRs
+
+* **dev:** CTL-1397 — replica-backed board-list discovery (board-freeze unstick) ([#2502](https://github.com/coalesce-labs/catalyst/issues/2502)) ([5392229](https://github.com/coalesce-labs/catalyst/commit/53922299a6099800667dbd515714bd56591035b5))
+* **dev:** CTL-1397 — route remaining skill-prose Linear reads through catalyst-linear ([#2511](https://github.com/coalesce-labs/catalyst/issues/2511)) ([00ec028](https://github.com/coalesce-labs/catalyst/commit/00ec028c2f1680018073e4c0e3f87324dda37b19))
+* **dev:** CTL-1397 (1/n) — mandate Linear reads via catalyst-linear (linearis skill + research agents) ([#2496](https://github.com/coalesce-labs/catalyst/issues/2496)) ([27ab1fe](https://github.com/coalesce-labs/catalyst/commit/27ab1fe5e242f7ac69bc9d7750b1dbd4ee79c1f8))
+* **dev:** CTL-1397 (2/n) — route per-dispatch Linear reads through the replica (catalyst-linear) ([#2501](https://github.com/coalesce-labs/catalyst/issues/2501)) ([8a3e336](https://github.com/coalesce-labs/catalyst/commit/8a3e3362649b24ea6a43d0fd78aace3cf66637d0))
+* **dev:** CTL-1397 (3/n) — trust the seed-complete replica-empty (durable board-freeze unstick) ([#2509](https://github.com/coalesce-labs/catalyst/issues/2509)) ([36482e7](https://github.com/coalesce-labs/catalyst/commit/36482e79d187f21c6c9ca9805d704819cc7677b4))
+* **dev:** CTL-1397 (4/n) — gate replica discovery on the writer heartbeat lock (close the quiet-feed linearis fallback) ([#2512](https://github.com/coalesce-labs/catalyst/issues/2512)) ([edd4b58](https://github.com/coalesce-labs/catalyst/commit/edd4b58901f006eec3ca2ad6088ae3feecf8664f))
+* **dev:** CTL-1406 — SDK phase workers emit session.context (dashboard panels 50/51) ([#2508](https://github.com/coalesce-labs/catalyst/issues/2508)) ([2ab5f57](https://github.com/coalesce-labs/catalyst/commit/2ab5f57a8f352116a09649a0870480fadd4ff5db))
+* **dev:** CTL-1404 — SDK phase-agent workers emit claude_code_* OTel again (daemon env lacked the OTLP endpoint) ([#2504](https://github.com/coalesce-labs/catalyst/issues/2504)) ([1b726bb](https://github.com/coalesce-labs/catalyst/commit/1b726bb37ed72e5e551c160f9b7f315c2933b087))
+* **dev:** CTL-1405 — sdkDispatch passes emitEvent in the wrong param → phase-turns telemetry never reached the event log ([#2500](https://github.com/coalesce-labs/catalyst/issues/2500)) ([6795089](https://github.com/coalesce-labs/catalyst/commit/6795089b9f10e584a63d96c4e6bca39c704c2274))
+* **dev:** CTL-1407 — provision the per-account rate-limit usage sampler on every host ([#2507](https://github.com/coalesce-labs/catalyst/issues/2507)) ([58f040e](https://github.com/coalesce-labs/catalyst/commit/58f040eafd2284f8dbe108d4a87e62e7794a43e1))
+
 ## [12.20.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.19.0...catalyst-dev-v12.20.0)
 
 Jun 30, 2026

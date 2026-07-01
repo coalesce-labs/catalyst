@@ -1,5 +1,21 @@
 # Changelog
 
+## [7.4.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-pm-v7.3.0...catalyst-pm-v7.4.0)
+
+Jul 01, 2026
+
+<!-- ai-enhanced -->
+
+### Enforced Linear Read Path
+
+The linearis skill now mandates that all agent and script Linear reads go through `catalyst-linear read|list|search` instead of calling `linearis` directly. This prevents bare reads from bypassing the local replica and burning shared API quota on rate-limited workers. Scripted read swaps for the `.sh` helpers and phase skills land in a follow-up PR.
+
+
+
+### PRs
+
+* **dev:** CTL-1397 (1/n) — mandate Linear reads via catalyst-linear (linearis skill + research agents) ([#2496](https://github.com/coalesce-labs/catalyst/issues/2496)) ([27ab1fe](https://github.com/coalesce-labs/catalyst/commit/27ab1fe5e242f7ac69bc9d7750b1dbd4ee79c1f8))
+
 ## [7.3.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-pm-v7.2.0...catalyst-pm-v7.3.0)
 
 Jun 30, 2026
