@@ -2,17 +2,21 @@
 # E2E test for plugins/dev/skills/phase-triage/SKILL.md (CTL-451 Initiative 1 Phase 5).
 #
 # Strategy:
-#   1. Build a tempdir scratch worker dir.
+#   1. Build a tempdir scratch orch/worker dir, pre-seeding the phase signal file
+#      (status:"dispatched") the dispatcher would have written.
 #   2. Stand up a fake `linearis` shim on PATH:
 #        - `linearis issues read <id>` → prints fixture JSON
 #        - `linearis issues discuss <id> --body <text>` → records call to a log
 #      (phase-triage never calls `linearis issues update` for a `triaged`
 #       label — there is no such label; triage completion is signaled by the
 #       analysis comment plus the local triage.json.)
-#   3. Point CATALYST_EVENTS_FILE at a tempfile.
-#   4. Extract the executable bash body from the skill (fenced by
+#   3. Point CATALYST_DIR at a scratch dir — CTL-1410 Phase A: terminal events now
+#      go through the phase-agent-emit-complete WRAPPER, which appends to
+#      $CATALYST_DIR/events/YYYY-MM.jsonl (NOT the lib-only $CATALYST_EVENTS_FILE)
+#      and flips the phase signal file's `status` in-band.
+#   4. Extract the executable bash body from the skill (fenced
 #      `bash phase-triage-body`).
-#   5. Run it with TICKET set; assert artifact + comment + event (no label call).
+#   5. Run it with TICKET set; assert artifact + comment + event + signal flip.
 #
 # Run: bash plugins/dev/scripts/__tests__/phase-triage-e2e.test.sh
 
@@ -21,7 +25,7 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../../../.." && pwd)"
 SKILL_FILE="${REPO_ROOT}/plugins/dev/skills/phase-triage/SKILL.md"
-EMIT_HELPER="${REPO_ROOT}/plugins/dev/scripts/lib/phase-emit-complete.sh"
+EMIT_WRAPPER="${REPO_ROOT}/plugins/dev/scripts/phase-agent-emit-complete"
 # CTL-632 Phase 6 refactor: adopt the shared linearis-stub helper.
 # shellcheck source=lib/linearis-stub.sh
 source "${SCRIPT_DIR}/lib/linearis-stub.sh"
@@ -46,9 +50,23 @@ assert_file_exists() { if [ -f "$2" ]; then ok "$1"; else fail "$1" "missing fil
 	echo "FAIL: skill missing: $SKILL_FILE"
 	exit 1
 }
-[ -f "$EMIT_HELPER" ] || {
-	echo "FAIL: helper missing: $EMIT_HELPER"
+[ -x "$EMIT_WRAPPER" ] || {
+	echo "FAIL: wrapper missing/not executable: $EMIT_WRAPPER"
 	exit 1
+}
+
+# Read the phase event line from a case's wrapper event sink
+# ($CATALYST_DIR/events/YYYY-MM.jsonl). catalyst-session.sh end (which the wrapper
+# also invokes) may append session lines after, so we grep the phase prefix.
+read_phase_event() {
+	local catalyst_dir="$1" month
+	month=$(date -u +%Y-%m)
+	local logfile="${catalyst_dir}/events/${month}.jsonl"
+	[ -f "$logfile" ] || {
+		echo ""
+		return 1
+	}
+	grep -F '"event.name":"phase.' "$logfile" | tail -1
 }
 
 # Extract the executable bash body delimited by ```bash phase-triage-body``` fences.
@@ -90,25 +108,37 @@ trap 'rm -rf "$TMPROOT" "$SKILL_BODY_FILE"' EXIT
 # hermetic, independent of any real replica in the runner's HOME.
 export CATALYST_REPLICA_DB="$TMPROOT/no-such-replica.db"
 
+# CTL-1410 Phase A: resolve a case's worker dir (triage.json + phase-triage.json
+# both live here, modeling production: WORKER_DIR == ORCH_DIR/workers/TICKET).
+case_worker_dir() { echo "$TMPROOT/$1/orch/workers/$2"; }
+case_catalyst_dir() { echo "$TMPROOT/$1/catalyst"; }
+
 run_case() {
 	local case_name="$1" fixture="$2" ticket="$3"
 	local body_file="${4:-$SKILL_BODY_FILE}"
 	local case_dir="$TMPROOT/$case_name"
-	mkdir -p "$case_dir/bin"
+	local orch_dir="$case_dir/orch"
+	local worker="$orch_dir/workers/$ticket"
+	local catalyst_dir="$case_dir/catalyst"
+	mkdir -p "$case_dir/bin" "$worker" "$catalyst_dir/events"
+
+	# Pre-seed the phase signal file exactly as the dispatcher would leave it
+	# (status:"dispatched") so the wrapper's terminal flip to done/failed is
+	# observable on disk.
+	printf '{"status":"dispatched","ticket":"%s","phase":"triage"}\n' "$ticket" \
+		>"$worker/phase-triage.json"
 
 	# CTL-632: use the shared helper instead of inlining the stub body.
 	linearis_stub_install "$case_dir/bin" "$case_dir/linearis-calls.log" "$fixture"
 	linear_comment_post_stub_install "$case_dir/bin" "$case_dir/comment-post-calls.log"
 
-	# Run the skill body with the stub on PATH.
-	local events_file="$case_dir/events.jsonl"
-
 	PATH="$case_dir/bin:$PATH" \
 		TICKET="$ticket" \
-		WORKER_DIR="$case_dir/worker" \
-		CATALYST_EVENTS_FILE="$events_file" \
+		WORKER_DIR="$worker" \
+		CATALYST_DIR="$catalyst_dir" \
+		CATALYST_ORCHESTRATOR_DIR="$orch_dir" \
+		CATALYST_ORCHESTRATOR_ID="orch-test" \
 		PHASE_AGENT_REPO_ROOT="$REPO_ROOT" \
-		PHASE_EMIT_HELPER="$EMIT_HELPER" \
 		bash "$body_file" >"$case_dir/stdout.log" 2>"$case_dir/stderr.log"
 	echo $? >"$case_dir/exit-code"
 
@@ -132,13 +162,15 @@ cat >"$FIXTURE_HAPPY" <<'EOF'
 EOF
 
 CASE_DIR="$(run_case happy "$FIXTURE_HAPPY" CTL-9999)"
+HAPPY_WORKER="$(case_worker_dir happy CTL-9999)"
+HAPPY_CATALYST="$(case_catalyst_dir happy)"
 
 # Assert: skill exited 0
 EXIT_CODE="$(cat "$CASE_DIR/exit-code")"
 assert_eq "happy: exit code 0" 0 "$EXIT_CODE"
 
 # Assert: triage.json exists and parses
-TRIAGE_FILE="$CASE_DIR/worker/triage.json"
+TRIAGE_FILE="$HAPPY_WORKER/triage.json"
 assert_file_exists "happy: triage.json created" "$TRIAGE_FILE"
 
 if [ -f "$TRIAGE_FILE" ]; then
@@ -184,18 +216,26 @@ else
 	ok "happy: phase-triage does not write any Linear label (no triaged label exists)"
 fi
 
-# Assert: emitted event has the right shape
-EVENT_NAME="$(jq -r '.attributes."event.name"' "$CASE_DIR/events.jsonl" 2>/dev/null | head -1)"
+# Assert: emitted event has the right shape (CTL-1410: from the wrapper sink)
+HAPPY_EVENT="$(read_phase_event "$HAPPY_CATALYST")"
+EVENT_NAME="$(printf '%s' "$HAPPY_EVENT" | jq -r '.attributes."event.name"' 2>/dev/null)"
 assert_eq "happy: emitted event name" "phase.triage.complete.CTL-9999" "$EVENT_NAME"
 
-EVENT_TICKET="$(jq -r '.attributes."linear.issue.identifier"' "$CASE_DIR/events.jsonl" 2>/dev/null | head -1)"
+EVENT_TICKET="$(printf '%s' "$HAPPY_EVENT" | jq -r '.attributes."linear.issue.identifier"' 2>/dev/null)"
 assert_eq "happy: event has linear.issue.identifier" "CTL-9999" "$EVENT_TICKET"
 
-EVENT_PHASE="$(jq -r '.body.payload.phase_name' "$CASE_DIR/events.jsonl" 2>/dev/null | head -1)"
+EVENT_PHASE="$(printf '%s' "$HAPPY_EVENT" | jq -r '.body.payload.phase_name' 2>/dev/null)"
 assert_eq "happy: event payload has phase_name" "triage" "$EVENT_PHASE"
 
-EVENT_CLASS="$(jq -r '.body.payload.classification' "$CASE_DIR/events.jsonl" 2>/dev/null | head -1)"
+EVENT_CLASS="$(printf '%s' "$HAPPY_EVENT" | jq -r '.body.payload.classification' 2>/dev/null)"
 assert_nonempty "happy: event payload includes classification" "$EVENT_CLASS"
+
+# CTL-1410 Phase A: the wrapper flips the phase signal file to done in-band.
+HAPPY_SIGNAL="$HAPPY_WORKER/phase-triage.json"
+SIG_STATUS="$(jq -r '.status' "$HAPPY_SIGNAL" 2>/dev/null)"
+assert_eq "happy: signal status flipped to done (CTL-1410)" "done" "$SIG_STATUS"
+HAS_COMPLETED="$(jq -r 'has("completedAt")' "$HAPPY_SIGNAL" 2>/dev/null)"
+assert_eq "happy: signal gained completedAt (terminal)" "true" "$HAS_COMPLETED"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Case 1b: all-caps + project-vocab acronyms (CTL-498 Bug 1).
@@ -215,7 +255,7 @@ CASE_DIR_ACR="$(run_case acronyms "$FIXTURE_ACRONYMS" CTL-9998)"
 
 assert_eq "acronyms: exit code 0" 0 "$(cat "$CASE_DIR_ACR/exit-code")"
 
-TRIAGE_ACR="$CASE_DIR_ACR/worker/triage.json"
+TRIAGE_ACR="$(case_worker_dir acronyms CTL-9998)/triage.json"
 assert_file_exists "acronyms: triage.json created" "$TRIAGE_ACR"
 
 if [ -f "$TRIAGE_ACR" ]; then
@@ -248,7 +288,7 @@ CASE_DIR_MD="$(run_case markdown "$FIXTURE_MD" CTL-9997)"
 
 assert_eq "markdown: exit code 0" 0 "$(cat "$CASE_DIR_MD/exit-code")"
 
-TRIAGE_MD="$CASE_DIR_MD/worker/triage.json"
+TRIAGE_MD="$(case_worker_dir markdown CTL-9997)/triage.json"
 assert_file_exists "markdown: triage.json created" "$TRIAGE_MD"
 
 if [ -f "$TRIAGE_MD" ]; then
@@ -288,19 +328,25 @@ CASE_DIR2="$(run_case bug "$FIXTURE_BUG" CTL-7777)"
 EXIT_CODE2="$(cat "$CASE_DIR2/exit-code")"
 assert_eq "bug: exit code 0" 0 "$EXIT_CODE2"
 
-if [ -f "$CASE_DIR2/worker/triage.json" ]; then
-	CLASS2="$(jq -r '.classification' "$CASE_DIR2/worker/triage.json")"
+BUG_TRIAGE="$(case_worker_dir bug CTL-7777)/triage.json"
+if [ -f "$BUG_TRIAGE" ]; then
+	CLASS2="$(jq -r '.classification' "$BUG_TRIAGE")"
 	assert_eq "bug: classified as bug" "bug" "$CLASS2"
 
-	SCOPE2="$(jq -r '.estimated_scope' "$CASE_DIR2/worker/triage.json")"
+	SCOPE2="$(jq -r '.estimated_scope' "$BUG_TRIAGE")"
 	assert_eq "bug: scope is small" "small" "$SCOPE2"
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Case 3: linearis read fails — skill must emit failed event + nonzero exit
+# Case 3: linearis read fails — skill must emit failed event + nonzero exit +
+# flip the signal to failed (CTL-1410 Phase A).
 
 FAIL_DIR="$TMPROOT/lin-fail"
-mkdir -p "$FAIL_DIR/bin"
+FAIL_ORCH="$FAIL_DIR/orch"
+FAIL_WORKER="$FAIL_ORCH/workers/CTL-9001"
+FAIL_CATALYST="$FAIL_DIR/catalyst"
+mkdir -p "$FAIL_DIR/bin" "$FAIL_WORKER" "$FAIL_CATALYST/events"
+printf '{"status":"dispatched","ticket":"CTL-9001","phase":"triage"}\n' >"$FAIL_WORKER/phase-triage.json"
 # CTL-1397: the triage body reads via direct SQL and falls back to `linearis`
 # when the replica is absent (which it is here — CATALYST_REPLICA_DB points at a
 # nonexistent file). Simulate a hard read failure by stubbing a failing
@@ -314,10 +360,11 @@ chmod +x "$FAIL_DIR/bin/linearis"
 
 PATH="$FAIL_DIR/bin:$PATH" \
 	TICKET=CTL-9001 \
-	WORKER_DIR="$FAIL_DIR/worker" \
-	CATALYST_EVENTS_FILE="$FAIL_DIR/events.jsonl" \
+	WORKER_DIR="$FAIL_WORKER" \
+	CATALYST_DIR="$FAIL_CATALYST" \
+	CATALYST_ORCHESTRATOR_DIR="$FAIL_ORCH" \
+	CATALYST_ORCHESTRATOR_ID="orch-test" \
 	PHASE_AGENT_REPO_ROOT="$REPO_ROOT" \
-	PHASE_EMIT_HELPER="$EMIT_HELPER" \
 	bash "$SKILL_BODY_FILE" >"$FAIL_DIR/stdout.log" 2>"$FAIL_DIR/stderr.log"
 FAIL_EXIT=$?
 
@@ -327,8 +374,11 @@ else
 	fail "lin-fail: exit code" "expected non-zero, got $FAIL_EXIT"
 fi
 
-FAIL_EVENT="$(jq -r '.attributes."event.name"' "$FAIL_DIR/events.jsonl" 2>/dev/null | head -1)"
+FAIL_EVENT="$(read_phase_event "$FAIL_CATALYST" | jq -r '.attributes."event.name"' 2>/dev/null)"
 assert_eq "lin-fail: emits phase.triage.failed event" "phase.triage.failed.CTL-9001" "$FAIL_EVENT"
+
+FAIL_SIG_STATUS="$(jq -r '.status' "$FAIL_WORKER/phase-triage.json" 2>/dev/null)"
+assert_eq "lin-fail: signal flipped to failed (CTL-1410)" "failed" "$FAIL_SIG_STATUS"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Case 4 (CTL-614): linearis issues discuss returns 429 — must NOT fail phase.
@@ -336,7 +386,11 @@ assert_eq "lin-fail: emits phase.triage.failed event" "phase.triage.failed.CTL-9
 # 429 stderr must surface to the skill's stderr (no longer swallowed).
 
 DISCUSS_429_DIR="$TMPROOT/discuss-429"
-mkdir -p "$DISCUSS_429_DIR/bin"
+D429_ORCH="$DISCUSS_429_DIR/orch"
+D429_WORKER="$D429_ORCH/workers/CTL-9002"
+D429_CATALYST="$DISCUSS_429_DIR/catalyst"
+mkdir -p "$DISCUSS_429_DIR/bin" "$D429_WORKER" "$D429_CATALYST/events"
+printf '{"status":"dispatched","ticket":"CTL-9002","phase":"triage"}\n' >"$D429_WORKER/phase-triage.json"
 
 FIXTURE_429="$TMPROOT/fixture-429.json"
 cat >"$FIXTURE_429" <<'EOF'
@@ -376,18 +430,19 @@ linear_comment_post_stub_install_failing "$DISCUSS_429_DIR/bin" "$DISCUSS_429_DI
 
 PATH="$DISCUSS_429_DIR/bin:$PATH" \
 	TICKET=CTL-9002 \
-	WORKER_DIR="$DISCUSS_429_DIR/worker" \
-	CATALYST_EVENTS_FILE="$DISCUSS_429_DIR/events.jsonl" \
+	WORKER_DIR="$D429_WORKER" \
+	CATALYST_DIR="$D429_CATALYST" \
+	CATALYST_ORCHESTRATOR_DIR="$D429_ORCH" \
+	CATALYST_ORCHESTRATOR_ID="orch-test" \
 	PHASE_AGENT_REPO_ROOT="$REPO_ROOT" \
-	PHASE_EMIT_HELPER="$EMIT_HELPER" \
 	bash "$SKILL_BODY_FILE" >"$DISCUSS_429_DIR/stdout.log" 2>"$DISCUSS_429_DIR/stderr.log"
 D429_EXIT=$?
 
 assert_eq "discuss-429: exit code 0 (best-effort)" 0 "$D429_EXIT"
 assert_file_exists "discuss-429: triage.json written despite discuss failure" \
-	"$DISCUSS_429_DIR/worker/triage.json"
+	"$D429_WORKER/triage.json"
 
-D429_EVENT="$(jq -r '.attributes."event.name"' "$DISCUSS_429_DIR/events.jsonl" 2>/dev/null | head -1)"
+D429_EVENT="$(read_phase_event "$D429_CATALYST" | jq -r '.attributes."event.name"' 2>/dev/null)"
 assert_eq "discuss-429: emits phase.triage.complete (not failed)" \
 	"phase.triage.complete.CTL-9002" "$D429_EVENT"
 
@@ -422,7 +477,7 @@ CASE_DIR_SUBST="$(run_case subst "$FIXTURE_HAPPY" CTL-9999 "$SUBST_BODY")"
 
 assert_eq "ctl602-dynamic: substituted body exits 0" 0 "$(cat "$CASE_DIR_SUBST/exit-code")"
 
-TRIAGE_SUBST="$CASE_DIR_SUBST/worker/triage.json"
+TRIAGE_SUBST="$(case_worker_dir subst CTL-9999)/triage.json"
 assert_file_exists "ctl602-dynamic: substituted body produced triage.json" "$TRIAGE_SUBST"
 
 if [ -f "$TRIAGE_SUBST" ]; then
@@ -468,7 +523,7 @@ EOF
 
 CASE_DIR_MENTIONS="$(run_case mentions "$FIXTURE_MENTIONS" CTL-863)"
 assert_eq "ctl838-noscrape: exit code 0" 0 "$(cat "$CASE_DIR_MENTIONS/exit-code")"
-TRIAGE_MENTIONS="$CASE_DIR_MENTIONS/worker/triage.json"
+TRIAGE_MENTIONS="$(case_worker_dir mentions CTL-863)/triage.json"
 assert_file_exists "ctl838-noscrape: triage.json created" "$TRIAGE_MENTIONS"
 if [ -f "$TRIAGE_MENTIONS" ]; then
 	DEPS_MENTIONS="$(jq -c '.dependencies' "$TRIAGE_MENTIONS")"

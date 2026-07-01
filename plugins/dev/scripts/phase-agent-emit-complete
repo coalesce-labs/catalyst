@@ -28,10 +28,17 @@
 #     --ticket <id> \
 #     --status complete|failed \
 #     [--reason <text>] \
+#     [--payload-json <json>] \
 #     [--orch-dir <path>] \
 #     [--orch-id <id>] \
 #     [--session-id <id>] \
 #     [--no-signal-update]
+#
+# --payload-json (CTL-1410): merge a caller-supplied JSON object into the event's
+#   body.payload (caller fields as base; the canonical phase/ticket/status fields
+#   overlay and win; phase_name injected). Used by the event-only phases migrating
+#   onto this wrapper so their terminal artifact detail still rides the completion
+#   event. Absent → byte-identical default payload. Malformed → fail-open to base.
 #
 # --no-signal-update (CTL-511): emit the canonical event (step 1) and end the
 #   catalyst-session (step 3) but skip the signal-file mutation (step 2). Used
@@ -81,6 +88,7 @@ TICKET=""
 STATUS=""
 REASON=""
 HANDOFF_PATH=""
+CALLER_PAYLOAD=""
 ORCH_DIR="${CATALYST_ORCHESTRATOR_DIR-}"
 ORCH_ID="${CATALYST_ORCHESTRATOR_ID-}"
 SESSION_ID="${CATALYST_SESSION_ID-}"
@@ -106,6 +114,10 @@ while [[ $# -gt 0 ]]; do
 		;;
 	--handoff-path)
 		HANDOFF_PATH="$2"
+		shift 2
+		;;
+	--payload-json)
+		CALLER_PAYLOAD="$2"
 		shift 2
 		;;
 	--orch-dir)
@@ -317,7 +329,7 @@ fi
 # optional failure_reason, optional handoff_path (CTL-484 turn-cap-exhausted),
 # optional duration_seconds (CTL-760). The broker's tryPhaseLifecycleRoute parser
 # reads only event.name + ticket, so payload extras don't change routing.
-PAYLOAD=$(jq -nc \
+BASE_PAYLOAD=$(jq -nc \
 	--arg phase "$PHASE" \
 	--arg ticket "$TICKET" \
 	--arg status "$STATUS" \
@@ -328,6 +340,26 @@ PAYLOAD=$(jq -nc \
    + (if ($reason == "" or $status == "complete") then {} else {failure_reason: $reason} end)
    + (if $handoff == "" then {} else {handoff_path: $handoff} end)
    + (if $duration == "" then {} else {duration_seconds: ($duration | tonumber)} end)')
+
+# CTL-1410 Phase A: optional --payload-json <json>. The event-only phases
+# (phase-triage, phase-monitor-deploy) migrating from the emit_phase_complete
+# helper to this wrapper pass their terminal artifact JSON (triage.json /
+# phase-monitor-deploy.json) so the completion event still carries that detail
+# plus phase_name — matching what the lib helper attached. The caller fields form
+# the base; the wrapper's canonical fields (phase/ticket/status/failure_reason/…)
+# overlay so they always win, then phase_name is injected. When absent, PAYLOAD is
+# byte-identical to the pre-CTL-1410 default (no phase_name). A malformed caller
+# payload fails open to the base default — the completion event is never dropped.
+PAYLOAD="$BASE_PAYLOAD"
+if [[ -n $CALLER_PAYLOAD ]]; then
+	PAYLOAD=$(jq -nc \
+		--argjson base "$BASE_PAYLOAD" \
+		--argjson caller "$CALLER_PAYLOAD" \
+		--arg phase "$PHASE" \
+		'($caller // {}) + $base + {phase_name: $phase}' 2>/dev/null) ||
+		PAYLOAD="$BASE_PAYLOAD"
+	[[ -n $PAYLOAD ]] || PAYLOAD="$BASE_PAYLOAD"
+fi
 
 LINE=$(build_canonical_line \
 	--ts "$TS" \
