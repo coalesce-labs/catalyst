@@ -87,6 +87,12 @@ export function parseArgs(argv) {
       case "--require-prs-merged":
         a.requirePrsMerged = true;
         break; // no-op opt-in: the open-PR gate is now UNIVERSAL for `--state done` (CTL-1157)
+      case "--transition-verified":
+        a.transitionVerified = true;
+        break; // CTL-1157 F #3: the caller confirmed the REAL Linear Done transition
+        // succeeded (rc=0). Gates the pipeline-record-only ENFORCE recovery.done-applied:
+        // without it we would report an applied Done even when linear-transition.sh
+        // failed or was missing. Absent → treat as pending/shadow (the drain lands it).
       case "--states-file":
         a.statesFile = next();
         break; // offline/test read seam
@@ -355,7 +361,14 @@ async function cmdDeclare(args, deps = {}) {
     const realDone = wrote && wrote.kind === "done" && wrote.applied && wrote.writeAction !== "skipped";
     const pipelineRecordOnly =
       args.noWrite && String(args.by).toLowerCase() === "pipeline";
-    if (pipelineRecordOnly) {
+    // CTL-1157 F #3: only the pipeline marker whose REAL Done transition was VERIFIED
+    // (rc=0, via --transition-verified) is a record of a Done that actually landed →
+    // ENFORCE done-applied + open-PR alarm. A marker dropped after a FAILED or MISSING
+    // linear-transition.sh (SKILL.md still runs `declare` on that path) is NOT proof of
+    // a Done: it falls through to the shadow would-event below (recoveryMode:"shadow"),
+    // so OTEL never charts an applied Done that did not happen; the reconcile drain /
+    // terminalDoneOnce backstop lands the real Done and re-declares it later.
+    if (pipelineRecordOnly && args.transitionVerified) {
       // (a) record of a REAL external Done — enumerate open PRs so the teardown Done is
       // observable + alarmed. Best-effort; observability must never break declare.
       const checkOpenPrs = deps.checkOpenPrs || defaultCheckOpenPrs;

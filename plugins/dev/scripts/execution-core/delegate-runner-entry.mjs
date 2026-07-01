@@ -180,6 +180,13 @@ export function drainOnce(deps = {}) {
   // byte-identical.
   const executor = deps.executor ?? null;
   let localLaunched = 0;
+  // CTL-1157 F P1: under executor=sdk each dispatch launches an IN-PROCESS query()
+  // that settles asynchronously (invokeFn returns the settled chain in
+  // details.pendingSdk). This disposable child must await those before exiting or
+  // process.exit kills the just-launched workers. Collect them here; the entrypoint
+  // awaits result.pending before process.exit(0). bg dispatch is synchronous, so
+  // pendingSdk is null and this array stays empty (byte-identical to before).
+  const pending = [];
 
   // (0) Crash safety: reclaim claimed-* sidecars older than one ceiling window
   //     back to queued so a dead runner doesn't strand an intent forever.
@@ -331,6 +338,10 @@ export function drainOnce(deps = {}) {
       // launched job is counted by countBg on the next iteration instead.
       localLaunched++;
       result.drained++;
+      // CTL-1157 F P1: hold the in-process sdk query's settled chain so the
+      // entrypoint can await it before process.exit. Null on the bg path.
+      const pendingSdk = r.details?.pendingSdk;
+      if (pendingSdk && typeof pendingSdk.then === "function") pending.push(pendingSdk);
     } else {
       const failReason = r?.reason ?? "dispatch-failed";
       try {
@@ -359,6 +370,9 @@ export function drainOnce(deps = {}) {
     }
   }
 
+  // CTL-1157 F P1: expose the in-process sdk query promises so the detached
+  // entrypoint can await them before process.exit. Empty on the bg path.
+  result.pending = pending;
   return result;
 }
 
@@ -483,7 +497,23 @@ if (isEntrypoint) {
         dispatchTicket: (o, t, p) => dispatchTicketSeam(o, t, p, { dispatch: executorDispatch }),
       });
     const r = drainOnce({ orchDir, maxParallel: readMaxParallel(orchDir, {}), invokeFn, executor });
-    log.info({ ...r, executor }, "delegate-runner-entry: drain complete");
+    // CTL-1157 F P1: under executor=sdk each launched delegate is an IN-PROCESS
+    // query() that resolves only AFTER the whole recovery-pass runs. drainOnce
+    // returns those settled chains in r.pending. Await them here — otherwise the
+    // process.exit(0) below kills the just-launched worker mid-run (the intent is
+    // already marked "launched", so the recovery item would never actually run). The
+    // chains NEVER reject (settleDispatchSync swallows), so allSettled is belt-and-
+    // suspenders. On bg, r.pending is empty and this resolves immediately (the bg job
+    // is a separate OS process that survives this child's exit — byte-identical).
+    if (Array.isArray(r.pending) && r.pending.length > 0) {
+      log.info(
+        { executor, pending: r.pending.length },
+        "delegate-runner-entry: awaiting in-process sdk delegate(s) before exit"
+      );
+      await Promise.allSettled(r.pending);
+    }
+    const { pending: _pending, ...summary } = r;
+    log.info({ ...summary, executor }, "delegate-runner-entry: drain complete");
   } catch (err) {
     log.warn({ err: err?.message }, "delegate-runner-entry: drain threw");
   } finally {

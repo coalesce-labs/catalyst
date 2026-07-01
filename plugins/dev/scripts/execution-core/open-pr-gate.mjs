@@ -38,6 +38,20 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { getProjectConfig } from "./registry.mjs";
 
+// CTL-1157 F #7 (Codex round-4): a finite cap on every enumeration subprocess. In
+// production `defaultCheckOpenPrs` runs on the SYNCHRONOUS terminal sweep before the
+// Done-write/alarm path, so a `gh` (or `catalyst-linear`) invocation hung on network,
+// auth, or keychain state would block the whole scheduler tick indefinitely — this
+// enumeration is best-effort observability and must never wedge the tick. A timeout
+// fire makes spawnSync set r.error (ETIMEDOUT) + r.status=null: the gh path throws →
+// defaultCheckOpenPrs collapses it to {unverifiable:true} (never a false clean list);
+// the replica read is best-effort → null. Env-overridable; "0" disables the cap.
+const ENUM_SUBPROCESS_TIMEOUT_MS = (() => {
+  const raw = Number(process.env.CATALYST_OPEN_PR_GATE_TIMEOUT_MS);
+  if (Number.isFinite(raw) && raw >= 0) return raw; // 0 → disabled (no timeout)
+  return 15_000;
+})();
+
 // readTicketReplica — read a ticket's record from the local REPLICA/cache via
 // `catalyst-linear read <TICKET>` (replica-first; the CLI itself degrades to its
 // own linearis fallback only internally — this module NEVER shells `linearis`
@@ -51,7 +65,9 @@ export function readTicketReplica(ticket, { cwd } = {}) {
     const r = spawnSync(bin, ["read", ticket], {
       encoding: "utf8",
       cwd: cwd || process.cwd(),
+      timeout: ENUM_SUBPROCESS_TIMEOUT_MS, // CTL-1157 F #7: same synchronous-tick wedge risk
     });
+    // best-effort: a timeout sets r.status=null → falls into the null return below.
     if (r.status !== 0 || !r.stdout) return null;
     return JSON.parse(r.stdout);
   } catch {
@@ -167,9 +183,18 @@ export function defaultDeriveAttachmentPrNumbers(ticket, opts) {
 }
 
 function defaultRunGh(ghArgs, cwd) {
-  const r = spawnSync("gh", ghArgs, { encoding: "utf8", cwd: cwd || process.cwd() });
+  const r = spawnSync("gh", ghArgs, {
+    encoding: "utf8",
+    cwd: cwd || process.cwd(),
+    timeout: ENUM_SUBPROCESS_TIMEOUT_MS, // CTL-1157 F #7: bound the tick (0 → no cap)
+  });
   if (r.error || r.status !== 0) {
-    const detail = (r.stderr || r.error?.message || `exit ${r.status}`).toString().trim();
+    // A timeout fire sets r.error.code === "ETIMEDOUT" (r.status null); surface it
+    // explicitly so the unverifiable reason is diagnosable rather than a bare "exit null".
+    const timedOut = r.error?.code === "ETIMEDOUT";
+    const detail = timedOut
+      ? `timed out after ${ENUM_SUBPROCESS_TIMEOUT_MS}ms`
+      : (r.stderr || r.error?.message || `exit ${r.status}`).toString().trim();
     throw new Error(`\`gh ${ghArgs.join(" ")}\` failed: ${detail}`);
   }
   try {

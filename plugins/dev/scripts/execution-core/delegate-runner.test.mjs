@@ -170,6 +170,31 @@ describe("drainOnce — drains a queued intent → launched", () => {
     expect(res.drained).toBe(1);
   });
 
+  // CTL-1157 F P1 (Codex round-4): under executor=sdk the recovery-pass runs as an
+  // IN-PROCESS query() that settles asynchronously; invokeFn surfaces its settled chain
+  // in details.pendingSdk. drainOnce must collect those into result.pending so the
+  // detached entrypoint can await them before process.exit (else it kills the worker it
+  // just launched). bg dispatch has no pendingSdk → result.pending stays empty.
+  test("collects details.pendingSdk (executor=sdk) into result.pending; bg leaves it empty", () => {
+    seedQueued("CTL-1");
+    const pendingSdk = Promise.resolve({ code: 0 });
+    const sdkDeps = makeDeps();
+    sdkDeps.executor = "sdk";
+    sdkDeps.invokeFn = () => ({
+      dispatched: true,
+      details: { bg_job_id: null, worktreePath: "/wt/CTL-1", pendingSdk },
+    });
+    const sdkRes = drainOnce(sdkDeps);
+    expect(Array.isArray(sdkRes.pending)).toBe(true);
+    expect(sdkRes.pending).toContain(pendingSdk);
+
+    seedQueued("CTL-2");
+    const bgDeps = makeDeps();
+    bgDeps.invokeFn = () => ({ dispatched: true, details: { bg_job_id: "bg-1", worktreePath: "/wt/CTL-2" } });
+    const bgRes = drainOnce(bgDeps);
+    expect(bgRes.pending).toEqual([]); // bg job is a separate OS process — nothing to await
+  });
+
   test("emits phase.dispatch.requested then phase.dispatch.launched (in order, with bg_job_id)", () => {
     seedQueued("CTL-1");
     const deps = makeDeps();

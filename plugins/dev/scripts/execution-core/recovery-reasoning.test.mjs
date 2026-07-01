@@ -16,6 +16,7 @@ import {
   defaultForgetIntent,
   defaultInvokeRemediateCapped,
   defaultInvokeRecoveryPass,
+  defaultWriteEscalationSignal,
   RECOVERY_PASS_CYCLE_CAP,
   RECOVERY_PASS_PHASE,
   RECOVERY_MAX_ATTEMPTS,
@@ -527,6 +528,46 @@ describe("reasoningRecoveryPass", () => {
     expect(result.results[2].fix_class).toBe("human");
     expect(events.filter((e) => e.type === "recovery.would-fix").length).toBe(2);
     expect(events.filter((e) => e.type === "recovery.would-escalate").length).toBe(1);
+  });
+
+  // CTL-1157 F #5 (Codex round-4): a `defer` decision must NOT write the cooldown
+  // marker in SHADOW mode — defaultShouldSkipItem honors a defer marker in enforce too,
+  // so a shadow-written marker would silently suppress the ticket after an operator
+  // flips shadow→enforce (shadow mutating enforce scheduler state). Enforce still writes.
+  const deferClassifier = () => ({
+    decision: "defer",
+    fix_class: "board-health",
+    details: { reason: "untyped stuck item" },
+  });
+
+  test("defer in SHADOW emits would-defer but writes NO cooldown marker", () => {
+    const intents = [];
+    const events = [];
+    const result = reasoningRecoveryPass([baseItem], {
+      mode: "shadow",
+      classifyTicket: deferClassifier,
+      recordIntent: (ticket, intent) => intents.push({ ticket, intent }),
+      emitEvent: (e) => events.push(e),
+      postComment: () => {},
+    });
+    expect(result.results[0].decision).toBe("defer");
+    expect(intents).toEqual([]); // shadow mutates NO scheduler state
+    expect(events.some((e) => e.type === "recovery.would-defer")).toBe(true);
+  });
+
+  test("defer in ENFORCE writes the cooldown-only defer marker", () => {
+    const intents = [];
+    const events = [];
+    reasoningRecoveryPass([baseItem], {
+      mode: "enforce",
+      classifyTicket: deferClassifier,
+      recordIntent: (ticket, intent) => intents.push({ ticket, intent }),
+      emitEvent: (e) => events.push(e),
+      postComment: () => {},
+    });
+    expect(intents).toHaveLength(1);
+    expect(intents[0].intent).toMatchObject({ decision: "defer" });
+    expect(events.some((e) => e.type === "recovery.deferred")).toBe(true);
   });
 
   test("format diagnosis comment correctly", () => {
@@ -1588,5 +1629,31 @@ describe("reasoningRecoveryPass decision visibility (CTL-1287)", () => {
     expect(env.attributes["event.label"]).toBeNull();
     expect(env.severityText).toBe("INFO");
     expect(env.body.payload.details.queueSize).toBe(3);
+  });
+});
+
+// ─── CTL-1157 F #6 (Codex round-4): escalation signal must carry `ticket` ─────
+// signal-reader parseSignal keys off raw.ticket and status:"needs-human" is
+// non-terminal, so this fresh recovery-pass signal wins over the failed phase.
+// Without a ticket, readWorkerSignals() reports ticket:null and scheduler-recovery /
+// board-health consumers lose the escalated ticket after the first pass.
+describe("defaultWriteEscalationSignal (CTL-1157 F #6)", () => {
+  test("the written phase-recovery-pass.json carries the ticket", () => {
+    const orchDir = mkdtempSync(pathJoin(tmpdir(), "esc-"));
+    try {
+      defaultWriteEscalationSignal(
+        "CTL-42",
+        { escalation_type: "manual", problem: "stuck", call_to_action: "look" },
+        { orchDir },
+      );
+      const p = pathJoin(orchDir, "workers", "CTL-42", "phase-recovery-pass.json");
+      expect(existsSync(p)).toBe(true);
+      const signal = JSON.parse(readFileSync(p, "utf8"));
+      expect(signal.ticket).toBe("CTL-42"); // the fix: never null
+      expect(signal.status).toBe("needs-human");
+      expect(signal.explanation).toBeDefined();
+    } finally {
+      rmSync(orchDir, { recursive: true, force: true });
+    }
   });
 });

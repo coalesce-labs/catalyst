@@ -299,9 +299,24 @@ fi
 # worker dir + signals[teardown]==='done'). --no-write: the Done write above is
 # authoritative; this only records the declaration. The drain marks it reconciled
 # once Linear shows Done, or re-writes it if the transition above silently failed.
+#
+# CTL-1157 F #3: pass --transition-verified ONLY when the real linear-transition.sh
+# above returned rc=0. That flag gates the ENFORCE recovery.done-applied telemetry +
+# open-PR alarm: without it, a marker dropped after a FAILED/MISSING transition would
+# report an applied Done that never happened. On the failure path we still drop the
+# marker (so the drain/terminalDoneOnce backstop reconciles), but as a shadow would-
+# event, not an enforce Done-move.
 LINEAR_RECONCILE="${PLUGIN_ROOT}/scripts/catalyst-linear-reconcile"
 if [[ -x "$LINEAR_RECONCILE" ]]; then
-  "$LINEAR_RECONCILE" declare "$TICKET" --state done --by pipeline --no-write >/dev/null 2>&1 || true
+  # Single no-space token → a set-but-empty string is safe under `set -u` and the
+  # unquoted expansion contributes no arg when empty (avoids the bash-3.2 empty-array
+  # trap). LINEAR_DONE_RC is unset when the transition script was missing → :-1 → shadow.
+  TRANSITION_VERIFIED_FLAG=""
+  if [[ "${LINEAR_DONE_RC:-1}" -eq 0 ]]; then
+    TRANSITION_VERIFIED_FLAG="--transition-verified"
+  fi
+  "$LINEAR_RECONCILE" declare "$TICKET" --state done --by pipeline --no-write \
+    $TRANSITION_VERIFIED_FLAG >/dev/null 2>&1 || true
 fi
 ```
 

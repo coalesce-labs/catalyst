@@ -87,34 +87,50 @@ function prNumberOf(d) {
 
 // lookupPrStatus — resolve the lifecycle status of (prNumber, repo) against the
 // composite prStatusMap (`Map<number, Map<repoKey, {status,updatedAt,repo}>>`,
-// produced by broker-state.getAllPrStatuses). The disambiguation rules (CTL-1157,
-// Codex #4):
-//   • No entry for the number → null (not observable for this ticket).
-//   • Exactly ONE repo holds the number → return it (no collision; this is the
-//     N=1 / single-repo path → byte-identical to the old number-only lookup,
-//     whether or not the ticket's repo was derived).
-//   • The number COLLIDES across repos AND the ticket's repo is known → return
-//     that repo's entry (or null when the ticket's own repo has no such PR). A
-//     cross-repo #-collision NO LONGER hides the ticket's real PR.
-//   • The number collides AND the ticket's repo is genuinely underivable → the
-//     TRUE residual: we cannot pick → return {ambiguous:true} so the cohort skips
-//     rather than borrow the wrong repo's status.
+// produced by broker-state.getAllPrStatuses; repoKey is the row's "owner/repo" or
+// "" when the lifecycle row carries no repo attribution). The disambiguation rules
+// (CTL-1157, Codex #4 round-4 — require the exact repo when it is KNOWN, never borrow
+// an unrelated repo's row for the same number):
+//   • No entry for the number → null (not observable).
+//   • Ticket repo KNOWN:
+//       – exact `byRepo.get(repo)` hit → return it (definitive).
+//       – no exact hit, but the number has a SINGLE UNATTRIBUTED ("") row → return it
+//         (a legacy / single-repo lifecycle row written before repo attribution; using
+//         it preserves phantom/orphan detection on the single-repo fleet).
+//       – otherwise (rows exist ONLY for other KNOWN repos, or ambiguous) → null. This
+//         is the fix: a ticket in org/y with PR #42 must NOT inherit org/x#42's status
+//         just because org/x is the only row for #42.
+//   • Ticket repo UNDERIVABLE:
+//       – exactly one repo holds the number → number-only resolution (legacy N=1).
+//       – the number collides across repos → {ambiguous:true} so the cohort skips
+//         rather than borrow a wrong repo's status.
 // `repo` is the ticket's GitHub "owner/repo" (or null when underivable).
 function lookupPrStatus(map, prNumber, repo) {
   if (!(map instanceof Map)) return null;
   const byRepo = map.get(prNumber);
   if (!(byRepo instanceof Map) || byRepo.size === 0) return null;
-  // No collision: exactly one repo owns this number → number-only resolution.
+
+  const repoKnown = repo != null && repo !== "";
+  if (repoKnown) {
+    // (1) Exact match on the ticket's OWN repo — definitive.
+    const exact = byRepo.get(repo);
+    if (exact) return exact;
+    // (2) No row attributed to the ticket's repo. The ONLY row we may still trust is a
+    //     LONE unattributed ("") row — a lifecycle row written before repo attribution.
+    //     This keeps single-repo detection while never borrowing another KNOWN repo's #N.
+    if (byRepo.size === 1) {
+      const [[onlyKey, only]] = byRepo.entries();
+      if (onlyKey === "") return only;
+    }
+    // (3) Rows exist only for OTHER known repos (or are ambiguous) → do not borrow.
+    return null;
+  }
+
+  // Repo underivable: fall back to number-only resolution, ambiguous on collision.
   if (byRepo.size === 1) {
     const [only] = byRepo.values();
     return only;
   }
-  // Collision: ≥2 repos share this number. Disambiguate by the ticket's repo.
-  if (repo != null && repo !== "") {
-    // Known repo → the ticket's OWN repo's #N, or null when it has none.
-    return byRepo.get(repo) ?? null;
-  }
-  // Repo underivable + collision → the documented true residual: ambiguous skip.
   return { status: null, updatedAt: null, repo: null, ambiguous: true };
 }
 

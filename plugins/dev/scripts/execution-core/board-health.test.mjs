@@ -400,6 +400,34 @@ describe("CTL-1157 multi-repo collision — composite (repo,number) disambiguati
     const r = evaluateInvariants(mkBoard({ ticketsById, prStatusMap }), { mode: "shadow" });
     expect(r.orphanedOpenPr.flagged).toContain("CTL-Z");
   });
+
+  // THE ROUND-4 FIX (Codex #4 borrow-across-repos): the ticket repo is KNOWN and the
+  // ONLY row for #42 belongs to a DIFFERENT repo. The pre-fix `byRepo.size===1` fast
+  // path returned that unrelated row, so a ticket in org/y inherited org/x#42's MERGED
+  // status → a FALSE phantom. Now a known repo requires the exact row → never borrow.
+  test("phantom-merged: known repo org/y is NOT flagged when the ONLY #42 row is org/x (no cross-repo borrow)", () => {
+    const ticketsById = new Map([["CTL-Y", { identifier: "CTL-Y", state: "In Review", prNumber: 42 }]]);
+    const prStatusMap = mkPrStatusMap([{ prNumber: 42, repo: "org/x", status: "merged" }]);
+    const r = evaluateInvariants(
+      mkBoard({ ticketsById, prStatusMap, repoForTicket: () => "org/y" }),
+      { mode: "shadow" },
+    );
+    expect(r.phantomMergedPr.flagged).not.toContain("CTL-Y"); // org/x#42's status is not CTL-Y's
+    expect(r.phantomMergedPr.ok).toBe(true);
+  });
+
+  // Single-repo preservation: a KNOWN repo with a LONE UNATTRIBUTED ("") lifecycle row
+  // (written before repo attribution) is still trusted — detection must not regress on
+  // the single-repo fleet whose filter_state rows carry no repo.
+  test("phantom-merged: known repo still flags off a lone UNATTRIBUTED row (single-repo preservation)", () => {
+    const ticketsById = new Map([["CTL-Y", { identifier: "CTL-Y", state: "In Review", prNumber: 42 }]]);
+    const prStatusMap = mkPrStatusMap([{ prNumber: 42, repo: null, status: "merged" }]); // repoKey ""
+    const r = evaluateInvariants(
+      mkBoard({ ticketsById, prStatusMap, repoForTicket: () => "org/y" }),
+      { mode: "shadow" },
+    );
+    expect(r.phantomMergedPr.flagged).toContain("CTL-Y");
+  });
 });
 
 // ─── CTL-1157 (Group 2, Codex) — cohort liveness/terminal correctness ────────

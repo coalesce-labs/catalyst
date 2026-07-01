@@ -1015,13 +1015,20 @@ describe("settleDispatchSync (CTL-1367 P1)", () => {
     let settled = false;
     const p = Promise.resolve({ code: 0 });
     const r = settleDispatchSync(p, { verifySync: () => true, onSettled: () => { settled = true; } });
-    expect(r).toEqual({ code: 0, async: true }); // resolved SYNCHRONOUSLY
-    await p; await Promise.resolve(); // let the detached handler run
+    // CTL-1157 F P1: the provisional now also carries `pending` (the never-rejecting
+    // settled chain) so the detached delegate-runner child can await the in-process
+    // sdk query before process.exit. The long-lived daemon entry points ignore it.
+    expect(r.code).toBe(0); // resolved SYNCHRONOUSLY
+    expect(r.async).toBe(true);
+    expect(typeof r.pending?.then).toBe("function");
+    await r.pending; await Promise.resolve(); // let the detached handler run
     expect(settled).toBe(true);
   });
   test("a Promise → { code:1 } when verifySync fails (prelaunch never wrote a runnable signal)", () => {
     const r = settleDispatchSync(Promise.resolve({ code: 1 }), { verifySync: () => false });
-    expect(r).toEqual({ code: 1, async: true });
+    expect(r.code).toBe(1);
+    expect(r.async).toBe(true);
+    expect(typeof r.pending?.then).toBe("function"); // CTL-1157 F P1
   });
   test("a rejecting Promise never escapes as an unhandled rejection", async () => {
     let err = null;
@@ -1138,8 +1145,9 @@ describe("backstopOnRejection (CTL-1367 P1)", () => {
         { emitBackstop: (a) => calls.push(a) },
       ),
     });
-    expect(r).toEqual({ code: 0, async: true }); // provisional success off the prelaunch signal
-    await Promise.resolve(); await Promise.resolve(); // let the detached handler run
+    expect(r.code).toBe(0); // provisional success off the prelaunch signal
+    expect(r.async).toBe(true);
+    await r.pending; await Promise.resolve(); // let the detached handler run (CTL-1157 F P1)
     expect(calls).toHaveLength(1);
     expect(calls[0]).toMatchObject({ ticket: "CTL-10", phase: "implement", status: "failed" });
     expect(calls[0].reason).toMatch(/non-array spec.env/);

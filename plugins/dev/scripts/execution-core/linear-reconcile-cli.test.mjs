@@ -372,7 +372,7 @@ test("DECLARE done-applied: a pipeline record-only marker (--by pipeline --no-wr
   const { code } = await runCli(
     [
       "declare", "CTL-9", "--by", "pipeline", "--state", "done", "--no-write",
-      "--decls-dir", dir,
+      "--transition-verified", "--decls-dir", dir,
     ],
     { emitDoneApplied: (f) => moves.push(f), checkOpenPrs: PASS }
   );
@@ -389,6 +389,36 @@ test("DECLARE done-applied: a pipeline record-only marker (--by pipeline --no-wr
   });
 });
 
+test("DECLARE done-applied: a pipeline marker WITHOUT --transition-verified (failed/missing real Done) emits a SHADOW would-event, never an enforce Done-move or alarm", async () => {
+  // CTL-1157 F #3 (Codex round-4): phase-teardown drops the `--by pipeline --no-write`
+  // marker EVEN when linear-transition.sh failed or was missing (SKILL.md runs it with
+  // `|| true`). Without --transition-verified we must NOT report an applied Done that
+  // never landed — no enforce done-applied, no open-PR alarm. It degrades to the shadow
+  // would-event so the reconcile drain / terminalDoneOnce backstop lands the real Done.
+  const dir = mkdtempSync(join(tmpdir(), "decl-"));
+  const moves = [];
+  const alarms = [];
+  const openPrCalls = [];
+  const { code } = await runCli(
+    [
+      "declare", "CTL-9", "--by", "pipeline", "--state", "done", "--no-write",
+      "--decls-dir", dir,
+    ],
+    {
+      emitDoneApplied: (f) => moves.push(f),
+      emitDoneWithOpenPr: (ev) => alarms.push(ev),
+      checkOpenPrs: (...a) => { openPrCalls.push(a); return PASS(...a); },
+    }
+  );
+  expect(code).toBe(0);
+  // still observable — but as a SHADOW would-event, not an enforce Done-move.
+  expect(moves).toHaveLength(1);
+  expect(moves[0]).toMatchObject({ ticket: "CTL-9", recoveryMode: "shadow" });
+  // no open-PR enumeration + NO alarm on the unverified path (it never claims a Done).
+  expect(alarms).toEqual([]);
+  expect(openPrCalls).toEqual([]);
+});
+
 test("DECLARE (GROUP 1): a pipeline record-only Done WITH an open PR is observable + alarmed — not silent", async () => {
   // The Problem-A regression: real teardown Done (external) → pipeline record-only
   // marker → later terminal-sweep sees already-Done → skipped. WITHOUT this fix the
@@ -400,7 +430,7 @@ test("DECLARE (GROUP 1): a pipeline record-only Done WITH an open PR is observab
   const { code } = await runCli(
     [
       "declare", "CTL-9", "--by", "pipeline", "--state", "done", "--no-write",
-      "--decls-dir", dir,
+      "--transition-verified", "--decls-dir", dir,
     ],
     {
       emitDoneApplied: (f) => moves.push(f),
@@ -425,7 +455,7 @@ test("DECLARE (GROUP 1): a pipeline record-only Done with an UNVERIFIABLE open-P
   const { code } = await runCli(
     [
       "declare", "CTL-9", "--by", "pipeline", "--state", "done", "--no-write",
-      "--decls-dir", dir,
+      "--transition-verified", "--decls-dir", dir,
     ],
     {
       emitDoneApplied: (f) => moves.push(f),
@@ -447,7 +477,7 @@ test("DECLARE (GROUP 1): a CLEAN pipeline record-only Done emits done-applied bu
   const { code } = await runCli(
     [
       "declare", "CTL-9", "--by", "pipeline", "--state", "done", "--no-write",
-      "--decls-dir", dir,
+      "--transition-verified", "--decls-dir", dir,
     ],
     {
       emitDoneApplied: (f) => moves.push(f),

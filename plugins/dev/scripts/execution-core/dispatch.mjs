@@ -356,13 +356,20 @@ export function settleDispatchSync(result, { verifySync, onSettled } = {}) {
     // (a) Detached settle handler — the query runs to completion in the background;
     // its terminal event is emitted by the worker/backstop. Swallow the settlement
     // so it can never surface as an unhandled rejection on the daemon event loop.
-    Promise.resolve(result).then(
-      (r) => { if (onSettled) { try { onSettled(r, null); } catch { /* best-effort */ } } },
-      (err) => { if (onSettled) { try { onSettled(null, err); } catch { /* best-effort */ } } },
+    // CTL-1157 F P1: capture the settled chain as `pending`. Both handlers RETURN
+    // (never re-throw), so `pending` NEVER rejects — awaiting it is always safe. The
+    // long-lived daemon entry points ignore it (byte-identical to before: the chain is
+    // still detached + swallowed). The ONE caller that must await it is the disposable,
+    // out-of-process delegate-runner child, whose executor=sdk query() runs IN-PROCESS
+    // and would be killed by the child's process.exit if it exited before the query
+    // finished (delegate-runner-entry). It reads `pending` and awaits it before exiting.
+    const pending = Promise.resolve(result).then(
+      (r) => { if (onSettled) { try { onSettled(r, null); } catch { /* best-effort */ } } return r; },
+      (err) => { if (onSettled) { try { onSettled(null, err); } catch { /* best-effort */ } } return { code: 1, error: err }; },
     );
     // (b) Synchronous provisional: the prelaunch signal IS the launch confirmation.
     const ok = verifySync ? verifySync() !== false : true;
-    return { code: ok ? 0 : 1, async: true };
+    return { code: ok ? 0 : 1, async: true, pending };
   }
   return result;
 }
