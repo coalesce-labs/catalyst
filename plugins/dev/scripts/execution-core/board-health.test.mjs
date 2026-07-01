@@ -402,6 +402,81 @@ describe("CTL-1157 multi-repo collision — composite (repo,number) disambiguati
   });
 });
 
+// ─── CTL-1157 (Group 2, Codex) — cohort liveness/terminal correctness ────────
+// (1) orphaned-open PR: a failed/stalled worker FREES the slot → NOT live, so a
+//     PR stuck behind it IS the orphaned case (must not read as "has a worker").
+// (2) frozen-needs-human: a terminal (Done/Canceled/Duplicate) ticket carrying a
+//     stale cached needs-human label must NOT be flagged for recovery.
+describe("CTL-1157 cohort correctness — dead-worker orphans + terminal stale-label", () => {
+  const staleOpen = { prNumber: 7, repo: "org/solo", status: "open", updatedAt: new Date(NOW - 100 * HOUR).toISOString() };
+
+  test("orphaned-open: a stale open PR whose ONLY worker signal is FAILED IS flagged", () => {
+    const ticketsById = new Map([["CTL-DEAD", { identifier: "CTL-DEAD", prNumber: 7 }]]);
+    const r = evaluateInvariants(
+      mkBoard({
+        ticketsById,
+        prStatusMap: mkPrStatusMap([staleOpen]),
+        signals: [{ ticket: "CTL-DEAD", phase: "implement", status: "failed" }],
+      }),
+      { mode: "shadow" },
+    );
+    expect(r.orphanedOpenPr.flagged).toContain("CTL-DEAD"); // failed worker ≠ live
+  });
+
+  test("orphaned-open: a stale open PR whose ONLY worker signal is STALLED IS flagged", () => {
+    const ticketsById = new Map([["CTL-STALL", { identifier: "CTL-STALL", prNumber: 7 }]]);
+    const r = evaluateInvariants(
+      mkBoard({
+        ticketsById,
+        prStatusMap: mkPrStatusMap([staleOpen]),
+        signals: [{ ticket: "CTL-STALL", phase: "implement", status: "stalled" }],
+      }),
+      { mode: "shadow" },
+    );
+    expect(r.orphanedOpenPr.flagged).toContain("CTL-STALL");
+  });
+
+  test("orphaned-open: a LIVE (running) worker still masks the PR as not-orphaned", () => {
+    const ticketsById = new Map([["CTL-LIVE", { identifier: "CTL-LIVE", prNumber: 7 }]]);
+    const r = evaluateInvariants(
+      mkBoard({
+        ticketsById,
+        prStatusMap: mkPrStatusMap([staleOpen]),
+        signals: [{ ticket: "CTL-LIVE", phase: "implement", status: "running" }],
+      }),
+      { mode: "shadow" },
+    );
+    expect(r.orphanedOpenPr.flagged).not.toContain("CTL-LIVE"); // running worker → live
+  });
+
+  test("frozen-needs-human: a TERMINAL ticket with a stale needs-human label is NOT flagged", () => {
+    const old = new Date(NOW - 100 * HOUR).toISOString();
+    const ticketsById = new Map([
+      ["CTL-DONE", { identifier: "CTL-DONE", state: "Done", labels: [{ name: "needs-human" }], updatedAt: old }],
+      ["CTL-CANCEL", { identifier: "CTL-CANCEL", state: "Canceled", labels: [{ name: "needs-human" }], updatedAt: old }],
+      ["CTL-DUP", { identifier: "CTL-DUP", state: "Duplicate", labels: [{ name: "needs-human" }], updatedAt: old }],
+    ]);
+    const r = evaluateInvariants(mkBoard({ ticketsById }), { mode: "shadow" });
+    expect(r.frozenNeedsHuman.flagged).not.toContain("CTL-DONE");
+    expect(r.frozenNeedsHuman.flagged).not.toContain("CTL-CANCEL");
+    expect(r.frozenNeedsHuman.flagged).not.toContain("CTL-DUP");
+    expect(r.frozenNeedsHuman.observable).toBe(true); // labels present → still observable
+  });
+
+  test("frozen-needs-human: a NON-terminal ticket with a stale needs-human label IS still flagged", () => {
+    const ticketsById = new Map([
+      ["CTL-STUCK", {
+        identifier: "CTL-STUCK",
+        state: "In Progress",
+        labels: [{ name: "needs-human" }],
+        updatedAt: new Date(NOW - 100 * HOUR).toISOString(),
+      }],
+    ]);
+    const r = evaluateInvariants(mkBoard({ ticketsById }), { mode: "shadow" });
+    expect(r.frozenNeedsHuman.flagged).toContain("CTL-STUCK"); // real frozen escalation preserved
+  });
+});
+
 // ─── decideBoardHealth — the cheap-gate funnel (§6) ─────────────────────────
 function inv(ok, failed = 0, observable = true, flagged = []) {
   return { ok, failed, observable, flagged, note: "" };

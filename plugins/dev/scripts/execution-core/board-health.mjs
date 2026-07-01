@@ -150,6 +150,35 @@ function emptyMoves() {
 function isTerminalStatus(status) {
   return status != null && TERMINAL_STATUSES.has(String(status).toLowerCase());
 }
+// SLOT_FREED_STATUSES — a worker signal in one of these no longer occupies a
+// slot / is no longer live. Mirrors the scheduler's isTicketInFlight (failed /
+// stalled / aborted FREE the slot, scheduler.mjs) and signal-reader.TERMINAL
+// (adds turn-cap-exhausted). Distinct from TERMINAL_STATUSES (success-like only,
+// used by worker-age): a failed/stalled worker is NOT terminal-success but is
+// also NOT live, so a PR stuck behind a dead/failed worker reads as orphaned.
+const SLOT_FREED_STATUSES = new Set([
+  ...TERMINAL_STATUSES,
+  "failed",
+  "stalled",
+  "aborted",
+  "turn-cap-exhausted",
+]);
+// isLiveWorkerStatus — true when a worker signal still represents active,
+// slot-occupying work (not terminal-success AND not failed/stalled/aborted).
+function isLiveWorkerStatus(status) {
+  return status != null && !SLOT_FREED_STATUSES.has(String(status).toLowerCase());
+}
+// isTerminalLinearState — the ticket's Linear workflow state is terminal
+// (Done/Canceled/Duplicate/merged). Reuses the same terminal-state pattern the
+// blocked-tree walk uses (BLOCKER_DONE_RE) and mirrors the reconcile's
+// Done/Canceled/Duplicate exclusion (linear-reconcile.mjs terminalStates), so
+// board-health never proposes recovery for already-terminal work whose only
+// remaining signal is a stale cached label (the CTL-1157/1162 stale-label class
+// that terminal-needs-human-reconcile strips lazily).
+function isTerminalLinearState(d) {
+  const state = d?.state ?? d?.linear_state ?? null;
+  return state != null && BLOCKER_DONE_RE.test(String(state));
+}
 function dedupeFlagged(invariants) {
   const seen = new Set();
   for (const v of Object.values(invariants)) {
@@ -585,8 +614,12 @@ function checkOrphanedOpenPr(b, t) {
   if (!(map instanceof Map) || map.size === 0) {
     return invariant(true, 0, false, [], "no PR-status map → orphaned open-PR not observable");
   }
+  // A worker only counts as "live" (→ NOT orphaned) when it still occupies a
+  // slot. failed/stalled/aborted FREE the slot (isTicketInFlight), so a PR stuck
+  // behind a dead/failed worker is exactly the orphaned case this cohort catches
+  // — do NOT let a terminal-FAILURE signal mask it as "has a live worker".
   const liveTickets = new Set(
-    b.signals.filter((s) => s.ticket && !isTerminalStatus(s.status)).map((s) => s.ticket),
+    b.signals.filter((s) => s.ticket && isLiveWorkerStatus(s.status)).map((s) => s.ticket),
   );
   const flagged = [];
   for (const [id, d] of b.ticketsById) {
@@ -628,6 +661,11 @@ function checkFrozenNeedsHuman(b, t) {
     const labels = labelsOf(d);
     if (labels) haveLabels = true;
     if (!labels || !labels.some((l) => NEEDS_HUMAN_LABEL_RE.test(labelName(l)))) continue;
+    // A Done/Canceled/Duplicate ticket can keep a stale cached needs-human label
+    // until terminal-needs-human-reconcile strips it. Flagging it purely by age
+    // would propose recovery for already-terminal work — mirror the reconcile's
+    // terminal-state exclusion and skip it (the CTL-1157/1162 stale-label class).
+    if (isTerminalLinearState(d)) continue;
     const updatedAt = d.updatedAt ?? d.updated_at ?? null;
     const updatedMs = updatedAt ? Date.parse(updatedAt) : NaN;
     const ageMs = Number.isFinite(updatedMs) ? b.now - updatedMs : null;
