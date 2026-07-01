@@ -1324,6 +1324,26 @@ describe("phantom worker-dir validity sweep (CTL-671)", () => {
     expect(sig.stalledReason).toBe("phantom-ticket");
   });
 
+  test("does NOT quarantine a live in-process SDK worker (CTL-1410 Phase B)", () => {
+    // An SDK worker has NO bg id (liveness.value null), so the bg gate can't
+    // protect it — only the in-process registry probe can. not-found +
+    // not-eligible would otherwise quarantine it.
+    writeSignal("CTL-9", "implement", "running");
+    const r = schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: () => ({ code: 0 }),
+      liveBackgroundCount: () => 0,
+      classifyResolution: resolveTo("not-found"),
+      isBgJobAlive: () => false,
+      isSdkWorkerLive: (ticket) => ticket === "CTL-9",
+    });
+    const sig = JSON.parse(
+      readFileSync(join(orchDir, "workers", "CTL-9", "phase-implement.json"), "utf8")
+    );
+    expect(sig.status).toBe("running"); // untouched
+    expect(r.quarantinedPhantoms ?? []).toEqual([]);
+  });
+
   test("does NOT quarantine when Linear resolution is unknown (outage safety)", () => {
     writeSignal("CTL-100", "implement", "running");
     schedulerTick(orchDir, {

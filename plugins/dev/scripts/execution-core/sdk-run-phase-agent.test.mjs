@@ -1592,3 +1592,157 @@ describe("sdkRunPhaseAgent — overload shape table", () => {
     }
   });
 });
+
+// ── CTL-1410 Phase B: in-process worker-registry wiring ───────────────────────
+// The registry is the SDK-native liveness source of truth (sdk-worker-registry.mjs).
+// The runner must register exactly once per real launch (after the spec resolves,
+// before the query loop), swap the abort controller per retry, heartbeat on
+// streamed messages, and deregister on EVERY exit path — while the three
+// pre-launch early-returns never register at all.
+
+describe("sdkRunPhaseAgent — CTL-1410 Phase B (worker registry wiring)", () => {
+  const fakeRegistry = () => {
+    const state = { registered: [], handles: [] };
+    const registerWorker = (entry) => {
+      state.registered.push(entry);
+      const h = {
+        controllers: [],
+        touches: 0,
+        deregistered: 0,
+        setAbortController(ac) {
+          h.controllers.push(ac);
+        },
+        touch() {
+          h.touches += 1;
+        },
+        deregister() {
+          h.deregistered += 1;
+        },
+      };
+      state.handles.push(h);
+      return h;
+    };
+    return { registerWorker, state };
+  };
+
+  test("registers after spec resolve, before the query; wires the AC; touches per message; deregisters on success", async () => {
+    const { spawn } = spawnReturningSpec();
+    const { registerWorker, state } = fakeRegistry();
+    let registeredAtQuery = -1;
+    const sink = {};
+    const runQuery = ({ prompt, options }) => {
+      registeredAtQuery = state.registered.length;
+      sink.options = options;
+      return (async function* () {
+        yield { type: "assistant", message: {} };
+        yield resultMsg();
+      })();
+    };
+    const r = await sdkRunPhaseAgent(ARGS, { ...GOOD_AUTH, spawn, runQuery, registerWorker });
+    expect(r.code).toBe(0);
+    expect(state.registered).toHaveLength(1);
+    expect(registeredAtQuery).toBe(1); // registered BEFORE the query launched
+    expect(state.registered[0]).toMatchObject({
+      ticket: "CTL-100",
+      phase: "implement",
+      worktreePath: "/wt/CTL-100",
+      generation: 1,
+      orchDir: "/ec",
+    });
+    const h = state.handles[0];
+    expect(h.controllers).toHaveLength(1);
+    expect(h.controllers[0]).toBe(sink.options.abortController); // the SAME ac query() got
+    expect(h.touches).toBe(2); // one per streamed message
+    expect(h.deregistered).toBe(1);
+  });
+
+  test("deregisters when the query throws (generic sdk-threw path)", async () => {
+    const { spawn } = spawnReturningSpec();
+    const { registerWorker, state } = fakeRegistry();
+    const runQuery = () =>
+      (async function* () {
+        throw new Error("boom");
+      })();
+    const r = await sdkRunPhaseAgent(ARGS, {
+      ...GOOD_AUTH, spawn, runQuery, registerWorker,
+      emitBackstop: () => {},
+    });
+    expect(r.code).toBe(1);
+    expect(state.handles[0].deregistered).toBe(1);
+  });
+
+  test("deregisters when the overload backoff exhausts", async () => {
+    const { spawn } = spawnReturningSpec();
+    const { registerWorker, state } = fakeRegistry();
+    const runQuery = () =>
+      (async function* () {
+        yield resultMsg({ subtype: "error", is_error: true, api_error_status: 529 });
+      })();
+    const r = await sdkRunPhaseAgent(ARGS, {
+      ...GOOD_AUTH, spawn, runQuery, registerWorker,
+      sleep: () => Promise.resolve(),
+      backoff: { baseMs: 1, capMs: 2 },
+      maxRetries: 1,
+      emitEvent: () => {},
+      emitBackstop: () => {},
+    });
+    expect(r.code).toBe(1);
+    expect(state.registered).toHaveLength(1); // register once, NOT per retry
+    expect(state.handles[0].deregistered).toBe(1);
+  });
+
+  test("swaps the abort controller on every retry (distinct AC per attempt)", async () => {
+    const { spawn } = spawnReturningSpec();
+    const { registerWorker, state } = fakeRegistry();
+    let attempt = 0;
+    const runQuery = () =>
+      (async function* () {
+        attempt += 1;
+        if (attempt === 1) {
+          yield resultMsg({ subtype: "error", is_error: true, api_error_status: 429 });
+        } else {
+          yield resultMsg();
+        }
+      })();
+    const r = await sdkRunPhaseAgent(ARGS, {
+      ...GOOD_AUTH, spawn, runQuery, registerWorker,
+      sleep: () => Promise.resolve(),
+      backoff: { baseMs: 1, capMs: 2 },
+      emitEvent: () => {},
+    });
+    expect(r.code).toBe(0);
+    const h = state.handles[0];
+    expect(h.controllers).toHaveLength(2);
+    expect(h.controllers[0]).not.toBe(h.controllers[1]);
+    expect(h.deregistered).toBe(1);
+  });
+
+  test("auth-guard early return never registers", async () => {
+    const { registerWorker, state } = fakeRegistry();
+    const r = await sdkRunPhaseAgent(ARGS, {
+      env: { ANTHROPIC_API_KEY: "sk", CLAUDE_CODE_OAUTH_TOKEN: "t" },
+      oauthToken: "t",
+      registerWorker,
+      emitEvent: () => {},
+    });
+    expect(r.code).toBe(1);
+    expect(state.registered).toHaveLength(0);
+  });
+
+  test("idempotent prelaunch never registers", async () => {
+    const spec = makeSpec({ status: "claim-lost", idempotent: true });
+    const { spawn } = spawnReturningSpec({ spec });
+    const { registerWorker, state } = fakeRegistry();
+    const r = await sdkRunPhaseAgent(ARGS, { ...GOOD_AUTH, spawn, registerWorker });
+    expect(r.code).toBe(0);
+    expect(state.registered).toHaveLength(0);
+  });
+
+  test("failed prelaunch never registers", async () => {
+    const { spawn } = spawnReturningSpec({ code: 1 });
+    const { registerWorker, state } = fakeRegistry();
+    const r = await sdkRunPhaseAgent(ARGS, { ...GOOD_AUTH, spawn, registerWorker });
+    expect(r.code).toBe(1);
+    expect(state.registered).toHaveLength(0);
+  });
+});

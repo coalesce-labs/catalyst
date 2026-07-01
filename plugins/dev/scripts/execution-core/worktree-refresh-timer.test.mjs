@@ -79,6 +79,27 @@ describe("startWorktreeRefreshTimer", () => {
     expect(refreshed.length).toBe(0);
   });
 
+  it("skips workers with a live in-process SDK worker (bg id null) — CTL-1410 Phase B", () => {
+    const clock = fakeClock();
+    const refreshed = [];
+    startWorktreeRefreshTimer({
+      intervalSeconds: 60,
+      quietSeconds: 0,
+      orchDir: "/fake/orch",
+      readSignals: () => [
+        mkSignal("/wt/A", { ticket: "CTL-SDK" }), // live in the registry — must be skipped
+        mkSignal("/wt/B", { ticket: "CTL-IDLE" }), // not registered — still refreshed
+      ],
+      statWorktree: () => ({ mtimeMs: 0 }),
+      isSessionLive: () => false, // bg leg sees nothing (bg id is null)
+      isSdkWorkerLive: (ticket) => ticket === "CTL-SDK",
+      refresh: (wt) => { refreshed.push(wt); return 0; },
+      clock,
+    });
+    clock.advance(60_000);
+    expect(refreshed).toEqual(["/wt/B"]);
+  });
+
   it("skips workers whose worktree mtime is too recent", () => {
     const clock = fakeClock();
     const refreshed = [];

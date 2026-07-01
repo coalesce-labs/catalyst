@@ -83,6 +83,9 @@ import { getProjectConfig, listProjects, ownerRepoFromRepoRoot } from "./registr
 // re-implements the gate in bash (merge-confirmation evidence + worktree
 // presweep + non-force `git worktree remove`) in phase-teardown/SKILL.md.
 import { readWorkerSignals, countSdkInflight as defaultCountSdkInflight, hasFreshClaim } from "./signal-reader.mjs";
+// CTL-1410 Phase B: the in-process SDK worker registry — the liveness fact for
+// workers with no bg job (leaf module; a Map read, never a shell-out).
+import { isSdkWorkerLive as registrySdkWorkerLive } from "./sdk-worker-registry.mjs";
 // CTL-933: shadow belief-store fact collector (opt-in CATALYST_BELIEFS_SHADOW=1).
 // CTL-937: getBeliefsDb exposes the module-level db handle for the diagnostician.
 // CTL-1241: getEscalateHumanBelief reads the latest escalate_human belief for the
@@ -3106,6 +3109,11 @@ export function schedulerTick(
     // production; sweep-specific tests inject their own stubs.
     classifyResolution = () => "unknown",
     isBgJobAlive = () => true,
+    // CTL-1410 Phase B: in-process SDK-worker probe for the sweep. The REAL
+    // registry read is the safe default here — it is a local Map lookup in this
+    // same process (never shells out), and an empty registry (bare unit tick)
+    // protects nothing, which is exactly the pre-Phase-B behavior.
+    isSdkWorkerLive = registrySdkWorkerLive,
     // CTL-823: the daemon's durable-descriptor-store reader; threaded into the
     // fetchState injections below. undefined in bare unit ticks (fail-open —
     // fetchTicketState without gateway behaves exactly as before).
@@ -3601,6 +3609,11 @@ export function schedulerTick(
     // (no snapshot fetch, no async `claude agents` warmer kick). The skip decision (incl. the
     // cold-cache fail-open) lives in the pure, unit-tested bgLivenessProtects helper.
     if (bgId && bgLivenessProtects(bgId, getAgents(), isBgJobAlive)) continue;
+    // (c-sdk) CTL-1410 Phase B: an in-process SDK worker has NO bg id, so the bg
+    // gate above is blind to it — consult the in-process registry before probing
+    // Linear. A live registry entry is a fact (same process as the dispatch), so
+    // this can never mis-protect a phantom: phantoms are never registered.
+    if (isSdkWorkerLive(sig.ticket)) continue;
     if (classifyResolution(sig.ticket, { exec }) !== "not-found") continue; // (b) definitive only
     if (maybeQuarantinePhantom(orchDir, sig.ticket, sig.phase)) {
       quarantinedPhantoms.push({ ticket: sig.ticket, phase: sig.phase });
