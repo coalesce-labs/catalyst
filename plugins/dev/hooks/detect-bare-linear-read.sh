@@ -9,16 +9,22 @@ set -uo pipefail
 input="$(cat)"                                   # Claude Code pipes the tool call as JSON on stdin
 cmd="$(printf '%s' "$input" | jq -r '.tool_input.command // empty' 2>/dev/null)"
 [[ -n "$cmd" ]] || exit 0
+# Collapse shell line-continuations (`\<newline>`) to a space so a wrapped
+# `linearis issues \<NL> read CTL-1` (one command to bash) isn't split into two
+# non-matching segments below.
+cmd="${cmd//$'\\\n'/ }"
 
 # Detect per COMMAND SEGMENT, not payload-wide, so a sanctioned `--with-attachments`
 # read in the same tool call can't shield a sibling bare read
 # (e.g. `linearis issues read A; linearis issues read B --with-attachments`). Split on
 # shell separators (;, &, |, newline) — sufficient for the payload shapes agents emit.
-# A segment is a BARE read iff it is an `issues read` (verb `read` excludes list/search/
-# create/update/comments/usage/auth) WITHOUT --with-attachments (the one replica-less read).
+# A segment is a BARE read iff `linearis` is the COMMAND WORD (anchored — after optional
+# leading whitespace + VAR=val env-assignments; so `rg "linearis issues read"` / `echo …`
+# do NOT match) running an `issues read` (verb `read` excludes list/search/create/update/
+# comments/usage/auth) WITHOUT --with-attachments (the one replica-less read).
 bare=""
 while IFS= read -r seg; do
-  printf '%s' "$seg" | grep -Eq 'linearis([[:space:]]+[^[:space:]]+)*[[:space:]]+issues[[:space:]]+read([[:space:]]|$)' || continue
+  printf '%s' "$seg" | grep -Eq '^[[:space:]]*([A-Za-z_][A-Za-z0-9_]*=[^[:space:]]*[[:space:]]+)*linearis([[:space:]]+[^[:space:]]+)*[[:space:]]+issues[[:space:]]+read([[:space:]]|$)' || continue
   printf '%s' "$seg" | grep -Eq -- '--with-attachments' && continue   # sanctioned attachment read — exempt
   bare="$seg"; break
 done < <(printf '%s\n' "$cmd" | tr ';&|' '\n')
