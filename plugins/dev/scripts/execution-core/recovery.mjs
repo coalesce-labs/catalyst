@@ -2983,12 +2983,30 @@ export function reclaimDeadWorkIfPossible(
 // event-log cursor, and classifies every in-flight worker. Returns a
 // RecoveryReport; throws nothing the daemon must handle (reconcile is internally
 // best-effort, worker scan is filesystem-pure).
-export function recoverStartup({ orchDir, exec, statJob, detectCold = detectColdStart } = {}) {
+export function recoverStartup({
+  orchDir,
+  exec,
+  statJob,
+  detectCold = detectColdStart,
+  // CTL-1420 follow-up (shared-bucket burn): let the daemon skip THIS boot
+  // reconcile. recoverStartup runs BEFORE the read-replica reader is injected
+  // into the monitor (daemon.mjs constructs + injects it only after recover()
+  // returns), so with CATALYST_LINEAR_REPLICA=on this poll falls to `linearis
+  // issues list` and draws the shared app-actor bucket — a redundant every-team
+  // storm at every boot. startMonitor runs an IMMEDIATE authoritative
+  // reconcileAll right after recover() returns, and that one IS replica-backed,
+  // so skipping this pre-injection poll changes nothing any consumer observes:
+  // nothing between recover() and startMonitor (reconcileBoot,
+  // processApprovedResumes) reads the eligible projection, and `projects` below
+  // comes from the registry (listProjects), not the reconcile. Default false →
+  // standalone/test callers reconcile exactly as before.
+  skipReconcile = false,
+} = {}) {
   if (!orchDir) throw new Error("recoverStartup: orchDir is required");
 
   // (1) Routing state — reconcileAll re-reads the registry + polls Linear per
   //     team; reconcileProject internally swallows poll/write failures.
-  reconcileAll({ exec });
+  if (!skipReconcile) reconcileAll({ exec });
   const projects = listProjects().map((p) => p.team);
 
   // (2) Durable event-log cursor — what the monitor's fast path will resume at.

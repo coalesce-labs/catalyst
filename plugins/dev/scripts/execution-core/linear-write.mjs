@@ -334,16 +334,30 @@ export async function removeLabel(
 // Modelled on applyLabel's read-back pattern (CTL-587). The `fetchState` seam
 // is injectable so tests never shell out to linearis; `resolveRepoRoot` + `exec`
 // are forwarded to runTransition unchanged.
+//
+// CTL-1420 follow-up (shared-bucket burn): `gateway` (CTL-823) + `replica`
+// (CTL-1340) are threaded into the PRE-transition read ONLY, so a warm
+// descriptor/replica resolves from_state with no cold `linearis` spawn (the
+// ticket was just admitted from the eligible set, which is served from the
+// replica, so this hits with high probability). They are DELIBERATELY NOT
+// applied to the post-write verify read-back below: that read must observe the
+// JUST-WRITTEN state, which the lagging gateway/replica would not yet reflect —
+// tiering it would false-report verify-failed on every triage. A tier MISS on
+// the pre-read falls through to the live read (fetchTicketState is fail-open),
+// so omitting them (tests, flag off) is byte-identical to the prior behavior.
 export function applyTriageStatus({
   ticket,
   resolveRepoRoot = defaultResolveRepoRoot,
   exec = defaultExec,
   fetchState = fetchTicketState,
+  gateway,
+  replica,
 }) {
   let from_state = null;
   try {
     // 1. Capture pre-transition state (best-effort — null is acceptable).
-    from_state = fetchState(ticket, { exec });
+    //    CTL-1420: gateway/replica-tiered — a warm hit skips the cold linearis read.
+    from_state = fetchState(ticket, { exec, gateway, replica });
 
     // 2. Shell the transition. CTL-758: pass the from_state we just read as
     //    knownCurrentState so the backward-write guard reuses it (no second read).
@@ -366,7 +380,9 @@ export function applyTriageStatus({
     const cfg = team ? getProjectConfig(team) : null;
     const expectedState = cfg?.eligibleQuery?.triageStatus ?? "Triage";
 
-    // 4. Re-read to verify the state actually landed.
+    // 4. Re-read to verify the state actually landed. CTL-1420: intentionally
+    //    LIVE (no gateway/replica) — the verify must observe the just-written
+    //    state, which the lagging tiers would not yet reflect.
     const to_state = fetchState(ticket, { exec });
     if (to_state == null) {
       log.warn({ ticket }, "linear-write: triage verify-unreadable — cannot confirm state landed");

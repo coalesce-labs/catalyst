@@ -554,6 +554,37 @@ describe("applyTriageStatus", () => {
     expect(args[args.indexOf("--transition") + 1]).toBe("triage");
   });
 
+  // CTL-1420 follow-up (shared-bucket burn): the PRE-transition read is
+  // gateway/replica-tiered so a warm hit skips the cold linearis spawn, but the
+  // post-write VERIFY read-back MUST stay live — the lagging tiers would not yet
+  // reflect the just-written state and would false-report verify-failed.
+  test("CTL-1420: PRE-read is gateway/replica-tiered; the verify read-back stays LIVE (exec-only)", () => {
+    const exec = makeTransitionExec();
+    const gateway = { getDescriptor() {} };
+    const replica = { lookup() {} };
+    const optsSeen = [];
+    let readCount = 0;
+    const fetchState = (_ticket, opts) => {
+      optsSeen.push(opts);
+      return ++readCount === 1 ? "Todo" : "Triage";
+    };
+    const r = applyTriageStatus({
+      ticket: "CTL-704",
+      resolveRepoRoot,
+      exec,
+      fetchState,
+      gateway,
+      replica,
+    });
+    expect(r.verified).toBe(true);
+    // Call 1 (pre-transition read) carries the read-tiers.
+    expect(optsSeen[0]).toEqual({ exec, gateway, replica });
+    // Call 2 (verify read-back) is LIVE — no gateway/replica threaded.
+    expect(optsSeen[1]).toEqual({ exec });
+    expect(optsSeen[1].gateway).toBeUndefined();
+    expect(optsSeen[1].replica).toBeUndefined();
+  });
+
   test("false-success — exit 0 but stale state → verified:false", () => {
     const exec = makeTransitionExec();
     // Both reads return "Todo" — the write exited 0 but state never changed

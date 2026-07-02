@@ -456,6 +456,35 @@ describe("recoverStartup", () => {
     ).toBe(true);
   });
 
+  // CTL-1420 follow-up (shared-bucket burn): the daemon passes skipReconcile:true
+  // because startMonitor runs an immediate replica-backed reconcile right after
+  // recover() returns — so recover()'s own (pre-replica-injection, linearis)
+  // reconcile is a redundant boot storm on the shared app-actor bucket.
+  test("CTL-1420: skipReconcile:true — does NOT poll Linear nor write the eligible projection", () => {
+    enroll("ENG", { status: "Todo" });
+    let execCalls = 0;
+    const exec = () => {
+      execCalls++;
+      return { code: 0, stdout: JSON.stringify({ nodes: [node("ENG-1")] }), stderr: "" };
+    };
+    recoverStartup({ orchDir, exec, statJob: () => null, skipReconcile: true });
+    expect(execCalls).toBe(0); // no boot reconcile → no linearis poll (the burn cut)
+    expect(
+      existsSync(join(catalystDir, "execution-core", "eligible", "ENG.json")),
+    ).toBe(false);
+  });
+
+  test("CTL-1420: skipReconcile:true — report.routing still carries the enrolled projects (from the registry, not the reconcile)", () => {
+    enroll("ENG", { status: "Todo" });
+    enroll("PLAT", { status: "Todo" });
+    const exec = () => {
+      throw new Error("reconcile exec must NOT run when skipReconcile:true");
+    };
+    const report = recoverStartup({ orchDir, exec, statJob: () => null, skipReconcile: true });
+    expect(report.routing.projectCount).toBe(2);
+    expect([...report.routing.projects].sort()).toEqual(["ENG", "PLAT"]);
+  });
+
   test("report.routing carries the enrolled project list", () => {
     enroll("ENG", { status: "Todo" });
     enroll("PLAT", { status: "Todo" });

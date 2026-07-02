@@ -603,8 +603,20 @@ export function readTicketLabelNodes(identifier, { exec = defaultExec } = {}) {
 // transient → unknown.
 export function classifyTicketResolution(
   identifier,
-  { exec = defaultExec, gateway, gatewayFreshMs = GATEWAY_EXISTS_FRESH_MS } = {}
+  { exec = defaultExec, gateway, replica, gatewayFreshMs = GATEWAY_EXISTS_FRESH_MS } = {}
 ) {
+  // CTL-1420 follow-up (shared-bucket burn): replica existence short-circuit
+  // (CTL-1340 tier). Mirrors the gateway block below — a present row in the
+  // local Catalyst-Cloud replica proves the ticket EXISTS, the only verdict safe
+  // to serve without a live read. A replica MISS (undefined lookup: absent /
+  // removed row, no db, any throw) NEVER yields "not-found": it falls through to
+  // the gateway + the live read, so a lagging or absent replica can never
+  // quarantine a real ticket (fresh-before-quarantine holds). Off (undefined
+  // replica) → skipped, byte-identical to the pre-change gateway-only path.
+  if (replica) {
+    const r = replica.lookup(identifier);
+    if (r !== undefined) return "exists";
+  }
   // CTL-823: serve ONLY the cheap not-quarantine verdict from the durable
   // store — a fresh, present, not-removed descriptor proves existence.
   // removed/absent/stale NEVER short-circuit: quarantine is a destructive
