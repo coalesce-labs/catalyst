@@ -1,7 +1,10 @@
 // Unit tests for the CTL-1420 fleet-frozen-for-admission alert.
 // Run: cd plugins/dev/scripts/execution-core && bun test fleet-freeze-alert.test.mjs
 
-import { describe, test, expect, beforeEach } from "bun:test";
+import { describe, test, expect, beforeEach, afterEach } from "bun:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   buildFleetFreezeAlertEvent,
   checkFleetFreeze,
@@ -11,6 +14,23 @@ import {
   ALERT_CLEARED,
   ALERT_KIND_FLEET_FROZEN_ADMISSION,
 } from "./fleet-freeze-alert.mjs";
+
+// The latch persists under getReconcileHealthDir() (CATALYST_DIR-scoped), so give
+// each test an isolated CATALYST_DIR — no cross-test marker leakage, no writes to
+// the real ~/catalyst tree.
+let catalystDir;
+let prevCatalystDir;
+beforeEach(() => {
+  prevCatalystDir = process.env.CATALYST_DIR;
+  catalystDir = mkdtempSync(join(tmpdir(), "fleet-freeze-"));
+  process.env.CATALYST_DIR = catalystDir;
+  __resetFleetFreezeLatch(); // clear in-memory latch + force re-hydrate from the fresh (empty) dir
+});
+afterEach(() => {
+  if (prevCatalystDir === undefined) delete process.env.CATALYST_DIR;
+  else process.env.CATALYST_DIR = prevCatalystDir;
+  rmSync(catalystDir, { recursive: true, force: true });
+});
 
 describe("buildFleetFreezeAlertEvent", () => {
   test("raised: catalyst.alert.raised envelope, WARN, fleet_frozen_admission label, execution-core resource", () => {
@@ -94,11 +114,61 @@ describe("checkFleetFreeze", () => {
     expect(lines).toHaveLength(0);
   });
 
-  test("empty registry never raises (no teams ⇒ not frozen)", () => {
+  test("empty registry from a CLOSED latch never raises (no teams to evaluate)", () => {
     const lines = [];
     const r = checkFleetFreeze({ teams: [], isTeamFrozen: () => true, append: (l) => lines.push(l) });
     expect(r).toEqual({ frozen: false, emitted: null });
     expect(lines).toHaveLength(0);
+  });
+
+  // CTL-1420 review finding: a transient empty listProjects() (registry.json
+  // momentarily unreadable/malformed — listProjects returns [] instead of
+  // throwing) must NOT flap a genuinely-raised latch to `cleared`. An empty team
+  // set is a NO-TRANSITION, not evidence of recovery.
+  test("empty team list is a NO-TRANSITION: a RAISED latch survives an empty read (no spurious clear, then re-raise)", () => {
+    const lines = [];
+    const append = (l) => lines.push(JSON.parse(l));
+    checkFleetFreeze({ teams: ["CTL", "ADV"], isTeamFrozen: () => true, append }); // raise
+    expect(lines).toHaveLength(1);
+    expect(isFleetFrozenRaised()).toBe(true);
+
+    // Registry momentarily unreadable → teams=[] → must NOT emit `cleared`.
+    const r = checkFleetFreeze({ teams: [], isTeamFrozen: () => true, append });
+    expect(r).toEqual({ frozen: true, emitted: null }); // latch preserved
+    expect(lines).toHaveLength(1); // no spurious cleared
+    expect(isFleetFrozenRaised()).toBe(true);
+
+    // Registry restored, still frozen → still no duplicate raise.
+    const r2 = checkFleetFreeze({ teams: ["CTL", "ADV"], isTeamFrozen: () => true, append });
+    expect(r2.emitted).toBe(null);
+    expect(lines).toHaveLength(1);
+  });
+
+  // CTL-1420 review finding: the latch is persisted + hydrated, so a daemon
+  // restart mid-freeze does NOT re-emit `raised` with no intervening `cleared`.
+  test("a daemon restart mid-freeze (in-memory reset, marker persists) does NOT re-emit raised", () => {
+    const lines = [];
+    const append = (l) => lines.push(JSON.parse(l));
+    const teams = ["CTL", "ADV"];
+    checkFleetFreeze({ teams, isTeamFrozen: () => true, append }); // raise + persist
+    expect(lines).toHaveLength(1);
+
+    // Simulate a RESTART: the in-memory latch + hydration flag reset, but the
+    // persisted marker (in this test's CATALYST_DIR) survives.
+    __resetFleetFreezeLatch();
+    expect(isFleetFrozenRaised()).toBe(false); // in-memory cleared
+
+    // First post-restart check, still frozen: hydrate reads the marker → already
+    // raised → NO second `raised` emitted.
+    const r = checkFleetFreeze({ teams, isTeamFrozen: () => true, append });
+    expect(r).toEqual({ frozen: true, emitted: null });
+    expect(lines).toHaveLength(1); // still exactly one raised, no duplicate
+    expect(isFleetFrozenRaised()).toBe(true); // hydrated from disk
+
+    // Recovery after restart still clears exactly once.
+    const r2 = checkFleetFreeze({ teams, isTeamFrozen: () => false, append });
+    expect(r2.emitted).toBe("cleared");
+    expect(lines).toHaveLength(2);
   });
 
   test("a throwing append never propagates, and does NOT latch → the alert retries next tick", () => {

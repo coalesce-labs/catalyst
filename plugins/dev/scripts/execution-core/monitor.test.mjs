@@ -59,6 +59,7 @@ beforeEach(() => {
   process.env.CATALYST_DIR = catalystDir;
   mkdirSync(join(catalystDir, "execution-core"), { recursive: true });
   __resetForTests();
+  __resetFleetFreezeLatch(); // CTL-1420: the fleet-freeze latch is module-global + now persisted — reset per test
   enrolledTeams.clear();
   registryEntries.length = 0;
 });

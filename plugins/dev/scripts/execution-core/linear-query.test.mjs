@@ -431,6 +431,31 @@ describe("runEligibleQuery — replica tier (CTL-1397)", () => {
     expect(sources).toEqual([["replica", 1]]);
   });
 
+  // CTL-1420 review finding (guard): the freeze-avoidance branch trusts the empty
+  // WITHOUT caching the empty-confirm marker. If it did cache it, the linearis
+  // reconfirm would be suppressed for EMPTY_RECONFIRM_MS after the breaker closes
+  // — trusting a CTL-139 feed-hole as a real empty board. This asserts the marker
+  // stays unset: once the breaker closes, an empty STILL reconfirms via linearis.
+  test("CTL-1420: breaker-open trust does NOT cache the empty-confirm marker → after the breaker closes the next empty still reconfirms via linearis", () => {
+    const replica = replicaReturning([]);
+    // Breaker OPEN: trust the empty, no exec, and (crucially) no marker cached.
+    const t1 = runEligibleQuery(query, { exec: execMustNotRun(), replica, breakerIsOpen: () => true });
+    expect(t1).toEqual([]);
+    // Breaker now CLOSED: if the open branch had cached the marker, this empty
+    // would be trusted with NO linearis call. It must reconfirm instead.
+    const exec = fakeExec({ stdout: ticketsJson([]) });
+    const sources = [];
+    const t2 = runEligibleQuery(query, {
+      exec,
+      replica,
+      breakerIsOpen: () => false,
+      onSource: (source, count) => sources.push([source, count]),
+    });
+    expect(exec.calls).toHaveLength(1); // reconfirmed — the open branch left the marker unset
+    expect(t2).toEqual([]);
+    expect(sources).toEqual([["linearis", 0]]);
+  });
+
   test("cadence: after a successful empty confirm, empties trust the replica until the window elapses, then re-confirm once per team", () => {
     const replica = replicaReturning([]);
     let clock = 5_000_000;
