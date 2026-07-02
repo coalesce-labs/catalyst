@@ -457,6 +457,39 @@ if [[ -n $CONFIG_PATH ]]; then
 	fi
 fi
 
+# 8. Linear read path — replica-first reflex (CTL-1397 / CTL-1420 follow-up)
+#    CTL-1397 pivoted agent Linear READS to direct SQLite against the local
+#    catalyst-replica.db (writer-fed from Catalyst Cloud). Bare `linearis issues
+#    read <ID>` instead hits the personal ~2500/hr Linear key and 429s under load.
+#    Affirm "reads → replica" when the replica is FRESH; WARN (advisory, NEVER fatal)
+#    only when the operator has OPTED IN (CATALYST_LINEAR_REPLICA=on) but the replica
+#    is STALE/missing — so a downstream/non-fleet host that never runs the replica is
+#    NOT nagged and is NOT flipped out of "Project setup OK". Freshness is the SAME
+#    two-gate check the read helper enforces (writer.lock < 5min AND a sync_meta
+#    cursor) — sourced, not duplicated, so the gate can't drift from read behavior.
+REPLICA_LIB=""
+if [[ -f "${SCRIPT_DIR}/lib/linear-read-replica.sh" ]]; then
+	REPLICA_LIB="${SCRIPT_DIR}/lib/linear-read-replica.sh"
+elif [[ -n ${CLAUDE_PLUGIN_ROOT-} && -f "${CLAUDE_PLUGIN_ROOT}/scripts/lib/linear-read-replica.sh" ]]; then
+	REPLICA_LIB="${CLAUDE_PLUGIN_ROOT}/scripts/lib/linear-read-replica.sh"
+fi
+if [[ -n $REPLICA_LIB ]]; then
+	# Defines replica_fresh() (print-free, rc-only) + CATALYST_REPLICA_DB /
+	# CATALYST_LINEAR_REPLICA_STALE_MS defaults. Idempotent; safe under set -e.
+	# shellcheck source=lib/linear-read-replica.sh disable=SC1090,SC1091
+	source "$REPLICA_LIB"
+	_replica_stale_s=$(( ${CATALYST_LINEAR_REPLICA_STALE_MS:-300000} / 1000 ))
+	if replica_fresh; then
+		echo -e "${GREEN}Linear reads → local replica${NC} (${CATALYST_REPLICA_DB}) — do NOT use bare 'linearis issues read <ID>' for single-ticket reads (it hits the personal Linear key and 429s under load)."
+	elif [[ -f "$CATALYST_REPLICA_DB" ]]; then
+		warnings+=("Linear replica STALE (writer heartbeat >${_replica_stale_s}s or seed incomplete) — single-ticket reads fall back to the personal Linear key (rate-limited, 429-prone). Check the cloud-sync writer: bash plugins/dev/scripts/check-setup.sh")
+	elif [[ ${CATALYST_LINEAR_REPLICA:-} == on ]]; then
+		warnings+=("CATALYST_LINEAR_REPLICA=on but no replica at $CATALYST_REPLICA_DB — single-ticket reads fall back to the personal Linear key (rate-limited, 429-prone). Start the cloud-sync writer: catalyst-stack adopt-cloud-sync")
+	fi
+	# else (no replica, not opted in): silent — the replica is fleet-internal infra a
+	# downstream install never runs; nagging it would be a permanent false alarm.
+fi
+
 # Report errors (fatal)
 if [[ ${#errors[@]} -gt 0 ]]; then
 	echo -e "${RED}ERROR: Project setup incomplete${NC}"

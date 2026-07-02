@@ -139,3 +139,21 @@ description = "Provide Catalyst plan structure guidance when in plan mode"
 command = "bash"
 args = ["${CLAUDE_PLUGIN_ROOT}/hooks/inject-plan-template.sh"]
 run_in_background = false
+
+# CTL-1397/CTL-1420: replica-first Linear reads. Warn on (observe, default) or block
+# (enforce) a bare `linearis issues read <ID>` that bypasses the local replica and 429s
+# the shared Linear quota, and emit a catalyst.replica.read_fallback event so the burn-down
+# is measurable in Loki. Mode via CATALYST_LINEAR_READ_DETECT_MODE (observe|enforce). This
+# is what makes the detector actually FIRE (no manual settings.json install).
+[[hooks]]
+name = "Detect bare Linear reads (replica-first)"
+event = "PreToolUse"
+description = "Observe/enforce bare `linearis issues read` that bypasses the replica (CTL-1397/CTL-1420)"
+
+[hooks.matcher]
+tool_name = "Bash"
+
+[hooks.command]
+command = "bash"
+args = ["${CLAUDE_PLUGIN_ROOT}/hooks/detect-bare-linear-read.sh"]
+run_in_background = false

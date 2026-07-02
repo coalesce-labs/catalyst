@@ -39,6 +39,8 @@ This project uses [Catalyst](https://github.com/coalesce-labs/catalyst) for AI-a
 /catalyst-filter      # Register semantic event interests (orchestrators only)
 ```
 
+**Linear reads → local replica:** for a single-ticket read call `linear_read_ticket <ID>` (never a bare `linearis issues read <ID>` — it 429s the shared quota); writes and list/search stay on `linearis`. See the `linearis` skill's "Reading Linear".
+
 ### Agent Teams
 
 For complex implementations spanning multiple domains (frontend + backend + tests),

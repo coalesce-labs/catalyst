@@ -39,6 +39,35 @@ _CATALYST_LINEAR_READ_REPLICA_SH=1
 # Live-read fallback cap in ms (matches catalyst-linear's runLinearis); default 8s.
 : "${CATALYST_LINEARIS_TIMEOUT_MS:=8000}"
 
+# _lrr_emit_fallback_event <ID> <reason> <source> — best-effort: append a WARN
+# `catalyst.replica.read_fallback` event to the unified log so every replica
+# miss/stale fallback is measurable in Loki (otel-forward ships this log; agent
+# Bash stderr is NOT). NEVER fails the caller. No dedup — WARN log-only, not
+# paging; the alerting story owns latching/rate-limiting (a writer outage can
+# burst this at read-rate × outage-duration).
+_lrr_emit_fallback_event() {
+  local id="$1" reason="$2" source="${3:-helper}"
+  local lib; lib="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/canonical-event.sh"
+  [[ -r "$lib" ]] || return 0
+  command -v jq >/dev/null 2>&1 || return 0
+  # shellcheck disable=SC1090
+  . "$lib" 2>/dev/null || return 0
+  local events_dir="${CATALYST_EVENTS_DIR:-${CATALYST_DIR:-$HOME/catalyst}/events}"
+  local ts; ts="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
+  local line
+  line="$(build_canonical_line \
+    --ts "$ts" --severity WARN \
+    --service "catalyst.linear-read" \
+    --event-name "catalyst.replica.read_fallback" \
+    --entity "linear-read" --action "fallback" \
+    --label "$reason" \
+    --linear-ticket "$id" \
+    --session "${CATALYST_SESSION_ID:-}" \
+    --message "Linear single-ticket read fell back to linearis ($reason) for $id" \
+    --payload-json "$(jq -nc --arg s "$source" '{source:$s}')" 2>/dev/null)" || return 0
+  canonical_jsonl_append "$events_dir" "$line" 2>/dev/null || true
+}
+
 # _lrr_live_read <ID> → run the linearis fallback, CAPPED so a 429-stalled / hung
 # linearis can't block the caller forever (parity with catalyst-linear's runLinearis
 # 8s cap). Uses `timeout` when present (GNU coreutils on the fleet); on timeout the
@@ -110,8 +139,10 @@ linear_read_ticket() {
     fi
     # Fresh replica, but the row is absent (not yet mirrored / tombstoned).
     printf '[linear-read-replica] MISS for %s (replica fresh, row absent) — falling back to linearis; file a ticket if this recurs.\n' "$id" >&2
+    _lrr_emit_fallback_event "$id" miss helper
   else
     printf '[linear-read-replica] replica STALE/ABSENT (writer heartbeat >%ds or seed incomplete) — falling back to linearis for %s; this is a writer/mirror gap to fix, not a retry.\n' "$(( ${CATALYST_LINEAR_REPLICA_STALE_MS:-300000} / 1000 ))" "$id" >&2
+    _lrr_emit_fallback_event "$id" stale-absent helper
   fi
   # Loud fallback — one un-accelerated, timeout-capped live read. Writes stay on
   # linearis elsewhere.

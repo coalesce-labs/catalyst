@@ -43,12 +43,13 @@ No build process — this is markdown files and bash scripts.
 - **Wait for all agents before synthesizing** — Don't proceed until research completes
 - **Config drives behavior** — No hardcoded values
 - **Single source of truth** — Don't duplicate information across files:
-  - CLI syntax lives in skills (e.g., the `linearis` skill, which also defines the direct-SQLite read rule for agent Linear reads — reads → the local replica, writes → `linearis`) — reference it, don't copy
+  - CLI syntax lives in skills (e.g., the `linearis` skill) — reference it, don't copy
   - Workflow logic lives in skills — each skill owns its own state transitions
   - Config schema lives in `website/src/content/docs/reference/configuration.md`
 - **Spawn parallel agents** — Maximize efficiency
 - **Agents are documentarians** — Never suggest improvements unless asked
 - **Preserve context** — Save to thoughts/, not just memory
+- **Linear reads → local replica** — for a single-ticket read call `linear_read_ticket <ID>` (it gates freshness and falls back loudly); never a bare `linearis issues read <ID>` (it 429s the shared-quota fleet). Writes and list/search stay on `linearis`. See the `linearis` skill's "Reading Linear".
 
 ## Skill & Agent References
 
