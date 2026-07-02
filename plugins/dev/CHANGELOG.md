@@ -1,5 +1,21 @@
 # Changelog
 
+## [12.23.1](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.23.0...catalyst-dev-v12.23.1)
+
+Jul 02, 2026
+
+<!-- ai-enhanced -->
+
+### Heartbeat Rate-Limit Backoff Fix
+
+The cluster heartbeat publisher now respects Linear's rate-class 400 and 429 responses by consulting the shared circuit breaker — skipping writes while the breaker is open instead of hammering an exhausted quota every two minutes. This also fixes a related failure where intermittent heartbeat 400s were flapping cross-host fences, causing the zombie guard to read stale state and kill runs at their final step. No migration required.
+
+
+
+### PRs
+
+* **dev:** cluster-heartbeat — back off the shared bucket on a rate-class Linear 400/429 (CTL-1420 follow-up) ([#2539](https://github.com/coalesce-labs/catalyst/issues/2539)) ([01d8844](https://github.com/coalesce-labs/catalyst/commit/01d88449f3845db47f33bad6ec346a0797e8a71e))
+
 ## [12.23.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.22.0...catalyst-dev-v12.23.0)
 
 Jul 02, 2026
