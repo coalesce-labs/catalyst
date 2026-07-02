@@ -42,6 +42,7 @@ import {
   checkPluginPullOwner,
   checkPluginSourceFreshness,
   classifyPluginSourceFreshness,
+  checkStaleLock,
   checksForClass,
   installChecksForClass,
   summarize,
@@ -4943,6 +4944,52 @@ describe("checksForClass — checkPluginSourceFreshness registration (CTL-1421)"
   for (const cls of ["worker", "developer", "monitor"]) {
     it(`wires checkPluginSourceFreshness into the ${cls} suite`, () => {
       expect(src({ recognized: true, class: cls })).toContain("checkPluginSourceFreshness");
+    });
+  }
+});
+
+// ─── checkStaleLock (CTL-1415) ───────────────────────────────────────────────
+//
+// A stale plugin-source .git/index.lock silently freezes plugin pulls. doctor
+// REPORTS it (WARN) — age-gated via the shared lib/stale-lock.mjs classifier, so
+// a live git op (fresh lock) reads as in-progress, not a problem.
+describe("checkStaleLock (CTL-1415)", () => {
+  const ROOT = "/co/plugin-source";
+  const LOCK = "/co/plugin-source/.git/index.lock";
+  const NOW = 1_750_000_000_000;
+  const statFor = (mtimeMs) => (path) => (path === LOCK && mtimeMs != null ? mtimeMs : null);
+
+  it("no lock → PASS", () => {
+    const [c] = checkStaleLock({ root: ROOT, now: NOW, statFn: statFor(null) });
+    expect(c.name).toBe("stale-plugin-lock");
+    expect(c.status).toBe(STATUS.PASS);
+    expect(c.detail).toContain("no stale git index.lock");
+  });
+
+  it("fresh lock (live git op) → PASS (in progress, not stale)", () => {
+    const [c] = checkStaleLock({ root: ROOT, now: NOW, thresholdMs: 600_000, statFn: statFor(NOW - 4_000) });
+    expect(c.status).toBe(STATUS.PASS);
+    expect(c.detail).toContain("git operation is in progress");
+  });
+
+  it("stale lock (older than threshold) → WARN with the frozen-pulls guidance", () => {
+    const [c] = checkStaleLock({ root: ROOT, now: NOW, thresholdMs: 600_000, statFn: statFor(NOW - 8.5 * 60 * 60 * 1000) });
+    expect(c.status).toBe(STATUS.WARN);
+    expect(c.detail).toContain("FROZEN");
+    expect(c.detail).toContain(LOCK);
+  });
+
+  it("stale lock is a WARN, never a FAIL (never blocks doctor exit)", () => {
+    const [c] = checkStaleLock({ root: ROOT, now: NOW, thresholdMs: 600_000, statFn: statFor(NOW - 3_600_000) });
+    expect(c.status).not.toBe(STATUS.FAIL);
+  });
+});
+
+describe("checksForClass — checkStaleLock registration (CTL-1415)", () => {
+  const src = (nc, opts = {}) => checksForClass(nc, opts).map((f) => f.toString()).join("\n");
+  for (const cls of ["worker", "developer", "monitor"]) {
+    it(`wires checkStaleLock into the ${cls} suite`, () => {
+      expect(src({ recognized: true, class: cls })).toContain("checkStaleLock()");
     });
   }
 });
