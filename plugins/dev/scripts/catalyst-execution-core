@@ -239,6 +239,14 @@ cmd_start() {
 			-d 'scope=read,write,comments:create,app:assignable,app:mentionable' \
 			-d 'actor=app' 2>/dev/null | jq -r '.access_token // empty' 2>/dev/null)
 		if [[ -n "$_otok" ]]; then
+			# CTL-1420 follow-up (shared-bucket burn): preserve the inherited per-host
+			# lin_api key as the daemon's READ key BEFORE the app-actor overwrite below,
+			# so linear-query.mjs routes Linear READS to each host's own 2500/hr personal
+			# bucket while WRITES stay on the shared app-actor token — reads stop drawing
+			# the write bucket. Only exported when a non-empty key was inherited (set -u
+			# safe via :- defaults); otherwise unset → reads fall back to LINEAR_API_TOKEN,
+			# byte-identical to today.
+			[[ -n "${LINEAR_API_TOKEN:-${LINEAR_API_KEY:-}}" ]] && export CATALYST_LINEAR_READ_KEY="${LINEAR_API_TOKEN:-${LINEAR_API_KEY:-}}"
 			export LINEAR_API_TOKEN="$_otok" LINEAR_API_KEY="$_otok"
 			echo "catalyst-execution-core: authenticated as Catalyst Orchestrator app-actor (isolated 5000/hr bucket)" >&2
 		else
