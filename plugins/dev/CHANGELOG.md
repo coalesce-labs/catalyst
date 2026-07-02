@@ -1,9 +1,18 @@
 # Changelog
 
-## [12.23.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.22.0...catalyst-dev-v12.23.0) (2026-07-02)
+## [12.23.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.22.0...catalyst-dev-v12.23.0)
+
+Jul 02, 2026
+
+<!-- ai-enhanced -->
+
+### Warm Resume & Replica-First Reads
+
+A daemon restart now continues in-flight SDK work from its existing transcript instead of cold-restarting — making fleet-wide stop/restart-all a routine, low-cost operation. Alongside that, replica-first Linear reads are now a standard reflex across every agent path: enforced in core context, phase-worker preambles, and a new PreToolUse hook that can catch and block bare `linearis issues read` calls before they hit the rate-limited API key.
 
 
-### Features
+
+### PRs
 
 * **dev:** CTL-1397 enforcement — replica-first Linear reads as a standard prerequisite reflex ([#2543](https://github.com/coalesce-labs/catalyst/issues/2543)) ([98dfbac](https://github.com/coalesce-labs/catalyst/commit/98dfbac7216d6ede87b6edf22d690b1188d7cbd1))
 * **dev:** CTL-1422 — warm resume: a daemon restart continues in-flight SDK work ([#2544](https://github.com/coalesce-labs/catalyst/issues/2544)) ([cca2892](https://github.com/coalesce-labs/catalyst/commit/cca2892b8182a5f9a8b93cf7c812d9337c5ea566))
