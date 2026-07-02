@@ -247,7 +247,12 @@ if [[ -f "$OPEN_PR_ENUM" ]] && command -v node >/dev/null 2>&1; then
       const t = process.env.TICKET;
       const branchName = process.env.TD_BRANCH || undefined;
       try {
-        const r = defaultCheckOpenPrs(t, { branchName });
+        // CTL-1157 (Codex round-8): teardown ALREADY runs inside the ticket worktree, so
+        // pass cwd=process.cwd() — defaultCheckOpenPrs then queries gh in THIS repo
+        // directly instead of relying on registry derivation, which reports
+        // repo-underivable/UNVERIFIABLE on an unenrolled repo or a repoRoot the registry
+        // convention cannot map, even though the current worktree is the right repo.
+        const r = defaultCheckOpenPrs(t, { branchName, cwd: process.cwd() });
         process.stdout.write(JSON.stringify({ prs: r.prs || [], unverifiable: !!r.unverifiable, reason: r.reason || "" }));
       } catch (e) {
         process.stdout.write(JSON.stringify({ prs: [], unverifiable: true, reason: String((e && e.message) || e) }));

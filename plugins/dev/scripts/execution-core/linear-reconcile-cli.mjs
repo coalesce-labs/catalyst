@@ -485,13 +485,14 @@ async function cmdReconcile(args, deps = {}) {
     const checkOpenPrs = deps.checkOpenPrs || defaultCheckOpenPrs;
     const emit = deps.emitDoneWithOpenPr || appendRecoveryDoneOpenPrEvent;
     const emitDoneApplied = deps.emitDoneApplied || appendRecoveryDoneAppliedEvent;
-    // CTL-1157 fix #2: run the gh enumeration in the TICKET's repository. The drain
-    // knows the project repoRoot from its --config (.catalyst/config.json lives at
-    // <repoRoot>/.catalyst/config.json), so pass it as the gh cwd — multi-repo /
-    // per-project installs must query the right repo, NEVER bare linearis and never
-    // the process cwd. When config is absent, defaultCheckOpenPrs falls back to its
-    // own registry-based repo derivation (and reports unverifiable if that fails).
-    const drainRepoRoot = existsSync(configPath) ? dirname(dirname(configPath)) : null;
+    // CTL-1157 fix #2 (+ Codex round-8): run the gh enumeration in EACH ticket's OWN
+    // repository. The drain processes pending declarations from the GLOBAL completions
+    // store, so its rows can belong to DIFFERENT project repos than this CLI's --config.
+    // Forcing the CLI's config repoRoot as cwd for every ticket would query gh in the
+    // wrong repo for cross-project rows (a false-clean or false-open result). Pass NO
+    // cwd → defaultCheckOpenPrs derives the repo PER TICKET from the registry
+    // (deriveRepoRoot(ticket)); an underivable ticket surfaces as unverifiable, never a
+    // silent clean. NEVER bare linearis, never the process cwd.
     for (const r of rows) {
       // A real Done transition that actually changed state (not an idempotent
       // already-Done noop, not a dry-run, not a failed/skip row).
@@ -499,7 +500,7 @@ async function cmdReconcile(args, deps = {}) {
       let openPrs = [];
       let unverifiable = false;
       try {
-        const facts = checkOpenPrs(r.ticket, drainRepoRoot ? { cwd: drainRepoRoot } : {});
+        const facts = checkOpenPrs(r.ticket, {});
         if (facts && facts.unverifiable) unverifiable = true;
         if (facts && Array.isArray(facts.prs)) openPrs = facts.prs;
       } catch {
