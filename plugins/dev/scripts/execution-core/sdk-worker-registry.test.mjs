@@ -376,3 +376,53 @@ describe("abort / cancel", () => {
     expect(isPreemptionAbort(undefined)).toBe(false);
   });
 });
+
+describe("session capture (CTL-1422)", () => {
+  test("setSessionId records the id, exposes it, and writes the projection immediately (bypasses throttle)", () => {
+    const dir = freshDir();
+    let t = T0;
+    const h = registerSdkWorker(entry(dir), { now: () => t });
+    t = T0 + 1_000; // INSIDE the touch throttle — the session write must not wait
+    h.setSessionId("sess-abc");
+    expect(sdkWorkerForTicket("CTL-1").sessionId).toBe("sess-abc");
+    expect(readProjection(dir, "CTL-1").sessionId).toBe("sess-abc");
+    h.deregister();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("a superseded handle's setSessionId does not clobber the successor (token fence)", () => {
+    const dir = freshDir();
+    const hOld = registerSdkWorker(entry(dir, { generation: 1 }));
+    const hNew = registerSdkWorker(entry(dir, { generation: 2 }));
+    hNew.setSessionId("sess-new");
+    hOld.setSessionId("sess-stale"); // superseded — must be a no-op
+    expect(sdkWorkerForTicket("CTL-1").sessionId).toBe("sess-new");
+    expect(readProjection(dir, "CTL-1").sessionId).toBe("sess-new");
+    hNew.deregister();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("reconcileSdkRegistryOnBoot harvests dead-pid projections that carry a sessionId", () => {
+    const dir = freshDir();
+    mkdirSync(join(dir, ".sdk-workers"), { recursive: true });
+    writeFileSync(
+      join(dir, ".sdk-workers", "CTL-1.json"),
+      JSON.stringify({ ticket: "CTL-1", phase: "implement", sessionId: "sess-1", generation: 3, worktreePath: "/wt/a", pid: 11111, updatedAt: T0 }),
+    );
+    writeFileSync(
+      join(dir, ".sdk-workers", "CTL-2.json"),
+      JSON.stringify({ ticket: "CTL-2", pid: 11111, updatedAt: T0 }), // dead, no session — removed, not harvested
+    );
+    writeFileSync(
+      join(dir, ".sdk-workers", "CTL-3.json"),
+      JSON.stringify({ ticket: "CTL-3", sessionId: "sess-3", pid: 22222, updatedAt: T0 }), // pid ALIVE — kept
+    );
+    const res = reconcileSdkRegistryOnBoot(dir, { pidAlive: (pid) => pid === 22222 });
+    expect(res.removed.sort()).toEqual(["CTL-1", "CTL-2"]);
+    expect(res.kept).toEqual(["CTL-3"]);
+    expect(res.harvested).toEqual([
+      { ticket: "CTL-1", sessionId: "sess-1", phase: "implement", generation: 3, worktreePath: "/wt/a" },
+    ]);
+    rmSync(dir, { recursive: true, force: true });
+  });
+});

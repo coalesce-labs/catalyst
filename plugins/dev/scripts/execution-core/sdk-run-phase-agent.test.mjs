@@ -1746,3 +1746,141 @@ describe("sdkRunPhaseAgent — CTL-1410 Phase B (worker registry wiring)", () =>
     expect(state.registered).toHaveLength(0);
   });
 });
+
+// ── CTL-1422: session capture + worker.session.* lifecycle events ─────────────
+// The init message's session_id is the warm-resume key: it must reach the
+// registry (durable projection) and the unified event log (fleet view) the
+// moment it is known. stopped fires on every post-capture exit path.
+
+describe("sdkRunPhaseAgent — CTL-1422 (session capture + lifecycle events)", () => {
+  const sessionRegistry = () => {
+    const state = { handles: [] };
+    const registerWorker = () => {
+      const h = { sessionIds: [], deregistered: 0 };
+      h.setAbortController = () => {};
+      h.touch = () => {};
+      h.setSessionId = (id) => h.sessionIds.push(id);
+      h.deregister = () => { h.deregistered += 1; };
+      state.handles.push(h);
+      return h;
+    };
+    return { registerWorker, state };
+  };
+  const initMsg = { type: "system", subtype: "init", session_id: "sess-abc" };
+
+  test("captures session_id from the init message → registry + started/stopped events", async () => {
+    const { spawn } = spawnReturningSpec();
+    const { registerWorker, state } = sessionRegistry();
+    const events = [];
+    const runQuery = fakeQuery([initMsg, resultMsg()]);
+    const r = await sdkRunPhaseAgent(ARGS, {
+      ...GOOD_AUTH, spawn, runQuery, registerWorker,
+      emitEvent: (n, p) => events.push([n, p]),
+    });
+    expect(r.code).toBe(0);
+    expect(state.handles[0].sessionIds).toEqual(["sess-abc"]);
+    const started = events.filter(([n]) => n === "worker.session.started");
+    expect(started).toHaveLength(1);
+    expect(started[0][1]).toMatchObject({
+      ticket: "CTL-100", phase: "implement", session_id: "sess-abc", generation: 1,
+    });
+    const stopped = events.filter(([n]) => n === "worker.session.stopped");
+    expect(stopped).toHaveLength(1);
+    expect(stopped[0][1]).toMatchObject({ ticket: "CTL-100", session_id: "sess-abc" });
+  });
+
+  test("a resume dispatch emits worker.session.resumed instead of started", async () => {
+    const spec = makeSpec({ resumeSession: "sess-prev" });
+    const { spawn } = spawnReturningSpec({ spec });
+    const { registerWorker } = sessionRegistry();
+    const events = [];
+    const runQuery = fakeQuery([{ ...initMsg, session_id: "sess-prev" }, resultMsg()]);
+    const r = await sdkRunPhaseAgent(ARGS, {
+      ...GOOD_AUTH, spawn, runQuery, registerWorker,
+      emitEvent: (n, p) => events.push([n, p]),
+    });
+    expect(r.code).toBe(0);
+    expect(events.filter(([n]) => n === "worker.session.resumed")).toHaveLength(1);
+    expect(events.filter(([n]) => n === "worker.session.started")).toHaveLength(0);
+  });
+
+  test("no init message → no session events, no registry call, no crash", async () => {
+    const { spawn } = spawnReturningSpec();
+    const { registerWorker, state } = sessionRegistry();
+    const events = [];
+    const runQuery = fakeQuery([resultMsg()]);
+    const r = await sdkRunPhaseAgent(ARGS, {
+      ...GOOD_AUTH, spawn, runQuery, registerWorker,
+      emitEvent: (n, p) => events.push([n, p]),
+    });
+    expect(r.code).toBe(0);
+    expect(state.handles[0].sessionIds).toEqual([]);
+    expect(events.filter(([n]) => String(n).startsWith("worker.session."))).toHaveLength(0);
+  });
+
+  test("stopped still fires when the query throws AFTER the init message", async () => {
+    const { spawn } = spawnReturningSpec();
+    const { registerWorker, state } = sessionRegistry();
+    const events = [];
+    const runQuery = () =>
+      (async function* () {
+        yield initMsg;
+        throw new Error("boom");
+      })();
+    const r = await sdkRunPhaseAgent(ARGS, {
+      ...GOOD_AUTH, spawn, runQuery, registerWorker,
+      emitEvent: (n, p) => events.push([n, p]),
+      emitBackstop: () => {},
+    });
+    expect(r.code).toBe(1);
+    expect(state.handles[0].sessionIds).toEqual(["sess-abc"]);
+    expect(events.filter(([n]) => n === "worker.session.stopped")).toHaveLength(1);
+  });
+
+  test("Phase B fakes without setSessionId do not crash (optional-chained)", async () => {
+    const { spawn } = spawnReturningSpec();
+    const legacyHandle = { setAbortController: () => {}, touch: () => {}, deregister: () => {} };
+    const runQuery = fakeQuery([initMsg, resultMsg()]);
+    const r = await sdkRunPhaseAgent(ARGS, {
+      ...GOOD_AUTH, spawn, runQuery,
+      registerWorker: () => legacyHandle,
+      emitEvent: () => {},
+    });
+    expect(r.code).toBe(0);
+  });
+});
+
+describe("sdkRunPhaseAgent — CTL-1422 session change across retries", () => {
+  test("an overload retry with a NEW session closes the old one (stopped) before starting the new", async () => {
+    const { spawn } = spawnReturningSpec();
+    const events = [];
+    let attempt = 0;
+    const runQuery = () =>
+      (async function* () {
+        attempt += 1;
+        yield { type: "system", subtype: "init", session_id: `sess-${attempt}` };
+        if (attempt === 1) {
+          yield resultMsg({ subtype: "error", is_error: true, api_error_status: 529 });
+        } else {
+          yield resultMsg();
+        }
+      })();
+    const r = await sdkRunPhaseAgent(ARGS, {
+      ...GOOD_AUTH, spawn, runQuery,
+      registerWorker: () => ({ setAbortController() {}, touch() {}, setSessionId() {}, deregister() {} }),
+      sleep: () => Promise.resolve(),
+      backoff: { baseMs: 1, capMs: 2 },
+      emitEvent: (n, p) => events.push([n, p]),
+    });
+    expect(r.code).toBe(0);
+    const lifecycle = events
+      .filter(([n]) => String(n).startsWith("worker.session."))
+      .map(([n, p]) => `${n.split(".").pop()}:${p.session_id}`);
+    expect(lifecycle).toEqual([
+      "started:sess-1",
+      "stopped:sess-1", // closed when the retry re-keyed the session
+      "started:sess-2",
+      "stopped:sess-2", // the finally close
+    ]);
+  });
+});

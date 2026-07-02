@@ -70,6 +70,7 @@ function writeProjection(entry) {
         pid: entry.pid,
         startedAt: entry.startedAt,
         updatedAt: entry.updatedAt,
+        sessionId: entry.sessionId ?? null,
       }),
     );
     renameSync(tmp, file);
@@ -105,6 +106,7 @@ function publicView(entry) {
     pid: entry.pid,
     orchDir: entry.orchDir,
     aborted: entry.aborted,
+    sessionId: entry.sessionId,
   };
 }
 
@@ -144,6 +146,7 @@ export function registerSdkWorker({ ticket, phase, worktreePath, generation, orc
     abortController: null,
     abortReason: null,
     aborted: false,
+    sessionId: null,
     now,
   };
   _live.set(ticket, entry);
@@ -172,6 +175,16 @@ export function registerSdkWorker({ ticket, phase, worktreePath, generation, orc
       if (entry.updatedAt - entry.lastProjectionWriteAt >= PROJECTION_TOUCH_THROTTLE_MS) {
         writeProjection(entry);
       }
+    },
+    // CTL-1422: the live SDK session UUID (from the query's init message) — the
+    // warm-resume key. Written to the projection IMMEDIATELY (not touch-throttled):
+    // the projection outliving a daemon crash is the entire point, so the id must
+    // be durable the moment it is known. Token-fenced like touch/deregister.
+    setSessionId(sessionId) {
+      if (_live.get(ticket)?.token !== entry.token) return;
+      entry.sessionId = sessionId;
+      entry.updatedAt = entry.now();
+      writeProjection(entry);
     },
     deregister() {
       const current = _live.get(ticket);
@@ -293,11 +306,17 @@ export function isSdkWorkerLiveOnDisk(orchDir, ticket, { pidAlive = defaultPidAl
 export function reconcileSdkRegistryOnBoot(orchDir, { pidAlive = defaultPidAlive } = {}) {
   const removed = [];
   const kept = [];
+  // CTL-1422: dead-pid projections that carry a sessionId are the warm-resume
+  // inventory — no in-process worker survives a daemon restart, so each one is
+  // an interrupted run whose SDK session can be continued via options.resume.
+  // Harvested BEFORE the file is deleted; the caller (daemon boot) threads the
+  // list into boot-resume as its sdkSessionHarvest.
+  const harvested = [];
   let files;
   try {
     files = readdirSync(projectionDir(orchDir)).filter((f) => f.endsWith(".json"));
   } catch {
-    return { removed, kept };
+    return { removed, kept, harvested };
   }
   for (const f of files) {
     const ticket = f.slice(0, -".json".length);
@@ -312,6 +331,15 @@ export function reconcileSdkRegistryOnBoot(orchDir, { pidAlive = defaultPidAlive
       kept.push(ticket);
       continue;
     }
+    if (proj && typeof proj.sessionId === "string" && proj.sessionId) {
+      harvested.push({
+        ticket,
+        sessionId: proj.sessionId,
+        phase: proj.phase,
+        generation: proj.generation,
+        worktreePath: proj.worktreePath,
+      });
+    }
     try {
       rmSync(file, { force: true });
     } catch {
@@ -319,7 +347,7 @@ export function reconcileSdkRegistryOnBoot(orchDir, { pidAlive = defaultPidAlive
     }
     removed.push(ticket);
   }
-  return { removed, kept };
+  return { removed, kept, harvested };
 }
 
 /** Test seam: clear all in-memory state (projections are per-test tmp dirs). */

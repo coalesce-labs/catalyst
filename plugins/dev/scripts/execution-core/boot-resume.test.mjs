@@ -1253,3 +1253,126 @@ describe("boot re-walk damping (CTL-1084)", () => {
     expect(res.dispatched).toBe(0);
   });
 });
+
+// ── CTL-1422: warm resume from harvested SDK sessions ─────────────────────────
+// sdkSessionHarvest (Map<ticket, sessionId>, from reconcileSdkRegistryOnBoot's
+// dead-pid projection harvest) turns a boot re-dispatch into a session
+// CONTINUATION: resumeSession is the harvested UUID, the CTL-644 expensive-phase
+// approval gate is bypassed (continuing is cheap — the gate exists to stop
+// costly cold re-runs), and the rewalk cap does not defer it (a deferred warm
+// candidate would lose its UUID: the harvest lives only in this boot pass).
+
+describe("reconcileBootResume — CTL-1422 warm resume", () => {
+  test("a harvested session warm-resumes an EXPENSIVE phase immediately (gate + cap bypassed)", () => {
+    writeSignal(orchDir, "CTL-1", "implement", { worktreePath: "/wt/CTL-1", bg_job_id: null });
+    const dispatched = [];
+    const reviveDispatch = (a) => {
+      dispatched.push(a);
+      return { code: 0 };
+    };
+    const res = reconcileBootResume({
+      orchDir,
+      report: { coldStart: true },
+      agents: [],
+      reviveDispatch,
+      dispatch: () => {},
+      appendEvent: () => {},
+      appendGatedEvent: () => {},
+      resolveSession: () => null,
+      maxRewalkPerTick: 0, // even a zero cap must not defer a warm resume
+      sdkSessionHarvest: new Map([["CTL-1", "sess-warm-1"]]),
+    });
+    expect(res.gated).toBe(0);
+    expect(res.dispatched).toBe(1);
+    expect(res.warmResumed).toBe(1);
+    expect(dispatched).toHaveLength(1);
+    expect(dispatched[0]).toMatchObject({ ticket: "CTL-1", phase: "implement", resumeSession: "sess-warm-1" });
+  });
+
+  test("no harvested session → cold path unchanged (expensive phase still gated)", () => {
+    writeSignal(orchDir, "CTL-2", "implement", { worktreePath: "/wt/CTL-2", bg_job_id: null });
+    const dispatched = [];
+    const gatedEvents = [];
+    const res = reconcileBootResume({
+      orchDir,
+      report: { coldStart: true },
+      agents: [],
+      reviveDispatch: (a) => {
+        dispatched.push(a);
+        return { code: 0 };
+      },
+      dispatch: () => {},
+      appendEvent: () => {},
+      appendGatedEvent: (e) => gatedEvents.push(e),
+      resolveSession: () => null,
+      sdkSessionHarvest: new Map(),
+    });
+    expect(res.dispatched).toBe(0);
+    expect(res.gated).toBe(1);
+    expect(res.warmResumed ?? 0).toBe(0);
+    expect(gatedEvents).toHaveLength(1);
+    expect(dispatched).toHaveLength(0);
+  });
+
+  test("a warm session for a CHEAP phase also resumes with the UUID (not fresh)", () => {
+    writeSignal(orchDir, "CTL-3", "plan", { worktreePath: "/wt/CTL-3", bg_job_id: null });
+    const dispatched = [];
+    const res = reconcileBootResume({
+      orchDir,
+      report: { coldStart: true },
+      agents: [],
+      reviveDispatch: (a) => {
+        dispatched.push(a);
+        return { code: 0 };
+      },
+      dispatch: () => {},
+      appendEvent: () => {},
+      resolveSession: () => null,
+      sdkSessionHarvest: new Map([["CTL-3", "sess-warm-3"]]),
+    });
+    expect(res.dispatched).toBe(1);
+    expect(res.resumed).toBe(1);
+    expect(res.warmResumed).toBe(1);
+    expect(dispatched[0]).toMatchObject({ ticket: "CTL-3", resumeSession: "sess-warm-3" });
+  });
+
+  test("a terminal signal is never warm-resumed even with a harvested session", () => {
+    writeSignal(orchDir, "CTL-4", "implement", { worktreePath: "/wt/CTL-4", status: "done", bg_job_id: null });
+    const dispatched = [];
+    const res = reconcileBootResume({
+      orchDir,
+      report: { coldStart: true },
+      agents: [],
+      reviveDispatch: (a) => {
+        dispatched.push(a);
+        return { code: 0 };
+      },
+      dispatch: () => {},
+      appendEvent: () => {},
+      resolveSession: () => null,
+      sdkSessionHarvest: new Map([["CTL-4", "sess-dead"]]),
+    });
+    expect(res.dispatched).toBe(0);
+    expect(dispatched).toHaveLength(0);
+  });
+
+  test("warm resume prefers the harvest over bg-session resolution", () => {
+    writeSignal(orchDir, "CTL-5", "plan", { worktreePath: "/wt/CTL-5", bg_job_id: "deadbeef" });
+    const dispatched = [];
+    const res = reconcileBootResume({
+      orchDir,
+      report: { coldStart: true },
+      agents: [],
+      reviveDispatch: (a) => {
+        dispatched.push(a);
+        return { code: 0 };
+      },
+      dispatch: () => {},
+      appendEvent: () => {},
+      resolveSession: () => "sess-from-bg-jobdir",
+      sdkSessionHarvest: new Map([["CTL-5", "sess-warm-5"]]),
+    });
+    expect(res.dispatched).toBe(1);
+    expect(dispatched[0]).toMatchObject({ resumeSession: "sess-warm-5" });
+  });
+});

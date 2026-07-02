@@ -392,6 +392,13 @@ export function reconcileBootResume({
   // CTL-1084: per-boot dispatch cap for cheap phases. Deferred items drain via
   // Sweep 1.5 on subsequent ticks. Default from BOOT_REWALK_MAX_PER_TICK const.
   maxRewalkPerTick = BOOT_REWALK_MAX_PER_TICK,
+  // CTL-1422: Map<ticket, sessionId> harvested from dead-pid SDK registry
+  // projections (reconcileSdkRegistryOnBoot) — interrupted in-process runs whose
+  // SDK session can be CONTINUED via options.resume. A warm candidate bypasses
+  // the CTL-644 expensive-phase gate AND the rewalk cap: continuation is cheap,
+  // and a deferred warm candidate would lose its UUID (the harvest lives only in
+  // this boot pass — Sweep 1.5 has no access to it).
+  sdkSessionHarvest = new Map(),
 } = {}) {
   // CTL-1006 Scenario 1: eligible on a cold start OR a daemon bounce. The old
   // `report.coldStart !== true` gate was a permanent production no-op because
@@ -417,12 +424,17 @@ export function reconcileBootResume({
   const planned = candidates.length;
   let dispatched = 0;
   let resumed = 0;
+  let warmResumed = 0; // CTL-1422: dispatches that continued a harvested SDK session
   let failed = 0;
   let gated = 0;
   let deferred = 0; // CTL-1084: cheap candidates held back by the per-boot cap
   for (const { ticket, phase, worktreePath, bgJobId } of candidates) {
+    // CTL-1422: a harvested SDK session makes this a warm CONTINUATION, not a
+    // cold re-run — skip the expensive gate and the rewalk cap (rationale in
+    // the option doc above).
+    const warmSession = sdkSessionHarvest.get?.(ticket) ?? null;
     // CTL-644: gate expensive phases behind operator approval; auto-dispatch cheap ones.
-    if (!isCheapPhase(phase)) {
+    if (!isCheapPhase(phase) && !warmSession) {
       const written = writePendingMarker(orchDir, ticket, phase, worktreePath);
       if (written) {
         gated++;
@@ -437,19 +449,23 @@ export function reconcileBootResume({
 
     // CTL-1084: per-boot cheap-dispatch cap — defer to Sweep 1.5 once reached.
     // Cooldown markers are never reset here; the cap is purely additive.
-    if (dispatched >= maxRewalkPerTick) {
+    // CTL-1422: warm candidates are exempt (see option doc).
+    if (!warmSession && dispatched >= maxRewalkPerTick) {
       deferred++;
       continue;
     }
 
     // Cheap path — existing resume/dispatch logic unchanged.
+    // CTL-1422: the harvested SDK session wins over bg-job-dir resolution (an
+    // sdk-run ticket has no bg job dir; a bg-run ticket has no projection —
+    // the two sources are disjoint in practice, precedence is belt-and-braces).
     // CTL-690: try to map the dead worker's bg_job_id → resume UUID. Null
     // result (no bg id, no state.json, no/!.jsonl transcript) falls through
     // to the today-default fresh-dispatch path. The downstream stderr
     // classifier in phase-agent-dispatch (CTL-658 launched/alive/failed)
     // handles a resume that's recorded on disk but fails to launch.
-    let resumeSession = null;
-    if (bgJobId) {
+    let resumeSession = warmSession;
+    if (!resumeSession && bgJobId) {
       try {
         resumeSession = resolveSession(bgJobId);
       } catch (err) {
@@ -470,6 +486,7 @@ export function reconcileBootResume({
     if (res?.code === 0) {
       dispatched++;
       if (resumeSession) resumed++;
+      if (warmSession) warmResumed++;
       appendEvent({ phase, ticket, orchId });
     } else {
       failed++;
@@ -481,10 +498,10 @@ export function reconcileBootResume({
   }
 
   log.info(
-    { dispatched, resumed, gated, failed, deferred, planned, candidates: candidates.length },
+    { dispatched, resumed, warmResumed, gated, failed, deferred, planned, candidates: candidates.length },
     "boot-resume: cold-start reconciliation complete"
   );
-  return { dispatched, resumed, gated, failed, deferred, planned, candidates: candidates.length };
+  return { dispatched, resumed, warmResumed, gated, failed, deferred, planned, candidates: candidates.length };
 }
 
 // processApprovedResumes — CTL-644. Dispatch gated tickets whose operator

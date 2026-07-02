@@ -1034,6 +1034,13 @@ export async function sdkRunPhaseAgent(
   // workers are, by the scheduler's maxParallel admission gate upstream.
   const sem = semaphore ?? sharedSemaphore(maxParallel);
   const release = await sem.acquire();
+  // CTL-1422: the live SDK session UUID — the warm-resume key. Captured from the
+  // first streamed message that carries one (the init message; a 429-retry starts
+  // a NEW session, so a changed id re-captures). Persisted to the registry
+  // projection the moment it is known (a daemon crash must not lose it) and
+  // announced on the unified event log (worker.session.started|resumed) so the
+  // fleet view / orphan lookback can be built centrally (Loki ships the same log).
+  let sessionId = null;
   try {
     let lastOverload = null;
     for (let i = 0; i <= maxRetries; i++) {
@@ -1047,6 +1054,22 @@ export async function sdkRunPhaseAgent(
         const q = runQuery({ prompt: spec.prompt, options: { ...options, abortController: ac } });
         for await (const m of q) {
           reg.touch(); // registry heartbeat (internally throttled to disk)
+          if (typeof m?.session_id === "string" && m.session_id && m.session_id !== sessionId) {
+            // A 429-retry starts a NEW session: close the old id first so the
+            // log never carries a dangling started (the "interrupted" shape is
+            // reserved for real crashes/kills).
+            if (sessionId) {
+              emitEvent("worker.session.stopped", {
+                ticket, phase, session_id: sessionId, generation: spec.generation ?? null,
+              });
+            }
+            sessionId = m.session_id;
+            reg.setSessionId?.(sessionId); // optional-chained: Phase B test fakes lack it
+            emitEvent(
+              spec.resumeSession ? "worker.session.resumed" : "worker.session.started",
+              { ticket, phase, session_id: sessionId, generation: spec.generation ?? null },
+            );
+          }
           if (m?.type === "result") result = m; // exactly one terminal
         }
       } catch (err) {
@@ -1156,6 +1179,15 @@ export async function sdkRunPhaseAgent(
     // Unreachable (the loop always returns), but keep a defined shape.
     return { code: 1, stdout: "", stderr: "sdk: retry loop exhausted", signal: null };
   } finally {
+    // CTL-1422: the lifecycle close — "started/resumed without a stopped" is the
+    // boot-time (and Loki) definition of an interrupted session, so stopped must
+    // fire on EVERY post-capture exit path. A daemon crash/SIGKILL skips this by
+    // nature, which is exactly what makes the interrupted session harvestable.
+    if (sessionId) {
+      emitEvent("worker.session.stopped", {
+        ticket, phase, session_id: sessionId, generation: spec.generation ?? null,
+      });
+    }
     reg.deregister(); // every post-registration exit path, including throws
     release();
   }
