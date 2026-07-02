@@ -8,7 +8,7 @@
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { homedir } from "node:os";
 import { resolve } from "node:path";
-import { readAgentConfig, getEventLogPath } from "./config.mjs";
+import { readAgentConfig, getEventLogPath, shimNoticeEnabled } from "./config.mjs";
 
 const ENVS = [
   "CATALYST_AGENT_EMIT",
@@ -177,5 +177,41 @@ describe("getEventLogPath", () => {
     const now = new Date();
     const ym = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}`;
     expect(p).toBe(resolve("/tmp/ctl812-fake-catalyst", "events", `${ym}.jsonl`));
+  });
+});
+
+// CTL-1418: the pino-unavailable console-shim notice is gated to debug/trace so
+// the standalone agent's expected fallback path doesn't flood the log per spawn.
+describe("shimNoticeEnabled — CTL-1418 log-spam gate", () => {
+  test("debug / trace → notice enabled (case-insensitive)", () => {
+    expect(shimNoticeEnabled("debug")).toBe(true);
+    expect(shimNoticeEnabled("trace")).toBe(true);
+    expect(shimNoticeEnabled("DEBUG")).toBe(true);
+    expect(shimNoticeEnabled("Trace")).toBe(true);
+  });
+  test("info / warn / error / unknown → notice suppressed (the steady state)", () => {
+    expect(shimNoticeEnabled("info")).toBe(false);
+    expect(shimNoticeEnabled("warn")).toBe(false);
+    expect(shimNoticeEnabled("error")).toBe(false);
+    expect(shimNoticeEnabled("verbose")).toBe(false);
+  });
+  test("unset / empty → suppressed (default operation is quiet)", () => {
+    expect(shimNoticeEnabled(undefined)).toBe(false);
+    expect(shimNoticeEnabled("")).toBe(false);
+    expect(shimNoticeEnabled(null)).toBe(false);
+  });
+  test("reads process.env.LOG_LEVEL when no arg passed", () => {
+    const saved = process.env.LOG_LEVEL;
+    try {
+      process.env.LOG_LEVEL = "debug";
+      expect(shimNoticeEnabled()).toBe(true);
+      process.env.LOG_LEVEL = "info";
+      expect(shimNoticeEnabled()).toBe(false);
+      delete process.env.LOG_LEVEL;
+      expect(shimNoticeEnabled()).toBe(false);
+    } finally {
+      if (saved === undefined) delete process.env.LOG_LEVEL;
+      else process.env.LOG_LEVEL = saved;
+    }
   });
 });
