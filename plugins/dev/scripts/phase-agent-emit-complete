@@ -475,7 +475,7 @@ if [[ -n $SESSION_ID ]] && [[ -x "${SCRIPT_DIR}/catalyst-session.sh" ]]; then
 		REASON_FLAG=(--reason "turn-cap-exhausted")
 	fi
 	"${SCRIPT_DIR}/catalyst-session.sh" end "$SESSION_ID" \
-		--status "$SESSION_OUTCOME" "${REASON_FLAG[@]}" >/dev/null 2>&1 ||
+		--status "$SESSION_OUTCOME" "${REASON_FLAG[@]+"${REASON_FLAG[@]}"}" >/dev/null 2>&1 ||
 		warn "catalyst-session.sh end failed for $SESSION_ID"
 fi
 
