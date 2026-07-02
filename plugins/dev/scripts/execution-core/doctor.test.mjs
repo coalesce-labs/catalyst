@@ -35,6 +35,8 @@ import {
   checkDaemonlessLocal,
   checkAgentsForClass,
   checkPluginPullOwner,
+  checkPluginSourceFreshness,
+  classifyPluginSourceFreshness,
   checksForClass,
   installChecksForClass,
   summarize,
@@ -2723,4 +2725,91 @@ describe("checkClusterSecretFreshness", () => {
     });
     expect(code).toBe(0); // WARN, not FAIL
   });
+});
+
+// ─── checkPluginSourceFreshness (CTL-1421) ───────────────────────────────────
+//
+// The bg + SDK phase-agent workers load skills from the resolved pluginDirs roots;
+// a node with no healthy pristine root SILENTLY falls back to the ≤24h-stale
+// marketplace cache. doctor asserts the worker plugin path is fresh (worker FAIL,
+// dev/monitor WARN). classifyPluginSourceFreshness is the pure decision core.
+describe("classifyPluginSourceFreshness — CTL-1421 decision core", () => {
+  const ROOT = "/Users/x/catalyst/plugin-source";
+
+  it("no roots on a worker → FAIL (silent marketplace-cache fallback)", () => {
+    const c = classifyPluginSourceFreshness({ roots: [], nodeClass: "worker" });
+    expect(c.name).toBe("plugin-source-freshness");
+    expect(c.status).toBe(STATUS.FAIL);
+    expect(c.detail).toMatch(/silently fall back|marketplace cache/i);
+  });
+
+  it("no roots on a developer → WARN (not the primary CI/CD executor)", () => {
+    expect(classifyPluginSourceFreshness({ roots: [], nodeClass: "developer" }).status).toBe(STATUS.WARN);
+  });
+
+  it("single healthy root → PASS", () => {
+    const c = classifyPluginSourceFreshness({ roots: [ROOT], healthByRoot: { [ROOT]: [] }, nodeClass: "worker" });
+    expect(c.status).toBe(STATUS.PASS);
+    expect(c.detail).toContain(ROOT);
+    expect(c.detail).toMatch(/no marketplace-cache fallback/i);
+  });
+
+  it("resolved-but-unhealthy root (OFF_MAIN/DIRTY) on a worker → FAIL, surfaces the problem lines", () => {
+    const c = classifyPluginSourceFreshness({
+      roots: [ROOT],
+      healthByRoot: { [ROOT]: [`OFF_MAIN ${ROOT} feature/x`, `DIRTY ${ROOT}`] },
+      nodeClass: "worker",
+    });
+    expect(c.status).toBe(STATUS.FAIL);
+    expect(c.detail).toContain("OFF_MAIN");
+    expect(c.detail).toContain("DIRTY");
+  });
+
+  it("unhealthy root on a monitor → WARN (not FAIL)", () => {
+    const c = classifyPluginSourceFreshness({
+      roots: [ROOT],
+      healthByRoot: { [ROOT]: [`DIRTY ${ROOT}`] },
+      nodeClass: "monitor",
+    });
+    expect(c.status).toBe(STATUS.WARN);
+  });
+
+  it("multiple roots → WARN (ambiguous; expected a single pristine source)", () => {
+    const c = classifyPluginSourceFreshness({
+      roots: [ROOT, "/Users/x/other/plugin-source"],
+      healthByRoot: { [ROOT]: [], "/Users/x/other/plugin-source": [] },
+      nodeClass: "worker",
+    });
+    expect(c.status).toBe(STATUS.WARN);
+    expect(c.detail).toMatch(/2 plugin-source roots|single pristine/i);
+  });
+});
+
+describe("checkPluginSourceFreshness — seams (CTL-1421)", () => {
+  const ROOT = "/co/plugin-source";
+  it("wires resolveRootsFn + healthFn into the classification (healthy → PASS)", () => {
+    const [c] = checkPluginSourceFreshness({
+      nodeClass: "worker",
+      resolveRootsFn: () => [ROOT],
+      healthFn: () => [],
+    });
+    expect(c.status).toBe(STATUS.PASS);
+  });
+  it("propagates health problems (dirty → FAIL on worker)", () => {
+    const [c] = checkPluginSourceFreshness({
+      nodeClass: "worker",
+      resolveRootsFn: () => [ROOT],
+      healthFn: () => [`DIRTY ${ROOT}`],
+    });
+    expect(c.status).toBe(STATUS.FAIL);
+  });
+});
+
+describe("checksForClass — checkPluginSourceFreshness registration (CTL-1421)", () => {
+  const src = (nc, opts = {}) => checksForClass(nc, opts).map((f) => f.toString()).join("\n");
+  for (const cls of ["worker", "developer", "monitor"]) {
+    it(`wires checkPluginSourceFreshness into the ${cls} suite`, () => {
+      expect(src({ recognized: true, class: cls })).toContain("checkPluginSourceFreshness");
+    });
+  }
 });

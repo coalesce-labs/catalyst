@@ -68,6 +68,7 @@ import { assertSdkAuth } from "./sdk-run-phase-agent.mjs";
 // (pure, no-I/O) shared with the Phase-1 config-schema tests. Lives in
 // plugins/dev/scripts/lib/ (sibling of execution-core/).
 import { validateLayer1Config, RELOCATED_LAYER1_KEYS } from "../lib/validate-catalyst-config.mjs";
+import { resolvePluginCheckoutRoots } from "../broker/plugin-refresh.mjs"; // CTL-1421: same resolver the workers use
 
 // readLinearBotUserIds — inlined from daemon.mjs to avoid pulling in the full
 // daemon dependency chain (which includes bun: protocol imports incompatible
@@ -2953,6 +2954,87 @@ export function checkPluginPullOwner(deps = {}) {
   ];
 }
 
+// defaultPluginSourceHealth — CTL-1421: shell out to lib/plugin-dirs.sh's
+// plugin_source_health (CTL-992), the single source of truth for pristine-checkout
+// health. Returns the array of typed problem lines
+// (MISSING/NOT_A_CHECKOUT/LINKED_WORKTREE/OFF_MAIN/DIRTY); [] = healthy. Reused
+// rather than re-implemented so the "pristine" definition can't drift from the
+// pull path. Seam-injected for tests.
+function defaultPluginSourceHealth(root) {
+  const libPath = resolve(dirname(fileURLToPath(import.meta.url)), "..", "lib", "plugin-dirs.sh");
+  const r = spawnSync("bash", ["-c", 'source "$1"; plugin_source_health "$2"', "bash", libPath, root], {
+    encoding: "utf8",
+    timeout: 10_000,
+  });
+  return String(r.stdout || "")
+    .split("\n")
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
+// classifyPluginSourceFreshness — CTL-1421: PURE decision core. The bg + SDK
+// phase-agent workers load their skills/scripts from the resolved pluginDirs roots
+// via `--plugin-dir` / SDK `plugins:`. A node with NO healthy pristine root
+// SILENTLY falls back to the Claude Code marketplace cache
+// (~/.claude/plugins/cache/catalyst, refreshed only on the daily release-please
+// cycle → up to ~24h stale), so CI/CD would run stale code with no signal
+// (phase-agent-dispatch:~922 "Empty = marketplace behavior unchanged";
+// sdk-run-phase-agent.mjs:~792 omits the plugins option). This asserts the
+// worker plugin path is fresh. Distinct from checkDaemonlessLocal's "plugins
+// fresh" (HEAD-vs-origin currency of a resolved checkout) — this is about whether
+// a healthy pristine checkout is RESOLVED at all. A worker node FAILs (it is the
+// CI/CD executor); developer/monitor WARN (not the primary executors).
+export function classifyPluginSourceFreshness({ roots = [], healthByRoot = {}, nodeClass = "worker" } = {}) {
+  const sev = nodeClass === "worker" ? STATUS.FAIL : STATUS.WARN;
+  if (roots.length === 0) {
+    return mkCheck(
+      "plugin-source-freshness",
+      sev,
+      "pluginDirs is unset / resolves to no checkout — bg + SDK phase-agent workers SILENTLY fall back to the " +
+        "marketplace cache (~/.claude/plugins/cache/catalyst, ~≤24h stale on the release cycle) instead of the " +
+        "fresh pristine plugin-source, so CI/CD runs stale skills/scripts with no signal. Set " +
+        "catalyst.orchestration.pluginDirs to the pristine checkout (run 'catalyst install' / setup-plugin-source.sh)",
+    );
+  }
+  const problems = roots.flatMap((r) => (healthByRoot[r] || []).map((line) => line));
+  if (problems.length > 0) {
+    return mkCheck(
+      "plugin-source-freshness",
+      sev,
+      `plugin-source is not a healthy pristine checkout (${problems.join("; ")}) — workers would load ` +
+        "non-pristine / off-main / dirty code instead of released main. Restore a clean, main-only, standalone checkout",
+    );
+  }
+  if (roots.length > 1) {
+    return mkCheck(
+      "plugin-source-freshness",
+      STATUS.WARN,
+      `${roots.length} plugin-source roots resolved (${roots.join(", ")}) — expected a single pristine ` +
+        "plugin-source; multiple roots are ambiguous for skill resolution",
+    );
+  }
+  return mkCheck(
+    "plugin-source-freshness",
+    STATUS.PASS,
+    `worker plugin path resolves to a single healthy pristine plugin-source (${roots[0]}) — no marketplace-cache fallback`,
+  );
+}
+
+// checkPluginSourceFreshness — CTL-1421: resolve the same pluginDirs the workers
+// use (resolvePluginCheckoutRoots, the JS mirror of lib/plugin-dirs.sh), health-
+// probe each resolved root, and classify. Seams injectable for tests.
+export function checkPluginSourceFreshness(deps = {}) {
+  const {
+    nodeClass = "worker",
+    resolveRootsFn = () => resolvePluginCheckoutRoots({}),
+    healthFn = defaultPluginSourceHealth,
+  } = deps;
+  const roots = resolveRootsFn();
+  const healthByRoot = {};
+  for (const r of roots) healthByRoot[r] = healthFn(r);
+  return [classifyPluginSourceFreshness({ roots, healthByRoot, nodeClass })];
+}
+
 // ─── Suite selection ─────────────────────────────────────────────────────────
 
 // checksForClass — build the check-thunk suite for a resolved node class. This is
@@ -2996,6 +3078,9 @@ export function checksForClass(nc, opts = {}) {
   // post-install verification (fail-closed). Seams (undefined in production) fall through to defaults.
   const agentsThunk = () => checkAgentsForClass({ nodeClass: nc.class, strict, hasStackAgent, hasUpdaterAgent });
   const pullOwnerThunk = () => checkPluginPullOwner({ nodeClass: nc.class, strict, owner: pluginPullOwner });
+  // CTL-1421: assert the worker plugin path resolves to a healthy pristine plugin-source
+  // (else workers silently serve stale marketplace-cache code). worker=FAIL, dev/monitor=WARN.
+  const pluginSourceFreshThunk = () => checkPluginSourceFreshness({ nodeClass: nc.class });
 
   const replicaThunk = () => checkReadReplicaReachable({ baseUrl: readReplicaBaseUrl, fetch: _fetch });
   const wontOwnThunk = () =>
@@ -3045,6 +3130,7 @@ export function checksForClass(nc, opts = {}) {
       () => checkDaemonlessLocal({ nodeClass: nc.class, runVerifyNode }), // broker/exec-core down + plugins fresh
       agentsThunk, // CTL-1369 PR4: updater agent installed, no worker stack (correct class agent set)
       pullOwnerThunk, // CTL-1369 PR4: pluginPullOwner=updater (a developer runs no broker)
+      pluginSourceFreshThunk, // CTL-1421: worker plugin path resolves to a fresh pristine plugin-source (WARN on a developer)
       replicaThunk,
       wontOwnThunk,
       () => checkReaper(), // advisory (never FAIL), class-agnostic
@@ -3069,6 +3155,7 @@ export function checksForClass(nc, opts = {}) {
       () => checkHrwPartition(), // would-own count (visibility)
       agentsThunk, // CTL-1369 PR4: updater agent installed, no worker stack (monitor is adopt-updater-shaped)
       pullOwnerThunk, // CTL-1369 PR4: pluginPullOwner=updater
+      pluginSourceFreshThunk, // CTL-1421: worker plugin path resolves to a fresh pristine plugin-source (WARN on a monitor)
       replicaThunk,
       wontOwnThunk,
       () => [
@@ -3096,6 +3183,7 @@ export function checksForClass(nc, opts = {}) {
     () => checkDaemonToolPath(), // CTL-1289: daemon launchd PATH resolves linearis/node/claude
     agentsThunk, // CTL-1369 PR4: worker work-stack agent installed, no updater agent (correct class agent set)
     pullOwnerThunk, // CTL-1369 PR4: pluginPullOwner=broker (the worker's broker owns the pull)
+    pluginSourceFreshThunk, // CTL-1421: worker plugin path resolves to a fresh pristine plugin-source (FAIL — the CI/CD executor)
     () => checkWebhookIngestion(), // CTL-1284: multiHost member ingests webhooks; single-host does not
     () => checkThoughts(), // CTL-1293: member thoughts repo provisioned + non-foreign primary
     () => checkClaudeSettings(), // CTL-1231: member settings.json pins host identity + OTLP endpoint
