@@ -38,13 +38,36 @@ function defaultAppend(line) {
   appendFileSync(file, line);
 }
 
-// normalizePrNumbers — accepts the open-PR list (objects with `.number`) OR a raw
-// array of numbers, returns a sorted unique number[] of OPEN PR numbers.
-function normalizePrNumbers(openPrs = []) {
-  const nums = (Array.isArray(openPrs) ? openPrs : [])
-    .map((p) => (typeof p === "number" ? p : p?.number))
-    .filter((n) => Number.isFinite(n));
-  return [...new Set(nums)].sort((a, b) => a - b);
+// normalizePrRefs — accepts the open-PR list (objects with `.number` and optional
+// `.repo`) OR a raw array of numbers, returns a sorted unique array of PR REFERENCES:
+// `owner/repo#number` when the repo is known, else `#number`.
+//
+// CTL-1157 (Codex round-7): key by (repo, number), NOT number alone. open-pr-gate
+// intentionally keeps a ticket-repo `#808` and an attached `org/other#808` DISTINCT
+// (they are two different PRs); collapsing them by number would report open_prs_count:1
+// and drop the repo-qualified PR that still needs remediation. A bare-number PR (no
+// repo recorded) keeps the `#number` form — unchanged for the common single-repo case.
+function normalizePrRefs(openPrs = []) {
+  const refs = (Array.isArray(openPrs) ? openPrs : [])
+    .map((p) => {
+      if (typeof p === "number") return Number.isFinite(p) ? `#${p}` : null;
+      const n = p?.number;
+      if (!Number.isFinite(n)) return null;
+      const repo = typeof p?.repo === "string" && p.repo ? p.repo : null;
+      return repo ? `${repo}#${n}` : `#${n}`;
+    })
+    .filter(Boolean);
+  // Sort by repo prefix (bare `#n` first), then by PR number NUMERICALLY (not lexically,
+  // so #42 sorts before #101).
+  const parse = (ref) => {
+    const i = ref.lastIndexOf("#");
+    return { repo: ref.slice(0, i), num: Number(ref.slice(i + 1)) };
+  };
+  return [...new Set(refs)].sort((a, b) => {
+    const pa = parse(a);
+    const pb = parse(b);
+    return pa.repo.localeCompare(pb.repo) || pa.num - pb.num;
+  });
 }
 
 // buildRecoveryDoneOpenPrEvent — canonical OTel envelope (string + "\n"). The
@@ -64,7 +87,7 @@ export function buildRecoveryDoneOpenPrEvent({
   unverifiable = false,
 } = {}) {
   const ts = new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
-  const prNumbers = normalizePrNumbers(openPrs);
+  const prRefs = normalizePrRefs(openPrs);
   return (
     JSON.stringify({
       ts,
@@ -82,9 +105,10 @@ export function buildRecoveryDoneOpenPrEvent({
         // bare `| ticket="…"` filter works alongside `| event_label="…"`.
         "event.label": ticket,
         ticket,
-        // [value] dimensions:
-        open_prs_count: prNumbers.length,
-        pr_numbers: prNumbers.map((n) => `#${n}`).join(","),
+        // [value] dimensions: count DISTINCT (repo,number) refs so a cross-repo
+        // same-numbered PR isn't lost (CTL-1157 Codex round-7).
+        open_prs_count: prRefs.length,
+        pr_numbers: prRefs.join(","),
         // [label] dimensions: WHICH pure-code backstop wrote the Done; whether the
         // open-PR check was unverifiable (Done landed without confirming clean).
         by,
@@ -94,8 +118,8 @@ export function buildRecoveryDoneOpenPrEvent({
         payload: {
           ticket,
           by,
-          open_prs_count: prNumbers.length,
-          pr_numbers: prNumbers,
+          open_prs_count: prRefs.length,
+          pr_numbers: prRefs,
           unverifiable: !!unverifiable,
         },
       },
@@ -112,7 +136,7 @@ export function buildRecoveryDoneOpenPrEvent({
 // Done landed without confirming the board was clean).
 export function appendRecoveryDoneOpenPrEvent({ append = defaultAppend, ...fields } = {}) {
   try {
-    if (normalizePrNumbers(fields.openPrs).length === 0 && !fields.unverifiable) return false;
+    if (normalizePrRefs(fields.openPrs).length === 0 && !fields.unverifiable) return false;
     append(buildRecoveryDoneOpenPrEvent(fields));
     return true;
   } catch {

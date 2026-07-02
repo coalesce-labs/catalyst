@@ -286,6 +286,23 @@ export function setFilterStateMerged(interestId, mergeCommitSha) {
   return result.changes > 0 ? { interestId } : null;
 }
 
+// setFilterStateClosed — CTL-1157 (Codex round-7): mark a PR's lifecycle row 'closed'
+// when it was closed WITHOUT merging. Before this the github.pr.closed webhook only
+// recorded a wake reason and never updated filter_state, so the row stayed 'open'
+// indefinitely — and board-health's orphaned-open-PR cohort then treated the
+// already-closed PR as a stale orphan forever, dispatching recovery for a PR that no
+// longer exists. 'closed' matches neither the orphaned cohort's `status === "open"`
+// nor the phantom cohort's merged/deployed test, so the PR is correctly excluded.
+export function setFilterStateClosed(interestId) {
+  const result = ensure().run(
+    `UPDATE filter_state
+       SET status = 'closed', updated_at = ?
+       WHERE interest_id = ?`,
+    [nowIso(), interestId]
+  );
+  return result.changes > 0 ? { interestId } : null;
+}
+
 export function setFilterStateDeploying(mergeCommitSha, deploymentId, environment) {
   const row = ensure()
     .prepare(`SELECT interest_id FROM filter_state WHERE merge_commit_sha = ? LIMIT 1`)

@@ -30,6 +30,36 @@ test("accepts a raw number[] for openPrs and dedupes", () => {
   expect(env.attributes.pr_numbers).toBe("#3,#7");
 });
 
+// CTL-1157 (Codex round-7): two DISTINCT open PRs with the same number from different
+// repos (open-pr-gate keeps them distinct) must NOT collapse by number — the alarm has
+// to count + name BOTH the repo-qualified PR and the bare ticket-repo one.
+test("keeps same-number cross-repo PRs distinct (repo#number keying)", () => {
+  const env = JSON.parse(
+    buildRecoveryDoneOpenPrEvent({
+      ticket: "CTL-808",
+      openPrs: [
+        { number: 808 }, // ticket-repo #808 (no repo recorded → bare)
+        { number: 808, repo: "org/other" }, // attached cross-repo #808 — DISTINCT
+      ],
+    }),
+  );
+  expect(env.attributes.open_prs_count).toBe(2); // NOT collapsed to 1
+  expect(env.attributes.pr_numbers).toBe("#808,org/other#808"); // bare first, then repo-qualified
+  expect(env.body.payload.pr_numbers).toEqual(["#808", "org/other#808"]);
+});
+
+// A same repo + same number is still a single PR (real dedup preserved).
+test("dedupes an identical repo#number ref", () => {
+  const env = JSON.parse(
+    buildRecoveryDoneOpenPrEvent({
+      ticket: "CTL-9",
+      openPrs: [{ number: 42, repo: "org/x" }, { number: 42, repo: "org/x" }],
+    }),
+  );
+  expect(env.attributes.open_prs_count).toBe(1);
+  expect(env.attributes.pr_numbers).toBe("org/x#42");
+});
+
 test("append: emits via the injected seam when ≥1 open PR", () => {
   const lines = [];
   const ok = appendRecoveryDoneOpenPrEvent({

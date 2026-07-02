@@ -22,6 +22,7 @@ import {
   // filter_state (backward compat)
   upsertFilterStateOpen,
   setFilterStateMerged,
+  setFilterStateClosed,
   getFilterStateByInterest,
   getAllPrStatuses,
 } from "./broker-state.mjs";
@@ -191,6 +192,20 @@ describe("filter_state (CTL-284 backward compat)", () => {
     const state = getFilterStateByInterest("sess-bc2");
     expect(state.status).toBe("merged");
     expect(state.mergeCommitSha).toBe("sha-abc");
+  });
+
+  // CTL-1157 (Codex round-7): a PR closed WITHOUT merging must leave 'open' so
+  // board-health's orphaned-open-PR cohort stops treating it as a stale orphan forever.
+  test("setFilterStateClosed transitions an open row to closed", () => {
+    upsertFilterStateOpen({ interestId: "sess-closed", prNumber: 503, repo: "org/repo" });
+    const res = setFilterStateClosed("sess-closed");
+    expect(res).toEqual({ interestId: "sess-closed" });
+    const state = getFilterStateByInterest("sess-closed");
+    expect(state.status).toBe("closed"); // no longer "open"
+  });
+
+  test("setFilterStateClosed is a no-op (null) when the interest has no row", () => {
+    expect(setFilterStateClosed("sess-absent")).toBeNull();
   });
 
   test("both tables coexist in the same DB file", () => {

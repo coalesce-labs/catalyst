@@ -639,6 +639,14 @@ function checkOrphanedOpenPr(b, t) {
   );
   const flagged = [];
   for (const [id, d] of b.ticketsById) {
+    // KNOWN LIMITATION (CTL-1157, Codex round-7 — deferred to a follow-up): the ticket
+    // descriptor exposes a SINGLE pr_number (ticket_state has one pr_number column) and
+    // filter_state rows are keyed by webhook interest_id, not by ticket — so there is no
+    // ticket→all-PRs mapping to iterate. A multi-PR ticket whose descriptor points at a
+    // newer merged PR while an OLDER PR stays open therefore reads green here (a false
+    // NEGATIVE — we miss the older orphan). Closing this needs a ticket→PRs data model
+    // (descriptor multi-PR field or an interest_id→ticket join), out of scope for this PR.
+    // Impact is bounded: shadow-only until the enforce flip, and a rare multi-PR case.
     const prNum = prNumberOf(d);
     if (prNum == null) continue;
     // CTL-1157 (Codex round-6): skip a ticket already in a terminal Linear state

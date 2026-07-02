@@ -283,20 +283,24 @@ fi
 # THIS IS THE ONLY Done writer when phase-teardown is in the pipeline.
 # Called while still in the ticket worktree so .catalyst/config.json is adjacent.
 LINEAR_TRANSITION="${PLUGIN_ROOT}/scripts/linear-transition.sh"
+LINEAR_DONE_ACTION=""
 if [[ -x "$LINEAR_TRANSITION" ]]; then
-  # Capture rc + stderr instead of suppressing them: linear-transition.sh can
-  # print "transitioned" even when the underlying linearis update fails (memory:
-  # linear_transition_silent_success), so a silent failure here would leave the
-  # ticket at PR/inReview while the pipeline reports success. Non-fatal — the
-  # scheduler's terminalDoneOnce backstop (fires on teardown===done) retries the
-  # Done write — but the failure must be LOUD so it is diagnosable.
+  # Capture rc + the JSON result: linear-transition.sh can print "transitioned" even
+  # when the underlying linearis update fails (memory: linear_transition_silent_success),
+  # AND it exits 0 for idempotent skip, dry-run, and skipped-no-linearis — so rc==0 alone
+  # is NOT proof a Done was actually written (CTL-1157 Codex round-7). Run with --json and
+  # read `.action`: only "transitioned" (a real move) or "skipped" (confirmed already in
+  # the target Done state) count as a genuine Done. "skipped-no-linearis" / "dry-run" do
+  # NOT. Non-fatal — terminalDoneOnce backstop (fires on teardown===done) retries — but
+  # the failure must be LOUD so it is diagnosable.
   LINEAR_DONE_OUT="$("$LINEAR_TRANSITION" --ticket "$TICKET" --transition done \
-    --config .catalyst/config.json 2>&1)"
+    --config .catalyst/config.json --json 2>&1)"
   LINEAR_DONE_RC=$?
+  LINEAR_DONE_ACTION="$(printf '%s' "$LINEAR_DONE_OUT" | jq -r '.action // ""' 2>/dev/null || echo "")"
   if [[ $LINEAR_DONE_RC -ne 0 ]]; then
     echo "phase-teardown: Linear Done transition FAILED (rc=${LINEAR_DONE_RC}) — terminalDoneOnce backstop will retry: ${LINEAR_DONE_OUT}" >&2
   else
-    echo "phase-teardown: Linear Done transition: ${LINEAR_DONE_OUT}"
+    echo "phase-teardown: Linear Done transition (action=${LINEAR_DONE_ACTION:-unknown}): ${LINEAR_DONE_OUT}"
   fi
 else
   echo "phase-teardown: linear-transition.sh not found at $LINEAR_TRANSITION; skipping Done transition" >&2
@@ -310,19 +314,22 @@ fi
 # authoritative; this only records the declaration. The drain marks it reconciled
 # once Linear shows Done, or re-writes it if the transition above silently failed.
 #
-# CTL-1157 F #3: pass --transition-verified ONLY when the real linear-transition.sh
-# above returned rc=0. That flag gates the ENFORCE recovery.done-applied telemetry +
-# open-PR alarm: without it, a marker dropped after a FAILED/MISSING transition would
-# report an applied Done that never happened. On the failure path we still drop the
-# marker (so the drain/terminalDoneOnce backstop reconciles), but as a shadow would-
-# event, not an enforce Done-move.
+# CTL-1157 F #3 (+ Codex round-7): pass --transition-verified ONLY when the real
+# linear-transition.sh above reported a GENUINE Done — action "transitioned" (a real
+# move) or "skipped" (confirmed already in the Done state). rc==0 alone is NOT enough:
+# it also covers dry-run and "skipped-no-linearis" (a node without linearis writes
+# NOTHING yet still exits 0). That flag gates the ENFORCE recovery.done-applied telemetry
+# + open-PR alarm: without it, a marker dropped after a failed/missing/no-op transition
+# would report an applied Done that never happened. On the unverified path we still drop
+# the marker (so the drain/terminalDoneOnce backstop reconciles), but as a shadow
+# would-event, not an enforce Done-move.
 LINEAR_RECONCILE="${PLUGIN_ROOT}/scripts/catalyst-linear-reconcile"
 if [[ -x "$LINEAR_RECONCILE" ]]; then
   # Single no-space token → a set-but-empty string is safe under `set -u` and the
   # unquoted expansion contributes no arg when empty (avoids the bash-3.2 empty-array
-  # trap). LINEAR_DONE_RC is unset when the transition script was missing → :-1 → shadow.
+  # trap). LINEAR_DONE_ACTION is empty when the transition script was missing → shadow.
   TRANSITION_VERIFIED_FLAG=""
-  if [[ "${LINEAR_DONE_RC:-1}" -eq 0 ]]; then
+  if [[ "$LINEAR_DONE_ACTION" == "transitioned" || "$LINEAR_DONE_ACTION" == "skipped" ]]; then
     TRANSITION_VERIFIED_FLAG="--transition-verified"
   fi
   "$LINEAR_RECONCILE" declare "$TICKET" --state done --by pipeline --no-write \

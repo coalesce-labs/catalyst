@@ -61,17 +61,23 @@ const ENUM_SUBPROCESS_TIMEOUT_MS = (() => {
   return 15_000;
 })();
 
-// readTicketReplica — read a ticket's record from the local REPLICA/cache via
-// `catalyst-linear read <TICKET>` (replica-first; the CLI itself degrades to its
-// own linearis fallback only internally — this module NEVER shells `linearis`
-// directly). Best-effort: any failure returns null. Shared by branchName +
-// attachment derivation so they pay a single spawn.
-export function readTicketReplica(ticket, { cwd } = {}) {
+// readTicketReplica — read a ticket's record via `catalyst-linear read <TICKET>`.
+// Best-effort: any failure returns null.
+//
+// CTL-1157 (Codex round-7): `withAttachments` adds `--with-attachments`. The replica's
+// normalized detail does NOT carry Linear attachments, and catalyst-linear only bypasses
+// to the attachment-capable LIVE read when that flag is present — so the branch-name path
+// (replica-only, cheap) MUST NOT set it, but the attachment-discovery path MUST, or the
+// whole Linear-attachment pass is inert and a PR linked only as an attachment (no
+// ticket-key mention, non-matching branch) is missed → a false-clean open-PR check. This
+// is a live read, but it is bounded (timeout below) and only runs on the attachment pass.
+export function readTicketReplica(ticket, { cwd, withAttachments = false } = {}) {
   try {
     const here = dirname(fileURLToPath(import.meta.url));
     const sibling = join(here, "..", "catalyst-linear");
     const bin = existsSync(sibling) ? sibling : "catalyst-linear";
-    const r = spawnSync(bin, ["read", ticket], {
+    const args = withAttachments ? ["read", ticket, "--with-attachments"] : ["read", ticket];
+    const r = spawnSync(bin, args, {
       encoding: "utf8",
       cwd: cwd || process.cwd(),
       timeout: ENUM_SUBPROCESS_TIMEOUT_MS, // CTL-1157 F #7: same synchronous-tick wedge risk
@@ -146,7 +152,10 @@ const PR_URL_RE = /github\.com\/([^/\s]+)\/([^/\s]+)\/pull\/(\d+)/i;
 // input-completeness limit, not a gap in this enumerator.
 export function defaultDeriveAttachmentPrs(ticket, { cwd, read = readTicketReplica } = {}) {
   try {
-    const rec = read(ticket, { cwd });
+    // CTL-1157 (Codex round-7): MUST request attachments — the replica omits them, so a
+    // flagless read returns none and this whole pass is inert. withAttachments makes
+    // catalyst-linear do the attachment-capable live read.
+    const rec = read(ticket, { cwd, withAttachments: true });
     if (!rec) return [];
     // Tolerate several shapes the replica may expose: an `attachments` array (Linear
     // GraphQL nodes), a `prLinks`/`pullRequests` array, or `attachments.nodes`.
