@@ -321,6 +321,51 @@ describe("abort / cancel", () => {
     h.setAbortController(ac);
     const res = cancelSdkRun({ ticket: "CTL-1", generation: 1 });
     expect(res.aborted).toBe(true); // fail-open: cancel proceeds
+    h.deregister(); // don't leak module state into later files in this bun process
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  // Phase B review catches — the abort must be sticky on the REGISTRATION:
+  test("an abort landing between retry attempts re-arms onto the next controller (backoff-window loss)", () => {
+    const dir = freshDir();
+    const h = registerSdkWorker(entry(dir));
+    const ac1 = new AbortController(); // attempt 0's controller — query already settled
+    h.setAbortController(ac1);
+    const res = abortSdkWorker("CTL-1", "watchdog-timeout");
+    expect(res).toEqual({ found: true, aborted: true });
+    // attempt 1 (post-backoff) installs a fresh controller — must abort on install
+    const ac2 = new AbortController();
+    h.setAbortController(ac2);
+    expect(ac2.signal.aborted).toBe(true);
+    expect(ac2.signal.reason).toBe("watchdog-timeout");
+    expect(h.aborted).toBe(true);
+    h.deregister();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("a queued abort with NO reason still fires on controller install (nullish-reason drop)", () => {
+    const dir = freshDir();
+    const h = registerSdkWorker(entry(dir));
+    const res = abortSdkWorker("CTL-1"); // reason undefined, no controller yet
+    expect(res).toEqual({ found: true, aborted: false });
+    const ac = new AbortController();
+    h.setAbortController(ac);
+    expect(ac.signal.aborted).toBe(true);
+    h.deregister();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("a superseded handle's touch never clobbers or resurrects the projection (token fence)", () => {
+    const dir = freshDir();
+    let t = T0;
+    const hOld = registerSdkWorker(entry(dir, { generation: 1 }), { now: () => t });
+    const hNew = registerSdkWorker(entry(dir, { generation: 2 }), { now: () => t });
+    t = T0 + 120_000; // far past the projection throttle
+    hOld.touch(); // superseded — must NOT overwrite gen-2's projection
+    expect(readProjection(dir, "CTL-1").generation).toBe(2);
+    hNew.deregister(); // unlinks the projection
+    hOld.touch(); // must NOT resurrect the file as a ghost
+    expect(existsSync(join(dir, ".sdk-workers", "CTL-1.json"))).toBe(false);
     rmSync(dir, { recursive: true, force: true });
   });
 

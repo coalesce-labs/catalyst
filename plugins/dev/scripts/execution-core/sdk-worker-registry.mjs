@@ -142,7 +142,7 @@ export function registerSdkWorker({ ticket, phase, worktreePath, generation, orc
     lastProjectionWriteAt: 0,
     token: ++_tokenSeq,
     abortController: null,
-    pendingAbortReason: null,
+    abortReason: null,
     aborted: false,
     now,
   };
@@ -151,17 +151,23 @@ export function registerSdkWorker({ ticket, phase, worktreePath, generation, orc
   writeProjection(entry);
 
   return {
-    // A cancel/abort can land before the runner creates its per-retry
-    // controller — the pending reason fires the moment one is installed.
+    // Abort is STICKY on the registration, not on one controller: an abort can
+    // land before any controller is installed, or between retry attempts while
+    // the stored controller is a previous attempt's already-settled one (the
+    // 429/529 backoff window). Every future controller of an aborted
+    // registration is aborted on install, so a cancelled worker can never
+    // resurrect on its next retry (Phase B review catch).
     setAbortController(ac) {
       entry.abortController = ac;
-      if (entry.pendingAbortReason != null && ac && !ac.signal.aborted) {
-        ac.abort(entry.pendingAbortReason);
-        entry.aborted = true;
-        entry.pendingAbortReason = null;
+      if (entry.aborted && ac && !ac.signal.aborted) {
+        ac.abort(entry.abortReason);
       }
     },
     touch() {
+      // Same token fence as deregister: a superseded handle's touch must never
+      // clobber — or, after the successor deregisters, resurrect — the shared
+      // projection file (Phase B review catch).
+      if (_live.get(ticket)?.token !== entry.token) return;
       entry.updatedAt = entry.now();
       if (entry.updatedAt - entry.lastProjectionWriteAt >= PROJECTION_TOUCH_THROTTLE_MS) {
         writeProjection(entry);
@@ -203,24 +209,27 @@ export function countLiveSdkWorkers() {
 }
 
 /**
- * Abort a live worker's current query (watchdog / operator kill). If no
- * controller is installed yet the abort is queued for setAbortController.
+ * Abort a live worker (watchdog / operator kill). Sticky: marks the whole
+ * registration aborted (even with a nullish reason), aborts the current
+ * controller when one is installed and un-aborted, and guarantees every
+ * FUTURE controller (next retry attempt) is aborted on install — so an abort
+ * landing in the overload-backoff window can never be lost.
+ * `aborted` reports whether a live controller was aborted NOW (or already
+ * was); a pre-controller abort returns aborted:false (queued, fires on
+ * install).
  * @returns {{found: boolean, aborted: boolean}}
  */
 export function abortSdkWorker(ticket, reason) {
   const entry = _live.get(ticket);
   if (!entry) return { found: false, aborted: false };
+  entry.aborted = true;
+  entry.abortReason = reason;
   const ac = entry.abortController;
   if (ac && !ac.signal.aborted) {
     ac.abort(reason);
-    entry.aborted = true;
     return { found: true, aborted: true };
   }
-  if (!ac) {
-    entry.pendingAbortReason = reason;
-    return { found: true, aborted: false };
-  }
-  return { found: true, aborted: ac.signal.aborted };
+  return { found: true, aborted: ac ? ac.signal.aborted : false };
 }
 
 /**
@@ -254,6 +263,13 @@ function defaultPidAlive(pid) {
  * Cross-process liveness read from the disk projection (for the delegate-runner
  * child and other non-daemon processes). pid-alive is primary; freshness is the
  * pid-reuse guard. Missing/corrupt projection reads as not-live, never throws.
+ *
+ * ADVISORY, not authoritative (Phase B review, deferred): the projection is
+ * touched only while the query streams, so a worker parked at the semaphore
+ * longer than freshMs reads as dead here while isSdkWorkerLive (in-process) is
+ * still true. Until a consumer needs stronger on-disk freshness (Phase F
+ * delegate-runner re-point), treat a dead read as "probably not live", never
+ * as license to clobber the worker's signal/worktree.
  */
 export function isSdkWorkerLiveOnDisk(orchDir, ticket, { pidAlive = defaultPidAlive, now = Date.now, freshMs = SDK_WORKER_FRESH_MS } = {}) {
   let proj;
