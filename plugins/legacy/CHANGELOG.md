@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.1.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-legacy-v2.0.0...catalyst-legacy-v2.1.0) (2026-07-02)
+
+
+### Features
+
+* **dev:** CTL-1397 enforcement — replica-first Linear reads as a standard prerequisite reflex ([#2543](https://github.com/coalesce-labs/catalyst/issues/2543)) ([98dfbac](https://github.com/coalesce-labs/catalyst/commit/98dfbac7216d6ede87b6edf22d690b1188d7cbd1))
+
 ## [2.0.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-legacy-v1.0.0...catalyst-legacy-v2.0.0) (2026-06-06)
 
 
