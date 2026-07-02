@@ -931,6 +931,11 @@ export function runEligibleQuery(
     // Injectable clock (defaults to production) so the empty-confirmation cadence
     // is deterministically testable.
     now = Date.now,
+    // CTL-1420: the CTL-679 breaker state, injectable for deterministic tests.
+    // When OPEN, the linearis reconfirm below can only short-circuit — so a
+    // DEFINED replica-empty is trusted instead of freezing admission (see the
+    // empty-path branch). Defaults to the production process-wide breaker.
+    breakerIsOpen = () => linearBreaker.isOpen(),
   } = {}
 ) {
   // CTL-1397: replica-backed board-list tier. Fail-open: a throw out of
@@ -982,8 +987,27 @@ export function runEligibleQuery(
         onSource?.("replica", 0);
         return tickets; // [] — a recently linearis-confirmed empty, trusted (breaker-immune)
       }
-      // No recent confirmation → fall through to the linearis confirm/preserve-prior
-      // path below. Do NOT set the marker here — only a successful EMPTY confirm does.
+      // CTL-1420 (freeze-avoidance): when the CTL-679 breaker is OPEN, the
+      // linearis reconfirm below can only short-circuit (circuit-open) → throw →
+      // reconcileProject preserves the (empty) prior set = a fleet-wide admission
+      // FREEZE for the breaker's entire open window (the observed 4h+ boot freeze:
+      // fresh process, empty marker map, breaker pinned → nothing ever admitted).
+      // A DEFINED replica-empty has already cleared the reader's writer-liveness +
+      // seed-complete cursor + snapshot-consistent gates, so it is a provably-real
+      // "0 eligible" (NOT a mid-reseed truncation). During breaker-open we TRUST it
+      // rather than freeze. The only residual risk is a CTL-139 feed-hole (a team's
+      // rows silently dropped while the writer stays alive) — strictly less bad than
+      // freezing ALL admission fleet-wide, and self-healing: the moment the breaker
+      // closes, the reconfirm path below resumes and re-validates every empty. A
+      // NON-EMPTY replica is always served (above), even during a storm — so this
+      // only ever trusts a genuinely-empty board; real Todo work still dispatches.
+      if (breakerIsOpen()) {
+        onSource?.("replica-empty-breaker-open", 0);
+        return tickets; // [] — trusted under quota exhaustion (freeze-avoidance)
+      }
+      // No recent confirmation AND breaker closed → fall through to the linearis
+      // confirm/preserve-prior path below (cheap: ≤1 confirm/team/window; sets the
+      // marker on a successful empty). Do NOT set the marker here.
     }
     // MISS (undefined) / unconfirmed replica-empty → fall through to the UNCHANGED
     // linearis path below.

@@ -28,6 +28,7 @@ import {
 } from "./linear-query.mjs";
 import { createTicketStateCache } from "./linear-cache.mjs";
 import { isLinearTerminal } from "./terminal-state.mjs"; // CTL-1340: replica-tier terminal assertions
+import { linearBreaker } from "./linear-breaker.mjs"; // CTL-1420: reset the shared breaker singleton between empty-path tests
 
 // A fake exec returning a canned linearis result. `exec(cmd, args)` ->
 // { code, stdout, stderr } — the injectable seam runEligibleQuery uses so a
@@ -230,7 +231,14 @@ describe("runEligibleQuery — replica tier (CTL-1397)", () => {
   // CTL-1397 (3/n): the empty-board re-confirm cadence is module-scoped state —
   // clear it before each test so an empty result is always "due" for re-confirm
   // (the deterministic baseline), regardless of test order.
-  beforeEach(() => __resetEligibleEmptyConfirm());
+  // CTL-1420: the CTL-679 breaker is a process-wide singleton that a prior test
+  // in this file can leave OPEN; the default breakerIsOpen reads it, so reset it
+  // to CLOSED here for a deterministic baseline. Tests that exercise the
+  // breaker-open freeze-avoidance path inject breakerIsOpen:()=>true explicitly.
+  beforeEach(() => {
+    __resetEligibleEmptyConfirm();
+    linearBreaker.recordSuccess(); // → closed (no-op if already closed)
+  });
 
   // A replica stub whose eligible() returns a canned linearis-list-shaped result.
   function replicaReturning(nodes) {
@@ -320,11 +328,17 @@ describe("runEligibleQuery — replica tier (CTL-1397)", () => {
       execCalls.push(clock);
       return { code: 0, stdout: ticketsJson([{ identifier: "CTL-9", state: { name: "Todo" }, priority: 2 }]), stderr: "" };
     };
-    const t1 = runEligibleQuery(query, { exec: mkExec(), replica, now });
+    // CTL-1420: pin the breaker CLOSED — this test exercises the closed-breaker
+    // reconfirm cadence. (The non-empty confirm's default delegate-batch spawn can
+    // 429 and trip the real breaker singleton; without pinning, the 2nd call would
+    // hit the breaker-open freeze-avoidance branch and trust the empty.) A stub
+    // delegateExec also keeps the unit test off the network.
+    const opts = { replica, now, breakerIsOpen: () => false, delegateExec: () => ({ code: 0, stdout: "{}", stderr: "" }) };
+    const t1 = runEligibleQuery(query, { exec: mkExec(), ...opts });
     expect(t1.map((t) => t.identifier)).toEqual(["CTL-9"]); // real board served (hole)
     // 1s later: the non-empty confirm did NOT cache → still falls through (no zeroing).
     clock += 1_000;
-    const t2 = runEligibleQuery(query, { exec: mkExec(), replica, now });
+    const t2 = runEligibleQuery(query, { exec: mkExec(), ...opts });
     expect(execCalls).toHaveLength(2); // linearis called BOTH times — never suppressed
     expect(t2.map((t) => t.identifier)).toEqual(["CTL-9"]);
   });
@@ -363,13 +377,58 @@ describe("runEligibleQuery — replica tier (CTL-1397)", () => {
     expect(exec2.calls).toHaveLength(1);
   });
 
-  test("replica-EMPTY, breaker OPEN (exec short-circuits circuit-open) with no recent confirm → THROWS → preserve prior (never trusts the empty)", () => {
+  // CTL-1420 (freeze-avoidance): the pre-1420 behavior was to THROW here →
+  // reconcileProject preserved the (empty) prior set → a fleet-wide admission
+  // FREEZE for the breaker's whole open window. Now a DEFINED replica-empty
+  // (which already cleared the reader's writer-liveness + seed-complete +
+  // snapshot gates) is TRUSTED during breaker-open instead of freezing. The
+  // linearis reconfirm is never attempted (it could only short-circuit anyway).
+  test("CTL-1420: replica-EMPTY, breaker OPEN, no recent confirm → TRUSTS the fresh replica-empty (no linearis, no throw), onSource('replica-empty-breaker-open', 0)", () => {
     const replica = replicaReturning([]);
-    // A breaker-open exec short-circuits locally: code 1, 'circuit-open' (no quota
-    // spent). runEligibleQuery throws → reconcileProject preserves the prior set,
-    // rather than trusting an unconfirmed replica-empty as authoritative.
-    const exec = fakeExec({ code: 1, stderr: "circuit-open" });
-    expect(() => runEligibleQuery(query, { exec, replica })).toThrow(/exit 1/);
+    const sources = [];
+    const tickets = runEligibleQuery(query, {
+      exec: execMustNotRun(), // proves the doomed linearis reconfirm is skipped
+      replica,
+      breakerIsOpen: () => true,
+      onSource: (source, count) => sources.push([source, count]),
+    });
+    expect(tickets).toEqual([]);
+    expect(sources).toEqual([["replica-empty-breaker-open", 0]]);
+    expect(replica.calls).toEqual([query]); // the replica WAS consulted
+  });
+
+  // CTL-1420: the fix is breaker-GATED — a CLOSED breaker preserves the exact
+  // pre-1420 behavior (fall through to the linearis confirm so a feed-hole is
+  // never trusted as empty; the ≤1-confirm/team/window cadence is intact).
+  test("CTL-1420: replica-EMPTY, breaker CLOSED, no recent confirm → still falls through to the linearis confirm (unchanged)", () => {
+    const replica = replicaReturning([]);
+    const exec = fakeExec({ stdout: ticketsJson([]) });
+    const sources = [];
+    const tickets = runEligibleQuery(query, {
+      exec,
+      replica,
+      breakerIsOpen: () => false,
+      onSource: (source, count) => sources.push([source, count]),
+    });
+    expect(exec.calls).toHaveLength(1); // linearis WAS called (breaker closed)
+    expect(tickets).toEqual([]);
+    expect(sources).toEqual([["linearis", 0]]); // served + cached by the linearis path
+  });
+
+  // CTL-1420: a breaker-open reconcile must NEVER fabricate work — a genuinely
+  // NON-EMPTY replica is still served verbatim (the freeze-avoidance branch only
+  // fires on an empty board), so real Todo work dispatches during a quota storm.
+  test("CTL-1420: replica NON-EMPTY, breaker OPEN → serves the real board (freeze-avoidance never masks real work)", () => {
+    const replica = replicaReturning([{ identifier: "CTL-1416", state: "Todo", priority: 2 }]);
+    const sources = [];
+    const tickets = runEligibleQuery(query, {
+      exec: execMustNotRun(),
+      replica,
+      breakerIsOpen: () => true,
+      onSource: (source, count) => sources.push([source, count]),
+    });
+    expect(tickets.map((t) => t.identifier)).toEqual(["CTL-1416"]);
+    expect(sources).toEqual([["replica", 1]]);
   });
 
   test("cadence: after a successful empty confirm, empties trust the replica until the window elapses, then re-confirm once per team", () => {

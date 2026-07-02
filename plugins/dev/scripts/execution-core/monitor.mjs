@@ -77,8 +77,10 @@ import { countSdkInflight as defaultCountSdkInflight } from "./signal-reader.mjs
 import {
   recordReconcileSuccess,
   recordReconcileFailure,
+  getReconcileHealth,
   __resetReconcileHealthForTests,
 } from "./reconcile-health.mjs";
+import { checkFleetFreeze } from "./fleet-freeze-alert.mjs"; // CTL-1420: fleet-frozen-for-admission alert
 
 // DRAG_OUT_STATES — the Linear workflow states that signal "stop work on this
 // ticket". The monitor classifies these as a kill: remove the ticket from the
@@ -343,7 +345,7 @@ export function reconcileProject(team, { exec, delegateExec, appendHealthEvent, 
 // reconcileAll — full reconcile of every registered team (the missed-webhook
 // backstop). Re-reads registry.json each call so a team added to the registry
 // is picked up and one removed is dropped within one tick.
-export function reconcileAll({ exec, delegateExec, appendHealthEvent } = {}) {
+export function reconcileAll({ exec, delegateExec, appendHealthEvent, fleetFreezeAppend } = {}) {
   const projects = listProjects();
   const seen = new Set(projects.map((p) => p.team));
   for (const p of projects) reconcileProject(p.team, { exec, delegateExec, appendHealthEvent });
@@ -355,6 +357,17 @@ export function reconcileAll({ exec, delegateExec, appendHealthEvent } = {}) {
   }
   knownProjects.clear();
   for (const t of seen) knownProjects.add(t);
+  // CTL-1420: after every team reconciled this pass, roll the per-team reconcile
+  // health up into a fleet-frozen-for-admission alert. When EVERY registered team
+  // is in a persistent-failure state, the eligible projection can refresh from
+  // neither the replica nor linearis — new work is frozen fleet-wide, which used
+  // to be silent (reconcileProject just preserves the empty prior set). Latched +
+  // best-effort inside checkFleetFreeze; a team's recovery clears it.
+  checkFleetFreeze({
+    teams: [...seen],
+    isTeamFrozen: (t) => getReconcileHealth(t)?.alerting === true,
+    ...(fleetFreezeAppend ? { append: fleetFreezeAppend } : {}),
+  });
 }
 
 // --- Event-driven fast path ---------------------------------------------
