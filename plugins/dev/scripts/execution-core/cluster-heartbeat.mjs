@@ -32,6 +32,18 @@ export function authHeader(token = "") {
   return /^lin_oauth/i.test(token) ? `Bearer ${token}` : token;
 }
 
+// isRateClassLinearError — CTL-1420 follow-up. Recognize a RATE-class Linear
+// rejection from a response body OR an error string. Linear serves its
+// complexity / soft-rate limit as HTTP **400** with `errors[].extensions.code
+// === "RATELIMITED"` (NOT 429), alongside the classic 429 "Only N requests are
+// allowed" message. This is the discriminator between "back off the shared
+// app-actor bucket" (rate-class) and a genuine bad-request 400 (a query/schema
+// bug — surface it, do NOT back off). Pure + exported so the publisher can
+// classify the propagated error string with the same rule.
+export function isRateClassLinearError(text) {
+  return /RATELIMITED|rate limit|requests are allowed|http 429\b/i.test(String(text ?? ""));
+}
+
 // defaultPost — the production GraphQL POST. Injectable via `post` option on every
 // public function so tests never touch the network.
 async function defaultPost(query, variables) {
@@ -44,7 +56,25 @@ async function defaultPost(query, variables) {
     },
     body: JSON.stringify({ query, variables }),
   });
-  if (!res.ok) throw new Error(`linear graphql http ${res.status}`);
+  if (!res.ok) {
+    // CTL-1420 follow-up: READ the body before throwing. It was previously
+    // discarded (throw on !res.ok fired before res.json()), so a rate-class 400
+    // (RATELIMITED) looked identical to a bad-request 400 — and the publisher had
+    // no signal to back off, so it re-hit the shared app-actor bucket every ~2min
+    // with no cooldown (a live burn contributor + the fence-stale flap). Surface
+    // the body (so a genuine query/schema 400 is diagnosable) and TAG a rate-class
+    // rejection so the publisher can feed the CTL-679 breaker.
+    let bodyText = "";
+    try {
+      bodyText = await res.text();
+    } catch {
+      /* body unreadable — status alone still classifies a 429 */
+    }
+    const rateClass = res.status === 429 || isRateClassLinearError(bodyText);
+    throw new Error(
+      `linear graphql http ${res.status}${rateClass ? " [RATELIMITED]" : ""}: ${bodyText.slice(0, 300)}`,
+    );
+  }
   const json = await res.json();
   if (json?.errors) throw new Error(`linear graphql errors: ${JSON.stringify(json.errors)}`);
   return json?.data ?? {};
