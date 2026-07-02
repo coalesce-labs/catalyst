@@ -468,10 +468,12 @@ if [ -z "$COMMS_BIN" ] || [ ! -x "$COMMS_BIN" ]; then
 fi
 
 # Build the registration JSON with all workers from all waves
-# Use linearis CLI to read ticket titles (run `linearis issues usage` for syntax)
+# Read ticket titles via the replica (per the `linearis` skill's "Reading Linear"
+# rule). A bare linearis loop also burns shared quota AND eats stdin without </dev/null.
+source "${CATALYST_DEV_SCRIPTS}/lib/linear-read-replica.sh"
 WORKERS_JSON="{}"
 for TICKET_ID in "${ALL_TICKETS[@]}"; do
-  TITLE=$(linearis issues read "$TICKET_ID" | jq -r '.title')  # see `linearis issues usage`
+  TITLE=$(linear_read_ticket "$TICKET_ID" | jq -r '.title')
   WORKERS_JSON=$(echo "$WORKERS_JSON" | jq \
     --arg tid "$TICKET_ID" --arg title "$TITLE" \
     '. + {($tid): {ticketId: $tid, title: $title, status: "dispatched", phase: 0, branch: null, pr: null, updatedAt: "'$(date -u +%Y-%m-%dT%H:%M:%SZ)'", needsAttention: false, attentionReason: null}}')

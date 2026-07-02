@@ -5,7 +5,7 @@ description:
   ticket', 'update the ticket', 'move ticket to', 'search Linear', or wants to create tickets from
   thoughts documents, update ticket status, or manage the Linear workflow. Uses Linearis CLI."
 disable-model-invocation: false
-allowed-tools: Bash(linearis *), Read, Write, Edit, Grep
+allowed-tools: Bash(linearis *), Bash(linear_read_ticket *), Read, Write, Edit, Grep
 version: 1.0.0
 ---
 
@@ -268,7 +268,9 @@ When user wants to add a comment to a ticket:
 
 1. **Determine which ticket:**
    - Use context from the current conversation to identify the relevant ticket
-   - If uncertain, read the ticket to show details and confirm (see `linearis issues usage`)
+   - If uncertain, read the ticket to show details and confirm — read via the replica
+     (`source "${CLAUDE_PLUGIN_ROOT}/scripts/lib/linear-read-replica.sh"; linear_read_ticket "$TICKET"`),
+     per the `linearis` skill's "Reading Linear" rule; see also `linearis issues usage`.
 
 2. **Format comments for clarity:**
    - Keep concise (~10 lines) unless more detail needed
