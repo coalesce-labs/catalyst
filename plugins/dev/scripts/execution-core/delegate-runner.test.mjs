@@ -170,6 +170,31 @@ describe("drainOnce — drains a queued intent → launched", () => {
     expect(res.drained).toBe(1);
   });
 
+  // CTL-1157 F P1 (Codex round-4): under executor=sdk the recovery-pass runs as an
+  // IN-PROCESS query() that settles asynchronously; invokeFn surfaces its settled chain
+  // in details.pendingSdk. drainOnce must collect those into result.pending so the
+  // detached entrypoint can await them before process.exit (else it kills the worker it
+  // just launched). bg dispatch has no pendingSdk → result.pending stays empty.
+  test("collects details.pendingSdk (executor=sdk) into result.pending; bg leaves it empty", () => {
+    seedQueued("CTL-1");
+    const pendingSdk = Promise.resolve({ code: 0 });
+    const sdkDeps = makeDeps();
+    sdkDeps.executor = "sdk";
+    sdkDeps.invokeFn = () => ({
+      dispatched: true,
+      details: { bg_job_id: null, worktreePath: "/wt/CTL-1", pendingSdk },
+    });
+    const sdkRes = drainOnce(sdkDeps);
+    expect(Array.isArray(sdkRes.pending)).toBe(true);
+    expect(sdkRes.pending).toContain(pendingSdk);
+
+    seedQueued("CTL-2");
+    const bgDeps = makeDeps();
+    bgDeps.invokeFn = () => ({ dispatched: true, details: { bg_job_id: "bg-1", worktreePath: "/wt/CTL-2" } });
+    const bgRes = drainOnce(bgDeps);
+    expect(bgRes.pending).toEqual([]); // bg job is a separate OS process — nothing to await
+  });
+
   test("emits phase.dispatch.requested then phase.dispatch.launched (in order, with bg_job_id)", () => {
     seedQueued("CTL-1");
     const deps = makeDeps();
@@ -334,6 +359,119 @@ describe("drainOnce — free-slot re-check", () => {
     drainOnce(deps);
     expect(readIntent("CTL-5").status).toBe("launched");
   });
+
+  // GROUP C: an sdk dispatch settles synchronously with NO bg job, so countBg
+  // cannot see this pass's launches. drainOnce must count them locally so it does
+  // not overrun maxParallel across multiple queued intents in one drain.
+  test("executor=sdk: with maxParallel=1 and two queued intents, only ONE launches (the second un-claims)", () => {
+    seedQueued("CTL-SDK-1");
+    seedQueued("CTL-SDK-2");
+    let invokes = 0;
+    const deps = makeDeps({
+      maxParallel: 1,
+      executor: "sdk",
+      // sdk dispatch is synchronous & invisible to countBg — it stays 0 the
+      // whole pass, exactly the condition that used to let BOTH intents launch.
+      countBackgroundAgents: () => 0,
+      invokeFn: () => {
+        invokes++;
+        return { dispatched: true, details: {} }; // sdk: no bg_job_id
+      },
+    });
+
+    const res = drainOnce(deps);
+
+    expect(invokes).toBe(1); // slot limit honored despite the static bg count
+    expect(res.drained).toBe(1);
+    const statuses = ["CTL-SDK-1", "CTL-SDK-2"].map((t) => readIntent(t).status).sort();
+    expect(statuses).toEqual(["launched", "queued"]); // one launched, one held
+    expect(deps._emitted.launched).toHaveLength(1);
+  });
+
+  // The bg path is unchanged: localLaunched is never consulted (executor != sdk),
+  // so the per-intent countBg check governs exactly as before.
+  test("executor=bg: localLaunched is NOT consulted (bg jobs surface in countBg)", () => {
+    seedQueued("CTL-BG-1");
+    seedQueued("CTL-BG-2");
+    let invokes = 0;
+    const deps = makeDeps({
+      maxParallel: 8,
+      executor: "bg",
+      countBackgroundAgents: () => 0, // plenty of headroom for both
+      invokeFn: (ticket) => {
+        invokes++;
+        return { dispatched: true, details: { bg_job_id: `bg-${ticket}` } };
+      },
+    });
+
+    const res = drainOnce(deps);
+
+    expect(invokes).toBe(2);
+    expect(res.drained).toBe(2);
+  });
+
+  // CTL-1157 (Codex round-6): the sdk slot budget is countBg + a ONCE-sampled
+  // pre-existing sdk baseline + localLaunched — three DISJOINT terms. The earlier
+  // round-6 attempt re-read countSdkInflight per iteration AND added localLaunched,
+  // which double-counted each launch (the synchronous prelaunch signal is on disk
+  // before invokeFn returns, so a per-iteration re-read already sees this pass's
+  // launches) and halved effective parallelism at maxParallel>=2.
+  test("executor=sdk: baseline sampled ONCE — all queued intents launch when slots are free (no halving)", () => {
+    seedQueued("CTL-SDK-A");
+    seedQueued("CTL-SDK-B");
+    seedQueued("CTL-SDK-C");
+    let sdkCalls = 0;
+    const deps = makeDeps({
+      maxParallel: 3,
+      executor: "sdk",
+      countBackgroundAgents: () => 0,
+      countSdkInflight: () => {
+        sdkCalls++;
+        return 0; // no pre-existing sdk work
+      },
+      invokeFn: () => ({ dispatched: true, details: { bg_job_id: null, worktreePath: "/wt", pendingSdk: null } }),
+    });
+
+    const res = drainOnce(deps);
+
+    expect(res.drained).toBe(3); // ALL three — not ceil(3/2)=2 (the double-count bug)
+    expect(sdkCalls).toBe(1); // sampled ONCE as a baseline, never re-read per iteration
+  });
+
+  test("executor=sdk: PRE-EXISTING sdk workers (baseline) consume slots — only free slots launch", () => {
+    seedQueued("CTL-SDK-A");
+    seedQueued("CTL-SDK-B");
+    seedQueued("CTL-SDK-C");
+    const deps = makeDeps({
+      maxParallel: 3,
+      executor: "sdk",
+      countBackgroundAgents: () => 0,
+      countSdkInflight: () => 2, // two sdk phase workers already in flight → 1 free slot
+      invokeFn: () => ({ dispatched: true, details: { bg_job_id: null, worktreePath: "/wt", pendingSdk: null } }),
+    });
+
+    const res = drainOnce(deps);
+
+    expect(res.drained).toBe(1); // only the one genuinely-free slot launches
+  });
+
+  test("executor=sdk: a baseline sdk count failure fails CLOSED (holds every intent)", () => {
+    seedQueued("CTL-SDK-A");
+    const deps = makeDeps({
+      maxParallel: 3,
+      executor: "sdk",
+      countBackgroundAgents: () => 0,
+      countSdkInflight: () => {
+        throw new Error("signal scan failed");
+      },
+      invokeFn: () => ({ dispatched: true, details: {} }),
+    });
+
+    const res = drainOnce(deps);
+
+    expect(res.drained).toBe(0); // never launch on an untrustworthy sdk occupancy count
+    expect(readIntent("CTL-SDK-A").status).toBe("queued"); // un-claimed back to queued
+  });
 });
 
 describe("drainOnce — live-worker supersede (idempotency)", () => {
@@ -365,6 +503,32 @@ describe("drainOnce — live-worker supersede (idempotency)", () => {
     const deps = makeDeps({ isBgJobAlive: () => false });
     drainOnce(deps);
     expect(readIntent("CTL-7").status).toBe("launched");
+  });
+
+  // CTL-1157 (GROUP-3 #2): under executor=sdk the recovery-pass worker runs in-process
+  // with NO bg_job_id — a dispatched|running signal there is LIVE. A second drain scan
+  // must SUPERSEDE (not re-launch) it, otherwise the same ticket double-dispatches.
+  test("sdk: a running recovery-pass worker with NO bg_job_id → superseded (no re-dispatch) when executor==='sdk'", () => {
+    seedQueued("CTL-sdk");
+    seedRecoveryPassSignal("CTL-sdk", "running", null); // sdk shape: no bg id
+    const deps = makeDeps({ executor: "sdk", isBgJobAlive: () => false });
+    let invoked = false;
+    deps.invokeFn = () => {
+      invoked = true;
+      return { dispatched: true, details: {} };
+    };
+    const res = drainOnce(deps);
+    expect(invoked).toBe(false);
+    expect(existsSync(intentPath("CTL-sdk"))).toBe(false); // GC'd, not launched
+    expect(res.superseded).toBe(1);
+  });
+
+  test("bg (default): a running worker with NO bg_job_id does NOT supersede → dispatches (byte-identical)", () => {
+    seedQueued("CTL-bgnull");
+    seedRecoveryPassSignal("CTL-bgnull", "running", null);
+    const deps = makeDeps({ isBgJobAlive: () => false }); // no executor → bg
+    drainOnce(deps);
+    expect(readIntent("CTL-bgnull").status).toBe("launched");
   });
 });
 

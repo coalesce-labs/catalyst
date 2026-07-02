@@ -76,7 +76,7 @@ import {
   readTicketLabels,
 } from "./linear-query.mjs";
 import { gatewayLabelsHit } from "./gateway-read.mjs"; // CTL-1079
-import { getProjectConfig, listProjects } from "./registry.mjs";
+import { getProjectConfig, listProjects, ownerRepoFromRepoRoot } from "./registry.mjs"; // CTL-1157: ownerRepoFromRepoRoot reconciles registry repoRoot → GitHub owner/repo for board-health's composite (repo,number) PR-status lookup
 // CTL-703: worktree teardown is now handled by the dedicated phase-teardown
 // phase agent (the 10th pipeline phase), not the scheduler's terminal sweep.
 // The gatedTeardownWorktree import is removed; the teardown phase agent
@@ -119,6 +119,18 @@ import { executeEscalations } from "./beliefs/escalate.mjs";
 // never per-tick / per-ticket — the gh subprocess only fires from inside prView
 // on the rare merged-zombie / drift path, not on construction.
 import { makePrView } from "./scan-adapters.mjs";
+// CTL-1157 (ALARM-NOT-BLOCK): the open-PR ENUMERATOR the terminal sweep's direct
+// Done write (terminalDoneOnce) consults — NOT a refuse-gate (THE REVERSAL). It no
+// longer blocks the write; it supplies the FACTS used to decide whether to fire the
+// recovery.done-applied-with-open-pr alarm. Permissive no-op default in schedulerTick;
+// armed with this real impl by runTick.
+import { defaultCheckOpenPrs } from "./open-pr-gate.mjs";
+// CTL-1157 (ALARM-NOT-BLOCK): the loud `recovery.done-applied-with-open-pr` event
+// the pure-code terminal sweep emits when it lands a Done while an open PR exists.
+import {
+  appendRecoveryDoneOpenPrEvent,
+  appendRecoveryDoneAppliedEvent,
+} from "./recovery-done-open-pr-event.mjs";
 import {
   countBackgroundAgents,
   getAgentsCached,
@@ -229,6 +241,12 @@ import {
   // tick's orchDir at the call site. Still entirely behind CATALYST_RECOVERY_PASS
   // (mode=off ⇒ the pass never runs), so no live behavior change until opt-in.
   defaultInvokeRecoveryPass as recoveryInvokeRecoveryPass,
+  // CTL-1157: the curated-escalation signal writer (Workstream C) + the defer
+  // attempts reader (Workstream B). Bound to the tick's orchDir at the call site
+  // (like recordIntent) — the daemon never sets CATALYST_ORCHESTRATOR_DIR on its
+  // own process, so the env-resolving defaults would otherwise no-op.
+  defaultWriteEscalationSignal as recoveryWriteEscalationSignal,
+  defaultReadIntentAttempts as recoveryReadIntentAttempts,
 } from "./recovery-reasoning.mjs";
 // CTL-1331: the async board-health delegate queue. countQueuedDelegates is the
 // slot reservation (a queued/claimed delegate has taken a slot its `claude --bg`
@@ -289,7 +307,7 @@ import { emitDrainedEvent as defaultEmitDrainedEvent } from "./drain-event.mjs";
 import { defaultCheckSequencing } from "./sequencing.mjs"; // CTL-537
 import { ownedBy, ownerForTicket } from "./hrw.mjs"; // CTL-850: HRW ownership filter (CTL-1191 also uses it for the diagnostician gate); ownerForTicket: CTL-1290 board-health stranded-node + enforce HRW gate
 import { boardHealthPass } from "./board-health.mjs"; // CTL-1290: the whole-board health delegate (shadow-first)
-import { getAllTicketDescriptors } from "../broker/broker-state.mjs"; // CTL-1290: board snapshot (reads only). bun:sqlite-backed — safe here: scheduler.mjs is daemon-only and NOT in the orch-monitor vite/UI graph (see MEMORY vite_config_bun_sqlite_trap).
+import { getAllTicketDescriptors, getAllPrStatuses, openBrokerStateDb } from "../broker/broker-state.mjs"; // CTL-1290: board snapshot (reads only). bun:sqlite-backed — safe here: scheduler.mjs is daemon-only and NOT in the orch-monitor vite/UI graph (see MEMORY vite_config_bun_sqlite_trap). CTL-1157: getAllPrStatuses = the filter_state PR-lifecycle reader for the phantom/orphaned-PR invariants. openBrokerStateDb (CTL-1157 Codex round-6): the exec-core daemon must open the broker DB handle before these readers — ensure() throws otherwise and assembleBoardState swallows it, leaving the board/PR maps empty and the cohorts inert.
 import { readReconcileHealthMarkers } from "./reconcile-health.mjs"; // CTL-1290: stranded-node reconcile signal
 import { claimDispatchSync } from "./cluster-claim-sync.mjs"; // CTL-850: cross-host claim soft-CAS
 // CTL-954: team estimation method — lazy-cached from Linear, used to expand
@@ -2356,7 +2374,14 @@ function terminalDoneOnce(
   ticket,
   writeStatus,
   emitStateWrite,
-  { multiHost = false } = {}
+  {
+    multiHost = false,
+    checkOpenPrs,
+    emitDoneWithOpenPr = appendRecoveryDoneOpenPrEvent,
+    // CTL-1157 SLICE 3: the broad "Done-moves" emitter — fires on EVERY confirmed
+    // terminal-sweep Done (not just the open-PR subset). Injectable for tests.
+    emitDoneApplied = appendRecoveryDoneAppliedEvent,
+  } = {}
 ) {
   const marker = join(orchDir, "workers", ticket, ".terminal-done.applied");
   if (existsSync(marker)) return;
@@ -2366,6 +2391,31 @@ function terminalDoneOnce(
       "ctl-863: stale fence — suppressing terminalDoneOnce write (zombie guard)"
     );
     return;
+  }
+  // CTL-1157 (ALARM-NOT-BLOCK — THE REVERSAL): the terminal sweep writes Done
+  // DIRECTLY (no agent to reason). The earlier behavior REFUSED the write when an
+  // open PR existed, which could wedge the board on a phantom/non-standard PR. The
+  // owner reversed that: this pure-code path now PROCEEDS — it never wedges, never
+  // mechanically escalates — but it CONSULTS the open-PR enumerator and, when it
+  // lands a Done while ≥1 OPEN PR still exists, emits the loud
+  // `recovery.done-applied-with-open-pr` alarm so we get the signal that would
+  // justify adding a real hard block later (held in reserve). The enumerator is
+  // dep-injected: schedulerTick's permissive no-op default keeps bare unit ticks
+  // silent; runTick arms the real defaultCheckOpenPrs in production. An unverifiable
+  // enumeration (a `gh` failure, or the ticket's repo could not be derived) is no
+  // longer FATAL — we still PROCEED (alarm-not-block) — but UNVERIFIABLE ≠ CLEAN: we
+  // could not confirm zero open PRs, so we surface it via the loud alarm rather than
+  // silently assuming an empty list.
+  let openPrs = [];
+  let unverifiable = false;
+  if (typeof checkOpenPrs === "function") {
+    try {
+      const facts = checkOpenPrs(ticket, {});
+      if (facts && facts.unverifiable) unverifiable = true;
+      if (facts && Array.isArray(facts.prs)) openPrs = facts.prs;
+    } catch {
+      unverifiable = true; // could not confirm clean ⇒ surface (don't assume zero)
+    }
   }
   try {
     const res = writeStatus.applyTerminalDone({ ticket });
@@ -2388,6 +2438,49 @@ function terminalDoneOnce(
     // success so the once-semantics stay testable without a real result.
     if (res === undefined || res?.applied) {
       writeFileSync(marker, "");
+      // CTL-1157 GROUP B (Done-event accuracy): only emit on a REAL Done write. An
+      // idempotent terminal SKIP (Linear already Done) returns {applied:true,
+      // action:"skipped"} and performs NO actual write — so emitting done-applied
+      // here would corrupt OTEL's before/after Done-move counts, and the open-PR
+      // alarm could fire for an already-Done ticket carrying a stale open PR. The
+      // marker still lands above (once-semantics). A test-stub `undefined` result is
+      // treated as a real write so the emit/alarm stay unit-testable.
+      const realDoneWrite = res === undefined || res?.action !== "skipped";
+      if (realDoneWrite) {
+        // CTL-1157 SLICE 3 (Done-moves panel): the Done write LANDED — emit the broad
+        // recovery.done-applied on EVERY terminal-sweep Done so OTEL charts the move
+        // and watches the open_prs_at_done>0 red-line. This pure-code path has no agent
+        // to reason about PRs, so prs_closed/prs_kept are 0; open_prs_at_done carries
+        // the enumerated count (the red-line). Best-effort — never aborts the tick.
+        try {
+          emitDoneApplied({
+            ticket,
+            openPrsAtDone: openPrs.length,
+            prsClosed: 0,
+            prsKept: 0,
+            recoveryMode: "enforce", // a real terminal-sweep write is always enforce
+            by: "terminal-sweep",
+          });
+        } catch {
+          /* observability must never break the sweep */
+        }
+        // CTL-1157 (ALARM-NOT-BLOCK): the Done write LANDED. Fire the loud alarm when
+        // the ticket still has ≥1 open PR OR the open-PR check was UNVERIFIABLE (a Done
+        // that landed without confirming the board was clean is the same silent-Done
+        // risk this alarm exists to surface). Best-effort; never throws, never aborts
+        // the tick. A clean, CONFIRMED Done (0 open PRs, verifiable) emits nothing.
+        if (openPrs.length >= 1 || unverifiable) {
+          try {
+            emitDoneWithOpenPr({ ticket, openPrs, by: "terminal-sweep", unverifiable });
+          } catch {
+            /* observability must never break the sweep */
+          }
+          log.warn(
+            { ticket, open_prs_count: openPrs.length, unverifiable },
+            "ctl-1157: terminal-sweep wrote Done while an open PR still exists or the check was unverifiable — alarm emitted (recovery.done-applied-with-open-pr)"
+          );
+        }
+      }
     }
   } catch (err) {
     log.warn(
@@ -2989,6 +3082,20 @@ export function schedulerTick(
     // runningOpts.prAdapter → runTick, so both paths fire live. Injectable so
     // tests can exercise the pr-merged branch without shelling out to `gh`.
     prAdapter = undefined,
+    // CTL-1157 (ALARM-NOT-BLOCK): the open-PR ENUMERATOR the terminal sweep's DIRECT
+    // Done write (terminalDoneOnce) consults — it no longer refuses the write, it
+    // only decides whether to fire the recovery.done-applied-with-open-pr alarm. The
+    // DEFAULT here is a deliberately PERMISSIVE no-op (zero open PRs) so a bare unit
+    // tick never shells out to `gh`/`catalyst-linear` and stays silent. PRODUCTION
+    // wires the real defaultCheckOpenPrs via startScheduler → runningOpts.checkOpenPrs
+    // → runTick. Injectable so the alarm branch is testable without shelling out.
+    checkOpenPrs = () => ({ ok: true, prs: [] }),
+    // CTL-1157: the alarm emitter for the terminal sweep (default = real append to
+    // the unified event log). Injectable so tests record the alarm without writing.
+    emitDoneWithOpenPr = appendRecoveryDoneOpenPrEvent,
+    // CTL-1157 SLICE 3: the broad Done-moves emitter for the terminal sweep (fires on
+    // EVERY confirmed Done, not just the open-PR subset). Injectable for tests.
+    emitDoneApplied = appendRecoveryDoneAppliedEvent,
     // CTL-671: phantom worker-dir validity sweep seams. classifyResolution is
     // the 3-valued Linear probe (exists|not-found|unknown); isBgJobAlive maps a
     // dead worker's bg_job_id to a live `claude agents` session. The DEFAULTS
@@ -4015,6 +4122,14 @@ export function schedulerTick(
             shouldSkipItem: (ticket) => recoveryShouldSkipItem(ticket, { orchDir }),
             recordIntent: (ticket, intent) =>
               recoveryRecordIntent(ticket, intent, { orchDir }),
+            // CTL-1157 Workstream C: write the curated 6-field explanation signal
+            // on enforce escalates (bound to this tick's orchDir).
+            writeEscalationSignal: (ticket, payload) =>
+              recoveryWriteEscalationSignal(ticket, payload, { orchDir }),
+            // CTL-1157 Workstream B: read prior attempts so a defer marker pins
+            // them (no auto-increment, no budget burn).
+            readIntentAttempts: (ticket) =>
+              recoveryReadIntentAttempts(ticket, { orchDir }),
             invokeSeam: (ticket, seamId, brief) =>
               recoveryInvokeSeam(ticket, seamId, brief, { orchDir }),
             // CTL-1176 rung 3: dispatch the recovery-pass skill for the
@@ -4038,6 +4153,11 @@ export function schedulerTick(
                 // time too, but this avoids the wasted enqueue→claim→supersede and a
                 // transient slot reservation.
                 isBgJobAlive: (id) => isBgJobAlive(id, { agents: getAgents().agents }),
+                // CTL-1157 (GROUP-3 #2): make the enqueue-time worker-live probe
+                // sdk-aware so a dispatched|running sdk recovery-pass worker (no
+                // bg_job_id) dedups a re-enqueue instead of double-dispatching. Inert
+                // under bg/oneshot-legacy (executor stays null → byte-identical).
+                executor: dispatchMode === "sdk" ? "sdk" : null,
               }),
           });
           if (rResult.processed > 0) {
@@ -4342,7 +4462,12 @@ export function schedulerTick(
   // only ever LOWERS freeSlots (conservative-only, §3b); with an empty queue both
   // calls return 0, so occupiedCount === liveCount (Phase A inert: zero change).
   try {
-    gcDelegateIntents(orchDir, now());
+    // CTL-1157 (GROUP-3 #2): pass the resolved executor so the GC keeps a launched
+    // sdk delegate intent (in-process query(), no bg_job_id) LIVE instead of dropping
+    // it as a dead bg job — dropping it would free the reservation/existence guard and
+    // let the next scan re-dispatch the same in-flight ticket. Inert under bg (executor
+    // null → the no-bg_job_id launched intent still drops exactly as today).
+    gcDelegateIntents(orchDir, now(), { executor: dispatchMode === "sdk" ? "sdk" : null });
   } catch {
     /* GC is best-effort — never block the tick */
   }
@@ -4366,7 +4491,10 @@ export function schedulerTick(
       /* best-effort — never block the tick on a signal-scan failure */
     }
   }
-  const occupiedCount = liveCount + queuedDelegates + sdkInflight;
+  // `let` (not const): a successful board-health enforce dispatch below reserves a
+  // slot by incrementing this AFTER the sample — see the board-health pass (CTL-1157
+  // Codex round-5). Every other read of occupiedCount is downstream of that point.
+  let occupiedCount = liveCount + queuedDelegates + sdkInflight;
 
   tick?.lap("liveness-read");
 
@@ -4396,7 +4524,17 @@ export function schedulerTick(
           capacity: { maxParallel, liveCount, freeSlots: computeFreeSlots(maxParallel, occupiedCount) },
           readEventRing: _boardHealth.readEventRing,
           ownerForTicket,
+          // CTL-1157 (Codex #4): ticket→owner/repo resolver for the composite
+          // (repo, number) PR-status lookup. Daemon-bound below; a bare tick
+          // passes none → null → number-only fallback (N=1 byte-identical).
+          repoForTicket: _boardHealth.repoForTicket,
           getReconcileMarkers: _boardHealth.getReconcileMarkers,
+          // CTL-1157: thread the PR-status reader + the provably-dead host set.
+          // Both are daemon-bound (the binding below); a bare tick passes neither
+          // → empty-Map / empty-array defaults keep the new invariants
+          // observable:false and the holistic failover unreachable (shadow-safe).
+          getPrStatusMap: _boardHealth.getPrStatusMap,
+          deadHosts: _boardHealth.deadHosts ? _boardHealth.deadHosts(roster) : [],
           lastRunMs: _boardHealthLastRunMs,
           // emit defaults to defaultEmitEvent. CTL-1300: thread the optional `act`
           // seam — supplied ONLY by the daemon binding (the holistic recovery-pass
@@ -4407,6 +4545,15 @@ export function schedulerTick(
           now,
         });
         if (_bhResult?.ran) _boardHealthLastRunMs = _bhResult.ranAtMs;
+        // CTL-1157 (Codex round-5): a successful board-health ENFORCE dispatch enqueued
+        // a recovery-pass delegate intent AFTER occupiedCount was sampled (queuedDelegates
+        // is now stale by one). RESERVE that slot here so the same tick's resume + new-work
+        // admission (every computeFreeSlots(maxParallel, occupiedCount) below) cannot fill
+        // the slot board-health just claimed — otherwise at maxParallel=1 with one free
+        // slot the tick launches board-health's delegate AND promotes/admits another worker,
+        // overrunning the limit. holisticBoardHealthAct dispatches exactly ONE per scan, so
+        // reserve one. shadow/off never reach `act` → dispatched is never true → no reserve.
+        if (_bhResult?.act?.dispatched === true) occupiedCount += 1;
       } catch (err) {
         log.warn?.(
           { step: "board-health", err: err.message },
@@ -5642,7 +5789,12 @@ export function schedulerTick(
       // CTL-863: thread multiHost so terminalDoneOnce's internal fence guard
       // suppresses a post-takeover zombie's terminal Done write on a multi-host
       // cluster (no-op single-host: multiHost=false → guard always passes).
-      terminalDoneOnce(orchDir, ticket, writeStatus, emitStateWrite, { multiHost });
+      terminalDoneOnce(orchDir, ticket, writeStatus, emitStateWrite, {
+        multiHost,
+        checkOpenPrs,
+        emitDoneWithOpenPr,
+        emitDoneApplied,
+      });
       // CTL-646: terminal Done unconditionally clears needs-human (belt + teardown path).
       // CTL-703: worktree teardown is now the `teardown` FSM phase (teardownWorktreeOnce
       // removed) — only the label clear remains inline here.
@@ -6245,6 +6397,12 @@ function runTick() {
       // A test may inject its own via startScheduler({ prAdapter }); production
       // gets the real makePrView-backed adapter.
       prAdapter: runningOpts.prAdapter,
+      // CTL-1157 (ALARM-NOT-BLOCK): arm the real open-PR ENUMERATOR in production so
+      // the terminal sweep can fire the recovery.done-applied-with-open-pr alarm when
+      // it lands a Done while a PR is still open (it no longer refuses the write). A
+      // test may inject its own via startScheduler({ checkOpenPrs }); a bare unit tick
+      // (no runningOpts override) gets schedulerTick's permissive no-op default.
+      checkOpenPrs: runningOpts.checkOpenPrs ?? defaultCheckOpenPrs,
       // CTL-671: phantom-sweep seams threaded from startScheduler. Undefined for
       // a direct startScheduler caller that did not opt in (unit tests) →
       // schedulerTick's SAFE no-op defaults apply, so a bare daemon tick never
@@ -6485,34 +6643,71 @@ function runTick() {
       // re-dispatch of one anchor to once per cooldown window, exactly like the
       // per-item path (scheduler.mjs recovery block).
       boardHealth: runningOpts.boardHealth ?? {
-        getBoard: () => getAllTicketDescriptors({ includeRemoved: false }),
+        // CTL-1157 (Codex round-6, P1): OPEN the broker DB handle before any reader.
+        // getAllTicketDescriptors + getAllPrStatuses both go through broker-state's
+        // ensure(), which THROWS when the module-level handle was never opened — and
+        // the exec-core daemon never opens it here (only the separate reconcile timer
+        // does, on a boot-order that isn't guaranteed before the first board-health
+        // tick). assembleBoardState swallows the throw, so the board AND the PR-status
+        // map silently come back empty and the phantom-merged / orphaned-open-PR cohorts
+        // this change adds are unobservable in BOTH shadow and enforce. openBrokerStateDb
+        // is idempotent (returns the existing handle) and read-safe under WAL, so calling
+        // it per reader is cheap and correct whether or not another opener ran first.
+        getBoard: () => {
+          try { openBrokerStateDb(); } catch { /* best-effort — empty board on open failure */ }
+          return getAllTicketDescriptors({ includeRemoved: false });
+        },
         readEventRing: () => readBoardHealthEventTail(),
         getReconcileMarkers: () => readReconcileHealthMarkers({}),
-        act: ({ anchor, boardContext, decision }) => {
-          const deps = { orchDir: runningOpts.orchDir };
-          // Reuse the recovery cooldown ledger so we don't re-dispatch the same
-          // anchor every board-health interval (the cap counts only `.complete`).
-          if (recoveryShouldSkipItem(anchor, deps)) {
-            return { dispatched: false, reason: "recovery-cooldown", anchor };
-          }
-          const r = recoveryInvokeRecoveryPass(
-            anchor,
-            {
-              boardContext,
-              reason: `board-health: ${decision?.gate?.reason ?? "board anomaly"} — holistic recovery-pass delegate`,
-            },
-            deps,
-          );
-          // Start the cooldown window on a dispatch attempt (success OR failure) so
-          // a failing anchor isn't re-dispatched until the window elapses.
+        // CTL-1157 (A11): the filter_state PR-status reader (phantom/orphaned-PR
+        // invariants) + the provably-dead host set for the HRW-safe holistic
+        // failover. computeSurvivingRoster already exists (scheduler.mjs) and
+        // returns the roster unchanged for roster ≤ 1 → empty dead set at N=1.
+        getPrStatusMap: () => {
+          try { openBrokerStateDb(); } catch { /* best-effort — empty PR map on open failure */ }
+          return getAllPrStatuses();
+        },
+        // CTL-1157 (Codex #4): resolve a stuck ticket → its GitHub "owner/repo" so
+        // the phantom/orphaned-PR cohorts disambiguate a cross-repo #-collision by
+        // the ticket's repo (registry repoRoot → ownerRepoFromRepoRoot) instead of
+        // skipping it and hiding a genuine orphaned open PR. NEVER bare linearis
+        // (QUOTA rule): teamOf + the local registry only. Null when the team/
+        // repoRoot is unknown or the path carries no /github/<owner>/<repo> segment
+        // (the documented true residual → number-only/ambiguous fallback).
+        repoForTicket: (ticket) => {
           try {
-            recoveryRecordIntent(
-              anchor,
-              { type: "recovery-pass", decision: "fix", fix_class: "board-health", outcome: !!r?.dispatched, source: "board-health" },
-              deps,
-            );
-          } catch { /* ledger write is best-effort — never block the tick */ }
-          return r;
+            const team = teamOf(ticket);
+            if (!team) return null;
+            return ownerRepoFromRepoRoot(getProjectConfig(team)?.repoRoot ?? null);
+          } catch {
+            return null;
+          }
+        },
+        deadHosts: (roster) => roster.filter((h) => !computeSurvivingRoster(roster).includes(h)),
+        // CTL-1157 (MUST-FIX 2): iterate the ordered candidate list and dispatch
+        // the FIRST actionable (non-cooldown/non-latched) candidate — instead of
+        // returning {dispatched:false} on the first skip, which wedged the whole
+        // holistic pass on one latched anchor and starved the rest of the cohort.
+        // The per-candidate cooldown gate + the recovery-pass intent ledger
+        // (decision:"fix" auto-increments attempts; cap 2 + 30-min cooldown) are
+        // preserved verbatim inside the loop — still exactly ONE dispatch per scan.
+        // CTL-1157 (F1): thread the executor-resolved dispatch fn (runningOpts.dispatch)
+        // through dispatchTicket so a delegate launches under the node's executor
+        // (sdk vs bg) instead of a hardcoded claude --bg. On a bg fleet this is a
+        // pure no-op (dispatchForExecutor("bg") === defaultDispatch).
+        act: ({ anchor, candidates = [], boardContext, decision }) => {
+          const deps = {
+            orchDir: runningOpts.orchDir,
+            dispatchTicket: (o, t, p) => dispatchTicket(o, t, p, { dispatch: runningOpts.dispatch }),
+          };
+          return holisticBoardHealthAct(
+            { anchor, candidates, boardContext, decision },
+            {
+              shouldSkipItem: (cand) => recoveryShouldSkipItem(cand, deps),
+              invokeRecoveryPass: (cand, ctx) => recoveryInvokeRecoveryPass(cand, ctx, deps),
+              recordIntent: (cand, intent) => recoveryRecordIntent(cand, intent, deps),
+            },
+          );
         },
       },
     });
@@ -6589,6 +6784,49 @@ function scheduleDebouncedTick(debounceMs) {
   debounceTimer = setTimeout(runTick, debounceMs);
 }
 
+// holisticBoardHealthAct — CTL-1157 (MUST-FIX 2 + GROUP-3 #3): the board-health
+// holistic `act` loop, extracted pure so it is unit-testable (the daemon wiring
+// binds the real recovery seams around it). Walk the ordered candidate cohort and
+// perform EXACTLY ONE real recovery-pass dispatch per scan. A candidate is SKIPPED
+// (continue to the next) when EITHER:
+//   (a) the intent-LEDGER cooldown/attempts gate latches it (shouldSkipItem), OR
+//   (b) the invoke RESULT is a NON-dispatch — recovery-pass-cycle-cap-exhausted /
+//       latched / no-op. The ledger gate (a) does NOT see the event-counted recovery
+//       cycle cap, so a candidate can pass (a) yet not dispatch; returning that result
+//       would wedge the whole pass on one cap-exhausted anchor and starve the cohort.
+// recordIntent starts the cooldown window on EVERY real invoke attempt (success or
+// non-dispatch) so a chronically-flagged anchor isn't re-hammered next scan. Only a
+// REAL dispatch (r.dispatched) ends the scan. Returns the dispatching candidate's
+// result, or {dispatched:false, reason:"all-candidates-cooldown"} when none dispatched.
+export function holisticBoardHealthAct(
+  { anchor = null, candidates = [], boardContext, decision } = {},
+  { shouldSkipItem, invokeRecoveryPass, recordIntent } = {}
+) {
+  const ordered = candidates.length ? candidates : (anchor ? [anchor] : []);
+  for (const cand of ordered) {
+    // (a) cooldown/attempts-latched → try the next candidate (MUST-FIX 2).
+    if (shouldSkipItem(cand)) continue;
+    const r = invokeRecoveryPass(cand, {
+      boardContext,
+      reason: `board-health: ${decision?.gate?.reason ?? "board anomaly"} — holistic recovery-pass delegate`,
+    });
+    // Start the cooldown window on a dispatch attempt (success OR failure).
+    try {
+      recordIntent(cand, {
+        type: "recovery-pass",
+        decision: "fix",
+        fix_class: "board-health",
+        outcome: !!r?.dispatched,
+        source: "board-health",
+      });
+    } catch { /* ledger write is best-effort — never block the tick */ }
+    // (b) a NON-dispatch RESULT is a SKIP, not this scan's dispatch — CONTINUE.
+    if (!r?.dispatched) continue;
+    return r; // exactly ONE real dispatch per scan
+  }
+  return { dispatched: false, reason: "all-candidates-cooldown" };
+}
+
 // startScheduler — immediate authoritative tick, arm the periodic timer, then
 // start the event-log fast path. `dispatch` / `readEligible` / `exec` /
 // `writeStatus` are injectable so a test drives a hermetic daemon (`exec` is
@@ -6650,6 +6888,10 @@ export function startScheduler({
     }),
   },
   preflight = preflightWorkspaceLabels, // CTL-585
+  // CTL-1157 (ALARM-NOT-BLOCK): optional override for the terminal-sweep open-PR
+  // enumerator. Undefined → runTick arms the real defaultCheckOpenPrs (production);
+  // a test may inject its own to exercise the alarm branch hermetically.
+  checkOpenPrs,
   // CTL-671: phantom-sweep seams. Undefined → schedulerTick's safe no-op
   // defaults (hermetic for unit tests that call startScheduler directly). The
   // real daemon (startDaemon) and the standalone main() pass the real impls.
@@ -6689,6 +6931,7 @@ export function startScheduler({
     fetchBatch, // CTL-755/784: optional admission-gate batch hydration seam
     appendPhaseAdvanceHeldEvent, // CTL-755: optional held-indicator emit seam
     prAdapter, // CTL-642/758: live PR-merged adapter (built once above), threaded per-tick
+    checkOpenPrs, // CTL-1157: optional terminal-sweep open-PR gate override (runTick arms the real one)
     classifyResolution, // CTL-671: optional phantom-sweep Linear-probe seam
     isBgJobAlive, // CTL-671: optional phantom-sweep bg-liveness seam
     botUserIds, // CTL-781: respect-assignment predicate membership set

@@ -89,6 +89,15 @@ export function reasoningRecoveryPass(items, opts = {}) {
     postComment = defaultPostComment,
     emitEvent = defaultEmitEvent,
     shouldSkipItem = defaultShouldSkipItem,
+    // CTL-1157 Workstream B: read prior intent attempts so a DEFER marker can pin
+    // `attempts` (no auto-increment → does not burn the bounded-LLM budget).
+    // Bound to the tick's orchDir at the scheduler call site (like recordIntent).
+    readIntentAttempts = defaultReadIntentAttempts,
+    // CTL-1157 Workstream C: write the curated 6-field explanation signal on every
+    // enforce escalate so the Needs-You inbox + detail pane render it. Bound to the
+    // tick's orchDir at the scheduler call site; default resolves orchDir from env
+    // (a no-op when unset, e.g. unit tests).
+    writeEscalationSignal = defaultWriteEscalationSignal,
     // CTL-1176: DIAGNOSE evidence-collector. Read-only — populates an item's
     // {logsOutput, jobState} from `claude logs` + the bg job state when the
     // caller didn't already attach them. Injectable for tests.
@@ -140,7 +149,7 @@ export function reasoningRecoveryPass(items, opts = {}) {
   const tickStats = {
     queueSize: items.length,
     processed: 0,
-    decisions: { fix_seam: 0, fix_bounded_llm: 0, escalate: 0 },
+    decisions: { fix_seam: 0, fix_bounded_llm: 0, escalate: 0, defer: 0 },
     actions: { fixed: 0, fixFailed: 0, escalated: 0, deferred: 0, errors: 0 },
     ledgerSkipped: [],
     terminalSkipped: [],
@@ -201,8 +210,9 @@ export function reasoningRecoveryPass(items, opts = {}) {
     // rollup. Emitted in BOTH shadow and enforce: it records the classifier's
     // verdict, independent of whether the mode then acts on it.
     tickStats.processed += 1;
-    const rule = decision === "escalate" ? 3 : fix_class === "bounded-llm" ? 2 : 1;
+    const rule = decision === "escalate" || decision === "defer" ? 3 : fix_class === "bounded-llm" ? 2 : 1;
     if (decision === "escalate") tickStats.decisions.escalate += 1;
+    else if (decision === "defer") tickStats.decisions.defer += 1;
     else if (fix_class === "bounded-llm") tickStats.decisions.fix_bounded_llm += 1;
     else tickStats.decisions.fix_seam += 1;
     emitEvent({
@@ -217,7 +227,54 @@ export function reasoningRecoveryPass(items, opts = {}) {
     let outcome = null;
     let actionLog = [];
 
-    if (mode === "shadow") {
+    if (decision === "defer") {
+      // CTL-1157 Workstream B: an untyped stuck item DEFERS rather than latching
+      // at escalate. In ENFORCE, write a cooldown-ONLY marker — NO escalated latch,
+      // and pin `attempts` to the prior value so it does NOT auto-increment. After
+      // the 30-min window both the per-item path AND board-health's holistic pass
+      // can reconsider it.
+      //
+      // CTL-1157 F #4 (Codex round-4): SHADOW must NOT write the marker. A
+      // `decision:"defer"` marker is honored by defaultShouldSkipItem in ENFORCE too,
+      // so a shadow-written defer marker would suppress the ticket for up to the whole
+      // cooldown window after an operator flips shadow→enforce — shadow silently
+      // mutating enforce scheduler state, violating the shadow-first contract (shadow =
+      // telemetry only, zero mutation). Skipping the marker is safe here: the defer
+      // path posts NO comment and defaultClassifyTicket is a pure deterministic
+      // classifier, so re-processing a deferred item on the next tick costs only a
+      // cheap re-classify + one recovery.would-defer emit — NOT the comment/fork storm
+      // the CTL-1176 rate-limit marker on the fix/escalate shadow path guards against.
+      if (mode !== "shadow") {
+        const priorAttempts = (() => {
+          try {
+            return readIntentAttempts(item.ticket) ?? 0;
+          } catch {
+            return 0;
+          }
+        })();
+        try {
+          recordIntent(item.ticket, {
+            type: "recovery-pass",
+            decision: "defer",
+            fix_class: fix_class ?? "board-health",
+            attempts: priorAttempts, // pin → no auto-increment, no latch
+          });
+          actionLog.push("recorded defer marker (cooldown-only, no latch)");
+        } catch (err) {
+          log(`recovery-reasoning: ${item.ticket} defer marker write failed: ${err.message}`);
+        }
+      } else {
+        actionLog.push("would-defer (shadow: no cooldown marker written)");
+      }
+      emitEvent({
+        type: mode === "shadow" ? "recovery.would-defer" : "recovery.deferred",
+        ticket: item.ticket,
+        reason: details.reason,
+        details: { mode },
+      });
+      tickStats.actions.deferred += 1;
+      outcome = { ticket: item.ticket, decision: "defer", reason: details.reason, actionLog, mode };
+    } else if (mode === "shadow") {
       // Shadow mode: emit .would-* events, post diagnoses, invoke nothing
       actionLog.push(`would-classify: ${decision} (${fix_class})`);
       const reasonStr = details.reason || "no reason";
@@ -348,6 +405,18 @@ export function reasoningRecoveryPass(items, opts = {}) {
       } else if (decision === "escalate") {
         const escalationPayload = buildEscalationPayload(item, classification);
 
+        // CTL-1157 Workstream C: write the curated 6-field explanation signal so
+        // the orch-monitor Needs-You inbox + detail pane render a real brief for a
+        // router-originated escalation (previously they found no `explanation` and
+        // rendered nothing). Best-effort in its OWN try/catch so a write failure
+        // never skips the recordIntent latch below.
+        try {
+          writeEscalationSignal(item.ticket, escalationPayload, { log });
+          actionLog.push("wrote curated escalation signal (phase-recovery-pass.json)");
+        } catch (err) {
+          log(`recovery-reasoning: ${item.ticket} escalation signal write failed: ${err.message}`);
+        }
+
         try {
           recordIntent(item.ticket, {
             type: "recovery-pass",
@@ -441,12 +510,26 @@ export function defaultClassifyTicket(evidence, opts = {}) {
     };
   }
 
-  // Rule 3: Check for human escalations (default)
+  // Rule 3: human escalation — but ONLY latch (escalate) when there is concrete
+  // evidence a human is genuinely needed. CTL-1157 Workstream B: an UNTYPED stuck
+  // item (no R12 belief, the generic "unclassified" reason) no longer dead-ends at
+  // the permanent escalate latch; it DEFERS (cooldown-only, no latch) so the
+  // holistic board-health delegate can triage it after the window.
+  const reason = determineEscalationReason(logsOutput, jobState, signal, beliefState);
+  const hasConcreteEvidence =
+    Boolean(beliefState?.escalate_human) || reason !== UNCLASSIFIED_ESCALATION_REASON;
+  if (hasConcreteEvidence) {
+    return {
+      decision: "escalate",
+      fix_class: "human",
+      details: { reason },
+    };
+  }
   return {
-    decision: "escalate",
-    fix_class: "human",
+    decision: "defer",
+    fix_class: "board-health",
     details: {
-      reason: determineEscalationReason(logsOutput, jobState, signal, beliefState),
+      reason: "No typed failure signature; holistic board-health delegate will triage",
     },
   };
 }
@@ -629,6 +712,14 @@ export function generateRemediateBrief(category) {
   return briefs[category] ?? `Resolve the ${category} issue and retry the phase.`;
 }
 
+// CTL-1157: the sentinel "no concrete evidence" escalation reason. Shared between
+// determineEscalationReason (its default) and defaultClassifyTicket's Rule-3
+// escalate-vs-defer split (Workstream B): when the reason IS this sentinel and no
+// R12 belief fired, there is no typed failure signature, so the item DEFERS to the
+// holistic board-health delegate instead of dead-ending at a permanent escalate
+// latch. Keep the exact string stable — it is the discriminator.
+export const UNCLASSIFIED_ESCALATION_REASON = "Unclassified stuck state requires human review";
+
 // Determine escalation reason (human decision)
 export function determineEscalationReason(logsOutput, jobState, signal, beliefState) {
   const reasons = [];
@@ -649,7 +740,7 @@ export function determineEscalationReason(logsOutput, jobState, signal, beliefSt
     reasons.push(`Failure reason: ${signal.failureReason}`);
   }
 
-  return reasons.length > 0 ? reasons.join("; ") : "Unclassified stuck state requires human review";
+  return reasons.length > 0 ? reasons.join("; ") : UNCLASSIFIED_ESCALATION_REASON;
 }
 
 // ─── Act phase (guarded fix: seam or remediate cap) ────────────────────────
@@ -778,6 +869,96 @@ Reasoning pass determined this requires human judgment.
 This ticket is now marked for human review.`;
 }
 
+// synthesizeEscalationExplanation — PURE. Build the 6-field curated brief
+// (the keys match orch-monitor board-data.mjs EXPLANATION_RENDER_FIELDS exactly:
+// call_to_action / outcome / problem / why_you / why_not_auto / what_to_do)
+// (+escalation_type for deriveEscalationType) from a buildEscalationPayload-shaped
+// object. The fields that pass through verbatim (call_to_action/problem/
+// why_not_auto) come from the payload; outcome/why_you/what_to_do are synthesized
+// when the payload doesn't already carry a richer authored value. Never
+// tautological ("requires human judgment").
+export function synthesizeEscalationExplanation(escalationPayload = {}) {
+  const p = escalationPayload || {};
+  const reason = p.observed?.diagnosis ?? p.problem ?? "an unclassified stuck state";
+  const instructions = Array.isArray(p.instructions) ? p.instructions.filter(Boolean) : [];
+  const what_to_do = instructions.length
+    ? `${instructions.map((s) => String(s).replace(/[.\s]+$/, "")).join(". ")}. Once resolved, the next scheduler tick picks it up.`
+    : (p.remediation_then_retry
+      ?? "Resolve the stuck state by hand; the next scheduler tick re-evaluates the ticket and re-dispatches if appropriate.");
+  const outcome = p.remediation_then_retry
+    ?? "Once the stuck state is resolved by hand, the next scheduler tick re-evaluates the ticket and re-dispatches if appropriate.";
+  const why_you = p.why_you
+    ?? `No autonomous fix path matched this failure: ${reason}. A human must read the raw evidence and decide: re-dispatch the phase, fix the branch by hand, or close the ticket.`;
+  const why_not_auto = p.why_not_auto
+    ?? p.blocked_capability
+    ?? "neither a deterministic act-seam nor a bounded-LLM fix matched this failure signature, so the pass has no safe action to take";
+  return {
+    escalation_type: typeof p.escalation_type === "string" ? p.escalation_type : "manual",
+    call_to_action: p.call_to_action ?? `Look at this ticket's worker log and decide whether to re-dispatch the phase, fix the branch by hand, or close it`,
+    problem: p.problem ?? `This ticket is stuck and the recovery pass could not classify it for an autonomous fix: ${reason}`,
+    why_you,
+    why_not_auto,
+    what_to_do,
+    outcome,
+  };
+}
+
+// writeEscalationSignal — CTL-1157 Workstream C. Write workers/<ticket>/
+// phase-recovery-pass.json carrying the curated `.explanation` so the UI renders a
+// real Needs-You brief for a router-originated escalation. Read-modify-write
+// (preserve a prior needsHumanSince) + atomic tmp+rename (mkdir -p the worker
+// dir). Best-effort: catches all, logs via opts.log, NEVER throws.
+function writeEscalationSignal(orchDir, ticket, escalationPayload, opts = {}) {
+  const log = opts.log ?? defaultLogFn;
+  if (!orchDir || !ticket) return;
+  try {
+    const p = join(orchDir, "workers", ticket, "phase-recovery-pass.json");
+    const explanation = synthesizeEscalationExplanation(escalationPayload);
+    let prior = {};
+    try {
+      prior = JSON.parse(readFileSync(p, "utf8")) ?? {};
+    } catch {
+      prior = {};
+    }
+    const nowIso = new Date().toISOString();
+    const signal = {
+      ...prior,
+      // CTL-1157 F #6 (Codex round-4): persist the ticket on the signal. signal-reader
+      // parseSignal keys off raw.ticket, and status:"needs-human" is NON-terminal, so
+      // this fresh recovery-pass signal wins over the failed phase signal — WITHOUT a
+      // ticket, readWorkerSignals() would then report ticket:null and scheduler-recovery
+      // / board-health consumers would lose the escalated ticket after the first pass.
+      ticket,
+      status: "needs-human",
+      needsHumanSince:
+        typeof prior.needsHumanSince === "string" && prior.needsHumanSince !== ""
+          ? prior.needsHumanSince
+          : nowIso,
+      updatedAt: nowIso,
+      phase: RECOVERY_PASS_PHASE,
+      explanation,
+    };
+    mkdirSync(dirname(p), { recursive: true });
+    const tmp = `${p}.tmp.${process.pid}`;
+    writeFileSync(tmp, JSON.stringify(signal, null, 2));
+    renameSync(tmp, p); // atomic
+  } catch (err) {
+    try {
+      log(`recovery-reasoning: ${ticket} escalation signal write failed: ${err.message}`);
+    } catch {
+      /* logging must never break the escalate path */
+    }
+  }
+}
+
+// defaultWriteEscalationSignal — the injectable default the scheduler binds to the
+// tick's orchDir. Resolves orchDir from opts/env (a no-op when unset).
+export function defaultWriteEscalationSignal(ticket, escalationPayload, opts = {}) {
+  const orchDir = opts.orchDir ?? resolveOrchDir();
+  if (!orchDir) return;
+  writeEscalationSignal(orchDir, ticket, escalationPayload, opts);
+}
+
 // buildEscalationPayload — the composer-ready EscalationPayload for the router's
 // OWN escalations (Rule-3 "human" classification, which never reaches the skill).
 // CTL-1221's notification-composer.ts and board-data.mjs's deriveEscalationType /
@@ -877,6 +1058,7 @@ function promoteNumericAttrs(type, details) {
     num("recovery.decisions.fix_seam", details.decisions?.fix_seam);
     num("recovery.decisions.fix_bounded_llm", details.decisions?.fix_bounded_llm);
     num("recovery.decisions.escalate", details.decisions?.escalate);
+    num("recovery.decisions.defer", details.decisions?.defer);
     num("recovery.actions.fixed", details.actions?.fixed);
     num("recovery.actions.fix_failed", details.actions?.fixFailed);
     num("recovery.actions.escalated", details.actions?.escalated);
@@ -904,6 +1086,13 @@ function promoteNumericAttrs(type, details) {
     for (const [name, r] of Object.entries(details.invariants ?? {})) {
       num(`recovery.inv.${name}.failed`, r?.failed);
     }
+    // CTL-1157 SLICE 3 (OTEL turn-56): promote the three stuck-cohort failed-counts
+    // under the AGREED underscored top-level names so the Done-safety dashboards bind
+    // to a stable contract (not the camelCase recovery.inv.<key>.failed mirror above).
+    // These are the cohorts board-health was blind to before CTL-1157.
+    num("cohort_phantom_merged_pr", details.invariants?.phantomMergedPr?.failed);
+    num("cohort_orphaned_pr", details.invariants?.orphanedOpenPr?.failed);
+    num("cohort_frozen_needs_human", details.invariants?.frozenNeedsHuman?.failed);
   }
   return a;
 }
@@ -1291,9 +1480,15 @@ export function defaultInvokeRecoveryPass(ticket, briefObj = {}, deps = {}) {
 
   // Lazy imports — same rationale as defaultInvokeRemediateCapped (avoid loading
   // the dispatch graph on the off/shadow paths; no import cycle).
-  let dispatchTicket, countRecoveryPassCycles;
+  let dispatchTicket, countRecoveryPassCycles, settleDispatchSync, isThenable, backstopOnRejection, sdkSignalRunnable;
   try {
-    ({ dispatchTicket } = deps.dispatchMod ?? requireSync("./dispatch.mjs"));
+    // CTL-1157 F2: also pull the async-settlement seam so an sdk dispatch Promise
+    // is turned into the synchronous {code,async:true} the rest of this fn expects.
+    // CTL-1157 F #4: sdkSignalRunnable is the SDK-aware verifySync — it confirms the
+    // synchronously-written prelaunch signal is actually runnable, so a resolved
+    // {code:1} (auth/prelaunch failure) is NOT reported as a successful dispatch.
+    ({ dispatchTicket, settleDispatchSync, isThenable, backstopOnRejection, sdkSignalRunnable } =
+      deps.dispatchMod ?? requireSync("./dispatch.mjs"));
     ({ countRecoveryPassCycles } = deps.eventScanMod ?? requireSync("./event-scan.mjs"));
   } catch (err) {
     return {
@@ -1375,7 +1570,46 @@ export function defaultInvokeRecoveryPass(ticket, briefObj = {}, deps = {}) {
   //     phase `recovery-pass` to /catalyst-dev:recovery-pass (skill_for_phase).
   let r;
   try {
-    r = dispatch(orchDir, ticket, RECOVERY_PASS_PHASE);
+    const rawR = dispatch(orchDir, ticket, RECOVERY_PASS_PHASE);
+    // CTL-1157 F2: on an sdk fleet `dispatch` returns a Promise; settle it
+    // synchronously into {code:0,async:true} so the success check below works
+    // exactly as it does for a synchronous bg dispatch. On a bg fleet rawR is a
+    // plain object → isThenable false → r = rawR (byte-identical no-op). On a
+    // REJECTED async launch, onSettled composes the FAILED terminal backstop
+    // (so the ticket doesn't strand at "dispatched") with a cooldown clear
+    // (preserving attempts) so a reliably-failing launch retries sooner, bounded
+    // by the attempts cap of 2.
+    if (isThenable && isThenable(rawR)) {
+      const onSettled = (_res, err) => {
+        // CTL-1157 F #4: fail on BOTH a rejection AND a resolved non-zero code. A
+        // resolved {code:1} (e.g. sdkRunPhaseAgent reporting an auth/prelaunch failure
+        // WITHOUT throwing) previously slipped through — onSettled only checked `err`,
+        // so the recovery-pass was recorded as dispatched while no worker was runnable.
+        const failed = err || (_res && Number.isFinite(_res.code) && _res.code !== 0);
+        if (!failed) return; // clean resolution → the worker owns its terminal event
+        try {
+          backstopOnRejection?.({ orchDir, ticket, phase: RECOVERY_PASS_PHASE, log: defaultLogFn })(_res, err ?? new Error(`sdk recovery-pass resolved code=${_res?.code}`));
+        } catch {
+          /* best-effort */
+        }
+        try {
+          defaultClearIntentCooldown(ticket, { orchDir });
+        } catch {
+          /* best-effort */
+        }
+      };
+      // verifySync (sdkSignalRunnable) makes the SYNCHRONOUS provisional code reflect
+      // whether the prelaunch actually wrote a runnable signal — mirrors the canonical
+      // monitor/scheduler/recovery entry-point wiring, so an sdk dispatch whose
+      // prelaunch failed is reported as a dispatch FAILURE (r.code:1) instead of a
+      // blind success.
+      r = settleDispatchSync(rawR, {
+        verifySync: () => (sdkSignalRunnable ? sdkSignalRunnable(orchDir, ticket, RECOVERY_PASS_PHASE) : true),
+        onSettled,
+      });
+    } else {
+      r = rawR;
+    }
   } catch (err) {
     return {
       success: false,
@@ -1398,6 +1632,12 @@ export function defaultInvokeRecoveryPass(ticket, briefObj = {}, deps = {}) {
         bg_job_id: r.signal?.bg_job_id ?? null,
         worktreePath: r.worktreePath ?? null,
         seamsTriedCount: seamsTried.length,
+        // CTL-1157 F P1: under executor=sdk the query() runs IN-PROCESS and settles
+        // asynchronously; `r.pending` is the (never-rejecting) settled chain. The
+        // disposable delegate-runner child MUST await this before process.exit, or it
+        // kills the in-process worker it just launched. bg dispatch is synchronous →
+        // r.pending is undefined → no-op.
+        pendingSdk: r.async ? r.pending ?? null : null,
       },
     };
   }
@@ -1504,6 +1744,15 @@ export function defaultShouldSkipItem(ticket, opts = {}) {
     return false; // no ledger / malformed → never acted → don't skip
   }
 
+  // CTL-1157 Workstream B: a DEFER marker is cooldown-ONLY — never attempts-
+  // latched, never escalated. Gate purely on the 30-min window so after it elapses
+  // BOTH the per-item path AND board-health's holistic pass can reconsider the
+  // untyped stuck item (it never dead-ends at a permanent latch).
+  if (data?.decision === "defer") {
+    const last = typeof data?.lastTs === "number" ? data.lastTs : data?.ts;
+    return typeof last === "number" && now() - last < RECOVERY_COOLDOWN_MS;
+  }
+
   // (c) already escalated → terminal, hand off to human, stop acting.
   if (data?.escalated === true) return true;
 
@@ -1535,5 +1784,52 @@ export function defaultForgetIntent(ticket, opts = {}) {
     return true;
   } catch {
     return false; // absent (ENOENT) or unremovable → nothing to forget
+  }
+}
+
+// defaultReadIntentAttempts — CTL-1157 Workstream B: the prior `attempts` count
+// from a ticket's recovery-intent ledger entry (0 when absent/malformed). Lets a
+// DEFER marker pin attempts so recordIntent does NOT auto-increment (a deferred
+// item must not burn the bounded-LLM budget). Never throws.
+export function defaultReadIntentAttempts(ticket, opts = {}) {
+  const orchDir = opts.orchDir ?? resolveOrchDir();
+  if (!orchDir || !ticket) return 0;
+  const p = recoveryIntentPath(orchDir, ticket);
+  try {
+    const data = JSON.parse(readFileSync(p, "utf8"));
+    return typeof data?.attempts === "number" ? data.attempts : 0;
+  } catch {
+    return 0;
+  }
+}
+
+// defaultClearIntentCooldown — CTL-1157 Workstream F2 (MUST-FIX 5 / H2). Reset a
+// ticket's cooldown window so a reliably-FAILING async (sdk) recovery launch
+// retries sooner instead of being silenced for the full 30-min window. Deletes
+// BOTH `lastTs` AND `ts` — defaultShouldSkipItem's cooldown branch falls back to
+// `ts` when `lastTs` is absent, so clearing only `lastTs` would STILL silence via
+// `ts`. PRESERVES `attempts` (the affirmed-sound storm bound: the attempts cap of
+// 2 still latches a persistently-failing launch after two retries, so the faster
+// retry is BOUNDED, not an immediate-retry storm) and `escalated` (the terminal
+// latch). Distinct from defaultForgetIntent, which deletes the whole entry
+// (resetting attempts to 0 → removes the storm bound). Idempotent; never throws.
+export function defaultClearIntentCooldown(ticket, opts = {}) {
+  const orchDir = opts.orchDir ?? resolveOrchDir();
+  if (!orchDir || !ticket) return false;
+  const p = recoveryIntentPath(orchDir, ticket);
+  let prior;
+  try {
+    prior = JSON.parse(readFileSync(p, "utf8"));
+  } catch {
+    return false; // absent / malformed → nothing to clear
+  }
+  if (!prior || typeof prior !== "object") return false;
+  delete prior.lastTs;
+  delete prior.ts;
+  try {
+    writeFileSync(p, JSON.stringify(prior));
+    return true;
+  } catch {
+    return false;
   }
 }

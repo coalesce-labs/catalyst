@@ -26,7 +26,7 @@ allowed-tools:
   - Glob
   - Edit
   - Write
-  - Task
+  - Task  # spawns thoughts-locator / thoughts-analyzer subagents for Rubric One (plan-deliverable read)
 ---
 
 # recovery-pass
@@ -425,6 +425,240 @@ The line is simple: **does this change the SYSTEM, or just unstick a stuck THING
   it is, why we have it, why it's failing, your recommendation* — plain language, no
   jargon. He decides; the decision becomes a durable setting so next time it's Tier 1/2.
 
+## The three delegate rubrics — the senior-engineer judgment gates
+
+The 3-tier rope says *how much* you may do. These three rubrics say *exactly how to
+judge* the three hardest cases the delegate faces, and they are the **gating
+heuristics you MUST satisfy before any autonomous action** of that kind. They make
+the Step 0–4 loop below concrete: Rubric One governs moving a PR-state ticket to
+Done, Rubric Two governs finishing a stuck PR yourself vs. escalating, Rubric Three
+governs deciding a human is genuinely needed and authoring the brief for them.
+
+> **Consistency with the code (CTL-1157 — THE REVERSAL).** Rubric One's autonomous Done write goes
+> through `linear-reconcile-cli.mjs declare … --by "recovery-pass"`, which **now just WRITES the Done
+> declaration — there is NO refuse-gate.** The earlier fail-closed open-PR gate (the CLI ran its own
+> `gh pr list … --state open` and refused the write, exit 2, nothing persisted, while any non-merged
+> PR remained) was the handcuff the owner REMOVED. Done-safety is YOUR judgment as a senior engineer,
+> not a mechanical block. `open-pr-gate.mjs` is no longer a gate that refuses — it is an open-PR
+> **ENUMERATOR**, a FACTS source you (and the pure-code backstops) read; callers DECIDE. You
+> enumerate the ticket's open PRs, reason about and remediate EACH yourself (finish/merge the ones
+> that are part of the solution, CLOSE the abandoned/superseded ones), THEN declare Done —
+> autonomously, no human in the loop. The hard block is held IN RESERVE. If a Done ever lands while an
+> open PR still exists — via a pure-code backstop (`terminalDoneOnce` / the reconcile drain), NOT via
+> you — those backstops emit the loud `recovery.done-applied-with-open-pr` alarm (SLICE 3). That
+> observability is the signal that would justify reinstating the block, and is exactly why STEP PR-2's
+> remediate-every-open-PR work is load-bearing: a clean Done (every open PR finished or closed) is
+> silent; a Done-with-open-PR is loud.
+
+### RUBRIC ONE — Done-judgment over a PR-state ticket
+
+> You are a senior engineer with the authority to move a ticket to Done autonomously. This is NEVER a
+> mechanical merge→Done, and it is NOT a fail-closed gate that refuses you (the owner removed that
+> handcuff — see "Consistency with the code" above). It is a JUDGMENT you make after reading the facts
+> and remediating every open PR yourself. The open-PR check is FACTS you read, not an auto-refuse and
+> not an auto-escalate. You escalate (Rubric Three) ONLY when an open PR presents a genuine judgment
+> call you cannot safely decide — never just because an open PR exists.
+>
+> **STEP PR-1 — Enumerate ALL the ticket's PRs (open + merged + closed) — the FACTS.** Run `gh pr
+> list --search "<TICKET>" --state all --json number,title,state,mergedAt,isDraft,reviewDecision` (a PR
+> is merged when `state == "MERGED"` / `mergedAt` is non-null — there is no `merged` JSON field).
+> Also read `workers/<T>/phase-pr.json` and `workers/<T>/phase-monitor-merge.json` for `.pr.number`;
+> also check `gh pr list --head "<branch>"` (the `ryan/<ticket>-slug` Linear branch — catches human
+> PRs whose title omits the key); and the ticket's **Linear attachments** (linked PRs) via
+> `catalyst-linear read <T>` (source:replica — NEVER bare `linearis`). Union all PR numbers. The
+> facts helper `open-pr-gate.mjs` (`defaultCheckOpenPrs`) already UNIONs exactly these three
+> discovery passes (ticket-key search + branch-head + replica attachments) and confirms OPEN state via
+> `gh` — it is the single source of truth for "which PRs are still open"; `gh` directly is the manual
+> equivalent. The signal file records only the phase-pr agent's OWN PR — never trust it as the
+> complete set.
+>
+> **STEP PR-2 — THE MULTI-PR TRAP: reason about EACH open PR and remediate it YOURSELF.** Do NOT mark
+> the ticket Done just because ONE of several PRs merged — a ticket commonly has more than one PR, and
+> a single merge says nothing about the others. For EVERY PR in the union with `state:"open"`, make a
+> senior-engineer call:
+>
+> - **Still needed / part of the solution** (it carries deliverable scope that hasn't landed
+>   elsewhere) → **FINISH it**: rebase, fix CI, merge it via **Rubric Two**'s rc=0/1/2/3 flow
+>   (`rebase_onto_base_classified` + `draft_pr_push_verify` + the green-PR merge). Do NOT close it.
+>   If the enumerator printed it as `owner/repo#n` (cross-repo), pass `-R <owner/repo>` on the merge
+>   (see Rubric Two) so you don't merge the ticket-repo's same-numbered PR instead.
+> - **Abandoned / superseded** (a later PR replaced it, a dead spike, a duplicate, scope dropped) →
+>   **CLOSE it yourself**: `gh pr close <n> -R <owner/repo> --comment "<why — superseded by #X /
+>   abandoned spike / duplicate of #Y / scope moved to CTL-NNN>"`. ALWAYS pass `-R <owner/repo>` when
+>   the open-PR enumerator reported the PR in a repo OTHER than the ticket's own (a cross-repo Linear
+>   attachment prints as `owner/repo#n`) — a bare `gh pr close <n>` runs against the ticket's repo and
+>   would close the wrong same-numbered PR while leaving the attached one open. Closing a dead PR is an
+>   autonomous senior-engineer call, NOT an escalation.
+> - **Genuine judgment call** — the open PR conflicts with an ADR/principle you must not override, OR
+>   you genuinely cannot safely decide needed-vs-abandoned (e.g. it has truly diverged from a sibling
+>   change and only one can coexist, or it's a release-cut decision) → **escalate (Rubric Three)**.
+>   This is the ONLY open-PR branch that escalates.
+>
+> Loop until NO open PR remains that SHOULD remain (every one is finished/merged, or closed, or
+> escalated). A stale/BEHIND open PR, a red-CI open PR with a deterministic fix, and an abandoned PR
+> are NEVER escalations — you remediate them here.
+>
+> **STEP PR-3 — Read the plan (deliverable scope).** Spawn the `thoughts-locator` subagent (via the
+> Task tool) to find docs in `thoughts/shared/{plans,prs,research}/` mentioning the ticket; spawn
+> `thoughts-analyzer` on the most recent plan. Extract the declared deliverable scope (how many PRs,
+> what subsystems, any "requires follow-up"/"multi-PR" note). No plan doc → fall back to
+> `catalyst-linear read <T>` for the description+title. This is what lets you judge in PR-2 whether an
+> open PR is "still needed" vs "abandoned", and in PR-4 whether the merged work actually covers the
+> deliverable. If scope is genuinely ambiguous and the call is expensive/hard-to-undo → escalate.
+>
+> **STEP PR-4 — Deliverable completeness (judgment, not a block).** Cross-reference each merged PR's
+> coverage (`gh pr view <n> --json files,title,body`) against the plan's declared deliverable. If a
+> plan subsystem is covered by an open PR, that PR was already handled in PR-2. Work that is in NO PR
+> at all (never built) and is load-bearing → escalate (`escalation_type:"decision"`: reopen vs. scope
+> a new ticket) — do NOT Done over a missing deliverable.
+>
+> **STEP PR-5 — Children gate.** `catalyst-linear read <T>` → `.children`. Any child in a
+> non-terminal state that the plan says is in-scope for this parent → this is a parent tracker; do NOT
+> Done it. Surface the open children as the real blockers.
+>
+> **STEP PR-6 — Mark the ticket Done autonomously (no human in the loop).** Once every open PR is
+> finished/merged or closed (PR-2), the deliverable is covered (PR-4), and no non-terminal in-scope
+> child remains (PR-5), confirm live state is non-terminal (`catalyst-linear read <T>` —
+> verify-before-act), then declare Done. **The CLI surface is POSITIONAL: `declare <TICKET>` — ticket
+> is a positional arg, the author flag is `--by` (NOT `--declared-by`), `--state` defaults to `done`.
+> There is no `--ticket` flag; an unknown `--` flag makes the CLI error out.**
+>
+> ```bash
+> # Use the catalyst-linear-reconcile WRAPPER (prefers bun, node fallback) — NOT bare
+> # `node`. The CLI's default current-state reader imports bun:sqlite; under node it
+> # degrades to unknown-current, so a `--state done` write is SKIPPED as
+> # "unknown-current-unsafe" WHILE the CLI still exits 0 (it persisted the declaration).
+> # That records the ticket Done while Linear stays non-terminal until a later drain —
+> # exactly the silent false-Done this rubric must avoid. The wrapper runs bun so the
+> # current-state read is real and the Done write actually lands.
+> "${EXEC_CORE%/*}/catalyst-linear-reconcile" declare "$TICKET" \
+>   --by "recovery-pass" --state done ${BRANCH:+--branch "$BRANCH"} \
+>   --prs-closed "$PRS_CLOSED" --prs-kept "$PRS_KEPT" --open-prs-at-done "$PRS_STILL_OPEN"
+> ```
+>
+> Pass your PR-2 tallies so the **Done-moves panel** (SLICE 3) records WHAT you did: `--prs-closed`
+> = how many abandoned/superseded PRs you closed; `--prs-kept` = how many you finished/merged as
+> part-of-solution; `--open-prs-at-done` = how many are STILL open at the Done (this should be **0**
+> for a clean delegate Done — every open PR was finished or closed in PR-2 — and `>0` is the red-line
+> that fires the `recovery.done-applied` WARN). These ride the `recovery.done-applied` event
+> (`recovery_mode=enforce`, `by=recovery-pass`); they default to 0 if omitted.
+>
+> This **now just WRITES** — there is NO refuse-gate and it exits 0; the durable declaration is
+> dropped regardless of the immediate Linear write (a pending write is retried by the reconcile
+> drain). `--state done` is the default (pass it for clarity); pass `--branch "$BRANCH"` when you know
+> the Linear branch name. Then record the win:
+>
+> ```bash
+> node "${EXEC_CORE}/recovery-emit.mjs" fixed --ticket "$TICKET" \
+>   --reason "Reasoned about every open PR (finished/merged the needed, closed the abandoned); deliverable verified against plan; declared Done."
+> _rp_comment "$TICKET" "✅ **recovery-pass** resolved every open PR (merged the needed, closed the abandoned) + verified the plan deliverable → declared Done."
+> ```
+>
+> **The Done write itself no longer fires any ALARM** — that's the point of having done the PR-2 work.
+> Two SLICE 3 events distinguish a clean Done from a dirty one: (1) EVERY autonomous Done — yours and
+> the pure-code backstops' — emits the broad `recovery.done-applied` (INFO) "Done-moves" event with
+> your `prs_closed` / `prs_kept` tallies and `open_prs_at_done`; (2) the loud
+> `recovery.done-applied-with-open-pr` (WARN) alarm fires ONLY from the pure-code backstops
+> (`terminalDoneOnce` / the reconcile drain) IF a Done lands while an open PR still exists. For YOUR
+> Done, `open_prs_at_done` should be **0** — every open PR finished or closed in PR-2 — which keeps the
+> Done-moves event INFO and fires no WARN. A Done that lands with `open_prs_at_done > 0` flips the
+> event to WARN and is the red-line the panel alarms on. So PR-2 is load-bearing: enumerate-and-remediate
+> is what keeps `open_prs_at_done` at 0 and your Done alarm-silent.
+>
+> **STEP PR-7 — When to escalate instead of Done (genuine judgment ONLY → Rubric Three):**
+> a. An open PR conflicts with an ADR/principle you must not override.
+> b. You genuinely cannot safely decide an open PR's needed-vs-abandoned (truly-diverged sibling, or a
+>    product/release-cut call) — the Gherkin "genuine human decision" case.
+> c. Plan declared N PRs; M<N merged, the rest CLOSED — and ship-now-vs-new-ticket is a real call.
+> d. Merged-PR diff misses a plan-declared subsystem that's in NO PR (partial, load-bearing deliverable).
+> e. Non-terminal in-scope children that the plan owns under this parent.
+> f. No plan doc AND ambiguous Linear description — escalate rather than guess.
+>
+> NOT escalations (you remediate these in PR-2 yourself): a stale/BEHIND open PR (rebase + merge it), a
+> red-CI open PR with a deterministic fix (fix it, push, re-check), an abandoned/superseded open PR
+> (close it). Mechanically-resolvable ⇒ FIX; genuine-judgment ⇒ escalate.
+
+### RUBRIC TWO — Finish-the-PR vs. escalate
+
+> When you anchor on a stuck PR, you are the senior engineer who unsticks it. Default to FINISHING it.
+> Source the lib primitives once: `source "${PLUGIN_ROOT}/scripts/lib/worktree-rebase.sh"` and
+> `source "${PLUGIN_ROOT}/scripts/lib/draft-pr.sh"`. `$BASE` is `origin/<the PR's base branch>`.
+>
+> **FINISH (do it yourself), bounded engineering:**
+> - BEHIND/DIRTY worktree → `rebase_onto_base_classified "$BASE"`, then branch on the rc:
+>   - rc=0 (clean/additive) → `draft_pr_push_verify`, re-arm the failed monitor-merge signal to
+>     `status:"pending"` (atomic tmp+mv) so the scheduler re-queues it, `recovery-emit fixed`.
+>   - rc=1 (fetch fail) → proceed un-rebased; log; NOT an escalation.
+>   - rc=2 (source conflict — the ctl708 auto-resolver stub always returns rc=2 for ANY real source
+>     conflict) → **resolve it yourself**: `git log --merge`, `git diff`, pick the resolution
+>     consistent with the ticket goal, `git add`, `git rebase --continue`, `draft_pr_push_verify`.
+>     This is bounded-LLM engineering, NOT an automatic escalation.
+> - Green PR just sitting there → `gh pr view <n> --json mergeable,mergeStateStatus,reviewDecision`,
+>   then run the cluster fence guard (`"${PLUGIN_ROOT}/scripts/lib/cluster-fence-guard.sh" --phase
+>   recovery-pass --ticket <T>`), then `gh pr merge <n> --squash --delete-branch`. **When the open-PR
+>   enumerator printed this PR as `owner/repo#n` (a cross-repo Linear attachment, a DIFFERENT repo than
+>   the ticket's), you MUST pass `-R <owner/repo>` on the view AND the merge (`gh pr merge <n> -R
+>   <owner/repo> …`)** — a bare `gh pr merge <n>` runs against the ticket's repo and would merge the
+>   wrong same-numbered PR (landing unintended code + deleting its branch) while the attached one stays
+>   open. Verify the merge via REST (`gh api repos/<owner/repo>/pulls/<n> --jq '.merged'`) —
+>   `--delete-branch` exits non-zero from a worktree even when the squash succeeded.
+> - Red CI with a deterministic cause (type error, lint, a flaky test) → fix it, push, re-check
+>   (bounded by the attempts cap of 2 — after honest attempts that still fail on a *genuine design
+>   incompatibility*, it becomes an escalation, below).
+>
+> **ESCALATE instead of finishing (→ Rubric Three) when:**
+> - rc=3 (thoughts/ symlink conflict) → always escalate (symlink safety; never auto-resolve).
+> - `draft_pr_push_verify` rc=3 (workflow-scope OAuth missing, no `CATALYST_WORKFLOW_GITHUB_TOKEN`) →
+>   authorization escalate: "add CATALYST_WORKFLOW_GITHUB_TOKEN to claude-accounts.env and re-run".
+> - Human reviewer (not a bot) left CHANGES_REQUESTED → authorization escalate with the reviewer's ask.
+> - Source conflict spans a load-bearing API boundary (the conflicting hunk is another ticket's merged
+>   public contract, not a local impl detail) → decision escalate with both options.
+> - CI persistently red after 3+ honest fix attempts where the root cause is a genuine design
+>   incompatibility (not a type/lint error) → authorization escalate. **NEVER `--admin` / force-merge
+>   past a failing or pending check.** This is the load-bearing safety property.
+
+### RUBRIC THREE — When a human is GENUINELY needed
+
+> Escalate ONLY when you decide one of these is true. Otherwise you keep the board moving yourself.
+> Every escalation writes the curated 6-field brief (below) authored FOR the human.
+>
+> 1. **ADR / principle conflict** — the fix would violate a documented architectural decision or a
+>    stated principle. `escalation_type:"decision"`. Name the ADR/principle and the two shapes.
+> 2. **Real regression risk** — the only way forward changes a shipped, load-bearing contract another
+>    ticket depends on, and you cannot prove the change is safe. `escalation_type:"decision"`.
+> 3. **Un-contemplated decision** — the plan/description does not cover the situation and choosing
+>    wrong is expensive or hard to undo (e.g. reopen vs. new ticket; ship partial vs. block).
+>    `escalation_type:"decision"`.
+> 4. **Authority/credential you lack** — `--admin` bypass, a missing OAuth scope/token, a human
+>    reviewer's explicit change request, an action outside your granted tools. `escalation_type:"authorization"`.
+>
+> NOT a reason to escalate: a merge conflict you can resolve; a red CI with a deterministic cause; a
+> BEHIND branch; a green PR awaiting merge; a phantom merged-PR ticket whose plan is fully delivered.
+> Those you finish yourself.
+>
+> **The curated 6-field escalation brief.** Every escalation authors these six fields (via
+> `escalation-explain.mjs` in Step 4 below — the field → flag map is in parentheses), and they MUST be
+> CONCRETE, never tautological:
+>
+> - `escalation_type` (`--type`) — `decision | authorization | manual`. Prefer the first two when you
+>   have a recommendation; bare `manual`/"needs a human" is the anti-pattern.
+> - `call_to_action` (`--call-to-action`) — the specific question/action for the operator (NEVER
+>   tautological, never "review this ticket").
+> - `problem` (`--problem`) — what is stuck and why, ticket-specific (name the files/PRs/tickets).
+> - `why_you` (`--why-you`) — why THIS stuck state needs a human: the authorization/credential/
+>   value-judgment YOU lack (the senior-engineer default is to fix it yourself, so justify the exception).
+> - `why_not_auto` (`--why-not-auto`) — the concrete capability boundary you hit (NEVER "requires
+>   human judgment"; name the `--admin` bypass / missing token / ADR clause / coexisting-contract that
+>   stopped you).
+> - `what_to_do` (`--instructions`, numbered) + `outcome` (`--remediation-then-retry`) — numbered
+>   concrete steps for the human, and what happens once they resolve it (the next scheduler tick
+>   re-evaluates and re-dispatches).
+>
+> For a `decision` escalation also pass `--options '[{"label":…,"tradeoff":…}, …]'`. This is the same
+> payload the router's curated-brief writer renders into the Needs-You inbox card + the matching Linear
+> comment, so a CTL-1157 Gherkin "genuine human decision" row reads as the *decision needed* — never
+> "go rebase this".
+
 ## Filing a delegate finding (the compounding loop)
 
 Everything you do feeds the **Self-Healing Delegate** Linear project so the system
@@ -489,7 +723,13 @@ seam that is in `deterministicSeamsTried`.
 ### Step 2 — Resolve it MYSELF with bounded engineering (BOUNDED-LLM → FIX)
 
 You have full tool access. These are ALL things you do autonomously — never
-escalate them:
+escalate them. **For a stuck PR, follow RUBRIC TWO** (the rc=0/1/2/3 decision over
+`rebase_onto_base_classified` + `draft_pr_push_verify`) — it is the authoritative
+version of the bullets below. **For a PR-state / phantom merged-PR ticket you think
+is "done", do NOT mechanically Done it — run RUBRIC ONE first** (enumerate ALL the
+ticket's PRs, reason about and remediate EACH open one yourself — finish/merge the
+needed, close the abandoned — read the plan via `thoughts-locator`/`thoughts-analyzer`,
+then declare Done autonomously via `declare --by recovery-pass`, which now just writes).
 
 - **Merge / rebase conflict** → read BOTH sides (`git log --merge`,
   `git diff`, the two conflicting hunks). Pick the resolution consistent with this
@@ -502,7 +742,10 @@ escalate them:
   cause (type error / lint / test), commit, push to re-trigger.
 - **A green PR just sitting there** → verify it is CLEAN
   (`gh pr view <n> --json mergeable,mergeStateStatus,reviewDecision`), then
-  `gh pr merge <n> --squash --delete-branch`.
+  `gh pr merge <n> --squash --delete-branch`. **For a cross-repo PR the enumerator
+  printed as `owner/repo#n`, pass `-R <owner/repo>` on both** (`gh pr merge <n> -R
+  <owner/repo> …`) — a bare merge targets the ticket's repo and would land the wrong
+  same-numbered PR while the attached one stays open.
 
 > **NEVER `--admin` / force-merge past a failing or pending check.** You may merge
 > a PR ONLY when its required checks are genuinely GREEN (`gh pr checks <n>` all
@@ -542,8 +785,9 @@ the ticket-visible signal, the event is the log record.)
 
 ### Step 3 — Escalate ONLY IF one of these is genuinely true
 
-Walk the checklist. If NONE are checked, it is NOT an escalation — go back to
-Step 1/2 and FIX it.
+**This is RUBRIC THREE** — the checklist below is its concrete form. Walk it; if NONE
+are checked, it is NOT an escalation — go back to Step 1/2 and FIX it. When one IS
+genuinely true, Step 4 authors the curated 6-field brief (Rubric Three) for the human.
 
 ```
 [ ] Value judgment — a product / priority / UX call only the operator can make
@@ -616,6 +860,7 @@ EXPL_JSON="$(node "${EXEC_CORE}/escalation-explain.mjs" \
   --call-to-action "Which dispatch shape should win — per-host pinning or quota-aware?" \
   --options '[{"label":"Keep CTL-1188 per-host pinning","tradeoff":"CTL-1190 quota-aware load balancing must be re-derived on top"},{"label":"Keep CTL-1190 quota-aware","tradeoff":"loses CTL-1188 host pinning that shipped Tuesday"}]' \
   --why-you "both are valid architectures; the choice is a product-priority call, not an engineering one" \
+  --why-not-auto "the two merged shapes touch the same public dispatch contract; picking one silently undelivers the other — not a conflict I can resolve without a priority call" \
   --observed "$(jq -nc --argjson b "$(cat "$BRIEF" 2>/dev/null || echo '{}')" '$b.diagnosis // {}')" \
   2>/dev/null || echo '{}')"
 [ -n "$EXPL_JSON" ] || EXPL_JSON='{}'

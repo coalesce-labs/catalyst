@@ -17,6 +17,7 @@ import {
   getProjectConfig,
   upsertProjectEntry,
   resolveEligibleQuery,
+  ownerRepoFromRepoRoot,
 } from "./registry.mjs";
 
 let catalystDir;
@@ -44,6 +45,29 @@ function writeRegistry(obj) {
     typeof obj === "string" ? obj : JSON.stringify(obj, null, 2)
   );
 }
+
+// ─── ownerRepoFromRepoRoot (CTL-1157, Codex #4) ──────────────────────────────
+describe("ownerRepoFromRepoRoot — repoRoot path → GitHub owner/repo", () => {
+  test("extracts owner/repo from a /github/<owner>/<repo> checkout path", () => {
+    expect(ownerRepoFromRepoRoot("/Users/x/code-repos/github/coalesce-labs/catalyst")).toBe(
+      "coalesce-labs/catalyst",
+    );
+    expect(ownerRepoFromRepoRoot("/Users/x/code-repos/github/groundworkapp/Adva")).toBe(
+      "groundworkapp/Adva",
+    );
+  });
+
+  test("ignores trailing path segments past owner/repo", () => {
+    expect(ownerRepoFromRepoRoot("/home/ci/github/org/repo/worktrees/wt-1")).toBe("org/repo");
+  });
+
+  test("returns null when there is no /github/ segment (the documented true residual)", () => {
+    expect(ownerRepoFromRepoRoot("/Users/x/projects/catalyst")).toBeNull();
+    expect(ownerRepoFromRepoRoot("/github/onlyowner")).toBeNull(); // owner without repo
+    expect(ownerRepoFromRepoRoot(null)).toBeNull();
+    expect(ownerRepoFromRepoRoot(undefined)).toBeNull();
+  });
+});
 
 describe("getRegistryPath", () => {
   test("resolves to <CATALYST_DIR>/execution-core/registry.json", () => {

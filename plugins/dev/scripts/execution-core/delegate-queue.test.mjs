@@ -296,6 +296,30 @@ describe("enqueueDelegateIntent — live-worker idempotency", () => {
     );
     expect(r.enqueued).toBe(true);
   });
+
+  // CTL-1157 (GROUP-3 #2): under executor=sdk the recovery-pass worker runs in-process
+  // with NO bg_job_id. That dispatched|running signal is a LIVE worker — a second scan
+  // must dedup it (worker-live) instead of double-dispatching.
+  test("sdk: a dispatched recovery-pass worker with NO bg_job_id blocks enqueue when executor==='sdk'", () => {
+    seedRecoveryPassSignal("CTL-1", "dispatched", null); // sdk shape: no bg id
+    const r = enqueueDelegateIntent(
+      "CTL-1",
+      INTENT,
+      deps({ isBgJobAlive: () => false, executor: "sdk" })
+    );
+    expect(r.enqueued).toBe(false);
+    expect(r.reason).toBe("worker-live");
+  });
+
+  test("bg (default): a dispatched worker with NO bg_job_id does NOT block enqueue (byte-identical)", () => {
+    seedRecoveryPassSignal("CTL-1", "dispatched", null);
+    const r = enqueueDelegateIntent(
+      "CTL-1",
+      INTENT,
+      deps({ isBgJobAlive: () => false }) // no executor → bg semantics
+    );
+    expect(r.enqueued).toBe(true);
+  });
 });
 
 // ─── enqueue idempotency layer 3: hard ceiling ───────────────────────────────
@@ -426,6 +450,32 @@ describe("gcDelegateIntents — removal & retention", () => {
     );
     expect(removed).toBe(0);
     expect(existsSync(intentPath("CTL-running"))).toBe(true);
+  });
+
+  // CTL-1157 (GROUP-3 #2): under executor=sdk a launched delegate carries NO bg_job_id
+  // (in-process query()). The GC must NOT drop it as a dead bg job — dropping it frees
+  // the reservation/existence guard and lets the next scan re-dispatch the same ticket.
+  test("sdk: RETAINS a launched intent with NO bg_job_id when executor==='sdk' (worker non-terminal, within TTL)", () => {
+    seedIntent("CTL-sdk", { status: "launched", bg_job_id: null, launchedAt: FIXED_NOW });
+    seedRecoveryPassSignal("CTL-sdk", "running", null); // in-process worker still live
+    const removed = gcDelegateIntents(orchDir, FIXED_NOW, deps({ executor: "sdk" }));
+    expect(removed).toBe(0);
+    expect(existsSync(intentPath("CTL-sdk"))).toBe(true);
+  });
+
+  test("sdk: still DROPS a launched no-bg_job_id intent once the worker signal is terminal", () => {
+    seedIntent("CTL-sdk-done", { status: "launched", bg_job_id: null, launchedAt: FIXED_NOW });
+    seedRecoveryPassSignal("CTL-sdk-done", "done", null); // worker finished (terminal → case b)
+    const removed = gcDelegateIntents(orchDir, FIXED_NOW, deps({ executor: "sdk" }));
+    expect(removed).toBe(1);
+    expect(existsSync(intentPath("CTL-sdk-done"))).toBe(false);
+  });
+
+  test("bg (default): a launched intent with NO bg_job_id is STILL dropped (byte-identical)", () => {
+    seedIntent("CTL-bg-null", { status: "launched", bg_job_id: null, launchedAt: FIXED_NOW });
+    const removed = gcDelegateIntents(orchDir, FIXED_NOW, deps()); // no executor → bg
+    expect(removed).toBe(1);
+    expect(existsSync(intentPath("CTL-bg-null"))).toBe(false);
   });
 
   test("RETAINS a claimed intent (mid-flight, no bg job yet, within TTL)", () => {

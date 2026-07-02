@@ -34,7 +34,11 @@ import {
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { log } from "./config.mjs";
+import { log, getExecutor } from "./config.mjs";
+// CTL-1157 F3: route the detached delegate's dispatch through the node's executor
+// (sdk vs bg) instead of the hardcoded bg path baked into defaultInvokeRecoveryPass.
+import { dispatchForExecutor, dispatchTicket as dispatchTicketSeam } from "./dispatch.mjs";
+import { resolveSdkBootExecutor } from "./sdk-run-phase-agent.mjs"; // auth-aware sdk→bg degrade (this detached child does NOT run the daemon-boot gate)
 import {
   delegateQueueDir,
   claimIntent as defaultClaimIntent,
@@ -50,6 +54,7 @@ import {
 import { defaultInvokeRecoveryPass } from "./recovery-reasoning.mjs";
 import { countBackgroundAgents as defaultCountBackgroundAgents } from "./claude-agents.mjs";
 import { isBgJobAlive as defaultIsBgJobAlive } from "./claude-agents.mjs";
+import { countSdkInflight as defaultCountSdkInflight } from "./signal-reader.mjs"; // CTL-1157 Codex round-6: existing dispatched/running sdk workers occupancy (no bg job → countBg misses them)
 import { computeFreeSlots, readMaxParallel } from "./scheduler.mjs";
 
 const RECOVERY_PASS_PHASE = "recovery-pass";
@@ -80,14 +85,19 @@ function readJsonFile(path) {
 // bg_job_id is alive. Mirrors delegate-queue's enqueue-time live-worker check so
 // the runner re-checks the same condition at DRAIN time (the worker may have
 // launched between enqueue and drain).
-function recoveryPassWorkerLive(orchDir, ticket, isBgJobAlive) {
+//
+// CTL-1157 (GROUP-3 #2): sdk-aware. Under executor=sdk the recovery-pass worker
+// runs IN-PROCESS with no bg_job_id (dispatch.mjs E3); a dispatched|running sdk
+// signal with no bg_job_id is LIVE, so a second drain scan dedups it instead of
+// re-launching the same ticket. Under bg the discriminator is absent → byte-identical.
+function recoveryPassWorkerLive(orchDir, ticket, isBgJobAlive, executor) {
   const sig = readJsonFile(
     join(orchDir, "workers", ticket, "phase-recovery-pass.json")
   );
   if (!sig) return false;
   if (sig.status !== "dispatched" && sig.status !== "running") return false;
   const bgJobId = sig.bg_job_id ?? null;
-  if (!bgJobId) return false;
+  if (!bgJobId) return executor === "sdk"; // sdk in-process worker: live with no bg id
   try {
     return isBgJobAlive(bgJobId) === true;
   } catch {
@@ -150,6 +160,7 @@ export function drainOnce(deps = {}) {
   const reclaimFn = deps.reclaimFn ?? defaultReclaimStaleClaims;
   const invokeFn = deps.invokeFn ?? defaultInvokeRecoveryPass;
   const countBg = deps.countBackgroundAgents ?? defaultCountBackgroundAgents;
+  const countSdkInflight = deps.countSdkInflight ?? defaultCountSdkInflight;
   const isBgJobAlive = deps.isBgJobAlive ?? defaultIsBgJobAlive;
   const appendRequested =
     deps.appendRequested ?? defaultAppendDispatchRequestedEvent;
@@ -161,6 +172,35 @@ export function drainOnce(deps = {}) {
     ? deps.claimCeilingMs
     : DEFAULT_CLAIM_CEILING_MS;
   const max = resolveMaxParallel(deps.maxParallel);
+  // CTL-1157 GROUP C: the executor this drain dispatches through. An sdk dispatch
+  // settles SYNCHRONOUSLY with no bg job, so countBg cannot see it on the next
+  // loop iteration — without a local counter, multiple queued intents would each
+  // pass the free-slot check and overrun the scheduler's slot limit at
+  // maxParallel=1. Track the synchronous launches already performed in THIS pass
+  // and count them toward the capacity check when executor==="sdk". bg launches
+  // DO surface in countBg, so for bg this counter is unused and behavior is
+  // byte-identical.
+  const executor = deps.executor ?? null;
+  let localLaunched = 0;
+  // CTL-1157 (Codex round-6, corrected): the sdk slot budget is the SUM of three
+  // DISJOINT terms — countBg (bg workers, re-read per iteration) + the PRE-EXISTING
+  // sdk in-flight workers sampled ONCE below + localLaunched (this pass's sdk launches).
+  // This mirrors the scheduler's sample-once occupiedCount + per-launch increment
+  // (scheduler.mjs). The tempting one-liner "re-read countSdkInflight each iteration AND
+  // add localLaunched" DOUBLE-COUNTS every launch: an sdk dispatch's synchronous
+  // prelaunch writes workers/<ticket>/phase-<phase>.json (dispatched, no bg_job_id)
+  // BEFORE invokeFn returns, so a per-iteration countSdkInflight already sees this pass's
+  // launches — adding localLaunched on top halves effective parallelism at maxParallel≥2.
+  // Sampling ONCE here (no this-pass launch has happened yet) keeps the two terms disjoint.
+  let sdkInflightBaseline = 0;
+  let sdkBaselineOk = true;
+  // CTL-1157 F P1: under executor=sdk each dispatch launches an IN-PROCESS query()
+  // that settles asynchronously (invokeFn returns the settled chain in
+  // details.pendingSdk). This disposable child must await those before exiting or
+  // process.exit kills the just-launched workers. Collect them here; the entrypoint
+  // awaits result.pending before process.exit(0). bg dispatch is synchronous, so
+  // pendingSdk is null and this array stays empty (byte-identical to before).
+  const pending = [];
 
   // (0) Crash safety: reclaim claimed-* sidecars older than one ceiling window
   //     back to queued so a dead runner doesn't strand an intent forever.
@@ -168,6 +208,23 @@ export function drainOnce(deps = {}) {
     result.reclaimed = reclaimFn(orchDir, now(), ceilingMs);
   } catch (err) {
     log.warn({ err: err?.message }, "delegate-runner: reclaim failed");
+  }
+
+  // (0b) Sample the PRE-EXISTING sdk in-flight occupancy ONCE (dispatched/running sdk
+  // phase workers, no bg job → invisible to countBg). Disjoint from localLaunched below.
+  // A count failure fails CLOSED (the drain holds every intent), matching the per-item
+  // countBg posture (CTL-731: never over-spawn on an untrustworthy live count). bg stays
+  // 0 (bg workers surface in countBg) → byte-identical to before.
+  if (executor === "sdk") {
+    try {
+      sdkInflightBaseline = countSdkInflight(orchDir) ?? 0;
+    } catch (err) {
+      sdkBaselineOk = false;
+      log.warn(
+        { err: err?.message },
+        "delegate-runner: sdk in-flight baseline count failed — fail-closed (holding all intents this pass)"
+      );
+    }
   }
 
   for (const ticket of listQueuedTickets(orchDir)) {
@@ -188,7 +245,7 @@ export function drainOnce(deps = {}) {
     //     (the work it would have started already exists), so it is removed:
     //     it must NOT keep reserving a slot, and there is nothing to re-drain.
     //     We unlink the consumed claim sidecar and the canonical intent file.
-    if (recoveryPassWorkerLive(orchDir, ticket, isBgJobAlive)) {
+    if (recoveryPassWorkerLive(orchDir, ticket, isBgJobAlive, executor)) {
       for (const p of [claimPath, intentPath(orchDir, ticket)]) {
         try {
           unlinkSync(p);
@@ -220,7 +277,15 @@ export function drainOnce(deps = {}) {
         "delegate-runner: bg count failed — un-claiming (fail-closed, no launch on unknown count)"
       );
     }
-    if (!countOk || computeFreeSlots(max, live) <= 0) {
+    // effectiveLive = live bg workers (re-read each iteration) + PRE-EXISTING sdk
+    // workers (sampled once in step 0b) + THIS pass's sdk launches (localLaunched). All
+    // three are disjoint, so the slot limit is honored across queued intents AND
+    // concurrent sdk phase workers with no double-count. bg path is byte-identical
+    // (sdkInflightBaseline and localLaunched both stay 0). A failed sdk baseline sample
+    // (sdkBaselineOk=false) holds every intent this pass (fail-closed).
+    const effectiveLive =
+      executor === "sdk" ? (live ?? 0) + sdkInflightBaseline + localLaunched : live;
+    if (!countOk || !sdkBaselineOk || computeFreeSlots(max, effectiveLive) <= 0) {
       try {
         transitionFn(orchDir, ticket, { from: claimPath, status: "queued" });
       } catch (err) {
@@ -302,7 +367,15 @@ export function drainOnce(deps = {}) {
       } catch {
         /* best-effort */
       }
+      // Count this dispatch toward the in-pass slot reservation. Only consulted
+      // when executor==="sdk" (synchronous, invisible to countBg); for bg the
+      // launched job is counted by countBg on the next iteration instead.
+      localLaunched++;
       result.drained++;
+      // CTL-1157 F P1: hold the in-process sdk query's settled chain so the
+      // entrypoint can await it before process.exit. Null on the bg path.
+      const pendingSdk = r.details?.pendingSdk;
+      if (pendingSdk && typeof pendingSdk.then === "function") pending.push(pendingSdk);
     } else {
       const failReason = r?.reason ?? "dispatch-failed";
       try {
@@ -331,6 +404,9 @@ export function drainOnce(deps = {}) {
     }
   }
 
+  // CTL-1157 F P1: expose the in-process sdk query promises so the detached
+  // entrypoint can await them before process.exit. Empty on the bg path.
+  result.pending = pending;
   return result;
 }
 
@@ -439,8 +515,39 @@ if (isEntrypoint) {
     // → Infinity, which would let the runner launch a delegate past maxParallel even
     // when the board is full. readMaxParallel(orchDir, {}) reads the same state.json
     // ceiling the scheduler tick uses.
-    const r = drainOnce({ orchDir, maxParallel: readMaxParallel(orchDir, {}) });
-    log.info({ ...r }, "delegate-runner-entry: drain complete");
+    // CTL-1157 F3: re-resolve the executor in this DETACHED child (it does NOT run
+    // the daemon-boot resolveSdkBootExecutor gate), degrading sdk→bg when the
+    // subscription-auth precondition fails (no CLAUDE_CODE_OAUTH_TOKEN) so a
+    // detached delegate never attempts an sdk launch it can't authenticate. On a
+    // bg fleet this is a pure no-op (dispatchForExecutor("bg") === defaultDispatch),
+    // so the launched delegate is byte-identical to today. The invokeFn wrapper
+    // curries the resolved dispatch into defaultInvokeRecoveryPass via its
+    // deps.dispatchTicket seam.
+    const { executor } = resolveSdkBootExecutor(getExecutor(), { log });
+    const executorDispatch = dispatchForExecutor(executor);
+    const invokeFn = (ticket, briefObj, invokeDeps) =>
+      defaultInvokeRecoveryPass(ticket, briefObj, {
+        ...invokeDeps,
+        dispatchTicket: (o, t, p) => dispatchTicketSeam(o, t, p, { dispatch: executorDispatch }),
+      });
+    const r = drainOnce({ orchDir, maxParallel: readMaxParallel(orchDir, {}), invokeFn, executor });
+    // CTL-1157 F P1: under executor=sdk each launched delegate is an IN-PROCESS
+    // query() that resolves only AFTER the whole recovery-pass runs. drainOnce
+    // returns those settled chains in r.pending. Await them here — otherwise the
+    // process.exit(0) below kills the just-launched worker mid-run (the intent is
+    // already marked "launched", so the recovery item would never actually run). The
+    // chains NEVER reject (settleDispatchSync swallows), so allSettled is belt-and-
+    // suspenders. On bg, r.pending is empty and this resolves immediately (the bg job
+    // is a separate OS process that survives this child's exit — byte-identical).
+    if (Array.isArray(r.pending) && r.pending.length > 0) {
+      log.info(
+        { executor, pending: r.pending.length },
+        "delegate-runner-entry: awaiting in-process sdk delegate(s) before exit"
+      );
+      await Promise.allSettled(r.pending);
+    }
+    const { pending: _pending, ...summary } = r;
+    log.info({ ...summary, executor }, "delegate-runner-entry: drain complete");
   } catch (err) {
     log.warn({ err: err?.message }, "delegate-runner-entry: drain threw");
   } finally {

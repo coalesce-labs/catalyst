@@ -16,6 +16,7 @@ import {
   defaultForgetIntent,
   defaultInvokeRemediateCapped,
   defaultInvokeRecoveryPass,
+  defaultWriteEscalationSignal,
   RECOVERY_PASS_CYCLE_CAP,
   RECOVERY_PASS_PHASE,
   RECOVERY_MAX_ATTEMPTS,
@@ -529,6 +530,46 @@ describe("reasoningRecoveryPass", () => {
     expect(events.filter((e) => e.type === "recovery.would-escalate").length).toBe(1);
   });
 
+  // CTL-1157 F #5 (Codex round-4): a `defer` decision must NOT write the cooldown
+  // marker in SHADOW mode — defaultShouldSkipItem honors a defer marker in enforce too,
+  // so a shadow-written marker would silently suppress the ticket after an operator
+  // flips shadow→enforce (shadow mutating enforce scheduler state). Enforce still writes.
+  const deferClassifier = () => ({
+    decision: "defer",
+    fix_class: "board-health",
+    details: { reason: "untyped stuck item" },
+  });
+
+  test("defer in SHADOW emits would-defer but writes NO cooldown marker", () => {
+    const intents = [];
+    const events = [];
+    const result = reasoningRecoveryPass([baseItem], {
+      mode: "shadow",
+      classifyTicket: deferClassifier,
+      recordIntent: (ticket, intent) => intents.push({ ticket, intent }),
+      emitEvent: (e) => events.push(e),
+      postComment: () => {},
+    });
+    expect(result.results[0].decision).toBe("defer");
+    expect(intents).toEqual([]); // shadow mutates NO scheduler state
+    expect(events.some((e) => e.type === "recovery.would-defer")).toBe(true);
+  });
+
+  test("defer in ENFORCE writes the cooldown-only defer marker", () => {
+    const intents = [];
+    const events = [];
+    reasoningRecoveryPass([baseItem], {
+      mode: "enforce",
+      classifyTicket: deferClassifier,
+      recordIntent: (ticket, intent) => intents.push({ ticket, intent }),
+      emitEvent: (e) => events.push(e),
+      postComment: () => {},
+    });
+    expect(intents).toHaveLength(1);
+    expect(intents[0].intent).toMatchObject({ decision: "defer" });
+    expect(events.some((e) => e.type === "recovery.deferred")).toBe(true);
+  });
+
   test("format diagnosis comment correctly", () => {
     const items = [
       {
@@ -783,7 +824,7 @@ describe("buildRecoveryEnvelope numeric/enum promotion (CTL-1291)", () => {
       mode: "enforce",
       queueSize: 12,
       processed: 3,
-      decisions: { fix_seam: 1, fix_bounded_llm: 1, escalate: 1 },
+      decisions: { fix_seam: 1, fix_bounded_llm: 1, escalate: 1, defer: 4 },
       actions: { fixed: 2, fixFailed: 0, escalated: 1, deferred: 0, errors: 0 },
       ledgerSkipped: ["CTL-1", "CTL-2"],
       terminalSkipped: ["CTL-3"],
@@ -795,6 +836,9 @@ describe("buildRecoveryEnvelope numeric/enum promotion (CTL-1291)", () => {
     expect(a["recovery.decisions.fix_seam"]).toBe(1);
     expect(a["recovery.decisions.fix_bounded_llm"]).toBe(1);
     expect(a["recovery.decisions.escalate"]).toBe(1);
+    // CTL-1157 GROUP B: the defer counter must be promoted so defer volume is
+    // queryable after otel-forward (else it's left only in body.payload.details).
+    expect(a["recovery.decisions.defer"]).toBe(4);
     expect(a["recovery.actions.fixed"]).toBe(2);
     expect(a["recovery.actions.fix_failed"]).toBe(0);
     expect(a["recovery.actions.escalated"]).toBe(1);
@@ -896,6 +940,31 @@ describe("buildRecoveryEnvelope numeric/enum promotion (CTL-1291)", () => {
     expect(a["recovery.inv.workerAge.failed"]).toBe(0);
     // board-scoped → event.label is null (the board reader ignores it; no per-ticket fold)
     expect(a["event.label"]).toBeNull();
+  });
+
+  // CTL-1157 SLICE 3 (OTEL turn-56): the three stuck-cohort failed-counts promote
+  // under the AGREED underscored top-level names (queryable structured metadata, not
+  // body-buried), in ADDITION to the camelCase recovery.inv.<key>.failed mirror.
+  test("recovery.board-scan promotes the three cohort failed-counts under cohort_* names", () => {
+    const details = {
+      mode: "shadow",
+      invariantsFailed: 3,
+      gateDecision: "proceed",
+      gateReason: "3 invariant(s) flagged",
+      proposedTier1: 0, proposedTier2: 0, proposedTier3: 0,
+      invariants: {
+        phantomMergedPr: { ok: false, failed: 2, observable: true },
+        orphanedOpenPr: { ok: false, failed: 1, observable: true },
+        frozenNeedsHuman: { ok: false, failed: 4, observable: true },
+        needsHumanPile: { ok: true, failed: 0, observable: true },
+      },
+    };
+    const a = buildRecoveryEnvelope({ type: "recovery.board-scan", ticket: null, details }).attributes;
+    expect(a.cohort_phantom_merged_pr).toBe(2);
+    expect(a.cohort_orphaned_pr).toBe(1);
+    expect(a.cohort_frozen_needs_human).toBe(4);
+    // the camelCase per-invariant mirror still rides alongside (back-compat)
+    expect(a["recovery.inv.phantomMergedPr.failed"]).toBe(2);
   });
 
   test("recovery.board-scan never promotes rosters/move arrays (cardinality)", () => {
@@ -1560,5 +1629,31 @@ describe("reasoningRecoveryPass decision visibility (CTL-1287)", () => {
     expect(env.attributes["event.label"]).toBeNull();
     expect(env.severityText).toBe("INFO");
     expect(env.body.payload.details.queueSize).toBe(3);
+  });
+});
+
+// ─── CTL-1157 F #6 (Codex round-4): escalation signal must carry `ticket` ─────
+// signal-reader parseSignal keys off raw.ticket and status:"needs-human" is
+// non-terminal, so this fresh recovery-pass signal wins over the failed phase.
+// Without a ticket, readWorkerSignals() reports ticket:null and scheduler-recovery /
+// board-health consumers lose the escalated ticket after the first pass.
+describe("defaultWriteEscalationSignal (CTL-1157 F #6)", () => {
+  test("the written phase-recovery-pass.json carries the ticket", () => {
+    const orchDir = mkdtempSync(pathJoin(tmpdir(), "esc-"));
+    try {
+      defaultWriteEscalationSignal(
+        "CTL-42",
+        { escalation_type: "manual", problem: "stuck", call_to_action: "look" },
+        { orchDir },
+      );
+      const p = pathJoin(orchDir, "workers", "CTL-42", "phase-recovery-pass.json");
+      expect(existsSync(p)).toBe(true);
+      const signal = JSON.parse(readFileSync(p, "utf8"));
+      expect(signal.ticket).toBe("CTL-42"); // the fix: never null
+      expect(signal.status).toBe("needs-human");
+      expect(signal.explanation).toBeDefined();
+    } finally {
+      rmSync(orchDir, { recursive: true, force: true });
+    }
   });
 });

@@ -93,13 +93,22 @@ function resolveMaxParallel(src) {
 // workers/<TICKET>/phase-recovery-pass.json is dispatched|running AND its
 // bg_job_id is alive per the injected isBgJobAlive. Reads the signal file
 // directly (the same shape phase-agent-dispatch writes: {status, bg_job_id}).
-function recoveryPassWorkerLive(orchDir, ticket, isBgJobAlive) {
+//
+// CTL-1157 (GROUP-3 #2): under executor=sdk the recovery-pass worker runs
+// IN-PROCESS (Agent SDK query()) and its prelaunch signal NEVER carries a
+// bg_job_id (dispatch.mjs E3 / signal-reader.countSdkInflight). A dispatched|running
+// sdk signal with no bg_job_id is a LIVE worker, not a dead one — so a bare
+// no-bg_job_id ⇒ not-live rule (correct for bg) would let a SECOND board-health
+// scan re-enqueue and double-dispatch the same in-flight sdk ticket. When the
+// caller is sdk-aware (executor==="sdk"), treat that shape as LIVE. Under bg the
+// discriminator is absent → behavior is byte-identical.
+function recoveryPassWorkerLive(orchDir, ticket, isBgJobAlive, executor) {
   const signalPath = join(orchDir, "workers", ticket, "phase-recovery-pass.json");
   const sig = readIntentFile(signalPath);
   if (!sig) return false;
   if (sig.status !== "dispatched" && sig.status !== "running") return false;
   const bgJobId = sig.bg_job_id ?? null;
-  if (!bgJobId) return false;
+  if (!bgJobId) return executor === "sdk"; // sdk in-process worker: live with no bg id
   try {
     return isBgJobAlive(bgJobId) === true;
   } catch {
@@ -123,6 +132,11 @@ export function enqueueDelegateIntent(anchor, payload = {}, deps = {}) {
 
   const now = deps.now ?? (() => Date.now());
   const isBgJobAlive = deps.isBgJobAlive ?? (() => false);
+  // CTL-1157 (GROUP-3 #2): the resolved executor ("sdk" | else). Threaded from the
+  // scheduler (dispatchMode==="sdk"). Makes the live-worker probe sdk-aware so a
+  // dispatched|running sdk signal with no bg_job_id dedups a second enqueue instead
+  // of double-dispatching. Absent/"bg" → byte-identical to today.
+  const executor = deps.executor ?? null;
 
   // (1) queue-file existence — one non-terminal intent per anchor.
   const existing = readIntentFile(intentPath(orchDir, anchor));
@@ -131,7 +145,7 @@ export function enqueueDelegateIntent(anchor, payload = {}, deps = {}) {
   }
 
   // (2) live recovery-pass worker — never even queue a redundant run.
-  if (recoveryPassWorkerLive(orchDir, anchor, isBgJobAlive)) {
+  if (recoveryPassWorkerLive(orchDir, anchor, isBgJobAlive, executor)) {
     return { enqueued: false, reason: "worker-live" };
   }
 
@@ -249,6 +263,14 @@ export function gcDelegateIntents(orchDir, now, deps = {}) {
   const ttlMs = Number.isFinite(deps.ttlMs) ? deps.ttlMs : DEFAULT_INTENT_TTL_MS;
   const isBgJobAlive = deps.isBgJobAlive ?? (() => false);
   const nowMs = typeof now === "number" ? now : Date.now();
+  // CTL-1157 (GROUP-3 #2): the resolved executor ("sdk" | else), threaded from the
+  // scheduler (dispatchMode==="sdk"). Under sdk a delegate launches an IN-PROCESS
+  // query() and its intent flips to `launched` with bg_job_id:null LEGITIMATELY —
+  // dropping it as "dead bg job" (case c) would free the reservation and let the
+  // next scan re-dispatch the same in-flight ticket. When sdk-aware, a launched
+  // no-bg_job_id intent is kept LIVE; its cleanup rides the worker-terminal (case b)
+  // + TTL (case a) paths instead. Absent/"bg" → byte-identical to today.
+  const executor = deps.executor ?? null;
 
   let removed = 0;
   for (const name of entries) {
@@ -276,7 +298,12 @@ export function gcDelegateIntents(orchDir, now, deps = {}) {
       const bgJobId = intent.bg_job_id ?? null;
       let alive = false;
       try {
-        alive = bgJobId ? isBgJobAlive(bgJobId) === true : false;
+        // CTL-1157 (GROUP-3 #2): under sdk a launched delegate carries NO bg_job_id
+        // (in-process query()) — that is a LIVE worker, not a dead bg job. Keep it
+        // (its cleanup rides case b's worker-terminal check + case a's TTL). Under
+        // bg a missing/dead bg_job_id stays droppable (byte-identical).
+        if (!bgJobId) alive = executor === "sdk";
+        else alive = isBgJobAlive(bgJobId) === true;
       } catch {
         alive = false;
       }

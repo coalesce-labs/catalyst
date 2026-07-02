@@ -168,25 +168,144 @@ for signal_f in "$WORKER_DIR"/phase-*.json; do
 done
 ```
 
+## Done-judgment — verify the ticket is GENUINELY done before you tear down (CTL-1157)
+
+You are a phase agent that CAN reason, and teardown is the LAST gate before the
+ticket is marked Done and its worktree destroyed. **Before you write Done, verify
+the ticket is genuinely done — do NOT trust "monitor-merge merged a PR" as proof
+the whole ticket is complete.** A ticket commonly has more than one PR (a second
+PR, a human PR opened outside the pipeline, an abandoned spike); monitor-merge
+tracked only the pipeline's OWN PR. Marking Done while another PR that is part of
+the solution is still open is the silent-rot failure CTL-1157 exists to prevent.
+
+This is the same open-PR remediation rubric the recovery-pass delegate uses —
+applied here as **"teardown verifies it's done."** It complements (does not
+replace) the merge safety-gate above.
+
+**STEP 1 — Enumerate the ticket's OPEN PRs (the facts).** The fence below runs the
+CTL-1157 open-PR ENUMERATOR (`open-pr-gate.mjs` — the single source of truth that
+UNIONs the ticket-key search + the branch-head pass + the Linear-attachment pass,
+confirming OPEN via `gh`) and prints any still-open PRs. It is a FACTS source, not
+a block: it never aborts teardown on its own (alarm-not-block). YOU read its output.
+
+**STEP 1½ — If the check came back UNVERIFIABLE, do NOT treat it as clean.** The
+enumerator returns `unverifiable:true` (with a reason) when the authoritative GitHub
+check could not be completed — the ticket's repo could not be derived, a `gh`
+list/view failed, or an attachment-linked PR could not be viewed. The fence surfaces
+that state explicitly ("open-PR verification was UNVERIFIABLE … (reason)") instead of
+collapsing it to an empty list. **UNVERIFIABLE ≠ CLEAN.** An unverifiable check is
+NOT "no open PR remains" — do not mark Done and remove the worktree on it. Finish the
+verification (re-run the enumerator, or eyeball the ticket's PRs by hand) and, if you
+still cannot confirm the board is clean, fail-out per STEP 2's genuine-judgment path
+(emit `phase.teardown.failed.${TICKET}` with the reason) so the unverified teardown
+surfaces rather than proceeding silently.
+
+**STEP 2 — Reason about EACH open PR and remediate it yourself.** For every PR the
+enumerator printed:
+
+- **Still needed / part of the solution** → FINISH it (rebase onto base, fix CI,
+  merge it) before you proceed. Do NOT tear down with deliverable work unmerged.
+- **Abandoned / superseded** (a later PR replaced it, a dead spike, a duplicate) →
+  CLOSE it yourself: `gh pr close <n> -R <owner/repo> --comment "<why — superseded by
+  #X / abandoned / duplicate of #Y>"`. Closing a dead PR is autonomous, not an escalation.
+- **Cross-repo PRs (CTL-1157):** when the enumerator printed a PR as `owner/repo#n`
+  (a cross-repo Linear attachment — a DIFFERENT repo than this ticket's), you MUST
+  target that repo explicitly on BOTH paths — `gh pr merge <n> -R <owner/repo> …` and
+  `gh pr close <n> -R <owner/repo> …`. A bare `gh pr merge/close <n>` runs against the
+  ticket's repo and would merge/close the wrong same-numbered PR while leaving the
+  attached `owner/repo#n` open (this matches the fence's own `-R` warning above).
+- **Genuine judgment call** (the open PR conflicts with an ADR/principle, or you
+  cannot safely decide needed-vs-abandoned) → do NOT mark Done; emit
+  `phase.teardown.failed.${TICKET}` via the failure template with a concrete reason
+  so the stuck PR surfaces (the scheduler/recovery layer then escalates it). This
+  is the rare case — mechanically-resolvable PRs you finish/close yourself.
+
+**STEP 3 — Only once no open PR remains that SHOULD remain**, continue to the Linear
+Done transition below and tear down. A clean teardown (every open PR finished or
+closed) leaves the backstops silent; tearing down with an open PR still present
+fires the loud `recovery.done-applied-with-open-pr` alarm — which is exactly the
+signal that you skipped this verification.
+
+```bash phase-teardown-open-pr-verify
+# ─── Done-judgment: enumerate the ticket's open PRs (FACTS, non-blocking) ──────
+# CTL-1157: print any still-open PRs for this ticket so the agent can reason about
+# each (finish/merge the needed, close the abandoned) BEFORE the Done write below.
+# Runs the shared open-PR ENUMERATOR; this is alarm-not-block — it NEVER aborts
+# teardown by itself. The agent's reasoning (STEP 2 above) is what acts.
+EXEC_CORE_TD="${PLUGIN_ROOT}/scripts/execution-core"
+OPEN_PR_ENUM="${EXEC_CORE_TD}/open-pr-gate.mjs"
+TD_BRANCH="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")"
+if [[ -f "$OPEN_PR_ENUM" ]] && command -v node >/dev/null 2>&1; then
+  # Invoke the enumerator's defaultCheckOpenPrs; print the FULL result as JSON —
+  # both the open-PR list AND the `unverifiable` flag + reason. UNVERIFIABLE ≠ CLEAN:
+  # if we serialized only `r.prs`, an unverifiable result (repo underivable / gh
+  # failed) would collapse to an empty list and falsely read as "no open PR remains".
+  # Best-effort: any throw is itself UNVERIFIABLE (never a silent clean list).
+  TD_OPEN_RESULT="$(OPEN_PR_ENUM="$OPEN_PR_ENUM" TICKET="$TICKET" TD_BRANCH="$TD_BRANCH" \
+    node --input-type=module -e '
+      const { defaultCheckOpenPrs } = await import(process.env.OPEN_PR_ENUM);
+      const t = process.env.TICKET;
+      const branchName = process.env.TD_BRANCH || undefined;
+      try {
+        // CTL-1157 (Codex round-8): teardown ALREADY runs inside the ticket worktree, so
+        // pass cwd=process.cwd() — defaultCheckOpenPrs then queries gh in THIS repo
+        // directly instead of relying on registry derivation, which reports
+        // repo-underivable/UNVERIFIABLE on an unenrolled repo or a repoRoot the registry
+        // convention cannot map, even though the current worktree is the right repo.
+        const r = defaultCheckOpenPrs(t, { branchName, cwd: process.cwd() });
+        process.stdout.write(JSON.stringify({ prs: r.prs || [], unverifiable: !!r.unverifiable, reason: r.reason || "" }));
+      } catch (e) {
+        process.stdout.write(JSON.stringify({ prs: [], unverifiable: true, reason: String((e && e.message) || e) }));
+      }
+    ' 2>/dev/null || echo "{\"prs\":[],\"unverifiable\":true,\"reason\":\"enumerator invocation failed\"}")"
+  [[ -n "$TD_OPEN_RESULT" ]] || TD_OPEN_RESULT="{\"prs\":[],\"unverifiable\":true,\"reason\":\"empty enumerator output\"}"
+  TD_OPEN_PRS="$(printf '%s' "$TD_OPEN_RESULT" | jq -c '.prs // []' 2>/dev/null || echo "[]")"
+  TD_UNVERIFIABLE="$(printf '%s' "$TD_OPEN_RESULT" | jq -r '.unverifiable // false' 2>/dev/null || echo "false")"
+  TD_UNVERIF_REASON="$(printf '%s' "$TD_OPEN_RESULT" | jq -r '.reason // ""' 2>/dev/null || echo "")"
+  TD_OPEN_COUNT="$(printf '%s' "$TD_OPEN_PRS" | jq 'length' 2>/dev/null || echo 0)"
+  if [[ "$TD_OPEN_COUNT" =~ ^[0-9]+$ && "$TD_OPEN_COUNT" -gt 0 ]]; then
+    echo "phase-teardown: CTL-1157 Done-judgment — ${TD_OPEN_COUNT} OPEN PR(s) still exist for ${TICKET}:" >&2
+    # CTL-1157 (Codex round-5): print the PR's OWN repo (owner/repo#n) when the
+    # enumerator recorded it — a cross-repo Linear attachment is a DIFFERENT PR than a
+    # same-numbered PR in the ticket's repo. Printing a bare "#n" would let the agent
+    # inspect/close the ticket-repo's #n while leaving the attached org/other#n open.
+    printf '%s\n' "$TD_OPEN_PRS" | jq -r '.[] | "  " + (if .repo then .repo + "#" else "#" end) + (.number|tostring) + " [" + (.state // "?") + "] " + (.title // "")' 2>/dev/null >&2 || true
+    echo "phase-teardown: reason about EACH (STEP 2): finish/merge the needed, close the abandoned, or fail-out on a genuine judgment call — BEFORE the Done transition below. IMPORTANT: for any entry printed as owner/repo#n, target THAT repo explicitly — 'gh pr close <n> -R <owner/repo> --comment ...' — never a bare 'gh pr close <n>' (which would act on the ticket repo's same-numbered PR)." >&2
+  elif [[ "$TD_UNVERIFIABLE" == "true" ]]; then
+    # UNVERIFIABLE ≠ CLEAN. The authoritative gh check could NOT confirm zero open PRs
+    # (repo underivable, gh/auth/rate-limit failure, or an attachment PR we could not
+    # view). Do NOT let this read as clean — surface it so the agent reasons (STEP 1½).
+    echo "phase-teardown: CTL-1157 Done-judgment — open-PR verification was UNVERIFIABLE for ${TICKET} (${TD_UNVERIF_REASON:-reason unknown})." >&2
+    echo "phase-teardown: UNVERIFIABLE ≠ CLEAN — the authoritative gh check could NOT confirm zero open PRs. Do NOT assume the board is clean and do NOT silently mark Done + remove the worktree. Finish the verification (re-run the enumerator / eyeball the ticket's PRs by hand) or, on a genuine judgment call, fail-out: emit phase.teardown.failed.${TICKET} via the failure template carrying this reason so the unverified teardown surfaces." >&2
+  else
+    echo "phase-teardown: CTL-1157 Done-judgment — no open PR remains for ${TICKET}; proceeding to Done." >&2
+  fi
+fi
+```
+
 ```bash phase-teardown-linear-done
 # ─── Linear Done transition ───────────────────────────────────────────────────
 # THIS IS THE ONLY Done writer when phase-teardown is in the pipeline.
 # Called while still in the ticket worktree so .catalyst/config.json is adjacent.
 LINEAR_TRANSITION="${PLUGIN_ROOT}/scripts/linear-transition.sh"
+LINEAR_DONE_ACTION=""
 if [[ -x "$LINEAR_TRANSITION" ]]; then
-  # Capture rc + stderr instead of suppressing them: linear-transition.sh can
-  # print "transitioned" even when the underlying linearis update fails (memory:
-  # linear_transition_silent_success), so a silent failure here would leave the
-  # ticket at PR/inReview while the pipeline reports success. Non-fatal — the
-  # scheduler's terminalDoneOnce backstop (fires on teardown===done) retries the
-  # Done write — but the failure must be LOUD so it is diagnosable.
+  # Capture rc + the JSON result: linear-transition.sh can print "transitioned" even
+  # when the underlying linearis update fails (memory: linear_transition_silent_success),
+  # AND it exits 0 for idempotent skip, dry-run, and skipped-no-linearis — so rc==0 alone
+  # is NOT proof a Done was actually written (CTL-1157 Codex round-7). Run with --json and
+  # read `.action`: only "transitioned" (a real move) or "skipped" (confirmed already in
+  # the target Done state) count as a genuine Done. "skipped-no-linearis" / "dry-run" do
+  # NOT. Non-fatal — terminalDoneOnce backstop (fires on teardown===done) retries — but
+  # the failure must be LOUD so it is diagnosable.
   LINEAR_DONE_OUT="$("$LINEAR_TRANSITION" --ticket "$TICKET" --transition done \
-    --config .catalyst/config.json 2>&1)"
+    --config .catalyst/config.json --json 2>&1)"
   LINEAR_DONE_RC=$?
+  LINEAR_DONE_ACTION="$(printf '%s' "$LINEAR_DONE_OUT" | jq -r '.action // ""' 2>/dev/null || echo "")"
   if [[ $LINEAR_DONE_RC -ne 0 ]]; then
     echo "phase-teardown: Linear Done transition FAILED (rc=${LINEAR_DONE_RC}) — terminalDoneOnce backstop will retry: ${LINEAR_DONE_OUT}" >&2
   else
-    echo "phase-teardown: Linear Done transition: ${LINEAR_DONE_OUT}"
+    echo "phase-teardown: Linear Done transition (action=${LINEAR_DONE_ACTION:-unknown}): ${LINEAR_DONE_OUT}"
   fi
 else
   echo "phase-teardown: linear-transition.sh not found at $LINEAR_TRANSITION; skipping Done transition" >&2
@@ -199,9 +318,27 @@ fi
 # worker dir + signals[teardown]==='done'). --no-write: the Done write above is
 # authoritative; this only records the declaration. The drain marks it reconciled
 # once Linear shows Done, or re-writes it if the transition above silently failed.
+#
+# CTL-1157 F #3 (+ Codex round-7): pass --transition-verified ONLY when the real
+# linear-transition.sh above reported a GENUINE Done — action "transitioned" (a real
+# move) or "skipped" (confirmed already in the Done state). rc==0 alone is NOT enough:
+# it also covers dry-run and "skipped-no-linearis" (a node without linearis writes
+# NOTHING yet still exits 0). That flag gates the ENFORCE recovery.done-applied telemetry
+# + open-PR alarm: without it, a marker dropped after a failed/missing/no-op transition
+# would report an applied Done that never happened. On the unverified path we still drop
+# the marker (so the drain/terminalDoneOnce backstop reconciles), but as a shadow
+# would-event, not an enforce Done-move.
 LINEAR_RECONCILE="${PLUGIN_ROOT}/scripts/catalyst-linear-reconcile"
 if [[ -x "$LINEAR_RECONCILE" ]]; then
-  "$LINEAR_RECONCILE" declare "$TICKET" --state done --by pipeline --no-write >/dev/null 2>&1 || true
+  # Single no-space token → a set-but-empty string is safe under `set -u` and the
+  # unquoted expansion contributes no arg when empty (avoids the bash-3.2 empty-array
+  # trap). LINEAR_DONE_ACTION is empty when the transition script was missing → shadow.
+  TRANSITION_VERIFIED_FLAG=""
+  if [[ "$LINEAR_DONE_ACTION" == "transitioned" || "$LINEAR_DONE_ACTION" == "skipped" ]]; then
+    TRANSITION_VERIFIED_FLAG="--transition-verified"
+  fi
+  "$LINEAR_RECONCILE" declare "$TICKET" --state done --by pipeline --no-write \
+    $TRANSITION_VERIFIED_FLAG >/dev/null 2>&1 || true
 fi
 ```
 

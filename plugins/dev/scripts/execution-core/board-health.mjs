@@ -41,6 +41,10 @@ const DEFAULT_THRESHOLDS = {
   dispatchStallMs: Number(process.env.CATALYST_BH_DISPATCH_STALL_MS) || 10 * 60_000,
   workerAgeMs: Number(process.env.CATALYST_BH_WORKER_AGE_MS) || 4 * 3_600_000,
   projectSilenceMs: Number(process.env.CATALYST_BH_PROJECT_SILENCE_MS) || 24 * 3_600_000,
+  // CTL-1157: an open PR with no live worker is "orphaned" past this age; a
+  // needs-human-labelled ticket is "frozen" past this age. 48h defaults.
+  orphanedPrAgeMs: Number(process.env.CATALYST_BH_ORPHANED_PR_MS) || 48 * 3_600_000,
+  frozenNeedsHumanMs: Number(process.env.CATALYST_BH_FROZEN_NH_MS) || 48 * 3_600_000,
 };
 
 // single-LLM cadence floor: most ticks are a near-instant no-op (cheap gates),
@@ -66,6 +70,90 @@ const TERMINAL_STATUSES = new Set(["complete", "completed", "done", "merged", "s
 // linear states a blocker can sit in and still NOT be a dead chain.
 const BLOCKER_DONE_RE = /done|complete|merged|cancel|duplicate/i;
 
+// CTL-1157 cohort matchers. PR_STATE_RE = a Linear state that means "a PR is
+// open/in review" (the phantom-merged-PR cohort lives here); PR_MERGED_RE = a
+// filter_state status that means the PR already landed/shipped.
+const PR_STATE_RE = /^pr$|in.?review/i;
+const PR_MERGED_RE = /^(merged|deployed)$/i;
+// label/status forms of "needs a human".
+const NEEDS_HUMAN_LABEL_RE = /needs.?human/i;
+const NEEDS_HUMAN_STATUSES = new Set(["needs-human", "needs_human", "stalled"]);
+
+// prNumberOf — read a ticket descriptor's linked PR number.
+function prNumberOf(d) {
+  const n = d?.prNumber ?? d?.pr_number ?? null;
+  return n == null ? null : Number(n);
+}
+
+// lookupPrStatus — resolve the lifecycle status of (prNumber, repo) against the
+// composite prStatusMap (`Map<number, Map<repoKey, {status,updatedAt,repo}>>`,
+// produced by broker-state.getAllPrStatuses; repoKey is the row's "owner/repo" or
+// "" when the lifecycle row carries no repo attribution). The disambiguation rules
+// (CTL-1157, Codex #4 round-4 — require the exact repo when it is KNOWN, never borrow
+// an unrelated repo's row for the same number):
+//   • No entry for the number → null (not observable).
+//   • Ticket repo KNOWN:
+//       – exact `byRepo.get(repo)` hit → return it (definitive).
+//       – no exact hit, but the number has a SINGLE UNATTRIBUTED ("") row → return it
+//         (a legacy / single-repo lifecycle row written before repo attribution; using
+//         it preserves phantom/orphan detection on the single-repo fleet).
+//       – otherwise (rows exist ONLY for other KNOWN repos, or ambiguous) → null. This
+//         is the fix: a ticket in org/y with PR #42 must NOT inherit org/x#42's status
+//         just because org/x is the only row for #42.
+//   • Ticket repo UNDERIVABLE:
+//       – exactly one repo holds the number → number-only resolution (legacy N=1).
+//       – the number collides across repos → {ambiguous:true} so the cohort skips
+//         rather than borrow a wrong repo's status.
+// `repo` is the ticket's GitHub "owner/repo" (or null when underivable).
+function lookupPrStatus(map, prNumber, repo) {
+  if (!(map instanceof Map)) return null;
+  const byRepo = map.get(prNumber);
+  if (!(byRepo instanceof Map) || byRepo.size === 0) return null;
+
+  const repoKnown = repo != null && repo !== "";
+  if (repoKnown) {
+    // (1) Exact match on the ticket's OWN repo — definitive.
+    const exact = byRepo.get(repo);
+    if (exact) return exact;
+    // (2) No row attributed to the ticket's repo. The ONLY row we may still trust is a
+    //     LONE unattributed ("") row — a lifecycle row written before repo attribution.
+    //     This keeps single-repo detection while never borrowing another KNOWN repo's #N.
+    if (byRepo.size === 1) {
+      const [[onlyKey, only]] = byRepo.entries();
+      if (onlyKey === "") return only;
+    }
+    // (3) Rows exist only for OTHER known repos (or are ambiguous) → do not borrow.
+    return null;
+  }
+
+  // Repo underivable: fall back to number-only resolution, ambiguous on collision.
+  if (byRepo.size === 1) {
+    const [only] = byRepo.values();
+    return only;
+  }
+  return { status: null, updatedAt: null, repo: null, ambiguous: true };
+}
+
+// safeRepoOf — call the injected ticket→owner/repo resolver, fail-open to null
+// (a throwing/absent resolver must never abort an invariant; null → number-only
+// lookup, i.e. the pre-CTL-1157 behavior).
+function safeRepoOf(resolver, id) {
+  if (typeof resolver !== "function") return null;
+  try {
+    const r = resolver(id);
+    return typeof r === "string" && r.length > 0 ? r : null;
+  } catch {
+    return null;
+  }
+}
+function labelsOf(d) {
+  const l = d?.labels;
+  return Array.isArray(l) ? l : null;
+}
+function labelName(l) {
+  return String(l?.name ?? l ?? "");
+}
+
 let _lastRunMs = 0; // host-local throttle state (mirrors unstuck-sweep)
 
 // ── small pure helpers ───────────────────────────────────────────────────────
@@ -77,6 +165,35 @@ function emptyMoves() {
 }
 function isTerminalStatus(status) {
   return status != null && TERMINAL_STATUSES.has(String(status).toLowerCase());
+}
+// SLOT_FREED_STATUSES — a worker signal in one of these no longer occupies a
+// slot / is no longer live. Mirrors the scheduler's isTicketInFlight (failed /
+// stalled / aborted FREE the slot, scheduler.mjs) and signal-reader.TERMINAL
+// (adds turn-cap-exhausted). Distinct from TERMINAL_STATUSES (success-like only,
+// used by worker-age): a failed/stalled worker is NOT terminal-success but is
+// also NOT live, so a PR stuck behind a dead/failed worker reads as orphaned.
+const SLOT_FREED_STATUSES = new Set([
+  ...TERMINAL_STATUSES,
+  "failed",
+  "stalled",
+  "aborted",
+  "turn-cap-exhausted",
+]);
+// isLiveWorkerStatus — true when a worker signal still represents active,
+// slot-occupying work (not terminal-success AND not failed/stalled/aborted).
+function isLiveWorkerStatus(status) {
+  return status != null && !SLOT_FREED_STATUSES.has(String(status).toLowerCase());
+}
+// isTerminalLinearState — the ticket's Linear workflow state is terminal
+// (Done/Canceled/Duplicate/merged). Reuses the same terminal-state pattern the
+// blocked-tree walk uses (BLOCKER_DONE_RE) and mirrors the reconcile's
+// Done/Canceled/Duplicate exclusion (linear-reconcile.mjs terminalStates), so
+// board-health never proposes recovery for already-terminal work whose only
+// remaining signal is a stale cached label (the CTL-1157/1162 stale-label class
+// that terminal-needs-human-reconcile strips lazily).
+function isTerminalLinearState(d) {
+  const state = d?.state ?? d?.linear_state ?? null;
+  return state != null && BLOCKER_DONE_RE.test(String(state));
 }
 function dedupeFlagged(invariants) {
   const seen = new Set();
@@ -164,12 +281,33 @@ export function assembleBoardState({
   getWorkerSignals = () => [],
   getEligible = () => [],
   roster = [],
+  // CTL-1157 (MUST-FIX 1): the provably-dead host set — hosts whose heartbeat is
+  // stale past the grace window. The daemon computes it from computeSurvivingRoster
+  // (scheduler.mjs); empty default keeps the holistic foreign-failover unreachable
+  // (shadow-safe AND N=1-safe).
+  deadHosts = [],
   self = "",
   multiHost = false,
   capacity = { maxParallel: 0, liveCount: 0, freeSlots: 0 },
   readEventRing = () => [],
   ownerForTicket = null,
+  // CTL-1157 (Codex #4): resolve a stuck ticket → its GitHub "owner/repo" so the
+  // phantom/orphaned-PR cohorts look up the EXACT (repo, number) entry in the
+  // composite prStatusMap instead of skipping a cross-repo #-collision. Daemon-
+  // bound at the scheduler call site (teamOf → registry repoRoot →
+  // ownerRepoFromRepoRoot); null default ⇒ repo underivable ⇒ number-only lookup
+  // (N=1 byte-identical; a true collision with no repo stays the ambiguous skip).
+  repoForTicket = null,
   getReconcileMarkers = () => ({}),
+  // CTL-1157: PR-lifecycle status map (filter_state). Empty Map default ⇒ the
+  // phantom-merged-PR / orphaned-open-PR invariants stay observable:false (the
+  // shadow-first seam: wiring lands before the invariants begin observing).
+  getPrStatusMap = () => new Map(),
+  // CTL-1157 off-gate: the run mode threads in so `off` is provably DARK. In off
+  // we never invoke getPrStatusMap() (the getAllPrStatuses() filter_state SELECT
+  // must not run), and evaluateInvariants reads board.mode to skip the cohort
+  // checks — together making an off scan byte-identical to origin/main.
+  mode = undefined,
   now = () => Date.now(),
 } = {}) {
   const nowMs = now();
@@ -199,6 +337,10 @@ export function assembleBoardState({
       updatedAt,
       ageMs: Number.isFinite(updatedMs) ? nowMs - updatedMs : null,
       host: s.host ?? s.owner_host ?? null,
+      // CTL-1157: preserve the worker's typed failure reason so the delegate's
+      // injected brief carries it per-ticket (consumed by the stuck-PR cohort
+      // brief) without re-reading each signal file.
+      failureReason: s.raw?.failureReason ?? s.failureReason ?? null,
     };
   });
 
@@ -216,22 +358,33 @@ export function assembleBoardState({
     signals,
     eligible,
     roster: Array.isArray(roster) ? roster : [],
+    deadHosts: Array.isArray(deadHosts) ? deadHosts : [],
     self: self ?? "",
     multiHost: !!multiHost,
+    // CTL-1157 off-gate: carried so evaluateInvariants can skip the cohort checks
+    // in off without re-threading mode through every call site.
+    mode,
     capacity: {
       maxParallel: capacity?.maxParallel ?? 0,
       liveCount: capacity?.liveCount ?? 0,
       freeSlots: capacity?.freeSlots ?? 0,
     },
     reconcileMarkers: safe(() => getReconcileMarkers(), {}),
+    // CTL-1157 off-gate: in off the filter_state PR-status SELECT must NOT run —
+    // skip getPrStatusMap() entirely so off is byte-identical to origin/main (the
+    // phantom/orphaned-PR invariants also stay out of evaluateInvariants in off).
+    prStatusMap: mode === "off" ? new Map() : safe(() => getPrStatusMap(), new Map()),
     ring: deriveRing(safe(() => readEventRing({ orchDir }), []), nowMs),
     ownerForTicket: typeof ownerForTicket === "function" ? ownerForTicket : null,
+    // CTL-1157 (Codex #4): the ticket→owner/repo resolver for the composite
+    // (repo, number) PR-status lookup. Null when unbound (number-only fallback).
+    repoForTicket: typeof repoForTicket === "function" ? repoForTicket : null,
     now: nowMs,
   });
 }
 
 // ── (2) evaluateInvariants — PURE. Each check fails-open on a throw. ─────────
-export function evaluateInvariants(boardState, { thresholds = DEFAULT_THRESHOLDS } = {}) {
+export function evaluateInvariants(boardState, { thresholds = DEFAULT_THRESHOLDS, mode = boardState?.mode } = {}) {
   const checks = {
     cacheCoherence: () => checkCacheCoherence(boardState),
     dispatchLiveness: () => checkDispatchLiveness(boardState, thresholds),
@@ -241,6 +394,26 @@ export function evaluateInvariants(boardState, { thresholds = DEFAULT_THRESHOLDS
     rateLimitHeadroom: () => checkRateLimitHeadroom(boardState),
     strandedNode: () => checkStrandedNode(boardState),
   };
+  // CTL-1157 off-gate: the four NEW cohort invariants run ONLY in shadow/enforce
+  // — never in off. In off this set is omitted entirely, so the board-scan event's
+  // details.invariants is byte-identical to origin/main (the legacy 7 keys only),
+  // and checkNeedsHumanPile (always-observable, status-based) no longer runs in
+  // off — it is gated here exactly like its three cohort siblings. SHADOW DOES run
+  // them: that is intentional read-only telemetry (the OTEL before/after baseline);
+  // the no-action guarantee is enforced separately in boardHealthPass (act is
+  // reached ONLY in enforce). `mode` defaults from boardState.mode (set by
+  // assembleBoardState); an undefined mode (bare unit call) keeps the legacy
+  // behavior of running them.
+  if (mode !== "off") {
+    Object.assign(checks, {
+      // CTL-1157: the three stuck cohorts board-health was blind to + the
+      // status-based needs-human catch-all (Workstream B).
+      phantomMergedPr: () => checkPhantomMergedPr(boardState),
+      orphanedOpenPr: () => checkOrphanedOpenPr(boardState, thresholds),
+      frozenNeedsHuman: () => checkFrozenNeedsHuman(boardState, thresholds),
+      needsHumanPile: () => checkNeedsHumanPile(boardState),
+    });
+  }
   const out = {};
   for (const [name, fn] of Object.entries(checks)) {
     try {
@@ -411,6 +584,169 @@ function checkStrandedNode(b) {
   );
 }
 
+// #7 — phantom merged-PR (CTL-1157). A ticket sitting in a PR/in-review Linear
+// state whose linked PR has already merged/deployed — the GitHub-PR→Done
+// automation was removed (multi-PR tickets falsely went Done on first merge), so
+// nothing advances these now. Empty prStatusMap ⇒ observable:false (shadow-safe).
+function checkPhantomMergedPr(b) {
+  const map = b.prStatusMap;
+  if (!(map instanceof Map) || map.size === 0) {
+    return invariant(true, 0, false, [], "no PR-status map → phantom merged-PR not observable");
+  }
+  const flagged = [];
+  for (const [id, d] of b.ticketsById) {
+    const state = d.state ?? d.linear_state ?? null;
+    if (!state || !PR_STATE_RE.test(String(state))) continue;
+    const prNum = prNumberOf(d);
+    if (prNum == null) continue;
+    // CTL-1157 (Codex #4) multi-repo: resolve the ticket's repo and look up the
+    // EXACT (repo, number) status. A cross-repo #-collision is disambiguated by
+    // the ticket's repo; only a collision with a genuinely underivable repo stays
+    // `ambiguous` and is skipped (never borrow the wrong repo's `merged` status).
+    const repo = b.repoForTicket ? safeRepoOf(b.repoForTicket, id) : null;
+    const pr = lookupPrStatus(map, prNum, repo);
+    if (pr && pr.ambiguous) continue;
+    if (pr && PR_MERGED_RE.test(String(pr.status))) flagged.push(id);
+  }
+  return invariant(
+    flagged.length === 0,
+    flagged.length,
+    true,
+    flagged,
+    flagged.length
+      ? `${flagged.length} ticket(s) in a PR state with an already-merged/deployed PR`
+      : "no phantom merged-PR tickets",
+  );
+}
+
+// #8 — orphaned open PR (CTL-1157). An open PR whose ticket has no live (non-
+// terminal) worker and whose last activity is past the orphan-age threshold —
+// "nothing rots silently". filter_state.updated_at is the last WEBHOOK, not last
+// PR activity (a freshly-rebased PR has no push webhook), so this is a
+// conservative SIGNAL: the delegate MUST `gh pr view` before acting. Empty map ⇒
+// observable:false.
+function checkOrphanedOpenPr(b, t) {
+  const map = b.prStatusMap;
+  if (!(map instanceof Map) || map.size === 0) {
+    return invariant(true, 0, false, [], "no PR-status map → orphaned open-PR not observable");
+  }
+  // A worker only counts as "live" (→ NOT orphaned) when it still occupies a
+  // slot. failed/stalled/aborted FREE the slot (isTicketInFlight), so a PR stuck
+  // behind a dead/failed worker is exactly the orphaned case this cohort catches
+  // — do NOT let a terminal-FAILURE signal mask it as "has a live worker".
+  const liveTickets = new Set(
+    b.signals.filter((s) => s.ticket && isLiveWorkerStatus(s.status)).map((s) => s.ticket),
+  );
+  const flagged = [];
+  for (const [id, d] of b.ticketsById) {
+    // KNOWN LIMITATION (CTL-1157, Codex round-7 — deferred to a follow-up): the ticket
+    // descriptor exposes a SINGLE pr_number (ticket_state has one pr_number column) and
+    // filter_state rows are keyed by webhook interest_id, not by ticket — so there is no
+    // ticket→all-PRs mapping to iterate. A multi-PR ticket whose descriptor points at a
+    // newer merged PR while an OLDER PR stays open therefore reads green here (a false
+    // NEGATIVE — we miss the older orphan). Closing this needs a ticket→PRs data model
+    // (descriptor multi-PR field or an interest_id→ticket join), out of scope for this PR.
+    // Impact is bounded: shadow-only until the enforce flip, and a rare multi-PR case.
+    const prNum = prNumberOf(d);
+    if (prNum == null) continue;
+    // CTL-1157 (Codex round-6): skip a ticket already in a terminal Linear state
+    // (Done/Canceled/Duplicate). getBoard = getAllTicketDescriptors({includeRemoved:false})
+    // only drops removed_at rows, NOT terminal ones, so a terminal ticket whose PR was
+    // never merged/closed still carries an "open" filter_state row — without this guard
+    // it becomes a tier-1 orphaned-PR anchor and gets a recovery-pass dispatched on
+    // already-finished work (a wasted slot, recurring every cooldown). Mirrors the
+    // terminal exclusion the frozen-needs-human + needs-human-pile cohorts already apply.
+    if (isTerminalLinearState(d)) continue;
+    // CTL-1157 (Codex #4) multi-repo: resolve the ticket's repo and look up the
+    // EXACT (repo, number) status. With the repo known, a cross-repo #-collision
+    // NO LONGER hides the ticket's genuine orphaned open PR (the missed-detection
+    // bug); only a collision whose repo is genuinely underivable stays `ambiguous`.
+    const repo = b.repoForTicket ? safeRepoOf(b.repoForTicket, id) : null;
+    const pr = lookupPrStatus(map, prNum, repo);
+    if (pr && pr.ambiguous) continue;
+    if (!pr || String(pr.status).toLowerCase() !== "open") continue;
+    if (liveTickets.has(id)) continue; // a worker is on it → not orphaned
+    const updatedMs = pr.updatedAt ? Date.parse(pr.updatedAt) : NaN;
+    const ageMs = Number.isFinite(updatedMs) ? b.now - updatedMs : null;
+    if (ageMs != null && ageMs > t.orphanedPrAgeMs) flagged.push(id);
+  }
+  return invariant(
+    flagged.length === 0,
+    flagged.length,
+    true,
+    flagged,
+    flagged.length
+      ? `${flagged.length} open PR(s) with no live worker past ${Math.round(t.orphanedPrAgeMs / 3_600_000)}h`
+      : "no orphaned open PRs",
+    { caveat: "filter_state.updated_at is last-webhook, not last-PR-activity — verify with gh pr view" },
+  );
+}
+
+// #9 — frozen needs-human (CTL-1157, LABEL-based). A ticket carrying the
+// needs-human Linear label that has not moved past the frozen-age threshold.
+// Distinct from #10 needsHumanPile (STATUS-based, from the signal file). No
+// labels in the cache ⇒ observable:false.
+function checkFrozenNeedsHuman(b, t) {
+  let haveLabels = false;
+  const flagged = [];
+  for (const [id, d] of b.ticketsById) {
+    const labels = labelsOf(d);
+    if (labels) haveLabels = true;
+    if (!labels || !labels.some((l) => NEEDS_HUMAN_LABEL_RE.test(labelName(l)))) continue;
+    // A Done/Canceled/Duplicate ticket can keep a stale cached needs-human label
+    // until terminal-needs-human-reconcile strips it. Flagging it purely by age
+    // would propose recovery for already-terminal work — mirror the reconcile's
+    // terminal-state exclusion and skip it (the CTL-1157/1162 stale-label class).
+    if (isTerminalLinearState(d)) continue;
+    const updatedAt = d.updatedAt ?? d.updated_at ?? null;
+    const updatedMs = updatedAt ? Date.parse(updatedAt) : NaN;
+    const ageMs = Number.isFinite(updatedMs) ? b.now - updatedMs : null;
+    if (ageMs != null && ageMs > t.frozenNeedsHumanMs) flagged.push(id);
+  }
+  return invariant(
+    flagged.length === 0,
+    flagged.length,
+    haveLabels,
+    flagged,
+    flagged.length
+      ? `${flagged.length} needs-human ticket(s) frozen past ${Math.round(t.frozenNeedsHumanMs / 3_600_000)}h`
+      : haveLabels
+        ? "no frozen needs-human tickets"
+        : "no labels in cache → frozen needs-human not observable",
+  );
+}
+
+// #10 — needs-human pile (CTL-1157 Workstream B, STATUS-based). A worker signal
+// parked at needs-human/stalled, regardless of age — checkWorkerAge requires
+// past-phase-age and misses a FRESH needs-human, so this opens the holistic
+// delegate's catch-all for untyped stuck items that no longer dead-end at an
+// escalate latch. Always observable (it judges the signal-file status set).
+function checkNeedsHumanPile(b) {
+  const flagged = [];
+  for (const s of b.signals) {
+    if (!s.ticket) continue;
+    const st = s.status != null ? String(s.status).toLowerCase() : null;
+    if (!(st && NEEDS_HUMAN_STATUSES.has(st))) continue;
+    // CTL-1157 F (Codex round-5): a Done/Canceled/Duplicate ticket can retain a stale
+    // needs-human/stalled worker signal, and signal-reader prefers a NON-terminal
+    // needs-human signal over the terminal phase signal — so without this an already-
+    // terminal ticket becomes a tier-1 board-health anchor and gets a recovery-pass
+    // dispatched in enforce. Mirror the label path's terminal exclusion (line ~684).
+    // Fail-OPEN when the descriptor is absent (uncached): we skip ONLY when we can
+    // CONFIRM the ticket is terminal, never dropping a genuinely stuck ticket.
+    const d = b.ticketsById?.get?.(s.ticket) ?? null;
+    if (d && isTerminalLinearState(d)) continue;
+    flagged.push(s.ticket);
+  }
+  return invariant(
+    flagged.length === 0,
+    flagged.length,
+    true,
+    flagged,
+    flagged.length ? `${flagged.length} worker(s) parked at needs-human/stalled` : "no needs-human/stalled workers",
+  );
+}
+
 // ── (3) decideBoardHealth — PURE. The cheap-gate funnel. First match wins. ───
 export function decideBoardHealth(invariants, boardState) {
   const observableFailed = Object.values(invariants).filter((v) => v.observable && !v.ok);
@@ -444,7 +780,7 @@ function decision(gateDecision, reason, invariantsFailed, moves) {
 
 // ── (4) proposeMoves — PURE. Maps failed invariants → tiered proposals. Never
 // executes. The tier is "does this change the SYSTEM or just unstick a THING?"
-export function proposeMoves(invariants, b) {
+export function proposeMoves(invariants, _b) {
   const tier1 = [];
   const tier2 = [];
   const tier3 = [];
@@ -457,8 +793,25 @@ export function proposeMoves(invariants, b) {
   if (invariants.cacheCoherence && invariants.cacheCoherence.observable && !invariants.cacheCoherence.ok) {
     tier1.push({ move: "note-cache-drift", rationale: invariants.cacheCoherence.note });
   }
+  // CTL-1157: the most-actionable stuck work — phantom merged-PR tickets (judge
+  // Done vs reopen) and orphaned open PRs (finish or close) — is tier1 (highest
+  // anchor priority); the status-based needs-human pile is the untyped catch-all.
+  for (const t of invariants.phantomMergedPr?.flagged ?? []) {
+    if (!invariants.phantomMergedPr.ok) tier1.push({ ticket: t, move: "judge-done-or-reopen", rationale: "PR merged/deployed but ticket still in a PR/in-review state" });
+  }
+  for (const t of invariants.orphanedOpenPr?.flagged ?? []) {
+    if (!invariants.orphanedOpenPr.ok) tier1.push({ ticket: t, move: "finish-or-close-pr", rationale: "open PR with no live worker past age" });
+  }
+  for (const t of invariants.needsHumanPile?.flagged ?? []) {
+    if (!invariants.needsHumanPile.ok) tier1.push({ ticket: t, move: "holistic-triage", rationale: "worker parked at needs-human/stalled" });
+  }
   for (const t of invariants.blockedTree?.flagged ?? []) {
     if (!invariants.blockedTree.ok) tier2.push({ ticket: t, move: "re-dispatch-blocker", rationale: "blocked by unscheduled/stuck blocker" });
+  }
+  // CTL-1157: a needs-human-LABELLED ticket frozen past 48h has already been
+  // escalated once → tier2 (review, lower urgency than the actionable PR work).
+  for (const t of invariants.frozenNeedsHuman?.flagged ?? []) {
+    if (!invariants.frozenNeedsHuman.ok) tier2.push({ ticket: t, move: "review-needs-human", rationale: "needs-human label frozen past threshold" });
   }
   for (const h of invariants.strandedNode?.flagged ?? []) {
     if (!invariants.strandedNode.ok) tier3.push({ host: h, move: "escalate-stranded-node", rationale: "rostered node owns work but reconcile is failing" });
@@ -487,28 +840,75 @@ export function proposeMoves(invariants, b) {
 // LATER flagged ticket it could act on. So we filter every candidate to self-owned
 // before applying the tier-1 > tier-2 > eligible priority. Single-host (no roster /
 // no ownerForTicket / multiHost false) owns everything → behavior unchanged.
-export function selectAnchor(moves, board) {
+// CTL-1157 (MUST-FIX 1+2): selectAnchorCandidates — PURE. Returns the ORDERED
+// candidate list (most-stuck first) the act site iterates, instead of a single
+// anchor that wedges the whole pass when it latches. The self-owned chain is
+// byte-identical to the old firstOwned ordering (tier1 → tier2 → eligible), just
+// collecting ALL of them in order. selectAnchor stays a thin wrapper over [0] so
+// every existing caller is unchanged.
+//
+// HRW-safety: a foreign-owned flagged ticket is appended ONLY in `holistic` mode
+// AND ONLY when its owner is provably unavailable (∈ strandedOrDeadHosts) — never
+// unconditionally, never the eligible queue. So a healthy peer's tickets are
+// never stolen (no double-dispatch on one branch). Self-owned always sorts ahead
+// of foreign-failover. N=1 (no roster / no ownerForTicket / !multiHost) ⇒ owns()
+// ≡ true and strandedOrDeadHosts is empty ⇒ the foreign branch is unreachable ⇒
+// byte-identical to today.
+export function selectAnchorCandidates(moves, board, { holistic = false, strandedOrDeadHosts = new Set() } = {}) {
+  const multiHost = !!(board && board.multiHost && typeof board.ownerForTicket === "function");
   const owns = (ticket) => {
     if (!ticket) return false;
-    if (!board || !board.multiHost || typeof board.ownerForTicket !== "function") return true;
+    if (!multiHost) return true;
     try {
       return board.ownerForTicket(ticket, board.roster) === board.self;
     } catch {
       return true; // fail-open: a broken HRW read must not block self-owned actuation
     }
   };
-  const firstOwned = (arr) => (arr ?? []).map((m) => m && m.ticket).filter(Boolean).find(owns) ?? null;
-  return (
-    firstOwned(moves?.tier1) ??
-    firstOwned(moves?.tier2) ??
-    ((board?.eligible ?? []).map((e) => e && e.id).filter(Boolean).find(owns) ?? null)
-  );
+  const out = [];
+  const seen = new Set();
+  const add = (t) => {
+    if (t && !seen.has(t)) {
+      seen.add(t);
+      out.push(t);
+    }
+  };
+  const ticketsOf = (arr) => (arr ?? []).map((m) => m && m.ticket).filter(Boolean);
+  // self-owned chain first (unchanged tier1 > tier2 > eligible ordering).
+  for (const t of ticketsOf(moves?.tier1).filter(owns)) add(t);
+  for (const t of ticketsOf(moves?.tier2).filter(owns)) add(t);
+  for (const e of (board?.eligible ?? []).map((x) => x && x.id).filter(Boolean).filter(owns)) add(e);
+  // holistic foreign-failover: a flagged tier1/tier2 ticket this host does NOT own,
+  // ONLY when its owner is provably dead/stranded. Appended AFTER all self-owned.
+  if (holistic && multiHost) {
+    const ownerDead = (ticket) => {
+      try {
+        return strandedOrDeadHosts.has(board.ownerForTicket(ticket, board.roster));
+      } catch {
+        return false; // a broken HRW read must not trigger a foreign failover
+      }
+    };
+    const failover = (arr) => ticketsOf(arr).filter((t) => !owns(t) && ownerDead(t));
+    for (const t of failover(moves?.tier1)) add(t);
+    for (const t of failover(moves?.tier2)) add(t);
+  }
+  return out;
+}
+
+export function selectAnchor(moves, board) {
+  return selectAnchorCandidates(moves, board)[0] ?? null;
 }
 
 // ── (5) buildBoardContext — PURE. The whole-board brief the dispatched delegate
 // gets injected into recovery-pass.json (today it gets NONE).
 export function buildBoardContext(boardState, invariants) {
-  const stuckWorkers = (invariants.workerAge?.flagged ?? []).map((t) => {
+  // CTL-1157: the stuck-worker set is the UNION of the age-flagged workers and the
+  // status-based needs-human pile (Workstream B), deduped by ticket.
+  const stuckTickets = [
+    ...(invariants.workerAge?.flagged ?? []),
+    ...(invariants.needsHumanPile?.flagged ?? []),
+  ];
+  const stuckWorkers = [...new Set(stuckTickets)].map((t) => {
     const s = boardState.signals.find((x) => x.ticket === t);
     return {
       ticket: t,
@@ -518,7 +918,9 @@ export function buildBoardContext(boardState, invariants) {
     };
   });
   return {
-    schema: "recovery-board-context/v1",
+    // CTL-1157: v2 adds the three stuck cohorts (additive; readers default each
+    // field to []). The skill reads them defensively, never gates on the schema.
+    schema: "recovery-board-context/v2",
     snapshotAt: new Date(boardState.now).toISOString(),
     host: { self: boardState.self, roster: boardState.roster, multiHost: boardState.multiHost },
     slots: {
@@ -531,6 +933,12 @@ export function buildBoardContext(boardState, invariants) {
       topTickets: boardState.eligible.slice(0, 5).map((e) => e.id).filter(Boolean),
     },
     stuckWorkers,
+    // CTL-1157 v2: the three stuck cohorts, surfaced additively so the delegate
+    // sees them without re-scanning. Empty arrays when the invariant is green /
+    // not observable (shadow-safe).
+    phantomPrs: invariants.phantomMergedPr?.flagged ?? [],
+    orphanedPrs: invariants.orphanedOpenPr?.flagged ?? [],
+    frozenNeedsHuman: invariants.frozenNeedsHuman?.flagged ?? [],
     strandedNodes: (invariants.strandedNode?.flagged ?? []).map((host) => ({
       host,
       // the tickets HRW-owned by this stranded host — the delegate's actionable
@@ -597,7 +1005,10 @@ export function boardHealthPass({
   capacity,
   readEventRing,
   ownerForTicket,
+  repoForTicket, // CTL-1157 (Codex #4): ticket→owner/repo resolver (daemon-bound)
   getReconcileMarkers,
+  getPrStatusMap, // CTL-1157: filter_state PR-status reader (daemon-bound)
+  deadHosts, // CTL-1157: provably-dead host set (daemon-computed)
   lastRunMs = _lastRunMs,
   intervalMs = BOARD_HEALTH_INTERVAL_MS,
   isThrottledFn = isThrottled,
@@ -614,9 +1025,10 @@ export function boardHealthPass({
 
   const board = assembleBoardState({
     orchDir, getBoard, getWorkerSignals, getEligible,
-    roster, self, multiHost, capacity, readEventRing, ownerForTicket, getReconcileMarkers, now,
+    roster, self, multiHost, capacity, readEventRing, ownerForTicket, repoForTicket, getReconcileMarkers,
+    getPrStatusMap, deadHosts, mode, now,
   });
-  const invariants = evaluateInvariants(board, {});
+  const invariants = evaluateInvariants(board, { mode });
   const dec = decideBoardHealth(invariants, board);
 
   try {
@@ -635,19 +1047,26 @@ export function boardHealthPass({
   // binds is the audited-real, capped, cooldown'd defaultInvokeRecoveryPass.
   let actResult;
   if (mode === "enforce" && typeof act === "function" && dec.gate.decision === "proceed") {
-    // CTL-1302: selectAnchor already HRW-filters to a SELF-OWNED ticket (or null
-    // when this host owns none of the flagged/eligible) — so there is no separate
-    // cross-host skip here. A null anchor means "nothing of mine to act on this
-    // scan" (e.g. all flagged work is owned by other hosts, or only host/project
-    // tier-3 moves with no ticket handle).
-    const anchor = selectAnchor(dec.moves, board);
+    // CTL-1157 (MUST-FIX 1+2): compute the ORDERED holistic candidate list. The
+    // self-owned chain comes first (byte-identical to CTL-1302's single anchor);
+    // a foreign-owned flagged ticket is appended ONLY when its owner is provably
+    // dead/stranded (owner ∈ strandedNode.flagged ∪ deadHosts) — never a live
+    // peer's branch. The act site (daemon) iterates the list and dispatches the
+    // first ACTIONABLE (non-cooldown/non-latched) candidate, one per scan, so a
+    // single latched anchor no longer wedges the whole flagged cohort.
+    const strandedOrDeadHosts = new Set([
+      ...(invariants.strandedNode?.flagged ?? []),
+      ...(board.deadHosts ?? []),
+    ]);
+    const candidates = selectAnchorCandidates(dec.moves, board, { holistic: true, strandedOrDeadHosts });
+    const anchor = candidates[0] ?? null;
     if (!anchor) {
-      log({ reason: "no-owned-anchor" }, "board-health: proceed but no self-owned ticket anchor — no holistic dispatch this scan");
+      log({ reason: "no-owned-anchor" }, "board-health: proceed but no actionable ticket anchor — no holistic dispatch this scan");
     } else {
       const boardContext = buildBoardContext(board, invariants);
       try {
-        actResult = act({ anchor, boardContext, decision: dec, board }) ?? null;
-        log({ anchor, dispatched: actResult?.dispatched ?? null }, "board-health: holistic recovery-pass delegate actuated");
+        actResult = act({ anchor, candidates, boardContext, decision: dec, board }) ?? null;
+        log({ anchor, candidates: candidates.length, dispatched: actResult?.dispatched ?? null }, "board-health: holistic recovery-pass delegate actuated");
       } catch (err) {
         log({ err: err.message, anchor }, "board-health: act failed (continuing)");
       }

@@ -63,6 +63,7 @@ import {
 import {
   upsertFilterStateOpen,
   setFilterStateMerged,
+  setFilterStateClosed,
   setFilterStateDeploying,
   setFilterStateDeployed,
   setFilterStateFailed,
@@ -1347,6 +1348,16 @@ export function tryDeterministicRoute(event, interestsMap) {
     } else if (name === "github.pr.closed") {
       if (prList.includes(scope.pr) && detail.merged === false) {
         reason = `PR #${scope.pr} closed without merging`;
+        // CTL-1157 (Codex round-7): mark the filter_state row 'closed' so a PR closed
+        // WITHOUT merging stops reading as an open orphan forever (board-health's
+        // orphaned-open-PR cohort trusts filter_state.status === "open"). Without this
+        // the row stays 'open' indefinitely and recovery gets dispatched on a PR that
+        // no longer exists. Best-effort — a missing DB handle must not drop the wake.
+        try {
+          setFilterStateClosed(interestId);
+        } catch {
+          /* DB not opened */
+        }
       }
     } else if (name === "github.pr_review.submitted") {
       if (prList.includes(scope.pr)) {

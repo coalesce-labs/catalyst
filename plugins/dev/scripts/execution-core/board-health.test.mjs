@@ -24,6 +24,25 @@ const NOW = Date.parse("2026-06-20T12:00:00Z");
 const MIN = 60_000;
 const HOUR = 3_600_000;
 
+// mkPrStatusMap — build the composite `Map<number, Map<repoKey, entry>>` shape
+// (CTL-1157, Codex #4) that broker-state.getAllPrStatuses now returns, from flat
+// {prNumber, repo, status, updatedAt} rows. Mirrors how the real reader nests
+// per-(repo, number); multiple rows with the same number but different repos form
+// the collision case.
+function mkPrStatusMap(rows = []) {
+  const map = new Map();
+  for (const { prNumber, repo = null, status, updatedAt } of rows) {
+    const key = repo ?? "";
+    let byRepo = map.get(prNumber);
+    if (!byRepo) {
+      byRepo = new Map();
+      map.set(prNumber, byRepo);
+    }
+    byRepo.set(key, { status, updatedAt, repo });
+  }
+  return map;
+}
+
 // A complete, default-healthy boardState shape (the frozen output assembleBoardState
 // produces). Overrides are shallow-merged per top-level key.
 function mkBoard(o = {}) {
@@ -34,8 +53,16 @@ function mkBoard(o = {}) {
     roster: o.roster ?? [],
     self: o.self ?? "mini",
     multiHost: o.multiHost ?? false,
+    // CTL-1157: assembleBoardState now records the run mode on the board so
+    // evaluateInvariants can default-gate the cohort checks (off → dark).
+    mode: o.mode,
     capacity: { maxParallel: 4, liveCount: 0, freeSlots: 4, ...(o.capacity ?? {}) },
     reconcileMarkers: o.reconcileMarkers ?? {},
+    // CTL-1157 (Codex #4): the filter_state PR-lifecycle map — composite
+    // `Map<number, Map<repoKey, {status,updatedAt,repo}>>`. Default empty Map ⇒ the
+    // phantom/orphaned-PR cohorts stay observable:false, exactly like an unwired
+    // board. `mkPrStatusMap` below builds the nested shape from flat rows.
+    prStatusMap: o.prStatusMap ?? new Map(),
     ring: {
       recentDispatchTs: null,
       cacheReconcile: null,
@@ -44,6 +71,8 @@ function mkBoard(o = {}) {
       ...(o.ring ?? {}),
     },
     ownerForTicket: o.ownerForTicket ?? null,
+    // CTL-1157 (Codex #4): ticket→owner/repo resolver for the composite lookup.
+    repoForTicket: o.repoForTicket ?? null,
     now: o.now ?? NOW,
   };
 }
@@ -209,6 +238,300 @@ describe("evaluateInvariants — per-invariant green/fail", () => {
   });
 });
 
+// ─── CTL-1157 off-gate: off = truly dark (no cohort code, no PR SELECT) ──────
+describe("CTL-1157 off-gate — cohort invariants + PR SELECT are dark in off", () => {
+  const COHORT_KEYS = ["phantomMergedPr", "orphanedOpenPr", "frozenNeedsHuman", "needsHumanPile"];
+
+  test("evaluateInvariants(mode:off) omits ALL four cohort invariants (legacy set only)", () => {
+    const r = evaluateInvariants(mkBoard(), { mode: "off" });
+    for (const k of COHORT_KEYS) expect(r[k]).toBeUndefined();
+    // the legacy invariants still all ran → byte-identical key set to origin/main.
+    expect(Object.keys(r).sort()).toEqual(
+      [
+        "blockedTree",
+        "cacheCoherence",
+        "dispatchLiveness",
+        "projectSilence",
+        "rateLimitHeadroom",
+        "strandedNode",
+        "workerAge",
+      ].sort(),
+    );
+  });
+
+  test("evaluateInvariants(mode:shadow) RUNS all four cohort invariants (telemetry)", () => {
+    const r = evaluateInvariants(mkBoard(), { mode: "shadow" });
+    for (const k of COHORT_KEYS) expect(r[k]).toBeDefined();
+    // needsHumanPile is the status-based catch-all → observable in shadow (it judges
+    // the signal-status set, always present), exactly like its siblings when wired.
+    expect(r.needsHumanPile.observable).toBe(true);
+  });
+
+  test("evaluateInvariants picks up board.mode (off) when no explicit mode passed", () => {
+    const r = evaluateInvariants(mkBoard({ mode: "off" }));
+    for (const k of COHORT_KEYS) expect(r[k]).toBeUndefined();
+  });
+
+  test("assembleBoardState(mode:off) NEVER invokes getPrStatusMap (no getAllPrStatuses SELECT)", () => {
+    let called = 0;
+    const board = assembleBoardState({
+      orchDir: "/tmp/x",
+      getBoard: () => [],
+      getWorkerSignals: () => [],
+      getEligible: () => [],
+      getPrStatusMap: () => {
+        called += 1;
+        return new Map([[1, { status: "merged" }]]);
+      },
+      mode: "off",
+      now: () => NOW,
+    });
+    expect(called).toBe(0); // the filter_state SELECT did not run
+    expect(board.prStatusMap.size).toBe(0); // empty Map → invariants would be inert anyway
+  });
+
+  test("assembleBoardState(mode:shadow) DOES invoke getPrStatusMap (telemetry needs it)", () => {
+    let called = 0;
+    assembleBoardState({
+      orchDir: "/tmp/x",
+      getBoard: () => [],
+      getWorkerSignals: () => [],
+      getEligible: () => [],
+      getPrStatusMap: () => {
+        called += 1;
+        return new Map();
+      },
+      mode: "shadow",
+      now: () => NOW,
+    });
+    expect(called).toBe(1);
+  });
+});
+
+// ─── CTL-1157 (Codex #4): multi-repo PR-number collision — composite keying ──
+// A (repo, pr_number) pair — not pr_number alone — identifies a PR. getAllPrStatuses
+// now returns a composite Map<number, Map<repo, status>>; board-health resolves the
+// stuck ticket's repo (repoForTicket) and looks up the EXACT (repo, number). A
+// cross-repo #-collision is disambiguated by the ticket's repo — it NO LONGER hides
+// a genuine orphaned open PR. Only a collision whose repo is genuinely underivable
+// stays the ambiguous skip (the documented true residual).
+describe("CTL-1157 multi-repo collision — composite (repo,number) disambiguation", () => {
+  // #42 collides: MERGED in org/x, OPEN in org/y — two different PRs.
+  const COLLIDE_42 = () =>
+    mkPrStatusMap([
+      { prNumber: 42, repo: "org/x", status: "merged" },
+      { prNumber: 42, repo: "org/y", status: "open" },
+    ]);
+
+  test("phantom-merged: a ticket in org/x (the MERGED repo) IS flagged despite the collision", () => {
+    const ticketsById = new Map([["CTL-Y", { identifier: "CTL-Y", state: "In Review", prNumber: 42 }]]);
+    const r = evaluateInvariants(
+      mkBoard({ ticketsById, prStatusMap: COLLIDE_42(), repoForTicket: () => "org/x" }),
+      { mode: "shadow" },
+    );
+    expect(r.phantomMergedPr.flagged).toContain("CTL-Y"); // genuine phantom still caught
+  });
+
+  test("phantom-merged: a ticket in org/y (the OPEN repo) is NOT flagged — no false phantom from org/x's merged", () => {
+    const ticketsById = new Map([["CTL-Y", { identifier: "CTL-Y", state: "In Review", prNumber: 42 }]]);
+    const r = evaluateInvariants(
+      mkBoard({ ticketsById, prStatusMap: COLLIDE_42(), repoForTicket: () => "org/y" }),
+      { mode: "shadow" },
+    );
+    expect(r.phantomMergedPr.flagged).not.toContain("CTL-Y"); // org/y's #42 is open, not merged
+    expect(r.phantomMergedPr.ok).toBe(true);
+  });
+
+  test("phantom-merged: collision + repo UNDERIVABLE (no repoForTicket) → ambiguous skip (true residual)", () => {
+    const ticketsById = new Map([["CTL-Y", { identifier: "CTL-Y", state: "In Review", prNumber: 42 }]]);
+    const r = evaluateInvariants(
+      mkBoard({ ticketsById, prStatusMap: COLLIDE_42() /* repoForTicket: null */ }),
+      { mode: "shadow" },
+    );
+    expect(r.phantomMergedPr.flagged).not.toContain("CTL-Y"); // can't pick → skip, never borrow
+  });
+
+  // THE HEADLINE FIX (Codex #4 missed-detection): a genuine orphaned open PR in the
+  // ticket's OWN repo must be flagged even when an UNRELATED repo reuses the number.
+  test("orphaned-open: a stale open PR in org/y IS flagged even though org/x reuses #99 (no longer hidden)", () => {
+    const ticketsById = new Map([["CTL-Z", { identifier: "CTL-Z", prNumber: 99 }]]);
+    const prStatusMap = mkPrStatusMap([
+      // org/x's #99 is merged & fresh — the unrelated collision that used to hide CTL-Z.
+      { prNumber: 99, repo: "org/x", status: "merged", updatedAt: new Date(NOW - 1 * HOUR).toISOString() },
+      // org/y's #99 — CTL-Z's real PR: open, stale, no live worker → orphaned.
+      { prNumber: 99, repo: "org/y", status: "open", updatedAt: new Date(NOW - 100 * HOUR).toISOString() },
+    ]);
+    const r = evaluateInvariants(
+      mkBoard({ ticketsById, prStatusMap, repoForTicket: () => "org/y" }),
+      { mode: "shadow" },
+    );
+    expect(r.orphanedOpenPr.flagged).toContain("CTL-Z"); // detection no longer hidden
+  });
+
+  test("orphaned-open: collision + repo UNDERIVABLE → ambiguous skip (true residual)", () => {
+    const ticketsById = new Map([["CTL-Z", { identifier: "CTL-Z", prNumber: 99 }]]);
+    const prStatusMap = mkPrStatusMap([
+      { prNumber: 99, repo: "org/x", status: "merged", updatedAt: new Date(NOW - 1 * HOUR).toISOString() },
+      { prNumber: 99, repo: "org/y", status: "open", updatedAt: new Date(NOW - 100 * HOUR).toISOString() },
+    ]);
+    const r = evaluateInvariants(
+      mkBoard({ ticketsById, prStatusMap /* repoForTicket: null */ }),
+      { mode: "shadow" },
+    );
+    expect(r.orphanedOpenPr.flagged).not.toContain("CTL-Z"); // can't pick → skip
+  });
+
+  // N=1 / single-repo: NO collision (one inner entry per number) → number-only
+  // resolution, byte-identical whether or not the ticket's repo was derived.
+  test("single-repo (N=1): phantom-merged still flags with NO repoForTicket bound", () => {
+    const ticketsById = new Map([["CTL-Y", { identifier: "CTL-Y", state: "In Review", prNumber: 42 }]]);
+    const r = evaluateInvariants(
+      mkBoard({ ticketsById, prStatusMap: mkPrStatusMap([{ prNumber: 42, repo: "org/solo", status: "merged" }]) }),
+      { mode: "shadow" },
+    );
+    expect(r.phantomMergedPr.flagged).toContain("CTL-Y");
+  });
+
+  test("single-repo (N=1): orphaned-open still flags with NO repoForTicket bound", () => {
+    const ticketsById = new Map([["CTL-Z", { identifier: "CTL-Z", prNumber: 99 }]]);
+    const prStatusMap = mkPrStatusMap([
+      { prNumber: 99, repo: "org/solo", status: "open", updatedAt: new Date(NOW - 100 * HOUR).toISOString() },
+    ]);
+    const r = evaluateInvariants(mkBoard({ ticketsById, prStatusMap }), { mode: "shadow" });
+    expect(r.orphanedOpenPr.flagged).toContain("CTL-Z");
+  });
+
+  // THE ROUND-4 FIX (Codex #4 borrow-across-repos): the ticket repo is KNOWN and the
+  // ONLY row for #42 belongs to a DIFFERENT repo. The pre-fix `byRepo.size===1` fast
+  // path returned that unrelated row, so a ticket in org/y inherited org/x#42's MERGED
+  // status → a FALSE phantom. Now a known repo requires the exact row → never borrow.
+  test("phantom-merged: known repo org/y is NOT flagged when the ONLY #42 row is org/x (no cross-repo borrow)", () => {
+    const ticketsById = new Map([["CTL-Y", { identifier: "CTL-Y", state: "In Review", prNumber: 42 }]]);
+    const prStatusMap = mkPrStatusMap([{ prNumber: 42, repo: "org/x", status: "merged" }]);
+    const r = evaluateInvariants(
+      mkBoard({ ticketsById, prStatusMap, repoForTicket: () => "org/y" }),
+      { mode: "shadow" },
+    );
+    expect(r.phantomMergedPr.flagged).not.toContain("CTL-Y"); // org/x#42's status is not CTL-Y's
+    expect(r.phantomMergedPr.ok).toBe(true);
+  });
+
+  // Single-repo preservation: a KNOWN repo with a LONE UNATTRIBUTED ("") lifecycle row
+  // (written before repo attribution) is still trusted — detection must not regress on
+  // the single-repo fleet whose filter_state rows carry no repo.
+  test("phantom-merged: known repo still flags off a lone UNATTRIBUTED row (single-repo preservation)", () => {
+    const ticketsById = new Map([["CTL-Y", { identifier: "CTL-Y", state: "In Review", prNumber: 42 }]]);
+    const prStatusMap = mkPrStatusMap([{ prNumber: 42, repo: null, status: "merged" }]); // repoKey ""
+    const r = evaluateInvariants(
+      mkBoard({ ticketsById, prStatusMap, repoForTicket: () => "org/y" }),
+      { mode: "shadow" },
+    );
+    expect(r.phantomMergedPr.flagged).toContain("CTL-Y");
+  });
+});
+
+// ─── CTL-1157 (Group 2, Codex) — cohort liveness/terminal correctness ────────
+// (1) orphaned-open PR: a failed/stalled worker FREES the slot → NOT live, so a
+//     PR stuck behind it IS the orphaned case (must not read as "has a worker").
+// (2) frozen-needs-human: a terminal (Done/Canceled/Duplicate) ticket carrying a
+//     stale cached needs-human label must NOT be flagged for recovery.
+describe("CTL-1157 cohort correctness — dead-worker orphans + terminal stale-label", () => {
+  const staleOpen = { prNumber: 7, repo: "org/solo", status: "open", updatedAt: new Date(NOW - 100 * HOUR).toISOString() };
+
+  test("orphaned-open: a stale open PR whose ONLY worker signal is FAILED IS flagged", () => {
+    const ticketsById = new Map([["CTL-DEAD", { identifier: "CTL-DEAD", prNumber: 7 }]]);
+    const r = evaluateInvariants(
+      mkBoard({
+        ticketsById,
+        prStatusMap: mkPrStatusMap([staleOpen]),
+        signals: [{ ticket: "CTL-DEAD", phase: "implement", status: "failed" }],
+      }),
+      { mode: "shadow" },
+    );
+    expect(r.orphanedOpenPr.flagged).toContain("CTL-DEAD"); // failed worker ≠ live
+  });
+
+  test("orphaned-open: a stale open PR whose ONLY worker signal is STALLED IS flagged", () => {
+    const ticketsById = new Map([["CTL-STALL", { identifier: "CTL-STALL", prNumber: 7 }]]);
+    const r = evaluateInvariants(
+      mkBoard({
+        ticketsById,
+        prStatusMap: mkPrStatusMap([staleOpen]),
+        signals: [{ ticket: "CTL-STALL", phase: "implement", status: "stalled" }],
+      }),
+      { mode: "shadow" },
+    );
+    expect(r.orphanedOpenPr.flagged).toContain("CTL-STALL");
+  });
+
+  // CTL-1157 (Codex round-6): a TERMINAL ticket (Done/Canceled/Duplicate) whose PR was
+  // never merged/closed still carries an "open" filter_state row, but must NOT be flagged
+  // as an orphaned-PR anchor — dispatching a recovery-pass on already-finished work wastes
+  // a slot. Mirrors the terminal exclusion the needs-human cohorts already apply.
+  test("orphaned-open: a TERMINAL (Canceled) ticket with a stale open PR is NOT flagged", () => {
+    const ticketsById = new Map([["CTL-TERM", { identifier: "CTL-TERM", prNumber: 7, state: "Canceled" }]]);
+    const r = evaluateInvariants(
+      mkBoard({
+        ticketsById,
+        prStatusMap: mkPrStatusMap([staleOpen]),
+        signals: [{ ticket: "CTL-TERM", phase: "implement", status: "failed" }],
+      }),
+      { mode: "shadow" },
+    );
+    expect(r.orphanedOpenPr.flagged).not.toContain("CTL-TERM"); // terminal → not a recovery anchor
+    expect(r.orphanedOpenPr.ok).toBe(true);
+  });
+
+  test("orphaned-open: a Done ticket with a stale open PR is NOT flagged", () => {
+    const ticketsById = new Map([["CTL-DONE", { identifier: "CTL-DONE", prNumber: 7, state: "Done" }]]);
+    const r = evaluateInvariants(
+      mkBoard({ ticketsById, prStatusMap: mkPrStatusMap([staleOpen]), signals: [] }),
+      { mode: "shadow" },
+    );
+    expect(r.orphanedOpenPr.flagged).not.toContain("CTL-DONE");
+  });
+
+  test("orphaned-open: a LIVE (running) worker still masks the PR as not-orphaned", () => {
+    const ticketsById = new Map([["CTL-LIVE", { identifier: "CTL-LIVE", prNumber: 7 }]]);
+    const r = evaluateInvariants(
+      mkBoard({
+        ticketsById,
+        prStatusMap: mkPrStatusMap([staleOpen]),
+        signals: [{ ticket: "CTL-LIVE", phase: "implement", status: "running" }],
+      }),
+      { mode: "shadow" },
+    );
+    expect(r.orphanedOpenPr.flagged).not.toContain("CTL-LIVE"); // running worker → live
+  });
+
+  test("frozen-needs-human: a TERMINAL ticket with a stale needs-human label is NOT flagged", () => {
+    const old = new Date(NOW - 100 * HOUR).toISOString();
+    const ticketsById = new Map([
+      ["CTL-DONE", { identifier: "CTL-DONE", state: "Done", labels: [{ name: "needs-human" }], updatedAt: old }],
+      ["CTL-CANCEL", { identifier: "CTL-CANCEL", state: "Canceled", labels: [{ name: "needs-human" }], updatedAt: old }],
+      ["CTL-DUP", { identifier: "CTL-DUP", state: "Duplicate", labels: [{ name: "needs-human" }], updatedAt: old }],
+    ]);
+    const r = evaluateInvariants(mkBoard({ ticketsById }), { mode: "shadow" });
+    expect(r.frozenNeedsHuman.flagged).not.toContain("CTL-DONE");
+    expect(r.frozenNeedsHuman.flagged).not.toContain("CTL-CANCEL");
+    expect(r.frozenNeedsHuman.flagged).not.toContain("CTL-DUP");
+    expect(r.frozenNeedsHuman.observable).toBe(true); // labels present → still observable
+  });
+
+  test("frozen-needs-human: a NON-terminal ticket with a stale needs-human label IS still flagged", () => {
+    const ticketsById = new Map([
+      ["CTL-STUCK", {
+        identifier: "CTL-STUCK",
+        state: "In Progress",
+        labels: [{ name: "needs-human" }],
+        updatedAt: new Date(NOW - 100 * HOUR).toISOString(),
+      }],
+    ]);
+    const r = evaluateInvariants(mkBoard({ ticketsById }), { mode: "shadow" });
+    expect(r.frozenNeedsHuman.flagged).toContain("CTL-STUCK"); // real frozen escalation preserved
+  });
+});
+
 // ─── decideBoardHealth — the cheap-gate funnel (§6) ─────────────────────────
 function inv(ok, failed = 0, observable = true, flagged = []) {
   return { ok, failed, observable, flagged, note: "" };
@@ -350,7 +673,7 @@ describe("buildBoardContext", () => {
     const invs = { ...allGreen(), workerAge: inv(false, 1, true, ["CTL-OLD"]) };
     const ctx = buildBoardContext(board, invs);
 
-    expect(ctx.schema).toBe("recovery-board-context/v1");
+    expect(ctx.schema).toBe("recovery-board-context/v2");
     expect(ctx.slots).toEqual({ capacity: 4, inUse: 2, free: 2 });
     expect(ctx.eligibleQueue.depth).toBe(2);
     expect(ctx.eligibleQueue.topTickets).toEqual(["CTL-1", "CTL-2"]);
@@ -486,6 +809,13 @@ describe("boardHealthPass — mode branching + shadow safety", () => {
     expect(emits.length).toBe(1);
     expect(emits[0].type).toBe("recovery.board-scan");
     expect(emits[0].details.mode).toBe("shadow");
+    // CTL-1157: shadow telemetry carries the cohort counts (OTEL before/after
+    // baseline) — present in the scan event, but the act seam threw and was never
+    // reached → telemetry-only, zero action.
+    for (const k of ["phantomMergedPr", "orphanedOpenPr", "frozenNeedsHuman", "needsHumanPile"]) {
+      expect(emits[0].details.invariants[k]).toBeDefined();
+    }
+    expect(r.act).toBeNull();
   });
 
   test("mode:enforce with NO act seam (the scheduler reality) → emits, mutates nothing, no throw", () => {
@@ -512,7 +842,7 @@ describe("boardHealthPass — mode branching + shadow safety", () => {
     // falls back to the top eligible ticket.
     expect(acted[0].anchor).toBe("CTL-1");
     // the delegate gets the WHOLE-board context, not a per-item brief.
-    expect(acted[0].boardContext.schema).toBe("recovery-board-context/v1");
+    expect(acted[0].boardContext.schema).toBe("recovery-board-context/v2");
     expect(acted[0].decision.gate.decision).toBe("proceed");
     // the act result is threaded back into the pass result (observability).
     expect(r.act).toEqual({ dispatched: true, attempts: 1 });

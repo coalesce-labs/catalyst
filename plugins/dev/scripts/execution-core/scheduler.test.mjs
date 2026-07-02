@@ -55,6 +55,7 @@ import {
   verifyDispatchedSignal,
   gcDispatchCooldowns,
   maybeEscalateDispatchFailures,
+  holisticBoardHealthAct,
   __resetForTests,
   __getRunningOpts,
   // CTL-705: Phase 2 helpers
@@ -5445,6 +5446,182 @@ describe("schedulerTick — terminal-Done once-marker (CTL-597)", () => {
     // No marker on a thrown apply → retried next tick.
     expect(existsSync(join(orchDir, "workers", "CTL-23", ".terminal-done.applied"))).toBe(false);
   });
+
+  // CTL-1157 (THE REVERSAL — ALARM-NOT-BLOCK): the terminal sweep writes Done
+  // DIRECTLY (no agent to reason). It no longer REFUSES on an open PR — it PROCEEDS
+  // (never wedges the board) and emits the loud recovery.done-applied-with-open-pr
+  // alarm so observability would justify adding a hard block later. A clean Done is
+  // silent.
+  test("CTL-1157: an OPEN PR does NOT block the terminal-sweep Done write — it PROCEEDS and fires the alarm", () => {
+    writeSignal("CTL-24", "teardown", "done");
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    const dones = [];
+    const writeStatus = {
+      ...terminalNoWrites(),
+      applyTerminalDone: (a) => {
+        dones.push(a);
+        return { applied: true };
+      },
+    };
+    const checkOpenPrs = () => ({ ok: false, prs: [{ number: 321, state: "OPEN" }] });
+    const alarms = [];
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: fakeDispatch(),
+      writeStatus,
+      checkOpenPrs,
+      emitDoneWithOpenPr: (ev) => alarms.push(ev),
+    });
+    expect(dones).toHaveLength(1); // proceeds — board never wedges
+    expect(existsSync(join(orchDir, "workers", "CTL-24", ".terminal-done.applied"))).toBe(true);
+    // The alarm fired with the ticket, the open PR list, and the backstop label.
+    expect(alarms).toHaveLength(1);
+    expect(alarms[0].ticket).toBe("CTL-24");
+    expect(alarms[0].by).toBe("terminal-sweep");
+    expect(alarms[0].openPrs.map((p) => p.number)).toEqual([321]);
+  });
+
+  // CTL-1157 (Codex GROUP-A fix #1 — UNVERIFIABLE ≠ CLEAN): a thrown/unverifiable
+  // enumeration is NOT a clean list. Per alarm-not-block the sweep still PROCEEDS
+  // (never wedges), but it now SURFACES the unverifiable Done via the loud alarm
+  // (flagged unverifiable) rather than silently assuming zero open PRs.
+  test("CTL-1157: an UNVERIFIABLE enumeration (gh throw) PROCEEDS and FIRES the alarm (unverifiable, surfaced not silent)", () => {
+    writeSignal("CTL-25", "teardown", "done");
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    const dones = [];
+    const writeStatus = {
+      ...terminalNoWrites(),
+      applyTerminalDone: (a) => {
+        dones.push(a);
+        return { applied: true };
+      },
+    };
+    const checkOpenPrs = () => {
+      throw new Error("`gh` not authenticated");
+    };
+    const alarms = [];
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: fakeDispatch(),
+      writeStatus,
+      checkOpenPrs,
+      emitDoneWithOpenPr: (ev) => alarms.push(ev),
+    });
+    expect(dones).toHaveLength(1); // proceeds — alarm-not-block (never wedges)
+    expect(existsSync(join(orchDir, "workers", "CTL-25", ".terminal-done.applied"))).toBe(true);
+    // unverifiable ⇒ could-not-confirm-clean ⇒ surface it (not silent).
+    expect(alarms).toHaveLength(1);
+    expect(alarms[0].ticket).toBe("CTL-25");
+    expect(alarms[0].by).toBe("terminal-sweep");
+    expect(alarms[0].unverifiable).toBe(true);
+    expect(alarms[0].openPrs).toEqual([]); // no KNOWN open PR, but still alarmed
+  });
+
+  // The structured {ok:false, unverifiable:true} return (no throw) — e.g. the
+  // attachment-view-failure path or an underivable repo — alarms the same way.
+  test("CTL-1157: a RETURNED unverifiable fact (no throw) also PROCEEDS and FIRES the alarm", () => {
+    writeSignal("CTL-27", "teardown", "done");
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    const dones = [];
+    const writeStatus = {
+      ...terminalNoWrites(),
+      applyTerminalDone: (a) => {
+        dones.push(a);
+        return { applied: true };
+      },
+    };
+    const checkOpenPrs = () => ({ ok: false, unverifiable: true, reason: "repo-underivable", prs: [] });
+    const alarms = [];
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: fakeDispatch(),
+      writeStatus,
+      checkOpenPrs,
+      emitDoneWithOpenPr: (ev) => alarms.push(ev),
+    });
+    expect(dones).toHaveLength(1);
+    expect(alarms).toHaveLength(1);
+    expect(alarms[0].unverifiable).toBe(true);
+  });
+
+  test("CTL-1157: no open PR (clean) writes Done, stamps the marker, and is SILENT (no alarm)", () => {
+    writeSignal("CTL-26", "teardown", "done");
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    const dones = [];
+    const writeStatus = {
+      ...terminalNoWrites(),
+      applyTerminalDone: (a) => {
+        dones.push(a);
+        return { applied: true };
+      },
+    };
+    const checkOpenPrs = () => ({ ok: true, prs: [] });
+    const alarms = [];
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: fakeDispatch(),
+      writeStatus,
+      checkOpenPrs,
+      emitDoneWithOpenPr: (ev) => alarms.push(ev),
+    });
+    expect(dones).toHaveLength(1); // legitimate completion preserved
+    expect(existsSync(join(orchDir, "workers", "CTL-26", ".terminal-done.applied"))).toBe(true);
+    expect(alarms).toEqual([]); // clean Done is silent
+  });
+
+  // CTL-1157 GROUP B (Done-event accuracy): an idempotent terminal SKIP (Linear
+  // already Done) returns {applied:true, action:"skipped"} and performs NO actual
+  // write. Emitting recovery.done-applied for it would corrupt OTEL's Done-move
+  // counts, and the open-PR alarm could fire for an already-Done ticket carrying a
+  // stale open PR. The marker still lands (once-semantics), but NEITHER emit fires.
+  test("CTL-1157: an idempotent SKIP (action:'skipped') stamps the marker but emits NO done-applied and NO alarm — even with a stale open PR", () => {
+    writeSignal("CTL-28", "teardown", "done");
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    const writeStatus = {
+      ...terminalNoWrites(),
+      // already-Done in Linear → no real write, just the idempotent skip outcome.
+      applyTerminalDone: () => ({ applied: true, action: "skipped" }),
+    };
+    // A stale open PR is present — would have alarmed on a REAL Done write.
+    const checkOpenPrs = () => ({ ok: false, prs: [{ number: 999, state: "OPEN" }] });
+    const doneApplied = [];
+    const alarms = [];
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: fakeDispatch(),
+      writeStatus,
+      checkOpenPrs,
+      emitDoneApplied: (ev) => doneApplied.push(ev),
+      emitDoneWithOpenPr: (ev) => alarms.push(ev),
+    });
+    // Once-semantics: the marker still lands on the confirming tick.
+    expect(existsSync(join(orchDir, "workers", "CTL-28", ".terminal-done.applied"))).toBe(true);
+    // But a SKIP is not a "move" — no done-applied, no open-PR alarm.
+    expect(doneApplied).toEqual([]);
+    expect(alarms).toEqual([]);
+  });
+
+  // CTL-1157 GROUP B: a REAL Done write (no action:"skipped") still emits the broad
+  // recovery.done-applied move (guards against the skipped-gate over-suppressing).
+  test("CTL-1157: a REAL terminal-sweep Done (applied, not skipped) DOES emit recovery.done-applied", () => {
+    writeSignal("CTL-29", "teardown", "done");
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    const writeStatus = {
+      ...terminalNoWrites(),
+      applyTerminalDone: () => ({ applied: true, action: "applied" }),
+    };
+    const doneApplied = [];
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: fakeDispatch(),
+      writeStatus,
+      checkOpenPrs: () => ({ ok: true, prs: [] }),
+      emitDoneApplied: (ev) => doneApplied.push(ev),
+    });
+    expect(doneApplied).toHaveLength(1);
+    expect(doneApplied[0].ticket).toBe("CTL-29");
+    expect(doneApplied[0].by).toBe("terminal-sweep");
+  });
 });
 
 // ─── CTL-653: end-to-end verify⇄remediate cycle through schedulerTick ───
@@ -9425,9 +9602,10 @@ describe("CTL-1191 — recovery passes HRW-gated over the surviving roster (Pass
 //
 // The reasoning pass must NOT reason over a ticket already finished (terminal
 // Linear state / merged PR) — doing so burns cooldown + re-posts diagnoses on a
-// Done ticket. The pass writes a per-ticket marker under .recovery-intents/ for
-// every item it processes (shadow mode), so the marker's presence/absence is the
-// observable. Single-host so the ownership gate is identity (we isolate the
+// Done ticket. In shadow the pass emits a per-item recovery.would-* event for every
+// item it processes (CTL-1157 F #5 retired the .recovery-intents cooldown marker in
+// shadow), so the event's presence/absence is the observable. Single-host so the
+// ownership gate is identity (we isolate the
 // terminal filter). A gateway descriptor supplies the Linear state without any
 // network — "Done" ⇒ terminal ⇒ filtered; "In Progress" ⇒ kept.
 describe("CTL-1191 — reasoning pass skips terminal tickets (Pass 0r terminal-state filter)", () => {
@@ -9465,12 +9643,19 @@ describe("CTL-1191 — reasoning pass skips terminal tickets (Pass 0r terminal-s
         applyTerminalDone: () => {},
         applyLabel: () => ({ applied: true }),
       },
-      recoveryPass: { mode: "shadow" }, // shadow still writes the cooldown marker
+      recoveryPass: { mode: "shadow" },
     });
 
-    // The in-flight ticket was reasoned over (marker written); the Done ticket
-    // was filtered BEFORE the pass (no marker — never processed).
-    expect(existsSync(recoveryIntentMarker("CTL-LIVE"))).toBe(true);
+    // CTL-1157 F #5: shadow no longer writes a cooldown marker for a DEFERRED (untyped
+    // stuck) item — that would mutate enforce scheduler state. So the observable that
+    // the in-flight CTL-LIVE was PROCESSED is now its recovery.would-defer EVENT; the
+    // terminal CTL-DONE, filtered BEFORE the pass, has NO per-item reasoning event
+    // (recovery.decision / recovery.would-*) and is never cooled down.
+    const events = readEventLog().map((e) => JSON.stringify(e));
+    expect(events.some((e) => e.includes("CTL-LIVE") && e.includes("would-defer"))).toBe(true);
+    expect(
+      events.some((e) => e.includes("CTL-DONE") && (e.includes("recovery.decision") || e.includes("would-"))),
+    ).toBe(false);
     expect(existsSync(recoveryIntentMarker("CTL-DONE"))).toBe(false);
   });
 });
