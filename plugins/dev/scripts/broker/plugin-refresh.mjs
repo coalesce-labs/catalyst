@@ -33,11 +33,12 @@
 // deterministically testable without real load, timers, network, or a checkout.
 // Mirrors the gc-liveness.mjs / autotune.mjs seam-injection convention.
 
-import { readFileSync } from "node:fs";
+import { readFileSync, rmSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { homedir } from "node:os";
 import { resolve } from "node:path";
 import { getEventName } from "./event-name.mjs"; // CTL-1348: leaf, not the heavy router
+import { staleLockStatus, indexLockPath, STALE_LOCK_THRESHOLD_MS } from "../lib/stale-lock.mjs"; // CTL-1415
 
 // Throttle window: at most one pull per N seconds per checkout root. A merge
 // often arrives as both a github.pr.merged AND a github.push to main within the
@@ -107,6 +108,59 @@ function defaultGitFn(root, args) {
     killSignal: "SIGKILL",
     env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
   }).trim();
+}
+
+// defaultRmFn — remove a path, tolerating a concurrent removal (force). Used only
+// to clear a stale git index.lock (CTL-1415); seam-injected for tests.
+function defaultRmFn(path) {
+  rmSync(path, { force: true });
+}
+
+/**
+ * clearStaleIndexLock — CTL-1415: age-gated removal of a crashed-op leftover
+ * `.git/index.lock` before a pull, so a stale lock can't silently freeze the
+ * checkout's `git reset --hard` for hours (the ~8.5h laptop freeze in CTL-1401).
+ *
+ * Removes ONLY when staleLockStatus reports the lock is older than the safe
+ * threshold, so an in-flight git op's lock is never disturbed. On removal, emits
+ * plugin.checkout.stale_lock_cleared (WARN — clearing means a git op had crashed,
+ * worth a signal). NEVER throws: a removal failure emits
+ * plugin.checkout.stale_lock_clear_failed (WARN) and the caller proceeds to the
+ * git op anyway (which then fails loudly via refresh_failed rather than this
+ * masking it).
+ *
+ * @returns {{present, ageMs, stale, cleared:boolean, error?:string}}
+ */
+export function clearStaleIndexLock({
+  root,
+  now = Date.now(),
+  emitFn,
+  statFn,
+  rmFn = defaultRmFn,
+  thresholdMs = STALE_LOCK_THRESHOLD_MS,
+}) {
+  const status = staleLockStatus({ root, now, thresholdMs, statFn });
+  if (!status.present || !status.stale) return { ...status, cleared: false };
+  try {
+    rmFn(indexLockPath(root));
+    emitFn?.({
+      event: "plugin.checkout.stale_lock_cleared",
+      orchestrator: null,
+      worker: null,
+      severity: "WARN",
+      detail: { checkout: root, lock_age_ms: status.ageMs, threshold_ms: thresholdMs },
+    });
+    return { ...status, cleared: true };
+  } catch (err) {
+    emitFn?.({
+      event: "plugin.checkout.stale_lock_clear_failed",
+      orchestrator: null,
+      worker: null,
+      severity: "WARN",
+      detail: { checkout: root, lock_age_ms: status.ageMs, error: err?.message ?? String(err) },
+    });
+    return { ...status, cleared: false, error: err?.message ?? String(err) };
+  }
 }
 
 // Dep install can take longer than a git op (lockfile resolution); generous ceiling.
@@ -407,6 +461,10 @@ export function refreshPluginCheckout({
   // ALWAYS returns changed:false so decideStackReload (stack-reload.mjs) stays a no-op
   // (a behind checkout the broker never pulled must not trigger a stack restart loop).
   pull = true,
+  // CTL-1415: seams for the pre-pull stale-index.lock age-gate. Undefined statFn
+  // falls through to staleLockStatus's real statSync default in production.
+  statFn = undefined,
+  rmFn = defaultRmFn,
 }) {
   if (!root) return { pulled: false, throttled: false, changed: false, failed: false, root, oldSha: null, newSha: null, restartNeeded: false };
 
@@ -463,6 +521,12 @@ export function refreshPluginCheckout({
   } catch {
     oldSha = null;
   }
+
+  // CTL-1415: clear a stale (crashed-op) index.lock BEFORE the reset --hard it
+  // would otherwise block on forever. Age-gated, so a live git op is untouched;
+  // never throws, so a clear failure surfaces as its own WARN and we still
+  // attempt the pull (which then fails loudly rather than being masked).
+  clearStaleIndexLock({ root, now, emitFn, statFn, rmFn });
 
   try {
     gitFn(root, ["fetch", "--no-tags", "origin", "main"]);
