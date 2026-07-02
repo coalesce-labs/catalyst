@@ -5,7 +5,7 @@ description:
   ticket', 'update the ticket', 'move ticket to', 'search Linear', or wants to create tickets from
   thoughts documents, update ticket status, or manage the Linear workflow. Uses Linearis CLI."
 disable-model-invocation: false
-allowed-tools: Bash(linearis *), Bash(linear_read_ticket *), Read, Write, Edit, Grep
+allowed-tools: Bash(linearis *), Bash(source *), Bash(linear_read_ticket *), Read, Write, Edit, Grep
 version: 1.0.0
 ---
 

@@ -8,7 +8,7 @@ description:
   plus tiered Gherkin (Given/When/Then) acceptance criteria — even for backend bugs and chores."
 disable-model-invocation: false
 user-invocable: true
-allowed-tools: Read, Write, Edit, Grep, Glob, Bash(linearis *), Bash(jq *), Bash(linear_read_ticket *)
+allowed-tools: Read, Write, Edit, Grep, Glob, Bash(linearis *), Bash(jq *), Bash(source *), Bash(linear_read_ticket *)
 version: 1.0.0
 ---
 

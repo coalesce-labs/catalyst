@@ -201,15 +201,19 @@ v2026.4.9.
 ### Read a ticket
 
 ```bash
-# Preferred — the shared helper: freshness gate → replica SQL → loud linearis fallback, one call.
-source "${SCRIPT_DIR}/lib/linear-read-replica.sh"   # plugins/dev/scripts/lib/linear-read-replica.sh
-json=$(linear_read_ticket ENG-123) || return 1      # linearis-shaped JSON (state.name, estimate, labels.nodes[]…)
-title=$(printf '%s' "$json" | jq -r '.title // empty')
-
-# No helper on hand? Inline SQL — gate on freshness first (see Reading Linear):
+# Preferred — self-contained inline replica SQL. No source, no $SCRIPT_DIR — works in any
+# shell. Resolves the DB path the same way the daemon does (gate on freshness first; see
+# Reading Linear):
 DB="${CATALYST_REPLICA_DB:-${CATALYST_DIR:-$HOME/catalyst}/catalyst-replica.db}"
 sqlite3 -json "$DB" \
   "SELECT identifier, title, state, estimate FROM issues WHERE identifier='ENG-123' AND removed_at IS NULL;"
+
+# Inside a skill/script, the shared helper does freshness-gate → replica SQL → loud linearis
+# fallback in ONE call. Source it by a RESOLVABLE root — there is NO $SCRIPT_DIR in a bare
+# shell; in a catalyst-dev skill use $CLAUDE_PLUGIN_ROOT:
+source "${CLAUDE_PLUGIN_ROOT:?source in a catalyst-dev skill}/scripts/lib/linear-read-replica.sh"
+json=$(linear_read_ticket ENG-123) || return 1      # linearis-shaped JSON (state.name, estimate, labels.nodes[]…)
+title=$(printf '%s' "$json" | jq -r '.title // empty')
 ```
 
 > `linearis issues read ENG-123` is the STALE/ABSENT **fallback only**. `linear_read_ticket` runs it
