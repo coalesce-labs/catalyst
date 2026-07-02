@@ -1019,6 +1019,10 @@ export async function sdkRunPhaseAgent(
     worktreePath: spec.worktreePath ?? worktreePath,
     generation: spec.generation,
     orchDir,
+    // CTL-1422 review fix (D): a warm resume knows its session UUID up front —
+    // seed the projection so a crash before the first streamed message doesn't
+    // break the warm chain (the init capture below overwrites/confirms it).
+    sessionId: spec.resumeSession ?? null,
   });
 
   // ── LAUNCH VERB: the in-process query() loop, under the concurrency cap ───

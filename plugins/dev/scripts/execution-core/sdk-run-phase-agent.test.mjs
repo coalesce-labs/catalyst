@@ -1789,6 +1789,23 @@ describe("sdkRunPhaseAgent — CTL-1422 (session capture + lifecycle events)", (
     expect(stopped[0][1]).toMatchObject({ ticket: "CTL-100", session_id: "sess-abc" });
   });
 
+  test("a resume dispatch seeds registerWorker with the known UUID (crash-before-init safety)", async () => {
+    const spec = makeSpec({ resumeSession: "sess-prev" });
+    const { spawn } = spawnReturningSpec({ spec });
+    const registered = [];
+    const runQuery = fakeQuery([resultMsg()]);
+    const r = await sdkRunPhaseAgent(ARGS, {
+      ...GOOD_AUTH, spawn, runQuery,
+      registerWorker: (e) => {
+        registered.push(e);
+        return { setAbortController() {}, touch() {}, setSessionId() {}, deregister() {} };
+      },
+      emitEvent: () => {},
+    });
+    expect(r.code).toBe(0);
+    expect(registered[0]).toMatchObject({ ticket: "CTL-100", sessionId: "sess-prev" });
+  });
+
   test("a resume dispatch emits worker.session.resumed instead of started", async () => {
     const spec = makeSpec({ resumeSession: "sess-prev" });
     const { spawn } = spawnReturningSpec({ spec });

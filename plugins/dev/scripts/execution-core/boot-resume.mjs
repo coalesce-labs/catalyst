@@ -35,6 +35,7 @@ import {
   mkdirSync,
   readdirSync,
   readFileSync,
+  rmSync,
   unlinkSync,
   writeFileSync,
 } from "node:fs";
@@ -241,6 +242,12 @@ export function selectBootResumeCandidates({
   // supersedes its resume phase. reconcileBootResume threads a real callback that
   // routes the regression to the audit log.
   onPhaseRegression = () => {},
+  // CTL-1422 review fix (B): warm-harvested tickets are exempt from the
+  // free-slot slice — dropping one silently discards its session UUID (the
+  // in-memory harvest is the boot pass's only copy in use). Safe: they were
+  // occupying slots before the restart, and the runner's semaphore still caps
+  // real concurrency.
+  sdkSessionHarvest = new Map(),
 } = {}) {
   const inFlight = listInFlightTickets(orchDir);
   if (inFlight.size === 0) return [];
@@ -338,7 +345,11 @@ export function selectBootResumeCandidates({
 
   const free = computeFreeSlots(maxParallel, liveCount);
   needResume.sort((a, b) => a.ticket.localeCompare(b.ticket));
-  return needResume.slice(0, free);
+  // CTL-1422 (B): warm candidates always survive selection; the slice caps
+  // only cold candidates, against the slots warm did not consume.
+  const warm = needResume.filter((c) => sdkSessionHarvest.has?.(c.ticket));
+  const cold = needResume.filter((c) => !sdkSessionHarvest.has?.(c.ticket));
+  return [...warm, ...cold.slice(0, Math.max(0, free - warm.length))];
 }
 
 // resolveAgents — normalize the injectable `agents` seam to a concrete array.
@@ -367,6 +378,42 @@ function resolveAgents(agents) {
 // dispatch-cooldown markers — it never resets them.
 const BOOT_REWALK_MAX_PER_TICK =
   Number(process.env.CATALYST_BOOT_REWALK_MAX_PER_TICK) || 2;
+
+// CTL-1422 review fix (A): the warm-resume loop budget. A crash-looping daemon
+// would otherwise re-resume the SAME session on every boot forever — bypassing
+// the CTL-644 operator gate it is allowed to skip only because a continuation
+// is cheap ONCE. The budget is keyed by session UUID (a NEW session is a new
+// run, not a loop) and persisted per ticket so it survives the crash loop it
+// exists to stop. At the cap, the candidate falls back to the normal gated path.
+export const WARM_RESUME_MAX_PER_SESSION =
+  Number(process.env.CATALYST_WARM_RESUME_MAX_PER_SESSION) || 3;
+
+function warmBudgetPath(orchDir, ticket) {
+  return join(orchDir, "workers", ticket, ".warm-resume-budget");
+}
+
+// Returns true when the warm path may proceed (and records the attempt);
+// false when the session has exhausted its budget.
+function consumeWarmBudget(orchDir, ticket, sessionId) {
+  const p = warmBudgetPath(orchDir, ticket);
+  let rec = null;
+  try {
+    rec = JSON.parse(readFileSync(p, "utf8"));
+  } catch {
+    /* absent/corrupt → fresh budget */
+  }
+  const count = rec?.sessionId === sessionId ? Number(rec.count) || 0 : 0;
+  if (count >= WARM_RESUME_MAX_PER_SESSION) return false;
+  try {
+    writeFileSync(p, JSON.stringify({ sessionId, count: count + 1 }));
+  } catch (err) {
+    log.warn(
+      { ticket, err: err?.message },
+      "boot-resume: warm-budget write failed — allowing this resume, budget not durable"
+    );
+  }
+  return true;
+}
 
 export function reconcileBootResume({
   orchDir,
@@ -418,6 +465,7 @@ export function reconcileBootResume({
     // audit log instead of re-dispatching it behind a later terminal phase.
     onPhaseRegression: ({ ticket, phase, dominantPhase }) =>
       appendRegressionEvent({ phase, ticket, dominantPhase, orchId }),
+    sdkSessionHarvest, // CTL-1422 (B): warm candidates are slice-exempt
   });
 
   // CTL-1084: planned = total candidates found (before any cap or cooldown filter).
@@ -431,8 +479,17 @@ export function reconcileBootResume({
   for (const { ticket, phase, worktreePath, bgJobId } of candidates) {
     // CTL-1422: a harvested SDK session makes this a warm CONTINUATION, not a
     // cold re-run — skip the expensive gate and the rewalk cap (rationale in
-    // the option doc above).
-    const warmSession = sdkSessionHarvest.get?.(ticket) ?? null;
+    // the option doc above). Review fix (A): the skip is BUDGETED per session
+    // UUID — an exhausted budget demotes the candidate to the normal cold path
+    // (gate + cap apply), so a crash-looping daemon cannot re-resume forever.
+    let warmSession = sdkSessionHarvest.get?.(ticket) ?? null;
+    if (warmSession && !consumeWarmBudget(orchDir, ticket, warmSession)) {
+      log.warn(
+        { ticket, phase, sessionId: warmSession, max: WARM_RESUME_MAX_PER_SESSION },
+        "boot-resume: warm-resume budget exhausted for this session — demoting to the gated cold path"
+      );
+      warmSession = null;
+    }
     // CTL-644: gate expensive phases behind operator approval; auto-dispatch cheap ones.
     if (!isCheapPhase(phase) && !warmSession) {
       const written = writePendingMarker(orchDir, ticket, phase, worktreePath);
@@ -464,6 +521,16 @@ export function reconcileBootResume({
     // to the today-default fresh-dispatch path. The downstream stderr
     // classifier in phase-agent-dispatch (CTL-658 launched/alive/failed)
     // handles a resume that's recorded on disk but fails to launch.
+    // CTL-1422 review fix (C): a warm dispatch supersedes any pending-approval
+    // marker a PRIOR boot's cold gating left behind — otherwise a later operator
+    // approval (processApprovedResumes) double-dispatches the same ticket.
+    if (warmSession) {
+      try {
+        rmSync(bootResumePendingPath(orchDir, ticket), { force: true });
+      } catch {
+        /* best-effort */
+      }
+    }
     let resumeSession = warmSession;
     if (!resumeSession && bgJobId) {
       try {

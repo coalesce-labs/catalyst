@@ -126,7 +126,13 @@ function isPlainInt(v) {
  * @param {{now?: () => number}} [opts] injectable clock
  * @returns handle {setAbortController, touch, deregister, aborted}
  */
-export function registerSdkWorker({ ticket, phase, worktreePath, generation, orchDir }, { now = Date.now } = {}) {
+export function registerSdkWorker(
+  // CTL-1422 review fix (D): a warm resume KNOWS its session UUID at register
+  // time (spec.resumeSession) — seed it so a crash between register and the
+  // first streamed message doesn't lose the warm chain.
+  { ticket, phase, worktreePath, generation, orchDir, sessionId = null },
+  { now = Date.now } = {},
+) {
   if (!ticket) throw new TypeError("registerSdkWorker: ticket is required");
   const prev = _live.get(ticket);
   if (prev && _byWorktree.get(prev.worktreePath) === ticket) _byWorktree.delete(prev.worktreePath);
@@ -146,7 +152,7 @@ export function registerSdkWorker({ ticket, phase, worktreePath, generation, orc
     abortController: null,
     abortReason: null,
     aborted: false,
-    sessionId: null,
+    sessionId,
     now,
   };
   _live.set(ticket, entry);
@@ -303,14 +309,23 @@ export function isSdkWorkerLiveOnDisk(orchDir, ticket, { pidAlive = defaultPidAl
  * previous daemon and is deleted. Runs before any dispatch entry point.
  * @returns {{removed: string[], kept: string[]}}
  */
-export function reconcileSdkRegistryOnBoot(orchDir, { pidAlive = defaultPidAlive } = {}) {
+// CTL-1422: harvested sessions older than this are orphans, not resume
+// candidates — the lookback window that stops an ancient never-stopped
+// projection from resurrecting forever.
+export const WARM_HARVEST_MAX_AGE_MS = 48 * 60 * 60 * 1000;
+
+export function reconcileSdkRegistryOnBoot(orchDir, { pidAlive = defaultPidAlive, now = Date.now } = {}) {
   const removed = [];
   const kept = [];
-  // CTL-1422: dead-pid projections that carry a sessionId are the warm-resume
-  // inventory — no in-process worker survives a daemon restart, so each one is
-  // an interrupted run whose SDK session can be continued via options.resume.
-  // Harvested BEFORE the file is deleted; the caller (daemon boot) threads the
-  // list into boot-resume as its sdkSessionHarvest.
+  // CTL-1422: dead-pid projections that carry a FRESH sessionId are the
+  // warm-resume inventory — no in-process worker survives a daemon restart, so
+  // each one is an interrupted run whose SDK session can be continued via
+  // options.resume. Review fix (B): harvested projections are KEPT on disk
+  // (the file is the only durable copy of the UUID; a candidate dropped by a
+  // downstream selection guard must survive to the next boot). The file is
+  // superseded when the resumed run re-registers, or aged out here at
+  // WARM_HARVEST_MAX_AGE_MS. Only unharvestable dead projections (corrupt, no
+  // session, stale) are deleted.
   const harvested = [];
   let files;
   try {
@@ -331,7 +346,9 @@ export function reconcileSdkRegistryOnBoot(orchDir, { pidAlive = defaultPidAlive
       kept.push(ticket);
       continue;
     }
-    if (proj && typeof proj.sessionId === "string" && proj.sessionId) {
+    const updatedAt = Number(proj?.updatedAt);
+    const fresh = Number.isFinite(updatedAt) && now() - updatedAt <= WARM_HARVEST_MAX_AGE_MS;
+    if (proj && typeof proj.sessionId === "string" && proj.sessionId && fresh) {
       harvested.push({
         ticket,
         sessionId: proj.sessionId,
@@ -339,6 +356,7 @@ export function reconcileSdkRegistryOnBoot(orchDir, { pidAlive = defaultPidAlive
         generation: proj.generation,
         worktreePath: proj.worktreePath,
       });
+      continue; // keep the file — it is the durable copy of the UUID
     }
     try {
       rmSync(file, { force: true });

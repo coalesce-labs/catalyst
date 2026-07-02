@@ -12,6 +12,7 @@ import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync, existsSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  WARM_RESUME_MAX_PER_SESSION,
   hasLiveBgWorker,
   activePhaseForTicket,
   selectBootResumeCandidates,
@@ -1374,5 +1375,85 @@ describe("reconcileBootResume — CTL-1422 warm resume", () => {
     });
     expect(res.dispatched).toBe(1);
     expect(dispatched[0]).toMatchObject({ resumeSession: "sess-warm-5" });
+  });
+});
+
+// ── CTL-1422 review fixes: warm-resume loop budget + slice exemption + marker clear ──
+
+describe("reconcileBootResume — CTL-1422 review hardening", () => {
+  const warmDeps = (over = {}) => ({
+    orchDir,
+    report: { coldStart: true },
+    agents: [],
+    dispatch: () => {},
+    appendEvent: () => {},
+    appendGatedEvent: () => {},
+    resolveSession: () => null,
+    ...over,
+  });
+
+  test("the SAME session UUID warm-resumes at most WARM_RESUME_MAX_PER_SESSION times, then falls to the gated path", () => {
+    const dispatched = [];
+    const gated = [];
+    for (let boot = 0; boot < 5; boot++) {
+      rmSync(join(orchDir, "workers", "CTL-1", "phase-implement.json"), { force: true });
+      writeSignal(orchDir, "CTL-1", "implement", { worktreePath: "/wt/CTL-1", bg_job_id: null });
+      reconcileBootResume(warmDeps({
+        reviveDispatch: (a) => { dispatched.push(a); return { code: 0 }; },
+        appendGatedEvent: (e) => gated.push(e),
+        sdkSessionHarvest: new Map([["CTL-1", "sess-loop"]]),
+      }));
+    }
+    expect(dispatched.length).toBe(WARM_RESUME_MAX_PER_SESSION);
+    expect(gated.length).toBe(1); // the over-budget boot falls back to the CTL-644 gate exactly once (marker idempotent after)
+  });
+
+  test("a DIFFERENT session UUID resets the warm budget (new run, not a loop)", () => {
+    const dispatched = [];
+    for (let boot = 0; boot < 2; boot++) {
+      rmSync(join(orchDir, "workers", "CTL-2", "phase-implement.json"), { force: true });
+      rmSync(join(orchDir, "workers", "CTL-2", ".boot-resume-pending-approval"), { force: true });
+      writeSignal(orchDir, "CTL-2", "implement", { worktreePath: "/wt/CTL-2", bg_job_id: null });
+      for (let i = 0; i < WARM_RESUME_MAX_PER_SESSION; i++) {
+        reconcileBootResume(warmDeps({
+          reviveDispatch: (a) => { dispatched.push(a); return { code: 0 }; },
+          sdkSessionHarvest: new Map([["CTL-2", `sess-gen-${boot}`]]),
+        }));
+      }
+    }
+    expect(dispatched.length).toBe(2 * WARM_RESUME_MAX_PER_SESSION);
+  });
+
+  test("warm candidates are exempt from the free-slot slice (the UUID must not be silently dropped)", () => {
+    // maxParallel=1 with two candidates: the lexically-later warm ticket must
+    // still dispatch; the cold one takes the single free slot.
+    writeSignal(orchDir, "CTL-A", "plan", { worktreePath: "/wt/CTL-A", bg_job_id: null });
+    writeSignal(orchDir, "CTL-Z", "plan", { worktreePath: "/wt/CTL-Z", bg_job_id: null });
+    const dispatched = [];
+    reconcileBootResume(warmDeps({
+      reviveDispatch: (a) => { dispatched.push(a.ticket); return { code: 0 }; },
+      concurrency: { maxParallel: 1 },
+      maxRewalkPerTick: 100,
+      sdkSessionHarvest: new Map([["CTL-Z", "sess-z"]]),
+    }));
+    expect(dispatched).toContain("CTL-Z"); // warm — slice-exempt
+    expect(dispatched).toHaveLength(1); // cold CTL-A lost the single slot to nothing else… slice caps cold only
+  });
+
+  test("a warm dispatch clears a stale pending-approval marker (no later double-dispatch)", () => {
+    writeSignal(orchDir, "CTL-3", "implement", { worktreePath: "/wt/CTL-3", bg_job_id: null });
+    // simulate the marker left by a PRIOR boot's cold gating
+    mkdirSync(join(orchDir, "workers", "CTL-3"), { recursive: true });
+    writeFileSync(
+      join(orchDir, "workers", "CTL-3", ".boot-resume-pending-approval"),
+      JSON.stringify({ ticket: "CTL-3", phase: "implement" }),
+    );
+    const dispatched = [];
+    reconcileBootResume(warmDeps({
+      reviveDispatch: (a) => { dispatched.push(a); return { code: 0 }; },
+      sdkSessionHarvest: new Map([["CTL-3", "sess-3"]]),
+    }));
+    expect(dispatched).toHaveLength(1);
+    expect(existsSync(join(orchDir, "workers", "CTL-3", ".boot-resume-pending-approval"))).toBe(false);
   });
 });
