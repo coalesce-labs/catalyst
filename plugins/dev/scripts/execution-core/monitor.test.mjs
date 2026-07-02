@@ -39,6 +39,12 @@ import {
   recordReconcileFailure,
   __resetReconcileHealthForTests,
 } from "./reconcile-health.mjs";
+import {
+  __resetFleetFreezeLatch,
+  ALERT_RAISED,
+  ALERT_CLEARED,
+  ALERT_KIND_FLEET_FROZEN_ADMISSION,
+} from "./fleet-freeze-alert.mjs"; // CTL-1420
 
 let catalystDir;
 let prevCatalystDir;
@@ -53,6 +59,7 @@ beforeEach(() => {
   process.env.CATALYST_DIR = catalystDir;
   mkdirSync(join(catalystDir, "execution-core"), { recursive: true });
   __resetForTests();
+  __resetFleetFreezeLatch(); // CTL-1420: the fleet-freeze latch is module-global + now persisted — reset per test
   enrolledTeams.clear();
   registryEntries.length = 0;
 });
@@ -892,6 +899,50 @@ describe("lifecycle", () => {
     unenroll("ENG");
     reconcileAll({ exec });
     expect(getEligibleSet("ENG")).toEqual([]); // dropProject'd
+  });
+
+  // CTL-1420: when EVERY registered team's reconcile fails persistently (no fresh
+  // replica AND the CTL-679 breaker is pinned open), the eligible projection can't
+  // refresh from either source — the board is frozen for new work fleet-wide.
+  // reconcileAll rolls the per-team reconcile-health up into ONE catalyst.alert.*.
+  test("reconcileAll raises a fleet-frozen-admission alert when every team's reconcile is failing, and clears it when one recovers", () => {
+    __resetFleetFreezeLatch();
+    enroll("ENG", { status: "Ready" });
+    enroll("PLAT", { status: "Ready" });
+    // A breaker-open/removed-state exec: throws for every team, every pass.
+    const throwingExec = () => ({ code: 1, stdout: "", stderr: "circuit-open" });
+    const alerts = [];
+    const fleetFreezeAppend = (line) => alerts.push(JSON.parse(line));
+
+    // Drive both teams past the failure threshold (3). No alert until the LAST
+    // team crosses — the fleet is frozen only when ALL teams are failing.
+    reconcileAll({ exec: throwingExec, fleetFreezeAppend });
+    reconcileAll({ exec: throwingExec, fleetFreezeAppend });
+    expect(alerts).toHaveLength(0); // both teams at 2 failures — under threshold
+    reconcileAll({ exec: throwingExec, fleetFreezeAppend });
+
+    // Both teams now alerting → exactly one fleet-frozen RAISED alert.
+    expect(getReconcileHealth("ENG").alerting).toBe(true);
+    expect(getReconcileHealth("PLAT").alerting).toBe(true);
+    expect(alerts).toHaveLength(1);
+    expect(alerts[0].attributes["event.name"]).toBe(ALERT_RAISED);
+    expect(alerts[0].attributes["event.label"]).toBe(ALERT_KIND_FLEET_FROZEN_ADMISSION);
+    expect(alerts[0].body.payload.teams.sort()).toEqual(["ENG", "PLAT"]);
+
+    // A further all-failing pass does NOT re-fire (latched).
+    reconcileAll({ exec: throwingExec, fleetFreezeAppend });
+    expect(alerts).toHaveLength(1);
+
+    // ENG recovers → not ALL teams frozen → exactly one CLEARED alert.
+    const mixedExec = (_cmd, args) => {
+      const team = args[args.indexOf("--team") + 1];
+      if (team === "ENG") return { code: 0, stdout: JSON.stringify({ nodes: [node("ENG-1")] }), stderr: "" };
+      return { code: 1, stdout: "", stderr: "circuit-open" };
+    };
+    reconcileAll({ exec: mixedExec, fleetFreezeAppend });
+    expect(getReconcileHealth("ENG").alerting).toBe(false);
+    expect(alerts).toHaveLength(2);
+    expect(alerts[1].attributes["event.name"]).toBe(ALERT_CLEARED);
   });
 
   test("stopMonitor clears pending debounce timers (a queued reconcile never fires)", async () => {
