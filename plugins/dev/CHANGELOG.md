@@ -1,9 +1,18 @@
 # Changelog
 
-## [12.22.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.21.0...catalyst-dev-v12.22.0) (2026-07-02)
+## [12.22.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.21.0...catalyst-dev-v12.22.0)
+
+Jul 02, 2026
+
+<!-- ai-enhanced -->
+
+### SDK Worker Registry & Fleet Resilience
+
+This release introduces a unified in-process SDK worker registry that tracks live workers with heartbeats, sticky abort semantics, and disk projections — closing the liveness blind spots that left the scheduler, delegate queue, and worktree refresh timer unable to see workers running outside the bg executor. Alongside that, a Linear quota storm can no longer freeze fleet admission: when the circuit breaker is open, a provably-real replica-empty is now trusted directly instead of looping into a failing linearis reconfirm. Agent reads also move off the `catalyst-linear` CLI to direct SQLite queries against the local replica, giving agents full join support and a single, well-defined freshness rule; `catalyst-linear` is now a deprecated shim.
 
 
-### Features
+
+### PRs
 
 * **dev:** CTL-1157 — Self-Healing Delegate wave 1 (board-health sees + acts on stuck work; shadow-gated, dark merge) ([#2503](https://github.com/coalesce-labs/catalyst/issues/2503)) ([32d2218](https://github.com/coalesce-labs/catalyst/commit/32d2218b962467ed8e3307e6146f3d657fb030d5))
 * **dev:** CTL-1397 — pivot agent Linear reads to direct SQLite; deprecate catalyst-linear CLI ([#2514](https://github.com/coalesce-labs/catalyst/issues/2514)) ([249c9d6](https://github.com/coalesce-labs/catalyst/commit/249c9d67c12d58f79aa07fa44289afa57b29c5db))
@@ -11,10 +20,6 @@
 * **dev:** CTL-1410 (Phase A) — in-band terminal signal flips for event-only phases + SDK success safety net ([#2524](https://github.com/coalesce-labs/catalyst/issues/2524)) ([ba06b66](https://github.com/coalesce-labs/catalyst/commit/ba06b66b01367091d3badfb107324d29d31c9135))
 * **dev:** CTL-1410 (Phase B) — unified in-process SDK worker registry + liveness re-points ([#2529](https://github.com/coalesce-labs/catalyst/issues/2529)) ([89fd452](https://github.com/coalesce-labs/catalyst/commit/89fd45209aed6fcbee213d6a4decf49c950a0fb8))
 * **dev:** CTL-1421 — doctor asserts the worker plugin path is a fresh pristine plugin-source ([#2537](https://github.com/coalesce-labs/catalyst/issues/2537)) ([e1c48f3](https://github.com/coalesce-labs/catalyst/commit/e1c48f310b49d638c59955943acd79b31ddf1c51))
-
-
-### Bug Fixes
-
 * **dev:** catalyst-cloud[#127](https://github.com/coalesce-labs/catalyst/issues/127) — bump @catalyst-cloud/sdk → ^0.4.0 (forward-compat filter + auto-reseed backfill) ([#2525](https://github.com/coalesce-labs/catalyst/issues/2525)) ([3d4bc40](https://github.com/coalesce-labs/catalyst/commit/3d4bc40e174a7e03d4f98bded60c0186e2118e7b))
 * **dev:** CTL-1416 — bash-3.2-safe emit-complete session-end + hermetic thoughts fixture for its tests ([#2535](https://github.com/coalesce-labs/catalyst/issues/2535)) ([aaeba1e](https://github.com/coalesce-labs/catalyst/commit/aaeba1e7bc04b9f12cf116294d12e84325818d1b))
 * **dev:** CTL-1416 — make `phase-agent-emit-complete` bash-3.2-safe ([aaeba1e](https://github.com/coalesce-labs/catalyst/commit/aaeba1e7bc04b9f12cf116294d12e84325818d1b))
