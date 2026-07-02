@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.5.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-pm-v7.4.0...catalyst-pm-v7.5.0) (2026-07-02)
+
+
+### Features
+
+* **dev:** CTL-1397 — pivot agent Linear reads to direct SQLite; deprecate catalyst-linear CLI ([#2514](https://github.com/coalesce-labs/catalyst/issues/2514)) ([249c9d6](https://github.com/coalesce-labs/catalyst/commit/249c9d67c12d58f79aa07fa44289afa57b29c5db))
+
 ## [7.4.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-pm-v7.3.0...catalyst-pm-v7.4.0)
 
 Jul 01, 2026
