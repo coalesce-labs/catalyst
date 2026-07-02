@@ -67,6 +67,7 @@ import { fileURLToPath } from "node:url";
 import { getEventLogPath } from "./config.mjs";
 import { buildCatalystResource } from "./lib/catalyst-resource.mjs";
 import { nodeClass } from "./lib/node-class.mjs";
+import { registerSdkWorker as defaultRegisterSdkWorker } from "./sdk-worker-registry.mjs";
 
 // phase-agent-dispatch + phase-agent-emit-complete sit one directory up.
 const PHASE_AGENT_DISPATCH_BIN = fileURLToPath(
@@ -945,6 +946,7 @@ export async function sdkRunPhaseAgent(
     random = Math.random,
     maxRetries = 5, // bound the 429/529 backoff
     backoff = {}, // { baseMs, capMs } overrides for tests
+    registerWorker = defaultRegisterSdkWorker, // CTL-1410 Phase B: the in-process worker registry
   } = {},
 ) {
   // ── AUTH GUARD: refuse BEFORE any side effect (no claim, no signal) ───────
@@ -1005,6 +1007,20 @@ export async function sdkRunPhaseAgent(
   const env = buildSdkEnv(spec.env, { base: authEnv, oauthToken, settingsEnv: spec.settings?.env });
   const options = buildQueryOptions(spec, env, { turnCap });
 
+  // CTL-1410 Phase B: register in the in-process worker registry — the SDK-native
+  // liveness fact (bg_job_id is null, so every bg-keyed probe is blind to this
+  // worker). Registered BEFORE sem.acquire on purpose: a parked waiter already
+  // owns its claim + "dispatched" signal, so the phantom-sweep / worktree-refresh
+  // consumers must see it as live while it queues. The three early-returns above
+  // never register (no claim, or another worker owns the phase).
+  const reg = registerWorker({
+    ticket,
+    phase,
+    worktreePath: spec.worktreePath ?? worktreePath,
+    generation: spec.generation,
+    orchDir,
+  });
+
   // ── LAUNCH VERB: the in-process query() loop, under the concurrency cap ───
   //
   // CTL-1367 item 16 (semaphore scope — DOCUMENTED DECISION): the cap wraps ONLY
@@ -1022,11 +1038,15 @@ export async function sdkRunPhaseAgent(
     let lastOverload = null;
     for (let i = 0; i <= maxRetries; i++) {
       const ac = new AbortController();
+      // Phase B: expose the per-attempt controller so cancel/abort (preemption,
+      // watchdog) can reach the live query; a pending abort fires immediately.
+      reg.setAbortController(ac);
       let result = null;
       let thrown = null;
       try {
         const q = runQuery({ prompt: spec.prompt, options: { ...options, abortController: ac } });
         for await (const m of q) {
+          reg.touch(); // registry heartbeat (internally throttled to disk)
           if (m?.type === "result") result = m; // exactly one terminal
         }
       } catch (err) {
@@ -1136,6 +1156,7 @@ export async function sdkRunPhaseAgent(
     // Unreachable (the loop always returns), but keep a defined shape.
     return { code: 1, stdout: "", stderr: "sdk: retry loop exhausted", signal: null };
   } finally {
+    reg.deregister(); // every post-registration exit path, including throws
     release();
   }
 }

@@ -137,6 +137,7 @@ import { classifyTicketResolution } from "./linear-query.mjs";
 import { createGatewayReader } from "./gateway-read.mjs";
 import { createReplicaReader } from "./replica-read.mjs"; // CTL-1340: read-replica tier reader
 import { isBgJobAlive, refreshAgents, listClaudeAgentsResult } from "./claude-agents.mjs"; // CTL-1165 D3: fail-closed liveness reader for job-dir GC
+import { reconcileSdkRegistryOnBoot } from "./sdk-worker-registry.mjs"; // CTL-1410 Phase B
 
 const DEFAULT_MAX_PARALLEL = 3;
 
@@ -626,6 +627,17 @@ export function startDaemon({
       log,
     });
     const executor = bootExec.executor;
+    // CTL-1410 Phase B: reap stale SDK-worker disk projections. No in-process
+    // worker survives a daemon restart, so any projection whose pid is dead is
+    // a leftover of the previous daemon; delete it BEFORE boot-resume and the
+    // scheduler run, so no liveness consumer trusts a ghost projection.
+    const sdkRegistryBoot = reconcileSdkRegistryOnBoot(orchDir);
+    if (sdkRegistryBoot.removed.length > 0) {
+      log.info(
+        { removed: sdkRegistryBoot.removed, kept: sdkRegistryBoot.kept },
+        "boot: reaped stale sdk-worker projections (CTL-1410)"
+      );
+    }
     // CTL-1396 (Codex P2): under executor=sdk, inject the unified-event-log appender
     // into the dispatch path so sdkRunPhaseAgent's telemetry (execution-core.sdk.phase-turns
     // — the turn-cap calibration signal — plus .overloaded/.auth.misconfigured) lands in

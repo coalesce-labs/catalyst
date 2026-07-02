@@ -298,8 +298,8 @@ describe("enqueueDelegateIntent — live-worker idempotency", () => {
   });
 
   // CTL-1157 (GROUP-3 #2): under executor=sdk the recovery-pass worker runs in-process
-  // with NO bg_job_id. That dispatched|running signal is a LIVE worker — a second scan
-  // must dedup it (worker-live) instead of double-dispatching.
+  // with NO bg_job_id. That dispatched|running signal is presumed LIVE (coarse
+  // fail-closed fallback) — a second scan must dedup it instead of double-dispatching.
   test("sdk: a dispatched recovery-pass worker with NO bg_job_id blocks enqueue when executor==='sdk'", () => {
     seedRecoveryPassSignal("CTL-1", "dispatched", null); // sdk shape: no bg id
     const r = enqueueDelegateIntent(
@@ -317,6 +317,31 @@ describe("enqueueDelegateIntent — live-worker idempotency", () => {
       "CTL-1",
       INTENT,
       deps({ isBgJobAlive: () => false }) // no executor → bg semantics
+    );
+    expect(r.enqueued).toBe(true);
+  });
+
+  // CTL-1410 Phase B: the PRECISE probe — an in-process SDK worker has
+  // bg_job_id null, so the bg probe can never see it; the registry closes that
+  // fail-open regardless of the executor value.
+  test("a running SDK worker (bg_job_id null, live in the registry) no-ops with worker-live", () => {
+    seedRecoveryPassSignal("CTL-1", "running", null);
+    const r = enqueueDelegateIntent(
+      "CTL-1",
+      INTENT,
+      deps({ isSdkWorkerLive: (ticket) => ticket === "CTL-1" })
+    );
+    expect(r.enqueued).toBe(false);
+    expect(r.reason).toBe("worker-live");
+    expect(existsSync(intentPath("CTL-1"))).toBe(false);
+  });
+
+  test("a running signal with bg_job_id null, NO registry entry, and no executor rule still enqueues (dead worker)", () => {
+    seedRecoveryPassSignal("CTL-1", "running", null);
+    const r = enqueueDelegateIntent(
+      "CTL-1",
+      INTENT,
+      deps({ isSdkWorkerLive: () => false })
     );
     expect(r.enqueued).toBe(true);
   });

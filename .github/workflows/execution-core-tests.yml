@@ -278,6 +278,7 @@ jobs:
             scheduler-replica-freshness.test.mjs \
             sdk-run-phase-agent.test.mjs \
             sdk-slot-gate.test.mjs \
+            sdk-worker-registry.test.mjs \
             sequencing.test.mjs \
             session-recency.test.mjs \
             signal-reader.test.mjs \

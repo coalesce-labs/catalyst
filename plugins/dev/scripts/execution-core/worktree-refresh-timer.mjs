@@ -9,6 +9,7 @@ import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { readWorkerSignals } from "./signal-reader.mjs";
 import { isBgJobAlive } from "./claude-agents.mjs";
+import { isSdkWorkerLive as registrySdkWorkerLive } from "./sdk-worker-registry.mjs";
 import { log } from "./config.mjs";
 
 const REFRESH_BIN = fileURLToPath(
@@ -63,6 +64,7 @@ function spawnRefresh(worktreePath, base) {
  * @param {Function}[opts.readSignals]            injectable signal reader
  * @param {Function}[opts.statWorktree]           injectable fs.statSync
  * @param {Function}[opts.isSessionLive]          injectable isBgJobAlive
+ * @param {Function}[opts.isSdkWorkerLive]        injectable in-process registry probe (CTL-1410)
  * @param {Function}[opts.refresh]                injectable spawnRefresh
  * @param {Function}[opts.emit]                   optional telemetry emitter
  * @param {object}  [opts.clock]                  fake-clock seam for tests
@@ -75,6 +77,7 @@ export function startWorktreeRefreshTimer({
   readSignals = readWorkerSignals,
   statWorktree = (p) => statSync(p),
   isSessionLive = isBgJobAlive,
+  isSdkWorkerLive = registrySdkWorkerLive,
   refresh = spawnRefresh,
   emit,
   clock = realClock(),
@@ -93,6 +96,11 @@ export function startWorktreeRefreshTimer({
 
         const bgJobId = signal.liveness?.value;
         if (bgJobId && isSessionLive(bgJobId)) continue;
+        // CTL-1410 Phase B: an in-process SDK worker has NO bg id (liveness
+        // value null), so the guard above is blind to it — without this check
+        // the timer can rebase a worktree a LIVE worker is editing. The default
+        // reads the in-process registry (same daemon process as the dispatch).
+        if (isSdkWorkerLive(signal.ticket)) continue;
 
         let mtime;
         try {
