@@ -79,8 +79,8 @@ mkdir -p "$HOME"
 export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null
 # Canary: prove the isolation is actually in effect (fails loud if HOME leaks).
 [[ "$HOME" == "$TMPROOT"/* ]] || {
-  echo "FAIL: HOME not isolated to scratch"
-  exit 1
+	echo "FAIL: HOME not isolated to scratch"
+	exit 1
 }
 
 # ─── Helper: build a throwaway git repo + linked worktree ───────────────────
