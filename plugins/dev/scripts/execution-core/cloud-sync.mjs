@@ -49,7 +49,7 @@ import { CatalystReplica } from "@catalyst-cloud/sdk/node";
 import { getHostName, getReplicaDbPath, resolveNodeCloudTokenEnv, HEARTBEAT_INTERVAL_MS } from "./config.mjs";
 import { logDaemonHeartbeat } from "../lib/daemon-heartbeat.mjs";
 import { sdkLogRecord } from "./cloud-sync-log.mjs";
-import { freshnessFields, readReplicaCounts } from "./cloud-sync-telemetry.mjs";
+import { classifyStall, freshnessFields, readReplicaCounts } from "./cloud-sync-telemetry.mjs";
 import { createRequire } from "node:module";
 
 const TAG = "[catalyst-cloud-sync]";
@@ -189,16 +189,25 @@ console.log(`${TAG} live — replica seeded + tailing the change feed (cursor=${
 // fired so it never reconnected): EVERY liveness signal was decoupled from cursor-advance.
 // The heartbeat kept beating and `status` stayed latched "live" while the cursor sat frozen
 // and the replica silently went stale — forcing the fleet's agents back onto the
-// rate-limited personal `linearis` key with no alarm. Three fixes here:
-//   (1) DERIVE status from cursor-advance so a freeze is VISIBLE in the freshness line;
-//   (2) emit a LOUD ERROR event to Loki the instant the cursor stalls (never silent again —
-//       this is the alarm Ryan asked for, and it fires on a network-interruption-not-down too);
-//   (3) SELF-HEAL by exiting so launchd KeepAlive re-spawns (a fresh socket + re-seed —
-//       exactly the manual `launchctl kickstart` that fixed it).
-// Genuine quiet periods (no new Linear changes) are tolerated by the generous
-// CATALYST_CLOUD_SYNC_STALL_MS window (default 10 min). NOTE: a future refinement can key on
-// the SDK's connection-level freshness signal to distinguish "quiet" from "dead socket"
-// precisely; a benign restart during a >10-min quiet period is cheap (fast re-seed).
+// rate-limited personal `linearis` key with no alarm.
+//
+// CODEX-REVIEW FIX (P1/P2): cursor-silence ALONE must NOT trigger a page/restart. A healthy
+// QUIET feed (no Linear changes for the window) freezes `replica.cursor` EXACTLY like a
+// dead/half-open socket does — replica-read.mjs:102-118 documents this (the apply cadence
+// goes stale on a quiet feed, which is why writer liveness keys on the `.writer.lock`
+// heartbeat, not cursor movement). Keying "stalled" on cursor-silence alone therefore
+// false-classifies a perfectly current idle node and would re-seed/restart/page every quiet
+// window. The SDK (0.4.0) exposes no per-frame keepalive/last-frame timestamp, so we gate the
+// destructive action on an ADDITIONAL independent liveness failure the cursor can't fake —
+// the SDK's own connection status (classifyStall). A GENUINE stall = cursor-silence AND an
+// unhealthy SDK status (reconnecting/error/stopped); only THEN do we:
+//   (1) surface status="stalled" in the freshness line (a mere quiet feed keeps its real status);
+//   (2) emit the LOUD ERROR alert to Loki (the alarm Ryan asked for — now fires only on a
+//       PROVABLE stall, never on a quiet-but-healthy feed, so no false pages every quiet window);
+//   (3) SELF-HEAL by exiting so launchd KeepAlive re-spawns (a fresh socket + re-seed).
+// A cursor stall with a still-"live" SDK status (indistinguishable quiet-vs-halfopen) is left
+// as observational freshness telemetry only — never a false-kill. The generous
+// CATALYST_CLOUD_SYNC_STALL_MS window (default 10 min) additionally widens the genuine case.
 const STALL_MS = Number(process.env.CATALYST_CLOUD_SYNC_STALL_MS) || 600_000;
 let _lastCursor = replica.cursor;
 let _lastAdvanceMs = Date.now();
@@ -212,19 +221,23 @@ const emitTelemetry = () => {
   const cursor = replica.cursor;
   if (cursor !== _lastCursor) { _lastCursor = cursor; _lastAdvanceMs = now; _stallAlerted = false; }
   const stalledMs = now - _lastAdvanceMs;
-  // Only a SEEDED replica (rows>0) whose cursor hasn't moved for the whole window is a
-  // stall — a pre-seed window legitimately has no cursor yet.
-  const stalled = (rows ?? 0) > 0 && stalledMs >= STALL_MS;
-  const status = stalled ? "stalled" : (replica.status ?? "live");
+  const sdkStatus = replica.status ?? "live";
+  // A stall is GENUINE (alert + self-heal) only when cursor-silence is CONFIRMED by an
+  // independent SDK connection-liveness failure — never on cursor-silence alone, which a
+  // healthy quiet feed produces identically (Codex P1/P2).
+  const { genuine, restart, displayStatus } = classifyStall({ rows, stalledMs, stallMs: STALL_MS, status: sdkStatus });
+  if (!genuine) _stallAlerted = false; // re-arm the one-shot alert for the next genuine stall
   try {
     hlog.info(
-      freshnessFields({ rows, maxUpdatedMs, status, cursor, hostName: getHostName() }),
+      freshnessFields({ rows, maxUpdatedMs, status: displayStatus, cursor, hostName: getHostName() }),
       "cloud-sync: freshness",
     );
   } catch { /* best-effort — telemetry must never crash the writer */ }
-  if (stalled && !_stallAlerted) {
+  if (genuine && !_stallAlerted) {
     _stallAlerted = true;
-    // The alarm that was missing for 18.5h. ERROR severity → ships via hlog→Alloy→Loki.
+    // The alarm that was missing for 18.5h — now gated on an independent liveness failure
+    // (unhealthy SDK status) so it never fires on a quiet-but-healthy feed. ERROR severity
+    // → ships via hlog→Alloy→Loki.
     try {
       hlog.error(
         {
@@ -233,15 +246,18 @@ const emitTelemetry = () => {
           cursor,
           stalledMs,
           rows,
+          "sdk.status": sdkStatus,
           "host.name": getHostName(),
         },
-        `cloud-sync: replica cursor STALLED ${Math.round(stalledMs / 1000)}s (>${Math.round(STALL_MS / 1000)}s) — reads are going stale; self-healing via restart`,
+        `cloud-sync: replica cursor STALLED ${Math.round(stalledMs / 1000)}s (>${Math.round(STALL_MS / 1000)}s) with unhealthy SDK status=${sdkStatus} — reads are going stale; self-healing via restart`,
       );
     } catch { /* the alarm must never crash the writer */ }
-    // Self-heal: stop the timer, close the replica, and exit non-zero so launchd
-    // (KeepAlive={SuccessfulExit:false}) re-spawns with a fresh socket + re-seed.
-    try { if (hbTimer) clearInterval(hbTimer); } catch { /* best-effort */ }
-    void replica.close().catch(() => {}).finally(() => process.exit(1));
+    if (restart) {
+      // Self-heal: stop the timer, close the replica, and exit non-zero so launchd
+      // (KeepAlive={SuccessfulExit:false}) re-spawns with a fresh socket + re-seed.
+      try { if (hbTimer) clearInterval(hbTimer); } catch { /* best-effort */ }
+      void replica.close().catch(() => {}).finally(() => process.exit(1));
+    }
   }
 };
 emitTelemetry();

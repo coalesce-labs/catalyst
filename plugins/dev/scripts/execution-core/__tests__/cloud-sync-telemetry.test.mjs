@@ -1,6 +1,6 @@
 // cloud-sync-telemetry.test.mjs — CTL-1395. Tests the pure freshness-telemetry helpers.
 import { describe, test, expect } from "bun:test";
-import { freshnessFields, readReplicaCounts } from "../cloud-sync-telemetry.mjs";
+import { classifyStall, freshnessFields, readReplicaCounts } from "../cloud-sync-telemetry.mjs";
 
 const NOW = 1_800_000_000_000;
 
@@ -40,6 +40,65 @@ describe("freshnessFields", () => {
   test("carries no secret-shaped keys/values (NAME-only telemetry)", () => {
     const f = freshnessFields({ rows: 1, maxUpdatedMs: NOW, status: "live", cursor: 1, hostName: "mini", now: NOW });
     expect(JSON.stringify(f)).not.toMatch(/token|secret|lin_|Bearer/i);
+  });
+});
+
+describe("classifyStall", () => {
+  const STALL = 600_000;
+
+  test("QUIET-BUT-HEALTHY: cursor stalled past the window but SDK status live → NOT a stall (no alert, no restart) — the Codex P1/P2 false-kill guard", () => {
+    const c = classifyStall({ rows: 2878, stalledMs: STALL + 5_000, stallMs: STALL, status: "live" });
+    expect(c.cursorStalled).toBe(true); // cursor IS silent
+    expect(c.sdkUnhealthy).toBe(false); // but the socket is healthy
+    expect(c.genuine).toBe(false);
+    expect(c.alert).toBe(false);
+    expect(c.restart).toBe(false);
+    expect(c.displayStatus).toBe("live"); // reports its real status, not "stalled"
+  });
+
+  test("GENUINE: cursor stalled past the window AND an unhealthy SDK status → alert + self-heal restart", () => {
+    for (const status of ["reconnecting", "error", "stopped"]) {
+      const c = classifyStall({ rows: 2878, stalledMs: STALL + 1, stallMs: STALL, status });
+      expect(c.cursorStalled).toBe(true);
+      expect(c.sdkUnhealthy).toBe(true);
+      expect(c.genuine).toBe(true);
+      expect(c.alert).toBe(true);
+      expect(c.restart).toBe(true);
+      expect(c.displayStatus).toBe("stalled");
+    }
+  });
+
+  test("unhealthy SDK status but cursor still advancing (within window) → NOT a stall (the SDK owns its own reconnect/backoff)", () => {
+    const c = classifyStall({ rows: 2878, stalledMs: 5_000, stallMs: STALL, status: "reconnecting" });
+    expect(c.cursorStalled).toBe(false);
+    expect(c.genuine).toBe(false);
+    expect(c.restart).toBe(false);
+    expect(c.displayStatus).toBe("reconnecting");
+  });
+
+  test("pre-seed window (rows 0 / null) is never a stall — no cursor yet", () => {
+    for (const rows of [0, null]) {
+      const c = classifyStall({ rows, stalledMs: STALL + 60_000, stallMs: STALL, status: "error" });
+      expect(c.cursorStalled).toBe(false);
+      expect(c.genuine).toBe(false);
+      expect(c.restart).toBe(false);
+    }
+  });
+
+  test("healthy transient states (connecting/resyncing) are NOT liveness failures", () => {
+    for (const status of ["connecting", "resyncing"]) {
+      const c = classifyStall({ rows: 2878, stalledMs: STALL + 1, stallMs: STALL, status });
+      expect(c.sdkUnhealthy).toBe(false);
+      expect(c.genuine).toBe(false);
+      expect(c.restart).toBe(false);
+    }
+  });
+
+  test("defaults are safe — no args never throws and is not a stall", () => {
+    const c = classifyStall();
+    expect(c.genuine).toBe(false);
+    expect(c.restart).toBe(false);
+    expect(c.displayStatus).toBe("live");
   });
 });
 
