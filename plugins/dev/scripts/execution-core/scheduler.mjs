@@ -5645,7 +5645,7 @@ export function schedulerTick(
     // cooldown marker, no failure event. Empty/absent botUserIds disables
     // the gate (CTL-749 fail-open convention).
     if (botUserIds instanceof Set && botUserIds.size > 0) {
-      const a = fetchAssignee(t.identifier, { gateway, exec });
+      const a = fetchAssignee(t.identifier, { gateway, exec, replica });
       if (!a.known) {
         log.debug(
           { ticket: t.identifier },

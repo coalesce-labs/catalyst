@@ -410,16 +410,24 @@ describe("createReplicaReader.eligible (CTL-1397 board-list)", () => {
     expect(reader.eligible({ team: "CTL" })).toBeUndefined();
   });
 
-  test("returns undefined (v1 scope) when query.project is set", () => {
+  // D1 (Stage 0): project-filtered queries are now SERVED from the replica (the
+  // permanent every-tick fall-through to `linearis issues list` for project-scoped
+  // teams is closed). The filter is an EXACT project-name match on the LEFT JOIN.
+  test("D1: serves a project-filtered query from the replica (exact project name)", () => {
     seedEligible();
     reader = createReplicaReader({ dbPath });
-    expect(reader.eligible({ team: "CTL", status: "Todo", project: "Harden" })).toBeUndefined();
+    const res = reader.eligible({ team: "CTL", status: "Todo", project: "Harden the core" });
+    // Only CTL-100 is in proj-1 ("Harden the core"); CTL-101 has no project.
+    expect(res.nodes.map((n) => n.identifier)).toEqual(["CTL-100"]);
   });
 
-  test("returns undefined (v1 scope) when query.label is set", () => {
+  test("D1: a project filter that matches nothing → { nodes: [] } (served, NOT undefined)", () => {
     seedEligible();
     reader = createReplicaReader({ dbPath });
-    expect(reader.eligible({ team: "CTL", status: "Todo", label: "bug" })).toBeUndefined();
+    // A defined empty answer — the caller must NOT re-run linearis for it.
+    expect(reader.eligible({ team: "CTL", status: "Todo", project: "Nonexistent" })).toEqual({
+      nodes: [],
+    });
   });
 
   test("returns undefined when the replica file is absent", () => {
@@ -574,5 +582,191 @@ describe("createReplicaReader.eligible (CTL-1397 board-list)", () => {
     expect(second.nodes[0].inverseRelations.nodes).toEqual([
       { type: "blocks", issue: { identifier: "CTL-7" } },
     ]);
+  });
+});
+
+// D1 (Stage 0) — label-filtered eligible(). Needs the issue_labels⋈labels join keyed
+// by the issue's own PK `id`, so this fixture carries the `id` column + the two label
+// tables the corrected join reads (issue_labels(issue_id,label_id) + labels(id,name)).
+function seedEligibleLabeled() {
+  const db = new Database(dbPath, { create: true });
+  db.run(`
+    CREATE TABLE issues (
+      id                TEXT,
+      identifier        TEXT,
+      title             TEXT,
+      state             TEXT,
+      priority          INTEGER,
+      estimate          INTEGER,
+      project_id        TEXT,
+      parent_identifier TEXT,
+      delegate_id       TEXT,
+      delegate_name     TEXT,
+      removed_at        TEXT,
+      updated_at        INTEGER,
+      created_at        INTEGER
+    )
+  `);
+  db.run(`CREATE INDEX idx_issues_identifier ON issues (identifier)`);
+  db.run(`CREATE TABLE relations (type TEXT, issue_identifier TEXT, related_identifier TEXT)`);
+  db.run(`CREATE TABLE projects (id TEXT, name TEXT)`);
+  db.run(`CREATE TABLE labels (id TEXT, name TEXT)`);
+  db.run(`CREATE TABLE issue_labels (issue_id TEXT, label_id TEXT)`);
+  db.run(`CREATE TABLE sync_meta (key TEXT PRIMARY KEY, value TEXT)`);
+  db.run(`INSERT INTO sync_meta VALUES ('cursor', '42')`);
+  db.run(`INSERT INTO labels VALUES ('lab-bug', 'bug')`);
+  db.run(`INSERT INTO labels VALUES ('lab-chore', 'chore')`);
+  // CTL-200 labeled 'bug'; CTL-201 labeled 'chore'; both Todo.
+  db.run(
+    `INSERT INTO issues VALUES ('id-200', 'CTL-200', 'Bug ticket', 'Todo', 2, NULL, NULL, NULL, NULL, NULL, NULL, 3000, 100)`,
+  );
+  db.run(
+    `INSERT INTO issues VALUES ('id-201', 'CTL-201', 'Chore ticket', 'Todo', 2, NULL, NULL, NULL, NULL, NULL, NULL, 2000, 90)`,
+  );
+  db.run(`INSERT INTO issue_labels VALUES ('id-200', 'lab-bug')`);
+  db.run(`INSERT INTO issue_labels VALUES ('id-201', 'lab-chore')`);
+  db.close();
+  freshen();
+}
+
+describe("createReplicaReader.eligible — D1 label filter (Stage 0)", () => {
+  test("serves a label-filtered query from the replica (issue_labels⋈labels by name)", () => {
+    seedEligibleLabeled();
+    reader = createReplicaReader({ dbPath });
+    const res = reader.eligible({ team: "CTL", status: "Todo", label: "bug" });
+    expect(res.nodes.map((n) => n.identifier)).toEqual(["CTL-200"]); // only the 'bug' ticket
+  });
+
+  test("a different label selects the other ticket (join resolves identifier→id correctly)", () => {
+    seedEligibleLabeled();
+    reader = createReplicaReader({ dbPath });
+    const res = reader.eligible({ team: "CTL", status: "Todo", label: "chore" });
+    expect(res.nodes.map((n) => n.identifier)).toEqual(["CTL-201"]);
+  });
+
+  test("a label matching nothing → { nodes: [] } (served, NOT undefined)", () => {
+    seedEligibleLabeled();
+    reader = createReplicaReader({ dbPath });
+    expect(reader.eligible({ team: "CTL", status: "Todo", label: "nonexistent" })).toEqual({
+      nodes: [],
+    });
+  });
+
+  test("project + label combined AND both filters", () => {
+    seedEligibleLabeled();
+    reader = createReplicaReader({ dbPath });
+    // No project set on these rows, so a project filter + label yields nothing.
+    expect(
+      reader.eligible({ team: "CTL", status: "Todo", label: "bug", project: "Harden the core" }),
+    ).toEqual({ nodes: [] });
+  });
+});
+
+// ownership() (Stage 0 / A0) — the per-ticket claim-gate reader. Same freshness +
+// seed-cursor gate as eligible() (NO per-ticket currency gate — the null-vs-non-null
+// trust decision lives in fetchTicketAssignee); any gate-fail / miss → undefined
+// (caller HOLDs / falls through, never claims on unknown).
+function seedOwnership() {
+  const db = new Database(dbPath, { create: true });
+  db.run(
+    `CREATE TABLE issues (identifier TEXT, assignee_id TEXT, delegate_id TEXT, delegate_name TEXT, removed_at TEXT)`,
+  );
+  db.run(`CREATE INDEX idx_issues_identifier ON issues (identifier)`);
+  db.run(`CREATE TABLE sync_meta (key TEXT PRIMARY KEY, value TEXT)`);
+  db.run(`INSERT INTO sync_meta VALUES ('cursor', '42')`);
+  db.run(`INSERT INTO issues VALUES ('CTL-300', 'user-1', 'bot-9', 'Bot', NULL)`); // assigned + delegated
+  db.run(`INSERT INTO issues VALUES ('CTL-301', NULL, NULL, NULL, NULL)`); // unassigned/undelegated
+  db.run(`INSERT INTO issues VALUES ('CTL-302', 'user-2', 'user-3', 'Human', NULL)`); // human delegate
+  db.run(`INSERT INTO issues VALUES ('CTL-303', 'user-1', 'bot-9', 'Bot', '2026-06-03T00:00:00Z')`); // removed
+  db.close();
+}
+
+// backdate — push a file's mtime N minutes into the past (liveness/currency fixtures).
+function backdate(path, minutes) {
+  const t = new Date(Date.now() - minutes * 60_000);
+  try {
+    utimesSync(path, t, t);
+  } catch {
+    /* absent */
+  }
+}
+
+describe("createReplicaReader.ownership (Stage 0 / A0)", () => {
+  test("fresh (liveness + seed pass) → HIT { assignee, delegate }", () => {
+    seedOwnership();
+    freshen();
+    reader = createReplicaReader({ dbPath });
+    expect(reader.ownership("CTL-300")).toEqual({ assignee: "user-1", delegate: "bot-9" });
+  });
+
+  test("HIT coerces unset assignee/delegate to null", () => {
+    seedOwnership();
+    freshen();
+    reader = createReplicaReader({ dbPath });
+    expect(reader.ownership("CTL-301")).toEqual({ assignee: null, delegate: null });
+  });
+
+  test("HIT reports a human delegate verbatim (the claim decision lives in the caller)", () => {
+    seedOwnership();
+    freshen();
+    reader = createReplicaReader({ dbPath });
+    expect(reader.ownership("CTL-302")).toEqual({ assignee: "user-2", delegate: "user-3" });
+  });
+
+  test("removed (tombstoned) row → undefined (MISS → caller HOLDs)", () => {
+    seedOwnership();
+    freshen();
+    reader = createReplicaReader({ dbPath });
+    expect(reader.ownership("CTL-303")).toBeUndefined();
+  });
+
+  test("absent ticket → undefined", () => {
+    seedOwnership();
+    freshen();
+    reader = createReplicaReader({ dbPath });
+    expect(reader.ownership("CTL-404")).toBeUndefined();
+  });
+
+  test("empty/falsy identifier → undefined without touching the DB", () => {
+    reader = createReplicaReader({ dbPath });
+    expect(reader.ownership("")).toBeUndefined();
+    expect(reader.ownership(null)).toBeUndefined();
+    expect(reader.ownership(undefined)).toBeUndefined();
+  });
+
+  test("STALE .writer.lock (dead writer) → undefined (liveness gate fails)", () => {
+    seedOwnership();
+    freshen(); // db/-wal fresh (a recent apply just before the writer died)
+    writeFileSync(dbPath + ".writer.lock", "");
+    backdate(dbPath + ".writer.lock", 10); // present-but-stale lock is authoritative → liveness fails
+    reader = createReplicaReader({ dbPath });
+    expect(reader.ownership("CTL-300")).toBeUndefined();
+  });
+
+  test("mid-reseed (cursor absent) on a fresh DB → undefined (seed gate)", () => {
+    seedOwnership();
+    const db = new Database(dbPath);
+    db.run(`DELETE FROM sync_meta WHERE key = 'cursor'`);
+    db.close();
+    freshen(); // liveness passes; only the seed is incomplete
+    reader = createReplicaReader({ dbPath });
+    expect(reader.ownership("CTL-300")).toBeUndefined();
+  });
+
+  // Regression (Stage-0 review): there is deliberately NO per-ticket currency gate.
+  // File mtime cannot detect PER-TICKET lag, and gating on it re-froze the claim gate
+  // on a genuinely QUIET-but-current feed (the CTL-1397 antipattern). As long as the
+  // writer is LIVE (fresh lock) and the seed is complete, ownership() serves the row
+  // even when the data-file mtimes are old — the null-vs-non-null trust decision is
+  // the caller's (fetchTicketAssignee live-confirms every null delegate).
+  test("STALE data files but LIVE writer + complete seed → HIT (no currency gate)", () => {
+    seedOwnership();
+    backdate(dbPath, 30); // data files stale far beyond any old currency window …
+    backdate(dbPath + "-wal", 30);
+    // … but the writer is alive: a just-heartbeated lock keeps liveness passing.
+    writeFileSync(dbPath + ".writer.lock", "");
+    utimesSync(dbPath + ".writer.lock", new Date(), new Date());
+    reader = createReplicaReader({ dbPath });
+    expect(reader.ownership("CTL-300")).toEqual({ assignee: "user-1", delegate: "bot-9" });
   });
 });
