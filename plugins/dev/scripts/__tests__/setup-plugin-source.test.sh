@@ -57,9 +57,22 @@ advance_origin() {
 }
 
 # run_setup MACHINE_CFG PATH_ARG REPO_URL [extra args...]
+# Passes --no-interactive-wrapper so the pluginDirs-registration tests never touch
+# the tester's real shell rc files. The wrapper behavior is covered separately by
+# the wrapper_* cases below (which invoke the script with an isolated $HOME).
 run_setup() {
   local mcfg="$1" path_arg="$2" url="$3"; shift 3
   env PATH="$REAL_PATH" CATALYST_MACHINE_CONFIG="$mcfg" GIT_TERMINAL_PROMPT=0 \
+    bash "$SETUP" --path "$path_arg" --repo-url "$url" --no-interactive-wrapper "$@"
+}
+
+# run_setup_hb — like run_setup but with an isolated HOME/ZDOTDIR/SHELL and WITHOUT
+# --no-interactive-wrapper, so the interactive `claude` wrapper install is exercised
+# against a throwaway home dir instead of the tester's real rc files.
+run_setup_hb() {
+  local home="$1" shell="$2" mcfg="$3" path_arg="$4" url="$5"; shift 5
+  env PATH="$REAL_PATH" CATALYST_MACHINE_CONFIG="$mcfg" GIT_TERMINAL_PROMPT=0 \
+    HOME="$home" ZDOTDIR="$home" SHELL="$shell" \
     bash "$SETUP" --path "$path_arg" --repo-url "$url" "$@"
 }
 
@@ -170,6 +183,75 @@ t8() {
   [[ "$(jq -r '.catalyst.orchestration.pluginDirs' "$MCFG8")" == "${CO8}/plugins/dev" ]]
 }
 check "creates the machine config (and parent dir) when absent" t8
+
+# ── 9. zsh: interactive wrapper written to ~/.zshrc (isolated HOME) ──────────
+make_origin wrapzsh
+MCFG9="${SCRATCH}/mcfg9.json"
+HOME9="${SCRATCH}/home9"; mkdir -p "$HOME9"
+CO9="${SCRATCH}/co9"
+t9() {
+  run_setup_hb "$HOME9" "/bin/zsh" "$MCFG9" "$CO9" "$ORIGIN" >/dev/null 2>&1 || return 1
+  [[ -f "${HOME9}/.zshrc" ]] || return 1
+  grep -q ">>> catalyst plugin-source" "${HOME9}/.zshrc" || return 1
+  # rerun stays idempotent: exactly one managed block.
+  run_setup_hb "$HOME9" "/bin/zsh" "$MCFG9" "$CO9" "$ORIGIN" >/dev/null 2>&1 || return 1
+  [[ "$(grep -c '>>> catalyst plugin-source' "${HOME9}/.zshrc")" == "1" ]]
+}
+check "zsh: installs idempotent interactive wrapper in ~/.zshrc" t9
+
+# ── 10. bash: interactive wrapper written to ~/.bashrc (isolated HOME) ───────
+make_origin wrapbash
+MCFG10="${SCRATCH}/mcfg10.json"
+HOME10="${SCRATCH}/home10"; mkdir -p "$HOME10"
+CO10="${SCRATCH}/co10"
+t10() {
+  run_setup_hb "$HOME10" "/bin/bash" "$MCFG10" "$CO10" "$ORIGIN" >/dev/null 2>&1 || return 1
+  grep -q ">>> catalyst plugin-source" "${HOME10}/.bashrc" || return 1
+  [[ ! -e "${HOME10}/.zshrc" ]]
+}
+check "bash: installs interactive wrapper in ~/.bashrc (not ~/.zshrc)" t10
+
+# ── 11. --no-interactive-wrapper: leaves rc files untouched ──────────────────
+make_origin nowrap
+MCFG11="${SCRATCH}/mcfg11.json"
+HOME11="${SCRATCH}/home11"; mkdir -p "$HOME11"
+CO11="${SCRATCH}/co11"
+t11() {
+  run_setup_hb "$HOME11" "/bin/zsh" "$MCFG11" "$CO11" "$ORIGIN" --no-interactive-wrapper >/dev/null 2>&1 || return 1
+  [[ ! -e "${HOME11}/.zshrc" && ! -e "${HOME11}/.bashrc" ]] || return 1
+  # config write still happened.
+  [[ "$(jq -r '.catalyst.orchestration.pluginDirs' "$MCFG11")" == "${CO11}/plugins/dev" ]]
+}
+check "--no-interactive-wrapper skips rc edit but still registers pluginDirs" t11
+
+# ── 12. symlinked ~/.zshrc (dotfiles repo) preserved on rerun ────────────────
+make_origin wrapsymlink
+MCFG12="${SCRATCH}/mcfg12.json"
+HOME12="${SCRATCH}/home12"; mkdir -p "${HOME12}/dotfiles"
+printf '# managed by dotfiles\n' > "${HOME12}/dotfiles/zshrc"
+ln -s "${HOME12}/dotfiles/zshrc" "${HOME12}/.zshrc"
+CO12="${SCRATCH}/co12"
+t12() {
+  run_setup_hb "$HOME12" "/bin/zsh" "$MCFG12" "$CO12" "$ORIGIN" >/dev/null 2>&1 || return 1
+  run_setup_hb "$HOME12" "/bin/zsh" "$MCFG12" "$CO12" "$ORIGIN" >/dev/null 2>&1 || return 1
+  [[ -L "${HOME12}/.zshrc" ]] || return 1                       # still a symlink
+  [[ "$(grep -c '>>> catalyst plugin-source' "${HOME12}/.zshrc")" == "1" ]] || return 1
+  grep -q "managed by dotfiles" "${HOME12}/dotfiles/zshrc"      # wrote through the link
+}
+check "symlinked ~/.zshrc is preserved (not replaced by a regular file)" t12
+
+# ── 13. read-only ~/.zshrc: wrapper is best-effort, pluginDirs still set ─────
+make_origin wrapreadonly
+MCFG13="${SCRATCH}/mcfg13.json"
+HOME13="${SCRATCH}/home13"; mkdir -p "$HOME13"
+printf '# read only\n' > "${HOME13}/.zshrc"; chmod 0444 "${HOME13}/.zshrc"
+CO13="${SCRATCH}/co13"
+t13() {
+  # Under the script's set -e, a read-only rc must NOT abort before the config write.
+  run_setup_hb "$HOME13" "/bin/zsh" "$MCFG13" "$CO13" "$ORIGIN" >/dev/null 2>&1 || return 1
+  [[ "$(jq -r '.catalyst.orchestration.pluginDirs' "$MCFG13")" == "${CO13}/plugins/dev" ]]
+}
+check "read-only ~/.zshrc is non-fatal; pluginDirs still registered" t13
 
 echo ""
 TOTAL=$((PASSES + FAILURES))
