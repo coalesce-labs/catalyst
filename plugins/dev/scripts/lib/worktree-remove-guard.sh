@@ -34,7 +34,14 @@ assert_worktree_removal_safe() {
 		return 3
 	fi
 
-	# (b) foreign-liveness via lsof (fail-closed).
+	# (b) foreign-liveness via lsof (fail-closed). rc semantics mirror the CTL-791
+	# Node gate (worktree-safety.mjs lsofCwdUnder) exactly: rc=1+empty ⇒ nothing
+	# under the tree (safe); rc=0/output ⇒ live holder (refuse); rc∉{0,1} ⇒ probe
+	# failed (fail-closed refuse). NOTE (inherited from the Node gate): lsof also
+	# exits rc=1+empty when denied `opendir` on an unreadable subdir (warning →
+	# suppressed stderr), so a handle inside a mode-000 subdir reads as absent.
+	# The actual data-loss class (a test/agent running FROM the tree) is caught by
+	# the lsof-independent cwd-containment check (a) above, not this probe.
 	local lsof_bin="${WT_GUARD_LSOF:-lsof}"
 	local out rc
 	out="$("$lsof_bin" -nP +D "$rt" 2>/dev/null)"
