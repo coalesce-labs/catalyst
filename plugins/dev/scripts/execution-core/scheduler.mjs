@@ -273,6 +273,8 @@ import { readUnstuckSweepConfig, readRecoveryPassConfig, readBoardHealthConfig, 
 import * as linearWrite from "./linear-write.mjs";
 // CTL-863: zombie-guard for external-write sites on multi-host clusters.
 import { fenceGuard } from "./fence-guard.mjs";
+// CTL-863: Linear-free fence event emitter (durable fence → event-log migration).
+import { emitFenceClaimed } from "./fence-event.mjs";
 // CTL-757: the canonical linear.state.write audit emitter. CALLER-EMITS at each
 // scheduler write site (source/phase/reason known only here) — NEVER inside
 // runTransition (would double-audit the triage path, which keeps its own
@@ -1720,6 +1722,9 @@ export function convergeStartedHeldLabels(
   {
     desired = null,
     multiHost = false,
+    // CTL-863: threaded through for the Stage-1 projection-first fence read.
+    gateway = undefined,
+    self = undefined,
     emitStateWrite = null,
     onRetract = null,
     fenceGuard: fence = fenceGuard,
@@ -1729,7 +1734,7 @@ export function convergeStartedHeldLabels(
     if (label === desired) continue;
     const base = join(orchDir, "workers", ticket, `.linear-label-${label}`);
     if (!existsSync(`${base}.applied`) && !existsSync(`${base}.skipped`)) continue;
-    if (!fence({ ticket, orchDir, multiHost })) {
+    if (!fence({ ticket, orchDir, multiHost, gateway, self })) {
       log.warn(
         { ticket, label },
         "ctl-1068: stale fence — suppressing held-label retraction (zombie guard)"
@@ -2379,6 +2384,9 @@ function terminalDoneOnce(
   emitStateWrite,
   {
     multiHost = false,
+    // CTL-863: threaded through for the Stage-1 projection-first fence read.
+    gateway = undefined,
+    self = undefined,
     checkOpenPrs,
     emitDoneWithOpenPr = appendRecoveryDoneOpenPrEvent,
     // CTL-1157 SLICE 3: the broad "Done-moves" emitter — fires on EVERY confirmed
@@ -2388,7 +2396,7 @@ function terminalDoneOnce(
 ) {
   const marker = join(orchDir, "workers", ticket, ".terminal-done.applied");
   if (existsSync(marker)) return;
-  if (!fenceGuard({ ticket, orchDir, multiHost })) {
+  if (!fenceGuard({ ticket, orchDir, multiHost, gateway, self })) {
     log.warn(
       { ticket },
       "ctl-863: stale fence — suppressing terminalDoneOnce write (zombie guard)"
@@ -2517,7 +2525,7 @@ function reconcileTerminalBackstop(
   signal,
   writeStatus,
   emitStateWrite,
-  { cache, prAdapter, fetchState = fetchTicketState, multiHost = false } = {}
+  { cache, prAdapter, fetchState = fetchTicketState, multiHost = false, gateway = undefined, self = undefined } = {}
 ) {
   // GATE 1 — pipeline reached terminal (marker present).
   const marker = join(orchDir, "workers", ticket, ".terminal-done.applied");
@@ -2542,7 +2550,7 @@ function reconcileTerminalBackstop(
   }
   if (state == null || isLinearTerminal(state)) return; // already terminal or unreadable → no-op
   // CTL-863: zombie guard — a post-takeover paused host must not re-Do a ticket.
-  if (!fenceGuard({ ticket, orchDir, multiHost })) {
+  if (!fenceGuard({ ticket, orchDir, multiHost, gateway, self })) {
     log.warn(
       { ticket },
       "ctl-863: stale fence — suppressing reconcileTerminalBackstop write (zombie guard)"
@@ -4669,7 +4677,7 @@ export function schedulerTick(
         for (const member of anomaly.members) {
           if (triagedWaiting.includes(member)) {
             cycleMembers.add(member);
-            if (fenceGuard({ ticket: member, orchDir, multiHost })) {
+            if (fenceGuard({ ticket: member, orchDir, multiHost, gateway, self })) {
               labelNeedsHumanUnlessBeliefOwner(orchDir, member, writeStatus, { env, site: "dependency-cycle", log });
             } else {
               log.warn(
@@ -4886,7 +4894,7 @@ export function schedulerTick(
           if (depState == null) continue; // unresolvable → drop
           if (ADMISSION_TERMINAL_STATES.has(depState)) continue; // terminal → no durable edge
 
-          if (fenceGuard({ ticket: candidate, orchDir, multiHost })) {
+          if (fenceGuard({ ticket: candidate, orchDir, multiHost, gateway, self })) {
             safeWrite(
               () => writeStatus.applyBlockedByRelation({ ticket: candidate, blockedBy: dep }),
               { ticket: candidate, phase: "triage-deps" }
@@ -5198,7 +5206,7 @@ export function schedulerTick(
       if (next === "research") {
         const est = readTriageEstimate(orchDir, ticket);
         if (est !== null) {
-          if (fenceGuard({ ticket, orchDir, multiHost })) {
+          if (fenceGuard({ ticket, orchDir, multiHost, gateway, self })) {
             safeWrite(() => writeStatus.applyEstimate({ ticket, estimate: est }), {
               ticket,
               phase: next,
@@ -5312,7 +5320,7 @@ export function schedulerTick(
             },
             { ticket: pd.identifier, phase: parkedPhase }
           );
-          if (fenceGuard({ ticket: pd.identifier, orchDir, multiHost })) {
+          if (fenceGuard({ ticket: pd.identifier, orchDir, multiHost, gateway, self })) {
             safeWrite(
               () => {
                 // CTL-757: audit the resume-after-preemption status write.
@@ -5386,7 +5394,7 @@ export function schedulerTick(
           );
           // CTL-863 fence: external Linear write — a zombie host that lost its
           // claim must not label after takeover (mirrors the A.5 cycle site).
-          if (fenceGuard({ ticket: member, orchDir, multiHost })) {
+          if (fenceGuard({ ticket: member, orchDir, multiHost, gateway, self })) {
             labelNeedsHumanUnlessBeliefOwner(orchDir, member, writeStatus, { env, site: "ctl-925-cycle", log });
           }
         }
@@ -5614,7 +5622,7 @@ export function schedulerTick(
             );
             continue;
           }
-          if (fenceGuard({ ticket: dep.candidate, orchDir, multiHost })) {
+          if (fenceGuard({ ticket: dep.candidate, orchDir, multiHost, gateway, self })) {
             safeWrite(
               () =>
                 writeStatus.applyBlockedByRelation({
@@ -5726,6 +5734,18 @@ export function schedulerTick(
       // advancement + revive sweeps re-inject it into later guarded phases. No-op
       // on single-host (clusterGeneration === null → writeClusterGeneration skips).
       writeClusterGeneration(orchDir, t.identifier, clusterGeneration);
+      // CTL-863: emit the authoritative fence.claimed event (Linear-free local
+      // append) so the broker projects this claim into ticket_state's fence
+      // columns — the durable, event-log-derived source the fence guard reads.
+      // Multi-host only (clusterGeneration non-null); single-host never fences.
+      if (clusterGeneration != null) {
+        emitFenceClaimed({
+          ticket: t.identifier,
+          owner_host: self,
+          generation: clusterGeneration,
+          phase: NEW_WORK_ENTRY_PHASE,
+        });
+      }
       // CTL-558: write the entry-phase (`research`) status for the new ticket.
       // CTL-757: audit it as a scheduler-advance state write (new work entering
       // the pipeline is the entry-phase forward advance).
@@ -5804,6 +5824,8 @@ export function schedulerTick(
       // cluster (no-op single-host: multiHost=false → guard always passes).
       terminalDoneOnce(orchDir, ticket, writeStatus, emitStateWrite, {
         multiHost,
+        gateway,
+        self,
         checkOpenPrs,
         emitDoneWithOpenPr,
         emitDoneApplied,
@@ -5828,6 +5850,8 @@ export function schedulerTick(
         prAdapter,
         fetchState: (id, o = {}) => fetchTicketState(id, { ...o, gateway, replica }),
         multiHost,
+        gateway,
+        self,
       }
     );
     const anyStalled = Object.values(signals).some((s) => s === "stalled");
@@ -5877,7 +5901,7 @@ export function schedulerTick(
         } else {
           // Non-terminal stalled/failed ticket → apply the belief-aware needs-human
           // label (CTL-1241: skipped when the belief engine owns the reclaim).
-          if (fenceGuard({ ticket, orchDir, multiHost })) {
+          if (fenceGuard({ ticket, orchDir, multiHost, gateway, self })) {
             labelNeedsHumanUnlessBeliefOwner(orchDir, ticket, writeStatus, { env, site: "terminal-sweep", log });
           } else {
             log.warn(
@@ -5918,6 +5942,8 @@ export function schedulerTick(
       convergeStartedHeldLabels(orchDir, ticket, retractionWriteStatus, {
         desired: null,
         multiHost,
+        gateway,
+        self,
         emitStateWrite,
         onRetract: () => lastHeldEmitState.delete(ticket),
       });

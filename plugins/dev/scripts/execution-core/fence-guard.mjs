@@ -22,6 +22,22 @@
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { fenceCheckSyncCached } from "./cluster-claim-sync.mjs";
+import { gatewayFence, claimedAtAgeMs } from "./gateway-read.mjs";
+
+// FENCE_FRESH_MS — how recently a projected fence must have been CLAIMED (or
+// re-emitted on the heartbeat cadence) for the multi-host guard to trust the
+// local reconciled row instead of escalating to the authoritative read
+// (spec §E / OQ-C). 90s = 3× the 30s tick and < the 120s fence re-emit /
+// reconcile cadence (LIVENESS_PUBLISH_INTERVAL_MS): a row that missed exactly
+// one re-emit is already suspect and escalates rather than being trusted. It is
+// far below HEARTBEAT_GRACE_MS (10min), so a "fresh" fence can never outlive its
+// owner's liveness window. Overridable via CATALYST_FENCE_FRESH_MS for tuning.
+const FENCE_FRESH_MS_DEFAULT = 90_000;
+
+function resolveFenceFreshMs(env) {
+  const raw = Number(env?.CATALYST_FENCE_FRESH_MS);
+  return Number.isFinite(raw) && raw > 0 ? raw : FENCE_FRESH_MS_DEFAULT;
+}
 
 // readSignalGeneration — read `generation` from the active phase signal file for
 // a ticket. Scans workers/<ticket>/phase-*.json, preferring running > newest.
@@ -56,27 +72,70 @@ export function readSignalGeneration(orchDir, ticket, { readDir = readdirSync, r
   return best;
 }
 
-// fenceGuard — single decision shared by every external-write site.
+// fenceGuard — single decision shared by every external-write site (CTL-863
+// durable fence → event-log migration; supersedes the #2552 interim ReadFence
+// cache on the read path).
 //
-// Single-host: multiHost:false → always true (no check). Multi-host: reads this
-// ticket's claimed generation from its signal file and asks fenceCheckSync if we're
-// still the current owner. Missing generation or a stale/failed check → false
-// (fail-closed: do NOT perform the side-effect — the write might be a
-// post-takeover zombie's).
+// ── N=1 SINGLE-HOST GATE (spec §C1) ──────────────────────────────────────────
+// multiHost:false means the LIVE roster has exactly one host → NO peer can ever
+// supersede this fence → the local fast path is UNCONDITIONALLY correct. Return
+// true with no read at all (today's exact behavior, the safe floor). Single-host
+// is the common case and pays zero cost.
 //
-// All three collaborators are injectable for unit tests (no fs or subprocess).
+// ── MULTI-HOST (spec §C2/§D) ─────────────────────────────────────────────────
+// A ≥2-host roster can be superseded by a peer's takeover, so we must NOT
+// silently trust local state. The read source is selected by
+// CATALYST_FENCE_READ_SOURCE:
+//
+//   "linear" (DEFAULT, Stage 0) — escalate to the authoritative read
+//     (fenceCheckSyncCached: the #2552 interim cache over `query ReadFence`).
+//     This is today's exact behavior. The projection-first fast path is NOT
+//     armed for multi-host because a PER-HOST broker projection cannot carry a
+//     FOREIGN host's takeover bump (spec's fatal finding 1) — trusting it would
+//     fail OPEN for the exact partitioned-zombie case the fence exists to catch.
+//     Arming it safely requires the cross-host reconcile store (spec Stage 1),
+//     which is a separate, fleet-reviewed change.
+//
+//   "projection-first" (Stage 1, opt-in) — read the broker projection; trust a
+//     FRESH self-owned + generation-matching row (claimed_at-age < FENCE_FRESH_MS);
+//     a fresh row showing a foreign owner (incl. a released→null owner) or a higher
+//     generation → suppress; a stale/absent row → escalate to the authoritative
+//     read (migration-safe fallback, no fence gap). ONLY safe once the broker
+//     reconciles foreign fence rows cross-host (Stage 1) — until then it MUST NOT
+//     be the fleet default.
+//
+// FAIL-CLOSED throughout: a missing generation or any thrown error → false
+// (suppress the side-effect). All collaborators are injectable for unit tests.
 export function fenceGuard(
-  { ticket, orchDir, multiHost },
+  { ticket, orchDir, multiHost, gateway, self },
   {
     readGen = () => readSignalGeneration(orchDir, ticket),
-    check = fenceCheckSyncCached,
+    readFence = (t) => gatewayFence(gateway, t),
+    isFresh = (f, env = process.env) => claimedAtAgeMs(f) < resolveFenceFreshMs(env),
+    escalate = fenceCheckSyncCached,
+    readSource = process.env.CATALYST_FENCE_READ_SOURCE || "linear",
+    env = process.env,
   } = {},
 ) {
-  if (!multiHost) return true; // single-host: always the fence owner
+  // N=1 single-host gate: provably no peer → trust local unconditionally.
+  if (!multiHost) return true;
+
   try {
     const generation = readGen();
     if (!Number.isFinite(generation)) return false; // missing/null/NaN → fail-closed
-    return check({ ticket, generation }).current === true;
+
+    // Stage 1 opt-in: trust a FRESH cross-host-reconciled projection row.
+    if (readSource === "projection-first" && gateway) {
+      const f = readFence(ticket);
+      if (f && isFresh(f, env)) {
+        if (f.ownerHost !== self) return false; // foreign owner (incl. released→null) → suppress
+        return f.generation === generation; // higher/other gen → suppress
+      }
+      // stale/absent projection → fall through to the authoritative read.
+    }
+
+    // Stage 0 default (and Stage 1 stale/absent fallback): authoritative read.
+    return escalate({ ticket, generation }).current === true;
   } catch {
     return false; // any error → fail-closed
   }

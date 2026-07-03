@@ -52,6 +52,8 @@ const INLINE_EVENT_NAMES = [
   "linear.state.write.CTL-1",         // linear-state-write-event.mjs:77
   "agent.waiting_on_user",            // wait-event.mjs:buildWaitEnvelope
   "agent.resumed",                    // wait-event.mjs:buildWaitEnvelope
+  "fence.claimed.CTL-1",              // CTL-863 fence-event.mjs (exec-core-owned, projected-not-re-emitted)
+  "fence.released.CTL-1",             // CTL-863 fence-event.mjs
 ];
 
 // Build the flat list of all static exec-core event names.

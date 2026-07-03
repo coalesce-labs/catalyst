@@ -13,9 +13,16 @@ import {
   openBrokerStateDb,
   closeBrokerStateDb,
   upsertTicketDescriptor,
+  upsertTicketFence,
   markTicketRemovedByUuid,
 } from "../broker/broker-state.mjs";
-import { createGatewayReader, descriptorAgeMs, gatewayLabelsHit } from "./gateway-read.mjs";
+import {
+  createGatewayReader,
+  descriptorAgeMs,
+  claimedAtAgeMs,
+  gatewayLabelsHit,
+  gatewayFence,
+} from "./gateway-read.mjs";
 
 let tmpDir;
 let dbPath;
@@ -173,5 +180,103 @@ describe("gatewayLabelsHit (CTL-1079)", () => {
   test("never throws: getDescriptor that throws → null", () => {
     const gw = { getDescriptor: () => { throw new Error("db gone"); } };
     expect(gatewayLabelsHit(gw, "CTL-1")).toBeNull();
+  });
+});
+
+// ─── CTL-863: fence read migration ───────────────────────────────────────────
+
+describe("getDescriptor surfaces the fence columns (CTL-863)", () => {
+  test("a fenced row exposes ownerHost/generation/fencePhase/claimedAt", () => {
+    openBrokerStateDb(dbPath);
+    upsertTicketFence({
+      ticket: "CTL-1",
+      ownerHost: "mini",
+      generation: 7,
+      phase: "implement",
+      claimedAt: "2026-07-03T10:00:00Z",
+    });
+    reader = createGatewayReader({ dbPath });
+    const d = reader.getDescriptor("CTL-1");
+    expect(d.ownerHost).toBe("mini");
+    expect(d.generation).toBe(7);
+    expect(d.fencePhase).toBe("implement");
+    expect(d.claimedAt).toBe("2026-07-03T10:00:00Z");
+  });
+
+  test("legacy pre-CTL-923 schema (no fence columns) → nulls, not a throw", () => {
+    const legacy = new Database(dbPath, { create: true });
+    legacy.run(`
+      CREATE TABLE ticket_state (
+        ticket       TEXT PRIMARY KEY,
+        linear_state TEXT,
+        pr_number    INTEGER,
+        updated_at   TEXT NOT NULL
+      )
+    `);
+    legacy.run(`INSERT INTO ticket_state VALUES ('CTL-9', 'Done', 7, '2026-01-01T00:00:00Z')`);
+    legacy.close();
+    reader = createGatewayReader({ dbPath });
+    const d = reader.getDescriptor("CTL-9");
+    expect(d.ownerHost).toBeNull();
+    expect(d.generation).toBeNull();
+    expect(d.fencePhase).toBeNull();
+    expect(d.claimedAt).toBeNull();
+  });
+});
+
+describe("gatewayFence (CTL-863)", () => {
+  const gwWith = (descriptor) => ({ getDescriptor: () => descriptor });
+
+  test("maps a fenced descriptor into the guard's { ownerHost, generation, phase, claimedAt } shape", () => {
+    const gw = gwWith({
+      removed: false,
+      ownerHost: "mini",
+      generation: 5,
+      fencePhase: "pr",
+      claimedAt: "2026-07-03T10:00:00Z",
+    });
+    expect(gatewayFence(gw, "CTL-1")).toEqual({
+      ownerHost: "mini",
+      generation: 5,
+      phase: "pr",
+      claimedAt: "2026-07-03T10:00:00Z",
+    });
+  });
+
+  test("a released fence (ownerHost cleared to null) → null (no fence to trust)", () => {
+    const gw = gwWith({ removed: false, ownerHost: null, generation: null });
+    expect(gatewayFence(gw, "CTL-1")).toBeNull();
+  });
+
+  test("miss: null gateway / no getDescriptor / absent row / tombstone → null", () => {
+    expect(gatewayFence(null, "CTL-1")).toBeNull();
+    expect(gatewayFence({}, "CTL-1")).toBeNull();
+    expect(gatewayFence(gwWith(null), "CTL-1")).toBeNull();
+    expect(gatewayFence(gwWith({ removed: true, ownerHost: "mini", generation: 5 }), "CTL-1")).toBeNull();
+  });
+
+  test("never throws: getDescriptor that throws → null", () => {
+    expect(gatewayFence({ getDescriptor: () => { throw new Error("x"); } }, "CTL-1")).toBeNull();
+  });
+});
+
+describe("claimedAtAgeMs — keyed on claimed_at, NOT updated_at (finding 6)", () => {
+  test("computes age from claimedAt", () => {
+    const now = Date.parse("2026-07-03T00:01:00Z");
+    expect(claimedAtAgeMs({ claimedAt: "2026-07-03T00:00:00Z" }, now)).toBe(60_000);
+  });
+
+  test("a fresh updated_at does NOT freshen a stale fence (uses claimedAt only)", () => {
+    const now = Date.parse("2026-07-03T01:00:00Z");
+    // The descriptor's updatedAt is 'now' (webhook just touched the row) but the
+    // fence was claimed an hour ago → claimedAtAgeMs must report the OLD age.
+    const fence = { claimedAt: "2026-07-03T00:00:00Z", updatedAt: "2026-07-03T01:00:00Z" };
+    expect(claimedAtAgeMs(fence, now)).toBe(3_600_000);
+  });
+
+  test("absent/unparseable claimedAt → Infinity (fails safe as stale → escalate)", () => {
+    expect(claimedAtAgeMs({})).toBe(Infinity);
+    expect(claimedAtAgeMs(null)).toBe(Infinity);
+    expect(claimedAtAgeMs({ claimedAt: "not a date" })).toBe(Infinity);
   });
 });

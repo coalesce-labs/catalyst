@@ -310,10 +310,10 @@ function defaultDispatchRescue(ticket, opts) {
 export function defaultEscalate(
   ticket,
   detail,
-  { orchDir, linearWrite, multiHost = false, env = process.env } = {}
+  { orchDir, linearWrite, multiHost = false, gateway = undefined, self = undefined, env = process.env } = {}
 ) {
   if (linearWrite) {
-    if (fenceGuard({ ticket, orchDir, multiHost })) {
+    if (fenceGuard({ ticket, orchDir, multiHost, gateway, self })) {
       labelNeedsHumanUnlessBeliefOwner(orchDir, ticket, linearWrite, {
         env,
         site: "stale-pr-rescue",

@@ -70,6 +70,8 @@ import { claimDispatchSync } from "./cluster-claim-sync.mjs";
 import { dispatchTicket, defaultDispatch, settleDispatchSync, sdkSignalRunnable, backstopOnRejection } from "./dispatch.mjs"; // CTL-1367 P1: settle async (sdk) revive dispatch synchronously + backstop a rejected async dispatch
 import { createWorktree } from "./worktree.mjs";
 import { fenceGuard } from "./fence-guard.mjs";
+// CTL-863: Linear-free fence event emitter (durable fence → event-log migration).
+import { emitFenceClaimed } from "./fence-event.mjs";
 import { applyLabel as defaultApplyLabel } from "./linear-write.mjs";
 import { linearBreaker } from "./linear-breaker.mjs";
 // CTL-642: the SHARED terminal-state predicate. The recovery short-circuit reuses
@@ -613,12 +615,15 @@ export function defaultPostReclaimMirror(
       return spawnSync(helperPath, [t, bodyText], { encoding: "utf8" });
     },
     multiHost = false,
+    // CTL-863: threaded through for the Stage-1 projection-first fence read.
+    gateway = undefined,
+    self = undefined,
   } = {}
 ) {
   const marker = `${orchDir}/workers/${ticket}/.linear-mirror-${phase}`;
   if (exists(marker)) return; // first-writer-wins
   // CTL-863: zombie guard — a post-takeover paused host must not post a mirror comment.
-  if (!fenceGuard({ ticket, orchDir, multiHost })) {
+  if (!fenceGuard({ ticket, orchDir, multiHost, gateway, self })) {
     log.warn(
       { ticket, phase },
       "ctl-863: stale fence — suppressing postReclaimMirror comment (zombie guard)"
@@ -3335,6 +3340,19 @@ export async function reclaimDeadHostWork(
       const r = dispatch(orchDir, ticket, phase, wt.cwd);
       if (r?.code === 0) {
         taken.push({ ticket, phase, generation: claimRes.generation });
+        // CTL-863: emit fence.claimed for the TAKEOVER bump (Linear-free local
+        // append). The generation was bumped by the soft-CAS above, so the
+        // superseded (dead/partitioned) host's projection observes owner_host=self
+        // at the higher generation on its next reconcile → its stale-gen writes
+        // suppress. Multi-host only (reclaim never runs at roster<=1).
+        if (Number.isFinite(claimRes.generation)) {
+          emitFenceClaimed({
+            ticket,
+            owner_host: self,
+            generation: claimRes.generation,
+            phase,
+          });
+        }
       }
     }
   }

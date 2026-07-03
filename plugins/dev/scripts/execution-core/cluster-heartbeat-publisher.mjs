@@ -24,6 +24,22 @@ import {
 import { publishHeartbeatSync } from "./cluster-heartbeat-sync.mjs";
 import { linearBreaker } from "./linear-breaker.mjs"; // CTL-1420 follow-up: share the CTL-679 breaker
 import { isRateClassLinearError } from "./cluster-heartbeat.mjs"; // rate-class discriminator (pure)
+import { emitFenceClaimed } from "./fence-event.mjs"; // CTL-863: Linear-free fence re-emit
+
+// localClusterGeneration — read this host's won fence generation for `ticket`
+// from workers/<ticket>/cluster-generation.json (the file writeClusterGeneration
+// persists). Read directly rather than importing scheduler.mjs — that would pull
+// the whole dispatch graph and risk a cycle (same rationale as readLocalMaxParallel).
+// Fail-open: any miss → null.
+function localClusterGeneration(orchDir, ticket) {
+  if (!orchDir || !ticket) return null;
+  try {
+    const g = JSON.parse(readFileSync(join(orchDir, "workers", ticket, "cluster-generation.json"), "utf8"));
+    return Number.isFinite(g?.generation) ? g.generation : null;
+  } catch {
+    return null;
+  }
+}
 
 // readLocalMaxParallel — this host's live parallel-slot count from state.json
 // (the autotuned value the scheduler reads via readMaxParallel). CTL-1092: the
@@ -84,6 +100,13 @@ export function startLivenessPublisher({
   // monitor cluster view can show per-host capacity. Injectable for tests.
   currentMaxParallel = () => readLocalMaxParallel(orchDir),
   publish = (args) => publishHeartbeatSync(args),
+  // CTL-863: heartbeat-cadence fence re-emit. Linear-FREE (a local event-log
+  // append) — it MUST NOT be gated behind the Linear breaker-skip below (doing so
+  // would re-create the CTL-1420 admission freeze on the fence path). Refreshes
+  // claimed_at for each owned ticket so the multi-host guard's isFresh gate keeps
+  // trusting the reconciled projection instead of escalating to Linear. Injectable.
+  emitFence = (args) => emitFenceClaimed(args),
+  readGeneration = (ticket) => localClusterGeneration(orchDir, ticket),
   logger = log, // CTL-1251: injectable so tests can assert publish-outcome logging
   // CTL-1420 follow-up: the shared CTL-679 breaker. The heartbeat is a ~2min
   // Linear WRITE on the same app-actor bucket as reads/writes, so it must (1)
@@ -115,6 +138,25 @@ export function startLivenessPublisher({
   // an info recovery line. Still fail-open — logging never throws.
   let consecutiveFailures = 0;
   const tick = () => {
+    // Snapshot the owned tickets ONCE per tick so the fence re-emit and the
+    // liveness publish observe the same set (and ownedTickets is invoked exactly
+    // once per tick, as before this fence re-emit was added).
+    const owned = ownedTickets();
+    // CTL-863: re-emit fence.claimed for each owned ticket FIRST, unconditionally
+    // — BEFORE the breaker check below. This is a local, Linear-free event-log
+    // append (zero app-actor traffic), so it must never be suppressed by the
+    // Linear breaker. Its own try/catch keeps a fence-log hiccup from ever
+    // aborting the liveness publish. Runs only multi-host (this publisher is inert
+    // at roster<=1), which is exactly when the fence projection is read.
+    try {
+      for (const ticket of owned) {
+        const generation = readGeneration(ticket);
+        if (!Number.isFinite(generation)) continue; // no won token → nothing to refresh
+        emitFence({ ticket, owner_host: self, generation });
+      }
+    } catch {
+      /* fence re-emit is best-effort; never blocks or crashes the liveness tick */
+    }
     try {
       // CTL-1420 follow-up: if the shared CTL-679 breaker is OPEN (a rate-class
       // 429/RATELIMITED from ANY daemon Linear path tripped it), SKIP this publish
@@ -135,7 +177,7 @@ export function startLivenessPublisher({
       const result = publish({
         anchorIssue,
         host: self,
-        inFlightTickets: ownedTickets(),
+        inFlightTickets: owned,
         maxParallel: currentMaxParallel(),
       });
       if (result && result.ok === false) {
