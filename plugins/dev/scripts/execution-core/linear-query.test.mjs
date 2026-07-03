@@ -1220,6 +1220,65 @@ describe("classifyTicketResolution (CTL-671)", () => {
   });
 });
 
+// ─── classifyTicketResolution — read-replica tier (CTL-1420 follow-up) ───────
+// The phantom-sweep existence probe gains a replica short-circuit mirroring the
+// gateway one: a present replica row proves the ticket EXISTS (the only verdict
+// safe to serve without a live read), and a MISS can NEVER yield "not-found".
+describe("classifyTicketResolution — read-replica tier (CTL-1420 follow-up)", () => {
+  test("replica HIT → 'exists', NEVER shells linearis (the burn cut)", () => {
+    const replica = fakeReplica({ state: "In Progress" });
+    const exec = fakeExec({ code: 0, stdout: "null" }); // would say not-found if reached
+    expect(classifyTicketResolution("CTL-100", { exec, replica })).toBe("exists");
+    expect(exec.calls.length).toBe(0);
+    expect(replica.calls).toEqual(["CTL-100"]);
+  });
+
+  test("replica HIT short-circuits even when the live read would say not-found (existence proof — never quarantines)", () => {
+    // A present replica row is definitive existence: it must win over a live
+    // read that would (falsely, mid-outage or lag) classify not-found.
+    const replica = fakeReplica({ state: "Todo" });
+    const exec = fakeExec({
+      code: 0,
+      stdout: JSON.stringify({ error: 'Issue with identifier "CTL-9" not found' }),
+    });
+    expect(classifyTicketResolution("CTL-9", { exec, replica })).toBe("exists");
+    expect(exec.calls.length).toBe(0);
+  });
+
+  test("replica MISS (lookup → undefined) → falls through to the live read (fail-open)", () => {
+    const replica = fakeReplica(undefined);
+    const exec = fakeExec({
+      code: 0,
+      stdout: JSON.stringify({ identifier: "CTL-100", state: { name: "Ready" } }),
+    });
+    expect(classifyTicketResolution("CTL-100", { exec, replica })).toBe("exists");
+    expect(exec.calls.length).toBe(1); // the live read ran on the miss
+    expect(replica.calls).toEqual(["CTL-100"]);
+  });
+
+  test("replica MISS + live not-found → not-found (a miss never masks a real not-found)", () => {
+    const replica = fakeReplica(undefined);
+    const exec = fakeExec({ code: 0, stdout: "null" });
+    expect(classifyTicketResolution("CTL-9", { exec, replica })).toBe("not-found");
+  });
+
+  test("no replica (flag off) → byte-identical: the live path is unchanged", () => {
+    const exec = fakeExec({ code: 0, stdout: JSON.stringify({ identifier: "CTL-100" }) });
+    expect(classifyTicketResolution("CTL-100", { exec })).toBe("exists");
+    expect(exec.calls.length).toBe(1);
+  });
+
+  test("precedence: a replica HIT is consulted BEFORE the gateway (both → 'exists', gateway never touched)", () => {
+    const replica = fakeReplica({ state: "Todo" });
+    const gateway = fakeGateway({ state: "Todo", removed: false, updatedAt: new Date().toISOString() });
+    const exec = fakeExec({ code: 0, stdout: "null" });
+    expect(classifyTicketResolution("CTL-5", { exec, replica, gateway })).toBe("exists");
+    expect(exec.calls.length).toBe(0);
+    expect(replica.calls).toEqual(["CTL-5"]); // replica consulted first
+    expect(gateway.calls.length).toBe(0); // short-circuited before the gateway
+  });
+});
+
 // ─── gateway read-path (CTL-823) ─────────────────────────────────────────────
 
 function fakeGateway(descriptor) {

@@ -767,9 +767,15 @@ function dispatchTriage(
   writeClusterGeneration(orchDir, identifier, clusterGeneration);
   if (budget) budget.remaining -= 1;
   // CTL-704: write Linear Todo→Triage (verified) + emit observability event.
+  // CTL-1420 follow-up (shared-bucket burn): thread the read-tiers into the
+  // PRE-transition state read so it resolves from the durable descriptor store
+  // (gateway, already in dispatchTriage scope) or the local Catalyst-Cloud
+  // replica (_injectedEligibleReplica — the same mode-gated reader the reconcile
+  // path uses; null when the flag is off) instead of a cold `linearis` spawn.
+  // The verify read-back inside applyTriageStatus stays live.
   let res = { applied: false, verified: false, from_state: null, to_state: null, reason: null };
   try {
-    res = applyTriageStatus({ ticket: identifier });
+    res = applyTriageStatus({ ticket: identifier, gateway, replica: _injectedEligibleReplica });
   } catch (err) {
     log.warn({ identifier, err: err.message }, "monitor: triage status write threw");
   }

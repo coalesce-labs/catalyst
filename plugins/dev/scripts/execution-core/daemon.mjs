@@ -598,7 +598,12 @@ export function startDaemon({
     // CTL-539 — rebuild routing + worker state on boot. CTL-654: capture the
     // RecoveryReport (previously discarded) so the boot-resume pass can consume
     // its `coldStart` verdict + worker buckets.
-    const report = recover({ orchDir });
+    // CTL-1420 follow-up (shared-bucket burn): skipReconcile — recoverStartup's
+    // own boot reconcile runs BEFORE the replica reader is injected below, so it
+    // would poll linearis and draw the shared app-actor bucket. startMonitor
+    // (further down) runs an immediate authoritative reconcileAll that IS
+    // replica-backed, so we skip the redundant pre-injection poll here.
+    const report = recover({ orchDir, skipReconcile: true });
     _bootReport = report;
     // CTL-1365a/b Stage C: resolve the phase-worker executor ONCE per boot (env →
     // Layer-1 catalyst.orchestration.executor → node-class default; every class
@@ -759,10 +764,13 @@ export function startDaemon({
       // removed/absent/stale always fall through to the live read
       // (fresh-before-quarantine). Fail-open: any store failure behaves
       // exactly like the pre-gateway path.
-      // Spread order matters: the daemon's reader is AUTHORITATIVE — callers
-      // (the sweep passes { exec }) cannot accidentally drop it.
+      // Spread order matters: the daemon's readers are AUTHORITATIVE — callers
+      // (the sweep passes { exec }) cannot accidentally drop them.
+      // CTL-1420 follow-up (shared-bucket burn): also thread the mode-gated
+      // read-replica reader so a present replica row short-circuits "exists"
+      // without a live linearis read (undefined when the flag is off → inert).
       classifyResolution: (identifier, opts = {}) =>
-        classifyTicketResolution(identifier, { ...opts, gateway: gatewayReader }),
+        classifyTicketResolution(identifier, { ...opts, gateway: gatewayReader, replica: replicaReader }),
       // CTL-823: thread the reader to the scheduler's internal fetchState
       // injections (reclaim + terminal backstop) so the 60s state window is
       // live in production, not just in unit tests.
