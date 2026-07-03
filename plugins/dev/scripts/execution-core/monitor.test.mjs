@@ -33,6 +33,7 @@ import { setProjectEligible, getEligibleSet, dropProject } from "./eligible-set.
 import { loadCursor, saveCursor } from "./event-cursor.mjs";
 import { createTicketStateCache } from "./linear-cache.mjs";
 import { fetchTicketState } from "./linear-query.mjs";
+import { linearBreaker } from "./linear-breaker.mjs"; // close the shared breaker so the D2 replica-miss fall-through is deterministic
 import {
   getReconcileHealth,
   readReconcileHealthMarkers,
@@ -224,6 +225,15 @@ describe("reconcileProject", () => {
 // quota + trips the CTL-679 circuit breaker). A replica HIT must NOT shell out
 // to linearis; a MISS falls through unchanged.
 describe("reconcileProject — replica tier (CTL-1397)", () => {
+  // CTL-679/Stage-0 D2: the shared linearBreaker is a process-wide singleton a
+  // prior test FILE can leave OPEN. Stage-0 D2 makes a replica-MISS THROW (preserve
+  // prior, no spawn) when the breaker is open — so the replica-miss→linearis
+  // fall-through these tests assert is the CLOSED-breaker path. Close it per test
+  // for a deterministic baseline (mirrors linear-query.test.mjs's replica-tier block).
+  beforeEach(() => {
+    linearBreaker.recordSuccess(); // → closed (no-op if already closed)
+  });
+
   // A replica stub whose eligible() returns a canned eligible answer (or
   // undefined to fall through). Shaped so normalizeTicket consumes it directly.
   function replicaReturning(nodesOrUndefined) {

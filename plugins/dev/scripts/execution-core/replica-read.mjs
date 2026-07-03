@@ -79,8 +79,37 @@ function coerceMs(v) {
 // `identifier LIKE 'CTL-%'` selects exactly team CTL (the hyphen disambiguates
 // CTL- from CTC-). state is the workflow-state NAME string (matches query.status).
 // removed_at IS NULL drops tombstones. LIMIT 200 matches linear-query DEFAULT_LIMIT.
-const ELIGIBLE_SELECT = `SELECT i.identifier, i.title, i.state, i.priority, i.estimate, i.updated_at, i.created_at, i.parent_identifier, i.delegate_id, i.delegate_name, p.name AS project_name FROM issues i LEFT JOIN projects p ON p.id = i.project_id WHERE i.identifier LIKE ? AND i.state = ? AND i.removed_at IS NULL ORDER BY i.updated_at DESC LIMIT ?`;
+// The eligible board-list query, split HEAD/TAIL so D1 (project/label filters)
+// can inject extra WHERE clauses before the ORDER BY without a second SELECT.
+const ELIGIBLE_SELECT_HEAD = `SELECT i.identifier, i.title, i.state, i.priority, i.estimate, i.updated_at, i.created_at, i.parent_identifier, i.delegate_id, i.delegate_name, p.name AS project_name FROM issues i LEFT JOIN projects p ON p.id = i.project_id WHERE i.identifier LIKE ? AND i.state = ? AND i.removed_at IS NULL`;
+const ELIGIBLE_SELECT_TAIL = ` ORDER BY i.updated_at DESC LIMIT ?`;
 const ELIGIBLE_LIMIT = 200;
+
+// buildEligibleSelect — assemble the eligible SELECT with optional D1 project/label
+// filters. project → `AND p.name = ?` (the LEFT JOIN projects.name already in HEAD);
+// label → an EXISTS over issue_labels⋈labels keyed by the issue's own PK id, matching
+// the label NAME (issue_labels(issue_id,label_id) + labels(id,name); the identifier→id
+// resolution the cloud schema needs). Bind order MUST mirror the appended clauses:
+// [likePattern, status, (project?), (label?), LIMIT].
+function buildEligibleSelect({ project, label } = {}) {
+  let sql = ELIGIBLE_SELECT_HEAD;
+  if (project != null) sql += ` AND p.name = ?`;
+  if (label != null)
+    sql += ` AND EXISTS (SELECT 1 FROM issue_labels il JOIN labels l ON l.id = il.label_id WHERE il.issue_id = i.id AND l.name = ?)`;
+  return sql + ELIGIBLE_SELECT_TAIL;
+}
+
+// ownership(id) — the per-ticket claim-gate reader (Stage 0 / A0). One index-backed
+// row-read of the assignee + delegate the CTL-1174 gate needs, so the daemon can
+// decide human/tool ownership Linear-free. Gated (in ownership() below) by the SAME
+// freshness + seed-cursor gate as eligible() — a gate-fail/miss/unreadable returns
+// undefined so the caller HOLDs / falls through to the live confirm and NEVER claims
+// on unknown. There is deliberately NO per-ticket currency gate here: file mtime
+// proves the writer is LIVE, not that THIS ticket's delegate change was applied, so
+// a caller must never TRUST a null delegate from the replica — fetchTicketAssignee
+// live-confirms every null delegate and trusts only a non-null (actor-set) one,
+// matching the gateway path (see linear-query.mjs).
+const OWNERSHIP_SELECT = `SELECT assignee_id, delegate_id, delegate_name FROM issues WHERE identifier = ? AND removed_at IS NULL LIMIT 1`;
 // Relation enrichment, mirroring normalizeDetail in linear-cli.mjs. forward:
 // edges this issue OWNS (relatedIssue is the target); inverse: edges that point
 // AT this issue (the blocked-by edge the scheduler gates on).
@@ -141,6 +170,20 @@ function isReplicaFresh(dbPath) {
   }
   return Date.now() - newest <= thresholdMs;
 }
+
+// NOTE (Stage 0): there is intentionally NO coarse "currency" guard on ownership().
+// An earlier draft gated ownership() on the db/`-wal` mtimes being within a currency
+// window, on the theory that a live-but-lagging writer could leave a just-delegated
+// ticket reading `delegate=null` locally. But file mtime cannot detect PER-TICKET
+// lag: it only proves SOME apply happened recently, not that THIS ticket's change
+// was applied — so it gave false confidence in the dangerous direction (a fresh
+// mtime with a stale row) while FALSELY tripping in the safe direction (a genuinely
+// QUIET-but-current feed reads as "stale" and re-froze the claim gate on the exact
+// `-wal`-staleness antipattern CTL-1397 removed — see isReplicaFresh's rationale
+// above). The correct instrument lives at the trust boundary instead:
+// fetchTicketAssignee live-confirms every NULL delegate and trusts only a NON-NULL
+// (actor-set) delegate, so a stale null can never self-delegate + claim, and a quiet
+// feed still serves the authoritative non-null case Linear-free.
 
 export function createReplicaReader({ dbPath = getReplicaDbPath() } = {}) {
   let db = null;
@@ -247,18 +290,17 @@ export function createReplicaReader({ dbPath = getReplicaDbPath() } = {}) {
   //   caller must NOT fall through and re-run linearis for it).
   //   undefined = "fall through to linearis" — returned when:
   //     - the query is missing team or status (can't build the filter), OR
-  //     - query.project or query.label is set (v1 scope: filtered queries stay
-  //       on linearis — the replica filter is team+state only), OR
   //     - the replica file is absent OR STALE by mtime (writer-liveness gate), OR
   //     - any throw (→ dropHandle + undefined).
   //   Fail-open everywhere: this tier can only ACCELERATE; any doubt falls
   //   through to today's linearis behavior, never makes discovery WORSE.
   const eligible = (query) => {
-    // Guard: need both filter dimensions, and v1 does NOT serve project/label
-    // filtered queries (the SQL filters team+state only — a project/label query
-    // would silently over-return, so fall through to linearis instead).
+    // Guard: need both filter dimensions.
+    // D1 (Stage 0): project/label filtered queries ARE now served from the replica
+    // (the replica carries projects + issue_labels⋈labels), closing the permanent
+    // every-tick fall-through to `linearis issues list` for project/label-scoped
+    // teams — buildEligibleSelect appends the matching WHERE clauses below.
     if (!query || !query.team || !query.status) return undefined;
-    if (query.project != null || query.label != null) return undefined;
     // Freshness GATE (writer-liveness proxy) — a stale/absent replica falls
     // through so a dead writer can never freeze discovery on a stale board.
     if (!isReplicaFresh(dbPath)) return undefined;
@@ -286,9 +328,15 @@ export function createReplicaReader({ dbPath = getReplicaDbPath() } = {}) {
         // snapshot as the board below so a re-seed can't slip between the two.
         // undefined here = gate failed → fall through to linearis.
         if (!handle.prepare(SEED_COMPLETE_SELECT).get()) return undefined;
+        // D1: bind order mirrors buildEligibleSelect's appended clauses —
+        // [likePattern, status, (project?), (label?), LIMIT].
+        const params = [`${query.team}-%`, query.status];
+        if (query.project != null) params.push(query.project);
+        if (query.label != null) params.push(query.label);
+        params.push(ELIGIBLE_LIMIT);
         const rows = handle
-          .prepare(ELIGIBLE_SELECT)
-          .all(`${query.team}-%`, query.status, ELIGIBLE_LIMIT);
+          .prepare(buildEligibleSelect({ project: query.project, label: query.label }))
+          .all(...params);
         const fwdStmt = handle.prepare(RELATIONS_FORWARD_SELECT);
         const invStmt = handle.prepare(RELATIONS_INVERSE_SELECT);
         return rows.map((row) => {
@@ -341,5 +389,44 @@ export function createReplicaReader({ dbPath = getReplicaDbPath() } = {}) {
     }
   };
 
-  return { lookup, freshness, titles, eligible, close: dropHandle };
+  // ownership(id) → { assignee, delegate } | undefined  (Stage 0 / A0, A1)
+  //   The per-ticket claim-gate reader: the ticket's current assignee + delegate
+  //   UUIDs (each null when unset), read Linear-free from the local replica.
+  //   Gated IDENTICALLY to eligible() — writer LIVENESS (isReplicaFresh, on the
+  //   `.writer.lock` heartbeat) + the seed-completeness cursor (inside the read
+  //   snapshot). ANY gate-fail, a MISS (absent/removed row), or any throw →
+  //   undefined, so the caller HOLDs / falls through to the live confirm and NEVER
+  //   claims on unknown (L1-1 fail-safe). The per-ticket null-vs-non-null trust
+  //   decision lives at the caller (fetchTicketAssignee): a null delegate is always
+  //   live-confirmed, a non-null one is trusted — so ownership() needs no currency
+  //   gate of its own (see the isReplicaCurrent removal note above).
+  //
+  //   Gate order:
+  //     1. !isReplicaFresh   → undefined            (dead/stale writer)
+  //     2. seed cursor absent → undefined            (mid-reseed)
+  //     3. no row            → undefined            (absent/removed; MISS)
+  //     4. HIT               → { assignee, delegate }
+  const ownership = (identifier) => {
+    if (!identifier) return undefined;
+    // 1. LIVENESS — a dead/stale writer must never serve ownership.
+    if (!isReplicaFresh(dbPath)) return undefined;
+    try {
+      const handle = open();
+      // 2+3+4 in ONE deferred read snapshot (same shape as eligible()): the
+      // seed-completeness cursor and the ownership row come from one consistent
+      // snapshot so a forced re-seed can't slip between the gate and the read.
+      const row = handle.transaction(() => {
+        if (!handle.prepare(SEED_COMPLETE_SELECT).get()) return undefined; // mid-reseed
+        return handle.prepare(OWNERSHIP_SELECT).get(identifier);
+      })();
+      if (!row) return undefined; // seed-gate fail / absent / removed → MISS (HOLD)
+      return { assignee: row.assignee_id ?? null, delegate: row.delegate_id ?? null };
+    } catch {
+      // Drop the handle so a later call re-opens fresh (DB may be re-seeded).
+      dropHandle();
+      return undefined;
+    }
+  };
+
+  return { lookup, freshness, titles, eligible, ownership, close: dropHandle };
 }

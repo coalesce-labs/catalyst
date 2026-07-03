@@ -1,7 +1,11 @@
 // Unit tests for the execution-core Linear eligible query (CTL-535 Phase 2).
 // Run: cd plugins/dev/scripts/execution-core && bun test linear-query.test.mjs
 
-import { describe, test, expect, mock, beforeEach } from "bun:test";
+import { describe, test, expect, mock, beforeEach, afterEach } from "bun:test";
+import { mkdtempSync, rmSync, readFileSync, readdirSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { __resetDispatchAlertThrottle } from "./dispatch-alert.mjs";
 import {
   buildLinearisArgs,
   runEligibleQuery,
@@ -1588,6 +1592,134 @@ describe("fetchTicketAssignee (CTL-781)", () => {
     const r = fetchTicketAssignee("CTL-8", { exec });
     expect(r).toEqual({ known: true, assignee: BOT });
     expect(exec.calls.length).toBe(1);
+  });
+});
+
+// ─── Stage 0 / A1: fetchTicketAssignee replica-ownership fast-path ───────────
+describe("fetchTicketAssignee — replica ownership (A1, Stage 0)", () => {
+  const BOT = "ff78d890-7906-4c22-b2f5-020bd150c790";
+  const HUMAN = "11111111-1111-1111-1111-111111111111";
+
+  test("replica HIT with a NON-NULL delegate → trusted, never consults gateway/exec/fetchDelegate", () => {
+    const replica = { ownership: mock(() => ({ assignee: HUMAN, delegate: BOT })) };
+    const gateway = {
+      getDescriptor: () => {
+        throw new Error("gateway must NOT be read on a trusted (non-null) replica HIT");
+      },
+    };
+    const exec = () => {
+      throw new Error("live exec must NOT run on a trusted replica HIT");
+    };
+    const fetchDelegate = () => {
+      throw new Error("live delegate must NOT run on a trusted replica HIT");
+    };
+    const r = fetchTicketAssignee("CTL-1", { replica, gateway, exec, fetchDelegate });
+    expect(r).toEqual({ known: true, assignee: HUMAN, delegate: BOT });
+    expect(replica.ownership).toHaveBeenCalledTimes(1);
+  });
+
+  // Regression (Stage-0 review, Lens 1): a NULL-delegate replica HIT must NOT be
+  // trusted. A per-ticket-lagged replica can read delegate=null while a just-applied
+  // human/actor delegation is still queued — trusting it would self-delegate over the
+  // real owner and claim (a stomp). So a null-delegate HIT falls through to the
+  // gateway/live chain, which live-confirms the delegate (CTL-1174 latch fix) and
+  // observes the human's real delegation.
+  test("replica HIT with a NULL delegate → NOT trusted, live-confirms via the gateway path", () => {
+    const replica = { ownership: () => ({ assignee: null, delegate: null }) };
+    // Gateway cached-null delegate → the CTL-1174 latch fix live-confirms it; the
+    // confirm returns the human's REAL delegation, so the null is never trusted.
+    const gateway = fakeGateway({ ticket: "CTL-1", assignee: HUMAN, delegate: null, removed: false, updatedAt: FRESH() });
+    const fetchDelegate = mock(() => ({ known: true, delegate: HUMAN }));
+    const r = fetchTicketAssignee("CTL-1", { replica, gateway, fetchDelegate });
+    expect(fetchDelegate).toHaveBeenCalledTimes(1); // fell through + live-confirmed the null
+    expect(r).toEqual({ known: true, assignee: HUMAN, delegate: HUMAN });
+  });
+
+  test("replica MISS (undefined) falls through to the existing gateway path UNCHANGED", () => {
+    const mkGateway = () =>
+      fakeGateway({ ticket: "CTL-1", assignee: HUMAN, delegate: BOT, removed: false, updatedAt: FRESH() });
+    const withMiss = fetchTicketAssignee("CTL-1", {
+      replica: { ownership: () => undefined },
+      gateway: mkGateway(),
+    });
+    const withoutReplica = fetchTicketAssignee("CTL-1", { gateway: mkGateway() });
+    expect(withMiss).toEqual({ known: true, assignee: HUMAN, delegate: BOT });
+    expect(withMiss).toEqual(withoutReplica); // byte-identical to today's behavior on a miss
+  });
+
+  test("replica MISS + gateway miss → today's live read chain (fetchDelegate injected)", () => {
+    const exec = fakeExec({ code: 0, stdout: JSON.stringify({ assignee: { id: BOT } }) });
+    const fetchDelegate = () => ({ known: true, delegate: null });
+    const r = fetchTicketAssignee("CTL-4", {
+      replica: { ownership: () => undefined },
+      gateway: fakeGateway(null),
+      exec,
+      fetchDelegate,
+    });
+    expect(r).toEqual({ known: true, assignee: BOT, delegate: null });
+    expect(exec.calls.length).toBe(1); // fell through to the live read
+  });
+});
+
+// ─── Stage 0 / D2: runEligibleQuery breaker-open replica-miss hardening ──────
+describe("runEligibleQuery — D2 (breaker-open replica miss)", () => {
+  let tmpDir;
+  let prevDir;
+  beforeEach(() => {
+    __resetEligibleEmptyConfirm();
+    __resetDispatchAlertThrottle();
+    prevDir = process.env.CATALYST_DIR;
+    tmpDir = mkdtempSync(join(tmpdir(), "d2-alert-"));
+    process.env.CATALYST_DIR = tmpDir; // redirect the event log the alert appends to
+  });
+  afterEach(() => {
+    if (prevDir === undefined) delete process.env.CATALYST_DIR;
+    else process.env.CATALYST_DIR = prevDir;
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  const missReplica = () => ({ eligible: () => undefined }); // a replica MISS (fall-through)
+
+  function eventLogBody() {
+    const dir = join(tmpDir, "events");
+    const files = readdirSync(dir);
+    return files.map((f) => readFileSync(join(dir, f), "utf8")).join("");
+  }
+
+  test("undefined-miss + breaker OPEN → throws (preserve-prior), NO linearis spawn, alert emitted", () => {
+    const exec = mock(() => ({ code: 0, stdout: ticketsJson([]), stderr: "" }));
+    const sources = [];
+    expect(() =>
+      runEligibleQuery(
+        { team: "CTL", status: "Todo" },
+        {
+          exec,
+          replica: missReplica(),
+          breakerIsOpen: () => true,
+          onSource: (s, n) => sources.push([s, n]),
+        },
+      ),
+    ).toThrow(/breaker open/);
+    expect(exec).not.toHaveBeenCalled(); // did NOT spawn into the open breaker
+    expect(sources).toEqual([["eligible-source-unavailable-breaker-open", 0]]);
+    const body = eventLogBody();
+    expect(body).toContain("catalyst.alert.eligible_source_unavailable");
+    expect(body).toContain("eligible_source_unavailable");
+  });
+
+  test("undefined-miss + breaker CLOSED → spawns linearis as before (no alert, no throw)", () => {
+    const exec = fakeExec({ code: 0, stdout: ticketsJson([]) });
+    const tickets = runEligibleQuery(
+      { team: "CTL", status: "Todo" },
+      {
+        exec,
+        replica: missReplica(),
+        breakerIsOpen: () => false,
+        delegateExec: () => ({ code: 0, stdout: "{}", stderr: "" }),
+      },
+    );
+    expect(tickets).toEqual([]);
+    expect(exec.calls.length).toBe(1); // fell through to the live linearis path
   });
 });
 

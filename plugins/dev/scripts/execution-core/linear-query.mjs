@@ -9,6 +9,7 @@ import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { withBreaker, linearBreaker, isRateLimitError } from "./linear-breaker.mjs";
 import { withAuthRemint, linearReminter, isBatchAuthError } from "./linear-remint.mjs";
+import { emitEligibleSourceUnavailable } from "./dispatch-alert.mjs";
 
 // linearis caps a single page; 200 comfortably covers a project's pickable
 // set without pagination (the reconcile poll runs every 10 min anyway).
@@ -650,8 +651,28 @@ export function classifyTicketResolution(
 // (back-compat for callers that do not wire the gateway, e.g. CLI tools).
 export function fetchTicketAssignee(
   identifier,
-  { exec = defaultExec, gateway, fetchDelegate = fetchTicketDelegate } = {}
+  { exec = defaultExec, gateway, fetchDelegate = fetchTicketDelegate, replica } = {}
 ) {
+  // Stage 0 / A1: consult the local replica FIRST — but with the SAME trust rule the
+  // gateway path applies below (confirm-null, trust-non-null). A HIT with a NON-NULL
+  // delegate is authoritative and served Linear-free: Issue.delegate is only ever set
+  // by an actor, so a non-null value is trustworthy regardless of replica age (the
+  // primary per-tick breaker-tripper — the live delegate confirm below — never runs).
+  // A HIT with a NULL delegate is NOT trusted: the replica proves the writer is LIVE,
+  // not that THIS ticket's delegation was applied, so a per-ticket-lagged row can read
+  // delegate=null while a just-applied human/actor delegation is still queued behind
+  // the writer's cursor — trusting that null would self-delegate over the real owner
+  // and claim (a stomp). So a null-delegate HIT (and any gate-fail / miss / unreadable)
+  // FALLS THROUGH to the gateway/live chain, which live-confirms every null delegate
+  // (the CTL-1174 latch fix) — never claim on unknown. NOTE (A1-partial): the live
+  // confirm at the gateway-null and gateway-miss paths is deliberately retained this
+  // stage; it is deleted only in Stage 2 once event-log claims exist.
+  if (replica && typeof replica.ownership === "function") {
+    const own = replica.ownership(identifier);
+    if (own && own.delegate != null) {
+      return { known: true, assignee: own.assignee ?? null, delegate: own.delegate };
+    }
+  }
   if (gateway) {
     const d = gateway.getDescriptor(identifier);
     if (d && !d.removed) {
@@ -1011,6 +1032,27 @@ export function runEligibleQuery(
     }
     // MISS (undefined) / unconfirmed replica-empty → fall through to the UNCHANGED
     // linearis path below.
+  }
+  // D2 (Stage 0): breaker-open-aware replica MISS. Gated on `replica?.eligible` so it
+  // fires ONLY when the replica tier was actually consulted and MISSED (undefined) —
+  // NOT when no replica is wired at all (that un-accelerated path stays byte-identical,
+  // its breaker gating handled by the real breaker-wrapped exec). Reaching here with
+  // `replica?.eligible` present means eligible() returned undefined (a true miss); a
+  // breaker-open replica-EMPTY was already trusted+returned above (CTL-1420), and the
+  // unconfirmed-empty reconfirm falls through only with the breaker CLOSED. So when the
+  // CTL-679 breaker is OPEN on a genuine replica miss, do NOT spawn into it: the spawn
+  // could only short-circuit (circuit-open → the throw below) AND fails SILENTLY
+  // (reconcileProject preserves the empty prior set for the whole open window = the
+  // residual freeze L0 found). Instead emit a LOUD alert and THROW so reconcileProject
+  // preserves the prior set EXACTLY as today (its catch logs + recordReconcileFailure +
+  // preserves prior — the same shape a circuit-open exec produces), without consuming
+  // the bucket.
+  if (replica?.eligible && breakerIsOpen()) {
+    onSource?.("eligible-source-unavailable-breaker-open", 0);
+    emitEligibleSourceUnavailable({ team: query.team });
+    throw new Error(
+      "eligible source unavailable: replica miss + Linear breaker open — preserving prior set (no linearis spawn)"
+    );
   }
   // CTL-1364 regression fix: the eligible-list poll MUST stay UNCAPPED. The
   // CTL-1364 default floor is for the hot per-signal terminal reads only; a

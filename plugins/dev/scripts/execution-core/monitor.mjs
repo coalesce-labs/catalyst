@@ -637,6 +637,12 @@ function dispatchTriage(
     botWriteId,
     gateway,
     fetchAssignee = fetchTicketAssignee,
+    // Stage 0 / A1: the daemon-injected replica reader (createReplicaReader, with an
+    // ownership() method), so the CTL-1174 gate consults local ownership FIRST and
+    // only falls through to the live confirm on a replica miss. Defaults to the
+    // module singleton the daemon set (mirrors reconcileProject's replica default);
+    // undefined on the Node broker / mode-off → the live path, byte-identical to today.
+    replica = _injectedEligibleReplica,
     applyAssignee = defaultApplyAssignee,
     // CTL-862: cross-host coordination seams (left undefined → single-host fallback).
     hosts = undefined,
@@ -694,7 +700,7 @@ function dispatchTriage(
   // retries next reconcile). Empty/absent botUserIds disables the gate
   // (CTL-749 fail-open convention).
   if (botUserIds instanceof Set && botUserIds.size > 0) {
-    const a = fetchAssignee(identifier, { gateway });
+    const a = fetchAssignee(identifier, { gateway, replica });
     if (!a.known) {
       // Unreadable delegate → HOLD (sweepMissingTriage retries next reconcile).
       log.info({ identifier, known: false }, "monitor: triage dispatch held — delegate unreadable (CTL-1174)");
