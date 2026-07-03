@@ -41,6 +41,11 @@ export interface BuildOpts {
   eventName: string;
   severityText?: CanonicalEvent["severityText"];
   severityNumber?: number;
+  // Top-level OTLP trace correlation. Callers that carry pino trace context
+  // (e.g. the scheduler's Tier-1 line) pass these so otlp.ts forwards them;
+  // omitted → null, unchanged for every existing caller (CTL-1424).
+  traceId?: string;
+  spanId?: string;
   attributes?: Record<string, unknown>;
   payload?: unknown;
   idExtra?: string;
@@ -54,8 +59,8 @@ export function buildCanonicalEnvelope(opts: BuildOpts): CanonicalEvent {
     id: deterministicId(ts, opts.eventName, opts.idExtra),
     severityText: opts.severityText ?? "INFO",
     severityNumber: opts.severityNumber ?? 9,
-    traceId: null,
-    spanId: null,
+    traceId: opts.traceId ?? null,
+    spanId: opts.spanId ?? null,
     // CTL-1368: built through buildCatalystResource so catalyst.node.class (the
     // node ROLE) is stamped LAST. service.name / service.version / host identity
     // are unchanged (host resolved via the bare hostName()/hostId() the helper

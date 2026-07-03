@@ -20,17 +20,23 @@ export function isFlatEvent(obj: unknown): obj is Record<string, unknown> {
   return typeof o.event === "string" && !("attributes" in o);
 }
 
-// A pino-shaped operational log: numeric `level` + string `msg`, no `event`
-// string and no `attributes` block (those belong to flat / canonical records).
+// A pino-shaped operational log: numeric `level` + string `msg`, no
+// `attributes` block (that belongs to already-canonical records). A structured
+// `event` field is ALLOWED — execution-core pino calls attach one as ordinary
+// structured data (e.g. `reaper.mjs` logs `{ level, msg, event }` on WARN/ERROR)
+// — and processLine checks isPinoRecord BEFORE isFlatEvent so those records keep
+// their severity instead of being misread as flat INFO events (CTL-1424).
 export function isPinoRecord(obj: unknown): obj is Record<string, unknown> {
   if (typeof obj !== "object" || obj === null) return false;
   const o = obj as Record<string, unknown>;
-  return (
-    typeof o.level === "number" &&
-    typeof o.msg === "string" &&
-    typeof o.event !== "string" &&
-    !("attributes" in o)
-  );
+  return typeof o.level === "number" && typeof o.msg === "string" && !("attributes" in o);
+}
+
+// isHexId — an OTLP trace/span id is a fixed-length lowercase-hex string
+// (32 for trace, 16 for span). Validate before forwarding so a malformed
+// value never reaches the collector (which would reject the whole record).
+function isHexId(v: unknown, len: number): v is string {
+  return typeof v === "string" && v.length === len && /^[0-9a-f]+$/i.test(v);
 }
 
 export function normalizePinoRecord(rec: Record<string, unknown>): CanonicalEvent {
@@ -45,13 +51,35 @@ export function normalizePinoRecord(rec: Record<string, unknown>): CanonicalEven
     payload[key] = val;
   }
 
-  const eventName = typeof rec.name === "string" ? rec.name : "execution-core";
+  // Each daemon pino logger sets its own `name` (execution-core, broker,
+  // cloud-sync, …) and the repo convention maps each to its own OTel service
+  // `catalyst.<name>`, so a broker log routes under catalyst.broker rather than
+  // being mis-stamped catalyst.execution-core and vanishing from service-scoped
+  // OTLP/Loki queries (CTL-1424).
+  const loggerName = typeof rec.name === "string" && rec.name ? rec.name : "execution-core";
+  const serviceName = loggerName.startsWith("catalyst.") ? loggerName : `catalyst.${loggerName}`;
+
+  // Preserve pino trace context: the scheduler stamps trace_id/span_id on its
+  // Tier-1 line for log↔Tempo pivoting, so lift them to the envelope's top-level
+  // traceId/spanId (the only fields otlp.ts forwards) instead of leaving the
+  // correlation stranded in body.payload (CTL-1424).
+  const traceId = isHexId(rec.trace_id, 32) ? rec.trace_id : undefined;
+  const spanId = isHexId(rec.span_id, 16) ? rec.span_id : undefined;
+
   const ev = buildCanonicalEnvelope({
     ts,
-    serviceName: "catalyst.execution-core",
-    eventName,
+    serviceName,
+    eventName: loggerName,
     severityText,
     severityNumber,
+    traceId,
+    spanId,
+    // Disambiguate bursts: pino `time` is ms-precision and `name` is constant
+    // per logger, so without an idExtra two records emitted in the same ms would
+    // collide on the deterministic id / OTLP logRecordUid and be deduped or
+    // mis-correlated downstream. pid + level + msg keeps distinct lines distinct
+    // while staying deterministic (no Math.random in the hot path) (CTL-1424).
+    idExtra: `${typeof rec.pid === "number" ? rec.pid : ""}:${severityNumber}:${rec.msg as string}`,
     payload: Object.keys(payload).length > 0 ? payload : undefined,
   });
   // Override body.message with the actual log message rather than the event name.
