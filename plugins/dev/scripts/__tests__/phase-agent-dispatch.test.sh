@@ -19,6 +19,26 @@ PASSES=0
 SCRATCH="$(mktemp -d -t phase-agent-dispatch-test-XXXXXX)"
 trap 'rm -rf "$SCRATCH"' EXIT
 
+# ─── CTL-1417: hermeticity floor ─────────────────────────────────────────────
+# Mirror the orphan-sweep.test.sh:18 gold standard + worktree-rebase.test.sh:20-27
+# pattern: a scratch HOME, neutered global/system git config, and a pinned
+# recreate worktree base. This guarantees that even a future code path computing
+# "$HOME/catalyst/wt/..." resolves inside SCRATCH, never the operator's real
+# worktree — closing the env-leak vector behind the CTL-1417 data-loss incident.
+export HOME="${SCRATCH}/home"
+mkdir -p "$HOME"
+export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null
+export GIT_AUTHOR_NAME=test GIT_AUTHOR_EMAIL=test@test
+export GIT_COMMITTER_NAME=test GIT_COMMITTER_EMAIL=test@test
+export GIT_EDITOR=true GIT_SEQUENCE_EDITOR=true
+# Pin the recreate worktree base under scratch (belt for Test 38's own override).
+export CATALYST_RECREATE_WORKTREE_DIR="${SCRATCH}/recreate-wt"
+# Canary: prove the isolation is actually in effect (fails loud if HOME leaks).
+[[ "$HOME" == "$SCRATCH"/* ]] || {
+	echo "FAIL: HOME not isolated to scratch"
+	exit 1
+}
+
 fail() {
 	FAILURES=$((FAILURES + 1))
 	echo "  FAIL: $1"
@@ -1428,7 +1448,8 @@ NEW_HEAD="$(cd "$GWORK" && git rev-parse HEAD 2>/dev/null || echo missing)"
 assert_eq "yes" "$([[ $NEW_HEAD != "$ORIG_HEAD" ]] && echo yes || echo no)" \
 	"recreate: worktree HEAD changed (recreated from origin/main)"
 unset CATALYST_DIR
-unset CATALYST_RECREATE_WORKTREE_DIR
+# Restore the scratch belt (Test 38 overrode it with its own base above).
+export CATALYST_RECREATE_WORKTREE_DIR="${SCRATCH}/recreate-wt"
 unset WT_GUARD_LSOF STUB_LSOF_RC STUB_LSOF_OUT
 
 # ─── T38c (CTL-1417): recreate is REFUSED when a foreign holder is present ─────
@@ -1483,7 +1504,9 @@ SIGNAL_C="${WORKER_DIR}/phase-research.json"
 assert_eq "stalled" "$(jq -r '.status' "$SIGNAL_C" 2>/dev/null)" "T38c: guard refusal parks status:stalled"
 assert_eq "no" "$([[ -s $CLAUDE_STUB_LOG ]] && echo yes || echo no)" "T38c: claude --bg NOT invoked (no re-dispatch)"
 assert_eq "yes" "$([[ -d $GWORKC ]] && echo yes || echo no)" "T38c: worktree still exists on disk (not force-removed)"
-unset CATALYST_DIR CATALYST_RECREATE_WORKTREE_DIR WT_GUARD_LSOF STUB_LSOF_RC STUB_LSOF_OUT
+unset CATALYST_DIR WT_GUARD_LSOF STUB_LSOF_RC STUB_LSOF_OUT
+# Restore the scratch belt (T38c overrode it with its own base above).
+export CATALYST_RECREATE_WORKTREE_DIR="${SCRATCH}/recreate-wt"
 
 # ─── Test 39 (CTL-707): fetch failure on plan → proceed un-rebased, worker spawned
 echo ""
