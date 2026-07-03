@@ -125,8 +125,24 @@ Conduct the research by **invoking the canonical skill** rather than reimplement
 it. The body of [[research-codebase]] is the single source of truth for how research
 is performed.
 
-1. Read the Linear ticket via `linearis issues read $TICKET --with-attachments` to
-   get the title, description, and any linked plan reference.
+1. Read the Linear ticket from the **replica** (per the `linearis` skill's "Reading
+   Linear" rule; NEVER a bare `linearis issues read`, which burns the shared API
+   quota). Use the shared helper:
+   ```bash
+   source "${PLUGIN_ROOT}/scripts/lib/linear-read-replica.sh"
+   TICKET_JSON=$(linear_read_ticket "$TICKET")   # freshness gate → replica SQL → loud linearis fallback
+   TITLE=$(printf '%s' "$TICKET_JSON" | jq -r '.title // empty')
+   DESC=$(printf '%s'  "$TICKET_JSON" | jq -r '.description // empty')
+   ```
+   Take the title and description from `$TICKET_JSON`. **Linked plan reference:**
+   most plan pointers are inline links in the description — scan `$DESC` first. If
+   `$DESC` contains no plan reference, the pointer may be stored as a Linear
+   link-attachment (NOT mirrored in the replica) — only then fetch it explicitly:
+   `linearis issues read "$TICKET" --with-attachments </dev/null` and read
+   `.attachments`. Do not conclude "no plan" from `$DESC` alone.
+   **Attachments are the one field the replica does not mirror**; skip the
+   `--with-attachments` fetch entirely when the description already yields what
+   research needs (the common case).
 2. Read the triage summary from `$TRIAGE_FILE` to understand classification and
    surfaced dependencies.
 3. **Pull-before-read (CTL-1236).** Fast-forward all thoughts checkouts so reads

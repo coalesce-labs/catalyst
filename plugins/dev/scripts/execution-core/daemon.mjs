@@ -639,10 +639,20 @@ export function startDaemon({
     const sdkRegistryBoot = reconcileSdkRegistryOnBoot(orchDir);
     if (sdkRegistryBoot.removed.length > 0) {
       log.info(
-        { removed: sdkRegistryBoot.removed, kept: sdkRegistryBoot.kept },
-        "boot: reaped stale sdk-worker projections (CTL-1410)"
+        {
+          removed: sdkRegistryBoot.removed,
+          kept: sdkRegistryBoot.kept,
+          harvested: sdkRegistryBoot.harvested.map((h) => h.ticket),
+        },
+        "boot: reaped stale sdk-worker projections (CTL-1410); harvested warm-resume sessions (CTL-1422)"
       );
     }
+    // CTL-1422: interrupted in-process runs (dead-pid projections that captured a
+    // session UUID) become warm-resume candidates — boot-resume CONTINUES their
+    // SDK session via options.resume instead of cold re-dispatching the phase.
+    const sdkSessionHarvest = new Map(
+      sdkRegistryBoot.harvested.map((h) => [h.ticket, h.sessionId])
+    );
     // CTL-1396 (Codex P2): under executor=sdk, inject the unified-event-log appender
     // into the dispatch path so sdkRunPhaseAgent's telemetry (execution-core.sdk.phase-turns
     // — the turn-cap calibration signal — plus .overloaded/.auth.misconfigured) lands in
@@ -673,7 +683,7 @@ export function startDaemon({
     // CTL-1365b: dispatch === dispatchFn so the crash-recovery re-dispatch honors
     // the executor flag (defaultDispatch under bg — reconcileBootResume's own
     // default — so byte-identical to today).
-    const bootResume = reconcileBoot({ orchDir, report, concurrency, dispatch: dispatchFn }); // CTL-665: config-first boot-resume ceiling
+    const bootResume = reconcileBoot({ orchDir, report, concurrency, dispatch: dispatchFn, sdkSessionHarvest }); // CTL-665: config-first ceiling; CTL-1422: warm-resume harvest
     _bootResume = bootResume;
     // CTL-644: dispatch any gated tickets that already have an approval sentinel on disk
     // (operator may have dropped the sentinel while the daemon was down).

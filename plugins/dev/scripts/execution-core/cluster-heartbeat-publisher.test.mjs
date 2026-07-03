@@ -1,10 +1,16 @@
 // cluster-heartbeat-publisher.test.mjs — periodic cross-host liveness publisher
 // (CTL-1090, Phase 4). Injects fakes for publish, ownedTickets, roster, etc.
 // so no network, fs, or subprocess is touched.
-import { describe, test, expect } from "bun:test";
+import { describe, test, expect, beforeEach } from "bun:test";
 import { startLivenessPublisher } from "./cluster-heartbeat-publisher.mjs";
+import { linearBreaker } from "./linear-breaker.mjs";
 
 describe("startLivenessPublisher (CTL-1090)", () => {
+  // CTL-1420 follow-up: the publisher now consults the shared CTL-679 breaker
+  // singleton (default). Reset it to CLOSED before each test so the existing
+  // "publishes …" assertions are deterministic regardless of test order; the
+  // new breaker-behavior tests inject an explicit fake breaker.
+  beforeEach(() => linearBreaker.recordSuccess());
   test("single-host roster: returns an inert handle, publisher fn NEVER called", () => {
     const publish = () => { throw new Error("must not publish single-host"); };
     const h = startLivenessPublisher({
@@ -247,5 +253,87 @@ describe("startLivenessPublisher (CTL-1090)", () => {
     h.stop();
     expect(warns.length).toBe(1);
     expect(warns[0].m).toContain("not configured");
+  });
+
+  // CTL-1420 follow-up: the heartbeat is a ~2min Linear WRITE on the same shared
+  // app-actor bucket as reads/writes. It must respect + feed the CTL-679 breaker.
+  describe("CTL-1420 breaker coupling", () => {
+    test("breaker OPEN → SKIP publish (no spawn, no bucket draw), warn once", () => {
+      const { logger, warns } = fakeLogger();
+      const calls = [];
+      const breaker = { isOpen: () => true, recordRateLimited: () => calls.push("rl") };
+      const h = startLivenessPublisher({
+        roster: ["mini", "laptop"],
+        anchorIssue: "CTL-9",
+        self: "mini",
+        ownedTickets: () => [],
+        publish: () => { throw new Error("must NOT publish while breaker open"); },
+        logger,
+        breaker,
+        intervalMs: 60_000,
+      });
+      h.stop();
+      expect(calls).toEqual([]); // did not even record — it just skipped
+      expect(warns.length).toBe(1);
+      expect(warns[0].m).toContain("SKIPPED publish");
+    });
+
+    test("RATE-class publish failure → feeds the breaker (recordRateLimited)", () => {
+      const { logger } = fakeLogger();
+      const events = [];
+      const breaker = { isOpen: () => false, recordRateLimited: () => events.push("rl") };
+      const h = startLivenessPublisher({
+        roster: ["mini", "laptop"],
+        anchorIssue: "CTL-9",
+        self: "mini",
+        ownedTickets: () => [],
+        // The RATELIMITED-tagged error defaultPost now surfaces on a rate-class 400.
+        publish: () => ({ ok: false, error: "exit 1: linear graphql http 400 [RATELIMITED]: complexity" }),
+        logger,
+        breaker,
+        intervalMs: 60_000,
+      });
+      h.stop();
+      expect(events).toEqual(["rl"]); // fed the breaker exactly once
+    });
+
+    test("NON-rate publish failure (genuine query/schema 400) → does NOT feed the breaker (surfaces the real bug)", () => {
+      const { logger, warns } = fakeLogger();
+      const events = [];
+      const breaker = { isOpen: () => false, recordRateLimited: () => events.push("rl") };
+      const h = startLivenessPublisher({
+        roster: ["mini", "laptop"],
+        anchorIssue: "CTL-9",
+        self: "mini",
+        ownedTickets: () => [],
+        publish: () => ({ ok: false, error: "exit 1: linear graphql http 400: Field foo is not defined by type IssueFilter" }),
+        logger,
+        breaker,
+        intervalMs: 60_000,
+      });
+      h.stop();
+      expect(events).toEqual([]); // NOT rate-class → breaker untouched
+      expect(warns[0].m).toContain("FAILED"); // logged loud so the bug surfaces
+    });
+
+    test("success → never force-closes the breaker (no recordSuccess from the heartbeat)", () => {
+      const events = [];
+      const breaker = {
+        isOpen: () => false,
+        recordRateLimited: () => events.push("rl"),
+        recordSuccess: () => events.push("ok"),
+      };
+      const h = startLivenessPublisher({
+        roster: ["mini", "laptop"],
+        anchorIssue: "CTL-9",
+        self: "mini",
+        ownedTickets: () => [],
+        publish: () => ({ ok: true }),
+        breaker,
+        intervalMs: 60_000,
+      });
+      h.stop();
+      expect(events).toEqual([]); // a light heartbeat success must not close the breaker
+    });
   });
 });

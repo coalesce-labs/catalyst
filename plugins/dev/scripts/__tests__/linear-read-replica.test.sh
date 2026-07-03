@@ -54,6 +54,10 @@ fresh_lock() { : >"$DB.writer.lock"; } # heartbeat = now
 fresh_lock
 
 export CATALYST_REPLICA_DB="$DB"
+# Isolate any fallback events (MISS/stale) to a scratch dir so the test's synthetic
+# TST-* reads never append to the LIVE ~/catalyst/events log otel-forward ships —
+# which would contaminate the very catalyst.replica.read_fallback burn-down metric.
+export CATALYST_EVENTS_DIR="$TMP/events"
 # shellcheck source=/dev/null
 source "$HELPER"
 
