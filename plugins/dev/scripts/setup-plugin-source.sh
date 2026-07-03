@@ -84,6 +84,50 @@ require_cmd() {
 require_cmd git
 require_cmd jq
 
+# install_interactive_claude_wrapper — the interactive counterpart of the worker
+# --plugin-dir wiring. Phase workers get plugin-source via phase-agent-dispatch's
+# --plugin-dir flags (resolved from the pluginDirs machine-config key); a plain
+# interactive `claude` session has NO such mechanism (Claude Code exposes no env/
+# settings key for live local-plugin loading — only the --plugin-dir CLI flag), so
+# it would silently fall back to the version-keyed marketplace cache (which lags
+# releases — the exact staleness this whole setup avoids). This appends a guarded,
+# idempotent zsh `claude` function to ~/.zshrc that injects --plugin-dir for every
+# plugin in the checkout. It goes in ~/.zshrc (interactive shells only) — NOT
+# ~/.zshenv — so it never leaks into non-interactive/daemon `claude --bg` spawns
+# (which already get --plugin-dir from the dispatcher) and double-inject.
+install_interactive_claude_wrapper() {
+	local checkout="$1" rc="${ZDOTDIR:-$HOME}/.zshrc"
+	local start="# >>> catalyst plugin-source (managed) >>>"
+	local end="# <<< catalyst plugin-source (managed) <<<"
+	# Idempotent: strip any prior managed block, then append the current one.
+	if [[ -f "$rc" ]] && grep -qF "$start" "$rc"; then
+		local tmp; tmp="$(mktemp "$(dirname "$rc")/.zshrc.XXXXXX")"
+		awk -v s="$start" -v e="$end" '$0==s{skip=1} !skip{print} $0==e{skip=0}' "$rc" >"$tmp" && mv "$tmp" "$rc"
+	fi
+	cat >>"$rc" <<WRAP
+${start}
+# Interactive \`claude\` loads catalyst plugins LIVE from the plugin-source checkout
+# (never the lagging marketplace cache). Phase workers get this via
+# phase-agent-dispatch's --plugin-dir; this is the interactive equivalent.
+claude() {
+  case "\${1:-}" in
+    plugin|mcp|config|update|doctor|install|migrate-installer|--help|-h|--version|-v)
+      command claude "\$@"; return ;;
+  esac
+  local base="${checkout}/plugins" d
+  local args=()
+  if [ -d "\$base" ]; then
+    for d in "\$base"/*/; do
+      [ -f "\${d}.claude-plugin/plugin.json" ] && args+=(--plugin-dir "\${d%/}")
+    done
+  fi
+  command claude "\${args[@]}" "\$@"
+}
+${end}
+WRAP
+	echo "Installed the interactive \`claude\` plugin-source wrapper in ${rc}."
+}
+
 CHECKOUT_PATH="${CHECKOUT_PATH:-$DEFAULT_PATH}"
 
 # Derive the repo URL from this repo's origin (https) when not supplied.
@@ -140,6 +184,11 @@ fi
 
 HEAD_SHA="$(git -C "$CHECKOUT_PATH" rev-parse HEAD)"
 TARGET_DIR="${CHECKOUT_PATH}/plugins/dev"
+
+# Interactive sessions: install the ~/.zshrc --plugin-dir wrapper (idempotent) so
+# plain `claude` also live-loads plugin-source, not the lagging cache. Runs on
+# every invocation, including the pluginDirs-already-registered fast path below.
+install_interactive_claude_wrapper "$CHECKOUT_PATH"
 
 # ─── 2. Register pluginDirs in the machine config ───────────────────────────
 MACHINE_CFG="$(plugin_dirs_machine_config_path)"
