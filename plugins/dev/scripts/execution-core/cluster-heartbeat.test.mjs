@@ -133,6 +133,34 @@ describe("publishHeartbeat", () => {
     );
     expect(rec.in_flight_tickets).toEqual([]);
   });
+
+  // CTL-863 fleet-unfreeze (entourage follow-up to #2552): a pre-resolved issueId
+  // override skips the ResolveIssueId round-trip entirely.
+  test("an issueId override SKIPS resolveIssueId — only attachmentCreate is called", async () => {
+    const calls = [];
+    const post = async (q, v) => {
+      calls.push(q);
+      return { attachmentCreate: { success: true, attachment: {} } };
+    };
+    const rec = await publishHeartbeat(
+      { anchorIssue: "CTL-9999", host: "mini" },
+      { post, now: () => "2026-06-13T01:00:00Z", issueId: "uuid-anchor" },
+    );
+    expect(rec.host).toBe("mini");
+    expect(calls.length).toBe(1); // ONLY attachmentCreate — no ResolveIssueId call
+    expect(calls[0]).toContain("attachmentCreate");
+  });
+
+  test("no issueId override → falls through to resolveIssueId unchanged", async () => {
+    const calls = [];
+    const post = async (q) => {
+      calls.push(q);
+      if (q.includes("ResolveIssue")) return { issue: { id: "uuid-x" } };
+      return { attachmentCreate: { success: true, attachment: {} } };
+    };
+    await publishHeartbeat({ anchorIssue: "CTL-9999", host: "mini" }, { post, issueId: null });
+    expect(calls.some((q) => q.includes("ResolveIssue"))).toBe(true);
+  });
 });
 
 describe("readPeerHeartbeats", () => {
@@ -263,6 +291,41 @@ describe("runCli", () => {
   test("unknown subcommand exits 1", async () => {
     const { code } = await captureStdout(() => runCli(["bogus"], {}));
     expect(code).toBe(1);
+  });
+
+  // CTL-863 fleet-unfreeze (entourage follow-up to #2552).
+  test("resolve-anchor: prints {issueId} and exits 0", async () => {
+    const post = async (q) => {
+      if (q.includes("ResolveIssue")) return { issue: { id: "uuid-anchor" } };
+      throw new Error("unexpected query");
+    };
+    const { code, out } = await captureStdout(() => runCli(["resolve-anchor", "CTL-9999"], { post }));
+    expect(code).toBe(0);
+    expect(JSON.parse(out)).toEqual({ issueId: "uuid-anchor" });
+  });
+
+  test("resolve-anchor: {issueId:null} when the anchor cannot be resolved", async () => {
+    const post = async () => ({ issue: null });
+    const { code, out } = await captureStdout(() => runCli(["resolve-anchor", "CTL-9999"], { post }));
+    expect(code).toBe(0);
+    expect(JSON.parse(out)).toEqual({ issueId: null });
+  });
+
+  test("publish: an optional 5th issueId arg skips ResolveIssueId (only attachmentCreate)", async () => {
+    const calls = [];
+    const post = async (q) => {
+      calls.push(q);
+      return { attachmentCreate: { success: true, attachment: {} } };
+    };
+    const { code, out } = await captureStdout(() =>
+      runCli(["publish", "CTL-9999", "mini", "CTL-1", "", "uuid-anchor"], {
+        post,
+        now: () => "2026-06-13T01:00:00Z",
+      }),
+    );
+    expect(code).toBe(0);
+    expect(JSON.parse(out).host).toBe("mini");
+    expect(calls.some((q) => q.includes("ResolveIssue"))).toBe(false);
   });
 });
 

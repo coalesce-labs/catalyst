@@ -158,11 +158,21 @@ const WRITE_ATTACHMENT_MUTATION = `mutation UpsertFence($input: AttachmentCreate
 // on the anchor issue. Single-writer-per-host ⇒ no CAS. Mirrors writeClaim
 // (resolve issue UUID, then attachmentCreate UPSERT). Returns the parsed
 // heartbeat record written, throwing on a resolution miss or success:false.
+//
+// CTL-863 fleet-unfreeze (entourage, follow-up to #2552): `issueId` is an
+// OPTIONAL pre-resolved UUID override. The anchor issue's UUID never changes
+// once resolved, so cluster-heartbeat-sync.mjs's resolveAnchorIssueIdSyncCached
+// resolves it ONCE (permanently cached, in-process) and passes it here on every
+// subsequent publish — skipping the redundant `query ResolveIssueId` round-trip
+// every ~2min publish tick would otherwise repeat forever. A falsy override
+// (the cache-miss / cache-disabled case) falls through to the original
+// resolveIssueId(anchorIssue) call, so behavior is UNCHANGED when no override
+// is supplied — this is purely additive.
 export async function publishHeartbeat(
   { anchorIssue, host, inFlightTickets = [], maxParallel = null },
-  { post = defaultPost, now } = {},
+  { post = defaultPost, now, issueId: issueIdOverride = null } = {},
 ) {
-  const issueId = await resolveIssueId(anchorIssue, { post });
+  const issueId = issueIdOverride || (await resolveIssueId(anchorIssue, { post }));
   if (!issueId) throw new Error(`cluster-heartbeat: no issue found for anchor ${anchorIssue}`);
   const last_seen = now ? now() : new Date().toISOString();
   const metadata = {
@@ -192,13 +202,20 @@ export async function publishHeartbeat(
 // cluster-heartbeat-sync.mjs is the in-process wrapper that spawnSync's
 // `node cluster-heartbeat.mjs <cmd> …`.
 //
-//   publish <anchor> <host> <ticketsCSV> [maxParallel]  → stdout JSON record; exit 0
-//   read <anchor>                                        → stdout JSON map; exit 0
+//   publish <anchor> <host> <ticketsCSV> [maxParallel] [issueId]  → stdout JSON record; exit 0
+//   read <anchor>                                                  → stdout JSON map; exit 0
+//   resolve-anchor <anchor>                                        → stdout JSON {issueId}; exit 0
+//
+// CTL-863 fleet-unfreeze (entourage): `resolve-anchor` is a standalone identifier→UUID
+// resolution, added so cluster-heartbeat-sync.mjs's permanent cache can populate itself
+// with ONE small subprocess call (instead of the resolution being buried inside every
+// `publish`), then pass the resolved UUID back into `publish`'s optional 5th arg on every
+// subsequent call — skipping that call's own ResolveIssueId round-trip.
 export async function runCli(argv, { post = defaultPost, now } = {}) {
   const [cmd, ...rest] = argv;
   switch (cmd) {
     case "publish": {
-      const [anchor, host, ticketsCsv, maxParallelRaw] = rest;
+      const [anchor, host, ticketsCsv, maxParallelRaw, issueIdRaw] = rest;
       const inFlightTickets =
         ticketsCsv
           ? ticketsCsv
@@ -211,9 +228,13 @@ export async function runCli(argv, { post = defaultPost, now } = {}) {
       // pass only 3 args, so the heartbeat still carries max_parallel: null).
       const mp = maxParallelRaw != null && maxParallelRaw !== "" ? Number(maxParallelRaw) : null;
       const maxParallel = Number.isInteger(mp) && mp > 0 ? mp : null;
+      // CTL-863 follow-up: optional 5th arg — a pre-resolved anchor UUID from the
+      // daemon-side permanent cache. Absent/blank → null (publishHeartbeat falls back
+      // to resolving it itself, byte-identical to pre-follow-up behavior).
+      const issueId = issueIdRaw != null && issueIdRaw !== "" ? issueIdRaw : null;
       const rec = await publishHeartbeat(
         { anchorIssue: anchor, host, inFlightTickets, maxParallel },
-        { post, now },
+        { post, now, issueId },
       );
       process.stdout.write(JSON.stringify(rec) + "\n");
       return 0;
@@ -224,10 +245,16 @@ export async function runCli(argv, { post = defaultPost, now } = {}) {
       process.stdout.write(JSON.stringify(map) + "\n");
       return 0;
     }
+    case "resolve-anchor": {
+      const [anchor] = rest;
+      const issueId = await resolveIssueId(anchor, { post });
+      process.stdout.write(JSON.stringify({ issueId }) + "\n");
+      return 0;
+    }
     default:
       process.stderr.write(
         `cluster-heartbeat.mjs: unknown subcommand: ${cmd ?? "(none)"}\n` +
-          "usage: cluster-heartbeat.mjs <publish <anchor> <host> <ticketsCSV> [maxParallel] | read <anchor>>\n",
+          "usage: cluster-heartbeat.mjs <publish <anchor> <host> <ticketsCSV> [maxParallel] [issueId] | read <anchor> | resolve-anchor <anchor>>\n",
       );
       return 1;
   }

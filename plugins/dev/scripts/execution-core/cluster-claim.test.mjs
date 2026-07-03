@@ -235,6 +235,28 @@ describe("writeClaim — upsert the attachment", () => {
     }
     expect(err?.message).toMatch(/no issue found/);
   });
+
+  // CTL-863 fleet-unfreeze (entourage follow-up to #2552): a pre-resolved issueId
+  // override skips the ResolveIssueId round-trip entirely.
+  it("an issueId override SKIPS resolveIssueId — only UpsertFence is called", async () => {
+    const { post, store, calls } = makeFakeLinear();
+    const written = await writeClaim(
+      "CTL-842",
+      { owner_host: "mini", generation: 1, phase: "triage" },
+      { post, issueId: "uuid-CTL-842" },
+    );
+    expect(written.owner_host).toBe("mini");
+    expect(calls.length).toBe(1); // ONLY the UpsertFence write — no ResolveIssueId call
+    expect(calls[0].query).toContain("UpsertFence");
+    expect(store.get("CTL-842").owner_host).toBe("mini");
+  });
+
+  it("no issueId override → falls through to resolveIssueId unchanged", async () => {
+    const { post, calls } = makeFakeLinear();
+    await writeClaim("CTL-842", { owner_host: "mini", generation: 1, phase: "triage" }, { post, issueId: null });
+    expect(calls[0].query).toContain("ResolveIssueId");
+    expect(calls[1].query).toContain("UpsertFence");
+  });
 });
 
 describe("claimTicket — soft-CAS via read-back", () => {
@@ -514,6 +536,35 @@ describe("runCli — the spawnSync CLI surface (CTL-850)", () => {
     const { post } = makeFakeLinear();
     const { code } = await captureStdout(() => runCli(["bogus"], { post }));
     expect(code).toBe(1);
+  });
+
+  // CTL-863 fleet-unfreeze (entourage follow-up to #2552).
+  it("resolve-issue-id: prints {issueId} and exits 0", async () => {
+    const { post } = makeFakeLinear();
+    const { code, out } = await captureStdout(() =>
+      runCli(["resolve-issue-id", "CTL-842"], { post }),
+    );
+    expect(code).toBe(0);
+    expect(JSON.parse(out)).toEqual({ issueId: "uuid-CTL-842" });
+  });
+
+  it("resolve-issue-id: {issueId:null} on a missing ticket", async () => {
+    const { post } = makeFakeLinear({ missingIssues: new Set(["CTL-999"]) });
+    const { code, out } = await captureStdout(() =>
+      runCli(["resolve-issue-id", "CTL-999"], { post }),
+    );
+    expect(code).toBe(0);
+    expect(JSON.parse(out)).toEqual({ issueId: null });
+  });
+
+  it("claim: an optional 4th issueId arg skips ResolveIssueId (only ReadFence/UpsertFence calls)", async () => {
+    const { post, calls } = makeFakeLinear();
+    const { code, out } = await captureStdout(() =>
+      runCli(["claim", "CTL-842", "mini", "triage", "uuid-CTL-842"], { post }),
+    );
+    expect(code).toBe(0);
+    expect(JSON.parse(out)).toEqual({ won: true, generation: 1 });
+    expect(calls.some((c) => c.query.includes("ResolveIssueId"))).toBe(false);
   });
 
   it("claim: preempts a stale cross-host claim via the default threshold (CTL-1297)", async () => {

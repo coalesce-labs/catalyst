@@ -175,8 +175,19 @@ const WRITE_ATTACHMENT_MUTATION = `mutation UpsertFence($input: AttachmentCreate
 // metadata is written with the VERIFIED key names: owner_host,
 // catalyst_generation, phase, claimed_at. catalyst_generation is a Number on the
 // wire; Linear's metadata JSON round-trips it.
-export async function writeClaim(ticket, { owner_host, generation, phase }, { post = defaultPost } = {}) {
-  const issueId = await resolveIssueId(ticket, { post });
+//
+// CTL-863 fleet-unfreeze (entourage, follow-up to #2552): `issueId` is an OPTIONAL
+// pre-resolved UUID override. A ticket's issue UUID never changes once assigned, so
+// cluster-claim-sync.mjs's permanent resolveIssueIdSyncCached resolves it ONCE and
+// passes it here on every subsequent claim — skipping this call's own `query
+// ResolveIssueId` round-trip. A falsy override (cache miss/disabled) falls through to
+// the original resolveIssueId(ticket) call, so behavior is unchanged when omitted.
+export async function writeClaim(
+  ticket,
+  { owner_host, generation, phase },
+  { post = defaultPost, issueId: issueIdOverride = null } = {},
+) {
+  const issueId = issueIdOverride || (await resolveIssueId(ticket, { post }));
   if (!issueId) {
     throw new Error(`cluster-claim: no issue found for identifier ${ticket}`);
   }
@@ -216,11 +227,16 @@ export async function writeClaim(ticket, { owner_host, generation, phase }, { po
 // and PR-order-independent; the caller threads in catalyst.host.name).
 // Returns { won, generation } where generation is the gen we attempted to claim.
 // staleMs and now are injectable seams for unit testing (no Date.now() in tests).
+// CTL-863 fleet-unfreeze (entourage): `issueId` is an OPTIONAL pre-resolved UUID
+// override, threaded straight through to both writeClaim call sites below (see
+// writeClaim's own doc comment) — NOT applied to the readClaim CAS reads above/below,
+// which must stay live: they are the actual fencing correctness check, not an
+// immutable identifier→UUID mapping, so caching them would risk a false win/lose.
 export async function claimTicket(
   ticket,
   hostName,
   phase,
-  { post = defaultPost, staleMs = CLAIM_STALE_MS_DEFAULT, now = () => Date.now() } = {},
+  { post = defaultPost, staleMs = CLAIM_STALE_MS_DEFAULT, now = () => Date.now(), issueId = null } = {},
 ) {
   const current = await readClaim(ticket, { post });
   const nextGen = (current?.generation ?? 0) + 1;
@@ -234,14 +250,14 @@ export async function claimTicket(
   if (current && current.owner_host && current.owner_host !== hostName) {
     const claimedAtMs = current.claimed_at ? Date.parse(current.claimed_at) : NaN;
     if (Number.isFinite(claimedAtMs) && now() - claimedAtMs > staleMs) {
-      await writeClaim(ticket, { owner_host: hostName, generation: nextGen, phase }, { post });
+      await writeClaim(ticket, { owner_host: hostName, generation: nextGen, phase }, { post, issueId });
       return { won: true, generation: nextGen };
     }
   }
 
   // Normal soft-CAS (unchanged): write then read-back; a concurrent host that
   // wrote last wins the read-back and we back off.
-  await writeClaim(ticket, { owner_host: hostName, generation: nextGen, phase }, { post });
+  await writeClaim(ticket, { owner_host: hostName, generation: nextGen, phase }, { post, issueId });
   const readback = await readClaim(ticket, { post });
   const won = readback?.owner_host === hostName && readback?.generation === nextGen;
   return { won, generation: nextGen };
@@ -270,21 +286,30 @@ export async function isFenceCurrent(ticket, generation, { post = defaultPost } 
 // runCli is exported (with an injectable `post`) so the CLI surface is unit
 // tested without the network; the main-guard below calls it with the real post.
 //
-//   claim <ticket> <host> <phase>  → stdout JSON {won, generation}; exit 0 iff
+//   claim <ticket> <host> <phase> [issueId]  → stdout JSON {won, generation}; exit 0 iff
 //                                    the soft-CAS ran (read `won` from stdout —
 //                                    a non-zero exit means the operation threw,
-//                                    which the wrapper treats as won:false).
+//                                    which the wrapper treats as won:false). The
+//                                    optional 4th arg is a pre-resolved ticket UUID
+//                                    (CTL-863 follow-up — see claimTicket/writeClaim).
 //   fence-check <ticket> <gen>     → stdout JSON {current}; exit 0 when current,
 //                                    FENCE_STALE_EXIT (10) when stale — mirrors
 //                                    claim.mjs's host-local fence-check contract.
+//   resolve-issue-id <ticket>      → stdout JSON {issueId}; exit 0. Standalone
+//                                    identifier→UUID resolution (CTL-863 follow-up)
+//                                    so cluster-claim-sync.mjs's permanent cache can
+//                                    populate itself with one small subprocess call
+//                                    instead of the resolution being buried inside
+//                                    every `claim`.
 const FENCE_STALE_EXIT = 10;
 
 export async function runCli(argv, { post = defaultPost } = {}) {
   const [cmd, ...rest] = argv;
   switch (cmd) {
     case "claim": {
-      const [ticket, hostName, phase] = rest;
-      const res = await claimTicket(ticket, hostName, phase, { post });
+      const [ticket, hostName, phase, issueIdRaw] = rest;
+      const issueId = issueIdRaw != null && issueIdRaw !== "" ? issueIdRaw : null;
+      const res = await claimTicket(ticket, hostName, phase, { post, issueId });
       process.stdout.write(JSON.stringify(res) + "\n");
       return 0;
     }
@@ -294,10 +319,16 @@ export async function runCli(argv, { post = defaultPost } = {}) {
       process.stdout.write(JSON.stringify({ current }) + "\n");
       return current ? 0 : FENCE_STALE_EXIT;
     }
+    case "resolve-issue-id": {
+      const [ticket] = rest;
+      const issueId = await resolveIssueId(ticket, { post });
+      process.stdout.write(JSON.stringify({ issueId }) + "\n");
+      return 0;
+    }
     default:
       process.stderr.write(
         `cluster-claim.mjs: unknown subcommand: ${cmd ?? "(none)"}\n` +
-          "usage: cluster-claim.mjs <claim <ticket> <host> <phase> | fence-check <ticket> <gen>>\n",
+          "usage: cluster-claim.mjs <claim <ticket> <host> <phase> [issueId] | fence-check <ticket> <gen> | resolve-issue-id <ticket>>\n",
       );
       return 1;
   }
