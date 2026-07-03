@@ -113,6 +113,20 @@ export function buildLinearisArgs(query) {
 // missing binary produces, which callers already treat as unknown/null.
 function rawExec(cmd, args, { timeoutMs, uncapped } = {}) {
   const opts = { encoding: "utf8" };
+  // CTL-1420 follow-up (shared-bucket burn): route linearis READS to the daemon's
+  // per-host read key when the launcher captured one (CATALYST_LINEAR_READ_KEY —
+  // the host's own lin_api key, preserved before CTL-785 overwrote LINEAR_API_TOKEN
+  // with the shared app-actor token). Overriding the child's LINEAR_API_TOKEN keeps
+  // reads on each host's own 2500/hr bucket, off the shared 5000/hr app-actor bucket
+  // that WRITES draw. Unset (non-fleet host / mint failed) → no override → the child
+  // inherits process.env exactly as before (byte-identical). The re-minter
+  // (linear-remint.mjs) only ever rewrites LINEAR_API_TOKEN/LINEAR_API_KEY on
+  // process.env, never this var, so a write-side remint can't leak the app-actor
+  // token into a read child — each read re-applies the read key here.
+  const _readKey = process.env.CATALYST_LINEAR_READ_KEY;
+  if (_readKey) {
+    opts.env = { ...process.env, LINEAR_API_TOKEN: _readKey, LINEAR_API_KEY: _readKey };
+  }
   // CTL-1364 regression fix: an explicit `{ uncapped: true }` sentinel opts the
   // call OUT of the default floor entirely — NO Node timeout is applied. This
   // preserves CTL-1339's deliberate scoping: the eligible-list poll
@@ -175,6 +189,22 @@ function rawExec(cmd, args, { timeoutMs, uncapped } = {}) {
 // the `timeout` option is actually wired (all stub tests bypass rawExec). Not for
 // production use — callers go through defaultExec/withBreaker.
 export const __rawExecForTest = rawExec;
+
+// readAuthToken — CTL-1420 follow-up (shared-bucket burn): the auth token for the
+// direct-curl GraphQL READS (runBatchOnce / runDelegateOnce / runDelegateBatchOnce,
+// which build their own curl args rather than shelling linearis). Prefers the
+// launcher-captured per-host read key (CATALYST_LINEAR_READ_KEY) so those reads draw
+// the host's own 2500/hr bucket; falls back to LINEAR_API_TOKEN (the shared app-actor
+// token, or the per-host key on a non-fleet host) when it is unset. Uses `||` (not
+// `??`) so a defined-but-empty var can never yield an empty Authorization header.
+export function readAuthToken() {
+  return (
+    process.env.CATALYST_LINEAR_READ_KEY ||
+    process.env.LINEAR_API_TOKEN ||
+    process.env.LINEAR_API_KEY ||
+    ""
+  );
+}
 
 // defaultExec — rawExec behind the CTL-679 process-wide rate-limit breaker. The
 // eligible poll and per-ticket reads short-circuit without spawning linearis
@@ -454,7 +484,7 @@ export function buildBatchCurlArgs(ids, { token = "", ca } = {}) {
 // Returns { nodes, auth, ratelimit, curlFailed }. Never throws. Internal to
 // defaultBatchExec; extracted so the auth-retry path can call it a second time.
 function runBatchOnce(ids) {
-  const token = process.env.LINEAR_API_TOKEN ?? process.env.LINEAR_API_KEY ?? "";
+  const token = readAuthToken(); // CTL-1420: per-host read key when set, else app-actor
   const { args, payload } = buildBatchCurlArgs(ids, { token, ca: process.env.NODE_EXTRA_CA_CERTS });
   const res = spawnSync("curl", args, { input: payload, encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
   if (res.status !== 0) {
@@ -757,7 +787,7 @@ export function buildDelegateCurlArgs(identifier, { token = "", ca } = {}) {
 }
 
 function runDelegateOnce(identifier) {
-  const token = process.env.LINEAR_API_TOKEN ?? process.env.LINEAR_API_KEY ?? "";
+  const token = readAuthToken(); // CTL-1420: per-host read key when set, else app-actor
   const { args, payload } = buildDelegateCurlArgs(identifier, { token, ca: process.env.NODE_EXTRA_CA_CERTS });
   const res = spawnSync("curl", args, { input: payload, encoding: "utf8" });
   if (res.status !== 0) return { nodes: null };
@@ -822,7 +852,7 @@ export function buildDelegateBatchCurlArgs(team, identifiers, { token = "", ca }
 }
 
 function runDelegateBatchOnce(team, identifiers) {
-  const token = process.env.LINEAR_API_TOKEN ?? process.env.LINEAR_API_KEY ?? "";
+  const token = readAuthToken(); // CTL-1420: per-host read key when set, else app-actor
   const { args, payload } = buildDelegateBatchCurlArgs(team, identifiers, {
     token,
     ca: process.env.NODE_EXTRA_CA_CERTS,

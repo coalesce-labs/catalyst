@@ -2,6 +2,7 @@
 // Run: cd plugins/dev/scripts/execution-core && bun test linear-query.test.mjs
 
 import { describe, test, expect, mock, beforeEach } from "bun:test";
+import { spawnSync } from "node:child_process";
 import {
   buildLinearisArgs,
   runEligibleQuery,
@@ -25,6 +26,7 @@ import {
   fetchTicketsDelegateBatch,
   parseTerminalTimeoutMs,
   __rawExecForTest,
+  readAuthToken,
 } from "./linear-query.mjs";
 import { createTicketStateCache } from "./linear-cache.mjs";
 import { isLinearTerminal } from "./terminal-state.mjs"; // CTL-1340: replica-tier terminal assertions
@@ -2190,5 +2192,105 @@ describe("fetchTicketState — onExec span seam (CTL-1364)", () => {
     expect(() => fetchTicketState("CTL-9", { exec, onExec })).not.toThrow();
     // the read still resolves despite the throwing seam
     expect(fetchTicketState("CTL-9", { exec, onExec })).toBe("Done");
+  });
+});
+
+// ─── read/write Linear key split (CTL-1420 follow-up) ────────────────────────
+// The daemon's READS draw the per-host read key (CATALYST_LINEAR_READ_KEY,
+// captured by the launcher before CTL-785 overwrites LINEAR_API_TOKEN with the
+// shared app-actor token); WRITES stay on the app-actor. readAuthToken() selects
+// the token for the direct-curl GraphQL reads; rawExec injects it into linearis
+// read subprocesses. Both fall back to LINEAR_API_TOKEN when the read key is
+// unset → byte-identical to the pre-split behavior.
+
+// Snapshot + restore the three auth env vars around a test body (undefined → the
+// var is deleted, so `unset` is faithfully reproduced).
+function withEnv(vars, fn) {
+  const keys = ["CATALYST_LINEAR_READ_KEY", "LINEAR_API_TOKEN", "LINEAR_API_KEY"];
+  const saved = {};
+  for (const k of keys) saved[k] = process.env[k];
+  try {
+    for (const k of keys) {
+      if (vars[k] === undefined) delete process.env[k];
+      else process.env[k] = vars[k];
+    }
+    return fn();
+  } finally {
+    for (const k of keys) {
+      if (saved[k] === undefined) delete process.env[k];
+      else process.env[k] = saved[k];
+    }
+  }
+}
+
+describe("readAuthToken — read/write key split (CTL-1420 follow-up)", () => {
+  test("read key SET → returned, winning over LINEAR_API_TOKEN (reads off the write bucket)", () => {
+    withEnv(
+      { CATALYST_LINEAR_READ_KEY: "rk", LINEAR_API_TOKEN: "app-actor", LINEAR_API_KEY: "app-actor" },
+      () => expect(readAuthToken()).toBe("rk"),
+    );
+  });
+
+  test("read key UNSET → falls back to LINEAR_API_TOKEN (byte-identical to today)", () => {
+    withEnv(
+      { CATALYST_LINEAR_READ_KEY: undefined, LINEAR_API_TOKEN: "app-actor", LINEAR_API_KEY: "x" },
+      () => expect(readAuthToken()).toBe("app-actor"),
+    );
+  });
+
+  test("read key defined-but-EMPTY → still falls back (|| not ??; never an empty Authorization)", () => {
+    withEnv(
+      { CATALYST_LINEAR_READ_KEY: "", LINEAR_API_TOKEN: "app-actor", LINEAR_API_KEY: "x" },
+      () => expect(readAuthToken()).toBe("app-actor"),
+    );
+  });
+
+  test("read key + LINEAR_API_TOKEN unset → falls back to LINEAR_API_KEY", () => {
+    withEnv(
+      { CATALYST_LINEAR_READ_KEY: undefined, LINEAR_API_TOKEN: undefined, LINEAR_API_KEY: "legacy" },
+      () => expect(readAuthToken()).toBe("legacy"),
+    );
+  });
+
+  test("all unset → empty string (never undefined)", () => {
+    withEnv(
+      { CATALYST_LINEAR_READ_KEY: undefined, LINEAR_API_TOKEN: undefined, LINEAR_API_KEY: undefined },
+      () => expect(readAuthToken()).toBe(""),
+    );
+  });
+});
+
+describe("rawExec — routes linearis reads to CATALYST_LINEAR_READ_KEY (CTL-1420 follow-up)", () => {
+  // The `sh` child prints the LINEAR_API_TOKEN it actually receives, proving the
+  // child-env override (or its absence). printf %s → no trailing newline.
+  const echoToken = ["-c", 'printf %s "${LINEAR_API_TOKEN:-}"'];
+
+  test("read key SET → the linearis child's LINEAR_API_TOKEN is the read key, NOT the app-actor", () => {
+    withEnv(
+      {
+        CATALYST_LINEAR_READ_KEY: "per-host-read-key",
+        LINEAR_API_TOKEN: "app-actor-write",
+        LINEAR_API_KEY: "app-actor-write",
+      },
+      () => {
+        const res = __rawExecForTest("sh", echoToken, { uncapped: true });
+        expect(res.code).toBe(0);
+        expect(res.stdout).toBe("per-host-read-key");
+      },
+    );
+  });
+
+  test("read key UNSET → rawExec adds NO env override: identical to a plain omitted-env spawn (byte-identical to today)", () => {
+    // NOTE: Bun's spawnSync with `env` omitted uses the process's STARTUP env
+    // snapshot, not runtime process.env mutations — so this proves the invariant
+    // by comparison rather than by mutating LINEAR_API_TOKEN: a plain omitted-env
+    // spawnSync is exactly what pre-change rawExec did, and rawExec (read key
+    // unset) must match it byte-for-byte (no injected LINEAR_API_TOKEN override).
+    withEnv({ CATALYST_LINEAR_READ_KEY: undefined }, () => {
+      const reference = spawnSync("sh", echoToken, { encoding: "utf8" }).stdout;
+      const res = __rawExecForTest("sh", echoToken, { uncapped: true });
+      expect(res.code).toBe(0);
+      expect(res.stdout).toBe(reference);
+    });
   });
 });
