@@ -46,7 +46,13 @@ import {
 // transcripts so a doc worker mid in-process fan-out is never judged silent
 // (CTL-662-safe). Used ONLY to break the cold-snapshot doc-phase 6h tie below.
 import { transcriptAgeMs as defaultTranscriptAgeMs } from "./transcript-silence.mjs";
-import { readPeerHeartbeatsSync } from "./cluster-heartbeat-sync.mjs";
+// CTL-863 fleet-unfreeze (entourage follow-up to #2552): readPeerHeartbeatsSyncCached is
+// the CACHED reader — a 45s in-process TTL cache around the same anchor-issue read, safe
+// here because dead-host detection already tolerates a far larger (10-min) staleness
+// grace. The uncached readPeerHeartbeatsSync stays available in cluster-heartbeat-sync.mjs
+// for callers that want the live read every time (e.g. cli/cluster.mjs's human-invoked
+// `status` verb).
+import { readPeerHeartbeatsSyncCached } from "./cluster-heartbeat-sync.mjs";
 import { HEARTBEAT_EVENT } from "./heartbeat-event.mjs"; // CTL-859: node.heartbeat reader
 import { resolveTicketType, UNKNOWN_TICKET_TYPE } from "./ticket-type.mjs"; // CTL-1023: work-type dimension
 import { phaseIndex, isKnownPhase } from "../lib/phase-fsm.mjs";
@@ -3039,7 +3045,7 @@ export function readClusterHeartbeats({
   logPath = getEventLogPath(),
   roster = getClusterHosts(),
   anchorIssue = getLivenessAnchorIssue(),
-  readPeers = (anchor) => readPeerHeartbeatsSync({ anchorIssue: anchor }),
+  readPeers = (anchor) => readPeerHeartbeatsSyncCached({ anchorIssue: anchor }),
 } = {}) {
   const lastSeen = {};
   let raw;
@@ -3230,7 +3236,7 @@ function defaultOwnedTicketsForHost(
   {
     orchDir,
     anchorIssue = getLivenessAnchorIssue(),
-    readPeers = (anchor) => readPeerHeartbeatsSync({ anchorIssue: anchor }),
+    readPeers = (anchor) => readPeerHeartbeatsSyncCached({ anchorIssue: anchor }),
   } = {}
 ) {
   if (anchorIssue) {
