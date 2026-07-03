@@ -1,9 +1,18 @@
 # Changelog
 
-## [12.23.1](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.23.0...catalyst-dev-v12.23.1) (2026-07-03)
+## [12.23.1](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.23.0...catalyst-dev-v12.23.1)
+
+Jul 03, 2026
+
+<!-- ai-enhanced -->
+
+### Linear Rate-Limit Freeze Fixes
+
+A cluster of fixes targeting the shared Linear bucket saturation that was freezing fleet dispatch and silently stalling replicas. Fence-guard reads are now cached (45s TTL), anchor UUID lookups are cached permanently, and dispatch reads route through the replica instead of hitting Linear live — together dropping breaker trips from ~18 per 3 minutes to near zero. A cloud-sync stall watchdog now detects frozen replica sockets and self-heals via process restart rather than sitting silent for hours, and interactive `claude` sessions now load plugins from `~/catalyst/plugin-source` on the same path as workers.
 
 
-### Bug Fixes
+
+### PRs
 
 * **dev:** cloud-sync stall watchdog + loud alert — stop silent replica freezes ([#2547](https://github.com/coalesce-labs/catalyst/issues/2547)) ([fd74bda](https://github.com/coalesce-labs/catalyst/commit/fd74bda299288d5ca6992e1b438cb1e83cd9312d))
 * **dev:** cluster-heartbeat — back off the shared bucket on a rate-class Linear 400/429 (CTL-1420 follow-up) ([#2539](https://github.com/coalesce-labs/catalyst/issues/2539)) ([01d8844](https://github.com/coalesce-labs/catalyst/commit/01d88449f3845db47f33bad6ec346a0797e8a71e))
