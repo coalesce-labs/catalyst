@@ -219,6 +219,10 @@ fi
 # This ensures .catalyst/.workflow-context.json exists with currentTicket set
 # so that direnv's use_otel_context can read it when someone enters the directory.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# CTL-1417: self-protection guard for the two --force rollback removals below.
+# shellcheck source=lib/worktree-remove-guard.sh
+[ -r "${SCRIPT_DIR}/lib/worktree-remove-guard.sh" ] &&
+	source "${SCRIPT_DIR}/lib/worktree-remove-guard.sh"
 if [ -f "${SCRIPT_DIR}/workflow-context.sh" ]; then
 	# Remove stale workflow-context.json if copied from main repo
 	rm -f "${WORKTREE_PATH}/.catalyst/.workflow-context.json"
@@ -359,7 +363,15 @@ else
 			SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 			[ -x "$SCRIPT_DIR/lib/worktree-presweep.sh" ] &&
 				"$SCRIPT_DIR/lib/worktree-presweep.sh" --force "$WORKTREE_PATH" 2>/dev/null || true
-			git worktree remove --force "$WORKTREE_PATH"
+			# CTL-1417: cwd already left the tree (cd - above); the guard's
+			# foreign-liveness check is the operative protection. On refusal,
+			# leave the tree for the reaper rather than force-deleting an in-use one.
+			if ! command -v assert_worktree_removal_safe >/dev/null 2>&1 ||
+				assert_worktree_removal_safe "$WORKTREE_PATH"; then
+				git worktree remove --force "$WORKTREE_PATH"
+			else
+				echo "create-worktree: guard refused removal of ${WORKTREE_PATH}; leaving for reaper" >&2
+			fi
 			git branch -D "$WORKTREE_NAME" 2>/dev/null || true
 			exit 1
 		fi
@@ -431,7 +443,13 @@ if [ "$THOUGHTS_INIT_EXPECTED" = true ] && [ ! -d "thoughts/shared" ]; then
 	SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 	[ -x "$SCRIPT_DIR/lib/worktree-presweep.sh" ] &&
 		"$SCRIPT_DIR/lib/worktree-presweep.sh" --force "$WORKTREE_PATH" 2>/dev/null || true
-	git worktree remove --force "$WORKTREE_PATH"
+	# CTL-1417: guard the --force removal (cwd already left via cd - above).
+	if ! command -v assert_worktree_removal_safe >/dev/null 2>&1 ||
+		assert_worktree_removal_safe "$WORKTREE_PATH"; then
+		git worktree remove --force "$WORKTREE_PATH"
+	else
+		echo "create-worktree: guard refused removal of ${WORKTREE_PATH}; leaving for reaper" >&2
+	fi
 	git branch -D "$WORKTREE_NAME" 2>/dev/null || true
 	exit 1
 fi

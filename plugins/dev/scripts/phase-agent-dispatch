@@ -80,6 +80,9 @@ source "${SCRIPT_DIR}/lib/resume.sh"
 source "${SCRIPT_DIR}/lib/phase-sequence.sh"
 # shellcheck source=lib/worktree-rebase.sh
 source "${SCRIPT_DIR}/lib/worktree-rebase.sh"
+# CTL-1417: self-protection guard for --force worktree removals (recreate site).
+# shellcheck source=lib/worktree-remove-guard.sh
+source "${SCRIPT_DIR}/lib/worktree-remove-guard.sh"
 # shellcheck source=lib/phase-artifact-gate.sh
 source "${SCRIPT_DIR}/lib/phase-artifact-gate.sh"
 
@@ -1013,36 +1016,46 @@ if [[ -z $RESUME_SESSION ]] && is_rebase_phase "$PHASE"; then
 				echo "phase-agent-dispatch: recreate: cannot resolve repo root; parking instead" >&2
 			else
 				_WT_PATH="$(pwd)"
-				git -C "$_REPO_ROOT" worktree remove --force "$_WT_PATH" 2>/dev/null || true
-				git -C "$_REPO_ROOT" branch -f "$TICKET" "origin/${BASE_BRANCH}" 2>/dev/null || true
-				# CATALYST_RECREATE_WORKTREE_DIR overrides the worktrees base for
-				# testing — passes --worktree-dir so create-worktree.sh uses the
-				# test-local scratch dir instead of the default ~/catalyst/wt/.
-				_RECREATE_WT_DIR_FLAG=""
-				[[ -n ${CATALYST_RECREATE_WORKTREE_DIR-} ]] &&
-					_RECREATE_WT_DIR_FLAG="--worktree-dir ${CATALYST_RECREATE_WORKTREE_DIR}"
-				_NEW_WT_OUT="$(cd "$_REPO_ROOT" &&
-					"${SCRIPT_DIR}/create-worktree.sh" \
-						"$TICKET" "$BASE_BRANCH" --reuse-existing ${_RECREATE_WT_DIR_FLAG} 2>/dev/null)"
-				_NEW_WT="$(printf '%s\n' "$_NEW_WT_OUT" | grep '^WORKTREE_PATH=' | cut -d= -f2)"
-				if [[ -n $_NEW_WT && -d $_NEW_WT ]]; then
-					# Delete the signal file so the second dispatch's idempotency
-					# guard finds no file and writes a fresh one (not "dispatched"
-					# which would short-circuit the re-exec as idempotent).
-					rm -f "$SIGNAL_FILE" 2>/dev/null || true
-					# CTL-736: this is a DELIBERATE clean restart — drop the claim
-					# tombstones too, so the re-exec's fresh (no-signal ⇒ gen 1)
-					# claim is exclusive and wins instead of colliding on gen 1.
-					rm -f "${WORKER_DIR}/${PHASE}.claim."* 2>/dev/null || true
-					echo "phase-agent-dispatch: recreated worktree at ${_NEW_WT}; re-dispatching ${TICKET}/${PHASE}" >&2
-					cd "$_NEW_WT"
-					# CTL-990: mark the recreate as spent — survives the exec, so a
-					# second rc=2 in the re-dispatched run parks instead of looping.
-					export CATALYST_RECREATE_ATTEMPTED=1
-					exec "$0" --phase "$PHASE" --ticket "$TICKET" \
-						--orch-dir "$ORCH_DIR" --orch-id "$ORCH_ID"
+				# CTL-1417: leave the doomed worktree BEFORE removing it, so the
+				# self-protection guard sees only foreign holders (a make-test run,
+				# another agent) and refuses the --force removal instead of yanking
+				# the tree out from under a live process. In the legitimate recreate
+				# nothing else is under the tree, so the guard passes.
+				cd "$_REPO_ROOT" || true
+				if ! assert_worktree_removal_safe "$_WT_PATH"; then
+					echo "phase-agent-dispatch: recreate: guard refused removal of ${_WT_PATH}; parking instead" >&2
 				else
-					echo "phase-agent-dispatch: recreate failed to produce worktree; parking instead" >&2
+					git -C "$_REPO_ROOT" worktree remove --force "$_WT_PATH" 2>/dev/null || true
+					git -C "$_REPO_ROOT" branch -f "$TICKET" "origin/${BASE_BRANCH}" 2>/dev/null || true
+					# CATALYST_RECREATE_WORKTREE_DIR overrides the worktrees base for
+					# testing — passes --worktree-dir so create-worktree.sh uses the
+					# test-local scratch dir instead of the default ~/catalyst/wt/.
+					_RECREATE_WT_DIR_FLAG=""
+					[[ -n ${CATALYST_RECREATE_WORKTREE_DIR-} ]] &&
+						_RECREATE_WT_DIR_FLAG="--worktree-dir ${CATALYST_RECREATE_WORKTREE_DIR}"
+					_NEW_WT_OUT="$(cd "$_REPO_ROOT" &&
+						"${SCRIPT_DIR}/create-worktree.sh" \
+							"$TICKET" "$BASE_BRANCH" --reuse-existing ${_RECREATE_WT_DIR_FLAG} 2>/dev/null)"
+					_NEW_WT="$(printf '%s\n' "$_NEW_WT_OUT" | grep '^WORKTREE_PATH=' | cut -d= -f2)"
+					if [[ -n $_NEW_WT && -d $_NEW_WT ]]; then
+						# Delete the signal file so the second dispatch's idempotency
+						# guard finds no file and writes a fresh one (not "dispatched"
+						# which would short-circuit the re-exec as idempotent).
+						rm -f "$SIGNAL_FILE" 2>/dev/null || true
+						# CTL-736: this is a DELIBERATE clean restart — drop the claim
+						# tombstones too, so the re-exec's fresh (no-signal ⇒ gen 1)
+						# claim is exclusive and wins instead of colliding on gen 1.
+						rm -f "${WORKER_DIR}/${PHASE}.claim."* 2>/dev/null || true
+						echo "phase-agent-dispatch: recreated worktree at ${_NEW_WT}; re-dispatching ${TICKET}/${PHASE}" >&2
+						cd "$_NEW_WT"
+						# CTL-990: mark the recreate as spent — survives the exec, so a
+						# second rc=2 in the re-dispatched run parks instead of looping.
+						export CATALYST_RECREATE_ATTEMPTED=1
+						exec "$0" --phase "$PHASE" --ticket "$TICKET" \
+							--orch-dir "$ORCH_DIR" --orch-id "$ORCH_ID"
+					else
+						echo "phase-agent-dispatch: recreate failed to produce worktree; parking instead" >&2
+					fi
 				fi
 			fi
 		fi

@@ -1344,12 +1344,28 @@ FAIL_REASON37="$(jq -r '.failureReason' "$VSIGNAL")"
 assert_eq "thoughts_conflict_with_origin_main" "$FAIL_REASON37" "thoughts verify: failureReason=thoughts_conflict_with_origin_main"
 unset CATALYST_DIR
 
-# ─── Test 38 (CTL-707): source conflict on plan → recreate worktree, re-dispatch
-# Uses a REAL git linked worktree (git worktree add) so the recreate path can
-# resolve REPO_ROOT via --git-common-dir and call create-worktree.sh correctly.
+# ─── CTL-1417: deterministic mock lsof for the recreate self-protection guard ─
+# The recreate path calls assert_worktree_removal_safe, which shells out to lsof
+# via WT_GUARD_LSOF. Point it at a mock driven by STUB_LSOF_RC / STUB_LSOF_OUT so
+# the guard never probes real processes against $SCRATCH.
+GUARD_MOCK_LSOF="${SCRATCH}/mock-lsof"
+cat >"$GUARD_MOCK_LSOF" <<'MOCK'
+#!/usr/bin/env bash
+printf '%s' "${STUB_LSOF_OUT:-}"
+exit "${STUB_LSOF_RC:-1}"
+MOCK
+chmod +x "$GUARD_MOCK_LSOF"
+
+# ─── Test 38 / T38b (CTL-707 + CTL-1417): source conflict on research → recreate
+# worktree, re-dispatch. Uses a REAL git linked worktree (git worktree add) so
+# the recreate path can resolve REPO_ROOT via --git-common-dir and call
+# create-worktree.sh correctly. T38b: the CTL-1417 removal guard is wired but
+# nothing foreign holds the tree (mock lsof rc=1/empty), so the guard ALLOWS the
+# --force removal and the recreate proceeds exactly as before.
 echo ""
-echo "Test 38 (CTL-707): source conflict on research → worktree recreated, worker spawned (no --resume)"
+echo "Test 38/T38b (CTL-707/CTL-1417): source conflict → recreated + spawned; guard does not block (lsof clear)"
 fresh_env t38_plan_recreate
+export WT_GUARD_LSOF="$GUARD_MOCK_LSOF" STUB_LSOF_RC=1 STUB_LSOF_OUT=""
 export CATALYST_DIR="${TEST_DIR}/catalyst-events"
 mkdir -p "${CATALYST_DIR}/events"
 
@@ -1413,6 +1429,61 @@ assert_eq "yes" "$([[ $NEW_HEAD != "$ORIG_HEAD" ]] && echo yes || echo no)" \
 	"recreate: worktree HEAD changed (recreated from origin/main)"
 unset CATALYST_DIR
 unset CATALYST_RECREATE_WORKTREE_DIR
+unset WT_GUARD_LSOF STUB_LSOF_RC STUB_LSOF_OUT
+
+# ─── T38c (CTL-1417): recreate is REFUSED when a foreign holder is present ─────
+# Same source-conflict-on-research fixture as Test 38, but the mock lsof reports
+# a live handle under the target (rc=0 + output). The self-protection guard must
+# refuse the --force removal, so the dispatcher parks status:"stalled", does NOT
+# re-dispatch (claude --bg not invoked), and the worktree stays on disk.
+echo ""
+echo "T38c (CTL-1417): foreign holder under worktree → recreate refused, parked stalled, tree kept"
+fresh_env t38c_recreate_guard
+export CATALYST_DIR="${TEST_DIR}/catalyst-events"
+mkdir -p "${CATALYST_DIR}/events"
+
+T38C_ORIGIN="${TEST_DIR}/t38c-origin.git"
+T38C_UP="${TEST_DIR}/t38c-up"
+T38C_MAIN="${TEST_DIR}/t38c-main"
+T38C_WT_BASE="${TEST_DIR}/t38c-wt"
+GWORKC="${T38C_WT_BASE}/CTL-100"
+git init --quiet --bare -b main "$T38C_ORIGIN"
+git clone --quiet "$T38C_ORIGIN" "$T38C_UP" 2>/dev/null
+(
+	cd "$T38C_UP"
+	printf 'base-line\n' >shared.txt
+	mkdir -p .catalyst
+	git add -A && git commit --quiet -m "initial"
+	git push --quiet origin main
+)
+git clone --quiet "$T38C_ORIGIN" "$T38C_MAIN" 2>/dev/null
+mkdir -p "$T38C_WT_BASE"
+(cd "$T38C_MAIN" && git worktree add --quiet -b CTL-100 "$GWORKC" main 2>/dev/null)
+(
+	cd "$GWORKC"
+	printf 'local-edit\n' >shared.txt
+	git add shared.txt && git commit --quiet -m "local source change"
+)
+(
+	cd "$T38C_UP" && git checkout --quiet main
+	printf 'upstream-edit\n' >shared.txt
+	mkdir -p thoughts/shared/research
+	printf '# research\n' >thoughts/shared/research/2026-05-28-ctl-100.md
+	git add -A && git commit --quiet -m "upstream: conflict + research artifact"
+	git push --quiet origin main
+)
+export CATALYST_RECREATE_WORKTREE_DIR="$T38C_WT_BASE"
+# Foreign holder present → guard refuses.
+export WT_GUARD_LSOF="$GUARD_MOCK_LSOF" STUB_LSOF_RC=0 STUB_LSOF_OUT="p4242"
+printf '{"ticket":"CTL-100","phase":"triage","status":"done"}\n' >"${WORKER_DIR}/triage.json"
+: >"$CLAUDE_STUB_LOG"
+(cd "$GWORKC" && CATALYST_BASE_BRANCH=main "$DISPATCH" --phase research --ticket CTL-100 \
+	--orch-dir "$ORCH_DIR" --orch-id orch-test >"${TEST_DIR}/t38c.out" 2>/dev/null)
+SIGNAL_C="${WORKER_DIR}/phase-research.json"
+assert_eq "stalled" "$(jq -r '.status' "$SIGNAL_C" 2>/dev/null)" "T38c: guard refusal parks status:stalled"
+assert_eq "no" "$([[ -s $CLAUDE_STUB_LOG ]] && echo yes || echo no)" "T38c: claude --bg NOT invoked (no re-dispatch)"
+assert_eq "yes" "$([[ -d $GWORKC ]] && echo yes || echo no)" "T38c: worktree still exists on disk (not force-removed)"
+unset CATALYST_DIR CATALYST_RECREATE_WORKTREE_DIR WT_GUARD_LSOF STUB_LSOF_RC STUB_LSOF_OUT
 
 # ─── Test 39 (CTL-707): fetch failure on plan → proceed un-rebased, worker spawned
 echo ""
@@ -1910,12 +1981,17 @@ echo "Test 58 (CTL-777): empty context var is OMITTED (no null key) while others
 fresh_env t58
 # Run the composer directly with GENERATION empty but ORCH_DIR present so we can
 # assert the ==\"\" omission pattern holds for the new keys too.
+# Extract to a temp file and source THAT — `source <(...)` process substitution
+# fails to define multi-line functions under macOS system bash 3.2 (the repo
+# dogfoods on macOS), so the earlier form left compose_worker_settings_json
+# undefined and produced empty output. A temp file is portable across bash 3.2+.
+T58_FN="${TEST_DIR}/compose-fn.sh"
+sed -n '/^compose_worker_settings_json()/,/^}/p' "$DISPATCH" >"$T58_FN"
 SETTINGS_T58=$(
 	ORCH_DIR="${ORCH_DIR}" ORCH_ID="orch-test" PHASE="triage" TICKET="CTL-100" \
 		GENERATION="" SCRIPT_DIR="${TEST_DIR}/bin" OTEL_RES_ATTRS="" \
-		bash -c '
-      source <(sed -n "/^compose_worker_settings_json()/,/^}/p" "'"$DISPATCH"'")
-      compose_worker_settings_json'
+		CATALYST_CLUSTER_GENERATION="" \
+		bash -c 'source "'"$T58_FN"'"; compose_worker_settings_json'
 )
 T58_HAS_GEN=$(echo "$SETTINGS_T58" | jq -r '.env | has("CATALYST_GENERATION")' 2>/dev/null)
 T58_HAS_ODIR=$(echo "$SETTINGS_T58" | jq -r '.env | has("CATALYST_ORCHESTRATOR_DIR")' 2>/dev/null)
