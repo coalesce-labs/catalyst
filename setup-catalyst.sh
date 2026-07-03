@@ -2323,9 +2323,12 @@ print_summary() {
 	print_header "Next Steps"
 	echo ""
 
-	echo "1. Install Catalyst plugin in Claude Code:"
-	echo "   /plugin marketplace add coalesce-labs/catalyst"
-	echo "   /plugin install catalyst-dev"
+	echo "1. Provision plugin-source (live plugin loading — NOT the marketplace cache,"
+	echo "   which lags releases and drifts per node):"
+	echo "   bash plugins/dev/scripts/setup-plugin-source.sh"
+	echo "   → sets the pluginDirs machine-config key (workers load plugin-source via"
+	echo "     phase-agent-dispatch --plugin-dir) AND installs the interactive \`claude\`"
+	echo "     --plugin-dir wrapper in ~/.zshrc. Open a new shell to pick it up."
 	echo ""
 
 	echo "2. Restart Claude Code to load configuration"
