@@ -9,6 +9,9 @@ import {
   fenceCheckSync,
   fenceCheckSyncCached,
   clearFenceReadCache,
+  resolveIssueIdSync,
+  resolveIssueIdSyncCached,
+  clearIssueIdCache,
 } from "./cluster-claim-sync.mjs";
 
 describe("claimDispatchSync — argv + parsing", () => {
@@ -276,5 +279,145 @@ describe("fenceCheckSyncCached — in-process TTL cache around the fence read (C
     );
     expect(captured.bin).toBe("/usr/bin/node");
     expect(captured.args).toEqual(["/x/cluster-claim.mjs", "fence-check", "CTL-7", "4"]);
+  });
+});
+
+describe("resolveIssueIdSync — argv + parsing (CTL-863 entourage follow-up)", () => {
+  it("builds the right argv: node <cli> resolve-issue-id <ticket>", () => {
+    let captured;
+    const spawn = (bin, args) => {
+      captured = { bin, args };
+      return { status: 0, stdout: '{"issueId":"uuid-CTL-9"}\n' };
+    };
+    resolveIssueIdSync(
+      { ticket: "CTL-9" },
+      { spawn, nodeBin: "/usr/bin/node", cli: "/x/cluster-claim.mjs" },
+    );
+    expect(captured.bin).toBe("/usr/bin/node");
+    expect(captured.args).toEqual(["/x/cluster-claim.mjs", "resolve-issue-id", "CTL-9"]);
+  });
+
+  it("parses the resolved UUID from stdout", () => {
+    const spawn = () => ({ status: 0, stdout: '{"issueId":"uuid-CTL-9"}\n' });
+    expect(resolveIssueIdSync({ ticket: "CTL-9" }, { spawn })).toBe("uuid-CTL-9");
+  });
+
+  it("a null issueId (missing ticket) → null", () => {
+    const spawn = () => ({ status: 0, stdout: '{"issueId":null}\n' });
+    expect(resolveIssueIdSync({ ticket: "CTL-9" }, { spawn })).toBeNull();
+  });
+
+  it("non-zero exit / spawn error / unparseable stdout / throw → null (fail-open)", () => {
+    expect(resolveIssueIdSync({ ticket: "CTL-9" }, { spawn: () => ({ status: 1, stdout: "" }) })).toBeNull();
+    expect(
+      resolveIssueIdSync({ ticket: "CTL-9" }, { spawn: () => ({ status: null, error: new Error("ETIMEDOUT") }) }),
+    ).toBeNull();
+    expect(resolveIssueIdSync({ ticket: "CTL-9" }, { spawn: () => ({ status: 0, stdout: "not json" }) })).toBeNull();
+    expect(
+      resolveIssueIdSync({ ticket: "CTL-9" }, { spawn: () => { throw new Error("EACCES"); } }),
+    ).toBeNull();
+  });
+});
+
+describe("resolveIssueIdSyncCached — permanent identifier→UUID cache (CTL-863 entourage follow-up)", () => {
+  beforeEach(() => {
+    clearIssueIdCache();
+  });
+
+  it("(a) two resolves of the same ticket → ONE underlying spawn call", () => {
+    let calls = 0;
+    const spawn = () => {
+      calls += 1;
+      return { status: 0, stdout: '{"issueId":"uuid-CTL-1"}\n' };
+    };
+    const first = resolveIssueIdSyncCached({ ticket: "CTL-1" }, { spawn });
+    const second = resolveIssueIdSyncCached({ ticket: "CTL-1" }, { spawn });
+    expect(first).toBe("uuid-CTL-1");
+    expect(second).toBe("uuid-CTL-1");
+    expect(calls).toBe(1); // second call served from the permanent cache, no spawn
+  });
+
+  it("persists beyond any TTL window — no expiry, ever (permanent cache)", () => {
+    let calls = 0;
+    const spawn = () => {
+      calls += 1;
+      return { status: 0, stdout: '{"issueId":"uuid-CTL-2"}\n' };
+    };
+    let now = 1_000_000;
+    resolveIssueIdSyncCached({ ticket: "CTL-2" }, { spawn, now: () => now });
+    now += 10 * 24 * 60 * 60 * 1000; // 10 days later — far past any TTL a read cache would use
+    resolveIssueIdSyncCached({ ticket: "CTL-2" }, { spawn, now: () => now });
+    expect(calls).toBe(1); // still cached — this cache has no TTL at all
+  });
+
+  it("CATALYST_ANCHOR_UUID_CACHE=0 disables the cache — every resolve hits through", () => {
+    let calls = 0;
+    const spawn = () => {
+      calls += 1;
+      return { status: 0, stdout: '{"issueId":"uuid-CTL-3"}\n' };
+    };
+    const env = { CATALYST_ANCHOR_UUID_CACHE: "0" };
+    resolveIssueIdSyncCached({ ticket: "CTL-3" }, { spawn, env });
+    resolveIssueIdSyncCached({ ticket: "CTL-3" }, { spawn, env });
+    expect(calls).toBe(2); // cache fully disabled — no memoization at all
+  });
+
+  it("a failed/null resolution is NEVER cached — the next call retries for real", () => {
+    let calls = 0;
+    const spawn = () => {
+      calls += 1;
+      return { status: 1, stdout: "" }; // non-zero exit → resolution failure
+    };
+    const first = resolveIssueIdSyncCached({ ticket: "CTL-4" }, { spawn });
+    const second = resolveIssueIdSyncCached({ ticket: "CTL-4" }, { spawn });
+    expect(first).toBeNull();
+    expect(second).toBeNull();
+    expect(calls).toBe(2); // NOT cached — both calls spawned
+  });
+
+  it("different tickets are NOT interchangeable — each gets its own resolve + cache slot", () => {
+    const seen = [];
+    const spawn = (bin, args) => {
+      seen.push(args[2]); // the ticket argv
+      return { status: 0, stdout: JSON.stringify({ issueId: `uuid-${args[2]}` }) + "\n" };
+    };
+    expect(resolveIssueIdSyncCached({ ticket: "CTL-5" }, { spawn })).toBe("uuid-CTL-5");
+    expect(resolveIssueIdSyncCached({ ticket: "CTL-6" }, { spawn })).toBe("uuid-CTL-6");
+    expect(seen).toEqual(["CTL-5", "CTL-6"]); // both spawned — distinct cache keys
+  });
+});
+
+describe("claimDispatchSync — pre-resolved issueId is threaded into the claim argv (CTL-863 entourage follow-up)", () => {
+  beforeEach(() => {
+    clearIssueIdCache();
+  });
+
+  it("a successful pre-resolve appends the UUID as the claim CLI's 4th arg", () => {
+    let claimArgs;
+    const spawn = (bin, args) => {
+      if (args[1] === "resolve-issue-id") {
+        return { status: 0, stdout: '{"issueId":"uuid-CTL-9"}\n' };
+      }
+      claimArgs = args;
+      return { status: 0, stdout: JSON.stringify({ won: true, generation: 1 }) + "\n" };
+    };
+    claimDispatchSync({ ticket: "CTL-9", hostName: "mini", phase: "triage" }, { spawn });
+    expect(claimArgs[claimArgs.length - 1]).toBe("uuid-CTL-9");
+  });
+
+  it("a failed pre-resolve falls back to the plain 3-arg claim form (unchanged behavior)", () => {
+    let claimArgs;
+    const spawn = (bin, args) => {
+      if (args[1] === "resolve-issue-id") {
+        return { status: 1, stdout: "" }; // resolution fails
+      }
+      claimArgs = args;
+      return { status: 0, stdout: JSON.stringify({ won: true, generation: 1 }) + "\n" };
+    };
+    claimDispatchSync(
+      { ticket: "CTL-9", hostName: "mini", phase: "triage" },
+      { spawn, nodeBin: "/usr/bin/node", cli: "/x/cluster-claim.mjs" },
+    );
+    expect(claimArgs).toEqual(["/x/cluster-claim.mjs", "claim", "CTL-9", "mini", "triage"]);
   });
 });

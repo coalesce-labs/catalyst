@@ -1,8 +1,16 @@
 // cluster-heartbeat-sync.test.mjs — synchronous bridge over cluster-heartbeat CLI
 // (CTL-1090). Every test injects a fake `spawn` so nothing forks a process.
 // Mirrors cluster-claim-sync.test.mjs in structure and fail-open contract.
-import { describe, test, expect } from "bun:test";
-import { publishHeartbeatSync, readPeerHeartbeatsSync } from "./cluster-heartbeat-sync.mjs";
+import { describe, test, expect, beforeEach } from "bun:test";
+import {
+  publishHeartbeatSync,
+  readPeerHeartbeatsSync,
+  resolveAnchorIssueIdSync,
+  resolveAnchorIssueIdSyncCached,
+  clearAnchorUuidCache,
+  readPeerHeartbeatsSyncCached,
+  clearHeartbeatReadCache,
+} from "./cluster-heartbeat-sync.mjs";
 
 describe("publishHeartbeatSync — argv + fail-open contract", () => {
   test("returns ok:true and forwards anchor/host/tickets to the CLI", () => {
@@ -236,5 +244,233 @@ describe("readPeerHeartbeatsSync — parsing + fail-open contract", () => {
         { spawn: () => ({ status: 0, stdout: "[]\n" }) },
       ),
     ).toEqual({});
+  });
+});
+
+describe("resolveAnchorIssueIdSync — argv + parsing (CTL-863 entourage follow-up)", () => {
+  test("builds the right argv: <node> <cli> resolve-anchor <anchor>", () => {
+    let capturedBin, capturedArgs;
+    const spawn = (bin, args) => {
+      capturedBin = bin;
+      capturedArgs = args;
+      return { status: 0, stdout: '{"issueId":"uuid-anchor"}\n' };
+    };
+    resolveAnchorIssueIdSync(
+      { anchorIssue: "CTL-9999" },
+      { spawn, nodeBin: "/usr/bin/node", cli: "/x/cluster-heartbeat.mjs" },
+    );
+    expect(capturedBin).toBe("/usr/bin/node");
+    expect(capturedArgs).toEqual(["/x/cluster-heartbeat.mjs", "resolve-anchor", "CTL-9999"]);
+  });
+
+  test("parses the resolved UUID from stdout", () => {
+    const spawn = () => ({ status: 0, stdout: '{"issueId":"uuid-anchor"}\n' });
+    expect(resolveAnchorIssueIdSync({ anchorIssue: "CTL-9999" }, { spawn })).toBe("uuid-anchor");
+  });
+
+  test("a null issueId (unresolvable anchor) → null", () => {
+    const spawn = () => ({ status: 0, stdout: '{"issueId":null}\n' });
+    expect(resolveAnchorIssueIdSync({ anchorIssue: "CTL-9999" }, { spawn })).toBeNull();
+  });
+
+  test("non-zero exit / spawn error / unparseable stdout / throw → null (fail-open)", () => {
+    expect(resolveAnchorIssueIdSync({ anchorIssue: "CTL-9999" }, { spawn: () => ({ status: 1, stdout: "" }) })).toBeNull();
+    expect(
+      resolveAnchorIssueIdSync({ anchorIssue: "CTL-9999" }, { spawn: () => ({ status: null, error: new Error("ETIMEDOUT") }) }),
+    ).toBeNull();
+    expect(
+      resolveAnchorIssueIdSync({ anchorIssue: "CTL-9999" }, { spawn: () => ({ status: 0, stdout: "not json" }) }),
+    ).toBeNull();
+    expect(
+      resolveAnchorIssueIdSync({ anchorIssue: "CTL-9999" }, { spawn: () => { throw new Error("EACCES"); } }),
+    ).toBeNull();
+  });
+});
+
+describe("resolveAnchorIssueIdSyncCached — permanent identifier→UUID cache (CTL-863 entourage follow-up)", () => {
+  beforeEach(() => {
+    clearAnchorUuidCache();
+  });
+
+  test("(a) two resolves of the same anchor → ONE underlying spawn call", () => {
+    let calls = 0;
+    const spawn = () => {
+      calls += 1;
+      return { status: 0, stdout: '{"issueId":"uuid-anchor-1"}\n' };
+    };
+    const first = resolveAnchorIssueIdSyncCached({ anchorIssue: "CTL-1001" }, { spawn });
+    const second = resolveAnchorIssueIdSyncCached({ anchorIssue: "CTL-1001" }, { spawn });
+    expect(first).toBe("uuid-anchor-1");
+    expect(second).toBe("uuid-anchor-1");
+    expect(calls).toBe(1); // second call served from the permanent cache, no spawn
+  });
+
+  test("persists beyond any TTL window — no expiry, ever (permanent cache)", () => {
+    let calls = 0;
+    const spawn = () => {
+      calls += 1;
+      return { status: 0, stdout: '{"issueId":"uuid-anchor-2"}\n' };
+    };
+    let now = 1_000_000;
+    resolveAnchorIssueIdSyncCached({ anchorIssue: "CTL-1002" }, { spawn, now: () => now });
+    now += 10 * 24 * 60 * 60 * 1000; // 10 days later — far past any TTL a read cache would use
+    resolveAnchorIssueIdSyncCached({ anchorIssue: "CTL-1002" }, { spawn, now: () => now });
+    expect(calls).toBe(1); // still cached — this cache has no TTL at all
+  });
+
+  test("CATALYST_ANCHOR_UUID_CACHE=0 disables the cache — every resolve hits through", () => {
+    let calls = 0;
+    const spawn = () => {
+      calls += 1;
+      return { status: 0, stdout: '{"issueId":"uuid-anchor-3"}\n' };
+    };
+    const env = { CATALYST_ANCHOR_UUID_CACHE: "0" };
+    resolveAnchorIssueIdSyncCached({ anchorIssue: "CTL-1003" }, { spawn, env });
+    resolveAnchorIssueIdSyncCached({ anchorIssue: "CTL-1003" }, { spawn, env });
+    expect(calls).toBe(2); // cache fully disabled — no memoization at all
+  });
+
+  test("a failed/null resolution is NEVER cached — the next call retries for real", () => {
+    let calls = 0;
+    const spawn = () => {
+      calls += 1;
+      return { status: 1, stdout: "" }; // non-zero exit → resolution failure
+    };
+    const first = resolveAnchorIssueIdSyncCached({ anchorIssue: "CTL-1004" }, { spawn });
+    const second = resolveAnchorIssueIdSyncCached({ anchorIssue: "CTL-1004" }, { spawn });
+    expect(first).toBeNull();
+    expect(second).toBeNull();
+    expect(calls).toBe(2); // NOT cached — both calls spawned
+  });
+});
+
+describe("publishHeartbeatSync — pre-resolved issueId threaded into the publish argv (CTL-863 entourage follow-up)", () => {
+  beforeEach(() => {
+    clearAnchorUuidCache();
+  });
+
+  test("a successful pre-resolve appends the UUID as the publish CLI's 5th arg", () => {
+    let publishArgs;
+    const spawn = (bin, args) => {
+      if (args[1] === "resolve-anchor") {
+        return { status: 0, stdout: '{"issueId":"uuid-anchor-5"}\n' };
+      }
+      publishArgs = args;
+      return { status: 0, stdout: '{"host":"mini","last_seen":"t","in_flight_tickets":[]}\n' };
+    };
+    publishHeartbeatSync(
+      { anchorIssue: "CTL-1005", host: "mini" },
+      { spawn, nodeBin: "/usr/bin/node", cli: "/x/cluster-heartbeat.mjs" },
+    );
+    // argv: [cli, "publish", anchor, host, ticketsCsv, maxParallelPlaceholder, issueId] —
+    // the maxParallel slot is kept as an empty-string placeholder ahead of issueId.
+    expect(publishArgs).toEqual(["/x/cluster-heartbeat.mjs", "publish", "CTL-1005", "mini", "", "", "uuid-anchor-5"]);
+  });
+
+  test("a failed pre-resolve falls back to the plain 4-arg publish form (unchanged behavior)", () => {
+    let publishArgs;
+    const spawn = (bin, args) => {
+      if (args[1] === "resolve-anchor") {
+        return { status: 1, stdout: "" }; // resolution fails
+      }
+      publishArgs = args;
+      return { status: 0, stdout: '{"host":"mini","last_seen":"t","in_flight_tickets":[]}\n' };
+    };
+    publishHeartbeatSync(
+      { anchorIssue: "CTL-1006", host: "mini" },
+      { spawn, nodeBin: "/usr/bin/node", cli: "/x/cluster-heartbeat.mjs" },
+    );
+    expect(publishArgs).toEqual(["/x/cluster-heartbeat.mjs", "publish", "CTL-1006", "mini", ""]);
+  });
+});
+
+describe("readPeerHeartbeatsSyncCached — 45s TTL cache around the peer-liveness read (CTL-863 entourage follow-up)", () => {
+  beforeEach(() => {
+    clearHeartbeatReadCache();
+  });
+
+  const peerMap = { mini: { host: "mini", last_seen: "2026-06-13T01:00:00Z", in_flight_tickets: [] } };
+
+  test("(a) two reads within TTL for the same anchor → ONE underlying spawn call", () => {
+    let calls = 0;
+    const spawn = () => {
+      calls += 1;
+      return { status: 0, stdout: JSON.stringify(peerMap) + "\n" };
+    };
+    let now = 1_000_000;
+    const first = readPeerHeartbeatsSyncCached({ anchorIssue: "CTL-2001" }, { spawn, now: () => now });
+    now += 1_000; // 1s later — well within the 45s default TTL
+    const second = readPeerHeartbeatsSyncCached({ anchorIssue: "CTL-2001" }, { spawn, now: () => now });
+    expect(first).toEqual(peerMap);
+    expect(second).toEqual(peerMap);
+    expect(calls).toBe(1); // second call served from cache, no spawn
+  });
+
+  test("(b) after TTL expiry → a fresh read (spawn called again)", () => {
+    let calls = 0;
+    const spawn = () => {
+      calls += 1;
+      return { status: 0, stdout: JSON.stringify(peerMap) + "\n" };
+    };
+    let now = 1_000_000;
+    readPeerHeartbeatsSyncCached({ anchorIssue: "CTL-2002" }, { spawn, now: () => now, env: { CATALYST_FENCE_READ_CACHE_MS: "45000" } });
+    now += 45_001; // just past the 45s TTL
+    readPeerHeartbeatsSyncCached({ anchorIssue: "CTL-2002" }, { spawn, now: () => now, env: { CATALYST_FENCE_READ_CACHE_MS: "45000" } });
+    expect(calls).toBe(2); // TTL expired → the second call re-spawned
+  });
+
+  test("(c) CATALYST_FENCE_READ_CACHE_MS=0 disables the cache — every read hits through", () => {
+    let calls = 0;
+    const spawn = () => {
+      calls += 1;
+      return { status: 0, stdout: JSON.stringify(peerMap) + "\n" };
+    };
+    const env = { CATALYST_FENCE_READ_CACHE_MS: "0" };
+    const now = () => 1_000_000; // frozen clock — proves it's the env flag, not elapsed time
+    readPeerHeartbeatsSyncCached({ anchorIssue: "CTL-2003" }, { spawn, env, now });
+    readPeerHeartbeatsSyncCached({ anchorIssue: "CTL-2003" }, { spawn, env, now });
+    readPeerHeartbeatsSyncCached({ anchorIssue: "CTL-2003" }, { spawn, env, now });
+    expect(calls).toBe(3); // cache fully disabled — no memoization at all
+  });
+
+  test("(d) an empty/error result is NEVER cached — the next call retries the real read", () => {
+    let calls = 0;
+    const spawn = () => {
+      calls += 1;
+      return { status: 1, stdout: "" }; // non-zero exit → the {} fail-open shape
+    };
+    const now = () => 1_000_000; // frozen clock — within TTL, so only caching (not expiry) explains a re-spawn
+    const first = readPeerHeartbeatsSyncCached({ anchorIssue: "CTL-2004" }, { spawn, now });
+    const second = readPeerHeartbeatsSyncCached({ anchorIssue: "CTL-2004" }, { spawn, now });
+    expect(first).toEqual({});
+    expect(second).toEqual({});
+    expect(calls).toBe(2); // NOT cached — both calls spawned
+  });
+
+  test("different anchors are NOT interchangeable — each gets its own read + cache slot", () => {
+    const seen = [];
+    const spawn = (bin, args) => {
+      seen.push(args[2]); // the anchor argv
+      return { status: 0, stdout: JSON.stringify(peerMap) + "\n" };
+    };
+    const now = () => 1_000_000;
+    readPeerHeartbeatsSyncCached({ anchorIssue: "CTL-2005" }, { spawn, now });
+    readPeerHeartbeatsSyncCached({ anchorIssue: "CTL-2006" }, { spawn, now });
+    expect(seen).toEqual(["CTL-2005", "CTL-2006"]); // both spawned — distinct cache keys
+  });
+
+  test("falls through to a real readPeerHeartbeatsSync on a cache miss (argv unchanged)", () => {
+    let captured;
+    const spawn = (bin, args) => {
+      captured = { bin, args };
+      return { status: 0, stdout: JSON.stringify(peerMap) + "\n" };
+    };
+    const now = () => 1_000_000;
+    readPeerHeartbeatsSyncCached(
+      { anchorIssue: "CTL-2007" },
+      { spawn, now, nodeBin: "/usr/bin/node", cli: "/x/cluster-heartbeat.mjs" },
+    );
+    expect(captured.bin).toBe("/usr/bin/node");
+    expect(captured.args).toEqual(["/x/cluster-heartbeat.mjs", "read", "CTL-2007"]);
   });
 });
