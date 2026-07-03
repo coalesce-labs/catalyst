@@ -12,7 +12,7 @@ import { logDaemonHeartbeat } from "../lib/daemon-heartbeat.mjs";
 import { OtlpSender } from "./lib/destinations/otlp.ts";
 import { PosthogSender } from "./lib/destinations/posthog.ts";
 import { CloudflareAESender } from "./lib/destinations/cloudflare-ae.ts";
-import { isFlatEvent, normalizeFlatEvent } from "./lib/normalize.ts";
+import { isFlatEvent, normalizeFlatEvent, isPinoRecord, normalizePinoRecord } from "./lib/normalize.ts";
 import { dlqDepth } from "./lib/dlq.ts";
 import { buildCanonicalEnvelope } from "./lib/canonical.ts";
 
@@ -143,6 +143,7 @@ export function processLine(line: string): void {
   try {
     let ev = JSON.parse(line) as CanonicalEvent;
     if (isFlatEvent(ev)) ev = normalizeFlatEvent(ev as unknown as Record<string, unknown>);
+    else if (isPinoRecord(ev)) ev = normalizePinoRecord(ev as unknown as Record<string, unknown>);
     if (!ev.attributes) {
       stats.skipped++;
       return;

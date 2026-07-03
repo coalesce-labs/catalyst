@@ -15,13 +15,15 @@ import { hostname, homedir } from "node:os";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
-export type Severity = "DEBUG" | "INFO" | "WARN" | "ERROR";
+export type Severity = "TRACE" | "DEBUG" | "INFO" | "WARN" | "ERROR" | "FATAL";
 
 export const SEVERITY_NUMBERS: Record<Severity, number> = {
+  TRACE: 1,
   DEBUG: 5,
   INFO: 9,
   WARN: 13,
   ERROR: 17,
+  FATAL: 21,
 };
 
 export function severityNumber(text: Severity): number {

@@ -1,5 +1,5 @@
 import { describe, test, expect } from "bun:test";
-import { normalizeFlatEvent, isFlatEvent } from "./normalize.ts";
+import { normalizeFlatEvent, isFlatEvent, isPinoRecord, normalizePinoRecord } from "./normalize.ts";
 
 describe("isFlatEvent", () => {
   test("true for flat reap-intent record", () => {
@@ -81,5 +81,85 @@ describe("normalizeFlatEvent", () => {
       orch_id: "CTL-999",
     });
     expect(c.attributes["catalyst.orchestrator.id"]).toBe("CTL-999");
+  });
+});
+
+describe("isPinoRecord (CTL-1424)", () => {
+  test("true for pino-shaped record with numeric level and string msg", () => {
+    expect(isPinoRecord({ level: 40, msg: "some warning" })).toBe(true);
+  });
+
+  test("false for flat event (has string event field) — flat events win", () => {
+    expect(isPinoRecord({ event: "phase.x", level: 40, msg: "m" })).toBe(false);
+  });
+
+  test("false for canonical record (has attributes)", () => {
+    expect(isPinoRecord({ attributes: { "event.name": "x" }, level: 40, msg: "m" })).toBe(false);
+  });
+
+  test("false when level is string (not number)", () => {
+    expect(isPinoRecord({ level: "40", msg: "m" })).toBe(false);
+  });
+
+  test("false when msg is missing", () => {
+    expect(isPinoRecord({ level: 40 })).toBe(false);
+  });
+
+  test("false for null", () => {
+    expect(isPinoRecord(null)).toBe(false);
+  });
+
+  test("false for non-object", () => {
+    expect(isPinoRecord("string")).toBe(false);
+  });
+});
+
+describe("normalizePinoRecord (CTL-1424)", () => {
+  const BASE_TIME = 1751500000000;
+
+  test("level 40 → WARN / 13", () => {
+    const c = normalizePinoRecord({ level: 40, time: BASE_TIME, msg: "warn line", name: "execution-core", pid: 123 });
+    expect(c.severityText).toBe("WARN");
+    expect(c.severityNumber).toBe(13);
+  });
+
+  test("level 10 → TRACE / 1 (AC endpoint)", () => {
+    const c = normalizePinoRecord({ level: 10, time: BASE_TIME, msg: "trace line" });
+    expect(c.severityText).toBe("TRACE");
+    expect(c.severityNumber).toBe(1);
+  });
+
+  test("level 60 → FATAL / 21 (AC endpoint)", () => {
+    const c = normalizePinoRecord({ level: 60, time: BASE_TIME, msg: "fatal line" });
+    expect(c.severityText).toBe("FATAL");
+    expect(c.severityNumber).toBe(21);
+  });
+
+  test("resource service.name === catalyst.execution-core", () => {
+    const c = normalizePinoRecord({ level: 30, msg: "info" });
+    expect(c.resource["service.name"]).toBe("catalyst.execution-core");
+  });
+
+  test("ts derived from time (unix ms)", () => {
+    const c = normalizePinoRecord({ level: 30, time: BASE_TIME, msg: "info" });
+    expect(c.ts).toBe(new Date(BASE_TIME).toISOString());
+  });
+
+  test("body.message === msg", () => {
+    const c = normalizePinoRecord({ level: 30, time: BASE_TIME, msg: "the message" });
+    expect((c.body as { message: string }).message).toBe("the message");
+  });
+
+  test("residual fields (pid, name) preserved in body.payload", () => {
+    const c = normalizePinoRecord({ level: 30, time: BASE_TIME, msg: "m", pid: 42, name: "execution-core" });
+    const payload = (c.body as { payload: Record<string, unknown> }).payload;
+    expect(payload).toBeDefined();
+    expect(payload.pid).toBe(42);
+    expect(payload.name).toBe("execution-core");
+  });
+
+  test("output has attributes (passes processLine gate)", () => {
+    const c = normalizePinoRecord({ level: 30, msg: "info" });
+    expect("attributes" in c).toBe(true);
   });
 });
