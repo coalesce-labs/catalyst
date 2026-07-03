@@ -5,7 +5,7 @@
 // channel.watcher.heartbeat on every interval — WITHOUT exiting on a new turn
 // (phenomenon (i) vs phenomenon (ii) distinction per the decision record).
 //
-// Config via env vars (also loadable from a config file via --config):
+// Config via env vars:
 //   CATALYST_WATCHER_ID         watcher identity (default: hostname)
 //   CATALYST_WATCHER_CHANNEL    path to the md-channel file (required)
 //   CATALYST_WATCHER_INTERVAL_MS  heartbeat interval (default: 30000)
@@ -15,8 +15,8 @@
 // dies, launchd restarts it within seconds.
 
 import { readFileSync } from "node:fs";
-import { hostname } from "node:os";
-import { join, dirname } from "node:path";
+import { hostname, homedir } from "node:os";
+import { join } from "node:path";
 import { tick } from "./lib/watch-loop.mjs";
 import { countTurns } from "./lib/turn-parser.mjs";
 
@@ -29,7 +29,7 @@ if (!WATCHER_CHANNEL) {
 
 const WATCHER_ID = process.env.CATALYST_WATCHER_ID ?? hostname();
 const INTERVAL_MS = parseInt(process.env.CATALYST_WATCHER_INTERVAL_MS ?? "30000", 10);
-const CATALYST_DIR = process.env.CATALYST_DIR ?? `${process.env.HOME}/.catalyst`;
+const CATALYST_DIR = process.env.CATALYST_DIR ?? `${process.env.HOME ?? homedir()}/catalyst`;
 
 function getEventLogPath() {
   const now = new Date();
