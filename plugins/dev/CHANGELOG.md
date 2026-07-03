@@ -1,5 +1,26 @@
 # Changelog
 
+## [12.23.1](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.23.0...catalyst-dev-v12.23.1)
+
+Jul 03, 2026
+
+<!-- ai-enhanced -->
+
+### Linear Rate-Limit Freeze Fixes
+
+A cluster of fixes targeting the shared Linear bucket saturation that was freezing fleet dispatch and silently stalling replicas. Fence-guard reads are now cached (45s TTL), anchor UUID lookups are cached permanently, and dispatch reads route through the replica instead of hitting Linear live — together dropping breaker trips from ~18 per 3 minutes to near zero. A cloud-sync stall watchdog now detects frozen replica sockets and self-heals via process restart rather than sitting silent for hours, and interactive `claude` sessions now load plugins from `~/catalyst/plugin-source` on the same path as workers.
+
+
+
+### PRs
+
+* **dev:** cloud-sync stall watchdog + loud alert — stop silent replica freezes ([#2547](https://github.com/coalesce-labs/catalyst/issues/2547)) ([fd74bda](https://github.com/coalesce-labs/catalyst/commit/fd74bda299288d5ca6992e1b438cb1e83cd9312d))
+* **dev:** cluster-heartbeat — back off the shared bucket on a rate-class Linear 400/429 (CTL-1420 follow-up) ([#2539](https://github.com/coalesce-labs/catalyst/issues/2539)) ([01d8844](https://github.com/coalesce-labs/catalyst/commit/01d88449f3845db47f33bad6ec346a0797e8a71e))
+* **dev:** CTL-1420 — dispatch reads via replica (Stage 0: ownership→replica, eligible breaker-aware) ([#2551](https://github.com/coalesce-labs/catalyst/issues/2551)) ([32f34dd](https://github.com/coalesce-labs/catalyst/commit/32f34dd39780ab1846ff77fdab6a97fb0976784b))
+* **dev:** CTL-863 — cache the fence entourage (ResolveIssueId anchor-UUID + GetIssueByIdentifier) to fully clear the shared bucket ([#2554](https://github.com/coalesce-labs/catalyst/issues/2554)) ([19e5a66](https://github.com/coalesce-labs/catalyst/commit/19e5a66f625db000a9806d354f33d4253146ca49))
+* **dev:** CTL-863 — interim in-process TTL cache for fence ReadFence to unfreeze the shared Linear bucket ([#2552](https://github.com/coalesce-labs/catalyst/issues/2552)) ([3cc975e](https://github.com/coalesce-labs/catalyst/commit/3cc975e60755fa9c131ee45c2ef986036f3aa5d5))
+* **dev:** standard plugin-source loading for interactive sessions + drop marketplace guidance ([#2549](https://github.com/coalesce-labs/catalyst/issues/2549)) ([8c96b1f](https://github.com/coalesce-labs/catalyst/commit/8c96b1faa74c9642cb0bc7b1176557f149c477aa))
+
 ## [12.23.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.22.0...catalyst-dev-v12.23.0)
 
 Jul 02, 2026
