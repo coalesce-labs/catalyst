@@ -79,10 +79,16 @@ async function runTick() {
   }
 }
 
-// Fire once immediately then on the interval.
+// Fire once immediately then on the interval. The interval is the daemon's
+// reason to exist and is deliberately NOT unref()'d: a ref'd timer is what
+// holds the event loop open so the process actually loops. Node/bun signal
+// listeners and an unref'd timer do NOT keep the loop alive — unref'ing the
+// sole timer makes the process exit cleanly (code 0) after a single tick, and
+// the plist's KeepAlive={SuccessfulExit:false} would then leave the watcher
+// permanently down (turn-detection never fires; the broker dead-man's switch
+// raises a false system_down). Mirrors catalyst-agent.mjs / updater.mjs.
 runTick();
 const timer = setInterval(runTick, INTERVAL_MS);
-timer.unref?.();
 
 // Clean shutdown on SIGTERM.
 process.on("SIGTERM", () => {
