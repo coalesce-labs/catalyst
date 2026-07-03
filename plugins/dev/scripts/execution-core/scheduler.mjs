@@ -4363,6 +4363,12 @@ export function schedulerTick(
         // suppression. null when CATALYST_BELIEFS_SHADOW=0 (the default — legacy tests
         // unaffected; intentAwareKill falls through to plain killBgJob).
         intentDb,
+        // CTL-863: thread this tick's live cluster gate + host identity so
+        // reclaimDeadWork's postReclaimMirror fence zombie-guard is armed on a real
+        // ≥2-host cluster (roster resolved per-tick above → no boot-time staleness).
+        multiHost,
+        self,
+        gateway,
       };
       // CTL-736 Phase 3: no per-tick revive budget is threaded — the progress gate
       // (revive only while progressing; stop on zero progress) + the Phase-1 O_EXCL

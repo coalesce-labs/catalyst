@@ -1959,6 +1959,32 @@ describe("CTL-664: reclaim Linear mirror", () => {
     expect(r).toBe("reclaim-failed");
     expect(mirror.calls.length).toBe(0);
   });
+
+  // CTL-863 regression: the caller MUST thread the live cluster gate + host
+  // identity into postReclaimMirror. Before this fix reclaimDeadWorkIfPossible
+  // omitted multiHost/self, so defaultPostReclaimMirror always saw multiHost=false
+  // and the fence zombie-guard was inert on a real ≥2-host cluster. Assert the
+  // threaded values arrive so the guard is actually armed.
+  test("CTL-863: reclaimDeadWorkIfPossible threads multiHost/self/gateway into postReclaimMirror", () => {
+    const mirror = recorder(undefined);
+    reclaimDeadWorkIfPossible(orch, implementSignal(), {
+      statJob: () => null,
+      probes: { implement: () => true },
+      emitComplete: () => ({ code: 0 }),
+      appendEvent: () => {},
+      postReclaimMirror: mirror,
+      repoRoot: "/repo",
+      multiHost: true,
+      self: "host-A",
+      gateway: { probe: "sentinel" },
+    });
+    expect(mirror.calls.length).toBe(1);
+    expect(mirror.calls[0][0]).toMatchObject({
+      multiHost: true,
+      self: "host-A",
+      gateway: { probe: "sentinel" },
+    });
+  });
 });
 
 // defaultPostReclaimMirror — driven through its injected existsSync / writeMarker

@@ -1977,6 +1977,15 @@ export function reclaimDeadWorkIfPossible(
     // The intentDb is obtained from beliefs.db (CATALYST_BELIEFS_SHADOW=1 gate);
     // it is threaded in from the scheduler's reclaimOpts alongside fetchState/cache.
     intentDb = null,
+    // CTL-863: cluster-size gate + host identity for the postReclaimMirror fence
+    // zombie-guard. The scheduler threads its live per-tick values (scheduler.mjs
+    // reclaimOpts); the fail-safe defaults (multiHost:false → guard trusts local,
+    // the safe single-host floor) keep every unit test that omits them unchanged.
+    // Without this thread the guard call at defaultPostReclaimMirror always saw
+    // multiHost=false and was inert on a real ≥2-host cluster.
+    multiHost = false,
+    self = undefined,
+    gateway = undefined,
   } = {}
 ) {
   const klass = classifyWorker(signal, { statJob });
@@ -2345,6 +2354,10 @@ export function reclaimDeadWorkIfPossible(
         deathSignal: "alive-probe-done",
         probeChecked: describeProbe(phase),
         reclaimedBgJobId: prevBgJobId,
+        // CTL-863: thread the live cluster gate so the fence zombie-guard fires on ≥2 hosts.
+        multiHost,
+        self,
+        gateway,
       });
       log.info(
         { ticket, phase },
@@ -2766,6 +2779,10 @@ export function reclaimDeadWorkIfPossible(
       deathSignal: death_signal,
       probeChecked: probe_checked,
       reclaimedBgJobId: prevBgJobId,
+      // CTL-863: thread the live cluster gate so the fence zombie-guard fires on ≥2 hosts.
+      multiHost,
+      self,
+      gateway,
     });
     // CTL-932 fix #3: the phase SUCCEEDED (work committed) — clear any stale
     // never-started attempt marker so a much-later legitimate re-dispatch of the

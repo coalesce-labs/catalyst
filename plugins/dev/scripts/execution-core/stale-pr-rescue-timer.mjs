@@ -358,7 +358,14 @@ export function startStalePrRescueTimer({
   // Real Linear transport by default — the daemon call site passes nothing,
   // and a null default made every escalation a silent no-op (verify finding).
   linearWrite = linearWriteDefault,
-  multiHost = getClusterHosts().length > 1,
+  // CTL-863: resolve the cluster-size gate LIVE per tick (below), not once at
+  // daemon boot. A boot-time snapshot froze `multiHost=false` for the daemon's
+  // whole lifetime when the roster grew 1→2 without an exec-core restart (the
+  // config.mjs:590 "honored on the next tick, no restart" contract), leaving the
+  // fence zombie-guard permanently disarmed on this timer. `undefined` here means
+  // "not injected" → resolve fresh each tick; a test may still pass an explicit
+  // boolean to pin it. Matches the per-tick `getClusterHosts()` in scheduler/monitor.
+  multiHost = undefined,
   // injectable seams
   jobLifecycle: jobLifecycleFn = jobLifecycle,
   prView = defaultPrView,
@@ -382,12 +389,17 @@ export function startStalePrRescueTimer({
 
   const handle = clock.setInterval(async () => {
     try {
+      // CTL-863: live per-tick cluster-size gate. Re-read the roster each tick so
+      // a 1→2 roster growth arms the fence zombie-guard on the very next tick with
+      // no daemon restart. An explicitly-injected `multiHost` (tests) is honored.
+      const tickMultiHost =
+        multiHost === undefined ? getClusterHosts().length > 1 : multiHost;
       await runTick({
         orchDir,
         orchId,
         cfg,
         linearWrite,
-        multiHost,
+        multiHost: tickMultiHost,
         jobLifecycleFn,
         prView,
         compareBehind,
