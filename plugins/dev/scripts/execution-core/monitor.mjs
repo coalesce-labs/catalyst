@@ -73,6 +73,8 @@ import {
 import { appendTriageTransitionEvent as defaultAppendEvent } from "./triage-transition-event.mjs";
 import { countBackgroundAgents, resetLivenessCache } from "./claude-agents.mjs";
 import { readMaxParallel, computeFreeSlots, writeClusterGeneration } from "./scheduler.mjs";
+// CTL-863: Linear-free fence event emitter (durable fence → event-log migration).
+import { emitFenceClaimed } from "./fence-event.mjs";
 import { countSdkInflight as defaultCountSdkInflight } from "./signal-reader.mjs"; // CTL-1367 P1: executor=sdk occupancy reader for the triage budget
 import {
   recordReconcileSuccess,
@@ -771,6 +773,17 @@ function dispatchTriage(
   // CTL-1028: persist the won generation so a later flapping-host triage worker
   // is fenced. null (single-host) is a no-op inside writeClusterGeneration.
   writeClusterGeneration(orchDir, identifier, clusterGeneration);
+  // CTL-863: emit the authoritative fence.claimed event (Linear-free local append)
+  // so the broker projects this triage claim into ticket_state's fence columns.
+  // Multi-host only (clusterGeneration non-null); single-host never fences.
+  if (clusterGeneration != null) {
+    emitFenceClaimed({
+      ticket: identifier,
+      owner_host: self,
+      generation: clusterGeneration,
+      phase: "triage",
+    });
+  }
   if (budget) budget.remaining -= 1;
   // CTL-704: write Linear Todo→Triage (verified) + emit observability event.
   let res = { applied: false, verified: false, from_state: null, to_state: null, reason: null };

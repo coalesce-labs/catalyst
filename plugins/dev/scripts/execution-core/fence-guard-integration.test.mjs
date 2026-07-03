@@ -2,7 +2,11 @@
 // suppressed when fenceGuard returns false (CTL-863 Phase 4).
 //
 // Tests via public functions that contain the guards, injecting stale-fence
-// conditions (no signal file → readSignalGeneration returns null → fail-closed).
+// conditions (no signal file → readSignalGeneration returns null → fail-closed
+// for the 9 MUTATING write sites). EXCEPTION: site 10 (defaultEscalate,
+// stale-pr-rescue) is an ESCALATION write and fails OPEN on a missing generation
+// (proceedOnMissingGeneration) so a needs-human escalation is never silently
+// dropped — its "no signal file" case asserts the label IS applied.
 // Run: cd plugins/dev/scripts/execution-core && bun test fence-guard-integration.test.mjs
 
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
@@ -177,12 +181,17 @@ describe("defaultEscalate fence guard (site 10, CTL-863)", () => {
     expect(labelApplied).toBe(true);
   });
 
-  test("multi-host + stale fence (no signal file) → label NOT applied", () => {
+  // WATCH-ITEM (Codex follow-up): the escalation site is the ONE guarded write
+  // that fails OPEN on a MISSING generation (proceedOnMissingGeneration) — a
+  // needs-human escalation must NEVER be silently dropped just because a
+  // generation can't be read. So a multi-host escalate with no signal file
+  // (generation null) now LOUDLY applies the label rather than suppressing it.
+  test("multi-host + no signal file (missing generation) → label IS applied (fail-open, escalation never silently dropped)", () => {
     let labelApplied = false;
     mkdirSync(join(dir, "workers", "CTL-10"), { recursive: true });
     const linearWrite = { applyLabel: () => { labelApplied = true; return { applied: true }; } };
     defaultEscalate("CTL-10", {}, { orchDir: dir, linearWrite, multiHost: true });
-    expect(labelApplied).toBe(false);
+    expect(labelApplied).toBe(true);
   });
 
 });

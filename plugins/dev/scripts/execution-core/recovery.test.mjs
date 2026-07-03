@@ -1959,6 +1959,36 @@ describe("CTL-664: reclaim Linear mirror", () => {
     expect(r).toBe("reclaim-failed");
     expect(mirror.calls.length).toBe(0);
   });
+
+  // CTL-863 regression: the caller MUST thread the live cluster gate + host
+  // identity into postReclaimMirror. Before this fix reclaimDeadWorkIfPossible
+  // omitted multiHost/self, so defaultPostReclaimMirror always saw multiHost=false
+  // and the fence zombie-guard was inert on a real ≥2-host cluster. The gate MUST
+  // arrive in the SECOND (options) argument — that is where defaultPostReclaimMirror
+  // reads multiHost/self/gateway (Codex P2, recovery.mjs:2360); passing them in the
+  // first (payload) arg left the guard reading the default multiHost=false (inert).
+  test("CTL-863: reclaimDeadWorkIfPossible threads multiHost/self/gateway into postReclaimMirror (2nd arg)", () => {
+    const mirror = recorder(undefined);
+    reclaimDeadWorkIfPossible(orch, implementSignal(), {
+      statJob: () => null,
+      probes: { implement: () => true },
+      emitComplete: () => ({ code: 0 }),
+      appendEvent: () => {},
+      postReclaimMirror: mirror,
+      repoRoot: "/repo",
+      multiHost: true,
+      self: "host-A",
+      gateway: { probe: "sentinel" },
+    });
+    expect(mirror.calls.length).toBe(1);
+    // The options object (2nd arg) carries the fence gate — the position
+    // defaultPostReclaimMirror actually destructures.
+    expect(mirror.calls[0][1]).toMatchObject({
+      multiHost: true,
+      self: "host-A",
+      gateway: { probe: "sentinel" },
+    });
+  });
 });
 
 // defaultPostReclaimMirror — driven through its injected existsSync / writeMarker
@@ -4976,6 +5006,64 @@ describe("reclaimDeadHostWork — takeover sweep (CTL-863)", () => {
     );
     expect(dispatches.sort()).toEqual(["CTL-900", "CTL-901"]);
     expect(r.taken).toHaveLength(2);
+  });
+
+  // ── CTL-863 follow-up regression (Codex P2 #3 + #5) — the takeover fence must
+  // both (a) EMIT fence.claimed as soon as the claim wins (not gated on a
+  // successful redispatch) and (b) PERSIST the won generation to
+  // cluster-generation.json so the heartbeat publisher can re-emit it and keep
+  // the reclaimed ticket's projection fresh. These are filesystem-observable
+  // (emitFenceClaimed / writeLocalClusterGeneration are not injectable seams).
+  describe("takeover fence durability", () => {
+    let catalystDir;
+    let orchDir;
+    let savedCatalystDir;
+    beforeEach(() => {
+      catalystDir = mkdtempSync(join(tmpdir(), "ctl863-fence-catalyst-"));
+      orchDir = mkdtempSync(join(tmpdir(), "ctl863-fence-orch-"));
+      savedCatalystDir = process.env.CATALYST_DIR;
+      process.env.CATALYST_DIR = catalystDir; // isolate the event log write
+    });
+    afterEach(() => {
+      if (savedCatalystDir === undefined) delete process.env.CATALYST_DIR;
+      else process.env.CATALYST_DIR = savedCatalystDir;
+      rmSync(catalystDir, { recursive: true, force: true });
+      rmSync(orchDir, { recursive: true, force: true });
+    });
+
+    const eventLogText = () => {
+      const dir = join(catalystDir, "events");
+      if (!existsSync(dir)) return "";
+      return readdirSync(dir)
+        .map((f) => readFileSync(join(dir, f), "utf8"))
+        .join("");
+    };
+
+    test("#3: a successful takeover PERSISTS the won generation to cluster-generation.json", async () => {
+      mkdirSync(join(orchDir, "workers", "CTL-900"), { recursive: true });
+      const r = await reclaimDeadHostWork(
+        { orchDir },
+        makeBaseDeps({ rebuildWorktree: () => ({ ok: true, cwd: join(orchDir, "wt") }) }),
+      );
+      expect(r.taken).toHaveLength(1);
+      const gen = JSON.parse(
+        readFileSync(join(orchDir, "workers", "CTL-900", "cluster-generation.json"), "utf8"),
+      );
+      expect(gen).toEqual({ generation: 5 });
+    });
+
+    test("#5: fence.claimed is emitted at claim-win even when the redispatch never succeeds", async () => {
+      // rebuildWorktree fails → no dispatch, taken stays empty — but the claim
+      // already bumped the generation, so the durable projection MUST record the
+      // takeover regardless (else a partitioned old owner keeps a fresh-looking
+      // self-owned projection under projection-first).
+      const r = await reclaimDeadHostWork(
+        { orchDir },
+        makeBaseDeps({ rebuildWorktree: () => ({ ok: false, cwd: null }) }),
+      );
+      expect(r.taken).toEqual([]);
+      expect(eventLogText()).toContain("fence.claimed.CTL-900");
+    });
   });
 });
 

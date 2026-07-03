@@ -75,6 +75,7 @@ import {
   upsertTicketDescriptor,
   markTicketRemovedByUuid,
   upsertTicketFence,
+  getTicketDescriptor,
   setTicketHeldSince,
   clearTicketHeldSince,
   upsertWaitingSession,
@@ -1588,6 +1589,74 @@ function foldFenceMetadata(ticket, fence) {
   });
 }
 
+// projectFenceEvent — CTL-863 (durable fence → event-log migration). Fold a
+// standalone `fence.claimed.<TICKET>` / `fence.released.<TICKET>` event (emitted
+// Linear-free by execution-core/fence-event.mjs) into the ticket_state fence
+// columns. This makes the event log — not a Linear attachment — the source of the
+// fence projection the daemon reads via gateway-read.mjs::gatewayFence.
+//
+// Non-consuming side-channel (like projectWorkerStateEvent): runs ABOVE the
+// shouldSkipEvent / interests gates so the projection converges whether or not any
+// orchestration is actively interested in the ticket. Best-effort: never throws.
+//
+//   fence.claimed  → owner_host/generation/phase/claimed_at from body.payload.
+//   fence.released → payload owner_host is null → foldFenceMetadata(null) CLEARS
+//                    the projection (the guard then reads "not self-owned" →
+//                    suppress; never allow).
+//
+// The broker stays the SOLE writer of the local ticket_state projection — this is
+// a broker-side fold of an exec-core-emitted event, not a second writer.
+export function projectFenceEvent(event) {
+  try {
+    const name = getEventName(event);
+    if (typeof name !== "string" || !name.startsWith("fence.")) return;
+    const p = getEventPayload(event);
+    const ticket = p?.ticket ?? event.attributes?.["linear.issue.identifier"];
+    if (!ticket) return;
+    if (name.startsWith("fence.released")) {
+      foldFenceMetadata(ticket, null); // explicit null → CLEAR the projection
+      return;
+    }
+    if (name.startsWith("fence.claimed")) {
+      // Call upsertTicketFence directly (not foldFenceMetadata, which coerces an
+      // absent phase to null) so a heartbeat-cadence re-emit — which carries
+      // phase:null — KEEPS the stored phase via key-presence, while a genuine
+      // claim/takeover (phase present) sets it. owner_host/generation/claimed_at
+      // are always meaningful on a claimed event → always projected.
+      const genRaw = p.generation;
+      const generation = genRaw == null ? null : Number(genRaw);
+      const gen = Number.isFinite(generation) ? generation : null;
+
+      // CTL-863 (Codex P1, router.mjs:1634): REJECT a stale (lower-generation)
+      // claim. A partitioned/paused zombie keeps heartbeat-re-emitting
+      // fence.claimed with its OLD generation; without this guard the fold would
+      // unconditionally upsert that later-arriving LOWER generation and DOWNGRADE
+      // a projection another host already advanced with a higher-generation
+      // takeover — after which fenceGuard (projection-first) reads a fresh
+      // self-owned matching row and ALLOWS the zombie's writes. Equal generation
+      // is accepted (a healthy owner's own heartbeat re-emit must refresh
+      // claimed_at); higher is accepted (the takeover itself). A claim with no
+      // finite generation can't be compared → projected as before (no regression).
+      if (gen != null) {
+        const stored = getTicketDescriptor(ticket);
+        const storedGen = Number.isFinite(stored?.generation) ? stored.generation : null;
+        if (storedGen != null && gen < storedGen) return; // stale downgrade → drop
+      }
+
+      const fence = {
+        ticket,
+        ownerHost: p.owner_host ?? null,
+        generation: gen,
+        claimedAt: p.claimed_at ?? null,
+      };
+      if (p.phase != null) fence.phase = p.phase; // key-present only when supplied
+      upsertTicketFence(fence);
+    }
+  } catch {
+    /* the routing path must never die on a fence projection write */
+  }
+}
+
 export function tryTicketLifecycleRoute(event, interestsMap) {
   const matches = [];
   // CTL-357: read event name + payload via the canonical-aware helpers so
@@ -2323,6 +2392,12 @@ export function processEvent(event) {
   // non-consuming — the projection is a side-channel observer and never
   // returns, so existing routing below is untouched).
   projectWorkerStateEvent(event);
+
+  // CTL-863: fold fence.claimed/fence.released into the ticket_state fence
+  // columns. Non-consuming side-channel like projectWorkerStateEvent — the fence
+  // projection must converge whether or not the ticket has an active interest.
+  // The broker stays sole writer of the local projection.
+  projectFenceEvent(event);
 
   // CTL-993: on a merge-to-main of the configured repo, ff-only pull the
   // pluginDirs checkout so fixes go live within seconds. Non-consuming

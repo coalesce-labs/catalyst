@@ -76,6 +76,8 @@ import { claimDispatchSync } from "./cluster-claim-sync.mjs";
 import { dispatchTicket, defaultDispatch, settleDispatchSync, sdkSignalRunnable, backstopOnRejection } from "./dispatch.mjs"; // CTL-1367 P1: settle async (sdk) revive dispatch synchronously + backstop a rejected async dispatch
 import { createWorktree } from "./worktree.mjs";
 import { fenceGuard } from "./fence-guard.mjs";
+// CTL-863: Linear-free fence event emitter (durable fence → event-log migration).
+import { emitFenceClaimed } from "./fence-event.mjs";
 import { applyLabel as defaultApplyLabel } from "./linear-write.mjs";
 import { linearBreaker } from "./linear-breaker.mjs";
 // CTL-642: the SHARED terminal-state predicate. The recovery short-circuit reuses
@@ -619,12 +621,15 @@ export function defaultPostReclaimMirror(
       return spawnSync(helperPath, [t, bodyText], { encoding: "utf8" });
     },
     multiHost = false,
+    // CTL-863: threaded through for the Stage-1 projection-first fence read.
+    gateway = undefined,
+    self = undefined,
   } = {}
 ) {
   const marker = `${orchDir}/workers/${ticket}/.linear-mirror-${phase}`;
   if (exists(marker)) return; // first-writer-wins
   // CTL-863: zombie guard — a post-takeover paused host must not post a mirror comment.
-  if (!fenceGuard({ ticket, orchDir, multiHost })) {
+  if (!fenceGuard({ ticket, orchDir, multiHost, gateway, self })) {
     log.warn(
       { ticket, phase },
       "ctl-863: stale fence — suppressing postReclaimMirror comment (zombie guard)"
@@ -1978,6 +1983,15 @@ export function reclaimDeadWorkIfPossible(
     // The intentDb is obtained from beliefs.db (CATALYST_BELIEFS_SHADOW=1 gate);
     // it is threaded in from the scheduler's reclaimOpts alongside fetchState/cache.
     intentDb = null,
+    // CTL-863: cluster-size gate + host identity for the postReclaimMirror fence
+    // zombie-guard. The scheduler threads its live per-tick values (scheduler.mjs
+    // reclaimOpts); the fail-safe defaults (multiHost:false → guard trusts local,
+    // the safe single-host floor) keep every unit test that omits them unchanged.
+    // Without this thread the guard call at defaultPostReclaimMirror always saw
+    // multiHost=false and was inert on a real ≥2-host cluster.
+    multiHost = false,
+    self = undefined,
+    gateway = undefined,
   } = {}
 ) {
   const klass = classifyWorker(signal, { statJob });
@@ -2339,14 +2353,21 @@ export function reclaimDeadWorkIfPossible(
         );
         return "reclaim-failed";
       }
-      postReclaimMirror({
-        orchDir,
-        ticket,
-        phase,
-        deathSignal: "alive-probe-done",
-        probeChecked: describeProbe(phase),
-        reclaimedBgJobId: prevBgJobId,
-      });
+      postReclaimMirror(
+        {
+          orchDir,
+          ticket,
+          phase,
+          deathSignal: "alive-probe-done",
+          probeChecked: describeProbe(phase),
+          reclaimedBgJobId: prevBgJobId,
+        },
+        // CTL-863 (Codex P2, recovery.mjs:2360): thread the live cluster gate as
+        // the SECOND (options) argument — that is where defaultPostReclaimMirror
+        // reads multiHost/self/gateway. Passing them in the first (payload) arg
+        // left the fence zombie-guard seeing multiHost=false (inert on ≥2 hosts).
+        { multiHost, self, gateway }
+      );
       log.info(
         { ticket, phase },
         "ctl-778: alive-but-idle worker reclaimed (complete event + probe)"
@@ -2760,14 +2781,21 @@ export function reclaimDeadWorkIfPossible(
     }
     // CTL-664: mirror the reclaim to Linear (after emit-complete succeeds, so a
     // reclaim-failed never posts). Reuses the Phase 2 consts — no recomputation.
-    postReclaimMirror({
-      orchDir,
-      ticket,
-      phase,
-      deathSignal: death_signal,
-      probeChecked: probe_checked,
-      reclaimedBgJobId: prevBgJobId,
-    });
+    postReclaimMirror(
+      {
+        orchDir,
+        ticket,
+        phase,
+        deathSignal: death_signal,
+        probeChecked: probe_checked,
+        reclaimedBgJobId: prevBgJobId,
+      },
+      // CTL-863 (Codex P2, recovery.mjs:2360): thread the live cluster gate as
+      // the SECOND (options) argument — that is where defaultPostReclaimMirror
+      // reads multiHost/self/gateway. Passing them in the first (payload) arg
+      // left the fence zombie-guard seeing multiHost=false (inert on ≥2 hosts).
+      { multiHost, self, gateway }
+    );
     // CTL-932 fix #3: the phase SUCCEEDED (work committed) — clear any stale
     // never-started attempt marker so a much-later legitimate re-dispatch of the
     // same (ticket, phase) starts the wedge budget fresh instead of inheriting a
@@ -3262,6 +3290,30 @@ function defaultOwnedTicketsForHost(
   return [...tickets];
 }
 
+// writeLocalClusterGeneration — persist a won cross-host fence generation to
+// workers/<ticket>/cluster-generation.json (idempotent tmp+rename). This is a
+// LOCAL inline copy of scheduler.mjs::writeClusterGeneration: recovery.mjs must
+// NOT import scheduler.mjs (scheduler.mjs already imports reclaimDeadWorkIfPossible
+// from here — the reverse edge would be a cycle; same rationale as
+// cluster-heartbeat-publisher.mjs::localClusterGeneration, which inlines the READ).
+// Writes the SAME { generation } shape at the SAME path the heartbeat publisher's
+// readGeneration reads, so a taken-over ticket's fence keeps getting refreshed on
+// the heartbeat cadence (Codex P2, recovery.mjs:3371). Non-finite generation
+// (single-host / null claim) is never persisted; best-effort (a missing worker dir
+// or I/O failure silently no-ops, like writeWorkerPriority).
+function writeLocalClusterGeneration(orchDir, ticket, generation) {
+  if (!Number.isFinite(generation)) return;
+  const p = join(orchDir, "workers", ticket, "cluster-generation.json");
+  try {
+    const tmp = `${p}.tmp.${process.pid}`;
+    writeFileSync(tmp, JSON.stringify({ generation }));
+    renameSync(tmp, p);
+  } catch {
+    // best-effort — missing worker dir or I/O failure; the heartbeat re-emit just
+    // won't refresh this ticket until a later successful write.
+  }
+}
+
 // reclaimDeadHostWork — takeover sweep (CTL-863, Part A).
 //
 // When a host goes silent (heartbeat silence > graceMs), surviving hosts detect it,
@@ -3317,6 +3369,25 @@ export async function reclaimDeadHostWork(
       const claimRes = claim(ticket, NEW_WORK_ENTRY_PHASE);
       if (!claimRes?.won) continue;
 
+      // CTL-863: emit fence.claimed for the TAKEOVER bump AS SOON AS THE CLAIM
+      // WINS — NOT gated on a successful redispatch (Codex P2, recovery.mjs:3358).
+      // The generation is ALREADY bumped by the soft-CAS above, so the superseded
+      // (dead/partitioned) host is superseded in the claim store regardless of
+      // whether the rebuild/inference/dispatch below succeeds; the durable
+      // projection must record that fact now, or a later-failing takeover would
+      // leave the old owner a fresh-looking self-owned projection under
+      // projection-first. Linear-free local append; multi-host only (reclaim
+      // never runs at roster<=1). Phase is the entry phase we claimed on (the
+      // resume phase is inferred later and doesn't change fence ownership).
+      if (Number.isFinite(claimRes.generation)) {
+        emitFenceClaimed({
+          ticket,
+          owner_host: self,
+          generation: claimRes.generation,
+          phase: NEW_WORK_ENTRY_PHASE,
+        });
+      }
+
       // Rebuild the worktree on the ticket branch.
       const wt = rebuildWorktree(ticket);
       if (!wt?.ok) continue;
@@ -3341,6 +3412,14 @@ export async function reclaimDeadHostWork(
       const r = dispatch(orchDir, ticket, phase, wt.cwd);
       if (r?.code === 0) {
         taken.push({ ticket, phase, generation: claimRes.generation });
+        // CTL-863 (Codex P2, recovery.mjs:3371): persist the won takeover
+        // generation now that the worker dir provably exists (dispatch
+        // succeeded), mirroring the scheduler/monitor claim-win pairing. The
+        // heartbeat publisher's readGeneration reads this file to re-emit
+        // fence.claimed on the 120s cadence, keeping the reclaimed ticket's
+        // projection FRESH — without it the initial takeover fence ages past
+        // FENCE_FRESH_MS and guarded writes fall back to Linear / fail closed.
+        writeLocalClusterGeneration(orchDir, ticket, claimRes.generation);
       }
     }
   }
