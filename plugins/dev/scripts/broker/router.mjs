@@ -75,6 +75,7 @@ import {
   upsertTicketDescriptor,
   markTicketRemovedByUuid,
   upsertTicketFence,
+  getTicketDescriptor,
   setTicketHeldSince,
   clearTicketHeldSince,
   upsertWaitingSession,
@@ -1624,10 +1625,28 @@ export function projectFenceEvent(event) {
       // are always meaningful on a claimed event → always projected.
       const genRaw = p.generation;
       const generation = genRaw == null ? null : Number(genRaw);
+      const gen = Number.isFinite(generation) ? generation : null;
+
+      // CTL-863 (Codex P1, router.mjs:1634): REJECT a stale (lower-generation)
+      // claim. A partitioned/paused zombie keeps heartbeat-re-emitting
+      // fence.claimed with its OLD generation; without this guard the fold would
+      // unconditionally upsert that later-arriving LOWER generation and DOWNGRADE
+      // a projection another host already advanced with a higher-generation
+      // takeover — after which fenceGuard (projection-first) reads a fresh
+      // self-owned matching row and ALLOWS the zombie's writes. Equal generation
+      // is accepted (a healthy owner's own heartbeat re-emit must refresh
+      // claimed_at); higher is accepted (the takeover itself). A claim with no
+      // finite generation can't be compared → projected as before (no regression).
+      if (gen != null) {
+        const stored = getTicketDescriptor(ticket);
+        const storedGen = Number.isFinite(stored?.generation) ? stored.generation : null;
+        if (storedGen != null && gen < storedGen) return; // stale downgrade → drop
+      }
+
       const fence = {
         ticket,
         ownerHost: p.owner_host ?? null,
-        generation: Number.isFinite(generation) ? generation : null,
+        generation: gen,
         claimedAt: p.claimed_at ?? null,
       };
       if (p.phase != null) fence.phase = p.phase; // key-present only when supplied

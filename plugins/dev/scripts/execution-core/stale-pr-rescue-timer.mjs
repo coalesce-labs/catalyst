@@ -313,7 +313,12 @@ export function defaultEscalate(
   { orchDir, linearWrite, multiHost = false, gateway = undefined, self = undefined, env = process.env } = {}
 ) {
   if (linearWrite) {
-    if (fenceGuard({ ticket, orchDir, multiHost, gateway, self })) {
+    // This is an ESCALATION write (needs-human), so it fails OPEN on a MISSING
+    // generation (proceedOnMissingGeneration): a zombie-guard that can't read a
+    // generation must LOUDLY proceed with the label rather than silently drop a
+    // human escalation. A genuine supersession (readable generation, fresh
+    // foreign owner / authoritative read says not-current) still suppresses.
+    if (fenceGuard({ ticket, orchDir, multiHost, gateway, self }, { proceedOnMissingGeneration: true })) {
       labelNeedsHumanUnlessBeliefOwner(orchDir, ticket, linearWrite, {
         env,
         site: "stale-pr-rescue",

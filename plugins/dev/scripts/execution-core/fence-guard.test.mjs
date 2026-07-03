@@ -112,8 +112,12 @@ describe("fenceGuard — multi-host default (Stage 0, readSource=linear → esca
   });
 });
 
-describe("fenceGuard — multi-host projection-first (Stage 1 opt-in)", () => {
+describe("fenceGuard — multi-host projection-first (Stage 1 opt-in, marker-gated)", () => {
   const base = { ticket: "CTL-1", orchDir: "/o", multiHost: true, gateway: {}, self: "mini" };
+  // The N>1 guardrail hard-refuses projection-first on a multi-host roster unless
+  // the Stage-1 capability marker is present; these tests exercise the Stage-1
+  // projection LOGIC, so they arm the marker.
+  const STAGE1 = { CATALYST_FENCE_STAGE1_STORE: "1" };
 
   test("fresh self-owned + generation match → true (fast path, no escalate)", () => {
     let escalated = false;
@@ -123,6 +127,7 @@ describe("fenceGuard — multi-host projection-first (Stage 1 opt-in)", () => {
       isFresh: () => true,
       escalate: () => { escalated = true; return { current: false }; },
       readSource: "projection-first",
+      env: STAGE1,
     });
     expect(result).toBe(true);
     expect(escalated).toBe(false); // burn-eliminated: no authoritative read
@@ -135,6 +140,7 @@ describe("fenceGuard — multi-host projection-first (Stage 1 opt-in)", () => {
       isFresh: () => true,
       escalate: () => ({ current: true }), // even if Linear lied, we must not reach it
       readSource: "projection-first",
+      env: STAGE1,
     });
     expect(result).toBe(false);
   });
@@ -146,6 +152,7 @@ describe("fenceGuard — multi-host projection-first (Stage 1 opt-in)", () => {
       isFresh: () => true,
       escalate: () => ({ current: true }),
       readSource: "projection-first",
+      env: STAGE1,
     });
     expect(result).toBe(false);
   });
@@ -158,6 +165,7 @@ describe("fenceGuard — multi-host projection-first (Stage 1 opt-in)", () => {
       isFresh: () => false, // missed a re-emit → not fresh
       escalate: () => { escalated = true; return { current: true }; },
       readSource: "projection-first",
+      env: STAGE1,
     });
     expect(escalated).toBe(true);
     expect(result).toBe(true); // authoritative said current → allow
@@ -171,6 +179,7 @@ describe("fenceGuard — multi-host projection-first (Stage 1 opt-in)", () => {
       isFresh: () => true,
       escalate: () => { escalated = true; return { current: true }; },
       readSource: "projection-first",
+      env: STAGE1,
     });
     expect(escalated).toBe(true);
     expect(result).toBe(true);
@@ -185,8 +194,102 @@ describe("fenceGuard — multi-host projection-first (Stage 1 opt-in)", () => {
       isFresh: () => true,
       escalate: () => ({ current: false }),
       readSource: "projection-first",
+      env: STAGE1,
     });
     expect(result).toBe(false);
+  });
+
+  test("default freshness window (240s) trusts a self-owned row claimed 150s ago (would be stale under the old 90s)", () => {
+    // Uses the REAL isFresh (default). A 150s-old claim is within the 240s window
+    // → trusted without escalating. Under the pre-fix 90s default it would have
+    // been stale and needlessly escalated to Linear every cycle (Codex P2:35).
+    let escalated = false;
+    const claimedAt = new Date(Date.now() - 150_000).toISOString();
+    const result = fenceGuard(base, {
+      readGen: () => 5,
+      readFence: () => fenceRow({ ownerHost: "mini", generation: 5, claimedAt }),
+      escalate: () => { escalated = true; return { current: false }; },
+      readSource: "projection-first",
+      env: STAGE1, // no CATALYST_FENCE_FRESH_MS override → default 240_000
+    });
+    expect(result).toBe(true);
+    expect(escalated).toBe(false);
+  });
+});
+
+describe("fenceGuard — N>1 projection-first guardrail (Codex: unsafe without Stage-1 store)", () => {
+  const base = { ticket: "CTL-GUARD-1", orchDir: "/o", multiHost: true, gateway: {}, self: "mini" };
+
+  test("projection-first on a >1 roster WITHOUT the Stage-1 marker → REFUSED, falls back to the authoritative read + warns", () => {
+    let escalated = false;
+    let fenceRead = false;
+    const warns = [];
+    const result = fenceGuard(base, {
+      readGen: () => 5,
+      readFence: () => { fenceRead = true; return fenceRow({ ownerHost: "mini", generation: 5 }); },
+      isFresh: () => true, // even a fresh self-owned row must NOT be trusted
+      escalate: () => { escalated = true; return { current: false }; },
+      readSource: "projection-first",
+      env: {}, // no marker
+      logger: { warn: (...a) => warns.push(a) },
+    });
+    expect(result).toBe(false);   // fell back to escalate, which said not-current
+    expect(escalated).toBe(true); // authoritative read WAS consulted (linear)
+    expect(fenceRead).toBe(false); // projection NOT trusted
+    expect(warns.length).toBe(1); // loud refusal warning fired
+  });
+
+  test("projection-first WITH the Stage-1 marker → the fast path is armed (marker gates the guardrail)", () => {
+    let escalated = false;
+    const result = fenceGuard(base, {
+      readGen: () => 5,
+      readFence: () => fenceRow({ ownerHost: "mini", generation: 5 }),
+      isFresh: () => true,
+      escalate: () => { escalated = true; return { current: false }; },
+      readSource: "projection-first",
+      env: { CATALYST_FENCE_STAGE1_STORE: "1" },
+    });
+    expect(result).toBe(true);    // fresh self-owned row trusted
+    expect(escalated).toBe(false); // no authoritative read
+  });
+});
+
+describe("fenceGuard — escalation-site fail-open on missing generation (watch item)", () => {
+  test("proceedOnMissingGeneration:true + null generation → PROCEED (write) + loud warn, never a silent drop", () => {
+    const warns = [];
+    const result = fenceGuard(
+      { ticket: "CTL-1", orchDir: "/o", multiHost: true, self: "mini" },
+      {
+        readGen: () => null,
+        escalate: () => ({ current: false }),
+        readSource: "linear",
+        proceedOnMissingGeneration: true,
+        logger: { warn: (...a) => warns.push(a) },
+      },
+    );
+    expect(result).toBe(true);     // fail-OPEN: the escalation is written
+    expect(warns.length).toBe(1);  // and loudly logged
+  });
+
+  test("default (proceedOnMissingGeneration:false) + null generation → fail-closed (mutating write sites unchanged)", () => {
+    const result = fenceGuard(
+      { ticket: "CTL-1", orchDir: "/o", multiHost: true, self: "mini" },
+      { readGen: () => null, escalate: () => ({ current: true }), readSource: "linear" },
+    );
+    expect(result).toBe(false);
+  });
+
+  test("proceedOnMissingGeneration does NOT loosen a readable-but-superseded generation (still suppresses)", () => {
+    const result = fenceGuard(
+      { ticket: "CTL-1", orchDir: "/o", multiHost: true, self: "mini" },
+      {
+        readGen: () => 5, // generation IS readable
+        escalate: () => ({ current: false }), // authoritative says superseded
+        readSource: "linear",
+        proceedOnMissingGeneration: true,
+      },
+    );
+    expect(result).toBe(false); // readable generation → the real check still runs
   });
 });
 

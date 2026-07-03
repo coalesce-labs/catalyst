@@ -101,6 +101,29 @@ describe("idempotence + race-freedom", () => {
     expect(d.generation).toBe(5);
   });
 
+  test("a STALE lower-generation re-emit does NOT downgrade a taken-over fence (Codex P1)", () => {
+    // mini owns at gen 5; laptop takes over → gen 6. A partitioned zombie (mini)
+    // then heartbeat-re-emits its OLD gen 5. The fold MUST reject the downgrade so
+    // the projection stays owner=laptop/gen 6 — otherwise projection-first would
+    // read a fresh self-owned matching row for the zombie and allow its writes.
+    processEvent(fenceEvent({ ticket: "CTL-1", action: "claimed", owner_host: "mini", generation: 5, phase: "implement", claimed_at: "2026-07-03T11:00:00Z" }));
+    processEvent(fenceEvent({ ticket: "CTL-1", action: "claimed", owner_host: "laptop", generation: 6, phase: "implement", claimed_at: "2026-07-03T11:05:00Z" }));
+    processEvent(fenceEvent({ ticket: "CTL-1", action: "claimed", owner_host: "mini", generation: 5, claimed_at: "2026-07-03T11:07:00Z" })); // zombie stale re-emit
+    const d = getTicketDescriptor("CTL-1");
+    expect(d.ownerHost).toBe("laptop"); // NOT downgraded back to mini
+    expect(d.generation).toBe(6);
+    expect(d.claimedAt).toBe("2026-07-03T11:05:00Z"); // stale re-emit did not refresh either
+  });
+
+  test("an EQUAL-generation re-emit from the current owner still refreshes (guard only rejects strictly-lower)", () => {
+    processEvent(fenceEvent({ ticket: "CTL-1", action: "claimed", owner_host: "laptop", generation: 6, phase: "implement", claimed_at: "2026-07-03T11:05:00Z" }));
+    processEvent(fenceEvent({ ticket: "CTL-1", action: "claimed", owner_host: "laptop", generation: 6, claimed_at: "2026-07-03T11:07:00Z" })); // healthy heartbeat re-emit
+    const d = getTicketDescriptor("CTL-1");
+    expect(d.generation).toBe(6);
+    expect(d.claimedAt).toBe("2026-07-03T11:07:00Z"); // refreshed
+    expect(d.fencePhase).toBe("implement"); // stored phase preserved
+  });
+
   test("a malformed fence event never throws out of processEvent", () => {
     // ticket missing from both payload and attributes → projectFenceEvent bails.
     expect(() =>
