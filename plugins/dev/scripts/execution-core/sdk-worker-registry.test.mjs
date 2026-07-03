@@ -11,6 +11,7 @@ import { join } from "node:path";
 
 import {
   SDK_WORKER_FRESH_MS,
+  WARM_HARVEST_MAX_AGE_MS,
   PREEMPTION_ABORT_REASON,
   isPreemptionAbort,
   registerSdkWorker,
@@ -374,5 +375,85 @@ describe("abort / cancel", () => {
     expect(isPreemptionAbort(new Error(PREEMPTION_ABORT_REASON))).toBe(true);
     expect(isPreemptionAbort("sdk-threw")).toBe(false);
     expect(isPreemptionAbort(undefined)).toBe(false);
+  });
+});
+
+describe("session capture (CTL-1422)", () => {
+  test("setSessionId records the id, exposes it, and writes the projection immediately (bypasses throttle)", () => {
+    const dir = freshDir();
+    let t = T0;
+    const h = registerSdkWorker(entry(dir), { now: () => t });
+    t = T0 + 1_000; // INSIDE the touch throttle — the session write must not wait
+    h.setSessionId("sess-abc");
+    expect(sdkWorkerForTicket("CTL-1").sessionId).toBe("sess-abc");
+    expect(readProjection(dir, "CTL-1").sessionId).toBe("sess-abc");
+    h.deregister();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("a superseded handle's setSessionId does not clobber the successor (token fence)", () => {
+    const dir = freshDir();
+    const hOld = registerSdkWorker(entry(dir, { generation: 1 }));
+    const hNew = registerSdkWorker(entry(dir, { generation: 2 }));
+    hNew.setSessionId("sess-new");
+    hOld.setSessionId("sess-stale"); // superseded — must be a no-op
+    expect(sdkWorkerForTicket("CTL-1").sessionId).toBe("sess-new");
+    expect(readProjection(dir, "CTL-1").sessionId).toBe("sess-new");
+    hNew.deregister();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("reconcileSdkRegistryOnBoot harvests dead-pid projections that carry a sessionId", () => {
+    const dir = freshDir();
+    mkdirSync(join(dir, ".sdk-workers"), { recursive: true });
+    writeFileSync(
+      join(dir, ".sdk-workers", "CTL-1.json"),
+      JSON.stringify({ ticket: "CTL-1", phase: "implement", sessionId: "sess-1", generation: 3, worktreePath: "/wt/a", pid: 11111, updatedAt: T0 }),
+    );
+    writeFileSync(
+      join(dir, ".sdk-workers", "CTL-2.json"),
+      JSON.stringify({ ticket: "CTL-2", pid: 11111, updatedAt: T0 }), // dead, no session — removed, not harvested
+    );
+    writeFileSync(
+      join(dir, ".sdk-workers", "CTL-3.json"),
+      JSON.stringify({ ticket: "CTL-3", sessionId: "sess-3", pid: 22222, updatedAt: T0 }), // pid ALIVE — kept
+    );
+    const res = reconcileSdkRegistryOnBoot(dir, { pidAlive: (pid) => pid === 22222, now: () => T0 + 1000 });
+    expect(res.removed).toEqual(["CTL-2"]); // unharvestable only
+    expect(res.kept).toEqual(["CTL-3"]);
+    expect(res.harvested).toEqual([
+      { ticket: "CTL-1", sessionId: "sess-1", phase: "implement", generation: 3, worktreePath: "/wt/a" },
+    ]);
+    // Review fix (B): the harvested projection is KEPT — it is the only durable
+    // copy of the UUID until the resumed run re-registers.
+    expect(existsSync(join(dir, ".sdk-workers", "CTL-1.json"))).toBe(true);
+    expect(existsSync(join(dir, ".sdk-workers", "CTL-2.json"))).toBe(false);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("a stale harvested projection (past the 48h lookback) is removed, not harvested", () => {
+    const dir = freshDir();
+    mkdirSync(join(dir, ".sdk-workers"), { recursive: true });
+    writeFileSync(
+      join(dir, ".sdk-workers", "CTL-9.json"),
+      JSON.stringify({ ticket: "CTL-9", sessionId: "sess-old", pid: 11111, updatedAt: T0 }),
+    );
+    const res = reconcileSdkRegistryOnBoot(dir, {
+      pidAlive: () => false,
+      now: () => T0 + WARM_HARVEST_MAX_AGE_MS + 1,
+    });
+    expect(res.harvested).toEqual([]);
+    expect(res.removed).toEqual(["CTL-9"]);
+    expect(existsSync(join(dir, ".sdk-workers", "CTL-9.json"))).toBe(false);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("register seeds the projection with a known resumeSession UUID (crash-before-init safety)", () => {
+    const dir = freshDir();
+    const h = registerSdkWorker(entry(dir, { sessionId: "sess-warm" }), { now: () => T0 });
+    expect(readProjection(dir, "CTL-1").sessionId).toBe("sess-warm");
+    expect(sdkWorkerForTicket("CTL-1").sessionId).toBe("sess-warm");
+    h.deregister();
+    rmSync(dir, { recursive: true, force: true });
   });
 });

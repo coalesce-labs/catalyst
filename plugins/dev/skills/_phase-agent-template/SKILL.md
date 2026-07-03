@@ -47,6 +47,11 @@ Every phase agent:
    - Updates `${ORCH_DIR}/workers/<TICKET>/phase-<name>.json`.
    - Calls `catalyst-session.sh end`.
 
+6. **Linear reads → local replica.** For a single-ticket read call
+   `linear_read_ticket <ID>` (never a bare `linearis issues read <ID>` — it 429s
+   the shared quota); writes and list/search stay on `linearis`. See the `linearis`
+   skill's "Reading Linear".
+
 ## Required env vars
 
 The dispatcher (`plugins/dev/scripts/phase-agent-dispatch`) sets these on

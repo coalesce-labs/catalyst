@@ -4,9 +4,11 @@
 import { describe, test, expect } from "bun:test";
 import {
   heartbeatUrl,
+  isRateClassLinearError,
   parseHeartbeatMetadata,
   publishHeartbeat,
   readPeerHeartbeats,
+  resolveIssueId,
   runCli,
 } from "./cluster-heartbeat.mjs";
 
@@ -261,5 +263,70 @@ describe("runCli", () => {
   test("unknown subcommand exits 1", async () => {
     const { code } = await captureStdout(() => runCli(["bogus"], {}));
     expect(code).toBe(1);
+  });
+});
+
+// CTL-1420 follow-up: rate-class discriminator + defaultPost body-reading.
+describe("isRateClassLinearError (CTL-1420)", () => {
+  test("recognizes Linear's RATELIMITED complexity code (served as HTTP 400)", () => {
+    expect(isRateClassLinearError('{"errors":[{"extensions":{"code":"RATELIMITED"}}]}')).toBe(true);
+  });
+  test("recognizes the classic 429 rate-limit message", () => {
+    expect(isRateClassLinearError("Rate limit exceeded. Only 5000 requests are allowed per hour")).toBe(true);
+    expect(isRateClassLinearError("linear graphql http 429")).toBe(true);
+  });
+  test("does NOT flag a genuine bad-request 400 (query/schema error)", () => {
+    expect(isRateClassLinearError('{"errors":[{"message":"Field foo is not defined by type IssueFilter","extensions":{"code":"INVALID_INPUT"}}]}')).toBe(false);
+  });
+  test("empty / nullish input is not rate-class", () => {
+    expect(isRateClassLinearError("")).toBe(false);
+    expect(isRateClassLinearError(null)).toBe(false);
+    expect(isRateClassLinearError(undefined)).toBe(false);
+  });
+});
+
+describe("defaultPost — !res.ok body handling (CTL-1420)", () => {
+  const realFetch = globalThis.fetch;
+  function mockFetch({ ok, status, body }) {
+    globalThis.fetch = async () => ({
+      ok,
+      status,
+      text: async () => body,
+      json: async () => JSON.parse(body),
+    });
+  }
+  function restore() {
+    globalThis.fetch = realFetch;
+  }
+
+  test("a rate-class 400 (RATELIMITED) is READ and TAGGED [RATELIMITED] in the thrown error", async () => {
+    mockFetch({ ok: false, status: 400, body: '{"errors":[{"extensions":{"code":"RATELIMITED"},"message":"complexity limit"}]}' });
+    try {
+      await expect(resolveIssueId("CTL-9")).rejects.toThrow(/\[RATELIMITED\]/);
+    } finally {
+      restore();
+    }
+  });
+
+  test("a genuine bad-request 400 SURFACES the body but is NOT tagged rate-class", async () => {
+    mockFetch({ ok: false, status: 400, body: '{"errors":[{"message":"Field foo is not defined by type IssueFilter"}]}' });
+    try {
+      let msg = "";
+      await resolveIssueId("CTL-9").catch((e) => { msg = e.message; });
+      expect(msg).toContain("http 400");
+      expect(msg).toContain("IssueFilter"); // body surfaced (was previously discarded)
+      expect(msg).not.toContain("[RATELIMITED]"); // not masked as rate-limited
+    } finally {
+      restore();
+    }
+  });
+
+  test("a 429 is tagged rate-class even if the body is unreadable", async () => {
+    globalThis.fetch = async () => ({ ok: false, status: 429, text: async () => { throw new Error("no body"); } });
+    try {
+      await expect(resolveIssueId("CTL-9")).rejects.toThrow(/\[RATELIMITED\]/);
+    } finally {
+      restore();
+    }
   });
 });
