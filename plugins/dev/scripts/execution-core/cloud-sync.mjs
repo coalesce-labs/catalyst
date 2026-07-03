@@ -184,15 +184,65 @@ console.log(`${TAG} live — replica seeded + tailing the change feed (cursor=${
 // the writer itself, so it closes the dev-node + seed-window blind spots the scheduler-only
 // CTL-1366 gauge misses, and is the continuous OTL-40 "reads recovered" signal. FAIL-OPEN:
 // a probe error (DB locked, mid-reconnect) must NEVER crash the writer — emit what we have.
+// CTL-1420 follow-up — cursor-advance WATCHDOG + visible status + loud alert. RCA of the
+// 18.5h silent freeze (a half-open push WebSocket the SDK never noticed; onclose never
+// fired so it never reconnected): EVERY liveness signal was decoupled from cursor-advance.
+// The heartbeat kept beating and `status` stayed latched "live" while the cursor sat frozen
+// and the replica silently went stale — forcing the fleet's agents back onto the
+// rate-limited personal `linearis` key with no alarm. Three fixes here:
+//   (1) DERIVE status from cursor-advance so a freeze is VISIBLE in the freshness line;
+//   (2) emit a LOUD ERROR event to Loki the instant the cursor stalls (never silent again —
+//       this is the alarm Ryan asked for, and it fires on a network-interruption-not-down too);
+//   (3) SELF-HEAL by exiting so launchd KeepAlive re-spawns (a fresh socket + re-seed —
+//       exactly the manual `launchctl kickstart` that fixed it).
+// Genuine quiet periods (no new Linear changes) are tolerated by the generous
+// CATALYST_CLOUD_SYNC_STALL_MS window (default 10 min). NOTE: a future refinement can key on
+// the SDK's connection-level freshness signal to distinguish "quiet" from "dead socket"
+// precisely; a benign restart during a >10-min quiet period is cheap (fast re-seed).
+const STALL_MS = Number(process.env.CATALYST_CLOUD_SYNC_STALL_MS) || 600_000;
+let _lastCursor = replica.cursor;
+let _lastAdvanceMs = Date.now();
+let _stallAlerted = false;
 const emitTelemetry = () => {
   try { logDaemonHeartbeat(hlog, "cloud-sync"); } catch { /* best-effort */ }
+  let rows = null;
+  let maxUpdatedMs = null;
+  try { ({ rows, maxUpdatedMs } = readReplicaCounts(replica.sql)); } catch { /* best-effort */ }
+  const now = Date.now();
+  const cursor = replica.cursor;
+  if (cursor !== _lastCursor) { _lastCursor = cursor; _lastAdvanceMs = now; _stallAlerted = false; }
+  const stalledMs = now - _lastAdvanceMs;
+  // Only a SEEDED replica (rows>0) whose cursor hasn't moved for the whole window is a
+  // stall — a pre-seed window legitimately has no cursor yet.
+  const stalled = (rows ?? 0) > 0 && stalledMs >= STALL_MS;
+  const status = stalled ? "stalled" : (replica.status ?? "live");
   try {
-    const { rows, maxUpdatedMs } = readReplicaCounts(replica.sql);
     hlog.info(
-      freshnessFields({ rows, maxUpdatedMs, status: replica.status, cursor: replica.cursor, hostName: getHostName() }),
+      freshnessFields({ rows, maxUpdatedMs, status, cursor, hostName: getHostName() }),
       "cloud-sync: freshness",
     );
   } catch { /* best-effort — telemetry must never crash the writer */ }
+  if (stalled && !_stallAlerted) {
+    _stallAlerted = true;
+    // The alarm that was missing for 18.5h. ERROR severity → ships via hlog→Alloy→Loki.
+    try {
+      hlog.error(
+        {
+          event: "catalyst.replica.stalled",
+          "catalyst.alert": "replica_stalled",
+          cursor,
+          stalledMs,
+          rows,
+          "host.name": getHostName(),
+        },
+        `cloud-sync: replica cursor STALLED ${Math.round(stalledMs / 1000)}s (>${Math.round(STALL_MS / 1000)}s) — reads are going stale; self-healing via restart`,
+      );
+    } catch { /* the alarm must never crash the writer */ }
+    // Self-heal: stop the timer, close the replica, and exit non-zero so launchd
+    // (KeepAlive={SuccessfulExit:false}) re-spawns with a fresh socket + re-seed.
+    try { if (hbTimer) clearInterval(hbTimer); } catch { /* best-effort */ }
+    void replica.close().catch(() => {}).finally(() => process.exit(1));
+  }
 };
 emitTelemetry();
 hbTimer = setInterval(emitTelemetry, HEARTBEAT_INTERVAL_MS);
