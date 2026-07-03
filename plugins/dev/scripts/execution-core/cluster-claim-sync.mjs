@@ -124,3 +124,82 @@ export function fenceCheckSync(
     return { current: false, stale: false };
   }
 }
+
+// ─── in-process TTL cache around the fence read (CTL-863 fleet-unfreeze, urgent interim) ──
+//
+// The CTL-863 fence guards (fenceGuard, fence-guard.mjs) call fenceCheckSync
+// before EVERY external-write site — ~11 call sites across scheduler.mjs,
+// recovery.mjs, and stale-pr-rescue-timer.mjs. Each call spawns a FRESH `node
+// cluster-claim.mjs fence-check <ticket> <gen>` subprocess (a new process, so
+// caching INSIDE cluster-claim.mjs would be cold every time) that issues
+// Linear's `query ReadFence` (an attachment read). Live-proxy-confirmed at
+// ~5,000/hr — 62% of ALL Linear traffic on the shared app-actor bucket —
+// saturating it and tripping the CTL-679 rate-limit breaker open, which
+// freezes fleet dispatch entirely.
+//
+// fenceCheckSyncCached wraps fenceCheckSync with an in-process TTL cache that
+// lives in THIS module (imported once by the long-running daemon process —
+// scheduler.mjs / recovery.mjs / stale-pr-rescue-timer.mjs — so the Map
+// persists across calls, unlike the per-call subprocess). Keyed by
+// `${ticket}::${generation}`, NOT ticket alone: isFenceCurrent's answer is a
+// function of BOTH — a takeover can leave the same ticket at a different
+// current generation, so two different generations asked about the same
+// ticket are NOT interchangeable answers.
+//
+// The underlying fence only changes on the heartbeat cadence (~2 min,
+// cluster-heartbeat.mjs), so caching a read for up to 45s cannot observe a
+// staler fence than genuinely existed at write time — safe by construction,
+// not a race. This is the INTERIM stopgap; the durable fix replaces the
+// read-per-check pattern with an event-log-derived fence (see
+// thoughts/shared/plans/2026-07-03-fence-to-eventlog.md).
+//
+// Only a DETERMINATE read is cached: {current:true} or {current:false,
+// stale:true} (a confirmed non-current generation). The indeterminate bucket —
+// {current:false, stale:false}, i.e. a spawn error/timeout/other exit — is a
+// FAILURE, not an answer. fenceGuard fail-closes on it (suppresses the write),
+// so caching a transient hiccup would extend a false "not current" verdict for
+// the full TTL instead of retrying on the very next call. Never cached.
+//
+// CATALYST_FENCE_READ_CACHE_MS — TTL override in ms, read from the same `env`
+// seam fenceCheckSync already threads through to the spawned subprocess. 0
+// disables the cache entirely (every call falls through to a real
+// fenceCheckSync) — an escape hatch for debugging/verification. Unset/invalid
+// → the 45s default.
+const FENCE_READ_CACHE_MS_DEFAULT = 45_000;
+
+// fenceReadCache — module-scope Map(`${ticket}::${generation}` -> {result, ts}).
+const fenceReadCache = new Map();
+
+// clearFenceReadCache — test-only reset of the module-scope cache between cases.
+export function clearFenceReadCache() {
+  fenceReadCache.clear();
+}
+
+function resolveFenceReadCacheMs(env) {
+  const raw = Number(env?.CATALYST_FENCE_READ_CACHE_MS);
+  return Number.isFinite(raw) && raw >= 0 ? raw : FENCE_READ_CACHE_MS_DEFAULT;
+}
+
+// fenceCheckSyncCached — the cached entry point. fence-guard.mjs's default
+// `check` seam points here so every real external-write-site fence check
+// benefits without any change to fenceGuard's decision logic or fail-closed
+// semantics — this only decides whether to skip the underlying read, never
+// what the read means. `now`/`env` are injectable for tests; every other
+// option (`spawn`/`nodeBin`/`cli`/`timeout`) passes straight through to
+// fenceCheckSync unchanged on a cache miss.
+export function fenceCheckSyncCached({ ticket, generation }, { now = Date.now, env = process.env, ...rest } = {}) {
+  const ttlMs = resolveFenceReadCacheMs(env);
+  const key = `${ticket}::${generation}`;
+  if (ttlMs > 0) {
+    const cached = fenceReadCache.get(key);
+    if (cached && now() - cached.ts < ttlMs) {
+      return cached.result;
+    }
+  }
+  const result = fenceCheckSync({ ticket, generation }, { env, ...rest });
+  // Cache only a determinate read (never the indeterminate/error bucket).
+  if (ttlMs > 0 && (result.current === true || result.stale === true)) {
+    fenceReadCache.set(key, { result, ts: now() });
+  }
+  return result;
+}
