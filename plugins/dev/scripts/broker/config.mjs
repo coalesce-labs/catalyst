@@ -106,6 +106,11 @@ export const GITHUB_RECENCY_DOWN_MS = parseInt(
 // source goes quiet even during active work. Its knobs
 // (FILTER_LINEAR_RECENCY_{DEGRADED,DOWN}_MS) are intentionally not defined until
 // a non-flaky threshold is found and linear is wired into RECENCY_SOURCES.
+// CTL-1423 Phase 5: channel-watcher dead-man's switch. After 3 missed intervals
+// (default 3 × 60s = 3 min) the broker promotes the silence to system_down.
+// Override with FILTER_WATCHER_RECENCY_STALE_MS.
+export const WATCHER_RECENCY_STALE_MS = parseInt(
+  process.env.FILTER_WATCHER_RECENCY_STALE_MS ?? "180000", 10);
 // Flap guard: minimum gap between a recovery and the next stale alarm. A death
 // that begins within this window is DEFERRED (re-checked each tick), never
 // dropped — see nextRecencyAlarmState.
