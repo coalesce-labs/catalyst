@@ -2323,12 +2323,27 @@ print_summary() {
 	print_header "Next Steps"
 	echo ""
 
+	# Resolve setup-plugin-source.sh next to THIS script. Via the `curl … | bash`
+	# flow (or when run from a non-catalyst target repo) BASH_SOURCE is empty/stdin
+	# and no such script exists locally, so print a runnable clone+run command
+	# instead of a relative path that would fail.
+	local _pss_dir _pss_script
+	_pss_dir="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd)" || _pss_dir=""
+	_pss_script="${_pss_dir}/plugins/dev/scripts/setup-plugin-source.sh"
+
 	echo "1. Provision plugin-source (live plugin loading — NOT the marketplace cache,"
 	echo "   which lags releases and drifts per node):"
-	echo "   bash plugins/dev/scripts/setup-plugin-source.sh"
+	if [ -n "$_pss_dir" ] && [ -f "$_pss_script" ]; then
+		echo "   bash ${_pss_script}"
+	else
+		echo "   # Run from a catalyst checkout (this setup script was not run from one):"
+		echo "   git clone https://github.com/coalesce-labs/catalyst.git ~/catalyst-src \\"
+		echo "     && bash ~/catalyst-src/plugins/dev/scripts/setup-plugin-source.sh"
+	fi
 	echo "   → sets the pluginDirs machine-config key (workers load plugin-source via"
 	echo "     phase-agent-dispatch --plugin-dir) AND installs the interactive \`claude\`"
-	echo "     --plugin-dir wrapper in ~/.zshrc. Open a new shell to pick it up."
+	echo "     --plugin-dir wrapper in your shell rc (~/.zshrc or ~/.bashrc). Open a new"
+	echo "     shell to pick it up."
 	echo ""
 
 	echo "2. Restart Claude Code to load configuration"
