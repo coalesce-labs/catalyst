@@ -1,11 +1,13 @@
 // fence-guard.test.mjs — tests for the shared fenceGuard decision helper
 // (CTL-863 durable fence → event-log migration; supersedes the #2552 cache).
 // Run: cd plugins/dev/scripts/execution-core && bun test fence-guard.test.mjs
-import { describe, test, expect } from "bun:test";
-import { readFileSync } from "node:fs";
+import { describe, test, expect, beforeEach, afterEach } from "bun:test";
+import { readFileSync, mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { fenceGuard } from "./fence-guard.mjs";
+import { fenceGuard, readClusterGeneration, readSignalGeneration } from "./fence-guard.mjs";
 
 // A helper to build a `readFence` seam that returns a fixed projection row.
 const fenceRow = (over = {}) => ({
@@ -297,5 +299,84 @@ describe("fenceGuard — hardening invariants", () => {
   test("no `soleWriter` reference remains anywhere in the source (deleted per OQ-B)", () => {
     const src = readFileSync(fileURLToPath(new URL("./fence-guard.mjs", import.meta.url)), "utf8");
     expect(src.includes("soleWriter")).toBe(false);
+  });
+});
+
+describe("fenceGuard — generation SOURCE wiring (CTL-1157 A1 regression)", () => {
+  // THE BUG: the default readGen read the per-phase single-flight counter
+  // (phase-*.json .generation, reset to 1 on a fresh dispatch) instead of the
+  // cross-host claim generation (cluster-generation.json) the fence attachment
+  // actually stores. On the multi-host fleet the two never matched → every fenced
+  // write, incl. the terminal Done, was suppressed forever → the board froze
+  // (~1,090/hr `stale fence` WARN on CTL-1423, 0 `.terminal-done.applied` markers
+  // fleet-wide). The pre-fix suite injected readGen in EVERY case, so it never
+  // exercised the real default — exactly how the bug slipped through. These tests
+  // pin the REAL default readGen.
+  let dir, orchDir, ticket, wdir;
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "fence-src-"));
+    orchDir = dir;
+    ticket = "CTL-1423";
+    wdir = join(orchDir, "workers", ticket);
+    mkdirSync(wdir, { recursive: true });
+  });
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("default readGen reads cluster-generation.json, NOT the phase counter (the exact CTL-1423 shape)", () => {
+    // phase counter = 1 (fresh dispatch), cluster gen = 7 — the empirically-observed mismatch.
+    writeFileSync(
+      join(wdir, "phase-teardown.json"),
+      JSON.stringify({ generation: 1, status: "done", updatedAt: new Date().toISOString() }),
+    );
+    writeFileSync(join(wdir, "cluster-generation.json"), JSON.stringify({ generation: 7 }));
+    let captured = null;
+    const result = fenceGuard(
+      { ticket, orchDir, multiHost: true, self: "mini" },
+      { escalate: (args) => { captured = args; return { current: true }; }, readSource: "linear" },
+    );
+    expect(captured).toEqual({ ticket, generation: 7 }); // 7 (cluster) — never 1 (the phase counter)
+    expect(result).toBe(true); // the fence now PASSES for the legitimate owner → the Done write lands
+  });
+
+  test("readClusterGeneration: file generation, null on missing/malformed", () => {
+    expect(readClusterGeneration(orchDir, ticket)).toBe(null); // absent
+    writeFileSync(join(wdir, "cluster-generation.json"), "not-json");
+    expect(readClusterGeneration(orchDir, ticket)).toBe(null); // malformed → never throws
+    writeFileSync(join(wdir, "cluster-generation.json"), JSON.stringify({ generation: 7 }));
+    expect(readClusterGeneration(orchDir, ticket)).toBe(7);
+  });
+
+  test("the two sources genuinely differ: readSignalGeneration=phase counter, readClusterGeneration=claim gen", () => {
+    writeFileSync(
+      join(wdir, "phase-teardown.json"),
+      JSON.stringify({ generation: 1, status: "done", updatedAt: new Date().toISOString() }),
+    );
+    writeFileSync(join(wdir, "cluster-generation.json"), JSON.stringify({ generation: 7 }));
+    expect(readSignalGeneration(orchDir, ticket)).toBe(1); // the WRONG value the fence used to receive
+    expect(readClusterGeneration(orchDir, ticket)).toBe(7); // the RIGHT value it receives now
+  });
+
+  test("missing cluster-generation.json + gateway → falls back to ticket_state generation via readFence", () => {
+    let captured = null;
+    const result = fenceGuard(
+      { ticket, orchDir, multiHost: true, gateway: {}, self: "mini" },
+      {
+        readFence: () => ({ ownerHost: "mini", generation: 9 }),
+        escalate: (args) => { captured = args; return { current: true }; },
+        readSource: "linear",
+      },
+    );
+    expect(captured).toEqual({ ticket, generation: 9 }); // recovered from the projection, still escalated
+    expect(result).toBe(true);
+  });
+
+  test("missing cluster-generation.json + NO gateway → fail-closed (mutating site suppresses)", () => {
+    const result = fenceGuard(
+      { ticket, orchDir, multiHost: true, self: "mini" },
+      { escalate: () => ({ current: true }), readSource: "linear" },
+    );
+    expect(result).toBe(false); // no generation recoverable → suppress (the safe side)
   });
 });

@@ -2377,7 +2377,7 @@ function isFenceSuppressFresh(orchDir, ticket, nowMs) {
 // CTL-757: the optional `emitStateWrite` callback (closed over schedulerTick's
 // injected emitter) audits the terminal-sweep Done write. Optional so the
 // once-semantics tests that call terminalDoneOnce directly need not supply it.
-function terminalDoneOnce(
+export function terminalDoneOnce(
   orchDir,
   ticket,
   writeStatus,
@@ -2392,15 +2392,32 @@ function terminalDoneOnce(
     // CTL-1157 SLICE 3: the broad "Done-moves" emitter — fires on EVERY confirmed
     // terminal-sweep Done (not just the open-PR subset). Injectable for tests.
     emitDoneApplied = appendRecoveryDoneAppliedEvent,
+    // CTL-1157 A1: injectable clock for the fence-suppress cooldown (deterministic
+    // in tests). Defaults to the wall clock in production.
+    now = Date.now,
+    // CTL-1157 A1: injectable fence decision (deterministic in tests). Production
+    // uses the real fenceGuard, which reads the cross-host claim generation.
+    fence = fenceGuard,
   } = {}
 ) {
   const marker = join(orchDir, "workers", ticket, ".terminal-done.applied");
   if (existsSync(marker)) return;
-  if (!fenceGuard({ ticket, orchDir, multiHost, gateway, self })) {
+  // CTL-1329 (extended to the terminal-Done branch, CTL-1157 A1): if a prior tick
+  // already fence-suppressed this dir, skip the fence-check subprocess (and the
+  // Linear reads it fronts) for the cooldown window instead of re-probing ~2x/sec.
+  // A genuinely-current fence self-heals after at most one window. Previously ONLY
+  // the stalled/failed branch stamped this cooldown, so a stale terminal fence
+  // burned unbounded — the CTL-1423 ~1,090/hr `stale fence` WARN storm.
+  if (isFenceSuppressFresh(orchDir, ticket, now())) return;
+  if (!fence({ ticket, orchDir, multiHost, gateway, self })) {
     log.warn(
       { ticket },
       "ctl-863: stale fence — suppressing terminalDoneOnce write (zombie guard)"
     );
+    // CTL-1329: arm the per-dir cooldown so subsequent ticks skip the probe+fence
+    // for a window (bounds the burn to once-per-cooldown), the same rail the
+    // stalled/failed branch uses immediately before its needs-human write.
+    stampFenceSuppress(orchDir, ticket, now());
     return;
   }
   // CTL-1157 (ALARM-NOT-BLOCK — THE REVERSAL): the terminal sweep writes Done

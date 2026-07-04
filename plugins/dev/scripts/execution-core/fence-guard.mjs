@@ -77,6 +77,13 @@ const _projectionRefuseWarned = new Set();
 // readSignalGeneration — read `generation` from the active phase signal file for
 // a ticket. Scans workers/<ticket>/phase-*.json, preferring running > newest.
 // Returns the numeric generation, or null when absent/unreadable.
+//
+// ⚠️ DEPRECATED as the fence-guard generation source. This is the per-phase
+// single-flight counter (CTL-736), which a fresh dispatch resets to 1 — it is NOT
+// the cross-host claim generation the fence attachment compares against. Feeding
+// it to fenceGuard suppressed every fenced write on the multi-host fleet. The
+// fence path now defaults to readClusterGeneration (below). Retained (exported)
+// only for its original single-flight callers; do NOT re-wire it into fenceGuard.
 export function readSignalGeneration(orchDir, ticket, { readDir = readdirSync, readFile = readFileSync } = {}) {
   if (!orchDir || !ticket) return null;
   const dir = join(orchDir, "workers", ticket);
@@ -105,6 +112,28 @@ export function readSignalGeneration(orchDir, ticket, { readDir = readdirSync, r
     }
   }
   return best;
+}
+
+// readClusterGeneration — read the CROSS-HOST claim generation from
+// workers/<ticket>/cluster-generation.json (persisted once at claim-win by the
+// scheduler's writeClusterGeneration, CTL-864). THIS is the counter the Linear
+// fence attachment (catalyst://fence/<ticket>) stores and fenceCheckSync compares
+// against — NOT the per-phase single-flight `generation` in phase-*.json (CTL-736,
+// read by readSignalGeneration), which a fresh dispatch resets to 1. On a
+// multi-host fleet the two counters are unrelated and essentially never match, so
+// feeding the phase counter to the fence check suppressed EVERY fenced write
+// forever (the terminal Done write never landed → the board froze; ~1,090/hr
+// `stale fence` WARN on CTL-1423). Returns the numeric generation, or null when
+// absent/unreadable (→ the ticket_state fallback in fenceGuard, else fail-closed).
+export function readClusterGeneration(orchDir, ticket, { readFile = readFileSync } = {}) {
+  if (!orchDir || !ticket) return null;
+  try {
+    const raw = readFile(join(orchDir, "workers", ticket, "cluster-generation.json"), "utf8");
+    const g = JSON.parse(raw);
+    return Number.isFinite(g?.generation) ? g.generation : null;
+  } catch {
+    return null;
+  }
 }
 
 // fenceGuard — single decision shared by every external-write site (CTL-863
@@ -150,7 +179,7 @@ export function readSignalGeneration(orchDir, ticket, { readDir = readdirSync, r
 export function fenceGuard(
   { ticket, orchDir, multiHost, gateway, self },
   {
-    readGen = () => readSignalGeneration(orchDir, ticket),
+    readGen = () => readClusterGeneration(orchDir, ticket),
     readFence = (t) => gatewayFence(gateway, t),
     isFresh = (f, env = process.env) => claimedAtAgeMs(f) < resolveFenceFreshMs(env),
     escalate = fenceCheckSyncCached,
@@ -191,7 +220,24 @@ export function fenceGuard(
   }
 
   try {
-    const generation = readGen();
+    let generation = readGen();
+    // Fallback: when cluster-generation.json is absent (e.g. a ticket claimed
+    // while the roster was single-host and only later grew, or a pruned worker-dir
+    // mirror), recover the cross-host claim generation from the ticket_state
+    // projection (catalyst_generation) via the gateway. SAFE: this only supplies a
+    // CANDIDATE generation — the authoritative escalate() below still validates it
+    // against Linear, so a stale/foreign projection can only fail-closed
+    // (suppress), never fail-open. Skipped when no gateway is wired (generation
+    // stays null → fail-closed for mutating sites, fail-open only where the site
+    // opted into proceedOnMissingGeneration).
+    if (!Number.isFinite(generation) && gateway) {
+      try {
+        const f = readFence(ticket);
+        if (Number.isFinite(f?.generation)) generation = f.generation;
+      } catch {
+        /* fall through to the missing-generation handling below */
+      }
+    }
     if (!Number.isFinite(generation)) {
       if (proceedOnMissingGeneration) {
         // Loud fail-open: never silently drop an escalation on "can't tell".

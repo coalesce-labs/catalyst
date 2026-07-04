@@ -239,6 +239,7 @@ jobs:
             event-tail.test.mjs \
             fence-guard.test.mjs \
             fence-guard-integration.test.mjs \
+            terminal-done-cooldown.test.mjs \
             fleet-health-event.test.mjs \
             fleet-health-probe.test.mjs \
             gateway-read.test.mjs \
