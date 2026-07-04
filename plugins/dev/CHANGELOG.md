@@ -1,5 +1,18 @@
 # Changelog
 
+## [12.24.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.23.1...catalyst-dev-v12.24.0) (2026-07-04)
+
+
+### Features
+
+* **dev:** CTL-1424 — otel-forward pino level → OTel SeverityNumber/Text at emit ([#2558](https://github.com/coalesce-labs/catalyst/issues/2558)) ([514fd7e](https://github.com/coalesce-labs/catalyst/commit/514fd7eb818ee999d202b82918ee04130f163a7a))
+* **dev:** CTL-863 — durable fence→event-log migration (N=1-gated), supersedes the interim ReadFence cache ([#2553](https://github.com/coalesce-labs/catalyst/issues/2553)) ([0e70424](https://github.com/coalesce-labs/catalyst/commit/0e704242c402233b1713ec098a888e0f1590c3f4))
+
+
+### Bug Fixes
+
+* **dev:** CTL-1157 (A1) — fence-guard reads the cross-host claim generation (unblocks the Done path) ([#2563](https://github.com/coalesce-labs/catalyst/issues/2563)) ([cb35036](https://github.com/coalesce-labs/catalyst/commit/cb35036f324b3167917d99cde786089819710d15))
+
 ## [12.23.1](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.23.0...catalyst-dev-v12.23.1)
 
 Jul 03, 2026
