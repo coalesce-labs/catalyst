@@ -358,18 +358,37 @@ describe("fenceGuard — generation SOURCE wiring (CTL-1157 A1 regression)", () 
     expect(readClusterGeneration(orchDir, ticket)).toBe(7); // the RIGHT value it receives now
   });
 
-  test("missing cluster-generation.json + gateway → falls back to ticket_state generation via readFence", () => {
+  test("missing cluster-generation.json + gateway, SELF-OWNED projection → borrows generation, still escalates", () => {
     let captured = null;
     const result = fenceGuard(
       { ticket, orchDir, multiHost: true, gateway: {}, self: "mini" },
       {
-        readFence: () => ({ ownerHost: "mini", generation: 9 }),
+        readFence: () => ({ ownerHost: "mini", generation: 9 }), // projection agrees WE own it
         escalate: (args) => { captured = args; return { current: true }; },
         readSource: "linear",
       },
     );
     expect(captured).toEqual({ ticket, generation: 9 }); // recovered from the projection, still escalated
     expect(result).toBe(true);
+  });
+
+  test("missing cluster-generation.json + gateway, FOREIGN-owned projection → does NOT borrow, fail-closed (zombie guard)", () => {
+    // THE fail-open the ownership guard prevents: a partitioned zombie (self=mini)
+    // whose local cluster-generation.json is gone must NOT borrow the CURRENT
+    // projection generation of the NEW owner (mini-2). escalate() checks only
+    // "is this generation current?" (not ownership), so borrowing mini-2's current
+    // generation would be a tautological match → false ALLOW → corruption.
+    let escalated = false;
+    const result = fenceGuard(
+      { ticket, orchDir, multiHost: true, gateway: {}, self: "mini" },
+      {
+        readFence: () => ({ ownerHost: "mini-2", generation: 9 }), // a peer took over
+        escalate: () => { escalated = true; return { current: true }; }, // even if Linear said "current"
+        readSource: "linear",
+      },
+    );
+    expect(result).toBe(false); // no candidate seeded (foreign owner) → fail-closed
+    expect(escalated).toBe(false); // never reached the authoritative read with a borrowed foreign gen
   });
 
   test("missing cluster-generation.json + NO gateway → fail-closed (mutating site suppresses)", () => {

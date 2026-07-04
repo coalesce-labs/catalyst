@@ -224,18 +224,32 @@ export function fenceGuard(
     // Fallback: when cluster-generation.json is absent (e.g. a ticket claimed
     // while the roster was single-host and only later grew, or a pruned worker-dir
     // mirror), recover the cross-host claim generation from the ticket_state
-    // projection (catalyst_generation) via the gateway. SAFE: this only supplies a
-    // CANDIDATE generation — the authoritative escalate() below still validates it
-    // against Linear, so a stale/foreign projection can only fail-closed
-    // (suppress), never fail-open. Skipped when no gateway is wired (generation
-    // stays null → fail-closed for mutating sites, fail-open only where the site
+    // projection (catalyst_generation) via the gateway — but ONLY when the
+    // projection agrees WE (self) are the owner (f.ownerHost === self). This
+    // mirrors the ownership guard the projection-first branch already applies
+    // (f.ownerHost !== self → suppress). Borrowing the projection's CURRENT
+    // generation for a FOREIGN owner would be a fail-OPEN: escalate() checks only
+    // "is this generation current?" (NOT ownership), so a partitioned zombie whose
+    // local file is gone would read the new owner's current generation, hand it to
+    // escalate(), get a tautological match, and be allowed to write — the exact
+    // corruption this fence exists to prevent (cf. scheduler.mjs readClusterGeneration:
+    // "reading the current generation would always match and silently defeat the
+    // fence"). With the self-owner guard the seeded generation is still validated by
+    // the authoritative escalate() below — a LIVE Linear read, not the projection —
+    // so a self-owned-but-STALE row still fails closed. A foreign/unowned/absent row
+    // seeds nothing → fail-closed for mutating sites (fail-open only where the site
     // opted into proceedOnMissingGeneration).
     if (!Number.isFinite(generation) && gateway) {
       try {
         const f = readFence(ticket);
-        if (Number.isFinite(f?.generation)) generation = f.generation;
-      } catch {
-        /* fall through to the missing-generation handling below */
+        if (Number.isFinite(f?.generation) && f.ownerHost === self) {
+          generation = f.generation;
+        }
+      } catch (err) {
+        // A throwing gateway/SQLite read is a real (rare) fault, not the common
+        // "no row" case — surface it at debug so a silent fence suppression here is
+        // diagnosable, then fall through to the missing-generation handling.
+        logger?.debug?.({ ticket, err: err?.message }, "fenceGuard: ticket_state fallback read threw");
       }
     }
     if (!Number.isFinite(generation)) {
