@@ -1,7 +1,7 @@
 // linear-breaker.test.mjs — Linear rate-limit circuit breaker (CTL-679).
 // Run: cd plugins/dev/scripts/execution-core && bun test linear-breaker.test.mjs
 import { describe, test, expect } from "bun:test";
-import { createLinearBreaker, withBreaker, isRateLimitError } from "./linear-breaker.mjs";
+import { createLinearBreaker, withBreaker, isRateLimitError, deriveCaller } from "./linear-breaker.mjs";
 
 const silentLogger = { warn() {}, info() {}, error() {} };
 const RATE_LIMIT_STDERR = "Rate limit exceeded. Only 2500 requests are allowed per 1 hour";
@@ -209,5 +209,107 @@ describe("withBreaker", () => {
     const exec = withBreaker(raw, { breaker });
     exec("linearis", ["issues", "list"]);
     expect(calls[0][2]).toBeUndefined();
+  });
+});
+
+describe("deriveCaller (CTL-1430)", () => {
+  test("tags a linearis subcommand from the argv (basename + first two non-flag args)", () => {
+    expect(deriveCaller("linearis", ["issues", "list"])).toBe("linearis:issues-list");
+    expect(deriveCaller("/usr/local/bin/linearis", ["issues", "read", "CTL-1"])).toBe("linearis:issues-read");
+  });
+  test("skips leading flags when picking the subcommand tag", () => {
+    expect(deriveCaller("linearis", ["--json", "issues", "list"])).toBe("linearis:issues-list");
+  });
+  test("falls back to the bare basename when there are no positional args", () => {
+    expect(deriveCaller("linear-transition.sh", [])).toBe("linear-transition.sh");
+    expect(deriveCaller("/opt/bin/linear-transition.sh", ["--flag-only"])).toBe("linear-transition.sh");
+  });
+  test("never throws on missing/oddly-typed argv", () => {
+    expect(deriveCaller(undefined, undefined)).toBe("unknown");
+    expect(deriveCaller("linearis", null)).toBe("linearis");
+  });
+});
+
+describe("CTL-1430: breaker reason/caller + durable event", () => {
+  test("recordRateLimited puts reason+caller on the OPEN log line", () => {
+    const warned = [];
+    const logger = { warn: (o, _m) => warned.push(o), info() {} };
+    const b = createLinearBreaker({ logger, baseCooldownMs: 1000 });
+    b.recordRateLimited(0, { reason: "timeout", caller: "linearis:issues-read" });
+    expect(warned).toHaveLength(1);
+    expect(warned[0].reason).toBe("timeout");
+    expect(warned[0].caller).toBe("linearis:issues-read");
+  });
+
+  test("recordRateLimited emits one durable OPEN event with reason/caller/cooldown/consecutive", () => {
+    const events = [];
+    const b = createLinearBreaker({
+      logger: silentLogger,
+      baseCooldownMs: 1000,
+      emitEvent: (e) => events.push(e),
+    });
+    b.recordRateLimited(0, { reason: "429", caller: "cluster-heartbeat-publisher" });
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      state: "open",
+      reason: "429",
+      caller: "cluster-heartbeat-publisher",
+      cooldownMs: 1000,
+      consecutive: 1,
+    });
+  });
+
+  test("recordSuccess emits one durable CLOSED event carrying recoveredAfter", () => {
+    const events = [];
+    const b = createLinearBreaker({
+      logger: silentLogger,
+      baseCooldownMs: 1000,
+      emitEvent: (e) => events.push(e),
+    });
+    b.recordRateLimited(0, { reason: "429", caller: "x" });
+    b.recordRateLimited(1000, { reason: "429", caller: "x" }); // consecutive → 2
+    b.recordSuccess();
+    const closed = events.filter((e) => e.state === "closed");
+    expect(closed).toHaveLength(1);
+    expect(closed[0].recoveredAfter).toBe(2);
+  });
+
+  test("a steady-state success (never degraded) emits NO event", () => {
+    const events = [];
+    const b = createLinearBreaker({ logger: silentLogger, emitEvent: (e) => events.push(e) });
+    b.recordSuccess();
+    expect(events).toHaveLength(0);
+  });
+
+  test("the factory default emitEvent is a no-op (hermetic — never touches the real log)", () => {
+    const b = createLinearBreaker({ logger: silentLogger });
+    expect(() => b.recordRateLimited(0, { reason: "429", caller: "x" })).not.toThrow();
+  });
+
+  test("withBreaker tags a 429 with reason='429' + the argv-derived caller", () => {
+    const events = [];
+    const breaker = createLinearBreaker({ logger: silentLogger, emitEvent: (e) => events.push(e) });
+    const raw = () => ({ code: 1, stdout: "", stderr: RATE_LIMIT_STDERR });
+    const exec = withBreaker(raw, { breaker, now: () => 0 });
+    exec("linearis", ["issues", "list"]);
+    expect(events[0]).toMatchObject({ state: "open", reason: "429", caller: "linearis:issues-list" });
+  });
+
+  test("withBreaker tags a timed-out read with reason='timeout'", () => {
+    const events = [];
+    const breaker = createLinearBreaker({ logger: silentLogger, emitEvent: (e) => events.push(e) });
+    const raw = () => ({ code: 1, timedOut: true, stdout: "", stderr: "" });
+    const exec = withBreaker(raw, { breaker, now: () => 0 });
+    exec("linearis", ["issues", "read", "CTL-9"]);
+    expect(events[0]).toMatchObject({ state: "open", reason: "timeout", caller: "linearis:issues-read" });
+  });
+
+  test("an explicit opts.caller overrides the argv-derived tag", () => {
+    const events = [];
+    const breaker = createLinearBreaker({ logger: silentLogger, emitEvent: (e) => events.push(e) });
+    const raw = () => ({ code: 1, stdout: "", stderr: RATE_LIMIT_STDERR });
+    const exec = withBreaker(raw, { breaker, now: () => 0 });
+    exec("linearis", ["issues", "list"], { caller: "open-pr-gate" });
+    expect(events[0].caller).toBe("open-pr-gate");
   });
 });
