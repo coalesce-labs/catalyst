@@ -299,6 +299,7 @@ jobs:
             worktree-safety.test.mjs \
             worktree.test.mjs \
             recovery-reasoning.test.mjs \
+            sweep-stale-recovery-intents.test.mjs \
             recovery-evidence.test.mjs \
             unstuck-act-seams.test.mjs \
             lib/catalyst-resource.test.mjs \

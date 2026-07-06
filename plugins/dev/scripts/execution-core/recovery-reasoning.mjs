@@ -1678,6 +1678,14 @@ export const RECOVERY_COOLDOWN_MS =
 export const RECOVERY_MAX_ATTEMPTS =
   Number(process.env.CATALYST_RECOVERY_MAX_ATTEMPTS) || 2;
 
+// CTL-1431: TTL on a terminal (escalated) recovery-intent. An escalated latch is
+// no longer permanent — after this window the intent goes stale and the ticket
+// re-enters the recovery triage funnel, so a months-old escalate cannot pin a
+// ticket forever once the underlying blocker has cleared. Env-only, matching its
+// siblings (NaN*x and 0*x are both falsy → fall through to the 7-day default).
+export const RECOVERY_TERMINAL_INTENT_TTL_MS =
+  Number(process.env.CATALYST_RECOVERY_TERMINAL_TTL_DAYS) * 864e5 || 7 * 864e5;
+
 function recoveryIntentPath(orchDir, ticket) {
   return join(orchDir, ".recovery-intents", `${ticket}.json`);
 }
@@ -1753,8 +1761,19 @@ export function defaultShouldSkipItem(ticket, opts = {}) {
     return typeof last === "number" && now() - last < RECOVERY_COOLDOWN_MS;
   }
 
-  // (c) already escalated → terminal, hand off to human, stop acting.
-  if (data?.escalated === true) return true;
+  // (c) already escalated → terminal latch, but TTL-bounded (CTL-1431). Within the
+  // TTL it still skips (the ticket is handed off to a human); once the intent ages
+  // past RECOVERY_TERMINAL_INTENT_TTL_MS it goes stale and the ticket RE-ENTERS the
+  // recovery triage funnel. Return false DIRECTLY on expiry — do NOT fall through to
+  // the attempts-exhausted branch below: an escalated intent already has attempts ≥
+  // 2, so a fall-through would instantly re-latch there (that branch has no age
+  // gate). Derived purely from timestamps, so NO file mutation on expiry (mirrors
+  // the non-mutating defer precedent above).
+  if (data?.escalated === true) {
+    const last = typeof data?.lastTs === "number" ? data.lastTs : data?.ts;
+    if (typeof last === "number" && now() - last < RECOVERY_TERMINAL_INTENT_TTL_MS) return true;
+    return false;
+  }
 
   // (b) attempts exhausted → stop self-healing.
   if (typeof data?.attempts === "number" && data.attempts >= RECOVERY_MAX_ATTEMPTS) return true;
