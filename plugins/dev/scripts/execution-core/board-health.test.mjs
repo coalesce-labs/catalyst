@@ -1254,6 +1254,13 @@ describe("boardHealthPass — C1 act-outcome captured on the emitted scan (CTL-1
     expect(emits[0].details.act).toEqual({ dispatched: false, anchor: null, skippedReason: "shadow" });
   });
 
+  test("Codex round-2: enforce with NO act seam → skippedReason:no-actuator (a miswired-actuator wedge)", () => {
+    const emits = [];
+    boardHealthPass(flaggedDeps({ mode: "enforce", emit: (e) => emits.push(e) })); // no act seam wired
+    expect(emits[0].details.act.dispatched).toBe(false);
+    expect(emits[0].details.act.skippedReason).toBe("no-actuator");
+  });
+
   test("ORDER: act runs BEFORE emit (so the scan carries a real outcome)", () => {
     const order = [];
     boardHealthPass(
@@ -1371,6 +1378,34 @@ describe("checkActuationLiveness — via evaluateInvariants (CTL-1435 C2)", () =
     const boardScans = Array.from({ length: 6 }, () => mkScan());
     const r = evaluateInvariants(mkBoard({ ring: { boardScans } }), { mode: "off" });
     expect(r.actuationLiveness).toBeUndefined();
+  });
+
+  test("Codex round-2: host currently in SHADOW → observable:false even with K stale enforce scans", () => {
+    const boardScans = Array.from({ length: 6 }, () => mkScan());
+    const r = evaluateInvariants(mkBoard({ mode: "shadow", ring: { boardScans } }));
+    expect(r.actuationLiveness.observable).toBe(false); // rolled back to shadow → don't flag stale enforce history
+  });
+
+  test("Codex round-2: enforce + no-actuator (miswired daemon proposes but can't dispatch) → flags", () => {
+    const boardScans = Array.from({ length: 6 }, () => mkScan({ skippedReason: "no-actuator" }));
+    const r = evaluateInvariants(mkBoard({ mode: "enforce", ring: { boardScans } }));
+    expect(r.actuationLiveness.ok).toBe(false);
+  });
+
+  test("Codex round-2: K scans spanning a downtime gap (oldest > windowMs ago) → observable:false", () => {
+    // 5 stale scans from ~3h ago + 1 fresh → the window is not recent/contiguous.
+    const boardScans = [
+      ...Array.from({ length: 5 }, () => mkScan({ tsMs: NOW - 3 * HOUR })),
+      mkScan({ tsMs: NOW }),
+    ];
+    const r = evaluateInvariants(mkBoard({ mode: "enforce", ring: { boardScans } }));
+    expect(r.actuationLiveness.observable).toBe(false);
+  });
+
+  test("a missing/non-finite tsMs in the window → observable:false (can't verify recency)", () => {
+    const boardScans = [mkScan({ tsMs: null }), ...Array.from({ length: 5 }, () => mkScan())];
+    const r = evaluateInvariants(mkBoard({ mode: "enforce", ring: { boardScans } }));
+    expect(r.actuationLiveness.observable).toBe(false);
   });
 });
 

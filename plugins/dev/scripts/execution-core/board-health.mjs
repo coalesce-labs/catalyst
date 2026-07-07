@@ -46,11 +46,16 @@ const DEFAULT_THRESHOLDS = {
   orphanedPrAgeMs: Number(process.env.CATALYST_BH_ORPHANED_PR_MS) || 48 * 3_600_000,
   frozenNeedsHumanMs: Number(process.env.CATALYST_BH_FROZEN_NH_MS) || 48 * 3_600_000,
   // CTL-1435 (C2): actuation-liveness window — how many recent ENFORCE board-scans
-  // must ALL show gate=proceed + proposedMoves>0 + dispatched≠true before the
-  // delegate flags its own propose-forever/dispatch-never wedge. 6 scans ≈ 30 min
-  // at the 5-min cadence. Observable only with ≥K enforce scans in the event tail,
-  // so a short/busy event window never false-flags.
+  // must ALL be owned-but-undispatched before the delegate flags its own
+  // propose-forever/dispatch-never wedge. 6 scans ≈ 30 min at the 5-min cadence.
+  // Observable only with ≥K enforce scans in the event tail, so a short/busy event
+  // window never false-flags.
   actuationLivenessScans: Number(process.env.CATALYST_BH_ACTUATION_K) || 6,
+  // CTL-1435 (C2, Codex round-2): the K scans must ALL fall within this window of
+  // now, so stale scans from before a daemon downtime / low-traffic gap can't
+  // combine with one fresh scan to fake a "K consecutive" run. 60 min gives K=6 at
+  // 5-min cadence (~30-min real span) generous headroom while rejecting hour+ gaps.
+  actuationLivenessWindowMs: Number(process.env.CATALYST_BH_ACTUATION_WINDOW_MS) || 60 * 60_000,
 };
 
 // single-LLM cadence floor: most ticks are a near-instant no-op (cheap gates),
@@ -636,7 +641,9 @@ function checkStrandedNode(b) {
 // gate-hold reasons all-green / no-free-slots / rate-limit-cliff; shadow) are
 // deliberately excluded so the invariant flags the CTL-1157 failure mode, not a
 // host that simply has no owned work.
-const WEDGE_SKIP_REASONS = new Set(["all-candidates-cooldown", "act-error"]);
+// Codex round-2: "no-actuator" (an enforce pass with no `act` seam wired — a
+// miswired daemon that proposes but structurally cannot dispatch) is a wedge too.
+const WEDGE_SKIP_REASONS = new Set(["all-candidates-cooldown", "act-error", "no-actuator"]);
 
 // #7 — actuation liveness (CTL-1435 C2): the delegate's OWN wedge. Over the last
 // K enforce board-scans in the ring, if EVERY one proceeded with an owned anchor
@@ -645,15 +652,23 @@ const WEDGE_SKIP_REASONS = new Set(["all-candidates-cooldown", "act-error"]);
 // proposed ~15 moves/5min for days with ~zero executions, invisible in the
 // journal). This is the invariant that would have caught it. It only READS the
 // ring's board-scan history (C1's act-outcome), so it adds no Linear/Git I/O.
-// Two false-positive guards:
-//   (1) enforce-only — shadow/off never dispatch by design, so their scans are
-//       filtered out (a shadow host has zero enforce scans → observable:false).
+// Three false-positive guards:
+//   (1) current-mode gate (Codex round-2) — observable ONLY when the host is
+//       enforce RIGHT NOW. After an enforce→shadow rollback the tail still holds
+//       enforce scans; without this gate a shadow host would keep flagging on that
+//       stale history until it ages out, even though shadow deliberately never acts.
 //   (2) ≥K guard — a short or busy event tail that holds <K enforce scans yields
 //       observable:false rather than a flag on thin evidence.
+//   (3) time-window bound (Codex round-2) — the K scans must ALL fall within
+//       actuationLivenessWindowMs of now, so stale pre-downtime scans can't combine
+//       with one fresh scan to fake a "K consecutive" run.
 // The remediation is NOT here: the "kick bypassing expired latches" is B1's
 // terminal-intent TTL (already shipped), and turning a sustained finding into a
 // deduped Gherkin ticket is C3/C4. C2's job is DETECT + SURFACE.
 function checkActuationLiveness(b, t) {
+  if (b.mode !== "enforce") {
+    return invariant(true, 0, false, [], "actuation liveness observable only when the host is currently enforce");
+  }
   const K = t.actuationLivenessScans;
   const scans = (b.ring?.boardScans ?? []).filter((s) => s.mode === "enforce");
   if (scans.length < K) {
@@ -666,6 +681,19 @@ function checkActuationLiveness(b, t) {
     );
   }
   const recent = scans.slice(-K);
+  // Time-window guard: the oldest of the last K must be within windowMs of now, so
+  // the K scans are both RECENT and CONTIGUOUS (no daemon-downtime gap folded in).
+  const windowMs = t.actuationLivenessWindowMs;
+  const ts = recent.map((s) => s.tsMs);
+  if (ts.some((v) => !Number.isFinite(v)) || b.now - ts[0] > windowMs) {
+    return invariant(
+      true,
+      0,
+      false,
+      [],
+      `enforce scan window not recent/contiguous (>${Math.round(windowMs / 60_000)}m span or missing ts) → actuation liveness not observable`,
+    );
+  }
   // A dispatch anywhere in the window clears it; otherwise EVERY scan must be an
   // owned-but-undispatched wedge (skippedReason ∈ WEDGE_SKIP_REASONS). This catches
   // the deferred-only proceed path (proposedMoves 0) the old proposedMoves>0
@@ -1250,7 +1278,15 @@ export function boardHealthPass({
   // is wrapped so an unexpected throw degrades to skippedReason:"act-error" and the
   // scan event still emits (previously an emit-first order made that implicit).
   let actResult;
-  let actOutcome = { dispatched: false, anchor: null, skippedReason: "shadow" };
+  // Codex round-2: an enforce pass with NO actuator wired is itself an actuation
+  // failure — it proposes but can never dispatch. Give it a distinct "no-actuator"
+  // wedge reason (vs. shadow/off's benign "shadow") so checkActuationLiveness
+  // catches a miswired daemon, not only cooldown-latching.
+  let actOutcome = {
+    dispatched: false,
+    anchor: null,
+    skippedReason: mode === "enforce" ? "no-actuator" : "shadow",
+  };
   if (mode === "enforce" && typeof act === "function") {
     if (dec.gate.decision !== "proceed") {
       // the gate held (all-green / no-actionable-moves / no-free-slots / rate-limit-cliff)
