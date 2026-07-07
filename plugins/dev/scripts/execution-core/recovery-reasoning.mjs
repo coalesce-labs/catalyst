@@ -1700,7 +1700,7 @@ function recoveryIntentPath(orchDir, ticket) {
 // selectAnchorCandidates now folds these in as first-class self-owned anchors so
 // the holistic pass actually dispatches a recovery-pass for them. Pure read,
 // fail-open: absent dir / malformed entries → [].
-export function readDeferredBoardHealthIntents(orchDir) {
+export function readDeferredBoardHealthIntents(orchDir, { now = () => Date.now(), cooldownMs = RECOVERY_COOLDOWN_MS } = {}) {
   if (!orchDir) return [];
   const dir = join(orchDir, ".recovery-intents");
   let files;
@@ -1715,6 +1715,12 @@ export function readDeferredBoardHealthIntents(orchDir) {
     try {
       const data = JSON.parse(readFileSync(join(dir, f), "utf8"));
       if (data?.decision === "defer" && data?.fix_class === "board-health") {
+        // CTL-1432 (Codex P1): honor the 30-min defer cooldown — defaultShouldSkipItem
+        // treats a defer marker as cooldown-only, so a deferred intent still inside its
+        // window is not yet an actionable anchor (else the gate proceeds and then the
+        // act site skips it → a wasted proceed).
+        const last = typeof data?.lastTs === "number" ? data.lastTs : data?.ts;
+        if (typeof last === "number" && now() - last < cooldownMs) continue;
         out.push(f.replace(/\.json$/, ""));
       }
     } catch {

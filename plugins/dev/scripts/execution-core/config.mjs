@@ -1325,7 +1325,10 @@ export const BOARD_HEALTH_MODES = new Set(["off", "shadow", "enforce"]);
 // sanctionedNeedsHuman; default empty (suppress nothing).
 export function readSanctionedNeedsHuman(env = process.env) {
   const raw = env.CATALYST_BH_SANCTIONED_LATCHES;
-  if (typeof raw === "string" && raw.trim()) {
+  // CTL-1432 (Codex P2): a DEFINED env var — even empty — is an explicit override, so
+  // `CATALYST_BH_SANCTIONED_LATCHES=` clears the allowlist (empty → []). Only fall
+  // through to Layer-2 when the env var is UNSET (undefined).
+  if (typeof raw === "string") {
     return raw.split(",").map((s) => s.trim()).filter(Boolean);
   }
   const l2 = readLayer2BoardHealth();

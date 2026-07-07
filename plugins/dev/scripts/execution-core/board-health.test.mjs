@@ -682,10 +682,26 @@ describe("selectAnchorCandidates — CTL-1432 deferred board-health (B2)", () =>
     expect(out).toEqual(["CTL-FLAG", "ADV-1403", "CTL-ELIG"]);
   });
 
-  test("(Codex P1) a deferred ticket NOT on the live board (since terminal) is dropped", () => {
+  test("(Codex P1) a deferred ticket NOT on the live board (removed) is dropped", () => {
     const board = mkBoard({ deferredBoardHealth: ["ADV-DONE"], ticketsById: new Map() });
     const out = selectAnchorCandidates({ tier1: [], tier2: [], tier3: [] }, board);
     expect(out).not.toContain("ADV-DONE");
+  });
+
+  test("(Codex P1 r3) a deferred ticket in a TERMINAL Linear state is dropped (getBoard keeps Done descriptors)", () => {
+    const board = mkBoard({ deferredBoardHealth: ["CTL-DONE"], ticketsById: new Map([["CTL-DONE", { state: "Done" }]]) });
+    const out = selectAnchorCandidates({ tier1: [], tier2: [], tier3: [] }, board);
+    expect(out).not.toContain("CTL-DONE");
+  });
+
+  test("(Codex P1 r3) a deferred ticket that is ALSO sanctioned is dropped from the deferred anchors", () => {
+    const board = mkBoard({
+      deferredBoardHealth: ["CTL-SANCT"],
+      sanctionedNeedsHuman: ["CTL-SANCT"],
+      ticketsById: new Map([["CTL-SANCT", {}]]),
+    });
+    const out = selectAnchorCandidates({ tier1: [], tier2: [], tier3: [] }, board);
+    expect(out).not.toContain("CTL-SANCT");
   });
 });
 

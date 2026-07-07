@@ -1236,6 +1236,15 @@ describe("readDeferredBoardHealthIntents (CTL-1432 B2)", () => {
     expect(readDeferredBoardHealthIntents(pathJoin(orchDir, "does-not-exist"))).toEqual([]);
     expect(readDeferredBoardHealthIntents(null)).toEqual([]);
   });
+
+  test("(Codex P1 r3) a deferred intent still inside its 30-min cooldown is NOT returned", () => {
+    const t0 = 1_000_000_000_000;
+    defaultRecordIntent("ADV-COOL", { decision: "defer", fix_class: "board-health" }, { orchDir, now: () => t0 });
+    // within cooldown → excluded (it would proceed the gate then be skipped at the act site)
+    expect(readDeferredBoardHealthIntents(orchDir, { now: () => t0 + 1_000 })).toEqual([]);
+    // past cooldown → included
+    expect(readDeferredBoardHealthIntents(orchDir, { now: () => t0 + RECOVERY_COOLDOWN_MS + 1 })).toContain("ADV-COOL");
+  });
 });
 
 // ─── CTL-1176: capped remediate dispatch (cap enforcement) ──────────────────

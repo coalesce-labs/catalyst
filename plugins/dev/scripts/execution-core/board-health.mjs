@@ -762,6 +762,26 @@ function checkNeedsHumanPile(b) {
 }
 
 // ── (3) decideBoardHealth — PURE. The cheap-gate funnel. First match wins. ───
+// CTL-1432 (Codex P1): the deferred board-health set must pass the SAME acceptance a
+// normal anchor does before it counts as actionable / gets ranked — not an operator-
+// sanctioned latch (else a sanctioned ticket that ALSO has a defer intent bypasses the
+// proposeMoves suppression via the deferred path), and still a LIVE non-terminal ticket
+// on the board. getBoard = getAllTicketDescriptors({includeRemoved:false}) still includes
+// Done/Canceled descriptors, so a board-presence check alone isn't enough — check
+// isTerminalLinearState too. (The 30-min defer cooldown is applied upstream in
+// readDeferredBoardHealthIntents.) Shared by decideBoardHealth (gate count) AND
+// selectAnchorCandidates (ranking) so the two never disagree.
+function eligibleDeferredAnchors(board) {
+  const sanctioned = new Set(board?.sanctionedNeedsHuman ?? []);
+  const byId = board?.ticketsById;
+  return (board?.deferredBoardHealth ?? []).filter((t) => {
+    if (sanctioned.has(t)) return false;
+    const d = byId && typeof byId.get === "function" ? byId.get(t) : undefined;
+    if (!d) return false;
+    return !isTerminalLinearState(d);
+  });
+}
+
 export function decideBoardHealth(invariants, boardState) {
   const observableFailed = Object.values(invariants).filter((v) => v.observable && !v.ok);
   const invariantsFailed = observableFailed.reduce((n, v) => n + (Number(v.failed) || 0), 0);
@@ -776,14 +796,10 @@ export function decideBoardHealth(invariants, boardState) {
   // trips the gate is inert). tier3 moves are escalate-only (never anchorable by
   // selectAnchorCandidates), so they alone do not justify a holistic pass.
   const moves = proposeMoves(invariants, boardState);
-  // CTL-1432 (Codex P1): count only deferred intents whose ticket is still on the live
-  // board (ticketsById excludes Done/removed) — a since-terminal defer marker must not
-  // make the gate proceed (it would proceed then no-anchor). Mirrors selectAnchorCandidates.
-  const deferred = (boardState?.deferredBoardHealth ?? []).filter((t) =>
-    boardState?.ticketsById && typeof boardState.ticketsById.has === "function"
-      ? boardState.ticketsById.has(t)
-      : true,
-  );
+  // CTL-1432 (Codex P1): count only deferred intents that pass full acceptance
+  // (not sanctioned, live + non-terminal) — a since-terminal / sanctioned defer must not
+  // make the gate proceed (it would proceed then no-anchor). Same helper selectAnchorCandidates uses.
+  const deferred = eligibleDeferredAnchors(boardState);
   const hasActionableWork =
     moves.tier1.length > 0 || moves.tier2.length > 0 || deferred.length > 0;
 
@@ -937,9 +953,7 @@ export function selectAnchorCandidates(moves, board, { holistic = false, strande
   // eligible-queue ticket. Cross-checked against the live board (ticketsById already
   // excludes Done/removed via getBoard's includeRemoved:false), so a stale defer marker
   // whose ticket has since gone terminal is dropped rather than re-anchored.
-  const onBoard = (t) =>
-    board?.ticketsById && typeof board.ticketsById.has === "function" ? board.ticketsById.has(t) : true;
-  for (const t of (board?.deferredBoardHealth ?? []).filter(owns).filter(onBoard)) add(t);
+  for (const t of eligibleDeferredAnchors(board).filter(owns)) add(t);
   for (const e of (board?.eligible ?? []).map((x) => x && x.id).filter(Boolean).filter(owns)) add(e);
   // holistic foreign-failover: a flagged tier1/tier2 ticket this host does NOT own,
   // ONLY when its owner is provably dead/stranded. Appended AFTER all self-owned.

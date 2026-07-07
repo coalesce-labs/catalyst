@@ -37,6 +37,7 @@ import {
   CLUSTER_SYNC_INTERVAL_MS,
   readDeadDocWorkerConfig,
   readBoardHealthConfig,
+  readSanctionedNeedsHuman,
   DEAD_DOC_WORKER_TRANSCRIPT_SILENCE_MS,
   readLinearReplica,
   getReplicaDbPath,
@@ -1049,6 +1050,22 @@ describe("readDeadDocWorkerConfig (CTL-1245)", () => {
   });
   test("transcript-silence floor defaults to 30 minutes", () => {
     expect(DEAD_DOC_WORKER_TRANSCRIPT_SILENCE_MS).toBe(30 * 60_000);
+  });
+});
+
+describe("readSanctionedNeedsHuman (CTL-1432 B3)", () => {
+  const saved = process.env.CATALYST_BH_SANCTIONED_LATCHES;
+  afterEach(() => {
+    if (saved === undefined) delete process.env.CATALYST_BH_SANCTIONED_LATCHES;
+    else process.env.CATALYST_BH_SANCTIONED_LATCHES = saved;
+  });
+  test("env list → parsed, trimmed, empties dropped", () => {
+    process.env.CATALYST_BH_SANCTIONED_LATCHES = "CTL-1, CTL-2 ,, CTL-3";
+    expect(readSanctionedNeedsHuman()).toEqual(["CTL-1", "CTL-2", "CTL-3"]);
+  });
+  test("(Codex P2) an EMPTY env var explicitly clears the allowlist → [] (does not fall through to Layer-2)", () => {
+    process.env.CATALYST_BH_SANCTIONED_LATCHES = "";
+    expect(readSanctionedNeedsHuman()).toEqual([]);
   });
 });
 
