@@ -299,6 +299,14 @@ export function assembleBoardState({
   // (N=1 byte-identical; a true collision with no repo stays the ambiguous skip).
   repoForTicket = null,
   getReconcileMarkers = () => ({}),
+  // CTL-1432 (B2): live query for tickets carrying a deferred board-health
+  // recovery-intent (defer→fix_class=board-health) — folded into the anchor
+  // candidates so the holistic pass actuates them. Empty default keeps a bare unit
+  // call byte-identical.
+  getDeferredBoardHealthTickets = () => [],
+  // CTL-1432 (B3): operator-sanctioned needs-human latch allowlist (a static array,
+  // not a live query). Suppressed from proposeMoves; stays visible in frozenNeedsHuman.
+  sanctionedNeedsHuman = [],
   // CTL-1157: PR-lifecycle status map (filter_state). Empty Map default ⇒ the
   // phantom-merged-PR / orphaned-open-PR invariants stay observable:false (the
   // shadow-first seam: wiring lands before the invariants begin observing).
@@ -370,6 +378,12 @@ export function assembleBoardState({
       freeSlots: capacity?.freeSlots ?? 0,
     },
     reconcileMarkers: safe(() => getReconcileMarkers(), {}),
+    // CTL-1432 (B2/B3): deferred board-health anchor candidates + the sanctioned
+    // needs-human allowlist, carried on the frozen board for the pure consumers
+    // (selectAnchorCandidates reads deferredBoardHealth; proposeMoves reads
+    // sanctionedNeedsHuman).
+    deferredBoardHealth: safe(() => getDeferredBoardHealthTickets(), []),
+    sanctionedNeedsHuman: Array.isArray(sanctionedNeedsHuman) ? sanctionedNeedsHuman : [],
     // CTL-1157 off-gate: in off the filter_state PR-status SELECT must NOT run —
     // skip getPrStatusMap() entirely so off is byte-identical to origin/main (the
     // phantom/orphaned-PR invariants also stay out of evaluateInvariants in off).
@@ -748,15 +762,74 @@ function checkNeedsHumanPile(b) {
 }
 
 // ── (3) decideBoardHealth — PURE. The cheap-gate funnel. First match wins. ───
+// CTL-1432 (Codex P1): the deferred board-health set must pass the SAME acceptance a
+// normal anchor does before it counts as actionable / gets ranked — not an operator-
+// sanctioned latch (else a sanctioned ticket that ALSO has a defer intent bypasses the
+// proposeMoves suppression via the deferred path), and still a LIVE non-terminal ticket
+// on the board. getBoard = getAllTicketDescriptors({includeRemoved:false}) still includes
+// Done/Canceled descriptors, so a board-presence check alone isn't enough — check
+// isTerminalLinearState too. (The 30-min defer cooldown is applied upstream in
+// readDeferredBoardHealthIntents.) Shared by decideBoardHealth (gate count) AND
+// selectAnchorCandidates (ranking) so the two never disagree.
+function eligibleDeferredAnchors(board) {
+  const sanctioned = new Set(board?.sanctionedNeedsHuman ?? []);
+  const byId = board?.ticketsById;
+  // CTL-1432 (Codex P2): HRW-ownership filter, mirroring selectAnchorCandidates — a
+  // foreign-owned deferred marker must not make the gate proceed (this host would then
+  // no-anchor it). N=1 / no roster / no ownerForTicket ⇒ owns everything ⇒ unchanged.
+  const multiHost = !!(board?.multiHost && typeof board?.ownerForTicket === "function");
+  const owns = (t) => {
+    if (!multiHost) return true;
+    try {
+      return board.ownerForTicket(t, board.roster) === board.self;
+    } catch {
+      return true; // fail-open: a broken HRW read must not block self-owned actuation
+    }
+  };
+  return (board?.deferredBoardHealth ?? []).filter((t) => {
+    if (sanctioned.has(t)) return false;
+    if (!owns(t)) return false;
+    const d = byId && typeof byId.get === "function" ? byId.get(t) : undefined;
+    if (!d) return false;
+    return !isTerminalLinearState(d);
+  });
+}
+
 export function decideBoardHealth(invariants, boardState) {
   const observableFailed = Object.values(invariants).filter((v) => v.observable && !v.ok);
   const invariantsFailed = observableFailed.reduce((n, v) => n + (Number(v.failed) || 0), 0);
 
-  // Gate 1 — all observable invariants green → skip (no LLM thrash).
-  if (observableFailed.length === 0) {
-    return decision("skip", "all-green", invariantsFailed, emptyMoves());
+  // CTL-1432 (B2/B3 — Codex P1): gate on ACTIONABLE work, not merely a failed
+  // invariant. proposeMoves already suppresses the sanctioned needs-human latches
+  // (B3), so a scan whose ONLY failure is an all-sanctioned frozenNeedsHuman produces
+  // no tier1/tier2 moves → it must NOT proceed (F2: else enforce dispatches a holistic
+  // pass with nothing real to do). Conversely, a deferred board-health intent (B2) is
+  // actionable even when NO invariant failed → it MUST proceed (F1: boardHealthPass
+  // calls selectAnchorCandidates only after "proceed", so a deferred intent that never
+  // trips the gate is inert). tier3 moves are escalate-only (never anchorable by
+  // selectAnchorCandidates), so they alone do not justify a holistic pass.
+  const moves = proposeMoves(invariants, boardState);
+  // CTL-1432 (Codex P1): count only deferred intents that pass full acceptance
+  // (not sanctioned, live + non-terminal) — a since-terminal / sanctioned defer must not
+  // make the gate proceed (it would proceed then no-anchor). Same helper selectAnchorCandidates uses.
+  const deferred = eligibleDeferredAnchors(boardState);
+  const hasActionableWork =
+    moves.tier1.length > 0 || moves.tier2.length > 0 || deferred.length > 0;
+
+  // Gate 1 — nothing actionable (all green, or every failure suppressed/escalate-only,
+  // and no deferred work) → skip the holistic DISPATCH (no LLM thrash). CTL-1432 (Codex
+  // P2): still return the proposed `moves` (not emptyMoves) so an escalate-only board —
+  // tier3 stranded-node / project-silence — keeps surfacing those proposals in the
+  // recovery.board-scan event (a human should see them); we just don't dispatch.
+  if (!hasActionableWork) {
+    return decision(
+      "skip",
+      observableFailed.length === 0 ? "all-green" : "no-actionable-moves",
+      invariantsFailed,
+      moves,
+    );
   }
-  // Gate 2 — failures exist but no free slot to dispatch a fix → skip.
+  // Gate 2 — actionable work but no free slot to dispatch a fix → skip.
   if ((boardState.capacity?.freeSlots ?? 0) <= 0) {
     return decision("skip", "no-free-slots", invariantsFailed, emptyMoves());
   }
@@ -765,8 +838,12 @@ export function decideBoardHealth(invariants, boardState) {
   if (rl && rl.observable && !rl.ok) {
     return decision("skip", "rate-limit-cliff", invariantsFailed, emptyMoves());
   }
-  // Gate 4 — real failures + headroom → proceed; compute proposed moves.
-  return decision("proceed", `${observableFailed.length} invariant(s) flagged`, invariantsFailed, proposeMoves(invariants, boardState));
+  // Gate 4 — actionable work + headroom → proceed.
+  const reason =
+    observableFailed.length > 0
+      ? `${observableFailed.length} invariant(s) flagged`
+      : `${deferred.length} deferred board-health intent(s)`;
+  return decision("proceed", reason, invariantsFailed, moves);
 }
 
 function decision(gateDecision, reason, invariantsFailed, moves) {
@@ -784,11 +861,20 @@ export function proposeMoves(invariants, _b) {
   const tier1 = [];
   const tier2 = [];
   const tier3 = [];
+  // CTL-1432 (B3 + Codex P1): operator-sanctioned needs-human latches are never
+  // re-proposed as ANY per-ticket move — not just the frozenNeedsHuman tier2, but also
+  // the needsHumanPile tier1 (a sanctioned ticket with a live needs-human/stalled
+  // worker signal), workerAge, and the PR cohorts. They stay VISIBLE in
+  // frozenNeedsHuman / boardContext (suppression is HERE only, never in
+  // checkFrozenNeedsHuman) so a human still sees them; they just stop drowning the
+  // genuinely-stuck tickets every 5-min scan (making proposedTier1/2 a constant).
+  const sanctioned = new Set(_b?.sanctionedNeedsHuman ?? []);
+  const sanction = (t) => sanctioned.has(t);
   if (invariants.dispatchLiveness && !invariants.dispatchLiveness.ok) {
     tier1.push({ move: "kick-dispatch", rationale: invariants.dispatchLiveness.note });
   }
   for (const t of invariants.workerAge?.flagged ?? []) {
-    if (!invariants.workerAge.ok) tier1.push({ ticket: t, move: "nudge", rationale: "worker past phase-normal age" });
+    if (!invariants.workerAge.ok && !sanction(t)) tier1.push({ ticket: t, move: "nudge", rationale: "worker past phase-normal age" });
   }
   if (invariants.cacheCoherence && invariants.cacheCoherence.observable && !invariants.cacheCoherence.ok) {
     tier1.push({ move: "note-cache-drift", rationale: invariants.cacheCoherence.note });
@@ -797,21 +883,21 @@ export function proposeMoves(invariants, _b) {
   // Done vs reopen) and orphaned open PRs (finish or close) — is tier1 (highest
   // anchor priority); the status-based needs-human pile is the untyped catch-all.
   for (const t of invariants.phantomMergedPr?.flagged ?? []) {
-    if (!invariants.phantomMergedPr.ok) tier1.push({ ticket: t, move: "judge-done-or-reopen", rationale: "PR merged/deployed but ticket still in a PR/in-review state" });
+    if (!invariants.phantomMergedPr.ok && !sanction(t)) tier1.push({ ticket: t, move: "judge-done-or-reopen", rationale: "PR merged/deployed but ticket still in a PR/in-review state" });
   }
   for (const t of invariants.orphanedOpenPr?.flagged ?? []) {
-    if (!invariants.orphanedOpenPr.ok) tier1.push({ ticket: t, move: "finish-or-close-pr", rationale: "open PR with no live worker past age" });
+    if (!invariants.orphanedOpenPr.ok && !sanction(t)) tier1.push({ ticket: t, move: "finish-or-close-pr", rationale: "open PR with no live worker past age" });
   }
   for (const t of invariants.needsHumanPile?.flagged ?? []) {
-    if (!invariants.needsHumanPile.ok) tier1.push({ ticket: t, move: "holistic-triage", rationale: "worker parked at needs-human/stalled" });
+    if (!invariants.needsHumanPile.ok && !sanction(t)) tier1.push({ ticket: t, move: "holistic-triage", rationale: "worker parked at needs-human/stalled" });
   }
   for (const t of invariants.blockedTree?.flagged ?? []) {
-    if (!invariants.blockedTree.ok) tier2.push({ ticket: t, move: "re-dispatch-blocker", rationale: "blocked by unscheduled/stuck blocker" });
+    if (!invariants.blockedTree.ok && !sanction(t)) tier2.push({ ticket: t, move: "re-dispatch-blocker", rationale: "blocked by unscheduled/stuck blocker" });
   }
   // CTL-1157: a needs-human-LABELLED ticket frozen past 48h has already been
   // escalated once → tier2 (review, lower urgency than the actionable PR work).
   for (const t of invariants.frozenNeedsHuman?.flagged ?? []) {
-    if (!invariants.frozenNeedsHuman.ok) tier2.push({ ticket: t, move: "review-needs-human", rationale: "needs-human label frozen past threshold" });
+    if (!invariants.frozenNeedsHuman.ok && !sanction(t)) tier2.push({ ticket: t, move: "review-needs-human", rationale: "needs-human label frozen past threshold" });
   }
   for (const h of invariants.strandedNode?.flagged ?? []) {
     if (!invariants.strandedNode.ok) tier3.push({ host: h, move: "escalate-stranded-node", rationale: "rostered node owns work but reconcile is failing" });
@@ -874,9 +960,16 @@ export function selectAnchorCandidates(moves, board, { holistic = false, strande
     }
   };
   const ticketsOf = (arr) => (arr ?? []).map((m) => m && m.ticket).filter(Boolean);
-  // self-owned chain first (unchanged tier1 > tier2 > eligible ordering).
+  // self-owned chain first (unchanged tier1 > tier2 ordering).
   for (const t of ticketsOf(moves?.tier1).filter(owns)) add(t);
   for (const t of ticketsOf(moves?.tier2).filter(owns)) add(t);
+  // CTL-1432 (B2, Codex P1): deferred board-health intents rank AFTER flagged work but
+  // BEFORE the eligible fallback — when a scan proceeds SOLELY for a deferred intent
+  // (empty moves), the deferred ticket MUST be the anchor, not an unrelated top-of-
+  // eligible-queue ticket. Cross-checked against the live board (ticketsById already
+  // excludes Done/removed via getBoard's includeRemoved:false), so a stale defer marker
+  // whose ticket has since gone terminal is dropped rather than re-anchored.
+  for (const t of eligibleDeferredAnchors(board)) add(t); // already HRW-owns-filtered
   for (const e of (board?.eligible ?? []).map((x) => x && x.id).filter(Boolean).filter(owns)) add(e);
   // holistic foreign-failover: a flagged tier1/tier2 ticket this host does NOT own,
   // ONLY when its owner is provably dead/stranded. Appended AFTER all self-owned.
@@ -1007,6 +1100,8 @@ export function boardHealthPass({
   ownerForTicket,
   repoForTicket, // CTL-1157 (Codex #4): ticket→owner/repo resolver (daemon-bound)
   getReconcileMarkers,
+  getDeferredBoardHealthTickets, // CTL-1432 (B2): deferred board-health anchor candidates
+  sanctionedNeedsHuman, // CTL-1432 (B3): sanctioned needs-human latch allowlist
   getPrStatusMap, // CTL-1157: filter_state PR-status reader (daemon-bound)
   deadHosts, // CTL-1157: provably-dead host set (daemon-computed)
   lastRunMs = _lastRunMs,
@@ -1027,6 +1122,7 @@ export function boardHealthPass({
     orchDir, getBoard, getWorkerSignals, getEligible,
     roster, self, multiHost, capacity, readEventRing, ownerForTicket, repoForTicket, getReconcileMarkers,
     getPrStatusMap, deadHosts, mode, now,
+    getDeferredBoardHealthTickets, sanctionedNeedsHuman, // CTL-1432 (B2/B3)
   });
   const invariants = evaluateInvariants(board, { mode });
   const dec = decideBoardHealth(invariants, board);

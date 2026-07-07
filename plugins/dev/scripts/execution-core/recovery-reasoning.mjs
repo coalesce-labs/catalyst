@@ -29,6 +29,7 @@ import {
   mkdirSync,
   appendFileSync,
   readFileSync,
+  readdirSync,
   writeFileSync,
   existsSync,
   renameSync,
@@ -1690,6 +1691,45 @@ function recoveryIntentPath(orchDir, ticket) {
   return join(orchDir, ".recovery-intents", `${ticket}.json`);
 }
 
+// readDeferredBoardHealthIntents — CTL-1432 (B2). Enumerate the tickets whose
+// recovery-intent is a DEFERRAL to the holistic board-health delegate
+// (decision:"defer" + fix_class:"board-health" — the classifier's "no typed
+// failure signature; the holistic board-health delegate will triage" path). Until
+// now nothing consumed these, so a deferred ticket rotted (the delegate-mini
+// session it implicitly routed to has been dormant since Jun 19). board-health's
+// selectAnchorCandidates now folds these in as first-class self-owned anchors so
+// the holistic pass actually dispatches a recovery-pass for them. Pure read,
+// fail-open: absent dir / malformed entries → [].
+export function readDeferredBoardHealthIntents(orchDir, { now = () => Date.now(), cooldownMs = RECOVERY_COOLDOWN_MS } = {}) {
+  if (!orchDir) return [];
+  const dir = join(orchDir, ".recovery-intents");
+  let files;
+  try {
+    files = readdirSync(dir);
+  } catch {
+    return [];
+  }
+  const out = [];
+  for (const f of files) {
+    if (!f.endsWith(".json")) continue;
+    try {
+      const data = JSON.parse(readFileSync(join(dir, f), "utf8"));
+      if (data?.decision === "defer" && data?.fix_class === "board-health") {
+        // CTL-1432 (Codex P1): honor the 30-min defer cooldown — defaultShouldSkipItem
+        // treats a defer marker as cooldown-only, so a deferred intent still inside its
+        // window is not yet an actionable anchor (else the gate proceeds and then the
+        // act site skips it → a wasted proceed).
+        const last = typeof data?.lastTs === "number" ? data.lastTs : data?.ts;
+        if (typeof last === "number" && now() - last < cooldownMs) continue;
+        out.push(f.replace(/\.json$/, ""));
+      }
+    } catch {
+      /* malformed → skip */
+    }
+  }
+  return out;
+}
+
 // defaultRecordIntent — append/upgrade a recovery-intent ledger entry.
 // Read-modify-write: preserve first-action ts, accrue attempts, latch escalated.
 export function defaultRecordIntent(ticket, intent, opts = {}) {
@@ -1725,10 +1765,21 @@ export function defaultRecordIntent(ticket, intent, opts = {}) {
     Boolean(intent.escalated) ||
     intent.decision === "escalate"; // an escalate-pass latches escalated
 
+  // CTL-1432 (Codex P1): a REPEATED defer→board-health is a no-op handoff — the ticket
+  // is already handed to the board-health delegate, so re-deferring must NOT refresh
+  // lastTs. Otherwise the per-item recovery pass (which runs BEFORE boardHealthPass in
+  // the same tick) re-defers the marker back under the 30-min cooldown every cycle, and
+  // the board-health consumer — which gates on lastTs — is starved forever. Freezing
+  // lastTs lets the marker AGE OUT so board-health finally consumes + dispatches it.
+  const isRepeatedBoardHealthDefer =
+    intent.decision === "defer" &&
+    (intent.fix_class ?? prior.fix_class) === "board-health" &&
+    prior.decision === "defer" &&
+    typeof prior.lastTs === "number";
   const entry = {
     ticket,
     ts: typeof prior.ts === "number" ? prior.ts : ts, // first-action timestamp
-    lastTs: ts, // most-recent action timestamp (drives the cooldown window)
+    lastTs: isRepeatedBoardHealthDefer ? prior.lastTs : ts, // most-recent action ts (drives cooldown)
     decision: intent.decision,
     fix_class: intent.fix_class ?? prior.fix_class ?? null,
     attempts:

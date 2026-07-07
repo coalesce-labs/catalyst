@@ -1316,6 +1316,26 @@ export function readDeadDocWorkerConfig() {
 //             carrying the whole-board context. Operator-gated — never auto-enabled.
 export const BOARD_HEALTH_MODES = new Set(["off", "shadow", "enforce"]);
 
+// readSanctionedNeedsHuman — CTL-1432 (B3). The operator-sanctioned needs-human
+// latch allowlist: tickets a human has deliberately parked at needs-human that the
+// delegate must NOT re-propose as moves every scan (they drown the genuinely-stuck
+// tickets). They STAY visible in boardContext.frozenNeedsHuman — this only
+// suppresses them from proposeMoves. Env CATALYST_BH_SANCTIONED_LATCHES
+// (comma-separated ticket ids) overrides Layer-2 catalyst.boardHealth.
+// sanctionedNeedsHuman; default empty (suppress nothing).
+export function readSanctionedNeedsHuman(env = process.env) {
+  const raw = env.CATALYST_BH_SANCTIONED_LATCHES;
+  // CTL-1432 (Codex P2): a DEFINED env var — even empty — is an explicit override, so
+  // `CATALYST_BH_SANCTIONED_LATCHES=` clears the allowlist (empty → []). Only fall
+  // through to Layer-2 when the env var is UNSET (undefined).
+  if (typeof raw === "string") {
+    return raw.split(",").map((s) => s.trim()).filter(Boolean);
+  }
+  const l2 = readLayer2BoardHealth();
+  const list = l2?.sanctionedNeedsHuman;
+  return Array.isArray(list) ? list.filter((x) => typeof x === "string") : [];
+}
+
 function readLayer2BoardHealth() {
   try {
     const b = JSON.parse(readFileSync(getLayer2ConfigPath(), "utf8"))?.catalyst?.boardHealth;
