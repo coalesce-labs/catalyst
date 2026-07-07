@@ -918,8 +918,19 @@ export function fetchTicketsDelegateBatch(team, identifiers, { exec = defaultDel
 // while a feed-hole (CTL-139: cursor present but a team's rows dropped) is never
 // trusted as empty — it keeps falling through to linearis until the replica
 // catches up. Empty confirms are thereby bounded to ≤1 linearis call/team/window.
-// Env-overridable; default 5 min (matches the replica staleness window).
-const EMPTY_RECONFIRM_MS = Number(process.env.CATALYST_ELIGIBLE_EMPTY_RECONFIRM_MS) || 300_000;
+// CTL-1433 (A2): default RAISED from 5 min to 30 min — ABOVE the 10-min reconcile
+// interval (RECONCILE_INTERVAL_MS, config.mjs). At 5 min the confirm was ALWAYS stale by
+// the next reconcile, so every quiet-board reconcile re-shelled `linearis issues list`
+// per team — the dominant CTL-679 breaker driver (the #1 attributed trip after A1
+// shipped: caller:"linearis:issues-list", eligible_source:linearis 597 vs replica 1 on
+// mini). At 30 min the marker stays fresh across ~2-3 reconciles, so a steady-empty team
+// re-validates at most ~once per 30 min (a ~4-6× cut) — while STILL doing a low-rate LIVE
+// validation. That live validation is load-bearing: if the configured Linear status is
+// renamed/removed, the replica filter (i.state = ?) returns a FALSE empty, and a full
+// removal of the reconfirm would silently freeze that team's admission; the periodic
+// linearis confirm (which queries the real status) catches the drift within ~30 min.
+// Env-overridable (CATALYST_ELIGIBLE_EMPTY_RECONFIRM_MS) — keep it above the reconcile interval.
+const EMPTY_RECONFIRM_MS = Number(process.env.CATALYST_ELIGIBLE_EMPTY_RECONFIRM_MS) || 1_800_000;
 // team → epoch-ms of the last SUCCESSFUL EMPTY linearis confirmation. Module-scoped
 // (the daemon is long-lived; bounded by team count). Reset in tests via the export.
 const _eligibleEmptyConfirmAt = new Map();
@@ -961,6 +972,9 @@ export function runEligibleQuery(
     // DEFINED replica-empty is trusted instead of freezing admission (see the
     // empty-path branch). Defaults to the production process-wide breaker.
     breakerIsOpen = () => linearBreaker.isOpen(),
+    // CTL-1433 (A2): the confirmed-empty trust window, injectable so the cadence tests
+    // pin a deterministic value independent of the (raised-to-30-min) module default.
+    reconfirmMs = EMPTY_RECONFIRM_MS,
   } = {}
 ) {
   // CTL-1397: replica-backed board-list tier. Fail-open: a throw out of
@@ -1008,7 +1022,7 @@ export function runEligibleQuery(
       //   - a breaker-OPEN reconcile with no recent confirmation falls through so
       //     the exec short-circuits (circuit-open) → throw → preserve prior (never
       //     trusts an unconfirmed empty as authoritative during a storm).
-      if (now() - (_eligibleEmptyConfirmAt.get(query.team) ?? 0) < EMPTY_RECONFIRM_MS) {
+      if (now() - (_eligibleEmptyConfirmAt.get(query.team) ?? 0) < reconfirmMs) {
         onSource?.("replica", 0);
         return tickets; // [] — a recently linearis-confirmed empty, trusted (breaker-immune)
       }

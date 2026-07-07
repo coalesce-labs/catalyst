@@ -337,7 +337,7 @@ describe("runEligibleQuery — replica tier (CTL-1397)", () => {
     // 429 and trip the real breaker singleton; without pinning, the 2nd call would
     // hit the breaker-open freeze-avoidance branch and trust the empty.) A stub
     // delegateExec also keeps the unit test off the network.
-    const opts = { replica, now, breakerIsOpen: () => false, delegateExec: () => ({ code: 0, stdout: "{}", stderr: "" }) };
+    const opts = { replica, now, breakerIsOpen: () => false, reconfirmMs: 300_000, delegateExec: () => ({ code: 0, stdout: "{}", stderr: "" }) };
     const t1 = runEligibleQuery(query, { exec: mkExec(), ...opts });
     expect(t1.map((t) => t.identifier)).toEqual(["CTL-9"]); // real board served (hole)
     // 1s later: the non-empty confirm did NOT cache → still falls through (no zeroing).
@@ -469,7 +469,7 @@ describe("runEligibleQuery — replica tier (CTL-1397)", () => {
       execCalls.push(clock);
       return { code: 0, stdout: ticketsJson([]), stderr: "" };
     };
-    const call = () => runEligibleQuery(query, { exec: mkExec(), replica, now });
+    const call = () => runEligibleQuery(query, { exec: mkExec(), replica, now, reconfirmMs: 300_000 });
     call(); // t0: cold → linearis confirms empty → caches
     clock += 60_000; call(); // +1m: within window → trust replica (no exec)
     clock += 60_000; call(); // +2m: within window → trust replica (no exec)
