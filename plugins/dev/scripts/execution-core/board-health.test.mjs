@@ -15,6 +15,7 @@ import {
   decideBoardHealth,
   proposeMoves,
   selectAnchor,
+  selectAnchorCandidates,
   buildBoardContext,
   buildBoardScanEvent,
   boardHealthPass,
@@ -73,6 +74,9 @@ function mkBoard(o = {}) {
     ownerForTicket: o.ownerForTicket ?? null,
     // CTL-1157 (Codex #4): ticket→owner/repo resolver for the composite lookup.
     repoForTicket: o.repoForTicket ?? null,
+    // CTL-1432 (B2/B3): deferred board-health anchor candidates + sanctioned latch allowlist.
+    deferredBoardHealth: o.deferredBoardHealth ?? [],
+    sanctionedNeedsHuman: o.sanctionedNeedsHuman ?? [],
     now: o.now ?? NOW,
   };
 }
@@ -633,6 +637,39 @@ describe("proposeMoves — tiering", () => {
     expect(d.proposed.tier1).toBe(d.moves.tier1.length);
     expect(d.proposed.tier2).toBe(d.moves.tier2.length);
     expect(d.proposed.tier3).toBe(d.moves.tier3.length);
+  });
+});
+
+// ─── CTL-1432 (B3): sanctioned needs-human latches suppressed from proposeMoves ─
+describe("proposeMoves — CTL-1432 sanctioned-latch suppression (B3)", () => {
+  test("a sanctioned frozen ticket is NOT re-proposed; a non-sanctioned one still is", () => {
+    const invs = { ...allGreen(), frozenNeedsHuman: inv(false, 2, true, ["CTL-SANCT", "CTL-REAL"]) };
+    const m = proposeMoves(invs, mkBoard({ sanctionedNeedsHuman: ["CTL-SANCT"] }));
+    const t2 = m.tier2.filter((x) => x.move === "review-needs-human").map((x) => x.ticket);
+    expect(t2).toContain("CTL-REAL");
+    expect(t2).not.toContain("CTL-SANCT");
+  });
+
+  test("empty allowlist → every frozen ticket still proposed (default behavior unchanged)", () => {
+    const invs = { ...allGreen(), frozenNeedsHuman: inv(false, 1, true, ["CTL-REAL"]) };
+    const m = proposeMoves(invs, mkBoard());
+    expect(m.tier2.map((x) => x.ticket)).toContain("CTL-REAL");
+  });
+});
+
+// ─── CTL-1432 (B2): deferred board-health intents become anchor candidates ──────
+describe("selectAnchorCandidates — CTL-1432 deferred board-health (B2)", () => {
+  test("a deferred board-health ticket with NO invariant flag is a self-owned anchor candidate", () => {
+    const board = mkBoard({ deferredBoardHealth: ["ADV-1403"] });
+    const out = selectAnchorCandidates({ tier1: [], tier2: [], tier3: [] }, board);
+    expect(out).toContain("ADV-1403");
+  });
+
+  test("deferred candidates rank AFTER flagged work + the eligible queue", () => {
+    const board = mkBoard({ deferredBoardHealth: ["ADV-1403"], eligible: [{ id: "CTL-ELIG" }] });
+    const moves = { tier1: [{ ticket: "CTL-FLAG" }], tier2: [], tier3: [] };
+    const out = selectAnchorCandidates(moves, board);
+    expect(out).toEqual(["CTL-FLAG", "CTL-ELIG", "ADV-1403"]);
   });
 });
 

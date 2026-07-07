@@ -299,6 +299,14 @@ export function assembleBoardState({
   // (N=1 byte-identical; a true collision with no repo stays the ambiguous skip).
   repoForTicket = null,
   getReconcileMarkers = () => ({}),
+  // CTL-1432 (B2): live query for tickets carrying a deferred board-health
+  // recovery-intent (defer→fix_class=board-health) — folded into the anchor
+  // candidates so the holistic pass actuates them. Empty default keeps a bare unit
+  // call byte-identical.
+  getDeferredBoardHealthTickets = () => [],
+  // CTL-1432 (B3): operator-sanctioned needs-human latch allowlist (a static array,
+  // not a live query). Suppressed from proposeMoves; stays visible in frozenNeedsHuman.
+  sanctionedNeedsHuman = [],
   // CTL-1157: PR-lifecycle status map (filter_state). Empty Map default ⇒ the
   // phantom-merged-PR / orphaned-open-PR invariants stay observable:false (the
   // shadow-first seam: wiring lands before the invariants begin observing).
@@ -370,6 +378,12 @@ export function assembleBoardState({
       freeSlots: capacity?.freeSlots ?? 0,
     },
     reconcileMarkers: safe(() => getReconcileMarkers(), {}),
+    // CTL-1432 (B2/B3): deferred board-health anchor candidates + the sanctioned
+    // needs-human allowlist, carried on the frozen board for the pure consumers
+    // (selectAnchorCandidates reads deferredBoardHealth; proposeMoves reads
+    // sanctionedNeedsHuman).
+    deferredBoardHealth: safe(() => getDeferredBoardHealthTickets(), []),
+    sanctionedNeedsHuman: Array.isArray(sanctionedNeedsHuman) ? sanctionedNeedsHuman : [],
     // CTL-1157 off-gate: in off the filter_state PR-status SELECT must NOT run —
     // skip getPrStatusMap() entirely so off is byte-identical to origin/main (the
     // phantom/orphaned-PR invariants also stay out of evaluateInvariants in off).
@@ -810,7 +824,13 @@ export function proposeMoves(invariants, _b) {
   }
   // CTL-1157: a needs-human-LABELLED ticket frozen past 48h has already been
   // escalated once → tier2 (review, lower urgency than the actionable PR work).
+  // CTL-1432 (B3): operator-sanctioned needs-human latches stay VISIBLE in
+  // frozenNeedsHuman / boardContext but are never re-proposed as moves — else the
+  // sanctioned tickets drown the genuinely-stuck ones every 5-min scan (making
+  // proposedTier2 a constant). Suppression is HERE only, never in checkFrozenNeedsHuman.
+  const sanctioned = new Set(_b?.sanctionedNeedsHuman ?? []);
   for (const t of invariants.frozenNeedsHuman?.flagged ?? []) {
+    if (sanctioned.has(t)) continue;
     if (!invariants.frozenNeedsHuman.ok) tier2.push({ ticket: t, move: "review-needs-human", rationale: "needs-human label frozen past threshold" });
   }
   for (const h of invariants.strandedNode?.flagged ?? []) {
@@ -878,6 +898,11 @@ export function selectAnchorCandidates(moves, board, { holistic = false, strande
   for (const t of ticketsOf(moves?.tier1).filter(owns)) add(t);
   for (const t of ticketsOf(moves?.tier2).filter(owns)) add(t);
   for (const e of (board?.eligible ?? []).map((x) => x && x.id).filter(Boolean).filter(owns)) add(e);
+  // CTL-1432 (B2): deferred board-health intents are self-owned anchor candidates —
+  // ranked AFTER flagged work + the eligible queue, but still actuated when a slot is
+  // free, so "the holistic delegate will triage" dispatches a recovery-pass instead of
+  // the deferred intent rotting. Self-owned filtered like every other candidate.
+  for (const t of (board?.deferredBoardHealth ?? []).filter(owns)) add(t);
   // holistic foreign-failover: a flagged tier1/tier2 ticket this host does NOT own,
   // ONLY when its owner is provably dead/stranded. Appended AFTER all self-owned.
   if (holistic && multiHost) {
@@ -1007,6 +1032,8 @@ export function boardHealthPass({
   ownerForTicket,
   repoForTicket, // CTL-1157 (Codex #4): ticket→owner/repo resolver (daemon-bound)
   getReconcileMarkers,
+  getDeferredBoardHealthTickets, // CTL-1432 (B2): deferred board-health anchor candidates
+  sanctionedNeedsHuman, // CTL-1432 (B3): sanctioned needs-human latch allowlist
   getPrStatusMap, // CTL-1157: filter_state PR-status reader (daemon-bound)
   deadHosts, // CTL-1157: provably-dead host set (daemon-computed)
   lastRunMs = _lastRunMs,
@@ -1027,6 +1054,7 @@ export function boardHealthPass({
     orchDir, getBoard, getWorkerSignals, getEligible,
     roster, self, multiHost, capacity, readEventRing, ownerForTicket, repoForTicket, getReconcileMarkers,
     getPrStatusMap, deadHosts, mode, now,
+    getDeferredBoardHealthTickets, sanctionedNeedsHuman, // CTL-1432 (B2/B3)
   });
   const invariants = evaluateInvariants(board, { mode });
   const dec = decideBoardHealth(invariants, board);

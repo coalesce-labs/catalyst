@@ -12,6 +12,7 @@ import {
   generateRemediateBrief,
   buildRecoveryEnvelope,
   defaultRecordIntent,
+  readDeferredBoardHealthIntents,
   defaultShouldSkipItem,
   defaultForgetIntent,
   defaultInvokeRemediateCapped,
@@ -1104,6 +1105,38 @@ describe("recovery-intent ledger (cooldown + max-attempts + escalated)", () => {
   test("forgetIntent with no orchDir / no ticket → false (fail-soft)", () => {
     expect(defaultForgetIntent("CTL-309", { orchDir: null })).toBe(false);
     expect(defaultForgetIntent("", { orchDir })).toBe(false);
+  });
+});
+
+// ─── CTL-1432 (B2): readDeferredBoardHealthIntents ──────────────────────────
+describe("readDeferredBoardHealthIntents (CTL-1432 B2)", () => {
+  let orchDir;
+  beforeEach(() => {
+    orchDir = mkdtempSync(pathJoin(tmpdir(), "rec-defer-"));
+  });
+  afterEach(() => {
+    try {
+      rmSync(orchDir, { recursive: true, force: true });
+    } catch {
+      /* best-effort */
+    }
+  });
+
+  test("returns ONLY defer + fix_class=board-health tickets", () => {
+    const t0 = 1_000_000_000_000;
+    // a deferred board-health intent → included
+    defaultRecordIntent("ADV-1403", { decision: "defer", fix_class: "board-health" }, { orchDir, now: () => t0 });
+    // a deferred intent with a DIFFERENT fix_class → excluded
+    defaultRecordIntent("CTL-900", { decision: "defer", fix_class: "bounded-llm" }, { orchDir, now: () => t0 });
+    // a non-defer (fix) board-health-ish intent → excluded (decision must be defer)
+    defaultRecordIntent("CTL-901", { decision: "fix", fix_class: "board-health" }, { orchDir, now: () => t0 });
+    const out = readDeferredBoardHealthIntents(orchDir);
+    expect(out).toEqual(["ADV-1403"]);
+  });
+
+  test("fail-open: absent dir / no orchDir → []", () => {
+    expect(readDeferredBoardHealthIntents(pathJoin(orchDir, "does-not-exist"))).toEqual([]);
+    expect(readDeferredBoardHealthIntents(null)).toEqual([]);
   });
 });
 

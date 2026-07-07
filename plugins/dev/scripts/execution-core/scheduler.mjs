@@ -233,6 +233,7 @@ import {
 import {
   reasoningRecoveryPass,
   defaultShouldSkipItem as recoveryShouldSkipItem,
+  readDeferredBoardHealthIntents, // CTL-1432 (B2): deferred board-health anchor candidates
   defaultRecordIntent as recoveryRecordIntent,
   // CTL-1242 (corrected scope): forget the host-local recovery-intent latch when
   // a ticket goes terminal so the ledger doesn't accumulate stale finished-ticket
@@ -266,7 +267,7 @@ import {
 // to production deps at the unstuckSweep wiring point below. Wiring this does NOT
 // flip enforce on — the mode gate stays at its safe 'off' default (ADR-023).
 import { buildUnstuckActSeams } from "./unstuck-act-seams.mjs";
-import { readUnstuckSweepConfig, readRecoveryPassConfig, readBoardHealthConfig, readReclaimGatewayFreshMs, isThrottled } from "./config.mjs";
+import { readUnstuckSweepConfig, readRecoveryPassConfig, readBoardHealthConfig, readSanctionedNeedsHuman, readReclaimGatewayFreshMs, isThrottled } from "./config.mjs";
 // CTL-558: the deterministic Linear status/label write seam. The whole module
 // is injected as `writeStatus` so tests pass fakes; production uses the real
 // module (best-effort — every write swallows its own failures).
@@ -4573,6 +4574,8 @@ export function schedulerTick(
           // passes none → null → number-only fallback (N=1 byte-identical).
           repoForTicket: _boardHealth.repoForTicket,
           getReconcileMarkers: _boardHealth.getReconcileMarkers,
+          getDeferredBoardHealthTickets: _boardHealth.getDeferredBoardHealthTickets, // CTL-1432 (B2)
+          sanctionedNeedsHuman: _boardHealth.sanctionedNeedsHuman, // CTL-1432 (B3)
           // CTL-1157: thread the PR-status reader + the provably-dead host set.
           // Both are daemon-bound (the binding below); a bare tick passes neither
           // → empty-Map / empty-array defaults keep the new invariants
@@ -6721,6 +6724,12 @@ function runTick() {
         },
         readEventRing: () => readBoardHealthEventTail(),
         getReconcileMarkers: () => readReconcileHealthMarkers({}),
+        // CTL-1432 (B2): deferred board-health intents → first-class anchor candidates
+        // (retires the dormant delegate-mini session). (B3): the sanctioned needs-human
+        // allowlist (env CATALYST_BH_SANCTIONED_LATCHES / Layer-2 config), suppressed
+        // from proposeMoves so the genuinely-stuck tickets stop being drowned each scan.
+        getDeferredBoardHealthTickets: () => readDeferredBoardHealthIntents(runningOpts.orchDir),
+        sanctionedNeedsHuman: readSanctionedNeedsHuman(),
         // CTL-1157 (A11): the filter_state PR-status reader (phantom/orphaned-PR
         // invariants) + the provably-dead host set for the HRW-safe holistic
         // failover. computeSurvivingRoster already exists (scheduler.mjs) and

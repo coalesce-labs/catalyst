@@ -29,6 +29,7 @@ import {
   mkdirSync,
   appendFileSync,
   readFileSync,
+  readdirSync,
   writeFileSync,
   existsSync,
   renameSync,
@@ -1680,6 +1681,39 @@ export const RECOVERY_MAX_ATTEMPTS =
 
 function recoveryIntentPath(orchDir, ticket) {
   return join(orchDir, ".recovery-intents", `${ticket}.json`);
+}
+
+// readDeferredBoardHealthIntents — CTL-1432 (B2). Enumerate the tickets whose
+// recovery-intent is a DEFERRAL to the holistic board-health delegate
+// (decision:"defer" + fix_class:"board-health" — the classifier's "no typed
+// failure signature; the holistic board-health delegate will triage" path). Until
+// now nothing consumed these, so a deferred ticket rotted (the delegate-mini
+// session it implicitly routed to has been dormant since Jun 19). board-health's
+// selectAnchorCandidates now folds these in as first-class self-owned anchors so
+// the holistic pass actually dispatches a recovery-pass for them. Pure read,
+// fail-open: absent dir / malformed entries → [].
+export function readDeferredBoardHealthIntents(orchDir) {
+  if (!orchDir) return [];
+  const dir = join(orchDir, ".recovery-intents");
+  let files;
+  try {
+    files = readdirSync(dir);
+  } catch {
+    return [];
+  }
+  const out = [];
+  for (const f of files) {
+    if (!f.endsWith(".json")) continue;
+    try {
+      const data = JSON.parse(readFileSync(join(dir, f), "utf8"));
+      if (data?.decision === "defer" && data?.fix_class === "board-health") {
+        out.push(f.replace(/\.json$/, ""));
+      }
+    } catch {
+      /* malformed → skip */
+    }
+  }
+  return out;
 }
 
 // defaultRecordIntent — append/upgrade a recovery-intent ledger entry.
