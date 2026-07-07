@@ -1,9 +1,18 @@
 # Changelog
 
-## [12.25.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.24.0...catalyst-dev-v12.25.0) (2026-07-07)
+## [12.25.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.24.0...catalyst-dev-v12.25.0)
+
+Jul 07, 2026
+
+<!-- ai-enhanced -->
+
+### Linear Breaker Observability & Board Health Actuation
+
+The Linear circuit breaker now records why it opened (rate-limit 429 vs. timeout) and which caller triggered it, making the 12–22 daily trips on mini attributable and falsifiable from logs for the first time. On the board-health side, deferred recovery intents now have a live consumer so they actually dispatch instead of rotting, operator-sanctioned needs-human latches are suppressed from re-proposal so genuinely stuck tickets surface, and stale escalated recovery intents expire after 7 days instead of pinning tickets in needs-human forever. The top measured breaker driver — eligible empty-reconfirm firing a live Linear read every quiet tick — is also removed entirely; a replica-empty is now trusted directly with zero live Linear reads.
 
 
-### Features
+
+### PRs
 
 * **dev:** CTL-1430 (WS-A A1) — instrument the Linear breaker (reason+caller on OPEN + durable linear.ratelimit.breaker event) ([#2565](https://github.com/coalesce-labs/catalyst/issues/2565)) ([ec03e6f](https://github.com/coalesce-labs/catalyst/commit/ec03e6ff5fef75845cccdc4edaa9141b782107e5))
 * **dev:** CTL-1431 (WS-B B1) — TTL on terminal recovery-intents + one-time June sweep ([#2567](https://github.com/coalesce-labs/catalyst/issues/2567)) ([9c5bb13](https://github.com/coalesce-labs/catalyst/commit/9c5bb13487f3c66ce5bd87d86ea4871f8ee1a392))
