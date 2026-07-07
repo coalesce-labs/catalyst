@@ -21,6 +21,7 @@ import {
   RECOVERY_PASS_PHASE,
   RECOVERY_MAX_ATTEMPTS,
   RECOVERY_COOLDOWN_MS,
+  RECOVERY_TERMINAL_INTENT_TTL_MS,
 } from "./recovery-reasoning.mjs";
 import { mkdtempSync, rmSync, existsSync, readFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { join as pathJoin } from "node:path";
@@ -1104,6 +1105,106 @@ describe("recovery-intent ledger (cooldown + max-attempts + escalated)", () => {
   test("forgetIntent with no orchDir / no ticket → false (fail-soft)", () => {
     expect(defaultForgetIntent("CTL-309", { orchDir: null })).toBe(false);
     expect(defaultForgetIntent("", { orchDir })).toBe(false);
+  });
+});
+
+// CTL-1431: the escalated latch is TTL-bounded. Within the terminal TTL it still
+// skips (hand off to human); once it ages past RECOVERY_TERMINAL_INTENT_TTL_MS the
+// ticket re-enters the recovery triage funnel. The critical invariant is the DIRECT
+// return false on expiry — the escalated branch must short-circuit, never fall
+// through to the attempts-exhausted branch (which has no age gate and would re-latch).
+describe("recovery-intent terminal TTL (CTL-1431)", () => {
+  let orchDir;
+  beforeEach(() => {
+    orchDir = mkdtempSync(pathJoin(tmpdir(), "rec-ttl-"));
+  });
+  afterEach(() => {
+    try {
+      rmSync(orchDir, { recursive: true, force: true });
+    } catch {
+      /* best-effort */
+    }
+  });
+
+  test("(a) escalated intent younger than TTL still skips (returns true)", () => {
+    const t0 = 1_000_000_000_000;
+    defaultRecordIntent("CTL-1431-A", { decision: "escalate" }, { orchDir, now: () => t0 });
+    const within = t0 + RECOVERY_TERMINAL_INTENT_TTL_MS - 1;
+    expect(defaultShouldSkipItem("CTL-1431-A", { orchDir, now: () => within })).toBe(true);
+  });
+
+  test("(b) escalated intent older than TTL re-enters triage (returns false)", () => {
+    const t0 = 1_000_000_000_000;
+    defaultRecordIntent("CTL-1431-B", { decision: "escalate" }, { orchDir, now: () => t0 });
+    const past = t0 + RECOVERY_TERMINAL_INTENT_TTL_MS + 1;
+    expect(defaultShouldSkipItem("CTL-1431-B", { orchDir, now: () => past })).toBe(false);
+  });
+
+  test("(c) escalated + attempts ≥ MAX but older than TTL still returns false (short-circuit, not fall-through)", () => {
+    const t0 = 1_000_000_000_000;
+    // attempts pinned well above RECOVERY_MAX_ATTEMPTS: if the escalated branch fell
+    // THROUGH to the attempts-exhausted branch (which has no age gate), this expired
+    // intent would skip (true). It must short-circuit to false instead.
+    defaultRecordIntent(
+      "CTL-1431-C",
+      { decision: "escalate", attempts: RECOVERY_MAX_ATTEMPTS + 3 },
+      { orchDir, now: () => t0 },
+    );
+    const past = t0 + RECOVERY_TERMINAL_INTENT_TTL_MS + 1;
+    expect(defaultShouldSkipItem("CTL-1431-C", { orchDir, now: () => past })).toBe(false);
+  });
+
+  test("(d) keys off lastTs not ts: fresh lastTs with a stale ts is NOT expired (returns true)", () => {
+    const t0 = 1_000_000_000_000;
+    const TTL = RECOVERY_TERMINAL_INTENT_TTL_MS;
+    // First escalate sets ts = lastTs = t0.
+    defaultRecordIntent("CTL-1431-D", { decision: "escalate" }, { orchDir, now: () => t0 });
+    // A later write advances lastTs to t1 but PRESERVES the first-action ts at t0.
+    const t1 = t0 + TTL;
+    defaultRecordIntent("CTL-1431-D", { decision: "fix", fix_class: "x" }, { orchDir, now: () => t1 });
+    // Evaluate at t1 + TTL/2: age off lastTs is TTL/2 (< TTL → skip), but age off the
+    // stale ts would be 1.5·TTL (> TTL → would re-enter). Keying off lastTs → true.
+    const nowT = t1 + TTL / 2;
+    expect(defaultShouldSkipItem("CTL-1431-D", { orchDir, now: () => nowT })).toBe(true);
+  });
+
+  test("(F3) escalated with NO timestamp stays terminal (clear-cooldown case, returns true)", () => {
+    const t0 = 1_000_000_000_000;
+    defaultRecordIntent("CTL-1431-F3", { decision: "escalate" }, { orchDir, now: () => t0 });
+    // Delete both timestamps, mimicking defaultClearIntentCooldown (which keeps
+    // `escalated` as a deliberate terminal latch). Such an entry can't be aged out.
+    const p = pathJoin(orchDir, ".recovery-intents", "CTL-1431-F3.json");
+    const data = JSON.parse(readFileSync(p, "utf8"));
+    delete data.ts;
+    delete data.lastTs;
+    writeFileSync(p, JSON.stringify(data));
+    expect(defaultShouldSkipItem("CTL-1431-F3", { orchDir, now: () => t0 + 1 })).toBe(true);
+  });
+
+  test("(F2) a fix recorded AFTER TTL expiry drops the escalated latch (no silent re-latch)", () => {
+    const t0 = 1_000_000_000_000;
+    defaultRecordIntent("CTL-1431-F2", { decision: "escalate" }, { orchDir, now: () => t0 });
+    const past = t0 + RECOVERY_TERMINAL_INTENT_TTL_MS + 1;
+    const entry = defaultRecordIntent(
+      "CTL-1431-F2",
+      { decision: "fix", fix_class: "x" },
+      { orchDir, now: () => past },
+    );
+    // The ticket has re-entered triage; a follow-up fix must NOT re-latch it for
+    // another 7 days. escalated is cleared → the entry is governed by attempts/cooldown.
+    expect(entry.escalated).toBe(false);
+  });
+
+  test("(F2) a fix recorded WITHIN the TTL preserves the escalated latch", () => {
+    const t0 = 1_000_000_000_000;
+    defaultRecordIntent("CTL-1431-F2b", { decision: "escalate" }, { orchDir, now: () => t0 });
+    const within = t0 + RECOVERY_TERMINAL_INTENT_TTL_MS - 1;
+    const entry = defaultRecordIntent(
+      "CTL-1431-F2b",
+      { decision: "fix", fix_class: "x" },
+      { orchDir, now: () => within },
+    );
+    expect(entry.escalated).toBe(true);
   });
 });
 

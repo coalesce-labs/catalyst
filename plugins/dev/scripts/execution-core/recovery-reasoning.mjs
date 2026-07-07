@@ -1678,6 +1678,14 @@ export const RECOVERY_COOLDOWN_MS =
 export const RECOVERY_MAX_ATTEMPTS =
   Number(process.env.CATALYST_RECOVERY_MAX_ATTEMPTS) || 2;
 
+// CTL-1431: TTL on a terminal (escalated) recovery-intent. An escalated latch is
+// no longer permanent — after this window the intent goes stale and the ticket
+// re-enters the recovery triage funnel, so a months-old escalate cannot pin a
+// ticket forever once the underlying blocker has cleared. Env-only, matching its
+// siblings (NaN*x and 0*x are both falsy → fall through to the 7-day default).
+export const RECOVERY_TERMINAL_INTENT_TTL_MS =
+  Number(process.env.CATALYST_RECOVERY_TERMINAL_TTL_DAYS) * 864e5 || 7 * 864e5;
+
 function recoveryIntentPath(orchDir, ticket) {
   return join(orchDir, ".recovery-intents", `${ticket}.json`);
 }
@@ -1700,8 +1708,20 @@ export function defaultRecordIntent(ticket, intent, opts = {}) {
     prior = {}; // absent / malformed → start fresh
   }
 
+  // CTL-1431 Codex F2: a prior escalated latch is preserved UNLESS it has aged past
+  // the terminal TTL. Once expired, the ticket has re-entered triage (see
+  // defaultShouldSkipItem) — recording a follow-up fix must NOT silently re-latch it
+  // for another 7 days with a refreshed lastTs, or the re-entry accomplishes nothing.
+  // A timestamp-less latch has no age and stays latched (matches F3 / the read path).
+  // Re-escalating explicitly (intent.escalated / decision "escalate") still latches
+  // afresh — a genuine new escalation with a new timestamp, so it TTLs again in 7d.
+  const priorLast = typeof prior.lastTs === "number" ? prior.lastTs : prior.ts;
+  const priorEscalationExpired =
+    Boolean(prior.escalated) &&
+    typeof priorLast === "number" &&
+    ts - priorLast >= RECOVERY_TERMINAL_INTENT_TTL_MS;
   const escalated =
-    Boolean(prior.escalated) ||
+    (Boolean(prior.escalated) && !priorEscalationExpired) ||
     Boolean(intent.escalated) ||
     intent.decision === "escalate"; // an escalate-pass latches escalated
 
@@ -1753,8 +1773,22 @@ export function defaultShouldSkipItem(ticket, opts = {}) {
     return typeof last === "number" && now() - last < RECOVERY_COOLDOWN_MS;
   }
 
-  // (c) already escalated → terminal, hand off to human, stop acting.
-  if (data?.escalated === true) return true;
+  // (c) already escalated → terminal latch, but TTL-bounded (CTL-1431). Within the
+  // TTL it still skips (the ticket is handed off to a human); once the intent ages
+  // past RECOVERY_TERMINAL_INTENT_TTL_MS it goes stale and the ticket RE-ENTERS the
+  // recovery triage funnel. Return false DIRECTLY on expiry — do NOT fall through to
+  // the attempts-exhausted branch below: an escalated intent already has attempts ≥
+  // 2, so a fall-through would instantly re-latch there (that branch has no age
+  // gate). Derived purely from timestamps, so NO file mutation on expiry (mirrors
+  // the non-mutating defer precedent above).
+  if (data?.escalated === true) {
+    const last = typeof data?.lastTs === "number" ? data.lastTs : data?.ts;
+    // A timestamp-less escalation (defaultClearIntentCooldown deletes both ts fields
+    // while KEEPING escalated as a deliberately-terminal latch) cannot be aged out —
+    // it stays terminal. (CTL-1431 Codex F3.)
+    if (typeof last !== "number") return true;
+    return now() - last < RECOVERY_TERMINAL_INTENT_TTL_MS;
+  }
 
   // (b) attempts exhausted → stop self-healing.
   if (typeof data?.attempts === "number" && data.attempts >= RECOVERY_MAX_ATTEMPTS) return true;
