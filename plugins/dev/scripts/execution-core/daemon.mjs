@@ -68,7 +68,7 @@ import { startRatelimitPoller as realStartRatelimitPoller } from "./ratelimit-po
 import { listProjects as realListProjects } from "./registry.mjs"; // CTL-854: boot health check
 import { startHeartbeat as realStartHeartbeat } from "./heartbeat-event.mjs"; // CTL-859: node.heartbeat emitter
 import { readAdmissionState } from "./admission-state.mjs"; // CTL-1322: live admission block for the heartbeat
-import { startLivenessPublisher as realStartLivenessPublisher } from "./cluster-heartbeat-publisher.mjs"; // CTL-1090: cross-host liveness
+import { startLivenessPublisher as realStartLivenessPublisher, localInFlightTickets } from "./cluster-heartbeat-publisher.mjs"; // CTL-1090: cross-host liveness; CTL-1420 (#17): in-flight list for the Loki heartbeat
 import { emitBootEvent } from "./boot-event.mjs"; // CTL-1084: node.boot self-report
 import {
   recoverStartup,
@@ -865,6 +865,10 @@ export function startDaemon({
       // both in scope here). Fail-open: readAdmissionState never throws.
       _heartbeat = startHeartbeat({
         admissionFn: () => readAdmissionState({ orchDir, concurrency }),
+        // CTL-1420 (#17): carry this host's in-flight tickets on every node.heartbeat
+        // so a peer can read liveness + ownership from Loki (retiring the Linear
+        // heartbeat attachment). Same local signal-scan source the publisher uses.
+        inFlightTicketsFn: () => localInFlightTickets(getHostName(), { orchDir }),
       });
       // CTL-1090: cross-host liveness publisher (multi-host only; single-host no-op).
       // startLivenessPublisher self-gates on roster.length > 1, so this is always safe.
