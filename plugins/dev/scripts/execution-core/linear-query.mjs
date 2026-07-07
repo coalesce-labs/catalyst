@@ -318,6 +318,15 @@ export function fetchTicketState(
     const node = JSON.parse(stdout);
     const state = node?.state?.name ?? node?.state ?? null;
     if (cache && state != null) cache.set(identifier, state); // populate on success only
+    else if (state == null && probeBackoff && cache?.setNegative) {
+      // A4 (Codex #2579): a `linearis issues read` that parses fine but carries NO
+      // state — a deleted/missing ticket returns code:0 + an error body — still
+      // shells out live every tick otherwise (it's exactly the stale-worker-dir
+      // class driving the flap). Back it off too, so the negative cache actually
+      // bounds the no-state live-read loop.
+      cache.setNegative(identifier);
+      emitTicketStateLiveFallback({ identifier, reason: "no-state" });
+    }
     if (onExec) {
       try {
         onExec({ source: "live", execMs: Date.now() - execStart, code, result: state, timedOut: timedOut === true });

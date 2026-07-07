@@ -841,6 +841,17 @@ describe("fetchTicketState — probeBackoff negative cache (CTL-1436 A4)", () =>
     expect(calls).toBe(2);
   });
 
+  test("a successful-but-STATELESS read (deleted/missing ticket: code:0, no state) also backs off (Codex #2579)", () => {
+    const cache = createTicketStateCache({ now: () => 0 });
+    let calls = 0;
+    // Linear returns a missing ticket as code:0 with an error body (parses fine, no state).
+    const exec = () => { calls += 1; return { code: 0, stdout: JSON.stringify({ error: "Entity not found" }), stderr: "" }; };
+    expect(fetchTicketState("CTL-1", { exec, cache, probeBackoff: true })).toBeNull();
+    expect(cache.isNegativelyCached("CTL-1")).toBe(true); // no-state → backed off
+    expect(fetchTicketState("CTL-1", { exec, cache, probeBackoff: true })).toBeNull();
+    expect(calls).toBe(1); // second call short-circuited on the negative cache
+  });
+
   test("a failed probeBackoff read emits the loud ticket_state_live_fallback alert", () => {
     const cache = createTicketStateCache({ now: () => 0 });
     fetchTicketState("CTL-77", { exec: fail429, cache, probeBackoff: true });
