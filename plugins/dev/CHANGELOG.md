@@ -1,5 +1,15 @@
 # Changelog
 
+## [12.25.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.24.0...catalyst-dev-v12.25.0) (2026-07-07)
+
+
+### Features
+
+* **dev:** CTL-1430 (WS-A A1) — instrument the Linear breaker (reason+caller on OPEN + durable linear.ratelimit.breaker event) ([#2565](https://github.com/coalesce-labs/catalyst/issues/2565)) ([ec03e6f](https://github.com/coalesce-labs/catalyst/commit/ec03e6ff5fef75845cccdc4edaa9141b782107e5))
+* **dev:** CTL-1431 (WS-B B1) — TTL on terminal recovery-intents + one-time June sweep ([#2567](https://github.com/coalesce-labs/catalyst/issues/2567)) ([9c5bb13](https://github.com/coalesce-labs/catalyst/commit/9c5bb13487f3c66ce5bd87d86ea4871f8ee1a392))
+* **dev:** CTL-1432 (WS-B B2+B3) — dispatch deferred board-health intents + suppress sanctioned needs-human latches ([#2570](https://github.com/coalesce-labs/catalyst/issues/2570)) ([880261e](https://github.com/coalesce-labs/catalyst/commit/880261eb7e487ef39ecba6199a359c9d741e1ba9))
+* **dev:** CTL-1433 (WS-A A2) — raise the eligible empty-reconfirm TTL above the reconcile interval (cut the top breaker driver, keep drift validation) ([#2572](https://github.com/coalesce-labs/catalyst/issues/2572)) ([96ea944](https://github.com/coalesce-labs/catalyst/commit/96ea944ce707f0feacb7ed473be0523fff276889))
+
 ## [12.24.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.23.1...catalyst-dev-v12.24.0)
 
 Jul 04, 2026
