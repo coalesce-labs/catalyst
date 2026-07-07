@@ -1142,3 +1142,203 @@ describe("boardHealthPass — mode branching + shadow safety", () => {
     expect(r.ran).toBe(true);
   });
 });
+
+// ─── CTL-1435 (C1) — act-outcome on the board-scan event ─────────────────────
+// The journal used to carry proposedMoves but never whether a proposal became a
+// dispatch — the blind spot behind the propose-forever/dispatch-never incident.
+describe("buildBoardScanEvent — C1 act-outcome (CTL-1435)", () => {
+  const decisionFor = (invs) => decideBoardHealth(invs, mkBoard({ capacity: { freeSlots: 4 } }));
+
+  test("no act param → default shadow outcome; actDispatched 0", () => {
+    const invs = { ...allGreen(), dispatchLiveness: inv(false, 1, true, ["CTL-1"]) };
+    const ev = buildBoardScanEvent({ mode: "shadow", invariants: invs, decision: decisionFor(invs) });
+    expect(ev.details.act).toEqual({ dispatched: false, anchor: null, skippedReason: "shadow" });
+    expect(ev.details.actDispatched).toBe(0);
+  });
+
+  test("dispatched act → act.dispatched true + anchor; actDispatched 1; reason string notes the dispatch", () => {
+    const invs = { ...allGreen(), dispatchLiveness: inv(false, 1, true, ["CTL-1"]) };
+    const ev = buildBoardScanEvent({
+      mode: "enforce",
+      invariants: invs,
+      decision: decisionFor(invs),
+      act: { dispatched: true, anchor: "CTL-7", skippedReason: null },
+    });
+    expect(ev.details.act).toEqual({ dispatched: true, anchor: "CTL-7", skippedReason: null });
+    expect(ev.details.actDispatched).toBe(1);
+    expect(ev.reason).toContain("dispatched CTL-7");
+  });
+
+  test("skipped act → skippedReason surfaced in details.act AND the reason string", () => {
+    const invs = { ...allGreen(), dispatchLiveness: inv(false, 1, true, ["CTL-1"]) };
+    const ev = buildBoardScanEvent({
+      mode: "enforce",
+      invariants: invs,
+      decision: decisionFor(invs),
+      act: { dispatched: false, anchor: null, skippedReason: "all-candidates-cooldown" },
+    });
+    expect(ev.details.act.skippedReason).toBe("all-candidates-cooldown");
+    expect(ev.details.actDispatched).toBe(0);
+    expect(ev.reason).toContain("no dispatch (all-candidates-cooldown)");
+  });
+});
+
+describe("boardHealthPass — C1 act-outcome captured on the emitted scan (CTL-1435)", () => {
+  test("enforce dispatch → emitted details.act.dispatched true + the dispatched anchor + actDispatched 1", () => {
+    const emits = [];
+    boardHealthPass(
+      flaggedDeps({
+        mode: "enforce",
+        emit: (e) => emits.push(e),
+        act: () => ({ dispatched: true, attempts: 1, candidate: "CTL-1" }),
+      }),
+    );
+    expect(emits.length).toBe(1);
+    expect(emits[0].details.act.dispatched).toBe(true);
+    expect(emits[0].details.act.anchor).toBe("CTL-1");
+    expect(emits[0].details.act.skippedReason).toBeNull();
+    expect(emits[0].details.actDispatched).toBe(1);
+  });
+
+  test("enforce proceed but no self-owned anchor → skippedReason:no-owned-anchor, dispatched:false", () => {
+    const emits = [];
+    boardHealthPass({
+      orchDir: "/tmp/x",
+      mode: "enforce",
+      getBoard: () => [{ identifier: "CTL-OWNED-ELSEWHERE" }],
+      getWorkerSignals: () => [
+        { ticket: "CTL-OWNED-ELSEWHERE", phase: "implement", status: "running", updatedAt: new Date(NOW - 5 * HOUR).toISOString() },
+      ],
+      getEligible: () => [],
+      roster: ["mini", "mini-2"],
+      self: "mini",
+      multiHost: true,
+      capacity: { maxParallel: 4, liveCount: 1, freeSlots: 3 },
+      readEventRing: () => [],
+      ownerForTicket: () => "mini-2", // the only flagged ticket is foreign-owned → no self anchor
+      getReconcileMarkers: () => ({}),
+      lastRunMs: 0,
+      intervalMs: 0,
+      now: () => NOW,
+      emit: (e) => emits.push(e),
+      act: () => { throw new Error("must not act — no anchor"); },
+    });
+    expect(emits.length).toBe(1);
+    expect(emits[0].details.act.dispatched).toBe(false);
+    expect(emits[0].details.act.skippedReason).toBe("no-owned-anchor");
+  });
+
+  test("enforce gate-hold (all-green) → skippedReason echoes the gate reason; act never runs", () => {
+    const emits = [];
+    boardHealthPass(
+      flaggedDeps({
+        mode: "enforce",
+        getEligible: () => [], // no queue → no dispatch wedge → all-green → gate=skip
+        emit: (e) => emits.push(e),
+        act: () => { throw new Error("must not act — gate held"); },
+      }),
+    );
+    expect(emits.length).toBe(1);
+    expect(emits[0].details.act.dispatched).toBe(false);
+    expect(emits[0].details.act.skippedReason).toBe("all-green");
+  });
+
+  test("shadow → emitted scan records skippedReason:shadow, dispatched:false (never actuates)", () => {
+    const emits = [];
+    boardHealthPass(
+      flaggedDeps({ mode: "shadow", emit: (e) => emits.push(e), act: () => { throw new Error("shadow must not act"); } }),
+    );
+    expect(emits[0].details.act).toEqual({ dispatched: false, anchor: null, skippedReason: "shadow" });
+  });
+
+  test("ORDER: act runs BEFORE emit (so the scan carries a real outcome)", () => {
+    const order = [];
+    boardHealthPass(
+      flaggedDeps({
+        mode: "enforce",
+        emit: () => order.push("emit"),
+        act: () => { order.push("act"); return { dispatched: true, candidate: "CTL-1" }; },
+      }),
+    );
+    expect(order).toEqual(["act", "emit"]);
+  });
+});
+
+// ─── CTL-1435 (C2) — actuation-liveness invariant ────────────────────────────
+describe("deriveRing → board.ring.boardScans via assembleBoardState (CTL-1435 C2)", () => {
+  test("recovery.board-scan events populate ring.boardScans with {mode,gate,proposedMoves,dispatched}", () => {
+    const events = [
+      {
+        ts: "2026-06-20T11:59:00Z",
+        type: "recovery.board-scan",
+        payload: { mode: "enforce", gateDecision: "proceed", proposedTier1: 1, proposedTier2: 2, proposedTier3: 0, act: { dispatched: false } },
+      },
+      {
+        ts: "2026-06-20T11:58:00Z",
+        type: "recovery.board-scan",
+        payload: { mode: "enforce", gateDecision: "proceed", proposedTier1: 0, proposedTier2: 1, proposedTier3: 0, act: { dispatched: true } },
+      },
+    ];
+    const board = assembleBoardState({
+      orchDir: "/tmp/x",
+      getBoard: () => [],
+      getWorkerSignals: () => [],
+      getEligible: () => [],
+      readEventRing: () => events,
+      mode: "enforce",
+      now: () => NOW,
+    });
+    expect(board.ring.boardScans.length).toBe(2);
+    expect(board.ring.boardScans[0]).toEqual({
+      tsMs: Date.parse("2026-06-20T11:59:00Z"),
+      mode: "enforce",
+      gate: "proceed",
+      proposedMoves: 3,
+      dispatched: false,
+    });
+    expect(board.ring.boardScans[1].dispatched).toBe(true);
+  });
+});
+
+describe("checkActuationLiveness — via evaluateInvariants (CTL-1435 C2)", () => {
+  const mkScan = (o = {}) => ({ tsMs: NOW, mode: "enforce", gate: "proceed", proposedMoves: 3, dispatched: false, ...o });
+
+  test("K enforce scans ALL proceed+moves>0+dispatched:false → flags (observable, not-ok)", () => {
+    const boardScans = Array.from({ length: 6 }, () => mkScan());
+    const r = evaluateInvariants(mkBoard({ mode: "enforce", ring: { boardScans } }));
+    expect(r.actuationLiveness.observable).toBe(true);
+    expect(r.actuationLiveness.ok).toBe(false);
+    expect(r.actuationLiveness.failed).toBe(1);
+  });
+
+  test("one dispatched:true within the K window → passes (ok:true)", () => {
+    const boardScans = [...Array.from({ length: 5 }, () => mkScan()), mkScan({ dispatched: true })];
+    const r = evaluateInvariants(mkBoard({ mode: "enforce", ring: { boardScans } }));
+    expect(r.actuationLiveness.ok).toBe(true);
+  });
+
+  test("fewer than K enforce scans → observable:false (no flag on thin evidence)", () => {
+    const boardScans = Array.from({ length: 3 }, () => mkScan());
+    const r = evaluateInvariants(mkBoard({ mode: "enforce", ring: { boardScans } }));
+    expect(r.actuationLiveness.observable).toBe(false);
+    expect(r.actuationLiveness.ok).toBe(true);
+  });
+
+  test("shadow scans are filtered out (not the delegate's dispatch job) → observable:false", () => {
+    const boardScans = Array.from({ length: 8 }, () => mkScan({ mode: "shadow" }));
+    const r = evaluateInvariants(mkBoard({ mode: "enforce", ring: { boardScans } }));
+    expect(r.actuationLiveness.observable).toBe(false);
+  });
+
+  test("proceed scans with zero proposed moves are NOT a propose-forever wedge", () => {
+    const boardScans = Array.from({ length: 6 }, () => mkScan({ proposedMoves: 0 }));
+    const r = evaluateInvariants(mkBoard({ mode: "enforce", ring: { boardScans } }));
+    expect(r.actuationLiveness.ok).toBe(true);
+  });
+
+  test("off mode omits actuationLiveness entirely (cohort-gated)", () => {
+    const boardScans = Array.from({ length: 6 }, () => mkScan());
+    const r = evaluateInvariants(mkBoard({ ring: { boardScans } }), { mode: "off" });
+    expect(r.actuationLiveness).toBeUndefined();
+  });
+});

@@ -6893,7 +6893,10 @@ export function holisticBoardHealthAct(
     } catch { /* ledger write is best-effort — never block the tick */ }
     // (b) a NON-dispatch RESULT is a SKIP, not this scan's dispatch — CONTINUE.
     if (!r?.dispatched) continue;
-    return r; // exactly ONE real dispatch per scan
+    // CTL-1435 (C1): surface WHICH candidate actually dispatched (may not be the
+    // [0] anchor if earlier candidates were cooldown-skipped) so the board-scan
+    // event's act.anchor records the real dispatch handle.
+    return { ...r, candidate: cand }; // exactly ONE real dispatch per scan
   }
   return { dispatched: false, reason: "all-candidates-cooldown" };
 }
