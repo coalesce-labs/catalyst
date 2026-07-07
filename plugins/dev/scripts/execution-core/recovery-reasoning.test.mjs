@@ -1167,6 +1167,45 @@ describe("recovery-intent terminal TTL (CTL-1431)", () => {
     const nowT = t1 + TTL / 2;
     expect(defaultShouldSkipItem("CTL-1431-D", { orchDir, now: () => nowT })).toBe(true);
   });
+
+  test("(F3) escalated with NO timestamp stays terminal (clear-cooldown case, returns true)", () => {
+    const t0 = 1_000_000_000_000;
+    defaultRecordIntent("CTL-1431-F3", { decision: "escalate" }, { orchDir, now: () => t0 });
+    // Delete both timestamps, mimicking defaultClearIntentCooldown (which keeps
+    // `escalated` as a deliberate terminal latch). Such an entry can't be aged out.
+    const p = pathJoin(orchDir, ".recovery-intents", "CTL-1431-F3.json");
+    const data = JSON.parse(readFileSync(p, "utf8"));
+    delete data.ts;
+    delete data.lastTs;
+    writeFileSync(p, JSON.stringify(data));
+    expect(defaultShouldSkipItem("CTL-1431-F3", { orchDir, now: () => t0 + 1 })).toBe(true);
+  });
+
+  test("(F2) a fix recorded AFTER TTL expiry drops the escalated latch (no silent re-latch)", () => {
+    const t0 = 1_000_000_000_000;
+    defaultRecordIntent("CTL-1431-F2", { decision: "escalate" }, { orchDir, now: () => t0 });
+    const past = t0 + RECOVERY_TERMINAL_INTENT_TTL_MS + 1;
+    const entry = defaultRecordIntent(
+      "CTL-1431-F2",
+      { decision: "fix", fix_class: "x" },
+      { orchDir, now: () => past },
+    );
+    // The ticket has re-entered triage; a follow-up fix must NOT re-latch it for
+    // another 7 days. escalated is cleared → the entry is governed by attempts/cooldown.
+    expect(entry.escalated).toBe(false);
+  });
+
+  test("(F2) a fix recorded WITHIN the TTL preserves the escalated latch", () => {
+    const t0 = 1_000_000_000_000;
+    defaultRecordIntent("CTL-1431-F2b", { decision: "escalate" }, { orchDir, now: () => t0 });
+    const within = t0 + RECOVERY_TERMINAL_INTENT_TTL_MS - 1;
+    const entry = defaultRecordIntent(
+      "CTL-1431-F2b",
+      { decision: "fix", fix_class: "x" },
+      { orchDir, now: () => within },
+    );
+    expect(entry.escalated).toBe(true);
+  });
 });
 
 // ─── CTL-1176: capped remediate dispatch (cap enforcement) ──────────────────

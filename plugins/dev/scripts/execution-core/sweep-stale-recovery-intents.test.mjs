@@ -110,4 +110,12 @@ describe("sweep-stale-recovery-intents (CTL-1431)", () => {
       rmSync(empty, { recursive: true, force: true });
     }
   });
+
+  test("(F1) selectStaleRecoveryIntents throws on a non-finite/non-positive ttl (never sweeps the whole ledger)", () => {
+    // A mistyped `--ttl-days foo` → NaN would otherwise make `ageMs < ttlMs` always
+    // false and mark EVERY escalated intent stale. Guard rejects it loudly instead.
+    expect(() => selectStaleRecoveryIntents({ orchDir, ttlMs: NaN, now: () => tNow })).toThrow();
+    expect(() => selectStaleRecoveryIntents({ orchDir, ttlMs: 0, now: () => tNow })).toThrow();
+    expect(() => selectStaleRecoveryIntents({ orchDir, ttlMs: -5, now: () => tNow })).toThrow();
+  });
 });

@@ -39,6 +39,12 @@ export function selectStaleRecoveryIntents({
   ttlMs = RECOVERY_TERMINAL_INTENT_TTL_MS,
 } = {}) {
   if (!orchDir) return [];
+  // CTL-1431 Codex F1: a non-finite / non-positive ttl (e.g. a mistyped `--ttl-days
+  // foo` → NaN) would make `ageMs < ttlMs` always false, marking EVERY escalated
+  // intent stale and sweeping the whole ledger. Fail loud instead of silently deleting.
+  if (!Number.isFinite(ttlMs) || ttlMs <= 0) {
+    throw new RangeError(`selectStaleRecoveryIntents: ttlMs must be a positive finite number (got ${ttlMs})`);
+  }
   const dir = join(orchDir, ".recovery-intents");
   let files;
   try {
@@ -117,7 +123,17 @@ if (import.meta.main) {
       ? args[orchIdx + 1]
       : process.env.CATALYST_ORCHESTRATOR_DIR ?? join(homedir(), "catalyst", "execution-core");
   const ttlIdx = args.indexOf("--ttl-days");
-  const ttlMs = ttlIdx !== -1 ? Number(args[ttlIdx + 1]) * 864e5 : RECOVERY_TERMINAL_INTENT_TTL_MS;
+  let ttlMs = RECOVERY_TERMINAL_INTENT_TTL_MS;
+  if (ttlIdx !== -1) {
+    // CTL-1431 Codex F1: validate before it can reach the selector as NaN and sweep
+    // the whole ledger. A mistyped/omitted value is a hard error, not a silent delete.
+    const days = Number(args[ttlIdx + 1]);
+    if (!Number.isFinite(days) || days <= 0) {
+      console.error(`error: --ttl-days requires a positive number (got: ${args[ttlIdx + 1] ?? "<missing>"})`);
+      process.exit(2);
+    }
+    ttlMs = days * 864e5;
+  }
 
   console.log(`orch dir: ${orchDir}`);
   console.log(`ttl: ${(ttlMs / 864e5).toFixed(1)}d`);

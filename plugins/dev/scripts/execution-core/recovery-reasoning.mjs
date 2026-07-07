@@ -1708,8 +1708,20 @@ export function defaultRecordIntent(ticket, intent, opts = {}) {
     prior = {}; // absent / malformed → start fresh
   }
 
+  // CTL-1431 Codex F2: a prior escalated latch is preserved UNLESS it has aged past
+  // the terminal TTL. Once expired, the ticket has re-entered triage (see
+  // defaultShouldSkipItem) — recording a follow-up fix must NOT silently re-latch it
+  // for another 7 days with a refreshed lastTs, or the re-entry accomplishes nothing.
+  // A timestamp-less latch has no age and stays latched (matches F3 / the read path).
+  // Re-escalating explicitly (intent.escalated / decision "escalate") still latches
+  // afresh — a genuine new escalation with a new timestamp, so it TTLs again in 7d.
+  const priorLast = typeof prior.lastTs === "number" ? prior.lastTs : prior.ts;
+  const priorEscalationExpired =
+    Boolean(prior.escalated) &&
+    typeof priorLast === "number" &&
+    ts - priorLast >= RECOVERY_TERMINAL_INTENT_TTL_MS;
   const escalated =
-    Boolean(prior.escalated) ||
+    (Boolean(prior.escalated) && !priorEscalationExpired) ||
     Boolean(intent.escalated) ||
     intent.decision === "escalate"; // an escalate-pass latches escalated
 
@@ -1771,8 +1783,11 @@ export function defaultShouldSkipItem(ticket, opts = {}) {
   // the non-mutating defer precedent above).
   if (data?.escalated === true) {
     const last = typeof data?.lastTs === "number" ? data.lastTs : data?.ts;
-    if (typeof last === "number" && now() - last < RECOVERY_TERMINAL_INTENT_TTL_MS) return true;
-    return false;
+    // A timestamp-less escalation (defaultClearIntentCooldown deletes both ts fields
+    // while KEEPING escalated as a deliberately-terminal latch) cannot be aged out —
+    // it stays terminal. (CTL-1431 Codex F3.)
+    if (typeof last !== "number") return true;
+    return now() - last < RECOVERY_TERMINAL_INTENT_TTL_MS;
   }
 
   // (b) attempts exhausted → stop self-healing.
