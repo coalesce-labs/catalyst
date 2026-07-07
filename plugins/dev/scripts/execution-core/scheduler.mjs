@@ -5874,7 +5874,10 @@ export function schedulerTick(
       {
         cache,
         prAdapter,
-        fetchState: (id, o = {}) => fetchTicketState(id, { ...o, gateway, replica }),
+        // CTL-1437 (A4 follow-up): the terminal-Done sweep runs EVERY tick per started
+        // ticket; probeBackoff backs off a replica-MISS ticket whose live terminal read
+        // fails so it isn't re-probed every tick (the CTL-1329 ~2x/sec flap driver).
+        fetchState: (id, o = {}) => fetchTicketState(id, { ...o, gateway, replica, probeBackoff: true }),
         multiHost,
         gateway,
         self,
@@ -5909,7 +5912,11 @@ export function schedulerTick(
         const term = isTicketTerminalOrMerged({
           ticket,
           signal: signalByTicket.get(ticket),
-          fetchState: (id, o = {}) => fetchTicketState(id, { ...o, cache, gateway, replica }),
+          // CTL-1437 (A4 follow-up): the cheap-first terminal probe on the stalled/failed
+          // set runs EVERY tick — CTL-1329's documented ~2x/sec `issues read` burn. probeBackoff
+          // backs a replica-MISS ticket off (5-min negTTL) after a failed live read instead of
+          // re-probing every tick, so the CTL-679 breaker stops flapping on it.
+          fetchState: (id, o = {}) => fetchTicketState(id, { ...o, cache, gateway, replica, probeBackoff: true }),
           cache,
           prAdapter,
         });
