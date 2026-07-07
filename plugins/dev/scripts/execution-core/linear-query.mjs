@@ -499,7 +499,10 @@ function defaultBatchExec(ids) {
   if (linearBreaker.isOpen()) return null; // circuit-open → skip, no spawn
   let r = runBatchOnce(ids);
   if (r.auth && linearReminter.attempt()) r = runBatchOnce(ids);
-  if (r.ratelimit) { linearBreaker.recordRateLimited(); return null; }
+  // CTL-1430: the CTL-784 batched GraphQL POST is not wrapped by withBreaker, so
+  // tag its direct breaker trip (429/RATELIMITED) here — otherwise it lands
+  // unattributed (reason/caller null) on the new breaker log line + event.
+  if (r.ratelimit) { linearBreaker.recordRateLimited(undefined, { reason: "429", caller: "linear-query:fetchTicketsBatch" }); return null; }
   if (r.nodes == null) return null; // auth-after-retry, curlFailed, or unparseable
   linearBreaker.recordSuccess();
   return r.nodes;
@@ -879,7 +882,8 @@ function defaultDelegateBatchExec(team, identifiers) {
   if (linearBreaker.isOpen()) return null;
   let r = runDelegateBatchOnce(team, identifiers);
   if (r.auth && linearReminter.attempt()) r = runDelegateBatchOnce(team, identifiers);
-  if (r.ratelimit) { linearBreaker.recordRateLimited(); return null; }
+  // CTL-1430: same direct (un-withBreaker'd) trip as defaultBatchExec — attribute it.
+  if (r.ratelimit) { linearBreaker.recordRateLimited(undefined, { reason: "429", caller: "linear-query:fetchTicketsDelegateBatch" }); return null; }
   if (r.nodes == null) return null;
   linearBreaker.recordSuccess();
   return r.nodes;
