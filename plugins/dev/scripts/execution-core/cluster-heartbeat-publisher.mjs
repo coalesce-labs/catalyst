@@ -188,7 +188,16 @@ export function startLivenessPublisher({
         // bug surfaces rather than being masked as "rate limited". We never call
         // recordSuccess here: a light heartbeat success must not force-close the
         // breaker while heavier reads are still being rate-limited.
-        if (isRateClassLinearError(result.error)) breaker?.recordRateLimited?.();
+        // CTL-1430: attribute this trip to the heartbeat publisher (a rate-class
+        // failure = 429-class) so the durable linear.ratelimit.breaker event names
+        // the caller — the WS-A diagnosis needs to know how much of the flap is
+        // this ~2min anchor write vs. the read paths.
+        if (isRateClassLinearError(result.error)) {
+          breaker?.recordRateLimited?.(undefined, {
+            reason: "429",
+            caller: "cluster-heartbeat-publisher",
+          });
+        }
         if (consecutiveFailures === 0) {
           logger.warn(
             { host: self, anchorIssue, error: result.error },
