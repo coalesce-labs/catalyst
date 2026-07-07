@@ -52,6 +52,19 @@ describe("buildLinearBreakerEnvelope — OPEN (CTL-1430)", () => {
     expect(env.body.payload["host.name"]).toBeDefined();
   });
 
+  test("promotes reason/caller/state to OTLP attributes (CTL-1430 F3 — survive otel-forward→Loki)", () => {
+    const env = buildLinearBreakerEnvelope({
+      state: "open",
+      reason: "timeout",
+      caller: "linearis:issues-read",
+      cooldownMs: 60000,
+      consecutive: 1,
+    });
+    expect(env.attributes["catalyst.linear.breaker.state"]).toBe("open");
+    expect(env.attributes["catalyst.linear.breaker.reason"]).toBe("timeout");
+    expect(env.attributes["catalyst.linear.breaker.caller"]).toBe("linearis:issues-read");
+  });
+
   test("open is WARN severity (13)", () => {
     const env = buildLinearBreakerEnvelope({ state: "open", reason: "429", caller: "x" });
     expect(env.severityText).toBe("WARN");
@@ -85,6 +98,10 @@ describe("buildLinearBreakerEnvelope — CLOSED (CTL-1430)", () => {
     expect(env.body.payload.cooldownMs).toBe(0);
     expect(env.severityText).toBe("INFO");
     expect(env.severityNumber).toBe(9);
+    // closed carries only state in attributes; reason/caller are open-only.
+    expect(env.attributes["catalyst.linear.breaker.state"]).toBe("closed");
+    expect(env.attributes["catalyst.linear.breaker.reason"]).toBeUndefined();
+    expect(env.attributes["catalyst.linear.breaker.caller"]).toBeUndefined();
   });
 });
 

@@ -217,8 +217,17 @@ describe("deriveCaller (CTL-1430)", () => {
     expect(deriveCaller("linearis", ["issues", "list"])).toBe("linearis:issues-list");
     expect(deriveCaller("/usr/local/bin/linearis", ["issues", "read", "CTL-1"])).toBe("linearis:issues-read");
   });
-  test("skips leading flags when picking the subcommand tag", () => {
-    expect(deriveCaller("linearis", ["--json", "issues", "list"])).toBe("linearis:issues-list");
+  test("stops at the first flag so flag VALUES never become caller tags (no ticket cardinality)", () => {
+    // A status write is flags-first (`--ticket CTL-123 …`) → just the basename, NOT
+    // a per-ticket `…:CTL-123-research` tag (the CTL-1430 Codex F2 finding).
+    expect(deriveCaller("linear-transition.sh", ["--ticket", "CTL-123", "--transition", "research"])).toBe(
+      "linear-transition.sh",
+    );
+    // Flags AFTER the subcommand are dropped; the subcommand is kept.
+    expect(deriveCaller("linearis", ["issues", "list", "--team", "CTL"])).toBe("linearis:issues-list");
+    // A leading global flag stops collection → basename (real linearis reads put the
+    // subcommand first, so this edge only costs granularity, never cardinality).
+    expect(deriveCaller("linearis", ["--api-token", "x", "issues", "list"])).toBe("linearis");
   });
   test("falls back to the bare basename when there are no positional args", () => {
     expect(deriveCaller("linear-transition.sh", [])).toBe("linear-transition.sh");

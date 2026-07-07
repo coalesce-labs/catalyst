@@ -57,6 +57,17 @@ export function buildLinearBreakerEnvelope({
       "event.entity": "linear",
       "event.action": open ? "ratelimit.breaker.open" : "ratelimit.breaker.closed",
       "event.label": host,
+      // CTL-1430 (Codex F3): promote the discriminating fields to OTLP attributes so
+      // they survive the otel-forward→Loki path as structured metadata (body.payload
+      // is NOT forwarded — only attributes + body.message are). Kept in body.payload
+      // too for direct JSONL readers (board-health deriveRing / grep).
+      "catalyst.linear.breaker.state": open ? "open" : "closed",
+      ...(open
+        ? {
+            "catalyst.linear.breaker.reason": reason ?? "unknown",
+            "catalyst.linear.breaker.caller": caller ?? "unknown",
+          }
+        : {}),
     },
     body: {
       payload: {

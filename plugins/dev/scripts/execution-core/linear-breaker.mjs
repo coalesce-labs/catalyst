@@ -108,10 +108,21 @@ export const linearBreaker = createLinearBreaker({ emitEvent: emitLinearBreakerE
 export function deriveCaller(cmd, args) {
   const base = String(cmd ?? "").split("/").pop() || "unknown";
   const a = Array.isArray(args) ? args : [];
-  const sub = a
-    .filter((x) => typeof x === "string" && !x.startsWith("-"))
-    .slice(0, 2)
-    .join("-");
+  // Take only the positional subcommand tokens that appear BEFORE the first flag
+  // (`issues list` from `linearis issues list --team CTL`). Stopping at the first
+  // `-`-prefixed token avoids capturing flag VALUES: a status write
+  // `linear-transition.sh --ticket CTL-123 --transition research` yields just the
+  // basename, not a per-ticket high-cardinality `…:CTL-123-research` tag (CTL-1430
+  // Codex review). linearis reads put the subcommand first, so this keeps their
+  // granularity (`linearis:issues-list`, `linearis:issues-read`).
+  const positional = [];
+  for (const x of a) {
+    if (typeof x !== "string") continue;
+    if (x.startsWith("-")) break;
+    positional.push(x);
+    if (positional.length === 2) break;
+  }
+  const sub = positional.join("-");
   return sub ? `${base}:${sub}` : base;
 }
 
