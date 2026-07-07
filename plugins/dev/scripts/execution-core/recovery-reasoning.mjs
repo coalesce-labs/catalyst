@@ -1081,6 +1081,10 @@ function promoteNumericAttrs(type, details) {
     num("recovery.proposed.tier1", details.proposedTier1);
     num("recovery.proposed.tier2", details.proposedTier2);
     num("recovery.proposed.tier3", details.proposedTier3);
+    // CTL-1435 (C1, Codex P2): promote the 0/1 dispatch flag so proposal-vs-dispatch
+    // dashboards/alerts get a chartable dispatch-rate signal (the act object rides in
+    // body.payload, which the OTel/Loki path does not make queryable).
+    num("recovery.act_dispatched", details.actDispatched);
     str("recovery.gate_decision", details.gateDecision);
     str("recovery.gate_reason", details.gateReason);
     str("recovery.mode", details.mode);
