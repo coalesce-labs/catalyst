@@ -407,6 +407,8 @@ Mode resolves from the env var (a single operator knob) over Layer-2 over the de
 |---|---|---|
 | `CATALYST_BOARD_HEALTH` _(env var)_ | `shadow` | `off` / `0` (kill-switch — strict no-op), `shadow` (scan + emit `recovery.board-scan`, take no action), `enforce` (CTL-1300 — on a proceeding scan, dispatch **one holistic recovery-pass delegate** anchored to a flagged ticket and carrying the whole-board context; reuses the capped + cooldown'd recovery-pass actuator. **Operator-gated — never auto-enabled**). Garbage values fall back to `shadow`. Overrides Layer-2. |
 | `catalyst.boardHealth.mode` _(Layer-2)_ | `shadow` | Same three values; honored when the env var is unset. |
+| `CATALYST_BH_SANCTIONED_LATCHES` _(env var)_ | _(empty)_ | Comma-separated ticket ids a human has **deliberately parked** at needs-human (CTL-1432 B3). They stay visible in the board context's `frozenNeedsHuman` but are suppressed from `proposeMoves`, so the delegate stops re-proposing them every scan (which otherwise drowns the genuinely-stuck tickets). Overrides Layer-2. |
+| `catalyst.boardHealth.sanctionedNeedsHuman` _(Layer-2)_ | `[]` | Array form of the sanctioned needs-human latch allowlist; honored when the env var is unset. |
 | `CATALYST_BH_INTERVAL_MS` | `300000` (5 min) | Cadence floor — the scan runs at most once per interval per host. |
 | `CATALYST_BH_DISPATCH_STALL_MS` | `600000` (10 min) | Dispatch-liveness threshold: free slots + a queue + no dispatch within this window flags a wedge. |
 | `CATALYST_BH_WORKER_AGE_MS` | `14400000` (4 h) | Fallback worker-age threshold (per-phase normals override it). |

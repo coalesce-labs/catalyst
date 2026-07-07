@@ -673,6 +673,35 @@ describe("selectAnchorCandidates — CTL-1432 deferred board-health (B2)", () =>
   });
 });
 
+// ─── CTL-1432 (B2/B3 — Codex P1): the gate accounts for deferred work + suppression ─
+describe("decideBoardHealth — CTL-1432 gate (deferred proceed / all-sanctioned skip)", () => {
+  test("(F1) a deferred board-health intent makes the gate PROCEED even when all invariants are green", () => {
+    const board = mkBoard({ deferredBoardHealth: ["ADV-1403"], capacity: { freeSlots: 4 } });
+    const d = decideBoardHealth(allGreen(), board);
+    expect(d.gate.decision).toBe("proceed");
+    expect(d.gate.reason).toMatch(/deferred/);
+  });
+
+  test("(F2) an all-sanctioned frozenNeedsHuman as the ONLY failure → gate SKIPS (no actionable moves)", () => {
+    const invs = { ...allGreen(), frozenNeedsHuman: inv(false, 2, true, ["CTL-SANCT-1", "CTL-SANCT-2"]) };
+    const board = mkBoard({
+      sanctionedNeedsHuman: ["CTL-SANCT-1", "CTL-SANCT-2"],
+      capacity: { freeSlots: 4 },
+    });
+    const d = decideBoardHealth(invs, board);
+    expect(d.gate.decision).toBe("skip");
+    expect(d.gate.reason).toBe("no-actionable-moves");
+  });
+
+  test("a partially-sanctioned frozenNeedsHuman still PROCEEDS on the non-sanctioned ticket", () => {
+    const invs = { ...allGreen(), frozenNeedsHuman: inv(false, 2, true, ["CTL-SANCT", "CTL-REAL"]) };
+    const board = mkBoard({ sanctionedNeedsHuman: ["CTL-SANCT"], capacity: { freeSlots: 4 } });
+    const d = decideBoardHealth(invs, board);
+    expect(d.gate.decision).toBe("proceed");
+    expect(d.moves.tier2.map((x) => x.ticket)).toEqual(["CTL-REAL"]);
+  });
+});
+
 // ─── buildBoardScanEvent — the flat event the emit envelope rides ───────────
 describe("buildBoardScanEvent", () => {
   test("type/ticket/scalars at top of details; rosters as arrays; mode echoed", () => {

@@ -766,11 +766,31 @@ export function decideBoardHealth(invariants, boardState) {
   const observableFailed = Object.values(invariants).filter((v) => v.observable && !v.ok);
   const invariantsFailed = observableFailed.reduce((n, v) => n + (Number(v.failed) || 0), 0);
 
-  // Gate 1 — all observable invariants green → skip (no LLM thrash).
-  if (observableFailed.length === 0) {
-    return decision("skip", "all-green", invariantsFailed, emptyMoves());
+  // CTL-1432 (B2/B3 — Codex P1): gate on ACTIONABLE work, not merely a failed
+  // invariant. proposeMoves already suppresses the sanctioned needs-human latches
+  // (B3), so a scan whose ONLY failure is an all-sanctioned frozenNeedsHuman produces
+  // no tier1/tier2 moves → it must NOT proceed (F2: else enforce dispatches a holistic
+  // pass with nothing real to do). Conversely, a deferred board-health intent (B2) is
+  // actionable even when NO invariant failed → it MUST proceed (F1: boardHealthPass
+  // calls selectAnchorCandidates only after "proceed", so a deferred intent that never
+  // trips the gate is inert). tier3 moves are escalate-only (never anchorable by
+  // selectAnchorCandidates), so they alone do not justify a holistic pass.
+  const moves = proposeMoves(invariants, boardState);
+  const deferred = boardState?.deferredBoardHealth ?? [];
+  const hasActionableWork =
+    moves.tier1.length > 0 || moves.tier2.length > 0 || deferred.length > 0;
+
+  // Gate 1 — nothing actionable (all green, or every failure suppressed/escalate-only,
+  // and no deferred work) → skip (no LLM thrash).
+  if (!hasActionableWork) {
+    return decision(
+      "skip",
+      observableFailed.length === 0 ? "all-green" : "no-actionable-moves",
+      invariantsFailed,
+      emptyMoves(),
+    );
   }
-  // Gate 2 — failures exist but no free slot to dispatch a fix → skip.
+  // Gate 2 — actionable work but no free slot to dispatch a fix → skip.
   if ((boardState.capacity?.freeSlots ?? 0) <= 0) {
     return decision("skip", "no-free-slots", invariantsFailed, emptyMoves());
   }
@@ -779,8 +799,12 @@ export function decideBoardHealth(invariants, boardState) {
   if (rl && rl.observable && !rl.ok) {
     return decision("skip", "rate-limit-cliff", invariantsFailed, emptyMoves());
   }
-  // Gate 4 — real failures + headroom → proceed; compute proposed moves.
-  return decision("proceed", `${observableFailed.length} invariant(s) flagged`, invariantsFailed, proposeMoves(invariants, boardState));
+  // Gate 4 — actionable work + headroom → proceed.
+  const reason =
+    observableFailed.length > 0
+      ? `${observableFailed.length} invariant(s) flagged`
+      : `${deferred.length} deferred board-health intent(s)`;
+  return decision("proceed", reason, invariantsFailed, moves);
 }
 
 function decision(gateDecision, reason, invariantsFailed, moves) {
