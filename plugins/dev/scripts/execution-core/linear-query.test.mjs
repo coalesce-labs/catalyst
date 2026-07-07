@@ -766,6 +766,90 @@ describe("fetchTicketState — cache (CTL-634)", () => {
   });
 });
 
+// CTL-1436 (A4): probeBackoff — the terminal-probe / GC census backs off from
+// re-reading a replica-MISS ticket live after its live read FAILS, so a ticket that
+// keeps 429-ing isn't re-hammered every tick (CTL-679 breaker-flap mitigation).
+// Scoped to probeBackoff callers → the CTL-634 blocker-hydration path
+// (never-cache-null, re-read promptly) is untouched — proven by the "does NOT cache
+// a failed read" test above, which uses the default probeBackoff:false.
+describe("fetchTicketState — probeBackoff negative cache (CTL-1436 A4)", () => {
+  let tmpDir;
+  let prevDir;
+  beforeEach(() => {
+    __resetDispatchAlertThrottle();
+    prevDir = process.env.CATALYST_DIR;
+    tmpDir = mkdtempSync(join(tmpdir(), "a4-backoff-"));
+    process.env.CATALYST_DIR = tmpDir; // redirect the event log the fallback alert appends to
+  });
+  afterEach(() => {
+    if (prevDir === undefined) delete process.env.CATALYST_DIR;
+    else process.env.CATALYST_DIR = prevDir;
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+  const fail429 = () => ({ code: 1, stdout: "", stderr: "429" });
+  function eventLogBody() {
+    const dir = join(tmpDir, "events");
+    let files = [];
+    try { files = readdirSync(dir); } catch { return ""; }
+    return files.map((f) => readFileSync(join(dir, f), "utf8")).join("");
+  }
+
+  test("a failed live read backs the ticket off → the second call SKIPS exec (returns null)", () => {
+    const cache = createTicketStateCache({ now: () => 0 });
+    let calls = 0;
+    const exec = () => { calls += 1; return fail429(); };
+    expect(fetchTicketState("CTL-1", { exec, cache, probeBackoff: true })).toBeNull();
+    expect(fetchTicketState("CTL-1", { exec, cache, probeBackoff: true })).toBeNull();
+    expect(calls).toBe(1); // second call short-circuited on the negative cache
+  });
+
+  test("WITHOUT probeBackoff (blocker-hydration default) a failed read re-execs — CTL-634 invariant preserved", () => {
+    const cache = createTicketStateCache({ now: () => 0 });
+    let calls = 0;
+    const exec = () => { calls += 1; return fail429(); };
+    fetchTicketState("CTL-1", { exec, cache }); // probeBackoff defaults false
+    fetchTicketState("CTL-1", { exec, cache });
+    expect(calls).toBe(2);
+  });
+
+  test("the backoff expires past negTtlMs → re-execs", () => {
+    let t = 0;
+    const cache = createTicketStateCache({ now: () => t, negTtlMs: 300_000 });
+    let calls = 0;
+    const exec = () => { calls += 1; return fail429(); };
+    fetchTicketState("CTL-1", { exec, cache, probeBackoff: true });
+    t = 300_001;
+    fetchTicketState("CTL-1", { exec, cache, probeBackoff: true });
+    expect(calls).toBe(2);
+  });
+
+  test("a SUCCESS sets no backoff and is positively cached", () => {
+    const cache = createTicketStateCache({ now: () => 0 });
+    let calls = 0;
+    const exec = () => { calls += 1; return { code: 0, stdout: JSON.stringify({ state: { name: "Done" } }), stderr: "" }; };
+    expect(fetchTicketState("CTL-1", { exec, cache, probeBackoff: true })).toBe("Done");
+    expect(cache.isNegativelyCached("CTL-1")).toBe(false);
+    expect(fetchTicketState("CTL-1", { exec, cache, probeBackoff: true })).toBe("Done");
+    expect(calls).toBe(1); // positive cache hit
+  });
+
+  test("probeBackoff with NO cache is a safe no-op (every call execs, never throws)", () => {
+    let calls = 0;
+    const exec = () => { calls += 1; return fail429(); };
+    expect(fetchTicketState("CTL-1", { exec, probeBackoff: true })).toBeNull();
+    expect(fetchTicketState("CTL-1", { exec, probeBackoff: true })).toBeNull();
+    expect(calls).toBe(2);
+  });
+
+  test("a failed probeBackoff read emits the loud ticket_state_live_fallback alert", () => {
+    const cache = createTicketStateCache({ now: () => 0 });
+    fetchTicketState("CTL-77", { exec: fail429, cache, probeBackoff: true });
+    const body = eventLogBody();
+    expect(body).toContain("catalyst.alert.ticket_state_live_fallback");
+    expect(body).toContain("CTL-77");
+  });
+});
+
 // CTL-755 — fetchTicketRelations is the admission gate's single-read hydration
 // of a triaged-waiting candidate: state + relations + inverseRelations +
 // priority + labels in one `linearis issues read <id>`. The descriptor it

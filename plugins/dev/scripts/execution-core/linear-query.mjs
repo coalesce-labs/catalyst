@@ -9,7 +9,7 @@ import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { withBreaker, linearBreaker, isRateLimitError } from "./linear-breaker.mjs";
 import { withAuthRemint, linearReminter, isBatchAuthError } from "./linear-remint.mjs";
-import { emitEligibleSourceUnavailable } from "./dispatch-alert.mjs";
+import { emitEligibleSourceUnavailable, emitTicketStateLiveFallback } from "./dispatch-alert.mjs";
 
 // linearis caps a single page; 200 comfortably covers a project's pickable
 // set without pagination (the reconcile poll runs every 10 min anyway).
@@ -252,7 +252,7 @@ const GATEWAY_STATE_FRESH_MS = 60_000;
 // Default undefined → zero added cost (no callback). Never throws out (best-effort).
 export function fetchTicketState(
   identifier,
-  { exec = defaultExec, cache, gateway, replica, gatewayFreshMs = GATEWAY_STATE_FRESH_MS, onExec } = {}
+  { exec = defaultExec, cache, gateway, replica, gatewayFreshMs = GATEWAY_STATE_FRESH_MS, onExec, probeBackoff = false } = {}
 ) {
   if (cache) {
     const cached = cache.get(identifier);
@@ -285,6 +285,15 @@ export function fetchTicketState(
       return d.state;
     }
   }
+  // CTL-1436 (A4): probeBackoff callers (terminal-probe / GC census) back off from
+  // re-reading a ticket live for negTtlMs after its last live read FAILED. This is
+  // the cache+gateway+replica MISS path — the ONLY live shell-out — so a MISS ticket
+  // whose live read keeps 429-ing would otherwise be re-probed EVERY tick and keep
+  // the CTL-679 breaker flapping. Scoped to probeBackoff only → the blocker-hydration
+  // path keeps its prompt-null-re-read (CTL-634) behavior untouched.
+  if (probeBackoff && cache?.isNegativelyCached?.(identifier)) {
+    return null;
+  }
   // CTL-1339: hot per-signal terminal read — cap the wall-clock so a 429-stalled
   // linearis can't block the synchronous tier-3 reclaim/recovery read its full ~30s.
   // CTL-1364: this is the cache+gateway+replica MISS path — the ONLY place this fn
@@ -294,6 +303,10 @@ export function fetchTicketState(
     timeoutMs: LINEARIS_TERMINAL_READ_TIMEOUT_MS,
   });
   if (code !== 0) {
+    if (probeBackoff && cache?.setNegative) {
+      cache.setNegative(identifier); // A4: back off — don't re-hammer this live read every tick
+      emitTicketStateLiveFallback({ identifier, reason: timedOut === true ? "timeout" : "error" });
+    }
     if (onExec) {
       try {
         onExec({ source: "live", execMs: Date.now() - execStart, code, result: null, timedOut: timedOut === true });
@@ -312,6 +325,10 @@ export function fetchTicketState(
     }
     return state;
   } catch {
+    if (probeBackoff && cache?.setNegative) {
+      cache.setNegative(identifier); // A4: unparseable live read → back off too
+      emitTicketStateLiveFallback({ identifier, reason: "unparseable" });
+    }
     if (onExec) {
       try {
         onExec({ source: "live", execMs: Date.now() - execStart, code, result: null, timedOut: timedOut === true });

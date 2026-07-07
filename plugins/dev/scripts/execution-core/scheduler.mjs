@@ -6521,6 +6521,7 @@ function runTick() {
                 cache: runningOpts.cache,
                 gateway: runningOpts.gateway,
                 replica: runningOpts.replica,
+                probeBackoff: true, // CTL-1436 (A4): a replica-MISS ticket whose live read fails backs off (breaker-flap mitigation)
               });
               return state != null && isLinearTerminal(state);
             },
@@ -6555,6 +6556,7 @@ function runTick() {
                 cache: runningOpts.cache,
                 gateway: runningOpts.gateway,
                 replica: runningOpts.replica,
+                probeBackoff: true, // CTL-1436 (A4): a replica-MISS ticket whose live read fails backs off (breaker-flap mitigation)
               });
               return state != null && isLinearTerminal(state);
             },
@@ -6594,6 +6596,7 @@ function runTick() {
                 cache: runningOpts.cache,
                 gateway: runningOpts.gateway,
                 replica: runningOpts.replica,
+                probeBackoff: true, // CTL-1436 (A4): a replica-MISS ticket whose live read fails backs off (breaker-flap mitigation)
               });
               return state != null && isLinearTerminal(state);
             },
