@@ -1765,10 +1765,21 @@ export function defaultRecordIntent(ticket, intent, opts = {}) {
     Boolean(intent.escalated) ||
     intent.decision === "escalate"; // an escalate-pass latches escalated
 
+  // CTL-1432 (Codex P1): a REPEATED defer→board-health is a no-op handoff — the ticket
+  // is already handed to the board-health delegate, so re-deferring must NOT refresh
+  // lastTs. Otherwise the per-item recovery pass (which runs BEFORE boardHealthPass in
+  // the same tick) re-defers the marker back under the 30-min cooldown every cycle, and
+  // the board-health consumer — which gates on lastTs — is starved forever. Freezing
+  // lastTs lets the marker AGE OUT so board-health finally consumes + dispatches it.
+  const isRepeatedBoardHealthDefer =
+    intent.decision === "defer" &&
+    (intent.fix_class ?? prior.fix_class) === "board-health" &&
+    prior.decision === "defer" &&
+    typeof prior.lastTs === "number";
   const entry = {
     ticket,
     ts: typeof prior.ts === "number" ? prior.ts : ts, // first-action timestamp
-    lastTs: ts, // most-recent action timestamp (drives the cooldown window)
+    lastTs: isRepeatedBoardHealthDefer ? prior.lastTs : ts, // most-recent action ts (drives cooldown)
     decision: intent.decision,
     fix_class: intent.fix_class ?? prior.fix_class ?? null,
     attempts:

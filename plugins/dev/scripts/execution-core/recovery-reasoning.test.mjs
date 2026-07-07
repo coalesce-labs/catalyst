@@ -1245,6 +1245,28 @@ describe("readDeferredBoardHealthIntents (CTL-1432 B2)", () => {
     // past cooldown → included
     expect(readDeferredBoardHealthIntents(orchDir, { now: () => t0 + RECOVERY_COOLDOWN_MS + 1 })).toContain("ADV-COOL");
   });
+
+  test("(Codex P1 r4) a REPEATED defer→board-health FREEZES lastTs so the marker ages out for board-health", () => {
+    const t0 = 1_000_000_000_000;
+    defaultRecordIntent("CTL-BHD", { decision: "defer", fix_class: "board-health" }, { orchDir, now: () => t0 });
+    // the per-item pass re-defers 40 min later (past cooldown) — lastTs must NOT refresh,
+    // else it stays perpetually under cooldown and starves the board-health consumer.
+    const e2 = defaultRecordIntent(
+      "CTL-BHD",
+      { decision: "defer", fix_class: "board-health" },
+      { orchDir, now: () => t0 + 40 * 60_000 },
+    );
+    expect(e2.lastTs).toBe(t0); // frozen at the first defer
+    // and the reader now sees it (past cooldown from the frozen lastTs):
+    expect(readDeferredBoardHealthIntents(orchDir, { now: () => t0 + 40 * 60_000 })).toContain("CTL-BHD");
+  });
+
+  test("a repeated NON-board-health defer still refreshes lastTs (unchanged)", () => {
+    const t0 = 1_000_000_000_000;
+    defaultRecordIntent("CTL-D", { decision: "defer", fix_class: "bounded-llm" }, { orchDir, now: () => t0 });
+    const e2 = defaultRecordIntent("CTL-D", { decision: "defer", fix_class: "bounded-llm" }, { orchDir, now: () => t0 + 1000 });
+    expect(e2.lastTs).toBe(t0 + 1000);
+  });
 });
 
 // ─── CTL-1176: capped remediate dispatch (cap enforcement) ──────────────────

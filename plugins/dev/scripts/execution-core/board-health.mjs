@@ -774,8 +774,21 @@ function checkNeedsHumanPile(b) {
 function eligibleDeferredAnchors(board) {
   const sanctioned = new Set(board?.sanctionedNeedsHuman ?? []);
   const byId = board?.ticketsById;
+  // CTL-1432 (Codex P2): HRW-ownership filter, mirroring selectAnchorCandidates — a
+  // foreign-owned deferred marker must not make the gate proceed (this host would then
+  // no-anchor it). N=1 / no roster / no ownerForTicket ⇒ owns everything ⇒ unchanged.
+  const multiHost = !!(board?.multiHost && typeof board?.ownerForTicket === "function");
+  const owns = (t) => {
+    if (!multiHost) return true;
+    try {
+      return board.ownerForTicket(t, board.roster) === board.self;
+    } catch {
+      return true; // fail-open: a broken HRW read must not block self-owned actuation
+    }
+  };
   return (board?.deferredBoardHealth ?? []).filter((t) => {
     if (sanctioned.has(t)) return false;
+    if (!owns(t)) return false;
     const d = byId && typeof byId.get === "function" ? byId.get(t) : undefined;
     if (!d) return false;
     return !isTerminalLinearState(d);
@@ -804,13 +817,16 @@ export function decideBoardHealth(invariants, boardState) {
     moves.tier1.length > 0 || moves.tier2.length > 0 || deferred.length > 0;
 
   // Gate 1 — nothing actionable (all green, or every failure suppressed/escalate-only,
-  // and no deferred work) → skip (no LLM thrash).
+  // and no deferred work) → skip the holistic DISPATCH (no LLM thrash). CTL-1432 (Codex
+  // P2): still return the proposed `moves` (not emptyMoves) so an escalate-only board —
+  // tier3 stranded-node / project-silence — keeps surfacing those proposals in the
+  // recovery.board-scan event (a human should see them); we just don't dispatch.
   if (!hasActionableWork) {
     return decision(
       "skip",
       observableFailed.length === 0 ? "all-green" : "no-actionable-moves",
       invariantsFailed,
-      emptyMoves(),
+      moves,
     );
   }
   // Gate 2 — actionable work but no free slot to dispatch a fix → skip.
@@ -953,7 +969,7 @@ export function selectAnchorCandidates(moves, board, { holistic = false, strande
   // eligible-queue ticket. Cross-checked against the live board (ticketsById already
   // excludes Done/removed via getBoard's includeRemoved:false), so a stale defer marker
   // whose ticket has since gone terminal is dropped rather than re-anchored.
-  for (const t of eligibleDeferredAnchors(board).filter(owns)) add(t);
+  for (const t of eligibleDeferredAnchors(board)) add(t); // already HRW-owns-filtered
   for (const e of (board?.eligible ?? []).map((x) => x && x.id).filter(Boolean).filter(owns)) add(e);
   // holistic foreign-failover: a flagged tier1/tier2 ticket this host does NOT own,
   // ONLY when its owner is provably dead/stranded. Appended AFTER all self-owned.

@@ -703,6 +703,19 @@ describe("selectAnchorCandidates — CTL-1432 deferred board-health (B2)", () =>
     const out = selectAnchorCandidates({ tier1: [], tier2: [], tier3: [] }, board);
     expect(out).not.toContain("CTL-SANCT");
   });
+
+  test("(Codex P2 r4) a FOREIGN-owned deferred marker is dropped (multi-host HRW)", () => {
+    const board = mkBoard({
+      deferredBoardHealth: ["ADV-FOREIGN"],
+      ticketsById: new Map([["ADV-FOREIGN", {}]]),
+      multiHost: true,
+      self: "mini",
+      roster: ["mini", "mini-2"],
+      ownerForTicket: () => "mini-2", // owned by the OTHER host
+    });
+    const out = selectAnchorCandidates({ tier1: [], tier2: [], tier3: [] }, board);
+    expect(out).not.toContain("ADV-FOREIGN");
+  });
 });
 
 // ─── CTL-1432 (B2/B3 — Codex P1): the gate accounts for deferred work + suppression ─
@@ -722,6 +735,13 @@ describe("decideBoardHealth — CTL-1432 gate (deferred proceed / all-sanctioned
     const board = mkBoard({ deferredBoardHealth: ["ADV-DONE"], ticketsById: new Map(), capacity: { freeSlots: 4 } });
     const d = decideBoardHealth(allGreen(), board);
     expect(d.gate.decision).toBe("skip");
+  });
+
+  test("(Codex P2 r4) a tier3-only board SKIPS dispatch but still SURFACES the tier3 proposals in decision.moves", () => {
+    const invs = { ...allGreen(), strandedNode: inv(false, 1, true, ["mini-2"]) };
+    const d = decideBoardHealth(invs, mkBoard({ capacity: { freeSlots: 4 } }));
+    expect(d.gate.decision).toBe("skip"); // escalate-only → no holistic dispatch
+    expect(d.moves.tier3.map((x) => x.move)).toContain("escalate-stranded-node"); // …but surfaced
   });
 
   test("(F2) an all-sanctioned frozenNeedsHuman as the ONLY failure → gate SKIPS (no actionable moves)", () => {
