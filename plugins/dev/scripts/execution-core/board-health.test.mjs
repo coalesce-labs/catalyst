@@ -20,6 +20,9 @@ import {
   buildBoardScanEvent,
   boardHealthPass,
 } from "./board-health.mjs";
+// CTL-1435 (Codex P1/P2): round-trip the REAL emit envelope so the ring test
+// exercises the production body.payload.details nesting + attribute promotion.
+import { buildRecoveryEnvelope } from "./recovery-reasoning.mjs";
 
 const NOW = Date.parse("2026-06-20T12:00:00Z");
 const MIN = 60_000;
@@ -1266,44 +1269,60 @@ describe("boardHealthPass — C1 act-outcome captured on the emitted scan (CTL-1
 
 // ─── CTL-1435 (C2) — actuation-liveness invariant ────────────────────────────
 describe("deriveRing → board.ring.boardScans via assembleBoardState (CTL-1435 C2)", () => {
-  test("recovery.board-scan events populate ring.boardScans with {mode,gate,proposedMoves,dispatched}", () => {
-    const events = [
-      {
-        ts: "2026-06-20T11:59:00Z",
-        type: "recovery.board-scan",
-        payload: { mode: "enforce", gateDecision: "proceed", proposedTier1: 1, proposedTier2: 2, proposedTier3: 0, act: { dispatched: false } },
-      },
-      {
-        ts: "2026-06-20T11:58:00Z",
-        type: "recovery.board-scan",
-        payload: { mode: "enforce", gateDecision: "proceed", proposedTier1: 0, proposedTier2: 1, proposedTier3: 0, act: { dispatched: true } },
-      },
-    ];
+  test("Codex P1 REGRESSION: the REAL emit envelope (body.payload.details) is read, not a flat payload", () => {
+    // Round-trip through the production envelope builder so the test exercises the
+    // exact nesting the daemon writes (buildRecoveryEnvelope → body.payload.details).
+    // Before the fix, deriveRing read payload.mode (null) and every enforce scan was
+    // filtered out — silently disabling the invariant in production.
+    const invs = { ...allGreen(), dispatchLiveness: inv(false, 1, true, ["CTL-1"]) };
+    const decision = decideBoardHealth(invs, mkBoard({ capacity: { freeSlots: 4 } }));
+    const flat = buildBoardScanEvent({
+      mode: "enforce",
+      invariants: invs,
+      decision,
+      act: { dispatched: false, anchor: "CTL-1", skippedReason: "all-candidates-cooldown" },
+    });
+    const envelope = buildRecoveryEnvelope(flat, { now: () => "2026-06-20T11:59:00Z" });
     const board = assembleBoardState({
       orchDir: "/tmp/x",
       getBoard: () => [],
       getWorkerSignals: () => [],
       getEligible: () => [],
-      readEventRing: () => events,
+      readEventRing: () => [envelope],
       mode: "enforce",
       now: () => NOW,
     });
-    expect(board.ring.boardScans.length).toBe(2);
+    expect(board.ring.boardScans.length).toBe(1);
+    expect(board.ring.boardScans[0].mode).toBe("enforce");
+    expect(board.ring.boardScans[0].gate).toBe("proceed");
+    expect(board.ring.boardScans[0].dispatched).toBe(false);
+    expect(board.ring.boardScans[0].skippedReason).toBe("all-candidates-cooldown");
+  });
+
+  test("flat/legacy payload shape still reads (back-compat)", () => {
+    const events = [
+      {
+        ts: "2026-06-20T11:59:00Z",
+        type: "recovery.board-scan",
+        payload: { mode: "enforce", gateDecision: "proceed", proposedTier1: 1, proposedTier2: 2, proposedTier3: 0, act: { dispatched: true, skippedReason: null } },
+      },
+    ];
+    const board = assembleBoardState({
+      orchDir: "/tmp/x", getBoard: () => [], getWorkerSignals: () => [], getEligible: () => [],
+      readEventRing: () => events, mode: "enforce", now: () => NOW,
+    });
     expect(board.ring.boardScans[0]).toEqual({
       tsMs: Date.parse("2026-06-20T11:59:00Z"),
-      mode: "enforce",
-      gate: "proceed",
-      proposedMoves: 3,
-      dispatched: false,
+      mode: "enforce", gate: "proceed", proposedMoves: 3, dispatched: true, skippedReason: null,
     });
-    expect(board.ring.boardScans[1].dispatched).toBe(true);
   });
 });
 
 describe("checkActuationLiveness — via evaluateInvariants (CTL-1435 C2)", () => {
-  const mkScan = (o = {}) => ({ tsMs: NOW, mode: "enforce", gate: "proceed", proposedMoves: 3, dispatched: false, ...o });
+  // default scan = an owned-but-undispatched wedge (all-candidates-cooldown).
+  const mkScan = (o = {}) => ({ tsMs: NOW, mode: "enforce", gate: "proceed", proposedMoves: 3, dispatched: false, skippedReason: "all-candidates-cooldown", ...o });
 
-  test("K enforce scans ALL proceed+moves>0+dispatched:false → flags (observable, not-ok)", () => {
+  test("K enforce scans ALL owned-but-undispatched (all-candidates-cooldown) → flags", () => {
     const boardScans = Array.from({ length: 6 }, () => mkScan());
     const r = evaluateInvariants(mkBoard({ mode: "enforce", ring: { boardScans } }));
     expect(r.actuationLiveness.observable).toBe(true);
@@ -1311,8 +1330,26 @@ describe("checkActuationLiveness — via evaluateInvariants (CTL-1435 C2)", () =
     expect(r.actuationLiveness.failed).toBe(1);
   });
 
+  test("Codex P2: deferred-only wedge (proposedMoves 0, all-candidates-cooldown) STILL flags", () => {
+    const boardScans = Array.from({ length: 6 }, () => mkScan({ proposedMoves: 0 }));
+    const r = evaluateInvariants(mkBoard({ mode: "enforce", ring: { boardScans } }));
+    expect(r.actuationLiveness.ok).toBe(false); // old proposedMoves>0 predicate missed this
+  });
+
+  test("act-error across the window also flags", () => {
+    const boardScans = Array.from({ length: 6 }, () => mkScan({ skippedReason: "act-error" }));
+    const r = evaluateInvariants(mkBoard({ mode: "enforce", ring: { boardScans } }));
+    expect(r.actuationLiveness.ok).toBe(false);
+  });
+
+  test("no-owned-anchor scans are BENIGN (nothing this host owns) → NOT flagged", () => {
+    const boardScans = Array.from({ length: 6 }, () => mkScan({ skippedReason: "no-owned-anchor" }));
+    const r = evaluateInvariants(mkBoard({ mode: "enforce", ring: { boardScans } }));
+    expect(r.actuationLiveness.ok).toBe(true);
+  });
+
   test("one dispatched:true within the K window → passes (ok:true)", () => {
-    const boardScans = [...Array.from({ length: 5 }, () => mkScan()), mkScan({ dispatched: true })];
+    const boardScans = [...Array.from({ length: 5 }, () => mkScan()), mkScan({ dispatched: true, skippedReason: null })];
     const r = evaluateInvariants(mkBoard({ mode: "enforce", ring: { boardScans } }));
     expect(r.actuationLiveness.ok).toBe(true);
   });
@@ -1330,15 +1367,31 @@ describe("checkActuationLiveness — via evaluateInvariants (CTL-1435 C2)", () =
     expect(r.actuationLiveness.observable).toBe(false);
   });
 
-  test("proceed scans with zero proposed moves are NOT a propose-forever wedge", () => {
-    const boardScans = Array.from({ length: 6 }, () => mkScan({ proposedMoves: 0 }));
-    const r = evaluateInvariants(mkBoard({ mode: "enforce", ring: { boardScans } }));
-    expect(r.actuationLiveness.ok).toBe(true);
-  });
-
   test("off mode omits actuationLiveness entirely (cohort-gated)", () => {
     const boardScans = Array.from({ length: 6 }, () => mkScan());
     const r = evaluateInvariants(mkBoard({ ring: { boardScans } }), { mode: "off" });
     expect(r.actuationLiveness).toBeUndefined();
+  });
+});
+
+// ─── CTL-1435 (C1, Codex P2) — actDispatched promoted to a chartable attribute ─
+describe("buildRecoveryEnvelope — recovery.act_dispatched promotion (CTL-1435)", () => {
+  const mkEvent = (act) => {
+    const invs = { ...allGreen(), dispatchLiveness: inv(false, 1, true, ["CTL-1"]) };
+    const decision = decideBoardHealth(invs, mkBoard({ capacity: { freeSlots: 4 } }));
+    return buildBoardScanEvent({ mode: "enforce", invariants: invs, decision, act });
+  };
+
+  test("dispatched scan → attributes['recovery.act_dispatched'] === 1 (chartable dispatch rate)", () => {
+    const env = buildRecoveryEnvelope(mkEvent({ dispatched: true, anchor: "CTL-1", skippedReason: null }));
+    expect(env.attributes["recovery.act_dispatched"]).toBe(1);
+    // the high-cardinality anchor stays in body.payload.details, never promoted.
+    expect(env.attributes["recovery.act_anchor"]).toBeUndefined();
+    expect(env.body.payload.details.act.anchor).toBe("CTL-1");
+  });
+
+  test("non-dispatch scan → attributes['recovery.act_dispatched'] === 0", () => {
+    const env = buildRecoveryEnvelope(mkEvent({ dispatched: false, anchor: null, skippedReason: "all-candidates-cooldown" }));
+    expect(env.attributes["recovery.act_dispatched"]).toBe(0);
   });
 });

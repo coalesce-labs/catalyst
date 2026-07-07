@@ -274,15 +274,23 @@ function deriveRing(events, nowMs) {
       if (team) ring.reconcileFailing.add(team);
     } else if (name === "recovery.board-scan") {
       // CTL-1435 (C2): retain each board-scan's actuation outcome so
-      // checkActuationLiveness can spot a propose-forever/dispatch-never run.
-      // `dispatched` comes from C1's act-outcome on the emitted event.
+      // checkActuationLiveness can spot a proceed-but-dispatch-never run.
+      // Codex P1: the REAL emit envelope (buildRecoveryEnvelope) nests the scan
+      // fields under body.payload.DETAILS — reading them off a flat `payload` gets
+      // null for every live event, silently disabling the invariant. Fall back to a
+      // flat payload so hand-built / legacy events still read.
+      const d = payload.details ?? payload;
       ring.boardScans.push({
         tsMs: Number.isFinite(tsMs) ? tsMs : null,
-        mode: payload.mode ?? null,
-        gate: payload.gateDecision ?? null,
-        proposedMoves:
-          (payload.proposedTier1 ?? 0) + (payload.proposedTier2 ?? 0) + (payload.proposedTier3 ?? 0),
-        dispatched: payload.act?.dispatched === true,
+        mode: d.mode ?? null,
+        gate: d.gateDecision ?? null,
+        proposedMoves: (d.proposedTier1 ?? 0) + (d.proposedTier2 ?? 0) + (d.proposedTier3 ?? 0),
+        dispatched: d.act?.dispatched === true,
+        // Codex P2: skippedReason is what tells a true actuation wedge (owned
+        // anchor, all-candidates-cooldown / act-error) from a benign non-dispatch
+        // (no-owned-anchor, gate-hold) — including the deferred-only proceed path
+        // where proposedMoves is 0.
+        skippedReason: d.act?.skippedReason ?? null,
       });
     }
   }
@@ -622,13 +630,22 @@ function checkStrandedNode(b) {
   );
 }
 
+// CTL-1435 (C2): the skippedReason values that mean "the delegate proceeded with
+// an OWNED anchor it could act on, yet dispatched nothing" — a real actuation
+// wedge. Benign non-dispatch reasons (no-owned-anchor = nothing this host owns;
+// gate-hold reasons all-green / no-free-slots / rate-limit-cliff; shadow) are
+// deliberately excluded so the invariant flags the CTL-1157 failure mode, not a
+// host that simply has no owned work.
+const WEDGE_SKIP_REASONS = new Set(["all-candidates-cooldown", "act-error"]);
+
 // #7 — actuation liveness (CTL-1435 C2): the delegate's OWN wedge. Over the last
-// K enforce board-scans in the ring, if EVERY one proceeded with proposed moves
-// yet dispatched nothing, board-health is proposing into the void — the exact
-// CTL-1157 incident (enforce proposed ~15 moves/5min for days with ~zero
-// executions, invisible in the journal). This is the invariant that would have
-// caught it. It only READS the ring's board-scan history (C1's act-outcome), so
-// it adds no Linear/Git I/O. Two false-positive guards:
+// K enforce board-scans in the ring, if EVERY one proceeded with an owned anchor
+// yet dispatched nothing (skippedReason ∈ all-candidates-cooldown / act-error),
+// board-health is proposing into the void — the exact CTL-1157 incident (enforce
+// proposed ~15 moves/5min for days with ~zero executions, invisible in the
+// journal). This is the invariant that would have caught it. It only READS the
+// ring's board-scan history (C1's act-outcome), so it adds no Linear/Git I/O.
+// Two false-positive guards:
 //   (1) enforce-only — shadow/off never dispatch by design, so their scans are
 //       filtered out (a shadow host has zero enforce scans → observable:false).
 //   (2) ≥K guard — a short or busy event tail that holds <K enforce scans yields
@@ -649,8 +666,12 @@ function checkActuationLiveness(b, t) {
     );
   }
   const recent = scans.slice(-K);
+  // A dispatch anywhere in the window clears it; otherwise EVERY scan must be an
+  // owned-but-undispatched wedge (skippedReason ∈ WEDGE_SKIP_REASONS). This catches
+  // the deferred-only proceed path (proposedMoves 0) the old proposedMoves>0
+  // predicate missed (Codex P2), and ignores benign no-owned-anchor/gate-hold scans.
   const wedged = recent.every(
-    (s) => s.gate === "proceed" && (s.proposedMoves ?? 0) > 0 && s.dispatched !== true,
+    (s) => s.dispatched !== true && WEDGE_SKIP_REASONS.has(s.skippedReason),
   );
   return invariant(
     !wedged,
