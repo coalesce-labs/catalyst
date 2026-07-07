@@ -655,31 +655,57 @@ describe("proposeMoves — CTL-1432 sanctioned-latch suppression (B3)", () => {
     const m = proposeMoves(invs, mkBoard());
     expect(m.tier2.map((x) => x.ticket)).toContain("CTL-REAL");
   });
+
+  test("(Codex P1) a sanctioned ticket in the needs-human PILE is not proposed as a tier1 holistic-triage", () => {
+    const invs = { ...allGreen(), needsHumanPile: inv(false, 1, true, ["CTL-SANCT"]) };
+    const m = proposeMoves(invs, mkBoard({ sanctionedNeedsHuman: ["CTL-SANCT"] }));
+    expect(m.tier1.map((x) => x.ticket)).not.toContain("CTL-SANCT");
+  });
 });
 
 // ─── CTL-1432 (B2): deferred board-health intents become anchor candidates ──────
 describe("selectAnchorCandidates — CTL-1432 deferred board-health (B2)", () => {
-  test("a deferred board-health ticket with NO invariant flag is a self-owned anchor candidate", () => {
-    const board = mkBoard({ deferredBoardHealth: ["ADV-1403"] });
+  test("a deferred board-health ticket (on the live board) with NO invariant flag is a self-owned anchor candidate", () => {
+    const board = mkBoard({ deferredBoardHealth: ["ADV-1403"], ticketsById: new Map([["ADV-1403", {}]]) });
     const out = selectAnchorCandidates({ tier1: [], tier2: [], tier3: [] }, board);
     expect(out).toContain("ADV-1403");
   });
 
-  test("deferred candidates rank AFTER flagged work + the eligible queue", () => {
-    const board = mkBoard({ deferredBoardHealth: ["ADV-1403"], eligible: [{ id: "CTL-ELIG" }] });
+  test("(Codex P1) deferred candidates rank AFTER flagged work but BEFORE the eligible queue", () => {
+    const board = mkBoard({
+      deferredBoardHealth: ["ADV-1403"],
+      eligible: [{ id: "CTL-ELIG" }],
+      ticketsById: new Map([["ADV-1403", {}]]),
+    });
     const moves = { tier1: [{ ticket: "CTL-FLAG" }], tier2: [], tier3: [] };
     const out = selectAnchorCandidates(moves, board);
-    expect(out).toEqual(["CTL-FLAG", "CTL-ELIG", "ADV-1403"]);
+    expect(out).toEqual(["CTL-FLAG", "ADV-1403", "CTL-ELIG"]);
+  });
+
+  test("(Codex P1) a deferred ticket NOT on the live board (since terminal) is dropped", () => {
+    const board = mkBoard({ deferredBoardHealth: ["ADV-DONE"], ticketsById: new Map() });
+    const out = selectAnchorCandidates({ tier1: [], tier2: [], tier3: [] }, board);
+    expect(out).not.toContain("ADV-DONE");
   });
 });
 
 // ─── CTL-1432 (B2/B3 — Codex P1): the gate accounts for deferred work + suppression ─
 describe("decideBoardHealth — CTL-1432 gate (deferred proceed / all-sanctioned skip)", () => {
-  test("(F1) a deferred board-health intent makes the gate PROCEED even when all invariants are green", () => {
-    const board = mkBoard({ deferredBoardHealth: ["ADV-1403"], capacity: { freeSlots: 4 } });
+  test("(F1) a deferred board-health intent (on the live board) makes the gate PROCEED even when all invariants are green", () => {
+    const board = mkBoard({
+      deferredBoardHealth: ["ADV-1403"],
+      ticketsById: new Map([["ADV-1403", {}]]),
+      capacity: { freeSlots: 4 },
+    });
     const d = decideBoardHealth(allGreen(), board);
     expect(d.gate.decision).toBe("proceed");
     expect(d.gate.reason).toMatch(/deferred/);
+  });
+
+  test("(Codex P1) a deferred intent whose ticket is terminal (not on the board) does NOT proceed", () => {
+    const board = mkBoard({ deferredBoardHealth: ["ADV-DONE"], ticketsById: new Map(), capacity: { freeSlots: 4 } });
+    const d = decideBoardHealth(allGreen(), board);
+    expect(d.gate.decision).toBe("skip");
   });
 
   test("(F2) an all-sanctioned frozenNeedsHuman as the ONLY failure → gate SKIPS (no actionable moves)", () => {
