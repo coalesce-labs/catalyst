@@ -128,6 +128,9 @@ describe("holisticBoardHealthAct — one real dispatch per scan, skip non-dispat
     expect(invoked).toEqual(["CTL-1"]); // stopped after the first real dispatch
     expect(recorded).toHaveLength(1);
     expect(recorded[0].intent.outcome).toBe(true);
+    // CTL-1439 (P0a): the dispatch-time ledger write is a DISPATCH marker, not a
+    // verdict — the session's actual conclusion arrives later via recordVerdict.
+    expect(recorded[0].intent.decision).toBe("dispatched");
   });
 
   test("a ledger-latched candidate (shouldSkipItem) is skipped without invoking (MUST-FIX 2)", () => {

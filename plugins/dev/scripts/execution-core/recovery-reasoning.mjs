@@ -1691,6 +1691,15 @@ export const RECOVERY_MAX_ATTEMPTS =
 export const RECOVERY_TERMINAL_INTENT_TTL_MS =
   Number(process.env.CATALYST_RECOVERY_TERMINAL_TTL_DAYS) * 864e5 || 7 * 864e5;
 
+// CTL-1439 (P0a): TTL on a leave-alone verdict. A recovery-pass that reviewed the
+// ticket and concluded "no action needed" (stale flag / actively human-driven /
+// false positive) suppresses re-review for this window, then the ticket re-enters
+// (conditions change). Deliberately much longer than the 30-min action cooldown —
+// re-reviewing a verified-healthy ticket every half hour is the RC2 waste loop.
+// Env-only, matching its siblings (NaN*x and 0*x are falsy → 24h default).
+export const RECOVERY_LEAVE_ALONE_TTL_MS =
+  Number(process.env.CATALYST_RECOVERY_LEAVE_ALONE_TTL_HOURS) * 3600e3 || 24 * 3600e3;
+
 function recoveryIntentPath(orchDir, ticket) {
   return join(orchDir, ".recovery-intents", `${ticket}.json`);
 }
@@ -1780,6 +1789,10 @@ export function defaultRecordIntent(ticket, intent, opts = {}) {
     (intent.fix_class ?? prior.fix_class) === "board-health" &&
     prior.decision === "defer" &&
     typeof prior.lastTs === "number";
+  // CTL-1439 (P0a): the session's ACTUAL verdict rides in the ledger. A write that
+  // carries a verdict stamps all three fields afresh; a verdict-less write (e.g.
+  // the next dispatch marker) PRESERVES the prior verdict trail for observability.
+  const hasVerdict = typeof intent.verdict === "string";
   const entry = {
     ticket,
     ts: typeof prior.ts === "number" ? prior.ts : ts, // first-action timestamp
@@ -1791,6 +1804,13 @@ export function defaultRecordIntent(ticket, intent, opts = {}) {
         ? intent.attempts
         : (typeof prior.attempts === "number" ? prior.attempts : 0) + 1,
     escalated,
+    ...(hasVerdict || typeof prior.verdict === "string"
+      ? {
+          verdict: hasVerdict ? intent.verdict : prior.verdict,
+          verdictReason: hasVerdict ? (intent.verdictReason ?? null) : (prior.verdictReason ?? null),
+          verdictTs: hasVerdict ? ts : (prior.verdictTs ?? null),
+        }
+      : {}),
   };
 
   try {
@@ -1803,9 +1823,67 @@ export function defaultRecordIntent(ticket, intent, opts = {}) {
   return entry;
 }
 
+// recordVerdict — CTL-1439 (P0a). Persist a recovery-pass session's ACTUAL
+// conclusion into the intent ledger (the dispatch-time write is only a
+// "dispatched" marker — see holisticBoardHealthAct). Three verdicts:
+//   fixed       → decision:"fixed", attempts PINNED (the dispatch already counted
+//                 this attempt; a verdict write must not double-count it).
+//   leave-alone → decision:"leave-alone", attempts REFUNDED by one (a reviewed-
+//                 healthy pass must not burn a fix attempt — audit RC1/RC2 (d));
+//                 defaultShouldSkipItem then suppresses re-review for
+//                 RECOVERY_LEAVE_ALONE_TTL_MS.
+//   escalate    → decision:"escalate" (latches escalated:true — existing terminal
+//                 semantics; the escalated TTL governs from here).
+// Returns the written entry, or null on an unknown verdict / no orchDir.
+export function recordVerdict(ticket, { verdict, reason = null } = {}, opts = {}) {
+  if (verdict === "leave-alone") {
+    const priorAttempts = defaultReadIntentAttempts(ticket, opts);
+    return defaultRecordIntent(
+      ticket,
+      {
+        type: "recovery-pass",
+        decision: "leave-alone",
+        attempts: Math.max(priorAttempts - 1, 0),
+        verdict,
+        verdictReason: reason,
+      },
+      opts,
+    );
+  }
+  if (verdict === "fixed") {
+    const priorAttempts = defaultReadIntentAttempts(ticket, opts);
+    return defaultRecordIntent(
+      ticket,
+      {
+        type: "recovery-pass",
+        decision: "fixed",
+        attempts: priorAttempts,
+        verdict,
+        verdictReason: reason,
+      },
+      opts,
+    );
+  }
+  if (verdict === "escalate") {
+    return defaultRecordIntent(
+      ticket,
+      {
+        type: "recovery-pass",
+        decision: "escalate",
+        escalated: true,
+        verdict,
+        verdictReason: reason,
+      },
+      opts,
+    );
+  }
+  return null;
+}
+
 // defaultShouldSkipItem — true when recovery should NOT act this pass. Fail-OPEN
 // on absent/malformed ledger (returns false → recovery proceeds). Evaluation
-// order: escalated (terminal) → attempts (terminal) → cooldown (transient).
+// order: defer (cooldown-only) → escalated (terminal, TTL) → leave-alone
+// (verdict, TTL) → attempts (terminal) → cooldown (transient).
 export function defaultShouldSkipItem(ticket, opts = {}) {
   const orchDir = opts.orchDir ?? resolveOrchDir();
   if (!orchDir) return false;
@@ -1843,6 +1921,17 @@ export function defaultShouldSkipItem(ticket, opts = {}) {
     // it stays terminal. (CTL-1431 Codex F3.)
     if (typeof last !== "number") return true;
     return now() - last < RECOVERY_TERMINAL_INTENT_TTL_MS;
+  }
+
+  // (CTL-1439 P0a) a LEAVE-ALONE verdict — the pass reviewed this ticket and
+  // concluded no action is needed (stale flag / actively human-driven / false
+  // positive). Skip re-review for the leave-alone TTL, then RE-ENTER with a
+  // direct false (mirrors the escalated short-circuit above — never fall through
+  // to the attempts latch: a reviewed-healthy ticket must not dead-end there).
+  if (data?.decision === "leave-alone") {
+    const last = typeof data?.lastTs === "number" ? data.lastTs : data?.ts;
+    if (typeof last !== "number") return false; // timestamp-less verdict → fail-open, re-enter
+    return now() - last < RECOVERY_LEAVE_ALONE_TTL_MS;
   }
 
   // (b) attempts exhausted → stop self-healing.
