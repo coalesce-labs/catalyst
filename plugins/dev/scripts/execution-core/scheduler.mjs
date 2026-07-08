@@ -6892,10 +6892,14 @@ export function holisticBoardHealthAct(
       reason: `board-health: ${decision?.gate?.reason ?? "board anomaly"} — holistic recovery-pass delegate`,
     });
     // Start the cooldown window on a dispatch attempt (success OR failure).
+    // CTL-1439 (P0a): this is a DISPATCH marker, not a verdict — the session's
+    // actual conclusion (fixed / leave-alone / escalate) arrives later via
+    // recovery-emit.mjs → recordVerdict. Hardcoding decision:"fix" here was RC2's
+    // "act-and-discard": the ledger claimed a fix verdict before the pass ran.
     try {
       recordIntent(cand, {
         type: "recovery-pass",
-        decision: "fix",
+        decision: "dispatched",
         fix_class: "board-health",
         outcome: !!r?.dispatched,
         source: "board-health",

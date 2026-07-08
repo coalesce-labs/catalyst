@@ -23,6 +23,8 @@ import {
   RECOVERY_MAX_ATTEMPTS,
   RECOVERY_COOLDOWN_MS,
   RECOVERY_TERMINAL_INTENT_TTL_MS,
+  RECOVERY_LEAVE_ALONE_TTL_MS,
+  recordVerdict,
 } from "./recovery-reasoning.mjs";
 import { mkdtempSync, rmSync, existsSync, readFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { join as pathJoin } from "node:path";
@@ -1206,6 +1208,177 @@ describe("recovery-intent terminal TTL (CTL-1431)", () => {
       { orchDir, now: () => within },
     );
     expect(entry.escalated).toBe(true);
+  });
+});
+
+// ─── CTL-1439 (P0a): verdict persistence — recordVerdict + leave-alone ──────
+// A recovery-pass session's ACTUAL conclusion (fixed / leave-alone / escalate)
+// must land in the ledger instead of the dispatch-time placeholder, and a
+// leave-alone verdict must not burn a fix attempt (RC2/RC1 of the 2026-07-08
+// root-cause audit).
+describe("recordVerdict + leave-alone TTL (CTL-1439 P0a)", () => {
+  let orchDir;
+  beforeEach(() => {
+    orchDir = mkdtempSync(pathJoin(tmpdir(), "rec-verdict-"));
+  });
+  afterEach(() => {
+    try {
+      rmSync(orchDir, { recursive: true, force: true });
+    } catch {
+      /* best-effort */
+    }
+  });
+
+  const readLedger = (ticket) =>
+    JSON.parse(readFileSync(pathJoin(orchDir, ".recovery-intents", `${ticket}.json`), "utf8"));
+
+  test("leave-alone REFUNDS the dispatch attempt (attempts 2 → 1) and records the verdict", () => {
+    const t0 = 1_000_000_000_000;
+    // Two dispatch-time writes (the holistic act's auto-increment) → attempts 2.
+    defaultRecordIntent("CTL-400", { decision: "dispatched", fix_class: "board-health" }, { orchDir, now: () => t0 });
+    defaultRecordIntent("CTL-400", { decision: "dispatched", fix_class: "board-health" }, { orchDir, now: () => t0 + 1 });
+    expect(readLedger("CTL-400").attempts).toBe(2);
+
+    const entry = recordVerdict(
+      "CTL-400",
+      { verdict: "leave-alone", reason: "needs-human label is stale; human actively driving" },
+      { orchDir, now: () => t0 + 2 },
+    );
+    expect(entry.decision).toBe("leave-alone");
+    expect(entry.attempts).toBe(1); // refunded — a reviewed-healthy pass must not burn an attempt
+    expect(entry.verdict).toBe("leave-alone");
+    expect(entry.verdictReason).toBe("needs-human label is stale; human actively driving");
+    expect(typeof entry.verdictTs).toBe("number");
+  });
+
+  test("leave-alone on an absent ledger → attempts floors at 0 (never negative)", () => {
+    const entry = recordVerdict(
+      "CTL-401",
+      { verdict: "leave-alone", reason: "false positive" },
+      { orchDir, now: () => 1_000_000_000_000 },
+    );
+    expect(entry.attempts).toBe(0);
+    expect(entry.decision).toBe("leave-alone");
+  });
+
+  test("fixed PINS attempts (no double count for the same dispatch) and records the verdict", () => {
+    const t0 = 1_000_000_000_000;
+    defaultRecordIntent("CTL-402", { decision: "dispatched", fix_class: "board-health" }, { orchDir, now: () => t0 });
+    const entry = recordVerdict(
+      "CTL-402",
+      { verdict: "fixed", reason: "rebased + merged #9999" },
+      { orchDir, now: () => t0 + 1 },
+    );
+    expect(entry.decision).toBe("fixed");
+    expect(entry.attempts).toBe(1); // pinned — the dispatch already counted this attempt
+    expect(entry.verdict).toBe("fixed");
+  });
+
+  test("escalate verdict latches escalated:true (existing terminal semantics)", () => {
+    const t0 = 1_000_000_000_000;
+    const entry = recordVerdict(
+      "CTL-403",
+      { verdict: "escalate", reason: "value judgment on two valid shapes" },
+      { orchDir, now: () => t0 },
+    );
+    expect(entry.decision).toBe("escalate");
+    expect(entry.escalated).toBe(true);
+    expect(defaultShouldSkipItem("CTL-403", { orchDir, now: () => t0 + 1 })).toBe(true);
+  });
+
+  test("unknown verdict → null (no ledger write)", () => {
+    expect(recordVerdict("CTL-404", { verdict: "wat" }, { orchDir })).toBeNull();
+    expect(existsSync(pathJoin(orchDir, ".recovery-intents", "CTL-404.json"))).toBe(false);
+  });
+
+  test("shouldSkipItem: leave-alone WITHIN the TTL → skip (no re-review thrash)", () => {
+    const t0 = 1_000_000_000_000;
+    recordVerdict("CTL-405", { verdict: "leave-alone", reason: "healthy" }, { orchDir, now: () => t0 });
+    expect(
+      defaultShouldSkipItem("CTL-405", { orchDir, now: () => t0 + RECOVERY_LEAVE_ALONE_TTL_MS - 1 }),
+    ).toBe(true);
+  });
+
+  test("shouldSkipItem: leave-alone PAST the TTL → re-enters DIRECTLY, even at attempts >= max", () => {
+    const t0 = 1_000_000_000_000;
+    // Force attempts to the cap, then a leave-alone verdict (no refund path used —
+    // attempts pinned high deliberately to prove the direct-return short-circuit).
+    defaultRecordIntent("CTL-406", { decision: "dispatched", attempts: RECOVERY_MAX_ATTEMPTS }, { orchDir, now: () => t0 });
+    recordVerdict("CTL-406", { verdict: "leave-alone", reason: "healthy" }, { orchDir, now: () => t0 + 1 });
+    // Past the leave-alone TTL: must return false DIRECTLY (re-enter), not fall
+    // through to the attempts latch (mirrors the CTL-1431 escalated short-circuit).
+    expect(
+      defaultShouldSkipItem("CTL-406", { orchDir, now: () => t0 + 1 + RECOVERY_LEAVE_ALONE_TTL_MS + 1 }),
+    ).toBe(false);
+  });
+
+  test("shouldSkipItem: escalated latch takes precedence over a later leave-alone decision", () => {
+    const t0 = 1_000_000_000_000;
+    defaultRecordIntent("CTL-407", { decision: "escalate" }, { orchDir, now: () => t0 });
+    // A later leave-alone write preserves the sticky escalated latch (human-owned;
+    // only the terminal TTL or a human ages it out).
+    const entry = recordVerdict("CTL-407", { verdict: "leave-alone", reason: "looks fine" }, { orchDir, now: () => t0 + 2 });
+    expect(entry.escalated).toBe(true);
+    expect(
+      defaultShouldSkipItem("CTL-407", { orchDir, now: () => t0 + 3 + RECOVERY_LEAVE_ALONE_TTL_MS }),
+    ).toBe(true); // escalated branch (7d TTL) governs, not the shorter leave-alone TTL
+  });
+
+  test("verdict fields survive a SUBSEQUENT dispatch-time write (observability trail)", () => {
+    const t0 = 1_000_000_000_000;
+    recordVerdict("CTL-408", { verdict: "leave-alone", reason: "healthy" }, { orchDir, now: () => t0 });
+    const entry = defaultRecordIntent(
+      "CTL-408",
+      { decision: "dispatched", fix_class: "board-health" },
+      { orchDir, now: () => t0 + RECOVERY_LEAVE_ALONE_TTL_MS + 5 },
+    );
+    expect(entry.decision).toBe("dispatched");
+    expect(entry.verdict).toBe("leave-alone"); // last verdict preserved until superseded
+    expect(entry.verdictReason).toBe("healthy");
+  });
+
+  test("a NEW verdict overwrites the preserved prior verdict fields", () => {
+    const t0 = 1_000_000_000_000;
+    recordVerdict("CTL-409", { verdict: "leave-alone", reason: "healthy" }, { orchDir, now: () => t0 });
+    const entry = recordVerdict("CTL-409", { verdict: "fixed", reason: "merged the green PR" }, { orchDir, now: () => t0 + 5 });
+    expect(entry.verdict).toBe("fixed");
+    expect(entry.verdictReason).toBe("merged the green PR");
+    expect(entry.verdictTs).toBe(t0 + 5);
+  });
+
+  test("a TERMINAL verdict-less write (fix / escalate) CLEARS stale verdict fields — the ledger never contradicts itself", () => {
+    // Codex P2 (#2586): a leave-alone verdict that ages out and then genuinely
+    // escalates must NOT carry verdict:"leave-alone" on the escalate entry.
+    const t0 = 1_000_000_000_000;
+    recordVerdict("CTL-410", { verdict: "leave-alone", reason: "healthy" }, { orchDir, now: () => t0 });
+    const escalated = defaultRecordIntent(
+      "CTL-410",
+      { decision: "escalate", reason: "now genuinely stuck" },
+      { orchDir, now: () => t0 + RECOVERY_LEAVE_ALONE_TTL_MS + 5 },
+    );
+    expect(escalated.decision).toBe("escalate");
+    expect(escalated.verdict).toBeUndefined();
+    expect(escalated.verdictReason).toBeUndefined();
+
+    recordVerdict("CTL-411", { verdict: "leave-alone", reason: "healthy" }, { orchDir, now: () => t0 });
+    const fixed = defaultRecordIntent(
+      "CTL-411",
+      { decision: "fix", fix_class: "bounded-llm" },
+      { orchDir, now: () => t0 + RECOVERY_LEAVE_ALONE_TTL_MS + 5 },
+    );
+    expect(fixed.decision).toBe("fix");
+    expect(fixed.verdict).toBeUndefined();
+  });
+
+  test("a defer MARKER write still preserves the verdict trail", () => {
+    const t0 = 1_000_000_000_000;
+    recordVerdict("CTL-412", { verdict: "leave-alone", reason: "healthy" }, { orchDir, now: () => t0 });
+    const deferred = defaultRecordIntent(
+      "CTL-412",
+      { decision: "defer", fix_class: "board-health", attempts: 0 },
+      { orchDir, now: () => t0 + 5 },
+    );
+    expect(deferred.verdict).toBe("leave-alone"); // marker writes keep the trail
   });
 });
 

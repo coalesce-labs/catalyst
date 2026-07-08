@@ -264,7 +264,9 @@ daemon-side.
        (2) ITEMS — every item the deterministic eyes+hands flagged as YOURS (HRW-
            owned) is now UNSTUCK (resolved autonomously — rebased / resolved the
            conflict / merged the green PR / re-dispatched the dead phase / reconciled
-           the orphan PR) or ESCALATED. Before I ACT on any item I VERIFIED its LIVE
+           the orphan PR), LEAVE-ALONE-verdicted (reviewed healthy — the verdict
+           EMITTED via recovery-emit, never just concluded), or ESCALATED. Before
+           I ACT on any item I VERIFIED its LIVE
            Linear state (verify-before-act) — never the stale board cache. CONTEXT
            (another host's HRW-owned) items I read for awareness, never act on.
 
@@ -680,6 +682,15 @@ Default to ACTING. For each stuck item, walk the decision checklist top-to-botto
 first match wins. Print a per-item resolution line for every item (your own
 self-checked record of the goal — see the /goal condition section).
 
+**Every item ends in exactly ONE of three verdicts, and every verdict is EMITTED
+(CTL-1439):** `FIX` (`recovery-emit.mjs fixed`), `LEAVE-ALONE`
+(`recovery-emit.mjs leave-alone` — Step 2.5), or `ESCALATE`
+(`recovery-emit.mjs escalated` — Step 4). A conclusion that lives only in your
+transcript does not exist: the audit found 7/7 sessions reached correct verdicts
+and discarded them. Emit the verdict for the ticket you were DISPATCHED for
+(`CATALYST_TICKET`); if you also acted on other tickets along the way, emit a
+verdict for each of those separately — never tag ticket A's verdict onto ticket B.
+
 ### Step 0 — Consume the eyes + hands output (do NOT redo it)
 
 Read the brief's `diagnosis` (the diagnostician evidence) and
@@ -782,6 +793,32 @@ _rp_comment "$TICKET" "✅ **recovery-pass** unstuck this — <what I did, plain
 
 (Pairs with the INFO `recovery-emit.mjs fixed` audit event below — the comment is
 the ticket-visible signal, the event is the log record.)
+
+### Step 2.5 — Nothing is actually wrong? LEAVE ALONE (a verdict, not a skip)
+
+Sometimes the honest conclusion is that **no action is needed**: the flag is
+stale (the label survived a state the ticket has left), a false positive, or the
+ticket is **actively human-driven** (clearing the label or "fixing" the branch
+would be actively harmful — the human is hand-driving that worktree). That is a
+real verdict, not a reason to silently move on. Record it:
+
+```bash
+node "${EXEC_CORE}/recovery-emit.mjs" leave-alone \
+  --ticket "$TICKET" --orch-dir "$ORCH_DIR" \
+  --reason "<one line: why no action is needed — e.g. 'needs-human label is stale; the human is actively driving this worktree'>"
+```
+
+One call writes all three surfaces: the `recovery.verdict` event (the log
+record), the ledger verdict `decision:"leave-alone"` — which **refunds the
+dispatch attempt** (a reviewed-healthy pass must not burn a fix attempt) and
+suppresses re-review for the leave-alone window (default 24h) — and the
+ticket-visible 🔍 comment (do NOT post a separate `_rp_comment` for this; the
+shim posts it). Without this call the router re-dispatches the same review every
+cooldown until the 2-strike latch silently freezes the ticket — the exact
+act-and-discard failure this verdict exists to close.
+
+LEAVE-ALONE is for "the SYSTEM is wrong about this ticket," never for "I
+couldn't figure it out" — that is Step 2 (keep trying) or Step 3 (escalate).
 
 ### Step 3 — Escalate ONLY IF one of these is genuinely true
 
@@ -893,17 +930,11 @@ app is a thin transport over that same shared filter; there is no second filter 
 satisfy. Print that both the event and the signal explanation were written — that
 printed line is your record that the escalation landed (the goal's branch (b)).
 
-**ESCALATE comment (enforce-only, once per item).** Alongside the inbox/push
-authoring above, post a ticket-visible comment so agents see it's awaiting a human
-decision and stop re-grabbing it:
-
-```bash
-_rp_comment "$TICKET" "🔼 **recovery-pass** escalated this to the operator — <the decision needed, one line>. (See your inbox.)"
-```
-
-This is the ticket-surface counterpart to the inbox row + push (which the
-`recovery-emit.mjs escalated` curation layer authors). Keep it to one line — the
-full briefing lives in the inbox, not the comment.
+**ESCALATE comment — posted by the shim (CTL-1439).** `recovery-emit.mjs
+escalated` posts the one-line 🔼 ticket comment itself (from the payload's
+`call_to_action`), so agents see the item is awaiting a human decision and stop
+re-grabbing it. Do NOT post a separate `_rp_comment` for the escalation — that
+would double-comment. The full briefing lives in the inbox, not the comment.
 
 **On an autonomous FIX, record the win for the audit trail** (INFO, no push — the
 recovered lane, not a needs-you row). Write a plain past-tense changelog, NOT
@@ -911,9 +942,12 @@ engineer chatter:
 
 ```bash
 node "${EXEC_CORE}/recovery-emit.mjs" fixed \
-  --ticket "$TICKET" \
+  --ticket "$TICKET" --orch-dir "$ORCH_DIR" \
   --reason "Resolved the rebase conflict in eligible-set.mjs by keeping both additions; force-pushed; CI green; merged #2163."
 ```
+
+(`--orch-dir` lets the shim record the ledger verdict `decision:"fixed"` —
+CTL-1439; without it only the event is written.)
 
 ### Iterate
 
@@ -926,8 +960,8 @@ sweep) and re-resolve `SIGNAL_FILE` /the per-item brief from it, so Step 4's
 --ticket "$TICKET"` carry the real ticket — an empty `--ticket` is rejected (exit
 2) and would leave the item neither FIXED nor ESCALATED, so the goal would never
 go TRUE. The goal stays FALSE while any YOURS item is "still stuck, not yet
-escalated", so keep going. Stop only when every YOURS item is UNSTUCK or
-legitimately ESCALATED.
+escalated", so keep going. Stop only when every YOURS item is UNSTUCK,
+LEAVE-ALONE-verdicted, or legitimately ESCALATED.
 
 ## Mid-flight inbox check (CTL-749)
 
@@ -945,11 +979,12 @@ the printed per-item resolution lines are the record.)
 ```bash
 if [[ -n "$TICKET" ]]; then
   EMIT="${PLUGIN_ROOT}/scripts/phase-agent-emit-complete"
-  # complete = "I finished the recovery pass on this item" (unstuck OR escalated
-  # with the inbox+push authored). The OUTCOME (fixed vs escalated) lives in the
-  # recovery.* event + the signal explanation, not in the phase status — mirroring
-  # phase-remediate's always-complete-on-a-normal-run semantics. Reserve
-  # --status failed for the pass ITSELF breaking (the failure block below).
+  # complete = "I finished the recovery pass on this item" (unstuck, leave-alone-
+  # verdicted, OR escalated with the inbox+push authored). The OUTCOME (fixed vs
+  # leave-alone vs escalated) lives in the recovery.* event + the ledger verdict +
+  # the signal explanation, not in the phase status — mirroring phase-remediate's
+  # always-complete-on-a-normal-run semantics. Reserve --status failed for the
+  # pass ITSELF breaking (the failure block below).
   if [[ -x "$EMIT" ]]; then
     "$EMIT" --phase "recovery-pass" --ticket "$TICKET" --status complete
   fi
@@ -1006,9 +1041,11 @@ this skill plugs in beneath them — exactly where the phase-remediate dispatch 
   event-counted per-target recovery-pass cycle cap
   (`countRecoveryPassCycles ≥ RECOVERY_PASS_CYCLE_CAP`, default 3) both live in the
   router; you are not re-dispatched past them.
-- **Cooldown + escalated-latch** — the host-local intent ledger
+- **Cooldown + escalated-latch + leave-alone TTL** — the host-local intent ledger
   (`shouldSkipItem` / `recordIntent`, 30-min cooldown, max-attempts 2, escalated
-  terminal). Your Step-4 escalation latches it via `recovery-emit.mjs`.
+  terminal; a leave-alone verdict suppresses re-review for
+  `RECOVERY_LEAVE_ALONE_TTL_MS`, default 24h, and refunds the dispatch attempt).
+  Your Step-4 escalation and Step-2.5 leave-alone both latch it via `recovery-emit.mjs`.
 - **Decide/act bright line (ADR-022/023/025)** — the router DERIVES the
   classification and owns the cooldown/cap; you ACT (resolve/rebase/merge/
   re-dispatch) and emit the result back to the log. You select among real moves;
