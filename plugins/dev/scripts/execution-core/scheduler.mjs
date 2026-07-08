@@ -2791,6 +2791,15 @@ export function defaultClearStall(orchDir, writeStatus) {
     } catch {
       /* best-effort */
     }
+    // 4. CTL-1442: re-arm the escalation ask budget. An operator re-arming a
+    //    stalled ticket starts a FRESH cycle — without this, a retried phase
+    //    that no-progresses again hits the spent ask-cap (askCount >= cap) and
+    //    is suppressed without a fresh ask or re-stall (Codex P2 on #2590).
+    try {
+      rmSync(join(orchDir, ".escalation-cooldowns", `${ticket}-${phase}.json`), { force: true });
+    } catch {
+      /* best-effort */
+    }
     return true;
   };
 }

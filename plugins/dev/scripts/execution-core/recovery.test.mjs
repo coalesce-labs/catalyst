@@ -48,6 +48,7 @@ import { saveCursor } from "./event-cursor.mjs";
 import { dropProject } from "./eligible-set.mjs";
 import { existsSync, appendFileSync, chmodSync } from "node:fs";
 import { recordEscalation } from "./label-guard.mjs"; // CTL-1442: seed reason-change scenarios
+import { defaultClearStall } from "./scheduler.mjs"; // CTL-1442: operator re-arm resets the ask budget
 import { WORK_DONE_PROBES } from "./work-done-probes.mjs";
 
 let orchDir;
@@ -2727,6 +2728,44 @@ describe("reclaimDeadWorkIfPossible — CTL-1442 escalation ask-cap", () => {
     const attempts = secondAsk.extras?.explanation?.attempts;
     expect(Array.isArray(attempts)).toBe(true);
     expect(attempts.length).toBeGreaterThanOrEqual(1);
+  });
+
+  test("a lost terminal flip is RE-ASSERTED on the next sweep (no silent capacity leak)", () => {
+    let clock = 20_000_000;
+    const s = setupAt(orchDir);
+    s.opts.now = () => clock;
+    for (let ask = 1; ask <= 3; ask++) {
+      reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts);
+      clock += 10 * 60 * 1000 + 1;
+    }
+    const sigPath = join(orchDir, "workers", "CTL-9", "phase-pr.json");
+    expect(JSON.parse(readFileSync(sigPath, "utf8")).status).toBe("stalled");
+    // Simulate the flip being lost (crash between record and write / manual rm).
+    rmSync(sigPath, { force: true });
+    reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts);
+    // Re-asserted terminal, but NO new event (the cap stays spent).
+    expect(JSON.parse(readFileSync(sigPath, "utf8")).status).toBe("stalled");
+    expect(s.opts.appendEscalatedEvent.calls.length).toBe(3);
+  });
+
+  test("defaultClearStall re-arms the ask budget (operator re-arm = fresh cycle)", () => {
+    let clock = 30_000_000;
+    const s = setupAt(orchDir);
+    s.opts.now = () => clock;
+    for (let ask = 1; ask <= 3; ask++) {
+      reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts);
+      clock += 10 * 60 * 1000 + 1;
+    }
+    expect(s.opts.appendEscalatedEvent.calls.length).toBe(3); // cap spent
+    // Operator replies → the stall janitor clears the stall; it must also
+    // remove the escalation-cooldown marker so the retry gets fresh asks.
+    defaultClearStall(orchDir, {})({ ticket: "CTL-9", phase: "pr" });
+    expect(
+      existsSync(join(orchDir, ".escalation-cooldowns", "CTL-9-pr.json")),
+    ).toBe(false);
+    // The retried phase no-progresses again → a FRESH ask fires (count restarted).
+    reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts);
+    expect(s.opts.appendEscalatedEvent.calls.length).toBe(4);
   });
 
   test("a DIFFERENT escalation reason does not consume the no-progress cap (reason change resets the count)", () => {

@@ -2221,13 +2221,9 @@ export function reclaimDeadWorkIfPossible(
         ? priorEscRecord.askCount
         : 0;
     const capApplies = reason === "no-progress";
-    if (capApplies && priorAsks >= escalationAskCap) {
-      log.debug(
-        { ticket, phase, reason, priorAsks },
-        "ctl-1442: escalation ask-cap already reached — not re-asking"
-      );
-      return "escalation-capped";
-    }
+    // (the cap early-return lives AFTER the explanation build below, so a
+    // failed/interrupted terminal flip can be re-asserted with a fresh brief —
+    // Codex P2 on #2590.)
     // CTL-1130: build a typed-union explanation classified by the three gates.
     // push_rejected_no_workflow_scope → MANUAL (capability boundary, D-recovery);
     // all other reasons → AUTHORIZATION (agent can retry with authority).
@@ -2276,6 +2272,30 @@ export function reclaimDeadWorkIfPossible(
         phase,
         canExecute: escType !== "manual",
       });
+    }
+    // CTL-1442: the ask-cap is already spent. Normally the cap-consuming ask
+    // flipped the signal terminal below — but if that write failed (or the
+    // process died between the record and the flip), the dead running signal
+    // would occupy capacity FOREVER while events stay suppressed (Codex P2).
+    // Re-assert the flip idempotently (skip when already stalled), never
+    // re-emit the event/label.
+    if (capApplies && priorAsks >= escalationAskCap) {
+      let already = null;
+      try {
+        already = JSON.parse(
+          readFileSync(join(orchDir, "workers", ticket, `phase-${phase}.json`), "utf8"),
+        )?.status;
+      } catch {
+        /* absent/malformed → re-assert below */
+      }
+      if (already !== "stalled") {
+        markEscalationCapTerminal({ orchDir, ticket, phase, explanation });
+        log.warn(
+          { ticket, phase, reason, priorAsks },
+          "ctl-1442: ask-cap spent but the signal was not terminal — re-asserted the stalled flip"
+        );
+      }
+      return "escalation-capped";
     }
     const enrichedExtras = { ...(extras ?? {}), explanation };
     appendEscalatedEvent({
