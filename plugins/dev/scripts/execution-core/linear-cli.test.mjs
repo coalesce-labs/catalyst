@@ -457,3 +457,63 @@ describe("usage", () => {
     expect(code).toBe(2);
   });
 });
+
+// ── CTL-1403: reads-by-source emit (catalyst.linear.read) ───────────────────
+// Proves the emit fires END-TO-END through main() on both success and failure,
+// landing a canonical line in the hermetic event log (CATALYST_DIR/events/…).
+import { readFileSync as _readFileSync, existsSync as _existsSync } from "node:fs";
+function readLinearReadEvents() {
+  const now = new Date();
+  const ym = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}`;
+  const path = join(process.env.CATALYST_DIR, "events", `${ym}.jsonl`);
+  if (!_existsSync(path)) return [];
+  return _readFileSync(path, "utf8")
+    .trim()
+    .split("\n")
+    .filter(Boolean)
+    .map((l) => JSON.parse(l))
+    .filter((e) => e.attributes?.["event.name"] === "catalyst.linear.read");
+}
+
+describe("CTL-1403 reads-by-source emit", () => {
+  test("successful read → one catalyst.linear.read (result=ok) with the full contract", async () => {
+    installFakeLinearis(tmp, { payload: { identifier: "CTL-1", state: { name: "Todo" } } });
+    const { code } = await runMain(["read", "CTL-1"]);
+    expect(code).toBe(0);
+    const events = readLinearReadEvents();
+    expect(events.length).toBe(1);
+    const e = events[0];
+    expect(e.attributes["event.name"]).toBe("catalyst.linear.read");
+    expect(e.attributes["event.entity"]).toBe("linear");
+    expect(e.attributes["event.action"]).toBe("read");
+    expect(e.attributes["event.label"]).toBe("CTL-1"); // entity_id, never a metric label
+    expect(e.attributes["linear.read.source"]).toBe("linearis"); // mode off → direct linearis
+    expect(e.attributes["linear.read.result"]).toBe("ok");
+    expect(e.attributes["linear.read.op"]).toBe("read");
+    expect(e.severityText).toBe("INFO");
+    expect(e.resource["service.name"]).toBe("catalyst.linear-read");
+  });
+
+  test("failed read (linearis exits non-zero) → catalyst.linear.read result=failed, WARN", async () => {
+    installFakeLinearis(tmp, { payload: { error: "boom" }, exitCode: 1 });
+    const { code } = await runMain(["read", "CTL-9"]);
+    expect(code).toBe(1); // read itself failed
+    const events = readLinearReadEvents();
+    expect(events.length).toBe(1);
+    expect(events[0].attributes["linear.read.result"]).toBe("failed");
+    expect(events[0].attributes["event.label"]).toBe("CTL-9");
+    expect(events[0].severityText).toBe("WARN");
+    expect(events[0].severityNumber).toBe(13);
+  });
+
+  test("list read → catalyst.linear.read op=list, no event.label (no single entity)", async () => {
+    installFakeLinearis(tmp, { payload: { nodes: [] } });
+    const { code } = await runMain(["list", "--team", "CTL"]);
+    expect(code).toBe(0);
+    const events = readLinearReadEvents();
+    expect(events.length).toBe(1);
+    expect(events[0].attributes["linear.read.op"]).toBe("list");
+    expect("event.label" in events[0].attributes).toBe(false);
+    expect(events[0].attributes["linear.read.source"]).toBe("linearis");
+  });
+});

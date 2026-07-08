@@ -194,6 +194,12 @@ build_canonical_line() {
   # CTL-1135: caused_by — the id of the triggering event (additive; null when absent).
   local caused_by=""
 
+  # CTL-1403: reads-by-source attributes (linear.read.*). source/result are the
+  # low-card metric dimensions (the collector normalizes → bare source/result);
+  # op is structured metadata; age_ms is a numeric VALUE (feeds the staleness
+  # histogram) emitted only when computable — never faked.
+  local linear_read_source="" linear_read_result="" linear_read_op="" linear_read_age_ms=""
+
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --ts)              ts="$2"; shift 2 ;;
@@ -233,6 +239,10 @@ build_canonical_line() {
       --phase-revive-count)  phase_revive_count="$2"; shift 2 ;;
       --ticket-type)         ticket_type="$2"; shift 2 ;;
       --caused-by)           caused_by="$2"; shift 2 ;;
+      --linear-read-source)  linear_read_source="$2"; shift 2 ;;
+      --linear-read-result)  linear_read_result="$2"; shift 2 ;;
+      --linear-read-op)      linear_read_op="$2"; shift 2 ;;
+      --linear-read-age-ms)  linear_read_age_ms="$2"; shift 2 ;;
       *) echo "build_canonical_line: unknown flag: $1" >&2; return 1 ;;
     esac
   done
@@ -308,6 +318,10 @@ build_canonical_line() {
     --arg phase_revive_count "$phase_revive_count" \
     --arg ticket_type "$ticket_type" \
     --arg caused_by "$caused_by" \
+    --arg linear_read_source "$linear_read_source" \
+    --arg linear_read_result "$linear_read_result" \
+    --arg linear_read_op "$linear_read_op" \
+    --arg linear_read_age_ms "$linear_read_age_ms" \
     '{
       ts: $ts,
       id: $id,
@@ -355,6 +369,10 @@ build_canonical_line() {
         + (if $claude_rl_7d_sonnet == "" then {} else { "claude.ratelimit.seven_day_sonnet_pct": ($claude_rl_7d_sonnet | tonumber) } end)
         + (if $phase_attempt == "" then {} else { "phase.attempt": ($phase_attempt | tonumber) } end)
         + (if $phase_revive_count == "" then {} else { "phase.revive_count": ($phase_revive_count | tonumber) } end)
+        + (if $linear_read_source == "" then {} else { "linear.read.source": $linear_read_source } end)
+        + (if $linear_read_result == "" then {} else { "linear.read.result": $linear_read_result } end)
+        + (if $linear_read_op     == "" then {} else { "linear.read.op":     $linear_read_op }     end)
+        + (if $linear_read_age_ms == "" then {} else { "linear.read.age_ms": ($linear_read_age_ms | tonumber) } end)
         + { "catalyst.ticket.type": $ticket_type }
       ),
       body: (

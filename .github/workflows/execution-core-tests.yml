@@ -151,6 +151,19 @@ jobs:
         working-directory: plugins/dev/scripts
         run: bash __tests__/catalyst-stack-cloud-sync-plist.test.sh
 
+      - name: linear-read-replica helper test (CTL-1397 + CTL-1403)
+        # CTL-1403: the bash linear_read_ticket helper is the canonical agent read
+        # path; this asserts its two-gate freshness + the reads-by-source emit
+        # (catalyst.linear.read on every branch: replica HIT / miss / stale / failure).
+        working-directory: plugins/dev/scripts
+        run: bash __tests__/linear-read-replica.test.sh
+
+      - name: canonical-event builder test (CTL-1403 linear.read.* attrs)
+        # Covers build_canonical_line incl. the CTL-1403 --linear-read-* attribute
+        # flags (source/result/op top-level attrs + numeric age_ms).
+        working-directory: plugins/dev/scripts
+        run: bash __tests__/canonical-event.test.sh
+
       - name: Run stable unit tests
         # EXCLUDED SUITES — do NOT add these back without fixing the underlying
         # timing / sandbox incompatibility:
@@ -312,6 +325,7 @@ jobs:
             linear-reconcile-timer.test.mjs \
             linear-reconcile-cli.test.mjs \
             linear-cli.test.mjs \
+            linear-read-event.test.mjs \
             updater/plugin-pull-defer.test.mjs \
             updater/updater.test.mjs \
             updater/updater-tracing.test.mjs

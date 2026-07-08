@@ -10,6 +10,7 @@ import { existsSync } from "node:fs";
 import { withBreaker, linearBreaker, isRateLimitError } from "./linear-breaker.mjs";
 import { withAuthRemint, linearReminter, isBatchAuthError } from "./linear-remint.mjs";
 import { emitEligibleSourceUnavailable, emitTicketStateLiveFallback } from "./dispatch-alert.mjs";
+import { emitLinearReadEvent } from "./linear-read-event.mjs";
 
 // linearis caps a single page; 200 comfortably covers a project's pickable
 // set without pagination (the reconcile poll runs every 10 min anyway).
@@ -241,6 +242,47 @@ function normalizeTicket(node) {
 const GATEWAY_EXISTS_FRESH_MS = 10 * 60_000;
 const GATEWAY_STATE_FRESH_MS = 60_000;
 
+// CTL-1403: daemon-side reads-by-source emit for fetchTicketState. Best-effort,
+// NEVER throws into the read (CTL-988: a diagnostic tap with no fallback once froze
+// the fleet 17-37h). service.name = catalyst.execution-core so the collector's
+// service-name-agnostic connector still rolls it into the single
+// catalyst_linear_read_total{source,result}. Per the ratified Option A we count
+// only reads that consulted the SQLite replica or shelled to Linear — the in-mem
+// cache tier (tier 1) and the gateway descriptor tier (tier 3) are local caches
+// that touched neither, so (by the same rationale that excludes the cache) they are
+// NOT emitted; counting them would inflate the replica-hit ratio toward a false 1.0
+// and hide real bypasses.
+function recordDaemonRead(source, result, identifier, ageMs = null) {
+  try {
+    emitLinearReadEvent({
+      source,
+      result,
+      op: "read_ticket",
+      entity: identifier,
+      ageMs,
+      serviceName: "catalyst.execution-core",
+    });
+  } catch {
+    /* telemetry must never break a daemon read */
+  }
+}
+// age_ms of a served linearis node = now − its updatedAt (ISO). null on clock skew
+// / unparseable (→ omitted, never faked). Daemon replica-tier hits carry no age_ms
+// (replica-read.mjs's lookup does not SELECT updated_at); the CLI replica surface
+// feeds the staleness histogram until that is added.
+function daemonAgeMs(node) {
+  try {
+    const iso = node?.updatedAt ?? node?.updated_at ?? null;
+    if (!iso) return null;
+    const t = Date.parse(iso);
+    if (!Number.isFinite(t)) return null;
+    const age = Date.now() - t;
+    return age >= 0 ? age : null;
+  } catch {
+    return null;
+  }
+}
+
 // CTL-1364: optional `onExec` seam — invoked ONLY when this call falls through to the
 // ACTUAL live `linearis issues read` spawn (cache MISS + replica MISS + gateway
 // stale/miss). A cache/gateway/replica HIT returns early WITHOUT calling onExec, so the
@@ -269,6 +311,7 @@ export function fetchTicketState(
     const r = replica.lookup(identifier);
     if (r !== undefined) {
       if (cache && r.state) cache.set(identifier, r.state); // warm the in-mem tier (never the "" poison)
+      recordDaemonRead("replica", "ok", identifier); // CTL-1403: replica HIT (guarantee holding)
       return r.state;
     }
     // MISS → fall through to gateway + live read (today's behavior).
@@ -298,11 +341,18 @@ export function fetchTicketState(
   // linearis can't block the synchronous tier-3 reclaim/recovery read its full ~30s.
   // CTL-1364: this is the cache+gateway+replica MISS path — the ONLY place this fn
   // shells out. Time the spawn for the optional onExec span seam.
+  // CTL-1403: reaching the live shell-out means neither local cache served. If a
+  // replica reader was passed it was consulted and MISSED (linearis_miss); if not,
+  // the replica was never consulted (linearis = the bare-linearis bypass the
+  // guarantee alert keys on). Gateway consultation does not change this — the
+  // gateway is a cache, not the replica.
+  const liveSource = replica ? "linearis_miss" : "linearis";
   const execStart = onExec ? Date.now() : 0;
   const { code, stdout, timedOut } = exec("linearis", ["issues", "read", identifier], {
     timeoutMs: LINEARIS_TERMINAL_READ_TIMEOUT_MS,
   });
   if (code !== 0) {
+    recordDaemonRead(liveSource, "failed", identifier); // live read errored/timed-out — no data served
     if (probeBackoff && cache?.setNegative) {
       cache.setNegative(identifier); // A4: back off — don't re-hammer this live read every tick
       emitTicketStateLiveFallback({ identifier, reason: timedOut === true ? "timeout" : "error" });
@@ -317,6 +367,7 @@ export function fetchTicketState(
   try {
     const node = JSON.parse(stdout);
     const state = node?.state?.name ?? node?.state ?? null;
+    recordDaemonRead(liveSource, "ok", identifier, daemonAgeMs(node)); // live read served data
     if (cache && state != null) cache.set(identifier, state); // populate on success only
     else if (state == null && probeBackoff && cache?.setNegative) {
       // A4 (Codex #2579): a `linearis issues read` that parses fine but carries NO
@@ -334,6 +385,7 @@ export function fetchTicketState(
     }
     return state;
   } catch {
+    recordDaemonRead(liveSource, "failed", identifier); // parsed nothing usable — no data served
     if (probeBackoff && cache?.setNegative) {
       cache.setNegative(identifier); // A4: unparseable live read → back off too
       emitTicketStateLiveFallback({ identifier, reason: "unparseable" });
