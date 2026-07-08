@@ -130,7 +130,8 @@ export interface BoardTicket {
   subSteps?: WorkflowSubStep[];
   /** CTL-755 held indicator from the ticket's Linear labels: the admission gate
    *  holds a triaged-waiting ticket before the triage→research promotion. */
-  held?: "blocked" | "waiting" | null;
+  /** CTL-764 Phase 4: "queued" is the new canonical value; "waiting" tolerated during rollout. */
+  held?: "blocked" | "queued" | "waiting" | null;
   /** Dependency ids a `blocked` hold is waiting on (only meaningful when held === "blocked"). */
   blockers?: string[];
   /** CTL-901 (HOME3): ISO applied-at of the held labels (durable ticket_state

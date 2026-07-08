@@ -176,7 +176,7 @@ describe("groupHoldingBuckets", () => {
     ];
     const b = groupHoldingBuckets(tickets, [], 4);
     expect(b.blocked.items.map((i) => (i.kind === "ticket" ? i.ticket.id : ""))).toEqual(["CTL-1"]);
-    expect(b.waiting.items.map((i) => (i.kind === "ticket" ? i.ticket.id : ""))).toEqual(["CTL-2"]);
+    expect(b.queued.items.map((i) => (i.kind === "ticket" ? i.ticket.id : ""))).toEqual(["CTL-2"]);
     expect(b.allEmpty).toBe(false);
   });
   it("a held ticket held by a LIVE worker is excluded (not double-listed)", () => {
@@ -247,7 +247,7 @@ describe("groupHoldingBuckets — stalled bucket (CTL-1066)", () => {
     ];
     const b = groupHoldingBuckets(tickets, [], 4);
     expect(b.stalled.items.map((i) => (i.kind === "ticket" ? i.ticket.id : ""))).toEqual(["CTL-1", "CTL-2"]);
-    expect(b.waiting.items.map((i) => (i.kind === "ticket" ? i.ticket.id : ""))).toEqual(["CTL-3"]);
+    expect(b.queued.items.map((i) => (i.kind === "ticket" ? i.ticket.id : ""))).toEqual(["CTL-3"]);
   });
 
   it("a stalled ticket attached to a LIVE worker is excluded (not double-listed)", () => {
@@ -289,5 +289,61 @@ describe("deadWorkers", () => {
       w({ name: "dead1", ticket: "C", activeState: "dead", startedAt: 10 }),
     ]);
     expect(d.map((x) => x.name)).toEqual(["dead1", "dead2"]);
+  });
+});
+
+// CTL-764 Phase 8: disposition buckets in groupHoldingBuckets
+describe("groupHoldingBuckets — queued/needsInput/needsHuman (CTL-764 Phase 8)", () => {
+  it("ticket with workerStatus='queued' → queued bucket (HoldingBuckets has queued, no waiting)", () => {
+    const tickets = [t({ id: "CTL-1", workerStatus: "queued" })];
+    const b = groupHoldingBuckets(tickets, [], 4);
+    expect(b.queued.items.map((i) => (i.kind === "ticket" ? i.ticket.id : ""))).toEqual(["CTL-1"]);
+    expect((b as any).waiting).toBeUndefined();
+  });
+
+  it("workerStatus='needs-input' → needsInput bucket", () => {
+    const tickets = [t({ id: "CTL-2", workerStatus: "needs-input" })];
+    const b = groupHoldingBuckets(tickets, [], 4);
+    expect(b.needsInput.items.map((i) => (i.kind === "ticket" ? i.ticket.id : ""))).toEqual(["CTL-2"]);
+  });
+
+  it("workerStatus='needs-human' → needsHuman bucket (separate from needs-you)", () => {
+    const tickets = [t({ id: "CTL-3", workerStatus: "needs-human" })];
+    const b = groupHoldingBuckets(tickets, [], 4);
+    expect(b.needsHuman.items.map((i) => (i.kind === "ticket" ? i.ticket.id : ""))).toEqual(["CTL-3"]);
+  });
+
+  it("needs-human wins over blocked (single-valued precedence)", () => {
+    const tickets = [t({ id: "CTL-4", workerStatus: "needs-human", held: "blocked" })];
+    const b = groupHoldingBuckets(tickets, [], 4);
+    expect(b.needsHuman.items).toHaveLength(1);
+    expect(b.blocked.items).toHaveLength(0);
+  });
+
+  it("back-compat: t.held='waiting' + null workerStatus → queued bucket", () => {
+    const tickets = [t({ id: "CTL-5", held: "waiting", workerStatus: null })];
+    const b = groupHoldingBuckets(tickets, [], 4);
+    expect(b.queued.items.map((i) => (i.kind === "ticket" ? i.ticket.id : ""))).toEqual(["CTL-5"]);
+  });
+
+  it("needs-you (live waitingOnUser) bucket unchanged — separate from worker-status buckets", () => {
+    const workers = [w({ name: "w1", ticket: "CTL-6", startedAt: 1, waitingOnUser: true })];
+    const b = groupHoldingBuckets([], workers, 4);
+    expect(b.needsYou.items).toHaveLength(1);
+    expect(b.queued.items).toHaveLength(0);
+    expect(b.needsHuman.items).toHaveLength(0);
+  });
+
+  it("holdingTicketIds includes queued/needsInput/needsHuman bucket ids", () => {
+    const tickets = [
+      t({ id: "CTL-10", workerStatus: "queued" }),
+      t({ id: "CTL-11", workerStatus: "needs-input" }),
+      t({ id: "CTL-12", workerStatus: "needs-human" }),
+    ];
+    const b = groupHoldingBuckets(tickets, [], 4);
+    const ids = holdingTicketIds(b);
+    expect(ids).toContain("CTL-10");
+    expect(ids).toContain("CTL-11");
+    expect(ids).toContain("CTL-12");
   });
 });
