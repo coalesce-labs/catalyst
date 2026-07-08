@@ -111,8 +111,16 @@ function postTicketComment(ticket, body) {
       maxBuffer: 10 * 1024 * 1024,
     });
     if (res.status === 0) return true;
+    // Codex P3: surface the helper's own diagnostic (its last stderr line names
+    // the actual cause — token mint / issue resolution / mutation) instead of a
+    // bare status code; the silent-failure class is exactly what CTL-1439 fixes.
+    const helperErr = (res.stderr || res.error?.message || "")
+      .toString()
+      .trim()
+      .split("\n")
+      .pop();
     process.stderr.write(
-      `recovery-emit: comment post failed on ${ticket} (status ${res.status ?? res.error?.message}) — continuing\n`,
+      `recovery-emit: comment post failed on ${ticket} (status ${res.status ?? "spawn-error"}${helperErr ? `; ${helperErr}` : ""}) — continuing\n`,
     );
   } catch (err) {
     process.stderr.write(
@@ -183,11 +191,13 @@ if (sub === "leave-alone") {
   }
 
   // (1) Ticket-tagged verdict event — the durable log record (audit RC2 (c)).
+  //     Caller details first: the verdict field is RESERVED (Codex P3 — a
+  //     details.verdict must never contradict the ledger/comment).
   defaultEmitEvent({
     type: "recovery.verdict",
     ticket,
     reason,
-    details: { verdict: "leave-alone", ...details },
+    details: { ...details, verdict: "leave-alone" },
   });
 
   // (2) The ACTUAL verdict into the ledger, refunding the dispatch attempt

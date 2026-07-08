@@ -133,8 +133,11 @@ ISSUE_HTTP=$(curl -s -w '\n%{http_code}' -X POST "${LINEAR_API}/graphql" \
 }
 ISSUE_CODE="${ISSUE_HTTP##*$'\n'}"
 ISSUE_RESPONSE="${ISSUE_HTTP%$'\n'*}"
-if [[ "$ISSUE_CODE" != "200" ]]; then
-  ERR_DETAIL=$(printf '%s' "$ISSUE_RESPONSE" | jq -r '.errors[0].message // empty' 2>/dev/null)
+# Linear returns GraphQL errors in an `errors` array even on HTTP 200 (schema/
+# authorization failures) — check it regardless of status so the real cause is
+# named instead of collapsing into "no issue found" (Codex P3, CTL-1439).
+ERR_DETAIL=$(printf '%s' "$ISSUE_RESPONSE" | jq -r '.errors[0].message // empty' 2>/dev/null)
+if [[ "$ISSUE_CODE" != "200" || -n "$ERR_DETAIL" ]]; then
   echo "linear-comment-post: issue identifier resolution failed (HTTP ${ISSUE_CODE}${ERR_DETAIL:+; }${ERR_DETAIL})" >&2
   exit 1
 fi

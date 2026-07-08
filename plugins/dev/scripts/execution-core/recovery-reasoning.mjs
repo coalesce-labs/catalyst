@@ -424,6 +424,10 @@ export function reasoningRecoveryPass(items, opts = {}) {
             decision: "escalate",
             reason: classification.details.reason,
             escalation: escalationPayload,
+            // CTL-1439: a genuine escalation IS the verdict — stamp it so the
+            // ledger's verdict fields always agree with the decision.
+            verdict: "escalate",
+            verdictReason: classification.details.reason ?? null,
           });
           actionLog.push("recorded escalation intent");
         } catch (err) {
@@ -1790,9 +1794,14 @@ export function defaultRecordIntent(ticket, intent, opts = {}) {
     prior.decision === "defer" &&
     typeof prior.lastTs === "number";
   // CTL-1439 (P0a): the session's ACTUAL verdict rides in the ledger. A write that
-  // carries a verdict stamps all three fields afresh; a verdict-less write (e.g.
-  // the next dispatch marker) PRESERVES the prior verdict trail for observability.
+  // carries a verdict stamps all three fields afresh. A verdict-less MARKER write
+  // (the "dispatched" dispatch marker / a "defer" hand-off) PRESERVES the prior
+  // verdict trail for observability — but a verdict-less TERMINAL/classifier write
+  // (fix / escalate / shadow) CLEARS it (Codex P2 on #2586: preserving there let
+  // a decision:"escalate" entry carry verdict:"leave-alone", corrupting the audit
+  // surface — the verdict fields must never contradict the decision).
   const hasVerdict = typeof intent.verdict === "string";
+  const isMarkerWrite = intent.decision === "dispatched" || intent.decision === "defer";
   const entry = {
     ticket,
     ts: typeof prior.ts === "number" ? prior.ts : ts, // first-action timestamp
@@ -1804,13 +1813,15 @@ export function defaultRecordIntent(ticket, intent, opts = {}) {
         ? intent.attempts
         : (typeof prior.attempts === "number" ? prior.attempts : 0) + 1,
     escalated,
-    ...(hasVerdict || typeof prior.verdict === "string"
-      ? {
-          verdict: hasVerdict ? intent.verdict : prior.verdict,
-          verdictReason: hasVerdict ? (intent.verdictReason ?? null) : (prior.verdictReason ?? null),
-          verdictTs: hasVerdict ? ts : (prior.verdictTs ?? null),
-        }
-      : {}),
+    ...(hasVerdict
+      ? { verdict: intent.verdict, verdictReason: intent.verdictReason ?? null, verdictTs: ts }
+      : isMarkerWrite && typeof prior.verdict === "string"
+        ? {
+            verdict: prior.verdict,
+            verdictReason: prior.verdictReason ?? null,
+            verdictTs: prior.verdictTs ?? null,
+          }
+        : {}),
   };
 
   try {

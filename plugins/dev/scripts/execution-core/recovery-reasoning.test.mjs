@@ -1345,6 +1345,41 @@ describe("recordVerdict + leave-alone TTL (CTL-1439 P0a)", () => {
     expect(entry.verdictReason).toBe("merged the green PR");
     expect(entry.verdictTs).toBe(t0 + 5);
   });
+
+  test("a TERMINAL verdict-less write (fix / escalate) CLEARS stale verdict fields — the ledger never contradicts itself", () => {
+    // Codex P2 (#2586): a leave-alone verdict that ages out and then genuinely
+    // escalates must NOT carry verdict:"leave-alone" on the escalate entry.
+    const t0 = 1_000_000_000_000;
+    recordVerdict("CTL-410", { verdict: "leave-alone", reason: "healthy" }, { orchDir, now: () => t0 });
+    const escalated = defaultRecordIntent(
+      "CTL-410",
+      { decision: "escalate", reason: "now genuinely stuck" },
+      { orchDir, now: () => t0 + RECOVERY_LEAVE_ALONE_TTL_MS + 5 },
+    );
+    expect(escalated.decision).toBe("escalate");
+    expect(escalated.verdict).toBeUndefined();
+    expect(escalated.verdictReason).toBeUndefined();
+
+    recordVerdict("CTL-411", { verdict: "leave-alone", reason: "healthy" }, { orchDir, now: () => t0 });
+    const fixed = defaultRecordIntent(
+      "CTL-411",
+      { decision: "fix", fix_class: "bounded-llm" },
+      { orchDir, now: () => t0 + RECOVERY_LEAVE_ALONE_TTL_MS + 5 },
+    );
+    expect(fixed.decision).toBe("fix");
+    expect(fixed.verdict).toBeUndefined();
+  });
+
+  test("a defer MARKER write still preserves the verdict trail", () => {
+    const t0 = 1_000_000_000_000;
+    recordVerdict("CTL-412", { verdict: "leave-alone", reason: "healthy" }, { orchDir, now: () => t0 });
+    const deferred = defaultRecordIntent(
+      "CTL-412",
+      { decision: "defer", fix_class: "board-health", attempts: 0 },
+      { orchDir, now: () => t0 + 5 },
+    );
+    expect(deferred.verdict).toBe("leave-alone"); // marker writes keep the trail
+  });
 });
 
 // ─── CTL-1432 (B2): readDeferredBoardHealthIntents ──────────────────────────
