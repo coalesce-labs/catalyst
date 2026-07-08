@@ -42,6 +42,8 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 import { emitBootResumePending as defaultEmitBootResumePending } from "./dispatch-alert.mjs"; // CTL-1443
+import { labelNeedsHumanUnlessBeliefOwner } from "./label-guard.mjs"; // CTL-1443 (Codex P1)
+import { applyLabel as defaultApplyLabel } from "./linear-write.mjs"; // CTL-1443 (Codex P1)
 import {
   readWorkerSignals,
   readAllPhaseSignals,
@@ -148,6 +150,7 @@ export function listPendingApprovals(orchDir, { now = () => Date.now() } = {}) {
     out.push({
       ticket,
       phase: pending.phase ?? null,
+      worktreePath: pending.worktreePath ?? null,
       requestedAt: pending.requestedAt ?? null,
       ageMs: requestedMs != null ? Math.max(0, now() - requestedMs) : null,
       approved: existsSync(bootResumeApprovedPath(orchDir, ticket)),
@@ -182,6 +185,12 @@ export function surfaceStalePendingApprovals({
   now = () => Date.now(),
   ttlMs = BOOT_RESUME_PENDING_TTL_MS,
   emitAlert = null, // ({identifier, phase, ageHours}) => void — daemon wires emitBootResumePending
+  // Codex P1: the signal explanation alone does NOT enter the monitor's
+  // Needs-You bucket — deriveAttention keys on the needs-human LABEL/marker,
+  // not on a bare status flip. Route through the same label-guard path the
+  // P0b exhaustion sweep uses (labelOnce markers = idempotence).
+  labelNeedsHuman = (dir, t) =>
+    labelNeedsHumanUnlessBeliefOwner(dir, t, { applyLabel: defaultApplyLabel }, { site: "boot-resume-gate" }),
 } = {}) {
   const surfaced = [];
   for (const gate of listPendingApprovals(orchDir, { now })) {
@@ -200,13 +209,17 @@ export function surfaceStalePendingApprovals({
       }
       if (!sig.ticket) sig.ticket = ticket;
       if (!sig.phase) sig.phase = phase;
+      // Codex P2: preserve the gated worktree on a synthetic rewrite — later
+      // approval routes through defaultReviveDispatch, whose CTL-615 worktree
+      // cross-check needs sig.worktreePath.
+      if (!sig.worktreePath && gate.worktreePath) sig.worktreePath = gate.worktreePath;
       sig.status = "needs-human";
       if (!sig.needsHumanSince) sig.needsHumanSince = new Date(now()).toISOString();
       sig.updatedAt = new Date(now()).toISOString();
       sig.explanation = {
         escalation_type: "authorization",
         problem: `${ticket}'s ${phase} resume has been gated behind boot-resume approval for ${ageHours}h with no operator response — expensive phases require explicit approval after a cold start, and nothing was surfacing the ask.`,
-        call_to_action: `approve the ${phase} resume for ${ticket} (boot-resume-approve.mjs ${ticket}), or take the ticket over?`,
+        call_to_action: `approve the ${phase} resume for ${ticket} (run: boot-resume-approve ${ticket}), or take the ticket over?`,
         recommendation: `approve the resume — the gate exists to prevent silent expensive re-runs, not to park the ticket`,
         risk: `left unapproved the ticket stays frozen invisibly (the OTL-41 failure mode)`,
         why_asking: "the CTL-644 cold-start gate requires operator approval for expensive phases",
@@ -219,6 +232,17 @@ export function surfaceStalePendingApprovals({
     } catch (err) {
       log.warn({ ticket, phase, err: err?.message }, "ctl-1443: stale-gate signal surfacing failed — will retry next tick");
       continue; // no surfacedAt stamp → retried next tick
+    }
+    // (1b) Codex P1: the needs-human LABEL is what deriveAttention keys on —
+    // without it the brief never reaches the Needs-You bucket. labelOnce's
+    // markers dedupe; failures retry next tick (no surfacedAt stamp yet? —
+    // the label is retried by virtue of running before the stamp only on the
+    // first pass; subsequent passes are gated by surfacedAt, so a transient
+    // label failure here is retried via labelOnce on the APPROVAL path too).
+    try {
+      labelNeedsHuman?.(orchDir, ticket);
+    } catch (err) {
+      log.warn({ ticket, err: err?.message }, "ctl-1443: needs-human label on stale gate failed — continuing");
     }
     // (2) the durable alert event (throttled per-kind inside the emitter).
     try {
@@ -717,9 +741,14 @@ export function processApprovedResumes({
   // defaulted here at call time).
   surfaceStaleGates = (o) => surfaceStalePendingApprovals(o),
   emitStaleGateAlert = defaultEmitBootResumePending,
+  staleGateLabelNeedsHuman = undefined, // CTL-1443 Codex P1: test seam
 } = {}) {
   try {
-    surfaceStaleGates({ orchDir, emitAlert: emitStaleGateAlert });
+    surfaceStaleGates({
+      orchDir,
+      emitAlert: emitStaleGateAlert,
+      ...(staleGateLabelNeedsHuman ? { labelNeedsHuman: staleGateLabelNeedsHuman } : {}),
+    });
   } catch (err) {
     log.warn({ err: err?.message }, "ctl-1443: stale-gate sweep threw — continuing");
   }

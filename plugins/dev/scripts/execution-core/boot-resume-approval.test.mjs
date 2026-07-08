@@ -277,12 +277,17 @@ describe("boot-resume approval surfacing (CTL-1443)", () => {
     const now = Date.now();
     writeGate("OTL-41", "recovery-pass", now - BOOT_RESUME_PENDING_TTL_MS - 1000);
     const alerts = [];
+    const labels = [];
     const out = surfaceStalePendingApprovals({
       orchDir,
       now: () => now,
       emitAlert: (a) => alerts.push(a),
+      labelNeedsHuman: (dir, t) => labels.push(t),
     });
     expect(out).toEqual(["OTL-41"]);
+    // Codex P1: the needs-human LABEL is what deriveAttention keys on — the
+    // signal explanation alone never reaches the Needs-You bucket.
+    expect(labels).toEqual(["OTL-41"]);
     const sig = JSON.parse(
       readFileSync(join(orchDir, "workers", "OTL-41", "phase-recovery-pass.json"), "utf8"),
     );
@@ -290,9 +295,10 @@ describe("boot-resume approval surfacing (CTL-1443)", () => {
     expect(sig.ticket).toBe("OTL-41");
     expect(sig.explanation.escalation_type).toBe("authorization");
     expect(sig.explanation.call_to_action).toContain("boot-resume-approve");
+    expect(sig.worktreePath).toBe("/wt"); // Codex P2: preserved for the CTL-615 revive cross-check
     expect(alerts[0].identifier).toBe("OTL-41");
     // idempotent: the surfacedAt stamp suppresses a second surfacing
-    const out2 = surfaceStalePendingApprovals({ orchDir, now: () => now, emitAlert: (a) => alerts.push(a) });
+    const out2 = surfaceStalePendingApprovals({ orchDir, now: () => now, emitAlert: (a) => alerts.push(a), labelNeedsHuman: () => {} });
     expect(out2).toEqual([]);
     expect(alerts.length).toBe(1);
     // and approval still works after surfacing (marker retained)
@@ -304,7 +310,7 @@ describe("boot-resume approval surfacing (CTL-1443)", () => {
     writeGate("CTL-2", "implement", now - 1000); // fresh
     writeGate("CTL-3", "implement", now - BOOT_RESUME_PENDING_TTL_MS - 1000); // stale but approved
     writeFileSync(bootResumeApprovedPath(orchDir, "CTL-3"), "");
-    expect(surfaceStalePendingApprovals({ orchDir, now: () => now, emitAlert: () => {} })).toEqual([]);
+    expect(surfaceStalePendingApprovals({ orchDir, now: () => now, emitAlert: () => {}, labelNeedsHuman: () => {} })).toEqual([]);
   });
 
   test("processApprovedResumes runs the sweep (stale gate surfaces on the normal tick path)", () => {
@@ -316,6 +322,7 @@ describe("boot-resume approval surfacing (CTL-1443)", () => {
       reviveDispatch: () => ({ code: 0 }),
       appendEvent: () => {},
       emitStaleGateAlert: (a) => alerts.push(a),
+      staleGateLabelNeedsHuman: () => {},
     });
     expect(alerts.length).toBe(1);
     expect(alerts[0].identifier).toBe("CTL-4");
