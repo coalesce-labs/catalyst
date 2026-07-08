@@ -674,31 +674,6 @@ function dispatchTriage(
     log.debug({ identifier }, "drain: skipping triage dispatch — node draining (CTL-1095)");
     return false;
   }
-  // CTL-1441 guard (b): a ticket at the triage dispatch cap parks LOUDLY, once —
-  // needs-human + a capped marker — then never burns another dispatch. Checked
-  // before HRW/claim so a capped ticket costs nothing per sweep.
-  if (readTriageDispatchCount(orchDir, identifier) >= TRIAGE_DISPATCH_CAP) {
-    const cappedMarker = join(orchDir, "workers", identifier, ".triage-redispatch-capped");
-    if (!existsSync(cappedMarker)) {
-      try {
-        mkdirSync(dirname(cappedMarker), { recursive: true });
-        writeFileSync(
-          cappedMarker,
-          JSON.stringify({ cappedAt: new Date().toISOString(), cap: TRIAGE_DISPATCH_CAP }),
-        );
-      } catch { /* marker is best-effort; the count gate above still holds */ }
-      try {
-        labelNeedsHuman(orchDir, identifier);
-      } catch (err) {
-        log.warn({ identifier, err: err.message }, "ctl-1441: needs-human label at triage cap threw — continuing");
-      }
-      log.warn(
-        { identifier, cap: TRIAGE_DISPATCH_CAP },
-        "ctl-1441: triage re-dispatch cap reached — parked needs-human; delete workers/<t>/.triage-redispatch-capped + .triage-dispatch-count.json to re-arm",
-      );
-    }
-    return false;
-  }
   // CTL-862/CTL-1057: HRW ownership filter. Resolve roster/self lazily per call
   // so hot roster reloads need no restart. Single-host (multiHost===false) is a
   // TRUE no-op regardless of whether the lone roster entry string-matches the
@@ -760,6 +735,38 @@ function dispatchTriage(
       return false;
     }
   }
+  // CTL-1441 guard (b): a ticket at the triage dispatch cap parks LOUDLY — then
+  // never burns another dispatch. Runs AFTER the drain/HRW/delegate gates
+  // (Codex P2: only the HRW owner of a still-claimable ticket may park it) and
+  // BEFORE the cross-host claim (a capped ticket must not consume claims).
+  // The needs-human apply is retried every capped sweep — labelOnce's own
+  // .linear-label-needs-human.{applied,skipped} markers are the idempotence
+  // guard, so a transient Linear failure (which deliberately leaves no marker)
+  // retries next sweep (Codex P2). The .triage-redispatch-capped marker gates
+  // only the duplicate WARN log. Re-arm by deleting that marker +
+  // .triage-dispatch-count.json.
+  if (readTriageDispatchCount(orchDir, identifier) >= TRIAGE_DISPATCH_CAP) {
+    try {
+      labelNeedsHuman(orchDir, identifier);
+    } catch (err) {
+      log.warn({ identifier, err: err.message }, "ctl-1441: needs-human label at triage cap threw — continuing");
+    }
+    const cappedMarker = join(orchDir, "workers", identifier, ".triage-redispatch-capped");
+    if (!existsSync(cappedMarker)) {
+      try {
+        mkdirSync(dirname(cappedMarker), { recursive: true });
+        writeFileSync(
+          cappedMarker,
+          JSON.stringify({ cappedAt: new Date().toISOString(), cap: TRIAGE_DISPATCH_CAP }),
+        );
+      } catch { /* marker is best-effort; the count gate above still holds */ }
+      log.warn(
+        { identifier, cap: TRIAGE_DISPATCH_CAP },
+        "ctl-1441: triage re-dispatch cap reached — parked needs-human; delete workers/<t>/.triage-redispatch-capped + .triage-dispatch-count.json to re-arm",
+      );
+    }
+    return false;
+  }
   // CTL-862: cross-host claim soft-CAS immediately before the spawn. Skipped on
   // single-host (no Linear write). A lost claim is NOT a failure — defer cleanly.
   // CTL-1028: lift claim.generation out of the block so it can be forwarded to
@@ -782,7 +789,17 @@ function dispatchTriage(
   // the launch so a spawn that dies without ever writing a signal (the
   // no-artifacts class) still counts toward the cap. Unbounded silent failure
   // is exactly the loop this bounds.
-  bumpTriageDispatchCount(orchDir, identifier);
+  // Codex P1: do NOT count while an in-flight triage signal exists — with
+  // triage.json still absent, phase-agent-dispatch treats a dispatch over a
+  // live worker as an idempotent no-op (CTL-615 yield), and counting those
+  // would let 10-min reconciles burn the whole cap against ONE long-running
+  // triage. A dead-frozen "running" signal is reset to stalled by the reclaim/
+  // revive path, after which counting resumes; "done"/"failed"/"stalled"
+  // signals count (a re-dispatch over those launches a real worker).
+  const _sigStatus = readTriageSignalStatus(orchDir, identifier);
+  if (!(_sigStatus === "dispatched" || _sigStatus === "running" || _sigStatus === "pending")) {
+    bumpTriageDispatchCount(orchDir, identifier);
+  }
   // CTL-1367 P1: settle an async (executor=sdk) dispatch synchronously. bg returns a
   // plain object (passthrough → byte-identical). sdk returns a Promise whose
   // synchronous prelaunch already wrote the triage `dispatched` signal;

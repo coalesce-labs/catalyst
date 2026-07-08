@@ -1335,7 +1335,7 @@ describe("triage re-dispatch guard (CTL-1441)", () => {
     expect(counter.count).toBe(1);
   });
 
-  test("at the cap: no dispatch, needs-human applied ONCE, capped marker written", () => {
+  test("at the cap: no dispatch, needs-human RETRIED each sweep (labelOnce dedupes), capped marker written", () => {
     enroll("ENG", { status: "Ready" });
     const realOrchDir = join(catalystDir, "execution-core");
     const dir = join(realOrchDir, "workers", "ENG-9");
@@ -1350,10 +1350,51 @@ describe("triage re-dispatch guard (CTL-1441)", () => {
     expect(labelNeedsHuman).toHaveBeenCalledTimes(1);
     expect(labelNeedsHuman).toHaveBeenCalledWith(realOrchDir, "ENG-9");
     expect(existsSync(join(dir, ".triage-redispatch-capped"))).toBe(true);
-    // A second sweep is a silent no-op (marker gates the label + warn).
+    // A second sweep still skips dispatch but RE-TRIES the label — a transient
+    // Linear failure leaves no labelOnce marker, so the retry must reach it
+    // (Codex P2); labelOnce's own markers are the idempotence guard.
     sweepMissingTriage(sweepOpts(realOrchDir, dispatch, labelNeedsHuman));
     expect(dispatch).not.toHaveBeenCalled();
-    expect(labelNeedsHuman).toHaveBeenCalledTimes(1);
+    expect(labelNeedsHuman).toHaveBeenCalledTimes(2);
+  });
+
+  test("multi-host: a NON-owner host never parks a capped ticket (HRW gate runs first)", () => {
+    enroll("ENG", { status: "Ready" });
+    const realOrchDir = join(catalystDir, "execution-core");
+    const dir = join(realOrchDir, "workers", "ENG-9");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, ".triage-dispatch-count.json"), JSON.stringify({ count: 3 }));
+    const exec = execReturning({ ENG: [node("ENG-9")] });
+    reconcileAll({ exec });
+    const roster = ["host-a", "host-b"];
+    const owner = ownerForTicket("ENG-9", roster);
+    const notOwner = roster.find((h) => h !== owner);
+    const dispatch = mock(() => ({ code: 0 }));
+    const labelNeedsHuman = mock(() => {});
+    sweepMissingTriage({
+      ...sweepOpts(realOrchDir, dispatch, labelNeedsHuman),
+      hosts: roster,
+      hostName: notOwner,
+    });
+    expect(dispatch).not.toHaveBeenCalled();
+    expect(labelNeedsHuman).not.toHaveBeenCalled(); // non-owner must not touch the ticket
+    expect(existsSync(join(dir, ".triage-redispatch-capped"))).toBe(false);
+  });
+
+  test("an IN-FLIGHT triage signal (running) suppresses the cap bump (idempotent no-op, Codex P1)", () => {
+    enroll("ENG", { status: "Ready" });
+    const realOrchDir = join(catalystDir, "execution-core");
+    const dir = join(realOrchDir, "workers", "ENG-9");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "phase-triage.json"), JSON.stringify({ status: "running" }));
+    const exec = execReturning({ ENG: [node("ENG-9")] });
+    reconcileAll({ exec });
+    const dispatch = mock(() => ({ code: 0 }));
+    sweepMissingTriage(sweepOpts(realOrchDir, dispatch));
+    // The dispatch still fires (CTL-615 yield decides downstream) but the cap
+    // counter must NOT accrue against a live worker every 10-min reconcile.
+    expect(dispatch).toHaveBeenCalledTimes(1);
+    expect(existsSync(join(dir, ".triage-dispatch-count.json"))).toBe(false);
   });
 
   test("a label failure at the cap never throws out of the sweep", () => {

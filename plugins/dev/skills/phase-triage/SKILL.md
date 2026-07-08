@@ -102,22 +102,24 @@ fi
 # shellcheck disable=SC1090
 . "$__PT_READ_LIB"
 
-# CTL-1441: bind from the CATALYST_-prefixed env FIRST — those are the channel
-# phase-agent-dispatch actually populates (DISPATCH_ENV / worker settings). The
-# bare TICKET/ORCH_DIR names exist only via slash-command substitution, which is
-# exactly the fragile channel that produced the CTL-1403 re-triage loop: a
-# substitution miss let WORKER_DIR fall back to $(pwd), triage.json landed
-# outside the worker dir, and the monitor (blind to it) re-dispatched forever.
-TICKET="${TICKET:-${CATALYST_TICKET:-}}"
+# CTL-1441: the CATALYST_-prefixed env WINS — that is the channel
+# phase-agent-dispatch actually populates (DISPATCH_ENV / worker settings), and
+# it must beat any stale ambient bare TICKET/ORCH_DIR inherited from a shell or
+# a prior invocation (Codex P2 on #2588). The bare names exist only via
+# slash-command substitution — exactly the fragile channel that produced the
+# CTL-1403 re-triage loop: a substitution miss let WORKER_DIR fall back to
+# $(pwd), triage.json landed outside the worker dir, and the monitor (blind to
+# it) re-dispatched forever. Bare names remain the operator-sweep fallback.
+TICKET="${CATALYST_TICKET:-${TICKET:-}}"
 : "${TICKET:?phase-triage: TICKET env var required}"
-ORCH_DIR="${ORCH_DIR:-${CATALYST_ORCHESTRATOR_DIR:-}}"
+ORCH_DIR="${CATALYST_ORCHESTRATOR_DIR:-${ORCH_DIR:-}}"
 
 WORKER_DIR="${WORKER_DIR:-${ORCH_DIR:+${ORCH_DIR}/workers/${TICKET}}}"
 # CTL-1441: NEVER fall back to $(pwd) — a triage.json outside the worker dir is
 # invisible to hasTriageArtifact and re-triages forever. Default to the
-# canonical orch dir and say so.
+# canonical orch dir (honoring a custom CATALYST_DIR install) and say so.
 if [[ -z "$WORKER_DIR" ]]; then
-  WORKER_DIR="${HOME}/catalyst/execution-core/workers/${TICKET}"
+  WORKER_DIR="${CATALYST_DIR:-${HOME}/catalyst}/execution-core/workers/${TICKET}"
   echo "phase-triage: ORCH_DIR unset — defaulting WORKER_DIR to ${WORKER_DIR} (CTL-1441)" >&2
 fi
 mkdir -p "$WORKER_DIR"
