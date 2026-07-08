@@ -406,6 +406,11 @@ export async function handleCommentWake(
     } catch {
       /* fail-open */
     }
+    try {
+      await removeLabel(ticket, "needs-input"); // CTL-764 Phase 4: durable needs-input cleared on genuine resolution
+    } catch {
+      /* fail-open */
+    }
 
     dispatch(orchDir, ticket, parkedPhase, { handoffPath, resumeSession });
   }

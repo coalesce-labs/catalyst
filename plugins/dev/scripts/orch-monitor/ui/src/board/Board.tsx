@@ -141,7 +141,8 @@ const TERMINAL_STATUSES = ["done", "failed", "stalled", "skipped", "signal_corru
 // board-data.mjs copies) — the board-held-indicator drift guard asserts all
 // three agree, so the badge below reads exactly the label the daemon writes.
 const HELD_LABEL_BLOCKED = "blocked";
-const HELD_LABEL_WAITING = "waiting";
+// CTL-764 Phase 4: value renamed "waiting" → "queued" (identifier preserved for drift guard).
+const HELD_LABEL_WAITING = "queued";
 
 // BOARD4 / CTL-908: the List view (BoardList.tsx) reuses these card atoms +
 // formatters as its table cells, rather than re-implementing the live/priority/
@@ -320,24 +321,25 @@ export function StatusBadge({ status }: { status: string }) {
   return <span style={{ fontFamily: C.mono, fontSize: 10, padding: "1.5px 7px", borderRadius: 6, color: m.fg, background: m.bg, whiteSpace: "nowrap" }}>{m.label}</span>;
 }
 // CTL-755: held indicator. A triaged-waiting ticket the admission gate is
-// holding before the triage→research promotion carries a `blocked` or `waiting`
-// Linear label. We render a distinct amber "⏸" chip so an operator sees at a
-// glance the ticket is HELD on a dependency (blocked, names the blocker ids) vs
-// merely awaiting capacity/priority (waiting) — NOT silently mid-triage.
-export function HeldBadge({ held, blockers }: { held: "blocked" | "waiting" | null | undefined; blockers?: string[] }) {
-  if (held !== HELD_LABEL_BLOCKED && held !== HELD_LABEL_WAITING) return null;
+// holding before the triage→research promotion carries a `blocked` or `queued`
+// (formerly `waiting`) Linear label. We render a distinct amber "⏸" chip so an
+// operator sees at a glance the ticket is HELD on a dependency (blocked, names
+// the blocker ids) vs merely awaiting capacity/priority (queued).
+// CTL-764 Phase 4: back-compat — tolerate legacy "waiting" value during rollout.
+export function HeldBadge({ held, blockers }: { held: "blocked" | "queued" | "waiting" | null | undefined; blockers?: string[] }) {
+  if (held !== HELD_LABEL_BLOCKED && held !== HELD_LABEL_WAITING && held !== "waiting") return null;
   const isBlocked = held === HELD_LABEL_BLOCKED;
   const fg = isBlocked ? C.redSoft : C.yellowSoft;
   const bg = isBlocked ? `${C.red}24` : `${C.yellow}24`;
   const ids = (blockers ?? []).filter(Boolean);
   const label = isBlocked
     ? `⏸ blocked${ids.length ? `: ${ids.join(", ")}` : ""}`
-    : "⏸ held";
+    : "⏸ queued";
   const tip = isBlocked
     ? ids.length
       ? `Held — blocked on open dependency: ${ids.join(", ")}`
       : "Held — blocked on an open dependency"
-    : "Held — deps satisfied, awaiting capacity or priority";
+    : "Held — deps satisfied, awaiting capacity or priority (queued)";
   return (
     <Tooltip><TooltipTrigger asChild>
       <span style={{ fontFamily: C.mono, fontSize: 10, padding: "1.5px 7px", borderRadius: 6, color: fg, background: bg, whiteSpace: "nowrap", maxWidth: 180, overflow: "hidden", textOverflow: "ellipsis", display: "inline-block" }}>{label}</span>

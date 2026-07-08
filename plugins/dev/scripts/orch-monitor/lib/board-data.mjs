@@ -186,16 +186,22 @@ export function isBgJobWaitingOnUser(jobState) {
 // label the daemon writes (we copy the literals rather than import the whole
 // scheduler module into the lightweight board data layer).
 export const HELD_LABEL_BLOCKED = "blocked";
-export const HELD_LABEL_WAITING = "waiting";
+// CTL-764 Phase 4: value renamed "waiting" → "queued" (identifier preserved —
+// the board-held-indicator drift guard imports it by name).
+export const HELD_LABEL_WAITING = "queued";
 
 // heldFor — classify a ticket's held state from its Linear label set. `blocked`
-// wins over `waiting` when both are somehow present (it is the more severe hold;
-// steady-state convergence only ever leaves one applied). Returns "blocked" |
-// "waiting" | null. Pure + exported so it is unit-testable.
+// wins over `queued`/`waiting` when both are somehow present (it is the more severe
+// hold). Returns "blocked" | "queued" | null. Pure + exported so it is unit-testable.
+// CTL-764 Phase 4: back-compat-maps legacy "waiting" label to "queued" so a
+// mid-rollout board is never blank while daemon writes new "queued" labels and
+// existing tickets still wear the old "waiting" label.
 export function heldFor(labels) {
   const set = new Set(Array.isArray(labels) ? labels : []);
   if (set.has(HELD_LABEL_BLOCKED)) return HELD_LABEL_BLOCKED;
   if (set.has(HELD_LABEL_WAITING)) return HELD_LABEL_WAITING;
+  // Back-compat: legacy "waiting" label is mapped to the new "queued" value.
+  if (set.has("waiting")) return HELD_LABEL_WAITING;
   return null;
 }
 

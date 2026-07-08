@@ -1600,7 +1600,17 @@ function safeEmit(fn, arg, ctx) {
 // gets BOTH labels removed (clear-on-pickup). The two label names live here so
 // the diff logic and any board reader share one source of truth.
 export const HELD_LABEL_BLOCKED = "blocked";
-export const HELD_LABEL_WAITING = "waiting";
+// CTL-764 Phase 4: value renamed "waiting" → "queued" (identifier preserved for
+// drift-guard imports). The HUD back-compat-maps legacy "waiting" so a mid-rollout
+// board is never blank. All new writes apply "queued".
+export const HELD_LABEL_WAITING = "queued";
+// CTL-764 Phase 4: new disposition constants.
+export const HELD_LABEL_NEEDS_INPUT = "needs-input";
+export const HELD_LABEL_NEEDS_HUMAN = "needs-human";
+// TICK_CONVERGED_DISPOSITIONS — the three dispositions that tick-converge via
+// convergeDispositionLabel. needs-human is EXCLUDED (it is sticky via labelOnce).
+const TICK_CONVERGED_DISPOSITIONS = [HELD_LABEL_BLOCKED, HELD_LABEL_WAITING, HELD_LABEL_NEEDS_INPUT];
+// Keep HELD_LABELS for convergeHeldLabel (thin alias) backward compat.
 const HELD_LABELS = [HELD_LABEL_BLOCKED, HELD_LABEL_WAITING];
 
 // Terminal Linear states a blocker can be in (a blocker in one of these does NOT
@@ -1705,6 +1715,69 @@ const UNRECOVERABLE_LABEL_REASONS = new Set([
   "exclusive-conflict",
   "team-mismatch",
 ]);
+
+// convergeDispositionLabel — generalised version of convergeHeldLabel covering the
+// full worker-status disposition set (CTL-764 Phase 4). Like convergeHeldLabel it
+// diffs current labels and applies/removes on change (steady-state zero writes),
+// with the same CTL-834 cool-down gate on unrecoverable failures.
+//
+// KEY INVARIANTS:
+//   • needs-human is NEVER tick-converged (it is sticky via labelOnce + .applied).
+//   • Precedence: if the ticket already carries needs-human, make ZERO writes —
+//     the lower dispositions are suppressed until needs-human is cleared by a
+//     genuine resolution call (handleCommentWake → clearStalledLabel).
+//   • NEVER issues removeLabel('needs-human') — only the three tick-converged
+//     dispositions (queued/blocked/needs-input) are in the removable set.
+//   • desired=null removes stale tick-converged labels but leaves needs-human alone.
+export function convergeDispositionLabel(
+  ticket,
+  current,
+  desired,
+  writeStatus,
+  { orchDir, now = Date.now } = {}
+) {
+  const have = new Set(current ?? []);
+  // Precedence suppression: if needs-human is already applied AND desired is one of
+  // the lower tick-converged dispositions (non-null), suppress ALL writes. The lower
+  // disposition must not overwrite or coexist with needs-human.
+  // When desired=null (clear-on-pickup), we still remove stale tick-converged labels
+  // but leave needs-human alone (it is cleared only by genuine resolution).
+  if (have.has(HELD_LABEL_NEEDS_HUMAN) && desired !== null && desired !== undefined) return 0;
+  // CTL-834: back off if a recent apply of `desired` failed unrecoverably.
+  if (orchDir && desired && inLabelCooldown(orchDir, ticket, desired, now())) {
+    return 0;
+  }
+  let writes = 0;
+  // Remove any tick-converged disposition label that is present but not desired.
+  // needs-human is intentionally excluded from this removable set — it is sticky.
+  for (const label of TICK_CONVERGED_DISPOSITIONS) {
+    if (label !== desired && have.has(label)) {
+      safeWrite(() => writeStatus.removeLabel(ticket, label), { ticket, phase: "admission" });
+      writes++;
+    }
+  }
+  // Apply the desired label if not already present.
+  if (desired && !have.has(desired)) {
+    let res;
+    try {
+      res = writeStatus.applyLabel({ ticket, label: desired });
+    } catch (err) {
+      log.warn(
+        { ticket, label: desired, err: err.message },
+        "convergeDispositionLabel: applyLabel threw — continuing tick"
+      );
+    }
+    writes++;
+    if (orchDir && res && res.applied === false && UNRECOVERABLE_LABEL_REASONS.has(res.reason)) {
+      recordLabelCooldown(orchDir, ticket, desired, now());
+      log.warn(
+        { ticket, label: desired, reason: res.reason },
+        "ctl-764: disposition-label apply unrecoverable — backing off (cool-down)"
+      );
+    }
+  }
+  return writes;
+}
 
 // CTL-1068 — convergeStartedHeldLabels: retract orphaned held labels for a STARTED
 // (already-admitted) ticket. The admission A.7 loop only converges the pre-pickup
@@ -2251,7 +2324,8 @@ export function verifyDispatchedSignal(orchDir, ticket, phase, { requireBgJob = 
 //   • blocked / waiting — HELD_LABEL_BLOCKED / HELD_LABEL_WAITING, applied by
 //     convergeHeldLabel for admission-hold indicators (CTL-874: the pre-CTL-874
 //     set listed only needs-human, so a missing held label went undetected).
-const REQUIRED_WORKSPACE_LABELS = ["needs-human", HELD_LABEL_BLOCKED, HELD_LABEL_WAITING];
+// CTL-764 Phase 4: added HELD_LABEL_NEEDS_INPUT to the required workspace set.
+const REQUIRED_WORKSPACE_LABELS = ["needs-human", HELD_LABEL_BLOCKED, HELD_LABEL_WAITING, HELD_LABEL_NEEDS_INPUT];
 
 // preflightWorkspaceLabels — best-effort daemon-start check. CTL-874: the
 // required labels are WORKSPACE-scoped (team:null), so the pre-CTL-874

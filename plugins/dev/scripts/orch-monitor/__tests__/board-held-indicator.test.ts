@@ -46,9 +46,16 @@ test("heldFor → 'blocked' when the blocked label is present", () => {
   expect(heldFor(["feature", "orchestrator", "blocked"])).toBe("blocked");
 });
 
-test("heldFor → 'waiting' when only the waiting label is present", () => {
-  expect(heldFor(["waiting"])).toBe("waiting");
-  expect(heldFor(["chore", "waiting"])).toBe("waiting");
+test("heldFor → 'queued' when the queued label is present (Phase 4 rename)", () => {
+  expect(heldFor(["queued"])).toBe("queued");
+  expect(heldFor(["chore", "queued"])).toBe("queued");
+});
+
+test("heldFor → back-compat: legacy 'waiting' label maps to 'queued'", () => {
+  // CTL-764 Phase 4: HELD_LABEL_WAITING value changed from "waiting" to "queued".
+  // The HUD back-compat-maps the old label so a mid-rollout board is never blank.
+  expect(heldFor(["waiting"])).toBe("queued");
+  expect(heldFor(["chore", "waiting"])).toBe("queued");
 });
 
 test("heldFor → 'blocked' wins when both labels are somehow present (more severe)", () => {
@@ -94,6 +101,8 @@ test("Board.tsx held label constants equal scheduler.mjs source of truth (no dri
     return m[1];
   };
   expect(grab("HELD_LABEL_BLOCKED")).toBe(SCHED_BLOCKED);
+  // CTL-764 Phase 4: value renamed from "waiting" to "queued". Both scheduler.mjs
+  // (daemon writer) and Board.tsx (display) must carry the same value.
   expect(grab("HELD_LABEL_WAITING")).toBe(SCHED_WAITING);
 });
 
@@ -102,7 +111,8 @@ test("Board.tsx defines a HeldBadge and wires it from the ticket's held field", 
   expect(BOARD_TSX).toContain("function HeldBadge");
   // The chip is rendered in TicketCard from t.held (+ t.blockers).
   expect(BOARD_TSX).toContain("<HeldBadge held={t.held} blockers={t.blockers} />");
-  // It distinguishes blocked vs waiting with the pause glyph.
+  // It distinguishes blocked vs queued (was "waiting") with the pause glyph.
   expect(BOARD_TSX).toContain("⏸ blocked");
-  expect(BOARD_TSX).toContain("⏸ waiting");
+  // CTL-764 Phase 4: display text updated from "⏸ waiting" to "⏸ queued".
+  expect(BOARD_TSX).toContain("⏸ queued");
 });

@@ -2384,3 +2384,75 @@ describe("CTL-1274 — cluster-repo auto-refresh (boot sync + periodic refresh)"
     expect(refreshCalls).toBe(afterStop);
   });
 });
+
+// ── CTL-764 Phase 4: handleCommentWake clears needs-input label ───────────────
+//
+// Phase 4 adds a durable `needs-input` Linear label (set at Pass 0.75 park seam,
+// cleared at the comment-wake genuine-resolution seam). This block ensures
+// handleCommentWake removes it (in its own try/catch, fail-open) in addition to
+// the existing needs-human removal (CTL-1067 Bug 3).
+describe("CTL-764 Phase 4 — handleCommentWake clears durable needs-input label", () => {
+  const tmpOrcDir = () => mkdtempSync(join(tmpdir(), "ctl-764-p4-daemon-"));
+
+  function writeSignalP4(orch, ticket, phase, data) {
+    const workerDir = join(orch, "workers", ticket);
+    mkdirSync(workerDir, { recursive: true });
+    writeFileSync(
+      join(workerDir, `phase-${phase}.json`),
+      JSON.stringify({ ticket, phase, ...data }),
+    );
+  }
+
+  test("clears 'needs-input' label on comment wake of a needs-input signal", async () => {
+    const orch = tmpOrcDir();
+    writeSignalP4(orch, "CTL-1", "implement", {
+      status: "needs-input",
+      parkedFrom: "implement",
+    });
+    const removed = [];
+    await handleCommentWake(
+      { ticket: "CTL-1", body: "answer" },
+      {
+        orchDir: orch,
+        dispatch: () => ({ code: 0 }),
+        removeLabel: async (ticket, label) => { removed.push({ ticket, label }); },
+      },
+    );
+    expect(removed).toContainEqual({ ticket: "CTL-1", label: "needs-input" });
+  });
+
+  test("still clears 'needs-human' label alongside 'needs-input'", async () => {
+    const orch = tmpOrcDir();
+    writeSignalP4(orch, "CTL-1", "implement", {
+      status: "needs-input",
+      parkedFrom: "implement",
+    });
+    const removed = [];
+    await handleCommentWake(
+      { ticket: "CTL-1", body: "answer" },
+      {
+        orchDir: orch,
+        dispatch: () => ({ code: 0 }),
+        removeLabel: async (ticket, label) => { removed.push({ ticket, label }); },
+      },
+    );
+    expect(removed).toContainEqual({ ticket: "CTL-1", label: "needs-human" });
+    expect(removed).toContainEqual({ ticket: "CTL-1", label: "needs-input" });
+  });
+
+  test("does NOT call removeLabel('needs-input') for a non-needs-input signal (no spurious removal)", async () => {
+    const orch = tmpOrcDir();
+    writeSignalP4(orch, "CTL-1", "implement", { status: "running" });
+    const removed = [];
+    await handleCommentWake(
+      { ticket: "CTL-1", body: "comment" },
+      {
+        orchDir: orch,
+        dispatch: () => ({ code: 0 }),
+        removeLabel: async (ticket, label) => { removed.push({ ticket, label }); },
+      },
+    );
+    const needsInputRemovals = removed.filter(r => r.label === "needs-input");
+    expect(needsInputRemovals).toHaveLength(0);
+  });
+});
