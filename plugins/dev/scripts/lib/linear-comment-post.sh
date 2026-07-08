@@ -113,18 +113,35 @@ if [[ -z "$ACCESS_TOKEN" ]]; then
 fi
 
 # 2. Resolve ticket identifier → issue UUID.
+#    CTL-1439: `issues(filter:{identifier:{eq:...}})` no longer validates — Linear
+#    removed the `identifier` field from IssueFilter, so the old query 400s
+#    (GRAPHQL_VALIDATION_FAILED) and EVERY comment post fleet-wide silently died
+#    at this step (a root cause of the audit's "0/7 recovery-pass comments"
+#    finding). `issue(id:)` accepts the human identifier directly. Captured
+#    WITHOUT -f (mirrors the mint above) so a schema/HTTP failure surfaces its
+#    actual cause instead of a generic curl error.
 ISSUE_QUERY=$(jq -nc \
-  --arg q 'query($id:String!){issues(filter:{identifier:{eq:$id}}){nodes{id}}}' \
+  --arg q 'query($id:String!){issue(id:$id){id}}' \
   --arg id "$TICKET" \
   '{query: $q, variables: {id: $id}}')
-ISSUE_RESPONSE=$(curl -sf -X POST "${LINEAR_API}/graphql" \
+ISSUE_HTTP=$(curl -s -w '\n%{http_code}' -X POST "${LINEAR_API}/graphql" \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer ${ACCESS_TOKEN}" \
   -d "$ISSUE_QUERY" 2>/dev/null) || {
-  echo "linear-comment-post: issue identifier resolution failed" >&2
+  echo "linear-comment-post: issue identifier resolution failed (curl error)" >&2
   exit 1
 }
-ISSUE_UUID=$(printf '%s' "$ISSUE_RESPONSE" | jq -r '.data.issues.nodes[0].id // empty' 2>/dev/null)
+ISSUE_CODE="${ISSUE_HTTP##*$'\n'}"
+ISSUE_RESPONSE="${ISSUE_HTTP%$'\n'*}"
+# Linear returns GraphQL errors in an `errors` array even on HTTP 200 (schema/
+# authorization failures) — check it regardless of status so the real cause is
+# named instead of collapsing into "no issue found" (Codex P3, CTL-1439).
+ERR_DETAIL=$(printf '%s' "$ISSUE_RESPONSE" | jq -r '.errors[0].message // empty' 2>/dev/null)
+if [[ "$ISSUE_CODE" != "200" || -n "$ERR_DETAIL" ]]; then
+  echo "linear-comment-post: issue identifier resolution failed (HTTP ${ISSUE_CODE}${ERR_DETAIL:+; }${ERR_DETAIL})" >&2
+  exit 1
+fi
+ISSUE_UUID=$(printf '%s' "$ISSUE_RESPONSE" | jq -r '.data.issue.id // empty' 2>/dev/null)
 if [[ -z "$ISSUE_UUID" ]]; then
   echo "linear-comment-post: no issue found for identifier $TICKET" >&2
   exit 1

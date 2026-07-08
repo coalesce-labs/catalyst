@@ -313,6 +313,7 @@ jobs:
             worktree-safety.test.mjs \
             worktree.test.mjs \
             recovery-reasoning.test.mjs \
+            recovery-emit.test.mjs \
             sweep-stale-recovery-intents.test.mjs \
             triage-redispatch-guard.test.mjs \
             recovery-evidence.test.mjs \

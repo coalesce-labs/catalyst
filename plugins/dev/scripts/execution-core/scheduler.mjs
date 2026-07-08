@@ -233,6 +233,8 @@ import {
 import {
   reasoningRecoveryPass,
   defaultShouldSkipItem as recoveryShouldSkipItem,
+  defaultSkipReason as recoverySkipReason, // CTL-1440 (P0b): exhausted-vs-cooldown truth
+  escalateExhaustedIntents, // CTL-1440 (P0b): attempts-exhausted → loud escalation
   readDeferredBoardHealthIntents, // CTL-1432 (B2): deferred board-health anchor candidates
   defaultRecordIntent as recoveryRecordIntent,
   // CTL-1242 (corrected scope): forget the host-local recovery-intent latch when
@@ -4149,6 +4151,42 @@ export function schedulerTick(
           db: getBeliefsDb(),
           getBeliefs: getEscalateHumanBelief,
         });
+        // CTL-1440 (P0b): terminal-state policy — attempts-exhausted intents
+        // escalate LOUDLY (ledger escalated:true + needs-human + curated brief +
+        // app-actor comment + recovery.escalated event) instead of silently
+        // latching forever (audit RC1: nothing un-latched an attempts-exhausted
+        // open ticket). Runs BEFORE the per-item pass so a freshly-escalated
+        // ticket is skipped as "escalated" (B1's TTL governs re-entry) rather
+        // than "attempts-exhausted". Enforce-only — shadow must not write
+        // labels/comments. Idempotent: escalated:true excludes future scans.
+        // Codex R1: board-health is independently operator-gated — an exhausted
+        // board-health candidate must escalate loudly even when the per-item
+        // recovery pass is off (the new all-candidates-exhausted reason is
+        // excluded from C2's wedge set, so WITHOUT this sweep nothing would
+        // ever surface those tickets).
+        const _bhModeForSweep = readBoardHealthConfig().mode;
+        if (rMode === "enforce" || _bhModeForSweep === "enforce") {
+          try {
+            escalateExhaustedIntents(orchDir, {
+              labelNeedsHuman: (dir, t) =>
+                labelNeedsHumanUnlessBeliefOwner(dir, t, writeStatus, {
+                  site: "attempts-exhausted",
+                }),
+              // Codex R1: a finished ticket's stale ledger is forgotten by the
+              // terminal cleanup LATER in the tick — never page a human for it.
+              // Cached/replica-first read; fail-open toward active.
+              isActive: (t) =>
+                !isTicketTerminalOrMerged({
+                  ticket: t,
+                  cache,
+                  fetchState: (id, o = {}) =>
+                    fetchTicketState(id, { ...o, cache, gateway, replica, probeBackoff: true }),
+                })?.terminal,
+            });
+          } catch (err) {
+            log.warn({ err: err?.message }, "ctl-1440: exhausted-intent sweep threw — continuing tick");
+          }
+        }
         if (rItems.length > 0) {
           // CTL-1176: BIND the host-local ledger + act-seams to THIS tick's real
           // orchDir. Without this the defaults call resolveOrchDir() →
@@ -6784,7 +6822,12 @@ function runTick() {
           return holisticBoardHealthAct(
             { anchor, candidates, boardContext, decision },
             {
-              shouldSkipItem: (cand) => recoveryShouldSkipItem(cand, deps),
+              // CTL-1440 (Codex R1): holistic:true — a board-health defer is
+              // gated on its FROZEN deferredSince anchor here (an aged deferred
+              // anchor stays actionable even when the per-item pass re-deferred
+              // it moments ago); the per-item pass keeps the lastTs throttle.
+              shouldSkipItem: (cand) => recoveryShouldSkipItem(cand, { ...deps, holistic: true }),
+              skipReason: (cand) => recoverySkipReason(cand, { ...deps, holistic: true }), // CTL-1440 (P0b)
               invokeRecoveryPass: (cand, ctx) => recoveryInvokeRecoveryPass(cand, ctx, deps),
               recordIntent: (cand, intent) => recoveryRecordIntent(cand, intent, deps),
             },
@@ -6881,21 +6924,43 @@ function scheduleDebouncedTick(debounceMs) {
 // result, or {dispatched:false, reason:"all-candidates-cooldown"} when none dispatched.
 export function holisticBoardHealthAct(
   { anchor = null, candidates = [], boardContext, decision } = {},
-  { shouldSkipItem, invokeRecoveryPass, recordIntent } = {}
+  { shouldSkipItem, invokeRecoveryPass, recordIntent, skipReason = null } = {}
 ) {
   const ordered = candidates.length ? candidates : (anchor ? [anchor] : []);
+  // CTL-1440 (P0b): track WHY candidates were ledger-skipped so the no-dispatch
+  // return distinguishes "everything is terminally attempts-exhausted" (a
+  // truthful non-wedge — the exhaustion sweep has escalated them to a human)
+  // from a genuine retryable cooldown (the old blanket "all-candidates-cooldown"
+  // misnomer that made C1/C2 lie — audit RC1).
+  let ledgerSkips = 0;
+  let terminalSkips = 0;
+  let invoked = 0;
+  // Codex R1: the terminal set includes "escalated" (the exhaustion sweep runs
+  // BEFORE this act and rewrites exhausted ledgers to escalated — the cohort is
+  // human-owned either way) and "leave-alone" (verified healthy). All three are
+  // truthful non-wedges; only genuine cooldown/defer skips stay retryable.
+  const TERMINAL_SKIPS = new Set(["attempts-exhausted", "escalated", "leave-alone"]);
   for (const cand of ordered) {
     // (a) cooldown/attempts-latched → try the next candidate (MUST-FIX 2).
-    if (shouldSkipItem(cand)) continue;
+    if (shouldSkipItem(cand)) {
+      ledgerSkips += 1;
+      if (TERMINAL_SKIPS.has(skipReason?.(cand))) terminalSkips += 1;
+      continue;
+    }
+    invoked += 1;
     const r = invokeRecoveryPass(cand, {
       boardContext,
       reason: `board-health: ${decision?.gate?.reason ?? "board anomaly"} — holistic recovery-pass delegate`,
     });
     // Start the cooldown window on a dispatch attempt (success OR failure).
+    // CTL-1439 (P0a): this is a DISPATCH marker, not a verdict — the session's
+    // actual conclusion (fixed / leave-alone / escalate) arrives later via
+    // recovery-emit.mjs → recordVerdict. Hardcoding decision:"fix" here was RC2's
+    // "act-and-discard": the ledger claimed a fix verdict before the pass ran.
     try {
       recordIntent(cand, {
         type: "recovery-pass",
-        decision: "fix",
+        decision: "dispatched",
         fix_class: "board-health",
         outcome: !!r?.dispatched,
         source: "board-health",
@@ -6908,7 +6973,18 @@ export function holisticBoardHealthAct(
     // event's act.anchor records the real dispatch handle.
     return { ...r, candidate: cand }; // exactly ONE real dispatch per scan
   }
-  return { dispatched: false, reason: "all-candidates-cooldown" };
+  // EVERY candidate was a terminal ledger skip (exhausted / escalated /
+  // leave-alone) and NONE was invoked → the cohort is truthfully done (C2
+  // non-wedge). Any invoke (even a non-dispatch result — cycle cap, latched)
+  // or any retryable skip keeps the cooldown reason (Codex R1: an actionable
+  // candidate that merely failed to dispatch is NOT a terminal cohort).
+  return {
+    dispatched: false,
+    reason:
+      invoked === 0 && ledgerSkips > 0 && terminalSkips === ledgerSkips
+        ? "all-candidates-exhausted"
+        : "all-candidates-cooldown",
+  };
 }
 
 // startScheduler — immediate authoritative tick, arm the periodic timer, then
