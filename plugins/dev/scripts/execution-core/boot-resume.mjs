@@ -213,7 +213,14 @@ export function surfaceStalePendingApprovals({
       // approval routes through defaultReviveDispatch, whose CTL-615 worktree
       // cross-check needs sig.worktreePath.
       if (!sig.worktreePath && gate.worktreePath) sig.worktreePath = gate.worktreePath;
-      sig.status = "needs-human";
+      // Codex R2 (P1): park as STALLED, not a bare needs-human status — the
+      // terminal label sweep preserves/applies the needs-human label only for
+      // stalled/failed signals (and RETRIES it every tick, which also closes
+      // the transient-label-failure gap), and deriveAttention's phaseFailed
+      // predicate keys terminal stalled phases into the Needs-You bucket. The
+      // stalledReason is mapped to skip in the unstuck sweep (no re-ask loop).
+      sig.status = "stalled";
+      sig.stalledReason = "boot-resume-gate-expired";
       if (!sig.needsHumanSince) sig.needsHumanSince = new Date(now()).toISOString();
       sig.updatedAt = new Date(now()).toISOString();
       sig.explanation = {
@@ -680,6 +687,14 @@ export function reconcileBootResume({
     if (warmSession) {
       try {
         rmSync(bootResumePendingPath(orchDir, ticket), { force: true });
+      } catch {
+        /* best-effort */
+      }
+      // CTL-1443 (Codex R2): a superseded gate's APPROVAL must die with it — a
+      // stale ticket-level sentinel would silently auto-authorize the NEXT
+      // expensive-phase gate for the same ticket (approve-once semantics).
+      try {
+        rmSync(bootResumeApprovedPath(orchDir, ticket), { force: true });
       } catch {
         /* best-effort */
       }

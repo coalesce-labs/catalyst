@@ -291,7 +291,8 @@ describe("boot-resume approval surfacing (CTL-1443)", () => {
     const sig = JSON.parse(
       readFileSync(join(orchDir, "workers", "OTL-41", "phase-recovery-pass.json"), "utf8"),
     );
-    expect(sig.status).toBe("needs-human");
+    expect(sig.status).toBe("stalled"); // terminal-sweep-owned label lifecycle (Codex R2)
+    expect(sig.stalledReason).toBe("boot-resume-gate-expired");
     expect(sig.ticket).toBe("OTL-41");
     expect(sig.explanation.escalation_type).toBe("authorization");
     expect(sig.explanation.call_to_action).toContain("boot-resume-approve");
@@ -326,5 +327,15 @@ describe("boot-resume approval surfacing (CTL-1443)", () => {
     });
     expect(alerts.length).toBe(1);
     expect(alerts[0].identifier).toBe("CTL-4");
+  });
+});
+
+describe("boot-resume approval lifetime (CTL-1443 Codex R2)", () => {
+  test("classifyStalledTicket skips gate-expired parks (no unstuck re-ask loop)", async () => {
+    const { classifyStalledTicket } = await import("./unstuck-sweep.mjs");
+    expect(classifyStalledTicket({ reason: "boot-resume-gate-expired" })).toEqual({
+      category: "skip",
+      action: "skip",
+    });
   });
 });
