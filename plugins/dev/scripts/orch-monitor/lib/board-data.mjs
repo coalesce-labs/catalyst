@@ -655,18 +655,48 @@ export function isTerminalDeadCorpse(worker, linearState) {
 // bg-workers are EXCLUDED from inFlight and freeSlots (they no longer hold a
 // maxParallel slot) and surfaced as their own `dead` count. `workers` is the
 // full BoardWorker[] (live + dead); `maxParallel` the configured ceiling.
+// CTL-764 Phase 7: triage workers are carved out — they are monitor-dispatched
+// and never consume a maxParallel slot. Surfaced as `triage` count separately.
 export function deriveCapacity(workers, maxParallel) {
   const all = Array.isArray(workers) ? workers : [];
   const live = all.filter((w) => !isWorkerDead(w));
+  const liveSlotConsumers = live.filter((w) => w.phase !== "triage");
+  const triageWorkers = live.filter((w) => w.phase === "triage");
   return {
     maxParallel,
-    inFlight: live.length,
-    freeSlots: Math.max(0, maxParallel - live.length),
-    active: live.filter((w) => w.activeState === "active").length,
-    working: live.filter((w) => w.working).length,
-    stuck: live.filter((w) => w.activeState === "stuck").length,
+    inFlight: liveSlotConsumers.length,
+    freeSlots: Math.max(0, maxParallel - liveSlotConsumers.length),
+    active: liveSlotConsumers.filter((w) => w.activeState === "active").length,
+    working: liveSlotConsumers.filter((w) => w.working).length,
+    stuck: liveSlotConsumers.filter((w) => w.activeState === "stuck").length,
     dead: all.filter((w) => isWorkerDead(w)).length,
+    triage: triageWorkers.length,
   };
+}
+
+// deriveStatusCounts — CTL-764 Phase 7: PURE per-disposition ticket counts.
+// Precedence: needs-human > needs-input > blocked > queued. Tickets owned by a
+// live worker (in inFlightTicketIds) are excluded to avoid double-counting
+// against the deck. `tickets` is the board tickets array; `inFlightTicketIds`
+// is a Set<string> of ticket ids that have live workers.
+export function deriveStatusCounts(tickets, inFlightTicketIds) {
+  const counts = { queued: 0, blocked: 0, needsInput: 0, needsHuman: 0 };
+  for (const t of Array.isArray(tickets) ? tickets : []) {
+    if (inFlightTicketIds?.has?.(t.id)) continue;
+    const attn = t.attention ?? null;
+    if (attn === "needs-human" || attn === "needs-input") {
+      counts.needsHuman++;
+      continue;
+    }
+    // Check worker-status disposition first (set by daemon), then fall back to
+    // label-based heldFor for back-compat with pre-CTL-764 boards.
+    const ws = t.workerStatus ?? heldFor(t.labels ?? []);
+    if (ws === "needs-human") { counts.needsHuman++; continue; }
+    if (ws === "needs-input") { counts.needsInput++; continue; }
+    if (ws === "blocked" || ws === HELD_LABEL_BLOCKED) { counts.blocked++; continue; }
+    if (ws === "queued" || ws === HELD_LABEL_WAITING || ws === "waiting") { counts.queued++; }
+  }
+  return counts;
 }
 
 // laneFor — CTL-928 single source of truth for which board lane a non-queued
@@ -2144,7 +2174,15 @@ export async function assembleBoard({ getPrStatus = null, ring = null } = {}) {
     // 6 listed, 3 dead → inFlight 3, freeSlots 3). `dead` is surfaced as its own
     // count so the operator sees the corpses without them consuming capacity. The
     // computation lives in the PURE deriveCapacity (unit-tested) — DRY.
-    config: deriveCapacity(boardWorkers, mp),
+    // CTL-764 Phase 7: per-disposition ticket counts spread into config. inFlightTicketIds
+    // is the set of ticket ids with live workers so we don't double-count vs the deck.
+    config: {
+      ...deriveCapacity(boardWorkers, mp),
+      ...deriveStatusCounts(
+        tickets,
+        new Set(boardWorkers.filter((w) => !isWorkerDead(w)).map((w) => w.ticket)),
+      ),
+    },
     repos,
     workers: boardWorkers.sort((a, b) => (a.runtimeMs ?? 0) - (b.runtimeMs ?? 0)),
     tickets,

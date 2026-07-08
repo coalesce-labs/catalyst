@@ -241,6 +241,16 @@ export interface BoardConfig {
    *  Optional so existing BoardConfig fixtures stay valid; the runtime always
    *  populates it via deriveCapacity. */
   dead?: number;
+  /** CTL-764: monitor-dispatched triage workers — never consume a maxParallel slot.
+   *  Optional so existing BoardConfig fixtures stay valid. */
+  triage?: number;
+  /** CTL-764: per-disposition ticket counts (queued/blocked/needsInput/needsHuman).
+   *  Optional so existing BoardConfig fixtures stay valid; the runtime populates via
+   *  deriveStatusCounts spread into config. */
+  queued?: number;
+  blocked?: number;
+  needsInput?: number;
+  needsHuman?: number;
 }
 
 /** CTL-1050 §3.2: one current service outage, decorated onto the board payload
@@ -404,12 +414,26 @@ export function isWorkerDead(
   worker: { activeState?: BoardActiveState } | null | undefined
 ): boolean;
 
-/** CTL-928: PURE capacity summary — dead bg-workers excluded from inFlight +
- *  freeSlots, surfaced as `dead`. Drives the board config block. */
+/** CTL-928 / CTL-764: PURE capacity summary — dead bg-workers excluded from
+ *  inFlight + freeSlots, surfaced as `dead`; triage workers carved out
+ *  (never consume a maxParallel slot), surfaced as `triage`. */
 export function deriveCapacity(
-  workers: ReadonlyArray<{ activeState?: BoardActiveState; working?: boolean }>,
+  workers: ReadonlyArray<{ activeState?: BoardActiveState; working?: boolean; phase?: string }>,
   maxParallel: number
 ): BoardConfig;
+
+/** CTL-764 Phase 7: PURE per-disposition ticket counts. Tickets owned by a live
+ *  worker (in inFlightTicketIds) are excluded to avoid double-counting.
+ *  Precedence: needs-human > needs-input > blocked > queued. */
+export function deriveStatusCounts(
+  tickets: ReadonlyArray<{
+    id: string;
+    labels?: unknown[];
+    attention?: string | null;
+    workerStatus?: string | null;
+  }>,
+  inFlightTicketIds: Set<string>
+): { queued: number; blocked: number; needsInput: number; needsHuman: number };
 
 /** CTL-928: classify a worker's top-level liveness — durable bg-job state FIRST
  *  (a `running` signal is not proof of life), transcript age second. Returns
