@@ -516,4 +516,22 @@ describe("CTL-1403 reads-by-source emit", () => {
     expect("event.label" in events[0].attributes).toBe(false);
     expect(events[0].attributes["linear.read.source"]).toBe("linearis");
   });
+
+  // Codex P2: a consulted-replica MISS whose live fallback FAILS must report
+  // source=linearis_miss (not a bare-linearis bypass) so the guarantee-violation
+  // alert (source="linearis") isn't tripped by replica misses during an outage.
+  test("replica-miss + failing fallback → source=linearis_miss, result=failed (not a false bypass)", async () => {
+    const dbPath = join(tmp, "catalyst-replica.db");
+    seedReplica(dbPath); // fresh replica, but we read an ABSENT id
+    process.env.CATALYST_LINEAR_REPLICA = "on";
+    process.env.CATALYST_REPLICA_DB = dbPath;
+    installFakeLinearis(tmp, { payload: { error: "boom" }, exitCode: 1 }); // live fallback fails
+    const { code } = await runMain(["read", "CTL-ABSENT"]);
+    expect(code).toBe(1);
+    const events = readLinearReadEvents();
+    expect(events.length).toBe(1);
+    expect(events[0].attributes["linear.read.source"]).toBe("linearis_miss");
+    expect(events[0].attributes["linear.read.result"]).toBe("failed");
+    expect(events[0].severityText).toBe("WARN");
+  });
 });

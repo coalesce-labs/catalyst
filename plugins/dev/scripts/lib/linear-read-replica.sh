@@ -100,7 +100,6 @@ _lrr_emit_read_event() {
     --event-name "catalyst.linear.read" \
     --entity "linear" --action "read" \
     --label "$id" \
-    --linear-ticket "$id" \
     --linear-read-source "$source" \
     --linear-read-result "$result" \
     --linear-read-op "read_ticket" \

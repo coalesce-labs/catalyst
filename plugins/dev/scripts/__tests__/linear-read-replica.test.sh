@@ -150,6 +150,10 @@ assert_eq "emit HIT: op=read_ticket" "read_ticket" "$(echo "$LR" | jq -r '.attri
 assert_eq "emit HIT: event.label=TST-1" "TST-1" "$(echo "$LR" | jq -r '.attributes["event.label"]')"
 assert_eq "emit HIT: service.name" "catalyst.linear-read" "$(echo "$LR" | jq -r '.resource["service.name"]')"
 assert_eq "emit HIT: severity INFO" "INFO" "$(echo "$LR" | jq -r '.severityText')"
+# Codex P2: the ticket id lives ONLY in event.label — never leaked into the resource
+# block (linear.key) or as the linear.issue.identifier attribute (per the contract).
+assert_eq "emit HIT: no ticket id in resource.linear.key" "ABSENT" "$(echo "$LR" | jq -r '.resource["linear.key"] // "ABSENT"')"
+assert_eq "emit HIT: no linear.issue.identifier attr" "ABSENT" "$(echo "$LR" | jq -r '.attributes["linear.issue.identifier"] // "ABSENT"')"
 
 # 11b. absent id → MISS → linearis fallback (stub exits 0) → source=linearis_miss, result=ok.
 clear_events

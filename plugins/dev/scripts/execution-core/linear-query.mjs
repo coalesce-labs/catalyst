@@ -252,6 +252,14 @@ const GATEWAY_STATE_FRESH_MS = 60_000;
 // that touched neither, so (by the same rationale that excludes the cache) they are
 // NOT emitted; counting them would inflate the replica-hit ratio toward a false 1.0
 // and hide real bypasses.
+//
+// SCOPE (Codex P2 / CTL-1403): fetchTicketState is the ticket's named daemon
+// surface and the hot per-tick per-ticket read. Other daemon paths that also shell
+// `linearis issues read` and burn the shared quota — fetchTicketRelations,
+// fetchTicketAssignee, classifyTicketResolution, readTicketLabels/readTicketLabelNodes,
+// and the batch reads — are NOT yet instrumented, so catalyst_linear_read_total
+// undercounts those lower-frequency direct-read contexts. Tracked as a follow-up
+// (extend recordDaemonRead to those call sites) rather than expanded here.
 function recordDaemonRead(source, result, identifier, ageMs = null) {
   try {
     emitLinearReadEvent({
@@ -367,7 +375,11 @@ export function fetchTicketState(
   try {
     const node = JSON.parse(stdout);
     const state = node?.state?.name ?? node?.state ?? null;
-    recordDaemonRead(liveSource, "ok", identifier, daemonAgeMs(node)); // live read served data
+    // CTL-1403 (Codex P2): a code:0 read that carries NO state (deleted/missing
+    // ticket → error body, or transient no-state) served no usable data and the
+    // caller returns null — so record result=failed, not ok, or the failure alert
+    // would miss these live-read failures. age_ms only when data was actually served.
+    recordDaemonRead(liveSource, state != null ? "ok" : "failed", identifier, state != null ? daemonAgeMs(node) : null);
     if (cache && state != null) cache.set(identifier, state); // populate on success only
     else if (state == null && probeBackoff && cache?.setNegative) {
       // A4 (Codex #2579): a `linearis issues read` that parses fine but carries NO

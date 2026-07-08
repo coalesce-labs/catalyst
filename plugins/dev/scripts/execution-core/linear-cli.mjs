@@ -364,6 +364,23 @@ function ageMsFrom(payload) {
   const age = Date.now() - t;
   return age >= 0 ? age : null;
 }
+// emitLinearisRead — run a linearis read and emit the reads-by-source event with
+// the CORRECT source on BOTH outcomes: success → result=ok (via emit()); failure →
+// result=failed HERE, using the caller's meta, before the throw unwinds to main()
+// where metaFor/source is no longer known. This is what keeps a consulted-replica
+// MISS/EXCEPTION whose live fallback FAILS from being misreported as a bare-linearis
+// bypass in catalyst.linear.read{source,result} (Codex P2). The re-throw preserves
+// main()'s existing stderr-envelope + exit-1 handling.
+function emitLinearisRead(readArgs, meta, readCtx, runOpts) {
+  let payload;
+  try {
+    payload = runOpts ? runLinearis(readArgs, runOpts) : runLinearis(readArgs);
+  } catch (err) {
+    recordRead(meta, "failed", readCtx);
+    throw err;
+  }
+  emit(payload, meta, readCtx);
+}
 function warnFallback(reason, id) {
   // Only warn when the operator OPTED IN (mode=on) but the replica didn't serve —
   // that is the surfacing signal. On a standard node (mode off) this is silent.
@@ -410,7 +427,7 @@ async function cmdRead(id, replica, flags = {}) {
   if (flagArgs.length > 0) {
     if (replica?.db) { try { replica.db.close(); } catch { /* already closed */ } }
     warnFallback("read-flags", id);
-    emit(runLinearis(readArgs), metaFor("linearis", null, { replica_skip: "read-flags" }), { op: "read", entity: id });
+    emitLinearisRead(readArgs, metaFor("linearis", null, { replica_skip: "read-flags" }), { op: "read", entity: id });
     return 0;
   }
   if (replica?.db) {
@@ -431,12 +448,12 @@ async function cmdRead(id, replica, flags = {}) {
     // _meta.source so monitoring can tell a clean cache-miss from a broken replica.
     replica.db.close();
     warnFallback(threw ? "replica-exception" : "miss", id);
-    emit(runLinearis(readArgs), metaFor(threw ? "linearis_exception" : "linearis_miss", replica), { op: "read", entity: id });
+    emitLinearisRead(readArgs, metaFor(threw ? "linearis_exception" : "linearis_miss", replica), { op: "read", entity: id });
     return 0;
   }
   // No usable replica: linearis is the direct path. warn only if the operator opted in.
   warnFallback(replica?.skip ?? "replica-absent", id);
-  emit(runLinearis(readArgs), metaFor("linearis", null, { replica_skip: replica?.skip ?? null }), { op: "read", entity: id });
+  emitLinearisRead(readArgs, metaFor("linearis", null, { replica_skip: replica?.skip ?? null }), { op: "read", entity: id });
   return 0;
 }
 
@@ -446,7 +463,7 @@ async function cmdRead(id, replica, flags = {}) {
 // today on every node; they simply aren't replica-accelerated yet.
 function cmdList(flags) {
   // timeoutMs: 0 — uncapped, matching direct `linearis issues list` (broad pages can exceed 8s).
-  emit(runLinearis(["issues", "list", ...flagPairs(flags)], { timeoutMs: 0 }), metaFor("linearis", null, { list_replica: "pending" }), { op: "list" });
+  emitLinearisRead(["issues", "list", ...flagPairs(flags)], metaFor("linearis", null, { list_replica: "pending" }), { op: "list" }, { timeoutMs: 0 });
   return 0;
 }
 function cmdSearch(query, flags) {
@@ -455,7 +472,7 @@ function cmdSearch(query, flags) {
     return 2;
   }
   // timeoutMs: 0 — uncapped, matching direct `linearis issues search` (expensive searches can exceed 8s).
-  emit(runLinearis(["issues", "search", query, ...flagPairs(flags)], { timeoutMs: 0 }), metaFor("linearis", null, { search_replica: "pending" }), { op: "search" });
+  emitLinearisRead(["issues", "search", query, ...flagPairs(flags)], metaFor("linearis", null, { search_replica: "pending" }), { op: "search" }, { timeoutMs: 0 });
   return 0;
 }
 
@@ -505,14 +522,10 @@ export async function main(argv) {
     // never sees a half-emitted payload).
     if (err && err._linearis) {
       process.stderr.write(JSON.stringify(err._linearis) + "\n");
-      // CTL-1403: a linearis exec failure = the live read itself failed (no data
-      // served). Record result=failed so the read-failure metric fires. Source is
-      // coarse here — the throw unwinds before metaFor, so we know only that a live
-      // linearis call failed. entity only for `read` (list/search have no single id).
-      recordRead({ source: "linearis" }, "failed", {
-        op: cmd,
-        entity: cmd === "read" ? (positionals[0] ?? null) : null,
-      });
+      // CTL-1403: the reads-by-source failure event is emitted at the read site
+      // (emitLinearisRead) with the CORRECT source — a consulted-replica MISS whose
+      // live fallback fails is `linearis_miss`, not a bare-linearis bypass. So no
+      // emit here (doing so would double-count and misclassify the source).
       return 1;
     }
     throw err;

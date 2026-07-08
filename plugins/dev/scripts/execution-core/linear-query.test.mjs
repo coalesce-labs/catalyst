@@ -833,6 +833,17 @@ describe("fetchTicketState — reads-by-source emit (CTL-1403)", () => {
     expect(events[0].severityText).toBe("WARN");
   });
 
+  test("live exec code:0 but NO state (deleted/error body) → result=failed (Codex P2)", () => {
+    // A missing/deleted ticket returns code:0 + an error body — parses fine, no state.
+    const exec = () => ({ code: 0, stdout: JSON.stringify({ error: "not found" }), stderr: "" });
+    expect(fetchTicketState("CTL-6", { exec })).toBeNull();
+    const events = readEvents();
+    expect(events.length).toBe(1);
+    expect(events[0].attributes["linear.read.result"]).toBe("failed"); // NOT ok — no state served
+    expect(events[0].severityText).toBe("WARN");
+    expect("linear.read.age_ms" in events[0].attributes).toBe(false); // no data → no age
+  });
+
   test("in-mem cache HIT is NOT counted (tier-1 exclusion)", () => {
     const cache = createTicketStateCache({ now: () => 0 });
     // First read: no replica → live exec → emits ONE (source=linearis).
