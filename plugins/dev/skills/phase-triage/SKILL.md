@@ -112,16 +112,21 @@ fi
 # it) re-dispatched forever. Bare names remain the operator-sweep fallback.
 TICKET="${CATALYST_TICKET:-${TICKET:-}}"
 : "${TICKET:?phase-triage: TICKET env var required}"
+# CTL-1441: NEVER fall back to $(pwd) for the worker dir — a triage.json outside
+# it is invisible to hasTriageArtifact and re-triages forever. Resolve ORCH_DIR
+# itself to the canonical location (honoring a custom CATALYST_DIR install) and
+# EXPORT it, so the phase-agent-emit-complete wrapper's signal flip — gated on
+# CATALYST_ORCHESTRATOR_DIR — lands in the SAME tree as triage.json (Codex R2:
+# a worker-dir-only fallback left phase-triage.json never flipping to done,
+# blocking triage→research advancement).
 ORCH_DIR="${CATALYST_ORCHESTRATOR_DIR:-${ORCH_DIR:-}}"
-
-WORKER_DIR="${WORKER_DIR:-${ORCH_DIR:+${ORCH_DIR}/workers/${TICKET}}}"
-# CTL-1441: NEVER fall back to $(pwd) — a triage.json outside the worker dir is
-# invisible to hasTriageArtifact and re-triages forever. Default to the
-# canonical orch dir (honoring a custom CATALYST_DIR install) and say so.
-if [[ -z "$WORKER_DIR" ]]; then
-  WORKER_DIR="${CATALYST_DIR:-${HOME}/catalyst}/execution-core/workers/${TICKET}"
-  echo "phase-triage: ORCH_DIR unset — defaulting WORKER_DIR to ${WORKER_DIR} (CTL-1441)" >&2
+if [[ -z "$ORCH_DIR" ]]; then
+  ORCH_DIR="${CATALYST_DIR:-${HOME}/catalyst}/execution-core"
+  echo "phase-triage: orchestrator dir unset — defaulting to ${ORCH_DIR} (CTL-1441)" >&2
 fi
+export CATALYST_ORCHESTRATOR_DIR="${CATALYST_ORCHESTRATOR_DIR:-$ORCH_DIR}"
+
+WORKER_DIR="${WORKER_DIR:-${ORCH_DIR}/workers/${TICKET}}"
 mkdir -p "$WORKER_DIR"
 
 # 1. Read ticket via direct SQL against the replica (CTL-1397 — never bare

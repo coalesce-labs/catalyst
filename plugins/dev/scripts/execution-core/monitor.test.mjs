@@ -1412,7 +1412,7 @@ describe("triage re-dispatch guard (CTL-1441)", () => {
     expect(dispatch).not.toHaveBeenCalled();
   });
 
-  test("done phase-triage.json + missing triage.json → re-dispatch ALLOWED (bounded remedy) + mismatch marker", () => {
+  test("done phase-triage.json + missing triage.json → stale signal RETIRED, real re-dispatch + mismatch marker", () => {
     enroll("ENG", { status: "Ready" });
     const realOrchDir = join(catalystDir, "execution-core");
     const dir = join(realOrchDir, "workers", "ENG-9");
@@ -1422,10 +1422,37 @@ describe("triage re-dispatch guard (CTL-1441)", () => {
     reconcileAll({ exec });
     const dispatch = mock(() => ({ code: 0 }));
     sweepMissingTriage(sweepOpts(realOrchDir, dispatch));
-    // research's prior-artifact gate needs triage.json, so the re-dispatch is
-    // the remedy — but the artifact mismatch is surfaced via the marker.
+    // The launcher short-circuits done signals as idempotent no-ops, so the
+    // sweep retires the stale completion signal (rename, forensics kept) and
+    // the dispatch is a REAL launch — counted by the cap.
     expect(dispatch).toHaveBeenCalledTimes(1);
+    expect(existsSync(join(dir, "phase-triage.json"))).toBe(false);
+    expect(existsSync(join(dir, "phase-triage.json.stale-ctl1441"))).toBe(true);
     expect(existsSync(join(dir, ".triage-artifact-mismatch-warned"))).toBe(true);
+    const counter = JSON.parse(readFileSync(join(dir, ".triage-dispatch-count.json"), "utf8"));
+    expect(counter.count).toBe(1);
+  });
+
+  test("at the cap with the final attempt still RUNNING → park deferred (no label) until the signal settles", () => {
+    enroll("ENG", { status: "Ready" });
+    const realOrchDir = join(catalystDir, "execution-core");
+    const dir = join(realOrchDir, "workers", "ENG-9");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, ".triage-dispatch-count.json"), JSON.stringify({ count: 3 }));
+    writeFileSync(join(dir, "phase-triage.json"), JSON.stringify({ status: "running" }));
+    const exec = execReturning({ ENG: [node("ENG-9")] });
+    reconcileAll({ exec });
+    const dispatch = mock(() => ({ code: 0 }));
+    const labelNeedsHuman = mock(() => {});
+    sweepMissingTriage(sweepOpts(realOrchDir, dispatch, labelNeedsHuman));
+    expect(dispatch).not.toHaveBeenCalled(); // count is spent — no new dispatch
+    expect(labelNeedsHuman).not.toHaveBeenCalled(); // the live attempt may still succeed
+    expect(existsSync(join(dir, ".triage-redispatch-capped"))).toBe(false);
+    // Once the worker settles (failed) without the artifact, the park lands.
+    writeFileSync(join(dir, "phase-triage.json"), JSON.stringify({ status: "failed" }));
+    sweepMissingTriage(sweepOpts(realOrchDir, dispatch, labelNeedsHuman));
+    expect(labelNeedsHuman).toHaveBeenCalledTimes(1);
+    expect(existsSync(join(dir, ".triage-redispatch-capped"))).toBe(true);
   });
 
   test("a failed spawn still counts toward the cap (the no-artifacts class is bounded)", () => {
