@@ -21,6 +21,11 @@ import { buildUnstuckActSeams } from "./unstuck-act-seams.mjs";
 // classifyStalledTicket — pure top-level router (CTL-1064)
 // ---------------------------------------------------------------------------
 describe("classifyStalledTicket — pure top-level router (CTL-1064)", () => {
+  test("escalation-ask-cap stalls are SKIPPED — already terminally escalated by CTL-1442 (no re-ask loop)", () => {
+    const r = classifyStalledTicket({ reason: "escalation-ask-cap" });
+    expect(r).toEqual({ category: "skip", action: "skip" });
+  });
+
   test("rebase_refused_dirty_tree → dirty-tree/clear-noise-and-retry", () => {
     const r = classifyStalledTicket({ reason: "rebase_refused_dirty_tree" });
     expect(r.category).toBe("dirty-tree");

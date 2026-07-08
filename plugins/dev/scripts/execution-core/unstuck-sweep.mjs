@@ -83,6 +83,11 @@ export const STALL_CATEGORY_MAP = Object.freeze({
   source_conflict_ctl708_unavailable: { category: "source-conflict", action: "force-push-if-clean" },
   "orphan-sweep-stale":               { category: "orphan-stale",   action: "emit-phase-complete-if-merged" },
   "remediate-cycle-cap-exhausted":    { category: "remediate-cap",  action: "escalate" },
+  // CTL-1442 (Codex R5): a ticket parked by the no-progress escalation ask-cap
+  // is ALREADY terminally escalated (needs-human + brief + final event) — the
+  // unstuck sweep must stay quiet, not re-escalate it every interval (that
+  // would recreate the ask loop through a different subsystem).
+  "escalation-ask-cap":               { category: "skip",           action: "skip" },
 });
 
 // classifyStalledTicket — PURE top-level router (Phase 1). No IO.
