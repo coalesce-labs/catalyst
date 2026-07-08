@@ -424,6 +424,10 @@ export function reasoningRecoveryPass(items, opts = {}) {
             decision: "escalate",
             reason: classification.details.reason,
             escalation: escalationPayload,
+            // CTL-1439: a genuine escalation IS the verdict — stamp it so the
+            // ledger's verdict fields always agree with the decision.
+            verdict: "escalate",
+            verdictReason: classification.details.reason ?? null,
           });
           actionLog.push("recorded escalation intent");
         } catch (err) {
@@ -1691,6 +1695,15 @@ export const RECOVERY_MAX_ATTEMPTS =
 export const RECOVERY_TERMINAL_INTENT_TTL_MS =
   Number(process.env.CATALYST_RECOVERY_TERMINAL_TTL_DAYS) * 864e5 || 7 * 864e5;
 
+// CTL-1439 (P0a): TTL on a leave-alone verdict. A recovery-pass that reviewed the
+// ticket and concluded "no action needed" (stale flag / actively human-driven /
+// false positive) suppresses re-review for this window, then the ticket re-enters
+// (conditions change). Deliberately much longer than the 30-min action cooldown —
+// re-reviewing a verified-healthy ticket every half hour is the RC2 waste loop.
+// Env-only, matching its siblings (NaN*x and 0*x are falsy → 24h default).
+export const RECOVERY_LEAVE_ALONE_TTL_MS =
+  Number(process.env.CATALYST_RECOVERY_LEAVE_ALONE_TTL_HOURS) * 3600e3 || 24 * 3600e3;
+
 function recoveryIntentPath(orchDir, ticket) {
   return join(orchDir, ".recovery-intents", `${ticket}.json`);
 }
@@ -1719,12 +1732,18 @@ export function readDeferredBoardHealthIntents(orchDir, { now = () => Date.now()
     try {
       const data = JSON.parse(readFileSync(join(dir, f), "utf8"));
       if (data?.decision === "defer" && data?.fix_class === "board-health") {
-        // CTL-1432 (Codex P1): honor the 30-min defer cooldown — defaultShouldSkipItem
-        // treats a defer marker as cooldown-only, so a deferred intent still inside its
-        // window is not yet an actionable anchor (else the gate proceeds and then the
-        // act site skips it → a wasted proceed).
-        const last = typeof data?.lastTs === "number" ? data.lastTs : data?.ts;
-        if (typeof last === "number" && now() - last < cooldownMs) continue;
+        // CTL-1440 (P0b): age off the FROZEN anchor `deferredSince` (set on the
+        // first board-health defer, preserved across re-defers) — lastTs now
+        // refreshes on every write, so keying it here would starve the consumer
+        // (the pre-CTL-1432 bug). Legacy entries without the field fall back to
+        // lastTs ?? ts (their lastTs was frozen, so it IS the anchor).
+        const anchor =
+          typeof data?.deferredSince === "number"
+            ? data.deferredSince
+            : typeof data?.lastTs === "number"
+              ? data.lastTs
+              : data?.ts;
+        if (typeof anchor === "number" && now() - anchor < cooldownMs) continue;
         out.push(f.replace(/\.json$/, ""));
       }
     } catch {
@@ -1769,21 +1788,41 @@ export function defaultRecordIntent(ticket, intent, opts = {}) {
     Boolean(intent.escalated) ||
     intent.decision === "escalate"; // an escalate-pass latches escalated
 
-  // CTL-1432 (Codex P1): a REPEATED defer→board-health is a no-op handoff — the ticket
-  // is already handed to the board-health delegate, so re-deferring must NOT refresh
-  // lastTs. Otherwise the per-item recovery pass (which runs BEFORE boardHealthPass in
-  // the same tick) re-defers the marker back under the 30-min cooldown every cycle, and
-  // the board-health consumer — which gates on lastTs — is starved forever. Freezing
-  // lastTs lets the marker AGE OUT so board-health finally consumes + dispatches it.
-  const isRepeatedBoardHealthDefer =
-    intent.decision === "defer" &&
-    (intent.fix_class ?? prior.fix_class) === "board-health" &&
-    prior.decision === "defer" &&
-    typeof prior.lastTs === "number";
+  // CTL-1440 (P0b, replaces the CTL-1432 lastTs FREEZE): the freeze shared one
+  // field between two consumers wanting OPPOSITE semantics — the board-health
+  // consumer needs the defer to AGE (a frozen anchor), while the per-item pass's
+  // cooldown gate needs the LAST touch (refreshing) — and that collision drove
+  // the RC3 defer storm (a frozen lastTs is permanently past-cooldown, so the
+  // per-item pass re-processed + re-emitted every ~2-3s fs.watch tick for 71 min
+  // on OTL-13). Decoupled: `deferredSince` is the frozen aging anchor (set on
+  // the FIRST board-health defer, preserved across re-defers, consumed by
+  // readDeferredBoardHealthIntents); `lastTs` now ALWAYS refreshes (drives the
+  // cooldown gates), so a re-defer is throttled to once per cooldown window and
+  // the consumer is still never starved. Legacy frozen entries fall back to
+  // prior.lastTs as their anchor.
+  const isBoardHealthDefer =
+    intent.decision === "defer" && (intent.fix_class ?? prior.fix_class) === "board-health";
+  const deferredSince = isBoardHealthDefer
+    ? typeof prior.deferredSince === "number"
+      ? prior.deferredSince
+      : prior.decision === "defer" && typeof prior.lastTs === "number"
+        ? prior.lastTs // legacy frozen entry — its lastTs WAS the anchor
+        : ts
+    : null;
+  // CTL-1439 (P0a): the session's ACTUAL verdict rides in the ledger. A write that
+  // carries a verdict stamps all three fields afresh. A verdict-less MARKER write
+  // (the "dispatched" dispatch marker / a "defer" hand-off) PRESERVES the prior
+  // verdict trail for observability — but a verdict-less TERMINAL/classifier write
+  // (fix / escalate / shadow) CLEARS it (Codex P2 on #2586: preserving there let
+  // a decision:"escalate" entry carry verdict:"leave-alone", corrupting the audit
+  // surface — the verdict fields must never contradict the decision).
+  const hasVerdict = typeof intent.verdict === "string";
+  const isMarkerWrite = intent.decision === "dispatched" || intent.decision === "defer";
   const entry = {
     ticket,
     ts: typeof prior.ts === "number" ? prior.ts : ts, // first-action timestamp
-    lastTs: isRepeatedBoardHealthDefer ? prior.lastTs : ts, // most-recent action ts (drives cooldown)
+    lastTs: ts, // most-recent action ts (drives cooldown; CTL-1440 always refreshes)
+    ...(deferredSince != null ? { deferredSince } : {}),
     decision: intent.decision,
     fix_class: intent.fix_class ?? prior.fix_class ?? null,
     attempts:
@@ -1791,6 +1830,15 @@ export function defaultRecordIntent(ticket, intent, opts = {}) {
         ? intent.attempts
         : (typeof prior.attempts === "number" ? prior.attempts : 0) + 1,
     escalated,
+    ...(hasVerdict
+      ? { verdict: intent.verdict, verdictReason: intent.verdictReason ?? null, verdictTs: ts }
+      : isMarkerWrite && typeof prior.verdict === "string"
+        ? {
+            verdict: prior.verdict,
+            verdictReason: prior.verdictReason ?? null,
+            verdictTs: prior.verdictTs ?? null,
+          }
+        : {}),
   };
 
   try {
@@ -1803,12 +1851,74 @@ export function defaultRecordIntent(ticket, intent, opts = {}) {
   return entry;
 }
 
-// defaultShouldSkipItem — true when recovery should NOT act this pass. Fail-OPEN
-// on absent/malformed ledger (returns false → recovery proceeds). Evaluation
-// order: escalated (terminal) → attempts (terminal) → cooldown (transient).
-export function defaultShouldSkipItem(ticket, opts = {}) {
+// recordVerdict — CTL-1439 (P0a). Persist a recovery-pass session's ACTUAL
+// conclusion into the intent ledger (the dispatch-time write is only a
+// "dispatched" marker — see holisticBoardHealthAct). Three verdicts:
+//   fixed       → decision:"fixed", attempts PINNED (the dispatch already counted
+//                 this attempt; a verdict write must not double-count it).
+//   leave-alone → decision:"leave-alone", attempts REFUNDED by one (a reviewed-
+//                 healthy pass must not burn a fix attempt — audit RC1/RC2 (d));
+//                 defaultShouldSkipItem then suppresses re-review for
+//                 RECOVERY_LEAVE_ALONE_TTL_MS.
+//   escalate    → decision:"escalate" (latches escalated:true — existing terminal
+//                 semantics; the escalated TTL governs from here).
+// Returns the written entry, or null on an unknown verdict / no orchDir.
+export function recordVerdict(ticket, { verdict, reason = null } = {}, opts = {}) {
+  if (verdict === "leave-alone") {
+    const priorAttempts = defaultReadIntentAttempts(ticket, opts);
+    return defaultRecordIntent(
+      ticket,
+      {
+        type: "recovery-pass",
+        decision: "leave-alone",
+        attempts: Math.max(priorAttempts - 1, 0),
+        verdict,
+        verdictReason: reason,
+      },
+      opts,
+    );
+  }
+  if (verdict === "fixed") {
+    const priorAttempts = defaultReadIntentAttempts(ticket, opts);
+    return defaultRecordIntent(
+      ticket,
+      {
+        type: "recovery-pass",
+        decision: "fixed",
+        attempts: priorAttempts,
+        verdict,
+        verdictReason: reason,
+      },
+      opts,
+    );
+  }
+  if (verdict === "escalate") {
+    return defaultRecordIntent(
+      ticket,
+      {
+        type: "recovery-pass",
+        decision: "escalate",
+        escalated: true,
+        verdict,
+        verdictReason: reason,
+      },
+      opts,
+    );
+  }
+  return null;
+}
+
+// defaultSkipReason — CTL-1440 (P0b): the reason-bearing form of the skip gate.
+// null → recovery may act; otherwise WHY it must not, one of:
+//   "defer-cooldown" | "escalated" | "leave-alone" | "attempts-exhausted" | "cooldown".
+// Lets the holistic act distinguish a RETRYABLE cooldown skip from a TERMINAL
+// attempts-exhausted one (the "all-candidates-cooldown" misnomer, audit RC1) so
+// C1's skippedReason and C2's wedge predicate tell the truth. Fail-OPEN on
+// absent/malformed ledger. Evaluation order: defer (cooldown-only) → escalated
+// (terminal, TTL) → leave-alone (verdict, TTL) → attempts (terminal) → cooldown.
+export function defaultSkipReason(ticket, opts = {}) {
   const orchDir = opts.orchDir ?? resolveOrchDir();
-  if (!orchDir) return false;
+  if (!orchDir) return null;
   const now = opts.now ?? (() => Date.now());
   const p = recoveryIntentPath(orchDir, ticket);
 
@@ -1816,7 +1926,7 @@ export function defaultShouldSkipItem(ticket, opts = {}) {
   try {
     data = JSON.parse(readFileSync(p, "utf8"));
   } catch {
-    return false; // no ledger / malformed → never acted → don't skip
+    return null; // no ledger / malformed → never acted → don't skip
   }
 
   // CTL-1157 Workstream B: a DEFER marker is cooldown-ONLY — never attempts-
@@ -1824,14 +1934,28 @@ export function defaultShouldSkipItem(ticket, opts = {}) {
   // BOTH the per-item path AND board-health's holistic pass can reconsider the
   // untyped stuck item (it never dead-ends at a permanent latch).
   if (data?.decision === "defer") {
-    const last = typeof data?.lastTs === "number" ? data.lastTs : data?.ts;
-    return typeof last === "number" && now() - last < RECOVERY_COOLDOWN_MS;
+    // CTL-1440 (Codex R1): TWO gates for a board-health defer. The per-item
+    // pass throttles on lastTs (the last touch — a re-defer refreshes it, so
+    // re-processing is once per window). The HOLISTIC act (opts.holistic) gates
+    // on the FROZEN aging anchor deferredSince: the per-item pass re-deferring
+    // seconds before board-health reads is a no-op handoff and must not push
+    // the aged candidate back under cooldown (the residual starvation half of
+    // the RC3 collision). Non-board-health defers keep the lastTs gate.
+    const holisticAnchor =
+      opts.holistic && data?.fix_class === "board-health" && typeof data?.deferredSince === "number"
+        ? data.deferredSince
+        : null;
+    const last =
+      holisticAnchor ?? (typeof data?.lastTs === "number" ? data.lastTs : data?.ts);
+    return typeof last === "number" && now() - last < RECOVERY_COOLDOWN_MS
+      ? "defer-cooldown"
+      : null;
   }
 
   // (c) already escalated → terminal latch, but TTL-bounded (CTL-1431). Within the
   // TTL it still skips (the ticket is handed off to a human); once the intent ages
   // past RECOVERY_TERMINAL_INTENT_TTL_MS it goes stale and the ticket RE-ENTERS the
-  // recovery triage funnel. Return false DIRECTLY on expiry — do NOT fall through to
+  // recovery triage funnel. Return null DIRECTLY on expiry — do NOT fall through to
   // the attempts-exhausted branch below: an escalated intent already has attempts ≥
   // 2, so a fall-through would instantly re-latch there (that branch has no age
   // gate). Derived purely from timestamps, so NO file mutation on expiry (mirrors
@@ -1841,18 +1965,164 @@ export function defaultShouldSkipItem(ticket, opts = {}) {
     // A timestamp-less escalation (defaultClearIntentCooldown deletes both ts fields
     // while KEEPING escalated as a deliberately-terminal latch) cannot be aged out —
     // it stays terminal. (CTL-1431 Codex F3.)
-    if (typeof last !== "number") return true;
-    return now() - last < RECOVERY_TERMINAL_INTENT_TTL_MS;
+    if (typeof last !== "number") return "escalated";
+    return now() - last < RECOVERY_TERMINAL_INTENT_TTL_MS ? "escalated" : null;
   }
 
-  // (b) attempts exhausted → stop self-healing.
-  if (typeof data?.attempts === "number" && data.attempts >= RECOVERY_MAX_ATTEMPTS) return true;
+  // (CTL-1439 P0a) a LEAVE-ALONE verdict — the pass reviewed this ticket and
+  // concluded no action is needed (stale flag / actively human-driven / false
+  // positive). Skip re-review for the leave-alone TTL, then RE-ENTER with a
+  // direct null (mirrors the escalated short-circuit above — never fall through
+  // to the attempts latch: a reviewed-healthy ticket must not dead-end there).
+  if (data?.decision === "leave-alone") {
+    const last = typeof data?.lastTs === "number" ? data.lastTs : data?.ts;
+    if (typeof last !== "number") return null; // timestamp-less verdict → fail-open, re-enter
+    return now() - last < RECOVERY_LEAVE_ALONE_TTL_MS ? "leave-alone" : null;
+  }
+
+  // (b) attempts exhausted → stop self-healing (escalateExhaustedIntents turns
+  // this into a LOUD escalation on the next sweep — CTL-1440).
+  if (typeof data?.attempts === "number" && data.attempts >= RECOVERY_MAX_ATTEMPTS) {
+    return "attempts-exhausted";
+  }
 
   // (a) acted within the cooldown window → too soon, skip this pass.
   const last = typeof data?.lastTs === "number" ? data.lastTs : data?.ts;
-  if (typeof last === "number" && now() - last < RECOVERY_COOLDOWN_MS) return true;
+  if (typeof last === "number" && now() - last < RECOVERY_COOLDOWN_MS) return "cooldown";
 
-  return false;
+  return null;
+}
+
+// defaultShouldSkipItem — true when recovery should NOT act this pass. The
+// boolean view over defaultSkipReason (same branches, same order — see above).
+export function defaultShouldSkipItem(ticket, opts = {}) {
+  return defaultSkipReason(ticket, opts) !== null;
+}
+
+// escalateExhaustedIntents — CTL-1440 (P0b): the terminal-state policy sweep.
+// An intent whose fix attempts are exhausted (attempts >= max) WITHOUT a verdict
+// must escalate LOUDLY — ledger escalated:true (B1's 7-day TTL then ages it out
+// for re-entry), needs-human label (via the injected label-guard path), a
+// curated brief on the recovery-pass signal (→ the monitor Needs-You inbox), an
+// app-actor ticket comment, and a ticket-tagged recovery.escalated event —
+// never a silent permanent latch (audit RC1: NOTHING un-latched an
+// attempts-exhausted open ticket; they rotted for weeks). Idempotent: the
+// escalated:true it writes excludes the entry from every later scan. Only the
+// no-verdict decisions ("dispatched" dispatch markers and "fix" classifier
+// writes) are swept — leave-alone / escalate / defer / fixed carry their own
+// terminal policies. Never throws; returns the tickets it escalated.
+export function escalateExhaustedIntents(orchDir, opts = {}) {
+  const {
+    now = () => Date.now(),
+    maxAttempts = RECOVERY_MAX_ATTEMPTS,
+    recordIntent = (t, i) => defaultRecordIntent(t, i, { orchDir, now }),
+    postComment = defaultPostComment,
+    emitEvent = defaultEmitEvent,
+    labelNeedsHuman = null, // (orchDir, ticket) => void — scheduler wires label-guard
+    writeSignal = (t, payload) => defaultWriteEscalationSignal(t, payload, { orchDir }),
+    // Codex R1: a finished ticket can hold a stale exhausted ledger until the
+    // terminal cleanup (recoveryForgetIntent) runs LATER in the tick — the sweep
+    // must not page a human about a Done ticket. The scheduler wires this to the
+    // cached terminal/merged check; default keeps the function pure/hermetic.
+    isActive = () => true,
+    log = defaultLogFn,
+  } = opts;
+  if (!orchDir) return [];
+  let files;
+  try {
+    files = readdirSync(join(orchDir, ".recovery-intents"));
+  } catch {
+    return [];
+  }
+  const escalatedTickets = [];
+  for (const f of files) {
+    if (!f.endsWith(".json")) continue;
+    let data;
+    try {
+      data = JSON.parse(readFileSync(join(orchDir, ".recovery-intents", f), "utf8"));
+    } catch {
+      continue; // malformed → skip (fail-open)
+    }
+    const sweepable = data?.decision === "dispatched" || data?.decision === "fix";
+    if (!sweepable || data?.escalated === true) continue;
+    if (!(typeof data?.attempts === "number" && data.attempts >= maxAttempts)) continue;
+    const ticket = f.replace(/\.json$/, "");
+    // Codex R1: never escalate a finished ticket (fail toward ACTIVE — a wrongly
+    // skipped live ticket just waits a tick; the ledger is forgotten by the
+    // terminal cleanup once the ticket is confirmed done).
+    let active = true;
+    try {
+      active = isActive(ticket) !== false;
+    } catch {
+      active = true;
+    }
+    if (!active) continue;
+    const reason = `self-heal attempts exhausted (${data.attempts} dispatches without a recorded verdict)`;
+    const escalation = {
+      escalation_type: "authorization",
+      problem: `${ticket} consumed ${data.attempts} recovery attempts (last decision "${data.decision}") without any recorded verdict — the self-heal loop is not resolving it.`,
+      call_to_action: `look at ${ticket}: authorize another recovery cycle (clear its ledger latch), or take it over?`,
+      recommendation: `inspect the last recovery-pass session for ${ticket}; repeated verdict-less deaths usually mean the ticket needs a human decision`,
+      risk: `left latched it rots silently — the audit RC1 failure this sweep exists to prevent`,
+      why_asking: reason,
+      observed: {
+        attempts: data.attempts,
+        decision: data.decision ?? null,
+        fix_class: data.fix_class ?? null,
+      },
+      attempts: [],
+    };
+    try {
+      recordIntent(ticket, {
+        type: "recovery-pass",
+        decision: "escalate",
+        escalated: true,
+        attempts: data.attempts, // pin — exhaustion is the finding, not a new attempt
+        verdict: "escalate",
+        verdictReason: reason,
+      });
+    } catch (err) {
+      log(`recovery-reasoning: ${ticket} exhausted-escalate ledger write failed: ${err.message}`);
+      continue; // without the latch the sweep would re-fire every tick — try again next tick
+    }
+    // Codex R1: defaultRecordIntent swallows write failures (best-effort by
+    // design) — VERIFY the latch actually landed before any human-facing side
+    // effect, or a disk-full/permission failure would re-post the signal/
+    // comment/label/event every tick.
+    let latched = false;
+    try {
+      latched =
+        JSON.parse(readFileSync(join(orchDir, ".recovery-intents", f), "utf8"))?.escalated === true;
+    } catch {
+      latched = false;
+    }
+    if (!latched) {
+      log(`recovery-reasoning: ${ticket} exhausted-escalate latch did not persist — deferring side effects to the next tick`);
+      continue;
+    }
+    try {
+      writeSignal(ticket, escalation);
+    } catch (err) {
+      log(`recovery-reasoning: ${ticket} exhausted-escalate signal write failed: ${err.message}`);
+    }
+    try {
+      labelNeedsHuman?.(orchDir, ticket);
+    } catch (err) {
+      log(`recovery-reasoning: ${ticket} exhausted-escalate label failed: ${err.message}`);
+    }
+    emitEvent({ type: "recovery.escalated", ticket, reason, escalation });
+    try {
+      postComment(
+        ticket,
+        `🔼 **recovery-pass** self-heal attempts exhausted on this ticket — escalated to the operator. ${reason}. (See your inbox.)`,
+      );
+    } catch {
+      /* comment is best-effort; the signal + event are the durable surfaces */
+    }
+    escalatedTickets.push(ticket);
+    log(`recovery-reasoning: ${ticket} attempts-exhausted → escalated loudly (CTL-1440)`);
+  }
+  return escalatedTickets;
 }
 
 // defaultForgetIntent — delete a ticket's recovery-intent ledger entry. The
