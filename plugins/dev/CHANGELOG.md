@@ -1,5 +1,24 @@
 # Changelog
 
+## [12.26.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.25.0...catalyst-dev-v12.26.0)
+
+Jul 08, 2026
+
+<!-- ai-enhanced -->
+
+### Linear Read Observability & Actuation Liveness
+
+Every Linear read now emits a `catalyst.linear.read` event with `source` and `result` attributes, so your OTEL collector can derive read totals and a staleness histogram — and alert on replica bypasses before the 429 breaker trips. The delegate's board-scan events now record whether a proposed move was actually dispatched, and a new `checkActuationLiveness` invariant flags sustained propose-but-never-dispatch conditions automatically. A negative cache on terminal-probe and census reads stops replica-miss tickets from firing live Linear reads every tick, which was the primary driver of breaker flaps.
+
+
+
+### PRs
+
+* **dev:** CTL-1403 — emit reads-by-source (catalyst.linear.read{source,result}) on every Linear read ([#2582](https://github.com/coalesce-labs/catalyst/issues/2582)) ([d23e8b1](https://github.com/coalesce-labs/catalyst/commit/d23e8b15ac71c8a020c85b950dc76ca6802c00fa))
+* **dev:** CTL-1435 (WS-C C1+C2) — self-observing actuation-liveness (act-outcome on board-scan + checkActuationLiveness invariant) ([#2576](https://github.com/coalesce-labs/catalyst/issues/2576)) ([06bb61f](https://github.com/coalesce-labs/catalyst/commit/06bb61f29c0afbf6830861d0fd82d2a9ea6c3794))
+* **dev:** CTL-1436 (WS-A A4) — negative-cache fetchTicketState replica-MISS live reads (stop the issues-read breaker flap) ([#2579](https://github.com/coalesce-labs/catalyst/issues/2579)) ([7f99ddc](https://github.com/coalesce-labs/catalyst/commit/7f99ddcbad765101540d6581928f4667b1136c69))
+* **dev:** CTL-1437 (A4 follow-up) — widen probeBackoff to the every-tick terminal-Done sweep ([#2581](https://github.com/coalesce-labs/catalyst/issues/2581)) ([52d58cc](https://github.com/coalesce-labs/catalyst/commit/52d58cc8e8cece98e950a27083c1c5ef8686c091))
+
 ## [12.25.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.24.0...catalyst-dev-v12.25.0)
 
 Jul 07, 2026
