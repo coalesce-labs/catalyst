@@ -170,3 +170,45 @@ Rationale: shadow-first + gated criteria makes harm observable before possible. 
 4. **Registered deterministic act-seams the sweep invokes** — workflow-scope push detour (CTL-1181), sibling-conflict resolve (CTL-855), orphan-PR detect/adopt (CTL-1175/1159/1160), ADR-024 cleaners. The LLM *selects among* registered seams; it never invents mutations.
 
 Rationale: the fleet only alerts + escalates then stops; the "try to clean it up first" step was scaffolding only (31:6 quantifies the cost). Deterministic-vs-flexible boundary (ADR-023): hygiene stays gated; LLM judgment is bounded to "human-or-not + which seam." Surfacing is the floor — inbox membership keys on worker-dir/event status (`failed`/`stalled`/`needs-human`), not just `gh pr list`, so failed-but-no-PR cases surface. Consequences: CTL-1176 needs its own scoping doc (becomes this ADR's implementation vehicle); belief executors (ADR-022) and this sweep are complementary; this is the "supervisor" record previously split across CTL-780/828/937. Rejected: a general open-ended re-dispatch agent (CTL-828 panel — reopens CTL-736); surfacing-only (leaves resolvable stalls consuming attention); leave re-engagement to the inference engine's lease rules (CTL-780 — that's the deterministic complement, held).
+
+## ADR-026: Two-Axis Worker State Model + worker-status Label Group (CTL-764)
+
+**Decision** — all worker state transitions are consolidated behind a single `recordWorkerTransition`
+chokepoint and a workspace-scoped, single-valued `worker-status` Linear label group carrying worker
+*disposition* independently of *pipeline stage*.
+
+**Two orthogonal axes (never blurred):**
+
+- **Axis 1 — Pipeline stage** (where the ticket is in the pipeline): Linear workflow Status,
+  written through the single `applyPhaseStatus` chokepoint.
+- **Axis 2 — Worker disposition** (how the worker is doing): four mutually exclusive values in
+  the `worker-status` label group (`queued`, `blocked`, `needs-input`, `needs-human`).
+
+**Single-valued workspace group** — workspace scope (shared by CTL and ADV teams) ensures the
+label is always readable regardless of which team's ticket is in flight. Exclusive group enforces
+single-value; the daemon removes stale members before applying a new one.
+
+**Precedence** — `needs-human > needs-input > blocked > queued > none`. `needs-human` is sticky
+(applied by `labelOnce`, NOT tick-converged) and cleared only at explicit resolution (Done or
+terminal-sweep). `queued`/`blocked`/`needs-input` are tick-converged (re-derived on diff each tick).
+
+**Resolution-gated clearing** — `clearStalledLabel`'s `onRemoved` callback fires only on confirmed
+Linear label removal, preventing false-positive "cleared" events on API failures.
+
+**`waiting` → `queued` rename** — the prior `waiting` label was renamed to `queued` to align with
+the disposition vocabulary. Back-compat: legacy `waiting` labels map to `queued` in the HUD and
+`heldFor`. CTL-755 team-level `blocked`/`waiting` labels are superseded by the workspace group.
+
+**Rationale** — scattered label writes produced observable drift (needs-human in the event log but
+healthy in Linear, or vice versa). One chokepoint, one group, one canonical `worker.transition`
+event per genuine change eliminates the coordination problem without per-site reasoning.
+
+**Alternatives considered** — per-site label writes (rejected: coordination problem persists);
+merged axes into a single status enum (rejected: pipeline stage and disposition are independent
+and both need independent observability); async `recordWorkerTransition` only (rejected:
+`schedulerTick` is sync; async would require a separate flush loop with new failure modes).
+
+**Consequences** — every transition fans out to five sinks (Linear Status, label, event log, OTLP
+via otel-forward, optional broker table); all fail-open. The HUD capacity header gains per-disposition
+buckets and triage is carved out of `maxParallel` counting. AGENTS.md / architecture.md carry the
+two-axis model as first-class concepts.

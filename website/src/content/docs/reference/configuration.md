@@ -134,6 +134,16 @@ If the registry is missing (a fresh or headless host), enroll a project with
 `catalyst-execution-core register --team <TEAM> --repo-root <path>` rather than writing the
 file by hand — see [Remote and unattended hosts](/getting-started/remote-and-unattended-hosts/).
 
+### Worker-status labels
+
+Catalyst uses a workspace-scoped `worker-status` Linear label group with four mutually-exclusive
+values (`queued`, `blocked`, `needs-input`, `needs-human`) to surface each worker's disposition on
+the ticket — independently of where the ticket is in the pipeline. The `setup-execution-core-states.sh`
+tool creates this group idempotently and never duplicates it. You do not configure the label values
+in `config.json` — the group is a Linear-side contract that the setup tool manages. See the
+[Worker-status labels reference](/autonomous-workflow/worker-status-labels/) for what each label
+means and how the HUD displays them.
+
 ## Linear app-actor identity (`catalyst.linear.bot.{worker,orchestrator}.botUserId`)
 
 Catalyst posts to Linear as a Linear OAuth **app actor** — the "Linear for Agents" identity that comments **as Catalyst**. Linear OAuth apps are account-level (one app serves every team), so the bot identity and OAuth credentials now live in the **global** `~/.config/catalyst/config.json` under `catalyst.linear.bot`, split into two app actors:

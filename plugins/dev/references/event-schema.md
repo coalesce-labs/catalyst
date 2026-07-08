@@ -634,6 +634,24 @@ the event with a `warn` log line and write no file.
 | `orchestrator.attention.raised` | `attention` | `raised` | WARN | `body.payload` = `{attentionType, reason}` |
 | `orchestrator.attention.resolved` | `attention` | `resolved` | INFO | |
 | `worker.state_changed` | `worker` | `state_changed` | INFO | `body.payload` = `{ticket, orchestrator, writer, state}`; consumed by broker projection (ADR-018) |
+| `linear.state.write.<TICKET>` | `worker` | `state_written` | INFO | CTL-757 audit: `{ticket, phase, source, applied, from_state, to_state}`; `source` = `scheduler-advance` or `preemption-resume` |
+| `worker.transition.<TICKET>` | `worker` | `transition` | INFO | CTL-764 unified two-axis event; supersedes `linear.state.write.*` as the canonical transition record. `attributes` carry disposition/stage dims (see CTL-764 fields below). `body.payload` is stripped off-machine by otel-forward. |
+
+#### worker.transition fields (CTL-764)
+
+Emitted by `recordTransition` in `scheduler.mjs` (sync chokepoint). Dims are **attributes** (not
+`body.payload`) because `otel-forward` strips `body.payload` before forwarding off-machine.
+
+| attribute | type | values / notes |
+|---|---|---|
+| `catalyst.worker.ticket` | string | ticket identifier |
+| `catalyst.worker.to_stage` | string | next pipeline phase (e.g. `plan`) — present on stage transitions |
+| `catalyst.worker.from_stage` | string | Linear from_state (e.g. `Research`) — present when known |
+| `catalyst.worker.to_disposition` | string | `queued` \| `blocked` \| `needs-input` \| `needs-human` \| `null` (cleared) |
+| `catalyst.worker.from_disposition` | string | previous disposition — present on clears |
+| `catalyst.worker.reason` | string | human-readable reason — present when provided |
+| `phase.attempt` | integer | dispatch attempt count — present when known |
+| `phase.revive_count` | integer | revive count — present when known |
 
 ### catalyst.comms
 

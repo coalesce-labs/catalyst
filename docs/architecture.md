@@ -128,6 +128,38 @@ During an orchestrated implement phase the draft PR is the off-disk, restart-sur
 
 Enforcement reuses the sweep + breaker: a `stalled` signal makes `isTicketInFlight` drop the ticket; the terminal sweep applies `needs-human` via `labelOnce`.
 
+### Two-axis worker state & the recordWorkerTransition chokepoint (CTL-764)
+
+Every worker ticket has **two orthogonal axes** — never blurred:
+
+- **Axis 1 — Pipeline stage** (WHERE the ticket is in the pipeline): written through the single
+  `applyPhaseStatus` chokepoint → Linear workflow Status, audited by `linear.state.write.<TICKET>`.
+- **Axis 2 — Worker disposition** (HOW the worker is doing): a single-valued workspace-scoped
+  `worker-status` Linear label group with four mutually exclusive values:
+
+  | Value | Detection seam | Cleared by |
+  |---|---|---|
+  | `queued` | converger (admission gate, tick-converged) | pickup / Done |
+  | `blocked` | converger (dependency not terminal, tick-converged) | dep becomes terminal / Done |
+  | `needs-input` | daemon `handleCommentWake` (worker paused, CTL-768) | human reply |
+  | `needs-human` | `labelOnce` (sticky — NOT tick-converged) | `clearStalledLabel` on resolution |
+
+**Precedence** (only one label at a time): `needs-human > needs-input > blocked > queued > none`.
+`needs-human` is **sticky** — it is never included in `TICK_CONVERGED_DISPOSITIONS` and only cleared
+at explicit resolution (Done or terminal-sweep-clear), not on steady-state ticks.
+
+**Resolution-gated clearing** — tick-converged labels (`queued`/`blocked`/`needs-input`) are
+re-derived on every tick and applied/removed on diff; `needs-human` is removed only by
+`clearStalledLabel`'s `onRemoved` callback which fires only on confirmed Linear label removal.
+
+**`recordWorkerTransition`** is the sync chokepoint inside `schedulerTick` that fans out every
+genuine transition to five sinks (fail-open): (1) Linear Status via `applyPhaseStatus`, (2) the
+`worker-status` Linear label via `convergeDispositionLabel`/`labelOnce`, (3) a single canonical
+`worker.transition.<TICKET>` event appended to the unified event log, (4) OTLP via `otel-forward`
+(dims as attributes — `body.payload` is stripped off-machine), (5) broker `ticket_state_transitions`
+table (optional, CTL-764 Phase 10). The only-on-change guard (`lastDispositionEmit`) prevents
+double-emit on steady-state ticks.
+
 ### Unified data-flow
 
 The same event log is the cross-process backbone for every observation surface:
