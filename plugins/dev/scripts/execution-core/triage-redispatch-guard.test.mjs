@@ -65,16 +65,16 @@ describe("triage dispatch counter (CTL-1441 guard b)", () => {
     expect(readTriageDispatchCount(orchDir, "CTL-10")).toBe(2);
     // persisted with a timestamp for the operator
     const data = JSON.parse(
-      readFileSync(pathJoin(orchDir, "workers", "CTL-10", ".triage-dispatch-count.json"), "utf8"),
+      readFileSync(pathJoin(orchDir, ".triage-dispatch-counts", "CTL-10.json"), "utf8"),
     );
     expect(data.count).toBe(2);
     expect(typeof data.lastDispatchAt).toBe("string");
   });
 
   test("malformed counter file → treated as 0 (fail-open), next bump repairs it", () => {
-    const dir = pathJoin(orchDir, "workers", "CTL-11");
+    const dir = pathJoin(orchDir, ".triage-dispatch-counts");
     mkdirSync(dir, { recursive: true });
-    writeFileSync(pathJoin(dir, ".triage-dispatch-count.json"), "garbage");
+    writeFileSync(pathJoin(dir, "CTL-11.json"), "garbage");
     expect(readTriageDispatchCount(orchDir, "CTL-11")).toBe(0);
     expect(bumpTriageDispatchCount(orchDir, "CTL-11")).toBe(1);
   });

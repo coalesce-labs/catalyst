@@ -695,6 +695,30 @@ function dispatchTriage(
     );
     return false;
   }
+  // CTL-1441 guard (b) — placed BEFORE the capacity gate (Codex R4: parking is
+  // capacity-independent; at a saturated fleet the budget return would keep a
+  // capped ticket invisible forever) and AFTER the drain/HRW gates (only the
+  // owner parks). The needs-human apply retries every capped sweep — labelOnce's
+  // markers are the idempotence guard (a transient Linear failure leaves none);
+  // cappedAt in the counter record gates only the duplicate WARN. Re-arm by
+  // deleting orchDir/.triage-dispatch-counts/<ticket>.json.
+  if (readTriageDispatchCount(orchDir, identifier) >= TRIAGE_DISPATCH_CAP) {
+    // Codex R2: the final allowed attempt may still be RUNNING — triage.json is
+    // naturally absent until it finishes. Defer the park while in flight.
+    if (isTriageInFlight(readTriageSignalStatus(orchDir, identifier))) return false;
+    try {
+      labelNeedsHuman(orchDir, identifier);
+    } catch (err) {
+      log.warn({ identifier, err: err.message }, "ctl-1441: needs-human label at triage cap threw — continuing");
+    }
+    if (markTriageCapped(orchDir, identifier)) {
+      log.warn(
+        { identifier, cap: TRIAGE_DISPATCH_CAP },
+        "ctl-1441: triage re-dispatch cap reached — parked needs-human; delete .triage-dispatch-counts/<ticket>.json to re-arm",
+      );
+    }
+    return false;
+  }
   if (budget && budget.remaining <= 0) {
     log.info(
       { identifier },
@@ -734,43 +758,6 @@ function dispatchTriage(
       );
       return false;
     }
-  }
-  // CTL-1441 guard (b): a ticket at the triage dispatch cap parks LOUDLY — then
-  // never burns another dispatch. Runs AFTER the drain/HRW/delegate gates
-  // (Codex P2: only the HRW owner of a still-claimable ticket may park it) and
-  // BEFORE the cross-host claim (a capped ticket must not consume claims).
-  // The needs-human apply is retried every capped sweep — labelOnce's own
-  // .linear-label-needs-human.{applied,skipped} markers are the idempotence
-  // guard, so a transient Linear failure (which deliberately leaves no marker)
-  // retries next sweep (Codex P2). The .triage-redispatch-capped marker gates
-  // only the duplicate WARN log. Re-arm by deleting that marker +
-  // .triage-dispatch-count.json.
-  if (readTriageDispatchCount(orchDir, identifier) >= TRIAGE_DISPATCH_CAP) {
-    // Codex R2 P2: the cap-consuming (final allowed) attempt may still be
-    // RUNNING — triage.json is naturally absent until it finishes. Defer the
-    // park while the signal is in flight; only park after it settles without
-    // producing the artifact. (No dispatch either way — the count is spent.)
-    if (isTriageInFlight(readTriageSignalStatus(orchDir, identifier))) return false;
-    try {
-      labelNeedsHuman(orchDir, identifier);
-    } catch (err) {
-      log.warn({ identifier, err: err.message }, "ctl-1441: needs-human label at triage cap threw — continuing");
-    }
-    const cappedMarker = join(orchDir, "workers", identifier, ".triage-redispatch-capped");
-    if (!existsSync(cappedMarker)) {
-      try {
-        mkdirSync(dirname(cappedMarker), { recursive: true });
-        writeFileSync(
-          cappedMarker,
-          JSON.stringify({ cappedAt: new Date().toISOString(), cap: TRIAGE_DISPATCH_CAP }),
-        );
-      } catch { /* marker is best-effort; the count gate above still holds */ }
-      log.warn(
-        { identifier, cap: TRIAGE_DISPATCH_CAP },
-        "ctl-1441: triage re-dispatch cap reached — parked needs-human; delete workers/<t>/.triage-redispatch-capped + .triage-dispatch-count.json to re-arm",
-      );
-    }
-    return false;
   }
   // CTL-862: cross-host claim soft-CAS immediately before the spawn. Skipped on
   // single-host (no Linear write). A lost claim is NOT a failure — defer cleanly.
@@ -944,35 +931,60 @@ function isTriageInFlight(status) {
   return status === "dispatched" || status === "running" || status === "pending";
 }
 
+// Codex R4: the cap state lives at orchDir level — NOT under workers/<t>/ —
+// because the worker-dir GC deletes terminal dirs after retention, and losing
+// the counter would re-arm the very re-dispatch cycle the cap terminates
+// (mirrors the .recovery-intents / .escalation-cooldowns placement rationale).
+// One file per ticket: { count, lastDispatchAt, cappedAt? }. Re-arm by
+// deleting orchDir/.triage-dispatch-counts/<ticket>.json.
 function triageDispatchCountPath(orchDir, ticket) {
-  return join(orchDir, "workers", ticket, ".triage-dispatch-count.json");
+  return join(orchDir, ".triage-dispatch-counts", `${ticket}.json`);
 }
 
-export function readTriageDispatchCount(orchDir, ticket) {
+export function readTriageDispatchRecord(orchDir, ticket) {
   try {
     const data = JSON.parse(readFileSync(triageDispatchCountPath(orchDir, ticket), "utf8"));
-    return typeof data?.count === "number" ? data.count : 0;
+    return data && typeof data === "object" ? data : null;
   } catch {
-    return 0; // absent/malformed → fail-open (the cap only ever under-counts)
+    return null; // absent/malformed → fail-open (the cap only ever under-counts)
   }
 }
 
-export function bumpTriageDispatchCount(orchDir, ticket, { now = () => new Date().toISOString() } = {}) {
-  const count = readTriageDispatchCount(orchDir, ticket) + 1;
+export function readTriageDispatchCount(orchDir, ticket) {
+  const rec = readTriageDispatchRecord(orchDir, ticket);
+  return typeof rec?.count === "number" ? rec.count : 0;
+}
+
+function writeTriageDispatchRecord(orchDir, ticket, rec) {
   // Codex R3: never manufacture the orch dir itself — several legacy tests use a
   // shared literal orchDir (e.g. "/orch") with mocked dispatchers, and a counter
   // write there would persist across runs and machines (cap suppression bleeding
   // between suites). A real daemon's orchDir always exists; a missing one means
-  // a hermetic/mocked context → count in-memory only (fail-open, under-counts).
-  if (!existsSync(orchDir)) return count;
+  // a hermetic/mocked context → in-memory only (fail-open, under-counts).
+  if (!existsSync(orchDir)) return false;
   const p = triageDispatchCountPath(orchDir, ticket);
   try {
     mkdirSync(dirname(p), { recursive: true });
-    writeFileSync(p, JSON.stringify({ count, lastDispatchAt: now() }));
+    writeFileSync(p, JSON.stringify(rec));
+    return true;
   } catch (err) {
     log.warn({ ticket, err: err.message }, "ctl-1441: triage dispatch-count write failed");
+    return false;
   }
+}
+
+export function bumpTriageDispatchCount(orchDir, ticket, { now = () => new Date().toISOString() } = {}) {
+  const prior = readTriageDispatchRecord(orchDir, ticket) ?? {};
+  const count = (typeof prior.count === "number" ? prior.count : 0) + 1;
+  writeTriageDispatchRecord(orchDir, ticket, { ...prior, count, lastDispatchAt: now() });
   return count;
+}
+
+export function markTriageCapped(orchDir, ticket, { now = () => new Date().toISOString() } = {}) {
+  const prior = readTriageDispatchRecord(orchDir, ticket) ?? {};
+  if (prior.cappedAt) return false; // already parked once
+  writeTriageDispatchRecord(orchDir, ticket, { ...prior, cappedAt: now(), cap: TRIAGE_DISPATCH_CAP });
+  return true;
 }
 
 // sweepMissingTriage — the reconcile-path analogue of the CTL-625 webhook guard
@@ -1035,7 +1047,10 @@ export function sweepMissingTriage({
   });
   for (const p of listProjects()) {
     for (const t of getEligibleSet(p.team)) {
-      if (budget.remaining <= 0) return; // capacity reached; remainder retries next sweep
+      // Codex R4: at a saturated fleet, still ROUTE capped tickets (their park is
+      // capacity-independent and dispatchTriage's cap gate runs before its
+      // budget gate); everything else waits for the next sweep.
+      if (budget.remaining <= 0 && readTriageDispatchCount(orchDir, t.identifier) < TRIAGE_DISPATCH_CAP) continue;
       if (hasTriageArtifact(orchDir, t.identifier)) continue;
       // CTL-1441 guard (a) note: the done-signal/missing-triage.json mismatch is
       // handled INSIDE dispatchTriage (post-gates, launch-imminent — Codex R3),
