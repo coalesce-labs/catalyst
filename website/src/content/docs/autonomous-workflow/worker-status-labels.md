@@ -5,8 +5,6 @@ description:
   ticket is in the pipeline.
 ---
 
-# Worker-Status Labels
-
 Every ticket Catalyst is working on has two independent states that you can observe in Linear and in
 the HUD:
 
@@ -34,7 +32,7 @@ Catalyst enforces a single `worker-status` label per ticket at any moment. If mu
 true (for example, a ticket is both `blocked` and `needs-human`), only the highest-priority label is
 applied:
 
-```
+```text
 needs-human > needs-input > blocked > queued
 ```
 
