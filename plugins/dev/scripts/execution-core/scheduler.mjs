@@ -233,6 +233,8 @@ import {
 import {
   reasoningRecoveryPass,
   defaultShouldSkipItem as recoveryShouldSkipItem,
+  defaultSkipReason as recoverySkipReason, // CTL-1440 (P0b): exhausted-vs-cooldown truth
+  escalateExhaustedIntents, // CTL-1440 (P0b): attempts-exhausted → loud escalation
   readDeferredBoardHealthIntents, // CTL-1432 (B2): deferred board-health anchor candidates
   defaultRecordIntent as recoveryRecordIntent,
   // CTL-1242 (corrected scope): forget the host-local recovery-intent latch when
@@ -4149,6 +4151,26 @@ export function schedulerTick(
           db: getBeliefsDb(),
           getBeliefs: getEscalateHumanBelief,
         });
+        // CTL-1440 (P0b): terminal-state policy — attempts-exhausted intents
+        // escalate LOUDLY (ledger escalated:true + needs-human + curated brief +
+        // app-actor comment + recovery.escalated event) instead of silently
+        // latching forever (audit RC1: nothing un-latched an attempts-exhausted
+        // open ticket). Runs BEFORE the per-item pass so a freshly-escalated
+        // ticket is skipped as "escalated" (B1's TTL governs re-entry) rather
+        // than "attempts-exhausted". Enforce-only — shadow must not write
+        // labels/comments. Idempotent: escalated:true excludes future scans.
+        if (rMode === "enforce") {
+          try {
+            escalateExhaustedIntents(orchDir, {
+              labelNeedsHuman: (dir, t) =>
+                labelNeedsHumanUnlessBeliefOwner(dir, t, writeStatus, {
+                  site: "attempts-exhausted",
+                }),
+            });
+          } catch (err) {
+            log.warn({ err: err?.message }, "ctl-1440: exhausted-intent sweep threw — continuing tick");
+          }
+        }
         if (rItems.length > 0) {
           // CTL-1176: BIND the host-local ledger + act-seams to THIS tick's real
           // orchDir. Without this the defaults call resolveOrchDir() →
@@ -6785,6 +6807,7 @@ function runTick() {
             { anchor, candidates, boardContext, decision },
             {
               shouldSkipItem: (cand) => recoveryShouldSkipItem(cand, deps),
+              skipReason: (cand) => recoverySkipReason(cand, deps), // CTL-1440 (P0b)
               invokeRecoveryPass: (cand, ctx) => recoveryInvokeRecoveryPass(cand, ctx, deps),
               recordIntent: (cand, intent) => recoveryRecordIntent(cand, intent, deps),
             },
@@ -6881,12 +6904,23 @@ function scheduleDebouncedTick(debounceMs) {
 // result, or {dispatched:false, reason:"all-candidates-cooldown"} when none dispatched.
 export function holisticBoardHealthAct(
   { anchor = null, candidates = [], boardContext, decision } = {},
-  { shouldSkipItem, invokeRecoveryPass, recordIntent } = {}
+  { shouldSkipItem, invokeRecoveryPass, recordIntent, skipReason = null } = {}
 ) {
   const ordered = candidates.length ? candidates : (anchor ? [anchor] : []);
+  // CTL-1440 (P0b): track WHY candidates were ledger-skipped so the no-dispatch
+  // return distinguishes "everything is terminally attempts-exhausted" (a
+  // truthful non-wedge — the exhaustion sweep has escalated them to a human)
+  // from a genuine retryable cooldown (the old blanket "all-candidates-cooldown"
+  // misnomer that made C1/C2 lie — audit RC1).
+  let ledgerSkips = 0;
+  let exhaustedSkips = 0;
   for (const cand of ordered) {
     // (a) cooldown/attempts-latched → try the next candidate (MUST-FIX 2).
-    if (shouldSkipItem(cand)) continue;
+    if (shouldSkipItem(cand)) {
+      ledgerSkips += 1;
+      if (skipReason?.(cand) === "attempts-exhausted") exhaustedSkips += 1;
+      continue;
+    }
     const r = invokeRecoveryPass(cand, {
       boardContext,
       reason: `board-health: ${decision?.gate?.reason ?? "board anomaly"} — holistic recovery-pass delegate`,
@@ -6912,7 +6946,15 @@ export function holisticBoardHealthAct(
     // event's act.anchor records the real dispatch handle.
     return { ...r, candidate: cand }; // exactly ONE real dispatch per scan
   }
-  return { dispatched: false, reason: "all-candidates-cooldown" };
+  // Every ledger skip was terminal exhaustion → say so (C2 treats it as a
+  // truthful non-wedge); any retryable/mixed skip keeps the cooldown reason.
+  return {
+    dispatched: false,
+    reason:
+      ledgerSkips > 0 && exhaustedSkips === ledgerSkips
+        ? "all-candidates-exhausted"
+        : "all-candidates-cooldown",
+  };
 }
 
 // startScheduler — immediate authoritative tick, arm the periodic timer, then

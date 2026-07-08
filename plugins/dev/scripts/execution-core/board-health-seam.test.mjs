@@ -173,6 +173,33 @@ describe("holisticBoardHealthAct — one real dispatch per scan, skip non-dispat
     expect(recorded[0].intent.outcome).toBe(false);
   });
 
+  test("ALL candidates ledger-skipped as attempts-exhausted → reason 'all-candidates-exhausted' (CTL-1440 truth)", () => {
+    const r = holisticBoardHealthAct(
+      { ...ctx, candidates: ["CTL-1", "CTL-2"] },
+      {
+        shouldSkipItem: () => true,
+        skipReason: () => "attempts-exhausted",
+        invokeRecoveryPass: () => { throw new Error("must not invoke"); },
+        recordIntent: () => {},
+      },
+    );
+    expect(r.dispatched).toBe(false);
+    expect(r.reason).toBe("all-candidates-exhausted");
+  });
+
+  test("MIXED ledger skips (exhausted + cooldown) → stays 'all-candidates-cooldown' (retryable)", () => {
+    const r = holisticBoardHealthAct(
+      { ...ctx, candidates: ["CTL-1", "CTL-2"] },
+      {
+        shouldSkipItem: () => true,
+        skipReason: (c) => (c === "CTL-1" ? "attempts-exhausted" : "cooldown"),
+        invokeRecoveryPass: () => { throw new Error("must not invoke"); },
+        recordIntent: () => {},
+      },
+    );
+    expect(r.reason).toBe("all-candidates-cooldown");
+  });
+
   test("ALL candidates non-dispatch → {dispatched:false, all-candidates-cooldown} (no starvation, no false dispatch)", () => {
     const r = holisticBoardHealthAct(
       { ...ctx, candidates: ["CTL-1", "CTL-2"] },
