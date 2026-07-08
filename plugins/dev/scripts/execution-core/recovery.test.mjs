@@ -47,6 +47,8 @@ import {
 import { saveCursor } from "./event-cursor.mjs";
 import { dropProject } from "./eligible-set.mjs";
 import { existsSync, appendFileSync, chmodSync } from "node:fs";
+import { recordEscalation } from "./label-guard.mjs"; // CTL-1442: seed reason-change scenarios
+import { defaultClearStall } from "./scheduler.mjs"; // CTL-1442: operator re-arm resets the ask budget
 import { WORK_DONE_PROBES } from "./work-done-probes.mjs";
 
 let orchDir;
@@ -2627,6 +2629,227 @@ describe("reclaimDeadWorkIfPossible — CTL-638 escalation storm prevention", ()
       orchDir: s.orch,
       ticket: "CTL-9",
     });
+  });
+});
+
+// --- CTL-1442: no-progress escalation ask-cap → terminal, never re-ask forever
+//
+// ADV-1374/1376 fired `phase.triage.escalated` (`reason:"no-progress"`) every
+// cool-down window for DAYS (audit RC4): the 10-min cool-down only throttles,
+// nothing ever transitioned the ticket, and the broker cannot consume the
+// `escalated` action. After ESCALATION_ASK_CAP consecutive same-reason asks the
+// escalation now goes terminal: the phase signal flips to stalled with the
+// curated explanation persisted (→ the monitor Needs-You inbox), and further
+// sweeps stop emitting.
+describe("reclaimDeadWorkIfPossible — CTL-1442 escalation ask-cap", () => {
+  let orchDir;
+  beforeEach(() => {
+    orchDir = mkdtempSync(join(tmpdir(), "ctl1442-"));
+  });
+  afterEach(() => {
+    rmSync(orchDir, { recursive: true, force: true });
+  });
+
+  function setupAt(orchPath, overrides = {}) {
+    const sig = {
+      ...implementSignal({ ticket: "CTL-9", status: "running", bgJobId: "bg-9" }),
+      phase: overrides.phase ?? "pr",
+    };
+    sig.raw.phase = overrides.phase ?? "pr";
+    return {
+      orch: orchPath,
+      sig,
+      opts: {
+        repoRoot: "/repo",
+        statJob: () => ({ exists: true, mtimeMs: 1_000 }),
+        jobLifecycle: () => "dead-gone",
+        progressMark: () => 0, // zero forward progress → the no-progress STOP path
+        readProgressMark: () => 0,
+        writeProgressMark: recorder(undefined),
+        probes: { [overrides.phase ?? "pr"]: recorder(false) },
+        emitComplete: recorder({ code: 0 }),
+        appendEvent: recorder(undefined),
+        appendReviveEvent: recorder(undefined),
+        appendEscalatedEvent: recorder(undefined),
+        appendReviveSuppressedEvent: recorder(undefined),
+        reviveDispatch: recorder({ code: 0 }),
+        applyStalledLabel: recorder({ applied: true }),
+        killBgJob: recorder(undefined),
+        countReviveEvents: recorder(0),
+        writeReviveMarker: recorder(undefined),
+        now: () => 1_000 + 6 * 60 * 1000,
+        staleMs: 5 * 60 * 1000,
+        // real fs-backed cool-down + ask-cap primitives (defaults)
+      },
+    };
+  }
+
+  test("the cap-consuming ask flips the signal TERMINAL with the brief persisted; later sweeps never re-ask", () => {
+    let clock = 5_000_000;
+    const s = setupAt(orchDir);
+    s.opts.now = () => clock;
+
+    // Asks 1..3 (each past the 10-min cool-down window). Default cap = 3.
+    for (let ask = 1; ask <= 3; ask++) {
+      reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts);
+      clock += 10 * 60 * 1000 + 1;
+    }
+    expect(s.opts.appendEscalatedEvent.calls.length).toBe(3);
+
+    // The 3rd (cap-consuming) ask parked the ticket terminal: stalled signal
+    // with the curated explanation persisted for the Needs-You inbox.
+    const sigPath = join(orchDir, "workers", "CTL-9", "phase-pr.json");
+    const written = JSON.parse(readFileSync(sigPath, "utf8"));
+    expect(written.status).toBe("stalled");
+    expect(written.stalledReason).toBe("escalation-ask-cap");
+    expect(written.explanation).toBeTruthy();
+    expect(typeof written.needsHumanSince).toBe("string");
+
+    // 50 more sweeps, each past the cool-down window: ZERO further events —
+    // the ask-cap early-return holds even though this test keeps feeding the
+    // same (now-stale) in-memory signal back in.
+    for (let i = 0; i < 50; i++) {
+      reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts);
+      clock += 10 * 60 * 1000 + 1;
+    }
+    expect(s.opts.appendEscalatedEvent.calls.length).toBe(3); // NOT 53
+  });
+
+  test("the ask history rides the event payload (attempts is no longer [] forever)", () => {
+    let clock = 9_000_000;
+    const s = setupAt(orchDir);
+    s.opts.now = () => clock;
+
+    reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts); // ask 1 — no prior history
+    clock += 10 * 60 * 1000 + 1;
+    reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts); // ask 2 — carries ask-1's ts
+
+    const secondAsk = s.opts.appendEscalatedEvent.calls[1][0];
+    const attempts = secondAsk.extras?.explanation?.attempts;
+    expect(Array.isArray(attempts)).toBe(true);
+    expect(attempts.length).toBeGreaterThanOrEqual(1);
+  });
+
+  test("a lost terminal flip is RE-ASSERTED on the next sweep (no silent capacity leak)", () => {
+    let clock = 20_000_000;
+    const s = setupAt(orchDir);
+    s.opts.now = () => clock;
+    for (let ask = 1; ask <= 3; ask++) {
+      reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts);
+      clock += 10 * 60 * 1000 + 1;
+    }
+    const sigPath = join(orchDir, "workers", "CTL-9", "phase-pr.json");
+    expect(JSON.parse(readFileSync(sigPath, "utf8")).status).toBe("stalled");
+    // Simulate the flip being lost (crash between record and write / manual rm).
+    rmSync(sigPath, { force: true });
+    reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts);
+    // Re-asserted terminal, but NO new event (the cap stays spent).
+    const reasserted = JSON.parse(readFileSync(sigPath, "utf8"));
+    expect(reasserted.status).toBe("stalled");
+    // Codex R3: the re-created body carries identity — readWorkerSignals derives
+    // ticket/phase from the JSON, and a null-ticket stalled row breaks the inbox.
+    expect(reasserted.ticket).toBe("CTL-9");
+    expect(reasserted.phase).toBe("pr");
+    expect(s.opts.appendEscalatedEvent.calls.length).toBe(3);
+  });
+
+  test("defaultClearStall re-arms the ask budget (operator re-arm = fresh cycle)", () => {
+    let clock = 30_000_000;
+    const s = setupAt(orchDir);
+    s.opts.now = () => clock;
+    for (let ask = 1; ask <= 3; ask++) {
+      reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts);
+      clock += 10 * 60 * 1000 + 1;
+    }
+    expect(s.opts.appendEscalatedEvent.calls.length).toBe(3); // cap spent
+    // Operator replies → the stall janitor clears the stall; it must also
+    // remove the escalation-cooldown marker so the retry gets fresh asks.
+    defaultClearStall(orchDir, {})({ ticket: "CTL-9", phase: "pr" });
+    expect(
+      existsSync(join(orchDir, ".escalation-cooldowns", "CTL-9-pr.json")),
+    ).toBe(false);
+    // The retried phase no-progresses again → a FRESH ask fires (count restarted).
+    reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts);
+    expect(s.opts.appendEscalatedEvent.calls.length).toBe(4);
+  });
+
+  test("(R2) a lost flip is re-asserted even INSIDE the cooldown window (no slot held for 10 min)", () => {
+    let clock = 40_000_000;
+    const s = setupAt(orchDir);
+    s.opts.now = () => clock;
+    for (let ask = 1; ask <= 3; ask++) {
+      reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts);
+      clock += 10 * 60 * 1000 + 1;
+    }
+    const sigPath = join(orchDir, "workers", "CTL-9", "phase-pr.json");
+    rmSync(sigPath, { force: true }); // flip lost right after the cap-consuming ask
+    clock += 30 * 1000; // only 30s later — WELL inside the fresh cooldown window
+    reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts);
+    expect(JSON.parse(readFileSync(sigPath, "utf8")).status).toBe("stalled"); // re-asserted now, not after 10 min
+    expect(s.opts.appendEscalatedEvent.calls.length).toBe(3); // still no new events
+  });
+
+  test("(R4) a lost flip is repaired even while the Linear breaker is OPEN (local-only rewrite)", () => {
+    let clock = 60_000_000;
+    const s = setupAt(orchDir);
+    s.opts.now = () => clock;
+    for (let ask = 1; ask <= 3; ask++) {
+      reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts);
+      clock += 10 * 60 * 1000 + 1;
+    }
+    const sigPath = join(orchDir, "workers", "CTL-9", "phase-pr.json");
+    rmSync(sigPath, { force: true });
+    // breaker OPEN: the repair still lands (no Linear I/O involved)
+    s.opts.breaker = { isOpen: () => true, recordRateLimited: () => {} };
+    reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts);
+    expect(JSON.parse(readFileSync(sigPath, "utf8")).status).toBe("stalled");
+    expect(s.opts.appendEscalatedEvent.calls.length).toBe(3); // no new events
+  });
+
+  test("(R4) a MALFORMED signal is rewritten like a missing one (parse failure cannot orphan the row)", () => {
+    let clock = 70_000_000;
+    const s = setupAt(orchDir);
+    s.opts.now = () => clock;
+    for (let ask = 1; ask <= 3; ask++) {
+      reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts);
+      clock += 10 * 60 * 1000 + 1;
+    }
+    const sigPath = join(orchDir, "workers", "CTL-9", "phase-pr.json");
+    writeFileSync(sigPath, "{truncated"); // corrupt it
+    reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts);
+    const repaired = JSON.parse(readFileSync(sigPath, "utf8"));
+    expect(repaired.status).toBe("stalled");
+    expect(repaired.ticket).toBe("CTL-9");
+  });
+
+  test("(R2) the attempts history never inherits a DIFFERENT reason's asks", () => {
+    let clock = 50_000_000;
+    const s = setupAt(orchDir);
+    s.opts.now = () => clock;
+    // three unrelated wedged asks on the marker, the last outside the window
+    recordEscalation(orchDir, "CTL-9", "pr", "wedged-never-started", clock - 3);
+    recordEscalation(orchDir, "CTL-9", "pr", "wedged-never-started", clock - 2);
+    recordEscalation(orchDir, "CTL-9", "pr", "wedged-never-started", clock - 31 * 60 * 1000);
+    reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts); // first no-progress ask
+    const firstAsk = s.opts.appendEscalatedEvent.calls[0][0];
+    expect(firstAsk.extras?.explanation?.attempts ?? []).toEqual([]); // fresh — no wedged history
+  });
+
+  test("a DIFFERENT escalation reason does not consume the no-progress cap (reason change resets the count)", () => {
+    let clock = 12_000_000;
+    const s = setupAt(orchDir);
+    s.opts.now = () => clock;
+    // Seed three same-reason asks via the real recordEscalation primitive but
+    // for a DIFFERENT reason — the no-progress cap must not fire off them.
+    // (The last write is past the cool-down window so the sweep's ask proceeds.)
+    recordEscalation(orchDir, "CTL-9", "pr", "wedged-never-started", clock - 3);
+    recordEscalation(orchDir, "CTL-9", "pr", "wedged-never-started", clock - 2);
+    recordEscalation(orchDir, "CTL-9", "pr", "wedged-never-started", clock - 31 * 60 * 1000);
+
+    reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts); // no-progress ask 1
+    expect(s.opts.appendEscalatedEvent.calls.length).toBe(1);
+    // Not terminal yet — the no-progress count restarted at 1.
+    expect(existsSync(join(orchDir, "workers", "CTL-9", "phase-pr.json"))).toBe(false);
   });
 });
 

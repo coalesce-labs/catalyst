@@ -299,8 +299,28 @@ export function inRemovalBackoff(orchDir, ticket, label, now) {
 export const ESCALATION_COOLDOWN_MS =
   Number(process.env.RECOVERY_ESCALATION_COOLDOWN_MS) || 10 * 60 * 1000;
 
+// CTL-1442: consecutive same-reason asks before an escalation goes TERMINAL.
+// The 10-min cooldown above only THROTTLES re-emission — with no cap, a
+// no-progress ticket asks "authorize retry?" every window forever (ADV-1374/
+// ADV-1376 fired for days; audit RC4) because nothing consumes the ask and
+// nothing ever transitions the ticket. After this many asks the escalation
+// site parks the ticket terminally instead of asking again.
+export const ESCALATION_ASK_CAP = Number(process.env.CATALYST_ESCALATION_ASK_CAP) || 3;
+
 export function escalationCooldownPath(orchDir, ticket, phase) {
   return join(orchDir, ".escalation-cooldowns", `${ticket}-${phase}.json`);
+}
+
+// readEscalationRecord — CTL-1442: the full cool-down marker (reason, askCount,
+// asks[] history), for the ask-cap gate + truthful `attempts` event payloads.
+// Absent/malformed → null (fail-open — the cap only ever under-counts).
+export function readEscalationRecord(orchDir, ticket, phase) {
+  try {
+    const data = JSON.parse(readFileSync(escalationCooldownPath(orchDir, ticket, phase), "utf8"));
+    return data && typeof data === "object" ? data : null;
+  } catch {
+    return null;
+  }
 }
 
 export function inEscalationCooldown(orchDir, ticket, phase, now) {
@@ -368,9 +388,16 @@ export function recordEscalation(orchDir, ticket, phase, reason, now) {
   const dir = join(orchDir, ".escalation-cooldowns");
   try {
     mkdirSync(dir, { recursive: true });
+    // CTL-1442: accrue the consecutive same-reason ask count (+ a bounded ask
+    // history for truthful event payloads). A DIFFERENT reason restarts the
+    // count — it is a new question to the operator, not a repeat of the last.
+    const prior = readEscalationRecord(orchDir, ticket, phase);
+    const sameReason = prior?.reason === reason;
+    const askCount = sameReason && typeof prior?.askCount === "number" ? prior.askCount + 1 : 1;
+    const asks = [...(sameReason && Array.isArray(prior?.asks) ? prior.asks : []).slice(-9), now];
     writeFileSync(
       escalationCooldownPath(orchDir, ticket, phase),
-      JSON.stringify({ ticket, phase, reason, escalatedAt: now })
+      JSON.stringify({ ticket, phase, reason, escalatedAt: now, askCount, asks })
     );
   } catch (err) {
     // Never let a marker write crash the tick — worst case is the next tick
