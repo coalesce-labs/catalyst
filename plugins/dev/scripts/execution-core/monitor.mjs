@@ -25,7 +25,7 @@
 // The 10-min periodic reconcile (RECONCILE_INTERVAL_MS) remains the
 // missed-webhook backstop for all three handlers.
 
-import { watch, openSync, fstatSync, readSync, closeSync, mkdirSync, existsSync } from "node:fs";
+import { watch, openSync, fstatSync, readSync, closeSync, mkdirSync, existsSync, readFileSync, writeFileSync, renameSync } from "node:fs";
 import { dirname, basename, join } from "node:path";
 import {
   getEventLogPath,
@@ -69,7 +69,9 @@ import { abortWorker as defaultAbortWorker } from "./abort-worker.mjs";
 import {
   applyTriageStatus as defaultApplyTriageStatus,
   applyAssignee as defaultApplyAssignee,
+  applyLabel, // CTL-1441: needs-human at the triage re-dispatch cap
 } from "./linear-write.mjs";
+import { labelNeedsHumanUnlessBeliefOwner } from "./label-guard.mjs"; // CTL-1441
 import { appendTriageTransitionEvent as defaultAppendEvent } from "./triage-transition-event.mjs";
 import { countBackgroundAgents, resetLivenessCache } from "./claude-agents.mjs";
 import { readMaxParallel, computeFreeSlots, writeClusterGeneration } from "./scheduler.mjs";
@@ -657,6 +659,10 @@ function dispatchTriage(
     // tests inject a spy. The bg path is synchronous → the detached handler never
     // fires, so this is a no-op on bg.
     emitBackstop,
+    // CTL-1441: needs-human application at the re-dispatch cap. Injectable so
+    // tests never spawn a real linearis write; default = the label-guard path.
+    labelNeedsHuman = (dir, t) =>
+      labelNeedsHumanUnlessBeliefOwner(dir, t, { applyLabel }, { site: "triage-redispatch-cap" }),
   }
 ) {
   if (!orchDir) {
@@ -687,6 +693,30 @@ function dispatchTriage(
       { identifier, self, roster },
       "ctl-862: ticket not owned by this host under HRW — skipping triage dispatch"
     );
+    return false;
+  }
+  // CTL-1441 guard (b) — placed BEFORE the capacity gate (Codex R4: parking is
+  // capacity-independent; at a saturated fleet the budget return would keep a
+  // capped ticket invisible forever) and AFTER the drain/HRW gates (only the
+  // owner parks). The needs-human apply retries every capped sweep — labelOnce's
+  // markers are the idempotence guard (a transient Linear failure leaves none);
+  // cappedAt in the counter record gates only the duplicate WARN. Re-arm by
+  // deleting orchDir/.triage-dispatch-counts/<ticket>.json.
+  if (readTriageDispatchCount(orchDir, identifier) >= TRIAGE_DISPATCH_CAP) {
+    // Codex R2: the final allowed attempt may still be RUNNING — triage.json is
+    // naturally absent until it finishes. Defer the park while in flight.
+    if (isTriageInFlight(readTriageSignalStatus(orchDir, identifier))) return false;
+    try {
+      labelNeedsHuman(orchDir, identifier);
+    } catch (err) {
+      log.warn({ identifier, err: err.message }, "ctl-1441: needs-human label at triage cap threw — continuing");
+    }
+    if (markTriageCapped(orchDir, identifier)) {
+      log.warn(
+        { identifier, cap: TRIAGE_DISPATCH_CAP },
+        "ctl-1441: triage re-dispatch cap reached — parked needs-human; delete .triage-dispatch-counts/<ticket>.json to re-arm",
+      );
+    }
     return false;
   }
   if (budget && budget.remaining <= 0) {
@@ -746,6 +776,50 @@ function dispatchTriage(
       return false;
     }
     clusterGeneration = claim.generation; // CTL-1028: forward to worker (mirrors CTL-864)
+  }
+  // CTL-1441 guard (a), placed HERE (post-gates, post-claim, launch imminent —
+  // Codex R3): a done phase-triage.json with triage.json missing is the
+  // artifact-mismatch class; the launcher short-circuits done signals as
+  // idempotent no-ops, so the stale completion signal is RETIRED (rename,
+  // forensics kept) immediately before a REAL launch. Doing this in the sweep
+  // (pre-gates) could strip the signal on a node that then never launches
+  // (HRW/drain/delegate/claim skip) — leaving the ticket with NEITHER artifact.
+  const preLaunchStatus = readTriageSignalStatus(orchDir, identifier);
+  if (preLaunchStatus === "done" && !hasTriageArtifact(orchDir, identifier)) {
+    const sigPath = join(orchDir, "workers", identifier, "phase-triage.json");
+    try {
+      renameSync(sigPath, `${sigPath}.stale-ctl1441`);
+      const warned = join(orchDir, "workers", identifier, ".triage-artifact-mismatch-warned");
+      if (!existsSync(warned)) {
+        try {
+          writeFileSync(warned, new Date().toISOString());
+        } catch { /* best-effort */ }
+        log.warn(
+          { identifier },
+          "ctl-1441: phase-triage.json was done but triage.json is missing — retired the stale signal for a real re-triage (bounded by the dispatch cap)",
+        );
+      }
+    } catch (err) {
+      log.warn(
+        { identifier, err: err.message },
+        "ctl-1441: could not retire the stale done triage signal — skipping this dispatch (a counted no-op would burn the cap)",
+      );
+      return false;
+    }
+  }
+  // CTL-1441: count the REAL spawn attempt — post-gates, post-claim, and BEFORE
+  // the launch so a spawn that dies without ever writing a signal (the
+  // no-artifacts class) still counts toward the cap. Unbounded silent failure
+  // is exactly the loop this bounds.
+  // Codex P1 + R3: do NOT count idempotent no-ops — an in-flight signal
+  // (dispatched/running/pending; the CTL-615 yield) OR a surviving done signal
+  // (only possible when triage.json exists, since the mismatch case was just
+  // retired above; the launcher short-circuits it). A dead-frozen "running"
+  // signal is reset to stalled by the reclaim/revive path, after which counting
+  // resumes; "failed"/"stalled" re-dispatches launch real workers and count.
+  const statusAtLaunch = readTriageSignalStatus(orchDir, identifier);
+  if (!isTriageInFlight(statusAtLaunch) && statusAtLaunch !== "done") {
+    bumpTriageDispatchCount(orchDir, identifier);
   }
   // CTL-1367 P1: settle an async (executor=sdk) dispatch synchronously. bg returns a
   // plain object (passthrough → byte-identical). sdk returns a Promise whose
@@ -819,6 +893,100 @@ function hasTriageArtifact(orchDir, ticket) {
   return existsSync(join(orchDir, "workers", ticket, "triage.json"));
 }
 
+// ── CTL-1441: triage re-dispatch guard ───────────────────────────────────────
+// CTL-1403 was re-triaged 12× in ~30h: this sweep keys ONLY on triage.json,
+// while advancement keys phase-triage.json — a triage run whose content
+// artifact goes astray (the skill's WORKER_DIR falling back to $(pwd)) posts
+// its comment and completes "done", yet stays re-dispatchable forever. Nothing
+// bounds per-ticket triage dispatches (the scheduler's dispatch circuit breaker
+// has no reach into monitor's dispatch path). Two additions:
+//   (a) when phase-triage.json is done but triage.json is missing, the
+//       re-dispatch is the legitimate REMEDY (research's prior-artifact gate
+//       needs triage.json) — but the mismatch is surfaced loudly once;
+//   (b) a hard per-ticket dispatch cap (CATALYST_TRIAGE_DISPATCH_CAP, default
+//       3): at the cap the ticket parks LOUDLY (needs-human via the
+//       label-guard) instead of silently burning a dispatch every reconcile —
+//       this also bounds the class where NO artifacts ever appear (a spawn
+//       dying on a bad repoRoot). Re-arm by deleting
+//       workers/<t>/.triage-redispatch-capped + .triage-dispatch-count.json.
+export const TRIAGE_DISPATCH_CAP = Number(process.env.CATALYST_TRIAGE_DISPATCH_CAP) || 3;
+
+export function readTriageSignalStatus(orchDir, ticket) {
+  try {
+    const sig = JSON.parse(
+      readFileSync(join(orchDir, "workers", ticket, "phase-triage.json"), "utf8"),
+    );
+    return typeof sig?.status === "string" ? sig.status : null;
+  } catch {
+    return null; // absent/malformed → fail-open
+  }
+}
+
+// isTriageInFlight — CTL-1441: a signal the launcher would treat as a live,
+// idempotent no-op (phase-agent-dispatch:513 short-circuits dispatched|running|
+// done; pending is a re-arm in progress). Used to (a) skip cap COUNTING (a
+// no-op dispatch is not a retry) and (b) defer cap PARKING (an allowed attempt
+// may still complete — only park after the signal settles without an artifact).
+function isTriageInFlight(status) {
+  return status === "dispatched" || status === "running" || status === "pending";
+}
+
+// Codex R4: the cap state lives at orchDir level — NOT under workers/<t>/ —
+// because the worker-dir GC deletes terminal dirs after retention, and losing
+// the counter would re-arm the very re-dispatch cycle the cap terminates
+// (mirrors the .recovery-intents / .escalation-cooldowns placement rationale).
+// One file per ticket: { count, lastDispatchAt, cappedAt? }. Re-arm by
+// deleting orchDir/.triage-dispatch-counts/<ticket>.json.
+function triageDispatchCountPath(orchDir, ticket) {
+  return join(orchDir, ".triage-dispatch-counts", `${ticket}.json`);
+}
+
+export function readTriageDispatchRecord(orchDir, ticket) {
+  try {
+    const data = JSON.parse(readFileSync(triageDispatchCountPath(orchDir, ticket), "utf8"));
+    return data && typeof data === "object" ? data : null;
+  } catch {
+    return null; // absent/malformed → fail-open (the cap only ever under-counts)
+  }
+}
+
+export function readTriageDispatchCount(orchDir, ticket) {
+  const rec = readTriageDispatchRecord(orchDir, ticket);
+  return typeof rec?.count === "number" ? rec.count : 0;
+}
+
+function writeTriageDispatchRecord(orchDir, ticket, rec) {
+  // Codex R3: never manufacture the orch dir itself — several legacy tests use a
+  // shared literal orchDir (e.g. "/orch") with mocked dispatchers, and a counter
+  // write there would persist across runs and machines (cap suppression bleeding
+  // between suites). A real daemon's orchDir always exists; a missing one means
+  // a hermetic/mocked context → in-memory only (fail-open, under-counts).
+  if (!existsSync(orchDir)) return false;
+  const p = triageDispatchCountPath(orchDir, ticket);
+  try {
+    mkdirSync(dirname(p), { recursive: true });
+    writeFileSync(p, JSON.stringify(rec));
+    return true;
+  } catch (err) {
+    log.warn({ ticket, err: err.message }, "ctl-1441: triage dispatch-count write failed");
+    return false;
+  }
+}
+
+export function bumpTriageDispatchCount(orchDir, ticket, { now = () => new Date().toISOString() } = {}) {
+  const prior = readTriageDispatchRecord(orchDir, ticket) ?? {};
+  const count = (typeof prior.count === "number" ? prior.count : 0) + 1;
+  writeTriageDispatchRecord(orchDir, ticket, { ...prior, count, lastDispatchAt: now() });
+  return count;
+}
+
+export function markTriageCapped(orchDir, ticket, { now = () => new Date().toISOString() } = {}) {
+  const prior = readTriageDispatchRecord(orchDir, ticket) ?? {};
+  if (prior.cappedAt) return false; // already parked once
+  writeTriageDispatchRecord(orchDir, ticket, { ...prior, cappedAt: now(), cap: TRIAGE_DISPATCH_CAP });
+  return true;
+}
+
 // sweepMissingTriage — the reconcile-path analogue of the CTL-625 webhook guard
 // (handleStateChangedEvent →Ready branch). After reconcileAll has (re)populated
 // the eligible sets, dispatch triage for every eligible ticket that lacks a
@@ -860,6 +1028,9 @@ export function sweepMissingTriage({
   // CTL-1367 P1: failed-terminal backstop for a rejected async (sdk) triage
   // dispatch — threaded through to dispatchTriage (undefined → real default).
   emitBackstop,
+  // CTL-1441: needs-human at the re-dispatch cap — threaded through to
+  // dispatchTriage (undefined → real label-guard default; tests inject a spy).
+  labelNeedsHuman,
 } = {}) {
   if (!orchDir) {
     log.debug("sweepMissingTriage: no orchDir wired — skipping triage sweep");
@@ -876,8 +1047,15 @@ export function sweepMissingTriage({
   });
   for (const p of listProjects()) {
     for (const t of getEligibleSet(p.team)) {
-      if (budget.remaining <= 0) return; // capacity reached; remainder retries next sweep
+      // Codex R4: at a saturated fleet, still ROUTE capped tickets (their park is
+      // capacity-independent and dispatchTriage's cap gate runs before its
+      // budget gate); everything else waits for the next sweep.
+      if (budget.remaining <= 0 && readTriageDispatchCount(orchDir, t.identifier) < TRIAGE_DISPATCH_CAP) continue;
       if (hasTriageArtifact(orchDir, t.identifier)) continue;
+      // CTL-1441 guard (a) note: the done-signal/missing-triage.json mismatch is
+      // handled INSIDE dispatchTriage (post-gates, launch-imminent — Codex R3),
+      // where the stale completion signal is retired immediately before a real
+      // launch. The sweep just routes the ticket there like any other.
       dispatchTriage(t.identifier, {
         dispatch,
         orchDir,
@@ -894,6 +1072,7 @@ export function sweepMissingTriage({
         hostName,
         claimDispatch, // CTL-862
         emitBackstop, // CTL-1367 P1
+        ...(labelNeedsHuman ? { labelNeedsHuman } : {}), // CTL-1441
       });
     }
   }

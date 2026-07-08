@@ -8,7 +8,7 @@
 import { describe, test, expect, beforeEach, afterEach, mock, spyOn } from "bun:test";
 import { ownerForTicket } from "./hrw.mjs"; // CTL-862: HRW owner computation for ownership-filter tests
 import { readClusterGeneration } from "./scheduler.mjs"; // CTL-1028: persistence assertion
-import { mkdtempSync, rmSync, mkdirSync, writeFileSync, appendFileSync, statSync } from "node:fs";
+import { mkdtempSync, rmSync, mkdirSync, writeFileSync, appendFileSync, statSync, existsSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -1305,6 +1305,186 @@ describe("sweepMissingTriage (CTL-711)", () => {
       phase: "triage",
     });
     stopMonitor();
+  });
+});
+
+// --- CTL-1441: triage re-dispatch guard (cap + artifact-mismatch) ------------
+
+describe("triage re-dispatch guard (CTL-1441)", () => {
+  const sweepOpts = (realOrchDir, dispatch, labelNeedsHuman) => ({
+    orchDir: realOrchDir,
+    dispatch,
+    applyTriageStatus: () => ({ applied: false, verified: false, from_state: null, to_state: null, reason: null }),
+    appendEvent: () => {},
+    readMaxParallelFn: () => 6,
+    liveBackgroundCount: () => 0,
+    ...(labelNeedsHuman ? { labelNeedsHuman } : {}),
+  });
+
+  test("each real dispatch bumps the per-ticket counter", () => {
+    enroll("ENG", { status: "Ready" });
+    const realOrchDir = join(catalystDir, "execution-core");
+    mkdirSync(realOrchDir, { recursive: true }); // counters only persist under a REAL orch dir
+    const exec = execReturning({ ENG: [node("ENG-9")] });
+    reconcileAll({ exec });
+    const dispatch = mock(() => ({ code: 0 }));
+    sweepMissingTriage(sweepOpts(realOrchDir, dispatch));
+    expect(dispatch).toHaveBeenCalledTimes(1);
+    const counter = JSON.parse(
+      readFileSync(join(realOrchDir, ".triage-dispatch-counts", "ENG-9.json"), "utf8"),
+    );
+    expect(counter.count).toBe(1);
+  });
+
+  test("at the cap: no dispatch, needs-human RETRIED each sweep (labelOnce dedupes), capped marker written", () => {
+    enroll("ENG", { status: "Ready" });
+    const realOrchDir = join(catalystDir, "execution-core");
+    const countsDir = join(realOrchDir, ".triage-dispatch-counts");
+    mkdirSync(countsDir, { recursive: true });
+    writeFileSync(join(countsDir, "ENG-9.json"), JSON.stringify({ count: 3 }));
+    const exec = execReturning({ ENG: [node("ENG-9")] });
+    reconcileAll({ exec });
+    const dispatch = mock(() => ({ code: 0 }));
+    const labelNeedsHuman = mock(() => {});
+    sweepMissingTriage(sweepOpts(realOrchDir, dispatch, labelNeedsHuman));
+    expect(dispatch).not.toHaveBeenCalled();
+    expect(labelNeedsHuman).toHaveBeenCalledTimes(1);
+    expect(labelNeedsHuman).toHaveBeenCalledWith(realOrchDir, "ENG-9");
+    expect(JSON.parse(readFileSync(join(countsDir, "ENG-9.json"), "utf8")).cappedAt).toBeTruthy();
+    // A second sweep still skips dispatch but RE-TRIES the label — a transient
+    // Linear failure leaves no labelOnce marker, so the retry must reach it
+    // (Codex P2); labelOnce's own markers are the idempotence guard.
+    sweepMissingTriage(sweepOpts(realOrchDir, dispatch, labelNeedsHuman));
+    expect(dispatch).not.toHaveBeenCalled();
+    expect(labelNeedsHuman).toHaveBeenCalledTimes(2);
+  });
+
+  test("multi-host: a NON-owner host never parks a capped ticket (HRW gate runs first)", () => {
+    enroll("ENG", { status: "Ready" });
+    const realOrchDir = join(catalystDir, "execution-core");
+    mkdirSync(join(realOrchDir, ".triage-dispatch-counts"), { recursive: true });
+    writeFileSync(join(realOrchDir, ".triage-dispatch-counts", "ENG-9.json"), JSON.stringify({ count: 3 }));
+    const exec = execReturning({ ENG: [node("ENG-9")] });
+    reconcileAll({ exec });
+    const roster = ["host-a", "host-b"];
+    const owner = ownerForTicket("ENG-9", roster);
+    const notOwner = roster.find((h) => h !== owner);
+    const dispatch = mock(() => ({ code: 0 }));
+    const labelNeedsHuman = mock(() => {});
+    sweepMissingTriage({
+      ...sweepOpts(realOrchDir, dispatch, labelNeedsHuman),
+      hosts: roster,
+      hostName: notOwner,
+    });
+    expect(dispatch).not.toHaveBeenCalled();
+    expect(labelNeedsHuman).not.toHaveBeenCalled(); // non-owner must not touch the ticket
+    expect(readFileSync(join(realOrchDir, ".triage-dispatch-counts", "ENG-9.json"), "utf8")).not.toContain("cappedAt");
+  });
+
+  test("an IN-FLIGHT triage signal (running) suppresses the cap bump (idempotent no-op, Codex P1)", () => {
+    enroll("ENG", { status: "Ready" });
+    const realOrchDir = join(catalystDir, "execution-core");
+    const dir = join(realOrchDir, "workers", "ENG-9");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "phase-triage.json"), JSON.stringify({ status: "running" }));
+    const exec = execReturning({ ENG: [node("ENG-9")] });
+    reconcileAll({ exec });
+    const dispatch = mock(() => ({ code: 0 }));
+    sweepMissingTriage(sweepOpts(realOrchDir, dispatch));
+    // The dispatch still fires (CTL-615 yield decides downstream) but the cap
+    // counter must NOT accrue against a live worker every 10-min reconcile.
+    expect(dispatch).toHaveBeenCalledTimes(1);
+    expect(existsSync(join(realOrchDir, ".triage-dispatch-counts", "ENG-9.json"))).toBe(false);
+  });
+
+  test("a label failure at the cap never throws out of the sweep", () => {
+    enroll("ENG", { status: "Ready" });
+    const realOrchDir = join(catalystDir, "execution-core");
+    mkdirSync(join(realOrchDir, ".triage-dispatch-counts"), { recursive: true });
+    writeFileSync(join(realOrchDir, ".triage-dispatch-counts", "ENG-9.json"), JSON.stringify({ count: 3 }));
+    const exec = execReturning({ ENG: [node("ENG-9")] });
+    reconcileAll({ exec });
+    const dispatch = mock(() => ({ code: 0 }));
+    expect(() =>
+      sweepMissingTriage(sweepOpts(realOrchDir, dispatch, () => { throw new Error("linear down"); })),
+    ).not.toThrow();
+    expect(dispatch).not.toHaveBeenCalled();
+  });
+
+  test("done phase-triage.json + missing triage.json → stale signal RETIRED, real re-dispatch + mismatch marker", () => {
+    enroll("ENG", { status: "Ready" });
+    const realOrchDir = join(catalystDir, "execution-core");
+    const dir = join(realOrchDir, "workers", "ENG-9");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "phase-triage.json"), JSON.stringify({ status: "done" }));
+    const exec = execReturning({ ENG: [node("ENG-9")] });
+    reconcileAll({ exec });
+    const dispatch = mock(() => ({ code: 0 }));
+    sweepMissingTriage(sweepOpts(realOrchDir, dispatch));
+    // The launcher short-circuits done signals as idempotent no-ops, so the
+    // sweep retires the stale completion signal (rename, forensics kept) and
+    // the dispatch is a REAL launch — counted by the cap.
+    expect(dispatch).toHaveBeenCalledTimes(1);
+    expect(existsSync(join(dir, "phase-triage.json"))).toBe(false);
+    expect(existsSync(join(dir, "phase-triage.json.stale-ctl1441"))).toBe(true);
+    expect(existsSync(join(dir, ".triage-artifact-mismatch-warned"))).toBe(true);
+    const counter = JSON.parse(readFileSync(join(realOrchDir, ".triage-dispatch-counts", "ENG-9.json"), "utf8"));
+    expect(counter.count).toBe(1);
+  });
+
+  test("at the cap with the final attempt still RUNNING → park deferred (no label) until the signal settles", () => {
+    enroll("ENG", { status: "Ready" });
+    const realOrchDir = join(catalystDir, "execution-core");
+    const dir = join(realOrchDir, "workers", "ENG-9");
+    mkdirSync(dir, { recursive: true });
+    mkdirSync(join(realOrchDir, ".triage-dispatch-counts"), { recursive: true });
+    writeFileSync(join(realOrchDir, ".triage-dispatch-counts", "ENG-9.json"), JSON.stringify({ count: 3 }));
+    writeFileSync(join(dir, "phase-triage.json"), JSON.stringify({ status: "running" }));
+    const exec = execReturning({ ENG: [node("ENG-9")] });
+    reconcileAll({ exec });
+    const dispatch = mock(() => ({ code: 0 }));
+    const labelNeedsHuman = mock(() => {});
+    sweepMissingTriage(sweepOpts(realOrchDir, dispatch, labelNeedsHuman));
+    expect(dispatch).not.toHaveBeenCalled(); // count is spent — no new dispatch
+    expect(labelNeedsHuman).not.toHaveBeenCalled(); // the live attempt may still succeed
+    expect(readFileSync(join(realOrchDir, ".triage-dispatch-counts", "ENG-9.json"), "utf8")).not.toContain("cappedAt");
+    // Once the worker settles (failed) without the artifact, the park lands.
+    writeFileSync(join(dir, "phase-triage.json"), JSON.stringify({ status: "failed" }));
+    sweepMissingTriage(sweepOpts(realOrchDir, dispatch, labelNeedsHuman));
+    expect(labelNeedsHuman).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(readFileSync(join(realOrchDir, ".triage-dispatch-counts", "ENG-9.json"), "utf8")).cappedAt).toBeTruthy();
+  });
+
+  test("(R4) a SATURATED fleet still parks a capped ticket (park is capacity-independent)", () => {
+    enroll("ENG", { status: "Ready" });
+    const realOrchDir = join(catalystDir, "execution-core");
+    mkdirSync(join(realOrchDir, ".triage-dispatch-counts"), { recursive: true });
+    writeFileSync(join(realOrchDir, ".triage-dispatch-counts", "ENG-9.json"), JSON.stringify({ count: 3 }));
+    const exec = execReturning({ ENG: [node("ENG-9")] });
+    reconcileAll({ exec });
+    const dispatch = mock(() => ({ code: 0 }));
+    const labelNeedsHuman = mock(() => {});
+    sweepMissingTriage({
+      ...sweepOpts(realOrchDir, dispatch, labelNeedsHuman),
+      readMaxParallelFn: () => 1,
+      liveBackgroundCount: () => 1, // zero free slots
+    });
+    expect(dispatch).not.toHaveBeenCalled();
+    expect(labelNeedsHuman).toHaveBeenCalledTimes(1); // parked despite saturation
+  });
+
+  test("a failed spawn still counts toward the cap (the no-artifacts class is bounded)", () => {
+    enroll("ENG", { status: "Ready" });
+    const realOrchDir = join(catalystDir, "execution-core");
+    mkdirSync(realOrchDir, { recursive: true }); // counters only persist under a REAL orch dir
+    const exec = execReturning({ ENG: [node("ENG-9")] });
+    reconcileAll({ exec });
+    const dispatch = mock(() => ({ code: 9, stderr: "spawn died" }));
+    sweepMissingTriage(sweepOpts(realOrchDir, dispatch));
+    const counter = JSON.parse(
+      readFileSync(join(realOrchDir, ".triage-dispatch-counts", "ENG-9.json"), "utf8"),
+    );
+    expect(counter.count).toBe(1);
   });
 });
 
