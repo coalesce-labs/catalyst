@@ -61,11 +61,13 @@ is no `triaged` workspace label — the daemon never writes one.
 
 Environment:
 
-- `TICKET` — Linear identifier (e.g. `CTL-451`). Required.
-- `WORKER_DIR` — output directory for `triage.json`. Defaults to `${ORCH_DIR}/workers/${TICKET}` if
-  set, else `$(pwd)`.
-- `ORCH_DIR`, `CATALYST_ORCHESTRATOR_ID`, `CATALYST_SESSION_ID` — used for trace/span id derivation
-  in the emitted event; all optional.
+- `TICKET` — Linear identifier (e.g. `CTL-451`). Required; falls back to `CATALYST_TICKET` (the
+  env the dispatcher actually sets — CTL-1441).
+- `WORKER_DIR` — output directory for `triage.json`. Defaults to `${ORCH_DIR}/workers/${TICKET}`,
+  else the canonical `~/catalyst/execution-core/workers/${TICKET}` — NEVER `$(pwd)` (a triage.json
+  outside the worker dir is invisible to the monitor and re-triages forever; CTL-1441/CTL-1403).
+- `ORCH_DIR` — falls back to `CATALYST_ORCHESTRATOR_DIR`. `CATALYST_ORCHESTRATOR_ID`,
+  `CATALYST_SESSION_ID` — used for trace/span id derivation in the emitted event; optional.
 
 ## Body
 
@@ -100,10 +102,24 @@ fi
 # shellcheck disable=SC1090
 . "$__PT_READ_LIB"
 
+# CTL-1441: bind from the CATALYST_-prefixed env FIRST — those are the channel
+# phase-agent-dispatch actually populates (DISPATCH_ENV / worker settings). The
+# bare TICKET/ORCH_DIR names exist only via slash-command substitution, which is
+# exactly the fragile channel that produced the CTL-1403 re-triage loop: a
+# substitution miss let WORKER_DIR fall back to $(pwd), triage.json landed
+# outside the worker dir, and the monitor (blind to it) re-dispatched forever.
+TICKET="${TICKET:-${CATALYST_TICKET:-}}"
 : "${TICKET:?phase-triage: TICKET env var required}"
+ORCH_DIR="${ORCH_DIR:-${CATALYST_ORCHESTRATOR_DIR:-}}"
 
 WORKER_DIR="${WORKER_DIR:-${ORCH_DIR:+${ORCH_DIR}/workers/${TICKET}}}"
-WORKER_DIR="${WORKER_DIR:-$(pwd)}"
+# CTL-1441: NEVER fall back to $(pwd) — a triage.json outside the worker dir is
+# invisible to hasTriageArtifact and re-triages forever. Default to the
+# canonical orch dir and say so.
+if [[ -z "$WORKER_DIR" ]]; then
+  WORKER_DIR="${HOME}/catalyst/execution-core/workers/${TICKET}"
+  echo "phase-triage: ORCH_DIR unset — defaulting WORKER_DIR to ${WORKER_DIR} (CTL-1441)" >&2
+fi
 mkdir -p "$WORKER_DIR"
 
 # 1. Read ticket via direct SQL against the replica (CTL-1397 — never bare
