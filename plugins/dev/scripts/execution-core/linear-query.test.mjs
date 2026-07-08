@@ -766,6 +766,96 @@ describe("fetchTicketState — cache (CTL-634)", () => {
   });
 });
 
+// CTL-1403 — fetchTicketState emits a reads-by-source `catalyst.linear.read`
+// event (service.name=catalyst.execution-core) on the replica-HIT tier and the
+// live-exec tier, but NOT on the in-mem cache tier (Option A: count only reads
+// that consulted the SQLite replica or shelled to Linear). source maps: replica
+// HIT → `replica`; reaching live-exec with a replica passed (consulted+missed) →
+// `linearis_miss`; with no replica (never consulted = bypass) → `linearis`.
+describe("fetchTicketState — reads-by-source emit (CTL-1403)", () => {
+  let dir;
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "lq-read-emit-"));
+    process.env.CATALYST_DIR = dir;
+  });
+  afterEach(() => {
+    try { rmSync(dir, { recursive: true, force: true }); } catch { /* best effort */ }
+  });
+  function readEvents() {
+    const now = new Date();
+    const ym = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}`;
+    try {
+      return readFileSync(join(dir, "events", `${ym}.jsonl`), "utf8")
+        .trim().split("\n").filter(Boolean).map((l) => JSON.parse(l))
+        .filter((e) => e.attributes?.["event.name"] === "catalyst.linear.read");
+    } catch { return []; }
+  }
+  const okNode = (state) => ({ code: 0, stdout: JSON.stringify({ state: { name: state }, updatedAt: "2026-07-08T00:00:00.000Z" }), stderr: "" });
+
+  test("replica HIT → source=replica, result=ok, service.name=catalyst.execution-core", () => {
+    const replica = { lookup: (id) => (id === "CTL-1" ? { terminal: false, state: "Todo" } : undefined) };
+    expect(fetchTicketState("CTL-1", { exec: () => { throw new Error("must not exec on replica hit"); }, replica })).toBe("Todo");
+    const events = readEvents();
+    expect(events.length).toBe(1);
+    expect(events[0].attributes["linear.read.source"]).toBe("replica");
+    expect(events[0].attributes["linear.read.result"]).toBe("ok");
+    expect(events[0].attributes["event.label"]).toBe("CTL-1");
+    expect(events[0].attributes["linear.read.op"]).toBe("read_ticket");
+    expect(events[0].resource["service.name"]).toBe("catalyst.execution-core");
+    expect(events[0].severityText).toBe("INFO");
+  });
+
+  test("replica passed but MISS → live exec ok → source=linearis_miss, with age_ms", () => {
+    const replica = { lookup: () => undefined }; // consulted, missed
+    expect(fetchTicketState("CTL-2", { exec: () => okNode("Done"), replica })).toBe("Done");
+    const events = readEvents();
+    expect(events.length).toBe(1);
+    expect(events[0].attributes["linear.read.source"]).toBe("linearis_miss");
+    expect(events[0].attributes["linear.read.result"]).toBe("ok");
+    expect(typeof events[0].attributes["linear.read.age_ms"]).toBe("number");
+  });
+
+  test("NO replica passed → live exec → source=linearis (the bypass case)", () => {
+    expect(fetchTicketState("CTL-3", { exec: () => okNode("Ready") })).toBe("Ready");
+    const events = readEvents();
+    expect(events.length).toBe(1);
+    expect(events[0].attributes["linear.read.source"]).toBe("linearis");
+    expect(events[0].attributes["linear.read.result"]).toBe("ok");
+  });
+
+  test("live exec fails (code!=0) → result=failed, WARN", () => {
+    const replica = { lookup: () => undefined };
+    expect(fetchTicketState("CTL-4", { exec: () => ({ code: 1, stdout: "", stderr: "boom" }), replica })).toBeNull();
+    const events = readEvents();
+    expect(events.length).toBe(1);
+    expect(events[0].attributes["linear.read.source"]).toBe("linearis_miss");
+    expect(events[0].attributes["linear.read.result"]).toBe("failed");
+    expect(events[0].severityText).toBe("WARN");
+  });
+
+  test("live exec code:0 but NO state (deleted/error body) → result=failed (Codex P2)", () => {
+    // A missing/deleted ticket returns code:0 + an error body — parses fine, no state.
+    const exec = () => ({ code: 0, stdout: JSON.stringify({ error: "not found" }), stderr: "" });
+    expect(fetchTicketState("CTL-6", { exec })).toBeNull();
+    const events = readEvents();
+    expect(events.length).toBe(1);
+    expect(events[0].attributes["linear.read.result"]).toBe("failed"); // NOT ok — no state served
+    expect(events[0].severityText).toBe("WARN");
+    expect("linear.read.age_ms" in events[0].attributes).toBe(false); // no data → no age
+  });
+
+  test("in-mem cache HIT is NOT counted (tier-1 exclusion)", () => {
+    const cache = createTicketStateCache({ now: () => 0 });
+    // First read: no replica → live exec → emits ONE (source=linearis).
+    fetchTicketState("CTL-5", { exec: () => okNode("Todo"), cache });
+    // Second read: served from cache → NO new emit.
+    fetchTicketState("CTL-5", { exec: () => { throw new Error("must not exec on cache hit"); }, cache });
+    const events = readEvents();
+    expect(events.length).toBe(1); // only the first (live) read counted
+    expect(events[0].attributes["linear.read.source"]).toBe("linearis");
+  });
+});
+
 // CTL-1436 (A4): probeBackoff — the terminal-probe / GC census backs off from
 // re-reading a replica-MISS ticket live after its live read FAILS, so a ticket that
 // keeps 429-ing isn't re-hammered every tick (CTL-679 breaker-flap mitigation).

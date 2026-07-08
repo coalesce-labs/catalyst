@@ -131,6 +131,68 @@ assert_eq "bad id: rc 2" "2" "$?"
 RESOLVED="$(env -u CATALYST_REPLICA_DB CATALYST_DIR=/custom/dir bash -c 'source "'"$HELPER"'"; printf "%s" "$CATALYST_REPLICA_DB"')"
 assert_eq "resolves \$CATALYST_DIR when REPLICA_DB unset" "/custom/dir/catalyst-replica.db" "$RESOLVED"
 
+# ── 11. CTL-1403: reads-by-source emit (catalyst.linear.read on EVERY branch) ──
+# The helper writes canonical events into $CATALYST_EVENTS_DIR (set above), so we
+# can assert the source/result contract per branch. last_lr() returns the last
+# catalyst.linear.read line; clear_events() resets between controlled reads.
+clear_events() { rm -f "$CATALYST_EVENTS_DIR"/*.jsonl 2>/dev/null || true; }
+last_lr() { grep -h '"catalyst.linear.read"' "$CATALYST_EVENTS_DIR"/*.jsonl 2>/dev/null | tail -1; }
+
+# 11a. replica HIT → source=replica, result=ok, full contract.
+fresh_lock
+clear_events
+linear_read_ticket TST-1 >/dev/null 2>&1
+LR="$(last_lr)"
+assert_eq "emit HIT: event.name" "catalyst.linear.read" "$(echo "$LR" | jq -r '.attributes["event.name"]')"
+assert_eq "emit HIT: source=replica" "replica" "$(echo "$LR" | jq -r '.attributes["linear.read.source"]')"
+assert_eq "emit HIT: result=ok" "ok" "$(echo "$LR" | jq -r '.attributes["linear.read.result"]')"
+assert_eq "emit HIT: op=read_ticket" "read_ticket" "$(echo "$LR" | jq -r '.attributes["linear.read.op"]')"
+assert_eq "emit HIT: event.label=TST-1" "TST-1" "$(echo "$LR" | jq -r '.attributes["event.label"]')"
+assert_eq "emit HIT: service.name" "catalyst.linear-read" "$(echo "$LR" | jq -r '.resource["service.name"]')"
+assert_eq "emit HIT: severity INFO" "INFO" "$(echo "$LR" | jq -r '.severityText')"
+# Codex P2: the ticket id lives ONLY in event.label — never leaked into the resource
+# block (linear.key) or as the linear.issue.identifier attribute (per the contract).
+assert_eq "emit HIT: no ticket id in resource.linear.key" "ABSENT" "$(echo "$LR" | jq -r '.resource["linear.key"] // "ABSENT"')"
+assert_eq "emit HIT: no linear.issue.identifier attr" "ABSENT" "$(echo "$LR" | jq -r '.attributes["linear.issue.identifier"] // "ABSENT"')"
+
+# 11b. absent id → MISS → linearis fallback (stub exits 0) → source=linearis_miss, result=ok.
+clear_events
+linear_read_ticket TST-999 >/dev/null 2>&1
+LR="$(last_lr)"
+assert_eq "emit MISS: source=linearis_miss" "linearis_miss" "$(echo "$LR" | jq -r '.attributes["linear.read.source"]')"
+assert_eq "emit MISS: result=ok" "ok" "$(echo "$LR" | jq -r '.attributes["linear.read.result"]')"
+
+# 11c. stale replica → linearis fallback (stub exits 0) → source=linearis, result=ok.
+touch -t 202001010000 "$DB.writer.lock"
+clear_events
+linear_read_ticket TST-1 >/dev/null 2>&1
+LR="$(last_lr)"
+assert_eq "emit STALE: source=linearis" "linearis" "$(echo "$LR" | jq -r '.attributes["linear.read.source"]')"
+assert_eq "emit STALE: result=ok" "ok" "$(echo "$LR" | jq -r '.attributes["linear.read.result"]')"
+fresh_lock
+
+# 11d. live read FAILS (linearis stub exits non-zero) → result=failed, WARN severity.
+cat >"$STUBBIN/linearis" <<'EOF'
+#!/usr/bin/env bash
+echo "LINEARIS_FAILED $*" >&2
+exit 1
+EOF
+chmod +x "$STUBBIN/linearis"
+clear_events
+linear_read_ticket TST-999 >/dev/null 2>&1
+RC=$?
+LR="$(last_lr)"
+assert_eq "emit FAIL: result=failed" "failed" "$(echo "$LR" | jq -r '.attributes["linear.read.result"]')"
+assert_eq "emit FAIL: severity WARN" "WARN" "$(echo "$LR" | jq -r '.severityText')"
+assert_eq "emit FAIL: caller sees the non-zero rc" "1" "$RC"
+# restore the ok stub for any later use
+cat >"$STUBBIN/linearis" <<'EOF'
+#!/usr/bin/env bash
+echo "LINEARIS_CALLED $*" >&2
+echo '{"identifier":"FALLBACK","state":{"name":"FromLinearis"}}'
+EOF
+chmod +x "$STUBBIN/linearis"
+
 echo "─────────────────────────────────────────"
 echo "Results: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]
