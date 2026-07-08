@@ -2789,6 +2789,39 @@ describe("reclaimDeadWorkIfPossible — CTL-1442 escalation ask-cap", () => {
     expect(s.opts.appendEscalatedEvent.calls.length).toBe(3); // still no new events
   });
 
+  test("(R4) a lost flip is repaired even while the Linear breaker is OPEN (local-only rewrite)", () => {
+    let clock = 60_000_000;
+    const s = setupAt(orchDir);
+    s.opts.now = () => clock;
+    for (let ask = 1; ask <= 3; ask++) {
+      reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts);
+      clock += 10 * 60 * 1000 + 1;
+    }
+    const sigPath = join(orchDir, "workers", "CTL-9", "phase-pr.json");
+    rmSync(sigPath, { force: true });
+    // breaker OPEN: the repair still lands (no Linear I/O involved)
+    s.opts.breaker = { isOpen: () => true, recordRateLimited: () => {} };
+    reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts);
+    expect(JSON.parse(readFileSync(sigPath, "utf8")).status).toBe("stalled");
+    expect(s.opts.appendEscalatedEvent.calls.length).toBe(3); // no new events
+  });
+
+  test("(R4) a MALFORMED signal is rewritten like a missing one (parse failure cannot orphan the row)", () => {
+    let clock = 70_000_000;
+    const s = setupAt(orchDir);
+    s.opts.now = () => clock;
+    for (let ask = 1; ask <= 3; ask++) {
+      reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts);
+      clock += 10 * 60 * 1000 + 1;
+    }
+    const sigPath = join(orchDir, "workers", "CTL-9", "phase-pr.json");
+    writeFileSync(sigPath, "{truncated"); // corrupt it
+    reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts);
+    const repaired = JSON.parse(readFileSync(sigPath, "utf8"));
+    expect(repaired.status).toBe("stalled");
+    expect(repaired.ticket).toBe("CTL-9");
+  });
+
   test("(R2) the attempts history never inherits a DIFFERENT reason's asks", () => {
     let clock = 50_000_000;
     const s = setupAt(orchDir);

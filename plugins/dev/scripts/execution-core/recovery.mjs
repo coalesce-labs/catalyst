@@ -1851,7 +1851,17 @@ function markEscalationCapTerminal({ orchDir, ticket, phase, explanation }) {
   const signalPath = join(orchDir, "workers", ticket, `phase-${phase}.json`);
   try {
     mkdirSync(dirname(signalPath), { recursive: true });
-    const sig = existsSync(signalPath) ? JSON.parse(readFileSync(signalPath, "utf8")) : {};
+    // Codex R4: a truncated/malformed signal must be treated like a MISSING one
+    // (parse failure must not abort the rewrite — readWorkerSignals skips
+    // malformed files, so leaving it broken loses the inbox association).
+    let sig = {};
+    if (existsSync(signalPath)) {
+      try {
+        sig = JSON.parse(readFileSync(signalPath, "utf8")) ?? {};
+      } catch {
+        sig = {};
+      }
+    }
     // Codex R3: when re-creating a removed/unreadable signal, seed identity —
     // readWorkerSignals derives ticket/phase from the BODY, not the path, and a
     // ticket:null stalled row breaks the Needs-You association.
@@ -2208,16 +2218,13 @@ export function reclaimDeadWorkIfPossible(
     // Defer: skip the audit event + label write entirely (no cool-down record,
     // so a genuine escalation re-fires cleanly once the breaker closes). A
     // transient 429 is not a human-intervention condition.
-    if (breaker.isOpen(now())) {
-      log.warn({ ticket, phase, reason }, "ctl-679: escalation deferred — Linear breaker open");
-      return "rate-limited-deferred";
-    }
     // CTL-1442: the ask-cap state (no-progress only). Consecutive same-reason
     // asks are counted in the cool-down marker; a spent cap means the ticket was
     // parked terminal (or should have been — the flip can be lost to a crash).
-    // Read BEFORE the cooldown gate so a lost flip is re-asserted even inside
-    // the window (Codex R2: waiting out the cooldown leaves a dead running
-    // signal counted as in-flight, blocking slots at maxParallel=1).
+    // Read BEFORE the breaker AND cooldown gates (Codex R2/R4): the terminal
+    // rewrite is purely LOCAL, so neither an open Linear breaker nor the
+    // cool-down window may defer repairing a lost flip — a dead running signal
+    // would otherwise hold a slot for the whole outage/window.
     const priorEscRecord = readEscalationRecordFn(orchDir, ticket, phase);
     const priorAsks =
       priorEscRecord?.reason === reason && typeof priorEscRecord?.askCount === "number"
@@ -2241,6 +2248,11 @@ export function reclaimDeadWorkIfPossible(
         "ctl-1442: ask-cap spent but the signal was not terminal — re-asserted the stalled flip"
       );
     };
+    if (breaker.isOpen(now())) {
+      if (capSpent) reassertTerminalIfLost(); // local-only repair — no Linear I/O
+      log.warn({ ticket, phase, reason }, "ctl-679: escalation deferred — Linear breaker open");
+      return "rate-limited-deferred";
+    }
     if (inEscalationCooldownFn(orchDir, ticket, phase, now())) {
       if (capSpent) reassertTerminalIfLost();
       return "escalation-suppressed";
