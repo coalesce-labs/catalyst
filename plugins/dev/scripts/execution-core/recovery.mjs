@@ -2298,11 +2298,17 @@ export function reclaimDeadWorkIfPossible(
             // "authorize retry?" every window (audit RC4). Scoped to the SAME
             // reason (Codex R2): a fresh no-progress ask must not inherit an
             // unrelated wedged-never-started history.
+            // Codex (post-merge #2590 P3): include the CURRENT ask — the marker
+            // is written after the emit, so the record alone is one ask behind
+            // (the terminal brief would show 2 of 3 timestamps).
             attempts:
               extras?.attempts ??
-              (priorEscRecord?.reason === reason && Array.isArray(priorEscRecord?.asks)
-                ? priorEscRecord.asks
-                : []),
+              [
+                ...(priorEscRecord?.reason === reason && Array.isArray(priorEscRecord?.asks)
+                  ? priorEscRecord.asks
+                  : []),
+                now(),
+              ],
           };
     try {
       explanation = buildExplanation(explanationFields);
@@ -2345,7 +2351,7 @@ export function reclaimDeadWorkIfPossible(
       markEscalationCapTerminal({ orchDir, ticket, phase, explanation });
       log.warn(
         { ticket, phase, reason, asks: priorAsks + 1 },
-        "ctl-1442: escalation ask-cap reached — parked terminal (stalled + needs-human + brief); delete the .escalation-cooldowns marker to re-arm"
+        "ctl-1442: escalation ask-cap reached — parked terminal (stalled + needs-human + brief); re-arm by deleting the .escalation-cooldowns marker AND the stalled phase signal (or reply on the ticket — the stall janitor clears both)"
       );
       return "escalation-cap-terminal";
     }
