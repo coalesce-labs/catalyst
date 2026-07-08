@@ -12,7 +12,7 @@ sidebar:
 
 Every `catalyst-*` CLI is installed onto your `PATH` by
 [`install-cli.sh`](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/scripts/install-cli.sh) (into
-`~/.catalyst/bin` by default). This page lists all 29 of them — one line of
+`~/.catalyst/bin` by default). This page lists all 30 of them — one line of
 purpose plus the key subcommands — grouped by area. Run any tool with `--help`
 for full syntax. The richer tools have their own reference pages (e.g.
 [catalyst-stack](/reference/catalyst-stack/)).
@@ -50,6 +50,14 @@ Entry wrapper for the otel-forward daemon (forwards OTel telemetry).
 **Key subcommands:** _(run `catalyst-otel-forward --help`)_
 
 [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/scripts/catalyst-otel-forward)
+
+### boot-resume-approve
+
+List and approve boot-resume gates for expensive-phase resumes (the CTL-644 cold-start approval sentinel).
+
+**Key subcommands:** _(run `boot-resume-approve --help`)_
+
+[Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/scripts/execution-core/boot-resume-approve.mjs)
 
 ## Event & comms
 
