@@ -4159,13 +4159,29 @@ export function schedulerTick(
         // ticket is skipped as "escalated" (B1's TTL governs re-entry) rather
         // than "attempts-exhausted". Enforce-only — shadow must not write
         // labels/comments. Idempotent: escalated:true excludes future scans.
-        if (rMode === "enforce") {
+        // Codex R1: board-health is independently operator-gated — an exhausted
+        // board-health candidate must escalate loudly even when the per-item
+        // recovery pass is off (the new all-candidates-exhausted reason is
+        // excluded from C2's wedge set, so WITHOUT this sweep nothing would
+        // ever surface those tickets).
+        const _bhModeForSweep = readBoardHealthConfig().mode;
+        if (rMode === "enforce" || _bhModeForSweep === "enforce") {
           try {
             escalateExhaustedIntents(orchDir, {
               labelNeedsHuman: (dir, t) =>
                 labelNeedsHumanUnlessBeliefOwner(dir, t, writeStatus, {
                   site: "attempts-exhausted",
                 }),
+              // Codex R1: a finished ticket's stale ledger is forgotten by the
+              // terminal cleanup LATER in the tick — never page a human for it.
+              // Cached/replica-first read; fail-open toward active.
+              isActive: (t) =>
+                !isTicketTerminalOrMerged({
+                  ticket: t,
+                  cache,
+                  fetchState: (id, o = {}) =>
+                    fetchTicketState(id, { ...o, cache, gateway, replica, probeBackoff: true }),
+                })?.terminal,
             });
           } catch (err) {
             log.warn({ err: err?.message }, "ctl-1440: exhausted-intent sweep threw — continuing tick");
@@ -6806,8 +6822,12 @@ function runTick() {
           return holisticBoardHealthAct(
             { anchor, candidates, boardContext, decision },
             {
-              shouldSkipItem: (cand) => recoveryShouldSkipItem(cand, deps),
-              skipReason: (cand) => recoverySkipReason(cand, deps), // CTL-1440 (P0b)
+              // CTL-1440 (Codex R1): holistic:true — a board-health defer is
+              // gated on its FROZEN deferredSince anchor here (an aged deferred
+              // anchor stays actionable even when the per-item pass re-deferred
+              // it moments ago); the per-item pass keeps the lastTs throttle.
+              shouldSkipItem: (cand) => recoveryShouldSkipItem(cand, { ...deps, holistic: true }),
+              skipReason: (cand) => recoverySkipReason(cand, { ...deps, holistic: true }), // CTL-1440 (P0b)
               invokeRecoveryPass: (cand, ctx) => recoveryInvokeRecoveryPass(cand, ctx, deps),
               recordIntent: (cand, intent) => recoveryRecordIntent(cand, intent, deps),
             },
@@ -6913,14 +6933,21 @@ export function holisticBoardHealthAct(
   // from a genuine retryable cooldown (the old blanket "all-candidates-cooldown"
   // misnomer that made C1/C2 lie — audit RC1).
   let ledgerSkips = 0;
-  let exhaustedSkips = 0;
+  let terminalSkips = 0;
+  let invoked = 0;
+  // Codex R1: the terminal set includes "escalated" (the exhaustion sweep runs
+  // BEFORE this act and rewrites exhausted ledgers to escalated — the cohort is
+  // human-owned either way) and "leave-alone" (verified healthy). All three are
+  // truthful non-wedges; only genuine cooldown/defer skips stay retryable.
+  const TERMINAL_SKIPS = new Set(["attempts-exhausted", "escalated", "leave-alone"]);
   for (const cand of ordered) {
     // (a) cooldown/attempts-latched → try the next candidate (MUST-FIX 2).
     if (shouldSkipItem(cand)) {
       ledgerSkips += 1;
-      if (skipReason?.(cand) === "attempts-exhausted") exhaustedSkips += 1;
+      if (TERMINAL_SKIPS.has(skipReason?.(cand))) terminalSkips += 1;
       continue;
     }
+    invoked += 1;
     const r = invokeRecoveryPass(cand, {
       boardContext,
       reason: `board-health: ${decision?.gate?.reason ?? "board anomaly"} — holistic recovery-pass delegate`,
@@ -6946,12 +6973,15 @@ export function holisticBoardHealthAct(
     // event's act.anchor records the real dispatch handle.
     return { ...r, candidate: cand }; // exactly ONE real dispatch per scan
   }
-  // Every ledger skip was terminal exhaustion → say so (C2 treats it as a
-  // truthful non-wedge); any retryable/mixed skip keeps the cooldown reason.
+  // EVERY candidate was a terminal ledger skip (exhausted / escalated /
+  // leave-alone) and NONE was invoked → the cohort is truthfully done (C2
+  // non-wedge). Any invoke (even a non-dispatch result — cycle cap, latched)
+  // or any retryable skip keeps the cooldown reason (Codex R1: an actionable
+  // candidate that merely failed to dispatch is NOT a terminal cohort).
   return {
     dispatched: false,
     reason:
-      ledgerSkips > 0 && exhaustedSkips === ledgerSkips
+      invoked === 0 && ledgerSkips > 0 && terminalSkips === ledgerSkips
         ? "all-candidates-exhausted"
         : "all-candidates-cooldown",
   };

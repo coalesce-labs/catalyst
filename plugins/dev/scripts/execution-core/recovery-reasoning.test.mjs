@@ -2105,6 +2105,55 @@ describe("defaultSkipReason + escalateExhaustedIntents (CTL-1440 P0b)", () => {
     expect(out).toEqual([]);
   });
 
+  test("(Codex R1) a terminal/finished ticket is NEVER swept (isActive gate; fail-open toward active)", () => {
+    const t0 = 1_000_000_000_000;
+    defaultRecordIntent("CTL-DONE", { decision: "fix", attempts: RECOVERY_MAX_ATTEMPTS }, { orchDir, now: () => t0 });
+    defaultRecordIntent("CTL-LIVE", { decision: "fix", attempts: RECOVERY_MAX_ATTEMPTS }, { orchDir, now: () => t0 });
+    const out = escalateExhaustedIntents(orchDir, {
+      now: () => t0 + 1,
+      isActive: (t) => t !== "CTL-DONE",
+      emitEvent: () => {}, postComment: () => {}, labelNeedsHuman: () => {}, writeSignal: () => {},
+    });
+    expect(out).toEqual(["CTL-LIVE"]);
+    expect(readLedger("CTL-DONE").escalated).toBe(false); // untouched — terminal cleanup owns it
+    // a THROWING isActive fails open toward active:
+    defaultRecordIntent("CTL-THROW", { decision: "fix", attempts: RECOVERY_MAX_ATTEMPTS }, { orchDir, now: () => t0 });
+    const out2 = escalateExhaustedIntents(orchDir, {
+      now: () => t0 + 2,
+      isActive: (t) => { if (t === "CTL-THROW") throw new Error("read failed"); return true; },
+      emitEvent: () => {}, postComment: () => {}, labelNeedsHuman: () => {}, writeSignal: () => {},
+    });
+    expect(out2).toContain("CTL-THROW");
+  });
+
+  test("(Codex R1) side effects are WITHHELD when the escalated latch did not persist (read-back gate)", () => {
+    const t0 = 1_000_000_000_000;
+    defaultRecordIntent("CTL-RO", { decision: "dispatched", attempts: RECOVERY_MAX_ATTEMPTS }, { orchDir, now: () => t0 });
+    const events = [];
+    const out = escalateExhaustedIntents(orchDir, {
+      now: () => t0 + 1,
+      recordIntent: () => ({ escalated: true }), // LIES: never writes the file
+      emitEvent: (e) => events.push(e),
+      postComment: () => { throw new Error("must not comment"); },
+      labelNeedsHuman: () => { throw new Error("must not label"); },
+      writeSignal: () => { throw new Error("must not write signal"); },
+    });
+    expect(out).toEqual([]); // latch verification failed → no side effects, retry next tick
+    expect(events).toEqual([]);
+  });
+
+  test("(Codex R1) the HOLISTIC gate keys a board-health defer on the frozen deferredSince anchor", () => {
+    const t0 = 1_000_000_000_000;
+    defaultRecordIntent("CTL-HD", { decision: "defer", fix_class: "board-health", attempts: 0 }, { orchDir, now: () => t0 });
+    // the per-item pass re-defers 31 min later — lastTs refreshes
+    defaultRecordIntent("CTL-HD", { decision: "defer", fix_class: "board-health", attempts: 0 }, { orchDir, now: () => t0 + 31 * 60_000 });
+    const shortly = t0 + 31 * 60_000 + 5_000; // 5s after the re-defer
+    // per-item view: throttled by the fresh lastTs
+    expect(defaultSkipReason("CTL-HD", { orchDir, now: () => shortly })).toBe("defer-cooldown");
+    // holistic view: the FROZEN anchor is aged → actionable NOW
+    expect(defaultSkipReason("CTL-HD", { orchDir, now: () => shortly, holistic: true })).toBeNull();
+  });
+
   test("after the sweep, skipReason flips from attempts-exhausted to escalated (TTL-governed re-entry)", () => {
     const t0 = 1_000_000_000_000;
     defaultRecordIntent("CTL-Y", { decision: "fix", fix_class: "bounded-llm", attempts: RECOVERY_MAX_ATTEMPTS }, { orchDir, now: () => t0 });

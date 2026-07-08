@@ -1934,7 +1934,19 @@ export function defaultSkipReason(ticket, opts = {}) {
   // BOTH the per-item path AND board-health's holistic pass can reconsider the
   // untyped stuck item (it never dead-ends at a permanent latch).
   if (data?.decision === "defer") {
-    const last = typeof data?.lastTs === "number" ? data.lastTs : data?.ts;
+    // CTL-1440 (Codex R1): TWO gates for a board-health defer. The per-item
+    // pass throttles on lastTs (the last touch — a re-defer refreshes it, so
+    // re-processing is once per window). The HOLISTIC act (opts.holistic) gates
+    // on the FROZEN aging anchor deferredSince: the per-item pass re-deferring
+    // seconds before board-health reads is a no-op handoff and must not push
+    // the aged candidate back under cooldown (the residual starvation half of
+    // the RC3 collision). Non-board-health defers keep the lastTs gate.
+    const holisticAnchor =
+      opts.holistic && data?.fix_class === "board-health" && typeof data?.deferredSince === "number"
+        ? data.deferredSince
+        : null;
+    const last =
+      holisticAnchor ?? (typeof data?.lastTs === "number" ? data.lastTs : data?.ts);
     return typeof last === "number" && now() - last < RECOVERY_COOLDOWN_MS
       ? "defer-cooldown"
       : null;
@@ -2008,6 +2020,11 @@ export function escalateExhaustedIntents(orchDir, opts = {}) {
     emitEvent = defaultEmitEvent,
     labelNeedsHuman = null, // (orchDir, ticket) => void — scheduler wires label-guard
     writeSignal = (t, payload) => defaultWriteEscalationSignal(t, payload, { orchDir }),
+    // Codex R1: a finished ticket can hold a stale exhausted ledger until the
+    // terminal cleanup (recoveryForgetIntent) runs LATER in the tick — the sweep
+    // must not page a human about a Done ticket. The scheduler wires this to the
+    // cached terminal/merged check; default keeps the function pure/hermetic.
+    isActive = () => true,
     log = defaultLogFn,
   } = opts;
   if (!orchDir) return [];
@@ -2030,6 +2047,16 @@ export function escalateExhaustedIntents(orchDir, opts = {}) {
     if (!sweepable || data?.escalated === true) continue;
     if (!(typeof data?.attempts === "number" && data.attempts >= maxAttempts)) continue;
     const ticket = f.replace(/\.json$/, "");
+    // Codex R1: never escalate a finished ticket (fail toward ACTIVE — a wrongly
+    // skipped live ticket just waits a tick; the ledger is forgotten by the
+    // terminal cleanup once the ticket is confirmed done).
+    let active = true;
+    try {
+      active = isActive(ticket) !== false;
+    } catch {
+      active = true;
+    }
+    if (!active) continue;
     const reason = `self-heal attempts exhausted (${data.attempts} dispatches without a recorded verdict)`;
     const escalation = {
       escalation_type: "authorization",
@@ -2057,6 +2084,21 @@ export function escalateExhaustedIntents(orchDir, opts = {}) {
     } catch (err) {
       log(`recovery-reasoning: ${ticket} exhausted-escalate ledger write failed: ${err.message}`);
       continue; // without the latch the sweep would re-fire every tick — try again next tick
+    }
+    // Codex R1: defaultRecordIntent swallows write failures (best-effort by
+    // design) — VERIFY the latch actually landed before any human-facing side
+    // effect, or a disk-full/permission failure would re-post the signal/
+    // comment/label/event every tick.
+    let latched = false;
+    try {
+      latched =
+        JSON.parse(readFileSync(join(orchDir, ".recovery-intents", f), "utf8"))?.escalated === true;
+    } catch {
+      latched = false;
+    }
+    if (!latched) {
+      log(`recovery-reasoning: ${ticket} exhausted-escalate latch did not persist — deferring side effects to the next tick`);
+      continue;
     }
     try {
       writeSignal(ticket, escalation);
