@@ -283,6 +283,7 @@ import { emitFenceClaimed } from "./fence-event.mjs";
 // runTransition (would double-audit the triage path, which keeps its own
 // phase.triage.linear-transition event). Best-effort: swallow-on-error.
 import { appendLinearStateWriteEvent } from "./linear-state-write-event.mjs";
+import { appendWorkerTransitionEvent as defaultAppendWorkerTransitionEvent } from "./worker-transition-event.mjs"; // CTL-764 Phase 5
 import { resolveTicketType } from "./ticket-type.mjs"; // CTL-1023: work-type dimension
 // CTL-642 + CTL-758: the SHARED Linear terminal-state predicate. isLinearTerminal
 // ({Done,Canceled} — its OWN set) backs both the reconcile-backstop's
@@ -3188,6 +3189,11 @@ export function schedulerTick(
     // distinct source tag — slice-1's deviation note: the parked re-dispatch reuses
     // the scheduler-advance / preemption-resume sites, it is not its own write.)
     appendStateWriteEvent = appendLinearStateWriteEvent,
+    // CTL-764 Phase 5: unified worker.transition event emitter. Injectable for tests
+    // (pass a spy to capture emitted transitions). Default no-op so bare unit ticks
+    // that do not inject this seam are unaffected. Production wires the real
+    // defaultAppendWorkerTransitionEvent via runTick.
+    appendWorkerTransitionEvent = null,
     // CTL-642/758: PR-merged adapter for the recovery terminal short-circuit's
     // optional second check (merged-but-not-yet-Done zombie) AND the reconcile
     // backstop's gate-2 merged check. Default undefined here keeps every legacy
@@ -3464,6 +3470,48 @@ export function schedulerTick(
       },
       { ticket, phase, source }
     );
+  }
+
+  // CTL-764 Phase 5: recordTransition — the per-tick sync chokepoint for worker
+  // state transitions. Emits one worker.transition event per genuine change.
+  // Disposition changes are guarded by lastDispositionEmit (only-on-change);
+  // stage-only transitions always emit. Fail-open: never aborts the tick.
+  // appendWorkerTransitionEvent is the injectable seam; null → silent no-op.
+  function recordTransition({
+    ticket,
+    toStage = null,
+    fromStage = null,
+    fromDisposition = null,
+    toDisposition,   // undefined = stage-only (no guard needed; always emit)
+    reason = null,
+    attempt = null,
+    reviveCount = null,
+    source = null,
+  }) {
+    if (!appendWorkerTransitionEvent) return;
+    // Disposition-only-on-change guard.
+    if (toDisposition !== undefined) {
+      const last = lastDispositionEmit.get(ticket);
+      if (last === toDisposition) return;
+      lastDispositionEmit.set(ticket, toDisposition ?? null);
+    }
+    try {
+      appendWorkerTransitionEvent({
+        ticket,
+        orchId: ticket,
+        toStage,
+        fromStage,
+        fromDisposition: fromDisposition ?? null,
+        toDisposition: toDisposition ?? null,
+        reason,
+        attempt,
+        reviveCount,
+        source,
+        taskType: resolveTicketType(orchDir, ticket),
+      });
+    } catch (_err) {
+      // fail-open
+    }
   }
 
   // ─── CTL-826: dispatchAndVerify — the shared dispatch→verify core ───
@@ -4826,6 +4874,8 @@ export function schedulerTick(
             cycleMembers.add(member);
             if (fenceGuard({ ticket: member, orchDir, multiHost, gateway, self })) {
               labelNeedsHumanUnlessBeliefOwner(orchDir, member, writeStatus, { env, site: "dependency-cycle", log });
+              // CTL-764 Phase 5: emit worker.transition for needs-human apply.
+              recordTransition({ ticket: member, toDisposition: "needs-human", source: "dependency-cycle" });
             } else {
               log.warn(
                 { ticket: member },
@@ -4875,6 +4925,8 @@ export function schedulerTick(
             now,
           });
           lastHeldEmitState.delete(ticket);
+          // CTL-764 Phase 5: cycle member superseded by needs-human → clear disposition.
+          recordTransition({ ticket, toDisposition: null, source: "cycle-member-clear" });
           continue;
         }
         let desired = null;
@@ -4915,9 +4967,13 @@ export function schedulerTick(
               { ticket, phase: "advance" }
             );
           }
+          // CTL-764 Phase 5: emit worker.transition for disposition hold.
+          recordTransition({ ticket, toDisposition: desired, reason, source: "scheduler-admission" });
         } else {
           // Admitted (or no longer held) → reset so a future re-hold re-emits.
           lastHeldEmitState.delete(ticket);
+          // CTL-764 Phase 5: emit worker.transition for admission (clear-on-pickup).
+          recordTransition({ ticket, toDisposition: null, source: "scheduler-admission" });
         }
       }
 
@@ -5345,6 +5401,13 @@ export function schedulerTick(
             source: "scheduler-advance",
             orchId: ticket,
           });
+          // CTL-764 Phase 5: emit worker.transition for stage change.
+          recordTransition({
+            ticket,
+            toStage: next,
+            fromStage: wr?.from_state ?? null,
+            source: "scheduler-advance",
+          });
         },
         { ticket, phase: next }
       );
@@ -5483,6 +5546,13 @@ export function schedulerTick(
                   source: "preemption-resume",
                   orchId: pd.identifier,
                 });
+                // CTL-764 Phase 5: emit worker.transition for resume stage change.
+                recordTransition({
+                  ticket: pd.identifier,
+                  toStage: parkedPhase,
+                  fromStage: wr?.from_state ?? null,
+                  source: "preemption-resume",
+                });
               },
               { ticket: pd.identifier, phase: parkedPhase }
             );
@@ -5543,6 +5613,8 @@ export function schedulerTick(
           // claim must not label after takeover (mirrors the A.5 cycle site).
           if (fenceGuard({ ticket: member, orchDir, multiHost, gateway, self })) {
             labelNeedsHumanUnlessBeliefOwner(orchDir, member, writeStatus, { env, site: "ctl-925-cycle", log });
+            // CTL-764 Phase 5: emit worker.transition for needs-human apply.
+            recordTransition({ ticket: member, toDisposition: "needs-human", source: "ctl-925-cycle" });
           }
         }
       }
@@ -5910,6 +5982,13 @@ export function schedulerTick(
             source: "scheduler-advance",
             orchId: t.identifier,
           });
+          // CTL-764 Phase 5: emit worker.transition for new-work entry-phase.
+          recordTransition({
+            ticket: t.identifier,
+            toStage: NEW_WORK_ENTRY_PHASE,
+            fromStage: wr?.from_state ?? null,
+            source: "scheduler-advance",
+          });
         },
         { ticket: t.identifier, phase: NEW_WORK_ENTRY_PHASE }
       );
@@ -5980,7 +6059,12 @@ export function schedulerTick(
       // CTL-646: terminal Done unconditionally clears needs-human (belt + teardown path).
       // CTL-703: worktree teardown is now the `teardown` FSM phase (teardownWorktreeOnce
       // removed) — only the label clear remains inline here.
-      clearStalledLabel(orchDir, ticket, "needs-human", retractionWriteStatus);
+      clearStalledLabel(orchDir, ticket, "needs-human", retractionWriteStatus, {
+        onRemoved: () => {
+          // CTL-764 Phase 5: emit worker.transition for needs-human clear on Done.
+          recordTransition({ ticket, fromDisposition: "needs-human", toDisposition: null, source: "terminal-done-clear" });
+        },
+      });
     }
     // CTL-758: reconcile backstop — re-Done a merged ticket whose Linear state
     // drifted back to non-terminal (a late echo). Gated by the .terminal-done.applied
@@ -6046,7 +6130,12 @@ export function schedulerTick(
           // re-applying. Marker-guarded so a no-marker terminal ticket fires zero API calls.
           const base = join(orchDir, "workers", ticket, ".linear-label-needs-human");
           if (existsSync(`${base}.applied`) || existsSync(`${base}.skipped`)) {
-            clearStalledLabel(orchDir, ticket, "needs-human", retractionWriteStatus);
+            clearStalledLabel(orchDir, ticket, "needs-human", retractionWriteStatus, {
+              onRemoved: () => {
+                // CTL-764 Phase 5: emit worker.transition for needs-human clear on terminal.
+                recordTransition({ ticket, fromDisposition: "needs-human", toDisposition: null, source: "terminal-sweep-clear" });
+              },
+            });
           }
           // CTL-1242 (corrected scope): also forget the host-local recovery-intent
           // latch so a finished ticket's escalated/cooldown ledger entry doesn't
@@ -6057,6 +6146,8 @@ export function schedulerTick(
           // label (CTL-1241: skipped when the belief engine owns the reclaim).
           if (fenceGuard({ ticket, orchDir, multiHost, gateway, self })) {
             labelNeedsHumanUnlessBeliefOwner(orchDir, ticket, writeStatus, { env, site: "terminal-sweep", log });
+            // CTL-764 Phase 5: emit worker.transition for needs-human apply.
+            recordTransition({ ticket, toDisposition: "needs-human", source: "terminal-sweep" });
           } else {
             log.warn(
               { ticket },
@@ -6079,7 +6170,12 @@ export function schedulerTick(
       // removeLabel API calls (steady-state-zero-writes invariant).
       const base = join(orchDir, "workers", ticket, ".linear-label-needs-human");
       if (existsSync(`${base}.applied`) || existsSync(`${base}.skipped`)) {
-        clearStalledLabel(orchDir, ticket, "needs-human", retractionWriteStatus);
+        clearStalledLabel(orchDir, ticket, "needs-human", retractionWriteStatus, {
+          onRemoved: () => {
+            // CTL-764 Phase 5: emit worker.transition for needs-human clear.
+            recordTransition({ ticket, fromDisposition: "needs-human", toDisposition: null, source: "no-stall-clear" });
+          },
+        });
       }
     }
     // CTL-1068 — retract orphaned held labels for STARTED (admitted) tickets. The
@@ -6361,6 +6457,10 @@ const observedYieldFiles = new Set();
 // An admitted/cleared ticket is deleted so a future re-hold re-emits. Cleared on
 // daemon restart (via __resetForTests).
 const lastHeldEmitState = new Map();
+// CTL-764 Phase 5: last-emitted disposition per ticket for the worker.transition
+// only-on-change guard. Mirrors lastHeldEmitState but covers the full disposition set
+// (null = no label / cleared). Cleared on daemon restart (via __resetForTests).
+const lastDispositionEmit = new Map();
 
 // CTL-1064: Pass 0u throttle — epoch-ms of the last unstuck-sweep run.
 // Module-level so the 15-min gate persists across ticks without a db write.
@@ -7285,6 +7385,7 @@ export function __resetForTests() {
   stopScheduler();
   observedYieldFiles.clear(); // CTL-702: reset per-lifetime dedup set between tests
   lastHeldEmitState.clear(); // CTL-755: reset held-event only-on-change dedup
+  lastDispositionEmit.clear(); // CTL-764 Phase 5: reset worker.transition only-on-change dedup
   _unstuckLastRunMs = 0; // CTL-1064: reset Pass 0u throttle between tests
   _stallJanitorCensusLastRunMs = 0; // CTL-1324: reset Pass 0j census throttle between tests
   // rankedAboveSince is cleared by stopScheduler above (CTL-705)

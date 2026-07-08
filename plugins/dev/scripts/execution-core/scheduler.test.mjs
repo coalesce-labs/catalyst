@@ -11118,3 +11118,117 @@ describe("CTL-764 Phase 4 — convergeDispositionLabel", () => {
     expect(ws.applyLabel.calls[0][0]).toMatchObject({ label: "blocked" });
   });
 });
+
+// ── CTL-764 Phase 5 — recordTransition closure: worker.transition events ──
+
+describe("CTL-764 Phase 5 — schedulerTick emits worker.transition events", () => {
+  const noWrites = () => ({
+    applyPhaseStatus() {},
+    applyTerminalDone() {},
+    applyLabel: () => ({}),
+    removeLabel: () => ({ removed: false }),
+  });
+
+  test("Pass-1 advance emits one worker.transition event with toStage", () => {
+    // Advance: research→plan dispatch. No plan signal so deriveAdvancement returns plan.
+    writeSignal("CTL-764", "triage", "done");
+    writeSignal("CTL-764", "research", "done");
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 2 }));
+    const transitions = [];
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: fakeDispatch(),
+      verifyDispatched: verifyOk,
+      writeStatus: {
+        ...noWrites(),
+        applyPhaseStatus: ({ ticket, phase }) => ({ applied: true, from_state: "In Progress", to_state: "In Review", action: phase }),
+      },
+      appendWorkerTransitionEvent: (ev) => transitions.push(ev),
+    });
+    const advance = transitions.find((e) => e.toStage && e.ticket === "CTL-764");
+    expect(advance).toBeDefined();
+    expect(advance.source).toBe("scheduler-advance");
+  });
+
+  test("terminal-sweep needs-human apply emits worker.transition(toDisposition='needs-human')", () => {
+    // Terminal stalled ticket triggers needs-human
+    writeSignal("CTL-764", "research", "done");
+    writeSignal("CTL-764", "implement", "failed");
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 2 }));
+    const transitions = [];
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: fakeDispatch(),
+      writeStatus: {
+        ...noWrites(),
+        applyLabel: ({ ticket, label }) => ({ applied: true, label }),
+        removeLabel: () => ({ removed: false }),
+      },
+      appendWorkerTransitionEvent: (ev) => transitions.push(ev),
+      env: {},
+    });
+    const needsHuman = transitions.find(
+      (e) => e.toDisposition === "needs-human" && e.ticket === "CTL-764"
+    );
+    expect(needsHuman).toBeDefined();
+  });
+
+  test("clear needs-human on terminal Done emits worker.transition(toDisposition=null)", () => {
+    writeSignal("CTL-764", "research", "done");
+    writeSignal("CTL-764", "plan", "done");
+    writeSignal("CTL-764", "monitor-deploy", "done");
+    // Mark the needs-human label as applied so clearStalledLabel removes it
+    mkdirSync(join(orchDir, "workers", "CTL-764"), { recursive: true });
+    writeFileSync(join(orchDir, "workers", "CTL-764", ".linear-label-needs-human.applied"), "");
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 2 }));
+    const transitions = [];
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: fakeDispatch(),
+      writeStatus: {
+        ...noWrites(),
+        removeLabel: () => ({ removed: true }),
+        applyTerminalDone: () => ({ applied: false, skipped: "already-done" }),
+      },
+      appendWorkerTransitionEvent: (ev) => transitions.push(ev),
+    });
+    const cleared = transitions.find(
+      (e) => e.toDisposition === null && e.fromDisposition === "needs-human" && e.ticket === "CTL-764"
+    );
+    expect(cleared).toBeDefined();
+  });
+
+  test("steady-state tick emits zero worker.transition events", () => {
+    // Blocked ticket that was already blocked last tick (lastDispositionEmit tracks it)
+    writeSignal("CTL-764", "triage", "done");
+    writeSignal("CTL-764", "research", "done");
+    writeSignal("CTL-764", "implement", "done");
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 0 }));
+    const transitions = [];
+    const writeStatus = {
+      ...noWrites(),
+      applyPhaseStatus: () => ({ applied: false, skipped: "already-in-state" }),
+    };
+    // First tick: emits the disposition event
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: fakeDispatch(),
+      writeStatus,
+      appendWorkerTransitionEvent: (ev) => transitions.push(ev),
+    });
+    const firstCount = transitions.length;
+    // Second tick: same state → no new transition event for that ticket
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: fakeDispatch(),
+      writeStatus,
+      appendWorkerTransitionEvent: (ev) => transitions.push(ev),
+    });
+    // If a disposition event was emitted in tick 1, it must NOT be re-emitted in tick 2
+    const tick2Events = transitions.slice(firstCount);
+    const tick2Disposition = tick2Events.filter(
+      (e) => e.ticket === "CTL-764" && e.toDisposition !== undefined
+    );
+    expect(tick2Disposition).toHaveLength(0);
+  });
+});
