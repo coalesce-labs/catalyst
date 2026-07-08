@@ -91,6 +91,9 @@ _lrr_emit_read_event() {
   local severity="INFO"; [[ "$result" == "failed" ]] && severity="WARN"
   local -a age_args=(); [[ "$age_ms" =~ ^[0-9]+$ ]] && age_args=(--linear-read-age-ms "$age_ms")
   local line
+  # ${age_args[@]+"${age_args[@]}"} is the empty-array-safe expansion: a bare
+  # "${age_args[@]}" on an EMPTY array under `set -u` throws "unbound variable" on
+  # bash 3.2 (macOS system bash), which would break the read this helper is on.
   line="$(build_canonical_line \
     --ts "$ts" --severity "$severity" \
     --service "catalyst.linear-read" \
@@ -101,7 +104,7 @@ _lrr_emit_read_event() {
     --linear-read-source "$source" \
     --linear-read-result "$result" \
     --linear-read-op "read_ticket" \
-    "${age_args[@]}" \
+    ${age_args[@]+"${age_args[@]}"} \
     --session "${CATALYST_SESSION_ID:-}" \
     --message "linear read $id source=$source result=$result" 2>/dev/null)" || return 0
   canonical_jsonl_append "$events_dir" "$line" 2>/dev/null || true
