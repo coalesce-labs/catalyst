@@ -2832,7 +2832,9 @@ describe("reclaimDeadWorkIfPossible — CTL-1442 escalation ask-cap", () => {
     recordEscalation(orchDir, "CTL-9", "pr", "wedged-never-started", clock - 31 * 60 * 1000);
     reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts); // first no-progress ask
     const firstAsk = s.opts.appendEscalatedEvent.calls[0][0];
-    expect(firstAsk.extras?.explanation?.attempts ?? []).toEqual([]); // fresh — no wedged history
+    // fresh — no wedged history; exactly the CURRENT ask's timestamp (post-merge
+    // P3: the emitted history includes the ask being made).
+    expect(firstAsk.extras?.explanation?.attempts).toEqual([clock]);
   });
 
   test("a DIFFERENT escalation reason does not consume the no-progress cap (reason change resets the count)", () => {

@@ -88,6 +88,10 @@ export const STALL_CATEGORY_MAP = Object.freeze({
   // unstuck sweep must stay quiet, not re-escalate it every interval (that
   // would recreate the ask loop through a different subsystem).
   "escalation-ask-cap":               { category: "skip",           action: "skip" },
+  // CTL-1443: a gate-expired park is already surfaced (brief + label via the
+  // terminal sweep + alert) and is waiting on an operator approval — the
+  // unstuck sweep must stay quiet, not re-escalate it every interval.
+  "boot-resume-gate-expired":         { category: "skip",           action: "skip" },
 });
 
 // classifyStalledTicket — PURE top-level router (Phase 1). No IO.

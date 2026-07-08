@@ -61,6 +61,7 @@ CLI_ENTRIES=(
   "catalyst-install:catalyst-install"
   "catalyst:catalyst"
   "thoughts-pull-sync.sh:thoughts-pull-sync"
+  "execution-core/boot-resume-approve.mjs:boot-resume-approve"
   "../hooks/emit-lifecycle-event.sh:emit-lifecycle-event"
 )
 

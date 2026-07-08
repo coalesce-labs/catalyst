@@ -34,6 +34,15 @@ export const ALERT_TICKET_STATE_LIVE_FALLBACK = "catalyst.alert.ticket_state_liv
 
 export const ALERT_KIND_TICKET_STATE_LIVE_FALLBACK = "ticket_state_live_fallback";
 
+// CTL-1443 (P1-loop-3): a boot-resume approval gate has sat unapproved past its
+// TTL. The gate itself is invisible by design (a marker file under workers/),
+// so without this alert + the Needs-You surfacing a gated ticket waits forever
+// (OTL-41 sat 4+ days). One line per window per kind — the per-ticket dedupe is
+// the marker's surfacedAt field.
+export const ALERT_BOOT_RESUME_PENDING = "catalyst.alert.boot_resume_pending";
+
+export const ALERT_KIND_BOOT_RESUME_PENDING = "boot_resume_pending";
+
 // Per-kind throttle so a per-tick hot path (runEligibleQuery inside the reconcile
 // timer) cannot spam the event log during a sustained storm. The alert is a LOUD
 // "something is wrong"
@@ -131,6 +140,24 @@ export function emitEligibleSourceUnavailable({ team = null, append, now, thrott
 // missed the replica and its live linearis fallback failed; the ticket is now
 // negative-cached (backed off). `identifier` rides in the payload; `reason` is the
 // failure mode (timeout | error | unparseable).
+export function emitBootResumePending({ identifier = null, phase = null, ageHours = null, reason = null, append, now, throttleMs } = {}) {
+  return emitThrottled({
+    eventName: ALERT_BOOT_RESUME_PENDING,
+    kind: ALERT_KIND_BOOT_RESUME_PENDING,
+    reason:
+      reason ??
+      "a boot-resume approval gate exceeded its TTL with no operator response — surfaced to Needs-You (approve with boot-resume-approve.mjs)",
+    detail: {
+      ...(identifier ? { "linear.ticket": identifier } : {}),
+      ...(phase ? { "catalyst.phase": phase } : {}),
+      ...(ageHours != null ? { "catalyst.gate_age_hours": ageHours } : {}),
+    },
+    append,
+    now,
+    throttleMs,
+  });
+}
+
 export function emitTicketStateLiveFallback({ identifier = null, reason = null, append, now, throttleMs } = {}) {
   return emitThrottled({
     eventName: ALERT_TICKET_STATE_LIVE_FALLBACK,
