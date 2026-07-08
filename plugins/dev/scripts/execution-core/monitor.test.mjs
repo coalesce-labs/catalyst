@@ -72,6 +72,11 @@ afterEach(() => {
   if (prevCatalystDir === undefined) delete process.env.CATALYST_DIR;
   else process.env.CATALYST_DIR = prevCatalystDir;
   rmSync(catalystDir, { recursive: true, force: true });
+  // CTL-1441 (Codex R3): several legacy cases pass the shared literal
+  // orchDir "/orch" — on machines where that path exists, the triage dispatch
+  // counter would persist across tests/runs and cap-suppress later dispatch
+  // expectations. Scrub it (workers subtree only — never anything real).
+  rmSync("/orch/workers", { recursive: true, force: true });
 });
 
 // writeRegistry — persist the current registryEntries to registry.json (the
@@ -1324,6 +1329,7 @@ describe("triage re-dispatch guard (CTL-1441)", () => {
   test("each real dispatch bumps the per-ticket counter", () => {
     enroll("ENG", { status: "Ready" });
     const realOrchDir = join(catalystDir, "execution-core");
+    mkdirSync(realOrchDir, { recursive: true }); // counters only persist under a REAL orch dir
     const exec = execReturning({ ENG: [node("ENG-9")] });
     reconcileAll({ exec });
     const dispatch = mock(() => ({ code: 0 }));
@@ -1458,6 +1464,7 @@ describe("triage re-dispatch guard (CTL-1441)", () => {
   test("a failed spawn still counts toward the cap (the no-artifacts class is bounded)", () => {
     enroll("ENG", { status: "Ready" });
     const realOrchDir = join(catalystDir, "execution-core");
+    mkdirSync(realOrchDir, { recursive: true }); // counters only persist under a REAL orch dir
     const exec = execReturning({ ENG: [node("ENG-9")] });
     reconcileAll({ exec });
     const dispatch = mock(() => ({ code: 9, stderr: "spawn died" }));

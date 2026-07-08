@@ -85,6 +85,13 @@ describe("triage dispatch counter (CTL-1441 guard b)", () => {
     expect(TRIAGE_DISPATCH_CAP).toBe(3);
   });
 
+  test("a MISSING orch dir never gets manufactured by a bump (shared-literal test-dir pollution guard, Codex R3)", () => {
+    const ghost = pathJoin(orchDir, "does-not-exist");
+    const n = bumpTriageDispatchCount(ghost, "CTL-14");
+    expect(n).toBe(1); // in-memory count still returned
+    expect(existsSync(ghost)).toBe(false); // nothing persisted
+  });
+
   test("counters are per-ticket", () => {
     bumpTriageDispatchCount(orchDir, "CTL-12");
     expect(readTriageDispatchCount(orchDir, "CTL-12")).toBe(1);

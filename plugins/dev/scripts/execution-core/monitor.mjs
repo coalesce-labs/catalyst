@@ -790,18 +790,48 @@ function dispatchTriage(
     }
     clusterGeneration = claim.generation; // CTL-1028: forward to worker (mirrors CTL-864)
   }
+  // CTL-1441 guard (a), placed HERE (post-gates, post-claim, launch imminent —
+  // Codex R3): a done phase-triage.json with triage.json missing is the
+  // artifact-mismatch class; the launcher short-circuits done signals as
+  // idempotent no-ops, so the stale completion signal is RETIRED (rename,
+  // forensics kept) immediately before a REAL launch. Doing this in the sweep
+  // (pre-gates) could strip the signal on a node that then never launches
+  // (HRW/drain/delegate/claim skip) — leaving the ticket with NEITHER artifact.
+  const preLaunchStatus = readTriageSignalStatus(orchDir, identifier);
+  if (preLaunchStatus === "done" && !hasTriageArtifact(orchDir, identifier)) {
+    const sigPath = join(orchDir, "workers", identifier, "phase-triage.json");
+    try {
+      renameSync(sigPath, `${sigPath}.stale-ctl1441`);
+      const warned = join(orchDir, "workers", identifier, ".triage-artifact-mismatch-warned");
+      if (!existsSync(warned)) {
+        try {
+          writeFileSync(warned, new Date().toISOString());
+        } catch { /* best-effort */ }
+        log.warn(
+          { identifier },
+          "ctl-1441: phase-triage.json was done but triage.json is missing — retired the stale signal for a real re-triage (bounded by the dispatch cap)",
+        );
+      }
+    } catch (err) {
+      log.warn(
+        { identifier, err: err.message },
+        "ctl-1441: could not retire the stale done triage signal — skipping this dispatch (a counted no-op would burn the cap)",
+      );
+      return false;
+    }
+  }
   // CTL-1441: count the REAL spawn attempt — post-gates, post-claim, and BEFORE
   // the launch so a spawn that dies without ever writing a signal (the
   // no-artifacts class) still counts toward the cap. Unbounded silent failure
   // is exactly the loop this bounds.
-  // Codex P1: do NOT count while an in-flight triage signal exists — with
-  // triage.json still absent, phase-agent-dispatch treats a dispatch over a
-  // live worker as an idempotent no-op (CTL-615 yield), and counting those
-  // would let 10-min reconciles burn the whole cap against ONE long-running
-  // triage. A dead-frozen "running" signal is reset to stalled by the reclaim/
-  // revive path, after which counting resumes; "done"/"failed"/"stalled"
-  // signals count (a re-dispatch over those launches a real worker).
-  if (!isTriageInFlight(readTriageSignalStatus(orchDir, identifier))) {
+  // Codex P1 + R3: do NOT count idempotent no-ops — an in-flight signal
+  // (dispatched/running/pending; the CTL-615 yield) OR a surviving done signal
+  // (only possible when triage.json exists, since the mismatch case was just
+  // retired above; the launcher short-circuits it). A dead-frozen "running"
+  // signal is reset to stalled by the reclaim/revive path, after which counting
+  // resumes; "failed"/"stalled" re-dispatches launch real workers and count.
+  const statusAtLaunch = readTriageSignalStatus(orchDir, identifier);
+  if (!isTriageInFlight(statusAtLaunch) && statusAtLaunch !== "done") {
     bumpTriageDispatchCount(orchDir, identifier);
   }
   // CTL-1367 P1: settle an async (executor=sdk) dispatch synchronously. bg returns a
@@ -928,8 +958,14 @@ export function readTriageDispatchCount(orchDir, ticket) {
 }
 
 export function bumpTriageDispatchCount(orchDir, ticket, { now = () => new Date().toISOString() } = {}) {
-  const p = triageDispatchCountPath(orchDir, ticket);
   const count = readTriageDispatchCount(orchDir, ticket) + 1;
+  // Codex R3: never manufacture the orch dir itself — several legacy tests use a
+  // shared literal orchDir (e.g. "/orch") with mocked dispatchers, and a counter
+  // write there would persist across runs and machines (cap suppression bleeding
+  // between suites). A real daemon's orchDir always exists; a missing one means
+  // a hermetic/mocked context → count in-memory only (fail-open, under-counts).
+  if (!existsSync(orchDir)) return count;
+  const p = triageDispatchCountPath(orchDir, ticket);
   try {
     mkdirSync(dirname(p), { recursive: true });
     writeFileSync(p, JSON.stringify({ count, lastDispatchAt: now() }));
@@ -1001,36 +1037,10 @@ export function sweepMissingTriage({
     for (const t of getEligibleSet(p.team)) {
       if (budget.remaining <= 0) return; // capacity reached; remainder retries next sweep
       if (hasTriageArtifact(orchDir, t.identifier)) continue;
-      // CTL-1441 guard (a): phase-triage.json done + triage.json missing = the
-      // content artifact went astray (WORKER_DIR mis-derivation class). A
-      // re-dispatch is the legitimate remedy (research's prior-artifact gate
-      // needs triage.json) — but the launcher short-circuits done signals as
-      // idempotent no-ops (phase-agent-dispatch:513; Codex R2 P2), so the stale
-      // completion signal must be RETIRED first for a real worker to launch.
-      // Renamed (not deleted) to keep the forensics; surfaced loudly once;
-      // bounded by the dispatch cap like any real launch.
-      if (readTriageSignalStatus(orchDir, t.identifier) === "done") {
-        const sigPath = join(orchDir, "workers", t.identifier, "phase-triage.json");
-        try {
-          renameSync(sigPath, `${sigPath}.stale-ctl1441`);
-        } catch (err) {
-          log.warn(
-            { ticket: t.identifier, err: err.message },
-            "ctl-1441: could not retire the stale done triage signal — skipping re-dispatch this sweep",
-          );
-          continue; // dispatching over the done signal would be a counted no-op
-        }
-        const warned = join(orchDir, "workers", t.identifier, ".triage-artifact-mismatch-warned");
-        if (!existsSync(warned)) {
-          try {
-            writeFileSync(warned, new Date().toISOString());
-          } catch { /* best-effort */ }
-          log.warn(
-            { ticket: t.identifier },
-            "ctl-1441: phase-triage.json was done but triage.json is missing — retired the stale signal and re-dispatching (bounded by the dispatch cap)",
-          );
-        }
-      }
+      // CTL-1441 guard (a) note: the done-signal/missing-triage.json mismatch is
+      // handled INSIDE dispatchTriage (post-gates, launch-imminent — Codex R3),
+      // where the stale completion signal is retired immediately before a real
+      // launch. The sweep just routes the ticket there like any other.
       dispatchTriage(t.identifier, {
         dispatch,
         orchDir,
