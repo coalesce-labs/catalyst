@@ -2768,6 +2768,35 @@ describe("reclaimDeadWorkIfPossible — CTL-1442 escalation ask-cap", () => {
     expect(s.opts.appendEscalatedEvent.calls.length).toBe(4);
   });
 
+  test("(R2) a lost flip is re-asserted even INSIDE the cooldown window (no slot held for 10 min)", () => {
+    let clock = 40_000_000;
+    const s = setupAt(orchDir);
+    s.opts.now = () => clock;
+    for (let ask = 1; ask <= 3; ask++) {
+      reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts);
+      clock += 10 * 60 * 1000 + 1;
+    }
+    const sigPath = join(orchDir, "workers", "CTL-9", "phase-pr.json");
+    rmSync(sigPath, { force: true }); // flip lost right after the cap-consuming ask
+    clock += 30 * 1000; // only 30s later — WELL inside the fresh cooldown window
+    reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts);
+    expect(JSON.parse(readFileSync(sigPath, "utf8")).status).toBe("stalled"); // re-asserted now, not after 10 min
+    expect(s.opts.appendEscalatedEvent.calls.length).toBe(3); // still no new events
+  });
+
+  test("(R2) the attempts history never inherits a DIFFERENT reason's asks", () => {
+    let clock = 50_000_000;
+    const s = setupAt(orchDir);
+    s.opts.now = () => clock;
+    // three unrelated wedged asks on the marker, the last outside the window
+    recordEscalation(orchDir, "CTL-9", "pr", "wedged-never-started", clock - 3);
+    recordEscalation(orchDir, "CTL-9", "pr", "wedged-never-started", clock - 2);
+    recordEscalation(orchDir, "CTL-9", "pr", "wedged-never-started", clock - 31 * 60 * 1000);
+    reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts); // first no-progress ask
+    const firstAsk = s.opts.appendEscalatedEvent.calls[0][0];
+    expect(firstAsk.extras?.explanation?.attempts ?? []).toEqual([]); // fresh — no wedged history
+  });
+
   test("a DIFFERENT escalation reason does not consume the no-progress cap (reason change resets the count)", () => {
     let clock = 12_000_000;
     const s = setupAt(orchDir);

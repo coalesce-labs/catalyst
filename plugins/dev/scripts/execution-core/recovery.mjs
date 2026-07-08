@@ -2207,26 +2207,45 @@ export function reclaimDeadWorkIfPossible(
       log.warn({ ticket, phase, reason }, "ctl-679: escalation deferred — Linear breaker open");
       return "rate-limited-deferred";
     }
-    if (inEscalationCooldownFn(orchDir, ticket, phase, now())) {
-      return "escalation-suppressed";
-    }
-    // CTL-1442: the ask-cap gate (no-progress only). Consecutive same-reason
-    // asks are counted in the cool-down marker; once the ticket has already
-    // been parked terminal (askCount >= cap), never re-ask — belt for the case
-    // where the terminal signal flip below failed and the sweep still sees a
-    // reclaim-eligible signal.
+    // CTL-1442: the ask-cap state (no-progress only). Consecutive same-reason
+    // asks are counted in the cool-down marker; a spent cap means the ticket was
+    // parked terminal (or should have been — the flip can be lost to a crash).
+    // Read BEFORE the cooldown gate so a lost flip is re-asserted even inside
+    // the window (Codex R2: waiting out the cooldown leaves a dead running
+    // signal counted as in-flight, blocking slots at maxParallel=1).
     const priorEscRecord = readEscalationRecordFn(orchDir, ticket, phase);
     const priorAsks =
       priorEscRecord?.reason === reason && typeof priorEscRecord?.askCount === "number"
         ? priorEscRecord.askCount
         : 0;
     const capApplies = reason === "no-progress";
-    // (the cap early-return lives AFTER the explanation build below, so a
-    // failed/interrupted terminal flip can be re-asserted with a fresh brief —
-    // Codex P2 on #2590.)
+    const capSpent = capApplies && priorAsks >= escalationAskCap;
+    const reassertTerminalIfLost = () => {
+      let already = null;
+      try {
+        already = JSON.parse(
+          readFileSync(join(orchDir, "workers", ticket, `phase-${phase}.json`), "utf8"),
+        )?.status;
+      } catch {
+        /* absent/malformed → re-assert below */
+      }
+      if (already === "stalled") return;
+      markEscalationCapTerminal({ orchDir, ticket, phase, explanation: buildEscExplanation() });
+      log.warn(
+        { ticket, phase, reason, priorAsks },
+        "ctl-1442: ask-cap spent but the signal was not terminal — re-asserted the stalled flip"
+      );
+    };
+    if (inEscalationCooldownFn(orchDir, ticket, phase, now())) {
+      if (capSpent) reassertTerminalIfLost();
+      return "escalation-suppressed";
+    }
     // CTL-1130: build a typed-union explanation classified by the three gates.
     // push_rejected_no_workflow_scope → MANUAL (capability boundary, D-recovery);
     // all other reasons → AUTHORIZATION (agent can retry with authority).
+    // CTL-1442: wrapped as a (pure) builder so the spent-cap re-assert can
+    // produce a fresh brief lazily without duplicating the CTL-1130 logic.
+    function buildEscExplanation() {
     const escType = reasonToType(reason);
     const whyField = reasonToWhyField(reason, finalAttemptCount);
     let explanation;
@@ -2259,8 +2278,14 @@ export function reclaimDeadWorkIfPossible(
             observed: { final_attempt_count: finalAttemptCount, ...(extras?.observed ?? {}) },
             // CTL-1442: truthful ask history — this call site historically passed
             // no extras, so the payload showed attempts:[] forever while asking
-            // "authorize retry?" every window (audit RC4).
-            attempts: extras?.attempts ?? (Array.isArray(priorEscRecord?.asks) ? priorEscRecord.asks : []),
+            // "authorize retry?" every window (audit RC4). Scoped to the SAME
+            // reason (Codex R2): a fresh no-progress ask must not inherit an
+            // unrelated wedged-never-started history.
+            attempts:
+              extras?.attempts ??
+              (priorEscRecord?.reason === reason && Array.isArray(priorEscRecord?.asks)
+                ? priorEscRecord.asks
+                : []),
           };
     try {
       explanation = buildExplanation(explanationFields);
@@ -2273,30 +2298,16 @@ export function reclaimDeadWorkIfPossible(
         canExecute: escType !== "manual",
       });
     }
-    // CTL-1442: the ask-cap is already spent. Normally the cap-consuming ask
-    // flipped the signal terminal below — but if that write failed (or the
-    // process died between the record and the flip), the dead running signal
-    // would occupy capacity FOREVER while events stay suppressed (Codex P2).
-    // Re-assert the flip idempotently (skip when already stalled), never
-    // re-emit the event/label.
-    if (capApplies && priorAsks >= escalationAskCap) {
-      let already = null;
-      try {
-        already = JSON.parse(
-          readFileSync(join(orchDir, "workers", ticket, `phase-${phase}.json`), "utf8"),
-        )?.status;
-      } catch {
-        /* absent/malformed → re-assert below */
-      }
-      if (already !== "stalled") {
-        markEscalationCapTerminal({ orchDir, ticket, phase, explanation });
-        log.warn(
-          { ticket, phase, reason, priorAsks },
-          "ctl-1442: ask-cap spent but the signal was not terminal — re-asserted the stalled flip"
-        );
-      }
+    return explanation;
+    }
+    // CTL-1442: the ask-cap is already spent (and we are OUTSIDE the cooldown —
+    // the in-window case re-asserted above). Re-assert the flip idempotently,
+    // never re-emit the event/label.
+    if (capSpent) {
+      reassertTerminalIfLost();
       return "escalation-capped";
     }
+    const explanation = buildEscExplanation();
     const enrichedExtras = { ...(extras ?? {}), explanation };
     appendEscalatedEvent({
       phase,
