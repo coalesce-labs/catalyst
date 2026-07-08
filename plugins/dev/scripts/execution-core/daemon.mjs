@@ -34,7 +34,7 @@ import {
   applyBootDrainPolicy, // CTL-1321: boot accepting work by default
   getRegistryPath,
   getEventLogPath,
-  getJobsRoot,      // CTL-1165 D3: job-dir GC root
+  getJobsRoot, // CTL-1165 D3: job-dir GC root
   log,
   EVENT_DEBOUNCE_MS,
   TAILER_POLL_INTERVAL_MS,
@@ -42,17 +42,17 @@ import {
   readMemorySamplerConfig,
   readFleetHealthConfig, // CTL-1165 D5: fleet-health guardrail config (selfHeal default OFF)
   readRatelimitPollerConfig,
-  getHostName,      // CTL-862
+  getHostName, // CTL-862
   resolveClusterHosts, // CTL-1273/CTL-1271: roster + source + multiHost for the boot assertion
   getLivenessAnchorIssue, // CTL-1271: "multi-host was configured" detector
-  getStaticRoster,        // CTL-1271: "multi-host was configured" detector
+  getStaticRoster, // CTL-1271: "multi-host was configured" detector
   CLUSTER_SYNC_INTERVAL_MS, // CTL-1274: cluster-repo auto-pull cadence
   isHostNamePinnedFromConfig, // CTL-1093
-  getCatalystRepoDir,       // CTL-1093 sticky dir
+  getCatalystRepoDir, // CTL-1093 sticky dir
   readDelegateRunnerConfig, // CTL-1331: async board-health delegate runner kill-switch
-  readLinearReplica,        // CTL-1340: read-replica tier flag (inert; default off)
-  getExecutor,              // CTL-1365a: phase-worker executor resolver (env→Layer-1→node-class default; all "bg" in Phase 1)
-  dispatchModeForExecutor,  // CTL-1365a: executor → catalyst.dispatch.mode telemetry vocab
+  readLinearReplica, // CTL-1340: read-replica tier flag (inert; default off)
+  getExecutor, // CTL-1365a: phase-worker executor resolver (env→Layer-1→node-class default; all "bg" in Phase 1)
+  dispatchModeForExecutor, // CTL-1365a: executor → catalyst.dispatch.mode telemetry vocab
 } from "./config.mjs";
 import { resolveBootIdentity } from "./host-boot-identity.mjs"; // CTL-1093
 import { readStickyIdentity, writeStickyIdentity } from "./host-sticky.mjs"; // CTL-1093
@@ -79,35 +79,28 @@ import {
   reconcileAll,
   createTicketStateCache,
 } from "./index.mjs";
-import { Reaper, defaultReadActivePhaseSignal, defaultReadSignalBgJobId, defaultAssessWorktreeRemoval } from "./reaper.mjs";
+import {
+  Reaper,
+  defaultReadActivePhaseSignal,
+  defaultReadSignalBgJobId,
+  defaultAssessWorktreeRemoval,
+} from "./reaper.mjs";
 import { listOrchDirs } from "./worktree-safety.mjs"; // CTL-1218: legacy-run provenance roots
 import { startOrphanReaperTimer, readOrphanReaperConfig } from "./orphan-reaper-timer.mjs";
 import { sweepJobDirs } from "./job-dir-gc.mjs"; // CTL-1165 D3: ~/.claude/jobs/<id> dir GC
 import { sweepWorkerDirs } from "./worker-dir-gc.mjs"; // CTL-1205: execution-core/workers/<TICKET>/ GC
 import { sweepWtCleanupQueue } from "./wt-cleanup-drain.mjs"; // CTL-1218: wt-cleanup-queue drain
 import { ProcReaper } from "./proc-reaper.mjs"; // CTL-1165 D2: orphan child-process reaper (default shadow)
-import {
-  startWorktreeRefreshTimer,
-  readWorktreeRefreshConfig,
-} from "./worktree-refresh-timer.mjs";
+import { startWorktreeRefreshTimer, readWorktreeRefreshConfig } from "./worktree-refresh-timer.mjs";
 // CTL-1331: the async board-health delegate runner timer (kicks the DETACHED
 // drainer that does the heavy worktree-provision + `claude --bg` off the daemon
 // event loop). Gated by readDelegateRunnerConfig; Phase A ships it inert.
 import { startDelegateRunnerTimer } from "./delegate-runner.mjs";
-import {
-  startStalePrRescueTimer,
-  readStalePrRescueConfig,
-} from "./stale-pr-rescue-timer.mjs";
+import { startStalePrRescueTimer, readStalePrRescueConfig } from "./stale-pr-rescue-timer.mjs";
 import { DEFAULTS as RESCUE_DEFAULTS } from "./stale-pr-rescue.mjs";
-import {
-  startOrphanPrSweepTimer,
-  readOrphanPrSweepConfig,
-} from "./orphan-pr-sweep-timer.mjs";
+import { startOrphanPrSweepTimer, readOrphanPrSweepConfig } from "./orphan-pr-sweep-timer.mjs";
 import { DEFAULTS as ORPHAN_DEFAULTS } from "./orphan-pr-sweep.mjs";
-import {
-  startLinearReconcileTimer,
-  readLinearReconcileConfig,
-} from "./linear-reconcile-timer.mjs";
+import { startLinearReconcileTimer, readLinearReconcileConfig } from "./linear-reconcile-timer.mjs";
 import { reconcileBootResume, processApprovedResumes } from "./boot-resume.mjs";
 // CTL-665: the committed executionCore concurrency reader — imported directly
 // (not via the index.mjs barrel, mirroring the orphan-reaper-timer import) so
@@ -125,7 +118,12 @@ import {
   defaultClearStall, // CTL-1067: J3 stall-clear seam
 } from "./scheduler.mjs";
 import * as linearWrite from "./linear-write.mjs"; // CTL-1067: writeStatus for defaultClearStall
-import { writeBootMarker, clearProgressMarks, resolvePhaseSessionId, defaultAppendOperatorEvent } from "./recovery.mjs"; // CTL-655: window the revive budget to this run; CTL-736: reset progress high-water; CTL-768: --resume; CTL-1044: operator-event appender for the scheduler's appendIntentEvent seam
+import {
+  writeBootMarker,
+  clearProgressMarks,
+  resolvePhaseSessionId,
+  defaultAppendOperatorEvent,
+} from "./recovery.mjs"; // CTL-655: window the revive budget to this run; CTL-736: reset progress high-water; CTL-768: --resume; CTL-1044: operator-event appender for the scheduler's appendIntentEvent seam
 import { startAutoTuner } from "./autotune.mjs"; // CTL-684: side-car maxParallel auto-tuner
 import { dispatchTicket, dispatchForExecutor, makeCommentWakeDispatch } from "./dispatch.mjs"; // CTL-549: comment-wake re-dispatch; CTL-1365a/b: executor→dispatch selection at the launch seam + comment-wake executor binding
 import { resolveSdkBootExecutor } from "./sdk-run-phase-agent.mjs"; // CTL-1367 item 9 + P3: boot auth gate (subscription-only) that degrades sdk→bg AND emits execution-core.executor.bg-fallback so the silent fallback is observable
@@ -203,7 +201,9 @@ export function readLinearBotUserIds(layer1Path, layer2Path) {
     try {
       const parsed = JSON.parse(readFileSync(path, "utf8"));
       extractor(parsed, ids);
-    } catch { /* ignore unreadable / malformed files */ }
+    } catch {
+      /* ignore unreadable / malformed files */
+    }
   }
   // NEW global path: both worker and orchestrator bot identities (Layer 2).
   addFromPath(layer2Path, (p, s) => {
@@ -232,7 +232,9 @@ export function readLinearBotWriteId(layer1Path, layer2Path) {
       const p = JSON.parse(readFileSync(layer2Path, "utf8"));
       const id = p?.catalyst?.linear?.bot?.orchestrator?.botUserId;
       if (typeof id === "string" && id.length > 0) return id;
-    } catch { /* ignore */ }
+    } catch {
+      /* ignore */
+    }
   }
   // Fallback: Layer-1 catalyst.monitor.linear.botUserId.
   if (layer1Path) {
@@ -240,7 +242,9 @@ export function readLinearBotWriteId(layer1Path, layer2Path) {
       const p = JSON.parse(readFileSync(layer1Path, "utf8"));
       const id = p?.catalyst?.monitor?.linear?.botUserId;
       if (typeof id === "string" && id.length > 0) return id;
-    } catch { /* ignore */ }
+    } catch {
+      /* ignore */
+    }
   }
   return null;
 }
@@ -325,10 +329,13 @@ function ensureState(orchDir) {
 export async function handleCommentWake(
   parsed,
   {
-    orchDir, dispatch, removeLabel, botUserId,
+    orchDir,
+    dispatch,
+    removeLabel,
+    botUserId,
     resolveSession = resolvePhaseSessionId,
     clearStall = () => false, // CTL-1067: J3 stall-clear seam; default no-op
-  },
+  }
 ) {
   const { ticket } = parsed ?? {};
   if (!ticket) return;
@@ -342,7 +349,7 @@ export async function handleCommentWake(
   let signalFiles;
   try {
     signalFiles = readdirSync(workerDir).filter(
-      (f) => f.startsWith("phase-") && f.endsWith(".json"),
+      (f) => f.startsWith("phase-") && f.endsWith(".json")
     );
   } catch {
     return;
@@ -362,9 +369,13 @@ export async function handleCommentWake(
     // from the preserved prior-done signal and re-dispatches the phase fresh.
     if (sig.status === "stalled") {
       const phase = fname.slice("phase-".length, -".json".length);
-      try { clearStall({ ticket, phase }); }
-      catch (err) {
-        log.warn({ ticket, phase, err: err?.message }, "handleCommentWake: clearStall threw — skipping");
+      try {
+        clearStall({ ticket, phase });
+      } catch (err) {
+        log.warn(
+          { ticket, phase, err: err?.message },
+          "handleCommentWake: clearStall threw — skipping"
+        );
       }
       continue;
     }
@@ -386,16 +397,20 @@ export async function handleCommentWake(
       const signalPath = join(workerDir, fname);
       try {
         const updated = {
-          ...sig, status: "stalled", stoppedForHold: false,
+          ...sig,
+          status: "stalled",
+          stoppedForHold: false,
           attentionReason: "ctl-768-hold-wake",
           updatedAt: new Date().toISOString().replace(/\.\d{3}Z$/, "Z"),
         };
         const tmp = `${signalPath}.tmp.${process.pid}`;
         writeFileSync(tmp, JSON.stringify(updated, null, 2));
-        renameSync(tmp, signalPath);                            // atomic
+        renameSync(tmp, signalPath); // atomic
       } catch (err) {
-        log.warn({ ticket, phase: parkedPhase, err: err.message },
-          "handleCommentWake: hold-wake signal reset failed — skipping");
+        log.warn(
+          { ticket, phase: parkedPhase, err: err.message },
+          "handleCommentWake: hold-wake signal reset failed — skipping"
+        );
         continue;
       }
       clearHoldStopCooldown(orchDir, ticket, parkedPhase);
@@ -553,7 +568,7 @@ export function startDaemon({
     { drained: _bootDrain.drained },
     _bootDrain.drained
       ? "boot: CATALYST_BOOT_DRAINED set — node boots drained, holding new-work admission (CTL-1321)"
-      : "boot: drain flag cleared — node accepting work (CTL-1321)",
+      : "boot: drain flag cleared — node accepting work (CTL-1321)"
   );
   _stopMonitor = stopMonitorFn;
   _stopScheduler = stopSchedulerFn;
@@ -570,7 +585,7 @@ export function startDaemon({
   _livenessTimer = setInterval(() => {
     try {
       Promise.resolve(refreshAgents()).catch((err) =>
-        log.warn({ err: err?.message }, "liveness warmer: refresh failed"),
+        log.warn({ err: err?.message }, "liveness warmer: refresh failed")
       );
     } catch (err) {
       log.warn({ err: err?.message }, "liveness warmer: threw");
@@ -683,7 +698,13 @@ export function startDaemon({
     // CTL-1365b: dispatch === dispatchFn so the crash-recovery re-dispatch honors
     // the executor flag (defaultDispatch under bg — reconcileBootResume's own
     // default — so byte-identical to today).
-    const bootResume = reconcileBoot({ orchDir, report, concurrency, dispatch: dispatchFn, sdkSessionHarvest }); // CTL-665: config-first ceiling; CTL-1422: warm-resume harvest
+    const bootResume = reconcileBoot({
+      orchDir,
+      report,
+      concurrency,
+      dispatch: dispatchFn,
+      sdkSessionHarvest,
+    }); // CTL-665: config-first ceiling; CTL-1422: warm-resume harvest
     _bootResume = bootResume;
     // CTL-644: dispatch any gated tickets that already have an approval sentinel on disk
     // (operator may have dropped the sentinel while the daemon was down).
@@ -704,8 +725,7 @@ export function startDaemon({
     // so the scheduler's replica block is never reached and behavior is
     // byte-identical to pre-CTL-1340. HIT-only acceleration of the hot
     // per-signal terminal reads once a Catalyst-Cloud replica is seeded on host.
-    const replicaReader =
-      readLinearReplica().mode === "on" ? createReplicaReader() : undefined;
+    const replicaReader = readLinearReplica().mode === "on" ? createReplicaReader() : undefined;
     // CTL-565: the monitor needs orchDir to one-shot-dispatch the triage phase
     // agent on a →Triage transition. `dispatch` stays an injectable default
     // (dispatch.mjs) so the daemon's fakes-pass-through pattern still holds.
@@ -732,7 +752,13 @@ export function startDaemon({
       gateway: gatewayReader, // CTL-781: gateway-first assignee reads
       onComment: (parsed) => {
         commentInboxWriter(parsed); // CTL-749: write to inbox.jsonl for in-flight workers
-        handleCommentWake(parsed, { orchDir, dispatch: commentWakeDispatch, removeLabel: defaultRemoveLabel, botUserId: linearBotUserIds, clearStall: defaultClearStall(orchDir, linearWrite) }); // CTL-549 + CTL-756 + CTL-1365b: re-dispatch parked tickets through the resolved executor; botUserId suppresses self-echo; CTL-1067: J3 stall-clear
+        handleCommentWake(parsed, {
+          orchDir,
+          dispatch: commentWakeDispatch,
+          removeLabel: defaultRemoveLabel,
+          botUserId: linearBotUserIds,
+          clearStall: defaultClearStall(orchDir, linearWrite),
+        }); // CTL-549 + CTL-756 + CTL-1365b: re-dispatch parked tickets through the resolved executor; botUserId suppresses self-echo; CTL-1067: J3 stall-clear
       },
       onUpdate: createUpdateInboxWriter(orchDir, linearBotUserIds), // CTL-749
       // CTL-1397: inject the SAME mode-gated replica reader the scheduler uses
@@ -825,7 +851,18 @@ export function startDaemon({
     }
 
     if (enableReaper) {
-      startReaperAndTimer({ orphanReaperConfig, worktreeRefreshConfig, stalePrRescueConfig, orphanPrSweepConfig, linearReconcileConfig, configPath, debounceMs, pollMs, orchDir, makeReaper });
+      startReaperAndTimer({
+        orphanReaperConfig,
+        worktreeRefreshConfig,
+        stalePrRescueConfig,
+        orphanPrSweepConfig,
+        linearReconcileConfig,
+        configPath,
+        debounceMs,
+        pollMs,
+        orchDir,
+        makeReaper,
+      });
     }
 
     // CTL-650: start the push-based session wait-state watcher. Inside the same
@@ -892,7 +929,10 @@ export function startDaemon({
         const bootSync = clusterSync();
         log.info({ pull: bootSync?.pull }, "execution-core daemon: cluster-repo synced at boot");
       } catch (err) {
-        log.warn({ err: err?.message }, "execution-core daemon: boot cluster-sync threw (continuing)");
+        log.warn(
+          { err: err?.message },
+          "execution-core daemon: boot cluster-sync threw (continuing)"
+        );
       }
       _clusterSyncTimer = setInterval(() => {
         try {
@@ -917,7 +957,7 @@ export function startDaemon({
       log.warn(
         { registry: getRegistryPath() },
         "execution-core daemon: registry has 0 projects — nothing will be dispatched. " +
-          "Enroll a project: `catalyst-execution-core register --team <TEAM> --repo-root <path>`",
+          "Enroll a project: `catalyst-execution-core register --team <TEAM> --repo-root <path>`"
       );
     }
   } catch (err) {
@@ -990,7 +1030,7 @@ export function startDaemon({
       "execution-core daemon: multi-host was configured (cluster anchor / static roster) " +
         "but the roster resolved to a SINGLE host — this node will own the ENTIRE fleet's " +
         "work under HRW. Check the cluster anchor is reachable and enrolled " +
-        "(`catalyst cluster status`).",
+        "(`catalyst cluster status`)."
     );
   }
   // CTL-1084: emit a structured node.boot event so catalyst-stack status can
@@ -998,9 +1038,10 @@ export function startDaemon({
   // Fail-open — emitBootEvent never throws. Kept alongside the pino log (not replacing it).
   emitBootEvent({
     summary: {
-      adoptedWorkers:   _bootReport?.workers?.running?.length ?? 0,
-      zombiesCleared:   (_bootReport?.workers?.dead?.length ?? 0) + (_bootReport?.workers?.unknown?.length ?? 0),
-      rewalkPlanned:    _bootResume?.planned    ?? _bootResume?.dispatched ?? 0,
+      adoptedWorkers: _bootReport?.workers?.running?.length ?? 0,
+      zombiesCleared:
+        (_bootReport?.workers?.dead?.length ?? 0) + (_bootReport?.workers?.unknown?.length ?? 0),
+      rewalkPlanned: _bootResume?.planned ?? _bootResume?.dispatched ?? 0,
       rewalkDispatched: _bootResume?.dispatched ?? 0,
     },
   });
@@ -1593,7 +1634,17 @@ function main() {
   process.on("unhandledRejection", fatal("unhandled rejection"));
 
   try {
-    startDaemon({ pidFile, orphanReaperConfig, worktreeRefreshConfig, stalePrRescueConfig, orphanPrSweepConfig, linearReconcileConfig, concurrency, configPath, layer2Path }); // CTL-676 + CTL-678 + CTL-707 + CTL-782 + CTL-1175 + CTL-1371
+    startDaemon({
+      pidFile,
+      orphanReaperConfig,
+      worktreeRefreshConfig,
+      stalePrRescueConfig,
+      orphanPrSweepConfig,
+      linearReconcileConfig,
+      concurrency,
+      configPath,
+      layer2Path,
+    }); // CTL-676 + CTL-678 + CTL-707 + CTL-782 + CTL-1175 + CTL-1371
   } catch (err) {
     log.error({ err }, "execution-core daemon: failed to start");
     process.exit(1);

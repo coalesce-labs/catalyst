@@ -13,12 +13,7 @@ import {
 
 describe("DISPOSITIONS constant", () => {
   test("descending precedence order: needs-human, needs-input, blocked, queued", () => {
-    expect(DISPOSITIONS).toEqual([
-      DISP_NEEDS_HUMAN,
-      DISP_NEEDS_INPUT,
-      DISP_BLOCKED,
-      DISP_QUEUED,
-    ]);
+    expect(DISPOSITIONS).toEqual([DISP_NEEDS_HUMAN, DISP_NEEDS_INPUT, DISP_BLOCKED, DISP_QUEUED]);
   });
 
   test("constants have expected string values", () => {
@@ -35,7 +30,9 @@ describe("resolveDisposition", () => {
   });
 
   test("all false → null (healthy)", () => {
-    expect(resolveDisposition({ needsHuman: false, needsInput: false, blocked: false, queued: false })).toBeNull();
+    expect(
+      resolveDisposition({ needsHuman: false, needsInput: false, blocked: false, queued: false })
+    ).toBeNull();
   });
 
   test("queued alone → queued", () => {
@@ -59,7 +56,9 @@ describe("resolveDisposition", () => {
   });
 
   test("needs-input beats blocked + queued", () => {
-    expect(resolveDisposition({ needsInput: true, blocked: true, queued: true })).toBe(DISP_NEEDS_INPUT);
+    expect(resolveDisposition({ needsInput: true, blocked: true, queued: true })).toBe(
+      DISP_NEEDS_INPUT
+    );
   });
 
   test("needs-human dominates needs-input + blocked + queued", () => {
@@ -74,15 +73,15 @@ describe("resolveDisposition", () => {
     for (let bits = 0; bits < 16; bits++) {
       const needsHuman = !!(bits & 0b1000);
       const needsInput = !!(bits & 0b0100);
-      const blocked    = !!(bits & 0b0010);
-      const queued     = !!(bits & 0b0001);
+      const blocked = !!(bits & 0b0010);
+      const queued = !!(bits & 0b0001);
       const result = resolveDisposition({ needsHuman, needsInput, blocked, queued });
       let expected;
-      if (needsHuman)      expected = DISP_NEEDS_HUMAN;
+      if (needsHuman) expected = DISP_NEEDS_HUMAN;
       else if (needsInput) expected = DISP_NEEDS_INPUT;
-      else if (blocked)    expected = DISP_BLOCKED;
-      else if (queued)     expected = DISP_QUEUED;
-      else                 expected = null;
+      else if (blocked) expected = DISP_BLOCKED;
+      else if (queued) expected = DISP_QUEUED;
+      else expected = null;
       expect(result).toBe(
         expected,
         `bits=${bits.toString(2).padStart(4, "0")} (nh=${needsHuman},ni=${needsInput},b=${blocked},q=${queued})`

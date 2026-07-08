@@ -81,10 +81,7 @@ export interface SlotAssignment {
  *
  * Dead workers (activeState === "dead") are excluded entirely — they hold no slot.
  */
-export function assignSlots(
-  workers: readonly BoardWorker[],
-  maxParallel: number,
-): SlotAssignment {
+export function assignSlots(workers: readonly BoardWorker[], maxParallel: number): SlotAssignment {
   const live = workers.filter(isLiveWorker);
   const sorted = [...live].sort((a, b) => {
     const sa = a.startedAt ?? 0;
@@ -114,7 +111,13 @@ export function slotLabel(slot: number): string {
 // ── holding buckets ("why work isn't moving") ──────────────────────────────────
 
 // CTL-764 Phase 8: "waiting" renamed to "queued"; needsInput/needsHuman added.
-export type HoldingBucketKind = "needs-you" | "stalled" | "blocked" | "queued" | "needs-input" | "needs-human";
+export type HoldingBucketKind =
+  | "needs-you"
+  | "stalled"
+  | "blocked"
+  | "queued"
+  | "needs-input"
+  | "needs-human";
 
 export interface HoldingBucketWorkerItem {
   kind: "worker";
@@ -172,7 +175,7 @@ const itemTicketId = (i: HoldingBucketItem): string =>
 export function groupHoldingBuckets(
   tickets: readonly BoardTicket[],
   workers: readonly BoardWorker[],
-  maxParallel: number,
+  maxParallel: number
 ): HoldingBuckets {
   // Stable deck assignment → 1-based slot index per worker name.
   const { occupied } = assignSlots(workers, maxParallel);
@@ -204,20 +207,41 @@ export function groupHoldingBuckets(
   for (const t of tickets) {
     if (inFlightTicketIds.has(t.id)) continue;
     // CTL-1180: not-in-flight needs-human attention → needs-you (operator-prompt axis).
-    if (t.attention === "needs-human") { needsYou.push({ kind: "ticket", ticket: t }); continue; }
-    if (t.status === "stalled") { stalled.push({ kind: "ticket", ticket: t }); continue; }
+    if (t.attention === "needs-human") {
+      needsYou.push({ kind: "ticket", ticket: t });
+      continue;
+    }
+    if (t.status === "stalled") {
+      stalled.push({ kind: "ticket", ticket: t });
+      continue;
+    }
     // CTL-764 Phase 8: single-valued precedence on workerStatus; fall back to held for back-compat.
-    const ws = (t as any).workerStatus ?? null;
+    const ws = t.workerStatus ?? null;
     const h = t.held ?? null;
-    if (ws === "needs-human") { needsHuman.push({ kind: "ticket", ticket: t }); continue; }
-    if (ws === "needs-input") { needsInput.push({ kind: "ticket", ticket: t }); continue; }
-    if (ws === "blocked" || h === "blocked") { blocked.push({ kind: "ticket", ticket: t }); continue; }
-    if (ws === "queued" || h === "queued" || h === "waiting") { queued.push({ kind: "ticket", ticket: t }); }
+    if (ws === "needs-human") {
+      needsHuman.push({ kind: "ticket", ticket: t });
+      continue;
+    }
+    if (ws === "needs-input") {
+      needsInput.push({ kind: "ticket", ticket: t });
+      continue;
+    }
+    if (ws === "blocked" || h === "blocked") {
+      blocked.push({ kind: "ticket", ticket: t });
+      continue;
+    }
+    if (ws === "queued" || h === "queued" || h === "waiting") {
+      queued.push({ kind: "ticket", ticket: t });
+    }
   }
 
   const allEmpty =
-    needsYou.length === 0 && stalled.length === 0 && blocked.length === 0 &&
-    queued.length === 0 && needsInput.length === 0 && needsHuman.length === 0;
+    needsYou.length === 0 &&
+    stalled.length === 0 &&
+    blocked.length === 0 &&
+    queued.length === 0 &&
+    needsInput.length === 0 &&
+    needsHuman.length === 0;
   return {
     needsYou: { kind: "needs-you", items: needsYou },
     stalled: { kind: "stalled", items: stalled },
@@ -232,8 +256,12 @@ export function groupHoldingBuckets(
 /** Flatten all bucket items to their ticket ids — for the bucket ∉ queue test. */
 export function holdingTicketIds(b: HoldingBuckets): string[] {
   return [
-    ...b.needsYou.items, ...b.stalled.items, ...b.blocked.items,
-    ...b.queued.items, ...b.needsInput.items, ...b.needsHuman.items,
+    ...b.needsYou.items,
+    ...b.stalled.items,
+    ...b.blocked.items,
+    ...b.queued.items,
+    ...b.needsInput.items,
+    ...b.needsHuman.items,
   ].map(itemTicketId);
 }
 

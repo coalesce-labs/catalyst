@@ -49,22 +49,24 @@ describe("buildWorkerTransitionEvent", () => {
   });
 
   test("both axes round-trip in body.payload", () => {
-    const ev = JSON.parse(buildWorkerTransitionEvent({
-      ticket: "CTL-764",
-      orchId: "CTL-764",
-      fromStage: "Research",
-      toStage: "Implement",
-      fromDisposition: "blocked",
-      toDisposition: "needs-human",
-      reason: "stuck",
-      attempt: 2,
-      reviveCount: 1,
-      source: "recovery-escalation",
-      project: "catalyst",
-      linearKey: "CTL-764",
-      branch: "ryan/ctl-764-worker-state",
-      taskType: "feature",
-    }));
+    const ev = JSON.parse(
+      buildWorkerTransitionEvent({
+        ticket: "CTL-764",
+        orchId: "CTL-764",
+        fromStage: "Research",
+        toStage: "Implement",
+        fromDisposition: "blocked",
+        toDisposition: "needs-human",
+        reason: "stuck",
+        attempt: 2,
+        reviveCount: 1,
+        source: "recovery-escalation",
+        project: "catalyst",
+        linearKey: "CTL-764",
+        branch: "ryan/ctl-764-worker-state",
+        taskType: "feature",
+      })
+    );
     const p = ev.body.payload;
     expect(p.ticket).toBe("CTL-764");
     expect(p.from_stage).toBe("Research");
@@ -82,14 +84,16 @@ describe("buildWorkerTransitionEvent", () => {
   });
 
   test("dims as OTLP attributes — string values", () => {
-    const ev = JSON.parse(buildWorkerTransitionEvent({
-      ticket: "CTL-764",
-      fromDisposition: "queued",
-      toDisposition: "needs-human",
-      fromStage: "Plan",
-      toStage: "Implement",
-      reason: "scheduler-advance",
-    }));
+    const ev = JSON.parse(
+      buildWorkerTransitionEvent({
+        ticket: "CTL-764",
+        fromDisposition: "queued",
+        toDisposition: "needs-human",
+        fromStage: "Plan",
+        toStage: "Implement",
+        reason: "scheduler-advance",
+      })
+    );
     expect(ev.attributes["catalyst.worker.from_disposition"]).toBe("queued");
     expect(ev.attributes["catalyst.worker.to_disposition"]).toBe("needs-human");
     expect(ev.attributes["catalyst.worker.from_state"]).toBe("Plan");
@@ -98,11 +102,13 @@ describe("buildWorkerTransitionEvent", () => {
   });
 
   test("dims as OTLP attributes — intValue for attempt and revive_count", () => {
-    const ev = JSON.parse(buildWorkerTransitionEvent({
-      ticket: "CTL-764",
-      attempt: 2,
-      reviveCount: 1,
-    }));
+    const ev = JSON.parse(
+      buildWorkerTransitionEvent({
+        ticket: "CTL-764",
+        attempt: 2,
+        reviveCount: 1,
+      })
+    );
     // intValue: stored as Number (not string) in the attributes object
     expect(typeof ev.attributes["phase.attempt"]).toBe("number");
     expect(ev.attributes["phase.attempt"]).toBe(2);
@@ -111,10 +117,12 @@ describe("buildWorkerTransitionEvent", () => {
   });
 
   test("to_disposition is a scalar string (not JSON-array string)", () => {
-    const ev = JSON.parse(buildWorkerTransitionEvent({
-      ticket: "CTL-764",
-      toDisposition: "blocked",
-    }));
+    const ev = JSON.parse(
+      buildWorkerTransitionEvent({
+        ticket: "CTL-764",
+        toDisposition: "blocked",
+      })
+    );
     const val = ev.attributes["catalyst.worker.to_disposition"];
     // Must be a plain string, not '["blocked"]'
     expect(typeof val).toBe("string");
@@ -163,7 +171,9 @@ describe("appendWorkerTransitionEvent", () => {
   test("swallows an append-throw and returns false", () => {
     const result = appendWorkerTransitionEvent({
       ticket: "CTL-764",
-      append: () => { throw new Error("disk full"); },
+      append: () => {
+        throw new Error("disk full");
+      },
     });
     expect(result).toBe(false);
   });

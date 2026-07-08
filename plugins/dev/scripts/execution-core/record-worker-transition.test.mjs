@@ -4,17 +4,37 @@ import { describe, test, expect } from "bun:test";
 import { recordWorkerTransition } from "./record-worker-transition.mjs";
 
 // Helpers to build call-recording fakes.
-function makeApplyPhaseStatus(result = { applied: true, from_state: "Research", to_state: "Plan" }) {
+function makeApplyPhaseStatus(
+  result = { applied: true, from_state: "Research", to_state: "Plan" }
+) {
   const calls = [];
-  return { calls, fn: (...args) => { calls.push(args); return result; } };
+  return {
+    calls,
+    fn: (...args) => {
+      calls.push(args);
+      return result;
+    },
+  };
 }
 function makeConvergeLabel(result = 1) {
   const calls = [];
-  return { calls, fn: (...args) => { calls.push(args); return result; } };
+  return {
+    calls,
+    fn: (...args) => {
+      calls.push(args);
+      return result;
+    },
+  };
 }
 function makeAppendEvent(result = true) {
   const calls = [];
-  return { calls, fn: (...args) => { calls.push(args); return result; } };
+  return {
+    calls,
+    fn: (...args) => {
+      calls.push(args);
+      return result;
+    },
+  };
 }
 
 describe("recordWorkerTransition — happy path", () => {
@@ -61,18 +81,25 @@ describe("recordWorkerTransition — happy path", () => {
 
 describe("recordWorkerTransition — fail-open Sink 1", () => {
   test("applyPhaseStatus throws → convergeLabel AND appendEvent still called; no throw", async () => {
-    const aps = { calls: [], fn: () => { throw new Error("linear API down"); } };
+    const aps = {
+      calls: [],
+      fn: () => {
+        throw new Error("linear API down");
+      },
+    };
     const cl = makeConvergeLabel();
     const ae = makeAppendEvent();
 
-    await expect(recordWorkerTransition({
-      ticket: "CTL-764",
-      toStage: "plan",
-      toDisposition: "queued",
-      applyPhaseStatus: aps.fn,
-      convergeLabel: cl.fn,
-      appendWorkerTransitionEvent: ae.fn,
-    })).resolves.toBeDefined();
+    await expect(
+      recordWorkerTransition({
+        ticket: "CTL-764",
+        toStage: "plan",
+        toDisposition: "queued",
+        applyPhaseStatus: aps.fn,
+        convergeLabel: cl.fn,
+        appendWorkerTransitionEvent: ae.fn,
+      })
+    ).resolves.toBeDefined();
 
     expect(cl.calls.length).toBe(1);
     expect(ae.calls.length).toBe(1);
@@ -82,17 +109,24 @@ describe("recordWorkerTransition — fail-open Sink 1", () => {
 describe("recordWorkerTransition — fail-open Sink 2", () => {
   test("convergeLabel throws → appendEvent still called; no throw", async () => {
     const aps = makeApplyPhaseStatus();
-    const cl = { calls: [], fn: () => { throw new Error("label write failed"); } };
+    const cl = {
+      calls: [],
+      fn: () => {
+        throw new Error("label write failed");
+      },
+    };
     const ae = makeAppendEvent();
 
-    await expect(recordWorkerTransition({
-      ticket: "CTL-764",
-      toStage: "plan",
-      toDisposition: "queued",
-      applyPhaseStatus: aps.fn,
-      convergeLabel: cl.fn,
-      appendWorkerTransitionEvent: ae.fn,
-    })).resolves.toBeDefined();
+    await expect(
+      recordWorkerTransition({
+        ticket: "CTL-764",
+        toStage: "plan",
+        toDisposition: "queued",
+        applyPhaseStatus: aps.fn,
+        convergeLabel: cl.fn,
+        appendWorkerTransitionEvent: ae.fn,
+      })
+    ).resolves.toBeDefined();
 
     expect(ae.calls.length).toBe(1);
   });
@@ -102,7 +136,12 @@ describe("recordWorkerTransition — fail-open Sink 3", () => {
   test("appendEvent throws → returns without throwing; stageResult still surfaced", async () => {
     const aps = makeApplyPhaseStatus({ applied: true, from_state: "Triage", to_state: "Plan" });
     const cl = makeConvergeLabel();
-    const ae = { calls: [], fn: () => { throw new Error("event log full"); } };
+    const ae = {
+      calls: [],
+      fn: () => {
+        throw new Error("event log full");
+      },
+    };
 
     const result = await recordWorkerTransition({
       ticket: "CTL-764",
@@ -143,7 +182,13 @@ describe("recordWorkerTransition — event payload", () => {
     const aps = makeApplyPhaseStatus({ applied: true, from_state: "Research", to_state: "Plan" });
     const cl = makeConvergeLabel();
     const appendedArgs = [];
-    const ae = { calls: appendedArgs, fn: (args) => { appendedArgs.push(args); return true; } };
+    const ae = {
+      calls: appendedArgs,
+      fn: (args) => {
+        appendedArgs.push(args);
+        return true;
+      },
+    };
 
     await recordWorkerTransition({
       ticket: "CTL-764",

@@ -60,7 +60,7 @@ export interface Resource {
   // CTL-636: optional orchestration-context resource keys. Present only when
   // the event carries the corresponding data; omitted otherwise so external
   // (webhook / broker-daemon) events keep the bare 3-key block.
-  "project"?: string;
+  project?: string;
   "linear.key"?: string;
   "catalyst.orchestration"?: string;
 }
@@ -158,7 +158,7 @@ export interface BuildInput {
   resource: {
     "service.name": string;
     "service.version"?: string;
-    "project"?: string;
+    project?: string;
     "linear.key"?: string;
     "catalyst.orchestration"?: string;
   };
@@ -177,7 +177,14 @@ export function pluginVersion(): string {
   if (cachedVersion !== null) return cachedVersion;
 
   const candidates = [
-    resolve(dirname(new URL(import.meta.url).pathname), "..", "..", "..", ".claude-plugin", "plugin.json"),
+    resolve(
+      dirname(new URL(import.meta.url).pathname),
+      "..",
+      "..",
+      "..",
+      ".claude-plugin",
+      "plugin.json"
+    ),
     resolve(dirname(new URL(import.meta.url).pathname), "..", "package.json"),
   ];
   for (const p of candidates) {
@@ -235,8 +242,7 @@ export function buildCanonicalEvent(input: BuildInput): CanonicalEvent {
   // already set these) or the ambient env (project only).
   const project = input.resource["project"] ?? projectFromEnv();
   if (project) resource["project"] = project;
-  const linearKey =
-    input.resource["linear.key"] ?? input.attributes["linear.issue.identifier"];
+  const linearKey = input.resource["linear.key"] ?? input.attributes["linear.issue.identifier"];
   if (linearKey) resource["linear.key"] = linearKey;
   const catOrch =
     input.resource["catalyst.orchestration"] ?? input.attributes["catalyst.orchestrator.id"];

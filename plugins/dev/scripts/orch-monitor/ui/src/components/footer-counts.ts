@@ -40,7 +40,7 @@ export interface FooterCounts {
 export function deriveFooterCounts(
   workers: readonly BoardWorker[],
   tickets: readonly BoardTicket[],
-  maxParallel: number,
+  maxParallel: number
 ): FooterCounts {
   const { occupied, emptyCount } = assignSlots(workers, maxParallel);
   const dead = deadWorkers(workers).length;

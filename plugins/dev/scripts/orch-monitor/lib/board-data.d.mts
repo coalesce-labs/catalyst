@@ -309,7 +309,7 @@ export const TERMINAL_FAILURE: Set<string>;
 export const PIPELINE_DONE_PHASE: string;
 export const HELD_LABEL_BLOCKED: string;
 export const HELD_LABEL_WAITING: string;
-export function heldFor(labels: unknown): "blocked" | "waiting" | null;
+export function heldFor(labels: unknown): "blocked" | "queued" | null;
 
 /** CTL-1131: the durable needs-human age anchor — the newest phase signal's
  *  needsHumanSince stamp. null when none carries it (never fabricated). */
@@ -361,9 +361,7 @@ export function deriveHumanQuestion(phaseSigs: unknown[]): string | null;
 /** CTL-1110: scan phaseSigs newest-first for the first signal whose explanation
  *  carries at least one of the extended render fields; returns the projected
  *  object (absent fields → null) or null when no signal carries any. */
-export function deriveExplanation(
-  phaseSigs: unknown[]
-): Record<string, string | null> | null;
+export function deriveExplanation(phaseSigs: unknown[]): Record<string, string | null> | null;
 
 /** CTL-1158: returns true when the PR has been in a real-blocker merge state
  *  (DIRTY/BLOCKED/UNSTABLE) for ≥ 300 s, anchored to prPhaseStartedAt. */
@@ -476,14 +474,14 @@ export function synthesizeQueuedTicket(
   linfo: Record<string, unknown>,
   relationBlockerMap?: Map<string, unknown>,
   teamRepoMap?: Record<string, string>,
-  replicaTitles?: Record<string, string>,
+  replicaTitles?: Record<string, string>
 ): BoardTicket;
 /** CTL-1378 (#2421 edge): the replica-first title chain shared by synthesizeQueuedTicket
  *  (the Todo card) AND the dispatch-queue payload, so the two never disagree. CTC replica
  *  title → eligible-projection title → bare id. */
 export function resolveQueuedTitle(
   eligible: { id?: string; title?: string | null } | null | undefined,
-  replicaTitles?: Record<string, string>,
+  replicaTitles?: Record<string, string>
 ): string;
 /** CTL-1152: PURE prefix→short-repo-name map from catalyst.monitor.linear.teams[].
  *  Maps each {key,vcsRepo} to UPPERCASE-key → lowercased basename; skips entries

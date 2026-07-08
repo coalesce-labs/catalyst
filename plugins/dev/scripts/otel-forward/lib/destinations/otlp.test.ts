@@ -181,7 +181,8 @@ describe("buildOtlpPayload — worker.transition attributes (CTL-764)", () => {
     const payload = buildOtlpPayload([ev]) as any;
     const attrs: Array<{ key: string; value: any }> =
       payload.resourceLogs[0].scopeLogs[0].logRecords[0].attributes;
-    const toDisp = attrs.find((a) => a.key === "catalyst.worker.to_disposition")?.value?.stringValue;
+    const toDisp = attrs.find((a) => a.key === "catalyst.worker.to_disposition")?.value
+      ?.stringValue;
     expect(toDisp).toBe("needs-human");
     expect(() => JSON.parse(toDisp ?? "")).toThrow();
   });
@@ -384,9 +385,7 @@ describe("OtlpSender DLQ drain — outside withRetry (CTL-1060)", () => {
   });
 
   test("no drain when primary fails: DLQ grows by primary, drain never attempted", async () => {
-    global.fetch = mock(() =>
-      Promise.reject(new Error("always fail"))
-    ) as unknown as typeof fetch;
+    global.fetch = mock(() => Promise.reject(new Error("always fail"))) as unknown as typeof fetch;
 
     const { OtlpSender } = await import("./otlp.ts");
     const dlqPath = join(dir, "nofail-dlq.jsonl");
@@ -455,7 +454,9 @@ describe("OtlpSender DLQ drain — outside withRetry (CTL-1060)", () => {
       endpoint: "http://127.0.0.1:4318",
       dlqPath,
       retryDelaysMs: [0],
-      onBatchDelivered: () => { deliveredCount++; },
+      onBatchDelivered: () => {
+        deliveredCount++;
+      },
     });
 
     await sender.flush([makeEvent()]);
@@ -465,9 +466,7 @@ describe("OtlpSender DLQ drain — outside withRetry (CTL-1060)", () => {
   });
 
   test("onBatchDelivered is NOT called when primary flush fails (CTL-1060 Phase 3)", async () => {
-    global.fetch = mock(() =>
-      Promise.reject(new Error("down"))
-    ) as unknown as typeof fetch;
+    global.fetch = mock(() => Promise.reject(new Error("down"))) as unknown as typeof fetch;
 
     const { OtlpSender } = await import("./otlp.ts");
     const dlqPath = join(dir, "obd-fail-dlq.jsonl");
@@ -477,7 +476,9 @@ describe("OtlpSender DLQ drain — outside withRetry (CTL-1060)", () => {
       endpoint: "http://127.0.0.1:1",
       dlqPath,
       retryDelaysMs: [0, 0, 0],
-      onBatchDelivered: () => { deliveredCount++; },
+      onBatchDelivered: () => {
+        deliveredCount++;
+      },
     });
 
     await sender.flush([makeEvent()]);

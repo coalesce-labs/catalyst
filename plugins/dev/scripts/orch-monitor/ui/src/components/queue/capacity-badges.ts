@@ -23,7 +23,11 @@ interface MinimalBoardConfig {
  */
 export function buildCapacityBadges(config: MinimalBoardConfig): CapacityBadge[] {
   const SLOTS: Array<{ key: keyof MinimalBoardConfig; label: string; legend?: string }> = [
-    { key: "triage", label: "triage", legend: "triage is intake — not counted against maxParallel" },
+    {
+      key: "triage",
+      label: "triage",
+      legend: "triage is intake — not counted against maxParallel",
+    },
     { key: "queued", label: "queued" },
     { key: "blocked", label: "blocked" },
     { key: "needsInput", label: "needs-input" },

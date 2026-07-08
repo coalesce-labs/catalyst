@@ -27,14 +27,14 @@ import { heldFor, HELD_LABEL_BLOCKED, HELD_LABEL_WAITING } from "../lib/board-da
 // would trip TS7016. This mirrors how board-phase-drift.test.ts reads Board.tsx
 // as text. We extract the two `export const HELD_LABEL_* = "…"` literals.
 const HERE = dirname(fileURLToPath(import.meta.url));
-const SCHED_SRC = readFileSync(
-  join(HERE, "..", "..", "execution-core", "scheduler.mjs"),
-  "utf8",
-);
+const SCHED_SRC = readFileSync(join(HERE, "..", "..", "execution-core", "scheduler.mjs"), "utf8");
 function schedLabel(name: string): string {
   // eslint-disable-next-line security/detect-non-literal-regexp
   const m = new RegExp(`export\\s+const\\s+${name}\\s*=\\s*"([^"]+)"`).exec(SCHED_SRC);
-  if (!m) throw new Error(`board-held-indicator: could not locate \`export const ${name}\` in scheduler.mjs`);
+  if (!m)
+    throw new Error(
+      `board-held-indicator: could not locate \`export const ${name}\` in scheduler.mjs`
+    );
   return m[1];
 }
 const SCHED_BLOCKED = schedLabel("HELD_LABEL_BLOCKED");
@@ -83,7 +83,7 @@ test("board-data held labels equal scheduler.mjs source of truth (no drift)", ()
         `  scheduler:  blocked=${JSON.stringify(SCHED_BLOCKED)} waiting=${JSON.stringify(SCHED_WAITING)}\n` +
         `  board-data: blocked=${JSON.stringify(HELD_LABEL_BLOCKED)} waiting=${JSON.stringify(HELD_LABEL_WAITING)}\n` +
         `The daemon writes these labels and the board reads them — they must match. ` +
-        `scheduler.mjs is the source of truth.`,
+        `scheduler.mjs is the source of truth.`
     );
   }
   expect(HELD_LABEL_BLOCKED).toBe(SCHED_BLOCKED);
@@ -97,7 +97,8 @@ test("Board.tsx held label constants equal scheduler.mjs source of truth (no dri
   const grab = (name: string) => {
     // eslint-disable-next-line security/detect-non-literal-regexp
     const m = new RegExp(`const\\s+${name}\\s*=\\s*"([^"]+)"`).exec(BOARD_TSX);
-    if (!m) throw new Error(`board-held-indicator: could not locate \`const ${name}\` in Board.tsx`);
+    if (!m)
+      throw new Error(`board-held-indicator: could not locate \`const ${name}\` in Board.tsx`);
     return m[1];
   };
   expect(grab("HELD_LABEL_BLOCKED")).toBe(SCHED_BLOCKED);

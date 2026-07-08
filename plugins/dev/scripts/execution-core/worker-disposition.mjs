@@ -7,12 +7,7 @@ export const DISP_BLOCKED = "blocked";
 export const DISP_QUEUED = "queued";
 
 /** Descending precedence order: index 0 wins. */
-export const DISPOSITIONS = [
-  DISP_NEEDS_HUMAN,
-  DISP_NEEDS_INPUT,
-  DISP_BLOCKED,
-  DISP_QUEUED,
-];
+export const DISPOSITIONS = [DISP_NEEDS_HUMAN, DISP_NEEDS_INPUT, DISP_BLOCKED, DISP_QUEUED];
 
 /**
  * Resolve the highest-precedence active disposition.

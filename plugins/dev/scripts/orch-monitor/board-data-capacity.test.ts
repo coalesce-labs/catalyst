@@ -9,10 +9,10 @@ const { deriveCapacity, deriveStatusCounts } = await import("./lib/board-data.mj
 
 describe("deriveCapacity — triage carve-out (CTL-764 Phase 7)", () => {
   function liveWorker(phase: string, extra: object = {}) {
-    return { activeState: "active", working: true, phase, ...extra };
+    return { activeState: "active" as const, working: true, phase, ...extra };
   }
   function deadWorker(phase: string) {
-    return { activeState: "dead", working: false, phase };
+    return { activeState: "dead" as const, working: false, phase };
   }
 
   it("a live triage worker is excluded from inFlight/freeSlots and counted as triage:1", () => {
@@ -25,7 +25,9 @@ describe("deriveCapacity — triage carve-out (CTL-764 Phase 7)", () => {
 
   it("triage never reduces freeSlots (6 implement + 2 triage, maxParallel 6 → inFlight 6, freeSlots 0, triage 2)", () => {
     const workers = [
-      ...Array(6).fill(null).map(() => liveWorker("implement")),
+      ...Array(6)
+        .fill(null)
+        .map(() => liveWorker("implement")),
       liveWorker("triage"),
       liveWorker("triage"),
     ];
@@ -56,7 +58,7 @@ describe("deriveCapacity — triage carve-out (CTL-764 Phase 7)", () => {
     const workers = [
       liveWorker("implement", { activeState: "active", working: true }),
       liveWorker("triage", { activeState: "active", working: false }),
-      { activeState: "dead", working: false, phase: "implement" },
+      { activeState: "dead" as const, working: false, phase: "implement" },
     ];
     const r = deriveCapacity(workers, 4);
     expect(r.active).toBe(1);
@@ -69,11 +71,14 @@ describe("deriveCapacity — triage carve-out (CTL-764 Phase 7)", () => {
 // ── deriveStatusCounts ────────────────────────────────────────────────────────
 
 describe("deriveStatusCounts (CTL-764 Phase 7)", () => {
-  function ticket(id: string, opts: {
-    labels?: string[];
-    attention?: string | null;
-    workerStatus?: string | null;
-  } = {}) {
+  function ticket(
+    id: string,
+    opts: {
+      labels?: string[];
+      attention?: string | null;
+      workerStatus?: string | null;
+    } = {}
+  ) {
     return {
       id,
       labels: opts.labels ?? [],

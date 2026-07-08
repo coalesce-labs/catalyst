@@ -26,7 +26,13 @@ export type BoardAttention = "waiting-on-you" | "needs-human" | null;
 
 /** CTL-1158: GitHub PR merge state; mirrors lib/board-data.d.mts PrMergeStateStatus. */
 export type PrMergeStateStatus =
-  | "CLEAN" | "BLOCKED" | "DIRTY" | "BEHIND" | "UNSTABLE" | "HAS_HOOKS" | "UNKNOWN";
+  | "CLEAN"
+  | "BLOCKED"
+  | "DIRTY"
+  | "BEHIND"
+  | "UNSTABLE"
+  | "HAS_HOOKS"
+  | "UNKNOWN";
 
 /** CTL-922 (BFF10): a node's stable identity stamped on every board entity so the
  *  node-aware surfaces (BOARD3 host swimlanes, SURF1 worker node group, SURF2

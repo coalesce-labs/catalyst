@@ -22,7 +22,11 @@ import { readFile, readdir, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join, dirname, basename } from "node:path";
 import { promisify } from "node:util";
-import { readLinearCache, readParkedNeedsHumanTickets, readReplicaTitles } from "./linear-cache-reader.mjs";
+import {
+  readLinearCache,
+  readParkedNeedsHumanTickets,
+  readReplicaTitles,
+} from "./linear-cache-reader.mjs";
 import { fillEstimateFallback, getEstimationMethodAsync } from "./linear-estimate-fallback.mjs";
 // CTL-1046: supplemental Linear-title fallback for cross-team (e.g. ADV) records.
 // CTL records carry their title via the eligible projection (eligible/CTL.json),
@@ -241,8 +245,8 @@ export function deriveAttention({
   needsHumanSince = null,
   prStuck = false, // CTL-1158: PR in a real-blocker merge state ≥ 300 s
   prStuckSince = null,
-  phaseFailed = false,    // CTL-1180: a terminal failed/stalled phase, ticket NOT pipeline-done
-  escalationType = null,  // CTL-1180: passthrough of explanation.escalation_type (forensic/render)
+  phaseFailed = false, // CTL-1180: a terminal failed/stalled phase, ticket NOT pipeline-done
+  escalationType = null, // CTL-1180: passthrough of explanation.escalation_type (forensic/render)
   linearTerminal = false, // CTL-1239: live Linear state is Done/Canceled
 } = {}) {
   // CTL-1239: a ticket terminal in Linear (Done/Canceled) is finished regardless of
@@ -267,7 +271,11 @@ export function deriveAttention({
     };
   }
   if (waitingOnUser === true) {
-    return { attention: "waiting-on-you", attentionSince: waitingSince ?? null, escalationType: null };
+    return {
+      attention: "waiting-on-you",
+      attentionSince: waitingSince ?? null,
+      escalationType: null,
+    };
   }
   return { attention: null, attentionSince: null, escalationType: null };
 }
@@ -304,7 +312,13 @@ export function resolveQueuedTitle(e, replicaTitles = {}) {
   return e?.title || e?.id;
 }
 
-export function synthesizeQueuedTicket(e, linfo, relationBlockerMap = new Map(), teamRepoMap = {}, replicaTitles = {}) {
+export function synthesizeQueuedTicket(
+  e,
+  linfo,
+  relationBlockerMap = new Map(),
+  teamRepoMap = {},
+  replicaTitles = {}
+) {
   const li = linfo[e.id] ?? {};
   return {
     id: e.id,
@@ -391,7 +405,11 @@ export function buildTeamRepoMap(teams) {
 // locations and precedence direction maxParallel() uses (L2 = ~/.config/catalyst,
 // L1 = cwd/.catalyst), preferring the L2 teams[] then L1.
 function readJSONSync(path) {
-  try { return JSON.parse(readFileSync(path, "utf8")); } catch { return null; }
+  try {
+    return JSON.parse(readFileSync(path, "utf8"));
+  } catch {
+    return null;
+  }
 }
 function loadTeamRepoMap() {
   const l2 = readJSONSync(join(HOME, ".config", "catalyst", "config.json"));
@@ -691,10 +709,21 @@ export function deriveStatusCounts(tickets, inFlightTicketIds) {
     // Check worker-status disposition first (set by daemon), then fall back to
     // label-based heldFor for back-compat with pre-CTL-764 boards.
     const ws = t.workerStatus ?? heldFor(t.labels ?? []);
-    if (ws === "needs-human") { counts.needsHuman++; continue; }
-    if (ws === "needs-input") { counts.needsInput++; continue; }
-    if (ws === "blocked" || ws === HELD_LABEL_BLOCKED) { counts.blocked++; continue; }
-    if (ws === "queued" || ws === HELD_LABEL_WAITING || ws === "waiting") { counts.queued++; }
+    if (ws === "needs-human") {
+      counts.needsHuman++;
+      continue;
+    }
+    if (ws === "needs-input") {
+      counts.needsInput++;
+      continue;
+    }
+    if (ws === "blocked" || ws === HELD_LABEL_BLOCKED) {
+      counts.blocked++;
+      continue;
+    }
+    if (ws === "queued" || ws === HELD_LABEL_WAITING || ws === "waiting") {
+      counts.queued++;
+    }
   }
   return counts;
 }
@@ -1216,10 +1245,14 @@ function readOrphanPrState() {
   let raw;
   try {
     raw = readFileSync(path, "utf8");
-  } catch { return {}; } // ENOENT: no sweep has run yet
+  } catch {
+    return {};
+  } // ENOENT: no sweep has run yet
   try {
     return JSON.parse(raw);
-  } catch { return {}; } // torn file: fail-open, zero orphan rows
+  } catch {
+    return {};
+  } // torn file: fail-open, zero orphan rows
 }
 
 // foldRecoveryOutcomes — the shared, byte-identical fold. Given the recovery
@@ -1318,22 +1351,41 @@ export function synthesizeOrphanTickets(orphanState, now) {
         id: `orphan:${e.repo}#${e.number}`,
         title: e.title || `Orphan PR #${e.number}`,
         type: "orphan-pr",
-        repo: e.repo || "", team: "",
-        phase: "monitor-merge", status: "running", model: null,
-        linearState: "", workerStatus: null, activeState: null, working: false,
-        lastActiveMs: null, priority: 0, estimate: null, scope: null, project: null,
-        held: null, heldSince: null, currentPhaseSince: null,
+        repo: e.repo || "",
+        team: "",
+        phase: "monitor-merge",
+        status: "running",
+        model: null,
+        linearState: "",
+        workerStatus: null,
+        activeState: null,
+        working: false,
+        lastActiveMs: null,
+        priority: 0,
+        estimate: null,
+        scope: null,
+        project: null,
+        held: null,
+        heldSince: null,
+        currentPhaseSince: null,
         // CTL-1175: surface as a Needs-You row, reusing CTL-1158 inbox derivation.
         attention: "needs-human",
         attentionSince: e.firstSeenAt ?? e.notifiedAt ?? null,
         humanQuestion: reason,
         explanation: null,
-        pr: e.number, prUrl: e.url ?? null,
+        pr: e.number,
+        prUrl: e.url ?? null,
         mergeStateStatus: e.mergeStateStatus ?? null,
         prStuckReason: reason,
-        costUSD: null, tokens: null, turns: null, phaseCosts: null, phaseSummary: [],
+        costUSD: null,
+        tokens: null,
+        turns: null,
+        phaseCosts: null,
+        phaseSummary: [],
         updatedAt: e.notifiedAt ?? new Date(now).toISOString(),
-        host: null, generation: null, failureReason: null,
+        host: null,
+        generation: null,
+        failureReason: null,
       };
     });
 }
@@ -1354,7 +1406,13 @@ export function synthesizeOrphanTickets(orphanState, now) {
 // bare-id parked card — the parked descriptor (readParkedNeedsHumanTickets) carries
 // NO title, so without the replica these cards rendered as "CTL-1214". Replica miss
 // → p.title (always absent here) → the bare ticket id (honest last resort).
-export function synthesizeParkedNeedsHumanTickets(parked, existingIds, now, replicaTitles = {}, linfo = {}) {
+export function synthesizeParkedNeedsHumanTickets(
+  parked,
+  existingIds,
+  now,
+  replicaTitles = {},
+  linfo = {}
+) {
   if (!Array.isArray(parked)) return [];
   const seen = existingIds instanceof Set ? new Set(existingIds) : new Set(existingIds ?? []);
   const cards = [];
@@ -1387,12 +1445,21 @@ export function synthesizeParkedNeedsHumanTickets(parked, existingIds, now, repl
       team: teamFor(p.ticket),
       // No worker dir / phase signal — these are off-board parked tickets. phase
       // "queued" + the cached Linear state keep the board column honest.
-      phase: "queued", status: "parked", model: null,
+      phase: "queued",
+      status: "parked",
+      model: null,
       linearState: typeof p.linearState === "string" ? p.linearState : "",
-      workerStatus: null, activeState: null, working: false,
-      lastActiveMs: null, priority: typeof p.priority === "number" ? p.priority : 0,
-      estimate: null, scope: null, project: null,
-      held: heldFor(labels), heldSince: null, currentPhaseSince: null,
+      workerStatus: null,
+      activeState: null,
+      working: false,
+      lastActiveMs: null,
+      priority: typeof p.priority === "number" ? p.priority : 0,
+      estimate: null,
+      scope: null,
+      project: null,
+      held: heldFor(labels),
+      heldSince: null,
+      currentPhaseSince: null,
       // surface as a Needs-You row, reusing the CTL-1158 inbox derivation.
       attention: "needs-human",
       // "how long has it needed you" anchor — the descriptor's last-updated stamp
@@ -1400,11 +1467,20 @@ export function synthesizeParkedNeedsHumanTickets(parked, existingIds, now, repl
       attentionSince: p.updatedAt ?? null,
       humanQuestion: reason,
       explanation: null,
-      pr: null, prUrl: null, mergeStateStatus: null, prStuckReason: null,
-      costUSD: null, tokens: null, turns: null, phaseCosts: null, phaseSummary: [],
+      pr: null,
+      prUrl: null,
+      mergeStateStatus: null,
+      prStuckReason: null,
+      costUSD: null,
+      tokens: null,
+      turns: null,
+      phaseCosts: null,
+      phaseSummary: [],
       blockers: [],
       updatedAt: p.updatedAt ?? new Date(now).toISOString(),
-      host: null, generation: null, failureReason: null,
+      host: null,
+      generation: null,
+      failureReason: null,
     });
   }
   return cards;
@@ -1541,9 +1617,13 @@ async function loadEligible(teamRepoMap = {}) {
       const id = t.identifier || t.id;
       if (!id) continue;
       out.push({
-        id, title: t.title || id, priority: t.priority ?? 0,
-        createdAt: t.createdAt || "", state: t.state || null,
-        repo: repoForWith(teamRepoMap, id), team: teamFor(id),
+        id,
+        title: t.title || id,
+        priority: t.priority ?? 0,
+        createdAt: t.createdAt || "",
+        state: t.state || null,
+        repo: repoForWith(teamRepoMap, id),
+        team: teamFor(id),
       });
     }
   }
@@ -1664,9 +1744,26 @@ async function loadDispatchCooldowns(now) {
 // instead of full-reading the ~190MB log on every 3s recompute. Ring-less
 // callers (tests) pass nothing and keep the legacy readFileSync path.
 export async function assembleBoard({ getPrStatus = null, ring = null } = {}) {
-  const [agents, costs, phaseCostsByTicket, eligible, linfo, mp, catalystSessByUuid, cooldowns, parkedNeedsHuman] = await Promise.all([
-    liveAgents(), costByTicket(), costByPhase(), loadEligible(TEAM_REPO), linearInfo(), maxParallel(),
-    catalystSessionByCcUuid(), loadDispatchCooldowns(Date.now()), readParkedNeedsHumanTickets(),
+  const [
+    agents,
+    costs,
+    phaseCostsByTicket,
+    eligible,
+    linfo,
+    mp,
+    catalystSessByUuid,
+    cooldowns,
+    parkedNeedsHuman,
+  ] = await Promise.all([
+    liveAgents(),
+    costByTicket(),
+    costByPhase(),
+    loadEligible(TEAM_REPO),
+    linearInfo(),
+    maxParallel(),
+    catalystSessionByCcUuid(),
+    loadDispatchCooldowns(Date.now()),
+    readParkedNeedsHumanTickets(),
   ]);
   const eligibleIndex = Object.fromEntries(eligible.map((e) => [e.id, e]));
 
@@ -1805,11 +1902,7 @@ export async function assembleBoard({ getPrStatus = null, ring = null } = {}) {
   // missing/unreadable replica → {} and the existing title chain (triage.title →
   // linfo/eligible → on-demand fetch → id) is preserved unchanged.
   const replicaTitles = await readReplicaTitles({
-    ids: [
-      ...cardTicketIds,
-      ...eligible.map((e) => e.id),
-      ...parkedNeedsHuman.map((p) => p.ticket),
-    ],
+    ids: [...cardTicketIds, ...eligible.map((e) => e.id), ...parkedNeedsHuman.map((p) => p.ticket)],
   });
 
   // CTL-974: supplemental estimate fallback — tickets whose durable-cache estimate
@@ -1944,8 +2037,7 @@ export async function assembleBoard({ getPrStatus = null, ring = null } = {}) {
       // pipeline genuinely shipped (cur.phase collapses to PIPELINE_DONE_PHASE). The
       // explanation.escalation_type rides along for the reading pane.
       const phaseFailed =
-        cur.phase !== PIPELINE_DONE_PHASE &&
-        phaseSigs.some((s) => TERMINAL_FAILURE.has(s?.status));
+        cur.phase !== PIPELINE_DONE_PHASE && phaseSigs.some((s) => TERMINAL_FAILURE.has(s?.status));
       // CTL-1180 / CTL-1239: the escalation_type passthrough for the reading pane.
       // Scan the FULL explanation array (incl. recovery-pass + remediate) so a
       // recovery-pass escalation — which lands needs-human via the marker/label,
@@ -1989,7 +2081,9 @@ export async function assembleBoard({ getPrStatus = null, ring = null } = {}) {
         // CTL-1239: a Linear-terminal ticket reports its live state ("Done"/"Canceled") so
         // the UI isDone() guard (home-inbox.ts:158) routes it to the Done section. Scoped to
         // terminal tickets only — non-terminal cards keep the phase-derived column mapping.
-        linearState: linearTerminal ? linfo[id].linearState : PHASE_TO_LINEAR[cur.phase] || "Research",
+        linearState: linearTerminal
+          ? linfo[id].linearState
+          : PHASE_TO_LINEAR[cur.phase] || "Research",
         workerStatus: live?.status || null,
         activeState: live?.activeState || null,
         working: live?.working || false,
@@ -2101,7 +2195,9 @@ export async function assembleBoard({ getPrStatus = null, ring = null } = {}) {
   // ANY worker dir is already surfaced as live / between-phases above, so it is
   // excluded here (cardTicketIds) — it is accounted for, not duplicated.
   const notInFlight = eligible.filter((e) => !cardTicketIds.has(e.id));
-  const queuedTickets = notInFlight.map((e) => synthesizeQueuedTicket(e, linfo, relationBlockerMap, TEAM_REPO, replicaTitles));
+  const queuedTickets = notInFlight.map((e) =>
+    synthesizeQueuedTicket(e, linfo, relationBlockerMap, TEAM_REPO, replicaTitles)
+  );
   tickets = [...liveTickets, ...betweenPhases, ...recentDone, ...queuedTickets];
 
   // CTL-1175: orphan-PR Needs-You rows. Synthetic cards (no worker dir, never in
@@ -2119,7 +2215,13 @@ export async function assembleBoard({ getPrStatus = null, ring = null } = {}) {
   // per parked ticket NOT already carded. Deduped against every existing card id;
   // terminal/removed excluded by the reader; fail-open ([] on a db read error).
   const existingCardIds = new Set(tickets.map((t) => t.id));
-  const parkedTickets = synthesizeParkedNeedsHumanTickets(parkedNeedsHuman, existingCardIds, now, replicaTitles, linfo);
+  const parkedTickets = synthesizeParkedNeedsHumanTickets(
+    parkedNeedsHuman,
+    existingCardIds,
+    now,
+    replicaTitles,
+    linfo
+  );
   tickets = [...tickets, ...parkedTickets];
 
   // priority queue: eligible (not yet in-flight), globally ranked (Queue tab)
@@ -2162,7 +2264,7 @@ export async function assembleBoard({ getPrStatus = null, ring = null } = {}) {
   // CTL-1239: drop dead bg-job corpses on Linear-terminal tickets so they leave both
   // the capacity `dead` count and the UI "Dead / stale" section. linfo is in scope.
   const boardWorkers = workers.filter(
-    (w) => !isTerminalDeadCorpse(w, linfo[w.ticket]?.linearState),
+    (w) => !isTerminalDeadCorpse(w, linfo[w.ticket]?.linearState)
   );
 
   const repos = [...new Set([...boardWorkers, ...tickets].map((x) => x.repo))].sort();
@@ -2180,7 +2282,7 @@ export async function assembleBoard({ getPrStatus = null, ring = null } = {}) {
       ...deriveCapacity(boardWorkers, mp),
       ...deriveStatusCounts(
         tickets,
-        new Set(boardWorkers.filter((w) => !isWorkerDead(w)).map((w) => w.ticket)),
+        new Set(boardWorkers.filter((w) => !isWorkerDead(w)).map((w) => w.ticket))
       ),
     },
     repos,

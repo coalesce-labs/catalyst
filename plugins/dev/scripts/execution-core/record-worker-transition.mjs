@@ -70,7 +70,10 @@ export async function recordWorkerTransition({
     try {
       stageResult = await applyPhaseStatus({ ticket, phase: toStage, isTerminal });
     } catch (err) {
-      log.error({ err: err?.message, ticket }, "recordWorkerTransition: Sink-1 (applyPhaseStatus) failed");
+      log.error(
+        { err: err?.message, ticket },
+        "recordWorkerTransition: Sink-1 (applyPhaseStatus) failed"
+      );
     }
   }
 
@@ -83,7 +86,10 @@ export async function recordWorkerTransition({
     try {
       labelWrites = await convergeLabel({ ticket, toDisposition, fromDisposition });
     } catch (err) {
-      log.error({ err: err?.message, ticket }, "recordWorkerTransition: Sink-2 (convergeLabel) failed");
+      log.error(
+        { err: err?.message, ticket },
+        "recordWorkerTransition: Sink-2 (convergeLabel) failed"
+      );
     }
   }
 
@@ -107,7 +113,10 @@ export async function recordWorkerTransition({
         taskType,
       });
     } catch (err) {
-      log.error({ err: err?.message, ticket }, "recordWorkerTransition: Sink-3 (appendWorkerTransitionEvent) failed");
+      log.error(
+        { err: err?.message, ticket },
+        "recordWorkerTransition: Sink-3 (appendWorkerTransitionEvent) failed"
+      );
     }
   }
 
