@@ -1852,6 +1852,11 @@ function markEscalationCapTerminal({ orchDir, ticket, phase, explanation }) {
   try {
     mkdirSync(dirname(signalPath), { recursive: true });
     const sig = existsSync(signalPath) ? JSON.parse(readFileSync(signalPath, "utf8")) : {};
+    // Codex R3: when re-creating a removed/unreadable signal, seed identity —
+    // readWorkerSignals derives ticket/phase from the BODY, not the path, and a
+    // ticket:null stalled row breaks the Needs-You association.
+    if (!sig.ticket) sig.ticket = ticket;
+    if (!sig.phase) sig.phase = phase;
     sig.status = "stalled";
     sig.stalledReason = "escalation-ask-cap";
     sig.explanation = explanation;

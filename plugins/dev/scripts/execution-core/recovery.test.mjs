@@ -2744,7 +2744,12 @@ describe("reclaimDeadWorkIfPossible — CTL-1442 escalation ask-cap", () => {
     rmSync(sigPath, { force: true });
     reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts);
     // Re-asserted terminal, but NO new event (the cap stays spent).
-    expect(JSON.parse(readFileSync(sigPath, "utf8")).status).toBe("stalled");
+    const reasserted = JSON.parse(readFileSync(sigPath, "utf8"));
+    expect(reasserted.status).toBe("stalled");
+    // Codex R3: the re-created body carries identity — readWorkerSignals derives
+    // ticket/phase from the JSON, and a null-ticket stalled row breaks the inbox.
+    expect(reasserted.ticket).toBe("CTL-9");
+    expect(reasserted.phase).toBe("pr");
     expect(s.opts.appendEscalatedEvent.calls.length).toBe(3);
   });
 
