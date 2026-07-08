@@ -643,6 +643,10 @@ function checkStrandedNode(b) {
 // host that simply has no owned work.
 // Codex round-2: "no-actuator" (an enforce pass with no `act` seam wired — a
 // miswired daemon that proposes but structurally cannot dispatch) is a wedge too.
+// CTL-1440 (P0b): "all-candidates-exhausted" is deliberately EXCLUDED — every
+// candidate is terminally attempts-exhausted AND the exhaustion sweep has
+// escalated each to a human (needs-human + brief + comment), so the delegate is
+// truthfully done, not wedged.
 const WEDGE_SKIP_REASONS = new Set(["all-candidates-cooldown", "act-error", "no-actuator"]);
 
 // #7 — actuation liveness (CTL-1435 C2): the delegate's OWN wedge. Over the last
