@@ -110,6 +110,19 @@ export interface Attributes {
   "claude.context.used_pct"?: number;
   "claude.context.tokens"?: number;
   "claude.turn"?: number;
+
+  // CTL-764: worker state transition dims. body.payload is stripped off-machine
+  // by otel-forward (otlp.ts:51-52), so disposition/stage dims MUST be attributes.
+  // toAttrArray is key-agnostic; these declarations enforce the contract at the type
+  // layer only — no runtime change to otel-forward is needed.
+  "catalyst.worker.disposition"?: string;
+  "catalyst.worker.from_disposition"?: string;
+  "catalyst.worker.to_disposition"?: string;
+  "catalyst.worker.from_state"?: string;
+  "catalyst.worker.to_state"?: string;
+  "catalyst.worker.reason"?: string;
+  "phase.attempt"?: number;
+  "phase.revive_count"?: number;
 }
 
 export interface Body {

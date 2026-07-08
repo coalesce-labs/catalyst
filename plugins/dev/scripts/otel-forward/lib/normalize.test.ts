@@ -248,3 +248,28 @@ describe("normalizePinoRecord (CTL-1424)", () => {
     expect(a.id).not.toBe(cWarn.id);
   });
 });
+
+// CTL-764 Phase 6: canonical worker.transition events must not be rewritten by normalizeFlatEvent.
+describe("isFlatEvent / worker.transition canonical guard (CTL-764)", () => {
+  test("canonical worker.transition record (has attributes) → isFlatEvent returns false", () => {
+    const canonical = {
+      ts: "2026-07-08T00:00:00Z",
+      attributes: {
+        "event.name": "worker.transition.CTL-764",
+        "catalyst.worker.ticket": "CTL-764",
+        "catalyst.worker.to_disposition": "needs-human",
+      },
+      body: {},
+    };
+    expect(isFlatEvent(canonical)).toBe(false);
+  });
+
+  test("flat worker.transition record (has event) → isFlatEvent returns true", () => {
+    const flat = {
+      ts: "2026-07-08T00:00:00Z",
+      event: "worker.transition.CTL-764",
+      ticket: "CTL-764",
+    };
+    expect(isFlatEvent(flat)).toBe(true);
+  });
+});
