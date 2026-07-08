@@ -93,6 +93,8 @@ import {
   labelOnce,
   inEscalationCooldown as defaultInEscalationCooldown,
   recordEscalation as defaultRecordEscalation,
+  readEscalationRecord as defaultReadEscalationRecord, // CTL-1442: ask-cap gate
+  ESCALATION_ASK_CAP, // CTL-1442
   labelNeedsHumanUnlessBeliefOwner,
 } from "./label-guard.mjs";
 import { countReviveEvents as defaultCountReviveEvents, hasCompleteEvent } from "./event-scan.mjs";
@@ -1837,6 +1839,37 @@ function defaultWriteProgressMark(orchDir, ticket, phase, value) {
 // (appendReviveEvent, appendEscalatedEvent, reviveDispatch, applyStalledLabel,
 // killBgJob, countReviveEvents, writeReviveMarker) + the CTL-638 cool-down +
 // CTL-679 breaker. All have real defaults for prod; tests override every one.
+// markEscalationCapTerminal — CTL-1442. Flip a phase signal to a TERMINAL
+// stalled state after the escalation ask-cap is consumed, persisting the
+// curated CTL-1130 explanation on the signal so the monitor's Needs-You inbox
+// (board-data deriveExplanation, newest-signal-first) renders the final brief.
+// A terminal signal drops the ticket from the reclaim sweep's working set, so
+// the every-cool-down re-ask loop (audit RC4) ends here. Read-modify-write,
+// atomic tmp+rename (mirrors defaultReviveDispatch's signal reset). Never
+// throws — a failed flip falls back to the escalateOnce ask-cap early-return.
+function markEscalationCapTerminal({ orchDir, ticket, phase, explanation }) {
+  const signalPath = join(orchDir, "workers", ticket, `phase-${phase}.json`);
+  try {
+    mkdirSync(dirname(signalPath), { recursive: true });
+    const sig = existsSync(signalPath) ? JSON.parse(readFileSync(signalPath, "utf8")) : {};
+    sig.status = "stalled";
+    sig.stalledReason = "escalation-ask-cap";
+    sig.explanation = explanation;
+    if (!sig.needsHumanSince) sig.needsHumanSince = new Date().toISOString();
+    sig.updatedAt = new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
+    const tmp = `${signalPath}.tmp.${process.pid}`;
+    writeFileSync(tmp, JSON.stringify(sig, null, 2));
+    renameSync(tmp, signalPath);
+    return true;
+  } catch (err) {
+    log.warn(
+      { ticket, phase, err: err.message },
+      "ctl-1442: escalation-cap terminal signal write failed — the ask-cap early-return still suppresses re-asks"
+    );
+    return false;
+  }
+}
+
 export function reclaimDeadWorkIfPossible(
   orchDir,
   signal,
@@ -1877,6 +1910,15 @@ export function reclaimDeadWorkIfPossible(
     // I/O, or to drive the cool-down clock independently of `now`.
     inEscalationCooldownFn = defaultInEscalationCooldown,
     recordEscalationFn = defaultRecordEscalation,
+    // CTL-1442 — the ask-cap gate: after escalationAskCap consecutive same-reason
+    // no-progress asks (default 3, env CATALYST_ESCALATION_ASK_CAP) the
+    // escalation goes TERMINAL (stalled signal + persisted brief) instead of
+    // re-asking every cool-down window forever (ADV-1374/1376 fired for days;
+    // audit RC4). Scoped to reason "no-progress" — the alive busy-ceiling and
+    // no-probe asks keep their existing unbounded-but-throttled behavior (their
+    // signals belong to live workers a terminal flip could fight).
+    readEscalationRecordFn = defaultReadEscalationRecord,
+    escalationAskCap = ESCALATION_ASK_CAP,
     // CTL-606 — supersede guard. Returns the ticket's dispatched phase names so
     // the guard can detect a dead signal the pipeline has already advanced past.
     listTicketPhases = (t) => listDispatchedPhases(orchDir, t),
@@ -2168,6 +2210,24 @@ export function reclaimDeadWorkIfPossible(
     if (inEscalationCooldownFn(orchDir, ticket, phase, now())) {
       return "escalation-suppressed";
     }
+    // CTL-1442: the ask-cap gate (no-progress only). Consecutive same-reason
+    // asks are counted in the cool-down marker; once the ticket has already
+    // been parked terminal (askCount >= cap), never re-ask — belt for the case
+    // where the terminal signal flip below failed and the sweep still sees a
+    // reclaim-eligible signal.
+    const priorEscRecord = readEscalationRecordFn(orchDir, ticket, phase);
+    const priorAsks =
+      priorEscRecord?.reason === reason && typeof priorEscRecord?.askCount === "number"
+        ? priorEscRecord.askCount
+        : 0;
+    const capApplies = reason === "no-progress";
+    if (capApplies && priorAsks >= escalationAskCap) {
+      log.debug(
+        { ticket, phase, reason, priorAsks },
+        "ctl-1442: escalation ask-cap already reached — not re-asking"
+      );
+      return "escalation-capped";
+    }
     // CTL-1130: build a typed-union explanation classified by the three gates.
     // push_rejected_no_workflow_scope → MANUAL (capability boundary, D-recovery);
     // all other reasons → AUTHORIZATION (agent can retry with authority).
@@ -2201,7 +2261,10 @@ export function reclaimDeadWorkIfPossible(
             could_higher_tier_resolve: tierProducer(extras?.model ?? signal?.raw?.model),
             authorize_label: `retry ${ticket} ${phase}`,
             observed: { final_attempt_count: finalAttemptCount, ...(extras?.observed ?? {}) },
-            attempts: extras?.attempts ?? [],
+            // CTL-1442: truthful ask history — this call site historically passed
+            // no extras, so the payload showed attempts:[] forever while asking
+            // "authorize retry?" every window (audit RC4).
+            attempts: extras?.attempts ?? (Array.isArray(priorEscRecord?.asks) ? priorEscRecord.asks : []),
           };
     try {
       explanation = buildExplanation(explanationFields);
@@ -2225,6 +2288,19 @@ export function reclaimDeadWorkIfPossible(
     });
     applyStalledLabel({ orchDir, ticket });
     recordEscalationFn(orchDir, ticket, phase, reason, now());
+    // CTL-1442: this ask consumed the cap → go TERMINAL. Flip the phase signal
+    // to stalled with the curated explanation persisted on it (deriveExplanation
+    // renders it in the monitor's Needs-You inbox), so the reclaim sweep stops
+    // re-evaluating the ticket and the operator sees ONE final, complete ask
+    // instead of an endless every-10-min echo.
+    if (capApplies && priorAsks + 1 >= escalationAskCap) {
+      markEscalationCapTerminal({ orchDir, ticket, phase, explanation });
+      log.warn(
+        { ticket, phase, reason, asks: priorAsks + 1 },
+        "ctl-1442: escalation ask-cap reached — parked terminal (stalled + needs-human + brief); delete the .escalation-cooldowns marker to re-arm"
+      );
+      return "escalation-cap-terminal";
+    }
     log.warn({ ticket, phase, reason }, "ctl-587: escalated");
     return "escalated";
   }

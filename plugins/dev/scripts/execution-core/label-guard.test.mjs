@@ -11,6 +11,7 @@ import {
   clearStalledLabel,
   inEscalationCooldown,
   recordEscalation,
+  readEscalationRecord,
   escalationCooldownPath,
   ESCALATION_COOLDOWN_MS,
   recordRemovalFailure,
@@ -251,7 +252,58 @@ describe("inEscalationCooldown / recordEscalation", () => {
       phase: "monitor-merge",
       reason: "revive-budget-exhausted",
       escalatedAt: 9_876_543,
+      // CTL-1442: the ask-cap fields ride the same marker.
+      askCount: 1,
+      asks: [9_876_543],
     });
+  });
+
+  // ─── CTL-1442: consecutive-ask counting on the cool-down marker ───
+
+  test("same-reason asks accrue askCount + a bounded ask history", () => {
+    recordEscalation(orchDir, "CTL-9", "pr", "no-progress", 1_000);
+    recordEscalation(orchDir, "CTL-9", "pr", "no-progress", 2_000);
+    recordEscalation(orchDir, "CTL-9", "pr", "no-progress", 3_000);
+    const rec = readEscalationRecord(orchDir, "CTL-9", "pr");
+    expect(rec.askCount).toBe(3);
+    expect(rec.asks).toEqual([1_000, 2_000, 3_000]);
+  });
+
+  test("a DIFFERENT reason restarts the count (a new question, not a repeat)", () => {
+    recordEscalation(orchDir, "CTL-9", "pr", "no-progress", 1_000);
+    recordEscalation(orchDir, "CTL-9", "pr", "no-progress", 2_000);
+    recordEscalation(orchDir, "CTL-9", "pr", "wedged-never-started", 3_000);
+    const rec = readEscalationRecord(orchDir, "CTL-9", "pr");
+    expect(rec.askCount).toBe(1);
+    expect(rec.asks).toEqual([3_000]);
+  });
+
+  test("the ask history is bounded to the last 10 entries", () => {
+    for (let i = 1; i <= 14; i++) {
+      recordEscalation(orchDir, "CTL-9", "pr", "no-progress", i * 1_000);
+    }
+    const rec = readEscalationRecord(orchDir, "CTL-9", "pr");
+    expect(rec.askCount).toBe(14);
+    expect(rec.asks.length).toBe(10);
+    expect(rec.asks[rec.asks.length - 1]).toBe(14_000);
+  });
+
+  test("readEscalationRecord: absent/malformed → null (fail-open)", () => {
+    expect(readEscalationRecord(orchDir, "CTL-none", "pr")).toBeNull();
+    mkdirSync(join(orchDir, ".escalation-cooldowns"), { recursive: true });
+    writeFileSync(escalationCooldownPath(orchDir, "CTL-bad", "pr"), "not json");
+    expect(readEscalationRecord(orchDir, "CTL-bad", "pr")).toBeNull();
+  });
+
+  test("a LEGACY marker (no askCount) counts as a fresh ask on the next record", () => {
+    mkdirSync(join(orchDir, ".escalation-cooldowns"), { recursive: true });
+    writeFileSync(
+      escalationCooldownPath(orchDir, "CTL-9", "pr"),
+      JSON.stringify({ ticket: "CTL-9", phase: "pr", reason: "no-progress", escalatedAt: 500 })
+    );
+    recordEscalation(orchDir, "CTL-9", "pr", "no-progress", 1_000);
+    const rec = readEscalationRecord(orchDir, "CTL-9", "pr");
+    expect(rec.askCount).toBe(1); // legacy marker had no count → restart at 1
   });
 
   test("recordEscalation swallows mkdir/writeFile failures (warn-only, no throw)", () => {
