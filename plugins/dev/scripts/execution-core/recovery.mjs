@@ -32,6 +32,8 @@ import {
   getClusterHosts,
   getHostName,
   getLivenessAnchorIssue,
+  getLivenessReadSource, // CTL-1420 (#17): loki|linear cross-host liveness source
+  getLokiQueryUrl, // CTL-1420 (#17): Loki base URL for the liveness read
   log,
   BUSY_CEILING_MS,
   REVIVE_MAX_AGE_MS,
@@ -53,6 +55,27 @@ import { transcriptAgeMs as defaultTranscriptAgeMs } from "./transcript-silence.
 // for callers that want the live read every time (e.g. cli/cluster.mjs's human-invoked
 // `status` verb).
 import { readPeerHeartbeatsSyncCached } from "./cluster-heartbeat-sync.mjs";
+import { readClusterLivenessFromLokiSyncCached } from "./loki-liveness-sync.mjs"; // CTL-1420 (#17): Loki liveness read
+
+// CTL-1420 (#17): source-aware cross-host peer-liveness read. "loki" reads the
+// unified event log via Loki (fail-open, Linear-free); "linear" is the legacy anchor
+// attachment. Both return the SAME { [host]: {last_seen, in_flight_tickets} } shape,
+// so readClusterHeartbeats / defaultOwnedTicketsForHost are unchanged below the seam.
+// The `anchorIssue` arg is only meaningful in linear mode (loki uses getLokiQueryUrl()).
+function defaultReadPeers(anchorIssue) {
+  if (getLivenessReadSource() === "loki") {
+    return readClusterLivenessFromLokiSyncCached({ lokiUrl: getLokiQueryUrl() });
+  }
+  return readPeerHeartbeatsSyncCached({ anchorIssue });
+}
+
+// peerLivenessConfigured — is the cross-host peer read wired for the ACTIVE source?
+// loki → a Loki query URL resolves; linear → the anchor issue is set. Gates the
+// multi-host merge so a source with no transport configured is an exact no-op
+// (local-map-only) instead of a wasted/failing read.
+function peerLivenessConfigured(anchorIssue) {
+  return getLivenessReadSource() === "loki" ? Boolean(getLokiQueryUrl()) : Boolean(anchorIssue);
+}
 import { HEARTBEAT_EVENT } from "./heartbeat-event.mjs"; // CTL-859: node.heartbeat reader
 import { resolveTicketType, UNKNOWN_TICKET_TYPE } from "./ticket-type.mjs"; // CTL-1023: work-type dimension
 import { phaseIndex, isKnownPhase } from "../lib/phase-fsm.mjs";
@@ -3203,7 +3226,7 @@ export function readClusterHeartbeats({
   logPath = getEventLogPath(),
   roster = getClusterHosts(),
   anchorIssue = getLivenessAnchorIssue(),
-  readPeers = (anchor) => readPeerHeartbeatsSyncCached({ anchorIssue: anchor }),
+  readPeers = defaultReadPeers, // CTL-1420 (#17): loki|linear source-aware peer read
 } = {}) {
   const lastSeen = {};
   let raw;
@@ -3233,12 +3256,14 @@ export function readClusterHeartbeats({
   }
 
   // CTL-1090: multi-host cross-host merge. Single-host (roster<=1) ⇒ exact no-op.
-  if (Array.isArray(roster) && roster.length > 1 && anchorIssue) {
+  // CTL-1420 (#17): gate on the ACTIVE source's transport (loki: Loki URL; linear:
+  // anchor issue) so a source with no transport is a clean local-map-only no-op.
+  if (Array.isArray(roster) && roster.length > 1 && peerLivenessConfigured(anchorIssue)) {
     let peers = {};
     try {
       peers = readPeers(anchorIssue) ?? {};
     } catch {
-      peers = {}; // fail-open: a Linear hiccup must never break liveness
+      peers = {}; // fail-open: a Loki/Linear hiccup must never break liveness
     }
     for (const [host, rec] of Object.entries(peers)) {
       const ts = rec?.last_seen;
@@ -3385,19 +3410,20 @@ export async function inferResumePhase(ticket, { probes = WORK_DONE_PROBES, cwd 
 
 // defaultOwnedTicketsForHost — return the in-flight tickets for a dead host.
 // Primary path (CTL-1090): read the dead host's published `in_flight_tickets`
-// from the cross-host liveness channel (one Linear read = liveness + tickets).
-// Fallback: scan the local worker signal directory for non-terminal signals
-// dispatched from the dead host (the original local-only behavior, unchanged).
+// from the cross-host liveness channel (one read = liveness + tickets). CTL-1420
+// (#17): that channel is now source-aware — Loki (default reader) or the legacy
+// Linear anchor. Fallback: scan the local worker signal directory for non-terminal
+// signals dispatched from the dead host (the original local-only behavior, unchanged).
 // `anchorIssue`/`readPeers` are injectable for unit tests.
 function defaultOwnedTicketsForHost(
   deadHost,
   {
     orchDir,
     anchorIssue = getLivenessAnchorIssue(),
-    readPeers = (anchor) => readPeerHeartbeatsSyncCached({ anchorIssue: anchor }),
+    readPeers = defaultReadPeers, // CTL-1420 (#17): loki|linear source-aware peer read
   } = {}
 ) {
-  if (anchorIssue) {
+  if (peerLivenessConfigured(anchorIssue)) {
     try {
       const peerMap = readPeers(anchorIssue);
       const rec = peerMap?.[deadHost];

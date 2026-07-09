@@ -337,3 +337,44 @@ describe("startLivenessPublisher (CTL-1090)", () => {
     });
   });
 });
+
+describe("startLivenessPublisher — loki-mode retires the Linear publish (CTL-1420 #17)", () => {
+  beforeEach(() => linearBreaker.recordSuccess());
+
+  test("readSource=loki: NO Linear publish, but the Linear-free fence re-emit STILL runs", () => {
+    const publishCalls = [];
+    const fenceCalls = [];
+    const h = startLivenessPublisher({
+      roster: ["mini", "mini-2"],
+      anchorIssue: "CTL-9",
+      self: "mini",
+      ownedTickets: () => ["CTL-1"],
+      readGeneration: () => 7, // finite → fence re-emit fires
+      emitFence: (args) => fenceCalls.push(args),
+      publish: () => { throw new Error("must NOT publish to Linear in loki mode"); },
+      readSource: () => "loki",
+      intervalMs: 60_000,
+    });
+    h.stop();
+    // The ~120/hr Linear anchor write is gone…
+    expect(publishCalls.length).toBe(0);
+    // …but the #2553 fence projection is still kept fresh (Linear-free event-log append).
+    expect(fenceCalls).toEqual([{ ticket: "CTL-1", owner_host: "mini", generation: 7 }]);
+  });
+
+  test("readSource=linear: publishes as before (no regression)", () => {
+    const publishCalls = [];
+    const h = startLivenessPublisher({
+      roster: ["mini", "mini-2"],
+      anchorIssue: "CTL-9",
+      self: "mini",
+      ownedTickets: () => ["CTL-1"],
+      publish: (args) => publishCalls.push(args),
+      readSource: () => "linear",
+      intervalMs: 60_000,
+    });
+    h.stop();
+    expect(publishCalls.length).toBeGreaterThanOrEqual(1);
+    expect(publishCalls[0]).toMatchObject({ host: "mini", inFlightTickets: ["CTL-1"] });
+  });
+});

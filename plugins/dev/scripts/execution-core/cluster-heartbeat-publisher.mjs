@@ -18,6 +18,7 @@ import {
   getClusterHosts,
   getHostName,
   getLivenessAnchorIssue,
+  getLivenessReadSource, // CTL-1420 (#17): gate the Linear anchor publish on the active source
   LIVENESS_PUBLISH_INTERVAL_MS,
   log,
 } from "./config.mjs";
@@ -113,6 +114,9 @@ export function startLivenessPublisher({
   // SKIP publishing while the breaker is open (don't add to a storm), and (2)
   // FEED the breaker on a rate-class rejection. Injectable for tests.
   breaker = linearBreaker,
+  // CTL-1420 (#17): the active cross-host liveness source. Injectable seam so tests
+  // can force loki|linear; defaults to the env-driven getLivenessReadSource().
+  readSource = getLivenessReadSource,
 } = {}) {
   // Single-host no-op (no network, no publish, zero cost).
   if (!Array.isArray(roster) || roster.length <= 1) {
@@ -157,6 +161,13 @@ export function startLivenessPublisher({
     } catch {
       /* fence re-emit is best-effort; never blocks or crashes the liveness tick */
     }
+    // CTL-1420 (#17): in "loki" mode the cross-host liveness READ comes from Loki
+    // (node.heartbeat → event log → Loki), so the Linear anchor publish is RETIRED —
+    // skip it entirely. This is the ~120/hr shared-app-actor-bucket write that flaps
+    // the CTL-679 breaker; removing it is the burn win. The Linear-FREE fence re-emit
+    // above still runs every tick. "linear" mode keeps the legacy publish (safe-rollout
+    // default; the fleet sets CATALYST_LIVENESS_READ_SOURCE=loki after validation).
+    if (readSource() !== "linear") return;
     try {
       // CTL-1420 follow-up: if the shared CTL-679 breaker is OPEN (a rate-class
       // 429/RATELIMITED from ANY daemon Linear path tripped it), SKIP this publish

@@ -5481,3 +5481,43 @@ describe("CTL-1065: reclaimDeadWorkIfPossible escalated event carries explanatio
     expect(validateExplanation(expl).valid).toBe(true);
   });
 });
+
+// ─── CTL-1420 (#17): readClusterHeartbeats source-aware peer gate ─────────────
+// In "loki" mode the cross-host peer read is gated on a resolvable Loki URL (NOT the
+// Linear anchor); in "linear" mode (the default, covered above) it gates on the anchor.
+describe("readClusterHeartbeats — loki source gate (CTL-1420 #17)", () => {
+  const ENVS = ["CATALYST_LIVENESS_READ_SOURCE", "CATALYST_LOKI_QUERY_URL", "OTEL_EXPORTER_OTLP_ENDPOINT"];
+  const NO_LOG = "/nonexistent/ctl1420/events.jsonl"; // readFileSync throws → local map empty
+  let saved = {};
+  beforeEach(() => {
+    for (const k of ENVS) { saved[k] = process.env[k]; delete process.env[k]; }
+    process.env.CATALYST_LIVENESS_READ_SOURCE = "loki";
+  });
+  afterEach(() => {
+    for (const k of ENVS) { if (saved[k] === undefined) delete process.env[k]; else process.env[k] = saved[k]; }
+    saved = {};
+  });
+
+  test("loki + Loki URL configured → peer merge runs (and does NOT require the Linear anchor)", () => {
+    process.env.CATALYST_LOKI_QUERY_URL = "http://loki:3100";
+    const readPeers = () => ({ "mini-2": { last_seen: "2026-06-08T00:05:00Z", in_flight_tickets: [] } });
+    const result = readClusterHeartbeats({
+      logPath: NO_LOG,
+      roster: ["mini", "mini-2"],
+      anchorIssue: null, // loki mode must NOT depend on the Linear anchor
+      readPeers,
+    });
+    expect(result["mini-2"]).toBe("2026-06-08T00:05:00Z");
+  });
+
+  test("loki but NO Loki URL → peer read SKIPPED (local-map only), even with an anchor set", () => {
+    const readPeers = () => { throw new Error("must not read: no Loki URL configured"); };
+    const result = readClusterHeartbeats({
+      logPath: NO_LOG,
+      roster: ["mini", "mini-2"],
+      anchorIssue: "CTL-9", // loki mode gates on the Loki URL, not this anchor
+      readPeers,
+    });
+    expect(result).toEqual({});
+  });
+});
