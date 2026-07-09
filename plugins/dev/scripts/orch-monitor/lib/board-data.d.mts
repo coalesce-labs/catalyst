@@ -140,8 +140,11 @@ export interface BoardTicket {
    *  ≥ 300 s; null otherwise. Mirrored into humanQuestion as the inbox sub-label. */
   prStuckReason?: string | null;
   updatedAt: string;
-  /** CTL-755 held indicator from the ticket's Linear labels. */
-  held: "blocked" | "waiting" | null;
+  /** CTL-755 held indicator from the ticket's Linear labels. CTL-764: awaiting-
+   *  capacity value renamed "waiting" → "queued" (heldFor now emits "queued");
+   *  legacy "waiting" retained for rollout tolerance at the payload boundary,
+   *  mirroring the UI-side BoardTicket.held union (types.ts). */
+  held: "blocked" | "queued" | "waiting" | null;
   /** Dependency ids a `blocked` hold is waiting on (from triage.json). */
   blockers: string[];
   /** CTL-901 (HOME3): ISO applied-at of the held (blocked/waiting) labels, from

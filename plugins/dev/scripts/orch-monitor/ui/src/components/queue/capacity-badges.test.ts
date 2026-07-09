@@ -63,8 +63,12 @@ describe("buildCapacityBadges (CTL-764 Phase 8)", () => {
   });
 
   it("missing optional fields default to 0 and are omitted (back-compat with older payloads)", () => {
-    const config = { maxParallel: 4, inFlight: 2, freeSlots: 2, active: 2, working: 2, stuck: 0 };
-    const badges = buildCapacityBadges(config);
+    // An older board payload predates the CTL-764 count fields entirely — none of
+    // triage/queued/blocked/needsInput/needsHuman are present. buildCapacityBadges
+    // reads only those fields, so every count defaults to 0 and no badge renders.
+    // (An empty object is assignable to the all-optional MinimalBoardConfig; the
+    // former literal carried only non-config keys → TS2559 weak-type mismatch.)
+    const badges = buildCapacityBadges({});
     expect(badges).toHaveLength(0);
   });
 

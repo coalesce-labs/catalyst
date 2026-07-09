@@ -3552,14 +3552,25 @@ export function schedulerTick(
     // Disposition-only-on-change guard.
     if (toDisposition !== undefined) {
       const last = lastDispositionEmit.get(ticket);
-      if (last === toDisposition) return;
+      // Only-on-change guard. Normalize a first-seen (undefined) last to null so
+      // an initial null→null healthy tick emits nothing — one canonical event per
+      // GENUINE change (verify CTL764-VER-6[low]: undefined===null was false, so a
+      // first-seen never-held ticket fired one spurious null→null no-op).
+      if ((last ?? null) === (toDisposition ?? null)) return;
       // CTL-764 Phase 5: needs-human is STICKY — cleared only by clearStalledLabel's
       // onRemoved (confirmed Linear label removal; sources terminal-done-clear /
-      // no-stall-clear), NEVER by a steady-state admission clear-on-pickup. Suppress
-      // the spurious needs-human→null emit the admission path would otherwise fire
-      // (the label is untouched), and DO NOT advance lastDispositionEmit so the
-      // sticky state persists until the genuine clear runs (verify CTL764-VER-6[low]).
-      if (toDisposition === null && last === "needs-human" && source === "scheduler-admission") {
+      // no-stall-clear), NEVER by a steady-state admission clear-on-pickup or a
+      // held-label convergence for a cycle member (which is STILL needs-human —
+      // only its held label was cleared). Suppress the spurious needs-human→null
+      // emit both paths would otherwise fire (the needs-human label is untouched),
+      // and DO NOT advance lastDispositionEmit so the sticky state persists until
+      // the genuine clear runs. Without cycle-member-clear here, a dep-cycle member
+      // storms A.5(needs-human)→A.7(null) every tick (verify CTL764-VER-2[med]).
+      if (
+        toDisposition === null &&
+        last === "needs-human" &&
+        (source === "scheduler-admission" || source === "cycle-member-clear")
+      ) {
         return;
       }
       lastDispositionEmit.set(ticket, toDisposition ?? null);

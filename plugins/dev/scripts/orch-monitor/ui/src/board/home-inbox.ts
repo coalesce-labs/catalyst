@@ -12,7 +12,8 @@
 // Direction A (thoughts/shared/research/2026-06-08-home-page-directions.md) +
 // the handoff (item #3) reshape the home groups into three calm sections:
 //   • "What's blocked"  — held === "blocked" (blocked on a dependency / on you).
-//   • "What's waiting"   — held === "waiting" (deps satisfied, awaiting capacity).
+//   • "What's waiting"   — held === "queued" (deps satisfied, awaiting capacity;
+//     CTL-764 renamed this value from "waiting", legacy tolerated during rollout).
 //   • "Running on its own" — the reassurance set (in-flight, nothing needed).
 // "Blocked" + "Waiting" ARE the needs-you cases. The durable source for that
 // classification is the broker's filter-state.db `ticket_state.labels`, which the
@@ -149,8 +150,15 @@ const SECTION_LABEL: Record<InboxSectionKind, string> = {
 
 // The held label values the board payload carries (board-data.mjs heldFor()).
 // Kept in lock-step with HELD_LABEL_BLOCKED / HELD_LABEL_WAITING there.
+// CTL-764 Phase 4: the awaiting-capacity value was renamed "waiting" → "queued"
+// (board-data.mjs HELD_LABEL_WAITING = "queued"); heldFor() emits "queued" and
+// back-compat-maps a legacy "waiting" label to it. So the payload's `held` is
+// "queued" at runtime — match that here (and tolerate a legacy "waiting" during
+// rollout, mirroring Board.tsx HeldBadge) or held-awaiting-capacity tickets fall
+// through to "running" and vanish from the "What's waiting" inbox section.
 const HELD_BLOCKED = "blocked";
-const HELD_WAITING = "waiting";
+const HELD_WAITING = "queued";
+const HELD_WAITING_LEGACY = "waiting";
 
 /** Phase/Linear-state values that mean a ticket is finished — its row belongs in
  *  "Done while you were away" rather than the running reassurance set. */
@@ -170,7 +178,7 @@ export function classifyTicket(t: BoardTicket): InboxSectionKind {
   if (isDone(t)) return "done";
   if (t.attention === "waiting-on-you" || t.attention === "needs-human") return "attention";
   if (t.held === HELD_BLOCKED) return "blocked";
-  if (t.held === HELD_WAITING) return "waiting";
+  if (t.held === HELD_WAITING || t.held === HELD_WAITING_LEGACY) return "waiting";
   return "running";
 }
 

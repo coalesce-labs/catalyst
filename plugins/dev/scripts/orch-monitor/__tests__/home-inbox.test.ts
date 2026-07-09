@@ -84,8 +84,11 @@ describe("classifyTicket — the needs-you split (held → section)", () => {
   it("a blocked ticket lands in 'blocked' (the needs-you, Unblock case)", () => {
     expect(classifyTicket(mkTicket("CTL-867", { held: "blocked" }))).toBe("blocked");
   });
-  it("a waiting ticket lands in 'waiting' (the needs-you, Answer case)", () => {
-    expect(classifyTicket(mkTicket("CTL-642", { held: "waiting" }))).toBe("waiting");
+  it("a queued ticket lands in 'waiting' (CTL-764: awaiting-capacity is now 'queued')", () => {
+    expect(classifyTicket(mkTicket("CTL-642", { held: "queued" }))).toBe("waiting");
+  });
+  it("a legacy 'waiting' held value still lands in 'waiting' (CTL-764 rollout back-compat)", () => {
+    expect(classifyTicket(mkTicket("CTL-643", { held: "waiting" }))).toBe("waiting");
   });
   it("an un-held, not-done ticket is the reassurance set 'running'", () => {
     expect(classifyTicket(mkTicket("CTL-900", { held: null }))).toBe("running");
