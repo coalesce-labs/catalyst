@@ -12,7 +12,7 @@ sidebar:
 
 Every `catalyst-*` CLI is installed onto your `PATH` by
 [`install-cli.sh`](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/scripts/install-cli.sh) (into
-`~/.catalyst/bin` by default). This page lists all 29 of them — one line of
+`~/.catalyst/bin` by default). This page lists all 30 of them — one line of
 purpose plus the key subcommands — grouped by area. Run any tool with `--help`
 for full syntax. The richer tools have their own reference pages (e.g.
 [catalyst-stack](/reference/catalyst-stack/)).
@@ -238,6 +238,12 @@ Capture / restore a node's restorable identity + state bundle (bare backup write
 Wrapper that registers a Catalyst session around claude, then execs the interactive claude process.
 
 [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/scripts/catalyst-claude.sh)
+
+### boot-resume-approve
+
+Operator approval CLI for the boot-resume gate (CTL-1443) — --list shows pending gates; <ticket> writes the .boot-resume-approved sentinel the daemon polls each tick.
+
+[Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/scripts/execution-core/boot-resume-approve.mjs)
 
 ## Hooks
 
