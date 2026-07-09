@@ -44,11 +44,14 @@ function dedup(arr: string[]): string[] {
 }
 
 /**
- * Extracts quoted attribute keys from the `Resource` and `Attributes` interface
- * bodies in canonical-event.ts. Uses a line-oriented regex that matches
- *   "key.name"?:
- * inside each interface block. Safe against the value `"catalog"` in
- * `"service.namespace": "catalog"` because values are never followed by `:`.
+ * Extracts attribute keys from the `Resource` and `Attributes` interface bodies
+ * in canonical-event.ts. Uses a line-oriented regex that matches a property key
+ * at the start of a line, in either the quoted (`"key.name"?:`) or the bare
+ * (`project?:`) form — Prettier's quoteProps:"as-needed" unquotes
+ * single-identifier keys, so both must be recognised. Safe against the value
+ * `"catalog"` in `"service.namespace": "catalog"` because values are never at a
+ * line start followed by `:`, and against `file.ts:51` inside comments because
+ * line comments are stripped first.
  */
 export function extractTsAttributeKeys(sourceText: string): string[] {
   const keys: string[] = [];
@@ -56,11 +59,14 @@ export function extractTsAttributeKeys(sourceText: string): string[] {
   const interfaceRe = /export interface (?:Resource|Attributes)\s*\{([^}]+)\}/g;
   let m: RegExpExecArray | null;
   while ((m = interfaceRe.exec(sourceText)) !== null) {
-    const body = m[1];
-    const keyRe = /"([^"]+)"\??:/g;
+    // Strip line comments first so an identifier inside one (e.g. a "file.ts:51"
+    // path reference) can never masquerade as a property key.
+    const body = m[1].replace(/\/\/[^\n]*/g, "");
+    // Quoted ("catalyst.worker.x"?:) or bare (project?:), anchored to line start.
+    const keyRe = /(?:^|\n)[ \t]*(?:"([^"]+)"|([A-Za-z_$][\w$]*))\s*\??:/g;
     let km: RegExpExecArray | null;
     while ((km = keyRe.exec(body)) !== null) {
-      keys.push(km[1]);
+      keys.push(km[1] ?? km[2]);
     }
   }
   return dedup(keys);

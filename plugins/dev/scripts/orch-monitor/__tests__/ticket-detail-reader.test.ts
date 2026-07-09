@@ -68,7 +68,9 @@ describe("buildTicketDetail — cache-backed detail assembly (P8)", () => {
     expect(detail.description).toBeNull();
     // No held-since timestamp column exists → honest null, never a fake "2h14m".
     expect(detail.heldSince).toBeNull();
-    expect(detail.held).toBe("waiting");
+    // CTL-764 Phase 4: the held value renamed "waiting" → "queued"; the legacy
+    // "waiting" label back-compat-maps to the new "queued" value.
+    expect(detail.held).toBe("queued");
   });
 
   it("computes REVERSE relation edges from sibling descriptors (the relation join)", () => {
