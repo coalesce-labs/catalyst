@@ -2369,7 +2369,7 @@ export function verifyDispatchedSignal(orchDir, ticket, phase, { requireBgJob = 
 //     set listed only needs-human, so a missing held label went undetected).
 // CTL-764 Phase 4: added HELD_LABEL_NEEDS_INPUT to the required workspace set.
 const REQUIRED_WORKSPACE_LABELS = [
-  "needs-human",
+  HELD_LABEL_NEEDS_HUMAN,
   HELD_LABEL_BLOCKED,
   HELD_LABEL_WAITING,
   HELD_LABEL_NEEDS_INPUT,

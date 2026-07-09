@@ -702,7 +702,7 @@ export function deriveStatusCounts(tickets, inFlightTicketIds) {
   for (const t of Array.isArray(tickets) ? tickets : []) {
     if (inFlightTicketIds?.has?.(t.id)) continue;
     const attn = t.attention ?? null;
-    if (attn === "needs-human" || attn === "needs-input") {
+    if (attn === "needs-human") {
       counts.needsHuman++;
       continue;
     }

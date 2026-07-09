@@ -93,7 +93,9 @@ export async function recordWorkerTransition({
     }
   }
 
-  // Sink 3 — unified event log.
+  // Sink 3 — unified event log. Fail-open: any throw from an injected
+  // appendWorkerTransitionEvent (e.g. a test spy) is caught here so callers
+  // are never aborted by event-log failures.
   if (appendWorkerTransitionEvent) {
     try {
       eventEmitted = appendWorkerTransitionEvent({

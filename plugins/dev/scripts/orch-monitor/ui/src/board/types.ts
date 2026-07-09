@@ -269,6 +269,13 @@ export interface BoardConfig {
   /** CTL-928: dead bg-job workers still listed by `claude agents` but excluded
    *  from inFlight/freeSlots. Optional so existing config fixtures stay valid. */
   dead?: number;
+  /** CTL-764: triage-phase workers excluded from maxParallel slot accounting. */
+  triage?: number;
+  /** CTL-764: per-disposition ticket counts from deriveStatusCounts spread. */
+  queued?: number;
+  blocked?: number;
+  needsInput?: number;
+  needsHuman?: number;
 }
 
 /** CTL-1050 §3.2: one current service outage decorated onto the board payload —

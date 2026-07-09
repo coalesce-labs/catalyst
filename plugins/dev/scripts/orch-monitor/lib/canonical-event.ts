@@ -115,7 +115,6 @@ export interface Attributes {
   // by otel-forward (otlp.ts:51-52), so disposition/stage dims MUST be attributes.
   // toAttrArray is key-agnostic; these declarations enforce the contract at the type
   // layer only — no runtime change to otel-forward is needed.
-  "catalyst.worker.disposition"?: string;
   "catalyst.worker.from_disposition"?: string;
   "catalyst.worker.to_disposition"?: string;
   "catalyst.worker.from_state"?: string;
