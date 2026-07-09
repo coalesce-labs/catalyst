@@ -657,6 +657,41 @@ export function getLivenessAnchorIssue() {
   return null;
 }
 
+// CTL-1420 (#17): getLivenessReadSource — WHERE the daemon reads CROSS-HOST peer
+// liveness for dead-host detection. "loki" reads the unified event log via Loki
+// (host + freshness + in_flight, fail-open — Loki is already the central cross-host
+// log store, so no mesh/new-store needed); "linear" is the legacy anchor-attachment
+// read. Defaults to "linear" for a SAFE rollout (opt-in "loki" via env, mirroring
+// CTL-863's CATALYST_FENCE_READ_SOURCE) — the fleet sets =loki once validated, with
+// an instant one-var revert. Single-host (roster ≤ 1) is a no-op under either source.
+export function getLivenessReadSource() {
+  const v = (process.env.CATALYST_LIVENESS_READ_SOURCE || "").trim().toLowerCase();
+  return v === "loki" ? "loki" : "linear";
+}
+
+// CTL-1420 (#17): getLokiQueryUrl — the Loki base URL the daemon QUERIES for peer
+// liveness (read path; distinct from the OTLP push endpoint the daemon writes to).
+// Resolution: (1) CATALYST_LOKI_QUERY_URL explicit override; (2) OTEL_EXPORTER_OTLP_ENDPOINT
+// with its port swapped to Loki's 3100 (same collector host); (3) null → the caller
+// fails open (no Loki read → peers look absent → deadHosts treats them alive → no
+// false reclaim). Never hardcodes an address (endpoints are environment-specific).
+export function getLokiQueryUrl() {
+  const explicit = process.env.CATALYST_LOKI_QUERY_URL;
+  if (typeof explicit === "string" && explicit.length > 0) return explicit.replace(/\/+$/, "");
+  const otlp = process.env.OTEL_EXPORTER_OTLP_ENDPOINT;
+  if (typeof otlp === "string" && otlp.length > 0) {
+    try {
+      const u = new URL(otlp);
+      u.port = "3100";
+      u.pathname = "/";
+      return u.toString().replace(/\/+$/, "");
+    } catch {
+      return null; // unparseable → fail-open
+    }
+  }
+  return null;
+}
+
 // LIVENESS_PUBLISH_INTERVAL_MS — cross-host liveness publish cadence (CTL-1090).
 // Coarser than the local heartbeat (30s) because the takeover grace is 10 min;
 // ~2 min keeps Linear quota bounded while giving 5 intervals of resolution inside
