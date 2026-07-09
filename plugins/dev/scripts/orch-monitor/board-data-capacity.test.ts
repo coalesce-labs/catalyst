@@ -3,7 +3,8 @@
 
 import { describe, it, expect } from "bun:test";
 
-const { deriveCapacity, deriveStatusCounts } = await import("./lib/board-data.mjs");
+const { deriveCapacity, deriveStatusCounts, synthesizeQueuedTicket } =
+  await import("./lib/board-data.mjs");
 
 // ── deriveCapacity: triage carve-out ──────────────────────────────────────────
 
@@ -137,5 +138,71 @@ describe("deriveStatusCounts (CTL-764 Phase 7)", () => {
   it("empty tickets → all buckets zero", () => {
     const r = deriveStatusCounts([], new Set());
     expect(r).toEqual({ queued: 0, blocked: 0, needsInput: 0, needsHuman: 0 });
+  });
+
+  // CTL764-VER-3: deriveAttention folds the needs-input label into
+  // attention:'needs-human', so a needs-input ticket must be split back out by its
+  // label BEFORE the needs-human short-circuit — else it is miscounted as needsHuman.
+  it("a needs-input label (folded to attention='needs-human') counts as needsInput, not needsHuman", () => {
+    // Mirrors what deriveAttention produces for a needs-input queued card.
+    const t = ticket("CTL-8", { labels: ["needs-input"], attention: "needs-human" });
+    const r = deriveStatusCounts([t], new Set());
+    expect(r.needsInput).toBe(1);
+    expect(r.needsHuman).toBe(0);
+  });
+
+  it("needs-human wins over needs-input when BOTH labels present (precedence)", () => {
+    const t = ticket("CTL-9", {
+      labels: ["needs-input", "needs-human"],
+      attention: "needs-human",
+    });
+    const r = deriveStatusCounts([t], new Set());
+    expect(r.needsHuman).toBe(1);
+    expect(r.needsInput).toBe(0);
+  });
+});
+
+// ── Integration: the REAL synthesizeQueuedTicket → deriveStatusCounts path ──────
+// CTL764-VER-2 / VER-3: the earlier green tests hand-built ticket fixtures with a
+// `.labels` key, masking the bug that the actual queued deck (synthesizeQueuedTicket)
+// sets workerStatus:null and stashed its blocked/queued determination on `.held`
+// (with no `.labels`), so the buckets counted ~0. This exercises the production
+// synthesizer so a regression in either the synthesizer or the counter is caught.
+describe("deriveStatusCounts over the real synthesizeQueuedTicket deck (CTL764-VER-2/3)", () => {
+  function synth(id: string, labels: string[]) {
+    // e = eligible entry (id is the only required field); linfo carries the labels.
+    return synthesizeQueuedTicket({ id }, { [id]: { labels } });
+  }
+
+  it("a blocked queued card lands in the blocked bucket (not 0)", () => {
+    const deck = [synth("CTL-100", ["blocked"])];
+    const r = deriveStatusCounts(deck, new Set());
+    expect(r.blocked).toBe(1);
+    expect(r.queued).toBe(0);
+  });
+
+  it("a queued card lands in the queued bucket (not 0)", () => {
+    const deck = [synth("CTL-101", ["queued"])];
+    const r = deriveStatusCounts(deck, new Set());
+    expect(r.queued).toBe(1);
+    expect(r.blocked).toBe(0);
+  });
+
+  it("a needs-input queued card lands in needsInput, not needsHuman", () => {
+    const deck = [synth("CTL-102", ["needs-input"])];
+    const r = deriveStatusCounts(deck, new Set());
+    expect(r.needsInput).toBe(1);
+    expect(r.needsHuman).toBe(0);
+  });
+
+  it("a mixed deck tallies each disposition (the Phase-8 capacity badges)", () => {
+    const deck = [
+      synth("CTL-200", ["blocked"]),
+      synth("CTL-201", ["blocked"]),
+      synth("CTL-202", ["queued"]),
+      synth("CTL-203", ["needs-input"]),
+    ];
+    const r = deriveStatusCounts(deck, new Set());
+    expect(r).toEqual({ queued: 1, blocked: 2, needsInput: 1, needsHuman: 0 });
   });
 });

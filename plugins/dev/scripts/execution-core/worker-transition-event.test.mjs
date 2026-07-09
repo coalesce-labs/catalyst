@@ -1,6 +1,9 @@
 // worker-transition-event.test.mjs — CTL-764 Phase 3: worker.transition canonical event.
 // Run: cd plugins/dev/scripts/execution-core && bun test worker-transition-event.test.mjs
 import { describe, test, expect } from "bun:test";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { dirname, join } from "node:path";
 import {
   buildWorkerTransitionEvent,
   appendWorkerTransitionEvent,
@@ -176,5 +179,37 @@ describe("appendWorkerTransitionEvent", () => {
       },
     });
     expect(result).toBe(false);
+  });
+});
+
+// CTL-764 (verify CTL764-VER-1): production-wiring guard. The bug this catches:
+// scheduler.mjs imported the emitter (as defaultAppendWorkerTransitionEvent) but
+// runTick NEVER threaded it into the per-tick schedulerTick opts, so every
+// recordTransition() early-returned on the `null` default and worker.transition
+// (Sink-3, feeding OTLP Sink-4) was DARK in production — green only because the
+// unit tests inject the seam directly. schedulerTick is a closure inside runTick
+// (not exported), so this asserts the wiring at the source level: the imported
+// default must be REFERENCED outside its import (not dead) AND wired into the
+// schedulerTick opts with the runningOpts-override fallback.
+describe("scheduler production wiring (CTL764-VER-1 regression guard)", () => {
+  const schedulerSrc = readFileSync(
+    join(dirname(fileURLToPath(import.meta.url)), "scheduler.mjs"),
+    "utf8"
+  );
+  const normalized = schedulerSrc.replace(/\s+/g, " ");
+
+  test("defaultAppendWorkerTransitionEvent is threaded, not just imported", () => {
+    const refs = schedulerSrc
+      .split("\n")
+      .filter((l) => l.includes("defaultAppendWorkerTransitionEvent"));
+    const nonImport = refs.filter((l) => !l.trimStart().startsWith("import"));
+    // At least one wiring reference beyond the import alias line.
+    expect(nonImport.length).toBeGreaterThan(0);
+  });
+
+  test("runTick wires appendWorkerTransitionEvent into schedulerTick opts with a default fallback", () => {
+    expect(normalized).toContain(
+      "appendWorkerTransitionEvent: runningOpts.appendWorkerTransitionEvent ?? defaultAppendWorkerTransitionEvent"
+    );
   });
 });

@@ -3553,6 +3553,15 @@ export function schedulerTick(
     if (toDisposition !== undefined) {
       const last = lastDispositionEmit.get(ticket);
       if (last === toDisposition) return;
+      // CTL-764 Phase 5: needs-human is STICKY — cleared only by clearStalledLabel's
+      // onRemoved (confirmed Linear label removal; sources terminal-done-clear /
+      // no-stall-clear), NEVER by a steady-state admission clear-on-pickup. Suppress
+      // the spurious needs-human→null emit the admission path would otherwise fire
+      // (the label is untouched), and DO NOT advance lastDispositionEmit so the
+      // sticky state persists until the genuine clear runs (verify CTL764-VER-6[low]).
+      if (toDisposition === null && last === "needs-human" && source === "scheduler-admission") {
+        return;
+      }
       lastDispositionEmit.set(ticket, toDisposition ?? null);
     }
     try {
@@ -6795,6 +6804,14 @@ function runTick() {
       // tests inject a stub through startScheduler so a daemon tick never shells out.
       fetchBatch: runningOpts.fetchBatch,
       appendPhaseAdvanceHeldEvent: runningOpts.appendPhaseAdvanceHeldEvent,
+      // CTL-764 Phase 5: the LIVE worker.transition emitter (Sink-3, feeding OTLP
+      // Sink-4 via otel-forward). schedulerTick defaults this to null, so a bare
+      // unit tick stays silent; production MUST thread the real emitter here or
+      // every recordTransition() early-returns and the two-axis model is dark in
+      // prod (verify CTL764-VER-1). A test may inject its own via
+      // startScheduler({ appendWorkerTransitionEvent }).
+      appendWorkerTransitionEvent:
+        runningOpts.appendWorkerTransitionEvent ?? defaultAppendWorkerTransitionEvent,
       // CTL-642/758: the LIVE PR-merged adapter. Without this the recovery
       // short-circuit's pr-merged branch (terminal-state.mjs) AND the reconcile
       // backstop (reconcileTerminalBackstop gate 2) are BOTH inert in production —
@@ -7345,6 +7362,11 @@ export function startScheduler({
   checkSequencing, // CTL-537: optional override; runTick defaults to defaultCheckSequencing.
   fetchBatch, // CTL-755/784: optional override; schedulerTick defaults to fetchTicketsBatch.
   appendPhaseAdvanceHeldEvent, // CTL-755: optional override; defaults to defaultAppendPhaseAdvanceHeldEvent.
+  // CTL-764 Phase 5: optional worker.transition emitter override (test seam).
+  // Undefined → runTick threads the real defaultAppendWorkerTransitionEvent into
+  // the per-tick schedulerTick opts (production). A test injects a spy here to
+  // capture transitions through the production runTick path.
+  appendWorkerTransitionEvent,
   // CTL-642/758: the LIVE PR-merged adapter, wired into the production daemon
   // path so the recovery short-circuit's pr-merged branch + the reconcile
   // backstop actually fire (both inert while prAdapter === undefined). Built
@@ -7406,6 +7428,7 @@ export function startScheduler({
     checkSequencing, // CTL-537: optional override (default defaultCheckSequencing)
     fetchBatch, // CTL-755/784: optional admission-gate batch hydration seam
     appendPhaseAdvanceHeldEvent, // CTL-755: optional held-indicator emit seam
+    appendWorkerTransitionEvent, // CTL-764: optional worker.transition emitter override (test seam; runTick defaults to defaultAppendWorkerTransitionEvent)
     prAdapter, // CTL-642/758: live PR-merged adapter (built once above), threaded per-tick
     checkOpenPrs, // CTL-1157: optional terminal-sweep open-PR gate override (runTick arms the real one)
     classifyResolution, // CTL-671: optional phantom-sweep Linear-probe seam

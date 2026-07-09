@@ -245,13 +245,21 @@ at explicit resolution (Done or terminal-sweep-clear), not on steady-state ticks
 re-derived on every tick and applied/removed on diff; `needs-human` is removed only by
 `clearStalledLabel`'s `onRemoved` callback which fires only on confirmed Linear label removal.
 
-**`recordWorkerTransition`** is the sync chokepoint inside `schedulerTick` that fans out every
-genuine transition to five sinks (fail-open): (1) Linear Status via `applyPhaseStatus`, (2) the
-`worker-status` Linear label via `convergeDispositionLabel`/`labelOnce`, (3) a single canonical
-`worker.transition.<TICKET>` event appended to the unified event log, (4) OTLP via `otel-forward`
-(dims as attributes — `body.payload` is stripped off-machine), (5) broker `ticket_state_transitions`
-table (optional, CTL-764 Phase 10). The only-on-change guard (`lastDispositionEmit`) prevents
-double-emit on steady-state ticks.
+Worker transitions are recorded at the scheduler's transition sites, coordinated around a single
+**inline `recordTransition` chokepoint** inside `schedulerTick`. That chokepoint owns sink (3): it
+emits exactly one canonical `worker.transition.<TICKET>` event per genuine change to the unified
+event log, and the only-on-change guard (`lastDispositionEmit`) prevents double-emit on steady-state
+ticks. Its emitter defaults to `null` so a bare unit tick stays silent; **production threads the
+real emitter (`defaultAppendWorkerTransitionEvent`) via `runTick`** — without that wiring every
+`recordTransition` early-returns and the event stream is dark. That event feeds sink (4), OTLP via
+`otel-forward` (dims as attributes — `body.payload` is stripped off-machine). The remaining sinks
+are written at their own scheduler sites around the same transition (not fanned out from inside the
+chokepoint): (1) Linear Status via the `applyPhaseStatus` chokepoint (Axis 1), (2) the
+`worker-status` label via the admission converger (`convergeHeldLabel`) / `labelOnce` (Axis 2), and
+(5) the optional broker `ticket_state_transitions` table (CTL-764 Phase 10). The standalone
+`recordWorkerTransition` module (`record-worker-transition.mjs`) is the extracted, unit-tested
+reference implementation of this same five-sink fan-out contract; the scheduler's live path uses the
+inline `recordTransition` today.
 
 ### Unified data-flow
 

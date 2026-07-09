@@ -353,6 +353,10 @@ export function synthesizeQueuedTicket(
     pr: null,
     updatedAt: e.createdAt || new Date(0).toISOString(),
     held: heldFor(li.labels),
+    // CTL-764 (verify CTL764-VER-3): expose the raw Linear labels so deriveStatusCounts
+    // can distinguish the needs-input Axis-2 disposition (which deriveAttention folds
+    // into attention:'needs-human'). Honest [] when the cache carried none.
+    labels: Array.isArray(li.labels) ? li.labels : [],
     // CTL-729: a queued (Todo) ticket has no live worker, so waiting-on-you is
     // impossible — but it CAN carry a needs-human/needs-input escalation label.
     // attentionSince has no durable label-applied stamp here → null (honest).
@@ -701,14 +705,33 @@ export function deriveStatusCounts(tickets, inFlightTicketIds) {
   const counts = { queued: 0, blocked: 0, needsInput: 0, needsHuman: 0 };
   for (const t of Array.isArray(tickets) ? tickets : []) {
     if (inFlightTicketIds?.has?.(t.id)) continue;
+    const labels = Array.isArray(t.labels) ? t.labels : [];
     const attn = t.attention ?? null;
+    // CTL-764 (verify CTL764-VER-3): deriveAttention FOLDS the needs-input label
+    // into attention:'needs-human' (line ~260), so `attn` alone cannot tell the two
+    // Axis-2 dispositions apart. Detect the needs-input label EXPLICITLY and route it
+    // to needsInput BEFORE the needs-human short-circuit — otherwise every needs-input
+    // ticket is miscounted as needs-human and the Axis-2 distinction the Phase-8
+    // buckets exist to show collapses. Precedence needs-human > needs-input: a ticket
+    // carrying BOTH labels stays needs-human (mirrors the parked-card reason at ~1426).
+    if (
+      labels.includes(ATTENTION_LABEL_NEEDS_INPUT) &&
+      !labels.includes(ATTENTION_LABEL_NEEDS_HUMAN)
+    ) {
+      counts.needsInput++;
+      continue;
+    }
     if (attn === "needs-human") {
       counts.needsHuman++;
       continue;
     }
-    // Check worker-status disposition first (set by daemon), then fall back to
-    // label-based heldFor for back-compat with pre-CTL-764 boards.
-    const ws = t.workerStatus ?? heldFor(t.labels ?? []);
+    // Check worker-status disposition first (set by daemon), then the already-resolved
+    // .held classification, then fall back to label-based heldFor for back-compat.
+    // CTL-764 (verify CTL764-VER-2): synthesizeQueuedTicket / the parked cards carry
+    // NO workerStatus and expose their queued/blocked determination on `.held` (they
+    // have no per-ticket `.labels` in the pre-passthrough boards), so reading `.held`
+    // here is what makes the queued/blocked capacity buckets non-zero for the deck.
+    const ws = t.workerStatus ?? t.held ?? heldFor(labels);
     if (ws === "needs-human") {
       counts.needsHuman++;
       continue;
@@ -1458,6 +1481,10 @@ export function synthesizeParkedNeedsHumanTickets(
       scope: null,
       project: null,
       held: heldFor(labels),
+      // CTL-764 (verify CTL764-VER-3): expose raw labels so deriveStatusCounts can
+      // route a needs-input parked card to needsInput (this card hardcodes attention
+      // to "needs-human" for the inbox, which alone would miscount needs-input).
+      labels,
       heldSince: null,
       currentPhaseSince: null,
       // surface as a Needs-You row, reusing the CTL-1158 inbox derivation.
@@ -2106,6 +2133,10 @@ export async function assembleBoard({ getPrStatus = null, ring = null } = {}) {
         // `blockers` names the dependencies a `blocked` hold is waiting on (only
         // meaningful when held === "blocked"); empty otherwise.
         held: heldFor(linfo[id]?.labels),
+        // CTL-764 (verify CTL764-VER-3): expose raw Linear labels so a dead-but-carded
+        // worker ticket (between-phases, not in-flight) counts its needs-input
+        // disposition correctly in deriveStatusCounts. Honest [] when none.
+        labels: Array.isArray(linfo[id]?.labels) ? linfo[id].labels : [],
         // CTL-1020: triage-derived blockers (authoritative) ∪ Linear relation-derived
         // blockers, so the dep graph draws an edge even when the dependency was set as
         // a Linear "blocked by" relation rather than scraped into triage.json.
