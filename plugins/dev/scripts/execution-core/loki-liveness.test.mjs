@@ -79,6 +79,25 @@ describe("parseLokiLivenessResponse (CTL-1420 #17)", () => {
     expect(out.mini.in_flight_tickets).toEqual(["NEW"]);
   });
 
+  test("newest ts tracked ACROSS streams — real Loki = one single-value stream per beat (regression)", () => {
+    // Real Loki splits EVERY heartbeat into its own stream (the changing in_flight_count
+    // label), and lists them in arbitrary order. A per-stream `newest` that overwrote
+    // out[host] each stream would let the LAST-listed (stale) stream win — the live bug
+    // that read a peer ~20 min stale and risked a false reclaim. The newest must win
+    // regardless of stream ORDER in the result array.
+    const body = {
+      data: {
+        result: [
+          stream("mini", [{ tsNs: "1783451090000000000" }]), // NEWEST, listed FIRST
+          stream("mini", [{ tsNs: "1783451000000000000" }]), // older, listed AFTER
+          stream("mini", [{ tsNs: "1783451030000000000" }]), // middle, listed LAST
+        ],
+      },
+    };
+    const out = parseLokiLivenessResponse(body);
+    expect(out.mini.last_seen).toBe("2026-07-07T19:04:50.000Z"); // 1783451090000 ms = newest
+  });
+
   test("skips streams with no host_name / no parseable ts; returns {} on garbage", () => {
     expect(parseLokiLivenessResponse({ data: { result: [{ stream: {}, values: [["1", "x"]] }] } })).toEqual({});
     expect(parseLokiLivenessResponse({ data: { result: [stream("mini", [{ tsNs: "zzz" }])] } })).toEqual({});
@@ -125,5 +144,32 @@ describe("readClusterLivenessFromLoki (CTL-1420 #17) — fail-open", () => {
   test("status != success → {}", async () => {
     const fetcher = async () => ({ ok: true, json: async () => ({ status: "error", data: null }) });
     expect(await readClusterLivenessFromLoki({ lokiUrl: "http://loki:3100", fetcher })).toEqual({});
+  });
+
+  test("two-query: liveness from A (all hosts) + tickets enriched from B (per host)", async () => {
+    // Query A (no tickets filter) → host+ts for BOTH; Query B (tickets filter) → only the
+    // host WITH a non-empty set. The reader merges B's tickets onto A without dropping the
+    // empty-set host from liveness.
+    const fetcher = async (url) =>
+      url.includes("in_flight_tickets")
+        ? ok([stream("mini", [{ tsNs: "1783451090000000000", metaTickets: "CTL-1,CTL-2" }])])
+        : ok([
+            stream("mini", [{ tsNs: "1783451090000000000" }]),
+            stream("mini-2", [{ tsNs: "1783451092000000000" }]),
+          ]);
+    const out = await readClusterLivenessFromLoki({ lokiUrl: "http://loki:3100", fetcher, nowMs: 1783451100000 });
+    expect(Object.keys(out).sort()).toEqual(["mini", "mini-2"]);
+    expect(out.mini.in_flight_tickets).toEqual(["CTL-1", "CTL-2"]);
+    expect(out["mini-2"].in_flight_tickets).toEqual([]);
+  });
+
+  test("tickets-enrichment (query B) failure does NOT break liveness (query A stands)", async () => {
+    const fetcher = async (url) => {
+      if (url.includes("in_flight_tickets")) throw new Error("loki blip on B");
+      return ok([stream("mini", [{ tsNs: "1783451090000000000" }])]);
+    };
+    const out = await readClusterLivenessFromLoki({ lokiUrl: "http://loki:3100", fetcher });
+    expect(out.mini).toBeDefined();
+    expect(out.mini.in_flight_tickets).toEqual([]);
   });
 });
