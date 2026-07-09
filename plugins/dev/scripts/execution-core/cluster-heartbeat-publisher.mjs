@@ -64,7 +64,7 @@ function readLocalMaxParallel(orchDir) {
 // in defaultOwnedTicketsForHost (recovery.mjs) — factored here so the publisher
 // and the recovery fallback share the logic without importing recovery.mjs (which
 // would create a circular dependency once recovery imports this module's outputs).
-function localInFlightTickets(hostName, { orchDir } = {}) {
+export function localInFlightTickets(hostName, { orchDir } = {}) {
   if (!orchDir) return [];
   try {
     const signals = readWorkerSignals(orchDir);
