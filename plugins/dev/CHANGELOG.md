@@ -1,5 +1,25 @@
 # Changelog
 
+## [12.27.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.26.0...catalyst-dev-v12.27.0)
+
+Jul 08, 2026
+
+<!-- ai-enhanced -->
+
+### Recovery Loop Elimination & Escalation Fixes
+
+This release closes five compounding loops that caused the recovery pass to silently discard verdicts, re-triage tickets indefinitely, and emit no-progress escalations forever. Recovery-pass sessions now persist a single verdict (`fixed`, `leave-alone`, or `escalate`) to the event log, ledger, and Linear in every case — and exhausted intents surface loudly as needs-human with a rendered brief instead of latching silently. Infinite escalation loops are capped and go terminal, triage re-dispatches are bounded per ticket, and the boot-resume approval gate finally has a CLI (`boot-resume-approve.mjs --list` / `<ticket>`) so gated recovery passes can actually be unblocked.
+
+
+
+### PRs
+
+* **dev:** CTL-1439 (P0a) — recovery-pass verdict persistence + surfacing (stop act-and-discard) ([#2586](https://github.com/coalesce-labs/catalyst/issues/2586)) ([af29551](https://github.com/coalesce-labs/catalyst/commit/af295516601800db3ccbddb0a3af2ebcabfc661f))
+* **dev:** CTL-1440 (P0b) — attempts-exhausted → loud escalation, RC3 defer-storm decoupling, truthful skip reasons ([#2593](https://github.com/coalesce-labs/catalyst/issues/2593)) ([1ef0e57](https://github.com/coalesce-labs/catalyst/commit/1ef0e57f34c671d2f5d5455ba5530f5dcf35d601))
+* **dev:** CTL-1443 (P1-loop-3) — operable boot-resume approval gate (approve CLI + 48h expiry into Needs-You + alert) ([#2596](https://github.com/coalesce-labs/catalyst/issues/2596)) ([a6aa271](https://github.com/coalesce-labs/catalyst/commit/a6aa2716bc303453ce54142c8611557ec2ecf4f6))
+* **dev:** CTL-1441 (P1-loop-2) — terminate the triage re-dispatch loop (cap + mismatch surfacing + WORKER_DIR hardening) ([#2588](https://github.com/coalesce-labs/catalyst/issues/2588)) ([9dd5309](https://github.com/coalesce-labs/catalyst/commit/9dd5309ebfa6185bd748f9f62badcec06ee33e7e))
+* **dev:** CTL-1442 (P1-loop-1) — no-progress escalations go terminal after N asks (stop the every-10-min forever loop) ([#2590](https://github.com/coalesce-labs/catalyst/issues/2590)) ([001557c](https://github.com/coalesce-labs/catalyst/commit/001557cd7ce6498496c8cd0b16e6c840391c3d1f))
+
 ## [12.26.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.25.0...catalyst-dev-v12.26.0)
 
 Jul 08, 2026
