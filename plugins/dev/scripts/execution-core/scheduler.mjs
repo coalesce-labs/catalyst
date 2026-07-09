@@ -4138,6 +4138,14 @@ export function schedulerTick(
                   cache,
                   gateway,
                   replica,
+                  // CTL-1451 (A4 "then widen", final site): the recovery backlog
+                  // re-reads its stuck cohort EVERY tick — a replica-hole ticket
+                  // whose live read fails (ADV-1433: ~700 failed reads/hr) must
+                  // back off like the terminal-sweep/census callers, not retry
+                  // per tick. Fail-open toward not-terminal, retried after the
+                  // negative-cache TTL (never-cache-null preserved for
+                  // blocker-hydration callers — this flag is per-site).
+                  probeBackoff: true,
                   onExec: done
                     ? ({ source, execMs, result: r, timedOut }) =>
                         done({
@@ -4410,6 +4418,11 @@ export function schedulerTick(
             ...o,
             gateway,
             replica,
+            // CTL-1451: same per-tick class as the recovery filter above — the
+            // reclaim terminal short-circuit runs per stuck signal per tick;
+            // fail toward not-terminal and back off (matches the terminal-Done
+            // sweep's flag).
+            probeBackoff: true,
             gatewayFreshMs: reclaimGatewayFreshMs,
             onExec: reclaimOpDone
               ? ({ execMs, timedOut }) => {
