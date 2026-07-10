@@ -1,5 +1,26 @@
 # Changelog
 
+## [12.28.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.27.0...catalyst-dev-v12.28.0)
+
+Jul 09, 2026
+
+<!-- ai-enhanced -->
+
+### Liveness Off Linear
+
+Cross-host dead-host detection now reads from Loki instead of Linear, eliminating the ~120 heartbeat writes per hour that were tripping the rate-limit breaker. Two live-deploy bugs in the initial reader were caught and fixed: stale streams no longer win the newest-host race, and in-flight ticket enrichment now runs as a separate fail-open query. The switch is gated behind `CATALYST_LIVENESS_READ_SOURCE=loki` — set it on all hosts simultaneously to enable; unset to revert instantly.
+
+
+
+### PRs
+
+* **dev:** CTL-1420 ([#17](https://github.com/coalesce-labs/catalyst/issues/17)) — move cross-host liveness off Linear → event log + Loki (PR1a: heartbeat carries in-flight tickets) ([#2575](https://github.com/coalesce-labs/catalyst/issues/2575)) ([ff99913](https://github.com/coalesce-labs/catalyst/commit/ff9991380ea87f283df83ccc3318f9ef44ca0bf1))
+* **dev:** CTL-1420 ([#17](https://github.com/coalesce-labs/catalyst/issues/17)) — read cross-host liveness from Loki + retire the Linear heartbeat publish (PR1b) ([#2604](https://github.com/coalesce-labs/catalyst/issues/2604)) ([9924aa2](https://github.com/coalesce-labs/catalyst/commit/9924aa2f94f03a7613a8df6bfdb56be06ce1314f))
+* **dev:** CTL-1420 ([#17](https://github.com/coalesce-labs/catalyst/issues/17)) follow-up — loki-liveness reader: newest-across-streams + two-query tickets ([#2606](https://github.com/coalesce-labs/catalyst/issues/2606)) ([4aa925b](https://github.com/coalesce-labs/catalyst/commit/4aa925bf95e830ebf591f92da90536a4efb48172))
+* **dev:** CTL-1443 follow-up — sync CLI reference for boot-resume-approve (unblocks CI) ([#2603](https://github.com/coalesce-labs/catalyst/issues/2603)) ([7d34bd8](https://github.com/coalesce-labs/catalyst/commit/7d34bd8a0aaacc8081d44f7dbe08e8ce324da581))
+* **dev:** CTL-1451 (A4 final widening) — probeBackoff on the recovery-filter + reclaim terminal reads (kills the ADV-1433 read-storm) ([#2608](https://github.com/coalesce-labs/catalyst/issues/2608)) ([6d4928f](https://github.com/coalesce-labs/catalyst/commit/6d4928f34a463aa3e31f9f59a06dcbcd4f5f0f6f))
+* **dev:** CTL-1452 — parity test exempts action:skip STALL_CATEGORY_MAP entries (restores exec-core CI on main) ([#2610](https://github.com/coalesce-labs/catalyst/issues/2610)) ([6e550ba](https://github.com/coalesce-labs/catalyst/commit/6e550baad3517eca8dbdce9bc93a5d474e2612c8))
+
 ## [12.27.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.26.0...catalyst-dev-v12.27.0)
 
 Jul 08, 2026
