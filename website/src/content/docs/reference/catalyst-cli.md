@@ -109,6 +109,12 @@ Manage global orchestrator state at ~/catalyst/state.json (flock-protected RMW +
 
 [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/scripts/catalyst-state.sh)
 
+### boot-resume-approve
+
+List boot-resume-gated tickets and approve one — writes the .boot-resume-approved sentinel so the daemon dispatches the gated phase without a restart (CTL-1443).
+
+[Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/scripts/execution-core/boot-resume-approve.mjs)
+
 ### catalyst-db
 
 SQLite-backed durable session store for agent runs (init/migrate, sessions, events, metrics).

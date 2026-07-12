@@ -338,6 +338,50 @@ describe("heartbeat admission block (CTL-1322)", () => {
   });
 });
 
+describe("heartbeat in-flight-tickets attributes (CTL-1420 #17)", () => {
+  test("carries the injected in-flight tickets as a comma-joined attribute + count", () => {
+    const env = buildHeartbeatEnvelope({ inFlightTicketsFn: () => ["CTL-100", "CTL-101"] });
+    // Top-level ATTRIBUTES (not body.payload) so they survive otel-forward → Loki.
+    expect(env.attributes["catalyst.node.in_flight_tickets"]).toBe("CTL-100,CTL-101");
+    expect(env.attributes["catalyst.node.in_flight_count"]).toBe(2);
+  });
+
+  test("defaults to empty string + 0 count when no fn is injected (key always present)", () => {
+    const env = buildHeartbeatEnvelope();
+    expect(env.attributes["catalyst.node.in_flight_tickets"]).toBe("");
+    expect(env.attributes["catalyst.node.in_flight_count"]).toBe(0);
+  });
+
+  test("filters non-string / empty entries and a non-array result fails safe to []", () => {
+    const dirty = buildHeartbeatEnvelope({ inFlightTicketsFn: () => ["CTL-1", "", null, 7, "CTL-2"] });
+    expect(dirty.attributes["catalyst.node.in_flight_tickets"]).toBe("CTL-1,CTL-2");
+    expect(dirty.attributes["catalyst.node.in_flight_count"]).toBe(2);
+    const notArray = buildHeartbeatEnvelope({ inFlightTicketsFn: () => null });
+    expect(notArray.attributes["catalyst.node.in_flight_tickets"]).toBe("");
+    expect(notArray.attributes["catalyst.node.in_flight_count"]).toBe(0);
+  });
+
+  test("startHeartbeat forwards inFlightTicketsFn through the tick to the appended line", async () => {
+    process.env.CATALYST_HOST_NAME = "mini";
+    const tmp = mkdtempSync(join(tmpdir(), "ctl1420-hb-inflight-"));
+    const logPath = join(tmp, "events.jsonl");
+    const h = startHeartbeat({
+      intervalMs: 1_000_000,
+      logPath,
+      inFlightTicketsFn: () => ["CTL-500"],
+    });
+    try {
+      await h.started;
+      const line = JSON.parse(readFileSync(logPath, "utf8").trim().split("\n")[0]);
+      expect(line.attributes["catalyst.node.in_flight_tickets"]).toBe("CTL-500");
+      expect(line.attributes["catalyst.node.in_flight_count"]).toBe(1);
+    } finally {
+      h.stop();
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+});
+
 // CTL-1322: emitHeartbeatEvent previously dropped governanceFn (and had no way to
 // forward admissionFn), so an injected seam never reached buildHeartbeatEnvelope on
 // the production startHeartbeat path — only the builder's default reader ran. Assert
