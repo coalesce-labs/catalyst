@@ -245,12 +245,6 @@ Wrapper that registers a Catalyst session around claude, then execs the interact
 
 [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/scripts/catalyst-claude.sh)
 
-### boot-resume-approve
-
-Operator approval CLI for the boot-resume gate (CTL-1443) — --list shows pending gates; <ticket> writes the .boot-resume-approved sentinel the daemon polls each tick.
-
-[Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/scripts/execution-core/boot-resume-approve.mjs)
-
 ## Hooks
 
 ### emit-lifecycle-event

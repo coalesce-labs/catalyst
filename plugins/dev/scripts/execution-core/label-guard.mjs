@@ -74,7 +74,7 @@ export function labelOnce(
   ticket,
   label,
   writeStatus,
-  { appendEvent = null, env = process.env } = {}
+  { appendEvent = null, env = process.env, onApplyResult = null } = {}
 ) {
   const base = labelMarkerBase(orchDir, ticket, label);
   if (existsSync(`${base}.applied`) || existsSync(`${base}.skipped`)) return false;
@@ -82,7 +82,16 @@ export function labelOnce(
     const res = writeStatus.applyLabel({ ticket, label });
     // A fake that returns undefined (test stubs) is treated as success so
     // the once-semantics stay testable without a real result.
-    if (res === undefined || res?.applied) {
+    const applied = res === undefined || res?.applied === true;
+    // CTL-764 finding C: surface the CONFIRMED apply outcome to callers that must
+    // gate a side-effect (labelNeedsHumanUnlessBeliefOwner → the worker.transition
+    // emission) on a real application, not merely on this being the first write
+    // attempt. Only fires when applyLabel actually ran — never on a throw or on the
+    // marker-guarded early return above.
+    if (typeof onApplyResult === "function") {
+      onApplyResult({ applied, reason: res?.reason ?? null });
+    }
+    if (applied) {
       writeFileSync(`${base}.applied`, "");
     } else if (UNRECOVERABLE_LABEL_REASONS.has(res?.reason)) {
       writeFileSync(`${base}.skipped`, "");
@@ -369,12 +378,13 @@ export function beliefOwnsNeedsHuman(env = process.env) {
 //     log   : { info }              (the module's log instance)
 //   }
 //
-// CTL-764 finding 8: returns whether THIS call performed a label write attempt —
-// `false` when it deferred to the belief owner OR labelOnce found a terminal marker
-// (a persisted needs-human after a daemon restart), `true` when labelOnce performed
-// the once-application. Callers gate their worker.transition emission on this so a
-// no-op re-application (no label changed) never records a fresh escalation. Existing
-// callers ignore the return, so this stays backward-compatible.
+// CTL-764 finding 8 + finding C: returns whether the needs-human label was CONFIRMED
+// applied on THIS call — `false` when it deferred to the belief owner, when labelOnce
+// found a terminal marker (a persisted needs-human after a daemon restart), OR when the
+// apply was attempted but did not land (rate-limited / exclusive-conflict / missing-label);
+// `true` ONLY when applyLabel reported applied:true. Callers gate their worker.transition
+// emission on this so neither a no-op re-application nor a failed attempt records a fresh
+// escalation. Existing callers ignore the return, so this stays backward-compatible.
 export function labelNeedsHumanUnlessBeliefOwner(
   orchDir,
   ticket,
@@ -387,8 +397,18 @@ export function labelNeedsHumanUnlessBeliefOwner(
     logger.info({ ticket, site }, "needs-human deferred to belief owner (CTL-1241)");
     return false;
   }
-  // Enforcement OFF (default): call labelOnce exactly as before.
-  return labelOnce(orchDir, ticket, "needs-human", writeStatus);
+  // Enforcement OFF (default): call labelOnce exactly as before. CTL-764 finding C:
+  // return whether the label was CONFIRMED applied, not merely attempted — labelOnce's
+  // boolean is true for any first write attempt (including outcomes where the label never
+  // landed). Capture applyLabel's applied result via onApplyResult; a marker-guarded no-op
+  // (labelOnce early-returns, onApplyResult never fires) correctly stays false.
+  let applied = false;
+  labelOnce(orchDir, ticket, "needs-human", writeStatus, {
+    onApplyResult: (r) => {
+      applied = r.applied === true;
+    },
+  });
+  return applied;
 }
 
 export function recordEscalation(orchDir, ticket, phase, reason, now) {

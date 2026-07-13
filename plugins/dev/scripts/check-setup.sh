@@ -258,7 +258,12 @@ if [[ -n ${PROJECT_KEY-} ]]; then
 	if [[ -f $SECRETS_FILE ]]; then
 		pass "Secrets file exists: config-${PROJECT_KEY}.json"
 
-		token=$(jq -r '.linear.apiToken // empty' "$SECRETS_FILE" 2>/dev/null)
+		# CTL-764 finding G: read the supported .catalyst.linear.apiToken shape first,
+		# falling back to the legacy .linear.apiToken — matching setup-execution-core-states.sh
+		# and check-project-setup.sh. Reading only the legacy path left installs on the
+		# supported shape with an empty token, silently skipping the worker-status label
+		# check (and mis-reporting the token below).
+		token=$(jq -r '.catalyst.linear.apiToken // .linear.apiToken // empty' "$SECRETS_FILE" 2>/dev/null)
 		if [[ -n $token && $token != "[NEEDS_SETUP]" ]]; then
 			pass "Linear API token configured"
 		else

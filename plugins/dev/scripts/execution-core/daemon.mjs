@@ -425,8 +425,16 @@ export async function handleCommentWake(
     } catch {
       /* fail-open */
     }
+    // CTL-764 finding E: gate the needs-input→cleared emission on a CONFIRMED removal.
+    // removeLabel reports a failed read/write as {removed:false} WITHOUT throwing, so the
+    // try/catch alone never suppresses the event — a bare emit would record a clear the
+    // durable label never got. removed:true covers both a real removal AND the idempotent
+    // already-absent case (linear-write.mjs:289-291); an undefined return from a test stub
+    // is treated as success to keep the wake path testable.
+    let needsInputRemoved = false;
     try {
-      await removeLabel(ticket, "needs-input"); // CTL-764 Phase 4: durable needs-input cleared on genuine resolution
+      const res = await removeLabel(ticket, "needs-input"); // CTL-764 Phase 4: durable needs-input cleared on genuine resolution
+      needsInputRemoved = res === undefined || res?.removed === true;
     } catch {
       /* fail-open */
     }
@@ -435,15 +443,17 @@ export async function handleCommentWake(
     // is emitted here (the daemon removes the durable label out-of-band and redispatches
     // — the scheduler never observes this edge). toDisposition:null is encoded as the
     // "cleared" sentinel in the event builder (finding 12). Fail-open — never blocks the
-    // wake.
-    appendWorkerTransitionEvent({
-      ticket,
-      orchId: ticket,
-      fromDisposition: "needs-input",
-      toDisposition: null,
-      reason: "comment-wake",
-      source: "comment-wake-clear",
-    });
+    // wake. finding E: only emitted on a confirmed removal.
+    if (needsInputRemoved) {
+      appendWorkerTransitionEvent({
+        ticket,
+        orchId: ticket,
+        fromDisposition: "needs-input",
+        toDisposition: null,
+        reason: "comment-wake",
+        source: "comment-wake-clear",
+      });
+    }
 
     dispatch(orchDir, ticket, parkedPhase, { handoffPath, resumeSession });
   }

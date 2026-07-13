@@ -211,6 +211,39 @@ else
 	fail "group missing: exit 0 (got rc=$RC5)"
 fi
 
+# ─── Test 6 (CTL-764 finding G): supported .catalyst.linear.apiToken shape ─────
+# An install using the supported nested shape must NOT be skipped — before the fix
+# the check read only the legacy .linear.apiToken, leaving `token` empty so the
+# worker-status section silently soft-skipped. Confirm the live query IS issued and
+# the members are checked.
+make_secrets_supported() {
+	local xdg="$1"
+	mkdir -p "${xdg}/catalyst"
+	cat >"${xdg}/catalyst/config-test.json" <<'EOF'
+{ "catalyst": { "linear": { "apiToken": "lin_api_fake_ws_token" } } }
+EOF
+	echo '{"catalyst":{}}' >"${xdg}/catalyst/config.json"
+}
+
+P6="${SCRATCH}/p6" X6="${SCRATCH}/x6" B6="${SCRATCH}/b6" L6="${SCRATCH}/l6.log"
+make_project "$P6"
+make_secrets_supported "$X6"
+install_ws_curl "$B6" "$L6" "full"
+: >"$L6"
+mkdir -p "${X6}/catalyst"
+OUT6="$(run_check_setup "$P6" "$X6" "$B6")"
+if grep -q "issueLabels" "$L6" 2>/dev/null; then
+	pass "supported token shape: live issueLabels query IS issued (not soft-skipped)"
+else
+	fail "supported token shape: live issueLabels query IS issued (not soft-skipped)"
+fi
+if ! grep -qiE "Skipping worker-status label check" <<<"$OUT6"; then
+	pass "supported token shape: no soft-skip message"
+else
+	fail "supported token shape: no soft-skip message"
+	echo "$OUT6" | grep -i "worker\|skip" | sed 's/^/    /'
+fi
+
 echo ""
 echo "Results: ${PASSES} passed, ${FAILURES} failed"
 [ "$FAILURES" = "0" ]

@@ -5117,6 +5117,18 @@ export function schedulerTick(
           now,
         });
 
+        // CTL-764 findings B + F: the worker.transition emission must reflect the
+        // ticket's TRUE disposition. needs-human is sticky + exclusive, so when it is
+        // already on the ticket the lower held dispositions (blocked/queued) cannot
+        // apply — recording one would falsely downgrade the two-axis stream (finding B).
+        // On a clear, pass the held label the ticket currently wears as fromDisposition
+        // so a genuine blocked/queued→cleared still emits after a daemon restart, where
+        // lastDispositionEmit is empty and recordTransition's first-seen-clear allowance
+        // needs a proven prior (finding F). needs-human clears are owned by
+        // clearStalledLabel, so the admission loop never emits them.
+        const currentLabelSet = new Set(labelsByTicket.get(ticket) ?? []);
+        const hasNeedsHuman = currentLabelSet.has(HELD_LABEL_NEEDS_HUMAN);
+
         if (desired) {
           // Only-on-state-change emission: skip if the same held class already
           // emitted for this ticket since it was last cleared/admitted.
@@ -5128,18 +5140,34 @@ export function schedulerTick(
               { ticket, phase: "advance" }
             );
           }
-          // CTL-764 Phase 5: emit worker.transition for disposition hold.
-          recordTransition({
-            ticket,
-            toDisposition: desired,
-            reason,
-            source: "scheduler-admission",
-          });
+          // CTL-764 Phase 5: emit worker.transition for disposition hold — finding B
+          // suppresses it while needs-human is present (the lower disposition never lands).
+          if (!hasNeedsHuman) {
+            recordTransition({
+              ticket,
+              toDisposition: desired,
+              reason,
+              source: "scheduler-admission",
+            });
+          }
         } else {
           // Admitted (or no longer held) → reset so a future re-hold re-emits.
           lastHeldEmitState.delete(ticket);
-          // CTL-764 Phase 5: emit worker.transition for admission (clear-on-pickup).
-          recordTransition({ ticket, toDisposition: null, source: "scheduler-admission" });
+          // CTL-764 Phase 5: emit worker.transition for admission (clear-on-pickup) —
+          // finding F passes the held label currently on the ticket as fromDisposition so
+          // the clear emits even after a restart; suppressed when needs-human is present.
+          if (!hasNeedsHuman) {
+            const currentHeld =
+              [HELD_LABEL_BLOCKED, HELD_LABEL_WAITING, LEGACY_HELD_LABEL_WAITING].find((l) =>
+                currentLabelSet.has(l)
+              ) ?? null;
+            recordTransition({
+              ticket,
+              fromDisposition: currentHeld,
+              toDisposition: null,
+              source: "scheduler-admission",
+            });
+          }
         }
       }
 
