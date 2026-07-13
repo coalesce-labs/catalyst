@@ -1,5 +1,19 @@
 # Changelog
 
+## [12.29.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.28.0...catalyst-dev-v12.29.0) (2026-07-13)
+
+
+### Features
+
+* **dev:** CTL-764 two-axis worker-state model — recordTransition chokepoint, worker-status labels, convergeDispositionLabel ([#2597](https://github.com/coalesce-labs/catalyst/issues/2597)) ([2ebbed3](https://github.com/coalesce-labs/catalyst/commit/2ebbed317d76f7963b2c22544c85060440e3f482))
+
+
+### Bug Fixes
+
+* **dev:** CTL-764 follow-up — Codex round-3 emission gating + gitleaks allowlist (greens main) ([#2631](https://github.com/coalesce-labs/catalyst/issues/2631)) ([27781cf](https://github.com/coalesce-labs/catalyst/commit/27781cfd3df2d0ebe6efceb55d9bb26474b87a10))
+* **dev:** CTL-764 follow-up — Codex round-4 emission/fallback edge cases ([#2632](https://github.com/coalesce-labs/catalyst/issues/2632)) ([3fa0429](https://github.com/coalesce-labs/catalyst/commit/3fa04294909c120fe30351ef8e8d6bf93e384f7b))
+* **dev:** CTL-764 follow-up — declare synthesizeOrphanTickets in board-data.d.mts (greens main quality gate) ([#2630](https://github.com/coalesce-labs/catalyst/issues/2630)) ([96ea021](https://github.com/coalesce-labs/catalyst/commit/96ea0213ab6b7a6bafb2b325ecdfbe278dabc2aa))
+
 ## [12.28.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.27.0...catalyst-dev-v12.28.0)
 
 Jul 09, 2026
