@@ -198,14 +198,17 @@ worker_status_members() {
 # build_issue_label_group_create_mutation <name> <color>
 # Workspace-scoped: omits teamId so Linear assigns the label to the workspace,
 # not a specific team (the daemon applies via linearis which lists workspace labels).
+# CTL-764 finding A: creates the parent as a PLAIN workspace label — IssueLabelCreateInput
+# accepts only id/name/description/color/parentId/teamId, so sending isGroup:true is
+# rejected and the whole reconcile aborts before any child is created. A Linear label
+# becomes a group implicitly the moment a child is created with its parentId (below).
 build_issue_label_group_create_mutation() {
 	local name="$1" color="$2"
 	cat <<MUTATION
 mutation {
   issueLabelCreate(input: {
     name: "${name}",
-    color: "${color}",
-    isGroup: true
+    color: "${color}"
   }) {
     success
     issueLabel { id name }
@@ -263,10 +266,14 @@ reconcile_worker_status_labels() {
 	local labels_json
 	labels_json=$(echo "$resp" | jq -c '.data.issueLabels.nodes // []')
 
-	# Find existing workspace group by name + isGroup:true.
+	# Find the existing workspace parent by name at the top level (parent == null).
+	# CTL-764 finding A: match on parent==null, NOT isGroup==true — a freshly-created
+	# parent is a plain label (isGroup false) until its first child attaches and Linear
+	# flips it to a group, so requiring isGroup would miss a parent whose child creation
+	# partially failed and wrongly re-issue a duplicate create.
 	local group_id
 	group_id=$(echo "$labels_json" | jq -r --arg n "$group_name" \
-		'.[] | select(.name == $n and .isGroup == true) | .id // empty' | head -1)
+		'.[] | select(.name == $n and .parent == null) | .id // empty' | head -1)
 
 	if [[ -z $group_id ]]; then
 		# Create the group (workspace-scoped, isGroup:true, no teamId).

@@ -11557,4 +11557,58 @@ describe("CTL-764 Phase 5 — schedulerTick emits worker.transition events", () 
     expect(park).toBeDefined();
     expect(park.source).toBe("needs-input-park");
   });
+
+  // CTL-764 finding B: a triaged-waiting ticket already wearing the sticky needs-human
+  // label (e.g. a dependency-cycle escalation persisted across restart) stays held, but
+  // convergeHeldLabel can't apply the lower disposition (exclusive worker-status group).
+  // The lower-disposition worker.transition must be SUPPRESSED so the two-axis stream is
+  // not falsely downgraded below needs-human.
+  test("finding B — a held ticket wearing needs-human suppresses the lower-disposition emit", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 0 })); // no slot → held
+    writeSignal("CTL-B", "triage", "done"); // triaged-waiting
+    const transitions = [];
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: fakeDispatch(),
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0,
+      // Held by a non-terminal blocker AND already wearing needs-human on Linear.
+      fetchBatch: mkBatch({
+        "CTL-B": relBlockedBy("CTL-BLK", { labels: ["needs-human"] }),
+        "CTL-BLK": descOf("Triage"),
+      }),
+      hasTriageArtifact: () => true,
+      writeStatus: noWrites(),
+      appendWorkerTransitionEvent: (ev) => transitions.push(ev),
+    });
+    const lowered = transitions.find(
+      (e) => e.ticket === "CTL-B" && (e.toDisposition === "blocked" || e.toDisposition === "queued")
+    );
+    expect(lowered).toBeUndefined();
+  });
+
+  // CTL-764 finding F: after a daemon restart lastDispositionEmit is empty. A ticket still
+  // wearing "blocked" on Linear that is admitted this tick (desired=null) must still emit
+  // the genuine blocked→cleared transition — the fix passes the current held label as
+  // fromDisposition so recordTransition's first-seen-clear allowance fires.
+  test("finding F — an admitted held ticket emits blocked→cleared after a restart (fromDisposition proven)", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 2 }));
+    writeSignal("CTL-F", "triage", "done"); // triaged-waiting, unblocked → admitted
+    const transitions = [];
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: fakeDispatch(),
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0,
+      fetchBatch: mkBatch(() => relUnblocked({ labels: ["blocked"] })),
+      hasTriageArtifact: () => true,
+      writeStatus: { ...noWrites(), removeLabel: () => ({ removed: true }) },
+      appendWorkerTransitionEvent: (ev) => transitions.push(ev),
+    });
+    const cleared = transitions.find(
+      (e) => e.ticket === "CTL-F" && e.fromDisposition === "blocked" && e.toDisposition === null
+    );
+    expect(cleared).toBeDefined();
+    expect(cleared.source).toBe("scheduler-admission");
+  });
 });

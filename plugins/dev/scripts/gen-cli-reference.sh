@@ -66,7 +66,6 @@ catalyst-install|Umbrella & lifecycle|1|Provision or tear down this node for its
 catalyst-doctor|Umbrella & lifecycle|1|Fail-closed activation gate — class-aware health/activation grade (exit 0 ⇒ safe to activate).
 catalyst-backup|Umbrella & lifecycle|0|Capture / restore a node's restorable identity + state bundle (bare backup writes a secrets bundle).
 catalyst-claude|Umbrella & lifecycle|0|Wrapper that registers a Catalyst session around claude, then execs the interactive claude process.
-boot-resume-approve|Umbrella & lifecycle|0|Operator approval CLI for the boot-resume gate (CTL-1443) — --list shows pending gates; <ticket> writes the .boot-resume-approved sentinel the daemon polls each tick.
 emit-lifecycle-event|Hooks|0|Claude Code Stop/SubagentStop hook — fallback agent.checkout emitter for the broker.
 EOF
 }

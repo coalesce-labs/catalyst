@@ -570,8 +570,10 @@ WS_GRP_MUT_VAL="$(source "$SCRIPT" && build_issue_label_group_create_mutation 'w
 run "build_issue_label_group_create_mutation: contains issueLabelCreate" \
 	bash -c "echo '$WS_GRP_MUT_VAL' | grep -q 'issueLabelCreate'"
 
-run "build_issue_label_group_create_mutation: contains isGroup" \
-	bash -c "echo '$WS_GRP_MUT_VAL' | grep -q 'isGroup'"
+# CTL-764 finding A: the group is created as a plain workspace label — sending isGroup:true
+# is rejected by IssueLabelCreateInput and aborts the reconcile before any child is created.
+run "build_issue_label_group_create_mutation: omits isGroup (rejected by IssueLabelCreateInput)" \
+	bash -c "! echo '$WS_GRP_MUT_VAL' | grep -q 'isGroup'"
 
 run "build_issue_label_group_create_mutation: omits teamId (workspace scope)" \
 	bash -c "! echo '$WS_GRP_MUT_VAL' | grep -q 'teamId'"
@@ -599,6 +601,11 @@ make_label_curl() {
 		;;
 	group_only)
 		labels_nodes='[{"id":"grp-ws","name":"worker-status","isGroup":true,"parent":null}]'
+		;;
+	group_only_plain)
+		# CTL-764 finding A: the parent exists but is still a PLAIN label (isGroup false)
+		# — a partial-failure re-run where the parent was created but no child attached.
+		labels_nodes='[{"id":"grp-ws","name":"worker-status","isGroup":false,"parent":null}]'
 		;;
 	partial)
 		labels_nodes='[{"id":"grp-ws","name":"worker-status","isGroup":true,"parent":null},{"id":"lbl-q","name":"queued","isGroup":false,"parent":{"id":"grp-ws"}},{"id":"lbl-b","name":"blocked","isGroup":false,"parent":{"id":"grp-ws"}},{"id":"lbl-nh","name":"needs-human","isGroup":false,"parent":{"id":"grp-ws"}}]'
@@ -737,6 +744,28 @@ run "--dry-run: no issueLabelCreate mutations issued" \
 
 run "--dry-run: reports intent (mentions worker-status or dry-run)" \
 	bash -c "grep -qiE 'dry.run|DRY|worker.status' '${SCRATCH}/ws-t5-out'"
+
+# Test 6 (CTL-764 finding A): the parent exists as a plain label (isGroup false, no
+# children yet). The lookup must FIND it by name+parent==null — NOT re-create it — and
+# create the 4 missing children → 4 issueLabelCreate calls, none of them a group create.
+WS_T6_BIN="${SCRATCH}/ws-t6/bin"
+WS_T6_LOG="${SCRATCH}/ws-t6/req.log"
+mkdir -p "${SCRATCH}/ws-t6"
+: >"$WS_T6_LOG"
+make_label_curl "$WS_T6_BIN" "group_only_plain" "true" "$WS_T6_LOG"
+(
+	# shellcheck source=/dev/null
+	source "$SCRIPT"
+	PATH="$WS_T6_BIN:$PATH"
+	dry_run=0
+	reconcile_worker_status_labels "fake-token"
+) >"${SCRATCH}/ws-t6-out" 2>&1
+
+run "plain-label parent: found by name+parent==null, creates the 4 children (4 issueLabelCreate)" \
+	bash -c "count=\$(grep -c 'issueLabelCreate' '$WS_T6_LOG' 2>/dev/null || echo 0); [ \"\$count\" = '4' ]"
+
+run "plain-label parent: never re-creates the group (every create carries parentId)" \
+	bash -c "! grep 'issueLabelCreate' '$WS_T6_LOG' | grep -qv 'parentId'"
 
 echo ""
 echo "Results: ${PASSES} passed, ${FAILURES} failed"

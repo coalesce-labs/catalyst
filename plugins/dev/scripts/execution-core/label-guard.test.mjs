@@ -846,4 +846,51 @@ describe("labelNeedsHumanUnlessBeliefOwner (CTL-1241)", () => {
     });
     expect(wrote).toBe(false);
   });
+
+  // CTL-764 finding C: the return must reflect a CONFIRMED apply, not a bare first
+  // attempt. labelOnce returns true for any first write attempt — including outcomes
+  // where applyLabel reported applied:false — so gating a worker.transition on the raw
+  // labelOnce boolean records a needs-human escalation that never actually landed.
+  test("finding C — returns false when applyLabel is attempted but not applied (rate-limited)", () => {
+    const calls = [];
+    const ws = {
+      applyLabel: (args) => {
+        calls.push(args);
+        return { applied: false, reason: "rate-limited" };
+      },
+    };
+    mkdirSync(join(orchDir, "workers", "CTL-C1"), { recursive: true });
+    const wrote = labelNeedsHumanUnlessBeliefOwner(orchDir, "CTL-C1", ws, {
+      env: { CATALYST_INTENTS_ENFORCE: "0" },
+      log: { info: () => {} },
+    });
+    // The attempt happened (transient → no marker, retries next tick) but the label
+    // did not land, so no transition should be recorded.
+    expect(calls.length).toBe(1);
+    expect(wrote).toBe(false);
+  });
+
+  test("finding C — returns false on an unrecoverable failure (exclusive-conflict, .skipped written)", () => {
+    const ws = { applyLabel: () => ({ applied: false, reason: "exclusive-conflict" }) };
+    mkdirSync(join(orchDir, "workers", "CTL-C2"), { recursive: true });
+    const wrote = labelNeedsHumanUnlessBeliefOwner(orchDir, "CTL-C2", ws, {
+      env: { CATALYST_INTENTS_ENFORCE: "0" },
+      log: { info: () => {} },
+    });
+    expect(wrote).toBe(false);
+    // The .skipped marker is still written (storm-break) even though nothing applied.
+    expect(
+      existsSync(join(orchDir, "workers", "CTL-C2", ".linear-label-needs-human.skipped"))
+    ).toBe(true);
+  });
+
+  test("finding C — returns true ONLY on a confirmed applied:true", () => {
+    const ws = { applyLabel: () => ({ applied: true }) };
+    mkdirSync(join(orchDir, "workers", "CTL-C3"), { recursive: true });
+    const wrote = labelNeedsHumanUnlessBeliefOwner(orchDir, "CTL-C3", ws, {
+      env: { CATALYST_INTENTS_ENFORCE: "0" },
+      log: { info: () => {} },
+    });
+    expect(wrote).toBe(true);
+  });
 });

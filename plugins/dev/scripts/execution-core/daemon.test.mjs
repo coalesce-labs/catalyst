@@ -1408,6 +1408,56 @@ describe("handleCommentWake (CTL-549)", () => {
     expect(cleared.source).toBe("comment-wake-clear");
   });
 
+  // CTL-764 finding E: removeLabel reports a failed read/write as {removed:false} without
+  // throwing, so the needs-input→cleared emission must be gated on a CONFIRMED removal —
+  // otherwise the event log says "cleared" while the durable label is still on Linear.
+  test("finding E — does NOT emit the clear when removeLabel reports {removed:false}", async () => {
+    const orch = tmpOrcDir();
+    writeSignal(orch, "CTL-1", "implement", {
+      status: "needs-input",
+      parkedFrom: "implement",
+    });
+    const transitions = [];
+    await handleCommentWake(
+      { ticket: "CTL-1", body: "answer" },
+      {
+        orchDir: orch,
+        dispatch: () => ({ code: 0 }),
+        // needs-human removes fine; needs-input removal FAILS (fail-open, no throw).
+        removeLabel: async (_t, label) =>
+          label === "needs-input" ? { removed: false, reason: "transient" } : { removed: true },
+        appendWorkerTransitionEvent: (ev) => transitions.push(ev),
+      }
+    );
+    const cleared = transitions.find(
+      (e) => e.ticket === "CTL-1" && e.fromDisposition === "needs-input" && e.toDisposition === null
+    );
+    expect(cleared).toBeUndefined();
+  });
+
+  test("finding E — emits the clear on a confirmed {removed:true}", async () => {
+    const orch = tmpOrcDir();
+    writeSignal(orch, "CTL-1", "implement", {
+      status: "needs-input",
+      parkedFrom: "implement",
+    });
+    const transitions = [];
+    await handleCommentWake(
+      { ticket: "CTL-1", body: "answer" },
+      {
+        orchDir: orch,
+        dispatch: () => ({ code: 0 }),
+        removeLabel: async () => ({ removed: true }),
+        appendWorkerTransitionEvent: (ev) => transitions.push(ev),
+      }
+    );
+    const cleared = transitions.find(
+      (e) => e.ticket === "CTL-1" && e.fromDisposition === "needs-input" && e.toDisposition === null
+    );
+    expect(cleared).toBeDefined();
+    expect(cleared.source).toBe("comment-wake-clear");
+  });
+
   test("no-ops when ticket has no worker dir", async () => {
     const orch = tmpOrcDir();
     const dispatched = [];
