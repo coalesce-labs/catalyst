@@ -244,6 +244,39 @@ else
 	echo "$OUT6" | grep -i "worker\|skip" | sed 's/^/    /'
 fi
 
+# ─── Test 7 (CTL-764 r4): "[NEEDS_SETUP]" placeholder must not stop the fallback ───
+# A migrated secrets file can carry the sentinel in the supported shape while the
+# legacy .linear.apiToken still holds the usable token — the // fallback must skip
+# the placeholder and reach the legacy value (before the fix it stopped on the
+# sentinel, reported no token, and soft-skipped the worker-status check).
+make_secrets_placeholder() {
+	local xdg="$1"
+	mkdir -p "${xdg}/catalyst"
+	cat >"${xdg}/catalyst/config-test.json" <<'EOF'
+{ "catalyst": { "linear": { "apiToken": "[NEEDS_SETUP]" } }, "linear": { "apiToken": "lin_api_fake_ws_token" } }
+EOF
+	echo '{"catalyst":{}}' >"${xdg}/catalyst/config.json"
+}
+
+P7="${SCRATCH}/p7" X7="${SCRATCH}/x7" B7="${SCRATCH}/b7" L7="${SCRATCH}/l7.log"
+make_project "$P7"
+make_secrets_placeholder "$X7"
+install_ws_curl "$B7" "$L7" "full"
+: >"$L7"
+mkdir -p "${X7}/catalyst"
+OUT7="$(run_check_setup "$P7" "$X7" "$B7")"
+if grep -q "issueLabels" "$L7" 2>/dev/null; then
+	pass "placeholder fallback: live issueLabels query IS issued (legacy token used)"
+else
+	fail "placeholder fallback: live issueLabels query IS issued (legacy token used)"
+fi
+if grep -q "Linear API token configured" <<<"$OUT7"; then
+	pass "placeholder fallback: token reported configured from the legacy path"
+else
+	fail "placeholder fallback: token reported configured from the legacy path"
+	echo "$OUT7" | grep -i "token" | sed 's/^/    /'
+fi
+
 echo ""
 echo "Results: ${PASSES} passed, ${FAILURES} failed"
 [ "$FAILURES" = "0" ]

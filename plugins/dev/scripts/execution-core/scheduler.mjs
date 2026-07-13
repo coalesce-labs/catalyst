@@ -1709,7 +1709,7 @@ export function convergeHeldLabel(
   current,
   desired,
   writeStatus,
-  { orchDir, now = Date.now } = {}
+  { orchDir, now = Date.now, onRemoveResult } = {}
 ) {
   // CTL-834: back off if a recent apply of `desired` failed unrecoverably.
   if (orchDir && desired && inLabelCooldown(orchDir, ticket, desired, now())) {
@@ -1719,9 +1719,24 @@ export function convergeHeldLabel(
   let writes = 0;
   // Remove any held label that is present but not desired. CTL-764 finding 1: the
   // removable set includes the legacy "waiting" so it is drained on clear-on-pickup.
+  // CTL-764 r4: the removal result is captured directly (safeWrite discards it) and
+  // surfaced via the optional onRemoveResult(label, removed) seam — removeLabel
+  // reports failures as {removed:false} WITHOUT throwing, and clear emissions must
+  // gate on a CONFIRMED removal. An undefined result (legacy/test stubs) counts as
+  // success; a throw counts as failure.
   for (const label of HELD_LABELS_REMOVABLE) {
     if (label !== desired && have.has(label)) {
-      safeWrite(() => writeStatus.removeLabel(ticket, label), { ticket, phase: "admission" });
+      let removed = false;
+      try {
+        const res = writeStatus.removeLabel(ticket, label);
+        removed = res?.removed !== false;
+      } catch (err) {
+        log.warn(
+          { ticket, phase: "admission", err: err.message },
+          "scheduler: Linear write-back threw — continuing tick"
+        );
+      }
+      onRemoveResult?.(label, removed);
       writes++;
     }
   }
@@ -5112,9 +5127,16 @@ export function schedulerTick(
         }
         // else: admitted → desired null → clear-on-pickup (both labels removed).
 
+        // CTL-764 r4 finding 1: collect which held labels this convergence CONFIRMED
+        // removed — the clear emission below must not outrun a failed removeLabel
+        // (Linear would still carry the label while the stream says cleared).
+        const confirmedRemoved = [];
         convergeHeldLabel(ticket, labelsByTicket.get(ticket), desired, writeStatus, {
           orchDir,
           now,
+          onRemoveResult: (label, removed) => {
+            if (removed) confirmedRemoved.push(label);
+          },
         });
 
         // CTL-764 findings B + F: the worker.transition emission must reflect the
@@ -5154,19 +5176,33 @@ export function schedulerTick(
           // Admitted (or no longer held) → reset so a future re-hold re-emits.
           lastHeldEmitState.delete(ticket);
           // CTL-764 Phase 5: emit worker.transition for admission (clear-on-pickup) —
-          // finding F passes the held label currently on the ticket as fromDisposition so
-          // the clear emits even after a restart; suppressed when needs-human is present.
+          // finding F passes the held label as fromDisposition so the clear emits even
+          // after a restart; suppressed when needs-human is present. CTL-764 r4:
+          //   finding 1 — the proven prior must come from a CONFIRMED removal, not the
+          //   pre-convergence snapshot: on a transient removeLabel failure Linear still
+          //   wears the label, so the emission is skipped and a later tick re-converges
+          //   and emits. A ticket that wore no held label stays a from:null no-op
+          //   (dropped by recordTransition's only-on-change guard).
+          //   finding 2 — legacy "waiting" normalizes to the canonical "queued" so the
+          //   transition stream never carries a fifth disposition value.
           if (!hasNeedsHuman) {
-            const currentHeld =
+            const woreHeld = [HELD_LABEL_BLOCKED, HELD_LABEL_WAITING, LEGACY_HELD_LABEL_WAITING].some(
+              (l) => currentLabelSet.has(l)
+            );
+            const removedHeld =
               [HELD_LABEL_BLOCKED, HELD_LABEL_WAITING, LEGACY_HELD_LABEL_WAITING].find((l) =>
-                currentLabelSet.has(l)
+                confirmedRemoved.includes(l)
               ) ?? null;
-            recordTransition({
-              ticket,
-              fromDisposition: currentHeld,
-              toDisposition: null,
-              source: "scheduler-admission",
-            });
+            const fromHeld =
+              removedHeld === LEGACY_HELD_LABEL_WAITING ? HELD_LABEL_WAITING : removedHeld;
+            if (!woreHeld || fromHeld) {
+              recordTransition({
+                ticket,
+                fromDisposition: fromHeld,
+                toDisposition: null,
+                source: "scheduler-admission",
+              });
+            }
           }
         }
       }
