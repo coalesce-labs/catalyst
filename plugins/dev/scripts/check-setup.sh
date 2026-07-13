@@ -263,7 +263,10 @@ if [[ -n ${PROJECT_KEY-} ]]; then
 		# and check-project-setup.sh. Reading only the legacy path left installs on the
 		# supported shape with an empty token, silently skipping the worker-status label
 		# check (and mis-reporting the token below).
-		token=$(jq -r '.catalyst.linear.apiToken // .linear.apiToken // empty' "$SECRETS_FILE" 2>/dev/null)
+		# r4: a "[NEEDS_SETUP]" placeholder in the supported shape must not stop the
+		# fallback — a migrated file can carry the sentinel there while the legacy
+		# path still holds the usable token.
+		token=$(jq -r '(.catalyst.linear.apiToken | select(. != null and . != "" and . != "[NEEDS_SETUP]")) // .linear.apiToken // empty' "$SECRETS_FILE" 2>/dev/null)
 		if [[ -n $token && $token != "[NEEDS_SETUP]" ]]; then
 			pass "Linear API token configured"
 		else

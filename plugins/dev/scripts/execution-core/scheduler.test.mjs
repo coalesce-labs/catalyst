@@ -11611,4 +11611,52 @@ describe("CTL-764 Phase 5 — schedulerTick emits worker.transition events", () 
     expect(cleared).toBeDefined();
     expect(cleared.source).toBe("scheduler-admission");
   });
+
+  // CTL-764 r4 finding 1: the restart clear must gate on a CONFIRMED removal.
+  // removeLabel reports transient failures as {removed:false} without throwing —
+  // Linear still wears the label, so emitting cleared would fork the stream from
+  // Linear. The emission is skipped; a later tick re-converges and emits then.
+  test("r4 finding 1 — a failed removeLabel suppresses the restart clear emission", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 2 }));
+    writeSignal("CTL-R41", "triage", "done"); // triaged-waiting, unblocked → admitted
+    const transitions = [];
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: fakeDispatch(),
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0,
+      fetchBatch: mkBatch(() => relUnblocked({ labels: ["blocked"] })),
+      hasTriageArtifact: () => true,
+      writeStatus: { ...noWrites(), removeLabel: () => ({ removed: false }) },
+      appendWorkerTransitionEvent: (ev) => transitions.push(ev),
+    });
+    const cleared = transitions.find(
+      (e) => e.ticket === "CTL-R41" && e.toDisposition === null && e.source === "scheduler-admission"
+    );
+    expect(cleared).toBeUndefined();
+  });
+
+  // CTL-764 r4 finding 2: a pre-migration "waiting" label is only a removable alias of
+  // "queued" — the restart clear must emit the canonical queued→cleared, never a fifth
+  // disposition value the two-axis vocabulary doesn't define.
+  test("r4 finding 2 — legacy waiting normalizes to queued on the restart clear", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 2 }));
+    writeSignal("CTL-R42", "triage", "done"); // triaged-waiting, unblocked → admitted
+    const transitions = [];
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: fakeDispatch(),
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0,
+      fetchBatch: mkBatch(() => relUnblocked({ labels: ["waiting"] })),
+      hasTriageArtifact: () => true,
+      writeStatus: { ...noWrites(), removeLabel: () => ({ removed: true }) },
+      appendWorkerTransitionEvent: (ev) => transitions.push(ev),
+    });
+    const cleared = transitions.find(
+      (e) => e.ticket === "CTL-R42" && e.toDisposition === null && e.source === "scheduler-admission"
+    );
+    expect(cleared).toBeDefined();
+    expect(cleared.fromDisposition).toBe("queued");
+  });
 });
