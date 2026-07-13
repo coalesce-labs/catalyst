@@ -479,6 +479,13 @@ export function synthesizeQueuedTicket(
   teamRepoMap?: Record<string, string>,
   replicaTitles?: Record<string, string>
 ): BoardTicket;
+/** One BoardTicket-shaped card (type:"orphan-pr", attention:"needs-human") per notified
+ *  orphan in the orphan-PR state file — no capacity/queue impact (deriveStatusCounts
+ *  skips them). */
+export function synthesizeOrphanTickets(
+  orphanState: Record<string, unknown> | null | undefined,
+  now?: number
+): BoardTicket[];
 /** CTL-1378 (#2421 edge): the replica-first title chain shared by synthesizeQueuedTicket
  *  (the Todo card) AND the dispatch-queue payload, so the two never disagree. CTC replica
  *  title → eligible-projection title → bare id. */
