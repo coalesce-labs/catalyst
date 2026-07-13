@@ -1647,6 +1647,16 @@ const TICK_CONVERGED_DISPOSITIONS = [
 ];
 // Keep HELD_LABELS for convergeHeldLabel (thin alias) backward compat.
 const HELD_LABELS = [HELD_LABEL_BLOCKED, HELD_LABEL_WAITING];
+// CTL-764 finding 1: the pre-migration disposition value. HELD_LABEL_WAITING now
+// resolves to "queued", so the rename dropped the legacy "waiting" out of every
+// removal loop — a ticket still carrying it kept rendering as queued via the board
+// back-compat path and could exclusive-conflict with applying the new "queued".
+// This value is NEVER APPLIED (only "queued" is); it lives in the REMOVABLE sets so
+// clear-on-pickup / convergence keep draining it until historical labels are gone.
+const LEGACY_HELD_LABEL_WAITING = "waiting";
+// Removable superset = the applicable held labels PLUS the legacy value. Used only by
+// the remove loops (removable ≠ applicable).
+const HELD_LABELS_REMOVABLE = [...HELD_LABELS, LEGACY_HELD_LABEL_WAITING];
 
 // Terminal Linear states a blocker can be in (a blocker in one of these does NOT
 // hold its dependent). Single source of truth: lib/dependency-graph.mjs
@@ -1707,8 +1717,9 @@ export function convergeHeldLabel(
   }
   const have = new Set(current ?? []);
   let writes = 0;
-  // Remove any held label that is present but not desired.
-  for (const label of HELD_LABELS) {
+  // Remove any held label that is present but not desired. CTL-764 finding 1: the
+  // removable set includes the legacy "waiting" so it is drained on clear-on-pickup.
+  for (const label of HELD_LABELS_REMOVABLE) {
     if (label !== desired && have.has(label)) {
       safeWrite(() => writeStatus.removeLabel(ticket, label), { ticket, phase: "admission" });
       writes++;
@@ -1785,7 +1796,9 @@ export function convergeDispositionLabel(
   let writes = 0;
   // Remove any tick-converged disposition label that is present but not desired.
   // needs-human is intentionally excluded from this removable set — it is sticky.
-  for (const label of TICK_CONVERGED_DISPOSITIONS) {
+  // CTL-764 finding 1: the legacy "waiting" is drained here too (removable, never
+  // applied) so a mid-rollout ticket cannot keep it alongside the new "queued".
+  for (const label of [...TICK_CONVERGED_DISPOSITIONS, LEGACY_HELD_LABEL_WAITING]) {
     if (label !== desired && have.has(label)) {
       safeWrite(() => writeStatus.removeLabel(ticket, label), { ticket, phase: "admission" });
       writes++;
@@ -1841,7 +1854,9 @@ export function convergeStartedHeldLabels(
     fenceGuard: fence = fenceGuard,
   } = {}
 ) {
-  for (const label of HELD_LABELS) {
+  // CTL-764 finding 1: iterate the removable superset so a STARTED ticket still
+  // wearing the legacy "waiting" (and its once-marker) has it retracted too.
+  for (const label of HELD_LABELS_REMOVABLE) {
     if (label === desired) continue;
     const base = join(orchDir, "workers", ticket, `.linear-label-${label}`);
     if (!existsSync(`${base}.applied`) && !existsSync(`${base}.skipped`)) continue;
@@ -2069,13 +2084,17 @@ export function gcDispatchCooldowns(orchDir, eligibleIdentifiers, now) {
 // CTL-713: consecutive-failure escalation. When a (ticket,phase) has failed N
 // times in a row with the same code, apply needs-human via labelOnce and emit
 // cooldown-escalated. labelOnce's .applied marker makes this idempotent.
+// CTL-764 finding 13: returns whether the sticky needs-human label was actually
+// written this call (false below threshold, on belief-owner deferral, or when
+// labelOnce no-ops on a persisted marker) so the caller emits the worker.transition
+// escalation only on a genuine label write — never a false escalation event.
 export function maybeEscalateDispatchFailures(
   orchDir,
   marker,
   { writeStatus, appendEvent, env = process.env } = {}
 ) {
-  if (!marker || marker.consecutiveFailures < DISPATCH_FAILURE_ESCALATION_THRESHOLD) return;
-  labelNeedsHumanUnlessBeliefOwner(orchDir, marker.ticket, writeStatus, {
+  if (!marker || marker.consecutiveFailures < DISPATCH_FAILURE_ESCALATION_THRESHOLD) return false;
+  const wrote = labelNeedsHumanUnlessBeliefOwner(orchDir, marker.ticket, writeStatus, {
     env,
     site: "dispatch-failures",
     log,
@@ -2087,6 +2106,7 @@ export function maybeEscalateDispatchFailures(
     code: marker.code,
     consecutiveFailures: marker.consecutiveFailures,
   });
+  return wrote;
 }
 
 // CTL-712: the refused-dispatch path writes NO signal file (the artifact gate
@@ -2526,14 +2546,18 @@ export function terminalDoneOnce(
   } = {}
 ) {
   const marker = join(orchDir, "workers", ticket, ".terminal-done.applied");
-  if (existsSync(marker)) return;
+  // CTL-764 finding 7: return whether a REAL Done write landed (+ its from_state) so
+  // the caller can emit the terminal worker.transition independently of any label
+  // clear. `null` on every no-write path (marker present, fence-suppressed, fenced
+  // out, idempotent skip, throw) — the caller only emits on a genuine Done write.
+  if (existsSync(marker)) return null;
   // CTL-1329 (extended to the terminal-Done branch, CTL-1157 A1): if a prior tick
   // already fence-suppressed this dir, skip the fence-check subprocess (and the
   // Linear reads it fronts) for the cooldown window instead of re-probing ~2x/sec.
   // A genuinely-current fence self-heals after at most one window. Previously ONLY
   // the stalled/failed branch stamped this cooldown, so a stale terminal fence
   // burned unbounded — the CTL-1423 ~1,090/hr `stale fence` WARN storm.
-  if (isFenceSuppressFresh(orchDir, ticket, now())) return;
+  if (isFenceSuppressFresh(orchDir, ticket, now())) return null;
   if (!fence({ ticket, orchDir, multiHost, gateway, self })) {
     log.warn(
       { ticket },
@@ -2543,7 +2567,7 @@ export function terminalDoneOnce(
     // for a window (bounds the burn to once-per-cooldown), the same rail the
     // stalled/failed branch uses immediately before its needs-human write.
     stampFenceSuppress(orchDir, ticket, now());
-    return;
+    return null;
   }
   // CTL-1157 (ALARM-NOT-BLOCK — THE REVERSAL): the terminal sweep writes Done
   // DIRECTLY (no agent to reason). The earlier behavior REFUSED the write when an
@@ -2633,6 +2657,9 @@ export function terminalDoneOnce(
             "ctl-1157: terminal-sweep wrote Done while an open PR still exists or the check was unverifiable — alarm emitted (recovery.done-applied-with-open-pr)"
           );
         }
+        // CTL-764 finding 7: a genuine Done write landed → signal the caller to emit
+        // the terminal worker.transition stage event.
+        return { realDoneWrite: true, from_state: res?.from_state ?? null };
       }
     }
   } catch (err) {
@@ -2641,6 +2668,7 @@ export function terminalDoneOnce(
       "scheduler: terminal-Done write-back threw — continuing tick"
     );
   }
+  return null;
 }
 
 // reconcileTerminalBackstop — CTL-758 defense-in-depth (the reconcile backstop).
@@ -3551,12 +3579,20 @@ export function schedulerTick(
     if (!appendWorkerTransitionEvent) return;
     // Disposition-only-on-change guard.
     if (toDisposition !== undefined) {
+      const seen = lastDispositionEmit.has(ticket);
       const last = lastDispositionEmit.get(ticket);
+      const normalizedTo = toDisposition ?? null;
+      // CTL-764 finding 10: a daemon restart clears lastDispositionEmit, so the FIRST
+      // confirmed clear after restart (toDisposition=null) would normalize last→null,
+      // satisfy the only-on-change guard, and drop a GENUINE needs-*→cleared event.
+      // Let it through when the ticket is first-seen this lifetime AND fromDisposition
+      // proves the prior non-null state (the clear-path callers pass it).
+      const firstSeenClear = !seen && normalizedTo === null && fromDisposition != null;
       // Only-on-change guard. Normalize a first-seen (undefined) last to null so
       // an initial null→null healthy tick emits nothing — one canonical event per
       // GENUINE change (verify CTL764-VER-6[low]: undefined===null was false, so a
       // first-seen never-held ticket fired one spurious null→null no-op).
-      if ((last ?? null) === (toDisposition ?? null)) return;
+      if ((last ?? null) === normalizedTo && !firstSeenClear) return;
       // CTL-764 Phase 5: needs-human is STICKY — cleared only by clearStalledLabel's
       // onRemoved (confirmed Linear label removal; sources terminal-done-clear /
       // no-stall-clear), NEVER by a steady-state admission clear-on-pickup or a
@@ -3567,13 +3603,13 @@ export function schedulerTick(
       // the genuine clear runs. Without cycle-member-clear here, a dep-cycle member
       // storms A.5(needs-human)→A.7(null) every tick (verify CTL764-VER-2[med]).
       if (
-        toDisposition === null &&
+        normalizedTo === null &&
         last === "needs-human" &&
         (source === "scheduler-admission" || source === "cycle-member-clear")
       ) {
         return;
       }
-      lastDispositionEmit.set(ticket, toDisposition ?? null);
+      lastDispositionEmit.set(ticket, normalizedTo);
     }
     try {
       appendWorkerTransitionEvent({
@@ -3720,10 +3756,17 @@ export function schedulerTick(
           expiresAt: cd.expiresAt,
           consecutiveFailures: cd.consecutiveFailures,
         });
-        maybeEscalateDispatchFailures(orchDir, cd, {
-          writeStatus,
-          appendEvent: appendCooldownEscalatedEvent,
-        });
+        if (
+          maybeEscalateDispatchFailures(orchDir, cd, {
+            writeStatus,
+            appendEvent: appendCooldownEscalatedEvent,
+          })
+        ) {
+          // CTL-764 finding 13: a ticket escalated to needs-human solely by
+          // consecutive dispatch failures gets a worker.transition too — gated on the
+          // actual sticky-label write (per finding 8) so a re-escalation is silent.
+          recordTransition({ ticket, toDisposition: "needs-human", source: "dispatch-failures" });
+        }
         log.warn(
           { ticket, phase, verifyReason: v.reason },
           "scheduler: dispatched signal verification failed"
@@ -3762,10 +3805,16 @@ export function schedulerTick(
         consecutiveFailures: cd.consecutiveFailures,
         ...diag,
       });
-      maybeEscalateDispatchFailures(orchDir, cd, {
-        writeStatus,
-        appendEvent: appendCooldownEscalatedEvent,
-      });
+      if (
+        maybeEscalateDispatchFailures(orchDir, cd, {
+          writeStatus,
+          appendEvent: appendCooldownEscalatedEvent,
+        })
+      ) {
+        // CTL-764 finding 13: emit the escalation transition on a genuine sticky-label
+        // write (per finding 8) — a re-escalation on a persisted marker stays silent.
+        recordTransition({ ticket, toDisposition: "needs-human", source: "dispatch-failures" });
+      }
       if (failLogMsg) {
         log.warn(
           {
@@ -4974,17 +5023,20 @@ export function schedulerTick(
           if (triagedWaiting.includes(member)) {
             cycleMembers.add(member);
             if (fenceGuard({ ticket: member, orchDir, multiHost, gateway, self })) {
-              labelNeedsHumanUnlessBeliefOwner(orchDir, member, writeStatus, {
+              const wrote = labelNeedsHumanUnlessBeliefOwner(orchDir, member, writeStatus, {
                 env,
                 site: "dependency-cycle",
                 log,
               });
-              // CTL-764 Phase 5: emit worker.transition for needs-human apply.
-              recordTransition({
-                ticket: member,
-                toDisposition: "needs-human",
-                source: "dependency-cycle",
-              });
+              // CTL-764 finding 8: emit only on an actual label write (a persisted
+              // marker after restart / belief-owner deferral is not a fresh escalation).
+              if (wrote) {
+                recordTransition({
+                  ticket: member,
+                  toDisposition: "needs-human",
+                  source: "dependency-cycle",
+                });
+              }
             } else {
               log.warn(
                 { ticket: member },
@@ -5726,17 +5778,20 @@ export function schedulerTick(
           // CTL-863 fence: external Linear write — a zombie host that lost its
           // claim must not label after takeover (mirrors the A.5 cycle site).
           if (fenceGuard({ ticket: member, orchDir, multiHost, gateway, self })) {
-            labelNeedsHumanUnlessBeliefOwner(orchDir, member, writeStatus, {
+            const wrote = labelNeedsHumanUnlessBeliefOwner(orchDir, member, writeStatus, {
               env,
               site: "ctl-925-cycle",
               log,
             });
-            // CTL-764 Phase 5: emit worker.transition for needs-human apply.
-            recordTransition({
-              ticket: member,
-              toDisposition: "needs-human",
-              source: "ctl-925-cycle",
-            });
+            // CTL-764 finding 8: emit only on an actual label write (a persisted
+            // marker after restart / belief-owner deferral is not a fresh escalation).
+            if (wrote) {
+              recordTransition({
+                ticket: member,
+                toDisposition: "needs-human",
+                source: "ctl-925-cycle",
+              });
+            }
           }
         }
       }
@@ -6170,7 +6225,7 @@ export function schedulerTick(
       // CTL-863: thread multiHost so terminalDoneOnce's internal fence guard
       // suppresses a post-takeover zombie's terminal Done write on a multi-host
       // cluster (no-op single-host: multiHost=false → guard always passes).
-      terminalDoneOnce(orchDir, ticket, writeStatus, emitStateWrite, {
+      const doneResult = terminalDoneOnce(orchDir, ticket, writeStatus, emitStateWrite, {
         multiHost,
         gateway,
         self,
@@ -6178,6 +6233,18 @@ export function schedulerTick(
         emitDoneWithOpenPr,
         emitDoneApplied,
       });
+      // CTL-764 finding 7: emit the terminal Done stage transition on a REAL Done
+      // write — independent of the needs-human clear below (a normally-completed
+      // ticket has no needs-human marker, so the onRemoved hook never fires). Gated
+      // on the actual write so a per-tick re-visit of an already-Done dir emits once.
+      if (doneResult?.realDoneWrite) {
+        recordTransition({
+          ticket,
+          toStage: "done",
+          fromStage: doneResult.from_state,
+          source: "terminal-done",
+        });
+      }
       // CTL-646: terminal Done unconditionally clears needs-human (belt + teardown path).
       // CTL-703: worktree teardown is now the `teardown` FSM phase (teardownWorktreeOnce
       // removed) — only the label clear remains inline here.
@@ -6279,13 +6346,18 @@ export function schedulerTick(
           // Non-terminal stalled/failed ticket → apply the belief-aware needs-human
           // label (CTL-1241: skipped when the belief engine owns the reclaim).
           if (fenceGuard({ ticket, orchDir, multiHost, gateway, self })) {
-            labelNeedsHumanUnlessBeliefOwner(orchDir, ticket, writeStatus, {
+            const wrote = labelNeedsHumanUnlessBeliefOwner(orchDir, ticket, writeStatus, {
               env,
               site: "terminal-sweep",
               log,
             });
-            // CTL-764 Phase 5: emit worker.transition for needs-human apply.
-            recordTransition({ ticket, toDisposition: "needs-human", source: "terminal-sweep" });
+            // CTL-764 finding 8: emit worker.transition ONLY when the label write
+            // actually occurred. A persisted .linear-label-needs-human marker after a
+            // daemon restart (labelOnce no-ops) or a belief-owner deferral changes no
+            // label — recording a fresh needs-human transition there is a false escalation.
+            if (wrote) {
+              recordTransition({ ticket, toDisposition: "needs-human", source: "terminal-sweep" });
+            }
           } else {
             log.warn(
               { ticket },
@@ -6340,6 +6412,39 @@ export function schedulerTick(
         emitStateWrite,
         onRetract: () => lastHeldEmitState.delete(ticket),
       });
+    }
+    // CTL-764 finding 5: converge the durable needs-input disposition label for a
+    // parked worker. convergeDispositionLabel is the sole applier/remover of the
+    // needs-input label — without this a needs-input park changes only the local
+    // signal and the Linear label never lands. Current labels come from the CTL-1079
+    // broker projection (the same cheap read the retraction sweep uses), so steady
+    // state is zero-write and needs-human precedence is honored inside the converger;
+    // a projection miss skips this tick rather than blind-applying (no write storm).
+    // The genuine needs-input→cleared emission is owned by the daemon comment-wake
+    // path (finding 11); here we keep the only-on-change map honest so a later re-park
+    // re-emits.
+    if (Object.values(signals).some((s) => s === "needs-input")) {
+      const hit = gatewayLabelsHit(gateway, ticket);
+      if (hit && fenceGuard({ ticket, orchDir, multiHost, gateway, self })) {
+        const writes = convergeDispositionLabel(
+          ticket,
+          hit.labels,
+          HELD_LABEL_NEEDS_INPUT,
+          retractionWriteStatus,
+          { orchDir, now }
+        );
+        if (writes > 0) {
+          recordTransition({
+            ticket,
+            toDisposition: HELD_LABEL_NEEDS_INPUT,
+            source: "needs-input-park",
+          });
+        }
+      }
+    } else if (lastDispositionEmit.get(ticket) === HELD_LABEL_NEEDS_INPUT) {
+      // Daemon comment-wake cleared the label out-of-band; reset the dedup (no emit —
+      // finding 11 already recorded the clear) so a future re-park re-emits.
+      lastDispositionEmit.set(ticket, null);
     }
     // CTL-695: nominate terminal workers for reaping once. Covers the gaps the
     // happy-path emitPredecessorReap (advance-success only) never reaches:

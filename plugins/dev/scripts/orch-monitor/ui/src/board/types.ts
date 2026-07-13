@@ -140,6 +140,11 @@ export interface BoardTicket {
   held?: "blocked" | "queued" | "waiting" | null;
   /** Dependency ids a `blocked` hold is waiting on (only meaningful when held === "blocked"). */
   blockers?: string[];
+  /** CTL-764 Phase 8: raw Linear labels (board-data.mjs passthrough) — the ONLY
+   *  place a needs-input vs needs-human disposition survives for a not-in-flight
+   *  ticket, since board-data hardcodes attention:"needs-human" for these inbox
+   *  cards. Empty/absent when the board payload carried none. */
+  labels?: string[];
   /** CTL-901 (HOME3): ISO applied-at of the held labels (durable ticket_state
    *  held_since, projected by the broker — BFF11). The honest "how long has it
    *  been waiting on you" anchor; null when no durable stamp exists (rendered

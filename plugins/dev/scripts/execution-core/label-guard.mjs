@@ -368,6 +368,13 @@ export function beliefOwnsNeedsHuman(env = process.env) {
 //     site  : string                 (short site-id for the deferral log)
 //     log   : { info }              (the module's log instance)
 //   }
+//
+// CTL-764 finding 8: returns whether THIS call performed a label write attempt —
+// `false` when it deferred to the belief owner OR labelOnce found a terminal marker
+// (a persisted needs-human after a daemon restart), `true` when labelOnce performed
+// the once-application. Callers gate their worker.transition emission on this so a
+// no-op re-application (no label changed) never records a fresh escalation. Existing
+// callers ignore the return, so this stays backward-compatible.
 export function labelNeedsHumanUnlessBeliefOwner(
   orchDir,
   ticket,
@@ -378,10 +385,10 @@ export function labelNeedsHumanUnlessBeliefOwner(
     // Defer to executeEscalations — R12 belief owner. Record, do not page.
     const logger = logArg ?? log;
     logger.info({ ticket, site }, "needs-human deferred to belief owner (CTL-1241)");
-    return;
+    return false;
   }
   // Enforcement OFF (default): call labelOnce exactly as before.
-  labelOnce(orchDir, ticket, "needs-human", writeStatus);
+  return labelOnce(orchDir, ticket, "needs-human", writeStatus);
 }
 
 export function recordEscalation(orchDir, ticket, phase, reason, now) {

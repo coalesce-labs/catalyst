@@ -3,7 +3,7 @@
 
 import { describe, it, expect } from "bun:test";
 
-const { deriveCapacity, deriveStatusCounts, synthesizeQueuedTicket } =
+const { deriveCapacity, deriveStatusCounts, synthesizeQueuedTicket, synthesizeOrphanTickets } =
   await import("./lib/board-data.mjs");
 
 // ── deriveCapacity: triage carve-out ──────────────────────────────────────────
@@ -204,5 +204,47 @@ describe("deriveStatusCounts over the real synthesizeQueuedTicket deck (CTL764-V
     ];
     const r = deriveStatusCounts(deck, new Set());
     expect(r).toEqual({ queued: 1, blocked: 2, needsInput: 1, needsHuman: 0 });
+  });
+});
+
+// ── Codex finding 4: orphan-PR cards excluded from deriveStatusCounts ──────────
+// synthesizeOrphanTickets documents its cards as having "no capacity/queue impact"
+// (board-data.mjs ~2234), but they carry attention:"needs-human" like a real
+// escalation, so deriveStatusCounts must skip type:"orphan-pr" explicitly or they
+// inflate the needsHuman count the deck/badges derive from.
+describe("deriveStatusCounts — orphan-PR cards excluded (Codex finding 4)", () => {
+  it("a synthesized orphan-PR card does NOT inflate needsHuman", () => {
+    const orphanState = {
+      "catalyst#123": {
+        repo: "catalyst",
+        number: 123,
+        title: "Orphan PR",
+        notifiedAt: "2026-07-01T00:00:00Z",
+        firstSeenAt: "2026-07-01T00:00:00Z",
+        mergeStateStatus: "DIRTY",
+      },
+    };
+    const orphanTickets = synthesizeOrphanTickets(orphanState, Date.now());
+    expect(orphanTickets).toHaveLength(1);
+    expect(orphanTickets[0].type).toBe("orphan-pr");
+    expect(orphanTickets[0].attention).toBe("needs-human");
+
+    const r = deriveStatusCounts(orphanTickets, new Set());
+    expect(r.needsHuman).toBe(0);
+  });
+
+  it("a real needs-human ticket alongside an orphan-PR card: only the real one counts", () => {
+    const realTicket = { id: "CTL-300", labels: [], attention: "needs-human", workerStatus: null };
+    const orphanState = {
+      "catalyst#124": {
+        repo: "catalyst",
+        number: 124,
+        title: "Another orphan PR",
+        notifiedAt: "2026-07-01T00:00:00Z",
+      },
+    };
+    const orphanTickets = synthesizeOrphanTickets(orphanState, Date.now());
+    const r = deriveStatusCounts([realTicket, ...orphanTickets], new Set());
+    expect(r.needsHuman).toBe(1);
   });
 });

@@ -80,9 +80,12 @@ export interface SlotAssignment {
  * any remainder are over-capacity. Empty slots fill the gap up to maxParallel.
  *
  * Dead workers (activeState === "dead") are excluded entirely — they hold no slot.
+ * CTL-764 Phase 7: triage-phase workers are ALSO excluded — they are intake, not
+ * a maxParallel slot consumer (mirrors board-data.mjs deriveCapacity's `w.phase
+ * !== "triage"` carve-out), so the deck agrees with config.inFlight/freeSlots.
  */
 export function assignSlots(workers: readonly BoardWorker[], maxParallel: number): SlotAssignment {
-  const live = workers.filter(isLiveWorker);
+  const live = workers.filter(isLiveWorker).filter((w) => w.phase !== "triage");
   const sorted = [...live].sort((a, b) => {
     const sa = a.startedAt ?? 0;
     const sb = b.startedAt ?? 0;
@@ -166,7 +169,9 @@ const itemTicketId = (i: HoldingBucketItem): string =>
  *  - stalled:     tickets with status=stalled (circuit breaker, CTL-1066).
  *  - blocked:     tickets with held/workerStatus=blocked, not in flight.
  *  - queued:      tickets with workerStatus=queued (or legacy held=waiting), not in flight.
- *  - needsInput:  tickets with workerStatus=needs-input, not in flight.
+ *  - needsInput:  tickets with workerStatus=needs-input, OR (CTL-764 Phase 8 fix)
+ *                 the needs-input label on a parked ticket whose attention was
+ *                 hardcoded to needs-human by board-data — not in flight.
  *  - needsHuman:  tickets with workerStatus=needs-human (separate from needs-you; disposition axis).
  *
  * Single-valued precedence: needs-human > needs-input > blocked > queued.
@@ -206,6 +211,17 @@ export function groupHoldingBuckets(
   const needsHuman: HoldingBucketItem[] = [];
   for (const t of tickets) {
     if (inFlightTicketIds.has(t.id)) continue;
+    // CTL-764 Phase 8: a parked/queued ticket's needs-input disposition survives
+    // ONLY in `labels` — board-data hardcodes attention:"needs-human" for these
+    // inbox cards (synthesizeParkedNeedsHumanTickets / the live-ticket assembler),
+    // so the label must be checked BEFORE the needs-human short-circuit below or
+    // every needs-input card collapses into "Needs you" (mirrors the label-first
+    // precedence in board-data.mjs's deriveStatusCounts).
+    const labels = t.labels ?? [];
+    if (labels.includes("needs-input") && !labels.includes("needs-human")) {
+      needsInput.push({ kind: "ticket", ticket: t });
+      continue;
+    }
     // CTL-1180: not-in-flight needs-human attention → needs-you (operator-prompt axis).
     if (t.attention === "needs-human") {
       needsYou.push({ kind: "ticket", ticket: t });

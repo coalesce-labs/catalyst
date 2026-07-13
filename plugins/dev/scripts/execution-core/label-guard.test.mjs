@@ -811,4 +811,39 @@ describe("labelNeedsHumanUnlessBeliefOwner (CTL-1241)", () => {
     });
     expect(ws.calls.length).toBe(1);
   });
+
+  // CTL-764 finding 8: the return value gates the caller's worker.transition emission
+  // — a fresh apply is `true`; a no-op (persisted marker / belief deferral) is `false`.
+  test("CTL-764 finding 8 — returns true on a fresh apply (a label write happened)", () => {
+    const ws = makeWS();
+    mkdirSync(join(orchDir, "workers", "CTL-8A"), { recursive: true });
+    const wrote = labelNeedsHumanUnlessBeliefOwner(orchDir, "CTL-8A", ws, {
+      env: { CATALYST_INTENTS_ENFORCE: "0" },
+      log: { info: () => {} },
+    });
+    expect(wrote).toBe(true);
+  });
+
+  test("CTL-764 finding 8 — returns false on a persisted marker (labelOnce no-op after restart)", () => {
+    const ws = makeWS();
+    const dir = join(orchDir, "workers", "CTL-8B");
+    mkdirSync(dir, { recursive: true });
+    // A needs-human already applied this lifetime — the once-marker persists on disk.
+    writeFileSync(join(dir, ".linear-label-needs-human.applied"), "");
+    const wrote = labelNeedsHumanUnlessBeliefOwner(orchDir, "CTL-8B", ws, {
+      env: { CATALYST_INTENTS_ENFORCE: "0" },
+      log: { info: () => {} },
+    });
+    expect(wrote).toBe(false);
+    expect(ws.calls.length).toBe(0); // labelOnce short-circuited on the marker — no write
+  });
+
+  test("CTL-764 finding 8 — returns false when deferring to the belief owner", () => {
+    const ws = makeWS();
+    const wrote = labelNeedsHumanUnlessBeliefOwner(orchDir, "CTL-8C", ws, {
+      env: { CATALYST_INTENTS_ENFORCE: "1" },
+      log: { info: () => {} },
+    });
+    expect(wrote).toBe(false);
+  });
 });

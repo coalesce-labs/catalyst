@@ -146,6 +146,52 @@ describe("buildWorkerTransitionEvent", () => {
     expect(ev.body.payload.to_stage).toBeNull();
   });
 
+  // CTL-764 finding 6: the documented schema keys must be stamped on attributes so
+  // off-machine filters (otel-forward drops body.payload) can scope by ticket / stage.
+  test("finding 6 — documented keys (ticket + from_stage/to_stage) stamped; legacy from_state/to_state kept", () => {
+    const ev = JSON.parse(
+      buildWorkerTransitionEvent({
+        ticket: "CTL-764",
+        fromStage: "Research",
+        toStage: "Plan",
+      })
+    );
+    expect(ev.attributes["catalyst.worker.ticket"]).toBe("CTL-764");
+    expect(ev.attributes["catalyst.worker.from_stage"]).toBe("Research");
+    expect(ev.attributes["catalyst.worker.to_stage"]).toBe("Plan");
+    // Legacy keys retained for on-machine consumers wired before the rename.
+    expect(ev.attributes["catalyst.worker.from_state"]).toBe("Research");
+    expect(ev.attributes["catalyst.worker.to_state"]).toBe("Plan");
+  });
+
+  // CTL-764 finding 12: a clear (from set → to null) is encoded as the "cleared"
+  // sentinel on the attribute (otel-forward serializes a null attribute to "" and
+  // drops body.payload). body.payload keeps the raw null for the on-machine reducer.
+  test("finding 12 — a cleared disposition is the 'cleared' sentinel on the attribute", () => {
+    const ev = JSON.parse(
+      buildWorkerTransitionEvent({
+        ticket: "CTL-764",
+        fromDisposition: "needs-human",
+        toDisposition: null,
+        source: "terminal-done-clear",
+      })
+    );
+    expect(ev.attributes["catalyst.worker.to_disposition"]).toBe("cleared");
+    expect(ev.attributes["catalyst.worker.from_disposition"]).toBe("needs-human");
+    // Raw null preserved in the body for the broker reducer (reads raw JSONL).
+    expect(ev.body.payload.to_disposition).toBeNull();
+  });
+
+  test("finding 12 — a both-null disposition axis stays null (stage-only, not a clear)", () => {
+    const ev = JSON.parse(
+      buildWorkerTransitionEvent({
+        ticket: "CTL-764",
+        toStage: "plan", // stage transition; disposition axis unchanged
+      })
+    );
+    expect(ev.attributes["catalyst.worker.to_disposition"]).toBeNull();
+  });
+
   test("broker shouldSkipEvent mirror passes worker.transition (not a broker event)", () => {
     const ev = JSON.parse(buildWorkerTransitionEvent({ ticket: "CTL-764" }));
     expect(shouldSkipEventMirror(ev)).toBe(false);
@@ -211,5 +257,31 @@ describe("scheduler production wiring (CTL764-VER-1 regression guard)", () => {
     expect(normalized).toContain(
       "appendWorkerTransitionEvent: runningOpts.appendWorkerTransitionEvent ?? defaultAppendWorkerTransitionEvent"
     );
+  });
+});
+
+// CTL-764 finding 5: convergeDispositionLabel is the only runtime code that applies
+// the durable needs-input disposition label — but before this fix production never
+// CALLED it (only its declaration + unit tests referenced it), so a needs-input park
+// changed only the local signal. schedulerTick's needs-input convergence is a closure
+// (not exported), so this guards the wiring at the source level: the converger must be
+// INVOKED somewhere beyond its own declaration.
+describe("CTL-764 finding 5 — convergeDispositionLabel production wiring", () => {
+  const schedulerSrc = readFileSync(
+    join(dirname(fileURLToPath(import.meta.url)), "scheduler.mjs"),
+    "utf8"
+  );
+
+  test("convergeDispositionLabel is invoked in the scheduler (not only declared)", () => {
+    const callLines = schedulerSrc
+      .split("\n")
+      .filter(
+        (l) =>
+          l.includes("convergeDispositionLabel(") &&
+          !l.trimStart().startsWith("//") &&
+          !l.trimStart().startsWith("*") &&
+          !l.includes("export function convergeDispositionLabel")
+      );
+    expect(callLines.length).toBeGreaterThan(0);
   });
 });

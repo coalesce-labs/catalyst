@@ -118,6 +118,7 @@ import {
   defaultClearStall, // CTL-1067: J3 stall-clear seam
 } from "./scheduler.mjs";
 import * as linearWrite from "./linear-write.mjs"; // CTL-1067: writeStatus for defaultClearStall
+import { appendWorkerTransitionEvent as defaultAppendWorkerTransitionEvent } from "./worker-transition-event.mjs"; // CTL-764 finding 11: needs-input→cleared on comment wake
 import {
   writeBootMarker,
   clearProgressMarks,
@@ -335,6 +336,9 @@ export async function handleCommentWake(
     botUserId,
     resolveSession = resolvePhaseSessionId,
     clearStall = () => false, // CTL-1067: J3 stall-clear seam; default no-op
+    // CTL-764 finding 11: canonical worker.transition emitter for the needs-input→
+    // cleared resolution. Injectable for tests; defaults to the real appender.
+    appendWorkerTransitionEvent = defaultAppendWorkerTransitionEvent,
   }
 ) {
   const { ticket } = parsed ?? {};
@@ -426,6 +430,20 @@ export async function handleCommentWake(
     } catch {
       /* fail-open */
     }
+    // CTL-764 finding 11: record the needs-input→cleared resolution in the canonical
+    // worker.transition stream. scheduler.mjs owns the park/apply emission; the clear
+    // is emitted here (the daemon removes the durable label out-of-band and redispatches
+    // — the scheduler never observes this edge). toDisposition:null is encoded as the
+    // "cleared" sentinel in the event builder (finding 12). Fail-open — never blocks the
+    // wake.
+    appendWorkerTransitionEvent({
+      ticket,
+      orchId: ticket,
+      fromDisposition: "needs-input",
+      toDisposition: null,
+      reason: "comment-wake",
+      source: "comment-wake-clear",
+    });
 
     dispatch(orchDir, ticket, parkedPhase, { handoffPath, resumeSession });
   }

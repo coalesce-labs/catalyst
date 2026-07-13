@@ -50,6 +50,14 @@ export function buildWorkerTransitionEvent({
   const ts = new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
   const orchVal = orchId ?? ticket;
 
+  // CTL-764 finding 12: a disposition CLEAR carries toDisposition=null with a proven
+  // prior (fromDisposition set). otel-forward serializes a null attribute as "" and
+  // drops body.payload, so off-machine a clear is indistinguishable from an unset axis
+  // — encode it as the "cleared" sentinel on the attribute. A both-null axis (a
+  // stage-only transition) stays null: there is no disposition change to report.
+  const toDispositionAttr =
+    toDisposition == null && fromDisposition != null ? "cleared" : toDisposition;
+
   const attributes = {
     "event.name": `worker.transition.${ticket}`,
     "event.entity": "worker",
@@ -58,12 +66,19 @@ export function buildWorkerTransitionEvent({
     "event.channel": "execution-core",
     "catalyst.orchestration": orchVal,
     "linear.issue.identifier": ticket,
+    // CTL-764 finding 6: stamp the documented schema keys (event-schema.md
+    // "worker.transition fields") so off-machine filters scoping by worker ticket or
+    // stage match — otel-forward forwards attributes but drops body.payload.
+    "catalyst.worker.ticket": ticket,
+    "catalyst.worker.from_stage": fromStage,
+    "catalyst.worker.to_stage": toStage,
     // Two-axis worker state dims — scalar strings (not arrays, not JSON-encoded).
     // OTLP forwarder reads ev.attributes; body.payload is dropped off-machine.
+    // from_state/to_state retained (the pre-schema keys) for on-machine consumers.
     "catalyst.worker.from_state": fromStage,
     "catalyst.worker.to_state": toStage,
     "catalyst.worker.from_disposition": fromDisposition,
-    "catalyst.worker.to_disposition": toDisposition,
+    "catalyst.worker.to_disposition": toDispositionAttr,
     "catalyst.worker.reason": reason,
   };
   // intValue dims — phase.attempt / phase.revive_count as numbers (CTL-636 pattern).

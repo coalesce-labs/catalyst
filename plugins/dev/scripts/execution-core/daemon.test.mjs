@@ -1381,6 +1381,33 @@ describe("handleCommentWake (CTL-549)", () => {
     expect(dispatchOrder.indexOf("remove")).toBeLessThan(dispatchOrder.indexOf("dispatch"));
   });
 
+  // CTL-764 finding 11: the daemon removes the durable needs-input label out-of-band and
+  // redispatches — the scheduler never sees this edge, so the needs-input→cleared
+  // resolution must be recorded here in the canonical worker.transition stream.
+  test("finding 11 — emits worker.transition(needs-input→cleared) on comment wake", async () => {
+    const orch = tmpOrcDir();
+    writeSignal(orch, "CTL-1", "implement", {
+      status: "needs-input",
+      parkedFrom: "implement",
+    });
+    const transitions = [];
+    await handleCommentWake(
+      { ticket: "CTL-1", body: "answer" },
+      {
+        orchDir: orch,
+        dispatch: () => ({ code: 0 }),
+        removeLabel: async () => {},
+        appendWorkerTransitionEvent: (ev) => transitions.push(ev),
+      }
+    );
+    const cleared = transitions.find(
+      (e) =>
+        e.ticket === "CTL-1" && e.fromDisposition === "needs-input" && e.toDisposition === null
+    );
+    expect(cleared).toBeDefined();
+    expect(cleared.source).toBe("comment-wake-clear");
+  });
+
   test("no-ops when ticket has no worker dir", async () => {
     const orch = tmpOrcDir();
     const dispatched = [];

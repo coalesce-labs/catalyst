@@ -667,7 +667,7 @@ Emitted by `recordTransition` in `scheduler.mjs` (sync chokepoint). Dims are **a
 | `catalyst.worker.ticket`           | string  | ticket identifier                                                           |
 | `catalyst.worker.to_stage`         | string  | next pipeline phase (e.g. `plan`) — present on stage transitions            |
 | `catalyst.worker.from_stage`       | string  | Linear from_state (e.g. `Research`) — present when known                    |
-| `catalyst.worker.to_disposition`   | string  | `queued` \| `blocked` \| `needs-input` \| `needs-human` \| `null` (cleared) |
+| `catalyst.worker.to_disposition`   | string  | `queued` \| `blocked` \| `needs-input` \| `needs-human` \| `cleared` (a clear — CTL-764 finding 12: encoded as the literal `cleared`, never `null`, so off-machine consumers can tell a clear from an unset axis; `body.payload.to_disposition` keeps the raw `null`) |
 | `catalyst.worker.from_disposition` | string  | previous disposition — present on clears                                    |
 | `catalyst.worker.reason`           | string  | human-readable reason — present when provided                               |
 | `phase.attempt`                    | integer | dispatch attempt count — present when known                                 |

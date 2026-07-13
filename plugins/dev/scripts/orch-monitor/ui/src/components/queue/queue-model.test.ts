@@ -154,6 +154,35 @@ describe("assignSlots", () => {
     expect(a.occupied).toEqual([]);
     expect(a.emptyCount).toBe(5);
   });
+
+  // CTL-764 Phase 7 (Codex finding 2): triage workers are intake, not a slot
+  // consumer — mirrors board-data.mjs deriveCapacity's `w.phase !== "triage"`.
+  it("excludes triage-phase workers — they hold no slot", () => {
+    const a = assignSlots(
+      [
+        w({ name: "impl", ticket: "A", startedAt: 1, phase: "implement" }),
+        w({ name: "intake", ticket: "B", startedAt: 2, phase: "triage" }),
+      ],
+      3
+    );
+    expect(a.occupied.map((x) => x.name)).toEqual(["impl"]);
+    expect(a.emptyCount).toBe(2);
+    expect(a.overCapacity).toEqual([]);
+  });
+
+  it("a live triage worker never consumes the last slot (deck agrees with config.freeSlots)", () => {
+    const a = assignSlots(
+      [
+        w({ name: "impl1", ticket: "A", startedAt: 1, phase: "implement" }),
+        w({ name: "impl2", ticket: "B", startedAt: 2, phase: "implement" }),
+        w({ name: "intake", ticket: "C", startedAt: 3, phase: "triage" }),
+      ],
+      2
+    );
+    expect(a.occupied.map((x) => x.name)).toEqual(["impl1", "impl2"]);
+    expect(a.emptyCount).toBe(0);
+    expect(a.overCapacity).toEqual([]);
+  });
 });
 
 describe("groupHoldingBuckets", () => {
@@ -340,6 +369,28 @@ describe("groupHoldingBuckets — queued/needsInput/needsHuman (CTL-764 Phase 8)
     expect(b.needsYou.items).toHaveLength(1);
     expect(b.queued.items).toHaveLength(0);
     expect(b.needsHuman.items).toHaveLength(0);
+  });
+
+  // CTL-764 Phase 8 (Codex finding 3): board-data hardcodes attention:"needs-human"
+  // for a parked ticket's inbox card even when its real disposition is needs-input —
+  // the label is the only place the distinction survives. The label check must run
+  // BEFORE the generic needs-human branch or this card collapses into "Needs you".
+  it("a needs-input LABEL (attention hardcoded to needs-human) routes to needsInput, not needsYou", () => {
+    const tickets = [t({ id: "CTL-20", attention: "needs-human", labels: ["needs-input"] })];
+    const b = groupHoldingBuckets(tickets, [], 4);
+    expect(b.needsInput.items.map((i) => (i.kind === "ticket" ? i.ticket.id : ""))).toEqual([
+      "CTL-20",
+    ]);
+    expect(b.needsYou.items).toHaveLength(0);
+  });
+
+  it("needs-human LABEL wins over needs-input LABEL when both present (precedence)", () => {
+    const tickets = [
+      t({ id: "CTL-21", attention: "needs-human", labels: ["needs-input", "needs-human"] }),
+    ];
+    const b = groupHoldingBuckets(tickets, [], 4);
+    expect(b.needsYou.items).toHaveLength(1);
+    expect(b.needsInput.items).toHaveLength(0);
   });
 
   it("holdingTicketIds includes queued/needsInput/needsHuman bucket ids", () => {

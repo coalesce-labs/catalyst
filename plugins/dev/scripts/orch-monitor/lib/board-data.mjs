@@ -705,6 +705,10 @@ export function deriveStatusCounts(tickets, inFlightTicketIds) {
   const counts = { queued: 0, blocked: 0, needsInput: 0, needsHuman: 0 };
   for (const t of Array.isArray(tickets) ? tickets : []) {
     if (inFlightTicketIds?.has?.(t.id)) continue;
+    // CTL-1175: orphan-PR cards (type:"orphan-pr") are synthetic Needs-You rows
+    // synthesizeOrphanTickets documents as having "no capacity/queue impact" — skip
+    // them here so they don't inflate the needsHuman count the deck/badges derive from.
+    if (t.type === "orphan-pr") continue;
     const labels = Array.isArray(t.labels) ? t.labels : [];
     const attn = t.attention ?? null;
     // CTL-764 (verify CTL764-VER-3): deriveAttention FOLDS the needs-input label
