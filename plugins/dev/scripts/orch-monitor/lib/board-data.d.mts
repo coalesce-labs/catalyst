@@ -140,8 +140,11 @@ export interface BoardTicket {
    *  ≥ 300 s; null otherwise. Mirrored into humanQuestion as the inbox sub-label. */
   prStuckReason?: string | null;
   updatedAt: string;
-  /** CTL-755 held indicator from the ticket's Linear labels. */
-  held: "blocked" | "waiting" | null;
+  /** CTL-755 held indicator from the ticket's Linear labels. CTL-764: awaiting-
+   *  capacity value renamed "waiting" → "queued" (heldFor now emits "queued");
+   *  legacy "waiting" retained for rollout tolerance at the payload boundary,
+   *  mirroring the UI-side BoardTicket.held union (types.ts). */
+  held: "blocked" | "queued" | "waiting" | null;
   /** Dependency ids a `blocked` hold is waiting on (from triage.json). */
   blockers: string[];
   /** CTL-901 (HOME3): ISO applied-at of the held (blocked/waiting) labels, from
@@ -241,6 +244,16 @@ export interface BoardConfig {
    *  Optional so existing BoardConfig fixtures stay valid; the runtime always
    *  populates it via deriveCapacity. */
   dead?: number;
+  /** CTL-764: monitor-dispatched triage workers — never consume a maxParallel slot.
+   *  Optional so existing BoardConfig fixtures stay valid. */
+  triage?: number;
+  /** CTL-764: per-disposition ticket counts (queued/blocked/needsInput/needsHuman).
+   *  Optional so existing BoardConfig fixtures stay valid; the runtime populates via
+   *  deriveStatusCounts spread into config. */
+  queued?: number;
+  blocked?: number;
+  needsInput?: number;
+  needsHuman?: number;
 }
 
 /** CTL-1050 §3.2: one current service outage, decorated onto the board payload
@@ -299,7 +312,7 @@ export const TERMINAL_FAILURE: Set<string>;
 export const PIPELINE_DONE_PHASE: string;
 export const HELD_LABEL_BLOCKED: string;
 export const HELD_LABEL_WAITING: string;
-export function heldFor(labels: unknown): "blocked" | "waiting" | null;
+export function heldFor(labels: unknown): "blocked" | "queued" | null;
 
 /** CTL-1131: the durable needs-human age anchor — the newest phase signal's
  *  needsHumanSince stamp. null when none carries it (never fabricated). */
@@ -351,9 +364,7 @@ export function deriveHumanQuestion(phaseSigs: unknown[]): string | null;
 /** CTL-1110: scan phaseSigs newest-first for the first signal whose explanation
  *  carries at least one of the extended render fields; returns the projected
  *  object (absent fields → null) or null when no signal carries any. */
-export function deriveExplanation(
-  phaseSigs: unknown[]
-): Record<string, string | null> | null;
+export function deriveExplanation(phaseSigs: unknown[]): Record<string, string | null> | null;
 
 /** CTL-1158: returns true when the PR has been in a real-blocker merge state
  *  (DIRTY/BLOCKED/UNSTABLE) for ≥ 300 s, anchored to prPhaseStartedAt. */
@@ -404,12 +415,26 @@ export function isWorkerDead(
   worker: { activeState?: BoardActiveState } | null | undefined
 ): boolean;
 
-/** CTL-928: PURE capacity summary — dead bg-workers excluded from inFlight +
- *  freeSlots, surfaced as `dead`. Drives the board config block. */
+/** CTL-928 / CTL-764: PURE capacity summary — dead bg-workers excluded from
+ *  inFlight + freeSlots, surfaced as `dead`; triage workers carved out
+ *  (never consume a maxParallel slot), surfaced as `triage`. */
 export function deriveCapacity(
-  workers: ReadonlyArray<{ activeState?: BoardActiveState; working?: boolean }>,
+  workers: ReadonlyArray<{ activeState?: BoardActiveState; working?: boolean; phase?: string }>,
   maxParallel: number
 ): BoardConfig;
+
+/** CTL-764 Phase 7: PURE per-disposition ticket counts. Tickets owned by a live
+ *  worker (in inFlightTicketIds) are excluded to avoid double-counting.
+ *  Precedence: needs-human > needs-input > blocked > queued. */
+export function deriveStatusCounts(
+  tickets: ReadonlyArray<{
+    id: string;
+    labels?: unknown[];
+    attention?: string | null;
+    workerStatus?: string | null;
+  }>,
+  inFlightTicketIds: Set<string>
+): { queued: number; blocked: number; needsInput: number; needsHuman: number };
 
 /** CTL-928: classify a worker's top-level liveness — durable bg-job state FIRST
  *  (a `running` signal is not proof of life), transcript age second. Returns
@@ -452,14 +477,14 @@ export function synthesizeQueuedTicket(
   linfo: Record<string, unknown>,
   relationBlockerMap?: Map<string, unknown>,
   teamRepoMap?: Record<string, string>,
-  replicaTitles?: Record<string, string>,
+  replicaTitles?: Record<string, string>
 ): BoardTicket;
 /** CTL-1378 (#2421 edge): the replica-first title chain shared by synthesizeQueuedTicket
  *  (the Todo card) AND the dispatch-queue payload, so the two never disagree. CTC replica
  *  title → eligible-projection title → bare id. */
 export function resolveQueuedTitle(
   eligible: { id?: string; title?: string | null } | null | undefined,
-  replicaTitles?: Record<string, string>,
+  replicaTitles?: Record<string, string>
 ): string;
 /** CTL-1152: PURE prefix→short-repo-name map from catalyst.monitor.linear.teams[].
  *  Maps each {key,vcsRepo} to UPPERCASE-key → lowercased basename; skips entries

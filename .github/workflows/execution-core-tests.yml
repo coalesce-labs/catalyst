@@ -304,6 +304,9 @@ jobs:
             test-setup.test.mjs \
             transcript-tail.test.mjs \
             triage-transition-event.test.mjs \
+            record-worker-transition.test.mjs \
+            worker-disposition.test.mjs \
+            worker-transition-event.test.mjs \
             turn-zero-gate.test.mjs \
             wait-event.test.mjs \
             wait-state-classifier.test.mjs \

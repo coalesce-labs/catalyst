@@ -21,6 +21,7 @@ import type { BoardWorker, BoardTicket, BoardConfig } from "../../board/types";
 import type { ClusterSignal } from "@/lib/cluster-signal";
 import { assignSlots, isLiveWorker, slotLabel } from "./queue-model";
 import { TickerNumber } from "./ticker-number";
+import { buildCapacityBadges } from "./capacity-badges";
 import {
   aggregateClusterCapacity,
   assignClusterSlots,
@@ -192,6 +193,38 @@ function RemoteSlotCard({ slot }: { slot: ClusterSlot }) {
   );
 }
 
+// CTL-764 Phase 8: capacity badges — the triage/queued/blocked/needs-input/
+// needs-human counts config carries alongside inFlight/freeSlots but the deck
+// never rendered. One dim pill per non-zero disposition; the legend (triage
+// only) surfaces via the native title tooltip, matching the header's minimal
+// "Linear calm" treatment (no new dependency, no extra chrome).
+function CapacityBadgeRow({ config }: { config: BoardConfig }) {
+  const badges = buildCapacityBadges(config);
+  if (badges.length === 0) return null;
+  return (
+    <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: -4, marginBottom: 14 }}>
+      {badges.map((b) => (
+        <span
+          key={b.label}
+          title={b.legend}
+          style={{
+            fontFamily: C.mono,
+            fontSize: 10.5,
+            padding: "1.5px 8px",
+            borderRadius: 6,
+            color: C.fgMuted,
+            background: C.s2,
+            border: `1px solid ${C.borderSubtle}`,
+            whiteSpace: "nowrap",
+          }}
+        >
+          {b.label} · {b.count}
+        </span>
+      ))}
+    </div>
+  );
+}
+
 export function SlotDeck({
   workers,
   tickets,
@@ -301,6 +334,9 @@ export function SlotDeck({
           </span>
         )}
       </div>
+
+      {/* 2.1b capacity badges (CTL-764 Phase 8) */}
+      <CapacityBadgeRow config={config} />
 
       {/* 2.2 slot deck */}
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(264px, 1fr))", gap: 10 }}>

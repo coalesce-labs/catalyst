@@ -37,29 +37,29 @@ set -uo pipefail
 # user-customised map without those legacy values — is preserved untouched.
 # Returns 0 (needs write) or 1 (skip).
 statemap_needs_write() {
-  local current="$1"
-  [[ -z $current || $current == "null" || $current == "{}" ]] && return 0
-  # contract satisfied? (all 6 values present) -> skip
-  if jq -e '
+	local current="$1"
+	[[ -z $current || $current == "null" || $current == "{}" ]] && return 0
+	# contract satisfied? (all 6 values present) -> skip
+	if jq -e '
         [to_entries[].value] as $v
         | (["Todo","Research","Plan","Implement","Validate","PR"]
            | all(. as $s | $v | index($s)))' <<<"$current" >/dev/null 2>&1; then
-    return 1
-  fi
-  # legacy signature present? -> rewrite
-  if jq -e '[to_entries[].value] | (index("In Progress") or index("In Review"))' \
-        <<<"$current" >/dev/null 2>&1; then
-    return 0
-  fi
-  # non-legacy, non-contract custom map -> preserve
-  return 1
+		return 1
+	fi
+	# legacy signature present? -> rewrite
+	if jq -e '[to_entries[].value] | (index("In Progress") or index("In Review"))' \
+		<<<"$current" >/dev/null 2>&1; then
+		return 0
+	fi
+	# non-legacy, non-contract custom map -> preserve
+	return 1
 }
 
 # The execution-core 9-phase -> 5-state collapse map. `todo` maps to the
 # pickable contract state `Todo`; verify+review collapse to `Validate`;
 # pr+monitor-merge+monitor-deploy collapse to `PR`.
 build_execution_core_state_map() {
-  jq -nc '{
+	jq -nc '{
     backlog: "Backlog",
     todo: "Todo",
     triage: "Triage",
@@ -78,7 +78,7 @@ build_execution_core_state_map() {
 # The contract states this script ensures, each with its Linear `type`.
 # Triage is intentionally excluded — it already exists in every team workflow.
 contract_states() {
-  jq -nc '[
+	jq -nc '[
     { name: "Todo",      type: "unstarted" },
     { name: "Research",  type: "unstarted" },
     { name: "Plan",      type: "started"   },
@@ -92,14 +92,14 @@ contract_states() {
 # absent from the fetched workflow-state set. Prints a space-separated list
 # (empty when the team already carries every contract state — idempotent).
 missing_contract_states() {
-  local fetched="$1"
-  local have name
-  have="$(echo "$fetched" | jq -r '.[].name' 2>/dev/null)"
-  for name in $(contract_states | jq -r '.[].name'); do
-    if ! grep -qxF "$name" <<<"$have"; then
-      printf '%s ' "$name"
-    fi
-  done
+	local fetched="$1"
+	local have name
+	have="$(echo "$fetched" | jq -r '.[].name' 2>/dev/null)"
+	for name in $(contract_states | jq -r '.[].name'); do
+		if ! grep -qxF "$name" <<<"$have"; then
+			printf '%s ' "$name"
+		fi
+	done
 }
 
 # The desired Linear git-automation contract (CTL-759). Linear can auto-move a
@@ -112,7 +112,7 @@ missing_contract_states() {
 # Keep in sync with contract_states() above (Done is a workflow `completed`
 # state Linear ships by default; PR is one of our contract states).
 desired_git_automations() {
-  jq -nc '[
+	jq -nc '[
     { event: "start", state: "PR"   },
     { event: "merge", state: "Done" }
   ]'
@@ -122,8 +122,8 @@ desired_git_automations() {
 # the raw GraphQL mutation string that creates one workflow state. `color` is
 # cosmetic; see CONTRACT_STATE_COLOR.
 build_workflow_state_create_mutation() {
-  local team_id="$1" name="$2" type="$3" color="$4"
-  cat <<MUTATION
+	local team_id="$1" name="$2" type="$3" color="$4"
+	cat <<MUTATION
 mutation {
   workflowStateCreate(input: {
     teamId: "${team_id}",
@@ -147,31 +147,179 @@ CONTRACT_STATE_COLOR="#5e6ad2"
 # Returns 0 on success, non-zero when deps are missing and `bun` is unavailable
 # (or when the install itself fails).
 ensure_execution_core_deps() {
-  local exec_dir="$1"
-  if [[ -d "${exec_dir}/node_modules" ]]; then
-    return 0
-  fi
-  if ! command -v bun >/dev/null 2>&1; then
-    echo "ERROR: ${exec_dir}/node_modules missing and 'bun' not on PATH; cannot install registry.mjs deps" >&2
-    return 1
-  fi
-  echo "Installing execution-core dependencies in ${exec_dir} (CTL-578)..." >&2
-  if ! (cd "$exec_dir" && bun install --frozen-lockfile >&2); then
-    echo "ERROR: bun install --frozen-lockfile failed in ${exec_dir}" >&2
-    return 1
-  fi
-  return 0
+	local exec_dir="$1"
+	if [[ -d "${exec_dir}/node_modules" ]]; then
+		return 0
+	fi
+	if ! command -v bun >/dev/null 2>&1; then
+		echo "ERROR: ${exec_dir}/node_modules missing and 'bun' not on PATH; cannot install registry.mjs deps" >&2
+		return 1
+	fi
+	echo "Installing execution-core dependencies in ${exec_dir} (CTL-578)..." >&2
+	if ! (cd "$exec_dir" && bun install --frozen-lockfile >&2); then
+		echo "ERROR: bun install --frozen-lockfile failed in ${exec_dir}" >&2
+		return 1
+	fi
+	return 0
 }
 
 # --- GraphQL transport ------------------------------------------------------
 # Isolated so tests can stub it via a fake `curl` earlier on PATH.
 # linear_graphql_post <token> <payload-json> — prints the raw response body.
 linear_graphql_post() {
-  local token="$1" payload="$2"
-  curl -s -X POST https://api.linear.app/graphql \
-    -H "Content-Type: application/json" \
-    -H "Authorization: ${token}" \
-    -d "$payload" 2>&1
+	local token="$1" payload="$2"
+	curl -s -X POST https://api.linear.app/graphql \
+		-H "Content-Type: application/json" \
+		-H "Authorization: ${token}" \
+		-d "$payload" 2>&1
+}
+
+# --- worker-status label group reconcile (CTL-764) --------------------------
+# Idempotently ensures a workspace-scoped exclusive 'worker-status' label group
+# with 4 members (queued/blocked/needs-input/needs-human) via issueLabelCreate.
+# Workspace-scoped (no teamId) so it applies across CTL + ADV teams without
+# duplication. Re-parents/supersedes CTL-755's team-level blocked/waiting labels
+# (no API delete — avoids stripping labels off historical tickets).
+
+# worker_status_group_name — the workspace-scoped exclusive label group name.
+worker_status_group_name() { echo "worker-status"; }
+
+# worker_status_members — jq array of {name,color} for the 4 group members.
+# Single source of truth: the daemon applies labels by these exact names.
+worker_status_members() {
+	jq -nc '[
+    {"name":"queued",      "color":"#0099cc"},
+    {"name":"blocked",     "color":"#eb5757"},
+    {"name":"needs-input", "color":"#f2c94c"},
+    {"name":"needs-human", "color":"#ff6b00"}
+  ]'
+}
+
+# build_issue_label_group_create_mutation <name> <color>
+# Workspace-scoped: omits teamId so Linear assigns the label to the workspace,
+# not a specific team (the daemon applies via linearis which lists workspace labels).
+build_issue_label_group_create_mutation() {
+	local name="$1" color="$2"
+	cat <<MUTATION
+mutation {
+  issueLabelCreate(input: {
+    name: "${name}",
+    color: "${color}",
+    isGroup: true
+  }) {
+    success
+    issueLabel { id name }
+  }
+}
+MUTATION
+}
+
+# build_issue_label_child_create_mutation <name> <color> <parentId>
+# Workspace-scoped child label: omits teamId, sets parentId for group membership.
+build_issue_label_child_create_mutation() {
+	local name="$1" color="$2" parent_id="$3"
+	cat <<MUTATION
+mutation {
+  issueLabelCreate(input: {
+    name: "${name}",
+    color: "${color}",
+    parentId: "${parent_id}"
+  }) {
+    success
+    issueLabel { id name }
+  }
+}
+MUTATION
+}
+
+# reconcile_worker_status_labels <token>
+# Ensures the workspace-scoped 'worker-status' group and its 4 children exist.
+# Idempotent: re-runs issue zero mutations when all present. Tolerant: any
+# Linear failure WARNs and returns 0 — never alters exit codes 0/2/3/4.
+reconcile_worker_status_labels() {
+	local token="$1"
+	local group_name
+	group_name=$(worker_status_group_name)
+
+	if [[ ${dry_run:-0} -eq 1 ]]; then
+		echo "DRY-RUN: would ensure worker-status label group (${group_name}) with 4 members (queued/blocked/needs-input/needs-human)"
+		return 0
+	fi
+
+	# Query workspace labels (team:null = workspace-scoped, not per-team).
+	local query payload resp
+	query='query { issueLabels(filter: {team: {null: true}}, first: 250) { nodes { id name isGroup parent { id } } } }'
+	payload=$(jq -nc --arg q "$query" '{query: $q}')
+	resp=$(linear_graphql_post "$token" "$payload")
+
+	if echo "$resp" | jq -e '.errors' >/dev/null 2>&1; then
+		local err
+		err=$(echo "$resp" | jq -r '.errors[0].message // "unknown error"')
+		echo "WARNING: reconcile_worker_status_labels: could not query workspace labels: ${err}" >&2
+		return 0
+	fi
+
+	# Parse the response into a JSON array once; all subsequent lookups use jq over this.
+	local labels_json
+	labels_json=$(echo "$resp" | jq -c '.data.issueLabels.nodes // []')
+
+	# Find existing workspace group by name + isGroup:true.
+	local group_id
+	group_id=$(echo "$labels_json" | jq -r --arg n "$group_name" \
+		'.[] | select(.name == $n and .isGroup == true) | .id // empty' | head -1)
+
+	if [[ -z $group_id ]]; then
+		# Create the group (workspace-scoped, isGroup:true, no teamId).
+		local group_mutation group_payload group_resp
+		group_mutation=$(build_issue_label_group_create_mutation "$group_name" "#5e6ad2")
+		group_payload=$(jq -nc --arg q "$group_mutation" '{query: $q}')
+		group_resp=$(linear_graphql_post "$token" "$group_payload")
+		if echo "$group_resp" | jq -e '.errors' >/dev/null 2>&1; then
+			local group_err
+			group_err=$(echo "$group_resp" | jq -r '.errors[0].message // "unknown error"')
+			echo "WARNING: reconcile_worker_status_labels: could not create group '${group_name}': ${group_err}" >&2
+			return 0
+		fi
+		group_id=$(echo "$group_resp" | jq -r '.data.issueLabelCreate.issueLabel.id // empty')
+		echo "reconcile_worker_status_labels: created group '${group_name}' (id: ${group_id})"
+	else
+		echo "reconcile_worker_status_labels: group '${group_name}' already present (id: ${group_id})"
+		# Note any pre-existing CTL-755 team-level labels now superseded by the workspace
+		# group (daemon applies by name). No API delete — avoids stripping historical tickets.
+		local stale
+		stale=$(echo "$labels_json" | jq -r \
+			'[ .[] | select((.name == "blocked" or .name == "waiting") and .isGroup == false and (.parent == null)) | .name ] | join(", ")' \
+			2>/dev/null || true)
+		[[ -n $stale ]] && echo "INFO: CTL-755 team-level labels (${stale}) superseded by workspace group (no API delete)" >&2
+	fi
+
+	# Create only missing children (those whose parentId matches the group).
+	local members_json child_names
+	members_json=$(worker_status_members)
+	child_names=$(echo "$members_json" | jq -r '.[].name')
+
+	while IFS= read -r member_name; do
+		local already
+		already=$(echo "$labels_json" | jq -r --arg n "$member_name" --arg pid "$group_id" \
+			'.[] | select(.name == $n and .parent.id == $pid) | .name // empty' | head -1)
+		if [[ -n $already ]]; then continue; fi
+
+		local member_color child_mutation child_payload child_resp
+		member_color=$(echo "$members_json" | jq -r --arg n "$member_name" \
+			'.[] | select(.name == $n) | .color // "#5e6ad2"')
+		child_mutation=$(build_issue_label_child_create_mutation "$member_name" "$member_color" "$group_id")
+		child_payload=$(jq -nc --arg q "$child_mutation" '{query: $q}')
+		child_resp=$(linear_graphql_post "$token" "$child_payload")
+		if echo "$child_resp" | jq -e '.errors' >/dev/null 2>&1; then
+			local child_err
+			child_err=$(echo "$child_resp" | jq -r '.errors[0].message // "unknown error"')
+			echo "WARNING: reconcile_worker_status_labels: could not create '${member_name}': ${child_err}" >&2
+		else
+			echo "reconcile_worker_status_labels: created child '${member_name}' under '${group_name}'"
+		fi
+	done <<<"$child_names"
+
+	return 0
 }
 
 # --- Linear git-automation reconcile (CTL-759) ------------------------------
@@ -193,400 +341,422 @@ linear_graphql_post() {
 # so this is a no-op there; value is durability at install + drift correction +
 # coverage for ADV / future teams.
 reconcile_git_automation_states() {
-  local team_id="$1" token="$2" fetched_states="$3"
+	local team_id="$1" token="$2" fetched_states="$3"
 
-  # Resolve target state-ids from the fetched workflow states (by name).
-  local pr_state_id done_state_id
-  pr_state_id=$(echo "$fetched_states" | jq -r 'map(select(.name == "PR")) | .[0].id // empty')
-  done_state_id=$(echo "$fetched_states" | jq -r 'map(select(.name == "Done")) | .[0].id // empty')
+	# Resolve target state-ids from the fetched workflow states (by name).
+	local pr_state_id done_state_id
+	pr_state_id=$(echo "$fetched_states" | jq -r 'map(select(.name == "PR")) | .[0].id // empty')
+	done_state_id=$(echo "$fetched_states" | jq -r 'map(select(.name == "Done")) | .[0].id // empty')
 
-  # Fetch existing git automations for the team (id + event + target state id).
-  local ga_query ga_payload ga_resp existing
-  # shellcheck disable=SC2016
-  ga_query='query($teamId: String!) { team(id: $teamId) { gitAutomationStates { nodes { id event state { id name } } } } }'
-  ga_payload=$(jq -nc --arg q "$ga_query" --arg t "$team_id" '{query: $q, variables: {teamId: $t}}')
-  ga_resp=$(linear_graphql_post "$token" "$ga_payload")
-  if echo "$ga_resp" | jq -e '.errors' >/dev/null 2>&1; then
-    local ga_err
-    ga_err=$(echo "$ga_resp" | jq -r '.errors[0].message // "unknown error"')
-    echo "WARNING: could not read git automations for team — skipping reconcile: $ga_err" >&2
-    return 0
-  fi
-  existing=$(echo "$ga_resp" | jq -c '.data.team.gitAutomationStates.nodes // []' 2>/dev/null)
-  if [[ -z $existing || $existing == "null" ]]; then
-    existing='[]'
-  fi
+	# Fetch existing git automations for the team (id + event + target state id).
+	local ga_query ga_payload ga_resp existing
+	# shellcheck disable=SC2016
+	ga_query='query($teamId: String!) { team(id: $teamId) { gitAutomationStates { nodes { id event state { id name } } } } }'
+	ga_payload=$(jq -nc --arg q "$ga_query" --arg t "$team_id" '{query: $q, variables: {teamId: $t}}')
+	ga_resp=$(linear_graphql_post "$token" "$ga_payload")
+	if echo "$ga_resp" | jq -e '.errors' >/dev/null 2>&1; then
+		local ga_err
+		ga_err=$(echo "$ga_resp" | jq -r '.errors[0].message // "unknown error"')
+		echo "WARNING: could not read git automations for team — skipping reconcile: $ga_err" >&2
+		return 0
+	fi
+	existing=$(echo "$ga_resp" | jq -c '.data.team.gitAutomationStates.nodes // []' 2>/dev/null)
+	if [[ -z $existing || $existing == "null" ]]; then
+		existing='[]'
+	fi
 
-  # upsert <event> <target_state_id> — create the node if absent, else update
-  # its stateId. Never called with an empty target id (caller guards).
-  _ga_upsert() {
-    local event="$1" state_id="$2"
-    local node_id mutation payload resp
-    node_id=$(echo "$existing" | jq -r --arg e "$event" 'map(select(.event == $e)) | .[0].id // empty')
-    if [[ -n $node_id ]]; then
-      # No change needed if the node already points at the desired state.
-      local cur_state_id
-      cur_state_id=$(echo "$existing" | jq -r --arg e "$event" 'map(select(.event == $e)) | .[0].state.id // empty')
-      if [[ $cur_state_id == "$state_id" ]]; then
-        echo "Git automation '${event}' already correct"
-        return 0
-      fi
-      # shellcheck disable=SC2016
-      mutation='mutation($id: String!, $input: GitAutomationStateUpdateInput!) { gitAutomationStateUpdate(id: $id, input: $input) { success } }'
-      payload=$(jq -nc --arg q "$mutation" --arg id "$node_id" --arg s "$state_id" \
-        '{query: $q, variables: {id: $id, input: {stateId: $s}}}')
-    else
-      # shellcheck disable=SC2016
-      mutation='mutation($input: GitAutomationStateCreateInput!) { gitAutomationStateCreate(input: $input) { success } }'
-      payload=$(jq -nc --arg q "$mutation" --arg t "$team_id" --arg e "$event" --arg s "$state_id" \
-        '{query: $q, variables: {input: {teamId: $t, event: $e, stateId: $s}}}')
-    fi
-    resp=$(linear_graphql_post "$token" "$payload")
-    if echo "$resp" | jq -e '.errors' >/dev/null 2>&1 \
-      || [[ "$(echo "$resp" | jq -r '.data.gitAutomationStateCreate.success // .data.gitAutomationStateUpdate.success // false')" != "true" ]]; then
-      echo "WARNING: failed to set git automation '${event}' → state ${state_id}" >&2
-    else
-      echo "Set git automation '${event}' → desired state"
-    fi
-  }
+	# upsert <event> <target_state_id> — create the node if absent, else update
+	# its stateId. Never called with an empty target id (caller guards).
+	_ga_upsert() {
+		local event="$1" state_id="$2"
+		local node_id mutation payload resp
+		node_id=$(echo "$existing" | jq -r --arg e "$event" 'map(select(.event == $e)) | .[0].id // empty')
+		if [[ -n $node_id ]]; then
+			# No change needed if the node already points at the desired state.
+			local cur_state_id
+			cur_state_id=$(echo "$existing" | jq -r --arg e "$event" 'map(select(.event == $e)) | .[0].state.id // empty')
+			if [[ $cur_state_id == "$state_id" ]]; then
+				echo "Git automation '${event}' already correct"
+				return 0
+			fi
+			# shellcheck disable=SC2016
+			mutation='mutation($id: String!, $input: GitAutomationStateUpdateInput!) { gitAutomationStateUpdate(id: $id, input: $input) { success } }'
+			payload=$(jq -nc --arg q "$mutation" --arg id "$node_id" --arg s "$state_id" \
+				'{query: $q, variables: {id: $id, input: {stateId: $s}}}')
+		else
+			# shellcheck disable=SC2016
+			mutation='mutation($input: GitAutomationStateCreateInput!) { gitAutomationStateCreate(input: $input) { success } }'
+			payload=$(jq -nc --arg q "$mutation" --arg t "$team_id" --arg e "$event" --arg s "$state_id" \
+				'{query: $q, variables: {input: {teamId: $t, event: $e, stateId: $s}}}')
+		fi
+		resp=$(linear_graphql_post "$token" "$payload")
+		if echo "$resp" | jq -e '.errors' >/dev/null 2>&1 ||
+			[[ "$(echo "$resp" | jq -r '.data.gitAutomationStateCreate.success // .data.gitAutomationStateUpdate.success // false')" != "true" ]]; then
+			echo "WARNING: failed to set git automation '${event}' → state ${state_id}" >&2
+		else
+			echo "Set git automation '${event}' → desired state"
+		fi
+	}
 
-  # START → PR
-  if [[ -z $pr_state_id ]]; then
-    echo "WARNING: target state 'PR' not found in team workflow — skipping 'start' git automation (no null stateId issued)" >&2
-  else
-    _ga_upsert "start" "$pr_state_id"
-  fi
+	# START → PR
+	if [[ -z $pr_state_id ]]; then
+		echo "WARNING: target state 'PR' not found in team workflow — skipping 'start' git automation (no null stateId issued)" >&2
+	else
+		_ga_upsert "start" "$pr_state_id"
+	fi
 
-  # MERGE → Done
-  if [[ -z $done_state_id ]]; then
-    echo "WARNING: target state 'Done' not found in team workflow — skipping 'merge' git automation (no null stateId issued)" >&2
-  else
-    _ga_upsert "merge" "$done_state_id"
-  fi
+	# MERGE → Done
+	if [[ -z $done_state_id ]]; then
+		echo "WARNING: target state 'Done' not found in team workflow — skipping 'merge' git automation (no null stateId issued)" >&2
+	else
+		_ga_upsert "merge" "$done_state_id"
+	fi
 
-  # REVIEW → delete each existing review node (we never auto-move on review).
-  local review_id review_ids del_mutation del_payload del_resp
-  review_ids=$(echo "$existing" | jq -r 'map(select(.event == "review")) | .[].id')
-  for review_id in $review_ids; do
-    [[ -z $review_id ]] && continue
-    # shellcheck disable=SC2016
-    del_mutation='mutation($id: String!) { gitAutomationStateDelete(id: $id) { success } }'
-    del_payload=$(jq -nc --arg q "$del_mutation" --arg id "$review_id" '{query: $q, variables: {id: $id}}')
-    del_resp=$(linear_graphql_post "$token" "$del_payload")
-    if echo "$del_resp" | jq -e '.errors' >/dev/null 2>&1 \
-      || [[ "$(echo "$del_resp" | jq -r '.data.gitAutomationStateDelete.success // false')" != "true" ]]; then
-      echo "WARNING: failed to delete 'review' git automation node ${review_id}" >&2
-    else
-      echo "Deleted 'review' git automation node"
-    fi
-  done
+	# REVIEW → delete each existing review node (we never auto-move on review).
+	local review_id review_ids del_mutation del_payload del_resp
+	review_ids=$(echo "$existing" | jq -r 'map(select(.event == "review")) | .[].id')
+	for review_id in $review_ids; do
+		[[ -z $review_id ]] && continue
+		# shellcheck disable=SC2016
+		del_mutation='mutation($id: String!) { gitAutomationStateDelete(id: $id) { success } }'
+		del_payload=$(jq -nc --arg q "$del_mutation" --arg id "$review_id" '{query: $q, variables: {id: $id}}')
+		del_resp=$(linear_graphql_post "$token" "$del_payload")
+		if echo "$del_resp" | jq -e '.errors' >/dev/null 2>&1 ||
+			[[ "$(echo "$del_resp" | jq -r '.data.gitAutomationStateDelete.success // false')" != "true" ]]; then
+			echo "WARNING: failed to delete 'review' git automation node ${review_id}" >&2
+		else
+			echo "Deleted 'review' git automation node"
+		fi
+	done
 
-  unset -f _ga_upsert
-  return 0
+	unset -f _ga_upsert
+	return 0
 }
 
 # --- main -------------------------------------------------------------------
 main() {
-  local config="" dry_run=0 json_out=0
+	local config="" dry_run=0 json_out=0
 
-  while [[ $# -gt 0 ]]; do
-    case "$1" in
-      --config)  config="$2"; shift 2 ;;
-      --dry-run) dry_run=1; shift ;;
-      --json)    json_out=1; shift ;;
-      # --force is accepted for CLI parity with resolve-linear-ids.sh. This
-      # script is unconditionally idempotent — it always rewrites stateMap and
-      # re-resolves stateIds (resolve-linear-ids.sh is called with --force
-      # below) — so --force is a documented no-op, kept so callers can pass it
-      # uniformly.
-      --force)   shift ;;
-      -h|--help) sed -n '2,24p' "$0" >&2; return 0 ;;
-      *) echo "ERROR: unknown arg: $1" >&2; return 1 ;;
-    esac
-  done
+	while [[ $# -gt 0 ]]; do
+		case "$1" in
+		--config)
+			config="$2"
+			shift 2
+			;;
+		--dry-run)
+			dry_run=1
+			shift
+			;;
+		--json)
+			json_out=1
+			shift
+			;;
+		# --force is accepted for CLI parity with resolve-linear-ids.sh. This
+		# script is unconditionally idempotent — it always rewrites stateMap and
+		# re-resolves stateIds (resolve-linear-ids.sh is called with --force
+		# below) — so --force is a documented no-op, kept so callers can pass it
+		# uniformly.
+		--force) shift ;;
+		-h | --help)
+			sed -n '2,24p' "$0" >&2
+			return 0
+			;;
+		*)
+			echo "ERROR: unknown arg: $1" >&2
+			return 1
+			;;
+		esac
+	done
 
-  for tool in jq curl git; do
-    if ! command -v "$tool" >/dev/null 2>&1; then
-      echo "ERROR: $tool required" >&2
-      return 1
-    fi
-  done
+	for tool in jq curl git; do
+		if ! command -v "$tool" >/dev/null 2>&1; then
+			echo "ERROR: $tool required" >&2
+			return 1
+		fi
+	done
 
-  # --- resolve config path ---
-  if [[ -z $config ]]; then
-    local dir; dir="$(pwd)"
-    while [[ $dir != "/" ]]; do
-      if [[ -f "${dir}/.catalyst/config.json" ]]; then
-        config="${dir}/.catalyst/config.json"; break
-      fi
-      dir="$(dirname "$dir")"
-    done
-  fi
-  if [[ -z $config || ! -f $config ]]; then
-    echo "ERROR: .catalyst/config.json not found" >&2
-    return 1
-  fi
+	# --- resolve config path ---
+	if [[ -z $config ]]; then
+		local dir
+		dir="$(pwd)"
+		while [[ $dir != "/" ]]; do
+			if [[ -f "${dir}/.catalyst/config.json" ]]; then
+				config="${dir}/.catalyst/config.json"
+				break
+			fi
+			dir="$(dirname "$dir")"
+		done
+	fi
+	if [[ -z $config || ! -f $config ]]; then
+		echo "ERROR: .catalyst/config.json not found" >&2
+		return 1
+	fi
 
-  local team_key project_key
-  team_key=$(jq -r '.catalyst.linear.teamKey // empty' "$config" 2>/dev/null)
-  project_key=$(jq -r '.catalyst.projectKey // empty' "$config" 2>/dev/null)
-  if [[ -z $team_key ]]; then
-    echo "ERROR: catalyst.linear.teamKey not set in $config" >&2
-    return 1
-  fi
-  if [[ -z $project_key ]]; then
-    echo "ERROR: catalyst.projectKey not set in $config" >&2
-    return 1
-  fi
+	local team_key project_key
+	team_key=$(jq -r '.catalyst.linear.teamKey // empty' "$config" 2>/dev/null)
+	project_key=$(jq -r '.catalyst.projectKey // empty' "$config" 2>/dev/null)
+	if [[ -z $team_key ]]; then
+		echo "ERROR: catalyst.linear.teamKey not set in $config" >&2
+		return 1
+	fi
+	if [[ -z $project_key ]]; then
+		echo "ERROR: catalyst.projectKey not set in $config" >&2
+		return 1
+	fi
 
-  # --- resolve repo root ---
-  # Use --git-common-dir so a worktree resolves to its canonical repo (matching
-  # orchestrate-execution-core-route.sh) — the registry must agree with it.
-  local config_dir repo_root common_dir
-  config_dir="$(cd "$(dirname "$config")/.." && pwd)"
-  if common_dir=$(git -C "$config_dir" rev-parse --git-common-dir 2>/dev/null); then
-    case "$common_dir" in
-      /*) : ;;
-      *)  common_dir="${config_dir}/${common_dir}" ;;
-    esac
-    repo_root="$(cd "$(dirname "$common_dir")" && pwd)"
-  else
-    repo_root="$config_dir"
-  fi
+	# --- resolve repo root ---
+	# Use --git-common-dir so a worktree resolves to its canonical repo (matching
+	# orchestrate-execution-core-route.sh) — the registry must agree with it.
+	local config_dir repo_root common_dir
+	config_dir="$(cd "$(dirname "$config")/.." && pwd)"
+	if common_dir=$(git -C "$config_dir" rev-parse --git-common-dir 2>/dev/null); then
+		case "$common_dir" in
+		/*) : ;;
+		*) common_dir="${config_dir}/${common_dir}" ;;
+		esac
+		repo_root="$(cd "$(dirname "$common_dir")" && pwd)"
+	else
+		repo_root="$config_dir"
+	fi
 
-  # --- resolve the Linear admin token ---
-  # Both shapes exist in the codebase: setup-catalyst.sh writes
-  # .catalyst.linear.apiToken, resolve-linear-ids.sh reads .linear.apiToken.
-  local secrets_path token
-  secrets_path="${HOME}/.config/catalyst/config-${project_key}.json"
-  if [[ ! -f $secrets_path ]]; then
-    echo "ERROR: secrets config not found at $secrets_path" >&2
-    return 1
-  fi
-  token=$(jq -r '.catalyst.linear.apiToken // .linear.apiToken // empty' "$secrets_path" 2>/dev/null)
-  if [[ -z $token ]]; then
-    echo "ERROR: Linear apiToken not found in $secrets_path" >&2
-    return 1
-  fi
+	# --- resolve the Linear admin token ---
+	# Both shapes exist in the codebase: setup-catalyst.sh writes
+	# .catalyst.linear.apiToken, resolve-linear-ids.sh reads .linear.apiToken.
+	local secrets_path token
+	secrets_path="${HOME}/.config/catalyst/config-${project_key}.json"
+	if [[ ! -f $secrets_path ]]; then
+		echo "ERROR: secrets config not found at $secrets_path" >&2
+		return 1
+	fi
+	token=$(jq -r '.catalyst.linear.apiToken // .linear.apiToken // empty' "$secrets_path" 2>/dev/null)
+	if [[ -z $token ]]; then
+		echo "ERROR: Linear apiToken not found in $secrets_path" >&2
+		return 1
+	fi
 
-  # --- fetch the team's current workflow states ---
-  local query payload response
-  # $teamKey is a GraphQL variable inside this single-quoted query, not a shell var.
-  # shellcheck disable=SC2016
-  query='query($teamKey: String!) { teams(filter: { key: { eq: $teamKey } }) { nodes { id states { nodes { id name type } } } } }'
-  payload=$(jq -nc --arg q "$query" --arg k "$team_key" '{query: $q, variables: {teamKey: $k}}')
-  response=$(linear_graphql_post "$token" "$payload")
+	# --- fetch the team's current workflow states ---
+	local query payload response
+	# $teamKey is a GraphQL variable inside this single-quoted query, not a shell var.
+	# shellcheck disable=SC2016
+	query='query($teamKey: String!) { teams(filter: { key: { eq: $teamKey } }) { nodes { id states { nodes { id name type } } } } }'
+	payload=$(jq -nc --arg q "$query" --arg k "$team_key" '{query: $q, variables: {teamKey: $k}}')
+	response=$(linear_graphql_post "$token" "$payload")
 
-  if echo "$response" | jq -e '.errors' >/dev/null 2>&1; then
-    local err
-    err=$(echo "$response" | jq -r '.errors[0].message // "unknown error"')
-    echo "ERROR: Linear API error fetching workflow states: $err" >&2
-    return 2
-  fi
+	if echo "$response" | jq -e '.errors' >/dev/null 2>&1; then
+		local err
+		err=$(echo "$response" | jq -r '.errors[0].message // "unknown error"')
+		echo "ERROR: Linear API error fetching workflow states: $err" >&2
+		return 2
+	fi
 
-  local team_node team_id fetched_states
-  team_node=$(echo "$response" | jq -c '.data.teams.nodes[0] // empty' 2>/dev/null)
-  if [[ -z $team_node || $team_node == "null" ]]; then
-    echo "ERROR: team '$team_key' not found in Linear" >&2
-    return 2
-  fi
-  team_id=$(echo "$team_node" | jq -r '.id')
-  fetched_states=$(echo "$team_node" | jq -c '.states.nodes // []')
+	local team_node team_id fetched_states
+	team_node=$(echo "$response" | jq -c '.data.teams.nodes[0] // empty' 2>/dev/null)
+	if [[ -z $team_node || $team_node == "null" ]]; then
+		echo "ERROR: team '$team_key' not found in Linear" >&2
+		return 2
+	fi
+	team_id=$(echo "$team_node" | jq -r '.id')
+	fetched_states=$(echo "$team_node" | jq -c '.states.nodes // []')
 
-  # --- diff against the contract ---
-  local missing
-  missing="$(missing_contract_states "$fetched_states")"
-  missing="${missing% }"  # trim trailing space
+	# --- diff against the contract ---
+	local missing
+	missing="$(missing_contract_states "$fetched_states")"
+	missing="${missing% }" # trim trailing space
 
-  local state_map registry_query
-  state_map="$(build_execution_core_state_map)"
-  # CTL-582: triageStatus is the →Triage trigger state the daemon watches,
-  # distinct from `status` (the scheduler-eligible state). resolveEligibleQuery
-  # defaults it to "Triage" too, but pin it here so the registry entry is
-  # self-describing.
-  registry_query=$(jq -nc \
-    '{ status: "Todo", triageStatus: "Triage", project: null, label: null, priority: null }')
+	local state_map registry_query
+	state_map="$(build_execution_core_state_map)"
+	# CTL-582: triageStatus is the →Triage trigger state the daemon watches,
+	# distinct from `status` (the scheduler-eligible state). resolveEligibleQuery
+	# defaults it to "Triage" too, but pin it here so the registry entry is
+	# self-describing.
+	registry_query=$(jq -nc \
+		'{ status: "Todo", triageStatus: "Triage", project: null, label: null, priority: null }')
 
-  # --- dry-run: report intent, write nothing ---
-  if [[ $dry_run -eq 1 ]]; then
-    if [[ $json_out -eq 1 ]]; then
-      jq -nc \
-        --arg team "$team_key" \
-        --arg repoRoot "$repo_root" \
-        --argjson stateMap "$state_map" \
-        --arg missing "$missing" \
-        '{
+	# --- dry-run: report intent, write nothing ---
+	if [[ $dry_run -eq 1 ]]; then
+		if [[ $json_out -eq 1 ]]; then
+			jq -nc \
+				--arg team "$team_key" \
+				--arg repoRoot "$repo_root" \
+				--argjson stateMap "$state_map" \
+				--arg missing "$missing" \
+				'{
           action: "dry-run",
           team: $team,
           repoRoot: $repoRoot,
           missingStates: ($missing | if . == "" then [] else (. / " ") end),
           stateMap: $stateMap
         }'
-    else
-      echo "Dry run — execution-core state contract for team $team_key:"
-      if [[ -z $missing ]]; then
-        echo "  contract states: all present"
-      else
-        echo "  would create: $missing"
-      fi
-      echo "  would write stateMap:"
-      echo "$state_map" | jq -r 'to_entries[] | "    \(.key): \(.value)"'
-      echo "  would upsert registry entry: team=$team_key repoRoot=$repo_root"
-    fi
-    return 0
-  fi
+		else
+			echo "Dry run — execution-core state contract for team $team_key:"
+			if [[ -z $missing ]]; then
+				echo "  contract states: all present"
+			else
+				echo "  would create: $missing"
+			fi
+			echo "  would write stateMap:"
+			echo "$state_map" | jq -r 'to_entries[] | "    \(.key): \(.value)"'
+			echo "  would upsert registry entry: team=$team_key repoRoot=$repo_root"
+		fi
+		return 0
+	fi
 
-  # --- ensure missing contract states via workflowStateCreate ---
-  local states_incomplete=0 name type create_payload create_resp
-  if [[ -n $missing ]]; then
-    for name in $missing; do
-      type=$(contract_states | jq -r --arg n "$name" '.[] | select(.name==$n) | .type')
-      local mutation
-      mutation="$(build_workflow_state_create_mutation "$team_id" "$name" "$type" "$CONTRACT_STATE_COLOR")"
-      create_payload=$(jq -nc --arg q "$mutation" '{query: $q}')
-      create_resp=$(linear_graphql_post "$token" "$create_payload")
-      if echo "$create_resp" | jq -e '.errors' >/dev/null 2>&1 \
-        || [[ "$(echo "$create_resp" | jq -r '.data.workflowStateCreate.success // false')" != "true" ]]; then
-        states_incomplete=1
-        echo "WARNING: failed to create workflow state '$name'" >&2
-      else
-        echo "Created workflow state '$name' ($type)"
-      fi
-    done
-  fi
+	# --- ensure missing contract states via workflowStateCreate ---
+	local states_incomplete=0 name type create_payload create_resp
+	if [[ -n $missing ]]; then
+		for name in $missing; do
+			type=$(contract_states | jq -r --arg n "$name" '.[] | select(.name==$n) | .type')
+			local mutation
+			mutation="$(build_workflow_state_create_mutation "$team_id" "$name" "$type" "$CONTRACT_STATE_COLOR")"
+			create_payload=$(jq -nc --arg q "$mutation" '{query: $q}')
+			create_resp=$(linear_graphql_post "$token" "$create_payload")
+			if echo "$create_resp" | jq -e '.errors' >/dev/null 2>&1 ||
+				[[ "$(echo "$create_resp" | jq -r '.data.workflowStateCreate.success // false')" != "true" ]]; then
+				states_incomplete=1
+				echo "WARNING: failed to create workflow state '$name'" >&2
+			else
+				echo "Created workflow state '$name' ($type)"
+			fi
+		done
+	fi
 
-  if [[ $states_incomplete -eq 1 ]]; then
-    echo "" >&2
-    echo "Could not create one or more contract states automatically." >&2
-    echo "Ask a Linear workspace admin to create them manually in the Linear app" >&2
-    echo "(Settings -> Teams -> ${team_key} -> Workflow), then re-run this script." >&2
-    echo "Missing states: $missing" >&2
-  fi
+	if [[ $states_incomplete -eq 1 ]]; then
+		echo "" >&2
+		echo "Could not create one or more contract states automatically." >&2
+		echo "Ask a Linear workspace admin to create them manually in the Linear app" >&2
+		echo "(Settings -> Teams -> ${team_key} -> Workflow), then re-run this script." >&2
+		echo "Missing states: $missing" >&2
+	fi
 
-  # --- check the Linear app-actor identity (CTL-749) ---
-  # The execution-core daemon reads a SET of bot user UUIDs at startup:
-  #   NEW: ~/.config/catalyst/config.json  catalyst.linear.bot.worker.botUserId
-  #        ~/.config/catalyst/config.json  catalyst.linear.bot.orchestrator.botUserId
-  #   OLD: .catalyst/config.json           catalyst.monitor.linear.botUserId (back-compat)
-  # Without at least one set, the agent's OWN comments/updates are not filtered
-  # out of inbox.jsonl and are treated as human input (false "human replied").
-  # This is a prerequisite, not a hard failure here — warn and continue.
-  local _global_cfg="$HOME/.config/catalyst/config.json"
-  local _bot_worker _bot_orch _bot_layer1
-  _bot_worker=$(jq -r '.catalyst.linear.bot.worker.botUserId // empty' "$_global_cfg" 2>/dev/null)
-  _bot_orch=$(jq -r '.catalyst.linear.bot.orchestrator.botUserId // empty' "$_global_cfg" 2>/dev/null)
-  _bot_layer1=$(jq -r '.catalyst.monitor.linear.botUserId // empty' "$config" 2>/dev/null)
-  if [[ -z $_bot_worker && -z $_bot_orch && -z $_bot_layer1 ]]; then
-    echo "WARNING: No Linear bot user IDs configured — CTL-749 self-echo guard is inactive" >&2
-    echo "  NEW: set catalyst.linear.bot.worker.botUserId in ~/.config/catalyst/config.json" >&2
-    echo "  OLD fallback: set catalyst.monitor.linear.botUserId in $config" >&2
-  fi
+	# --- check the Linear app-actor identity (CTL-749) ---
+	# The execution-core daemon reads a SET of bot user UUIDs at startup:
+	#   NEW: ~/.config/catalyst/config.json  catalyst.linear.bot.worker.botUserId
+	#        ~/.config/catalyst/config.json  catalyst.linear.bot.orchestrator.botUserId
+	#   OLD: .catalyst/config.json           catalyst.monitor.linear.botUserId (back-compat)
+	# Without at least one set, the agent's OWN comments/updates are not filtered
+	# out of inbox.jsonl and are treated as human input (false "human replied").
+	# This is a prerequisite, not a hard failure here — warn and continue.
+	local _global_cfg="$HOME/.config/catalyst/config.json"
+	local _bot_worker _bot_orch _bot_layer1
+	_bot_worker=$(jq -r '.catalyst.linear.bot.worker.botUserId // empty' "$_global_cfg" 2>/dev/null)
+	_bot_orch=$(jq -r '.catalyst.linear.bot.orchestrator.botUserId // empty' "$_global_cfg" 2>/dev/null)
+	_bot_layer1=$(jq -r '.catalyst.monitor.linear.botUserId // empty' "$config" 2>/dev/null)
+	if [[ -z $_bot_worker && -z $_bot_orch && -z $_bot_layer1 ]]; then
+		echo "WARNING: No Linear bot user IDs configured — CTL-749 self-echo guard is inactive" >&2
+		echo "  NEW: set catalyst.linear.bot.worker.botUserId in ~/.config/catalyst/config.json" >&2
+		echo "  OLD fallback: set catalyst.monitor.linear.botUserId in $config" >&2
+	fi
 
-  # --- write the execution-core stateMap (atomic tmp + mv), only if needed (CTL-722) ---
-  local current_map
-  current_map="$(jq -c '.catalyst.linear.stateMap // {}' "$config" 2>/dev/null || echo '{}')"
-  if statemap_needs_write "$current_map"; then
-    jq --argjson stateMap "$state_map" '.catalyst.linear.stateMap = $stateMap' \
-      "$config" > "${config}.tmp" && mv "${config}.tmp" "$config"
-    echo "Wrote execution-core stateMap to $config"
-  else
-    echo "stateMap already satisfies the contract or is user-customised — preserved ($config)"
-  fi
+	# --- write the execution-core stateMap (atomic tmp + mv), only if needed (CTL-722) ---
+	local current_map
+	current_map="$(jq -c '.catalyst.linear.stateMap // {}' "$config" 2>/dev/null || echo '{}')"
+	if statemap_needs_write "$current_map"; then
+		jq --argjson stateMap "$state_map" '.catalyst.linear.stateMap = $stateMap' \
+			"$config" >"${config}.tmp" && mv "${config}.tmp" "$config"
+		echo "Wrote execution-core stateMap to $config"
+	else
+		echo "stateMap already satisfies the contract or is user-customised — preserved ($config)"
+	fi
 
-  # --- refresh the machine-local stateIds cache via resolve-linear-ids.sh --force ---
-  # CTL-577: stateIds is cached in ~/.config/catalyst/linear-state-ids.json,
-  # keyed by teamKey — not committed to .catalyst/config.json.
-  local script_dir resolve
-  script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-  resolve="${script_dir}/resolve-linear-ids.sh"
-  if [[ -x $resolve ]]; then
-    if bash "$resolve" --config "$config" --force >/dev/null 2>&1; then
-      echo "Refreshed stateIds cache (~/.config/catalyst/linear-state-ids.json)"
-    else
-      echo "WARNING: resolve-linear-ids.sh failed — stateIds cache may be stale" >&2
-    fi
-  else
-    echo "WARNING: resolve-linear-ids.sh not found — stateIds cache not refreshed" >&2
-  fi
+	# --- refresh the machine-local stateIds cache via resolve-linear-ids.sh --force ---
+	# CTL-577: stateIds is cached in ~/.config/catalyst/linear-state-ids.json,
+	# keyed by teamKey — not committed to .catalyst/config.json.
+	local script_dir resolve
+	script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+	resolve="${script_dir}/resolve-linear-ids.sh"
+	if [[ -x $resolve ]]; then
+		if bash "$resolve" --config "$config" --force >/dev/null 2>&1; then
+			echo "Refreshed stateIds cache (~/.config/catalyst/linear-state-ids.json)"
+		else
+			echo "WARNING: resolve-linear-ids.sh failed — stateIds cache may be stale" >&2
+		fi
+	else
+		echo "WARNING: resolve-linear-ids.sh not found — stateIds cache not refreshed" >&2
+	fi
 
-  # --- upsert the central registry entry via registry.mjs (CTL-578) ---
-  # Three things changed vs. the original silent flow:
-  #   1. `ensure_execution_core_deps` runs `bun install` if node_modules is
-  #      missing, so a fresh worktree never silently no-ops on a pino import.
-  #   2. Stderr is captured (not 2>&1-suppressed) and surfaced on failure.
-  #   3. The runner's exit 0 is cross-checked by jq-reading registry.json —
-  #      a runner that "succeeds" without writing the team fails the script.
-  local registry_mjs runner=""
-  local exec_dir="${script_dir}/execution-core"
-  registry_mjs="${exec_dir}/registry.mjs"
-  if command -v bun >/dev/null 2>&1; then
-    runner="bun"
-  elif command -v node >/dev/null 2>&1; then
-    runner="node"
-  fi
+	# --- upsert the central registry entry via registry.mjs (CTL-578) ---
+	# Three things changed vs. the original silent flow:
+	#   1. `ensure_execution_core_deps` runs `bun install` if node_modules is
+	#      missing, so a fresh worktree never silently no-ops on a pino import.
+	#   2. Stderr is captured (not 2>&1-suppressed) and surfaced on failure.
+	#   3. The runner's exit 0 is cross-checked by jq-reading registry.json —
+	#      a runner that "succeeds" without writing the team fails the script.
+	local registry_mjs runner=""
+	local exec_dir="${script_dir}/execution-core"
+	registry_mjs="${exec_dir}/registry.mjs"
+	if command -v bun >/dev/null 2>&1; then
+		runner="bun"
+	elif command -v node >/dev/null 2>&1; then
+		runner="node"
+	fi
 
-  local registry_failed=0
-  if [[ -z $runner || ! -f $registry_mjs ]]; then
-    echo "ERROR: cannot run registry.mjs (no bun/node, or module missing at ${registry_mjs})" >&2
-    registry_failed=1
-  elif ! ensure_execution_core_deps "$exec_dir"; then
-    registry_failed=1
-  else
-    local upsert_err
-    upsert_err="$(mktemp)"
-    if "$runner" "$registry_mjs" upsert \
-      --team "$team_key" \
-      --repo-root "$repo_root" \
-      --eligible-query "$registry_query" 2>"$upsert_err" >/dev/null; then
-      local registry_path="${CATALYST_DIR:-$HOME/catalyst}/execution-core/registry.json"
-      if [[ -f $registry_path ]] && \
-         jq -e --arg t "$team_key" '.projects[]? | select(.team == $t)' \
-           "$registry_path" >/dev/null 2>&1; then
-        echo "Upserted registry entry for team $team_key"
-      else
-        echo "ERROR: registry.mjs upsert exited 0 but team '$team_key' not present in $registry_path" >&2
-        registry_failed=1
-      fi
-    else
-      echo "ERROR: registry.mjs upsert failed for team $team_key" >&2
-      sed 's/^/  /' "$upsert_err" >&2
-      registry_failed=1
-    fi
-    rm -f "$upsert_err"
-  fi
+	local registry_failed=0
+	if [[ -z $runner || ! -f $registry_mjs ]]; then
+		echo "ERROR: cannot run registry.mjs (no bun/node, or module missing at ${registry_mjs})" >&2
+		registry_failed=1
+	elif ! ensure_execution_core_deps "$exec_dir"; then
+		registry_failed=1
+	else
+		local upsert_err
+		upsert_err="$(mktemp)"
+		if "$runner" "$registry_mjs" upsert \
+			--team "$team_key" \
+			--repo-root "$repo_root" \
+			--eligible-query "$registry_query" 2>"$upsert_err" >/dev/null; then
+			local registry_path="${CATALYST_DIR:-$HOME/catalyst}/execution-core/registry.json"
+			if [[ -f $registry_path ]] &&
+				jq -e --arg t "$team_key" '.projects[]? | select(.team == $t)' \
+					"$registry_path" >/dev/null 2>&1; then
+				echo "Upserted registry entry for team $team_key"
+			else
+				echo "ERROR: registry.mjs upsert exited 0 but team '$team_key' not present in $registry_path" >&2
+				registry_failed=1
+			fi
+		else
+			echo "ERROR: registry.mjs upsert failed for team $team_key" >&2
+			sed 's/^/  /' "$upsert_err" >&2
+			registry_failed=1
+		fi
+		rm -f "$upsert_err"
+	fi
 
-  # --- reconcile Linear git automations (CTL-759) — the LAST Linear step ---
-  # Best-effort hardening: pins start→PR / merge→Done and removes any review
-  # automation, the install-time complement to the daemon's CTL-758 backward-
-  # write guard. Tolerant by design — it prints WARNINGs and continues, and
-  # never touches the 3/4 exit codes the caller (setup-catalyst.sh) consumes.
-  reconcile_git_automation_states "$team_id" "$token" "$fetched_states" || true
+	# --- reconcile worker-status label group (CTL-764) -------------------------
+	# Must run before git automations so the group exists before the daemon starts
+	# applying labels. Best-effort — never alters exit codes 0/2/3/4.
+	reconcile_worker_status_labels "$token" || true
 
-  # --- summary ---
-  if [[ $json_out -eq 1 ]]; then
-    jq -nc \
-      --arg team "$team_key" \
-      --arg repoRoot "$repo_root" \
-      --argjson incomplete "$states_incomplete" \
-      '{
+	# --- reconcile Linear git automations (CTL-759) — the LAST Linear step ---
+	# Best-effort hardening: pins start→PR / merge→Done and removes any review
+	# automation, the install-time complement to the daemon's CTL-758 backward-
+	# write guard. Tolerant by design — it prints WARNINGs and continues, and
+	# never touches the 3/4 exit codes the caller (setup-catalyst.sh) consumes.
+	reconcile_git_automation_states "$team_id" "$token" "$fetched_states" || true
+
+	# --- summary ---
+	if [[ $json_out -eq 1 ]]; then
+		jq -nc \
+			--arg team "$team_key" \
+			--arg repoRoot "$repo_root" \
+			--argjson incomplete "$states_incomplete" \
+			'{
         action: (if $incomplete == 1 then "states_incomplete" else "complete" end),
         team: $team,
         repoRoot: $repoRoot
       }'
-  fi
+	fi
 
-  if [[ $states_incomplete -eq 1 ]]; then
-    return 3
-  fi
-  if [[ $registry_failed -eq 1 ]]; then
-    return 4
-  fi
-  return 0
+	if [[ $states_incomplete -eq 1 ]]; then
+		return 3
+	fi
+	if [[ $registry_failed -eq 1 ]]; then
+		return 4
+	fi
+	return 0
 }
 
 # Sourcing guard — when sourced (by the test suite) main does not run, so the
 # pure helpers above can be asserted directly.
-if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
-  main "$@"
-  exit $?
+if [[ ${BASH_SOURCE[0]} == "${0}" ]]; then
+	main "$@"
+	exit $?
 fi

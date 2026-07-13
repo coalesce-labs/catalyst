@@ -92,7 +92,7 @@ if ! command -v smee &>/dev/null; then
 	warnings+=("  Install: npm install -g smee-client")
 fi
 
-if [[ -f "$HOME_CONFIG_PATH" ]]; then
+if [[ -f $HOME_CONFIG_PATH ]]; then
 	SMEE_CHANNEL=$(jq -r '.catalyst.monitor.github.smeeChannel // empty' "$HOME_CONFIG_PATH" 2>/dev/null)
 	if [[ -z $SMEE_CHANNEL ]]; then
 		warnings+=("Missing catalyst.monitor.github.smeeChannel in $HOME_CONFIG_PATH — webhook tunnel won't start")
@@ -255,8 +255,8 @@ if [[ -n $CONFIG_PATH ]]; then
 					-H "Authorization: ${GIT_AUTO_TOKEN}" \
 					-d "$ga_payload" 2>/dev/null || true)
 				if [[ -n $ga_resp ]] && ! echo "$ga_resp" | jq -e '.errors' >/dev/null 2>&1; then
-					git_auto_nodes=$(echo "$ga_resp" \
-						| jq -c '.data.teams.nodes[0].gitAutomationStates.nodes // []' 2>/dev/null)
+					git_auto_nodes=$(echo "$ga_resp" |
+						jq -c '.data.teams.nodes[0].gitAutomationStates.nodes // []' 2>/dev/null)
 					if [[ -n $git_auto_nodes && $git_auto_nodes != "null" ]]; then
 						mkdir -p "$CATALYST_CONFIG"
 						tmp_cache="$(mktemp)"
@@ -267,9 +267,9 @@ if [[ -n $CONFIG_PATH ]]; then
 							--argjson nodes "$git_auto_nodes" \
 							--argjson ts "$(date +%s)" \
 							'.[$k] = { fetchedAt: $ts, nodes: $nodes }' \
-							> "$tmp_cache" 2>/dev/null \
-							&& mv "$tmp_cache" "$GIT_AUTO_CACHE" \
-							|| rm -f "$tmp_cache"
+							>"$tmp_cache" 2>/dev/null &&
+							mv "$tmp_cache" "$GIT_AUTO_CACHE" ||
+							rm -f "$tmp_cache"
 					fi
 				fi
 			fi
@@ -290,6 +290,80 @@ if [[ -n $CONFIG_PATH ]]; then
 					warnings+=("Linear 'merge' git automation for team '$TEAM_KEY' points at '$merge_state' (expected 'Done')")
 				fi
 			fi
+		fi
+
+		# CTL-764: worker-status label group check (hot-path, TTL-cached). Reuses the
+		# GIT_AUTO_TOKEN acquired above. Shared cache key: .[TEAM_KEY].workerStatusLabels
+		# preserves the gitAutomation sibling written above. Warnings only — never alters
+		# exit code. No per-project token → silently skipped (same gate as git-automation).
+		if [[ -n $GIT_AUTO_TOKEN && -n $TEAM_KEY ]]; then
+			WS_CACHE="${CATALYST_CONFIG}/linear-git-automation-cache.json"
+			WS_TTL=$((6 * 60 * 60))
+			ws_members=""
+			ws_status="" # "" | "no_group" | "found"
+			if [[ -f $WS_CACHE ]]; then
+				ws_cache_ts=$(jq -r --arg k "$TEAM_KEY" \
+					'.[$k].workerStatusLabels.fetchedAt // empty' \
+					"$WS_CACHE" 2>/dev/null)
+				if [[ -n $ws_cache_ts ]]; then
+					now_ts=$(date +%s)
+					age=$((now_ts - ws_cache_ts))
+					if [[ $age -ge 0 && $age -lt $WS_TTL ]]; then
+						ws_status="found"
+						ws_members=$(jq -c --arg k "$TEAM_KEY" \
+							'.[$k].workerStatusLabels.members // []' \
+							"$WS_CACHE" 2>/dev/null)
+					fi
+				fi
+			fi
+
+			if [[ -z $ws_status ]] && command -v curl &>/dev/null; then
+				ws_query='query { issueLabels(filter: {team: {null: true}}, first: 250) { nodes { id name isGroup parent { id } } } }'
+				ws_payload=$(jq -nc --arg q "$ws_query" '{query: $q}')
+				ws_resp=$(curl -s --max-time 5 -X POST https://api.linear.app/graphql \
+					-H "Content-Type: application/json" \
+					-H "Authorization: ${GIT_AUTO_TOKEN}" \
+					-d "$ws_payload" 2>/dev/null || true)
+				if [[ -n $ws_resp ]] && ! echo "$ws_resp" | jq -e '.errors' >/dev/null 2>&1; then
+					all_labels=$(echo "$ws_resp" | jq -c '.data.issueLabels.nodes // []' 2>/dev/null)
+					ws_group_id=$(echo "$all_labels" | jq -r \
+						'.[] | select(.name == "worker-status" and .isGroup == true) | .id // empty' \
+						2>/dev/null | head -1)
+					if [[ -n $ws_group_id ]]; then
+						ws_status="found"
+						ws_members=$(echo "$all_labels" | jq -c --arg pid "$ws_group_id" \
+							'[.[] | select(.parent.id == $pid) | .name]' 2>/dev/null)
+						mkdir -p "$CATALYST_CONFIG"
+						tmp_ws="$(mktemp)"
+						existing_ws_cache='{}'
+						[[ -f $WS_CACHE ]] && existing_ws_cache="$(cat "$WS_CACHE" 2>/dev/null || echo '{}')"
+						echo "$existing_ws_cache" | jq \
+							--arg k "$TEAM_KEY" \
+							--argjson members "$ws_members" \
+							--argjson ts "$(date +%s)" \
+							'.[$k].workerStatusLabels = { fetchedAt: $ts, members: $members }' \
+							>"$tmp_ws" 2>/dev/null &&
+							mv "$tmp_ws" "$WS_CACHE" ||
+							rm -f "$tmp_ws"
+					else
+						ws_status="no_group"
+					fi
+				fi
+			fi
+
+			case "$ws_status" in
+			found)
+				for _ws_exp in queued blocked needs-input needs-human; do
+					if ! echo "$ws_members" | jq -e --arg n "$_ws_exp" \
+						'map(. == $n) | any' >/dev/null 2>&1; then
+						warnings+=("worker-status label '${_ws_exp}' missing from Linear workspace — run plugins/dev/scripts/setup-execution-core-states.sh")
+					fi
+				done
+				;;
+			no_group)
+				warnings+=("worker-status label group missing from Linear workspace — run plugins/dev/scripts/setup-execution-core-states.sh")
+				;;
+			esac
 		fi
 	fi
 
@@ -336,7 +410,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 #     port/CA diagnostics live in check-setup.sh; here we keep it cheap (read the
 #     file in a subshell, no network) and warn only.
 DAEMON_ENV_FILE="${CATALYST_EXECUTION_CORE_ENV:-$CATALYST_CONFIG/execution-core.env}"
-if [[ -f "$DAEMON_ENV_FILE" ]]; then
+if [[ -f $DAEMON_ENV_FILE ]]; then
 	daemon_env_vals=$(
 		set +euo pipefail
 		set -a
@@ -344,7 +418,7 @@ if [[ -f "$DAEMON_ENV_FILE" ]]; then
 		. "$DAEMON_ENV_FILE" 2>/dev/null
 		set +a
 		printf 'PROXY=%s\nUSE_ENV_PROXY=%s\n' \
-			"${HTTPS_PROXY:-${HTTP_PROXY:-}}" "${NODE_USE_ENV_PROXY:-}"
+			"${HTTPS_PROXY:-${HTTP_PROXY-}}" "${NODE_USE_ENV_PROXY-}"
 	)
 	de_proxy=$(printf '%s\n' "$daemon_env_vals" | sed -n 's/^PROXY=//p')
 	de_use_env_proxy=$(printf '%s\n' "$daemon_env_vals" | sed -n 's/^USE_ENV_PROXY=//p')
@@ -368,14 +442,14 @@ if [[ -x $MONITOR_SCRIPT ]]; then
 			local_tunnel=$(curl -s --max-time 2 "http://localhost:${MONITOR_PORT_RESOLVED}/api/status/webhook-tunnel" 2>/dev/null || true)
 			smee_url=$(echo "$local_tunnel" | jq -r '.smeeUrl // empty' 2>/dev/null || true)
 			tunnel_connected=$(echo "$local_tunnel" | jq -r '.connected // empty' 2>/dev/null || true)
-			if [[ -n "$smee_url" && "$tunnel_connected" != "true" ]]; then
+			if [[ -n $smee_url && $tunnel_connected != "true" ]]; then
 				warnings+=("Webhook tunnel not connected (smeeUrl=${smee_url}) — GitHub events won't reach the daemon")
 				warnings+=("  Restart the monitor: $MONITOR_SCRIPT restart")
 			fi
 		fi
 	else
 		# Daemon stopped. Behavior splits on autonomous vs interactive.
-		if [[ -n ${CATALYST_AUTONOMOUS:-} ]] || [[ ! -t 0 ]]; then
+		if [[ -n ${CATALYST_AUTONOMOUS-} ]] || [[ ! -t 0 ]]; then
 			echo -e "${YELLOW}WARN: orch-monitor daemon not running${NC}" >&2
 			echo "  Event-driven skills will degrade to polling fallback." >&2
 			echo "  Start with: $MONITOR_SCRIPT start" >&2
@@ -385,15 +459,15 @@ if [[ -x $MONITOR_SCRIPT ]]; then
 			echo "to slower polling fallback without it."
 			read -r -p "Start the monitor now? [Y/n] " yn
 			case "$yn" in
-				[Nn]*)
-					warnings+=("orch-monitor daemon not running — event-driven skills will degrade to polling")
-					;;
-				*)
-					if ! "$MONITOR_SCRIPT" start; then
-						errors+=("Failed to start orch-monitor — check log: ${CATALYST_DIR:-$HOME/catalyst}/monitor.log")
-						errors+=("  Investigate: tail -50 \"${CATALYST_DIR:-$HOME/catalyst}/monitor.log\"")
-					fi
-					;;
+			[Nn]*)
+				warnings+=("orch-monitor daemon not running — event-driven skills will degrade to polling")
+				;;
+			*)
+				if ! "$MONITOR_SCRIPT" start; then
+					errors+=("Failed to start orch-monitor — check log: ${CATALYST_DIR:-$HOME/catalyst}/monitor.log")
+					errors+=("  Investigate: tail -50 \"${CATALYST_DIR:-$HOME/catalyst}/monitor.log\"")
+				fi
+				;;
 			esac
 		fi
 	fi
@@ -443,16 +517,16 @@ if [[ -n $CONFIG_PATH ]]; then
 		# set -e would abort on rc=1; tolerate non-zero so we can branch on rc.
 		DRIFT_OUT=$(bash "$DRIFT_SCRIPT" --config "$CONFIG_PATH" --template "$TEMPLATE_PATH" 2>&1) && DRIFT_RC=0 || DRIFT_RC=$?
 		case $DRIFT_RC in
-			0) ;;
-			1)
-				while IFS= read -r line; do
-					[[ -n $line ]] && warnings+=("$line")
-				done <<<"$DRIFT_OUT"
-				;;
-			*)
-				# Collapse newlines so the warning stays a single bullet.
-				warnings+=("check-config-drift exited $DRIFT_RC: ${DRIFT_OUT//$'\n'/ }")
-				;;
+		0) ;;
+		1)
+			while IFS= read -r line; do
+				[[ -n $line ]] && warnings+=("$line")
+			done <<<"$DRIFT_OUT"
+			;;
+		*)
+			# Collapse newlines so the warning stays a single bullet.
+			warnings+=("check-config-drift exited $DRIFT_RC: ${DRIFT_OUT//$'\n'/ }")
+			;;
 		esac
 	fi
 fi
@@ -478,12 +552,12 @@ if [[ -n $REPLICA_LIB ]]; then
 	# CATALYST_LINEAR_REPLICA_STALE_MS defaults. Idempotent; safe under set -e.
 	# shellcheck source=lib/linear-read-replica.sh disable=SC1090,SC1091
 	source "$REPLICA_LIB"
-	_replica_stale_s=$(( ${CATALYST_LINEAR_REPLICA_STALE_MS:-300000} / 1000 ))
+	_replica_stale_s=$((${CATALYST_LINEAR_REPLICA_STALE_MS:-300000} / 1000))
 	if replica_fresh; then
 		echo -e "${GREEN}Linear reads → local replica${NC} (${CATALYST_REPLICA_DB}) — do NOT use bare 'linearis issues read <ID>' for single-ticket reads (it hits the personal Linear key and 429s under load)."
-	elif [[ -f "$CATALYST_REPLICA_DB" ]]; then
+	elif [[ -f $CATALYST_REPLICA_DB ]]; then
 		warnings+=("Linear replica STALE (writer heartbeat >${_replica_stale_s}s or seed incomplete) — single-ticket reads fall back to the personal Linear key (rate-limited, 429-prone). Check the cloud-sync writer: bash plugins/dev/scripts/check-setup.sh")
-	elif [[ ${CATALYST_LINEAR_REPLICA:-} == on ]]; then
+	elif [[ ${CATALYST_LINEAR_REPLICA-} == on ]]; then
 		warnings+=("CATALYST_LINEAR_REPLICA=on but no replica at $CATALYST_REPLICA_DB — single-ticket reads fall back to the personal Linear key (rate-limited, 429-prone). Start the cloud-sync writer: catalyst-stack adopt-cloud-sync")
 	fi
 	# else (no replica, not opted in): silent — the replica is fleet-internal infra a
