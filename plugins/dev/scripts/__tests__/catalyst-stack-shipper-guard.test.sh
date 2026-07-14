@@ -72,6 +72,13 @@ out="$(CATALYST_FORCE_BAKE_DIR=/var/folders/xx/abc/T/foo/scripts \
        bash "$STACK" install-services --print 2>&1)"; rc=$?
 [[ $rc -ne 0 && "$out" == *"ephemeral"* ]] && pass "refuses a /var/folders temp bake dir" || fail "should refuse /var/folders path (rc=$rc)"
 
+# 6. /private/var/folders (realpath-resolved macOS TMPDIR form) → refuse (CTL-1473
+#    remediate: _is_ephemeral_dir now matches the /private-prefixed form too).
+out="$(CATALYST_FORCE_BAKE_DIR=/private/var/folders/xx/abc/T/foo/scripts \
+       CATALYST_LAYER2_CONFIG_FILE=/dev/null \
+       bash "$STACK" install-services --print 2>&1)"; rc=$?
+[[ $rc -ne 0 && "$out" == *"ephemeral"* ]] && pass "refuses a /private/var/folders temp bake dir" || fail "should refuse /private/var/folders path (rc=$rc)"
+
 echo ""
 echo "Results: ${PASSES} passed, ${FAILURES} failed"
 [[ $FAILURES -eq 0 ]]

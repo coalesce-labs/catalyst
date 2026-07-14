@@ -1815,12 +1815,37 @@ export function checkLogShipper(deps = {}) {
     return checks;
   }
 
-  const { loaded } = shipperState();
+  const { loaded, lastExit } = shipperState();
   if (!loaded) {
     checks.push(mkCheck(
       "shipper-installed",
       sev(STATUS.FAIL),
       `log-shipper plist present but not loaded by launchd — run 'catalyst-stack install-services'`,
+    ));
+    return checks;
+  }
+
+  // CTL-1473 remediate (round-3): inspect lastExit exactly like checkReaper
+  // (line ~1728). The prior code destructured only `loaded` and dropped
+  // lastExit, so a loaded-but-crash-looping shipper (LastExitStatus 127/78,
+  // shipping nothing) with a canonical --config path reported shipper-config:
+  // PASS — the exact "green while shipping nothing" failure this ticket exists
+  // to prevent. FAIL (sev-wrapped so the preinstall gate downgrades to WARN)
+  // given shipsLogs criticality; PASS on 0 (clean) or null (loaded but never
+  // run yet) falls through to the canonical --config check below.
+  if (lastExit === 127) {
+    checks.push(mkCheck(
+      "shipper-health",
+      sev(STATUS.FAIL),
+      `log-shipper last exited 127 (program path unresolved) — shipping nothing; reinstall from the pristine clone ('catalyst-stack install-services')`,
+    ));
+    return checks;
+  }
+  if (typeof lastExit === "number" && lastExit !== 0) {
+    checks.push(mkCheck(
+      "shipper-health",
+      sev(STATUS.FAIL),
+      `log-shipper last exited ${lastExit} — crash-looping and shipping nothing; check the shipper log and reinstall ('catalyst-stack install-services')`,
     ));
     return checks;
   }
@@ -1898,7 +1923,12 @@ export function checkStaleGitLock(deps = {}) {
   const {
     lockExists = (p) => existsSync(p),
     lockAgeMs = (p) => {
-      try { return Date.now() - statSync(p).mtimeMs; } catch { return 0; }
+      // CTL-1473 remediate (round-3): on stat failure return null (unknown age),
+      // NOT 0. The prior `return 0` degraded a present-but-unstattable lock
+      // (permission / TOCTOU race) to age=0, which reported INFO "active git
+      // operation" and masked the failure. The null sentinel surfaces as WARN
+      // (see the age === null branch below) — unknown is not benign.
+      try { return Date.now() - statSync(p).mtimeMs; } catch { return null; }
     },
     resolveRootsFn = () => resolvePluginCheckoutRoots({}),
     preinstall = !!process.env.CATALYST_DOCTOR_PREINSTALL,
@@ -1915,6 +1945,17 @@ export function checkStaleGitLock(deps = {}) {
       continue;
     }
     const age = lockAgeMs(lockPath);
+    if (age === null) {
+      // CTL-1473 remediate (round-3): the lock exists (lockExists true) but its
+      // age could not be determined (stat failed). Unknown age is NOT benign —
+      // WARN rather than the prior return-0 → INFO "active git operation" mask.
+      checks.push(mkCheck(
+        "stale-git-lock",
+        STATUS.WARN,
+        `${lockPath} exists but its age could not be determined (stat failed — permission or TOCTOU race) — inspect manually: ls -l ${lockPath}`,
+      ));
+      continue;
+    }
     if (age < STALE_LOCK_MS) {
       checks.push(mkCheck(
         "stale-git-lock",

@@ -1189,6 +1189,69 @@ describe("checkLogShipper", () => {
     expect(c[0].name).toBe("shipper-config");
     expect(c[0].status).toBe(STATUS.WARN);
   });
+
+  // CTL-1473 remediate (round-3): a loaded-but-crash-looping shipper (non-zero
+  // LastExitStatus, shipping nothing) must NOT report a clean shipper-config
+  // PASS. The prior code dropped lastExit; these assert the shipper-health
+  // check now FAILs on 127/non-zero and never falls through to a clean pass.
+  it("FAILs with shipper-health (not a config PASS) when loaded but last exit was 127", () => {
+    const canon = "/Users/x/catalyst/plugin-source/plugins/dev/scripts/log-shipper/config.alloy";
+    const c = checkLogShipper({
+      shipsLogs: true,
+      readFile: () => shipperPlist(canon),
+      fileExists: () => true,
+      realpath: (p) => p,
+      canonicalConfig: () => canon,
+      shipperState: () => ({ loaded: true, lastExit: 127 }),
+    });
+    expect(c[0].name).toBe("shipper-health");
+    expect(c[0].status).toBe(STATUS.FAIL);
+    expect(c.some((x) => x.name === "shipper-config" && x.status === STATUS.PASS)).toBe(false);
+  });
+
+  it("FAILs with shipper-health on a non-zero, non-127 exit (crash-looping shipper)", () => {
+    const canon = "/Users/x/catalyst/plugin-source/plugins/dev/scripts/log-shipper/config.alloy";
+    const c = checkLogShipper({
+      shipsLogs: true,
+      readFile: () => shipperPlist(canon),
+      fileExists: () => true,
+      realpath: (p) => p,
+      canonicalConfig: () => canon,
+      shipperState: () => ({ loaded: true, lastExit: 78 }),
+    });
+    expect(c[0].name).toBe("shipper-health");
+    expect(c[0].status).toBe(STATUS.FAIL);
+    expect(c[0].detail).toContain("78");
+  });
+
+  it("downgrades shipper-health FAIL→WARN under the preinstall flag", () => {
+    const canon = "/Users/x/catalyst/plugin-source/plugins/dev/scripts/log-shipper/config.alloy";
+    const c = checkLogShipper({
+      shipsLogs: true,
+      preinstall: true,
+      readFile: () => shipperPlist(canon),
+      fileExists: () => true,
+      realpath: (p) => p,
+      canonicalConfig: () => canon,
+      shipperState: () => ({ loaded: true, lastExit: 127 }),
+    });
+    expect(c[0].name).toBe("shipper-health");
+    expect(c[0].status).toBe(STATUS.WARN);
+  });
+
+  it("PASSes (config check) when loaded but never run yet (lastExit null)", () => {
+    const canon = "/Users/x/catalyst/plugin-source/plugins/dev/scripts/log-shipper/config.alloy";
+    const c = checkLogShipper({
+      shipsLogs: true,
+      readFile: () => shipperPlist(canon),
+      fileExists: () => true,
+      realpath: (p) => p,
+      canonicalConfig: () => canon,
+      shipperState: () => ({ loaded: true, lastExit: null }),
+    });
+    expect(c.every((x) => x.status === STATUS.PASS)).toBe(true);
+    expect(c.some((x) => x.name === "shipper-config")).toBe(true);
+  });
 });
 
 // ─── checkStaleGitLock (CTL-1473) ────────────────────────────────────────────
@@ -1225,6 +1288,20 @@ describe("checkStaleGitLock", () => {
     });
     expect(c[0].name).toBe("stale-git-lock");
     expect(c[0].status).toBe(STATUS.INFO);
+  });
+
+  // CTL-1473 remediate (round-3): a present-but-unstattable lock (permission /
+  // TOCTOU) yields lockAgeMs === null. Unknown age is NOT benign — WARN, never
+  // the prior return-0 → INFO "active git operation" mask.
+  it("WARNs (not INFO) when the lock exists but its age cannot be determined", () => {
+    const c = checkStaleGitLock({
+      lockExists: () => true,
+      lockAgeMs: () => null,
+      resolveRootsFn: () => ["/checkout"],
+    });
+    expect(c[0].name).toBe("stale-git-lock");
+    expect(c[0].status).toBe(STATUS.WARN);
+    expect(c[0].detail).toContain("could not be determined");
   });
 
   // CTL-1473 remediate: a 15m+ lock is stale regardless of concurrent git

@@ -1011,7 +1011,11 @@ STUBS4O="${SCRATCH}/stubs4o"
 make_stubs "$STUBS4O"
 INVLOG4O="${STUBS4O}/invocations.log"
 
-run "T4.5 catalyst-stack install-services runs last" bash -c "
+# CTL-1473 remediate: install-services is NO LONGER the last invocation — the diff
+# added a strict post-install `doctor-verify` stage that runs AFTER it (see
+# catalyst-join.sh main() step 8). Assert the ordering install-services < the final
+# doctor invocation, rather than the now-stale "install-services runs last".
+run "T4.5 install-services runs after config, before the post-install doctor verify (CTL-1473)" bash -c "
   catdir='${SCRATCH}/c45'
   home45='${SCRATCH}/h45'
   mkdir -p \"\$home45/.config/catalyst\"
@@ -1027,9 +1031,50 @@ run "T4.5 catalyst-stack install-services runs last" bash -c "
     CATALYST_JOIN_DOCTOR_SCRIPT='${STUBS4O}/stub-check-setup.sh' \
     CATALYST_JOIN_REACH_PROBE='${STUBS4O}/stub-reach-probe.sh' \
     bash '$JOIN' --bundle '$FIXTURE_BUNDLE' >/dev/null 2>&1
-  # stack install-services must be last in the log
-  last=\$(tail -1 '$INVLOG4O')
-  echo \"\$last\" | grep -q 'install-services'"
+  # install-services present, and the final doctor invocation (the post-install
+  # verify) runs AFTER install-services.
+  install_line=\$(grep -n 'install-services' '$INVLOG4O' | head -1 | cut -d: -f1)
+  verify_line=\$(grep -n 'check-setup' '$INVLOG4O' | tail -1 | cut -d: -f1)
+  [[ -n \"\$install_line\" && -n \"\$verify_line\" ]] && [[ \"\$install_line\" -lt \"\$verify_line\" ]]"
+
+# T4.7: CTL-1473 — the doctor gate runs in PREINSTALL mode (install-remediable
+# FAIL→WARN) BEFORE install-services, then a strict post-install verify (no
+# PREINSTALL downgrade) runs AFTER install-services. The doctor stub records the
+# CATALYST_DOCTOR_PREINSTALL flag state per invocation so we can assert both the
+# mode and the ordering (previously untested — verify.json coverage finding).
+STUBS4V="${SCRATCH}/stubs4v"
+make_stubs "$STUBS4V"
+INVLOG4V="${STUBS4V}/invocations.log"
+cat > "$STUBS4V/stub-check-setup.sh" <<EOF
+#!/usr/bin/env bash
+echo "check-setup PREINSTALL=\${CATALYST_DOCTOR_PREINSTALL:-unset}" >> "$INVLOG4V"
+exit 0
+EOF
+chmod +x "$STUBS4V/stub-check-setup.sh"
+
+run "T4.7 doctor gate is PREINSTALL before stack, strict verify after (CTL-1473)" bash -c "
+  catdir='${SCRATCH}/c47'
+  home47='${SCRATCH}/h47'
+  mkdir -p \"\$home47/.config/catalyst\"
+  printf '{}' > \"\$home47/.config/catalyst/config.json\"
+  rm -f '$INVLOG4V'
+  env -i HOME=\"\$home47\" CATALYST_DIR=\"\$catdir\" \
+    CATALYST_JOIN_TOKEN='$GOOD_TOKEN' \
+    CATALYST_JOIN_SETUP_SCRIPT='${STUBS4V}/stub-setup-catalyst.sh' \
+    CATALYST_JOIN_INSTALL_CLI_SCRIPT='${STUBS4V}/stub-install-cli.sh' \
+    CATALYST_JOIN_PLUGIN_SRC_SCRIPT='${STUBS4V}/stub-setup-plugin-source.sh' \
+    CATALYST_JOIN_PROVISION_THOUGHTS_SCRIPT='${STUBS4V}/stub-provision-thoughts.sh' \
+    CATALYST_JOIN_STACK_BIN='${STUBS4V}/stub-catalyst-stack' \
+    CATALYST_JOIN_DOCTOR_SCRIPT='${STUBS4V}/stub-check-setup.sh' \
+    CATALYST_JOIN_REACH_PROBE='${STUBS4V}/stub-reach-probe.sh' \
+    bash '$JOIN' --bundle '$FIXTURE_BUNDLE' >/dev/null 2>&1
+  # Order in the log: gate(PREINSTALL=1) → install-services → verify(PREINSTALL=unset)
+  gate_line=\$(grep -n 'check-setup PREINSTALL=1' '$INVLOG4V' | head -1 | cut -d: -f1)
+  install_line=\$(grep -n 'install-services' '$INVLOG4V' | head -1 | cut -d: -f1)
+  verify_line=\$(grep -n 'check-setup PREINSTALL=unset' '$INVLOG4V' | head -1 | cut -d: -f1)
+  [[ -n \"\$gate_line\" && -n \"\$install_line\" && -n \"\$verify_line\" ]] && \
+  [[ \"\$gate_line\" -lt \"\$install_line\" ]] && \
+  [[ \"\$install_line\" -lt \"\$verify_line\" ]]"
 
 # T4.6: Idempotency — second run with same host.name produces identical config
 run "T4.6 idempotency: second run is no-op" bash -c "
