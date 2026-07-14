@@ -33,7 +33,7 @@
 // deterministically testable without real load, timers, network, or a checkout.
 // Mirrors the gc-liveness.mjs / autotune.mjs seam-injection convention.
 
-import { readFileSync, unlinkSync } from "node:fs";
+import { readFileSync, unlinkSync, statSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { homedir } from "node:os";
 import { resolve } from "node:path";
@@ -134,12 +134,36 @@ function defaultBunInstallFn(pkgDir) {
 // Files whose change means deps may need (re)installing in their containing dir.
 const DEP_MANIFEST_RE = /(^|\/)(package\.json|bun\.lock)$/;
 
+// LOCK_SETTLE_MS — CTL-1473 remediate: a .git/index.lock younger than this may
+// belong to a git op still in flight on the checkout; a genuine SIGKILL leftover
+// is from a PRIOR throttled refresh cycle (PLUGIN_REFRESH_THROTTLE_MS = 60s) and
+// is therefore always older. 5s is comfortably under the throttle and above any
+// same-cycle race, so it heals real leftovers without stomping a live op.
+export const PLUGIN_REFRESH_LOCK_SETTLE_MS =
+  Number(process.env.CATALYST_PLUGIN_REFRESH_LOCK_SETTLE_MS) || 5_000;
+
 // defaultRemoveLockFn — CTL-1473: remove a stale .git/index.lock so the next
 // reset --hard can succeed. The lock file is created by git ops that were
-// forcibly killed (SIGKILL on timeout); if no git process holds it the removal
-// is always safe. Only called after we confirm the error message mentions the lock.
-function defaultRemoveLockFn(root) {
-  unlinkSync(`${root}/.git/index.lock`);
+// forcibly killed (SIGKILL on timeout). Only called after we confirm the error
+// message mentions the lock.
+//
+// CTL-1473 remediate: the prior implementation unlinked unconditionally. The
+// checkout is disposable and single-writer (broker, throttled per-root), so a
+// concurrent git op is unlikely — but removing a lock a live op still holds
+// would corrupt it. So we age-gate: an mtime younger than LOCK_SETTLE_MS is
+// treated as possibly-in-flight and left in place (the caller then reports
+// refresh_failed and the next cycle heals it once it has settled); a missing
+// lock is a no-op. This mirrors checkStaleGitLock's age-based staleness.
+export function defaultRemoveLockFn(root) {
+  const lockPath = `${root}/.git/index.lock`;
+  let ageMs;
+  try {
+    ageMs = Date.now() - statSync(lockPath).mtimeMs;
+  } catch {
+    return; // lock already gone — nothing to remove
+  }
+  if (ageMs < PLUGIN_REFRESH_LOCK_SETTLE_MS) return; // fresh — may be in flight
+  unlinkSync(lockPath);
 }
 
 // changedPackageDirs — pure helper: map a `git diff --name-only` output to

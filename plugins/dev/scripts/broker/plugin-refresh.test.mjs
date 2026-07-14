@@ -16,7 +16,7 @@
 // Run: bun test plugins/dev/scripts/broker/plugin-refresh.test.mjs
 
 import { describe, test, expect, beforeEach } from "bun:test";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -29,7 +29,9 @@ import {
   startPluginDriftCheck,
   handlePluginRefreshEvent,
   changedPackageDirs,
+  defaultRemoveLockFn,
   PLUGIN_REFRESH_THROTTLE_MS,
+  PLUGIN_REFRESH_LOCK_SETTLE_MS,
   PLUGIN_DRIFT_CHECK_INTERVAL_MS,
   __clearThrottleForTest,
   CHECKOUT_LAG_FAILURE_THRESHOLD,
@@ -563,6 +565,40 @@ describe("refreshPluginCheckout", () => {
       expect(res.pulled).toBe(true);
       expect(res.failed).toBe(false);
       expect(emitted.some((e) => e.event === "plugin.checkout.git_lock_healed")).toBe(true);
+    });
+
+    // CTL-1473 remediate: the DEFAULT removeLock is age-gated so it never stomps a
+    // lock a live git op may still hold. Exercised against a real temp .git dir.
+    describe("defaultRemoveLockFn age gate (CTL-1473 remediate)", () => {
+      let dir;
+      beforeEach(() => {
+        dir = mkdtempSync(join(tmpdir(), "plugin-refresh-lock-"));
+        mkdirSync(join(dir, ".git"), { recursive: true });
+      });
+
+      const lockPath = () => join(dir, ".git", "index.lock");
+
+      test("removes a settled (stale) lock", () => {
+        writeFileSync(lockPath(), "");
+        // backdate mtime past the settle window
+        const old = (Date.now() - PLUGIN_REFRESH_LOCK_SETTLE_MS - 60_000) / 1000;
+        utimesSync(lockPath(), old, old);
+        defaultRemoveLockFn(dir);
+        expect(existsSync(lockPath())).toBe(false);
+        rmSync(dir, { recursive: true, force: true });
+      });
+
+      test("leaves a fresh lock in place (may be in flight)", () => {
+        writeFileSync(lockPath(), "");
+        defaultRemoveLockFn(dir); // mtime is ~now, under the settle window
+        expect(existsSync(lockPath())).toBe(true);
+        rmSync(dir, { recursive: true, force: true });
+      });
+
+      test("is a no-op when the lock is already gone", () => {
+        expect(() => defaultRemoveLockFn(dir)).not.toThrow();
+        rmSync(dir, { recursive: true, force: true });
+      });
     });
   });
 

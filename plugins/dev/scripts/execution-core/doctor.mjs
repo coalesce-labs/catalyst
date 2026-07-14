@@ -24,7 +24,7 @@
 //
 // Exit code: number of FAIL-level checks (0 = all clear).
 
-import { readFileSync, statSync, existsSync } from "node:fs";
+import { readFileSync, statSync, existsSync, realpathSync } from "node:fs";
 import { resolve, dirname } from "node:path";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
@@ -1788,7 +1788,11 @@ export function checkLogShipper(deps = {}) {
     readFile = (p) => readFileSync(p, "utf8"),
     fileExists = (p) => existsSync(p),
     realpath = (p) => {
-      try { return require("node:fs").realpathSync(p); } catch { return p; }
+      // Runtime-agnostic: realpathSync is imported at module top (line 27), so
+      // symlink normalization runs under both node and bun. The prior
+      // require("node:fs") threw under node ESM (require is undefined), silently
+      // returning the un-normalized path (CTL-1473 verify silent-failure finding).
+      try { return realpathSync(p); } catch { return p; }
     },
     canonicalConfig = defaultCanonicalShipperConfig,
     shipperState = defaultShipperState,
@@ -1876,22 +1880,25 @@ export function checkLogShipper(deps = {}) {
 const STALE_LOCK_MS = 15 * 60 * 1_000;
 
 // checkStaleGitLock — CTL-1473: detect a stale .git/index.lock in each plugin-source
-// checkout root. A lock older than STALE_LOCK_MS with no live git holder is a FAIL
-// (silently blocked the updater for days in the laptop audit). The updater self-heals
-// by removing + retrying (Phase 4); doctor independently surfaces it as a FAIL so
-// operators catch it on any node, not just when the updater is running. All deps
-// are injectable for unit testing; default uses existsSync/statSync and pgrep.
+// checkout root. A lock older than STALE_LOCK_MS is a FAIL (silently blocked the
+// updater for days in the laptop audit). The updater self-heals by removing +
+// retrying (Phase 4); doctor independently surfaces it as a FAIL so operators catch
+// it on any node, not just when the updater is running.
+//
+// CTL-1473 remediate: the prior implementation downgraded FAIL→INFO whenever a
+// live git holder was detected via a system-wide `pgrep -x git`. That check
+// matched ANY git process on the host, so on a busy worker (concurrent
+// fetches/rebases) a genuinely stale 15m+ lock was masked whenever an unrelated
+// git ran — the exact failure mode this check was added to catch. The holder
+// downgrade also contradicted this module's own threshold rationale: a git
+// operation that has held index.lock for 15+ minutes is, by definition, stuck.
+// So the age threshold alone determines staleness; there is no holder downgrade.
+// All deps are injectable for unit testing; defaults use existsSync/statSync.
 export function checkStaleGitLock(deps = {}) {
   const {
     lockExists = (p) => existsSync(p),
     lockAgeMs = (p) => {
       try { return Date.now() - statSync(p).mtimeMs; } catch { return 0; }
-    },
-    holderAlive = () => {
-      try {
-        const r = spawnSync("pgrep", ["-x", "git"], { timeout: 3_000 });
-        return !r.error && r.status === 0;
-      } catch { return false; }
     },
     resolveRootsFn = () => resolvePluginCheckoutRoots({}),
     preinstall = !!process.env.CATALYST_DOCTOR_PREINSTALL,
@@ -1916,23 +1923,24 @@ export function checkStaleGitLock(deps = {}) {
       ));
       continue;
     }
-    if (holderAlive()) {
-      checks.push(mkCheck(
-        "stale-git-lock",
-        STATUS.INFO,
-        `${lockPath} is ${Math.round(age / 60_000)}m old but a git process appears to hold it`,
-      ));
-      continue;
-    }
     checks.push(mkCheck(
       "stale-git-lock",
       sev(STATUS.FAIL),
-      `stale .git/index.lock in ${root} (age: ${Math.round(age / 60_000)}m, no live holder) — plugin updates were silently blocked; the updater will self-heal on its next tick, or remove manually: rm ${lockPath}`,
+      `stale .git/index.lock in ${root} (age: ${Math.round(age / 60_000)}m) — plugin updates were silently blocked; the updater will self-heal on its next tick, or remove manually: rm ${lockPath}`,
     ));
   }
 
   if (checks.length === 0) {
-    checks.push(mkCheck("stale-git-lock", STATUS.PASS, "no plugin-source checkouts resolved — nothing to check"));
+    // CTL-1473 remediate: empty roots is unverifiable, not healthy — mirror
+    // checkLogShipper's WARN-when-unverifiable. resolvePluginCheckoutRoots()
+    // also returns [] when the Layer-2 config is unreadable/unparseable (the
+    // error is swallowed in plugin-refresh __readConfig), so reporting PASS
+    // here would mask a broken config as a clean bill of health.
+    checks.push(mkCheck(
+      "stale-git-lock",
+      STATUS.WARN,
+      "no plugin-source checkouts resolved — cannot verify .git/index.lock health (config unreadable, or this node has no checkout)",
+    ));
   }
   return checks;
 }

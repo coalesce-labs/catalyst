@@ -1207,11 +1207,10 @@ describe("checkStaleGitLock", () => {
     expect(c[0].status).toBe(STATUS.PASS);
   });
 
-  it("FAILs when .git/index.lock is older than 15m and no live process holds it", () => {
+  it("FAILs when .git/index.lock is older than 15m", () => {
     const c = checkStaleGitLock({
       lockExists: () => true,
       lockAgeMs: () => STALE_MS,
-      holderAlive: () => false,
       resolveRootsFn: () => ["/checkout"],
     });
     expect(c[0].status).toBe(STATUS.FAIL);
@@ -1222,28 +1221,29 @@ describe("checkStaleGitLock", () => {
     const c = checkStaleGitLock({
       lockExists: () => true,
       lockAgeMs: () => 60_000,
-      holderAlive: () => false,
       resolveRootsFn: () => ["/checkout"],
     });
     expect(c[0].name).toBe("stale-git-lock");
     expect(c[0].status).toBe(STATUS.INFO);
   });
 
-  it("PASSes (INFO) when a live git process holds the lock even if old", () => {
+  // CTL-1473 remediate: a 15m+ lock is stale regardless of concurrent git
+  // activity on the host. The old system-wide `pgrep -x git` holder downgrade
+  // was removed because it masked genuinely-stale locks on busy workers (the
+  // exact failure mode this check guards). Age alone determines staleness.
+  it("FAILs a 15m+ lock even when unrelated git processes are running", () => {
     const c = checkStaleGitLock({
       lockExists: () => true,
       lockAgeMs: () => STALE_MS,
-      holderAlive: () => true,
       resolveRootsFn: () => ["/checkout"],
     });
-    expect(c[0].status).toBe(STATUS.INFO);
+    expect(c[0].status).toBe(STATUS.FAIL);
   });
 
   it("downgrades FAIL→WARN under preinstall flag", () => {
     const c = checkStaleGitLock({
       lockExists: () => true,
       lockAgeMs: () => STALE_MS,
-      holderAlive: () => false,
       resolveRootsFn: () => ["/checkout"],
       preinstall: true,
     });
@@ -1254,12 +1254,23 @@ describe("checkStaleGitLock", () => {
     const c = checkStaleGitLock({
       lockExists: (p) => p.includes("checkout-a"),
       lockAgeMs: () => STALE_MS,
-      holderAlive: () => false,
       resolveRootsFn: () => ["/checkout-a", "/checkout-b"],
     });
     expect(c).toHaveLength(2);
     expect(c[0].status).toBe(STATUS.FAIL);
     expect(c[1].status).toBe(STATUS.PASS);
+  });
+
+  // CTL-1473 remediate: empty roots is unverifiable, not healthy — WARN (mirrors
+  // checkLogShipper). resolvePluginCheckoutRoots() also returns [] when the
+  // Layer-2 config is unreadable, so a PASS here would mask a broken config.
+  it("WARNs (not PASSes) when no checkout roots resolve", () => {
+    const c = checkStaleGitLock({
+      resolveRootsFn: () => [],
+    });
+    expect(c).toHaveLength(1);
+    expect(c[0].name).toBe("stale-git-lock");
+    expect(c[0].status).toBe(STATUS.WARN);
   });
 });
 
