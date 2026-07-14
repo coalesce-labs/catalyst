@@ -19,6 +19,7 @@ import {
   scrubSecrets,
   defaultEmitBackstop,
   flipSignalDoneOnSuccess,
+  runPrelaunch,
 } from "./sdk-run-phase-agent.mjs";
 
 // ── Fakes ───────────────────────────────────────────────────────────────────
@@ -139,6 +140,41 @@ describe("buildSdkEnv", () => {
     expect(env.CLAUDE_CODE_OAUTH_TOKEN).toBe("tok");
     // Base env preserved.
     expect(env.PATH).toBe("/bin");
+    // CTL-1457: the in-process SDK worker is attributed so its emit-complete
+    // stamps catalyst.executor="sdk" on the completion event.
+    expect(env.CATALYST_EXECUTOR_ID).toBe("sdk");
+  });
+});
+
+// ── runPrelaunch executor attribution (CTL-1457) ──────────────────────────────
+
+describe("runPrelaunch — executorId threads CATALYST_EXECUTOR_ID (CTL-1457)", () => {
+  const spy = () => {
+    const calls = [];
+    const spawn = (bin, args, opts) => {
+      calls.push({ bin, args, opts });
+      return { status: 0, stdout: "", stderr: "" };
+    };
+    spawn.calls = calls;
+    return spawn;
+  };
+
+  test("executorId set → CATALYST_EXECUTOR_ID in the prelaunch spawn env", () => {
+    const spawn = spy();
+    runPrelaunch(
+      { orchDir: "/ec", ticket: "CTL-1", phase: "triage", worktreePath: "/wt/CTL-1" },
+      { spawn, executorId: "codex-exec" }
+    );
+    expect(spawn.calls[0].opts.env.CATALYST_EXECUTOR_ID).toBe("codex-exec");
+  });
+
+  test("executorId omitted → CATALYST_EXECUTOR_ID absent (byte-identical prelaunch)", () => {
+    const spawn = spy();
+    runPrelaunch(
+      { orchDir: "/ec", ticket: "CTL-1", phase: "triage", worktreePath: "/wt/CTL-1" },
+      { spawn }
+    );
+    expect("CATALYST_EXECUTOR_ID" in spawn.calls[0].opts.env).toBe(false);
   });
 });
 

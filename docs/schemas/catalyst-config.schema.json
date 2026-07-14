@@ -492,6 +492,56 @@
                   "description": "Directory holding durable per-ticket completion markers (default ~/catalyst/completions; env CATALYST_COMPLETIONS_DIR)."
                 }
               }
+            },
+            "executor": {
+              "type": "string",
+              "enum": ["bg", "sdk", "oneshot-legacy", "codex-exec", "claude-bg", "claude-sdk", "claude-oneshot"],
+              "description": "CTL-1365a/CTL-1457: the phase-worker substrate this node dispatches on. Canonical values: 'bg' (detached claude --bg job), 'sdk' (in-process claude-agent-sdk query worker), 'oneshot-legacy' (catalyst-legacy single long-lived job), 'codex-exec' (child-process codex exec --json worker on OpenAI Codex). The 'claude-*' compound values are read-time aliases for bg/sdk/oneshot-legacy. Precedence: env CATALYST_EXECUTOR > this Layer-1 value > node-class default (Phase 1: always 'bg'). Node-scoped; the daemon reads it once at boot."
+            },
+            "executorByPhase": {
+              "type": "object",
+              "description": "CTL-1457: per-phase executor routing. Maps a pipeline phase name (triage, research, plan, implement, verify, review, pr, monitor-merge, monitor-deploy, teardown) to the executor that should run that phase, overriding the node-wide 'executor' for the routed phase only. An unrouted phase falls back to the node executor (zero behavior change when this map is empty). Values are validated against the executor enum (post-alias) at dispatch time; an invalid value is a loud config error, never a silent fallback.",
+              "additionalProperties": {
+                "type": "string",
+                "description": "Executor id for this phase (bg | sdk | oneshot-legacy | codex-exec, or a claude-* alias)."
+              },
+              "examples": [
+                {
+                  "triage": "codex-exec"
+                }
+              ]
+            },
+            "codex": {
+              "type": "object",
+              "description": "CTL-1457: codex-exec runtime settings. Precedence per key: env > this Layer-1 value > default. Node-scoped.",
+              "additionalProperties": false,
+              "properties": {
+                "codexHome": {
+                  "type": "string",
+                  "description": "Dedicated CODEX_HOME for the codex worker (isolation + auth.json + config.toml). Default ~/catalyst/codex-home. Env CATALYST_CODEX_HOME overrides."
+                },
+                "bin": {
+                  "type": "string",
+                  "default": "codex",
+                  "description": "Path to (or name of) the codex binary. Default 'codex' (resolved via PATH). Env CATALYST_CODEX_BIN overrides."
+                },
+                "model": {
+                  "type": ["string", "null"],
+                  "description": "Model id passed to `codex exec -m`. null (default) lets the codex config.toml decide — no -m flag is added. Env CATALYST_CODEX_MODEL overrides."
+                },
+                "writableRoots": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "default": [],
+                  "description": "Extra filesystem roots the workspace-write sandbox may write to (on top of the worktree). Default [~/catalyst]. The thoughts-repo root is added downstream at arg-build time from the worktree."
+                },
+                "pluginRoot": {
+                  "type": "string",
+                  "description": "Pristine plugin-source root exported as CLAUDE_PLUGIN_ROOT into the codex worker env. Default null (resolved from the launch spec's pluginDirs at runtime). Env CATALYST_CODEX_PLUGIN_ROOT overrides."
+                }
+              }
             }
           }
         },

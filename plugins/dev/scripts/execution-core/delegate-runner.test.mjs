@@ -34,7 +34,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { startDelegateRunnerTimer } from "./delegate-runner.mjs";
-import { drainOnce } from "./delegate-runner-entry.mjs";
+import { drainOnce, resolveEffectiveDelegateExecutor } from "./delegate-runner-entry.mjs";
 import { DELEGATE_QUEUE_DIR, claimIntent } from "./delegate-queue.mjs";
 
 let orchDir;
@@ -836,5 +836,52 @@ describe("startDelegateRunnerTimer — detached spawn().unref() kick", () => {
       openLogFd: () => 5,
     });
     expect(unrefed).toBe(true);
+  });
+});
+
+// CTL-1457 (N4): the DETACHED delegate child re-resolves the executor and must apply
+// the SAME codex→bg degrade the daemon did at boot — else it keeps launching unusable
+// codex for every recovery-pass delegate on a node the daemon already degraded to bg.
+describe("resolveEffectiveDelegateExecutor — codex→bg degrade in the detached child", () => {
+  test("codex-exec node with a FAILING codex precondition degrades to bg", () => {
+    const executor = resolveEffectiveDelegateExecutor({
+      getExecutor: () => "codex-exec",
+      resolveSdkBoot: (e) => ({ executor: e }), // sdk gate passes codex-exec through
+      resolveCodexBoot: () => ({ eligible: false, reason: "codex auth missing" }),
+      logger: { warn: () => {} },
+    });
+    expect(executor).toBe("bg");
+  });
+
+  test("codex-exec node with an ELIGIBLE codex precondition stays codex-exec", () => {
+    const executor = resolveEffectiveDelegateExecutor({
+      getExecutor: () => "codex-exec",
+      resolveSdkBoot: (e) => ({ executor: e }),
+      resolveCodexBoot: () => ({ eligible: true, reason: null }),
+      logger: { warn: () => {} },
+    });
+    expect(executor).toBe("codex-exec");
+  });
+
+  test("a bg node never consults the codex gate (byte-identical)", () => {
+    let codexChecked = false;
+    const executor = resolveEffectiveDelegateExecutor({
+      getExecutor: () => "bg",
+      resolveSdkBoot: (e) => ({ executor: e }),
+      resolveCodexBoot: () => { codexChecked = true; return { eligible: false }; },
+      logger: { warn: () => {} },
+    });
+    expect(executor).toBe("bg");
+    expect(codexChecked).toBe(false);
+  });
+
+  test("the sdk→bg degrade still applies (sdk gate returns bg on a failing precondition)", () => {
+    const executor = resolveEffectiveDelegateExecutor({
+      getExecutor: () => "sdk",
+      resolveSdkBoot: () => ({ executor: "bg" }), // sdk auth precondition failed → bg
+      resolveCodexBoot: () => ({ eligible: true }),
+      logger: { warn: () => {} },
+    });
+    expect(executor).toBe("bg");
   });
 });

@@ -2203,6 +2203,65 @@ describe("schedulerTick — new-work pull", () => {
     expect(r.dispatched).toHaveLength(1);
   });
 
+  // CTL-1457 (T2): a codex-exec node prelaunches the SAME no-bg_job_id "dispatched"
+  // signals (queued behind a semaphore), so its in-flight workers must reduce free
+  // slots EXACTLY like sdk — else a codex node at maxParallel keeps over-admitting.
+  test("dispatchMode=codex-exec: in-flight codex workers reduce new-work free slots (same as sdk)", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 3 }));
+    const dispatch = fakeDispatch();
+    const eligible = ["CTL-1", "CTL-2", "CTL-3"].map((identifier) => ({
+      identifier,
+      priority: 1,
+      createdAt: "x",
+      state: "Todo",
+      relations: { nodes: [] },
+      inverseRelations: { nodes: [] },
+    }));
+    const r = schedulerTick(orchDir, {
+      readEligible: () => eligible,
+      dispatch,
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0, // no bg jobs
+      countSdkInflight: () => 2, // 2 in-process codex workers already in flight
+      dispatchMode: "codex-exec",
+      hasTriageArtifact: () => true,
+      listStartedTickets: () => new Set(),
+    });
+    // maxParallel 3 − 2 codex in-flight = 1 free slot → only ONE new ticket admitted.
+    expect(r.dispatched).toHaveLength(1);
+  });
+
+  // CTL-1457 (N1): the PRIMARY rollout routes ONE phase to codex-exec/sdk on a node
+  // whose boot dispatchMode is still "phase-agents" (bg). There the mode gate is false,
+  // so WITHOUT hasInProcessRoute the routed no-bg workers are invisible and the tick
+  // over-admits past maxParallel. With hasInProcessRoute=true the occupancy gate arms
+  // countSdkInflight even under bg — matching executorByPhase={triage:codex-exec}.
+  test("dispatchMode=phase-agents + hasInProcessRoute: routed no-bg workers reduce free slots (the Phase-5 bg-node scenario)", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 3 }));
+    const dispatch = fakeDispatch();
+    const eligible = ["CTL-1", "CTL-2", "CTL-3"].map((identifier) => ({
+      identifier,
+      priority: 1,
+      createdAt: "x",
+      state: "Todo",
+      relations: { nodes: [] },
+      inverseRelations: { nodes: [] },
+    }));
+    const r = schedulerTick(orchDir, {
+      readEligible: () => eligible,
+      dispatch,
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0, // no bg jobs
+      countSdkInflight: () => 2, // 2 routed no-bg (codex) workers already in flight
+      dispatchMode: "phase-agents", // NODE mode is bg — only the per-phase route is in-process
+      hasInProcessRoute: true, // executorByPhase={triage:codex-exec}
+      hasTriageArtifact: () => true,
+      listStartedTickets: () => new Set(),
+    });
+    // maxParallel 3 − 2 routed in-flight = 1 free slot → only ONE new ticket admitted.
+    expect(r.dispatched).toHaveLength(1);
+  });
+
   // CTL-1367 P2 (item b): the SDK new-work budget must subtract SAME-TICK SDK
   // advancements. The tick-top countSdkInflight sample predates the advancement sweep,
   // so without the post-sweep re-sample an in-flight ticket advancing research→plan via

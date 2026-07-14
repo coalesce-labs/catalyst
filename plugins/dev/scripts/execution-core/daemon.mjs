@@ -53,6 +53,10 @@ import {
   readLinearReplica, // CTL-1340: read-replica tier flag (inert; default off)
   getExecutor, // CTL-1365a: phase-worker executor resolver (env→Layer-1→node-class default; all "bg" in Phase 1)
   dispatchModeForExecutor, // CTL-1365a: executor → catalyst.dispatch.mode telemetry vocab
+  resolveExecutorForPhase, // CTL-1457: per-phase executor routing hook (boot validation of executorByPhase values)
+  readExecutorByPhaseLayer1, // CTL-1457: Layer-1 catalyst.orchestration.executorByPhase map reader
+  hasInProcessExecutorRoute, // CTL-1457 (N1): does executorByPhase route ANY phase to sdk|codex-exec? (arms the slot/occupancy gates on a bg node)
+  codexConfig, // CTL-1457: codex-exec runtime settings (codexHome/bin/…) for the boot-eligibility gate
 } from "./config.mjs";
 import { resolveBootIdentity } from "./host-boot-identity.mjs"; // CTL-1093
 import { readStickyIdentity, writeStickyIdentity } from "./host-sticky.mjs"; // CTL-1093
@@ -126,8 +130,9 @@ import {
   defaultAppendOperatorEvent,
 } from "./recovery.mjs"; // CTL-655: window the revive budget to this run; CTL-736: reset progress high-water; CTL-768: --resume; CTL-1044: operator-event appender for the scheduler's appendIntentEvent seam
 import { startAutoTuner } from "./autotune.mjs"; // CTL-684: side-car maxParallel auto-tuner
-import { dispatchTicket, dispatchForExecutor, makeCommentWakeDispatch } from "./dispatch.mjs"; // CTL-549: comment-wake re-dispatch; CTL-1365a/b: executor→dispatch selection at the launch seam + comment-wake executor binding
-import { resolveSdkBootExecutor } from "./sdk-run-phase-agent.mjs"; // CTL-1367 item 9 + P3: boot auth gate (subscription-only) that degrades sdk→bg AND emits execution-core.executor.bg-fallback so the silent fallback is observable
+import { dispatchTicket, makeCommentWakeDispatch, makePhaseAwareDispatchFn } from "./dispatch.mjs"; // CTL-549: comment-wake re-dispatch; CTL-1365a/b: executor→dispatch selection at the launch seam + comment-wake executor binding; CTL-1457: per-phase-aware dispatchFn factory (owns the executor→dispatch selection internally)
+import { resolveSdkBootExecutor, assertSdkAuth } from "./sdk-run-phase-agent.mjs"; // CTL-1367 item 9 + P3: boot auth gate (subscription-only) that degrades sdk→bg AND emits execution-core.executor.bg-fallback so the silent fallback is observable; CTL-1457 (T5): assertSdkAuth also gates a per-phase sdk route on a bg/default node
+import { resolveCodexBootEligibility } from "./codex-run-phase-agent.mjs"; // CTL-1457: codex boot gate (auth.json + `codex --version`) that degrades routed codex phases + emits execution-core.executor.codex-fallback
 import { removeLabel as defaultRemoveLabel } from "./linear-write.mjs"; // CTL-549: clear needs-human on resume
 // CTL-671: the real phantom-sweep seams. startScheduler defaults them to safe
 // no-ops (hermetic for direct-call unit tests); the REAL daemon arms them here
@@ -674,20 +679,75 @@ export function startDaemon({
       emitEvent: defaultAppendOperatorEvent,
       log,
     });
-    const executor = bootExec.executor;
+    // CTL-1457 (finding 1): `let` because a codex-exec BOOT executor that fails the
+    // codex boot precondition is degraded to "bg" below (resolveSdkBootExecutor passes
+    // codex-exec through untouched — the node-level codex degrade is owned here, the
+    // mirror of its own sdk→bg degrade).
+    let executor = bootExec.executor;
+    // CTL-1457: per-phase executor routing. Read the Layer-1 executorByPhase map
+    // ONCE and VALIDATE every value loudly at boot — resolveExecutorForPhase THROWS
+    // on an invalid/typo'd executor id, so wrap each per-phase check so a bad value
+    // is loud-but-NON-fatal (log.error + a best-effort event) and that phase simply
+    // falls back to the boot executor at dispatch time (makePhaseAwareDispatchFn
+    // catches the same throw). An empty map (the default) is a pure no-op.
+    const executorByPhase = readExecutorByPhaseLayer1(configPath);
+    for (const [routedPhase, routedValue] of Object.entries(executorByPhase)) {
+      try {
+        resolveExecutorForPhase(routedPhase, { configPath });
+      } catch (err) {
+        log.error(
+          { err: err.message, phase: routedPhase, value: routedValue },
+          "executorByPhase: invalid routing value at boot — that phase will use the boot executor (fix Layer-1 catalyst.orchestration.executorByPhase)"
+        );
+        try {
+          defaultAppendOperatorEvent({
+            "event.name": "execution-core.executor.route-invalid",
+            payload: { phase: routedPhase, value: routedValue, reason: err.message },
+          });
+        } catch {
+          /* best-effort */
+        }
+      }
+    }
+    // CTL-1457: codex boot-eligibility gate. When codex is routed — a per-phase route
+    // OR the node-level boot executor is itself codex-exec (finding 1) — assert the
+    // codex auth home + probe `codex --version`; on failure it WARN-logs and emits
+    // execution-core.executor.codex-fallback, and makePhaseAwareDispatchFn degrades
+    // routed codex phases to the boot executor. When nothing routes to codex it is a
+    // pure no-op (eligible:true, no checks, no event). `bootExecutor` is threaded so
+    // the gate arms for a codex-exec boot node and labels the event's `effective`
+    // degrade target (finding 5: "bg" for a codex node, else the real boot executor).
+    const codexElig = resolveCodexBootEligibility(executorByPhase, {
+      codexCfg: codexConfig({ configPath }),
+      emitEvent: defaultAppendOperatorEvent,
+      bootExecutor: bootExec.executor,
+      log,
+    });
+    // CTL-1457 (finding 1): degrade the NODE-LEVEL boot executor when codex-exec is the
+    // node default but the codex boot precondition failed — mirror resolveSdkBootExecutor's
+    // sdk→bg degrade (it passes codex-exec through untouched, so the node-level codex
+    // degrade lives here). Without this a codex-exec node whose auth/binary is unusable
+    // would still route EVERY unrouted phase to the non-eligible codex executor. A
+    // per-phase codex route degrades separately inside makePhaseAwareDispatchFn.
+    if (bootExec.executor === "codex-exec" && !codexElig.eligible) {
+      executor = "bg";
+    }
     // CTL-1410 Phase B: reap stale SDK-worker disk projections. No in-process
     // worker survives a daemon restart, so any projection whose pid is dead is
     // a leftover of the previous daemon; delete it BEFORE boot-resume and the
     // scheduler run, so no liveness consumer trusts a ghost projection.
     const sdkRegistryBoot = reconcileSdkRegistryOnBoot(orchDir);
-    if (sdkRegistryBoot.removed.length > 0) {
+    if (sdkRegistryBoot.removed.length > 0 || (sdkRegistryBoot.killedChildren?.length ?? 0) > 0) {
       log.info(
         {
           removed: sdkRegistryBoot.removed,
           kept: sdkRegistryBoot.kept,
           harvested: sdkRegistryBoot.harvested.map((h) => h.ticket),
+          // CTL-1457 (N2): orphaned codex children SIGTERM'd before their dead-daemon
+          // projections were reaped (empty on a pure sdk/bg fleet).
+          killedChildren: (sdkRegistryBoot.killedChildren ?? []).map((k) => k.ticket),
         },
-        "boot: reaped stale sdk-worker projections (CTL-1410); harvested warm-resume sessions (CTL-1422)"
+        "boot: reaped stale sdk-worker projections (CTL-1410); harvested warm-resume sessions (CTL-1422); killed orphaned codex children (CTL-1457 N2)"
       );
     }
     // CTL-1422: interrupted in-process runs (dead-pid projections that captured a
@@ -696,24 +756,47 @@ export function startDaemon({
     const sdkSessionHarvest = new Map(
       sdkRegistryBoot.harvested.map((h) => [h.ticket, h.sessionId])
     );
-    // CTL-1396 (Codex P2): under executor=sdk, inject the unified-event-log appender
-    // into the dispatch path so sdkRunPhaseAgent's telemetry (execution-core.sdk.phase-turns
-    // — the turn-cap calibration signal — plus .overloaded/.auth.misconfigured) lands in
-    // the JSONL event log / Loki, not just daemon.log's stderr. sdkRunPhaseAgent's emitEvent
-    // is the two-arg (name, payload) shape; defaultAppendOperatorEvent takes the one-arg
-    // {event.name,payload} envelope, so adapt. bg/oneshot-legacy → identity pass-through
-    // (no sdk launch verb → byte-identical to today).
-    const rawDispatchFn = dispatchForExecutor(executor);
-    const dispatchFn =
-      executor === "sdk"
-        ? (args, seams = {}) =>
-            rawDispatchFn(args, {
-              emitEvent: (name, payload) =>
-                defaultAppendOperatorEvent({ "event.name": name, payload }),
-              ...seams,
-            })
-        : rawDispatchFn;
+    // CTL-1457: the SINGLE phase-aware dispatchFn threaded to all FIVE dispatch entry
+    // points. Per dispatch it consults resolveExecutorForPhase(phase) — a routed phase
+    // runs on its configured executor (codex degraded to the boot executor when
+    // codexElig.eligible is false), every other phase on the boot executor. It also
+    // owns the CTL-1396 emitEvent adaptation: for the sdk AND codex-exec arms it binds
+    // defaultAppendOperatorEvent (the one-arg {event.name,payload} envelope) into the
+    // runner's two-arg (name,payload) emitEvent so execution-core.{sdk,codex}.* telemetry
+    // lands in the JSONL event log / Loki, not just daemon.log's stderr. With
+    // executorByPhase empty (the default) every phase resolves to the boot executor, so
+    // the selected dispatch fn + emitEvent wrapping are byte-identical to today.
+    // CTL-1457 (T5): the daemon-boot sdk-auth verdict for a per-phase sdk route. The
+    // node-level executor already went through resolveSdkBootExecutor (sdk→bg on a bad
+    // env), but a phase EXPLICITLY routed to "sdk" on a bg/default node bypasses that
+    // node-level gate — so compute the same auth verdict here and thread it so
+    // makePhaseAwareDispatchFn degrades a routed sdk phase to the boot executor ONCE
+    // instead of refusing before prelaunch on every dispatch. Zero-change-when-unrouted:
+    // the flag is only consulted for an EXPLICITLY-routed sdk phase.
+    const sdkBootEligible = assertSdkAuth({
+      env: process.env,
+      oauthToken: process.env.CLAUDE_CODE_OAUTH_TOKEN,
+    }).ok;
+    const dispatchFn = makePhaseAwareDispatchFn({
+      bootExecutor: executor,
+      codexBootEligible: codexElig.eligible,
+      sdkBootEligible,
+      configPath,
+      emitEvent: defaultAppendOperatorEvent,
+      log,
+    });
     const dispatchMode = dispatchModeForExecutor(executor);
+    // CTL-1457 (N1): the PRIMARY codex/sdk rollout routes ONE phase to codex-exec/sdk
+    // on a node whose boot executor is still bg — there dispatchMode is "phase-agents"
+    // so the scheduler/monitor slot gates (which gate on isInProcessDispatchMode) skip
+    // countSdkInflight and the routed no-bg worker is NOT counted → over-admit past
+    // maxParallel. Derive this flag from the ALREADY-READ executorByPhase map and thread
+    // it alongside dispatchMode so those gates OR it in and count the routed worker.
+    // Empty map (the default) → false → byte-identical. NOTE: a routed-but-degraded
+    // executor (codex not eligible → bg) still arms the gate, but countSdkInflight then
+    // sees 0 no-bg signals (the phase launches bg with a bg_job_id), so occupancy is
+    // unchanged — the flag is safe to derive from the raw routing map.
+    const hasInProcessRoute = hasInProcessExecutorRoute(executorByPhase);
     // CTL-1365b: the comment-wake re-dispatch binding — routes a parked ticket's
     // re-dispatch through the SAME resolved executor (no split-brain).
     const commentWakeDispatch = makeCommentWakeDispatch(dispatchFn);
@@ -774,6 +857,7 @@ export function startDaemon({
       cache,
       dispatch: dispatchFn, // CTL-1365a: →Triage one-shot dispatch substrate (bg today)
       dispatchMode, // CTL-1367 P1: gate the SDK-occupancy term in the →Triage budget (no-op under bg)
+      hasInProcessRoute, // CTL-1457 (N1): also arm the →Triage SDK-occupancy term when a per-phase route runs in-process on a bg node
       concurrency, // CTL-716: slot-gate uses the same ceiling as the scheduler
       botUserIds: linearBotUserIds, // CTL-781: respect-assignment gate
       botWriteId: linearBotWriteId, // CTL-781: self-assign on claim
@@ -806,6 +890,7 @@ export function startDaemon({
       cache,
       dispatch: dispatchFn, // CTL-1365a: scheduler pull-loop dispatch substrate (bg today)
       dispatchMode, // CTL-1365a: catalyst.dispatch.mode for the Tier-1 tick line + OTLP resource attr
+      hasInProcessRoute, // CTL-1457 (N1): arm the scheduler occupancy gates when a per-phase route runs in-process on a bg node
       concurrency,
       configPath,
       layer2Path,

@@ -194,6 +194,11 @@ build_canonical_line() {
   # CTL-1135: caused_by — the id of the triggering event (additive; null when absent).
   local caused_by=""
 
+  # CTL-1457: catalyst.executor — the launch verb that ran the worker (bg | sdk |
+  # codex-exec). Additive, omit-when-empty: absent CATALYST_EXECUTOR_ID leaves the
+  # event byte-identical to today.
+  local executor=""
+
   # CTL-1403: reads-by-source attributes (linear.read.*). source/result are the
   # low-card metric dimensions (the collector normalizes → bare source/result);
   # op is structured metadata; age_ms is a numeric VALUE (feeds the staleness
@@ -238,6 +243,7 @@ build_canonical_line() {
       --phase-attempt)       phase_attempt="$2"; shift 2 ;;
       --phase-revive-count)  phase_revive_count="$2"; shift 2 ;;
       --ticket-type)         ticket_type="$2"; shift 2 ;;
+      --executor)            executor="$2"; shift 2 ;;
       --caused-by)           caused_by="$2"; shift 2 ;;
       --linear-read-source)  linear_read_source="$2"; shift 2 ;;
       --linear-read-result)  linear_read_result="$2"; shift 2 ;;
@@ -317,6 +323,7 @@ build_canonical_line() {
     --arg phase_attempt "$phase_attempt" \
     --arg phase_revive_count "$phase_revive_count" \
     --arg ticket_type "$ticket_type" \
+    --arg executor "$executor" \
     --arg caused_by "$caused_by" \
     --arg linear_read_source "$linear_read_source" \
     --arg linear_read_result "$linear_read_result" \
@@ -373,6 +380,7 @@ build_canonical_line() {
         + (if $linear_read_result == "" then {} else { "linear.read.result": $linear_read_result } end)
         + (if $linear_read_op     == "" then {} else { "linear.read.op":     $linear_read_op }     end)
         + (if $linear_read_age_ms == "" then {} else { "linear.read.age_ms": ($linear_read_age_ms | tonumber) } end)
+        + (if $executor == "" then {} else { "catalyst.executor": $executor } end)
         + { "catalyst.ticket.type": $ticket_type }
       ),
       body: (
