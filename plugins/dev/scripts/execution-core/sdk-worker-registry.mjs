@@ -75,6 +75,12 @@ function writeProjection(entry) {
         // projections / when the caller omits it; cross-process readers (doctor,
         // boot reconcile) see which launch verb owns the worker.
         executor: entry.executor ?? null,
+        // CTL-1457 (N2): the REAL child subprocess pid for an OUT-of-process executor
+        // (codex-exec spawns `codex exec`). The projection's `pid` is process.pid (the
+        // DAEMON) for EVERY worker; a codex child is a genuine subprocess that can
+        // OUTLIVE a daemon crash, so its own pid must be durable here to let boot
+        // reconcile kill the orphan. null for in-process sdk/bg (never set).
+        childPid: entry.childPid ?? null,
       }),
     );
     renameSync(tmp, file);
@@ -112,6 +118,7 @@ function publicView(entry) {
     aborted: entry.aborted,
     sessionId: entry.sessionId,
     executor: entry.executor, // CTL-1457: which launch verb owns this worker
+    childPid: entry.childPid, // CTL-1457 (N2): out-of-process child pid (codex-exec) or null
   };
 }
 
@@ -162,6 +169,9 @@ export function registerSdkWorker(
     aborted: false,
     sessionId,
     executor,
+    // CTL-1457 (N2): the out-of-process child pid (codex-exec). Unknown at register
+    // time (the child spawns later) → null; set via setChildPid after spawn.
+    childPid: null,
     now,
   };
   _live.set(ticket, entry);
@@ -198,6 +208,16 @@ export function registerSdkWorker(
     setSessionId(sessionId) {
       if (_live.get(ticket)?.token !== entry.token) return;
       entry.sessionId = sessionId;
+      entry.updatedAt = entry.now();
+      writeProjection(entry);
+    },
+    // CTL-1457 (N2): record the REAL child subprocess pid (codex-exec) so a crash of
+    // THIS daemon leaves a durable pointer to any orphaned child on the projection.
+    // Written immediately (durability is the point) and token-fenced like touch/
+    // setSessionId. A non-integer pid clears it to null. No-op for in-process sdk/bg.
+    setChildPid(pid) {
+      if (_live.get(ticket)?.token !== entry.token) return;
+      entry.childPid = Number.isInteger(pid) && pid > 0 ? pid : null;
       entry.updatedAt = entry.now();
       writeProjection(entry);
     },
@@ -287,6 +307,18 @@ function defaultPidAlive(pid) {
   }
 }
 
+// CTL-1457 (N2): best-effort SIGTERM to an orphaned out-of-process child (codex-exec)
+// on boot reconcile. Returns true when the signal was delivered. Never throws.
+function defaultKillChild(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, "SIGTERM");
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Cross-process liveness read from the disk projection (for the delegate-runner
  * child and other non-daemon processes). pid-alive is primary; freshness is the
@@ -316,16 +348,27 @@ export function isSdkWorkerLiveOnDisk(orchDir, ticket, { pidAlive = defaultPidAl
  * Boot reconcile: no in-process worker survives a daemon restart, so any
  * projection whose pid is dead (or that is unreadable) is a leftover from the
  * previous daemon and is deleted. Runs before any dispatch entry point.
- * @returns {{removed: string[], kept: string[]}}
+ * CTL-1457 (N2): an OUT-of-process codex-exec child can OUTLIVE a daemon crash;
+ * such a projection is (a) never warm-resumed (its worker is a `codex exec` child,
+ * not a resumable in-process SDK session) and (b) if its recorded childPid is still
+ * alive, SIGTERM'd BEFORE the projection is deleted — so the signal-based boot-resume
+ * cold re-dispatches the phase exactly once instead of racing a surviving orphan.
+ * @returns {{removed: string[], kept: string[], harvested: object[], killedChildren: object[]}}
  */
 // CTL-1422: harvested sessions older than this are orphans, not resume
 // candidates — the lookback window that stops an ancient never-stopped
 // projection from resurrecting forever.
 export const WARM_HARVEST_MAX_AGE_MS = 48 * 60 * 60 * 1000;
 
-export function reconcileSdkRegistryOnBoot(orchDir, { pidAlive = defaultPidAlive, now = Date.now } = {}) {
+export function reconcileSdkRegistryOnBoot(
+  orchDir,
+  { pidAlive = defaultPidAlive, now = Date.now, killChild = defaultKillChild } = {},
+) {
   const removed = [];
   const kept = [];
+  // CTL-1457 (N2): { ticket, childPid } for each orphaned codex child SIGTERM'd here.
+  // Empty on a pure sdk/bg fleet (childPid is only ever set by the codex runner).
+  const killedChildren = [];
   // CTL-1422: dead-pid projections that carry a FRESH sessionId are the
   // warm-resume inventory — no in-process worker survives a daemon restart, so
   // each one is an interrupted run whose SDK session can be continued via
@@ -340,7 +383,7 @@ export function reconcileSdkRegistryOnBoot(orchDir, { pidAlive = defaultPidAlive
   try {
     files = readdirSync(projectionDir(orchDir)).filter((f) => f.endsWith(".json"));
   } catch {
-    return { removed, kept, harvested };
+    return { removed, kept, harvested, killedChildren };
   }
   for (const f of files) {
     const ticket = f.slice(0, -".json".length);
@@ -357,7 +400,12 @@ export function reconcileSdkRegistryOnBoot(orchDir, { pidAlive = defaultPidAlive
     }
     const updatedAt = Number(proj?.updatedAt);
     const fresh = Number.isFinite(updatedAt) && now() - updatedAt <= WARM_HARVEST_MAX_AGE_MS;
-    if (proj && typeof proj.sessionId === "string" && proj.sessionId && fresh) {
+    // CTL-1457 (N2): a codex-exec projection is NEVER a warm-resume candidate — its
+    // worker is an out-of-process `codex exec` child, not a resumable in-process SDK
+    // session. It always falls through to the reap branch below (where a surviving
+    // orphan is killed), so the signal-based boot-resume re-dispatches the phase once.
+    const isCodex = proj?.executor === "codex-exec";
+    if (!isCodex && proj && typeof proj.sessionId === "string" && proj.sessionId && fresh) {
       harvested.push({
         ticket,
         sessionId: proj.sessionId,
@@ -367,6 +415,14 @@ export function reconcileSdkRegistryOnBoot(orchDir, { pidAlive = defaultPidAlive
       });
       continue; // keep the file — it is the durable copy of the UUID
     }
+    // CTL-1457 (N2): kill a still-alive orphaned codex child BEFORE deleting its
+    // projection. Gated on isCodex + freshness + pidAlive so a long-dead projection
+    // (whose childPid may have been reused) is never signalled — best-effort orphan
+    // cleanup, not a guaranteed kill. bg/sdk projections carry no childPid → no-op.
+    const childPid = Number(proj?.childPid);
+    if (isCodex && Number.isInteger(childPid) && childPid > 0 && fresh && pidAlive(childPid)) {
+      if (killChild(childPid)) killedChildren.push({ ticket, childPid });
+    }
     try {
       rmSync(file, { force: true });
     } catch {
@@ -374,7 +430,7 @@ export function reconcileSdkRegistryOnBoot(orchDir, { pidAlive = defaultPidAlive
     }
     removed.push(ticket);
   }
-  return { removed, kept, harvested };
+  return { removed, kept, harvested, killedChildren };
 }
 
 /** Test seam: clear all in-memory state (projections are per-test tmp dirs). */

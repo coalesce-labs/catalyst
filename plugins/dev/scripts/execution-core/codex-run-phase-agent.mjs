@@ -402,8 +402,16 @@ export function buildCodexArgs(spec, cfg, { orchDir, worktreePath } = {}) {
 // verbatim, then CODEX_HOME / CLAUDE_PLUGIN_ROOT / CATALYST_EXECUTOR_ID. The KEY
 // divergence from buildSdkEnv: it DELETES CLAUDE_CODE_OAUTH_TOKEN too (plus the
 // ANTHROPIC_* keys) — codex must NOT carry the Claude subscription token. All
-// CATALYST_* from the spec env are preserved (only the three vendor-auth vars are
-// stripped).
+// CATALYST_* from the spec env are preserved (only the vendor-auth / provider vars
+// are stripped).
+//
+// CTL-1457 (N3): OpenAI provider-env scrub. On the auth.json / ChatGPT-subscription
+// path (NO CODEX_API_KEY in the child env) a stray OPENAI_API_KEY or provider-base
+// override inherited from the daemon env would make the codex child silently run
+// METERED / against the wrong endpoint with NONE of the LOUD CODEX_API_KEY warning
+// assertCodexAuth emits. So when the child is NOT in explicit API-key mode, DELETE
+// the OpenAI API key + provider-override vars. When CODEX_API_KEY IS set the operator
+// opted into metered API-key mode → leave the provider env intact.
 export function buildCodexEnv(spec, cfg) {
   const env = { ...process.env };
   for (const kv of spec?.env ?? []) {
@@ -426,6 +434,18 @@ export function buildCodexEnv(spec, cfg) {
   delete env.ANTHROPIC_API_KEY;
   delete env.ANTHROPIC_AUTH_TOKEN;
   delete env.CLAUDE_CODE_OAUTH_TOKEN;
+  // CTL-1457 (N3): unless the operator explicitly opted into metered API-key mode
+  // (CODEX_API_KEY present in the child env), strip the OpenAI API key + provider
+  // overrides so an auth.json/ChatGPT-plan child can never silently meter or hit a
+  // wrong endpoint on a leaked var. Left intact when CODEX_API_KEY is set (the
+  // operator's deliberate API-key path).
+  if (!env.CODEX_API_KEY) {
+    delete env.OPENAI_API_KEY;
+    delete env.OPENAI_BASE_URL;
+    delete env.OPENAI_API_BASE;
+    delete env.OPENAI_ORG;
+    delete env.OPENAI_ORGANIZATION;
+  }
   return env;
 }
 
@@ -645,6 +665,13 @@ function spawnAndParse({ bin, args, cwd, env, spawnChild, reg, onSession, secret
       });
       return;
     }
+
+    // CTL-1457 (N2): record the REAL codex child pid on the registry projection. The
+    // projection's `pid` is the DAEMON's; this child is a genuine subprocess that can
+    // outlive a daemon crash, so boot reconcile needs its own pid to kill the orphan.
+    // Optional-chained: a test-injected registry handle may omit the setter, and a
+    // fake EventEmitter child has no numeric pid (setChildPid coerces that to null).
+    reg.setChildPid?.(child?.pid);
 
     let settled = false;
     let aborted = false;

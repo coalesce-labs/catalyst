@@ -446,6 +446,45 @@ describe("buildCodexEnv", () => {
     const env = buildCodexEnv(makeCodexSpec({ pluginDirs: [] }), { ...CFG, pluginRoot: "/override/plugins/dev" });
     expect(env.CLAUDE_PLUGIN_ROOT).toBe("/override/plugins/dev");
   });
+
+  // CTL-1457 (N3): auth.json / ChatGPT-plan mode (NO CODEX_API_KEY) — strip the OpenAI
+  // API key + provider overrides so the child can never silently run metered / against a
+  // wrong endpoint with none of the LOUD CODEX_API_KEY warning.
+  test("N3: auth.json mode (no CODEX_API_KEY) — OPENAI_API_KEY + provider overrides deleted from the child env", () => {
+    const spec = makeCodexSpec({
+      env: [
+        "OPENAI_API_KEY=sk-openai-leak",
+        "OPENAI_BASE_URL=https://proxy.example/v1",
+        "OPENAI_API_BASE=https://proxy.example",
+        "OPENAI_ORG=org-x",
+        "OPENAI_ORGANIZATION=org-y",
+        "CATALYST_TICKET=CTL-100",
+      ],
+    });
+    const env = buildCodexEnv(spec, CFG); // CFG has no CODEX_API_KEY
+    expect("OPENAI_API_KEY" in env).toBe(false);
+    expect("OPENAI_BASE_URL" in env).toBe(false);
+    expect("OPENAI_API_BASE" in env).toBe(false);
+    expect("OPENAI_ORG" in env).toBe(false);
+    expect("OPENAI_ORGANIZATION" in env).toBe(false);
+    // CATALYST_* untouched — only the OpenAI vendor/provider vars are stripped.
+    expect(env.CATALYST_TICKET).toBe("CTL-100");
+  });
+
+  // CTL-1457 (N3): metered API-key mode (CODEX_API_KEY set) — the operator opted into the
+  // API path, so the OpenAI provider env is LEFT intact.
+  test("N3: CODEX_API_KEY mode — OpenAI provider env is left intact", () => {
+    const spec = makeCodexSpec({
+      env: [
+        "CODEX_API_KEY=sk-codex-metered",
+        "OPENAI_API_KEY=sk-openai-intended",
+        "OPENAI_BASE_URL=https://api.openai.com/v1",
+      ],
+    });
+    const env = buildCodexEnv(spec, CFG);
+    expect(env.OPENAI_API_KEY).toBe("sk-openai-intended");
+    expect(env.OPENAI_BASE_URL).toBe("https://api.openai.com/v1");
+  });
 });
 
 // ── buildCodexPrompt (snapshot-by-assertion) ──────────────────────────────────

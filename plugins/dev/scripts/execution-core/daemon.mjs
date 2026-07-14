@@ -55,6 +55,7 @@ import {
   dispatchModeForExecutor, // CTL-1365a: executor → catalyst.dispatch.mode telemetry vocab
   resolveExecutorForPhase, // CTL-1457: per-phase executor routing hook (boot validation of executorByPhase values)
   readExecutorByPhaseLayer1, // CTL-1457: Layer-1 catalyst.orchestration.executorByPhase map reader
+  hasInProcessExecutorRoute, // CTL-1457 (N1): does executorByPhase route ANY phase to sdk|codex-exec? (arms the slot/occupancy gates on a bg node)
   codexConfig, // CTL-1457: codex-exec runtime settings (codexHome/bin/…) for the boot-eligibility gate
 } from "./config.mjs";
 import { resolveBootIdentity } from "./host-boot-identity.mjs"; // CTL-1093
@@ -736,14 +737,17 @@ export function startDaemon({
     // a leftover of the previous daemon; delete it BEFORE boot-resume and the
     // scheduler run, so no liveness consumer trusts a ghost projection.
     const sdkRegistryBoot = reconcileSdkRegistryOnBoot(orchDir);
-    if (sdkRegistryBoot.removed.length > 0) {
+    if (sdkRegistryBoot.removed.length > 0 || (sdkRegistryBoot.killedChildren?.length ?? 0) > 0) {
       log.info(
         {
           removed: sdkRegistryBoot.removed,
           kept: sdkRegistryBoot.kept,
           harvested: sdkRegistryBoot.harvested.map((h) => h.ticket),
+          // CTL-1457 (N2): orphaned codex children SIGTERM'd before their dead-daemon
+          // projections were reaped (empty on a pure sdk/bg fleet).
+          killedChildren: (sdkRegistryBoot.killedChildren ?? []).map((k) => k.ticket),
         },
-        "boot: reaped stale sdk-worker projections (CTL-1410); harvested warm-resume sessions (CTL-1422)"
+        "boot: reaped stale sdk-worker projections (CTL-1410); harvested warm-resume sessions (CTL-1422); killed orphaned codex children (CTL-1457 N2)"
       );
     }
     // CTL-1422: interrupted in-process runs (dead-pid projections that captured a
@@ -782,6 +786,17 @@ export function startDaemon({
       log,
     });
     const dispatchMode = dispatchModeForExecutor(executor);
+    // CTL-1457 (N1): the PRIMARY codex/sdk rollout routes ONE phase to codex-exec/sdk
+    // on a node whose boot executor is still bg — there dispatchMode is "phase-agents"
+    // so the scheduler/monitor slot gates (which gate on isInProcessDispatchMode) skip
+    // countSdkInflight and the routed no-bg worker is NOT counted → over-admit past
+    // maxParallel. Derive this flag from the ALREADY-READ executorByPhase map and thread
+    // it alongside dispatchMode so those gates OR it in and count the routed worker.
+    // Empty map (the default) → false → byte-identical. NOTE: a routed-but-degraded
+    // executor (codex not eligible → bg) still arms the gate, but countSdkInflight then
+    // sees 0 no-bg signals (the phase launches bg with a bg_job_id), so occupancy is
+    // unchanged — the flag is safe to derive from the raw routing map.
+    const hasInProcessRoute = hasInProcessExecutorRoute(executorByPhase);
     // CTL-1365b: the comment-wake re-dispatch binding — routes a parked ticket's
     // re-dispatch through the SAME resolved executor (no split-brain).
     const commentWakeDispatch = makeCommentWakeDispatch(dispatchFn);
@@ -842,6 +857,7 @@ export function startDaemon({
       cache,
       dispatch: dispatchFn, // CTL-1365a: →Triage one-shot dispatch substrate (bg today)
       dispatchMode, // CTL-1367 P1: gate the SDK-occupancy term in the →Triage budget (no-op under bg)
+      hasInProcessRoute, // CTL-1457 (N1): also arm the →Triage SDK-occupancy term when a per-phase route runs in-process on a bg node
       concurrency, // CTL-716: slot-gate uses the same ceiling as the scheduler
       botUserIds: linearBotUserIds, // CTL-781: respect-assignment gate
       botWriteId: linearBotWriteId, // CTL-781: self-assign on claim
@@ -874,6 +890,7 @@ export function startDaemon({
       cache,
       dispatch: dispatchFn, // CTL-1365a: scheduler pull-loop dispatch substrate (bg today)
       dispatchMode, // CTL-1365a: catalyst.dispatch.mode for the Tier-1 tick line + OTLP resource attr
+      hasInProcessRoute, // CTL-1457 (N1): arm the scheduler occupancy gates when a per-phase route runs in-process on a bg node
       concurrency,
       configPath,
       layer2Path,

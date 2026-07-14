@@ -3518,6 +3518,14 @@ export function schedulerTick(
     // by dispatch mode. Default "phase-agents" = today's bg substrate; every
     // direct-call test keeps the stable label with no wiring.
     dispatchMode = "phase-agents",
+    // CTL-1457 (N1): true when executorByPhase routes ANY phase to an in-process
+    // executor (sdk|codex-exec) even though the NODE boot dispatchMode is bg —
+    // the primary per-phase codex/sdk rollout. ORed into the occupancy gates below
+    // (isInProcessDispatchMode(dispatchMode) || hasInProcessRoute) so a routed no-bg
+    // worker on a bg node is counted (else it over-admits past maxParallel). Default
+    // false → the bg node with no in-process route is byte-identical (countSdkInflight
+    // is never called; and even when armed it is 0 on a node nothing routes in-process).
+    hasInProcessRoute = false,
   } = {}
 ) {
   // CTL-850: resolve this host + the cluster roster ONCE per tick (cheap
@@ -4881,8 +4889,12 @@ export function schedulerTick(
   // count them too — gate on isInProcessDispatchMode (sdk OR codex-exec). Under
   // bg/oneshot-legacy the term is 0 (countSdkInflight is never called), so
   // occupiedCount is byte-identical to today.
+  // CTL-1457 (N1): ALSO arm when executorByPhase routes ANY phase to an in-process
+  // executor while the NODE mode is still bg (hasInProcessRoute) — the per-phase
+  // rollout's routed no-bg worker must be counted too. countSdkInflight stays 0 on a
+  // node nothing routes in-process, so a bg node with an empty map is unchanged.
   let sdkInflight = 0;
-  if (isInProcessDispatchMode(dispatchMode)) {
+  if (isInProcessDispatchMode(dispatchMode) || hasInProcessRoute) {
     try {
       sdkInflight = countSdkInflight(orchDir);
     } catch {
@@ -5900,9 +5912,10 @@ export function schedulerTick(
   // counts dispatched|running, so the re-sample is never inflated by it. CTL-1457 (T2):
   // gate on isInProcessDispatchMode so codex-exec re-samples its no-bg occupancy the same
   // way sdk does; the bg/oneshot-legacy path never recomputes (sdkInFlightCount stays
-  // === inFlightCount) and keeps the byte-identical freeSlots formula below.
+  // === inFlightCount) and keeps the byte-identical freeSlots formula below. CTL-1457
+  // (N1): also re-sample when a per-phase in-process route is armed on a bg node.
   let sdkInFlightCount = inFlightCount;
-  if (isInProcessDispatchMode(dispatchMode)) {
+  if (isInProcessDispatchMode(dispatchMode) || hasInProcessRoute) {
     let resampledSdkInflight = sdkInflight;
     try {
       resampledSdkInflight = countSdkInflight(orchDir);
@@ -5939,7 +5952,9 @@ export function schedulerTick(
   // loss; the slot frees naturally next tick via getAgentsCached deregistration).
   const freeSlots =
     livenessFresh && !draining
-      ? isInProcessDispatchMode(dispatchMode)
+      ? // CTL-1457 (N1): the in-process budget formula also applies when a per-phase
+        // route arms in-process occupancy on a bg node (hasInProcessRoute).
+        isInProcessDispatchMode(dispatchMode) || hasInProcessRoute
         ? // CTL-1367 P2 (item b): under executor=sdk take the MIN of two budgets so
           // whichever formula correctly accounts for the slot the other missed wins:
           //  (1) the re-sampled SDK count (sdkInFlightCount) — catches same-tick
@@ -6972,6 +6987,7 @@ function runTick() {
       readEligible: runningOpts.readEligible,
       dispatch: runningOpts.dispatch,
       dispatchMode: runningOpts.dispatchMode, // CTL-1365a: stamp the Tier-1 tick-timing line
+      hasInProcessRoute: runningOpts.hasInProcessRoute, // CTL-1457 (N1): arm occupancy gates for a per-phase in-process route on a bg node
       exec: runningOpts.exec,
       writeStatus: runningOpts.writeStatus,
       cache: runningOpts.cache, // CTL-634: shared out-of-set blocker state cache
@@ -7538,6 +7554,12 @@ export function startScheduler({
   // resource attr (initTracing). Default "phase-agents" keeps every direct-call
   // test + standalone main() on today's label with no wiring.
   dispatchMode = "phase-agents",
+  // CTL-1457 (N1): true when the node's executorByPhase routes ANY phase to an
+  // in-process executor (sdk|codex-exec) while the node boot dispatchMode is still
+  // bg. Threaded into runningOpts → the schedulerTick occupancy gates so a routed
+  // no-bg worker is counted on a bg node. Default false → byte-identical for a node
+  // with no in-process route (the common case).
+  hasInProcessRoute = false,
   readEligible,
   exec,
   writeStatus,
@@ -7616,6 +7638,7 @@ export function startScheduler({
     orchDir,
     dispatch,
     dispatchMode, // CTL-1365a: threaded to schedulerTick (tick-timing log field)
+    hasInProcessRoute, // CTL-1457 (N1): per-phase in-process route arms the occupancy gates on a bg node
     readEligible,
     exec,
     writeStatus,

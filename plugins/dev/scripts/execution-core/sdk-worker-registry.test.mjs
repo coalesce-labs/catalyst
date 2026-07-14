@@ -479,3 +479,97 @@ describe("executor attribution (CTL-1457)", () => {
     rmSync(dir, { recursive: true, force: true });
   });
 });
+
+describe("codex child pid + orphan reap (CTL-1457 N2)", () => {
+  test("setChildPid records the child pid, exposes it, and writes the projection immediately", () => {
+    const dir = freshDir();
+    let t = T0;
+    const h = registerSdkWorker(entry(dir, { executor: "codex-exec" }), { now: () => t });
+    // childPid is unknown at register time → null.
+    expect(readProjection(dir, "CTL-1").childPid).toBe(null);
+    t = T0 + 500; // INSIDE the touch throttle — the child-pid write must not wait
+    h.setChildPid(44444);
+    expect(sdkWorkerForTicket("CTL-1").childPid).toBe(44444);
+    expect(readProjection(dir, "CTL-1").childPid).toBe(44444);
+    // A non-integer clears it to null.
+    h.setChildPid(undefined);
+    expect(readProjection(dir, "CTL-1").childPid).toBe(null);
+    h.deregister();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("a superseded handle's setChildPid does not clobber the successor (token fence)", () => {
+    const dir = freshDir();
+    const hOld = registerSdkWorker(entry(dir, { generation: 1, executor: "codex-exec" }));
+    const hNew = registerSdkWorker(entry(dir, { generation: 2, executor: "codex-exec" }));
+    hNew.setChildPid(55555);
+    hOld.setChildPid(99999); // superseded — must be a no-op
+    expect(readProjection(dir, "CTL-1").childPid).toBe(55555);
+    hNew.deregister();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("boot reconcile SIGTERMs a live orphaned codex child and reaps its projection (never warm-resumed despite a sessionId)", () => {
+    const dir = freshDir();
+    mkdirSync(join(dir, ".sdk-workers"), { recursive: true });
+    writeFileSync(
+      join(dir, ".sdk-workers", "CTL-1.json"),
+      JSON.stringify({
+        ticket: "CTL-1", phase: "triage", sessionId: "thread-1", generation: 1,
+        worktreePath: "/wt/a", pid: 11111, childPid: 33333, executor: "codex-exec", updatedAt: T0,
+      }),
+    );
+    const killed = [];
+    const res = reconcileSdkRegistryOnBoot(dir, {
+      pidAlive: (pid) => pid === 33333, // daemon 11111 DEAD, codex child 33333 ALIVE
+      now: () => T0 + 1000,
+      killChild: (pid) => { killed.push(pid); return true; },
+    });
+    expect(killed).toEqual([33333]);
+    expect(res.killedChildren).toEqual([{ ticket: "CTL-1", childPid: 33333 }]);
+    // A codex projection is NEVER a warm-resume candidate even with a sessionId.
+    expect(res.harvested).toEqual([]);
+    expect(res.removed).toEqual(["CTL-1"]);
+    expect(existsSync(join(dir, ".sdk-workers", "CTL-1.json"))).toBe(false);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("boot reconcile reaps a codex projection whose child is already DEAD without a kill", () => {
+    const dir = freshDir();
+    mkdirSync(join(dir, ".sdk-workers"), { recursive: true });
+    writeFileSync(
+      join(dir, ".sdk-workers", "CTL-1.json"),
+      JSON.stringify({ ticket: "CTL-1", childPid: 33333, executor: "codex-exec", pid: 11111, updatedAt: T0 }),
+    );
+    const killed = [];
+    const res = reconcileSdkRegistryOnBoot(dir, {
+      pidAlive: () => false, // both daemon + child dead
+      now: () => T0 + 1000,
+      killChild: (pid) => { killed.push(pid); return true; },
+    });
+    expect(killed).toEqual([]);
+    expect(res.killedChildren).toEqual([]);
+    expect(res.removed).toEqual(["CTL-1"]);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("a STALE codex projection (past the 48h window) is reaped WITHOUT a kill (pid-reuse safety)", () => {
+    const dir = freshDir();
+    mkdirSync(join(dir, ".sdk-workers"), { recursive: true });
+    writeFileSync(
+      join(dir, ".sdk-workers", "CTL-1.json"),
+      JSON.stringify({ ticket: "CTL-1", childPid: 33333, executor: "codex-exec", pid: 11111, updatedAt: T0 }),
+    );
+    const killed = [];
+    const res = reconcileSdkRegistryOnBoot(dir, {
+      // daemon pid 11111 DEAD (so we reach the reap); child pid 33333 "alive" — but the
+      // projection is stale (past 48h), so the kill is skipped for pid-reuse safety.
+      pidAlive: (pid) => pid === 33333,
+      now: () => T0 + WARM_HARVEST_MAX_AGE_MS + 1,
+      killChild: (pid) => { killed.push(pid); return true; },
+    });
+    expect(killed).toEqual([]);
+    expect(res.removed).toEqual(["CTL-1"]);
+    rmSync(dir, { recursive: true, force: true });
+  });
+});

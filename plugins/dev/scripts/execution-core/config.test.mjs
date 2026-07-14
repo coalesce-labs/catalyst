@@ -48,6 +48,7 @@ import {
   getExecutor,
   dispatchModeForExecutor,
   resolveExecutorForPhase,
+  hasInProcessExecutorRoute,
   codexConfig,
 } from "./config.mjs";
 
@@ -621,6 +622,29 @@ describe("executor flag + resolver (CTL-1365a)", () => {
     writeExecutorByPhase({ triage: "gpt-9000" });
     expect(() => resolveExecutorForPhase("triage", { configPath: l1 })).toThrow(/gpt-9000/);
     expect(() => resolveExecutorForPhase("triage", { configPath: l1 })).toThrow(/triage/);
+  });
+
+  // CTL-1457 (N1): hasInProcessExecutorRoute — does the map route ANY phase in-process?
+  test("hasInProcessExecutorRoute: true when a phase routes to codex-exec", () => {
+    expect(hasInProcessExecutorRoute({ triage: "codex-exec" })).toBe(true);
+  });
+  test("hasInProcessExecutorRoute: true when a phase routes to sdk", () => {
+    expect(hasInProcessExecutorRoute({ implement: "sdk" })).toBe(true);
+  });
+  test("hasInProcessExecutorRoute: true via a compound alias (claude-sdk→sdk)", () => {
+    expect(hasInProcessExecutorRoute({ plan: "claude-sdk" })).toBe(true);
+  });
+  test("hasInProcessExecutorRoute: false for an all-bg map (no in-process route)", () => {
+    expect(hasInProcessExecutorRoute({ triage: "bg", plan: "claude-bg" })).toBe(false);
+  });
+  test("hasInProcessExecutorRoute: false for an empty / absent / non-object map", () => {
+    expect(hasInProcessExecutorRoute({})).toBe(false);
+    expect(hasInProcessExecutorRoute(undefined)).toBe(false);
+    expect(hasInProcessExecutorRoute(null)).toBe(false);
+    expect(hasInProcessExecutorRoute("codex-exec")).toBe(false); // non-object → false
+  });
+  test("hasInProcessExecutorRoute: case-insensitive, whitespace-tolerant", () => {
+    expect(hasInProcessExecutorRoute({ triage: " Codex-Exec " })).toBe(true);
   });
 
   test("codexConfig resolves defaults (home ~/catalyst/codex-home, bin codex, model null, writableRoots [catalystDir])", () => {

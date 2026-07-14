@@ -614,6 +614,29 @@ export function resolveExecutorForPhase(phase, { configPath, env = process.env }
   return { executor: r.executor, source: r.source };
 }
 
+// hasInProcessExecutorRoute — CTL-1457 (N1): does the executorByPhase map route ANY
+// phase to an IN-PROCESS executor (sdk|codex-exec)? The slot/occupancy gates count
+// no-bg in-flight workers gated on isInProcessDispatchMode(dispatchMode) — but that
+// gates on the NODE boot mode. The PRIMARY codex/sdk rollout routes ONE phase to
+// codex-exec/sdk on a node whose boot mode is still "phase-agents" (bg); there the
+// mode gate is false and the routed no-bg worker is NOT counted → over-admit past
+// maxParallel. This predicate ORs into those gates so a bg/oneshot-legacy node that
+// routes any phase in-process still arms countSdkInflight. Pure over the ALREADY-READ
+// map object (the daemon reads executorByPhase once at boot and passes it here — no
+// extra IO); canonicalizes compound aliases (claude-sdk→sdk) before the membership
+// test; returns false for an empty/absent/non-object map (the common case → zero
+// behavior change, so the zero-change-when-unrouted invariant holds). Never throws.
+export function hasInProcessExecutorRoute(executorByPhase) {
+  if (!executorByPhase || typeof executorByPhase !== "object") return false;
+  for (const raw of Object.values(executorByPhase)) {
+    if (typeof raw !== "string") continue;
+    const normalized = raw.trim().toLowerCase();
+    const canonical = EXECUTOR_ALIASES[normalized] ?? normalized;
+    if (isInProcessDispatchMode(canonical)) return true;
+  }
+  return false;
+}
+
 // readCodexConfigLayer1 — pull catalyst.orchestration.codex out of a project's
 // Layer-1 .catalyst/config.json. Returns {} for a null/missing/unparseable file
 // or an absent/non-object key. Never throws — mirrors readFleetHealthConfigLayer1.

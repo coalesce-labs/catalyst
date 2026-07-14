@@ -429,6 +429,9 @@ export function handleStateChangedEvent(
     // byte-identical bg budget. Threaded from startMonitor via tailerOpts.
     dispatchMode = "phase-agents",
     countSdkInflight = defaultCountSdkInflight,
+    // CTL-1457 (N1): per-phase in-process route flag → the computed budget (below)
+    // arms the SDK-occupancy term on a bg node. Default false → unchanged.
+    hasInProcessRoute = false,
     triageBudget,
     // CTL-781: respect-assignment + self-assign seams.
     botUserIds,
@@ -461,7 +464,7 @@ export function handleStateChangedEvent(
   // single call. Either way, the budget gates all dispatchTriage calls below.
   const budget =
     triageBudget ??
-    computeTriageBudget({ orchDir, concurrency, readMaxParallelFn, liveBackgroundCount, dispatchMode, countSdkInflight });
+    computeTriageBudget({ orchDir, concurrency, readMaxParallelFn, liveBackgroundCount, dispatchMode, countSdkInflight, hasInProcessRoute });
   for (const p of listProjects()) {
     const query = resolveEligibleQuery(p);
     if (query.team !== parsed.teamKey) continue;
@@ -603,6 +606,11 @@ export function computeTriageBudget({
   // CTL-1367 P1: executor=sdk occupancy reader (in-process SDK workers have no
   // `claude --bg` job → invisible to liveBackgroundCount). Injectable for tests.
   countSdkInflight = defaultCountSdkInflight,
+  // CTL-1457 (N1): true when executorByPhase routes ANY phase to an in-process
+  // executor (sdk|codex-exec) while the node boot dispatchMode is still bg — the
+  // per-phase rollout. ORed into the gate so the routed no-bg triage worker is
+  // counted on a bg node. Default false → byte-identical when nothing routes.
+  hasInProcessRoute = false,
 } = {}) {
   const maxParallel = readMaxParallelFn(orchDir, concurrency);
   const live = liveBackgroundCount();
@@ -611,9 +619,11 @@ export function computeTriageBudget({
   // can't dispatch past maxParallel while prior SDK triage queries run/queue behind
   // the semaphore. CTL-1457 (T2): codex-exec prelaunches write the SAME no-bg_job_id
   // signals and queue behind their own semaphore, so gate on isInProcessDispatchMode
-  // (sdk OR codex-exec) → still 0 under bg/oneshot-legacy (byte-identical).
+  // (sdk OR codex-exec) → still 0 under bg/oneshot-legacy (byte-identical). CTL-1457
+  // (N1): also arm when a per-phase in-process route is present on a bg node — the
+  // triage phase routed to codex-exec/sdk writes the same no-bg signal.
   let sdkInflight = 0;
-  if (isInProcessDispatchMode(dispatchMode)) {
+  if (isInProcessDispatchMode(dispatchMode) || hasInProcessRoute) {
     try {
       sdkInflight = countSdkInflight(orchDir);
     } catch {
@@ -1018,6 +1028,9 @@ export function sweepMissingTriage({
   // "phase-agents" → byte-identical bg budget). Threaded from startMonitor.
   dispatchMode = "phase-agents",
   countSdkInflight = defaultCountSdkInflight,
+  // CTL-1457 (N1): per-phase in-process route flag (arms the SDK-occupancy term on
+  // a bg node). Threaded from startMonitor. Default false → unchanged.
+  hasInProcessRoute = false,
   // CTL-781: respect-assignment + self-assign seams.
   botUserIds,
   botWriteId,
@@ -1047,6 +1060,7 @@ export function sweepMissingTriage({
     liveBackgroundCount,
     dispatchMode, // CTL-1367 P1
     countSdkInflight, // CTL-1367 P1
+    hasInProcessRoute, // CTL-1457 (N1)
   });
   for (const p of listProjects()) {
     for (const t of getEligibleSet(p.team)) {
@@ -1196,6 +1210,7 @@ export function readNewEvents({ foldOnly = false } = {}) {
           liveBackgroundCount: tailerOpts.liveBackgroundCount,
           dispatchMode: tailerOpts.dispatchMode, // CTL-1367 P1
           countSdkInflight: tailerOpts.countSdkInflight, // CTL-1367 P1
+          hasInProcessRoute: tailerOpts.hasInProcessRoute, // CTL-1457 (N1)
         });
     for (const line of lines) {
       if (!line.trim()) continue;
@@ -1264,6 +1279,11 @@ export function startMonitor({
   // counts in-process SDK workers. Default "phase-agents" → byte-identical bg.
   dispatchMode = "phase-agents",
   countSdkInflight = defaultCountSdkInflight,
+  // CTL-1457 (N1): true when executorByPhase routes ANY phase to an in-process
+  // executor (sdk|codex-exec) while the node boot dispatchMode is still bg. Threaded
+  // into tailerOpts + both sweepMissingTriage calls so the →Triage budget counts a
+  // routed no-bg triage worker on a bg node. Default false → byte-identical bg.
+  hasInProcessRoute = false,
   // CTL-781: respect-assignment + self-assign seams.
   botUserIds,
   botWriteId,
@@ -1296,6 +1316,7 @@ export function startMonitor({
     liveBackgroundCount,
     dispatchMode, // CTL-1367 P1
     countSdkInflight, // CTL-1367 P1
+    hasInProcessRoute, // CTL-1457 (N1)
     botUserIds,
     botWriteId,
     gateway,
@@ -1309,6 +1330,7 @@ export function startMonitor({
     liveBackgroundCount,
     dispatchMode, // CTL-1367 P1
     countSdkInflight, // CTL-1367 P1
+    hasInProcessRoute, // CTL-1457 (N1)
     botUserIds,
     botWriteId,
     gateway,
@@ -1346,6 +1368,7 @@ export function startMonitor({
       liveBackgroundCount,
       dispatchMode, // CTL-1367 P1
       countSdkInflight, // CTL-1367 P1
+      hasInProcessRoute, // CTL-1457 (N1)
       botUserIds,
       botWriteId,
       gateway,
