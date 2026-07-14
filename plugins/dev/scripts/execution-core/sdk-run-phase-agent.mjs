@@ -466,7 +466,12 @@ function defaultWriteSignalTerminal(signalFile, status, reason) {
 // which does NOT retry). Mirror of phase-agent-dispatch's mark_launch_failed. The
 // 2-arg shape is the seam defaultEmitBackstop injects for the failed/overloaded
 // (non-turn-cap) backstops.
-function defaultWriteSignalStalled(signalFile, reason) {
+// CTL-1457: exported so the sibling codex-exec launch verb
+// (codex-run-phase-agent.mjs) reuses the SAME "flip a still-in-flight signal to
+// stalled" writer instead of duplicating the atomic tmp+rename + P3
+// terminal-clobber guard. Its closure deps (defaultWriteSignalTerminal,
+// SIGNAL_TERMINAL_STATUSES) travel with it.
+export function defaultWriteSignalStalled(signalFile, reason) {
   return defaultWriteSignalTerminal(signalFile, "stalled", reason);
 }
 
@@ -652,9 +657,15 @@ function isLaunchSpec(obj) {
 //                   signal, or a lost single-flight claim). NOT a failure (item 18):
 //                   the existing/winning worker owns the phase; the caller returns
 //                   success without launching query().
-function runPrelaunch(
+// CTL-1457: exported so the sibling codex-exec launch verb
+// (codex-run-phase-agent.mjs) drives the IDENTICAL Stage-A shared pre-launch
+// (single-flight claim + fenced "dispatched" signal + generation token + rebase +
+// prompt/env composition) instead of copying the spawn block. Its closure deps
+// (PHASE_AGENT_DISPATCH_BIN, isLaunchSpec, PRELAUNCH_SPEC_STATUSES,
+// getPrelaunchTimeoutMs) travel with it — the codex module never re-declares them.
+export function runPrelaunch(
   { orchDir, ticket, phase, worktreePath, resumeSession, handoffPath, attempt, clusterGeneration },
-  { spawn = spawnSync } = {},
+  { spawn = spawnSync, executorId } = {},
 ) {
   const args = [
     "--phase", phase,
@@ -668,6 +679,10 @@ function runPrelaunch(
   const extraEnv = {};
   if (handoffPath) extraEnv.CATALYST_HANDOFF_PATH = handoffPath;
   if (clusterGeneration != null) extraEnv.CATALYST_CLUSTER_GENERATION = String(clusterGeneration);
+  // CTL-1457: attribute the signal file (phase-agent-dispatch reads
+  // CATALYST_EXECUTOR_ID → writes executor:<id> into the "dispatched" signal +
+  // DISPATCH_ENV). Omitted when unset so a bare prelaunch stays byte-identical.
+  if (executorId) extraEnv.CATALYST_EXECUTOR_ID = executorId;
   const env = {
     ...process.env,
     CATALYST_ORCHESTRATOR_DIR: orchDir,
@@ -747,6 +762,12 @@ export function buildSdkEnv(specEnv, { base = process.env, oauthToken, settingsE
   delete env.ANTHROPIC_AUTH_TOKEN;
   env.CLAUDE_CODE_OAUTH_TOKEN = oauthToken;
   delete env.CATALYST_RECREATE_ATTEMPTED;
+  // CTL-1457: attribute the in-process SDK worker (mirror where buildCodexEnv
+  // sets codex-exec). The phase skill body's phase-agent-emit-complete reads this
+  // to stamp catalyst.executor="sdk" on the completion event. The prelaunch
+  // spec.env already carries it (runPrelaunch executorId), but set it explicitly
+  // so the worker is attributed even when the spec array omits it.
+  env.CATALYST_EXECUTOR_ID = "sdk";
   return env;
 }
 
@@ -960,7 +981,7 @@ export async function sdkRunPhaseAgent(
   //    rebase + prompt/env composition) via phase-agent-dispatch prelaunch-only ─
   const pre = runPrelaunch(
     { orchDir, ticket, phase, worktreePath, resumeSession, handoffPath, attempt, clusterGeneration },
-    { spawn },
+    { spawn, executorId: "sdk" }, // CTL-1457: prelaunch writes executor:"sdk" into the signal file
   );
   // CTL-1367 item 18: an idempotent prelaunch (claim-lost / existing
   // dispatched|running|done signal) is a NO-OP SUCCESS, NOT a failure — the

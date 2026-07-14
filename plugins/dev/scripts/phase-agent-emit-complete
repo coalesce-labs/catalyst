@@ -205,6 +205,15 @@ resolve_ticket_type() {
 }
 TICKET_TYPE="$(resolve_ticket_type)"
 
+# ─── CTL-1457: resolve the executor attribution (catalyst.executor) ───────────
+#
+# The worker carries CATALYST_EXECUTOR_ID in its own env (set by the launch verb:
+# phase-agent-dispatch for bg, buildSdkEnv for sdk, buildCodexEnv for codex-exec).
+# Straight env read with NO default — an unset value stays empty so
+# build_canonical_line omits the catalyst.executor attribute entirely (the event
+# is byte-identical to pre-CTL-1457 for any worker that lacks the var).
+EXECUTOR="${CATALYST_EXECUTOR_ID-}"
+
 # ─── 0. CTL-736 Phase 1: fencing check (stale generation bows out) ───────────
 #
 # A worker carries its dispatch generation in CATALYST_GENERATION. If the phase
@@ -382,6 +391,7 @@ LINE=$(build_canonical_line \
 	--phase-attempt "$PHASE_ATTEMPT" \
 	--phase-revive-count "$PHASE_REVIVE_COUNT" \
 	--ticket-type "$TICKET_TYPE" \
+	--executor "$EXECUTOR" \
 	2>/dev/null) || warn "failed to build canonical event line"
 
 if [[ -n $LINE ]]; then

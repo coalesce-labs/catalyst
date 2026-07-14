@@ -522,6 +522,29 @@ CB_NULL=$(echo "$LINE_CB_BARE" | jq -r '.caused_by')
 expect_eq "caused_by key present even when flag absent" "true" "$CB_HAS"
 expect_eq "caused_by defaults to null when flag absent" "null" "$CB_NULL"
 
+# CTL-1457: catalyst.executor — additive, omit-when-empty attribution attribute.
+LINE_EX="$(build_canonical_line \
+  --ts "2026-07-14T00:00:00Z" --severity INFO \
+  --service catalyst.phase-agent --event-name "phase.triage.complete.CTL-1457" \
+  --executor codex-exec)"
+EX=$(echo "$LINE_EX" | jq -r '.attributes["catalyst.executor"]')
+expect_eq "build_canonical_line catalyst.executor from --executor" "codex-exec" "$EX"
+
+# Absent flag → attribute key omitted entirely (event byte-identical to pre-CTL-1457).
+LINE_EX_BARE="$(build_canonical_line \
+  --ts "2026-07-14T00:00:00Z" --severity INFO \
+  --service catalyst.phase-agent --event-name "phase.triage.complete.CTL-1457")"
+EX_HAS=$(echo "$LINE_EX_BARE" | jq -r '.attributes | has("catalyst.executor")')
+expect_eq "catalyst.executor omitted when --executor absent" "false" "$EX_HAS"
+
+# Empty-string flag → also omitted (mirrors the pervasive omit-when-empty convention).
+LINE_EX_EMPTY="$(build_canonical_line \
+  --ts "2026-07-14T00:00:00Z" --severity INFO \
+  --service catalyst.phase-agent --event-name "phase.triage.complete.CTL-1457" \
+  --executor "")"
+EX_EMPTY_HAS=$(echo "$LINE_EX_EMPTY" | jq -r '.attributes | has("catalyst.executor")')
+expect_eq "catalyst.executor omitted when --executor is empty" "false" "$EX_EMPTY_HAS"
+
 echo ""
 echo "Total: $((PASSES + FAILURES)), Passed: $PASSES, Failed: $FAILURES"
 exit "$FAILURES"

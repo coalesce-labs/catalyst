@@ -71,6 +71,10 @@ function writeProjection(entry) {
         startedAt: entry.startedAt,
         updatedAt: entry.updatedAt,
         sessionId: entry.sessionId ?? null,
+        // CTL-1457: executor attribution (additive, opaque). null for pre-CTL-1457
+        // projections / when the caller omits it; cross-process readers (doctor,
+        // boot reconcile) see which launch verb owns the worker.
+        executor: entry.executor ?? null,
       }),
     );
     renameSync(tmp, file);
@@ -107,6 +111,7 @@ function publicView(entry) {
     orchDir: entry.orchDir,
     aborted: entry.aborted,
     sessionId: entry.sessionId,
+    executor: entry.executor, // CTL-1457: which launch verb owns this worker
   };
 }
 
@@ -130,7 +135,10 @@ export function registerSdkWorker(
   // CTL-1422 review fix (D): a warm resume KNOWS its session UUID at register
   // time (spec.resumeSession) — seed it so a crash between register and the
   // first streamed message doesn't lose the warm chain.
-  { ticket, phase, worktreePath, generation, orchDir, sessionId = null },
+  // CTL-1457: executor is an additive, opaque attribution field (the launch verb
+  // that owns this worker: "bg" | "sdk" | "codex-exec"). null when omitted; every
+  // liveness/abort/reconcile path stays executor-agnostic.
+  { ticket, phase, worktreePath, generation, orchDir, sessionId = null, executor = null },
   { now = Date.now } = {},
 ) {
   if (!ticket) throw new TypeError("registerSdkWorker: ticket is required");
@@ -153,6 +161,7 @@ export function registerSdkWorker(
     abortReason: null,
     aborted: false,
     sessionId,
+    executor,
     now,
   };
   _live.set(ticket, entry);

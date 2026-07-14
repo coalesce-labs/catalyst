@@ -457,3 +457,25 @@ describe("session capture (CTL-1422)", () => {
     rmSync(dir, { recursive: true, force: true });
   });
 });
+
+describe("executor attribution (CTL-1457)", () => {
+  test("registerSdkWorker({executor:'codex-exec'}) carries it into the entry, projection, and publicView", () => {
+    const dir = freshDir();
+    const h = registerSdkWorker(entry(dir, { executor: "codex-exec" }), { now: () => T0 });
+    // publicView (sdkWorkerForTicket) exposes it for liveness/reconcile readers.
+    expect(sdkWorkerForTicket("CTL-1").executor).toBe("codex-exec");
+    // The disk projection carries it for cross-process readers (doctor, boot reconcile).
+    expect(readProjection(dir, "CTL-1").executor).toBe("codex-exec");
+    h.deregister();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("omitted executor defaults to null (additive — pre-CTL-1457 callers unchanged)", () => {
+    const dir = freshDir();
+    const h = registerSdkWorker(entry(dir), { now: () => T0 });
+    expect(sdkWorkerForTicket("CTL-1").executor).toBe(null);
+    expect(readProjection(dir, "CTL-1").executor).toBe(null);
+    h.deregister();
+    rmSync(dir, { recursive: true, force: true });
+  });
+});

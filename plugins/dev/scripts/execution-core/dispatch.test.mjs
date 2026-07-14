@@ -9,7 +9,7 @@ import { describe, test, expect } from "bun:test";
 import { mkdtempSync, writeFileSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { dispatchTicket, defaultDispatch, defaultRunPhaseAgent, dispatchForExecutor, sdkDispatch, makeCommentWakeDispatch, teamOf, settleDispatchSync, sdkSignalRunnable, isThenable, backstopOnRejection } from "./dispatch.mjs";
+import { dispatchTicket, defaultDispatch, defaultRunPhaseAgent, dispatchForExecutor, sdkDispatch, codexDispatch, makePhaseAwareDispatchFn, makeCommentWakeDispatch, teamOf, settleDispatchSync, sdkSignalRunnable, isThenable, backstopOnRejection } from "./dispatch.mjs";
 
 describe("teamOf", () => {
   test("extracts the team prefix from a ticket identifier", () => {
@@ -317,6 +317,18 @@ describe("defaultRunPhaseAgent — spawn-arg construction (CTL-658)", () => {
     }
     expect("CATALYST_RECREATE_ATTEMPTED" in spawn.calls[0].opts.env).toBe(false);
   });
+
+  // CTL-1457: attribution becomes universal — the bg launch verb stamps
+  // CATALYST_EXECUTOR_ID="bg" so phase-agent-dispatch writes executor:"bg" into
+  // the signal file + the bg worker's completion event carries catalyst.executor.
+  test("sets CATALYST_EXECUTOR_ID='bg' in the spawned env (CTL-1457)", () => {
+    const spawn = spy();
+    defaultRunPhaseAgent(
+      { orchDir: "/ec", ticket: "CTL-1", phase: "research", worktreePath: "/wt/CTL-1" },
+      { spawn }
+    );
+    expect(spawn.calls[0].opts.env.CATALYST_EXECUTOR_ID).toBe("bg");
+  });
 });
 
 // CTL-1004 / CTL-1056 Bug 2: a failing dispatch must surface the captured
@@ -390,6 +402,18 @@ describe("dispatchForExecutor (CTL-1365b)", () => {
     // identity-stable: the SAME function object every call, so the daemon's
     // four-entry-point wiring is assertable by reference.
     expect(dispatchForExecutor("sdk")).toBe(dispatchForExecutor("sdk"));
+  });
+
+  // CTL-1457: codex-exec → codexDispatch, identity-stable (the daemon's
+  // makePhaseAwareDispatchFn asserts the selection by reference).
+  test("codex-exec → codexDispatch (identity-stable)", () => {
+    expect(dispatchForExecutor("codex-exec")).toBe(codexDispatch);
+    expect(dispatchForExecutor("codex-exec")).toBe(dispatchForExecutor("codex-exec"));
+  });
+
+  test("an unknown executor value falls back to defaultDispatch (bg semantics)", () => {
+    expect(dispatchForExecutor("who-knows")).toBe(defaultDispatch);
+    expect(dispatchForExecutor(undefined)).toBe(defaultDispatch);
   });
 
   test("the injected bg dispatch behaves IDENTICALLY to defaultDispatch — same arg array reaches runPhaseAgent", () => {
@@ -535,6 +559,204 @@ describe("sdkDispatch (CTL-1365b)", () => {
       if (savedTok !== undefined) process.env.CLAUDE_CODE_OAUTH_TOKEN = savedTok;
       if (savedAuth !== undefined) process.env.ANTHROPIC_AUTH_TOKEN = savedAuth;
     }
+  });
+});
+
+// CTL-1457: codexDispatch reuses defaultDispatch's resolve→worktree→run pipeline
+// EXACTLY like sdkDispatch, swapping ONLY the launch verb (→ codexRunPhaseAgent).
+// The runPhaseAgent seam stays injectable for the hermetic wiring assertion; the
+// pipeline-seam test is parametrized over BOTH sdk and codex to prove the seams
+// (resolveProject → createWorktree → runPhaseAgent) receive IDENTICAL args and only
+// the runner differs.
+describe.each([
+  ["sdk", sdkDispatch],
+  ["codex-exec", codexDispatch],
+])("%s dispatch — pipeline seams byte-identical (CTL-1457)", (_name, dispatchFn) => {
+  test("resolveProject → createWorktree → runPhaseAgent receive identical args", () => {
+    const calls = [];
+    const spy = (args) => { calls.push(args); return { code: 0, stdout: "ok", stderr: "", signal: null }; };
+    const r = dispatchFn(
+      { orchDir: "/ec", ticket: "CTL-1", phase: "implement", clusterGeneration: 7 },
+      {
+        resolveProject: () => ({ team: "CTL", repoRoot: "/repo" }),
+        createWorktree: (a) => ({ code: 0, worktreePath: `/wt/${a.ticket}`, stderr: "" }),
+        runPhaseAgent: spy, // override the executor's verb for a hermetic wiring check
+      },
+    );
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toEqual({
+      orchDir: "/ec",
+      ticket: "CTL-1",
+      phase: "implement",
+      worktreePath: "/wt/CTL-1",
+      resumeSession: undefined,
+      handoffPath: undefined,
+      attempt: undefined,
+      clusterGeneration: 7,
+    });
+    // sync launch verb → defaultDispatch's object branch → sync result + worktreePath.
+    expect(r).toEqual({ code: 0, stdout: "ok", stderr: "", signal: null, worktreePath: "/wt/CTL-1" });
+  });
+
+  test("an injected emitEvent reaches the runner's SECOND (options) param, not the input object", () => {
+    const emitted = [];
+    const emitEvent = (name, payload) => emitted.push({ name, payload });
+    const spy = (input, opts = {}) => {
+      opts.emitEvent("execution-core.launch.telemetry", { ticket: input.ticket });
+      return { code: 0, stdout: "", stderr: "", signal: null };
+    };
+    const inputSeen = [];
+    dispatchFn(
+      { orchDir: "/ec", ticket: "CTL-1", phase: "implement" },
+      {
+        resolveProject: () => ({ team: "CTL", repoRoot: "/repo" }),
+        createWorktree: (a) => ({ code: 0, worktreePath: `/wt/${a.ticket}`, stderr: "" }),
+        runPhaseAgent: (input, opts) => { inputSeen.push("emitEvent" in input); return spy(input, opts); },
+        emitEvent,
+      },
+    );
+    expect(emitted).toHaveLength(1);
+    expect(emitted[0].payload.ticket).toBe("CTL-1");
+    expect(inputSeen[0]).toBe(false); // emitEvent bound into opts, never smuggled into the input object
+  });
+});
+
+// CTL-1457: makePhaseAwareDispatchFn — the single dispatchFn the daemon threads to
+// all five entry points. Per dispatch it consults resolveExecutorForPhase(phase) to
+// choose the executor; unrouted phases (and an empty routing map) use the boot
+// executor. resolveExecutorForPhase + dispatchForExecutor are injected as fakes so
+// the routing decision is driven with no config file / no real dispatch.
+describe("makePhaseAwareDispatchFn (CTL-1457)", () => {
+  // recordingDispatchForExecutor — a fake dispatchForExecutor that returns a fn
+  // recording (executor, args, seams) for each executor value.
+  const harness = ({ routeMap = {}, bootExecutor = "bg", codexBootEligible = true, emitEvent, resolveThrows = false } = {}) => {
+    const dispatched = [];
+    const errors = [];
+    const fakeResolveExecutorForPhase = (phase) => {
+      if (resolveThrows && phase === "triage") throw new Error(`executorByPhase["triage"] = "codex-exce" is not a valid executor`);
+      const routed = routeMap[phase];
+      return { executor: routed ?? bootExecutor, source: routed ? "executorByPhase" : "default" };
+    };
+    const fakeDispatchForExecutor = (executor) => (args, seams = {}) => {
+      dispatched.push({ executor, args, seams });
+      return { code: 0 };
+    };
+    const dispatchFn = makePhaseAwareDispatchFn({
+      bootExecutor,
+      codexBootEligible,
+      configPath: "/cfg.json",
+      emitEvent,
+      resolveExecutorForPhase: fakeResolveExecutorForPhase,
+      dispatchForExecutor: fakeDispatchForExecutor,
+      log: { error: (...a) => errors.push(a) },
+    });
+    return { dispatchFn, dispatched, errors };
+  };
+
+  test("a routed phase → the routed executor's dispatch (codex)", () => {
+    const { dispatchFn, dispatched } = harness({ routeMap: { triage: "codex-exec" }, bootExecutor: "bg", emitEvent: () => {} });
+    dispatchFn({ orchDir: "/ec", ticket: "CTL-1", phase: "triage" });
+    expect(dispatched).toHaveLength(1);
+    expect(dispatched[0].executor).toBe("codex-exec");
+  });
+
+  test("an unrouted phase → the boot executor's dispatch", () => {
+    const { dispatchFn, dispatched } = harness({ routeMap: { triage: "codex-exec" }, bootExecutor: "bg", emitEvent: () => {} });
+    dispatchFn({ orchDir: "/ec", ticket: "CTL-1", phase: "implement" });
+    expect(dispatched[0].executor).toBe("bg");
+  });
+
+  test("empty routing → EVERY phase uses the boot executor (zero-change invariant)", () => {
+    const { dispatchFn, dispatched } = harness({ routeMap: {}, bootExecutor: "bg", emitEvent: () => {} });
+    for (const phase of ["triage", "research", "plan", "implement", "verify", "review", "pr"]) {
+      dispatchFn({ orchDir: "/ec", ticket: "CTL-1", phase });
+    }
+    expect(dispatched.map((d) => d.executor)).toEqual(["bg", "bg", "bg", "bg", "bg", "bg", "bg"]);
+  });
+
+  test("codex routed but codexBootEligible=false → degrades to the boot executor", () => {
+    const { dispatchFn, dispatched } = harness({ routeMap: { triage: "codex-exec" }, bootExecutor: "bg", codexBootEligible: false, emitEvent: () => {} });
+    dispatchFn({ orchDir: "/ec", ticket: "CTL-1", phase: "triage" });
+    expect(dispatched[0].executor).toBe("bg");
+  });
+
+  // finding 1 (defense-in-depth): when the BOOT executor is itself codex-exec and the
+  // codex boot precondition failed, an unrouted phase must NOT fall back to codex-exec
+  // (that would re-dispatch to the same unusable codex) — it degrades to the concrete
+  // "bg" fallback. (The daemon degrades bootExecutor at boot too; this arm is the belt.)
+  test("bootExecutor codex-exec + codexBootEligible=false → an unrouted phase degrades to bg, NOT codex", () => {
+    const { dispatchFn, dispatched } = harness({
+      routeMap: {}, // unrouted → uses the boot executor (which is codex-exec here)
+      bootExecutor: "codex-exec",
+      codexBootEligible: false,
+      emitEvent: () => {},
+    });
+    dispatchFn({ orchDir: "/ec", ticket: "CTL-1", phase: "implement" });
+    expect(dispatched[0].executor).toBe("bg"); // concrete non-codex fallback, never codex-exec
+  });
+
+  // A phase EXPLICITLY routed to codex-exec on a codex-exec boot node with a failed
+  // boot gate also degrades to bg (never a codex-exec self-fallback loop).
+  test("routed codex-exec + bootExecutor codex-exec + codexBootEligible=false → degrades to bg", () => {
+    const { dispatchFn, dispatched } = harness({
+      routeMap: { triage: "codex-exec" },
+      bootExecutor: "codex-exec",
+      codexBootEligible: false,
+      emitEvent: () => {},
+    });
+    dispatchFn({ orchDir: "/ec", ticket: "CTL-1", phase: "triage" });
+    expect(dispatched[0].executor).toBe("bg");
+  });
+
+  test("an invalid route throw is caught → boot executor + log.error", () => {
+    const { dispatchFn, dispatched, errors } = harness({ resolveThrows: true, bootExecutor: "bg", emitEvent: () => {} });
+    dispatchFn({ orchDir: "/ec", ticket: "CTL-1", phase: "triage" });
+    expect(dispatched[0].executor).toBe("bg"); // degraded, not crashed
+    expect(errors).toHaveLength(1);
+    expect(errors[0][1]).toMatch(/routing invalid/);
+  });
+
+  test("emitEvent is WRAPPED (into a {event.name,payload} envelope) for the sdk AND codex arms", () => {
+    for (const executor of ["sdk", "codex-exec"]) {
+      const envelopes = [];
+      const { dispatchFn, dispatched } = harness({
+        routeMap: { triage: executor },
+        bootExecutor: "bg",
+        emitEvent: (env) => envelopes.push(env),
+      });
+      dispatchFn({ orchDir: "/ec", ticket: "CTL-1", phase: "triage" });
+      const { seams } = dispatched[0];
+      expect(typeof seams.emitEvent).toBe("function");
+      // The wrapper adapts the runner's (name, payload) call into the one-arg envelope.
+      seams.emitEvent("execution-core.x", { a: 1 });
+      expect(envelopes).toEqual([{ "event.name": "execution-core.x", payload: { a: 1 } }]);
+    }
+  });
+
+  test("emitEvent is NOT wrapped for the bg arm (byte-identical to today — no telemetry seam)", () => {
+    const { dispatchFn, dispatched } = harness({ routeMap: {}, bootExecutor: "bg", emitEvent: () => {} });
+    dispatchFn({ orchDir: "/ec", ticket: "CTL-1", phase: "implement" });
+    expect("emitEvent" in dispatched[0].seams).toBe(false);
+  });
+
+  // finding 4: the codex arm receives configPath in its seams (codexDispatch threads it
+  // into codexRunPhaseAgent so the runtime codexConfig matches the boot gate); the sdk
+  // arm does NOT (it ignores it, so it is scoped to the codex arm).
+  test("configPath is threaded into the codex arm's seams but not the sdk arm's", () => {
+    const codex = harness({ routeMap: { triage: "codex-exec" }, bootExecutor: "bg", emitEvent: () => {} });
+    codex.dispatchFn({ orchDir: "/ec", ticket: "CTL-1", phase: "triage" });
+    expect(codex.dispatched[0].seams.configPath).toBe("/cfg.json");
+
+    const sdk = harness({ routeMap: { triage: "sdk" }, bootExecutor: "bg", emitEvent: () => {} });
+    sdk.dispatchFn({ orchDir: "/ec", ticket: "CTL-1", phase: "triage" });
+    expect("configPath" in sdk.dispatched[0].seams).toBe(false);
+  });
+
+  test("caller seams pass through alongside the wrapped emitEvent (sdk arm)", () => {
+    const { dispatchFn, dispatched } = harness({ routeMap: { triage: "sdk" }, bootExecutor: "bg", emitEvent: () => {} });
+    dispatchFn({ orchDir: "/ec", ticket: "CTL-1", phase: "triage" }, { resumeSession: "u1" });
+    expect(dispatched[0].seams.resumeSession).toBe("u1");
+    expect(typeof dispatched[0].seams.emitEvent).toBe("function");
   });
 });
 

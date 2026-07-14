@@ -168,7 +168,7 @@ describe("parseArgs", () => {
     expect(parseArgs(["install", "--executor"]).errors).toContain("--executor requires a value");
     expect(parseArgs(["install", "--executor="]).errors).toContain("--executor requires a value");
     // the valid set the install accepts (asserted against the exported constant)
-    expect(VALID_EXECUTORS).toEqual(["bg", "sdk", "oneshot-legacy"]);
+    expect(VALID_EXECUTORS).toEqual(["bg", "sdk", "oneshot-legacy", "codex-exec"]);
   });
 });
 

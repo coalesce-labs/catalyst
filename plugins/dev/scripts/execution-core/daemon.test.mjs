@@ -2089,21 +2089,50 @@ describe("CTL-1365b: executor flag honored at all four dispatch entry points", (
     return captured;
   };
 
-  test("executor=bg → scheduler + monitor + boot-resume all receive defaultDispatch (byte-identical)", () => {
+  // CTL-1457: the daemon now threads a SINGLE phase-aware dispatchFn (built by
+  // makePhaseAwareDispatchFn) to every site — no longer defaultDispatch by reference.
+  // So the wiring assertion shifts: the three sites receive the SAME closure (no
+  // split-brain), and invoking it under empty routing + executor=bg proves it routes
+  // to the bg arm (defaultDispatch's pipeline, runPhaseAgent called with NO emitEvent
+  // seam — byte-identical to the pre-CTL-1457 path). configPath is null in this
+  // harness ⇒ readExecutorByPhaseLayer1 returns {} ⇒ every phase is unrouted.
+  const invokeRoutes = (dispatchFn, phase = "implement") => {
+    const seen = [];
+    dispatchFn(
+      { orchDir: "/ec", ticket: "CTL-1", phase },
+      {
+        resolveProject: () => ({ team: "CTL", repoRoot: "/repo" }),
+        createWorktree: (a) => ({ code: 0, worktreePath: `/wt/${a.ticket}`, stderr: "" }),
+        runPhaseAgent: (input, opts) => {
+          seen.push({ input, opts });
+          return { code: 0, stdout: "", stderr: "", signal: null };
+        },
+      }
+    );
+    return seen;
+  };
+
+  test("executor=bg → all sites receive the SAME phase-aware dispatchFn that routes to bg (byte-identical behavior)", () => {
     process.env.CATALYST_EXECUTOR = "bg";
     const c = captureThreeSites();
-    expect(c.scheduler).toBe(defaultDispatch); // site 1
-    expect(c.monitor).toBe(defaultDispatch); // site 2 (→Triage one-shot)
-    expect(c.boot).toBe(defaultDispatch); // site 4 (boot-resume)
+    expect(c.scheduler).toBe(c.monitor); // sites 1 & 2 — same closure (no split-brain)
+    expect(c.scheduler).toBe(c.boot); // site 4 — same closure
+    expect(typeof c.scheduler).toBe("function");
     expect(typeof c.onComment).toBe("function"); // site 3 wired (routing pinned below)
+    // bg arm: defaultDispatch's pipeline runs and runPhaseAgent gets NO emitEvent seam.
+    const seen = invokeRoutes(c.scheduler);
+    expect(seen).toHaveLength(1);
+    expect(seen[0].opts).toBeUndefined();
   });
 
-  test("executor unset → defaults to bg at all three captured sites (no site hardcodes sdk)", () => {
+  test("executor unset → every site routes to bg (no site hardcodes sdk)", () => {
     delete process.env.CATALYST_EXECUTOR;
     const c = captureThreeSites();
-    expect(c.scheduler).toBe(defaultDispatch);
-    expect(c.monitor).toBe(defaultDispatch);
-    expect(c.boot).toBe(defaultDispatch);
+    expect(c.scheduler).toBe(c.monitor);
+    expect(c.scheduler).toBe(c.boot);
+    const seen = invokeRoutes(c.scheduler);
+    expect(seen).toHaveLength(1);
+    expect(seen[0].opts).toBeUndefined(); // bg arm — no emitEvent wrap
   });
 
   test("executor=sdk → scheduler + monitor + boot-resume all receive sdkDispatch (none hardcodes bg)", () => {
@@ -2151,9 +2180,15 @@ describe("CTL-1365b: executor flag honored at all four dispatch entry points", (
     delete process.env.ANTHROPIC_API_KEY;
     try {
       const c = captureThreeSites();
-      expect(c.scheduler).toBe(defaultDispatch);
-      expect(c.monitor).toBe(defaultDispatch);
-      expect(c.boot).toBe(defaultDispatch);
+      // All sites receive the SAME phase-aware closure whose bootExecutor is the
+      // degraded "bg". CTL-1457: an unrouted phase keeps the boot executor (the
+      // phase-aware routing only overrides an EXPLICITLY-routed phase), so the
+      // degrade survives — invoking routes to the bg arm (no emitEvent seam), NOT sdk.
+      expect(c.scheduler).toBe(c.monitor);
+      expect(c.scheduler).toBe(c.boot);
+      const seen = invokeRoutes(c.scheduler);
+      expect(seen).toHaveLength(1);
+      expect(seen[0].opts).toBeUndefined();
     } finally {
       if (savedTok === undefined) delete process.env.CLAUDE_CODE_OAUTH_TOKEN;
       else process.env.CLAUDE_CODE_OAUTH_TOKEN = savedTok;
