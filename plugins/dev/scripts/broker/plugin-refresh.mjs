@@ -33,7 +33,7 @@
 // deterministically testable without real load, timers, network, or a checkout.
 // Mirrors the gc-liveness.mjs / autotune.mjs seam-injection convention.
 
-import { readFileSync } from "node:fs";
+import { readFileSync, unlinkSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { homedir } from "node:os";
 import { resolve } from "node:path";
@@ -133,6 +133,14 @@ function defaultBunInstallFn(pkgDir) {
 
 // Files whose change means deps may need (re)installing in their containing dir.
 const DEP_MANIFEST_RE = /(^|\/)(package\.json|bun\.lock)$/;
+
+// defaultRemoveLockFn — CTL-1473: remove a stale .git/index.lock so the next
+// reset --hard can succeed. The lock file is created by git ops that were
+// forcibly killed (SIGKILL on timeout); if no git process holds it the removal
+// is always safe. Only called after we confirm the error message mentions the lock.
+function defaultRemoveLockFn(root) {
+  unlinkSync(`${root}/.git/index.lock`);
+}
 
 // changedPackageDirs — pure helper: map a `git diff --name-only` output to
 // unique absolute package dirs that need `bun install`. Exported for direct
@@ -396,6 +404,10 @@ export function refreshPluginCheckout({
   now = Date.now(),
   gitFn = defaultGitFn,
   bunInstallFn = defaultBunInstallFn,
+  // CTL-1473: injectable seam for removing a stale .git/index.lock. Tests inject
+  // a spy; production defaults to defaultRemoveLockFn (unlinkSync). Only called
+  // when the fetch/reset error message mentions "index.lock".
+  removeLockFn = defaultRemoveLockFn,
   emitFn,
   loadedCommit = null,
   loadedCommitRoot = null,
@@ -468,37 +480,100 @@ export function refreshPluginCheckout({
     gitFn(root, ["fetch", "--no-tags", "origin", "main"]);
     gitFn(root, ["reset", "--hard", "origin/main"]);
   } catch (err) {
-    emitFn({
-      event: "plugin.checkout.refresh_failed",
-      orchestrator: null,
-      worker: null,
-      severity: "WARN",
-      detail: {
-        checkout: root,
-        old_sha: oldSha,
-        error: err?.message ?? String(err),
-      },
-    });
-    const prior = _failuresByRoot.get(root) ?? { count: 0, since: now };
-    const next = { count: prior.count + 1, since: prior.count === 0 ? now : prior.since };
-    _failuresByRoot.set(root, next);
-    if (next.count >= CHECKOUT_LAG_FAILURE_THRESHOLD && !_lagEmittedByRoot.has(root)) {
-      _lagEmittedByRoot.add(root);
+    // CTL-1473: stale .git/index.lock self-heal. A prior git op killed with SIGKILL
+    // (e.g. a timed-out GIT_TIMEOUT_MS fetch) can leave index.lock behind; the next
+    // reset --hard then fails with "Unable to create … index.lock: File exists". Remove
+    // the lock and retry the reset once. Only the reset is retried — fetch already
+    // succeeded (or we'd have thrown earlier), so index.lock is always a reset artifact.
+    const errMsg = err?.message ?? String(err);
+    if (errMsg.includes("index.lock")) {
+      let lockRemoved = false;
+      try {
+        removeLockFn(root);
+        lockRemoved = true;
+      } catch {
+        // lock file already gone — that's fine; retry regardless
+        lockRemoved = true;
+      }
+      if (lockRemoved) {
+        try {
+          gitFn(root, ["reset", "--hard", "origin/main"]);
+          emitFn({
+            event: "plugin.checkout.git_lock_healed",
+            orchestrator: null,
+            worker: null,
+            severity: "INFO",
+            detail: { checkout: root, old_sha: oldSha },
+          });
+          // fall through to the newSha read + updated emit below
+        } catch (retryErr) {
+          // retry also failed — fall through to normal refresh_failed handling
+          emitFn({
+            event: "plugin.checkout.refresh_failed",
+            orchestrator: null,
+            worker: null,
+            severity: "WARN",
+            detail: {
+              checkout: root,
+              old_sha: oldSha,
+              error: retryErr?.message ?? String(retryErr),
+            },
+          });
+          const priorR = _failuresByRoot.get(root) ?? { count: 0, since: now };
+          const nextR = { count: priorR.count + 1, since: priorR.count === 0 ? now : priorR.since };
+          _failuresByRoot.set(root, nextR);
+          if (nextR.count >= CHECKOUT_LAG_FAILURE_THRESHOLD && !_lagEmittedByRoot.has(root)) {
+            _lagEmittedByRoot.add(root);
+            emitFn({
+              event: "plugin.checkout.lag",
+              orchestrator: null,
+              worker: null,
+              severity: "ERROR",
+              detail: {
+                checkout: root,
+                old_sha: oldSha,
+                consecutive_failures: nextR.count,
+                behind_since: nextR.since,
+                error: retryErr?.message ?? String(retryErr),
+              },
+            });
+          }
+          return { pulled: false, throttled: false, changed: false, failed: true, root, oldSha, newSha: null, restartNeeded: false };
+        }
+      }
+    } else {
       emitFn({
-        event: "plugin.checkout.lag",
+        event: "plugin.checkout.refresh_failed",
         orchestrator: null,
         worker: null,
-        severity: "ERROR",
+        severity: "WARN",
         detail: {
           checkout: root,
           old_sha: oldSha,
-          consecutive_failures: next.count,
-          behind_since: next.since,
-          error: err?.message ?? String(err),
+          error: errMsg,
         },
       });
+      const prior = _failuresByRoot.get(root) ?? { count: 0, since: now };
+      const next = { count: prior.count + 1, since: prior.count === 0 ? now : prior.since };
+      _failuresByRoot.set(root, next);
+      if (next.count >= CHECKOUT_LAG_FAILURE_THRESHOLD && !_lagEmittedByRoot.has(root)) {
+        _lagEmittedByRoot.add(root);
+        emitFn({
+          event: "plugin.checkout.lag",
+          orchestrator: null,
+          worker: null,
+          severity: "ERROR",
+          detail: {
+            checkout: root,
+            old_sha: oldSha,
+            consecutive_failures: next.count,
+            behind_since: next.since,
+            error: errMsg,
+          },
+        });
+      }
+      return { pulled: false, throttled: false, changed: false, failed: true, root, oldSha, newSha: null, restartNeeded: false };
     }
-    return { pulled: false, throttled: false, changed: false, failed: true, root, oldSha, newSha: null, restartNeeded: false };
   }
 
   let newSha = null;

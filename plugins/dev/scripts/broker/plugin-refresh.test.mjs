@@ -465,6 +465,107 @@ describe("refreshPluginCheckout", () => {
     expect(emitted[0].severity).toBe("WARN");
   });
 
+  // CTL-1473: stale .git/index.lock self-heal tests
+  describe("index.lock self-heal (CTL-1473)", () => {
+    function makeGitFnWithLock({ before = "aaaa", after = "bbbb", lockOnFirstReset = true, retryThrows = false } = {}) {
+      const calls = [];
+      let resetCount = 0;
+      const gitFn = (root, args) => {
+        calls.push({ root, args });
+        const sub = args[0];
+        if (sub === "rev-parse") {
+          const seen = calls.filter((c) => c.args[0] === "rev-parse").length;
+          return seen === 1 ? before : after;
+        }
+        if (sub === "fetch") return "";
+        if (sub === "reset") {
+          resetCount++;
+          if (lockOnFirstReset && resetCount === 1) {
+            throw new Error("Unable to create '/repo/.git/index.lock': File exists.");
+          }
+          if (retryThrows && resetCount >= 2) {
+            throw new Error("reset failed after lock removal");
+          }
+          return "";
+        }
+        return "";
+      };
+      gitFn.calls = calls;
+      return gitFn;
+    }
+
+    test("removes lock and retries reset on index.lock error, emits git_lock_healed", () => {
+      const emitted = [];
+      const lockRemoveCalls = [];
+      const gitFn = makeGitFnWithLock({ before: "old1", after: "new2", lockOnFirstReset: true });
+      const res = refreshPluginCheckout({
+        root: "/co",
+        now: 0,
+        gitFn,
+        removeLockFn: (root) => lockRemoveCalls.push(root),
+        emitFn: (e) => emitted.push(e),
+      });
+      expect(lockRemoveCalls).toEqual(["/co"]);
+      const healed = emitted.find((e) => e.event === "plugin.checkout.git_lock_healed");
+      expect(healed).toBeDefined();
+      expect(healed.severity).toBe("INFO");
+      expect(healed.detail.checkout).toBe("/co");
+      // should still emit updated (checkout advanced)
+      const updated = emitted.find((e) => e.event === "plugin.checkout.updated");
+      expect(updated).toBeDefined();
+      expect(res.pulled).toBe(true);
+      expect(res.failed).toBe(false);
+      expect(res.changed).toBe(true);
+    });
+
+    test("does NOT call removeLockFn for non-lock errors", () => {
+      const emitted = [];
+      const lockRemoveCalls = [];
+      const gitFn = makeGitFn({ fetchThrows: true });
+      refreshPluginCheckout({
+        root: "/co",
+        now: 0,
+        gitFn,
+        removeLockFn: (root) => lockRemoveCalls.push(root),
+        emitFn: (e) => emitted.push(e),
+      });
+      expect(lockRemoveCalls).toHaveLength(0);
+      expect(emitted[0].event).toBe("plugin.checkout.refresh_failed");
+    });
+
+    test("emits refresh_failed when retry also fails after lock removal", () => {
+      const emitted = [];
+      const gitFn = makeGitFnWithLock({ lockOnFirstReset: true, retryThrows: true });
+      const res = refreshPluginCheckout({
+        root: "/co",
+        now: 0,
+        gitFn,
+        removeLockFn: () => {},
+        emitFn: (e) => emitted.push(e),
+      });
+      expect(res.failed).toBe(true);
+      const failed = emitted.find((e) => e.event === "plugin.checkout.refresh_failed");
+      expect(failed).toBeDefined();
+      expect(emitted.some((e) => e.event === "plugin.checkout.git_lock_healed")).toBe(false);
+    });
+
+    test("tolerates removeLockFn throwing (lock already gone) and retries anyway", () => {
+      const emitted = [];
+      const gitFn = makeGitFnWithLock({ before: "x", after: "y", lockOnFirstReset: true });
+      const res = refreshPluginCheckout({
+        root: "/co",
+        now: 0,
+        gitFn,
+        removeLockFn: () => { throw new Error("ENOENT: no such file"); },
+        emitFn: (e) => emitted.push(e),
+      });
+      // retry succeeded even though removeLockFn threw
+      expect(res.pulled).toBe(true);
+      expect(res.failed).toBe(false);
+      expect(emitted.some((e) => e.event === "plugin.checkout.git_lock_healed")).toBe(true);
+    });
+  });
+
   test("no-op (no event) when HEAD did not advance", () => {
     const emitted = [];
     const gitFn = makeGitFn({ before: "same", after: "same" });

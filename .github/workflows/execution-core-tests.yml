@@ -112,6 +112,13 @@ jobs:
         # Walk its static graph.
         run: bun build install-lifecycle.mjs --target=node --outfile /dev/null
 
+      - name: Verify service-manifest import graph (bun build resolution check, CTL-1473)
+        # CTL-1473: service-manifest.mjs is the per-class service truth consumed by
+        # install-lifecycle.mjs and doctor.mjs. It has no heavy runtime deps (pure
+        # constants + helpers), so a bad import silently breaks both consumers. Walk
+        # its static graph before merge.
+        run: bun build service-manifest.mjs --target=node --outfile /dev/null
+
       - name: Verify catalyst-linear import graph (node-loadability contract, CTL-1391)
         # CTL-1391: linear-cli.mjs is the catalyst-linear driver, a separate CLI entrypoint
         # NOT in daemon.mjs's graph. Its node-loadability is load-bearing — the write-reject +
@@ -163,6 +170,19 @@ jobs:
         # flags (source/result/op top-level attrs + numeric age_ms).
         working-directory: plugins/dev/scripts
         run: bash __tests__/canonical-event.test.sh
+
+      - name: catalyst-stack shipper ephemeral-path guard test (CTL-1473)
+        # CTL-1473: guards that install-services (--print and real) refuses to bake
+        # an ephemeral config path (worktree or /tmp). Uses CATALYST_FORCE_BAKE_DIR +
+        # CATALYST_LAYER2_CONFIG_FILE seams; no launchctl calls.
+        working-directory: plugins/dev/scripts
+        run: bash __tests__/catalyst-stack-shipper-guard.test.sh
+
+      - name: orphan-sweep wf_* and plugin-source root tests (CTL-1473)
+        # CTL-1473: wf_* worktrees idle > SWEEP_WF_STALE_DAYS are classified SAFE
+        # (not SALVAGE_UNPUSHED); discover_worktree_roots includes SWEEP_PLUGIN_SOURCE_WT.
+        working-directory: plugins/dev/scripts
+        run: bash __tests__/orphan-sweep.test.sh
 
       - name: Run stable unit tests
         # EXCLUDED SUITES — do NOT add these back without fixing the underlying
@@ -333,4 +353,5 @@ jobs:
             linear-read-event.test.mjs \
             updater/plugin-pull-defer.test.mjs \
             updater/updater.test.mjs \
-            updater/updater-tracing.test.mjs
+            updater/updater-tracing.test.mjs \
+            service-manifest.test.mjs

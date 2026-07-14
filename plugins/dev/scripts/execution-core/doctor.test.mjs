@@ -21,6 +21,8 @@ import {
   checkThoughts,
   checkClaudeSettings,
   checkReaper,
+  checkLogShipper,
+  checkStaleGitLock,
   checkCloudTokenEnv,
   checkClusterSecretFreshness,
   checkSdkExecutorAuth,
@@ -1102,6 +1104,179 @@ describe("checkReaper", () => {
     });
     expect(checks[0].name).toBe("reaper-health");
     expect(checks[0].status).toBe(STATUS.PASS);
+  });
+});
+
+// ─── checkLogShipper (CTL-1473) ──────────────────────────────────────────────
+
+const shipperPlist = (cfg) =>
+  `<plist><dict><key>ProgramArguments</key><array><string>/bin/bash</string>` +
+  `<string>/x/launch.sh</string><string>--config</string><string>${cfg}</string></array></dict></plist>`;
+
+describe("checkLogShipper", () => {
+  it("is a no-op (empty) for classes that do not ship logs (developer/monitor)", () => {
+    expect(checkLogShipper({ shipsLogs: false })).toEqual([]);
+  });
+
+  it("FAILs when the shipper LaunchAgent is not installed (shipsLogs class)", () => {
+    const c = checkLogShipper({ shipsLogs: true, readFile: () => { throw new Error("ENOENT"); } });
+    expect(c).toHaveLength(1);
+    expect(c[0].name).toBe("shipper-installed");
+    expect(c[0].status).toBe(STATUS.FAIL);
+  });
+
+  it("FAILs when the plist is present but launchd never loaded the job", () => {
+    const cfg = "/Users/x/catalyst/plugin-source/plugins/dev/scripts/log-shipper/config.alloy";
+    const c = checkLogShipper({
+      shipsLogs: true,
+      readFile: () => shipperPlist(cfg),
+      shipperState: () => ({ loaded: false, lastExit: null }),
+    });
+    expect(c[0].name).toBe("shipper-installed");
+    expect(c[0].status).toBe(STATUS.FAIL);
+  });
+
+  it("FAILs and names the offending path when --config is outside the pristine checkout", () => {
+    const bad = "/Users/x/catalyst/wt/CTL-1410/plugins/dev/scripts/log-shipper/config.alloy";
+    const canon = "/Users/x/catalyst/plugin-source/plugins/dev/scripts/log-shipper/config.alloy";
+    const c = checkLogShipper({
+      shipsLogs: true,
+      readFile: () => shipperPlist(bad),
+      fileExists: () => true,
+      realpath: (p) => p,
+      canonicalConfig: () => canon,
+      shipperState: () => ({ loaded: true, lastExit: 0 }),
+    });
+    const found = c.find((x) => x.name === "shipper-config");
+    expect(found).toBeDefined();
+    expect(found.status).toBe(STATUS.FAIL);
+    expect(found.detail).toContain(bad);
+  });
+
+  it("PASSes when loaded and --config resolves to the canonical path", () => {
+    const canon = "/Users/x/catalyst/plugin-source/plugins/dev/scripts/log-shipper/config.alloy";
+    const c = checkLogShipper({
+      shipsLogs: true,
+      readFile: () => shipperPlist(canon),
+      fileExists: () => true,
+      realpath: (p) => p,
+      canonicalConfig: () => canon,
+      shipperState: () => ({ loaded: true, lastExit: 0 }),
+    });
+    expect(c.every((x) => x.status === STATUS.PASS)).toBe(true);
+  });
+
+  it("downgrades FAIL→WARN under preinstall flag", () => {
+    const c = checkLogShipper({
+      shipsLogs: true,
+      preinstall: true,
+      readFile: () => { throw new Error("ENOENT"); },
+    });
+    expect(c[0].name).toBe("shipper-installed");
+    expect(c[0].status).toBe(STATUS.WARN);
+  });
+
+  it("WARNs (not FAILs) when canonicalConfig is unavailable", () => {
+    const cfg = "/some/path/config.alloy";
+    const c = checkLogShipper({
+      shipsLogs: true,
+      readFile: () => shipperPlist(cfg),
+      fileExists: () => true,
+      realpath: (p) => p,
+      canonicalConfig: () => null,
+      shipperState: () => ({ loaded: true, lastExit: 0 }),
+    });
+    expect(c[0].name).toBe("shipper-config");
+    expect(c[0].status).toBe(STATUS.WARN);
+  });
+});
+
+// ─── checkStaleGitLock (CTL-1473) ────────────────────────────────────────────
+
+describe("checkStaleGitLock", () => {
+  const STALE_MS = 16 * 60 * 1_000;
+
+  it("PASSes when no lock file exists", () => {
+    const c = checkStaleGitLock({
+      lockExists: () => false,
+      lockAgeMs: () => 0,
+      holderAlive: () => false,
+      resolveRootsFn: () => ["/checkout"],
+    });
+    expect(c[0].name).toBe("stale-git-lock");
+    expect(c[0].status).toBe(STATUS.PASS);
+  });
+
+  it("FAILs when .git/index.lock is older than 15m and no live process holds it", () => {
+    const c = checkStaleGitLock({
+      lockExists: () => true,
+      lockAgeMs: () => STALE_MS,
+      holderAlive: () => false,
+      resolveRootsFn: () => ["/checkout"],
+    });
+    expect(c[0].status).toBe(STATUS.FAIL);
+    expect(c[0].detail).toContain("index.lock");
+  });
+
+  it("PASSes when the lock is fresh (<15m)", () => {
+    const c = checkStaleGitLock({
+      lockExists: () => true,
+      lockAgeMs: () => 60_000,
+      holderAlive: () => false,
+      resolveRootsFn: () => ["/checkout"],
+    });
+    expect(c[0].name).toBe("stale-git-lock");
+    expect(c[0].status).toBe(STATUS.INFO);
+  });
+
+  it("PASSes (INFO) when a live git process holds the lock even if old", () => {
+    const c = checkStaleGitLock({
+      lockExists: () => true,
+      lockAgeMs: () => STALE_MS,
+      holderAlive: () => true,
+      resolveRootsFn: () => ["/checkout"],
+    });
+    expect(c[0].status).toBe(STATUS.INFO);
+  });
+
+  it("downgrades FAIL→WARN under preinstall flag", () => {
+    const c = checkStaleGitLock({
+      lockExists: () => true,
+      lockAgeMs: () => STALE_MS,
+      holderAlive: () => false,
+      resolveRootsFn: () => ["/checkout"],
+      preinstall: true,
+    });
+    expect(c[0].status).toBe(STATUS.WARN);
+  });
+
+  it("emits one check per checkout root with a stale lock", () => {
+    const c = checkStaleGitLock({
+      lockExists: (p) => p.includes("checkout-a"),
+      lockAgeMs: () => STALE_MS,
+      holderAlive: () => false,
+      resolveRootsFn: () => ["/checkout-a", "/checkout-b"],
+    });
+    expect(c).toHaveLength(2);
+    expect(c[0].status).toBe(STATUS.FAIL);
+    expect(c[1].status).toBe(STATUS.PASS);
+  });
+});
+
+// checksForClass membership: checkLogShipper present for worker, absent for dev/monitor
+describe("checksForClass — checkLogShipper membership (CTL-1473)", () => {
+  const src = (nc, opts = {}) => checksForClass(nc, opts).map((f) => f.toString()).join("\n");
+  it("worker suite includes checkLogShipper", () => {
+    const s = src(nodeClassOf({ class: "worker", raw: "worker" }));
+    expect(s).toContain("checkLogShipper");
+  });
+  it("developer suite does NOT include checkLogShipper", () => {
+    const s = src(nodeClassOf({ class: "developer", raw: "developer" }));
+    expect(s).not.toContain("checkLogShipper");
+  });
+  it("monitor suite does NOT include checkLogShipper", () => {
+    const s = src(nodeClassOf({ class: "monitor", raw: "monitor" }));
+    expect(s).not.toContain("checkLogShipper");
   });
 });
 

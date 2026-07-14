@@ -296,11 +296,15 @@ export function planPhases({ operation, nodeClass, scripts, opts = {} }) {
     phase: "install-agents",
     steps: [
       { label: "install-cli", kind: "run", argv: [scripts.installCli] },
-      worker
+      ...(worker
         ? // worker: the full work stack (and its 4 launchd agents). NEVER adopt-updater.
-          { label: "install-services", kind: "run", argv: [scripts.stack, "install-services"] }
+          [{ label: "install-services", kind: "run", argv: [scripts.stack, "install-services"] }]
         : // developer/monitor: the 5th updater agent as sole pull owner. NEVER install-services.
-          { label: "adopt-updater", kind: "run", argv: [scripts.stack, "adopt-updater"] },
+          // CTL-1473: also adopt thoughts-sync (developer nodes get thoughts-sync per the manifest).
+          [
+            { label: "adopt-updater", kind: "run", argv: [scripts.stack, "adopt-updater"] },
+            { label: "adopt-thoughts-sync", kind: "run", argv: [scripts.stack, "adopt-thoughts-sync"] },
+          ]),
       // CTL-1401: the per-host cloud-sync replica writer runs on EVERY class (adopt-cloud-sync has no
       // node-class guard — workers read the replica from the scheduler hot path, dev/monitor via
       // catalyst-linear). Teardown's uninstall-services boots it OUT, so a reinstall MUST re-adopt it

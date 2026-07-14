@@ -193,6 +193,35 @@ pid_alive() {
 [[ -f "${SCRIPT_DIR}/lib/plugin-dirs.sh" ]] || fail "missing lib/plugin-dirs.sh next to catalyst-stack"
 . "${SCRIPT_DIR}/lib/plugin-dirs.sh"
 
+# _pristine_scripts_dir — the scripts dir of the registered pristine plugin-source
+# checkout, or "". Mirrored from install-orphan-sweep.sh (CTL-1473): shared helper
+# extracted here so catalyst-stack can guard the shipper config path.
+_pristine_scripts_dir() {
+  local cfg="${CATALYST_LAYER2_CONFIG_FILE:-${HOME}/.config/catalyst/config.json}"
+  [[ -f "$cfg" ]] && command -v jq >/dev/null 2>&1 || return 0
+  local pd
+  pd="$(jq -r '.catalyst.orchestration.pluginDirs | if type=="array" then .[0] elif type=="string" then . else empty end' "$cfg" 2>/dev/null || true)"
+  [[ -n "$pd" && -f "${pd}/scripts/log-shipper/config.alloy" ]] && echo "${pd}/scripts"
+  return 0
+}
+
+# _is_ephemeral_dir <dir>: true if the dir is a linked git worktree or under a
+# temp root — a path that can be deleted out from under the LaunchAgent. Mirrored
+# from install-orphan-sweep.sh (CTL-1473): guards the shipper config bake path.
+_is_ephemeral_dir() {
+  local d="$1"
+  case "$d" in
+    /private/tmp/*|/tmp/*|/var/tmp/*|/var/folders/*|*/.Trash/*) return 0 ;;
+  esac
+  command -v git >/dev/null 2>&1 || return 1
+  local gd
+  gd="$(git -C "$d" rev-parse --absolute-git-dir 2>/dev/null)" || return 1
+  case "$gd" in
+    */worktrees/*) return 0 ;;
+  esac
+  return 1
+}
+
 mitm_pid() { pgrep -f "mitmdump -s.*mitm_linear_addon" 2>/dev/null | head -1; }
 
 # ─── Service start/stop primitives ──────────────────────────────────────────
@@ -1011,7 +1040,7 @@ PLIST
 # StartInterval and deliberately NO AbandonProcessGroup — launchd OWNS this pgid and
 # restarts the job (alloy) the instant it exits. host_name pins CATALYST_HOST_NAME.
 render_shipper_plist() {
-  local launcher="$1" host_name="${2:-}"
+  local launcher="$1" host_name="${2:-}" config_path="${3:-$SHIPPER_CONFIG}"
   local host_env=""
   if [[ -n "$host_name" ]]; then
     host_env="
@@ -1039,7 +1068,7 @@ render_shipper_plist() {
     <string>/bin/bash</string>
     <string>${launcher}</string>
     <string>--config</string>
-    <string>${SHIPPER_CONFIG}</string>
+    <string>${config_path}</string>
     <string>--storage</string>
     <string>${SHIPPER_STORAGE}</string>
   </array>
@@ -1216,10 +1245,18 @@ cmd_install_services() {
   # Warning goes to stderr: log() writes stdout, and --print emits the plist to
   # stdout — a stdout warning would corrupt `--print` output (CTL-1202 review).
   [[ -z "$host_name" ]] && log "warning: catalyst.host.name not set in Layer-2 config; CATALYST_HOST_NAME will not be pinned (telemetry/scheduler identity may split)" >&2
+  # CTL-1473: resolve the shipper bake dir (ephemeral guard applies to both --print and real install).
+  local _shipper_bake_dir="${CATALYST_FORCE_BAKE_DIR:-$(_pristine_scripts_dir)}"
+  _shipper_bake_dir="${_shipper_bake_dir:-$SCRIPT_DIR}"
+  local _shipper_config_resolved="${_shipper_bake_dir}/log-shipper/config.alloy"
+  if _is_ephemeral_dir "$_shipper_bake_dir"; then
+    fail "refusing to install the log-shipper from an ephemeral path (CTL-1473): ${_shipper_bake_dir} is inside a linked worktree or temp dir. Run 'catalyst-stack install-services' from the pristine plugin-source checkout (~/catalyst/plugin-source) or after setting CATALYST_LAYER2_CONFIG_FILE to a config with a pristine pluginDirs."
+  fi
+
   if [[ "$print_only" == "yes" ]]; then
     render_stack_plist "$cmd" "$interval" "$host_name"
     render_thoughts_sync_plist "$sync_cmd" "$sync_interval"
-    render_shipper_plist "$shipper_launcher" "$host_name"
+    render_shipper_plist "$shipper_launcher" "$host_name" "$_shipper_config_resolved"
     [[ -x "${SCRIPT_DIR}/install-orphan-sweep.sh" ]] && bash "${SCRIPT_DIR}/install-orphan-sweep.sh" --print-only 2>/dev/null || true
     return 0
   fi
@@ -1250,13 +1287,12 @@ cmd_install_services() {
   else
     fail "launchctl bootstrap failed for $SYNC_AGENT_PLIST"
   fi
-
   # CTL-1285: log-shipper agent. Reap any non-agent Alloy FIRST (a stack-started
   # child or a hand-started orphan) so KeepAlive+RunAtLoad never bring up a SECOND
   # Alloy double-shipping the same four logs. The reap runs BEFORE the plist exists,
   # so the start_shipper/stop_shipper defer-guards don't short-circuit it.
   _reap_unmanaged_shipper
-  render_shipper_plist "$shipper_launcher" "$host_name" > "$SHIPPER_AGENT_PLIST"
+  render_shipper_plist "$shipper_launcher" "$host_name" "$_shipper_config_resolved" > "$SHIPPER_AGENT_PLIST"
   log "wrote $SHIPPER_AGENT_PLIST (exec: launch.sh, KeepAlive foreground)"
 
   launchctl bootout "$guid" "$SHIPPER_AGENT_PLIST" 2>/dev/null || true
@@ -1522,6 +1558,38 @@ cmd_adopt_updater() {
     log "no running broker to nudge (daemonless node) — a broker that starts later reads pluginPullOwner fresh"
   fi
   log "cutover complete: catalyst-updater is now the sole plugin-pull owner; the broker DEFERS (detect-only)"
+}
+
+# cmd_adopt_thoughts_sync — CTL-1473: install the thoughts-sync LaunchAgent for developer/monitor
+# nodes. Extracted from cmd_install_services so developer nodes (routed through adopt-updater,
+# not install-services) get thoughts-sync too. Pure install — no cutover side effects.
+cmd_adopt_thoughts_sync() {
+  local print_only="no" sync_interval="$SYNC_AGENT_INTERVAL_DEFAULT"
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --print)         print_only="yes"; shift ;;
+      --sync-interval) sync_interval="${2:?--sync-interval needs a value}"; shift 2 ;;
+      *) fail "unknown adopt-thoughts-sync arg: $1 (try: --print | --sync-interval <sec>)" ;;
+    esac
+  done
+  [[ "$sync_interval" =~ ^[0-9]+$ ]] || fail "--sync-interval must be an integer (seconds), got: $sync_interval"
+  local sync_cmd; sync_cmd="$(_resolve_thoughts_sync_cmd)"
+  if [[ "$print_only" == "yes" ]]; then
+    render_thoughts_sync_plist "$sync_cmd" "$sync_interval"
+    return 0
+  fi
+  [[ "$(uname -s)" == "Darwin" ]] || fail "adopt-thoughts-sync is macOS-only (launchd); this host is $(uname -s). Use --print to preview the plist."
+  command -v launchctl >/dev/null 2>&1 || fail "launchctl not found"
+  mkdir -p "${HOME}/Library/LaunchAgents" "${HOME}/catalyst"
+  render_thoughts_sync_plist "$sync_cmd" "$sync_interval" > "$SYNC_AGENT_PLIST"
+  log "wrote $SYNC_AGENT_PLIST (exec: $sync_cmd, interval ${sync_interval}s)"
+  local guid; guid="gui/$(id -u)"
+  launchctl bootout "$guid" "$SYNC_AGENT_PLIST" 2>/dev/null || true
+  if launchctl bootstrap "$guid" "$SYNC_AGENT_PLIST" 2>&1 | sed 's/^/  /'; then
+    log "loaded $SYNC_AGENT_LABEL — RunAtLoad fired thoughts-pull-sync"
+  else
+    fail "launchctl bootstrap failed for $SYNC_AGENT_PLIST"
+  fi
 }
 
 # cmd_adopt_cloud_sync — install the supervised catalyst-cloud-sync LaunchAgent
@@ -2755,16 +2823,17 @@ case "${1:-}" in
   parity)   shift; cmd_parity "$@" ;;
   install-services)   shift; cmd_install_services "$@" ;;
   uninstall-services) shift; cmd_uninstall_services ;;
-  adopt-updater)      shift; cmd_adopt_updater "$@" ;;
-  adopt-cloud-sync) shift; cmd_adopt_cloud_sync "$@" ;;
-  verify-updater)     shift; cmd_verify_updater "$@" ;;
-  verify-node)        shift; cmd_verify_node "$@" ;;
-  services-status)    shift; cmd_services_status ;;
-  sync-cloud-env)     shift; cmd_sync_cloud_env "$@" ;;
+  adopt-updater)        shift; cmd_adopt_updater "$@" ;;
+  adopt-thoughts-sync)  shift; cmd_adopt_thoughts_sync "$@" ;;
+  adopt-cloud-sync)     shift; cmd_adopt_cloud_sync "$@" ;;
+  verify-updater)       shift; cmd_verify_updater "$@" ;;
+  verify-node)          shift; cmd_verify_node "$@" ;;
+  services-status)      shift; cmd_services_status ;;
+  sync-cloud-env)       shift; cmd_sync_cloud_env "$@" ;;
   status|"") cmd_status ;;
   -h|--help)
     sed -n '2,/^$/p' "$0" | sed 's/^# \{0,1\}//'
     ;;
-  *) fail "unknown command: $1 (try: start | stop | restart | status | hotpatch | parity | install-services | uninstall-services | adopt-updater | adopt-cloud-sync | verify-updater | verify-node | services-status)" ;;
+  *) fail "unknown command: $1 (try: start | stop | restart | status | hotpatch | parity | install-services | uninstall-services | adopt-updater | adopt-thoughts-sync | adopt-cloud-sync | verify-updater | verify-node | services-status)" ;;
 esac
 fi
