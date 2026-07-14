@@ -1,5 +1,21 @@
 # Changelog
 
+## [12.29.1](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.29.0...catalyst-dev-v12.29.1)
+
+Jul 14, 2026
+
+<!-- ai-enhanced -->
+
+### Thenable-Aware Removal Confirmation
+
+The `removeLabel` async bug is fixed — previously, inspecting a Promise's `.removed` property always returned `undefined`, so failed removals were silently treated as successful. The fix makes the result handler thenable-aware, deferring the admission clear emission until the async write actually resolves or rejects.
+
+
+
+### PRs
+
+* **dev:** CTL-764 follow-up — round-5: thenable-aware removal confirmation ([#2636](https://github.com/coalesce-labs/catalyst/issues/2636)) ([2df9d10](https://github.com/coalesce-labs/catalyst/commit/2df9d109504f8f8dad451bd4bd0d24a7dd186799))
+
 ## [12.29.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.28.0...catalyst-dev-v12.29.0)
 
 Jul 13, 2026
