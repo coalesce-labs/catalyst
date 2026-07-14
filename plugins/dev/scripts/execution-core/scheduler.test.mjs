@@ -11659,4 +11659,72 @@ describe("CTL-764 Phase 5 — schedulerTick emits worker.transition events", () 
     expect(cleared).toBeDefined();
     expect(cleared.fromDisposition).toBe("queued");
   });
+
+  // CTL-764 r5: the PRODUCTION removeLabel (linear-write.mjs) is ASYNC. The r4 capture
+  // inspected the returned Promise synchronously — `.removed` read as undefined, so every
+  // removal false-confirmed and the failed-removal suppression was a no-op in prod. The
+  // seam is now thenable-aware: the clear emits (or is suppressed) when the write RESOLVES.
+  test("r5 — an async removeLabel resolving {removed:false} suppresses the clear (prod shape)", async () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 2 }));
+    writeSignal("CTL-R51", "triage", "done"); // triaged-waiting, unblocked → admitted
+    const transitions = [];
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: fakeDispatch(),
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0,
+      fetchBatch: mkBatch(() => relUnblocked({ labels: ["blocked"] })),
+      hasTriageArtifact: () => true,
+      writeStatus: { ...noWrites(), removeLabel: async () => ({ removed: false }) },
+      appendWorkerTransitionEvent: (ev) => transitions.push(ev),
+    });
+    await new Promise((r) => setTimeout(r, 0)); // let the write settle
+    const cleared = transitions.find(
+      (e) => e.ticket === "CTL-R51" && e.toDisposition === null && e.source === "scheduler-admission"
+    );
+    expect(cleared).toBeUndefined();
+  });
+
+  test("r5 — an async removeLabel resolving {removed:true} emits the clear post-settle (prod shape)", async () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 2 }));
+    writeSignal("CTL-R52", "triage", "done"); // triaged-waiting, unblocked → admitted
+    const transitions = [];
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: fakeDispatch(),
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0,
+      fetchBatch: mkBatch(() => relUnblocked({ labels: ["blocked"] })),
+      hasTriageArtifact: () => true,
+      writeStatus: { ...noWrites(), removeLabel: async () => ({ removed: true }) },
+      appendWorkerTransitionEvent: (ev) => transitions.push(ev),
+    });
+    await new Promise((r) => setTimeout(r, 0)); // let the write settle
+    const cleared = transitions.find(
+      (e) => e.ticket === "CTL-R52" && e.toDisposition === null && e.source === "scheduler-admission"
+    );
+    expect(cleared).toBeDefined();
+    expect(cleared.fromDisposition).toBe("blocked");
+  });
+
+  test("r5 — an async removeLabel REJECTION suppresses the clear (fail-open, warn only)", async () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 2 }));
+    writeSignal("CTL-R53", "triage", "done");
+    const transitions = [];
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: fakeDispatch(),
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0,
+      fetchBatch: mkBatch(() => relUnblocked({ labels: ["blocked"] })),
+      hasTriageArtifact: () => true,
+      writeStatus: { ...noWrites(), removeLabel: () => Promise.reject(new Error("boom")) },
+      appendWorkerTransitionEvent: (ev) => transitions.push(ev),
+    });
+    await new Promise((r) => setTimeout(r, 0));
+    const cleared = transitions.find(
+      (e) => e.ticket === "CTL-R53" && e.toDisposition === null && e.source === "scheduler-admission"
+    );
+    expect(cleared).toBeUndefined();
+  });
 });

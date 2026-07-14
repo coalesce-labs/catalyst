@@ -1723,20 +1723,39 @@ export function convergeHeldLabel(
   // surfaced via the optional onRemoveResult(label, removed) seam — removeLabel
   // reports failures as {removed:false} WITHOUT throwing, and clear emissions must
   // gate on a CONFIRMED removal. An undefined result (legacy/test stubs) counts as
-  // success; a throw counts as failure.
+  // success; a throw counts as failure. CTL-764 r5: the production removeLabel
+  // (linear-write.mjs) is ASYNC while this converger (and schedulerTick) is sync —
+  // a thenable result defers onRemoveResult to resolution instead of inspecting the
+  // Promise (which read `.removed` as undefined and false-confirmed every removal);
+  // the callback therefore fires post-tick in production and callers must not
+  // assume it ran before this function returns.
+  const settle = (label, res) => {
+    if (res != null && typeof res.then === "function") {
+      res.then(
+        (r) => onRemoveResult?.(label, r?.removed !== false),
+        (err) => {
+          log.warn(
+            { ticket, phase: "admission", err: err?.message },
+            "scheduler: Linear write-back threw — continuing tick"
+          );
+          onRemoveResult?.(label, false);
+        }
+      );
+      return;
+    }
+    onRemoveResult?.(label, res?.removed !== false);
+  };
   for (const label of HELD_LABELS_REMOVABLE) {
     if (label !== desired && have.has(label)) {
-      let removed = false;
       try {
-        const res = writeStatus.removeLabel(ticket, label);
-        removed = res?.removed !== false;
+        settle(label, writeStatus.removeLabel(ticket, label));
       } catch (err) {
         log.warn(
           { ticket, phase: "admission", err: err.message },
           "scheduler: Linear write-back threw — continuing tick"
         );
+        onRemoveResult?.(label, false);
       }
-      onRemoveResult?.(label, removed);
       writes++;
     }
   }
@@ -5127,29 +5146,41 @@ export function schedulerTick(
         }
         // else: admitted → desired null → clear-on-pickup (both labels removed).
 
-        // CTL-764 r4 finding 1: collect which held labels this convergence CONFIRMED
-        // removed — the clear emission below must not outrun a failed removeLabel
-        // (Linear would still carry the label while the stream says cleared).
-        const confirmedRemoved = [];
-        convergeHeldLabel(ticket, labelsByTicket.get(ticket), desired, writeStatus, {
-          orchDir,
-          now,
-          onRemoveResult: (label, removed) => {
-            if (removed) confirmedRemoved.push(label);
-          },
-        });
-
         // CTL-764 findings B + F: the worker.transition emission must reflect the
         // ticket's TRUE disposition. needs-human is sticky + exclusive, so when it is
         // already on the ticket the lower held dispositions (blocked/queued) cannot
         // apply — recording one would falsely downgrade the two-axis stream (finding B).
-        // On a clear, pass the held label the ticket currently wears as fromDisposition
-        // so a genuine blocked/queued→cleared still emits after a daemon restart, where
+        // On a clear, pass the held label as fromDisposition so a genuine
+        // blocked/queued→cleared still emits after a daemon restart, where
         // lastDispositionEmit is empty and recordTransition's first-seen-clear allowance
         // needs a proven prior (finding F). needs-human clears are owned by
         // clearStalledLabel, so the admission loop never emits them.
         const currentLabelSet = new Set(labelsByTicket.get(ticket) ?? []);
         const hasNeedsHuman = currentLabelSet.has(HELD_LABEL_NEEDS_HUMAN);
+
+        // CTL-764 r4 finding 1 + r5: the clear emission lives INSIDE the removal
+        // callback so it fires only on a CONFIRMED removal — and, because the
+        // production removeLabel is async while this tick is sync, it fires when the
+        // write RESOLVES (post-tick) rather than false-confirming off a Promise. A
+        // transient failure emits nothing (Linear still wears the label; a later tick
+        // re-converges). recordTransition's only-on-change guard dedupes the rare
+        // double-callback (a ticket wearing two stale held labels). Legacy "waiting"
+        // normalizes to the canonical "queued" (finding 2) so the stream never carries
+        // a fifth disposition value.
+        convergeHeldLabel(ticket, labelsByTicket.get(ticket), desired, writeStatus, {
+          orchDir,
+          now,
+          onRemoveResult: (label, removed) => {
+            if (desired !== null || !removed || hasNeedsHuman) return;
+            const fromHeld = label === LEGACY_HELD_LABEL_WAITING ? HELD_LABEL_WAITING : label;
+            recordTransition({
+              ticket,
+              fromDisposition: fromHeld,
+              toDisposition: null,
+              source: "scheduler-admission",
+            });
+          },
+        });
 
         if (desired) {
           // Only-on-state-change emission: skip if the same held class already
@@ -5174,36 +5205,9 @@ export function schedulerTick(
           }
         } else {
           // Admitted (or no longer held) → reset so a future re-hold re-emits.
+          // The clear emission itself lives in the onRemoveResult callback above
+          // (r4 finding 1 + r5): confirmed-removal-gated, async-write-safe.
           lastHeldEmitState.delete(ticket);
-          // CTL-764 Phase 5: emit worker.transition for admission (clear-on-pickup) —
-          // finding F passes the held label as fromDisposition so the clear emits even
-          // after a restart; suppressed when needs-human is present. CTL-764 r4:
-          //   finding 1 — the proven prior must come from a CONFIRMED removal, not the
-          //   pre-convergence snapshot: on a transient removeLabel failure Linear still
-          //   wears the label, so the emission is skipped and a later tick re-converges
-          //   and emits. A ticket that wore no held label stays a from:null no-op
-          //   (dropped by recordTransition's only-on-change guard).
-          //   finding 2 — legacy "waiting" normalizes to the canonical "queued" so the
-          //   transition stream never carries a fifth disposition value.
-          if (!hasNeedsHuman) {
-            const woreHeld = [HELD_LABEL_BLOCKED, HELD_LABEL_WAITING, LEGACY_HELD_LABEL_WAITING].some(
-              (l) => currentLabelSet.has(l)
-            );
-            const removedHeld =
-              [HELD_LABEL_BLOCKED, HELD_LABEL_WAITING, LEGACY_HELD_LABEL_WAITING].find((l) =>
-                confirmedRemoved.includes(l)
-              ) ?? null;
-            const fromHeld =
-              removedHeld === LEGACY_HELD_LABEL_WAITING ? HELD_LABEL_WAITING : removedHeld;
-            if (!woreHeld || fromHeld) {
-              recordTransition({
-                ticket,
-                fromDisposition: fromHeld,
-                toDisposition: null,
-                source: "scheduler-admission",
-              });
-            }
-          }
         }
       }
 
