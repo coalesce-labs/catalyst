@@ -2203,6 +2203,34 @@ describe("schedulerTick — new-work pull", () => {
     expect(r.dispatched).toHaveLength(1);
   });
 
+  // CTL-1457 (T2): a codex-exec node prelaunches the SAME no-bg_job_id "dispatched"
+  // signals (queued behind a semaphore), so its in-flight workers must reduce free
+  // slots EXACTLY like sdk — else a codex node at maxParallel keeps over-admitting.
+  test("dispatchMode=codex-exec: in-flight codex workers reduce new-work free slots (same as sdk)", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 3 }));
+    const dispatch = fakeDispatch();
+    const eligible = ["CTL-1", "CTL-2", "CTL-3"].map((identifier) => ({
+      identifier,
+      priority: 1,
+      createdAt: "x",
+      state: "Todo",
+      relations: { nodes: [] },
+      inverseRelations: { nodes: [] },
+    }));
+    const r = schedulerTick(orchDir, {
+      readEligible: () => eligible,
+      dispatch,
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0, // no bg jobs
+      countSdkInflight: () => 2, // 2 in-process codex workers already in flight
+      dispatchMode: "codex-exec",
+      hasTriageArtifact: () => true,
+      listStartedTickets: () => new Set(),
+    });
+    // maxParallel 3 − 2 codex in-flight = 1 free slot → only ONE new ticket admitted.
+    expect(r.dispatched).toHaveLength(1);
+  });
+
   // CTL-1367 P2 (item b): the SDK new-work budget must subtract SAME-TICK SDK
   // advancements. The tick-top countSdkInflight sample predates the advancement sweep,
   // so without the post-sweep re-sample an in-flight ticket advancing research→plan via

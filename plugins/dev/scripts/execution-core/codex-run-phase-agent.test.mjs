@@ -52,6 +52,23 @@ function makeFakeChild() {
   return child;
 }
 
+// makeSigtermIgnoringChild — a fake child that IGNORES SIGTERM (records it but does
+// NOT close) and only closes on SIGKILL. Drives the T3 abort→escalation regression:
+// the runner must keep the SIGKILL timer alive past the AbortError and settle only
+// after the child actually closes.
+function makeSigtermIgnoringChild() {
+  const child = new EventEmitter();
+  child.stdout = new Readable({ read() {} });
+  child.stderr = new Readable({ read() {} });
+  child.killed = [];
+  child.kill = (sig = "SIGTERM") => {
+    child.killed.push(sig);
+    if (sig === "SIGKILL") child.emit("close", null, sig); // only SIGKILL actually terminates
+    return true;
+  };
+  return child;
+}
+
 // autoChild — a fake child that, once the runner has attached its listeners,
 // pushes the given JSONL lines then closes with exitCode/signal. Deferred via
 // setImmediate so the 'data'/'close' listeners attach before the stream flows.
@@ -366,6 +383,29 @@ describe("buildCodexArgs", () => {
     expect(args).not.toContain("-m");
     expect(args[args.length - 1]).toBe(buildCodexPrompt(spec));
   });
+
+  // CTL-1457 (T6): a resume dispatch (spec.resumeSession set) builds the `exec resume
+  // <id>` subcommand form so codex continues the interrupted thread; it still carries
+  // --json + sandbox + writable_roots + network + model, and the prompt stays last.
+  test("resumeSession set → argv starts with ['exec','resume','<id>'] and keeps --json + sandbox flags", () => {
+    const spec = makeCodexSpec({ resumeSession: "019f5cd0-a4ee-7722-a22f-a7bd424b5689" });
+    const args = buildCodexArgs(spec, { ...CFG, model: "gpt-5" }, { orchDir: "/ec", worktreePath: "/no" });
+    expect(args.slice(0, 3)).toEqual(["exec", "resume", "019f5cd0-a4ee-7722-a22f-a7bd424b5689"]);
+    // the (global) options still ride after the resume subcommand.
+    expect(args).toContain("--json");
+    expect(args[args.indexOf("--sandbox") + 1]).toBe("workspace-write");
+    expect(args.some((a) => typeof a === "string" && a.startsWith("sandbox_workspace_write.writable_roots="))).toBe(true);
+    expect(args).toContain("sandbox_workspace_write.network_access=true");
+    expect(args[args.indexOf("-m") + 1]).toBe("gpt-5");
+    expect(args[args.length - 1]).toBe(buildCodexPrompt(spec)); // prompt still last positional
+  });
+
+  test("resumeSession absent → the fresh `exec --json …` form is unchanged (starts with 'exec','--json')", () => {
+    const spec = makeCodexSpec({ resumeSession: null });
+    const args = buildCodexArgs(spec, CFG, { orchDir: "/ec", worktreePath: "/no" });
+    expect(args.slice(0, 2)).toEqual(["exec", "--json"]);
+    expect(args).not.toContain("resume");
+  });
 });
 
 // ── buildCodexEnv ───────────────────────────────────────────────────────────
@@ -398,6 +438,13 @@ describe("buildCodexEnv", () => {
   test("falls back to pluginDirs[0] for CLAUDE_PLUGIN_ROOT when no leaf is the dev plugin", () => {
     const env = buildCodexEnv(makeCodexSpec({ pluginDirs: ["/some/other-plugin"] }), CFG);
     expect(env.CLAUDE_PLUGIN_ROOT).toBe("/some/other-plugin");
+  });
+
+  // CTL-1457 (T4): cfg.pluginRoot (the resolved codex.pluginRoot override) wins over
+  // spec.pluginDirs for CLAUDE_PLUGIN_ROOT — even when pluginDirs is empty/stale.
+  test("cfg.pluginRoot overrides spec.pluginDirs for CLAUDE_PLUGIN_ROOT, even with empty pluginDirs", () => {
+    const env = buildCodexEnv(makeCodexSpec({ pluginDirs: [] }), { ...CFG, pluginRoot: "/override/plugins/dev" });
+    expect(env.CLAUDE_PLUGIN_ROOT).toBe("/override/plugins/dev");
   });
 });
 
@@ -457,6 +504,70 @@ describe("ensureCodexSkills", () => {
   test("best-effort: never throws when pluginDirs is empty or worktree is missing", () => {
     expect(() => ensureCodexSkills("/no/such/wt", { pluginDirs: [] })).not.toThrow();
     expect(() => ensureCodexSkills(undefined, {})).not.toThrow();
+  });
+
+  // CTL-1457 (T7): a PRE-EXISTING real .agents/skills directory (the project's/user's own
+  // Codex skills) is NEVER clobbered — the runner must not `rm -r` a path it does not own.
+  test("pre-existing real .agents/skills dir → NOT clobbered; a warning is logged; no symlink created", () => {
+    const wt = mkdtempSync(join(tmpdir(), "codex-wt-real-"));
+    const checkout = mkdtempSync(join(tmpdir(), "codex-checkout-real-"));
+    const devDir = join(checkout, "plugins", "dev");
+    mkdirSync(join(devDir, "skills"), { recursive: true });
+    // A REAL .agents/skills dir with a sentinel file the runner must preserve.
+    const realSkills = join(wt, ".agents", "skills");
+    mkdirSync(realSkills, { recursive: true });
+    const sentinel = join(realSkills, "SENTINEL.md");
+    writeFileSync(sentinel, "user-owned skill — do not delete");
+    const warns = [];
+
+    ensureCodexSkills(wt, { pluginDirs: [devDir], log: { warn: (...a) => warns.push(a) } });
+
+    // The sentinel survives and .agents/skills is still a real dir (NOT replaced by a symlink).
+    expect(lstatSync(sentinel).isFile()).toBe(true);
+    expect(readFileSync(sentinel, "utf8")).toContain("do not delete");
+    expect(lstatSync(realSkills).isSymbolicLink()).toBe(false);
+    expect(warns.length).toBe(1); // loud skip
+
+    rmSync(wt, { recursive: true, force: true });
+    rmSync(checkout, { recursive: true, force: true });
+  });
+
+  // CTL-1457 (T7): a pre-existing OUR symlink (→ our target) is an idempotent no-op.
+  test("pre-existing OUR symlink → idempotent no-op (link preserved, no throw)", () => {
+    const wt = mkdtempSync(join(tmpdir(), "codex-wt-ours-"));
+    const checkout = mkdtempSync(join(tmpdir(), "codex-checkout-ours-"));
+    const devDir = join(checkout, "plugins", "dev");
+    const skillsDir = join(devDir, "skills");
+    mkdirSync(skillsDir, { recursive: true });
+    Bun.spawnSync(["git", "init"], { cwd: wt });
+
+    ensureCodexSkills(wt, { pluginDirs: [devDir] }); // creates OUR symlink
+    const link = join(wt, ".agents", "skills");
+    expect(readlinkSync(link)).toBe(skillsDir);
+    // Second call over OUR symlink → no-op, link unchanged.
+    ensureCodexSkills(wt, { pluginDirs: [devDir] });
+    expect(lstatSync(link).isSymbolicLink()).toBe(true);
+    expect(readlinkSync(link)).toBe(skillsDir);
+
+    rmSync(wt, { recursive: true, force: true });
+    rmSync(checkout, { recursive: true, force: true });
+  });
+
+  // CTL-1457 (T4): ensureCodexSkills targets cfg.pluginRoot's skills dir (before pluginDirs).
+  test("pluginRoot overrides pluginDirs for the skills symlink source (T4)", () => {
+    const wt = mkdtempSync(join(tmpdir(), "codex-wt-proot-"));
+    const overrideDev = mkdtempSync(join(tmpdir(), "codex-override-dev-"));
+    mkdirSync(join(overrideDev, "skills"), { recursive: true });
+    Bun.spawnSync(["git", "init"], { cwd: wt });
+
+    // Empty pluginDirs but a pluginRoot override → the link points at the override skills.
+    ensureCodexSkills(wt, { pluginDirs: [], pluginRoot: overrideDev });
+    const link = join(wt, ".agents", "skills");
+    expect(lstatSync(link).isSymbolicLink()).toBe(true);
+    expect(readlinkSync(link)).toBe(join(overrideDev, "skills"));
+
+    rmSync(wt, { recursive: true, force: true });
+    rmSync(overrideDev, { recursive: true, force: true });
   });
 });
 
@@ -553,8 +664,9 @@ describe("codexRunPhaseAgent — failure classification", () => {
     expect(stalled).toEqual([["/tmp/whatever.json", "codex-auth"]]);
   });
 
-  test("usage-limit → rate-park after a BOUNDED retry (≤ maxRateRetries), no stalled write", async () => {
+  test("usage-limit → rate-park after a BOUNDED retry (≤ maxRateRetries); exhaustion invokes the terminal-signal backstop (T1)", async () => {
     const stalled = [];
+    const marks = [];
     let spawned = 0;
     const { opts } = runnerOpts({
       over: {
@@ -563,6 +675,7 @@ describe("codexRunPhaseAgent — failure classification", () => {
           return autoChild([RATE_ERR], 1);
         },
         writeSignalStalled: (...a) => stalled.push(a),
+        markLaunchFailed: (arg) => marks.push(arg),
         maxRateRetries: 2,
       },
     });
@@ -570,7 +683,19 @@ describe("codexRunPhaseAgent — failure classification", () => {
     expect(r.classification).toBe("rate-park");
     expect(r.code).toBe(1);
     expect(spawned).toBe(3); // 1 initial + 2 retries — bounded, no infinite loop
-    expect(stalled.length).toBe(0); // transient — the scheduler cool-down retries later
+    // CTL-1457 (T1): on EXHAUSTION the terminal-signal backstop IS invoked so the phase
+    // is not left dangling — recovery re-enters cool-down instead of treating the no-bg
+    // signal as "unknown" forever. It uses markLaunchFailed with status:"failed" (a
+    // TRANSIENT cool-down failure), NOT the sticky needs-human auth-park stalled write.
+    expect(marks).toHaveLength(1);
+    expect(marks[0]).toMatchObject({
+      ticket: "CTL-100",
+      phase: "implement",
+      status: "failed",
+      signalFile: "/ec/workers/CTL-100/phase-implement.json",
+    });
+    expect(marks[0].reason).toBe("codex-rate-park-exhausted");
+    expect(stalled.length).toBe(0); // NOT the sticky auth-park stalled path
   });
 
   // D5: park is the stalled-signal + classification consumed by the daemon's
@@ -599,6 +724,7 @@ describe("codexRunPhaseAgent — failure classification", () => {
       over: {
         spawnChild: () => autoChild([RATE_ERR], 1),
         writeSignalStalled: () => {},
+        markLaunchFailed: () => {}, // T1: absorb the exhaustion backstop (no real emit spawn)
         maxRateRetries: 1,
         emitEvent: (name) => rateEvents.push(name),
       },
@@ -698,6 +824,42 @@ describe("codexRunPhaseAgent — abort", () => {
     expect(child.killed).toContain("SIGTERM");
     expect(r.aborted).toBe(true);
     expect(reg.state.handles[0].deregistered).toBe(1); // slot released on the abort path
+  });
+
+  // CTL-1457 (T3): a child that IGNORES SIGTERM must still be escalated to SIGKILL, and
+  // the runner must settle (deregister + release the slot) ONLY after the child closes —
+  // never on the AbortError alone, which would clear the escalation timer and leak a live
+  // subprocess.
+  test("child ignores SIGTERM → runner escalates to SIGKILL and settles only after close", async () => {
+    const child = makeSigtermIgnoringChild();
+    let spawned = false;
+    const { opts, reg } = runnerOpts({
+      over: {
+        spawnChild: () => {
+          spawned = true;
+          return child;
+        },
+        killGraceMs: 5, // tiny grace so the escalation fires fast in-test
+        semaphore: new Semaphore(2),
+      },
+    });
+    const p = codexRunPhaseAgent(ARGS, opts);
+    while (!spawned) await tick();
+    child.stdout.push(`{"type":"thread.started","thread_id":"tid-ignore"}\n`);
+    await tick();
+    const ac = reg.state.handles[0].controllers[0];
+    expect(ac).toBeTruthy();
+    ac.abort(); // → onAbort: SIGTERM (ignored) + schedules the SIGKILL escalation timer
+    // Simulate node's spawn({signal}) behavior: an AbortError 'error' event arrives on the
+    // child BEFORE it exits. The OLD handler settled on this (clearing the escalation timer),
+    // leaking a live child; the fix must IGNORE it and let 'close' settle instead.
+    child.emit("error", Object.assign(new Error("The operation was aborted"), { name: "AbortError" }));
+    await tick();
+    expect(child.killed).toContain("SIGTERM");
+    const r = await p; // resolves only once the killGrace timer escalates to SIGKILL → close
+    expect(child.killed).toContain("SIGKILL"); // escalation survived the AbortError and fired
+    expect(r.aborted).toBe(true);
+    expect(reg.state.handles[0].deregistered).toBe(1); // slot released only after the real close
   });
 });
 

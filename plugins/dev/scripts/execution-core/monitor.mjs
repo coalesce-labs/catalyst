@@ -37,6 +37,7 @@ import {
   getClusterHosts, // CTL-862
   hostMembershipWarning, // CTL-1057
   isDraining as isDrainingDefault, // CTL-1095: drain gate
+  isInProcessDispatchMode, // CTL-1457 (T2): sdk|codex-exec occupancy gate predicate
 } from "./config.mjs";
 // CTL-1397 (Node-loadability): monitor.mjs MUST NOT import replica-read.mjs — that
 // module statically imports `bun:sqlite`, which the Node ESM loader rejects at
@@ -608,9 +609,11 @@ export function computeTriageBudget({
   // CTL-1367 P1: under executor=sdk add the in-process SDK workers' occupancy so the
   // →Triage budget counts them like bg jobs and a webhook drain / sweepMissingTriage
   // can't dispatch past maxParallel while prior SDK triage queries run/queue behind
-  // the semaphore. GATED on dispatchMode === "sdk" → 0 under bg (byte-identical).
+  // the semaphore. CTL-1457 (T2): codex-exec prelaunches write the SAME no-bg_job_id
+  // signals and queue behind their own semaphore, so gate on isInProcessDispatchMode
+  // (sdk OR codex-exec) → still 0 under bg/oneshot-legacy (byte-identical).
   let sdkInflight = 0;
-  if (dispatchMode === "sdk") {
+  if (isInProcessDispatchMode(dispatchMode)) {
     try {
       sdkInflight = countSdkInflight(orchDir);
     } catch {

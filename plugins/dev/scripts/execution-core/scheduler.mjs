@@ -334,6 +334,7 @@ import {
   isDraining as isDrainingDefault,
   getDrainedMarkerPath, // CTL-1321: shared resolver for the drain.drained sentinel
   HEARTBEAT_GRACE_MS, // CTL-1191: dead-host grace for surviving-roster recovery gate
+  isInProcessDispatchMode, // CTL-1457 (T2): sdk|codex-exec occupancy gate predicate
 } from "./config.mjs";
 import { emitDrainedEvent as defaultEmitDrainedEvent } from "./drain-event.mjs"; // CTL-1095: drained sentinel
 import { defaultCheckSequencing } from "./sequencing.mjs"; // CTL-537
@@ -4875,10 +4876,13 @@ export function schedulerTick(
   // job, so liveCount is blind to them. Add their occupancy (dispatched/running
   // nested signals with no bg_job_id) so the slot gate counts them like bg jobs and
   // can't admit MORE tickets past maxParallel (each queuing behind the SDK
-  // semaphore). GATED on dispatchMode === "sdk": under bg/oneshot-legacy the term is
-  // 0 (countSdkInflight is never called), so occupiedCount is byte-identical to today.
+  // semaphore). CTL-1457 (T2): codex-exec prelaunches write the SAME no-bg_job_id
+  // "dispatched" signals and queue behind their own semaphore, so a codex node must
+  // count them too — gate on isInProcessDispatchMode (sdk OR codex-exec). Under
+  // bg/oneshot-legacy the term is 0 (countSdkInflight is never called), so
+  // occupiedCount is byte-identical to today.
   let sdkInflight = 0;
-  if (dispatchMode === "sdk") {
+  if (isInProcessDispatchMode(dispatchMode)) {
     try {
       sdkInflight = countSdkInflight(orchDir);
     } catch {
@@ -5893,11 +5897,12 @@ export function schedulerTick(
   // maxParallel=1 — a 2nd SDK signal beyond parallelism for one tick. The predecessor
   // teardown via emitPredecessorReap is async, so the just-finished predecessor signal is
   // still on disk this tick — but it is terminal (done/skipped) and countSdkInflight only
-  // counts dispatched|running, so the re-sample is never inflated by it. GATED strictly on
-  // dispatchMode === "sdk": the bg/oneshot-legacy path never recomputes (sdkInFlightCount
-  // stays === inFlightCount) and keeps the byte-identical freeSlots formula below.
+  // counts dispatched|running, so the re-sample is never inflated by it. CTL-1457 (T2):
+  // gate on isInProcessDispatchMode so codex-exec re-samples its no-bg occupancy the same
+  // way sdk does; the bg/oneshot-legacy path never recomputes (sdkInFlightCount stays
+  // === inFlightCount) and keeps the byte-identical freeSlots formula below.
   let sdkInFlightCount = inFlightCount;
-  if (dispatchMode === "sdk") {
+  if (isInProcessDispatchMode(dispatchMode)) {
     let resampledSdkInflight = sdkInflight;
     try {
       resampledSdkInflight = countSdkInflight(orchDir);
@@ -5934,7 +5939,7 @@ export function schedulerTick(
   // loss; the slot frees naturally next tick via getAgentsCached deregistration).
   const freeSlots =
     livenessFresh && !draining
-      ? dispatchMode === "sdk"
+      ? isInProcessDispatchMode(dispatchMode)
         ? // CTL-1367 P2 (item b): under executor=sdk take the MIN of two budgets so
           // whichever formula correctly accounts for the slot the other missed wins:
           //  (1) the re-sampled SDK count (sdkInFlightCount) — catches same-tick

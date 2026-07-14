@@ -130,7 +130,7 @@ import {
 } from "./recovery.mjs"; // CTL-655: window the revive budget to this run; CTL-736: reset progress high-water; CTL-768: --resume; CTL-1044: operator-event appender for the scheduler's appendIntentEvent seam
 import { startAutoTuner } from "./autotune.mjs"; // CTL-684: side-car maxParallel auto-tuner
 import { dispatchTicket, makeCommentWakeDispatch, makePhaseAwareDispatchFn } from "./dispatch.mjs"; // CTL-549: comment-wake re-dispatch; CTL-1365a/b: executor→dispatch selection at the launch seam + comment-wake executor binding; CTL-1457: per-phase-aware dispatchFn factory (owns the executor→dispatch selection internally)
-import { resolveSdkBootExecutor } from "./sdk-run-phase-agent.mjs"; // CTL-1367 item 9 + P3: boot auth gate (subscription-only) that degrades sdk→bg AND emits execution-core.executor.bg-fallback so the silent fallback is observable
+import { resolveSdkBootExecutor, assertSdkAuth } from "./sdk-run-phase-agent.mjs"; // CTL-1367 item 9 + P3: boot auth gate (subscription-only) that degrades sdk→bg AND emits execution-core.executor.bg-fallback so the silent fallback is observable; CTL-1457 (T5): assertSdkAuth also gates a per-phase sdk route on a bg/default node
 import { resolveCodexBootEligibility } from "./codex-run-phase-agent.mjs"; // CTL-1457: codex boot gate (auth.json + `codex --version`) that degrades routed codex phases + emits execution-core.executor.codex-fallback
 import { removeLabel as defaultRemoveLabel } from "./linear-write.mjs"; // CTL-549: clear needs-human on resume
 // CTL-671: the real phantom-sweep seams. startScheduler defaults them to safe
@@ -762,9 +762,21 @@ export function startDaemon({
     // lands in the JSONL event log / Loki, not just daemon.log's stderr. With
     // executorByPhase empty (the default) every phase resolves to the boot executor, so
     // the selected dispatch fn + emitEvent wrapping are byte-identical to today.
+    // CTL-1457 (T5): the daemon-boot sdk-auth verdict for a per-phase sdk route. The
+    // node-level executor already went through resolveSdkBootExecutor (sdk→bg on a bad
+    // env), but a phase EXPLICITLY routed to "sdk" on a bg/default node bypasses that
+    // node-level gate — so compute the same auth verdict here and thread it so
+    // makePhaseAwareDispatchFn degrades a routed sdk phase to the boot executor ONCE
+    // instead of refusing before prelaunch on every dispatch. Zero-change-when-unrouted:
+    // the flag is only consulted for an EXPLICITLY-routed sdk phase.
+    const sdkBootEligible = assertSdkAuth({
+      env: process.env,
+      oauthToken: process.env.CLAUDE_CODE_OAUTH_TOKEN,
+    }).ok;
     const dispatchFn = makePhaseAwareDispatchFn({
       bootExecutor: executor,
       codexBootEligible: codexElig.eligible,
+      sdkBootEligible,
       configPath,
       emitEvent: defaultAppendOperatorEvent,
       log,

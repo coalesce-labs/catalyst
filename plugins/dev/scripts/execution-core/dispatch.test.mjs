@@ -629,7 +629,7 @@ describe.each([
 describe("makePhaseAwareDispatchFn (CTL-1457)", () => {
   // recordingDispatchForExecutor — a fake dispatchForExecutor that returns a fn
   // recording (executor, args, seams) for each executor value.
-  const harness = ({ routeMap = {}, bootExecutor = "bg", codexBootEligible = true, emitEvent, resolveThrows = false } = {}) => {
+  const harness = ({ routeMap = {}, bootExecutor = "bg", codexBootEligible = true, sdkBootEligible = true, emitEvent, resolveThrows = false } = {}) => {
     const dispatched = [];
     const errors = [];
     const fakeResolveExecutorForPhase = (phase) => {
@@ -644,6 +644,7 @@ describe("makePhaseAwareDispatchFn (CTL-1457)", () => {
     const dispatchFn = makePhaseAwareDispatchFn({
       bootExecutor,
       codexBootEligible,
+      sdkBootEligible,
       configPath: "/cfg.json",
       emitEvent,
       resolveExecutorForPhase: fakeResolveExecutorForPhase,
@@ -705,6 +706,28 @@ describe("makePhaseAwareDispatchFn (CTL-1457)", () => {
       emitEvent: () => {},
     });
     dispatchFn({ orchDir: "/ec", ticket: "CTL-1", phase: "triage" });
+    expect(dispatched[0].executor).toBe("bg");
+  });
+
+  // CTL-1457 (T5): a phase routed to "sdk" degrades to the boot executor when the node's
+  // boot sdk-auth precondition failed (sdkBootEligible=false) — mirror of the codex degrade.
+  test("sdk routed but sdkBootEligible=false → degrades to the boot executor", () => {
+    const { dispatchFn, dispatched } = harness({ routeMap: { plan: "sdk" }, bootExecutor: "bg", sdkBootEligible: false, emitEvent: () => {} });
+    dispatchFn({ orchDir: "/ec", ticket: "CTL-1", phase: "plan" });
+    expect(dispatched[0].executor).toBe("bg");
+  });
+
+  test("sdk routed + sdkBootEligible=true → dispatches to sdk (no degrade)", () => {
+    const { dispatchFn, dispatched } = harness({ routeMap: { plan: "sdk" }, bootExecutor: "bg", sdkBootEligible: true, emitEvent: () => {} });
+    dispatchFn({ orchDir: "/ec", ticket: "CTL-1", phase: "plan" });
+    expect(dispatched[0].executor).toBe("sdk");
+  });
+
+  // Zero-change-when-unrouted: an UNROUTED phase never hits the sdk gate even with
+  // sdkBootEligible=false — it keeps the boot executor (which already carries any boot degrade).
+  test("unrouted phase is unaffected by sdkBootEligible=false", () => {
+    const { dispatchFn, dispatched } = harness({ routeMap: { plan: "sdk" }, bootExecutor: "bg", sdkBootEligible: false, emitEvent: () => {} });
+    dispatchFn({ orchDir: "/ec", ticket: "CTL-1", phase: "implement" }); // unrouted → boot executor
     expect(dispatched[0].executor).toBe("bg");
   });
 

@@ -1742,6 +1742,27 @@ describe("sweepMissingTriage — CTL-716 slot gate", () => {
     expect(dispatch.mock.calls.length).toBe(1);
   });
 
+  // CTL-1457 (T2): a codex-exec node prelaunches the SAME no-bg_job_id workers, so they
+  // must consume the triage budget EXACTLY like sdk.
+  test("CTL-1457 T2: dispatchMode=codex-exec — in-flight codex workers consume the triage budget", () => {
+    enroll("ENG", { status: "Ready" });
+    const realOrchDir = join(catalystDir, "execution-core");
+    const exec = execReturning({ ENG: [node("ENG-1"), node("ENG-2"), node("ENG-3")] });
+    reconcileAll({ exec });
+    const dispatch = mock(() => ({ code: 0 }));
+    sweepMissingTriage({
+      orchDir: realOrchDir,
+      dispatch,
+      applyTriageStatus: () => ({ applied: false, verified: false, from_state: null, to_state: null, reason: null }),
+      appendEvent: () => {},
+      readMaxParallelFn: () => 3,
+      liveBackgroundCount: () => 0, // no bg jobs
+      dispatchMode: "codex-exec",
+      countSdkInflight: () => 2, // 2 in-process codex workers in flight → 1 free
+    });
+    expect(dispatch.mock.calls.length).toBe(1);
+  });
+
   test("CTL-1367 P1: dispatchMode=bg — countSdkInflight is NOT consulted (byte-identical)", () => {
     enroll("ENG", { status: "Ready" });
     const realOrchDir = join(catalystDir, "execution-core");

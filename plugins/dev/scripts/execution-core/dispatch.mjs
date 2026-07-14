@@ -322,6 +322,13 @@ const _defaultDispatchForExecutor = dispatchForExecutor;
 export function makePhaseAwareDispatchFn({
   bootExecutor,
   codexBootEligible,
+  // CTL-1457 (T5): the daemon-boot sdk-auth verdict (assertSdkAuth(...).ok). Defaults
+  // to true for back-compat so an unrouted / non-sdk caller is unaffected. When a phase
+  // is EXPLICITLY routed to "sdk" on a bg/default node whose boot env lacks
+  // CLAUDE_CODE_OAUTH_TOKEN (or has ANTHROPIC_API_KEY), sdkRunPhaseAgent would refuse
+  // BEFORE prelaunch on every dispatch — degrade the routed sdk phase to the boot
+  // executor ONCE instead (mirrors the codex degrade below).
+  sdkBootEligible = true,
   configPath,
   emitEvent,
   resolveExecutorForPhase = _defaultResolveExecutorForPhase,
@@ -356,6 +363,17 @@ export function makePhaseAwareDispatchFn({
     // which would dispatch to the same unusable codex.
     if (effective === "codex-exec" && !codexBootEligible) {
       effective = bootExecutor === "codex-exec" ? "bg" : bootExecutor;
+    }
+    // CTL-1457 (T5): sdk degrade — mirror the codex degrade. A phase routed to sdk on a
+    // node whose boot sdk-auth precondition failed (sdkBootEligible=false) degrades to the
+    // boot executor so it degrades ONCE at the routing seam rather than refusing on every
+    // dispatch. When the boot executor is itself sdk, resolveSdkBootExecutor already
+    // degraded it to bg at boot (so bootExecutor would not be "sdk" with a failed auth);
+    // the `=== "sdk" ? "bg"` guard is the defense-in-depth belt against a self-fallback
+    // loop. Zero-change-when-unrouted: sdkBootEligible defaults to true, and an unrouted
+    // phase keeps effective === bootExecutor (which already carries the boot degrade).
+    if (effective === "sdk" && !sdkBootEligible) {
+      effective = bootExecutor === "sdk" ? "bg" : bootExecutor;
     }
     const fn = dispatchForExecutor(effective);
     if (effective === "sdk" || effective === "codex-exec") {

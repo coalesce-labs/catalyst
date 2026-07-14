@@ -53,8 +53,8 @@ import {
   lstatSync,
   mkdirSync,
   readFileSync,
+  readlinkSync,
   realpathSync,
-  rmSync,
   symlinkSync,
 } from "node:fs";
 import { basename, dirname, isAbsolute, join } from "node:path";
@@ -369,11 +369,22 @@ function harnessShim() {
 // is the LAST positional. writable_roots is JSON.stringified (a valid TOML string
 // array that survives spaces in paths). `-m <model>` is added ONLY when cfg.model
 // is non-null (per the Phase 1 codexConfig default — we never invent a model id).
+//
+// CTL-1457 (T6): for a boot-resume/revive dispatch (spec.resumeSession set) build the
+// RESUME subcommand form so codex continues the interrupted thread instead of starting
+// a fresh one (which duplicates work on restart). Per the codex protocol §A
+// (`codex exec [OPTIONS] <COMMAND> [ARGS]`, COMMAND ∈ {resume, review};
+// `codex exec resume <SESSION_ID>`): the session id is the `resume` subcommand's
+// positional; the (global) --json / sandbox / -c overrides / -m still apply after it,
+// and the prompt stays the last positional. Absent resumeSession → the fresh
+// `exec --json …` form, byte-identical to before.
 export function buildCodexArgs(spec, cfg, { orchDir, worktreePath } = {}) {
   const roots = resolveWritableRoots(cfg, { orchDir, worktreePath });
   const prompt = buildCodexPrompt(spec);
+  const resume = spec?.resumeSession;
+  const head = resume ? ["exec", "resume", String(resume)] : ["exec"];
   return [
-    "exec",
+    ...head,
     "--json",
     "--sandbox",
     "workspace-write",
@@ -402,7 +413,12 @@ export function buildCodexEnv(spec, cfg) {
     env[s.slice(0, idx)] = s.slice(idx + 1);
   }
   if (cfg?.codexHome) env.CODEX_HOME = cfg.codexHome;
-  const pluginRoot = resolveDevPluginRoot(spec?.pluginDirs);
+  // CTL-1457 (T4): prefer the resolved codex.pluginRoot (CATALYST_CODEX_PLUGIN_ROOT /
+  // Layer-1 codex.pluginRoot) over the launch spec's pluginDirs. A node with the
+  // override — or with empty/stale pluginDirs — must still point CLAUDE_PLUGIN_ROOT at
+  // the catalyst skills, else codex launches without them. Falls back to pluginDirs
+  // when cfg.pluginRoot is unset (the common case), so unrouted nodes are unchanged.
+  const pluginRoot = cfg?.pluginRoot ?? resolveDevPluginRoot(spec?.pluginDirs);
   if (pluginRoot) env.CLAUDE_PLUGIN_ROOT = pluginRoot;
   env.CATALYST_EXECUTOR_ID = CODEX_EXECUTOR_ID;
   // Wrong-vendor leakage guard: codex authenticates via CODEX_HOME/CODEX_API_KEY,
@@ -477,32 +493,69 @@ function resolveGitInfoExcludeFallback(worktreePath) {
 }
 
 // ensureCodexSkills — symlink <worktreePath>/.agents/skills to the pristine
-// dev-plugin skills dir (resolved from pluginDirs) so a Codex worker can discover
-// the /catalyst-dev:phase-* skills (Codex reads `.agents/skills`, not Claude
-// plugins), and git-exclude `.agents/` (D7). Idempotent (unlink-first) and
-// best-effort — a resolution/link failure logs and returns; it never throws
-// fatally (the runner calls it before spawn).
-export function ensureCodexSkills(worktreePath, { pluginDirs } = {}) {
+// dev-plugin skills dir so a Codex worker can discover the /catalyst-dev:phase-*
+// skills (Codex reads `.agents/skills`, not Claude plugins), and git-exclude
+// `.agents/` (D7). Best-effort — a resolution/link failure logs and returns; it
+// never throws fatally (the runner calls it before spawn).
+//
+// CTL-1457 (T4): the skills source is cfg.pluginRoot when set (the resolved
+// codex.pluginRoot), else resolved from pluginDirs — the same precedence
+// buildCodexEnv uses for CLAUDE_PLUGIN_ROOT so both point at the SAME skills.
+//
+// CTL-1457 (T7): NEVER `rm -r` a path this runner does not own. Phase workers run in
+// ARBITRARY project worktrees, so a pre-existing `.agents/skills` may be the project's
+// or user's real Codex skills (a real dir) or a foreign symlink — the old unlink-first
+// setup deleted it (DATA LOSS). Only touch the link when SAFE:
+//   - ABSENT               → create our symlink;
+//   - OUR symlink (→ src)  → idempotent no-op;
+//   - real dir / FOREIGN symlink → leave it untouched, WARN LOUDLY, and skip.
+export function ensureCodexSkills(worktreePath, { pluginDirs, pluginRoot, log: logger = log } = {}) {
   try {
     if (!worktreePath) return;
-    const devRoot = resolveDevPluginRoot(pluginDirs);
+    const devRoot = pluginRoot ?? resolveDevPluginRoot(pluginDirs);
     if (!devRoot) return;
     const skillsSrc = join(devRoot, "skills");
     const agentsDir = join(worktreePath, ".agents");
     const skillsLink = join(agentsDir, "skills");
     mkdirSync(agentsDir, { recursive: true });
-    // Unlink-first idempotency (`ln -sfn` equivalent): remove any prior link/dir.
+    // Probe the existing entry WITHOUT removing anything.
+    let existing = null;
     try {
-      lstatSync(skillsLink);
-      rmSync(skillsLink, { recursive: true, force: true });
+      existing = lstatSync(skillsLink);
     } catch {
-      /* nothing to remove */
+      /* absent — fall through to create our symlink */
+    }
+    if (existing) {
+      if (existing.isSymbolicLink()) {
+        let target = null;
+        try {
+          target = readlinkSync(skillsLink);
+        } catch {
+          /* unreadable link — treat as foreign, never clobber */
+        }
+        if (target === skillsSrc) {
+          // OUR symlink already in place — idempotent no-op (still ensure the exclude).
+          gitExcludeAgents(worktreePath);
+          return;
+        }
+      }
+      // A real directory OR a symlink pointing at something ELSE — this runner does
+      // NOT own it. Leave it exactly as-is and skip (best-effort, non-fatal).
+      try {
+        logger?.warn?.(
+          { worktreePath, skillsLink, wanted: skillsSrc },
+          "codex-exec: .agents/skills already exists and is not our symlink — leaving it untouched (skipping codex skills setup; codex may not discover the phase skills)",
+        );
+      } catch {
+        /* logging must never break a dispatch */
+      }
+      return;
     }
     symlinkSync(skillsSrc, skillsLink);
     gitExcludeAgents(worktreePath);
   } catch (err) {
     try {
-      log?.warn?.(
+      logger?.warn?.(
         { worktreePath, err: err?.message },
         "codex-exec: ensureCodexSkills best-effort setup failed",
       );
@@ -567,7 +620,7 @@ function readSignalStatus(signalFile) {
 // an explicit child.kill("SIGTERM") + SIGKILL escalation (an AbortController
 // alone cannot stop a subprocess). Never rejects — every failure resolves a
 // structured record so the runner's control flow stays linear.
-function spawnAndParse({ bin, args, cwd, env, spawnChild, reg, onSession, secrets }) {
+function spawnAndParse({ bin, args, cwd, env, spawnChild, reg, onSession, secrets, killGraceMs = 2000 }) {
   return new Promise((resolve) => {
     const ac = new AbortController();
     reg.setAbortController?.(ac);
@@ -628,14 +681,18 @@ function spawnAndParse({ bin, args, cwd, env, spawnChild, reg, onSession, secret
       } catch {
         /* already dead */
       }
-      // SIGKILL escalation if the child ignores SIGTERM.
+      // SIGKILL escalation if the child ignores SIGTERM. CTL-1457 (T3): this timer
+      // MUST outlive the AbortError 'error' event — see the child.on("error") handler
+      // — so a child that ignores SIGTERM is still force-killed and the aborted path
+      // only settles once the child has actually CLOSED. Cleared by cleanup() on the
+      // real 'close' (by which point the child is dead or the kill has fired).
       killTimer = setTimeout(() => {
         try {
           child.kill("SIGKILL");
         } catch {
           /* already dead */
         }
-      }, 2000);
+      }, killGraceMs);
       if (killTimer && typeof killTimer.unref === "function") killTimer.unref();
     }
     try {
@@ -700,8 +757,12 @@ function spawnAndParse({ bin, args, cwd, env, spawnChild, reg, onSession, secret
 
     child.on("error", (err) => {
       if (aborted || err?.name === "AbortError") {
-        // Abort-induced error — let the close handler resolve the aborted outcome.
-        finish({ exitCode: null, signal: "SIGTERM", aborted: true, usage, errMsg, stderrTail: tail() });
+        // CTL-1457 (T3): Node's spawn({signal}) emits AbortError BEFORE the child
+        // necessarily exits. Do NOT settle here — settling runs cleanup(), which
+        // clears the SIGKILL escalation timer, so a child that ignores SIGTERM would
+        // survive (deregistered + slot released while still running). Return and let
+        // the 'close' handler settle the aborted outcome once the child has ACTUALLY
+        // exited (SIGTERM worked, or onAbort's killTimer escalated to SIGKILL).
         return;
       }
       finish({
@@ -750,6 +811,7 @@ export async function codexRunPhaseAgent(
     maxParallel = resolveMaxParallel(),
     sleep = defaultSleep,
     maxRateRetries = 2,
+    killGraceMs = 2000, // CTL-1457 (T3): SIGTERM→SIGKILL abort grace (injectable for tests)
   } = {},
 ) {
   const cfg = codexCfg ?? codexConfig({ configPath, env });
@@ -806,7 +868,9 @@ export async function codexRunPhaseAgent(
   const args2 = buildCodexArgs(spec, cfg, { orchDir, worktreePath: wt });
 
   // Symlink .agents/skills + git-exclude .agents/ before spawn (best-effort).
-  prepareWorktree(wt, { pluginDirs: spec.pluginDirs });
+  // CTL-1457 (T4): pass cfg.pluginRoot so the skills source honors the same
+  // codex.pluginRoot override CLAUDE_PLUGIN_ROOT uses (falls back to spec.pluginDirs).
+  prepareWorktree(wt, { pluginDirs: spec.pluginDirs, pluginRoot: cfg.pluginRoot });
 
   // Register in the in-process worker registry (executor-tagged). Registered
   // BEFORE the semaphore so a parked worker still reads as live.
@@ -857,6 +921,7 @@ export async function codexRunPhaseAgent(
         reg,
         onSession,
         secrets,
+        killGraceMs,
       });
 
       // Abort — a cancelled child (preemption / watchdog). Surface aborted:true.
@@ -900,7 +965,20 @@ export async function codexRunPhaseAgent(
           await sleep(rateBackoffMs(rateAttempt));
           continue; // transient — retry the spawn (bounded)
         }
-        // Exhausted: NO stalled write (transient — the scheduler cool-down retries later).
+        // Exhausted (CTL-1457 T1): mirror the sdk overloaded-exhausted backstop so a
+        // TERMINAL signal is written AND the canonical phase.<phase>.failed.<ticket>
+        // event is emitted. Without it the async (thenable) codex dispatch already
+        // settled "successful" (verifyDispatched requireBgJob:false) while recovery
+        // no-ops a no-bg_job_id in-flight signal as "unknown" — the phase would stay
+        // dispatched/running FOREVER, never entering cool-down. status:"failed" (NOT the
+        // sticky needs-human auth-park path above) routes through the daemon's cool-down
+        // / circuit-breaker retry — the scheduler re-dispatches after the cool-down,
+        // which is the TRANSIENT behavior rate-park intends. Classification stays
+        // "rate-park" for any caller that inspects it.
+        markLaunchFailed(
+          { phase, ticket, status: "failed", reason: "codex-rate-park-exhausted", orchDir, signalFile },
+          { spawn },
+        );
         return {
           code: 1,
           stdout: "",

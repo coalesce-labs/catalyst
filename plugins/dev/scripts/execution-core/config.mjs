@@ -449,6 +449,18 @@ export function dispatchModeForExecutor(executor) {
   return DISPATCH_MODE_BY_EXECUTOR[executor] ?? "phase-agents";
 }
 
+// isInProcessDispatchMode — CTL-1457 (T2): does this dispatch mode run its phase
+// workers IN-PROCESS (no `claude --bg` job, hence no bg_job_id)? Both "sdk" (the
+// in-process Agent SDK query) and "codex-exec" (a `codex exec --json` child that the
+// daemon prelaunches + tracks by no-bg_job_id signal, queued behind a semaphore)
+// write the same no-bg "dispatched" signals, so BOTH must contribute to the slot /
+// occupancy gates or a node at maxParallel shows zero occupied slots and over-admits.
+// "phase-agents" (bg) and "oneshot-legacy" are out-of-process (bg_job_id) → false.
+// Pure; never throws.
+export function isInProcessDispatchMode(mode) {
+  return mode === "sdk" || mode === "codex-exec";
+}
+
 // readExecutorLayer1 — pull catalyst.orchestration.executor out of a project's
 // Layer-1 .catalyst/config.json. Returns the raw value EXACTLY as written, or
 // undefined when the key is absent or the file is missing/malformed/unreadable
