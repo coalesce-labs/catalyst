@@ -1389,10 +1389,12 @@ run "T68: wf_* worktree fresh mtime -> KEEP" bash -c "
 "
 
 # wf_* with active session -> KEEP (active_session guard fires before wf_* guard)
-cat > "$MOCKBIN/claude" <<'CLAUDEOF'
+# Unquoted heredoc so ${P10_WT_ROOT} expands NOW (write-time) into a literal path;
+# runtime shell vars in the script (${1:-}) are escaped with backslash.
+cat > "$MOCKBIN/claude" <<CLAUDEOF
 #!/usr/bin/env bash
-if [[ "${1:-}" == "agents" ]]; then
-  echo '[{"sessionId":"live_active_session","kind":"background","status":"idle","cwd":"'"${P10_WT_ROOT}/wf_active"'"}]'
+if [[ "\${1:-}" == "agents" ]]; then
+  echo '[{"sessionId":"live_active_session","kind":"background","status":"idle","cwd":"${P10_WT_ROOT}/wf_active"}]'
 fi
 CLAUDEOF
 chmod +x "$MOCKBIN/claude"

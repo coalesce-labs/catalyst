@@ -144,7 +144,13 @@ _real_dirty_count_stdin() {
   printf '%s\n' "$count"
 }
 
-_real_dirty_count() { git -C "$1" status --porcelain 2>/dev/null | _real_dirty_count_stdin; }
+# CTL-1473 remediate: swallow a failing inner git so the pipeline never returns
+# non-zero under `set -o pipefail`. Previously, on a non-repo path git exited
+# non-zero, the pipeline failed, and the call site's `|| echo 0` appended a second
+# "0" on top of the stdin helper's own "0" — yielding a two-line "0\n0" that made
+# `[[ "$dirty" -gt 0 ]]` raise a syntax error. `_real_dirty_count_stdin` already
+# prints 0 for empty input, so the call site no longer needs `|| echo 0`.
+_real_dirty_count() { { git -C "$1" status --porcelain 2>/dev/null || true; } | _real_dirty_count_stdin; }
 
 # ─── roots (overridable via env) ────────────────────────────────────────────
 
@@ -321,13 +327,28 @@ _wt_unpushed_count() {
   git -C "$1" rev-list --count HEAD --not "${refs[@]}" 2>/dev/null || printf '0'
 }
 
+# CTL-1473 remediate: portable file/dir mtime (epoch seconds). GNU and BSD stat
+# differ — GNU uses `stat -c %Y`, BSD/macOS uses `stat -f %m`. The previous
+# BSD-first `stat -f '%m' … || stat -c '%Y' …` order was NOT a safe fallback on
+# Linux: there `-f` means --file-system, so `stat -f '%m' FILE` treats `%m` as a
+# (missing) file operand and prints a multi-line filesystem block for FILE to
+# stdout *before* exiting non-zero. The `|| stat -c '%Y'` then also runs, so the
+# mtime stream is polluted with filesystem-block numbers and `sort -nr | head -1`
+# returns garbage — the wf_* classify path produced no SAFE/KEEP verdict on Linux
+# (CI RED T67/T68). Detect the working flavour once at load time instead.
+if stat -c '%Y' /dev/null >/dev/null 2>&1; then
+  _stat_mtime() { stat -c '%Y' "$1" 2>/dev/null || echo 0; }
+else
+  _stat_mtime() { stat -f '%m' "$1" 2>/dev/null || echo 0; }
+fi
+
 _wt_newest_mtime() {
   find "$1" -type f \
     -not -path '*/node_modules/*' -not -path '*/.cache/*' \
     -not -path '*/.trunk/*' -not -path '*/dist/*' -not -path '*/build/*' \
     2>/dev/null \
   | while IFS= read -r f; do
-      stat -f '%m' "$f" 2>/dev/null || stat -c '%Y' "$f" 2>/dev/null || echo 0
+      _stat_mtime "$f"
     done \
   | sort -nr | head -1
 }
@@ -348,8 +369,8 @@ _wt_idle_secs_ge() {
   local newest now
   newest="$(_wt_newest_mtime "$wt")"
   if [[ -z "$newest" || "$newest" == "0" ]]; then
-    # No files — fall back to the directory's own mtime.
-    newest="$(stat -f '%m' "$wt" 2>/dev/null || stat -c '%Y' "$wt" 2>/dev/null || echo 0)"
+    # No files — fall back to the directory's own mtime (portable, CTL-1473).
+    newest="$(_stat_mtime "$wt")"
   fi
   [[ -z "$newest" || "$newest" == "0" ]] && return 1  # unknown → conservative: not idle
   now="$(date -u +%s)"
@@ -364,7 +385,7 @@ classify_worktree() {
     _wt_is_idle "$wt" && { printf 'ORPHAN_GITFILE'; return 0; }
     printf 'KEEP'; return 0
   fi
-  dirty="$(_real_dirty_count "$wt" 2>/dev/null || echo 0)"
+  dirty="$(_real_dirty_count "$wt" 2>/dev/null)"; dirty="${dirty:-0}"
   [[ "$dirty" -gt 0 ]] && { printf 'SALVAGE_DIRTY'; return 0; }
   # CTL-1473: wf_* worktrees are Workflow tool session artifacts baked inside the
   # plugin-source checkout. They are always disposable — the Workflow tool creates a
