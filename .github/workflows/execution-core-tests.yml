@@ -87,6 +87,16 @@ jobs:
       - name: Install dependencies
         run: bun install
 
+      - name: Install broker dependencies (CTL-1473)
+        # The stable-unit-tests step runs ../broker/plugin-refresh.test.mjs, which
+        # imports broker/router.mjs -> broker/config.mjs. Unlike execution-core/config.mjs
+        # (pino-optional via a try/catch console shim), broker/config.mjs does a hard
+        # top-level `import pino from "pino"`. Node/bun resolves that from broker/'s
+        # location upward, so the job-default `bun install` in execution-core/ never
+        # satisfies it. Install broker/ deps so pino resolves for the broker import chain.
+        working-directory: plugins/dev/scripts/broker
+        run: bun install
+
       - name: Verify import graph (bun build resolution check)
         # CTL-1298: resolve daemon.mjs's full transitive import graph so a missing
         # named export (the CTL-1093 outage: getCatalystRepoDir added to daemon.mjs
