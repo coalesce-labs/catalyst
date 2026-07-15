@@ -6284,6 +6284,7 @@ export function schedulerTick(
           stampWorkerLabel({
             ticket: t.identifier,
             hostName: self,
+            knownHosts: roster,
             replica,
             applyLabel: writeStatus.applyLabel,
             removeLabel: writeStatus.removeLabel,

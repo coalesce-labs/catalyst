@@ -68,7 +68,7 @@ describe("stampWorkerLabel — swap from a foreign host", () => {
       return { applied: true };
     });
 
-    const res = stampWorkerLabel({ ticket: "CTL-1", hostName: "mini", readLabelNodes, applyLabel, removeLabel });
+    const res = stampWorkerLabel({ ticket: "CTL-1", hostName: "mini", knownHosts: ["mini", "other"], readLabelNodes, applyLabel, removeLabel });
 
     expect(res).toEqual({ stamped: true });
     expect(order).toEqual(["remove:worker:other", "apply:worker:mini"]);
@@ -83,7 +83,7 @@ describe("stampWorkerLabel — swap from a foreign host", () => {
     const removeLabel = recorder({ removed: true });
     const applyLabel = recorder({ applied: true });
 
-    stampWorkerLabel({ ticket: "CTL-1", hostName: "mini", readLabelNodes, applyLabel, removeLabel });
+    stampWorkerLabel({ ticket: "CTL-1", hostName: "mini", knownHosts: ["other"], readLabelNodes, applyLabel, removeLabel });
 
     expect(removeLabel.calls.length).toBe(1);
     expect(removeLabel.calls[0][1]).toBe("worker:other");
@@ -132,7 +132,7 @@ describe("stampWorkerLabel — removeLabel fails", () => {
     const removeLabel = recorder({ removed: false, reason: "transient" });
     const applyLabel = recorder({ applied: true });
 
-    const res = stampWorkerLabel({ ticket: "CTL-1", hostName: "mini", readLabelNodes, applyLabel, removeLabel });
+    const res = stampWorkerLabel({ ticket: "CTL-1", hostName: "mini", knownHosts: ["other"], readLabelNodes, applyLabel, removeLabel });
 
     expect(res).toEqual({ stamped: false, reason: "remove-failed" });
     expect(applyLabel.calls.length).toBe(0);
@@ -148,7 +148,7 @@ describe("stampWorkerLabel — removeLabel fails", () => {
     let threw = false;
     let res;
     try {
-      res = stampWorkerLabel({ ticket: "CTL-1", hostName: "mini", readLabelNodes, applyLabel, removeLabel });
+      res = stampWorkerLabel({ ticket: "CTL-1", hostName: "mini", knownHosts: ["other"], readLabelNodes, applyLabel, removeLabel });
     } catch {
       threw = true;
     }
@@ -184,7 +184,7 @@ describe("stampWorkerLabel — thenable removeLabel (the production async-declar
       return { applied: true };
     });
 
-    const res = stampWorkerLabel({ ticket: "CTL-1", hostName: "mini", readLabelNodes, applyLabel, removeLabel });
+    const res = stampWorkerLabel({ ticket: "CTL-1", hostName: "mini", knownHosts: ["other"], readLabelNodes, applyLabel, removeLabel });
 
     // Sync caller only learns the swap was deferred; no apply yet.
     expect(res).toEqual({ stamped: false, reason: "swap-deferred" });
@@ -199,7 +199,7 @@ describe("stampWorkerLabel — thenable removeLabel (the production async-declar
     const removeLabel = recorder(Promise.resolve({ removed: false, reason: "transient" }));
     const applyLabel = recorder({ applied: true });
 
-    const res = stampWorkerLabel({ ticket: "CTL-1", hostName: "mini", readLabelNodes, applyLabel, removeLabel });
+    const res = stampWorkerLabel({ ticket: "CTL-1", hostName: "mini", knownHosts: ["other"], readLabelNodes, applyLabel, removeLabel });
     expect(res).toEqual({ stamped: false, reason: "swap-deferred" });
 
     await Promise.resolve();
@@ -214,7 +214,7 @@ describe("stampWorkerLabel — thenable removeLabel (the production async-declar
     const removeLabel = recorder(rejection);
     const applyLabel = recorder({ applied: true });
 
-    const res = stampWorkerLabel({ ticket: "CTL-1", hostName: "mini", readLabelNodes, applyLabel, removeLabel });
+    const res = stampWorkerLabel({ ticket: "CTL-1", hostName: "mini", knownHosts: ["other"], readLabelNodes, applyLabel, removeLabel });
     expect(res).toEqual({ stamped: false, reason: "swap-deferred" });
 
     await Promise.resolve();
@@ -329,14 +329,47 @@ describe("stampWorkerLabel — stale-replica exclusive-conflict live retry (Code
     expect(applyLabel.calls.length).toBe(2); // replica attempt + live attempt, then stop
   });
 
-  test("exclusive-conflict off a LIVE read does not retry (no replica involved)", () => {
+  test("exclusive-conflict retries once even off a LIVE read (roster-limited eager set can miss an in-group sibling)", () => {
     const readLabelNodes = recorder({ ok: true, nodes: [] });
     const applyLabel = recorder({ applied: false, reason: "exclusive-conflict" });
 
     const res = stampWorkerLabel({ ticket: "CTL-1", hostName: "mini", readLabelNodes, applyLabel, removeLabel: recorder({ removed: true }) });
 
     expect(res).toEqual({ stamped: false, reason: "exclusive-conflict" });
-    expect(readLabelNodes.calls.length).toBe(1);
+    expect(readLabelNodes.calls.length).toBe(2); // initial + the one conflict retry
+    expect(applyLabel.calls.length).toBe(2); // first attempt + retry attempt, then stop
+  });
+});
+
+describe("stampWorkerLabel — group-scoped sibling removal (Codex #2650 round-3)", () => {
+  test("an unrelated same-prefix label (worker:frontend, not roster-known) is NEVER removed when the apply succeeds", () => {
+    const readLabelNodes = recorder({ ok: true, nodes: [{ id: "l9", name: "worker:frontend" }] });
+    const removeLabel = recorder({ removed: true });
+    const applyLabel = recorder({ applied: true }); // different group — no exclusive conflict
+
+    const res = stampWorkerLabel({ ticket: "CTL-1", hostName: "mini", knownHosts: ["mini", "mini-2"], readLabelNodes, applyLabel, removeLabel });
+
+    expect(res).toEqual({ stamped: true });
+    expect(removeLabel.calls.length).toBe(0);
     expect(applyLabel.calls.length).toBe(1);
+  });
+
+  test("a decommissioned host's sibling (not in roster) swaps via the conflict-proven retry", () => {
+    // worker:oldhost is OUR group's child but its host left the roster —
+    // the eager pass skips it, the apply conflicts, the retry removes it.
+    const readLabelNodes = recorder({ ok: true, nodes: [{ id: "l1", name: "worker:oldhost" }] });
+    const removeLabel = recorder({ removed: true });
+    let applyCalls = 0;
+    const applyLabel = recorder(() => {
+      applyCalls += 1;
+      return applyCalls === 1 ? { applied: false, reason: "exclusive-conflict" } : { applied: true };
+    });
+
+    const res = stampWorkerLabel({ ticket: "CTL-1", hostName: "mini", knownHosts: ["mini", "mini-2"], readLabelNodes, applyLabel, removeLabel });
+
+    expect(res).toEqual({ stamped: true });
+    expect(removeLabel.calls.length).toBe(1);
+    expect(removeLabel.calls[0][1]).toBe("worker:oldhost");
+    expect(applyLabel.calls.length).toBe(2);
   });
 });

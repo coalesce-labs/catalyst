@@ -51,11 +51,16 @@ export { WORKER_LABEL_GROUP, WORKER_LABEL_PREFIX };
 // CTL-1481) — the PREFERRED read source per the repo's replica-first read rule
 // (a live single-ticket read burns the shared fleet quota). A replica miss
 // (gate-fail/absent/undefined) falls back LOUDLY to the live `readLabelNodes`.
+// `knownHosts` is the cluster roster (in scope at every call site): eager
+// sibling removal is limited to `worker:<roster-host>` names so an unrelated
+// same-prefix label from a workspace's own taxonomy is never touched outside
+// the conflict-proven retry.
 // `log` is an optional injectable logger (default null — no-op) so a bare test
 // call needs no logger stub.
 export function stampWorkerLabel({
   ticket,
   hostName,
+  knownHosts = null,
   replica = null,
   readLabelNodes = readTicketLabelNodes,
   applyLabel = defaultApplyLabel,
@@ -64,16 +69,27 @@ export function stampWorkerLabel({
 } = {}) {
   try {
     const desired = `${WORKER_LABEL_PREFIX}${hostName}`;
+    // A prefix-matched sibling that is NOT the desired label. Prefix alone
+    // cannot prove group membership (a workspace may carry an unrelated
+    // `worker:frontend` from its own taxonomy), so candidates are only
+    // removed EAGERLY when their host part is roster-known (certainly ours),
+    // and prefix-wide only inside the conflict-proven retry below.
+    const isCandidate = (n) =>
+      typeof n?.name === "string" &&
+      n.name.startsWith(WORKER_LABEL_PREFIX) &&
+      n.name !== desired;
+    const knownNames = new Set(
+      (Array.isArray(knownHosts) ? knownHosts : []).map((h) => `${WORKER_LABEL_PREFIX}${h}`)
+    );
+
     // Replica-first: labels ARE mirrored into catalyst-replica.db, and the
     // steady-state stamp (label already correct) should cost ZERO live calls.
     // replica.labels returns [] as an authoritative "no labels" answer and
     // undefined on any gate-fail/miss — only undefined falls through.
     let nodes = null;
-    let usedReplica = false;
     const replicaRows = typeof replica?.labels === "function" ? replica.labels(ticket) : undefined;
     if (Array.isArray(replicaRows)) {
       nodes = replicaRows;
-      usedReplica = true;
     } else {
       if (replica) {
         // Loud fallback per the replica-first convention — a silent live read
@@ -93,16 +109,18 @@ export function stampWorkerLabel({
       }
       nodes = read.nodes;
     }
-    // Remove BEFORE add: Linear rejects a second exclusive-group child in one
-    // apply, so any foreign `worker:*` sibling must be cleared first.
-    const foreign = nodes.filter(
-      (n) =>
-        typeof n?.name === "string" &&
-        n.name.startsWith(WORKER_LABEL_PREFIX) &&
-        n.name !== desired
-    );
-    const applyIfAbsent = () => {
-      if (nodes.some((n) => n?.name === desired)) {
+
+    // applyIfAbsent — the terminal apply step of a pass. On an
+    // exclusive-conflict rejection the server has PROVED a live same-group
+    // sibling our pass didn't remove (a stale replica snapshot, or a sibling
+    // outside the roster — e.g. a decommissioned host's label). One
+    // conflict-proven retry re-reads LIVE and removes candidates PREFIX-WIDE:
+    // at that point an unrelated same-prefix label coexisting with a genuine
+    // in-group conflict is vanishingly rare, and the alternative is an
+    // ownership label that can never converge. The retry pass itself never
+    // retries again.
+    const applyIfAbsent = (currentNodes, allowConflictRetry) => {
+      if (currentNodes.some((n) => n?.name === desired)) {
         return { stamped: true };
       }
       let applyRes;
@@ -118,25 +136,20 @@ export function stampWorkerLabel({
       if (applyRes?.applied) {
         return { stamped: true };
       }
-      // A replica that is fresh-gated but behind for THIS ticket can be missing
-      // a live foreign worker:* sibling — the apply then hits the server-side
-      // exclusive-group rejection. Retry ONCE from a LIVE read (replica
-      // disabled) so the stale sibling is actually removed before re-adding;
-      // the replica:null recursion cannot recurse again.
-      if (usedReplica && applyRes?.reason === "exclusive-conflict") {
+      if (allowConflictRetry && applyRes?.reason === "exclusive-conflict") {
         log?.warn?.(
           { ticket, label: desired },
-          "worker-label: exclusive-conflict off a replica-sourced read — retrying from a live read"
+          "worker-label: exclusive-conflict — retrying once from a live read (prefix-wide removal)"
         );
-        return stampWorkerLabel({
-          ticket,
-          hostName,
-          replica: null,
-          readLabelNodes,
-          applyLabel,
-          removeLabel,
-          log,
-        });
+        const read = readLabelNodes(ticket);
+        if (!read?.ok || !Array.isArray(read.nodes)) {
+          log?.warn?.(
+            { ticket, hostName },
+            "worker-label: conflict-retry live read failed — stamp aborted"
+          );
+          return { stamped: false, reason: "read-failed" };
+        }
+        return removeThenApply(read.nodes, read.nodes.filter(isCandidate), false);
       }
       log?.warn?.(
         { ticket, label: desired, reason: applyRes?.reason },
@@ -144,52 +157,64 @@ export function stampWorkerLabel({
       );
       return { stamped: false, reason: applyRes?.reason ?? "apply-failed" };
     };
-    // Sequential remove→confirm→next→apply chain. removeLabel (linear-write.mjs)
-    // is declared `async` with an entirely spawnSync-synchronous body — the
-    // mutation has already landed or failed by the time it returns; only the
-    // RESULT is promise-wrapped. Mirror clearStalledLabel's thenable-aware
-    // confirmation (CTL-764 round-5): a plain-object result (test fakes) is
-    // confirmed inline; a thenable result is confirmed on a microtask, so the
-    // apply still happens strictly AFTER a CONFIRMED remove and a failed remove
-    // aborts the stamp in production too (never leaves the exclusive group with
-    // an apply Linear would reject).
-    const removeThenContinue = (idx) => {
-      if (idx >= foreign.length) return applyIfAbsent();
-      const node = foreign[idx];
-      let res;
-      try {
-        res = removeLabel(ticket, node.name);
-      } catch (err) {
-        log?.warn?.(
-          { ticket, label: node.name, err: err.message },
-          "worker-label: removeLabel threw — stamp aborted (no apply)"
-        );
-        return { stamped: false, reason: "remove-failed" };
-      }
-      const confirm = (r) => {
-        if (r?.removed === false) {
+
+    // removeThenApply — sequential remove→confirm→next→apply chain.
+    // removeLabel (linear-write.mjs) is declared `async` with an entirely
+    // spawnSync-synchronous body — the mutation has already landed or failed
+    // by the time it returns; only the RESULT is promise-wrapped. Mirror
+    // clearStalledLabel's thenable-aware confirmation (CTL-764 round-5): a
+    // plain-object result (test fakes) is confirmed inline; a thenable result
+    // is confirmed on a microtask, so the apply still happens strictly AFTER a
+    // CONFIRMED remove and a failed remove aborts the stamp in production too
+    // (never leaves the exclusive group with an apply Linear would reject).
+    // removeLabel internally re-reads live before writing (read-modify-write),
+    // so every removal is checked against live truth even off a replica read.
+    const removeThenApply = (currentNodes, toRemove, allowConflictRetry) => {
+      const step = (idx) => {
+        if (idx >= toRemove.length) return applyIfAbsent(currentNodes, allowConflictRetry);
+        const node = toRemove[idx];
+        let res;
+        try {
+          res = removeLabel(ticket, node.name);
+        } catch (err) {
           log?.warn?.(
-            { ticket, label: node.name, reason: r.reason },
-            "worker-label: removeLabel failed — stamp aborted (no apply)"
+            { ticket, label: node.name, err: err.message },
+            "worker-label: removeLabel threw — stamp aborted (no apply)"
           );
           return { stamped: false, reason: "remove-failed" };
         }
-        return removeThenContinue(idx + 1);
+        const confirm = (r) => {
+          if (r?.removed === false) {
+            log?.warn?.(
+              { ticket, label: node.name, reason: r.reason },
+              "worker-label: removeLabel failed — stamp aborted (no apply)"
+            );
+            return { stamped: false, reason: "remove-failed" };
+          }
+          return step(idx + 1);
+        };
+        if (res && typeof res.then === "function") {
+          res.then(confirm).catch((err) =>
+            log?.warn?.(
+              { ticket, label: node.name, err: err?.message },
+              "worker-label: removeLabel rejected — stamp aborted (no apply)"
+            )
+          );
+          // The swap completes on a microtask; the sync caller only learns it
+          // was deferred. Best-effort projection — the outcome is logged, not
+          // returned.
+          return { stamped: false, reason: "swap-deferred" };
+        }
+        return confirm(res);
       };
-      if (res && typeof res.then === "function") {
-        res.then(confirm).catch((err) =>
-          log?.warn?.(
-            { ticket, label: node.name, err: err?.message },
-            "worker-label: removeLabel rejected — stamp aborted (no apply)"
-          )
-        );
-        // The swap completes on a microtask; the sync caller only learns it was
-        // deferred. Best-effort projection — the outcome is logged, not returned.
-        return { stamped: false, reason: "swap-deferred" };
-      }
-      return confirm(res);
+      return step(0);
     };
-    return removeThenContinue(0);
+
+    // First pass: eagerly remove only roster-known siblings, then apply; an
+    // exclusive-conflict on the apply escalates to the one live prefix-wide
+    // retry inside applyIfAbsent.
+    const eager = nodes.filter((n) => isCandidate(n) && knownNames.has(n.name));
+    return removeThenApply(nodes, eager, true);
   } catch (err) {
     log?.warn?.(
       { ticket, hostName, err: err?.message },

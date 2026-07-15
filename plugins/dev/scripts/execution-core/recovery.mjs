@@ -3557,7 +3557,7 @@ export async function reclaimDeadHostWork(
       // projection of the takeover claim we just won, NEVER the claim arbiter
       // itself. Best-effort swallow (mirrors writeLocalClusterGeneration below).
       try {
-        stampWorkerLabel({ ticket, hostName: self, replica, log });
+        stampWorkerLabel({ ticket, hostName: self, knownHosts: roster, replica, log });
       } catch {
         // best-effort — a failed/thrown stamp never blocks the takeover.
       }

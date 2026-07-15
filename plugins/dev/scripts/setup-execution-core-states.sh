@@ -480,7 +480,10 @@ reconcile_worker_host_labels() {
 
 	# Query workspace labels (team:null = workspace-scoped, not per-team).
 	local query payload resp
-	query='query { issueLabels(filter: {team: {null: true}}, first: 250) { nodes { id name isGroup parent { id } } } }'
+	# Narrowed server-side to names starting "worker" so the group + every
+	# worker:<host> child always fit one page — a >250-label workspace cannot
+	# push them past the first-page bound (Codex #2650 round-3).
+	query='query { issueLabels(filter: {team: {null: true}, name: {startsWith: "worker"}}, first: 250) { nodes { id name isGroup parent { id } } } }'
 	payload=$(jq -nc --arg q "$query" '{query: $q}')
 	resp=$(linear_graphql_post "$token" "$payload")
 

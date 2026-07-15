@@ -2208,7 +2208,9 @@ export async function checkWorkerLabels(deps = {}) {
     ];
   }
 
-  const QUERY = `query { issueLabels(filter: {team: {null: true}}, first: 250) { nodes { id name parent { id } } } }`;
+  // Narrowed server-side to names starting "worker" so the group + children
+  // always fit one page regardless of workspace label count (Codex #2650 r3).
+  const QUERY = `query { issueLabels(filter: {team: {null: true}, name: {startsWith: "worker"}}, first: 250) { nodes { id name parent { id } } } }`;
   let nodes;
   try {
     const json = await post(QUERY, token);
