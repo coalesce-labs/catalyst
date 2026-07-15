@@ -7474,9 +7474,10 @@ function runTick() {
     // Skip entirely on single-host installs (no-op inside the function, but the
     // pre-check avoids the call to stay zero-cost on the common case).
     if (getClusterHosts().length > 1) {
-      // CTL-1481: thread the replica so the takeover stamp's label read stays
-      // off live Linear (replica-first, loud live fallback inside the stamp).
-      reclaimDeadHostWork({ orchDir: runningOpts.orchDir, replica: runningOpts.replica }).catch((err) => {
+      // CTL-1481: thread the replica (second arg — the seams object) so the
+      // takeover stamp's label read stays off live Linear (replica-first, loud
+      // live fallback inside the stamp).
+      reclaimDeadHostWork({ orchDir: runningOpts.orchDir }, { replica: runningOpts.replica }).catch((err) => {
         log.warn({ err: err?.message }, "ctl-863: reclaimDeadHostWork tick failed — continuing");
       });
     }

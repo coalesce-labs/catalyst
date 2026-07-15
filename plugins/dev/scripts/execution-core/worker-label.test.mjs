@@ -293,3 +293,50 @@ describe("stampWorkerLabel — replica-first read (Codex #2650 P2)", () => {
     expect(warns.length).toBe(0);
   });
 });
+
+describe("stampWorkerLabel — stale-replica exclusive-conflict live retry (Codex #2650 round-2)", () => {
+  test("replica missed a live foreign sibling → apply conflicts → ONE live retry removes it and re-applies", () => {
+    // Replica says no labels; live truth has worker:other still attached.
+    const replica = { labels: recorder([]) };
+    const readLabelNodes = recorder({ ok: true, nodes: [{ id: "l1", name: "worker:other" }] });
+    const removeLabel = recorder({ removed: true });
+    let applyCalls = 0;
+    const applyLabel = recorder(() => {
+      applyCalls += 1;
+      // First apply (off the stale replica read) hits the server-side
+      // exclusive-group rejection; the live-retry apply succeeds.
+      return applyCalls === 1 ? { applied: false, reason: "exclusive-conflict" } : { applied: true };
+    });
+
+    const res = stampWorkerLabel({ ticket: "CTL-1", hostName: "mini", replica, readLabelNodes, applyLabel, removeLabel });
+
+    expect(res).toEqual({ stamped: true });
+    expect(readLabelNodes.calls.length).toBe(1); // the live retry read
+    expect(removeLabel.calls.length).toBe(1); // the stale sibling removed
+    expect(removeLabel.calls[0][1]).toBe("worker:other");
+    expect(applyLabel.calls.length).toBe(2);
+  });
+
+  test("live retry that STILL conflicts surfaces the failure — no infinite recursion", () => {
+    const replica = { labels: recorder([]) };
+    const readLabelNodes = recorder({ ok: true, nodes: [] });
+    const applyLabel = recorder({ applied: false, reason: "exclusive-conflict" });
+
+    const res = stampWorkerLabel({ ticket: "CTL-1", hostName: "mini", replica, readLabelNodes, applyLabel, removeLabel: recorder({ removed: true }) });
+
+    expect(res).toEqual({ stamped: false, reason: "exclusive-conflict" });
+    expect(readLabelNodes.calls.length).toBe(1); // exactly one live retry
+    expect(applyLabel.calls.length).toBe(2); // replica attempt + live attempt, then stop
+  });
+
+  test("exclusive-conflict off a LIVE read does not retry (no replica involved)", () => {
+    const readLabelNodes = recorder({ ok: true, nodes: [] });
+    const applyLabel = recorder({ applied: false, reason: "exclusive-conflict" });
+
+    const res = stampWorkerLabel({ ticket: "CTL-1", hostName: "mini", readLabelNodes, applyLabel, removeLabel: recorder({ removed: true }) });
+
+    expect(res).toEqual({ stamped: false, reason: "exclusive-conflict" });
+    expect(readLabelNodes.calls.length).toBe(1);
+    expect(applyLabel.calls.length).toBe(1);
+  });
+});

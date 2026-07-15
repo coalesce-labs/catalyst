@@ -376,7 +376,9 @@ worker_host_self_name() {
 # a missing or malformed cluster repo/file yields empty output, never an error.
 worker_host_roster() {
 	local cluster_dir cluster_file
-	cluster_dir="${CATALYST_CLUSTER_DIR:-$HOME/catalyst/catalyst-cluster}"
+	# Mirror config.mjs getClusterRepoDir: CATALYST_CLUSTER_DIR, else the
+	# catalyst data dir (CATALYST_DIR, default ~/catalyst) + /catalyst-cluster.
+	cluster_dir="${CATALYST_CLUSTER_DIR:-${CATALYST_DIR:-$HOME/catalyst}/catalyst-cluster}"
 	cluster_file="${cluster_dir}/cluster.json"
 	[[ -f $cluster_file ]] || return 0
 	jq -r '.roster[]?' "$cluster_file" 2>/dev/null || true

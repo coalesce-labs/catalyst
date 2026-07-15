@@ -69,9 +69,11 @@ export function stampWorkerLabel({
     // replica.labels returns [] as an authoritative "no labels" answer and
     // undefined on any gate-fail/miss — only undefined falls through.
     let nodes = null;
+    let usedReplica = false;
     const replicaRows = typeof replica?.labels === "function" ? replica.labels(ticket) : undefined;
     if (Array.isArray(replicaRows)) {
       nodes = replicaRows;
+      usedReplica = true;
     } else {
       if (replica) {
         // Loud fallback per the replica-first convention — a silent live read
@@ -115,6 +117,26 @@ export function stampWorkerLabel({
       }
       if (applyRes?.applied) {
         return { stamped: true };
+      }
+      // A replica that is fresh-gated but behind for THIS ticket can be missing
+      // a live foreign worker:* sibling — the apply then hits the server-side
+      // exclusive-group rejection. Retry ONCE from a LIVE read (replica
+      // disabled) so the stale sibling is actually removed before re-adding;
+      // the replica:null recursion cannot recurse again.
+      if (usedReplica && applyRes?.reason === "exclusive-conflict") {
+        log?.warn?.(
+          { ticket, label: desired },
+          "worker-label: exclusive-conflict off a replica-sourced read — retrying from a live read"
+        );
+        return stampWorkerLabel({
+          ticket,
+          hostName,
+          replica: null,
+          readLabelNodes,
+          applyLabel,
+          removeLabel,
+          log,
+        });
       }
       log?.warn?.(
         { ticket, label: desired, reason: applyRes?.reason },
