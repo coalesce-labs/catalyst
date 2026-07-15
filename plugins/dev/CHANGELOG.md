@@ -1,16 +1,21 @@
 # Changelog
 
-## [12.30.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.29.1...catalyst-dev-v12.30.0) (2026-07-15)
+## [12.30.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.29.1...catalyst-dev-v12.30.0)
+
+Jul 15, 2026
+
+<!-- ai-enhanced -->
+
+### Codex Executor & Worker Label Ownership
+
+The daemon can now dispatch phase workers to OpenAI Codex via a new `codex-exec` executor adapter, routed per-phase through `executorByPhase` config with zero behavior change until you explicitly flip a phase to it. Linear boards now show which node owns each in-flight ticket via stamped `worker:<host>` labels — ownership is board-filterable and readable from the local replica without a live Linear call. Both worker-label provisioning paths (`reconcile_worker_host_labels` and `reconcile_worker_status_labels`) are hardened against the current Linear API's `isGroup:true` requirement, which broke fresh-workspace installs; run the setup script on any new node to provision labels cleanly.
 
 
-### Features
+
+### PRs
 
 * **dev:** CTL-1457 codex-exec executor adapter — daemon dispatches phase workers on Codex ([#2639](https://github.com/coalesce-labs/catalyst/issues/2639)) ([1ae616a](https://github.com/coalesce-labs/catalyst/commit/1ae616a42cc311ceb59ab715ed92868dfba9e535))
 * **dev:** CTL-1481 worker:&lt;host&gt; label ownership — Linear board shows which node owns each ticket ([#2650](https://github.com/coalesce-labs/catalyst/issues/2650)) ([47946d7](https://github.com/coalesce-labs/catalyst/commit/47946d7f2fd6953f9e2aed322de032183cb16655))
-
-
-### Bug Fixes
-
 * **dev:** CTL-1481 follow-up — worker group create needs isGroup:true (live API drift) ([#2651](https://github.com/coalesce-labs/catalyst/issues/2651)) ([f6099a9](https://github.com/coalesce-labs/catalyst/commit/f6099a9123f1f84c1dffb2ab6532ab3b16a335e6))
 * **dev:** CTL-1483 mirror isGroup:true fix to reconcile_worker_status_labels ([#2653](https://github.com/coalesce-labs/catalyst/issues/2653)) ([e1d5d0c](https://github.com/coalesce-labs/catalyst/commit/e1d5d0c382675ecffbd84644957941be5ae6c2ee))
 
