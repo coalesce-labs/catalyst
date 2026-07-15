@@ -435,8 +435,33 @@ worker_host_list() {
 build_worker_host_group_create_payload() {
 	local name="$1" color="$2"
 	jq -nc --arg name "$name" --arg color "$color" '{
+    query: "mutation($name: String!, $color: String!) { issueLabelCreate(input: { name: $name, color: $color, isGroup: true }) { success issueLabel { id name } } }",
+    variables: { name: $name, color: $color }
+  }'
+}
+
+# build_worker_host_group_create_payload_plain <name> <color>
+# The pre-drift shape (no isGroup) — the fallback when the API generation
+# rejects the isGroup input field (the CTL-764 #2631-era behavior). See the
+# group-create fallback in reconcile_worker_host_labels.
+build_worker_host_group_create_payload_plain() {
+	local name="$1" color="$2"
+	jq -nc --arg name "$name" --arg color "$color" '{
     query: "mutation($name: String!, $color: String!) { issueLabelCreate(input: { name: $name, color: $color }) { success issueLabel { id name } } }",
     variables: { name: $name, color: $color }
+  }'
+}
+
+# build_worker_host_group_upgrade_payload <labelId>
+# issueLabelUpdate isGroup:true — upgrades an adopted plain parent (a
+# pre-drift partial run, or a customer label adopted by name) so children can
+# attach: the live API now REJECTS issueLabelCreate(parentId:) against a
+# non-group parent ("parent label is not a group", observed 2026-07-15).
+build_worker_host_group_upgrade_payload() {
+	local label_id="$1"
+	jq -nc --arg id "$label_id" '{
+    query: "mutation($id: String!) { issueLabelUpdate(id: $id, input: { isGroup: true }) { success issueLabel { id isGroup } } }",
+    variables: { id: $id }
   }'
 }
 
@@ -504,15 +529,21 @@ reconcile_worker_host_labels() {
 	labels_json=$(echo "$resp" | jq -c '.data.issueLabels.nodes // []')
 
 	# Find the existing workspace parent by name at the top level (parent == null).
-	# Same #2631 rationale as reconcile_worker_status_labels: match on parent==null,
-	# NOT isGroup==true, so a partial-failure re-run (parent created, no child
-	# attached yet) is found rather than re-created.
-	local group_id
+	# Same #2631 rationale as reconcile_worker_status_labels: match on parent==null
+	# (not isGroup==true) so a partial-failure prior run — or a customer's plain
+	# label adopted by name — is found rather than re-created.
+	local group_id group_is_group
 	group_id=$(echo "$labels_json" | jq -r --arg n "$group_name" \
 		'.[] | select(.name == $n and .parent == null) | .id // empty' | head -1)
+	group_is_group=$(echo "$labels_json" | jq -r --arg n "$group_name" \
+		'.[] | select(.name == $n and .parent == null) | .isGroup // false' | head -1)
 
 	if [[ -z $group_id ]]; then
-		# Create the group (workspace-scoped, plain label — no isGroup, no teamId).
+		# Create the group with isGroup:true — the live API REJECTS attaching a
+		# child to a non-group parent ("parent label is not a group", observed
+		# 2026-07-15; inverts the CTL-764 #2631-era behavior where isGroup was
+		# itself rejected). If THIS API generation rejects the isGroup field,
+		# fall back to the pre-drift plain create.
 		local group_payload group_resp
 		group_payload=$(build_worker_host_group_create_payload "$group_name" "$(worker_host_color)")
 		group_resp=$(linear_graphql_post "$token" "$group_payload")
@@ -523,13 +554,39 @@ reconcile_worker_host_labels() {
 		if echo "$group_resp" | jq -e '.errors' >/dev/null 2>&1; then
 			local group_err
 			group_err=$(echo "$group_resp" | jq -r '.errors[0].message // "unknown error"')
-			echo "WARNING: reconcile_worker_host_labels: could not create group '${group_name}': ${group_err}" >&2
-			return 0
+			if [[ $group_err == *isGroup* ]]; then
+				echo "reconcile_worker_host_labels: isGroup rejected by this API generation — retrying plain create" >&2
+				group_payload=$(build_worker_host_group_create_payload_plain "$group_name" "$(worker_host_color)")
+				group_resp=$(linear_graphql_post "$token" "$group_payload")
+				if ! jq -e . >/dev/null 2>&1 <<<"$group_resp" || echo "$group_resp" | jq -e '.errors' >/dev/null 2>&1; then
+					group_err=$(echo "$group_resp" | jq -r '.errors[0].message // "transport/non-JSON"' 2>/dev/null)
+					echo "WARNING: reconcile_worker_host_labels: could not create group '${group_name}': ${group_err}" >&2
+					return 0
+				fi
+			else
+				echo "WARNING: reconcile_worker_host_labels: could not create group '${group_name}': ${group_err}" >&2
+				return 0
+			fi
 		fi
 		group_id=$(echo "$group_resp" | jq -r '.data.issueLabelCreate.issueLabel.id // empty')
 		echo "reconcile_worker_host_labels: created group '${group_name}' (id: ${group_id})"
 	else
 		echo "reconcile_worker_host_labels: group '${group_name}' already present (id: ${group_id})"
+		if [[ $group_is_group != "true" ]]; then
+			# Adopted plain parent (pre-drift partial run or a same-name customer
+			# label): upgrade it to a group so the child creates below can attach.
+			# WARN-and-continue on failure — the per-child WARNs then surface it.
+			local upgrade_payload upgrade_resp
+			upgrade_payload=$(build_worker_host_group_upgrade_payload "$group_id")
+			upgrade_resp=$(linear_graphql_post "$token" "$upgrade_payload")
+			if ! jq -e . >/dev/null 2>&1 <<<"$upgrade_resp" || echo "$upgrade_resp" | jq -e '.errors' >/dev/null 2>&1; then
+				local upgrade_err
+				upgrade_err=$(echo "$upgrade_resp" | jq -r '.errors[0].message // "transport/non-JSON"' 2>/dev/null)
+				echo "WARNING: reconcile_worker_host_labels: could not upgrade '${group_name}' to a group: ${upgrade_err}" >&2
+			else
+				echo "reconcile_worker_host_labels: upgraded plain '${group_name}' to a group (isGroup:true)"
+			fi
+		fi
 	fi
 
 	# Create only missing children (one per host, name "worker:<host>").

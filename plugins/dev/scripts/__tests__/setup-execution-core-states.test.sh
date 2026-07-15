@@ -1077,6 +1077,88 @@ run "child create-failure: worker:host-a is attempted" \
 run "child create-failure: worker:host-b is attempted" \
 	bash -c "grep 'issueLabelCreate' '$WH_T8_LOG' | grep -q 'worker:host-b'"
 
+# Test 9: adopted PLAIN parent (isGroup:false) is upgraded via issueLabelUpdate
+# before children attach — the live API rejects child creates against a
+# non-group parent ("parent label is not a group", observed 2026-07-15).
+WH_T9_BIN="${SCRATCH}/wh-t9/bin"
+WH_T9_LOG="${SCRATCH}/wh-t9/req.log"
+mkdir -p "${SCRATCH}/wh-t9" "$WH_T9_BIN"
+: >"$WH_T9_LOG"
+WH_T9_NODES='[{"id":"grp-plain","name":"worker","isGroup":false,"parent":null}]'
+cat >"${WH_T9_BIN}/curl" <<SCRIPT
+#!/usr/bin/env bash
+body=""
+for a in "\$@"; do case "\$a" in {*) body="\$a";; esac; done
+if [ -z "\$body" ]; then body="\$(cat 2>/dev/null)"; fi
+echo "\$body" >> "${WH_T9_LOG}"
+case "\$body" in
+  *issueLabelUpdate*) echo '{"data":{"issueLabelUpdate":{"success":true,"issueLabel":{"id":"grp-plain","isGroup":true}}}}' ;;
+  *issueLabelCreate*) echo '{"data":{"issueLabelCreate":{"success":true,"issueLabel":{"id":"new-lbl-id","name":"x"}}}}' ;;
+  *) echo '{"data":{"issueLabels":{"nodes":${WH_T9_NODES}}}}' ;;
+esac
+exit 0
+SCRIPT
+chmod +x "${WH_T9_BIN}/curl"
+(
+	# shellcheck source=/dev/null
+	source "$SCRIPT"
+	PATH="$WH_T9_BIN:$PATH"
+	CATALYST_HOST_NAME="testhost"
+	CATALYST_CLUSTER_DIR="${SCRATCH}/wh-t9-nocluster"
+	dry_run=0
+	reconcile_worker_host_labels "fake-token"
+) >"${SCRATCH}/wh-t9-out" 2>&1
+WH_T9_RC=$?
+
+run "plain-parent upgrade: issues exactly one issueLabelUpdate with isGroup" \
+	bash -c "count=\$(grep -c 'issueLabelUpdate' '$WH_T9_LOG' 2>/dev/null || echo 0); [ \"\$count\" = '1' ] && grep 'issueLabelUpdate' '$WH_T9_LOG' | grep -q 'isGroup'"
+
+run "plain-parent upgrade: child create still attempted after the upgrade" \
+	bash -c "grep 'issueLabelCreate' '$WH_T9_LOG' | grep -q 'worker:testhost'"
+
+run "plain-parent upgrade: returns 0" \
+	bash -c "[ '$WH_T9_RC' = '0' ]"
+
+# Test 10: an API generation that REJECTS the isGroup input field (the
+# CTL-764 #2631-era behavior) gets the plain-create fallback.
+WH_T10_BIN="${SCRATCH}/wh-t10/bin"
+WH_T10_LOG="${SCRATCH}/wh-t10/req.log"
+mkdir -p "${SCRATCH}/wh-t10" "$WH_T10_BIN"
+: >"$WH_T10_LOG"
+cat >"${WH_T10_BIN}/curl" <<SCRIPT
+#!/usr/bin/env bash
+body=""
+for a in "\$@"; do case "\$a" in {*) body="\$a";; esac; done
+if [ -z "\$body" ]; then body="\$(cat 2>/dev/null)"; fi
+echo "\$body" >> "${WH_T10_LOG}"
+case "\$body" in
+  *issueLabelCreate*isGroup*) echo '{"errors":[{"message":"Field \\"isGroup\\" is not defined by type IssueLabelCreateInput"}]}' ;;
+  *issueLabelCreate*) echo '{"data":{"issueLabelCreate":{"success":true,"issueLabel":{"id":"new-lbl-id","name":"x"}}}}' ;;
+  *) echo '{"data":{"issueLabels":{"nodes":[]}}}' ;;
+esac
+exit 0
+SCRIPT
+chmod +x "${WH_T10_BIN}/curl"
+(
+	# shellcheck source=/dev/null
+	source "$SCRIPT"
+	PATH="$WH_T10_BIN:$PATH"
+	CATALYST_HOST_NAME="testhost"
+	CATALYST_CLUSTER_DIR="${SCRATCH}/wh-t10-nocluster"
+	dry_run=0
+	reconcile_worker_host_labels "fake-token"
+) >"${SCRATCH}/wh-t10-out" 2>&1
+WH_T10_RC=$?
+
+run "isGroup-rejected fallback: 3 issueLabelCreate calls (isGroup attempt + plain retry + child)" \
+	bash -c "count=\$(grep -c 'issueLabelCreate' '$WH_T10_LOG' 2>/dev/null || echo 0); [ \"\$count\" = '3' ]"
+
+run "isGroup-rejected fallback: the child create still lands (worker:testhost)" \
+	bash -c "grep 'issueLabelCreate' '$WH_T10_LOG' | grep -q 'worker:testhost'"
+
+run "isGroup-rejected fallback: returns 0" \
+	bash -c "[ '$WH_T10_RC' = '0' ]"
+
 echo ""
 echo "Results: ${PASSES} passed, ${FAILURES} failed"
 [ "$FAILURES" = "0" ]
