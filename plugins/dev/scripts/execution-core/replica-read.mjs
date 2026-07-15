@@ -116,6 +116,20 @@ const OWNERSHIP_SELECT = `SELECT assignee_id, delegate_id, delegate_name FROM is
 const RELATIONS_FORWARD_SELECT = `SELECT type, related_identifier FROM relations WHERE issue_identifier = ?`;
 const RELATIONS_INVERSE_SELECT = `SELECT type, issue_identifier FROM relations WHERE related_identifier = ?`;
 
+// labels(identifier) SELECTs (CTL-1481 — the worker-label visibility projection's
+// replica-backed read). issue_labels keys off the issue's internal PK, not its
+// display identifier, so this resolves identifier → id first (same resolution
+// buildEligibleSelect's label-EXISTS join needs, just materialized as a row
+// instead of tested for existence).
+const LABELS_ISSUE_ID_SELECT = `SELECT id FROM issues WHERE identifier = ? AND removed_at IS NULL LIMIT 1`;
+// labels.removed_at IS filtered here — a deliberate NEW decision for this
+// accessor. No existing SELECT in this file filters labels.removed_at (the
+// EXISTS join in buildEligibleSelect only tests `l.name = ?`, tombstone-blind),
+// but a caller LISTING a ticket's labels must never see a removed one: a
+// tombstoned label name can be recycled/reused by a later live label, so
+// surfacing it here would misreport what's actually attached today.
+const LABELS_SELECT = `SELECT l.id, l.name FROM issue_labels il JOIN labels l ON l.id = il.label_id WHERE il.issue_id = ? AND l.removed_at IS NULL ORDER BY l.name`;
+
 // CTL-1397 (P1 fix) — the SEED-COMPLETENESS gate. The mtime gate
 // (isReplicaFresh) proves the cloud-sync writer is LIVE; it does NOT prove the
 // seed is COMPLETE. The writer's forced re-seed (the exact quota/outage-recovery
@@ -428,5 +442,48 @@ export function createReplicaReader({ dbPath = getReplicaDbPath() } = {}) {
     }
   };
 
-  return { lookup, freshness, titles, eligible, ownership, close: dropHandle };
+  // labels(id) → [{ id, name }] | undefined  (CTL-1481 — worker-label visibility
+  // projection read). The replica-backed accessor a `worker:<host>` label reader
+  // can consult instead of a live linearis label fetch. Gated IDENTICALLY to
+  // eligible()/ownership(): writer LIVENESS (isReplicaFresh) + the seed-completeness
+  // cursor, both resolved inside one deferred read snapshot. ANY gate-fail, a MISS
+  // (absent/removed issue), or any throw → undefined — the caller falls through to
+  // a live read, never trusts a stale/partial label list.
+  //
+  //   HIT (issue exists, ≥1 live label attached) → [{id, name}, ...], sorted by name.
+  //   HIT (issue exists, zero labels attached)    → [] — a DEFINED, authoritative
+  //     empty answer (not a miss); the caller must NOT treat it as "unknown".
+  //   MISS/gate-fail/throw                        → undefined.
+  //
+  //   Gate order:
+  //     1. !isReplicaFresh    → undefined  (dead/stale writer)
+  //     2. seed cursor absent → undefined  (mid-reseed)
+  //     3. no issue row       → undefined  (absent/removed; MISS)
+  //     4. HIT                → [{id, name}] (possibly empty)
+  const labels = (identifier) => {
+    if (!identifier) return undefined;
+    // 1. LIVENESS — a dead/stale writer must never serve a label list.
+    if (!isReplicaFresh(dbPath)) return undefined;
+    try {
+      const handle = open();
+      // 2+3+4 in ONE deferred read snapshot (same shape as ownership()): the
+      // seed-completeness cursor, the identifier→id resolution, and the label
+      // rows come from one consistent snapshot so a forced re-seed can't slip
+      // between the gate and the reads.
+      const rows = handle.transaction(() => {
+        if (!handle.prepare(SEED_COMPLETE_SELECT).get()) return undefined; // mid-reseed
+        const issue = handle.prepare(LABELS_ISSUE_ID_SELECT).get(identifier);
+        if (!issue) return undefined; // absent/removed → MISS
+        return handle.prepare(LABELS_SELECT).all(issue.id);
+      })();
+      if (!rows) return undefined; // seed-gate fail / absent / removed → MISS
+      return rows.map((row) => ({ id: row.id, name: row.name }));
+    } catch {
+      // Drop the handle so a later call re-opens fresh (DB may be re-seeded).
+      dropHandle();
+      return undefined;
+    }
+  };
+
+  return { lookup, freshness, titles, eligible, ownership, labels, close: dropHandle };
 }

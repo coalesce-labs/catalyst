@@ -2375,6 +2375,9 @@ describe("CTL-862 — HRW ownership + claim-on-dispatch (monitor dispatchTriage)
       hosts: ROSTER,
       hostName: OWNER,
       claimDispatch,
+      // CTL-1481: stub the label-stamp seam — this test's subject is HRW/claim
+      // dispatch, not the label write, and a won multi-host claim now fires it.
+      stampWorkerLabel: () => ({ stamped: true }),
       applyTriageStatus: () => ({ applied: false, verified: false, from_state: null, to_state: null, reason: null }),
       appendEvent: () => {},
     });
@@ -2430,6 +2433,9 @@ describe("CTL-862 — HRW ownership + claim-on-dispatch (monitor dispatchTriage)
       hosts: ROSTER,
       hostName: OWNER,
       claimDispatch,
+      // CTL-1481: stub the label-stamp seam — this test's subject is HRW/claim
+      // dispatch, not the label write, and a won multi-host claim now fires it.
+      stampWorkerLabel: () => ({ stamped: true }),
       applyTriageStatus: () => ({ applied: false, verified: false, from_state: null, to_state: null, reason: null }),
       appendEvent: () => {},
       readMaxParallelFn: () => 5,
@@ -2474,6 +2480,9 @@ describe("CTL-1028 — triage forwards + persists cluster generation (monitor di
       hosts: ROSTER,
       hostName: OWNER,
       claimDispatch,
+      // CTL-1481: stub the label-stamp seam — this test's subject is
+      // clusterGeneration forwarding, not the label write.
+      stampWorkerLabel: () => ({ stamped: true }),
       applyTriageStatus: () => ({ applied: false, verified: false, from_state: null, to_state: null, reason: null }),
       appendEvent: () => {},
     });
@@ -2513,6 +2522,9 @@ describe("CTL-1028 — triage forwards + persists cluster generation (monitor di
         hosts: ROSTER,
         hostName: OWNER,
         claimDispatch,
+        // CTL-1481: stub the label-stamp seam — this test's subject is the
+        // cluster-generation persist, not the label write.
+        stampWorkerLabel: () => ({ stamped: true }),
         applyTriageStatus: () => ({ applied: false, verified: false, from_state: null, to_state: null, reason: null }),
         appendEvent: () => {},
       });

@@ -60,6 +60,9 @@ import {
 } from "./config.mjs";
 import { ownedBy } from "./hrw.mjs";
 import { readPeerHeartbeats } from "./cluster-heartbeat.mjs";
+// CTL-1481: the canonical worker-ownership label names — imported (not
+// re-hardcoded) so the doctor can never drift from what the stamper writes.
+import { WORKER_LABEL_GROUP, WORKER_LABEL_PREFIX } from "./worker-label.mjs";
 // CTL-1367 item 9: reuse the single-source-of-truth subscription-auth predicate
 // (sdk-run-phase-agent.mjs imports only node:* + config.mjs — no bun: protocol —
 // so it is safe to pull into this node-runnable doctor).
@@ -2155,6 +2158,94 @@ export function checkConfigScopeLeak(deps = {}) {
   return checks;
 }
 
+// ─── CTL-1481: worker:<host> label ownership visibility advisory ────────────
+
+// defaultLinearGraphQLPost — minimal fetch-based Linear GraphQL POST, mirroring
+// checkBotCredentials' inline probe above. Injectable via deps.post so tests
+// never hit the network; throws on a non-2xx response (caught by the caller).
+async function defaultLinearGraphQLPost(query, token) {
+  const res = await fetch(LINEAR_GQL, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: token },
+    body: JSON.stringify({ query }),
+    signal: AbortSignal.timeout(5000),
+  });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return res.json();
+}
+
+// checkWorkerLabels — CTL-1481. Advisory health of the workspace `worker`
+// label group + its `worker:<host>` children (the best-effort claim-win
+// VISIBILITY PROJECTION stamped by worker-label.mjs — never the claim
+// arbiter; the fence CAS in cluster-claim.mjs stays the source of truth).
+// EVERY condition is WARN/INFO/PASS, NEVER FAIL: doctor's exit code is the
+// FAIL count and gates catalyst-join activation — a projection label that
+// hasn't been provisioned yet must never block a node. Doctor does NOT
+// mutate Linear here (repo convention: setup-execution-core-states.sh is the
+// sole writer); this check only reports drift and points at the remediation.
+export async function checkWorkerLabels(deps = {}) {
+  const {
+    getRoster = getClusterHosts,
+    linearToken = () => process.env.LINEAR_API_TOKEN ?? process.env.LINEAR_API_KEY ?? "",
+    post = defaultLinearGraphQLPost,
+  } = deps;
+
+  const REMEDIATION = "run plugins/dev/scripts/setup-execution-core-states.sh";
+
+  const roster = getRoster();
+  // Single-host (or empty roster): no ownership ambiguity to visualize.
+  if (!Array.isArray(roster) || roster.length <= 1) {
+    return [mkCheck("worker-labels", STATUS.INFO, "single-host — worker ownership labels not applicable")];
+  }
+
+  const token = linearToken();
+  if (!token) {
+    return [
+      mkCheck("worker-labels", STATUS.INFO, "no LINEAR_API_TOKEN / LINEAR_API_KEY — skipping worker-label check"),
+    ];
+  }
+
+  const QUERY = `query { issueLabels(filter: {team: {null: true}}, first: 250) { nodes { id name parent { id } } } }`;
+  let nodes;
+  try {
+    const json = await post(QUERY, token);
+    if (json?.errors?.length) {
+      return [mkCheck("worker-labels", STATUS.WARN, `Linear GraphQL error: ${JSON.stringify(json.errors)}`)];
+    }
+    nodes = json?.data?.issueLabels?.nodes;
+    if (!Array.isArray(nodes)) {
+      return [mkCheck("worker-labels", STATUS.WARN, "unexpected issueLabels response shape from Linear")];
+    }
+  } catch (err) {
+    return [mkCheck("worker-labels", STATUS.WARN, `Linear unreachable: ${err?.message ?? err}`)];
+  }
+
+  // #2631-safe match: the exclusive-group marker is parent==null + the group
+  // name, NOT isGroup (drift-prone — see the CTL-1481 write-test verdict).
+  const group = nodes.find((n) => n?.name === WORKER_LABEL_GROUP && n?.parent == null);
+  if (!group) {
+    return [
+      mkCheck(
+        "worker-labels",
+        STATUS.WARN,
+        `workspace label group "${WORKER_LABEL_GROUP}" not found — ${REMEDIATION}`,
+      ),
+    ];
+  }
+
+  const checks = [];
+  for (const host of roster) {
+    const childName = `${WORKER_LABEL_PREFIX}${host}`;
+    const child = nodes.find((n) => n?.name === childName && n?.parent?.id === group.id);
+    checks.push(
+      child
+        ? mkCheck(`worker-label:${host}`, STATUS.PASS, `label "${childName}" present under group "${WORKER_LABEL_GROUP}"`)
+        : mkCheck(`worker-label:${host}`, STATUS.WARN, `label "${childName}" missing — ${REMEDIATION}`),
+    );
+  }
+  return checks;
+}
+
 // ─── CTL-1375: repo-icon token-scope advisory ────────────────────────────────
 
 // _ownerRepoFromRepoRoot — extract "owner/repo" from a repoRoot filesystem path that
@@ -3139,6 +3230,7 @@ export function checksForClass(nc, opts = {}) {
       () => checkClusterSecretFreshness(), // CTL-1393: warn if running on stale rotated secrets (advisory)
       () => checkCloudSync(), // CTL-1394: developer nodes read Linear from the local replica too (advisory)
       () => checkConfigScopeLeak(), // advisory
+      () => checkWorkerLabels(), // CTL-1481: worker:<host> label is a best-effort visibility projection, never the claim arbiter — advisory only
     ];
   }
 
@@ -3196,6 +3288,7 @@ export function checksForClass(nc, opts = {}) {
     () => checkConfigScopeLeak(), // CTL-1214: committed Layer-1 .catalyst/config.json must not carry node/cluster scope (roster/orchestration/feedback/sweep/repoColors/hosts.json)
     () => checkRepoIconTokenScope(), // CTL-1375: monitor daemon's gh token can read configured private repos' contents (else favicons fall back to the org avatar) — advisory (never FAIL)
     () => checkMonitorProductionBuild(), // CTL-1372: warn if the local monitor serves a dev-build React bundle (leaks via performance.measure) — advisory (never FAIL)
+    () => checkWorkerLabels(), // CTL-1481: worker:<host> label is a best-effort visibility projection, never the claim arbiter — advisory only
   ];
 }
 
