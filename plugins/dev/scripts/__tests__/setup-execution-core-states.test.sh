@@ -767,6 +767,316 @@ run "plain-label parent: found by name+parent==null, creates the 4 children (4 i
 run "plain-label parent: never re-creates the group (every create carries parentId)" \
 	bash -c "! grep 'issueLabelCreate' '$WS_T6_LOG' | grep -qv 'parentId'"
 
+# ─── Phase 2 (CTL-1481): worker:<host> label group ───────────────────────────
+# Unit tests for pure helpers (script already sourced above).
+
+run "worker_host_group_name is 'worker'" \
+	bash -c "source '$SCRIPT'; [ \"\$(worker_host_group_name)\" = 'worker' ]"
+
+run "worker_host_color: returns a single hex color" \
+	bash -c "source '$SCRIPT'; echo \"\$(worker_host_color)\" | grep -qE '^#[0-9a-fA-F]{6}\$'"
+
+run "worker_host_self_name: CATALYST_HOST_NAME env wins" \
+	bash -c "source '$SCRIPT'; [ \"\$(CATALYST_HOST_NAME=envhost worker_host_self_name)\" = 'envhost' ]"
+
+WH_LAYER2_DIR="${SCRATCH}/wh-layer2"
+mkdir -p "$WH_LAYER2_DIR"
+cat >"${WH_LAYER2_DIR}/config.json" <<'EOF'
+{"catalyst":{"host":{"name":"layer2host"}}}
+EOF
+
+run "worker_host_self_name: Layer-2 catalyst.host.name used when env unset" \
+	bash -c "source '$SCRIPT'; unset CATALYST_HOST_NAME; [ \"\$(CATALYST_LAYER2_CONFIG_FILE='${WH_LAYER2_DIR}/config.json' worker_host_self_name)\" = 'layer2host' ]"
+
+run "worker_host_self_name: falls back to hostname when env+layer2 absent" \
+	bash -c "source '$SCRIPT'; unset CATALYST_HOST_NAME; out=\$(CATALYST_LAYER2_CONFIG_FILE='${WH_LAYER2_DIR}/missing.json' worker_host_self_name); [ -n \"\$out\" ]"
+
+run "worker_host_roster: missing cluster.json -> empty" \
+	bash -c "source '$SCRIPT'; [ -z \"\$(CATALYST_CLUSTER_DIR='${SCRATCH}/wh-missing-cluster' worker_host_roster)\" ]"
+
+WH_MALFORMED_DIR="${SCRATCH}/wh-malformed-cluster"
+mkdir -p "$WH_MALFORMED_DIR"
+echo '{not valid json' >"${WH_MALFORMED_DIR}/cluster.json"
+
+run "worker_host_roster: malformed cluster.json -> empty (fail-soft)" \
+	bash -c "source '$SCRIPT'; [ -z \"\$(CATALYST_CLUSTER_DIR='${WH_MALFORMED_DIR}' worker_host_roster)\" ]"
+
+WH_ROSTER_DIR="${SCRATCH}/wh-roster"
+mkdir -p "$WH_ROSTER_DIR"
+cat >"${WH_ROSTER_DIR}/cluster.json" <<'EOF'
+{"roster": ["mini", "mini-2"]}
+EOF
+
+run "worker_host_roster: reads roster array" \
+	bash -c "source '$SCRIPT'; names=\$(CATALYST_CLUSTER_DIR='${WH_ROSTER_DIR}' worker_host_roster | sort | tr '\n' ' '); [ \"\$names\" = 'mini mini-2 ' ]"
+
+run "worker_host_list: dedupes roster + self when self is already in the roster" \
+	bash -c "source '$SCRIPT'; names=\$(CATALYST_CLUSTER_DIR='${WH_ROSTER_DIR}' CATALYST_HOST_NAME='mini' worker_host_list | sort | tr '\n' ' '); [ \"\$names\" = 'mini mini-2 ' ]"
+
+run "worker_host_list: unions roster + a distinct self host" \
+	bash -c "source '$SCRIPT'; names=\$(CATALYST_CLUSTER_DIR='${WH_ROSTER_DIR}' CATALYST_HOST_NAME='laptop' worker_host_list | sort | tr '\n' ' '); [ \"\$names\" = 'laptop mini mini-2 ' ]"
+
+# make_worker_host_curl <bin_dir> <labels_nodes_json|ERROR> <create_ok> <log_file>
+# Generic label-list fixture (labels_nodes_json is the raw `nodes` array
+# content, or the literal string ERROR to make the initial query fail).
+make_worker_host_curl() {
+	local bin_dir="$1" labels_nodes="$2" create_ok="${3:-true}" log="${4:-/dev/null}"
+	mkdir -p "$bin_dir"
+	local create_resp query_resp
+	if [ "$create_ok" = "true" ]; then
+		create_resp='{"data":{"issueLabelCreate":{"success":true,"issueLabel":{"id":"new-lbl-id","name":"x"}}}}'
+	else
+		create_resp='{"errors":[{"message":"insufficient permissions"}]}'
+	fi
+	if [ "$labels_nodes" = "ERROR" ]; then
+		query_resp='{"errors":[{"message":"api error"}]}'
+	else
+		query_resp="{\"data\":{\"issueLabels\":{\"nodes\":${labels_nodes}}}}"
+	fi
+	cat >"${bin_dir}/curl" <<SCRIPT
+#!/usr/bin/env bash
+body=""
+for a in "\$@"; do case "\$a" in {*) body="\$a";; esac; done
+if [ -z "\$body" ]; then body="\$(cat 2>/dev/null)"; fi
+echo "\$body" >> "${log}"
+case "\$body" in
+  *issueLabelCreate*) echo '${create_resp}' ;;
+  *) echo '${query_resp}' ;;
+esac
+exit 0
+SCRIPT
+	chmod +x "${bin_dir}/curl"
+}
+
+# Test 1: fresh workspace (empty) + single host (self only) -> 1 group create + 1 child create = 2
+WH_T1_BIN="${SCRATCH}/wh-t1/bin"
+WH_T1_LOG="${SCRATCH}/wh-t1/req.log"
+mkdir -p "${SCRATCH}/wh-t1"
+: >"$WH_T1_LOG"
+make_worker_host_curl "$WH_T1_BIN" "[]" "true" "$WH_T1_LOG"
+(
+	# shellcheck source=/dev/null
+	source "$SCRIPT"
+	PATH="$WH_T1_BIN:$PATH"
+	CATALYST_HOST_NAME="testhost"
+	CATALYST_CLUSTER_DIR="${SCRATCH}/wh-t1-nocluster"
+	dry_run=0
+	reconcile_worker_host_labels "fake-token"
+) >"${SCRATCH}/wh-t1-out" 2>&1
+WH_T1_RC=$?
+
+run "fresh workspace: issues exactly 2 issueLabelCreate calls (1 group + 1 child)" \
+	bash -c "count=\$(grep -c 'issueLabelCreate' '$WH_T1_LOG' 2>/dev/null || echo 0); [ \"\$count\" = '2' ]"
+
+run "fresh workspace: the child create is for worker:testhost" \
+	bash -c "grep 'issueLabelCreate' '$WH_T1_LOG' | grep -q 'worker:testhost'"
+
+run "fresh workspace: returns 0" \
+	bash -c "[ '$WH_T1_RC' = '0' ]"
+
+# Test 2: idempotent (group + the self child already present) -> 0 issueLabelCreate calls
+WH_T2_BIN="${SCRATCH}/wh-t2/bin"
+WH_T2_LOG="${SCRATCH}/wh-t2/req.log"
+mkdir -p "${SCRATCH}/wh-t2"
+: >"$WH_T2_LOG"
+WH_T2_NODES='[{"id":"grp-w","name":"worker","isGroup":true,"parent":null},{"id":"lbl-th","name":"worker:testhost","isGroup":false,"parent":{"id":"grp-w"}}]'
+make_worker_host_curl "$WH_T2_BIN" "$WH_T2_NODES" "true" "$WH_T2_LOG"
+(
+	# shellcheck source=/dev/null
+	source "$SCRIPT"
+	PATH="$WH_T2_BIN:$PATH"
+	CATALYST_HOST_NAME="testhost"
+	CATALYST_CLUSTER_DIR="${SCRATCH}/wh-t2-nocluster"
+	dry_run=0
+	reconcile_worker_host_labels "fake-token"
+) >"${SCRATCH}/wh-t2-out" 2>&1
+WH_T2_RC=$?
+
+run "idempotent: zero issueLabelCreate calls when all present" \
+	bash -c "! grep -q 'issueLabelCreate' '$WH_T2_LOG'"
+
+run "idempotent: returns 0" \
+	bash -c "[ '$WH_T2_RC' = '0' ]"
+
+# Test 3: partial — 2 hosts (self + 1 roster host); group + self child present,
+# roster host's child missing -> exactly 1 issueLabelCreate (the missing child)
+WH_T3_BIN="${SCRATCH}/wh-t3/bin"
+WH_T3_LOG="${SCRATCH}/wh-t3/req.log"
+mkdir -p "${SCRATCH}/wh-t3"
+: >"$WH_T3_LOG"
+WH_T3_CLUSTER="${SCRATCH}/wh-t3-cluster"
+mkdir -p "$WH_T3_CLUSTER"
+cat >"${WH_T3_CLUSTER}/cluster.json" <<'EOF'
+{"roster": ["host-b"]}
+EOF
+WH_T3_NODES='[{"id":"grp-w","name":"worker","isGroup":true,"parent":null},{"id":"lbl-a","name":"worker:host-a","isGroup":false,"parent":{"id":"grp-w"}}]'
+make_worker_host_curl "$WH_T3_BIN" "$WH_T3_NODES" "true" "$WH_T3_LOG"
+(
+	# shellcheck source=/dev/null
+	source "$SCRIPT"
+	PATH="$WH_T3_BIN:$PATH"
+	CATALYST_HOST_NAME="host-a"
+	CATALYST_CLUSTER_DIR="$WH_T3_CLUSTER"
+	dry_run=0
+	reconcile_worker_host_labels "fake-token"
+) >"${SCRATCH}/wh-t3-out" 2>&1
+
+run "partial: creates only the missing child (1 issueLabelCreate)" \
+	bash -c "count=\$(grep -c 'issueLabelCreate' '$WH_T3_LOG' 2>/dev/null || echo 0); [ \"\$count\" = '1' ]"
+
+run "partial: the one create is for worker:host-b" \
+	bash -c "grep 'issueLabelCreate' '$WH_T3_LOG' | grep -q 'worker:host-b'"
+
+# Test 4: Linear error on the labels query -> WARNING printed, returns 0
+WH_T4_BIN="${SCRATCH}/wh-t4/bin"
+WH_T4_LOG="${SCRATCH}/wh-t4/req.log"
+mkdir -p "${SCRATCH}/wh-t4"
+: >"$WH_T4_LOG"
+make_worker_host_curl "$WH_T4_BIN" "ERROR" "true" "$WH_T4_LOG"
+WH_T4_OUT="${SCRATCH}/wh-t4-out"
+(
+	# shellcheck source=/dev/null
+	source "$SCRIPT"
+	PATH="$WH_T4_BIN:$PATH"
+	CATALYST_HOST_NAME="testhost"
+	CATALYST_CLUSTER_DIR="${SCRATCH}/wh-t4-nocluster"
+	dry_run=0
+	reconcile_worker_host_labels "fake-token"
+) >"$WH_T4_OUT" 2>&1
+WH_T4_RC=$?
+
+run "query error: WARNING is printed" \
+	bash -c "grep -qi 'warning' '$WH_T4_OUT'"
+
+run "query error: returns 0 (never alters exit codes)" \
+	bash -c "[ '$WH_T4_RC' = '0' ]"
+
+# Test 5: --dry-run (dry_run=1) -> no issueLabelCreate mutations, reports intent
+WH_T5_BIN="${SCRATCH}/wh-t5/bin"
+WH_T5_LOG="${SCRATCH}/wh-t5/req.log"
+mkdir -p "${SCRATCH}/wh-t5"
+: >"$WH_T5_LOG"
+make_worker_host_curl "$WH_T5_BIN" "[]" "true" "$WH_T5_LOG"
+(
+	# shellcheck source=/dev/null
+	source "$SCRIPT"
+	PATH="$WH_T5_BIN:$PATH"
+	CATALYST_HOST_NAME="testhost"
+	CATALYST_CLUSTER_DIR="${SCRATCH}/wh-t5-nocluster"
+	dry_run=1
+	reconcile_worker_host_labels "fake-token"
+) >"${SCRATCH}/wh-t5-out" 2>&1
+
+run "--dry-run: no issueLabelCreate mutations issued" \
+	bash -c "! grep -q 'issueLabelCreate' '$WH_T5_LOG'"
+
+run "--dry-run: reports intent (mentions worker or dry-run)" \
+	bash -c "grep -qiE 'dry.run|DRY|worker' '${SCRATCH}/wh-t5-out'"
+
+# Test 6 (plain-parent adoption): the 'worker' parent exists as a plain label
+# (isGroup false, no children yet). Must be found by name+parent==null — not
+# re-created — and only the missing self child gets created.
+WH_T6_BIN="${SCRATCH}/wh-t6/bin"
+WH_T6_LOG="${SCRATCH}/wh-t6/req.log"
+mkdir -p "${SCRATCH}/wh-t6"
+: >"$WH_T6_LOG"
+WH_T6_NODES='[{"id":"grp-w","name":"worker","isGroup":false,"parent":null}]'
+make_worker_host_curl "$WH_T6_BIN" "$WH_T6_NODES" "true" "$WH_T6_LOG"
+(
+	# shellcheck source=/dev/null
+	source "$SCRIPT"
+	PATH="$WH_T6_BIN:$PATH"
+	CATALYST_HOST_NAME="testhost"
+	CATALYST_CLUSTER_DIR="${SCRATCH}/wh-t6-nocluster"
+	dry_run=0
+	reconcile_worker_host_labels "fake-token"
+) >"${SCRATCH}/wh-t6-out" 2>&1
+
+run "plain-label parent: found by name+parent==null, creates only the 1 missing child" \
+	bash -c "count=\$(grep -c 'issueLabelCreate' '$WH_T6_LOG' 2>/dev/null || echo 0); [ \"\$count\" = '1' ]"
+
+run "plain-label parent: never re-creates the group (the one create carries parentId)" \
+	bash -c "grep 'issueLabelCreate' '$WH_T6_LOG' | grep -q 'parentId'"
+
+# Test 7 (roster-source coverage): CATALYST_CLUSTER_DIR fixture roster
+# ["mini","mini-2"] + CATALYST_HOST_NAME=laptop -> children worker:mini,
+# worker:mini-2, worker:laptop (1 group + 3 children = 4 issueLabelCreate).
+WH_T7_BIN="${SCRATCH}/wh-t7/bin"
+WH_T7_LOG="${SCRATCH}/wh-t7/req.log"
+mkdir -p "${SCRATCH}/wh-t7"
+: >"$WH_T7_LOG"
+WH_T7_CLUSTER="${SCRATCH}/wh-t7-cluster"
+mkdir -p "$WH_T7_CLUSTER"
+cat >"${WH_T7_CLUSTER}/cluster.json" <<'EOF'
+{"roster": ["mini", "mini-2"]}
+EOF
+make_worker_host_curl "$WH_T7_BIN" "[]" "true" "$WH_T7_LOG"
+(
+	# shellcheck source=/dev/null
+	source "$SCRIPT"
+	PATH="$WH_T7_BIN:$PATH"
+	CATALYST_HOST_NAME="laptop"
+	CATALYST_CLUSTER_DIR="$WH_T7_CLUSTER"
+	dry_run=0
+	reconcile_worker_host_labels "fake-token"
+) >"${SCRATCH}/wh-t7-out" 2>&1
+
+run "roster fixture: issues 4 issueLabelCreate (1 group + 3 children)" \
+	bash -c "count=\$(grep -c 'issueLabelCreate' '$WH_T7_LOG' 2>/dev/null || echo 0); [ \"\$count\" = '4' ]"
+
+run "roster fixture: creates worker:mini (distinct from worker:mini-2)" \
+	bash -c "grep 'issueLabelCreate' '$WH_T7_LOG' | grep 'worker:mini' | grep -qv 'mini-2'"
+
+run "roster fixture: creates worker:mini-2" \
+	bash -c "grep 'issueLabelCreate' '$WH_T7_LOG' | grep -q 'worker:mini-2'"
+
+run "roster fixture: creates worker:laptop" \
+	bash -c "grep 'issueLabelCreate' '$WH_T7_LOG' | grep -q 'worker:laptop'"
+
+# Test 8 (CTL-1481 finding 4: dead failure fixtures) — group already present (so
+# group-create is never attempted, ruling out the early-return-on-group-failure
+# path), 2 hosts (self + 1 roster host), BOTH children missing, and
+# create_ok=false so every issueLabelCreate the loop attempts errors out.
+# Asserts the per-child failure never aborts the loop: both children are still
+# attempted, a WARNING is printed for each, and the function still returns 0.
+WH_T8_BIN="${SCRATCH}/wh-t8/bin"
+WH_T8_LOG="${SCRATCH}/wh-t8/req.log"
+mkdir -p "${SCRATCH}/wh-t8"
+: >"$WH_T8_LOG"
+WH_T8_CLUSTER="${SCRATCH}/wh-t8-cluster"
+mkdir -p "$WH_T8_CLUSTER"
+cat >"${WH_T8_CLUSTER}/cluster.json" <<'EOF'
+{"roster": ["host-b"]}
+EOF
+WH_T8_NODES='[{"id":"grp-w","name":"worker","isGroup":true,"parent":null}]'
+make_worker_host_curl "$WH_T8_BIN" "$WH_T8_NODES" "false" "$WH_T8_LOG"
+WH_T8_OUT="${SCRATCH}/wh-t8-out"
+(
+	# shellcheck source=/dev/null
+	source "$SCRIPT"
+	PATH="$WH_T8_BIN:$PATH"
+	CATALYST_HOST_NAME="host-a"
+	CATALYST_CLUSTER_DIR="$WH_T8_CLUSTER"
+	dry_run=0
+	reconcile_worker_host_labels "fake-token"
+) >"$WH_T8_OUT" 2>&1
+WH_T8_RC=$?
+
+run "child create-failure: returns 0 (never alters exit codes)" \
+	bash -c "[ '$WH_T8_RC' = '0' ]"
+
+run "child create-failure: at least one WARNING is printed" \
+	bash -c "grep -qi 'warning' '$WH_T8_OUT'"
+
+run "child create-failure: both children are attempted despite the per-child error (2 issueLabelCreate)" \
+	bash -c "count=\$(grep -c 'issueLabelCreate' '$WH_T8_LOG' 2>/dev/null || echo 0); [ \"\$count\" = '2' ]"
+
+run "child create-failure: worker:host-a is attempted" \
+	bash -c "grep 'issueLabelCreate' '$WH_T8_LOG' | grep -q 'worker:host-a'"
+
+run "child create-failure: worker:host-b is attempted" \
+	bash -c "grep 'issueLabelCreate' '$WH_T8_LOG' | grep -q 'worker:host-b'"
+
 echo ""
 echo "Results: ${PASSES} passed, ${FAILURES} failed"
 [ "$FAILURES" = "0" ]

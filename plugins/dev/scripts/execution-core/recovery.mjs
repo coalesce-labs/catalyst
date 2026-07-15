@@ -102,6 +102,9 @@ import { fenceGuard } from "./fence-guard.mjs";
 // CTL-863: Linear-free fence event emitter (durable fence → event-log migration).
 import { emitFenceClaimed } from "./fence-event.mjs";
 import { applyLabel as defaultApplyLabel } from "./linear-write.mjs";
+// CTL-1481: best-effort worker:<host> label visibility-projection stamp on a
+// won cluster claim. Never the claim arbiter — see worker-label.mjs header.
+import { stampWorkerLabel as defaultStampWorkerLabel } from "./worker-label.mjs";
 import { linearBreaker } from "./linear-breaker.mjs";
 // CTL-642: the SHARED terminal-state predicate. The recovery short-circuit reuses
 // the scheduler's fetchTicketState + cache (threaded via reclaimOpts) so a
@@ -3502,6 +3505,13 @@ export async function reclaimDeadHostWork(
     thoughtsPull = (cwd) => defaultThoughtsPull(cwd),
     dispatch = (od, ticket, phase, cwd) =>
       dispatchTicket(od, ticket, phase, { dispatch: defaultDispatch }),
+    // CTL-1481: best-effort worker:<host> label stamp, fired right after a won
+    // takeover claim (same gate as emitFenceClaimed). Injectable so tests
+    // drive/assert the stamp without touching Linear. `replica` is the daemon's
+    // createReplicaReader, threaded from the tick so the stamp's label read is
+    // replica-first (live fallback is loud inside the stamp).
+    stampWorkerLabel = defaultStampWorkerLabel,
+    replica = undefined,
   } = {}
 ) {
   const taken = [];
@@ -3542,6 +3552,14 @@ export async function reclaimDeadHostWork(
           generation: claimRes.generation,
           phase: NEW_WORK_ENTRY_PHASE,
         });
+      }
+      // CTL-1481: best-effort worker:<host> label stamp — a visibility
+      // projection of the takeover claim we just won, NEVER the claim arbiter
+      // itself. Best-effort swallow (mirrors writeLocalClusterGeneration below).
+      try {
+        stampWorkerLabel({ ticket, hostName: self, knownHosts: roster, replica, log });
+      } catch {
+        // best-effort — a failed/thrown stamp never blocks the takeover.
       }
 
       // Rebuild the worktree on the ticket branch.

@@ -71,6 +71,7 @@ import {
   applyTriageStatus as defaultApplyTriageStatus,
   applyAssignee as defaultApplyAssignee,
   applyLabel, // CTL-1441: needs-human at the triage re-dispatch cap
+  removeLabel, // CTL-1481: worker:<host> swap (remove-before-add)
 } from "./linear-write.mjs";
 import { labelNeedsHumanUnlessBeliefOwner } from "./label-guard.mjs"; // CTL-1441
 import { appendTriageTransitionEvent as defaultAppendEvent } from "./triage-transition-event.mjs";
@@ -78,6 +79,9 @@ import { countBackgroundAgents, resetLivenessCache } from "./claude-agents.mjs";
 import { readMaxParallel, computeFreeSlots, writeClusterGeneration } from "./scheduler.mjs";
 // CTL-863: Linear-free fence event emitter (durable fence → event-log migration).
 import { emitFenceClaimed } from "./fence-event.mjs";
+// CTL-1481: best-effort worker:<host> label visibility-projection stamp on a
+// won cluster claim. Never the claim arbiter — see worker-label.mjs header.
+import { stampWorkerLabel as defaultStampWorkerLabel } from "./worker-label.mjs";
 import { countSdkInflight as defaultCountSdkInflight } from "./signal-reader.mjs"; // CTL-1367 P1: executor=sdk occupancy reader for the triage budget
 import {
   recordReconcileSuccess,
@@ -448,6 +452,9 @@ export function handleStateChangedEvent(
     // CTL-1367 P1: failed-terminal backstop for a rejected async (sdk) triage
     // dispatch — threaded through to dispatchTriage (undefined → real default).
     emitBackstop,
+    // CTL-1481: worker:<host> label-stamp seam — threaded through to
+    // dispatchTriage (undefined → real default; tests inject a fake).
+    stampWorkerLabel,
   } = {}
 ) {
   const parsed = parseStateChangedEvent(event);
@@ -493,6 +500,7 @@ export function handleStateChangedEvent(
           claimDispatch, // CTL-862
           isDraining, // CTL-1095
           emitBackstop, // CTL-1367 P1
+          stampWorkerLabel, // CTL-1481
         });
       }
     } else if (!parsed.toState || parsed.toState === query.status) {
@@ -549,6 +557,7 @@ export function handleStateChangedEvent(
           claimDispatch, // CTL-862
           isDraining, // CTL-1095
           emitBackstop, // CTL-1367 P1
+          stampWorkerLabel, // CTL-1481
         });
       } else {
         log.debug(
@@ -665,6 +674,10 @@ function dispatchTriage(
     hosts = undefined,
     hostName = undefined,
     claimDispatch = claimDispatchSync,
+    // CTL-1481: best-effort worker:<host> label stamp, fired right after a won
+    // multi-host triage claim (same gate as emitFenceClaimed). Injectable so
+    // tests drive/assert the stamp without touching Linear.
+    stampWorkerLabel = defaultStampWorkerLabel,
     // CTL-1095: drain gate — node-level refusal of new-triage admission.
     isDraining = (dir) => isDrainingDefault(dir),
     // CTL-1367 P1: failed-terminal backstop for a REJECTED async (sdk) triage
@@ -896,6 +909,19 @@ function dispatchTriage(
   } catch (err) {
     log.warn({ identifier, err: err.message }, "monitor: self-assign threw — continuing");
   }
+  // CTL-1481: best-effort worker:<host> label stamp — a visibility projection
+  // of the triage claim we just won, NEVER the claim arbiter itself. Multi-host
+  // only (same gate as emitFenceClaimed). Placed AFTER the triage-status +
+  // self-assign writes so a stamp-tripped breaker can never starve them. Own
+  // try/catch (mirrors the self-assign precedent above) so a throw only logs
+  // and never blocks the triage dispatch.
+  if (clusterGeneration != null) {
+    try {
+      stampWorkerLabel({ ticket: identifier, hostName: self, knownHosts: roster, replica, applyLabel, removeLabel, log });
+    } catch (err) {
+      log.warn({ identifier, err: err.message }, "monitor: stampWorkerLabel threw — continuing");
+    }
+  }
   return true;
 }
 
@@ -1047,6 +1073,9 @@ export function sweepMissingTriage({
   // CTL-1441: needs-human at the re-dispatch cap — threaded through to
   // dispatchTriage (undefined → real label-guard default; tests inject a spy).
   labelNeedsHuman,
+  // CTL-1481: worker:<host> label-stamp seam — threaded through to
+  // dispatchTriage (undefined → real default; tests inject a fake).
+  stampWorkerLabel,
 } = {}) {
   if (!orchDir) {
     log.debug("sweepMissingTriage: no orchDir wired — skipping triage sweep");
@@ -1090,6 +1119,7 @@ export function sweepMissingTriage({
         claimDispatch, // CTL-862
         emitBackstop, // CTL-1367 P1
         ...(labelNeedsHuman ? { labelNeedsHuman } : {}), // CTL-1441
+        stampWorkerLabel, // CTL-1481
       });
     }
   }

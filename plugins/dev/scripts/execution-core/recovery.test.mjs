@@ -4935,6 +4935,10 @@ describe("reclaimDeadHostWork — peer in_flight_tickets seam (CTL-1090)", () =>
         rebuildWorktree: () => ({ ok: true, cwd: "/wt/CTL-7" }),
         thoughtsPull: () => ({ ok: true }),
         dispatch: (od, ticket) => { dispatched.push(ticket); return { code: 0 }; },
+        // CTL-1481: stub the label-stamp seam — this test's subject is the
+        // peer in_flight_tickets seam, not the label write, and a won claim
+        // now fires it (else this would hit the real network default).
+        stampWorkerLabel: () => ({ stamped: true }),
       },
     );
     expect(dispatched.sort()).toEqual(["CTL-7", "CTL-8"]);
@@ -5115,6 +5119,10 @@ const makeBaseDeps = (overrides = {}) => ({
   alreadyComplete: () => false,
   rebuildWorktree: () => ({ ok: true, cwd: "/wt/CTL-900" }),
   dispatch: () => ({ code: 0 }),
+  // CTL-1481: stub the label-stamp seam by default — this describe block's
+  // default `claim` always wins, so every test that doesn't override
+  // stampWorkerLabel would otherwise hit the real (network-touching) default.
+  stampWorkerLabel: () => ({ stamped: true }),
   ...overrides,
 });
 
@@ -5137,6 +5145,47 @@ describe("reclaimDeadHostWork — takeover sweep (CTL-863)", () => {
     );
     expect(dispatched).toBe(true);
     expect(r.taken).toEqual([{ ticket: "CTL-900", phase: "implement", generation: 5 }]);
+  });
+
+  // CTL-1481: the worker:<host> label visibility-projection stamp fires right
+  // after a won takeover claim, mirroring the emitFenceClaimed gate.
+  test("CTL-1481: a won takeover claim fires stampWorkerLabel with the ticket + host", async () => {
+    const calls = [];
+    const r = await reclaimDeadHostWork(
+      { orchDir: "/o" },
+      makeBaseDeps({
+        stampWorkerLabel: (arg) => { calls.push(arg); return { stamped: true }; },
+      }),
+    );
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toMatchObject({ ticket: "CTL-900", hostName: "mini" });
+    expect(r.taken).toHaveLength(1);
+  });
+
+  test("CTL-1481: a lost claim never fires stampWorkerLabel", async () => {
+    const calls = [];
+    const r = await reclaimDeadHostWork(
+      { orchDir: "/o" },
+      makeBaseDeps({
+        claim: () => ({ won: false, generation: null }),
+        stampWorkerLabel: (arg) => { calls.push(arg); return { stamped: true }; },
+      }),
+    );
+    expect(calls).toHaveLength(0);
+    expect(r.taken).toEqual([]);
+  });
+
+  test("CTL-1481: a thrown stampWorkerLabel never blocks the takeover dispatch", async () => {
+    let dispatched = false;
+    const r = await reclaimDeadHostWork(
+      { orchDir: "/o" },
+      makeBaseDeps({
+        stampWorkerLabel: () => { throw new Error("linearis exploded"); },
+        dispatch: () => { dispatched = true; return { code: 0 }; },
+      }),
+    );
+    expect(dispatched).toBe(true);
+    expect(r.taken).toHaveLength(1);
   });
 
   test("HRW says another survivor owns it → skip (no claim, no dispatch)", async () => {

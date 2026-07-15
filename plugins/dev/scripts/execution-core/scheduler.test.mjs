@@ -9578,6 +9578,9 @@ describe("CTL-850 — HRW ownership + claim-on-dispatch (schedulerTick new-work)
       hosts: ROSTER,
       hostName: OWNER,
       claimDispatch,
+      // CTL-1481: stub the label-stamp seam — this test's subject is HRW/claim
+      // dispatch, not the label write, and a won multi-host claim now fires it.
+      stampWorkerLabel: () => ({ stamped: true }),
       verifyDispatched: verifyOk,
       liveBackgroundCount: () => 0,
       now: () => 1_000,
@@ -9640,6 +9643,9 @@ describe("CTL-850 — HRW ownership + claim-on-dispatch (schedulerTick new-work)
       hosts: ROSTER,
       hostName: OWNER,
       claimDispatch,
+      // CTL-1481: stub the label-stamp seam — this test's subject is
+      // clusterGeneration forwarding, not the label write.
+      stampWorkerLabel: () => ({ stamped: true }),
       verifyDispatched: verifyOk,
       liveBackgroundCount: () => 0,
       now: () => 1_000,
@@ -9705,6 +9711,9 @@ describe("CTL-850 — HRW ownership + claim-on-dispatch (schedulerTick new-work)
       hosts: ROSTER,
       hostName: OWNER,
       claimDispatch,
+      // CTL-1481: stub the label-stamp seam — this test's subject is the
+      // cluster-generation persist, not the label write.
+      stampWorkerLabel: () => ({ stamped: true }),
       verifyDispatched: verifyOk,
       liveBackgroundCount: () => 0,
       now: () => 1_000,
@@ -9727,6 +9736,79 @@ describe("CTL-850 — HRW ownership + claim-on-dispatch (schedulerTick new-work)
       now: () => 1_000,
     });
     expect(existsSync(join(orchDir, "workers", TICKET, "cluster-generation.json"))).toBe(false);
+  });
+
+  // CTL-1481: the worker:<host> label visibility-projection stamp fires right
+  // after a won multi-host claim, mirroring the emitFenceClaimed gate.
+  test("CTL-1481: a won multi-host claim fires stampWorkerLabel with the ticket + host", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    const dispatch = dispatchCreatesDir();
+    const claimDispatch = recordClaim({ won: true, generation: 7 });
+    const calls = [];
+    const stampWorkerLabel = (arg) => {
+      calls.push(arg);
+      return { stamped: true };
+    };
+    schedulerTick(orchDir, {
+      readEligible: () => eligibleOne(),
+      dispatch,
+      hosts: ROSTER,
+      hostName: OWNER,
+      claimDispatch,
+      stampWorkerLabel,
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0,
+      now: () => 1_000,
+      hasTriageArtifact: () => true, // CTL-1150: bypass triage gate, subject is the label stamp wiring
+    });
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toMatchObject({ ticket: TICKET, hostName: OWNER });
+  });
+
+  test("CTL-1481: single-host dispatch never fires stampWorkerLabel (multiHost gate)", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    const dispatch = dispatchCreatesDir();
+    const calls = [];
+    const stampWorkerLabel = (arg) => {
+      calls.push(arg);
+      return { stamped: true };
+    };
+    schedulerTick(orchDir, {
+      readEligible: () => eligibleOne(),
+      dispatch,
+      hosts: ["solo"],
+      hostName: "solo",
+      claimDispatch: recordClaim({ won: false, generation: null }),
+      stampWorkerLabel,
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0,
+      now: () => 1_000,
+      hasTriageArtifact: () => true,
+    });
+    expect(calls).toHaveLength(0);
+  });
+
+  test("CTL-1481: a thrown stampWorkerLabel never blocks the dispatch success path", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    const dispatch = dispatchCreatesDir();
+    const claimDispatch = recordClaim({ won: true, generation: 7 });
+    const stampWorkerLabel = () => {
+      throw new Error("linearis exploded");
+    };
+    const result = schedulerTick(orchDir, {
+      readEligible: () => eligibleOne(),
+      dispatch,
+      hosts: ROSTER,
+      hostName: OWNER,
+      claimDispatch,
+      stampWorkerLabel,
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0,
+      now: () => 1_000,
+      hasTriageArtifact: () => true,
+    });
+    expect(dispatch.calls).toHaveLength(1); // dispatch still succeeded
+    expect(result?.dispatched).toEqual([TICKET]);
   });
 });
 

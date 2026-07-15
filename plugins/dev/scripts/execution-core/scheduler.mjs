@@ -301,6 +301,9 @@ import * as linearWrite from "./linear-write.mjs";
 import { fenceGuard } from "./fence-guard.mjs";
 // CTL-863: Linear-free fence event emitter (durable fence → event-log migration).
 import { emitFenceClaimed } from "./fence-event.mjs";
+// CTL-1481: best-effort worker:<host> label visibility-projection stamp on a
+// won cluster claim. Never the claim arbiter — see worker-label.mjs header.
+import { stampWorkerLabel as defaultStampWorkerLabel } from "./worker-label.mjs";
 // CTL-757: the canonical linear.state.write audit emitter. CALLER-EMITS at each
 // scheduler write site (source/phase/reason known only here) — NEVER inside
 // runTransition (would double-audit the triage path, which keeps its own
@@ -3393,6 +3396,11 @@ export function schedulerTick(
     hosts = undefined,
     hostName = undefined,
     claimDispatch = claimDispatchSync,
+    // CTL-1481: best-effort worker:<host> label stamp, fired right after a won
+    // multi-host claim (same gate as emitFenceClaimed). Injectable so tests
+    // drive/assert the stamp without touching Linear; production defaults to
+    // the real linear-query/linear-write-backed implementation.
+    stampWorkerLabel = defaultStampWorkerLabel,
     // CTL-1191: injectable surviving-roster computation for the recovery-pass HRW
     // gate (ownsForRecovery). Default undefined → computeSurvivingRoster(roster),
     // which reads heartbeats from the (test-redirected) event log. Tests inject a
@@ -6264,6 +6272,31 @@ export function schedulerTick(
         ticket: t.identifier,
         phase: "assignment",
       });
+      // CTL-1481: best-effort worker:<host> label stamp — a visibility
+      // projection of the claim we just won, NEVER the claim arbiter itself.
+      // Multi-host only (same gate as emitFenceClaimed). Placed AFTER the
+      // applyPhaseStatus/applyAssignee writes so a stamp-tripped breaker can
+      // never starve the Axis-1 status write within the same tick. Own
+      // try/catch (mirrors convergeHeldLabel's applyLabel catch shape) so a
+      // throw only logs and never unwinds the dispatch success path.
+      if (clusterGeneration != null) {
+        try {
+          stampWorkerLabel({
+            ticket: t.identifier,
+            hostName: self,
+            knownHosts: roster,
+            replica,
+            applyLabel: writeStatus.applyLabel,
+            removeLabel: writeStatus.removeLabel,
+            log,
+          });
+        } catch (err) {
+          log.warn(
+            { ticket: t.identifier, err: err.message },
+            "scheduler: stampWorkerLabel threw — continuing tick"
+          );
+        }
+      }
     }
   }
 
@@ -7442,7 +7475,10 @@ function runTick() {
     // Skip entirely on single-host installs (no-op inside the function, but the
     // pre-check avoids the call to stay zero-cost on the common case).
     if (getClusterHosts().length > 1) {
-      reclaimDeadHostWork({ orchDir: runningOpts.orchDir }).catch((err) => {
+      // CTL-1481: thread the replica (second arg — the seams object) so the
+      // takeover stamp's label read stays off live Linear (replica-first, loud
+      // live fallback inside the stamp).
+      reclaimDeadHostWork({ orchDir: runningOpts.orchDir }, { replica: runningOpts.replica }).catch((err) => {
         log.warn({ err: err?.message }, "ctl-863: reclaimDeadHostWork tick failed — continuing");
       });
     }
