@@ -570,10 +570,10 @@ WS_GRP_MUT_VAL="$(source "$SCRIPT" && build_issue_label_group_create_mutation 'w
 run "build_issue_label_group_create_mutation: contains issueLabelCreate" \
 	bash -c "echo '$WS_GRP_MUT_VAL' | grep -q 'issueLabelCreate'"
 
-# CTL-764 finding A: the group is created as a plain workspace label — sending isGroup:true
-# is rejected by IssueLabelCreateInput and aborts the reconcile before any child is created.
-run "build_issue_label_group_create_mutation: omits isGroup (rejected by IssueLabelCreateInput)" \
-	bash -c "! echo '$WS_GRP_MUT_VAL' | grep -q 'isGroup'"
+# CTL-1483: the live API now REQUIRES isGroup:true on the parent create — a plain
+# parent rejects child attaches ("parent label is not a group"). Inverts the #2631 shape.
+run "build_issue_label_group_create_mutation: sets isGroup:true (required by the live API)" \
+	bash -c "echo '$WS_GRP_MUT_VAL' | grep -q 'isGroup'"
 
 run "build_issue_label_group_create_mutation: omits teamId (workspace scope)" \
 	bash -c "! echo '$WS_GRP_MUT_VAL' | grep -q 'teamId'"
@@ -635,6 +635,7 @@ for a in "\$@"; do case "\$a" in {*) body="\$a";; esac; done
 if [ -z "\$body" ]; then body="\$(cat 2>/dev/null)"; fi
 echo "\$body" >> "${log}"
 case "\$body" in
+  *issueLabelUpdate*) echo '{"data":{"issueLabelUpdate":{"success":true,"issueLabel":{"id":"grp-ws","isGroup":true}}}}' ;;
   *issueLabelCreate*) echo '${create_resp}' ;;
   *) echo '${query_resp}' ;;
 esac
@@ -766,6 +767,84 @@ run "plain-label parent: found by name+parent==null, creates the 4 children (4 i
 
 run "plain-label parent: never re-creates the group (every create carries parentId)" \
 	bash -c "! grep 'issueLabelCreate' '$WS_T6_LOG' | grep -qv 'parentId'"
+
+run "plain-label parent: issues exactly one issueLabelUpdate to upgrade the group" \
+	bash -c "count=\$(grep -c 'issueLabelUpdate' '$WS_T6_LOG' 2>/dev/null || echo 0); [ \"\$count\" = '1' ]"
+
+# Test 9 (CTL-1483): adopted PLAIN parent (isGroup:false) is upgraded via issueLabelUpdate
+# before children attach — mirrors WH_T9, but for the worker-status reconciler.
+WS_T9_BIN="${SCRATCH}/ws-t9/bin"
+WS_T9_LOG="${SCRATCH}/ws-t9/req.log"
+mkdir -p "${SCRATCH}/ws-t9" "$WS_T9_BIN"
+: >"$WS_T9_LOG"
+WS_T9_NODES='[{"id":"grp-plain","name":"worker-status","isGroup":false,"parent":null}]'
+cat >"${WS_T9_BIN}/curl" <<SCRIPT
+#!/usr/bin/env bash
+body=""
+for a in "\$@"; do case "\$a" in {*) body="\$a";; esac; done
+if [ -z "\$body" ]; then body="\$(cat 2>/dev/null)"; fi
+echo "\$body" >> "${WS_T9_LOG}"
+case "\$body" in
+  *issueLabelUpdate*) echo '{"data":{"issueLabelUpdate":{"success":true,"issueLabel":{"id":"grp-plain","isGroup":true}}}}' ;;
+  *issueLabelCreate*) echo '{"data":{"issueLabelCreate":{"success":true,"issueLabel":{"id":"new-lbl-id","name":"x"}}}}' ;;
+  *) echo '{"data":{"issueLabels":{"nodes":${WS_T9_NODES}}}}' ;;
+esac
+exit 0
+SCRIPT
+chmod +x "${WS_T9_BIN}/curl"
+(
+	# shellcheck source=/dev/null
+	source "$SCRIPT"
+	PATH="$WS_T9_BIN:$PATH"
+	dry_run=0
+	reconcile_worker_status_labels "fake-token"
+) >"${SCRATCH}/ws-t9-out" 2>&1
+WS_T9_RC=$?
+
+run "WS plain-parent upgrade: issues exactly one issueLabelUpdate with isGroup" \
+	bash -c "count=\$(grep -c 'issueLabelUpdate' '$WS_T9_LOG' 2>/dev/null || echo 0); [ \"\$count\" = '1' ] && grep 'issueLabelUpdate' '$WS_T9_LOG' | grep -q 'isGroup'"
+
+run "WS plain-parent upgrade: 4 child creates still attempted after the upgrade" \
+	bash -c "count=\$(grep -c 'issueLabelCreate' '$WS_T9_LOG' 2>/dev/null || echo 0); [ \"\$count\" = '4' ]"
+
+run "WS plain-parent upgrade: returns 0" bash -c "[ '$WS_T9_RC' = '0' ]"
+
+# Test 10 (CTL-1483): an API generation that REJECTS the isGroup input field gets the
+# plain-create fallback — mirrors WH_T10, but 4 children vs 1.
+WS_T10_BIN="${SCRATCH}/ws-t10/bin"
+WS_T10_LOG="${SCRATCH}/ws-t10/req.log"
+mkdir -p "${SCRATCH}/ws-t10" "$WS_T10_BIN"
+: >"$WS_T10_LOG"
+cat >"${WS_T10_BIN}/curl" <<SCRIPT
+#!/usr/bin/env bash
+body=""
+for a in "\$@"; do case "\$a" in {*) body="\$a";; esac; done
+if [ -z "\$body" ]; then body="\$(cat 2>/dev/null)"; fi
+echo "\$body" >> "${WS_T10_LOG}"
+case "\$body" in
+  *issueLabelCreate*isGroup*) echo '{"errors":[{"message":"Field \"isGroup\" is not defined by type IssueLabelCreateInput"}]}' ;;
+  *issueLabelCreate*) echo '{"data":{"issueLabelCreate":{"success":true,"issueLabel":{"id":"new-lbl-id","name":"x"}}}}' ;;
+  *) echo '{"data":{"issueLabels":{"nodes":[]}}}' ;;
+esac
+exit 0
+SCRIPT
+chmod +x "${WS_T10_BIN}/curl"
+(
+	# shellcheck source=/dev/null
+	source "$SCRIPT"
+	PATH="$WS_T10_BIN:$PATH"
+	dry_run=0
+	reconcile_worker_status_labels "fake-token"
+) >"${SCRATCH}/ws-t10-out" 2>&1
+WS_T10_RC=$?
+
+run "WS isGroup-rejected fallback: 6 issueLabelCreate calls (isGroup attempt + plain retry + 4 children)" \
+	bash -c "count=\$(grep -c 'issueLabelCreate' '$WS_T10_LOG' 2>/dev/null || echo 0); [ \"\$count\" = '6' ]"
+
+run "WS isGroup-rejected fallback: a child create lands (queued)" \
+	bash -c "grep 'issueLabelCreate' '$WS_T10_LOG' | grep -q 'queued'"
+
+run "WS isGroup-rejected fallback: returns 0" bash -c "[ '$WS_T10_RC' = '0' ]"
 
 # ─── Phase 2 (CTL-1481): worker:<host> label group ───────────────────────────
 # Unit tests for pure helpers (script already sourced above).
