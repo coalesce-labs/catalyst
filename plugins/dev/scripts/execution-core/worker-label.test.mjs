@@ -222,3 +222,74 @@ describe("stampWorkerLabel — thenable removeLabel (the production async-declar
     expect(applyLabel.calls.length).toBe(0);
   });
 });
+
+describe("stampWorkerLabel — replica-first read (Codex #2650 P2)", () => {
+  test("replica HIT (label already correct) — ZERO live reads, zero writes", () => {
+    const replica = { labels: recorder([{ id: "l1", name: "worker:mini" }]) };
+    const readLabelNodes = recorder({ ok: true, nodes: [] });
+    const applyLabel = recorder({ applied: true });
+    const removeLabel = recorder({ removed: true });
+
+    const res = stampWorkerLabel({ ticket: "CTL-1", hostName: "mini", replica, readLabelNodes, applyLabel, removeLabel });
+
+    expect(res).toEqual({ stamped: true });
+    expect(replica.labels.calls.length).toBe(1);
+    expect(readLabelNodes.calls.length).toBe(0);
+    expect(applyLabel.calls.length).toBe(0);
+    expect(removeLabel.calls.length).toBe(0);
+  });
+
+  test("replica [] (authoritative empty) is trusted — no live read, one apply", () => {
+    const replica = { labels: recorder([]) };
+    const readLabelNodes = recorder({ ok: true, nodes: [{ id: "x", name: "worker:other" }] });
+    const applyLabel = recorder({ applied: true });
+    const removeLabel = recorder({ removed: true });
+
+    const res = stampWorkerLabel({ ticket: "CTL-1", hostName: "mini", replica, readLabelNodes, applyLabel, removeLabel });
+
+    expect(res).toEqual({ stamped: true });
+    expect(readLabelNodes.calls.length).toBe(0);
+    expect(removeLabel.calls.length).toBe(0);
+    expect(applyLabel.calls.length).toBe(1);
+  });
+
+  test("replica MISS (undefined) falls back LOUDLY to the live read", () => {
+    const replica = { labels: recorder(undefined) };
+    const readLabelNodes = recorder({ ok: true, nodes: [{ id: "l1", name: "worker:mini" }] });
+    const warns = [];
+    const log = { warn: (...a) => warns.push(a) };
+
+    const res = stampWorkerLabel({ ticket: "CTL-1", hostName: "mini", replica, readLabelNodes, applyLabel: recorder({ applied: true }), removeLabel: recorder({ removed: true }), log });
+
+    expect(res).toEqual({ stamped: true });
+    expect(readLabelNodes.calls.length).toBe(1);
+    expect(warns.some(([, msg]) => String(msg).includes("falling back to live read"))).toBe(true);
+  });
+
+  test("replica.labels throwing is swallowed by the outer guard — stamped:false, nothing propagates", () => {
+    const replica = { labels: () => { throw new Error("db exploded"); } };
+
+    let threw = false;
+    let res;
+    try {
+      res = stampWorkerLabel({ ticket: "CTL-1", hostName: "mini", replica, readLabelNodes: recorder({ ok: true, nodes: [] }), applyLabel: recorder({ applied: true }), removeLabel: recorder({ removed: true }) });
+    } catch {
+      threw = true;
+    }
+
+    expect(threw).toBe(false);
+    expect(res).toEqual({ stamped: false, reason: "threw" });
+  });
+
+  test("no replica (null) — live read path unchanged, no fallback warn", () => {
+    const readLabelNodes = recorder({ ok: true, nodes: [{ id: "l1", name: "worker:mini" }] });
+    const warns = [];
+    const log = { warn: (...a) => warns.push(a) };
+
+    const res = stampWorkerLabel({ ticket: "CTL-1", hostName: "mini", readLabelNodes, applyLabel: recorder({ applied: true }), removeLabel: recorder({ removed: true }), log });
+
+    expect(res).toEqual({ stamped: true });
+    expect(readLabelNodes.calls.length).toBe(1);
+    expect(warns.length).toBe(0);
+  });
+});

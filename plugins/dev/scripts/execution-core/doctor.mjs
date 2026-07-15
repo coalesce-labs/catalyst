@@ -62,7 +62,10 @@ import { ownedBy } from "./hrw.mjs";
 import { readPeerHeartbeats } from "./cluster-heartbeat.mjs";
 // CTL-1481: the canonical worker-ownership label names — imported (not
 // re-hardcoded) so the doctor can never drift from what the stamper writes.
-import { WORKER_LABEL_GROUP, WORKER_LABEL_PREFIX } from "./worker-label.mjs";
+// From the zero-import names leaf, NOT worker-label.mjs: doctor runs under
+// bare Node, and worker-label.mjs's graph reaches gateway-read.mjs →
+// bun:sqlite, which fails Node's ESM loader at import time.
+import { WORKER_LABEL_GROUP, WORKER_LABEL_PREFIX } from "./worker-label-names.mjs";
 // CTL-1367 item 9: reuse the single-source-of-truth subscription-auth predicate
 // (sdk-run-phase-agent.mjs imports only node:* + config.mjs — no bun: protocol —
 // so it is safe to pull into this node-runnable doctor).

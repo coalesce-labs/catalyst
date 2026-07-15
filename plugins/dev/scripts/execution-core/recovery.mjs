@@ -3507,8 +3507,11 @@ export async function reclaimDeadHostWork(
       dispatchTicket(od, ticket, phase, { dispatch: defaultDispatch }),
     // CTL-1481: best-effort worker:<host> label stamp, fired right after a won
     // takeover claim (same gate as emitFenceClaimed). Injectable so tests
-    // drive/assert the stamp without touching Linear.
+    // drive/assert the stamp without touching Linear. `replica` is the daemon's
+    // createReplicaReader, threaded from the tick so the stamp's label read is
+    // replica-first (live fallback is loud inside the stamp).
     stampWorkerLabel = defaultStampWorkerLabel,
+    replica = undefined,
   } = {}
 ) {
   const taken = [];
@@ -3554,7 +3557,7 @@ export async function reclaimDeadHostWork(
       // projection of the takeover claim we just won, NEVER the claim arbiter
       // itself. Best-effort swallow (mirrors writeLocalClusterGeneration below).
       try {
-        stampWorkerLabel({ ticket, hostName: self, log });
+        stampWorkerLabel({ ticket, hostName: self, replica, log });
       } catch {
         // best-effort — a failed/thrown stamp never blocks the takeover.
       }

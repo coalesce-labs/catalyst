@@ -26,17 +26,11 @@ import {
   applyLabel as defaultApplyLabel,
   removeLabel as defaultRemoveLabel,
 } from "./linear-write.mjs";
+// The name constants live in a zero-import leaf so bare-Node entrypoints
+// (doctor.mjs) can read them without loading this module's linearis graph.
+import { WORKER_LABEL_GROUP, WORKER_LABEL_PREFIX } from "./worker-label-names.mjs";
 
-// WORKER_LABEL_GROUP — the workspace-level label group's own name (matched by
-// name + parent==null, per the #2631 isGroup gotcha). Provisioned by
-// setup-execution-core-states.sh (which necessarily duplicates the string —
-// bash), asserted by doctor.mjs checkWorkerLabels (which imports it from here).
-export const WORKER_LABEL_GROUP = "worker";
-
-// WORKER_LABEL_PREFIX — the shared prefix for the per-host children of the
-// workspace `worker` label group. A ticket's desired label is always
-// `${WORKER_LABEL_PREFIX}${hostName}`.
-export const WORKER_LABEL_PREFIX = "worker:";
+export { WORKER_LABEL_GROUP, WORKER_LABEL_PREFIX };
 
 // stampWorkerLabel — apply `worker:<hostName>` to `ticket`, removing any OTHER
 // `worker:*` label first (remove-before-add: Linear rejects a second
@@ -52,13 +46,17 @@ export const WORKER_LABEL_PREFIX = "worker:";
 // ("apply-threw" or applyLabel's own reason string).
 //
 // `readLabelNodes`/`applyLabel`/`removeLabel` are injectable (tests fake them);
-// production defaults to the real linear-query.mjs/linear-write.mjs functions —
-// `readLabelNodes` is a LIVE read (labels are not yet served by the replica).
+// production defaults to the real linear-query.mjs/linear-write.mjs functions.
+// `replica` is the daemon's createReplicaReader instance (duck-typed .labels,
+// CTL-1481) — the PREFERRED read source per the repo's replica-first read rule
+// (a live single-ticket read burns the shared fleet quota). A replica miss
+// (gate-fail/absent/undefined) falls back LOUDLY to the live `readLabelNodes`.
 // `log` is an optional injectable logger (default null — no-op) so a bare test
 // call needs no logger stub.
 export function stampWorkerLabel({
   ticket,
   hostName,
+  replica = null,
   readLabelNodes = readTicketLabelNodes,
   applyLabel = defaultApplyLabel,
   removeLabel = defaultRemoveLabel,
@@ -66,15 +64,33 @@ export function stampWorkerLabel({
 } = {}) {
   try {
     const desired = `${WORKER_LABEL_PREFIX}${hostName}`;
-    const read = readLabelNodes(ticket);
-    if (!read?.ok || !Array.isArray(read.nodes)) {
-      log?.warn?.(
-        { ticket, hostName },
-        "worker-label: label read failed — skipping stamp (no writes; cannot safely swap)"
-      );
-      return { stamped: false, reason: "read-failed" };
+    // Replica-first: labels ARE mirrored into catalyst-replica.db, and the
+    // steady-state stamp (label already correct) should cost ZERO live calls.
+    // replica.labels returns [] as an authoritative "no labels" answer and
+    // undefined on any gate-fail/miss — only undefined falls through.
+    let nodes = null;
+    const replicaRows = typeof replica?.labels === "function" ? replica.labels(ticket) : undefined;
+    if (Array.isArray(replicaRows)) {
+      nodes = replicaRows;
+    } else {
+      if (replica) {
+        // Loud fallback per the replica-first convention — a silent live read
+        // here would hide replica-health regressions behind burned quota.
+        log?.warn?.(
+          { ticket, hostName },
+          "worker-label: replica label read missed — falling back to live read"
+        );
+      }
+      const read = readLabelNodes(ticket);
+      if (!read?.ok || !Array.isArray(read.nodes)) {
+        log?.warn?.(
+          { ticket, hostName },
+          "worker-label: label read failed — skipping stamp (no writes; cannot safely swap)"
+        );
+        return { stamped: false, reason: "read-failed" };
+      }
+      nodes = read.nodes;
     }
-    const nodes = read.nodes;
     // Remove BEFORE add: Linear rejects a second exclusive-group child in one
     // apply, so any foreign `worker:*` sibling must be cleared first.
     const foreign = nodes.filter(

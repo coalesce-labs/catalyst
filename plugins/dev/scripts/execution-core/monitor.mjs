@@ -917,7 +917,7 @@ function dispatchTriage(
   // and never blocks the triage dispatch.
   if (clusterGeneration != null) {
     try {
-      stampWorkerLabel({ ticket: identifier, hostName: self, applyLabel, removeLabel });
+      stampWorkerLabel({ ticket: identifier, hostName: self, replica, applyLabel, removeLabel, log });
     } catch (err) {
       log.warn({ identifier, err: err.message }, "monitor: stampWorkerLabel threw — continuing");
     }
