@@ -89,7 +89,26 @@ export function stampWorkerLabel({
     let nodes = null;
     const replicaRows = typeof replica?.labels === "function" ? replica.labels(ticket) : undefined;
     if (Array.isArray(replicaRows)) {
-      nodes = replicaRows;
+      if (replicaRows.some((n) => n?.name === desired)) {
+        // The ONE replica answer that would terminate with NO write: a stale
+        // snapshot can still show OUR label after a peer swapped it live (we
+        // re-win within the replica lag), and since no later stamp fires, a
+        // wrong no-op here never converges. Every other replica answer leads
+        // to a write that self-verifies against live truth (removeLabel is
+        // read-modify-write; applyLabel is server-side conflict-checked), so
+        // only this already-present answer gets a live confirm.
+        const confirm = readLabelNodes(ticket);
+        if (!confirm?.ok || !Array.isArray(confirm.nodes)) {
+          log?.warn?.(
+            { ticket, hostName },
+            "worker-label: live confirm of replica already-present hit failed — skipping stamp"
+          );
+          return { stamped: false, reason: "read-failed" };
+        }
+        nodes = confirm.nodes;
+      } else {
+        nodes = replicaRows;
+      }
     } else {
       if (replica) {
         // Loud fallback per the replica-first convention — a silent live read

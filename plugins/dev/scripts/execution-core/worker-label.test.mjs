@@ -224,9 +224,9 @@ describe("stampWorkerLabel — thenable removeLabel (the production async-declar
 });
 
 describe("stampWorkerLabel — replica-first read (Codex #2650 P2)", () => {
-  test("replica HIT (label already correct) — ZERO live reads, zero writes", () => {
+  test("replica already-present hit is LIVE-CONFIRMED — 1 read, zero writes when live agrees", () => {
     const replica = { labels: recorder([{ id: "l1", name: "worker:mini" }]) };
-    const readLabelNodes = recorder({ ok: true, nodes: [] });
+    const readLabelNodes = recorder({ ok: true, nodes: [{ id: "l1", name: "worker:mini" }] });
     const applyLabel = recorder({ applied: true });
     const removeLabel = recorder({ removed: true });
 
@@ -234,7 +234,36 @@ describe("stampWorkerLabel — replica-first read (Codex #2650 P2)", () => {
 
     expect(res).toEqual({ stamped: true });
     expect(replica.labels.calls.length).toBe(1);
-    expect(readLabelNodes.calls.length).toBe(0);
+    expect(readLabelNodes.calls.length).toBe(1); // the confirm — this is the one no-write replica answer
+    expect(applyLabel.calls.length).toBe(0);
+    expect(removeLabel.calls.length).toBe(0);
+  });
+
+  test("STALE replica already-present hit (peer swapped live) — live confirm disagrees, swap proceeds", () => {
+    // Replica still shows worker:mini from our previous stint; live truth is
+    // worker:mini-2 (a peer swapped it and we just re-won the claim).
+    const replica = { labels: recorder([{ id: "l1", name: "worker:mini" }]) };
+    const readLabelNodes = recorder({ ok: true, nodes: [{ id: "l2", name: "worker:mini-2" }] });
+    const removeLabel = recorder({ removed: true });
+    const applyLabel = recorder({ applied: true });
+
+    const res = stampWorkerLabel({ ticket: "CTL-1", hostName: "mini", knownHosts: ["mini", "mini-2"], replica, readLabelNodes, applyLabel, removeLabel });
+
+    expect(res).toEqual({ stamped: true });
+    expect(removeLabel.calls.length).toBe(1);
+    expect(removeLabel.calls[0][1]).toBe("worker:mini-2");
+    expect(applyLabel.calls.length).toBe(1);
+  });
+
+  test("live confirm of a replica already-present hit FAILING skips the stamp (no writes)", () => {
+    const replica = { labels: recorder([{ id: "l1", name: "worker:mini" }]) };
+    const readLabelNodes = recorder({ ok: false, nodes: null, code: 1, stderr: "boom" });
+    const applyLabel = recorder({ applied: true });
+    const removeLabel = recorder({ removed: true });
+
+    const res = stampWorkerLabel({ ticket: "CTL-1", hostName: "mini", replica, readLabelNodes, applyLabel, removeLabel });
+
+    expect(res).toEqual({ stamped: false, reason: "read-failed" });
     expect(applyLabel.calls.length).toBe(0);
     expect(removeLabel.calls.length).toBe(0);
   });
