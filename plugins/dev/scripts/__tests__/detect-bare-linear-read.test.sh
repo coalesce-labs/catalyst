@@ -112,6 +112,13 @@ assert_pass "echo of the string is not a call" "echo 'linear issues read CTC-198
 assert_pass "a substring binary is not linearis" "mylinearis issues read CTC-198"
 assert_pass "linear-adjacent binary is not linearis" "linearisctl issues read CTC-198"
 assert_pass "unrelated command" "ls -la"
+# A wrapper must not license skipping to ANY later `linear` token: the command a
+# wrapper runs is the first thing in command position after its own operands.
+# Here the command is `echo`, so nothing hits the API. Detecting it would BLOCK a
+# legitimate command under enforce. (Codex P2, PR #2658.)
+assert_pass "wrapper running a different command" "env echo linear issues read CTC-198"
+assert_pass "wrapper running a different command (direnv)" "direnv exec . echo linear issues read CTC-198"
+assert_pass "printf of the string under a wrapper" "env printf '%s' 'linear issues read CTC-198'"
 
 echo
 echo "detect-bare-linear-read: enforce mode blocks"
@@ -140,13 +147,38 @@ out="$(printf '{"tool_input":{"command":"linear issues read CTC-198"}}' |
 	CATALYST_LINEAR_READ_DETECT_MODE=enforce CATALYST_EVENTS_DIR="$TMPDIR_T/events" \
 		bash "$HOOK" 2>&1)"
 case "$out" in
-*"source plugins/dev/scripts/lib"*) fail "enforce remedy is an absolute path" "message quotes a repo-relative path that does not exist outside the catalyst checkout" ;;
-*"source /"*) ok "enforce remedy is an absolute path" ;;
+*"source plugins/dev/scripts/lib"* | *"source 'plugins/"*)
+	fail "enforce remedy is an absolute path" "message quotes a repo-relative path that does not exist outside the catalyst checkout" ;;
+*"source '/"* | *"source /"*) ok "enforce remedy is an absolute path" ;;
 *) fail "enforce remedy is an absolute path" "no sourceable path in: $out" ;;
 esac
 if printf '%s' "$out" | grep -q "linear_read_ticket CTC-198"; then
 	ok "enforce remedy names the ticket"
 else fail "enforce remedy names the ticket" "got: $out"; fi
+
+# The remedy is copy-pasted by an agent, so the path must survive a plugin root
+# containing spaces — an unquoted `source /a b/c.sh` is a broken command.
+# (Codex P2, PR #2658.)
+SPACED="$TMPDIR_T/plugin root/hooks"
+mkdir -p "$SPACED" "$TMPDIR_T/plugin root/scripts/lib"
+cp "$HOOK" "$SPACED/detect-bare-linear-read.sh"
+: >"$TMPDIR_T/plugin root/scripts/lib/linear-read-replica.sh"
+out="$(printf '{"tool_input":{"command":"linear issues read CTC-198"}}' |
+	CATALYST_LINEAR_READ_DETECT_MODE=enforce CATALYST_EVENTS_DIR="$TMPDIR_T/events" \
+		bash "$SPACED/detect-bare-linear-read.sh" 2>&1)"
+if printf '%s' "$out" | grep -qE "source ('[^']*'|\"[^\"]*\")"; then
+	ok "enforce remedy quotes a path containing spaces"
+else fail "enforce remedy quotes a path containing spaces" "unquoted/invalid in: $out"; fi
+
+# The reported id must be the READ TARGET, not a wrapper operand that merely looks
+# like a ticket — otherwise the remedy tells the agent to read the wrong ticket and
+# the Loki event is misattributed. (Codex P2, PR #2658.)
+out="$(printf '{"tool_input":{"command":"direnv exec /tmp/CTC-111 linear issues read CTC-198"}}' |
+	CATALYST_LINEAR_READ_DETECT_MODE=enforce CATALYST_EVENTS_DIR="$TMPDIR_T/events" \
+		bash "$HOOK" 2>&1)"
+if printf '%s' "$out" | grep -q "linear_read_ticket CTC-198"; then
+	ok "id comes from the read target, not a wrapper operand"
+else fail "id comes from the read target, not a wrapper operand" "got: $out"; fi
 
 echo
 printf 'detect-bare-linear-read: %d passed, %d failed\n' "$PASS" "$FAIL"

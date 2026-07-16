@@ -55,36 +55,59 @@ is_shell_keyword() {
 }
 
 # True iff SEGMENT invokes `<linearis|linear> [flags] issues [flags] read`.
+# On success sets DETECTED_TICKET to the READ TARGET (the positional after `read`),
+# or "" when the id is a shell variable.
+#
 # Matching the command word EXACTLY (after stripping a leading path) is what keeps
 # `rg 'linearis issues read'` / `echo '…'` / `mylinearis` / `linearisctl` from
 # matching: a quoted or substring occurrence is never a bare token.
+#
+# A wrapper does NOT license skipping ahead to any later `linear` token — the command
+# it runs is whatever lands in command position after its own known operands. Skipping
+# arbitrarily would flag `env echo linear issues read X`, which touches no API, and
+# under enforce that BLOCKS a legitimate command.
 is_bare_issues_read() {
 	local seg="$1"
+	DETECTED_TICKET=""
 	local -a toks
 	read -r -a toks <<<"$seg" || return 1
-	local n=${#toks[@]} i=0 saw_wrapper=0 base
-	# Phase 1 — resolve the command word past env-assignments and wrappers.
+	local n=${#toks[@]} i=0 base
+	# Phase 1 — resolve the command word past env-assignments, flags and wrappers.
 	while ((i < n)); do
 		if [[ ${toks[i]} == [A-Za-z_]*=* ]]; then # VAR=val prefix
 			i=$((i + 1))
 			continue
 		fi
-		base="${toks[i]##*/}" # strip a path invocation (/opt/homebrew/bin/linear)
-		is_linearis "$base" && break
+		if [[ ${toks[i]} == -* ]]; then # a wrapper's own flag
+			i=$((i + 1))
+			continue
+		fi
 		if is_shell_keyword "${toks[i]}"; then
 			i=$((i + 1))
 			continue
 		fi
+		base="${toks[i]##*/}" # strip a path invocation (/opt/homebrew/bin/linear)
+		is_linearis "$base" && break
 		if is_wrapper "$base"; then
-			saw_wrapper=1
 			i=$((i + 1))
+			# Consume only the operands this wrapper's grammar puts before the command:
+			# `direnv exec <DIR> CMD`, `timeout <DURATION> CMD`, `env -u <NAME> CMD`.
+			# Everything else takes the command word next.
+			case "$base" in
+			direnv)
+				[[ ${toks[i]:-} == exec ]] && i=$((i + 1))
+				[[ -n ${toks[i]:-} && ${toks[i]} != -* ]] && i=$((i + 1)) # DIR
+				;;
+			timeout)
+				[[ -n ${toks[i]:-} && ${toks[i]} != -* ]] && i=$((i + 1)) # DURATION
+				;;
+			env)
+				while [[ ${toks[i]:-} == -u ]]; do i=$((i + 2)); done # -u NAME pairs
+				;;
+			esac
 			continue
 		fi
-		# A wrapper's own operands (`.` in `direnv exec .`, `-u FOO` in `env -u FOO`)
-		# sit between the wrapper and the command word — skip them. With no wrapper in
-		# front, any other command word means this is not a linearis invocation.
-		((saw_wrapper)) || return 1
-		i=$((i + 1))
+		return 1 # a real command word that is not linearis → not a linearis invocation
 	done
 	((i < n)) || return 1 # ran out of tokens — no linearis command word
 
@@ -96,7 +119,12 @@ is_bare_issues_read() {
 		[[ ${toks[i]} == -* ]] || rest+=("${toks[i]}") # drop flags; keep positionals
 		i=$((i + 1))
 	done
-	[[ ${#rest[@]} -ge 2 && ${rest[0]} == "issues" && ${rest[1]} == "read" ]]
+	[[ ${#rest[@]} -ge 2 && ${rest[0]} == "issues" && ${rest[1]} == "read" ]] || return 1
+	# The read target is the positional after `read` — NOT any ticket-shaped token
+	# elsewhere in the segment (a wrapper's `direnv exec /tmp/CTC-111` operand would
+	# otherwise misname the remedy and misattribute the Loki event).
+	DETECTED_TICKET="${rest[2]:-}"
+	return 0
 }
 
 # Detect per COMMAND SEGMENT, not payload-wide, so a sanctioned `--with-attachments`
@@ -104,16 +132,19 @@ is_bare_issues_read() {
 # (e.g. `linearis issues read A --with-attachments; linear issues read B`). Split on
 # shell separators (;, &, |, newline) — sufficient for the payload shapes agents emit.
 bare=""
+ticket=""
 while IFS= read -r seg; do
 	is_bare_issues_read "$seg" || continue
 	printf '%s' "$seg" | grep -Eq -- '--with-attachments' && continue # sanctioned attachment read — exempt
 	bare="$seg"
+	ticket="$DETECTED_TICKET"
 	break
 done < <(printf '%s\n' "$cmd" | tr ';&|' '\n')
 [[ -n "$bare" ]] || exit 0
 
-# Literal id in the OFFENDING segment if present; else variable-form → unknown (still counted/blocked).
-id="$(printf '%s' "$bare" | grep -Eo '[A-Za-z][A-Za-z0-9]*-[0-9]+' | head -1)"
+# Literal id of the READ TARGET if present; else variable-form → unknown (still
+# counted/blocked). Scoped to the target token, never the whole segment.
+id="$(printf '%s' "$ticket" | grep -Eo '[A-Za-z][A-Za-z0-9]*-[0-9]+' | head -1)"
 id="${id:-unknown}"
 
 # Resolve the helper's REAL location — used both to emit telemetry and to quote a
@@ -128,7 +159,9 @@ LIB="$(cd "$(dirname "$0")/../scripts/lib" 2>/dev/null && pwd)/linear-read-repli
 [[ -r "$LIB" ]] && { source "$LIB"; _lrr_emit_fallback_event "$id" no-gate raw-cli-hook; }
 
 if [[ "${CATALYST_LINEAR_READ_DETECT_MODE:-observe}" == "enforce" ]]; then
-	echo "Blocked: '$bare' hits the rate-limited Linear API. Use the replica: source $LIB && linear_read_ticket ${id/unknown/<ID>} (or gate + sqlite3 the replica). Attachments? add --with-attachments (exempt). See the linearis skill 'Reading Linear'." >&2
+	# The path is SHELL-QUOTED: the agent copy-pastes this, and a plugin root
+	# containing spaces would otherwise emit a broken `source /a b/c.sh`.
+	echo "Blocked: '$bare' hits the rate-limited Linear API. Use the replica: source '$LIB' && linear_read_ticket ${id/unknown/<ID>} (or gate + sqlite3 the replica). Attachments? add --with-attachments (exempt). See the linearis skill 'Reading Linear'." >&2
 	exit 2 # exit 2 = block the tool call, feed stderr to the model
 fi
 # observe mode: warn + allow (does NOT hard-stop the read — see deploy plan).
