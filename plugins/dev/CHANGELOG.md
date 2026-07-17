@@ -1,9 +1,18 @@
 # Changelog
 
-## [12.30.1](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.30.0...catalyst-dev-v12.30.1) (2026-07-17)
+## [12.30.1](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.30.0...catalyst-dev-v12.30.1)
+
+Jul 17, 2026
+
+<!-- ai-enhanced -->
+
+### Replica-Read Detector Fixed
+
+The Linear replica-read detector introduced in a prior release was never actually firing, leaving agents free to burn the shared API quota on reads the replica could have served. The fix rewrites the command-word matching from a single anchored regex to a token walk that correctly resolves the real command past environment assignments, wrapper prefixes like `direnv exec .`, and shell keywords — and now recognizes both `linear` and `linearis`. The enforce mode remedy path is also corrected to an absolute location so it's actually sourceable in the repos where the hook now fires.
 
 
-### Bug Fixes
+
+### PRs
 
 * **dev:** CTL-1420 replica-read detector was blind to the `linear` alias + wrapper prefixes ([#2658](https://github.com/coalesce-labs/catalyst/issues/2658)) ([19f7ada](https://github.com/coalesce-labs/catalyst/commit/19f7ada2e3c7253526e2e248fa76cac235ae6331))
 
