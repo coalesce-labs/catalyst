@@ -1,5 +1,12 @@
 # Changelog
 
+## [12.30.1](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.30.0...catalyst-dev-v12.30.1) (2026-07-17)
+
+
+### Bug Fixes
+
+* **dev:** CTL-1420 replica-read detector was blind to the `linear` alias + wrapper prefixes ([#2658](https://github.com/coalesce-labs/catalyst/issues/2658)) ([19f7ada](https://github.com/coalesce-labs/catalyst/commit/19f7ada2e3c7253526e2e248fa76cac235ae6331))
+
 ## [12.30.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.29.1...catalyst-dev-v12.30.0)
 
 Jul 15, 2026
