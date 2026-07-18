@@ -49,7 +49,7 @@ No build process — this is markdown files and bash scripts.
 - **Spawn parallel agents** — Maximize efficiency
 - **Agents are documentarians** — Never suggest improvements unless asked
 - **Preserve context** — Save to thoughts/, not just memory
-- **Linear reads → local replica** — for a single-ticket read call `linear_read_ticket <ID>` (it gates freshness and falls back loudly); never a bare `linearis issues read <ID>` (it 429s the shared-quota fleet). Writes and list/search stay on `linearis`. See the `linearis` skill's "Reading Linear".
+- **Linear reads → local replica** — read a single ticket with **`sqlite3 "${CATALYST_REPLICA_DB:-${CATALYST_DIR:-$HOME/catalyst}/catalyst-replica.db}"`** (the canonical path resolver — an install may set `CATALYST_REPLICA_DB`/`CATALYST_DIR`; don't hard-code the default; gate on freshness first, per the `linearis` skill's "Reading Linear"). This is the bg-safe form: it needs no plugin, resolves in any shell, and physically cannot 429. **Never a bare `linearis`/`linear issues read <ID>`** — that hits the rate-limited API and burns the shared-quota fleet. `linear_read_ticket <ID>` is a convenience wrapper for the *same* replica read, but it is a plugin **shell function** that is NOT on `PATH` in a background/daemon Bash — so an unattended agent that reaches for it gets "command not found" and silently falls through to bare `linearis`. Prefer the `sqlite3` form in scripts and bg agents; use `linear_read_ticket` only in an interactive session that has sourced the helper. Writes and `issues list`/`search` have no replica form — they stay on `linearis`. See the `linearis` skill's "Reading Linear".
 
 ## Skill & Agent References
 
