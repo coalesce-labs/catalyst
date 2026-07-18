@@ -39,7 +39,7 @@ This project uses [Catalyst](https://github.com/coalesce-labs/catalyst) for AI-a
 /catalyst-filter      # Register semantic event interests (orchestrators only)
 ```
 
-**Linear reads → local replica:** for a single-ticket read call `linear_read_ticket <ID>` (never a bare `linearis issues read <ID>` — it 429s the shared quota); writes and list/search stay on `linearis`. See the `linearis` skill's "Reading Linear".
+**Linear reads → local replica:** for a single-ticket read use `sqlite3 ~/catalyst/catalyst-replica.db` (bg-safe — resolves in any shell, never 429s). `linear_read_ticket <ID>` is the same read but a plugin **shell function**, so it only works after you `source` the helper — in a background/daemon Bash it is "command not found" and you silently fall through to the API. **Never** a bare `linearis`/`linear issues read <ID>` — it 429s the shared quota. Writes and list/search stay on `linearis`. See the `linearis` skill's "Reading Linear".
 
 ### Agent Teams
 
