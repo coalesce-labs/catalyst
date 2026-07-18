@@ -48,8 +48,10 @@ Every phase agent:
    - Calls `catalyst-session.sh end`.
 
 6. **Linear reads → local replica.** For a single-ticket read, prefer
-   `sqlite3 ~/catalyst/catalyst-replica.db` (bg-safe — resolves in any shell,
-   never 429s). `linear_read_ticket <ID>` is the same read but is a plugin **shell
+   `sqlite3 "${CATALYST_REPLICA_DB:-${CATALYST_DIR:-$HOME/catalyst}/catalyst-replica.db}"`
+   (bg-safe — resolves in any shell, never 429s; the `${…}` is the canonical path
+   resolver, so an install that sets `CATALYST_REPLICA_DB`/`CATALYST_DIR` still hits
+   the right DB). `linear_read_ticket <ID>` is the same read but is a plugin **shell
    function**: it only resolves if you first `source
    "${CLAUDE_PLUGIN_ROOT}/scripts/lib/linear-read-replica.sh"`, else it is "command
    not found" and you silently fall through to bare `linearis`. **Never** a bare
