@@ -5,10 +5,11 @@
   Seed this section verbatim into every Catalyst-managed repo's agent-instructions
   doc — AGENTS.md when CLAUDE.md is a thin `@AGENTS.md` bridge, otherwise directly
   into the monolithic CLAUDE.md (that is the file the driving agent actually loads).
-  `check-project-setup.sh` §9 verifies its presence via the three reflex markers
-  ("subscribe to the event log" / "👍" / "local replica"); keep those phrases intact
-  so the checkup keeps recognizing a correctly-set-up project. Delete this HTML
-  comment when you paste the block into a repo.
+  It is intentionally SELF-CONTAINED (no cross-references to other sections) so it
+  ports into any repo. `check-project-setup.sh` §9 verifies its presence via the
+  three reflex markers ("subscribe to the event log" / "👍" / "local replica");
+  keep those phrases intact so the checkup keeps recognizing a set-up project.
+  Delete this HTML comment when you paste the block into a repo.
 -->
 
 These are house rules for anyone touching this repo's dev / PR / ticket workflow — whether you are
@@ -18,17 +19,21 @@ by hand.
 
 - **Waiting on GitHub / CI / Linear state → subscribe to the event log, don't poll.** To block on a
   state change (a PR merged, CI turning green, a review posted, a push to a branch, a ticket
-  transition), wait on the unified event log instead of re-querying in a loop. Reach for the
-  `catalyst-dev:wait-for-github` skill for GitHub events (broker `broker_claim_pr` + `filter.wake`,
-  falling back to `catalyst-events wait-for`) and `catalyst-dev:monitor-events` for the general
-  wait-for-a-state-change pattern. A `gh` / `linearis` poll loop burns shared-quota API budget and
-  silently misses reaction-only signals (next bullet). When the broker / webhook infra is down these
-  skills degrade to a bounded single-event wait — that degradation is the fallback, never your
-  opening move.
+  transition), wait on the unified Catalyst event log instead of re-querying in a loop. Reach for
+  the `catalyst-dev:wait-for-github` skill for GitHub events (broker `broker_claim_pr` +
+  `filter.wake`, falling back to `catalyst-events wait-for`) and `catalyst-dev:monitor-events` for
+  the general wait-for-a-state-change pattern. A `gh` / `linearis` poll loop burns shared-quota API
+  budget and silently misses reaction-only signals (next bullet). When the broker / webhook infra is
+  down these skills degrade to a bounded single-event wait — that degradation is the fallback, never
+  your opening move.
 - **Judging an automated code review → a clean pass is a reaction, not a review object.** The
-  automated reviewer signals "no issues" with a 👍 reaction (or a terse "no major issues" comment)
-  **instead of** opening review threads. Detect it via the PR's reactions and issue comments, not
-  only the reviews API — otherwise a review that already passed reads as silence and you wait on it
-  forever. See **Pull requests** below for the full contract.
-- **Reading one Linear ticket → the local replica, not bare `linearis`.** See **Key Principles**
-  below (`linear_read_ticket <ID>`); a bare `linearis issues read <ID>` 429s the shared fleet quota.
+  automated PR reviewer signals "no issues" with a 👍 reaction (or a terse "no major issues"
+  comment) **instead of** opening review threads. Detect it via the PR's reactions and issue
+  comments, not only the reviews API — otherwise a review that already passed reads as silence and
+  you wait on it forever.
+- **Reading one Linear ticket → the local replica, not bare `linearis`.** Read the local replica
+  directly — `sqlite3 ~/catalyst/catalyst-replica.db` (a SQLite mirror kept fresh by the cloud-sync
+  daemon) — or, where the `catalyst-dev` tooling is present, `source` its
+  `plugins/dev/scripts/lib/linear-read-replica.sh` and call `linear_read_ticket <ID>` (it gates
+  replica freshness and falls back loudly). Never a bare `linearis issues read <ID>` — it 429s the
+  shared fleet quota. Writes and list/search still go through `linearis`.
