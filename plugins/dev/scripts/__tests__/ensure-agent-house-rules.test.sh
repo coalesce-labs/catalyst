@@ -29,7 +29,7 @@ run() { bash "$SCRIPT" --quiet --repo "$1" "${@:2}"; }
 
 # ---- 0. template integrity: markers survive comment-strip ----------------------
 [[ -f "$TEMPLATE" ]] && pass "template exists" || fail "template exists"
-for m in "subscribe to the event log" "👍" "local replica"; do
+for m in "subscribe to the event log" "reaction, not a review object" "local replica"; do
 	grep -qF "$m" "$TEMPLATE" && pass "template has marker: $m" || fail "template marker: $m"
 done
 
@@ -219,7 +219,7 @@ assert_eq "crlf-template: exactly one block heading (no unbounded dup)" 1 "$(cou
 BAD_TMPL="$SCRATCH/template.nested.md"
 {
 	echo "## Working the Loop (every agent — interactive too, not just skills)"; echo ""
-	echo "intro — subscribe to the event log; 👍; local replica."; echo ""
+	echo "intro — subscribe to the event log; a clean pass is a reaction, not a review object; local replica."; echo ""
 	echo "### Nested heading that breaks the boundary"; echo ""; echo "body"
 } >"$BAD_TMPL"
 R="$SCRATCH/nestedtmpl"; mkdir -p "$R"; printf '# CLAUDE.md\n' >"$R/CLAUDE.md"
@@ -227,7 +227,7 @@ bash "$SCRIPT" --quiet --repo "$R" --template "$BAD_TMPL" --fix >/dev/null 2>&1
 assert_eq "nested-heading template: refused (exit 3)" 3 "$?"
 
 # ---- 6. all three reflex markers land in the seeded doc ------------------------
-for m in "subscribe to the event log" "👍" "local replica"; do
+for m in "subscribe to the event log" "reaction, not a review object" "local replica"; do
 	assert_file_has "seeded markers: $m" "$m" "$SCRATCH/mono/CLAUDE.md"
 done
 

@@ -73,7 +73,9 @@ fi
 # would be appended without bound.
 BLOCK="$(tr -d '\r' <"$TEMPLATE" | awk 'f==0 && /^<!--/{f=1} f==1{ if (/-->/) f=2; next } f==2 && /^[[:space:]]*$/ && seen==0 {seen=1; next} {print}')"
 # Guard: the three reflex markers must survive extraction (template integrity).
-for marker in 'subscribe to the event log' '👍' 'local replica'; do
+# The review marker is a stable ASCII phrase, not the raw 👍 emoji — an emoji is a
+# fragile presence token (encoding normalization could silently drop it and fail §9).
+for marker in 'subscribe to the event log' 'reaction, not a review object' 'local replica'; do
 	printf '%s' "$BLOCK" | grep -qiF "$marker" || { echo "ensure-agent-house-rules: template missing marker '$marker' after comment strip — refusing" >&2; exit 3; }
 done
 # Guard: the block body must contain no nested ATX heading. The section boundary

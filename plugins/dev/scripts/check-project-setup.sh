@@ -587,8 +587,8 @@ if [[ ${#AGENT_DOCS[@]} -gt 0 ]]; then
 	missing_reflex=()
 	grep -qiE 'subscribe to the event log|wait-for-github' "${AGENT_DOCS[@]}" ||
 		missing_reflex+=("event-log-over-polling (waiting on GitHub/CI/Linear state → catalyst-dev:wait-for-github / catalyst-dev:monitor-events, don't poll)")
-	grep -qE '👍' "${AGENT_DOCS[@]}" ||
-		missing_reflex+=("automated-review 👍-reaction clean pass (detect via reactions/comments, not only the reviews API)")
+	grep -qiF 'reaction, not a review object' "${AGENT_DOCS[@]}" ||
+		missing_reflex+=("automated-review clean pass is a reaction, not a review object (detect via reactions/comments, not only the reviews API)")
 	grep -qiE 'linear_read_ticket|local replica' "${AGENT_DOCS[@]}" ||
 		missing_reflex+=("single-ticket Linear reads → local replica (linear_read_ticket <ID>, not bare linearis)")
 	if [[ ${#missing_reflex[@]} -eq 0 ]]; then
