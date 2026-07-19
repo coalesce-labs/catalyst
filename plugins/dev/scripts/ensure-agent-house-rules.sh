@@ -103,39 +103,61 @@ CLA="$REPO/CLAUDE.md"
 AG="$REPO/AGENTS.md"
 
 # --- helpers -----------------------------------------------------------------
-# print a file with fenced code regions blanked, CRLF + trailing whitespace
-# stripped — for heading / import detection that must ignore anything inside
-# ``` / ~~~ fences. The rstrip is done here in awk (byte-safe) rather than via a
-# downstream `sed 's/[[:space:]]*$//'`, which on BSD/macOS mangles multibyte UTF-8
-# (e.g. the em-dash in the heading), causing a silent detection miss.
+# print a file with fenced code regions blanked (and, with mode "1", HTML-comment
+# regions too), CRLF + trailing whitespace stripped — for heading / import / marker
+# detection that must ignore anything inside ``` / ~~~ fences (and comments). Fence
+# tracking is CommonMark-ish: an opener is ≥3 of ` or ~ (≤3-space indent) and only a
+# closer of the SAME char and ≥ the opener length closes it, so a 3-backtick line
+# inside a 4-backtick fence does not mis-toggle. The rstrip is done here in awk
+# (byte-safe) rather than a downstream `sed`, which on BSD/macOS mangles multibyte
+# UTF-8 (e.g. the em-dash in the heading), causing a silent detection miss.
 defenced() {
-	awk 'function ls3(s){ for(k=0;k<3;k++){ if(substr(s,1,1)==" ") s=substr(s,2); else break } return s }
+	awk -v sc="${2:-0}" '
+		function ls3(s){ for(k=0;k<3;k++){ if(substr(s,1,1)==" ") s=substr(s,2); else break } return s }
 		{ line=$0; sub(/\r$/,"",line); sub(/[[:space:]]+$/,"",line); ls=ls3(line)
-		if (ls ~ /^(```|~~~)/) { fence=!fence; print ""; next }
-		if (fence) { print ""; next }
-		print line }' "$1"
+			if (sc=="1") {
+				if (incomment) { if (line ~ /-->/) incomment=0; print ""; next }
+				if (ls ~ /^<!--/) { if (line !~ /-->/) incomment=1; print ""; next }
+			}
+			if (!infence) {
+				if (match(ls, /^(`+|~+)/)) { d=substr(ls,RSTART,RLENGTH)
+					if (length(d) >= 3) { infence=1; fchar=substr(d,1,1); flen=length(d); print ""; next } }
+			} else {
+				if (match(ls, /^(`+|~+)/) && ls ~ /^[`~]+[[:space:]]*$/) { d=substr(ls,RSTART,RLENGTH)
+					if (substr(d,1,1)==fchar && length(d) >= flen) { infence=0; print ""; next } }
+				print ""; next
+			}
+			print line }' "$1"
 }
-has_managed() { [[ -f "$1" ]] && grep -qF "$BEGIN_MARK" "$1"; }
-has_legacy()  { [[ -f "$1" ]] && defenced "$1" | grep -Fxq "$HEADING"; }
+# Detection captures defenced output into a here-string before grepping, so a
+# match never closes the pipe early and SIGPIPEs awk under `set -o pipefail`
+# (which would flip the result to a false negative on a large doc).
+has_managed() { [[ -f "$1" ]] || return 1; grep -qF "$BEGIN_MARK" <<<"$(defenced "$1")"; }
+has_legacy()  { [[ -f "$1" ]] || return 1; grep -Fxq "$HEADING" <<<"$(defenced "$1" 1)"; }
 has_block()   { has_managed "$1" || has_legacy "$1"; }
-claude_imports_agents() { [[ -f "$CLA" ]] && defenced "$CLA" | grep -Fxq "$BRIDGE_LINE"; }
+claude_imports_agents() { [[ -f "$CLA" ]] || return 1; grep -Fxq "$BRIDGE_LINE" <<<"$(defenced "$CLA" 1)"; }
 
 readlink_f() { readlink -f "$1" 2>/dev/null || realpath "$1" 2>/dev/null || python3 -c 'import os,sys;print(os.path.realpath(sys.argv[1]))' "$1" 2>/dev/null || echo "$1"; }
 
-# write CONTENT-FILE into DEST, preserving a symlink (write through to its target)
-# and the destination's existing mode (truncate+write keeps inode/mode; a plain
-# `mv` would replace the symlink with a regular file and reset mode to mktemp's).
-# Deliberate tradeoff: truncate-in-place is NOT atomic — a mid-write I/O failure
-# (disk full) after truncation could leave the doc truncated. The common failure
-# (read-only) is fail-safe: the redirection can't open the file so `cat` never runs
-# and the original is intact. Atomicity is traded for symlink/inode/mode fidelity,
-# which the automated review required; an agent-instructions doc is regenerable.
-# Note: kept lines are emitted verbatim, so rewriting a CRLF doc yields LF for the
-# block amid CRLF surroundings — cosmetic only (detection/idempotency unaffected).
+# Write CONTENT-FILE into DEST. Regular file → atomic temp-in-same-dir + rename,
+# preserving the destination's mode (so a mid-write I/O failure can't truncate the
+# doc). Symlink → write through to the resolved target to preserve the link (the one
+# non-atomic case; a symlinked instruction doc pointing at shared content is rare and
+# the doc is regenerable). New file → plain write.
 write_through() {
-	local src="$1" dest="$2" real="$2"
-	[[ -L "$dest" ]] && real="$(readlink_f "$dest")"
-	cat "$src" >"$real" || die "failed to write ${dest#"$REPO"/} (read-only?)"
+	local src="$1" dest="$2"
+	if [[ -L "$dest" ]]; then
+		local real; real="$(readlink_f "$dest")"
+		cat "$src" >"$real" || die "failed to write ${dest#"$REPO"/} via symlink (read-only?)"
+	elif [[ -f "$dest" ]]; then
+		local mode tmp; mode="$(stat -c '%a' "$dest" 2>/dev/null || stat -f '%Lp' "$dest" 2>/dev/null || echo '')"
+		tmp="$(mktemp "$(dirname "$dest")/.house-rules.XXXXXX" 2>/dev/null)" || die "cannot create temp next to ${dest#"$REPO"/} (read-only dir?)"
+		if ! cat "$src" >"$tmp"; then rm -f "$tmp"; die "failed to stage ${dest#"$REPO"/}"; fi
+		[[ -n "$mode" ]] && chmod "$mode" "$tmp" 2>/dev/null
+		mv "$tmp" "$dest" || { rm -f "$tmp"; die "failed to write ${dest#"$REPO"/} (read-only dir?)"; }
+	else
+		cat "$src" >"$dest" || die "failed to write ${dest#"$REPO"/}"
+	fi
 }
 create_agents_core() {
 	printf '# AGENTS.md\n\nPortable, tool-agnostic guidance for AI coding agents working in this repository.\n' >"$AG" || die "failed to create $AG"
@@ -173,16 +195,29 @@ if [[ -n "$OTHER" && -f "$OTHER" ]] && has_block "$OTHER"; then
 fi
 
 # --- convergence / duplicate guards ------------------------------------------
-MANAGED_COUNT=0
-[[ -f "$TARGET" ]] && MANAGED_COUNT="$(grep -cF "$BEGIN_MARK" "$TARGET" 2>/dev/null)"
-[[ -n "$MANAGED_COUNT" ]] || MANAGED_COUNT=0
-if [[ "$MANAGED_COUNT" -gt 1 ]]; then
-	die "${TARGET_REL} has ${MANAGED_COUNT} '${BEGIN_MARK}' sentinels — refusing to auto-edit an ambiguous doc. Collapse to one and re-run." 4
+# Counts are taken OUTSIDE fenced examples (a doc that documents the sentineled
+# block in a code fence must not be mistaken for a live managed block).
+MANAGED_BEGIN=0 MANAGED_END=0
+if [[ -f "$TARGET" ]]; then
+	MANAGED_BEGIN="$(defenced "$TARGET" | grep -cF "$BEGIN_MARK")"
+	MANAGED_END="$(defenced "$TARGET" | grep -cF "$END_MARK")"
 fi
+[[ -n "$MANAGED_BEGIN" ]] || MANAGED_BEGIN=0
+[[ -n "$MANAGED_END" ]] || MANAGED_END=0
+if [[ "$MANAGED_BEGIN" -gt 1 || "$MANAGED_END" -gt 1 ]]; then
+	die "${TARGET_REL} has ${MANAGED_BEGIN} begin / ${MANAGED_END} end house-rules sentinels — refusing to auto-edit an ambiguous doc. Collapse to one pair and re-run." 4
+fi
+# An UNPAIRED begin sentinel (begin without a matching end) would make the managed
+# replace skip through EOF and delete everything after it — refuse loudly instead.
+if [[ "$MANAGED_BEGIN" -ne "$MANAGED_END" ]]; then
+	die "${TARGET_REL} has an unpaired house-rules sentinel (${MANAGED_BEGIN} begin, ${MANAGED_END} end) — refusing. Restore a matching begin/end pair (or remove both) and re-run." 4
+fi
+MANAGED_COUNT="$MANAGED_BEGIN"
 # Same guard for LEGACY (un-sentineled) headings: migration only converts the
 # first, so >1 would orphan the rest — refuse rather than silently half-migrate.
+# Fence- AND comment-aware (a heading shown inside an HTML comment is not live).
 if [[ "$MANAGED_COUNT" -eq 0 && -f "$TARGET" ]]; then
-	LEGACY_COUNT="$(defenced "$TARGET" | grep -Fxc "$HEADING")"
+	LEGACY_COUNT="$(defenced "$TARGET" 1 | grep -Fxc "$HEADING")"
 	[[ -n "$LEGACY_COUNT" ]] || LEGACY_COUNT=0
 	if [[ "$LEGACY_COUNT" -gt 1 ]]; then
 		die "${TARGET_REL} has ${LEGACY_COUNT} legacy '${HEADING}' sections — refusing to auto-edit an ambiguous doc. Collapse to one and re-run." 4
@@ -253,7 +288,11 @@ legacy)
 	# ends at the next ATX heading OR a setext-underlined heading (a non-blank line
 	# whose next line is all '=' or '-') OR EOF, all fence-aware. \r- and
 	# trailing-whitespace-tolerant; kept lines are emitted verbatim.
-	awk -v heading="$HEADING" -v wf="$WRAPFILE" '
+	# CAP guards against silent over-deletion: a real house-rules block is ~30 lines,
+	# so if no boundary (heading/setext/EOF) appears within CAP lines of the heading
+	# the "section" is implausible — refuse (exit 3) rather than delete a huge span of
+	# un-headed user prose. The canonical block is heading-bounded in every real repo.
+	awk -v heading="$HEADING" -v wf="$WRAPFILE" -v cap=60 '
 		function rstrip(s){ sub(/[[:space:]]+$/,"",s); return s }
 		function ls3(s){ for(k=0;k<3;k++){ if(substr(s,1,1)==" ") s=substr(s,2); else break } return s }
 		{ raw[NR]=$0; l=$0; sub(/\r$/,"",l); norm[NR]=l }
@@ -274,11 +313,16 @@ legacy)
 				if (ls ~ /^#+[[:space:]]/){ ei=i; break }
 				if (i<n && norm[i] ~ /[^[:space:]]/ && ls3(norm[i+1]) ~ /^(=+|-+)[[:space:]]*$/){ ei=i; break }
 			}
+			if (ei - hi > cap) { for(i=1;i<=n;i++) print raw[i]; exit 3 }   # no clear boundary → refuse
 			for (i=1;i<hi;i++) print raw[i]
 			printf "%s", w
 			if (ei<=n){ print ""; for (i=ei;i<=n;i++) print raw[i] }
 		}
-	' "$TARGET" >"$TMP" || die "failed to migrate ${TARGET_REL}"
+	' "$TARGET" >"$TMP"; awk_rc=$?
+	if [[ $awk_rc -eq 3 ]]; then
+		die "${TARGET_REL}: the legacy 'Working the Loop' section has no clear boundary within 60 lines — refusing to migrate (would risk deleting un-headed user content). Wrap the block in <!-- catalyst-house-rules:begin/end --> sentinels by hand, then re-run." 4
+	fi
+	[[ $awk_rc -eq 0 ]] || die "failed to migrate ${TARGET_REL}"
 	write_through "$TMP" "$TARGET"
 	say "✓ migrated legacy 'Working the Loop' block to sentinels in ${TARGET_REL}"
 	;;

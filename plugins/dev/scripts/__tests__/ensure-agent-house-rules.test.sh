@@ -122,22 +122,23 @@ run "$R" --fix >/dev/null
 [[ -L "$R/CLAUDE.md" ]] && pass "symlink: CLAUDE.md still a symlink" || fail "symlink: replaced with regular file"
 has "symlink: shared target updated" "$BEGIN" "$R/shared/CLAUDE.md"
 
-# 13. permission preservation
+# 13. permission preservation (mode read GNU-first then BSD — `stat -f` means
+# something different on GNU/Linux and would return the wrong value)
 R="$SCRATCH/perm"; mkdir -p "$R"; printf '# CLAUDE.md\n\n## Setup\nx\n' >"$R/CLAUDE.md"; chmod 0640 "$R/CLAUDE.md"
 run "$R" --fix >/dev/null
-mode="$(stat -f '%Lp' "$R/CLAUDE.md" 2>/dev/null || stat -c '%a' "$R/CLAUDE.md" 2>/dev/null)"
+mode="$(stat -c '%a' "$R/CLAUDE.md" 2>/dev/null || stat -f '%Lp' "$R/CLAUDE.md" 2>/dev/null)"
 assert_eq "perm: mode preserved (640)" "640" "$mode"
 
-# 14. read-only file → nonzero exit, unchanged. Skipped under root: DAC perms
-# don't stop uid 0 from writing, so the failure can't be provoked reliably in a
-# root CI container.
+# 14. write into a read-only DIR → nonzero exit, unchanged. (The atomic path stages
+# a temp in the same dir and renames, so a read-only DIR is the real failure mode.)
+# Skipped under root: DAC perms don't stop uid 0, so it can't be provoked in root CI.
 if [[ "${EUID:-$(id -u)}" -eq 0 ]]; then
-	echo "  SKIP: read-only-file test (running as root — perms don't apply)"
+	echo "  SKIP: read-only-dir test (running as root — perms don't apply)"
 else
 	R="$SCRATCH/ro"; mkdir -p "$R"; printf '# CLAUDE.md\n\n## Setup\nx\n' >"$R/CLAUDE.md"; before="$(cat "$R/CLAUDE.md")"
-	chmod 0444 "$R/CLAUDE.md"; run "$R" --fix >/dev/null 2>&1; rc=$?; chmod 0644 "$R/CLAUDE.md"
-	[[ "$rc" -ne 0 ]] && pass "read-only file: nonzero exit (rc=$rc)" || fail "read-only file: exited 0"
-	assert_eq "read-only file: unchanged" "$before" "$(cat "$R/CLAUDE.md")"
+	chmod 0555 "$R"; run "$R" --fix >/dev/null 2>&1; rc=$?; chmod 0755 "$R"
+	[[ "$rc" -ne 0 ]] && pass "read-only dir: nonzero exit (rc=$rc)" || fail "read-only dir: exited 0"
+	assert_eq "read-only dir: unchanged" "$before" "$(cat "$R/CLAUDE.md")"
 fi
 
 # 14b. legacy migration boundary honors a CommonMark-indented ATX heading
@@ -204,6 +205,50 @@ R="$SCRATCH/legdup"; mkdir -p "$R"
 { echo "# CLAUDE.md"; echo ""; echo "## Working the Loop (every agent — interactive too, not just skills)"; echo "a"; echo ""; echo "## Working the Loop (every agent — interactive too, not just skills)"; echo "b"; } >"$R/CLAUDE.md"
 run "$R" --fix >/dev/null 2>&1; assert_eq "legacy duplicate: refuse (rc=4)" 4 "$?"
 assert_eq "legacy duplicate: untouched (no sentinel added)" 0 "$(count "$R/CLAUDE.md" "$BEGIN")"
+
+# 24. unpaired begin sentinel → refuse (would otherwise delete to EOF on replace)
+R="$SCRATCH/unpaired"; mkdir -p "$R"
+{ echo "# CLAUDE.md"; echo "<!-- catalyst-house-rules:begin -->"; echo "## Working the Loop (x)"; echo "body"; echo ""; echo "## Important user section"; echo "MUST NOT be deleted"; } >"$R/CLAUDE.md"
+run "$R" --fix >/dev/null 2>&1; assert_eq "unpaired sentinel: refuse (rc=4)" 4 "$?"
+has "unpaired sentinel: user section intact" "MUST NOT be deleted" "$R/CLAUDE.md"
+
+# 25. a fully-sentineled block INSIDE a fenced example is not the live block
+R="$SCRATCH/fencesent"; mkdir -p "$R"
+{ echo "# CLAUDE.md"; echo ""; echo '```md'; echo "<!-- catalyst-house-rules:begin -->"; echo "## Working the Loop (doc example)"; echo "<!-- catalyst-house-rules:end -->"; echo '```'; echo ""; echo "## Real"; echo "real"; } >"$R/CLAUDE.md"
+run "$R" --fix >/dev/null
+has "fenced-sentinel: example preserved" "doc example" "$R/CLAUDE.md"
+assert_eq "fenced-sentinel: a real (live) block was added" 2 "$(count "$R/CLAUDE.md" "$BEGIN")"
+
+# 26. a legacy heading inside an HTML comment is not treated as live
+R="$SCRATCH/comhead"; mkdir -p "$R"
+{ echo "# CLAUDE.md"; echo ""; echo "<!--"; echo "## Working the Loop (every agent — interactive too, not just skills)"; echo "example in a comment"; echo "-->"; echo ""; echo "## Real"; echo "real"; } >"$R/CLAUDE.md"
+run "$R" --fix >/dev/null
+has "comment-heading: comment example intact" "example in a comment" "$R/CLAUDE.md"
+has "comment-heading: real block appended" "$BEGIN" "$R/CLAUDE.md"
+
+# 27. 4-backtick fence containing a triple-backtick line is one fence (no mis-toggle)
+R="$SCRATCH/bt4"; mkdir -p "$R"
+{ echo "# CLAUDE.md"; echo ""; echo '````md'; echo '```'; echo "@AGENTS.md"; echo '```'; echo '````'; echo ""; echo "## Real"; echo "r"; } >"$R/CLAUDE.md"
+# the @AGENTS.md inside the 4-backtick fence must NOT be read as a live bridge import,
+# so this monolithic CLAUDE.md is targeted (block lands in CLAUDE.md, no AGENTS.md made)
+run "$R" --fix >/dev/null
+has "bt4: block in CLAUDE.md (fenced @AGENTS.md ignored)" "$BEGIN" "$R/CLAUDE.md"
+[[ ! -e "$R/AGENTS.md" ]] && pass "bt4: no AGENTS.md created (fenced import ignored)" || fail "bt4: AGENTS.md wrongly created"
+
+# 28. large doc, legacy heading near the top, boundary present → detected + migrated
+# (guards against a pipefail/SIGPIPE detection miss on a big file)
+R="$SCRATCH/big"; mkdir -p "$R"
+{ echo "# CLAUDE.md"; echo ""; echo "## Working the Loop (every agent — interactive too, not just skills)"; echo "oldbody"; echo ""; echo "## After"; for i in $(seq 1 4000); do echo "filler line $i lorem ipsum dolor sit amet"; done; } >"$R/CLAUDE.md"
+run "$R" --fix >/dev/null
+assert_eq "big-doc: legacy heading detected+migrated (1 sentinel, not appended)" 1 "$(count "$R/CLAUDE.md" "$BEGIN")"
+has "big-doc: content after boundary preserved" "filler line 4000" "$R/CLAUDE.md"
+
+# 29. legacy block with NO boundary within the cap → refuse (no over-deletion)
+R="$SCRATCH/nobound"; mkdir -p "$R"
+{ echo "# CLAUDE.md"; echo ""; echo "## Working the Loop (every agent — interactive too, not just skills)"; echo "oldbody"; for i in $(seq 1 100); do echo "PRECIOUS un-headed line $i"; done; } >"$R/CLAUDE.md"
+run "$R" --fix >/dev/null 2>&1; assert_eq "no-boundary: refuse migration (rc=4)" 4 "$?"
+assert_eq "no-boundary: no sentinel added" 0 "$(count "$R/CLAUDE.md" "$BEGIN")"
+has "no-boundary: un-headed content preserved" "PRECIOUS un-headed line 100" "$R/CLAUDE.md"
 
 echo ""
 echo "ensure-agent-house-rules.test.sh: ${PASSES} passed, ${FAILURES} failed"

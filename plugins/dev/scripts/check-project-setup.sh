@@ -584,10 +584,11 @@ AGENT_DOCS=()
 [[ -f AGENTS.md ]] && AGENT_DOCS+=("AGENTS.md")
 [[ -f CLAUDE.md ]] && AGENT_DOCS+=("CLAUDE.md")
 if [[ ${#AGENT_DOCS[@]} -gt 0 ]]; then
-	# Primary signal: the stable seeder sentinel (survives any heading/prose
-	# rewording). Fallback for a legacy block seeded before sentinels existed: the
-	# three reflex marker phrases. Either → present.
-	if grep -qF 'catalyst-house-rules:begin' "${AGENT_DOCS[@]}"; then
+	# Primary signal: a COMPLETE seeder sentinel pair (survives any heading/prose
+	# rewording). A lone begin marker is not enough — an unpaired/half-written block
+	# isn't a real managed block. Fallback for a legacy block seeded before sentinels
+	# existed: the three reflex marker phrases. Either → present.
+	if grep -qF 'catalyst-house-rules:begin' "${AGENT_DOCS[@]}" && grep -qF 'catalyst-house-rules:end' "${AGENT_DOCS[@]}"; then
 		echo -e "${GREEN}Agent house rules present${NC} — ${AGENT_DOCS[*]} carries the managed 'Working the Loop' block."
 	else
 		missing_reflex=()
