@@ -1,8 +1,13 @@
 #!/usr/bin/env bash
-# Shell tests for setup-plugin-source.sh (CTL-992): provisions a pristine
-# main-only plugin-source checkout and registers it as
-# catalyst.orchestration.pluginDirs in the machine config. Idempotent;
-# refuses linked worktrees and non-main branches.
+# Shell tests for setup-plugin-source.sh: provisions a pristine main-only
+# plugin-source checkout, registers it as catalyst.orchestration.pluginDirs in the
+# machine config (CTL-992), and — the skills-dir-plugin migration — points every
+# session type Claude Code resolves plugins for at that same live checkout via
+# user-scope ~/.claude/skills symlinks, retiring the interactive `claude()`
+# --plugin-dir wrapper and (full mode) the version-keyed `catalyst` marketplace.
+# The pluginDirs machine-config key STAYS: the daemon / SDK / Codex executors load
+# plugins from it (the Agent SDK does not auto-load ~/.claude/skills plugins).
+# Idempotent; refuses linked worktrees and non-main branches.
 # Run: bash plugins/dev/scripts/__tests__/setup-plugin-source.test.sh
 
 set -uo pipefail
@@ -16,6 +21,26 @@ FAILURES=0
 PASSES=0
 SCRATCH="$(mktemp -d)"
 trap 'rm -rf "$SCRATCH"' EXIT
+
+# A stub `claude` so the marketplace-retirement CLI calls are deterministic and
+# never touch the tester's real plugin state: it reports an empty plugin +
+# marketplace list, so uninstall / marketplace-remove are never reached. The jq
+# enabledPlugins-clearing path (which needs no `claude`) still runs for real.
+STUBBIN="${SCRATCH}/stubbin"
+mkdir -p "$STUBBIN"
+cat > "${STUBBIN}/claude" <<'STUB'
+#!/usr/bin/env bash
+# args: plugin list | plugin marketplace list|remove | plugin uninstall <p> -y
+if [[ "${1:-}" == "plugin" ]]; then
+  case "${2:-}" in
+    list) exit 0 ;;                       # nothing installed
+    marketplace) exit 0 ;;                # `marketplace list` empty; `remove` no-op
+    uninstall) exit 0 ;;
+  esac
+fi
+exit 0
+STUB
+chmod +x "${STUBBIN}/claude"
 
 check() {
   local name="$1"; shift
@@ -32,14 +57,19 @@ check() {
 
 GITC="git -c user.email=t@t -c user.name=t -c commit.gpgsign=false -c init.defaultBranch=main"
 
-# make_origin NAME → bare origin.git with plugins/dev seeded; sets ORIGIN, SEED.
+# make_origin NAME → bare origin.git with plugins/dev + plugins/pm seeded (each
+# with a .claude-plugin/plugin.json carrying its own `name`); sets ORIGIN, SEED.
+# Two plugins so the skills-dir cases can assert EVERY plugin is symlinked (keyed
+# by manifest name, not dir name — catalyst-dev/catalyst-pm, not dev/pm).
 make_origin() {
   local base="${SCRATCH}/orig_$1"
   mkdir -p "${base}/seed"
   $GITC -C "${base}/seed" init -q
-  mkdir -p "${base}/seed/plugins/dev/.claude-plugin"
+  mkdir -p "${base}/seed/plugins/dev/.claude-plugin" "${base}/seed/plugins/pm/.claude-plugin"
   echo '{"name":"catalyst-dev","version":"1.0.0"}' \
     > "${base}/seed/plugins/dev/.claude-plugin/plugin.json"
+  echo '{"name":"catalyst-pm","version":"1.0.0"}' \
+    > "${base}/seed/plugins/pm/.claude-plugin/plugin.json"
   echo "v1" > "${base}/seed/plugins/dev/marker.txt"
   $GITC -C "${base}/seed" add -A
   $GITC -C "${base}/seed" commit -qm "initial"
@@ -57,26 +87,43 @@ advance_origin() {
 }
 
 # run_setup MACHINE_CFG PATH_ARG REPO_URL [extra args...]
-# Passes --no-interactive-wrapper so the pluginDirs-registration tests never touch
-# the tester's real shell rc files. The wrapper behavior is covered separately by
-# the wrapper_* cases below (which invoke the script with an isolated $HOME).
+# Passes --no-interactive-wrapper so the pluginDirs-registration tests stay in the
+# git-reconstructable path (no rc-file / marketplace cutover). Skills-dir + cutover
+# behavior is covered by the *_hb cases below (isolated $HOME + stub `claude`).
+# HOME is ALSO isolated here: --no-interactive-wrapper still creates the (reversible)
+# ~/.claude/skills symlinks, so without an isolated HOME these config-focused cases
+# would clobber the tester's real ~/.claude/skills. Each run gets a fresh throwaway.
 run_setup() {
   local mcfg="$1" path_arg="$2" url="$3"; shift 3
+  local rh; rh="$(mktemp -d "${SCRATCH}/rh.XXXXXX")"
   env PATH="$REAL_PATH" CATALYST_MACHINE_CONFIG="$mcfg" GIT_TERMINAL_PROMPT=0 \
+    HOME="$rh" \
     bash "$SETUP" --path "$path_arg" --repo-url "$url" --no-interactive-wrapper "$@"
 }
 
-# run_setup_hb — like run_setup but with an isolated HOME/ZDOTDIR/SHELL and WITHOUT
-# --no-interactive-wrapper, so the interactive `claude` wrapper install is exercised
-# against a throwaway home dir instead of the tester's real rc files.
+# run_setup_hb — isolated HOME/ZDOTDIR/SHELL, stub `claude` prepended to PATH, and
+# (by default) FULL cutover mode, so the skills-dir symlinks + wrapper removal +
+# marketplace retirement run against a throwaway home instead of the tester's real
+# state. Pass --no-interactive-wrapper as an extra arg to exercise acquire mode.
 run_setup_hb() {
   local home="$1" shell="$2" mcfg="$3" path_arg="$4" url="$5"; shift 5
-  env PATH="$REAL_PATH" CATALYST_MACHINE_CONFIG="$mcfg" GIT_TERMINAL_PROMPT=0 \
+  env PATH="${STUBBIN}:$REAL_PATH" CATALYST_MACHINE_CONFIG="$mcfg" GIT_TERMINAL_PROMPT=0 \
     HOME="$home" ZDOTDIR="$home" SHELL="$shell" \
     bash "$SETUP" --path "$path_arg" --repo-url "$url" "$@"
 }
 
-echo "setup-plugin-source (CTL-992) tests"
+# A verbatim copy of the managed wrapper block markers, for seeding a legacy rc.
+legacy_wrapper_block() {
+  cat <<'BLK'
+# >>> catalyst plugin-source (managed) >>>
+claude() {
+  command claude --plugin-dir /whatever "$@"
+}
+# <<< catalyst plugin-source (managed) <<<
+BLK
+}
+
+echo "setup-plugin-source tests"
 
 # ── 1. fresh clone → clones + registers pluginDirs in machine config ────────
 make_origin fresh
@@ -184,74 +231,118 @@ t8() {
 }
 check "creates the machine config (and parent dir) when absent" t8
 
-# ── 9. zsh: interactive wrapper written to ~/.zshrc (isolated HOME) ──────────
-make_origin wrapzsh
+# ── 9. skills-dir symlinks created for EVERY plugin; NO wrapper installed ────
+make_origin skzsh
 MCFG9="${SCRATCH}/mcfg9.json"
 HOME9="${SCRATCH}/home9"; mkdir -p "$HOME9"
 CO9="${SCRATCH}/co9"
 t9() {
   run_setup_hb "$HOME9" "/bin/zsh" "$MCFG9" "$CO9" "$ORIGIN" >/dev/null 2>&1 || return 1
-  [[ -f "${HOME9}/.zshrc" ]] || return 1
-  grep -q ">>> catalyst plugin-source" "${HOME9}/.zshrc" || return 1
-  # rerun stays idempotent: exactly one managed block.
-  run_setup_hb "$HOME9" "/bin/zsh" "$MCFG9" "$CO9" "$ORIGIN" >/dev/null 2>&1 || return 1
-  [[ "$(grep -c '>>> catalyst plugin-source' "${HOME9}/.zshrc")" == "1" ]]
+  [[ -L "${HOME9}/.claude/skills/catalyst-dev" ]] || return 1
+  [[ -L "${HOME9}/.claude/skills/catalyst-pm" ]] || return 1
+  [[ "$(readlink "${HOME9}/.claude/skills/catalyst-dev")" == "${CO9}/plugins/dev" ]] || return 1
+  [[ "$(readlink "${HOME9}/.claude/skills/catalyst-pm")" == "${CO9}/plugins/pm" ]] || return 1
+  # the script no longer installs the interactive --plugin-dir wrapper
+  ! { [[ -f "${HOME9}/.zshrc" ]] && grep -q ">>> catalyst plugin-source" "${HOME9}/.zshrc"; }
 }
-check "zsh: installs idempotent interactive wrapper in ~/.zshrc" t9
+check "creates ~/.claude/skills symlinks for every plugin; installs no wrapper" t9
 
-# ── 10. bash: interactive wrapper written to ~/.bashrc (isolated HOME) ───────
-make_origin wrapbash
+# ── 10. skills-dir symlinks idempotent + repoint a stale link ───────────────
+make_origin skidem
 MCFG10="${SCRATCH}/mcfg10.json"
 HOME10="${SCRATCH}/home10"; mkdir -p "$HOME10"
 CO10="${SCRATCH}/co10"
 t10() {
-  run_setup_hb "$HOME10" "/bin/bash" "$MCFG10" "$CO10" "$ORIGIN" >/dev/null 2>&1 || return 1
-  grep -q ">>> catalyst plugin-source" "${HOME10}/.bashrc" || return 1
-  [[ ! -e "${HOME10}/.zshrc" ]]
+  run_setup_hb "$HOME10" "/bin/zsh" "$MCFG10" "$CO10" "$ORIGIN" >/dev/null 2>&1 || return 1
+  # rerun: still exactly one correct symlink each (idempotent, no dup/error)
+  run_setup_hb "$HOME10" "/bin/zsh" "$MCFG10" "$CO10" "$ORIGIN" >/dev/null 2>&1 || return 1
+  [[ "$(readlink "${HOME10}/.claude/skills/catalyst-dev")" == "${CO10}/plugins/dev" ]] || return 1
+  # point it somewhere stale, rerun → repointed to the correct target
+  ln -sfn /tmp/stale "${HOME10}/.claude/skills/catalyst-dev"
+  run_setup_hb "$HOME10" "/bin/zsh" "$MCFG10" "$CO10" "$ORIGIN" >/dev/null 2>&1 || return 1
+  [[ "$(readlink "${HOME10}/.claude/skills/catalyst-dev")" == "${CO10}/plugins/dev" ]]
 }
-check "bash: installs interactive wrapper in ~/.bashrc (not ~/.zshrc)" t10
+check "skills-dir symlinks are idempotent and repoint a stale link" t10
 
-# ── 11. --no-interactive-wrapper: leaves rc files untouched ──────────────────
-make_origin nowrap
+# ── 11. --no-interactive-wrapper: symlinks + pluginDirs, but NO cutover ──────
+make_origin acquire
 MCFG11="${SCRATCH}/mcfg11.json"
-HOME11="${SCRATCH}/home11"; mkdir -p "$HOME11"
+HOME11="${SCRATCH}/home11"; mkdir -p "${HOME11}/.claude"
+legacy_wrapper_block > "${HOME11}/.zshrc"                       # pre-existing wrapper
+printf '%s\n' '{"enabledPlugins":{"catalyst-dev@catalyst":true,"other@x":true}}' \
+  > "${HOME11}/.claude/settings.json"
 CO11="${SCRATCH}/co11"
 t11() {
   run_setup_hb "$HOME11" "/bin/zsh" "$MCFG11" "$CO11" "$ORIGIN" --no-interactive-wrapper >/dev/null 2>&1 || return 1
-  [[ ! -e "${HOME11}/.zshrc" && ! -e "${HOME11}/.bashrc" ]] || return 1
-  # config write still happened.
-  [[ "$(jq -r '.catalyst.orchestration.pluginDirs' "$MCFG11")" == "${CO11}/plugins/dev" ]]
+  # symlinks + pluginDirs DID run (reconstructable path)
+  [[ -L "${HOME11}/.claude/skills/catalyst-dev" ]] || return 1
+  [[ "$(jq -r '.catalyst.orchestration.pluginDirs' "$MCFG11")" == "${CO11}/plugins/dev" ]] || return 1
+  # cutover was SKIPPED: wrapper block untouched, enablement not cleared
+  grep -q ">>> catalyst plugin-source" "${HOME11}/.zshrc" || return 1
+  [[ "$(jq -r '.enabledPlugins["catalyst-dev@catalyst"]' "${HOME11}/.claude/settings.json")" == "true" ]]
 }
-check "--no-interactive-wrapper skips rc edit but still registers pluginDirs" t11
+check "--no-interactive-wrapper does symlinks+pluginDirs but skips the cutover" t11
 
-# ── 12. symlinked ~/.zshrc (dotfiles repo) preserved on rerun ────────────────
-make_origin wrapsymlink
+# ── 12. full mode strips a legacy wrapper block, preserving a symlinked rc ───
+make_origin wraprm
 MCFG12="${SCRATCH}/mcfg12.json"
 HOME12="${SCRATCH}/home12"; mkdir -p "${HOME12}/dotfiles"
-printf '# managed by dotfiles\n' > "${HOME12}/dotfiles/zshrc"
+{ printf '# managed by dotfiles\n'; legacy_wrapper_block; } > "${HOME12}/dotfiles/zshrc"
 ln -s "${HOME12}/dotfiles/zshrc" "${HOME12}/.zshrc"
 CO12="${SCRATCH}/co12"
 t12() {
   run_setup_hb "$HOME12" "/bin/zsh" "$MCFG12" "$CO12" "$ORIGIN" >/dev/null 2>&1 || return 1
-  run_setup_hb "$HOME12" "/bin/zsh" "$MCFG12" "$CO12" "$ORIGIN" >/dev/null 2>&1 || return 1
-  [[ -L "${HOME12}/.zshrc" ]] || return 1                       # still a symlink
-  [[ "$(grep -c '>>> catalyst plugin-source' "${HOME12}/.zshrc")" == "1" ]] || return 1
-  grep -q "managed by dotfiles" "${HOME12}/dotfiles/zshrc"      # wrote through the link
+  [[ -L "${HOME12}/.zshrc" ]] || return 1                                   # still a symlink
+  [[ "$(grep -c '>>> catalyst plugin-source' "${HOME12}/.zshrc")" == "0" ]] || return 1  # block removed
+  grep -q "managed by dotfiles" "${HOME12}/dotfiles/zshrc"                  # wrote through the link
 }
-check "symlinked ~/.zshrc is preserved (not replaced by a regular file)" t12
+check "full mode removes the legacy wrapper block, preserving a symlinked rc" t12
 
-# ── 13. read-only ~/.zshrc: wrapper is best-effort, pluginDirs still set ─────
-make_origin wrapreadonly
+# ── 13. read-only rc carrying a wrapper block: non-fatal; symlinks still set ─
+make_origin wrapro
 MCFG13="${SCRATCH}/mcfg13.json"
 HOME13="${SCRATCH}/home13"; mkdir -p "$HOME13"
-printf '# read only\n' > "${HOME13}/.zshrc"; chmod 0444 "${HOME13}/.zshrc"
+legacy_wrapper_block > "${HOME13}/.zshrc"; chmod 0444 "${HOME13}/.zshrc"
 CO13="${SCRATCH}/co13"
 t13() {
-  # Under the script's set -e, a read-only rc must NOT abort before the config write.
+  # A read-only rc must NOT abort before/around the essential config + symlink work.
   run_setup_hb "$HOME13" "/bin/zsh" "$MCFG13" "$CO13" "$ORIGIN" >/dev/null 2>&1 || return 1
-  [[ "$(jq -r '.catalyst.orchestration.pluginDirs' "$MCFG13")" == "${CO13}/plugins/dev" ]]
+  [[ "$(jq -r '.catalyst.orchestration.pluginDirs' "$MCFG13")" == "${CO13}/plugins/dev" ]] || return 1
+  [[ -L "${HOME13}/.claude/skills/catalyst-dev" ]]
 }
-check "read-only ~/.zshrc is non-fatal; pluginDirs still registered" t13
+check "read-only rc with a wrapper block is non-fatal; pluginDirs+symlinks set" t13
+
+# ── 14. an existing non-symlink at the skills path is left untouched ─────────
+make_origin skconflict
+MCFG14="${SCRATCH}/mcfg14.json"
+HOME14="${SCRATCH}/home14"; mkdir -p "${HOME14}/.claude/skills/catalyst-dev"
+printf 'user file\n' > "${HOME14}/.claude/skills/catalyst-dev/keep.txt"
+CO14="${SCRATCH}/co14"
+t14() {
+  run_setup_hb "$HOME14" "/bin/zsh" "$MCFG14" "$CO14" "$ORIGIN" >/dev/null 2>&1 || return 1
+  # the pre-existing non-symlink dir is untouched (never clobbered)
+  [[ ! -L "${HOME14}/.claude/skills/catalyst-dev" ]] || return 1
+  [[ -f "${HOME14}/.claude/skills/catalyst-dev/keep.txt" ]] || return 1
+  # the other plugin still gets its symlink
+  [[ -L "${HOME14}/.claude/skills/catalyst-pm" ]]
+}
+check "an existing non-symlink at ~/.claude/skills/<name> is left untouched" t14
+
+# ── 15. full mode clears catalyst-*@catalyst from user-scope enabledPlugins ──
+make_origin mktclear
+MCFG15="${SCRATCH}/mcfg15.json"
+HOME15="${SCRATCH}/home15"; mkdir -p "${HOME15}/.claude"
+printf '%s\n' '{"enabledPlugins":{"catalyst-dev@catalyst":true,"catalyst-pm@catalyst":true,"other@x":true}}' \
+  > "${HOME15}/.claude/settings.json"
+CO15="${SCRATCH}/co15"
+t15() {
+  run_setup_hb "$HOME15" "/bin/zsh" "$MCFG15" "$CO15" "$ORIGIN" >/dev/null 2>&1 || return 1
+  [[ "$(jq -r '.enabledPlugins["catalyst-dev@catalyst"] // "gone"' "${HOME15}/.claude/settings.json")" == "gone" ]] || return 1
+  [[ "$(jq -r '.enabledPlugins["catalyst-pm@catalyst"] // "gone"' "${HOME15}/.claude/settings.json")" == "gone" ]] || return 1
+  # unrelated enablement preserved
+  [[ "$(jq -r '.enabledPlugins["other@x"]' "${HOME15}/.claude/settings.json")" == "true" ]]
+}
+check "full mode clears catalyst-*@catalyst from user-scope enabledPlugins" t15
 
 echo ""
 TOTAL=$((PASSES + FAILURES))

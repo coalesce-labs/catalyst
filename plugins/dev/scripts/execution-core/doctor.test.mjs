@@ -37,6 +37,8 @@ import {
   checkPluginPullOwner,
   checkPluginSourceFreshness,
   classifyPluginSourceFreshness,
+  checkSkillsDirPlugins,
+  classifySkillsDirPlugins,
   checksForClass,
   installChecksForClass,
   summarize,
@@ -2810,6 +2812,155 @@ describe("checksForClass — checkPluginSourceFreshness registration (CTL-1421)"
   for (const cls of ["worker", "developer", "monitor"]) {
     it(`wires checkPluginSourceFreshness into the ${cls} suite`, () => {
       expect(src({ recognized: true, class: cls })).toContain("checkPluginSourceFreshness");
+    });
+  }
+});
+
+// ─── checkSkillsDirPlugins (skills-dir plugin migration) ─────────────────────
+// Asserts catalyst loads in-place via user-scope ~/.claude/skills symlinks (every
+// plugin in the checkout symlinked into it) with no legacy marketplace/wrapper
+// residue. worker=FAIL, dev/monitor=WARN. classifySkillsDirPlugins is the pure core.
+describe("classifySkillsDirPlugins — decision core", () => {
+  const ROOT = "/co/plugin-source";
+  // two plugins, both symlinked correctly, no residue — the clean end state
+  const EXPECTED = [
+    { name: "catalyst-dev", dir: `${ROOT}/plugins/dev` },
+    { name: "catalyst-pm", dir: `${ROOT}/plugins/pm` },
+  ];
+  const cleanLinks = {
+    "catalyst-dev": { kind: "symlink", target: `${ROOT}/plugins/dev` },
+    "catalyst-pm": { kind: "symlink", target: `${ROOT}/plugins/pm` },
+  };
+  const clean = (over = {}) => ({
+    roots: [ROOT],
+    expectedPlugins: EXPECTED,
+    linkByName: cleanLinks,
+    settings: null,
+    installedPlugins: null,
+    wrapperRcFiles: [],
+    nodeClass: "worker",
+    ...over,
+  });
+
+  it("no roots on a worker → FAIL", () => {
+    const c = classifySkillsDirPlugins({ roots: [], nodeClass: "worker" });
+    expect(c.name).toBe("skills-dir-plugins");
+    expect(c.status).toBe(STATUS.FAIL);
+    expect(c.detail).toMatch(/pluginDirs unset|no plugin-source/i);
+  });
+
+  it("no roots on a developer → WARN", () => {
+    expect(classifySkillsDirPlugins({ roots: [], nodeClass: "developer" }).status).toBe(STATUS.WARN);
+  });
+
+  it("all plugins symlinked + no residue → PASS", () => {
+    const c = classifySkillsDirPlugins(clean());
+    expect(c.status).toBe(STATUS.PASS);
+    expect(c.detail).toContain(ROOT);
+    expect(c.detail).toMatch(/2 catalyst plugins/);
+  });
+
+  it("a missing symlink → FAIL naming the plugin", () => {
+    const c = classifySkillsDirPlugins(
+      clean({ linkByName: { ...cleanLinks, "catalyst-pm": { kind: "missing" } } }),
+    );
+    expect(c.status).toBe(STATUS.FAIL);
+    expect(c.detail).toContain("catalyst-pm");
+    expect(c.detail).toMatch(/missing/i);
+  });
+
+  it("a real file/dir (non-symlink) at the skills path → FAIL, never clobbered signal", () => {
+    const c = classifySkillsDirPlugins(
+      clean({ linkByName: { ...cleanLinks, "catalyst-dev": { kind: "other" } } }),
+    );
+    expect(c.status).toBe(STATUS.FAIL);
+    expect(c.detail).toMatch(/not a symlink/i);
+  });
+
+  it("a dangling symlink → FAIL", () => {
+    const c = classifySkillsDirPlugins(
+      clean({ linkByName: { ...cleanLinks, "catalyst-dev": { kind: "symlink", target: null } } }),
+    );
+    expect(c.status).toBe(STATUS.FAIL);
+    expect(c.detail).toMatch(/dangling/i);
+  });
+
+  it("a symlink pointing outside the checkout → FAIL", () => {
+    const c = classifySkillsDirPlugins(
+      clean({ linkByName: { ...cleanLinks, "catalyst-dev": { kind: "symlink", target: "/some/other/dev" } } }),
+    );
+    expect(c.status).toBe(STATUS.FAIL);
+    expect(c.detail).toMatch(/resolves to \/some\/other\/dev/);
+  });
+
+  it("enabledPlugins residue → FAIL", () => {
+    const c = classifySkillsDirPlugins(clean({ settings: { enabledPlugins: { "catalyst-dev@catalyst": true } } }));
+    expect(c.status).toBe(STATUS.FAIL);
+    expect(c.detail).toMatch(/enabledPlugins still lists catalyst-dev@catalyst/);
+  });
+
+  it("a still-registered marketplace → FAIL", () => {
+    const c = classifySkillsDirPlugins(clean({ settings: { extraKnownMarketplaces: { catalyst: { source: {} } } } }));
+    expect(c.status).toBe(STATUS.FAIL);
+    expect(c.detail).toMatch(/marketplace is still registered/i);
+  });
+
+  it("an installed marketplace copy (precedence-block) → FAIL", () => {
+    const c = classifySkillsDirPlugins(
+      clean({ installedPlugins: { plugins: { "catalyst-dev@catalyst": [{ scope: "project" }] } } }),
+    );
+    expect(c.status).toBe(STATUS.FAIL);
+    expect(c.detail).toMatch(/precedence-BLOCKS/i);
+  });
+
+  it("a surviving interactive wrapper → FAIL", () => {
+    const c = classifySkillsDirPlugins(clean({ wrapperRcFiles: ["/home/u/.zshrc"] }));
+    expect(c.status).toBe(STATUS.FAIL);
+    expect(c.detail).toMatch(/wrapper is still in \/home\/u\/\.zshrc/);
+  });
+
+  it("residue on a monitor → WARN (not FAIL)", () => {
+    const c = classifySkillsDirPlugins(
+      clean({ nodeClass: "monitor", settings: { enabledPlugins: { "catalyst-pm@catalyst": true } } }),
+    );
+    expect(c.status).toBe(STATUS.WARN);
+  });
+});
+
+describe("checkSkillsDirPlugins — seams", () => {
+  const ROOT = "/co/plugin-source";
+  const expected = [{ name: "catalyst-dev", dir: `${ROOT}/plugins/dev` }];
+  it("wires resolveRootsFn + expectedPluginsFn + skillLinkFn (clean → PASS)", () => {
+    const [c] = checkSkillsDirPlugins({
+      nodeClass: "worker",
+      resolveRootsFn: () => [ROOT],
+      expectedPluginsFn: () => expected,
+      skillLinkFn: () => ({ kind: "symlink", target: `${ROOT}/plugins/dev` }),
+      readSettingsFn: () => null,
+      readInstalledPluginsFn: () => null,
+      wrapperRcFilesFn: () => [],
+    });
+    expect(c.status).toBe(STATUS.PASS);
+  });
+  it("propagates a missing symlink → FAIL on worker", () => {
+    const [c] = checkSkillsDirPlugins({
+      nodeClass: "worker",
+      resolveRootsFn: () => [ROOT],
+      expectedPluginsFn: () => expected,
+      skillLinkFn: () => ({ kind: "missing" }),
+      readSettingsFn: () => null,
+      readInstalledPluginsFn: () => null,
+      wrapperRcFilesFn: () => [],
+    });
+    expect(c.status).toBe(STATUS.FAIL);
+  });
+});
+
+describe("checksForClass — checkSkillsDirPlugins registration", () => {
+  const src = (nc, opts = {}) => checksForClass(nc, opts).map((f) => f.toString()).join("\n");
+  for (const cls of ["worker", "developer", "monitor"]) {
+    it(`wires checkSkillsDirPlugins into the ${cls} suite`, () => {
+      expect(src({ recognized: true, class: cls })).toContain("checkSkillsDirPlugins");
     });
   }
 });

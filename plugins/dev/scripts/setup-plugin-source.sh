@@ -10,11 +10,33 @@
 #      source — workers must run from a pristine, standalone, main-only tree.
 #   3. ff-only pulls origin/main into the reused checkout to keep it fresh.
 #   4. Registers <path>/plugins/dev as catalyst.orchestration.pluginDirs in the
-#      machine config (Layer 2), preserving every other key.
+#      machine config (Layer 2), preserving every other key. This is the path
+#      the daemon / SDK executor / Codex executor / phase-agent-dispatch load
+#      catalyst plugins from — it is IN-PLACE from this checkout (never the
+#      version-keyed marketplace cache), so it stays. The Agent SDK loads
+#      plugins ONLY via an explicit path (it does not auto-load ~/.claude/skills
+#      plugins), so pluginDirs is load-bearing for the daemon and is kept.
+#   5. Points every session type Claude Code itself resolves plugins for
+#      (interactive, `claude --bg`, bg-spare, desktop) at the SAME live checkout
+#      via user-scope skills-directory symlinks (~/.claude/skills/<plugin-name>
+#      -> <path>/plugins/<dir>), and — in full cutover mode — retires the two
+#      legacy load paths those surfaces used: the version-keyed `catalyst`
+#      marketplace (the ONE stale path this whole setup exists to kill) and the
+#      interactive `claude()` --plugin-dir shell wrapper (now redundant with the
+#      symlinks). See the skills-dir-plugin migration handoff.
 #
 # Re-running is safe and idempotent: when pluginDirs already points at the
-# resolved target, the config write is skipped (the ff-only pull still runs).
-# Pass --force to re-register a different checkout path.
+# resolved target, the config write is skipped (the ff-only pull still runs);
+# the skills-dir symlinks are (re)pointed only when missing/wrong; the wrapper
+# and marketplace removals are no-ops once done. Pass --force to re-register a
+# different checkout path.
+#
+# --no-interactive-wrapper (set by the non-interactive install-lifecycle acquire
+# step, which runs pre-backup and must not mutate un-backed-up host state) limits
+# this to the git-reconstructable work: the pluginDirs config write + the
+# reversible skills-dir symlinks. It SKIPS the shell-rc wrapper removal and the
+# marketplace/enablement cutover (both stateful, both no-ops on a fresh node);
+# the full `bash setup-plugin-source.sh` run (join / manual) performs those.
 #
 # The path of the machine config is resolved via lib/plugin-dirs.sh — the same
 # single source of truth phase-agent-dispatch and catalyst-stack use, so the
@@ -37,7 +59,11 @@ DEFAULT_PATH="${CATALYST_PLUGIN_SOURCE:-$HOME/catalyst/plugin-source}"
 CHECKOUT_PATH=""
 REPO_URL=""
 FORCE=0
-INSTALL_WRAPPER=1
+# Full cutover = also remove the interactive shell wrapper + retire the
+# marketplace/enablement. Disabled by --no-interactive-wrapper (the
+# non-interactive install acquire step), which keeps only the git-reconstructable
+# pluginDirs write + reversible skills-dir symlinks.
+FULL_CUTOVER=1
 
 usage() {
 	cat <<EOF
@@ -53,9 +79,12 @@ Options:
   --force           Re-register even if pluginDirs is already set to a
                     different path.
   --no-interactive-wrapper
-                    Skip installing the interactive \`claude\` shell wrapper
-                    (used by the non-interactive install-lifecycle acquire step,
-                    which must not touch the user's shell rc files).
+                    Non-interactive acquire mode: do ONLY the pluginDirs config
+                    write + the reversible ~/.claude/skills symlinks. Skip the
+                    stateful cutover (shell-rc wrapper removal + marketplace/
+                    enablement retirement). Used by the install-lifecycle acquire
+                    step, which runs pre-backup and must not mutate un-backed-up
+                    host state. (Flag name kept for backward compatibility.)
   -h|--help         Show this message.
 EOF
 }
@@ -75,7 +104,7 @@ while [[ $# -gt 0 ]]; do
 			fi
 			REPO_URL="$2"; shift 2 ;;
 		--force) FORCE=1; shift ;;
-		--no-interactive-wrapper) INSTALL_WRAPPER=0; shift ;;
+		--no-interactive-wrapper) FULL_CUTOVER=0; shift ;;
 		-h|--help) usage; exit 0 ;;
 		*) echo "Unknown option: $1" >&2; usage; exit 1 ;;
 	esac
@@ -108,81 +137,127 @@ rc_files_for_interactive_shell() {
 	esac
 }
 
-# install_interactive_claude_wrapper — the interactive counterpart of the worker
-# --plugin-dir wiring. Phase workers get plugin-source via phase-agent-dispatch's
-# --plugin-dir flags (resolved from the pluginDirs machine-config key); a plain
-# interactive `claude` session has NO such mechanism (Claude Code exposes no env/
-# settings key for live local-plugin loading — only the --plugin-dir CLI flag), so
-# it would silently fall back to the version-keyed marketplace cache (which lags
-# releases — the exact staleness this whole setup avoids). This appends a guarded,
-# idempotent shell `claude` function that injects --plugin-dir for every plugin in
-# the checkout. It goes in the interactive rc (~/.zshrc / ~/.bashrc) — NOT ~/.zshenv
-# — so it never leaks into non-interactive/daemon `claude --bg` spawns (which
-# already get --plugin-dir from the dispatcher) and double-inject.
+# create_skills_dir_symlinks — point every session type Claude Code resolves
+# plugins for (interactive `claude`, `claude --bg`, bg-spare, desktop) at the live
+# plugin-source checkout via user-scope skills-directory symlinks. A folder under
+# ~/.claude/skills/ that carries a .claude-plugin/plugin.json loads in-place as
+# `<name>@skills-dir` for every project/session — no marketplace, no version cache.
+# We symlink EVERY plugin in the checkout (mirroring the old wrapper's `for d in
+# plugins/*/` behaviour), keyed by the plugin's own manifest `name` (so the symlink
+# basename is e.g. `catalyst-dev`, not the dir `dev`).
 #
-# BEST-EFFORT: this is a non-essential convenience — the essential pluginDirs config
-# write has already run by the time we are called. A missing rc directory, a
-# read-only rc, or any write failure must warn-and-continue, never abort the script
-# (the caller invokes us as `… || warn`, which also disables `set -e` inside here).
-# Symlinked rc files (dotfiles repos) are rewritten IN PLACE (truncate-through-the-
-# link) so a routine rerun updates the symlink target instead of replacing the
-# symlink with a regular file.
-install_interactive_claude_wrapper() {
-	local checkout="$1" rc dir tmp
+# Idempotent + reversible + safe under --no-interactive-wrapper: a symlink is
+# (re)pointed only when missing or pointing elsewhere; an existing non-symlink at
+# the path is left untouched with a warning (never clobbered). BEST-EFFORT: never
+# aborts the script (the caller invokes us as `… || warn`, which also disables
+# `set -e` inside here).
+create_skills_dir_symlinks() {
+	local checkout="$1"
+	local base="${checkout}/plugins"
+	local skills_dir="${HOME}/.claude/skills"
+	local d pname target link cur
+	if [[ ! -d "$base" ]]; then
+		echo "WARN: no plugins directory at ${base} — skipping skills-dir symlinks." >&2
+		return 0
+	fi
+	mkdir -p "$skills_dir" || { echo "WARN: could not create ${skills_dir} — skipping skills-dir symlinks." >&2; return 0; }
+	for d in "$base"/*/; do
+		[[ -f "${d}.claude-plugin/plugin.json" ]] || continue
+		pname="$(jq -r '.name // empty' "${d}.claude-plugin/plugin.json" 2>/dev/null || true)"
+		if [[ -z "$pname" ]]; then
+			echo "WARN: ${d}.claude-plugin/plugin.json has no \"name\" — skipping." >&2
+			continue
+		fi
+		target="${d%/}"
+		link="${skills_dir}/${pname}"
+		if [[ -L "$link" ]]; then
+			cur="$(readlink "$link")"
+			if [[ "$cur" == "$target" ]]; then
+				continue
+			fi
+			ln -sfn "$target" "$link" && echo "Repointed skills-dir symlink: ${link} -> ${target}" \
+				|| echo "WARN: could not repoint ${link}." >&2
+		elif [[ -e "$link" ]]; then
+			echo "WARN: ${link} exists and is not a symlink — leaving as-is (remove it to enable skills-dir loading)." >&2
+		else
+			ln -s "$target" "$link" && echo "Created skills-dir symlink: ${link} -> ${target}" \
+				|| echo "WARN: could not create ${link}." >&2
+		fi
+	done
+}
+
+# remove_managed_claude_wrapper — strip the legacy interactive `claude()`
+# --plugin-dir shell wrapper (the managed block this script used to install) from
+# the interactive rc file(s). Now redundant: the skills-dir symlinks give an
+# interactive `claude` the same live plugins, and leaving both in place risks a
+# double-load (wrapper's --plugin-dir + skills-dir). Reuses the same in-place strip
+# as the old installer (awk skip-range + `cat >"$rc"` truncate-through-symlink so a
+# dotfiles-repo symlink is preserved). Idempotent no-op once the block is gone.
+# BEST-EFFORT: warn-and-continue, never abort.
+remove_managed_claude_wrapper() {
+	local rc tmp
 	local start="# >>> catalyst plugin-source (managed) >>>"
 	local end="# <<< catalyst plugin-source (managed) <<<"
-	local block
-	block="$(cat <<WRAP
-${start}
-# Interactive \`claude\` loads catalyst plugins LIVE from the plugin-source checkout
-# (never the lagging marketplace cache). Phase workers get this via
-# phase-agent-dispatch's --plugin-dir; this is the interactive equivalent.
-claude() {
-  case "\${1:-}" in
-    plugin|mcp|config|update|doctor|install|migrate-installer|--help|-h|--version|-v)
-      command claude "\$@"; return ;;
-  esac
-  local base="${checkout}/plugins" d
-  local args=()
-  if [ -d "\$base" ]; then
-    for d in "\$base"/*/; do
-      [ -f "\${d}.claude-plugin/plugin.json" ] && args+=(--plugin-dir "\${d%/}")
-    done
-  fi
-  command claude "\${args[@]}" "\$@"
-}
-${end}
-WRAP
-	)"
-
 	while IFS= read -r rc; do
-		if [[ -z "$rc" ]]; then continue; fi
-		dir="$(dirname "$rc")"
-		if [[ ! -d "$dir" ]]; then
-			echo "WARN: skipping interactive wrapper in ${rc} — directory ${dir} does not exist." >&2
+		[[ -z "$rc" ]] && continue
+		[[ -f "$rc" ]] || continue
+		grep -qF "$start" "$rc" 2>/dev/null || continue
+		if [[ ! -w "$rc" ]]; then
+			echo "WARN: ${rc} carries the managed \`claude\` wrapper but is not writable — remove the '>>> catalyst plugin-source (managed) >>>' block manually." >&2
 			continue
 		fi
-		# Read-only rc file (or dir, for a not-yet-created rc): warn and skip.
-		if { [[ -e "$rc" && ! -w "$rc" ]]; } || { [[ ! -e "$rc" && ! -w "$dir" ]]; }; then
-			echo "WARN: skipping interactive wrapper in ${rc} — not writable." >&2
-			continue
-		fi
-		# Idempotent: strip any prior managed block, then append the current one.
-		# The strip rewrites the rc IN PLACE (cat >"$rc" truncates through a symlink,
-		# preserving a dotfiles-repo symlink instead of replacing it with a file).
-		if [[ -f "$rc" ]] && grep -qF "$start" "$rc"; then
-			tmp="$(mktemp "${TMPDIR:-/tmp}/.catalyst-rc.XXXXXX")" || { echo "WARN: mktemp failed for ${rc}" >&2; continue; }
-			if awk -v s="$start" -v e="$end" '$0==s{skip=1} !skip{print} $0==e{skip=0}' "$rc" >"$tmp"; then
-				cat "$tmp" >"$rc" || { echo "WARN: could not rewrite ${rc}" >&2; rm -f "$tmp"; continue; }
+		tmp="$(mktemp "${TMPDIR:-/tmp}/.catalyst-rc.XXXXXX")" || { echo "WARN: mktemp failed for ${rc}" >&2; continue; }
+		if awk -v s="$start" -v e="$end" '$0==s{skip=1} !skip{print} $0==e{skip=0}' "$rc" >"$tmp"; then
+			if cat "$tmp" >"$rc"; then
+				echo "Removed the legacy interactive \`claude\` wrapper block from ${rc}."
+			else
+				echo "WARN: could not rewrite ${rc}." >&2
 			fi
-			rm -f "$tmp"
 		fi
-		if printf '%s\n' "$block" >>"$rc"; then
-			echo "Installed the interactive \`claude\` plugin-source wrapper in ${rc}."
-		else
-			echo "WARN: could not append interactive wrapper to ${rc}." >&2
-		fi
+		rm -f "$tmp"
 	done < <(rc_files_for_interactive_shell)
+}
+
+# retire_catalyst_marketplace — best-effort cutover away from the version-keyed
+# `catalyst` marketplace (the one stale load path). Clears user-scope
+# enabledPlugins entries (atomic jq), then best-effort uninstalls the marketplace
+# copies + removes the marketplace registration via the CLI. NON-FATAL by design:
+# a marketplace copy installed at PROJECT scope (anchored to some other repo) can
+# only be uninstalled with `--scope project` from that repo, which this generic
+# routine can't know — so any residue is left with a loud warning and the
+# checkSkillsDirPlugins doctor check flags it for a manual finish. On a fresh node
+# (no marketplace) every step is a clean no-op.
+retire_catalyst_marketplace() {
+	local settings="${HOME}/.claude/settings.json" tmp p
+	# 1. Clear user-scope enabledPlugins entries (atomic same-dir tmp + mv).
+	if [[ -f "$settings" ]] && command -v jq >/dev/null 2>&1; then
+		if jq -e '(.enabledPlugins // {}) | has("catalyst-dev@catalyst") or has("catalyst-pm@catalyst")' "$settings" >/dev/null 2>&1; then
+			tmp="$(mktemp "$(dirname "$settings")/.settings.json.XXXXXX")" || tmp=""
+			if [[ -n "$tmp" ]]; then
+				if jq 'if .enabledPlugins then .enabledPlugins |= (del(.["catalyst-dev@catalyst"]) | del(.["catalyst-pm@catalyst"])) else . end' "$settings" >"$tmp"; then
+					mv "$tmp" "$settings" && echo "Cleared catalyst-*@catalyst from user-scope enabledPlugins."
+				else
+					rm -f "$tmp"
+					echo "WARN: could not rewrite ${settings} to clear catalyst-*@catalyst enablement." >&2
+				fi
+			fi
+		fi
+	fi
+	# 2. Best-effort uninstall + marketplace removal (CLI; warns on project-scope block).
+	if command -v claude >/dev/null 2>&1; then
+		for p in catalyst-dev@catalyst catalyst-pm@catalyst; do
+			if claude plugin list 2>/dev/null | grep -qF "$p"; then
+				claude plugin uninstall "$p" -y >/dev/null 2>&1 \
+					&& echo "Uninstalled marketplace plugin ${p}." \
+					|| echo "WARN: could not uninstall ${p} (likely enabled at project scope in another repo) — finish with 'claude plugin uninstall ${p} --scope project -y' from that repo; doctor will flag it." >&2
+			fi
+		done
+		if claude plugin marketplace list 2>/dev/null | grep -qiE '(^|[^-])catalyst([^-]|$)'; then
+			claude plugin marketplace remove catalyst >/dev/null 2>&1 \
+				&& echo "Removed the catalyst marketplace registration." \
+				|| echo "WARN: could not remove the catalyst marketplace — run 'claude plugin marketplace remove catalyst' manually; doctor will flag it." >&2
+		fi
+	fi
 }
 
 CHECKOUT_PATH="${CHECKOUT_PATH:-$DEFAULT_PATH}"
@@ -275,13 +350,21 @@ else
 	echo "  HEAD:     ${HEAD_SHA}"
 fi
 
-# ─── 3. Interactive `claude` wrapper (best-effort, LAST) ────────────────────
-# Runs after the essential pluginDirs config write so a non-fatal rc-file failure
-# can never skip it. Skipped entirely (--no-interactive-wrapper) when invoked by
-# the non-interactive install-lifecycle acquire step, which must not touch the
-# user's shell rc files. The `|| warn` guard also disables `set -e` inside the
-# function so a read-only/managed-dotfiles rc warns instead of aborting.
-if [[ $INSTALL_WRAPPER -eq 1 ]]; then
-	install_interactive_claude_wrapper "$CHECKOUT_PATH" \
-		|| echo "WARN: interactive \`claude\` wrapper not installed (non-fatal) — pluginDirs config is set; plain \`claude\` will use the marketplace cache until you add the wrapper manually." >&2
+# ─── 3. Skills-dir symlinks + legacy-path cutover (best-effort, LAST) ───────
+# Runs after the essential pluginDirs config write so a non-fatal failure here can
+# never skip it. The skills-dir symlinks always run (reversible, git-reconstructable,
+# and the mechanism a fresh node needs to load catalyst for every session type
+# Claude Code itself resolves plugins for — outside the daemon's SDK path). The
+# stateful cutover — removing the interactive wrapper + retiring the marketplace —
+# runs only in full mode; --no-interactive-wrapper (install acquire, pre-backup)
+# skips it (both are no-ops on a fresh node anyway). Each `|| warn` disables `set -e`
+# inside the callee so a read-only rc / project-scoped marketplace warns, not aborts.
+create_skills_dir_symlinks "$CHECKOUT_PATH" \
+	|| echo "WARN: skills-dir symlinks not fully created (non-fatal) — some catalyst plugins may not load outside the daemon until fixed." >&2
+
+if [[ $FULL_CUTOVER -eq 1 ]]; then
+	remove_managed_claude_wrapper \
+		|| echo "WARN: legacy interactive \`claude\` wrapper not fully removed (non-fatal)." >&2
+	retire_catalyst_marketplace \
+		|| echo "WARN: catalyst marketplace not fully retired (non-fatal) — doctor will flag residue." >&2
 fi
