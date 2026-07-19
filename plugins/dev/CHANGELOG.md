@@ -1,15 +1,20 @@
 # Changelog
 
-## [12.31.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.30.1...catalyst-dev-v12.31.0) (2026-07-19)
+## [12.31.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.30.1...catalyst-dev-v12.31.0)
+
+Jul 19, 2026
+
+<!-- ai-enhanced -->
+
+### Agent House Rules & Replica Read Fix
+
+Two changes land together to make unattended agents less error-prone. A new "Working the Loop" block is now seeded into every project's `AGENTS.md` via `agents-house-rules.md`, teaching agents to subscribe to the unified event log instead of polling GitHub or CI, detect automated review approvals via reactions, and read Linear tickets from the local replica rather than the live API. Alongside that, the replica-read instruction itself is corrected — background agents were silently falling through to bare `linearis` because `linear_read_ticket` is a shell function that never resolves in an unattended Bash session; the instruction now leads with the `sqlite3` form that works in any shell. Run `check-project-setup.sh` to verify your projects have the new reflex markers in place.
 
 
-### Features
+
+### PRs
 
 * **dev:** agent house-rules block + checkup (CTL general-instructions) ([#2663](https://github.com/coalesce-labs/catalyst/issues/2663)) ([e6e67db](https://github.com/coalesce-labs/catalyst/commit/e6e67dbbc07c9b4ad2c327069d43565dafbfd451))
-
-
-### Bug Fixes
-
 * **dev:** CTL-1420 replica-read rule pointed bg/daemon agents at a shell function not on PATH ([#2661](https://github.com/coalesce-labs/catalyst/issues/2661)) ([efd9a2b](https://github.com/coalesce-labs/catalyst/commit/efd9a2b85075a57a6c5e1f958078bd3621528536))
 
 ## [12.30.1](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.30.0...catalyst-dev-v12.30.1)
