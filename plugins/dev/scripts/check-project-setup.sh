@@ -564,6 +564,40 @@ if [[ -n $REPLICA_LIB ]]; then
 	# downstream install never runs; nagging it would be a permanent false alarm.
 fi
 
+# 9. Agent house rules present — the "Working the Loop" reflexes (CTL general-instructions).
+#    The agent-instructions doc is meant to teach EVERY agent (including an interactive,
+#    non-slash-command session) three default reflexes that are otherwise buried in
+#    skills: (a) subscribe to the event log instead of polling GitHub/CI/Linear,
+#    (b) read a single Linear ticket from the local replica, (c) recognize an
+#    automated reviewer's 👍-reaction clean pass. A recent interactive session polled
+#    GitHub for 99 min and missed a passed review because these were framed as
+#    skill-internal, not house rules. This checkup nags (WARN, never fatal) when a
+#    Catalyst-managed project's agent doc is missing any reflex.
+#
+#    The block must live in the file the driving agent actually LOADS: AGENTS.md when
+#    CLAUDE.md is a thin `@AGENTS.md` bridge (AGENTS.md is imported), otherwise the
+#    monolithic CLAUDE.md directly. So we accept a marker found in EITHER doc, and only
+#    run the check when at least one agent doc exists (a repo with neither is outside
+#    the framework — nagging it would be a false alarm). Canonical block to copy:
+#    plugins/dev/templates/agents-house-rules.md. Markers matched case-insensitively.
+AGENT_DOCS=()
+[[ -f AGENTS.md ]] && AGENT_DOCS+=("AGENTS.md")
+[[ -f CLAUDE.md ]] && AGENT_DOCS+=("CLAUDE.md")
+if [[ ${#AGENT_DOCS[@]} -gt 0 ]]; then
+	missing_reflex=()
+	grep -qiE 'subscribe to the event log|wait-for-github' "${AGENT_DOCS[@]}" ||
+		missing_reflex+=("event-log-over-polling (waiting on GitHub/CI/Linear state → catalyst-dev:wait-for-github / catalyst-dev:monitor-events, don't poll)")
+	grep -qE '👍' "${AGENT_DOCS[@]}" ||
+		missing_reflex+=("automated-review 👍-reaction clean pass (detect via reactions/comments, not only the reviews API)")
+	grep -qiE 'linear_read_ticket|local replica' "${AGENT_DOCS[@]}" ||
+		missing_reflex+=("single-ticket Linear reads → local replica (linear_read_ticket <ID>, not bare linearis)")
+	if [[ ${#missing_reflex[@]} -eq 0 ]]; then
+		echo -e "${GREEN}Agent house rules present${NC} — ${AGENT_DOCS[*]} teaches the event-log, 👍-review, and replica-read reflexes."
+	else
+		warnings+=("Agent doc (${AGENT_DOCS[*]}) is missing house rules (the 'Working the Loop' reflexes) — an interactive agent won't learn: ${missing_reflex[*]}. Seed the canonical block: plugins/dev/templates/agents-house-rules.md (into AGENTS.md if CLAUDE.md is an @AGENTS.md bridge, else into CLAUDE.md).")
+	fi
+fi
+
 # Report errors (fatal)
 if [[ ${#errors[@]} -gt 0 ]]; then
 	echo -e "${RED}ERROR: Project setup incomplete${NC}"

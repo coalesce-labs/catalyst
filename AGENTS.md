@@ -26,6 +26,30 @@ All agents follow a **documentarian, not critic** approach:
 - NO architecture critiques or quality assessments
 - Focus on answering "WHERE is X?" and "HOW does X work?"
 
+## Working the Loop (every agent — interactive too, not just skills)
+
+These are house rules for anyone touching this repo's dev / PR / ticket workflow — whether you are
+running a slash-command skill **or** working interactively and ad-hoc. They are **default
+reflexes, not skill internals**: reach for them without being told, even on a one-off PR you opened
+by hand.
+
+- **Waiting on GitHub / CI / Linear state → subscribe to the event log, don't poll.** To block on a
+  state change (a PR merged, CI turning green, a review posted, a push to a branch, a ticket
+  transition), wait on the unified event log instead of re-querying in a loop. Reach for the
+  `catalyst-dev:wait-for-github` skill for GitHub events (broker `broker_claim_pr` + `filter.wake`,
+  falling back to `catalyst-events wait-for`) and `catalyst-dev:monitor-events` for the general
+  wait-for-a-state-change pattern. A `gh` / `linearis` poll loop burns shared-quota API budget and
+  silently misses reaction-only signals (next bullet). When the broker / webhook infra is down these
+  skills degrade to a bounded single-event wait — that degradation is the fallback, never your
+  opening move.
+- **Judging an automated code review → a clean pass is a reaction, not a review object.** The
+  automated reviewer signals "no issues" with a 👍 reaction (or a terse "no major issues" comment)
+  **instead of** opening review threads. Detect it via the PR's reactions and issue comments, not
+  only the reviews API — otherwise a review that already passed reads as silence and you wait on it
+  forever. See **Pull requests** below for the full contract.
+- **Reading one Linear ticket → the local replica, not bare `linearis`.** See **Key Principles**
+  below (`linear_read_ticket <ID>`); a bare `linearis issues read <ID>` 429s the shared fleet quota.
+
 ## Build & Test
 
 No build process — this is markdown files and bash scripts.
@@ -49,7 +73,7 @@ No build process — this is markdown files and bash scripts.
 - **Spawn parallel agents** — Maximize efficiency
 - **Agents are documentarians** — Never suggest improvements unless asked
 - **Preserve context** — Save to thoughts/, not just memory
-- **Linear reads → local replica** — read a single ticket with **`sqlite3 "${CATALYST_REPLICA_DB:-${CATALYST_DIR:-$HOME/catalyst}/catalyst-replica.db}"`** (the canonical path resolver — an install may set `CATALYST_REPLICA_DB`/`CATALYST_DIR`; don't hard-code the default; gate on freshness first, per the `linearis` skill's "Reading Linear"). This is the bg-safe form: it needs no plugin, resolves in any shell, and physically cannot 429. **Never a bare `linearis`/`linear issues read <ID>`** — that hits the rate-limited API and burns the shared-quota fleet. `linear_read_ticket <ID>` is a convenience wrapper for the *same* replica read, but it is a plugin **shell function** that is NOT on `PATH` in a background/daemon Bash — so an unattended agent that reaches for it gets "command not found" and silently falls through to bare `linearis`. Prefer the `sqlite3` form in scripts and bg agents; use `linear_read_ticket` only in an interactive session that has sourced the helper. Writes and `issues list`/`search` have no replica form — they stay on `linearis`. See the `linearis` skill's "Reading Linear".
+- **Linear reads → local replica** — for a single-ticket read call `linear_read_ticket <ID>` (it gates freshness and falls back loudly); never a bare `linearis issues read <ID>` (it 429s the shared-quota fleet). Writes and list/search stay on `linearis`. See the `linearis` skill's "Reading Linear".
 
 ## Skill & Agent References
 
@@ -210,7 +234,7 @@ A pull request is **not mergeable** until BOTH are true:
 - **All CI checks pass.** A failing or pending required check blocks the merge.
 - **Every review is resolved.** If the PR has any review (automated code review or human), each review thread/conversation must be addressed and marked resolved. An unresolved review blocks the merge even when checks are green.
 
-So after opening a PR: watch the checks to green, then address every review comment (push fixes), reply, and resolve each thread before considering the PR done.
+So after opening a PR: wait for the checks to go green (subscribe to the event log — see **Working the Loop**, don't poll `gh` in a loop), then address every review comment (push fixes), reply, and resolve each thread before considering the PR done.
 
 **Reading the automated reviewer's signal.** When the automated code reviewer finds nothing, it
 signals a clean pass with a 👍 reaction (or a brief "no major issues" note) **instead of** opening
