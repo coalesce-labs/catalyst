@@ -19,7 +19,9 @@ These are house rules for anyone touching this repo's dev / PR / ticket workflow
 running a slash-command skill **or** working interactively and ad-hoc. They are **default
 reflexes, not skill internals**: reach for them without being told, even on a one-off PR you opened
 by hand. They defer their mechanism to the `catalyst-dev` plugin, available in every Catalyst-managed
-repo.
+repo. If that plugin is somehow unavailable (a broken environment — fix it), degrade each reflex to a
+single **bounded** check as a last resort — a lone `catalyst-events wait-for` / `gh` poll, a `gh` API
+reaction read, or one `linearis issues read` — never a poll loop, and never your opening move.
 
 - **Waiting on GitHub / CI / Linear state → subscribe to the event log, don't poll.** To block on a
   state change (a PR merged, CI turning green, a review posted, a push to a branch, a ticket
@@ -40,7 +42,6 @@ repo.
   local replica behind a freshness gate (via its `linear_read_ticket` helper, run in the plugin's
   skill context) and does the loud stale/absent fallback for you. Don't hand-roll the read yourself:
   an **un-gated** `sqlite3` of the replica skips the freshness check (you may read stale data or
-  create an empty DB), and a bare `linearis issues read <ID>` loop 429s the shared fleet quota. The
-  ban is on un-gated and looped reads, not on reading at all — if `catalyst-dev` is somehow
-  unavailable (a broken environment), one loud `linearis issues read <ID>` to unblock is tolerable,
-  never a loop. Writes and list/search go through `linearis`.
+  create an empty DB), and a bare `linearis issues read <ID>` loop 429s the shared fleet quota (the
+  ban is on un-gated and looped reads, not on reading at all — see the degraded-mode note above).
+  Writes and list/search go through `linearis`.

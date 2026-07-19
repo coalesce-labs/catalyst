@@ -83,8 +83,9 @@ BLOCK="$(tr -d '\r' <"$TEMPLATE" | awk '
 	{ print }')"
 HEADING="$(printf '%s\n' "$BLOCK" | head -n1)"
 
-# Template integrity guards.
-for marker in 'subscribe to the event log' 'reaction, not a review object' 'local replica'; do
+# Template integrity guards. The 👍 emoji is guarded too (not just the ASCII
+# phrase) so a reword can't silently drop the concrete clean-pass detection signal.
+for marker in 'subscribe to the event log' 'reaction, not a review object' '👍' 'local replica'; do
 	printf '%s' "$BLOCK" | grep -qiF "$marker" || die "template missing marker '$marker' after comment strip — refusing" 3
 done
 # Defense-in-depth: any residual HTML-comment marker means the strip went wrong
@@ -124,6 +125,13 @@ readlink_f() { readlink -f "$1" 2>/dev/null || realpath "$1" 2>/dev/null || pyth
 # write CONTENT-FILE into DEST, preserving a symlink (write through to its target)
 # and the destination's existing mode (truncate+write keeps inode/mode; a plain
 # `mv` would replace the symlink with a regular file and reset mode to mktemp's).
+# Deliberate tradeoff: truncate-in-place is NOT atomic — a mid-write I/O failure
+# (disk full) after truncation could leave the doc truncated. The common failure
+# (read-only) is fail-safe: the redirection can't open the file so `cat` never runs
+# and the original is intact. Atomicity is traded for symlink/inode/mode fidelity,
+# which the automated review required; an agent-instructions doc is regenerable.
+# Note: kept lines are emitted verbatim, so rewriting a CRLF doc yields LF for the
+# block amid CRLF surroundings — cosmetic only (detection/idempotency unaffected).
 write_through() {
 	local src="$1" dest="$2" real="$2"
 	[[ -L "$dest" ]] && real="$(readlink_f "$dest")"
