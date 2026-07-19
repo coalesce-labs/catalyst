@@ -131,9 +131,14 @@ defenced() {
 }
 # Detection captures defenced output into a here-string before grepping, so a
 # match never closes the pipe early and SIGPIPEs awk under `set -o pipefail`
-# (which would flip the result to a false negative on a large doc).
-has_managed() { [[ -f "$1" ]] || return 1; grep -qF "$BEGIN_MARK" <<<"$(defenced "$1")"; }
-has_legacy()  { [[ -f "$1" ]] || return 1; grep -Fxq "$HEADING" <<<"$(defenced "$1" 1)"; }
+# (which would flip the result to a false negative on a large doc). Sentinels are
+# matched as WHOLE LINES (`grep -Fxq`), not substrings — an inline `<!-- ... -->`
+# mention in prose is not a live sentinel. The heading match is ≤3-space-indent
+# tolerant (CommonMark) via ls3, done in awk so the leading-strip doesn't corrupt
+# other lines.
+_line_eq_indent() { awk -v want="$2" 'function ls3(s){for(k=0;k<3;k++){if(substr(s,1,1)==" ")s=substr(s,2);else break}return s} ls3($0)==want{f=1} END{exit(f?0:1)}'; }
+has_managed() { [[ -f "$1" ]] || return 1; grep -Fxq "$BEGIN_MARK" <<<"$(defenced "$1")"; }
+has_legacy()  { [[ -f "$1" ]] || return 1; _line_eq_indent x "$HEADING" <<<"$(defenced "$1" 1)"; }
 has_block()   { has_managed "$1" || has_legacy "$1"; }
 claude_imports_agents() { [[ -f "$CLA" ]] || return 1; grep -Fxq "$BRIDGE_LINE" <<<"$(defenced "$CLA" 1)"; }
 
@@ -199,8 +204,8 @@ fi
 # block in a code fence must not be mistaken for a live managed block).
 MANAGED_BEGIN=0 MANAGED_END=0
 if [[ -f "$TARGET" ]]; then
-	MANAGED_BEGIN="$(defenced "$TARGET" | grep -cF "$BEGIN_MARK")"
-	MANAGED_END="$(defenced "$TARGET" | grep -cF "$END_MARK")"
+	MANAGED_BEGIN="$(defenced "$TARGET" | grep -Fxc "$BEGIN_MARK")"
+	MANAGED_END="$(defenced "$TARGET" | grep -Fxc "$END_MARK")"
 fi
 [[ -n "$MANAGED_BEGIN" ]] || MANAGED_BEGIN=0
 [[ -n "$MANAGED_END" ]] || MANAGED_END=0
@@ -217,7 +222,7 @@ MANAGED_COUNT="$MANAGED_BEGIN"
 # first, so >1 would orphan the rest — refuse rather than silently half-migrate.
 # Fence- AND comment-aware (a heading shown inside an HTML comment is not live).
 if [[ "$MANAGED_COUNT" -eq 0 && -f "$TARGET" ]]; then
-	LEGACY_COUNT="$(defenced "$TARGET" 1 | grep -Fxc "$HEADING")"
+	LEGACY_COUNT="$(defenced "$TARGET" 1 | awk -v h="$HEADING" 'function ls3(s){for(k=0;k<3;k++){if(substr(s,1,1)==" ")s=substr(s,2);else break}return s} ls3($0)==h{c++} END{print c+0}')"
 	[[ -n "$LEGACY_COUNT" ]] || LEGACY_COUNT=0
 	if [[ "$LEGACY_COUNT" -gt 1 ]]; then
 		die "${TARGET_REL} has ${LEGACY_COUNT} legacy '${HEADING}' sections — refusing to auto-edit an ambiguous doc. Collapse to one and re-run." 4
@@ -299,7 +304,7 @@ legacy)
 		END {
 			n=NR; while ((getline x < wf) > 0) w = w x "\n"
 			fence=0; hi=0
-			for (i=1;i<=n;i++){ ls=ls3(norm[i]); if (ls ~ /^(```|~~~)/) fence=!fence; else if (!fence && rstrip(norm[i])==heading){ hi=i; break } }
+			for (i=1;i<=n;i++){ ls=ls3(norm[i]); if (ls ~ /^(```|~~~)/) fence=!fence; else if (!fence && rstrip(ls3(norm[i]))==heading){ hi=i; break } }
 			if (hi==0){ for(i=1;i<=n;i++) print raw[i]; exit }   # defensive: heading vanished
 			# recompute fence state up to the heading, then find the end boundary.
 			# Boundaries (all allow CommonMark ≤3-space indent): next ATX heading, a

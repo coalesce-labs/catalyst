@@ -580,29 +580,22 @@ fi
 #    run the check when at least one agent doc exists (a repo with neither is outside
 #    the framework — nagging it would be a false alarm). Canonical block to copy:
 #    plugins/dev/templates/agents-house-rules.md. Markers matched case-insensitively.
-AGENT_DOCS=()
-[[ -f AGENTS.md ]] && AGENT_DOCS+=("AGENTS.md")
-[[ -f CLAUDE.md ]] && AGENT_DOCS+=("CLAUDE.md")
-if [[ ${#AGENT_DOCS[@]} -gt 0 ]]; then
-	# Primary signal: a COMPLETE seeder sentinel pair (survives any heading/prose
-	# rewording). A lone begin marker is not enough — an unpaired/half-written block
-	# isn't a real managed block. Fallback for a legacy block seeded before sentinels
-	# existed: the three reflex marker phrases. Either → present.
-	if grep -qF 'catalyst-house-rules:begin' "${AGENT_DOCS[@]}" && grep -qF 'catalyst-house-rules:end' "${AGENT_DOCS[@]}"; then
-		echo -e "${GREEN}Agent house rules present${NC} — ${AGENT_DOCS[*]} carries the managed 'Working the Loop' block."
+# Only check a repo that already has an agent doc — a doc-less repo is out of the
+# framework here (foundry:setup-catalyst seeds those directly). Delegate the actual
+# detection to the seeder's dry-run rather than re-implementing grep: the seeder is
+# fence-aware, import-aware (checks the doc the agent actually loads), and matches
+# whole-line sentinels — re-implementing that here drifted. rc 0 = present/current,
+# rc 10 = missing or stale, other = seeder/setup error.
+SEEDER="${SCRIPT_DIR}/ensure-agent-house-rules.sh"
+if [[ ( -f AGENTS.md || -f CLAUDE.md ) && -x "$SEEDER" ]]; then
+	hr_rc=0
+	bash "$SEEDER" --quiet >/dev/null 2>&1 || hr_rc=$?
+	if [[ $hr_rc -eq 0 ]]; then
+		echo -e "${GREEN}Agent house rules present${NC} — the managed 'Working the Loop' block is current."
+	elif [[ $hr_rc -eq 10 ]]; then
+		warnings+=("Agent doc is missing or has a stale 'Working the Loop' house-rules block (the reflexes an interactive agent needs: event-log-over-polling, 👍-review detection, replica reads). Fix: bash ${SEEDER} --fix (idempotent; run from the repo root or pass --repo DIR).")
 	else
-		missing_reflex=()
-		grep -qiE 'subscribe to the event log|wait-for-github' "${AGENT_DOCS[@]}" ||
-			missing_reflex+=("event-log-over-polling (waiting on GitHub/CI/Linear state → catalyst-dev:wait-for-github / catalyst-dev:monitor-events, don't poll)")
-		grep -qiF 'reaction, not a review object' "${AGENT_DOCS[@]}" ||
-			missing_reflex+=("automated-review clean pass is a reaction, not a review object (detect via reactions/comments, not only the reviews API)")
-		grep -qiE 'linear_read_ticket|local replica' "${AGENT_DOCS[@]}" ||
-			missing_reflex+=("single-ticket Linear reads → local replica (linear_read_ticket <ID>, not bare linearis)")
-		if [[ ${#missing_reflex[@]} -eq 0 ]]; then
-			echo -e "${GREEN}Agent house rules present${NC} — ${AGENT_DOCS[*]} teaches the event-log, review, and replica-read reflexes (legacy block; re-run the seeder to add sentinels)."
-		else
-			warnings+=("Agent doc (${AGENT_DOCS[*]}) is missing house rules (the 'Working the Loop' reflexes) — an interactive agent won't learn: ${missing_reflex[*]}. Fix: bash ${SCRIPT_DIR}/ensure-agent-house-rules.sh --fix (idempotently seeds/updates the canonical block; run --fix from the repo root or pass --repo DIR).")
-		fi
+		warnings+=("Could not verify the agent house-rules block (ensure-agent-house-rules.sh returned ${hr_rc} — an ambiguous/duplicate block, or a setup issue). Inspect: bash ${SEEDER}")
 	fi
 fi
 

@@ -250,6 +250,23 @@ run "$R" --fix >/dev/null 2>&1; assert_eq "no-boundary: refuse migration (rc=4)"
 assert_eq "no-boundary: no sentinel added" 0 "$(count "$R/CLAUDE.md" "$BEGIN")"
 has "no-boundary: un-headed content preserved" "PRECIOUS un-headed line 100" "$R/CLAUDE.md"
 
+# 30. an inline (non-fenced) sentinel MENTION in prose is not a live managed block
+R="$SCRATCH/inlinesent"; mkdir -p "$R"
+{ echo "# CLAUDE.md"; echo ""; echo 'The block is wrapped in `<!-- catalyst-house-rules:begin -->` markers.'; echo ""; echo "## Real"; echo "real"; } >"$R/CLAUDE.md"
+run "$R" --fix >/dev/null
+has "inline-mention: real (whole-line) block added" "$BEGIN" "$R/CLAUDE.md"
+# exactly one whole-line begin sentinel (the live one), plus the inline mention untouched
+assert_eq "inline-mention: one whole-line begin sentinel" 1 "$(grep -Fxc '<!-- catalyst-house-rules:begin -->' "$R/CLAUDE.md")"
+has "inline-mention: prose mention preserved" 'wrapped in `<!-- catalyst-house-rules:begin -->`' "$R/CLAUDE.md"
+
+# 31. an indented (≤3 space) legacy heading is migrated in place, not duplicated
+R="$SCRATCH/indlegacy"; mkdir -p "$R"
+{ echo "# CLAUDE.md"; echo ""; echo "  ## Working the Loop (every agent — interactive too, not just skills)"; echo "oldbody"; echo ""; echo "## After"; echo "keep"; } >"$R/CLAUDE.md"
+run "$R" --fix >/dev/null
+assert_eq "indented-legacy: migrated in place (one sentinel)" 1 "$(count "$R/CLAUDE.md" "$BEGIN")"
+lacks "indented-legacy: old body replaced" "oldbody" "$R/CLAUDE.md"
+has "indented-legacy: After preserved" "keep" "$R/CLAUDE.md"
+
 echo ""
 echo "ensure-agent-house-rules.test.sh: ${PASSES} passed, ${FAILURES} failed"
 [[ $FAILURES -eq 0 ]]
