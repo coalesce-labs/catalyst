@@ -73,15 +73,24 @@ fi
 
 # BLOCK = template with the leading HTML seeding-comment stripped (that comment is
 # maintainer instructions, not content for the repo). CRLF stripped up front so
-# HEADING is LF-clean.
-BLOCK="$(tr -d '\r' <"$TEMPLATE" | awk 'f==0 && /^<!--/{f=1} f==1{ if (/-->/) f=2; next } f==2 && /^[[:space:]]*$/ && seen==0 {seen=1; next} {print}')"
+# HEADING is LF-clean. The comment open/close are matched as WHOLE LINES so an
+# inline `<!-- ... -->` inside a backtick code span in the comment body does not
+# terminate the strip early (that leaked the maintainer prose into every block).
+BLOCK="$(tr -d '\r' <"$TEMPLATE" | awk '
+	f==0 && /^[[:space:]]*<!--/ { f=1; next }
+	f==1 { if (/^[[:space:]]*-->[[:space:]]*$/) f=2; next }
+	f==2 && /^[[:space:]]*$/ && seen==0 { seen=1; next }
+	{ print }')"
 HEADING="$(printf '%s\n' "$BLOCK" | head -n1)"
 
 # Template integrity guards.
 for marker in 'subscribe to the event log' 'reaction, not a review object' 'local replica'; do
 	printf '%s' "$BLOCK" | grep -qiF "$marker" || die "template missing marker '$marker' after comment strip — refusing" 3
 done
-printf '%s\n' "$BLOCK" | grep -qF "$BEGIN_MARK" && die "template block already contains a sentinel — refusing (sentinels are added by the seeder, not the template)" 3
+# Defense-in-depth: any residual HTML-comment marker means the strip went wrong
+# (or the template embeds a stray comment) — refuse rather than ship a corrupt block.
+printf '%s\n' "$BLOCK" | grep -qE '<!--|-->' && die "template block still contains an HTML-comment marker after strip — refusing (the comment open/close must each be on their own line)" 3
+printf '%s\n' "$BLOCK" | grep -qF 'catalyst-house-rules:' && die "template block contains a sentinel token — refusing (sentinels are added by the seeder, not the template)" 3
 if printf '%s\n' "$BLOCK" | tail -n +2 | grep -qE '^#+[[:space:]]'; then
 	die "template block body has a nested heading — keep the block flat below its title" 3
 fi
@@ -99,8 +108,9 @@ AG="$REPO/AGENTS.md"
 # downstream `sed 's/[[:space:]]*$//'`, which on BSD/macOS mangles multibyte UTF-8
 # (e.g. the em-dash in the heading), causing a silent detection miss.
 defenced() {
-	awk '{ line=$0; sub(/\r$/,"",line); sub(/[[:space:]]+$/,"",line)
-		if (line ~ /^(```|~~~)/) { fence=!fence; print ""; next }
+	awk 'function ls3(s){ for(k=0;k<3;k++){ if(substr(s,1,1)==" ") s=substr(s,2); else break } return s }
+		{ line=$0; sub(/\r$/,"",line); sub(/[[:space:]]+$/,"",line); ls=ls3(line)
+		if (ls ~ /^(```|~~~)/) { fence=!fence; print ""; next }
 		if (fence) { print ""; next }
 		print line }' "$1"
 }
@@ -160,6 +170,15 @@ MANAGED_COUNT=0
 [[ -n "$MANAGED_COUNT" ]] || MANAGED_COUNT=0
 if [[ "$MANAGED_COUNT" -gt 1 ]]; then
 	die "${TARGET_REL} has ${MANAGED_COUNT} '${BEGIN_MARK}' sentinels — refusing to auto-edit an ambiguous doc. Collapse to one and re-run." 4
+fi
+# Same guard for LEGACY (un-sentineled) headings: migration only converts the
+# first, so >1 would orphan the rest — refuse rather than silently half-migrate.
+if [[ "$MANAGED_COUNT" -eq 0 && -f "$TARGET" ]]; then
+	LEGACY_COUNT="$(defenced "$TARGET" | grep -Fxc "$HEADING")"
+	[[ -n "$LEGACY_COUNT" ]] || LEGACY_COUNT=0
+	if [[ "$LEGACY_COUNT" -gt 1 ]]; then
+		die "${TARGET_REL} has ${LEGACY_COUNT} legacy '${HEADING}' sections — refusing to auto-edit an ambiguous doc. Collapse to one and re-run." 4
+	fi
 fi
 
 # Extract the current managed region's INNER block (between sentinels), CRLF-safe.
@@ -228,20 +247,24 @@ legacy)
 	# trailing-whitespace-tolerant; kept lines are emitted verbatim.
 	awk -v heading="$HEADING" -v wf="$WRAPFILE" '
 		function rstrip(s){ sub(/[[:space:]]+$/,"",s); return s }
+		function ls3(s){ for(k=0;k<3;k++){ if(substr(s,1,1)==" ") s=substr(s,2); else break } return s }
 		{ raw[NR]=$0; l=$0; sub(/\r$/,"",l); norm[NR]=l }
 		END {
 			n=NR; while ((getline x < wf) > 0) w = w x "\n"
 			fence=0; hi=0
-			for (i=1;i<=n;i++){ if (norm[i] ~ /^(```|~~~)/) fence=!fence; else if (!fence && rstrip(norm[i])==heading){ hi=i; break } }
+			for (i=1;i<=n;i++){ ls=ls3(norm[i]); if (ls ~ /^(```|~~~)/) fence=!fence; else if (!fence && rstrip(norm[i])==heading){ hi=i; break } }
 			if (hi==0){ for(i=1;i<=n;i++) print raw[i]; exit }   # defensive: heading vanished
-			# recompute fence state up to the heading, then find the end boundary
-			fence=0; for (i=1;i<=hi;i++) if (norm[i] ~ /^(```|~~~)/) fence=!fence
+			# recompute fence state up to the heading, then find the end boundary.
+			# Boundaries (all allow CommonMark ≤3-space indent): next ATX heading, a
+			# setext-underlined heading (non-blank line whose next line is all =/-), or EOF.
+			fence=0; for (i=1;i<=hi;i++){ ls=ls3(norm[i]); if (ls ~ /^(```|~~~)/) fence=!fence }
 			ei=n+1
 			for (i=hi+1;i<=n;i++){
-				if (norm[i] ~ /^(```|~~~)/){ fence=!fence; continue }
+				ls=ls3(norm[i])
+				if (ls ~ /^(```|~~~)/){ fence=!fence; continue }
 				if (fence) continue
-				if (norm[i] ~ /^#+[[:space:]]/){ ei=i; break }
-				if (i<n && norm[i] ~ /[^[:space:]]/ && norm[i+1] ~ /^(=+|-+)[[:space:]]*$/){ ei=i; break }
+				if (ls ~ /^#+[[:space:]]/){ ei=i; break }
+				if (i<n && norm[i] ~ /[^[:space:]]/ && ls3(norm[i+1]) ~ /^(=+|-+)[[:space:]]*$/){ ei=i; break }
 			}
 			for (i=1;i<hi;i++) print raw[i]
 			printf "%s", w

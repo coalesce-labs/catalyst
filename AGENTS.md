@@ -29,11 +29,6 @@ All agents follow a **documentarian, not critic** approach:
 <!-- catalyst-house-rules:begin -->
 ## Working the Loop (every agent — interactive too, not just skills)
 
-  sentinels; the seeder and `check-project-setup.sh` §9 key on those stable
-  sentinels, so the human-readable heading and prose below can be reworded freely
-  without breaking detection. Self-contained by design except that it DEFERS the
-  Linear-read mechanism to the `catalyst-dev:linearis` skill (single-source-of-truth).
--->
 These are house rules for anyone touching this repo's dev / PR / ticket workflow — whether you are
 running a slash-command skill **or** working interactively and ad-hoc. They are **default
 reflexes, not skill internals**: reach for them without being told, even on a one-off PR you opened
@@ -59,8 +54,10 @@ repo.
   local replica behind a freshness gate (via its `linear_read_ticket` helper, run in the plugin's
   skill context) and does the loud stale/absent fallback for you. Don't hand-roll the read yourself:
   an **un-gated** `sqlite3` of the replica skips the freshness check (you may read stale data or
-  create an empty DB), and a bare `linearis issues read <ID>` loop 429s the shared fleet quota.
-  Writes and list/search go through `linearis`.
+  create an empty DB), and a bare `linearis issues read <ID>` loop 429s the shared fleet quota. The
+  ban is on un-gated and looped reads, not on reading at all — if `catalyst-dev` is somehow
+  unavailable (a broken environment), one loud `linearis issues read <ID>` to unblock is tolerable,
+  never a loop. Writes and list/search go through `linearis`.
 <!-- catalyst-house-rules:end -->
 
 ## Build & Test

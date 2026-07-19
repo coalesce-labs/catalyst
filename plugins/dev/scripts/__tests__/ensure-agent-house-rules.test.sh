@@ -19,7 +19,7 @@ fail() { FAILURES=$((FAILURES + 1)); echo "  FAIL: $1"; [[ -n "${2:-}" ]] && ech
 assert_eq() { [[ "$2" == "$3" ]] && pass "$1" || fail "$1" "expected='$2' actual='$3'"; }
 has() { grep -qF "$2" "$3" && pass "$1" || fail "$1" "'$2' not in $3"; }
 lacks() { grep -qF "$2" "$3" && fail "$1" "'$2' unexpectedly in $3" || pass "$1"; }
-count() { grep -cF "$2" "$1" 2>/dev/null || echo 0; }
+count() { local c; c="$(grep -cF "$2" "$1" 2>/dev/null)"; echo "${c:-0}"; }
 run() { bash "$SCRIPT" --quiet --repo "$1" "${@:2}"; }
 
 # 0. template integrity
@@ -128,11 +128,25 @@ run "$R" --fix >/dev/null
 mode="$(stat -f '%Lp' "$R/CLAUDE.md" 2>/dev/null || stat -c '%a' "$R/CLAUDE.md" 2>/dev/null)"
 assert_eq "perm: mode preserved (640)" "640" "$mode"
 
-# 14. read-only dir → nonzero exit, unchanged
-R="$SCRATCH/ro"; mkdir -p "$R"; printf '# CLAUDE.md\n\n## Setup\nx\n' >"$R/CLAUDE.md"; before="$(cat "$R/CLAUDE.md")"
-chmod 0444 "$R/CLAUDE.md"; run "$R" --fix >/dev/null 2>&1; rc=$?; chmod 0644 "$R/CLAUDE.md"
-[[ "$rc" -ne 0 ]] && pass "read-only file: nonzero exit (rc=$rc)" || fail "read-only file: exited 0"
-assert_eq "read-only file: unchanged" "$before" "$(cat "$R/CLAUDE.md")"
+# 14. read-only file → nonzero exit, unchanged. Skipped under root: DAC perms
+# don't stop uid 0 from writing, so the failure can't be provoked reliably in a
+# root CI container.
+if [[ "${EUID:-$(id -u)}" -eq 0 ]]; then
+	echo "  SKIP: read-only-file test (running as root — perms don't apply)"
+else
+	R="$SCRATCH/ro"; mkdir -p "$R"; printf '# CLAUDE.md\n\n## Setup\nx\n' >"$R/CLAUDE.md"; before="$(cat "$R/CLAUDE.md")"
+	chmod 0444 "$R/CLAUDE.md"; run "$R" --fix >/dev/null 2>&1; rc=$?; chmod 0644 "$R/CLAUDE.md"
+	[[ "$rc" -ne 0 ]] && pass "read-only file: nonzero exit (rc=$rc)" || fail "read-only file: exited 0"
+	assert_eq "read-only file: unchanged" "$before" "$(cat "$R/CLAUDE.md")"
+fi
+
+# 14b. legacy migration boundary honors a CommonMark-indented ATX heading
+R="$SCRATCH/indent"; mkdir -p "$R"
+{ echo "# CLAUDE.md"; echo ""; echo "## Working the Loop (every agent — interactive too, not just skills)"; echo "oldbody"; echo ""; echo "   ## Indented Local Notes"; echo "PRECIOUS indented-heading content"; } >"$R/CLAUDE.md"
+run "$R" --fix >/dev/null
+has "indent: indented heading preserved" "## Indented Local Notes" "$R/CLAUDE.md"
+has "indent: content after preserved" "PRECIOUS indented-heading content" "$R/CLAUDE.md"
+has "indent: block migrated" "$BEGIN" "$R/CLAUDE.md"
 
 # 15. duplicate sentinels → refuse exit 4
 R="$SCRATCH/dup"; mkdir -p "$R"
@@ -176,6 +190,20 @@ R="$SCRATCH/markers"; mkdir -p "$R"; printf '# CLAUDE.md\n' >"$R/CLAUDE.md"; run
 for m in "subscribe to the event log" "reaction, not a review object" "local replica"; do
 	has "seeded marker: $m" "$m" "$R/CLAUDE.md"
 done
+
+# 22. the seeded block carries NO leaked maintainer comment/prose (P1 regression:
+# an inline --> in the template comment must not terminate the strip early)
+R="$SCRATCH/clean"; mkdir -p "$R"; printf '# CLAUDE.md\n' >"$R/CLAUDE.md"; run "$R" --fix >/dev/null
+inner="$(awk '/catalyst-house-rules:begin/{g=1;next} /catalyst-house-rules:end/{g=0} g' "$R/CLAUDE.md")"
+grep -qE '<!--|-->' <<<"$inner" && fail "clean: no residual HTML-comment markers in block" || pass "clean: no residual HTML-comment markers in block"
+grep -qF 'the seeder and' <<<"$inner" && fail "clean: no leaked maintainer prose in block" || pass "clean: no leaked maintainer prose in block"
+[[ "$(printf '%s\n' "$inner" | head -1)" == '## Working the Loop'* ]] && pass "clean: block starts with the heading" || fail "clean: block starts with the heading" "got: $(printf '%s\n' "$inner" | head -1)"
+
+# 23. legacy duplicate headings → refuse (exit 4), don't half-migrate
+R="$SCRATCH/legdup"; mkdir -p "$R"
+{ echo "# CLAUDE.md"; echo ""; echo "## Working the Loop (every agent — interactive too, not just skills)"; echo "a"; echo ""; echo "## Working the Loop (every agent — interactive too, not just skills)"; echo "b"; } >"$R/CLAUDE.md"
+run "$R" --fix >/dev/null 2>&1; assert_eq "legacy duplicate: refuse (rc=4)" 4 "$?"
+assert_eq "legacy duplicate: untouched (no sentinel added)" 0 "$(count "$R/CLAUDE.md" "$BEGIN")"
 
 echo ""
 echo "ensure-agent-house-rules.test.sh: ${PASSES} passed, ${FAILURES} failed"
