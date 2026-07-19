@@ -240,11 +240,13 @@ export function planPhases({ operation, nodeClass, scripts, opts = {} }) {
   // readReplica, secrets, launchd agents, catalyst.db) is written AFTER backup and so is restorable.
   const acquire = () => ({
     phase: "acquire",
-    // --no-interactive-wrapper: the acquire step runs pre-backup and non-interactively;
-    // it must only write the git-reconstructable pluginDirs config, never the user's
-    // shell rc files (~/.zshrc/~/.bashrc), which the backup phase does not capture and
-    // a rollback could not restore. The interactive `claude` wrapper is installed only
-    // by the documented manual `bash setup-plugin-source.sh` run.
+    // --no-interactive-wrapper: the acquire step runs pre-backup and non-interactively,
+    // so it does only the git-reconstructable work — the pluginDirs config write + the
+    // reversible ~/.claude/skills symlinks. It SKIPS the stateful cutover (shell-rc
+    // wrapper removal + `catalyst` marketplace/enablement retirement), which the backup
+    // phase does not capture and a rollback could not restore; both are no-ops on a
+    // fresh node anyway. The full cutover runs via the join stage / the documented
+    // manual `bash setup-plugin-source.sh` run.
     steps: [{ label: "plugin-source", kind: "run", argv: [scripts.pluginSrc, "--no-interactive-wrapper"] }],
   });
 
