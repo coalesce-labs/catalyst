@@ -4,23 +4,34 @@
 #
 # WHY: the block teaches EVERY agent (interactive too, not just slash-command
 # skills) three default reflexes — subscribe to the event log instead of polling,
-# recognize an automated review's 👍 clean-pass reaction, and read single Linear
+# recognize an automated review's clean-pass reaction, and read single Linear
 # tickets from the freshness-gated local replica. `check-project-setup.sh` §9
 # only *warns* when it is missing; this script is the *fix* — it makes every
 # newly-enrolled (or drifted) repo carry the current canonical block. Idempotent:
 # re-running syncs the block to the template, so it doubles as a "keep in sync"
 # updater, not just a first-time seeder.
 #
-# Target-doc rule (the file the DRIVING agent actually loads):
-#   - CLAUDE.md is a thin `@AGENTS.md` bridge (line 1) AND AGENTS.md exists → AGENTS.md
-#   - else CLAUDE.md exists (monolithic)                                    → CLAUDE.md
-#   - else AGENTS.md exists                                                 → AGENTS.md
-#   - else (neither doc)  → create AGENTS.md (portable core) + a thin
-#                           `@AGENTS.md` CLAUDE.md bridge; seed into AGENTS.md
+# The seeded block is wrapped in HTML-comment SENTINELS (catalyst-house-rules:
+# begin/end). Detection, counting and replacement all key on those stable
+# sentinels — so the heading/prose can be reworded without duplicating the block
+# fleet-wide, a fenced code sample that shows the block is not mistaken for it,
+# and trailing/setext content after the block is never swept away. Legacy blocks
+# seeded before sentinels existed are detected by their exact heading (fence-aware)
+# and upgraded in place.
+#
+# Target-doc rule (the file the DRIVING agent actually LOADS):
+#   - CLAUDE.md imports AGENTS.md (a `@AGENTS.md` line) → AGENTS.md (create the
+#     portable core if it is missing so the import resolves)
+#   - CLAUDE.md is monolithic (no import)               → CLAUDE.md
+#   - only AGENTS.md exists                              → AGENTS.md
+#   - neither doc                                        → create AGENTS.md core +
+#                                                          a thin `@AGENTS.md` bridge
+# An existing managed/legacy block in the NON-loaded doc is left in place and
+# reported as an orphan (never silently followed into a doc the agent won't read).
 #
 # Usage:
 #   ensure-agent-house-rules.sh [--fix] [--repo DIR] [--template FILE] [--quiet]
-#     (no --fix) → dry-run: report what WOULD change, exit 0 if already current,
+#     (no --fix) → dry-run: report what WOULD change; exit 0 if already current,
 #                  exit 10 if a change is needed (so callers can branch).
 #     --fix      → write the change in place.
 set -uo pipefail
@@ -32,21 +43,19 @@ while [[ $# -gt 0 ]]; do
 	--repo) REPO="${2:?--repo needs a dir}"; shift ;;
 	--template) TEMPLATE="${2:?--template needs a file}"; shift ;;
 	--quiet) QUIET=1 ;;
-	-h | --help)
-		sed -n '2,30p' "$0"
-		exit 0
-		;;
-	*)
-		echo "ensure-agent-house-rules: unknown arg '$1'" >&2
-		exit 2
-		;;
+	-h | --help) sed -n '2,40p' "$0"; exit 0 ;;
+	*) echo "ensure-agent-house-rules: unknown arg '$1'" >&2; exit 2 ;;
 	esac
 	shift
 done
 
 say() { [[ $QUIET -eq 1 ]] || printf '%s\n' "$*"; }
+die() { echo "ensure-agent-house-rules: $1" >&2; exit "${2:-5}"; }
 
 SCRIPT_DIR="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+BEGIN_MARK='<!-- catalyst-house-rules:begin -->'
+END_MARK='<!-- catalyst-house-rules:end -->'
+BRIDGE_LINE='@AGENTS.md'
 
 # Resolve the canonical template (repo copy → plugin-cache CLAUDE_PLUGIN_ROOT).
 if [[ -z "$TEMPLATE" ]]; then
@@ -57,80 +66,78 @@ if [[ -z "$TEMPLATE" ]]; then
 	done
 fi
 if [[ ! -f "$TEMPLATE" ]]; then
-	if [[ -n "$TEMPLATE" ]]; then
-		echo "ensure-agent-house-rules: template not found at '$TEMPLATE'" >&2
-	else
-		echo "ensure-agent-house-rules: canonical template not found (looked at ${SCRIPT_DIR}/../templates/agents-house-rules.md and \${CLAUDE_PLUGIN_ROOT}/templates/agents-house-rules.md)" >&2
-	fi
-	exit 3
+	[[ -n "$TEMPLATE" ]] && die "template not found at '$TEMPLATE'" 3
+	die "canonical template not found (looked at ${SCRIPT_DIR}/../templates/agents-house-rules.md and \${CLAUDE_PLUGIN_ROOT}/templates/agents-house-rules.md)" 3
 fi
-[[ -d "$REPO" ]] || { echo "ensure-agent-house-rules: --repo '$REPO' is not a directory" >&2; exit 2; }
+[[ -d "$REPO" ]] || die "--repo '$REPO' is not a directory" 2
 
 # BLOCK = template with the leading HTML seeding-comment stripped (that comment is
-# instructions for the seeder, not content for the repo). Strip CRLF up front so a
-# CRLF-encoded template yields an LF-clean HEADING — otherwise the heading match
-# (which normalizes the TARGET but not the template) would never fire and the block
-# would be appended without bound.
+# maintainer instructions, not content for the repo). CRLF stripped up front so
+# HEADING is LF-clean.
 BLOCK="$(tr -d '\r' <"$TEMPLATE" | awk 'f==0 && /^<!--/{f=1} f==1{ if (/-->/) f=2; next } f==2 && /^[[:space:]]*$/ && seen==0 {seen=1; next} {print}')"
-# Guard: the three reflex markers must survive extraction (template integrity).
-# The review marker is a stable ASCII phrase, not the raw 👍 emoji — an emoji is a
-# fragile presence token (encoding normalization could silently drop it and fail §9).
+HEADING="$(printf '%s\n' "$BLOCK" | head -n1)"
+
+# Template integrity guards.
 for marker in 'subscribe to the event log' 'reaction, not a review object' 'local replica'; do
-	printf '%s' "$BLOCK" | grep -qiF "$marker" || { echo "ensure-agent-house-rules: template missing marker '$marker' after comment strip — refusing" >&2; exit 3; }
+	printf '%s' "$BLOCK" | grep -qiF "$marker" || die "template missing marker '$marker' after comment strip — refusing" 3
 done
-# Guard: the block body must contain no nested ATX heading. The section boundary
-# treats the NEXT heading of any level as the section end, so a nested heading below
-# the title would break extraction/replacement (non-convergence + duplication).
+printf '%s\n' "$BLOCK" | grep -qF "$BEGIN_MARK" && die "template block already contains a sentinel — refusing (sentinels are added by the seeder, not the template)" 3
 if printf '%s\n' "$BLOCK" | tail -n +2 | grep -qE '^#+[[:space:]]'; then
-	echo "ensure-agent-house-rules: template block body has a nested heading — the seeder's section boundary can't represent it. Keep the block flat below its title." >&2
-	exit 3
+	die "template block body has a nested heading — keep the block flat below its title" 3
 fi
 
-BRIDGE_LINE="@AGENTS.md"
+# WRAPPED = the sentineled block that actually lands in a repo.
+WRAPPED="$(printf '%s\n%s\n%s' "$BEGIN_MARK" "$BLOCK" "$END_MARK")"
+
 CLA="$REPO/CLAUDE.md"
 AG="$REPO/AGENTS.md"
 
-# HEADING = the exact canonical heading (first line of the block). Match the FULL
-# line, never a prefix — so a hand-written "## Working the Loop Diagram" section is
-# not mistaken for the block (which would clobber it) and a "## Working the Loop
-# Notes" sibling does not trip the duplicate guard.
-HEADING="$(printf '%s\n' "$BLOCK" | head -n1)"
+# --- helpers -----------------------------------------------------------------
+# print a file with fenced code regions blanked, CRLF + trailing whitespace
+# stripped — for heading / import detection that must ignore anything inside
+# ``` / ~~~ fences. The rstrip is done here in awk (byte-safe) rather than via a
+# downstream `sed 's/[[:space:]]*$//'`, which on BSD/macOS mangles multibyte UTF-8
+# (e.g. the em-dash in the heading), causing a silent detection miss.
+defenced() {
+	awk '{ line=$0; sub(/\r$/,"",line); sub(/[[:space:]]+$/,"",line)
+		if (line ~ /^(```|~~~)/) { fence=!fence; print ""; next }
+		if (fence) { print ""; next }
+		print line }' "$1"
+}
+has_managed() { [[ -f "$1" ]] && grep -qF "$BEGIN_MARK" "$1"; }
+has_legacy()  { [[ -f "$1" ]] && defenced "$1" | grep -Fxq "$HEADING"; }
+has_block()   { has_managed "$1" || has_legacy "$1"; }
+claude_imports_agents() { [[ -f "$CLA" ]] && defenced "$CLA" | grep -Fxq "$BRIDGE_LINE"; }
 
-die() { echo "ensure-agent-house-rules: $1" >&2; exit "${2:-5}"; }
+readlink_f() { readlink -f "$1" 2>/dev/null || realpath "$1" 2>/dev/null || python3 -c 'import os,sys;print(os.path.realpath(sys.argv[1]))' "$1" 2>/dev/null || echo "$1"; }
 
-is_bridge() { [[ -f "$CLA" ]] && [[ "$(head -n1 "$CLA" | tr -d '\r' | sed 's/[[:space:]]*$//')" == "$BRIDGE_LINE" ]]; }
-# CRLF-safe exact-line detection: strip \r before matching so a CRLF checkout is
-# still recognized as carrying the block (else we'd append a duplicate).
-has_block() { [[ -f "$1" ]] && tr -d '\r' <"$1" | grep -Fxq "$HEADING"; }
-
+# write CONTENT-FILE into DEST, preserving a symlink (write through to its target)
+# and the destination's existing mode (truncate+write keeps inode/mode; a plain
+# `mv` would replace the symlink with a regular file and reset mode to mktemp's).
+write_through() {
+	local src="$1" dest="$2" real="$2"
+	[[ -L "$dest" ]] && real="$(readlink_f "$dest")"
+	cat "$src" >"$real" || die "failed to write ${dest#"$REPO"/} (read-only?)"
+}
 create_agents_core() {
 	printf '# AGENTS.md\n\nPortable, tool-agnostic guidance for AI coding agents working in this repository.\n' >"$AG" || die "failed to create $AG"
 }
 
+# --- resolve the LOADED doc (the target) -------------------------------------
 CREATED_DOCS=""
-if has_block "$AG"; then
-	# Block already lives in AGENTS.md → update it there, whatever the bridge style.
-	# (Some repos import AGENTS.md from a header line other than line 1, so the line-1
-	# is_bridge probe alone would mis-target them — always follow the existing block.)
-	TARGET="$AG"
-elif has_block "$CLA"; then
-	# Block already lives in the (monolithic) CLAUDE.md → update it there.
-	TARGET="$CLA"
-elif is_bridge; then
-	# CLAUDE.md imports AGENTS.md → the block belongs in AGENTS.md. If AGENTS.md does
-	# not exist yet, create the portable core so the `@AGENTS.md` import resolves —
-	# do NOT seed the block into the thin bridge file.
-	TARGET="$AG"
-	if [[ ! -f "$AG" ]]; then
-		CREATED_DOCS="AGENTS.md (portable core; CLAUDE.md already imports it)"
-		[[ $FIX -eq 1 ]] && create_agents_core
+if [[ -f "$CLA" ]]; then
+	if claude_imports_agents; then
+		TARGET="$AG"
+		if [[ ! -f "$AG" ]]; then
+			CREATED_DOCS="AGENTS.md (portable core; CLAUDE.md already imports it)"
+			[[ $FIX -eq 1 ]] && create_agents_core
+		fi
+	else
+		TARGET="$CLA"
 	fi
-elif [[ -f "$CLA" ]]; then
-	TARGET="$CLA"
 elif [[ -f "$AG" ]]; then
 	TARGET="$AG"
 else
-	# Neither doc exists → establish the context-framework (AGENTS.md core + bridge).
 	TARGET="$AG"
 	CREATED_DOCS="AGENTS.md + CLAUDE.md(@AGENTS.md bridge)"
 	if [[ $FIX -eq 1 ]]; then
@@ -138,39 +145,35 @@ else
 		printf '%s\n\n## Bridge\n\nAll portable project guidance lives in `AGENTS.md` (imported above). Add only tool-specific notes here.\n' "$BRIDGE_LINE" >"$CLA" || die "failed to create $CLA"
 	fi
 fi
-
 TARGET_REL="${TARGET#"$REPO"/}"
 
-# Count exact-heading occurrences (CRLF-stripped). The seeder never creates
-# duplicates, so >1 means the doc was hand-edited into an ambiguous state — refuse
-# loudly rather than silently half-update only the first (which would never converge).
-HEADING_COUNT=0
-[[ -f "$TARGET" ]] && HEADING_COUNT="$(tr -d '\r' <"$TARGET" | grep -Fxc "$HEADING")"
-[[ -n "$HEADING_COUNT" ]] || HEADING_COUNT=0
-if [[ "$HEADING_COUNT" -gt 1 ]]; then
-	die "${TARGET_REL} has ${HEADING_COUNT} '${HEADING}' sections — refusing to auto-edit an ambiguous doc. Collapse them to one and re-run." 4
+# Warn about a block orphaned in the NON-loaded doc (never silently follow it).
+OTHER=""
+[[ "$TARGET" == "$AG" ]] && OTHER="$CLA" || OTHER="$AG"
+if [[ -n "$OTHER" && -f "$OTHER" ]] && has_block "$OTHER"; then
+	say "note: a house-rules block also exists in ${OTHER#"$REPO"/}, which the driving agent does not load — leaving it (remove it by hand if stray)."
 fi
 
-# Extract the existing block: from the exact heading line to the line before the
-# NEXT ATX heading of ANY level (or EOF). Ending only at '^## ' would let a
-# following H1/H3 heading fall inside the section and get deleted on replace
-# (silent data loss). \r is stripped so a CRLF-only diff isn't misreported as
-# stale; `$( )` strips trailing newlines for a clean compare against BLOCK.
-extract_existing() {
-	awk -v heading="$HEADING" '
-		{ line = $0; sub(/\r$/, "", line) }
-		line == heading && !seen { seen = 1; grab = 1; print line; next }
-		grab && line ~ /^#+[[:space:]]/ { grab = 0 }
+# --- convergence / duplicate guards ------------------------------------------
+MANAGED_COUNT=0
+[[ -f "$TARGET" ]] && MANAGED_COUNT="$(grep -cF "$BEGIN_MARK" "$TARGET" 2>/dev/null)"
+[[ -n "$MANAGED_COUNT" ]] || MANAGED_COUNT=0
+if [[ "$MANAGED_COUNT" -gt 1 ]]; then
+	die "${TARGET_REL} has ${MANAGED_COUNT} '${BEGIN_MARK}' sentinels — refusing to auto-edit an ambiguous doc. Collapse to one and re-run." 4
+fi
+
+# Extract the current managed region's INNER block (between sentinels), CRLF-safe.
+extract_managed() {
+	awk -v b="$BEGIN_MARK" -v e="$END_MARK" '
+		{ line=$0; sub(/\r$/,"",line) }
+		line==b { grab=1; next }
+		grab && line==e { grab=0; done=1; next }
 		grab { print line }
 	' "$1"
 }
-
 current_block_matches() {
-	[[ -f "$TARGET" ]] || return 1
-	local existing
-	existing="$(extract_existing "$TARGET")"
-	[[ -n "$existing" ]] || return 1
-	[[ "$existing" == "$BLOCK" ]]
+	[[ -f "$TARGET" ]] && has_managed "$TARGET" || return 1
+	[[ "$(extract_managed "$TARGET")" == "$BLOCK" ]]
 }
 
 if [[ -f "$TARGET" ]] && current_block_matches; then
@@ -178,52 +181,88 @@ if [[ -f "$TARGET" ]] && current_block_matches; then
 	exit 0
 fi
 
-# Determine action: replace an existing (stale) section, or append a new one.
-HAS_SECTION=0
-[[ "$HEADING_COUNT" -eq 1 ]] && HAS_SECTION=1
+# What action? update a sentineled block, migrate a legacy (heading-only) block,
+# or append a fresh sentineled block.
+MODE="append"
+if has_managed "$TARGET"; then
+	MODE="managed"
+elif has_legacy "$TARGET"; then
+	MODE="legacy"
+fi
 
 if [[ $FIX -eq 0 ]]; then
 	[[ -n "$CREATED_DOCS" ]] && say "would CREATE ${CREATED_DOCS} in ${REPO} and seed the block"
-	if [[ $HAS_SECTION -eq 1 ]]; then
-		say "would UPDATE the stale 'Working the Loop' block in ${TARGET_REL}"
-	else
-		say "would SEED the 'Working the Loop' block into ${TARGET_REL}"
-	fi
+	case "$MODE" in
+	managed) say "would UPDATE the sentineled 'Working the Loop' block in ${TARGET_REL}" ;;
+	legacy)  say "would MIGRATE the legacy (un-sentineled) 'Working the Loop' block in ${TARGET_REL} to sentinels" ;;
+	append)  say "would SEED the 'Working the Loop' block into ${TARGET_REL}" ;;
+	esac
 	say "(dry-run — re-run with --fix to apply)"
 	exit 10
 fi
 
 TMP="$(mktemp)" || die "mktemp failed"
-BLOCKFILE="$(mktemp)" || die "mktemp failed"
-trap 'rm -f "$TMP" "$BLOCKFILE"' EXIT
-printf '%s\n' "$BLOCK" >"$BLOCKFILE" || die "failed to stage block"
+WRAPFILE="$(mktemp)" || die "mktemp failed"
+trap 'rm -f "$TMP" "$WRAPFILE"' EXIT
+printf '%s\n' "$WRAPPED" >"$WRAPFILE" || die "failed to stage block"
 
-if [[ $HAS_SECTION -eq 1 ]]; then
-	# Replace the existing section: exact heading → next ATX heading (any level) or
-	# EOF; one blank line before the following heading. The block is read from a file
-	# via getline — `awk -v` cannot carry the multi-line value. Matching is
-	# \r-tolerant; kept lines are printed verbatim (endings preserved).
-	awk -v blockfile="$BLOCKFILE" -v heading="$HEADING" '
-		BEGIN { while ((getline l < blockfile) > 0) block = block l "\n" }
-		{ line = $0; sub(/\r$/, "", line) }
-		line == heading && done == 0 { printf "%s", block; skip = 1; done = 1; next }
-		skip == 1 && line ~ /^#+[[:space:]]/ { skip = 0; print ""; print; next }
-		skip == 1 { next }
+case "$MODE" in
+managed)
+	# Replace between the sentinels (inclusive).
+	awk -v b="$BEGIN_MARK" -v e="$END_MARK" -v wf="$WRAPFILE" '
+		BEGIN { while ((getline l < wf) > 0) w = w l "\n" }
+		{ line=$0; sub(/\r$/,"",line) }
+		line==b && !done { printf "%s", w; skip=1; done=1; next }
+		skip && line==e { skip=0; next }
+		skip { next }
 		{ print }
 	' "$TARGET" >"$TMP" || die "failed to rewrite ${TARGET_REL}"
-	mv "$TMP" "$TARGET" || die "failed to write ${TARGET_REL} (read-only?)"
+	write_through "$TMP" "$TARGET"
 	say "✓ updated 'Working the Loop' block in ${TARGET_REL}"
-else
-	# Append via a checked temp-then-mv (never a bare >> redirect that could silently
-	# fail on a read-only target). Guarantee a blank-line separator regardless of
-	# whether the file already ends in a newline.
-	if [[ -f "$TARGET" ]]; then cp "$TARGET" "$TMP" || die "failed to read ${TARGET_REL}"; else : >"$TMP" || die "mktemp write failed"; fi
-	if [[ -s "$TMP" ]]; then
-		[[ "$(tail -c1 "$TMP")" == "" ]] || printf '\n' >>"$TMP"
-		printf '\n' >>"$TMP"
+	;;
+legacy)
+	# Migrate: replace the legacy section with the sentineled block. Buffered (not
+	# streaming) so the section end can be detected with one-line lookahead — it
+	# ends at the next ATX heading OR a setext-underlined heading (a non-blank line
+	# whose next line is all '=' or '-') OR EOF, all fence-aware. \r- and
+	# trailing-whitespace-tolerant; kept lines are emitted verbatim.
+	awk -v heading="$HEADING" -v wf="$WRAPFILE" '
+		function rstrip(s){ sub(/[[:space:]]+$/,"",s); return s }
+		{ raw[NR]=$0; l=$0; sub(/\r$/,"",l); norm[NR]=l }
+		END {
+			n=NR; while ((getline x < wf) > 0) w = w x "\n"
+			fence=0; hi=0
+			for (i=1;i<=n;i++){ if (norm[i] ~ /^(```|~~~)/) fence=!fence; else if (!fence && rstrip(norm[i])==heading){ hi=i; break } }
+			if (hi==0){ for(i=1;i<=n;i++) print raw[i]; exit }   # defensive: heading vanished
+			# recompute fence state up to the heading, then find the end boundary
+			fence=0; for (i=1;i<=hi;i++) if (norm[i] ~ /^(```|~~~)/) fence=!fence
+			ei=n+1
+			for (i=hi+1;i<=n;i++){
+				if (norm[i] ~ /^(```|~~~)/){ fence=!fence; continue }
+				if (fence) continue
+				if (norm[i] ~ /^#+[[:space:]]/){ ei=i; break }
+				if (i<n && norm[i] ~ /[^[:space:]]/ && norm[i+1] ~ /^(=+|-+)[[:space:]]*$/){ ei=i; break }
+			}
+			for (i=1;i<hi;i++) print raw[i]
+			printf "%s", w
+			if (ei<=n){ print ""; for (i=ei;i<=n;i++) print raw[i] }
+		}
+	' "$TARGET" >"$TMP" || die "failed to migrate ${TARGET_REL}"
+	write_through "$TMP" "$TARGET"
+	say "✓ migrated legacy 'Working the Loop' block to sentinels in ${TARGET_REL}"
+	;;
+append)
+	# Append with exactly one blank-line separator (collapse any pre-existing
+	# trailing blanks), via a checked temp-then-write-through.
+	if [[ -f "$TARGET" ]]; then
+		awk '{ lines[NR]=$0 } END { last=NR; while (last>0 && lines[last] ~ /^[[:space:]]*$/) last--; for(i=1;i<=last;i++) print lines[i] }' "$TARGET" >"$TMP" || die "failed to read ${TARGET_REL}"
+	else
+		: >"$TMP"
 	fi
-	printf '%s\n' "$BLOCK" >>"$TMP" || die "failed to stage append"
-	mv "$TMP" "$TARGET" || die "failed to write ${TARGET_REL} (read-only?)"
+	[[ -s "$TMP" ]] && printf '\n' >>"$TMP"
+	printf '%s\n' "$WRAPPED" >>"$TMP" || die "failed to stage append"
+	write_through "$TMP" "$TARGET"
 	say "✓ seeded 'Working the Loop' block into ${TARGET_REL}${CREATED_DOCS:+ (created ${CREATED_DOCS})}"
-fi
+	;;
+esac
 exit 0

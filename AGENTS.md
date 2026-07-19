@@ -26,14 +26,19 @@ All agents follow a **documentarian, not critic** approach:
 - NO architecture critiques or quality assessments
 - Focus on answering "WHERE is X?" and "HOW does X work?"
 
+<!-- catalyst-house-rules:begin -->
 ## Working the Loop (every agent — interactive too, not just skills)
 
+  sentinels; the seeder and `check-project-setup.sh` §9 key on those stable
+  sentinels, so the human-readable heading and prose below can be reworded freely
+  without breaking detection. Self-contained by design except that it DEFERS the
+  Linear-read mechanism to the `catalyst-dev:linearis` skill (single-source-of-truth).
+-->
 These are house rules for anyone touching this repo's dev / PR / ticket workflow — whether you are
 running a slash-command skill **or** working interactively and ad-hoc. They are **default
 reflexes, not skill internals**: reach for them without being told, even on a one-off PR you opened
-by hand. They defer their mechanism to the `catalyst-dev` plugin, which is available in every
-Catalyst-managed repo (if a skill won't resolve, the marketplace cache has likely rotted — reload it
-rather than working around it).
+by hand. They defer their mechanism to the `catalyst-dev` plugin, available in every Catalyst-managed
+repo.
 
 - **Waiting on GitHub / CI / Linear state → subscribe to the event log, don't poll.** To block on a
   state change (a PR merged, CI turning green, a review posted, a push to a branch, a ticket
@@ -51,13 +56,12 @@ rather than working around it).
   PR is mergeable only once **every** review thread has been addressed and resolved.
 - **Reading one Linear ticket → the freshness-gated local replica, not bare `linearis`.**
   Invoke the `catalyst-dev:linearis` skill and follow its "Reading Linear" contract — it reads the
-  local replica behind a freshness gate (its `linear_read_ticket` helper, run in the plugin's skill
-  context) and performs the loud stale/absent fallback for you. Two anti-patterns: a bare `linearis
-  issues read <ID>` (a poll loop 429s the shared fleet quota, and the repo's pre-read hook blocks
-  bare reads outright), and an **un-gated** `sqlite3` of the replica (skips the freshness check, so
-  you may read stale data or silently create an empty DB). If the skill can't resolve, that's a
-  rotted plugin cache — reload it; the pre-read hook's own message points at the gated replica read
-  to use meanwhile. Writes and list/search go through `linearis`.
+  local replica behind a freshness gate (via its `linear_read_ticket` helper, run in the plugin's
+  skill context) and does the loud stale/absent fallback for you. Don't hand-roll the read yourself:
+  an **un-gated** `sqlite3` of the replica skips the freshness check (you may read stale data or
+  create an empty DB), and a bare `linearis issues read <ID>` loop 429s the shared fleet quota.
+  Writes and list/search go through `linearis`.
+<!-- catalyst-house-rules:end -->
 
 ## Build & Test
 

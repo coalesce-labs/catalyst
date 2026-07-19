@@ -584,17 +584,24 @@ AGENT_DOCS=()
 [[ -f AGENTS.md ]] && AGENT_DOCS+=("AGENTS.md")
 [[ -f CLAUDE.md ]] && AGENT_DOCS+=("CLAUDE.md")
 if [[ ${#AGENT_DOCS[@]} -gt 0 ]]; then
-	missing_reflex=()
-	grep -qiE 'subscribe to the event log|wait-for-github' "${AGENT_DOCS[@]}" ||
-		missing_reflex+=("event-log-over-polling (waiting on GitHub/CI/Linear state → catalyst-dev:wait-for-github / catalyst-dev:monitor-events, don't poll)")
-	grep -qiF 'reaction, not a review object' "${AGENT_DOCS[@]}" ||
-		missing_reflex+=("automated-review clean pass is a reaction, not a review object (detect via reactions/comments, not only the reviews API)")
-	grep -qiE 'linear_read_ticket|local replica' "${AGENT_DOCS[@]}" ||
-		missing_reflex+=("single-ticket Linear reads → local replica (linear_read_ticket <ID>, not bare linearis)")
-	if [[ ${#missing_reflex[@]} -eq 0 ]]; then
-		echo -e "${GREEN}Agent house rules present${NC} — ${AGENT_DOCS[*]} teaches the event-log, 👍-review, and replica-read reflexes."
+	# Primary signal: the stable seeder sentinel (survives any heading/prose
+	# rewording). Fallback for a legacy block seeded before sentinels existed: the
+	# three reflex marker phrases. Either → present.
+	if grep -qF 'catalyst-house-rules:begin' "${AGENT_DOCS[@]}"; then
+		echo -e "${GREEN}Agent house rules present${NC} — ${AGENT_DOCS[*]} carries the managed 'Working the Loop' block."
 	else
-		warnings+=("Agent doc (${AGENT_DOCS[*]}) is missing house rules (the 'Working the Loop' reflexes) — an interactive agent won't learn: ${missing_reflex[*]}. Fix: bash ${SCRIPT_DIR}/ensure-agent-house-rules.sh --fix (idempotently seeds/updates the canonical block; run --fix from the repo root or pass --repo DIR).")
+		missing_reflex=()
+		grep -qiE 'subscribe to the event log|wait-for-github' "${AGENT_DOCS[@]}" ||
+			missing_reflex+=("event-log-over-polling (waiting on GitHub/CI/Linear state → catalyst-dev:wait-for-github / catalyst-dev:monitor-events, don't poll)")
+		grep -qiF 'reaction, not a review object' "${AGENT_DOCS[@]}" ||
+			missing_reflex+=("automated-review clean pass is a reaction, not a review object (detect via reactions/comments, not only the reviews API)")
+		grep -qiE 'linear_read_ticket|local replica' "${AGENT_DOCS[@]}" ||
+			missing_reflex+=("single-ticket Linear reads → local replica (linear_read_ticket <ID>, not bare linearis)")
+		if [[ ${#missing_reflex[@]} -eq 0 ]]; then
+			echo -e "${GREEN}Agent house rules present${NC} — ${AGENT_DOCS[*]} teaches the event-log, review, and replica-read reflexes (legacy block; re-run the seeder to add sentinels)."
+		else
+			warnings+=("Agent doc (${AGENT_DOCS[*]}) is missing house rules (the 'Working the Loop' reflexes) — an interactive agent won't learn: ${missing_reflex[*]}. Fix: bash ${SCRIPT_DIR}/ensure-agent-house-rules.sh --fix (idempotently seeds/updates the canonical block; run --fix from the repo root or pass --repo DIR).")
+		fi
 	fi
 fi
 
