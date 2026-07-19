@@ -594,7 +594,7 @@ if [[ ${#AGENT_DOCS[@]} -gt 0 ]]; then
 	if [[ ${#missing_reflex[@]} -eq 0 ]]; then
 		echo -e "${GREEN}Agent house rules present${NC} — ${AGENT_DOCS[*]} teaches the event-log, 👍-review, and replica-read reflexes."
 	else
-		warnings+=("Agent doc (${AGENT_DOCS[*]}) is missing house rules (the 'Working the Loop' reflexes) — an interactive agent won't learn: ${missing_reflex[*]}. Seed the canonical block: plugins/dev/templates/agents-house-rules.md (into AGENTS.md if CLAUDE.md is an @AGENTS.md bridge, else into CLAUDE.md).")
+		warnings+=("Agent doc (${AGENT_DOCS[*]}) is missing house rules (the 'Working the Loop' reflexes) — an interactive agent won't learn: ${missing_reflex[*]}. Fix: bash ${SCRIPT_DIR}/ensure-agent-house-rules.sh --fix (idempotently seeds/updates the canonical block; run --fix from the repo root or pass --repo DIR).")
 	fi
 fi
 
