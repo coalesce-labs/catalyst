@@ -71,6 +71,26 @@ describe("HubClient (CTL-1488 Phase 3)", () => {
     expect(existsSync(dlqPath)).toBe(false);
   });
 
+  test("drainDlq() clears a queued backlog independently of a fresh publish, and is failure-isolated while the hub is still down (Codex P1)", async () => {
+    // A prior outage queues one DLQ batch.
+    const failing = new HubClient({ hubUrl: "https://hub.example", dlqPath, retryDelaysMs: [0, 0, 0], fetchImpl: failFetch().fetchImpl });
+    await failing.publish([rec(1)]);
+    expect(existsSync(dlqPath)).toBe(true);
+
+    // Hub STILL down: an independent drain must not throw and must leave the backlog requeued.
+    await failing.drainDlq();
+    expect(existsSync(dlqPath)).toBe(true); // backlog survives a still-down hub
+
+    // Hub recovers: drainDlq with NO new publish still clears the backlog and advances the seq —
+    // this is the path that was previously unreachable (publish() only drained after a new batch).
+    const { fetchImpl, calls } = okFetch();
+    const healthy = new HubClient({ hubUrl: "https://hub.example", dlqPath, retryDelaysMs: [0, 0, 0], fetchImpl });
+    await healthy.drainDlq();
+    expect(calls.length).toBe(1); // the queued batch delivered without any fresh publish()
+    expect(existsSync(dlqPath)).toBe(false);
+    expect(healthy.lastPublishedSeq).toBe(1);
+  });
+
   test("after N consecutive failures a coordination_publish_degraded event is appended locally (never silent)", async () => {
     const client = new HubClient({
       hubUrl: "https://hub.example",

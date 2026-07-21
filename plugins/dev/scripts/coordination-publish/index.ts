@@ -31,6 +31,17 @@ export interface CoordinationCheckpoint {
   updatedAt?: string;
 }
 
+/**
+ * The current UTC monthly event-log path — the same `<eventsDir>/YYYY-MM.jsonl`
+ * shape the reused otel-forward tailer (`defaultMonthPath`) resolves. Kept here so
+ * the checkpoint month-gate below compares against the exact file the tailer opens.
+ */
+export function currentEventLogPath(eventsDir: string): string {
+  const now = new Date();
+  const ym = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}`;
+  return join(eventsDir, `${ym}.jsonl`);
+}
+
 export function readCoordinationCheckpoint(ckPath: string): CoordinationCheckpoint | null {
   if (!existsSync(ckPath)) return null;
   try {
@@ -86,6 +97,8 @@ export function seedLocalSeqFromMirror(mirrorPath: string): number {
 
 export interface HubClientLike {
   publish(batch: Array<Record<string, unknown>>): Promise<void>;
+  /** Drain any queued DLQ backlog independently of a fresh outbound batch (Codex P1). */
+  drainDlq?: () => Promise<void>;
 }
 
 export interface PublisherOpts {
@@ -126,6 +139,15 @@ export function createCoordinationPublisher(opts: PublisherOpts): CoordinationPu
   // unique invariant. mirrorState.lastLocalSeq is always >= ck.localSeq, so Math.max is safe.
   let localSeq = ck ? Math.max(ck.localSeq, mirrorState.lastLocalSeq) : mirrorState.lastLocalSeq;
   const seenIds = mirrorState.ids;
+  // CTL-1488 (Codex P1): reuse the checkpoint byte-offset ONLY when it belongs to the
+  // file we're about to tail. After a UTC month rollover the tailer opens the new
+  // month's log, but a stale ck.offset from the previous month would start the read
+  // mid-file — permanently skipping the new month's initial lines whenever that file
+  // already grew past the old offset while the daemon was down. The checkpoint records
+  // `path` for exactly this comparison; on a mismatch (or absent checkpoint) start at 0.
+  // The id-dedup (seenIds) + mirror-seeded localSeq keep a from-zero re-read exactly-once.
+  const initialTailPath = opts.filePath ?? currentEventLogPath(opts.eventsDir ?? "");
+  const startOffset = ck && ck.path === initialTailPath ? ck.offset : 0;
   const outbound: Array<Record<string, unknown>> = [];
   const stats = { written: 0, skipped: 0 };
 
@@ -183,7 +205,7 @@ export function createCoordinationPublisher(opts: PublisherOpts): CoordinationPu
     : createTailer({
         filePath: opts.filePath,
         eventsDir: opts.eventsDir ?? "",
-        offset: ck?.offset ?? 0,
+        offset: startOffset,
         onLine: processLine,
         signal: opts.signal,
         pollMs: opts.pollMs,
@@ -204,17 +226,25 @@ export function createCoordinationPublisher(opts: PublisherOpts): CoordinationPu
     // In-flight guard: flushToHub is void-called on a 1s timer, so a slow publish could overlap
     // the next tick. Skipping while one is in flight keeps a single publisher and avoids
     // double-publishing the same rows.
-    if (!opts.hubClient || outbound.length === 0 || flushing) return;
+    if (!opts.hubClient || flushing) return;
     flushing = true;
-    // Snapshot without removing: splice ONLY after publish() resolves, so a publish() that throws
-    // (HubClient.publish is documented never-throw, but a DLQ ENOSPC/EACCES or corrupt-line edge can
-    // still reject) leaves the batch in `outbound` to retry next tick instead of losing it from
-    // egress with no DLQ entry and no degraded event (CTL-1488 remediate: silent egress loss).
-    const batchSize = outbound.length;
     try {
-      await opts.hubClient.publish(outbound.slice(0, batchSize));
-      // Remove only the rows we published; rows appended by the tailer during the await stay queued.
-      outbound.splice(0, batchSize);
+      if (outbound.length > 0) {
+        // Snapshot without removing: splice ONLY after publish() resolves, so a publish() that throws
+        // (HubClient.publish is documented never-throw, but a DLQ ENOSPC/EACCES or corrupt-line edge can
+        // still reject) leaves the batch in `outbound` to retry next tick instead of losing it from
+        // egress with no DLQ entry and no degraded event (CTL-1488 remediate: silent egress loss).
+        // publish() also drains any DLQ backlog on a successful delivery.
+        const batchSize = outbound.length;
+        await opts.hubClient.publish(outbound.slice(0, batchSize));
+        // Remove only the rows we published; rows appended by the tailer during the await stay queued.
+        outbound.splice(0, batchSize);
+      } else if (opts.hubClient.drainDlq) {
+        // No new outbound rows, but a prior outage may have left a DLQ backlog that publish()'s
+        // post-success drain never reaches (Codex P1). Attempt an independent drain so a recovered
+        // hub catches up instead of stranding queued rows until the next coordination event arrives.
+        await opts.hubClient.drainDlq();
+      }
     } finally {
       flushing = false;
     }
@@ -258,12 +288,7 @@ if (import.meta.main) {
   const MIRROR_PATH = (getCoordinationMirrorPath as () => string)();
   const CHECKPOINT_PATH = resolve(CATALYST_DIR, "coordination-publish.checkpoint.json");
   const DLQ_PATH = resolve(CATALYST_DIR, "coordination-publish-dlq.jsonl");
-  const monthPath = () => {
-    const now = new Date();
-    const ym = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}`;
-    return join(EVENTS_DIR, `${ym}.jsonl`);
-  };
-  const EVENT_LOG_PATH = monthPath();
+  const EVENT_LOG_PATH = currentEventLogPath(EVENTS_DIR);
 
   const ac = new AbortController();
   process.on("SIGTERM", () => ac.abort());

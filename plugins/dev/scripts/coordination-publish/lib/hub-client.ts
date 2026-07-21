@@ -110,6 +110,33 @@ export class HubClient {
     );
   }
 
+  /**
+   * Attempt to drain any queued DLQ backlog independently of a fresh outbound batch.
+   *
+   * publish()'s post-success drain only runs when a NEW batch is delivered, so a hub
+   * outage that queues rows and is then followed by silence (no further coordination
+   * events) would strand that backlog indefinitely — every flush tick early-returns on
+   * an empty outbound and publish() is never called (Codex P1). The daemon's flush timer
+   * calls this on the empty-outbound path so a recovered hub catches up regardless.
+   *
+   * Failure-isolated and never-throw (daemon never-crash contract): drainDlqBounded stops
+   * at the first still-failing batch and requeues it plus the remainder, so a hub that is
+   * STILL down simply leaves the backlog for the next tick.
+   */
+  async drainDlq(): Promise<void> {
+    const retryDelays = this.opts.retryDelaysMs ?? [...DEFAULT_RETRY_DELAYS_MS];
+    await drainDlqBounded(
+      this.opts.dlqPath,
+      (b) => withRetry(() => this.sendBatch(b as CoordinationRecord[]), 3, [...retryDelays]),
+      {
+        maxBatches: this.opts.maxDrainBatches ?? DEFAULT_MAX_DRAIN_BATCHES,
+        onBatchDelivered: (b) => {
+          this.lastPublishedSeq = Math.max(this.lastPublishedSeq, maxSeq(b as CoordinationRecord[]));
+        },
+      }
+    );
+  }
+
   private maybeEmitDegraded(batchSize: number, err: unknown): void {
     const threshold = this.opts.degradedThreshold ?? 5;
     // Emit once at the crossing so a sustained outage isn't a per-batch spam,

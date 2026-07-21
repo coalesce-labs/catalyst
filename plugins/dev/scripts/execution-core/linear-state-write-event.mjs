@@ -70,6 +70,10 @@ export function buildLinearStateWriteEvent({
       resource: buildCatalystResource({ serviceName: "catalyst.execution-core" }),
       attributes: {
         "event.name": `linear.state.write.${ticket}`,
+        // CTL-1488: this name is unconditionally coordination (linear. prefix), so the
+        // coordination-publish tailer's fail-closed filter would drop it unstamped.
+        // Stamp it like the other coordination producers (worker.transition).
+        "event.stream_class": "coordination",
         "event.entity": "linear",
         "event.action": "state-write",
         "event.label": ticket,
