@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.2.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-foundry-v2.1.0...catalyst-foundry-v2.2.0) (2026-07-21)
+
+
+### Features
+
+* **dev:** auto-seed agent house-rules on every enrolled repo + Codex-hardened block ([#2666](https://github.com/coalesce-labs/catalyst/issues/2666)) ([97aa6de](https://github.com/coalesce-labs/catalyst/commit/97aa6deb32e74740ab6ce0a7455332bf0fd6d687))
+
 ## [2.1.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-foundry-v2.0.0...catalyst-foundry-v2.1.0) (2026-06-08)
 
 

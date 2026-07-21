@@ -1,5 +1,19 @@
 # Changelog
 
+## [12.32.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.31.0...catalyst-dev-v12.32.0) (2026-07-21)
+
+
+### Features
+
+* **dev:** auto-seed agent house-rules on every enrolled repo + Codex-hardened block ([#2666](https://github.com/coalesce-labs/catalyst/issues/2666)) ([97aa6de](https://github.com/coalesce-labs/catalyst/commit/97aa6deb32e74740ab6ce0a7455332bf0fd6d687))
+* **dev:** CTL-1127 — inbox row: restore favicon, unwrap ID, two-line title, drop verb cluster, fix pane accent ([#1991](https://github.com/coalesce-labs/catalyst/issues/1991)) ([2cda8d5](https://github.com/coalesce-labs/catalyst/commit/2cda8d55464efc9ddfffd608b2f60eff4a426f2e))
+
+
+### Bug Fixes
+
+* **dev:** CTL-682 — wait-watcher skips background agents; pin scheduler test live-count seam ([#2670](https://github.com/coalesce-labs/catalyst/issues/2670)) ([4fd98b2](https://github.com/coalesce-labs/catalyst/commit/4fd98b2b6d8b1db55673d304b3f45a4d7d83f88f))
+* **dev:** drop the Linear-API degraded escape (contradicted the absolute replica rule) ([#2668](https://github.com/coalesce-labs/catalyst/issues/2668)) ([507b227](https://github.com/coalesce-labs/catalyst/commit/507b227d46b6fb285c178dc9385c6fc35e0f66e5))
+
 ## [12.31.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.30.1...catalyst-dev-v12.31.0)
 
 Jul 19, 2026
