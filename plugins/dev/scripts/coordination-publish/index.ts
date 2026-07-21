@@ -214,12 +214,41 @@ if (import.meta.main) {
   const flushTimer =
     cfg.mode === "enforce" ? setInterval(() => void pub.flushToHub(), 1000) : null;
 
+  // CTL-1488 Phase 5: INBOUND mirror-tail — only in enforce (shadow is local-mirror-only, no pull).
+  // Hub HTTP transport when hubUrl is set; otherwise the interim Loki-tail source (fail-open) so the
+  // mirror still converges cross-host on a slower cadence. The merge logic never branches on transport.
+  let inboundTimer: ReturnType<typeof setInterval> | null = null;
+  if (cfg.mode === "enforce") {
+    const { createMirrorTailClient, createHubChangeSource } = await import("./lib/mirror-tail-client.ts");
+    let source;
+    if (cfg.hubUrl) {
+      source = createHubChangeSource({ hubUrl: cfg.hubUrl });
+    } else {
+      const lokiUrlSpecifier = ["../execution-core/config.mjs"].join("");
+      const { getLokiQueryUrl } = await import(lokiUrlSpecifier);
+      const lokiUrl = (getLokiQueryUrl as () => string | null)();
+      if (lokiUrl) {
+        const { createLokiFetcher } = await import("../orch-monitor/lib/loki.ts");
+        const { createLokiChangeSource } = await import("./lib/interim-loki-source.ts");
+        source = createLokiChangeSource({
+          lokiFetcher: createLokiFetcher({ baseUrl: lokiUrl }),
+          nowMs: Date.now(),
+        });
+      }
+    }
+    if (source) {
+      const inbound = createMirrorTailClient({ mirrorPath: MIRROR_PATH, source, signal: ac.signal });
+      inboundTimer = setInterval(() => void inbound.tick(), 2000);
+    }
+  }
+
   // eslint-disable-next-line no-console
   console.error(`[coordination-publish] started mode=${cfg.mode} hub=${cfg.hubUrl ?? "(none)"}`);
   await pub.run();
 
   clearInterval(ckTimer);
   if (flushTimer) clearInterval(flushTimer);
+  if (inboundTimer) clearInterval(inboundTimer);
   await pub.flushToHub();
   pub.saveCheckpoint();
 }
