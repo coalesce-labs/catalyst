@@ -1,9 +1,18 @@
 # Changelog
 
-## [2.2.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-foundry-v2.1.0...catalyst-foundry-v2.2.0) (2026-07-21)
+## [2.2.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-foundry-v2.1.0...catalyst-foundry-v2.2.0)
+
+Jul 21, 2026
+
+<!-- ai-enhanced -->
+
+### Agent House-Rules Auto-Enrollment
+
+Any repo you enroll in Catalyst now automatically receives the "Working the Loop" agent house-rules block, kept in sync on every setup run. The underlying block has been corrected to defer Linear reads through the proper freshness-gated skill contract, restore the required review-thread resolution rule before merge, and scope reflexes to repos where the catalyst-dev substrate is present. A 60-test hardening suite covers edge cases like nested headings, CRLF line endings, and checked writes to prevent silent failures.
 
 
-### Features
+
+### PRs
 
 * **dev:** auto-seed agent house-rules on every enrolled repo + Codex-hardened block ([#2666](https://github.com/coalesce-labs/catalyst/issues/2666)) ([97aa6de](https://github.com/coalesce-labs/catalyst/commit/97aa6deb32e74740ab6ce0a7455332bf0fd6d687))
 
