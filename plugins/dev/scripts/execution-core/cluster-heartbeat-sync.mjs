@@ -191,6 +191,15 @@ export function readPeerHeartbeatsSync(
     cli = CLUSTER_HEARTBEAT_CLI,
     env = process.env,
     timeout = LIVENESS_TIMEOUT_MS,
+    // CTL-1091 (Codex P1 follow-up): when TRUE, a DETERMINATE read FAILURE (spawn
+    // error, timeout, nonzero exit, non-string/unparseable/non-object stdout) THROWS
+    // instead of collapsing to `{}`. This lets the strict DISPATCH liveness path
+    // (readClusterHeartbeats requirePeerView → readPositiveLive → resolveDispatchRoster)
+    // tell a FAILED peer read (→ full-roster outage fallback) apart from a genuinely
+    // EMPTY but SUCCESSFUL read (status 0, no peers published yet → legitimate [self]).
+    // Default false preserves the historical fail-open behavior recovery relies on:
+    // every failure → `{}` (unseen ≠ dead → never reclaim).
+    strict = false,
   } = {},
 ) {
   try {
@@ -199,13 +208,23 @@ export function readPeerHeartbeatsSync(
       env,
       timeout,
     });
-    if (!res || res.status !== 0 || typeof res.stdout !== "string") return {};
+    if (!res || res.status !== 0 || typeof res.stdout !== "string") {
+      if (strict)
+        throw new Error(
+          `ctl-1091: peer heartbeat read failed (status=${res?.status ?? "none"}) — indeterminate peer view`,
+        );
+      return {};
+    }
     const line = res.stdout.trim().split("\n").filter(Boolean).pop();
-    if (!line) return {};
+    if (!line) return {}; // status 0, no data → genuinely empty (a determinate success)
     const parsed = JSON.parse(line);
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      if (strict) throw new Error("ctl-1091: peer heartbeat read returned a malformed payload");
+      return {};
+    }
     return parsed;
-  } catch {
+  } catch (err) {
+    if (strict) throw err; // preserve the failure for the strict dispatch path
     return {};
   }
 }

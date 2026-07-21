@@ -4948,6 +4948,23 @@ describe("readClusterHeartbeats — requirePeerView dispatch strict mode (CTL-10
     ).toThrow(/Linear down/);
   });
 
+  test("strict + multi-host + peer read returns EMPTY {} (genuine, no throw) → local map, NOT an outage", () => {
+    // A SUCCESSFUL-but-empty read (no peers heartbeating yet / all genuinely absent)
+    // must NOT be treated as an outage — the reader returns {} without throwing, so
+    // readClusterHeartbeats returns the local self-only map and the dispatch resolver
+    // legitimately fails over. Only a determinate FAILURE (which the strict readers now
+    // throw on) routes to the full-roster fallback. See the reader-level strict tests.
+    const result = readClusterHeartbeats({
+      logPath,
+      roster: ["mini", "laptop"],
+      anchorIssue: "CTL-9999",
+      readPeers: () => ({}), // genuine empty success (no throw)
+      requirePeerView: true,
+    });
+    expect(result.mini).toBe("2026-06-13T01:00:00Z");
+    expect(result.laptop).toBeUndefined();
+  });
+
   test("strict + multi-host + peer read OK → merges normally (happy path unaffected)", () => {
     const result = readClusterHeartbeats({
       logPath,

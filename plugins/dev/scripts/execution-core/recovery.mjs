@@ -62,11 +62,18 @@ import { readClusterLivenessFromLokiSyncCached } from "./loki-liveness-sync.mjs"
 // attachment. Both return the SAME { [host]: {last_seen, in_flight_tickets} } shape,
 // so readClusterHeartbeats / defaultOwnedTicketsForHost are unchanged below the seam.
 // The `anchorIssue` arg is only meaningful in linear mode (loki uses getLokiQueryUrl()).
-function defaultReadPeers(anchorIssue) {
+// CTL-1091 (Codex P1 follow-up): `strict` propagates to the underlying reader so a
+// DETERMINATE peer-read FAILURE throws (dispatch outage → full roster) rather than
+// fail-opening to `{}` (which is indistinguishable from a genuinely-empty success and
+// would let the strict path keep [self] and grab every peer's work). The cached
+// wrappers spread it straight through to the sync reader on a miss; a cache HIT (a
+// recent determinate success) legitimately skips the read. Default false = recovery's
+// fail-open.
+function defaultReadPeers(anchorIssue, { strict = false } = {}) {
   if (getLivenessReadSource() === "loki") {
-    return readClusterLivenessFromLokiSyncCached({ lokiUrl: getLokiQueryUrl() });
+    return readClusterLivenessFromLokiSyncCached({ lokiUrl: getLokiQueryUrl() }, { strict });
   }
-  return readPeerHeartbeatsSyncCached({ anchorIssue });
+  return readPeerHeartbeatsSyncCached({ anchorIssue }, { strict });
 }
 
 // peerLivenessConfigured — is the cross-host peer read wired for the ACTIVE source?
@@ -3291,7 +3298,13 @@ export function readClusterHeartbeats({
     } else {
       let peers = {};
       try {
-        peers = readPeers(anchorIssue) ?? {};
+        // strict:requirePeerView makes the reader THROW on a determinate failure
+        // (timeout/nonzero/unparseable) instead of collapsing it to `{}` — the default
+        // readers otherwise fail-open, so a failed peer read would look identical to a
+        // genuinely-empty one and the dispatch roster would silently shrink to [self]
+        // (Codex P1 follow-up). A genuinely-empty SUCCESSFUL read still returns `{}`
+        // (legitimate all-peers-absent → [self] failover).
+        peers = readPeers(anchorIssue, { strict: requirePeerView }) ?? {};
       } catch (err) {
         // CTL-1091 P1 #3: DISPATCH surfaces the read failure as an outage (→ full
         // roster). RECOVERY stays fail-open — a Loki/Linear hiccup must never break
