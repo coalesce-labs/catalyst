@@ -117,7 +117,14 @@ export function createCoordinationPublisher(opts: PublisherOpts): CoordinationPu
   // Read the mirror ONCE: the checkpoint owns the local_seq counter when present; the id set is always
   // needed so a periodic-checkpoint restart can't double-append an already-mirrored line (review #3).
   const mirrorState = readMirrorState(opts.mirrorPath);
-  let localSeq = ck ? ck.localSeq : mirrorState.lastLocalSeq;
+  // Seed from the AUTHORITATIVE mirror high-water, never the checkpoint alone (review #1 / CTL-1488
+  // remediate). The checkpoint is flushed on a 10s timer while the mirror is appended continuously,
+  // so a present checkpoint's localSeq LAGS the mirror high-water whenever a line was mirrored after
+  // the last flush. On restart the tailer re-reads those already-mirrored lines; the id-dedup skips
+  // re-appending them but would leave localSeq frozen at the stale ck.localSeq, so the next genuinely
+  // new line reuses a local_seq already assigned to a mirrored row — breaking the strictly-increasing/
+  // unique invariant. mirrorState.lastLocalSeq is always >= ck.localSeq, so Math.max is safe.
+  let localSeq = ck ? Math.max(ck.localSeq, mirrorState.lastLocalSeq) : mirrorState.lastLocalSeq;
   const seenIds = mirrorState.ids;
   const outbound: Array<Record<string, unknown>> = [];
   const stats = { written: 0, skipped: 0 };
@@ -262,8 +269,17 @@ if (import.meta.main) {
   });
 
   const ckTimer = setInterval(() => pub.saveCheckpoint(), 10_000);
+  // Catch inside the timer callback (review #2): flushToHub's try/finally rethrows on a publish()
+  // rejection (the DLQ ENOSPC/EACCES edge where HubClient.publish is NOT throw-proof). Fire-and-
+  // forgetting it (`void`) would surface that as a recurring unhandledRejection every second — no
+  // handler is installed — which under bun/node can terminate the never-crash daemon or flood the
+  // log. Degrade a throwing publish to a logged retry instead.
   const flushTimer =
-    cfg.mode === "enforce" ? setInterval(() => void pub.flushToHub(), 1000) : null;
+    cfg.mode === "enforce"
+      ? setInterval(() => {
+          pub.flushToHub().catch((e) => console.error("[coordination-publish] flush failed", e));
+        }, 1000)
+      : null;
 
   // CTL-1488 Phase 5: INBOUND mirror-tail — only in enforce (shadow is local-mirror-only, no pull).
   // Hub HTTP transport when hubUrl is set; otherwise the interim Loki-tail source (fail-open) so the

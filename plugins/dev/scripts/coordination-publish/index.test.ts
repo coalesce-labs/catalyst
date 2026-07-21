@@ -128,6 +128,37 @@ describe("createCoordinationPublisher — local-first mirror (CTL-1488 Phase 3)"
     expect(recs.map((r) => r.local_seq)).toEqual([1, 2]); // continues the high-water, no renumber
   });
 
+  test("a present-but-LAGGING checkpoint seeds local_seq from the mirror high-water, not the stale ck (review #1)", async () => {
+    // The bug: the checkpoint is flushed on a 10s timer while the mirror is appended continuously, so
+    // a present checkpoint can lag the mirror high-water. Seeding localSeq from ck.localSeq alone then
+    // reuses an already-assigned local_seq on the next new line — repro yields [1,2,2] instead of
+    // [1,2,3], breaking the strictly-increasing/unique invariant.
+
+    // Round 1: mirror evt-a and SAVE a checkpoint at localSeq=1 (offset after evt-a).
+    writeFileSync(filePath, evLine("phase.plan.complete.CTL-1", "coordination", { id: "evt-a" }));
+    const pub1 = createCoordinationPublisher({ mode: "shadow", filePath, mirrorPath, checkpointPath, signal: ac.signal });
+    await pub1.drain();
+    pub1.saveCheckpoint();
+    expect(readCoordinationCheckpoint(checkpointPath)?.localSeq).toBe(1);
+
+    // Mirror advances to local_seq=2 (evt-b) but WITHOUT a new checkpoint flush — the checkpoint now
+    // LAGS the mirror (localSeq=1, but mirror high-water is 2).
+    appendFileSync(filePath, evLine("phase.verify.complete.CTL-2", "coordination", { id: "evt-b" }));
+    await pub1.drain();
+    expect(mirrorRecords(mirrorPath).map((r) => r.local_seq)).toEqual([1, 2]);
+    expect(readCoordinationCheckpoint(checkpointPath)?.localSeq).toBe(1); // still stale
+
+    // Restart from the lagging checkpoint (resumes at ck.offset, re-reads evt-b — deduped — then a
+    // genuinely new evt-c). evt-c must continue past the mirror high-water, not collide with evt-b.
+    appendFileSync(filePath, evLine("phase.pr.complete.CTL-3", "coordination", { id: "evt-c" }));
+    const pub2 = createCoordinationPublisher({ mode: "shadow", filePath, mirrorPath, checkpointPath, signal: ac.signal });
+    await pub2.drain();
+
+    const seqs = mirrorRecords(mirrorPath).map((r) => r.local_seq);
+    expect(seqs).toEqual([1, 2, 3]); // NOT [1, 2, 2]
+    expect(new Set(seqs).size).toBe(seqs.length); // strictly unique — no reused local_seq
+  });
+
   test("mode 'off' resolves run() immediately and never writes the mirror", async () => {
     writeFileSync(filePath, evLine("phase.plan.complete.CTL-1", "coordination"));
     const pub = createCoordinationPublisher({ mode: "off", filePath, mirrorPath, checkpointPath, signal: ac.signal });

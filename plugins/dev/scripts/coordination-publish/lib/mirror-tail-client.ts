@@ -12,7 +12,16 @@
 // A host's own rows (written by index.ts with a `local_seq`) are reconciled by event.id and never
 // double-appended when the hub echoes them back.
 
-import { appendFileSync, mkdirSync, readFileSync, existsSync } from "node:fs";
+import {
+  appendFileSync,
+  mkdirSync,
+  readFileSync,
+  existsSync,
+  openSync,
+  fstatSync,
+  readSync,
+  closeSync,
+} from "node:fs";
 import { dirname } from "node:path";
 import { buildCanonicalEnvelope } from "../../otel-forward/lib/canonical.ts";
 
@@ -107,6 +116,67 @@ export function createMirrorTailClient(opts: MirrorTailClientOpts): MirrorTailCl
   const degradedThreshold = opts.degradedThreshold ?? 5;
   let consecutiveFailures = 0;
 
+  // review #4: incremental mirror dedup. The mirror is append-only and never rotated, so re-reading
+  // AND re-parsing the whole file on every ~2s tick made per-tick CPU + transient memory grow
+  // unbounded with mirror size. Instead keep the seen-id set in memory and, each tick, ingest ONLY
+  // the bytes appended since the last read — by this client OR by the local publisher (index.ts)
+  // writing its own rows to the same mirror out-of-band. That preserves the own-row echo dedup (a
+  // read-once-at-startup set would miss the local publisher's post-startup appends and double-append
+  // its echoed-back rows) while bounding per-tick work to new data.
+  let seenIds: Set<string> | null = null;
+  let mirrorOffset = 0; // byte offset up to which the mirror has been ingested into seenIds
+  let pending = ""; // carry a partial trailing line (no newline yet) across ticks
+
+  /** Ingest any mirror bytes appended since the last tick into the in-memory seen-id set, then
+   *  return it. First call reads from 0 (seeds from an existing mirror); a shrink (truncate/rotate)
+   *  restarts the scan. Bounded by NEW bytes, not total size. Best-effort: an I/O fault leaves the
+   *  set as-is (the caller's append still dedups against what we have). */
+  function ingestNewMirrorRows(): Set<string> {
+    if (seenIds === null) {
+      seenIds = new Set<string>();
+      mirrorOffset = 0;
+      pending = "";
+    }
+    if (!existsSync(opts.mirrorPath)) return seenIds;
+    let fd: number;
+    try {
+      fd = openSync(opts.mirrorPath, "r");
+    } catch {
+      return seenIds;
+    }
+    try {
+      const size = fstatSync(fd).size;
+      if (size < mirrorOffset) {
+        // Truncation / rotation — the file is smaller than where we stopped. Rescan from the start.
+        seenIds = new Set<string>();
+        mirrorOffset = 0;
+        pending = "";
+      }
+      if (size > mirrorOffset) {
+        const len = size - mirrorOffset;
+        const buf = Buffer.allocUnsafe(len);
+        const n = readSync(fd, buf, 0, len, mirrorOffset);
+        mirrorOffset += n;
+        pending += buf.subarray(0, n).toString("utf8");
+      }
+    } finally {
+      closeSync(fd);
+    }
+    let nl: number;
+    while ((nl = pending.indexOf("\n")) >= 0) {
+      const line = pending.slice(0, nl);
+      pending = pending.slice(nl + 1);
+      if (!line) continue;
+      try {
+        const obj = JSON.parse(line) as { id?: unknown };
+        if (typeof obj.id === "string") seenIds.add(obj.id);
+      } catch {
+        // skip malformed line
+      }
+    }
+    return seenIds;
+  }
+
   /** A pull that returned rows (or an empty steady-state) — the inbound path is healthy again. */
   function recordSuccess(): void {
     consecutiveFailures = 0;
@@ -137,12 +207,15 @@ export function createMirrorTailClient(opts: MirrorTailClientOpts): MirrorTailCl
 
   function mergeDeltas(deltas: CoordinationDelta[]): void {
     if (deltas.length === 0) return;
-    const seen = readMirrorEventIds(opts.mirrorPath);
+    const seen = ingestNewMirrorRows(); // picks up own-rows appended out-of-band since last tick
     mkdirSync(dirname(opts.mirrorPath), { recursive: true });
     for (const d of deltas) {
       if (!d.event_id || seen.has(d.event_id)) continue; // dedup: own rows + already-pulled remote rows
-      appendFileSync(opts.mirrorPath, JSON.stringify(deltaToMirrorRow(d)) + "\n");
+      const row = JSON.stringify(deltaToMirrorRow(d)) + "\n";
+      appendFileSync(opts.mirrorPath, row);
       seen.add(d.event_id);
+      // Account for our own append so next tick's incremental read skips these bytes (already seen).
+      mirrorOffset += Buffer.byteLength(row, "utf8");
     }
   }
 
@@ -168,7 +241,16 @@ export function createMirrorTailClient(opts: MirrorTailClientOpts): MirrorTailCl
         return;
       }
       if (resync.ok) {
-        mergeDeltas(resync.deltas);
+        // mergeDeltas does local mirror I/O (readSync + appendFileSync); a transient fault
+        // (ENOSPC/EACCES) must route through recordFailure — same observable degraded signal as a
+        // pull outage — not throw out of this fire-and-forget tick as a silent unhandled rejection
+        // (review #5 / silent-failure). Leave the cursor unadvanced so the rows are re-pulled.
+        try {
+          mergeDeltas(resync.deltas);
+        } catch (err) {
+          recordFailure(`resync merge threw: ${err instanceof Error ? err.message : String(err)}`);
+          return;
+        }
         lastHubSeq = Math.max(resync.headSeq, seqCeiling(resync.deltas, 0));
         recordSuccess();
       } else {
@@ -182,7 +264,14 @@ export function createMirrorTailClient(opts: MirrorTailClientOpts): MirrorTailCl
       return;
     }
 
-    mergeDeltas(res.deltas);
+    try {
+      mergeDeltas(res.deltas);
+    } catch (err) {
+      // Same as the resync path: a local mirror-write fault is an observable inbound degradation,
+      // not a silent throw. Cursor stays put so the deltas are re-pulled next tick (review #5).
+      recordFailure(`merge threw: ${err instanceof Error ? err.message : String(err)}`);
+      return;
+    }
     lastHubSeq = Math.max(res.headSeq, seqCeiling(res.deltas, lastHubSeq ?? 0));
     recordSuccess();
   }

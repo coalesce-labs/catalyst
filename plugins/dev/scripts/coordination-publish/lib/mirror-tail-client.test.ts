@@ -1,5 +1,5 @@
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync, appendFileSync, readFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -147,6 +147,81 @@ describe("createMirrorTailClient (CTL-1488 Phase 5)", () => {
     const evtB = mirrorRows(mirrorPath).find((r) => r.id === "evt-b")!;
     expect(evtB.hub_seq).toBe(2);
     expect(evtB.local_seq).toBeUndefined();
+  });
+
+  test("incremental dedup: a local row appended OUT-OF-BAND after startup is not double-appended when echoed (review #4)", async () => {
+    // The seen-id set is kept in memory and refreshed incrementally each tick. This guards the
+    // correctness edge a naive read-once-at-startup set would break: the local publisher appends its
+    // OWN rows to the same mirror after the client started, and the source later echoes them back.
+    const src = scriptedSource([
+      { ok: true, deltas: [delta(1, "evt-a", "laptop")], headSeq: 1 }, // tick 1: one remote row
+      // tick 2: the source echoes back evt-c (a row the LOCAL publisher wrote out-of-band between
+      // ticks) plus a genuinely new remote evt-d. evt-c must dedup against the out-of-band append.
+      { ok: true, deltas: [delta(3, "evt-c", "mini"), delta(4, "evt-d", "laptop")], headSeq: 4 },
+    ]);
+    const client = createMirrorTailClient({ mirrorPath, source: src, signal: ac.signal });
+    await client.tick();
+    expect(mirrorRows(mirrorPath).map((r) => r.id)).toEqual(["evt-a"]);
+
+    // Local publisher writes its own row to the SAME mirror, out-of-band from this client.
+    appendFileSync(mirrorPath, JSON.stringify({ id: "evt-c", local_seq: 2, attributes: { "event.name": "x" } }) + "\n");
+
+    await client.tick();
+    const ids = mirrorRows(mirrorPath).map((r) => r.id);
+    expect(ids).toEqual(["evt-a", "evt-c", "evt-d"]); // evt-c appears once (the local append), not doubled
+    expect(ids.filter((id) => id === "evt-c").length).toBe(1);
+  });
+
+  test("a local mirror-write fault in mergeDeltas routes through recordFailure, not a silent throw (review #5)", async () => {
+    // Point the mirror under a regular FILE so mkdirSync(dirname)/appendFileSync inside mergeDeltas
+    // throws (ENOTDIR) — the ENOSPC/EACCES local-I/O edge. The throw must be caught and surfaced as
+    // the same coordination_mirror_tail_degraded signal as a pull outage, never an unhandled rejection.
+    const blocker = join(dir, "blocker");
+    writeFileSync(blocker, "x");
+    const wedgedMirror = join(blocker, "coordination.jsonl"); // parent is a file → writes fault
+    const eventLogPath = join(dir, "events.jsonl");
+    const src = scriptedSource([
+      { ok: true, deltas: [delta(1, "evt-a")], headSeq: 1 },
+      { ok: true, deltas: [delta(2, "evt-b")], headSeq: 2 },
+    ]);
+    const client = createMirrorTailClient({
+      mirrorPath: wedgedMirror, source: src, signal: ac.signal,
+      logError: () => {}, eventLogPath, degradedThreshold: 2,
+    });
+    await client.tick(); // merge throws → recordFailure #1, must NOT throw out of tick
+    expect(client.currentHubSeq()).toBeNull(); // cursor NOT advanced on a merge fault
+    await client.tick(); // recordFailure #2 → crosses threshold → degraded event
+    const events = existsSync(eventLogPath)
+      ? readFileSync(eventLogPath, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l))
+      : [];
+    expect(events.length).toBe(1);
+    expect(events[0].attributes["event.name"]).toBe("catalyst.observability.coordination_mirror_tail_degraded");
+  });
+
+  test("a resync pull that THROWS is a no-op tick (recordFailure, cursor stays null) — coverage of the resync-throws branch", async () => {
+    let call = 0;
+    const throwingResync: ChangeSource = {
+      async pullChanges(since: number) {
+        call++;
+        if (call === 1) return { ok: false, underflow: true } as PullResult; // force resync
+        throw new Error("resync boom");
+      },
+    };
+    const client = createMirrorTailClient({ mirrorPath, source: throwingResync, signal: ac.signal, logError: () => {}, startHubSeq: 3 });
+    await client.tick(); // underflow → resync pull throws — must not crash
+    expect(client.currentHubSeq()).toBeNull(); // reset to null on underflow, never re-advanced
+    expect(mirrorRows(mirrorPath).length).toBe(0);
+  });
+
+  test("a resync pull that returns a transient error is a no-op tick — coverage of the resync-error branch", async () => {
+    const src = scriptedSource([
+      { ok: false, underflow: true }, // force resync
+      { ok: false, error: true }, // resync itself fails transiently
+    ]);
+    const client = createMirrorTailClient({ mirrorPath, source: src, signal: ac.signal, logError: () => {}, startHubSeq: 3 });
+    await client.tick();
+    expect(client.currentHubSeq()).toBeNull();
+    expect(mirrorRows(mirrorPath).length).toBe(0);
   });
 });
 

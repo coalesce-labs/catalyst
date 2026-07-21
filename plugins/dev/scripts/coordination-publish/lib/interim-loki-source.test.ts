@@ -124,6 +124,39 @@ describe("createLokiChangeSource (CTL-1488 Phase 5 interim transport)", () => {
     expect(BigInt(windows[1].endNs) - BigInt(windows[1].startNs)).toBe(widthNs);
   });
 
+  test("queryRange THROWING is a no-op tick (fail-open on the throw path, not only the null path)", async () => {
+    // The prior fail-open test covers queryRange returning null; this covers queryRange THROWING
+    // (the catch at interim-loki-source.ts:88-91) — the untested branch (coverage finding).
+    const loki: LokiFetcher = {
+      async queryRange(): Promise<LokiQueryResult | null> {
+        throw new Error("loki down");
+      },
+      isAvailable() { return true; },
+    };
+    const source = createLokiChangeSource({ lokiFetcher: loki, nowMs: () => 1_700_000_100_000 });
+    const client = createMirrorTailClient({ mirrorPath, source, signal: ac.signal });
+    await client.tick(); // must not throw — degrades to a no-op tick
+    expect(mirrorRows(mirrorPath).length).toBe(0);
+  });
+
+  test("host provenance PREFERS resource['catalyst.node.name'] over host.name when present (coverage)", async () => {
+    // Only host.name is covered elsewhere; this exercises the preferred catalyst.node.name branch.
+    const line = JSON.stringify({
+      id: "evt-node",
+      ts: "2026-07-21T00:00:00Z",
+      caused_by: null,
+      attributes: { "event.name": "phase.plan.complete.CTL-1", "event.stream_class": "coordination" },
+      resource: { "service.name": "catalyst.execution-core", "catalyst.node.name": "node-a", "host.name": "laptop" },
+    });
+    const loki = fakeLoki({ available: true, streams: [{ line, tsNs: "1700000000000000000" }] });
+    const source = createLokiChangeSource({ lokiFetcher: loki, nowMs: () => 1_700_000_100_000 });
+    const client = createMirrorTailClient({ mirrorPath, source, signal: ac.signal });
+    await client.tick();
+    const rows = mirrorRows(mirrorPath);
+    expect(rows.map((r) => r.id)).toEqual(["evt-node"]);
+    expect(rows[0].host).toBe("node-a"); // catalyst.node.name wins over host.name
+  });
+
   test("nowMs defaults to a live Date.now clock when omitted (real callers omit it)", async () => {
     const loki = fakeLoki({ available: true });
     const before = Date.now();
