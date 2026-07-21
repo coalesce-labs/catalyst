@@ -222,6 +222,17 @@ describe("createCoordinationPublisher — local-first mirror (CTL-1488 Phase 3)"
     expect(mirrorRecords(mirrorPath).length).toBe(2);
   });
 
+  test("enforce mode WITHOUT a hub client (interim Loki inbound path) does not accumulate outbound — no unbounded buffer (Codex P2)", async () => {
+    writeFileSync(filePath, evLine("phase.plan.complete.CTL-1", "coordination", { id: "a" }));
+    appendFileSync(filePath, evLine("phase.verify.complete.CTL-2", "coordination", { id: "b" }));
+    // enforce + no hubClient == the documented Loki-fallback (inbound-only) topology.
+    const pub = createCoordinationPublisher({ mode: "enforce", filePath, mirrorPath, checkpointPath, signal: ac.signal });
+    await pub.drain();
+    // The mirror is still written (local-first), but nothing is buffered for a non-existent hub.
+    expect(mirrorRecords(mirrorPath).length).toBe(2);
+    expect(pub.outboundDepth()).toBe(0);
+  });
+
   test("flushToHub drains the DLQ backlog even when outbound is empty (recovered hub catches up — Codex P1)", async () => {
     // No coordination lines were tailed, so outbound stays empty. A prior outage could have left a
     // DLQ backlog; the flush tick must still attempt an independent drain instead of early-returning.

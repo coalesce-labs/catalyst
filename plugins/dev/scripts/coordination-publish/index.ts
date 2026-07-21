@@ -197,7 +197,12 @@ export function createCoordinationPublisher(opts: PublisherOpts): CoordinationPu
     localSeq = nextSeq;
     if (eventId) seenIds.add(eventId);
     stats.written++;
-    if (opts.mode === "enforce") outbound.push(record);
+    // Buffer for outbound publish ONLY when there is a hub client to drain it (Codex P2).
+    // In enforce mode without a hubUrl the daemon runs the interim inbound-only Loki path with
+    // NO hubClient, so flushToHub always early-returns — buffering here would grow the array by
+    // one record per coordination event forever. The mirror write above is the durable record;
+    // outbound is a hub-egress staging buffer with no meaning when there is nothing to flush to.
+    if (opts.mode === "enforce" && opts.hubClient) outbound.push(record);
   }
 
   const tailer = inert
