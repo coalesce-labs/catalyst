@@ -4196,6 +4196,7 @@ describe("CTL-539 — idempotent dispatch across a crash", () => {
       readEligible: () => eligible,
       dispatch,
       verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0, // CTL-682: deterministic in-flight count (matches r1)
     });
 
     // CTL-9 now has a worker dir → excluded from the pull. research:dispatched
