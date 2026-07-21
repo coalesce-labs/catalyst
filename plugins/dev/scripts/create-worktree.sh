@@ -136,6 +136,15 @@ if [ -d "$WORKTREE_PATH" ]; then
 				exit 64
 			fi
 		fi
+		# CTL-1497: the reuse path short-circuits BEFORE the setup block below, so a worktree first
+		# created with a broken (plain-dir, not symlink) thoughts/shared is never repaired on later
+		# dispatches — thoughts written there strand and never sync. Repair it here before returning.
+		if [ ! -L "$WORKTREE_PATH/thoughts/shared" ]; then
+			_CW_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+			echo -e "${YELLOW}  ⚠️  thoughts/shared is not a symlink — repairing (CTL-1497)${NC}"
+			( cd "$WORKTREE_PATH" && bash "${_CW_SCRIPT_DIR}/catalyst-thoughts.sh" init-or-repair ) \
+				|| echo -e "${YELLOW}  ⚠️  thoughts repair failed on reuse path (non-fatal); run: cd ${WORKTREE_PATH} && bash ${_CW_SCRIPT_DIR}/catalyst-thoughts.sh init-or-repair${NC}" >&2
+		fi
 		echo -e "${GREEN}♻️  Reusing existing worktree: $WORKTREE_PATH${NC}"
 		echo "WORKTREE_PATH=${WORKTREE_PATH}"
 		exit 0
@@ -384,7 +393,7 @@ else
 			echo -e "${GREEN}  ✅ Thoughts initialized${NC}"
 			humanlayer thoughts sync >/dev/null 2>&1 || echo -e "${YELLOW}  ⚠️  Sync warning: run 'humanlayer thoughts sync' manually${NC}"
 			# Verify thoughts/shared/ exists after init+sync
-			if [ ! -d "thoughts/shared" ]; then
+			if [ ! -L "thoughts/shared" ]; then
 				echo -e "${RED}❌ Error: thoughts/shared/ does not exist after init+sync${NC}"
 				echo "  Working directory: $(pwd)"
 				echo "  Expected path: $(pwd)/thoughts/shared/"
@@ -417,7 +426,7 @@ fi
 # run_hook_array (or the auto-detected else-branch) and is otherwise silent;
 # the missing thoughts/shared then surfaces ~30 min later as a phase-plan
 # `prior_artifact_missing` failure. Catch it here, at creation time, instead.
-if [ "$THOUGHTS_INIT_EXPECTED" = true ] && [ ! -d "thoughts/shared" ]; then
+if [ "$THOUGHTS_INIT_EXPECTED" = true ] && [ ! -L "thoughts/shared" ]; then
 	echo -e "${RED}❌ Error: thoughts/shared/ missing after setup hooks${NC}"
 	echo "  Working directory: $(pwd)"
 	echo "  Expected path: $(pwd)/thoughts/shared/"
