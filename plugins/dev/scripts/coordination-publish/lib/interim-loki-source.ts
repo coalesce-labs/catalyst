@@ -23,8 +23,14 @@ const DEFAULT_WINDOW_MS = 10 * 60_000;
 export interface LokiChangeSourceOpts {
   lokiFetcher: LokiFetcher;
   windowMs?: number;
-  /** Injected clock (tests). Real callers omit it. Must be provided where Date.now() is unavailable. */
-  nowMs: number;
+  /**
+   * Injected clock. Real callers omit it (defaults to Date.now). It is a FUNCTION, not a
+   * captured number, and is evaluated INSIDE pullChanges on every tick — so the look-back
+   * window [now-windowMs, now] slides forward with wall-clock instead of freezing at the
+   * value captured when the source was constructed at daemon startup (CTL-1488 remediate:
+   * a frozen window silently stopped cross-host inbound ingestion ~windowMs after start).
+   */
+  nowMs?: () => number;
   limit?: number;
 }
 
@@ -71,10 +77,13 @@ function envelopeToDelta(env: StoredEnvelope): CoordinationDelta | null {
  */
 export function createLokiChangeSource(opts: LokiChangeSourceOpts): ChangeSource {
   const windowMs = opts.windowMs ?? DEFAULT_WINDOW_MS;
+  const now = opts.nowMs ?? Date.now;
   return {
     async pullChanges(): Promise<PullResult> {
-      const endNs = String(opts.nowMs * 1_000_000);
-      const startNs = String((opts.nowMs - windowMs) * 1_000_000);
+      // Evaluate the clock per-pull so the window slides forward each tick (never frozen at ctor).
+      const nowMs = now();
+      const endNs = String(nowMs * 1_000_000);
+      const startNs = String((nowMs - windowMs) * 1_000_000);
       let result;
       try {
         result = await opts.lokiFetcher.queryRange(COORDINATION_LOKI_QUERY, startNs, endNs, opts.limit);

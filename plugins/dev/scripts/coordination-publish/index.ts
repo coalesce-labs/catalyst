@@ -177,10 +177,25 @@ export function createCoordinationPublisher(opts: PublisherOpts): CoordinationPu
     await tailer.run();
   }
 
+  let flushing = false;
   async function flushToHub(): Promise<void> {
-    if (!opts.hubClient || outbound.length === 0) return;
-    const batch = outbound.splice(0);
-    await opts.hubClient.publish(batch);
+    // In-flight guard: flushToHub is void-called on a 1s timer, so a slow publish could overlap
+    // the next tick. Skipping while one is in flight keeps a single publisher and avoids
+    // double-publishing the same rows.
+    if (!opts.hubClient || outbound.length === 0 || flushing) return;
+    flushing = true;
+    // Snapshot without removing: splice ONLY after publish() resolves, so a publish() that throws
+    // (HubClient.publish is documented never-throw, but a DLQ ENOSPC/EACCES or corrupt-line edge can
+    // still reject) leaves the batch in `outbound` to retry next tick instead of losing it from
+    // egress with no DLQ entry and no degraded event (CTL-1488 remediate: silent egress loss).
+    const batchSize = outbound.length;
+    try {
+      await opts.hubClient.publish(outbound.slice(0, batchSize));
+      // Remove only the rows we published; rows appended by the tailer during the await stay queued.
+      outbound.splice(0, batchSize);
+    } finally {
+      flushing = false;
+    }
   }
 
   function saveCheckpoint(): void {
@@ -266,14 +281,22 @@ if (import.meta.main) {
       if (lokiUrl) {
         const { createLokiFetcher } = await import("../orch-monitor/lib/loki.ts");
         const { createLokiChangeSource } = await import("./lib/interim-loki-source.ts");
+        // No nowMs: the source defaults to a live Date.now clock evaluated per-pull, so the
+        // interim inbound window slides forward instead of freezing at daemon-start (CTL-1488).
         source = createLokiChangeSource({
           lokiFetcher: createLokiFetcher({ baseUrl: lokiUrl }),
-          nowMs: Date.now(),
         });
       }
     }
     if (source) {
-      const inbound = createMirrorTailClient({ mirrorPath: MIRROR_PATH, source, signal: ac.signal });
+      // eventLogPath makes a sustained inbound outage observable (coordination_mirror_tail_degraded),
+      // mirroring the outbound HubClient's degraded signal (CTL-1488 remediate).
+      const inbound = createMirrorTailClient({
+        mirrorPath: MIRROR_PATH,
+        source,
+        signal: ac.signal,
+        eventLogPath: EVENT_LOG_PATH,
+      });
       inboundTimer = setInterval(() => void inbound.tick(), 2000);
     }
   }

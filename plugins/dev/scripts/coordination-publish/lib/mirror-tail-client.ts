@@ -14,6 +14,12 @@
 
 import { appendFileSync, mkdirSync, readFileSync, existsSync } from "node:fs";
 import { dirname } from "node:path";
+import { buildCanonicalEnvelope } from "../../otel-forward/lib/canonical.ts";
+
+export const SERVICE_NAME = "catalyst.coordination-publish";
+/** Inbound counterpart to hub-client's coordination_publish_degraded (the OUTBOUND signal). */
+export const INBOUND_DEGRADED_EVENT_NAME =
+  "catalyst.observability.coordination_mirror_tail_degraded";
 
 /** One coordination delta as the hub's /coordination/changes NDJSON emits it. */
 export interface CoordinationDelta {
@@ -79,6 +85,15 @@ export interface MirrorTailClientOpts {
   startHubSeq?: number | null;
   /** Injected logger; defaults to console.error. */
   logError?: (msg: string) => void;
+  /**
+   * Append a coordination_mirror_tail_degraded event here after N consecutive failed ticks, so a
+   * sustained inbound outage is observable (event + metric) instead of only a repeating daemon.log
+   * line — the INBOUND counterpart to hub-client's outbound degraded signal (CTL-1488 remediate).
+   * Omitted → no event emission (the pre-existing console.error-only behavior).
+   */
+  eventLogPath?: string;
+  /** Consecutive failed-tick count that trips the inbound degraded event. Default 5. */
+  degradedThreshold?: number;
 }
 
 export interface MirrorTailClient {
@@ -89,6 +104,36 @@ export interface MirrorTailClient {
 export function createMirrorTailClient(opts: MirrorTailClientOpts): MirrorTailClient {
   let lastHubSeq: number | null = opts.startHubSeq ?? null;
   const logError = opts.logError ?? ((m: string) => console.error(`[coordination-mirror-tail] ${m}`));
+  const degradedThreshold = opts.degradedThreshold ?? 5;
+  let consecutiveFailures = 0;
+
+  /** A pull that returned rows (or an empty steady-state) — the inbound path is healthy again. */
+  function recordSuccess(): void {
+    consecutiveFailures = 0;
+  }
+
+  /** A failed/errored tick. Emit the inbound degraded event exactly once at the threshold crossing
+   *  (mirrors hub-client.maybeEmitDegraded), so a sustained outage isn't per-tick spam but is never
+   *  silent. Best-effort: writing the event must never throw and never block the poll loop. */
+  function recordFailure(reason: string): void {
+    logError(reason);
+    consecutiveFailures++;
+    if (consecutiveFailures !== degradedThreshold || !opts.eventLogPath) return;
+    try {
+      const ev = buildCanonicalEnvelope({
+        serviceName: SERVICE_NAME,
+        eventName: INBOUND_DEGRADED_EVENT_NAME,
+        severityText: "ERROR",
+        severityNumber: 17,
+        payload: { consecutiveFailures, lastSince: lastHubSeq ?? 0, reason },
+        idExtra: String(consecutiveFailures),
+      });
+      mkdirSync(dirname(opts.eventLogPath), { recursive: true });
+      appendFileSync(opts.eventLogPath, JSON.stringify(ev) + "\n");
+    } catch {
+      // Best-effort — a failure to write the degraded event must never crash the tick.
+    }
+  }
 
   function mergeDeltas(deltas: CoordinationDelta[]): void {
     if (deltas.length === 0) return;
@@ -108,7 +153,7 @@ export function createMirrorTailClient(opts: MirrorTailClientOpts): MirrorTailCl
     try {
       res = await opts.source.pullChanges(since);
     } catch (err) {
-      logError(`pull threw: ${err instanceof Error ? err.message : String(err)}`);
+      recordFailure(`pull threw: ${err instanceof Error ? err.message : String(err)}`);
       return; // no-op tick, retried next tick
     }
 
@@ -119,23 +164,27 @@ export function createMirrorTailClient(opts: MirrorTailClientOpts): MirrorTailCl
       try {
         resync = await opts.source.pullChanges(0);
       } catch (err) {
-        logError(`resync pull threw: ${err instanceof Error ? err.message : String(err)}`);
+        recordFailure(`resync pull threw: ${err instanceof Error ? err.message : String(err)}`);
         return;
       }
       if (resync.ok) {
         mergeDeltas(resync.deltas);
         lastHubSeq = Math.max(resync.headSeq, seqCeiling(resync.deltas, 0));
+        recordSuccess();
+      } else {
+        recordFailure("resync pull failed (transient); retrying next tick");
       }
       return;
     }
     if (!res.ok) {
       // Transient error — leave the cursor untouched, retry next tick.
-      logError("pull failed (transient); retrying next tick");
+      recordFailure("pull failed (transient); retrying next tick");
       return;
     }
 
     mergeDeltas(res.deltas);
     lastHubSeq = Math.max(res.headSeq, seqCeiling(res.deltas, lastHubSeq ?? 0));
+    recordSuccess();
   }
 
   return { tick, currentHubSeq: () => lastHubSeq };

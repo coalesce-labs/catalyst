@@ -97,6 +97,43 @@ describe("createMirrorTailClient (CTL-1488 Phase 5)", () => {
     expect(mirrorRows(mirrorPath).length).toBe(1);
   });
 
+  test("emits an inbound coordination_mirror_tail_degraded event once at the consecutive-failure threshold (CTL-1488 remediate)", async () => {
+    const eventLogPath = join(dir, "events.jsonl");
+    // 6 consecutive failing pulls; threshold 3.
+    const src = scriptedSource(Array.from({ length: 6 }, () => ({ ok: false, error: true }) as PullResult));
+    const client = createMirrorTailClient({
+      mirrorPath, source: src, signal: ac.signal,
+      logError: () => {}, eventLogPath, degradedThreshold: 3,
+    });
+    for (let i = 0; i < 6; i++) await client.tick();
+    const events = existsSync(eventLogPath)
+      ? readFileSync(eventLogPath, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l))
+      : [];
+    // Emitted exactly ONCE (at the crossing), not per-tick spam.
+    expect(events.length).toBe(1);
+    expect(events[0].attributes["event.name"]).toBe("catalyst.observability.coordination_mirror_tail_degraded");
+    expect(events[0].severityText).toBe("ERROR");
+    expect(events[0].body.payload.consecutiveFailures).toBe(3);
+  });
+
+  test("a successful pull resets the failure counter so the degraded event does not fire on intermittent errors", async () => {
+    const eventLogPath = join(dir, "events.jsonl");
+    // error, error, SUCCESS, error, error — never 3 consecutive.
+    const src = scriptedSource([
+      { ok: false, error: true },
+      { ok: false, error: true },
+      { ok: true, deltas: [delta(1, "evt-a")], headSeq: 1 },
+      { ok: false, error: true },
+      { ok: false, error: true },
+    ]);
+    const client = createMirrorTailClient({
+      mirrorPath, source: src, signal: ac.signal,
+      logError: () => {}, eventLogPath, degradedThreshold: 3,
+    });
+    for (let i = 0; i < 5; i++) await client.tick();
+    expect(existsSync(eventLogPath)).toBe(false); // never crossed 3 consecutive
+  });
+
   test("merges OTHER hosts' rows and dedups the host's OWN rows by event.id (never double-appends)", async () => {
     // Seed the mirror with a local row the host wrote itself (id evt-a, local_seq 1).
     writeFileSync(mirrorPath, JSON.stringify({ id: "evt-a", local_seq: 1, attributes: { "event.name": "x" } }) + "\n");

@@ -156,6 +156,31 @@ describe("createCoordinationPublisher — local-first mirror (CTL-1488 Phase 3)"
     expect((published[0] as Array<Record<string, unknown>>)[0].local_seq).toBe(1);
     expect(pub.outboundDepth()).toBe(0);
   });
+
+  test("flushToHub retains the batch when publish() throws — no egress loss (CTL-1488 remediate)", async () => {
+    writeFileSync(filePath, evLine("phase.plan.complete.CTL-1", "coordination", { id: "a" }));
+    appendFileSync(filePath, evLine("phase.verify.complete.CTL-2", "coordination", { id: "b" }));
+    let attempts = 0;
+    const pub = createCoordinationPublisher({
+      mode: "enforce", filePath, mirrorPath, checkpointPath, signal: ac.signal,
+      // First publish throws (simulate the DLQ ENOSPC/corrupt-line edge where publish() is NOT
+      // throw-proof); the second succeeds.
+      hubClient: { publish: async () => { attempts++; if (attempts === 1) throw new Error("dlq ENOSPC"); } },
+    });
+    await pub.drain();
+    expect(pub.outboundDepth()).toBe(2);
+
+    // The throwing flush must NOT drop the batch from egress.
+    await expect(pub.flushToHub()).rejects.toThrow("dlq ENOSPC");
+    expect(pub.outboundDepth()).toBe(2); // batch retained, not spliced away
+
+    // A subsequent flush delivers the retained rows exactly once.
+    await pub.flushToHub();
+    expect(pub.outboundDepth()).toBe(0);
+    expect(attempts).toBe(2);
+    // Mirror still holds both rows the whole time (local-first — never lost).
+    expect(mirrorRecords(mirrorPath).length).toBe(2);
+  });
 });
 
 describe("seedLocalSeqFromMirror", () => {
