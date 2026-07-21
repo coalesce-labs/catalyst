@@ -872,20 +872,32 @@ export const HEARTBEAT_INTERVAL_MS =
 export const HEARTBEAT_GRACE_MS =
   Number(process.env.EXECUTION_CORE_HEARTBEAT_GRACE_MS) || 600_000;
 
+// resolveRestoreHoldMs — parse the CTL-1091 restore-hold override with the
+// documented fallback semantics. Valid: a finite value >= 0, INCLUDING an explicit
+// 0 (opt-out: disables the hold, admitting a restored host immediately). Invalid →
+// fall back to `defaultMs`: unset, empty/whitespace, non-numeric, OR negative.
+// CTL-1091 (Codex P2): a bare `Number(env)` coerced an EMPTY value ("") to 0 and
+// accepted NEGATIVE values, either of which silently disabled the deflap (a flapping
+// host would immediately reclaim its HRW slice) — contradicting the "unset/garbled →
+// default" contract. Exported for unit tests.
+export function resolveRestoreHoldMs(rawStr, defaultMs) {
+  if (typeof rawStr !== "string" || rawStr.trim() === "") return defaultMs;
+  const n = Number(rawStr);
+  return Number.isFinite(n) && n >= 0 ? n : defaultMs;
+}
+
 // HEARTBEAT_RESTORE_HOLD_MS — CTL-1091 restore-side deflap. A host that
 // transitioned dead→live must be observed continuously live for this window
 // before it re-enters the DISPATCH ownership roster, so a flapping laptop (lid
 // open/close) does not grab-then-strand new work. Default = one grace window
 // (symmetric with the shed side). During the hold the surviving peer keeps
 // covering the slice, so there is no starvation gap. Env-overridable via
-// EXECUTION_CORE_HEARTBEAT_RESTORE_HOLD_MS for tests/tuning. A finite value of 0
-// is honored (disables the hold — a restored host is admitted immediately);
-// Number.isFinite gates so an unset/garbled env falls back to the default rather
-// than being swallowed by the falsy-zero of a bare `|| HEARTBEAT_GRACE_MS`.
-export const HEARTBEAT_RESTORE_HOLD_MS = (() => {
-  const raw = Number(process.env.EXECUTION_CORE_HEARTBEAT_RESTORE_HOLD_MS);
-  return Number.isFinite(raw) ? raw : HEARTBEAT_GRACE_MS;
-})();
+// EXECUTION_CORE_HEARTBEAT_RESTORE_HOLD_MS for tests/tuning (see resolveRestoreHoldMs
+// for the validation contract — explicit 0 opt-out honored; empty/negative → default).
+export const HEARTBEAT_RESTORE_HOLD_MS = resolveRestoreHoldMs(
+  process.env.EXECUTION_CORE_HEARTBEAT_RESTORE_HOLD_MS,
+  HEARTBEAT_GRACE_MS,
+);
 
 // CLUSTER_SYNC_INTERVAL_MS — how often the daemon git-pulls the catalyst-cluster
 // clone so a roster change committed on one node (CTL-1274 cluster cli) reaches
