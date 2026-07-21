@@ -85,11 +85,12 @@ import {
   readMaxParallel,
   computeFreeSlots,
   writeClusterGeneration,
-  // CTL-1091: route the triage-dispatch HRW gate through the same surviving
-  // (live) roster the scheduler's new-work gate uses, so both dispatch sites
-  // fail an offline owner's slice over to a live host. This helper pulls in no
-  // bun:sqlite dependency, so it is safe to import here (CTL-1397 Node-loadability).
-  computeSurvivingRoster,
+  // CTL-1091: route the triage-dispatch HRW gate through the same live roster the
+  // scheduler's new-work gate uses (positive-liveness → sheds a never-live host),
+  // so both dispatch sites fail an offline owner's slice over to a live host. This
+  // helper pulls in no bun:sqlite dependency, so it is safe to import here
+  // (CTL-1397 Node-loadability).
+  computeDispatchSurvivingRoster,
 } from "./scheduler.mjs";
 // CTL-863: Linear-free fence event emitter (durable fence → event-log migration).
 import { emitFenceClaimed } from "./fence-event.mjs";
@@ -694,7 +695,7 @@ function dispatchTriage(
     hostName = undefined,
     // CTL-1091: injectable surviving-roster override for the ownership gate below,
     // mirroring the scheduler's dispatchSurvivingRoster. Default undefined →
-    // computeSurvivingRoster(roster) (reads the live heartbeat feed). Tests inject
+    // computeDispatchSurvivingRoster(roster) (positive-liveness heartbeat read). Tests inject
     // a fixed survivor set to drive the offline-owner failover deterministically.
     survivingRosterOverride = undefined,
     claimDispatch = claimDispatchSync,
@@ -742,7 +743,7 @@ function dispatchTriage(
   // whose HRW owner is offline is triaged by a live host instead of stranding.
   // Injectable for tests; defaults to the live heartbeat feed. The heartbeat
   // sync wrappers cache (Loki 20s / Linear 45s) so per-call reads coalesce.
-  // Fail-safe: computeSurvivingRoster degrades to the full roster on a
+  // Fail-safe: computeDispatchSurvivingRoster degrades to the full roster on a
   // read-throw / all-dead (today's raw-roster behavior). Only computed multi-host.
   //
   // Phase 2: layer the restore-side deflap on top of the surviving roster so
@@ -755,7 +756,9 @@ function dispatchTriage(
     // Test override bypasses both the heartbeat read and the deflap.
     dispatchRoster = survivingRosterOverride;
   } else {
-    const survivingRosterNow = computeSurvivingRoster(roster);
+    // Phase 3: positive-liveness surviving roster (sheds a never-live host), then
+    // Phase 2 restore deflap on top. READ-ONLY deflap state (scheduler is sole writer).
+    const survivingRosterNow = computeDispatchSurvivingRoster(roster);
     dispatchRoster = computeDispatchRoster({
       survivingRoster: survivingRosterNow,
       roster,

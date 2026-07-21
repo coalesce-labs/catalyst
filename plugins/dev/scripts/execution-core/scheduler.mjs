@@ -423,6 +423,39 @@ export function computeSurvivingRoster(
   }
 }
 
+// CTL-1091 Phase 3: the DISPATCH-side surviving roster. Unlike computeSurvivingRoster
+// (which uses deadHosts's fail-OPEN semantics — an unseen host is "not proven dead"
+// and stays a survivor), dispatch ownership requires POSITIVE liveness: a host must
+// have been SEEN within grace to own new work. This sheds a NEVER-live rostered host
+// (absent from lastSeen — the CTL-1057 permanently-offline case) whose HRW slice would
+// otherwise strand, because deadHosts never flags a host it has never seen.
+//
+// The asymmetry is deliberate: recovery keeps the fail-open deadHosts (it must NOT
+// reclaim a never-seen host's non-existent work), while dispatch fails an unseen
+// owner's slice over to a live host. See plan Phase 3 / docs/architecture.md.
+//
+// Fail-safe preserved: if positive-liveness empties the roster (a TOTAL feed outage —
+// nobody has heartbeated at all), degrade to the FULL roster, exactly as
+// computeSurvivingRoster does — never strand the board on a dead feed. Single-host
+// (roster.length <= 1) is a no-op with no read.
+export function computeDispatchSurvivingRoster(
+  roster,
+  { readHeartbeats = readClusterHeartbeats, nowMs = Date.now(), graceMs = HEARTBEAT_GRACE_MS } = {}
+) {
+  if (!Array.isArray(roster) || roster.length <= 1) return roster;
+  try {
+    const lastSeen = readHeartbeats({ roster });
+    const cutoff = nowMs - graceMs;
+    const live = roster.filter((h) => {
+      const seen = lastSeen[h];
+      return typeof seen === "string" && seen.length > 0 && Date.parse(seen) >= cutoff;
+    });
+    return live.length > 0 ? live : roster;
+  } catch {
+    return roster;
+  }
+}
+
 // CTL-1004/CTL-1056 Bug 2: dispatchFailureDiag — extract the diagnostic fields
 // from a dispatch result (r = { code, stderr, spawnError, signal }) for the
 // "dispatch failed" log + the phase.dispatch.failed event. The scheduler used to
@@ -3612,12 +3645,13 @@ export function schedulerTick(
       _dispatchRosterMemo = dispatchSurvivingRoster;
       return _dispatchRosterMemo;
     }
-    // CTL-1091 Phase 2: layer the restore-side deflap on top of the surviving
-    // roster. A dead→live host is held out of the dispatch roster until it has
-    // been continuously live for HEARTBEAT_RESTORE_HOLD_MS, so a flapping host
-    // doesn't grab-then-strand new work. Scheduler is the SOLE writer of
-    // .liveness-deflap.json (monitor reads it read-only).
-    const survivingRosterNow = computeSurvivingRoster(roster);
+    // CTL-1091 Phase 3: dispatch ownership uses POSITIVE liveness (seen within
+    // grace), so a never-live rostered host is shed and its slice fails over.
+    // Phase 2: layer the restore-side deflap on top, so a dead→live host is held
+    // out until continuously live for HEARTBEAT_RESTORE_HOLD_MS (no grab-then-
+    // strand on a flap). Scheduler is the SOLE writer of .liveness-deflap.json
+    // (monitor reads it read-only).
+    const survivingRosterNow = computeDispatchSurvivingRoster(roster);
     if (!multiHost) {
       _dispatchRosterMemo = survivingRosterNow;
       return _dispatchRosterMemo;

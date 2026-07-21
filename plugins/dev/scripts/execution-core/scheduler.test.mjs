@@ -20,6 +20,7 @@ import {
   readPhaseSignals,
   isTicketInFlight,
   listInFlightTickets,
+  computeDispatchSurvivingRoster, // CTL-1091 Phase 3: positive-liveness dispatch roster
   readMaxParallel,
   readExecutionCoreConcurrency,
   readExecutionCoreConcurrencyLayer2,
@@ -9901,18 +9902,21 @@ describe("schedulerTick — new-work dispatch fails over an offline HRW owner (C
     expect(dispatch.calls.map((a) => a.ticket)).toContain(LAPTOP_OWNED_ID);
   });
 
-  test("fails open: total liveness outage degrades to the full roster (no override, no heartbeats)", () => {
+  test("fails open: total liveness outage degrades to the full roster (no override)", () => {
     writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
     const dispatch = fakeDispatch({ code: 0 });
-    // No dispatchSurvivingRoster override → computeSurvivingRoster(roster) runs.
-    // With no heartbeat event log under orchDir it sees no live hosts; the
-    // fail-safe degrades to the FULL roster [mini,laptop], so laptop still owns
-    // CTL-3 → mini does NOT dispatch it (today's raw-roster behavior preserved).
+    // No dispatchSurvivingRoster override → the real computeDispatchSurvivingRoster
+    // runs. Use fake hosts guaranteed ABSENT from the real heartbeat feed so
+    // positive-liveness sees NO live host → fail-safe degrades to the FULL roster
+    // [hosta,hostb]. CTL-1 hashes to hostb over that roster, so hosta does NOT
+    // dispatch it (today's raw-roster behavior preserved on a dead feed).
+    const OUTAGE_ROSTER = ["hosta", "hostb"];
+    expect(ownerForTicket("CTL-1", OUTAGE_ROSTER)).toBe("hostb");
     schedulerTick(orchDir, {
-      readEligible: () => eligibleOne(),
+      readEligible: () => eligibleOne("CTL-1"),
       dispatch,
-      hosts: ROSTER,
-      hostName: "mini",
+      hosts: OUTAGE_ROSTER,
+      hostName: "hosta",
       claimDispatch: () => ({ won: true, generation: 1 }),
       stampWorkerLabel: () => ({ stamped: true }),
       verifyDispatched: verifyOk,
@@ -9947,6 +9951,209 @@ describe("schedulerTick — new-work dispatch fails over an offline HRW owner (C
     expect(existsSync(join(orchDir, ".liveness-deflap.json"))).toBe(true);
     const leftoverTmp = readdirSync(orchDir).filter((f) => f.startsWith(".liveness-deflap.json.tmp"));
     expect(leftoverTmp).toEqual([]);
+  });
+});
+
+// ── CTL-1091 / CTL-1057: computeDispatchSurvivingRoster positive-liveness ──────
+//
+// Dispatch ownership requires POSITIVE liveness (seen within grace), unlike the
+// recovery-side computeSurvivingRoster (fail-open deadHosts). This sheds a host
+// that has NEVER heartbeated (absent from lastSeen) so its HRW slice fails over,
+// while a total feed outage still fail-safes to the full roster.
+describe("computeDispatchSurvivingRoster — positive liveness (CTL-1091/CTL-1057)", () => {
+  const NOW = 10_000_000;
+  const recent = new Date(NOW - 1_000).toISOString();
+  const stale = new Date(NOW - 700_000).toISOString(); // older than 10-min grace
+
+  test("sheds a NEVER-live host (absent from lastSeen) — the CTL-1057 case", () => {
+    const roster = ["mini", "ghost"];
+    const out = computeDispatchSurvivingRoster(roster, {
+      readHeartbeats: () => ({ mini: recent }), // ghost never heartbeated
+      nowMs: NOW,
+    });
+    expect(out).toEqual(["mini"]);
+  });
+
+  test("sheds a host whose last heartbeat is older than grace", () => {
+    const roster = ["mini", "laptop"];
+    const out = computeDispatchSurvivingRoster(roster, {
+      readHeartbeats: () => ({ mini: recent, laptop: stale }),
+      nowMs: NOW,
+    });
+    expect(out).toEqual(["mini"]);
+  });
+
+  test("keeps every host seen within grace", () => {
+    const roster = ["mini", "laptop"];
+    const out = computeDispatchSurvivingRoster(roster, {
+      readHeartbeats: () => ({ mini: recent, laptop: recent }),
+      nowMs: NOW,
+    });
+    expect(out.slice().sort()).toEqual(["laptop", "mini"]);
+  });
+
+  test("fail-safe: NObody live (total outage) → full roster, never strands", () => {
+    const roster = ["mini", "laptop"];
+    const out = computeDispatchSurvivingRoster(roster, {
+      readHeartbeats: () => ({}), // no host seen at all
+      nowMs: NOW,
+    });
+    expect(out.slice().sort()).toEqual(["laptop", "mini"]);
+  });
+
+  test("fail-safe: a heartbeat-read throw → full roster", () => {
+    const roster = ["mini", "laptop"];
+    const out = computeDispatchSurvivingRoster(roster, {
+      readHeartbeats: () => {
+        throw new Error("loki down");
+      },
+      nowMs: NOW,
+    });
+    expect(out).toEqual(roster);
+  });
+
+  test("single-host is a strict no-op (no read)", () => {
+    let read = false;
+    const out = computeDispatchSurvivingRoster(["solo"], {
+      readHeartbeats: () => {
+        read = true;
+        return {};
+      },
+      nowMs: NOW,
+    });
+    expect(out).toEqual(["solo"]);
+    expect(read).toBe(false);
+  });
+});
+
+// ── CTL-1091 ticket-Gherkin scenarios (end-to-end over schedulerTick) ──────────
+//
+// One describe per ticket scenario. Co-located here (not a standalone file) to
+// reuse the outer beforeEach's CATALYST_DIR redirect — otherwise the real event
+// log would leak into computeSurvivingRoster and make these non-deterministic.
+// Liveness is injected via dispatchSurvivingRoster; the soft-CAS via claimDispatch.
+describe("CTL-1091 ticket scenarios — offline-node ownership shedding", () => {
+  const ROSTER = ["mini", "laptop"];
+  const T_MINI = "CTL-1"; // HRW owner over [mini,laptop] === mini
+  const T_LAPTOP = "CTL-3"; // HRW owner over [mini,laptop] === laptop
+  // Anchor fixtures to the real HRW math.
+  expect(ownerForTicket(T_MINI, ROSTER)).toBe("mini");
+  expect(ownerForTicket(T_LAPTOP, ROSTER)).toBe("laptop");
+  expect(ownerForTicket(T_LAPTOP, ["mini"])).toBe("mini"); // fails over to survivor
+
+  const elig = (...ids) =>
+    ids.map((identifier) => ({
+      identifier,
+      priority: 1,
+      createdAt: "x",
+      state: "Todo",
+      relations: { nodes: [] },
+      inverseRelations: { nodes: [] },
+    }));
+
+  const dispatchedIds = (dispatch) => dispatch.calls.map((a) => a.ticket).sort();
+
+  test("scenario 1 — backlog flows while the laptop is OFF: mini dispatches ALL", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 5 }));
+    const dispatch = fakeDispatch({ code: 0 });
+    schedulerTick(orchDir, {
+      readEligible: () => elig(T_MINI, T_LAPTOP),
+      dispatch,
+      hosts: ROSTER,
+      hostName: "mini",
+      dispatchSurvivingRoster: ["mini"], // laptop shed
+      claimDispatch: () => ({ won: true, generation: 1 }),
+      stampWorkerLabel: () => ({ stamped: true }),
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0,
+      now: () => 1_000,
+      hasTriageArtifact: () => true,
+    });
+    // Both the mini-hashed AND the laptop-hashed ticket dispatch from mini.
+    expect(dispatchedIds(dispatch)).toEqual([T_LAPTOP, T_MINI].sort());
+  });
+
+  test("scenario 2a — laptop rejoins and takes its OWN slice back", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 5 }));
+    const dispatch = fakeDispatch({ code: 0 });
+    schedulerTick(orchDir, {
+      readEligible: () => elig(T_LAPTOP),
+      dispatch,
+      hosts: ROSTER,
+      hostName: "laptop",
+      dispatchSurvivingRoster: ["mini", "laptop"], // both live (past hold)
+      claimDispatch: () => ({ won: true, generation: 1 }),
+      stampWorkerLabel: () => ({ stamped: true }),
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0,
+      now: () => 1_000,
+      hasTriageArtifact: () => true,
+    });
+    expect(dispatchedIds(dispatch)).toEqual([T_LAPTOP]);
+  });
+
+  test("scenario 2b — NO mid-flight handback: a ticket mini already claimed stays with mini", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 5 }));
+    const dispatch = fakeDispatch({ code: 0 });
+    const claims = [];
+    schedulerTick(orchDir, {
+      readEligible: () => elig(T_LAPTOP),
+      dispatch,
+      hosts: ROSTER,
+      hostName: "laptop",
+      dispatchSurvivingRoster: ["mini", "laptop"],
+      // laptop owns T_LAPTOP by HRW and attempts the claim, but mini holds the
+      // fence → the soft-CAS is LOST → laptop does not re-dispatch (no handback).
+      claimDispatch: (arg) => {
+        claims.push(arg);
+        return { won: false, generation: 2 };
+      },
+      stampWorkerLabel: () => ({ stamped: true }),
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0,
+      now: () => 1_000,
+      hasTriageArtifact: () => true,
+    });
+    expect(claims).toHaveLength(1); // the claim was ATTEMPTED (path unchanged)
+    expect(dispatch.calls).toHaveLength(0); // but LOST → not dispatched
+  });
+
+  test("scenario 3 — both hosts race a transition: the soft-CAS yields EXACTLY one dispatch", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 5 }));
+    // mini's tick: it believes laptop is dead → it owns T_LAPTOP → wins the CAS.
+    const dMini = fakeDispatch({ code: 0 });
+    schedulerTick(orchDir, {
+      readEligible: () => elig(T_LAPTOP),
+      dispatch: dMini,
+      hosts: ROSTER,
+      hostName: "mini",
+      dispatchSurvivingRoster: ["mini"],
+      claimDispatch: () => ({ won: true, generation: 5 }), // mini wins
+      stampWorkerLabel: () => ({ stamped: true }),
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0,
+      now: () => 1_000,
+      hasTriageArtifact: () => true,
+    });
+    // laptop's concurrent tick: it believes it is live → it owns T_LAPTOP too, but
+    // the fence CAS is already held by mini → LOST.
+    const dLaptop = fakeDispatch({ code: 0 });
+    schedulerTick(orchDir, {
+      readEligible: () => elig(T_LAPTOP),
+      dispatch: dLaptop,
+      hosts: ROSTER,
+      hostName: "laptop",
+      dispatchSurvivingRoster: ["mini", "laptop"],
+      claimDispatch: () => ({ won: false, generation: 5 }), // laptop loses the CAS
+      stampWorkerLabel: () => ({ stamped: true }),
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0,
+      now: () => 1_000,
+      hasTriageArtifact: () => true,
+    });
+    // Exactly one host dispatched the contested ticket.
+    expect(dMini.calls).toHaveLength(1);
+    expect(dLaptop.calls).toHaveLength(0);
   });
 });
 
