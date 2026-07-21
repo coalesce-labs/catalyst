@@ -402,7 +402,11 @@ const TERMINAL_SIGNAL_STATUSES = new Set(["failed", "stalled", "aborted"]);
 // then owns only its own HRW slice (NEVER double-acts) and we merely forgo the
 // dead-owner failover for this tick (no worse than the pre-CTL-1191 strand).
 // Single-host (roster.length <= 1) returns the roster unchanged with no read.
-function computeSurvivingRoster(
+// CTL-1091: exported so monitor.mjs can route its triage-dispatch ownership gate
+// through the same surviving-roster read as the scheduler's new-work gate (both
+// dispatch sites then agree with recovery on who is alive). Safe to import from
+// monitor.mjs — this helper pulls in no bun:sqlite dependency (CTL-1397).
+export function computeSurvivingRoster(
   roster,
   { readHeartbeats = readClusterHeartbeats, nowMs = Date.now() } = {}
 ) {
@@ -3407,6 +3411,13 @@ export function schedulerTick(
     // fixed survivor set to drive the dead-owner-failover path deterministically
     // without writing heartbeat events. Single-host is still a no-op regardless.
     recoverySurvivingRoster = undefined,
+    // CTL-1091: injectable surviving-roster computation for the NEW-WORK dispatch
+    // HRW gate (the `ready` filter below), mirroring recoverySurvivingRoster.
+    // Default undefined → computeSurvivingRoster(roster) (reads the test-redirected
+    // event log). Tests inject a fixed survivor set to drive the offline-owner
+    // failover deterministically without writing heartbeat events. Single-host is
+    // still a no-op regardless (multiHost gate short-circuits before it is read).
+    dispatchSurvivingRoster = undefined,
     // CTL-729: progress-watchdog seams. Defaults keep every existing bare unit
     // tick inert (null silence probe → predicate no-ops via "no-transcript").
     watchdog: {
@@ -3582,6 +3593,22 @@ export function schedulerTick(
     return _survivorRoster;
   };
   const ownsForRecovery = (ticket) => !multiHost || ownedBy(ticket, _survivors(), self);
+
+  // CTL-1091: the DISPATCH-time ownership roster = the surviving (live) roster,
+  // so new eligible tickets whose HRW owner is OFFLINE fail over to a live host
+  // instead of stranding in Todo. Memoized once per tick; reuses the same
+  // heartbeat read as recovery (_survivors) so dispatch and recovery agree on
+  // who is alive. Injectable via dispatchSurvivingRoster for tests. Fail-safe:
+  // computeSurvivingRoster degrades to the full roster on a read-throw / all-dead
+  // (today's raw-roster behavior — never double-acts).
+  let _dispatchRosterMemo = null;
+  const _dispatchRoster = () => {
+    if (_dispatchRosterMemo) return _dispatchRosterMemo;
+    _dispatchRosterMemo = Array.isArray(dispatchSurvivingRoster)
+      ? dispatchSurvivingRoster
+      : computeSurvivingRoster(roster);
+    return _dispatchRosterMemo;
+  };
   // CTL-757: emitStateWrite — caller-emit the canonical linear.state.write audit
   // event for ONE scheduler write site. `writerResult` is the runTransition return
   // ({applied, reason, from_state, to_state, ...}) from applyPhaseStatus /
@@ -5898,7 +5925,9 @@ export function schedulerTick(
   // hostName (stale/aliased hosts.json). HRW filtering engages only when a 2nd
   // host actually joins (roster.length > 1).
   const ready = computeReadyTickets(eligible, { blockerStates }).filter(
-    (t) => !multiHost || ownedBy(t.identifier, roster, self)
+    // CTL-1091: hash ownership over the LIVE (surviving) roster, not the raw
+    // roster, so an offline owner's slice fails over to a live host.
+    (t) => !multiHost || ownedBy(t.identifier, _dispatchRoster(), self)
   );
   // CTL-657: the in-flight count is the live `background` claude-agents count,
   // not listInFlightTickets(orchDir).size. A worker that leaked (signal terminal

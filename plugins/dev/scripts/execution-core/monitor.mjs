@@ -76,7 +76,16 @@ import {
 import { labelNeedsHumanUnlessBeliefOwner } from "./label-guard.mjs"; // CTL-1441
 import { appendTriageTransitionEvent as defaultAppendEvent } from "./triage-transition-event.mjs";
 import { countBackgroundAgents, resetLivenessCache } from "./claude-agents.mjs";
-import { readMaxParallel, computeFreeSlots, writeClusterGeneration } from "./scheduler.mjs";
+import {
+  readMaxParallel,
+  computeFreeSlots,
+  writeClusterGeneration,
+  // CTL-1091: route the triage-dispatch HRW gate through the same surviving
+  // (live) roster the scheduler's new-work gate uses, so both dispatch sites
+  // fail an offline owner's slice over to a live host. This helper pulls in no
+  // bun:sqlite dependency, so it is safe to import here (CTL-1397 Node-loadability).
+  computeSurvivingRoster,
+} from "./scheduler.mjs";
 // CTL-863: Linear-free fence event emitter (durable fence → event-log migration).
 import { emitFenceClaimed } from "./fence-event.mjs";
 // CTL-1481: best-effort worker:<host> label visibility-projection stamp on a
@@ -446,6 +455,9 @@ export function handleStateChangedEvent(
     // CTL-862: cross-host coordination seams.
     hosts = undefined,
     hostName = undefined,
+    // CTL-1091: surviving-roster override → threaded through to dispatchTriage's
+    // live-roster ownership gate (undefined → real heartbeat feed; tests inject).
+    survivingRosterOverride = undefined,
     claimDispatch = claimDispatchSync,
     // CTL-1095: drain gate seam — thread through to dispatchTriage.
     isDraining = (dir) => isDrainingDefault(dir),
@@ -497,6 +509,7 @@ export function handleStateChangedEvent(
           applyAssignee,
           hosts,
           hostName,
+          survivingRosterOverride, // CTL-1091
           claimDispatch, // CTL-862
           isDraining, // CTL-1095
           emitBackstop, // CTL-1367 P1
@@ -554,6 +567,7 @@ export function handleStateChangedEvent(
           applyAssignee,
           hosts,
           hostName,
+          survivingRosterOverride, // CTL-1091
           claimDispatch, // CTL-862
           isDraining, // CTL-1095
           emitBackstop, // CTL-1367 P1
@@ -673,6 +687,11 @@ function dispatchTriage(
     // CTL-862: cross-host coordination seams (left undefined → single-host fallback).
     hosts = undefined,
     hostName = undefined,
+    // CTL-1091: injectable surviving-roster override for the ownership gate below,
+    // mirroring the scheduler's dispatchSurvivingRoster. Default undefined →
+    // computeSurvivingRoster(roster) (reads the live heartbeat feed). Tests inject
+    // a fixed survivor set to drive the offline-owner failover deterministically.
+    survivingRosterOverride = undefined,
     claimDispatch = claimDispatchSync,
     // CTL-1481: best-effort worker:<host> label stamp, fired right after a won
     // multi-host triage claim (same gate as emitFenceClaimed). Injectable so
@@ -714,10 +733,21 @@ function dispatchTriage(
     globalThis.__ctl1057_monitor_warned = true;
     log.warn({ roster, self }, _mw);
   }
-  if (multiHost && !ownedBy(identifier, roster, self)) {
+  // CTL-1091: ownership over the LIVE (surviving) roster, so a →Triage ticket
+  // whose HRW owner is offline is triaged by a live host instead of stranding.
+  // Injectable for tests; defaults to the live heartbeat feed. The heartbeat
+  // sync wrappers cache (Loki 20s / Linear 45s) so per-call reads coalesce.
+  // Fail-safe: computeSurvivingRoster degrades to the full roster on a
+  // read-throw / all-dead (today's raw-roster behavior). Only computed multi-host.
+  const dispatchRoster = !multiHost
+    ? roster
+    : Array.isArray(survivingRosterOverride)
+      ? survivingRosterOverride
+      : computeSurvivingRoster(roster);
+  if (multiHost && !ownedBy(identifier, dispatchRoster, self)) {
     log.debug(
-      { identifier, self, roster },
-      "ctl-862: ticket not owned by this host under HRW — skipping triage dispatch"
+      { identifier, self, roster, dispatchRoster },
+      "ctl-1091: ticket not owned by this host under HRW over the live roster — skipping triage dispatch"
     );
     return false;
   }
@@ -1066,6 +1096,9 @@ export function sweepMissingTriage({
   // CTL-862: cross-host coordination seams.
   hosts = undefined,
   hostName = undefined,
+  // CTL-1091: surviving-roster override → threaded through to dispatchTriage's
+  // live-roster ownership gate (undefined → real heartbeat feed; tests inject).
+  survivingRosterOverride = undefined,
   claimDispatch = claimDispatchSync,
   // CTL-1367 P1: failed-terminal backstop for a rejected async (sdk) triage
   // dispatch — threaded through to dispatchTriage (undefined → real default).
@@ -1116,6 +1149,7 @@ export function sweepMissingTriage({
         applyAssignee,
         hosts,
         hostName,
+        survivingRosterOverride, // CTL-1091
         claimDispatch, // CTL-862
         emitBackstop, // CTL-1367 P1
         ...(labelNeedsHuman ? { labelNeedsHuman } : {}), // CTL-1441

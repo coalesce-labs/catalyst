@@ -9813,6 +9813,116 @@ describe("CTL-850 — HRW ownership + claim-on-dispatch (schedulerTick new-work)
   });
 });
 
+// ── CTL-1091: new-work dispatch fails over an OFFLINE HRW owner ───────────────
+//
+// The new-work ready filter (scheduler.mjs) must hash ownership over the LIVE
+// (surviving) roster, not the raw roster, so a ticket whose HRW owner is offline
+// fails over to a live host instead of stranding in Todo forever. Mirrors the
+// CTL-1191 recovery-side seam: an injectable dispatchSurvivingRoster override
+// drives the shed set deterministically without writing heartbeat events.
+describe("schedulerTick — new-work dispatch fails over an offline HRW owner (CTL-1091)", () => {
+  const ROSTER = ["mini", "laptop"];
+  // CTL-3 hashes to "laptop" under [mini,laptop]; under [mini] alone it fails
+  // over to mini (survivor identity). Anchor the fixture to the real HRW math.
+  const LAPTOP_OWNED_ID = "CTL-3";
+  expect(ownerForTicket(LAPTOP_OWNED_ID, ROSTER)).toBe("laptop");
+  expect(ownerForTicket(LAPTOP_OWNED_ID, ["mini"])).toBe("mini");
+
+  const eligibleOne = (id = LAPTOP_OWNED_ID) => [
+    {
+      identifier: id,
+      priority: 1,
+      createdAt: "x",
+      state: "Todo",
+      relations: { nodes: [] },
+      inverseRelations: { nodes: [] },
+    },
+  ];
+
+  test("dispatches a laptop-owned ticket from mini when laptop is OFFLINE (shed)", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    const dispatch = fakeDispatch({ code: 0 });
+    schedulerTick(orchDir, {
+      readEligible: () => eligibleOne(),
+      dispatch,
+      hosts: ROSTER,
+      hostName: "mini",
+      // laptop shed → survivors = [mini]; mini now owns CTL-3 → dispatched.
+      dispatchSurvivingRoster: ["mini"],
+      // won claim so the dispatch proceeds past the multi-host claim gate.
+      claimDispatch: () => ({ won: true, generation: 1 }),
+      stampWorkerLabel: () => ({ stamped: true }),
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0,
+      now: () => 1_000,
+      hasTriageArtifact: () => true,
+    });
+    expect(dispatch.calls.map((a) => a.ticket)).toContain(LAPTOP_OWNED_ID);
+  });
+
+  test("does NOT dispatch a laptop-owned ticket from mini when laptop is LIVE", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    const dispatch = fakeDispatch({ code: 0 });
+    schedulerTick(orchDir, {
+      readEligible: () => eligibleOne(),
+      dispatch,
+      hosts: ROSTER,
+      hostName: "mini",
+      // both live → laptop still owns CTL-3 → mini filters it out.
+      dispatchSurvivingRoster: ["mini", "laptop"],
+      claimDispatch: () => ({ won: true, generation: 1 }),
+      stampWorkerLabel: () => ({ stamped: true }),
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0,
+      now: () => 1_000,
+      hasTriageArtifact: () => true,
+    });
+    expect(dispatch.calls).toHaveLength(0);
+  });
+
+  test("single-host is a strict no-op (dispatches, HRW identity)", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    const dispatch = fakeDispatch({ code: 0 });
+    schedulerTick(orchDir, {
+      readEligible: () => eligibleOne(),
+      dispatch,
+      hosts: ["mini"],
+      hostName: "mini",
+      // multiHost=false short-circuits the ownership filter entirely; no
+      // surviving-roster read fires regardless of any override.
+      claimDispatch: () => ({ won: true, generation: 1 }),
+      stampWorkerLabel: () => ({ stamped: true }),
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0,
+      now: () => 1_000,
+      hasTriageArtifact: () => true,
+    });
+    expect(dispatch.calls.map((a) => a.ticket)).toContain(LAPTOP_OWNED_ID);
+  });
+
+  test("fails open: total liveness outage degrades to the full roster (no override, no heartbeats)", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    const dispatch = fakeDispatch({ code: 0 });
+    // No dispatchSurvivingRoster override → computeSurvivingRoster(roster) runs.
+    // With no heartbeat event log under orchDir it sees no live hosts; the
+    // fail-safe degrades to the FULL roster [mini,laptop], so laptop still owns
+    // CTL-3 → mini does NOT dispatch it (today's raw-roster behavior preserved).
+    schedulerTick(orchDir, {
+      readEligible: () => eligibleOne(),
+      dispatch,
+      hosts: ROSTER,
+      hostName: "mini",
+      claimDispatch: () => ({ won: true, generation: 1 }),
+      stampWorkerLabel: () => ({ stamped: true }),
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0,
+      now: () => 1_000,
+      hasTriageArtifact: () => true,
+    });
+    expect(dispatch.calls).toHaveLength(0);
+  });
+});
+
 // ── CTL-1191: HRW-gate the recovery passes over the surviving roster ──────────
 //
 // The recovery passes (Pass 0u unstuck-sweep, Pass 0r reasoning, diagnostician)
