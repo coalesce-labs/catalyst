@@ -1581,6 +1581,53 @@ export function readBoardHealthConfig(env = process.env) {
   return { mode };
 }
 
+// CTL-1488: coordination-substrate rollout config. Same off→shadow→enforce
+// discipline (ADR-023) and env-override → Layer-2 → default precedence as
+// readBoardHealthConfig, with ONE deliberate difference: the default is "off",
+// NOT board-health's "shadow" floor. Coordination adds an always-on background
+// process (coordination-publish) and — in enforce — network egress to the hub,
+// so the safe default is fully inert until an operator promotes it.
+export const COORDINATION_MODES = new Set(["off", "shadow", "enforce"]);
+
+function readLayer2Coordination() {
+  try {
+    const c = JSON.parse(readFileSync(getLayer2ConfigPath(), "utf8"))?.catalyst?.coordination;
+    return c && typeof c === "object" ? c : {};
+  } catch { return {}; }
+}
+
+export function readCoordinationConfig(env = process.env) {
+  const l2 = readLayer2Coordination();
+  const v = env.CATALYST_COORDINATION_MODE;
+  let mode;
+  if (v === "0") {
+    mode = "off"; // kill-switch — always wins, regardless of Layer-2
+  } else if (typeof v === "string" && COORDINATION_MODES.has(v)) {
+    mode = v;
+  } else if (typeof l2.mode === "string" && COORDINATION_MODES.has(l2.mode)) {
+    mode = l2.mode;
+  } else {
+    mode = "off"; // fail-safe: unset/garbage → inert (no process, no egress)
+  }
+  // hubUrl: the catalyst-cloud coordination changefeed base URL (Phase 4/5).
+  // env override → Layer-2 → null. Null forces the interim Loki-tail transport.
+  const envHub = env.CATALYST_COORDINATION_HUB_URL;
+  const hubUrl =
+    typeof envHub === "string" && envHub !== ""
+      ? envHub
+      : typeof l2.hubUrl === "string" && l2.hubUrl !== ""
+        ? l2.hubUrl
+        : null;
+  return { mode, hubUrl };
+}
+
+// CTL-1488: the local-first coordination mirror. coordination-publish writes the
+// ordered coordination subset here (with local_seq) synchronously before any
+// network call; the inbound mirror-tail client merges other hosts' rows in.
+export function getCoordinationMirrorPath() {
+  return resolve(catalystDir(), "coordination.jsonl");
+}
+
 // CTL-1331: delegate-runner config reader. Gates the DETACHED process that
 // drains the board-health delegate queue (where the heavy worktree-provision +
 // `claude --bg` spawn moved off the daemon event loop). Mirrors the
