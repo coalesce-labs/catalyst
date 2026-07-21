@@ -45,6 +45,50 @@ describe("readClusterLivenessFromLokiSync (CTL-1420 #17) — fail-open", () => {
     const spawn = () => { throw new Error("ENOENT"); };
     expect(readClusterLivenessFromLokiSync({ lokiUrl: "http://loki:3100" }, { spawn })).toEqual({});
   });
+
+  // CTL-1091 (Codex P1 follow-up): strict mode surfaces a determinate FAILURE as a
+  // throw (dispatch → full-roster outage fallback) while still returning {} on a
+  // genuinely-empty successful read. Default (non-strict) fail-open above unchanged.
+  describe("strict mode (CTL-1091 P1 follow-up)", () => {
+    test("strict + missing lokiUrl → THROWS", () => {
+      expect(() => readClusterLivenessFromLokiSync({ lokiUrl: "" }, { spawn: () => ({}), strict: true })).toThrow(
+        /indeterminate peer view/i,
+      );
+    });
+
+    test("strict + non-zero exit → THROWS", () => {
+      const spawn = () => ({ status: 1, stdout: "", stderr: "boom" });
+      expect(() => readClusterLivenessFromLokiSync({ lokiUrl: "http://loki:3100" }, { spawn, strict: true })).toThrow(
+        /indeterminate peer view/i,
+      );
+    });
+
+    test("strict + spawn throws → THROWS (original error preserved)", () => {
+      const spawn = () => { throw new Error("ENOENT"); };
+      expect(() => readClusterLivenessFromLokiSync({ lokiUrl: "http://loki:3100" }, { spawn, strict: true })).toThrow(
+        /ENOENT/,
+      );
+    });
+
+    test("strict + array/non-object payload → THROWS", () => {
+      const spawn = () => ({ status: 0, stdout: "[1,2,3]\n" });
+      expect(() => readClusterLivenessFromLokiSync({ lokiUrl: "http://loki:3100" }, { spawn, strict: true })).toThrow(
+        /malformed payload/i,
+      );
+    });
+
+    test("strict + status 0 empty stdout → {} (genuine empty, NOT a failure)", () => {
+      const spawn = () => ({ status: 0, stdout: "" });
+      expect(readClusterLivenessFromLokiSync({ lokiUrl: "http://loki:3100" }, { spawn, strict: true })).toEqual({});
+    });
+
+    test("strict + valid peers → returns peers (happy path unaffected)", () => {
+      const map = { mini: { last_seen: "2026-07-07T19:04:50.000Z", in_flight_tickets: [] } };
+      expect(
+        readClusterLivenessFromLokiSync({ lokiUrl: "http://loki:3100" }, { spawn: okSpawn(map), strict: true }),
+      ).toEqual(map);
+    });
+  });
 });
 
 describe("readClusterLivenessFromLokiSyncCached (CTL-1420 #17)", () => {

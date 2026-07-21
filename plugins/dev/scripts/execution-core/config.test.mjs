@@ -1364,3 +1364,42 @@ describe("getReplicaDbPath (CTL-1340)", () => {
     expect(getReplicaDbPath()).toBe("/tmp/b/catalyst-replica.db");
   });
 });
+
+// ─── CTL-1091 (Codex P2): resolveRestoreHoldMs validation contract ───────────
+import { resolveRestoreHoldMs } from "./config.mjs";
+
+describe("resolveRestoreHoldMs — restore-hold override validation (CTL-1091 P2)", () => {
+  const DEF = 600_000;
+
+  test("unset (undefined) → default", () => {
+    expect(resolveRestoreHoldMs(undefined, DEF)).toBe(DEF);
+  });
+
+  test("empty string → default (NOT 0 — closes the Number(\"\")===0 bug)", () => {
+    expect(resolveRestoreHoldMs("", DEF)).toBe(DEF);
+    expect(resolveRestoreHoldMs("   ", DEF)).toBe(DEF);
+  });
+
+  test("explicit \"0\" → 0 (opt-out preserved, disables the hold)", () => {
+    expect(resolveRestoreHoldMs("0", DEF)).toBe(0);
+  });
+
+  test("negative → default (invalid)", () => {
+    expect(resolveRestoreHoldMs("-5", DEF)).toBe(DEF);
+    expect(resolveRestoreHoldMs("-1", DEF)).toBe(DEF);
+  });
+
+  test("non-numeric → default", () => {
+    expect(resolveRestoreHoldMs("abc", DEF)).toBe(DEF);
+    expect(resolveRestoreHoldMs("NaN", DEF)).toBe(DEF);
+  });
+
+  test("valid positive → honored", () => {
+    expect(resolveRestoreHoldMs("120000", DEF)).toBe(120_000);
+  });
+
+  test("non-string (defensive) → default", () => {
+    expect(resolveRestoreHoldMs(null, DEF)).toBe(DEF);
+    expect(resolveRestoreHoldMs(5000, DEF)).toBe(DEF);
+  });
+});

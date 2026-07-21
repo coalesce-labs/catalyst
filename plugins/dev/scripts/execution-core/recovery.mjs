@@ -62,11 +62,18 @@ import { readClusterLivenessFromLokiSyncCached } from "./loki-liveness-sync.mjs"
 // attachment. Both return the SAME { [host]: {last_seen, in_flight_tickets} } shape,
 // so readClusterHeartbeats / defaultOwnedTicketsForHost are unchanged below the seam.
 // The `anchorIssue` arg is only meaningful in linear mode (loki uses getLokiQueryUrl()).
-function defaultReadPeers(anchorIssue) {
+// CTL-1091 (Codex P1 follow-up): `strict` propagates to the underlying reader so a
+// DETERMINATE peer-read FAILURE throws (dispatch outage → full roster) rather than
+// fail-opening to `{}` (which is indistinguishable from a genuinely-empty success and
+// would let the strict path keep [self] and grab every peer's work). The cached
+// wrappers spread it straight through to the sync reader on a miss; a cache HIT (a
+// recent determinate success) legitimately skips the read. Default false = recovery's
+// fail-open.
+function defaultReadPeers(anchorIssue, { strict = false } = {}) {
   if (getLivenessReadSource() === "loki") {
-    return readClusterLivenessFromLokiSyncCached({ lokiUrl: getLokiQueryUrl() });
+    return readClusterLivenessFromLokiSyncCached({ lokiUrl: getLokiQueryUrl() }, { strict });
   }
-  return readPeerHeartbeatsSyncCached({ anchorIssue });
+  return readPeerHeartbeatsSyncCached({ anchorIssue }, { strict });
 }
 
 // peerLivenessConfigured — is the cross-host peer read wired for the ACTIVE source?
@@ -3230,6 +3237,21 @@ export function readClusterHeartbeats({
   roster = getClusterHosts(),
   anchorIssue = getLivenessAnchorIssue(),
   readPeers = defaultReadPeers, // CTL-1420 (#17): loki|linear source-aware peer read
+  // CTL-1091 (Codex P1 #3): when TRUE — the DISPATCH positive-liveness path — a
+  // multi-host roster with NO trustworthy cross-host view THROWS instead of
+  // returning a local-only map. "No trustworthy view" = the peer transport is
+  // unconfigured OR the peer read threw. Without this the local event log always
+  // carries self's own fresh heartbeat, so the positive-liveness filter would see
+  // live=[self] (nonempty, no throw), skip the resolver's outage branch, shrink the
+  // dispatch roster to [self], and make every live host own every ready ticket —
+  // contending for its peers' work instead of taking the documented
+  // outage → FULL-roster fallback (each node owns only its own HRW slice). The throw
+  // routes through readPositiveLive's catch → resolveDispatchRoster's outage degrade.
+  // RECOVERY keeps the default (false) fail-open: an unseen peer is "not proven dead"
+  // and must NOT be reclaimed, so a Loki/Linear hiccup there must never break
+  // liveness. This is the dispatch(positive) vs recovery(fail-open) asymmetry in
+  // docs/architecture.md.
+  requirePeerView = false,
 } = {}) {
   const lastSeen = {};
   let raw;
@@ -3261,30 +3283,53 @@ export function readClusterHeartbeats({
   // CTL-1090: multi-host cross-host merge. Single-host (roster<=1) ⇒ exact no-op.
   // CTL-1420 (#17): gate on the ACTIVE source's transport (loki: Loki URL; linear:
   // anchor issue) so a source with no transport is a clean local-map-only no-op.
-  if (Array.isArray(roster) && roster.length > 1 && peerLivenessConfigured(anchorIssue)) {
-    let peers = {};
-    try {
-      peers = readPeers(anchorIssue) ?? {};
-    } catch {
-      peers = {}; // fail-open: a Loki/Linear hiccup must never break liveness
-    }
-    for (const [host, rec] of Object.entries(peers)) {
-      const ts = rec?.last_seen;
-      if (typeof ts !== "string" || ts.length === 0) continue;
-      // CTL-1090 review hardening: a peer's last_seen is untrusted input. Reject
-      // anything Date.parse can't read so a garbage value (e.g. "zzz") — which
-      // would sort ABOVE real ISO strings lexicographically and then make the host
-      // look forever-alive once deadHosts does Date.parse(seen) (NaN < cutoff is
-      // false) — can never poison the merge.
-      const peerMs = Date.parse(ts);
-      if (!Number.isFinite(peerMs)) continue; // unparseable → drop (fail-open)
-      // Keep the freshest ts per host. Compare NUMERICALLY (Date.parse), not
-      // lexicographically: the local event log carries second-precision ts
-      // ("…02Z", heartbeat-event.mjs strips millis) while peers publish
-      // millisecond ISO ("…02.500Z"), and "…02.500Z" < "…02Z" as strings — a
-      // lexicographic compare would discard a genuinely newer peer ts.
-      const cur = lastSeen[host];
-      if (!cur || peerMs > Date.parse(cur)) lastSeen[host] = ts;
+  if (Array.isArray(roster) && roster.length > 1) {
+    if (!peerLivenessConfigured(anchorIssue)) {
+      // No cross-host transport. CTL-1091 P1 #3: for the DISPATCH path this is NOT a
+      // safe local-map-only no-op — self's own heartbeat alone would collapse the
+      // dispatch roster to [self]. Surface it as an outage so the resolver degrades
+      // to the FULL roster. Recovery (requirePeerView=false) keeps the local-map-only
+      // no-op (an unconfigured transport must not manufacture "dead" peers to reclaim).
+      if (requirePeerView) {
+        throw new Error(
+          "ctl-1091: dispatch requires a cross-host liveness view but no peer transport is configured (multi-host)",
+        );
+      }
+    } else {
+      let peers = {};
+      try {
+        // strict:requirePeerView makes the reader THROW on a determinate failure
+        // (timeout/nonzero/unparseable) instead of collapsing it to `{}` — the default
+        // readers otherwise fail-open, so a failed peer read would look identical to a
+        // genuinely-empty one and the dispatch roster would silently shrink to [self]
+        // (Codex P1 follow-up). A genuinely-empty SUCCESSFUL read still returns `{}`
+        // (legitimate all-peers-absent → [self] failover).
+        peers = readPeers(anchorIssue, { strict: requirePeerView }) ?? {};
+      } catch (err) {
+        // CTL-1091 P1 #3: DISPATCH surfaces the read failure as an outage (→ full
+        // roster). RECOVERY stays fail-open — a Loki/Linear hiccup must never break
+        // liveness (unseen ≠ dead).
+        if (requirePeerView) throw err;
+        peers = {};
+      }
+      for (const [host, rec] of Object.entries(peers)) {
+        const ts = rec?.last_seen;
+        if (typeof ts !== "string" || ts.length === 0) continue;
+        // CTL-1090 review hardening: a peer's last_seen is untrusted input. Reject
+        // anything Date.parse can't read so a garbage value (e.g. "zzz") — which
+        // would sort ABOVE real ISO strings lexicographically and then make the host
+        // look forever-alive once deadHosts does Date.parse(seen) (NaN < cutoff is
+        // false) — can never poison the merge.
+        const peerMs = Date.parse(ts);
+        if (!Number.isFinite(peerMs)) continue; // unparseable → drop (fail-open)
+        // Keep the freshest ts per host. Compare NUMERICALLY (Date.parse), not
+        // lexicographically: the local event log carries second-precision ts
+        // ("…02Z", heartbeat-event.mjs strips millis) while peers publish
+        // millisecond ISO ("…02.500Z"), and "…02.500Z" < "…02Z" as strings — a
+        // lexicographic compare would discard a genuinely newer peer ts.
+        const cur = lastSeen[host];
+        if (!cur || peerMs > Date.parse(cur)) lastSeen[host] = ts;
+      }
     }
   }
 

@@ -4892,6 +4892,127 @@ describe("readClusterHeartbeats — cross-host peer merge (CTL-1090)", () => {
   });
 });
 
+// ─── CTL-1091 (Codex P1 #3): requirePeerView — dispatch must NOT fail-open ────
+// The DISPATCH positive-liveness path passes requirePeerView:true so that a
+// multi-host roster with no trustworthy cross-host view THROWS (→ readPositiveLive
+// catch → resolveDispatchRoster outage degrade → full roster) instead of returning
+// a local-only map (self's own heartbeat), which would collapse the dispatch roster
+// to [self] and make every live host grab every ready ticket. RECOVERY keeps the
+// default (false) fail-open so an unseen peer is never reclaimed on a transient
+// Loki/Linear hiccup. These tests pin the asymmetry.
+describe("readClusterHeartbeats — requirePeerView dispatch strict mode (CTL-1091 P1 #3)", () => {
+  let tmpDir;
+  let logPath;
+  let prevSource;
+
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), "ctl1091-strict-hb-"));
+    logPath = join(tmpDir, "events.jsonl");
+    writeFileSync(logPath, makeHbLine("mini", "2026-06-13T01:00:00Z") + "\n");
+    // Pin the liveness source so peerLivenessConfigured() is driven by anchorIssue
+    // (linear source) and NOT by an ambient CATALYST_LIVENESS_READ_SOURCE=loki with
+    // no Loki URL — which would make peerLivenessConfigured always false and mask the
+    // configured-vs-unconfigured distinction these tests pin. (CI runs with a clean
+    // env; a dev machine may have the loki source exported.)
+    prevSource = process.env.CATALYST_LIVENESS_READ_SOURCE;
+    process.env.CATALYST_LIVENESS_READ_SOURCE = "linear";
+  });
+
+  afterEach(() => {
+    rmSync(tmpDir, { recursive: true, force: true });
+    if (prevSource === undefined) delete process.env.CATALYST_LIVENESS_READ_SOURCE;
+    else process.env.CATALYST_LIVENESS_READ_SOURCE = prevSource;
+  });
+
+  test("strict + multi-host + peer transport UNCONFIGURED → THROWS (no silent local-only map)", () => {
+    expect(() =>
+      readClusterHeartbeats({
+        logPath,
+        roster: ["mini", "laptop"],
+        anchorIssue: null, // unconfigured (linear source) → no cross-host view
+        readPeers: () => ({}),
+        requirePeerView: true,
+      }),
+    ).toThrow(/cross-host liveness view/i);
+  });
+
+  test("strict + multi-host + peer read THROWS → propagates (not swallowed)", () => {
+    expect(() =>
+      readClusterHeartbeats({
+        logPath,
+        roster: ["mini", "laptop"],
+        anchorIssue: "CTL-9999",
+        readPeers: () => { throw new Error("Linear down"); },
+        requirePeerView: true,
+      }),
+    ).toThrow(/Linear down/);
+  });
+
+  test("strict + multi-host + peer read returns EMPTY {} (genuine, no throw) → local map, NOT an outage", () => {
+    // A SUCCESSFUL-but-empty read (no peers heartbeating yet / all genuinely absent)
+    // must NOT be treated as an outage — the reader returns {} without throwing, so
+    // readClusterHeartbeats returns the local self-only map and the dispatch resolver
+    // legitimately fails over. Only a determinate FAILURE (which the strict readers now
+    // throw on) routes to the full-roster fallback. See the reader-level strict tests.
+    const result = readClusterHeartbeats({
+      logPath,
+      roster: ["mini", "laptop"],
+      anchorIssue: "CTL-9999",
+      readPeers: () => ({}), // genuine empty success (no throw)
+      requirePeerView: true,
+    });
+    expect(result.mini).toBe("2026-06-13T01:00:00Z");
+    expect(result.laptop).toBeUndefined();
+  });
+
+  test("strict + multi-host + peer read OK → merges normally (happy path unaffected)", () => {
+    const result = readClusterHeartbeats({
+      logPath,
+      roster: ["mini", "laptop"],
+      anchorIssue: "CTL-9999",
+      readPeers: () => ({
+        laptop: { host: "laptop", last_seen: "2026-06-13T00:55:00Z", in_flight_tickets: [] },
+      }),
+      requirePeerView: true,
+    });
+    expect(result.mini).toBe("2026-06-13T01:00:00Z");
+    expect(result.laptop).toBe("2026-06-13T00:55:00Z");
+  });
+
+  test("strict + SINGLE-host → peer reader never called, never throws (no-op)", () => {
+    expect(() =>
+      readClusterHeartbeats({
+        logPath,
+        roster: ["mini"],
+        anchorIssue: null,
+        readPeers: () => { throw new Error("must not be called single-host"); },
+        requirePeerView: true,
+      }),
+    ).not.toThrow();
+  });
+
+  test("recovery (default requirePeerView:false) stays FAIL-OPEN on the same conditions", () => {
+    // unconfigured transport
+    expect(() =>
+      readClusterHeartbeats({
+        logPath,
+        roster: ["mini", "laptop"],
+        anchorIssue: null,
+        readPeers: () => ({}),
+      }),
+    ).not.toThrow();
+    // peer read throws
+    const result = readClusterHeartbeats({
+      logPath,
+      roster: ["mini", "laptop"],
+      anchorIssue: "CTL-9999",
+      readPeers: () => { throw new Error("Linear down"); },
+    });
+    expect(result.mini).toBe("2026-06-13T01:00:00Z"); // local map preserved
+    expect(result.laptop).toBeUndefined();
+  });
+});
+
 // ─── CTL-1090: deadHosts flags a stale peer (pure function, no change needed) ─
 
 describe("deadHosts — flags a stale peer in merged lastSeen (CTL-1090)", () => {

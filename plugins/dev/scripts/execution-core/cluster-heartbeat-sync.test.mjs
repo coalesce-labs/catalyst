@@ -245,6 +245,64 @@ describe("readPeerHeartbeatsSync — parsing + fail-open contract", () => {
       ),
     ).toEqual({});
   });
+
+  // CTL-1091 (Codex P1 follow-up): strict mode must THROW on a determinate read
+  // FAILURE (so the dispatch liveness path degrades to the full roster) but still
+  // return {} on a genuinely-EMPTY successful read (so legitimate all-peers-absent
+  // failover is preserved). The default (non-strict) fail-open above is unchanged.
+  describe("strict mode (CTL-1091 P1 follow-up)", () => {
+    test("strict + non-zero exit → THROWS", () => {
+      expect(() =>
+        readPeerHeartbeatsSync({ anchorIssue: "CTL-9" }, { spawn: () => ({ status: 1, stdout: "" }), strict: true }),
+      ).toThrow(/indeterminate peer view/i);
+    });
+
+    test("strict + timeout (status null) → THROWS", () => {
+      expect(() =>
+        readPeerHeartbeatsSync(
+          { anchorIssue: "CTL-9" },
+          { spawn: () => ({ status: null, error: new Error("ETIMEDOUT"), stdout: null }), strict: true },
+        ),
+      ).toThrow(/indeterminate peer view/i);
+    });
+
+    test("strict + spawn throws → THROWS (original error preserved)", () => {
+      expect(() =>
+        readPeerHeartbeatsSync(
+          { anchorIssue: "CTL-9" },
+          { spawn: () => { throw new Error("ENOENT"); }, strict: true },
+        ),
+      ).toThrow(/ENOENT/);
+    });
+
+    test("strict + unparseable stdout → THROWS", () => {
+      expect(() =>
+        readPeerHeartbeatsSync({ anchorIssue: "CTL-9" }, { spawn: () => ({ status: 0, stdout: "not json" }), strict: true }),
+      ).toThrow();
+    });
+
+    test("strict + non-object payload → THROWS", () => {
+      expect(() =>
+        readPeerHeartbeatsSync({ anchorIssue: "CTL-9" }, { spawn: () => ({ status: 0, stdout: "[]\n" }), strict: true }),
+      ).toThrow(/malformed payload/i);
+    });
+
+    test("strict + status 0 empty stdout → {} (genuine empty, NOT a failure)", () => {
+      expect(
+        readPeerHeartbeatsSync({ anchorIssue: "CTL-9" }, { spawn: () => ({ status: 0, stdout: "" }), strict: true }),
+      ).toEqual({});
+    });
+
+    test("strict + status 0 valid peers → returns peers (happy path unaffected)", () => {
+      const map = { mini: { host: "mini", last_seen: "t", in_flight_tickets: [] } };
+      expect(
+        readPeerHeartbeatsSync(
+          { anchorIssue: "CTL-9" },
+          { spawn: () => ({ status: 0, stdout: JSON.stringify(map) + "\n" }), strict: true },
+        ),
+      ).toEqual(map);
+    });
+  });
 });
 
 describe("resolveAnchorIssueIdSync — argv + parsing (CTL-863 entourage follow-up)", () => {

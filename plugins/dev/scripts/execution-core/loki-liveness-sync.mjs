@@ -32,18 +32,38 @@ export function readClusterLivenessFromLokiSync(
     cli = LOKI_LIVENESS_CLI,
     env = process.env,
     timeout = LOKI_LIVENESS_TIMEOUT_MS,
+    // CTL-1091 (Codex P1 follow-up): mirror readPeerHeartbeatsSync — when TRUE, a
+    // DETERMINATE read FAILURE (missing Loki URL, spawn error, timeout, nonzero exit,
+    // non-string/unparseable/non-object stdout) THROWS instead of collapsing to `{}`,
+    // so the strict DISPATCH liveness path can tell a FAILED read (→ full-roster outage
+    // fallback) apart from a genuinely EMPTY successful read. Default false preserves
+    // the fail-open behavior recovery relies on.
+    strict = false,
   } = {},
 ) {
-  if (typeof lokiUrl !== "string" || lokiUrl.length === 0) return {};
+  if (typeof lokiUrl !== "string" || lokiUrl.length === 0) {
+    if (strict) throw new Error("ctl-1091: Loki liveness read has no query URL — indeterminate peer view");
+    return {};
+  }
   try {
     const res = spawn(nodeBin, [cli, "read", lokiUrl], { encoding: "utf8", env, timeout });
-    if (!res || res.status !== 0 || typeof res.stdout !== "string") return {};
+    if (!res || res.status !== 0 || typeof res.stdout !== "string") {
+      if (strict)
+        throw new Error(
+          `ctl-1091: Loki liveness read failed (status=${res?.status ?? "none"}) — indeterminate peer view`,
+        );
+      return {};
+    }
     const line = res.stdout.trim().split("\n").filter(Boolean).pop();
-    if (!line) return {};
+    if (!line) return {}; // status 0, no data → genuinely empty (a determinate success)
     const parsed = JSON.parse(line);
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      if (strict) throw new Error("ctl-1091: Loki liveness read returned a malformed payload");
+      return {};
+    }
     return parsed;
-  } catch {
+  } catch (err) {
+    if (strict) throw err; // preserve the failure for the strict dispatch path
     return {};
   }
 }

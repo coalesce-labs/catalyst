@@ -2447,6 +2447,88 @@ describe("CTL-862 — HRW ownership + claim-on-dispatch (monitor dispatchTriage)
   });
 });
 
+// ── CTL-1091: triage-dispatch ownership over the SURVIVING roster ─────────────
+//
+// The triage gate (dispatchTriage) must hash ownership over the LIVE roster too,
+// so a →Triage ticket whose HRW owner is offline is triaged by a live host
+// instead of stranding. An injectable survivingRosterOverride threaded through
+// handleStateChangedEvent drives the shed set deterministically (mirrors the
+// scheduler's dispatchSurvivingRoster).
+describe("CTL-1091 — triage ownership over the surviving roster (dispatchTriage)", () => {
+  const ROSTER = ["mini", "laptop"];
+  // ENG-1 hashes to "laptop" under [mini,laptop]; under [mini] alone → mini.
+  const TICKET = "ENG-1";
+  expect(ownerForTicket(TICKET, ROSTER)).toBe("laptop");
+  expect(ownerForTicket(TICKET, ["mini"])).toBe("mini");
+
+  const triageEvent = () => ({
+    event: "linear.issue.state_changed",
+    detail: { ticket: TICKET, teamKey: "ENG", toState: "Triage" },
+  });
+  const recordClaim = (verdict) => {
+    const calls = [];
+    const fn = (arg) => { calls.push(arg); return verdict; };
+    fn.calls = calls;
+    return fn;
+  };
+  const fakeOrchDir = "/fake-orch-1091";
+
+  test("mini triages a laptop-owned ticket when laptop is OFFLINE (shed)", () => {
+    enroll("ENG", { status: "Ready" });
+    const dispatch = mock(() => ({ code: 0 }));
+    const claimDispatch = recordClaim({ won: true, generation: 1 });
+    handleStateChangedEvent(triageEvent(), {
+      dispatch,
+      orchDir: fakeOrchDir,
+      hosts: ROSTER,
+      hostName: "mini",
+      survivingRosterOverride: ["mini"], // laptop shed → mini owns ENG-1
+      claimDispatch,
+      stampWorkerLabel: () => ({ stamped: true }),
+      applyTriageStatus: () => ({ applied: false, verified: false, from_state: null, to_state: null, reason: null }),
+      appendEvent: () => {},
+    });
+    // Won claim forwards its generation as clusterGeneration (CTL-864).
+    expect(dispatch).toHaveBeenCalledWith({ orchDir: fakeOrchDir, ticket: TICKET, phase: "triage", clusterGeneration: 1 });
+    expect(claimDispatch.calls[0]).toEqual({ ticket: TICKET, hostName: "mini", phase: "triage" });
+  });
+
+  test("mini does NOT triage a laptop-owned ticket when laptop is LIVE", () => {
+    enroll("ENG", { status: "Ready" });
+    const dispatch = mock(() => ({ code: 0 }));
+    const claimDispatch = recordClaim({ won: true, generation: 1 });
+    handleStateChangedEvent(triageEvent(), {
+      dispatch,
+      orchDir: fakeOrchDir,
+      hosts: ROSTER,
+      hostName: "mini",
+      survivingRosterOverride: ["mini", "laptop"], // laptop live → laptop owns it
+      claimDispatch,
+      applyTriageStatus: () => ({ applied: false, verified: false, from_state: null, to_state: null, reason: null }),
+      appendEvent: () => {},
+    });
+    expect(dispatch).not.toHaveBeenCalled();
+    expect(claimDispatch.calls).toHaveLength(0);
+  });
+
+  test("single-host: predicate is a strict no-op (dispatch proceeds, no claim)", () => {
+    enroll("ENG", { status: "Ready" });
+    const dispatch = mock(() => ({ code: 0 }));
+    const claimDispatch = recordClaim({ won: false, generation: null });
+    handleStateChangedEvent(triageEvent(), {
+      dispatch,
+      orchDir: fakeOrchDir,
+      hosts: ["mini"],
+      hostName: "mini",
+      claimDispatch,
+      applyTriageStatus: () => ({ applied: false, verified: false, from_state: null, to_state: null, reason: null }),
+      appendEvent: () => {},
+    });
+    expect(dispatch).toHaveBeenCalledWith({ orchDir: fakeOrchDir, ticket: TICKET, phase: "triage" });
+    expect(claimDispatch.calls).toHaveLength(0);
+  });
+});
+
 // ── CTL-1028: triage forwards + persists cluster generation (monitor dispatchTriage) ──
 //
 // Mirrors the CTL-864 scheduler tests but drives dispatchTriage through the

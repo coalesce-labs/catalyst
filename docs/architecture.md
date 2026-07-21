@@ -76,6 +76,28 @@ per-orchestrator local state in worktrees stays the source of truth for crash re
 - **Heartbeat** — orchestrators write `lastHeartbeat` every 2–3 min; entries stale >10 min are GC'd
   as `abandoned`.
 
+**Cross-host ticket ownership (HRW + liveness, CTL-859 → CTL-1091).** In a multi-host cluster,
+ticket ownership is partitioned by Highest-Random-Weight (rendezvous) hashing (`hrw.mjs` `ownedBy`):
+each daemon acts only on the tickets it owns, so one ticket is considered by exactly one host. Two
+gates evaluate ownership, and — since CTL-1091 — **both hash over a liveness-filtered roster**, so an
+offline owner's slice fails over to a live host instead of stranding in Todo forever:
+
+- **Dispatch gates** (new-work `ready` filter in `scheduler.mjs`; triage predicate in `monitor.mjs`)
+  hash over the **dispatch roster** = `computeDispatchSurvivingRoster(roster)` (POSITIVE liveness —
+  a host must have heartbeated within `HEARTBEAT_GRACE_MS`, so a *never-live* rostered host is shed;
+  CTL-1057) with a restore-side **deflap** on top (`liveness-deflap.mjs` `computeDispatchRoster` —
+  a dead→live host is held out for `HEARTBEAT_RESTORE_HOLD_MS` so a flapping laptop can't
+  grab-then-strand work; scheduler is the sole writer of `.liveness-deflap.json`, monitor reads it).
+- **Recovery gates** (`ownsForRecovery`, `reclaimDeadHostWork`) hash over the **surviving roster** =
+  `computeSurvivingRoster(roster)` (fail-OPEN `deadHosts` — an unseen host is "not proven dead" and
+  is NOT reclaimed, since a never-seen host has no work to reclaim). The asymmetry is deliberate:
+  dispatch fails an unseen owner's slice **over**; recovery must not reclaim a host's non-existent work.
+
+Both altitudes preserve the same fail-safes: single-host is a strict no-op, and a total liveness
+outage (heartbeat read throws / everyone looks dead) degrades to the **full roster** (each node owns
+only its own HRW slice — never double-acts). The Linear-CAS claim (`cluster-claim.mjs` soft-CAS on
+`catalyst://fence/<TICKET>`, applied HRW-first/claim-second) remains the transition-race serializer.
+
 **Worker signal projection (in migration, ADR-018, CTL-483).** Per-worker `workers/<TICKET>.json`
 files are currently written by ~7 scripts with no inter-process locking. CTL-483 moves these
 mutations to a `worker.state_changed` command event consumed by the broker, which projects to a
