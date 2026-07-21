@@ -443,8 +443,12 @@ function readPositiveLive(
       return typeof seen === "string" && seen.length > 0 && Date.parse(seen) >= cutoff;
     });
     return { live };
-  } catch {
-    return { live: null };
+  } catch (err) {
+    // CTL-1091 review F2: preserve the caught error so the outage→full-roster
+    // degrade can be told apart from a latent bug in the read path when it is
+    // surfaced (resolveDispatchRoster's onDegrade hook). Back-compat: existing
+    // callers destructure only `{ live }`.
+    return { live: null, error: err };
   }
 }
 
@@ -487,12 +491,31 @@ export function resolveDispatchRoster({
   persist = false,
   readHeartbeats = readClusterHeartbeats,
   holdMs = HEARTBEAT_RESTORE_HOLD_MS,
+  // CTL-1091 review F2: observability hook fired ONLY on the outage→full-roster
+  // degradation (below). Default no-op keeps the pure resolve silent for unit
+  // callers and the read-only monitor site; the scheduler's write path wires the
+  // rate-limited warn emitter so a genuine feed outage is not invisible.
+  onDegrade = () => {},
 } = {}) {
   if (!Array.isArray(roster) || roster.length <= 1) return roster;
   const prevState = readDeflapState(orchDir);
-  const { live } = readPositiveLive(roster, { readHeartbeats, nowMs });
+  const { live, error } = readPositiveLive(roster, { readHeartbeats, nowMs });
   if (!live || live.length === 0) {
-    // Total outage → full roster, observation state untouched.
+    // Total outage → full roster, observation state untouched. Surface the
+    // degradation (its silence was CTL-1091 verify F2): cross-host failover has
+    // effectively turned OFF this tick and every host has dropped back to owning
+    // only its own HRW slice. The fail-safe is correct; only its silence was the
+    // risk. Never let an observability throw break the roster resolve.
+    try {
+      onDegrade({
+        roster,
+        self,
+        reason: error ? "heartbeat-read-threw" : "nobody-positively-live",
+        error: error ? (error.message ?? String(error)) : null,
+      });
+    } catch {
+      /* observability is best-effort */
+    }
     if (persist) writeDeflapState(orchDir, prevState);
     return roster;
   }
@@ -506,6 +529,26 @@ export function resolveDispatchRoster({
   });
   if (persist) writeDeflapState(orchDir, nextState);
   return dispatchRoster;
+}
+
+// CTL-1091 review F2: rate-limited WARN for the dispatch-roster outage degrade.
+// The scheduler is a single long-lived daemon process, so a module-level
+// timestamp is enough to keep this to one warn per window (a partial feed outage
+// otherwise fires every tick). Alloy ships the Tier-1 daemon log to Loki, so this
+// gives an operator the "failover is OFF right now" signal — and the caught error
+// message rides along so a genuine feed outage is distinguishable from a latent
+// read-path bug. The read-only monitor site stays silent (no onDegrade), so the
+// scheduler is the sole emitter and there is no double-logging.
+const DISPATCH_ROSTER_OUTAGE_WARN_INTERVAL_MS = 60_000;
+let _lastDispatchRosterOutageWarnMs = 0;
+function warnDispatchRosterOutage({ roster, self, reason, error } = {}) {
+  const nowMs = Date.now();
+  if (nowMs - _lastDispatchRosterOutageWarnMs < DISPATCH_ROSTER_OUTAGE_WARN_INTERVAL_MS) return;
+  _lastDispatchRosterOutageWarnMs = nowMs;
+  log.warn(
+    { roster, self, reason, error, degradedTo: "full-roster" },
+    "ctl-1091: dispatch-roster liveness read degraded to the FULL roster — cross-host failover is OFF this tick (every host owns only its own HRW slice). This is the correct fail-safe; investigate the heartbeat/Loki feed if it persists.",
+  );
 }
 
 // CTL-1004/CTL-1056 Bug 2: dispatchFailureDiag — extract the diagnostic fields
@@ -3705,7 +3748,14 @@ export function schedulerTick(
     // reads it read-only. Shared with the triage gate via resolveDispatchRoster so
     // both dispatch sites can never drift out of sync.
     _dispatchRosterMemo = multiHost
-      ? resolveDispatchRoster({ roster, orchDir, self, nowMs: now(), persist: true })
+      ? resolveDispatchRoster({
+          roster,
+          orchDir,
+          self,
+          nowMs: now(),
+          persist: true,
+          onDegrade: warnDispatchRosterOutage, // CTL-1091 F2: surface outage→full-roster
+        })
       : roster;
     return _dispatchRosterMemo;
   };

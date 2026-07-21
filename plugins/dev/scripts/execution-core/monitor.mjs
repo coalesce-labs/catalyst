@@ -690,8 +690,12 @@ function dispatchTriage(
     hostName = undefined,
     // CTL-1091: injectable surviving-roster override for the ownership gate below,
     // mirroring the scheduler's dispatchSurvivingRoster. Default undefined →
-    // computeDispatchSurvivingRoster(roster) (positive-liveness heartbeat read). Tests inject
-    // a fixed survivor set to drive the offline-owner failover deterministically.
+    // resolveDispatchRoster (positive-liveness → restore-deflap → outage fail-safe),
+    // called read-only (persist:false) — the SAME gate the scheduler's new-work
+    // path uses, so the two dispatch sites can never drift. (computeDispatchSurvivingRoster
+    // is the positive-liveness-only sub-step, exported/unit-tested but NOT the live
+    // composition — the live path adds the deflap.) Tests inject a fixed survivor
+    // set to drive the offline-owner failover deterministically.
     survivingRosterOverride = undefined,
     claimDispatch = claimDispatchSync,
     // CTL-1481: best-effort worker:<host> label stamp, fired right after a won

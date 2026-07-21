@@ -10134,6 +10134,97 @@ describe("resolveDispatchRoster — shared dispatch resolver (CTL-1091)", () => 
     });
     expect(existsSync(join(orchDir, ".liveness-deflap.json"))).toBe(false);
   });
+
+  // CTL-1091 verify F3 (coverage): pin the SOLE-WRITER invariant on the read-only
+  // (monitor) path even when the deflap actually mutates observation state — a
+  // freshly-restored host is held, so nextState differs from prevState, yet
+  // persist:false must still leave the file untouched. Guards a regression that
+  // made the monitor path (resolveDispatchRoster persist:false) write the file.
+  test("persist:false leaves the deflap file untouched even when the deflap holds a host", () => {
+    // Seed a restored host so the resolve computes fresh observation state.
+    const seeded = JSON.stringify({ laptop: { liveSince: null } });
+    writeFileSync(join(orchDir, ".liveness-deflap.json"), seeded);
+    const out = resolveDispatchRoster({
+      roster: ["mini", "laptop"],
+      orchDir,
+      self: "mini",
+      nowMs: NOW,
+      holdMs: HOLD,
+      readHeartbeats: () => ({ mini: recent, laptop: recent }), // both live now
+      persist: false,
+    });
+    expect(out).toEqual(["mini"]); // laptop held (deflap active → nextState differs)
+    // File byte-identical to the seed — read-only path wrote nothing.
+    expect(readFileSync(join(orchDir, ".liveness-deflap.json"), "utf8")).toBe(seeded);
+  });
+
+  // CTL-1091 verify F2 (silent-failure): the outage→full-roster degrade must fire
+  // the onDegrade observability hook so cross-host failover turning OFF is not
+  // invisible. Two outage shapes; the caught error rides along on a read-throw.
+  test("onDegrade fires on a read-throw outage with the caught error message", () => {
+    const calls = [];
+    const out = resolveDispatchRoster({
+      roster: ["mini", "laptop"],
+      orchDir,
+      self: "mini",
+      nowMs: NOW,
+      readHeartbeats: () => {
+        throw new Error("loki down");
+      },
+      persist: true,
+      onDegrade: (info) => calls.push(info),
+    });
+    expect(out.slice().sort()).toEqual(["laptop", "mini"]);
+    expect(calls.length).toBe(1);
+    expect(calls[0].reason).toBe("heartbeat-read-threw");
+    expect(calls[0].error).toBe("loki down");
+  });
+
+  test("onDegrade fires when NOBODY is positively live (reason nobody-positively-live)", () => {
+    const calls = [];
+    resolveDispatchRoster({
+      roster: ["mini", "laptop"],
+      orchDir,
+      self: "mini",
+      nowMs: NOW,
+      readHeartbeats: () => ({}), // empty feed → nobody live
+      persist: true,
+      onDegrade: (info) => calls.push(info),
+    });
+    expect(calls.length).toBe(1);
+    expect(calls[0].reason).toBe("nobody-positively-live");
+    expect(calls[0].error).toBe(null);
+  });
+
+  test("onDegrade does NOT fire on the happy (some-live) path", () => {
+    const calls = [];
+    resolveDispatchRoster({
+      roster: ["mini", "laptop"],
+      orchDir,
+      self: "mini",
+      nowMs: NOW,
+      holdMs: HOLD,
+      readHeartbeats: () => ({ mini: recent, laptop: recent }),
+      persist: true,
+      onDegrade: (info) => calls.push(info),
+    });
+    expect(calls.length).toBe(0);
+  });
+
+  test("an onDegrade that throws never breaks the roster resolve", () => {
+    const out = resolveDispatchRoster({
+      roster: ["mini", "laptop"],
+      orchDir,
+      self: "mini",
+      nowMs: NOW,
+      readHeartbeats: () => ({}),
+      persist: false,
+      onDegrade: () => {
+        throw new Error("observability blew up");
+      },
+    });
+    expect(out.slice().sort()).toEqual(["laptop", "mini"]);
+  });
 });
 
 // ── CTL-1091 ticket-Gherkin scenarios (end-to-end over schedulerTick) ──────────

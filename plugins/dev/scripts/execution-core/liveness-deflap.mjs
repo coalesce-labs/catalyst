@@ -38,7 +38,11 @@ export const DEFLAP_STATE_FILE = ".liveness-deflap.json";
 // A host ABSENT from `survivingRoster` (shed/dead) resets its liveSince to null,
 // so a later re-join restarts the whole hold (deflap).
 //
-// `self` is never held — a host never defers taking its OWN work.
+// `self` is never held AND never shed — a host always owns its OWN work, even
+// when it is absent from `survivingRoster` (a not-yet-heartbeated fresh start or
+// a stale/laggy self-heartbeat read). The self guard is hoisted above the
+// shed branch so it is reached regardless of self's observed liveness (CTL-1091
+// correctness review #1).
 //
 // FAIL-SAFE: if the filter would empty the dispatch roster (e.g. a total liveness
 // outage degraded survivingRoster to the full roster on a cold start where every
@@ -59,6 +63,24 @@ export function computeDispatchRoster({
   const dispatchRoster = [];
 
   for (const h of roster ?? []) {
+    // self is ALWAYS admitted to its OWN dispatch roster and never held — this
+    // guard is hoisted ABOVE the surviving.has() gate on purpose. A host must
+    // never defer or re-home its own HRW slice based on its own observed
+    // liveness: on a fresh daemon start (self has not emitted its first heartbeat
+    // yet) or a stale/laggy self-heartbeat read, self is absent from the live
+    // `survivingRoster` and would otherwise fall into the `!surviving.has(h)`
+    // shed branch below BEFORE this self guard was ever reached — silently
+    // re-homing self's slice to a peer during the warmup window (CTL-1091
+    // correctness review #1). Keeping the guard first makes the documented
+    // "self never held / never double-acts" invariant hold regardless of whether
+    // self appears in the live set this tick.
+    if (self !== undefined && h === self) {
+      const liveSince = nowMs - holdMs;
+      nextState[h] = { liveSince };
+      dispatchRoster.push(h);
+      continue;
+    }
+
     if (!surviving.has(h)) {
       // Shed / dead this tick → reset the restore hold; not dispatch-eligible.
       nextState[h] = { liveSince: null };
@@ -77,9 +99,6 @@ export function computeDispatchRoster({
       // Explicit null → was dead, now restored → start the hold now.
       liveSince = nowMs;
     }
-
-    // self never defers taking its own work.
-    if (self !== undefined && h === self) liveSince = nowMs - holdMs;
 
     nextState[h] = { liveSince };
     if (nowMs - liveSince >= holdMs) dispatchRoster.push(h);
