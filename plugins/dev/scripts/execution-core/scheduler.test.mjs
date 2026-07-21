@@ -9953,6 +9953,33 @@ describe("schedulerTick — new-work dispatch fails over an offline HRW owner (C
     const leftoverTmp = readdirSync(orchDir).filter((f) => f.startsWith(".liveness-deflap.json.tmp"));
     expect(leftoverTmp).toEqual([]);
   });
+
+  // CTL-1091 (Codex P1 #1): the deflap observation state must refresh on EVERY
+  // multi-host tick, even with NO ready work. Before the fix, _dispatchRoster()
+  // (the sole persist:true / writeDeflapState path) ran only inside the ready
+  // filter, so an idle board (empty eligible → empty ready) never wrote the file —
+  // a peer that departed while the board was quiet kept a stale continuous liveSince
+  // and was re-admitted immediately on return, skipping the restore hold. Assert the
+  // file is written even when there is nothing to dispatch.
+  test("Phase 2 (P1 #1): a multi-host tick with NO ready work still refreshes .liveness-deflap.json", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    const dispatch = fakeDispatch({ code: 0 });
+    expect(existsSync(join(orchDir, ".liveness-deflap.json"))).toBe(false);
+    schedulerTick(orchDir, {
+      readEligible: () => [], // EMPTY board → no ready tickets → ready.filter never runs
+      dispatch,
+      hosts: ROSTER,
+      hostName: "mini",
+      claimDispatch: () => ({ won: true, generation: 1 }),
+      stampWorkerLabel: () => ({ stamped: true }),
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0,
+      now: () => 1_000,
+      hasTriageArtifact: () => true,
+    });
+    expect(dispatch.calls).toHaveLength(0); // nothing dispatched
+    expect(existsSync(join(orchDir, ".liveness-deflap.json"))).toBe(true); // …but deflap refreshed
+  });
 });
 
 // ── CTL-1091 / CTL-1057: computeDispatchSurvivingRoster positive-liveness ──────

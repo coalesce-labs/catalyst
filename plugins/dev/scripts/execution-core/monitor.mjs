@@ -82,9 +82,22 @@ import {
   writeClusterGeneration,
   // CTL-1091: route the triage-dispatch HRW gate through the SAME helper the
   // scheduler's new-work gate uses (positive-liveness → restore-deflap → outage
-  // fail-safe), so both dispatch sites can never drift out of sync. This helper
-  // pulls in no bun:sqlite dependency, so it is safe to import here (CTL-1397
-  // Node-loadability).
+  // fail-safe), so both dispatch sites can never drift out of sync.
+  //
+  // NOTE (CTL-1091 Codex P1 #2 — correcting an earlier inaccurate comment):
+  // a STATIC import from ./scheduler.mjs loads that module's ENTIRE graph, which
+  // DOES transitively reach `bun:sqlite` (scheduler.mjs → broker/broker-state.mjs).
+  // So this line is NOT bun:sqlite-free, and monitor.mjs is not Node-loadable in
+  // isolation. This is a PRE-EXISTING property, not introduced here: monitor.mjs
+  // already imported readMaxParallel/computeFreeSlots/writeClusterGeneration from
+  // ./scheduler.mjs before this ticket, so the scheduler→broker-state→bun:sqlite
+  // edge was already in the graph; adding resolveDispatchRoster changes nothing
+  // about reachability. Every runtime that loads this path (exec-core daemon,
+  // broker) runs under Bun, where bun:sqlite resolves. Making monitor.mjs truly
+  // Node-loadable requires extracting ALL of these shared scheduler helpers into a
+  // Node-safe leaf module — an all-or-nothing refactor out of this ticket's scope
+  // (a partial extraction of just this symbol would leave the other three imports
+  // pulling the same edge, so it would buy nothing). Tracked separately.
   resolveDispatchRoster,
 } from "./scheduler.mjs";
 // CTL-863: Linear-free fence event emitter (durable fence → event-log migration).

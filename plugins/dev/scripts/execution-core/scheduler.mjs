@@ -436,7 +436,14 @@ function readPositiveLive(
   { readHeartbeats = readClusterHeartbeats, nowMs = Date.now(), graceMs = HEARTBEAT_GRACE_MS } = {}
 ) {
   try {
-    const lastSeen = readHeartbeats({ roster });
+    // CTL-1091 (Codex P1 #3): DISPATCH liveness requires a trustworthy cross-host
+    // view. requirePeerView makes readClusterHeartbeats THROW (→ caught below →
+    // {live:null,error} → resolveDispatchRoster outage degrade → FULL roster) when
+    // the peer transport is unconfigured or the peer read fails, instead of quietly
+    // returning self's local-only heartbeat map (which would collapse the dispatch
+    // roster to [self] and make every host grab every ready ticket). A test-injected
+    // readHeartbeats simply ignores the extra option.
+    const lastSeen = readHeartbeats({ roster, requirePeerView: true });
     const cutoff = nowMs - graceMs;
     const live = roster.filter((h) => {
       const seen = lastSeen[h];
@@ -6074,6 +6081,18 @@ export function schedulerTick(
   // regardless of whether the lone roster entry string-matches the resolved
   // hostName (stale/aliased hosts.json). HRW filtering engages only when a 2nd
   // host actually joins (roster.length > 1).
+  // CTL-1091 (Codex P1 #1): refresh the dispatch-roster deflap observation state
+  // EVERY multi-host tick, even when there is no ready work. _dispatchRoster() is
+  // otherwise only reached lazily through the ready.filter() below, so on an idle
+  // board (ready empty) that path never runs — a peer that departs while the board
+  // is quiet never has its liveSince reset to null, and on return computeDispatchRoster
+  // would see a stale continuous timestamp and re-admit it immediately, skipping the
+  // restore hold (the exact flap this deflap exists to prevent). Forcing the
+  // (memoized) read+persist here keeps the deflap honest during idle periods; the
+  // ready.filter() below reuses the same memoized roster (no double read). During a
+  // liveness outage the resolver degrades to the full roster and intentionally leaves
+  // the observation state untouched (we learned nothing this tick).
+  if (multiHost) _dispatchRoster();
   const ready = computeReadyTickets(eligible, { blockerStates }).filter(
     // CTL-1091: hash ownership over the LIVE (surviving) roster, not the raw
     // roster, so an offline owner's slice fails over to a live host.
