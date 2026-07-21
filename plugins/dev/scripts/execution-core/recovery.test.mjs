@@ -9,6 +9,7 @@ import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync, readdirSyn
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  buildEventEnvelope,
   classifyWorker,
   jobLifecycle,
   reconstructWorkerState,
@@ -5689,5 +5690,28 @@ describe("readClusterHeartbeats — loki source gate (CTL-1420 #17)", () => {
       readPeers,
     });
     expect(result).toEqual({});
+  });
+});
+
+// --- CTL-1488 Phase 2: caused_by + event.stream_class parity ----------------
+// buildEventEnvelope is the hand-rolled execution-core builder. Bring it to
+// ADR-022 parity with the shared TS/bash builders: a present caused_by field
+// (value or null) and an event.stream_class attribute on every phase.* envelope.
+describe("buildEventEnvelope — CTL-1488 caused_by + event.stream_class parity", () => {
+  test("caused_by threads through when provided, null by default (ADR-022 parity)", () => {
+    const line = buildEventEnvelope({ phase: "verify", ticket: "CTL-1", action: "escalated", reason: "x" });
+    expect(JSON.parse(line).caused_by).toBeNull(); // additive default — parity with canonical-event.sh:340
+    const withCause = buildEventEnvelope({
+      phase: "verify",
+      ticket: "CTL-1",
+      action: "escalated",
+      reason: "x",
+      causedBy: "evt-abc",
+    });
+    expect(JSON.parse(withCause).caused_by).toBe("evt-abc");
+  });
+  test("stamps attributes['event.stream_class'] = 'coordination' for every phase.* envelope", () => {
+    const line = buildEventEnvelope({ phase: "verify", ticket: "CTL-1", action: "escalated", reason: "x" });
+    expect(JSON.parse(line).attributes["event.stream_class"]).toBe("coordination");
   });
 });

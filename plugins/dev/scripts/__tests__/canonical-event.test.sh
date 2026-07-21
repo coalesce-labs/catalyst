@@ -156,6 +156,20 @@ LINE="$(build_canonical_line \
 EVENT_NAME="$(echo "$LINE" | jq -r '.attributes."event.name"')"
 expect_eq "build_canonical_line event.name" "session.phase" "$EVENT_NAME"
 
+# CTL-1488 Phase 2: every canonical line carries event.stream_class. session.phase
+# is not an allowlisted coordination name → telemetry (fail-closed default).
+STREAM_CLASS_OUT="$(echo "$LINE" | jq -r '.attributes."event.stream_class"')"
+expect_eq "build_canonical_line stamps event.stream_class (telemetry for session.phase)" "telemetry" "$STREAM_CLASS_OUT"
+
+# CTL-1488 Phase 2: a phase.* pipeline event classifies coordination.
+LINE_COORD="$(build_canonical_line \
+  --ts "2026-05-08T18:00:00.000Z" \
+  --severity INFO \
+  --service "catalyst.execution-core" \
+  --event-name "phase.plan.complete.CTL-1")"
+STREAM_CLASS_COORD="$(echo "$LINE_COORD" | jq -r '.attributes."event.stream_class"')"
+expect_eq "build_canonical_line stamps event.stream_class=coordination for phase.plan.complete.CTL-1" "coordination" "$STREAM_CLASS_COORD"
+
 # CTL-1368: every canonical line carries the node-class core dimension (a valid role)
 NODE_CLASS_OUT="$(echo "$LINE" | jq -r '.resource."catalyst.node.class"')"
 case "$NODE_CLASS_OUT" in

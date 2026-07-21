@@ -86,6 +86,7 @@ function peerLivenessConfigured(anchorIssue) {
 import { HEARTBEAT_EVENT } from "./heartbeat-event.mjs"; // CTL-859: node.heartbeat reader
 import { resolveTicketType, UNKNOWN_TICKET_TYPE } from "./ticket-type.mjs"; // CTL-1023: work-type dimension
 import { phaseIndex, isKnownPhase } from "../lib/phase-fsm.mjs";
+import { classifyEventStream } from "../lib/event-stream-class.mjs"; // CTL-1488: coordination/telemetry split
 import { readWorkerSignals, TERMINAL, listDispatchedPhases } from "./signal-reader.mjs";
 import { reconcileAll } from "./monitor.mjs";
 import { listProjects } from "./registry.mjs";
@@ -354,8 +355,12 @@ function buildEventEnvelope({
   severityText = "WARN",
   severityNumber = 13,
   ticketType = UNKNOWN_TICKET_TYPE,
+  // CTL-1488: id of the triggering event (additive; null when absent). Parity
+  // with the shared TS/bash builders' caused_by (ADR-022 absence-detection).
+  causedBy = null,
 }) {
   const ts = new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
+  const eventName = `phase.${phase}.${action}.${ticket}`;
   return (
     JSON.stringify({
       ts,
@@ -365,21 +370,26 @@ function buildEventEnvelope({
       severityNumber,
       traceId: randomBytes(16).toString("hex"),
       spanId: randomBytes(8).toString("hex"),
+      // CTL-1488: caused_by parity with canonical-event.sh:340 / canonical-event.ts:258.
+      caused_by: causedBy,
       resource: buildCatalystResource({ serviceName: "catalyst.execution-core" }),
       attributes: {
-        "event.name": `phase.${phase}.${action}.${ticket}`,
+        "event.name": eventName,
         "event.entity": "phase",
         "event.action": action,
         "event.label": ticket,
         "catalyst.orchestration": orchId ?? ticket,
         "linear.issue.identifier": ticket,
         "catalyst.ticket.type": ticketType ?? UNKNOWN_TICKET_TYPE,
+        // CTL-1488: coordination/telemetry split label (single source of truth).
+        "event.stream_class": classifyEventStream(eventName),
         ...vetAttrs(attrExtras), // CTL-1291: chartable gauge numbers
       },
       body: { payload: { phase, ticket, status: action, reason, ...payloadExtras } },
     }) + "\n"
   );
 }
+export { buildEventEnvelope }; // CTL-1488: exported for direct parity tests
 
 // appendEnvelopeBestEffort — try to append; return true on success, false on
 // any failure. Revive event callers gate the dispatch on this return value:
