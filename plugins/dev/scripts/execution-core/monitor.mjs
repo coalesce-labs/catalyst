@@ -38,7 +38,6 @@ import {
   hostMembershipWarning, // CTL-1057
   isDraining as isDrainingDefault, // CTL-1095: drain gate
   isInProcessDispatchMode, // CTL-1457 (T2): sdk|codex-exec occupancy gate predicate
-  HEARTBEAT_RESTORE_HOLD_MS, // CTL-1091: restore-side deflap hold for the dispatch roster
 } from "./config.mjs";
 // CTL-1397 (Node-loadability): monitor.mjs MUST NOT import replica-read.mjs — that
 // module statically imports `bun:sqlite`, which the Node ESM loader rejects at
@@ -49,10 +48,6 @@ import {
 // (linear-query.mjs never imports replica-read.mjs either; daemon.mjs:681 builds
 // the reader and passes it in). monitor.mjs stays Node-loadable.
 import { ownedBy } from "./hrw.mjs"; // CTL-862: HRW ownership filter
-// CTL-1091: restore-side deflap — READ-ONLY here (scheduler tick is the sole
-// writer of .liveness-deflap.json). Pure node:fs/node:path; no bun:sqlite dep,
-// so it is safe to import into the Node-loadable monitor.mjs (CTL-1397).
-import { computeDispatchRoster, readDeflapState } from "./liveness-deflap.mjs";
 import { claimDispatchSync } from "./cluster-claim-sync.mjs"; // CTL-862: cross-host claim soft-CAS
 import { listProjects, getProjectConfig, resolveEligibleQuery } from "./registry.mjs";
 import {
@@ -85,12 +80,12 @@ import {
   readMaxParallel,
   computeFreeSlots,
   writeClusterGeneration,
-  // CTL-1091: route the triage-dispatch HRW gate through the same live roster the
-  // scheduler's new-work gate uses (positive-liveness → sheds a never-live host),
-  // so both dispatch sites fail an offline owner's slice over to a live host. This
-  // helper pulls in no bun:sqlite dependency, so it is safe to import here
-  // (CTL-1397 Node-loadability).
-  computeDispatchSurvivingRoster,
+  // CTL-1091: route the triage-dispatch HRW gate through the SAME helper the
+  // scheduler's new-work gate uses (positive-liveness → restore-deflap → outage
+  // fail-safe), so both dispatch sites can never drift out of sync. This helper
+  // pulls in no bun:sqlite dependency, so it is safe to import here (CTL-1397
+  // Node-loadability).
+  resolveDispatchRoster,
 } from "./scheduler.mjs";
 // CTL-863: Linear-free fence event emitter (durable fence → event-log migration).
 import { emitFenceClaimed } from "./fence-event.mjs";
@@ -739,16 +734,13 @@ function dispatchTriage(
     globalThis.__ctl1057_monitor_warned = true;
     log.warn({ roster, self }, _mw);
   }
-  // CTL-1091: ownership over the LIVE (surviving) roster, so a →Triage ticket
-  // whose HRW owner is offline is triaged by a live host instead of stranding.
-  // Injectable for tests; defaults to the live heartbeat feed. The heartbeat
-  // sync wrappers cache (Loki 20s / Linear 45s) so per-call reads coalesce.
-  // Fail-safe: computeDispatchSurvivingRoster degrades to the full roster on a
-  // read-throw / all-dead (today's raw-roster behavior). Only computed multi-host.
-  //
-  // Phase 2: layer the restore-side deflap on top of the surviving roster so
-  // triage and new-work agree on the deflapped roster. READ-ONLY — the scheduler
-  // tick is the sole writer of .liveness-deflap.json; monitor discards nextState.
+  // CTL-1091: ownership over the LIVE roster (positive-liveness + restore-deflap +
+  // outage fail-safe), so a →Triage ticket whose HRW owner is offline is triaged by
+  // a live host instead of stranding. Computed via the SAME resolveDispatchRoster
+  // the scheduler's new-work gate uses, so the two dispatch sites can never drift
+  // out of sync. READ-ONLY here (persist:false) — the scheduler tick is the sole
+  // writer of .liveness-deflap.json. The heartbeat sync wrappers cache (Loki 20s /
+  // Linear 45s) so per-call reads coalesce. Only computed multi-host.
   let dispatchRoster;
   if (!multiHost) {
     dispatchRoster = roster;
@@ -756,17 +748,13 @@ function dispatchTriage(
     // Test override bypasses both the heartbeat read and the deflap.
     dispatchRoster = survivingRosterOverride;
   } else {
-    // Phase 3: positive-liveness surviving roster (sheds a never-live host), then
-    // Phase 2 restore deflap on top. READ-ONLY deflap state (scheduler is sole writer).
-    const survivingRosterNow = computeDispatchSurvivingRoster(roster);
-    dispatchRoster = computeDispatchRoster({
-      survivingRoster: survivingRosterNow,
+    dispatchRoster = resolveDispatchRoster({
       roster,
-      prevState: readDeflapState(orchDir),
-      holdMs: HEARTBEAT_RESTORE_HOLD_MS,
-      nowMs: Date.now(),
+      orchDir,
       self,
-    }).dispatchRoster;
+      nowMs: Date.now(),
+      persist: false,
+    });
   }
   if (multiHost && !ownedBy(identifier, dispatchRoster, self)) {
     log.debug(

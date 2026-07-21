@@ -21,6 +21,7 @@ import {
   isTicketInFlight,
   listInFlightTickets,
   computeDispatchSurvivingRoster, // CTL-1091 Phase 3: positive-liveness dispatch roster
+  resolveDispatchRoster, // CTL-1091: shared dispatch-roster resolver (liveness + deflap + outage)
   readMaxParallel,
   readExecutionCoreConcurrency,
   readExecutionCoreConcurrencyLayer2,
@@ -10023,6 +10024,115 @@ describe("computeDispatchSurvivingRoster — positive liveness (CTL-1091/CTL-105
     });
     expect(out).toEqual(["solo"]);
     expect(read).toBe(false);
+  });
+});
+
+// ── CTL-1091: resolveDispatchRoster — the shared liveness+deflap+outage resolver ─
+//
+// The single source of truth both dispatch sites (scheduler new-work + monitor
+// triage) call, so they can never drift. Composes positive-liveness → restore
+// deflap → outage fail-safe. Uses a real temp orchDir for the .liveness-deflap.json
+// read/write and an injected readHeartbeats for the feed.
+describe("resolveDispatchRoster — shared dispatch resolver (CTL-1091)", () => {
+  const NOW = 10_000_000;
+  const recent = new Date(NOW - 1_000).toISOString();
+  const HOLD = 600_000;
+
+  test("single-host is a strict no-op", () => {
+    const out = resolveDispatchRoster({
+      roster: ["solo"],
+      orchDir,
+      self: "solo",
+      nowMs: NOW,
+      readHeartbeats: () => ({}),
+    });
+    expect(out).toEqual(["solo"]);
+  });
+
+  test("sheds a never-live host and dispatches over the live survivor", () => {
+    const out = resolveDispatchRoster({
+      roster: ["mini", "ghost"],
+      orchDir,
+      self: "mini",
+      nowMs: NOW,
+      holdMs: HOLD,
+      readHeartbeats: () => ({ mini: recent }), // ghost never live
+      persist: true,
+    });
+    expect(out).toEqual(["mini"]);
+  });
+
+  test("holds a freshly-restored host out for the deflap window", () => {
+    // Seed prevState: laptop was shed last tick (liveSince:null) → newly restored.
+    writeFileSync(
+      join(orchDir, ".liveness-deflap.json"),
+      JSON.stringify({ laptop: { liveSince: null } })
+    );
+    const out = resolveDispatchRoster({
+      roster: ["mini", "laptop"],
+      orchDir,
+      self: "mini",
+      nowMs: NOW,
+      holdMs: HOLD,
+      readHeartbeats: () => ({ mini: recent, laptop: recent }), // both live now
+      persist: true,
+    });
+    expect(out).toEqual(["mini"]); // laptop held out (restore hold)
+  });
+
+  // CTL-1091 correctness review #1: on a TOTAL feed outage the resolver must
+  // degrade to the FULL roster and NOT let the deflap partially re-shed a
+  // just-departed host (which would re-home its slice, violating the outage
+  // invariant). This is the exact reproduction from the review.
+  test("total outage → FULL roster even when prevState marks a host shed (no partial re-shed)", () => {
+    writeFileSync(
+      join(orchDir, ".liveness-deflap.json"),
+      JSON.stringify({ A: { liveSince: null }, C: { liveSince: 0 } })
+    );
+    const out = resolveDispatchRoster({
+      roster: ["A", "B", "C"],
+      orchDir,
+      self: "A",
+      nowMs: 700_000,
+      holdMs: HOLD,
+      readHeartbeats: () => ({}), // NOBODY positively live → total outage
+      persist: true,
+    });
+    // Must be the full roster, NOT the partial [B,C] the naive deflap produced.
+    expect(out.slice().sort()).toEqual(["A", "B", "C"]);
+  });
+
+  test("read-throw (outage) → full roster, observation state left intact", () => {
+    writeFileSync(
+      join(orchDir, ".liveness-deflap.json"),
+      JSON.stringify({ laptop: { liveSince: 1234 } })
+    );
+    const out = resolveDispatchRoster({
+      roster: ["mini", "laptop"],
+      orchDir,
+      self: "mini",
+      nowMs: NOW,
+      readHeartbeats: () => {
+        throw new Error("loki down");
+      },
+      persist: true,
+    });
+    expect(out.slice().sort()).toEqual(["laptop", "mini"]);
+    // prevState preserved (we learned nothing this tick).
+    const persisted = JSON.parse(readFileSync(join(orchDir, ".liveness-deflap.json"), "utf8"));
+    expect(persisted.laptop.liveSince).toBe(1234);
+  });
+
+  test("persist:false does NOT write the deflap file", () => {
+    resolveDispatchRoster({
+      roster: ["mini", "ghost"],
+      orchDir,
+      self: "mini",
+      nowMs: NOW,
+      readHeartbeats: () => ({ mini: recent }),
+      persist: false,
+    });
+    expect(existsSync(join(orchDir, ".liveness-deflap.json"))).toBe(false);
   });
 });
 

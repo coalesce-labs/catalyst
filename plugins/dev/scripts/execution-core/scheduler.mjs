@@ -423,26 +423,18 @@ export function computeSurvivingRoster(
   }
 }
 
-// CTL-1091 Phase 3: the DISPATCH-side surviving roster. Unlike computeSurvivingRoster
-// (which uses deadHosts's fail-OPEN semantics — an unseen host is "not proven dead"
-// and stays a survivor), dispatch ownership requires POSITIVE liveness: a host must
-// have been SEEN within grace to own new work. This sheds a NEVER-live rostered host
-// (absent from lastSeen — the CTL-1057 permanently-offline case) whose HRW slice would
-// otherwise strand, because deadHosts never flags a host it has never seen.
-//
-// The asymmetry is deliberate: recovery keeps the fail-open deadHosts (it must NOT
-// reclaim a never-seen host's non-existent work), while dispatch fails an unseen
-// owner's slice over to a live host. See plan Phase 3 / docs/architecture.md.
-//
-// Fail-safe preserved: if positive-liveness empties the roster (a TOTAL feed outage —
-// nobody has heartbeated at all), degrade to the FULL roster, exactly as
-// computeSurvivingRoster does — never strand the board on a dead feed. Single-host
-// (roster.length <= 1) is a no-op with no read.
-export function computeDispatchSurvivingRoster(
+// CTL-1091 Phase 3: the RAW positively-live host set. Dispatch ownership requires
+// POSITIVE liveness — a host must have been SEEN within grace to own new work —
+// unlike computeSurvivingRoster's fail-OPEN deadHosts (an unseen host is "not
+// proven dead" and stays a survivor). Returns `{ live }` where `live` is the
+// filtered array (possibly EMPTY when nobody is positively live), or `{ live: null }`
+// when the heartbeat read THREW. The empty/null distinction from "some hosts live"
+// is what lets callers tell a total feed outage apart from a partial one — the
+// fail-safe (degrade to the full roster) must fire only on a genuine outage.
+function readPositiveLive(
   roster,
   { readHeartbeats = readClusterHeartbeats, nowMs = Date.now(), graceMs = HEARTBEAT_GRACE_MS } = {}
 ) {
-  if (!Array.isArray(roster) || roster.length <= 1) return roster;
   try {
     const lastSeen = readHeartbeats({ roster });
     const cutoff = nowMs - graceMs;
@@ -450,10 +442,70 @@ export function computeDispatchSurvivingRoster(
       const seen = lastSeen[h];
       return typeof seen === "string" && seen.length > 0 && Date.parse(seen) >= cutoff;
     });
-    return live.length > 0 ? live : roster;
+    return { live };
   } catch {
+    return { live: null };
+  }
+}
+
+// computeDispatchSurvivingRoster — the positive-liveness dispatch roster with the
+// outage fail-safe folded in: sheds a NEVER-live rostered host (absent from
+// lastSeen — the CTL-1057 permanently-offline case) so its HRW slice fails over,
+// but degrades to the FULL roster when NOBODY is positively live (a total feed
+// outage) so the board is never stranded. Single-host (roster.length <= 1) is a
+// no-op with no read. The recovery side deliberately keeps the fail-open deadHosts
+// (it must NOT reclaim a never-seen host's non-existent work); see docs/architecture.md.
+export function computeDispatchSurvivingRoster(roster, opts = {}) {
+  if (!Array.isArray(roster) || roster.length <= 1) return roster;
+  const { live } = readPositiveLive(roster, opts);
+  return live && live.length > 0 ? live : roster;
+}
+
+// resolveDispatchRoster — the SINGLE source of truth for the dispatch-ownership
+// roster, shared by BOTH dispatch sites (scheduler new-work `_dispatchRoster` and
+// monitor `dispatchTriage`) so they can never drift into split-brain (CTL-1091
+// cleanup #1). Composes positive-liveness → restore deflap → outage fail-safe:
+//
+//  1. Read the raw positively-live set once.
+//  2. TOTAL OUTAGE (read threw, or NOBODY positively live) → degrade to the FULL
+//     roster and DO NOT mutate the deflap observation state (we learned nothing
+//     this tick). This preserves the "outage → full roster, never re-home" invariant
+//     that a naive deflap-on-fail-open-roster would violate: without this guard a
+//     just-departed host (prevState liveSince:null) would be held out and its slice
+//     re-homed to a peer during an outage (CTL-1091 correctness review #1).
+//  3. Otherwise apply the restore deflap (computeDispatchRoster) on the live set;
+//     `persist` writes the next observation state atomically (scheduler is the SOLE
+//     writer; monitor passes persist:false and reads the same file read-only).
+//
+// Single-host (roster.length <= 1) is a strict no-op with no read. Injectable
+// readHeartbeats/holdMs for tests.
+export function resolveDispatchRoster({
+  roster,
+  orchDir,
+  self,
+  nowMs = Date.now(),
+  persist = false,
+  readHeartbeats = readClusterHeartbeats,
+  holdMs = HEARTBEAT_RESTORE_HOLD_MS,
+} = {}) {
+  if (!Array.isArray(roster) || roster.length <= 1) return roster;
+  const prevState = readDeflapState(orchDir);
+  const { live } = readPositiveLive(roster, { readHeartbeats, nowMs });
+  if (!live || live.length === 0) {
+    // Total outage → full roster, observation state untouched.
+    if (persist) writeDeflapState(orchDir, prevState);
     return roster;
   }
+  const { dispatchRoster, nextState } = computeDispatchRoster({
+    survivingRoster: live,
+    roster,
+    prevState,
+    holdMs,
+    nowMs,
+    self,
+  });
+  if (persist) writeDeflapState(orchDir, nextState);
+  return dispatchRoster;
 }
 
 // CTL-1004/CTL-1056 Bug 2: dispatchFailureDiag — extract the diagnostic fields
@@ -3629,13 +3681,14 @@ export function schedulerTick(
   };
   const ownsForRecovery = (ticket) => !multiHost || ownedBy(ticket, _survivors(), self);
 
-  // CTL-1091: the DISPATCH-time ownership roster = the surviving (live) roster,
-  // so new eligible tickets whose HRW owner is OFFLINE fail over to a live host
-  // instead of stranding in Todo. Memoized once per tick; reuses the same
-  // heartbeat read as recovery (_survivors) so dispatch and recovery agree on
-  // who is alive. Injectable via dispatchSurvivingRoster for tests. Fail-safe:
-  // computeSurvivingRoster degrades to the full roster on a read-throw / all-dead
-  // (today's raw-roster behavior — never double-acts).
+  // CTL-1091: the DISPATCH-time ownership roster = the live (positive-liveness +
+  // restore-deflap) roster, so new eligible tickets whose HRW owner is OFFLINE
+  // fail over to a live host instead of stranding in Todo. Memoized once per tick.
+  // It performs its OWN positive-liveness heartbeat read (via resolveDispatchRoster)
+  // — independent of recovery's fail-open computeSurvivingRoster read (_survivors),
+  // by design: dispatch needs positive liveness, recovery needs fail-open. Both hit
+  // the same cached feed. Injectable via dispatchSurvivingRoster for tests; a total
+  // outage degrades to the full roster (never double-acts).
   let _dispatchRosterMemo = null;
   const _dispatchRoster = () => {
     if (_dispatchRosterMemo) return _dispatchRosterMemo;
@@ -3645,27 +3698,15 @@ export function schedulerTick(
       _dispatchRosterMemo = dispatchSurvivingRoster;
       return _dispatchRosterMemo;
     }
-    // CTL-1091 Phase 3: dispatch ownership uses POSITIVE liveness (seen within
-    // grace), so a never-live rostered host is shed and its slice fails over.
-    // Phase 2: layer the restore-side deflap on top, so a dead→live host is held
-    // out until continuously live for HEARTBEAT_RESTORE_HOLD_MS (no grab-then-
-    // strand on a flap). Scheduler is the SOLE writer of .liveness-deflap.json
-    // (monitor reads it read-only).
-    const survivingRosterNow = computeDispatchSurvivingRoster(roster);
-    if (!multiHost) {
-      _dispatchRosterMemo = survivingRosterNow;
-      return _dispatchRosterMemo;
-    }
-    const { dispatchRoster: deflapped, nextState } = computeDispatchRoster({
-      survivingRoster: survivingRosterNow,
-      roster,
-      prevState: readDeflapState(orchDir),
-      holdMs: HEARTBEAT_RESTORE_HOLD_MS,
-      nowMs: now(),
-      self,
-    });
-    writeDeflapState(orchDir, nextState);
-    _dispatchRosterMemo = deflapped;
+    // Single-host is a strict no-op with NO heartbeat read (cheap guard first);
+    // _dispatchRoster is only reached multiHost anyway (the ready filter short-
+    // circuits single-host), but this keeps it safe if ever called otherwise.
+    // Scheduler is the SOLE writer of .liveness-deflap.json (persist:true); monitor
+    // reads it read-only. Shared with the triage gate via resolveDispatchRoster so
+    // both dispatch sites can never drift out of sync.
+    _dispatchRosterMemo = multiHost
+      ? resolveDispatchRoster({ roster, orchDir, self, nowMs: now(), persist: true })
+      : roster;
     return _dispatchRosterMemo;
   };
   // CTL-757: emitStateWrite — caller-emit the canonical linear.state.write audit

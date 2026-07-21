@@ -877,10 +877,15 @@ export const HEARTBEAT_GRACE_MS =
 // before it re-enters the DISPATCH ownership roster, so a flapping laptop (lid
 // open/close) does not grab-then-strand new work. Default = one grace window
 // (symmetric with the shed side). During the hold the surviving peer keeps
-// covering the slice, so there is no starvation gap. Env-overridable for
-// tests/tuning; also settable via Layer-2 catalyst.cluster.heartbeatRestoreHoldMs.
-export const HEARTBEAT_RESTORE_HOLD_MS =
-  Number(process.env.EXECUTION_CORE_HEARTBEAT_RESTORE_HOLD_MS) || HEARTBEAT_GRACE_MS;
+// covering the slice, so there is no starvation gap. Env-overridable via
+// EXECUTION_CORE_HEARTBEAT_RESTORE_HOLD_MS for tests/tuning. A finite value of 0
+// is honored (disables the hold — a restored host is admitted immediately);
+// Number.isFinite gates so an unset/garbled env falls back to the default rather
+// than being swallowed by the falsy-zero of a bare `|| HEARTBEAT_GRACE_MS`.
+export const HEARTBEAT_RESTORE_HOLD_MS = (() => {
+  const raw = Number(process.env.EXECUTION_CORE_HEARTBEAT_RESTORE_HOLD_MS);
+  return Number.isFinite(raw) ? raw : HEARTBEAT_GRACE_MS;
+})();
 
 // CLUSTER_SYNC_INTERVAL_MS — how often the daemon git-pulls the catalyst-cluster
 // clone so a roster change committed on one node (CTL-1274 cluster cli) reaches
