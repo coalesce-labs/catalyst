@@ -94,9 +94,7 @@ export function createMirrorTailClient(opts: MirrorTailClientOpts): MirrorTailCl
     if (deltas.length === 0) return;
     const seen = readMirrorEventIds(opts.mirrorPath);
     mkdirSync(dirname(opts.mirrorPath), { recursive: true });
-    let maxSeq = lastHubSeq ?? 0;
     for (const d of deltas) {
-      if (typeof d.seq === "number" && d.seq > maxSeq) maxSeq = d.seq;
       if (!d.event_id || seen.has(d.event_id)) continue; // dedup: own rows + already-pulled remote rows
       appendFileSync(opts.mirrorPath, JSON.stringify(deltaToMirrorRow(d)) + "\n");
       seen.add(d.event_id);
