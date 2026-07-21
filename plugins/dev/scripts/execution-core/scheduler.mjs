@@ -337,11 +337,13 @@ import {
   isDraining as isDrainingDefault,
   getDrainedMarkerPath, // CTL-1321: shared resolver for the drain.drained sentinel
   HEARTBEAT_GRACE_MS, // CTL-1191: dead-host grace for surviving-roster recovery gate
+  HEARTBEAT_RESTORE_HOLD_MS, // CTL-1091: restore-side deflap hold for the dispatch roster
   isInProcessDispatchMode, // CTL-1457 (T2): sdk|codex-exec occupancy gate predicate
 } from "./config.mjs";
 import { emitDrainedEvent as defaultEmitDrainedEvent } from "./drain-event.mjs"; // CTL-1095: drained sentinel
 import { defaultCheckSequencing } from "./sequencing.mjs"; // CTL-537
 import { ownedBy, ownerForTicket } from "./hrw.mjs"; // CTL-850: HRW ownership filter (CTL-1191 also uses it for the diagnostician gate); ownerForTicket: CTL-1290 board-health stranded-node + enforce HRW gate
+import { computeDispatchRoster, readDeflapState, writeDeflapState } from "./liveness-deflap.mjs"; // CTL-1091: restore-side deflap for the dispatch roster
 import { boardHealthPass } from "./board-health.mjs"; // CTL-1290: the whole-board health delegate (shadow-first)
 import {
   getAllTicketDescriptors,
@@ -3604,9 +3606,32 @@ export function schedulerTick(
   let _dispatchRosterMemo = null;
   const _dispatchRoster = () => {
     if (_dispatchRosterMemo) return _dispatchRosterMemo;
-    _dispatchRosterMemo = Array.isArray(dispatchSurvivingRoster)
-      ? dispatchSurvivingRoster
-      : computeSurvivingRoster(roster);
+    // Test override bypasses both the heartbeat read AND the deflap (tests
+    // exercise the deflap directly via the pure computeDispatchRoster).
+    if (Array.isArray(dispatchSurvivingRoster)) {
+      _dispatchRosterMemo = dispatchSurvivingRoster;
+      return _dispatchRosterMemo;
+    }
+    // CTL-1091 Phase 2: layer the restore-side deflap on top of the surviving
+    // roster. A dead→live host is held out of the dispatch roster until it has
+    // been continuously live for HEARTBEAT_RESTORE_HOLD_MS, so a flapping host
+    // doesn't grab-then-strand new work. Scheduler is the SOLE writer of
+    // .liveness-deflap.json (monitor reads it read-only).
+    const survivingRosterNow = computeSurvivingRoster(roster);
+    if (!multiHost) {
+      _dispatchRosterMemo = survivingRosterNow;
+      return _dispatchRosterMemo;
+    }
+    const { dispatchRoster: deflapped, nextState } = computeDispatchRoster({
+      survivingRoster: survivingRosterNow,
+      roster,
+      prevState: readDeflapState(orchDir),
+      holdMs: HEARTBEAT_RESTORE_HOLD_MS,
+      nowMs: now(),
+      self,
+    });
+    writeDeflapState(orchDir, nextState);
+    _dispatchRosterMemo = deflapped;
     return _dispatchRosterMemo;
   };
   // CTL-757: emitStateWrite — caller-emit the canonical linear.state.write audit

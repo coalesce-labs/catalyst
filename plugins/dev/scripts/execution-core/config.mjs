@@ -872,6 +872,16 @@ export const HEARTBEAT_INTERVAL_MS =
 export const HEARTBEAT_GRACE_MS =
   Number(process.env.EXECUTION_CORE_HEARTBEAT_GRACE_MS) || 600_000;
 
+// HEARTBEAT_RESTORE_HOLD_MS — CTL-1091 restore-side deflap. A host that
+// transitioned dead→live must be observed continuously live for this window
+// before it re-enters the DISPATCH ownership roster, so a flapping laptop (lid
+// open/close) does not grab-then-strand new work. Default = one grace window
+// (symmetric with the shed side). During the hold the surviving peer keeps
+// covering the slice, so there is no starvation gap. Env-overridable for
+// tests/tuning; also settable via Layer-2 catalyst.cluster.heartbeatRestoreHoldMs.
+export const HEARTBEAT_RESTORE_HOLD_MS =
+  Number(process.env.EXECUTION_CORE_HEARTBEAT_RESTORE_HOLD_MS) || HEARTBEAT_GRACE_MS;
+
 // CLUSTER_SYNC_INTERVAL_MS — how often the daemon git-pulls the catalyst-cluster
 // clone so a roster change committed on one node (CTL-1274 cluster cli) reaches
 // every running daemon without a restart. 5 min keeps the pull cheap while

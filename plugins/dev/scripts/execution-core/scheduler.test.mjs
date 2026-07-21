@@ -12,6 +12,7 @@ import {
   appendFileSync,
   existsSync,
   readFileSync,
+  readdirSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -9920,6 +9921,32 @@ describe("schedulerTick — new-work dispatch fails over an offline HRW owner (C
       hasTriageArtifact: () => true,
     });
     expect(dispatch.calls).toHaveLength(0);
+  });
+
+  // CTL-1091 Phase 2: the deflap path (no dispatchSurvivingRoster override) must
+  // persist .liveness-deflap.json atomically — the file exists after a multi-host
+  // tick and no partial `.tmp` sibling is left behind.
+  test("Phase 2: a multi-host tick writes .liveness-deflap.json atomically (no .tmp left)", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    const dispatch = fakeDispatch({ code: 0 });
+    schedulerTick(orchDir, {
+      // A mini-owned eligible ticket forces the ready filter (→ _dispatchRoster())
+      // to run without a dispatchSurvivingRoster override, so the real deflap
+      // read/compute/write path fires.
+      readEligible: () => eligibleOne("CTL-1"),
+      dispatch,
+      hosts: ROSTER,
+      hostName: "mini",
+      claimDispatch: () => ({ won: true, generation: 1 }),
+      stampWorkerLabel: () => ({ stamped: true }),
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0,
+      now: () => 1_000,
+      hasTriageArtifact: () => true,
+    });
+    expect(existsSync(join(orchDir, ".liveness-deflap.json"))).toBe(true);
+    const leftoverTmp = readdirSync(orchDir).filter((f) => f.startsWith(".liveness-deflap.json.tmp"));
+    expect(leftoverTmp).toEqual([]);
   });
 });
 
