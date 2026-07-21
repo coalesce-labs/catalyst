@@ -160,7 +160,7 @@ export interface HubChangeSourceOpts {
  * deltas. 409 → underflow (resync); any network / non-2xx (other than 409) → error (retry next tick).
  */
 export function createHubChangeSource(opts: HubChangeSourceOpts): ChangeSource {
-  const fetchImpl = opts.fetchImpl ?? (globalThis.fetch as unknown as FetchLike);
+  const fetchImpl = opts.fetchImpl ?? (globalThis.fetch as FetchLike);
   const base = opts.hubUrl.replace(/\/$/, "");
   return {
     async pullChanges(since: number): Promise<PullResult> {

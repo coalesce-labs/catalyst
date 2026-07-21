@@ -57,7 +57,7 @@ export class HubClient {
   private readonly fetchImpl: FetchLike;
 
   constructor(private opts: HubClientOpts) {
-    this.fetchImpl = opts.fetchImpl ?? (globalThis.fetch as unknown as FetchLike);
+    this.fetchImpl = opts.fetchImpl ?? (globalThis.fetch as FetchLike);
   }
 
   private url(): string {
