@@ -170,6 +170,14 @@ LINE_COORD="$(build_canonical_line \
 STREAM_CLASS_COORD="$(echo "$LINE_COORD" | jq -r '.attributes."event.stream_class"')"
 expect_eq "build_canonical_line stamps event.stream_class=coordination for phase.plan.complete.CTL-1" "coordination" "$STREAM_CLASS_COORD"
 
+# CTL-1488 Phase 2 (remediate coverage): the INTENTIONAL_PHASE_SLOT_EXCEPTIONS
+# (dispatch/scheduler/advance) are cross-host coordination signal too. Exercise
+# classify_event_stream directly so a bash case-pattern typo can't silently
+# reclassify them to telemetry (mirrors the ESM classifier test).
+expect_eq "classify_event_stream phase.dispatch.* → coordination" "coordination" "$(classify_event_stream "phase.dispatch.failed.CTL-1")"
+expect_eq "classify_event_stream phase.scheduler.* → coordination" "coordination" "$(classify_event_stream "phase.scheduler.yield-file-skip.CTL-1")"
+expect_eq "classify_event_stream phase.advance.* → coordination" "coordination" "$(classify_event_stream "phase.advance.held.CTL-1")"
+
 # CTL-1368: every canonical line carries the node-class core dimension (a valid role)
 NODE_CLASS_OUT="$(echo "$LINE" | jq -r '.resource."catalyst.node.class"')"
 case "$NODE_CLASS_OUT" in

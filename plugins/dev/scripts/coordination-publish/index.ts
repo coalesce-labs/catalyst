@@ -153,11 +153,26 @@ export function createCoordinationPublisher(opts: PublisherOpts): CoordinationPu
       stats.skipped++;
       return;
     }
-    localSeq++;
-    const record = { ...obj, local_seq: localSeq };
+    // Assign the next local_seq speculatively; commit it (and seenIds/outbound/
+    // stats) ONLY after the mirror write succeeds, so a write fault leaves no
+    // local_seq gap.
+    const nextSeq = localSeq + 1;
+    const record = { ...obj, local_seq: nextSeq };
     // LOCAL-FIRST: synchronous mirror append BEFORE any network buffering.
     mkdirSync(dirname(opts.mirrorPath), { recursive: true });
-    appendFileSync(opts.mirrorPath, JSON.stringify(record) + "\n");
+    try {
+      appendFileSync(opts.mirrorPath, JSON.stringify(record) + "\n");
+    } catch (err) {
+      // A mirror-write fault (ENOSPC/EACCES) must not crash the never-crash
+      // daemon. The tailer already advanced its offset past this line, so it
+      // won't be retried — degrade to a skipped line WITHOUT advancing
+      // localSeq/seenIds/outbound/stats.written (no permanent seq gap).
+      console.error("[coordination-publish] mirror write failed, skipping line", err);
+      stats.skipped++;
+      return;
+    }
+    // Commit only after the write succeeded.
+    localSeq = nextSeq;
     if (eventId) seenIds.add(eventId);
     stats.written++;
     if (opts.mode === "enforce") outbound.push(record);
@@ -313,7 +328,11 @@ if (import.meta.main) {
         signal: ac.signal,
         eventLogPath: EVENT_LOG_PATH,
       });
-      inboundTimer = setInterval(() => void inbound.tick(), 2000);
+      inboundTimer = setInterval(() => {
+        // Match the flush timer: a future uncaught throw in tick() must not
+        // become an unhandledRejection that terminates the never-crash daemon.
+        inbound.tick().catch((e) => console.error("[coordination-mirror-tail] tick failed", e));
+      }, 2000);
     }
   }
 
@@ -324,6 +343,8 @@ if (import.meta.main) {
   clearInterval(ckTimer);
   if (flushTimer) clearInterval(flushTimer);
   if (inboundTimer) clearInterval(inboundTimer);
-  await pub.flushToHub();
+  // Guard the shutdown flush so a DLQ/hub I/O fault can't kill the process
+  // before saveCheckpoint() persists the byte-offset/local_seq checkpoint.
+  await pub.flushToHub().catch((e) => console.error("[coordination-publish] shutdown flush failed", e));
   pub.saveCheckpoint();
 }

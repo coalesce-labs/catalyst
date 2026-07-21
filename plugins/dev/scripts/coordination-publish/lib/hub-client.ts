@@ -81,7 +81,15 @@ export class HubClient {
     try {
       await withRetry(() => this.sendBatch(batch), 3, retryDelays);
     } catch (err) {
-      appendToDlq(this.opts.dlqPath, batch);
+      // A DLQ-write fault (ENOSPC/EACCES) must NOT swallow the outage: guard it
+      // so consecutiveFailures++ and maybeEmitDegraded still run — a hub outage
+      // is never silent, and publish() truly never throws (flushToHub + the
+      // shutdown flush rely on that contract).
+      try {
+        appendToDlq(this.opts.dlqPath, batch);
+      } catch {
+        // Best-effort — a DLQ-write fault must never throw out of publish().
+      }
       this.consecutiveFailures++;
       this.maybeEmitDegraded(batch.length, err);
       return; // local-first: never throw, never block the mirror

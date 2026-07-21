@@ -172,6 +172,28 @@ describe("createMirrorTailClient (CTL-1488 Phase 5)", () => {
     expect(ids.filter((id) => id === "evt-c").length).toBe(1);
   });
 
+  test("a mirror truncation/rotation (size < mirrorOffset) resets seenIds and rescans from 0 (coverage of the shrink branch)", async () => {
+    // Accumulate mirrorOffset by ingesting two own-rows, then rotate the mirror out from under the
+    // client (writeFileSync '' → size 0 < mirrorOffset). The next tick must hit the shrink branch:
+    // reset seenIds + rescan from 0. Proof the reset actually fired: re-sending evt-a AFTER the
+    // rotation re-appends it (a stale, non-reset seenIds would dedup it away, leaving only evt-c).
+    const src = scriptedSource([
+      { ok: true, deltas: [delta(1, "evt-a"), delta(2, "evt-b")], headSeq: 2 },
+      { ok: true, deltas: [delta(1, "evt-a"), delta(3, "evt-c")], headSeq: 3 },
+    ]);
+    const client = createMirrorTailClient({ mirrorPath, source: src, signal: ac.signal });
+    await client.tick();
+    expect(mirrorRows(mirrorPath).map((r) => r.id)).toEqual(["evt-a", "evt-b"]);
+
+    writeFileSync(mirrorPath, ""); // rotation/truncation — mirror shrinks below the ingested offset
+
+    await client.tick();
+    const ids = mirrorRows(mirrorPath).map((r) => r.id);
+    expect(ids).toEqual(["evt-a", "evt-c"]); // evt-a re-appended (seenIds rescanned from the now-empty mirror)
+    expect(new Set(ids).size).toBe(ids.length); // no duplicate ids survive the rescan
+    expect(client.currentHubSeq()).toBe(3); // cursor still tracked across the rotation
+  });
+
   test("a local mirror-write fault in mergeDeltas routes through recordFailure, not a silent throw (review #5)", async () => {
     // Point the mirror under a regular FILE so mkdirSync(dirname)/appendFileSync inside mergeDeltas
     // throws (ENOTDIR) — the ENOSPC/EACCES local-I/O edge. The throw must be caught and surfaced as

@@ -167,6 +167,14 @@ describe("createCoordinationPublisher — local-first mirror (CTL-1488 Phase 3)"
     expect(existsSync(mirrorPath)).toBe(false);
   });
 
+  test("mode 'off' processLine is inert directly — the public method's inert guard early-returns without writing", () => {
+    // The mode='off' test above only exercises run()/drain() (which early-return on tailer===null),
+    // never the `if (inert) return` guard on the public processLine method. Call it directly.
+    const pub = createCoordinationPublisher({ mode: "off", filePath, mirrorPath, checkpointPath, signal: ac.signal });
+    pub.processLine(evLine("phase.plan.complete.CTL-1", "coordination", { id: "a" }).trimEnd());
+    expect(existsSync(mirrorPath)).toBe(false); // inert guard fired — nothing mirrored
+  });
+
   test("enforce buffers coordination records for the hub (still writes the mirror first)", async () => {
     writeFileSync(filePath, evLine("phase.plan.complete.CTL-1", "coordination", { id: "a" }));
     const published: unknown[][] = [];
