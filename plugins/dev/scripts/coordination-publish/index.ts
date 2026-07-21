@@ -45,20 +45,43 @@ export function writeCoordinationCheckpoint(ckPath: string, ck: Omit<Coordinatio
 }
 
 /**
+ * Read the mirror ONCE at startup, returning both the last local_seq high-water AND the set of event
+ * ids already mirrored. Absent/empty/malformed → {lastLocalSeq:0, ids:∅}. Never throws.
+ *
+ * The id set is what makes a restart exactly-once for the LOCAL append path: the tailer checkpoint
+ * (offset + local_seq) is written on a periodic timer, so a crash between a mirror append and the next
+ * checkpoint flush leaves the checkpoint's offset BEHIND the last-mirrored line. On restart the tailer
+ * re-reads those lines; without a dedup they'd be re-appended (same id, re-derived local_seq). Seeding
+ * the seen-set from the mirror makes processLine skip an already-present id.
+ */
+export function readMirrorState(mirrorPath: string): { lastLocalSeq: number; ids: Set<string> } {
+  const ids = new Set<string>();
+  if (!existsSync(mirrorPath)) return { lastLocalSeq: 0, ids };
+  try {
+    const lines = readFileSync(mirrorPath, "utf8").split("\n").filter(Boolean);
+    let lastLocalSeq = 0;
+    for (const line of lines) {
+      try {
+        const obj = JSON.parse(line) as { id?: unknown; local_seq?: unknown };
+        if (typeof obj.id === "string") ids.add(obj.id);
+        if (typeof obj.local_seq === "number") lastLocalSeq = obj.local_seq;
+      } catch {
+        // skip malformed line
+      }
+    }
+    return { lastLocalSeq, ids };
+  } catch {
+    return { lastLocalSeq: 0, ids };
+  }
+}
+
+/**
  * Seed the in-memory local_seq counter from the last line of an existing mirror,
  * so a restart WITHOUT a checkpoint still continues the sequence instead of
  * renumbering from 1. Absent/empty/malformed → 0. Never throws.
  */
 export function seedLocalSeqFromMirror(mirrorPath: string): number {
-  if (!existsSync(mirrorPath)) return 0;
-  try {
-    const lines = readFileSync(mirrorPath, "utf8").split("\n").filter(Boolean);
-    if (lines.length === 0) return 0;
-    const last = JSON.parse(lines[lines.length - 1]) as { local_seq?: unknown };
-    return typeof last.local_seq === "number" ? last.local_seq : 0;
-  } catch {
-    return 0;
-  }
+  return readMirrorState(mirrorPath).lastLocalSeq;
 }
 
 export interface HubClientLike {
@@ -91,7 +114,11 @@ export interface CoordinationPublisher {
 export function createCoordinationPublisher(opts: PublisherOpts): CoordinationPublisher {
   const inert = opts.mode === "off";
   const ck = readCoordinationCheckpoint(opts.checkpointPath);
-  let localSeq = ck ? ck.localSeq : seedLocalSeqFromMirror(opts.mirrorPath);
+  // Read the mirror ONCE: the checkpoint owns the local_seq counter when present; the id set is always
+  // needed so a periodic-checkpoint restart can't double-append an already-mirrored line (review #3).
+  const mirrorState = readMirrorState(opts.mirrorPath);
+  let localSeq = ck ? ck.localSeq : mirrorState.lastLocalSeq;
+  const seenIds = mirrorState.ids;
   const outbound: Array<Record<string, unknown>> = [];
   const stats = { written: 0, skipped: 0 };
 
@@ -111,11 +138,20 @@ export function createCoordinationPublisher(opts: PublisherOpts): CoordinationPu
       stats.skipped++;
       return;
     }
+    // Restart dedup (review #3): the periodic checkpoint can lag a mirror append, so on restart the
+    // tailer re-reads already-mirrored lines. Skip an id already in the mirror so the append path is
+    // exactly-once (no duplicate row, no wasted local_seq).
+    const eventId = typeof obj.id === "string" ? obj.id : "";
+    if (eventId && seenIds.has(eventId)) {
+      stats.skipped++;
+      return;
+    }
     localSeq++;
     const record = { ...obj, local_seq: localSeq };
     // LOCAL-FIRST: synchronous mirror append BEFORE any network buffering.
     mkdirSync(dirname(opts.mirrorPath), { recursive: true });
     appendFileSync(opts.mirrorPath, JSON.stringify(record) + "\n");
+    if (eventId) seenIds.add(eventId);
     stats.written++;
     if (opts.mode === "enforce") outbound.push(record);
   }

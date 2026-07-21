@@ -12,7 +12,8 @@ function envelopeLine(id: string, name: string): string {
     ts: "2026-07-21T00:00:00Z",
     caused_by: null,
     attributes: { "event.name": name, "event.stream_class": "coordination" },
-    resource: { "service.name": "catalyst.execution-core", "catalyst.node.name": "laptop" },
+    // Real coordination events carry host.name (buildCatalystResource), NOT catalyst.node.name.
+    resource: { "service.name": "catalyst.execution-core", "host.name": "laptop" },
   });
 }
 
@@ -70,6 +71,8 @@ describe("createLokiChangeSource (CTL-1488 Phase 5 interim transport)", () => {
     const rows = mirrorRows(mirrorPath);
     expect(rows.map((r) => r.id)).toEqual(["evt-loki-1"]);
     expect((rows[0].attributes as Record<string, unknown>)["event.stream_class"]).toBe("coordination");
+    // host provenance is resolved from resource["host.name"] (CTL-1488 review finding #2).
+    expect(rows[0].host).toBe("laptop");
   });
 
   test("dedups by event.id across ticks (the window is re-queried, rows are not double-appended)", async () => {

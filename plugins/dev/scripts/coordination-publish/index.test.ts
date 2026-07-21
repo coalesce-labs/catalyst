@@ -109,6 +109,25 @@ describe("createCoordinationPublisher — local-first mirror (CTL-1488 Phase 3)"
     expect(recs[1].local_seq).toBe(2); // continues the high-water, not restart at 1
   });
 
+  test("a lagged-checkpoint restart does NOT double-append an already-mirrored line (dedup by event id)", async () => {
+    // Round 1: mirror one coordination line, but DON'T save the checkpoint (simulate a crash before
+    // the periodic checkpoint flush).
+    writeFileSync(filePath, evLine("phase.plan.complete.CTL-1", "coordination", { id: "evt-a" }));
+    const pub1 = createCoordinationPublisher({ mode: "shadow", filePath, mirrorPath, checkpointPath, signal: ac.signal });
+    await pub1.drain();
+    expect(mirrorRecords(mirrorPath).length).toBe(1);
+    // No saveCheckpoint() → the checkpoint is absent/behind.
+
+    // Round 2: a fresh publisher with NO checkpoint re-reads from offset 0 (re-processing evt-a) and
+    // also sees a genuinely new line. evt-a must NOT be re-appended; only evt-b lands.
+    appendFileSync(filePath, evLine("phase.verify.complete.CTL-2", "coordination", { id: "evt-b" }));
+    const pub2 = createCoordinationPublisher({ mode: "shadow", filePath, mirrorPath, checkpointPath, signal: ac.signal });
+    await pub2.drain();
+    const recs = mirrorRecords(mirrorPath);
+    expect(recs.map((r) => r.id)).toEqual(["evt-a", "evt-b"]); // evt-a not doubled
+    expect(recs.map((r) => r.local_seq)).toEqual([1, 2]); // continues the high-water, no renumber
+  });
+
   test("mode 'off' resolves run() immediately and never writes the mirror", async () => {
     writeFileSync(filePath, evLine("phase.plan.complete.CTL-1", "coordination"));
     const pub = createCoordinationPublisher({ mode: "off", filePath, mirrorPath, checkpointPath, signal: ac.signal });

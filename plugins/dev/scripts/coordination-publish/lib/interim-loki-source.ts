@@ -43,10 +43,16 @@ function envelopeToDelta(env: StoredEnvelope): CoordinationDelta | null {
   if (!env || typeof env.id !== "string" || env.id === "") return null;
   const attrs = (env.attributes ?? {}) as Record<string, unknown>;
   const eventName = typeof attrs["event.name"] === "string" ? (attrs["event.name"] as string) : "";
+  // The phase.*/worker.transition builders stamp `host.name` on the resource
+  // (buildCatalystResource); only otel-forward's internal events carry the optional
+  // `catalyst.node.name`. Prefer the coordination name when present, else host.name.
+  const res = env.resource ?? {};
   const host =
-    env.resource && typeof env.resource["catalyst.node.name"] === "string"
-      ? (env.resource["catalyst.node.name"] as string)
-      : null;
+    typeof res["catalyst.node.name"] === "string"
+      ? (res["catalyst.node.name"] as string)
+      : typeof res["host.name"] === "string"
+        ? (res["host.name"] as string)
+        : null;
   return {
     seq: 0,
     host,
