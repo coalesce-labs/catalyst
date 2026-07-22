@@ -1,5 +1,17 @@
 # Changelog
 
+## [12.33.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.32.0...catalyst-dev-v12.33.0) (2026-07-22)
+
+
+### Features
+
+* **dev:** CTL-1091 Phase 1 — route dispatch gates through the surviving roster ([#2671](https://github.com/coalesce-labs/catalyst/issues/2671)) ([2fb23ee](https://github.com/coalesce-labs/catalyst/commit/2fb23ee46d292a3e2975ca05a6e5c6856239346f))
+
+
+### Bug Fixes
+
+* **dev:** CTL-1497 — repair thoughts/shared on the worktree reuse path; guards test -L not -d ([#2685](https://github.com/coalesce-labs/catalyst/issues/2685)) ([c4bf08c](https://github.com/coalesce-labs/catalyst/commit/c4bf08c23f2cb8f442e152aa92090ab47a39b0ac))
+
 ## [12.32.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.31.0...catalyst-dev-v12.32.0)
 
 Jul 21, 2026
