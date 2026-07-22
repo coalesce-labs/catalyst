@@ -109,7 +109,7 @@ describe("assignSlots", () => {
         w({ name: "a", ticket: "B", startedAt: 100 }),
         w({ name: "m", ticket: "C", startedAt: 200 }),
       ],
-      4,
+      4
     );
     expect(a.occupied.map((x) => x.name)).toEqual(["a", "m", "z"]);
     expect(a.emptyCount).toBe(1);
@@ -121,7 +121,7 @@ describe("assignSlots", () => {
         w({ name: "beta", ticket: "A", startedAt: 100 }),
         w({ name: "alpha", ticket: "B", startedAt: 100 }),
       ],
-      4,
+      4
     );
     expect(a.occupied.map((x) => x.name)).toEqual(["alpha", "beta"]);
   });
@@ -131,7 +131,7 @@ describe("assignSlots", () => {
         w({ name: "live", ticket: "A", startedAt: 100 }),
         w({ name: "corpse", ticket: "B", startedAt: 50, activeState: "dead" }),
       ],
-      3,
+      3
     );
     expect(a.occupied.map((x) => x.name)).toEqual(["live"]);
     expect(a.emptyCount).toBe(2);
@@ -143,7 +143,7 @@ describe("assignSlots", () => {
         w({ name: "w2", ticket: "B", startedAt: 2 }),
         w({ name: "w3", ticket: "C", startedAt: 3 }),
       ],
-      2,
+      2
     );
     expect(a.occupied.map((x) => x.name)).toEqual(["w1", "w2"]);
     expect(a.overCapacity.map((x) => x.name)).toEqual(["w3"]);
@@ -153,6 +153,35 @@ describe("assignSlots", () => {
     const a = assignSlots([], 5);
     expect(a.occupied).toEqual([]);
     expect(a.emptyCount).toBe(5);
+  });
+
+  // CTL-764 Phase 7 (Codex finding 2): triage workers are intake, not a slot
+  // consumer — mirrors board-data.mjs deriveCapacity's `w.phase !== "triage"`.
+  it("excludes triage-phase workers — they hold no slot", () => {
+    const a = assignSlots(
+      [
+        w({ name: "impl", ticket: "A", startedAt: 1, phase: "implement" }),
+        w({ name: "intake", ticket: "B", startedAt: 2, phase: "triage" }),
+      ],
+      3
+    );
+    expect(a.occupied.map((x) => x.name)).toEqual(["impl"]);
+    expect(a.emptyCount).toBe(2);
+    expect(a.overCapacity).toEqual([]);
+  });
+
+  it("a live triage worker never consumes the last slot (deck agrees with config.freeSlots)", () => {
+    const a = assignSlots(
+      [
+        w({ name: "impl1", ticket: "A", startedAt: 1, phase: "implement" }),
+        w({ name: "impl2", ticket: "B", startedAt: 2, phase: "implement" }),
+        w({ name: "intake", ticket: "C", startedAt: 3, phase: "triage" }),
+      ],
+      2
+    );
+    expect(a.occupied.map((x) => x.name)).toEqual(["impl1", "impl2"]);
+    expect(a.emptyCount).toBe(0);
+    expect(a.overCapacity).toEqual([]);
   });
 });
 
@@ -176,7 +205,7 @@ describe("groupHoldingBuckets", () => {
     ];
     const b = groupHoldingBuckets(tickets, [], 4);
     expect(b.blocked.items.map((i) => (i.kind === "ticket" ? i.ticket.id : ""))).toEqual(["CTL-1"]);
-    expect(b.waiting.items.map((i) => (i.kind === "ticket" ? i.ticket.id : ""))).toEqual(["CTL-2"]);
+    expect(b.queued.items.map((i) => (i.kind === "ticket" ? i.ticket.id : ""))).toEqual(["CTL-2"]);
     expect(b.allEmpty).toBe(false);
   });
   it("a held ticket held by a LIVE worker is excluded (not double-listed)", () => {
@@ -186,16 +215,17 @@ describe("groupHoldingBuckets", () => {
     expect(b.blocked.items).toHaveLength(0);
   });
   it("allEmpty true when nothing is blocked/waiting/needs-you", () => {
-    const b = groupHoldingBuckets([t({ id: "CTL-1" })], [w({ name: "w", ticket: "X", startedAt: 1 })], 4);
+    const b = groupHoldingBuckets(
+      [t({ id: "CTL-1" })],
+      [w({ name: "w", ticket: "X", startedAt: 1 })],
+      4
+    );
     expect(b.allEmpty).toBe(true);
   });
   it("INVARIANT: bucket ticket ids never overlap the dispatch queue", () => {
     // The eligible projection already excludes blocked/waiting tickets from the
     // queue; this asserts the buckets we surface are disjoint from a queue.
-    const tickets = [
-      t({ id: "CTL-1", held: "blocked" }),
-      t({ id: "CTL-2", held: "waiting" }),
-    ];
+    const tickets = [t({ id: "CTL-1", held: "blocked" }), t({ id: "CTL-2", held: "waiting" })];
     const queueIds = new Set(["CTL-10", "CTL-11"]); // eligible, none held
     const b = groupHoldingBuckets(tickets, [], 4);
     for (const id of holdingTicketIds(b)) expect(queueIds.has(id)).toBe(false);
@@ -217,13 +247,13 @@ describe("slotLabel — vacant slots keep their numbers (CTL-1035)", () => {
         w({ name: "w2", ticket: "B", startedAt: 2 }),
         w({ name: "w3", ticket: "C", startedAt: 3 }),
       ],
-      6,
+      6
     );
     expect(a.occupied).toHaveLength(3);
     expect(a.emptyCount).toBe(3);
     const occupiedLabels = a.occupied.map((_, i) => slotLabel(i + 1));
     const emptyLabels = Array.from({ length: a.emptyCount }, (_, i) =>
-      slotLabel(a.occupied.length + i + 1),
+      slotLabel(a.occupied.length + i + 1)
     );
     expect(occupiedLabels).toEqual(["SLOT 1", "SLOT 2", "SLOT 3"]);
     expect(emptyLabels).toEqual(["SLOT 4", "SLOT 5", "SLOT 6"]);
@@ -232,7 +262,7 @@ describe("slotLabel — vacant slots keep their numbers (CTL-1035)", () => {
   it("an all-empty deck numbers every open slot from 1", () => {
     const a = assignSlots([], 4);
     const emptyLabels = Array.from({ length: a.emptyCount }, (_, i) =>
-      slotLabel(a.occupied.length + i + 1),
+      slotLabel(a.occupied.length + i + 1)
     );
     expect(emptyLabels).toEqual(["SLOT 1", "SLOT 2", "SLOT 3", "SLOT 4"]);
   });
@@ -246,8 +276,11 @@ describe("groupHoldingBuckets — stalled bucket (CTL-1066)", () => {
       t({ id: "CTL-3", held: "waiting" }),
     ];
     const b = groupHoldingBuckets(tickets, [], 4);
-    expect(b.stalled.items.map((i) => (i.kind === "ticket" ? i.ticket.id : ""))).toEqual(["CTL-1", "CTL-2"]);
-    expect(b.waiting.items.map((i) => (i.kind === "ticket" ? i.ticket.id : ""))).toEqual(["CTL-3"]);
+    expect(b.stalled.items.map((i) => (i.kind === "ticket" ? i.ticket.id : ""))).toEqual([
+      "CTL-1",
+      "CTL-2",
+    ]);
+    expect(b.queued.items.map((i) => (i.kind === "ticket" ? i.ticket.id : ""))).toEqual(["CTL-3"]);
   });
 
   it("a stalled ticket attached to a LIVE worker is excluded (not double-listed)", () => {
@@ -289,5 +322,87 @@ describe("deadWorkers", () => {
       w({ name: "dead1", ticket: "C", activeState: "dead", startedAt: 10 }),
     ]);
     expect(d.map((x) => x.name)).toEqual(["dead1", "dead2"]);
+  });
+});
+
+// CTL-764 Phase 8: disposition buckets in groupHoldingBuckets
+describe("groupHoldingBuckets — queued/needsInput/needsHuman (CTL-764 Phase 8)", () => {
+  it("ticket with workerStatus='queued' → queued bucket (HoldingBuckets has queued, no waiting)", () => {
+    const tickets = [t({ id: "CTL-1", workerStatus: "queued" })];
+    const b = groupHoldingBuckets(tickets, [], 4);
+    expect(b.queued.items.map((i) => (i.kind === "ticket" ? i.ticket.id : ""))).toEqual(["CTL-1"]);
+    expect((b as any).waiting).toBeUndefined();
+  });
+
+  it("workerStatus='needs-input' → needsInput bucket", () => {
+    const tickets = [t({ id: "CTL-2", workerStatus: "needs-input" })];
+    const b = groupHoldingBuckets(tickets, [], 4);
+    expect(b.needsInput.items.map((i) => (i.kind === "ticket" ? i.ticket.id : ""))).toEqual([
+      "CTL-2",
+    ]);
+  });
+
+  it("workerStatus='needs-human' → needsHuman bucket (separate from needs-you)", () => {
+    const tickets = [t({ id: "CTL-3", workerStatus: "needs-human" })];
+    const b = groupHoldingBuckets(tickets, [], 4);
+    expect(b.needsHuman.items.map((i) => (i.kind === "ticket" ? i.ticket.id : ""))).toEqual([
+      "CTL-3",
+    ]);
+  });
+
+  it("needs-human wins over blocked (single-valued precedence)", () => {
+    const tickets = [t({ id: "CTL-4", workerStatus: "needs-human", held: "blocked" })];
+    const b = groupHoldingBuckets(tickets, [], 4);
+    expect(b.needsHuman.items).toHaveLength(1);
+    expect(b.blocked.items).toHaveLength(0);
+  });
+
+  it("back-compat: t.held='waiting' + null workerStatus → queued bucket", () => {
+    const tickets = [t({ id: "CTL-5", held: "waiting", workerStatus: null })];
+    const b = groupHoldingBuckets(tickets, [], 4);
+    expect(b.queued.items.map((i) => (i.kind === "ticket" ? i.ticket.id : ""))).toEqual(["CTL-5"]);
+  });
+
+  it("needs-you (live waitingOnUser) bucket unchanged — separate from worker-status buckets", () => {
+    const workers = [w({ name: "w1", ticket: "CTL-6", startedAt: 1, waitingOnUser: true })];
+    const b = groupHoldingBuckets([], workers, 4);
+    expect(b.needsYou.items).toHaveLength(1);
+    expect(b.queued.items).toHaveLength(0);
+    expect(b.needsHuman.items).toHaveLength(0);
+  });
+
+  // CTL-764 Phase 8 (Codex finding 3): board-data hardcodes attention:"needs-human"
+  // for a parked ticket's inbox card even when its real disposition is needs-input —
+  // the label is the only place the distinction survives. The label check must run
+  // BEFORE the generic needs-human branch or this card collapses into "Needs you".
+  it("a needs-input LABEL (attention hardcoded to needs-human) routes to needsInput, not needsYou", () => {
+    const tickets = [t({ id: "CTL-20", attention: "needs-human", labels: ["needs-input"] })];
+    const b = groupHoldingBuckets(tickets, [], 4);
+    expect(b.needsInput.items.map((i) => (i.kind === "ticket" ? i.ticket.id : ""))).toEqual([
+      "CTL-20",
+    ]);
+    expect(b.needsYou.items).toHaveLength(0);
+  });
+
+  it("needs-human LABEL wins over needs-input LABEL when both present (precedence)", () => {
+    const tickets = [
+      t({ id: "CTL-21", attention: "needs-human", labels: ["needs-input", "needs-human"] }),
+    ];
+    const b = groupHoldingBuckets(tickets, [], 4);
+    expect(b.needsYou.items).toHaveLength(1);
+    expect(b.needsInput.items).toHaveLength(0);
+  });
+
+  it("holdingTicketIds includes queued/needsInput/needsHuman bucket ids", () => {
+    const tickets = [
+      t({ id: "CTL-10", workerStatus: "queued" }),
+      t({ id: "CTL-11", workerStatus: "needs-input" }),
+      t({ id: "CTL-12", workerStatus: "needs-human" }),
+    ];
+    const b = groupHoldingBuckets(tickets, [], 4);
+    const ids = holdingTicketIds(b);
+    expect(ids).toContain("CTL-10");
+    expect(ids).toContain("CTL-11");
+    expect(ids).toContain("CTL-12");
   });
 });

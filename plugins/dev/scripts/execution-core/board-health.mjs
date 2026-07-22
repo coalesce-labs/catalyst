@@ -45,6 +45,17 @@ const DEFAULT_THRESHOLDS = {
   // needs-human-labelled ticket is "frozen" past this age. 48h defaults.
   orphanedPrAgeMs: Number(process.env.CATALYST_BH_ORPHANED_PR_MS) || 48 * 3_600_000,
   frozenNeedsHumanMs: Number(process.env.CATALYST_BH_FROZEN_NH_MS) || 48 * 3_600_000,
+  // CTL-1435 (C2): actuation-liveness window — how many recent ENFORCE board-scans
+  // must ALL be owned-but-undispatched before the delegate flags its own
+  // propose-forever/dispatch-never wedge. 6 scans ≈ 30 min at the 5-min cadence.
+  // Observable only with ≥K enforce scans in the event tail, so a short/busy event
+  // window never false-flags.
+  actuationLivenessScans: Number(process.env.CATALYST_BH_ACTUATION_K) || 6,
+  // CTL-1435 (C2, Codex round-2): the K scans must ALL fall within this window of
+  // now, so stale scans from before a daemon downtime / low-traffic gap can't
+  // combine with one fresh scan to fake a "K consecutive" run. 60 min gives K=6 at
+  // 5-min cadence (~30-min real span) generous headroom while rejecting hour+ gaps.
+  actuationLivenessWindowMs: Number(process.env.CATALYST_BH_ACTUATION_WINDOW_MS) || 60 * 60_000,
 };
 
 // single-LLM cadence floor: most ticks are a near-instant no-op (cheap gates),
@@ -241,6 +252,7 @@ function deriveRing(events, nowMs) {
     cacheReconcile: null,
     accountRatelimit: null,
     reconcileFailing: new Set(),
+    boardScans: [], // CTL-1435 (C2): per-scan actuation outcomes, chronological
   };
   for (const ev of events ?? []) {
     const name = ev?.attributes?.["event.name"] ?? ev?.["event.name"] ?? ev?.type ?? "";
@@ -265,6 +277,26 @@ function deriveRing(events, nowMs) {
     } else if (/reconcile\.failing/i.test(name)) {
       const team = payload.team ?? name.split(".").pop();
       if (team) ring.reconcileFailing.add(team);
+    } else if (name === "recovery.board-scan") {
+      // CTL-1435 (C2): retain each board-scan's actuation outcome so
+      // checkActuationLiveness can spot a proceed-but-dispatch-never run.
+      // Codex P1: the REAL emit envelope (buildRecoveryEnvelope) nests the scan
+      // fields under body.payload.DETAILS — reading them off a flat `payload` gets
+      // null for every live event, silently disabling the invariant. Fall back to a
+      // flat payload so hand-built / legacy events still read.
+      const d = payload.details ?? payload;
+      ring.boardScans.push({
+        tsMs: Number.isFinite(tsMs) ? tsMs : null,
+        mode: d.mode ?? null,
+        gate: d.gateDecision ?? null,
+        proposedMoves: (d.proposedTier1 ?? 0) + (d.proposedTier2 ?? 0) + (d.proposedTier3 ?? 0),
+        dispatched: d.act?.dispatched === true,
+        // Codex P2: skippedReason is what tells a true actuation wedge (owned
+        // anchor, all-candidates-cooldown / act-error) from a benign non-dispatch
+        // (no-owned-anchor, gate-hold) — including the deferred-only proceed path
+        // where proposedMoves is 0.
+        skippedReason: d.act?.skippedReason ?? null,
+      });
     }
   }
   // guard against a stale dispatch ts in the future / absurd past
@@ -299,6 +331,14 @@ export function assembleBoardState({
   // (N=1 byte-identical; a true collision with no repo stays the ambiguous skip).
   repoForTicket = null,
   getReconcileMarkers = () => ({}),
+  // CTL-1432 (B2): live query for tickets carrying a deferred board-health
+  // recovery-intent (defer→fix_class=board-health) — folded into the anchor
+  // candidates so the holistic pass actuates them. Empty default keeps a bare unit
+  // call byte-identical.
+  getDeferredBoardHealthTickets = () => [],
+  // CTL-1432 (B3): operator-sanctioned needs-human latch allowlist (a static array,
+  // not a live query). Suppressed from proposeMoves; stays visible in frozenNeedsHuman.
+  sanctionedNeedsHuman = [],
   // CTL-1157: PR-lifecycle status map (filter_state). Empty Map default ⇒ the
   // phantom-merged-PR / orphaned-open-PR invariants stay observable:false (the
   // shadow-first seam: wiring lands before the invariants begin observing).
@@ -370,6 +410,12 @@ export function assembleBoardState({
       freeSlots: capacity?.freeSlots ?? 0,
     },
     reconcileMarkers: safe(() => getReconcileMarkers(), {}),
+    // CTL-1432 (B2/B3): deferred board-health anchor candidates + the sanctioned
+    // needs-human allowlist, carried on the frozen board for the pure consumers
+    // (selectAnchorCandidates reads deferredBoardHealth; proposeMoves reads
+    // sanctionedNeedsHuman).
+    deferredBoardHealth: safe(() => getDeferredBoardHealthTickets(), []),
+    sanctionedNeedsHuman: Array.isArray(sanctionedNeedsHuman) ? sanctionedNeedsHuman : [],
     // CTL-1157 off-gate: in off the filter_state PR-status SELECT must NOT run —
     // skip getPrStatusMap() entirely so off is byte-identical to origin/main (the
     // phantom/orphaned-PR invariants also stay out of evaluateInvariants in off).
@@ -412,6 +458,11 @@ export function evaluateInvariants(boardState, { thresholds = DEFAULT_THRESHOLDS
       orphanedOpenPr: () => checkOrphanedOpenPr(boardState, thresholds),
       frozenNeedsHuman: () => checkFrozenNeedsHuman(boardState, thresholds),
       needsHumanPile: () => checkNeedsHumanPile(boardState),
+      // CTL-1435 (C2): the delegate's SELF-observation — flags its own
+      // propose-forever/dispatch-never wedge. Cohort-gated (never runs in off) and
+      // observable ONLY in enforce (shadow not-dispatching is by-design telemetry),
+      // so the off-mode invariant set stays byte-identical to origin/main.
+      actuationLiveness: () => checkActuationLiveness(boardState, thresholds),
     });
   }
   const out = {};
@@ -584,6 +635,87 @@ function checkStrandedNode(b) {
   );
 }
 
+// CTL-1435 (C2): the skippedReason values that mean "the delegate proceeded with
+// an OWNED anchor it could act on, yet dispatched nothing" — a real actuation
+// wedge. Benign non-dispatch reasons (no-owned-anchor = nothing this host owns;
+// gate-hold reasons all-green / no-free-slots / rate-limit-cliff; shadow) are
+// deliberately excluded so the invariant flags the CTL-1157 failure mode, not a
+// host that simply has no owned work.
+// Codex round-2: "no-actuator" (an enforce pass with no `act` seam wired — a
+// miswired daemon that proposes but structurally cannot dispatch) is a wedge too.
+// CTL-1440 (P0b): "all-candidates-exhausted" is deliberately EXCLUDED — every
+// candidate is terminally attempts-exhausted AND the exhaustion sweep has
+// escalated each to a human (needs-human + brief + comment), so the delegate is
+// truthfully done, not wedged.
+const WEDGE_SKIP_REASONS = new Set(["all-candidates-cooldown", "act-error", "no-actuator"]);
+
+// #7 — actuation liveness (CTL-1435 C2): the delegate's OWN wedge. Over the last
+// K enforce board-scans in the ring, if EVERY one proceeded with an owned anchor
+// yet dispatched nothing (skippedReason ∈ all-candidates-cooldown / act-error),
+// board-health is proposing into the void — the exact CTL-1157 incident (enforce
+// proposed ~15 moves/5min for days with ~zero executions, invisible in the
+// journal). This is the invariant that would have caught it. It only READS the
+// ring's board-scan history (C1's act-outcome), so it adds no Linear/Git I/O.
+// Three false-positive guards:
+//   (1) current-mode gate (Codex round-2) — observable ONLY when the host is
+//       enforce RIGHT NOW. After an enforce→shadow rollback the tail still holds
+//       enforce scans; without this gate a shadow host would keep flagging on that
+//       stale history until it ages out, even though shadow deliberately never acts.
+//   (2) ≥K guard — a short or busy event tail that holds <K enforce scans yields
+//       observable:false rather than a flag on thin evidence.
+//   (3) time-window bound (Codex round-2) — the K scans must ALL fall within
+//       actuationLivenessWindowMs of now, so stale pre-downtime scans can't combine
+//       with one fresh scan to fake a "K consecutive" run.
+// The remediation is NOT here: the "kick bypassing expired latches" is B1's
+// terminal-intent TTL (already shipped), and turning a sustained finding into a
+// deduped Gherkin ticket is C3/C4. C2's job is DETECT + SURFACE.
+function checkActuationLiveness(b, t) {
+  if (b.mode !== "enforce") {
+    return invariant(true, 0, false, [], "actuation liveness observable only when the host is currently enforce");
+  }
+  const K = t.actuationLivenessScans;
+  const scans = (b.ring?.boardScans ?? []).filter((s) => s.mode === "enforce");
+  if (scans.length < K) {
+    return invariant(
+      true,
+      0,
+      false,
+      [],
+      `insufficient enforce board-scan history (${scans.length}/${K}) → actuation liveness not observable`,
+    );
+  }
+  const recent = scans.slice(-K);
+  // Time-window guard: the oldest of the last K must be within windowMs of now, so
+  // the K scans are both RECENT and CONTIGUOUS (no daemon-downtime gap folded in).
+  const windowMs = t.actuationLivenessWindowMs;
+  const ts = recent.map((s) => s.tsMs);
+  if (ts.some((v) => !Number.isFinite(v)) || b.now - ts[0] > windowMs) {
+    return invariant(
+      true,
+      0,
+      false,
+      [],
+      `enforce scan window not recent/contiguous (>${Math.round(windowMs / 60_000)}m span or missing ts) → actuation liveness not observable`,
+    );
+  }
+  // A dispatch anywhere in the window clears it; otherwise EVERY scan must be an
+  // owned-but-undispatched wedge (skippedReason ∈ WEDGE_SKIP_REASONS). This catches
+  // the deferred-only proceed path (proposedMoves 0) the old proposedMoves>0
+  // predicate missed (Codex P2), and ignores benign no-owned-anchor/gate-hold scans.
+  const wedged = recent.every(
+    (s) => s.dispatched !== true && WEDGE_SKIP_REASONS.has(s.skippedReason),
+  );
+  return invariant(
+    !wedged,
+    wedged ? 1 : 0,
+    true,
+    [], // fleet/host-scoped anomaly, no per-ticket flagged list
+    wedged
+      ? `${K} consecutive enforce scans proposed moves but dispatched nothing → actuation wedged (propose-forever/dispatch-never)`
+      : "board-health actuation live (recent scans dispatched or had nothing actionable)",
+  );
+}
+
 // #7 — phantom merged-PR (CTL-1157). A ticket sitting in a PR/in-review Linear
 // state whose linked PR has already merged/deployed — the GitHub-PR→Done
 // automation was removed (multi-PR tickets falsely went Done on first merge), so
@@ -748,15 +880,74 @@ function checkNeedsHumanPile(b) {
 }
 
 // ── (3) decideBoardHealth — PURE. The cheap-gate funnel. First match wins. ───
+// CTL-1432 (Codex P1): the deferred board-health set must pass the SAME acceptance a
+// normal anchor does before it counts as actionable / gets ranked — not an operator-
+// sanctioned latch (else a sanctioned ticket that ALSO has a defer intent bypasses the
+// proposeMoves suppression via the deferred path), and still a LIVE non-terminal ticket
+// on the board. getBoard = getAllTicketDescriptors({includeRemoved:false}) still includes
+// Done/Canceled descriptors, so a board-presence check alone isn't enough — check
+// isTerminalLinearState too. (The 30-min defer cooldown is applied upstream in
+// readDeferredBoardHealthIntents.) Shared by decideBoardHealth (gate count) AND
+// selectAnchorCandidates (ranking) so the two never disagree.
+function eligibleDeferredAnchors(board) {
+  const sanctioned = new Set(board?.sanctionedNeedsHuman ?? []);
+  const byId = board?.ticketsById;
+  // CTL-1432 (Codex P2): HRW-ownership filter, mirroring selectAnchorCandidates — a
+  // foreign-owned deferred marker must not make the gate proceed (this host would then
+  // no-anchor it). N=1 / no roster / no ownerForTicket ⇒ owns everything ⇒ unchanged.
+  const multiHost = !!(board?.multiHost && typeof board?.ownerForTicket === "function");
+  const owns = (t) => {
+    if (!multiHost) return true;
+    try {
+      return board.ownerForTicket(t, board.roster) === board.self;
+    } catch {
+      return true; // fail-open: a broken HRW read must not block self-owned actuation
+    }
+  };
+  return (board?.deferredBoardHealth ?? []).filter((t) => {
+    if (sanctioned.has(t)) return false;
+    if (!owns(t)) return false;
+    const d = byId && typeof byId.get === "function" ? byId.get(t) : undefined;
+    if (!d) return false;
+    return !isTerminalLinearState(d);
+  });
+}
+
 export function decideBoardHealth(invariants, boardState) {
   const observableFailed = Object.values(invariants).filter((v) => v.observable && !v.ok);
   const invariantsFailed = observableFailed.reduce((n, v) => n + (Number(v.failed) || 0), 0);
 
-  // Gate 1 — all observable invariants green → skip (no LLM thrash).
-  if (observableFailed.length === 0) {
-    return decision("skip", "all-green", invariantsFailed, emptyMoves());
+  // CTL-1432 (B2/B3 — Codex P1): gate on ACTIONABLE work, not merely a failed
+  // invariant. proposeMoves already suppresses the sanctioned needs-human latches
+  // (B3), so a scan whose ONLY failure is an all-sanctioned frozenNeedsHuman produces
+  // no tier1/tier2 moves → it must NOT proceed (F2: else enforce dispatches a holistic
+  // pass with nothing real to do). Conversely, a deferred board-health intent (B2) is
+  // actionable even when NO invariant failed → it MUST proceed (F1: boardHealthPass
+  // calls selectAnchorCandidates only after "proceed", so a deferred intent that never
+  // trips the gate is inert). tier3 moves are escalate-only (never anchorable by
+  // selectAnchorCandidates), so they alone do not justify a holistic pass.
+  const moves = proposeMoves(invariants, boardState);
+  // CTL-1432 (Codex P1): count only deferred intents that pass full acceptance
+  // (not sanctioned, live + non-terminal) — a since-terminal / sanctioned defer must not
+  // make the gate proceed (it would proceed then no-anchor). Same helper selectAnchorCandidates uses.
+  const deferred = eligibleDeferredAnchors(boardState);
+  const hasActionableWork =
+    moves.tier1.length > 0 || moves.tier2.length > 0 || deferred.length > 0;
+
+  // Gate 1 — nothing actionable (all green, or every failure suppressed/escalate-only,
+  // and no deferred work) → skip the holistic DISPATCH (no LLM thrash). CTL-1432 (Codex
+  // P2): still return the proposed `moves` (not emptyMoves) so an escalate-only board —
+  // tier3 stranded-node / project-silence — keeps surfacing those proposals in the
+  // recovery.board-scan event (a human should see them); we just don't dispatch.
+  if (!hasActionableWork) {
+    return decision(
+      "skip",
+      observableFailed.length === 0 ? "all-green" : "no-actionable-moves",
+      invariantsFailed,
+      moves,
+    );
   }
-  // Gate 2 — failures exist but no free slot to dispatch a fix → skip.
+  // Gate 2 — actionable work but no free slot to dispatch a fix → skip.
   if ((boardState.capacity?.freeSlots ?? 0) <= 0) {
     return decision("skip", "no-free-slots", invariantsFailed, emptyMoves());
   }
@@ -765,8 +956,12 @@ export function decideBoardHealth(invariants, boardState) {
   if (rl && rl.observable && !rl.ok) {
     return decision("skip", "rate-limit-cliff", invariantsFailed, emptyMoves());
   }
-  // Gate 4 — real failures + headroom → proceed; compute proposed moves.
-  return decision("proceed", `${observableFailed.length} invariant(s) flagged`, invariantsFailed, proposeMoves(invariants, boardState));
+  // Gate 4 — actionable work + headroom → proceed.
+  const reason =
+    observableFailed.length > 0
+      ? `${observableFailed.length} invariant(s) flagged`
+      : `${deferred.length} deferred board-health intent(s)`;
+  return decision("proceed", reason, invariantsFailed, moves);
 }
 
 function decision(gateDecision, reason, invariantsFailed, moves) {
@@ -784,11 +979,20 @@ export function proposeMoves(invariants, _b) {
   const tier1 = [];
   const tier2 = [];
   const tier3 = [];
+  // CTL-1432 (B3 + Codex P1): operator-sanctioned needs-human latches are never
+  // re-proposed as ANY per-ticket move — not just the frozenNeedsHuman tier2, but also
+  // the needsHumanPile tier1 (a sanctioned ticket with a live needs-human/stalled
+  // worker signal), workerAge, and the PR cohorts. They stay VISIBLE in
+  // frozenNeedsHuman / boardContext (suppression is HERE only, never in
+  // checkFrozenNeedsHuman) so a human still sees them; they just stop drowning the
+  // genuinely-stuck tickets every 5-min scan (making proposedTier1/2 a constant).
+  const sanctioned = new Set(_b?.sanctionedNeedsHuman ?? []);
+  const sanction = (t) => sanctioned.has(t);
   if (invariants.dispatchLiveness && !invariants.dispatchLiveness.ok) {
     tier1.push({ move: "kick-dispatch", rationale: invariants.dispatchLiveness.note });
   }
   for (const t of invariants.workerAge?.flagged ?? []) {
-    if (!invariants.workerAge.ok) tier1.push({ ticket: t, move: "nudge", rationale: "worker past phase-normal age" });
+    if (!invariants.workerAge.ok && !sanction(t)) tier1.push({ ticket: t, move: "nudge", rationale: "worker past phase-normal age" });
   }
   if (invariants.cacheCoherence && invariants.cacheCoherence.observable && !invariants.cacheCoherence.ok) {
     tier1.push({ move: "note-cache-drift", rationale: invariants.cacheCoherence.note });
@@ -797,21 +1001,21 @@ export function proposeMoves(invariants, _b) {
   // Done vs reopen) and orphaned open PRs (finish or close) — is tier1 (highest
   // anchor priority); the status-based needs-human pile is the untyped catch-all.
   for (const t of invariants.phantomMergedPr?.flagged ?? []) {
-    if (!invariants.phantomMergedPr.ok) tier1.push({ ticket: t, move: "judge-done-or-reopen", rationale: "PR merged/deployed but ticket still in a PR/in-review state" });
+    if (!invariants.phantomMergedPr.ok && !sanction(t)) tier1.push({ ticket: t, move: "judge-done-or-reopen", rationale: "PR merged/deployed but ticket still in a PR/in-review state" });
   }
   for (const t of invariants.orphanedOpenPr?.flagged ?? []) {
-    if (!invariants.orphanedOpenPr.ok) tier1.push({ ticket: t, move: "finish-or-close-pr", rationale: "open PR with no live worker past age" });
+    if (!invariants.orphanedOpenPr.ok && !sanction(t)) tier1.push({ ticket: t, move: "finish-or-close-pr", rationale: "open PR with no live worker past age" });
   }
   for (const t of invariants.needsHumanPile?.flagged ?? []) {
-    if (!invariants.needsHumanPile.ok) tier1.push({ ticket: t, move: "holistic-triage", rationale: "worker parked at needs-human/stalled" });
+    if (!invariants.needsHumanPile.ok && !sanction(t)) tier1.push({ ticket: t, move: "holistic-triage", rationale: "worker parked at needs-human/stalled" });
   }
   for (const t of invariants.blockedTree?.flagged ?? []) {
-    if (!invariants.blockedTree.ok) tier2.push({ ticket: t, move: "re-dispatch-blocker", rationale: "blocked by unscheduled/stuck blocker" });
+    if (!invariants.blockedTree.ok && !sanction(t)) tier2.push({ ticket: t, move: "re-dispatch-blocker", rationale: "blocked by unscheduled/stuck blocker" });
   }
   // CTL-1157: a needs-human-LABELLED ticket frozen past 48h has already been
   // escalated once → tier2 (review, lower urgency than the actionable PR work).
   for (const t of invariants.frozenNeedsHuman?.flagged ?? []) {
-    if (!invariants.frozenNeedsHuman.ok) tier2.push({ ticket: t, move: "review-needs-human", rationale: "needs-human label frozen past threshold" });
+    if (!invariants.frozenNeedsHuman.ok && !sanction(t)) tier2.push({ ticket: t, move: "review-needs-human", rationale: "needs-human label frozen past threshold" });
   }
   for (const h of invariants.strandedNode?.flagged ?? []) {
     if (!invariants.strandedNode.ok) tier3.push({ host: h, move: "escalate-stranded-node", rationale: "rostered node owns work but reconcile is failing" });
@@ -874,9 +1078,16 @@ export function selectAnchorCandidates(moves, board, { holistic = false, strande
     }
   };
   const ticketsOf = (arr) => (arr ?? []).map((m) => m && m.ticket).filter(Boolean);
-  // self-owned chain first (unchanged tier1 > tier2 > eligible ordering).
+  // self-owned chain first (unchanged tier1 > tier2 ordering).
   for (const t of ticketsOf(moves?.tier1).filter(owns)) add(t);
   for (const t of ticketsOf(moves?.tier2).filter(owns)) add(t);
+  // CTL-1432 (B2, Codex P1): deferred board-health intents rank AFTER flagged work but
+  // BEFORE the eligible fallback — when a scan proceeds SOLELY for a deferred intent
+  // (empty moves), the deferred ticket MUST be the anchor, not an unrelated top-of-
+  // eligible-queue ticket. Cross-checked against the live board (ticketsById already
+  // excludes Done/removed via getBoard's includeRemoved:false), so a stale defer marker
+  // whose ticket has since gone terminal is dropped rather than re-anchored.
+  for (const t of eligibleDeferredAnchors(board)) add(t); // already HRW-owns-filtered
   for (const e of (board?.eligible ?? []).map((x) => x && x.id).filter(Boolean).filter(owns)) add(e);
   // holistic foreign-failover: a flagged tier1/tier2 ticket this host does NOT own,
   // ONLY when its owner is provably dead/stranded. Appended AFTER all self-owned.
@@ -962,15 +1173,29 @@ export function buildBoardContext(boardState, invariants) {
 // ── (6) buildBoardScanEvent — PURE. The flat event reused through the CTL-1287
 // emit envelope. Scalars at the top of details (CTL-1291 promotes them to
 // chartable attributes); rosters/move arrays stay in details → body.payload.
-export function buildBoardScanEvent({ mode, invariants, decision }) {
+export function buildBoardScanEvent({ mode, invariants, decision, act = null }) {
   const totalMoves = decision.proposed.tier1 + decision.proposed.tier2 + decision.proposed.tier3;
+  // CTL-1435 (C1): the actuation OUTCOME of this scan. Without it the journal shows
+  // proposedMoves but never whether anything was dispatched — the blind spot behind
+  // the propose-forever/dispatch-never incident. shadow/off never actuate → the
+  // default records dispatched:false, skippedReason:"shadow".
+  const actOutcome = {
+    dispatched: act?.dispatched === true,
+    anchor: act?.anchor ?? null,
+    skippedReason: act?.skippedReason ?? (act?.dispatched === true ? null : "shadow"),
+  };
   return {
     type: "recovery.board-scan",
     ticket: null, // board/fleet-scoped → event.label:null; the board reader ignores it (correct)
     fix_class: null,
     reason:
       `board-health scan (${mode}): ${decision.invariantsFailed} invariant(s) flagged, ` +
-      `gate=${decision.gate.decision}, ${totalMoves} move(s) proposed`,
+      `gate=${decision.gate.decision}, ${totalMoves} move(s) proposed` +
+      (actOutcome.dispatched
+        ? `, dispatched ${actOutcome.anchor}`
+        : actOutcome.skippedReason
+          ? `, no dispatch (${actOutcome.skippedReason})`
+          : ""),
     details: {
       mode,
       // ── chartable scalars (CTL-1291 promoteNumericAttrs) ──
@@ -980,6 +1205,9 @@ export function buildBoardScanEvent({ mode, invariants, decision }) {
       proposedTier1: decision.proposed.tier1,
       proposedTier2: decision.proposed.tier2,
       proposedTier3: decision.proposed.tier3,
+      // CTL-1435 (C1): 0/1 so Grafana can chart the dispatch RATE alongside the
+      // proposal counts (proposed-vs-dispatched is the actuation-liveness signal).
+      actDispatched: actOutcome.dispatched ? 1 : 0,
       invariants: Object.fromEntries(
         Object.entries(invariants).map(([k, v]) => [k, { ok: v.ok, failed: v.failed, observable: v.observable }]),
       ),
@@ -988,6 +1216,10 @@ export function buildBoardScanEvent({ mode, invariants, decision }) {
       tier1Moves: decision.moves.tier1,
       tier2Moves: decision.moves.tier2,
       tier3Moves: decision.moves.tier3,
+      // CTL-1435 (C1): the full act-outcome object. `anchor` is high-cardinality
+      // (a ticket id) so it lives here in body.payload, never promoted.
+      // deriveRing (C2) reads `payload.act.dispatched` from this.
+      act: actOutcome,
     },
   };
 }
@@ -1007,6 +1239,8 @@ export function boardHealthPass({
   ownerForTicket,
   repoForTicket, // CTL-1157 (Codex #4): ticket→owner/repo resolver (daemon-bound)
   getReconcileMarkers,
+  getDeferredBoardHealthTickets, // CTL-1432 (B2): deferred board-health anchor candidates
+  sanctionedNeedsHuman, // CTL-1432 (B3): sanctioned needs-human latch allowlist
   getPrStatusMap, // CTL-1157: filter_state PR-status reader (daemon-bound)
   deadHosts, // CTL-1157: provably-dead host set (daemon-computed)
   lastRunMs = _lastRunMs,
@@ -1027,50 +1261,83 @@ export function boardHealthPass({
     orchDir, getBoard, getWorkerSignals, getEligible,
     roster, self, multiHost, capacity, readEventRing, ownerForTicket, repoForTicket, getReconcileMarkers,
     getPrStatusMap, deadHosts, mode, now,
+    getDeferredBoardHealthTickets, sanctionedNeedsHuman, // CTL-1432 (B2/B3)
   });
   const invariants = evaluateInvariants(board, { mode });
   const dec = decideBoardHealth(invariants, board);
 
-  try {
-    emit(buildBoardScanEvent({ mode, invariants, decision: dec })); // shadow AND enforce
-  } catch (err) {
-    log({ err: err.message }, "board-health: emit failed (continuing)");
-  }
-
   // enforce-ONLY actuation (CTL-1300), and only if a caller injected an `act`
-  // seam. SHADOW-FIRST is preserved structurally: shadow never reaches here, and
-  // the scheduler injects an `act` ONLY in the daemon binding (operator-gated via
+  // seam. SHADOW-FIRST is preserved structurally: shadow never actuates, and the
+  // scheduler injects an `act` ONLY in the daemon binding (operator-gated via
   // CATALYST_BOARD_HEALTH=enforce). This is the HOLISTIC dispatch — ONE
   // recovery-pass delegate per proceeding scan, anchored to board-health's chosen
   // ticket and carrying the whole-board boardContext (the delegate reasons across
-  // the WHOLE board, not once per proposed move). The actuator the scheduler
-  // binds is the audited-real, capped, cooldown'd defaultInvokeRecoveryPass.
+  // the WHOLE board, not once per proposed move). The actuator the scheduler binds
+  // is the audited-real, capped, cooldown'd defaultInvokeRecoveryPass.
+  //
+  // CTL-1435 (C1): actuate FIRST and capture the OUTCOME, THEN emit — so the scan
+  // event records whether a proposal became a dispatch (and, if not, a
+  // machine-readable skippedReason). Emit still fires for shadow AND enforce; only
+  // the ORDER (act→emit) and the added act field change. The whole enforce branch
+  // is wrapped so an unexpected throw degrades to skippedReason:"act-error" and the
+  // scan event still emits (previously an emit-first order made that implicit).
   let actResult;
-  if (mode === "enforce" && typeof act === "function" && dec.gate.decision === "proceed") {
-    // CTL-1157 (MUST-FIX 1+2): compute the ORDERED holistic candidate list. The
-    // self-owned chain comes first (byte-identical to CTL-1302's single anchor);
-    // a foreign-owned flagged ticket is appended ONLY when its owner is provably
-    // dead/stranded (owner ∈ strandedNode.flagged ∪ deadHosts) — never a live
-    // peer's branch. The act site (daemon) iterates the list and dispatches the
-    // first ACTIONABLE (non-cooldown/non-latched) candidate, one per scan, so a
-    // single latched anchor no longer wedges the whole flagged cohort.
-    const strandedOrDeadHosts = new Set([
-      ...(invariants.strandedNode?.flagged ?? []),
-      ...(board.deadHosts ?? []),
-    ]);
-    const candidates = selectAnchorCandidates(dec.moves, board, { holistic: true, strandedOrDeadHosts });
-    const anchor = candidates[0] ?? null;
-    if (!anchor) {
-      log({ reason: "no-owned-anchor" }, "board-health: proceed but no actionable ticket anchor — no holistic dispatch this scan");
+  // Codex round-2: an enforce pass with NO actuator wired is itself an actuation
+  // failure — it proposes but can never dispatch. Give it a distinct "no-actuator"
+  // wedge reason (vs. shadow/off's benign "shadow") so checkActuationLiveness
+  // catches a miswired daemon, not only cooldown-latching.
+  let actOutcome = {
+    dispatched: false,
+    anchor: null,
+    skippedReason: mode === "enforce" ? "no-actuator" : "shadow",
+  };
+  if (mode === "enforce" && typeof act === "function") {
+    if (dec.gate.decision !== "proceed") {
+      // the gate held (all-green / no-actionable-moves / no-free-slots / rate-limit-cliff)
+      actOutcome = { dispatched: false, anchor: null, skippedReason: dec.gate.reason ?? "gate-hold" };
     } else {
-      const boardContext = buildBoardContext(board, invariants);
       try {
-        actResult = act({ anchor, candidates, boardContext, decision: dec, board }) ?? null;
-        log({ anchor, candidates: candidates.length, dispatched: actResult?.dispatched ?? null }, "board-health: holistic recovery-pass delegate actuated");
+        // CTL-1157 (MUST-FIX 1+2): compute the ORDERED holistic candidate list. The
+        // self-owned chain comes first (byte-identical to CTL-1302's single anchor);
+        // a foreign-owned flagged ticket is appended ONLY when its owner is provably
+        // dead/stranded (owner ∈ strandedNode.flagged ∪ deadHosts) — never a live
+        // peer's branch. The act site iterates the list and dispatches the first
+        // ACTIONABLE (non-cooldown/non-latched) candidate, one per scan, so a single
+        // latched anchor no longer wedges the whole flagged cohort.
+        const strandedOrDeadHosts = new Set([
+          ...(invariants.strandedNode?.flagged ?? []),
+          ...(board.deadHosts ?? []),
+        ]);
+        const candidates = selectAnchorCandidates(dec.moves, board, { holistic: true, strandedOrDeadHosts });
+        const anchor = candidates[0] ?? null;
+        if (!anchor) {
+          log({ reason: "no-owned-anchor" }, "board-health: proceed but no actionable ticket anchor — no holistic dispatch this scan");
+          actOutcome = { dispatched: false, anchor: null, skippedReason: "no-owned-anchor" };
+        } else {
+          const boardContext = buildBoardContext(board, invariants);
+          actResult = act({ anchor, candidates, boardContext, decision: dec, board }) ?? null;
+          log({ anchor, candidates: candidates.length, dispatched: actResult?.dispatched ?? null }, "board-health: holistic recovery-pass delegate actuated");
+          const dispatched = actResult?.dispatched === true;
+          actOutcome = {
+            dispatched,
+            // the ACTUALLY-dispatched candidate (holisticBoardHealthAct may skip the
+            // [0] anchor and dispatch a later one); fall back to the intended anchor.
+            anchor: (dispatched ? actResult?.candidate : null) ?? anchor,
+            skippedReason: dispatched ? null : actResult?.reason ?? "all-candidates-cooldown",
+          };
+        }
       } catch (err) {
-        log({ err: err.message, anchor }, "board-health: act failed (continuing)");
+        log({ err: err.message }, "board-health: act failed (continuing)");
+        actOutcome = { dispatched: false, anchor: null, skippedReason: "act-error" };
       }
     }
+  }
+
+  // CTL-1435 (C1): emit AFTER actuation so the scan event carries the act outcome.
+  try {
+    emit(buildBoardScanEvent({ mode, invariants, decision: dec, act: actOutcome })); // shadow AND enforce
+  } catch (err) {
+    log({ err: err.message }, "board-health: emit failed (continuing)");
   }
 
   _lastRunMs = nowMs;

@@ -34,7 +34,7 @@ import {
   applyBootDrainPolicy, // CTL-1321: boot accepting work by default
   getRegistryPath,
   getEventLogPath,
-  getJobsRoot,      // CTL-1165 D3: job-dir GC root
+  getJobsRoot, // CTL-1165 D3: job-dir GC root
   log,
   EVENT_DEBOUNCE_MS,
   TAILER_POLL_INTERVAL_MS,
@@ -42,17 +42,21 @@ import {
   readMemorySamplerConfig,
   readFleetHealthConfig, // CTL-1165 D5: fleet-health guardrail config (selfHeal default OFF)
   readRatelimitPollerConfig,
-  getHostName,      // CTL-862
+  getHostName, // CTL-862
   resolveClusterHosts, // CTL-1273/CTL-1271: roster + source + multiHost for the boot assertion
   getLivenessAnchorIssue, // CTL-1271: "multi-host was configured" detector
-  getStaticRoster,        // CTL-1271: "multi-host was configured" detector
+  getStaticRoster, // CTL-1271: "multi-host was configured" detector
   CLUSTER_SYNC_INTERVAL_MS, // CTL-1274: cluster-repo auto-pull cadence
   isHostNamePinnedFromConfig, // CTL-1093
-  getCatalystRepoDir,       // CTL-1093 sticky dir
+  getCatalystRepoDir, // CTL-1093 sticky dir
   readDelegateRunnerConfig, // CTL-1331: async board-health delegate runner kill-switch
-  readLinearReplica,        // CTL-1340: read-replica tier flag (inert; default off)
-  getExecutor,              // CTL-1365a: phase-worker executor resolver (env→Layer-1→node-class default; all "bg" in Phase 1)
-  dispatchModeForExecutor,  // CTL-1365a: executor → catalyst.dispatch.mode telemetry vocab
+  readLinearReplica, // CTL-1340: read-replica tier flag (inert; default off)
+  getExecutor, // CTL-1365a: phase-worker executor resolver (env→Layer-1→node-class default; all "bg" in Phase 1)
+  dispatchModeForExecutor, // CTL-1365a: executor → catalyst.dispatch.mode telemetry vocab
+  resolveExecutorForPhase, // CTL-1457: per-phase executor routing hook (boot validation of executorByPhase values)
+  readExecutorByPhaseLayer1, // CTL-1457: Layer-1 catalyst.orchestration.executorByPhase map reader
+  hasInProcessExecutorRoute, // CTL-1457 (N1): does executorByPhase route ANY phase to sdk|codex-exec? (arms the slot/occupancy gates on a bg node)
+  codexConfig, // CTL-1457: codex-exec runtime settings (codexHome/bin/…) for the boot-eligibility gate
 } from "./config.mjs";
 import { resolveBootIdentity } from "./host-boot-identity.mjs"; // CTL-1093
 import { readStickyIdentity, writeStickyIdentity } from "./host-sticky.mjs"; // CTL-1093
@@ -68,7 +72,7 @@ import { startRatelimitPoller as realStartRatelimitPoller } from "./ratelimit-po
 import { listProjects as realListProjects } from "./registry.mjs"; // CTL-854: boot health check
 import { startHeartbeat as realStartHeartbeat } from "./heartbeat-event.mjs"; // CTL-859: node.heartbeat emitter
 import { readAdmissionState } from "./admission-state.mjs"; // CTL-1322: live admission block for the heartbeat
-import { startLivenessPublisher as realStartLivenessPublisher } from "./cluster-heartbeat-publisher.mjs"; // CTL-1090: cross-host liveness
+import { startLivenessPublisher as realStartLivenessPublisher, localInFlightTickets } from "./cluster-heartbeat-publisher.mjs"; // CTL-1090: cross-host liveness; CTL-1420 (#17): in-flight list for the Loki heartbeat
 import { emitBootEvent } from "./boot-event.mjs"; // CTL-1084: node.boot self-report
 import {
   recoverStartup,
@@ -79,35 +83,28 @@ import {
   reconcileAll,
   createTicketStateCache,
 } from "./index.mjs";
-import { Reaper, defaultReadActivePhaseSignal, defaultReadSignalBgJobId, defaultAssessWorktreeRemoval } from "./reaper.mjs";
+import {
+  Reaper,
+  defaultReadActivePhaseSignal,
+  defaultReadSignalBgJobId,
+  defaultAssessWorktreeRemoval,
+} from "./reaper.mjs";
 import { listOrchDirs } from "./worktree-safety.mjs"; // CTL-1218: legacy-run provenance roots
 import { startOrphanReaperTimer, readOrphanReaperConfig } from "./orphan-reaper-timer.mjs";
 import { sweepJobDirs } from "./job-dir-gc.mjs"; // CTL-1165 D3: ~/.claude/jobs/<id> dir GC
 import { sweepWorkerDirs } from "./worker-dir-gc.mjs"; // CTL-1205: execution-core/workers/<TICKET>/ GC
 import { sweepWtCleanupQueue } from "./wt-cleanup-drain.mjs"; // CTL-1218: wt-cleanup-queue drain
 import { ProcReaper } from "./proc-reaper.mjs"; // CTL-1165 D2: orphan child-process reaper (default shadow)
-import {
-  startWorktreeRefreshTimer,
-  readWorktreeRefreshConfig,
-} from "./worktree-refresh-timer.mjs";
+import { startWorktreeRefreshTimer, readWorktreeRefreshConfig } from "./worktree-refresh-timer.mjs";
 // CTL-1331: the async board-health delegate runner timer (kicks the DETACHED
 // drainer that does the heavy worktree-provision + `claude --bg` off the daemon
 // event loop). Gated by readDelegateRunnerConfig; Phase A ships it inert.
 import { startDelegateRunnerTimer } from "./delegate-runner.mjs";
-import {
-  startStalePrRescueTimer,
-  readStalePrRescueConfig,
-} from "./stale-pr-rescue-timer.mjs";
+import { startStalePrRescueTimer, readStalePrRescueConfig } from "./stale-pr-rescue-timer.mjs";
 import { DEFAULTS as RESCUE_DEFAULTS } from "./stale-pr-rescue.mjs";
-import {
-  startOrphanPrSweepTimer,
-  readOrphanPrSweepConfig,
-} from "./orphan-pr-sweep-timer.mjs";
+import { startOrphanPrSweepTimer, readOrphanPrSweepConfig } from "./orphan-pr-sweep-timer.mjs";
 import { DEFAULTS as ORPHAN_DEFAULTS } from "./orphan-pr-sweep.mjs";
-import {
-  startLinearReconcileTimer,
-  readLinearReconcileConfig,
-} from "./linear-reconcile-timer.mjs";
+import { startLinearReconcileTimer, readLinearReconcileConfig } from "./linear-reconcile-timer.mjs";
 import { reconcileBootResume, processApprovedResumes } from "./boot-resume.mjs";
 // CTL-665: the committed executionCore concurrency reader — imported directly
 // (not via the index.mjs barrel, mirroring the orphan-reaper-timer import) so
@@ -125,10 +122,17 @@ import {
   defaultClearStall, // CTL-1067: J3 stall-clear seam
 } from "./scheduler.mjs";
 import * as linearWrite from "./linear-write.mjs"; // CTL-1067: writeStatus for defaultClearStall
-import { writeBootMarker, clearProgressMarks, resolvePhaseSessionId, defaultAppendOperatorEvent } from "./recovery.mjs"; // CTL-655: window the revive budget to this run; CTL-736: reset progress high-water; CTL-768: --resume; CTL-1044: operator-event appender for the scheduler's appendIntentEvent seam
+import { appendWorkerTransitionEvent as defaultAppendWorkerTransitionEvent } from "./worker-transition-event.mjs"; // CTL-764 finding 11: needs-input→cleared on comment wake
+import {
+  writeBootMarker,
+  clearProgressMarks,
+  resolvePhaseSessionId,
+  defaultAppendOperatorEvent,
+} from "./recovery.mjs"; // CTL-655: window the revive budget to this run; CTL-736: reset progress high-water; CTL-768: --resume; CTL-1044: operator-event appender for the scheduler's appendIntentEvent seam
 import { startAutoTuner } from "./autotune.mjs"; // CTL-684: side-car maxParallel auto-tuner
-import { dispatchTicket, dispatchForExecutor, makeCommentWakeDispatch } from "./dispatch.mjs"; // CTL-549: comment-wake re-dispatch; CTL-1365a/b: executor→dispatch selection at the launch seam + comment-wake executor binding
-import { resolveSdkBootExecutor } from "./sdk-run-phase-agent.mjs"; // CTL-1367 item 9 + P3: boot auth gate (subscription-only) that degrades sdk→bg AND emits execution-core.executor.bg-fallback so the silent fallback is observable
+import { dispatchTicket, makeCommentWakeDispatch, makePhaseAwareDispatchFn } from "./dispatch.mjs"; // CTL-549: comment-wake re-dispatch; CTL-1365a/b: executor→dispatch selection at the launch seam + comment-wake executor binding; CTL-1457: per-phase-aware dispatchFn factory (owns the executor→dispatch selection internally)
+import { resolveSdkBootExecutor, assertSdkAuth } from "./sdk-run-phase-agent.mjs"; // CTL-1367 item 9 + P3: boot auth gate (subscription-only) that degrades sdk→bg AND emits execution-core.executor.bg-fallback so the silent fallback is observable; CTL-1457 (T5): assertSdkAuth also gates a per-phase sdk route on a bg/default node
+import { resolveCodexBootEligibility } from "./codex-run-phase-agent.mjs"; // CTL-1457: codex boot gate (auth.json + `codex --version`) that degrades routed codex phases + emits execution-core.executor.codex-fallback
 import { removeLabel as defaultRemoveLabel } from "./linear-write.mjs"; // CTL-549: clear needs-human on resume
 // CTL-671: the real phantom-sweep seams. startScheduler defaults them to safe
 // no-ops (hermetic for direct-call unit tests); the REAL daemon arms them here
@@ -203,7 +207,9 @@ export function readLinearBotUserIds(layer1Path, layer2Path) {
     try {
       const parsed = JSON.parse(readFileSync(path, "utf8"));
       extractor(parsed, ids);
-    } catch { /* ignore unreadable / malformed files */ }
+    } catch {
+      /* ignore unreadable / malformed files */
+    }
   }
   // NEW global path: both worker and orchestrator bot identities (Layer 2).
   addFromPath(layer2Path, (p, s) => {
@@ -232,7 +238,9 @@ export function readLinearBotWriteId(layer1Path, layer2Path) {
       const p = JSON.parse(readFileSync(layer2Path, "utf8"));
       const id = p?.catalyst?.linear?.bot?.orchestrator?.botUserId;
       if (typeof id === "string" && id.length > 0) return id;
-    } catch { /* ignore */ }
+    } catch {
+      /* ignore */
+    }
   }
   // Fallback: Layer-1 catalyst.monitor.linear.botUserId.
   if (layer1Path) {
@@ -240,7 +248,9 @@ export function readLinearBotWriteId(layer1Path, layer2Path) {
       const p = JSON.parse(readFileSync(layer1Path, "utf8"));
       const id = p?.catalyst?.monitor?.linear?.botUserId;
       if (typeof id === "string" && id.length > 0) return id;
-    } catch { /* ignore */ }
+    } catch {
+      /* ignore */
+    }
   }
   return null;
 }
@@ -325,10 +335,16 @@ function ensureState(orchDir) {
 export async function handleCommentWake(
   parsed,
   {
-    orchDir, dispatch, removeLabel, botUserId,
+    orchDir,
+    dispatch,
+    removeLabel,
+    botUserId,
     resolveSession = resolvePhaseSessionId,
     clearStall = () => false, // CTL-1067: J3 stall-clear seam; default no-op
-  },
+    // CTL-764 finding 11: canonical worker.transition emitter for the needs-input→
+    // cleared resolution. Injectable for tests; defaults to the real appender.
+    appendWorkerTransitionEvent = defaultAppendWorkerTransitionEvent,
+  }
 ) {
   const { ticket } = parsed ?? {};
   if (!ticket) return;
@@ -342,7 +358,7 @@ export async function handleCommentWake(
   let signalFiles;
   try {
     signalFiles = readdirSync(workerDir).filter(
-      (f) => f.startsWith("phase-") && f.endsWith(".json"),
+      (f) => f.startsWith("phase-") && f.endsWith(".json")
     );
   } catch {
     return;
@@ -362,9 +378,13 @@ export async function handleCommentWake(
     // from the preserved prior-done signal and re-dispatches the phase fresh.
     if (sig.status === "stalled") {
       const phase = fname.slice("phase-".length, -".json".length);
-      try { clearStall({ ticket, phase }); }
-      catch (err) {
-        log.warn({ ticket, phase, err: err?.message }, "handleCommentWake: clearStall threw — skipping");
+      try {
+        clearStall({ ticket, phase });
+      } catch (err) {
+        log.warn(
+          { ticket, phase, err: err?.message },
+          "handleCommentWake: clearStall threw — skipping"
+        );
       }
       continue;
     }
@@ -386,16 +406,20 @@ export async function handleCommentWake(
       const signalPath = join(workerDir, fname);
       try {
         const updated = {
-          ...sig, status: "stalled", stoppedForHold: false,
+          ...sig,
+          status: "stalled",
+          stoppedForHold: false,
           attentionReason: "ctl-768-hold-wake",
           updatedAt: new Date().toISOString().replace(/\.\d{3}Z$/, "Z"),
         };
         const tmp = `${signalPath}.tmp.${process.pid}`;
         writeFileSync(tmp, JSON.stringify(updated, null, 2));
-        renameSync(tmp, signalPath);                            // atomic
+        renameSync(tmp, signalPath); // atomic
       } catch (err) {
-        log.warn({ ticket, phase: parkedPhase, err: err.message },
-          "handleCommentWake: hold-wake signal reset failed — skipping");
+        log.warn(
+          { ticket, phase: parkedPhase, err: err.message },
+          "handleCommentWake: hold-wake signal reset failed — skipping"
+        );
         continue;
       }
       clearHoldStopCooldown(orchDir, ticket, parkedPhase);
@@ -405,6 +429,35 @@ export async function handleCommentWake(
       await removeLabel(ticket, "needs-human"); // CTL-1067 Bug 3: was "needs-human/question"
     } catch {
       /* fail-open */
+    }
+    // CTL-764 finding E: gate the needs-input→cleared emission on a CONFIRMED removal.
+    // removeLabel reports a failed read/write as {removed:false} WITHOUT throwing, so the
+    // try/catch alone never suppresses the event — a bare emit would record a clear the
+    // durable label never got. removed:true covers both a real removal AND the idempotent
+    // already-absent case (linear-write.mjs:289-291); an undefined return from a test stub
+    // is treated as success to keep the wake path testable.
+    let needsInputRemoved = false;
+    try {
+      const res = await removeLabel(ticket, "needs-input"); // CTL-764 Phase 4: durable needs-input cleared on genuine resolution
+      needsInputRemoved = res === undefined || res?.removed === true;
+    } catch {
+      /* fail-open */
+    }
+    // CTL-764 finding 11: record the needs-input→cleared resolution in the canonical
+    // worker.transition stream. scheduler.mjs owns the park/apply emission; the clear
+    // is emitted here (the daemon removes the durable label out-of-band and redispatches
+    // — the scheduler never observes this edge). toDisposition:null is encoded as the
+    // "cleared" sentinel in the event builder (finding 12). Fail-open — never blocks the
+    // wake. finding E: only emitted on a confirmed removal.
+    if (needsInputRemoved) {
+      appendWorkerTransitionEvent({
+        ticket,
+        orchId: ticket,
+        fromDisposition: "needs-input",
+        toDisposition: null,
+        reason: "comment-wake",
+        source: "comment-wake-clear",
+      });
     }
 
     dispatch(orchDir, ticket, parkedPhase, { handoffPath, resumeSession });
@@ -548,7 +601,7 @@ export function startDaemon({
     { drained: _bootDrain.drained },
     _bootDrain.drained
       ? "boot: CATALYST_BOOT_DRAINED set — node boots drained, holding new-work admission (CTL-1321)"
-      : "boot: drain flag cleared — node accepting work (CTL-1321)",
+      : "boot: drain flag cleared — node accepting work (CTL-1321)"
   );
   _stopMonitor = stopMonitorFn;
   _stopScheduler = stopSchedulerFn;
@@ -565,7 +618,7 @@ export function startDaemon({
   _livenessTimer = setInterval(() => {
     try {
       Promise.resolve(refreshAgents()).catch((err) =>
-        log.warn({ err: err?.message }, "liveness warmer: refresh failed"),
+        log.warn({ err: err?.message }, "liveness warmer: refresh failed")
       );
     } catch (err) {
       log.warn({ err: err?.message }, "liveness warmer: threw");
@@ -626,20 +679,75 @@ export function startDaemon({
       emitEvent: defaultAppendOperatorEvent,
       log,
     });
-    const executor = bootExec.executor;
+    // CTL-1457 (finding 1): `let` because a codex-exec BOOT executor that fails the
+    // codex boot precondition is degraded to "bg" below (resolveSdkBootExecutor passes
+    // codex-exec through untouched — the node-level codex degrade is owned here, the
+    // mirror of its own sdk→bg degrade).
+    let executor = bootExec.executor;
+    // CTL-1457: per-phase executor routing. Read the Layer-1 executorByPhase map
+    // ONCE and VALIDATE every value loudly at boot — resolveExecutorForPhase THROWS
+    // on an invalid/typo'd executor id, so wrap each per-phase check so a bad value
+    // is loud-but-NON-fatal (log.error + a best-effort event) and that phase simply
+    // falls back to the boot executor at dispatch time (makePhaseAwareDispatchFn
+    // catches the same throw). An empty map (the default) is a pure no-op.
+    const executorByPhase = readExecutorByPhaseLayer1(configPath);
+    for (const [routedPhase, routedValue] of Object.entries(executorByPhase)) {
+      try {
+        resolveExecutorForPhase(routedPhase, { configPath });
+      } catch (err) {
+        log.error(
+          { err: err.message, phase: routedPhase, value: routedValue },
+          "executorByPhase: invalid routing value at boot — that phase will use the boot executor (fix Layer-1 catalyst.orchestration.executorByPhase)"
+        );
+        try {
+          defaultAppendOperatorEvent({
+            "event.name": "execution-core.executor.route-invalid",
+            payload: { phase: routedPhase, value: routedValue, reason: err.message },
+          });
+        } catch {
+          /* best-effort */
+        }
+      }
+    }
+    // CTL-1457: codex boot-eligibility gate. When codex is routed — a per-phase route
+    // OR the node-level boot executor is itself codex-exec (finding 1) — assert the
+    // codex auth home + probe `codex --version`; on failure it WARN-logs and emits
+    // execution-core.executor.codex-fallback, and makePhaseAwareDispatchFn degrades
+    // routed codex phases to the boot executor. When nothing routes to codex it is a
+    // pure no-op (eligible:true, no checks, no event). `bootExecutor` is threaded so
+    // the gate arms for a codex-exec boot node and labels the event's `effective`
+    // degrade target (finding 5: "bg" for a codex node, else the real boot executor).
+    const codexElig = resolveCodexBootEligibility(executorByPhase, {
+      codexCfg: codexConfig({ configPath }),
+      emitEvent: defaultAppendOperatorEvent,
+      bootExecutor: bootExec.executor,
+      log,
+    });
+    // CTL-1457 (finding 1): degrade the NODE-LEVEL boot executor when codex-exec is the
+    // node default but the codex boot precondition failed — mirror resolveSdkBootExecutor's
+    // sdk→bg degrade (it passes codex-exec through untouched, so the node-level codex
+    // degrade lives here). Without this a codex-exec node whose auth/binary is unusable
+    // would still route EVERY unrouted phase to the non-eligible codex executor. A
+    // per-phase codex route degrades separately inside makePhaseAwareDispatchFn.
+    if (bootExec.executor === "codex-exec" && !codexElig.eligible) {
+      executor = "bg";
+    }
     // CTL-1410 Phase B: reap stale SDK-worker disk projections. No in-process
     // worker survives a daemon restart, so any projection whose pid is dead is
     // a leftover of the previous daemon; delete it BEFORE boot-resume and the
     // scheduler run, so no liveness consumer trusts a ghost projection.
     const sdkRegistryBoot = reconcileSdkRegistryOnBoot(orchDir);
-    if (sdkRegistryBoot.removed.length > 0) {
+    if (sdkRegistryBoot.removed.length > 0 || (sdkRegistryBoot.killedChildren?.length ?? 0) > 0) {
       log.info(
         {
           removed: sdkRegistryBoot.removed,
           kept: sdkRegistryBoot.kept,
           harvested: sdkRegistryBoot.harvested.map((h) => h.ticket),
+          // CTL-1457 (N2): orphaned codex children SIGTERM'd before their dead-daemon
+          // projections were reaped (empty on a pure sdk/bg fleet).
+          killedChildren: (sdkRegistryBoot.killedChildren ?? []).map((k) => k.ticket),
         },
-        "boot: reaped stale sdk-worker projections (CTL-1410); harvested warm-resume sessions (CTL-1422)"
+        "boot: reaped stale sdk-worker projections (CTL-1410); harvested warm-resume sessions (CTL-1422); killed orphaned codex children (CTL-1457 N2)"
       );
     }
     // CTL-1422: interrupted in-process runs (dead-pid projections that captured a
@@ -648,24 +756,47 @@ export function startDaemon({
     const sdkSessionHarvest = new Map(
       sdkRegistryBoot.harvested.map((h) => [h.ticket, h.sessionId])
     );
-    // CTL-1396 (Codex P2): under executor=sdk, inject the unified-event-log appender
-    // into the dispatch path so sdkRunPhaseAgent's telemetry (execution-core.sdk.phase-turns
-    // — the turn-cap calibration signal — plus .overloaded/.auth.misconfigured) lands in
-    // the JSONL event log / Loki, not just daemon.log's stderr. sdkRunPhaseAgent's emitEvent
-    // is the two-arg (name, payload) shape; defaultAppendOperatorEvent takes the one-arg
-    // {event.name,payload} envelope, so adapt. bg/oneshot-legacy → identity pass-through
-    // (no sdk launch verb → byte-identical to today).
-    const rawDispatchFn = dispatchForExecutor(executor);
-    const dispatchFn =
-      executor === "sdk"
-        ? (args, seams = {}) =>
-            rawDispatchFn(args, {
-              emitEvent: (name, payload) =>
-                defaultAppendOperatorEvent({ "event.name": name, payload }),
-              ...seams,
-            })
-        : rawDispatchFn;
+    // CTL-1457: the SINGLE phase-aware dispatchFn threaded to all FIVE dispatch entry
+    // points. Per dispatch it consults resolveExecutorForPhase(phase) — a routed phase
+    // runs on its configured executor (codex degraded to the boot executor when
+    // codexElig.eligible is false), every other phase on the boot executor. It also
+    // owns the CTL-1396 emitEvent adaptation: for the sdk AND codex-exec arms it binds
+    // defaultAppendOperatorEvent (the one-arg {event.name,payload} envelope) into the
+    // runner's two-arg (name,payload) emitEvent so execution-core.{sdk,codex}.* telemetry
+    // lands in the JSONL event log / Loki, not just daemon.log's stderr. With
+    // executorByPhase empty (the default) every phase resolves to the boot executor, so
+    // the selected dispatch fn + emitEvent wrapping are byte-identical to today.
+    // CTL-1457 (T5): the daemon-boot sdk-auth verdict for a per-phase sdk route. The
+    // node-level executor already went through resolveSdkBootExecutor (sdk→bg on a bad
+    // env), but a phase EXPLICITLY routed to "sdk" on a bg/default node bypasses that
+    // node-level gate — so compute the same auth verdict here and thread it so
+    // makePhaseAwareDispatchFn degrades a routed sdk phase to the boot executor ONCE
+    // instead of refusing before prelaunch on every dispatch. Zero-change-when-unrouted:
+    // the flag is only consulted for an EXPLICITLY-routed sdk phase.
+    const sdkBootEligible = assertSdkAuth({
+      env: process.env,
+      oauthToken: process.env.CLAUDE_CODE_OAUTH_TOKEN,
+    }).ok;
+    const dispatchFn = makePhaseAwareDispatchFn({
+      bootExecutor: executor,
+      codexBootEligible: codexElig.eligible,
+      sdkBootEligible,
+      configPath,
+      emitEvent: defaultAppendOperatorEvent,
+      log,
+    });
     const dispatchMode = dispatchModeForExecutor(executor);
+    // CTL-1457 (N1): the PRIMARY codex/sdk rollout routes ONE phase to codex-exec/sdk
+    // on a node whose boot executor is still bg — there dispatchMode is "phase-agents"
+    // so the scheduler/monitor slot gates (which gate on isInProcessDispatchMode) skip
+    // countSdkInflight and the routed no-bg worker is NOT counted → over-admit past
+    // maxParallel. Derive this flag from the ALREADY-READ executorByPhase map and thread
+    // it alongside dispatchMode so those gates OR it in and count the routed worker.
+    // Empty map (the default) → false → byte-identical. NOTE: a routed-but-degraded
+    // executor (codex not eligible → bg) still arms the gate, but countSdkInflight then
+    // sees 0 no-bg signals (the phase launches bg with a bg_job_id), so occupancy is
+    // unchanged — the flag is safe to derive from the raw routing map.
+    const hasInProcessRoute = hasInProcessExecutorRoute(executorByPhase);
     // CTL-1365b: the comment-wake re-dispatch binding — routes a parked ticket's
     // re-dispatch through the SAME resolved executor (no split-brain).
     const commentWakeDispatch = makeCommentWakeDispatch(dispatchFn);
@@ -678,7 +809,13 @@ export function startDaemon({
     // CTL-1365b: dispatch === dispatchFn so the crash-recovery re-dispatch honors
     // the executor flag (defaultDispatch under bg — reconcileBootResume's own
     // default — so byte-identical to today).
-    const bootResume = reconcileBoot({ orchDir, report, concurrency, dispatch: dispatchFn, sdkSessionHarvest }); // CTL-665: config-first ceiling; CTL-1422: warm-resume harvest
+    const bootResume = reconcileBoot({
+      orchDir,
+      report,
+      concurrency,
+      dispatch: dispatchFn,
+      sdkSessionHarvest,
+    }); // CTL-665: config-first ceiling; CTL-1422: warm-resume harvest
     _bootResume = bootResume;
     // CTL-644: dispatch any gated tickets that already have an approval sentinel on disk
     // (operator may have dropped the sentinel while the daemon was down).
@@ -699,8 +836,7 @@ export function startDaemon({
     // so the scheduler's replica block is never reached and behavior is
     // byte-identical to pre-CTL-1340. HIT-only acceleration of the hot
     // per-signal terminal reads once a Catalyst-Cloud replica is seeded on host.
-    const replicaReader =
-      readLinearReplica().mode === "on" ? createReplicaReader() : undefined;
+    const replicaReader = readLinearReplica().mode === "on" ? createReplicaReader() : undefined;
     // CTL-565: the monitor needs orchDir to one-shot-dispatch the triage phase
     // agent on a →Triage transition. `dispatch` stays an injectable default
     // (dispatch.mjs) so the daemon's fakes-pass-through pattern still holds.
@@ -721,13 +857,20 @@ export function startDaemon({
       cache,
       dispatch: dispatchFn, // CTL-1365a: →Triage one-shot dispatch substrate (bg today)
       dispatchMode, // CTL-1367 P1: gate the SDK-occupancy term in the →Triage budget (no-op under bg)
+      hasInProcessRoute, // CTL-1457 (N1): also arm the →Triage SDK-occupancy term when a per-phase route runs in-process on a bg node
       concurrency, // CTL-716: slot-gate uses the same ceiling as the scheduler
       botUserIds: linearBotUserIds, // CTL-781: respect-assignment gate
       botWriteId: linearBotWriteId, // CTL-781: self-assign on claim
       gateway: gatewayReader, // CTL-781: gateway-first assignee reads
       onComment: (parsed) => {
         commentInboxWriter(parsed); // CTL-749: write to inbox.jsonl for in-flight workers
-        handleCommentWake(parsed, { orchDir, dispatch: commentWakeDispatch, removeLabel: defaultRemoveLabel, botUserId: linearBotUserIds, clearStall: defaultClearStall(orchDir, linearWrite) }); // CTL-549 + CTL-756 + CTL-1365b: re-dispatch parked tickets through the resolved executor; botUserId suppresses self-echo; CTL-1067: J3 stall-clear
+        handleCommentWake(parsed, {
+          orchDir,
+          dispatch: commentWakeDispatch,
+          removeLabel: defaultRemoveLabel,
+          botUserId: linearBotUserIds,
+          clearStall: defaultClearStall(orchDir, linearWrite),
+        }); // CTL-549 + CTL-756 + CTL-1365b: re-dispatch parked tickets through the resolved executor; botUserId suppresses self-echo; CTL-1067: J3 stall-clear
       },
       onUpdate: createUpdateInboxWriter(orchDir, linearBotUserIds), // CTL-749
       // CTL-1397: inject the SAME mode-gated replica reader the scheduler uses
@@ -747,6 +890,7 @@ export function startDaemon({
       cache,
       dispatch: dispatchFn, // CTL-1365a: scheduler pull-loop dispatch substrate (bg today)
       dispatchMode, // CTL-1365a: catalyst.dispatch.mode for the Tier-1 tick line + OTLP resource attr
+      hasInProcessRoute, // CTL-1457 (N1): arm the scheduler occupancy gates when a per-phase route runs in-process on a bg node
       concurrency,
       configPath,
       layer2Path,
@@ -820,7 +964,18 @@ export function startDaemon({
     }
 
     if (enableReaper) {
-      startReaperAndTimer({ orphanReaperConfig, worktreeRefreshConfig, stalePrRescueConfig, orphanPrSweepConfig, linearReconcileConfig, configPath, debounceMs, pollMs, orchDir, makeReaper });
+      startReaperAndTimer({
+        orphanReaperConfig,
+        worktreeRefreshConfig,
+        stalePrRescueConfig,
+        orphanPrSweepConfig,
+        linearReconcileConfig,
+        configPath,
+        debounceMs,
+        pollMs,
+        orchDir,
+        makeReaper,
+      });
     }
 
     // CTL-650: start the push-based session wait-state watcher. Inside the same
@@ -865,6 +1020,10 @@ export function startDaemon({
       // both in scope here). Fail-open: readAdmissionState never throws.
       _heartbeat = startHeartbeat({
         admissionFn: () => readAdmissionState({ orchDir, concurrency }),
+        // CTL-1420 (#17): carry this host's in-flight tickets on every node.heartbeat
+        // so a peer can read liveness + ownership from Loki (retiring the Linear
+        // heartbeat attachment). Same local signal-scan source the publisher uses.
+        inFlightTicketsFn: () => localInFlightTickets(getHostName(), { orchDir }),
       });
       // CTL-1090: cross-host liveness publisher (multi-host only; single-host no-op).
       // startLivenessPublisher self-gates on roster.length > 1, so this is always safe.
@@ -887,7 +1046,10 @@ export function startDaemon({
         const bootSync = clusterSync();
         log.info({ pull: bootSync?.pull }, "execution-core daemon: cluster-repo synced at boot");
       } catch (err) {
-        log.warn({ err: err?.message }, "execution-core daemon: boot cluster-sync threw (continuing)");
+        log.warn(
+          { err: err?.message },
+          "execution-core daemon: boot cluster-sync threw (continuing)"
+        );
       }
       _clusterSyncTimer = setInterval(() => {
         try {
@@ -912,7 +1074,7 @@ export function startDaemon({
       log.warn(
         { registry: getRegistryPath() },
         "execution-core daemon: registry has 0 projects — nothing will be dispatched. " +
-          "Enroll a project: `catalyst-execution-core register --team <TEAM> --repo-root <path>`",
+          "Enroll a project: `catalyst-execution-core register --team <TEAM> --repo-root <path>`"
       );
     }
   } catch (err) {
@@ -985,7 +1147,7 @@ export function startDaemon({
       "execution-core daemon: multi-host was configured (cluster anchor / static roster) " +
         "but the roster resolved to a SINGLE host — this node will own the ENTIRE fleet's " +
         "work under HRW. Check the cluster anchor is reachable and enrolled " +
-        "(`catalyst cluster status`).",
+        "(`catalyst cluster status`)."
     );
   }
   // CTL-1084: emit a structured node.boot event so catalyst-stack status can
@@ -993,9 +1155,10 @@ export function startDaemon({
   // Fail-open — emitBootEvent never throws. Kept alongside the pino log (not replacing it).
   emitBootEvent({
     summary: {
-      adoptedWorkers:   _bootReport?.workers?.running?.length ?? 0,
-      zombiesCleared:   (_bootReport?.workers?.dead?.length ?? 0) + (_bootReport?.workers?.unknown?.length ?? 0),
-      rewalkPlanned:    _bootResume?.planned    ?? _bootResume?.dispatched ?? 0,
+      adoptedWorkers: _bootReport?.workers?.running?.length ?? 0,
+      zombiesCleared:
+        (_bootReport?.workers?.dead?.length ?? 0) + (_bootReport?.workers?.unknown?.length ?? 0),
+      rewalkPlanned: _bootResume?.planned ?? _bootResume?.dispatched ?? 0,
       rewalkDispatched: _bootResume?.dispatched ?? 0,
     },
   });
@@ -1588,7 +1751,17 @@ function main() {
   process.on("unhandledRejection", fatal("unhandled rejection"));
 
   try {
-    startDaemon({ pidFile, orphanReaperConfig, worktreeRefreshConfig, stalePrRescueConfig, orphanPrSweepConfig, linearReconcileConfig, concurrency, configPath, layer2Path }); // CTL-676 + CTL-678 + CTL-707 + CTL-782 + CTL-1175 + CTL-1371
+    startDaemon({
+      pidFile,
+      orphanReaperConfig,
+      worktreeRefreshConfig,
+      stalePrRescueConfig,
+      orphanPrSweepConfig,
+      linearReconcileConfig,
+      concurrency,
+      configPath,
+      layer2Path,
+    }); // CTL-676 + CTL-678 + CTL-707 + CTL-782 + CTL-1175 + CTL-1371
   } catch (err) {
     log.error({ err }, "execution-core daemon: failed to start");
     process.exit(1);

@@ -136,6 +136,16 @@ export function accentFor(row: InboxRow): PaneAccent {
   return "none";
 }
 
+/**
+ * The accent for the needs-human escalation hero. Mirrors accentFor (blocked→red,
+ * decision→amber) but floors the neutral case to amber so an escalation card always
+ * carries at least the amber emphasis.
+ */
+export function escalationAccentFor(row: InboxRow): PaneAccent {
+  const accent = accentFor(row);
+  return accent === "none" ? "amber" : accent;
+}
+
 /** CTL-1110: the needs-human escalation card view-model — a highlighted CTA plus
  *  the labelled explanation sections, top to bottom. Each field is null when the
  *  payload omitted it (rendered absent, never fabricated). */

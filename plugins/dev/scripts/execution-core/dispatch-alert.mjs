@@ -24,6 +24,25 @@ export const ALERT_ELIGIBLE_SOURCE_UNAVAILABLE = "catalyst.alert.eligible_source
 
 export const ALERT_KIND_ELIGIBLE_SOURCE_UNAVAILABLE = "eligible_source_unavailable";
 
+// CTL-1436 (A4): a terminal-probe / GC-census ticket-state read MISSED the replica
+// and its LIVE `linearis issues read` fallback FAILED (429 / timeout / unparseable).
+// This is the "reads-via-replica must be LOUD on fail-open" signal — the silent
+// MISS→live fallthrough is now visible, and the negative cache backs the ticket off
+// so the breaker stops flapping. Throttled per-kind (one line/window) since the
+// negative cache already rate-limits the underlying reads.
+export const ALERT_TICKET_STATE_LIVE_FALLBACK = "catalyst.alert.ticket_state_live_fallback";
+
+export const ALERT_KIND_TICKET_STATE_LIVE_FALLBACK = "ticket_state_live_fallback";
+
+// CTL-1443 (P1-loop-3): a boot-resume approval gate has sat unapproved past its
+// TTL. The gate itself is invisible by design (a marker file under workers/),
+// so without this alert + the Needs-You surfacing a gated ticket waits forever
+// (OTL-41 sat 4+ days). One line per window per kind — the per-ticket dedupe is
+// the marker's surfacedAt field.
+export const ALERT_BOOT_RESUME_PENDING = "catalyst.alert.boot_resume_pending";
+
+export const ALERT_KIND_BOOT_RESUME_PENDING = "boot_resume_pending";
+
 // Per-kind throttle so a per-tick hot path (runEligibleQuery inside the reconcile
 // timer) cannot spam the event log during a sustained storm. The alert is a LOUD
 // "something is wrong"
@@ -111,6 +130,42 @@ export function emitEligibleSourceUnavailable({ team = null, append, now, thrott
       reason ??
       "eligible discovery missed the replica AND the Linear breaker is OPEN — preserved the prior eligible set without spawning linearis (no bucket consumed)",
     detail: team ? { "linear.team.key": team } : {},
+    append,
+    now,
+    throttleMs,
+  });
+}
+
+// emitTicketStateLiveFallback — CTL-1436 (A4). A probeBackoff terminal-state read
+// missed the replica and its live linearis fallback failed; the ticket is now
+// negative-cached (backed off). `identifier` rides in the payload; `reason` is the
+// failure mode (timeout | error | unparseable).
+export function emitBootResumePending({ identifier = null, phase = null, ageHours = null, reason = null, append, now, throttleMs } = {}) {
+  return emitThrottled({
+    eventName: ALERT_BOOT_RESUME_PENDING,
+    kind: ALERT_KIND_BOOT_RESUME_PENDING,
+    reason:
+      reason ??
+      "a boot-resume approval gate exceeded its TTL with no operator response — surfaced to Needs-You (approve with boot-resume-approve.mjs)",
+    detail: {
+      ...(identifier ? { "linear.ticket": identifier } : {}),
+      ...(phase ? { "catalyst.phase": phase } : {}),
+      ...(ageHours != null ? { "catalyst.gate_age_hours": ageHours } : {}),
+    },
+    append,
+    now,
+    throttleMs,
+  });
+}
+
+export function emitTicketStateLiveFallback({ identifier = null, reason = null, append, now, throttleMs } = {}) {
+  return emitThrottled({
+    eventName: ALERT_TICKET_STATE_LIVE_FALLBACK,
+    kind: ALERT_KIND_TICKET_STATE_LIVE_FALLBACK,
+    reason:
+      reason ??
+      "a terminal-probe ticket-state read missed the replica and its live linearis fallback failed — backed off (breaker-flap mitigation)",
+    detail: identifier ? { "linear.ticket": identifier } : {},
     append,
     now,
     throttleMs,

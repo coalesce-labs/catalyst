@@ -46,6 +46,10 @@ export function buildTriageTransitionEvent({
       resource: buildCatalystResource({ serviceName: "catalyst.execution-core" }),
       attributes: {
         "event.name": `phase.triage.linear-transition.${ticket}`,
+        // CTL-1488: this name is unconditionally coordination (phase.triage. prefix),
+        // so the coordination-publish tailer's fail-closed filter would drop it
+        // unstamped. Stamp it like the other coordination producers (worker.transition).
+        "event.stream_class": "coordination",
         "event.entity": "phase",
         "event.action": "linear-transition",
         "event.label": ticket,

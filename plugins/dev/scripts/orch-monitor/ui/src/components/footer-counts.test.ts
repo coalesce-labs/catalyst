@@ -72,7 +72,7 @@ describe("deriveFooterCounts", () => {
     expect(counts.active).toBe(4);
     expect(counts.dead).toBe(1);
     expect(counts.free).toBe(2);
-    expect(counts.waiting).toBe(0);
+    expect(counts.queued).toBe(0);
   });
 
   it("derives all four categories from a mixed fleet", () => {
@@ -95,7 +95,7 @@ describe("deriveFooterCounts", () => {
     expect(counts.active).toBe(2);
     expect(counts.dead).toBe(2);
     expect(counts.free).toBe(2);
-    expect(counts.waiting).toBe(1);
+    expect(counts.queued).toBe(1);
   });
 
   it("a fully-dead fleet reports zero active and zero free occupied by live work", () => {
@@ -108,7 +108,7 @@ describe("deriveFooterCounts", () => {
     expect(counts.active).toBe(0);
     expect(counts.dead).toBe(2);
     expect(counts.free).toBe(4);
-    expect(counts.waiting).toBe(0);
+    expect(counts.queued).toBe(0);
   });
 
   it("over-capacity live workers are not counted as active beyond the deck", () => {
@@ -122,6 +122,27 @@ describe("deriveFooterCounts", () => {
     expect(counts.active).toBe(2);
     expect(counts.dead).toBe(0);
     expect(counts.free).toBe(0);
+  });
+
+  // CTL-764 Phase 8: footer's fourth category renamed waiting→queued
+  it("CTL-764: fourth category is now 'queued', not 'waiting'", () => {
+    const tickets = [t({ id: "CTL-10", held: "queued" })];
+    const counts = deriveFooterCounts([], tickets, 4);
+    expect((counts as any).queued).toBe(1);
+    expect((counts as any).waiting).toBeUndefined();
+  });
+
+  it("CTL-764: legacy held='waiting' still increments queued (back-compat)", () => {
+    const tickets = [t({ id: "CTL-10", held: "waiting" })];
+    const counts = deriveFooterCounts([], tickets, 4);
+    expect((counts as any).queued).toBe(1);
+  });
+
+  it("CTL-764: in-flight queued ticket (live worker owns it) is not counted", () => {
+    const workers = [w({ name: "w1", ticket: "CTL-1", startedAt: 1 })];
+    const tickets = [t({ id: "CTL-1", held: "queued" })];
+    const counts = deriveFooterCounts(workers, tickets, 4);
+    expect((counts as any).queued).toBe(0);
   });
 
   it("the evidence case: footer said 6 active while 4 work + 2 dead", () => {

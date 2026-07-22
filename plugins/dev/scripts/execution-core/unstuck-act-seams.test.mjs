@@ -661,6 +661,11 @@ describe("buildUnstuckActSeams — registry factory (CTL-1219)", () => {
     const seams = buildUnstuckActSeams(makeStubDeps());
     for (const { category, action } of Object.values(STALL_CATEGORY_MAP)) {
       if (action === "escalate") continue; // remediate-cap/unknown route to escalate, NOT the registry
+      // CTL-1442/CTL-1443: skip-typed entries (escalation-ask-cap, boot-resume-
+      // gate-expired) route to the sweep's own skip path (unstuck-sweep.mjs
+      // action === "skip" — the same branch classifyStalledTicket's live-session/
+      // linear-terminal returns use), NOT the seam registry.
+      if (action === "skip") continue;
       expect(Object.keys(seams)).toContain(category);
     }
   });

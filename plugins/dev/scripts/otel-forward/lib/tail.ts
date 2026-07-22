@@ -30,14 +30,19 @@ export function createTailer(opts: TailerOpts): Tailer {
   let currentPath = opts.filePath ?? monthFn();
   let offset = opts.offset;
 
-  // Accept canonical OTel envelopes (have `attributes`) AND flat reap-intent
-  // records (have `event` but no `attributes`). processLine normalizes flat
-  // records into canonical form before forwarding.
+  // Accept canonical OTel envelopes (have `attributes`), flat reap-intent
+  // records (have `event` but no `attributes`), and pino operational logs
+  // (have numeric `level` + string `msg`, no `event` or `attributes`).
+  // processLine normalizes flat/pino records into canonical form before forwarding.
   function shouldForward(line: string): boolean {
     try {
-      const obj = JSON.parse(line);
+      const obj = JSON.parse(line) as Record<string, unknown>;
       if (typeof obj !== "object" || obj === null) return false;
-      return "attributes" in obj || typeof (obj as Record<string, unknown>).event === "string";
+      return (
+        "attributes" in obj ||
+        typeof obj.event === "string" ||
+        (typeof obj.level === "number" && typeof obj.msg === "string")
+      );
     } catch {
       return false;
     }

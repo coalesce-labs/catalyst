@@ -21,9 +21,9 @@ export interface FooterCounts {
   dead: number;
   /** Empty capacity slots (maxParallel minus the workers occupying slots). */
   free: number;
-  /** Tickets waiting on the admission gate (held === "waiting"), not in flight —
-   *  the control tower's "waiting" holding bucket. */
-  waiting: number;
+  /** CTL-764 Phase 8: tickets on the admission gate (queued disposition), not in flight.
+   *  Renamed from "waiting" — back-compat via groupHoldingBuckets.queued fallback. */
+  queued: number;
 }
 
 /**
@@ -40,15 +40,15 @@ export interface FooterCounts {
 export function deriveFooterCounts(
   workers: readonly BoardWorker[],
   tickets: readonly BoardTicket[],
-  maxParallel: number,
+  maxParallel: number
 ): FooterCounts {
   const { occupied, emptyCount } = assignSlots(workers, maxParallel);
   const dead = deadWorkers(workers).length;
-  const waiting = groupHoldingBuckets(tickets, workers, maxParallel).waiting.items.length;
+  const queued = groupHoldingBuckets(tickets, workers, maxParallel).queued.items.length;
   return {
     active: occupied.length,
     dead,
     free: emptyCount,
-    waiting,
+    queued,
   };
 }

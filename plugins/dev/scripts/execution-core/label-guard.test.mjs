@@ -11,6 +11,7 @@ import {
   clearStalledLabel,
   inEscalationCooldown,
   recordEscalation,
+  readEscalationRecord,
   escalationCooldownPath,
   ESCALATION_COOLDOWN_MS,
   recordRemovalFailure,
@@ -251,7 +252,58 @@ describe("inEscalationCooldown / recordEscalation", () => {
       phase: "monitor-merge",
       reason: "revive-budget-exhausted",
       escalatedAt: 9_876_543,
+      // CTL-1442: the ask-cap fields ride the same marker.
+      askCount: 1,
+      asks: [9_876_543],
     });
+  });
+
+  // ─── CTL-1442: consecutive-ask counting on the cool-down marker ───
+
+  test("same-reason asks accrue askCount + a bounded ask history", () => {
+    recordEscalation(orchDir, "CTL-9", "pr", "no-progress", 1_000);
+    recordEscalation(orchDir, "CTL-9", "pr", "no-progress", 2_000);
+    recordEscalation(orchDir, "CTL-9", "pr", "no-progress", 3_000);
+    const rec = readEscalationRecord(orchDir, "CTL-9", "pr");
+    expect(rec.askCount).toBe(3);
+    expect(rec.asks).toEqual([1_000, 2_000, 3_000]);
+  });
+
+  test("a DIFFERENT reason restarts the count (a new question, not a repeat)", () => {
+    recordEscalation(orchDir, "CTL-9", "pr", "no-progress", 1_000);
+    recordEscalation(orchDir, "CTL-9", "pr", "no-progress", 2_000);
+    recordEscalation(orchDir, "CTL-9", "pr", "wedged-never-started", 3_000);
+    const rec = readEscalationRecord(orchDir, "CTL-9", "pr");
+    expect(rec.askCount).toBe(1);
+    expect(rec.asks).toEqual([3_000]);
+  });
+
+  test("the ask history is bounded to the last 10 entries", () => {
+    for (let i = 1; i <= 14; i++) {
+      recordEscalation(orchDir, "CTL-9", "pr", "no-progress", i * 1_000);
+    }
+    const rec = readEscalationRecord(orchDir, "CTL-9", "pr");
+    expect(rec.askCount).toBe(14);
+    expect(rec.asks.length).toBe(10);
+    expect(rec.asks[rec.asks.length - 1]).toBe(14_000);
+  });
+
+  test("readEscalationRecord: absent/malformed → null (fail-open)", () => {
+    expect(readEscalationRecord(orchDir, "CTL-none", "pr")).toBeNull();
+    mkdirSync(join(orchDir, ".escalation-cooldowns"), { recursive: true });
+    writeFileSync(escalationCooldownPath(orchDir, "CTL-bad", "pr"), "not json");
+    expect(readEscalationRecord(orchDir, "CTL-bad", "pr")).toBeNull();
+  });
+
+  test("a LEGACY marker (no askCount) counts as a fresh ask on the next record", () => {
+    mkdirSync(join(orchDir, ".escalation-cooldowns"), { recursive: true });
+    writeFileSync(
+      escalationCooldownPath(orchDir, "CTL-9", "pr"),
+      JSON.stringify({ ticket: "CTL-9", phase: "pr", reason: "no-progress", escalatedAt: 500 })
+    );
+    recordEscalation(orchDir, "CTL-9", "pr", "no-progress", 1_000);
+    const rec = readEscalationRecord(orchDir, "CTL-9", "pr");
+    expect(rec.askCount).toBe(1); // legacy marker had no count → restart at 1
   });
 
   test("recordEscalation swallows mkdir/writeFile failures (warn-only, no throw)", () => {
@@ -758,5 +810,87 @@ describe("labelNeedsHumanUnlessBeliefOwner (CTL-1241)", () => {
       log: { info: () => {} },
     });
     expect(ws.calls.length).toBe(1);
+  });
+
+  // CTL-764 finding 8: the return value gates the caller's worker.transition emission
+  // — a fresh apply is `true`; a no-op (persisted marker / belief deferral) is `false`.
+  test("CTL-764 finding 8 — returns true on a fresh apply (a label write happened)", () => {
+    const ws = makeWS();
+    mkdirSync(join(orchDir, "workers", "CTL-8A"), { recursive: true });
+    const wrote = labelNeedsHumanUnlessBeliefOwner(orchDir, "CTL-8A", ws, {
+      env: { CATALYST_INTENTS_ENFORCE: "0" },
+      log: { info: () => {} },
+    });
+    expect(wrote).toBe(true);
+  });
+
+  test("CTL-764 finding 8 — returns false on a persisted marker (labelOnce no-op after restart)", () => {
+    const ws = makeWS();
+    const dir = join(orchDir, "workers", "CTL-8B");
+    mkdirSync(dir, { recursive: true });
+    // A needs-human already applied this lifetime — the once-marker persists on disk.
+    writeFileSync(join(dir, ".linear-label-needs-human.applied"), "");
+    const wrote = labelNeedsHumanUnlessBeliefOwner(orchDir, "CTL-8B", ws, {
+      env: { CATALYST_INTENTS_ENFORCE: "0" },
+      log: { info: () => {} },
+    });
+    expect(wrote).toBe(false);
+    expect(ws.calls.length).toBe(0); // labelOnce short-circuited on the marker — no write
+  });
+
+  test("CTL-764 finding 8 — returns false when deferring to the belief owner", () => {
+    const ws = makeWS();
+    const wrote = labelNeedsHumanUnlessBeliefOwner(orchDir, "CTL-8C", ws, {
+      env: { CATALYST_INTENTS_ENFORCE: "1" },
+      log: { info: () => {} },
+    });
+    expect(wrote).toBe(false);
+  });
+
+  // CTL-764 finding C: the return must reflect a CONFIRMED apply, not a bare first
+  // attempt. labelOnce returns true for any first write attempt — including outcomes
+  // where applyLabel reported applied:false — so gating a worker.transition on the raw
+  // labelOnce boolean records a needs-human escalation that never actually landed.
+  test("finding C — returns false when applyLabel is attempted but not applied (rate-limited)", () => {
+    const calls = [];
+    const ws = {
+      applyLabel: (args) => {
+        calls.push(args);
+        return { applied: false, reason: "rate-limited" };
+      },
+    };
+    mkdirSync(join(orchDir, "workers", "CTL-C1"), { recursive: true });
+    const wrote = labelNeedsHumanUnlessBeliefOwner(orchDir, "CTL-C1", ws, {
+      env: { CATALYST_INTENTS_ENFORCE: "0" },
+      log: { info: () => {} },
+    });
+    // The attempt happened (transient → no marker, retries next tick) but the label
+    // did not land, so no transition should be recorded.
+    expect(calls.length).toBe(1);
+    expect(wrote).toBe(false);
+  });
+
+  test("finding C — returns false on an unrecoverable failure (exclusive-conflict, .skipped written)", () => {
+    const ws = { applyLabel: () => ({ applied: false, reason: "exclusive-conflict" }) };
+    mkdirSync(join(orchDir, "workers", "CTL-C2"), { recursive: true });
+    const wrote = labelNeedsHumanUnlessBeliefOwner(orchDir, "CTL-C2", ws, {
+      env: { CATALYST_INTENTS_ENFORCE: "0" },
+      log: { info: () => {} },
+    });
+    expect(wrote).toBe(false);
+    // The .skipped marker is still written (storm-break) even though nothing applied.
+    expect(
+      existsSync(join(orchDir, "workers", "CTL-C2", ".linear-label-needs-human.skipped"))
+    ).toBe(true);
+  });
+
+  test("finding C — returns true ONLY on a confirmed applied:true", () => {
+    const ws = { applyLabel: () => ({ applied: true }) };
+    mkdirSync(join(orchDir, "workers", "CTL-C3"), { recursive: true });
+    const wrote = labelNeedsHumanUnlessBeliefOwner(orchDir, "CTL-C3", ws, {
+      env: { CATALYST_INTENTS_ENFORCE: "0" },
+      log: { info: () => {} },
+    });
+    expect(wrote).toBe(true);
   });
 });

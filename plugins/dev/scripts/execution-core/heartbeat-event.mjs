@@ -43,9 +43,12 @@ export const HEARTBEAT_EVENT = "node.heartbeat";
  * @param {Function} [opts.governanceFn]  injectable governance snapshot fn (CTL-1062)
  * @param {Function} [opts.admissionFn]  injectable admission-state fn (CTL-1322); the
  *   daemon supplies a closure over orchDir + concurrency. null when not supplied.
+ * @param {Function} [opts.inFlightTicketsFn]  CTL-1420 (#17): injectable fn returning
+ *   this host's in-flight ticket IDs (string[]); the daemon supplies the local
+ *   signal-scan list. Defaults to [] for non-daemon callers/tests.
  * @returns {object} the envelope object
  */
-export function buildHeartbeatEnvelope({ now, epochFn, governanceFn, admissionFn } = {}) {
+export function buildHeartbeatEnvelope({ now, epochFn, governanceFn, admissionFn, inFlightTicketsFn } = {}) {
   const ts = now ? now() : new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
   const epoch = epochFn ? epochFn() : Date.now();
   const host = getHostName();
@@ -55,6 +58,18 @@ export function buildHeartbeatEnvelope({ now, epochFn, governanceFn, admissionFn
   // instead of hidden behind a healthy heartbeat. Supplied by the daemon; null for
   // non-daemon callers/tests so the key is always present for consumers.
   const admission = admissionFn ? admissionFn() : null;
+  // CTL-1420 (#17): this host's in-flight ticket IDs, carried as top-level ATTRIBUTES
+  // (not body.payload — otlp.ts:51 strips payload; only attributes reach Loki). A
+  // dotted attr key becomes Loki STRUCTURED METADATA (catalyst_node_in_flight_tickets),
+  // NOT an indexed stream label (collector-config cardinality rule), so a changing
+  // per-line value is safe. This is the cross-host ownership signal that lets a peer
+  // reclaim a dead host's work by reading Loki instead of the Linear heartbeat
+  // attachment. Comma-joined so the OTLP string attribute survives verbatim; count is
+  // a low-card int for dashboards. Fail-safe: a non-array fn result → [].
+  const inFlightRaw = inFlightTicketsFn ? inFlightTicketsFn() : [];
+  const inFlightTickets = Array.isArray(inFlightRaw)
+    ? inFlightRaw.filter((t) => typeof t === "string" && t.length > 0)
+    : [];
 
   return {
     ts,
@@ -70,6 +85,9 @@ export function buildHeartbeatEnvelope({ now, epochFn, governanceFn, admissionFn
       "event.entity": "node",
       "event.action": "heartbeat",
       "event.label": host,
+      // CTL-1420 (#17): Loki-queryable cross-host liveness+ownership signal.
+      "catalyst.node.in_flight_tickets": inFlightTickets.join(","),
+      "catalyst.node.in_flight_count": inFlightTickets.length,
     },
     body: {
       payload: {
@@ -97,8 +115,9 @@ export async function emitHeartbeatEvent({
   // reached buildHeartbeatEnvelope from here; now both governanceFn + admissionFn flow.
   governanceFn,
   admissionFn,
+  inFlightTicketsFn, // CTL-1420 (#17): forward the in-flight-tickets seam to the builder
 } = {}) {
-  const line = `${JSON.stringify(buildHeartbeatEnvelope({ now, epochFn, governanceFn, admissionFn }))}\n`;
+  const line = `${JSON.stringify(buildHeartbeatEnvelope({ now, epochFn, governanceFn, admissionFn, inFlightTicketsFn }))}\n`;
   try {
     await mkdir(dirname(logPath), { recursive: true });
     await appendFile(logPath, line);
@@ -120,15 +139,16 @@ export async function emitHeartbeatEvent({
  * @param {string} [opts.logPath]     event-log path (injectable for tests)
  * @param {Function} [opts.admissionFn]  CTL-1322: live admission-state fn (daemon-supplied)
  * @param {Function} [opts.governanceFn] CTL-1062: live governance snapshot fn (optional override)
+ * @param {Function} [opts.inFlightTicketsFn] CTL-1420 (#17): live in-flight-tickets fn (daemon-supplied)
  */
-export function startHeartbeat({ intervalMs = HEARTBEAT_INTERVAL_MS, logPath, admissionFn, governanceFn } = {}) {
+export function startHeartbeat({ intervalMs = HEARTBEAT_INTERVAL_MS, logPath, admissionFn, governanceFn, inFlightTicketsFn } = {}) {
   const tick = () => {
     // CTL-1280: deterministic liveness heartbeat to daemon.log (Alloy→Loki),
     // riding the same cadence as the node.heartbeat event but on the .log stream
     // so a liveness check can watch the heartbeat marker independent of the
     // otel-forward event pipeline (a quiet-but-healthy daemon must still prove it).
     logDaemonHeartbeat(log, "execution-core");
-    return emitHeartbeatEvent({ logPath, admissionFn, governanceFn }).catch(() => {});
+    return emitHeartbeatEvent({ logPath, admissionFn, governanceFn, inFlightTicketsFn }).catch(() => {});
   };
   const started = tick(); // emit once at boot; Promise for callers that need to await it
   const timer = setInterval(tick, intervalMs);

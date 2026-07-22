@@ -12,7 +12,12 @@ import { logDaemonHeartbeat } from "../lib/daemon-heartbeat.mjs";
 import { OtlpSender } from "./lib/destinations/otlp.ts";
 import { PosthogSender } from "./lib/destinations/posthog.ts";
 import { CloudflareAESender } from "./lib/destinations/cloudflare-ae.ts";
-import { isFlatEvent, normalizeFlatEvent } from "./lib/normalize.ts";
+import {
+  isFlatEvent,
+  normalizeFlatEvent,
+  isPinoRecord,
+  normalizePinoRecord,
+} from "./lib/normalize.ts";
 import { dlqDepth } from "./lib/dlq.ts";
 import { buildCanonicalEnvelope } from "./lib/canonical.ts";
 
@@ -46,7 +51,10 @@ export function maxTs(a: string | undefined, b: string | undefined): string | un
 }
 
 /** Returns lagMs = localNewestTs - lastForwardedTs in ms, clamped to ≥ 0. Returns 0 when either timestamp is undefined. */
-export function computeLagMs(localNewestTs: string | undefined, lastForwardedTs: string | undefined): number {
+export function computeLagMs(
+  localNewestTs: string | undefined,
+  lastForwardedTs: string | undefined
+): number {
   if (!localNewestTs || !lastForwardedTs) return 0;
   const delta = Date.parse(localNewestTs) - Date.parse(lastForwardedTs);
   return delta > 0 ? delta : 0;
@@ -142,7 +150,12 @@ function emitLag(): void {
 export function processLine(line: string): void {
   try {
     let ev = JSON.parse(line) as CanonicalEvent;
-    if (isFlatEvent(ev)) ev = normalizeFlatEvent(ev as unknown as Record<string, unknown>);
+    // pino BEFORE flat: an execution-core pino WARN/ERROR may carry a structured
+    // `event` field (e.g. reaper.mjs), which isFlatEvent would otherwise claim
+    // and strip of its severity. isPinoRecord (numeric level + string msg) never
+    // matches a real flat catalyst event, so this ordering is safe (CTL-1424).
+    if (isPinoRecord(ev)) ev = normalizePinoRecord(ev as unknown as Record<string, unknown>);
+    else if (isFlatEvent(ev)) ev = normalizeFlatEvent(ev as unknown as Record<string, unknown>);
     if (!ev.attributes) {
       stats.skipped++;
       return;

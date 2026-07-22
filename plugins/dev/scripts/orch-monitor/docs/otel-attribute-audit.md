@@ -12,8 +12,8 @@ Do **not** edit this file directly.
 | --- | --- |
 | ✓ Conforming | 20 |
 | → Rename-to | 37 |
-| ● Legitimately Custom | 28 |
-| **Total** | 85 |
+| ● Legitimately Custom | 39 |
+| **Total** | 96 |
 
 ## Classification by Emitter
 
@@ -27,7 +27,12 @@ Do **not** edit this file directly.
 | `catalyst.orchestrator.id` | `canonical-event.ts:67` | ● custom |  |  |  |
 | `catalyst.phase` | `canonical-event.ts:70` | ● custom |  |  |  |
 | `catalyst.session.id` | `canonical-event.ts:69` | ● custom |  |  |  |
+| `catalyst.worker.from_disposition` | `canonical-event.ts:118` | ● custom |  |  | CTL-764 |
+| `catalyst.worker.from_state` | `canonical-event.ts:120` | ● custom |  |  | CTL-764 |
+| `catalyst.worker.reason` | `canonical-event.ts:122` | ● custom |  |  | CTL-764 |
 | `catalyst.worker.ticket` | `canonical-event.ts:68` | ● custom |  |  |  |
+| `catalyst.worker.to_disposition` | `canonical-event.ts:119` | ● custom |  |  | CTL-764 |
+| `catalyst.worker.to_state` | `canonical-event.ts:121` | ● custom |  |  | CTL-764 |
 | `cicd.pipeline.name` | `canonical-event.ts:82` | ✓ conforming |  |  |  |
 | `cicd.pipeline.run.conclusion` | `canonical-event.ts:81` | → rename-to | → `cicd.pipeline.run.result` | Cluster E |  |
 | `cicd.pipeline.run.id` | `canonical-event.ts:79` | ✓ conforming |  |  |  |
@@ -44,6 +49,7 @@ Do **not** edit this file directly.
 | `event.entity` | `canonical-event.ts:60` | → rename-to | → `catalyst.event.entity` | Cluster A |  |
 | `event.label` | `canonical-event.ts:62` | → rename-to | → `catalyst.event.label` | Cluster A |  |
 | `event.name` | `canonical-event.ts:59` | ✓ conforming |  |  |  |
+| `event.stream_class` | `canonical-event.ts:75` | ● custom |  |  | CTL-1488 |
 | `event.value` | `canonical-event.ts:63` | → rename-to | → `catalyst.event.value` | Cluster A |  |
 | `host.id` | `canonical-event.ts:48` | ✓ conforming |  |  |  |
 | `host.name` | `canonical-event.ts:47` | ✓ conforming |  |  |  |
@@ -52,6 +58,8 @@ Do **not** edit this file directly.
 | `linear.issue.identifier` | `canonical-event.ts:85` | ● custom |  |  |  |
 | `linear.key` | `canonical-event.ts:53` | ● custom |  |  |  |
 | `linear.team.key` | `canonical-event.ts:87` | ● custom |  |  |  |
+| `phase.attempt` | `canonical-event.ts:123` | → rename-to | → `catalyst.phase.attempt` | Cluster F | CTL-761/CTL-764 |
+| `phase.revive_count` | `canonical-event.ts:124` | → rename-to | → `catalyst.phase.revive_count` | Cluster F | CTL-761/CTL-764 |
 | `project` | `canonical-event.ts:52` | → rename-to | → `catalyst.project` | Cluster H |  |
 | `service.name` | `canonical-event.ts:43` | ✓ conforming |  |  |  |
 | `service.namespace` | `canonical-event.ts:44` | ✓ conforming |  |  |  |
@@ -65,13 +73,16 @@ Do **not** edit this file directly.
 
 | Key | Source | Classification | Target | Cluster | Note |
 | --- | --- | --- | --- | --- | --- |
+| `catalyst.executor` | `canonical-event.sh:406` | ● custom |  |  | CTL-1457 |
 | `catalyst.ticket.type` | `canonical-event.sh:349` | ● custom |  |  | CTL-1023 |
 | `claude.ratelimit.five_hour_pct` | `canonical-event.sh:343` | ● custom |  |  | CTL-760 |
 | `claude.ratelimit.seven_day_opus_pct` | `canonical-event.sh:345` | ● custom |  |  | CTL-763 |
 | `claude.ratelimit.seven_day_pct` | `canonical-event.sh:344` | ● custom |  |  | CTL-760 |
 | `claude.ratelimit.seven_day_sonnet_pct` | `canonical-event.sh:346` | ● custom |  |  | CTL-763 |
-| `phase.attempt` | `canonical-event.sh:347` | → rename-to | → `catalyst.phase.attempt` | Cluster F | CTL-761 |
-| `phase.revive_count` | `canonical-event.sh:348` | → rename-to | → `catalyst.phase.revive_count` | Cluster F | CTL-761 |
+| `linear.read.age_ms` | `canonical-event.sh:375` | ● custom |  |  | CTL-1403 |
+| `linear.read.op` | `canonical-event.sh:374` | ● custom |  |  | CTL-1403 |
+| `linear.read.result` | `canonical-event.sh:373` | ● custom |  |  | CTL-1403 |
+| `linear.read.source` | `canonical-event.sh:372` | ● custom |  |  | CTL-1403 |
 
 ### MJS (execution-core / catalyst-agent)
 
@@ -232,7 +243,7 @@ validated against live Loki.
 
 ### Cluster F — phase.* unnamespaced fields
 
-- **Emit-side files**: `canonical-event.sh`
+- **Emit-side files**: `canonical-event.ts`
 - **Where**: emit
 - **Migration**: hard-cutover (no dual-emit)
 - **Consumer-update checklist** (all in ONE PR, validated against live Loki):
@@ -243,8 +254,8 @@ validated against live Loki.
 
 | Current key | Target name | Note |
 | --- | --- | --- |
-| `phase.attempt` | `catalyst.phase.attempt` | CTL-761 |
-| `phase.revive_count` | `catalyst.phase.revive_count` | CTL-761 |
+| `phase.attempt` | `catalyst.phase.attempt` | CTL-761/CTL-764 |
+| `phase.revive_count` | `catalyst.phase.revive_count` | CTL-761/CTL-764 |
 
 ### Cluster G — emit-otel-event.sh legacy bare attributes
 

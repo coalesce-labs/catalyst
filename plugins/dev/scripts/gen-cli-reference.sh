@@ -48,6 +48,7 @@ catalyst-why|Event & comms|1|Explain why the daemon believes a worker is alive, 
 catalyst-transitions|Event & comms|0|Live, human-readable Linear-state + phase transition log (tails the event stream — bare runs forever).
 catalyst-session|Session & state|1|Lifecycle CLI for Catalyst agent sessions (start/phase/metric/tool/pr → SQLite + event log).
 catalyst-state|Session & state|1|Manage global orchestrator state at ~/catalyst/state.json (flock-protected RMW + event log).
+boot-resume-approve|Session & state|0|List boot-resume-gated tickets and approve one — writes the .boot-resume-approved sentinel so the daemon dispatches the gated phase without a restart (CTL-1443).
 catalyst-db|Session & state|1|SQLite-backed durable session store for agent runs (init/migrate, sessions, events, metrics).
 workflow-context|Session & state|1|Workflow context management utilities (recent docs, orchestration pointers, skill chaining).
 catalyst-thoughts|Thoughts|1|Repair and verify the HumanLayer thoughts system for a Catalyst project.

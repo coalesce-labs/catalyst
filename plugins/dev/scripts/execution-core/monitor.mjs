@@ -25,7 +25,7 @@
 // The 10-min periodic reconcile (RECONCILE_INTERVAL_MS) remains the
 // missed-webhook backstop for all three handlers.
 
-import { watch, openSync, fstatSync, readSync, closeSync, mkdirSync, existsSync } from "node:fs";
+import { watch, openSync, fstatSync, readSync, closeSync, mkdirSync, existsSync, readFileSync, writeFileSync, renameSync } from "node:fs";
 import { dirname, basename, join } from "node:path";
 import {
   getEventLogPath,
@@ -37,6 +37,7 @@ import {
   getClusterHosts, // CTL-862
   hostMembershipWarning, // CTL-1057
   isDraining as isDrainingDefault, // CTL-1095: drain gate
+  isInProcessDispatchMode, // CTL-1457 (T2): sdk|codex-exec occupancy gate predicate
 } from "./config.mjs";
 // CTL-1397 (Node-loadability): monitor.mjs MUST NOT import replica-read.mjs — that
 // module statically imports `bun:sqlite`, which the Node ESM loader rejects at
@@ -69,12 +70,41 @@ import { abortWorker as defaultAbortWorker } from "./abort-worker.mjs";
 import {
   applyTriageStatus as defaultApplyTriageStatus,
   applyAssignee as defaultApplyAssignee,
+  applyLabel, // CTL-1441: needs-human at the triage re-dispatch cap
+  removeLabel, // CTL-1481: worker:<host> swap (remove-before-add)
 } from "./linear-write.mjs";
+import { labelNeedsHumanUnlessBeliefOwner } from "./label-guard.mjs"; // CTL-1441
 import { appendTriageTransitionEvent as defaultAppendEvent } from "./triage-transition-event.mjs";
 import { countBackgroundAgents, resetLivenessCache } from "./claude-agents.mjs";
-import { readMaxParallel, computeFreeSlots, writeClusterGeneration } from "./scheduler.mjs";
+import {
+  readMaxParallel,
+  computeFreeSlots,
+  writeClusterGeneration,
+  // CTL-1091: route the triage-dispatch HRW gate through the SAME helper the
+  // scheduler's new-work gate uses (positive-liveness → restore-deflap → outage
+  // fail-safe), so both dispatch sites can never drift out of sync.
+  //
+  // NOTE (CTL-1091 Codex P1 #2 — correcting an earlier inaccurate comment):
+  // a STATIC import from ./scheduler.mjs loads that module's ENTIRE graph, which
+  // DOES transitively reach `bun:sqlite` (scheduler.mjs → broker/broker-state.mjs).
+  // So this line is NOT bun:sqlite-free, and monitor.mjs is not Node-loadable in
+  // isolation. This is a PRE-EXISTING property, not introduced here: monitor.mjs
+  // already imported readMaxParallel/computeFreeSlots/writeClusterGeneration from
+  // ./scheduler.mjs before this ticket, so the scheduler→broker-state→bun:sqlite
+  // edge was already in the graph; adding resolveDispatchRoster changes nothing
+  // about reachability. Every runtime that loads this path (exec-core daemon,
+  // broker) runs under Bun, where bun:sqlite resolves. Making monitor.mjs truly
+  // Node-loadable requires extracting ALL of these shared scheduler helpers into a
+  // Node-safe leaf module — an all-or-nothing refactor out of this ticket's scope
+  // (a partial extraction of just this symbol would leave the other three imports
+  // pulling the same edge, so it would buy nothing). Tracked separately.
+  resolveDispatchRoster,
+} from "./scheduler.mjs";
 // CTL-863: Linear-free fence event emitter (durable fence → event-log migration).
 import { emitFenceClaimed } from "./fence-event.mjs";
+// CTL-1481: best-effort worker:<host> label visibility-projection stamp on a
+// won cluster claim. Never the claim arbiter — see worker-label.mjs header.
+import { stampWorkerLabel as defaultStampWorkerLabel } from "./worker-label.mjs";
 import { countSdkInflight as defaultCountSdkInflight } from "./signal-reader.mjs"; // CTL-1367 P1: executor=sdk occupancy reader for the triage budget
 import {
   recordReconcileSuccess,
@@ -426,6 +456,9 @@ export function handleStateChangedEvent(
     // byte-identical bg budget. Threaded from startMonitor via tailerOpts.
     dispatchMode = "phase-agents",
     countSdkInflight = defaultCountSdkInflight,
+    // CTL-1457 (N1): per-phase in-process route flag → the computed budget (below)
+    // arms the SDK-occupancy term on a bg node. Default false → unchanged.
+    hasInProcessRoute = false,
     triageBudget,
     // CTL-781: respect-assignment + self-assign seams.
     botUserIds,
@@ -436,12 +469,18 @@ export function handleStateChangedEvent(
     // CTL-862: cross-host coordination seams.
     hosts = undefined,
     hostName = undefined,
+    // CTL-1091: surviving-roster override → threaded through to dispatchTriage's
+    // live-roster ownership gate (undefined → real heartbeat feed; tests inject).
+    survivingRosterOverride = undefined,
     claimDispatch = claimDispatchSync,
     // CTL-1095: drain gate seam — thread through to dispatchTriage.
     isDraining = (dir) => isDrainingDefault(dir),
     // CTL-1367 P1: failed-terminal backstop for a rejected async (sdk) triage
     // dispatch — threaded through to dispatchTriage (undefined → real default).
     emitBackstop,
+    // CTL-1481: worker:<host> label-stamp seam — threaded through to
+    // dispatchTriage (undefined → real default; tests inject a fake).
+    stampWorkerLabel,
   } = {}
 ) {
   const parsed = parseStateChangedEvent(event);
@@ -458,7 +497,7 @@ export function handleStateChangedEvent(
   // single call. Either way, the budget gates all dispatchTriage calls below.
   const budget =
     triageBudget ??
-    computeTriageBudget({ orchDir, concurrency, readMaxParallelFn, liveBackgroundCount, dispatchMode, countSdkInflight });
+    computeTriageBudget({ orchDir, concurrency, readMaxParallelFn, liveBackgroundCount, dispatchMode, countSdkInflight, hasInProcessRoute });
   for (const p of listProjects()) {
     const query = resolveEligibleQuery(p);
     if (query.team !== parsed.teamKey) continue;
@@ -484,9 +523,11 @@ export function handleStateChangedEvent(
           applyAssignee,
           hosts,
           hostName,
+          survivingRosterOverride, // CTL-1091
           claimDispatch, // CTL-862
           isDraining, // CTL-1095
           emitBackstop, // CTL-1367 P1
+          stampWorkerLabel, // CTL-1481
         });
       }
     } else if (!parsed.toState || parsed.toState === query.status) {
@@ -540,9 +581,11 @@ export function handleStateChangedEvent(
           applyAssignee,
           hosts,
           hostName,
+          survivingRosterOverride, // CTL-1091
           claimDispatch, // CTL-862
           isDraining, // CTL-1095
           emitBackstop, // CTL-1367 P1
+          stampWorkerLabel, // CTL-1481
         });
       } else {
         log.debug(
@@ -600,15 +643,24 @@ export function computeTriageBudget({
   // CTL-1367 P1: executor=sdk occupancy reader (in-process SDK workers have no
   // `claude --bg` job → invisible to liveBackgroundCount). Injectable for tests.
   countSdkInflight = defaultCountSdkInflight,
+  // CTL-1457 (N1): true when executorByPhase routes ANY phase to an in-process
+  // executor (sdk|codex-exec) while the node boot dispatchMode is still bg — the
+  // per-phase rollout. ORed into the gate so the routed no-bg triage worker is
+  // counted on a bg node. Default false → byte-identical when nothing routes.
+  hasInProcessRoute = false,
 } = {}) {
   const maxParallel = readMaxParallelFn(orchDir, concurrency);
   const live = liveBackgroundCount();
   // CTL-1367 P1: under executor=sdk add the in-process SDK workers' occupancy so the
   // →Triage budget counts them like bg jobs and a webhook drain / sweepMissingTriage
   // can't dispatch past maxParallel while prior SDK triage queries run/queue behind
-  // the semaphore. GATED on dispatchMode === "sdk" → 0 under bg (byte-identical).
+  // the semaphore. CTL-1457 (T2): codex-exec prelaunches write the SAME no-bg_job_id
+  // signals and queue behind their own semaphore, so gate on isInProcessDispatchMode
+  // (sdk OR codex-exec) → still 0 under bg/oneshot-legacy (byte-identical). CTL-1457
+  // (N1): also arm when a per-phase in-process route is present on a bg node — the
+  // triage phase routed to codex-exec/sdk writes the same no-bg signal.
   let sdkInflight = 0;
-  if (dispatchMode === "sdk") {
+  if (isInProcessDispatchMode(dispatchMode) || hasInProcessRoute) {
     try {
       sdkInflight = countSdkInflight(orchDir);
     } catch {
@@ -649,7 +701,20 @@ function dispatchTriage(
     // CTL-862: cross-host coordination seams (left undefined → single-host fallback).
     hosts = undefined,
     hostName = undefined,
+    // CTL-1091: injectable surviving-roster override for the ownership gate below,
+    // mirroring the scheduler's dispatchSurvivingRoster. Default undefined →
+    // resolveDispatchRoster (positive-liveness → restore-deflap → outage fail-safe),
+    // called read-only (persist:false) — the SAME gate the scheduler's new-work
+    // path uses, so the two dispatch sites can never drift. (computeDispatchSurvivingRoster
+    // is the positive-liveness-only sub-step, exported/unit-tested but NOT the live
+    // composition — the live path adds the deflap.) Tests inject a fixed survivor
+    // set to drive the offline-owner failover deterministically.
+    survivingRosterOverride = undefined,
     claimDispatch = claimDispatchSync,
+    // CTL-1481: best-effort worker:<host> label stamp, fired right after a won
+    // multi-host triage claim (same gate as emitFenceClaimed). Injectable so
+    // tests drive/assert the stamp without touching Linear.
+    stampWorkerLabel = defaultStampWorkerLabel,
     // CTL-1095: drain gate — node-level refusal of new-triage admission.
     isDraining = (dir) => isDrainingDefault(dir),
     // CTL-1367 P1: failed-terminal backstop for a REJECTED async (sdk) triage
@@ -657,6 +722,10 @@ function dispatchTriage(
     // tests inject a spy. The bg path is synchronous → the detached handler never
     // fires, so this is a no-op on bg.
     emitBackstop,
+    // CTL-1441: needs-human application at the re-dispatch cap. Injectable so
+    // tests never spawn a real linearis write; default = the label-guard path.
+    labelNeedsHuman = (dir, t) =>
+      labelNeedsHumanUnlessBeliefOwner(dir, t, { applyLabel }, { site: "triage-redispatch-cap" }),
   }
 ) {
   if (!orchDir) {
@@ -682,11 +751,57 @@ function dispatchTriage(
     globalThis.__ctl1057_monitor_warned = true;
     log.warn({ roster, self }, _mw);
   }
-  if (multiHost && !ownedBy(identifier, roster, self)) {
+  // CTL-1091: ownership over the LIVE roster (positive-liveness + restore-deflap +
+  // outage fail-safe), so a →Triage ticket whose HRW owner is offline is triaged by
+  // a live host instead of stranding. Computed via the SAME resolveDispatchRoster
+  // the scheduler's new-work gate uses, so the two dispatch sites can never drift
+  // out of sync. READ-ONLY here (persist:false) — the scheduler tick is the sole
+  // writer of .liveness-deflap.json. The heartbeat sync wrappers cache (Loki 20s /
+  // Linear 45s) so per-call reads coalesce. Only computed multi-host.
+  let dispatchRoster;
+  if (!multiHost) {
+    dispatchRoster = roster;
+  } else if (Array.isArray(survivingRosterOverride)) {
+    // Test override bypasses both the heartbeat read and the deflap.
+    dispatchRoster = survivingRosterOverride;
+  } else {
+    dispatchRoster = resolveDispatchRoster({
+      roster,
+      orchDir,
+      self,
+      nowMs: Date.now(),
+      persist: false,
+    });
+  }
+  if (multiHost && !ownedBy(identifier, dispatchRoster, self)) {
     log.debug(
-      { identifier, self, roster },
-      "ctl-862: ticket not owned by this host under HRW — skipping triage dispatch"
+      { identifier, self, roster, dispatchRoster },
+      "ctl-1091: ticket not owned by this host under HRW over the live roster — skipping triage dispatch"
     );
+    return false;
+  }
+  // CTL-1441 guard (b) — placed BEFORE the capacity gate (Codex R4: parking is
+  // capacity-independent; at a saturated fleet the budget return would keep a
+  // capped ticket invisible forever) and AFTER the drain/HRW gates (only the
+  // owner parks). The needs-human apply retries every capped sweep — labelOnce's
+  // markers are the idempotence guard (a transient Linear failure leaves none);
+  // cappedAt in the counter record gates only the duplicate WARN. Re-arm by
+  // deleting orchDir/.triage-dispatch-counts/<ticket>.json.
+  if (readTriageDispatchCount(orchDir, identifier) >= TRIAGE_DISPATCH_CAP) {
+    // Codex R2: the final allowed attempt may still be RUNNING — triage.json is
+    // naturally absent until it finishes. Defer the park while in flight.
+    if (isTriageInFlight(readTriageSignalStatus(orchDir, identifier))) return false;
+    try {
+      labelNeedsHuman(orchDir, identifier);
+    } catch (err) {
+      log.warn({ identifier, err: err.message }, "ctl-1441: needs-human label at triage cap threw — continuing");
+    }
+    if (markTriageCapped(orchDir, identifier)) {
+      log.warn(
+        { identifier, cap: TRIAGE_DISPATCH_CAP },
+        "ctl-1441: triage re-dispatch cap reached — parked needs-human; delete .triage-dispatch-counts/<ticket>.json to re-arm",
+      );
+    }
     return false;
   }
   if (budget && budget.remaining <= 0) {
@@ -746,6 +861,50 @@ function dispatchTriage(
       return false;
     }
     clusterGeneration = claim.generation; // CTL-1028: forward to worker (mirrors CTL-864)
+  }
+  // CTL-1441 guard (a), placed HERE (post-gates, post-claim, launch imminent —
+  // Codex R3): a done phase-triage.json with triage.json missing is the
+  // artifact-mismatch class; the launcher short-circuits done signals as
+  // idempotent no-ops, so the stale completion signal is RETIRED (rename,
+  // forensics kept) immediately before a REAL launch. Doing this in the sweep
+  // (pre-gates) could strip the signal on a node that then never launches
+  // (HRW/drain/delegate/claim skip) — leaving the ticket with NEITHER artifact.
+  const preLaunchStatus = readTriageSignalStatus(orchDir, identifier);
+  if (preLaunchStatus === "done" && !hasTriageArtifact(orchDir, identifier)) {
+    const sigPath = join(orchDir, "workers", identifier, "phase-triage.json");
+    try {
+      renameSync(sigPath, `${sigPath}.stale-ctl1441`);
+      const warned = join(orchDir, "workers", identifier, ".triage-artifact-mismatch-warned");
+      if (!existsSync(warned)) {
+        try {
+          writeFileSync(warned, new Date().toISOString());
+        } catch { /* best-effort */ }
+        log.warn(
+          { identifier },
+          "ctl-1441: phase-triage.json was done but triage.json is missing — retired the stale signal for a real re-triage (bounded by the dispatch cap)",
+        );
+      }
+    } catch (err) {
+      log.warn(
+        { identifier, err: err.message },
+        "ctl-1441: could not retire the stale done triage signal — skipping this dispatch (a counted no-op would burn the cap)",
+      );
+      return false;
+    }
+  }
+  // CTL-1441: count the REAL spawn attempt — post-gates, post-claim, and BEFORE
+  // the launch so a spawn that dies without ever writing a signal (the
+  // no-artifacts class) still counts toward the cap. Unbounded silent failure
+  // is exactly the loop this bounds.
+  // Codex P1 + R3: do NOT count idempotent no-ops — an in-flight signal
+  // (dispatched/running/pending; the CTL-615 yield) OR a surviving done signal
+  // (only possible when triage.json exists, since the mismatch case was just
+  // retired above; the launcher short-circuits it). A dead-frozen "running"
+  // signal is reset to stalled by the reclaim/revive path, after which counting
+  // resumes; "failed"/"stalled" re-dispatches launch real workers and count.
+  const statusAtLaunch = readTriageSignalStatus(orchDir, identifier);
+  if (!isTriageInFlight(statusAtLaunch) && statusAtLaunch !== "done") {
+    bumpTriageDispatchCount(orchDir, identifier);
   }
   // CTL-1367 P1: settle an async (executor=sdk) dispatch synchronously. bg returns a
   // plain object (passthrough → byte-identical). sdk returns a Promise whose
@@ -809,6 +968,19 @@ function dispatchTriage(
   } catch (err) {
     log.warn({ identifier, err: err.message }, "monitor: self-assign threw — continuing");
   }
+  // CTL-1481: best-effort worker:<host> label stamp — a visibility projection
+  // of the triage claim we just won, NEVER the claim arbiter itself. Multi-host
+  // only (same gate as emitFenceClaimed). Placed AFTER the triage-status +
+  // self-assign writes so a stamp-tripped breaker can never starve them. Own
+  // try/catch (mirrors the self-assign precedent above) so a throw only logs
+  // and never blocks the triage dispatch.
+  if (clusterGeneration != null) {
+    try {
+      stampWorkerLabel({ ticket: identifier, hostName: self, knownHosts: roster, replica, applyLabel, removeLabel, log });
+    } catch (err) {
+      log.warn({ identifier, err: err.message }, "monitor: stampWorkerLabel threw — continuing");
+    }
+  }
   return true;
 }
 
@@ -817,6 +989,100 @@ function dispatchTriage(
 // a Backlog→Ready-direct entry that skipped the triage phase agent.
 function hasTriageArtifact(orchDir, ticket) {
   return existsSync(join(orchDir, "workers", ticket, "triage.json"));
+}
+
+// ── CTL-1441: triage re-dispatch guard ───────────────────────────────────────
+// CTL-1403 was re-triaged 12× in ~30h: this sweep keys ONLY on triage.json,
+// while advancement keys phase-triage.json — a triage run whose content
+// artifact goes astray (the skill's WORKER_DIR falling back to $(pwd)) posts
+// its comment and completes "done", yet stays re-dispatchable forever. Nothing
+// bounds per-ticket triage dispatches (the scheduler's dispatch circuit breaker
+// has no reach into monitor's dispatch path). Two additions:
+//   (a) when phase-triage.json is done but triage.json is missing, the
+//       re-dispatch is the legitimate REMEDY (research's prior-artifact gate
+//       needs triage.json) — but the mismatch is surfaced loudly once;
+//   (b) a hard per-ticket dispatch cap (CATALYST_TRIAGE_DISPATCH_CAP, default
+//       3): at the cap the ticket parks LOUDLY (needs-human via the
+//       label-guard) instead of silently burning a dispatch every reconcile —
+//       this also bounds the class where NO artifacts ever appear (a spawn
+//       dying on a bad repoRoot). Re-arm by deleting
+//       workers/<t>/.triage-redispatch-capped + .triage-dispatch-count.json.
+export const TRIAGE_DISPATCH_CAP = Number(process.env.CATALYST_TRIAGE_DISPATCH_CAP) || 3;
+
+export function readTriageSignalStatus(orchDir, ticket) {
+  try {
+    const sig = JSON.parse(
+      readFileSync(join(orchDir, "workers", ticket, "phase-triage.json"), "utf8"),
+    );
+    return typeof sig?.status === "string" ? sig.status : null;
+  } catch {
+    return null; // absent/malformed → fail-open
+  }
+}
+
+// isTriageInFlight — CTL-1441: a signal the launcher would treat as a live,
+// idempotent no-op (phase-agent-dispatch:513 short-circuits dispatched|running|
+// done; pending is a re-arm in progress). Used to (a) skip cap COUNTING (a
+// no-op dispatch is not a retry) and (b) defer cap PARKING (an allowed attempt
+// may still complete — only park after the signal settles without an artifact).
+function isTriageInFlight(status) {
+  return status === "dispatched" || status === "running" || status === "pending";
+}
+
+// Codex R4: the cap state lives at orchDir level — NOT under workers/<t>/ —
+// because the worker-dir GC deletes terminal dirs after retention, and losing
+// the counter would re-arm the very re-dispatch cycle the cap terminates
+// (mirrors the .recovery-intents / .escalation-cooldowns placement rationale).
+// One file per ticket: { count, lastDispatchAt, cappedAt? }. Re-arm by
+// deleting orchDir/.triage-dispatch-counts/<ticket>.json.
+function triageDispatchCountPath(orchDir, ticket) {
+  return join(orchDir, ".triage-dispatch-counts", `${ticket}.json`);
+}
+
+export function readTriageDispatchRecord(orchDir, ticket) {
+  try {
+    const data = JSON.parse(readFileSync(triageDispatchCountPath(orchDir, ticket), "utf8"));
+    return data && typeof data === "object" ? data : null;
+  } catch {
+    return null; // absent/malformed → fail-open (the cap only ever under-counts)
+  }
+}
+
+export function readTriageDispatchCount(orchDir, ticket) {
+  const rec = readTriageDispatchRecord(orchDir, ticket);
+  return typeof rec?.count === "number" ? rec.count : 0;
+}
+
+function writeTriageDispatchRecord(orchDir, ticket, rec) {
+  // Codex R3: never manufacture the orch dir itself — several legacy tests use a
+  // shared literal orchDir (e.g. "/orch") with mocked dispatchers, and a counter
+  // write there would persist across runs and machines (cap suppression bleeding
+  // between suites). A real daemon's orchDir always exists; a missing one means
+  // a hermetic/mocked context → in-memory only (fail-open, under-counts).
+  if (!existsSync(orchDir)) return false;
+  const p = triageDispatchCountPath(orchDir, ticket);
+  try {
+    mkdirSync(dirname(p), { recursive: true });
+    writeFileSync(p, JSON.stringify(rec));
+    return true;
+  } catch (err) {
+    log.warn({ ticket, err: err.message }, "ctl-1441: triage dispatch-count write failed");
+    return false;
+  }
+}
+
+export function bumpTriageDispatchCount(orchDir, ticket, { now = () => new Date().toISOString() } = {}) {
+  const prior = readTriageDispatchRecord(orchDir, ticket) ?? {};
+  const count = (typeof prior.count === "number" ? prior.count : 0) + 1;
+  writeTriageDispatchRecord(orchDir, ticket, { ...prior, count, lastDispatchAt: now() });
+  return count;
+}
+
+export function markTriageCapped(orchDir, ticket, { now = () => new Date().toISOString() } = {}) {
+  const prior = readTriageDispatchRecord(orchDir, ticket) ?? {};
+  if (prior.cappedAt) return false; // already parked once
+  writeTriageDispatchRecord(orchDir, ticket, { ...prior, cappedAt: now(), cap: TRIAGE_DISPATCH_CAP });
+  return true;
 }
 
 // sweepMissingTriage — the reconcile-path analogue of the CTL-625 webhook guard
@@ -847,6 +1113,9 @@ export function sweepMissingTriage({
   // "phase-agents" → byte-identical bg budget). Threaded from startMonitor.
   dispatchMode = "phase-agents",
   countSdkInflight = defaultCountSdkInflight,
+  // CTL-1457 (N1): per-phase in-process route flag (arms the SDK-occupancy term on
+  // a bg node). Threaded from startMonitor. Default false → unchanged.
+  hasInProcessRoute = false,
   // CTL-781: respect-assignment + self-assign seams.
   botUserIds,
   botWriteId,
@@ -856,10 +1125,19 @@ export function sweepMissingTriage({
   // CTL-862: cross-host coordination seams.
   hosts = undefined,
   hostName = undefined,
+  // CTL-1091: surviving-roster override → threaded through to dispatchTriage's
+  // live-roster ownership gate (undefined → real heartbeat feed; tests inject).
+  survivingRosterOverride = undefined,
   claimDispatch = claimDispatchSync,
   // CTL-1367 P1: failed-terminal backstop for a rejected async (sdk) triage
   // dispatch — threaded through to dispatchTriage (undefined → real default).
   emitBackstop,
+  // CTL-1441: needs-human at the re-dispatch cap — threaded through to
+  // dispatchTriage (undefined → real label-guard default; tests inject a spy).
+  labelNeedsHuman,
+  // CTL-1481: worker:<host> label-stamp seam — threaded through to
+  // dispatchTriage (undefined → real default; tests inject a fake).
+  stampWorkerLabel,
 } = {}) {
   if (!orchDir) {
     log.debug("sweepMissingTriage: no orchDir wired — skipping triage sweep");
@@ -873,11 +1151,19 @@ export function sweepMissingTriage({
     liveBackgroundCount,
     dispatchMode, // CTL-1367 P1
     countSdkInflight, // CTL-1367 P1
+    hasInProcessRoute, // CTL-1457 (N1)
   });
   for (const p of listProjects()) {
     for (const t of getEligibleSet(p.team)) {
-      if (budget.remaining <= 0) return; // capacity reached; remainder retries next sweep
+      // Codex R4: at a saturated fleet, still ROUTE capped tickets (their park is
+      // capacity-independent and dispatchTriage's cap gate runs before its
+      // budget gate); everything else waits for the next sweep.
+      if (budget.remaining <= 0 && readTriageDispatchCount(orchDir, t.identifier) < TRIAGE_DISPATCH_CAP) continue;
       if (hasTriageArtifact(orchDir, t.identifier)) continue;
+      // CTL-1441 guard (a) note: the done-signal/missing-triage.json mismatch is
+      // handled INSIDE dispatchTriage (post-gates, launch-imminent — Codex R3),
+      // where the stale completion signal is retired immediately before a real
+      // launch. The sweep just routes the ticket there like any other.
       dispatchTriage(t.identifier, {
         dispatch,
         orchDir,
@@ -892,8 +1178,11 @@ export function sweepMissingTriage({
         applyAssignee,
         hosts,
         hostName,
+        survivingRosterOverride, // CTL-1091
         claimDispatch, // CTL-862
         emitBackstop, // CTL-1367 P1
+        ...(labelNeedsHuman ? { labelNeedsHuman } : {}), // CTL-1441
+        stampWorkerLabel, // CTL-1481
       });
     }
   }
@@ -1014,6 +1303,7 @@ export function readNewEvents({ foldOnly = false } = {}) {
           liveBackgroundCount: tailerOpts.liveBackgroundCount,
           dispatchMode: tailerOpts.dispatchMode, // CTL-1367 P1
           countSdkInflight: tailerOpts.countSdkInflight, // CTL-1367 P1
+          hasInProcessRoute: tailerOpts.hasInProcessRoute, // CTL-1457 (N1)
         });
     for (const line of lines) {
       if (!line.trim()) continue;
@@ -1082,6 +1372,11 @@ export function startMonitor({
   // counts in-process SDK workers. Default "phase-agents" → byte-identical bg.
   dispatchMode = "phase-agents",
   countSdkInflight = defaultCountSdkInflight,
+  // CTL-1457 (N1): true when executorByPhase routes ANY phase to an in-process
+  // executor (sdk|codex-exec) while the node boot dispatchMode is still bg. Threaded
+  // into tailerOpts + both sweepMissingTriage calls so the →Triage budget counts a
+  // routed no-bg triage worker on a bg node. Default false → byte-identical bg.
+  hasInProcessRoute = false,
   // CTL-781: respect-assignment + self-assign seams.
   botUserIds,
   botWriteId,
@@ -1114,6 +1409,7 @@ export function startMonitor({
     liveBackgroundCount,
     dispatchMode, // CTL-1367 P1
     countSdkInflight, // CTL-1367 P1
+    hasInProcessRoute, // CTL-1457 (N1)
     botUserIds,
     botWriteId,
     gateway,
@@ -1127,6 +1423,7 @@ export function startMonitor({
     liveBackgroundCount,
     dispatchMode, // CTL-1367 P1
     countSdkInflight, // CTL-1367 P1
+    hasInProcessRoute, // CTL-1457 (N1)
     botUserIds,
     botWriteId,
     gateway,
@@ -1164,6 +1461,7 @@ export function startMonitor({
       liveBackgroundCount,
       dispatchMode, // CTL-1367 P1
       countSdkInflight, // CTL-1367 P1
+      hasInProcessRoute, // CTL-1457 (N1)
       botUserIds,
       botWriteId,
       gateway,

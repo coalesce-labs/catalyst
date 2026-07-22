@@ -15,10 +15,14 @@ import {
   decideBoardHealth,
   proposeMoves,
   selectAnchor,
+  selectAnchorCandidates,
   buildBoardContext,
   buildBoardScanEvent,
   boardHealthPass,
 } from "./board-health.mjs";
+// CTL-1435 (Codex P1/P2): round-trip the REAL emit envelope so the ring test
+// exercises the production body.payload.details nesting + attribute promotion.
+import { buildRecoveryEnvelope } from "./recovery-reasoning.mjs";
 
 const NOW = Date.parse("2026-06-20T12:00:00Z");
 const MIN = 60_000;
@@ -73,6 +77,9 @@ function mkBoard(o = {}) {
     ownerForTicket: o.ownerForTicket ?? null,
     // CTL-1157 (Codex #4): ticket→owner/repo resolver for the composite lookup.
     repoForTicket: o.repoForTicket ?? null,
+    // CTL-1432 (B2/B3): deferred board-health anchor candidates + sanctioned latch allowlist.
+    deferredBoardHealth: o.deferredBoardHealth ?? [],
+    sanctionedNeedsHuman: o.sanctionedNeedsHuman ?? [],
     now: o.now ?? NOW,
   };
 }
@@ -636,6 +643,130 @@ describe("proposeMoves — tiering", () => {
   });
 });
 
+// ─── CTL-1432 (B3): sanctioned needs-human latches suppressed from proposeMoves ─
+describe("proposeMoves — CTL-1432 sanctioned-latch suppression (B3)", () => {
+  test("a sanctioned frozen ticket is NOT re-proposed; a non-sanctioned one still is", () => {
+    const invs = { ...allGreen(), frozenNeedsHuman: inv(false, 2, true, ["CTL-SANCT", "CTL-REAL"]) };
+    const m = proposeMoves(invs, mkBoard({ sanctionedNeedsHuman: ["CTL-SANCT"] }));
+    const t2 = m.tier2.filter((x) => x.move === "review-needs-human").map((x) => x.ticket);
+    expect(t2).toContain("CTL-REAL");
+    expect(t2).not.toContain("CTL-SANCT");
+  });
+
+  test("empty allowlist → every frozen ticket still proposed (default behavior unchanged)", () => {
+    const invs = { ...allGreen(), frozenNeedsHuman: inv(false, 1, true, ["CTL-REAL"]) };
+    const m = proposeMoves(invs, mkBoard());
+    expect(m.tier2.map((x) => x.ticket)).toContain("CTL-REAL");
+  });
+
+  test("(Codex P1) a sanctioned ticket in the needs-human PILE is not proposed as a tier1 holistic-triage", () => {
+    const invs = { ...allGreen(), needsHumanPile: inv(false, 1, true, ["CTL-SANCT"]) };
+    const m = proposeMoves(invs, mkBoard({ sanctionedNeedsHuman: ["CTL-SANCT"] }));
+    expect(m.tier1.map((x) => x.ticket)).not.toContain("CTL-SANCT");
+  });
+});
+
+// ─── CTL-1432 (B2): deferred board-health intents become anchor candidates ──────
+describe("selectAnchorCandidates — CTL-1432 deferred board-health (B2)", () => {
+  test("a deferred board-health ticket (on the live board) with NO invariant flag is a self-owned anchor candidate", () => {
+    const board = mkBoard({ deferredBoardHealth: ["ADV-1403"], ticketsById: new Map([["ADV-1403", {}]]) });
+    const out = selectAnchorCandidates({ tier1: [], tier2: [], tier3: [] }, board);
+    expect(out).toContain("ADV-1403");
+  });
+
+  test("(Codex P1) deferred candidates rank AFTER flagged work but BEFORE the eligible queue", () => {
+    const board = mkBoard({
+      deferredBoardHealth: ["ADV-1403"],
+      eligible: [{ id: "CTL-ELIG" }],
+      ticketsById: new Map([["ADV-1403", {}]]),
+    });
+    const moves = { tier1: [{ ticket: "CTL-FLAG" }], tier2: [], tier3: [] };
+    const out = selectAnchorCandidates(moves, board);
+    expect(out).toEqual(["CTL-FLAG", "ADV-1403", "CTL-ELIG"]);
+  });
+
+  test("(Codex P1) a deferred ticket NOT on the live board (removed) is dropped", () => {
+    const board = mkBoard({ deferredBoardHealth: ["ADV-DONE"], ticketsById: new Map() });
+    const out = selectAnchorCandidates({ tier1: [], tier2: [], tier3: [] }, board);
+    expect(out).not.toContain("ADV-DONE");
+  });
+
+  test("(Codex P1 r3) a deferred ticket in a TERMINAL Linear state is dropped (getBoard keeps Done descriptors)", () => {
+    const board = mkBoard({ deferredBoardHealth: ["CTL-DONE"], ticketsById: new Map([["CTL-DONE", { state: "Done" }]]) });
+    const out = selectAnchorCandidates({ tier1: [], tier2: [], tier3: [] }, board);
+    expect(out).not.toContain("CTL-DONE");
+  });
+
+  test("(Codex P1 r3) a deferred ticket that is ALSO sanctioned is dropped from the deferred anchors", () => {
+    const board = mkBoard({
+      deferredBoardHealth: ["CTL-SANCT"],
+      sanctionedNeedsHuman: ["CTL-SANCT"],
+      ticketsById: new Map([["CTL-SANCT", {}]]),
+    });
+    const out = selectAnchorCandidates({ tier1: [], tier2: [], tier3: [] }, board);
+    expect(out).not.toContain("CTL-SANCT");
+  });
+
+  test("(Codex P2 r4) a FOREIGN-owned deferred marker is dropped (multi-host HRW)", () => {
+    const board = mkBoard({
+      deferredBoardHealth: ["ADV-FOREIGN"],
+      ticketsById: new Map([["ADV-FOREIGN", {}]]),
+      multiHost: true,
+      self: "mini",
+      roster: ["mini", "mini-2"],
+      ownerForTicket: () => "mini-2", // owned by the OTHER host
+    });
+    const out = selectAnchorCandidates({ tier1: [], tier2: [], tier3: [] }, board);
+    expect(out).not.toContain("ADV-FOREIGN");
+  });
+});
+
+// ─── CTL-1432 (B2/B3 — Codex P1): the gate accounts for deferred work + suppression ─
+describe("decideBoardHealth — CTL-1432 gate (deferred proceed / all-sanctioned skip)", () => {
+  test("(F1) a deferred board-health intent (on the live board) makes the gate PROCEED even when all invariants are green", () => {
+    const board = mkBoard({
+      deferredBoardHealth: ["ADV-1403"],
+      ticketsById: new Map([["ADV-1403", {}]]),
+      capacity: { freeSlots: 4 },
+    });
+    const d = decideBoardHealth(allGreen(), board);
+    expect(d.gate.decision).toBe("proceed");
+    expect(d.gate.reason).toMatch(/deferred/);
+  });
+
+  test("(Codex P1) a deferred intent whose ticket is terminal (not on the board) does NOT proceed", () => {
+    const board = mkBoard({ deferredBoardHealth: ["ADV-DONE"], ticketsById: new Map(), capacity: { freeSlots: 4 } });
+    const d = decideBoardHealth(allGreen(), board);
+    expect(d.gate.decision).toBe("skip");
+  });
+
+  test("(Codex P2 r4) a tier3-only board SKIPS dispatch but still SURFACES the tier3 proposals in decision.moves", () => {
+    const invs = { ...allGreen(), strandedNode: inv(false, 1, true, ["mini-2"]) };
+    const d = decideBoardHealth(invs, mkBoard({ capacity: { freeSlots: 4 } }));
+    expect(d.gate.decision).toBe("skip"); // escalate-only → no holistic dispatch
+    expect(d.moves.tier3.map((x) => x.move)).toContain("escalate-stranded-node"); // …but surfaced
+  });
+
+  test("(F2) an all-sanctioned frozenNeedsHuman as the ONLY failure → gate SKIPS (no actionable moves)", () => {
+    const invs = { ...allGreen(), frozenNeedsHuman: inv(false, 2, true, ["CTL-SANCT-1", "CTL-SANCT-2"]) };
+    const board = mkBoard({
+      sanctionedNeedsHuman: ["CTL-SANCT-1", "CTL-SANCT-2"],
+      capacity: { freeSlots: 4 },
+    });
+    const d = decideBoardHealth(invs, board);
+    expect(d.gate.decision).toBe("skip");
+    expect(d.gate.reason).toBe("no-actionable-moves");
+  });
+
+  test("a partially-sanctioned frozenNeedsHuman still PROCEEDS on the non-sanctioned ticket", () => {
+    const invs = { ...allGreen(), frozenNeedsHuman: inv(false, 2, true, ["CTL-SANCT", "CTL-REAL"]) };
+    const board = mkBoard({ sanctionedNeedsHuman: ["CTL-SANCT"], capacity: { freeSlots: 4 } });
+    const d = decideBoardHealth(invs, board);
+    expect(d.gate.decision).toBe("proceed");
+    expect(d.moves.tier2.map((x) => x.ticket)).toEqual(["CTL-REAL"]);
+  });
+});
+
 // ─── buildBoardScanEvent — the flat event the emit envelope rides ───────────
 describe("buildBoardScanEvent", () => {
   test("type/ticket/scalars at top of details; rosters as arrays; mode echoed", () => {
@@ -1012,5 +1143,290 @@ describe("boardHealthPass — mode branching + shadow safety", () => {
       flaggedDeps({ mode: "shadow", emit: () => { throw new Error("emit blew up"); } }),
     );
     expect(r.ran).toBe(true);
+  });
+});
+
+// ─── CTL-1435 (C1) — act-outcome on the board-scan event ─────────────────────
+// The journal used to carry proposedMoves but never whether a proposal became a
+// dispatch — the blind spot behind the propose-forever/dispatch-never incident.
+describe("buildBoardScanEvent — C1 act-outcome (CTL-1435)", () => {
+  const decisionFor = (invs) => decideBoardHealth(invs, mkBoard({ capacity: { freeSlots: 4 } }));
+
+  test("no act param → default shadow outcome; actDispatched 0", () => {
+    const invs = { ...allGreen(), dispatchLiveness: inv(false, 1, true, ["CTL-1"]) };
+    const ev = buildBoardScanEvent({ mode: "shadow", invariants: invs, decision: decisionFor(invs) });
+    expect(ev.details.act).toEqual({ dispatched: false, anchor: null, skippedReason: "shadow" });
+    expect(ev.details.actDispatched).toBe(0);
+  });
+
+  test("dispatched act → act.dispatched true + anchor; actDispatched 1; reason string notes the dispatch", () => {
+    const invs = { ...allGreen(), dispatchLiveness: inv(false, 1, true, ["CTL-1"]) };
+    const ev = buildBoardScanEvent({
+      mode: "enforce",
+      invariants: invs,
+      decision: decisionFor(invs),
+      act: { dispatched: true, anchor: "CTL-7", skippedReason: null },
+    });
+    expect(ev.details.act).toEqual({ dispatched: true, anchor: "CTL-7", skippedReason: null });
+    expect(ev.details.actDispatched).toBe(1);
+    expect(ev.reason).toContain("dispatched CTL-7");
+  });
+
+  test("skipped act → skippedReason surfaced in details.act AND the reason string", () => {
+    const invs = { ...allGreen(), dispatchLiveness: inv(false, 1, true, ["CTL-1"]) };
+    const ev = buildBoardScanEvent({
+      mode: "enforce",
+      invariants: invs,
+      decision: decisionFor(invs),
+      act: { dispatched: false, anchor: null, skippedReason: "all-candidates-cooldown" },
+    });
+    expect(ev.details.act.skippedReason).toBe("all-candidates-cooldown");
+    expect(ev.details.actDispatched).toBe(0);
+    expect(ev.reason).toContain("no dispatch (all-candidates-cooldown)");
+  });
+});
+
+describe("boardHealthPass — C1 act-outcome captured on the emitted scan (CTL-1435)", () => {
+  test("enforce dispatch → emitted details.act.dispatched true + the dispatched anchor + actDispatched 1", () => {
+    const emits = [];
+    boardHealthPass(
+      flaggedDeps({
+        mode: "enforce",
+        emit: (e) => emits.push(e),
+        act: () => ({ dispatched: true, attempts: 1, candidate: "CTL-1" }),
+      }),
+    );
+    expect(emits.length).toBe(1);
+    expect(emits[0].details.act.dispatched).toBe(true);
+    expect(emits[0].details.act.anchor).toBe("CTL-1");
+    expect(emits[0].details.act.skippedReason).toBeNull();
+    expect(emits[0].details.actDispatched).toBe(1);
+  });
+
+  test("enforce proceed but no self-owned anchor → skippedReason:no-owned-anchor, dispatched:false", () => {
+    const emits = [];
+    boardHealthPass({
+      orchDir: "/tmp/x",
+      mode: "enforce",
+      getBoard: () => [{ identifier: "CTL-OWNED-ELSEWHERE" }],
+      getWorkerSignals: () => [
+        { ticket: "CTL-OWNED-ELSEWHERE", phase: "implement", status: "running", updatedAt: new Date(NOW - 5 * HOUR).toISOString() },
+      ],
+      getEligible: () => [],
+      roster: ["mini", "mini-2"],
+      self: "mini",
+      multiHost: true,
+      capacity: { maxParallel: 4, liveCount: 1, freeSlots: 3 },
+      readEventRing: () => [],
+      ownerForTicket: () => "mini-2", // the only flagged ticket is foreign-owned → no self anchor
+      getReconcileMarkers: () => ({}),
+      lastRunMs: 0,
+      intervalMs: 0,
+      now: () => NOW,
+      emit: (e) => emits.push(e),
+      act: () => { throw new Error("must not act — no anchor"); },
+    });
+    expect(emits.length).toBe(1);
+    expect(emits[0].details.act.dispatched).toBe(false);
+    expect(emits[0].details.act.skippedReason).toBe("no-owned-anchor");
+  });
+
+  test("enforce gate-hold (all-green) → skippedReason echoes the gate reason; act never runs", () => {
+    const emits = [];
+    boardHealthPass(
+      flaggedDeps({
+        mode: "enforce",
+        getEligible: () => [], // no queue → no dispatch wedge → all-green → gate=skip
+        emit: (e) => emits.push(e),
+        act: () => { throw new Error("must not act — gate held"); },
+      }),
+    );
+    expect(emits.length).toBe(1);
+    expect(emits[0].details.act.dispatched).toBe(false);
+    expect(emits[0].details.act.skippedReason).toBe("all-green");
+  });
+
+  test("shadow → emitted scan records skippedReason:shadow, dispatched:false (never actuates)", () => {
+    const emits = [];
+    boardHealthPass(
+      flaggedDeps({ mode: "shadow", emit: (e) => emits.push(e), act: () => { throw new Error("shadow must not act"); } }),
+    );
+    expect(emits[0].details.act).toEqual({ dispatched: false, anchor: null, skippedReason: "shadow" });
+  });
+
+  test("Codex round-2: enforce with NO act seam → skippedReason:no-actuator (a miswired-actuator wedge)", () => {
+    const emits = [];
+    boardHealthPass(flaggedDeps({ mode: "enforce", emit: (e) => emits.push(e) })); // no act seam wired
+    expect(emits[0].details.act.dispatched).toBe(false);
+    expect(emits[0].details.act.skippedReason).toBe("no-actuator");
+  });
+
+  test("ORDER: act runs BEFORE emit (so the scan carries a real outcome)", () => {
+    const order = [];
+    boardHealthPass(
+      flaggedDeps({
+        mode: "enforce",
+        emit: () => order.push("emit"),
+        act: () => { order.push("act"); return { dispatched: true, candidate: "CTL-1" }; },
+      }),
+    );
+    expect(order).toEqual(["act", "emit"]);
+  });
+});
+
+// ─── CTL-1435 (C2) — actuation-liveness invariant ────────────────────────────
+describe("deriveRing → board.ring.boardScans via assembleBoardState (CTL-1435 C2)", () => {
+  test("Codex P1 REGRESSION: the REAL emit envelope (body.payload.details) is read, not a flat payload", () => {
+    // Round-trip through the production envelope builder so the test exercises the
+    // exact nesting the daemon writes (buildRecoveryEnvelope → body.payload.details).
+    // Before the fix, deriveRing read payload.mode (null) and every enforce scan was
+    // filtered out — silently disabling the invariant in production.
+    const invs = { ...allGreen(), dispatchLiveness: inv(false, 1, true, ["CTL-1"]) };
+    const decision = decideBoardHealth(invs, mkBoard({ capacity: { freeSlots: 4 } }));
+    const flat = buildBoardScanEvent({
+      mode: "enforce",
+      invariants: invs,
+      decision,
+      act: { dispatched: false, anchor: "CTL-1", skippedReason: "all-candidates-cooldown" },
+    });
+    const envelope = buildRecoveryEnvelope(flat, { now: () => "2026-06-20T11:59:00Z" });
+    const board = assembleBoardState({
+      orchDir: "/tmp/x",
+      getBoard: () => [],
+      getWorkerSignals: () => [],
+      getEligible: () => [],
+      readEventRing: () => [envelope],
+      mode: "enforce",
+      now: () => NOW,
+    });
+    expect(board.ring.boardScans.length).toBe(1);
+    expect(board.ring.boardScans[0].mode).toBe("enforce");
+    expect(board.ring.boardScans[0].gate).toBe("proceed");
+    expect(board.ring.boardScans[0].dispatched).toBe(false);
+    expect(board.ring.boardScans[0].skippedReason).toBe("all-candidates-cooldown");
+  });
+
+  test("flat/legacy payload shape still reads (back-compat)", () => {
+    const events = [
+      {
+        ts: "2026-06-20T11:59:00Z",
+        type: "recovery.board-scan",
+        payload: { mode: "enforce", gateDecision: "proceed", proposedTier1: 1, proposedTier2: 2, proposedTier3: 0, act: { dispatched: true, skippedReason: null } },
+      },
+    ];
+    const board = assembleBoardState({
+      orchDir: "/tmp/x", getBoard: () => [], getWorkerSignals: () => [], getEligible: () => [],
+      readEventRing: () => events, mode: "enforce", now: () => NOW,
+    });
+    expect(board.ring.boardScans[0]).toEqual({
+      tsMs: Date.parse("2026-06-20T11:59:00Z"),
+      mode: "enforce", gate: "proceed", proposedMoves: 3, dispatched: true, skippedReason: null,
+    });
+  });
+});
+
+describe("checkActuationLiveness — via evaluateInvariants (CTL-1435 C2)", () => {
+  // default scan = an owned-but-undispatched wedge (all-candidates-cooldown).
+  const mkScan = (o = {}) => ({ tsMs: NOW, mode: "enforce", gate: "proceed", proposedMoves: 3, dispatched: false, skippedReason: "all-candidates-cooldown", ...o });
+
+  test("K enforce scans ALL owned-but-undispatched (all-candidates-cooldown) → flags", () => {
+    const boardScans = Array.from({ length: 6 }, () => mkScan());
+    const r = evaluateInvariants(mkBoard({ mode: "enforce", ring: { boardScans } }));
+    expect(r.actuationLiveness.observable).toBe(true);
+    expect(r.actuationLiveness.ok).toBe(false);
+    expect(r.actuationLiveness.failed).toBe(1);
+  });
+
+  test("Codex P2: deferred-only wedge (proposedMoves 0, all-candidates-cooldown) STILL flags", () => {
+    const boardScans = Array.from({ length: 6 }, () => mkScan({ proposedMoves: 0 }));
+    const r = evaluateInvariants(mkBoard({ mode: "enforce", ring: { boardScans } }));
+    expect(r.actuationLiveness.ok).toBe(false); // old proposedMoves>0 predicate missed this
+  });
+
+  test("act-error across the window also flags", () => {
+    const boardScans = Array.from({ length: 6 }, () => mkScan({ skippedReason: "act-error" }));
+    const r = evaluateInvariants(mkBoard({ mode: "enforce", ring: { boardScans } }));
+    expect(r.actuationLiveness.ok).toBe(false);
+  });
+
+  test("no-owned-anchor scans are BENIGN (nothing this host owns) → NOT flagged", () => {
+    const boardScans = Array.from({ length: 6 }, () => mkScan({ skippedReason: "no-owned-anchor" }));
+    const r = evaluateInvariants(mkBoard({ mode: "enforce", ring: { boardScans } }));
+    expect(r.actuationLiveness.ok).toBe(true);
+  });
+
+  test("one dispatched:true within the K window → passes (ok:true)", () => {
+    const boardScans = [...Array.from({ length: 5 }, () => mkScan()), mkScan({ dispatched: true, skippedReason: null })];
+    const r = evaluateInvariants(mkBoard({ mode: "enforce", ring: { boardScans } }));
+    expect(r.actuationLiveness.ok).toBe(true);
+  });
+
+  test("fewer than K enforce scans → observable:false (no flag on thin evidence)", () => {
+    const boardScans = Array.from({ length: 3 }, () => mkScan());
+    const r = evaluateInvariants(mkBoard({ mode: "enforce", ring: { boardScans } }));
+    expect(r.actuationLiveness.observable).toBe(false);
+    expect(r.actuationLiveness.ok).toBe(true);
+  });
+
+  test("shadow scans are filtered out (not the delegate's dispatch job) → observable:false", () => {
+    const boardScans = Array.from({ length: 8 }, () => mkScan({ mode: "shadow" }));
+    const r = evaluateInvariants(mkBoard({ mode: "enforce", ring: { boardScans } }));
+    expect(r.actuationLiveness.observable).toBe(false);
+  });
+
+  test("off mode omits actuationLiveness entirely (cohort-gated)", () => {
+    const boardScans = Array.from({ length: 6 }, () => mkScan());
+    const r = evaluateInvariants(mkBoard({ ring: { boardScans } }), { mode: "off" });
+    expect(r.actuationLiveness).toBeUndefined();
+  });
+
+  test("Codex round-2: host currently in SHADOW → observable:false even with K stale enforce scans", () => {
+    const boardScans = Array.from({ length: 6 }, () => mkScan());
+    const r = evaluateInvariants(mkBoard({ mode: "shadow", ring: { boardScans } }));
+    expect(r.actuationLiveness.observable).toBe(false); // rolled back to shadow → don't flag stale enforce history
+  });
+
+  test("Codex round-2: enforce + no-actuator (miswired daemon proposes but can't dispatch) → flags", () => {
+    const boardScans = Array.from({ length: 6 }, () => mkScan({ skippedReason: "no-actuator" }));
+    const r = evaluateInvariants(mkBoard({ mode: "enforce", ring: { boardScans } }));
+    expect(r.actuationLiveness.ok).toBe(false);
+  });
+
+  test("Codex round-2: K scans spanning a downtime gap (oldest > windowMs ago) → observable:false", () => {
+    // 5 stale scans from ~3h ago + 1 fresh → the window is not recent/contiguous.
+    const boardScans = [
+      ...Array.from({ length: 5 }, () => mkScan({ tsMs: NOW - 3 * HOUR })),
+      mkScan({ tsMs: NOW }),
+    ];
+    const r = evaluateInvariants(mkBoard({ mode: "enforce", ring: { boardScans } }));
+    expect(r.actuationLiveness.observable).toBe(false);
+  });
+
+  test("a missing/non-finite tsMs in the window → observable:false (can't verify recency)", () => {
+    const boardScans = [mkScan({ tsMs: null }), ...Array.from({ length: 5 }, () => mkScan())];
+    const r = evaluateInvariants(mkBoard({ mode: "enforce", ring: { boardScans } }));
+    expect(r.actuationLiveness.observable).toBe(false);
+  });
+});
+
+// ─── CTL-1435 (C1, Codex P2) — actDispatched promoted to a chartable attribute ─
+describe("buildRecoveryEnvelope — recovery.act_dispatched promotion (CTL-1435)", () => {
+  const mkEvent = (act) => {
+    const invs = { ...allGreen(), dispatchLiveness: inv(false, 1, true, ["CTL-1"]) };
+    const decision = decideBoardHealth(invs, mkBoard({ capacity: { freeSlots: 4 } }));
+    return buildBoardScanEvent({ mode: "enforce", invariants: invs, decision, act });
+  };
+
+  test("dispatched scan → attributes['recovery.act_dispatched'] === 1 (chartable dispatch rate)", () => {
+    const env = buildRecoveryEnvelope(mkEvent({ dispatched: true, anchor: "CTL-1", skippedReason: null }));
+    expect(env.attributes["recovery.act_dispatched"]).toBe(1);
+    // the high-cardinality anchor stays in body.payload.details, never promoted.
+    expect(env.attributes["recovery.act_anchor"]).toBeUndefined();
+    expect(env.body.payload.details.act.anchor).toBe("CTL-1");
+  });
+
+  test("non-dispatch scan → attributes['recovery.act_dispatched'] === 0", () => {
+    const env = buildRecoveryEnvelope(mkEvent({ dispatched: false, anchor: null, skippedReason: "all-candidates-cooldown" }));
+    expect(env.attributes["recovery.act_dispatched"]).toBe(0);
   });
 });

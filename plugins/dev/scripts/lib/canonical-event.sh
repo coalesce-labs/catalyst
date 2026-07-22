@@ -169,6 +169,27 @@ synthesize_event_id() {
 #                            bug|feature|chore|refactor|docs|test). Defaults to
 #                            "unknown" when omitted/empty so the attribute is
 #                            CONSISTENTLY present, never sometimes-missing.
+# classify_event_stream EVENT_NAME
+# Prints "coordination" or "telemetry". CTL-1488: bash mirror of the ESM
+# single-source-of-truth classifier at plugins/dev/scripts/lib/event-stream-class.mjs.
+# Bash can't `import` ESM, so the allowlist is hand-mirrored the same way this
+# file keeps bash/TS in lockstep for trace/span-id derivation. Keep the two in
+# sync — canonical-event.test.sh + event-stream-class.test.mjs cross-check them.
+# Fail-closed: anything not explicitly allowlisted → telemetry.
+classify_event_stream() {
+  local name="${1:-}"
+  case "$name" in
+    # KNOWN_PHASES (namespace-contract.mjs:36) — the canonical 10 pipeline phases.
+    phase.triage.*|phase.research.*|phase.plan.*|phase.implement.*|phase.verify.*|\
+    phase.review.*|phase.pr.*|phase.monitor-merge.*|phase.monitor-deploy.*|phase.teardown.*|\
+    phase.dispatch.*|phase.scheduler.*|phase.advance.*|\
+    worker.transition|worker.transition.*|escalation.*|resume.*|linear.*|github.*|comms.*)
+      printf 'coordination' ;;
+    *)
+      printf 'telemetry' ;;
+  esac
+}
+
 build_canonical_line() {
   local ts="" severity="" service="" event_name=""
   local trace_id="" span_id=""
@@ -193,6 +214,17 @@ build_canonical_line() {
 
   # CTL-1135: caused_by — the id of the triggering event (additive; null when absent).
   local caused_by=""
+
+  # CTL-1457: catalyst.executor — the launch verb that ran the worker (bg | sdk |
+  # codex-exec). Additive, omit-when-empty: absent CATALYST_EXECUTOR_ID leaves the
+  # event byte-identical to today.
+  local executor=""
+
+  # CTL-1403: reads-by-source attributes (linear.read.*). source/result are the
+  # low-card metric dimensions (the collector normalizes → bare source/result);
+  # op is structured metadata; age_ms is a numeric VALUE (feeds the staleness
+  # histogram) emitted only when computable — never faked.
+  local linear_read_source="" linear_read_result="" linear_read_op="" linear_read_age_ms=""
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -232,7 +264,12 @@ build_canonical_line() {
       --phase-attempt)       phase_attempt="$2"; shift 2 ;;
       --phase-revive-count)  phase_revive_count="$2"; shift 2 ;;
       --ticket-type)         ticket_type="$2"; shift 2 ;;
+      --executor)            executor="$2"; shift 2 ;;
       --caused-by)           caused_by="$2"; shift 2 ;;
+      --linear-read-source)  linear_read_source="$2"; shift 2 ;;
+      --linear-read-result)  linear_read_result="$2"; shift 2 ;;
+      --linear-read-op)      linear_read_op="$2"; shift 2 ;;
+      --linear-read-age-ms)  linear_read_age_ms="$2"; shift 2 ;;
       *) echo "build_canonical_line: unknown flag: $1" >&2; return 1 ;;
     esac
   done
@@ -258,12 +295,13 @@ build_canonical_line() {
       | grep -oE 'project=[^,]+' | head -1 | cut -d= -f2- || true)"
   fi
 
-  local sev_num event_id host_name host_id_val node_class_val
+  local sev_num event_id host_name host_id_val node_class_val stream_class
   sev_num="$(severity_number "$severity")"
   event_id="$(generate_event_id)"
   host_name="$(catalyst_host_name)"
   host_id_val="$(catalyst_host_id)"
   node_class_val="$(catalyst_node_class)"  # CTL-1368: the node ROLE core dimension
+  stream_class="$(classify_event_stream "$event_name")"  # CTL-1488: coordination/telemetry split
 
   jq -nc \
     --arg ts "$ts" \
@@ -277,6 +315,7 @@ build_canonical_line() {
     --arg host_name "$host_name" \
     --arg host_id "$host_id_val" \
     --arg node_class "$node_class_val" \
+    --arg stream_class "$stream_class" \
     --arg event_name "$event_name" \
     --arg entity "$entity" \
     --arg action "$action" \
@@ -307,7 +346,12 @@ build_canonical_line() {
     --arg phase_attempt "$phase_attempt" \
     --arg phase_revive_count "$phase_revive_count" \
     --arg ticket_type "$ticket_type" \
+    --arg executor "$executor" \
     --arg caused_by "$caused_by" \
+    --arg linear_read_source "$linear_read_source" \
+    --arg linear_read_result "$linear_read_result" \
+    --arg linear_read_op "$linear_read_op" \
+    --arg linear_read_age_ms "$linear_read_age_ms" \
     '{
       ts: $ts,
       id: $id,
@@ -331,7 +375,7 @@ build_canonical_line() {
         + (if $cat_orch   == "" then {} else { "catalyst.orchestration": $cat_orch } end)
       ),
       attributes: (
-        { "event.name": $event_name }
+        { "event.name": $event_name, "event.stream_class": $stream_class }
         + (if $entity  == "" then {} else { "event.entity": $entity }  end)
         + (if $action  == "" then {} else { "event.action": $action }  end)
         + (if $label   == "" then {} else { "event.label":  $label }   end)
@@ -355,6 +399,11 @@ build_canonical_line() {
         + (if $claude_rl_7d_sonnet == "" then {} else { "claude.ratelimit.seven_day_sonnet_pct": ($claude_rl_7d_sonnet | tonumber) } end)
         + (if $phase_attempt == "" then {} else { "phase.attempt": ($phase_attempt | tonumber) } end)
         + (if $phase_revive_count == "" then {} else { "phase.revive_count": ($phase_revive_count | tonumber) } end)
+        + (if $linear_read_source == "" then {} else { "linear.read.source": $linear_read_source } end)
+        + (if $linear_read_result == "" then {} else { "linear.read.result": $linear_read_result } end)
+        + (if $linear_read_op     == "" then {} else { "linear.read.op":     $linear_read_op }     end)
+        + (if $linear_read_age_ms == "" then {} else { "linear.read.age_ms": ($linear_read_age_ms | tonumber) } end)
+        + (if $executor == "" then {} else { "catalyst.executor": $executor } end)
         + { "catalyst.ticket.type": $ticket_type }
       ),
       body: (

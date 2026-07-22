@@ -68,6 +68,47 @@ _lrr_emit_fallback_event() {
   canonical_jsonl_append "$events_dir" "$line" 2>/dev/null || true
 }
 
+# _lrr_emit_read_event <ID> <source> <result> [age_ms] — CTL-1403 reads-by-source.
+# Append ONE canonical `catalyst.linear.read` event so EVERY scripted single-ticket
+# read (replica HIT + linearis fallback + live-read failure) is counted by the
+# collector's {source,result} connector — this bash helper is the actual canonical
+# agent read path, so it is where the "every client reads the replica" guarantee is
+# proven. source ∈ {replica, linearis_miss, linearis} (this path never distinguishes
+# a replica read-model exception); result ∈ {ok, failed}. age_ms is OPTIONAL and
+# currently omitted here (the replica row stores updated_at as epoch-ms while
+# linearis returns ISO — a clean, parity-safe age is a follow-up; the CLI + daemon
+# surfaces carry age_ms for the staleness histogram). NEVER fails the caller
+# (CTL-988: a diagnostic tap with no fallback once froze the fleet 17-37h).
+_lrr_emit_read_event() {
+  local id="$1" source="$2" result="$3" age_ms="${4:-}"
+  local lib; lib="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/canonical-event.sh"
+  [[ -r "$lib" ]] || return 0
+  command -v jq >/dev/null 2>&1 || return 0
+  # shellcheck disable=SC1090
+  . "$lib" 2>/dev/null || return 0
+  local events_dir="${CATALYST_EVENTS_DIR:-${CATALYST_DIR:-$HOME/catalyst}/events}"
+  local ts; ts="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
+  local severity="INFO"; [[ "$result" == "failed" ]] && severity="WARN"
+  local -a age_args=(); [[ "$age_ms" =~ ^[0-9]+$ ]] && age_args=(--linear-read-age-ms "$age_ms")
+  local line
+  # ${age_args[@]+"${age_args[@]}"} is the empty-array-safe expansion: a bare
+  # "${age_args[@]}" on an EMPTY array under `set -u` throws "unbound variable" on
+  # bash 3.2 (macOS system bash), which would break the read this helper is on.
+  line="$(build_canonical_line \
+    --ts "$ts" --severity "$severity" \
+    --service "catalyst.linear-read" \
+    --event-name "catalyst.linear.read" \
+    --entity "linear" --action "read" \
+    --label "$id" \
+    --linear-read-source "$source" \
+    --linear-read-result "$result" \
+    --linear-read-op "read_ticket" \
+    ${age_args[@]+"${age_args[@]}"} \
+    --session "${CATALYST_SESSION_ID:-}" \
+    --message "linear read $id source=$source result=$result" 2>/dev/null)" || return 0
+  canonical_jsonl_append "$events_dir" "$line" 2>/dev/null || true
+}
+
 # _lrr_live_read <ID> → run the linearis fallback, CAPPED so a 429-stalled / hung
 # linearis can't block the caller forever (parity with catalyst-linear's runLinearis
 # 8s cap). Uses `timeout` when present (GNU coreutils on the fleet); on timeout the
@@ -109,7 +150,7 @@ replica_fresh() {
 # linear_read_ticket <ID> [db] → echo ticket JSON (linearis-shaped) on stdout.
 # rc 0 on any successful read (replica HIT or linearis fallback); rc 2 on bad id.
 linear_read_ticket() {
-  local id="$1" db="${2:-$CATALYST_REPLICA_DB}" json
+  local id="$1" db="${2:-$CATALYST_REPLICA_DB}" json read_source
   if [[ ! "$id" =~ ^[A-Za-z0-9]+-[0-9]+$ ]]; then
     printf '[linear-read-replica] bad ticket id: %s\n' "${id:-<empty>}" >&2
     return 2
@@ -134,17 +175,31 @@ linear_read_ticket() {
       )
       FROM issues i WHERE i.identifier = '$id' AND i.removed_at IS NULL LIMIT 1;" 2>/dev/null)
     if [[ -n "$json" && "$json" != "null" ]]; then
+      _lrr_emit_read_event "$id" replica ok   # CTL-1403: replica HIT (the guarantee holding)
       printf '%s\n' "$json"
       return 0
     fi
     # Fresh replica, but the row is absent (not yet mirrored / tombstoned).
     printf '[linear-read-replica] MISS for %s (replica fresh, row absent) — falling back to linearis; file a ticket if this recurs.\n' "$id" >&2
     _lrr_emit_fallback_event "$id" miss helper
+    read_source=linearis_miss
   else
     printf '[linear-read-replica] replica STALE/ABSENT (writer heartbeat >%ds or seed incomplete) — falling back to linearis for %s; this is a writer/mirror gap to fix, not a retry.\n' "$(( ${CATALYST_LINEAR_REPLICA_STALE_MS:-300000} / 1000 ))" "$id" >&2
     _lrr_emit_fallback_event "$id" stale-absent helper
+    read_source=linearis
   fi
   # Loud fallback — one un-accelerated, timeout-capped live read. Writes stay on
-  # linearis elsewhere.
-  _lrr_live_read "$id"
+  # linearis elsewhere. CTL-1403: emit the read outcome (result=failed when the live
+  # read itself errors/times-out) so the read-failure metric fires. Capture rather
+  # than stream so we can classify the outcome; a single-ticket read is one JSON
+  # blob, so buffering is behaviourally equivalent.
+  local live_out live_rc
+  live_out="$(_lrr_live_read "$id")"; live_rc=$?
+  if (( live_rc == 0 )); then
+    _lrr_emit_read_event "$id" "$read_source" ok
+  else
+    _lrr_emit_read_event "$id" "$read_source" failed
+  fi
+  [[ -n "$live_out" ]] && printf '%s\n' "$live_out"
+  return "$live_rc"
 }

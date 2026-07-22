@@ -35,11 +35,15 @@ import {
   mkdirSync,
   readdirSync,
   readFileSync,
+  renameSync,
   rmSync,
   unlinkSync,
   writeFileSync,
 } from "node:fs";
 import { join } from "node:path";
+import { emitBootResumePending as defaultEmitBootResumePending } from "./dispatch-alert.mjs"; // CTL-1443
+import { labelNeedsHumanUnlessBeliefOwner } from "./label-guard.mjs"; // CTL-1443 (Codex P1)
+import { applyLabel as defaultApplyLabel } from "./linear-write.mjs"; // CTL-1443 (Codex P1)
 import {
   readWorkerSignals,
   readAllPhaseSignals,
@@ -112,6 +116,162 @@ function readPendingMarker(orchDir, ticket) {
   } catch {
     return null;
   }
+}
+
+// ─── CTL-1443 (P1-loop-3): the approval gate becomes OPERABLE ───────────────
+//
+// The pending marker was written with a companion "operator (or a HUD button)"
+// approval sentinel that NOTHING ever wrote, no surface displayed, and no TTL
+// expired — a gated ticket sat invisible forever (OTL-41: 4+ days). Three
+// additions: a list/approve API (fronted by boot-resume-approve.mjs), and a
+// per-tick expiry sweep that surfaces a stale gate ONCE into the existing
+// Needs-You pipeline (explanation on the gated phase's signal) + a
+// catalyst.alert.boot_resume_pending event.
+
+export const BOOT_RESUME_PENDING_TTL_MS =
+  Number(process.env.CATALYST_BOOT_RESUME_PENDING_TTL_H) * 3600e3 || 48 * 3600e3;
+
+// listPendingApprovals — every gated ticket with its age + approval state.
+export function listPendingApprovals(orchDir, { now = () => Date.now() } = {}) {
+  const workersDir = join(orchDir, "workers");
+  let tickets;
+  try {
+    tickets = readdirSync(workersDir, { withFileTypes: true })
+      .filter((e) => e.isDirectory())
+      .map((e) => e.name);
+  } catch {
+    return [];
+  }
+  const out = [];
+  for (const ticket of tickets) {
+    if (!existsSync(bootResumePendingPath(orchDir, ticket))) continue;
+    const pending = readPendingMarker(orchDir, ticket) ?? {};
+    const requestedMs = Date.parse(pending.requestedAt ?? "") || null;
+    out.push({
+      ticket,
+      phase: pending.phase ?? null,
+      worktreePath: pending.worktreePath ?? null,
+      requestedAt: pending.requestedAt ?? null,
+      ageMs: requestedMs != null ? Math.max(0, now() - requestedMs) : null,
+      approved: existsSync(bootResumeApprovedPath(orchDir, ticket)),
+      surfacedAt: pending.surfacedAt ?? null,
+    });
+  }
+  return out;
+}
+
+// approveBootResume — write the approval sentinel; the every-tick
+// processApprovedResumes picks it up (no restart). Refuses when no gate exists.
+export function approveBootResume(orchDir, ticket) {
+  if (!existsSync(bootResumePendingPath(orchDir, ticket))) {
+    return { approved: false, reason: "no-pending-gate" };
+  }
+  try {
+    writeFileSync(bootResumeApprovedPath(orchDir, ticket), "");
+    return { approved: true };
+  } catch (err) {
+    return { approved: false, reason: err?.message ?? String(err) };
+  }
+}
+
+// surfaceStalePendingApprovals — a pending gate older than the TTL surfaces
+// ONCE: the gated phase's signal gains status:"needs-human" + a curated
+// explanation (the monitor's existing Needs-You inbox renders it via
+// deriveExplanation) and a catalyst.alert.boot_resume_pending event fires. The
+// marker itself stays (approval still works); surfacedAt on the marker is the
+// per-ticket dedupe. Never throws; returns the tickets surfaced.
+export function surfaceStalePendingApprovals({
+  orchDir,
+  now = () => Date.now(),
+  ttlMs = BOOT_RESUME_PENDING_TTL_MS,
+  emitAlert = null, // ({identifier, phase, ageHours}) => void — daemon wires emitBootResumePending
+  // Codex P1: the signal explanation alone does NOT enter the monitor's
+  // Needs-You bucket — deriveAttention keys on the needs-human LABEL/marker,
+  // not on a bare status flip. Route through the same label-guard path the
+  // P0b exhaustion sweep uses (labelOnce markers = idempotence).
+  labelNeedsHuman = (dir, t) =>
+    labelNeedsHumanUnlessBeliefOwner(dir, t, { applyLabel: defaultApplyLabel }, { site: "boot-resume-gate" }),
+} = {}) {
+  const surfaced = [];
+  for (const gate of listPendingApprovals(orchDir, { now })) {
+    if (gate.approved || gate.surfacedAt) continue;
+    if (gate.ageMs == null || gate.ageMs < ttlMs) continue;
+    const { ticket, phase } = gate;
+    const ageHours = Math.round(gate.ageMs / 3600e3);
+    // (1) explanation onto the GATED phase's signal → the Needs-You inbox.
+    const sigPath = join(orchDir, "workers", ticket, `phase-${phase}.json`);
+    try {
+      let sig = {};
+      try {
+        sig = JSON.parse(readFileSync(sigPath, "utf8")) ?? {};
+      } catch {
+        sig = {};
+      }
+      if (!sig.ticket) sig.ticket = ticket;
+      if (!sig.phase) sig.phase = phase;
+      // Codex P2: preserve the gated worktree on a synthetic rewrite — later
+      // approval routes through defaultReviveDispatch, whose CTL-615 worktree
+      // cross-check needs sig.worktreePath.
+      if (!sig.worktreePath && gate.worktreePath) sig.worktreePath = gate.worktreePath;
+      // Codex R2 (P1): park as STALLED, not a bare needs-human status — the
+      // terminal label sweep preserves/applies the needs-human label only for
+      // stalled/failed signals (and RETRIES it every tick, which also closes
+      // the transient-label-failure gap), and deriveAttention's phaseFailed
+      // predicate keys terminal stalled phases into the Needs-You bucket. The
+      // stalledReason is mapped to skip in the unstuck sweep (no re-ask loop).
+      sig.status = "stalled";
+      sig.stalledReason = "boot-resume-gate-expired";
+      if (!sig.needsHumanSince) sig.needsHumanSince = new Date(now()).toISOString();
+      sig.updatedAt = new Date(now()).toISOString();
+      sig.explanation = {
+        escalation_type: "authorization",
+        problem: `${ticket}'s ${phase} resume has been gated behind boot-resume approval for ${ageHours}h with no operator response — expensive phases require explicit approval after a cold start, and nothing was surfacing the ask.`,
+        call_to_action: `approve the ${phase} resume for ${ticket} (run: boot-resume-approve ${ticket}), or take the ticket over?`,
+        recommendation: `approve the resume — the gate exists to prevent silent expensive re-runs, not to park the ticket`,
+        risk: `left unapproved the ticket stays frozen invisibly (the OTL-41 failure mode)`,
+        why_asking: "the CTL-644 cold-start gate requires operator approval for expensive phases",
+        observed: { gate_age_hours: ageHours, phase },
+        attempts: [],
+      };
+      const tmp = `${sigPath}.tmp.${process.pid}`;
+      writeFileSync(tmp, JSON.stringify(sig, null, 2));
+      renameSync(tmp, sigPath);
+    } catch (err) {
+      log.warn({ ticket, phase, err: err?.message }, "ctl-1443: stale-gate signal surfacing failed — will retry next tick");
+      continue; // no surfacedAt stamp → retried next tick
+    }
+    // (1b) Codex P1: the needs-human LABEL is what deriveAttention keys on —
+    // without it the brief never reaches the Needs-You bucket. labelOnce's
+    // markers dedupe; failures retry next tick (no surfacedAt stamp yet? —
+    // the label is retried by virtue of running before the stamp only on the
+    // first pass; subsequent passes are gated by surfacedAt, so a transient
+    // label failure here is retried via labelOnce on the APPROVAL path too).
+    try {
+      labelNeedsHuman?.(orchDir, ticket);
+    } catch (err) {
+      log.warn({ ticket, err: err?.message }, "ctl-1443: needs-human label on stale gate failed — continuing");
+    }
+    // (2) the durable alert event (throttled per-kind inside the emitter).
+    try {
+      emitAlert?.({ identifier: ticket, phase, ageHours });
+    } catch {
+      /* alert is best-effort; the signal is the operator surface */
+    }
+    // (3) dedupe stamp on the marker (approval still works; marker retained).
+    try {
+      const pending = readPendingMarker(orchDir, ticket) ?? { ticket, phase };
+      pending.surfacedAt = new Date(now()).toISOString();
+      writeFileSync(bootResumePendingPath(orchDir, ticket), JSON.stringify(pending));
+    } catch (err) {
+      log.warn({ ticket, err: err?.message }, "ctl-1443: surfacedAt stamp failed — the gate may re-surface next tick");
+    }
+    log.warn(
+      { ticket, phase, ageHours },
+      "ctl-1443: boot-resume approval gate exceeded its TTL — surfaced to Needs-You (approve with boot-resume-approve.mjs)"
+    );
+    surfaced.push(ticket);
+  }
+  return surfaced;
 }
 
 // hasLiveBgWorker — does `agents` contain a live BACKGROUND session whose cwd is
@@ -530,6 +690,14 @@ export function reconcileBootResume({
       } catch {
         /* best-effort */
       }
+      // CTL-1443 (Codex R2): a superseded gate's APPROVAL must die with it — a
+      // stale ticket-level sentinel would silently auto-authorize the NEXT
+      // expensive-phase gate for the same ticket (approve-once semantics).
+      try {
+        rmSync(bootResumeApprovedPath(orchDir, ticket), { force: true });
+      } catch {
+        /* best-effort */
+      }
     }
     let resumeSession = warmSession;
     if (!resumeSession && bgJobId) {
@@ -582,7 +750,23 @@ export function processApprovedResumes({
   dispatch = defaultDispatch,
   appendEvent = defaultAppendBootResumeEvent,
   orchId = undefined,
+  // CTL-1443: the stale-gate expiry sweep rides the same every-tick call so no
+  // scheduler wiring is needed. Injectable for tests; emitAlert defaults to the
+  // real dispatch-alert emitter (lazy import avoided — passed by the caller or
+  // defaulted here at call time).
+  surfaceStaleGates = (o) => surfaceStalePendingApprovals(o),
+  emitStaleGateAlert = defaultEmitBootResumePending,
+  staleGateLabelNeedsHuman = undefined, // CTL-1443 Codex P1: test seam
 } = {}) {
+  try {
+    surfaceStaleGates({
+      orchDir,
+      emitAlert: emitStaleGateAlert,
+      ...(staleGateLabelNeedsHuman ? { labelNeedsHuman: staleGateLabelNeedsHuman } : {}),
+    });
+  } catch (err) {
+    log.warn({ err: err?.message }, "ctl-1443: stale-gate sweep threw — continuing");
+  }
   const workersDir = join(orchDir, "workers");
   let tickets;
   try {

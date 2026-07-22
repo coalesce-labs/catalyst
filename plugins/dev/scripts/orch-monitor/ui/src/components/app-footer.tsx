@@ -157,10 +157,10 @@ export function AppFooter() {
             {" · "}
             {counts.free} free
           </span>
-          {counts.waiting > 0 && (
+          {counts.queued > 0 && (
             <span style={{ color: C.fgDim }}>
               {" · "}
-              {counts.waiting} waiting
+              {counts.queued} queued
             </span>
           )}
         </span>

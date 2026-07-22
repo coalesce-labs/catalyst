@@ -7,7 +7,7 @@
   },
   "dependencies": {
     "@catalyst-cloud/read-model": "^0.1.0",
-    "@catalyst-cloud/sdk": "^0.4.0",
+    "@catalyst-cloud/sdk": "^0.6.0",
     "@opentelemetry/api": "^1.9.1",
     "@opentelemetry/exporter-trace-otlp-http": "^0.219.0",
     "@opentelemetry/resources": "^2.8.0",

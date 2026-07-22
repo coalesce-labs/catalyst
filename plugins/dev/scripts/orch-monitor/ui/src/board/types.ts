@@ -26,7 +26,13 @@ export type BoardAttention = "waiting-on-you" | "needs-human" | null;
 
 /** CTL-1158: GitHub PR merge state; mirrors lib/board-data.d.mts PrMergeStateStatus. */
 export type PrMergeStateStatus =
-  | "CLEAN" | "BLOCKED" | "DIRTY" | "BEHIND" | "UNSTABLE" | "HAS_HOOKS" | "UNKNOWN";
+  | "CLEAN"
+  | "BLOCKED"
+  | "DIRTY"
+  | "BEHIND"
+  | "UNSTABLE"
+  | "HAS_HOOKS"
+  | "UNKNOWN";
 
 /** CTL-922 (BFF10): a node's stable identity stamped on every board entity so the
  *  node-aware surfaces (BOARD3 host swimlanes, SURF1 worker node group, SURF2
@@ -130,9 +136,15 @@ export interface BoardTicket {
   subSteps?: WorkflowSubStep[];
   /** CTL-755 held indicator from the ticket's Linear labels: the admission gate
    *  holds a triaged-waiting ticket before the triage→research promotion. */
-  held?: "blocked" | "waiting" | null;
+  /** CTL-764 Phase 4: "queued" is the new canonical value; "waiting" tolerated during rollout. */
+  held?: "blocked" | "queued" | "waiting" | null;
   /** Dependency ids a `blocked` hold is waiting on (only meaningful when held === "blocked"). */
   blockers?: string[];
+  /** CTL-764 Phase 8: raw Linear labels (board-data.mjs passthrough) — the ONLY
+   *  place a needs-input vs needs-human disposition survives for a not-in-flight
+   *  ticket, since board-data hardcodes attention:"needs-human" for these inbox
+   *  cards. Empty/absent when the board payload carried none. */
+  labels?: string[];
   /** CTL-901 (HOME3): ISO applied-at of the held labels (durable ticket_state
    *  held_since, projected by the broker — BFF11). The honest "how long has it
    *  been waiting on you" anchor; null when no durable stamp exists (rendered
@@ -262,6 +274,13 @@ export interface BoardConfig {
   /** CTL-928: dead bg-job workers still listed by `claude agents` but excluded
    *  from inFlight/freeSlots. Optional so existing config fixtures stay valid. */
   dead?: number;
+  /** CTL-764: triage-phase workers excluded from maxParallel slot accounting. */
+  triage?: number;
+  /** CTL-764: per-disposition ticket counts from deriveStatusCounts spread. */
+  queued?: number;
+  blocked?: number;
+  needsInput?: number;
+  needsHuman?: number;
 }
 
 /** CTL-1050 §3.2: one current service outage decorated onto the board payload —

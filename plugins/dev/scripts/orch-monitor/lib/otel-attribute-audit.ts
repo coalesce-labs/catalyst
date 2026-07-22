@@ -43,12 +43,23 @@ export const AUDIT_MANIFEST: AttributeAuditEntry[] = [
   { key: "event.label",   emitter: "ts", source: "canonical-event.ts:62", classification: "rename-to", targetName: "catalyst.event.label",   remediationCluster: "A", where: "emit" },
   { key: "event.value",   emitter: "ts", source: "canonical-event.ts:63", classification: "rename-to", targetName: "catalyst.event.value",   remediationCluster: "A", where: "emit" },
   { key: "event.channel", emitter: "ts", source: "canonical-event.ts:64", classification: "rename-to", targetName: "catalyst.event.channel", remediationCluster: "A", where: "emit" },
+  // CTL-1488 (ADR-022): coordination/telemetry stream split — a Catalyst-invented
+  // routing dimension we intentionally keep under the event.* namespace.
+  { key: "event.stream_class", emitter: "ts", source: "canonical-event.ts:75", classification: "legitimately-custom", note: "CTL-1488" },
 
   // §4c: Catalyst internal — legitimately-custom (catalyst.* namespace)
   { key: "catalyst.orchestrator.id", emitter: "ts", source: "canonical-event.ts:67", classification: "legitimately-custom" },
   { key: "catalyst.worker.ticket",   emitter: "ts", source: "canonical-event.ts:68", classification: "legitimately-custom" },
   { key: "catalyst.session.id",      emitter: "ts", source: "canonical-event.ts:69", classification: "legitimately-custom" },
   { key: "catalyst.phase",           emitter: "ts", source: "canonical-event.ts:70", classification: "legitimately-custom" },
+
+  // CTL-764: worker state-transition dims — legitimately-custom (catalyst.* namespace).
+  // body.payload is stripped off-machine by otel-forward, so these MUST be attributes.
+  { key: "catalyst.worker.from_disposition", emitter: "ts", source: "canonical-event.ts:118", classification: "legitimately-custom", note: "CTL-764" },
+  { key: "catalyst.worker.to_disposition",   emitter: "ts", source: "canonical-event.ts:119", classification: "legitimately-custom", note: "CTL-764" },
+  { key: "catalyst.worker.from_state",       emitter: "ts", source: "canonical-event.ts:120", classification: "legitimately-custom", note: "CTL-764" },
+  { key: "catalyst.worker.to_state",         emitter: "ts", source: "canonical-event.ts:121", classification: "legitimately-custom", note: "CTL-764" },
+  { key: "catalyst.worker.reason",           emitter: "ts", source: "canonical-event.ts:122", classification: "legitimately-custom", note: "CTL-764" },
 
   // §4d: VCS semconv
   { key: "vcs.repository.name", emitter: "ts", source: "canonical-event.ts:73", classification: "conforming" },
@@ -86,12 +97,25 @@ export const AUDIT_MANIFEST: AttributeAuditEntry[] = [
   { key: "claude.ratelimit.seven_day_opus_pct", emitter: "sh", source: "canonical-event.sh:345", classification: "legitimately-custom", note: "CTL-763" },
   { key: "claude.ratelimit.seven_day_sonnet_pct", emitter: "sh", source: "canonical-event.sh:346", classification: "legitimately-custom", note: "CTL-763" },
 
-  // §4h: Phase attempt tracking (CTL-761) — rename-to cluster F
-  { key: "phase.attempt",      emitter: "sh", source: "canonical-event.sh:347", classification: "rename-to", targetName: "catalyst.phase.attempt",      remediationCluster: "F", where: "emit", note: "CTL-761" },
-  { key: "phase.revive_count", emitter: "sh", source: "canonical-event.sh:348", classification: "rename-to", targetName: "catalyst.phase.revive_count", remediationCluster: "F", where: "emit", note: "CTL-761" },
+  // CTL-1403: Linear read-path dims (canonical-event.sh) — legitimately-custom
+  // (linear.* vendor namespace). sh-only; emitted on every replica HIT/miss/stale.
+  { key: "linear.read.source", emitter: "sh", source: "canonical-event.sh:372", classification: "legitimately-custom", note: "CTL-1403" },
+  { key: "linear.read.result", emitter: "sh", source: "canonical-event.sh:373", classification: "legitimately-custom", note: "CTL-1403" },
+  { key: "linear.read.op",     emitter: "sh", source: "canonical-event.sh:374", classification: "legitimately-custom", note: "CTL-1403" },
+  { key: "linear.read.age_ms", emitter: "sh", source: "canonical-event.sh:375", classification: "legitimately-custom", note: "CTL-1403" },
 
   // CTL-1023: work-type dimension — legitimately-custom (catalyst.* namespace)
   { key: "catalyst.ticket.type", emitter: "sh", source: "canonical-event.sh:349", classification: "legitimately-custom", note: "CTL-1023" },
+
+  // CTL-1457: launch verb that ran the worker (bg | sdk | codex-exec) —
+  // legitimately-custom (catalyst.* namespace). Emitted at canonical-event.sh:406.
+  { key: "catalyst.executor", emitter: "sh", source: "canonical-event.sh:406", classification: "legitimately-custom", note: "CTL-1457" },
+
+  // §4h: Phase attempt tracking (CTL-761) — rename-to cluster F. CTL-764 promoted
+  // these to the TS interface (worker-transition-event emits them), so they are
+  // now ts-emitted; the sh extractor excludes any key present in the TS interface.
+  { key: "phase.attempt",      emitter: "ts", source: "canonical-event.ts:123", classification: "rename-to", targetName: "catalyst.phase.attempt",      remediationCluster: "F", where: "emit", note: "CTL-761/CTL-764" },
+  { key: "phase.revive_count", emitter: "ts", source: "canonical-event.ts:124", classification: "rename-to", targetName: "catalyst.phase.revive_count", remediationCluster: "F", where: "emit", note: "CTL-761/CTL-764" },
 
   // ── MJS emitter — execution-core/ratelimit-event.mjs ─────────────────────
   // §4i: Account rate-limit cluster B — rename-to

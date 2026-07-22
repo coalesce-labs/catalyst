@@ -32,6 +32,8 @@ import {
   getClusterHosts,
   getHostName,
   getLivenessAnchorIssue,
+  getLivenessReadSource, // CTL-1420 (#17): loki|linear cross-host liveness source
+  getLokiQueryUrl, // CTL-1420 (#17): Loki base URL for the liveness read
   log,
   BUSY_CEILING_MS,
   REVIVE_MAX_AGE_MS,
@@ -53,9 +55,38 @@ import { transcriptAgeMs as defaultTranscriptAgeMs } from "./transcript-silence.
 // for callers that want the live read every time (e.g. cli/cluster.mjs's human-invoked
 // `status` verb).
 import { readPeerHeartbeatsSyncCached } from "./cluster-heartbeat-sync.mjs";
+import { readClusterLivenessFromLokiSyncCached } from "./loki-liveness-sync.mjs"; // CTL-1420 (#17): Loki liveness read
+
+// CTL-1420 (#17): source-aware cross-host peer-liveness read. "loki" reads the
+// unified event log via Loki (fail-open, Linear-free); "linear" is the legacy anchor
+// attachment. Both return the SAME { [host]: {last_seen, in_flight_tickets} } shape,
+// so readClusterHeartbeats / defaultOwnedTicketsForHost are unchanged below the seam.
+// The `anchorIssue` arg is only meaningful in linear mode (loki uses getLokiQueryUrl()).
+// CTL-1091 (Codex P1 follow-up): `strict` propagates to the underlying reader so a
+// DETERMINATE peer-read FAILURE throws (dispatch outage → full roster) rather than
+// fail-opening to `{}` (which is indistinguishable from a genuinely-empty success and
+// would let the strict path keep [self] and grab every peer's work). The cached
+// wrappers spread it straight through to the sync reader on a miss; a cache HIT (a
+// recent determinate success) legitimately skips the read. Default false = recovery's
+// fail-open.
+function defaultReadPeers(anchorIssue, { strict = false } = {}) {
+  if (getLivenessReadSource() === "loki") {
+    return readClusterLivenessFromLokiSyncCached({ lokiUrl: getLokiQueryUrl() }, { strict });
+  }
+  return readPeerHeartbeatsSyncCached({ anchorIssue }, { strict });
+}
+
+// peerLivenessConfigured — is the cross-host peer read wired for the ACTIVE source?
+// loki → a Loki query URL resolves; linear → the anchor issue is set. Gates the
+// multi-host merge so a source with no transport configured is an exact no-op
+// (local-map-only) instead of a wasted/failing read.
+function peerLivenessConfigured(anchorIssue) {
+  return getLivenessReadSource() === "loki" ? Boolean(getLokiQueryUrl()) : Boolean(anchorIssue);
+}
 import { HEARTBEAT_EVENT } from "./heartbeat-event.mjs"; // CTL-859: node.heartbeat reader
 import { resolveTicketType, UNKNOWN_TICKET_TYPE } from "./ticket-type.mjs"; // CTL-1023: work-type dimension
 import { phaseIndex, isKnownPhase } from "../lib/phase-fsm.mjs";
+import { classifyEventStream } from "../lib/event-stream-class.mjs"; // CTL-1488: coordination/telemetry split
 import { readWorkerSignals, TERMINAL, listDispatchedPhases } from "./signal-reader.mjs";
 import { reconcileAll } from "./monitor.mjs";
 import { listProjects } from "./registry.mjs";
@@ -79,6 +110,9 @@ import { fenceGuard } from "./fence-guard.mjs";
 // CTL-863: Linear-free fence event emitter (durable fence → event-log migration).
 import { emitFenceClaimed } from "./fence-event.mjs";
 import { applyLabel as defaultApplyLabel } from "./linear-write.mjs";
+// CTL-1481: best-effort worker:<host> label visibility-projection stamp on a
+// won cluster claim. Never the claim arbiter — see worker-label.mjs header.
+import { stampWorkerLabel as defaultStampWorkerLabel } from "./worker-label.mjs";
 import { linearBreaker } from "./linear-breaker.mjs";
 // CTL-642: the SHARED terminal-state predicate. The recovery short-circuit reuses
 // the scheduler's fetchTicketState + cache (threaded via reclaimOpts) so a
@@ -93,6 +127,8 @@ import {
   labelOnce,
   inEscalationCooldown as defaultInEscalationCooldown,
   recordEscalation as defaultRecordEscalation,
+  readEscalationRecord as defaultReadEscalationRecord, // CTL-1442: ask-cap gate
+  ESCALATION_ASK_CAP, // CTL-1442
   labelNeedsHumanUnlessBeliefOwner,
 } from "./label-guard.mjs";
 import { countReviveEvents as defaultCountReviveEvents, hasCompleteEvent } from "./event-scan.mjs";
@@ -319,8 +355,12 @@ function buildEventEnvelope({
   severityText = "WARN",
   severityNumber = 13,
   ticketType = UNKNOWN_TICKET_TYPE,
+  // CTL-1488: id of the triggering event (additive; null when absent). Parity
+  // with the shared TS/bash builders' caused_by (ADR-022 absence-detection).
+  causedBy = null,
 }) {
   const ts = new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
+  const eventName = `phase.${phase}.${action}.${ticket}`;
   return (
     JSON.stringify({
       ts,
@@ -330,21 +370,26 @@ function buildEventEnvelope({
       severityNumber,
       traceId: randomBytes(16).toString("hex"),
       spanId: randomBytes(8).toString("hex"),
+      // CTL-1488: caused_by parity with canonical-event.sh:340 / canonical-event.ts:258.
+      caused_by: causedBy,
       resource: buildCatalystResource({ serviceName: "catalyst.execution-core" }),
       attributes: {
-        "event.name": `phase.${phase}.${action}.${ticket}`,
+        "event.name": eventName,
         "event.entity": "phase",
         "event.action": action,
         "event.label": ticket,
         "catalyst.orchestration": orchId ?? ticket,
         "linear.issue.identifier": ticket,
         "catalyst.ticket.type": ticketType ?? UNKNOWN_TICKET_TYPE,
+        // CTL-1488: coordination/telemetry split label (single source of truth).
+        "event.stream_class": classifyEventStream(eventName),
         ...vetAttrs(attrExtras), // CTL-1291: chartable gauge numbers
       },
       body: { payload: { phase, ticket, status: action, reason, ...payloadExtras } },
     }) + "\n"
   );
 }
+export { buildEventEnvelope }; // CTL-1488: exported for direct parity tests
 
 // appendEnvelopeBestEffort — try to append; return true on success, false on
 // any failure. Revive event callers gate the dispatch on this return value:
@@ -1837,6 +1882,52 @@ function defaultWriteProgressMark(orchDir, ticket, phase, value) {
 // (appendReviveEvent, appendEscalatedEvent, reviveDispatch, applyStalledLabel,
 // killBgJob, countReviveEvents, writeReviveMarker) + the CTL-638 cool-down +
 // CTL-679 breaker. All have real defaults for prod; tests override every one.
+// markEscalationCapTerminal — CTL-1442. Flip a phase signal to a TERMINAL
+// stalled state after the escalation ask-cap is consumed, persisting the
+// curated CTL-1130 explanation on the signal so the monitor's Needs-You inbox
+// (board-data deriveExplanation, newest-signal-first) renders the final brief.
+// A terminal signal drops the ticket from the reclaim sweep's working set, so
+// the every-cool-down re-ask loop (audit RC4) ends here. Read-modify-write,
+// atomic tmp+rename (mirrors defaultReviveDispatch's signal reset). Never
+// throws — a failed flip falls back to the escalateOnce ask-cap early-return.
+function markEscalationCapTerminal({ orchDir, ticket, phase, explanation }) {
+  const signalPath = join(orchDir, "workers", ticket, `phase-${phase}.json`);
+  try {
+    mkdirSync(dirname(signalPath), { recursive: true });
+    // Codex R4: a truncated/malformed signal must be treated like a MISSING one
+    // (parse failure must not abort the rewrite — readWorkerSignals skips
+    // malformed files, so leaving it broken loses the inbox association).
+    let sig = {};
+    if (existsSync(signalPath)) {
+      try {
+        sig = JSON.parse(readFileSync(signalPath, "utf8")) ?? {};
+      } catch {
+        sig = {};
+      }
+    }
+    // Codex R3: when re-creating a removed/unreadable signal, seed identity —
+    // readWorkerSignals derives ticket/phase from the BODY, not the path, and a
+    // ticket:null stalled row breaks the Needs-You association.
+    if (!sig.ticket) sig.ticket = ticket;
+    if (!sig.phase) sig.phase = phase;
+    sig.status = "stalled";
+    sig.stalledReason = "escalation-ask-cap";
+    sig.explanation = explanation;
+    if (!sig.needsHumanSince) sig.needsHumanSince = new Date().toISOString();
+    sig.updatedAt = new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
+    const tmp = `${signalPath}.tmp.${process.pid}`;
+    writeFileSync(tmp, JSON.stringify(sig, null, 2));
+    renameSync(tmp, signalPath);
+    return true;
+  } catch (err) {
+    log.warn(
+      { ticket, phase, err: err.message },
+      "ctl-1442: escalation-cap terminal signal write failed — the ask-cap early-return still suppresses re-asks"
+    );
+    return false;
+  }
+}
+
 export function reclaimDeadWorkIfPossible(
   orchDir,
   signal,
@@ -1877,6 +1968,15 @@ export function reclaimDeadWorkIfPossible(
     // I/O, or to drive the cool-down clock independently of `now`.
     inEscalationCooldownFn = defaultInEscalationCooldown,
     recordEscalationFn = defaultRecordEscalation,
+    // CTL-1442 — the ask-cap gate: after escalationAskCap consecutive same-reason
+    // no-progress asks (default 3, env CATALYST_ESCALATION_ASK_CAP) the
+    // escalation goes TERMINAL (stalled signal + persisted brief) instead of
+    // re-asking every cool-down window forever (ADV-1374/1376 fired for days;
+    // audit RC4). Scoped to reason "no-progress" — the alive busy-ceiling and
+    // no-probe asks keep their existing unbounded-but-throttled behavior (their
+    // signals belong to live workers a terminal flip could fight).
+    readEscalationRecordFn = defaultReadEscalationRecord,
+    escalationAskCap = ESCALATION_ASK_CAP,
     // CTL-606 — supersede guard. Returns the ticket's dispatched phase names so
     // the guard can detect a dead signal the pipeline has already advanced past.
     listTicketPhases = (t) => listDispatchedPhases(orchDir, t),
@@ -2161,16 +2261,51 @@ export function reclaimDeadWorkIfPossible(
     // Defer: skip the audit event + label write entirely (no cool-down record,
     // so a genuine escalation re-fires cleanly once the breaker closes). A
     // transient 429 is not a human-intervention condition.
+    // CTL-1442: the ask-cap state (no-progress only). Consecutive same-reason
+    // asks are counted in the cool-down marker; a spent cap means the ticket was
+    // parked terminal (or should have been — the flip can be lost to a crash).
+    // Read BEFORE the breaker AND cooldown gates (Codex R2/R4): the terminal
+    // rewrite is purely LOCAL, so neither an open Linear breaker nor the
+    // cool-down window may defer repairing a lost flip — a dead running signal
+    // would otherwise hold a slot for the whole outage/window.
+    const priorEscRecord = readEscalationRecordFn(orchDir, ticket, phase);
+    const priorAsks =
+      priorEscRecord?.reason === reason && typeof priorEscRecord?.askCount === "number"
+        ? priorEscRecord.askCount
+        : 0;
+    const capApplies = reason === "no-progress";
+    const capSpent = capApplies && priorAsks >= escalationAskCap;
+    const reassertTerminalIfLost = () => {
+      let already = null;
+      try {
+        already = JSON.parse(
+          readFileSync(join(orchDir, "workers", ticket, `phase-${phase}.json`), "utf8"),
+        )?.status;
+      } catch {
+        /* absent/malformed → re-assert below */
+      }
+      if (already === "stalled") return;
+      markEscalationCapTerminal({ orchDir, ticket, phase, explanation: buildEscExplanation() });
+      log.warn(
+        { ticket, phase, reason, priorAsks },
+        "ctl-1442: ask-cap spent but the signal was not terminal — re-asserted the stalled flip"
+      );
+    };
     if (breaker.isOpen(now())) {
+      if (capSpent) reassertTerminalIfLost(); // local-only repair — no Linear I/O
       log.warn({ ticket, phase, reason }, "ctl-679: escalation deferred — Linear breaker open");
       return "rate-limited-deferred";
     }
     if (inEscalationCooldownFn(orchDir, ticket, phase, now())) {
+      if (capSpent) reassertTerminalIfLost();
       return "escalation-suppressed";
     }
     // CTL-1130: build a typed-union explanation classified by the three gates.
     // push_rejected_no_workflow_scope → MANUAL (capability boundary, D-recovery);
     // all other reasons → AUTHORIZATION (agent can retry with authority).
+    // CTL-1442: wrapped as a (pure) builder so the spent-cap re-assert can
+    // produce a fresh brief lazily without duplicating the CTL-1130 logic.
+    function buildEscExplanation() {
     const escType = reasonToType(reason);
     const whyField = reasonToWhyField(reason, finalAttemptCount);
     let explanation;
@@ -2201,7 +2336,22 @@ export function reclaimDeadWorkIfPossible(
             could_higher_tier_resolve: tierProducer(extras?.model ?? signal?.raw?.model),
             authorize_label: `retry ${ticket} ${phase}`,
             observed: { final_attempt_count: finalAttemptCount, ...(extras?.observed ?? {}) },
-            attempts: extras?.attempts ?? [],
+            // CTL-1442: truthful ask history — this call site historically passed
+            // no extras, so the payload showed attempts:[] forever while asking
+            // "authorize retry?" every window (audit RC4). Scoped to the SAME
+            // reason (Codex R2): a fresh no-progress ask must not inherit an
+            // unrelated wedged-never-started history.
+            // Codex (post-merge #2590 P3): include the CURRENT ask — the marker
+            // is written after the emit, so the record alone is one ask behind
+            // (the terminal brief would show 2 of 3 timestamps).
+            attempts:
+              extras?.attempts ??
+              [
+                ...(priorEscRecord?.reason === reason && Array.isArray(priorEscRecord?.asks)
+                  ? priorEscRecord.asks
+                  : []),
+                now(),
+              ],
           };
     try {
       explanation = buildExplanation(explanationFields);
@@ -2214,6 +2364,16 @@ export function reclaimDeadWorkIfPossible(
         canExecute: escType !== "manual",
       });
     }
+    return explanation;
+    }
+    // CTL-1442: the ask-cap is already spent (and we are OUTSIDE the cooldown —
+    // the in-window case re-asserted above). Re-assert the flip idempotently,
+    // never re-emit the event/label.
+    if (capSpent) {
+      reassertTerminalIfLost();
+      return "escalation-capped";
+    }
+    const explanation = buildEscExplanation();
     const enrichedExtras = { ...(extras ?? {}), explanation };
     appendEscalatedEvent({
       phase,
@@ -2225,6 +2385,19 @@ export function reclaimDeadWorkIfPossible(
     });
     applyStalledLabel({ orchDir, ticket });
     recordEscalationFn(orchDir, ticket, phase, reason, now());
+    // CTL-1442: this ask consumed the cap → go TERMINAL. Flip the phase signal
+    // to stalled with the curated explanation persisted on it (deriveExplanation
+    // renders it in the monitor's Needs-You inbox), so the reclaim sweep stops
+    // re-evaluating the ticket and the operator sees ONE final, complete ask
+    // instead of an endless every-10-min echo.
+    if (capApplies && priorAsks + 1 >= escalationAskCap) {
+      markEscalationCapTerminal({ orchDir, ticket, phase, explanation });
+      log.warn(
+        { ticket, phase, reason, asks: priorAsks + 1 },
+        "ctl-1442: escalation ask-cap reached — parked terminal (stalled + needs-human + brief); re-arm by deleting the .escalation-cooldowns marker AND the stalled phase signal (or reply on the ticket — the stall janitor clears both)"
+      );
+      return "escalation-cap-terminal";
+    }
     log.warn({ ticket, phase, reason }, "ctl-587: escalated");
     return "escalated";
   }
@@ -3073,7 +3246,22 @@ export function readClusterHeartbeats({
   logPath = getEventLogPath(),
   roster = getClusterHosts(),
   anchorIssue = getLivenessAnchorIssue(),
-  readPeers = (anchor) => readPeerHeartbeatsSyncCached({ anchorIssue: anchor }),
+  readPeers = defaultReadPeers, // CTL-1420 (#17): loki|linear source-aware peer read
+  // CTL-1091 (Codex P1 #3): when TRUE — the DISPATCH positive-liveness path — a
+  // multi-host roster with NO trustworthy cross-host view THROWS instead of
+  // returning a local-only map. "No trustworthy view" = the peer transport is
+  // unconfigured OR the peer read threw. Without this the local event log always
+  // carries self's own fresh heartbeat, so the positive-liveness filter would see
+  // live=[self] (nonempty, no throw), skip the resolver's outage branch, shrink the
+  // dispatch roster to [self], and make every live host own every ready ticket —
+  // contending for its peers' work instead of taking the documented
+  // outage → FULL-roster fallback (each node owns only its own HRW slice). The throw
+  // routes through readPositiveLive's catch → resolveDispatchRoster's outage degrade.
+  // RECOVERY keeps the default (false) fail-open: an unseen peer is "not proven dead"
+  // and must NOT be reclaimed, so a Loki/Linear hiccup there must never break
+  // liveness. This is the dispatch(positive) vs recovery(fail-open) asymmetry in
+  // docs/architecture.md.
+  requirePeerView = false,
 } = {}) {
   const lastSeen = {};
   let raw;
@@ -3103,30 +3291,55 @@ export function readClusterHeartbeats({
   }
 
   // CTL-1090: multi-host cross-host merge. Single-host (roster<=1) ⇒ exact no-op.
-  if (Array.isArray(roster) && roster.length > 1 && anchorIssue) {
-    let peers = {};
-    try {
-      peers = readPeers(anchorIssue) ?? {};
-    } catch {
-      peers = {}; // fail-open: a Linear hiccup must never break liveness
-    }
-    for (const [host, rec] of Object.entries(peers)) {
-      const ts = rec?.last_seen;
-      if (typeof ts !== "string" || ts.length === 0) continue;
-      // CTL-1090 review hardening: a peer's last_seen is untrusted input. Reject
-      // anything Date.parse can't read so a garbage value (e.g. "zzz") — which
-      // would sort ABOVE real ISO strings lexicographically and then make the host
-      // look forever-alive once deadHosts does Date.parse(seen) (NaN < cutoff is
-      // false) — can never poison the merge.
-      const peerMs = Date.parse(ts);
-      if (!Number.isFinite(peerMs)) continue; // unparseable → drop (fail-open)
-      // Keep the freshest ts per host. Compare NUMERICALLY (Date.parse), not
-      // lexicographically: the local event log carries second-precision ts
-      // ("…02Z", heartbeat-event.mjs strips millis) while peers publish
-      // millisecond ISO ("…02.500Z"), and "…02.500Z" < "…02Z" as strings — a
-      // lexicographic compare would discard a genuinely newer peer ts.
-      const cur = lastSeen[host];
-      if (!cur || peerMs > Date.parse(cur)) lastSeen[host] = ts;
+  // CTL-1420 (#17): gate on the ACTIVE source's transport (loki: Loki URL; linear:
+  // anchor issue) so a source with no transport is a clean local-map-only no-op.
+  if (Array.isArray(roster) && roster.length > 1) {
+    if (!peerLivenessConfigured(anchorIssue)) {
+      // No cross-host transport. CTL-1091 P1 #3: for the DISPATCH path this is NOT a
+      // safe local-map-only no-op — self's own heartbeat alone would collapse the
+      // dispatch roster to [self]. Surface it as an outage so the resolver degrades
+      // to the FULL roster. Recovery (requirePeerView=false) keeps the local-map-only
+      // no-op (an unconfigured transport must not manufacture "dead" peers to reclaim).
+      if (requirePeerView) {
+        throw new Error(
+          "ctl-1091: dispatch requires a cross-host liveness view but no peer transport is configured (multi-host)",
+        );
+      }
+    } else {
+      let peers = {};
+      try {
+        // strict:requirePeerView makes the reader THROW on a determinate failure
+        // (timeout/nonzero/unparseable) instead of collapsing it to `{}` — the default
+        // readers otherwise fail-open, so a failed peer read would look identical to a
+        // genuinely-empty one and the dispatch roster would silently shrink to [self]
+        // (Codex P1 follow-up). A genuinely-empty SUCCESSFUL read still returns `{}`
+        // (legitimate all-peers-absent → [self] failover).
+        peers = readPeers(anchorIssue, { strict: requirePeerView }) ?? {};
+      } catch (err) {
+        // CTL-1091 P1 #3: DISPATCH surfaces the read failure as an outage (→ full
+        // roster). RECOVERY stays fail-open — a Loki/Linear hiccup must never break
+        // liveness (unseen ≠ dead).
+        if (requirePeerView) throw err;
+        peers = {};
+      }
+      for (const [host, rec] of Object.entries(peers)) {
+        const ts = rec?.last_seen;
+        if (typeof ts !== "string" || ts.length === 0) continue;
+        // CTL-1090 review hardening: a peer's last_seen is untrusted input. Reject
+        // anything Date.parse can't read so a garbage value (e.g. "zzz") — which
+        // would sort ABOVE real ISO strings lexicographically and then make the host
+        // look forever-alive once deadHosts does Date.parse(seen) (NaN < cutoff is
+        // false) — can never poison the merge.
+        const peerMs = Date.parse(ts);
+        if (!Number.isFinite(peerMs)) continue; // unparseable → drop (fail-open)
+        // Keep the freshest ts per host. Compare NUMERICALLY (Date.parse), not
+        // lexicographically: the local event log carries second-precision ts
+        // ("…02Z", heartbeat-event.mjs strips millis) while peers publish
+        // millisecond ISO ("…02.500Z"), and "…02.500Z" < "…02Z" as strings — a
+        // lexicographic compare would discard a genuinely newer peer ts.
+        const cur = lastSeen[host];
+        if (!cur || peerMs > Date.parse(cur)) lastSeen[host] = ts;
+      }
     }
   }
 
@@ -3255,19 +3468,20 @@ export async function inferResumePhase(ticket, { probes = WORK_DONE_PROBES, cwd 
 
 // defaultOwnedTicketsForHost — return the in-flight tickets for a dead host.
 // Primary path (CTL-1090): read the dead host's published `in_flight_tickets`
-// from the cross-host liveness channel (one Linear read = liveness + tickets).
-// Fallback: scan the local worker signal directory for non-terminal signals
-// dispatched from the dead host (the original local-only behavior, unchanged).
+// from the cross-host liveness channel (one read = liveness + tickets). CTL-1420
+// (#17): that channel is now source-aware — Loki (default reader) or the legacy
+// Linear anchor. Fallback: scan the local worker signal directory for non-terminal
+// signals dispatched from the dead host (the original local-only behavior, unchanged).
 // `anchorIssue`/`readPeers` are injectable for unit tests.
 function defaultOwnedTicketsForHost(
   deadHost,
   {
     orchDir,
     anchorIssue = getLivenessAnchorIssue(),
-    readPeers = (anchor) => readPeerHeartbeatsSyncCached({ anchorIssue: anchor }),
+    readPeers = defaultReadPeers, // CTL-1420 (#17): loki|linear source-aware peer read
   } = {}
 ) {
-  if (anchorIssue) {
+  if (peerLivenessConfigured(anchorIssue)) {
     try {
       const peerMap = readPeers(anchorIssue);
       const rec = peerMap?.[deadHost];
@@ -3346,6 +3560,13 @@ export async function reclaimDeadHostWork(
     thoughtsPull = (cwd) => defaultThoughtsPull(cwd),
     dispatch = (od, ticket, phase, cwd) =>
       dispatchTicket(od, ticket, phase, { dispatch: defaultDispatch }),
+    // CTL-1481: best-effort worker:<host> label stamp, fired right after a won
+    // takeover claim (same gate as emitFenceClaimed). Injectable so tests
+    // drive/assert the stamp without touching Linear. `replica` is the daemon's
+    // createReplicaReader, threaded from the tick so the stamp's label read is
+    // replica-first (live fallback is loud inside the stamp).
+    stampWorkerLabel = defaultStampWorkerLabel,
+    replica = undefined,
   } = {}
 ) {
   const taken = [];
@@ -3386,6 +3607,14 @@ export async function reclaimDeadHostWork(
           generation: claimRes.generation,
           phase: NEW_WORK_ENTRY_PHASE,
         });
+      }
+      // CTL-1481: best-effort worker:<host> label stamp — a visibility
+      // projection of the takeover claim we just won, NEVER the claim arbiter
+      // itself. Best-effort swallow (mirrors writeLocalClusterGeneration below).
+      try {
+        stampWorkerLabel({ ticket, hostName: self, knownHosts: roster, replica, log });
+      } catch {
+        // best-effort — a failed/thrown stamp never blocks the takeover.
       }
 
       // Rebuild the worktree on the ticket branch.

@@ -175,7 +175,14 @@ describe("assembleBoard wiring — parked needs-human synthetic tickets", () => 
   });
 
   it("assembleBoard dedupes against existing card ids and appends parkedTickets", () => {
-    expect(boardDataSrc).toContain("synthesizeParkedNeedsHumanTickets(parkedNeedsHuman, existingCardIds, now, replicaTitles, linfo)");
+    // Whitespace-insensitive: Prettier may reflow the call across multiple lines,
+    // so assert the arg order (the wiring that matters), not the exact layout.
+    const nospace = (s: string) => s.replace(/\s+/g, "");
+    expect(nospace(boardDataSrc)).toContain(
+      nospace(
+        "synthesizeParkedNeedsHumanTickets(parkedNeedsHuman, existingCardIds, now, replicaTitles, linfo)",
+      ),
+    );
     expect(boardDataSrc).toContain("...parkedTickets");
   });
 });

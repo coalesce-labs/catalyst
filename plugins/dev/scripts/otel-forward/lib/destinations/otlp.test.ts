@@ -127,6 +127,79 @@ describe("buildOtlpPayload", () => {
   });
 });
 
+// CTL-764 Phase 6: worker.transition attribute pass-through
+describe("buildOtlpPayload — worker.transition attributes (CTL-764)", () => {
+  function makeTransitionEvent(): CanonicalEvent {
+    return {
+      ...SAMPLE_EVENT,
+      resource: {
+        ...SAMPLE_EVENT.resource,
+        project: "catalyst-workspace",
+        "linear.key": "CTL-764",
+        "catalyst.orchestration": "phase-agents",
+      },
+      attributes: {
+        "event.name": "worker.transition.CTL-764",
+        "catalyst.worker.ticket": "CTL-764",
+        "catalyst.worker.from_disposition": "queued",
+        "catalyst.worker.to_disposition": "needs-human",
+        "catalyst.worker.from_state": "Research",
+        "catalyst.worker.to_state": "Needs You",
+        "catalyst.worker.reason": "stall-timeout",
+        "phase.attempt": 2,
+        "phase.revive_count": 1,
+      },
+    };
+  }
+
+  test("string worker dims map to stringValue", () => {
+    const ev = makeTransitionEvent();
+    const payload = buildOtlpPayload([ev]) as any;
+    const attrs: Array<{ key: string; value: any }> =
+      payload.resourceLogs[0].scopeLogs[0].logRecords[0].attributes;
+    const get = (k: string) => attrs.find((a) => a.key === k)?.value?.stringValue;
+    expect(get("catalyst.worker.from_disposition")).toBe("queued");
+    expect(get("catalyst.worker.to_disposition")).toBe("needs-human");
+    expect(get("catalyst.worker.from_state")).toBe("Research");
+    expect(get("catalyst.worker.to_state")).toBe("Needs You");
+    expect(get("catalyst.worker.reason")).toBe("stall-timeout");
+  });
+
+  test("numeric worker dims map to intValue", () => {
+    const ev = makeTransitionEvent();
+    const payload = buildOtlpPayload([ev]) as any;
+    const attrs: Array<{ key: string; value: any }> =
+      payload.resourceLogs[0].scopeLogs[0].logRecords[0].attributes;
+    const get = (k: string) => attrs.find((a) => a.key === k)?.value;
+    expect(get("phase.attempt")).toEqual({ intValue: 2 });
+    expect(get("phase.revive_count")).toEqual({ intValue: 1 });
+    expect(get("phase.attempt")?.doubleValue).toBeUndefined();
+  });
+
+  test("to_disposition is scalar stringValue (not JSON-array string)", () => {
+    const ev = makeTransitionEvent();
+    const payload = buildOtlpPayload([ev]) as any;
+    const attrs: Array<{ key: string; value: any }> =
+      payload.resourceLogs[0].scopeLogs[0].logRecords[0].attributes;
+    const toDisp = attrs.find((a) => a.key === "catalyst.worker.to_disposition")?.value
+      ?.stringValue;
+    expect(toDisp).toBe("needs-human");
+    expect(() => JSON.parse(toDisp ?? "")).toThrow();
+  });
+
+  test("resource dims project/linear.key propagate to resourceLogs[0].resource.attributes", () => {
+    const ev = makeTransitionEvent();
+    const payload = buildOtlpPayload([ev]) as any;
+    const resAttrs: Array<{ key: string; value: any }> =
+      payload.resourceLogs[0].resource.attributes;
+    const get = (k: string) => resAttrs.find((a) => a.key === k)?.value?.stringValue;
+    expect(get("project")).toBe("catalyst-workspace");
+    expect(get("linear.key")).toBe("CTL-764");
+    expect(get("catalyst.orchestration")).toBe("phase-agents");
+    expect(get("service.name")).toBe("catalyst.session");
+  });
+});
+
 describe("OtlpSender flush failure events (CTL-1008 Phase 4)", () => {
   let dir: string;
   beforeEach(() => {
@@ -312,9 +385,7 @@ describe("OtlpSender DLQ drain — outside withRetry (CTL-1060)", () => {
   });
 
   test("no drain when primary fails: DLQ grows by primary, drain never attempted", async () => {
-    global.fetch = mock(() =>
-      Promise.reject(new Error("always fail"))
-    ) as unknown as typeof fetch;
+    global.fetch = mock(() => Promise.reject(new Error("always fail"))) as unknown as typeof fetch;
 
     const { OtlpSender } = await import("./otlp.ts");
     const dlqPath = join(dir, "nofail-dlq.jsonl");
@@ -383,7 +454,9 @@ describe("OtlpSender DLQ drain — outside withRetry (CTL-1060)", () => {
       endpoint: "http://127.0.0.1:4318",
       dlqPath,
       retryDelaysMs: [0],
-      onBatchDelivered: () => { deliveredCount++; },
+      onBatchDelivered: () => {
+        deliveredCount++;
+      },
     });
 
     await sender.flush([makeEvent()]);
@@ -393,9 +466,7 @@ describe("OtlpSender DLQ drain — outside withRetry (CTL-1060)", () => {
   });
 
   test("onBatchDelivered is NOT called when primary flush fails (CTL-1060 Phase 3)", async () => {
-    global.fetch = mock(() =>
-      Promise.reject(new Error("down"))
-    ) as unknown as typeof fetch;
+    global.fetch = mock(() => Promise.reject(new Error("down"))) as unknown as typeof fetch;
 
     const { OtlpSender } = await import("./otlp.ts");
     const dlqPath = join(dir, "obd-fail-dlq.jsonl");
@@ -405,7 +476,9 @@ describe("OtlpSender DLQ drain — outside withRetry (CTL-1060)", () => {
       endpoint: "http://127.0.0.1:1",
       dlqPath,
       retryDelaysMs: [0, 0, 0],
-      onBatchDelivered: () => { deliveredCount++; },
+      onBatchDelivered: () => {
+        deliveredCount++;
+      },
     });
 
     await sender.flush([makeEvent()]);

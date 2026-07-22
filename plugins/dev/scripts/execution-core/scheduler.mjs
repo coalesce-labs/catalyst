@@ -65,7 +65,14 @@ export { STAGE_RANK, NON_PREEMPTABLE_PHASES };
 import { readVerifyVerdict } from "./work-done-probes.mjs";
 import { countRemediateCycles, countTicketEventsInWindow } from "./event-scan.mjs";
 import { rankTickets, compareTickets } from "./scheduler-rank.mjs";
-import { defaultDispatch, dispatchTicket, teamOf, settleDispatchSync, isThenable, backstopOnRejection } from "./dispatch.mjs"; // CTL-1367 P1: settle async (sdk) dispatch synchronously + backstop a rejected async dispatch
+import {
+  defaultDispatch,
+  dispatchTicket,
+  teamOf,
+  settleDispatchSync,
+  isThenable,
+  backstopOnRejection,
+} from "./dispatch.mjs"; // CTL-1367 P1: settle async (sdk) dispatch synchronously + backstop a rejected async dispatch
 import {
   fetchTicketState,
   fetchTicketsBatch,
@@ -82,7 +89,11 @@ import { getProjectConfig, listProjects, ownerRepoFromRepoRoot } from "./registr
 // The gatedTeardownWorktree import is removed; the teardown phase agent
 // re-implements the gate in bash (merge-confirmation evidence + worktree
 // presweep + non-force `git worktree remove`) in phase-teardown/SKILL.md.
-import { readWorkerSignals, countSdkInflight as defaultCountSdkInflight, hasFreshClaim } from "./signal-reader.mjs";
+import {
+  readWorkerSignals,
+  countSdkInflight as defaultCountSdkInflight,
+  hasFreshClaim,
+} from "./signal-reader.mjs";
 // CTL-1410 Phase B: the in-process SDK worker registry — the liveness fact for
 // workers with no bg job (leaf module; a Map read, never a shell-out).
 import { isSdkWorkerLive as registrySdkWorkerLive } from "./sdk-worker-registry.mjs";
@@ -143,7 +154,12 @@ import {
   setLivenessSpanSink, // CTL-1330 Tier 3: wire the liveness.refresh span sink
 } from "./claude-agents.mjs";
 // CTL-1330 Tier 3: OTLP span export (OFF unless CATALYST_TRACING=on).
-import { initTracing, shutdownTracing, emitTickTrace, emitLivenessRefreshSpan } from "./tracing.mjs";
+import {
+  initTracing,
+  shutdownTracing,
+  emitTickTrace,
+  emitLivenessRefreshSpan,
+} from "./tracing.mjs";
 import { emitReapIntent } from "./reap-intent.mjs";
 // CTL-574: per-tick reclaim of dead-but-work-done phase workers. The default
 // is the real recovery-module function; tests inject a fake. See
@@ -233,6 +249,9 @@ import {
 import {
   reasoningRecoveryPass,
   defaultShouldSkipItem as recoveryShouldSkipItem,
+  defaultSkipReason as recoverySkipReason, // CTL-1440 (P0b): exhausted-vs-cooldown truth
+  escalateExhaustedIntents, // CTL-1440 (P0b): attempts-exhausted → loud escalation
+  readDeferredBoardHealthIntents, // CTL-1432 (B2): deferred board-health anchor candidates
   defaultRecordIntent as recoveryRecordIntent,
   // CTL-1242 (corrected scope): forget the host-local recovery-intent latch when
   // a ticket goes terminal so the ledger doesn't accumulate stale finished-ticket
@@ -266,7 +285,14 @@ import {
 // to production deps at the unstuckSweep wiring point below. Wiring this does NOT
 // flip enforce on — the mode gate stays at its safe 'off' default (ADR-023).
 import { buildUnstuckActSeams } from "./unstuck-act-seams.mjs";
-import { readUnstuckSweepConfig, readRecoveryPassConfig, readBoardHealthConfig, readReclaimGatewayFreshMs, isThrottled } from "./config.mjs";
+import {
+  readUnstuckSweepConfig,
+  readRecoveryPassConfig,
+  readBoardHealthConfig,
+  readSanctionedNeedsHuman,
+  readReclaimGatewayFreshMs,
+  isThrottled,
+} from "./config.mjs";
 // CTL-558: the deterministic Linear status/label write seam. The whole module
 // is injected as `writeStatus` so tests pass fakes; production uses the real
 // module (best-effort — every write swallows its own failures).
@@ -275,11 +301,15 @@ import * as linearWrite from "./linear-write.mjs";
 import { fenceGuard } from "./fence-guard.mjs";
 // CTL-863: Linear-free fence event emitter (durable fence → event-log migration).
 import { emitFenceClaimed } from "./fence-event.mjs";
+// CTL-1481: best-effort worker:<host> label visibility-projection stamp on a
+// won cluster claim. Never the claim arbiter — see worker-label.mjs header.
+import { stampWorkerLabel as defaultStampWorkerLabel } from "./worker-label.mjs";
 // CTL-757: the canonical linear.state.write audit emitter. CALLER-EMITS at each
 // scheduler write site (source/phase/reason known only here) — NEVER inside
 // runTransition (would double-audit the triage path, which keeps its own
 // phase.triage.linear-transition event). Best-effort: swallow-on-error.
 import { appendLinearStateWriteEvent } from "./linear-state-write-event.mjs";
+import { appendWorkerTransitionEvent as defaultAppendWorkerTransitionEvent } from "./worker-transition-event.mjs"; // CTL-764 Phase 5
 import { resolveTicketType } from "./ticket-type.mjs"; // CTL-1023: work-type dimension
 // CTL-642 + CTL-758: the SHARED Linear terminal-state predicate. isLinearTerminal
 // ({Done,Canceled} — its OWN set) backs both the reconcile-backstop's
@@ -307,12 +337,19 @@ import {
   isDraining as isDrainingDefault,
   getDrainedMarkerPath, // CTL-1321: shared resolver for the drain.drained sentinel
   HEARTBEAT_GRACE_MS, // CTL-1191: dead-host grace for surviving-roster recovery gate
+  HEARTBEAT_RESTORE_HOLD_MS, // CTL-1091: restore-side deflap hold for the dispatch roster
+  isInProcessDispatchMode, // CTL-1457 (T2): sdk|codex-exec occupancy gate predicate
 } from "./config.mjs";
 import { emitDrainedEvent as defaultEmitDrainedEvent } from "./drain-event.mjs"; // CTL-1095: drained sentinel
 import { defaultCheckSequencing } from "./sequencing.mjs"; // CTL-537
 import { ownedBy, ownerForTicket } from "./hrw.mjs"; // CTL-850: HRW ownership filter (CTL-1191 also uses it for the diagnostician gate); ownerForTicket: CTL-1290 board-health stranded-node + enforce HRW gate
+import { computeDispatchRoster, readDeflapState, writeDeflapState } from "./liveness-deflap.mjs"; // CTL-1091: restore-side deflap for the dispatch roster
 import { boardHealthPass } from "./board-health.mjs"; // CTL-1290: the whole-board health delegate (shadow-first)
-import { getAllTicketDescriptors, getAllPrStatuses, openBrokerStateDb } from "../broker/broker-state.mjs"; // CTL-1290: board snapshot (reads only). bun:sqlite-backed — safe here: scheduler.mjs is daemon-only and NOT in the orch-monitor vite/UI graph (see MEMORY vite_config_bun_sqlite_trap). CTL-1157: getAllPrStatuses = the filter_state PR-lifecycle reader for the phantom/orphaned-PR invariants. openBrokerStateDb (CTL-1157 Codex round-6): the exec-core daemon must open the broker DB handle before these readers — ensure() throws otherwise and assembleBoardState swallows it, leaving the board/PR maps empty and the cohorts inert.
+import {
+  getAllTicketDescriptors,
+  getAllPrStatuses,
+  openBrokerStateDb,
+} from "../broker/broker-state.mjs"; // CTL-1290: board snapshot (reads only). bun:sqlite-backed — safe here: scheduler.mjs is daemon-only and NOT in the orch-monitor vite/UI graph (see MEMORY vite_config_bun_sqlite_trap). CTL-1157: getAllPrStatuses = the filter_state PR-lifecycle reader for the phantom/orphaned-PR invariants. openBrokerStateDb (CTL-1157 Codex round-6): the exec-core daemon must open the broker DB handle before these readers — ensure() throws otherwise and assembleBoardState swallows it, leaving the board/PR maps empty and the cohorts inert.
 import { readReconcileHealthMarkers } from "./reconcile-health.mjs"; // CTL-1290: stranded-node reconcile signal
 import { claimDispatchSync } from "./cluster-claim-sync.mjs"; // CTL-850: cross-host claim soft-CAS
 // CTL-954: team estimation method — lazy-cached from Linear, used to expand
@@ -367,7 +404,14 @@ const TERMINAL_SIGNAL_STATUSES = new Set(["failed", "stalled", "aborted"]);
 // then owns only its own HRW slice (NEVER double-acts) and we merely forgo the
 // dead-owner failover for this tick (no worse than the pre-CTL-1191 strand).
 // Single-host (roster.length <= 1) returns the roster unchanged with no read.
-function computeSurvivingRoster(roster, { readHeartbeats = readClusterHeartbeats, nowMs = Date.now() } = {}) {
+// CTL-1091: exported so monitor.mjs can route its triage-dispatch ownership gate
+// through the same surviving-roster read as the scheduler's new-work gate (both
+// dispatch sites then agree with recovery on who is alive). Safe to import from
+// monitor.mjs — this helper pulls in no bun:sqlite dependency (CTL-1397).
+export function computeSurvivingRoster(
+  roster,
+  { readHeartbeats = readClusterHeartbeats, nowMs = Date.now() } = {}
+) {
   if (!Array.isArray(roster) || roster.length <= 1) return roster;
   try {
     const lastSeen = readHeartbeats({ roster });
@@ -377,6 +421,141 @@ function computeSurvivingRoster(roster, { readHeartbeats = readClusterHeartbeats
   } catch {
     return roster;
   }
+}
+
+// CTL-1091 Phase 3: the RAW positively-live host set. Dispatch ownership requires
+// POSITIVE liveness — a host must have been SEEN within grace to own new work —
+// unlike computeSurvivingRoster's fail-OPEN deadHosts (an unseen host is "not
+// proven dead" and stays a survivor). Returns `{ live }` where `live` is the
+// filtered array (possibly EMPTY when nobody is positively live), or `{ live: null }`
+// when the heartbeat read THREW. The empty/null distinction from "some hosts live"
+// is what lets callers tell a total feed outage apart from a partial one — the
+// fail-safe (degrade to the full roster) must fire only on a genuine outage.
+function readPositiveLive(
+  roster,
+  { readHeartbeats = readClusterHeartbeats, nowMs = Date.now(), graceMs = HEARTBEAT_GRACE_MS } = {}
+) {
+  try {
+    // CTL-1091 (Codex P1 #3): DISPATCH liveness requires a trustworthy cross-host
+    // view. requirePeerView makes readClusterHeartbeats THROW (→ caught below →
+    // {live:null,error} → resolveDispatchRoster outage degrade → FULL roster) when
+    // the peer transport is unconfigured or the peer read fails, instead of quietly
+    // returning self's local-only heartbeat map (which would collapse the dispatch
+    // roster to [self] and make every host grab every ready ticket). A test-injected
+    // readHeartbeats simply ignores the extra option.
+    const lastSeen = readHeartbeats({ roster, requirePeerView: true });
+    const cutoff = nowMs - graceMs;
+    const live = roster.filter((h) => {
+      const seen = lastSeen[h];
+      return typeof seen === "string" && seen.length > 0 && Date.parse(seen) >= cutoff;
+    });
+    return { live };
+  } catch (err) {
+    // CTL-1091 review F2: preserve the caught error so the outage→full-roster
+    // degrade can be told apart from a latent bug in the read path when it is
+    // surfaced (resolveDispatchRoster's onDegrade hook). Back-compat: existing
+    // callers destructure only `{ live }`.
+    return { live: null, error: err };
+  }
+}
+
+// computeDispatchSurvivingRoster — the positive-liveness dispatch roster with the
+// outage fail-safe folded in: sheds a NEVER-live rostered host (absent from
+// lastSeen — the CTL-1057 permanently-offline case) so its HRW slice fails over,
+// but degrades to the FULL roster when NOBODY is positively live (a total feed
+// outage) so the board is never stranded. Single-host (roster.length <= 1) is a
+// no-op with no read. The recovery side deliberately keeps the fail-open deadHosts
+// (it must NOT reclaim a never-seen host's non-existent work); see docs/architecture.md.
+export function computeDispatchSurvivingRoster(roster, opts = {}) {
+  if (!Array.isArray(roster) || roster.length <= 1) return roster;
+  const { live } = readPositiveLive(roster, opts);
+  return live && live.length > 0 ? live : roster;
+}
+
+// resolveDispatchRoster — the SINGLE source of truth for the dispatch-ownership
+// roster, shared by BOTH dispatch sites (scheduler new-work `_dispatchRoster` and
+// monitor `dispatchTriage`) so they can never drift into split-brain (CTL-1091
+// cleanup #1). Composes positive-liveness → restore deflap → outage fail-safe:
+//
+//  1. Read the raw positively-live set once.
+//  2. TOTAL OUTAGE (read threw, or NOBODY positively live) → degrade to the FULL
+//     roster and DO NOT mutate the deflap observation state (we learned nothing
+//     this tick). This preserves the "outage → full roster, never re-home" invariant
+//     that a naive deflap-on-fail-open-roster would violate: without this guard a
+//     just-departed host (prevState liveSince:null) would be held out and its slice
+//     re-homed to a peer during an outage (CTL-1091 correctness review #1).
+//  3. Otherwise apply the restore deflap (computeDispatchRoster) on the live set;
+//     `persist` writes the next observation state atomically (scheduler is the SOLE
+//     writer; monitor passes persist:false and reads the same file read-only).
+//
+// Single-host (roster.length <= 1) is a strict no-op with no read. Injectable
+// readHeartbeats/holdMs for tests.
+export function resolveDispatchRoster({
+  roster,
+  orchDir,
+  self,
+  nowMs = Date.now(),
+  persist = false,
+  readHeartbeats = readClusterHeartbeats,
+  holdMs = HEARTBEAT_RESTORE_HOLD_MS,
+  // CTL-1091 review F2: observability hook fired ONLY on the outage→full-roster
+  // degradation (below). Default no-op keeps the pure resolve silent for unit
+  // callers and the read-only monitor site; the scheduler's write path wires the
+  // rate-limited warn emitter so a genuine feed outage is not invisible.
+  onDegrade = () => {},
+} = {}) {
+  if (!Array.isArray(roster) || roster.length <= 1) return roster;
+  const prevState = readDeflapState(orchDir);
+  const { live, error } = readPositiveLive(roster, { readHeartbeats, nowMs });
+  if (!live || live.length === 0) {
+    // Total outage → full roster, observation state untouched. Surface the
+    // degradation (its silence was CTL-1091 verify F2): cross-host failover has
+    // effectively turned OFF this tick and every host has dropped back to owning
+    // only its own HRW slice. The fail-safe is correct; only its silence was the
+    // risk. Never let an observability throw break the roster resolve.
+    try {
+      onDegrade({
+        roster,
+        self,
+        reason: error ? "heartbeat-read-threw" : "nobody-positively-live",
+        error: error ? (error.message ?? String(error)) : null,
+      });
+    } catch {
+      /* observability is best-effort */
+    }
+    if (persist) writeDeflapState(orchDir, prevState);
+    return roster;
+  }
+  const { dispatchRoster, nextState } = computeDispatchRoster({
+    survivingRoster: live,
+    roster,
+    prevState,
+    holdMs,
+    nowMs,
+    self,
+  });
+  if (persist) writeDeflapState(orchDir, nextState);
+  return dispatchRoster;
+}
+
+// CTL-1091 review F2: rate-limited WARN for the dispatch-roster outage degrade.
+// The scheduler is a single long-lived daemon process, so a module-level
+// timestamp is enough to keep this to one warn per window (a partial feed outage
+// otherwise fires every tick). Alloy ships the Tier-1 daemon log to Loki, so this
+// gives an operator the "failover is OFF right now" signal — and the caught error
+// message rides along so a genuine feed outage is distinguishable from a latent
+// read-path bug. The read-only monitor site stays silent (no onDegrade), so the
+// scheduler is the sole emitter and there is no double-logging.
+const DISPATCH_ROSTER_OUTAGE_WARN_INTERVAL_MS = 60_000;
+let _lastDispatchRosterOutageWarnMs = 0;
+function warnDispatchRosterOutage({ roster, self, reason, error } = {}) {
+  const nowMs = Date.now();
+  if (nowMs - _lastDispatchRosterOutageWarnMs < DISPATCH_ROSTER_OUTAGE_WARN_INTERVAL_MS) return;
+  _lastDispatchRosterOutageWarnMs = nowMs;
+  log.warn(
+    { roster, self, reason, error, degradedTo: "full-roster" },
+    "ctl-1091: dispatch-roster liveness read degraded to the FULL roster — cross-host failover is OFF this tick (every host owns only its own HRW slice). This is the correct fail-safe; investigate the heartbeat/Loki feed if it persists.",
+  );
 }
 
 // CTL-1004/CTL-1056 Bug 2: dispatchFailureDiag — extract the diagnostic fields
@@ -1597,8 +1776,32 @@ function safeEmit(fn, arg, ctx) {
 // gets BOTH labels removed (clear-on-pickup). The two label names live here so
 // the diff logic and any board reader share one source of truth.
 export const HELD_LABEL_BLOCKED = "blocked";
-export const HELD_LABEL_WAITING = "waiting";
+// CTL-764 Phase 4: value renamed "waiting" → "queued" (identifier preserved for
+// drift-guard imports). The HUD back-compat-maps legacy "waiting" so a mid-rollout
+// board is never blank. All new writes apply "queued".
+export const HELD_LABEL_WAITING = "queued";
+// CTL-764 Phase 4: new disposition constants.
+export const HELD_LABEL_NEEDS_INPUT = "needs-input";
+export const HELD_LABEL_NEEDS_HUMAN = "needs-human";
+// TICK_CONVERGED_DISPOSITIONS — the three dispositions that tick-converge via
+// convergeDispositionLabel. needs-human is EXCLUDED (it is sticky via labelOnce).
+const TICK_CONVERGED_DISPOSITIONS = [
+  HELD_LABEL_BLOCKED,
+  HELD_LABEL_WAITING,
+  HELD_LABEL_NEEDS_INPUT,
+];
+// Keep HELD_LABELS for convergeHeldLabel (thin alias) backward compat.
 const HELD_LABELS = [HELD_LABEL_BLOCKED, HELD_LABEL_WAITING];
+// CTL-764 finding 1: the pre-migration disposition value. HELD_LABEL_WAITING now
+// resolves to "queued", so the rename dropped the legacy "waiting" out of every
+// removal loop — a ticket still carrying it kept rendering as queued via the board
+// back-compat path and could exclusive-conflict with applying the new "queued".
+// This value is NEVER APPLIED (only "queued" is); it lives in the REMOVABLE sets so
+// clear-on-pickup / convergence keep draining it until historical labels are gone.
+const LEGACY_HELD_LABEL_WAITING = "waiting";
+// Removable superset = the applicable held labels PLUS the legacy value. Used only by
+// the remove loops (removable ≠ applicable).
+const HELD_LABELS_REMOVABLE = [...HELD_LABELS, LEGACY_HELD_LABEL_WAITING];
 
 // Terminal Linear states a blocker can be in (a blocker in one of these does NOT
 // hold its dependent). Single source of truth: lib/dependency-graph.mjs
@@ -1651,7 +1854,7 @@ export function convergeHeldLabel(
   current,
   desired,
   writeStatus,
-  { orchDir, now = Date.now } = {}
+  { orchDir, now = Date.now, onRemoveResult } = {}
 ) {
   // CTL-834: back off if a recent apply of `desired` failed unrecoverably.
   if (orchDir && desired && inLabelCooldown(orchDir, ticket, desired, now())) {
@@ -1659,10 +1862,45 @@ export function convergeHeldLabel(
   }
   const have = new Set(current ?? []);
   let writes = 0;
-  // Remove any held label that is present but not desired.
-  for (const label of HELD_LABELS) {
+  // Remove any held label that is present but not desired. CTL-764 finding 1: the
+  // removable set includes the legacy "waiting" so it is drained on clear-on-pickup.
+  // CTL-764 r4: the removal result is captured directly (safeWrite discards it) and
+  // surfaced via the optional onRemoveResult(label, removed) seam — removeLabel
+  // reports failures as {removed:false} WITHOUT throwing, and clear emissions must
+  // gate on a CONFIRMED removal. An undefined result (legacy/test stubs) counts as
+  // success; a throw counts as failure. CTL-764 r5: the production removeLabel
+  // (linear-write.mjs) is ASYNC while this converger (and schedulerTick) is sync —
+  // a thenable result defers onRemoveResult to resolution instead of inspecting the
+  // Promise (which read `.removed` as undefined and false-confirmed every removal);
+  // the callback therefore fires post-tick in production and callers must not
+  // assume it ran before this function returns.
+  const settle = (label, res) => {
+    if (res != null && typeof res.then === "function") {
+      res.then(
+        (r) => onRemoveResult?.(label, r?.removed !== false),
+        (err) => {
+          log.warn(
+            { ticket, phase: "admission", err: err?.message },
+            "scheduler: Linear write-back threw — continuing tick"
+          );
+          onRemoveResult?.(label, false);
+        }
+      );
+      return;
+    }
+    onRemoveResult?.(label, res?.removed !== false);
+  };
+  for (const label of HELD_LABELS_REMOVABLE) {
     if (label !== desired && have.has(label)) {
-      safeWrite(() => writeStatus.removeLabel(ticket, label), { ticket, phase: "admission" });
+      try {
+        settle(label, writeStatus.removeLabel(ticket, label));
+      } catch (err) {
+        log.warn(
+          { ticket, phase: "admission", err: err.message },
+          "scheduler: Linear write-back threw — continuing tick"
+        );
+        onRemoveResult?.(label, false);
+      }
       writes++;
     }
   }
@@ -1703,6 +1941,71 @@ const UNRECOVERABLE_LABEL_REASONS = new Set([
   "team-mismatch",
 ]);
 
+// convergeDispositionLabel — generalised version of convergeHeldLabel covering the
+// full worker-status disposition set (CTL-764 Phase 4). Like convergeHeldLabel it
+// diffs current labels and applies/removes on change (steady-state zero writes),
+// with the same CTL-834 cool-down gate on unrecoverable failures.
+//
+// KEY INVARIANTS:
+//   • needs-human is NEVER tick-converged (it is sticky via labelOnce + .applied).
+//   • Precedence: if the ticket already carries needs-human, make ZERO writes —
+//     the lower dispositions are suppressed until needs-human is cleared by a
+//     genuine resolution call (handleCommentWake → clearStalledLabel).
+//   • NEVER issues removeLabel('needs-human') — only the three tick-converged
+//     dispositions (queued/blocked/needs-input) are in the removable set.
+//   • desired=null removes stale tick-converged labels but leaves needs-human alone.
+export function convergeDispositionLabel(
+  ticket,
+  current,
+  desired,
+  writeStatus,
+  { orchDir, now = Date.now } = {}
+) {
+  const have = new Set(current ?? []);
+  // Precedence suppression: if needs-human is already applied AND desired is one of
+  // the lower tick-converged dispositions (non-null), suppress ALL writes. The lower
+  // disposition must not overwrite or coexist with needs-human.
+  // When desired=null (clear-on-pickup), we still remove stale tick-converged labels
+  // but leave needs-human alone (it is cleared only by genuine resolution).
+  if (have.has(HELD_LABEL_NEEDS_HUMAN) && desired !== null && desired !== undefined) return 0;
+  // CTL-834: back off if a recent apply of `desired` failed unrecoverably.
+  if (orchDir && desired && inLabelCooldown(orchDir, ticket, desired, now())) {
+    return 0;
+  }
+  let writes = 0;
+  // Remove any tick-converged disposition label that is present but not desired.
+  // needs-human is intentionally excluded from this removable set — it is sticky.
+  // CTL-764 finding 1: the legacy "waiting" is drained here too (removable, never
+  // applied) so a mid-rollout ticket cannot keep it alongside the new "queued".
+  for (const label of [...TICK_CONVERGED_DISPOSITIONS, LEGACY_HELD_LABEL_WAITING]) {
+    if (label !== desired && have.has(label)) {
+      safeWrite(() => writeStatus.removeLabel(ticket, label), { ticket, phase: "admission" });
+      writes++;
+    }
+  }
+  // Apply the desired label if not already present.
+  if (desired && !have.has(desired)) {
+    let res;
+    try {
+      res = writeStatus.applyLabel({ ticket, label: desired });
+    } catch (err) {
+      log.warn(
+        { ticket, label: desired, err: err.message },
+        "convergeDispositionLabel: applyLabel threw — continuing tick"
+      );
+    }
+    writes++;
+    if (orchDir && res && res.applied === false && UNRECOVERABLE_LABEL_REASONS.has(res.reason)) {
+      recordLabelCooldown(orchDir, ticket, desired, now());
+      log.warn(
+        { ticket, label: desired, reason: res.reason },
+        "ctl-764: disposition-label apply unrecoverable — backing off (cool-down)"
+      );
+    }
+  }
+  return writes;
+}
+
 // CTL-1068 — convergeStartedHeldLabels: retract orphaned held labels for a STARTED
 // (already-admitted) ticket. The admission A.7 loop only converges the pre-pickup
 // pool (triagedWaiting); a ticket that was picked up and then failed while wearing
@@ -1730,7 +2033,9 @@ export function convergeStartedHeldLabels(
     fenceGuard: fence = fenceGuard,
   } = {}
 ) {
-  for (const label of HELD_LABELS) {
+  // CTL-764 finding 1: iterate the removable superset so a STARTED ticket still
+  // wearing the legacy "waiting" (and its once-marker) has it retracted too.
+  for (const label of HELD_LABELS_REMOVABLE) {
     if (label === desired) continue;
     const base = join(orchDir, "workers", ticket, `.linear-label-${label}`);
     if (!existsSync(`${base}.applied`) && !existsSync(`${base}.skipped`)) continue;
@@ -1958,9 +2263,21 @@ export function gcDispatchCooldowns(orchDir, eligibleIdentifiers, now) {
 // CTL-713: consecutive-failure escalation. When a (ticket,phase) has failed N
 // times in a row with the same code, apply needs-human via labelOnce and emit
 // cooldown-escalated. labelOnce's .applied marker makes this idempotent.
-export function maybeEscalateDispatchFailures(orchDir, marker, { writeStatus, appendEvent, env = process.env } = {}) {
-  if (!marker || marker.consecutiveFailures < DISPATCH_FAILURE_ESCALATION_THRESHOLD) return;
-  labelNeedsHumanUnlessBeliefOwner(orchDir, marker.ticket, writeStatus, { env, site: "dispatch-failures", log });
+// CTL-764 finding 13: returns whether the sticky needs-human label was actually
+// written this call (false below threshold, on belief-owner deferral, or when
+// labelOnce no-ops on a persisted marker) so the caller emits the worker.transition
+// escalation only on a genuine label write — never a false escalation event.
+export function maybeEscalateDispatchFailures(
+  orchDir,
+  marker,
+  { writeStatus, appendEvent, env = process.env } = {}
+) {
+  if (!marker || marker.consecutiveFailures < DISPATCH_FAILURE_ESCALATION_THRESHOLD) return false;
+  const wrote = labelNeedsHumanUnlessBeliefOwner(orchDir, marker.ticket, writeStatus, {
+    env,
+    site: "dispatch-failures",
+    log,
+  });
   appendEvent({
     ticket: marker.ticket,
     orchId: marker.ticket,
@@ -1968,6 +2285,7 @@ export function maybeEscalateDispatchFailures(orchDir, marker, { writeStatus, ap
     code: marker.code,
     consecutiveFailures: marker.consecutiveFailures,
   });
+  return wrote;
 }
 
 // CTL-712: the refused-dispatch path writes NO signal file (the artifact gate
@@ -2248,7 +2566,13 @@ export function verifyDispatchedSignal(orchDir, ticket, phase, { requireBgJob = 
 //   • blocked / waiting — HELD_LABEL_BLOCKED / HELD_LABEL_WAITING, applied by
 //     convergeHeldLabel for admission-hold indicators (CTL-874: the pre-CTL-874
 //     set listed only needs-human, so a missing held label went undetected).
-const REQUIRED_WORKSPACE_LABELS = ["needs-human", HELD_LABEL_BLOCKED, HELD_LABEL_WAITING];
+// CTL-764 Phase 4: added HELD_LABEL_NEEDS_INPUT to the required workspace set.
+const REQUIRED_WORKSPACE_LABELS = [
+  HELD_LABEL_NEEDS_HUMAN,
+  HELD_LABEL_BLOCKED,
+  HELD_LABEL_WAITING,
+  HELD_LABEL_NEEDS_INPUT,
+];
 
 // preflightWorkspaceLabels — best-effort daemon-start check. CTL-874: the
 // required labels are WORKSPACE-scoped (team:null), so the pre-CTL-874
@@ -2377,7 +2701,7 @@ function isFenceSuppressFresh(orchDir, ticket, nowMs) {
 // CTL-757: the optional `emitStateWrite` callback (closed over schedulerTick's
 // injected emitter) audits the terminal-sweep Done write. Optional so the
 // once-semantics tests that call terminalDoneOnce directly need not supply it.
-function terminalDoneOnce(
+export function terminalDoneOnce(
   orchDir,
   ticket,
   writeStatus,
@@ -2392,16 +2716,37 @@ function terminalDoneOnce(
     // CTL-1157 SLICE 3: the broad "Done-moves" emitter — fires on EVERY confirmed
     // terminal-sweep Done (not just the open-PR subset). Injectable for tests.
     emitDoneApplied = appendRecoveryDoneAppliedEvent,
+    // CTL-1157 A1: injectable clock for the fence-suppress cooldown (deterministic
+    // in tests). Defaults to the wall clock in production.
+    now = Date.now,
+    // CTL-1157 A1: injectable fence decision (deterministic in tests). Production
+    // uses the real fenceGuard, which reads the cross-host claim generation.
+    fence = fenceGuard,
   } = {}
 ) {
   const marker = join(orchDir, "workers", ticket, ".terminal-done.applied");
-  if (existsSync(marker)) return;
-  if (!fenceGuard({ ticket, orchDir, multiHost, gateway, self })) {
+  // CTL-764 finding 7: return whether a REAL Done write landed (+ its from_state) so
+  // the caller can emit the terminal worker.transition independently of any label
+  // clear. `null` on every no-write path (marker present, fence-suppressed, fenced
+  // out, idempotent skip, throw) — the caller only emits on a genuine Done write.
+  if (existsSync(marker)) return null;
+  // CTL-1329 (extended to the terminal-Done branch, CTL-1157 A1): if a prior tick
+  // already fence-suppressed this dir, skip the fence-check subprocess (and the
+  // Linear reads it fronts) for the cooldown window instead of re-probing ~2x/sec.
+  // A genuinely-current fence self-heals after at most one window. Previously ONLY
+  // the stalled/failed branch stamped this cooldown, so a stale terminal fence
+  // burned unbounded — the CTL-1423 ~1,090/hr `stale fence` WARN storm.
+  if (isFenceSuppressFresh(orchDir, ticket, now())) return null;
+  if (!fence({ ticket, orchDir, multiHost, gateway, self })) {
     log.warn(
       { ticket },
       "ctl-863: stale fence — suppressing terminalDoneOnce write (zombie guard)"
     );
-    return;
+    // CTL-1329: arm the per-dir cooldown so subsequent ticks skip the probe+fence
+    // for a window (bounds the burn to once-per-cooldown), the same rail the
+    // stalled/failed branch uses immediately before its needs-human write.
+    stampFenceSuppress(orchDir, ticket, now());
+    return null;
   }
   // CTL-1157 (ALARM-NOT-BLOCK — THE REVERSAL): the terminal sweep writes Done
   // DIRECTLY (no agent to reason). The earlier behavior REFUSED the write when an
@@ -2491,6 +2836,9 @@ function terminalDoneOnce(
             "ctl-1157: terminal-sweep wrote Done while an open PR still exists or the check was unverifiable — alarm emitted (recovery.done-applied-with-open-pr)"
           );
         }
+        // CTL-764 finding 7: a genuine Done write landed → signal the caller to emit
+        // the terminal worker.transition stage event.
+        return { realDoneWrite: true, from_state: res?.from_state ?? null };
       }
     }
   } catch (err) {
@@ -2499,6 +2847,7 @@ function terminalDoneOnce(
       "scheduler: terminal-Done write-back threw — continuing tick"
     );
   }
+  return null;
 }
 
 // reconcileTerminalBackstop — CTL-758 defense-in-depth (the reconcile backstop).
@@ -2525,7 +2874,14 @@ function reconcileTerminalBackstop(
   signal,
   writeStatus,
   emitStateWrite,
-  { cache, prAdapter, fetchState = fetchTicketState, multiHost = false, gateway = undefined, self = undefined } = {}
+  {
+    cache,
+    prAdapter,
+    fetchState = fetchTicketState,
+    multiHost = false,
+    gateway = undefined,
+    self = undefined,
+  } = {}
 ) {
   // GATE 1 — pipeline reached terminal (marker present).
   const marker = join(orchDir, "workers", ticket, ".terminal-done.applied");
@@ -2773,6 +3129,15 @@ export function defaultClearStall(orchDir, writeStatus) {
     } catch {
       /* best-effort */
     }
+    // 4. CTL-1442: re-arm the escalation ask budget. An operator re-arming a
+    //    stalled ticket starts a FRESH cycle — without this, a retried phase
+    //    that no-progresses again hits the spent ask-cap (askCount >= cap) and
+    //    is suppressed without a fresh ask or re-stall (Codex P2 on #2590).
+    try {
+      rmSync(join(orchDir, ".escalation-cooldowns", `${ticket}-${phase}.json`), { force: true });
+    } catch {
+      /* best-effort */
+    }
     return true;
   };
 }
@@ -2795,7 +3160,11 @@ function readBoardHealthEventTail(maxLines = 800) {
     const out = [];
     for (const line of lines.slice(-maxLines)) {
       if (!line) continue;
-      try { out.push(JSON.parse(line)); } catch { /* skip a partial/garbled line */ }
+      try {
+        out.push(JSON.parse(line));
+      } catch {
+        /* skip a partial/garbled line */
+      }
     }
     return out;
   } catch {
@@ -2840,7 +3209,12 @@ export function makeTickTimer(now = () => performance.now(), wallNow = Date.now)
     lap(label) {
       const t = now();
       passes[label] = round1(t - last);
-      spanLaps.push({ name: label, durationMs: round1(t - last), startEpochMs: toEpoch(last), endEpochMs: toEpoch(t) });
+      spanLaps.push({
+        name: label,
+        durationMs: round1(t - last),
+        startEpochMs: toEpoch(last),
+        endEpochMs: toEpoch(t),
+      });
       last = t;
     },
     // op(pass, name, attrsAtStart) — open one operation sub-lap inside `pass`.
@@ -2954,7 +3328,7 @@ export function maybeEmitReplicaFreshness({
         "catalyst.linear.replica.staleness": stalenessSeconds,
         "catalyst.linear.replica.rows": fresh.rowCount,
       },
-      "scheduler: replica freshness (CTL-1366)",
+      "scheduler: replica freshness (CTL-1366)"
     );
   } catch {
     /* gauge emit must never wedge the tick */
@@ -3085,6 +3459,11 @@ export function schedulerTick(
     // distinct source tag — slice-1's deviation note: the parked re-dispatch reuses
     // the scheduler-advance / preemption-resume sites, it is not its own write.)
     appendStateWriteEvent = appendLinearStateWriteEvent,
+    // CTL-764 Phase 5: unified worker.transition event emitter. Injectable for tests
+    // (pass a spy to capture emitted transitions). Default no-op so bare unit ticks
+    // that do not inject this seam are unaffected. Production wires the real
+    // defaultAppendWorkerTransitionEvent via runTick.
+    appendWorkerTransitionEvent = null,
     // CTL-642/758: PR-merged adapter for the recovery terminal short-circuit's
     // optional second check (merged-but-not-yet-Done zombie) AND the reconcile
     // backstop's gate-2 merged check. Default undefined here keeps every legacy
@@ -3158,12 +3537,24 @@ export function schedulerTick(
     hosts = undefined,
     hostName = undefined,
     claimDispatch = claimDispatchSync,
+    // CTL-1481: best-effort worker:<host> label stamp, fired right after a won
+    // multi-host claim (same gate as emitFenceClaimed). Injectable so tests
+    // drive/assert the stamp without touching Linear; production defaults to
+    // the real linear-query/linear-write-backed implementation.
+    stampWorkerLabel = defaultStampWorkerLabel,
     // CTL-1191: injectable surviving-roster computation for the recovery-pass HRW
     // gate (ownsForRecovery). Default undefined → computeSurvivingRoster(roster),
     // which reads heartbeats from the (test-redirected) event log. Tests inject a
     // fixed survivor set to drive the dead-owner-failover path deterministically
     // without writing heartbeat events. Single-host is still a no-op regardless.
     recoverySurvivingRoster = undefined,
+    // CTL-1091: injectable surviving-roster computation for the NEW-WORK dispatch
+    // HRW gate (the `ready` filter below), mirroring recoverySurvivingRoster.
+    // Default undefined → computeSurvivingRoster(roster) (reads the test-redirected
+    // event log). Tests inject a fixed survivor set to drive the offline-owner
+    // failover deterministically without writing heartbeat events. Single-host is
+    // still a no-op regardless (multiHost gate short-circuits before it is read).
+    dispatchSurvivingRoster = undefined,
     // CTL-729: progress-watchdog seams. Defaults keep every existing bare unit
     // tick inert (null silence probe → predicate no-ops via "no-transcript").
     watchdog: {
@@ -3240,9 +3631,7 @@ export function schedulerTick(
     } = {},
     // CTL-1176: Pass 0r — recovery-reasoning pass seams. Default undefined keeps
     // a bare tick fully inert. Production passes mode from env > Layer-2.
-    recoveryPass: {
-      mode: _recoveryPassMode = undefined,
-    } = {},
+    recoveryPass: { mode: _recoveryPassMode = undefined } = {},
     // CTL-1290: board-health delegate seam. Threaded by the daemon (runTick) with
     // the real-IO seams (board snapshot / event-ring / reconcile markers) — mirrors
     // the stallJanitor census wiring. Undefined on a bare schedulerTick (unit
@@ -3285,6 +3674,14 @@ export function schedulerTick(
     // by dispatch mode. Default "phase-agents" = today's bg substrate; every
     // direct-call test keeps the stable label with no wiring.
     dispatchMode = "phase-agents",
+    // CTL-1457 (N1): true when executorByPhase routes ANY phase to an in-process
+    // executor (sdk|codex-exec) even though the NODE boot dispatchMode is bg —
+    // the primary per-phase codex/sdk rollout. ORed into the occupancy gates below
+    // (isInProcessDispatchMode(dispatchMode) || hasInProcessRoute) so a routed no-bg
+    // worker on a bg node is counted (else it over-admits past maxParallel). Default
+    // false → the bg node with no in-process route is byte-identical (countSdkInflight
+    // is never called; and even when armed it is 0 on a node nothing routes in-process).
+    hasInProcessRoute = false,
   } = {}
 ) {
   // CTL-850: resolve this host + the cluster roster ONCE per tick (cheap
@@ -3332,8 +3729,43 @@ export function schedulerTick(
       : computeSurvivingRoster(roster);
     return _survivorRoster;
   };
-  const ownsForRecovery = (ticket) =>
-    !multiHost || ownedBy(ticket, _survivors(), self);
+  const ownsForRecovery = (ticket) => !multiHost || ownedBy(ticket, _survivors(), self);
+
+  // CTL-1091: the DISPATCH-time ownership roster = the live (positive-liveness +
+  // restore-deflap) roster, so new eligible tickets whose HRW owner is OFFLINE
+  // fail over to a live host instead of stranding in Todo. Memoized once per tick.
+  // It performs its OWN positive-liveness heartbeat read (via resolveDispatchRoster)
+  // — independent of recovery's fail-open computeSurvivingRoster read (_survivors),
+  // by design: dispatch needs positive liveness, recovery needs fail-open. Both hit
+  // the same cached feed. Injectable via dispatchSurvivingRoster for tests; a total
+  // outage degrades to the full roster (never double-acts).
+  let _dispatchRosterMemo = null;
+  const _dispatchRoster = () => {
+    if (_dispatchRosterMemo) return _dispatchRosterMemo;
+    // Test override bypasses both the heartbeat read AND the deflap (tests
+    // exercise the deflap directly via the pure computeDispatchRoster).
+    if (Array.isArray(dispatchSurvivingRoster)) {
+      _dispatchRosterMemo = dispatchSurvivingRoster;
+      return _dispatchRosterMemo;
+    }
+    // Single-host is a strict no-op with NO heartbeat read (cheap guard first);
+    // _dispatchRoster is only reached multiHost anyway (the ready filter short-
+    // circuits single-host), but this keeps it safe if ever called otherwise.
+    // Scheduler is the SOLE writer of .liveness-deflap.json (persist:true); monitor
+    // reads it read-only. Shared with the triage gate via resolveDispatchRoster so
+    // both dispatch sites can never drift out of sync.
+    _dispatchRosterMemo = multiHost
+      ? resolveDispatchRoster({
+          roster,
+          orchDir,
+          self,
+          nowMs: now(),
+          persist: true,
+          onDegrade: warnDispatchRosterOutage, // CTL-1091 F2: surface outage→full-roster
+        })
+      : roster;
+    return _dispatchRosterMemo;
+  };
   // CTL-757: emitStateWrite — caller-emit the canonical linear.state.write audit
   // event for ONE scheduler write site. `writerResult` is the runTransition return
   // ({applied, reason, from_state, to_state, ...}) from applyPhaseStatus /
@@ -3361,6 +3793,76 @@ export function schedulerTick(
       },
       { ticket, phase, source }
     );
+  }
+
+  // CTL-764 Phase 5: recordTransition — the per-tick sync chokepoint for worker
+  // state transitions. Emits one worker.transition event per genuine change.
+  // Disposition changes are guarded by lastDispositionEmit (only-on-change);
+  // stage-only transitions always emit. Fail-open: never aborts the tick.
+  // appendWorkerTransitionEvent is the injectable seam; null → silent no-op.
+  function recordTransition({
+    ticket,
+    toStage = null,
+    fromStage = null,
+    fromDisposition = null,
+    toDisposition, // undefined = stage-only (no guard needed; always emit)
+    reason = null,
+    attempt = null,
+    reviveCount = null,
+    source = null,
+  }) {
+    if (!appendWorkerTransitionEvent) return;
+    // Disposition-only-on-change guard.
+    if (toDisposition !== undefined) {
+      const seen = lastDispositionEmit.has(ticket);
+      const last = lastDispositionEmit.get(ticket);
+      const normalizedTo = toDisposition ?? null;
+      // CTL-764 finding 10: a daemon restart clears lastDispositionEmit, so the FIRST
+      // confirmed clear after restart (toDisposition=null) would normalize last→null,
+      // satisfy the only-on-change guard, and drop a GENUINE needs-*→cleared event.
+      // Let it through when the ticket is first-seen this lifetime AND fromDisposition
+      // proves the prior non-null state (the clear-path callers pass it).
+      const firstSeenClear = !seen && normalizedTo === null && fromDisposition != null;
+      // Only-on-change guard. Normalize a first-seen (undefined) last to null so
+      // an initial null→null healthy tick emits nothing — one canonical event per
+      // GENUINE change (verify CTL764-VER-6[low]: undefined===null was false, so a
+      // first-seen never-held ticket fired one spurious null→null no-op).
+      if ((last ?? null) === normalizedTo && !firstSeenClear) return;
+      // CTL-764 Phase 5: needs-human is STICKY — cleared only by clearStalledLabel's
+      // onRemoved (confirmed Linear label removal; sources terminal-done-clear /
+      // no-stall-clear), NEVER by a steady-state admission clear-on-pickup or a
+      // held-label convergence for a cycle member (which is STILL needs-human —
+      // only its held label was cleared). Suppress the spurious needs-human→null
+      // emit both paths would otherwise fire (the needs-human label is untouched),
+      // and DO NOT advance lastDispositionEmit so the sticky state persists until
+      // the genuine clear runs. Without cycle-member-clear here, a dep-cycle member
+      // storms A.5(needs-human)→A.7(null) every tick (verify CTL764-VER-2[med]).
+      if (
+        normalizedTo === null &&
+        last === "needs-human" &&
+        (source === "scheduler-admission" || source === "cycle-member-clear")
+      ) {
+        return;
+      }
+      lastDispositionEmit.set(ticket, normalizedTo);
+    }
+    try {
+      appendWorkerTransitionEvent({
+        ticket,
+        orchId: ticket,
+        toStage,
+        fromStage,
+        fromDisposition: fromDisposition ?? null,
+        toDisposition: toDisposition ?? null,
+        reason,
+        attempt,
+        reviveCount,
+        source,
+        taskType: resolveTicketType(orchDir, ticket),
+      });
+    } catch (_err) {
+      // fail-open
+    }
   }
 
   // ─── CTL-826: dispatchAndVerify — the shared dispatch→verify core ───
@@ -3489,10 +3991,17 @@ export function schedulerTick(
           expiresAt: cd.expiresAt,
           consecutiveFailures: cd.consecutiveFailures,
         });
-        maybeEscalateDispatchFailures(orchDir, cd, {
-          writeStatus,
-          appendEvent: appendCooldownEscalatedEvent,
-        });
+        if (
+          maybeEscalateDispatchFailures(orchDir, cd, {
+            writeStatus,
+            appendEvent: appendCooldownEscalatedEvent,
+          })
+        ) {
+          // CTL-764 finding 13: a ticket escalated to needs-human solely by
+          // consecutive dispatch failures gets a worker.transition too — gated on the
+          // actual sticky-label write (per finding 8) so a re-escalation is silent.
+          recordTransition({ ticket, toDisposition: "needs-human", source: "dispatch-failures" });
+        }
         log.warn(
           { ticket, phase, verifyReason: v.reason },
           "scheduler: dispatched signal verification failed"
@@ -3531,10 +4040,16 @@ export function schedulerTick(
         consecutiveFailures: cd.consecutiveFailures,
         ...diag,
       });
-      maybeEscalateDispatchFailures(orchDir, cd, {
-        writeStatus,
-        appendEvent: appendCooldownEscalatedEvent,
-      });
+      if (
+        maybeEscalateDispatchFailures(orchDir, cd, {
+          writeStatus,
+          appendEvent: appendCooldownEscalatedEvent,
+        })
+      ) {
+        // CTL-764 finding 13: emit the escalation transition on a genuine sticky-label
+        // write (per finding 8) — a re-escalation on a persisted marker stays silent.
+        recordTransition({ ticket, toDisposition: "needs-human", source: "dispatch-failures" });
+      }
       if (failLogMsg) {
         log.warn(
           {
@@ -3835,7 +4350,9 @@ export function schedulerTick(
     // startScheduler, or a test injecting it). A bare tick has none → skip cleanly.
     if (
       jMode !== "off" &&
-      (_collectOrphanCandidates || _collectGhostCandidates || _collectStallClearCandidates ||
+      (_collectOrphanCandidates ||
+        _collectGhostCandidates ||
+        _collectStallClearCandidates ||
         _collectTerminalSignalGcCandidates)
     ) {
       // CTL-1324: throttle the EXPENSIVE worktree censuses (J1 orphan, J3
@@ -3852,11 +4369,7 @@ export function schedulerTick(
       // + lastRun are injectable (CTL-1064 Pass 0u idiom) for a deterministic test.
       const jCensusIntervalMs = _janitorCensusIntervalMs ?? jcfg.censusIntervalMs;
       const jNowMs = typeof _janitorNowMs === "function" ? _janitorNowMs() : Date.now();
-      const runHeavyCensus = !isThrottled(
-        _stallJanitorCensusLastRunMs,
-        jCensusIntervalMs,
-        jNowMs,
-      );
+      const runHeavyCensus = !isThrottled(_stallJanitorCensusLastRunMs, jCensusIntervalMs, jNowMs);
       if (runHeavyCensus) _stallJanitorCensusLastRunMs = jNowMs;
       try {
         const jreport = runStallJanitorPass({
@@ -3865,13 +4378,13 @@ export function schedulerTick(
           // CTL-1324: J1 orphan-worktree census — git-heavy → throttled.
           collectOrphanCandidates: runHeavyCensus
             ? (_collectOrphanCandidates ?? (() => []))
-            : (() => []),
+            : () => [],
           // J2 ghost-session census — cheap (warm agents snapshot only) → every tick.
           collectGhostCandidates: _collectGhostCandidates ?? (() => []),
           // CTL-1005 J3: stall-clear census (git-heavy) → throttled; unstick seam unchanged.
           collectStallClearCandidates: runHeavyCensus
             ? (_collectStallClearCandidates ?? (() => []))
-            : (() => []),
+            : () => [],
           // Default clear seam: deletes the synthetic stalled signal, clears
           // needs-human (+ marker) + .orphan-detected.applied, writes the
           // .janitor-cleared-<phase>.applied once-marker, and lets the scheduler's
@@ -3880,7 +4393,7 @@ export function schedulerTick(
           // CTL-1242 J4: terminal/merged signal dir GC census (git-heavy) → throttled.
           collectTerminalSignalGcCandidates: runHeavyCensus
             ? (_collectTerminalSignalGcCandidates ?? (() => []))
-            : (() => []),
+            : () => [],
           gcTerminalSignals: _gcTerminalSignals ?? (() => false),
           emit: _janitorEmit,
           // Default kill seam: BOTH issues killBgJob AND records the pinned
@@ -3961,7 +4474,8 @@ export function schedulerTick(
           // both post escalation comments / race a clear on the same ticket. A
           // dead owner's stuck tickets re-home to a live survivor. STRICT no-op
           // at N=1 (ownsForRecovery is identity → the census is unchanged).
-          collectCandidates: () => (_collectUnstuckCandidates() ?? []).filter((c) => ownsForRecovery(c.ticket)),
+          collectCandidates: () =>
+            (_collectUnstuckCandidates() ?? []).filter((c) => ownsForRecovery(c.ticket)),
           actByCategory: _unstuckActByCategory ?? {},
           escalate: _unstuckEscalate ?? (() => {}),
           emit: _unstuckEmit,
@@ -4109,6 +4623,14 @@ export function schedulerTick(
                   cache,
                   gateway,
                   replica,
+                  // CTL-1451 (A4 "then widen", final site): the recovery backlog
+                  // re-reads its stuck cohort EVERY tick — a replica-hole ticket
+                  // whose live read fails (ADV-1433: ~700 failed reads/hr) must
+                  // back off like the terminal-sweep/census callers, not retry
+                  // per tick. Fail-open toward not-terminal, retried after the
+                  // negative-cache TTL (never-cache-null preserved for
+                  // blocker-hydration callers — this flag is per-site).
+                  probeBackoff: true,
                   onExec: done
                     ? ({ source, execMs, result: r, timedOut }) =>
                         done({
@@ -4131,6 +4653,45 @@ export function schedulerTick(
           db: getBeliefsDb(),
           getBeliefs: getEscalateHumanBelief,
         });
+        // CTL-1440 (P0b): terminal-state policy — attempts-exhausted intents
+        // escalate LOUDLY (ledger escalated:true + needs-human + curated brief +
+        // app-actor comment + recovery.escalated event) instead of silently
+        // latching forever (audit RC1: nothing un-latched an attempts-exhausted
+        // open ticket). Runs BEFORE the per-item pass so a freshly-escalated
+        // ticket is skipped as "escalated" (B1's TTL governs re-entry) rather
+        // than "attempts-exhausted". Enforce-only — shadow must not write
+        // labels/comments. Idempotent: escalated:true excludes future scans.
+        // Codex R1: board-health is independently operator-gated — an exhausted
+        // board-health candidate must escalate loudly even when the per-item
+        // recovery pass is off (the new all-candidates-exhausted reason is
+        // excluded from C2's wedge set, so WITHOUT this sweep nothing would
+        // ever surface those tickets).
+        const _bhModeForSweep = readBoardHealthConfig().mode;
+        if (rMode === "enforce" || _bhModeForSweep === "enforce") {
+          try {
+            escalateExhaustedIntents(orchDir, {
+              labelNeedsHuman: (dir, t) =>
+                labelNeedsHumanUnlessBeliefOwner(dir, t, writeStatus, {
+                  site: "attempts-exhausted",
+                }),
+              // Codex R1: a finished ticket's stale ledger is forgotten by the
+              // terminal cleanup LATER in the tick — never page a human for it.
+              // Cached/replica-first read; fail-open toward active.
+              isActive: (t) =>
+                !isTicketTerminalOrMerged({
+                  ticket: t,
+                  cache,
+                  fetchState: (id, o = {}) =>
+                    fetchTicketState(id, { ...o, cache, gateway, replica, probeBackoff: true }),
+                })?.terminal,
+            });
+          } catch (err) {
+            log.warn(
+              { err: err?.message },
+              "ctl-1440: exhausted-intent sweep threw — continuing tick"
+            );
+          }
+        }
         if (rItems.length > 0) {
           // CTL-1176: BIND the host-local ledger + act-seams to THIS tick's real
           // orchDir. Without this the defaults call resolveOrchDir() →
@@ -4141,16 +4702,14 @@ export function schedulerTick(
           const rResult = reasoningRecoveryPass(rItems, {
             mode: rMode,
             shouldSkipItem: (ticket) => recoveryShouldSkipItem(ticket, { orchDir }),
-            recordIntent: (ticket, intent) =>
-              recoveryRecordIntent(ticket, intent, { orchDir }),
+            recordIntent: (ticket, intent) => recoveryRecordIntent(ticket, intent, { orchDir }),
             // CTL-1157 Workstream C: write the curated 6-field explanation signal
             // on enforce escalates (bound to this tick's orchDir).
             writeEscalationSignal: (ticket, payload) =>
               recoveryWriteEscalationSignal(ticket, payload, { orchDir }),
             // CTL-1157 Workstream B: read prior attempts so a defer marker pins
             // them (no auto-increment, no budget burn).
-            readIntentAttempts: (ticket) =>
-              recoveryReadIntentAttempts(ticket, { orchDir }),
+            readIntentAttempts: (ticket) => recoveryReadIntentAttempts(ticket, { orchDir }),
             invokeSeam: (ticket, seamId, brief) =>
               recoveryInvokeSeam(ticket, seamId, brief, { orchDir }),
             // CTL-1176 rung 3: dispatch the recovery-pass skill for the
@@ -4345,6 +4904,11 @@ export function schedulerTick(
             ...o,
             gateway,
             replica,
+            // CTL-1451: same per-tick class as the recovery filter above — the
+            // reclaim terminal short-circuit runs per stuck signal per tick;
+            // fail toward not-terminal and back off (matches the terminal-Done
+            // sweep's flag).
+            probeBackoff: true,
             gatewayFreshMs: reclaimGatewayFreshMs,
             onExec: reclaimOpDone
               ? ({ execMs, timedOut }) => {
@@ -4386,7 +4950,11 @@ export function schedulerTick(
         });
       }
       // CTL-935 Phase 3: record raw outcome before the switch coarsens it.
-      try { reclaimOutcomes.set(`${sig.ticket}/${sig.phase}`, r); } catch { /* isolation */ }
+      try {
+        reclaimOutcomes.set(`${sig.ticket}/${sig.phase}`, r);
+      } catch {
+        /* isolation */
+      }
       const entry = { ticket: sig.ticket, phase: sig.phase };
       switch (r) {
         case "reclaimed":
@@ -4508,10 +5076,17 @@ export function schedulerTick(
   // job, so liveCount is blind to them. Add their occupancy (dispatched/running
   // nested signals with no bg_job_id) so the slot gate counts them like bg jobs and
   // can't admit MORE tickets past maxParallel (each queuing behind the SDK
-  // semaphore). GATED on dispatchMode === "sdk": under bg/oneshot-legacy the term is
-  // 0 (countSdkInflight is never called), so occupiedCount is byte-identical to today.
+  // semaphore). CTL-1457 (T2): codex-exec prelaunches write the SAME no-bg_job_id
+  // "dispatched" signals and queue behind their own semaphore, so a codex node must
+  // count them too — gate on isInProcessDispatchMode (sdk OR codex-exec). Under
+  // bg/oneshot-legacy the term is 0 (countSdkInflight is never called), so
+  // occupiedCount is byte-identical to today.
+  // CTL-1457 (N1): ALSO arm when executorByPhase routes ANY phase to an in-process
+  // executor while the NODE mode is still bg (hasInProcessRoute) — the per-phase
+  // rollout's routed no-bg worker must be counted too. countSdkInflight stays 0 on a
+  // node nothing routes in-process, so a bg node with an empty map is unchanged.
   let sdkInflight = 0;
-  if (dispatchMode === "sdk") {
+  if (isInProcessDispatchMode(dispatchMode) || hasInProcessRoute) {
     try {
       sdkInflight = countSdkInflight(orchDir);
     } catch {
@@ -4548,7 +5123,11 @@ export function schedulerTick(
           roster,
           self,
           multiHost,
-          capacity: { maxParallel, liveCount, freeSlots: computeFreeSlots(maxParallel, occupiedCount) },
+          capacity: {
+            maxParallel,
+            liveCount,
+            freeSlots: computeFreeSlots(maxParallel, occupiedCount),
+          },
           readEventRing: _boardHealth.readEventRing,
           ownerForTicket,
           // CTL-1157 (Codex #4): ticket→owner/repo resolver for the composite
@@ -4556,6 +5135,8 @@ export function schedulerTick(
           // passes none → null → number-only fallback (N=1 byte-identical).
           repoForTicket: _boardHealth.repoForTicket,
           getReconcileMarkers: _boardHealth.getReconcileMarkers,
+          getDeferredBoardHealthTickets: _boardHealth.getDeferredBoardHealthTickets, // CTL-1432 (B2)
+          sanctionedNeedsHuman: _boardHealth.sanctionedNeedsHuman, // CTL-1432 (B3)
           // CTL-1157: thread the PR-status reader + the provably-dead host set.
           // Both are daemon-bound (the binding below); a bare tick passes neither
           // → empty-Map / empty-array defaults keep the new invariants
@@ -4584,7 +5165,7 @@ export function schedulerTick(
       } catch (err) {
         log.warn?.(
           { step: "board-health", err: err.message },
-          "scheduler: board-health pass failed — continuing tick (CTL-1290)",
+          "scheduler: board-health pass failed — continuing tick (CTL-1290)"
         );
       }
     }
@@ -4684,7 +5265,20 @@ export function schedulerTick(
           if (triagedWaiting.includes(member)) {
             cycleMembers.add(member);
             if (fenceGuard({ ticket: member, orchDir, multiHost, gateway, self })) {
-              labelNeedsHumanUnlessBeliefOwner(orchDir, member, writeStatus, { env, site: "dependency-cycle", log });
+              const wrote = labelNeedsHumanUnlessBeliefOwner(orchDir, member, writeStatus, {
+                env,
+                site: "dependency-cycle",
+                log,
+              });
+              // CTL-764 finding 8: emit only on an actual label write (a persisted
+              // marker after restart / belief-owner deferral is not a fresh escalation).
+              if (wrote) {
+                recordTransition({
+                  ticket: member,
+                  toDisposition: "needs-human",
+                  source: "dependency-cycle",
+                });
+              }
             } else {
               log.warn(
                 { ticket: member },
@@ -4734,6 +5328,8 @@ export function schedulerTick(
             now,
           });
           lastHeldEmitState.delete(ticket);
+          // CTL-764 Phase 5: cycle member superseded by needs-human → clear disposition.
+          recordTransition({ ticket, toDisposition: null, source: "cycle-member-clear" });
           continue;
         }
         let desired = null;
@@ -4758,9 +5354,40 @@ export function schedulerTick(
         }
         // else: admitted → desired null → clear-on-pickup (both labels removed).
 
+        // CTL-764 findings B + F: the worker.transition emission must reflect the
+        // ticket's TRUE disposition. needs-human is sticky + exclusive, so when it is
+        // already on the ticket the lower held dispositions (blocked/queued) cannot
+        // apply — recording one would falsely downgrade the two-axis stream (finding B).
+        // On a clear, pass the held label as fromDisposition so a genuine
+        // blocked/queued→cleared still emits after a daemon restart, where
+        // lastDispositionEmit is empty and recordTransition's first-seen-clear allowance
+        // needs a proven prior (finding F). needs-human clears are owned by
+        // clearStalledLabel, so the admission loop never emits them.
+        const currentLabelSet = new Set(labelsByTicket.get(ticket) ?? []);
+        const hasNeedsHuman = currentLabelSet.has(HELD_LABEL_NEEDS_HUMAN);
+
+        // CTL-764 r4 finding 1 + r5: the clear emission lives INSIDE the removal
+        // callback so it fires only on a CONFIRMED removal — and, because the
+        // production removeLabel is async while this tick is sync, it fires when the
+        // write RESOLVES (post-tick) rather than false-confirming off a Promise. A
+        // transient failure emits nothing (Linear still wears the label; a later tick
+        // re-converges). recordTransition's only-on-change guard dedupes the rare
+        // double-callback (a ticket wearing two stale held labels). Legacy "waiting"
+        // normalizes to the canonical "queued" (finding 2) so the stream never carries
+        // a fifth disposition value.
         convergeHeldLabel(ticket, labelsByTicket.get(ticket), desired, writeStatus, {
           orchDir,
           now,
+          onRemoveResult: (label, removed) => {
+            if (desired !== null || !removed || hasNeedsHuman) return;
+            const fromHeld = label === LEGACY_HELD_LABEL_WAITING ? HELD_LABEL_WAITING : label;
+            recordTransition({
+              ticket,
+              fromDisposition: fromHeld,
+              toDisposition: null,
+              source: "scheduler-admission",
+            });
+          },
         });
 
         if (desired) {
@@ -4774,8 +5401,20 @@ export function schedulerTick(
               { ticket, phase: "advance" }
             );
           }
+          // CTL-764 Phase 5: emit worker.transition for disposition hold — finding B
+          // suppresses it while needs-human is present (the lower disposition never lands).
+          if (!hasNeedsHuman) {
+            recordTransition({
+              ticket,
+              toDisposition: desired,
+              reason,
+              source: "scheduler-admission",
+            });
+          }
         } else {
           // Admitted (or no longer held) → reset so a future re-hold re-emits.
+          // The clear emission itself lives in the onRemoveResult callback above
+          // (r4 finding 1 + r5): confirmed-removal-gated, async-write-safe.
           lastHeldEmitState.delete(ticket);
         }
       }
@@ -5204,6 +5843,13 @@ export function schedulerTick(
             source: "scheduler-advance",
             orchId: ticket,
           });
+          // CTL-764 Phase 5: emit worker.transition for stage change.
+          recordTransition({
+            ticket,
+            toStage: next,
+            fromStage: wr?.from_state ?? null,
+            source: "scheduler-advance",
+          });
         },
         { ticket, phase: next }
       );
@@ -5342,6 +5988,13 @@ export function schedulerTick(
                   source: "preemption-resume",
                   orchId: pd.identifier,
                 });
+                // CTL-764 Phase 5: emit worker.transition for resume stage change.
+                recordTransition({
+                  ticket: pd.identifier,
+                  toStage: parkedPhase,
+                  fromStage: wr?.from_state ?? null,
+                  source: "preemption-resume",
+                });
               },
               { ticket: pd.identifier, phase: parkedPhase }
             );
@@ -5401,7 +6054,20 @@ export function schedulerTick(
           // CTL-863 fence: external Linear write — a zombie host that lost its
           // claim must not label after takeover (mirrors the A.5 cycle site).
           if (fenceGuard({ ticket: member, orchDir, multiHost, gateway, self })) {
-            labelNeedsHumanUnlessBeliefOwner(orchDir, member, writeStatus, { env, site: "ctl-925-cycle", log });
+            const wrote = labelNeedsHumanUnlessBeliefOwner(orchDir, member, writeStatus, {
+              env,
+              site: "ctl-925-cycle",
+              log,
+            });
+            // CTL-764 finding 8: emit only on an actual label write (a persisted
+            // marker after restart / belief-owner deferral is not a fresh escalation).
+            if (wrote) {
+              recordTransition({
+                ticket: member,
+                toDisposition: "needs-human",
+                source: "ctl-925-cycle",
+              });
+            }
           }
         }
       }
@@ -5415,8 +6081,22 @@ export function schedulerTick(
   // regardless of whether the lone roster entry string-matches the resolved
   // hostName (stale/aliased hosts.json). HRW filtering engages only when a 2nd
   // host actually joins (roster.length > 1).
+  // CTL-1091 (Codex P1 #1): refresh the dispatch-roster deflap observation state
+  // EVERY multi-host tick, even when there is no ready work. _dispatchRoster() is
+  // otherwise only reached lazily through the ready.filter() below, so on an idle
+  // board (ready empty) that path never runs — a peer that departs while the board
+  // is quiet never has its liveSince reset to null, and on return computeDispatchRoster
+  // would see a stale continuous timestamp and re-admit it immediately, skipping the
+  // restore hold (the exact flap this deflap exists to prevent). Forcing the
+  // (memoized) read+persist here keeps the deflap honest during idle periods; the
+  // ready.filter() below reuses the same memoized roster (no double read). During a
+  // liveness outage the resolver degrades to the full roster and intentionally leaves
+  // the observation state untouched (we learned nothing this tick).
+  if (multiHost) _dispatchRoster();
   const ready = computeReadyTickets(eligible, { blockerStates }).filter(
-    (t) => !multiHost || ownedBy(t.identifier, roster, self)
+    // CTL-1091: hash ownership over the LIVE (surviving) roster, not the raw
+    // roster, so an offline owner's slice fails over to a live host.
+    (t) => !multiHost || ownedBy(t.identifier, _dispatchRoster(), self)
   );
   // CTL-657: the in-flight count is the live `background` claude-agents count,
   // not listInFlightTickets(orchDir).size. A worker that leaked (signal terminal
@@ -5435,11 +6115,13 @@ export function schedulerTick(
   // maxParallel=1 — a 2nd SDK signal beyond parallelism for one tick. The predecessor
   // teardown via emitPredecessorReap is async, so the just-finished predecessor signal is
   // still on disk this tick — but it is terminal (done/skipped) and countSdkInflight only
-  // counts dispatched|running, so the re-sample is never inflated by it. GATED strictly on
-  // dispatchMode === "sdk": the bg/oneshot-legacy path never recomputes (sdkInFlightCount
-  // stays === inFlightCount) and keeps the byte-identical freeSlots formula below.
+  // counts dispatched|running, so the re-sample is never inflated by it. CTL-1457 (T2):
+  // gate on isInProcessDispatchMode so codex-exec re-samples its no-bg occupancy the same
+  // way sdk does; the bg/oneshot-legacy path never recomputes (sdkInFlightCount stays
+  // === inFlightCount) and keeps the byte-identical freeSlots formula below. CTL-1457
+  // (N1): also re-sample when a per-phase in-process route is armed on a bg node.
   let sdkInFlightCount = inFlightCount;
-  if (dispatchMode === "sdk") {
+  if (isInProcessDispatchMode(dispatchMode) || hasInProcessRoute) {
     let resampledSdkInflight = sdkInflight;
     try {
       resampledSdkInflight = countSdkInflight(orchDir);
@@ -5476,7 +6158,9 @@ export function schedulerTick(
   // loss; the slot frees naturally next tick via getAgentsCached deregistration).
   const freeSlots =
     livenessFresh && !draining
-      ? dispatchMode === "sdk"
+      ? // CTL-1457 (N1): the in-process budget formula also applies when a per-phase
+        // route arms in-process occupancy on a bg node (hasInProcessRoute).
+        isInProcessDispatchMode(dispatchMode) || hasInProcessRoute
         ? // CTL-1367 P2 (item b): under executor=sdk take the MIN of two budgets so
           // whichever formula correctly accounts for the slot the other missed wins:
           //  (1) the re-sampled SDK count (sdkInFlightCount) — catches same-tick
@@ -5495,8 +6179,8 @@ export function schedulerTick(
             0,
             Math.min(
               computeFreeSlots(maxParallel, sdkInFlightCount),
-              computeFreeSlots(maxParallel, inFlightCount) - resumedCount - promotedCount,
-            ),
+              computeFreeSlots(maxParallel, inFlightCount) - resumedCount - promotedCount
+            )
           )
         : Math.max(0, computeFreeSlots(maxParallel, inFlightCount) - resumedCount - promotedCount)
       : 0;
@@ -5769,6 +6453,13 @@ export function schedulerTick(
             source: "scheduler-advance",
             orchId: t.identifier,
           });
+          // CTL-764 Phase 5: emit worker.transition for new-work entry-phase.
+          recordTransition({
+            ticket: t.identifier,
+            toStage: NEW_WORK_ENTRY_PHASE,
+            fromStage: wr?.from_state ?? null,
+            source: "scheduler-advance",
+          });
         },
         { ticket: t.identifier, phase: NEW_WORK_ENTRY_PHASE }
       );
@@ -5779,6 +6470,31 @@ export function schedulerTick(
         ticket: t.identifier,
         phase: "assignment",
       });
+      // CTL-1481: best-effort worker:<host> label stamp — a visibility
+      // projection of the claim we just won, NEVER the claim arbiter itself.
+      // Multi-host only (same gate as emitFenceClaimed). Placed AFTER the
+      // applyPhaseStatus/applyAssignee writes so a stamp-tripped breaker can
+      // never starve the Axis-1 status write within the same tick. Own
+      // try/catch (mirrors convergeHeldLabel's applyLabel catch shape) so a
+      // throw only logs and never unwinds the dispatch success path.
+      if (clusterGeneration != null) {
+        try {
+          stampWorkerLabel({
+            ticket: t.identifier,
+            hostName: self,
+            knownHosts: roster,
+            replica,
+            applyLabel: writeStatus.applyLabel,
+            removeLabel: writeStatus.removeLabel,
+            log,
+          });
+        } catch (err) {
+          log.warn(
+            { ticket: t.identifier, err: err.message },
+            "scheduler: stampWorkerLabel threw — continuing tick"
+          );
+        }
+      }
     }
   }
 
@@ -5828,7 +6544,7 @@ export function schedulerTick(
       // CTL-863: thread multiHost so terminalDoneOnce's internal fence guard
       // suppresses a post-takeover zombie's terminal Done write on a multi-host
       // cluster (no-op single-host: multiHost=false → guard always passes).
-      terminalDoneOnce(orchDir, ticket, writeStatus, emitStateWrite, {
+      const doneResult = terminalDoneOnce(orchDir, ticket, writeStatus, emitStateWrite, {
         multiHost,
         gateway,
         self,
@@ -5836,10 +6552,32 @@ export function schedulerTick(
         emitDoneWithOpenPr,
         emitDoneApplied,
       });
+      // CTL-764 finding 7: emit the terminal Done stage transition on a REAL Done
+      // write — independent of the needs-human clear below (a normally-completed
+      // ticket has no needs-human marker, so the onRemoved hook never fires). Gated
+      // on the actual write so a per-tick re-visit of an already-Done dir emits once.
+      if (doneResult?.realDoneWrite) {
+        recordTransition({
+          ticket,
+          toStage: "done",
+          fromStage: doneResult.from_state,
+          source: "terminal-done",
+        });
+      }
       // CTL-646: terminal Done unconditionally clears needs-human (belt + teardown path).
       // CTL-703: worktree teardown is now the `teardown` FSM phase (teardownWorktreeOnce
       // removed) — only the label clear remains inline here.
-      clearStalledLabel(orchDir, ticket, "needs-human", retractionWriteStatus);
+      clearStalledLabel(orchDir, ticket, "needs-human", retractionWriteStatus, {
+        onRemoved: () => {
+          // CTL-764 Phase 5: emit worker.transition for needs-human clear on Done.
+          recordTransition({
+            ticket,
+            fromDisposition: "needs-human",
+            toDisposition: null,
+            source: "terminal-done-clear",
+          });
+        },
+      });
     }
     // CTL-758: reconcile backstop — re-Done a merged ticket whose Linear state
     // drifted back to non-terminal (a late echo). Gated by the .terminal-done.applied
@@ -5854,7 +6592,11 @@ export function schedulerTick(
       {
         cache,
         prAdapter,
-        fetchState: (id, o = {}) => fetchTicketState(id, { ...o, gateway, replica }),
+        // CTL-1437 (A4 follow-up): the terminal-Done sweep runs EVERY tick per started
+        // ticket; probeBackoff backs off a replica-MISS ticket whose live terminal read
+        // fails so it isn't re-probed every tick (the CTL-1329 ~2x/sec flap driver).
+        fetchState: (id, o = {}) =>
+          fetchTicketState(id, { ...o, gateway, replica, probeBackoff: true }),
         multiHost,
         gateway,
         self,
@@ -5889,7 +6631,12 @@ export function schedulerTick(
         const term = isTicketTerminalOrMerged({
           ticket,
           signal: signalByTicket.get(ticket),
-          fetchState: (id, o = {}) => fetchTicketState(id, { ...o, cache, gateway, replica }),
+          // CTL-1437 (A4 follow-up): the cheap-first terminal probe on the stalled/failed
+          // set runs EVERY tick — CTL-1329's documented ~2x/sec `issues read` burn. probeBackoff
+          // backs a replica-MISS ticket off (5-min negTTL) after a failed live read instead of
+          // re-probing every tick, so the CTL-679 breaker stops flapping on it.
+          fetchState: (id, o = {}) =>
+            fetchTicketState(id, { ...o, cache, gateway, replica, probeBackoff: true }),
           cache,
           prAdapter,
         });
@@ -5898,7 +6645,17 @@ export function schedulerTick(
           // re-applying. Marker-guarded so a no-marker terminal ticket fires zero API calls.
           const base = join(orchDir, "workers", ticket, ".linear-label-needs-human");
           if (existsSync(`${base}.applied`) || existsSync(`${base}.skipped`)) {
-            clearStalledLabel(orchDir, ticket, "needs-human", retractionWriteStatus);
+            clearStalledLabel(orchDir, ticket, "needs-human", retractionWriteStatus, {
+              onRemoved: () => {
+                // CTL-764 Phase 5: emit worker.transition for needs-human clear on terminal.
+                recordTransition({
+                  ticket,
+                  fromDisposition: "needs-human",
+                  toDisposition: null,
+                  source: "terminal-sweep-clear",
+                });
+              },
+            });
           }
           // CTL-1242 (corrected scope): also forget the host-local recovery-intent
           // latch so a finished ticket's escalated/cooldown ledger entry doesn't
@@ -5908,7 +6665,18 @@ export function schedulerTick(
           // Non-terminal stalled/failed ticket → apply the belief-aware needs-human
           // label (CTL-1241: skipped when the belief engine owns the reclaim).
           if (fenceGuard({ ticket, orchDir, multiHost, gateway, self })) {
-            labelNeedsHumanUnlessBeliefOwner(orchDir, ticket, writeStatus, { env, site: "terminal-sweep", log });
+            const wrote = labelNeedsHumanUnlessBeliefOwner(orchDir, ticket, writeStatus, {
+              env,
+              site: "terminal-sweep",
+              log,
+            });
+            // CTL-764 finding 8: emit worker.transition ONLY when the label write
+            // actually occurred. A persisted .linear-label-needs-human marker after a
+            // daemon restart (labelOnce no-ops) or a belief-owner deferral changes no
+            // label — recording a fresh needs-human transition there is a false escalation.
+            if (wrote) {
+              recordTransition({ ticket, toDisposition: "needs-human", source: "terminal-sweep" });
+            }
           } else {
             log.warn(
               { ticket },
@@ -5931,7 +6699,17 @@ export function schedulerTick(
       // removeLabel API calls (steady-state-zero-writes invariant).
       const base = join(orchDir, "workers", ticket, ".linear-label-needs-human");
       if (existsSync(`${base}.applied`) || existsSync(`${base}.skipped`)) {
-        clearStalledLabel(orchDir, ticket, "needs-human", retractionWriteStatus);
+        clearStalledLabel(orchDir, ticket, "needs-human", retractionWriteStatus, {
+          onRemoved: () => {
+            // CTL-764 Phase 5: emit worker.transition for needs-human clear.
+            recordTransition({
+              ticket,
+              fromDisposition: "needs-human",
+              toDisposition: null,
+              source: "no-stall-clear",
+            });
+          },
+        });
       }
     }
     // CTL-1068 — retract orphaned held labels for STARTED (admitted) tickets. The
@@ -5953,6 +6731,39 @@ export function schedulerTick(
         emitStateWrite,
         onRetract: () => lastHeldEmitState.delete(ticket),
       });
+    }
+    // CTL-764 finding 5: converge the durable needs-input disposition label for a
+    // parked worker. convergeDispositionLabel is the sole applier/remover of the
+    // needs-input label — without this a needs-input park changes only the local
+    // signal and the Linear label never lands. Current labels come from the CTL-1079
+    // broker projection (the same cheap read the retraction sweep uses), so steady
+    // state is zero-write and needs-human precedence is honored inside the converger;
+    // a projection miss skips this tick rather than blind-applying (no write storm).
+    // The genuine needs-input→cleared emission is owned by the daemon comment-wake
+    // path (finding 11); here we keep the only-on-change map honest so a later re-park
+    // re-emits.
+    if (Object.values(signals).some((s) => s === "needs-input")) {
+      const hit = gatewayLabelsHit(gateway, ticket);
+      if (hit && fenceGuard({ ticket, orchDir, multiHost, gateway, self })) {
+        const writes = convergeDispositionLabel(
+          ticket,
+          hit.labels,
+          HELD_LABEL_NEEDS_INPUT,
+          retractionWriteStatus,
+          { orchDir, now }
+        );
+        if (writes > 0) {
+          recordTransition({
+            ticket,
+            toDisposition: HELD_LABEL_NEEDS_INPUT,
+            source: "needs-input-park",
+          });
+        }
+      }
+    } else if (lastDispositionEmit.get(ticket) === HELD_LABEL_NEEDS_INPUT) {
+      // Daemon comment-wake cleared the label out-of-band; reset the dedup (no emit —
+      // finding 11 already recorded the clear) so a future re-park re-emits.
+      lastDispositionEmit.set(ticket, null);
     }
     // CTL-695: nominate terminal workers for reaping once. Covers the gaps the
     // happy-path emitPredecessorReap (advance-success only) never reaches:
@@ -6192,7 +7003,10 @@ function emitEventLoopDelay() {
     // A runtime that constructed the monitor but can't read it (partial
     // perf_hooks support) — disable to avoid per-tick noise; tick-timing +
     // liveness lines are unaffected.
-    log.warn({ err: err?.message }, "scheduler: event-loop delay read failed — disabling (CTL-1330)");
+    log.warn(
+      { err: err?.message },
+      "scheduler: event-loop delay read failed — disabling (CTL-1330)"
+    );
     try {
       h.disable?.();
     } catch {
@@ -6213,6 +7027,10 @@ const observedYieldFiles = new Set();
 // An admitted/cleared ticket is deleted so a future re-hold re-emits. Cleared on
 // daemon restart (via __resetForTests).
 const lastHeldEmitState = new Map();
+// CTL-764 Phase 5: last-emitted disposition per ticket for the worker.transition
+// only-on-change guard. Mirrors lastHeldEmitState but covers the full disposition set
+// (null = no label / cleared). Cleared on daemon restart (via __resetForTests).
+const lastDispositionEmit = new Map();
 
 // CTL-1064: Pass 0u throttle — epoch-ms of the last unstuck-sweep run.
 // Module-level so the 15-min gate persists across ticks without a db write.
@@ -6400,6 +7218,7 @@ function runTick() {
       readEligible: runningOpts.readEligible,
       dispatch: runningOpts.dispatch,
       dispatchMode: runningOpts.dispatchMode, // CTL-1365a: stamp the Tier-1 tick-timing line
+      hasInProcessRoute: runningOpts.hasInProcessRoute, // CTL-1457 (N1): arm occupancy gates for a per-phase in-process route on a bg node
       exec: runningOpts.exec,
       writeStatus: runningOpts.writeStatus,
       cache: runningOpts.cache, // CTL-634: shared out-of-set blocker state cache
@@ -6434,6 +7253,14 @@ function runTick() {
       // tests inject a stub through startScheduler so a daemon tick never shells out.
       fetchBatch: runningOpts.fetchBatch,
       appendPhaseAdvanceHeldEvent: runningOpts.appendPhaseAdvanceHeldEvent,
+      // CTL-764 Phase 5: the LIVE worker.transition emitter (Sink-3, feeding OTLP
+      // Sink-4 via otel-forward). schedulerTick defaults this to null, so a bare
+      // unit tick stays silent; production MUST thread the real emitter here or
+      // every recordTransition() early-returns and the two-axis model is dark in
+      // prod (verify CTL764-VER-1). A test may inject its own via
+      // startScheduler({ appendWorkerTransitionEvent }).
+      appendWorkerTransitionEvent:
+        runningOpts.appendWorkerTransitionEvent ?? defaultAppendWorkerTransitionEvent,
       // CTL-642/758: the LIVE PR-merged adapter. Without this the recovery
       // short-circuit's pr-merged branch (terminal-state.mjs) AND the reconcile
       // backstop (reconcileTerminalBackstop gate 2) are BOTH inert in production —
@@ -6501,6 +7328,7 @@ function runTick() {
                 cache: runningOpts.cache,
                 gateway: runningOpts.gateway,
                 replica: runningOpts.replica,
+                probeBackoff: true, // CTL-1436 (A4): a replica-MISS ticket whose live read fails backs off (breaker-flap mitigation)
               });
               return state != null && isLinearTerminal(state);
             },
@@ -6535,6 +7363,7 @@ function runTick() {
                 cache: runningOpts.cache,
                 gateway: runningOpts.gateway,
                 replica: runningOpts.replica,
+                probeBackoff: true, // CTL-1436 (A4): a replica-MISS ticket whose live read fails backs off (breaker-flap mitigation)
               });
               return state != null && isLinearTerminal(state);
             },
@@ -6574,6 +7403,7 @@ function runTick() {
                 cache: runningOpts.cache,
                 gateway: runningOpts.gateway,
                 replica: runningOpts.replica,
+                probeBackoff: true, // CTL-1436 (A4): a replica-MISS ticket whose live read fails backs off (breaker-flap mitigation)
               });
               return state != null && isLinearTerminal(state);
             },
@@ -6601,48 +7431,55 @@ function runTick() {
         // ?? precedence keeps every existing scheduler test that injects
         // unstuckActByCategory:{} working unchanged. The seams are pure-cored +
         // injectable; here we bind the production deps already in scope.
-        actByCategory: runningOpts.unstuckActByCategory ?? buildUnstuckActSeams({
-          orchDir: runningOpts.orchDir,
-          // re-arm seam: deletes the stalled signal so the phase re-dispatches.
-          clearStall: defaultClearStall(runningOpts.orchDir, runningOpts.writeStatus ?? linearWrite),
-          // label-removal seam for the stale-label category.
-          writeStatus: runningOpts.writeStatus ?? linearWrite,
-          // resolvePrState: normalize the live PR view ("MERGED" | other) for the
-          // orphan-stale gate. Reuses the SAME prAdapter the recovery short-circuit
-          // + reconcile backstop use (built once at boot, gh only fires inside
-          // prView). Inert when no prAdapter / PR number is wired.
-          resolvePrState: (ticket) => {
-            const adapter = runningOpts.prAdapter;
-            if (!adapter || typeof adapter.prView !== "function") return null;
-            let pr = null;
-            for (const sig of readWorkerSignals(runningOpts.orchDir)) {
-              if (sig.ticket === ticket) {
-                pr = sig.raw?.pr ?? sig.pr ?? null;
-                if (pr?.number) break;
+        actByCategory:
+          runningOpts.unstuckActByCategory ??
+          buildUnstuckActSeams({
+            orchDir: runningOpts.orchDir,
+            // re-arm seam: deletes the stalled signal so the phase re-dispatches.
+            clearStall: defaultClearStall(
+              runningOpts.orchDir,
+              runningOpts.writeStatus ?? linearWrite
+            ),
+            // label-removal seam for the stale-label category.
+            writeStatus: runningOpts.writeStatus ?? linearWrite,
+            // resolvePrState: normalize the live PR view ("MERGED" | other) for the
+            // orphan-stale gate. Reuses the SAME prAdapter the recovery short-circuit
+            // + reconcile backstop use (built once at boot, gh only fires inside
+            // prView). Inert when no prAdapter / PR number is wired.
+            resolvePrState: (ticket) => {
+              const adapter = runningOpts.prAdapter;
+              if (!adapter || typeof adapter.prView !== "function") return null;
+              let pr = null;
+              for (const sig of readWorkerSignals(runningOpts.orchDir)) {
+                if (sig.ticket === ticket) {
+                  pr = sig.raw?.pr ?? sig.pr ?? null;
+                  if (pr?.number) break;
+                }
               }
-            }
-            if (!pr?.number) return null;
-            try {
-              const view = adapter.prView(ticket, pr);
-              if (view && (view.state === "MERGED" || view.mergedAt != null)) return "MERGED";
-              return view?.state ?? null;
-            } catch {
-              return null; // fail-closed: a gh error is never treated as MERGED.
-            }
-          },
-          // jobLifecycle: the same bg-liveness probe the reclaim sweep uses; bound
-          // to the warm agents snapshot. Inert (→ not-alive) without isBgJobAlive.
-          jobLifecycle: (bgJobId) => {
-            if (typeof runningOpts.isBgJobAlive !== "function" || !bgJobId) return false;
-            try {
-              return Boolean(runningOpts.isBgJobAlive(bgJobId, { agents: getAgentsCached().agents }));
-            } catch {
-              return false;
-            }
-          },
-          // runGit / fs primitives / emitPhaseComplete fall back to real defaults
-          // inside unstuck-act-seams.mjs (git, node:fs, phase-agent-emit-complete).
-        }),
+              if (!pr?.number) return null;
+              try {
+                const view = adapter.prView(ticket, pr);
+                if (view && (view.state === "MERGED" || view.mergedAt != null)) return "MERGED";
+                return view?.state ?? null;
+              } catch {
+                return null; // fail-closed: a gh error is never treated as MERGED.
+              }
+            },
+            // jobLifecycle: the same bg-liveness probe the reclaim sweep uses; bound
+            // to the warm agents snapshot. Inert (→ not-alive) without isBgJobAlive.
+            jobLifecycle: (bgJobId) => {
+              if (typeof runningOpts.isBgJobAlive !== "function" || !bgJobId) return false;
+              try {
+                return Boolean(
+                  runningOpts.isBgJobAlive(bgJobId, { agents: getAgentsCached().agents })
+                );
+              } catch {
+                return false;
+              }
+            },
+            // runGit / fs primitives / emitPhaseComplete fall back to real defaults
+            // inside unstuck-act-seams.mjs (git, node:fs, phase-agent-emit-complete).
+          }),
         // emit: the dedicated unstuck unified-log emitter (NOT emitReapIntent,
         // whose closed vocabulary throws on unstuck.* — CTL-1064). Explicit here
         // so the production wiring does not silently depend on the schedulerTick
@@ -6699,17 +7536,31 @@ function runTick() {
         // is idempotent (returns the existing handle) and read-safe under WAL, so calling
         // it per reader is cheap and correct whether or not another opener ran first.
         getBoard: () => {
-          try { openBrokerStateDb(); } catch { /* best-effort — empty board on open failure */ }
+          try {
+            openBrokerStateDb();
+          } catch {
+            /* best-effort — empty board on open failure */
+          }
           return getAllTicketDescriptors({ includeRemoved: false });
         },
         readEventRing: () => readBoardHealthEventTail(),
         getReconcileMarkers: () => readReconcileHealthMarkers({}),
+        // CTL-1432 (B2): deferred board-health intents → first-class anchor candidates
+        // (retires the dormant delegate-mini session). (B3): the sanctioned needs-human
+        // allowlist (env CATALYST_BH_SANCTIONED_LATCHES / Layer-2 config), suppressed
+        // from proposeMoves so the genuinely-stuck tickets stop being drowned each scan.
+        getDeferredBoardHealthTickets: () => readDeferredBoardHealthIntents(runningOpts.orchDir),
+        sanctionedNeedsHuman: readSanctionedNeedsHuman(),
         // CTL-1157 (A11): the filter_state PR-status reader (phantom/orphaned-PR
         // invariants) + the provably-dead host set for the HRW-safe holistic
         // failover. computeSurvivingRoster already exists (scheduler.mjs) and
         // returns the roster unchanged for roster ≤ 1 → empty dead set at N=1.
         getPrStatusMap: () => {
-          try { openBrokerStateDb(); } catch { /* best-effort — empty PR map on open failure */ }
+          try {
+            openBrokerStateDb();
+          } catch {
+            /* best-effort — empty PR map on open failure */
+          }
           return getAllPrStatuses();
         },
         // CTL-1157 (Codex #4): resolve a stuck ticket → its GitHub "owner/repo" so
@@ -6743,15 +7594,21 @@ function runTick() {
         act: ({ anchor, candidates = [], boardContext, decision }) => {
           const deps = {
             orchDir: runningOpts.orchDir,
-            dispatchTicket: (o, t, p) => dispatchTicket(o, t, p, { dispatch: runningOpts.dispatch }),
+            dispatchTicket: (o, t, p) =>
+              dispatchTicket(o, t, p, { dispatch: runningOpts.dispatch }),
           };
           return holisticBoardHealthAct(
             { anchor, candidates, boardContext, decision },
             {
-              shouldSkipItem: (cand) => recoveryShouldSkipItem(cand, deps),
+              // CTL-1440 (Codex R1): holistic:true — a board-health defer is
+              // gated on its FROZEN deferredSince anchor here (an aged deferred
+              // anchor stays actionable even when the per-item pass re-deferred
+              // it moments ago); the per-item pass keeps the lastTs throttle.
+              shouldSkipItem: (cand) => recoveryShouldSkipItem(cand, { ...deps, holistic: true }),
+              skipReason: (cand) => recoverySkipReason(cand, { ...deps, holistic: true }), // CTL-1440 (P0b)
               invokeRecoveryPass: (cand, ctx) => recoveryInvokeRecoveryPass(cand, ctx, deps),
               recordIntent: (cand, intent) => recoveryRecordIntent(cand, intent, deps),
-            },
+            }
           );
         },
       },
@@ -6765,9 +7622,8 @@ function runTick() {
         const fsDb = getBeliefsDb();
         if (fsDb) {
           runFreeSlotsShadow(fsDb, beliefsRes.tickId, {
-            proceduralFreeSlots: typeof tickResult?.freeSlots === "number"
-              ? tickResult.freeSlots
-              : null,
+            proceduralFreeSlots:
+              typeof tickResult?.freeSlots === "number" ? tickResult.freeSlots : null,
             proceduralInputs: tickResult
               ? {
                   maxParallel: tickResult.maxParallel,
@@ -6783,7 +7639,10 @@ function runTick() {
         }
       } catch (fsErr) {
         try {
-          log.warn({ err: fsErr?.message }, "free-slots-shadow: comparator threw (tick unaffected)");
+          log.warn(
+            { err: fsErr?.message },
+            "free-slots-shadow: comparator threw (tick unaffected)"
+          );
         } catch {
           /* even logging must not break the tick */
         }
@@ -6814,7 +7673,10 @@ function runTick() {
     // Skip entirely on single-host installs (no-op inside the function, but the
     // pre-check avoids the call to stay zero-cost on the common case).
     if (getClusterHosts().length > 1) {
-      reclaimDeadHostWork({ orchDir: runningOpts.orchDir }).catch((err) => {
+      // CTL-1481: thread the replica (second arg — the seams object) so the
+      // takeover stamp's label read stays off live Linear (replica-first, loud
+      // live fallback inside the stamp).
+      reclaimDeadHostWork({ orchDir: runningOpts.orchDir }, { replica: runningOpts.replica }).catch((err) => {
         log.warn({ err: err?.message }, "ctl-863: reclaimDeadHostWork tick failed — continuing");
       });
     }
@@ -6845,31 +7707,69 @@ function scheduleDebouncedTick(debounceMs) {
 // result, or {dispatched:false, reason:"all-candidates-cooldown"} when none dispatched.
 export function holisticBoardHealthAct(
   { anchor = null, candidates = [], boardContext, decision } = {},
-  { shouldSkipItem, invokeRecoveryPass, recordIntent } = {}
+  { shouldSkipItem, invokeRecoveryPass, recordIntent, skipReason = null } = {}
 ) {
-  const ordered = candidates.length ? candidates : (anchor ? [anchor] : []);
+  const ordered = candidates.length ? candidates : anchor ? [anchor] : [];
+  // CTL-1440 (P0b): track WHY candidates were ledger-skipped so the no-dispatch
+  // return distinguishes "everything is terminally attempts-exhausted" (a
+  // truthful non-wedge — the exhaustion sweep has escalated them to a human)
+  // from a genuine retryable cooldown (the old blanket "all-candidates-cooldown"
+  // misnomer that made C1/C2 lie — audit RC1).
+  let ledgerSkips = 0;
+  let terminalSkips = 0;
+  let invoked = 0;
+  // Codex R1: the terminal set includes "escalated" (the exhaustion sweep runs
+  // BEFORE this act and rewrites exhausted ledgers to escalated — the cohort is
+  // human-owned either way) and "leave-alone" (verified healthy). All three are
+  // truthful non-wedges; only genuine cooldown/defer skips stay retryable.
+  const TERMINAL_SKIPS = new Set(["attempts-exhausted", "escalated", "leave-alone"]);
   for (const cand of ordered) {
     // (a) cooldown/attempts-latched → try the next candidate (MUST-FIX 2).
-    if (shouldSkipItem(cand)) continue;
+    if (shouldSkipItem(cand)) {
+      ledgerSkips += 1;
+      if (TERMINAL_SKIPS.has(skipReason?.(cand))) terminalSkips += 1;
+      continue;
+    }
+    invoked += 1;
     const r = invokeRecoveryPass(cand, {
       boardContext,
       reason: `board-health: ${decision?.gate?.reason ?? "board anomaly"} — holistic recovery-pass delegate`,
     });
     // Start the cooldown window on a dispatch attempt (success OR failure).
+    // CTL-1439 (P0a): this is a DISPATCH marker, not a verdict — the session's
+    // actual conclusion (fixed / leave-alone / escalate) arrives later via
+    // recovery-emit.mjs → recordVerdict. Hardcoding decision:"fix" here was RC2's
+    // "act-and-discard": the ledger claimed a fix verdict before the pass ran.
     try {
       recordIntent(cand, {
         type: "recovery-pass",
-        decision: "fix",
+        decision: "dispatched",
         fix_class: "board-health",
         outcome: !!r?.dispatched,
         source: "board-health",
       });
-    } catch { /* ledger write is best-effort — never block the tick */ }
+    } catch {
+      /* ledger write is best-effort — never block the tick */
+    }
     // (b) a NON-dispatch RESULT is a SKIP, not this scan's dispatch — CONTINUE.
     if (!r?.dispatched) continue;
-    return r; // exactly ONE real dispatch per scan
+    // CTL-1435 (C1): surface WHICH candidate actually dispatched (may not be the
+    // [0] anchor if earlier candidates were cooldown-skipped) so the board-scan
+    // event's act.anchor records the real dispatch handle.
+    return { ...r, candidate: cand }; // exactly ONE real dispatch per scan
   }
-  return { dispatched: false, reason: "all-candidates-cooldown" };
+  // EVERY candidate was a terminal ledger skip (exhausted / escalated /
+  // leave-alone) and NONE was invoked → the cohort is truthfully done (C2
+  // non-wedge). Any invoke (even a non-dispatch result — cycle cap, latched)
+  // or any retryable skip keeps the cooldown reason (Codex R1: an actionable
+  // candidate that merely failed to dispatch is NOT a terminal cohort).
+  return {
+    dispatched: false,
+    reason:
+      invoked === 0 && ledgerSkips > 0 && terminalSkips === ledgerSkips
+        ? "all-candidates-exhausted"
+        : "all-candidates-cooldown",
+  };
 }
 
 // startScheduler — immediate authoritative tick, arm the periodic timer, then
@@ -6888,6 +7788,12 @@ export function startScheduler({
   // resource attr (initTracing). Default "phase-agents" keeps every direct-call
   // test + standalone main() on today's label with no wiring.
   dispatchMode = "phase-agents",
+  // CTL-1457 (N1): true when the node's executorByPhase routes ANY phase to an
+  // in-process executor (sdk|codex-exec) while the node boot dispatchMode is still
+  // bg. Threaded into runningOpts → the schedulerTick occupancy gates so a routed
+  // no-bg worker is counted on a bg node. Default false → byte-identical for a node
+  // with no in-process route (the common case).
+  hasInProcessRoute = false,
   readEligible,
   exec,
   writeStatus,
@@ -6914,6 +7820,11 @@ export function startScheduler({
   checkSequencing, // CTL-537: optional override; runTick defaults to defaultCheckSequencing.
   fetchBatch, // CTL-755/784: optional override; schedulerTick defaults to fetchTicketsBatch.
   appendPhaseAdvanceHeldEvent, // CTL-755: optional override; defaults to defaultAppendPhaseAdvanceHeldEvent.
+  // CTL-764 Phase 5: optional worker.transition emitter override (test seam).
+  // Undefined → runTick threads the real defaultAppendWorkerTransitionEvent into
+  // the per-tick schedulerTick opts (production). A test injects a spy here to
+  // capture transitions through the production runTick path.
+  appendWorkerTransitionEvent,
   // CTL-642/758: the LIVE PR-merged adapter, wired into the production daemon
   // path so the recovery short-circuit's pr-merged branch + the reconcile
   // backstop actually fire (both inert while prAdapter === undefined). Built
@@ -6961,6 +7872,7 @@ export function startScheduler({
     orchDir,
     dispatch,
     dispatchMode, // CTL-1365a: threaded to schedulerTick (tick-timing log field)
+    hasInProcessRoute, // CTL-1457 (N1): per-phase in-process route arms the occupancy gates on a bg node
     readEligible,
     exec,
     writeStatus,
@@ -6975,6 +7887,7 @@ export function startScheduler({
     checkSequencing, // CTL-537: optional override (default defaultCheckSequencing)
     fetchBatch, // CTL-755/784: optional admission-gate batch hydration seam
     appendPhaseAdvanceHeldEvent, // CTL-755: optional held-indicator emit seam
+    appendWorkerTransitionEvent, // CTL-764: optional worker.transition emitter override (test seam; runTick defaults to defaultAppendWorkerTransitionEvent)
     prAdapter, // CTL-642/758: live PR-merged adapter (built once above), threaded per-tick
     checkOpenPrs, // CTL-1157: optional terminal-sweep open-PR gate override (runTick arms the real one)
     classifyResolution, // CTL-671: optional phantom-sweep Linear-probe seam
@@ -7087,6 +8000,7 @@ export function __resetForTests() {
   stopScheduler();
   observedYieldFiles.clear(); // CTL-702: reset per-lifetime dedup set between tests
   lastHeldEmitState.clear(); // CTL-755: reset held-event only-on-change dedup
+  lastDispositionEmit.clear(); // CTL-764 Phase 5: reset worker.transition only-on-change dedup
   _unstuckLastRunMs = 0; // CTL-1064: reset Pass 0u throttle between tests
   _stallJanitorCensusLastRunMs = 0; // CTL-1324: reset Pass 0j census throttle between tests
   // rankedAboveSince is cleared by stopScheduler above (CTL-705)

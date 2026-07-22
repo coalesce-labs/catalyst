@@ -74,7 +74,7 @@ export function labelOnce(
   ticket,
   label,
   writeStatus,
-  { appendEvent = null, env = process.env } = {}
+  { appendEvent = null, env = process.env, onApplyResult = null } = {}
 ) {
   const base = labelMarkerBase(orchDir, ticket, label);
   if (existsSync(`${base}.applied`) || existsSync(`${base}.skipped`)) return false;
@@ -82,7 +82,16 @@ export function labelOnce(
     const res = writeStatus.applyLabel({ ticket, label });
     // A fake that returns undefined (test stubs) is treated as success so
     // the once-semantics stay testable without a real result.
-    if (res === undefined || res?.applied) {
+    const applied = res === undefined || res?.applied === true;
+    // CTL-764 finding C: surface the CONFIRMED apply outcome to callers that must
+    // gate a side-effect (labelNeedsHumanUnlessBeliefOwner → the worker.transition
+    // emission) on a real application, not merely on this being the first write
+    // attempt. Only fires when applyLabel actually ran — never on a throw or on the
+    // marker-guarded early return above.
+    if (typeof onApplyResult === "function") {
+      onApplyResult({ applied, reason: res?.reason ?? null });
+    }
+    if (applied) {
       writeFileSync(`${base}.applied`, "");
     } else if (UNRECOVERABLE_LABEL_REASONS.has(res?.reason)) {
       writeFileSync(`${base}.skipped`, "");
@@ -299,8 +308,28 @@ export function inRemovalBackoff(orchDir, ticket, label, now) {
 export const ESCALATION_COOLDOWN_MS =
   Number(process.env.RECOVERY_ESCALATION_COOLDOWN_MS) || 10 * 60 * 1000;
 
+// CTL-1442: consecutive same-reason asks before an escalation goes TERMINAL.
+// The 10-min cooldown above only THROTTLES re-emission — with no cap, a
+// no-progress ticket asks "authorize retry?" every window forever (ADV-1374/
+// ADV-1376 fired for days; audit RC4) because nothing consumes the ask and
+// nothing ever transitions the ticket. After this many asks the escalation
+// site parks the ticket terminally instead of asking again.
+export const ESCALATION_ASK_CAP = Number(process.env.CATALYST_ESCALATION_ASK_CAP) || 3;
+
 export function escalationCooldownPath(orchDir, ticket, phase) {
   return join(orchDir, ".escalation-cooldowns", `${ticket}-${phase}.json`);
+}
+
+// readEscalationRecord — CTL-1442: the full cool-down marker (reason, askCount,
+// asks[] history), for the ask-cap gate + truthful `attempts` event payloads.
+// Absent/malformed → null (fail-open — the cap only ever under-counts).
+export function readEscalationRecord(orchDir, ticket, phase) {
+  try {
+    const data = JSON.parse(readFileSync(escalationCooldownPath(orchDir, ticket, phase), "utf8"));
+    return data && typeof data === "object" ? data : null;
+  } catch {
+    return null;
+  }
 }
 
 export function inEscalationCooldown(orchDir, ticket, phase, now) {
@@ -348,6 +377,14 @@ export function beliefOwnsNeedsHuman(env = process.env) {
 //     site  : string                 (short site-id for the deferral log)
 //     log   : { info }              (the module's log instance)
 //   }
+//
+// CTL-764 finding 8 + finding C: returns whether the needs-human label was CONFIRMED
+// applied on THIS call — `false` when it deferred to the belief owner, when labelOnce
+// found a terminal marker (a persisted needs-human after a daemon restart), OR when the
+// apply was attempted but did not land (rate-limited / exclusive-conflict / missing-label);
+// `true` ONLY when applyLabel reported applied:true. Callers gate their worker.transition
+// emission on this so neither a no-op re-application nor a failed attempt records a fresh
+// escalation. Existing callers ignore the return, so this stays backward-compatible.
 export function labelNeedsHumanUnlessBeliefOwner(
   orchDir,
   ticket,
@@ -358,19 +395,36 @@ export function labelNeedsHumanUnlessBeliefOwner(
     // Defer to executeEscalations — R12 belief owner. Record, do not page.
     const logger = logArg ?? log;
     logger.info({ ticket, site }, "needs-human deferred to belief owner (CTL-1241)");
-    return;
+    return false;
   }
-  // Enforcement OFF (default): call labelOnce exactly as before.
-  labelOnce(orchDir, ticket, "needs-human", writeStatus);
+  // Enforcement OFF (default): call labelOnce exactly as before. CTL-764 finding C:
+  // return whether the label was CONFIRMED applied, not merely attempted — labelOnce's
+  // boolean is true for any first write attempt (including outcomes where the label never
+  // landed). Capture applyLabel's applied result via onApplyResult; a marker-guarded no-op
+  // (labelOnce early-returns, onApplyResult never fires) correctly stays false.
+  let applied = false;
+  labelOnce(orchDir, ticket, "needs-human", writeStatus, {
+    onApplyResult: (r) => {
+      applied = r.applied === true;
+    },
+  });
+  return applied;
 }
 
 export function recordEscalation(orchDir, ticket, phase, reason, now) {
   const dir = join(orchDir, ".escalation-cooldowns");
   try {
     mkdirSync(dir, { recursive: true });
+    // CTL-1442: accrue the consecutive same-reason ask count (+ a bounded ask
+    // history for truthful event payloads). A DIFFERENT reason restarts the
+    // count — it is a new question to the operator, not a repeat of the last.
+    const prior = readEscalationRecord(orchDir, ticket, phase);
+    const sameReason = prior?.reason === reason;
+    const askCount = sameReason && typeof prior?.askCount === "number" ? prior.askCount + 1 : 1;
+    const asks = [...(sameReason && Array.isArray(prior?.asks) ? prior.asks : []).slice(-9), now];
     writeFileSync(
       escalationCooldownPath(orchDir, ticket, phase),
-      JSON.stringify({ ticket, phase, reason, escalatedAt: now })
+      JSON.stringify({ ticket, phase, reason, escalatedAt: now, askCount, asks })
     );
   } catch (err) {
     // Never let a marker write crash the tick — worst case is the next tick

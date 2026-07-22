@@ -41,6 +41,7 @@ import {
 } from "../execution-core/memory-event.mjs";
 import { JANITOR_EVENT_TYPES } from "../execution-core/janitor-event-types.mjs";
 import { UNSTUCK_SWEEP_EVENT_TYPES } from "../execution-core/unstuck-sweep-event-types.mjs";
+import { LINEAR_READ_EVENT } from "../execution-core/linear-read-event.mjs"; // CTL-1403
 
 // Inline names that don't have a dedicated exported constant; verified against
 // the source file they appear in.
@@ -68,6 +69,7 @@ const EXEC_CORE_EVENT_NAMES = [
   MEMORY_EVENT_KILLED,
   ...JANITOR_EVENT_TYPES,
   ...UNSTUCK_SWEEP_EVENT_TYPES,
+  LINEAR_READ_EVENT, // CTL-1403 reads-by-source (catalyst.linear.read)
   ...INLINE_EVENT_NAMES,
 ];
 

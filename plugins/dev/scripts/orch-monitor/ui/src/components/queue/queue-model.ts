@@ -80,12 +80,12 @@ export interface SlotAssignment {
  * any remainder are over-capacity. Empty slots fill the gap up to maxParallel.
  *
  * Dead workers (activeState === "dead") are excluded entirely — they hold no slot.
+ * CTL-764 Phase 7: triage-phase workers are ALSO excluded — they are intake, not
+ * a maxParallel slot consumer (mirrors board-data.mjs deriveCapacity's `w.phase
+ * !== "triage"` carve-out), so the deck agrees with config.inFlight/freeSlots.
  */
-export function assignSlots(
-  workers: readonly BoardWorker[],
-  maxParallel: number,
-): SlotAssignment {
-  const live = workers.filter(isLiveWorker);
+export function assignSlots(workers: readonly BoardWorker[], maxParallel: number): SlotAssignment {
+  const live = workers.filter(isLiveWorker).filter((w) => w.phase !== "triage");
   const sorted = [...live].sort((a, b) => {
     const sa = a.startedAt ?? 0;
     const sb = b.startedAt ?? 0;
@@ -113,7 +113,14 @@ export function slotLabel(slot: number): string {
 
 // ── holding buckets ("why work isn't moving") ──────────────────────────────────
 
-export type HoldingBucketKind = "needs-you" | "stalled" | "blocked" | "waiting";
+// CTL-764 Phase 8: "waiting" renamed to "queued"; needsInput/needsHuman added.
+export type HoldingBucketKind =
+  | "needs-you"
+  | "stalled"
+  | "blocked"
+  | "queued"
+  | "needs-input"
+  | "needs-human";
 
 export interface HoldingBucketWorkerItem {
   kind: "worker";
@@ -140,8 +147,13 @@ export interface HoldingBuckets {
   /** CTL-1066: tickets with status=stalled — the circuit breaker gave up; human must intervene. */
   stalled: HoldingBucket;
   blocked: HoldingBucket;
-  waiting: HoldingBucket;
-  /** True when all four buckets are empty (render the "nothing blocked" line). */
+  /** CTL-764 Phase 8: renamed from "waiting" → "queued"; back-compat maps legacy held="waiting". */
+  queued: HoldingBucket;
+  /** CTL-764 Phase 8: tickets paused for worker input (needs-input disposition). */
+  needsInput: HoldingBucket;
+  /** CTL-764 Phase 8: tickets escalated to needs-human disposition (separate from needs-you). */
+  needsHuman: HoldingBucket;
+  /** True when all buckets are empty (render the "nothing blocked" line). */
   allEmpty: boolean;
 }
 
@@ -149,22 +161,26 @@ const itemTicketId = (i: HoldingBucketItem): string =>
   i.kind === "worker" ? i.worker.ticket : i.ticket.id;
 
 /**
- * Build the three "why work isn't moving" buckets:
+ * Build the "why work isn't moving" holding buckets. CTL-764 Phase 8 adds
+ * queued/needsInput/needsHuman driven by workerStatus with held back-compat.
  *
- *  - needs-you: live workers parked on a human prompt (`waitingOnUser === true`)
- *    — these DO hold slots, so each carries its deck slot number — PLUS any ticket
- *    flagged needs-human via its `held`/labels that is NOT in flight.
- *  - blocked:   tickets with `held === "blocked"`, not in flight.
- *  - waiting:   tickets with `held === "waiting"` (admission gate), not in flight.
+ *  - needs-you:   live workers parked on a human prompt (waitingOnUser) PLUS
+ *                 not-in-flight tickets with attention=needs-human (CTL-1180).
+ *  - stalled:     tickets with status=stalled (circuit breaker, CTL-1066).
+ *  - blocked:     tickets with held/workerStatus=blocked, not in flight.
+ *  - queued:      tickets with workerStatus=queued (or legacy held=waiting), not in flight.
+ *  - needsInput:  tickets with workerStatus=needs-input, OR (CTL-764 Phase 8 fix)
+ *                 the needs-input label on a parked ticket whose attention was
+ *                 hardcoded to needs-human by board-data — not in flight.
+ *  - needsHuman:  tickets with workerStatus=needs-human (separate from needs-you; disposition axis).
  *
- * `inFlightTicketIds` is the set of ticket ids a LIVE worker is attached to (so a
- * blocked/waiting label on an in-flight ticket is not double-listed). Slot numbers
- * are resolved from the same stable assignment the deck uses (assignSlots).
+ * Single-valued precedence: needs-human > needs-input > blocked > queued.
+ * The CTL-729 needs-you (operator-prompt / permission-pause) bucket stays a separate axis.
  */
 export function groupHoldingBuckets(
   tickets: readonly BoardTicket[],
   workers: readonly BoardWorker[],
-  maxParallel: number,
+  maxParallel: number
 ): HoldingBuckets {
   // Stable deck assignment → 1-based slot index per worker name.
   const { occupied } = assignSlots(workers, maxParallel);
@@ -190,31 +206,79 @@ export function groupHoldingBuckets(
 
   const stalled: HoldingBucketItem[] = [];
   const blocked: HoldingBucketItem[] = [];
-  const waiting: HoldingBucketItem[] = [];
+  const queued: HoldingBucketItem[] = [];
+  const needsInput: HoldingBucketItem[] = [];
+  const needsHuman: HoldingBucketItem[] = [];
   for (const t of tickets) {
     if (inFlightTicketIds.has(t.id)) continue;
-    // CTL-1180: a not-in-flight needs-human ticket (e.g. a reaped failed phase)
-    // belongs in needs-you — the bucket's documented intent. Stalled keeps its own bucket.
-    if (t.attention === "needs-human") needsYou.push({ kind: "ticket", ticket: t });
-    else if (t.status === "stalled") stalled.push({ kind: "ticket", ticket: t });
-    else if (t.held === "blocked") blocked.push({ kind: "ticket", ticket: t });
-    else if (t.held === "waiting") waiting.push({ kind: "ticket", ticket: t });
+    // CTL-764 Phase 8: a parked/queued ticket's needs-input disposition survives
+    // ONLY in `labels` — board-data hardcodes attention:"needs-human" for these
+    // inbox cards (synthesizeParkedNeedsHumanTickets / the live-ticket assembler),
+    // so the label must be checked BEFORE the needs-human short-circuit below or
+    // every needs-input card collapses into "Needs you" (mirrors the label-first
+    // precedence in board-data.mjs's deriveStatusCounts).
+    const labels = t.labels ?? [];
+    if (labels.includes("needs-input") && !labels.includes("needs-human")) {
+      needsInput.push({ kind: "ticket", ticket: t });
+      continue;
+    }
+    // CTL-1180: not-in-flight needs-human attention → needs-you (operator-prompt axis).
+    if (t.attention === "needs-human") {
+      needsYou.push({ kind: "ticket", ticket: t });
+      continue;
+    }
+    if (t.status === "stalled") {
+      stalled.push({ kind: "ticket", ticket: t });
+      continue;
+    }
+    // CTL-764 Phase 8: single-valued precedence on workerStatus; fall back to held for back-compat.
+    const ws = t.workerStatus ?? null;
+    const h = t.held ?? null;
+    if (ws === "needs-human") {
+      needsHuman.push({ kind: "ticket", ticket: t });
+      continue;
+    }
+    if (ws === "needs-input") {
+      needsInput.push({ kind: "ticket", ticket: t });
+      continue;
+    }
+    if (ws === "blocked" || h === "blocked") {
+      blocked.push({ kind: "ticket", ticket: t });
+      continue;
+    }
+    if (ws === "queued" || h === "queued" || h === "waiting") {
+      queued.push({ kind: "ticket", ticket: t });
+    }
   }
 
   const allEmpty =
-    needsYou.length === 0 && stalled.length === 0 && blocked.length === 0 && waiting.length === 0;
+    needsYou.length === 0 &&
+    stalled.length === 0 &&
+    blocked.length === 0 &&
+    queued.length === 0 &&
+    needsInput.length === 0 &&
+    needsHuman.length === 0;
   return {
     needsYou: { kind: "needs-you", items: needsYou },
     stalled: { kind: "stalled", items: stalled },
     blocked: { kind: "blocked", items: blocked },
-    waiting: { kind: "waiting", items: waiting },
+    queued: { kind: "queued", items: queued },
+    needsInput: { kind: "needs-input", items: needsInput },
+    needsHuman: { kind: "needs-human", items: needsHuman },
     allEmpty,
   };
 }
 
 /** Flatten all bucket items to their ticket ids — for the bucket ∉ queue test. */
 export function holdingTicketIds(b: HoldingBuckets): string[] {
-  return [...b.needsYou.items, ...b.stalled.items, ...b.blocked.items, ...b.waiting.items].map(itemTicketId);
+  return [
+    ...b.needsYou.items,
+    ...b.stalled.items,
+    ...b.blocked.items,
+    ...b.queued.items,
+    ...b.needsInput.items,
+    ...b.needsHuman.items,
+  ].map(itemTicketId);
 }
 
 // ── dead / stale ───────────────────────────────────────────────────────────────

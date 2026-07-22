@@ -61,11 +61,13 @@ is no `triaged` workspace label — the daemon never writes one.
 
 Environment:
 
-- `TICKET` — Linear identifier (e.g. `CTL-451`). Required.
-- `WORKER_DIR` — output directory for `triage.json`. Defaults to `${ORCH_DIR}/workers/${TICKET}` if
-  set, else `$(pwd)`.
-- `ORCH_DIR`, `CATALYST_ORCHESTRATOR_ID`, `CATALYST_SESSION_ID` — used for trace/span id derivation
-  in the emitted event; all optional.
+- `TICKET` — Linear identifier (e.g. `CTL-451`). Required; falls back to `CATALYST_TICKET` (the
+  env the dispatcher actually sets — CTL-1441).
+- `WORKER_DIR` — output directory for `triage.json`. Defaults to `${ORCH_DIR}/workers/${TICKET}`,
+  else the canonical `~/catalyst/execution-core/workers/${TICKET}` — NEVER `$(pwd)` (a triage.json
+  outside the worker dir is invisible to the monitor and re-triages forever; CTL-1441/CTL-1403).
+- `ORCH_DIR` — falls back to `CATALYST_ORCHESTRATOR_DIR`. `CATALYST_ORCHESTRATOR_ID`,
+  `CATALYST_SESSION_ID` — used for trace/span id derivation in the emitted event; optional.
 
 ## Body
 
@@ -100,10 +102,31 @@ fi
 # shellcheck disable=SC1090
 . "$__PT_READ_LIB"
 
+# CTL-1441: the CATALYST_-prefixed env WINS — that is the channel
+# phase-agent-dispatch actually populates (DISPATCH_ENV / worker settings), and
+# it must beat any stale ambient bare TICKET/ORCH_DIR inherited from a shell or
+# a prior invocation (Codex P2 on #2588). The bare names exist only via
+# slash-command substitution — exactly the fragile channel that produced the
+# CTL-1403 re-triage loop: a substitution miss let WORKER_DIR fall back to
+# $(pwd), triage.json landed outside the worker dir, and the monitor (blind to
+# it) re-dispatched forever. Bare names remain the operator-sweep fallback.
+TICKET="${CATALYST_TICKET:-${TICKET:-}}"
 : "${TICKET:?phase-triage: TICKET env var required}"
+# CTL-1441: NEVER fall back to $(pwd) for the worker dir — a triage.json outside
+# it is invisible to hasTriageArtifact and re-triages forever. Resolve ORCH_DIR
+# itself to the canonical location (honoring a custom CATALYST_DIR install) and
+# EXPORT it, so the phase-agent-emit-complete wrapper's signal flip — gated on
+# CATALYST_ORCHESTRATOR_DIR — lands in the SAME tree as triage.json (Codex R2:
+# a worker-dir-only fallback left phase-triage.json never flipping to done,
+# blocking triage→research advancement).
+ORCH_DIR="${CATALYST_ORCHESTRATOR_DIR:-${ORCH_DIR:-}}"
+if [[ -z "$ORCH_DIR" ]]; then
+  ORCH_DIR="${CATALYST_DIR:-${HOME}/catalyst}/execution-core"
+  echo "phase-triage: orchestrator dir unset — defaulting to ${ORCH_DIR} (CTL-1441)" >&2
+fi
+export CATALYST_ORCHESTRATOR_DIR="${CATALYST_ORCHESTRATOR_DIR:-$ORCH_DIR}"
 
-WORKER_DIR="${WORKER_DIR:-${ORCH_DIR:+${ORCH_DIR}/workers/${TICKET}}}"
-WORKER_DIR="${WORKER_DIR:-$(pwd)}"
+WORKER_DIR="${WORKER_DIR:-${ORCH_DIR}/workers/${TICKET}}"
 mkdir -p "$WORKER_DIR"
 
 # 1. Read ticket via direct SQL against the replica (CTL-1397 — never bare
