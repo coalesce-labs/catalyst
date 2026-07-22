@@ -2241,6 +2241,36 @@ describe("classifyPrNotMerged (CTL-1496)", () => {
     expect(r.decision).toBe("fix");
   });
 
+  test("BLOCKED with no actionable cause → escalate (awaiting required approval, not LLM-fixable)", () => {
+    const r = defaultClassifyTicket(mkEvidence(), {
+      probePrBlock: probeReturning({
+        prNumber: 46,
+        mergeStateStatus: "BLOCKED",
+        failingChecks: [],
+        unresolvedBotThreads: [],
+        unresolvedHumanThreads: [],
+        hasChangesRequested: false,
+      }),
+    });
+    expect(r.decision).toBe("escalate");
+    expect(r.details.reason).toContain("no remediable cause");
+  });
+
+  test("DIRTY with no actionable cause → escalate 'no remediable cause' (fallthrough coverage)", () => {
+    const r = defaultClassifyTicket(mkEvidence(), {
+      probePrBlock: probeReturning({
+        prNumber: 47,
+        mergeStateStatus: "DIRTY",
+        failingChecks: [],
+        unresolvedBotThreads: [],
+        unresolvedHumanThreads: [],
+        hasChangesRequested: false,
+      }),
+    });
+    expect(r.decision).toBe("escalate");
+    expect(r.details.reason).toContain("no remediable cause");
+  });
+
   test("probe throws → defer (transient), NOT escalate", () => {
     const r = defaultClassifyTicket(mkEvidence(), {
       probePrBlock: () => { throw new Error("gh down"); },

@@ -171,6 +171,7 @@ describe("defaultProbePrBlock", () => {
             mergeStateStatus: "BLOCKED",
             mergeable: "MERGEABLE",
             statusCheckRollup: [],
+            reviewDecision: "CHANGES_REQUESTED",
           },
         ],
       ],
@@ -340,6 +341,84 @@ describe("defaultProbePrBlock", () => {
         },
       ],
       ["pr view 47 --json reviews", { reviews: [] }],
+    ]);
+    const r = defaultProbePrBlock("CTL-1", { gh, repo: "o/r" });
+    expect(r.unresolvedBotThreads).toHaveLength(0);
+    expect(r.unresolvedHumanThreads).toHaveLength(0);
+  });
+
+  test("re-APPROVED PR (reviewDecision APPROVED) → hasChangesRequested false despite past CHANGES_REQUESTED", () => {
+    // CTL-1496 high finding: the aggregate reviewDecision, not raw review
+    // history, drives hasChangesRequested — so a fixed-then-re-approved PR is
+    // not stale-flagged and false-escalated to a human.
+    const gh = makeGh([
+      [
+        "pr list",
+        [
+          {
+            number: 48,
+            state: "OPEN",
+            mergeStateStatus: "CLEAN",
+            mergeable: "MERGEABLE",
+            statusCheckRollup: [],
+            reviewDecision: "APPROVED",
+          },
+        ],
+      ],
+      ["api graphql", EMPTY_THREADS],
+    ]);
+    const r = defaultProbePrBlock("CTL-1", { gh, repo: "o/r" });
+    expect(r.hasChangesRequested).toBe(false);
+  });
+
+  test("partial/errored review-threads GraphQL (pullRequest null) → throws (caller defers)", () => {
+    const gh = makeGh([
+      [
+        "pr list",
+        [
+          {
+            number: 49,
+            state: "OPEN",
+            mergeStateStatus: "BLOCKED",
+            mergeable: "MERGEABLE",
+            statusCheckRollup: [],
+          },
+        ],
+      ],
+      // HTTP-200 body with a field-level error: data present but pullRequest null.
+      ["api graphql", { data: { repository: { pullRequest: null } }, errors: [{ message: "x" }] }],
+    ]);
+    expect(() => defaultProbePrBlock("CTL-1", { gh, repo: "o/r" })).toThrow();
+  });
+
+  test("unresolved thread with no first comment → counted as neither bot nor human", () => {
+    const gh = makeGh([
+      [
+        "pr list",
+        [
+          {
+            number: 50,
+            state: "OPEN",
+            mergeStateStatus: "BLOCKED",
+            mergeable: "MERGEABLE",
+            statusCheckRollup: [],
+          },
+        ],
+      ],
+      [
+        "api graphql",
+        {
+          data: {
+            repository: {
+              pullRequest: {
+                reviewThreads: {
+                  nodes: [{ id: "X1", isResolved: false, comments: { nodes: [] } }],
+                },
+              },
+            },
+          },
+        },
+      ],
     ]);
     const r = defaultProbePrBlock("CTL-1", { gh, repo: "o/r" });
     expect(r.unresolvedBotThreads).toHaveLength(0);

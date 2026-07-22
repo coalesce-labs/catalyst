@@ -536,12 +536,15 @@ export function classifyPrNotMerged(evidence, { probePrBlock = defaultProbePrBlo
     };
   }
 
-  // Remediable: failing checks, unresolved bot threads, or simply ready to merge.
+  // Remediable when there is a concrete LLM-actionable cause (failing checks or
+  // unresolved bot threads), or the PR is already CLEAN and just needs merging.
+  // A BLOCKED PR with NO actionable cause (awaiting a required approving review
+  // or a still-pending required check) is not LLM-fixable — falling through to
+  // escalate avoids burning the recovery-attempt budget re-entering as 'fix'.
   const remediable =
     probe.failingChecks.length > 0 ||
     probe.unresolvedBotThreads.length > 0 ||
-    probe.mergeStateStatus === "CLEAN" ||
-    probe.mergeStateStatus === "BLOCKED";
+    probe.mergeStateStatus === "CLEAN";
   if (remediable) {
     return {
       decision: "fix",

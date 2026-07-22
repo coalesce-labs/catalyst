@@ -53,8 +53,12 @@ function emptyProbe() {
   };
 }
 
-// Fields the classifier reads off the resolved PR.
-const PR_VIEW_FIELDS = "number,state,mergeStateStatus,mergeable,statusCheckRollup";
+// Fields the classifier reads off the resolved PR. `reviewDecision` is the
+// aggregate GitHub verdict (latest review per required reviewer) — used instead
+// of scanning the raw reviews history so a PR that was CHANGES_REQUESTED then
+// re-APPROVED is not false-flagged by a stale entry (CTL-1496 verify finding).
+const PR_VIEW_FIELDS =
+  "number,state,mergeStateStatus,mergeable,statusCheckRollup,reviewDecision";
 
 // Resolve the ticket's PR EXPLICITLY — never by the daemon's current branch.
 // classifyPrNotMerged runs inside the daemon process (daemon cwd), so a bare
@@ -103,17 +107,35 @@ export function defaultProbePrBlock(ticket, { gh = realGh, repo, branch } = {}) 
     "graphql",
     "-f",
     `query=${REVIEW_THREADS_QUERY}`,
-    "-F",
+    // owner/name are String! — pass with -f (raw string) so a purely-numeric
+    // owner or repo name is not coerced to an Int and rejected. pr is Int! → -F.
+    "-f",
     `owner=${owner}`,
-    "-F",
+    "-f",
     `name=${name}`,
     "-F",
     `pr=${view.number}`,
   ]);
   const threadsJson = safeJson(threadsRaw);
+  // `gh api graphql` can exit 0 with a partial/field-errored body (HTTP 200,
+  // data.repository.pullRequest === null, or a top-level `errors` array). Coercing
+  // that to [] would silently hide an unresolved HUMAN thread and route a
+  // human-blocked PR to the autonomous fix path. Treat an unparseable or partial
+  // response as a probe failure → classifyPrNotMerged defers (retry next tick).
+  if (
+    threadsJson === null ||
+    threadsJson.errors ||
+    !threadsJson?.data?.repository?.pullRequest
+  ) {
+    throw new Error(
+      "review-threads GraphQL returned no usable data (partial/errored response)",
+    );
+  }
   const nodes =
-    threadsJson?.data?.repository?.pullRequest?.reviewThreads?.nodes || [];
-  const unresolved = nodes.filter((n) => !n.isResolved);
+    threadsJson.data.repository.pullRequest.reviewThreads?.nodes || [];
+  // A thread with no first comment cannot be attributed to bot vs human; skip it
+  // rather than defaulting it into unresolvedHumanThreads (spurious escalate).
+  const unresolved = nodes.filter((n) => !n.isResolved && n.comments?.nodes?.[0]);
   const shape = (n) => ({
     id: n.id,
     ...pick(n.comments?.nodes?.[0], ["body", "path", "line"]),
@@ -125,9 +147,11 @@ export function defaultProbePrBlock(ticket, { gh = realGh, repo, branch } = {}) 
     .filter((n) => !isBotAuthor(n.comments?.nodes?.[0]?.author))
     .map(shape);
 
-  const reviewsRaw = gh(["pr", "view", String(view.number), "--json", "reviews"]);
-  const reviews = safeJson(reviewsRaw)?.reviews || [];
-  const hasChangesRequested = reviews.some((r) => r.state === "CHANGES_REQUESTED");
+  // Aggregate verdict, not raw history: reviewDecision reflects the latest
+  // review per required reviewer, so a re-APPROVED PR reads APPROVED (not the
+  // stale CHANGES_REQUESTED it once carried). An un-required CHANGES_REQUESTED
+  // that reviewDecision omits is still caught by unresolvedHumanThreads.
+  const hasChangesRequested = view.reviewDecision === "CHANGES_REQUESTED";
 
   return {
     prNumber: view.number,
