@@ -12,7 +12,8 @@
 // parseBootHandoff boot seam; CTL-1161 added 6 — isDaemonLocalMergeSignal,
 // refreshAllPluginCheckouts, startPluginDriftCheck, PLUGIN_DRIFT_CHECK_INTERVAL_MS
 // from plugin-refresh.mjs, and startDriftCheckWatcher from router.mjs; CTL-1171
-// added 2 — BROKER_HEARTBEAT_INTERVAL_MS and buildBrokerHeartbeatEvent).
+// added 2 — BROKER_HEARTBEAT_INTERVAL_MS and buildBrokerHeartbeatEvent;
+// CTL-1489 added 3 — the sink-5 ticket-transition store helpers).
 // The count is the length of the enumerated REQUIRED_EXPORTS list below —
 // `grep -cE '^export '` undercounts because most re-exports are multi-name
 // `export { … } from` blocks.
@@ -93,10 +94,17 @@ const REQUIRED_EXPORTS = [
   "getProjectionMeta",
   "setProjectionMeta",
   "getStaleWorkers",
+  // CTL-1489: sink-5 ticket-transition store helpers (broker-state.mjs)
+  "recordTicketStateTransition",
+  "getTicketStateTransitions",
+  "getLatestTicketStateTransition",
   // CTL-532: worker-state projection — reducer + drivers (projection.mjs)
   "reduceWorkerStateEvent",
   "projectWorkerStateEvent",
   "replayWorkerStateProjection",
+  // CTL-1489: sink-5 ticket-transition reducer + projection driver (projection.mjs)
+  "reduceTicketTransitionEvent",
+  "projectTicketTransitionEvent",
   // CTL-993: merge-to-main plugin-checkout refresh (plugin-refresh.mjs)
   "resolvePluginCheckoutRoots",
   "resolveRepoFullName",
@@ -138,11 +146,11 @@ const REQUIRED_EXPORTS = [
 ];
 
 describe("CTL-529 barrel contract", () => {
-  test("all 100 public symbols re-export from ./index.mjs", () => {
+  test("all 105 public symbols re-export from ./index.mjs", () => {
     for (const name of REQUIRED_EXPORTS) {
       expect(typeof barrel[name], `missing export: ${name}`).not.toBe("undefined");
     }
-    expect(REQUIRED_EXPORTS.length).toBe(100);
+    expect(REQUIRED_EXPORTS.length).toBe(105);
   });
 
   test("singleton getters return identity-stable live references", () => {

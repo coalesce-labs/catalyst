@@ -59,6 +59,7 @@ import {
   getProjectedWorkerStatePath,
   writeProjectedWorkerState,
   projectWorkerStateEvent,
+  projectTicketTransitionEvent, // CTL-1489 sink 5
 } from "./projection.mjs";
 import {
   upsertFilterStateOpen,
@@ -2397,6 +2398,12 @@ export function processEvent(event) {
   // non-consuming — the projection is a side-channel observer and never
   // returns, so existing routing below is untouched).
   projectWorkerStateEvent(event);
+
+  // CTL-1489: fold worker.transition.<TICKET> into the sink-5
+  // ticket_state_transitions table + the widened worker_state sticky columns.
+  // Non-consuming side-channel like projectWorkerStateEvent — runs ABOVE the
+  // shouldSkipEvent gate so the durable transition history is complete.
+  projectTicketTransitionEvent(event);
 
   // CTL-863: fold fence.claimed/fence.released into the ticket_state fence
   // columns. Non-consuming side-channel like projectWorkerStateEvent — the fence
