@@ -492,9 +492,15 @@ export const PR_NOT_MERGED_REASON = "pr_not_merged";
 // stays pure and unit-testable with a fake probe.
 export function classifyPrNotMerged(evidence, { probePrBlock = defaultProbePrBlock, log } = {}) {
   const ticket = evidence.ticket ?? evidence.signal?.ticket;
+  // CTL-1496: thread the ticket's head branch to the probe when the evidence
+  // carries it, so the probe resolves the ticket's PR by `--head <branch>`
+  // rather than the daemon's current branch. Falls back to ticket-in-title
+  // search inside the probe when branch is absent.
+  const branch =
+    evidence.branch ?? evidence.signal?.branch ?? evidence.signal?.branchName ?? undefined;
   let probe;
   try {
-    probe = probePrBlock(ticket);
+    probe = probePrBlock(ticket, { branch });
   } catch (e) {
     log?.(`pr-block probe failed: ${e.message}`);
     return {

@@ -6,7 +6,9 @@ import { describe, test, expect } from "bun:test";
 import { defaultProbePrBlock } from "./pr-block-probe.mjs";
 
 // fakeGh routes by longest matching pattern first so specific patterns
-// (e.g. "pr view 42 --json reviews") win over generic ones ("pr view").
+// (e.g. "pr view 42 --json reviews") win over generic ones ("pr list").
+// The PR is resolved via `gh pr list` (head branch or ticket-in-title search) —
+// never a bare `gh pr view` on the daemon's current branch (CTL-1496).
 function makeGh(routes) {
   const sorted = [...routes].sort((a, b) => b[0].length - a[0].length);
   return (args) => {
@@ -25,11 +27,54 @@ const EMPTY_THREADS = {
   data: { repository: { pullRequest: { reviewThreads: { nodes: [] } } } },
 };
 
+describe("defaultProbePrBlock — PR resolution contract (CTL-1496)", () => {
+  test("resolves by ticket-in-title search when no branch is threaded", () => {
+    const calls = [];
+    const gh = (args) => {
+      calls.push(args.join(" "));
+      const key = args.join(" ");
+      if (key.startsWith("pr list"))
+        return JSON.stringify([
+          { number: 42, state: "OPEN", mergeStateStatus: "CLEAN", mergeable: "MERGEABLE", statusCheckRollup: [] },
+        ]);
+      if (key.includes("api graphql")) return JSON.stringify(EMPTY_THREADS);
+      if (key.includes("pr view 42 --json reviews")) return JSON.stringify({ reviews: [] });
+      throw new Error(`unrouted gh: ${key}`);
+    };
+    const r = defaultProbePrBlock("CTL-99", { gh, repo: "o/r" });
+    expect(r.prNumber).toBe(42);
+    // The resolution call must NOT be a bare `pr view` (daemon current branch);
+    // it must select by the ticket id in the PR title.
+    const resolveCall = calls.find((c) => c.startsWith("pr list"));
+    expect(resolveCall).toContain("--search");
+    expect(resolveCall).toContain("CTL-99 in:title");
+    expect(resolveCall).not.toMatch(/^pr view/);
+  });
+
+  test("resolves by --head <branch> when the branch is threaded", () => {
+    const calls = [];
+    const gh = (args) => {
+      calls.push(args.join(" "));
+      const key = args.join(" ");
+      if (key.startsWith("pr list"))
+        return JSON.stringify([
+          { number: 7, state: "OPEN", mergeStateStatus: "BLOCKED", mergeable: "MERGEABLE", statusCheckRollup: [] },
+        ]);
+      if (key.includes("api graphql")) return JSON.stringify(EMPTY_THREADS);
+      if (key.includes("pr view 7 --json reviews")) return JSON.stringify({ reviews: [] });
+      throw new Error(`unrouted gh: ${key}`);
+    };
+    const r = defaultProbePrBlock("CTL-99", { gh, repo: "o/r", branch: "ryan/ctl-99-slug" });
+    expect(r.prNumber).toBe(7);
+    const resolveCall = calls.find((c) => c.startsWith("pr list"));
+    expect(resolveCall).toContain("--head ryan/ctl-99-slug");
+    expect(resolveCall).not.toContain("--search");
+  });
+});
+
 describe("defaultProbePrBlock", () => {
   test("no PR for ticket → { prNumber: null }", () => {
-    const gh = makeGh([
-      ["pr view", {}],
-    ]);
+    const gh = makeGh([["pr list", []]]);
     const r = defaultProbePrBlock("CTL-1", { gh, repo: "o/r" });
     expect(r.prNumber).toBeNull();
   });
@@ -37,17 +82,19 @@ describe("defaultProbePrBlock", () => {
   test("BLOCKED PR with one failing required check → failingChecks length 1", () => {
     const gh = makeGh([
       [
-        "pr view",
-        {
-          number: 42,
-          state: "OPEN",
-          mergeStateStatus: "BLOCKED",
-          mergeable: "MERGEABLE",
-          statusCheckRollup: [
-            { name: "quality", state: "FAILURE", detailsUrl: "u" },
-            { name: "unit", state: "SUCCESS" },
-          ],
-        },
+        "pr list",
+        [
+          {
+            number: 42,
+            state: "OPEN",
+            mergeStateStatus: "BLOCKED",
+            mergeable: "MERGEABLE",
+            statusCheckRollup: [
+              { name: "quality", state: "FAILURE", detailsUrl: "u" },
+              { name: "unit", state: "SUCCESS" },
+            ],
+          },
+        ],
       ],
       ["api graphql", EMPTY_THREADS],
       ["pr view 42 --json reviews", { reviews: [] }],
@@ -62,14 +109,16 @@ describe("defaultProbePrBlock", () => {
   test("green PR with one unresolved bot thread → unresolvedBotThreads length 1", () => {
     const gh = makeGh([
       [
-        "pr view",
-        {
-          number: 43,
-          state: "OPEN",
-          mergeStateStatus: "BLOCKED",
-          mergeable: "MERGEABLE",
-          statusCheckRollup: [{ name: "quality", state: "SUCCESS" }],
-        },
+        "pr list",
+        [
+          {
+            number: 43,
+            state: "OPEN",
+            mergeStateStatus: "BLOCKED",
+            mergeable: "MERGEABLE",
+            statusCheckRollup: [{ name: "quality", state: "SUCCESS" }],
+          },
+        ],
       ],
       [
         "api graphql",
@@ -114,14 +163,16 @@ describe("defaultProbePrBlock", () => {
   test("human CHANGES_REQUESTED → hasChangesRequested true + human thread captured", () => {
     const gh = makeGh([
       [
-        "pr view",
-        {
-          number: 44,
-          state: "OPEN",
-          mergeStateStatus: "BLOCKED",
-          mergeable: "MERGEABLE",
-          statusCheckRollup: [],
-        },
+        "pr list",
+        [
+          {
+            number: 44,
+            state: "OPEN",
+            mergeStateStatus: "BLOCKED",
+            mergeable: "MERGEABLE",
+            statusCheckRollup: [],
+          },
+        ],
       ],
       [
         "api graphql",
@@ -167,14 +218,16 @@ describe("defaultProbePrBlock", () => {
   test("already merged / clean → mergeStateStatus reflects it, no blockers", () => {
     const gh = makeGh([
       [
-        "pr view",
-        {
-          number: 45,
-          state: "OPEN",
-          mergeStateStatus: "CLEAN",
-          mergeable: "MERGEABLE",
-          statusCheckRollup: [{ name: "quality", state: "SUCCESS" }],
-        },
+        "pr list",
+        [
+          {
+            number: 45,
+            state: "OPEN",
+            mergeStateStatus: "CLEAN",
+            mergeable: "MERGEABLE",
+            statusCheckRollup: [{ name: "quality", state: "SUCCESS" }],
+          },
+        ],
       ],
       ["api graphql", EMPTY_THREADS],
       ["pr view 45 --json reviews", { reviews: [] }],
@@ -186,21 +239,23 @@ describe("defaultProbePrBlock", () => {
   });
 
   test("gh failure → throws (caller treats as transient)", () => {
-    const gh = makeGh([["pr view", new Error("gh: network")]]);
+    const gh = makeGh([["pr list", new Error("gh: network")]]);
     expect(() => defaultProbePrBlock("CTL-1", { gh, repo: "o/r" })).toThrow();
   });
 
   test("bot author detected by [bot] suffix (not just __typename)", () => {
     const gh = makeGh([
       [
-        "pr view",
-        {
-          number: 46,
-          state: "OPEN",
-          mergeStateStatus: "BLOCKED",
-          mergeable: "MERGEABLE",
-          statusCheckRollup: [],
-        },
+        "pr list",
+        [
+          {
+            number: 46,
+            state: "OPEN",
+            mergeStateStatus: "BLOCKED",
+            mergeable: "MERGEABLE",
+            statusCheckRollup: [],
+          },
+        ],
       ],
       [
         "api graphql",
@@ -241,14 +296,16 @@ describe("defaultProbePrBlock", () => {
   test("already-resolved threads are excluded", () => {
     const gh = makeGh([
       [
-        "pr view",
-        {
-          number: 47,
-          state: "OPEN",
-          mergeStateStatus: "BLOCKED",
-          mergeable: "MERGEABLE",
-          statusCheckRollup: [],
-        },
+        "pr list",
+        [
+          {
+            number: 47,
+            state: "OPEN",
+            mergeStateStatus: "BLOCKED",
+            mergeable: "MERGEABLE",
+            statusCheckRollup: [],
+          },
+        ],
       ],
       [
         "api graphql",

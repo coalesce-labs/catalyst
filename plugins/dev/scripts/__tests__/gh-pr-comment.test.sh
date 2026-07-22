@@ -140,6 +140,51 @@ fi
 
 scratch_teardown
 
+# ── Test 6: --idempotent existing-comment fetch failure → fail-closed ─────────
+# A transient gh api hiccup must NOT fall through to a post (double-comment
+# spam) — it fails closed (no post) and exits non-zero (CTL-1496).
+scratch_setup
+
+cat > "${SCRATCH}/bin/gh" <<'STUB'
+#!/usr/bin/env bash
+ARGS="$*"
+if [[ "$ARGS" == *"repo view"* ]]; then
+  echo '{"nameWithOwner":"test-org/test-repo"}'
+elif [[ "$ARGS" == *"pr comment"* ]]; then
+  echo "COMMENT_CALLED $ARGS" >> "$COMMENT_LOG"
+  exit 0
+elif [[ "$ARGS" == *"issues/"*"/comments"* ]]; then
+  echo "gh api: 502 Bad Gateway" >&2
+  exit 1
+else
+  echo "stub gh: unexpected: $ARGS" >&2
+  exit 99
+fi
+STUB
+chmod +x "${SCRATCH}/bin/gh"
+
+EXIT=0
+bash "$HELPER" 42 "@codex review" --idempotent 2>/dev/null || EXIT=$?
+if [[ "$EXIT" -ne 0 ]] && ! grep -q "COMMENT_CALLED" "$COMMENT_LOG"; then
+  pass "--idempotent: fetch failure fails closed (no post, non-zero exit)"
+else
+  fail "--idempotent: fetch failure fails closed (no post, non-zero exit)" \
+    "exit=${EXIT}, comment_log=$(cat "$COMMENT_LOG")"
+fi
+
+scratch_teardown
+
+# ── Test 7: non-numeric PR number → rejected (non-zero) ──────────────────────
+scratch_setup
+
+if bash "$HELPER" "42; rm -rf /" "body" 2>/dev/null; then
+  fail "non-numeric PR number → rejected" "exited 0 on non-numeric PR arg"
+else
+  pass "non-numeric PR number → rejected"
+fi
+
+scratch_teardown
+
 # ── Summary ───────────────────────────────────────────────────────────────────
 echo ""
 echo "Results: ${PASSES} passed, ${FAILURES} failed"

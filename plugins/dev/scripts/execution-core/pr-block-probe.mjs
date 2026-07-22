@@ -53,34 +53,45 @@ function emptyProbe() {
   };
 }
 
-// Resolve the ticket's PR by branch name or by listing open PRs.
-// gh pr view with no selector looks up the current branch — we pass the ticket
-// as a head-branch hint instead; tests inject a fake gh that routes on "pr view".
-function prSelector(ticket) {
-  // Use the ticket as a search term for the branch name the dispatcher would have created.
-  // In practice the fake gh in tests routes on "pr view" regardless of the extra args,
-  // and in production `gh pr view` against the current branch (no extra args) works
-  // because phase agents run inside the ticket's worktree on the ticket branch.
-  return [];
+// Fields the classifier reads off the resolved PR.
+const PR_VIEW_FIELDS = "number,state,mergeStateStatus,mergeable,statusCheckRollup";
+
+// Resolve the ticket's PR EXPLICITLY — never by the daemon's current branch.
+// classifyPrNotMerged runs inside the daemon process (daemon cwd), so a bare
+// `gh pr view` would resolve whatever branch the daemon happens to be on, not
+// the ticket's PR (CTL-1496 verify finding: the probe was inert in production,
+// always resolving the wrong PR → always escalating). We resolve by the ticket's
+// head branch when the caller threads it, else by the ticket id in the PR title
+// (draft_pr_title injects `<type>(<scope>): <TICKET> …`), taking the single open
+// PR. Returns the parsed PR object or null.
+function resolveTicketPr(gh, ticket, branch) {
+  const selector = branch ? ["--head", branch] : ["--search", `${ticket} in:title`];
+  const listRaw = gh([
+    "pr",
+    "list",
+    ...selector,
+    "--state",
+    "open",
+    "--json",
+    PR_VIEW_FIELDS,
+    "--limit",
+    "1",
+  ]);
+  const list = safeJson(listRaw);
+  if (!Array.isArray(list) || list.length === 0) return null;
+  return list[0];
 }
 
-export function defaultProbePrBlock(ticket, { gh = realGh, repo } = {}) {
+export function defaultProbePrBlock(ticket, { gh = realGh, repo, branch } = {}) {
   const [owner, name] = (
     repo ||
     safeJson(gh(["repo", "view", "--json", "nameWithOwner"]))?.nameWithOwner ||
     "/"
   ).split("/");
 
-  // Resolve PR: the fake gh in tests routes any "pr view" call; production gh
-  // runs in the ticket's worktree on the ticket branch and resolves by current branch.
-  const viewRaw = gh([
-    "pr",
-    "view",
-    ...prSelector(ticket),
-    "--json",
-    "number,state,mergeStateStatus,mergeable,statusCheckRollup",
-  ]);
-  const view = safeJson(viewRaw);
+  // Resolve the ticket's PR by head branch (when threaded) or ticket-in-title
+  // search — independent of the daemon's cwd/current branch.
+  const view = resolveTicketPr(gh, ticket, branch);
   if (!view || !view.number) return emptyProbe();
 
   const failingChecks = (view.statusCheckRollup || [])
