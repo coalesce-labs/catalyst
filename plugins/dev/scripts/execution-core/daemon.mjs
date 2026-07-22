@@ -57,7 +57,10 @@ import {
   readExecutorByPhaseLayer1, // CTL-1457: Layer-1 catalyst.orchestration.executorByPhase map reader
   hasInProcessExecutorRoute, // CTL-1457 (N1): does executorByPhase route ANY phase to sdk|codex-exec? (arms the slot/occupancy gates on a bg node)
   codexConfig, // CTL-1457: codex-exec runtime settings (codexHome/bin/…) for the boot-eligibility gate
+  readProjectionReadConfig, // CTL-1489: durable-projection read-cutover flag (off/shadow/enforce)
 } from "./config.mjs";
+import { findHeldRunFromProjection } from "./projection-reader.mjs"; // CTL-1489
+import { emitProjectionDrift } from "./projection-read-decision.mjs"; // CTL-1489
 import { resolveBootIdentity } from "./host-boot-identity.mjs"; // CTL-1093
 import { readStickyIdentity, writeStickyIdentity } from "./host-sticky.mjs"; // CTL-1093
 import { ownedBy } from "./hrw.mjs"; // CTL-862: HRW ownership filter
@@ -432,6 +435,12 @@ export async function handleCommentWake(
     // silently returns to the inbox and cannot be retried. A human answering IS
     // the signal that another attempt is warranted.
     forgetIntent = defaultForgetIntent,
+    // CTL-1489: durable-projection read-cutover seams. When the local worker dir
+    // is absent (multi-host: the ticket is served elsewhere), off keeps today's
+    // bare return; shadow observes the gap; enforce resumes from the projection.
+    readProjectionMode = () => readProjectionReadConfig().mode,
+    findHeldFromProjection = findHeldRunFromProjection,
+    emitDrift = emitProjectionDrift,
   }
 ) {
   const { ticket } = parsed ?? {};
@@ -609,7 +618,43 @@ export async function handleCommentWake(
       (f) => f.startsWith("phase-") && f.endsWith(".json")
     );
   } catch {
-    // No local worker state: the label clear above is the entire correct response.
+    // CTL-1489 (closes CTL-1475): the local worker dir is absent. In a multi-host
+    // cluster the ticket may be served on another host, so the durable projection
+    // is the only surviving record of its held state — a bare return here silently
+    // drops a legitimate human reply. off → today's bare return; shadow → observe
+    // the gap (drift event); enforce → resume the held run from durable state.
+    let mode;
+    try {
+      mode = readProjectionMode();
+    } catch {
+      mode = "off";
+    }
+    if (mode === "off") return;
+    let held = null;
+    try {
+      held = findHeldFromProjection(ticket);
+    } catch {
+      held = null;
+    }
+    if (!held) return; // no durable held run for this ticket → nothing to resume
+    if (mode === "shadow") {
+      try {
+        emitDrift({ ticket, source: "comment-wake" });
+      } catch {
+        /* drift emit is best-effort */
+      }
+      return; // shadow observes but never acts
+    }
+    // enforce: resume the held run reconstructed from the projection.
+    const projSig = held.signal ?? {};
+    const parkedPhase = projSig.raw?.parkedFrom ?? projSig.phase ?? held.phase;
+    const handoffPath = projSig.raw?.handoffPath ?? undefined;
+    try {
+      dispatch(orchDir, ticket, parkedPhase, { handoffPath });
+      log.info({ ticket, phase: parkedPhase }, "handleCommentWake: resumed from projection (CTL-1489 enforce)");
+    } catch (err) {
+      log.warn({ ticket, err: err?.message }, "handleCommentWake: projection resume dispatch failed");
+    }
     return;
   }
 
