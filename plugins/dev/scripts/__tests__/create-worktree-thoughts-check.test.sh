@@ -166,7 +166,13 @@ run_reuse_worktree() {
 		chmod +x "$BIN/humanlayer"
 		PATHX="$BIN:$PATH"
 	else
-		CONF='{"catalyst":{"projectKey":"t"}}' # no thoughts profile; humanlayer stays off PATH
+		CONF='{"catalyst":{"projectKey":"t"}}' # no thoughts profile configured
+		# Deterministic 'unconfigured' regardless of the host's ambient PATH (Codex on #2688): shadow any
+		# real humanlayer with a stub that reports NO profile, so the reuse-path profile gate resolves empty
+		# and the repair is correctly SKIPPED (not attempted against the absent $HL, which would exit 65).
+		printf '#!/usr/bin/env bash\nexit 0\n' >"$BIN/humanlayer"
+		chmod +x "$BIN/humanlayer"
+		PATHX="$BIN:$PATH"
 	fi
 	printf '%s\n' "$CONF" >"$SRC/.catalyst/config.json"
 	printf '%s\n' "$CONF" >"$WT/t-CTL-999/.catalyst/config.json"
