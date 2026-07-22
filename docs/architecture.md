@@ -218,6 +218,26 @@ active work:
 - **Deferred**: reading `.draftPr` draft-state as a secondary advancement signal (advancement
   currently driven by signal `status === "done"` only).
 
+### Recovery-pass `pr_not_merged` remediation (CTL-1496)
+
+When `phase-teardown` emits `failed(reason: "pr_not_merged")`, the scheduler's **Pass 0r** sweeps
+it as a recovery item. Previously the classifier blindly escalated it to a human. With CTL-1496
+(`CATALYST_RECOVERY_PASS=shadow|enforce`), the classifier instead probes live GitHub state
+(`pr-block-probe.mjs` → one `gh pr view` + GraphQL `reviewThreads` + `gh pr view --json reviews`):
+
+- **Failing required checks or unresolved bot (Codex) threads, no human `CHANGES_REQUESTED`** →
+  `{ decision: "fix", fix_class: "bounded-llm" }` with a `"pr-not-merged"` brief embedding the
+  concrete failing-check names and thread ids. The recovery-pass worker fixes the CI, addresses the
+  review findings, resolves the threads, and posts `@codex review` via `gh-pr-comment.sh
+  --idempotent` to re-trigger the automated reviewer, then merges when `CLEAN`.
+- **Human `CHANGES_REQUESTED`** → `escalate` with the specific reviewer ask (PR and thread linked),
+  never the opaque `"Failure reason: pr_not_merged"` string.
+- **Probe throws** → `defer` (transient GitHub outage — retry next tick).
+- **No open PR found** → `escalate`.
+
+The behavior is gated by `CATALYST_RECOVERY_PASS` (off by default); shadow mode logs a
+`recovery.would-fix` event without dispatching; enforce dispatches the recovery-pass worker.
+
 ### Runaway-loop guards (CTL-671)
 
 `schedulerTick` is hardened against runaway dispatch/reclaim loops on phantom/non-resolving tickets

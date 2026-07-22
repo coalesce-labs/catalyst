@@ -580,6 +580,49 @@ governs deciding a human is genuinely needed and authoring the brief for them.
 > red-CI open PR with a deterministic fix (fix it, push, re-check), an abandoned/superseded open PR
 > (close it). Mechanically-resolvable ⇒ FIX; genuine-judgment ⇒ escalate.
 
+### PR-not-merged remediation playbook (CTL-1496)
+
+When the recovery-pass brief category is `pr-not-merged` (set by the Phase-2 classifier when
+`phase-teardown` failed with `failureReason: "pr_not_merged"`), follow this sub-playbook before
+the general Rubric Two logic. The brief already embeds the concrete blockers from the classify-time
+probe; re-probe live state at act-time to get the current picture:
+
+```bash
+# Re-probe live PR state (read-only; same seam as classifier)
+gh pr view --json number,state,mergeStateStatus,mergeable,statusCheckRollup
+```
+
+**Step 1 — CI branch** (failing required checks): for each failing check named in the brief:
+1. `gh run view --log-failed` to read the failure log.
+2. Fix the root cause in code (bounded by the existing attempts cap — see Rubric Two).
+3. `git add … && git commit && git push` to re-trigger CI.
+4. Re-probe after CI completes; if CLEAN, proceed to Step 3 (merge).
+
+**Step 2 — Review branch** (unresolved bot-review threads): for each unresolved bot thread:
+1. Read the thread body — understand the specific finding (file, line, concern).
+2. Address the actionable finding in code; commit.
+3. Resolve the thread via the `resolveReviewThread` GraphQL mutation (reuse
+   `orchestrate-resolve-fixed-threads`'s mutation or call
+   `/catalyst-dev:review-comments <PR> --headless`).
+4. Post `@codex review` via `plugins/dev/scripts/lib/gh-pr-comment.sh <PR> "@codex review" --idempotent`
+   to re-trigger the automated reviewer. Wait bounded (`catalyst-events wait-for`) for re-review.
+5. Escalate ONLY a finding that is a genuine judgment call (human `CHANGES_REQUESTED` or a design
+   decision you cannot resolve) — write the finding to `.review-escalations.jsonl` and use it as
+   the curated escalation brief (PR + thread linked, never the opaque `pr_not_merged` string).
+
+**Step 3 — Merge** (when the probe returns `mergeStateStatus: "CLEAN"`):
+- Run `gh pr view <n> --json mergeable,mergeStateStatus` to confirm.
+- Run the cluster fence guard: `"${PLUGIN_ROOT}/scripts/lib/cluster-fence-guard.sh" --phase recovery-pass --ticket <T>`.
+- Merge: `gh pr merge <n> --squash --delete-branch`. **NEVER `--admin` or force-merge past a
+  failing or pending check** — this is the load-bearing safety property (Rubric Two invariant).
+
+**Step 4 — Escalate** only when:
+- A human reviewer (not a bot) left `CHANGES_REQUESTED` → escalate with the reviewer's SPECIFIC
+  ask (file, line, and body), PR number linked. Never "Failure reason: pr_not_merged".
+- CI persistently red after 3 honest attempts at a genuine design incompatibility → decision
+  escalate naming the failing check and the incompatibility.
+- The PR was not found (no open PR for the ticket) → escalate with the specific reason.
+
 ### RUBRIC TWO — Finish-the-PR vs. escalate
 
 > When you anchor on a stuck PR, you are the senior engineer who unsticks it. Default to FINISHING it.

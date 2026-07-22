@@ -164,6 +164,20 @@ jobs:
         working-directory: plugins/dev/scripts
         run: bash __tests__/canonical-event.test.sh
 
+      - name: gh-pr-comment helper test (CTL-1496)
+        # Covers PR_NUMBER numeric validation + the idempotent existing-comment
+        # guard (skip on match, fail-closed on fetch failure).
+        working-directory: plugins/dev/scripts
+        run: bash __tests__/gh-pr-comment.test.sh
+
+      - name: recovery-pass pr_not_merged remediation test (CTL-1496)
+        working-directory: plugins/dev/scripts
+        run: bash __tests__/recovery-pass-pr-not-merged.test.sh
+
+      - name: review-comments headless resolution test (CTL-1496)
+        working-directory: plugins/dev/scripts
+        run: bash __tests__/review-comments-headless.test.sh
+
       - name: Run stable unit tests
         # EXCLUDED SUITES — do NOT add these back without fixing the underlying
         # timing / sandbox incompatibility:
@@ -317,6 +331,7 @@ jobs:
             worktree-safety.test.mjs \
             worktree.test.mjs \
             recovery-reasoning.test.mjs \
+            pr-block-probe.test.mjs \
             recovery-emit.test.mjs \
             sweep-stale-recovery-intents.test.mjs \
             triage-redispatch-guard.test.mjs \
