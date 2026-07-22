@@ -46,6 +46,9 @@ export function buildWorkerTransitionEvent({
   branch = null,
   taskType = null,
   actor = "catalyst.execution-core",
+  // CTL-1488: id of the triggering event (additive; null when absent). Parity
+  // with the shared TS/bash builders' caused_by (ADR-022 absence-detection).
+  causedBy = null,
 } = {}) {
   const ts = new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
   const orchVal = orchId ?? ticket;
@@ -80,6 +83,9 @@ export function buildWorkerTransitionEvent({
     "catalyst.worker.from_disposition": fromDisposition,
     "catalyst.worker.to_disposition": toDispositionAttr,
     "catalyst.worker.reason": reason,
+    // CTL-1488: worker.transition is unconditionally coordination (cross-host
+    // shared state) — hardcoded, not classifier-derived, for the fixed name.
+    "event.stream_class": "coordination",
   };
   // intValue dims — phase.attempt / phase.revive_count as numbers (CTL-636 pattern).
   if (attempt !== null && attempt !== undefined) {
@@ -98,6 +104,8 @@ export function buildWorkerTransitionEvent({
       severityNumber: 9,
       traceId: randomBytes(16).toString("hex"),
       spanId: randomBytes(8).toString("hex"),
+      // CTL-1488: caused_by parity with the shared builders (ADR-022).
+      caused_by: causedBy,
       channel: "execution-core",
       resource: buildCatalystResource({ serviceName: "catalyst.execution-core" }),
       attributes,

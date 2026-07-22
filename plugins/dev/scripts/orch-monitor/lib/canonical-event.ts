@@ -24,6 +24,8 @@ import {
   generateEventId,
   severityNumber,
 } from "./canonical-event-shared";
+// CTL-1488: coordination/telemetry split — single source of truth (ESM module).
+import { classifyEventStream } from "../../lib/event-stream-class.mjs";
 
 export {
   type Severity,
@@ -68,6 +70,9 @@ export interface Resource {
 export interface Attributes {
   // catalyst-internal classifier
   "event.name": string;
+  // CTL-1488: coordination/telemetry stream split label, stamped by every
+  // canonical builder from classifyEventStream(event.name).
+  "event.stream_class"?: "coordination" | "telemetry";
   "event.entity"?: string;
   "event.action"?: string;
   "event.label"?: string;
@@ -246,6 +251,11 @@ export function buildCanonicalEvent(input: BuildInput): CanonicalEvent {
   const catOrch =
     input.resource["catalyst.orchestration"] ?? input.attributes["catalyst.orchestrator.id"];
   if (catOrch) resource["catalyst.orchestration"] = catOrch;
+
+  // CTL-1488: stamp the coordination/telemetry split label from the event name.
+  // Mutating the input attributes in place (the builder already owns them) keeps
+  // the single-source-of-truth classifier as the only place the split is decided.
+  input.attributes["event.stream_class"] = classifyEventStream(input.attributes["event.name"]);
 
   const event: CanonicalEvent = {
     ts: input.ts,

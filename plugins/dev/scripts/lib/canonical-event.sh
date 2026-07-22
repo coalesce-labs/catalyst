@@ -169,6 +169,27 @@ synthesize_event_id() {
 #                            bug|feature|chore|refactor|docs|test). Defaults to
 #                            "unknown" when omitted/empty so the attribute is
 #                            CONSISTENTLY present, never sometimes-missing.
+# classify_event_stream EVENT_NAME
+# Prints "coordination" or "telemetry". CTL-1488: bash mirror of the ESM
+# single-source-of-truth classifier at plugins/dev/scripts/lib/event-stream-class.mjs.
+# Bash can't `import` ESM, so the allowlist is hand-mirrored the same way this
+# file keeps bash/TS in lockstep for trace/span-id derivation. Keep the two in
+# sync — canonical-event.test.sh + event-stream-class.test.mjs cross-check them.
+# Fail-closed: anything not explicitly allowlisted → telemetry.
+classify_event_stream() {
+  local name="${1:-}"
+  case "$name" in
+    # KNOWN_PHASES (namespace-contract.mjs:36) — the canonical 10 pipeline phases.
+    phase.triage.*|phase.research.*|phase.plan.*|phase.implement.*|phase.verify.*|\
+    phase.review.*|phase.pr.*|phase.monitor-merge.*|phase.monitor-deploy.*|phase.teardown.*|\
+    phase.dispatch.*|phase.scheduler.*|phase.advance.*|\
+    worker.transition|worker.transition.*|escalation.*|resume.*|linear.*|github.*|comms.*)
+      printf 'coordination' ;;
+    *)
+      printf 'telemetry' ;;
+  esac
+}
+
 build_canonical_line() {
   local ts="" severity="" service="" event_name=""
   local trace_id="" span_id=""
@@ -274,12 +295,13 @@ build_canonical_line() {
       | grep -oE 'project=[^,]+' | head -1 | cut -d= -f2- || true)"
   fi
 
-  local sev_num event_id host_name host_id_val node_class_val
+  local sev_num event_id host_name host_id_val node_class_val stream_class
   sev_num="$(severity_number "$severity")"
   event_id="$(generate_event_id)"
   host_name="$(catalyst_host_name)"
   host_id_val="$(catalyst_host_id)"
   node_class_val="$(catalyst_node_class)"  # CTL-1368: the node ROLE core dimension
+  stream_class="$(classify_event_stream "$event_name")"  # CTL-1488: coordination/telemetry split
 
   jq -nc \
     --arg ts "$ts" \
@@ -293,6 +315,7 @@ build_canonical_line() {
     --arg host_name "$host_name" \
     --arg host_id "$host_id_val" \
     --arg node_class "$node_class_val" \
+    --arg stream_class "$stream_class" \
     --arg event_name "$event_name" \
     --arg entity "$entity" \
     --arg action "$action" \
@@ -352,7 +375,7 @@ build_canonical_line() {
         + (if $cat_orch   == "" then {} else { "catalyst.orchestration": $cat_orch } end)
       ),
       attributes: (
-        { "event.name": $event_name }
+        { "event.name": $event_name, "event.stream_class": $stream_class }
         + (if $entity  == "" then {} else { "event.entity": $entity }  end)
         + (if $action  == "" then {} else { "event.action": $action }  end)
         + (if $label   == "" then {} else { "event.label":  $label }   end)

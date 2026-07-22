@@ -107,6 +107,7 @@ import {
   FORBIDDEN_PREFIXES,
   PROTECTED_EXACT_NAMES,
 } from "./namespace-contract.mjs";
+import { classifyEventStream } from "../lib/event-stream-class.mjs"; // CTL-1488: coordination/telemetry split
 // CTL-1122: ingestion-silence detector (PR1 = monitor recency). The pure
 // classifier (no I/O) + the broker-side alarm machine + the byte-bounded tail
 // reader used once at boot to warm the last-seen map (a leaf module, no
@@ -302,6 +303,10 @@ export function buildCanonicalEnvelope(legacy) {
   if (typeof repo === "string" && repo.length > 0) {
     attributes["vcs.repository.name"] = repo;
   }
+  // CTL-1488: stamp the coordination/telemetry split label. Broker-internal
+  // names (filter.*, broker.daemon.*) classify telemetry (fail-closed); phase.*
+  // and other allowlisted names classify coordination.
+  attributes["event.stream_class"] = classifyEventStream(eventName);
 
   return {
     ts,

@@ -43,6 +43,9 @@ export const AUDIT_MANIFEST: AttributeAuditEntry[] = [
   { key: "event.label",   emitter: "ts", source: "canonical-event.ts:62", classification: "rename-to", targetName: "catalyst.event.label",   remediationCluster: "A", where: "emit" },
   { key: "event.value",   emitter: "ts", source: "canonical-event.ts:63", classification: "rename-to", targetName: "catalyst.event.value",   remediationCluster: "A", where: "emit" },
   { key: "event.channel", emitter: "ts", source: "canonical-event.ts:64", classification: "rename-to", targetName: "catalyst.event.channel", remediationCluster: "A", where: "emit" },
+  // CTL-1488 (ADR-022): coordination/telemetry stream split — a Catalyst-invented
+  // routing dimension we intentionally keep under the event.* namespace.
+  { key: "event.stream_class", emitter: "ts", source: "canonical-event.ts:75", classification: "legitimately-custom", note: "CTL-1488" },
 
   // §4c: Catalyst internal — legitimately-custom (catalyst.* namespace)
   { key: "catalyst.orchestrator.id", emitter: "ts", source: "canonical-event.ts:67", classification: "legitimately-custom" },
@@ -103,6 +106,10 @@ export const AUDIT_MANIFEST: AttributeAuditEntry[] = [
 
   // CTL-1023: work-type dimension — legitimately-custom (catalyst.* namespace)
   { key: "catalyst.ticket.type", emitter: "sh", source: "canonical-event.sh:349", classification: "legitimately-custom", note: "CTL-1023" },
+
+  // CTL-1457: launch verb that ran the worker (bg | sdk | codex-exec) —
+  // legitimately-custom (catalyst.* namespace). Emitted at canonical-event.sh:406.
+  { key: "catalyst.executor", emitter: "sh", source: "canonical-event.sh:406", classification: "legitimately-custom", note: "CTL-1457" },
 
   // §4h: Phase attempt tracking (CTL-761) — rename-to cluster F. CTL-764 promoted
   // these to the TS interface (worker-transition-event emits them), so they are
