@@ -24,7 +24,7 @@ else
 fi
 
 # 2. SKILL.md must state the y/N prompt is skipped in headless mode
-if grep -q "y/N.*skip\|skip.*y/N\|not.*prompt\|never.*prompt\|prompt.*skipped\|skipped.*prompt" \
+if grep -qi "y/N.*skip\|skip.*y/N\|not.*prompt\|never.*prompt\|prompt.*skipped\|skipped.*prompt" \
      "$SKILL_MD" 2>/dev/null; then
   pass "SKILL.md states y/N prompt is SKIPPED in headless mode"
 else

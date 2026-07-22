@@ -84,38 +84,13 @@ Post this reply? [y/N]
 
 ## Non-interactive / headless mode (CTL-1496)
 
-When `CATALYST_PHASE` is set in the environment **or** the argument `--headless` is passed, this
-skill runs non-interactively — no stdin is available (e.g. a `claude --bg` recovery-pass worker).
-
-In headless mode:
-
-- **Addressable findings** (code change requested) → address in code + resolve the thread (same
-  GraphQL path as interactive mode). Unchanged.
-- **Disagreement / judgment-call findings** → the `Post this reply? [y/N]` prompt is **skipped**.
-  The thread is left unresolved and a structured record is appended to
-  `${ORCH_DIR:-.}/workers/${CATALYST_TICKET}/.review-escalations.jsonl`:
-  ```json
-  {"prNumber": 42, "threadId": "T_id", "path": "a.ts", "line": 5,
-   "finding": "…reviewer's body…", "why": "…why this is a judgment call…"}
-  ```
-  The caller (recovery-pass) reads `.review-escalations.jsonl` and escalates with these specific
-  findings linked — never the opaque `pr_not_merged` string.
-- **Approval / praise** → same as interactive (skip, no action).
-
-The interactive `[y/N]` path is preserved unchanged for sessions where `CATALYST_PHASE` is unset
-and `--headless` is not passed.
-
-Group related comments that affect the same file — make all changes to a file before moving on.
-
-## Non-interactive / headless mode (CTL-1496)
-
 When `CATALYST_PHASE` is set **or** `--headless` is passed as an argument, this skill runs in a
 mode safe for `claude --bg` workers (no stdin available):
 
 - **Addressable findings** (code change requested, clear fix) → address in code + resolve the
   thread via `resolveReviewThread` mutation (same as the interactive path). Unchanged.
-- **Disagreement / judgment-call findings** → the `Post this reply? [y/N]` prompt is
-  **SKIPPED**. Instead the thread is left unresolved and a structured record is appended to
+- **Disagreement / judgment-call findings** → the `Post this reply? [y/N]` prompt is **SKIPPED** in headless mode.
+  Instead, the thread is left unresolved and a structured record is appended to
   `${ORCH_DIR:-./workers/${CATALYST_TICKET:-unknown}}/.review-escalations.jsonl`:
   ```json
   {"prNumber":42,"threadId":"T1","path":"a.ts","line":5,"finding":"…","why":"…"}
