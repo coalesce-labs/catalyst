@@ -27,6 +27,8 @@ import {
   recordVerdict,
   defaultSkipReason,
   escalateExhaustedIntents,
+  classifyPrNotMerged,
+  PR_NOT_MERGED_REASON,
 } from "./recovery-reasoning.mjs";
 import { mkdtempSync, rmSync, existsSync, readFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { join as pathJoin } from "node:path";
@@ -2162,5 +2164,148 @@ describe("defaultSkipReason + escalateExhaustedIntents (CTL-1440 P0b)", () => {
     expect(defaultSkipReason("CTL-Y", { orchDir, now: () => t0 + 2 })).toBe("escalated");
     // …and B1's terminal TTL ages it back into triage.
     expect(defaultSkipReason("CTL-Y", { orchDir, now: () => t0 + 2 + RECOVERY_TERMINAL_INTENT_TTL_MS })).toBeNull();
+  });
+});
+
+// ─── CTL-1496: pr_not_merged classification ─────────────────────────────────
+
+describe("classifyPrNotMerged (CTL-1496)", () => {
+  const mkEvidence = () => ({
+    logsOutput: null,
+    signal: { failureReason: PR_NOT_MERGED_REASON },
+    failureReason: PR_NOT_MERGED_REASON,
+    ticket: "CTL-1",
+  });
+  const probeReturning = (o) => () => o;
+
+  test("failing check → bounded-llm fix, brief names the check", () => {
+    const r = defaultClassifyTicket(mkEvidence(), {
+      probePrBlock: probeReturning({
+        prNumber: 42,
+        mergeStateStatus: "BLOCKED",
+        failingChecks: [{ name: "quality", detailsUrl: null }],
+        unresolvedBotThreads: [],
+        unresolvedHumanThreads: [],
+        hasChangesRequested: false,
+      }),
+    });
+    expect(r.decision).toBe("fix");
+    expect(r.fix_class).toBe("bounded-llm");
+    expect(r.details.brief).toContain("quality");
+  });
+
+  test("unresolved bot thread only → bounded-llm fix (review sub-mode)", () => {
+    const r = defaultClassifyTicket(mkEvidence(), {
+      probePrBlock: probeReturning({
+        prNumber: 43,
+        mergeStateStatus: "BLOCKED",
+        failingChecks: [],
+        unresolvedBotThreads: [{ id: "T1", path: "a.ts", line: 3, body: "fix this" }],
+        unresolvedHumanThreads: [],
+        hasChangesRequested: false,
+      }),
+    });
+    expect(r.decision).toBe("fix");
+    expect(r.fix_class).toBe("bounded-llm");
+    expect(r.details.brief).toContain("review");
+  });
+
+  test("human CHANGES_REQUESTED → escalate with PR number in reason, not opaque pr_not_merged", () => {
+    const r = defaultClassifyTicket(mkEvidence(), {
+      probePrBlock: probeReturning({
+        prNumber: 44,
+        mergeStateStatus: "BLOCKED",
+        failingChecks: [],
+        unresolvedBotThreads: [],
+        unresolvedHumanThreads: [{ id: "H1", body: "redesign", path: "b.ts", line: 9 }],
+        hasChangesRequested: true,
+      }),
+    });
+    expect(r.decision).toBe("escalate");
+    expect(r.fix_class).toBe("human");
+    expect(r.details.reason).toContain("44");
+    expect(r.details.reason).not.toBe("Failure reason: pr_not_merged");
+  });
+
+  test("no blockers / CLEAN → bounded-llm fix (finish the merge)", () => {
+    const r = defaultClassifyTicket(mkEvidence(), {
+      probePrBlock: probeReturning({
+        prNumber: 45,
+        mergeStateStatus: "CLEAN",
+        failingChecks: [],
+        unresolvedBotThreads: [],
+        unresolvedHumanThreads: [],
+        hasChangesRequested: false,
+      }),
+    });
+    expect(r.decision).toBe("fix");
+  });
+
+  test("probe throws → defer (transient), NOT escalate", () => {
+    const r = defaultClassifyTicket(mkEvidence(), {
+      probePrBlock: () => { throw new Error("gh down"); },
+    });
+    expect(r.decision).toBe("defer");
+  });
+
+  test("no PR found (prNumber null) → escalate with 'no open PR' reason", () => {
+    const r = defaultClassifyTicket(mkEvidence(), {
+      probePrBlock: probeReturning({ prNumber: null }),
+    });
+    expect(r.decision).toBe("escalate");
+    expect(r.details.reason).toContain("no open PR");
+  });
+
+  test("generateRemediateBrief('pr-not-merged') mentions gh pr view, @codex review", () => {
+    const b = generateRemediateBrief("pr-not-merged");
+    expect(b).toContain("gh pr view");
+    expect(b).toContain("@codex review");
+  });
+
+  test("generateRemediateBrief('pr-not-merged', probe) embeds check names and thread paths", () => {
+    const probe = {
+      prNumber: 42,
+      mergeStateStatus: "BLOCKED",
+      failingChecks: [{ name: "quality-gate", detailsUrl: null }],
+      unresolvedBotThreads: [{ id: "T1", path: "src/foo.ts", line: 5, body: "fix this" }],
+    };
+    const b = generateRemediateBrief("pr-not-merged", probe);
+    expect(b).toContain("quality-gate");
+    expect(b).toContain("src/foo.ts");
+    expect(b).toContain("@codex review");
+  });
+
+  // REGRESSION GUARD: probe is never called for non-pr_not_merged reasons.
+  test("merge-conflict still bounded-llm without touching the probe", () => {
+    let called = false;
+    const r = defaultClassifyTicket(
+      { logsOutput: null, signal: { failureReason: "merge-conflict" } },
+      { probePrBlock: () => { called = true; return {}; } },
+    );
+    expect(r.fix_class).toBe("bounded-llm");
+    expect(called).toBe(false);
+  });
+
+  test("unknown failure without pr_not_merged — probe never called", () => {
+    let called = false;
+    defaultClassifyTicket(
+      { logsOutput: null, signal: { failureReason: "some-other-reason" } },
+      { probePrBlock: () => { called = true; return {}; } },
+    );
+    expect(called).toBe(false);
+  });
+
+  test("classifyPrNotMerged exported + produces same result as via defaultClassifyTicket", () => {
+    const probe = probeReturning({
+      prNumber: 50,
+      mergeStateStatus: "BLOCKED",
+      failingChecks: [{ name: "lint", detailsUrl: null }],
+      unresolvedBotThreads: [],
+      unresolvedHumanThreads: [],
+      hasChangesRequested: false,
+    });
+    const via1 = defaultClassifyTicket(mkEvidence(), { probePrBlock: probe });
+    const via2 = classifyPrNotMerged(mkEvidence(), { probePrBlock: probe });
+    expect(via1).toEqual(via2);
   });
 });

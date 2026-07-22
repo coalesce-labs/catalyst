@@ -45,6 +45,7 @@ import {
   getEventLogPath,
 } from "./config.mjs";
 import { buildCatalystResource } from "./lib/catalyst-resource.mjs";
+import { defaultProbePrBlock } from "./pr-block-probe.mjs";
 import { captureEvidence } from "./diagnostician.mjs";
 
 // Wrap defaultLog to ensure it's a function (config.mjs may export an object)
@@ -483,11 +484,105 @@ export function reasoningRecoveryPass(items, opts = {}) {
 
 // ─── Classification logic (pure, injectable) ────────────────────────────────
 
+// CTL-1496: the failureReason value emitted by phase-teardown's pr_not_merged gate.
+export const PR_NOT_MERGED_REASON = "pr_not_merged";
+
+// CTL-1496: classify a pr_not_merged recovery item by probing live PR state.
+// All GitHub calls are behind the injectable probePrBlock seam so this function
+// stays pure and unit-testable with a fake probe.
+export function classifyPrNotMerged(evidence, { probePrBlock = defaultProbePrBlock, log } = {}) {
+  const ticket = evidence.ticket ?? evidence.signal?.ticket;
+  let probe;
+  try {
+    probe = probePrBlock(ticket);
+  } catch (e) {
+    log?.(`pr-block probe failed: ${e.message}`);
+    return {
+      decision: "defer",
+      fix_class: "board-health",
+      details: {
+        reason: `pr_not_merged: PR-state probe failed (${e.message}); retry next tick`,
+      },
+    };
+  }
+
+  if (!probe || !probe.prNumber) {
+    return {
+      decision: "escalate",
+      fix_class: "human",
+      details: { reason: `pr_not_merged: no open PR found for ${ticket}` },
+    };
+  }
+
+  // Human decision required → escalate with the SPECIFIC ask.
+  if (probe.hasChangesRequested || probe.unresolvedHumanThreads.length > 0) {
+    const t = probe.unresolvedHumanThreads[0];
+    return {
+      decision: "escalate",
+      fix_class: "human",
+      details: {
+        reason:
+          `PR #${probe.prNumber} blocked by human review` +
+          (t
+            ? ` — "${(t.body || "").slice(0, 120)}" (${t.path}:${t.line})`
+            : " (CHANGES_REQUESTED)"),
+      },
+    };
+  }
+
+  // Remediable: failing checks, unresolved bot threads, or simply ready to merge.
+  const remediable =
+    probe.failingChecks.length > 0 ||
+    probe.unresolvedBotThreads.length > 0 ||
+    probe.mergeStateStatus === "CLEAN" ||
+    probe.mergeStateStatus === "BLOCKED";
+  if (remediable) {
+    return {
+      decision: "fix",
+      fix_class: "bounded-llm",
+      details: {
+        reason: _prNotMergedReasonText(probe),
+        brief: generateRemediateBrief("pr-not-merged", probe),
+      },
+    };
+  }
+
+  // Genuinely stuck with no actionable cause.
+  return {
+    decision: "escalate",
+    fix_class: "human",
+    details: {
+      reason: `PR #${probe.prNumber} not merged; mergeState=${probe.mergeStateStatus}, no remediable cause`,
+    },
+  };
+}
+
+function _prNotMergedReasonText(probe) {
+  const parts = [];
+  if (probe.failingChecks.length > 0) {
+    parts.push(`failing checks: ${probe.failingChecks.map((c) => c.name).join(", ")}`);
+  }
+  if (probe.unresolvedBotThreads.length > 0) {
+    parts.push(`${probe.unresolvedBotThreads.length} unresolved bot review thread(s)`);
+  }
+  if (parts.length === 0) {
+    parts.push(`mergeState=${probe.mergeStateStatus}`);
+  }
+  return `PR #${probe.prNumber} not merged — ${parts.join("; ")}`;
+}
+
 export function defaultClassifyTicket(evidence, opts = {}) {
-  const { log = defaultLogFn } = opts;
+  const { log = defaultLogFn, probePrBlock } = opts;
 
   // Extract evidence fields
   const { logsOutput, jobState, signal, beliefState, failureReason } = evidence;
+
+  // CTL-1496: pr_not_merged gets a live PR-state probe before any generic rules.
+  // Only fires for this specific failureReason; all other paths are untouched.
+  const effectiveFailureReason = failureReason ?? signal?.failureReason;
+  if (effectiveFailureReason === PR_NOT_MERGED_REASON) {
+    return classifyPrNotMerged(evidence, { probePrBlock: probePrBlock ?? defaultProbePrBlock, log });
+  }
 
   // Rule 1: Check for deterministic errors in logs
   const deterministic = checkDeterministicErrors(logsOutput, failureReason);
@@ -687,9 +782,11 @@ export function checkBoundedLlmFixes(logsOutput, jobState, signal) {
   return null;
 }
 
-// Generate a structured brief for phase-remediate that includes explicit instruction
-// on escalation bar: only return HUMAN if the fix would delete another ticket's merged feature.
-export function generateRemediateBrief(category) {
+// Generate a structured brief for phase-remediate / recovery-pass that includes
+// explicit instruction on escalation bar.  For the "pr-not-merged" category an
+// optional `probe` object embeds the concrete blockers so the worker has them
+// without re-probing at act-time.
+export function generateRemediateBrief(category, probe = null) {
   const briefs = {
     "merge-conflict": [
       "Read both sides of every conflicting hunk (git diff HEAD...MERGE_HEAD or git log --merge).",
@@ -713,6 +810,30 @@ export function generateRemediateBrief(category) {
     ].join(" "),
     "bun-install": "Run bun install in affected packages and retry the phase.",
     "typescript-error": "Review and fix type errors reported by the compiler, then retry the phase.",
+    // CTL-1496: pr-not-merged remediation brief (embeds concrete blockers from the probe).
+    "pr-not-merged": [
+      probe
+        ? `PR #${probe.prNumber} is OPEN (mergeState=${probe.mergeStateStatus}).`
+        : "A PR for this ticket is open but not merged.",
+      probe?.failingChecks?.length
+        ? `Failing checks: ${probe.failingChecks.map((c) => c.name).join(", ")}. ` +
+          "For each, run `gh run view --log-failed`, fix the root cause, commit and push to re-run it."
+        : "",
+      probe?.unresolvedBotThreads?.length
+        ? `Unresolved automated-review threads: ` +
+          `${probe.unresolvedBotThreads.map((t) => `${t.path}:${t.line}`).join(", ")}. ` +
+          "Address each actionable finding in code, resolve the thread via resolveReviewThread, " +
+          "then post `@codex review` via gh-pr-comment.sh to re-trigger the reviewer."
+        : "",
+      "When the PR is CLEAN, run `gh pr view <n> --json mergeable,mergeStateStatus` to confirm, " +
+        "then merge with `gh pr merge --squash --delete-branch`. " +
+        "After addressing any review finding, post `@codex review` via gh-pr-comment.sh to re-trigger the reviewer.",
+      "Never --admin or force-merge past a failing or pending check. " +
+        "Escalate ONLY a finding that genuinely requires a human decision, " +
+        "with the PR number and thread linked.",
+    ]
+      .filter(Boolean)
+      .join(" "),
   };
   return briefs[category] ?? `Resolve the ${category} issue and retry the phase.`;
 }
