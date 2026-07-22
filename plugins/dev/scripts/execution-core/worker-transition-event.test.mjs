@@ -311,3 +311,44 @@ describe("CTL-764 finding 5 — convergeDispositionLabel production wiring", () 
     expect(callLines.length).toBeGreaterThan(0);
   });
 });
+
+// CTL-1489: widen the transition event's body.payload with durable-projection
+// path fields. These MUST land in body.payload ONLY, never attributes —
+// otel-forward forwards attributes off-machine and FS paths must never become
+// OTLP attributes (path cardinality/leak guard).
+describe("CTL-1489 widened body.payload path fields", () => {
+  test("widened fields land in body.payload only, never attributes", () => {
+    let captured;
+    appendWorkerTransitionEvent({
+      append: (l) => (captured = JSON.parse(l)),
+      ticket: "CTL-1",
+      toStage: "plan",
+      worktreePath: "/wt/CTL-1",
+      bgJobId: "abc",
+      generation: 2,
+      handoffPath: "/h.md",
+      artifact: "thoughts/x.md",
+    });
+    expect(captured.body.payload.worktree_path).toBe("/wt/CTL-1");
+    expect(captured.body.payload.bg_job_id).toBe("abc");
+    expect(captured.body.payload.generation).toBe(2);
+    expect(captured.body.payload.handoff_path).toBe("/h.md");
+    expect(captured.body.payload.artifact).toBe("thoughts/x.md");
+    // NONE of these keys leak into attributes (path cardinality/leak guard):
+    for (const k of Object.keys(captured.attributes)) {
+      expect(/worktree|handoff|artifact|bg_job/i.test(k), `leaked ${k}`).toBe(false);
+    }
+  });
+
+  test("omitted widened fields serialize as null (not undefined)", () => {
+    const ev = JSON.parse(buildWorkerTransitionEvent({ ticket: "CTL-1", toStage: "plan" }));
+    expect(ev.body.payload.worktree_path).toBe(null);
+    expect(ev.body.payload.bg_job_id).toBe(null);
+    expect(ev.body.payload.generation).toBe(null);
+    expect(ev.body.payload.handoff_path).toBe(null);
+    expect(ev.body.payload.artifact).toBe(null);
+    // Serialized keys are present (null), not dropped as undefined.
+    expect("worktree_path" in ev.body.payload).toBe(true);
+    expect("artifact" in ev.body.payload).toBe(true);
+  });
+});
