@@ -46,10 +46,13 @@ function maxSeq(batch: CoordinationRecord[]): number {
  * HubClient — outbound publish half of coordination-publish (enforce mode).
  *
  * The local-first mirror write has ALWAYS already happened before publish() is
- * called, so publish() NEVER throws: a hub outage degrades to the DLQ + a
- * visible degraded event, never a lost mirror row or a crashed daemon. Modeled
- * 1:1 on otel-forward/lib/destinations/otlp.ts's flush control flow — primary
- * inside withRetry, bounded failure-isolated DLQ drain outside.
+ * called, so a hub outage never loses a mirror row or crashes the daemon: it
+ * degrades to the durable DLQ + a visible degraded event and publish() resolves.
+ * publish() rejects in exactly ONE case — the hub is down AND the DLQ write also
+ * fails (ENOSPC/EACCES) — the signal telling flushToHub to RETAIN the batch for
+ * retry rather than splice it away as delivered. Modeled 1:1 on
+ * otel-forward/lib/destinations/otlp.ts's flush control flow — primary inside
+ * withRetry, bounded failure-isolated DLQ drain outside.
  */
 export class HubClient {
   lastPublishedSeq = 0;
@@ -81,18 +84,20 @@ export class HubClient {
     try {
       await withRetry(() => this.sendBatch(batch), 3, retryDelays);
     } catch (err) {
-      // A DLQ-write fault (ENOSPC/EACCES) must NOT swallow the outage: guard it
-      // so consecutiveFailures++ and maybeEmitDegraded still run — a hub outage
-      // is never silent, and publish() truly never throws (flushToHub + the
-      // shutdown flush rely on that contract).
-      try {
-        appendToDlq(this.opts.dlqPath, batch);
-      } catch {
-        // Best-effort — a DLQ-write fault must never throw out of publish().
-      }
+      // Hub is down. Record the outage FIRST so it is never silent.
       this.consecutiveFailures++;
       this.maybeEmitDegraded(batch.length, err);
-      return; // local-first: never throw, never block the mirror
+      // Then fall back to the durable DLQ so the batch survives to retry.
+      try {
+        appendToDlq(this.opts.dlqPath, batch);
+      } catch (dlqErr) {
+        // Both hub AND durable DLQ failed → the batch reached NEITHER. Re-throw so flushToHub
+        // RETAINS it in `outbound` to retry next tick instead of splicing it away as delivered
+        // (Codex P1). The outage signal above is already emitted, so this is never silent; flushToHub
+        // and the shutdown flush already .catch() a rejecting publish, so the daemon never crashes.
+        throw dlqErr;
+      }
+      return; // DLQ'd → durably captured; local-first, never block the mirror
     }
 
     // Primary delivered → hub healthy.

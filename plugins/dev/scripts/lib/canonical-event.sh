@@ -183,7 +183,7 @@ classify_event_stream() {
     phase.triage.*|phase.research.*|phase.plan.*|phase.implement.*|phase.verify.*|\
     phase.review.*|phase.pr.*|phase.monitor-merge.*|phase.monitor-deploy.*|phase.teardown.*|\
     phase.dispatch.*|phase.scheduler.*|phase.advance.*|\
-    worker.transition*|escalation.*|resume.*|linear.*|github.*|comms.*)
+    worker.transition|worker.transition.*|escalation.*|resume.*|linear.*|github.*|comms.*)
       printf 'coordination' ;;
     *)
       printf 'telemetry' ;;

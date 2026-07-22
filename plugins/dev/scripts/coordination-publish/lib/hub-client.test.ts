@@ -1,5 +1,5 @@
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
-import { mkdtempSync, rmSync, existsSync, readFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, existsSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { HubClient } from "./hub-client.ts";
@@ -89,6 +89,25 @@ describe("HubClient (CTL-1488 Phase 3)", () => {
     expect(calls.length).toBe(1); // the queued batch delivered without any fresh publish()
     expect(existsSync(dlqPath)).toBe(false);
     expect(healthy.lastPublishedSeq).toBe(1);
+  });
+
+  test("re-throws when the hub is down AND the DLQ write also fails, so flushToHub retains the batch (Codex P1)", async () => {
+    // A directory at dlqPath makes appendFileSync throw EISDIR — the ENOSPC/EACCES edge where the batch
+    // reaches NEITHER the hub nor durable storage. publish() must REJECT (not silently resolve) so
+    // flushToHub retains the batch for retry instead of splicing it out of egress.
+    mkdirSync(dlqPath);
+    const client = new HubClient({
+      hubUrl: "https://hub.example",
+      dlqPath,
+      eventLogPath,
+      degradedThreshold: 1,
+      retryDelaysMs: [0, 0, 0],
+      fetchImpl: failFetch().fetchImpl,
+    });
+    await expect(client.publish([rec(1)])).rejects.toThrow();
+    // ... but the outage is still observable — seq never advanced, degraded event still emitted first.
+    expect(client.lastPublishedSeq).toBe(0);
+    expect(existsSync(eventLogPath)).toBe(true);
   });
 
   test("after N consecutive failures a coordination_publish_degraded event is appended locally (never silent)", async () => {

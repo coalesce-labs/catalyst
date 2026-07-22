@@ -214,9 +214,14 @@ export function createMirrorTailClient(opts: MirrorTailClientOpts): MirrorTailCl
       const row = JSON.stringify(deltaToMirrorRow(d)) + "\n";
       appendFileSync(opts.mirrorPath, row);
       seen.add(d.event_id);
-      // Account for our own append so next tick's incremental read skips these bytes (already seen).
-      mirrorOffset += Buffer.byteLength(row, "utf8");
     }
+    // Advance mirrorOffset ONLY by bytes actually read+parsed — never by assuming our appended rows are
+    // the only bytes written since the scan above. The local publisher (index.ts) and, during a restart
+    // overlap, a second daemon append to the same mirror out-of-band; a row landing between the scan and
+    // our append would shift every later offset, making the next scan start mid-line — dropping the local
+    // id as a malformed fragment and double-appending it when the source later echoes it back. Re-ingesting
+    // keeps mirrorOffset at the true EOF and captures the local id; idempotent for our own rows (in `seen`).
+    ingestNewMirrorRows();
   }
 
   async function tick(): Promise<void> {

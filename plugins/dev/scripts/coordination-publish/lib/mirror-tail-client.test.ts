@@ -61,6 +61,42 @@ describe("createMirrorTailClient (CTL-1488 Phase 5)", () => {
     expect(mirrorRows(mirrorPath).length).toBe(1);
   });
 
+  test("a local row appended out-of-band DURING a merge is not double-appended when later echoed (Codex P2 PRRT_kwDOP8GlQM6SxnKy)", async () => {
+    let injected = false;
+    // A remote delta whose event_id getter simulates the local publisher (or a second daemon during a
+    // restart overlap) appending its OWN row to the same mirror in the window AFTER mergeDeltas scanned
+    // but BEFORE this remote row is appended. Fires exactly once.
+    const injectingRemote = {
+      seq: 2,
+      host: "mini",
+      event_name: "phase.plan.complete.remote-b",
+      ts: "2026-07-21T00:00:00Z",
+      caused_by: null,
+      attributes: { "event.name": "phase.plan.complete.remote-b", "event.stream_class": "coordination" },
+      resource: { "service.name": "catalyst.execution-core" },
+      get event_id() {
+        if (!injected) {
+          injected = true;
+          appendFileSync(
+            mirrorPath,
+            JSON.stringify({ id: "local-x", local_seq: 1, attributes: { "event.name": "x" } }) + "\n",
+          );
+        }
+        return "remote-b";
+      },
+    } as unknown as CoordinationDelta;
+    const src = scriptedSource([
+      { ok: true, deltas: [delta(1, "remote-a"), injectingRemote], headSeq: 2 },
+      { ok: true, deltas: [delta(3, "local-x", "mini")], headSeq: 3 }, // source echoes the local row back
+    ]);
+    const client = createMirrorTailClient({ mirrorPath, source: src, signal: ac.signal });
+    await client.tick(); // appends remote-a, [local-x lands out-of-band], remote-b
+    await client.tick(); // echoes local-x back — must dedup, not double-append
+    const ids = mirrorRows(mirrorPath).map((r) => r.id);
+    expect(ids.filter((id) => id === "local-x").length).toBe(1); // captured into seenIds → not doubled
+    expect(new Set(ids)).toEqual(new Set(["remote-a", "local-x", "remote-b"]));
+  });
+
   test("steady-state uses the advanced cursor on the next tick", async () => {
     const src = scriptedSource([
       { ok: true, deltas: [delta(1, "evt-a")], headSeq: 1 },

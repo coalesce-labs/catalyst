@@ -177,6 +177,13 @@ expect_eq "build_canonical_line stamps event.stream_class=coordination for phase
 expect_eq "classify_event_stream phase.dispatch.* → coordination" "coordination" "$(classify_event_stream "phase.dispatch.failed.CTL-1")"
 expect_eq "classify_event_stream phase.scheduler.* → coordination" "coordination" "$(classify_event_stream "phase.scheduler.yield-file-skip.CTL-1")"
 expect_eq "classify_event_stream phase.advance.* → coordination" "coordination" "$(classify_event_stream "phase.advance.held.CTL-1")"
+# CTL-1488 (Codex P2): worker.transition must be delimiter-bounded to match the ESM classifier EXACTLY.
+# The bare name and the dot-delimited ticket variants are coordination; an unrelated future name that
+# merely shares the string start (worker.transitioning.started, worker.transitionX) must NOT be swept in.
+expect_eq "classify_event_stream worker.transition (bare) → coordination" "coordination" "$(classify_event_stream "worker.transition")"
+expect_eq "classify_event_stream worker.transition.CTL-1 → coordination" "coordination" "$(classify_event_stream "worker.transition.CTL-1")"
+expect_eq "classify_event_stream worker.transitioning.started → telemetry" "telemetry" "$(classify_event_stream "worker.transitioning.started")"
+expect_eq "classify_event_stream worker.transitionX → telemetry" "telemetry" "$(classify_event_stream "worker.transitionX")"
 
 # CTL-1368: every canonical line carries the node-class core dimension (a valid role)
 NODE_CLASS_OUT="$(echo "$LINE" | jq -r '.resource."catalyst.node.class"')"
