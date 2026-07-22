@@ -1581,6 +1581,38 @@ export function readBoardHealthConfig(env = process.env) {
   return { mode };
 }
 
+// CTL-1489: durable-projection read-cutover rollout config. Same off→shadow→
+// enforce discipline and env-override → Layer-2 → default precedence as
+// readBoardHealthConfig. Default `shadow` — reads both the local signal and the
+// projection and diffs them, but every live decision still follows the local
+// reader, so no behavior changes until an operator flips a node to `enforce`
+// after the zero-drift soak. `CATALYST_PROJECTION_READS=0` is the kill-switch to
+// pre-projection behavior.
+export const PROJECTION_READ_MODES = new Set(["off", "shadow", "enforce"]);
+
+function readLayer2ProjectionReads() {
+  try {
+    const p = JSON.parse(readFileSync(getLayer2ConfigPath(), "utf8"))?.catalyst?.projectionReads;
+    return p && typeof p === "object" ? p : {};
+  } catch { return {}; }
+}
+
+export function readProjectionReadConfig(env = process.env) {
+  const l2 = readLayer2ProjectionReads();
+  const v = env.CATALYST_PROJECTION_READS;
+  let mode;
+  if (v === "0") {
+    mode = "off"; // kill-switch
+  } else if (typeof v === "string" && PROJECTION_READ_MODES.has(v)) {
+    mode = v;
+  } else if (typeof l2.mode === "string" && PROJECTION_READ_MODES.has(l2.mode)) {
+    mode = l2.mode;
+  } else {
+    mode = "shadow"; // floor: shadow changes no decision; garbage → shadow
+  }
+  return { mode };
+}
+
 // CTL-1488: coordination-substrate rollout config. Same off→shadow→enforce
 // discipline (ADR-023) and env-override → Layer-2 → default precedence as
 // readBoardHealthConfig, with ONE deliberate difference: the default is "off",

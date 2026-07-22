@@ -629,3 +629,17 @@ kill-switch and any unset/garbage value both resolve to `off`.
 | `catalyst.coordination.mode` _(Layer-2)_ | `off` | Same three values; honored when the env var is unset. |
 | `CATALYST_COORDINATION_HUB_URL` _(env var)_ | _(none)_ | Base URL of the catalyst-cloud coordination changefeed used in `enforce`. Overrides Layer-2. When empty/unset the publisher uses the interim Loki-tail transport instead. |
 | `catalyst.coordination.hubUrl` _(Layer-2)_ | `null` | Same; honored when the env var is unset. |
+
+### Durable ticket-state projection reads (CTL-1489)
+
+Phase 2 of the stateless-event-driven-orchestration epic promotes the broker's event-sourced
+`worker_state`/`ticket_state_transitions` projection to a candidate authoritative read path so a
+ticket served on one host is visible/recoverable on another. The cutover is gated so no live
+decision changes until an operator opts a node into `enforce` after a zero-drift soak. Floor is
+`shadow` (reads both the local signal and the projection, diffs them, emits `projection.read.drift.*`
+on mismatch, but every decision still follows the local reader).
+
+| Key | Default | Notes |
+| --- | --- | --- |
+| `CATALYST_PROJECTION_READS` _(env var)_ | `shadow` | `off` / `0` (kill-switch — read only the local `phase-*.json` signals, pre-projection behavior), `shadow` (read both, diff, emit `projection.read.drift.<ticket>` on mismatch, **decide off the local reader** — no behavior change), `enforce` (decide off the projection, falling back to local **only when the projection has no row** for that ticket; **operator-gated, never auto-enabled**). Garbage falls back to `shadow`. Overrides Layer-2. |
+| `catalyst.projectionReads.mode` _(Layer-2)_ | `shadow` | Same three values; honored when the env var is unset. |
