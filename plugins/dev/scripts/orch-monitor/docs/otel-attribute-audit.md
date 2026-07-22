@@ -12,8 +12,8 @@ Do **not** edit this file directly.
 | --- | --- |
 | ✓ Conforming | 20 |
 | → Rename-to | 37 |
-| ● Legitimately Custom | 37 |
-| **Total** | 94 |
+| ● Legitimately Custom | 39 |
+| **Total** | 96 |
 
 ## Classification by Emitter
 
@@ -49,6 +49,7 @@ Do **not** edit this file directly.
 | `event.entity` | `canonical-event.ts:60` | → rename-to | → `catalyst.event.entity` | Cluster A |  |
 | `event.label` | `canonical-event.ts:62` | → rename-to | → `catalyst.event.label` | Cluster A |  |
 | `event.name` | `canonical-event.ts:59` | ✓ conforming |  |  |  |
+| `event.stream_class` | `canonical-event.ts:75` | ● custom |  |  | CTL-1488 |
 | `event.value` | `canonical-event.ts:63` | → rename-to | → `catalyst.event.value` | Cluster A |  |
 | `host.id` | `canonical-event.ts:48` | ✓ conforming |  |  |  |
 | `host.name` | `canonical-event.ts:47` | ✓ conforming |  |  |  |
@@ -72,6 +73,7 @@ Do **not** edit this file directly.
 
 | Key | Source | Classification | Target | Cluster | Note |
 | --- | --- | --- | --- | --- | --- |
+| `catalyst.executor` | `canonical-event.sh:406` | ● custom |  |  | CTL-1457 |
 | `catalyst.ticket.type` | `canonical-event.sh:349` | ● custom |  |  | CTL-1023 |
 | `claude.ratelimit.five_hour_pct` | `canonical-event.sh:343` | ● custom |  |  | CTL-760 |
 | `claude.ratelimit.seven_day_opus_pct` | `canonical-event.sh:345` | ● custom |  |  | CTL-763 |

@@ -604,3 +604,28 @@ with a `for: 10m` window; scope per node with `| host_name="mini.rozich"`. This 
 **both** the drain hold (CTL-1095) and the liveness-cold hold (CTL-731). Follow-ups: ship the
 catalyst event log to Loki so the _structured_ admission field becomes queryable, plus a
 daemon-emitted debounced `catalyst.alert.not_accepting` edge (cleaner raised/cleared semantics).
+
+### Coordination substrate (CTL-1488)
+
+The distributed-coordination epic (ADR-022/023) adds a subsystem that durably orders and shares
+**coordination events** across hosts via a `coordination-publish` background process: it tails the
+unified event log, writes the ordered coordination subset to a local-first mirror
+(`~/catalyst/coordination.jsonl`, carrying a monotonic `local_seq`) synchronously before any network
+call, and — in `enforce` — exchanges those rows with a catalyst-cloud coordination hub (or, until the
+hub is wired, an interim Loki-tail transport).
+
+It ships behind the same **off→shadow→enforce** rollout discipline as the recovery family, but —
+unlike the board-health delegate — its floor is **`off`**, not `shadow`: coordination adds an
+always-on publisher process and, in enforce, network egress, so the safe default is fully inert until
+an operator promotes it. This is **groundwork** — the publisher is not launched by the standard stack
+yet; enforce + hub wiring lands in a later phase.
+
+Mode resolves from the env var (a single operator knob) over Layer-2 over the default. The `0`
+kill-switch and any unset/garbage value both resolve to `off`.
+
+| Key | Default | Notes |
+| --- | --- | --- |
+| `CATALYST_COORDINATION_MODE` _(env var)_ | `off` | `off` / `0` (kill-switch — strict no-op: no publisher, no mirror, no egress), `shadow` (run the publisher and write the local `~/catalyst/coordination.jsonl` mirror only — no outbound publish, no inbound pull), `enforce` (also exchange rows with the hub: outbound buffer + inbound merge; **operator-gated, never auto-enabled**). Unset or garbage falls back to `off`. Overrides Layer-2. |
+| `catalyst.coordination.mode` _(Layer-2)_ | `off` | Same three values; honored when the env var is unset. |
+| `CATALYST_COORDINATION_HUB_URL` _(env var)_ | _(none)_ | Base URL of the catalyst-cloud coordination changefeed used in `enforce`. Overrides Layer-2. When empty/unset the publisher uses the interim Loki-tail transport instead. |
+| `catalyst.coordination.hubUrl` _(Layer-2)_ | `null` | Same; honored when the env var is unset. |

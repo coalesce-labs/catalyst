@@ -564,6 +564,41 @@ if [[ -n $REPLICA_LIB ]]; then
 	# downstream install never runs; nagging it would be a permanent false alarm.
 fi
 
+# 9. Agent house rules present — the "Working the Loop" reflexes (CTL general-instructions).
+#    The agent-instructions doc is meant to teach EVERY agent (including an interactive,
+#    non-slash-command session) three default reflexes that are otherwise buried in
+#    skills: (a) subscribe to the event log instead of polling GitHub/CI/Linear,
+#    (b) read a single Linear ticket from the local replica, (c) recognize an
+#    automated reviewer's 👍-reaction clean pass. A recent interactive session polled
+#    GitHub for 99 min and missed a passed review because these were framed as
+#    skill-internal, not house rules. This checkup nags (WARN, never fatal) when a
+#    Catalyst-managed project's agent doc is missing any reflex.
+#
+#    The block must live in the file the driving agent actually LOADS: AGENTS.md when
+#    CLAUDE.md is a thin `@AGENTS.md` bridge (AGENTS.md is imported), otherwise the
+#    monolithic CLAUDE.md directly. So we accept a marker found in EITHER doc, and only
+#    run the check when at least one agent doc exists (a repo with neither is outside
+#    the framework — nagging it would be a false alarm). Canonical block to copy:
+#    plugins/dev/templates/agents-house-rules.md. Markers matched case-insensitively.
+# Only check a repo that already has an agent doc — a doc-less repo is out of the
+# framework here (foundry:setup-catalyst seeds those directly). Delegate the actual
+# detection to the seeder's dry-run rather than re-implementing grep: the seeder is
+# fence-aware, import-aware (checks the doc the agent actually loads), and matches
+# whole-line sentinels — re-implementing that here drifted. rc 0 = present/current,
+# rc 10 = missing or stale, other = seeder/setup error.
+SEEDER="${SCRIPT_DIR}/ensure-agent-house-rules.sh"
+if [[ ( -f AGENTS.md || -f CLAUDE.md ) && -x "$SEEDER" ]]; then
+	hr_rc=0
+	bash "$SEEDER" --quiet >/dev/null 2>&1 || hr_rc=$?
+	if [[ $hr_rc -eq 0 ]]; then
+		echo -e "${GREEN}Agent house rules present${NC} — the managed 'Working the Loop' block is current."
+	elif [[ $hr_rc -eq 10 ]]; then
+		warnings+=("Agent doc is missing or has a stale 'Working the Loop' house-rules block (the reflexes an interactive agent needs: event-log-over-polling, 👍-review detection, replica reads). Fix: bash ${SEEDER} --fix (idempotent; run from the repo root or pass --repo DIR).")
+	else
+		warnings+=("Could not verify the agent house-rules block (ensure-agent-house-rules.sh returned ${hr_rc} — an ambiguous/duplicate block, or a setup issue). Inspect: bash ${SEEDER}")
+	fi
+fi
+
 # Report errors (fatal)
 if [[ ${#errors[@]} -gt 0 ]]; then
 	echo -e "${RED}ERROR: Project setup incomplete${NC}"

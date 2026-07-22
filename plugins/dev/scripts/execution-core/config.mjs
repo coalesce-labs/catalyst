@@ -872,6 +872,33 @@ export const HEARTBEAT_INTERVAL_MS =
 export const HEARTBEAT_GRACE_MS =
   Number(process.env.EXECUTION_CORE_HEARTBEAT_GRACE_MS) || 600_000;
 
+// resolveRestoreHoldMs — parse the CTL-1091 restore-hold override with the
+// documented fallback semantics. Valid: a finite value >= 0, INCLUDING an explicit
+// 0 (opt-out: disables the hold, admitting a restored host immediately). Invalid →
+// fall back to `defaultMs`: unset, empty/whitespace, non-numeric, OR negative.
+// CTL-1091 (Codex P2): a bare `Number(env)` coerced an EMPTY value ("") to 0 and
+// accepted NEGATIVE values, either of which silently disabled the deflap (a flapping
+// host would immediately reclaim its HRW slice) — contradicting the "unset/garbled →
+// default" contract. Exported for unit tests.
+export function resolveRestoreHoldMs(rawStr, defaultMs) {
+  if (typeof rawStr !== "string" || rawStr.trim() === "") return defaultMs;
+  const n = Number(rawStr);
+  return Number.isFinite(n) && n >= 0 ? n : defaultMs;
+}
+
+// HEARTBEAT_RESTORE_HOLD_MS — CTL-1091 restore-side deflap. A host that
+// transitioned dead→live must be observed continuously live for this window
+// before it re-enters the DISPATCH ownership roster, so a flapping laptop (lid
+// open/close) does not grab-then-strand new work. Default = one grace window
+// (symmetric with the shed side). During the hold the surviving peer keeps
+// covering the slice, so there is no starvation gap. Env-overridable via
+// EXECUTION_CORE_HEARTBEAT_RESTORE_HOLD_MS for tests/tuning (see resolveRestoreHoldMs
+// for the validation contract — explicit 0 opt-out honored; empty/negative → default).
+export const HEARTBEAT_RESTORE_HOLD_MS = resolveRestoreHoldMs(
+  process.env.EXECUTION_CORE_HEARTBEAT_RESTORE_HOLD_MS,
+  HEARTBEAT_GRACE_MS,
+);
+
 // CLUSTER_SYNC_INTERVAL_MS — how often the daemon git-pulls the catalyst-cluster
 // clone so a roster change committed on one node (CTL-1274 cluster cli) reaches
 // every running daemon without a restart. 5 min keeps the pull cheap while
@@ -1552,6 +1579,53 @@ export function readBoardHealthConfig(env = process.env) {
     mode = "shadow"; // CTL-1290 floor: shadow mutates nothing; garbage → shadow
   }
   return { mode };
+}
+
+// CTL-1488: coordination-substrate rollout config. Same off→shadow→enforce
+// discipline (ADR-023) and env-override → Layer-2 → default precedence as
+// readBoardHealthConfig, with ONE deliberate difference: the default is "off",
+// NOT board-health's "shadow" floor. Coordination adds an always-on background
+// process (coordination-publish) and — in enforce — network egress to the hub,
+// so the safe default is fully inert until an operator promotes it.
+export const COORDINATION_MODES = new Set(["off", "shadow", "enforce"]);
+
+function readLayer2Coordination() {
+  try {
+    const c = JSON.parse(readFileSync(getLayer2ConfigPath(), "utf8"))?.catalyst?.coordination;
+    return c && typeof c === "object" ? c : {};
+  } catch { return {}; }
+}
+
+export function readCoordinationConfig(env = process.env) {
+  const l2 = readLayer2Coordination();
+  const v = env.CATALYST_COORDINATION_MODE;
+  let mode;
+  if (v === "0") {
+    mode = "off"; // kill-switch — always wins, regardless of Layer-2
+  } else if (typeof v === "string" && COORDINATION_MODES.has(v)) {
+    mode = v;
+  } else if (typeof l2.mode === "string" && COORDINATION_MODES.has(l2.mode)) {
+    mode = l2.mode;
+  } else {
+    mode = "off"; // fail-safe: unset/garbage → inert (no process, no egress)
+  }
+  // hubUrl: the catalyst-cloud coordination changefeed base URL (Phase 4/5).
+  // env override → Layer-2 → null. Null forces the interim Loki-tail transport.
+  const envHub = env.CATALYST_COORDINATION_HUB_URL;
+  const hubUrl =
+    typeof envHub === "string" && envHub !== ""
+      ? envHub
+      : typeof l2.hubUrl === "string" && l2.hubUrl !== ""
+        ? l2.hubUrl
+        : null;
+  return { mode, hubUrl };
+}
+
+// CTL-1488: the local-first coordination mirror. coordination-publish writes the
+// ordered coordination subset here (with local_seq) synchronously before any
+// network call; the inbound mirror-tail client merges other hosts' rows in.
+export function getCoordinationMirrorPath() {
+  return resolve(catalystDir(), "coordination.jsonl");
 }
 
 // CTL-1331: delegate-runner config reader. Gates the DETACHED process that

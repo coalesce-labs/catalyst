@@ -156,6 +156,35 @@ LINE="$(build_canonical_line \
 EVENT_NAME="$(echo "$LINE" | jq -r '.attributes."event.name"')"
 expect_eq "build_canonical_line event.name" "session.phase" "$EVENT_NAME"
 
+# CTL-1488 Phase 2: every canonical line carries event.stream_class. session.phase
+# is not an allowlisted coordination name → telemetry (fail-closed default).
+STREAM_CLASS_OUT="$(echo "$LINE" | jq -r '.attributes."event.stream_class"')"
+expect_eq "build_canonical_line stamps event.stream_class (telemetry for session.phase)" "telemetry" "$STREAM_CLASS_OUT"
+
+# CTL-1488 Phase 2: a phase.* pipeline event classifies coordination.
+LINE_COORD="$(build_canonical_line \
+  --ts "2026-05-08T18:00:00.000Z" \
+  --severity INFO \
+  --service "catalyst.execution-core" \
+  --event-name "phase.plan.complete.CTL-1")"
+STREAM_CLASS_COORD="$(echo "$LINE_COORD" | jq -r '.attributes."event.stream_class"')"
+expect_eq "build_canonical_line stamps event.stream_class=coordination for phase.plan.complete.CTL-1" "coordination" "$STREAM_CLASS_COORD"
+
+# CTL-1488 Phase 2 (remediate coverage): the INTENTIONAL_PHASE_SLOT_EXCEPTIONS
+# (dispatch/scheduler/advance) are cross-host coordination signal too. Exercise
+# classify_event_stream directly so a bash case-pattern typo can't silently
+# reclassify them to telemetry (mirrors the ESM classifier test).
+expect_eq "classify_event_stream phase.dispatch.* → coordination" "coordination" "$(classify_event_stream "phase.dispatch.failed.CTL-1")"
+expect_eq "classify_event_stream phase.scheduler.* → coordination" "coordination" "$(classify_event_stream "phase.scheduler.yield-file-skip.CTL-1")"
+expect_eq "classify_event_stream phase.advance.* → coordination" "coordination" "$(classify_event_stream "phase.advance.held.CTL-1")"
+# CTL-1488 (Codex P2): worker.transition must be delimiter-bounded to match the ESM classifier EXACTLY.
+# The bare name and the dot-delimited ticket variants are coordination; an unrelated future name that
+# merely shares the string start (worker.transitioning.started, worker.transitionX) must NOT be swept in.
+expect_eq "classify_event_stream worker.transition (bare) → coordination" "coordination" "$(classify_event_stream "worker.transition")"
+expect_eq "classify_event_stream worker.transition.CTL-1 → coordination" "coordination" "$(classify_event_stream "worker.transition.CTL-1")"
+expect_eq "classify_event_stream worker.transitioning.started → telemetry" "telemetry" "$(classify_event_stream "worker.transitioning.started")"
+expect_eq "classify_event_stream worker.transitionX → telemetry" "telemetry" "$(classify_event_stream "worker.transitionX")"
+
 # CTL-1368: every canonical line carries the node-class core dimension (a valid role)
 NODE_CLASS_OUT="$(echo "$LINE" | jq -r '.resource."catalyst.node.class"')"
 case "$NODE_CLASS_OUT" in

@@ -65,6 +65,7 @@ import { appendFileSync, mkdirSync, readFileSync, renameSync, writeFileSync } fr
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { getEventLogPath } from "./config.mjs";
+import { classifyEventStream } from "../lib/event-stream-class.mjs"; // CTL-1488: stamp stream class on the direct terminal-fallback writer
 import { buildCatalystResource } from "./lib/catalyst-resource.mjs";
 import { nodeClass } from "./lib/node-class.mjs";
 import { registerSdkWorker as defaultRegisterSdkWorker } from "./sdk-worker-registry.mjs";
@@ -546,10 +547,11 @@ export function flipSignalDoneOnSuccess(signalFile, generation) {
 // v2 envelope `phase.<phase>.<status>.<ticket>` to the unified event log so the
 // terminal event is NEVER silently dropped (the broker routes on
 // attributes["event.name"]). Best-effort; never throws.
-function defaultAppendEventLog({ phase, ticket, status, reason }) {
+export function defaultAppendEventLog({ phase, ticket, status, reason }) {
   try {
     const path = getEventLogPath();
     mkdirSync(dirname(path), { recursive: true });
+    const eventName = `phase.${phase}.${status}.${ticket}`;
     const line = JSON.stringify({
       ts: new Date().toISOString(),
       resource: {
@@ -558,7 +560,10 @@ function defaultAppendEventLog({ phase, ticket, status, reason }) {
         "catalyst.node.class": nodeClass(),
       },
       attributes: {
-        "event.name": `phase.${phase}.${status}.${ticket}`,
+        "event.name": eventName,
+        // CTL-1488: DIRECT canonical writer — bypasses buildCanonicalEvent, so stamp the stream class
+        // or coordination-publish's fail-closed filter silently drops this terminal event.
+        "event.stream_class": classifyEventStream(eventName),
         "linear.issue.identifier": ticket,
         "catalyst.worker.ticket": ticket,
       },

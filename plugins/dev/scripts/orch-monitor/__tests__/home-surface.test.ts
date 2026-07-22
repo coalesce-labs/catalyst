@@ -34,9 +34,10 @@ const splitSrc = read("components/home/resizable-split.tsx");
 const useBoardSnapshotSrc = read("hooks/use-board-snapshot.ts");
 const allClearHeroSrc = read("components/home/all-clear-hero.tsx");
 // CTL-903 / HOME5: the write-path wiring lives in the reading pane (the verb's
-// prominent home), the row (the quieter verb + overflow), the surface (the
-// optimistic state + reconcile), and the use-respond hook (the only place the
-// fetch-bearing client is called from).
+// SOLE home — CTL-1127 made the row select-only, relocating the bright verb +
+// its optimistic state to the pane's PaneVerb), the surface (the optimistic
+// state + reconcile), and the use-respond hook (the only place the fetch-bearing
+// client is called from).
 const readingPaneSrc = read("components/home/reading-pane.tsx");
 const useRespondSrc = read("hooks/use-respond.ts");
 
@@ -289,14 +290,15 @@ describe("HOME5 — the bright verb fires the read-model write + resume (CTL-903
     expect(homeSurfaceSrc).toMatch(/onAct=\{onAct\}/);
   });
 
-  it("the row's verb is a real ACTION button that fires onAct (not just selects)", () => {
-    // The verb is a <button> carrying the action hook, and clicking it stops
-    // propagation so it acts instead of selecting the row.
-    expect(inboxRowSrc).toContain("data-row-verb");
-    expect(inboxRowSrc).toContain("onAct?.(row.id)");
-    expect(rowCode).toContain("stopPropagation");
-    // The verb word comes from the typed action model, not a re-derivation.
-    expect(inboxRowSrc).toContain("verbActionFor");
+  it("the row is SELECT-ONLY — it fires onSelect, never an action verb (CTL-1127)", () => {
+    // CTL-1127: the row carries NO action affordance. Its only interaction is
+    // selection (onSelect); the bright verb moved to the reading pane's PaneVerb,
+    // so the list stays calm. The row therefore wires no onAct / verbActionFor /
+    // data-row-verb — clicking the row selects it, nothing more.
+    expect(inboxRowSrc).toContain("onSelect(row.id)");
+    expect(inboxRowSrc).not.toContain("data-row-verb");
+    expect(inboxRowSrc).not.toContain("verbActionFor");
+    expect(rowCode).not.toContain("onAct");
   });
 
   it("the reading pane carries the PROMINENT primary verb (the verb's home)", () => {
@@ -314,17 +316,19 @@ describe("HOME5 — the bright verb fires the read-model write + resume (CTL-903
     expect(clientSrc).toMatch(/method:\s*"POST"/);
   });
 
-  // Scenario: Exactly one bright verb per row
-  it("exactly ONE bright verb per row; the rest are a hover/overflow `⋯` menu", () => {
-    // ONE primary verb (data-row-verb) + the demoted set behind the overflow
-    // trigger (data-row-overflow) drawn from the closed OVERFLOW_ACTIONS list.
-    expect(inboxRowSrc).toContain("data-row-verb");
-    expect(inboxRowSrc).toContain("data-row-overflow");
-    expect(inboxRowSrc).toContain("OVERFLOW_ACTIONS");
-    expect(inboxRowSrc).toContain("DropdownMenu");
-    // The overflow trigger is hover-revealed (opacity-0 → group-hover:opacity-100),
-    // keeping the row calm with one bright button.
-    expect(inboxRowSrc).toContain("group-hover:opacity-100");
+  // Scenario: Exactly one bright verb — and it lives in the pane, not the row
+  it("there is exactly ONE bright verb, and it lives in the pane (no row overflow `⋯`)", () => {
+    // CTL-1127: the row-level verb cluster (one bright verb + a hover `⋯`
+    // overflow of demoted actions) was removed. The single primary verb now
+    // lives in the reading pane's PaneVerb; the row carries no overflow trigger /
+    // DropdownMenu. One PaneVerb = one bright verb.
+    expect(inboxRowSrc).not.toContain("data-row-overflow");
+    expect(inboxRowSrc).not.toContain("OVERFLOW_ACTIONS");
+    expect(inboxRowSrc).not.toContain("DropdownMenu");
+    expect(inboxRowSrc).not.toContain("group-hover:opacity-100");
+    // The one bright verb's home is the pane (the typed action drives the word).
+    expect(readingPaneSrc).toContain("data-pane-verb");
+    expect(readingPaneSrc).toContain("verbActionFor");
   });
 
   // Scenario: The mutation is fence-aware in a cluster
@@ -347,11 +351,15 @@ describe("HOME5 — the bright verb fires the read-model write + resume (CTL-903
     expect(homeSurfaceSrc).toContain("isNeedsYouSection");
   });
 
-  it("the row surfaces the optimistic state: resuming… then 'didn't take' on rollback", () => {
-    expect(inboxRowSrc).toContain("resuming…");
-    expect(inboxRowSrc).toContain("data-row-resuming");
-    expect(inboxRowSrc).toContain("data-row-did-not-take");
-    expect(inboxRowSrc).toContain("respondStatus");
+  it("the PANE surfaces the optimistic state: Resuming… then 'didn't take' on rollback", () => {
+    // CTL-1127: the optimistic write state moved off the row and onto the pane's
+    // PaneVerb — it shows `Resuming…` (data-pane-resuming) while the write is in
+    // flight, then reinstates the verb + a quiet "did not resume" note
+    // (data-pane-did-not-take) on rollback, driven off the respondStatus prop.
+    expect(readingPaneSrc).toContain("Resuming…");
+    expect(readingPaneSrc).toContain("data-pane-resuming");
+    expect(readingPaneSrc).toContain("data-pane-did-not-take");
+    expect(readingPaneSrc).toContain("respondStatus");
   });
 
   it("the ONLY place the write client (fetch) is reached is the use-respond hook / its pure client", () => {

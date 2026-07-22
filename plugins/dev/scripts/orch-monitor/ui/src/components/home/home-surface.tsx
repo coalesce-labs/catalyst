@@ -76,17 +76,11 @@ function InboxSectionBlock({
   selectedId,
   onSelect,
   now,
-  onAct,
-  statusFor,
 }: {
   section: InboxSection;
   selectedId: string | null;
   onSelect: (id: string) => void;
   now: number;
-  /** CTL-903 (HOME5): fire a row's bright verb (record + resume). */
-  onAct: (id: string) => void;
-  /** CTL-903 (HOME5): the optimistic write status for a given row id. */
-  statusFor: (id: string) => RespondRowStatus;
 }) {
   // Needs-you sections are always open (you must see what needs you). The
   // reassurance sets start collapsed so the page de-alarms by subtraction.
@@ -135,8 +129,6 @@ function InboxSectionBlock({
               selected={row.id === selectedId}
               onSelect={onSelect}
               now={now}
-              onAct={onAct}
-              respondStatus={statusFor(row.id)}
             />
           ))}
         </div>
@@ -154,8 +146,6 @@ function InboxList({
   onSelect,
   status,
   now,
-  onAct,
-  statusFor,
 }: {
   header: string;
   sections: ReturnType<typeof deriveInbox>["sections"];
@@ -164,10 +154,6 @@ function InboxList({
   onSelect: (id: string) => void;
   status: string;
   now: number;
-  /** CTL-903 (HOME5): fire a row's bright verb (record + resume). */
-  onAct: (id: string) => void;
-  /** CTL-903 (HOME5): the optimistic write status for a given row id. */
-  statusFor: (id: string) => RespondRowStatus;
 }) {
   return (
     <div className="flex h-full flex-col bg-surface-1">
@@ -196,8 +182,6 @@ function InboxList({
               selectedId={selectedId}
               onSelect={onSelect}
               now={now}
-              onAct={onAct}
-              statusFor={statusFor}
             />
           ))
         )}
@@ -321,8 +305,6 @@ export function HomeSurface() {
             onSelect={setSelectedId}
             status={status}
             now={now}
-            onAct={onAct}
-            statusFor={statusFor}
           />
         }
         reading={

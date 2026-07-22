@@ -70,6 +70,14 @@ export function startWaitWatcher({
     const live = new Set();
     for (const a of agents) {
       if (!a || !a.sessionId) continue;
+      // CTL-682: background phase agents post a closing text summary and exit
+      // with stopReason==="end_turn", which classifyWaitState() reads as
+      // WAITING_USER — a false "waiting on user" for a finished agent. The only
+      // consumer (`sessions waiting`) is about interactive sessions blocked on a
+      // human, so skip background agents entirely (matches reaper._isBackground /
+      // countBackgroundAgents). Absent kind (older claude builds) is treated as
+      // non-background and processed as before.
+      if (a.kind === "background") continue;
       live.add(a.sessionId);
 
       const path = findTranscriptFn(a.sessionId, projectsDir);

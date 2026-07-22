@@ -12,6 +12,7 @@ import {
   appendFileSync,
   existsSync,
   readFileSync,
+  readdirSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -19,6 +20,8 @@ import {
   readPhaseSignals,
   isTicketInFlight,
   listInFlightTickets,
+  computeDispatchSurvivingRoster, // CTL-1091 Phase 3: positive-liveness dispatch roster
+  resolveDispatchRoster, // CTL-1091: shared dispatch-roster resolver (liveness + deflap + outage)
   readMaxParallel,
   readExecutionCoreConcurrency,
   readExecutionCoreConcurrencyLayer2,
@@ -4196,6 +4199,7 @@ describe("CTL-539 — idempotent dispatch across a crash", () => {
       readEligible: () => eligible,
       dispatch,
       verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0, // CTL-682: deterministic in-flight count (matches r1)
     });
 
     // CTL-9 now has a worker dir → excluded from the pull. research:dispatched
@@ -9809,6 +9813,575 @@ describe("CTL-850 — HRW ownership + claim-on-dispatch (schedulerTick new-work)
     });
     expect(dispatch.calls).toHaveLength(1); // dispatch still succeeded
     expect(result?.dispatched).toEqual([TICKET]);
+  });
+});
+
+// ── CTL-1091: new-work dispatch fails over an OFFLINE HRW owner ───────────────
+//
+// The new-work ready filter (scheduler.mjs) must hash ownership over the LIVE
+// (surviving) roster, not the raw roster, so a ticket whose HRW owner is offline
+// fails over to a live host instead of stranding in Todo forever. Mirrors the
+// CTL-1191 recovery-side seam: an injectable dispatchSurvivingRoster override
+// drives the shed set deterministically without writing heartbeat events.
+describe("schedulerTick — new-work dispatch fails over an offline HRW owner (CTL-1091)", () => {
+  const ROSTER = ["mini", "laptop"];
+  // CTL-3 hashes to "laptop" under [mini,laptop]; under [mini] alone it fails
+  // over to mini (survivor identity). Anchor the fixture to the real HRW math.
+  const LAPTOP_OWNED_ID = "CTL-3";
+  expect(ownerForTicket(LAPTOP_OWNED_ID, ROSTER)).toBe("laptop");
+  expect(ownerForTicket(LAPTOP_OWNED_ID, ["mini"])).toBe("mini");
+
+  const eligibleOne = (id = LAPTOP_OWNED_ID) => [
+    {
+      identifier: id,
+      priority: 1,
+      createdAt: "x",
+      state: "Todo",
+      relations: { nodes: [] },
+      inverseRelations: { nodes: [] },
+    },
+  ];
+
+  test("dispatches a laptop-owned ticket from mini when laptop is OFFLINE (shed)", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    const dispatch = fakeDispatch({ code: 0 });
+    schedulerTick(orchDir, {
+      readEligible: () => eligibleOne(),
+      dispatch,
+      hosts: ROSTER,
+      hostName: "mini",
+      // laptop shed → survivors = [mini]; mini now owns CTL-3 → dispatched.
+      dispatchSurvivingRoster: ["mini"],
+      // won claim so the dispatch proceeds past the multi-host claim gate.
+      claimDispatch: () => ({ won: true, generation: 1 }),
+      stampWorkerLabel: () => ({ stamped: true }),
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0,
+      now: () => 1_000,
+      hasTriageArtifact: () => true,
+    });
+    expect(dispatch.calls.map((a) => a.ticket)).toContain(LAPTOP_OWNED_ID);
+  });
+
+  test("does NOT dispatch a laptop-owned ticket from mini when laptop is LIVE", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    const dispatch = fakeDispatch({ code: 0 });
+    schedulerTick(orchDir, {
+      readEligible: () => eligibleOne(),
+      dispatch,
+      hosts: ROSTER,
+      hostName: "mini",
+      // both live → laptop still owns CTL-3 → mini filters it out.
+      dispatchSurvivingRoster: ["mini", "laptop"],
+      claimDispatch: () => ({ won: true, generation: 1 }),
+      stampWorkerLabel: () => ({ stamped: true }),
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0,
+      now: () => 1_000,
+      hasTriageArtifact: () => true,
+    });
+    expect(dispatch.calls).toHaveLength(0);
+  });
+
+  test("single-host is a strict no-op (dispatches, HRW identity)", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    const dispatch = fakeDispatch({ code: 0 });
+    schedulerTick(orchDir, {
+      readEligible: () => eligibleOne(),
+      dispatch,
+      hosts: ["mini"],
+      hostName: "mini",
+      // multiHost=false short-circuits the ownership filter entirely; no
+      // surviving-roster read fires regardless of any override.
+      claimDispatch: () => ({ won: true, generation: 1 }),
+      stampWorkerLabel: () => ({ stamped: true }),
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0,
+      now: () => 1_000,
+      hasTriageArtifact: () => true,
+    });
+    expect(dispatch.calls.map((a) => a.ticket)).toContain(LAPTOP_OWNED_ID);
+  });
+
+  test("fails open: total liveness outage degrades to the full roster (no override)", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    const dispatch = fakeDispatch({ code: 0 });
+    // No dispatchSurvivingRoster override → the real computeDispatchSurvivingRoster
+    // runs. Use fake hosts guaranteed ABSENT from the real heartbeat feed so
+    // positive-liveness sees NO live host → fail-safe degrades to the FULL roster
+    // [hosta,hostb]. CTL-1 hashes to hostb over that roster, so hosta does NOT
+    // dispatch it (today's raw-roster behavior preserved on a dead feed).
+    const OUTAGE_ROSTER = ["hosta", "hostb"];
+    expect(ownerForTicket("CTL-1", OUTAGE_ROSTER)).toBe("hostb");
+    schedulerTick(orchDir, {
+      readEligible: () => eligibleOne("CTL-1"),
+      dispatch,
+      hosts: OUTAGE_ROSTER,
+      hostName: "hosta",
+      claimDispatch: () => ({ won: true, generation: 1 }),
+      stampWorkerLabel: () => ({ stamped: true }),
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0,
+      now: () => 1_000,
+      hasTriageArtifact: () => true,
+    });
+    expect(dispatch.calls).toHaveLength(0);
+  });
+
+  // CTL-1091 Phase 2: the deflap path (no dispatchSurvivingRoster override) must
+  // persist .liveness-deflap.json atomically — the file exists after a multi-host
+  // tick and no partial `.tmp` sibling is left behind.
+  test("Phase 2: a multi-host tick writes .liveness-deflap.json atomically (no .tmp left)", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    const dispatch = fakeDispatch({ code: 0 });
+    schedulerTick(orchDir, {
+      // A mini-owned eligible ticket forces the ready filter (→ _dispatchRoster())
+      // to run without a dispatchSurvivingRoster override, so the real deflap
+      // read/compute/write path fires.
+      readEligible: () => eligibleOne("CTL-1"),
+      dispatch,
+      hosts: ROSTER,
+      hostName: "mini",
+      claimDispatch: () => ({ won: true, generation: 1 }),
+      stampWorkerLabel: () => ({ stamped: true }),
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0,
+      now: () => 1_000,
+      hasTriageArtifact: () => true,
+    });
+    expect(existsSync(join(orchDir, ".liveness-deflap.json"))).toBe(true);
+    const leftoverTmp = readdirSync(orchDir).filter((f) => f.startsWith(".liveness-deflap.json.tmp"));
+    expect(leftoverTmp).toEqual([]);
+  });
+
+  // CTL-1091 (Codex P1 #1): the deflap observation state must refresh on EVERY
+  // multi-host tick, even with NO ready work. Before the fix, _dispatchRoster()
+  // (the sole persist:true / writeDeflapState path) ran only inside the ready
+  // filter, so an idle board (empty eligible → empty ready) never wrote the file —
+  // a peer that departed while the board was quiet kept a stale continuous liveSince
+  // and was re-admitted immediately on return, skipping the restore hold. Assert the
+  // file is written even when there is nothing to dispatch.
+  test("Phase 2 (P1 #1): a multi-host tick with NO ready work still refreshes .liveness-deflap.json", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    const dispatch = fakeDispatch({ code: 0 });
+    expect(existsSync(join(orchDir, ".liveness-deflap.json"))).toBe(false);
+    schedulerTick(orchDir, {
+      readEligible: () => [], // EMPTY board → no ready tickets → ready.filter never runs
+      dispatch,
+      hosts: ROSTER,
+      hostName: "mini",
+      claimDispatch: () => ({ won: true, generation: 1 }),
+      stampWorkerLabel: () => ({ stamped: true }),
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0,
+      now: () => 1_000,
+      hasTriageArtifact: () => true,
+    });
+    expect(dispatch.calls).toHaveLength(0); // nothing dispatched
+    expect(existsSync(join(orchDir, ".liveness-deflap.json"))).toBe(true); // …but deflap refreshed
+  });
+});
+
+// ── CTL-1091 / CTL-1057: computeDispatchSurvivingRoster positive-liveness ──────
+//
+// Dispatch ownership requires POSITIVE liveness (seen within grace), unlike the
+// recovery-side computeSurvivingRoster (fail-open deadHosts). This sheds a host
+// that has NEVER heartbeated (absent from lastSeen) so its HRW slice fails over,
+// while a total feed outage still fail-safes to the full roster.
+describe("computeDispatchSurvivingRoster — positive liveness (CTL-1091/CTL-1057)", () => {
+  const NOW = 10_000_000;
+  const recent = new Date(NOW - 1_000).toISOString();
+  const stale = new Date(NOW - 700_000).toISOString(); // older than 10-min grace
+
+  test("sheds a NEVER-live host (absent from lastSeen) — the CTL-1057 case", () => {
+    const roster = ["mini", "ghost"];
+    const out = computeDispatchSurvivingRoster(roster, {
+      readHeartbeats: () => ({ mini: recent }), // ghost never heartbeated
+      nowMs: NOW,
+    });
+    expect(out).toEqual(["mini"]);
+  });
+
+  test("sheds a host whose last heartbeat is older than grace", () => {
+    const roster = ["mini", "laptop"];
+    const out = computeDispatchSurvivingRoster(roster, {
+      readHeartbeats: () => ({ mini: recent, laptop: stale }),
+      nowMs: NOW,
+    });
+    expect(out).toEqual(["mini"]);
+  });
+
+  test("keeps every host seen within grace", () => {
+    const roster = ["mini", "laptop"];
+    const out = computeDispatchSurvivingRoster(roster, {
+      readHeartbeats: () => ({ mini: recent, laptop: recent }),
+      nowMs: NOW,
+    });
+    expect(out.slice().sort()).toEqual(["laptop", "mini"]);
+  });
+
+  test("fail-safe: NObody live (total outage) → full roster, never strands", () => {
+    const roster = ["mini", "laptop"];
+    const out = computeDispatchSurvivingRoster(roster, {
+      readHeartbeats: () => ({}), // no host seen at all
+      nowMs: NOW,
+    });
+    expect(out.slice().sort()).toEqual(["laptop", "mini"]);
+  });
+
+  test("fail-safe: a heartbeat-read throw → full roster", () => {
+    const roster = ["mini", "laptop"];
+    const out = computeDispatchSurvivingRoster(roster, {
+      readHeartbeats: () => {
+        throw new Error("loki down");
+      },
+      nowMs: NOW,
+    });
+    expect(out).toEqual(roster);
+  });
+
+  test("single-host is a strict no-op (no read)", () => {
+    let read = false;
+    const out = computeDispatchSurvivingRoster(["solo"], {
+      readHeartbeats: () => {
+        read = true;
+        return {};
+      },
+      nowMs: NOW,
+    });
+    expect(out).toEqual(["solo"]);
+    expect(read).toBe(false);
+  });
+});
+
+// ── CTL-1091: resolveDispatchRoster — the shared liveness+deflap+outage resolver ─
+//
+// The single source of truth both dispatch sites (scheduler new-work + monitor
+// triage) call, so they can never drift. Composes positive-liveness → restore
+// deflap → outage fail-safe. Uses a real temp orchDir for the .liveness-deflap.json
+// read/write and an injected readHeartbeats for the feed.
+describe("resolveDispatchRoster — shared dispatch resolver (CTL-1091)", () => {
+  const NOW = 10_000_000;
+  const recent = new Date(NOW - 1_000).toISOString();
+  const HOLD = 600_000;
+
+  test("single-host is a strict no-op", () => {
+    const out = resolveDispatchRoster({
+      roster: ["solo"],
+      orchDir,
+      self: "solo",
+      nowMs: NOW,
+      readHeartbeats: () => ({}),
+    });
+    expect(out).toEqual(["solo"]);
+  });
+
+  test("sheds a never-live host and dispatches over the live survivor", () => {
+    const out = resolveDispatchRoster({
+      roster: ["mini", "ghost"],
+      orchDir,
+      self: "mini",
+      nowMs: NOW,
+      holdMs: HOLD,
+      readHeartbeats: () => ({ mini: recent }), // ghost never live
+      persist: true,
+    });
+    expect(out).toEqual(["mini"]);
+  });
+
+  test("holds a freshly-restored host out for the deflap window", () => {
+    // Seed prevState: laptop was shed last tick (liveSince:null) → newly restored.
+    writeFileSync(
+      join(orchDir, ".liveness-deflap.json"),
+      JSON.stringify({ laptop: { liveSince: null } })
+    );
+    const out = resolveDispatchRoster({
+      roster: ["mini", "laptop"],
+      orchDir,
+      self: "mini",
+      nowMs: NOW,
+      holdMs: HOLD,
+      readHeartbeats: () => ({ mini: recent, laptop: recent }), // both live now
+      persist: true,
+    });
+    expect(out).toEqual(["mini"]); // laptop held out (restore hold)
+  });
+
+  // CTL-1091 correctness review #1: on a TOTAL feed outage the resolver must
+  // degrade to the FULL roster and NOT let the deflap partially re-shed a
+  // just-departed host (which would re-home its slice, violating the outage
+  // invariant). This is the exact reproduction from the review.
+  test("total outage → FULL roster even when prevState marks a host shed (no partial re-shed)", () => {
+    writeFileSync(
+      join(orchDir, ".liveness-deflap.json"),
+      JSON.stringify({ A: { liveSince: null }, C: { liveSince: 0 } })
+    );
+    const out = resolveDispatchRoster({
+      roster: ["A", "B", "C"],
+      orchDir,
+      self: "A",
+      nowMs: 700_000,
+      holdMs: HOLD,
+      readHeartbeats: () => ({}), // NOBODY positively live → total outage
+      persist: true,
+    });
+    // Must be the full roster, NOT the partial [B,C] the naive deflap produced.
+    expect(out.slice().sort()).toEqual(["A", "B", "C"]);
+  });
+
+  test("read-throw (outage) → full roster, observation state left intact", () => {
+    writeFileSync(
+      join(orchDir, ".liveness-deflap.json"),
+      JSON.stringify({ laptop: { liveSince: 1234 } })
+    );
+    const out = resolveDispatchRoster({
+      roster: ["mini", "laptop"],
+      orchDir,
+      self: "mini",
+      nowMs: NOW,
+      readHeartbeats: () => {
+        throw new Error("loki down");
+      },
+      persist: true,
+    });
+    expect(out.slice().sort()).toEqual(["laptop", "mini"]);
+    // prevState preserved (we learned nothing this tick).
+    const persisted = JSON.parse(readFileSync(join(orchDir, ".liveness-deflap.json"), "utf8"));
+    expect(persisted.laptop.liveSince).toBe(1234);
+  });
+
+  test("persist:false does NOT write the deflap file", () => {
+    resolveDispatchRoster({
+      roster: ["mini", "ghost"],
+      orchDir,
+      self: "mini",
+      nowMs: NOW,
+      readHeartbeats: () => ({ mini: recent }),
+      persist: false,
+    });
+    expect(existsSync(join(orchDir, ".liveness-deflap.json"))).toBe(false);
+  });
+
+  // CTL-1091 verify F3 (coverage): pin the SOLE-WRITER invariant on the read-only
+  // (monitor) path even when the deflap actually mutates observation state — a
+  // freshly-restored host is held, so nextState differs from prevState, yet
+  // persist:false must still leave the file untouched. Guards a regression that
+  // made the monitor path (resolveDispatchRoster persist:false) write the file.
+  test("persist:false leaves the deflap file untouched even when the deflap holds a host", () => {
+    // Seed a restored host so the resolve computes fresh observation state.
+    const seeded = JSON.stringify({ laptop: { liveSince: null } });
+    writeFileSync(join(orchDir, ".liveness-deflap.json"), seeded);
+    const out = resolveDispatchRoster({
+      roster: ["mini", "laptop"],
+      orchDir,
+      self: "mini",
+      nowMs: NOW,
+      holdMs: HOLD,
+      readHeartbeats: () => ({ mini: recent, laptop: recent }), // both live now
+      persist: false,
+    });
+    expect(out).toEqual(["mini"]); // laptop held (deflap active → nextState differs)
+    // File byte-identical to the seed — read-only path wrote nothing.
+    expect(readFileSync(join(orchDir, ".liveness-deflap.json"), "utf8")).toBe(seeded);
+  });
+
+  // CTL-1091 verify F2 (silent-failure): the outage→full-roster degrade must fire
+  // the onDegrade observability hook so cross-host failover turning OFF is not
+  // invisible. Two outage shapes; the caught error rides along on a read-throw.
+  test("onDegrade fires on a read-throw outage with the caught error message", () => {
+    const calls = [];
+    const out = resolveDispatchRoster({
+      roster: ["mini", "laptop"],
+      orchDir,
+      self: "mini",
+      nowMs: NOW,
+      readHeartbeats: () => {
+        throw new Error("loki down");
+      },
+      persist: true,
+      onDegrade: (info) => calls.push(info),
+    });
+    expect(out.slice().sort()).toEqual(["laptop", "mini"]);
+    expect(calls.length).toBe(1);
+    expect(calls[0].reason).toBe("heartbeat-read-threw");
+    expect(calls[0].error).toBe("loki down");
+  });
+
+  test("onDegrade fires when NOBODY is positively live (reason nobody-positively-live)", () => {
+    const calls = [];
+    resolveDispatchRoster({
+      roster: ["mini", "laptop"],
+      orchDir,
+      self: "mini",
+      nowMs: NOW,
+      readHeartbeats: () => ({}), // empty feed → nobody live
+      persist: true,
+      onDegrade: (info) => calls.push(info),
+    });
+    expect(calls.length).toBe(1);
+    expect(calls[0].reason).toBe("nobody-positively-live");
+    expect(calls[0].error).toBe(null);
+  });
+
+  test("onDegrade does NOT fire on the happy (some-live) path", () => {
+    const calls = [];
+    resolveDispatchRoster({
+      roster: ["mini", "laptop"],
+      orchDir,
+      self: "mini",
+      nowMs: NOW,
+      holdMs: HOLD,
+      readHeartbeats: () => ({ mini: recent, laptop: recent }),
+      persist: true,
+      onDegrade: (info) => calls.push(info),
+    });
+    expect(calls.length).toBe(0);
+  });
+
+  test("an onDegrade that throws never breaks the roster resolve", () => {
+    const out = resolveDispatchRoster({
+      roster: ["mini", "laptop"],
+      orchDir,
+      self: "mini",
+      nowMs: NOW,
+      readHeartbeats: () => ({}),
+      persist: false,
+      onDegrade: () => {
+        throw new Error("observability blew up");
+      },
+    });
+    expect(out.slice().sort()).toEqual(["laptop", "mini"]);
+  });
+});
+
+// ── CTL-1091 ticket-Gherkin scenarios (end-to-end over schedulerTick) ──────────
+//
+// One describe per ticket scenario. Co-located here (not a standalone file) to
+// reuse the outer beforeEach's CATALYST_DIR redirect — otherwise the real event
+// log would leak into computeSurvivingRoster and make these non-deterministic.
+// Liveness is injected via dispatchSurvivingRoster; the soft-CAS via claimDispatch.
+describe("CTL-1091 ticket scenarios — offline-node ownership shedding", () => {
+  const ROSTER = ["mini", "laptop"];
+  const T_MINI = "CTL-1"; // HRW owner over [mini,laptop] === mini
+  const T_LAPTOP = "CTL-3"; // HRW owner over [mini,laptop] === laptop
+  // Anchor fixtures to the real HRW math.
+  expect(ownerForTicket(T_MINI, ROSTER)).toBe("mini");
+  expect(ownerForTicket(T_LAPTOP, ROSTER)).toBe("laptop");
+  expect(ownerForTicket(T_LAPTOP, ["mini"])).toBe("mini"); // fails over to survivor
+
+  const elig = (...ids) =>
+    ids.map((identifier) => ({
+      identifier,
+      priority: 1,
+      createdAt: "x",
+      state: "Todo",
+      relations: { nodes: [] },
+      inverseRelations: { nodes: [] },
+    }));
+
+  const dispatchedIds = (dispatch) => dispatch.calls.map((a) => a.ticket).sort();
+
+  test("scenario 1 — backlog flows while the laptop is OFF: mini dispatches ALL", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 5 }));
+    const dispatch = fakeDispatch({ code: 0 });
+    schedulerTick(orchDir, {
+      readEligible: () => elig(T_MINI, T_LAPTOP),
+      dispatch,
+      hosts: ROSTER,
+      hostName: "mini",
+      dispatchSurvivingRoster: ["mini"], // laptop shed
+      claimDispatch: () => ({ won: true, generation: 1 }),
+      stampWorkerLabel: () => ({ stamped: true }),
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0,
+      now: () => 1_000,
+      hasTriageArtifact: () => true,
+    });
+    // Both the mini-hashed AND the laptop-hashed ticket dispatch from mini.
+    expect(dispatchedIds(dispatch)).toEqual([T_LAPTOP, T_MINI].sort());
+  });
+
+  test("scenario 2a — laptop rejoins and takes its OWN slice back", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 5 }));
+    const dispatch = fakeDispatch({ code: 0 });
+    schedulerTick(orchDir, {
+      readEligible: () => elig(T_LAPTOP),
+      dispatch,
+      hosts: ROSTER,
+      hostName: "laptop",
+      dispatchSurvivingRoster: ["mini", "laptop"], // both live (past hold)
+      claimDispatch: () => ({ won: true, generation: 1 }),
+      stampWorkerLabel: () => ({ stamped: true }),
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0,
+      now: () => 1_000,
+      hasTriageArtifact: () => true,
+    });
+    expect(dispatchedIds(dispatch)).toEqual([T_LAPTOP]);
+  });
+
+  test("scenario 2b — NO mid-flight handback: a ticket mini already claimed stays with mini", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 5 }));
+    const dispatch = fakeDispatch({ code: 0 });
+    const claims = [];
+    schedulerTick(orchDir, {
+      readEligible: () => elig(T_LAPTOP),
+      dispatch,
+      hosts: ROSTER,
+      hostName: "laptop",
+      dispatchSurvivingRoster: ["mini", "laptop"],
+      // laptop owns T_LAPTOP by HRW and attempts the claim, but mini holds the
+      // fence → the soft-CAS is LOST → laptop does not re-dispatch (no handback).
+      claimDispatch: (arg) => {
+        claims.push(arg);
+        return { won: false, generation: 2 };
+      },
+      stampWorkerLabel: () => ({ stamped: true }),
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0,
+      now: () => 1_000,
+      hasTriageArtifact: () => true,
+    });
+    expect(claims).toHaveLength(1); // the claim was ATTEMPTED (path unchanged)
+    expect(dispatch.calls).toHaveLength(0); // but LOST → not dispatched
+  });
+
+  test("scenario 3 — both hosts race a transition: the soft-CAS yields EXACTLY one dispatch", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 5 }));
+    // mini's tick: it believes laptop is dead → it owns T_LAPTOP → wins the CAS.
+    const dMini = fakeDispatch({ code: 0 });
+    schedulerTick(orchDir, {
+      readEligible: () => elig(T_LAPTOP),
+      dispatch: dMini,
+      hosts: ROSTER,
+      hostName: "mini",
+      dispatchSurvivingRoster: ["mini"],
+      claimDispatch: () => ({ won: true, generation: 5 }), // mini wins
+      stampWorkerLabel: () => ({ stamped: true }),
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0,
+      now: () => 1_000,
+      hasTriageArtifact: () => true,
+    });
+    // laptop's concurrent tick: it believes it is live → it owns T_LAPTOP too, but
+    // the fence CAS is already held by mini → LOST.
+    const dLaptop = fakeDispatch({ code: 0 });
+    schedulerTick(orchDir, {
+      readEligible: () => elig(T_LAPTOP),
+      dispatch: dLaptop,
+      hosts: ROSTER,
+      hostName: "laptop",
+      dispatchSurvivingRoster: ["mini", "laptop"],
+      claimDispatch: () => ({ won: false, generation: 5 }), // laptop loses the CAS
+      stampWorkerLabel: () => ({ stamped: true }),
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0,
+      now: () => 1_000,
+      hasTriageArtifact: () => true,
+    });
+    // Exactly one host dispatched the contested ticket.
+    expect(dMini.calls).toHaveLength(1);
+    expect(dLaptop.calls).toHaveLength(0);
   });
 });
 

@@ -1,5 +1,5 @@
 {
-  "plugins/dev": "12.30.1",
+  "plugins/dev": "12.33.0",
   "plugins/pm": "7.5.0",
   "plugins/analytics": "1.3.1",
   "plugins/debugging": "1.3.1",
@@ -8,5 +8,5 @@
   "plugins/meeting-hygiene": "2.0.0",
   "plugins/discovery": "2.0.0",
   "plugins/legacy": "2.1.0",
-  "plugins/foundry": "2.1.0"
+  "plugins/foundry": "2.2.0"
 }

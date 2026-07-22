@@ -18,6 +18,7 @@ import {
   Semaphore,
   scrubSecrets,
   defaultEmitBackstop,
+  defaultAppendEventLog,
   flipSignalDoneOnSuccess,
   runPrelaunch,
 } from "./sdk-run-phase-agent.mjs";
@@ -1935,5 +1936,28 @@ describe("sdkRunPhaseAgent — CTL-1422 session change across retries", () => {
       "started:sess-2",
       "stopped:sess-2", // the finally close
     ]);
+  });
+});
+
+describe("defaultAppendEventLog — CTL-1488 stamps the coordination stream class", () => {
+  test("the terminal-fallback phase event carries event.stream_class=coordination", () => {
+    const prev = process.env.CATALYST_DIR;
+    const dir = mkdtempSync(join(tmpdir(), "sdk-ctl1488-"));
+    process.env.CATALYST_DIR = dir; // getEventLogPath() re-resolves from CATALYST_DIR per call
+    try {
+      defaultAppendEventLog({ phase: "implement", ticket: "CTL-1", status: "failed", reason: "sdk-threw" });
+      const now = new Date();
+      const ym = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}`;
+      const logPath = join(dir, "events", `${ym}.jsonl`);
+      const line = readFileSync(logPath, "utf8").trim().split("\n").filter(Boolean).pop();
+      const ev = JSON.parse(line);
+      expect(ev.attributes["event.name"]).toBe("phase.implement.failed.CTL-1");
+      // Without the stamp, coordination-publish/index.ts:166 (fail-closed) excludes it from the mirror.
+      expect(ev.attributes["event.stream_class"]).toBe("coordination");
+    } finally {
+      if (prev === undefined) delete process.env.CATALYST_DIR;
+      else process.env.CATALYST_DIR = prev;
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

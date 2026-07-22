@@ -136,6 +136,38 @@ if [ -d "$WORKTREE_PATH" ]; then
 				exit 64
 			fi
 		fi
+		# CTL-1497: the reuse path short-circuits BEFORE the setup block below, so a worktree first
+		# created with a broken thoughts/shared — a plain directory, OR a dangling symlink whose target is
+		# gone — is never repaired on later dispatches, and thoughts written there strand and never sync.
+		# A HEALTHY thoughts/shared is a symlink that resolves to a directory (-L AND -d).
+		if [ ! -L "$WORKTREE_PATH/thoughts/shared" ] || [ ! -d "$WORKTREE_PATH/thoughts/shared" ]; then
+			# ...but only when this project actually USES shared thoughts. An unconfigured project (no
+			# thoughts profile in config, no HumanLayer) legitimately has no thoughts/shared and must still
+			# reuse — never block phases 2-9 for those. Resolve the profile exactly as the setup block does.
+			_CW_THOUGHTS_PROFILE=""
+			[ -n "$CONFIG_FILE" ] && _CW_THOUGHTS_PROFILE=$(jq -r '.catalyst.thoughts.profile // empty' "$CONFIG_FILE" 2>/dev/null)
+			if [ -z "$_CW_THOUGHTS_PROFILE" ] && command -v humanlayer >/dev/null 2>&1; then
+				_CW_THOUGHTS_PROFILE=$(humanlayer thoughts status 2>/dev/null | grep -i "Profile:" | head -1 | awk '{print $2}')
+			fi
+			if [ -n "$_CW_THOUGHTS_PROFILE" ]; then
+				_CW_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+				echo -e "${YELLOW}  ⚠️  thoughts/shared is not a healthy symlink — repairing (CTL-1497)${NC}"
+				# init-or-repair refuses to clobber an existing plain-dir/dangling thoughts/ (it will not
+				# risk data loss), so move it aside first — stranded content is preserved under .orphaned-*
+				# — then rebuild. If repair does not leave a healthy symlink, FAIL LOUD (exit 65): never
+				# report a successful reuse of a worktree that would still strand thoughts.
+				if [ -e "$WORKTREE_PATH/thoughts" ] || [ -L "$WORKTREE_PATH/thoughts" ]; then
+					mv "$WORKTREE_PATH/thoughts" "$WORKTREE_PATH/thoughts.orphaned-$(date +%Y%m%d-%H%M%S)" \
+						|| { echo -e "${RED}❌ create-worktree: could not move aside broken thoughts/ in ${WORKTREE_PATH} (CTL-1497)${NC}" >&2; exit 65; }
+				fi
+				if ! ( cd "$WORKTREE_PATH" && bash "${_CW_SCRIPT_DIR}/catalyst-thoughts.sh" init-or-repair ) \
+					|| [ ! -L "$WORKTREE_PATH/thoughts/shared" ] || [ ! -d "$WORKTREE_PATH/thoughts/shared" ]; then
+					echo -e "${RED}❌ create-worktree: thoughts repair FAILED on reuse path — ${WORKTREE_PATH} would strand thoughts; refusing to report success (CTL-1497)${NC}" >&2
+					exit 65
+				fi
+				echo -e "${GREEN}  ✅ thoughts/shared repaired${NC}"
+			fi
+		fi
 		echo -e "${GREEN}♻️  Reusing existing worktree: $WORKTREE_PATH${NC}"
 		echo "WORKTREE_PATH=${WORKTREE_PATH}"
 		exit 0
@@ -384,8 +416,8 @@ else
 			echo -e "${GREEN}  ✅ Thoughts initialized${NC}"
 			humanlayer thoughts sync >/dev/null 2>&1 || echo -e "${YELLOW}  ⚠️  Sync warning: run 'humanlayer thoughts sync' manually${NC}"
 			# Verify thoughts/shared/ exists after init+sync
-			if [ ! -d "thoughts/shared" ]; then
-				echo -e "${RED}❌ Error: thoughts/shared/ does not exist after init+sync${NC}"
+			if [ ! -L "thoughts/shared" ] || [ ! -d "thoughts/shared" ]; then
+				echo -e "${RED}❌ Error: thoughts/shared/ is not a healthy symlink (missing or dangling) after init+sync${NC}"
 				echo "  Working directory: $(pwd)"
 				echo "  Expected path: $(pwd)/thoughts/shared/"
 				echo "  This indicates a thoughts initialization failure."
@@ -417,7 +449,7 @@ fi
 # run_hook_array (or the auto-detected else-branch) and is otherwise silent;
 # the missing thoughts/shared then surfaces ~30 min later as a phase-plan
 # `prior_artifact_missing` failure. Catch it here, at creation time, instead.
-if [ "$THOUGHTS_INIT_EXPECTED" = true ] && [ ! -d "thoughts/shared" ]; then
+if [ "$THOUGHTS_INIT_EXPECTED" = true ] && { [ ! -L "thoughts/shared" ] || [ ! -d "thoughts/shared" ]; }; then
 	echo -e "${RED}❌ Error: thoughts/shared/ missing after setup hooks${NC}"
 	echo "  Working directory: $(pwd)"
 	echo "  Expected path: $(pwd)/thoughts/shared/"

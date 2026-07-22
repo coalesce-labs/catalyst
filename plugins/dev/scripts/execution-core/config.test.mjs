@@ -37,6 +37,8 @@ import {
   CLUSTER_SYNC_INTERVAL_MS,
   readDeadDocWorkerConfig,
   readBoardHealthConfig,
+  readCoordinationConfig,
+  getCoordinationMirrorPath,
   readSanctionedNeedsHuman,
   DEAD_DOC_WORKER_TRANSCRIPT_SILENCE_MS,
   readLinearReplica,
@@ -1268,6 +1270,64 @@ describe("readBoardHealthConfig (CTL-1290)", () => {
   });
 });
 
+describe("readCoordinationConfig (CTL-1488)", () => {
+  const CO_ENVS = ["CATALYST_COORDINATION_MODE", "CATALYST_COORDINATION_HUB_URL", "CATALYST_LAYER2_CONFIG_FILE"];
+  let saved = {}, tmp;
+  beforeEach(() => {
+    for (const k of CO_ENVS) { saved[k] = process.env[k]; delete process.env[k]; }
+    tmp = mkdtempSync(join(tmpdir(), "ctl1488-co-"));
+    process.env.CATALYST_LAYER2_CONFIG_FILE = join(tmp, "absent.json");
+  });
+  afterEach(() => {
+    for (const k of CO_ENVS) { saved[k] === undefined ? delete process.env[k] : (process.env[k] = saved[k]); }
+    saved = {}; rmSync(tmp, { recursive: true, force: true });
+  });
+
+  test("default (no env, no Layer-2) is 'off' — NOT 'shadow' like board-health", () => {
+    expect(readCoordinationConfig({}).mode).toBe("off");
+  });
+  test("CATALYST_COORDINATION_MODE=0 is the kill-switch regardless of Layer-2", () => {
+    expect(readCoordinationConfig({ CATALYST_COORDINATION_MODE: "0" }).mode).toBe("off");
+  });
+  test("env overrides Layer-2; Layer-2 overrides default", () => {
+    expect(readCoordinationConfig({ CATALYST_COORDINATION_MODE: "enforce" }).mode).toBe("enforce");
+  });
+  test("env off / shadow / enforce are honored", () => {
+    expect(readCoordinationConfig({ CATALYST_COORDINATION_MODE: "off" }).mode).toBe("off");
+    expect(readCoordinationConfig({ CATALYST_COORDINATION_MODE: "shadow" }).mode).toBe("shadow");
+    expect(readCoordinationConfig({ CATALYST_COORDINATION_MODE: "enforce" }).mode).toBe("enforce");
+  });
+  test("garbage env → falls back to off (fail-safe: the process/egress stays inert)", () => {
+    expect(readCoordinationConfig({ CATALYST_COORDINATION_MODE: "banana" }).mode).toBe("off");
+  });
+  test("reads catalyst.coordination.mode + hubUrl from Layer-2 when env absent", () => {
+    const cfg = join(tmp, "config.json");
+    writeFileSync(cfg, JSON.stringify({ catalyst: { coordination: { mode: "shadow", hubUrl: "https://hub.example" } } }));
+    process.env.CATALYST_LAYER2_CONFIG_FILE = cfg;
+    const c = readCoordinationConfig();
+    expect(c.mode).toBe("shadow");
+    expect(c.hubUrl).toBe("https://hub.example");
+  });
+  test("env CATALYST_COORDINATION_HUB_URL overrides Layer-2 hubUrl; unset hubUrl is null", () => {
+    expect(readCoordinationConfig({}).hubUrl).toBeNull();
+    expect(readCoordinationConfig({ CATALYST_COORDINATION_HUB_URL: "https://env.hub" }).hubUrl).toBe("https://env.hub");
+  });
+  test("malformed Layer-2 file → off (never throws)", () => {
+    const cfg = join(tmp, "config.json"); writeFileSync(cfg, "{ not json");
+    process.env.CATALYST_LAYER2_CONFIG_FILE = cfg;
+    expect(readCoordinationConfig().mode).toBe("off");
+  });
+  test("getCoordinationMirrorPath resolves coordination.jsonl under CATALYST_DIR", () => {
+    const prev = process.env.CATALYST_DIR;
+    process.env.CATALYST_DIR = tmp;
+    try {
+      expect(getCoordinationMirrorPath()).toBe(join(tmp, "coordination.jsonl"));
+    } finally {
+      prev === undefined ? delete process.env.CATALYST_DIR : (process.env.CATALYST_DIR = prev);
+    }
+  });
+});
+
 describe("readLinearReplica (CTL-1340)", () => {
   const LR_ENVS = ["CATALYST_LINEAR_REPLICA", "CATALYST_LAYER2_CONFIG_FILE"];
   let saved = {}, tmp;
@@ -1362,5 +1422,44 @@ describe("getReplicaDbPath (CTL-1340)", () => {
     expect(getReplicaDbPath()).toBe("/tmp/a/catalyst-replica.db");
     process.env.CATALYST_DIR = "/tmp/b";
     expect(getReplicaDbPath()).toBe("/tmp/b/catalyst-replica.db");
+  });
+});
+
+// ─── CTL-1091 (Codex P2): resolveRestoreHoldMs validation contract ───────────
+import { resolveRestoreHoldMs } from "./config.mjs";
+
+describe("resolveRestoreHoldMs — restore-hold override validation (CTL-1091 P2)", () => {
+  const DEF = 600_000;
+
+  test("unset (undefined) → default", () => {
+    expect(resolveRestoreHoldMs(undefined, DEF)).toBe(DEF);
+  });
+
+  test("empty string → default (NOT 0 — closes the Number(\"\")===0 bug)", () => {
+    expect(resolveRestoreHoldMs("", DEF)).toBe(DEF);
+    expect(resolveRestoreHoldMs("   ", DEF)).toBe(DEF);
+  });
+
+  test("explicit \"0\" → 0 (opt-out preserved, disables the hold)", () => {
+    expect(resolveRestoreHoldMs("0", DEF)).toBe(0);
+  });
+
+  test("negative → default (invalid)", () => {
+    expect(resolveRestoreHoldMs("-5", DEF)).toBe(DEF);
+    expect(resolveRestoreHoldMs("-1", DEF)).toBe(DEF);
+  });
+
+  test("non-numeric → default", () => {
+    expect(resolveRestoreHoldMs("abc", DEF)).toBe(DEF);
+    expect(resolveRestoreHoldMs("NaN", DEF)).toBe(DEF);
+  });
+
+  test("valid positive → honored", () => {
+    expect(resolveRestoreHoldMs("120000", DEF)).toBe(120_000);
+  });
+
+  test("non-string (defensive) → default", () => {
+    expect(resolveRestoreHoldMs(null, DEF)).toBe(DEF);
+    expect(resolveRestoreHoldMs(5000, DEF)).toBe(DEF);
   });
 });

@@ -1,5 +1,58 @@
 # Changelog
 
+## [12.33.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.32.0...catalyst-dev-v12.33.0)
+
+Jul 22, 2026
+
+<!-- ai-enhanced -->
+
+### Dispatch Roster Failover & Worktree Repair
+
+Offline and never-live hosts no longer strand their share of the ticket backlog — dispatch ownership now hashes over a liveness-filtered roster with restore-side deflap hysteresis, so a live host picks up any slice whose owner has gone dark. A separate fix repairs worktrees whose `thoughts/shared` was left as a plain directory instead of a symlink, so handoffs and research written into reused worktrees actually sync instead of silently accumulating in a dead-end local dir.
+
+
+
+### PRs
+
+* **dev:** CTL-1091 Phase 1 — route dispatch gates through the surviving roster ([#2671](https://github.com/coalesce-labs/catalyst/issues/2671)) ([2fb23ee](https://github.com/coalesce-labs/catalyst/commit/2fb23ee46d292a3e2975ca05a6e5c6856239346f))
+* **dev:** CTL-1497 — repair thoughts/shared on the worktree reuse path; guards test -L not -d ([#2685](https://github.com/coalesce-labs/catalyst/issues/2685)) ([c4bf08c](https://github.com/coalesce-labs/catalyst/commit/c4bf08c23f2cb8f442e152aa92090ab47a39b0ac))
+
+## [12.32.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.31.0...catalyst-dev-v12.32.0)
+
+Jul 21, 2026
+
+<!-- ai-enhanced -->
+
+### Agent House-Rules Auto-Seeding & Inbox Polish
+
+Any repo you enroll in Catalyst now automatically receives the "Working the Loop" agent house-rules block — seeded into AGENTS.md (or CLAUDE.md if that's what the repo uses) without any manual setup. The block itself has been hardened: Linear reads must go through the `catalyst-dev:linearis` skill rather than raw API calls or hand-rolled sqlite, and a contradictory degraded escape that could reintroduce shared-quota burn has been removed. Inbox rows also get a cleaner look — favicon restored, unwrapped ID, two-line title, and corrected pane accent.
+
+
+
+### PRs
+
+* **dev:** auto-seed agent house-rules on every enrolled repo + Codex-hardened block ([#2666](https://github.com/coalesce-labs/catalyst/issues/2666)) ([97aa6de](https://github.com/coalesce-labs/catalyst/commit/97aa6deb32e74740ab6ce0a7455332bf0fd6d687))
+* **dev:** CTL-1127 — inbox row: restore favicon, unwrap ID, two-line title, drop verb cluster, fix pane accent ([#1991](https://github.com/coalesce-labs/catalyst/issues/1991)) ([2cda8d5](https://github.com/coalesce-labs/catalyst/commit/2cda8d55464efc9ddfffd608b2f60eff4a426f2e))
+* **dev:** CTL-682 — wait-watcher skips background agents; pin scheduler test live-count seam ([#2670](https://github.com/coalesce-labs/catalyst/issues/2670)) ([4fd98b2](https://github.com/coalesce-labs/catalyst/commit/4fd98b2b6d8b1db55673d304b3f45a4d7d83f88f))
+* **dev:** drop the Linear-API degraded escape (contradicted the absolute replica rule) ([#2668](https://github.com/coalesce-labs/catalyst/issues/2668)) ([507b227](https://github.com/coalesce-labs/catalyst/commit/507b227d46b6fb285c178dc9385c6fc35e0f66e5))
+
+## [12.31.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.30.1...catalyst-dev-v12.31.0)
+
+Jul 19, 2026
+
+<!-- ai-enhanced -->
+
+### Agent House Rules & Replica Read Fix
+
+Two changes land together to make unattended agents less error-prone. A new "Working the Loop" block is now seeded into every project's `AGENTS.md` via `agents-house-rules.md`, teaching agents to subscribe to the unified event log instead of polling GitHub or CI, detect automated review approvals via reactions, and read Linear tickets from the local replica rather than the live API. Alongside that, the replica-read instruction itself is corrected — background agents were silently falling through to bare `linearis` because `linear_read_ticket` is a shell function that never resolves in an unattended Bash session; the instruction now leads with the `sqlite3` form that works in any shell. Run `check-project-setup.sh` to verify your projects have the new reflex markers in place.
+
+
+
+### PRs
+
+* **dev:** agent house-rules block + checkup (CTL general-instructions) ([#2663](https://github.com/coalesce-labs/catalyst/issues/2663)) ([e6e67db](https://github.com/coalesce-labs/catalyst/commit/e6e67dbbc07c9b4ad2c327069d43565dafbfd451))
+* **dev:** CTL-1420 replica-read rule pointed bg/daemon agents at a shell function not on PATH ([#2661](https://github.com/coalesce-labs/catalyst/issues/2661)) ([efd9a2b](https://github.com/coalesce-labs/catalyst/commit/efd9a2b85075a57a6c5e1f958078bd3621528536))
+
 ## [12.30.1](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.30.0...catalyst-dev-v12.30.1)
 
 Jul 17, 2026
