@@ -15,10 +15,12 @@
 
 import { KNOWN_PHASES, INTENTIONAL_PHASE_SLOT_EXCEPTIONS } from "../broker/namespace-contract.mjs";
 
-// Exact-match coordination names. Empty today — every coordination event is
-// matched by a prefix below — but kept as the escape hatch for a future
-// single-name event that has no shared prefix.
-export const COORDINATION_EXACT = Object.freeze([]);
+// Exact-match coordination names. The bare `worker.transition` event
+// (worker-transition-event.mjs emits it with no ticket suffix) is matched here
+// EXACTLY rather than by prefix, so an unrelated future name that merely shares
+// the string start (e.g. `worker.transitioning.started`) is NOT swept into
+// coordination — see the `worker.transition.` prefix note below (Codex P2).
+export const COORDINATION_EXACT = Object.freeze(["worker.transition"]);
 
 // Prefix allowlist. A name that startsWith any of these is coordination.
 export const COORDINATION_PREFIXES = Object.freeze([
@@ -28,10 +30,13 @@ export const COORDINATION_PREFIXES = Object.freeze([
   // emit `phase.<slot>.*.<ticket>` observability/failure events that are still
   // cross-host coordination signal.
   ...INTENTIONAL_PHASE_SLOT_EXCEPTIONS.map((slot) => `phase.${slot}.`),
-  // Worker two-axis transitions (worker-transition-event.mjs) — hardcoded name
-  // `worker.transition`; no trailing dot so both the bare name and
-  // `worker.transition.<ticket>` variants match.
-  "worker.transition",
+  // Worker two-axis transitions (worker-transition-event.mjs) — the
+  // `worker.transition.<ticket>` variants. The trailing dot is REQUIRED: it
+  // matches the dot-delimited ticket variants without also matching an unrelated
+  // future name like `worker.transitioning.started` (which would bypass the
+  // fail-closed boundary in enforce mode). The bare `worker.transition` name is
+  // handled by COORDINATION_EXACT above (Codex P2).
+  "worker.transition.",
   // Reserved for later epic phases (not emitted yet) — allowlisted now so the
   // classifier needs no second edit when Phases 4/5 land.
   "escalation.",

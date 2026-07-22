@@ -36,6 +36,15 @@ describe("classifyEventStream", () => {
   test("unrecognized/future event name classifies telemetry (fail-closed default)", () => {
     expect(classifyEventStream("some.brand.new.event")).toBe("telemetry");
   });
+  test("bare worker.transition classifies coordination (exact match)", () => {
+    expect(classifyEventStream("worker.transition")).toBe("coordination");
+  });
+  test.each([
+    "worker.transitioning.started", // shares the prefix string but is an unrelated name (Codex P2)
+    "worker.transitionX", // no delimiter after the bare name
+  ])("%s classifies telemetry (delimiter required after worker.transition)", (name) => {
+    expect(classifyEventStream(name)).toBe("telemetry");
+  });
   test("filter.* / broker.daemon.* (broker-protected namespaces) classify telemetry, never coordination", () => {
     expect(classifyEventStream("filter.wake.CTL-1")).toBe("telemetry");
     expect(classifyEventStream("broker.daemon.startup")).toBe("telemetry");
