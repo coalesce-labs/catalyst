@@ -498,9 +498,18 @@ export function classifyPrNotMerged(evidence, { probePrBlock = defaultProbePrBlo
   // search inside the probe when branch is absent.
   const branch =
     evidence.branch ?? evidence.signal?.branch ?? evidence.signal?.branchName ?? undefined;
+  // CTL-1496 P1: thread the ticket's repository into the probe so it resolves
+  // the ticket's PR, not a same-ticket PR in the daemon's own checkout. `repo`
+  // (owner/name) is used directly; `worktreePath` lets the probe derive the repo
+  // from the ticket's worktree when `repo` isn't pre-resolved. Both come off the
+  // worker signal the scheduler already carries — without them an external-repo
+  // ticket falls back to the daemon cwd and is misclassified as having no PR.
+  const repo = evidence.repo ?? evidence.signal?.repo ?? undefined;
+  const worktreePath =
+    evidence.worktreePath ?? evidence.signal?.worktreePath ?? undefined;
   let probe;
   try {
-    probe = probePrBlock(ticket, { branch });
+    probe = probePrBlock(ticket, { branch, repo, worktreePath });
   } catch (e) {
     log?.(`pr-block probe failed: ${e.message}`);
     return {
@@ -520,8 +529,14 @@ export function classifyPrNotMerged(evidence, { probePrBlock = defaultProbePrBlo
     };
   }
 
-  // Human decision required → escalate with the SPECIFIC ask.
-  if (probe.hasChangesRequested || probe.unresolvedHumanThreads.length > 0) {
+  // Human decision required → escalate with the SPECIFIC ask. The escalation
+  // condition is the aggregate CHANGES_REQUESTED verdict ONLY (CTL-1496 P2): a
+  // merely-open human discussion thread or question — with reviewDecision not
+  // CHANGES_REQUESTED — is not a change request, so it must NOT short-circuit to
+  // a terminal human-escalation latch while the PR has a fixable failing check
+  // or bot finding. Such non-requesting threads fall through to the actionable
+  // path below (and, if nothing is fixable, the generic escalate at the end).
+  if (probe.hasChangesRequested) {
     const t = probe.unresolvedHumanThreads[0];
     return {
       decision: "escalate",
@@ -552,6 +567,23 @@ export function classifyPrNotMerged(evidence, { probePrBlock = defaultProbePrBlo
       details: {
         reason: _prNotMergedReasonText(probe),
         brief: generateRemediateBrief("pr-not-merged", probe),
+      },
+    };
+  }
+
+  // CTL-1496 P2: a PR blocked only by queued/in-progress required checks has no
+  // fixable cause YET — but it is not stuck. Escalating here would latch a
+  // "no remediable cause" record for days and never revisit a CI run that
+  // later turns green. Defer instead so the next tick re-probes once checks
+  // settle.
+  if (probe.pendingChecks?.length > 0) {
+    return {
+      decision: "defer",
+      fix_class: "board-health",
+      details: {
+        reason:
+          `PR #${probe.prNumber} awaiting checks: ` +
+          `${probe.pendingChecks.map((c) => c.name).join(", ")}; retry next tick`,
       },
     };
   }

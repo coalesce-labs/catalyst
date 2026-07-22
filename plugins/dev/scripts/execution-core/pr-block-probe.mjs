@@ -28,8 +28,11 @@ const GH_PROBE_TIMEOUT_MS = Number(process.env.CATALYST_GH_PROBE_TIMEOUT_MS || 2
 // partial set (CTL-1496 P2).
 const MAX_THREAD_PAGES = 25;
 
-function realGh(args) {
-  const r = spawnSync("gh", args, { encoding: "utf8", timeout: GH_PROBE_TIMEOUT_MS });
+// opts.cwd lets the caller resolve `gh repo view` against the TICKET's worktree
+// so the probe targets the ticket's repository, not the daemon's checkout
+// (CTL-1496 P1).
+function realGh(args, { cwd } = {}) {
+  const r = spawnSync("gh", args, { encoding: "utf8", timeout: GH_PROBE_TIMEOUT_MS, cwd });
   // A timeout (or spawn failure) sets r.error and leaves status null — surface
   // it as a throw so the caller treats it as transient rather than the daemon
   // hanging on a wedged child.
@@ -55,6 +58,22 @@ export function isFailingState(s) {
     // escalation for those conclusions (CTL-1496 P2).
     "ACTION_REQUIRED",
     "STARTUP_FAILURE",
+  ].includes(s);
+}
+
+// A required check that is still queued/running is NOT a failure — the PR is
+// simply not ready yet. The classifier must DEFER on these (retry next tick)
+// rather than escalate a "no remediable cause" latch on a PR whose CI just
+// hasn't finished (CTL-1496 P2). check-runs report progress via `.status`
+// (QUEUED/IN_PROGRESS), legacy statuses via `.state` (PENDING/EXPECTED).
+export function isPendingState(s) {
+  return [
+    "QUEUED",
+    "IN_PROGRESS",
+    "PENDING",
+    "WAITING",
+    "REQUESTED",
+    "EXPECTED",
   ].includes(s);
 }
 
@@ -84,6 +103,7 @@ function emptyProbe() {
     mergeStateStatus: null,
     mergeable: null,
     failingChecks: [],
+    pendingChecks: [],
     unresolvedBotThreads: [],
     unresolvedHumanThreads: [],
     hasChangesRequested: false,
@@ -175,10 +195,19 @@ function fetchAllReviewThreads(gh, owner, name, prNumber) {
   );
 }
 
-export function defaultProbePrBlock(ticket, { gh = realGh, repo, branch } = {}) {
+export function defaultProbePrBlock(ticket, { gh = realGh, repo, branch, worktreePath } = {}) {
+  // Resolve owner/name: prefer an explicitly-threaded `repo`, else `gh repo
+  // view` run IN THE TICKET'S WORKTREE (cwd) so it reports the ticket's repo,
+  // not the daemon's checkout. Falls back to the daemon cwd only when neither is
+  // available (CTL-1496 P1).
   const [owner, name] = (
     repo ||
-    safeJson(gh(["repo", "view", "--json", "nameWithOwner"]))?.nameWithOwner ||
+    safeJson(
+      gh(
+        ["repo", "view", "--json", "nameWithOwner"],
+        worktreePath ? { cwd: worktreePath } : undefined,
+      ),
+    )?.nameWithOwner ||
     "/"
   ).split("/");
 
@@ -188,8 +217,17 @@ export function defaultProbePrBlock(ticket, { gh = realGh, repo, branch } = {}) 
   const view = resolveTicketPr(gh, ticket, branch, owner, name);
   if (!view || !view.number) return emptyProbe();
 
-  const failingChecks = (view.statusCheckRollup || [])
+  const rollup = view.statusCheckRollup || [];
+  const failingChecks = rollup
     .filter((c) => isFailingState(c.state || c.conclusion))
+    .map((c) => ({ name: c.name || c.context, detailsUrl: c.detailsUrl || null }));
+  // Queued/in-progress required checks: not failing, not done. Surfaced so the
+  // classifier can DEFER (retry next tick) instead of latching a "no remediable
+  // cause" escalation on a PR whose CI simply hasn't finished (CTL-1496 P2). A
+  // check that is both failing and (somehow) pending is counted as failing only.
+  const pendingChecks = rollup
+    .filter((c) => !isFailingState(c.state || c.conclusion))
+    .filter((c) => isPendingState(c.status) || isPendingState(c.state))
     .map((c) => ({ name: c.name || c.context, detailsUrl: c.detailsUrl || null }));
 
   // Walk EVERY review-thread page. A single first:100 page silently omits later
@@ -223,6 +261,7 @@ export function defaultProbePrBlock(ticket, { gh = realGh, repo, branch } = {}) 
     mergeStateStatus: view.mergeStateStatus,
     mergeable: view.mergeable,
     failingChecks,
+    pendingChecks,
     unresolvedBotThreads,
     unresolvedHumanThreads,
     hasChangesRequested,

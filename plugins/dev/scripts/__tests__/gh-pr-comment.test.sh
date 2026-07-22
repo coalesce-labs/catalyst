@@ -185,6 +185,44 @@ fi
 
 scratch_teardown
 
+# ── Test 8: --idempotent dedups only within the recent window ────────────────
+# The fetch uses the API `since` param; a duplicate OLDER than the window is
+# filtered server-side (stub returns [] when `since` is present), so a fresh
+# re-review request is NOT suppressed forever by an old identical comment
+# (CTL-1496 round-2 fix).
+scratch_setup
+
+cat > "${SCRATCH}/bin/gh" <<'STUB'
+#!/usr/bin/env bash
+ARGS="$*"
+if [[ "$ARGS" == *"repo view"* ]]; then
+  echo '{"nameWithOwner":"test-org/test-repo"}'
+elif [[ "$ARGS" == *"pr comment"* ]]; then
+  echo "COMMENT_CALLED $ARGS" >> "$COMMENT_LOG"
+  exit 0
+elif [[ "$ARGS" == *"issues/"*"/comments"* ]]; then
+  # Windowed fetch (since=) returns nothing → old dupe is outside the window.
+  if [[ "$ARGS" == *"since="* ]]; then echo "[]"; else
+    echo '[{"body":"@codex review","created_at":"2000-01-01T00:00:00Z"}]'
+  fi
+else
+  echo "stub gh: unexpected: $ARGS" >&2; exit 99
+fi
+STUB
+chmod +x "${SCRATCH}/bin/gh"
+
+if bash "$HELPER" 42 "@codex review" --idempotent 2>/dev/null; then
+  if grep -q "COMMENT_CALLED" "$COMMENT_LOG"; then
+    pass "--idempotent: an out-of-window duplicate does not suppress a fresh post"
+  else
+    fail "--idempotent: an out-of-window duplicate does not suppress a fresh post" "post was suppressed"
+  fi
+else
+  fail "--idempotent: an out-of-window duplicate does not suppress a fresh post" "exited non-zero"
+fi
+
+scratch_teardown
+
 # ── Summary ───────────────────────────────────────────────────────────────────
 echo ""
 echo "Results: ${PASSES} passed, ${FAILURES} failed"

@@ -90,14 +90,18 @@ mode safe for `claude --bg` workers (no stdin available):
 - **Addressable findings** (code change requested, clear fix) → address in code + resolve the
   thread via `resolveReviewThread` mutation (same as the interactive path). Unchanged.
 - **Disagreement / judgment-call findings** → the `Post this reply? [y/N]` prompt is **SKIPPED** in headless mode.
-  Instead, the thread is left unresolved and a structured record is appended to
-  `${ORCH_DIR:-./workers/${CATALYST_TICKET:-unknown}}/.review-escalations.jsonl`:
+  Instead, the thread is left unresolved and a structured record is appended to the ticket's
+  worker directory under the orchestrator dir:
+  `${CATALYST_ORCHESTRATOR_DIR:-${ORCH_DIR:-.}}/workers/${CATALYST_TICKET:-unknown}/.review-escalations.jsonl`:
   ```json
   {"prNumber":42,"threadId":"T1","path":"a.ts","line":5,"finding":"…","why":"…"}
   ```
-  The caller (recovery-pass worker) reads `.review-escalations.jsonl` to author a curated
-  escalation brief — one line per genuine judgment call — and escalates only those, with the
-  PR number and thread linked.
+  (Resolve `CATALYST_ORCHESTRATOR_DIR` **first** — a `claude --bg` worker receives that var, not
+  `ORCH_DIR`, which is only exported inside the recovery-pass skill's own prelude. Keying off
+  `ORCH_DIR` alone wrote the record to `./workers/<ticket>` in the worktree, where the recovery-pass
+  caller could never find it — CTL-1496.) The caller (recovery-pass worker) reads
+  `.review-escalations.jsonl` from that same path to author a curated escalation brief — one line per
+  genuine judgment call — and escalates only those, with the PR number and thread linked.
 - **Interactive path preserved** — when neither `CATALYST_PHASE` is set nor `--headless` is
   passed, the existing `[y/N]` prompt behaviour is unchanged.
 

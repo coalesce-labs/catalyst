@@ -2338,6 +2338,88 @@ describe("classifyPrNotMerged (CTL-1496)", () => {
     const via2 = classifyPrNotMerged(mkEvidence(), { probePrBlock: probe });
     expect(via1).toEqual(via2);
   });
+
+  // ── CTL-1496 remediation (Codex re-review round 2) ──
+
+  // P2: a merely-open human discussion thread (reviewDecision NOT
+  // CHANGES_REQUESTED) must NOT short-circuit to a human-escalation latch when
+  // there is a fixable cause — it follows the actionable path.
+  test("open human thread w/o CHANGES_REQUESTED + failing check → fix (not escalate)", () => {
+    const r = classifyPrNotMerged(mkEvidence(), {
+      probePrBlock: probeReturning({
+        prNumber: 51,
+        mergeStateStatus: "BLOCKED",
+        failingChecks: [{ name: "quality", detailsUrl: null }],
+        unresolvedBotThreads: [],
+        unresolvedHumanThreads: [{ id: "H9", body: "just a question", path: "x.ts", line: 2 }],
+        hasChangesRequested: false,
+      }),
+    });
+    expect(r.decision).toBe("fix");
+    expect(r.fix_class).toBe("bounded-llm");
+  });
+
+  // P2: pending required checks (queued/in-progress) are not a failure and not
+  // stuck — defer instead of latching a "no remediable cause" escalation.
+  test("only pending checks, no other cause → defer (retry next tick)", () => {
+    const r = classifyPrNotMerged(mkEvidence(), {
+      probePrBlock: probeReturning({
+        prNumber: 52,
+        mergeStateStatus: "BLOCKED",
+        failingChecks: [],
+        pendingChecks: [{ name: "e2e", detailsUrl: null }],
+        unresolvedBotThreads: [],
+        unresolvedHumanThreads: [],
+        hasChangesRequested: false,
+      }),
+    });
+    expect(r.decision).toBe("defer");
+    expect(r.details.reason).toContain("e2e");
+  });
+
+  // P2: a failing check still wins over pending — fix, don't defer.
+  test("failing check alongside a pending check → fix (failing wins)", () => {
+    const r = classifyPrNotMerged(mkEvidence(), {
+      probePrBlock: probeReturning({
+        prNumber: 53,
+        mergeStateStatus: "BLOCKED",
+        failingChecks: [{ name: "unit", detailsUrl: null }],
+        pendingChecks: [{ name: "e2e", detailsUrl: null }],
+        unresolvedBotThreads: [],
+        unresolvedHumanThreads: [],
+        hasChangesRequested: false,
+      }),
+    });
+    expect(r.decision).toBe("fix");
+  });
+
+  // P1: the ticket's repo + worktreePath are threaded from the worker signal
+  // into the probe so it resolves the ticket's repository, not the daemon's.
+  test("threads repo + worktreePath from the worker signal into the probe", () => {
+    let seen = null;
+    classifyPrNotMerged(
+      {
+        failureReason: PR_NOT_MERGED_REASON,
+        ticket: "CTL-77",
+        signal: {
+          failureReason: PR_NOT_MERGED_REASON,
+          branchName: "ryan/ctl-77-x",
+          repo: "acme/widgets",
+          worktreePath: "/wt/CTL-77",
+        },
+      },
+      {
+        probePrBlock: (ticket, opts) => {
+          seen = { ticket, ...opts };
+          return { prNumber: 77, mergeStateStatus: "CLEAN", failingChecks: [], unresolvedBotThreads: [], unresolvedHumanThreads: [], hasChangesRequested: false };
+        },
+      },
+    );
+    expect(seen.ticket).toBe("CTL-77");
+    expect(seen.repo).toBe("acme/widgets");
+    expect(seen.worktreePath).toBe("/wt/CTL-77");
+    expect(seen.branch).toBe("ryan/ctl-77-x");
+  });
 });
 
 // ─── CTL-1496 Phase 4: reasoningRecoveryPass end-to-end (enforce + shadow) ──

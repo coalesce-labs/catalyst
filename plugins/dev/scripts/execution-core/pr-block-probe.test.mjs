@@ -3,7 +3,7 @@
 // Run: cd plugins/dev/scripts/execution-core && bun test pr-block-probe.test.mjs
 
 import { describe, test, expect } from "bun:test";
-import { defaultProbePrBlock, isFailingState } from "./pr-block-probe.mjs";
+import { defaultProbePrBlock, isFailingState, isPendingState } from "./pr-block-probe.mjs";
 
 // fakeGh routes by longest matching pattern first so specific patterns
 // (e.g. "pr view 42 --json reviews") win over generic ones ("pr list").
@@ -541,5 +541,63 @@ describe("CTL-1496 remediation — probe hardening (Codex review)", () => {
       throw new Error(`unrouted gh: ${key}`);
     };
     expect(() => defaultProbePrBlock("CTL-1", { gh, repo: "o/r" })).toThrow(/page/);
+  });
+
+  // P2 (round 2): queued/in-progress checks are surfaced as pendingChecks (not
+  // failingChecks) so the classifier can defer instead of escalating.
+  test("isPendingState covers queued/in-progress/pending states", () => {
+    expect(isPendingState("QUEUED")).toBe(true);
+    expect(isPendingState("IN_PROGRESS")).toBe(true);
+    expect(isPendingState("PENDING")).toBe(true);
+    expect(isPendingState("SUCCESS")).toBe(false);
+    expect(isPendingState("FAILURE")).toBe(false);
+  });
+
+  test("in-progress check → pendingChecks, not failingChecks", () => {
+    const gh = makeGh([
+      [
+        "pr list",
+        [
+          {
+            number: 71,
+            state: "OPEN",
+            mergeStateStatus: "BLOCKED",
+            mergeable: "MERGEABLE",
+            statusCheckRollup: [
+              { name: "e2e", status: "IN_PROGRESS", conclusion: null },
+              { name: "queued-gate", status: "QUEUED", conclusion: null },
+              { name: "unit", status: "COMPLETED", conclusion: "SUCCESS" },
+            ],
+          },
+        ],
+      ],
+      ["api graphql", EMPTY_THREADS],
+    ]);
+    const r = defaultProbePrBlock("CTL-1", { gh, repo: "o/r" });
+    expect(r.failingChecks).toHaveLength(0);
+    expect(r.pendingChecks.map((c) => c.name).sort()).toEqual(["e2e", "queued-gate"]);
+  });
+
+  // P1 (round 2): with no explicit repo, owner/name are resolved via `gh repo
+  // view` run in the ticket's worktree (cwd), then the PR lookup is scoped to it.
+  test("resolves repo from worktree cwd when no repo is threaded, scopes -R", () => {
+    const calls = [];
+    const gh = (args, opts) => {
+      calls.push({ key: args.join(" "), cwd: opts?.cwd });
+      const key = args.join(" ");
+      if (key.startsWith("repo view")) return JSON.stringify({ nameWithOwner: "acme/from-worktree" });
+      if (key.startsWith("pr list"))
+        return JSON.stringify([
+          { number: 72, state: "OPEN", mergeStateStatus: "CLEAN", mergeable: "MERGEABLE", statusCheckRollup: [] },
+        ]);
+      if (key.includes("api graphql")) return JSON.stringify(EMPTY_THREADS);
+      throw new Error(`unrouted gh: ${key}`);
+    };
+    const r = defaultProbePrBlock("CTL-9", { gh, worktreePath: "/wt/CTL-9" });
+    expect(r.prNumber).toBe(72);
+    const repoView = calls.find((c) => c.key.startsWith("repo view"));
+    expect(repoView.cwd).toBe("/wt/CTL-9");
+    const prList = calls.find((c) => c.key.startsWith("pr list"));
+    expect(prList.key).toContain("-R acme/from-worktree");
   });
 });
