@@ -240,6 +240,21 @@ describe("planPhases — per-class correctness (pure)", () => {
     expect(labels).toContain("adopt-updater");
     expect(labels).not.toContain("install-services");
   });
+  test("install/developer adopts thoughts-sync (CTL-1473) but not the stack keep-alive", () => {
+    const labels = stepLabels(planPhases({ operation: "install", nodeClass: "developer", scripts: SCRIPTS }));
+    expect(labels).toContain("adopt-thoughts-sync");
+    expect(labels).not.toContain("install-services");
+  });
+  test("install/monitor adopts thoughts-sync (developer-shaped, CTL-1473)", () => {
+    const labels = stepLabels(planPhases({ operation: "install", nodeClass: "monitor", scripts: SCRIPTS }));
+    expect(labels).toContain("adopt-thoughts-sync");
+    expect(labels).not.toContain("install-services");
+  });
+  test("install/worker still gets the full stack; no separate thoughts-sync step (folded into install-services)", () => {
+    const labels = stepLabels(planPhases({ operation: "install", nodeClass: "worker", scripts: SCRIPTS }));
+    expect(labels).toContain("install-services");
+    expect(labels).not.toContain("adopt-thoughts-sync");
+  });
   test("install phase order EXACTLY matches the OTEL-locked INSTALL_PHASES", () => {
     expect(phaseNames(planPhases({ operation: "install", nodeClass: "worker", scripts: SCRIPTS }))).toEqual([...INSTALL_PHASES]);
   });

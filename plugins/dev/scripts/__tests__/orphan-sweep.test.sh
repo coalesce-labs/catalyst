@@ -1353,6 +1353,90 @@ rm -f "$MOCKBIN/git"
 rm -f "$MOCKBIN/pmset"
 rm -f "$MOCKBIN/worktree-presweep.sh"
 
+# --- Phase 10: CTL-1473 wf_* worktree sweep + plugin-source root ---
+
+# Reuse the Phase 8/9 git mock (still installed) and p9 pmset+presweep mocks.
+# P10_SWEEP targets a plugin-source-style .claude/worktrees root that contains wf_* dirs.
+P10_WT_ROOT="${SCRATCH}/p10-plugin-source-wt"
+mkdir -p "$P10_WT_ROOT"
+
+make_wf_wt() {
+  local name="$1"
+  # Use a real .git directory so _is_orphan_gitfile_dir does NOT fire — wf_* check
+  # must apply to linked worktrees with real .git dirs, not just orphan gitfiles.
+  mkdir -p "${P10_WT_ROOT}/${name}/.git"
+}
+
+# wf_* classify: stale (backdated) -> SAFE
+mkdir -p "$SCRATCH/clf_wf"
+make_wf_wt "wf_old1234"
+touch -t 202501010000 "${P10_WT_ROOT}/wf_old1234" "${P10_WT_ROOT}/wf_old1234/.git" 2>/dev/null || true
+
+run "T67: wf_* worktree backdated -> SAFE" bash -c "
+  verdict=\$(SWEEP_WF_STALE_DAYS=7 SWEEP_IDLE_HOURS=9999 bash '${SWEEP}' --classify '${P10_WT_ROOT}/wf_old1234' 2>/dev/null)
+  echo \"verdict=\$verdict\"
+  [[ \"\$verdict\" == 'SAFE' ]]
+"
+
+# wf_* classify: fresh (now) -> KEEP (not idle enough)
+make_wf_wt "wf_fresh5678"
+# do NOT backdate — mtime is NOW
+
+run "T68: wf_* worktree fresh mtime -> KEEP" bash -c "
+  verdict=\$(SWEEP_WF_STALE_DAYS=7 SWEEP_IDLE_HOURS=9999 bash '${SWEEP}' --classify '${P10_WT_ROOT}/wf_fresh5678' 2>/dev/null)
+  echo \"verdict=\$verdict\"
+  [[ \"\$verdict\" == 'KEEP' ]]
+"
+
+# wf_* with active session -> KEEP (active_session guard fires before wf_* guard)
+# Unquoted heredoc so ${P10_WT_ROOT} expands NOW (write-time) into a literal path;
+# runtime shell vars in the script (${1:-}) are escaped with backslash.
+cat > "$MOCKBIN/claude" <<CLAUDEOF
+#!/usr/bin/env bash
+if [[ "\${1:-}" == "agents" ]]; then
+  echo '[{"sessionId":"live_active_session","kind":"background","status":"idle","cwd":"${P10_WT_ROOT}/wf_active"}]'
+fi
+CLAUDEOF
+chmod +x "$MOCKBIN/claude"
+
+make_wf_wt "wf_active"
+touch -t 202501010000 "${P10_WT_ROOT}/wf_active" "${P10_WT_ROOT}/wf_active/.git" 2>/dev/null || true
+
+run "T69: wf_* with live active session -> KEEP (session guard wins)" bash -c "
+  ACTIVE_CWD='${P10_WT_ROOT}/wf_active' verdict=\$(SWEEP_WF_STALE_DAYS=7 SWEEP_IDLE_HOURS=9999 bash '${SWEEP}' --classify '${P10_WT_ROOT}/wf_active' 2>/dev/null)
+  echo \"verdict=\$verdict\"
+  [[ \"\$verdict\" == 'KEEP' ]]
+"
+
+# Restore no-op claude mock
+cat > "$MOCKBIN/claude" <<'EOF'
+#!/usr/bin/env bash
+if [[ "${1:-}" == "agents" ]]; then echo "[]"; fi
+EOF
+chmod +x "$MOCKBIN/claude"
+
+# discover_worktree_roots includes SWEEP_PLUGIN_SOURCE_WT when dir exists
+P10_PS_WT="${SCRATCH}/p10-ps-wt"
+mkdir -p "$P10_PS_WT"
+
+# T70: check via --print-config (which now includes SWEEP_PLUGIN_SOURCE_WT) and via dry-run log
+run "T70a: --print-config shows SWEEP_WF_STALE_DAYS and SWEEP_PLUGIN_SOURCE_WT" bash -c "
+  SWEEP_WF_STALE_DAYS=7 SWEEP_PLUGIN_SOURCE_WT='${P10_PS_WT}' bash '${SWEEP}' --print-config 2>&1 | grep -q 'SWEEP_WF_STALE_DAYS=7'
+"
+
+run "T70b: --dry-run logs scanning of SWEEP_PLUGIN_SOURCE_WT root" bash -c "
+  SWEEP_WT_ROOT='/nonexistent' SWEEP_INCLUDE_GLOBAL_CLAUDE_WT=0 SWEEP_PROJECT_CLAUDE_WT='/nonexistent' SWEEP_PLUGIN_SOURCE_WT='${P10_PS_WT}' SWEEP_WF_STALE_DAYS=7 bash '${SWEEP}' --dry-run 2>&1 | grep -q '${P10_PS_WT}'
+"
+
+# SWEEP_PLUGIN_SOURCE_WT that doesn't exist -> silently skipped (no error)
+run "T71: SWEEP_PLUGIN_SOURCE_WT nonexistent -> no error" bash -c "
+  SWEEP_WT_ROOT='/nonexistent' SWEEP_INCLUDE_GLOBAL_CLAUDE_WT=0 SWEEP_PROJECT_CLAUDE_WT='/nonexistent' SWEEP_PLUGIN_SOURCE_WT='/nonexistent/plugin-source/.claude/worktrees' SWEEP_WF_STALE_DAYS=7 bash '${SWEEP}' --dry-run 2>&1
+"
+
+rm -f "$MOCKBIN/git"
+rm -f "$MOCKBIN/pmset"
+rm -f "$MOCKBIN/worktree-presweep.sh"
+
 # ─── results ────────────────────────────────────────────────────────────────
 
 echo ""

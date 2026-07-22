@@ -24,7 +24,7 @@
 //
 // Exit code: number of FAIL-level checks (0 = all clear).
 
-import { readFileSync, statSync, existsSync } from "node:fs";
+import { readFileSync, statSync, existsSync, realpathSync } from "node:fs";
 import { resolve, dirname } from "node:path";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
@@ -75,6 +75,7 @@ import { assertSdkAuth } from "./sdk-run-phase-agent.mjs";
 // plugins/dev/scripts/lib/ (sibling of execution-core/).
 import { validateLayer1Config, RELOCATED_LAYER1_KEYS } from "../lib/validate-catalyst-config.mjs";
 import { resolvePluginCheckoutRoots } from "../broker/plugin-refresh.mjs"; // CTL-1421: same resolver the workers use
+import { shipsLogs, LABELS as MANIFEST_LABELS } from "./service-manifest.mjs"; // CTL-1473: per-class service manifest
 
 // readLinearBotUserIds — inlined from daemon.mjs to avoid pulling in the full
 // daemon dependency chain (which includes bun: protocol imports incompatible
@@ -1747,6 +1748,250 @@ export function checkReaper(deps = {}) {
   return checks;
 }
 
+// defaultShipperState — load state + last exit of the log-shipper LaunchAgent.
+// Mirrors defaultReaperState but for ai.coalesce.catalyst-log-shipper.
+function defaultShipperState() {
+  try {
+    const r = spawnSync("launchctl", ["list", MANIFEST_LABELS.shipper], {
+      encoding: "utf8",
+      timeout: 5_000,
+    });
+    if (r.status !== 0 || !r.stdout) return { loaded: false, lastExit: null };
+    const m = r.stdout.match(/"LastExitStatus"\s*=\s*(-?\d+)/);
+    return { loaded: true, lastExit: m ? parseInt(m[1], 10) : null };
+  } catch {
+    return { loaded: false, lastExit: null };
+  }
+}
+
+// defaultCanonicalShipperConfig — resolve the canonical config path from the
+// registered pristine plugin-source checkout (catalyst.orchestration.pluginDirs[0]).
+// Returns the absolute path or null if the config is absent/unreadable.
+function defaultCanonicalShipperConfig() {
+  try {
+    const cfg = JSON.parse(readFileSync(layer2Path(), "utf8"));
+    const pluginDirs = cfg?.catalyst?.orchestration?.pluginDirs;
+    const pd = Array.isArray(pluginDirs) ? pluginDirs[0] : (typeof pluginDirs === "string" ? pluginDirs : null);
+    if (!pd) return null;
+    return resolve(pd, "scripts", "log-shipper", "config.alloy");
+  } catch {
+    return null;
+  }
+}
+
+// checkLogShipper — CTL-1473: for classes whose manifest declares shipsLogs:true,
+// (a) FAILs when the shipper LaunchAgent is missing/unloaded, and (b) FAILs when
+// the plist's --config path does not resolve to the canonical config under the
+// registered pristine plugin-source checkout. A preinstall flag (from
+// CATALYST_DOCTOR_PREINSTALL=1) downgrades FAILs to WARNs so the join pre-install
+// gate can run before install-services creates the shipper. The post-install strict
+// verify runs without the flag and fails hard on a missing/misconfigured shipper.
+export function checkLogShipper(deps = {}) {
+  const {
+    shipsLogs: shipperRequired = false,
+    preinstall = false,
+    plistPath = resolve(homedir(), "Library", "LaunchAgents", `${MANIFEST_LABELS.shipper}.plist`),
+    readFile = (p) => readFileSync(p, "utf8"),
+    fileExists = (p) => existsSync(p),
+    realpath = (p) => {
+      // Runtime-agnostic: realpathSync is imported at module top (line 27), so
+      // symlink normalization runs under both node and bun. The prior
+      // require("node:fs") threw under node ESM (require is undefined), silently
+      // returning the un-normalized path (CTL-1473 verify silent-failure finding).
+      try { return realpathSync(p); } catch { return p; }
+    },
+    canonicalConfig = defaultCanonicalShipperConfig,
+    shipperState = defaultShipperState,
+  } = deps;
+
+  if (!shipperRequired) return [];
+
+  const sev = (s) => (preinstall && s === STATUS.FAIL ? STATUS.WARN : s);
+  const checks = [];
+
+  let xml;
+  try {
+    xml = readFile(plistPath);
+  } catch {
+    checks.push(mkCheck(
+      "shipper-installed",
+      sev(STATUS.FAIL),
+      `log-shipper agent (${MANIFEST_LABELS.shipper}) not installed — daemon logs won't reach Loki; run 'catalyst-stack install-services'`,
+    ));
+    return checks;
+  }
+
+  const { loaded, lastExit } = shipperState();
+  if (!loaded) {
+    checks.push(mkCheck(
+      "shipper-installed",
+      sev(STATUS.FAIL),
+      `log-shipper plist present but not loaded by launchd — run 'catalyst-stack install-services'`,
+    ));
+    return checks;
+  }
+
+  // CTL-1473 remediate (round-3): inspect lastExit exactly like checkReaper
+  // (line ~1728). The prior code destructured only `loaded` and dropped
+  // lastExit, so a loaded-but-crash-looping shipper (LastExitStatus 127/78,
+  // shipping nothing) with a canonical --config path reported shipper-config:
+  // PASS — the exact "green while shipping nothing" failure this ticket exists
+  // to prevent. FAIL (sev-wrapped so the preinstall gate downgrades to WARN)
+  // given shipsLogs criticality; PASS on 0 (clean) or null (loaded but never
+  // run yet) falls through to the canonical --config check below.
+  if (lastExit === 127) {
+    checks.push(mkCheck(
+      "shipper-health",
+      sev(STATUS.FAIL),
+      `log-shipper last exited 127 (program path unresolved) — shipping nothing; reinstall from the pristine clone ('catalyst-stack install-services')`,
+    ));
+    return checks;
+  }
+  if (typeof lastExit === "number" && lastExit !== 0) {
+    checks.push(mkCheck(
+      "shipper-health",
+      sev(STATUS.FAIL),
+      `log-shipper last exited ${lastExit} — crash-looping and shipping nothing; check the shipper log and reinstall ('catalyst-stack install-services')`,
+    ));
+    return checks;
+  }
+
+  // Extract the --config argument from the plist ProgramArguments
+  const cfgMatch = xml.match(/<string>([^<]*config\.alloy)<\/string>/);
+  const bakedConfig = cfgMatch ? cfgMatch[1] : null;
+  if (!bakedConfig) {
+    checks.push(mkCheck(
+      "shipper-config",
+      sev(STATUS.FAIL),
+      `log-shipper plist present and loaded but no --config alloy path found in ${plistPath} (malformed plist)`,
+    ));
+    return checks;
+  }
+
+  const canonical = typeof canonicalConfig === "function" ? canonicalConfig() : canonicalConfig;
+  if (!canonical) {
+    checks.push(mkCheck(
+      "shipper-config",
+      STATUS.WARN,
+      `log-shipper config path unverifiable (no pluginDirs in Layer-2 config) — baked path: ${bakedConfig}`,
+    ));
+    return checks;
+  }
+
+  const bakedExists = fileExists(bakedConfig);
+  if (!bakedExists) {
+    checks.push(mkCheck(
+      "shipper-config",
+      sev(STATUS.FAIL),
+      `log-shipper --config path does not exist on disk (ephemeral/deleted worktree?): ${bakedConfig} — reinstall from the pristine clone ('catalyst-stack install-services')`,
+    ));
+    return checks;
+  }
+
+  let resolvedBaked = bakedConfig;
+  let resolvedCanon = canonical;
+  try { resolvedBaked = realpath(bakedConfig); } catch { /* use raw */ }
+  try { resolvedCanon = realpath(canonical); } catch { /* use raw */ }
+
+  if (resolvedBaked !== resolvedCanon) {
+    checks.push(mkCheck(
+      "shipper-config",
+      sev(STATUS.FAIL),
+      `log-shipper --config points at a non-canonical path (likely a deleted worktree): ${bakedConfig} (expected: ${canonical}) — reinstall from the pristine clone ('catalyst-stack install-services')`,
+    ));
+    return checks;
+  }
+
+  checks.push(mkCheck("shipper-config", STATUS.PASS, `log-shipper config path is canonical (${bakedConfig})`));
+  return checks;
+}
+
+// STALE_LOCK_MS — age threshold beyond which a .git/index.lock is considered stale.
+// 15 minutes: a legitimate git operation that holds the lock for 15+ minutes is stuck.
+const STALE_LOCK_MS = 15 * 60 * 1_000;
+
+// checkStaleGitLock — CTL-1473: detect a stale .git/index.lock in each plugin-source
+// checkout root. A lock older than STALE_LOCK_MS is a FAIL (silently blocked the
+// updater for days in the laptop audit). The updater self-heals by removing +
+// retrying (Phase 4); doctor independently surfaces it as a FAIL so operators catch
+// it on any node, not just when the updater is running.
+//
+// CTL-1473 remediate: the prior implementation downgraded FAIL→INFO whenever a
+// live git holder was detected via a system-wide `pgrep -x git`. That check
+// matched ANY git process on the host, so on a busy worker (concurrent
+// fetches/rebases) a genuinely stale 15m+ lock was masked whenever an unrelated
+// git ran — the exact failure mode this check was added to catch. The holder
+// downgrade also contradicted this module's own threshold rationale: a git
+// operation that has held index.lock for 15+ minutes is, by definition, stuck.
+// So the age threshold alone determines staleness; there is no holder downgrade.
+// All deps are injectable for unit testing; defaults use existsSync/statSync.
+export function checkStaleGitLock(deps = {}) {
+  const {
+    lockExists = (p) => existsSync(p),
+    lockAgeMs = (p) => {
+      // CTL-1473 remediate (round-3): on stat failure return null (unknown age),
+      // NOT 0. The prior `return 0` degraded a present-but-unstattable lock
+      // (permission / TOCTOU race) to age=0, which reported INFO "active git
+      // operation" and masked the failure. The null sentinel surfaces as WARN
+      // (see the age === null branch below) — unknown is not benign.
+      try { return Date.now() - statSync(p).mtimeMs; } catch { return null; }
+    },
+    resolveRootsFn = () => resolvePluginCheckoutRoots({}),
+    preinstall = !!process.env.CATALYST_DOCTOR_PREINSTALL,
+  } = deps;
+
+  const roots = resolveRootsFn();
+  const checks = [];
+  const sev = (s) => (preinstall && s === STATUS.FAIL ? STATUS.WARN : s);
+
+  for (const root of roots) {
+    const lockPath = resolve(root, ".git", "index.lock");
+    if (!lockExists(lockPath)) {
+      checks.push(mkCheck("stale-git-lock", STATUS.PASS, `no stale .git/index.lock in ${root}`));
+      continue;
+    }
+    const age = lockAgeMs(lockPath);
+    if (age === null) {
+      // CTL-1473 remediate (round-3): the lock exists (lockExists true) but its
+      // age could not be determined (stat failed). Unknown age is NOT benign —
+      // WARN rather than the prior return-0 → INFO "active git operation" mask.
+      checks.push(mkCheck(
+        "stale-git-lock",
+        STATUS.WARN,
+        `${lockPath} exists but its age could not be determined (stat failed — permission or TOCTOU race) — inspect manually: ls -l ${lockPath}`,
+      ));
+      continue;
+    }
+    if (age < STALE_LOCK_MS) {
+      checks.push(mkCheck(
+        "stale-git-lock",
+        STATUS.INFO,
+        `${lockPath} exists but is only ${Math.round(age / 60_000)}m old — may be an active git operation`,
+      ));
+      continue;
+    }
+    checks.push(mkCheck(
+      "stale-git-lock",
+      sev(STATUS.FAIL),
+      `stale .git/index.lock in ${root} (age: ${Math.round(age / 60_000)}m) — plugin updates were silently blocked; the updater will self-heal on its next tick, or remove manually: rm ${lockPath}`,
+    ));
+  }
+
+  if (checks.length === 0) {
+    // CTL-1473 remediate: empty roots is unverifiable, not healthy — mirror
+    // checkLogShipper's WARN-when-unverifiable. resolvePluginCheckoutRoots()
+    // also returns [] when the Layer-2 config is unreadable/unparseable (the
+    // error is swallowed in plugin-refresh __readConfig), so reporting PASS
+    // here would mask a broken config as a clean bill of health.
+    checks.push(mkCheck(
+      "stale-git-lock",
+      STATUS.WARN,
+      "no plugin-source checkouts resolved — cannot verify .git/index.lock health (config unreadable, or this node has no checkout)",
+    ));
+  }
+  return checks;
+}
+
 // checkCloudTokenEnv — CTL-1307. ADVISORY ONLY (never FAIL): the cluster-shared
 // CATALYST_CLOUD_TOKEN is an OPTIONAL extension — a node stays fully local-only
 // without it, so its absence must NEVER block activation. WARN only on DRIFT: the
@@ -3160,6 +3405,9 @@ export function checksForClass(nc, opts = {}) {
     hasStackAgent,
     hasUpdaterAgent,
     pluginPullOwner,
+    // CTL-1473: pre-install flag downgrades install-remediable checks (shipper, agents-for-class)
+    // from FAIL to WARN when the join gate runs BEFORE install-services (which creates the services).
+    preinstall = !!process.env.CATALYST_DOCTOR_PREINSTALL,
   } = opts;
 
   const nodeClassCheck = () => checkNodeClass({ nodeClass: nc });
@@ -3230,6 +3478,7 @@ export function checksForClass(nc, opts = {}) {
       replicaThunk,
       wontOwnThunk,
       () => checkReaper(), // advisory (never FAIL), class-agnostic
+      () => checkStaleGitLock({ preinstall }), // CTL-1473: stale .git/index.lock blocks plugin updates
       () => checkMonitorProductionBuild({ fetch: _fetch }), // CTL-1372: warn on a dev-build monitor (advisory)
       () => checkCloudTokenEnv(), // advisory
       () => checkClusterSecretFreshness(), // CTL-1393: warn if running on stale rotated secrets (advisory)
@@ -3285,6 +3534,8 @@ export function checksForClass(nc, opts = {}) {
     () => checkThoughts(), // CTL-1293: member thoughts repo provisioned + non-foreign primary
     () => checkClaudeSettings(), // CTL-1231: member settings.json pins host identity + OTLP endpoint
     () => checkReaper(), // CTL-1306: orphan-sweep reaper installed + baked path still exists (not dead-127)
+    () => checkLogShipper({ shipsLogs: shipsLogs("worker"), preinstall }), // CTL-1473: log-shipper present + canonical config path
+    () => checkStaleGitLock({ preinstall }), // CTL-1473: stale .git/index.lock blocks plugin updates (FAIL)
     () => checkCloudTokenEnv(), // CTL-1307: cluster cloud token decrypted → projected to machine-level env (advisory)
     () => checkClusterSecretFreshness(), // CTL-1393: warn if the node is running on stale rotated secrets (advisory)
     () => checkCloudSync(), // CTL-1394: supervised cloud-sync daemon + read tier on the worker hot path (advisory)

@@ -87,6 +87,16 @@ jobs:
       - name: Install dependencies
         run: bun install
 
+      - name: Install broker dependencies (CTL-1473)
+        # The stable-unit-tests step runs ../broker/plugin-refresh.test.mjs, which
+        # imports broker/router.mjs -> broker/config.mjs. Unlike execution-core/config.mjs
+        # (pino-optional via a try/catch console shim), broker/config.mjs does a hard
+        # top-level `import pino from "pino"`. Node/bun resolves that from broker/'s
+        # location upward, so the job-default `bun install` in execution-core/ never
+        # satisfies it. Install broker/ deps so pino resolves for the broker import chain.
+        working-directory: plugins/dev/scripts/broker
+        run: bun install
+
       - name: Verify import graph (bun build resolution check)
         # CTL-1298: resolve daemon.mjs's full transitive import graph so a missing
         # named export (the CTL-1093 outage: getCatalystRepoDir added to daemon.mjs
@@ -111,6 +121,13 @@ jobs:
         # ./config.mjs, ../tracing.mjs) would otherwise only fail at install runtime on a node.
         # Walk its static graph.
         run: bun build install-lifecycle.mjs --target=node --outfile /dev/null
+
+      - name: Verify service-manifest import graph (bun build resolution check, CTL-1473)
+        # CTL-1473: service-manifest.mjs is the per-class service truth consumed by
+        # install-lifecycle.mjs and doctor.mjs. It has no heavy runtime deps (pure
+        # constants + helpers), so a bad import silently breaks both consumers. Walk
+        # its static graph before merge.
+        run: bun build service-manifest.mjs --target=node --outfile /dev/null
 
       - name: Verify catalyst-linear import graph (node-loadability contract, CTL-1391)
         # CTL-1391: linear-cli.mjs is the catalyst-linear driver, a separate CLI entrypoint
@@ -163,6 +180,19 @@ jobs:
         # flags (source/result/op top-level attrs + numeric age_ms).
         working-directory: plugins/dev/scripts
         run: bash __tests__/canonical-event.test.sh
+
+      - name: catalyst-stack shipper ephemeral-path guard test (CTL-1473)
+        # CTL-1473: guards that install-services (--print and real) refuses to bake
+        # an ephemeral config path (worktree or /tmp). Uses CATALYST_FORCE_BAKE_DIR +
+        # CATALYST_LAYER2_CONFIG_FILE seams; no launchctl calls.
+        working-directory: plugins/dev/scripts
+        run: bash __tests__/catalyst-stack-shipper-guard.test.sh
+
+      - name: orphan-sweep wf_* and plugin-source root tests (CTL-1473)
+        # CTL-1473: wf_* worktrees idle > SWEEP_WF_STALE_DAYS are classified SAFE
+        # (not SALVAGE_UNPUSHED); discover_worktree_roots includes SWEEP_PLUGIN_SOURCE_WT.
+        working-directory: plugins/dev/scripts
+        run: bash __tests__/orphan-sweep.test.sh
 
       - name: Run stable unit tests
         # EXCLUDED SUITES — do NOT add these back without fixing the underlying
@@ -334,4 +364,6 @@ jobs:
             linear-read-event.test.mjs \
             updater/plugin-pull-defer.test.mjs \
             updater/updater.test.mjs \
-            updater/updater-tracing.test.mjs
+            updater/updater-tracing.test.mjs \
+            service-manifest.test.mjs \
+            ../broker/plugin-refresh.test.mjs

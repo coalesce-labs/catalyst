@@ -16,7 +16,7 @@
 // Run: bun test plugins/dev/scripts/broker/plugin-refresh.test.mjs
 
 import { describe, test, expect, beforeEach } from "bun:test";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -29,7 +29,9 @@ import {
   startPluginDriftCheck,
   handlePluginRefreshEvent,
   changedPackageDirs,
+  defaultRemoveLockFn,
   PLUGIN_REFRESH_THROTTLE_MS,
+  PLUGIN_REFRESH_LOCK_SETTLE_MS,
   PLUGIN_DRIFT_CHECK_INTERVAL_MS,
   __clearThrottleForTest,
   CHECKOUT_LAG_FAILURE_THRESHOLD,
@@ -463,6 +465,141 @@ describe("refreshPluginCheckout", () => {
     expect(emitted[0].detail.checkout).toBe("/co");
     expect(typeof emitted[0].detail.error).toBe("string");
     expect(emitted[0].severity).toBe("WARN");
+  });
+
+  // CTL-1473: stale .git/index.lock self-heal tests
+  describe("index.lock self-heal (CTL-1473)", () => {
+    function makeGitFnWithLock({ before = "aaaa", after = "bbbb", lockOnFirstReset = true, retryThrows = false } = {}) {
+      const calls = [];
+      let resetCount = 0;
+      const gitFn = (root, args) => {
+        calls.push({ root, args });
+        const sub = args[0];
+        if (sub === "rev-parse") {
+          const seen = calls.filter((c) => c.args[0] === "rev-parse").length;
+          return seen === 1 ? before : after;
+        }
+        if (sub === "fetch") return "";
+        if (sub === "reset") {
+          resetCount++;
+          if (lockOnFirstReset && resetCount === 1) {
+            throw new Error("Unable to create '/repo/.git/index.lock': File exists.");
+          }
+          if (retryThrows && resetCount >= 2) {
+            throw new Error("reset failed after lock removal");
+          }
+          return "";
+        }
+        return "";
+      };
+      gitFn.calls = calls;
+      return gitFn;
+    }
+
+    test("removes lock and retries reset on index.lock error, emits git_lock_healed", () => {
+      const emitted = [];
+      const lockRemoveCalls = [];
+      const gitFn = makeGitFnWithLock({ before: "old1", after: "new2", lockOnFirstReset: true });
+      const res = refreshPluginCheckout({
+        root: "/co",
+        now: 0,
+        gitFn,
+        removeLockFn: (root) => lockRemoveCalls.push(root),
+        emitFn: (e) => emitted.push(e),
+      });
+      expect(lockRemoveCalls).toEqual(["/co"]);
+      const healed = emitted.find((e) => e.event === "plugin.checkout.git_lock_healed");
+      expect(healed).toBeDefined();
+      expect(healed.severity).toBe("INFO");
+      expect(healed.detail.checkout).toBe("/co");
+      // should still emit updated (checkout advanced)
+      const updated = emitted.find((e) => e.event === "plugin.checkout.updated");
+      expect(updated).toBeDefined();
+      expect(res.pulled).toBe(true);
+      expect(res.failed).toBe(false);
+      expect(res.changed).toBe(true);
+    });
+
+    test("does NOT call removeLockFn for non-lock errors", () => {
+      const emitted = [];
+      const lockRemoveCalls = [];
+      const gitFn = makeGitFn({ fetchThrows: true });
+      refreshPluginCheckout({
+        root: "/co",
+        now: 0,
+        gitFn,
+        removeLockFn: (root) => lockRemoveCalls.push(root),
+        emitFn: (e) => emitted.push(e),
+      });
+      expect(lockRemoveCalls).toHaveLength(0);
+      expect(emitted[0].event).toBe("plugin.checkout.refresh_failed");
+    });
+
+    test("emits refresh_failed when retry also fails after lock removal", () => {
+      const emitted = [];
+      const gitFn = makeGitFnWithLock({ lockOnFirstReset: true, retryThrows: true });
+      const res = refreshPluginCheckout({
+        root: "/co",
+        now: 0,
+        gitFn,
+        removeLockFn: () => {},
+        emitFn: (e) => emitted.push(e),
+      });
+      expect(res.failed).toBe(true);
+      const failed = emitted.find((e) => e.event === "plugin.checkout.refresh_failed");
+      expect(failed).toBeDefined();
+      expect(emitted.some((e) => e.event === "plugin.checkout.git_lock_healed")).toBe(false);
+    });
+
+    test("tolerates removeLockFn throwing (lock already gone) and retries anyway", () => {
+      const emitted = [];
+      const gitFn = makeGitFnWithLock({ before: "x", after: "y", lockOnFirstReset: true });
+      const res = refreshPluginCheckout({
+        root: "/co",
+        now: 0,
+        gitFn,
+        removeLockFn: () => { throw new Error("ENOENT: no such file"); },
+        emitFn: (e) => emitted.push(e),
+      });
+      // retry succeeded even though removeLockFn threw
+      expect(res.pulled).toBe(true);
+      expect(res.failed).toBe(false);
+      expect(emitted.some((e) => e.event === "plugin.checkout.git_lock_healed")).toBe(true);
+    });
+
+    // CTL-1473 remediate: the DEFAULT removeLock is age-gated so it never stomps a
+    // lock a live git op may still hold. Exercised against a real temp .git dir.
+    describe("defaultRemoveLockFn age gate (CTL-1473 remediate)", () => {
+      let dir;
+      beforeEach(() => {
+        dir = mkdtempSync(join(tmpdir(), "plugin-refresh-lock-"));
+        mkdirSync(join(dir, ".git"), { recursive: true });
+      });
+
+      const lockPath = () => join(dir, ".git", "index.lock");
+
+      test("removes a settled (stale) lock", () => {
+        writeFileSync(lockPath(), "");
+        // backdate mtime past the settle window
+        const old = (Date.now() - PLUGIN_REFRESH_LOCK_SETTLE_MS - 60_000) / 1000;
+        utimesSync(lockPath(), old, old);
+        defaultRemoveLockFn(dir);
+        expect(existsSync(lockPath())).toBe(false);
+        rmSync(dir, { recursive: true, force: true });
+      });
+
+      test("leaves a fresh lock in place (may be in flight)", () => {
+        writeFileSync(lockPath(), "");
+        defaultRemoveLockFn(dir); // mtime is ~now, under the settle window
+        expect(existsSync(lockPath())).toBe(true);
+        rmSync(dir, { recursive: true, force: true });
+      });
+
+      test("is a no-op when the lock is already gone", () => {
+        expect(() => defaultRemoveLockFn(dir)).not.toThrow();
+        rmSync(dir, { recursive: true, force: true });
+      });
+    });
   });
 
   test("no-op (no event) when HEAD did not advance", () => {

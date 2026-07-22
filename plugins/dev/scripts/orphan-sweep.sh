@@ -24,6 +24,8 @@
 #   SWEEP_INTERVAL_HOURS        — launchd schedule token (1|2|3h, default from config / 2)
 #   SWEEP_INCLUDE_GLOBAL_CLAUDE_WT — scan ~/.claude/worktrees (default 1)
 #   SWEEP_PROJECT_CLAUDE_WT     — project .claude/worktrees path
+#   SWEEP_PLUGIN_SOURCE_WT      — plugin-source .claude/worktrees path (default: auto from config)
+#   SWEEP_WF_STALE_DAYS         — days idle before wf_* worktrees are SAFE (default 7, CTL-1473)
 #   SWEEP_DRY_RUN               — set to 1 or use --dry-run flag
 #   SWEEP_RUN_ID                — default: timestamp-based (set in tests for determinism)
 #   SWEEP_FORCE_POWER           — 1 to force sweep even on battery
@@ -108,6 +110,11 @@ _load_sweep_config() {
   if [[ -z "${SWEEP_MAX_REMOVALS:-}" ]]; then
     v="$(_cfg_str '.catalyst.sweep.maxRemovalsPerRun')"; SWEEP_MAX_REMOVALS="${v:-20}"
   fi
+  # CTL-1473: wf_* worktrees (Workflow tool artifacts inside plugin-source) are SAFE
+  # after SWEEP_WF_STALE_DAYS days idle, regardless of unpushed commits.
+  if [[ -z "${SWEEP_WF_STALE_DAYS:-}" ]]; then
+    v="$(_cfg_str '.catalyst.sweep.wfStaleDays')"; SWEEP_WF_STALE_DAYS="${v:-7}"
+  fi
 }
 
 _porcelain_path() {
@@ -137,7 +144,13 @@ _real_dirty_count_stdin() {
   printf '%s\n' "$count"
 }
 
-_real_dirty_count() { git -C "$1" status --porcelain 2>/dev/null | _real_dirty_count_stdin; }
+# CTL-1473 remediate: swallow a failing inner git so the pipeline never returns
+# non-zero under `set -o pipefail`. Previously, on a non-repo path git exited
+# non-zero, the pipeline failed, and the call site's `|| echo 0` appended a second
+# "0" on top of the stdin helper's own "0" — yielding a two-line "0\n0" that made
+# `[[ "$dirty" -gt 0 ]]` raise a syntax error. `_real_dirty_count_stdin` already
+# prints 0 for empty input, so the call site no longer needs `|| echo 0`.
+_real_dirty_count() { { git -C "$1" status --porcelain 2>/dev/null || true; } | _real_dirty_count_stdin; }
 
 # ─── roots (overridable via env) ────────────────────────────────────────────
 
@@ -151,6 +164,10 @@ _init_roots() {
   SWEEP_RUN_ID="${SWEEP_RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)-$$}"
   SWEEP_INCLUDE_GLOBAL_CLAUDE_WT="${SWEEP_INCLUDE_GLOBAL_CLAUDE_WT:-1}"
   SWEEP_PROJECT_CLAUDE_WT="${SWEEP_PROJECT_CLAUDE_WT:-${SCRIPT_DIR%/plugins/dev/scripts}/.claude/worktrees}"
+  # CTL-1473: plugin-source .claude/worktrees — Workflow tool bakes wf_* here.
+  # Default to ~/catalyst/plugin-source/.claude/worktrees (standard install path).
+  SWEEP_PLUGIN_SOURCE_WT="${SWEEP_PLUGIN_SOURCE_WT:-${HOME}/catalyst/plugin-source/.claude/worktrees}"
+  SWEEP_WF_STALE_DAYS="${SWEEP_WF_STALE_DAYS:-}"  # loaded in _load_sweep_config; pre-declare for -u safety
   SWEEP_CONFIG_PATH="${SWEEP_CONFIG_PATH:-$(_resolve_sweep_config_path)}"
   _load_sweep_config
 }
@@ -310,13 +327,28 @@ _wt_unpushed_count() {
   git -C "$1" rev-list --count HEAD --not "${refs[@]}" 2>/dev/null || printf '0'
 }
 
+# CTL-1473 remediate: portable file/dir mtime (epoch seconds). GNU and BSD stat
+# differ — GNU uses `stat -c %Y`, BSD/macOS uses `stat -f %m`. The previous
+# BSD-first `stat -f '%m' … || stat -c '%Y' …` order was NOT a safe fallback on
+# Linux: there `-f` means --file-system, so `stat -f '%m' FILE` treats `%m` as a
+# (missing) file operand and prints a multi-line filesystem block for FILE to
+# stdout *before* exiting non-zero. The `|| stat -c '%Y'` then also runs, so the
+# mtime stream is polluted with filesystem-block numbers and `sort -nr | head -1`
+# returns garbage — the wf_* classify path produced no SAFE/KEEP verdict on Linux
+# (CI RED T67/T68). Detect the working flavour once at load time instead.
+if stat -c '%Y' /dev/null >/dev/null 2>&1; then
+  _stat_mtime() { stat -c '%Y' "$1" 2>/dev/null || echo 0; }
+else
+  _stat_mtime() { stat -f '%m' "$1" 2>/dev/null || echo 0; }
+fi
+
 _wt_newest_mtime() {
   find "$1" -type f \
     -not -path '*/node_modules/*' -not -path '*/.cache/*' \
     -not -path '*/.trunk/*' -not -path '*/dist/*' -not -path '*/build/*' \
     2>/dev/null \
   | while IFS= read -r f; do
-      stat -f '%m' "$f" 2>/dev/null || stat -c '%Y' "$f" 2>/dev/null || echo 0
+      _stat_mtime "$f"
     done \
   | sort -nr | head -1
 }
@@ -329,6 +361,22 @@ _wt_is_idle() {
   [[ $(( now - newest )) -ge $(( SWEEP_IDLE_HOURS * 3600 )) ]]
 }
 
+# CTL-1473: _wt_idle_secs_ge — has the worktree been idle for at least N seconds?
+# Falls back to directory mtime when no files exist (avoids misclassifying an empty
+# but freshly-created wf_* worktree as stale). Returns 1 (not idle) on any unknown.
+_wt_idle_secs_ge() {
+  local wt="$1" threshold_secs="$2"
+  local newest now
+  newest="$(_wt_newest_mtime "$wt")"
+  if [[ -z "$newest" || "$newest" == "0" ]]; then
+    # No files — fall back to the directory's own mtime (portable, CTL-1473).
+    newest="$(_stat_mtime "$wt")"
+  fi
+  [[ -z "$newest" || "$newest" == "0" ]] && return 1  # unknown → conservative: not idle
+  now="$(date -u +%s)"
+  [[ $(( now - newest )) -ge $threshold_secs ]]
+}
+
 classify_worktree() {
   local wt="$1" trunk="${2:-origin/main}" dirty unpushed
   [[ -d "$wt" ]] || { printf 'KEEP'; return 0; }
@@ -337,8 +385,21 @@ classify_worktree() {
     _wt_is_idle "$wt" && { printf 'ORPHAN_GITFILE'; return 0; }
     printf 'KEEP'; return 0
   fi
-  dirty="$(_real_dirty_count "$wt" 2>/dev/null || echo 0)"
+  dirty="$(_real_dirty_count "$wt" 2>/dev/null)"; dirty="${dirty:-0}"
   [[ "$dirty" -gt 0 ]] && { printf 'SALVAGE_DIRTY'; return 0; }
+  # CTL-1473: wf_* worktrees are Workflow tool session artifacts baked inside the
+  # plugin-source checkout. They are always disposable — the Workflow tool creates a
+  # fresh one per run. After SWEEP_WF_STALE_DAYS idle days, classify SAFE (skip the
+  # unpushed-commits salvage path — there is nothing worth salvaging in a wf_* branch).
+  # Ordering: AFTER active-session and dirty checks so a dirty wf_* still hits SALVAGE_DIRTY.
+  local wt_base; wt_base="$(basename "$wt")"
+  if [[ "$wt_base" == wf_* ]]; then
+    local wf_stale_secs=$(( ${SWEEP_WF_STALE_DAYS:-7} * 86400 ))
+    if _wt_idle_secs_ge "$wt" "$wf_stale_secs"; then
+      printf 'SAFE'; return 0
+    fi
+    printf 'KEEP'; return 0
+  fi
   unpushed="$(_wt_unpushed_count "$wt" 2>/dev/null || echo 0)"
   [[ "$unpushed" -gt 0 ]] && { printf 'SALVAGE_UNPUSHED'; return 0; }
   if _wt_ancestry_ok "$wt" "$trunk" 2>/dev/null && _wt_is_idle "$wt"; then
@@ -488,6 +549,15 @@ discover_worktree_roots() {
   local proj_wt="${SWEEP_PROJECT_CLAUDE_WT:-}"
   [[ -n "$proj_wt" && -d "$proj_wt" && "$proj_wt" != "${HOME}/.claude/worktrees" ]] \
     && printf '%s\n' "$proj_wt"
+  # CTL-1473: plugin-source Workflow worktrees. The Workflow tool bakes wf_* dirs
+  # here; they are abandoned AI session artifacts and should be swept on a shorter
+  # idle window than ticket worktrees.
+  local ps_wt="${SWEEP_PLUGIN_SOURCE_WT:-}"
+  if [[ -n "$ps_wt" && -d "$ps_wt" \
+        && "$ps_wt" != "${HOME}/.claude/worktrees" \
+        && "$ps_wt" != "${proj_wt:-}" ]]; then
+    printf '%s\n' "$ps_wt"
+  fi
 }
 
 enumerate_worktree_dirs() {
@@ -531,6 +601,7 @@ sweep_worktrees() {
   local removed_count=0 deferred=0
 
   while IFS= read -r root; do
+    [[ -d "$root" ]] && log "scanning worktree root: ${root}"
     while IFS= read -r -d '' wt; do
       wt_id="$(basename "$wt")"
 
@@ -617,8 +688,9 @@ sweep_worktrees() {
 
 main() {
   if [[ "$_PRINT_CONFIG" == "1" ]]; then
-    printf 'SWEEP_IDLE_HOURS=%s\nSWEEP_INTERVAL_HOURS=%s\nSWEEP_SALVAGE_PUSH=%s\nSWEEP_MAX_REMOVALS=%s\n' \
-      "$SWEEP_IDLE_HOURS" "$SWEEP_INTERVAL_HOURS" "$SWEEP_SALVAGE_PUSH" "$SWEEP_MAX_REMOVALS"
+    printf 'SWEEP_IDLE_HOURS=%s\nSWEEP_INTERVAL_HOURS=%s\nSWEEP_SALVAGE_PUSH=%s\nSWEEP_MAX_REMOVALS=%s\nSWEEP_WF_STALE_DAYS=%s\nSWEEP_PLUGIN_SOURCE_WT=%s\n' \
+      "$SWEEP_IDLE_HOURS" "$SWEEP_INTERVAL_HOURS" "$SWEEP_SALVAGE_PUSH" "$SWEEP_MAX_REMOVALS" \
+      "$SWEEP_WF_STALE_DAYS" "$SWEEP_PLUGIN_SOURCE_WT"
     exit 0
   fi
   [[ "$_COUNT_DIRTY" == "1" ]] && { _real_dirty_count_stdin; exit 0; }
