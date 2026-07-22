@@ -399,11 +399,29 @@ export async function handleCommentWake(
     }
     // enforce: resume the held run reconstructed from the projection.
     const projSig = held.signal ?? {};
-    const parkedPhase = projSig.raw?.parkedFrom ?? projSig.phase ?? held.phase;
+    // CTL-1489: reconstruct the resume session from the projected bg_job_id so a
+    // CTL-768 held-stopped worker recovered cross-host continues its PAUSED
+    // conversation via `--resume` (the same resolveSession seam the dir-present
+    // path uses) instead of being re-launched from scratch — which would land
+    // the operator's answer in a brand-new context. Absent bg_job_id → undefined
+    // (a still-alive worker: no resume, matching the legacy path).
+    const projBgJobId = projSig.raw?.bg_job_id ?? null;
+    const resumeSession = projBgJobId ? resolveSession(projBgJobId) ?? undefined : undefined;
+    // parkedFrom is NOT cross-host-recoverable — it lives only in the local
+    // signal file, never in worker_state / the transition event. The projected
+    // `phase` is the honest best-effort (it equals parkedFrom in the common case,
+    // and is exactly what the dir-present path falls back to via `sig.phase`).
+    const parkedPhase = projSig.phase ?? held.phase;
     const handoffPath = projSig.raw?.handoffPath ?? undefined;
+    // No local signal file exists here (the dir is absent), so the dir-present
+    // path's stoppedForHold→stalled signal RESET is a no-op cross-host — the
+    // re-dispatch provisions a fresh worktree + signal.
     try {
-      dispatch(orchDir, ticket, parkedPhase, { handoffPath });
-      log.info({ ticket, phase: parkedPhase }, "handleCommentWake: resumed from projection (CTL-1489 enforce)");
+      dispatch(orchDir, ticket, parkedPhase, { handoffPath, resumeSession });
+      log.info(
+        { ticket, phase: parkedPhase, resumed: Boolean(resumeSession) },
+        "handleCommentWake: resumed from projection (CTL-1489 enforce)"
+      );
     } catch (err) {
       log.warn({ ticket, err: err?.message }, "handleCommentWake: projection resume dispatch failed");
     }

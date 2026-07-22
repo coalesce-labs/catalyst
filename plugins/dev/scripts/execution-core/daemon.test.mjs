@@ -1706,7 +1706,12 @@ describe("handleCommentWake (CTL-549)", () => {
   describe("absent worker dir → projection read cutover (CTL-1489)", () => {
     const heldFromProjection = () => ({
       phase: "implement",
-      signal: { ticket: "CTL-1", phase: "implement", status: "needs-input", raw: { handoffPath: "/h.md" } },
+      signal: {
+        ticket: "CTL-1",
+        phase: "implement",
+        status: "needs-input",
+        raw: { handoffPath: "/h.md", bg_job_id: "bg-xyz" },
+      },
     });
 
     test("off → bare return (no dispatch, no drift) even when the projection is held", async () => {
@@ -1747,7 +1752,7 @@ describe("handleCommentWake (CTL-549)", () => {
       expect(drifts).toEqual(["CTL-1"]);
     });
 
-    test("enforce → resumes the held run from the projection (dispatch called)", async () => {
+    test("enforce → resumes the held run from the projection (dispatch called, session reconstructed)", async () => {
       const orch = tmpOrcDir();
       const dispatched = [];
       await handleCommentWake(
@@ -1758,12 +1763,18 @@ describe("handleCommentWake (CTL-549)", () => {
           removeLabel: async () => {},
           readProjectionMode: () => "enforce",
           findHeldFromProjection: heldFromProjection,
+          // resolveSession maps the projected bg_job_id → a resume session id.
+          resolveSession: (bgJobId) => (bgJobId === "bg-xyz" ? "sess-abc" : null),
         }
       );
       expect(dispatched).toHaveLength(1);
       expect(dispatched[0].ticket).toBe("CTL-1");
       expect(dispatched[0].phase).toBe("implement");
       expect(dispatched[0].opts.handoffPath).toBe("/h.md");
+      // CTL-1489 finding-1 fix: a held-stopped worker resumes its PAUSED session
+      // via --resume (session reconstructed from the projected bg_job_id), not a
+      // fresh re-launch that would drop the conversation.
+      expect(dispatched[0].opts.resumeSession).toBe("sess-abc");
     });
 
     test("enforce → no dispatch when the projection shows no held run", async () => {

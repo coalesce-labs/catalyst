@@ -598,7 +598,12 @@ export function reduceTicketTransitionEvent(event) {
 // and the widened worker_state sticky columns. Idempotent — a re-fold is a
 // no-op on the append-only table and a null-sticky upsert on worker_state.
 // Does NOT set worker_state.status: status stays owned by the phase.*/
-// worker.state_changed branches to avoid double-writing the status axis.
+// worker.state_changed branches to avoid double-writing the STATUS axis.
+// It DOES write `phase` (= to_stage, the authoritative next stage): phase is a
+// shared column with the phase.* branch, but both fold the same event stream
+// under the same last_event_ts watermark, so it is last-write-wins-by-ts and
+// self-healing (a transient disagreement converges on the next event). Only the
+// status axis needs the single-writer discipline (a transition carries no status).
 export function projectTicketTransitionEvent(event) {
   try {
     const r = reduceTicketTransitionEvent(event);
