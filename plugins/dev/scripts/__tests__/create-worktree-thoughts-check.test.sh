@@ -142,6 +142,67 @@ if [[ -d "$WT_PATH/thoughts/shared" ]]; then pass "thoughts/shared present"; els
 if [[ -L "$WT_PATH/thoughts/shared" ]]; then pass "thoughts/shared is a symlink"; else fail "not a symlink"; fi
 rm -rf "$SCRATCH"
 
+# --- CTL-1497: reuse-path thoughts repair --------------------------------------------------------
+# The daemon ALWAYS calls create-worktree.sh with --reuse-existing, which short-circuits before the
+# setup block. A worktree first created with a broken thoughts/shared (a plain dir, or a dangling
+# symlink) was therefore never repaired on later dispatches, so thoughts written there stranded and
+# never synced. Builds an EXISTING worktree in a chosen broken state and runs the reuse path.
+#   $1 STATE:      plaindir | dangling | absent   (the broken thoughts/shared to seed)
+#   $2 CONFIGURED: yes | no   (yes → .catalyst.thoughts config + humanlayer available)
+# Sets globals: OUTPUT, EXIT, WT_PATH, SCRATCH
+run_reuse_worktree() {
+	local STATE="$1" CONFIGURED="$2"
+	SCRATCH="$(mktemp -d -t cwt-ctl1497-XXXXXX)"
+	local SRC="$SCRATCH/src" WT="$SCRATCH/wt" BIN="$SCRATCH/bin" HL="$SCRATCH/hl.json" TR="$SCRATCH/tr"
+	mkdir -p "$SRC/.catalyst" "$WT/t-CTL-999/.catalyst" "$BIN" "$TR/repos/t/shared"
+	git -C "$SRC" init -q
+	git -C "$SRC" config user.email t@t.t && git -C "$SRC" config user.name t
+	git -C "$SRC" commit -q --allow-empty -m init
+	local CONF PATHX="$PATH"
+	if [[ $CONFIGURED == yes ]]; then
+		CONF='{"catalyst":{"projectKey":"t","thoughts":{"profile":"testprofile","directory":"t"}}}'
+		printf '{"thoughts":{"thoughtsRepo":"%s","reposDir":"repos","globalDir":"global","user":"testuser"}}\n' "$TR" >"$HL"
+		printf '#!/usr/bin/env bash\n[ "$1 $2" = "thoughts status" ] && echo "Profile: testprofile"; exit 0\n' >"$BIN/humanlayer"
+		chmod +x "$BIN/humanlayer"
+		PATHX="$BIN:$PATH"
+	else
+		CONF='{"catalyst":{"projectKey":"t"}}' # no thoughts profile; humanlayer stays off PATH
+	fi
+	printf '%s\n' "$CONF" >"$SRC/.catalyst/config.json"
+	printf '%s\n' "$CONF" >"$WT/t-CTL-999/.catalyst/config.json"
+	case "$STATE" in
+	plaindir) mkdir -p "$WT/t-CTL-999/thoughts/shared/handoffs" && echo stranded >"$WT/t-CTL-999/thoughts/shared/handoffs/h.md" ;;
+	dangling) mkdir -p "$WT/t-CTL-999/thoughts" && ln -sfn "$SCRATCH/gone" "$WT/t-CTL-999/thoughts/shared" ;;
+	absent) : ;;
+	esac
+	OUTPUT="$(cd "$SRC" && PATH="$PATHX" HUMANLAYER_CONFIG="$HL" \
+		bash "$CREATE_WT" t-CTL-999 main --worktree-dir "$WT" --skip-fetch --reuse-existing 2>&1)"
+	EXIT=$?
+	WT_PATH="$WT/t-CTL-999"
+}
+
+# Case 8 — reuse path repairs a plain-dir thoughts/shared (the stranding bug) and preserves content.
+echo "Test 8: reuse-existing repairs a plain-dir thoughts/shared (configured project)"
+run_reuse_worktree plaindir yes
+assert_eq "0" "$EXIT" "exits 0 on reuse with repair"
+if [[ -L "$WT_PATH/thoughts/shared" && -d "$WT_PATH/thoughts/shared" ]]; then pass "thoughts/shared repaired to a healthy symlink"; else fail "thoughts/shared not a healthy symlink"; fi
+if ls "$WT_PATH"/thoughts.orphaned-*/shared/handoffs/h.md >/dev/null 2>&1; then pass "stranded content preserved under thoughts.orphaned-*"; else fail "stranded content lost"; fi
+rm -rf "$SCRATCH"
+
+# Case 9 — a dangling thoughts/shared symlink is also repaired (guards require -L AND -d, not just -L).
+echo "Test 9: reuse-existing repairs a dangling thoughts/shared symlink"
+run_reuse_worktree dangling yes
+assert_eq "0" "$EXIT" "exits 0 on reuse with dangling-symlink repair"
+if [[ -L "$WT_PATH/thoughts/shared" && -d "$WT_PATH/thoughts/shared" ]]; then pass "dangling symlink repaired"; else fail "dangling symlink not repaired"; fi
+rm -rf "$SCRATCH"
+
+# Case 10 — a project WITHOUT shared thoughts must still reuse — never hard-block phases 2-9.
+echo "Test 10: reuse-existing does not block a project that does not use shared thoughts"
+run_reuse_worktree plaindir no
+assert_eq "0" "$EXIT" "exits 0 (reuse proceeds) when thoughts is not configured"
+if [[ -d "$WT_PATH/thoughts/shared" && ! -L "$WT_PATH/thoughts/shared" ]]; then pass "unconfigured thoughts left untouched"; else fail "unconfigured thoughts unexpectedly modified"; fi
+rm -rf "$SCRATCH"
+
 # CTL-845 Phase 4: guard against re-committing a machine-local worktree.setup script.
 # The committed .catalyst/config.json must never reference an absolute /Users/ path
 # so the repo remains portable across machines.
