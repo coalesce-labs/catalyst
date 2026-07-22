@@ -1,15 +1,20 @@
 # Changelog
 
-## [12.33.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.32.0...catalyst-dev-v12.33.0) (2026-07-22)
+## [12.33.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.32.0...catalyst-dev-v12.33.0)
+
+Jul 22, 2026
+
+<!-- ai-enhanced -->
+
+### Dispatch Roster Failover & Worktree Repair
+
+Offline and never-live hosts no longer strand their share of the ticket backlog — dispatch ownership now hashes over a liveness-filtered roster with restore-side deflap hysteresis, so a live host picks up any slice whose owner has gone dark. A separate fix repairs worktrees whose `thoughts/shared` was left as a plain directory instead of a symlink, so handoffs and research written into reused worktrees actually sync instead of silently accumulating in a dead-end local dir.
 
 
-### Features
+
+### PRs
 
 * **dev:** CTL-1091 Phase 1 — route dispatch gates through the surviving roster ([#2671](https://github.com/coalesce-labs/catalyst/issues/2671)) ([2fb23ee](https://github.com/coalesce-labs/catalyst/commit/2fb23ee46d292a3e2975ca05a6e5c6856239346f))
-
-
-### Bug Fixes
-
 * **dev:** CTL-1497 — repair thoughts/shared on the worktree reuse path; guards test -L not -d ([#2685](https://github.com/coalesce-labs/catalyst/issues/2685)) ([c4bf08c](https://github.com/coalesce-labs/catalyst/commit/c4bf08c23f2cb8f442e152aa92090ab47a39b0ac))
 
 ## [12.32.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.31.0...catalyst-dev-v12.32.0)
