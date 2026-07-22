@@ -37,6 +37,8 @@ import {
   CLUSTER_SYNC_INTERVAL_MS,
   readDeadDocWorkerConfig,
   readBoardHealthConfig,
+  readCoordinationConfig,
+  getCoordinationMirrorPath,
   readSanctionedNeedsHuman,
   DEAD_DOC_WORKER_TRANSCRIPT_SILENCE_MS,
   readLinearReplica,
@@ -47,6 +49,9 @@ import {
   resolveExecutor,
   getExecutor,
   dispatchModeForExecutor,
+  resolveExecutorForPhase,
+  hasInProcessExecutorRoute,
+  codexConfig,
 } from "./config.mjs";
 
 const PREV = process.env.CATALYST_WAIT_WATCHER;
@@ -452,19 +457,20 @@ describe("executor flag + resolver (CTL-1365a)", () => {
     writeFileSync(l1, JSON.stringify({ catalyst: { orchestration: { executor } } }));
 
   test("EXECUTORS + DISPATCH_MODES are frozen closed enums", () => {
-    expect(EXECUTORS).toEqual(["bg", "sdk", "oneshot-legacy"]);
+    expect(EXECUTORS).toEqual(["bg", "sdk", "oneshot-legacy", "codex-exec"]);
     expect(Object.isFrozen(EXECUTORS)).toBe(true);
-    expect(DISPATCH_MODES).toEqual(["phase-agents", "oneshot-legacy", "sdk"]);
+    expect(DISPATCH_MODES).toEqual(["phase-agents", "oneshot-legacy", "sdk", "codex-exec"]);
     expect(Object.isFrozen(DISPATCH_MODES)).toBe(true);
     expect(() => {
       EXECUTORS.push("rogue");
     }).toThrow();
   });
 
-  test("dispatchModeForExecutor maps bg→phase-agents, sdk→sdk, oneshot-legacy→oneshot-legacy, unknown→phase-agents", () => {
+  test("dispatchModeForExecutor maps bg→phase-agents, sdk→sdk, oneshot-legacy→oneshot-legacy, codex-exec→codex-exec, unknown→phase-agents", () => {
     expect(dispatchModeForExecutor("bg")).toBe("phase-agents");
     expect(dispatchModeForExecutor("sdk")).toBe("sdk");
     expect(dispatchModeForExecutor("oneshot-legacy")).toBe("oneshot-legacy");
+    expect(dispatchModeForExecutor("codex-exec")).toBe("codex-exec");
     expect(dispatchModeForExecutor("nonsense")).toBe("phase-agents");
     expect(dispatchModeForExecutor(undefined)).toBe("phase-agents");
   });
@@ -517,7 +523,7 @@ describe("executor flag + resolver (CTL-1365a)", () => {
     const orig = console.warn;
     // The console-shim path logs WARN to stderr; capture via process.stderr.write.
     const origWrite = process.stderr.write.bind(process.stderr);
-    process.stderr.write = (chunk, ...rest) => {
+    process.stderr.write = (chunk) => {
       warnings.push(String(chunk));
       return true;
     };
@@ -559,6 +565,145 @@ describe("executor flag + resolver (CTL-1365a)", () => {
     process.env.CATALYST_EXECUTOR = "   ";
     writeL1("sdk"); // empty env falls through to Layer-1
     expect(resolveExecutor(l1).executor).toBe("sdk");
+  });
+
+  // --- CTL-1457: codex-exec value, compound aliases, per-phase routing, codexConfig ---
+
+  test("resolveExecutor accepts codex-exec + canonicalizes compound aliases; rejects unknown (existing behavior preserved)", () => {
+    process.env.CATALYST_EXECUTOR = "codex-exec";
+    const r = resolveExecutor(l1);
+    expect(r.executor).toBe("codex-exec");
+    expect(r.recognized).toBe(true);
+
+    // compound aliases canonicalize to the bare value
+    process.env.CATALYST_EXECUTOR = "claude-bg";
+    expect(resolveExecutor(l1).executor).toBe("bg");
+    process.env.CATALYST_EXECUTOR = "claude-sdk";
+    expect(resolveExecutor(l1).executor).toBe("sdk");
+    process.env.CATALYST_EXECUTOR = "claude-oneshot";
+    expect(resolveExecutor(l1).executor).toBe("oneshot-legacy");
+    // aliases are case-normalized (normalized is already toLowerCase)
+    process.env.CATALYST_EXECUTOR = "  CLAUDE-SDK ";
+    expect(resolveExecutor(l1).executor).toBe("sdk");
+
+    // an unknown value is STILL rejected → bg (most restrictive) + recognized:false
+    process.env.CATALYST_EXECUTOR = "totally-bogus";
+    const u = resolveExecutor(l1);
+    expect(u.executor).toBe("bg");
+    expect(u.recognized).toBe(false);
+  });
+
+  const writeExecutorByPhase = (map) =>
+    writeFileSync(l1, JSON.stringify({ catalyst: { orchestration: { executorByPhase: map } } }));
+
+  test("resolveExecutorForPhase returns the executorByPhase entry when the phase is routed", () => {
+    writeExecutorByPhase({ triage: "codex-exec" });
+    const r = resolveExecutorForPhase("triage", { configPath: l1 });
+    expect(r.executor).toBe("codex-exec");
+    expect(r.source).toBe("executorByPhase");
+  });
+
+  test("resolveExecutorForPhase canonicalizes a compound alias in the map", () => {
+    writeExecutorByPhase({ triage: "claude-sdk" });
+    expect(resolveExecutorForPhase("triage", { configPath: l1 }).executor).toBe("sdk");
+  });
+
+  test("resolveExecutorForPhase falls back to the node executor when the phase key is absent (unrouted = today)", () => {
+    writeExecutorByPhase({ triage: "codex-exec" });
+    const r = resolveExecutorForPhase("implement", { configPath: l1 });
+    expect(r.executor).toBe("bg"); // node-class default; unrouted behaves exactly as before
+    expect(r.source).toBe("default");
+  });
+
+  test("resolveExecutorForPhase with NO executorByPhase key returns the node executor", () => {
+    writeL1("sdk"); // top-level executor only, no per-phase map
+    expect(resolveExecutorForPhase("triage", { configPath: l1 }).executor).toBe("sdk");
+  });
+
+  test("resolveExecutorForPhase THROWS on an unknown executor value in the map (no silent fallback)", () => {
+    writeExecutorByPhase({ triage: "gpt-9000" });
+    expect(() => resolveExecutorForPhase("triage", { configPath: l1 })).toThrow(/gpt-9000/);
+    expect(() => resolveExecutorForPhase("triage", { configPath: l1 })).toThrow(/triage/);
+  });
+
+  // CTL-1457 (N1): hasInProcessExecutorRoute — does the map route ANY phase in-process?
+  test("hasInProcessExecutorRoute: true when a phase routes to codex-exec", () => {
+    expect(hasInProcessExecutorRoute({ triage: "codex-exec" })).toBe(true);
+  });
+  test("hasInProcessExecutorRoute: true when a phase routes to sdk", () => {
+    expect(hasInProcessExecutorRoute({ implement: "sdk" })).toBe(true);
+  });
+  test("hasInProcessExecutorRoute: true via a compound alias (claude-sdk→sdk)", () => {
+    expect(hasInProcessExecutorRoute({ plan: "claude-sdk" })).toBe(true);
+  });
+  test("hasInProcessExecutorRoute: false for an all-bg map (no in-process route)", () => {
+    expect(hasInProcessExecutorRoute({ triage: "bg", plan: "claude-bg" })).toBe(false);
+  });
+  test("hasInProcessExecutorRoute: false for an empty / absent / non-object map", () => {
+    expect(hasInProcessExecutorRoute({})).toBe(false);
+    expect(hasInProcessExecutorRoute(undefined)).toBe(false);
+    expect(hasInProcessExecutorRoute(null)).toBe(false);
+    expect(hasInProcessExecutorRoute("codex-exec")).toBe(false); // non-object → false
+  });
+  test("hasInProcessExecutorRoute: case-insensitive, whitespace-tolerant", () => {
+    expect(hasInProcessExecutorRoute({ triage: " Codex-Exec " })).toBe(true);
+  });
+
+  test("codexConfig resolves defaults (home ~/catalyst/codex-home, bin codex, model null, writableRoots [catalystDir])", () => {
+    // l1 has no codex key; env bag empty → pure defaults. catalystDir() reads the
+    // hermetic CATALYST_DIR pinned by test-setup.mjs.
+    const cfg = codexConfig({ configPath: l1, env: {} });
+    expect(cfg.codexHome).toBe(`${process.env.CATALYST_DIR}/codex-home`);
+    expect(cfg.bin).toBe("codex");
+    expect(cfg.model).toBeNull();
+    expect(cfg.writableRoots).toEqual([process.env.CATALYST_DIR]);
+    expect(cfg.pluginRoot).toBeNull();
+  });
+
+  test("codexConfig honors env overrides (CATALYST_CODEX_HOME/BIN/MODEL/PLUGIN_ROOT)", () => {
+    const cfg = codexConfig({
+      configPath: l1,
+      env: {
+        CATALYST_CODEX_HOME: "/custom/codex-home",
+        CATALYST_CODEX_BIN: "/opt/bin/codex",
+        CATALYST_CODEX_MODEL: "o4-mini",
+        CATALYST_CODEX_PLUGIN_ROOT: "/plugins/root",
+      },
+    });
+    expect(cfg.codexHome).toBe("/custom/codex-home");
+    expect(cfg.bin).toBe("/opt/bin/codex");
+    expect(cfg.model).toBe("o4-mini");
+    expect(cfg.pluginRoot).toBe("/plugins/root");
+  });
+
+  test("codexConfig reads Layer-1 catalyst.orchestration.codex.* (env wins over Layer-1)", () => {
+    writeFileSync(
+      l1,
+      JSON.stringify({
+        catalyst: {
+          orchestration: {
+            codex: {
+              codexHome: "/l1/codex-home",
+              bin: "codex-l1",
+              model: "gpt-l1",
+              writableRoots: ["/root/a", "/root/b"],
+              pluginRoot: "/l1/plugins",
+            },
+          },
+        },
+      }),
+    );
+    const cfg = codexConfig({ configPath: l1, env: {} });
+    expect(cfg.codexHome).toBe("/l1/codex-home");
+    expect(cfg.bin).toBe("codex-l1");
+    expect(cfg.model).toBe("gpt-l1");
+    expect(cfg.writableRoots).toEqual(["/root/a", "/root/b"]);
+    expect(cfg.pluginRoot).toBe("/l1/plugins");
+
+    // env override wins over the Layer-1 value
+    const overridden = codexConfig({ configPath: l1, env: { CATALYST_CODEX_BIN: "/env/codex" } });
+    expect(overridden.bin).toBe("/env/codex");
+    expect(overridden.model).toBe("gpt-l1"); // untouched keys still come from Layer-1
   });
 });
 
@@ -1125,6 +1270,64 @@ describe("readBoardHealthConfig (CTL-1290)", () => {
   });
 });
 
+describe("readCoordinationConfig (CTL-1488)", () => {
+  const CO_ENVS = ["CATALYST_COORDINATION_MODE", "CATALYST_COORDINATION_HUB_URL", "CATALYST_LAYER2_CONFIG_FILE"];
+  let saved = {}, tmp;
+  beforeEach(() => {
+    for (const k of CO_ENVS) { saved[k] = process.env[k]; delete process.env[k]; }
+    tmp = mkdtempSync(join(tmpdir(), "ctl1488-co-"));
+    process.env.CATALYST_LAYER2_CONFIG_FILE = join(tmp, "absent.json");
+  });
+  afterEach(() => {
+    for (const k of CO_ENVS) { saved[k] === undefined ? delete process.env[k] : (process.env[k] = saved[k]); }
+    saved = {}; rmSync(tmp, { recursive: true, force: true });
+  });
+
+  test("default (no env, no Layer-2) is 'off' — NOT 'shadow' like board-health", () => {
+    expect(readCoordinationConfig({}).mode).toBe("off");
+  });
+  test("CATALYST_COORDINATION_MODE=0 is the kill-switch regardless of Layer-2", () => {
+    expect(readCoordinationConfig({ CATALYST_COORDINATION_MODE: "0" }).mode).toBe("off");
+  });
+  test("env overrides Layer-2; Layer-2 overrides default", () => {
+    expect(readCoordinationConfig({ CATALYST_COORDINATION_MODE: "enforce" }).mode).toBe("enforce");
+  });
+  test("env off / shadow / enforce are honored", () => {
+    expect(readCoordinationConfig({ CATALYST_COORDINATION_MODE: "off" }).mode).toBe("off");
+    expect(readCoordinationConfig({ CATALYST_COORDINATION_MODE: "shadow" }).mode).toBe("shadow");
+    expect(readCoordinationConfig({ CATALYST_COORDINATION_MODE: "enforce" }).mode).toBe("enforce");
+  });
+  test("garbage env → falls back to off (fail-safe: the process/egress stays inert)", () => {
+    expect(readCoordinationConfig({ CATALYST_COORDINATION_MODE: "banana" }).mode).toBe("off");
+  });
+  test("reads catalyst.coordination.mode + hubUrl from Layer-2 when env absent", () => {
+    const cfg = join(tmp, "config.json");
+    writeFileSync(cfg, JSON.stringify({ catalyst: { coordination: { mode: "shadow", hubUrl: "https://hub.example" } } }));
+    process.env.CATALYST_LAYER2_CONFIG_FILE = cfg;
+    const c = readCoordinationConfig();
+    expect(c.mode).toBe("shadow");
+    expect(c.hubUrl).toBe("https://hub.example");
+  });
+  test("env CATALYST_COORDINATION_HUB_URL overrides Layer-2 hubUrl; unset hubUrl is null", () => {
+    expect(readCoordinationConfig({}).hubUrl).toBeNull();
+    expect(readCoordinationConfig({ CATALYST_COORDINATION_HUB_URL: "https://env.hub" }).hubUrl).toBe("https://env.hub");
+  });
+  test("malformed Layer-2 file → off (never throws)", () => {
+    const cfg = join(tmp, "config.json"); writeFileSync(cfg, "{ not json");
+    process.env.CATALYST_LAYER2_CONFIG_FILE = cfg;
+    expect(readCoordinationConfig().mode).toBe("off");
+  });
+  test("getCoordinationMirrorPath resolves coordination.jsonl under CATALYST_DIR", () => {
+    const prev = process.env.CATALYST_DIR;
+    process.env.CATALYST_DIR = tmp;
+    try {
+      expect(getCoordinationMirrorPath()).toBe(join(tmp, "coordination.jsonl"));
+    } finally {
+      prev === undefined ? delete process.env.CATALYST_DIR : (process.env.CATALYST_DIR = prev);
+    }
+  });
+});
+
 describe("readLinearReplica (CTL-1340)", () => {
   const LR_ENVS = ["CATALYST_LINEAR_REPLICA", "CATALYST_LAYER2_CONFIG_FILE"];
   let saved = {}, tmp;
@@ -1219,5 +1422,44 @@ describe("getReplicaDbPath (CTL-1340)", () => {
     expect(getReplicaDbPath()).toBe("/tmp/a/catalyst-replica.db");
     process.env.CATALYST_DIR = "/tmp/b";
     expect(getReplicaDbPath()).toBe("/tmp/b/catalyst-replica.db");
+  });
+});
+
+// ─── CTL-1091 (Codex P2): resolveRestoreHoldMs validation contract ───────────
+import { resolveRestoreHoldMs } from "./config.mjs";
+
+describe("resolveRestoreHoldMs — restore-hold override validation (CTL-1091 P2)", () => {
+  const DEF = 600_000;
+
+  test("unset (undefined) → default", () => {
+    expect(resolveRestoreHoldMs(undefined, DEF)).toBe(DEF);
+  });
+
+  test("empty string → default (NOT 0 — closes the Number(\"\")===0 bug)", () => {
+    expect(resolveRestoreHoldMs("", DEF)).toBe(DEF);
+    expect(resolveRestoreHoldMs("   ", DEF)).toBe(DEF);
+  });
+
+  test("explicit \"0\" → 0 (opt-out preserved, disables the hold)", () => {
+    expect(resolveRestoreHoldMs("0", DEF)).toBe(0);
+  });
+
+  test("negative → default (invalid)", () => {
+    expect(resolveRestoreHoldMs("-5", DEF)).toBe(DEF);
+    expect(resolveRestoreHoldMs("-1", DEF)).toBe(DEF);
+  });
+
+  test("non-numeric → default", () => {
+    expect(resolveRestoreHoldMs("abc", DEF)).toBe(DEF);
+    expect(resolveRestoreHoldMs("NaN", DEF)).toBe(DEF);
+  });
+
+  test("valid positive → honored", () => {
+    expect(resolveRestoreHoldMs("120000", DEF)).toBe(120_000);
+  });
+
+  test("non-string (defensive) → default", () => {
+    expect(resolveRestoreHoldMs(null, DEF)).toBe(DEF);
+    expect(resolveRestoreHoldMs(5000, DEF)).toBe(DEF);
   });
 });

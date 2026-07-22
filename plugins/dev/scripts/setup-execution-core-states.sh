@@ -198,11 +198,31 @@ worker_status_members() {
 # build_issue_label_group_create_mutation <name> <color>
 # Workspace-scoped: omits teamId so Linear assigns the label to the workspace,
 # not a specific team (the daemon applies via linearis which lists workspace labels).
-# CTL-764 finding A: creates the parent as a PLAIN workspace label — IssueLabelCreateInput
-# accepts only id/name/description/color/parentId/teamId, so sending isGroup:true is
-# rejected and the whole reconcile aborts before any child is created. A Linear label
-# becomes a group implicitly the moment a child is created with its parentId (below).
+# CTL-1483: the live API now REQUIRES isGroup:true on the parent create — a plain parent
+# rejects child attaches ("parent label is not a group", observed 2026-07-15). Inverts
+# the CTL-764 #2631-era shape. See build_worker_host_group_create_payload for the
+# variable-form twin (used where name/color are host-derived untrusted input).
 build_issue_label_group_create_mutation() {
+	local name="$1" color="$2"
+	cat <<MUTATION
+mutation {
+  issueLabelCreate(input: {
+    name: "${name}",
+    color: "${color}",
+    isGroup: true
+  }) {
+    success
+    issueLabel { id name }
+  }
+}
+MUTATION
+}
+
+# build_issue_label_group_create_mutation_plain <name> <color>
+# The pre-drift shape (no isGroup) — fallback when the API generation rejects the
+# isGroup input field (the CTL-764 #2631-era behavior). See build_worker_host_group_create_payload_plain
+# for the variable-form twin.
+build_issue_label_group_create_mutation_plain() {
 	local name="$1" color="$2"
 	cat <<MUTATION
 mutation {
@@ -215,6 +235,18 @@ mutation {
   }
 }
 MUTATION
+}
+
+# build_issue_label_group_upgrade_mutation <labelId>
+# issueLabelUpdate isGroup:true — upgrades an adopted plain parent so children can attach.
+# Returns a wrapped {query,variables} JSON envelope (pass directly to linear_graphql_post,
+# do NOT re-wrap). See build_worker_host_group_upgrade_payload for the variable-form twin.
+build_issue_label_group_upgrade_mutation() {
+	local label_id="$1"
+	jq -nc --arg id "$label_id" '{
+    query: "mutation($id: String!) { issueLabelUpdate(id: $id, input: { isGroup: true }) { success issueLabel { id isGroup } } }",
+    variables: { id: $id }
+  }'
 }
 
 # build_issue_label_child_create_mutation <name> <color> <parentId>
@@ -255,6 +287,13 @@ reconcile_worker_status_labels() {
 	payload=$(jq -nc --arg q "$query" '{query: $q}')
 	resp=$(linear_graphql_post "$token" "$payload")
 
+	# 4a: transport validation before .errors — a curl failure yields non-JSON text
+	# (mirrors reconcile_worker_host_labels :515-518).
+	if ! jq -e . >/dev/null 2>&1 <<<"$resp"; then
+		echo "WARNING: reconcile_worker_status_labels: non-JSON/transport response — skipping" >&2
+		return 0
+	fi
+
 	if echo "$resp" | jq -e '.errors' >/dev/null 2>&1; then
 		local err
 		err=$(echo "$resp" | jq -r '.errors[0].message // "unknown error"')
@@ -267,30 +306,64 @@ reconcile_worker_status_labels() {
 	labels_json=$(echo "$resp" | jq -c '.data.issueLabels.nodes // []')
 
 	# Find the existing workspace parent by name at the top level (parent == null).
-	# CTL-764 finding A: match on parent==null, NOT isGroup==true — a freshly-created
-	# parent is a plain label (isGroup false) until its first child attaches and Linear
-	# flips it to a group, so requiring isGroup would miss a parent whose child creation
-	# partially failed and wrongly re-issue a duplicate create.
-	local group_id
+	# Match on parent==null, NOT isGroup==true — a partial-failure prior run may have
+	# created the parent without isGroup (or without children), and requiring isGroup
+	# would wrongly re-create a duplicate.
+	# 4b: also extract group_is_group for the upgrade branch below (mirrors host :535-539).
+	local group_id group_is_group
 	group_id=$(echo "$labels_json" | jq -r --arg n "$group_name" \
 		'.[] | select(.name == $n and .parent == null) | .id // empty' | head -1)
+	group_is_group=$(echo "$labels_json" | jq -r --arg n "$group_name" \
+		'.[] | select(.name == $n and .parent == null) | .isGroup // false' | head -1)
 
 	if [[ -z $group_id ]]; then
-		# Create the group (workspace-scoped, isGroup:true, no teamId).
+		# 4c: Create the group with isGroup:true — the live API REJECTS attaching a child
+		# to a non-group parent ("parent label is not a group", observed 2026-07-15). If
+		# this API generation rejects the isGroup field, fall back to the pre-drift plain create.
 		local group_mutation group_payload group_resp
 		group_mutation=$(build_issue_label_group_create_mutation "$group_name" "#5e6ad2")
 		group_payload=$(jq -nc --arg q "$group_mutation" '{query: $q}')
 		group_resp=$(linear_graphql_post "$token" "$group_payload")
+		if ! jq -e . >/dev/null 2>&1 <<<"$group_resp"; then
+			echo "WARNING: reconcile_worker_status_labels: non-JSON/transport response — skipping" >&2
+			return 0
+		fi
 		if echo "$group_resp" | jq -e '.errors' >/dev/null 2>&1; then
 			local group_err
 			group_err=$(echo "$group_resp" | jq -r '.errors[0].message // "unknown error"')
-			echo "WARNING: reconcile_worker_status_labels: could not create group '${group_name}': ${group_err}" >&2
-			return 0
+			if [[ $group_err == *isGroup* ]]; then
+				echo "reconcile_worker_status_labels: isGroup rejected by this API generation — retrying plain create" >&2
+				group_mutation=$(build_issue_label_group_create_mutation_plain "$group_name" "#5e6ad2")
+				group_payload=$(jq -nc --arg q "$group_mutation" '{query: $q}')
+				group_resp=$(linear_graphql_post "$token" "$group_payload")
+				if ! jq -e . >/dev/null 2>&1 <<<"$group_resp" || echo "$group_resp" | jq -e '.errors' >/dev/null 2>&1; then
+					group_err=$(echo "$group_resp" | jq -r '.errors[0].message // "transport/non-JSON"' 2>/dev/null)
+					echo "WARNING: reconcile_worker_status_labels: could not create group '${group_name}': ${group_err}" >&2
+					return 0
+				fi
+			else
+				echo "WARNING: reconcile_worker_status_labels: could not create group '${group_name}': ${group_err}" >&2
+				return 0
+			fi
 		fi
 		group_id=$(echo "$group_resp" | jq -r '.data.issueLabelCreate.issueLabel.id // empty')
 		echo "reconcile_worker_status_labels: created group '${group_name}' (id: ${group_id})"
 	else
 		echo "reconcile_worker_status_labels: group '${group_name}' already present (id: ${group_id})"
+		if [[ $group_is_group != "true" ]]; then
+			# Adopted plain parent (pre-drift partial run): upgrade it to a group so
+			# child creates below can attach. WARN-and-continue on failure.
+			local upgrade_payload upgrade_resp
+			upgrade_payload=$(build_issue_label_group_upgrade_mutation "$group_id")
+			upgrade_resp=$(linear_graphql_post "$token" "$upgrade_payload")
+			if ! jq -e . >/dev/null 2>&1 <<<"$upgrade_resp" || echo "$upgrade_resp" | jq -e '.errors' >/dev/null 2>&1; then
+				local upgrade_err
+				upgrade_err=$(echo "$upgrade_resp" | jq -r '.errors[0].message // "transport/non-JSON"' 2>/dev/null)
+				echo "WARNING: reconcile_worker_status_labels: could not upgrade '${group_name}' to a group: ${upgrade_err}" >&2
+			else
+				echo "reconcile_worker_status_labels: upgraded plain '${group_name}' to a group (isGroup:true)"
+			fi
+		fi
 		# Note any pre-existing CTL-755 team-level labels now superseded by the workspace
 		# group (daemon applies by name). No API delete — avoids stripping historical tickets.
 		local stale
@@ -317,6 +390,11 @@ reconcile_worker_status_labels() {
 		child_mutation=$(build_issue_label_child_create_mutation "$member_name" "$member_color" "$group_id")
 		child_payload=$(jq -nc --arg q "$child_mutation" '{query: $q}')
 		child_resp=$(linear_graphql_post "$token" "$child_payload")
+		# 4d: transport validation before .errors (mirrors host :605-608).
+		if ! jq -e . >/dev/null 2>&1 <<<"$child_resp"; then
+			echo "WARNING: reconcile_worker_status_labels: non-JSON/transport response for '${member_name}' — skipping" >&2
+			continue
+		fi
 		if echo "$child_resp" | jq -e '.errors' >/dev/null 2>&1; then
 			local child_err
 			child_err=$(echo "$child_resp" | jq -r '.errors[0].message // "unknown error"')
@@ -325,6 +403,295 @@ reconcile_worker_status_labels() {
 			echo "reconcile_worker_status_labels: created child '${member_name}' under '${group_name}'"
 		fi
 	done <<<"$child_names"
+
+	return 0
+}
+
+# --- worker:<host> label group reconcile (CTL-1481) -------------------------
+# Idempotently ensures a workspace-scoped exclusive 'worker' label group with
+# one 'worker:<host>' child per cluster host, via issueLabelCreate. Mirrors
+# reconcile_worker_status_labels above exactly in shape and tolerance — this is
+# a best-effort VISIBILITY PROJECTION of which host currently owns/last-claimed
+# a ticket, NEVER the claim arbiter (cluster-claim.mjs's Linear-attachment CAS
+# + generation stay authoritative).
+
+# worker_host_group_name — the workspace-scoped exclusive label group name.
+worker_host_group_name() { echo "worker"; }
+
+# worker_host_color — single hex color shared by every worker:<host> child. An
+# ownership stamp isn't a disposition palette (unlike worker_status_members'
+# 4 distinct colors), so one harmonious color suffices — picked to read
+# distinctly from the existing queued/blocked/needs-input/needs-human hues.
+worker_host_color() { echo "#26a69a"; }
+
+# worker_host_self_name — this host's coordination name. Bash mirror of
+# config.mjs getHostName()'s precedence:
+#   1. CATALYST_HOST_NAME env (test/alias override)
+#   2. catalyst.host.name in the Layer-2 (machine-local) config file
+#   3. hostname, reduced to its first DNS label (strips .local, .rozich, etc.)
+# Never fails — always echoes something.
+worker_host_self_name() {
+	if [[ -n ${CATALYST_HOST_NAME:-} ]]; then
+		echo "$CATALYST_HOST_NAME"
+		return 0
+	fi
+	local layer2 name
+	layer2="${CATALYST_LAYER2_CONFIG_FILE:-$HOME/.config/catalyst/config.json}"
+	if [[ -f $layer2 ]]; then
+		name=$(jq -r '.catalyst.host.name // empty' "$layer2" 2>/dev/null)
+		if [[ -n $name ]]; then
+			echo "$name"
+			return 0
+		fi
+	fi
+	local h
+	h=$(hostname -s 2>/dev/null)
+	[[ -z $h ]] && h=$(hostname 2>/dev/null)
+	echo "${h%%.*}"
+}
+
+# worker_host_roster — cluster.json roster hosts (newline-separated). Fail-soft:
+# a missing or malformed cluster repo/file yields empty output, never an error.
+worker_host_roster() {
+	local cluster_dir cluster_file
+	# Mirror config.mjs getClusterRepoDir: CATALYST_CLUSTER_DIR, else the
+	# catalyst data dir (CATALYST_DIR, default ~/catalyst) + /catalyst-cluster.
+	cluster_dir="${CATALYST_CLUSTER_DIR:-${CATALYST_DIR:-$HOME/catalyst}/catalyst-cluster}"
+	cluster_file="${cluster_dir}/cluster.json"
+	[[ -f $cluster_file ]] || return 0
+	jq -r '.roster[]?' "$cluster_file" 2>/dev/null || true
+}
+
+# worker_host_static_roster_env — CATALYST_STATIC_ROSTER escape-hatch leg
+# (CTL-1481 finding 1). Comma-separated host list; mirrors config.mjs
+# getStaticRoster()'s env leg exactly (split, trim, drop blanks). Fail-soft:
+# unset/empty contributes nothing.
+worker_host_static_roster_env() {
+	local env="${CATALYST_STATIC_ROSTER:-}"
+	[[ -z $env ]] && return 0
+	tr ',' '\n' <<<"$env" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' | awk 'NF'
+}
+
+# worker_host_static_roster_layer2 — catalyst.cluster.staticRoster escape-hatch
+# leg (CTL-1481 finding 1). Mirrors config.mjs getStaticRoster()'s file leg: a
+# JSON array of host-name strings at .catalyst.cluster.staticRoster in the
+# Layer-2 (machine-local) config. Fail-soft: a missing file, malformed JSON,
+# non-array value, or non-string/empty entries contribute nothing.
+worker_host_static_roster_layer2() {
+	local layer2
+	layer2="${CATALYST_LAYER2_CONFIG_FILE:-$HOME/.config/catalyst/config.json}"
+	[[ -f $layer2 ]] || return 0
+	jq -r '.catalyst.cluster.staticRoster // [] | .[] | select(type == "string" and length > 0)' \
+		"$layer2" 2>/dev/null || true
+}
+
+# worker_host_list — union of the cluster.json roster, the
+# CATALYST_STATIC_ROSTER env escape hatch, the Layer-2
+# catalyst.cluster.staticRoster escape hatch, and this host's own name, deduped
+# (newline-separated). CTL-1481 finding 1: unlike config.mjs's
+# resolveClusterHosts (which picks ONE source by precedence for roster
+# membership), label provisioning wants a child label for every host that
+# could ever claim a ticket, so all sources are unioned rather than
+# precedence-selected — over-provisioning a label is harmless and idempotent.
+# Each leg is independently fail-soft; never empty in practice —
+# worker_host_self_name always resolves to something.
+worker_host_list() {
+	{ worker_host_roster
+		worker_host_static_roster_env
+		worker_host_static_roster_layer2
+		worker_host_self_name
+	} | awk 'NF' | sort -u
+}
+
+# build_worker_host_group_create_payload <name> <color>
+# CTL-1481 finding 2: unlike build_issue_label_group_create_mutation above
+# (used only with the static worker-status group name/color literals), the
+# name here is a host-derived string (cluster.json roster / env / Layer-2
+# config) — untrusted input that could contain a double-quote or backslash and
+# break or inject into a spliced-in GraphQL query. So name/color travel as
+# GraphQL variables and the query text stays a fixed string.
+build_worker_host_group_create_payload() {
+	local name="$1" color="$2"
+	jq -nc --arg name "$name" --arg color "$color" '{
+    query: "mutation($name: String!, $color: String!) { issueLabelCreate(input: { name: $name, color: $color, isGroup: true }) { success issueLabel { id name } } }",
+    variables: { name: $name, color: $color }
+  }'
+}
+
+# build_worker_host_group_create_payload_plain <name> <color>
+# The pre-drift shape (no isGroup) — the fallback when the API generation
+# rejects the isGroup input field (the CTL-764 #2631-era behavior). See the
+# group-create fallback in reconcile_worker_host_labels.
+build_worker_host_group_create_payload_plain() {
+	local name="$1" color="$2"
+	jq -nc --arg name "$name" --arg color "$color" '{
+    query: "mutation($name: String!, $color: String!) { issueLabelCreate(input: { name: $name, color: $color }) { success issueLabel { id name } } }",
+    variables: { name: $name, color: $color }
+  }'
+}
+
+# build_worker_host_group_upgrade_payload <labelId>
+# issueLabelUpdate isGroup:true — upgrades an adopted plain parent (a
+# pre-drift partial run, or a customer label adopted by name) so children can
+# attach: the live API now REJECTS issueLabelCreate(parentId:) against a
+# non-group parent ("parent label is not a group", observed 2026-07-15).
+build_worker_host_group_upgrade_payload() {
+	local label_id="$1"
+	jq -nc --arg id "$label_id" '{
+    query: "mutation($id: String!) { issueLabelUpdate(id: $id, input: { isGroup: true }) { success issueLabel { id isGroup } } }",
+    variables: { id: $id }
+  }'
+}
+
+# build_worker_host_child_create_payload <name> <color> <parentId>
+# Same variables treatment as build_worker_host_group_create_payload, plus
+# parentId (also untrusted-shaped — derived from the group's resolved id, but
+# kept as a variable for consistency and to avoid re-introducing splicing).
+build_worker_host_child_create_payload() {
+	local name="$1" color="$2" parent_id="$3"
+	jq -nc --arg name "$name" --arg color "$color" --arg parentId "$parent_id" '{
+    query: "mutation($name: String!, $color: String!, $parentId: String!) { issueLabelCreate(input: { name: $name, color: $color, parentId: $parentId }) { success issueLabel { id name } } }",
+    variables: { name: $name, color: $color, parentId: $parentId }
+  }'
+}
+
+# reconcile_worker_host_labels <token>
+# Ensures the workspace-scoped 'worker' group and one 'worker:<host>' child per
+# cluster host exist. Idempotent: re-runs issue zero mutations when all
+# present. Tolerant: any Linear failure WARNs and returns 0 — never alters
+# exit codes 0/2/3/4. CTL-1481 finding 3: every response is checked for valid
+# JSON before `.errors` is consulted — a curl transport failure (timeout, TLS
+# error, connection refused) yields non-JSON text on stdout, and `jq -e
+# '.errors'` on unparseable input silently evaluates falsy, which would read as
+# "no errors" and log a false success.
+reconcile_worker_host_labels() {
+	local token="$1"
+	local group_name
+	group_name=$(worker_host_group_name)
+
+	local hosts
+	hosts=$(worker_host_list)
+	if [[ -z $hosts ]]; then
+		echo "WARNING: reconcile_worker_host_labels: no hosts resolved (empty roster and self) — skipping" >&2
+		return 0
+	fi
+
+	if [[ ${dry_run:-0} -eq 1 ]]; then
+		echo "DRY-RUN: would ensure worker label group (${group_name}) with children: $(echo "$hosts" | tr '\n' ' ')"
+		return 0
+	fi
+
+	# Query workspace labels (team:null = workspace-scoped, not per-team).
+	local query payload resp
+	# Narrowed server-side to names starting "worker" so the group + every
+	# worker:<host> child always fit one page — a >250-label workspace cannot
+	# push them past the first-page bound (Codex #2650 round-3).
+	query='query { issueLabels(filter: {team: {null: true}, name: {startsWith: "worker"}}, first: 250) { nodes { id name isGroup parent { id } } } }'
+	payload=$(jq -nc --arg q "$query" '{query: $q}')
+	resp=$(linear_graphql_post "$token" "$payload")
+
+	if ! jq -e . >/dev/null 2>&1 <<<"$resp"; then
+		echo "WARNING: reconcile_worker_host_labels: non-JSON/transport response — skipping" >&2
+		return 0
+	fi
+
+	if echo "$resp" | jq -e '.errors' >/dev/null 2>&1; then
+		local err
+		err=$(echo "$resp" | jq -r '.errors[0].message // "unknown error"')
+		echo "WARNING: reconcile_worker_host_labels: could not query workspace labels: ${err}" >&2
+		return 0
+	fi
+
+	# Parse the response into a JSON array once; all subsequent lookups use jq over this.
+	local labels_json
+	labels_json=$(echo "$resp" | jq -c '.data.issueLabels.nodes // []')
+
+	# Find the existing workspace parent by name at the top level (parent == null).
+	# Same #2631 rationale as reconcile_worker_status_labels: match on parent==null
+	# (not isGroup==true) so a partial-failure prior run — or a customer's plain
+	# label adopted by name — is found rather than re-created.
+	local group_id group_is_group
+	group_id=$(echo "$labels_json" | jq -r --arg n "$group_name" \
+		'.[] | select(.name == $n and .parent == null) | .id // empty' | head -1)
+	group_is_group=$(echo "$labels_json" | jq -r --arg n "$group_name" \
+		'.[] | select(.name == $n and .parent == null) | .isGroup // false' | head -1)
+
+	if [[ -z $group_id ]]; then
+		# Create the group with isGroup:true — the live API REJECTS attaching a
+		# child to a non-group parent ("parent label is not a group", observed
+		# 2026-07-15; inverts the CTL-764 #2631-era behavior where isGroup was
+		# itself rejected). If THIS API generation rejects the isGroup field,
+		# fall back to the pre-drift plain create.
+		local group_payload group_resp
+		group_payload=$(build_worker_host_group_create_payload "$group_name" "$(worker_host_color)")
+		group_resp=$(linear_graphql_post "$token" "$group_payload")
+		if ! jq -e . >/dev/null 2>&1 <<<"$group_resp"; then
+			echo "WARNING: reconcile_worker_host_labels: non-JSON/transport response — skipping" >&2
+			return 0
+		fi
+		if echo "$group_resp" | jq -e '.errors' >/dev/null 2>&1; then
+			local group_err
+			group_err=$(echo "$group_resp" | jq -r '.errors[0].message // "unknown error"')
+			if [[ $group_err == *isGroup* ]]; then
+				echo "reconcile_worker_host_labels: isGroup rejected by this API generation — retrying plain create" >&2
+				group_payload=$(build_worker_host_group_create_payload_plain "$group_name" "$(worker_host_color)")
+				group_resp=$(linear_graphql_post "$token" "$group_payload")
+				if ! jq -e . >/dev/null 2>&1 <<<"$group_resp" || echo "$group_resp" | jq -e '.errors' >/dev/null 2>&1; then
+					group_err=$(echo "$group_resp" | jq -r '.errors[0].message // "transport/non-JSON"' 2>/dev/null)
+					echo "WARNING: reconcile_worker_host_labels: could not create group '${group_name}': ${group_err}" >&2
+					return 0
+				fi
+			else
+				echo "WARNING: reconcile_worker_host_labels: could not create group '${group_name}': ${group_err}" >&2
+				return 0
+			fi
+		fi
+		group_id=$(echo "$group_resp" | jq -r '.data.issueLabelCreate.issueLabel.id // empty')
+		echo "reconcile_worker_host_labels: created group '${group_name}' (id: ${group_id})"
+	else
+		echo "reconcile_worker_host_labels: group '${group_name}' already present (id: ${group_id})"
+		if [[ $group_is_group != "true" ]]; then
+			# Adopted plain parent (pre-drift partial run or a same-name customer
+			# label): upgrade it to a group so the child creates below can attach.
+			# WARN-and-continue on failure — the per-child WARNs then surface it.
+			local upgrade_payload upgrade_resp
+			upgrade_payload=$(build_worker_host_group_upgrade_payload "$group_id")
+			upgrade_resp=$(linear_graphql_post "$token" "$upgrade_payload")
+			if ! jq -e . >/dev/null 2>&1 <<<"$upgrade_resp" || echo "$upgrade_resp" | jq -e '.errors' >/dev/null 2>&1; then
+				local upgrade_err
+				upgrade_err=$(echo "$upgrade_resp" | jq -r '.errors[0].message // "transport/non-JSON"' 2>/dev/null)
+				echo "WARNING: reconcile_worker_host_labels: could not upgrade '${group_name}' to a group: ${upgrade_err}" >&2
+			else
+				echo "reconcile_worker_host_labels: upgraded plain '${group_name}' to a group (isGroup:true)"
+			fi
+		fi
+	fi
+
+	# Create only missing children (one per host, name "worker:<host>").
+	local host_name
+	while IFS= read -r host_name; do
+		[[ -z $host_name ]] && continue
+		local child_name already
+		child_name="worker:${host_name}"
+		already=$(echo "$labels_json" | jq -r --arg n "$child_name" --arg pid "$group_id" \
+			'.[] | select(.name == $n and .parent.id == $pid) | .name // empty' | head -1)
+		if [[ -n $already ]]; then continue; fi
+
+		local child_payload child_resp
+		child_payload=$(build_worker_host_child_create_payload "$child_name" "$(worker_host_color)" "$group_id")
+		child_resp=$(linear_graphql_post "$token" "$child_payload")
+		if ! jq -e . >/dev/null 2>&1 <<<"$child_resp"; then
+			echo "WARNING: reconcile_worker_host_labels: non-JSON/transport response for '${child_name}' — skipping" >&2
+			continue
+		fi
+		if echo "$child_resp" | jq -e '.errors' >/dev/null 2>&1; then
+			local child_err
+			child_err=$(echo "$child_resp" | jq -r '.errors[0].message // "unknown error"')
+			echo "WARNING: reconcile_worker_host_labels: could not create '${child_name}': ${child_err}" >&2
+		else
+			echo "reconcile_worker_host_labels: created child '${child_name}' under '${group_name}'"
+		fi
+	done <<<"$hosts"
 
 	return 0
 }
@@ -731,6 +1098,11 @@ main() {
 	# Must run before git automations so the group exists before the daemon starts
 	# applying labels. Best-effort — never alters exit codes 0/2/3/4.
 	reconcile_worker_status_labels "$token" || true
+
+	# --- reconcile worker:<host> label group (CTL-1481) ------------------------
+	# Best-effort visibility projection — never gates the exit code. Runs right
+	# after the worker-status reconcile (same install-time step, same tolerance).
+	reconcile_worker_host_labels "$token" || true
 
 	# --- reconcile Linear git automations (CTL-759) — the LAST Linear step ---
 	# Best-effort hardening: pins start→PR / merge→Done and removes any review

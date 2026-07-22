@@ -262,6 +262,7 @@ jobs:
             cluster-claim-sync.test.mjs \
             cluster-claim.test.mjs \
             comms-drain.test.mjs \
+            codex-run-phase-agent.test.mjs \
             config-pino-fallback.test.mjs \
             config-node-class.test.mjs \
             config-cloud-token-env.test.mjs \

@@ -390,19 +390,21 @@ export function getNodeClass() {
 // --- CTL-1365a: phase-worker executor selection seam ---
 //
 // `catalyst.orchestration.executor` selects the phase-worker substrate at the
-// dispatch seam. Three substrates:
+// dispatch seam. Four substrates:
 //   - "bg"             today's detached `claude --bg` job via phase-agent-dispatch.
 //   - "sdk"            in-process @anthropic-ai/claude-agent-sdk query() worker
 //                      (CTL-1365b). NOT yet implemented — resolves here, but the
 //                      dispatch wiring (dispatch.mjs:dispatchForExecutor) falls
 //                      back to bg + warns until 1b lands.
 //   - "oneshot-legacy" the catalyst-legacy single long-lived job/ticket fallback.
+//   - "codex-exec"     child-process `codex exec --json` phase worker on OpenAI
+//                      Codex (CTL-1457). Routed per-phase via executorByPhase.
 //
 // Resolution mirrors resolveNodeClass: CATALYST_EXECUTOR env → Layer-1
 // catalyst.orchestration.executor → node-class default. Phase 1: every node-class
 // maps to "bg", so the resolver is a pure no-op (an unset flag never changes
 // behavior) until an operator explicitly flips a node.
-export const EXECUTORS = Object.freeze(["bg", "sdk", "oneshot-legacy"]);
+export const EXECUTORS = Object.freeze(["bg", "sdk", "oneshot-legacy", "codex-exec"]);
 // The most-restrictive / always-safe substrate. An unrecognized explicit value
 // degrades HERE (never silently to sdk) + warns once, mirroring
 // NODE_CLASS_MOST_RESTRICTIVE — a typo'd flag can never put a node on an
@@ -417,21 +419,46 @@ const EXECUTOR_BY_NODE_CLASS = Object.freeze({
   monitor: "bg",
 });
 
+// CTL-1457: compound executor aliases — the fully-qualified `<harness>-<mechanism>`
+// spelling of an existing bare value. The bare values (bg|sdk|oneshot-legacy|
+// codex-exec) stay canonical; these read-time-only aliases let an operator write
+// the harness-qualified name and have it resolve to the canonical id. Applied
+// inside resolveExecutor (and resolveExecutorForPhase) BEFORE the EXECUTORS
+// membership check. Purely additive — never renames a stored value.
+const EXECUTOR_ALIASES = Object.freeze({
+  "claude-bg": "bg",
+  "claude-sdk": "sdk",
+  "claude-oneshot": "oneshot-legacy",
+});
+
 // The dispatch-mode telemetry vocab (CTL-1365a / OTEL #43/#44, frozen 2026-06-25).
 // executor → catalyst.dispatch.mode value. Closed enum {phase-agents |
-// oneshot-legacy | sdk}: "bg" maps to the existing "phase-agents" label so the
-// telemetry name is stable across the rename.
-export const DISPATCH_MODES = Object.freeze(["phase-agents", "oneshot-legacy", "sdk"]);
+// oneshot-legacy | sdk | codex-exec}: "bg" maps to the existing "phase-agents"
+// label so the telemetry name is stable across the rename.
+export const DISPATCH_MODES = Object.freeze(["phase-agents", "oneshot-legacy", "sdk", "codex-exec"]);
 const DISPATCH_MODE_BY_EXECUTOR = Object.freeze({
   bg: "phase-agents",
   sdk: "sdk",
   "oneshot-legacy": "oneshot-legacy",
+  "codex-exec": "codex-exec",
 });
 // dispatchModeForExecutor — map a resolved executor to its dispatch-mode telemetry
 // value. Unknown/undefined → "phase-agents" (the safe default that matches today's
 // substrate). Pure; never throws.
 export function dispatchModeForExecutor(executor) {
   return DISPATCH_MODE_BY_EXECUTOR[executor] ?? "phase-agents";
+}
+
+// isInProcessDispatchMode — CTL-1457 (T2): does this dispatch mode run its phase
+// workers IN-PROCESS (no `claude --bg` job, hence no bg_job_id)? Both "sdk" (the
+// in-process Agent SDK query) and "codex-exec" (a `codex exec --json` child that the
+// daemon prelaunches + tracks by no-bg_job_id signal, queued behind a semaphore)
+// write the same no-bg "dispatched" signals, so BOTH must contribute to the slot /
+// occupancy gates or a node at maxParallel shows zero occupied slots and over-admits.
+// "phase-agents" (bg) and "oneshot-legacy" are out-of-process (bg_job_id) → false.
+// Pure; never throws.
+export function isInProcessDispatchMode(mode) {
+  return mode === "sdk" || mode === "codex-exec";
 }
 
 // readExecutorLayer1 — pull catalyst.orchestration.executor out of a project's
@@ -498,8 +525,11 @@ export function resolveExecutor(configPath) {
   if (normalized.length === 0) {
     return { executor: nodeClassDefault, source: "default", inferred: true, recognized: true, raw: null };
   }
-  if (EXECUTORS.includes(normalized)) {
-    return { executor: normalized, source, inferred: false, recognized: true, raw };
+  // CTL-1457: canonicalize a compound alias (claude-bg→bg …) before the membership
+  // check. An alias is never "" so this stays after the cleared-string short-circuit.
+  const canonical = EXECUTOR_ALIASES[normalized] ?? normalized;
+  if (EXECUTORS.includes(canonical)) {
+    return { executor: canonical, source, inferred: false, recognized: true, raw };
   }
   return { executor: EXECUTOR_DEFAULT, source, inferred: false, recognized: false, raw };
 }
@@ -523,6 +553,136 @@ export function getExecutor(configPath) {
     }
   }
   return r.executor;
+}
+
+// --- CTL-1457: per-phase executor routing + codex-exec runtime settings ---
+
+// readExecutorByPhaseLayer1 — pull catalyst.orchestration.executorByPhase (a
+// phase→executor map) out of a project's Layer-1 .catalyst/config.json. Returns
+// {} for a null/missing/unparseable file or an absent/non-object key so callers
+// fall back to the daemon executor. Never throws — mirrors
+// readFleetHealthConfigLayer1's ENOENT-tolerant shape.
+export function readExecutorByPhaseLayer1(configPath) {
+  if (!configPath) return {};
+  try {
+    const parsed = JSON.parse(readFileSync(configPath, "utf8"));
+    const map = parsed?.catalyst?.orchestration?.executorByPhase;
+    return map && typeof map === "object" ? map : {};
+  } catch (err) {
+    if (err?.code !== "ENOENT") {
+      log.warn(
+        { configPath, err: err.message },
+        "executorByPhase: Layer-1 config unreadable; using daemon executor"
+      );
+    }
+    return {};
+  }
+}
+
+// resolveExecutorForPhase — the per-phase routing hook (CTL-1457), consulted at
+// the daemon's dispatch site to pick the executor for ONE specific phase.
+//   - When catalyst.orchestration.executorByPhase[phase] is present: canonicalize
+//     any compound alias (claude-sdk→sdk) then validate against EXECUTORS. An
+//     INVALID value THROWS a loud, actionable config error naming the phase + the
+//     bad value + the valid set — routing NEVER silently falls back on a typo (a
+//     silently-downgraded routed phase would be a debugging nightmare).
+//   - When the phase key is absent/empty: return the node/daemon executor via
+//     resolveExecutor(configPath).executor, so unrouted phases behave EXACTLY as
+//     today (zero behavior change when executorByPhase is empty).
+// Returns { executor, source } — source is "executorByPhase" for a routed phase,
+// else resolveExecutor's source ("env" | "layer1" | "default"). The `env` bag is
+// accepted for signature symmetry with the other injected-env-bag readers; routing
+// itself is Layer-1-file-only today (there is no env override for the map).
+export function resolveExecutorForPhase(phase, { configPath, env = process.env } = {}) {
+  void env; // reserved for signature symmetry; per-phase routing is Layer-1-file-only.
+  const map = readExecutorByPhaseLayer1(configPath);
+  const raw = phase != null ? map[phase] : undefined;
+  if (typeof raw === "string" && raw.trim() !== "") {
+    const normalized = raw.trim().toLowerCase();
+    const canonical = EXECUTOR_ALIASES[normalized] ?? normalized;
+    if (!EXECUTORS.includes(canonical)) {
+      throw new Error(
+        `catalyst.orchestration.executorByPhase["${phase}"] = "${raw}" is not a valid executor — ` +
+          `expected one of [${EXECUTORS.join(", ")}] ` +
+          `(aliases: ${Object.keys(EXECUTOR_ALIASES).join(", ")}). ` +
+          `Fix the Layer-1 config; per-phase routing refuses to silently fall back on an invalid value.`
+      );
+    }
+    return { executor: canonical, source: "executorByPhase" };
+  }
+  const r = resolveExecutor(configPath);
+  return { executor: r.executor, source: r.source };
+}
+
+// hasInProcessExecutorRoute — CTL-1457 (N1): does the executorByPhase map route ANY
+// phase to an IN-PROCESS executor (sdk|codex-exec)? The slot/occupancy gates count
+// no-bg in-flight workers gated on isInProcessDispatchMode(dispatchMode) — but that
+// gates on the NODE boot mode. The PRIMARY codex/sdk rollout routes ONE phase to
+// codex-exec/sdk on a node whose boot mode is still "phase-agents" (bg); there the
+// mode gate is false and the routed no-bg worker is NOT counted → over-admit past
+// maxParallel. This predicate ORs into those gates so a bg/oneshot-legacy node that
+// routes any phase in-process still arms countSdkInflight. Pure over the ALREADY-READ
+// map object (the daemon reads executorByPhase once at boot and passes it here — no
+// extra IO); canonicalizes compound aliases (claude-sdk→sdk) before the membership
+// test; returns false for an empty/absent/non-object map (the common case → zero
+// behavior change, so the zero-change-when-unrouted invariant holds). Never throws.
+export function hasInProcessExecutorRoute(executorByPhase) {
+  if (!executorByPhase || typeof executorByPhase !== "object") return false;
+  for (const raw of Object.values(executorByPhase)) {
+    if (typeof raw !== "string") continue;
+    const normalized = raw.trim().toLowerCase();
+    const canonical = EXECUTOR_ALIASES[normalized] ?? normalized;
+    if (isInProcessDispatchMode(canonical)) return true;
+  }
+  return false;
+}
+
+// readCodexConfigLayer1 — pull catalyst.orchestration.codex out of a project's
+// Layer-1 .catalyst/config.json. Returns {} for a null/missing/unparseable file
+// or an absent/non-object key. Never throws — mirrors readFleetHealthConfigLayer1.
+export function readCodexConfigLayer1(configPath) {
+  if (!configPath) return {};
+  try {
+    const parsed = JSON.parse(readFileSync(configPath, "utf8"));
+    const c = parsed?.catalyst?.orchestration?.codex;
+    return c && typeof c === "object" ? c : {};
+  } catch (err) {
+    if (err?.code !== "ENOENT") {
+      log.warn(
+        { configPath, err: err.message },
+        "codex: Layer-1 config unreadable; using defaults"
+      );
+    }
+    return {};
+  }
+}
+
+// codexConfig — resolve the codex-exec runtime settings (CTL-1457). Precedence per
+// key: env → Layer-1 catalyst.orchestration.codex.<key> → default. Mirrors the
+// readFleetHealthConfig style (Layer-1 object + env overrides + defaults). Never
+// throws. Returns { codexHome, bin, model, writableRoots, pluginRoot }:
+//   - codexHome     CATALYST_CODEX_HOME → codex.codexHome → ${catalystDir()}/codex-home
+//   - bin           CATALYST_CODEX_BIN  → codex.bin       → "codex"
+//   - model         CATALYST_CODEX_MODEL → codex.model    → null (null = let the
+//                   codex config.toml decide; buildCodexArgs adds -m ONLY when
+//                   non-null — we never invent a model id).
+//   - writableRoots codex.writableRoots (array of strings) → [catalystDir()]. The
+//                   thoughts-root is added downstream at arg-build time from the
+//                   worktree, NOT here — config.mjs has no thoughts resolver.
+//   - pluginRoot    CATALYST_CODEX_PLUGIN_ROOT → codex.pluginRoot → null (resolved
+//                   from the launch spec's pluginDirs at runtime).
+export function codexConfig({ configPath, env = process.env } = {}) {
+  const l1 = readCodexConfigLayer1(configPath);
+  const writableRoots = Array.isArray(l1.writableRoots)
+    ? l1.writableRoots.filter((v) => typeof v === "string" && v.trim() !== "")
+    : [];
+  return {
+    codexHome: resolveNonEmptyString(env.CATALYST_CODEX_HOME, l1.codexHome, `${catalystDir()}/codex-home`),
+    bin: resolveNonEmptyString(env.CATALYST_CODEX_BIN, l1.bin, "codex"),
+    model: resolveNonEmptyString(env.CATALYST_CODEX_MODEL, l1.model, null),
+    writableRoots: writableRoots.length > 0 ? writableRoots : [catalystDir()],
+    pluginRoot: resolveNonEmptyString(env.CATALYST_CODEX_PLUGIN_ROOT, l1.pluginRoot, null),
+  };
 }
 
 // getStaticRoster — the `static` escape-hatch roster (CTL-1273). A multi-host
@@ -711,6 +871,33 @@ export const HEARTBEAT_INTERVAL_MS =
 // live-but-slow host is worse than a slow takeover. Env-overridable for tests.
 export const HEARTBEAT_GRACE_MS =
   Number(process.env.EXECUTION_CORE_HEARTBEAT_GRACE_MS) || 600_000;
+
+// resolveRestoreHoldMs — parse the CTL-1091 restore-hold override with the
+// documented fallback semantics. Valid: a finite value >= 0, INCLUDING an explicit
+// 0 (opt-out: disables the hold, admitting a restored host immediately). Invalid →
+// fall back to `defaultMs`: unset, empty/whitespace, non-numeric, OR negative.
+// CTL-1091 (Codex P2): a bare `Number(env)` coerced an EMPTY value ("") to 0 and
+// accepted NEGATIVE values, either of which silently disabled the deflap (a flapping
+// host would immediately reclaim its HRW slice) — contradicting the "unset/garbled →
+// default" contract. Exported for unit tests.
+export function resolveRestoreHoldMs(rawStr, defaultMs) {
+  if (typeof rawStr !== "string" || rawStr.trim() === "") return defaultMs;
+  const n = Number(rawStr);
+  return Number.isFinite(n) && n >= 0 ? n : defaultMs;
+}
+
+// HEARTBEAT_RESTORE_HOLD_MS — CTL-1091 restore-side deflap. A host that
+// transitioned dead→live must be observed continuously live for this window
+// before it re-enters the DISPATCH ownership roster, so a flapping laptop (lid
+// open/close) does not grab-then-strand new work. Default = one grace window
+// (symmetric with the shed side). During the hold the surviving peer keeps
+// covering the slice, so there is no starvation gap. Env-overridable via
+// EXECUTION_CORE_HEARTBEAT_RESTORE_HOLD_MS for tests/tuning (see resolveRestoreHoldMs
+// for the validation contract — explicit 0 opt-out honored; empty/negative → default).
+export const HEARTBEAT_RESTORE_HOLD_MS = resolveRestoreHoldMs(
+  process.env.EXECUTION_CORE_HEARTBEAT_RESTORE_HOLD_MS,
+  HEARTBEAT_GRACE_MS,
+);
 
 // CLUSTER_SYNC_INTERVAL_MS — how often the daemon git-pulls the catalyst-cluster
 // clone so a roster change committed on one node (CTL-1274 cluster cli) reaches
@@ -1392,6 +1579,53 @@ export function readBoardHealthConfig(env = process.env) {
     mode = "shadow"; // CTL-1290 floor: shadow mutates nothing; garbage → shadow
   }
   return { mode };
+}
+
+// CTL-1488: coordination-substrate rollout config. Same off→shadow→enforce
+// discipline (ADR-023) and env-override → Layer-2 → default precedence as
+// readBoardHealthConfig, with ONE deliberate difference: the default is "off",
+// NOT board-health's "shadow" floor. Coordination adds an always-on background
+// process (coordination-publish) and — in enforce — network egress to the hub,
+// so the safe default is fully inert until an operator promotes it.
+export const COORDINATION_MODES = new Set(["off", "shadow", "enforce"]);
+
+function readLayer2Coordination() {
+  try {
+    const c = JSON.parse(readFileSync(getLayer2ConfigPath(), "utf8"))?.catalyst?.coordination;
+    return c && typeof c === "object" ? c : {};
+  } catch { return {}; }
+}
+
+export function readCoordinationConfig(env = process.env) {
+  const l2 = readLayer2Coordination();
+  const v = env.CATALYST_COORDINATION_MODE;
+  let mode;
+  if (v === "0") {
+    mode = "off"; // kill-switch — always wins, regardless of Layer-2
+  } else if (typeof v === "string" && COORDINATION_MODES.has(v)) {
+    mode = v;
+  } else if (typeof l2.mode === "string" && COORDINATION_MODES.has(l2.mode)) {
+    mode = l2.mode;
+  } else {
+    mode = "off"; // fail-safe: unset/garbage → inert (no process, no egress)
+  }
+  // hubUrl: the catalyst-cloud coordination changefeed base URL (Phase 4/5).
+  // env override → Layer-2 → null. Null forces the interim Loki-tail transport.
+  const envHub = env.CATALYST_COORDINATION_HUB_URL;
+  const hubUrl =
+    typeof envHub === "string" && envHub !== ""
+      ? envHub
+      : typeof l2.hubUrl === "string" && l2.hubUrl !== ""
+        ? l2.hubUrl
+        : null;
+  return { mode, hubUrl };
+}
+
+// CTL-1488: the local-first coordination mirror. coordination-publish writes the
+// ordered coordination subset here (with local_seq) synchronously before any
+// network call; the inbound mirror-tail client merges other hosts' rows in.
+export function getCoordinationMirrorPath() {
+  return resolve(catalystDir(), "coordination.jsonl");
 }
 
 // CTL-1331: delegate-runner config reader. Gates the DETACHED process that

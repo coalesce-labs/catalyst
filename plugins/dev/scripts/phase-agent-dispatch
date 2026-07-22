@@ -438,6 +438,17 @@ resolve_model() {
 }
 MODEL="$(resolve_model)"
 
+# ─── CTL-1457: resolve the executor attribution ─────────────────────────────
+#
+# The daemon's per-phase routing threads the chosen launch verb via
+# CATALYST_EXECUTOR_ID (the sdk/codex prelaunch runners set it; a bare `claude
+# --bg` dispatch inherits it from dispatch.mjs:defaultRunPhaseAgent). A legacy /
+# bare dispatch with the var unset defaults to "bg" so attribution is UNIVERSAL,
+# not codex-special. Written into the signal file + carried into the worker env
+# (settings.env for the surviving `claude --bg` RPC channel; DISPATCH_ENV for
+# the sdk/codex spawns) so every record and completion event is attributed.
+EXECUTOR="${CATALYST_EXECUTOR_ID:-bg}"
+
 # ─── Resolve turn cap: CLI > config.turnCaps > per-phase default ───────────
 
 resolve_turn_cap() {
@@ -691,6 +702,7 @@ jq -nc \
 	--arg ticket "$TICKET" \
 	--arg phase "$PHASE" \
 	--arg model "$MODEL" \
+	--arg executor "$EXECUTOR" \
 	--argjson turnCap "$TURN_CAP" \
 	--arg orch "$ORCH_ID" \
 	--arg ts "$TS" \
@@ -699,7 +711,7 @@ jq -nc \
 	--argjson attempt "$ATTEMPT" \
 	--arg host_name "$_DISPATCH_HOST_NAME" \
 	--arg host_id "$_DISPATCH_HOST_ID" \
-	'{ticket: $ticket, phase: $phase, orchestrator: $orch, model: $model,
+	'{ticket: $ticket, phase: $phase, orchestrator: $orch, model: $model, executor: $executor,
     turnCap: $turnCap, status: "dispatched", bg_job_id: null,
     worktreePath: $wt, generation: $generation, attempt: $attempt,
     startedAt: $ts, updatedAt: $ts,
@@ -840,6 +852,7 @@ compose_worker_settings_json() {
 	local ticket_val="${TICKET-}"
 	local generation_val="${GENERATION-}"
 	local cluster_generation_val="${CATALYST_CLUSTER_GENERATION-}" # CTL-864
+	local executor_val="${EXECUTOR-}"                             # CTL-1457
 
 	local statusline_script="${SCRIPT_DIR}/catalyst-statusline.sh"
 
@@ -856,6 +869,7 @@ compose_worker_settings_json() {
 		--arg ticket "$ticket_val" \
 		--arg generation "$generation_val" \
 		--arg cluster_generation "$cluster_generation_val" \
+		--arg executor "$executor_val" \
 		--arg statusline_cmd "$statusline_script" \
 		--argjson have_statusline "$([[ -f $statusline_script ]] && echo true || echo false)" \
 		'{
@@ -874,6 +888,7 @@ compose_worker_settings_json() {
          + (if $ticket == "" then {} else { "CATALYST_TICKET": $ticket } end)
          + (if $generation == "" then {} else { "CATALYST_GENERATION": $generation } end)
          + (if $cluster_generation == "" then {} else { "CATALYST_CLUSTER_GENERATION": $cluster_generation } end)
+         + (if $executor == "" then {} else { "CATALYST_EXECUTOR_ID": $executor } end)
        ),
        # CTL-1105: phase workers run with cwd = the ticket worktree (not under
        # .claude/worktrees/), so the default bgIsolation would force EnterWorktree
@@ -904,6 +919,11 @@ DISPATCH_ENV=(
 	# CTL-864: cross-host cluster fencing token (distinct from the host-local
 	# CATALYST_GENERATION above). Empty on single-host → worker performs no check.
 	"CATALYST_CLUSTER_GENERATION=${CATALYST_CLUSTER_GENERATION-}"
+	# CTL-1457: executor attribution — the worker's phase-agent-emit-complete reads
+	# this to stamp catalyst.executor on the completion event. Rides the plain env
+	# prefix here (reaches sdk/codex spawns directly); ALSO threaded through
+	# settings.env below so it survives the `claude --bg` RPC that drops this prefix.
+	"CATALYST_EXECUTOR_ID=${EXECUTOR}"
 )
 [[ -n $OTEL_RES_ATTRS ]] &&
 	DISPATCH_ENV+=("OTEL_RESOURCE_ATTRIBUTES=${OTEL_RES_ATTRS}")

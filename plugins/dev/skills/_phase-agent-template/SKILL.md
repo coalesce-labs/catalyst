@@ -47,10 +47,16 @@ Every phase agent:
    - Updates `${ORCH_DIR}/workers/<TICKET>/phase-<name>.json`.
    - Calls `catalyst-session.sh end`.
 
-6. **Linear reads → local replica.** For a single-ticket read call
-   `linear_read_ticket <ID>` (never a bare `linearis issues read <ID>` — it 429s
-   the shared quota); writes and list/search stay on `linearis`. See the `linearis`
-   skill's "Reading Linear".
+6. **Linear reads → local replica.** For a single-ticket read, prefer
+   `sqlite3 "${CATALYST_REPLICA_DB:-${CATALYST_DIR:-$HOME/catalyst}/catalyst-replica.db}"`
+   (bg-safe — resolves in any shell, never 429s; the `${…}` is the canonical path
+   resolver, so an install that sets `CATALYST_REPLICA_DB`/`CATALYST_DIR` still hits
+   the right DB). `linear_read_ticket <ID>` is the same read but is a plugin **shell
+   function**: it only resolves if you first `source
+   "${CLAUDE_PLUGIN_ROOT}/scripts/lib/linear-read-replica.sh"`, else it is "command
+   not found" and you silently fall through to bare `linearis`. **Never** a bare
+   `linearis`/`linear issues read <ID>` — it 429s the shared quota. Writes and
+   `issues list`/`search` stay on `linearis`. See the `linearis` skill's "Reading Linear".
 
 ## Required env vars
 

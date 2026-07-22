@@ -1742,6 +1742,51 @@ describe("sweepMissingTriage — CTL-716 slot gate", () => {
     expect(dispatch.mock.calls.length).toBe(1);
   });
 
+  // CTL-1457 (T2): a codex-exec node prelaunches the SAME no-bg_job_id workers, so they
+  // must consume the triage budget EXACTLY like sdk.
+  test("CTL-1457 T2: dispatchMode=codex-exec — in-flight codex workers consume the triage budget", () => {
+    enroll("ENG", { status: "Ready" });
+    const realOrchDir = join(catalystDir, "execution-core");
+    const exec = execReturning({ ENG: [node("ENG-1"), node("ENG-2"), node("ENG-3")] });
+    reconcileAll({ exec });
+    const dispatch = mock(() => ({ code: 0 }));
+    sweepMissingTriage({
+      orchDir: realOrchDir,
+      dispatch,
+      applyTriageStatus: () => ({ applied: false, verified: false, from_state: null, to_state: null, reason: null }),
+      appendEvent: () => {},
+      readMaxParallelFn: () => 3,
+      liveBackgroundCount: () => 0, // no bg jobs
+      dispatchMode: "codex-exec",
+      countSdkInflight: () => 2, // 2 in-process codex workers in flight → 1 free
+    });
+    expect(dispatch.mock.calls.length).toBe(1);
+  });
+
+  // CTL-1457 (N1): the per-phase rollout routes ONE phase (triage) to codex-exec/sdk on
+  // a node whose boot dispatchMode is still bg. WITHOUT hasInProcessRoute the mode gate is
+  // false and the routed no-bg triage workers are uncounted → the sweep over-admits past
+  // maxParallel. hasInProcessRoute=true arms the SDK-occupancy term even under bg.
+  test("CTL-1457 N1: dispatchMode=phase-agents + hasInProcessRoute — routed no-bg workers consume the triage budget", () => {
+    enroll("ENG", { status: "Ready" });
+    const realOrchDir = join(catalystDir, "execution-core");
+    const exec = execReturning({ ENG: [node("ENG-1"), node("ENG-2"), node("ENG-3")] });
+    reconcileAll({ exec });
+    const dispatch = mock(() => ({ code: 0 }));
+    sweepMissingTriage({
+      orchDir: realOrchDir,
+      dispatch,
+      applyTriageStatus: () => ({ applied: false, verified: false, from_state: null, to_state: null, reason: null }),
+      appendEvent: () => {},
+      readMaxParallelFn: () => 3,
+      liveBackgroundCount: () => 0, // no bg jobs
+      dispatchMode: "phase-agents", // NODE mode is bg
+      hasInProcessRoute: true, // executorByPhase={triage:codex-exec}
+      countSdkInflight: () => 2, // 2 routed no-bg workers in flight → 1 free
+    });
+    expect(dispatch.mock.calls.length).toBe(1);
+  });
+
   test("CTL-1367 P1: dispatchMode=bg — countSdkInflight is NOT consulted (byte-identical)", () => {
     enroll("ENG", { status: "Ready" });
     const realOrchDir = join(catalystDir, "execution-core");
@@ -2330,6 +2375,9 @@ describe("CTL-862 — HRW ownership + claim-on-dispatch (monitor dispatchTriage)
       hosts: ROSTER,
       hostName: OWNER,
       claimDispatch,
+      // CTL-1481: stub the label-stamp seam — this test's subject is HRW/claim
+      // dispatch, not the label write, and a won multi-host claim now fires it.
+      stampWorkerLabel: () => ({ stamped: true }),
       applyTriageStatus: () => ({ applied: false, verified: false, from_state: null, to_state: null, reason: null }),
       appendEvent: () => {},
     });
@@ -2385,6 +2433,9 @@ describe("CTL-862 — HRW ownership + claim-on-dispatch (monitor dispatchTriage)
       hosts: ROSTER,
       hostName: OWNER,
       claimDispatch,
+      // CTL-1481: stub the label-stamp seam — this test's subject is HRW/claim
+      // dispatch, not the label write, and a won multi-host claim now fires it.
+      stampWorkerLabel: () => ({ stamped: true }),
       applyTriageStatus: () => ({ applied: false, verified: false, from_state: null, to_state: null, reason: null }),
       appendEvent: () => {},
       readMaxParallelFn: () => 5,
@@ -2393,6 +2444,88 @@ describe("CTL-862 — HRW ownership + claim-on-dispatch (monitor dispatchTriage)
     expect(dispatch).toHaveBeenCalledTimes(1);
     expect(claimDispatch.calls).toHaveLength(1);
     expect(claimDispatch.calls[0]).toMatchObject({ ticket: TICKET, phase: "triage" });
+  });
+});
+
+// ── CTL-1091: triage-dispatch ownership over the SURVIVING roster ─────────────
+//
+// The triage gate (dispatchTriage) must hash ownership over the LIVE roster too,
+// so a →Triage ticket whose HRW owner is offline is triaged by a live host
+// instead of stranding. An injectable survivingRosterOverride threaded through
+// handleStateChangedEvent drives the shed set deterministically (mirrors the
+// scheduler's dispatchSurvivingRoster).
+describe("CTL-1091 — triage ownership over the surviving roster (dispatchTriage)", () => {
+  const ROSTER = ["mini", "laptop"];
+  // ENG-1 hashes to "laptop" under [mini,laptop]; under [mini] alone → mini.
+  const TICKET = "ENG-1";
+  expect(ownerForTicket(TICKET, ROSTER)).toBe("laptop");
+  expect(ownerForTicket(TICKET, ["mini"])).toBe("mini");
+
+  const triageEvent = () => ({
+    event: "linear.issue.state_changed",
+    detail: { ticket: TICKET, teamKey: "ENG", toState: "Triage" },
+  });
+  const recordClaim = (verdict) => {
+    const calls = [];
+    const fn = (arg) => { calls.push(arg); return verdict; };
+    fn.calls = calls;
+    return fn;
+  };
+  const fakeOrchDir = "/fake-orch-1091";
+
+  test("mini triages a laptop-owned ticket when laptop is OFFLINE (shed)", () => {
+    enroll("ENG", { status: "Ready" });
+    const dispatch = mock(() => ({ code: 0 }));
+    const claimDispatch = recordClaim({ won: true, generation: 1 });
+    handleStateChangedEvent(triageEvent(), {
+      dispatch,
+      orchDir: fakeOrchDir,
+      hosts: ROSTER,
+      hostName: "mini",
+      survivingRosterOverride: ["mini"], // laptop shed → mini owns ENG-1
+      claimDispatch,
+      stampWorkerLabel: () => ({ stamped: true }),
+      applyTriageStatus: () => ({ applied: false, verified: false, from_state: null, to_state: null, reason: null }),
+      appendEvent: () => {},
+    });
+    // Won claim forwards its generation as clusterGeneration (CTL-864).
+    expect(dispatch).toHaveBeenCalledWith({ orchDir: fakeOrchDir, ticket: TICKET, phase: "triage", clusterGeneration: 1 });
+    expect(claimDispatch.calls[0]).toEqual({ ticket: TICKET, hostName: "mini", phase: "triage" });
+  });
+
+  test("mini does NOT triage a laptop-owned ticket when laptop is LIVE", () => {
+    enroll("ENG", { status: "Ready" });
+    const dispatch = mock(() => ({ code: 0 }));
+    const claimDispatch = recordClaim({ won: true, generation: 1 });
+    handleStateChangedEvent(triageEvent(), {
+      dispatch,
+      orchDir: fakeOrchDir,
+      hosts: ROSTER,
+      hostName: "mini",
+      survivingRosterOverride: ["mini", "laptop"], // laptop live → laptop owns it
+      claimDispatch,
+      applyTriageStatus: () => ({ applied: false, verified: false, from_state: null, to_state: null, reason: null }),
+      appendEvent: () => {},
+    });
+    expect(dispatch).not.toHaveBeenCalled();
+    expect(claimDispatch.calls).toHaveLength(0);
+  });
+
+  test("single-host: predicate is a strict no-op (dispatch proceeds, no claim)", () => {
+    enroll("ENG", { status: "Ready" });
+    const dispatch = mock(() => ({ code: 0 }));
+    const claimDispatch = recordClaim({ won: false, generation: null });
+    handleStateChangedEvent(triageEvent(), {
+      dispatch,
+      orchDir: fakeOrchDir,
+      hosts: ["mini"],
+      hostName: "mini",
+      claimDispatch,
+      applyTriageStatus: () => ({ applied: false, verified: false, from_state: null, to_state: null, reason: null }),
+      appendEvent: () => {},
+    });
+    expect(dispatch).toHaveBeenCalledWith({ orchDir: fakeOrchDir, ticket: TICKET, phase: "triage" });
+    expect(claimDispatch.calls).toHaveLength(0);
   });
 });
 
@@ -2429,6 +2562,9 @@ describe("CTL-1028 — triage forwards + persists cluster generation (monitor di
       hosts: ROSTER,
       hostName: OWNER,
       claimDispatch,
+      // CTL-1481: stub the label-stamp seam — this test's subject is
+      // clusterGeneration forwarding, not the label write.
+      stampWorkerLabel: () => ({ stamped: true }),
       applyTriageStatus: () => ({ applied: false, verified: false, from_state: null, to_state: null, reason: null }),
       appendEvent: () => {},
     });
@@ -2468,6 +2604,9 @@ describe("CTL-1028 — triage forwards + persists cluster generation (monitor di
         hosts: ROSTER,
         hostName: OWNER,
         claimDispatch,
+        // CTL-1481: stub the label-stamp seam — this test's subject is the
+        // cluster-generation persist, not the label write.
+        stampWorkerLabel: () => ({ stamped: true }),
         applyTriageStatus: () => ({ applied: false, verified: false, from_state: null, to_state: null, reason: null }),
         appendEvent: () => {},
       });

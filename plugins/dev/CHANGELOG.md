@@ -1,5 +1,109 @@
 # Changelog
 
+## [12.33.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.32.0...catalyst-dev-v12.33.0)
+
+Jul 22, 2026
+
+<!-- ai-enhanced -->
+
+### Dispatch Roster Failover & Worktree Repair
+
+Offline and never-live hosts no longer strand their share of the ticket backlog — dispatch ownership now hashes over a liveness-filtered roster with restore-side deflap hysteresis, so a live host picks up any slice whose owner has gone dark. A separate fix repairs worktrees whose `thoughts/shared` was left as a plain directory instead of a symlink, so handoffs and research written into reused worktrees actually sync instead of silently accumulating in a dead-end local dir.
+
+
+
+### PRs
+
+* **dev:** CTL-1091 Phase 1 — route dispatch gates through the surviving roster ([#2671](https://github.com/coalesce-labs/catalyst/issues/2671)) ([2fb23ee](https://github.com/coalesce-labs/catalyst/commit/2fb23ee46d292a3e2975ca05a6e5c6856239346f))
+* **dev:** CTL-1497 — repair thoughts/shared on the worktree reuse path; guards test -L not -d ([#2685](https://github.com/coalesce-labs/catalyst/issues/2685)) ([c4bf08c](https://github.com/coalesce-labs/catalyst/commit/c4bf08c23f2cb8f442e152aa92090ab47a39b0ac))
+
+## [12.32.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.31.0...catalyst-dev-v12.32.0)
+
+Jul 21, 2026
+
+<!-- ai-enhanced -->
+
+### Agent House-Rules Auto-Seeding & Inbox Polish
+
+Any repo you enroll in Catalyst now automatically receives the "Working the Loop" agent house-rules block — seeded into AGENTS.md (or CLAUDE.md if that's what the repo uses) without any manual setup. The block itself has been hardened: Linear reads must go through the `catalyst-dev:linearis` skill rather than raw API calls or hand-rolled sqlite, and a contradictory degraded escape that could reintroduce shared-quota burn has been removed. Inbox rows also get a cleaner look — favicon restored, unwrapped ID, two-line title, and corrected pane accent.
+
+
+
+### PRs
+
+* **dev:** auto-seed agent house-rules on every enrolled repo + Codex-hardened block ([#2666](https://github.com/coalesce-labs/catalyst/issues/2666)) ([97aa6de](https://github.com/coalesce-labs/catalyst/commit/97aa6deb32e74740ab6ce0a7455332bf0fd6d687))
+* **dev:** CTL-1127 — inbox row: restore favicon, unwrap ID, two-line title, drop verb cluster, fix pane accent ([#1991](https://github.com/coalesce-labs/catalyst/issues/1991)) ([2cda8d5](https://github.com/coalesce-labs/catalyst/commit/2cda8d55464efc9ddfffd608b2f60eff4a426f2e))
+* **dev:** CTL-682 — wait-watcher skips background agents; pin scheduler test live-count seam ([#2670](https://github.com/coalesce-labs/catalyst/issues/2670)) ([4fd98b2](https://github.com/coalesce-labs/catalyst/commit/4fd98b2b6d8b1db55673d304b3f45a4d7d83f88f))
+* **dev:** drop the Linear-API degraded escape (contradicted the absolute replica rule) ([#2668](https://github.com/coalesce-labs/catalyst/issues/2668)) ([507b227](https://github.com/coalesce-labs/catalyst/commit/507b227d46b6fb285c178dc9385c6fc35e0f66e5))
+
+## [12.31.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.30.1...catalyst-dev-v12.31.0)
+
+Jul 19, 2026
+
+<!-- ai-enhanced -->
+
+### Agent House Rules & Replica Read Fix
+
+Two changes land together to make unattended agents less error-prone. A new "Working the Loop" block is now seeded into every project's `AGENTS.md` via `agents-house-rules.md`, teaching agents to subscribe to the unified event log instead of polling GitHub or CI, detect automated review approvals via reactions, and read Linear tickets from the local replica rather than the live API. Alongside that, the replica-read instruction itself is corrected — background agents were silently falling through to bare `linearis` because `linear_read_ticket` is a shell function that never resolves in an unattended Bash session; the instruction now leads with the `sqlite3` form that works in any shell. Run `check-project-setup.sh` to verify your projects have the new reflex markers in place.
+
+
+
+### PRs
+
+* **dev:** agent house-rules block + checkup (CTL general-instructions) ([#2663](https://github.com/coalesce-labs/catalyst/issues/2663)) ([e6e67db](https://github.com/coalesce-labs/catalyst/commit/e6e67dbbc07c9b4ad2c327069d43565dafbfd451))
+* **dev:** CTL-1420 replica-read rule pointed bg/daemon agents at a shell function not on PATH ([#2661](https://github.com/coalesce-labs/catalyst/issues/2661)) ([efd9a2b](https://github.com/coalesce-labs/catalyst/commit/efd9a2b85075a57a6c5e1f958078bd3621528536))
+
+## [12.30.1](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.30.0...catalyst-dev-v12.30.1)
+
+Jul 17, 2026
+
+<!-- ai-enhanced -->
+
+### Replica-Read Detector Fixed
+
+The Linear replica-read detector introduced in a prior release was never actually firing, leaving agents free to burn the shared API quota on reads the replica could have served. The fix rewrites the command-word matching from a single anchored regex to a token walk that correctly resolves the real command past environment assignments, wrapper prefixes like `direnv exec .`, and shell keywords — and now recognizes both `linear` and `linearis`. The enforce mode remedy path is also corrected to an absolute location so it's actually sourceable in the repos where the hook now fires.
+
+
+
+### PRs
+
+* **dev:** CTL-1420 replica-read detector was blind to the `linear` alias + wrapper prefixes ([#2658](https://github.com/coalesce-labs/catalyst/issues/2658)) ([19f7ada](https://github.com/coalesce-labs/catalyst/commit/19f7ada2e3c7253526e2e248fa76cac235ae6331))
+
+## [12.30.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.29.1...catalyst-dev-v12.30.0)
+
+Jul 15, 2026
+
+<!-- ai-enhanced -->
+
+### Codex Executor & Worker Label Ownership
+
+The daemon can now dispatch phase workers to OpenAI Codex via a new `codex-exec` executor adapter, routed per-phase through `executorByPhase` config with zero behavior change until you explicitly flip a phase to it. Linear boards now show which node owns each in-flight ticket via stamped `worker:<host>` labels — ownership is board-filterable and readable from the local replica without a live Linear call. Both worker-label provisioning paths (`reconcile_worker_host_labels` and `reconcile_worker_status_labels`) are hardened against the current Linear API's `isGroup:true` requirement, which broke fresh-workspace installs; run the setup script on any new node to provision labels cleanly.
+
+
+
+### PRs
+
+* **dev:** CTL-1457 codex-exec executor adapter — daemon dispatches phase workers on Codex ([#2639](https://github.com/coalesce-labs/catalyst/issues/2639)) ([1ae616a](https://github.com/coalesce-labs/catalyst/commit/1ae616a42cc311ceb59ab715ed92868dfba9e535))
+* **dev:** CTL-1481 worker:&lt;host&gt; label ownership — Linear board shows which node owns each ticket ([#2650](https://github.com/coalesce-labs/catalyst/issues/2650)) ([47946d7](https://github.com/coalesce-labs/catalyst/commit/47946d7f2fd6953f9e2aed322de032183cb16655))
+* **dev:** CTL-1481 follow-up — worker group create needs isGroup:true (live API drift) ([#2651](https://github.com/coalesce-labs/catalyst/issues/2651)) ([f6099a9](https://github.com/coalesce-labs/catalyst/commit/f6099a9123f1f84c1dffb2ab6532ab3b16a335e6))
+* **dev:** CTL-1483 mirror isGroup:true fix to reconcile_worker_status_labels ([#2653](https://github.com/coalesce-labs/catalyst/issues/2653)) ([e1d5d0c](https://github.com/coalesce-labs/catalyst/commit/e1d5d0c382675ecffbd84644957941be5ae6c2ee))
+
+## [12.29.1](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.29.0...catalyst-dev-v12.29.1)
+
+Jul 14, 2026
+
+<!-- ai-enhanced -->
+
+### Thenable-Aware Removal Confirmation
+
+The `removeLabel` async bug is fixed — previously, inspecting a Promise's `.removed` property always returned `undefined`, so failed removals were silently treated as successful. The fix makes the result handler thenable-aware, deferring the admission clear emission until the async write actually resolves or rejects.
+
+
+
+### PRs
+
+* **dev:** CTL-764 follow-up — round-5: thenable-aware removal confirmation ([#2636](https://github.com/coalesce-labs/catalyst/issues/2636)) ([2df9d10](https://github.com/coalesce-labs/catalyst/commit/2df9d109504f8f8dad451bd4bd0d24a7dd186799))
+
 ## [12.29.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.28.0...catalyst-dev-v12.29.0)
 
 Jul 13, 2026

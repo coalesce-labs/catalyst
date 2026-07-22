@@ -20,8 +20,9 @@ import { fileURLToPath } from "node:url";
 import { getProjectConfig } from "./registry.mjs";
 import { createWorktree as defaultCreateWorktree } from "./worktree.mjs";
 import { sdkRunPhaseAgent, defaultEmitBackstop, scrubSecrets } from "./sdk-run-phase-agent.mjs"; // CTL-1365b: the executor=sdk launch verb (in-process Agent SDK query()); CTL-1367 P1: shared failed-terminal backstop for a rejected async dispatch; CTL-1367 item 11: scrub token-shaped substrings out of a rejected-dispatch reason before it is backstopped/logged
+import { codexRunPhaseAgent } from "./codex-run-phase-agent.mjs"; // CTL-1457: the executor=codex-exec launch verb (spawns `codex exec --json` as a child process)
 import { hasFreshClaim } from "./signal-reader.mjs"; // CTL-1367 P2-G: a young single-flight claim makes a missing SDK signal a benign claim-lost no-op
-import { log } from "./config.mjs"; // CTL-1367 P1: log a swallowed async-dispatch rejection before the backstop fires
+import { log, resolveExecutorForPhase } from "./config.mjs"; // CTL-1367 P1: log a swallowed async-dispatch rejection before the backstop fires; CTL-1457: per-phase executor routing hook (the default seam threaded into makePhaseAwareDispatchFn)
 
 // phase-agent-dispatch sits one directory up from execution-core/.
 const PHASE_AGENT_DISPATCH_BIN = fileURLToPath(new URL("../phase-agent-dispatch", import.meta.url));
@@ -83,6 +84,10 @@ export function defaultRunPhaseAgent(
     CATALYST_PHASE: phase,
     CATALYST_TICKET: ticket,
     CATALYST_EXECUTION_CORE: "1",
+    // CTL-1457: attribute the bg launch verb — phase-agent-dispatch reads this
+    // (defaulting to "bg" when absent) to write executor:"bg" into the signal
+    // file + carry it into the worker env, so bg workers are attributed too.
+    CATALYST_EXECUTOR_ID: "bg",
     ...extraEnv,
   };
   // CTL-990: the recreate-once marker is PER DISPATCH CHAIN — only the chain's
@@ -231,21 +236,159 @@ export function sdkDispatch(args, { runPhaseAgent = sdkRunPhaseAgent, emitEvent,
   return defaultDispatch(args, { runPhaseAgent: launch, ...seams });
 }
 
-// dispatchForExecutor — CTL-1365b Stage C: map a resolved executor
-// (config.mjs:getExecutor) to the dispatch function the daemon threads into ALL
-// FOUR dispatch entry points (scheduler pull-loop, monitor →Triage one-shot,
-// comment-wake re-dispatch, boot-resume crash-recovery). Resolved ONCE per boot
-// and threaded to every site so a node never split-brains (some sites bg, others
-// sdk).
+// codexDispatch — CTL-1457: the executor=codex-exec dispatch function. IDENTICAL
+// to sdkDispatch except the LAUNCH VERB: it injects codexRunPhaseAgent (the
+// `codex exec --json` child-process worker) in place of sdkRunPhaseAgent. It reuses
+// defaultDispatch's resolve-project → create-worktree → run-phase pipeline verbatim
+// (the resolveProject/createWorktree/… seams pass straight through), so the ONLY
+// behavioral delta vs sdk is which runPhaseAgent runs. codexRunPhaseAgent — like
+// sdkRunPhaseAgent — reads `emitEvent` from its SECOND (options) param, so the
+// daemon-injected unified-event-log appender is bound there when present (absent →
+// codexRunPhaseAgent keeps its dependency-free stderr default, byte-identical).
+// Because codexRunPhaseAgent is async, defaultDispatch's thenable branch composes
+// worktreePath onto the awaited result, so codexDispatch returns a
+// Promise<{code,…,worktreePath}> exactly as sdkDispatch does.
+// CTL-1457 (finding 4): `configPath` is threaded into the runner's SECOND (options)
+// param alongside `emitEvent` so codexRunPhaseAgent's runtime codexConfig({configPath})
+// resolves the SAME Layer-1 catalyst.orchestration.codex.* (codexHome/model/writableRoots)
+// the daemon's boot eligibility gate validated — without it a Layer-1-only codexHome
+// would be honored at boot but NOT at dispatch (the runtime auth guard + buildCodexArgs
+// would fall back to the default home). When configPath is undefined the launch wrapper
+// is byte-identical to the prior emitEvent-only shape (codexConfig treats an undefined
+// configPath the same as an omitted one).
+export function codexDispatch(
+  args,
+  { runPhaseAgent = codexRunPhaseAgent, emitEvent, configPath, ...seams } = {}
+) {
+  const launch =
+    emitEvent || configPath ? (a) => runPhaseAgent(a, { emitEvent, configPath }) : runPhaseAgent;
+  return defaultDispatch(args, { runPhaseAgent: launch, ...seams });
+}
+
+// dispatchForExecutor — CTL-1365b Stage C / CTL-1457: map a resolved executor to
+// the dispatch function threaded into the daemon's dispatch entry points. Resolved
+// per dispatch by makePhaseAwareDispatchFn (per-phase routing) — and still resolved
+// once at boot for the node default — so a node never split-brains.
 //   - "bg" | "oneshot-legacy" → defaultDispatch (the `claude --bg` path). Returned
-//     BY IDENTITY, so the existing dispatch.test.mjs arg-array `toEqual`
-//     assertions are unaffected — the dispatched behavior is byte-identical to
-//     today.
+//     BY IDENTITY (the `?? defaultDispatch` fallback), so the existing
+//     dispatch.test.mjs arg-array `toEqual` assertions are unaffected — the
+//     dispatched behavior is byte-identical to today.
 //   - "sdk" → sdkDispatch (injects sdkRunPhaseAgent — the in-process SDK worker).
-// Pure + identity-stable (the SAME function object per executor) so the daemon's
-// four-entry-point wiring is assertable by reference.
+//   - "codex-exec" → codexDispatch (injects codexRunPhaseAgent — the `codex exec`
+//     child-process worker).
+// Pure + identity-stable (the SAME function object per executor value) so the
+// daemon's multi-entry-point wiring is assertable by reference.
+const DISPATCH_BY_EXECUTOR = Object.freeze({
+  sdk: sdkDispatch,
+  "codex-exec": codexDispatch,
+});
 export function dispatchForExecutor(executor) {
-  return executor === "sdk" ? sdkDispatch : defaultDispatch;
+  return DISPATCH_BY_EXECUTOR[executor] ?? defaultDispatch;
+}
+
+// Module refs captured so makePhaseAwareDispatchFn's SAME-named injectable params
+// can default to the real implementations without a TDZ self-reference in the
+// destructuring default (`{ dispatchForExecutor = dispatchForExecutor }` would
+// reference the param binding itself, not the module symbol).
+const _defaultResolveExecutorForPhase = resolveExecutorForPhase;
+const _defaultDispatchForExecutor = dispatchForExecutor;
+
+// makePhaseAwareDispatchFn — CTL-1457: build the SINGLE dispatchFn closure the
+// daemon threads to ALL FIVE dispatch entry points (scheduler pull-loop, monitor
+// →Triage one-shot, comment-wake re-dispatch, boot-resume, approved-resume). Per
+// dispatch it consults resolveExecutorForPhase(phase) so a routed phase runs on its
+// configured executor while every other phase runs on the boot executor — replacing
+// the CTL-1365b single-boot-executor selection without changing any entry-point
+// wiring.
+//
+// ZERO-CHANGE-WHEN-UNROUTED INVARIANT: only a phase EXPLICITLY present in
+// executorByPhase (resolveExecutorForPhase → source === "executorByPhase")
+// overrides the boot executor; an unrouted phase keeps `effective === bootExecutor`.
+// With an empty map (the default) NO phase is routed ⇒ every phase runs on the boot
+// executor ⇒ the selected dispatch fn + emitEvent wrapping are byte-identical to the
+// pre-CTL-1457 boot wiring. Gating on `source` (not merely on a truthy executor) is
+// deliberate: resolveExecutorForPhase's fallback for an unrouted phase is the raw
+// node executor from resolveExecutor, which for executor=sdk+failing-boot-auth is
+// still "sdk" — so a bare `if (routed) effective = routed` would silently UNDO the
+// CTL-1367 boot auth-gate degrade (sdk→bg). Honoring only the explicit-route source
+// preserves that degrade (bootExecutor already carries it).
+//
+// Seams: resolveExecutorForPhase + dispatchForExecutor default to the real module
+// implementations but are injectable so the unit test drives the routing decision
+// with fakes (no config file, no real dispatch). `emitEvent` is the daemon's
+// one-arg { "event.name", payload } unified-event-log appender; it is wrapped into
+// the two-arg (name, payload) shape sdk/codex runners expect for the sdk AND
+// codex-exec arms only (the bg/oneshot arm never emits, byte-identical to today).
+export function makePhaseAwareDispatchFn({
+  bootExecutor,
+  codexBootEligible,
+  // CTL-1457 (T5): the daemon-boot sdk-auth verdict (assertSdkAuth(...).ok). Defaults
+  // to true for back-compat so an unrouted / non-sdk caller is unaffected. When a phase
+  // is EXPLICITLY routed to "sdk" on a bg/default node whose boot env lacks
+  // CLAUDE_CODE_OAUTH_TOKEN (or has ANTHROPIC_API_KEY), sdkRunPhaseAgent would refuse
+  // BEFORE prelaunch on every dispatch — degrade the routed sdk phase to the boot
+  // executor ONCE instead (mirrors the codex degrade below).
+  sdkBootEligible = true,
+  configPath,
+  emitEvent,
+  resolveExecutorForPhase = _defaultResolveExecutorForPhase,
+  dispatchForExecutor = _defaultDispatchForExecutor,
+  log: logger = log,
+} = {}) {
+  return (args, seams = {}) => {
+    // Per-phase routing. Only an EXPLICITLY-routed phase (source "executorByPhase")
+    // overrides the boot executor; an unrouted phase keeps the boot executor (which
+    // already carries the sdk→bg boot auth-gate degrade). resolveExecutorForPhase
+    // THROWS on an invalid routed value — caught here so a typo degrades that dispatch
+    // to the boot executor (loud-but-non-fatal) instead of crashing the daemon.
+    let effective = bootExecutor;
+    try {
+      const routed = resolveExecutorForPhase(args.phase, { configPath });
+      if (routed?.source === "executorByPhase" && routed.executor) {
+        effective = routed.executor;
+      }
+    } catch (err) {
+      logger?.error?.(
+        { err: err.message, phase: args.phase },
+        "executorByPhase routing invalid — using boot executor"
+      );
+      effective = bootExecutor;
+    }
+    // Codex degrade: a routed codex-exec phase falls back to the boot executor when
+    // the codex boot precondition (auth + binary) failed — the boot check already
+    // WARNed + emitted execution-core.executor.codex-fallback. Defense-in-depth
+    // (finding 1): when the boot executor is ITSELF codex-exec (a codex node whose
+    // boot gate should already have degraded it, but did not reach here degraded),
+    // fall back to "bg" — a concrete non-codex executor — never back to codex-exec,
+    // which would dispatch to the same unusable codex.
+    if (effective === "codex-exec" && !codexBootEligible) {
+      effective = bootExecutor === "codex-exec" ? "bg" : bootExecutor;
+    }
+    // CTL-1457 (T5): sdk degrade — mirror the codex degrade. A phase routed to sdk on a
+    // node whose boot sdk-auth precondition failed (sdkBootEligible=false) degrades to the
+    // boot executor so it degrades ONCE at the routing seam rather than refusing on every
+    // dispatch. When the boot executor is itself sdk, resolveSdkBootExecutor already
+    // degraded it to bg at boot (so bootExecutor would not be "sdk" with a failed auth);
+    // the `=== "sdk" ? "bg"` guard is the defense-in-depth belt against a self-fallback
+    // loop. Zero-change-when-unrouted: sdkBootEligible defaults to true, and an unrouted
+    // phase keeps effective === bootExecutor (which already carries the boot degrade).
+    if (effective === "sdk" && !sdkBootEligible) {
+      effective = bootExecutor === "sdk" ? "bg" : bootExecutor;
+    }
+    const fn = dispatchForExecutor(effective);
+    if (effective === "sdk" || effective === "codex-exec") {
+      return fn(args, {
+        emitEvent: (name, payload) => emitEvent({ "event.name": name, payload }),
+        // CTL-1457 (finding 4): the codex runner resolves its runtime codexConfig from
+        // configPath — thread it so the runtime auth guard + buildCodexArgs honor the
+        // SAME Layer-1 codex.* the boot gate checked. Scoped to the codex arm (the sdk
+        // dispatch ignores unknown seams, so this is a no-op there either way).
+        ...(effective === "codex-exec" ? { configPath } : {}),
+        ...seams,
+      });
+    }
+    return fn(args, seams);
+  };
 }
 
 // makeCommentWakeDispatch — CTL-1365b Stage C: bind the resolved executor dispatch

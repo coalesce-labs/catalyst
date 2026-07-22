@@ -770,3 +770,109 @@ describe("createReplicaReader.ownership (Stage 0 / A0)", () => {
     expect(reader.ownership("CTL-300")).toEqual({ assignee: "user-1", delegate: "bot-9" });
   });
 });
+
+// labels() (CTL-1481 — worker-label visibility projection read). Same freshness +
+// seed-cursor gate as ownership(); any gate-fail/miss/throw → undefined (caller
+// falls through, never trusts a stale/partial label list). Resolves
+// identifier → internal id first (issue_labels keys off the PK, matching the
+// identifier→id resolution eligible()'s label-EXISTS join needs), then joins
+// issue_labels⋈labels for that id.
+function seedLabels() {
+  const db = new Database(dbPath, { create: true });
+  db.run(`CREATE TABLE issues (id TEXT, identifier TEXT, removed_at TEXT)`);
+  db.run(`CREATE INDEX idx_issues_identifier ON issues (identifier)`);
+  db.run(`CREATE TABLE labels (id TEXT, name TEXT, removed_at TEXT)`);
+  db.run(`CREATE TABLE issue_labels (issue_id TEXT, label_id TEXT)`);
+  db.run(`CREATE TABLE sync_meta (key TEXT PRIMARY KEY, value TEXT)`);
+  db.run(`INSERT INTO sync_meta VALUES ('cursor', '42')`);
+  db.run(`INSERT INTO labels VALUES ('lab-a', 'worker:mini', NULL)`);
+  db.run(`INSERT INTO labels VALUES ('lab-b', 'type:bug', NULL)`);
+  // CTL-400: two live labels attached — the sort-order + basic HIT case.
+  db.run(`INSERT INTO issues VALUES ('id-400', 'CTL-400', NULL)`);
+  db.run(`INSERT INTO issue_labels VALUES ('id-400', 'lab-a')`);
+  db.run(`INSERT INTO issue_labels VALUES ('id-400', 'lab-b')`);
+  // CTL-401: no labels attached at all — a defined, authoritative [].
+  db.run(`INSERT INTO issues VALUES ('id-401', 'CTL-401', NULL)`);
+  // CTL-402: tombstoned issue (removed_at set) — excluded by removed_at IS NULL.
+  db.run(`INSERT INTO issues VALUES ('id-402', 'CTL-402', '2026-06-03T00:00:00Z')`);
+  db.run(`INSERT INTO issue_labels VALUES ('id-402', 'lab-a')`);
+  // CTL-403: one live label ('lab-a') + one tombstoned label ('lab-c') attached —
+  // the tombstoned label must be filtered out of the returned list.
+  db.run(`INSERT INTO labels VALUES ('lab-c', 'worker:mini-2', '2026-06-03T00:00:00Z')`);
+  db.run(`INSERT INTO issues VALUES ('id-403', 'CTL-403', NULL)`);
+  db.run(`INSERT INTO issue_labels VALUES ('id-403', 'lab-a')`);
+  db.run(`INSERT INTO issue_labels VALUES ('id-403', 'lab-c')`);
+  db.close();
+  freshen();
+}
+
+describe("createReplicaReader.labels (CTL-1481 — worker-label visibility read)", () => {
+  test("fresh + seeded issue with 2 labels → sorted [{id,name}] pairs (ORDER BY l.name)", () => {
+    seedLabels();
+    reader = createReplicaReader({ dbPath });
+    expect(reader.labels("CTL-400")).toEqual([
+      { id: "lab-b", name: "type:bug" },
+      { id: "lab-a", name: "worker:mini" },
+    ]);
+  });
+
+  test("issue with zero labels → [] (a defined, authoritative empty answer)", () => {
+    seedLabels();
+    reader = createReplicaReader({ dbPath });
+    expect(reader.labels("CTL-401")).toEqual([]);
+  });
+
+  test("unknown identifier → undefined (MISS)", () => {
+    seedLabels();
+    reader = createReplicaReader({ dbPath });
+    expect(reader.labels("CTL-404")).toBeUndefined();
+  });
+
+  test("tombstoned issue (removed_at set) → undefined", () => {
+    seedLabels();
+    reader = createReplicaReader({ dbPath });
+    expect(reader.labels("CTL-402")).toBeUndefined();
+  });
+
+  test("a tombstoned label attached to a live issue is filtered out of the list", () => {
+    seedLabels();
+    reader = createReplicaReader({ dbPath });
+    // CTL-403 has lab-a (live) + lab-c (tombstoned) attached; only lab-a returns.
+    expect(reader.labels("CTL-403")).toEqual([{ id: "lab-a", name: "worker:mini" }]);
+  });
+
+  test("STALE .writer.lock (dead writer) → undefined (liveness gate fails)", () => {
+    seedLabels();
+    writeFileSync(dbPath + ".writer.lock", "");
+    backdate(dbPath + ".writer.lock", 10); // present-but-stale lock is authoritative
+    reader = createReplicaReader({ dbPath });
+    expect(reader.labels("CTL-400")).toBeUndefined();
+  });
+
+  test("mid-reseed (cursor row ABSENT) on a fresh DB → undefined (seed gate)", () => {
+    seedLabels();
+    const db = new Database(dbPath);
+    db.run(`DELETE FROM sync_meta WHERE key = 'cursor'`);
+    db.close();
+    freshen(); // the writer is STILL live; only the seed is incomplete
+    reader = createReplicaReader({ dbPath });
+    expect(reader.labels("CTL-400")).toBeUndefined();
+  });
+
+  test("mid-reseed (cursor present but EMPTY value) → undefined (seed gate)", () => {
+    seedLabels();
+    const db = new Database(dbPath);
+    db.run(`UPDATE sync_meta SET value = '' WHERE key = 'cursor'`);
+    db.close();
+    freshen();
+    reader = createReplicaReader({ dbPath });
+    expect(reader.labels("CTL-400")).toBeUndefined();
+  });
+
+  test("empty/falsy identifier → undefined without touching the DB", () => {
+    reader = createReplicaReader({ dbPath });
+    expect(reader.labels("")).toBeUndefined();
+    expect(reader.labels(null)).toBeUndefined();
+    expect(reader.labels(undefined)).toBeUndefined();
+  });
+});

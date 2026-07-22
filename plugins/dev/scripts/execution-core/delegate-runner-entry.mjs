@@ -39,6 +39,7 @@ import { log, getExecutor } from "./config.mjs";
 // (sdk vs bg) instead of the hardcoded bg path baked into defaultInvokeRecoveryPass.
 import { dispatchForExecutor, dispatchTicket as dispatchTicketSeam } from "./dispatch.mjs";
 import { resolveSdkBootExecutor } from "./sdk-run-phase-agent.mjs"; // auth-aware sdk→bg degrade (this detached child does NOT run the daemon-boot gate)
+import { resolveCodexBootEligibility } from "./codex-run-phase-agent.mjs"; // CTL-1457 (N4): codex→bg degrade in the detached child (mirror of the sdk degrade)
 import {
   delegateQueueDir,
   claimIntent as defaultClaimIntent,
@@ -487,6 +488,37 @@ export function acquireRunnerLock(orchDir, deps = {}) {
   };
 }
 
+// resolveEffectiveDelegateExecutor — CTL-1157 F3 + CTL-1457 (N4): the executor this
+// DETACHED child dispatches through. It re-resolves getExecutor() (env→Layer-1→node
+// default) and applies the SAME boot degrades the daemon does — because this child
+// does NOT run the daemon-boot gate, so it must not trust a raw config value the
+// daemon has already degraded away:
+//   - resolveSdkBootExecutor degrades sdk→bg when the subscription-auth precondition
+//     fails (no CLAUDE_CODE_OAUTH_TOKEN);
+//   - resolveCodexBootEligibility degrades codex-exec→bg when the codex auth.json /
+//     `codex --version` precondition fails. WITHOUT this the daemon degrades codex→bg
+//     at boot but this inherited-env child re-resolves getExecutor()==="codex-exec"
+//     and keeps launching unusable codex for every recovery-pass delegate (N4).
+// On a bg/sdk fleet the codex branch is never taken → byte-identical. Pure-cored; every
+// seam is injectable so the degrade is unit-testable without the entrypoint side effects.
+export function resolveEffectiveDelegateExecutor({
+  getExecutor: getExec = getExecutor,
+  resolveSdkBoot = resolveSdkBootExecutor,
+  resolveCodexBoot = resolveCodexBootEligibility,
+  logger = log,
+} = {}) {
+  let { executor } = resolveSdkBoot(getExec(), { log: logger });
+  if (executor === "codex-exec") {
+    // Empty routing map + bootExecutor:"codex-exec" arms the gate for a node whose
+    // DEFAULT executor is codex (every phase routes to codex). No emitEvent — the
+    // daemon already emitted execution-core.executor.codex-fallback at boot; this is
+    // a silent local degrade so the detached child agrees with the daemon.
+    const elig = resolveCodexBoot({}, { bootExecutor: "codex-exec", log: logger });
+    if (!elig.eligible) executor = "bg";
+  }
+  return executor;
+}
+
 // ── top-level detached-entry body ────────────────────────────────────────────
 //
 // When this file is run directly (the detached child the timer spawns), take the
@@ -515,15 +547,14 @@ if (isEntrypoint) {
     // → Infinity, which would let the runner launch a delegate past maxParallel even
     // when the board is full. readMaxParallel(orchDir, {}) reads the same state.json
     // ceiling the scheduler tick uses.
-    // CTL-1157 F3: re-resolve the executor in this DETACHED child (it does NOT run
-    // the daemon-boot resolveSdkBootExecutor gate), degrading sdk→bg when the
-    // subscription-auth precondition fails (no CLAUDE_CODE_OAUTH_TOKEN) so a
-    // detached delegate never attempts an sdk launch it can't authenticate. On a
-    // bg fleet this is a pure no-op (dispatchForExecutor("bg") === defaultDispatch),
-    // so the launched delegate is byte-identical to today. The invokeFn wrapper
-    // curries the resolved dispatch into defaultInvokeRecoveryPass via its
-    // deps.dispatchTicket seam.
-    const { executor } = resolveSdkBootExecutor(getExecutor(), { log });
+    // CTL-1157 F3 + CTL-1457 (N4): re-resolve the executor in this DETACHED child (it
+    // does NOT run the daemon-boot gate), degrading sdk→bg on a failing subscription-auth
+    // precondition AND codex-exec→bg on a failing codex precondition — so a detached
+    // delegate never launches an executor the daemon already degraded away. On a bg fleet
+    // this is a pure no-op (dispatchForExecutor("bg") === defaultDispatch), so the launched
+    // delegate is byte-identical to today. The invokeFn wrapper curries the resolved
+    // dispatch into defaultInvokeRecoveryPass via its deps.dispatchTicket seam.
+    const executor = resolveEffectiveDelegateExecutor({ logger: log });
     const executorDispatch = dispatchForExecutor(executor);
     const invokeFn = (ticket, briefObj, invokeDeps) =>
       defaultInvokeRecoveryPass(ticket, briefObj, {

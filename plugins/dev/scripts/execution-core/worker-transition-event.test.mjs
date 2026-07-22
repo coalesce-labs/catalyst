@@ -51,6 +51,32 @@ describe("buildWorkerTransitionEvent", () => {
     expect(ev.attributes["event.channel"]).toBe("execution-core");
   });
 
+  // CTL-1488 Phase 2: caused_by + event.stream_class parity.
+  test("caused_by threads through when provided, null by default (ADR-022 parity)", () => {
+    const line = buildWorkerTransitionEvent({
+      ticket: "CTL-1",
+      orchId: "CTL-1",
+      fromStage: "Research",
+      toStage: "Plan",
+      fromDisposition: "queued",
+      toDisposition: "queued",
+    });
+    expect(JSON.parse(line).caused_by).toBeNull();
+    const withCause = buildWorkerTransitionEvent({ ticket: "CTL-1", causedBy: "evt-xyz" });
+    expect(JSON.parse(withCause).caused_by).toBe("evt-xyz");
+  });
+  test("stamps attributes['event.stream_class'] = 'coordination' (worker.transition is unconditionally coordination)", () => {
+    const line = buildWorkerTransitionEvent({
+      ticket: "CTL-1",
+      orchId: "CTL-1",
+      fromStage: "Research",
+      toStage: "Plan",
+      fromDisposition: "queued",
+      toDisposition: "queued",
+    });
+    expect(JSON.parse(line).attributes["event.stream_class"]).toBe("coordination");
+  });
+
   test("both axes round-trip in body.payload", () => {
     const ev = JSON.parse(
       buildWorkerTransitionEvent({

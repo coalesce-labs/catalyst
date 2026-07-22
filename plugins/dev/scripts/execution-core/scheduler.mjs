@@ -301,6 +301,9 @@ import * as linearWrite from "./linear-write.mjs";
 import { fenceGuard } from "./fence-guard.mjs";
 // CTL-863: Linear-free fence event emitter (durable fence → event-log migration).
 import { emitFenceClaimed } from "./fence-event.mjs";
+// CTL-1481: best-effort worker:<host> label visibility-projection stamp on a
+// won cluster claim. Never the claim arbiter — see worker-label.mjs header.
+import { stampWorkerLabel as defaultStampWorkerLabel } from "./worker-label.mjs";
 // CTL-757: the canonical linear.state.write audit emitter. CALLER-EMITS at each
 // scheduler write site (source/phase/reason known only here) — NEVER inside
 // runTransition (would double-audit the triage path, which keeps its own
@@ -334,10 +337,13 @@ import {
   isDraining as isDrainingDefault,
   getDrainedMarkerPath, // CTL-1321: shared resolver for the drain.drained sentinel
   HEARTBEAT_GRACE_MS, // CTL-1191: dead-host grace for surviving-roster recovery gate
+  HEARTBEAT_RESTORE_HOLD_MS, // CTL-1091: restore-side deflap hold for the dispatch roster
+  isInProcessDispatchMode, // CTL-1457 (T2): sdk|codex-exec occupancy gate predicate
 } from "./config.mjs";
 import { emitDrainedEvent as defaultEmitDrainedEvent } from "./drain-event.mjs"; // CTL-1095: drained sentinel
 import { defaultCheckSequencing } from "./sequencing.mjs"; // CTL-537
 import { ownedBy, ownerForTicket } from "./hrw.mjs"; // CTL-850: HRW ownership filter (CTL-1191 also uses it for the diagnostician gate); ownerForTicket: CTL-1290 board-health stranded-node + enforce HRW gate
+import { computeDispatchRoster, readDeflapState, writeDeflapState } from "./liveness-deflap.mjs"; // CTL-1091: restore-side deflap for the dispatch roster
 import { boardHealthPass } from "./board-health.mjs"; // CTL-1290: the whole-board health delegate (shadow-first)
 import {
   getAllTicketDescriptors,
@@ -398,7 +404,11 @@ const TERMINAL_SIGNAL_STATUSES = new Set(["failed", "stalled", "aborted"]);
 // then owns only its own HRW slice (NEVER double-acts) and we merely forgo the
 // dead-owner failover for this tick (no worse than the pre-CTL-1191 strand).
 // Single-host (roster.length <= 1) returns the roster unchanged with no read.
-function computeSurvivingRoster(
+// CTL-1091: exported so monitor.mjs can route its triage-dispatch ownership gate
+// through the same surviving-roster read as the scheduler's new-work gate (both
+// dispatch sites then agree with recovery on who is alive). Safe to import from
+// monitor.mjs — this helper pulls in no bun:sqlite dependency (CTL-1397).
+export function computeSurvivingRoster(
   roster,
   { readHeartbeats = readClusterHeartbeats, nowMs = Date.now() } = {}
 ) {
@@ -411,6 +421,141 @@ function computeSurvivingRoster(
   } catch {
     return roster;
   }
+}
+
+// CTL-1091 Phase 3: the RAW positively-live host set. Dispatch ownership requires
+// POSITIVE liveness — a host must have been SEEN within grace to own new work —
+// unlike computeSurvivingRoster's fail-OPEN deadHosts (an unseen host is "not
+// proven dead" and stays a survivor). Returns `{ live }` where `live` is the
+// filtered array (possibly EMPTY when nobody is positively live), or `{ live: null }`
+// when the heartbeat read THREW. The empty/null distinction from "some hosts live"
+// is what lets callers tell a total feed outage apart from a partial one — the
+// fail-safe (degrade to the full roster) must fire only on a genuine outage.
+function readPositiveLive(
+  roster,
+  { readHeartbeats = readClusterHeartbeats, nowMs = Date.now(), graceMs = HEARTBEAT_GRACE_MS } = {}
+) {
+  try {
+    // CTL-1091 (Codex P1 #3): DISPATCH liveness requires a trustworthy cross-host
+    // view. requirePeerView makes readClusterHeartbeats THROW (→ caught below →
+    // {live:null,error} → resolveDispatchRoster outage degrade → FULL roster) when
+    // the peer transport is unconfigured or the peer read fails, instead of quietly
+    // returning self's local-only heartbeat map (which would collapse the dispatch
+    // roster to [self] and make every host grab every ready ticket). A test-injected
+    // readHeartbeats simply ignores the extra option.
+    const lastSeen = readHeartbeats({ roster, requirePeerView: true });
+    const cutoff = nowMs - graceMs;
+    const live = roster.filter((h) => {
+      const seen = lastSeen[h];
+      return typeof seen === "string" && seen.length > 0 && Date.parse(seen) >= cutoff;
+    });
+    return { live };
+  } catch (err) {
+    // CTL-1091 review F2: preserve the caught error so the outage→full-roster
+    // degrade can be told apart from a latent bug in the read path when it is
+    // surfaced (resolveDispatchRoster's onDegrade hook). Back-compat: existing
+    // callers destructure only `{ live }`.
+    return { live: null, error: err };
+  }
+}
+
+// computeDispatchSurvivingRoster — the positive-liveness dispatch roster with the
+// outage fail-safe folded in: sheds a NEVER-live rostered host (absent from
+// lastSeen — the CTL-1057 permanently-offline case) so its HRW slice fails over,
+// but degrades to the FULL roster when NOBODY is positively live (a total feed
+// outage) so the board is never stranded. Single-host (roster.length <= 1) is a
+// no-op with no read. The recovery side deliberately keeps the fail-open deadHosts
+// (it must NOT reclaim a never-seen host's non-existent work); see docs/architecture.md.
+export function computeDispatchSurvivingRoster(roster, opts = {}) {
+  if (!Array.isArray(roster) || roster.length <= 1) return roster;
+  const { live } = readPositiveLive(roster, opts);
+  return live && live.length > 0 ? live : roster;
+}
+
+// resolveDispatchRoster — the SINGLE source of truth for the dispatch-ownership
+// roster, shared by BOTH dispatch sites (scheduler new-work `_dispatchRoster` and
+// monitor `dispatchTriage`) so they can never drift into split-brain (CTL-1091
+// cleanup #1). Composes positive-liveness → restore deflap → outage fail-safe:
+//
+//  1. Read the raw positively-live set once.
+//  2. TOTAL OUTAGE (read threw, or NOBODY positively live) → degrade to the FULL
+//     roster and DO NOT mutate the deflap observation state (we learned nothing
+//     this tick). This preserves the "outage → full roster, never re-home" invariant
+//     that a naive deflap-on-fail-open-roster would violate: without this guard a
+//     just-departed host (prevState liveSince:null) would be held out and its slice
+//     re-homed to a peer during an outage (CTL-1091 correctness review #1).
+//  3. Otherwise apply the restore deflap (computeDispatchRoster) on the live set;
+//     `persist` writes the next observation state atomically (scheduler is the SOLE
+//     writer; monitor passes persist:false and reads the same file read-only).
+//
+// Single-host (roster.length <= 1) is a strict no-op with no read. Injectable
+// readHeartbeats/holdMs for tests.
+export function resolveDispatchRoster({
+  roster,
+  orchDir,
+  self,
+  nowMs = Date.now(),
+  persist = false,
+  readHeartbeats = readClusterHeartbeats,
+  holdMs = HEARTBEAT_RESTORE_HOLD_MS,
+  // CTL-1091 review F2: observability hook fired ONLY on the outage→full-roster
+  // degradation (below). Default no-op keeps the pure resolve silent for unit
+  // callers and the read-only monitor site; the scheduler's write path wires the
+  // rate-limited warn emitter so a genuine feed outage is not invisible.
+  onDegrade = () => {},
+} = {}) {
+  if (!Array.isArray(roster) || roster.length <= 1) return roster;
+  const prevState = readDeflapState(orchDir);
+  const { live, error } = readPositiveLive(roster, { readHeartbeats, nowMs });
+  if (!live || live.length === 0) {
+    // Total outage → full roster, observation state untouched. Surface the
+    // degradation (its silence was CTL-1091 verify F2): cross-host failover has
+    // effectively turned OFF this tick and every host has dropped back to owning
+    // only its own HRW slice. The fail-safe is correct; only its silence was the
+    // risk. Never let an observability throw break the roster resolve.
+    try {
+      onDegrade({
+        roster,
+        self,
+        reason: error ? "heartbeat-read-threw" : "nobody-positively-live",
+        error: error ? (error.message ?? String(error)) : null,
+      });
+    } catch {
+      /* observability is best-effort */
+    }
+    if (persist) writeDeflapState(orchDir, prevState);
+    return roster;
+  }
+  const { dispatchRoster, nextState } = computeDispatchRoster({
+    survivingRoster: live,
+    roster,
+    prevState,
+    holdMs,
+    nowMs,
+    self,
+  });
+  if (persist) writeDeflapState(orchDir, nextState);
+  return dispatchRoster;
+}
+
+// CTL-1091 review F2: rate-limited WARN for the dispatch-roster outage degrade.
+// The scheduler is a single long-lived daemon process, so a module-level
+// timestamp is enough to keep this to one warn per window (a partial feed outage
+// otherwise fires every tick). Alloy ships the Tier-1 daemon log to Loki, so this
+// gives an operator the "failover is OFF right now" signal — and the caught error
+// message rides along so a genuine feed outage is distinguishable from a latent
+// read-path bug. The read-only monitor site stays silent (no onDegrade), so the
+// scheduler is the sole emitter and there is no double-logging.
+const DISPATCH_ROSTER_OUTAGE_WARN_INTERVAL_MS = 60_000;
+let _lastDispatchRosterOutageWarnMs = 0;
+function warnDispatchRosterOutage({ roster, self, reason, error } = {}) {
+  const nowMs = Date.now();
+  if (nowMs - _lastDispatchRosterOutageWarnMs < DISPATCH_ROSTER_OUTAGE_WARN_INTERVAL_MS) return;
+  _lastDispatchRosterOutageWarnMs = nowMs;
+  log.warn(
+    { roster, self, reason, error, degradedTo: "full-roster" },
+    "ctl-1091: dispatch-roster liveness read degraded to the FULL roster — cross-host failover is OFF this tick (every host owns only its own HRW slice). This is the correct fail-safe; investigate the heartbeat/Loki feed if it persists.",
+  );
 }
 
 // CTL-1004/CTL-1056 Bug 2: dispatchFailureDiag — extract the diagnostic fields
@@ -3392,12 +3537,24 @@ export function schedulerTick(
     hosts = undefined,
     hostName = undefined,
     claimDispatch = claimDispatchSync,
+    // CTL-1481: best-effort worker:<host> label stamp, fired right after a won
+    // multi-host claim (same gate as emitFenceClaimed). Injectable so tests
+    // drive/assert the stamp without touching Linear; production defaults to
+    // the real linear-query/linear-write-backed implementation.
+    stampWorkerLabel = defaultStampWorkerLabel,
     // CTL-1191: injectable surviving-roster computation for the recovery-pass HRW
     // gate (ownsForRecovery). Default undefined → computeSurvivingRoster(roster),
     // which reads heartbeats from the (test-redirected) event log. Tests inject a
     // fixed survivor set to drive the dead-owner-failover path deterministically
     // without writing heartbeat events. Single-host is still a no-op regardless.
     recoverySurvivingRoster = undefined,
+    // CTL-1091: injectable surviving-roster computation for the NEW-WORK dispatch
+    // HRW gate (the `ready` filter below), mirroring recoverySurvivingRoster.
+    // Default undefined → computeSurvivingRoster(roster) (reads the test-redirected
+    // event log). Tests inject a fixed survivor set to drive the offline-owner
+    // failover deterministically without writing heartbeat events. Single-host is
+    // still a no-op regardless (multiHost gate short-circuits before it is read).
+    dispatchSurvivingRoster = undefined,
     // CTL-729: progress-watchdog seams. Defaults keep every existing bare unit
     // tick inert (null silence probe → predicate no-ops via "no-transcript").
     watchdog: {
@@ -3517,6 +3674,14 @@ export function schedulerTick(
     // by dispatch mode. Default "phase-agents" = today's bg substrate; every
     // direct-call test keeps the stable label with no wiring.
     dispatchMode = "phase-agents",
+    // CTL-1457 (N1): true when executorByPhase routes ANY phase to an in-process
+    // executor (sdk|codex-exec) even though the NODE boot dispatchMode is bg —
+    // the primary per-phase codex/sdk rollout. ORed into the occupancy gates below
+    // (isInProcessDispatchMode(dispatchMode) || hasInProcessRoute) so a routed no-bg
+    // worker on a bg node is counted (else it over-admits past maxParallel). Default
+    // false → the bg node with no in-process route is byte-identical (countSdkInflight
+    // is never called; and even when armed it is 0 on a node nothing routes in-process).
+    hasInProcessRoute = false,
   } = {}
 ) {
   // CTL-850: resolve this host + the cluster roster ONCE per tick (cheap
@@ -3565,6 +3730,42 @@ export function schedulerTick(
     return _survivorRoster;
   };
   const ownsForRecovery = (ticket) => !multiHost || ownedBy(ticket, _survivors(), self);
+
+  // CTL-1091: the DISPATCH-time ownership roster = the live (positive-liveness +
+  // restore-deflap) roster, so new eligible tickets whose HRW owner is OFFLINE
+  // fail over to a live host instead of stranding in Todo. Memoized once per tick.
+  // It performs its OWN positive-liveness heartbeat read (via resolveDispatchRoster)
+  // — independent of recovery's fail-open computeSurvivingRoster read (_survivors),
+  // by design: dispatch needs positive liveness, recovery needs fail-open. Both hit
+  // the same cached feed. Injectable via dispatchSurvivingRoster for tests; a total
+  // outage degrades to the full roster (never double-acts).
+  let _dispatchRosterMemo = null;
+  const _dispatchRoster = () => {
+    if (_dispatchRosterMemo) return _dispatchRosterMemo;
+    // Test override bypasses both the heartbeat read AND the deflap (tests
+    // exercise the deflap directly via the pure computeDispatchRoster).
+    if (Array.isArray(dispatchSurvivingRoster)) {
+      _dispatchRosterMemo = dispatchSurvivingRoster;
+      return _dispatchRosterMemo;
+    }
+    // Single-host is a strict no-op with NO heartbeat read (cheap guard first);
+    // _dispatchRoster is only reached multiHost anyway (the ready filter short-
+    // circuits single-host), but this keeps it safe if ever called otherwise.
+    // Scheduler is the SOLE writer of .liveness-deflap.json (persist:true); monitor
+    // reads it read-only. Shared with the triage gate via resolveDispatchRoster so
+    // both dispatch sites can never drift out of sync.
+    _dispatchRosterMemo = multiHost
+      ? resolveDispatchRoster({
+          roster,
+          orchDir,
+          self,
+          nowMs: now(),
+          persist: true,
+          onDegrade: warnDispatchRosterOutage, // CTL-1091 F2: surface outage→full-roster
+        })
+      : roster;
+    return _dispatchRosterMemo;
+  };
   // CTL-757: emitStateWrite — caller-emit the canonical linear.state.write audit
   // event for ONE scheduler write site. `writerResult` is the runTransition return
   // ({applied, reason, from_state, to_state, ...}) from applyPhaseStatus /
@@ -4875,10 +5076,17 @@ export function schedulerTick(
   // job, so liveCount is blind to them. Add their occupancy (dispatched/running
   // nested signals with no bg_job_id) so the slot gate counts them like bg jobs and
   // can't admit MORE tickets past maxParallel (each queuing behind the SDK
-  // semaphore). GATED on dispatchMode === "sdk": under bg/oneshot-legacy the term is
-  // 0 (countSdkInflight is never called), so occupiedCount is byte-identical to today.
+  // semaphore). CTL-1457 (T2): codex-exec prelaunches write the SAME no-bg_job_id
+  // "dispatched" signals and queue behind their own semaphore, so a codex node must
+  // count them too — gate on isInProcessDispatchMode (sdk OR codex-exec). Under
+  // bg/oneshot-legacy the term is 0 (countSdkInflight is never called), so
+  // occupiedCount is byte-identical to today.
+  // CTL-1457 (N1): ALSO arm when executorByPhase routes ANY phase to an in-process
+  // executor while the NODE mode is still bg (hasInProcessRoute) — the per-phase
+  // rollout's routed no-bg worker must be counted too. countSdkInflight stays 0 on a
+  // node nothing routes in-process, so a bg node with an empty map is unchanged.
   let sdkInflight = 0;
-  if (dispatchMode === "sdk") {
+  if (isInProcessDispatchMode(dispatchMode) || hasInProcessRoute) {
     try {
       sdkInflight = countSdkInflight(orchDir);
     } catch {
@@ -5873,8 +6081,22 @@ export function schedulerTick(
   // regardless of whether the lone roster entry string-matches the resolved
   // hostName (stale/aliased hosts.json). HRW filtering engages only when a 2nd
   // host actually joins (roster.length > 1).
+  // CTL-1091 (Codex P1 #1): refresh the dispatch-roster deflap observation state
+  // EVERY multi-host tick, even when there is no ready work. _dispatchRoster() is
+  // otherwise only reached lazily through the ready.filter() below, so on an idle
+  // board (ready empty) that path never runs — a peer that departs while the board
+  // is quiet never has its liveSince reset to null, and on return computeDispatchRoster
+  // would see a stale continuous timestamp and re-admit it immediately, skipping the
+  // restore hold (the exact flap this deflap exists to prevent). Forcing the
+  // (memoized) read+persist here keeps the deflap honest during idle periods; the
+  // ready.filter() below reuses the same memoized roster (no double read). During a
+  // liveness outage the resolver degrades to the full roster and intentionally leaves
+  // the observation state untouched (we learned nothing this tick).
+  if (multiHost) _dispatchRoster();
   const ready = computeReadyTickets(eligible, { blockerStates }).filter(
-    (t) => !multiHost || ownedBy(t.identifier, roster, self)
+    // CTL-1091: hash ownership over the LIVE (surviving) roster, not the raw
+    // roster, so an offline owner's slice fails over to a live host.
+    (t) => !multiHost || ownedBy(t.identifier, _dispatchRoster(), self)
   );
   // CTL-657: the in-flight count is the live `background` claude-agents count,
   // not listInFlightTickets(orchDir).size. A worker that leaked (signal terminal
@@ -5893,11 +6115,13 @@ export function schedulerTick(
   // maxParallel=1 — a 2nd SDK signal beyond parallelism for one tick. The predecessor
   // teardown via emitPredecessorReap is async, so the just-finished predecessor signal is
   // still on disk this tick — but it is terminal (done/skipped) and countSdkInflight only
-  // counts dispatched|running, so the re-sample is never inflated by it. GATED strictly on
-  // dispatchMode === "sdk": the bg/oneshot-legacy path never recomputes (sdkInFlightCount
-  // stays === inFlightCount) and keeps the byte-identical freeSlots formula below.
+  // counts dispatched|running, so the re-sample is never inflated by it. CTL-1457 (T2):
+  // gate on isInProcessDispatchMode so codex-exec re-samples its no-bg occupancy the same
+  // way sdk does; the bg/oneshot-legacy path never recomputes (sdkInFlightCount stays
+  // === inFlightCount) and keeps the byte-identical freeSlots formula below. CTL-1457
+  // (N1): also re-sample when a per-phase in-process route is armed on a bg node.
   let sdkInFlightCount = inFlightCount;
-  if (dispatchMode === "sdk") {
+  if (isInProcessDispatchMode(dispatchMode) || hasInProcessRoute) {
     let resampledSdkInflight = sdkInflight;
     try {
       resampledSdkInflight = countSdkInflight(orchDir);
@@ -5934,7 +6158,9 @@ export function schedulerTick(
   // loss; the slot frees naturally next tick via getAgentsCached deregistration).
   const freeSlots =
     livenessFresh && !draining
-      ? dispatchMode === "sdk"
+      ? // CTL-1457 (N1): the in-process budget formula also applies when a per-phase
+        // route arms in-process occupancy on a bg node (hasInProcessRoute).
+        isInProcessDispatchMode(dispatchMode) || hasInProcessRoute
         ? // CTL-1367 P2 (item b): under executor=sdk take the MIN of two budgets so
           // whichever formula correctly accounts for the slot the other missed wins:
           //  (1) the re-sampled SDK count (sdkInFlightCount) — catches same-tick
@@ -6244,6 +6470,31 @@ export function schedulerTick(
         ticket: t.identifier,
         phase: "assignment",
       });
+      // CTL-1481: best-effort worker:<host> label stamp — a visibility
+      // projection of the claim we just won, NEVER the claim arbiter itself.
+      // Multi-host only (same gate as emitFenceClaimed). Placed AFTER the
+      // applyPhaseStatus/applyAssignee writes so a stamp-tripped breaker can
+      // never starve the Axis-1 status write within the same tick. Own
+      // try/catch (mirrors convergeHeldLabel's applyLabel catch shape) so a
+      // throw only logs and never unwinds the dispatch success path.
+      if (clusterGeneration != null) {
+        try {
+          stampWorkerLabel({
+            ticket: t.identifier,
+            hostName: self,
+            knownHosts: roster,
+            replica,
+            applyLabel: writeStatus.applyLabel,
+            removeLabel: writeStatus.removeLabel,
+            log,
+          });
+        } catch (err) {
+          log.warn(
+            { ticket: t.identifier, err: err.message },
+            "scheduler: stampWorkerLabel threw — continuing tick"
+          );
+        }
+      }
     }
   }
 
@@ -6967,6 +7218,7 @@ function runTick() {
       readEligible: runningOpts.readEligible,
       dispatch: runningOpts.dispatch,
       dispatchMode: runningOpts.dispatchMode, // CTL-1365a: stamp the Tier-1 tick-timing line
+      hasInProcessRoute: runningOpts.hasInProcessRoute, // CTL-1457 (N1): arm occupancy gates for a per-phase in-process route on a bg node
       exec: runningOpts.exec,
       writeStatus: runningOpts.writeStatus,
       cache: runningOpts.cache, // CTL-634: shared out-of-set blocker state cache
@@ -7421,7 +7673,10 @@ function runTick() {
     // Skip entirely on single-host installs (no-op inside the function, but the
     // pre-check avoids the call to stay zero-cost on the common case).
     if (getClusterHosts().length > 1) {
-      reclaimDeadHostWork({ orchDir: runningOpts.orchDir }).catch((err) => {
+      // CTL-1481: thread the replica (second arg — the seams object) so the
+      // takeover stamp's label read stays off live Linear (replica-first, loud
+      // live fallback inside the stamp).
+      reclaimDeadHostWork({ orchDir: runningOpts.orchDir }, { replica: runningOpts.replica }).catch((err) => {
         log.warn({ err: err?.message }, "ctl-863: reclaimDeadHostWork tick failed — continuing");
       });
     }
@@ -7533,6 +7788,12 @@ export function startScheduler({
   // resource attr (initTracing). Default "phase-agents" keeps every direct-call
   // test + standalone main() on today's label with no wiring.
   dispatchMode = "phase-agents",
+  // CTL-1457 (N1): true when the node's executorByPhase routes ANY phase to an
+  // in-process executor (sdk|codex-exec) while the node boot dispatchMode is still
+  // bg. Threaded into runningOpts → the schedulerTick occupancy gates so a routed
+  // no-bg worker is counted on a bg node. Default false → byte-identical for a node
+  // with no in-process route (the common case).
+  hasInProcessRoute = false,
   readEligible,
   exec,
   writeStatus,
@@ -7611,6 +7872,7 @@ export function startScheduler({
     orchDir,
     dispatch,
     dispatchMode, // CTL-1365a: threaded to schedulerTick (tick-timing log field)
+    hasInProcessRoute, // CTL-1457 (N1): per-phase in-process route arms the occupancy gates on a bg node
     readEligible,
     exec,
     writeStatus,

@@ -117,10 +117,11 @@ export function layer2Path(env = process.env) {
   );
 }
 
-// CTL-1401: valid executor levers (mirrors config.mjs's resolver — bg | sdk | oneshot-legacy). The
-// install's `--executor` flag provisions one of these into execution-core.env so the node's executor
-// is install-set, not dependent on a hand-edit surviving.
-export const VALID_EXECUTORS = Object.freeze(["bg", "sdk", "oneshot-legacy"]);
+// CTL-1401: valid executor levers (mirrors config.mjs's EXECUTORS — bg | sdk | oneshot-legacy |
+// codex-exec). The install's `--executor` flag provisions one of these into execution-core.env so
+// the node's executor is install-set, not dependent on a hand-edit surviving. Keep in sync with
+// config.mjs:EXECUTORS (a separate literal, not an import).
+export const VALID_EXECUTORS = Object.freeze(["bg", "sdk", "oneshot-legacy", "codex-exec"]);
 
 /**
  * execCoreEnvPath — the daemon env file the execution-core launcher sources on EVERY start, and from
