@@ -2309,3 +2309,110 @@ describe("classifyPrNotMerged (CTL-1496)", () => {
     expect(via1).toEqual(via2);
   });
 });
+
+// ─── CTL-1496 Phase 4: reasoningRecoveryPass end-to-end (enforce + shadow) ──
+
+describe("reasoningRecoveryPass — pr_not_merged end-to-end (CTL-1496 Phase 4)", () => {
+  const mkPrNotMergedItem = () => ({
+    ticket: "CTL-PRNM",
+    evidence: {
+      failureReason: "pr_not_merged",
+      signal: { failureReason: "pr_not_merged" },
+      ticket: "CTL-PRNM",
+      logsOutput: null,
+      jobState: null,
+    },
+  });
+
+  test("enforce: pr_not_merged + failing check → dispatches recovery-pass (fix intent recorded)", () => {
+    const intents = [];
+    const events = [];
+    const items = [mkPrNotMergedItem()];
+    reasoningRecoveryPass(items, {
+      mode: "enforce",
+      classifyTicket: () => ({
+        decision: "fix",
+        fix_class: "bounded-llm",
+        details: {
+          reason: "PR #42 failing quality",
+          brief: "…@codex review…",
+        },
+      }),
+      invokeRecoveryPass: (_ticket, _o) => ({
+        success: true,
+        dispatched: true,
+        details: {},
+      }),
+      recordIntent: (t, i) => intents.push({ t, i }),
+      emitEvent: (e) => events.push(e),
+      postComment: () => {},
+      shouldSkipItem: () => null,
+    });
+    expect(intents.length).toBeGreaterThan(0);
+    const fixIntent = intents.find((i) => i.i.decision === "fix" || i.i.type === "recovery-pass");
+    expect(fixIntent).toBeDefined();
+    expect(events.some((e) => e.type === "recovery.fixed" || e.type === "recovery.decision")).toBe(true);
+  });
+
+  test("shadow: pr_not_merged + failing check → emits would-fix event, dispatches NOTHING", () => {
+    const events = [];
+    const items = [mkPrNotMergedItem()];
+    reasoningRecoveryPass(items, {
+      mode: "shadow",
+      classifyTicket: () => ({
+        decision: "fix",
+        fix_class: "bounded-llm",
+        details: { reason: "PR #42", brief: "…" },
+      }),
+      invokeRecoveryPass: () => {
+        throw new Error("must not dispatch in shadow mode");
+      },
+      recordIntent: () => {},
+      emitEvent: (e) => events.push(e),
+      postComment: () => {},
+      shouldSkipItem: () => null,
+    });
+    expect(events.some((e) => String(e.type).includes("would"))).toBe(true);
+    expect(events.some((e) => e.type === "recovery.fixed")).toBe(false);
+  });
+
+  test("shadow: human CHANGES_REQUESTED → emits would-escalate, dispatches NOTHING", () => {
+    const events = [];
+    reasoningRecoveryPass([mkPrNotMergedItem()], {
+      mode: "shadow",
+      classifyTicket: () => ({
+        decision: "escalate",
+        fix_class: "human",
+        details: { reason: "PR #44 blocked by human review — 'redesign' (b.ts:9)" },
+      }),
+      invokeRecoveryPass: () => { throw new Error("must not dispatch in shadow"); },
+      recordIntent: () => {},
+      emitEvent: (e) => events.push(e),
+      postComment: () => {},
+      shouldSkipItem: () => null,
+    });
+    expect(events.some((e) => String(e.type).includes("would-escalate") || String(e.type).includes("would"))).toBe(true);
+  });
+
+  test("probe throws in enforce → defer outcome (no dispatch, no escalation latch)", () => {
+    const events = [];
+    const intents = [];
+    reasoningRecoveryPass([mkPrNotMergedItem()], {
+      mode: "enforce",
+      classifyTicket: () => ({
+        decision: "defer",
+        fix_class: "board-health",
+        details: { reason: "pr_not_merged: probe failed (gh down); retry next tick" },
+      }),
+      invokeRecoveryPass: () => { throw new Error("must not dispatch on defer"); },
+      recordIntent: (t, i) => intents.push({ t, i }),
+      emitEvent: (e) => events.push(e),
+      postComment: () => {},
+      shouldSkipItem: () => null,
+    });
+    const deferIntent = intents.find((i) => i.i.decision === "defer");
+    expect(deferIntent).toBeDefined();
+    expect(events.some((e) => e.type === "recovery.fixed")).toBe(false);
+    expect(events.some((e) => e.type === "recovery.escalated")).toBe(false);
+  });
+});
