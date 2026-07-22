@@ -3335,6 +3335,36 @@ export function maybeEmitReplicaFreshness({
   }
 }
 
+// CTL-1489: best-effort resolver for the widened worker.transition path fields.
+// Reads the ticket's active phase-*.json via the existing signal reader and
+// returns {worktreePath, bgJobId, generation, handoffPath, artifact} — or
+// all-null on any error / a pruned worker dir. Because the broker's widened
+// worker_state columns are COALESCE-sticky, a null result never erases a
+// previously-captured path, so calling this once at the recordTransition
+// chokepoint is safe by construction (OQ1). Not on any hot loop.
+export function resolveTransitionFields(orchDir, ticket) {
+  try {
+    const sigs = readWorkerSignals(orchDir).filter((s) => s.ticket === ticket);
+    const sig = sigs[0];
+    const raw = sig?.raw ?? {};
+    return {
+      worktreePath: sig?.worktreePath ?? raw.worktreePath ?? null,
+      bgJobId: raw.bg_job_id ?? null,
+      generation: raw.generation ?? null,
+      handoffPath: raw.handoffPath ?? raw.handoff_path ?? null,
+      artifact: raw.artifact ?? null,
+    };
+  } catch {
+    return {
+      worktreePath: null,
+      bgJobId: null,
+      generation: null,
+      handoffPath: null,
+      artifact: null,
+    };
+  }
+}
+
 // schedulerTick — one pull cycle: (1) advancement sweep, (2) new-work pull,
 // (3) terminal-Done sweep (CTL-558). Idempotent and restart-safe — derives
 // every action from filesystem state. `exec` is the injectable seam for the
@@ -3859,6 +3889,10 @@ export function schedulerTick(
         reviveCount,
         source,
         taskType: resolveTicketType(orchDir, ticket),
+        // CTL-1489: widen the event with the durable-projection path fields so
+        // the broker can reconstruct a WorkerSignal from durable state. Sticky
+        // columns make a null result (pruned dir) harmless.
+        ...resolveTransitionFields(orchDir, ticket),
       });
     } catch (_err) {
       // fail-open

@@ -49,6 +49,14 @@ export function buildWorkerTransitionEvent({
   // CTL-1488: id of the triggering event (additive; null when absent). Parity
   // with the shared TS/bash builders' caused_by (ADR-022 absence-detection).
   causedBy = null,
+  // CTL-1489: widened durable-projection path fields. body.payload ONLY (see
+  // below) — never attributes: otel-forward forwards attributes off-machine and
+  // FS paths must never become OTLP attributes (cardinality/leak guard).
+  worktreePath = null,
+  bgJobId = null,
+  generation = null,
+  handoffPath = null,
+  artifact = null,
 } = {}) {
   const ts = new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
   const orchVal = orchId ?? ticket;
@@ -125,6 +133,13 @@ export function buildWorkerTransitionEvent({
           linearKey,
           branch,
           taskType,
+          // CTL-1489: widened durable-projection fields (body.payload only).
+          // The broker reducer folds these into worker_state + the sink-5 table.
+          worktree_path: worktreePath,
+          bg_job_id: bgJobId,
+          generation,
+          handoff_path: handoffPath,
+          artifact,
         },
       },
     }) + "\n"

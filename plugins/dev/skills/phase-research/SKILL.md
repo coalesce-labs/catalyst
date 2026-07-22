@@ -311,8 +311,11 @@ daily review sorts "friction since last review" by this per-record timestamp.
 "${PLUGIN_ROOT}/scripts/lib/thoughts-sync-gate.sh" --phase "$PHASE" --ticket "$TICKET" || exit 11
 
 # Emit phase-complete event, close signal file, end catalyst-session.
+# CTL-1489: stamp the research-doc artifact pointer into the completion event's
+# body.payload so durable-state consumers can locate this phase's output.
 "${PLUGIN_ROOT}/scripts/phase-agent-emit-complete" \
-  --phase "$PHASE" --ticket "$TICKET" --status complete
+  --phase "$PHASE" --ticket "$TICKET" --status complete \
+  --payload-json "$(jq -nc --arg a "${RESEARCH_DOC:-}" '{artifact:$a}')"
 
 # Self-halt after complete to prevent zombie workers (CTL-778 step 2).
 # Read our own bg_job_id from the signal file and ask Claude to stop us.
