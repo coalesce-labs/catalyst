@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+# projection-shadow-diff — CTL-1489 shadow-diff drift harness for the durable-
+# projection read cutover. Thin wrapper: the comparison needs both JS readers
+# (readWorkerSignals + readWorkerSignalsFromProjection), so the logic lives in
+# execution-core/projection-shadow-diff.mjs and this shells to it via bun.
+#
+# Usage:
+#   projection-shadow-diff [--json] [--strict] <orchId-or-orch-dir>
+#
+# Exit codes:
+#   0 — all compared tickets match (or only projection-missing tickets, non-strict)
+#   1 — drift on ≥1 ticket (or --strict and a signal-only ticket)
+#   2 — no broker DB / no workers dir (nothing to compare)
+set -uo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+RUNNER="${SCRIPT_DIR}/execution-core/projection-shadow-diff.mjs"
+
+if command -v bun >/dev/null 2>&1; then
+  exec bun "$RUNNER" "$@"
+elif command -v node >/dev/null 2>&1; then
+  exec node "$RUNNER" "$@"
+else
+  echo "ERROR: bun or node required to run projection-shadow-diff" >&2
+  exit 2
+fi
