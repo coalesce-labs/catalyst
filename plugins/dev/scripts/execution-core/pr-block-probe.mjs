@@ -6,19 +6,56 @@
 
 import { spawnSync } from "node:child_process";
 
-export const REVIEW_THREADS_QUERY = `query($owner:String!,$name:String!,$pr:Int!){
+// Paginated: `after:$after` (nullable String → first page passes it unbound =
+// null = start from the beginning). pageInfo lets the caller walk every page so
+// a review thread beyond the first 100 is never silently dropped (CTL-1496 P2).
+export const REVIEW_THREADS_QUERY = `query($owner:String!,$name:String!,$pr:Int!,$after:String){
   repository(owner:$owner,name:$name){ pullRequest(number:$pr){
-    reviewThreads(first:100){ nodes { id isResolved
+    reviewThreads(first:100, after:$after){
+      pageInfo { hasNextPage endCursor }
+      nodes { id isResolved
       comments(first:1){ nodes { body path line author { login __typename } } } } } } } }`;
 
+// This probe runs SYNCHRONOUSLY from reasoningRecoveryPass on the scheduler
+// tick, so an unbounded `gh` (hung network / auth / keychain prompt) would
+// wedge the whole daemon event loop. Bound every spawn; a timeout surfaces as
+// r.error (ETIMEDOUT) → throw → classifyPrNotMerged defers to the next tick
+// (CTL-1496 P1).
+const GH_PROBE_TIMEOUT_MS = Number(process.env.CATALYST_GH_PROBE_TIMEOUT_MS || 20000);
+
+// Hard cap on review-thread pages walked (100 threads/page). Far above any real
+// PR; hitting it means something is wrong, so we refuse rather than proceed on a
+// partial set (CTL-1496 P2).
+const MAX_THREAD_PAGES = 25;
+
 function realGh(args) {
-  const r = spawnSync("gh", args, { encoding: "utf8" });
+  const r = spawnSync("gh", args, { encoding: "utf8", timeout: GH_PROBE_TIMEOUT_MS });
+  // A timeout (or spawn failure) sets r.error and leaves status null — surface
+  // it as a throw so the caller treats it as transient rather than the daemon
+  // hanging on a wedged child.
+  if (r.error) {
+    const timedOut = r.error.code === "ETIMEDOUT" || r.signal === "SIGTERM";
+    throw new Error(
+      `gh ${args.join(" ")} ${timedOut ? `timed out after ${GH_PROBE_TIMEOUT_MS}ms` : `errored: ${r.error.message}`}`,
+    );
+  }
   if (r.status !== 0) throw new Error(`gh ${args.join(" ")} failed: ${r.stderr || r.status}`);
   return r.stdout;
 }
 
 export function isFailingState(s) {
-  return ["FAILURE", "ERROR", "TIMED_OUT", "CANCELLED"].includes(s);
+  return [
+    "FAILURE",
+    "ERROR",
+    "TIMED_OUT",
+    "CANCELLED",
+    // ACTION_REQUIRED / STARTUP_FAILURE are genuine CI failure states the
+    // existing orchestrate-auto-fixup classifier already treats as failing;
+    // omitting them here regressed the autonomous remediation path to a human
+    // escalation for those conclusions (CTL-1496 P2).
+    "ACTION_REQUIRED",
+    "STARTUP_FAILURE",
+  ].includes(s);
 }
 
 export function isBotAuthor(a) {
@@ -67,12 +104,18 @@ const PR_VIEW_FIELDS =
 // always resolving the wrong PR → always escalating). We resolve by the ticket's
 // head branch when the caller threads it, else by the ticket id in the PR title
 // (draft_pr_title injects `<type>(<scope>): <TICKET> …`), taking the single open
-// PR. Returns the parsed PR object or null.
-function resolveTicketPr(gh, ticket, branch) {
+// PR. Scoped to owner/name with `-R` so the lookup targets the TICKET's repo —
+// the same repo used for the GraphQL threads query below — not whatever repo the
+// daemon's cwd points at (CTL-1496 P1: without `-R`/cwd it resolved the daemon
+// repo → false "no open PR" escalation or an unrelated same-ticket PR).
+// Returns the parsed PR object or null.
+function resolveTicketPr(gh, ticket, branch, owner, name) {
   const selector = branch ? ["--head", branch] : ["--search", `${ticket} in:title`];
+  const repoArgs = owner && name ? ["-R", `${owner}/${name}`] : [];
   const listRaw = gh([
     "pr",
     "list",
+    ...repoArgs,
     ...selector,
     "--state",
     "open",
@@ -86,6 +129,52 @@ function resolveTicketPr(gh, ticket, branch) {
   return list[0];
 }
 
+// Fetch all review threads across pages, accumulating nodes. Each page's
+// partial/errored body is a probe failure (throw → caller defers) rather than a
+// silently-empty set. Refuse past MAX_THREAD_PAGES with more pages remaining so
+// a genuinely enormous (or looping) thread set never yields a partial view that
+// hides an unresolved human thread (CTL-1496 P2).
+function fetchAllReviewThreads(gh, owner, name, prNumber) {
+  const nodes = [];
+  let after = null;
+  for (let page = 0; page < MAX_THREAD_PAGES; page++) {
+    const args = [
+      "api",
+      "graphql",
+      "-f",
+      `query=${REVIEW_THREADS_QUERY}`,
+      // owner/name are String! — pass with -f (raw string) so a purely-numeric
+      // owner or repo name is not coerced to an Int and rejected. pr is Int! → -F.
+      "-f",
+      `owner=${owner}`,
+      "-f",
+      `name=${name}`,
+      "-F",
+      `pr=${prNumber}`,
+    ];
+    // First page leaves $after unbound (nullable → null → from the beginning).
+    if (after) args.push("-f", `after=${after}`);
+    const json = safeJson(gh(args));
+    // `gh api graphql` can exit 0 with a partial/field-errored body (HTTP 200,
+    // data.repository.pullRequest === null, or a top-level `errors` array).
+    // Coercing that to [] would silently hide an unresolved HUMAN thread and
+    // route a human-blocked PR to the autonomous fix path.
+    if (json === null || json.errors || !json?.data?.repository?.pullRequest) {
+      throw new Error(
+        "review-threads GraphQL returned no usable data (partial/errored response)",
+      );
+    }
+    const rt = json.data.repository.pullRequest.reviewThreads;
+    for (const n of rt?.nodes || []) nodes.push(n);
+    const pageInfo = rt?.pageInfo;
+    if (!pageInfo?.hasNextPage || !pageInfo?.endCursor) return nodes;
+    after = pageInfo.endCursor;
+  }
+  throw new Error(
+    `review-threads exceeded ${MAX_THREAD_PAGES} pages; refusing partial thread set`,
+  );
+}
+
 export function defaultProbePrBlock(ticket, { gh = realGh, repo, branch } = {}) {
   const [owner, name] = (
     repo ||
@@ -94,45 +183,20 @@ export function defaultProbePrBlock(ticket, { gh = realGh, repo, branch } = {}) 
   ).split("/");
 
   // Resolve the ticket's PR by head branch (when threaded) or ticket-in-title
-  // search — independent of the daemon's cwd/current branch.
-  const view = resolveTicketPr(gh, ticket, branch);
+  // search — independent of the daemon's cwd/current branch, scoped to the
+  // resolved owner/name.
+  const view = resolveTicketPr(gh, ticket, branch, owner, name);
   if (!view || !view.number) return emptyProbe();
 
   const failingChecks = (view.statusCheckRollup || [])
     .filter((c) => isFailingState(c.state || c.conclusion))
     .map((c) => ({ name: c.name || c.context, detailsUrl: c.detailsUrl || null }));
 
-  const threadsRaw = gh([
-    "api",
-    "graphql",
-    "-f",
-    `query=${REVIEW_THREADS_QUERY}`,
-    // owner/name are String! — pass with -f (raw string) so a purely-numeric
-    // owner or repo name is not coerced to an Int and rejected. pr is Int! → -F.
-    "-f",
-    `owner=${owner}`,
-    "-f",
-    `name=${name}`,
-    "-F",
-    `pr=${view.number}`,
-  ]);
-  const threadsJson = safeJson(threadsRaw);
-  // `gh api graphql` can exit 0 with a partial/field-errored body (HTTP 200,
-  // data.repository.pullRequest === null, or a top-level `errors` array). Coercing
-  // that to [] would silently hide an unresolved HUMAN thread and route a
-  // human-blocked PR to the autonomous fix path. Treat an unparseable or partial
-  // response as a probe failure → classifyPrNotMerged defers (retry next tick).
-  if (
-    threadsJson === null ||
-    threadsJson.errors ||
-    !threadsJson?.data?.repository?.pullRequest
-  ) {
-    throw new Error(
-      "review-threads GraphQL returned no usable data (partial/errored response)",
-    );
-  }
-  const nodes =
-    threadsJson.data.repository.pullRequest.reviewThreads?.nodes || [];
+  // Walk EVERY review-thread page. A single first:100 page silently omits later
+  // threads; if an omitted one is an unresolved human conversation while
+  // reviewDecision !== CHANGES_REQUESTED, the classifier would take the
+  // autonomous fix/merge path despite an unresolved human review (CTL-1496 P2).
+  const nodes = fetchAllReviewThreads(gh, owner, name, view.number);
   // A thread with no first comment cannot be attributed to bot vs human; skip it
   // rather than defaulting it into unresolvedHumanThreads (spurious escalate).
   const unresolved = nodes.filter((n) => !n.isResolved && n.comments?.nodes?.[0]);

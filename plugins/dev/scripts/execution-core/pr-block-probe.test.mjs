@@ -3,7 +3,7 @@
 // Run: cd plugins/dev/scripts/execution-core && bun test pr-block-probe.test.mjs
 
 import { describe, test, expect } from "bun:test";
-import { defaultProbePrBlock } from "./pr-block-probe.mjs";
+import { defaultProbePrBlock, isFailingState } from "./pr-block-probe.mjs";
 
 // fakeGh routes by longest matching pattern first so specific patterns
 // (e.g. "pr view 42 --json reviews") win over generic ones ("pr list").
@@ -423,5 +423,123 @@ describe("defaultProbePrBlock", () => {
     const r = defaultProbePrBlock("CTL-1", { gh, repo: "o/r" });
     expect(r.unresolvedBotThreads).toHaveLength(0);
     expect(r.unresolvedHumanThreads).toHaveLength(0);
+  });
+});
+
+describe("CTL-1496 remediation — probe hardening (Codex review)", () => {
+  // P1: the PR lookup must be scoped to the ticket's repo (-R owner/name), not
+  // resolved against the daemon's cwd/current branch.
+  test("gh pr list is scoped with -R <owner>/<name>", () => {
+    const calls = [];
+    const gh = (args) => {
+      calls.push(args.join(" "));
+      const key = args.join(" ");
+      if (key.startsWith("pr list"))
+        return JSON.stringify([
+          { number: 61, state: "OPEN", mergeStateStatus: "CLEAN", mergeable: "MERGEABLE", statusCheckRollup: [] },
+        ]);
+      if (key.includes("api graphql")) return JSON.stringify(EMPTY_THREADS);
+      throw new Error(`unrouted gh: ${key}`);
+    };
+    const r = defaultProbePrBlock("CTL-9", { gh, repo: "acme/widgets" });
+    expect(r.prNumber).toBe(61);
+    const resolveCall = calls.find((c) => c.startsWith("pr list"));
+    expect(resolveCall).toContain("-R acme/widgets");
+  });
+
+  // P2: ACTION_REQUIRED and STARTUP_FAILURE are genuine CI failure states.
+  test("isFailingState treats ACTION_REQUIRED and STARTUP_FAILURE as failing", () => {
+    expect(isFailingState("ACTION_REQUIRED")).toBe(true);
+    expect(isFailingState("STARTUP_FAILURE")).toBe(true);
+    // sanity: still passes the previously-covered states and excludes success
+    expect(isFailingState("FAILURE")).toBe(true);
+    expect(isFailingState("SUCCESS")).toBe(false);
+    expect(isFailingState("PENDING")).toBe(false);
+  });
+
+  test("ACTION_REQUIRED check surfaces in failingChecks", () => {
+    const gh = makeGh([
+      [
+        "pr list",
+        [
+          {
+            number: 62,
+            state: "OPEN",
+            mergeStateStatus: "BLOCKED",
+            mergeable: "MERGEABLE",
+            statusCheckRollup: [
+              { name: "deploy-gate", state: "ACTION_REQUIRED", detailsUrl: "u" },
+              { name: "unit", state: "SUCCESS" },
+            ],
+          },
+        ],
+      ],
+      ["api graphql", EMPTY_THREADS],
+    ]);
+    const r = defaultProbePrBlock("CTL-1", { gh, repo: "o/r" });
+    expect(r.failingChecks.map((c) => c.name)).toEqual(["deploy-gate"]);
+  });
+
+  // P2: walk every review-thread page — a thread beyond the first page is not
+  // silently dropped. Here page 2 carries an unresolved HUMAN thread.
+  test("paginates review threads across pages (page-2 human thread captured)", () => {
+    const gh = (args) => {
+      const key = args.join(" ");
+      if (key.startsWith("pr list"))
+        return JSON.stringify([
+          { number: 63, state: "OPEN", mergeStateStatus: "BLOCKED", mergeable: "MERGEABLE", statusCheckRollup: [] },
+        ]);
+      if (key.includes("api graphql")) {
+        const onPage2 = key.includes("after=CURSOR1");
+        if (!onPage2) {
+          return JSON.stringify({
+            data: { repository: { pullRequest: { reviewThreads: {
+              pageInfo: { hasNextPage: true, endCursor: "CURSOR1" },
+              nodes: [
+                { id: "BOT1", isResolved: false, comments: { nodes: [
+                  { body: "[P3] nit", path: "a.ts", line: 1, author: { login: "codex[bot]", __typename: "Bot" } },
+                ] } },
+              ],
+            } } } },
+          });
+        }
+        return JSON.stringify({
+          data: { repository: { pullRequest: { reviewThreads: {
+            pageInfo: { hasNextPage: false, endCursor: null },
+            nodes: [
+              { id: "HUMAN1", isResolved: false, comments: { nodes: [
+                { body: "please rethink", path: "z.ts", line: 9, author: { login: "ryan", __typename: "User" } },
+              ] } },
+            ],
+          } } } },
+        });
+      }
+      throw new Error(`unrouted gh: ${key}`);
+    };
+    const r = defaultProbePrBlock("CTL-1", { gh, repo: "o/r" });
+    expect(r.unresolvedBotThreads.map((t) => t.id)).toEqual(["BOT1"]);
+    expect(r.unresolvedHumanThreads.map((t) => t.id)).toEqual(["HUMAN1"]);
+  });
+
+  // P2: an endlessly-paging response is refused rather than yielding a partial
+  // (possibly human-thread-omitting) set.
+  test("refuses when review threads exceed the page cap", () => {
+    const gh = (args) => {
+      const key = args.join(" ");
+      if (key.startsWith("pr list"))
+        return JSON.stringify([
+          { number: 64, state: "OPEN", mergeStateStatus: "BLOCKED", mergeable: "MERGEABLE", statusCheckRollup: [] },
+        ]);
+      if (key.includes("api graphql"))
+        // Always claims another page → drives the cap.
+        return JSON.stringify({
+          data: { repository: { pullRequest: { reviewThreads: {
+            pageInfo: { hasNextPage: true, endCursor: "C" },
+            nodes: [],
+          } } } },
+        });
+      throw new Error(`unrouted gh: ${key}`);
+    };
+    expect(() => defaultProbePrBlock("CTL-1", { gh, repo: "o/r" })).toThrow(/page/);
   });
 });
