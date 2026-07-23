@@ -333,7 +333,7 @@ fi
 # CTL-1490: write durable local thoughts doc (unconditional; push is mode-gated).
 # Reuses COMMENT_BODY already computed above — no recomputation.
 source "${__PT_REPO_ROOT}/plugins/dev/scripts/lib/write-phase-thoughts-doc.sh"
-write_phase_thoughts_doc "phase-triage" "$TICKET" "$COMMENT_BODY" || true
+write_phase_thoughts_doc "triage" "$TICKET" "${COMMENT_BODY:-}" || true
 "${__PT_REPO_ROOT}/plugins/dev/scripts/lib/thoughts-sync-gate.sh" --phase triage --ticket "$TICKET" || exit 11
 ```
 
