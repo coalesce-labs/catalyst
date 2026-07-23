@@ -839,6 +839,22 @@ describe("defaultCollectStallClearCandidates (CTL-1005 J3)", () => {
     expect(out[0].alreadyCleared).toBe(true);
   });
 
+  test("census skips non-ticket dir names (CTL-1504) — .catalyst never probed", () => {
+    mkStalled("CTL-854", "plan");
+    mkStalled(".catalyst", "plan");
+    const seen = [];
+    const out = defaultCollectStallClearCandidates({
+      orchDir,
+      isLinearTerminal: (t) => { seen.push(t); return false; },
+      resolveWorktreePath: () => "/wt/x",
+      artifactPresent: () => true,
+      artifactComplete: () => true,
+    });
+    expect(seen).not.toContain(".catalyst");
+    expect(out.map((c) => c.ticket)).not.toContain(".catalyst");
+    expect(out.map((c) => c.ticket)).toContain("CTL-854");
+  });
+
   // CTL-1045 Bug 5: doctrine guard — once-marker is file-backed and survives
   // across daemon restarts (per worker-dir lifetime, NOT per daemon lifetime).
   test("CTL-1045 Bug 5: once-marker survives across a simulated daemon restart (per worker-dir lifetime)", () => {
@@ -1083,58 +1099,71 @@ describe("defaultCollectTerminalSignalGcCandidates (CTL-1242 J4)", () => {
   }
 
   test("includes a terminal ticket with a failed signal", () => {
-    mkWorkerSignal("CTL-1242-A");
+    mkWorkerSignal("CTL-3001");
     const out = defaultCollectTerminalSignalGcCandidates({
       orchDir,
-      isLinearTerminalOrMerged: (id) => id === "CTL-1242-A",
+      isLinearTerminalOrMerged: (id) => id === "CTL-3001",
     });
-    expect(out.some((c) => c.ticket === "CTL-1242-A")).toBe(true);
-    const c = out.find((c) => c.ticket === "CTL-1242-A");
+    expect(out.some((c) => c.ticket === "CTL-3001")).toBe(true);
+    const c = out.find((c) => c.ticket === "CTL-3001");
     expect(c.linearTerminalOrMerged).toBe(true);
     expect(c.inFlight).toBe(false);
     expect(c.liveSessionInWorktree).toBe(false);
   });
 
   test("excludes non-terminal tickets", () => {
-    mkWorkerSignal("CTL-1242-B");
+    mkWorkerSignal("CTL-3002");
     const out = defaultCollectTerminalSignalGcCandidates({
       orchDir,
       isLinearTerminalOrMerged: () => false,
     });
-    expect(out.some((c) => c.ticket === "CTL-1242-B")).toBe(false);
+    expect(out.some((c) => c.ticket === "CTL-3002")).toBe(false);
+  });
+
+  test("census skips non-ticket dir names (CTL-1504) — .catalyst never probed", () => {
+    mkWorkerSignal("CTL-3001");
+    mkWorkerSignal(".catalyst");
+    const seen = [];
+    const out = defaultCollectTerminalSignalGcCandidates({
+      orchDir,
+      isLinearTerminalOrMerged: (t) => { seen.push(t); return true; },
+    });
+    expect(seen).not.toContain(".catalyst");
+    expect(out.map((c) => c.ticket)).not.toContain(".catalyst");
+    expect(out.map((c) => c.ticket)).toContain("CTL-3001");
   });
 
   test("excludes in-flight tickets", () => {
-    mkWorkerSignal("CTL-1242-C");
+    mkWorkerSignal("CTL-3003");
     const out = defaultCollectTerminalSignalGcCandidates({
       orchDir,
       isLinearTerminalOrMerged: () => true,
-      inFlightTickets: new Set(["CTL-1242-C"]),
+      inFlightTickets: new Set(["CTL-3003"]),
     });
-    const c = out.find((o) => o.ticket === "CTL-1242-C");
+    const c = out.find((o) => o.ticket === "CTL-3003");
     expect(c?.inFlight).toBe(true);
   });
 
   test("live-session-in-worktree sets liveSessionInWorktree:true", () => {
-    mkWorkerSignal("CTL-1242-D");
+    mkWorkerSignal("CTL-3004");
     const out = defaultCollectTerminalSignalGcCandidates({
       orchDir,
       isLinearTerminalOrMerged: () => true,
-      agents: [{ cwd: "/wt/CTL-1242-D/subdir" }],
-      resolveWorktreePath: () => "/wt/CTL-1242-D",
+      agents: [{ cwd: "/wt/CTL-3004/subdir" }],
+      resolveWorktreePath: () => "/wt/CTL-3004",
     });
-    const c = out.find((o) => o.ticket === "CTL-1242-D");
+    const c = out.find((o) => o.ticket === "CTL-3004");
     expect(c?.liveSessionInWorktree).toBe(true);
   });
 
   test("alreadyGcd:true when .janitor-gc.applied marker present", () => {
-    const d = mkWorkerSignal("CTL-1242-E");
+    const d = mkWorkerSignal("CTL-3005");
     writeFileSync(join(d, ".janitor-gc.applied"), "");
     const out = defaultCollectTerminalSignalGcCandidates({
       orchDir,
       isLinearTerminalOrMerged: () => true,
     });
-    const c = out.find((o) => o.ticket === "CTL-1242-E");
+    const c = out.find((o) => o.ticket === "CTL-3005");
     expect(c?.alreadyGcd).toBe(true);
   });
 
@@ -1143,18 +1172,18 @@ describe("defaultCollectTerminalSignalGcCandidates (CTL-1242 J4)", () => {
     // phase-triage.json (status done) reads as in-flight (triage != TERMINAL_PHASE),
     // so the census marks inFlight:true. listInFlightTickets computes that Set in
     // production; here we inject it to keep this a stall-janitor-local unit test.
-    const d = join(orchDir, "workers", "CTL-1315-REPRO");
+    const d = join(orchDir, "workers", "CTL-3006");
     mkdirSync(d, { recursive: true });
     writeFileSync(
       join(d, "phase-triage.json"),
-      JSON.stringify({ ticket: "CTL-1315-REPRO", status: "done" }),
+      JSON.stringify({ ticket: "CTL-3006", status: "done" }),
     );
     const out = defaultCollectTerminalSignalGcCandidates({
       orchDir,
       isLinearTerminalOrMerged: () => true,
-      inFlightTickets: new Set(["CTL-1315-REPRO"]),
+      inFlightTickets: new Set(["CTL-3006"]),
     });
-    const c = out.find((o) => o.ticket === "CTL-1315-REPRO");
+    const c = out.find((o) => o.ticket === "CTL-3006");
     expect(c).toBeDefined();
     expect(c.linearTerminalOrMerged).toBe(true);
     expect(c.inFlight).toBe(true);
@@ -1166,7 +1195,7 @@ describe("defaultCollectTerminalSignalGcCandidates (CTL-1242 J4)", () => {
 
   test("CTL-1315 freshness gate: agentsFresh:false collects NO candidates (never reap blind)", () => {
     // A would-be candidate (terminal, failed signal) that the census normally emits...
-    mkWorkerSignal("CTL-1315-COLD");
+    mkWorkerSignal("CTL-3007");
     // ...is withheld entirely when the agents snapshot is not fresh, because
     // liveSessionInWorktree (the sole live-worker fence for a terminal ticket) is
     // unreliable on a cold/stale snapshot. Deferring avoids reaping a genuinely-live
@@ -1180,12 +1209,12 @@ describe("defaultCollectTerminalSignalGcCandidates (CTL-1242 J4)", () => {
   });
 
   test("CTL-1315 freshness gate: agentsFresh:true (the default) still collects candidates", () => {
-    mkWorkerSignal("CTL-1315-WARM");
+    mkWorkerSignal("CTL-3008");
     const out = defaultCollectTerminalSignalGcCandidates({
       orchDir,
       isLinearTerminalOrMerged: () => true,
       agentsFresh: true,
     });
-    expect(out.some((c) => c.ticket === "CTL-1315-WARM")).toBe(true);
+    expect(out.some((c) => c.ticket === "CTL-3008")).toBe(true);
   });
 });
