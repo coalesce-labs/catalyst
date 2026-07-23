@@ -41,6 +41,7 @@ import {
   readWaitWatcherConfig,
   readMemorySamplerConfig,
   readFleetHealthConfig, // CTL-1165 D5: fleet-health guardrail config (selfHeal default OFF)
+  readDaemonWatchdogConfig, // CTL-1502: stuck-but-alive daemon watchdog config (shadow default)
   readRatelimitPollerConfig,
   getHostName, // CTL-862
   resolveClusterHosts, // CTL-1273/CTL-1271: roster + source + multiHost for the boot assertion
@@ -68,6 +69,7 @@ import {
 import { startWaitWatcher as realStartWaitWatcher } from "./wait-watcher.mjs";
 import { startMemorySampler as realStartMemorySampler } from "./memory-sampler.mjs";
 import { startFleetHealthProbe as realStartFleetHealthProbe } from "./fleet-health-probe.mjs"; // CTL-1165 D5: pre-exhaustion fleet-health guardrail
+import { startDaemonWatchdogProbe as realStartDaemonWatchdogProbe } from "./daemon-watchdog-probe.mjs"; // CTL-1502: stuck-but-alive daemon watchdog
 import { startRatelimitPoller as realStartRatelimitPoller } from "./ratelimit-poller.mjs";
 import { listProjects as realListProjects } from "./registry.mjs"; // CTL-854: boot health check
 import { startHeartbeat as realStartHeartbeat } from "./heartbeat-event.mjs"; // CTL-859: node.heartbeat emitter
@@ -169,6 +171,8 @@ let _waitWatcher = null;
 let _memorySampler = null;
 // CTL-1165 D5: pre-exhaustion fleet-health probe handle.
 let _fleetHealthProbe = null;
+// CTL-1502: stuck-but-alive daemon watchdog probe handle.
+let _daemonWatchdogProbe = null;
 // CTL-787: account-level rate-limit usage poller handle.
 let _ratelimitPoller = null;
 // CTL-859: node-heartbeat emitter handle (distributed-coordination foundation).
@@ -513,6 +517,14 @@ export function startDaemon({
   // undefined → resolve from config (env + Layer-1 via configPath) in the boot
   // body below; tests may force true/false and that wins via `??`.
   enableFleetHealth = undefined,
+  // CTL-1502: stuck-but-alive daemon watchdog probe. Injectable for tests; gated
+  // by the readDaemonWatchdogConfig mode (default "shadow" → enabled; off disables).
+  // Shadow-first: it detects + logs would-restart but performs no restart until an
+  // operator flips it to enforce.
+  startDaemonWatchdogProbe = realStartDaemonWatchdogProbe,
+  // undefined → resolve from config (env + Layer-1 via configPath) below; tests
+  // may force true/false and that wins via `??`.
+  enableDaemonWatchdog = undefined,
   // CTL-787: account-level rate-limit usage poller. Injectable for tests; gated
   // by a config knob (default-on, CATALYST_RATELIMIT_POLLER=0 disables) like the
   // memory sampler.
@@ -1000,6 +1012,17 @@ export function startDaemon({
     const fleetHealthConfig = readFleetHealthConfig(configPath);
     if (enableFleetHealth ?? fleetHealthConfig.enabled) {
       _fleetHealthProbe = startFleetHealthProbe({ orchDir, config: fleetHealthConfig });
+    }
+
+    // CTL-1502: start the stuck-but-alive daemon watchdog. SHADOW by default
+    // (detect + log would-restart; no restart until an operator flips to enforce).
+    // Inside the same try/catch so a throw triggers PID-file cleanup via stopDaemon.
+    // Config resolved WITH configPath so the Layer-1
+    // catalyst.orchestration.daemonWatchdog knobs take effect, and passed to the
+    // probe so it reads the SAME resolved thresholds.
+    const daemonWatchdogConfig = readDaemonWatchdogConfig(configPath);
+    if (enableDaemonWatchdog ?? daemonWatchdogConfig.enabled) {
+      _daemonWatchdogProbe = startDaemonWatchdogProbe({ config: daemonWatchdogConfig });
     }
 
     // CTL-787: start the account-level rate-limit usage poller. Inside the same
@@ -1637,6 +1660,15 @@ export function stopDaemon() {
       log.warn({ err: err?.message }, "stopDaemon: fleet-health-probe stop failed");
     }
     _fleetHealthProbe = null;
+  }
+  // CTL-1502: stop the stuck-but-alive daemon watchdog probe.
+  if (_daemonWatchdogProbe) {
+    try {
+      _daemonWatchdogProbe.stop();
+    } catch (err) {
+      log.warn({ err: err?.message }, "stopDaemon: daemon-watchdog stop failed");
+    }
+    _daemonWatchdogProbe = null;
   }
   // CTL-787: stop the account-level rate-limit usage poller.
   if (_ratelimitPoller) {
