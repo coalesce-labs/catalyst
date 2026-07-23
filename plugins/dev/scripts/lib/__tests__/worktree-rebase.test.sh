@@ -768,6 +768,100 @@ else
   echo "  SKIP: escalation-explain.mjs or node not available"
 fi
 
+# ─── CTL-1505: transient source conflict cleared by a re-fetch retry ─────────
+# A source conflict is judged against origin/<base> as fetched at the top of
+# rebase_onto_base_classified. When main has since moved, that judgement is
+# STALE: rebasing onto a freshly-fetched base often applies cleanly. Before the
+# terminal rc=2 park, the classifier must abort, RE-FETCH origin/<base>, and
+# retry the rebase exactly once. This is the CTL-1504 regression.
+
+# ── 28. transient source conflict → re-fetch retry clears it → rc 0 ─────────
+echo "28. rebase_onto_base_classified transient source conflict → retry → rc 0"
+new_fixture t28
+advance_origin_main_conflict   # origin/main tip: shared.txt='upstream-edit' (conflicts)
+# git shim: on the 2nd `git fetch … main` (the CTL-1505 retry fetch), first push
+# a RESOLVING commit to origin (reverting shared.txt to base-line) with the REAL
+# git, then delegate. Simulates origin/main advancing between the initial fetch
+# (conflict) and the retry fetch (clean) inside one function call.
+mkdir -p "$SCRATCH/t28/shimbin"
+cat >"$SCRATCH/t28/shimbin/git" <<'SHIM'
+#!/usr/bin/env bash
+if [[ "$1" == "fetch" && "$*" == *main* ]]; then
+  __n=$(( $(cat "$T28_COUNTER" 2>/dev/null || echo 0) + 1 ))
+  echo "$__n" >"$T28_COUNTER"
+  if [[ "$__n" -ge 2 ]]; then
+    (
+      cd "$T28_UP" || exit 0
+      "$T28_REAL_GIT" checkout --quiet main
+      printf 'base-line\n' >shared.txt
+      "$T28_REAL_GIT" add -A
+      "$T28_REAL_GIT" commit --quiet -m "upstream resolves conflict (main advanced)"
+      "$T28_REAL_GIT" push --quiet origin main
+    ) >/dev/null 2>&1
+  fi
+fi
+exec "$T28_REAL_GIT" "$@"
+SHIM
+chmod +x "$SCRATCH/t28/shimbin/git"
+(
+  cd "$WORK"
+  printf 'local-edit\n' >shared.txt
+  git add -A && git commit --quiet -m "local conflicting edit"
+  ORIG_HEAD="$(git rev-parse HEAD)"
+  echo "$ORIG_HEAD" >"$SCRATCH/t28.orig"
+  # Capture REAL git BEFORE the shim shadows it on PATH.
+  export T28_REAL_GIT="$(command -v git)"
+  export T28_UP="$UP" T28_COUNTER="$SCRATCH/t28/fetchcount"
+  export PATH="$SCRATCH/t28/shimbin:$PATH"
+  hash -r 2>/dev/null || true
+  rebase_onto_base_classified "main"
+  echo "$?" >"$SCRATCH/t28.rc"
+  git log --oneline >"$SCRATCH/t28.log"
+  cat shared.txt >"$SCRATCH/t28.shared"
+  [[ -d .git/rebase-merge ]] && echo leftover >"$SCRATCH/t28.rebasedir" || echo clean >"$SCRATCH/t28.rebasedir"
+  git status --porcelain >"$SCRATCH/t28.status"
+)
+assert_eq "0" "$(cat "$SCRATCH/t28.rc")" "transient source conflict cleared by re-fetch retry → rc 0"
+assert_eq "clean" "$(cat "$SCRATCH/t28.rebasedir")" "retry-clean: no rebase-merge leftover"
+assert_eq "" "$(cat "$SCRATCH/t28.status")" "retry-clean: working tree clean (noise stash popped)"
+assert_eq "local-edit" "$(cat "$SCRATCH/t28.shared")" "retry-clean: local edit applied onto advanced base"
+T28_WORK_IN_LOG="no"; grep -q "local conflicting edit" "$SCRATCH/t28.log" && T28_WORK_IN_LOG="yes"
+assert_eq "yes" "$T28_WORK_IN_LOG" "retry-clean: local work commit retained"
+# The auto-rebased(refetch-retry) event is the distinct, observable retry signal.
+assert_eq "refetch-retry" \
+  "$(jq -r '.body.payload.strategy' <<<"$(last_telem_line)")" \
+  "retry-clean: auto-rebased(refetch-retry) event emitted"
+
+# ── 29. persistent source conflict → retry still conflicts → rc 2, HEAD restored
+# Guards boundedness (one retry, no loop) and that the terminal reason stays the
+# routing-recognized source_conflict_ctl708_unavailable (downstream recovery
+# keys EXACTLY on it — see catB-force-with-lease.mjs / STALL_CATEGORY_MAP).
+echo "29. persistent source conflict → retry still conflicts → rc 2 (bounded)"
+new_fixture t29
+advance_origin_main_conflict
+(
+  cd "$WORK"
+  printf 'local-edit\n' >shared.txt
+  git add -A && git commit --quiet -m "local conflicting edit"
+  ORIG_HEAD="$(git rev-parse HEAD)"
+  echo "$ORIG_HEAD" >"$SCRATCH/t29.orig"
+  rebase_onto_base_classified "main"
+  echo "$?" >"$SCRATCH/t29.rc"
+  echo "${REBASE_LAST_STALL_REASON:-}" >"$SCRATCH/t29.reason"
+  git rev-parse HEAD >"$SCRATCH/t29.head"
+  [[ -d .git/rebase-merge ]] && echo leftover >"$SCRATCH/t29.rebasedir" || echo clean >"$SCRATCH/t29.rebasedir"
+  git status --porcelain >"$SCRATCH/t29.status"
+)
+assert_eq "2" "$(cat "$SCRATCH/t29.rc")" "persistent source conflict survives retry → rc 2"
+assert_eq "source_conflict_ctl708_unavailable" "$(cat "$SCRATCH/t29.reason")" \
+  "persistent: terminal reason stays routing-recognized (not renamed)"
+assert_eq "$(cat "$SCRATCH/t29.orig")" "$(cat "$SCRATCH/t29.head")" "persistent: HEAD restored after retry+abort"
+assert_eq "clean" "$(cat "$SCRATCH/t29.rebasedir")" "persistent: no rebase-merge leftover after retry"
+assert_eq "" "$(cat "$SCRATCH/t29.status")" "persistent: working tree clean after retry+abort"
+STALL29="$(last_telem_line)"
+assert_eq "source_conflict_ctl708_unavailable" "$(jq -r '.body.payload.reason' <<<"$STALL29")" \
+  "persistent: stalled event reason recorded (observable park)"
+
 echo
 echo "results: $PASSES passed, $FAILURES failed"
 [ $FAILURES -eq 0 ]
