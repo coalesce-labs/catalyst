@@ -299,7 +299,11 @@ function daemonAgeMs(node) {
 // so it is robust to the JSON body and any plain-string form. Never throws.
 export function bodyLooksNotFound(stderr, stdout) {
   const body = `${stderr ?? ""}\n${stdout ?? ""}`;
-  return /not\s*found/i.test(body);
+  // CTL-1504 (Codex P1): require the Linear ENTITY-missing shape — an `issue` /
+  // `identifier` / `entity` qualifier next to "not found" — NOT a bare "not
+  // found". A transient transport error like `HTTP 404 Not Found` must stay
+  // "unknown" and never enter the destructive phantom-quarantine path.
+  return /\b(?:issue|identifier|entity)\b[^\n]*\bnot\s*found/i.test(body);
 }
 
 // isDefinitiveMissing — not-found OR invalid-identifier-format (the two "this is

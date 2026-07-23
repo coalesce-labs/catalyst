@@ -1434,6 +1434,14 @@ describe("classifyTicketResolution (CTL-671)", () => {
     expect(classifyTicketResolution("CTL-100", { exec })).toBe("unknown");
   });
 
+  test("nonzero exit: identifier-missing → not-found; bare HTTP 404 → unknown (Codex P1)", () => {
+    // The Linear identifier-missing shape quarantines; a transient transport 404 must NOT.
+    const missing = fakeExec({ code: 1, stdout: "", stderr: '{"error":"Issue with identifier \\"CTL-9\\" not found"}' });
+    expect(classifyTicketResolution("CTL-9", { exec: missing })).toBe("not-found");
+    const http404 = fakeExec({ code: 1, stdout: "", stderr: "HTTP 404 Not Found" });
+    expect(classifyTicketResolution("CTL-100", { exec: http404 })).toBe("unknown");
+  });
+
   test("REAL linearis resolvable shape (exit 0 + identifier/id) → exists", () => {
     const exec = fakeExec({
       code: 0,

@@ -3,7 +3,7 @@ import { isTicketKey } from "./ticket-key.mjs";
 
 describe("isTicketKey", () => {
   test("accepts canonical ticket keys", () => {
-    for (const k of ["CTL-1504", "CTC-70", "ABCD-9999", "A-1"]) {
+    for (const k of ["CTL-1504", "CTC-70", "ABCD-9999", "A-1", "OPS_2-17", "ENG2-5"]) {
       expect(isTicketKey(k)).toBe(true);
     }
   });
