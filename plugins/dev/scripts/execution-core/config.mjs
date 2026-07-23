@@ -557,12 +557,54 @@ export function getExecutor(configPath) {
 
 // --- CTL-1457: per-phase executor routing + codex-exec runtime settings ---
 
-// readExecutorByPhaseLayer1 — pull catalyst.orchestration.executorByPhase (a
-// phase→executor map) out of a project's Layer-1 .catalyst/config.json. Returns
-// {} for a null/missing/unparseable file or an absent/non-object key so callers
-// fall back to the daemon executor. Never throws — mirrors
-// readFleetHealthConfigLayer1's ENOENT-tolerant shape.
-export function readExecutorByPhaseLayer1(configPath) {
+// readExecutorByPhaseLayer1 — resolve the executorByPhase (phase→executor) map.
+// Precedence: env CATALYST_EXECUTOR_BY_PHASE (a JSON map) OVER Layer-1
+// catalyst.orchestration.executorByPhase — mirroring resolveExecutor's
+// env-over-Layer-1 precedence. Returns {} for a null/missing/unparseable file or an
+// absent/non-object key so callers fall back to the daemon executor. Never throws —
+// mirrors readFleetHealthConfigLayer1's ENOENT-tolerant shape.
+//
+// CTL-1457 follow-up (Gap 1): the env override is the DURABLE, clobber-safe home for
+// a routing pin. On worker nodes the per-node Layer-1 .catalyst/config.json is
+// git-reset every few minutes, so a routing pin written to the file cannot persist;
+// CATALYST_EXECUTOR_BY_PHASE (set in the daemon launch env) survives that reset. When
+// set to a plain-object JSON map it REPLACES the file (env-over-Layer-1). When set but
+// malformed (invalid JSON, or JSON that is not a plain object) it WARN-logs actionably
+// and FALLS THROUGH to the Layer-1 file — a routing pin never silently vanishes AND a
+// typo never silently routes. Example: {"triage":"codex-exec"}.
+export function readExecutorByPhaseLayer1(configPath, env = process.env) {
+  const rawEnv = env?.CATALYST_EXECUTOR_BY_PHASE;
+  if (typeof rawEnv === "string" && rawEnv.trim() !== "") {
+    let parsedEnv;
+    let parseErr = null;
+    try {
+      parsedEnv = JSON.parse(rawEnv);
+    } catch (err) {
+      parseErr = err;
+    }
+    const isPlainObject =
+      !parseErr && parsedEnv && typeof parsedEnv === "object" && !Array.isArray(parsedEnv);
+    // Every route VALUE must be a string. A non-string (e.g. {"triage":false} /
+    // {"triage":null}) would make resolveExecutorForPhase treat that phase as unrouted
+    // AND hide a valid Layer-1 route — silently losing the durable pin this override adds.
+    const badPhase = isPlainObject
+      ? Object.entries(parsedEnv).find(([, v]) => typeof v !== "string")?.[0]
+      : undefined;
+    if (isPlainObject && badPhase === undefined) {
+      // A well-formed phase→executor string map → env REPLACES the Layer-1 file.
+      return parsedEnv;
+    }
+    // Any malformed shape (JSON parse error, non-object, or a non-string route value) →
+    // WARN + fall through to the Layer-1 file. Never throw, never silently route.
+    log.warn(
+      { value: rawEnv, err: parseErr?.message, badPhase },
+      parseErr
+        ? "CATALYST_EXECUTOR_BY_PHASE is set but is not valid JSON — ignoring the env override and falling back to the Layer-1 executorByPhase map"
+        : badPhase !== undefined
+          ? `CATALYST_EXECUTOR_BY_PHASE has a non-string value for phase "${badPhase}" — ignoring the env override and falling back to the Layer-1 executorByPhase map`
+          : "CATALYST_EXECUTOR_BY_PHASE is set but did not parse to a JSON object (a phase→executor map) — ignoring the env override and falling back to the Layer-1 executorByPhase map"
+    );
+  }
   if (!configPath) return {};
   try {
     const parsed = JSON.parse(readFileSync(configPath, "utf8"));
@@ -591,11 +633,11 @@ export function readExecutorByPhaseLayer1(configPath) {
 //     today (zero behavior change when executorByPhase is empty).
 // Returns { executor, source } — source is "executorByPhase" for a routed phase,
 // else resolveExecutor's source ("env" | "layer1" | "default"). The `env` bag is
-// accepted for signature symmetry with the other injected-env-bag readers; routing
-// itself is Layer-1-file-only today (there is no env override for the map).
+// threaded into readExecutorByPhaseLayer1 so the CTL-1457-followup env override
+// (CATALYST_EXECUTOR_BY_PHASE, env-over-Layer-1) is honored here too — a phase routed
+// via the durable env map resolves exactly as one routed via the Layer-1 file.
 export function resolveExecutorForPhase(phase, { configPath, env = process.env } = {}) {
-  void env; // reserved for signature symmetry; per-phase routing is Layer-1-file-only.
-  const map = readExecutorByPhaseLayer1(configPath);
+  const map = readExecutorByPhaseLayer1(configPath, env);
   const raw = phase != null ? map[phase] : undefined;
   if (typeof raw === "string" && raw.trim() !== "") {
     const normalized = raw.trim().toLowerCase();

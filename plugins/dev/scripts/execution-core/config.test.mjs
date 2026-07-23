@@ -50,6 +50,7 @@ import {
   getExecutor,
   dispatchModeForExecutor,
   resolveExecutorForPhase,
+  readExecutorByPhaseLayer1,
   hasInProcessExecutorRoute,
   codexConfig,
 } from "./config.mjs";
@@ -429,7 +430,15 @@ describe("executor flag + resolver (CTL-1365a)", () => {
   // CATALYST_NODE_CLASS + a temp Layer-2 file keep the node-class default
   // deterministic (worker → "bg" in Phase 1) so the precedence assertions don't
   // depend on the host's real Layer-2 config.
-  const ENVS = ["CATALYST_EXECUTOR", "CATALYST_NODE_CLASS", "CATALYST_LAYER2_CONFIG_FILE"];
+  const ENVS = [
+    "CATALYST_EXECUTOR",
+    "CATALYST_NODE_CLASS",
+    "CATALYST_LAYER2_CONFIG_FILE",
+    // CTL-1457 follow-up (Gap 1): scrub the env override so an ambient value on the
+    // host running the suite can never perturb the existing resolveExecutorForPhase /
+    // executorByPhase tests (which pass no env bag → default process.env).
+    "CATALYST_EXECUTOR_BY_PHASE",
+  ];
   let saved = {};
   let tmp, l1, l2;
 
@@ -624,6 +633,73 @@ describe("executor flag + resolver (CTL-1365a)", () => {
     writeExecutorByPhase({ triage: "gpt-9000" });
     expect(() => resolveExecutorForPhase("triage", { configPath: l1 })).toThrow(/gpt-9000/);
     expect(() => resolveExecutorForPhase("triage", { configPath: l1 })).toThrow(/triage/);
+  });
+
+  // --- CTL-1457 follow-up (Gap 1): CATALYST_EXECUTOR_BY_PHASE env override ---
+  // The env map is the DURABLE, clobber-safe routing home (the per-node Layer-1 file is
+  // git-reset every few minutes). Precedence mirrors resolveExecutor's env-over-Layer-1.
+  // Uses the injected {env} bag pattern (like readBoardHealthConfig({env})).
+
+  test("CATALYST_EXECUTOR_BY_PHASE env map REPLACES the Layer-1 file (env > Layer-1)", () => {
+    writeExecutorByPhase({ triage: "bg" }); // Layer-1 file says bg
+    const env = { CATALYST_EXECUTOR_BY_PHASE: '{"triage":"codex-exec"}' };
+    // readExecutorByPhaseLayer1 returns the ENV map, not the file map.
+    expect(readExecutorByPhaseLayer1(l1, env)).toEqual({ triage: "codex-exec" });
+    // resolveExecutorForPhase threads env → routes to the env value.
+    const r = resolveExecutorForPhase("triage", { configPath: l1, env });
+    expect(r.executor).toBe("codex-exec");
+    expect(r.source).toBe("executorByPhase");
+  });
+
+  test("the env override works even with NO Layer-1 file present (durable routing pin)", () => {
+    // No writeExecutorByPhase — l1 does not exist. The env map still routes.
+    const env = { CATALYST_EXECUTOR_BY_PHASE: '{"triage":"codex-exec"}' };
+    expect(readExecutorByPhaseLayer1(l1, env)).toEqual({ triage: "codex-exec" });
+    expect(resolveExecutorForPhase("triage", { configPath: l1, env }).executor).toBe("codex-exec");
+  });
+
+  test("malformed CATALYST_EXECUTOR_BY_PHASE JSON → warn + fall through to the Layer-1 file (NOT a throw)", () => {
+    writeExecutorByPhase({ triage: "sdk" });
+    const env = { CATALYST_EXECUTOR_BY_PHASE: "{not valid json" };
+    expect(() => readExecutorByPhaseLayer1(l1, env)).not.toThrow();
+    // Fell through to the Layer-1 file.
+    expect(readExecutorByPhaseLayer1(l1, env)).toEqual({ triage: "sdk" });
+    expect(resolveExecutorForPhase("triage", { configPath: l1, env }).executor).toBe("sdk");
+  });
+
+  test("CATALYST_EXECUTOR_BY_PHASE that parses to a NON-object (array) → warn + fall through", () => {
+    writeExecutorByPhase({ triage: "sdk" });
+    const env = { CATALYST_EXECUTOR_BY_PHASE: '["triage","codex-exec"]' };
+    expect(() => readExecutorByPhaseLayer1(l1, env)).not.toThrow();
+    expect(readExecutorByPhaseLayer1(l1, env)).toEqual({ triage: "sdk" }); // file wins
+  });
+
+  test("CATALYST_EXECUTOR_BY_PHASE with a NON-STRING route value → warn + fall through (Codex #2655)", () => {
+    // A valid object whose value isn't a string ({"triage":false}/{"triage":null}) must
+    // NOT be accepted — it would make triage look unrouted AND hide the Layer-1 route.
+    writeExecutorByPhase({ triage: "codex-exec" });
+    for (const bad of ['{"triage":false}', '{"triage":null}', '{"triage":123}', '{"triage":{"nested":"x"}}']) {
+      const env = { CATALYST_EXECUTOR_BY_PHASE: bad };
+      expect(() => readExecutorByPhaseLayer1(l1, env)).not.toThrow();
+      // Falls through to the Layer-1 file — the durable route is preserved, not lost.
+      expect(readExecutorByPhaseLayer1(l1, env)).toEqual({ triage: "codex-exec" });
+      expect(resolveExecutorForPhase("triage", { configPath: l1, env }).executor).toBe("codex-exec");
+    }
+  });
+
+  test("empty / whitespace / unset CATALYST_EXECUTOR_BY_PHASE → Layer-1 file behavior unchanged", () => {
+    writeExecutorByPhase({ triage: "codex-exec" });
+    expect(readExecutorByPhaseLayer1(l1, {})).toEqual({ triage: "codex-exec" });
+    expect(readExecutorByPhaseLayer1(l1, { CATALYST_EXECUTOR_BY_PHASE: "   " })).toEqual({
+      triage: "codex-exec",
+    });
+    // The default-arg (process.env) form is unchanged too (env is scrubbed by ENVS).
+    expect(readExecutorByPhaseLayer1(l1)).toEqual({ triage: "codex-exec" });
+  });
+
+  test("hasInProcessExecutorRoute over the env-override map arms the in-process gate", () => {
+    const env = { CATALYST_EXECUTOR_BY_PHASE: '{"triage":"codex-exec"}' };
+    expect(hasInProcessExecutorRoute(readExecutorByPhaseLayer1(l1, env))).toBe(true);
   });
 
   // CTL-1457 (N1): hasInProcessExecutorRoute — does the map route ANY phase in-process?
