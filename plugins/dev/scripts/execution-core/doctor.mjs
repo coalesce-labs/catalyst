@@ -1747,6 +1747,142 @@ export function checkReaper(deps = {}) {
   return checks;
 }
 
+// ─── Phase 5f: agent-browser worker browser tool (CTL-1500) ──────────────────
+// Phase workers run browser tests (screenshots, live-UI verification) via the
+// `agent-browser` CLI (catalyst-dev:agent-browser skill). Hosts drifted badly:
+// mini ran 0.9.1 (IGNORES the idle-timeout knob), laptop 0.27.2, mini-2 had it
+// NOT INSTALLED. AGENT_BROWSER_IDLE_TIMEOUT_MS auto-shuts-down the per-session
+// daemon (the fix for the headed-Chrome core leak); honored only by >= 0.27.0.
+// Every non-healthy condition is WARN/INFO, never FAIL — same rationale as
+// checkReaper: doctor's exit code is the catalyst-join activation gate, and a
+// missing browser tool must not block owning/dispatching or self-healing.
+
+// Floor at which AGENT_BROWSER_IDLE_TIMEOUT_MS is honored (older builds ignore
+// it). Keep in sync with the bash floor in install-cli.sh / check-setup.sh.
+export const AGENT_BROWSER_MIN_VERSION = "0.27.0";
+
+// parseSemver — "agent-browser 0.32.4" | "0.32.4" → [0,32,4] (or null).
+export function parseSemver(s) {
+  const m = String(s ?? "").match(/(\d+)\.(\d+)\.(\d+)/);
+  return m ? [Number(m[1]), Number(m[2]), Number(m[3])] : null;
+}
+
+// versionGte — dotted `a` >= `b`? Unparseable a → false.
+export function versionGte(a, b) {
+  const va = parseSemver(a), vb = parseSemver(b);
+  if (!va || !vb) return false;
+  for (let i = 0; i < 3; i++) {
+    if (va[i] > vb[i]) return true;
+    if (va[i] < vb[i]) return false;
+  }
+  return true;
+}
+
+function defaultAbVersion() {
+  const r = spawnSync("agent-browser", ["--version"], { encoding: "utf8", timeout: 10_000 });
+  if (r.error || r.status !== 0 || !r.stdout) return null; // ENOENT → error set / status null
+  return r.stdout.trim(); // "agent-browser 0.32.4"
+}
+
+// Fast + network-free: --quick skips the live launch, --offline skips CDN probes.
+function defaultAbDoctor() {
+  const r = spawnSync("agent-browser", ["doctor", "--quick", "--offline", "--json"],
+    { encoding: "utf8", timeout: 20_000 });
+  if (r.error || !r.stdout) return null;
+  try { return JSON.parse(r.stdout); } catch { return null; }
+}
+
+// phase-agent-dispatch (one dir up from execution-core/) bakes
+// AGENT_BROWSER_IDLE_TIMEOUT_MS into the dispatched worker env block (CTL-1500).
+function defaultDispatchWiresIdleTimeout() {
+  try {
+    const p = resolve(dirname(fileURLToPath(import.meta.url)), "..", "phase-agent-dispatch");
+    return /AGENT_BROWSER_IDLE_TIMEOUT_MS/.test(readFileSync(p, "utf8"));
+  } catch { return false; }
+}
+
+// Does the INSTALLED orphan-sweep.sh (the one launchd runs) carry the CTL-1500
+// vector-5 agent-browser reaper? Resolve its baked path from the same plist
+// checkReaper reads, grep for the SWEEP_AB_ENABLED / _ab_browser_roots marker.
+// null = reaper LaunchAgent not installed at all (checkReaper covers that).
+function defaultReaperHasAbVector() {
+  try {
+    const plist = resolve(homedir(), "Library", "LaunchAgents", "ai.coalesce.catalyst-orphan-sweep.plist");
+    const m = readFileSync(plist, "utf8").match(/<string>([^<]*orphan-sweep\.sh)<\/string>/);
+    if (!m) return null;
+    return /SWEEP_AB_ENABLED|_ab_browser_roots/.test(readFileSync(m[1], "utf8"));
+  } catch { return null; }
+}
+
+// checkAgentBrowser — CTL-1500. present + >= min + idle-timeout wired + doctor
+// green + CTL-1500 reaper present. All advisory (WARN/INFO/PASS) — never FAILs.
+export function checkAgentBrowser(deps = {}) {
+  const {
+    abVersion = defaultAbVersion,
+    abDoctor = defaultAbDoctor,
+    dispatchWiresIdleTimeout = defaultDispatchWiresIdleTimeout,
+    reaperHasAbVector = defaultReaperHasAbVector,
+    minVersion = AGENT_BROWSER_MIN_VERSION,
+  } = deps;
+  const checks = [];
+
+  // (a) present on PATH
+  const raw = abVersion();
+  if (!raw) {
+    checks.push(mkCheck("agent-browser-installed", STATUS.WARN,
+      "agent-browser not found on PATH — worker browser tests (screenshots / live-UI " +
+        "verification) unavailable; `brew install agent-browser` then `agent-browser install`"));
+    return checks;
+  }
+  const version = (parseSemver(raw) ?? []).join(".") || raw;
+  checks.push(mkCheck("agent-browser-installed", STATUS.PASS, `agent-browser present (${raw})`));
+
+  // (b) version >= min (older builds silently IGNORE AGENT_BROWSER_IDLE_TIMEOUT_MS)
+  checks.push(versionGte(raw, minVersion)
+    ? mkCheck("agent-browser-version", STATUS.PASS,
+        `agent-browser ${version} >= ${minVersion} (honors AGENT_BROWSER_IDLE_TIMEOUT_MS)`)
+    : mkCheck("agent-browser-version", STATUS.WARN,
+        `agent-browser ${version} is below the ${minVersion} floor — it IGNORES ` +
+          `AGENT_BROWSER_IDLE_TIMEOUT_MS (the daemon idle-shutdown that stops the ` +
+          `headed-Chrome core leak); \`brew upgrade agent-browser\``));
+
+  // (c) idle-timeout wired into dispatched workers
+  checks.push(dispatchWiresIdleTimeout()
+    ? mkCheck("agent-browser-idle-timeout", STATUS.PASS,
+        "AGENT_BROWSER_IDLE_TIMEOUT_MS is wired into dispatched workers (phase-agent-dispatch)")
+    : mkCheck("agent-browser-idle-timeout", STATUS.WARN,
+        "phase-agent-dispatch does not inject AGENT_BROWSER_IDLE_TIMEOUT_MS — a leaked " +
+          "agent-browser daemon will not self-shutdown (CTL-1500 wiring missing)"));
+
+  // (d) optional: agent-browser's own doctor (fast, offline)
+  const d = abDoctor();
+  if (d && typeof d === "object") {
+    const s = d.summary ?? {};
+    checks.push(d.success
+      ? mkCheck("agent-browser-doctor", STATUS.PASS,
+          `agent-browser doctor: pass (${s.pass ?? "?"} pass, ${s.warn ?? 0} warn, ${s.fail ?? 0} fail)`)
+      : mkCheck("agent-browser-doctor", STATUS.WARN,
+          `agent-browser doctor reports ${s.fail ?? "?"} failing check(s) — run \`agent-browser doctor\``));
+  } else {
+    checks.push(mkCheck("agent-browser-doctor", STATUS.INFO,
+      "agent-browser doctor probe unavailable (older build without `doctor`, or probe failed)"));
+  }
+
+  // (e) CTL-1500 reaper present in the INSTALLED orphan-sweep.sh (checkReaper covers the LaunchAgent)
+  const hasVector = reaperHasAbVector();
+  checks.push(hasVector === true
+    ? mkCheck("agent-browser-reaper", STATUS.PASS,
+        "orphan-sweep.sh carries the CTL-1500 agent-browser leaked-browser reaper (vector 5)")
+    : hasVector === false
+      ? mkCheck("agent-browser-reaper", STATUS.WARN,
+          "installed orphan-sweep.sh predates CTL-1500 (no agent-browser vector-5 reaper) — " +
+            "reinstall from the pristine clone (`catalyst-stack install-services`)")
+      : mkCheck("agent-browser-reaper", STATUS.INFO,
+          "orphan-sweep reaper not installed — see the reaper-* checks"));
+
+  return checks;
+}
+
 // checkCloudTokenEnv — CTL-1307. ADVISORY ONLY (never FAIL): the cluster-shared
 // CATALYST_CLOUD_TOKEN is an OPTIONAL extension — a node stays fully local-only
 // without it, so its absence must NEVER block activation. WARN only on DRIFT: the
@@ -3230,6 +3366,7 @@ export function checksForClass(nc, opts = {}) {
       replicaThunk,
       wontOwnThunk,
       () => checkReaper(), // advisory (never FAIL), class-agnostic
+      () => checkAgentBrowser(), // CTL-1500: developers run the mini live-test browser loop too (advisory)
       () => checkMonitorProductionBuild({ fetch: _fetch }), // CTL-1372: warn on a dev-build monitor (advisory)
       () => checkCloudTokenEnv(), // advisory
       () => checkClusterSecretFreshness(), // CTL-1393: warn if running on stale rotated secrets (advisory)
@@ -3285,6 +3422,7 @@ export function checksForClass(nc, opts = {}) {
     () => checkThoughts(), // CTL-1293: member thoughts repo provisioned + non-foreign primary
     () => checkClaudeSettings(), // CTL-1231: member settings.json pins host identity + OTLP endpoint
     () => checkReaper(), // CTL-1306: orphan-sweep reaper installed + baked path still exists (not dead-127)
+    () => checkAgentBrowser(), // CTL-1500: worker browser tool present + >= min + idle-timeout wired + reaper (advisory, never FAIL)
     () => checkCloudTokenEnv(), // CTL-1307: cluster cloud token decrypted → projected to machine-level env (advisory)
     () => checkClusterSecretFreshness(), // CTL-1393: warn if the node is running on stale rotated secrets (advisory)
     () => checkCloudSync(), // CTL-1394: supervised cloud-sync daemon + read tier on the worker hot path (advisory)

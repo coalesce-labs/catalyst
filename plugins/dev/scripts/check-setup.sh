@@ -16,6 +16,10 @@ CATALYST_DIR="${CATALYST_DIR:-$HOME/catalyst}"
 DIRENV_CONFIG="${XDG_CONFIG_HOME:-$HOME/.config}/direnv"
 CATALYST_CONFIG="${XDG_CONFIG_HOME:-$HOME/.config}/catalyst"
 
+# Minimum agent-browser that honors AGENT_BROWSER_IDLE_TIMEOUT_MS (CTL-1500).
+# Keep in sync with install-cli.sh and execution-core/doctor.mjs.
+AGENT_BROWSER_MIN_VERSION="0.27.0"
+
 pass_count=0
 warn_count=0
 fail_count=0
@@ -36,6 +40,12 @@ info() { echo -e "  ${BLUE}ℹ   ${NC}$1"; }
 header() {
 	echo ""
 	echo -e "${BOLD}$1${NC}"
+}
+
+# version_ge <have> <min> — true iff semver <have> >= <min> (sort -V handles
+# 0.9.1 < 0.27.0 correctly; lexical sort does not).
+version_ge() {
+	[[ "$(printf '%s\n%s\n' "$2" "$1" | sort -V | head -n1)" == "$2" ]]
 }
 
 # ─── 1. Platform ────────────────────────────────────────────────────────────
@@ -76,7 +86,6 @@ done
 header "Optional Tools"
 
 OPT_TOOLS=(
-	"agent-browser:agent-browser"
 	"sentry-cli:Sentry CLI"
 	"direnv:direnv"
 	"smee:smee-client (webhook tunnel)"
@@ -92,6 +101,25 @@ for spec in "${OPT_TOOLS[@]}"; do
 		warn "$name not found (optional)"
 	fi
 done
+
+header "Browser Testing (agent-browser)"
+if command -v agent-browser &>/dev/null; then
+	# `|| true`: under `set -euo pipefail` an unparseable/failed --version makes the
+	# grep pipeline return nonzero and would abort the whole check before the
+	# `[[ -z $ab_ver ]]` branch can warn (CTL-1500 review). Swallow it → empty ab_ver.
+	ab_ver=$(agent-browser --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)
+	if [[ -z $ab_ver ]]; then
+		warn "agent-browser present but --version unparseable — need >= $AGENT_BROWSER_MIN_VERSION"
+	elif version_ge "$ab_ver" "$AGENT_BROWSER_MIN_VERSION"; then
+		pass "agent-browser $ab_ver (>= $AGENT_BROWSER_MIN_VERSION)"
+	else
+		fail "agent-browser $ab_ver < $AGENT_BROWSER_MIN_VERSION — AGENT_BROWSER_IDLE_TIMEOUT_MS ignored (daemon leak, CTL-1500)"
+		info "Upgrade: brew upgrade agent-browser"
+	fi
+else
+	warn "agent-browser not found — required for browser-testing skills (catalyst-dev:agent-browser)"
+	info "Install: brew install agent-browser && agent-browser install"
+fi
 
 # ─── 2b. Catalyst CLI Install ───────────────────────────────────────────────
 

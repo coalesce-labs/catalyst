@@ -21,6 +21,7 @@ import {
   checkThoughts,
   checkClaudeSettings,
   checkReaper,
+  checkAgentBrowser,
   checkCloudTokenEnv,
   checkClusterSecretFreshness,
   checkSdkExecutorAuth,
@@ -1102,6 +1103,60 @@ describe("checkReaper", () => {
     });
     expect(checks[0].name).toBe("reaper-health");
     expect(checks[0].status).toBe(STATUS.PASS);
+  });
+});
+
+// ─── checkAgentBrowser (CTL-1500) ────────────────────────────────────────────
+describe("checkAgentBrowser", () => {
+  const healthyDeps = {
+    abVersion: () => "agent-browser 0.32.4",
+    abDoctor: () => ({ success: true, summary: { pass: 8, warn: 0, fail: 0 } }),
+    dispatchWiresIdleTimeout: () => true,
+    reaperHasAbVector: () => true,
+  };
+
+  it("WARNs and short-circuits when agent-browser is not on PATH", () => {
+    const checks = checkAgentBrowser({ ...healthyDeps, abVersion: () => null });
+    expect(checks).toHaveLength(1);
+    expect(checks[0].name).toBe("agent-browser-installed");
+    expect(checks[0].status).toBe(STATUS.WARN);
+  });
+
+  it("WARNs on a below-floor version (idle-timeout ignored)", () => {
+    const checks = checkAgentBrowser({ ...healthyDeps, abVersion: () => "agent-browser 0.9.1" });
+    const v = checks.find((c) => c.name === "agent-browser-version");
+    expect(v.status).toBe(STATUS.WARN);
+  });
+
+  it("PASSes the version check at exactly the floor", () => {
+    const checks = checkAgentBrowser({ ...healthyDeps, abVersion: () => "agent-browser 0.27.0" });
+    const v = checks.find((c) => c.name === "agent-browser-version");
+    expect(v.status).toBe(STATUS.PASS);
+  });
+
+  it("WARNs when phase-agent-dispatch does not wire the idle timeout", () => {
+    const checks = checkAgentBrowser({ ...healthyDeps, dispatchWiresIdleTimeout: () => false });
+    const t = checks.find((c) => c.name === "agent-browser-idle-timeout");
+    expect(t.status).toBe(STATUS.WARN);
+  });
+
+  it("INFOs (not WARN/FAIL) when the doctor probe is unavailable (older build)", () => {
+    const checks = checkAgentBrowser({ ...healthyDeps, abDoctor: () => null });
+    const d = checks.find((c) => c.name === "agent-browser-doctor");
+    expect(d.status).toBe(STATUS.INFO);
+  });
+
+  it("WARNs when the installed orphan-sweep predates the CTL-1500 reaper vector", () => {
+    const checks = checkAgentBrowser({ ...healthyDeps, reaperHasAbVector: () => false });
+    const r = checks.find((c) => c.name === "agent-browser-reaper");
+    expect(r.status).toBe(STATUS.WARN);
+  });
+
+  it("is all-advisory on a fully healthy host (no FAIL records)", () => {
+    const checks = checkAgentBrowser(healthyDeps);
+    expect(checks.every((c) => c.status !== STATUS.FAIL)).toBe(true);
+    expect(checks.find((c) => c.name === "agent-browser-version").status).toBe(STATUS.PASS);
+    expect(checks.find((c) => c.name === "agent-browser-doctor").status).toBe(STATUS.PASS);
   });
 });
 

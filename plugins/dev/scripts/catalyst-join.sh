@@ -425,6 +425,13 @@ do_install_cli() {
   if ! command -v alloy >/dev/null 2>&1; then
     warn "alloy not installed by install-cli — log-shipper will not start on this node (install Grafana Alloy manually, then 'catalyst-stack start')"
   fi
+  # CTL-1500: install-cli.sh's ensure_agent_browser provisions agent-browser
+  # (>= min) + Chrome for Testing on this node. Surface a LOUD but NON-FATAL
+  # warning if it did not land (e.g. a headless box with no brew) — browser-
+  # testing skills degrade, but the join must not hard-fail on optional infra.
+  if ! command -v agent-browser >/dev/null 2>&1; then
+    warn "agent-browser not installed by install-cli — browser-testing skills will not run on this node (install: brew install agent-browser && agent-browser install)"
+  fi
   return 0
 }
 
