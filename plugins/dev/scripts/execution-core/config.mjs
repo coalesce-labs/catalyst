@@ -137,6 +137,16 @@ export function getReconcileHealthDir() {
   return resolve(getExecutionCoreDir(), "reconcile-health");
 }
 
+// CTL-1503 — fleet-health durable-latch dir. Holds the edge-trigger latch marker
+// (fleet-health-latch.json) the probe persists on the healthy→degraded /
+// degraded→healthy edges and hydrates on start, so a daemon restart mid-episode
+// does not re-emit `degraded` with no prior `recovered`. CATALYST_DIR-scoped
+// (re-resolved per call) so tests isolate via CATALYST_DIR, mirroring
+// getReconcileHealthDir.
+export function getFleetHealthDir() {
+  return resolve(getExecutionCoreDir(), "fleet-health");
+}
+
 // The durable event-log tailer cursor — monitor.mjs persists its byte offset
 // here so a daemon restart resumes the fast path instead of re-seeding at EOF.
 export function getCursorPath() {
@@ -1129,11 +1139,21 @@ export function readMemorySamplerConfig() {
 // (catalyst.orchestration.fleetHealth in .catalyst/config.json) > code default.
 // `selfHealEnabled` DEFAULTS OFF — the first ship is a pure alert; nothing is
 // reaped until an operator opts in via EXECUTION_CORE_FLEET_SELF_HEAL.
+//
+// CTL-1503: the fleet.health.degraded event is now EDGE-TRIGGERED with a
+// HYSTERESIS BAND — degraded fires once on the healthy→degraded edge and a paired
+// fleet.health.recovered fires once on the degraded→healthy edge. The swap signal
+// carries a distinct lower `swapUsedMbClearThreshold`: the latch clears only once
+// swap drops strictly below the clear threshold, so a signal hovering in the band
+// [clear, trip) cannot re-flap. The absolute swap trip is raised above the
+// observed normal-swap ceiling (~11.5–24 GB on a 16 GB Mac) so it stops firing on
+// every tick. Both are per-host tunable via env / Layer-1.
 const FLEET_HEALTH_DEFAULTS = Object.freeze({
   enabled: true,
   intervalMs: 120_000,
   jobsThreshold: 500,
-  swapUsedMbThreshold: 4096,
+  swapUsedMbThreshold: 24576,
+  swapUsedMbClearThreshold: 16384,
   agentsThreshold: 12,
   procsThreshold: 40,
   selfHealEnabled: false,
@@ -1190,6 +1210,13 @@ export function readFleetHealthConfig(configPath) {
       process.env.EXECUTION_CORE_FLEET_SWAP_MB_THRESHOLD,
       l1.swapUsedMbThreshold,
       FLEET_HEALTH_DEFAULTS.swapUsedMbThreshold,
+    ),
+    // CTL-1503 — lower clear threshold for the swap hysteresis band; the latch
+    // releases only once swap drops strictly below this. Same precedence chain.
+    swapUsedMbClearThreshold: fleetHealthNumber(
+      process.env.EXECUTION_CORE_FLEET_SWAP_MB_CLEAR_THRESHOLD,
+      l1.swapUsedMbClearThreshold,
+      FLEET_HEALTH_DEFAULTS.swapUsedMbClearThreshold,
     ),
     agentsThreshold: fleetHealthNumber(
       process.env.EXECUTION_CORE_FLEET_AGENTS_THRESHOLD,
