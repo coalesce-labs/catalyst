@@ -159,6 +159,31 @@ for skill in phase-triage phase-verify phase-review phase-pr phase-monitor-merge
 done
 
 # --------------------------------------------------------------------------
+# CTL-1490 regression: phase-pr's ALREADY_MERGED early-exit path (CTL-714)
+# emits `--status complete` BEFORE the End-block write_phase_thoughts_doc. Once
+# the `pr` phase is artifact-gated, that early complete must have its OWN
+# doc-write in front of it, or every already-merged ticket downgrades to
+# failed(artifact_not_gate_visible) and stalls at pr. Assert the FIRST
+# --status complete in phase-pr is preceded by a write_phase_thoughts_doc call.
+# --------------------------------------------------------------------------
+echo ""
+echo "=== phase-pr ALREADY_MERGED early-exit writes its doc before complete ==="
+pr_f="${SKILLS_DIR}/phase-pr/SKILL.md"
+first_complete_line=$(grep -n -- "--status complete" "$pr_f" | head -1 | cut -d: -f1)
+first_doc_line=$(grep -n "write_phase_thoughts_doc" "$pr_f" | head -1 | cut -d: -f1)
+echo "Test: phase-pr first write_phase_thoughts_doc before first --status complete"
+if [[ -z "$first_complete_line" ]]; then
+  fail "phase-pr early-exit: --status complete not found"
+elif [[ -z "$first_doc_line" ]]; then
+  fail "phase-pr early-exit: write_phase_thoughts_doc not found"
+elif [[ "$first_doc_line" -lt "$first_complete_line" ]]; then
+  pass "phase-pr doc-write (line ${first_doc_line}) before first --status complete (line ${first_complete_line})"
+else
+  fail "phase-pr early-exit doc ordering" \
+    "first write_phase_thoughts_doc (line ${first_doc_line}) is NOT before the ALREADY_MERGED --status complete (line ${first_complete_line}) — already-merged tickets will stall at pr"
+fi
+
+# --------------------------------------------------------------------------
 echo ""
 echo "─────────────────────────────────────────────"
 echo "phase-skill-thoughts-doc: ${PASSES} passed, ${FAILURES} failed"

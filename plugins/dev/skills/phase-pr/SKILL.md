@@ -136,6 +136,15 @@ if [[ "$ALREADY_MERGED" -eq 1 ]]; then
     | if $prNum != null then .pr = {number: $prNum, url: $prUrl} else . end
   ' "$SIGNAL_FILE" > "$TMP" && mv "$TMP" "$SIGNAL_FILE"
 
+  # CTL-1490: this early-exit path emits `complete` before the End-block
+  # write_phase_thoughts_doc, so it must write its own durable doc — otherwise
+  # the pr-phase artifact self-check (own_thoughts_artifact_dir_for_phase pr →
+  # thoughts/shared/phase-pr) finds no doc and downgrades this complete to
+  # failed(artifact_not_gate_visible), stalling every already-merged ticket at pr.
+  source "${PLUGIN_ROOT}/scripts/lib/write-phase-thoughts-doc.sh"
+  write_phase_thoughts_doc "pr" "$TICKET" \
+    "already-merged-to-main (PR #${MERGED_PR_NUMBER:-?}: ${MERGED_PR_URL:-})" || true
+
   "${PLUGIN_ROOT}/scripts/phase-agent-emit-complete" \
     --phase "$PHASE" --ticket "$TICKET" --status complete
   [[ -n "$COMMS" && -x "$COMMS" ]] && "$COMMS" done "$CHANNEL" --as "$TICKET" >/dev/null 2>&1 || true
