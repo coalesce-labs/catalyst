@@ -685,13 +685,34 @@ _is_agent_browser_root_cmd() {
   return 0
 }
 
+# _is_agent_browser_owned_cmd <cmd>: true iff cmd carries an agent-browser-SPECIFIC
+# ownership anchor (~/.agent-browser/ or the agent-browser-chrome- user-data-dir),
+# proving it is agent-browser's OWN browser rather than one merely sharing the
+# generic Playwright cache/profile. The shared /ms-playwright/ and
+# playwright_chromiumdev_profile markers are NOT agent-browser-specific — an
+# unrelated Playwright job uses them too — so a browser matched only by those is
+# reaped only when a live agent-browser daemon owns it (see the safety gate in
+# sweep_agent_browser). CTL-1500 review P1.
+_is_agent_browser_owned_cmd() {
+  local cmd="$1"
+  case "$cmd" in
+    *"/.agent-browser/"*|*"agent-browser-chrome-"*) return 0 ;;
+  esac
+  return 1
+}
+
 # _is_agent_browser_daemon_cmd <cmd>: true iff cmd is an agent-browser daemon binary.
-# Both the 0.9.x `node …/dist/daemon.js` and the 0.3x compiled
-# `…/bin/agent-browser-<platform>` live under node_modules/agent-browser/bin/.
+# Covers BOTH the 0.3x compiled `…/node_modules/agent-browser/bin/agent-browser-<platform>`
+# AND the 0.9.x node daemon `node …/node_modules/agent-browser/dist/daemon.js` — the
+# 0.9.x daemon lives under dist/, not bin/, so a bin/-only match would reject the live
+# owning daemon of a 0.9.x leak, reap the browser alone, and leave the daemon +
+# .pid/.sock behind (CTL-1500 review P2).
 _is_agent_browser_daemon_cmd() {
   local cmd="$1"
   case "$cmd" in */Applications/*) return 1 ;; esac
-  case "$cmd" in *"/node_modules/agent-browser/bin/"*) return 0 ;; esac
+  case "$cmd" in
+    *"/node_modules/agent-browser/bin/"*|*"/node_modules/agent-browser/dist/"*) return 0 ;;
+  esac
   return 1
 }
 
@@ -766,7 +787,7 @@ sweep_agent_browser() {
   #     still alive (the common leak: daemon outlives the CLI) or already dead (an
   #     orphaned browser reparented to init). Browser-centric so it is agnostic to
   #     the daemon-binary shape across agent-browser versions.
-  local root rcmd subtree helper root_age max_cpu reason ppid pcmd
+  local root rcmd subtree helper root_age max_cpu reason ppid pcmd daemon_owner
   while IFS= read -r root; do
     [[ "$root" =~ ^[0-9]+$ ]] || continue
     rcmd="$(ps -o command= -p "$root" 2>/dev/null)"
@@ -792,13 +813,30 @@ sweep_agent_browser() {
       continue
     fi
 
-    # Also reap the owning daemon (and drop its sock/pid) when the parent is a
-    # validated agent-browser daemon; an orphaned browser (parent = init or gone)
-    # is reaped on its own.
+    # Resolve the owning daemon: the parent, when it validates as an agent-browser
+    # daemon binary (the common leak = the daemon outlives the CLI).
     ppid="$(_ab_ppid "$root")"
     pcmd="$(ps -o command= -p "$ppid" 2>/dev/null)"
+    daemon_owner=""
     if [[ "$ppid" =~ ^[0-9]+$ ]] && _is_agent_browser_daemon_cmd "$pcmd"; then
-      _ab_reap "$ppid" "$root" "$sockdir" "$reason"
+      daemon_owner="$ppid"
+    fi
+
+    # SHARED-PLAYWRIGHT SAFETY GATE (CTL-1500 review P1): a browser matched ONLY by
+    # the generic Playwright markers (ms-playwright cache / playwright_chromiumdev_profile)
+    # — with no agent-browser-specific anchor AND no live agent-browser daemon parent —
+    # may belong to an UNRELATED Playwright job, so it must NEVER be reaped. Reap a
+    # shared-marker browser only when a live agent-browser daemon owns it; a browser
+    # with an agent-browser-specific anchor is reaped regardless (incl. orphaned).
+    if [[ -z "$daemon_owner" ]] && ! _is_agent_browser_owned_cmd "$rcmd"; then
+      log "keep agent-browser (root=${root}): shared-playwright browser, no agent-browser owner (age=${root_age}s cpu=${max_cpu}%)"
+      continue
+    fi
+
+    # Reap the owning daemon (and drop its sock/pid) when present; an orphaned but
+    # agent-browser-owned browser (parent = init or gone) is reaped on its own.
+    if [[ -n "$daemon_owner" ]]; then
+      _ab_reap "$daemon_owner" "$root" "$sockdir" "$reason"
     else
       _ab_reap "" "$root" "$sockdir" "${reason} (orphaned, no live daemon)"
     fi

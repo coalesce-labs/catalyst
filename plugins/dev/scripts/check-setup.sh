@@ -104,7 +104,10 @@ done
 
 header "Browser Testing (agent-browser)"
 if command -v agent-browser &>/dev/null; then
-	ab_ver=$(agent-browser --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+	# `|| true`: under `set -euo pipefail` an unparseable/failed --version makes the
+	# grep pipeline return nonzero and would abort the whole check before the
+	# `[[ -z $ab_ver ]]` branch can warn (CTL-1500 review). Swallow it → empty ab_ver.
+	ab_ver=$(agent-browser --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)
 	if [[ -z $ab_ver ]]; then
 		warn "agent-browser present but --version unparseable — need >= $AGENT_BROWSER_MIN_VERSION"
 	elif version_ge "$ab_ver" "$AGENT_BROWSER_MIN_VERSION"; then

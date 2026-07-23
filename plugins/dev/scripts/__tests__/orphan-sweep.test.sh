@@ -1483,18 +1483,35 @@ run "T68a: young browser NOT killed (5100/5101 absent from kill log)" \
 run "T68b: keep logged for young browser" \
   bash -c "bash '$SWEEP' 2>&1 | grep -qi 'keep agent-browser'"
 
-# ── T69: orphaned old idle browser (daemon dead, low CPU, age>=TTL) → TTL reap ─
-# 0.9.x ms-playwright root, reparented to init (ppid=1) → reap root only, no daemon.
+# ── T69: 0.9.x leak WITH a live daemon (dist/ topology) → daemon+root reaped ──
+# The 0.9.x ms-playwright browser matches only the SHARED Playwright markers, so it
+# is reaped BECAUSE a live agent-browser daemon owns it. That daemon lives under
+# dist/ (not bin/) — this also proves _is_agent_browser_daemon_cmd matches the 0.9.x
+# `dist/daemon.js` topology (CTL-1500 review P2).
 _ab_clear
+AB_DAEMON_09X_CMD="/opt/homebrew/opt/node/bin/node /Users/x/.npm-global/lib/node_modules/agent-browser/dist/daemon.js"
 export AB_CFT="5201"
-export AB_CMD_5201="$AB_PLAYWRIGHT_ROOT_CMD"; export AB_CPU_5201="0"; export AB_ETIME_5201="05-00:00:00"; export AB_PPID_5201="1"
+export AB_CMD_5201="$AB_PLAYWRIGHT_ROOT_CMD"; export AB_CPU_5201="0"; export AB_ETIME_5201="05-00:00:00"; export AB_PPID_5201="5200"
+export AB_CMD_5200="$AB_DAEMON_09X_CMD"; export AB_PPID_5200="1"
+rm -f "$KILL_LOG"
+run "T69: 0.9.x leak-with-daemon sweep exits 0" bash "$SWEEP"
+run "T69a: TTL reap kills root 5201" bash -c "grep -q '5201' '${KILL_LOG}'"
+run "T69b: 0.9.x dist/ daemon 5200 recognized + killed (P2)" bash -c "grep -q '5200' '${KILL_LOG}'"
+
+# ── T69safety: orphaned SHARED-Playwright browser, NO agent-browser daemon → KEPT ─
+# A ms-playwright / playwright_chromiumdev_profile browser reparented to init with no
+# agent-browser-specific anchor could be an UNRELATED Playwright job — never reap it
+# (CTL-1500 review P1). CPU-pegged + ancient so only the ownership gate spares it.
+_ab_clear
+export AB_CFT="5211"
+export AB_CMD_5211="$AB_PLAYWRIGHT_ROOT_CMD"; export AB_CPU_5211="99"; export AB_ETIME_5211="05-00:00:00"; export AB_PPID_5211="1"
 export AB_CMD_1=""   # init has no agent-browser-daemon command
 rm -f "$KILL_LOG"
-run "T69: orphaned old browser sweep exits 0" bash "$SWEEP"
-run "T69a: TTL reap kills orphaned root 5201" bash -c "grep -q '5201' '${KILL_LOG}'"
-run "T69b: no daemon (init pid 1) killed" bash -c "! grep -qx '1' '${KILL_LOG}' 2>/dev/null; true"
-run "T69c: orphan reason logged" \
-  bash -c "bash '$SWEEP' 2>&1 | grep -qi 'orphaned'"
+run "T69safety: shared-playwright-no-owner sweep exits 0" bash "$SWEEP"
+run "T69safety-a: unowned shared-playwright root 5211 NEVER killed (P1)" \
+  bash -c "! grep -q '5211' '${KILL_LOG}' 2>/dev/null; true"
+run "T69safety-b: 'no agent-browser owner' keep logged" \
+  bash -c "bash '$SWEEP' 2>&1 | grep -qi 'no agent-browser owner'"
 
 # ── T70: SAFETY — /Applications personal Chrome & unowned CfT are NEVER targets ─
 # 5302: personal Chrome root (no 'for Testing') → rejected by browser-sig.

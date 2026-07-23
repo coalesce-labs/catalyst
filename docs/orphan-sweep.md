@@ -12,7 +12,7 @@ orphaned resources on unattended hosts. It complements the execution-core real-t
 | 2 | Done-ticket worktrees | Worktrees for Linear "Done" tickets not cleaned by `/teardown` | `worktree-presweep.sh` stops sessions first; `git status --porcelain` must be clean; NEVER removes dirty worktrees |
 | 3 | Stale phase signals | `status=running` signals whose `bg_job_id` is dead and >30 min old | Flip ONLY if `bg_job_id` absent from `claude agents --json`; never touch interactive-kind or terminal statuses |
 | 4 | Trunk repo cache dirs | `~/.cache/trunk/repos` entries with mtime >30 days | mtime only; no live-process guard needed |
-| 5 | Leaked agent-browser browsers | agent-browser's persistent daemon + its "Chrome for Testing" / `chrome-headless-shell` browser that outlived the CLI — reaped when a browser subtree is CPU-pegged (runaway) or older than a TTL, plus stale `~/.agent-browser/<session>.sock\|.pid` housekeeping (CTL-1500) | Target ONLY the Playwright browser under `ms-playwright/` (bundle `com.google.chrome.for.testing`) validated against the `agent-browser …/daemon.js` owner; any command under `/Applications/` is HARD-EXCLUDED so the user's personal `/Applications/Google Chrome.app` is NEVER touched |
+| 5 | Leaked agent-browser browsers | agent-browser's persistent daemon + its "Chrome for Testing" / `chrome-headless-shell` browser that outlived the CLI — reaped when a browser subtree is CPU-pegged (runaway) or older than a TTL, plus stale `~/.agent-browser/<session>.sock\|.pid` housekeeping (CTL-1500) | Every command under `/Applications/` is HARD-EXCLUDED so the personal `/Applications/Google Chrome.app` is NEVER touched. A browser with an agent-browser-SPECIFIC anchor (`~/.agent-browser/`, `agent-browser-chrome-`) is reaped on its own; a browser matched only by the SHARED Playwright markers (`ms-playwright/`, `playwright_chromiumdev_profile`) is reaped ONLY when a live agent-browser daemon (`…/node_modules/agent-browser/{bin,dist}/…`) owns it, so an unrelated Playwright job is never killed |
 
 Telemetry: one `emit-otel-event.sh` call per reclaimed resource (`catalyst.sweep.reclaim`, vector `agent_browser` for #5), fail-open.
 
@@ -29,10 +29,12 @@ idle timeout). Knobs (env, all with production defaults):
 | `SWEEP_AB_TTL_SECS` | `14400` | absolute leaked-browser age cap (4h) |
 | `SWEEP_AB_SOCKET_DIR` | `$AGENT_BROWSER_SOCKET_DIR` → `$XDG_RUNTIME_DIR/agent-browser` → `~/.agent-browser` | sock/pid dir |
 
-Reap = graceful `kill` of the daemon (its `SIGTERM` handler closes the browser) plus
-the root browser process (cascades helper children), then removal of that session's
-`.sock`/`.pid`. Complements the forward fix: phase workers now launch with
-`AGENT_BROWSER_IDLE_TIMEOUT_MS` set so newer agent-browser self-shuts-down when idle.
+Reap = graceful `kill` of the owning daemon (its `SIGTERM` handler closes the browser)
+plus the root browser process (cascades helper children), then removal of that
+session's `.sock`/`.pid`. A shared-Playwright-marker browser with no live agent-browser
+daemon owner is left alone (it may be an unrelated Playwright job). Complements the
+forward fix: phase workers now launch with `AGENT_BROWSER_IDLE_TIMEOUT_MS` set so newer
+agent-browser self-shuts-down when idle.
 
 ## Installation
 
