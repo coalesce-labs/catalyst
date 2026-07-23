@@ -263,6 +263,40 @@ reclaim storms). Three additive defenses:
 Enforcement reuses the sweep + breaker: a `stalled` signal makes `isTicketInFlight` drop the ticket;
 the terminal sweep applies `needs-human` via `labelOnce`.
 
+### Stuck-but-alive daemon watchdog (CTL-1502)
+
+Both existing daemon-supervision paths — the launchd `KeepAlive`/`StartInterval` agents and
+`catalyst-monitor forward-start` — are **pid-liveness only** (`kill -0`), so a wedged process that
+holds its pid passes every check. The stuck-but-alive watchdog closes that emit→act gap for the
+otel-forward stack daemon: it reads *stuck predicates pid-liveness cannot see* and, in `enforce`
+mode, restarts the stuck daemon exactly once per breach episode.
+
+- **Two disk-only predicates (OR'd), both O(1) `statSync`/small-JSON reads that never touch the
+  daemon or the bytes they measure.** **P1 DLQ-size** — the DLQ file's `statSync().size` at or above
+  `dlqMaxBytes` (default 1 GiB); read by size, not `readFileSync`, so it stays honest past 2 GB where
+  a whole-file read throws and the in-payload `dlqDepth` silently freezes. **P2 forwarding-lag** — the
+  checkpoint's `lastForwardedTs` frozen for ≥ `stalenessMs` *while the event log has fresher writes*
+  (real backlog), so a legitimately idle forwarder never trips. `lastForwardedTs` is the honest
+  progress signal because it advances only on real forwarding, unlike the checkpoint file's mtime
+  (rewritten unconditionally every 10 s — the same trap as the unconditional heartbeat).
+- **Out-of-band alert path** (the watched daemon's own egress may be the wedged thing): the alert
+  rides the exec-core daemon's pino `.log` (Alloy-shipped, independent of otel-forward) plus a local
+  marker `~/catalyst/watchdog/<daemon>.alert.json` the HUD reads. A best-effort
+  `catalyst.alert.raised|cleared {kind:"daemon_stuck"}` event to the log (for dashboards) is
+  explicitly *not* load-bearing — it rides the very egress that may be broken.
+- **State machine** (a structural clone of the fleet-health probe, hysteresis + cooldown): a
+  sustained breach (≥ `sustainedTicks`) restarts once; a **post-restart verify window** re-checks for
+  `verifyTicks` ticks — if the predicate clears, it emits `cleared` and re-arms; if it stays tripped,
+  it **escalates** (a latched, non-clearing raised alert + a `severity:high` recovery finding) with
+  no second restart until the `cooldownMs` (default 15 min, deliberately > the 600 s launchd
+  `StartInterval` so the two supervision layers never race) expires and a healthy tick re-arms.
+- **Modes** `off/shadow/enforce` (default **`shadow`** — detect + log `would-restart`, mutate
+  nothing). Ships shadow-first; an operator flips it to `enforce` via
+  `catalyst.orchestration.daemonWatchdog.mode` or `EXECUTION_CORE_DAEMON_WATCHDOG_MODE`. Every reader
+  returns a non-crossing sentinel on throw so the guardrail can never wedge the daemon tick. First
+  ship registers exactly one target (otel-forward) behind a descriptor registry, so a second watched
+  daemon is a one-line addition.
+
 ### Two-axis worker state & the recordWorkerTransition chokepoint (CTL-764)
 
 Every worker ticket has **two orthogonal axes** — never blurred:
