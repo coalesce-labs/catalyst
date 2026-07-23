@@ -1336,6 +1336,86 @@ export function readWatchdogConfig() {
   return { mode, silenceThresholdMs, phaseBudgetMultiplier, reviveBudget };
 }
 
+// --- CTL-1502 — stuck-but-alive daemon watchdog config. Mode idiom mirrors
+// readWatchdogConfig (off/shadow/enforce, shadow-first); numeric knobs use the
+// env > Layer-1 catalyst.orchestration.daemonWatchdog > frozen-default
+// precedence (mirrors fleetHealthNumber). Re-reads process.env on every call so
+// tests mutate env freely. Never throws — a missing/malformed Layer-1 file falls
+// through to env/defaults.
+const DAEMON_WATCHDOG_DEFAULTS = Object.freeze({
+  intervalMs: 120_000, // ~120s tick, like fleet-health
+  dlqMaxBytes: 1_073_741_824, // 1 GiB DLQ ceiling (P1)
+  stalenessMs: 900_000, // 15 min frozen lastForwardedTs w/ backlog (P2)
+  cooldownMs: 900_000, // 15 min between restarts (> 600s launchd StartInterval)
+  sustainedTicks: 2, // consecutive breach ticks before acting (hysteresis)
+  verifyTicks: 2, // post-restart re-check window before escalating
+});
+
+// readDaemonWatchdogConfigLayer1 — pull catalyst.orchestration.daemonWatchdog out
+// of a project's .catalyst/config.json. Returns {} for a null/missing/unparseable
+// file or absent key so callers fall back to env/defaults. Never throws (mirrors
+// readFleetHealthConfigLayer1).
+export function readDaemonWatchdogConfigLayer1(configPath) {
+  if (!configPath) return {};
+  try {
+    const parsed = JSON.parse(readFileSync(configPath, "utf8"));
+    const dw = parsed?.catalyst?.orchestration?.daemonWatchdog;
+    return dw && typeof dw === "object" ? dw : {};
+  } catch (err) {
+    if (err?.code !== "ENOENT") {
+      log.warn(
+        { configPath, err: err.message },
+        "daemon-watchdog: Layer-1 config unreadable; using defaults",
+      );
+    }
+    return {};
+  }
+}
+
+export function readDaemonWatchdogConfig(configPath) {
+  const l1 = readDaemonWatchdogConfigLayer1(configPath);
+  // CATALYST_DAEMON_WATCHDOG=0 is the kill-switch → mode:off (mirrors
+  // readWatchdogConfig's CATALYST_WATCHDOG=0). Otherwise env > Layer-1 > shadow.
+  const mode =
+    process.env.CATALYST_DAEMON_WATCHDOG === "0"
+      ? "off"
+      : resolveMode(process.env.EXECUTION_CORE_DAEMON_WATCHDOG_MODE, l1.mode);
+  return {
+    mode,
+    enabled: mode !== "off",
+    intervalMs: fleetHealthNumber(
+      process.env.EXECUTION_CORE_DAEMON_WATCHDOG_INTERVAL_MS,
+      l1.intervalMs,
+      DAEMON_WATCHDOG_DEFAULTS.intervalMs,
+    ),
+    dlqMaxBytes: fleetHealthNumber(
+      process.env.EXECUTION_CORE_DAEMON_WATCHDOG_DLQ_MAX_BYTES,
+      l1.dlqMaxBytes,
+      DAEMON_WATCHDOG_DEFAULTS.dlqMaxBytes,
+    ),
+    stalenessMs: fleetHealthNumber(
+      process.env.EXECUTION_CORE_DAEMON_WATCHDOG_STALENESS_MS,
+      l1.stalenessMs,
+      DAEMON_WATCHDOG_DEFAULTS.stalenessMs,
+    ),
+    cooldownMs: fleetHealthNumber(
+      process.env.EXECUTION_CORE_DAEMON_WATCHDOG_COOLDOWN_MS,
+      l1.cooldownMs,
+      DAEMON_WATCHDOG_DEFAULTS.cooldownMs,
+    ),
+    sustainedTicks: fleetHealthNumber(
+      process.env.EXECUTION_CORE_DAEMON_WATCHDOG_SUSTAINED_TICKS,
+      l1.sustainedTicks,
+      DAEMON_WATCHDOG_DEFAULTS.sustainedTicks,
+    ),
+    verifyTicks: fleetHealthNumber(
+      process.env.EXECUTION_CORE_DAEMON_WATCHDOG_VERIFY_TICKS,
+      l1.verifyTicks,
+      DAEMON_WATCHDOG_DEFAULTS.verifyTicks,
+    ),
+  };
+}
+
 // --- CTL-1137 cost-cap watcher config. SHADOW-FIRST, same shape + precedence as the
 // CTL-729 watchdog above: env > Layer-2 catalyst.costCap.* > code default, default
 // mode "shadow" (detect + log "would-abort", never kill, until an operator flips it to
