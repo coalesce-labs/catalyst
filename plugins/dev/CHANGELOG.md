@@ -1,5 +1,18 @@
 # Changelog
 
+## [12.35.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.34.0...catalyst-dev-v12.35.0) (2026-07-23)
+
+
+### Features
+
+* **dev:** CTL-1500 reap leaked agent-browser Chrome + idle-timeout + setup-tooling ownership ([#2702](https://github.com/coalesce-labs/catalyst/issues/2702)) ([74fa0a8](https://github.com/coalesce-labs/catalyst/commit/74fa0a8ea2eda2bb96ef53772a320366ef3e87b7))
+
+
+### Bug Fixes
+
+* **dev:** CTL-1504 guard scheduler census sites + classify not-found (stop CTC-phantom board-health poison) ([#2698](https://github.com/coalesce-labs/catalyst/issues/2698)) ([6d6d154](https://github.com/coalesce-labs/catalyst/commit/6d6d15411b4fe469b175db9b4ed29a3628d38bf6))
+* **dev:** CTL-1505 retry rebase against fresh origin/&lt;base&gt; before parking a source conflict ([#2701](https://github.com/coalesce-labs/catalyst/issues/2701)) ([17de576](https://github.com/coalesce-labs/catalyst/commit/17de576be99523a232415334918010708ec00ef0))
+
 ## [12.34.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.33.0...catalyst-dev-v12.34.0)
 
 Jul 23, 2026
