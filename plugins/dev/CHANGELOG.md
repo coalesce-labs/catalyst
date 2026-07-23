@@ -1,5 +1,17 @@
 # Changelog
 
+## [12.34.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.33.0...catalyst-dev-v12.34.0) (2026-07-23)
+
+
+### Features
+
+* **dev:** CTL-1496 recovery-pass drives blocked PR to merge instead of escalating ([#2689](https://github.com/coalesce-labs/catalyst/issues/2689)) ([bec5e03](https://github.com/coalesce-labs/catalyst/commit/bec5e038be26256572fed0342c93cda1dc5bb31b))
+
+
+### Bug Fixes
+
+* **dev:** CTL-1457 follow-up — CATALYST_EXECUTOR_BY_PHASE env override (durable per-node routing) ([#2655](https://github.com/coalesce-labs/catalyst/issues/2655)) ([3afb50a](https://github.com/coalesce-labs/catalyst/commit/3afb50aea8e18ea3cc26c52b38d01dd6f66f6536))
+
 ## [12.33.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.32.0...catalyst-dev-v12.33.0)
 
 Jul 22, 2026
