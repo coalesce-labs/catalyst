@@ -951,6 +951,67 @@ describe("fetchTicketState — probeBackoff negative cache (CTL-1436 A4)", () =>
   });
 });
 
+// CTL-1504 — fetchTicketState reads STDERR: the linearis CLI now exits nonzero
+// for a genuinely-missing / malformed ticket id, with the not-found body on
+// stderr. A definitive-missing read is BENIGN (negative-cached, no WARN alert);
+// a transient nonzero (429/auth/network/timeout) stays loud.
+describe("fetchTicketState — stderr definitive-missing (CTL-1504)", () => {
+  let tmpDir;
+  let prevDir;
+  beforeEach(() => {
+    __resetDispatchAlertThrottle();
+    prevDir = process.env.CATALYST_DIR;
+    tmpDir = mkdtempSync(join(tmpdir(), "ctl1504-fts-"));
+    process.env.CATALYST_DIR = tmpDir;
+  });
+  afterEach(() => {
+    if (prevDir === undefined) delete process.env.CATALYST_DIR;
+    else process.env.CATALYST_DIR = prevDir;
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+  function eventLogBody() {
+    const dir = join(tmpDir, "events");
+    let files = [];
+    try { files = readdirSync(dir); } catch { return ""; }
+    return files.map((f) => readFileSync(join(dir, f), "utf8")).join("");
+  }
+
+  test("nonzero + not-found stderr → null, negative-cached, NO WARN alert (CTL-1504)", () => {
+    const cache = createTicketStateCache({ now: () => 0 });
+    const exec = fakeExec({ code: 1, stdout: "", stderr: '{"error":"Issue with identifier \\"CTL-9\\" not found"}' });
+    expect(fetchTicketState("CTL-9", { exec, cache, probeBackoff: true })).toBeNull();
+    expect(cache.isNegativelyCached("CTL-9")).toBe(true); // still backed off
+    const body = eventLogBody();
+    // benign missing → NO live-fallback alert at all for this identifier
+    expect(body).not.toContain("catalyst.alert.ticket_state_live_fallback");
+  });
+
+  test("nonzero + invalid-identifier stderr → null, benign (no WARN)", () => {
+    const cache = createTicketStateCache({ now: () => 0 });
+    const exec = fakeExec({ code: 1, stderr: '{"error":"Invalid issue identifier format: \\".catalyst\\". Expected format: TEAM-123"}' });
+    expect(fetchTicketState(".catalyst", { exec, cache, probeBackoff: true })).toBeNull();
+    expect(eventLogBody()).not.toContain("catalyst.alert.ticket_state_live_fallback");
+  });
+
+  test("nonzero + transient (auth stderr) → null, WARN reason:'error' (stays loud)", () => {
+    const cache = createTicketStateCache({ now: () => 0 });
+    const exec = fakeExec({ code: 1, stderr: "auth failed" });
+    expect(fetchTicketState("CTL-9", { exec, cache, probeBackoff: true })).toBeNull();
+    const body = eventLogBody();
+    expect(body).toContain("catalyst.alert.ticket_state_live_fallback");
+    expect(body).toContain('"reason":"error"');
+  });
+
+  test("timeout → WARN reason:'timeout' unchanged", () => {
+    const cache = createTicketStateCache({ now: () => 0 });
+    const exec = () => ({ code: 124, stdout: "", stderr: "", timedOut: true });
+    expect(fetchTicketState("CTL-9", { exec, cache, probeBackoff: true })).toBeNull();
+    const body = eventLogBody();
+    expect(body).toContain("catalyst.alert.ticket_state_live_fallback");
+    expect(body).toContain('"reason":"timeout"');
+  });
+});
+
 // CTL-755 — fetchTicketRelations is the admission gate's single-read hydration
 // of a triaged-waiting candidate: state + relations + inverseRelations +
 // priority + labels in one `linearis issues read <id>`. The descriptor it

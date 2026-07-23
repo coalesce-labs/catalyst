@@ -291,6 +291,26 @@ function daemonAgeMs(node) {
   }
 }
 
+// bodyLooksNotFound — CTL-1504: the linearis CLI now exits nonzero for a
+// genuinely-missing ticket id, with the error body on STDERR
+// (`{"error":"Issue with identifier \"X\" not found"}`). A definitive not-found is
+// the ONLY nonzero we treat as "the ticket is gone"; every other nonzero
+// (429/network/auth/timeout) is transient. Matches the raw text of either stream
+// so it is robust to the JSON body and any plain-string form. Never throws.
+export function bodyLooksNotFound(stderr, stdout) {
+  const body = `${stderr ?? ""}\n${stdout ?? ""}`;
+  return /not\s*found/i.test(body);
+}
+
+// isDefinitiveMissing — not-found OR invalid-identifier-format (the two "this is
+// not a live ticket" bodies). Used ONLY by fetchTicketState to pick the benign
+// reason; classifyTicketResolution stays strict (not-found only) so an
+// invalid-format never quarantines.
+export function isDefinitiveMissing(stderr, stdout) {
+  const body = `${stderr ?? ""}\n${stdout ?? ""}`;
+  return bodyLooksNotFound(stderr, stdout) || /invalid\s+issue\s+identifier/i.test(body);
+}
+
 // CTL-1364: optional `onExec` seam — invoked ONLY when this call falls through to the
 // ACTUAL live `linearis issues read` spawn (cache MISS + replica MISS + gateway
 // stale/miss). A cache/gateway/replica HIT returns early WITHOUT calling onExec, so the
@@ -356,14 +376,20 @@ export function fetchTicketState(
   // gateway is a cache, not the replica.
   const liveSource = replica ? "linearis_miss" : "linearis";
   const execStart = onExec ? Date.now() : 0;
-  const { code, stdout, timedOut } = exec("linearis", ["issues", "read", identifier], {
+  const { code, stdout, stderr, timedOut } = exec("linearis", ["issues", "read", identifier], {
     timeoutMs: LINEARIS_TERMINAL_READ_TIMEOUT_MS,
   });
   if (code !== 0) {
     recordDaemonRead(liveSource, "failed", identifier); // live read errored/timed-out — no data served
     if (probeBackoff && cache?.setNegative) {
-      cache.setNegative(identifier); // A4: back off — don't re-hammer this live read every tick
-      emitTicketStateLiveFallback({ identifier, reason: timedOut === true ? "timeout" : "error" });
+      cache.setNegative(identifier); // A4: back off either way — don't re-hammer this live read every tick
+      if (isDefinitiveMissing(stderr, stdout)) {
+        // CTL-1504: a deleted / malformed ticket is BENIGN — negative-cache it but
+        // do NOT fire the WARN live-fallback alert (this was the storm source). The
+        // phantom-sweep (classifyTicketResolution) owns quarantine.
+      } else {
+        emitTicketStateLiveFallback({ identifier, reason: timedOut === true ? "timeout" : "error" });
+      }
     }
     if (onExec) {
       try {
