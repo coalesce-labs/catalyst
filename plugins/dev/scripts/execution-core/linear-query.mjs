@@ -721,6 +721,13 @@ export function readTicketLabelNodes(identifier, { exec = defaultExec } = {}) {
 // discriminator is the BODY, not the exit code: a "not found" error string is
 // the definitive not-found; any other error body (auth/network/rate-limit) is
 // transient → unknown.
+//
+// CONTRACT DRIFT (CTL-1504, verified 2026-07-23): the CLI now exits **1** for a
+// genuinely-missing ticket, with the not-found body on **stderr**. So on a
+// nonzero exit we inspect the body (stderr preferred) for a definitive not-found
+// and return "not-found"; every other nonzero (429/network/auth/timeout/
+// invalid-format) stays "unknown". The exit-0 body-discriminator path below is
+// retained for back-compat with any deployment still on the 2026-05-27 contract.
 export function classifyTicketResolution(
   identifier,
   { exec = defaultExec, gateway, gatewayFreshMs = GATEWAY_EXISTS_FRESH_MS } = {}
@@ -737,10 +744,16 @@ export function classifyTicketResolution(
   // CTL-1339: hot per-signal terminal read (phantom-sweep) — cap the wall-clock
   // so a 429-stalled linearis can't block the synchronous tick. A timed-out read
   // fails SAFE via the code-127 → "unknown" branch (never a false quarantine).
-  const { code, stdout } = exec("linearis", ["issues", "read", identifier], {
+  const { code, stdout, stderr } = exec("linearis", ["issues", "read", identifier], {
     timeoutMs: LINEARIS_TERMINAL_READ_TIMEOUT_MS,
   });
-  if (code !== 0) return "unknown"; // nonzero is ambiguous — NEVER not-found
+  if (code !== 0) {
+    // CTL-1504: the CLI now exits 1 for a genuinely-missing ticket, with the
+    // not-found body on stderr. A definitive not-found is the ONLY nonzero that
+    // may quarantine; every other nonzero (429/network/auth/timeout/invalid-format)
+    // stays ambiguous → "unknown" so a Linear outage never quarantines a real ticket.
+    return bodyLooksNotFound(stderr, stdout) ? "not-found" : "unknown";
+  }
   let node;
   try {
     node = JSON.parse(stdout);

@@ -1446,16 +1446,31 @@ describe("classifyTicketResolution (CTL-671)", () => {
     expect(classifyTicketResolution("CTL-671", { exec })).toBe("exists");
   });
 
-  test("explicit not-found stderr with nonzero exit → unknown (NOT not-found — fail safe)", () => {
-    // A nonzero exit is ambiguous (auth/network/not-found all exit nonzero);
-    // never quarantine on it. This is the load-bearing safety assertion.
-    const exec = fakeExec({ code: 1, stderr: "linearis: issue CTL-9 not found" });
-    expect(classifyTicketResolution("CTL-9", { exec })).toBe("unknown");
+  // CHANGED (CTL-1504): the CLI now exits 1 for a genuinely-missing ticket with
+  // the not-found body on stderr. That IS a definitive not-found →
+  // quarantine-eligible (was 'unknown' under the stale 2026-05-27 contract).
+  test("nonzero exit + not-found stderr → not-found (CTL-1504 — was 'unknown')", () => {
+    const exec = fakeExec({ code: 1, stderr: '{"error":"Issue with identifier \\"CTL-9\\" not found"}' });
+    expect(classifyTicketResolution("CTL-9", { exec })).toBe("not-found");
   });
 
+  test("nonzero exit + plain-string not-found stderr → not-found (CTL-1504)", () => {
+    const exec = fakeExec({ code: 1, stderr: "linearis: issue CTL-9 not found" });
+    expect(classifyTicketResolution("CTL-9", { exec })).toBe("not-found");
+  });
+
+  // UNCHANGED safety: a transient nonzero (no not-found body) is still ambiguous —
+  // a Linear outage never quarantines a real ticket.
   test("auth/network failure → unknown (never quarantines a real ticket)", () => {
     const exec = fakeExec({ code: 1, stderr: "auth failed" });
     expect(classifyTicketResolution("CTL-100", { exec })).toBe("unknown");
+  });
+
+  // UNCHANGED: invalid-identifier-format is NOT /not\s*found/ → stays unknown (and
+  // is unreachable past the census guard anyway).
+  test("nonzero + invalid-identifier-format stderr → unknown (strict)", () => {
+    const exec = fakeExec({ code: 1, stderr: '{"error":"Invalid issue identifier format: \\"x\\"."}' });
+    expect(classifyTicketResolution("x", { exec })).toBe("unknown");
   });
 
   test("unparseable stdout → unknown", () => {
