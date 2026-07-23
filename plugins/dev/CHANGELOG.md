@@ -1,5 +1,22 @@
 # Changelog
 
+## [12.34.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.33.0...catalyst-dev-v12.34.0)
+
+Jul 23, 2026
+
+<!-- ai-enhanced -->
+
+### Autonomous PR Block Recovery
+
+When a PR fails to merge, the recovery pass now probes GitHub live — checking CI status, unresolved bot review threads, and review decisions — and routes autonomously: bounded fixes get dispatched to a worker, while genuine human gates (CHANGES_REQUESTED from a person, no open PR found) escalate with specific context instead of an opaque failure message. A `CATALYST_EXECUTOR_BY_PHASE` JSON env var also lands in this release, letting you set durable per-phase executor routing in `execution-core.env` without it being wiped by the broker's periodic `git reset`. The recovery pass feature ships behind `CATALYST_RECOVERY_PASS=shadow|enforce` and is off by default.
+
+
+
+### PRs
+
+* **dev:** CTL-1496 recovery-pass drives blocked PR to merge instead of escalating ([#2689](https://github.com/coalesce-labs/catalyst/issues/2689)) ([bec5e03](https://github.com/coalesce-labs/catalyst/commit/bec5e038be26256572fed0342c93cda1dc5bb31b))
+* **dev:** CTL-1457 follow-up — CATALYST_EXECUTOR_BY_PHASE env override (durable per-node routing) ([#2655](https://github.com/coalesce-labs/catalyst/issues/2655)) ([3afb50a](https://github.com/coalesce-labs/catalyst/commit/3afb50aea8e18ea3cc26c52b38d01dd6f66f6536))
+
 ## [12.33.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.32.0...catalyst-dev-v12.33.0)
 
 Jul 22, 2026
