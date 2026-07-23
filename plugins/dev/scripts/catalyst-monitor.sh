@@ -522,6 +522,15 @@ cmd_forward_status() {
   fi
 }
 
+cmd_forward_restart() {
+  # CTL-1502: atomic restart — stop (SIGTERM→SIGKILL→pid-file cleanup) then start.
+  # Both halves are already idempotent/no-op-safe, so a restart from any state
+  # (running, dead-pid, not-running) converges to "running with a fresh pid".
+  # Used by the stuck-but-alive daemon watchdog as its one restart primitive.
+  cmd_forward_stop
+  cmd_forward_start
+}
+
 usage() {
   echo "Usage: catalyst-monitor.sh <command> [options]"
   echo ""
@@ -535,6 +544,7 @@ usage() {
   echo "  forward-start      Start otel-forward daemon in background"
   echo "  forward-stop       Stop otel-forward daemon"
   echo "  forward-status     Check if otel-forward daemon is running"
+  echo "  forward-restart    Atomically stop then start the otel-forward daemon"
 }
 
 cmd="${1:-help}"
@@ -550,6 +560,7 @@ case "$cmd" in
   forward-start)  cmd_forward_start ;;
   forward-stop)   cmd_forward_stop ;;
   forward-status) cmd_forward_status ;;
+  forward-restart) cmd_forward_restart ;;
   help|--help|-h) usage ;;
   *) echo "error: unknown command: $cmd" >&2; exit 1 ;;
 esac
