@@ -21,6 +21,10 @@ MOCKBIN="${SCRATCH}/bin"
 mkdir -p "$MOCKBIN"
 export PATH="${MOCKBIN}:${PATH}"
 export SWEEP_RUN_ID="testrun"
+# CTL-1500: keep the agent-browser reaper (vector 5) inert for all pre-existing
+# phases so their fixed pgrep/ps mocks (or the real host) can't trip it. The
+# dedicated Phase 10 turns it back on with fully-mocked pgrep/ps/kill.
+export SWEEP_AB_ENABLED=0
 
 # ─── harness ────────────────────────────────────────────────────────────────
 
@@ -1352,6 +1356,213 @@ run "T66: worktree.sweep.completed emitted exactly once" \
 rm -f "$MOCKBIN/git"
 rm -f "$MOCKBIN/pmset"
 rm -f "$MOCKBIN/worktree-presweep.sh"
+
+# ─── Phase 10: vector 5 — leaked agent-browser reaper (CTL-1500, T67-T74) ────
+#
+# Hermetic: pgrep/ps/kill are mocked so NO real process is ever signalled. The
+# agent-browser browser/daemon topology is described entirely via AB_* env vars.
+# The reaper is browser-centric and version-agnostic: it enumerates browser roots
+# via `pgrep -f "Chrome for Testing"` / `pgrep -f "chrome-headless-shell"`, so the
+# mock returns those matches (root + helpers) and the reaper's own validation must
+# filter to true roots and reject helpers / crashpad / personal /Applications Chrome.
+
+# Dispatching pgrep mock: browser-sig patterns → $AB_CFT / $AB_HS; -P → children.
+cat > "$MOCKBIN/pgrep" <<'EOF'
+#!/usr/bin/env bash
+if [[ "${1:-}" == "-f" ]]; then
+  case "${2:-}" in
+    *"Chrome for Testing"*)     printf '%s\n' ${AB_CFT:-} ;;
+    *"chrome-headless-shell"*)  printf '%s\n' ${AB_HS:-} ;;
+    *) : ;;   # bun run|turbo|node etc → no match
+  esac
+elif [[ "${1:-}" == "-P" ]]; then
+  eval "printf '%s\n' \${AB_CHILDREN_${2}:-}"
+fi
+exit 0
+EOF
+chmod +x "$MOCKBIN/pgrep"
+
+# ps mock: `-o <fmt>= -p <pid>` for command=/pcpu=/etime=/ppid= via AB_<F>_<pid>.
+cat > "$MOCKBIN/ps" <<'EOF'
+#!/usr/bin/env bash
+fmt=""; pid=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -o) fmt="$2"; shift 2 ;;
+    -p) pid="$2"; shift 2 ;;
+    *)  shift ;;
+  esac
+done
+case "$fmt" in
+  command=) eval "printf '%s\n' \"\${AB_CMD_${pid}:-}\"" ;;
+  pcpu=)    eval "printf '%s\n' \"\${AB_CPU_${pid}:-}\"" ;;
+  etime=)   eval "printf '%s\n' \"\${AB_ETIME_${pid}:-}\"" ;;
+  ppid=)    eval "printf '%s\n' \"\${AB_PPID_${pid}:-}\"" ;;
+esac
+exit 0
+EOF
+chmod +x "$MOCKBIN/ps"
+
+# kill mock records signalled pids (env kill resolves to PATH; kill -0 stays builtin).
+cat > "$MOCKBIN/kill" <<'EOF'
+#!/usr/bin/env bash
+echo "$@" >> "${KILL_LOG}"
+EOF
+chmod +x "$MOCKBIN/kill"
+
+# claude mock: no active agents (worktree/signal vectors stay inert).
+cat > "$MOCKBIN/claude" <<'EOF'
+#!/usr/bin/env bash
+if [[ "${1:-}" == "agents" ]]; then echo "[]"; fi
+EOF
+chmod +x "$MOCKBIN/claude"
+
+AB_SOCKDIR="${SCRATCH}/ab-sock"
+mkdir -p "$AB_SOCKDIR"
+
+# Phase-wide env: reaper ON, all other vectors pointed at empty/nonexistent roots.
+export SWEEP_AB_ENABLED=1
+export SWEEP_AB_SOCKET_DIR="$AB_SOCKDIR"
+export SWEEP_TRUNK_CACHE_DIR="${SCRATCH}/none-trunk"
+export SWEEP_WORKERS_GLOB_ROOT="/nonexistent-ab"
+export SWEEP_WT_ROOT="/nonexistent-ab"
+export SWEEP_PROJECT_CLAUDE_WT="/nonexistent-ab"
+export SWEEP_INCLUDE_GLOBAL_CLAUDE_WT=0
+export SWEEP_FORCE_POWER=ac
+# defaults: CPU_THRESHOLD=30 MIN_AGE=600 TTL=14400
+
+# Ground-truth-derived command lines. 0.3x-style root browser (~/.agent-browser +
+# agent-browser-chrome- user-data-dir) and a helper renderer; a 0.9.x-style
+# ms-playwright root; the compiled-daemon command; and personal /Applications Chrome.
+AB_ROOT_CMD="/Users/x/.agent-browser/browsers/chrome-151/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing --headless=new --user-data-dir=/var/folders/T/agent-browser-chrome-uuid --window-size=1280,720"
+AB_RENDERER_CMD="/Users/x/.agent-browser/browsers/chrome-151/Google Chrome for Testing.app/Contents/Frameworks/Google Chrome for Testing Framework.framework/Versions/151/Helpers/Google Chrome for Testing Helper (Renderer).app/Contents/MacOS/Google Chrome for Testing Helper (Renderer) --type=renderer --user-data-dir=/var/folders/T/agent-browser-chrome-uuid"
+AB_CRASHPAD_CMD="/Users/x/.agent-browser/browsers/chrome-151/Google Chrome for Testing.app/Contents/Frameworks/Google Chrome for Testing Framework.framework/Versions/151/Helpers/chrome_crashpad_handler --monitor-self --database=/Users/x/Library/Application Support/Google/Chrome for Testing/Crashpad"
+AB_PLAYWRIGHT_ROOT_CMD="/Users/x/Library/Caches/ms-playwright/chromium-1208/chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing --user-data-dir=/var/folders/T/playwright_chromiumdev_profile-a"
+AB_DAEMON_CMD="/opt/homebrew/Cellar/agent-browser/0.32.4/libexec/lib/node_modules/agent-browser/bin/agent-browser-darwin-arm64"
+PERSONAL_CHROME_ROOT_CMD="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+PERSONAL_CHROME_HELPER_CMD="/Applications/Google Chrome.app/Contents/Frameworks/Google Chrome Framework.framework/Versions/149/Helpers/Google Chrome Helper (Renderer).app/Contents/MacOS/Google Chrome Helper (Renderer) --type=renderer"
+
+_ab_clear() {
+  # unset all AB_* topology vars so scenarios don't leak into each other
+  unset "${!AB_CFT@}" "${!AB_HS@}" "${!AB_CMD_@}" "${!AB_CPU_@}" "${!AB_ETIME_@}" "${!AB_PPID_@}" "${!AB_CHILDREN_@}" 2>/dev/null || true
+  unset AB_CFT AB_HS 2>/dev/null || true
+}
+
+# ── T67: runaway browser (renderer CPU-pegged, age>min) → daemon+root reaped ──
+# pgrep 'Chrome for Testing' returns root(5001)+helper(5002); only 5001 is a root.
+_ab_clear
+export AB_CFT="5001 5002"
+export AB_CMD_5001="$AB_ROOT_CMD"; export AB_CPU_5001="1"; export AB_ETIME_5001="20:00"; export AB_PPID_5001="5000"
+export AB_CHILDREN_5001="5002"
+export AB_CMD_5002="$AB_RENDERER_CMD"; export AB_CPU_5002="96"; export AB_ETIME_5002="19:50"; export AB_PPID_5002="5001"
+export AB_CMD_5000="$AB_DAEMON_CMD"; export AB_PPID_5000="1"
+rm -f "$KILL_LOG" "$SCRATCH_OTEL_LOG"
+echo "5000" > "$AB_SOCKDIR/probe.pid"; : > "$AB_SOCKDIR/probe.sock"
+
+run "T67: runaway browser sweep exits 0" bash "$SWEEP"
+run "T67a: owning daemon pid 5000 killed" bash -c "grep -q '5000' '${KILL_LOG}'"
+run "T67b: root browser pid 5001 killed" bash -c "grep -q '5001' '${KILL_LOG}'"
+run "T67c: helper 5002 NOT killed directly (cascades; not a root)" \
+  bash -c "! grep -q '5002' '${KILL_LOG}' 2>/dev/null; true"
+run "T67d: emits agent_browser reclaim vector" \
+  bash -c "grep -q 'agent_browser' '${SCRATCH_OTEL_LOG}'"
+run "T67e: reaped session sock/pid removed" \
+  bash -c "! test -e '${AB_SOCKDIR}/probe.pid' && ! test -e '${AB_SOCKDIR}/probe.sock'"
+
+# ── T68: young browser, even CPU-pegged → KEPT (min-age guards short bursts) ──
+_ab_clear
+export AB_CFT="5101 5102"
+export AB_CMD_5101="$AB_ROOT_CMD"; export AB_CPU_5101="1"; export AB_ETIME_5101="00:30"; export AB_PPID_5101="5100"
+export AB_CHILDREN_5101="5102"
+export AB_CMD_5102="$AB_RENDERER_CMD"; export AB_CPU_5102="99"; export AB_ETIME_5102="00:20"; export AB_PPID_5102="5101"
+export AB_CMD_5100="$AB_DAEMON_CMD"; export AB_PPID_5100="1"
+rm -f "$KILL_LOG"
+run "T68: young pegged browser sweep exits 0" bash "$SWEEP"
+run "T68a: young browser NOT killed (5100/5101 absent from kill log)" \
+  bash -c "! grep -qE '5100|5101' '${KILL_LOG}' 2>/dev/null; true"
+run "T68b: keep logged for young browser" \
+  bash -c "bash '$SWEEP' 2>&1 | grep -qi 'keep agent-browser'"
+
+# ── T69: orphaned old idle browser (daemon dead, low CPU, age>=TTL) → TTL reap ─
+# 0.9.x ms-playwright root, reparented to init (ppid=1) → reap root only, no daemon.
+_ab_clear
+export AB_CFT="5201"
+export AB_CMD_5201="$AB_PLAYWRIGHT_ROOT_CMD"; export AB_CPU_5201="0"; export AB_ETIME_5201="05-00:00:00"; export AB_PPID_5201="1"
+export AB_CMD_1=""   # init has no agent-browser-daemon command
+rm -f "$KILL_LOG"
+run "T69: orphaned old browser sweep exits 0" bash "$SWEEP"
+run "T69a: TTL reap kills orphaned root 5201" bash -c "grep -q '5201' '${KILL_LOG}'"
+run "T69b: no daemon (init pid 1) killed" bash -c "! grep -qx '1' '${KILL_LOG}' 2>/dev/null; true"
+run "T69c: orphan reason logged" \
+  bash -c "bash '$SWEEP' 2>&1 | grep -qi 'orphaned'"
+
+# ── T70: SAFETY — /Applications personal Chrome & unowned CfT are NEVER targets ─
+# 5302: personal Chrome root (no 'for Testing') → rejected by browser-sig.
+# 5303: personal Chrome renderer under /Applications WITH 'for Testing' forced in →
+#       rejected by the /Applications hard-exclude.
+# 5304: a "Chrome for Testing" root with NO agent-browser/Playwright ownership
+#       anchor (a human's manual run) → rejected by the ownership requirement.
+# All CPU-pegged + ancient so ONLY the safety gates keep them alive.
+_ab_clear
+export AB_CFT="5302 5303 5304"
+export AB_CMD_5302="$PERSONAL_CHROME_ROOT_CMD"; export AB_CPU_5302="99"; export AB_ETIME_5302="38-00:00:00"; export AB_PPID_5302="1"
+export AB_CMD_5303="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome for Testing Helper (Renderer) --type=renderer"; export AB_CPU_5303="99"; export AB_ETIME_5303="38-00:00:00"; export AB_PPID_5303="1"
+export AB_CMD_5304="/opt/local/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing --user-data-dir=/tmp/manual"; export AB_CPU_5304="99"; export AB_ETIME_5304="38-00:00:00"; export AB_PPID_5304="1"
+rm -f "$KILL_LOG"
+run "T70: safety-scenario sweep exits 0" bash "$SWEEP"
+run "T70a: personal Chrome root 5302 NEVER killed (no 'for Testing')" \
+  bash -c "! grep -q '5302' '${KILL_LOG}' 2>/dev/null; true"
+run "T70b: /Applications 'for Testing' 5303 NEVER killed (app-bundle hard-exclude)" \
+  bash -c "! grep -q '5303' '${KILL_LOG}' 2>/dev/null; true"
+run "T70c: unowned manual CfT 5304 NEVER killed (no ownership anchor)" \
+  bash -c "! grep -q '5304' '${KILL_LOG}' 2>/dev/null; true"
+
+# ── T71: --dry-run reaps nothing (runaway fixture) ───────────────────────────
+_ab_clear
+export AB_CFT="5401 5402"
+export AB_CMD_5401="$AB_ROOT_CMD"; export AB_CPU_5401="1"; export AB_ETIME_5401="30:00"; export AB_PPID_5401="5400"
+export AB_CHILDREN_5401="5402"
+export AB_CMD_5402="$AB_RENDERER_CMD"; export AB_CPU_5402="88"; export AB_ETIME_5402="29:50"; export AB_PPID_5402="5401"
+export AB_CMD_5400="$AB_DAEMON_CMD"; export AB_PPID_5400="1"
+rm -f "$KILL_LOG"
+run "T71: dry-run kills nothing" \
+  bash -c "bash '$SWEEP' --dry-run && ! test -s '${KILL_LOG}'"
+run "T71b: dry-run logs would-reap" \
+  bash -c "bash '$SWEEP' --dry-run 2>&1 | grep -qi 'would reap agent-browser'"
+
+# ── T72: crashpad handler is never treated as a root (harmless leftover) ──────
+_ab_clear
+export AB_CFT="5601"
+export AB_CMD_5601="$AB_CRASHPAD_CMD"; export AB_CPU_5601="0"; export AB_ETIME_5601="10-00:00:00"; export AB_PPID_5601="1"
+rm -f "$KILL_LOG"
+run "T72: crashpad handler not reaped (excluded from roots)" \
+  bash -c "bash '$SWEEP' && ! grep -q '5601' '${KILL_LOG}' 2>/dev/null; true"
+
+# ── T73: stale sock/pid housekeeping (dead pid removed, live pid kept) ────────
+_ab_clear
+rm -rf "$AB_SOCKDIR"; mkdir -p "$AB_SOCKDIR"
+run "T73: stale sock/pid housekeeping" bash -c '
+  echo 999999 > "'"$AB_SOCKDIR"'/dead.pid"; : > "'"$AB_SOCKDIR"'/dead.sock"
+  echo $$ > "'"$AB_SOCKDIR"'/alive.pid"; : > "'"$AB_SOCKDIR"'/alive.sock"
+  bash "'"$SWEEP"'" >/dev/null 2>&1
+  ! test -e "'"$AB_SOCKDIR"'/dead.pid" && ! test -e "'"$AB_SOCKDIR"'/dead.sock" \
+    && test -e "'"$AB_SOCKDIR"'/alive.pid" && test -e "'"$AB_SOCKDIR"'/alive.sock"
+'
+
+# ── T74: kill-switch — SWEEP_AB_ENABLED=0 disables the whole vector ──────────
+_ab_clear
+export AB_CFT="5501 5502"
+export AB_CMD_5501="$AB_ROOT_CMD"; export AB_CPU_5501="99"; export AB_ETIME_5501="99:00"; export AB_PPID_5501="5500"
+export AB_CHILDREN_5501="5502"
+export AB_CMD_5502="$AB_RENDERER_CMD"; export AB_CPU_5502="99"; export AB_ETIME_5502="98:00"; export AB_PPID_5502="5501"
+export AB_CMD_5500="$AB_DAEMON_CMD"; export AB_PPID_5500="1"
+rm -f "$KILL_LOG"
+run "T74: SWEEP_AB_ENABLED=0 reaps nothing" \
+  bash -c "SWEEP_AB_ENABLED=0 bash '$SWEEP' && ! test -s '${KILL_LOG}'"
+
+_ab_clear
+unset SWEEP_AB_ENABLED SWEEP_AB_SOCKET_DIR
+rm -f "$MOCKBIN/pgrep" "$MOCKBIN/ps"
 
 # ─── results ────────────────────────────────────────────────────────────────
 

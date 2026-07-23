@@ -7,6 +7,12 @@
 #   2. Orphaned/idle worktrees (multi-signal classifier, CTL-1030)
 #   3. Stale phase signals: status=running + dead bg_job_id >30 min
 #   4. Trunk repo cache dirs, mtime >30 days
+#   5. Leaked agent-browser browsers/daemons (CTL-1500): a per-session daemon owns
+#      a real "Chrome for Testing" / chrome-headless-shell browser (Playwright,
+#      under ms-playwright) that OUTLIVES the CLI and has no idle timeout in old
+#      versions. Reap when a browser subtree is CPU-pegged (runaway) or older than
+#      a TTL. Targets ONLY the ms-playwright browser — NEVER /Applications personal
+#      Chrome.
 #
 # Usage:
 #   orphan-sweep.sh [--dry-run] [--print-config] [--count-dirty]
@@ -18,6 +24,12 @@
 #   SWEEP_WT_ROOT               — default: $HOME/catalyst/wt
 #   SWEEP_STALE_SECS            — default: 1800 (30 min)
 #   SWEEP_CACHE_MTIME_DAYS      — default: 30
+#   SWEEP_AB_ENABLED            — agent-browser reaper on/off (default 1)
+#   SWEEP_AB_CPU_THRESHOLD      — runaway browser %CPU threshold (default 30)
+#   SWEEP_AB_MIN_AGE_SECS       — min browser age for the runaway rule (default 600)
+#   SWEEP_AB_TTL_SECS           — absolute leaked-browser age cap (default 14400 / 4h)
+#   SWEEP_AB_SOCKET_DIR         — agent-browser sock/pid dir (default: $AGENT_BROWSER_SOCKET_DIR
+#                                 else $XDG_RUNTIME_DIR/agent-browser else ~/.agent-browser)
 #   SWEEP_IDLE_HOURS            — idle window before a worktree qualifies (default from config / 48)
 #   SWEEP_MAX_REMOVALS          — per-run deletion cap (default from config / 20)
 #   SWEEP_SALVAGE_PUSH          — 1 to push salvage branch before remove (default from config / 0)
@@ -152,6 +164,11 @@ _init_roots() {
   SWEEP_INCLUDE_GLOBAL_CLAUDE_WT="${SWEEP_INCLUDE_GLOBAL_CLAUDE_WT:-1}"
   SWEEP_PROJECT_CLAUDE_WT="${SWEEP_PROJECT_CLAUDE_WT:-${SCRIPT_DIR%/plugins/dev/scripts}/.claude/worktrees}"
   SWEEP_CONFIG_PATH="${SWEEP_CONFIG_PATH:-$(_resolve_sweep_config_path)}"
+  # CTL-1500: agent-browser reaper knobs (production defaults; all overridable).
+  SWEEP_AB_ENABLED="${SWEEP_AB_ENABLED:-1}"
+  SWEEP_AB_CPU_THRESHOLD="${SWEEP_AB_CPU_THRESHOLD:-30}"
+  SWEEP_AB_MIN_AGE_SECS="${SWEEP_AB_MIN_AGE_SECS:-600}"
+  SWEEP_AB_TTL_SECS="${SWEEP_AB_TTL_SECS:-14400}"
   _load_sweep_config
 }
 
@@ -613,6 +630,199 @@ sweep_worktrees() {
   # SWEEP_LINEAR_TEAMS deprecated — Linear Done query removed (CTL-1030)
 }
 
+# ─── vector 5: leaked agent-browser browser/daemon reaper (CTL-1500) ─────────
+#
+# agent-browser runs a PERSISTENT per-session daemon that owns a real "Chrome for
+# Testing" (or chrome-headless-shell) browser. It has NO idle timeout in current
+# builds, so when the Claude worker that ran `agent-browser open` exits/crashes the
+# daemon + browser + its renderer children survive until reboot — and a leaked
+# browser left on the auto-refreshing orch-monitor SPA re-renders every 20-40s,
+# pegging ~1 core. This reaper kills those leaks.
+#
+# SAFETY (non-negotiable): every kill target is command-validated to be an
+# agent-browser process. Browsers are the automation-only "Google Chrome for
+# Testing" (bundle com.google.chrome.for.testing) / "chrome-headless-shell" binary,
+# owned by agent-browser/Playwright (path under `~/.agent-browser/`, `ms-playwright/`,
+# a `--user-data-dir=…/agent-browser-chrome-*` or `…/playwright_chromiumdev_profile-*`).
+# ANY command under `/Applications/` is HARD-EXCLUDED, so the user's personal
+# `/Applications/Google Chrome.app` (which is "Google Chrome", NEVER "for Testing")
+# can never be a target. Verified version-agnostic across agent-browser 0.9.x
+# (Playwright ms-playwright cache) and 0.3x (compiled daemon + ~/.agent-browser
+# browsers) on macOS.
+
+# _ab_socket_dir: mirror the daemon's app-dir resolution order.
+_ab_socket_dir() {
+  if [[ -n "${SWEEP_AB_SOCKET_DIR:-}" ]]; then printf '%s' "$SWEEP_AB_SOCKET_DIR"; return 0; fi
+  if [[ -n "${AGENT_BROWSER_SOCKET_DIR:-}" ]]; then printf '%s' "$AGENT_BROWSER_SOCKET_DIR"; return 0; fi
+  if [[ -n "${XDG_RUNTIME_DIR:-}" ]]; then printf '%s' "${XDG_RUNTIME_DIR}/agent-browser"; return 0; fi
+  printf '%s' "${HOME}/.agent-browser"
+}
+
+# _is_agent_browser_cmd <cmd>: true iff cmd is agent-browser's automation browser —
+# a "Chrome for Testing"/chrome-headless-shell process owned by agent-browser or
+# Playwright. Version-agnostic; HARD-EXCLUDES anything under /Applications, so the
+# personal desktop Chrome ("Google Chrome", never "for Testing") can never match.
+_is_agent_browser_cmd() {
+  local cmd="$1"
+  case "$cmd" in */Applications/*) return 1 ;; esac
+  case "$cmd" in
+    *"Chrome for Testing"*|*"chrome-headless-shell"*) ;;
+    *) return 1 ;;
+  esac
+  case "$cmd" in
+    *"/.agent-browser/"*|*"/ms-playwright/"*|*"agent-browser-chrome-"*|*"playwright_chromiumdev_profile"*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# _is_agent_browser_root_cmd <cmd>: true iff cmd is the TOP-LEVEL browser process
+# (not a `--type=` helper, not the crashpad handler) — killing it cascades the
+# whole browser subtree.
+_is_agent_browser_root_cmd() {
+  local cmd="$1"
+  _is_agent_browser_cmd "$cmd" || return 1
+  case "$cmd" in *"--type="*|*crashpad*) return 1 ;; esac
+  return 0
+}
+
+# _is_agent_browser_daemon_cmd <cmd>: true iff cmd is an agent-browser daemon binary.
+# Both the 0.9.x `node …/dist/daemon.js` and the 0.3x compiled
+# `…/bin/agent-browser-<platform>` live under node_modules/agent-browser/bin/.
+_is_agent_browser_daemon_cmd() {
+  local cmd="$1"
+  case "$cmd" in */Applications/*) return 1 ;; esac
+  case "$cmd" in *"/node_modules/agent-browser/bin/"*) return 0 ;; esac
+  return 1
+}
+
+# _etime_to_secs "<ps-etime>": parse macOS ps etime ([DD-]HH:MM:SS or MM:SS) → seconds.
+# (macOS ps has no `etimes` keyword, so we parse the human `etime`.)
+_etime_to_secs() {
+  local e="${1// /}" days=0 a b c
+  [[ -n "$e" ]] || { printf '0'; return 0; }
+  if [[ "$e" == *-* ]]; then days="${e%%-*}"; e="${e#*-}"; fi
+  local IFS=:
+  read -r a b c <<<"$e"
+  if [[ -n "$c" ]]; then
+    printf '%s' $(( 10#${days:-0}*86400 + 10#${a:-0}*3600 + 10#${b:-0}*60 + 10#${c:-0} ))
+  else
+    printf '%s' $(( 10#${days:-0}*86400 + 10#${a:-0}*60 + 10#${b:-0} ))
+  fi
+}
+
+_ab_children() { pgrep -P "$1" 2>/dev/null || true; }
+_ab_ppid()     { ps -o ppid= -p "$1" 2>/dev/null | tr -d ' '; }
+
+# Candidate browser-root pids: the union of the two automation-browser signatures.
+# pgrep excludes its own pid, and `Chrome for Testing`/`chrome-headless-shell` never
+# match the personal `/Applications/Google Chrome.app` — validation narrows further.
+_ab_browser_roots() {
+  { pgrep -f 'Chrome for Testing' 2>/dev/null; pgrep -f 'chrome-headless-shell' 2>/dev/null; } \
+    | sort -un
+}
+
+_ab_max_cpu() {
+  local pid maxc=0 c
+  for pid in "$@"; do
+    c="$(ps -o pcpu= -p "$pid" 2>/dev/null | awk 'NR==1{printf "%d", $1+0.5}')"
+    [[ -n "$c" ]] || continue
+    [[ "$c" -gt "$maxc" ]] && maxc="$c"
+  done
+  printf '%s' "$maxc"
+}
+
+# _ab_reap <daemon_pid|""> <root_browser_pid> <sockdir> <reason>
+_ab_reap() {
+  local dpid="$1" root="$2" sockdir="$3" reason="$4"
+  if is_dry; then
+    log "[dry-run] would reap agent-browser (${dpid:+daemon=$dpid }root=${root}): ${reason}"
+    return 0
+  fi
+  # TERM the owning daemon first (its SIGTERM handler closes the browser), then TERM
+  # the root browser (cascades its helper children). Both targets are command-
+  # validated agent-browser processes — never the personal Chrome.
+  [[ -n "$dpid" ]] && env kill "$dpid" 2>/dev/null || true
+  [[ -n "$root" ]] && env kill "$root" 2>/dev/null || true
+  log "reaped agent-browser (${dpid:+daemon=$dpid }root=${root}): ${reason}"
+  emit_reclaim agent_browser "${dpid:+daemon=$dpid,}root=${root}"
+  # Drop the sock/pid whose .pid content == this daemon pid.
+  [[ -n "$dpid" && -d "$sockdir" ]] || return 0
+  local pidf base cpid
+  for pidf in "$sockdir"/*.pid; do
+    [[ -e "$pidf" ]] || continue
+    cpid="$(tr -dc '0-9' < "$pidf" 2>/dev/null)"
+    [[ "$cpid" == "$dpid" ]] && { base="${pidf%.pid}"; rm -f "${base}.pid" "${base}.sock"; }
+  done
+}
+
+sweep_agent_browser() {
+  [[ "${SWEEP_AB_ENABLED:-1}" == "1" ]] || return 0
+  command -v pgrep >/dev/null 2>&1 || return 0
+  command -v ps    >/dev/null 2>&1 || return 0
+
+  local sockdir; sockdir="$(_ab_socket_dir)"
+
+  # (1) Reap runaway / leaked agent-browser browsers — whether the owning daemon is
+  #     still alive (the common leak: daemon outlives the CLI) or already dead (an
+  #     orphaned browser reparented to init). Browser-centric so it is agnostic to
+  #     the daemon-binary shape across agent-browser versions.
+  local root rcmd subtree helper root_age max_cpu reason ppid pcmd
+  while IFS= read -r root; do
+    [[ "$root" =~ ^[0-9]+$ ]] || continue
+    rcmd="$(ps -o command= -p "$root" 2>/dev/null)"
+    _is_agent_browser_root_cmd "$rcmd" || continue
+
+    subtree="$root"
+    while IFS= read -r helper; do
+      [[ "$helper" =~ ^[0-9]+$ ]] && subtree="$subtree $helper"
+    done < <(_ab_children "$root")
+
+    root_age="$(_etime_to_secs "$(ps -o etime= -p "$root" 2>/dev/null)")"
+    # shellcheck disable=SC2086
+    max_cpu="$(_ab_max_cpu $subtree)"
+
+    reason=""
+    if [[ "$root_age" -ge "$SWEEP_AB_TTL_SECS" ]]; then
+      reason="ttl age=${root_age}s>=${SWEEP_AB_TTL_SECS}s cpu=${max_cpu}%"
+    elif [[ "$root_age" -ge "$SWEEP_AB_MIN_AGE_SECS" && "$max_cpu" -ge "$SWEEP_AB_CPU_THRESHOLD" ]]; then
+      reason="runaway cpu=${max_cpu}%>=${SWEEP_AB_CPU_THRESHOLD}% age=${root_age}s"
+    fi
+    if [[ -z "$reason" ]]; then
+      log "keep agent-browser (root=${root} age=${root_age}s cpu=${max_cpu}%)"
+      continue
+    fi
+
+    # Also reap the owning daemon (and drop its sock/pid) when the parent is a
+    # validated agent-browser daemon; an orphaned browser (parent = init or gone)
+    # is reaped on its own.
+    ppid="$(_ab_ppid "$root")"
+    pcmd="$(ps -o command= -p "$ppid" 2>/dev/null)"
+    if [[ "$ppid" =~ ^[0-9]+$ ]] && _is_agent_browser_daemon_cmd "$pcmd"; then
+      _ab_reap "$ppid" "$root" "$sockdir" "$reason"
+    else
+      _ab_reap "" "$root" "$sockdir" "${reason} (orphaned, no live daemon)"
+    fi
+  done < <(_ab_browser_roots)
+
+  # (2) Housekeeping: drop stale sock/pid whose recorded daemon pid is dead.
+  #     Pure file cleanup — kill -0 (shell builtin) never signals a process.
+  [[ -d "$sockdir" ]] || return 0
+  local pidf pid base
+  for pidf in "$sockdir"/*.pid; do
+    [[ -e "$pidf" ]] || continue
+    pid="$(tr -dc '0-9' < "$pidf" 2>/dev/null)"
+    if [[ -z "$pid" ]] || ! kill -0 "$pid" 2>/dev/null; then
+      base="${pidf%.pid}"
+      if is_dry; then
+        log "[dry-run] would remove stale agent-browser sock/pid: $(basename "$base")"
+      else
+        rm -f "${base}.pid" "${base}.sock"
+        log "removed stale agent-browser sock/pid: $(basename "$base")"
+      fi
+    fi
+  done
+}
+
 # ─── main ───────────────────────────────────────────────────────────────────
 
 main() {
@@ -633,13 +843,14 @@ main() {
     log "=== DRY RUN — no changes will be made ==="
   fi
 
-  log "starting sweep (vectors: trunk_cache, signals, procs, worktrees)"
+  log "starting sweep (vectors: trunk_cache, signals, procs, worktrees, agent_browser)"
 
   _SWEEP_START_EPOCH="$(date -u +%s)"
   sweep_trunk_cache
   sweep_procs
   sweep_signals
   sweep_worktrees
+  sweep_agent_browser
   emit_sweep_completed
 
   log "sweep complete"
