@@ -89,7 +89,6 @@ match_thoughts_artifact_with_pull_retry() {
 	# Miss — pull once then re-check.
 	local self_dir
 	self_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-	local pull_gate="${CATALYST_PULL_SYNC_CMD:-${self_dir}/thoughts-pull-sync-gate.sh}"
 	if [[ -n "${CATALYST_PULL_SYNC_CMD:-}" ]]; then
 		"$CATALYST_PULL_SYNC_CMD" >/dev/null 2>&1 || true
 	elif [[ -x "${self_dir}/thoughts-pull-sync-gate.sh" ]]; then

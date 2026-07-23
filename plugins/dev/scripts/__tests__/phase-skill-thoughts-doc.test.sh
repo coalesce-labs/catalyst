@@ -97,6 +97,68 @@ else
 fi
 
 # --------------------------------------------------------------------------
+# CTL-1490 regression (verify HIGH): the helper is actually INVOKED and the
+# doc must land in own_thoughts_artifact_dir_for_phase <phase> — the exact dir
+# the emit-complete gate (match_thoughts_artifact) inspects. The prior grep-only
+# tests missed a double-'phase-' prefix that routed docs to
+# thoughts/shared/phase-phase-<name>/, causing every complete to downgrade to
+# failed(artifact_not_gate_visible). This block executes the helper end-to-end
+# and asserts the written path is gate-visible.
+# --------------------------------------------------------------------------
+echo ""
+echo "=== end-to-end: write_phase_thoughts_doc lands where the gate looks ==="
+
+WRITER="${REPO_ROOT}/plugins/dev/scripts/lib/write-phase-thoughts-doc.sh"
+GATE="${REPO_ROOT}/plugins/dev/scripts/lib/phase-artifact-gate.sh"
+
+# skill name → bare phase arg (skill without the leading 'phase-').
+for skill in phase-triage phase-verify phase-review phase-pr phase-monitor-merge phase-monitor-deploy; do
+  phase="${skill#phase-}"
+  f="${SKILLS_DIR}/${skill}/SKILL.md"
+
+  echo ""
+  echo "--- $skill (phase=${phase}) ---"
+
+  # a) Static guard: the call site passes the BARE phase name (no 'phase-'
+  #    re-prefix), matching the helper's 'thoughts/shared/phase-<phase>' contract.
+  echo "Test: ${skill} passes bare phase name to write_phase_thoughts_doc"
+  if grep -Eq "write_phase_thoughts_doc[[:space:]]+\"${phase}\"" "$f"; then
+    pass "${skill} passes bare \"${phase}\""
+  else
+    fail "${skill} passes bare phase name" \
+      "expected write_phase_thoughts_doc \"${phase}\" (found a 'phase-' re-prefix?) in ${f}"
+  fi
+
+  # b) Execution guard: invoke the helper in an isolated cwd and assert the file
+  #    lands in own_thoughts_artifact_dir_for_phase <phase> AND that
+  #    match_thoughts_artifact (the emit-complete gate) finds it.
+  echo "Test: ${skill} doc is gate-visible after write"
+  tmp="$(mktemp -d)"
+  gate_result="$(
+    cd "$tmp" || exit 3
+    # shellcheck source=/dev/null
+    source "$WRITER" || exit 3
+    # shellcheck source=/dev/null
+    source "$GATE" || exit 3
+    expected_dir="$(own_thoughts_artifact_dir_for_phase "$phase")"
+    [[ -n "$expected_dir" ]] || { echo "NO_DIR"; exit 0; }
+    write_phase_thoughts_doc "$phase" "CTL-9999" "body-for-${phase}"
+    if [[ ! -d "$expected_dir" ]]; then echo "MISS_DIR:${expected_dir}"; exit 0; fi
+    if match_thoughts_artifact "$expected_dir" "CTL-9999" >/dev/null 2>&1; then
+      echo "OK:${expected_dir}"
+    else
+      echo "MISS_GATE:${expected_dir}"
+    fi
+  )"
+  rm -rf "$tmp"
+  case "$gate_result" in
+    OK:*)  pass "${skill} doc gate-visible in ${gate_result#OK:}" ;;
+    NO_DIR) fail "${skill} gate-visible" "own_thoughts_artifact_dir_for_phase ${phase} returned empty" ;;
+    *)      fail "${skill} gate-visible" "helper wrote outside the gate dir (${gate_result}) — double 'phase-' prefix regression?" ;;
+  esac
+done
+
+# --------------------------------------------------------------------------
 echo ""
 echo "─────────────────────────────────────────────"
 echo "phase-skill-thoughts-doc: ${PASSES} passed, ${FAILURES} failed"

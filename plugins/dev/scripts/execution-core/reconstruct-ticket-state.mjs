@@ -9,6 +9,7 @@
 
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { PHASES, NEW_WORK_ENTRY_PHASE } from "../lib/workflow-descriptor.mjs";
 import { createWorktree } from "./worktree.mjs";
 import { defaultCheckOpenPrs } from "./open-pr-gate.mjs";
@@ -155,6 +156,9 @@ export async function reconstructTicketState(
       const res = await buildWorktree(ticket, {
         orchDir,
         repoRoot,
+        // Explicit even though defaultBuildWorktree hardcodes it: an INJECTED
+        // buildWorktree collaborator relies on this DI contract (tested in T5),
+        // so it is not actually redundant.
         expectedBranch: ticket,
       });
       worktree = res?.ok ? (res.cwd ?? null) : null;
@@ -168,7 +172,7 @@ export async function reconstructTicketState(
 
 // ─── CLI entrypoint ──────────────────────────────────────────────────────────
 
-if (process.argv[1] && import.meta.url.endsWith(process.argv[1].replace(/^\//, ""))) {
+if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
   const args = process.argv.slice(2);
   const ticketIdx = args.indexOf("--ticket");
   const ticket = ticketIdx >= 0 ? args[ticketIdx + 1] : null;
