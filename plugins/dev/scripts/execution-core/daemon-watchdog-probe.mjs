@@ -179,6 +179,17 @@ export function startDaemonWatchdogProbe({
       // carried over from a previous episode's restart.
       if (s.restartedAt != null && nowMs - s.restartedAt < cooldownMs) continue;
 
+      // Advance the state PRE-EMPTIVELY, BEFORE the (awaited) restart. tick() is
+      // not serialized — setInterval re-fires every intervalMs regardless of an
+      // in-flight tick — so if restart(t) hangs past intervalMs (the exact
+      // wedged-daemon case this watchdog targets: forward-stop blocking on an
+      // unkillable process), a concurrent tick would otherwise still see
+      // restarted=false / restartedAt=null, clear every gate, and issue a SECOND
+      // restart, breaking the once-per-episode invariant. Setting these first
+      // makes the overlapping tick enter the verify window instead. nowMs is the
+      // tick-top snapshot, so cooldown semantics are unchanged in the fast path.
+      s.restarted = true;
+      s.restartedAt = nowMs;
       if (enforce) {
         alert.raiseAlert(t, { tripped, sinceMs }, alertIo);
         s.raised = true;
@@ -192,8 +203,6 @@ export function startDaemonWatchdogProbe({
         log.warn?.({ daemon: t.name, tripped }, "daemon-watchdog: would-restart (shadow)");
         s.raised = true; // internal "would-be-raised" flag so the verify window runs
       }
-      s.restarted = true;
-      s.restartedAt = nowMs;
     }
   }
 

@@ -127,6 +127,37 @@ describe("enforce mode — restart with hysteresis + cooldown", () => {
   });
 });
 
+describe("concurrent-tick safety — restart state advances BEFORE the await", () => {
+  // Regression (CTL-1502 review): tick() is NOT serialized — setInterval re-fires
+  // every intervalMs regardless of an in-flight tick. If restart(t) hangs past
+  // intervalMs (the exact wedged-daemon case this watchdog targets), an overlapping
+  // tick must NOT issue a second restart. Guaranteed by setting restarted/restartedAt
+  // BEFORE `await restart(t)`.
+  test("a hung restart does NOT let a concurrent tick fire a second restart", async () => {
+    let restartCalls = 0;
+    let release;
+    const gate = new Promise((res) => { release = res; });
+    const probe = startDaemonWatchdogProbe({
+      clock: recordingClock(),
+      config: { mode: "enforce", intervalMs: 120_000, dlqMaxBytes: DLQ_MAX, stalenessMs: 900_000, cooldownMs: 10_000, sustainedTicks: 1, verifyTicks: 2 },
+      targets: [TARGET],
+      readDlqBytes: () => DLQ_MAX, // always stuck
+      readLagStuck: () => false,
+      restart: async () => { restartCalls += 1; await gate; }, // hangs until released
+      alert: { raiseAlert: () => {}, clearAlert: () => {}, escalate: () => {} },
+      now: () => 1_000_000,
+      log: { warn: () => {}, info: () => {}, error: () => {} },
+      io: {},
+    });
+    const first = probe.tick(); // enters restart, blocks on gate (restarted already set)
+    await probe.tick(); // concurrent tick — must see restarted=true → verify window, NO 2nd restart
+    expect(restartCalls).toBe(1);
+    release();
+    await first;
+    expect(restartCalls).toBe(1);
+  });
+});
+
 describe("verify window", () => {
   test("predicate clears within verifyTicks → clearAlert once, episode re-arms", async () => {
     const { probe, ctl, alertCalls } = makeProbe({ mode: "enforce", sustainedTicks: 1, verifyTicks: 2, cooldownMs: 0 });
