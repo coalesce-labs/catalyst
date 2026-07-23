@@ -91,6 +91,14 @@ jq --arg ts "$TS" --arg sid "${CATALYST_SESSION_ID:-}" '
 ' "$SIGNAL_FILE" > "$TMP" \
   && mv "$TMP" "$SIGNAL_FILE"
 
+# CTL-1490 (F12): pull thoughts before reading the research doc so phase-plan
+# sees peer-written research even between periodic-timer ticks. Mirrors phase-research.
+"${PLUGIN_ROOT}/scripts/lib/thoughts-pull-sync-gate.sh" || true
+
+# CTL-1490 (F12): pull before reading the research artifact so we see the
+# freshest peer-synced state. Non-fatal in all modes — mirrors phase-research.
+"${PLUGIN_ROOT}/scripts/lib/thoughts-pull-sync-gate.sh" || true
+
 # Prior-phase artifact: the research document. Dispatcher gates this via
 # match_thoughts_artifact (lib/phase-artifact-gate.sh, CTL-1081); re-read
 # here so we can fail loudly on race.
