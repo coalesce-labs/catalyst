@@ -30,7 +30,10 @@ import {
   DRAIN_CHANGED_EVENT,
   DRAINED_EVENT,
 } from "../execution-core/drain-event.mjs";
-import { FLEET_HEALTH_DEGRADED } from "../execution-core/fleet-health-event.mjs";
+import {
+  FLEET_HEALTH_DEGRADED,
+  FLEET_HEALTH_RECOVERED,
+} from "../execution-core/fleet-health-event.mjs";
 import {
   RATELIMIT_EVENT_SAMPLED,
 } from "../execution-core/ratelimit-event.mjs";
@@ -63,6 +66,7 @@ const EXEC_CORE_EVENT_NAMES = [
   DRAIN_CHANGED_EVENT,
   DRAINED_EVENT,
   FLEET_HEALTH_DEGRADED,
+  FLEET_HEALTH_RECOVERED, // CTL-1503 — degraded→healthy edge event
   RATELIMIT_EVENT_SAMPLED,
   MEMORY_EVENT_SAMPLED,
   MEMORY_EVENT_WARN,

@@ -13,6 +13,7 @@ import {
   buildFleetHealthEnvelope,
   emitFleetHealthEvent,
   FLEET_HEALTH_DEGRADED,
+  FLEET_HEALTH_RECOVERED,
 } from "./fleet-health-event.mjs";
 
 const basePayload = {
@@ -86,6 +87,39 @@ describe("buildFleetHealthEnvelope", () => {
     const env = buildFleetHealthEnvelope(basePayload);
     expect(env.id).toMatch(/^[0-9a-f]{16}$/);
   });
+
+  // ── CTL-1503: recovered (INFO) — the degraded→healthy edge event ──
+  test("recovered constant equals fleet.health.recovered", () => {
+    expect(FLEET_HEALTH_RECOVERED).toBe("fleet.health.recovered");
+  });
+
+  test("action:'recovered' → INFO envelope with the recovered event name", () => {
+    const fixed = "2026-07-23T00:00:00Z";
+    const env = buildFleetHealthEnvelope(basePayload, { action: "recovered", now: () => fixed });
+    expect(env.attributes["event.name"]).toBe(FLEET_HEALTH_RECOVERED);
+    expect(env.attributes["event.action"]).toBe("recovered");
+    expect(env.attributes["event.entity"]).toBe("fleet");
+    expect(env.severityText).toBe("INFO");
+    expect(env.severityNumber).toBe(9);
+    // recovered carries the last tripped set for forensic parity.
+    expect(env.attributes["event.label"]).toBe("jobs,agents");
+  });
+
+  test("recovered with empty tripped → event.label falls back to 'fleet'", () => {
+    const env = buildFleetHealthEnvelope(
+      { ...basePayload, tripped: [] },
+      { action: "recovered" },
+    );
+    expect(env.attributes["event.label"]).toBe("fleet");
+  });
+
+  test("degraded is byte-for-byte unchanged when action omitted (backward compat)", () => {
+    const env = buildFleetHealthEnvelope(basePayload);
+    expect(env.attributes["event.name"]).toBe(FLEET_HEALTH_DEGRADED);
+    expect(env.attributes["event.action"]).toBe("degraded");
+    expect(env.severityText).toBe("WARN");
+    expect(env.severityNumber).toBe(13);
+  });
 });
 
 describe("emitFleetHealthEvent", () => {
@@ -116,6 +150,26 @@ describe("emitFleetHealthEvent", () => {
     expect(() => {
       // logPath is the dir itself (not a file) — appendFileSync throws EISDIR
       result = emitFleetHealthEvent(basePayload, { logPath: dir });
+    }).not.toThrow();
+    expect(result).toBe(false);
+  });
+
+  // ── CTL-1503: emit path threads `action` through to the envelope ──
+  test("action:'recovered' appends a fleet.health.recovered line", () => {
+    const dir = mkdtempSync(join(tmpdir(), "ctl1503-fhe-rec-"));
+    const logPath = join(dir, "2026-07.jsonl");
+    const ok = emitFleetHealthEvent(basePayload, { logPath, action: "recovered" });
+    expect(ok).toBe(true);
+    const parsed = JSON.parse(readFileSync(logPath, "utf8").trim());
+    expect(parsed.attributes["event.name"]).toBe(FLEET_HEALTH_RECOVERED);
+    expect(parsed.severityText).toBe("INFO");
+  });
+
+  test("recovered emit still returns false / never throws on an unwritable logPath", () => {
+    const dir = mkdtempSync(join(tmpdir(), "ctl1503-fhe-rec-bad-"));
+    let result;
+    expect(() => {
+      result = emitFleetHealthEvent(basePayload, { logPath: dir, action: "recovered" });
     }).not.toThrow();
     expect(result).toBe(false);
   });
