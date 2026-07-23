@@ -53,6 +53,7 @@ import { NEXT_PHASE } from "../lib/workflow-descriptor.mjs";
 // truth — a new emit type is unusable until it is added to the shared list,
 // which the vocabulary then registers automatically.
 import { JANITOR_EVENT_TYPES } from "./janitor-event-types.mjs";
+import { isTicketKey } from "./ticket-key.mjs";
 
 // Named accessors over the frozen list — one per janitor emit type. Indexing the
 // frozen array keeps the strings in ONE place; a typo here is a load error, not a
@@ -651,7 +652,7 @@ export function defaultCollectGhostCandidates({
 export function defaultTicketFromCwd(cwd) {
   if (!cwd) return null;
   const seg = stripTrailingSlash(cwd).split("/").pop();
-  return /^[A-Z]+-\d+$/.test(seg ?? "") ? seg : null;
+  return isTicketKey(seg ?? "") ? seg : null;
 }
 
 // defaultSignalMtimeMs — mtime of a phase signal file, or null when unreadable.
