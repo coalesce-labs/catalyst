@@ -3423,7 +3423,9 @@ export function phaseAlreadyComplete(
 
 // RESUME_PHASE_ORDER — the linear pipeline phases in forward order, derived from
 // STAGE_RANK (ancillary `remediate` excluded). Reverse-walked by inferResumePhase.
-const RESUME_PHASE_ORDER = Object.entries(STAGE_RANK)
+// Exported for reconstruct-ticket-state.mjs (CTL-1490) — no import cycle since
+// reconstruct-ticket-state.mjs never imports back into recovery.mjs.
+export const RESUME_PHASE_ORDER = Object.entries(STAGE_RANK)
   .filter(([id]) => id !== "remediate")
   .sort((a, b) => a[1] - b[1])
   .map(([id]) => id);
@@ -3674,7 +3676,9 @@ function defaultThoughtsPull(cwd) {
 function defaultRebuildWorktree(ticket, { orchDir }) {
   try {
     const repoRoot = join(orchDir, "..", "..");
-    const res = createWorktree({ ticket, repoRoot });
+    // CTL-1490 (Feature E): pass expectedBranch so the CTL-615 collision guard
+    // fires on cross-host takeover and the reconstruction lands on the correct branch.
+    const res = createWorktree({ ticket, repoRoot, expectedBranch: ticket });
     if (res?.code === 0 && res.worktreePath) return { ok: true, cwd: res.worktreePath };
     return { ok: false, cwd: null };
   } catch {
