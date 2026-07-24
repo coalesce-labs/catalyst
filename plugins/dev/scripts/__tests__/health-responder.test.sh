@@ -103,6 +103,13 @@ chmod +x "$MOCKBIN/pgrep"
 export KICKSTART_LOG="${SCRATCH}/kickstart.log"
 cat > "$MOCKBIN/launchctl" <<'EOF'
 #!/usr/bin/env bash
+# `list` probes (the intentional-exit gate) answer from MOCK_LAST_EXIT and are
+# NOT recorded — only kickstart invocations land in KICKSTART_LOG, so
+# `! test -s KICKSTART_LOG` assertions stay meaningful.
+if [[ "${1:-}" == "list" ]]; then
+  [[ -n "${MOCK_LAST_EXIT:-}" ]] && echo "\"LastExitStatus\" = ${MOCK_LAST_EXIT};"
+  exit 0
+fi
 echo "$@" >> "${KICKSTART_LOG:-/tmp/kickstart.log}"
 if [[ "${1:-}" == "kickstart" ]]; then
   # revive: the writer process comes back; freshen: the SDK heartbeat resumes
@@ -127,7 +134,7 @@ export SCRATCH_OTEL_LOG="${SCRATCH}/otel.log"
 _reset() {
   rm -rf "$RESPONDER_STATE_DIR"
   rm -f "$MOCK_ALIVE_FILE" "$KICKSTART_LOG" "$SCRATCH_OTEL_LOG" "$RESPONDER_SELFHEAL_FILE" "$PLIST" "$LOCK" "$PGREP_LOG"
-  unset MOCK_KICKSTART_REVIVES MOCK_KICKSTART_FRESHENS 2>/dev/null || true
+  unset MOCK_KICKSTART_REVIVES MOCK_KICKSTART_FRESHENS MOCK_LAST_EXIT 2>/dev/null || true
 }
 
 _fresh_lock() { touch "$LOCK"; }
@@ -204,6 +211,13 @@ run "T10: failed kickstart exits 0 and still records the attempt" \
 # restore the succeeding launchctl mock
 cat > "$MOCKBIN/launchctl" <<'EOF'
 #!/usr/bin/env bash
+# `list` probes (the intentional-exit gate) answer from MOCK_LAST_EXIT and are
+# NOT recorded — only kickstart invocations land in KICKSTART_LOG, so
+# `! test -s KICKSTART_LOG` assertions stay meaningful.
+if [[ "${1:-}" == "list" ]]; then
+  [[ -n "${MOCK_LAST_EXIT:-}" ]] && echo "\"LastExitStatus\" = ${MOCK_LAST_EXIT};"
+  exit 0
+fi
 echo "$@" >> "${KICKSTART_LOG:-/tmp/kickstart.log}"
 if [[ "${1:-}" == "kickstart" ]]; then
   # revive: the writer process comes back; freshen: the SDK heartbeat resumes
@@ -481,6 +495,9 @@ touch "$PLIST" # dead-writer
 mv "$MOCKBIN/launchctl" "${SCRATCH}/launchctl-real-mock"
 cat > "$MOCKBIN/launchctl" <<'EOF'
 #!/usr/bin/env bash
+# Hang ONLY on kickstart — the intentional-exit gate's `list` probe must
+# answer instantly or the test measures the wrong call.
+[[ "${1:-}" == "list" ]] && exit 0
 sleep 60
 EOF
 chmod +x "$MOCKBIN/launchctl"
@@ -565,6 +582,51 @@ run "T42: RESPONDER_LOCK_STALE_SECS=abc still heartbeats healthy (no crash)" \
   bash -c "RESPONDER_LOCK_STALE_SECS=abc RESPONDER_SELFHEAL_GRACE_SECS=xyz bash '$RESPONDER' | grep -q 'heartbeat status=healthy'"
 run "T42b: negative lock threshold clamps — fresh lock is NOT stale" \
   bash -c "RESPONDER_LOCK_STALE_SECS=-5 bash '$RESPONDER' | grep -q 'stale_lock=0' && ! test -s '${KICKSTART_LOG}'"
+
+# ─── Phase 12: Codex round-3 remediations (T43–T46) ─────────────────────────
+
+# T43 (P1): a tokenless writer idles by DESIGN (exit 0) — the responder must
+# not kickstart it into a false escalation, nor fight a manual SIGTERM stop.
+_reset
+touch "$PLIST" # installed, no process
+export MOCK_LAST_EXIT=0
+run "T43: last-exit-0 idle writer is not a fault (no kickstart)" \
+  bash -c "bash '$RESPONDER' | grep -q 'idle by design' && ! test -s '${KICKSTART_LOG}'"
+run "T43b: last-exit-0 suppresses no-respawn from a leftover breadcrumb too" \
+  bash -c "printf '{\"ts\":1,\"expectRestart\":true}' > '$RESPONDER_SELFHEAL_FILE'; bash '$RESPONDER' | grep -q 'no_respawn=0' && ! test -s '${KICKSTART_LOG}'"
+export MOCK_LAST_EXIT=1
+run "T43c: nonzero last exit is a genuine dead-writer (kickstarts)" \
+  bash -c "rm -f '$RESPONDER_SELFHEAL_FILE'; bash '$RESPONDER' | grep -q 'dead_writer=1' && test -s '${KICKSTART_LOG}'"
+unset MOCK_LAST_EXIT
+
+# T44 (P2): a failed marker cleanup must not report "re-armed" — the durable
+# ESCALATED marker survived, so degrade loudly and keep the escalated state.
+_reset
+touch "$PLIST"; touch "$MOCK_ALIVE_FILE"; _fresh_lock # healthy probe
+mkdir -p "$RESPONDER_STATE_DIR"
+touch "${RESPONDER_STATE_DIR}/ESCALATED.cloud-sync"
+chmod 500 "$RESPONDER_STATE_DIR"
+run "T44: unremovable markers => degraded, never a false re-arm" \
+  bash -c "bash '$RESPONDER' | grep -q 'heartbeat status=degraded' && test -e '${RESPONDER_STATE_DIR}/ESCALATED.cloud-sync'"
+chmod 700 "$RESPONDER_STATE_DIR"
+
+# T45 (P1): CATALYST_DIR override resolves the lock/breadcrumb/state paths the
+# same way the writer's catalystDir() does — no $HOME/catalyst hardcode.
+_reset
+ALT_DIR="${SCRATCH}/altcat"
+mkdir -p "$ALT_DIR"
+touch -t 202501010000 "${ALT_DIR}/catalyst-replica.db.writer.lock" # stale
+touch "$PLIST"; touch "$MOCK_ALIVE_FILE"
+run "T45: CATALYST_DIR-resolved stale lock is detected (kickstart)" \
+  bash -c "env -u CATALYST_REPLICA_DB -u RESPONDER_SELFHEAL_FILE -u RESPONDER_STATE_DIR CATALYST_DIR='${ALT_DIR}' RESPONDER_KICKSTART_WAIT_SECS=0 bash '$RESPONDER' | grep -q 'stale_lock=1' && test -s '${KICKSTART_LOG}'"
+
+# T46 (P1): zero-padded overrides must not silently octal-break the cap.
+_reset
+touch "$PLIST" # dead-writer
+mkdir -p "$RESPONDER_STATE_DIR"
+for i in 1 2 3 4 5 6 7 8; do touch "${RESPONDER_STATE_DIR}/attempt.$(date +%s).$i"; done
+run "T46: RESPONDER_MAX_ATTEMPTS=08 is base-10 — cap still escalates" \
+  bash -c "RESPONDER_MAX_ATTEMPTS=08 bash '$RESPONDER' | grep -q 'ERROR: escalated' && ! test -s '${KICKSTART_LOG}'"
 
 # ─── results ────────────────────────────────────────────────────────────────
 

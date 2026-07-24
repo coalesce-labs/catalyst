@@ -125,16 +125,35 @@ RESPONDER_KICKSTART_TIMEOUT_SECS="${RESPONDER_KICKSTART_TIMEOUT_SECS:-20}"
 # healthy writer round after round.
 [[ "$RESPONDER_LOCK_STALE_SECS" =~ ^[0-9]+$ && "$RESPONDER_LOCK_STALE_SECS" -gt 0 ]] || RESPONDER_LOCK_STALE_SECS=900
 [[ "$RESPONDER_SELFHEAL_GRACE_SECS" =~ ^[0-9]+$ ]] || RESPONDER_SELFHEAL_GRACE_SECS=120
+# Force base-10 (Codex P1 round 3): a zero-padded override like
+# RESPONDER_MAX_ATTEMPTS=08 passes the digits regex, but Bash arithmetic parses
+# leading-zero literals as OCTAL — "08" throws "value too great for base", the
+# [[ -ge ]] cap comparison then evaluates FALSE on every sweep, and the
+# responder kickstarts unbounded. $((10#…)) is safe here: every value is
+# digits-only after the guards above.
+RESPONDER_ATTEMPT_WINDOW_SECS=$((10#$RESPONDER_ATTEMPT_WINDOW_SECS))
+RESPONDER_MAX_ATTEMPTS=$((10#$RESPONDER_MAX_ATTEMPTS))
+RESPONDER_KICKSTART_WAIT_SECS=$((10#$RESPONDER_KICKSTART_WAIT_SECS))
+RESPONDER_KICKSTART_TIMEOUT_SECS=$((10#$RESPONDER_KICKSTART_TIMEOUT_SECS))
+RESPONDER_LOCK_STALE_SECS=$((10#$RESPONDER_LOCK_STALE_SECS))
+RESPONDER_SELFHEAL_GRACE_SECS=$((10#$RESPONDER_SELFHEAL_GRACE_SECS))
 RESPONDER_RUN_ID="${RESPONDER_RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)-$$}"
-RESPONDER_STATE_DIR="${RESPONDER_STATE_DIR:-${HOME}/catalyst/.health-responder}"
-RESPONDER_SELFHEAL_FILE="${RESPONDER_SELFHEAL_FILE:-${HOME}/catalyst/cloud-sync.selfheal.json}"
+# Resolve every state/target path through CATALYST_DIR exactly like the
+# writer's config.mjs catalystDir() (Codex P1 round 3): a node using the
+# supported CATALYST_DIR override moves the replica db, lock, breadcrumb, and
+# responder state together — a $HOME/catalyst hardcode here would blind the
+# responder to the real lock AND let a leftover default-path lock trigger
+# false restarts.
+CATALYST_DIR="${CATALYST_DIR:-${HOME}/catalyst}"
+RESPONDER_STATE_DIR="${RESPONDER_STATE_DIR:-${CATALYST_DIR}/.health-responder}"
+RESPONDER_SELFHEAL_FILE="${RESPONDER_SELFHEAL_FILE:-${CATALYST_DIR}/cloud-sync.selfheal.json}"
 
 # Target: the supervised cloud-sync replica writer. Label + plist dir + replica
 # db path all mirror doctor.mjs checkCloudSync / config.mjs getReplicaDbPath so
 # the responder and the doctor can never disagree about WHERE to look.
 CLOUD_SYNC_LABEL="ai.coalesce.catalyst-cloud-sync"
 CLOUD_SYNC_PLIST="${CATALYST_LAUNCHAGENTS_DIR:-${HOME}/Library/LaunchAgents}/${CLOUD_SYNC_LABEL}.plist"
-REPLICA_DB="${CATALYST_REPLICA_DB:-${HOME}/catalyst/catalyst-replica.db}"
+REPLICA_DB="${CATALYST_REPLICA_DB:-${CATALYST_DIR}/catalyst-replica.db}"
 WRITER_LOCK="${REPLICA_DB}.writer.lock"
 ESCALATED_MARKER="${RESPONDER_STATE_DIR}/ESCALATED.cloud-sync"
 
@@ -182,6 +201,15 @@ emit_escalated() {
 # launch.sh has no .mjs); mirrors doctor.mjs defaultCloudSyncProcessAlive.
 # pgrep failing entirely (rc>1) degrades to "not alive" — a wrong kickstart is
 # bounded by the attempt cap; a wrongly-skipped one would leave the writer down.
+# _last_exit_status: LastExitStatus from `launchctl list <label>` ("" when the
+# job is unknown or the output unparseable). Used ONLY inside the
+# already-anomalous installed-but-not-running branch — passive every-sweep
+# detection stays launchctl-free by design (see _writer_alive).
+_last_exit_status() {
+  launchctl list "$CLOUD_SYNC_LABEL" 2>/dev/null \
+    | sed -n 's/.*"LastExitStatus" *= *\(-\{0,1\}[0-9][0-9]*\).*/\1/p' | head -1
+}
+
 # Scoped to THIS user's launchd-shaped writer invocation (Codex P2): a bare
 # `cloud-sync.mjs` pattern would match an editor (`vim cloud-sync.mjs`), a
 # test, or another user's process and mask a genuinely dead supervised writer.
@@ -285,8 +313,19 @@ _record_attempt() {
   : > "${RESPONDER_STATE_DIR}/attempt.$(date +%s).$$" 2>/dev/null
 }
 
+# Returns non-zero when any marker SURVIVES the rm (state dir went read-only):
+# the caller must NOT report "re-armed" while the durable ESCALATED marker
+# still exists on disk, or the next incident silently enters the escalated
+# hold with zero recovery attempts while the log claims a clean slate
+# (Codex P2 round 3).
 _clear_markers() {
   rm -f "${RESPONDER_STATE_DIR}"/attempt.* "$ESCALATED_MARKER" 2>/dev/null || true
+  [[ -e "$ESCALATED_MARKER" ]] && return 1
+  local f
+  for f in "${RESPONDER_STATE_DIR}"/attempt.*; do
+    [[ -e "$f" ]] && return 1
+  done
+  return 0
 }
 
 # ─── heartbeat (the one line every run must emit) ───────────────────────────
@@ -327,6 +366,20 @@ _probe_selfheal
 SETTLING=0
 [[ "$SELFHEAL_VALID" -eq 1 && "$ALIVE" -eq 0 && "$SELFHEAL_AGE" -le "$RESPONDER_SELFHEAL_GRACE_SECS" ]] && SETTLING=1
 
+# Intentional-exit gate (Codex P1 round 3), evaluated once for the anomalous
+# installed-but-not-running state: the writer exits 0 ON PURPOSE in two
+# supported flows — the tokenless fail-open no-op (adopt-cloud-sync installs
+# the plist before the token exists; cloud-sync.mjs:113-116 "writer idle") and
+# a manual SIGTERM stop (exit 0 by design so KeepAlive does NOT resurrect it).
+# Kickstarting either fights the operator and ends in a false escalation.
+# LastExitStatus==0 → idle by design, leave it down; nonzero or unparseable →
+# treat as dead (recovery must not be lost to weird launchctl output).
+_LE=""
+if [[ "$INSTALLED" -eq 1 && "$ALIVE" -eq 0 ]]; then
+  _LE="$(_last_exit_status)"
+  [[ "$_LE" == "0" ]] && log "writer idle by design (last exit 0 — tokenless no-op or manual stop); not a fault"
+fi
+
 # Condition 1: dead-writer. Installed-gated: a node without the cloud-sync
 # agent (not on the replica tier) is simply not our patient — do nothing.
 # SETTLING-gated: a fresh self-heal breadcrumb means the writer exited on
@@ -334,7 +387,7 @@ SETTLING=0
 # hold for the grace window (the relaunch either lands, clearing this, or the
 # breadcrumb ages into the no-respawn condition).
 C_DEAD=0
-[[ "$INSTALLED" -eq 1 && "$ALIVE" -eq 0 && "$SETTLING" -eq 0 ]] && C_DEAD=1
+[[ "$INSTALLED" -eq 1 && "$ALIVE" -eq 0 && "$SETTLING" -eq 0 && "$_LE" != "0" ]] && C_DEAD=1
 
 # Condition 2: stale-writer (process up, SDK heartbeat dead). Installed-gated
 # like the other two (Codex P2): a leftover manual/orphaned matching process
@@ -353,8 +406,11 @@ fi
 # Installed-gated like dead-writer (adversarial-verify caveat): a stale
 # breadcrumb on a node whose cloud-sync agent was since uninstalled must not
 # yield no-op kickstarts + a false escalation — no plist, not our patient.
+# Also gated on the intentional-exit check (_LE): a leftover ancient
+# breadcrumb on a node that later became tokenless-idle (last exit 0) must not
+# drive a kickstart loop either — the self-heal path always exits 1.
 C_NORESPAWN=0
-if [[ "$INSTALLED" -eq 1 && "$ALIVE" -eq 0 && "$SELFHEAL_VALID" -eq 1 && "$SELFHEAL_AGE" -gt "$RESPONDER_SELFHEAL_GRACE_SECS" ]]; then
+if [[ "$INSTALLED" -eq 1 && "$ALIVE" -eq 0 && "$_LE" != "0" && "$SELFHEAL_VALID" -eq 1 && "$SELFHEAL_AGE" -gt "$RESPONDER_SELFHEAL_GRACE_SECS" ]]; then
   C_NORESPAWN=1
   log "no-respawn: self-heal breadcrumb expectRestart=true but no writer came back within ${RESPONDER_SELFHEAL_GRACE_SECS}s"
 fi
@@ -385,11 +441,18 @@ if [[ "$CONDITION" -eq 0 ]]; then
   if [[ "$SETTLING" -eq 0 && ( "$ESCALATED" -eq 1 || "$ATTEMPTS" -gt 0 ) ]]; then
     if is_dry; then
       log "[dry-run] would re-arm: clear ${ATTEMPTS} attempt marker(s) + escalated=${ESCALATED} marker"
-    else
-      _clear_markers
+    elif _clear_markers; then
       [[ "$ESCALATED" -eq 1 ]] && log "condition cleared — re-armed (ESCALATED marker + attempt markers removed)"
       ESCALATED=0
       ATTEMPTS=0
+    else
+      # Codex P2 round 3: rm failed (state dir read-only?) and the durable
+      # markers SURVIVED — reporting "re-armed" here would lie: the next
+      # incident would enter the escalated hold with zero recovery attempts.
+      # Degrade loudly instead; state stays escalated until perms are fixed.
+      log "ERROR: condition cleared but markers could not be removed from ${RESPONDER_STATE_DIR} (read-only?) — responder remains ESCALATED on disk; fix permissions"
+      heartbeat "degraded"
+      exit 0
     fi
   fi
   if [[ "$SETTLING" -eq 1 ]]; then
