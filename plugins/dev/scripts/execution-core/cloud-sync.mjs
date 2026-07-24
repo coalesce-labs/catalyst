@@ -45,11 +45,15 @@
 //   • SIGTERM/SIGINT             → close() (releases the writer lock) + exit 0  (no restart)
 //   • start() throws / fatal     → exit 1  (launchd restarts with backoff; a stale
 //                                   self-lock auto-reclaims after ~15s)
+//   • genuine stall (watchdog)   → self-heal breadcrumb + close() + exit 1  (restart)
+// CTL-1508: BOTH close()-then-exit paths are bounded by CATALYST_CLOUD_SYNC_CLOSE_TIMEOUT_MS
+// (default 3s) via exitAfterClose — a close() wedged on a dead socket can no longer strand
+// the process in a half-dead never-exits state launchd cannot recover from.
 import { CatalystReplica } from "@catalyst-cloud/sdk/node";
-import { getHostName, getReplicaDbPath, resolveNodeCloudTokenEnv, HEARTBEAT_INTERVAL_MS } from "./config.mjs";
+import { getCloudSyncSelfHealPath, getHostName, getReplicaDbPath, resolveNodeCloudTokenEnv, HEARTBEAT_INTERVAL_MS } from "./config.mjs";
 import { logDaemonHeartbeat } from "../lib/daemon-heartbeat.mjs";
 import { sdkLogRecord } from "./cloud-sync-log.mjs";
-import { classifyStall, freshnessFields, readReplicaCounts } from "./cloud-sync-telemetry.mjs";
+import { classifyStall, clearSelfHealBreadcrumb, exitAfterClose, freshnessFields, readReplicaCounts, writeSelfHealBreadcrumb } from "./cloud-sync-telemetry.mjs";
 import { createRequire } from "node:module";
 
 const TAG = "[catalyst-cloud-sync]";
@@ -102,6 +106,12 @@ function resolveStartTimeoutMs(raw) {
   return Number.isFinite(n) && n > 0 ? n : 120_000;
 }
 const startTimeoutMs = resolveStartTimeoutMs(process.env.CATALYST_REPLICA_START_TIMEOUT_MS);
+// CTL-1508: hard deadline on the exit-path replica.close() (both SIGTERM/SIGINT and the
+// genuine-stall self-heal). close() over a dead/half-open socket — the stall path's most
+// likely socket — can hang forever; unbounded, that stranded a half-dead writer (hbTimer
+// already cleared, heartbeats stopped) that launchd could never replace because the
+// process never exited. See exitAfterClose in cloud-sync-telemetry.mjs.
+const CLOSE_TIMEOUT_MS = Number(process.env.CATALYST_CLOUD_SYNC_CLOSE_TIMEOUT_MS) || 3_000;
 const dbPath = getReplicaDbPath();
 const { envVar, source } = resolveNodeCloudTokenEnv();
 const token = process.env[envVar];
@@ -157,8 +167,11 @@ const shutdown = (sig) => {
   closing = true;
   if (hbTimer) clearInterval(hbTimer);
   console.log(`${TAG} ${sig} — closing (releasing writer lock)`);
-  // close() is idempotent: stops the socket, releases the lock, closes the DB.
-  void replica.close().finally(() => process.exit(0));
+  // close() is idempotent: stops the socket, releases the lock, closes the DB. CTL-1508:
+  // bounded — a close() wedged on a dead socket must not strand a manual stop forever.
+  // Still exit 0 whether close settles or times out: KeepAlive={SuccessfulExit:false}
+  // must NOT restart a deliberate stop.
+  exitAfterClose({ closePromise: replica.close(), exitCode: 0, timeoutMs: CLOSE_TIMEOUT_MS });
 };
 process.on("SIGTERM", () => shutdown("SIGTERM"));
 process.on("SIGINT", () => shutdown("SIGINT"));
@@ -176,6 +189,12 @@ try {
   process.exit(1);
 }
 console.log(`${TAG} live — replica seeded + tailing the change feed (cursor=${replica.cursor})`);
+
+// CTL-1508: reaching 'live' proves a prior self-heal restart WORKED, so consume the
+// breadcrumb the pre-restart run dropped (see the genuine-stall block below for the full
+// CTL-1509 contract). Best-effort — a missing file (no self-heal pending) is the normal
+// case and clearSelfHealBreadcrumb never throws.
+clearSelfHealBreadcrumb(getCloudSyncSelfHealPath());
 
 // CTL-1395: liveness + freshness telemetry. Every HEARTBEAT_INTERVAL_MS emit (a) the
 // CTL-1280 `daemon heartbeat` marker — feed-independent proof the writer is alive, → the
@@ -197,10 +216,20 @@ console.log(`${TAG} live — replica seeded + tailing the change feed (cursor=${
 // goes stale on a quiet feed, which is why writer liveness keys on the `.writer.lock`
 // heartbeat, not cursor movement). Keying "stalled" on cursor-silence alone therefore
 // false-classifies a perfectly current idle node and would re-seed/restart/page every quiet
-// window. The SDK (0.4.0) exposes no per-frame keepalive/last-frame timestamp, so we gate the
+// window. The SDK (0.4.0) exposed no per-frame keepalive/last-frame timestamp, so we gate the
 // destructive action on an ADDITIONAL independent liveness failure the cursor can't fake —
-// the SDK's own connection status (classifyStall). A GENUINE stall = cursor-silence AND an
-// unhealthy SDK status (reconnecting/error/stopped); only THEN do we:
+// the SDK's own connection status (classifyStall).
+// CTL-1508 (SDK 0.6.0): the SDK now DOES surface `replica.lastFrameAt` — epoch-ms of the
+// last inbound socket bytes of ANY kind, INCLUDING the CTC-135 watchdog's pong traffic
+// (unlike `lastChangeFrameAt`, which ignores pongs). A healthy quiet feed keeps lastFrameAt
+// fresh via ping/pong (the SDK pings after ~90s of idle), so a lastFrameAt frozen across
+// the whole stall window is something a healthy socket CANNOT produce — it independently
+// confirms the half-open case even while `status` sits latched "live" (exactly the 18.5h
+// RCA shape gate-by-status alone was blind to). classifyStall therefore accepts EITHER
+// confirmation; feature-detected via typeof so an older SDK (getter absent) degrades
+// bit-identically to the status-only classifier. A GENUINE stall = cursor-silence AND
+// (an unhealthy SDK status (reconnecting/error/stopped) OR whole-window frame-silence);
+// only THEN do we:
 //   (1) surface status="stalled" in the freshness line (a mere quiet feed keeps its real status);
 //   (2) emit the LOUD ERROR alert to Loki (the alarm Ryan asked for — now fires only on a
 //       PROVABLE stall, never on a quiet-but-healthy feed, so no false pages every quiet window);
@@ -222,22 +251,31 @@ const emitTelemetry = () => {
   if (cursor !== _lastCursor) { _lastCursor = cursor; _lastAdvanceMs = now; _stallAlerted = false; }
   const stalledMs = now - _lastAdvanceMs;
   const sdkStatus = replica.status ?? "live";
+  // CTL-1508: per-frame transport liveness (SDK 0.6.0). Feature-detect via typeof — an
+  // older SDK has no getter (undefined) and MUST degrade to the status-only classifier
+  // bit-identically, so anything non-number becomes null (which never asserts).
+  const lastFrameAt = typeof replica.lastFrameAt === "number" ? replica.lastFrameAt : null;
   // A stall is GENUINE (alert + self-heal) only when cursor-silence is CONFIRMED by an
-  // independent SDK connection-liveness failure — never on cursor-silence alone, which a
-  // healthy quiet feed produces identically (Codex P1/P2).
-  const { genuine, restart, displayStatus } = classifyStall({ rows, stalledMs, stallMs: STALL_MS, status: sdkStatus });
+  // independent transport-liveness failure — an unhealthy SDK status OR whole-window
+  // frame-silence (CTL-1508) — never on cursor-silence alone, which a healthy quiet feed
+  // produces identically (Codex P1/P2).
+  const { genuine, restart, displayStatus, sdkUnhealthy, frameSilent } = classifyStall({ rows, stalledMs, stallMs: STALL_MS, status: sdkStatus, lastFrameAt, now });
   if (!genuine) _stallAlerted = false; // re-arm the one-shot alert for the next genuine stall
   try {
     hlog.info(
-      freshnessFields({ rows, maxUpdatedMs, status: displayStatus, cursor, hostName: getHostName() }),
+      freshnessFields({ rows, maxUpdatedMs, status: displayStatus, cursor, hostName: getHostName(), lastFrameAt, now }),
       "cloud-sync: freshness",
     );
   } catch { /* best-effort — telemetry must never crash the writer */ }
   if (genuine && !_stallAlerted) {
     _stallAlerted = true;
     // The alarm that was missing for 18.5h — now gated on an independent liveness failure
-    // (unhealthy SDK status) so it never fires on a quiet-but-healthy feed. ERROR severity
-    // → ships via hlog→Alloy→Loki.
+    // (unhealthy SDK status, or CTL-1508 whole-window frame-silence) so it never fires on
+    // a quiet-but-healthy feed. ERROR severity → ships via hlog→Alloy→Loki. The reason
+    // clause names WHICH confirmation fired (frame-silence implies a finite lastFrameAt).
+    const reason = sdkUnhealthy
+      ? `unhealthy SDK status=${sdkStatus}`
+      : `NO inbound frames for ${Math.round((now - lastFrameAt) / 1000)}s (not even watchdog pongs) despite SDK status=${sdkStatus}`;
     try {
       hlog.error(
         {
@@ -247,16 +285,36 @@ const emitTelemetry = () => {
           stalledMs,
           rows,
           "sdk.status": sdkStatus,
+          // CTL-1508: which independent confirmation(s) upgraded cursor-silence to genuine,
+          // plus the raw frame timestamp (null on an older SDK) for the responder/RCA.
+          "sdk.unhealthy": sdkUnhealthy,
+          "sdk.frame_silent": frameSilent,
+          "sdk.last_frame_at": lastFrameAt,
           "host.name": getHostName(),
         },
-        `cloud-sync: replica cursor STALLED ${Math.round(stalledMs / 1000)}s (>${Math.round(STALL_MS / 1000)}s) with unhealthy SDK status=${sdkStatus} — reads are going stale; self-healing via restart`,
+        `cloud-sync: replica cursor STALLED ${Math.round(stalledMs / 1000)}s (>${Math.round(STALL_MS / 1000)}s) with ${reason} — reads are going stale; self-healing via restart`,
       );
     } catch { /* the alarm must never crash the writer */ }
     if (restart) {
       // Self-heal: stop the timer, close the replica, and exit non-zero so launchd
       // (KeepAlive={SuccessfulExit:false}) re-spawns with a fresh socket + re-seed.
+      //
+      // CTL-1508 SELF-HEAL BREADCRUMB — a cross-ticket contract consumed by CTL-1509's
+      // external responder and doctor. BEFORE initiating close, atomically drop
+      // ~/catalyst/cloud-sync.selfheal.json = {ts, cursor, stalledMs, sdkStatus,
+      // expectRestart: true}; the NEXT boot deletes it on reaching 'live' (above). So:
+      //   breadcrumb present + writer process ABSENT → launchd did NOT re-spawn us —
+      //     the launchd-no-respawn signature the responder pages on / doctor flags;
+      //   breadcrumb present + writer alive          → restart in progress (normal);
+      //   breadcrumb absent                          → no self-heal pending.
+      // Best-effort by construction (writeSelfHealBreadcrumb never throws) — the
+      // breadcrumb must never block the exit.
+      writeSelfHealBreadcrumb(getCloudSyncSelfHealPath(), { cursor, stalledMs, sdkStatus });
       try { if (hbTimer) clearInterval(hbTimer); } catch { /* best-effort */ }
-      void replica.close().catch(() => {}).finally(() => process.exit(1));
+      // CTL-1508: bounded exit — this close() runs over the very dead socket that CAUSED
+      // the stall (the close most likely to hang). Unbounded, a hung close stranded a
+      // half-dead writer (heartbeats stopped above) that launchd could never replace.
+      exitAfterClose({ closePromise: replica.close(), exitCode: 1, timeoutMs: CLOSE_TIMEOUT_MS });
     }
   }
 };
