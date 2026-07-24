@@ -1,9 +1,18 @@
 # Changelog
 
-## [12.35.1](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.35.0...catalyst-dev-v12.35.1) (2026-07-24)
+## [12.35.1](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.35.0...catalyst-dev-v12.35.1)
+
+Jul 24, 2026
+
+<!-- ai-enhanced -->
+
+### Cloud-Sync Exit Safety & Stall Detection
+
+The cloud-sync writer now exits within a bounded timeout on both shutdown paths, fixing a bug where a dead socket could strand the process indefinitely after a self-heal attempt. A new stall classifier uses `lastFrameAt` to distinguish a quiet-but-healthy feed from a half-open socket, dropping detection time from 80+ minutes to roughly two ticks. A breadcrumb file at `~/catalyst/cloud-sync.selfheal.json` is written before any stall exit, making the previously invisible "launchd didn't respawn" failure mode detectable.
 
 
-### Bug Fixes
+
+### PRs
 
 * **dev:** CTL-1508 exit-safe cloud-sync self-heal + selfheal breadcrumb + lastFrameAt stall classifier ([#2709](https://github.com/coalesce-labs/catalyst/issues/2709)) ([1e33520](https://github.com/coalesce-labs/catalyst/commit/1e33520fdca612d9f8b02e42bf6fe277f2687ee9))
 
