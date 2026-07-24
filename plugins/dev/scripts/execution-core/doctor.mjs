@@ -24,7 +24,7 @@
 //
 // Exit code: number of FAIL-level checks (0 = all clear).
 
-import { readFileSync, statSync, existsSync } from "node:fs";
+import { readFileSync, statSync, existsSync, lstatSync, realpathSync, readdirSync } from "node:fs";
 import { resolve, dirname } from "node:path";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
@@ -3267,6 +3267,196 @@ export function checkPluginSourceFreshness(deps = {}) {
   return [classifyPluginSourceFreshness({ roots, healthByRoot, nodeClass })];
 }
 
+// ─── Skills-dir plugin migration ─────────────────────────────────────────────
+// The daemon / SDK / Codex executors load catalyst plugins from the resolved
+// pluginDirs checkout (still — the Agent SDK does not auto-load ~/.claude/skills
+// plugins, so pluginDirs stays and checkPluginSourceFreshness above guards it).
+// Every OTHER session type Claude Code itself resolves plugins for (interactive
+// `claude`, `claude --bg`, bg-spare, desktop) must load catalyst IN-PLACE from
+// that same checkout via user-scope skills-dir symlinks — never the version-keyed
+// `catalyst` marketplace cache (the one path that goes stale, the "stale copy
+// reports healthy" class this migration closes). This check asserts that end
+// state: every plugin in the checkout has a matching ~/.claude/skills/<name>
+// symlink resolving into it, AND no legacy path (marketplace registration,
+// enabledPlugins residue, an installed marketplace copy that precedence-BLOCKS the
+// skills-dir plugin, or the retired interactive --plugin-dir wrapper) survives.
+// worker = FAIL (the fleet node), developer/monitor = WARN.
+
+const SKILLS_DIR_WRAPPER_MARKER = "# >>> catalyst plugin-source (managed) >>>";
+
+// defaultExpectedSkillsPlugins — every <root>/plugins/*/.claude-plugin/plugin.json,
+// keyed by manifest `name` (the symlink basename) with `dir` realpath'd for a
+// direct string compare against the (also realpath'd) symlink target.
+function defaultExpectedSkillsPlugins(roots) {
+  const out = [];
+  for (const root of roots) {
+    const pluginsDir = resolve(root, "plugins");
+    let entries;
+    try {
+      entries = readdirSync(pluginsDir, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const e of entries) {
+      if (!e.isDirectory()) continue;
+      const dir = resolve(pluginsDir, e.name);
+      try {
+        const name = JSON.parse(readFileSync(resolve(dir, ".claude-plugin", "plugin.json"), "utf8"))?.name;
+        if (name) out.push({ name, dir: realpathSync(dir) });
+      } catch {
+        /* no manifest → not a loadable plugin */
+      }
+    }
+  }
+  return out;
+}
+
+// defaultSkillLink — classify ~/.claude/skills/<name>: symlink (target realpath'd,
+// null if dangling) | other (a real file/dir, never clobbered) | missing.
+function defaultSkillLink(name) {
+  const link = resolve(homedir(), ".claude", "skills", name);
+  let st;
+  try {
+    st = lstatSync(link);
+  } catch {
+    return { kind: "missing" };
+  }
+  if (!st.isSymbolicLink()) return { kind: "other" };
+  try {
+    return { kind: "symlink", target: realpathSync(link) };
+  } catch {
+    return { kind: "symlink", target: null }; // dangling
+  }
+}
+
+// defaultReadInstalledPlugins — ~/.claude/plugins/installed_plugins.json (records a
+// marketplace copy install even when it is not in enabledPlugins).
+function defaultReadInstalledPlugins() {
+  try {
+    return JSON.parse(readFileSync(resolve(homedir(), ".claude", "plugins", "installed_plugins.json"), "utf8"));
+  } catch {
+    return null;
+  }
+}
+
+// defaultWrapperRcFiles — interactive rc files still carrying the retired managed
+// `claude()` --plugin-dir wrapper block (double-loads with skills-dir).
+function defaultWrapperRcFiles() {
+  const found = [];
+  for (const rc of [".zshrc", ".bashrc", ".bash_profile"].map((f) => resolve(homedir(), f))) {
+    try {
+      if (readFileSync(rc, "utf8").includes(SKILLS_DIR_WRAPPER_MARKER)) found.push(rc);
+    } catch {
+      /* absent */
+    }
+  }
+  return found;
+}
+
+// classifySkillsDirPlugins — PURE decision core (all IO injected). Aggregates every
+// residue into a single check, mirroring classifyPluginSourceFreshness's shape.
+export function classifySkillsDirPlugins({
+  roots = [],
+  expectedPlugins = [],
+  linkByName = {},
+  settings = null,
+  installedPlugins = null,
+  wrapperRcFiles = [],
+  nodeClass = "worker",
+} = {}) {
+  const sev = nodeClass === "worker" ? STATUS.FAIL : STATUS.WARN;
+
+  if (roots.length === 0) {
+    return mkCheck(
+      "skills-dir-plugins",
+      sev,
+      "no plugin-source checkout resolved (pluginDirs unset) — cannot verify the ~/.claude/skills symlinks; " +
+        "run setup-plugin-source.sh",
+    );
+  }
+
+  const problems = [];
+
+  // (a) every plugin in the checkout has a matching skills-dir symlink into it
+  for (const { name, dir } of expectedPlugins) {
+    const link = linkByName[name];
+    if (!link || link.kind === "missing") {
+      problems.push(`~/.claude/skills/${name} is missing`);
+    } else if (link.kind === "other") {
+      problems.push(`~/.claude/skills/${name} exists but is not a symlink`);
+    } else if (!link.target) {
+      problems.push(`~/.claude/skills/${name} is a dangling symlink`);
+    } else if (link.target !== dir) {
+      problems.push(`~/.claude/skills/${name} resolves to ${link.target}, not the plugin-source checkout (${dir})`);
+    }
+  }
+
+  // (b) legacy marketplace load-path residue — any of these reintroduces the stale
+  //     version-keyed cache and/or precedence-blocks the in-place skills-dir copy
+  const ep = settings?.enabledPlugins || {};
+  for (const k of ["catalyst-dev@catalyst", "catalyst-pm@catalyst"]) {
+    if (k in ep) problems.push(`enabledPlugins still lists ${k} — clear it`);
+  }
+  if (settings?.extraKnownMarketplaces?.catalyst) {
+    problems.push("the 'catalyst' marketplace is still registered (extraKnownMarketplaces) — remove it");
+  }
+  const installed = installedPlugins?.plugins || {};
+  for (const k of ["catalyst-dev@catalyst", "catalyst-pm@catalyst"]) {
+    if (installed[k]) {
+      problems.push(`${k} is still installed from the marketplace — it precedence-BLOCKS the skills-dir copy; uninstall it`);
+    }
+  }
+
+  // (c) the retired interactive --plugin-dir wrapper (double-loads with skills-dir)
+  for (const rc of wrapperRcFiles) {
+    problems.push(`the legacy interactive --plugin-dir wrapper is still in ${rc} — remove the managed block`);
+  }
+
+  if (problems.length > 0) {
+    return mkCheck(
+      "skills-dir-plugins",
+      sev,
+      `catalyst plugins do not load cleanly in-place via user-scope skills-dir (${problems.join("; ")}). ` +
+        "Run the full 'bash setup-plugin-source.sh' cutover to fix (marketplace copies enabled at project scope in " +
+        "another repo need 'claude plugin uninstall <p>@catalyst --scope project -y' from that repo).",
+    );
+  }
+  return mkCheck(
+    "skills-dir-plugins",
+    STATUS.PASS,
+    `all ${expectedPlugins.length} catalyst plugins load in-place via ~/.claude/skills symlinks into ${roots[0]}; ` +
+      "no marketplace / wrapper residue",
+  );
+}
+
+// checkSkillsDirPlugins — gather the IO, then classify. Seams injectable for tests.
+export function checkSkillsDirPlugins(deps = {}) {
+  const {
+    nodeClass = "worker",
+    resolveRootsFn = () => resolvePluginCheckoutRoots({}),
+    expectedPluginsFn = defaultExpectedSkillsPlugins,
+    skillLinkFn = defaultSkillLink,
+    readSettingsFn = defaultReadClaudeSettings,
+    readInstalledPluginsFn = defaultReadInstalledPlugins,
+    wrapperRcFilesFn = defaultWrapperRcFiles,
+  } = deps;
+  const roots = resolveRootsFn();
+  const expectedPlugins = expectedPluginsFn(roots);
+  const linkByName = {};
+  for (const { name } of expectedPlugins) linkByName[name] = skillLinkFn(name);
+  return [
+    classifySkillsDirPlugins({
+      roots,
+      expectedPlugins,
+      linkByName,
+      settings: readSettingsFn(),
+      installedPlugins: readInstalledPluginsFn(),
+      wrapperRcFiles: wrapperRcFilesFn(),
+      nodeClass,
+    }),
+  ];
+}
+
 // ─── Suite selection ─────────────────────────────────────────────────────────
 
 // checksForClass — build the check-thunk suite for a resolved node class. This is
@@ -3313,6 +3503,10 @@ export function checksForClass(nc, opts = {}) {
   // CTL-1421: assert the worker plugin path resolves to a healthy pristine plugin-source
   // (else workers silently serve stale marketplace-cache code). worker=FAIL, dev/monitor=WARN.
   const pluginSourceFreshThunk = () => checkPluginSourceFreshness({ nodeClass: nc.class });
+  // skills-dir-plugin migration: catalyst loads in-place via ~/.claude/skills symlinks
+  // for every session type Claude Code resolves plugins for; no marketplace/wrapper
+  // residue. worker=FAIL, dev/monitor=WARN.
+  const skillsDirPluginsThunk = () => checkSkillsDirPlugins({ nodeClass: nc.class });
 
   const replicaThunk = () => checkReadReplicaReachable({ baseUrl: readReplicaBaseUrl, fetch: _fetch });
   const wontOwnThunk = () =>
@@ -3363,6 +3557,7 @@ export function checksForClass(nc, opts = {}) {
       agentsThunk, // CTL-1369 PR4: updater agent installed, no worker stack (correct class agent set)
       pullOwnerThunk, // CTL-1369 PR4: pluginPullOwner=updater (a developer runs no broker)
       pluginSourceFreshThunk, // CTL-1421: worker plugin path resolves to a fresh pristine plugin-source (WARN on a developer)
+      skillsDirPluginsThunk, // skills-dir migration: catalyst loads in-place via ~/.claude/skills; no marketplace/wrapper residue (WARN on a developer)
       replicaThunk,
       wontOwnThunk,
       () => checkReaper(), // advisory (never FAIL), class-agnostic
@@ -3390,6 +3585,7 @@ export function checksForClass(nc, opts = {}) {
       agentsThunk, // CTL-1369 PR4: updater agent installed, no worker stack (monitor is adopt-updater-shaped)
       pullOwnerThunk, // CTL-1369 PR4: pluginPullOwner=updater
       pluginSourceFreshThunk, // CTL-1421: worker plugin path resolves to a fresh pristine plugin-source (WARN on a monitor)
+      skillsDirPluginsThunk, // skills-dir migration: catalyst loads in-place via ~/.claude/skills; no marketplace/wrapper residue (WARN on a monitor)
       replicaThunk,
       wontOwnThunk,
       () => [
@@ -3418,6 +3614,7 @@ export function checksForClass(nc, opts = {}) {
     agentsThunk, // CTL-1369 PR4: worker work-stack agent installed, no updater agent (correct class agent set)
     pullOwnerThunk, // CTL-1369 PR4: pluginPullOwner=broker (the worker's broker owns the pull)
     pluginSourceFreshThunk, // CTL-1421: worker plugin path resolves to a fresh pristine plugin-source (FAIL — the CI/CD executor)
+    skillsDirPluginsThunk, // skills-dir migration: catalyst loads in-place via ~/.claude/skills; no marketplace/wrapper residue (FAIL on a worker)
     () => checkWebhookIngestion(), // CTL-1284: multiHost member ingests webhooks; single-host does not
     () => checkThoughts(), // CTL-1293: member thoughts repo provisioned + non-foreign primary
     () => checkClaudeSettings(), // CTL-1231: member settings.json pins host identity + OTLP endpoint
