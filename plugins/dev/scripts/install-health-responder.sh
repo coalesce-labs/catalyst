@@ -93,7 +93,13 @@ _pristine_scripts_dir() {
     # shellcheck source=/dev/null
     . "${SCRIPT_DIR}/lib/plugin-dirs.sh" 2>/dev/null || true
     if command -v resolve_plugin_dirs >/dev/null 2>&1; then
-      pd="$(resolve_plugin_dirs 2>/dev/null | cut -d: -f1)" || true
+      # resolve_plugin_dirs POPULATES RESOLVED_PLUGIN_DIRS (it emits NO stdout)
+      # — call it in THIS shell and read the variable; a $(subshell) capture is
+      # always empty and would silently discard the env/repo-config precedence
+      # (Codex P2 round 2). Anchor at SCRIPT_DIR so the repo-config walk
+      # resolves the checkout the installer itself lives in (CTL-1349 pattern).
+      resolve_plugin_dirs "$SCRIPT_DIR" 2>/dev/null || true
+      pd="${RESOLVED_PLUGIN_DIRS%%:*}"
     fi
   fi
   if [[ -z "$pd" ]]; then

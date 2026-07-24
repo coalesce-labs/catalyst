@@ -537,6 +537,35 @@ touch "$PLIST"
 run "T39: pgrep pattern is the scoped launchd shape, uid-constrained" \
   bash -c "bash '$RESPONDER' >/dev/null; grep -q -- '-U .* bun .*execution-core/cloud-sync' '${PGREP_LOG}'"
 
+# ─── Phase 11: Codex round-2 remediations (T40–T42) ─────────────────────────
+
+# T40 (P1): in cmd_adopt_cloud_sync the responder must install BEFORE the
+# tokenless early-return — a dev/monitor node adopted without its token gets
+# the writer now and the token later, and that writer needs its recovery layer.
+STACK="${REPO_ROOT}/plugins/dev/scripts/catalyst-stack"
+run "T40: adopt-cloud-sync installs the responder before the tokenless return" \
+  bash -c "a=\$(awk '/^cmd_adopt_cloud_sync\(\) \{/,/^\}/' '$STACK' | grep -n 'install-health-responder.sh' | head -1 | cut -d: -f1); b=\$(awk '/^cmd_adopt_cloud_sync\(\) \{/,/^\}/' '$STACK' | grep -n 'awaiting token' | head -1 | cut -d: -f1); [ -n \"\$a\" ] && [ -n \"\$b\" ] && [ \"\$a\" -lt \"\$b\" ]"
+
+# T41 (P2): CATALYST_PLUGIN_DIRS precedence is actually honored — the resolver
+# populates RESOLVED_PLUGIN_DIRS (no stdout), so a subshell capture would
+# silently ignore it and fall back to SCRIPT_DIR.
+FAKE_PD="${BAKE_SCRATCH}/fake-plugins-dev"
+mkdir -p "${FAKE_PD}/scripts/orch-monitor/dist"
+cp "$RESPONDER" "${FAKE_PD}/scripts/health-responder.sh"
+cp "${REPO_ROOT}/plugins/dev/scripts/orch-monitor/dist/ai.coalesce.catalyst-health-responder.plist" \
+   "${FAKE_PD}/scripts/orch-monitor/dist/"
+run "T41: CATALYST_PLUGIN_DIRS env checkout is baked (resolver variable read)" \
+  bash -c "cd / && CATALYST_PLUGIN_DIRS='${FAKE_PD}' bash '$INSTALLER' --print-only | grep -q '${FAKE_PD}/scripts/health-responder.sh'"
+
+# T42 (P2): garbage/negative detection thresholds must not crash the sweep
+# (set -u unbound-variable in arithmetic) nor stale-classify a fresh lock.
+_reset
+touch "$PLIST"; touch "$MOCK_ALIVE_FILE"; _fresh_lock
+run "T42: RESPONDER_LOCK_STALE_SECS=abc still heartbeats healthy (no crash)" \
+  bash -c "RESPONDER_LOCK_STALE_SECS=abc RESPONDER_SELFHEAL_GRACE_SECS=xyz bash '$RESPONDER' | grep -q 'heartbeat status=healthy'"
+run "T42b: negative lock threshold clamps — fresh lock is NOT stale" \
+  bash -c "RESPONDER_LOCK_STALE_SECS=-5 bash '$RESPONDER' | grep -q 'stale_lock=0' && ! test -s '${KICKSTART_LOG}'"
+
 # ─── results ────────────────────────────────────────────────────────────────
 
 echo ""

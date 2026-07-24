@@ -1608,6 +1608,25 @@ cmd_adopt_cloud_sync() {
     fail "launchctl bootstrap failed for $CLOUD_SYNC_AGENT_PLIST — agent backed out"
   fi
 
+  # CTL-1509 (Codex P1 round 2): install the responder BEFORE the tokenless
+  # return below — a dev/monitor node initially adopted without its token gets
+  # the writer plist now and the token later (kickstart per the printed
+  # instructions), and that later-activated writer must already have its
+  # recovery layer; these classes never run install-services. adopt-cloud-sync
+  # is the ONE class-independent path (install-lifecycle.mjs installAgents).
+  # Idempotent (a worker's install-services double-install is a harmless
+  # bootout+bootstrap reload); non-fatal, same warn+continue contract as the
+  # other delegated installers.
+  if [[ -x "${SCRIPT_DIR}/install-health-responder.sh" ]]; then
+    if bash "${SCRIPT_DIR}/install-health-responder.sh" 2>&1 | sed 's/^/  /'; then
+      log "loaded ai.coalesce.catalyst-health-responder — cloud-sync recovery sweep (CTL-1509)"
+    else
+      warn "install-health-responder.sh failed (continuing) — dead-writer auto-recovery absent on this node"
+    fi
+  else
+    warn "install-health-responder.sh not found next to catalyst-stack — cloud-sync health responder not installed"
+  fi
+
   if [[ "$token_present" != "yes" ]]; then
     log "NOTE: token '$token_env' is not in the launchd-sourced 0600 files — the writer will IDLE (fail-open no-op) until you provision it."
     log "  Provision: add 'export $token_env=...' to ~/.config/catalyst/cloud-sync.env (chmod 600), then:"
@@ -1645,23 +1664,6 @@ cmd_adopt_cloud_sync() {
     fi
   fi
 
-  # CTL-1509 (Codex P1): the health responder guards the writer this command
-  # just adopted, and adopt-cloud-sync is the ONE class-independent install
-  # path — developer/monitor installs run adopt-updater + adopt-cloud-sync and
-  # NEVER install-services (install-lifecycle.mjs installAgents), so wiring the
-  # responder only into install-services would leave every non-worker writer
-  # without its recovery layer. Idempotent (double-installs from a worker's
-  # install-services are harmless bootout+bootstrap reloads); non-fatal, same
-  # warn+continue contract as the other delegated installers.
-  if [[ -x "${SCRIPT_DIR}/install-health-responder.sh" ]]; then
-    if bash "${SCRIPT_DIR}/install-health-responder.sh" 2>&1 | sed 's/^/  /'; then
-      log "loaded ai.coalesce.catalyst-health-responder — cloud-sync recovery sweep (CTL-1509)"
-    else
-      warn "install-health-responder.sh failed (continuing) — dead-writer auto-recovery absent on this node"
-    fi
-  else
-    warn "install-health-responder.sh not found next to catalyst-stack — cloud-sync health responder not installed"
-  fi
 }
 
 # _write_plugin_pull_owner <config-path> <owner> — atomically merge

@@ -118,6 +118,13 @@ RESPONDER_KICKSTART_TIMEOUT_SECS="${RESPONDER_KICKSTART_TIMEOUT_SECS:-20}"
 [[ "$RESPONDER_MAX_ATTEMPTS" =~ ^[0-9]+$ ]] || RESPONDER_MAX_ATTEMPTS=3
 [[ "$RESPONDER_KICKSTART_WAIT_SECS" =~ ^[0-9]+$ ]] || RESPONDER_KICKSTART_WAIT_SECS=10
 [[ "$RESPONDER_KICKSTART_TIMEOUT_SECS" =~ ^[0-9]+$ && "$RESPONDER_KICKSTART_TIMEOUT_SECS" -gt 0 ]] || RESPONDER_KICKSTART_TIMEOUT_SECS=20
+# The two detection thresholds get the same treatment (Codex P2 round 2): a
+# non-numeric value would blow up `[[ -gt ]]` arithmetic as an unbound-variable
+# reference under `set -u` (sweep dies BEFORE its heartbeat), and a negative
+# lock threshold would classify every fresh lock as stale and kickstart a
+# healthy writer round after round.
+[[ "$RESPONDER_LOCK_STALE_SECS" =~ ^[0-9]+$ && "$RESPONDER_LOCK_STALE_SECS" -gt 0 ]] || RESPONDER_LOCK_STALE_SECS=900
+[[ "$RESPONDER_SELFHEAL_GRACE_SECS" =~ ^[0-9]+$ ]] || RESPONDER_SELFHEAL_GRACE_SECS=120
 RESPONDER_RUN_ID="${RESPONDER_RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)-$$}"
 RESPONDER_STATE_DIR="${RESPONDER_STATE_DIR:-${HOME}/catalyst/.health-responder}"
 RESPONDER_SELFHEAL_FILE="${RESPONDER_SELFHEAL_FILE:-${HOME}/catalyst/cloud-sync.selfheal.json}"
