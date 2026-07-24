@@ -47,6 +47,16 @@
   <key>RunAtLoad</key>
   <true/>
 
+  <!-- launchd's default PATH omits /opt/homebrew/bin — without it the sweep
+       cannot resolve jq and every self-heal breadcrumb is silently ignored
+       (no settling hold, no no-respawn detection). Substituted by the
+       installer; mirrors catalyst-stack's _stack_agent_path (CTL-1289). -->
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>REPLACE_PATH</string>
+  </dict>
+
   <key>StandardOutPath</key>
   <string>REPLACE_HOME/catalyst/health-responder.log</string>
 

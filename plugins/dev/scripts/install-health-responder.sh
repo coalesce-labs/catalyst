@@ -55,6 +55,12 @@ for arg in "$@"; do
       echo "  --help        Show this message"
       exit 0
       ;;
+    *)
+      # Reject unknown args (Codex P2): a typo like --uninstalll must not fall
+      # through to a full install/reload, nor --print-onl to a side-effecting run.
+      printf 'install-health-responder.sh: unknown argument: %s (see --help)\n' "$arg" >&2
+      exit 2
+      ;;
   esac
 done
 
@@ -76,12 +82,27 @@ done
 
 # _pristine_scripts_dir: the scripts dir of the registered pristine clone, or "".
 _pristine_scripts_dir() {
-  local cfg="${CATALYST_LAYER2_CONFIG_FILE:-${HOME}/.config/catalyst/config.json}"
-  [[ -f "$cfg" ]] && command -v jq >/dev/null 2>&1 || return 0
-  local pd
-  # pluginDirs is polymorphic (join-bundle.mjs:61): a string, or an array whose
-  # first element is the active dir. Normalize both to a single path.
-  pd="$(jq -r '.catalyst.orchestration.pluginDirs | if type=="array" then .[0] elif type=="string" then . else empty end' "$cfg" 2>/dev/null || true)"
+  # Codex P2: honor the CANONICAL pluginDirs precedence (lib/plugin-dirs.sh —
+  # env CATALYST_PLUGIN_DIRS, then repo .catalyst/config.json, then machine
+  # config) instead of a machine-config-only read, which could bake a
+  # removable marketplace-cache path while a pristine source is explicitly
+  # registered upstream. Source the shared lib when present; fall back to the
+  # legacy Layer-2 read when it isn't (a partial checkout must still install).
+  local pd=""
+  if [[ -r "${SCRIPT_DIR}/lib/plugin-dirs.sh" ]]; then
+    # shellcheck source=/dev/null
+    . "${SCRIPT_DIR}/lib/plugin-dirs.sh" 2>/dev/null || true
+    if command -v resolve_plugin_dirs >/dev/null 2>&1; then
+      pd="$(resolve_plugin_dirs 2>/dev/null | cut -d: -f1)" || true
+    fi
+  fi
+  if [[ -z "$pd" ]]; then
+    local cfg="${CATALYST_LAYER2_CONFIG_FILE:-${HOME}/.config/catalyst/config.json}"
+    [[ -f "$cfg" ]] && command -v jq >/dev/null 2>&1 || return 0
+    # pluginDirs is polymorphic (join-bundle.mjs:61): a string, or an array whose
+    # first element is the active dir. Normalize both to a single path.
+    pd="$(jq -r '.catalyst.orchestration.pluginDirs | if type=="array" then .[0] elif type=="string" then . else empty end' "$cfg" 2>/dev/null || true)"
+  fi
   # pluginDirs points at <clone>/plugins/dev; health-responder.sh lives under scripts/.
   [[ -n "$pd" && -f "${pd}/scripts/health-responder.sh" ]] && echo "${pd}/scripts"
   # FAIL OPEN (CTL-1306): a false [[ ... ]] test would otherwise make this
@@ -153,12 +174,18 @@ _interval_seconds() {
 # ─── template substitution ──────────────────────────────────────────────────
 
 _substitute() {
-  local interval
+  local interval agent_path
   interval="$(_interval_seconds)"
+  # PATH for launchd's otherwise-minimal environment (Codex P2): homebrew jq
+  # (the breadcrumb parser — without it the settling hold + no-respawn
+  # detection go dark), bun, and the member CLI dirs. Mirrors catalyst-stack's
+  # _stack_agent_path (CTL-1289) — keep the two in sync.
+  agent_path="${HOME}/.catalyst/bin:${HOME}/.local/node/bin:${HOME}/.local/bin:${HOME}/.bun/bin:/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
   sed \
     -e "s|REPLACE_WITH_ABSOLUTE|${BAKE_DIR}|g" \
     -e "s|REPLACE_HOME|${HOME}|g" \
     -e "s|REPLACE_START_INTERVAL|${interval}|g" \
+    -e "s|REPLACE_PATH|${agent_path}|g" \
     "$TEMPLATE"
 }
 
@@ -175,9 +202,13 @@ if [[ "$UNINSTALL" -eq 1 ]]; then
   exit 0
 fi
 
-# ─── non-Darwin early exit ───────────────────────────────────────────────────
+# ─── non-Darwin early exit (install path only) ───────────────────────────────
+#
+# --print-only proceeds on ANY platform (Codex P2): `catalyst-stack
+# install-services --print` directs non-macOS users to preview the plists, and
+# rendering needs no launchctl — only the actual install is macOS-only.
 
-if [[ "$(_os)" != "Darwin" ]]; then
+if [[ "$(_os)" != "Darwin" && "$PRINT_ONLY" -ne 1 ]]; then
   echo "install-health-responder.sh: non-Darwin platform detected ($(_os))." >&2
   echo "  Linux scheduling (systemd timer) is a follow-up. No launchctl action taken." >&2
   exit 0

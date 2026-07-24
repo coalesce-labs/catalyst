@@ -1644,6 +1644,24 @@ cmd_adopt_cloud_sync() {
       warn "could not restart the log-shipper — cloud-sync.log won't reach Loki until Alloy restarts (re-run install-services or restart the shipper agent)"
     fi
   fi
+
+  # CTL-1509 (Codex P1): the health responder guards the writer this command
+  # just adopted, and adopt-cloud-sync is the ONE class-independent install
+  # path — developer/monitor installs run adopt-updater + adopt-cloud-sync and
+  # NEVER install-services (install-lifecycle.mjs installAgents), so wiring the
+  # responder only into install-services would leave every non-worker writer
+  # without its recovery layer. Idempotent (double-installs from a worker's
+  # install-services are harmless bootout+bootstrap reloads); non-fatal, same
+  # warn+continue contract as the other delegated installers.
+  if [[ -x "${SCRIPT_DIR}/install-health-responder.sh" ]]; then
+    if bash "${SCRIPT_DIR}/install-health-responder.sh" 2>&1 | sed 's/^/  /'; then
+      log "loaded ai.coalesce.catalyst-health-responder — cloud-sync recovery sweep (CTL-1509)"
+    else
+      warn "install-health-responder.sh failed (continuing) — dead-writer auto-recovery absent on this node"
+    fi
+  else
+    warn "install-health-responder.sh not found next to catalyst-stack — cloud-sync health responder not installed"
+  fi
 }
 
 # _write_plugin_pull_owner <config-path> <owner> — atomically merge

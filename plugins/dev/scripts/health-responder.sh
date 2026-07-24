@@ -104,6 +104,20 @@ RESPONDER_SELFHEAL_GRACE_SECS="${RESPONDER_SELFHEAL_GRACE_SECS:-120}"
 RESPONDER_MAX_ATTEMPTS="${RESPONDER_MAX_ATTEMPTS:-3}"
 RESPONDER_ATTEMPT_WINDOW_SECS="${RESPONDER_ATTEMPT_WINDOW_SECS:-3600}"
 RESPONDER_KICKSTART_WAIT_SECS="${RESPONDER_KICKSTART_WAIT_SECS:-10}"
+# How long the launchctl kickstart subprocess itself may run before being
+# killed (Codex P1: a hung launchctl must not wedge the sweep — see the act
+# section). Distinct from KICKSTART_WAIT_SECS (the post-kickstart settle).
+RESPONDER_KICKSTART_TIMEOUT_SECS="${RESPONDER_KICKSTART_TIMEOUT_SECS:-20}"
+
+# Guard the bounded-action envelope itself (Codex P2): a zero/negative/garbage
+# window would prune every attempt marker on each sweep — the counter pins at
+# 1, escalation becomes unreachable, and the writer is kickstarted every
+# interval forever, defeating the central safety property. Clamp to sane
+# values rather than trusting the env.
+[[ "$RESPONDER_ATTEMPT_WINDOW_SECS" =~ ^[0-9]+$ && "$RESPONDER_ATTEMPT_WINDOW_SECS" -gt 0 ]] || RESPONDER_ATTEMPT_WINDOW_SECS=3600
+[[ "$RESPONDER_MAX_ATTEMPTS" =~ ^[0-9]+$ ]] || RESPONDER_MAX_ATTEMPTS=3
+[[ "$RESPONDER_KICKSTART_WAIT_SECS" =~ ^[0-9]+$ ]] || RESPONDER_KICKSTART_WAIT_SECS=10
+[[ "$RESPONDER_KICKSTART_TIMEOUT_SECS" =~ ^[0-9]+$ && "$RESPONDER_KICKSTART_TIMEOUT_SECS" -gt 0 ]] || RESPONDER_KICKSTART_TIMEOUT_SECS=20
 RESPONDER_RUN_ID="${RESPONDER_RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)-$$}"
 RESPONDER_STATE_DIR="${RESPONDER_STATE_DIR:-${HOME}/catalyst/.health-responder}"
 RESPONDER_SELFHEAL_FILE="${RESPONDER_SELFHEAL_FILE:-${HOME}/catalyst/cloud-sync.selfheal.json}"
@@ -125,7 +139,20 @@ is_dry() { [[ "$DRY_RUN" == "1" ]]; }
 
 # _mtime <file>: epoch mtime, macOS-first (on GNU/Linux `stat -f` means
 # filesystem-stat, hence the ordering — same idiom as orphan-sweep.sh).
-_mtime() { stat -f %m "$1" 2>/dev/null || stat -c %Y "$1" 2>/dev/null; }
+# _mtime FILE — epoch mtime, portable. GNU stat FAILS `-f %m` but still prints
+# filesystem info to stdout before returning non-zero (Codex P2) — so the BSD
+# attempt's output must be validated and DISCARDED on failure, never
+# concatenated with the `-c` fallback's output.
+_mtime() {
+  local out
+  if out="$(stat -f %m "$1" 2>/dev/null)" && [[ "$out" =~ ^[0-9]+$ ]]; then
+    echo "$out"
+    return 0
+  fi
+  out="$(stat -c %Y "$1" 2>/dev/null)" || return 1
+  [[ "$out" =~ ^[0-9]+$ ]] || return 1
+  echo "$out"
+}
 
 # Fail-open telemetry (orphan-sweep idiom): missing binary = silent no-op, and
 # a telemetry failure can never fail the responder.
@@ -148,7 +175,14 @@ emit_escalated() {
 # launch.sh has no .mjs); mirrors doctor.mjs defaultCloudSyncProcessAlive.
 # pgrep failing entirely (rc>1) degrades to "not alive" — a wrong kickstart is
 # bounded by the attempt cap; a wrongly-skipped one would leave the writer down.
-_writer_alive() { pgrep -f 'cloud-sync\.mjs' >/dev/null 2>&1; }
+# Scoped to THIS user's launchd-shaped writer invocation (Codex P2): a bare
+# `cloud-sync.mjs` pattern would match an editor (`vim cloud-sync.mjs`), a
+# test, or another user's process and mask a genuinely dead supervised writer.
+# The launch.sh contract is `exec bun .../execution-core/cloud-sync.mjs`, so
+# match that shape, current uid only. (Resolving the exact launchd PID via
+# `launchctl print` would put launchctl on the every-sweep detection path —
+# deliberately avoided; detection stays passive.)
+_writer_alive() { pgrep -U "$(id -u)" -f "bun .*execution-core/cloud-sync\.mjs" >/dev/null 2>&1; }
 
 # _lock_age_secs: seconds since the writer.lock heartbeat, or "" when the lock
 # is absent/unreadable. An ABSENT lock is NOT stale — it may mean guard
@@ -181,7 +215,13 @@ _probe_selfheal() {
   SELFHEAL_VALID=0
   SELFHEAL_AGE=""
   [[ -f "$RESPONDER_SELFHEAL_FILE" ]] || return 0
-  command -v jq >/dev/null 2>&1 || return 0
+  if ! command -v jq >/dev/null 2>&1; then
+    # A breadcrumb EXISTS but can't be parsed — say so (Codex P2 adjacent: the
+    # launchd plist now bakes a PATH that resolves homebrew jq, but if jq is
+    # genuinely absent the settling hold + no-respawn detection are dark).
+    log "WARN: jq not found on PATH — self-heal breadcrumb present but unreadable; settling hold + no-respawn detection disabled this sweep"
+    return 0
+  fi
   local expect ts now m
   expect="$(jq -r '.expectRestart // empty' "$RESPONDER_SELFHEAL_FILE" 2>/dev/null || true)"
   [[ "$expect" == "true" ]] || return 0
@@ -289,9 +329,12 @@ SETTLING=0
 C_DEAD=0
 [[ "$INSTALLED" -eq 1 && "$ALIVE" -eq 0 && "$SETTLING" -eq 0 ]] && C_DEAD=1
 
-# Condition 2: stale-writer (process up, SDK heartbeat dead).
+# Condition 2: stale-writer (process up, SDK heartbeat dead). Installed-gated
+# like the other two (Codex P2): a leftover manual/orphaned matching process
+# plus an old lock on a node whose plist was removed must not kickstart an
+# unloaded label round after round into a false escalation.
 C_STALE=0
-if [[ "$ALIVE" -eq 1 ]]; then
+if [[ "$INSTALLED" -eq 1 && "$ALIVE" -eq 1 ]]; then
   _LOCK_AGE="$(_lock_age_secs)"
   if [[ -n "$_LOCK_AGE" && "$_LOCK_AGE" -gt "$RESPONDER_LOCK_STALE_SECS" ]]; then
     C_STALE=1
@@ -328,7 +371,11 @@ if [[ "$CONDITION" -eq 0 ]]; then
   # Healthy. If we had escalated, the condition clearing re-arms the responder:
   # drop the ESCALATED marker + attempt files so a future incident gets a
   # fresh bounded-attempt budget.
-  if [[ "$ESCALATED" -eq 1 || "$ATTEMPTS" -gt 0 ]]; then
+  # Re-arm ONLY on a genuinely healthy probe — settling is NOT health (Codex
+  # P1): a crash-looping writer that starts, drops a fresh breadcrumb, and dies
+  # again would otherwise clear its own attempt budget every loop, converting
+  # the hourly cap into unlimited kickstart batches that never escalate.
+  if [[ "$SETTLING" -eq 0 && ( "$ESCALATED" -eq 1 || "$ATTEMPTS" -gt 0 ) ]]; then
     if is_dry; then
       log "[dry-run] would re-arm: clear ${ATTEMPTS} attempt marker(s) + escalated=${ESCALATED} marker"
     else
@@ -399,18 +446,53 @@ if ! _record_attempt; then
   exit 0
 fi
 ATTEMPTS=$((ATTEMPTS+1))
-if launchctl kickstart -k "gui/$(id -u)/${CLOUD_SYNC_LABEL}" 2>&1 | sed 's/^/  /'; then
+# Bound the launchctl call itself (Codex P1): a hung kickstart — the very
+# wedge class this responder exists to break — must not turn the short-lived
+# sweep into a silently wedged watcher of its own (launchd will not start the
+# next StartInterval run while this one is alive). Background + deadline; no
+# `timeout` binary exists on stock macOS.
+_KICK_OUT="$(mktemp "${TMPDIR:-/tmp}/responder-kick.XXXXXX")"
+launchctl kickstart -k "gui/$(id -u)/${CLOUD_SYNC_LABEL}" > "$_KICK_OUT" 2>&1 &
+_KPID=$!
+_KRC=""
+for (( _i = 0; _i < RESPONDER_KICKSTART_TIMEOUT_SECS; _i++ )); do
+  if ! kill -0 "$_KPID" 2>/dev/null; then
+    wait "$_KPID"
+    _KRC=$?
+    break
+  fi
+  sleep 1
+done
+if [[ -z "$_KRC" ]]; then
+  kill -9 "$_KPID" 2>/dev/null || true
+  wait "$_KPID" 2>/dev/null || true
+  log "kickstart TIMED OUT after ${RESPONDER_KICKSTART_TIMEOUT_SECS}s for gui/$(id -u)/${CLOUD_SYNC_LABEL} (attempt ${ATTEMPTS}/${RESPONDER_MAX_ATTEMPTS} still counted)"
+elif [[ "$_KRC" -eq 0 ]]; then
+  sed 's/^/  /' "$_KICK_OUT"
   log "kickstarted gui/$(id -u)/${CLOUD_SYNC_LABEL} (attempt ${ATTEMPTS}/${RESPONDER_MAX_ATTEMPTS})"
 else
+  sed 's/^/  /' "$_KICK_OUT"
   log "kickstart FAILED for gui/$(id -u)/${CLOUD_SYNC_LABEL} — label not loaded? (attempt ${ATTEMPTS}/${RESPONDER_MAX_ATTEMPTS} still counted)"
 fi
+rm -f "$_KICK_OUT"
 
 # Settle, then re-probe so the log says whether the kickstart actually worked.
 [[ "$RESPONDER_KICKSTART_WAIT_SECS" -gt 0 ]] && sleep "$RESPONDER_KICKSTART_WAIT_SECS"
 if _writer_alive; then
   ALIVE=1
-  log "recovered: cloud-sync.mjs is back after kickstart"
-  heartbeat "recovered"
+  # For a stale-writer incident the process was alive BEFORE the kickstart, so
+  # a process-only probe would always report "recovered" — even if launchctl
+  # failed and left the old wedged instance running (Codex P2). Recovery from
+  # a stale lock means the SDK heartbeat RESUMED: re-evaluate the lock (a
+  # restarted writer rewrites it ~5s; the settle wait covers that).
+  _NEW_LOCK_AGE="$(_lock_age_secs)"
+  if [[ "$C_STALE" -eq 1 && -n "$_NEW_LOCK_AGE" && "$_NEW_LOCK_AGE" -gt "$RESPONDER_LOCK_STALE_SECS" ]]; then
+    log "still-down: process is back but writer.lock heartbeat is still ${_NEW_LOCK_AGE}s stale after kickstart + ${RESPONDER_KICKSTART_WAIT_SECS}s"
+    heartbeat "still-down"
+  else
+    log "recovered: cloud-sync.mjs is back after kickstart"
+    heartbeat "recovered"
+  fi
 else
   log "still-down: no cloud-sync.mjs after kickstart + ${RESPONDER_KICKSTART_WAIT_SECS}s"
   heartbeat "still-down"

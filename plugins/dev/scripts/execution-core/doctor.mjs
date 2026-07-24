@@ -1801,7 +1801,7 @@ export function checkHealthResponder(deps = {}) {
   } catch {
     checks.push(mkCheck(
       "responder-installed", STATUS.WARN,
-      "cloud-sync health responder not installed — a dead/wedged replica writer won't be auto-kickstarted; run 'catalyst-stack install-services'",
+      "cloud-sync health responder not installed — a dead/wedged replica writer won't be auto-kickstarted; run 'catalyst-stack adopt-cloud-sync' (class-independent; workers also get it via install-services)",
     ));
     return checks;
   }

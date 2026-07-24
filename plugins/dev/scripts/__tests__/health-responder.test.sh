@@ -41,6 +41,7 @@ mkdir -p "$CATALYST_LAUNCHAGENTS_DIR" "${SCRATCH}/replica"
 
 PLIST="${CATALYST_LAUNCHAGENTS_DIR}/ai.coalesce.catalyst-cloud-sync.plist"
 LOCK="${CATALYST_REPLICA_DB}.writer.lock"
+export MOCK_LOCK_FILE="$LOCK" # launchctl mock's freshen target (T38)
 
 # ─── harness ────────────────────────────────────────────────────────────────
 
@@ -86,9 +87,12 @@ expect_not_contains() {
 # pgrep: "alive" iff MOCK_ALIVE_FILE exists — so a scenario flips liveness by
 # touching/removing one file, and the kickstart mock can "revive" the writer.
 export MOCK_ALIVE_FILE="${SCRATCH}/writer-alive"
+export PGREP_LOG="${SCRATCH}/pgrep.log"
 cat > "$MOCKBIN/pgrep" <<'EOF'
 #!/usr/bin/env bash
-# health-responder only calls `pgrep -f 'cloud-sync\.mjs'`.
+# Records its args (T39 pins the scoped pattern) and answers liveness from
+# MOCK_ALIVE_FILE regardless of pattern.
+echo "$@" >> "${PGREP_LOG:-/tmp/pgrep.log}"
 [[ -e "${MOCK_ALIVE_FILE:-/nonexistent}" ]] && exit 0
 exit 1
 EOF
@@ -100,8 +104,11 @@ export KICKSTART_LOG="${SCRATCH}/kickstart.log"
 cat > "$MOCKBIN/launchctl" <<'EOF'
 #!/usr/bin/env bash
 echo "$@" >> "${KICKSTART_LOG:-/tmp/kickstart.log}"
-if [[ "${1:-}" == "kickstart" && "${MOCK_KICKSTART_REVIVES:-0}" == "1" ]]; then
-  touch "${MOCK_ALIVE_FILE:-/tmp/writer-alive}"
+if [[ "${1:-}" == "kickstart" ]]; then
+  # revive: the writer process comes back; freshen: the SDK heartbeat resumes
+  # (rewrites the writer.lock) — T38 distinguishes the two.
+  [[ "${MOCK_KICKSTART_REVIVES:-0}" == "1" ]] && touch "${MOCK_ALIVE_FILE:-/tmp/writer-alive}"
+  [[ "${MOCK_KICKSTART_FRESHENS:-0}" == "1" && -n "${MOCK_LOCK_FILE:-}" ]] && touch "${MOCK_LOCK_FILE}"
 fi
 exit 0
 EOF
@@ -119,8 +126,8 @@ export SCRATCH_OTEL_LOG="${SCRATCH}/otel.log"
 # Scenario helpers: reset all mutable state between phases.
 _reset() {
   rm -rf "$RESPONDER_STATE_DIR"
-  rm -f "$MOCK_ALIVE_FILE" "$KICKSTART_LOG" "$SCRATCH_OTEL_LOG" "$RESPONDER_SELFHEAL_FILE" "$PLIST" "$LOCK"
-  unset MOCK_KICKSTART_REVIVES 2>/dev/null || true
+  rm -f "$MOCK_ALIVE_FILE" "$KICKSTART_LOG" "$SCRATCH_OTEL_LOG" "$RESPONDER_SELFHEAL_FILE" "$PLIST" "$LOCK" "$PGREP_LOG"
+  unset MOCK_KICKSTART_REVIVES MOCK_KICKSTART_FRESHENS 2>/dev/null || true
 }
 
 _fresh_lock() { touch "$LOCK"; }
@@ -198,8 +205,11 @@ run "T10: failed kickstart exits 0 and still records the attempt" \
 cat > "$MOCKBIN/launchctl" <<'EOF'
 #!/usr/bin/env bash
 echo "$@" >> "${KICKSTART_LOG:-/tmp/kickstart.log}"
-if [[ "${1:-}" == "kickstart" && "${MOCK_KICKSTART_REVIVES:-0}" == "1" ]]; then
-  touch "${MOCK_ALIVE_FILE:-/tmp/writer-alive}"
+if [[ "${1:-}" == "kickstart" ]]; then
+  # revive: the writer process comes back; freshen: the SDK heartbeat resumes
+  # (rewrites the writer.lock) — T38 distinguishes the two.
+  [[ "${MOCK_KICKSTART_REVIVES:-0}" == "1" ]] && touch "${MOCK_ALIVE_FILE:-/tmp/writer-alive}"
+  [[ "${MOCK_KICKSTART_FRESHENS:-0}" == "1" && -n "${MOCK_LOCK_FILE:-}" ]] && touch "${MOCK_LOCK_FILE}"
 fi
 exit 0
 EOF
@@ -434,6 +444,98 @@ run "T30: breadcrumb without the plist is healthy (not our patient)" \
   bash -c "bash '$RESPONDER' | grep -q 'heartbeat status=healthy' && ! test -s '${KICKSTART_LOG}'"
 run "T30b: heartbeat reports no_respawn=0 without the plist" \
   bash -c "bash '$RESPONDER' | grep -q 'no_respawn=0'"
+
+# ─── Phase 10: Codex-review remediations (T31–T39) ──────────────────────────
+
+# T31 (P1): settling must NOT re-arm the attempt budget — a crash-looping
+# writer that keeps dropping fresh breadcrumbs would otherwise refill its own
+# hourly cap every loop and never escalate.
+_reset
+touch "$PLIST" # installed, no process
+printf '{"ts":%s,"expectRestart":true}\n' "$(date +%s)" > "$RESPONDER_SELFHEAL_FILE"
+mkdir -p "$RESPONDER_STATE_DIR"
+touch "${RESPONDER_STATE_DIR}/attempt.$(date +%s).777"
+run "T31: settling preserves the attempt budget (no re-arm)" \
+  bash -c "bash '$RESPONDER' | grep -q 'heartbeat status=settling' && ls '${RESPONDER_STATE_DIR}'/attempt.* >/dev/null"
+
+# T32 (P2): stale-writer is installed-gated — orphaned matching process + old
+# lock on a node without the plist must not kickstart an unloaded label.
+_reset
+touch "$MOCK_ALIVE_FILE"; _stale_lock # NO plist
+run "T32: stale lock without the plist is healthy (not our patient)" \
+  bash -c "bash '$RESPONDER' | grep -q 'heartbeat status=healthy' && ! test -s '${KICKSTART_LOG}'"
+
+# T33 (P2): a zero/garbage attempt window is clamped — markers survive pruning
+# and the cap still escalates instead of kickstarting every sweep forever.
+_reset
+touch "$PLIST" # dead-writer
+mkdir -p "$RESPONDER_STATE_DIR"
+for i in 1 2 3; do touch "${RESPONDER_STATE_DIR}/attempt.$(date +%s).$i"; done
+run "T33: window=0 clamps — cap still escalates (no kickstart)" \
+  bash -c "RESPONDER_ATTEMPT_WINDOW_SECS=0 bash '$RESPONDER' | grep -q 'ERROR: escalated' && ! test -s '${KICKSTART_LOG}'"
+
+# T34 (P1): a HUNG launchctl is bounded — the sweep must finish, count the
+# attempt, and heartbeat rather than becoming a wedged watcher itself.
+_reset
+touch "$PLIST" # dead-writer
+mv "$MOCKBIN/launchctl" "${SCRATCH}/launchctl-real-mock"
+cat > "$MOCKBIN/launchctl" <<'EOF'
+#!/usr/bin/env bash
+sleep 60
+EOF
+chmod +x "$MOCKBIN/launchctl"
+run "T34: hung kickstart times out, sweep completes with heartbeat" \
+  bash -c "RESPONDER_KICKSTART_TIMEOUT_SECS=1 RESPONDER_KICKSTART_WAIT_SECS=0 bash '$RESPONDER' | grep -q 'kickstart TIMED OUT' "
+run "T34b: the timed-out attempt still counted" \
+  bash -c "ls '${RESPONDER_STATE_DIR}'/attempt.* >/dev/null"
+mv "${SCRATCH}/launchctl-real-mock" "$MOCKBIN/launchctl"
+
+# T35 (P2): GNU-stat semantics (`-f %m` prints junk AND fails) must not poison
+# the `-c` fallback — stale-lock detection still works.
+_reset
+touch "$PLIST"; touch "$MOCK_ALIVE_FILE"
+cat > "$MOCKBIN/stat" <<EOF
+#!/usr/bin/env bash
+if [[ "\$1" == "-f" ]]; then
+  echo "  File: \\"whatever\\" — GNU fs info spam"
+  exit 1
+fi
+# -c %Y fallback: an epoch 2000s in the past → stale (> 900s threshold)
+echo \$(( \$(date +%s) - 2000 ))
+EOF
+chmod +x "$MOCKBIN/stat"
+run "T35: GNU stat fallback stays clean — stale lock still detected" \
+  bash -c "bash '$RESPONDER' | grep -q 'stale_lock=1' && test -s '${KICKSTART_LOG}'"
+rm -f "$MOCKBIN/stat"
+
+# T36 (P2): unknown installer flags are rejected before any lifecycle action.
+run_fail "T36: installer rejects a typo'd flag (--uninstalll)" \
+  bash "$INSTALLER" --uninstalll
+run_fail "T36b: installer rejects --print-onl" \
+  bash "$INSTALLER" --print-onl
+
+# T37 (P2): --print-only works on non-Darwin (plist preview needs no launchctl).
+run "T37: non-Darwin --print-only renders the plist" \
+  bash -c "cd / && CATALYST_FORCE_OS=Linux CATALYST_FORCE_BAKE_DIR='${BAKE}' bash '$INSTALLER' --print-only | grep -q '<integer>180</integer>'"
+
+# T38 (P2): "recovered" after a stale-writer incident requires the SDK
+# heartbeat to RESUME, not merely a matching process (which was alive all along).
+_reset
+touch "$PLIST"; touch "$MOCK_ALIVE_FILE"; _stale_lock
+run "T38: stale incident + lock still stale => still-down, not recovered" \
+  bash -c "RESPONDER_KICKSTART_WAIT_SECS=0 bash '$RESPONDER' | grep -q 'heartbeat status=still-down'"
+_reset
+touch "$PLIST"; touch "$MOCK_ALIVE_FILE"; _stale_lock
+export MOCK_KICKSTART_FRESHENS=1
+run "T38b: kickstart that freshens the lock => recovered" \
+  bash -c "RESPONDER_KICKSTART_WAIT_SECS=0 bash '$RESPONDER' | grep -q 'heartbeat status=recovered'"
+unset MOCK_KICKSTART_FRESHENS
+
+# T39 (P2): the liveness probe is scoped — launchd-shaped invocation, this uid.
+_reset
+touch "$PLIST"
+run "T39: pgrep pattern is the scoped launchd shape, uid-constrained" \
+  bash -c "bash '$RESPONDER' >/dev/null; grep -q -- '-U .* bun .*execution-core/cloud-sync' '${PGREP_LOG}'"
 
 # ─── results ────────────────────────────────────────────────────────────────
 
