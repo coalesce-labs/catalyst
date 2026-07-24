@@ -69,6 +69,20 @@ fi
 TMPROOT="$(mktemp -d -t phase-teardown-test.XXXXXX)"
 trap 'rm -rf "$TMPROOT" "$SKILL_BODY_FILE"' EXIT
 
+# ─── CTL-1417: hermeticity floor ─────────────────────────────────────────────
+# A scratch HOME + neutered global/system git config as a belt around the
+# per-skill-run FAKE_HOME already injected below — so any code path OUTSIDE
+# those subshells that computes "$HOME/catalyst/..." resolves under TMPROOT,
+# never the operator's real tree (the CTL-1417 data-loss vector).
+export HOME="${TMPROOT}/home"
+mkdir -p "$HOME"
+export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null
+# Canary: prove the isolation is actually in effect (fails loud if HOME leaks).
+[[ "$HOME" == "$TMPROOT"/* ]] || {
+	echo "FAIL: HOME not isolated to scratch"
+	exit 1
+}
+
 # ─── Helper: build a throwaway git repo + linked worktree ───────────────────
 # Returns the path to the PRIMARY worktree (the repo) via stdout.
 # The TICKET worktree is at <primary>/../wt/<ticket>.

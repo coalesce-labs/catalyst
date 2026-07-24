@@ -402,6 +402,16 @@ elif [[ "$KEEP_WT" != "true" ]]; then
       elif ! "$PRESWEEP_BIN" "$WORKTREE_PATH"; then
         echo "phase-teardown: presweep failed for $WORKTREE_PATH; auto-teardown skipped" >&2
       else
+        # CTL-1417: defense-in-depth self-protection guard, additive to the
+        # existing self/primary checks + presweep above. Sourced defensively so
+        # its absence (e.g. the e2e fake plugin root) is a no-op that falls
+        # through to the existing presweep-gated removal.
+        __TD_GUARD="${PLUGIN_ROOT}/scripts/lib/worktree-remove-guard.sh"
+        [ -r "$__TD_GUARD" ] && . "$__TD_GUARD"
+        if command -v assert_worktree_removal_safe >/dev/null 2>&1 &&
+          ! assert_worktree_removal_safe "$WORKTREE_PATH"; then
+          echo "phase-teardown: removal guard refused $WORKTREE_PATH; auto-teardown skipped" >&2
+        else
         # Capture the real `git worktree remove` stderr so a failed teardown
         # reports the actual cause (dirty tree, locked, submodule, etc.) rather
         # than guessing. The merge is NEVER rolled back — we only warn + skip.
@@ -414,6 +424,7 @@ elif [[ "$KEEP_WT" != "true" ]]; then
           echo "phase-teardown: auto-teardown complete (worktree + branch removed)"
         else
           echo "phase-teardown: git worktree remove failed; auto-teardown skipped (merge left intact): ${WT_RM_ERR}" >&2
+        fi
         fi
       fi
     fi
