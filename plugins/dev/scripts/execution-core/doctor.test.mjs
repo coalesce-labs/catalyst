@@ -21,6 +21,7 @@ import {
   checkThoughts,
   checkClaudeSettings,
   checkReaper,
+  checkHealthResponder,
   checkAgentBrowser,
   checkCloudTokenEnv,
   checkClusterSecretFreshness,
@@ -1103,6 +1104,145 @@ describe("checkReaper", () => {
     });
     expect(checks[0].name).toBe("reaper-health");
     expect(checks[0].status).toBe(STATUS.PASS);
+  });
+});
+
+// ─── checkHealthResponder (CTL-1509) ─────────────────────────────────────────
+
+const responderPlist = (path) =>
+  `<plist><dict><key>ProgramArguments</key><array><string>/bin/bash</string><string>${path}</string></array></dict></plist>`;
+
+// The default-path fixture: readFile dispatches on suffix so the same injected
+// dep serves both the plist read and the baked-script kill-switch read.
+const responderScript = "#!/usr/bin/env bash\nRESPONDER_ENABLED=\"${RESPONDER_ENABLED:-1}\"\n";
+
+describe("checkHealthResponder", () => {
+  const bakedPath = "/Users/x/catalyst/plugin-source/plugins/dev/scripts/health-responder.sh";
+  const healthyReadFile = (p) => (p.endsWith(".plist") ? responderPlist(bakedPath) : responderScript);
+
+  it("WARNs when the responder LaunchAgent is not installed", () => {
+    const checks = checkHealthResponder({
+      readFile: () => { throw new Error("ENOENT"); },
+    });
+    expect(checks).toHaveLength(1);
+    expect(checks[0].name).toBe("responder-installed");
+    expect(checks[0].status).toBe(STATUS.WARN);
+  });
+
+  it("WARNs when the plist has no health-responder.sh program path (malformed)", () => {
+    const checks = checkHealthResponder({
+      readFile: () => "<plist><dict></dict></plist>",
+    });
+    expect(checks).toHaveLength(1);
+    expect(checks[0].name).toBe("responder-installed");
+    expect(checks[0].status).toBe(STATUS.WARN);
+  });
+
+  it("WARNs (never FAILs, so it can't block the join activation gate) when the baked program path no longer exists (CTL-1306 silent-death)", () => {
+    const dead = "/private/tmp/pr-wt/plugins/dev/scripts/health-responder.sh";
+    const checks = checkHealthResponder({
+      readFile: (p) => (p.endsWith(".plist") ? responderPlist(dead) : responderScript),
+      fileExists: (p) => p !== dead,
+      responderState: () => ({ loaded: true, lastExit: 127 }),
+    });
+    expect(checks).toHaveLength(1);
+    expect(checks[0].name).toBe("responder-path");
+    expect(checks[0].status).toBe(STATUS.WARN);
+    expect(checks[0].detail).toContain(dead);
+  });
+
+  it("WARNs when the installed script lacks the RESPONDER_ENABLED kill-switch marker (stale install)", () => {
+    const checks = checkHealthResponder({
+      readFile: (p) => (p.endsWith(".plist") ? responderPlist(bakedPath) : "#!/usr/bin/env bash\necho old\n"),
+      fileExists: () => true,
+      responderState: () => ({ loaded: true, lastExit: 0 }),
+    });
+    expect(checks).toHaveLength(1);
+    expect(checks[0].name).toBe("responder-killswitch");
+    expect(checks[0].status).toBe(STATUS.WARN);
+  });
+
+  it("WARNs when the baked script exists in the plist but is unreadable", () => {
+    const checks = checkHealthResponder({
+      readFile: (p) => {
+        if (p.endsWith(".plist")) return responderPlist(bakedPath);
+        throw new Error("EACCES");
+      },
+      fileExists: () => true,
+      responderState: () => ({ loaded: true, lastExit: 0 }),
+    });
+    expect(checks[0].name).toBe("responder-killswitch");
+    expect(checks[0].status).toBe(STATUS.WARN);
+  });
+
+  it("WARNs when the plist is present but launchd never loaded the job", () => {
+    const checks = checkHealthResponder({
+      readFile: healthyReadFile,
+      fileExists: () => true,
+      responderState: () => ({ loaded: false, lastExit: null }),
+    });
+    expect(checks).toHaveLength(1);
+    expect(checks[0].name).toBe("responder-loaded");
+    expect(checks[0].status).toBe(STATUS.WARN);
+  });
+
+  it("WARNs (not FAILs) when the baked path exists but last exit was 127", () => {
+    const checks = checkHealthResponder({
+      readFile: healthyReadFile,
+      fileExists: () => true,
+      responderState: () => ({ loaded: true, lastExit: 127 }),
+    });
+    expect(checks[0].name).toBe("responder-health");
+    expect(checks[0].status).toBe(STATUS.WARN);
+  });
+
+  it("WARNs on a non-zero, non-127 exit", () => {
+    const checks = checkHealthResponder({
+      readFile: healthyReadFile,
+      fileExists: () => true,
+      responderState: () => ({ loaded: true, lastExit: 2 }),
+    });
+    expect(checks[0].name).toBe("responder-health");
+    expect(checks[0].status).toBe(STATUS.WARN);
+  });
+
+  it("PASSes when loaded, baked path exists, kill-switch present, and last exit is clean", () => {
+    const checks = checkHealthResponder({
+      readFile: healthyReadFile,
+      fileExists: () => true,
+      responderState: () => ({ loaded: true, lastExit: 0 }),
+    });
+    expect(checks[0].name).toBe("responder-health");
+    expect(checks[0].status).toBe(STATUS.PASS);
+    expect(checks[0].detail).toContain(bakedPath);
+  });
+
+  it("PASSes when loaded but never run yet (lastExit null)", () => {
+    const checks = checkHealthResponder({
+      readFile: healthyReadFile,
+      fileExists: () => true,
+      responderState: () => ({ loaded: true, lastExit: null }),
+    });
+    expect(checks[0].name).toBe("responder-health");
+    expect(checks[0].status).toBe(STATUS.PASS);
+  });
+
+  it("never emits a FAIL from any branch (advisory-only contract)", () => {
+    const branches = [
+      checkHealthResponder({ readFile: () => { throw new Error("ENOENT"); } }),
+      checkHealthResponder({ readFile: () => "<plist/>" }),
+      checkHealthResponder({
+        readFile: healthyReadFile, fileExists: () => false,
+        responderState: () => ({ loaded: true, lastExit: 127 }),
+      }),
+      checkHealthResponder({
+        readFile: healthyReadFile, fileExists: () => true,
+        responderState: () => ({ loaded: true, lastExit: 1 }),
+      }),
+    ];
+    for (const checks of branches) {
+      for (const c of checks) expect(c.status).not.toBe(STATUS.FAIL);
+    }
   });
 });
 

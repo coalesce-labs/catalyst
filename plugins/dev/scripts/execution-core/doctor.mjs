@@ -1747,6 +1747,126 @@ export function checkReaper(deps = {}) {
   return checks;
 }
 
+// defaultResponderState — load state + last exit of the health-responder
+// LaunchAgent. Same launchctl contract as defaultReaperState: `launchctl list
+// <label>` exits 0 and prints a dict containing `"LastExitStatus" = N;` only
+// when launchd has the job loaded; non-zero means never bootstrapped.
+function defaultResponderState() {
+  try {
+    const r = spawnSync("launchctl", ["list", "ai.coalesce.catalyst-health-responder"], {
+      encoding: "utf8",
+      timeout: 5_000,
+    });
+    if (r.status !== 0 || !r.stdout) return { loaded: false, lastExit: null };
+    const m = r.stdout.match(/"LastExitStatus"\s*=\s*(-?\d+)/);
+    return { loaded: true, lastExit: m ? parseInt(m[1], 10) : null };
+  } catch {
+    return { loaded: false, lastExit: null };
+  }
+}
+
+// checkHealthResponder (CTL-1509) — the periodic cloud-sync health responder
+// (health-responder.sh, the bounded-kickstart sweep) must be installed, LOADED
+// by launchd, its baked program path must still exist, and the installed script
+// must carry the RESPONDER_ENABLED kill-switch (a pre-CTL-1509 stale install
+// would silently do nothing). Mirrors checkReaper EXACTLY — every non-healthy
+// condition is a WARN, never a FAIL: catalyst-doctor's exit code is the count
+// of FAILs and gates the catalyst-join activation gate (do_doctor_gate runs
+// BEFORE install-services, which is exactly what would reinstall a stale
+// plist). A FAILing responder check would therefore BLOCK a node from
+// self-healing via join.
+// Severities:
+//   • plist absent             → WARN  (responder not installed; a dead writer stays dead)
+//   • no baked path in plist    → WARN  (malformed plist)
+//   • baked path missing        → WARN  (the CTL-1306 silent-death signature; reinstall)
+//   • kill-switch marker absent → WARN  (stale installed script; reinstall)
+//   • plist present, not loaded  → WARN  (launchd never bootstrapped it)
+//   • last exit 127             → WARN  (program path unresolved; reinstall)
+//   • other non-zero exit       → WARN  (check the log)
+//   • loaded + exit 0 or null   → PASS  (null = never run yet)
+export function checkHealthResponder(deps = {}) {
+  const {
+    plistPath = resolve(
+      homedir(), "Library", "LaunchAgents", "ai.coalesce.catalyst-health-responder.plist",
+    ),
+    readFile = (p) => readFileSync(p, "utf8"),
+    fileExists = (p) => existsSync(p),
+    responderState = defaultResponderState,
+  } = deps;
+  const checks = [];
+
+  let xml;
+  try {
+    xml = readFile(plistPath);
+  } catch {
+    checks.push(mkCheck(
+      "responder-installed", STATUS.WARN,
+      "cloud-sync health responder not installed — a dead/wedged replica writer won't be auto-kickstarted; run 'catalyst-stack install-services'",
+    ));
+    return checks;
+  }
+
+  const m = xml.match(/<string>([^<]*health-responder\.sh)<\/string>/);
+  const baked = m ? m[1] : null;
+  if (!baked) {
+    checks.push(mkCheck(
+      "responder-installed", STATUS.WARN,
+      `responder plist present but no health-responder.sh program path found in ${plistPath}`,
+    ));
+    return checks;
+  }
+
+  if (!fileExists(baked)) {
+    checks.push(mkCheck(
+      "responder-path", STATUS.WARN,
+      `responder points at a path that no longer exists (CTL-1306 silent-death signature): ${baked} — reinstall from the pristine clone ('catalyst-stack install-services')`,
+    ));
+    return checks;
+  }
+
+  // The kill-switch marker doubles as a stale-install detector: the installed
+  // (baked) script — the one launchd actually runs — must be the CTL-1509
+  // shape. Same pattern as defaultReaperHasAbVector's CTL-1500 cross-check.
+  let script = null;
+  try {
+    script = readFile(baked);
+  } catch {
+    script = null;
+  }
+  if (script === null || !/RESPONDER_ENABLED/.test(script)) {
+    checks.push(mkCheck(
+      "responder-killswitch", STATUS.WARN,
+      `installed health-responder.sh (${baked}) is unreadable or lacks the RESPONDER_ENABLED kill-switch marker — stale install; reinstall from the pristine clone ('catalyst-stack install-services')`,
+    ));
+    return checks;
+  }
+
+  const { loaded, lastExit } = responderState();
+  if (!loaded) {
+    checks.push(mkCheck(
+      "responder-loaded", STATUS.WARN,
+      "responder plist present but not loaded by launchd — run 'catalyst-stack install-services'",
+    ));
+    return checks;
+  }
+
+  if (lastExit === 127) {
+    checks.push(mkCheck(
+      "responder-health", STATUS.WARN,
+      "responder last exited 127 (program path unresolved) — reinstall from the pristine clone",
+    ));
+  } else if (typeof lastExit === "number" && lastExit !== 0) {
+    checks.push(mkCheck(
+      "responder-health", STATUS.WARN,
+      `responder last exited ${lastExit} — check ~/catalyst/health-responder.log`,
+    ));
+  } else {
+    // lastExit === 0 (clean) or null (loaded but never run yet)
+    checks.push(mkCheck("responder-health", STATUS.PASS, `health responder installed and healthy (${baked})`));
+  }
+  return checks;
+}
+
 // ─── Phase 5f: agent-browser worker browser tool (CTL-1500) ──────────────────
 // Phase workers run browser tests (screenshots, live-UI verification) via the
 // `agent-browser` CLI (catalyst-dev:agent-browser skill). Hosts drifted badly:
@@ -3366,6 +3486,7 @@ export function checksForClass(nc, opts = {}) {
       replicaThunk,
       wontOwnThunk,
       () => checkReaper(), // advisory (never FAIL), class-agnostic
+      () => checkHealthResponder(), // CTL-1509: cloud-sync health responder installed + baked path + kill-switch (advisory, never FAIL)
       () => checkAgentBrowser(), // CTL-1500: developers run the mini live-test browser loop too (advisory)
       () => checkMonitorProductionBuild({ fetch: _fetch }), // CTL-1372: warn on a dev-build monitor (advisory)
       () => checkCloudTokenEnv(), // advisory
@@ -3422,6 +3543,7 @@ export function checksForClass(nc, opts = {}) {
     () => checkThoughts(), // CTL-1293: member thoughts repo provisioned + non-foreign primary
     () => checkClaudeSettings(), // CTL-1231: member settings.json pins host identity + OTLP endpoint
     () => checkReaper(), // CTL-1306: orphan-sweep reaper installed + baked path still exists (not dead-127)
+    () => checkHealthResponder(), // CTL-1509: cloud-sync health responder installed + baked path + kill-switch (advisory, never FAIL)
     () => checkAgentBrowser(), // CTL-1500: worker browser tool present + >= min + idle-timeout wired + reaper (advisory, never FAIL)
     () => checkCloudTokenEnv(), // CTL-1307: cluster cloud token decrypted → projected to machine-level env (advisory)
     () => checkClusterSecretFreshness(), // CTL-1393: warn if the node is running on stale rotated secrets (advisory)
