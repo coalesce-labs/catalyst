@@ -374,13 +374,20 @@ cmd_poll() {
   }
 
   if [[ "$wait" = "1" ]]; then
+    # CTL-1423: exit cleanly on SIGTERM/HUP/PIPE and when reparented to init.
+    trap 'exit 0' TERM HUP PIPE INT
     # Emit current backlog first
     emit_lines "$since"
     # Then wait and emit new lines as they arrive.
-    local last_lines
+    local last_lines _poll_parent_pid
     last_lines=$(wc -l < "$file" | tr -d ' ')
+    # Capture the caller's PID before any subshell so the in-pipe PPID check
+    # targets the original parent (not the main shell), matching the CTL-439
+    # guard in catalyst-events.
+    _poll_parent_pid="$PPID"
     if command -v fswatch >/dev/null 2>&1; then
       fswatch -o "$file" | while read -r _; do
+        kill -0 "$_poll_parent_pid" 2>/dev/null || exit 0
         local cur
         cur=$(wc -l < "$file" | tr -d ' ')
         if [[ "$cur" -gt "$last_lines" ]]; then
@@ -390,6 +397,7 @@ cmd_poll() {
       done
     else
       while :; do
+        kill -0 "$PPID" 2>/dev/null || exit 0
         sleep 1
         local cur
         cur=$(wc -l < "$file" | tr -d ' ')
@@ -512,10 +520,25 @@ cmd_watch() {
     printf "\033[%sm[%s] %s (%s):\033[0m %s\n" "$code" "$ts" "$from" "$type" "$body"
   }
 
-  # Stream current + new lines.
-  tail -n 0 -F "$file" 2>/dev/null | while IFS= read -r line; do
-    [[ -z "$line" ]] && continue
-    colorize "$line"
+  # CTL-1423: exit cleanly on signals and when reparented to init (orphan-to-init
+  # path). Replaces bare tail -F pipe (which cannot check PPID inside a subshell)
+  # with a 1s polling loop in the main shell, matching the CTL-439 guard in
+  # catalyst-events. 1s latency is acceptable for a human-facing watch command.
+  trap 'exit 0' TERM HUP PIPE INT
+  local _watch_parent_pid _watch_last_lines
+  _watch_parent_pid="$PPID"
+  _watch_last_lines=$(wc -l < "$file" | tr -d ' ')
+  while kill -0 "$_watch_parent_pid" 2>/dev/null; do
+    sleep 1
+    local cur
+    cur=$(wc -l < "$file" | tr -d ' ')
+    if [[ "$cur" -gt "$_watch_last_lines" ]]; then
+      tail -n +"$((_watch_last_lines + 1))" "$file" 2>/dev/null | while IFS= read -r line; do
+        [[ -z "$line" ]] && continue
+        colorize "$line"
+      done
+      _watch_last_lines="$cur"
+    fi
   done
 }
 
