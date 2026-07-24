@@ -205,6 +205,14 @@ export function openBrokerStateDb(dbPath = DEFAULT_DB_PATH) {
       revive_count   INTEGER NOT NULL DEFAULT 0,
       last_event_id  TEXT,
       last_event_ts  TEXT,
+      -- CTL-1489: widened sticky path columns so projection readers can
+      -- reconstruct a WorkerSignal with no local-dir dependency. All five are
+      -- COALESCE-sticky in upsertWorkerState (a later null never erases them).
+      worktree_path  TEXT,
+      bg_job_id      TEXT,
+      generation     INTEGER,
+      handoff_path   TEXT,
+      artifact_path  TEXT,
       updated_at     TEXT NOT NULL,
       PRIMARY KEY (orchestrator, ticket)
     )
@@ -239,6 +247,52 @@ export function openBrokerStateDb(dbPath = DEFAULT_DB_PATH) {
       updated_at     TEXT NOT NULL
     )
   `);
+
+  // CTL-1489: additive column migration for the widened worker_state path
+  // columns, so a live broker DB created before CTL-1489 gains them in place
+  // (null-valued). Same try/catch ALTER idiom as ticket_state above — a
+  // fresh DB already has them from the CREATE TABLE, so the ALTER no-ops.
+  for (const col of [
+    "worktree_path TEXT",
+    "bg_job_id TEXT",
+    "generation INTEGER",
+    "handoff_path TEXT",
+    "artifact_path TEXT",
+  ]) {
+    try {
+      db.run(`ALTER TABLE worker_state ADD COLUMN ${col}`);
+    } catch {
+      /* already exists */
+    }
+  }
+
+  // CTL-1489 sink 5: durable append-only ticket-transition history. INSERT OR
+  // IGNORE by event_id → idempotent full-log replay. Widened with worktree/bg/
+  // generation/handoff/artifact so projection readers reconstruct a WorkerSignal
+  // with no local-dir dependency.
+  db.run(`
+    CREATE TABLE IF NOT EXISTS ticket_state_transitions (
+      event_id         TEXT PRIMARY KEY,
+      orchestrator     TEXT,
+      ticket           TEXT NOT NULL,
+      from_stage       TEXT,
+      to_stage         TEXT,
+      from_disposition TEXT,
+      to_disposition   TEXT,
+      reason           TEXT,
+      attempt          INTEGER,
+      revive_count     INTEGER NOT NULL DEFAULT 0,
+      worktree_path    TEXT,
+      bg_job_id        TEXT,
+      generation       INTEGER,
+      handoff_path     TEXT,
+      artifact_path    TEXT,
+      ts               TEXT NOT NULL,
+      recorded_at      TEXT NOT NULL
+    )
+  `);
+  db.run(`CREATE INDEX IF NOT EXISTS idx_tst_ticket ON ticket_state_transitions(ticket, ts)`);
+  db.run(`CREATE INDEX IF NOT EXISTS idx_tst_orch   ON ticket_state_transitions(orchestrator, ts)`);
 
   return db;
 }
@@ -842,7 +896,20 @@ export function clearTicketHeldSince(ticket) {
 
 // Statuses that mean the worker has finished — used by getStaleWorkers (and the
 // projection reducer) so "terminal" is defined exactly once.
-export const WORKER_TERMINAL_STATUSES = new Set(["done", "failed", "complete"]);
+// CTL-1489: parity with the exec-core signal-reader TERMINAL set
+// (signal-reader.mjs:73 = {done, failed, stalled, skipped, turn-cap-exhausted}).
+// "complete" is a broker-only phase-event status (PHASE_STATUS_MAP) the broker
+// sees on worker_state.status; keeping it makes this a superset — never
+// un-terminals an already-terminal worker. Enforced by a parity test that
+// asserts the exec-core five are all present.
+export const WORKER_TERMINAL_STATUSES = new Set([
+  "done",
+  "failed",
+  "complete",
+  "stalled",
+  "skipped",
+  "turn-cap-exhausted",
+]);
 
 // upsertWorkerState — last-write-wins for phase/status gated on the event
 // watermark; pr_number is COALESCE-sticky; revive_count is monotone (MAX);
@@ -858,13 +925,21 @@ export function upsertWorkerState({
   reviveCount,
   eventId,
   eventTs,
+  // CTL-1489: widened sticky path columns (all COALESCE-sticky below).
+  worktreePath,
+  bgJobId,
+  generation,
+  handoffPath,
+  artifact,
 }) {
   if (!orchestrator || !ticket) return;
   ensure().run(
     `INSERT INTO worker_state
        (orchestrator, ticket, phase, status, pr_number, revive_count,
-        last_event_id, last_event_ts, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        last_event_id, last_event_ts,
+        worktree_path, bg_job_id, generation, handoff_path, artifact_path,
+        updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(orchestrator, ticket) DO UPDATE SET
        -- phase/status only move forward when the incoming event is at least
        -- as recent as the last folded event (watermark gate).
@@ -881,6 +956,13 @@ export function upsertWorkerState({
               AND excluded.status IS NOT NULL
          THEN excluded.status ELSE worker_state.status END,
        pr_number    = COALESCE(excluded.pr_number, worker_state.pr_number),
+       -- CTL-1489: sticky path columns — a later null-path event never erases
+       -- a previously-captured path (same idiom as pr_number above).
+       worktree_path = COALESCE(excluded.worktree_path, worker_state.worktree_path),
+       bg_job_id     = COALESCE(excluded.bg_job_id, worker_state.bg_job_id),
+       generation    = COALESCE(excluded.generation, worker_state.generation),
+       handoff_path  = COALESCE(excluded.handoff_path, worker_state.handoff_path),
+       artifact_path = COALESCE(excluded.artifact_path, worker_state.artifact_path),
        revive_count = MAX(excluded.revive_count, worker_state.revive_count),
        last_event_id = CASE
          WHEN excluded.last_event_ts IS NOT NULL
@@ -902,6 +984,11 @@ export function upsertWorkerState({
       reviveCount ?? 0,
       eventId ?? null,
       eventTs ?? null,
+      worktreePath ?? null,
+      bgJobId ?? null,
+      generation ?? null,
+      handoffPath ?? null,
+      artifact ?? null,
       nowIso(),
     ]
   );
@@ -945,6 +1032,62 @@ export function getReviveCount(orchestrator, ticket) {
     )
     .get(orchestrator, ticket);
   return row?.n ?? 0;
+}
+
+// ─── ticket_state_transitions helpers (CTL-1489 sink 5) ─────────────────────
+
+// recordTicketStateTransition — INSERT OR IGNORE by event_id → idempotent
+// full-log replay. Returns true only when a genuinely new row was inserted, so
+// a re-fold of a previously-seen transition event is a safe no-op. Models
+// recordReviveEvent's idempotency-ledger idiom.
+export function recordTicketStateTransition(t) {
+  if (!t?.eventId || !t?.ticket) return false;
+  const res = ensure().run(
+    `INSERT OR IGNORE INTO ticket_state_transitions
+       (event_id, orchestrator, ticket, from_stage, to_stage, from_disposition,
+        to_disposition, reason, attempt, revive_count, worktree_path, bg_job_id,
+        generation, handoff_path, artifact_path, ts, recorded_at)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+    [
+      t.eventId,
+      t.orchestrator ?? null,
+      t.ticket,
+      t.fromStage ?? null,
+      t.toStage ?? null,
+      t.fromDisposition ?? null,
+      t.toDisposition ?? null,
+      t.reason ?? null,
+      t.attempt ?? null,
+      t.reviveCount ?? 0,
+      t.worktreePath ?? null,
+      t.bgJobId ?? null,
+      t.generation ?? null,
+      t.handoffPath ?? null,
+      t.artifact ?? null,
+      t.ts,
+      nowIso(),
+    ]
+  );
+  return res.changes > 0;
+}
+
+export function getTicketStateTransitions(ticket) {
+  return ensure()
+    .prepare(
+      `SELECT * FROM ticket_state_transitions WHERE ticket = ? ORDER BY ts, recorded_at`
+    )
+    .all(ticket);
+}
+
+export function getLatestTicketStateTransition(ticket) {
+  return (
+    ensure()
+      .prepare(
+        `SELECT * FROM ticket_state_transitions WHERE ticket = ?
+         ORDER BY ts DESC, recorded_at DESC LIMIT 1`
+      )
+      .get(ticket) ?? null
+  );
 }
 
 export function getProjectionMeta() {

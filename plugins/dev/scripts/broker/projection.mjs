@@ -44,6 +44,7 @@ import {
   recordReviveEvent,
   getReviveCount,
   setProjectionMeta,
+  recordTicketStateTransition, // CTL-1489 sink 5
 } from "./broker-state.mjs";
 
 // Identity-stable aliases for the shared maps — disk I/O lives here, the data
@@ -355,6 +356,11 @@ function localTicket(event, payload) {
 const WORKER_PHASE_EVENT_PATTERN =
   /^phase\.([^.]+)\.(complete|failed|turn-cap-exhausted)\.([A-Za-z][A-Za-z0-9_]*-\d+)$/;
 
+// CTL-1489: worker.transition.<TICKET> — the coordination event the sink-5
+// projection folds. Same ticket-slot grammar as the phase pattern.
+const WORKER_TRANSITION_EVENT_PATTERN =
+  /^worker\.transition\.([A-Za-z][A-Za-z0-9_]*-\d+)$/;
+
 // phase.<name>.<status> → projected worker `status` value.
 const PHASE_STATUS_MAP = {
   complete: "phase-complete",
@@ -546,6 +552,80 @@ export function projectWorkerStateEvent(event) {
   }
 }
 
+// ─── CTL-1489: sink-5 ticket-transition projection ──────────────────────────
+
+// reduceTicketTransitionEvent — PURE fold of a worker.transition.<TICKET> event
+// into a normalized transition row. Reads the widened fields from body.payload
+// (never attributes — otel-forward drops payload off-machine, but the broker
+// reads raw JSONL lines locally, so body.payload is the authoritative source).
+// Returns null for any non-transition event. The producer stamps the
+// orchestrator on the `catalyst.orchestration` attribute (worker-transition-
+// event.mjs), so resolve that in addition to localOrchestrator's keys.
+export function reduceTicketTransitionEvent(event) {
+  if (!event || typeof event !== "object") return null;
+  const name = localEventName(event);
+  const m = WORKER_TRANSITION_EVENT_PATTERN.exec(name);
+  if (!m) return null;
+  const ticketFromName = m[1];
+  const payload = localPayload(event);
+  const orchestrator =
+    localOrchestrator(event) ?? event.attributes?.["catalyst.orchestration"] ?? null;
+  const ticket = localTicket(event, payload) ?? ticketFromName;
+  if (!ticket) return null;
+  const ts = event.ts ?? event.observedTs ?? null;
+  return {
+    eventId: event.id ?? synthesizeWorkerEventId(name, ts, ticket),
+    orchestrator,
+    ticket,
+    ts,
+    fromStage: payload.from_stage ?? null,
+    toStage: payload.to_stage ?? null,
+    fromDisposition: payload.from_disposition ?? null,
+    toDisposition: payload.to_disposition ?? null,
+    reason: payload.reason ?? null,
+    attempt: payload.attempt ?? null,
+    reviveCount: payload.revive_count ?? 0,
+    worktreePath: payload.worktree_path ?? null,
+    bgJobId: payload.bg_job_id ?? null,
+    generation: payload.generation ?? null,
+    handoffPath: payload.handoff_path ?? null,
+    artifact: payload.artifact ?? null,
+  };
+}
+
+// projectTicketTransitionEvent — best-effort driver: fold one transition event
+// into BOTH the append-only ticket_state_transitions table (dedup by event_id)
+// and the widened worker_state sticky columns. Idempotent — a re-fold is a
+// no-op on the append-only table and a null-sticky upsert on worker_state.
+// Does NOT set worker_state.status: status stays owned by the phase.*/
+// worker.state_changed branches to avoid double-writing the STATUS axis.
+// It DOES write `phase` (= to_stage, the authoritative next stage): phase is a
+// shared column with the phase.* branch, but both fold the same event stream
+// under the same last_event_ts watermark, so it is last-write-wins-by-ts and
+// self-healing (a transient disagreement converges on the next event). Only the
+// status axis needs the single-writer discipline (a transition carries no status).
+export function projectTicketTransitionEvent(event) {
+  try {
+    const r = reduceTicketTransitionEvent(event);
+    if (!r) return;
+    recordTicketStateTransition(r);
+    upsertWorkerState({
+      orchestrator: r.orchestrator,
+      ticket: r.ticket,
+      phase: r.toStage,
+      worktreePath: r.worktreePath,
+      bgJobId: r.bgJobId,
+      generation: r.generation,
+      handoffPath: r.handoffPath,
+      artifact: r.artifact,
+      eventId: r.eventId,
+      eventTs: r.ts,
+    });
+  } catch (err) {
+    log.warn({ err: err.message }, "projectTicketTransitionEvent failed (best-effort)");
+  }
+}
+
 // replayWorkerStateProjection — startup replay: fold the whole current-month
 // event log into worker_state. Idempotent so it is correct whether the broker
 // just started cold, restarted after a crash, or has been running live.
@@ -574,6 +654,7 @@ export function replayWorkerStateProjection() {
         continue; // skip malformed lines
       }
       projectWorkerStateEvent(event);
+      projectTicketTransitionEvent(event); // CTL-1489: one pass rebuilds both tables
       eventsFolded++;
       const ts = event?.ts ?? event?.observedTs ?? null;
       if (ts && (!lastEventTs || ts >= lastEventTs)) {

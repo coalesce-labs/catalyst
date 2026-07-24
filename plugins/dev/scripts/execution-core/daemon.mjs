@@ -57,7 +57,10 @@ import {
   readExecutorByPhaseLayer1, // CTL-1457: Layer-1 catalyst.orchestration.executorByPhase map reader
   hasInProcessExecutorRoute, // CTL-1457 (N1): does executorByPhase route ANY phase to sdk|codex-exec? (arms the slot/occupancy gates on a bg node)
   codexConfig, // CTL-1457: codex-exec runtime settings (codexHome/bin/…) for the boot-eligibility gate
+  readProjectionReadConfig, // CTL-1489: durable-projection read-cutover flag (off/shadow/enforce)
 } from "./config.mjs";
+import { findHeldRunFromProjection } from "./projection-reader.mjs"; // CTL-1489
+import { emitProjectionDrift } from "./projection-read-decision.mjs"; // CTL-1489
 import { resolveBootIdentity } from "./host-boot-identity.mjs"; // CTL-1093
 import { readStickyIdentity, writeStickyIdentity } from "./host-sticky.mjs"; // CTL-1093
 import { ownedBy } from "./hrw.mjs"; // CTL-862: HRW ownership filter
@@ -344,6 +347,12 @@ export async function handleCommentWake(
     // CTL-764 finding 11: canonical worker.transition emitter for the needs-input→
     // cleared resolution. Injectable for tests; defaults to the real appender.
     appendWorkerTransitionEvent = defaultAppendWorkerTransitionEvent,
+    // CTL-1489: durable-projection read-cutover seams. When the local worker dir
+    // is absent (multi-host: the ticket is served elsewhere), off keeps today's
+    // bare return; shadow observes the gap; enforce resumes from the projection.
+    readProjectionMode = () => readProjectionReadConfig().mode,
+    findHeldFromProjection = findHeldRunFromProjection,
+    emitDrift = emitProjectionDrift,
   }
 ) {
   const { ticket } = parsed ?? {};
@@ -361,6 +370,61 @@ export async function handleCommentWake(
       (f) => f.startsWith("phase-") && f.endsWith(".json")
     );
   } catch {
+    // CTL-1489 (closes CTL-1475): the local worker dir is absent. In a multi-host
+    // cluster the ticket may be served on another host, so the durable projection
+    // is the only surviving record of its held state — a bare return here silently
+    // drops a legitimate human reply. off → today's bare return; shadow → observe
+    // the gap (drift event); enforce → resume the held run from durable state.
+    let mode;
+    try {
+      mode = readProjectionMode();
+    } catch {
+      mode = "off";
+    }
+    if (mode === "off") return;
+    let held = null;
+    try {
+      held = findHeldFromProjection(ticket);
+    } catch {
+      held = null;
+    }
+    if (!held) return; // no durable held run for this ticket → nothing to resume
+    if (mode === "shadow") {
+      try {
+        emitDrift({ ticket, source: "comment-wake" });
+      } catch {
+        /* drift emit is best-effort */
+      }
+      return; // shadow observes but never acts
+    }
+    // enforce: resume the held run reconstructed from the projection.
+    const projSig = held.signal ?? {};
+    // CTL-1489: reconstruct the resume session from the projected bg_job_id so a
+    // CTL-768 held-stopped worker recovered cross-host continues its PAUSED
+    // conversation via `--resume` (the same resolveSession seam the dir-present
+    // path uses) instead of being re-launched from scratch — which would land
+    // the operator's answer in a brand-new context. Absent bg_job_id → undefined
+    // (a still-alive worker: no resume, matching the legacy path).
+    const projBgJobId = projSig.raw?.bg_job_id ?? null;
+    const resumeSession = projBgJobId ? resolveSession(projBgJobId) ?? undefined : undefined;
+    // parkedFrom is NOT cross-host-recoverable — it lives only in the local
+    // signal file, never in worker_state / the transition event. The projected
+    // `phase` is the honest best-effort (it equals parkedFrom in the common case,
+    // and is exactly what the dir-present path falls back to via `sig.phase`).
+    const parkedPhase = projSig.phase ?? held.phase;
+    const handoffPath = projSig.raw?.handoffPath ?? undefined;
+    // No local signal file exists here (the dir is absent), so the dir-present
+    // path's stoppedForHold→stalled signal RESET is a no-op cross-host — the
+    // re-dispatch provisions a fresh worktree + signal.
+    try {
+      dispatch(orchDir, ticket, parkedPhase, { handoffPath, resumeSession });
+      log.info(
+        { ticket, phase: parkedPhase, resumed: Boolean(resumeSession) },
+        "handleCommentWake: resumed from projection (CTL-1489 enforce)"
+      );
+    } catch (err) {
+      log.warn({ ticket, err: err?.message }, "handleCommentWake: projection resume dispatch failed");
+    }
     return;
   }
 

@@ -37,6 +37,7 @@ import {
   CLUSTER_SYNC_INTERVAL_MS,
   readDeadDocWorkerConfig,
   readBoardHealthConfig,
+  readProjectionReadConfig, // CTL-1489
   readCoordinationConfig,
   getCoordinationMirrorPath,
   readSanctionedNeedsHuman,
@@ -1343,6 +1344,52 @@ describe("readBoardHealthConfig (CTL-1290)", () => {
   test("accepts an injected env bag (env param overrides process.env)", () => {
     process.env.CATALYST_BOARD_HEALTH = "shadow";
     expect(readBoardHealthConfig({ CATALYST_BOARD_HEALTH: "0" }).mode).toBe("off");
+  });
+});
+
+describe("readProjectionReadConfig (CTL-1489)", () => {
+  const PR_ENVS = ["CATALYST_PROJECTION_READS", "CATALYST_LAYER2_CONFIG_FILE"];
+  let saved = {}, tmp;
+  beforeEach(() => {
+    for (const k of PR_ENVS) { saved[k] = process.env[k]; delete process.env[k]; }
+    tmp = mkdtempSync(join(tmpdir(), "ctl1489-pr-"));
+    process.env.CATALYST_LAYER2_CONFIG_FILE = join(tmp, "absent.json");
+  });
+  afterEach(() => {
+    for (const k of PR_ENVS) { saved[k] === undefined ? delete process.env[k] : (process.env[k] = saved[k]); }
+    saved = {}; rmSync(tmp, { recursive: true, force: true });
+  });
+
+  test("default: mode=shadow (shadow doubles reads but changes no decision)", () => {
+    expect(readProjectionReadConfig({}).mode).toBe("shadow");
+  });
+  test("=0 kill-switch → off", () => {
+    expect(readProjectionReadConfig({ CATALYST_PROJECTION_READS: "0" }).mode).toBe("off");
+  });
+  test("env off / shadow / enforce are honored", () => {
+    expect(readProjectionReadConfig({ CATALYST_PROJECTION_READS: "off" }).mode).toBe("off");
+    expect(readProjectionReadConfig({ CATALYST_PROJECTION_READS: "shadow" }).mode).toBe("shadow");
+    expect(readProjectionReadConfig({ CATALYST_PROJECTION_READS: "enforce" }).mode).toBe("enforce");
+  });
+  test("garbage env → falls back to shadow", () => {
+    expect(readProjectionReadConfig({ CATALYST_PROJECTION_READS: "garbage" }).mode).toBe("shadow");
+  });
+  test("reads catalyst.projectionReads.mode from Layer-2 when env absent", () => {
+    const cfg = join(tmp, "config.json");
+    writeFileSync(cfg, JSON.stringify({ catalyst: { projectionReads: { mode: "enforce" } } }));
+    process.env.CATALYST_LAYER2_CONFIG_FILE = cfg;
+    expect(readProjectionReadConfig({}).mode).toBe("enforce");
+  });
+  test("env wins over Layer-2", () => {
+    const cfg = join(tmp, "config.json");
+    writeFileSync(cfg, JSON.stringify({ catalyst: { projectionReads: { mode: "enforce" } } }));
+    process.env.CATALYST_LAYER2_CONFIG_FILE = cfg;
+    expect(readProjectionReadConfig({ CATALYST_PROJECTION_READS: "0" }).mode).toBe("off");
+  });
+  test("malformed Layer-2 file → shadow (never throws)", () => {
+    const cfg = join(tmp, "config.json"); writeFileSync(cfg, "{ not json");
+    process.env.CATALYST_LAYER2_CONFIG_FILE = cfg;
+    expect(readProjectionReadConfig({}).mode).toBe("shadow");
   });
 });
 

@@ -42,6 +42,10 @@ export {
   getStaleWorkers,
   hasActiveWorkers,
   ACTIVE_WORKER_FRESHNESS_MS,
+  // CTL-1489 sink 5: durable ticket-transition store helpers.
+  recordTicketStateTransition,
+  getTicketStateTransitions,
+  getLatestTicketStateTransition,
 } from "./broker-state.mjs";
 import { formatMissingKeyWarning, formatLoadedKeyInfo, probeGroq } from "../lib/api-key-health.mjs";
 import {
@@ -125,6 +129,9 @@ export {
   reduceWorkerStateEvent,
   projectWorkerStateEvent,
   replayWorkerStateProjection,
+  // CTL-1489 sink 5: ticket-transition reducer + projection driver.
+  reduceTicketTransitionEvent,
+  projectTicketTransitionEvent,
 } from "./projection.mjs";
 export {
   pluginVersion,
