@@ -1,5 +1,12 @@
 # Changelog
 
+## [12.35.1](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.35.0...catalyst-dev-v12.35.1) (2026-07-24)
+
+
+### Bug Fixes
+
+* **dev:** CTL-1508 exit-safe cloud-sync self-heal + selfheal breadcrumb + lastFrameAt stall classifier ([#2709](https://github.com/coalesce-labs/catalyst/issues/2709)) ([1e33520](https://github.com/coalesce-labs/catalyst/commit/1e33520fdca612d9f8b02e42bf6fe277f2687ee9))
+
 ## [12.35.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.34.0...catalyst-dev-v12.35.0)
 
 Jul 23, 2026
