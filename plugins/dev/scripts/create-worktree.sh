@@ -180,6 +180,15 @@ fi
 if git show-ref --verify --quiet "refs/heads/${WORKTREE_NAME}"; then
 	echo "📋 Using existing branch: ${WORKTREE_NAME}"
 	git worktree add "$WORKTREE_PATH" "$WORKTREE_NAME"
+elif [ "$SKIP_FETCH" = false ] \
+	&& git fetch --quiet origin "${WORKTREE_NAME}:refs/remotes/origin/${WORKTREE_NAME}" 2>/dev/null \
+	&& git show-ref --verify --quiet "refs/remotes/origin/${WORKTREE_NAME}"; then
+	# CTL-1490 (Feature E): a live remote branch for this ticket exists — root the
+	# rebuilt worktree on it instead of branching fresh from main, so a cross-host
+	# takeover gets the actual in-flight code rather than an empty main-based branch.
+	echo "🔀 Rooting worktree on origin/${WORKTREE_NAME} (remote branch exists — reconstruction)"
+	git worktree add -b "$WORKTREE_NAME" "$WORKTREE_PATH" "refs/remotes/origin/${WORKTREE_NAME}"
+	git -C "$WORKTREE_PATH" branch --set-upstream-to="origin/${WORKTREE_NAME}" "$WORKTREE_NAME"
 else
 	echo "🆕 Creating new branch: ${WORKTREE_NAME}"
 	START_POINT="$BASE_BRANCH"

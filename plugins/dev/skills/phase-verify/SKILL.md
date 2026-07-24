@@ -381,6 +381,14 @@ cat >> "$FRICTION_LOG" <<EOF
 EOF
 ```
 
+```bash phase-verify-thoughts-doc
+# CTL-1490: write durable local thoughts doc (unconditional; push is mode-gated).
+# Reuses MIRROR_BODY already computed in the mirror block above.
+source "${PLUGIN_ROOT}/scripts/lib/write-phase-thoughts-doc.sh"
+write_phase_thoughts_doc "verify" "$TICKET" "${MIRROR_BODY:-}" || true
+"${PLUGIN_ROOT}/scripts/lib/thoughts-sync-gate.sh" --phase "$PHASE" --ticket "$TICKET" || exit 11
+```
+
 ```bash
 "${PLUGIN_ROOT}/scripts/phase-agent-emit-complete" \
   --phase "$PHASE" --ticket "$TICKET" --status complete

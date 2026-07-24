@@ -349,4 +349,5 @@ jobs:
             linear-read-event.test.mjs \
             updater/plugin-pull-defer.test.mjs \
             updater/updater.test.mjs \
-            updater/updater-tracing.test.mjs
+            updater/updater-tracing.test.mjs \
+            reconstruct-ticket-state.test.mjs

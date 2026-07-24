@@ -324,6 +324,14 @@ ${MIRROR_FOOTER}"
   fi
 fi
 
+```bash phase-monitor-deploy-thoughts-doc
+# CTL-1490: write durable local thoughts doc (unconditional; push is mode-gated).
+# Reuses MIRROR_BODY already computed in the mirror block above.
+source "${__PM_REPO_ROOT}/plugins/dev/scripts/lib/write-phase-thoughts-doc.sh"
+write_phase_thoughts_doc "monitor-deploy" "$TICKET" "${MIRROR_BODY:-}" || true
+"${__PM_REPO_ROOT}/plugins/dev/scripts/lib/thoughts-sync-gate.sh" --phase monitor-deploy --ticket "$TICKET" || exit 11
+```
+
 # 6. Emit the canonical phase event based on canary status. CTL-1410 Phase A: via
 #    $__PM_WRAPPER so the signal file's terminal `status` is flipped in-band under
 #    executor=sdk (the artifact write above already landed the same file, so the
