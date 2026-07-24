@@ -74,9 +74,11 @@ plugins/dev/scripts/orch-monitor/node_modules/
 .serena/project.local.yml
 .serena/logs/
 
-# mockups/: HTML mockups are reviewed source and stay tracked; the screenshots
-# captured while iterating on them are ephemeral and don't belong in history.
+# mockups/ and docs/specs/: HTML mockups are reviewed source and stay tracked;
+# the screenshots captured while iterating on them are ephemeral and don't
+# belong in history. New design work lives under docs/specs/ (see its README).
 mockups/**/*.png
+docs/specs/**/*.png
 
 # Ad hoc root-level package install (e.g. `npm install linearis` for local CLI use)
 /node_modules/

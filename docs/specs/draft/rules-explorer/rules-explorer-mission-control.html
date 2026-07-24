@@ -1,0 +1,659 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>Rules Explorer — Mission Control · catalyst execution-core</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700&family=IBM+Plex+Mono:ital,wght@0,400;0,500;0,600;1,400&display=swap" rel="stylesheet">
+<style>
+/* ════════════════════════════════════════════════════════════════════
+   MISSION CONTROL — token layer (mirrors shadcn semantic naming, dark)
+   ════════════════════════════════════════════════════════════════════ */
+:root{
+  --background: oklch(0.145 0.012 252);          /* void blue-black */
+  --surface:    oklch(0.175 0.014 252);          /* card */
+  --surface-2:  oklch(0.205 0.016 252);          /* raised */
+  --border:     oklch(0.30 0.02 252 / .55);
+  --border-dim: oklch(0.27 0.02 252 / .35);
+  --foreground: oklch(0.92 0.01 250);
+  --muted-foreground: oklch(0.62 0.02 250);
+  --faint:      oklch(0.46 0.02 250);
+  /* status scale — urgency coded */
+  --ok:        oklch(0.80 0.17 152);   /* progressing / lease_valid */
+  --ok-dim:    oklch(0.80 0.17 152 / .14);
+  --warn:      oklch(0.83 0.15 85);    /* stalled-alive */
+  --warn-dim:  oklch(0.83 0.15 85 / .13);
+  --expire:    oklch(0.74 0.17 55);    /* lease-expired */
+  --expire-dim:oklch(0.74 0.17 55 / .13);
+  --crit:      oklch(0.67 0.22 25);    /* wedged-never-started */
+  --crit-dim:  oklch(0.67 0.22 25 / .15);
+  --dead:      oklch(0.55 0.06 20);    /* dead */
+  --dead-dim:  oklch(0.55 0.06 20 / .18);
+  --esc:       oklch(0.72 0.19 330);   /* escalation magenta */
+  --esc-dim:   oklch(0.72 0.19 330 / .13);
+  --fact:      oklch(0.78 0.13 215);   /* evidence cyan */
+  --fact-dim:  oklch(0.78 0.13 215 / .12);
+  --cfg:       oklch(0.75 0.12 260);   /* threshold blue-violet */
+  --cfg-dim:   oklch(0.75 0.12 260 / .13);
+  --mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  --disp: "Barlow Condensed", "Arial Narrow", sans-serif;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%}
+body{
+  background:var(--background); color:var(--foreground);
+  font-family:var(--mono); font-size:12px; line-height:1.45;
+  overflow:hidden;
+}
+/* atmospheric layers: grid + vignette + scanline grain */
+body::before{
+  content:""; position:fixed; inset:0; pointer-events:none; z-index:0;
+  background:
+    radial-gradient(1200px 700px at 38% 30%, oklch(0.30 0.05 252/.14), transparent 65%),
+    radial-gradient(900px 500px at 85% 90%, oklch(0.40 0.12 330/.05), transparent 60%),
+    repeating-linear-gradient(0deg, transparent 0 2px, oklch(0 0 0/.05) 2px 3px),
+    linear-gradient(oklch(0.55 0.03 250/.045) 1px, transparent 1px),
+    linear-gradient(90deg, oklch(0.55 0.03 250/.045) 1px, transparent 1px);
+  background-size:auto,auto,auto,40px 40px,40px 40px;
+}
+body::after{
+  content:""; position:fixed; inset:0; pointer-events:none; z-index:60;
+  background:radial-gradient(ellipse at center, transparent 55%, oklch(0 0 0/.42));
+}
+#app{position:relative; z-index:1; display:grid; height:100vh;
+  grid-template-rows:46px 34px 1fr 218px;
+  grid-template-columns:1fr 400px;
+  grid-template-areas:"top top" "anom anom" "canvas inspector" "feed inspector";
+}
+
+/* ── TOP BAR ─────────────────────────────────────────────── */
+header.top{
+  grid-area:top; display:flex; align-items:center; gap:18px; padding:0 16px;
+  border-bottom:1px solid var(--border); background:oklch(0.16 0.013 252/.9);
+}
+.brand{display:flex; align-items:baseline; gap:10px}
+.brand .sig{width:10px;height:10px;border-radius:2px;background:var(--crit);
+  box-shadow:0 0 10px var(--crit); align-self:center; animation:blink 1.2s steps(2) infinite}
+@keyframes blink{50%{opacity:.35}}
+.brand h1{font-family:var(--disp); font-weight:700; font-size:19px; letter-spacing:.14em; text-transform:uppercase}
+.brand h1 em{font-style:normal; color:var(--muted-foreground); font-weight:500}
+.topmeta{display:flex; gap:18px; margin-left:auto; align-items:center; color:var(--muted-foreground); font-size:11px}
+.topmeta b{color:var(--foreground); font-weight:500}
+.topmeta .k{color:var(--faint); margin-right:5px; text-transform:uppercase; font-size:9.5px; letter-spacing:.1em}
+.tickclock{padding:3px 10px; border:1px solid var(--border); border-radius:4px; background:var(--surface);
+  display:flex; gap:8px; align-items:baseline}
+.tickclock .t{font-weight:600; font-variant-numeric:tabular-nums; color:var(--fact)}
+.live-pill{display:flex; align-items:center; gap:6px; padding:3px 10px; border-radius:99px;
+  border:1px solid oklch(0.80 0.17 152/.4); color:var(--ok); font-size:10px; letter-spacing:.12em; font-weight:600}
+.live-pill i{width:6px;height:6px;border-radius:50%;background:var(--ok);box-shadow:0 0 8px var(--ok);animation:blink 1s steps(2) infinite}
+
+/* ── ANOMALY BANNER ──────────────────────────────────────── */
+.anomaly{grid-area:anom; display:flex; align-items:center; gap:12px; padding:0 16px;
+  background:linear-gradient(90deg, var(--crit-dim), transparent 70%);
+  border-bottom:1px solid oklch(0.67 0.22 25/.4); overflow:hidden; white-space:nowrap}
+.anomaly .tag{font-family:var(--disp); font-weight:700; letter-spacing:.18em; font-size:13px;
+  color:var(--crit); text-transform:uppercase; display:flex; gap:8px; align-items:center}
+.anomaly .tag::before{content:"▲"; font-size:10px}
+.anomaly .msg{color:var(--foreground); font-size:11.5px}
+.anomaly .msg b{color:var(--crit)}
+.anomaly .sub{color:var(--muted-foreground); font-size:11px}
+.anomaly .act{margin-left:auto; color:var(--esc); font-size:11px}
+.anomaly .act b{border:1px solid oklch(0.72 0.19 330/.45); border-radius:3px; padding:1px 7px; font-weight:500}
+
+/* ── CANVAS (the radar) ──────────────────────────────────── */
+.canvas-wrap{grid-area:canvas; position:relative; overflow:auto; border-right:1px solid var(--border)}
+.canvas{position:relative; width:1168px; height:604px; margin:10px 8px 8px}
+svg.wires{position:absolute; inset:0; width:100%; height:100%; overflow:visible; pointer-events:none}
+.wires path{fill:none; stroke-width:1.4}
+.wires .w-ok{stroke:oklch(0.80 0.17 152/.55)}
+.wires .w-fact{stroke:oklch(0.78 0.13 215/.4)}
+.wires .w-crit{stroke:oklch(0.67 0.22 25/.8); stroke-width:1.8}
+.wires .w-warn{stroke:oklch(0.83 0.15 85/.6)}
+.wires .w-expire{stroke:oklch(0.74 0.17 55/.6)}
+.wires .w-dead{stroke:oklch(0.55 0.06 20/.8)}
+.wires .w-esc{stroke:oklch(0.72 0.19 330/.7)}
+.wires .w-cfg{stroke:oklch(0.75 0.12 260/.45)}
+.wires .inhib{stroke-dasharray:3 4; stroke-width:1.2}
+.wires .firing{stroke-dasharray:7 5; animation:flow 0.9s linear infinite}
+.wires .firing-slow{stroke-dasharray:7 5; animation:flow 2.2s linear infinite}
+@keyframes flow{to{stroke-dashoffset:-12}}
+.wires text{font-family:var(--mono); font-size:9px; fill:var(--muted-foreground)}
+.wires text.rl{fill:var(--foreground); font-weight:600}
+.wires text.rl-crit{fill:var(--crit); font-weight:600}
+.wires text.rl-esc{fill:var(--esc); font-weight:600}
+.wires .inhib-dot{fill:none; stroke-width:1.2}
+
+/* strata bands */
+.stratum{position:absolute; top:0; bottom:0; border-left:1px dashed var(--border-dim); padding-top:2px}
+.stratum .slab{position:sticky; top:0; font-family:var(--disp); font-weight:600; font-size:11px;
+  letter-spacing:.22em; text-transform:uppercase; color:var(--faint); padding-left:8px}
+.stratum .slab b{color:var(--muted-foreground)}
+
+/* nodes */
+.node{position:absolute; border:1px solid var(--border); border-radius:6px; background:var(--surface);
+  box-shadow:0 2px 12px oklch(0 0 0/.35)}
+.node .hd{display:flex; align-items:center; gap:6px; padding:5px 8px 4px; font-size:11px; font-weight:600}
+.node .hd .dot{width:7px; height:7px; border-radius:50%}
+.node .hd .rid{margin-left:auto; font-size:9px; color:var(--faint); font-weight:400}
+.node .meta{padding:0 8px 6px; color:var(--muted-foreground); font-size:10px}
+.node .cnt{font-variant-numeric:tabular-nums}
+
+/* evidence (S1) nodes */
+.ev{width:172px; background:oklch(0.165 0.015 230/.85); border-color:oklch(0.78 0.13 215/.22)}
+.ev .hd{color:var(--fact); font-weight:500; padding-bottom:2px}
+.ev .meta{font-size:9.5px; padding-bottom:5px}
+.ev.cfg-node{border-color:oklch(0.75 0.12 260/.3)} .ev.cfg-node .hd{color:var(--cfg)}
+.ev.tick-node{border-color:var(--border)} .ev.tick-node .hd{color:var(--foreground)}
+
+/* verdict state nodes */
+.state .hd{font-family:var(--disp); font-size:14.5px; letter-spacing:.06em; text-transform:uppercase; font-weight:600}
+.state .belief{font-size:9.5px; color:var(--faint); padding:0 8px 4px; font-style:italic}
+.state .tokens{display:flex; flex-wrap:wrap; gap:4px; padding:2px 8px 8px}
+.s-ok{border-color:oklch(0.80 0.17 152/.5)} .s-ok .hd{color:var(--ok)} .s-ok .hd .dot{background:var(--ok)}
+.s-warn{border-color:oklch(0.83 0.15 85/.5)} .s-warn .hd{color:var(--warn)} .s-warn .hd .dot{background:var(--warn)}
+.s-expire{border-color:oklch(0.74 0.17 55/.5)} .s-expire .hd{color:var(--expire)} .s-expire .hd .dot{background:var(--expire)}
+.s-crit{border-color:oklch(0.67 0.22 25/.75); background:linear-gradient(180deg, var(--crit-dim), var(--surface) 55%);
+  box-shadow:0 0 0 1px oklch(0.67 0.22 25/.25), 0 0 26px oklch(0.67 0.22 25/.22)}
+.s-crit .hd{color:var(--crit)} .s-crit .hd .dot{background:var(--crit); box-shadow:0 0 9px var(--crit); animation:blink 1.2s steps(2) infinite}
+.s-dead{border-color:oklch(0.55 0.06 20/.7)} .s-dead .hd{color:var(--dead)} .s-dead .hd .dot{background:var(--dead)}
+.s-dim{border-color:var(--border-dim); background:oklch(0.165 0.013 252/.7)}
+.s-dim .hd{color:var(--muted-foreground)} .s-dim .hd .dot{background:var(--faint)}
+.statecount{margin-left:auto; font-family:var(--mono); font-size:11px; font-weight:600;
+  padding:0 6px; border-radius:3px; background:oklch(0 0 0/.3)}
+
+/* worker tokens */
+.tok{display:flex; align-items:center; gap:5px; padding:2.5px 7px 2.5px 6px; border-radius:4px;
+  background:oklch(0.13 0.012 252/.9); border:1px solid var(--border); cursor:pointer;
+  font-size:10.5px; transition:border-color .15s, background .15s}
+.tok:hover{border-color:var(--fact); background:var(--surface-2)}
+.tok .ph{color:var(--faint); font-size:9.5px}
+.tok .age{color:var(--muted-foreground); font-size:9px; font-variant-numeric:tabular-nums}
+.tok .sid{display:none}
+.tok-crit{border-color:oklch(0.67 0.22 25/.45); color:oklch(0.88 0.07 25)}
+.tok-dead{border-color:oklch(0.55 0.06 20/.6); color:var(--muted-foreground); text-decoration:line-through; text-decoration-color:oklch(0.55 0.06 20/.7); text-decoration-thickness:1px}
+.tok.sel{border-color:var(--crit); background:var(--crit-dim);
+  box-shadow:0 0 0 1px oklch(0.67 0.22 25/.5), 0 0 14px oklch(0.67 0.22 25/.4); animation:selpulse 1.6s ease-in-out infinite}
+@keyframes selpulse{50%{box-shadow:0 0 0 1px oklch(0.67 0.22 25/.8), 0 0 22px oklch(0.67 0.22 25/.6)}}
+.empty-tokens{padding:2px 8px 9px; color:var(--faint); font-size:10px; font-style:italic}
+
+/* gauge node (R8) */
+.gauge{width:176px}
+.gauge .big{font-size:34px; font-weight:600; text-align:center; padding:2px 0 0;
+  font-variant-numeric:tabular-nums; color:var(--foreground); line-height:1.1}
+.gauge .big small{font-size:11px; color:var(--faint); font-weight:400}
+.gauge .terms{padding:4px 10px 8px; font-size:10px; color:var(--muted-foreground)}
+.gauge .terms .row{display:flex; justify-content:space-between; padding:1.5px 0}
+.gauge .terms .row b{color:var(--foreground); font-weight:500}
+.gauge .bar{height:5px; border-radius:3px; background:oklch(0 0 0/.4); margin:3px 10px 9px; overflow:hidden; display:flex}
+.gauge .bar i{height:100%}
+
+/* escalation sinks */
+.sink{border-color:oklch(0.72 0.19 330/.5)}
+.sink .hd{color:var(--esc); font-family:var(--disp); font-size:14px; letter-spacing:.06em; text-transform:uppercase}
+.sink .hd .dot{background:var(--esc); box-shadow:0 0 8px var(--esc)}
+.sink .meta b{color:var(--foreground); font-weight:500}
+.sink .intent{margin:0 8px 8px; padding:5px 7px; border:1px solid oklch(0.72 0.19 330/.3); border-radius:4px;
+  background:var(--esc-dim); font-size:10px}
+.sink .intent .k{color:var(--esc); font-weight:600}
+.sink .intent .res{color:var(--warn); display:block; margin-top:2px}
+.sink2{border-color:var(--border)} .sink2 .hd{color:var(--muted-foreground)} .sink2 .hd .dot{background:var(--faint); box-shadow:none}
+
+/* legend */
+.legend{position:absolute; left:248px; bottom:4px; display:flex; gap:14px; font-size:9.5px; color:var(--muted-foreground); align-items:center}
+.legend i{display:inline-block; width:16px; border-top:1.4px solid var(--muted-foreground); vertical-align:middle; margin-right:5px}
+.legend .l-in{border-top:1.2px dashed var(--muted-foreground)}
+.legend .l-fire{border-top:1.8px solid var(--crit)}
+
+/* ── INSPECTOR (why-trace) ───────────────────────────────── */
+.inspector{grid-area:inspector; display:flex; flex-direction:column; overflow:hidden;
+  background:oklch(0.155 0.013 252/.92); border-left:1px solid var(--border)}
+.inspector .ihd{padding:10px 14px 8px; border-bottom:1px solid var(--border)}
+.inspector .crumb{font-size:9.5px; letter-spacing:.16em; text-transform:uppercase; color:var(--faint); margin-bottom:4px}
+.inspector .subject{display:flex; align-items:baseline; gap:8px}
+.inspector .subject h2{font-family:var(--disp); font-size:20px; font-weight:700; letter-spacing:.04em}
+.inspector .subject .st{font-size:10px; font-weight:600; color:var(--crit); border:1px solid oklch(0.67 0.22 25/.5);
+  border-radius:3px; padding:1px 7px; letter-spacing:.08em; text-transform:uppercase; background:var(--crit-dim)}
+.inspector .sidline{margin-top:5px; font-size:10px; color:var(--muted-foreground)}
+.inspector .sidline b{color:var(--fact); font-weight:500}
+.inspector .ibody{flex:1; overflow-y:auto; padding:10px 12px 16px}
+.inspector .ibody::-webkit-scrollbar{width:8px}
+.inspector .ibody::-webkit-scrollbar-thumb{background:var(--border); border-radius:4px}
+.qhint{font-size:9.5px; color:var(--faint); padding:0 2px 8px}
+.qhint code{color:var(--muted-foreground); background:oklch(0 0 0/.3); padding:1px 5px; border-radius:3px}
+
+/* trace tree */
+details.tn{position:relative; margin:0 0 2px 0}
+details.tn details.tn{margin-left:16px; border-left:1px solid var(--border-dim); padding-left:8px}
+summary.trow{list-style:none; cursor:pointer; display:flex; gap:7px; align-items:flex-start;
+  padding:5px 7px; border-radius:5px; border:1px solid transparent}
+summary.trow::-webkit-details-marker{display:none}
+summary.trow:hover{background:var(--surface-2)}
+.trow .car{color:var(--faint); font-size:9px; line-height:1.9; width:9px; flex:none; transition:transform .12s}
+details[open] > .trow .car{transform:rotate(90deg)}
+details.leaf > .trow .car{visibility:hidden}
+.kchip{flex:none; font-size:8.5px; font-weight:600; letter-spacing:.1em; text-transform:uppercase;
+  border-radius:3px; padding:1.5px 6px; margin-top:1px; border:1px solid}
+.k-belief{color:var(--ok); border-color:oklch(0.80 0.17 152/.4); background:var(--ok-dim)}
+.k-belief-crit{color:var(--crit); border-color:oklch(0.67 0.22 25/.5); background:var(--crit-dim)}
+.k-belief-esc{color:var(--esc); border-color:oklch(0.72 0.19 330/.45); background:var(--esc-dim)}
+.k-fact{color:var(--fact); border-color:oklch(0.78 0.13 215/.4); background:var(--fact-dim)}
+.k-neg{color:var(--warn); border-color:oklch(0.83 0.15 85/.45); background:var(--warn-dim); border-style:dashed}
+.k-cfg{color:var(--cfg); border-color:oklch(0.75 0.12 260/.45); background:var(--cfg-dim)}
+.tmain{flex:1; min-width:0}
+.tmain .tl{font-size:11px; font-weight:500; color:var(--foreground); word-break:break-word}
+.tmain .tl .neg{color:var(--warn)}
+.tmain .td{font-size:10px; color:var(--muted-foreground); margin-top:1px; word-break:break-word}
+.tmain .td b{color:var(--foreground); font-weight:500}
+.tmain .td .pass{color:var(--ok)} .tmain .td .nul{color:var(--faint)}
+.tts{flex:none; font-size:9px; color:var(--faint); font-variant-numeric:tabular-nums; margin-top:2px}
+.tn-root > .trow{border-color:oklch(0.72 0.19 330/.4); background:var(--esc-dim)}
+.tn-crit > .trow{border-color:oklch(0.67 0.22 25/.35); background:oklch(0.67 0.22 25/.07)}
+.fid{color:var(--faint); font-size:9px; margin-left:5px; font-weight:400}
+
+/* ── FEED ────────────────────────────────────────────────── */
+.feed{grid-area:feed; display:grid; grid-template-columns:1fr 332px; overflow:hidden;
+  border-top:1px solid var(--border); background:oklch(0.15 0.012 252/.95)}
+.feedcol{display:flex; flex-direction:column; overflow:hidden}
+.fhd{display:flex; align-items:center; gap:10px; padding:6px 12px 5px; border-bottom:1px solid var(--border-dim)}
+.fhd h3{font-family:var(--disp); font-size:12.5px; font-weight:600; letter-spacing:.2em; text-transform:uppercase; color:var(--muted-foreground)}
+.fhd .src{font-size:9px; color:var(--faint)}
+.fhd .pause{margin-left:auto; font-size:9px; color:var(--faint); border:1px solid var(--border); border-radius:3px; padding:1px 7px; cursor:pointer}
+.fhd .pause:hover{color:var(--foreground)}
+.frows{flex:1; overflow-y:auto; padding:3px 0 6px; font-size:10.5px}
+.frows::-webkit-scrollbar{width:8px}
+.frows::-webkit-scrollbar-thumb{background:var(--border); border-radius:4px}
+.frow{display:flex; align-items:baseline; gap:9px; padding:2.5px 12px; white-space:nowrap}
+.frow:hover{background:var(--surface-2)}
+.frow .ts{color:var(--faint); font-variant-numeric:tabular-nums; flex:none; width:88px}
+.frow .rid{flex:none; width:34px; font-weight:600}
+.frow .dot{flex:none; width:6px; height:6px; border-radius:50%; align-self:center}
+.frow .body{overflow:hidden; text-overflow:ellipsis}
+.frow .body b{font-weight:500}
+.frow .body .subj{color:var(--fact); cursor:pointer} .frow .body .subj:hover{text-decoration:underline}
+.frow .val{color:var(--muted-foreground)}
+.f-ok .dot{background:var(--ok)} .f-ok .rid{color:var(--ok)}
+.f-fact .dot{background:var(--fact)} .f-fact .rid{color:var(--fact)}
+.f-crit .dot{background:var(--crit); box-shadow:0 0 6px var(--crit)} .f-crit .rid{color:var(--crit)}
+.f-dead .dot{background:var(--dead)} .f-dead .rid{color:var(--dead)}
+.f-esc .dot{background:var(--esc); box-shadow:0 0 6px var(--esc)} .f-esc .rid{color:var(--esc)}
+.f-sys .dot{background:var(--faint)} .f-sys .rid{color:var(--muted-foreground)}
+.frow.cluster{background:linear-gradient(90deg, oklch(0.67 0.22 25/.09), transparent 75%)}
+.frow.flash{animation:rowin .5s ease-out}
+@keyframes rowin{from{background:oklch(0.67 0.22 25/.3)}}
+.fsep{padding:3px 12px 1px; color:var(--faint); font-size:9px; letter-spacing:.14em; text-transform:uppercase;
+  border-top:1px dashed var(--border-dim); margin-top:3px}
+
+/* thresholds panel */
+.thr{border-left:1px solid var(--border); display:flex; flex-direction:column; overflow:hidden}
+.thr table{width:100%; border-collapse:collapse; font-size:10px}
+.thr .twrap{flex:1; overflow-y:auto}
+.thr td,.thr th{padding:3.5px 10px; text-align:left; border-bottom:1px solid var(--border-dim)}
+.thr th{font-size:8.5px; letter-spacing:.14em; text-transform:uppercase; color:var(--faint); font-weight:500; position:sticky; top:0; background:oklch(0.15 0.012 252)}
+.thr td.key{color:var(--cfg); font-weight:500}
+.thr td.val{font-variant-numeric:tabular-nums; color:var(--foreground); text-align:right}
+.thr td.val small{color:var(--faint)}
+.thr td.use{color:var(--muted-foreground)}
+.thr td.use b{color:var(--foreground); font-weight:500}
+.thr tr.hot td{background:oklch(0.67 0.22 25/.07)}
+.thr tr.hot td.key{color:var(--crit)}
+.thr .prov{padding:5px 10px; font-size:9px; color:var(--faint); border-top:1px solid var(--border-dim)}
+.thr .prov code{color:var(--muted-foreground)}
+</style>
+</head>
+<body>
+<div id="app">
+
+<!-- ═══ TOP BAR ═══ -->
+<header class="top">
+  <div class="brand">
+    <span class="sig"></span>
+    <h1>Rules Explorer <em>/ execution-core beliefs</em></h1>
+  </div>
+  <div class="topmeta">
+    <span><span class="k">host</span><b>mini</b> · pid 7837</span>
+    <span><span class="k">rules</span><b>12</b> · strata <b>4</b></span>
+    <span><span class="k">workers</span><b>8</b> tracked</span>
+    <span class="tickclock"><span class="k">tick</span><b>#6647</b><span class="t" id="clock">18:35:08.000Z</span></span>
+    <span class="live-pill"><i></i>LIVE</span>
+  </div>
+</header>
+
+<!-- ═══ ANOMALY BANNER ═══ -->
+<div class="anomaly">
+  <span class="tag">Anomaly</span>
+  <span class="msg"><b>6 of 6</b> active workers entered <b>wedged-never-started</b> within <b>5 ms</b> (R4 ×6 at +223…+228 ms)</span>
+  <span class="sub">— simultaneity ⇒ shared cause · transcripts absent on all six · oldest CTL-722/plan 9 h 39 m</span>
+  <span class="act">diagnostician <b>i1 dispatched</b> → captured: <b>“Unknown command: /catalyst-dev:phase-plan”</b></span>
+</div>
+
+<!-- ═══ CANVAS ═══ -->
+<div class="canvas-wrap">
+<div class="canvas">
+
+  <!-- strata band rules -->
+  <div class="stratum" style="left:228px"><div class="slab">S2 · <b>Liveness verdicts</b> <span style="letter-spacing:0;color:var(--faint)">negation over S1</span></div></div>
+  <div class="stratum" style="left:716px"><div class="slab">S3 · <b>Capacity</b></div></div>
+  <div class="stratum" style="left:914px"><div class="slab">S4 · <b>Escalation</b></div></div>
+  <div class="stratum" style="left:0;border-left:none"><div class="slab">S1 · <b>Evidence</b> <span style="letter-spacing:0;color:var(--faint)">obs_* @ tick</span></div></div>
+
+  <!-- ═ SVG wiring ═ -->
+  <svg class="wires" viewBox="0 0 1168 604">
+    <defs>
+      <marker id="m-ok" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L8 4L0 8z" fill="oklch(0.80 0.17 152/.7)"/></marker>
+      <marker id="m-fact" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L8 4L0 8z" fill="oklch(0.78 0.13 215/.55)"/></marker>
+      <marker id="m-crit" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L8 4L0 8z" fill="oklch(0.67 0.22 25/.9)"/></marker>
+      <marker id="m-warn" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L8 4L0 8z" fill="oklch(0.83 0.15 85/.8)"/></marker>
+      <marker id="m-expire" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L8 4L0 8z" fill="oklch(0.74 0.17 55/.8)"/></marker>
+      <marker id="m-dead" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L8 4L0 8z" fill="oklch(0.55 0.06 20/.9)"/></marker>
+      <marker id="m-esc" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L8 4L0 8z" fill="oklch(0.72 0.19 330/.85)"/></marker>
+      <marker id="m-inhib" viewBox="0 0 10 10" refX="5" refY="5" markerWidth="8" markerHeight="8" orient="auto"><circle cx="5" cy="5" r="3.4" fill="oklch(0.145 0.012 252)" stroke="oklch(0.83 0.15 85/.9)" stroke-width="1.6"/></marker>
+    </defs>
+
+    <!-- S1 → S2 : R1/R5 ground correlations -->
+    <path class="w-fact" d="M196 86 C 240 86, 240 80, 300 80" marker-end="url(#m-fact)"/>
+    <text x="243" y="72">R5 lease</text>
+    <path class="w-fact firing-slow" d="M196 142 C 236 142, 230 226, 296 226" marker-end="url(#m-fact)"/>
+    <text class="rl" x="222" y="190">R1 ×6</text>
+    <path class="w-fact firing-slow" d="M196 92 C 252 110, 240 200, 296 212" marker-end="url(#m-fact)"/>
+    <path class="w-fact" d="M196 306 C 236 306, 246 104, 300 96" marker-end="url(#m-fact)"/>
+    <text x="222" y="296">R3 evid.</text>
+
+    <!-- inhibitors into WEDGED (the stratification, visible) -->
+    <path class="w-warn inhib" d="M196 254 C 240 254, 244 252, 290 250" marker-end="url(#m-inhib)"/>
+    <text class="rl" x="214" y="244" fill="oklch(0.83 0.15 85)">¬R2 turn_started</text>
+    <path class="w-warn inhib" d="M196 198 C 234 198, 248 236, 290 238" marker-end="url(#m-inhib)"/>
+    <text class="rl" x="240" y="212" fill="oklch(0.83 0.15 85)">¬R7</text>
+
+    <!-- obs_job → DEAD (R7) and → STALLED guard -->
+    <path class="w-dead" d="M196 206 C 300 206, 380 332, 500 332" marker-end="url(#m-dead)"/>
+    <text x="350" y="318">R7 worker_dead</text>
+    <path class="w-warn inhib" d="M196 190 C 330 168, 400 112, 498 100" marker-end="url(#m-warn)"/>
+    <text x="356" y="112">guard: obs_job.state = working</text>
+
+    <!-- cfg → wedged threshold -->
+    <path class="w-cfg inhib" d="M196 488 C 250 488, 232 320, 290 296" marker-end="url(#m-cfg)" stroke-dasharray="2 3"/>
+    <text x="208" y="406" fill="oklch(0.75 0.12 260/.8)">never_started_ms</text>
+
+    <!-- progressing → free_slots (R8) -->
+    <path class="w-ok" d="M462 84 C 580 84, 600 196, 716 200" marker-end="url(#m-ok)"/>
+    <text class="rl" x="588" y="160" fill="oklch(0.80 0.17 152)">R8 count lease_valid = 0</text>
+    <!-- obs_agent → free_slots session cap -->
+    <path class="w-fact" d="M196 150 C 420 158, 560 420, 716 262 " marker-end="url(#m-fact)" opacity=".6"/>
+    <text x="688" y="344" fill="oklch(0.78 0.13 215/.7)">R8 count background = 6</text>
+
+    <!-- WEDGED → wake_diagnostician : THE firing edge -->
+    <path class="w-crit firing" d="M474 252 C 612 252, 636 134, 770 126 C 840 122, 866 130, 904 138" marker-end="url(#m-crit)"/>
+    
+    <!-- stalled-alive → wake_diagnostician -->
+    <path class="w-warn" d="M664 96 C 760 96, 800 124, 904 130" marker-end="url(#m-warn)"/>
+    <text x="762" y="106" fill="oklch(0.83 0.15 85/.9)">R10b “stalled-alive”</text>
+    <!-- lease-expired → stalled-alive disambiguation -->
+    <path class="w-expire inhib" d="M582 168 L 582 122" marker-end="url(#m-expire)"/>
+    <text x="590" y="152" fill="oklch(0.74 0.17 55/.9)">+job alive</text>
+
+    <!-- diag cooldown inhibitor from cfg -->
+    <path class="w-cfg inhib" d="M196 500 C 560 560, 800 420, 920 218" marker-end="url(#m-inhib)" stroke-dasharray="2 3"/>
+    <text x="700" y="478" fill="oklch(0.75 0.12 260/.8)">¬recent_intent · diag_cooldown_ms</text>
+
+    <!-- wake → escalate_human (R11/R12) -->
+    <path class="w-esc" d="M1010 218 L 1010 282" marker-end="url(#m-esc)"/>
+    <text class="rl-esc" x="1020" y="254">R12</text>
+    <text x="1020" y="266" fill="oklch(0.72 0.19 330/.7)">R11 ineffective ≥2</text>
+
+    <!-- obs_linear → board_drift -->
+    <path class="w-fact" d="M196 362 C 240 362, 244 462, 300 462" marker-end="url(#m-fact)" opacity=".5"/>
+    <text x="234" y="442" fill="oklch(0.78 0.13 215/.6)">R9</text>
+  </svg>
+
+  <!-- ═ S1 evidence nodes ═ -->
+  <div class="node ev" style="left:16px; top:64px">
+    <div class="hd">obs_signal <span class="rid">8 rows</span></div>
+    <div class="meta">workers/&lt;T&gt;/phase-*.json · 8 running</div>
+  </div>
+  <div class="node ev" style="left:16px; top:120px">
+    <div class="hd">obs_agent <span class="rid">6 rows</span></div>
+    <div class="meta">claude agents --json · 6 background</div>
+  </div>
+  <div class="node ev" style="left:16px; top:176px">
+    <div class="hd">obs_job <span class="rid">8 rows</span></div>
+    <div class="meta">jobs/&lt;id&gt;/state.json · tempo/detail/needs</div>
+  </div>
+  <div class="node ev" style="left:16px; top:232px">
+    <div class="hd">obs_transcript <span class="rid">6 rows</span></div>
+    <div class="meta" style="color:var(--crit)">exists=0 on 6/6 sessions ⚠</div>
+  </div>
+  <div class="node ev" style="left:16px; top:288px">
+    <div class="hd">obs_heartbeat <span class="rid">0 new</span></div>
+    <div class="meta">worker.heartbeat tail · silent 9h+</div>
+  </div>
+  <div class="node ev" style="left:16px; top:344px">
+    <div class="hd">obs_linear <span class="rid">8 rows</span></div>
+    <div class="meta">cache-mediated · 1 drift</div>
+  </div>
+  <div class="node ev tick-node" style="left:16px; top:408px">
+    <div class="hd">tick #6647</div>
+    <div class="meta">now_ms 1781030108000 · host mini</div>
+  </div>
+  <div class="node ev cfg-node" style="left:16px; top:464px">
+    <div class="hd">cfg <span class="rid">7 keys</span></div>
+    <div class="meta">.catalyst/config.json → beliefs.*</div>
+  </div>
+
+  <!-- ═ S2 verdict states ═ -->
+  <div class="node state s-ok" style="left:300px; top:48px; width:164px">
+    <div class="hd"><span class="dot"></span>Progressing<span class="statecount">0</span></div>
+    <div class="belief">lease_valid · R5</div>
+    <div class="empty-tokens">no worker holds a live lease</div>
+  </div>
+
+  <div class="node state s-warn" style="left:500px; top:48px; width:164px">
+    <div class="hd"><span class="dot"></span>Stalled-alive<span class="statecount">0</span></div>
+    <div class="belief">lease_expired ∧ job working · R6+R10b</div>
+    <div class="empty-tokens">—</div>
+  </div>
+
+  <div class="node state s-expire" style="left:500px; top:168px; width:164px">
+    <div class="hd"><span class="dot"></span>Lease-expired<span class="statecount">0</span></div>
+    <div class="belief">lease_expired · R6</div>
+    <div class="empty-tokens">—</div>
+  </div>
+
+  <div class="node state s-crit" style="left:296px; top:188px; width:198px">
+    <div class="hd"><span class="dot"></span>Wedged<span class="statecount">6</span></div>
+    <div class="belief">wedged_never_started · R4 · never a first turn</div>
+    <div class="tokens">
+      <span class="tok tok-crit sel" title="b4 · session 5ad5c1ff">CTL-722<span class="ph">/plan</span><span class="age">9h39m</span></span>
+      <span class="tok tok-crit">CTL-865<span class="ph">/plan</span><span class="age">9h41m</span></span>
+      <span class="tok tok-crit">CTL-729<span class="ph">/remediate</span><span class="age">9h12m</span></span>
+      <span class="tok tok-crit">CTL-926<span class="ph">/plan</span><span class="age">8h57m</span></span>
+      <span class="tok tok-crit">CTL-925<span class="ph">/research</span><span class="age">8h39m</span></span>
+      <span class="tok tok-crit">CTL-928<span class="ph">/plan</span><span class="age">8h15m</span></span>
+    </div>
+  </div>
+
+  <div class="node state s-dead" style="left:500px; top:296px; width:178px">
+    <div class="hd"><span class="dot"></span>Dead<span class="statecount">2</span></div>
+    <div class="belief">worker_dead · R7 · CC durable verdict</div>
+    <div class="tokens">
+      <span class="tok tok-dead">CTL-718<span class="ph">/mon-merge</span></span>
+      <span class="tok tok-dead">CTL-731<span class="ph">/verify</span></span>
+    </div>
+  </div>
+
+  <div class="node state s-dim" style="left:300px; top:436px; width:180px">
+    <div class="hd"><span class="dot"></span>Board drift<span class="statecount">1</span></div>
+    <div class="belief">board_drift · R9 · Linear ≠ signal</div>
+    <div class="tokens"><span class="tok">CTL-729<span class="ph">want Implement</span></span></div>
+  </div>
+
+  <!-- ═ S3 gauge ═ -->
+  <div class="node gauge" style="left:726px; top:160px">
+    <div class="hd" style="color:var(--foreground); font-family:var(--disp); font-size:14px; letter-spacing:.06em">FREE SLOTS <span class="rid">R8 · b3</span></div>
+    <div class="big">4 <small>= min(6, 4)</small></div>
+    <div class="bar"><i style="width:40%; background:var(--ok)"></i><i style="width:60%; background:oklch(0 0 0/.2)"></i></div>
+    <div class="terms">
+      <div class="row"><span>by_lease</span><b>6 − 0 = 6</b></div>
+      <div class="row"><span>by_session_cap</span><b>10 − 6 = 4</b></div>
+      <div class="row" style="color:var(--ok)"><span>drains, not starves</span><b style="color:var(--ok)">admit 4</b></div>
+    </div>
+  </div>
+
+  <!-- ═ S4 sinks ═ -->
+  <div class="node sink" style="left:904px; top:96px; width:226px">
+    <div class="hd"><span class="dot"></span>Wake diagnostician <span class="rid">R10</span></div>
+    <div class="meta">deterministic rules end here — the <b>agent interprets</b>. cooldown 15m via intent table (storm-proof)</div>
+    <div class="intent"><span class="k">intent i1</span> wake-diagnostician · CTL-722/plan · +412ms
+      <span class="res">↳ claude logs 5ad5c1ff → “Unknown command: /catalyst-dev:phase-plan”</span>
+    </div>
+  </div>
+  <div class="node sink sink2" style="left:904px; top:282px; width:226px">
+    <div class="hd"><span class="dot"></span>Escalate human <span class="rid">R12</span></div>
+    <div class="meta">conclusion w/ provenance, not a lost label. fires if diagnosis unresolved or R11 <b>action_ineffective</b> (≥2 attempts, no effect)</div>
+    <div class="meta" style="color:var(--faint)">0 active — i1 still in flight</div>
+  </div>
+
+  <div class="legend">
+    <span><i></i>derivation</span>
+    <span><i class="l-in"></i>negation / inhibitor (stratified ¬)</span>
+    <span><i class="l-fire"></i>firing this tick</span>
+    <span style="color:var(--faint)">click any token → why-trace · click an edge label → rule source</span>
+  </div>
+
+</div><!-- /canvas -->
+</div>
+
+<!-- ═══ INSPECTOR : WHY-TRACE ═══ -->
+<aside class="inspector">
+  <div class="ihd">
+    <div class="crumb">Why-trace · tick #6647 · 18:35:08Z</div>
+    <div class="subject"><h2>CTL-722 / plan</h2><span class="st">wedged-never-started</span></div>
+    <div class="sidline">session <b>5ad5c1ff</b> · pid 41782 · started 08:56:24Z · age <b style="color:var(--crit)">9h 39m</b></div>
+  </div>
+  <div class="ibody">
+    <div class="qhint">replayable: <code>catalyst why CTL-722 --tick 6647</code> — every node below is a stored row</div>
+
+    <details class="tn tn-root" open>
+      <summary class="trow"><span class="car">▶</span><span class="kchip k-belief-esc">belief·R10</span>
+        <span class="tmain"><span class="tl">wake_diagnostician(CTL-722, plan, “never-started”)<span class="fid">b4</span></span>
+        <span class="td">intent <b>i1</b> dispatched → runner captured <code>claude logs 5ad5c1ff</code> → <b style="color:var(--warn)">“Unknown command: /catalyst-dev:phase-plan”</b></span></span>
+        <span class="tts">+410ms</span></summary>
+
+      <details class="tn tn-crit" open>
+        <summary class="trow"><span class="car">▶</span><span class="kchip k-belief-crit">belief·R4</span>
+          <span class="tmain"><span class="tl">wedged_never_started(CTL-722, plan)<span class="fid">b2</span></span>
+          <span class="td">age <b>9h39m</b> (34,724,000ms) ≫ never_started_ms <b>120,000ms</b>; ¬turn_started; ¬worker_dead</span></span>
+          <span class="tts">+223ms</span></summary>
+
+        <details class="tn" open>
+          <summary class="trow"><span class="car">▶</span><span class="kchip k-belief">belief·R1</span>
+            <span class="tmain"><span class="tl">session_registered(CTL-722, plan, 5ad5c1ff)<span class="fid">b1</span></span>
+            <span class="td">signal bg_job_id matched background agent listing</span></span></summary>
+          <details class="tn leaf"><summary class="trow"><span class="car">▶</span><span class="kchip k-fact">fact</span>
+            <span class="tmain"><span class="tl">obs_signal CTL-722/plan<span class="fid">f101</span></span>
+            <span class="td">status=<b>running</b> bg_job_id=5ad5c1ff started <b>2026-06-09T08:56:24Z</b></span></span></summary></details>
+          <details class="tn leaf"><summary class="trow"><span class="car">▶</span><span class="kchip k-fact">fact</span>
+            <span class="tmain"><span class="tl">obs_agent 5ad5c1ff<span class="fid">f102</span></span>
+            <span class="td">kind=background status=idle <b style="color:var(--warn)">state=blocked</b> pid=41782</span></span></summary></details>
+        </details>
+
+        <details class="tn leaf"><summary class="trow"><span class="car">▶</span><span class="kchip k-fact">fact</span>
+          <span class="tmain"><span class="tl">obs_signal.started_at_ms<span class="fid">f101</span></span>
+          <span class="td">1780995384000 <span class="nul">(08:56:24Z)</span></span></span></summary></details>
+
+        <details class="tn leaf"><summary class="trow"><span class="car">▶</span><span class="kchip k-fact">fact</span>
+          <span class="tmain"><span class="tl">tick.now_ms<span class="fid">t6647</span></span>
+          <span class="td">1781030108000 <span class="nul">(18:35:08Z)</span></span></span></summary></details>
+
+        <details class="tn leaf"><summary class="trow"><span class="car">▶</span><span class="kchip k-cfg">threshold</span>
+          <span class="tmain"><span class="tl">cfg never_started_ms = 120000<span class="fid">cfg:never_started_ms</span></span>
+          <span class="td">from <b>.catalyst/config.json → catalyst.beliefs.neverStartedMs</b>; used by R4. Guard: now − started_at = <b>34,724,000</b> &gt; 120,000 <span class="pass">✓</span></span></span></summary></details>
+
+        <details class="tn" open>
+          <summary class="trow"><span class="car">▶</span><span class="kchip k-neg">¬ negation</span>
+            <span class="tmain"><span class="tl"><span class="neg">¬turn_started(CTL-722, plan)</span></span>
+            <span class="td">No R2 belief this tick: obs_transcript f104 exists_flag=<b>0</b> — the prompt <b>never became a turn</b></span></span></summary>
+          <details class="tn leaf"><summary class="trow"><span class="car">▶</span><span class="kchip k-fact">fact</span>
+            <span class="tmain"><span class="tl">obs_transcript 5ad5c1ff<span class="fid">f104</span></span>
+            <span class="td">exists_flag=<b>0</b> mtime=<span class="nul">null</span> bytes=<span class="nul">null</span></span></span></summary></details>
+        </details>
+
+        <details class="tn">
+          <summary class="trow"><span class="car">▶</span><span class="kchip k-neg">¬ negation</span>
+            <span class="tmain"><span class="tl"><span class="neg">¬worker_dead(CTL-722, plan)</span></span>
+            <span class="td">No R7 belief: obs_job f103 state=working, first_terminal_at=<span class="nul">null</span>, exists_flag=1</span></span></summary>
+          <details class="tn leaf"><summary class="trow"><span class="car">▶</span><span class="kchip k-fact">fact</span>
+            <span class="tmain"><span class="tl">obs_job 5ad5c1ff<span class="fid">f103</span></span>
+            <span class="td">state=working <b style="color:var(--warn)">tempo=blocked</b> detail=<b>“stuck on a startup dialog”</b> first_terminal_at=<span class="nul">null</span></span></span></summary></details>
+        </details>
+      </details>
+
+      <details class="tn leaf"><summary class="trow"><span class="car">▶</span><span class="kchip k-neg">¬ negation</span>
+        <span class="tmain"><span class="tl"><span class="neg">¬recent_intent(“wake-diagnostician”, CTL-722/plan, 900000ms)</span></span>
+        <span class="td">No wake intent for this subject within diag_cooldown_ms — <b>storm-proof by construction</b></span></span></summary></details>
+
+      <details class="tn leaf"><summary class="trow"><span class="car">▶</span><span class="kchip k-cfg">threshold</span>
+        <span class="tmain"><span class="tl">cfg diag_cooldown_ms = 900000<span class="fid">cfg:diag_cooldown_ms</span></span>
+        <span class="td">used by R10</span></span></summary></details>
+    </details>
+  </div>
+</aside>
+
+<!-- ═══ FEED + THRESHOLDS ═══ -->
+<div class="feed">
+  <div class="feedcol">
+    <div class="fhd"><h3>Firing feed</h3><span class="src">SSE · belief rows, newest first · ec-worker-stream tail</span><span class="pause">⏸ hold</span></div>
+    <div class="frows" id="frows">
+      <div class="frow f-sys flash"><span class="ts">+2841ms</span><span class="dot"></span><span class="rid">i1</span><span class="body">intent outcome · runner captured <b style="color:var(--warn)">“Unknown command: /catalyst-dev:phase-plan”</b> <span class="val">← claude logs 5ad5c1ff</span></span></div>
+      <div class="frow f-esc"><span class="ts">+412ms</span><span class="dot"></span><span class="rid">i1</span><span class="body">intent dispatched · kind=wake-diagnostician subject=<span class="subj">CTL-722/plan</span> <span class="val">postcondition: transcript exists within 120s</span></span></div>
+      <div class="frow f-esc"><span class="ts">+410ms</span><span class="dot"></span><span class="rid">R10</span><span class="body"><b>wake_diagnostician</b>(<span class="subj">CTL-722/plan</span>, “never-started”) <span class="val">b4 · ¬recent_intent ✓ · 5 siblings suppressed by cooldown ordering</span></span></div>
+      <div class="frow f-ok"><span class="ts">+301ms</span><span class="dot"></span><span class="rid">R8</span><span class="body"><b>free_slots = 4</b> <span class="val">= min(6−0 by_lease, 10−6 by_session_cap) · b3 · admission decision record</span></span></div>
+      <div class="fsep">▼ incident signature — 6 firings in 5 ms</div>
+      <div class="frow f-crit cluster"><span class="ts">+228ms</span><span class="dot"></span><span class="rid">R4</span><span class="body"><b>wedged_never_started</b>(<span class="subj">CTL-928/plan</span>) <span class="val">b25 · age 8h15m · ¬turn_started</span></span></div>
+      <div class="frow f-crit cluster"><span class="ts">+227ms</span><span class="dot"></span><span class="rid">R4</span><span class="body"><b>wedged_never_started</b>(<span class="subj">CTL-925/research</span>) <span class="val">b24 · age 8h39m · ¬turn_started</span></span></div>
+      <div class="frow f-crit cluster"><span class="ts">+226ms</span><span class="dot"></span><span class="rid">R4</span><span class="body"><b>wedged_never_started</b>(<span class="subj">CTL-926/plan</span>) <span class="val">b21 · age 8h57m · ¬turn_started</span></span></div>
+      <div class="frow f-crit cluster"><span class="ts">+225ms</span><span class="dot"></span><span class="rid">R4</span><span class="body"><b>wedged_never_started</b>(<span class="subj">CTL-729/remediate</span>) <span class="val">b19 · age 9h12m · ¬turn_started</span></span></div>
+      <div class="frow f-crit cluster"><span class="ts">+224ms</span><span class="dot"></span><span class="rid">R4</span><span class="body"><b>wedged_never_started</b>(<span class="subj">CTL-865/plan</span>) <span class="val">b18 · age 9h41m · ¬turn_started</span></span></div>
+      <div class="frow f-crit cluster"><span class="ts">+223ms</span><span class="dot"></span><span class="rid">R4</span><span class="body"><b>wedged_never_started</b>(<span class="subj">CTL-722/plan</span>) <span class="val">b2 · age 9h39m · ¬turn_started · ¬worker_dead</span></span></div>
+      <div class="frow f-dead"><span class="ts">+199ms</span><span class="dot"></span><span class="rid">R7</span><span class="body"><b>worker_dead</b>(<span class="subj">CTL-731/verify</span>) <span class="val">b17 · first_terminal_at set</span></span></div>
+      <div class="frow f-dead"><span class="ts">+198ms</span><span class="dot"></span><span class="rid">R7</span><span class="body"><b>worker_dead</b>(<span class="subj">CTL-718/monitor-merge</span>) <span class="val">b16 · job dir gone (exists=0)</span></span></div>
+      <div class="frow f-ok"><span class="ts">+180ms</span><span class="dot"></span><span class="rid">R1</span><span class="body"><b>session_registered</b> ×6 <span class="val">b1,b18a… · all six signals matched background agents</span></span></div>
+      <div class="frow f-fact"><span class="ts">+002ms</span><span class="dot"></span><span class="rid">obs</span><span class="body">collector snapshot · 8 signals, 6 agents, 8 jobs, 6 transcripts(0 exist), 0 heartbeats <span class="val">tick #6647 opened 18:35:08.000Z</span></span></div>
+      <div class="fsep" style="color:var(--faint)">tick #6646 · 18:34:38Z · 14 beliefs (identical verdicts, no new firings)</div>
+    </div>
+  </div>
+
+  <div class="feedcol thr">
+    <div class="fhd"><h3>Thresholds</h3><span class="src">cfg facts · display-only</span></div>
+    <div class="twrap"><table>
+      <tr><th>key</th><th style="text-align:right">value</th><th>used by</th></tr>
+      <tr class="hot"><td class="key">never_started_ms</td><td class="val">120 000 <small>2m</small></td><td class="use"><b>R4</b> · breached ×6</td></tr>
+      <tr><td class="key">lease_window_build_ms</td><td class="val">1 800 000 <small>30m</small></td><td class="use">R5/R6</td></tr>
+      <tr><td class="key">lease_window_doc_ms</td><td class="val">2 700 000 <small>45m</small></td><td class="use">R5/R6</td></tr>
+      <tr><td class="key">max_parallel</td><td class="val">6</td><td class="use">R8</td></tr>
+      <tr><td class="key">session_cap</td><td class="val">10</td><td class="use">R8 · binding now</td></tr>
+      <tr class="hot"><td class="key">diag_cooldown_ms</td><td class="val">900 000 <small>15m</small></td><td class="use"><b>R10</b> · armed (i1)</td></tr>
+      <tr><td class="key">max_attempts</td><td class="val">2</td><td class="use">R11/R12</td></tr>
+    </table></div>
+    <div class="prov">provenance: <code>.catalyst/config.json → catalyst.beliefs.*</code> · panel asserts usedBy ≡ cfgConsumers() in tests</div>
+  </div>
+</div>
+
+</div><!-- /app -->
+
+<script>
+// live tick clock — ms since tick open, frozen incident data otherwise
+const t0 = Date.now(); const base = "18:35:08";
+setInterval(() => {
+  const ms = (Date.now() - t0 + 2841) % 30000; // collector tick every 30s
+  document.getElementById("clock").textContent = base + "." + String(ms).padStart(5," ").slice(-3).replace(/ /g,"0") + "Z";
+}, 87);
+// hold/resume feed affordance (visual only in mock)
+document.querySelector(".pause").addEventListener("click", e => {
+  const b = e.currentTarget; const held = b.dataset.h === "1";
+  b.dataset.h = held ? "0" : "1"; b.textContent = held ? "⏸ hold" : "▶ resume";
+  b.style.color = held ? "" : "var(--warn)";
+});
+</script>
+</body>
+</html>

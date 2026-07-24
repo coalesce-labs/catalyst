@@ -1,0 +1,402 @@
+<!doctype html>
+<html lang="en" class="dark">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Belief Engine Rulebook — swim-lane board mockup</title>
+<script src="https://cdn.tailwindcss.com?plugins=typography"></script>
+<style>
+  :root{
+    --bg:#0b0b0c; --card:#141416; --card2:#101012;
+    --fg:#e7e7ea; --muted:#9a9aa2; --faint:#6b6b73; --border:#26262b;
+    --s1:#7c9cff; --s2:#5ec8a8; --s3:#e0b15a; --s4:#e08a6a; --s5:#b58ae0; --s6:#62b6d8;
+  }
+  html,body{background:var(--bg);color:var(--fg);}
+  body{font-family:ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,Helvetica,Arial;}
+  .mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;}
+  .measure{max-width:74ch;}
+  .muted{color:var(--muted);} .faint{color:var(--faint);}
+  .prose-cal p{color:#d4d4d8;line-height:1.7;margin:0 0 .7rem;}
+  .prose-cal em{font-style:italic;color:#c9c9d0;}
+
+  /* ── layer-cake left rail ───────────────────────────── */
+  .cake{position:relative;width:46px;flex:none;}
+  .cake .bar{position:absolute;left:50%;top:6px;bottom:6px;width:3px;transform:translateX(-50%);border-radius:3px;
+    background:linear-gradient(to top,var(--s1),var(--s2),var(--s3),var(--s4),var(--s5),var(--s6));opacity:.55;}
+  .cake .axislabel{position:absolute;left:-2px;writing-mode:vertical-rl;text-orientation:mixed;
+    font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:var(--faint);}
+  .cake .top{top:8px;} .cake .bot{bottom:8px;}
+
+  /* ── lane (one stratum) ─────────────────────────────── */
+  .lane{display:flex;align-items:stretch;overflow-x:auto;scrollbar-width:thin;}
+  .lane::-webkit-scrollbar{height:7px;}
+  .lane::-webkit-scrollbar-thumb{background:#2c2c32;border-radius:4px;}
+  .lane + .lane{border-top:1px solid var(--border);}
+  .lane-label{position:sticky;left:0;z-index:5;width:252px;flex:none;background:var(--bg);
+    padding:16px 18px 16px 16px;border-right:1px solid var(--border);}
+  .lane-label::after{content:"";position:absolute;right:-1px;top:0;bottom:0;width:14px;
+    background:linear-gradient(to right,var(--bg),transparent);pointer-events:none;}
+  .lane-cards{display:flex;gap:12px;padding:16px 18px;align-items:stretch;}
+
+  .dot{width:22px;height:22px;border-radius:999px;display:flex;align-items:center;justify-content:center;
+    font-size:11px;font-weight:700;color:#0b0b0c;flex:none;}
+
+  /* ── rule card ──────────────────────────────────────── */
+  .rc{width:248px;flex:none;background:var(--card);border:1px solid var(--border);
+    border-left-width:2px;border-radius:10px;padding:11px 13px 10px;display:flex;flex-direction:column;
+    cursor:pointer;transition:border-color .12s,background .12s,transform .12s;text-align:left;}
+  .rc:hover{background:#191919;border-color:#3a3a42;transform:translateY(-1px);}
+  .rc .desc{color:#d2d2d8;font-size:12.5px;line-height:1.5;margin-top:6px;
+    display:-webkit-box;-webkit-line-clamp:4;-webkit-box-orient:vertical;overflow:hidden;flex:1;}
+  .rc .src-hint{font-size:10px;color:var(--faint);margin-top:8px;opacity:0;transition:opacity .12s;}
+  .rc:hover .src-hint{opacity:1;}
+  .sev{font-size:9.5px;font-weight:600;padding:1px 7px;border-radius:999px;white-space:nowrap;}
+  .chip{font-size:10px;padding:1px 6px;border-radius:5px;background:#1a1a1e;border:1px solid var(--border);
+    color:var(--muted);white-space:nowrap;}
+  .chip .arrow{color:var(--faint);}
+  .feedrow{display:flex;flex-wrap:wrap;gap:4px;margin-top:8px;align-items:center;}
+  .lbl{font-size:9.5px;color:var(--faint);text-transform:uppercase;letter-spacing:.06em;}
+
+  details>summary{list-style:none;cursor:pointer;} details>summary::-webkit-details-marker{display:none;}
+  .chev{transition:transform .15s;display:inline-block;} details[open] .chev{transform:rotate(90deg);}
+
+  /* ── detail drawer ──────────────────────────────────── */
+  .scrim{position:fixed;inset:0;background:rgba(0,0,0,.5);opacity:0;pointer-events:none;transition:opacity .18s;z-index:40;}
+  .scrim.on{opacity:1;pointer-events:auto;}
+  .drawer{position:fixed;top:0;right:0;height:100vh;width:min(540px,94vw);background:var(--card);
+    border-left:1px solid var(--border);transform:translateX(102%);transition:transform .22s ease;
+    z-index:50;overflow-y:auto;box-shadow:-24px 0 60px rgba(0,0,0,.45);}
+  .drawer.on{transform:none;}
+  .seg{border:1px solid var(--border);border-radius:8px;overflow:hidden;display:inline-flex;background:var(--card2);}
+  .seg button{padding:5px 13px;font-size:12px;color:var(--muted);background:transparent;border:0;cursor:pointer;}
+  .seg button.on{background:#1d1d21;color:#e7e7ea;}
+  .seg button.jargon{color:var(--faint);}
+  .codeblk{background:#0e0e10;border:1px solid var(--border);border-radius:8px;padding:12px 14px;
+    font-size:11.5px;line-height:1.6;overflow-x:auto;white-space:pre;color:#c7c7cf;}
+  .xbtn{width:30px;height:30px;border-radius:8px;border:1px solid var(--border);background:var(--card2);
+    color:var(--muted);cursor:pointer;font-size:15px;line-height:1;}
+  .xbtn:hover{color:var(--fg);background:#1d1d21;}
+</style>
+</head>
+<body>
+<div class="min-h-screen px-6 py-10 md:px-10">
+
+  <!-- ── header / orientation ──────────────────────────── -->
+  <header class="measure mb-7">
+    <h1 class="text-2xl font-bold tracking-tight">Belief Engine Rulebook</h1>
+    <p class="muted text-sm mt-1">How the daemon decides who's working, who's wedged, and when to call a human.</p>
+    <div class="prose-cal text-[14.5px] mt-4">
+      <p>Every few seconds — once per tick — the daemon reasons from <em>what it can see</em> up to
+        <em>what to do about it</em>. It works in six layers: raw observations enter at the base and rise
+        into decisions. The engine evaluates them in a fixed order — layer by layer, and rule by rule within
+        each layer — so every rule already sees whatever it builds on, whether that's a layer beneath it or
+        an earlier rule in its own layer. Read each lane as one layer; the cards inside are the rules that
+        fire there. <span class="muted">Click any rule to read its source.</span></p>
+    </div>
+    <!-- legend -->
+    <div class="flex flex-wrap items-center gap-x-5 gap-y-2 mt-4 text-[11px] muted">
+      <span class="flex items-center gap-1.5"><span class="sev" style="background:#16233f;color:#9bb8ff">info</span> a plain fact</span>
+      <span class="flex items-center gap-1.5"><span class="sev" style="background:#3a2e16;color:#e3b85f">warn</span> needs watching</span>
+      <span class="flex items-center gap-1.5"><span class="sev" style="background:#3a1d20;color:#ec8a8a">error</span> needs action</span>
+      <span class="faint">·</span>
+      <span><span class="chip"><span class="arrow">→</span> name</span> &nbsp;the next belief this rule feeds</span>
+    </div>
+  </header>
+
+  <!-- ── the board: layer-cake rail + lanes ─────────────── -->
+  <div class="flex items-stretch border border-[var(--border)] rounded-xl overflow-hidden" style="background:var(--card2)">
+    <div class="cake" style="border-right:1px solid var(--border)">
+      <div class="bar"></div>
+      <div class="axislabel top">decisions ↑</div>
+      <div class="axislabel bot">raw facts</div>
+    </div>
+    <div id="board" class="flex-1 min-w-0"></div>
+  </div>
+
+  <!-- ── supporting detail, collapsed ───────────────────── -->
+  <div class="measure mt-7 space-y-3">
+    <details class="rounded-lg border border-[var(--border)]" style="background:var(--card2)">
+      <summary class="px-4 py-3 flex items-center gap-2 text-sm">
+        <span class="chev faint">▸</span>
+        <span>How the rules work <span class="muted">(the Datalog model)</span></span>
+        <span class="ml-auto faint text-xs mono">17 rules · rules.dl</span>
+      </summary>
+      <div class="px-4 pb-4 prose-cal text-sm muted">
+        <p>Each rule reads beliefs it already trusts and writes a new, named belief. Every tick, the engine
+          evaluates the rules in a fixed order — the six <em>strata</em> from the bottom up, and the rules in
+          order within each stratum — so a rule never depends on anything computed later in the same tick.
+          Most rules build on the layers beneath them; a few also build on an earlier rule in their own layer
+          (for example, <em>lease_expired</em> fires only when <em>lease_valid</em> did not). That fixed order
+          is what keeps every conclusion finite and traceable — open any belief in the live view to see
+          exactly which facts triggered which rule.</p>
+      </div>
+    </details>
+    <details class="rounded-lg border border-[var(--border)]" style="background:var(--card2)">
+      <summary class="px-4 py-3 flex items-center gap-2 text-sm">
+        <span class="chev faint">▸</span>
+        <span>Thresholds <span class="muted">(the tunable numbers)</span></span>
+        <span class="ml-auto faint text-xs mono">cfg · 9 keys</span>
+      </summary>
+      <div class="px-4 pb-4 text-sm muted mono text-xs leading-relaxed">
+        <p class="py-2">never_started_ms · lease_window_doc_ms · lease_window_build_ms · diag_cooldown_ms ·
+          max_attempts · max_parallel · session_cap · eligible_state …</p>
+      </div>
+    </details>
+  </div>
+
+  <p class="text-center text-xs faint mt-10">Mockup · swim-lane board direction · plain-English first, source one click away ·
+    layer-cake order (raw facts at the base, rising into decisions)</p>
+</div>
+
+<!-- detail drawer -->
+<div id="scrim" class="scrim" onclick="closeRule()"></div>
+<aside id="drawer" class="drawer" aria-hidden="true"><div id="drawer-body" class="p-5"></div></aside>
+
+<script>
+  const SEV = {
+    info:  {bg:'#16233f', fg:'#9bb8ff'},
+    warn:  {bg:'#3a2e16', fg:'#e3b85f'},
+    error: {bg:'#3a1d20', fg:'#ec8a8a'},
+  };
+  const COLOR = {1:'var(--s1)',2:'var(--s2)',3:'var(--s3)',4:'var(--s4)',5:'var(--s5)',6:'var(--s6)'};
+  const NAME = {R1:'session_registered',R2:'turn_started',R3:'progress_evidence',R4:'wedged_never_started',
+    R5:'lease_valid',R6:'lease_expired',R7:'worker_dead',R8:'free_slots',R9:'board_drift',
+    R10:'wake_diagnostician',R11:'action_ineffective',R12:'escalate_human',R13:'blocker_rank',
+    R14:'cycle_detected',R15:'ready',R16:'advance_to',R17:'cycle_exhausted'};
+
+  // real compiled source per rule (datalog/sql), injected from the live manifest
+  const CODE = {
+  "R1": {
+    "extern": false,
+    "datalog": "INSERT OR IGNORE INTO belief (tick_id, stratum, name, subject, value, rule_id, source_fact_ids)\nSELECT t.tick_id, 1, 'session_registered', s.ticket || '/' || s.phase,\n       json_object('session_id', a.session_id, 'short_id', a.short_id),\n       'R1', json_array('s' || s.fact_id, 'a' || a.fact_id)\nFROM tick t\nJOIN obs_signal s ON s.tick_id = t.tick_id AND s.bg_job_id IS NOT NULL\nJOIN obs_agent a ON a.tick_id = t.tick_id AND a.short_id = s.bg_job_id AND a.kind = 'background'\nWHERE t.tick_id = :tick",
+    "sql": "INSERT OR IGNORE INTO belief (tick_id, stratum, name, subject, value, rule_id, source_fact_ids)\nSELECT t.tick_id, 1, 'session_registered', s.ticket || '/' || s.phase,\n       json_object('session_id', a.session_id, 'short_id', a.short_id),\n       'R1', json_array('s' || s.fact_id, 'a' || a.fact_id)\nFROM tick t\nJOIN obs_signal s ON s.tick_id = t.tick_id AND s.bg_job_id IS NOT NULL\nJOIN obs_agent a ON a.tick_id = t.tick_id AND a.short_id = s.bg_job_id AND a.kind = 'background'\nWHERE t.tick_id = :tick"
+  },
+  "R2": {
+    "extern": false,
+    "datalog": "INSERT OR IGNORE INTO belief (tick_id, stratum, name, subject, value, rule_id, source_fact_ids)\nSELECT t.tick_id, 1, 'turn_started', s.ticket || '/' || s.phase,\n       json_object('session_id', a.session_id, 'bytes', tr.bytes),\n       'R2', json_array('s' || s.fact_id, 'a' || a.fact_id, 'r' || tr.fact_id)\nFROM tick t\nJOIN obs_signal s ON s.tick_id = t.tick_id AND s.bg_job_id IS NOT NULL\nJOIN obs_agent a ON a.tick_id = t.tick_id AND a.short_id = s.bg_job_id\nJOIN obs_transcript tr ON tr.tick_id = t.tick_id AND tr.session_id = a.session_id AND tr.exists_flag = 1\nWHERE t.tick_id = :tick",
+    "sql": "INSERT OR IGNORE INTO belief (tick_id, stratum, name, subject, value, rule_id, source_fact_ids)\nSELECT t.tick_id, 1, 'turn_started', s.ticket || '/' || s.phase,\n       json_object('session_id', a.session_id, 'bytes', tr.bytes),\n       'R2', json_array('s' || s.fact_id, 'a' || a.fact_id, 'r' || tr.fact_id)\nFROM tick t\nJOIN obs_signal s ON s.tick_id = t.tick_id AND s.bg_job_id IS NOT NULL\nJOIN obs_agent a ON a.tick_id = t.tick_id AND a.short_id = s.bg_job_id\nJOIN obs_transcript tr ON tr.tick_id = t.tick_id AND tr.session_id = a.session_id AND tr.exists_flag = 1\nWHERE t.tick_id = :tick"
+  },
+  "R4": {
+    "extern": false,
+    "datalog": "INSERT OR IGNORE INTO belief (tick_id, stratum, name, subject, rule_id, source_fact_ids)\nSELECT t.tick_id, 2, 'wedged_never_started', s.ticket || '/' || s.phase, 'R4',\n       json_array('b' || sr.belief_id, 's' || s.fact_id, 't' || t.tick_id)\nFROM tick t\nJOIN obs_signal s ON s.tick_id = t.tick_id AND s.status = 'running'\nJOIN belief sr ON sr.tick_id = t.tick_id AND sr.name = 'session_registered' AND sr.subject = s.ticket || '/' || s.phase\nJOIN cfg c ON c.key = 'never_started_ms'\nWHERE t.tick_id = :tick\n  AND s.started_at_ms IS NOT NULL\n  AND t.now_ms - s.started_at_ms > c.value_int\n  AND NOT EXISTS (SELECT 1 FROM belief b WHERE b.tick_id = t.tick_id AND b.name = 'turn_started' AND b.subject = sr.subject)\n  AND NOT EXISTS (SELECT 1 FROM belief b WHERE b.tick_id = t.tick_id AND b.name = 'worker_dead' AND b.subject = sr.subject)",
+    "sql": "INSERT OR IGNORE INTO belief (tick_id, stratum, name, subject, rule_id, source_fact_ids)\nSELECT t.tick_id, 2, 'wedged_never_started', s.ticket || '/' || s.phase, 'R4',\n       json_array('b' || sr.belief_id, 's' || s.fact_id, 't' || t.tick_id)\nFROM tick t\nJOIN obs_signal s ON s.tick_id = t.tick_id AND s.status = 'running'\nJOIN belief sr ON sr.tick_id = t.tick_id AND sr.name = 'session_registered' AND sr.subject = s.ticket || '/' || s.phase\nJOIN cfg c ON c.key = 'never_started_ms'\nWHERE t.tick_id = :tick\n  AND s.started_at_ms IS NOT NULL\n  AND t.now_ms - s.started_at_ms > c.value_int\n  AND NOT EXISTS (SELECT 1 FROM belief b WHERE b.tick_id = t.tick_id AND b.name = 'turn_started' AND b.subject = sr.subject)\n  AND NOT EXISTS (SELECT 1 FROM belief b WHERE b.tick_id = t.tick_id AND b.name = 'worker_dead' AND b.subject = sr.subject)"
+  },
+  "R3": {
+    "extern": true,
+    "datalog": null,
+    "sql": "INSERT OR IGNORE INTO belief (tick_id, stratum, name, subject, value, rule_id, source_fact_ids)\nWITH evidence(tick_id, subject, ts, ref, channel) AS (\n  -- signal updatedAt (always present for a running phase). ref is pre-TAGGED\n  -- per channel ('s'/'r'/'h') so the per-table fact_id collision can't bite.\n  SELECT t.tick_id, s.ticket || '/' || s.phase, s.updated_at_ms, 's' || s.fact_id, 'signal'\n  FROM tick t JOIN obs_signal s ON s.tick_id = t.tick_id\n  WHERE t.tick_id = :tick AND s.updated_at_ms IS NOT NULL\n  UNION ALL\n  -- transcript mtime, mapped phase←signal(bg)←agent(short)→transcript(session)\n  SELECT t.tick_id, s.ticket || '/' || s.phase, tr.mtime_ms, 'r' || tr.fact_id, 'transcript'\n  FROM tick t\n  JOIN obs_signal     s  ON s.tick_id = t.tick_id AND s.bg_job_id IS NOT NULL\n  JOIN obs_agent      a  ON a.tick_id = t.tick_id AND a.short_id = s.bg_job_id\n  JOIN obs_transcript tr ON tr.tick_id = t.tick_id AND tr.session_id = a.session_id\n                        AND tr.exists_flag = 1 AND tr.mtime_ms IS NOT NULL\n  WHERE t.tick_id = :tick\n  UNION ALL\n  -- worker.heartbeat ts (own time axis; matched by ticket/phase)\n  SELECT t.tick_id, s.ticket || '/' || s.phase, h.ts_ms, 'h' || h.fact_id, 'heartbeat'\n  FROM tick t\n  JOIN obs_signal s ON s.tick_id = t.tick_id\n  JOIN obs_heartbeat h ON h.ticket = s.ticket AND h.phase = s.phase\n  WHERE t.tick_id = :tick\n)\nSELECT e.tick_id, 1, 'progress_evidence', e.subject,\n       json_object('ts_ms', mx.ts),\n       'R3', (SELECT json_group_array(ref) FROM evidence e2 WHERE e2.subject = e.subject)\nFROM evidence e\nJOIN (SELECT subject, MAX(ts) AS ts FROM evidence GROUP BY subject) mx\n  ON mx.subject = e.subject AND mx.ts = e.ts\nGROUP BY e.subject"
+  },
+  "R7": {
+    "extern": true,
+    "datalog": null,
+    "sql": "INSERT OR IGNORE INTO belief (tick_id, stratum, name, subject, value, rule_id, source_fact_ids)\nSELECT t.tick_id, 1, 'worker_dead', s.ticket || '/' || s.phase,\n       json_object('reason',\n         CASE\n           WHEN j.exists_flag = 0 THEN 'job_gone'\n           WHEN j.first_terminal_at IS NOT NULL THEN 'first_terminal_at'\n           ELSE 'state:' || j.state\n         END),\n       'R7', json_array('s' || s.fact_id, 'j' || j.fact_id)\nFROM tick t\nJOIN obs_signal s ON s.tick_id = t.tick_id AND s.bg_job_id IS NOT NULL\nJOIN obs_job    j ON j.tick_id = t.tick_id AND j.bg_job_id = s.bg_job_id\nWHERE t.tick_id = :tick\n  AND ( j.exists_flag = 0\n     OR j.first_terminal_at IS NOT NULL\n     OR j.state IN ('stopped','failed','done','blocked') )"
+  },
+  "R5": {
+    "extern": true,
+    "datalog": null,
+    "sql": "INSERT OR IGNORE INTO belief (tick_id, stratum, name, subject, value, rule_id, source_fact_ids)\nSELECT t.tick_id, 2, 'lease_valid', s.ticket || '/' || s.phase,\n       json_object('evidence_ts_ms', CAST(json_extract(pe.value, '$.ts_ms') AS INTEGER),\n                   'window_ms', win.value_int),\n       'R5', json_array('b' || pe.belief_id, 's' || s.fact_id, 't' || t.tick_id)\nFROM tick t\nJOIN obs_signal s ON s.tick_id = t.tick_id AND s.status = 'running'\nJOIN belief pe    ON pe.tick_id = t.tick_id AND pe.name = 'progress_evidence'\n                 AND pe.subject = s.ticket || '/' || s.phase\nJOIN cfg win ON win.key = CASE\n      WHEN s.phase IN ('triage','research','plan','pr','monitor-merge','monitor-deploy')\n        THEN 'lease_window_doc_ms' ELSE 'lease_window_build_ms' END\nWHERE t.tick_id = :tick\n  AND t.now_ms - CAST(json_extract(pe.value, '$.ts_ms') AS INTEGER) <= win.value_int\n  AND NOT EXISTS (SELECT 1 FROM belief b WHERE b.tick_id = t.tick_id\n                  AND b.name = 'worker_dead' AND b.subject = s.ticket || '/' || s.phase)"
+  },
+  "R6": {
+    "extern": true,
+    "datalog": null,
+    "sql": "INSERT OR IGNORE INTO belief (tick_id, stratum, name, subject, rule_id, source_fact_ids)\nSELECT t.tick_id, 2, 'lease_expired', s.ticket || '/' || s.phase, 'R6',\n       json_array('s' || s.fact_id, 't' || t.tick_id)\nFROM tick t\nJOIN obs_signal s ON s.tick_id = t.tick_id AND s.status = 'running'\nWHERE t.tick_id = :tick\n  AND NOT EXISTS (SELECT 1 FROM belief b WHERE b.tick_id = t.tick_id\n                  AND b.name = 'lease_valid' AND b.subject = s.ticket || '/' || s.phase)\n  AND NOT EXISTS (SELECT 1 FROM belief b WHERE b.tick_id = t.tick_id\n                  AND b.name = 'worker_dead' AND b.subject = s.ticket || '/' || s.phase)"
+  },
+  "R9": {
+    "extern": true,
+    "datalog": null,
+    "sql": "INSERT OR IGNORE INTO belief (tick_id, stratum, name, subject, value, rule_id, source_fact_ids)\nSELECT t.tick_id, 2, 'board_drift', s.ticket,\n       json_object('have', l.state, 'want', want.k, 'phase', s.phase),\n       'R9', json_array('s' || s.fact_id, 'l' || l.fact_id)\nFROM tick t\nJOIN obs_signal s ON s.tick_id = t.tick_id AND s.status = 'running'\nJOIN obs_linear l ON l.tick_id = t.tick_id AND l.ticket = s.ticket\n                 AND l.state IS NOT NULL\nJOIN (SELECT 'triage' AS phase, 'Research' AS k UNION ALL\n      SELECT 'research','Research' UNION ALL\n      SELECT 'plan','Plan' UNION ALL\n      SELECT 'implement','Implement' UNION ALL\n      SELECT 'verify','Validate' UNION ALL\n      SELECT 'review','Validate' UNION ALL\n      SELECT 'remediate','Validate' UNION ALL\n      SELECT 'pr','PR' UNION ALL\n      SELECT 'monitor-merge','PR' UNION ALL\n      SELECT 'monitor-deploy','PR') want ON want.phase = s.phase\nWHERE t.tick_id = :tick\n  AND l.state <> want.k\n  AND l.state NOT IN ('Done','Canceled','Cancelled')"
+  },
+  "R8": {
+    "extern": true,
+    "datalog": null,
+    "sql": "INSERT OR IGNORE INTO belief (tick_id, stratum, name, subject, value, rule_id, source_fact_ids)\nSELECT t.tick_id, 3, 'free_slots', 'host:' || t.host,\n       json_object(\n         'free_slots', MAX(0, MIN(mp.value_int - lv.n, sc.value_int - bg.n)),\n         'by_lease',   mp.value_int - lv.n,\n         'by_session_cap', sc.value_int - bg.n,\n         'max_parallel', mp.value_int,\n         'session_cap', sc.value_int,\n         'lease_valid_count', lv.n,\n         'bg_session_count', bg.n),\n       'R8',\n       json_array(\n         (SELECT json_group_array('b' || belief_id) FROM belief\n            WHERE tick_id = t.tick_id AND name = 'lease_valid'),\n         (SELECT json_group_array('a' || fact_id) FROM obs_agent\n            WHERE tick_id = t.tick_id AND kind = 'background'))\nFROM tick t\nJOIN cfg mp ON mp.key = 'max_parallel'\nJOIN cfg sc ON sc.key = 'session_cap'\nJOIN (SELECT COUNT(*) AS n FROM belief\n        WHERE tick_id = :tick AND name = 'lease_valid') lv\nJOIN (SELECT COUNT(*) AS n FROM obs_agent\n        WHERE tick_id = :tick AND kind = 'background') bg\nWHERE t.tick_id = :tick"
+  },
+  "R10": {
+    "extern": true,
+    "datalog": null,
+    "sql": "-- R10a\nINSERT OR IGNORE INTO belief (tick_id, stratum, name, subject, value, rule_id, source_fact_ids)\nSELECT t.tick_id, 4, 'wake_diagnostician', w.subject,\n       json_object('reason', 'never-started'),\n       'R10', json_array('b' || w.belief_id)\nFROM tick t\nJOIN belief w ON w.tick_id = t.tick_id AND w.name = 'wedged_never_started'\nWHERE t.tick_id = :tick\n  AND NOT EXISTS (\n    SELECT 1 FROM intent i JOIN tick it ON it.tick_id = i.tick_id, cfg c\n    WHERE c.key = 'diag_cooldown_ms'\n      AND i.kind = 'wake-diagnostician' AND i.subject = w.subject\n      AND t.now_ms - it.now_ms <= c.value_int)\n\n-- R10b\nINSERT OR IGNORE INTO belief (tick_id, stratum, name, subject, value, rule_id, source_fact_ids)\nSELECT t.tick_id, 4, 'wake_diagnostician', le.subject,\n       json_object('reason', 'stalled-alive'),\n       'R10', json_array('b' || le.belief_id, 'j' || j.fact_id)\nFROM tick t\nJOIN belief le ON le.tick_id = t.tick_id AND le.name = 'lease_expired'\nJOIN obs_signal s ON s.tick_id = t.tick_id AND s.ticket || '/' || s.phase = le.subject\nJOIN obs_job   j  ON j.tick_id = t.tick_id AND j.bg_job_id = s.bg_job_id\n                 AND j.state = 'working'\nWHERE t.tick_id = :tick\n  AND NOT EXISTS (SELECT 1 FROM belief b WHERE b.tick_id = t.tick_id\n                  AND b.name = 'wake_diagnostician' AND b.subject = le.subject)\n  AND NOT EXISTS (\n    SELECT 1 FROM intent i JOIN tick it ON it.tick_id = i.tick_id, cfg c\n    WHERE c.key = 'diag_cooldown_ms'\n      AND i.kind = 'wake-diagnostician' AND i.subject = le.subject\n      AND t.now_ms - it.now_ms <= c.value_int)"
+  },
+  "R11": {
+    "extern": true,
+    "datalog": null,
+    "sql": "INSERT OR IGNORE INTO belief (tick_id, stratum, name, subject, value, rule_id, source_fact_ids)\nSELECT t.tick_id, 4, 'action_ineffective', i.kind || ':' || i.subject,\n       json_object('kind', i.kind, 'attempts', i.attempts),\n       'R11', json_array('i' || i.intent_id)\nFROM tick t\nJOIN cfg c ON c.key = 'max_attempts'\nJOIN intent i ON i.outcome IS NULL AND i.attempts >= c.value_int\nWHERE t.tick_id = :tick"
+  },
+  "R12": {
+    "extern": true,
+    "datalog": null,
+    "sql": "INSERT OR IGNORE INTO belief (tick_id, stratum, name, subject, value, rule_id, source_fact_ids)\nSELECT t.tick_id, 4, 'escalate_human', wd.subject,\n       json_object('why', json_extract(wd.value, '$.reason')),\n       'R12', json_array('b' || wd.belief_id, 'b' || ai.belief_id)\nFROM tick t\nJOIN belief wd ON wd.tick_id = t.tick_id AND wd.name = 'wake_diagnostician'\nJOIN belief ai ON ai.tick_id = t.tick_id AND ai.name = 'action_ineffective'\n              AND ai.subject = 'wake-diagnostician:' || wd.subject\nWHERE t.tick_id = :tick"
+  },
+  "R13": {
+    "extern": true,
+    "datalog": null,
+    "sql": "INSERT OR IGNORE INTO belief (tick_id, stratum, name, subject, value, rule_id, source_fact_ids)\n\nWITH RECURSIVE\n  edges(dependent, dependency, fact_id) AS (\n    SELECT target_ticket, source_ticket, fact_id\n      FROM obs_relation\n     WHERE tick_id = :tick AND relation_type = 'blocks'\n  ),\n  closure(dependent, dependency, depth) AS (\n    -- base: each direct edge (A depends_on B) is depth 1\n    SELECT dependent, dependency, 1 FROM edges\n    UNION\n    -- step: A depends_on B, B depends_on C  ⇒  A depends_on C\n    SELECT c.dependent, e.dependency, c.depth + 1\n      FROM closure c\n      JOIN edges e ON e.dependent = c.dependency\n     WHERE c.depth < (SELECT COUNT(*) FROM edges) + 1\n  )\nSELECT :tick, 5, 'blocker_rank', cl.dependent,\n       json_object(\n         'rank', COUNT(DISTINCT cl.dependency),\n         'direct', (SELECT json_group_array(e.dependency)\n                      FROM edges e WHERE e.dependent = cl.dependent),\n         'transitive', json_group_array(DISTINCT cl.dependency)),\n       'R13',\n       (SELECT json_group_array('x' || e.fact_id)\n          FROM edges e WHERE e.dependent = cl.dependent)\nFROM closure cl\nGROUP BY cl.dependent"
+  },
+  "R14": {
+    "extern": true,
+    "datalog": null,
+    "sql": "INSERT OR IGNORE INTO belief (tick_id, stratum, name, subject, value, rule_id, source_fact_ids)\n\nWITH RECURSIVE\n  edges(dependent, dependency, fact_id) AS (\n    SELECT target_ticket, source_ticket, fact_id\n      FROM obs_relation\n     WHERE tick_id = :tick AND relation_type = 'blocks'\n  ),\n  closure(dependent, dependency, depth) AS (\n    -- base: each direct edge (A depends_on B) is depth 1\n    SELECT dependent, dependency, 1 FROM edges\n    UNION\n    -- step: A depends_on B, B depends_on C  ⇒  A depends_on C\n    SELECT c.dependent, e.dependency, c.depth + 1\n      FROM closure c\n      JOIN edges e ON e.dependent = c.dependency\n     WHERE c.depth < (SELECT COUNT(*) FROM edges) + 1\n  ),\n  -- A is in a cycle iff (A,A) is in the closure\n  self_cycle(t) AS (SELECT DISTINCT dependent FROM closure WHERE dependent = dependency)\nSELECT :tick, 5, 'cycle_detected', sc.t,\n       json_object('members',\n         (SELECT json_group_array(DISTINCT m) FROM (\n            SELECT sc.t AS m\n            UNION\n            -- every D that A reaches AND that reaches back to A\n            SELECT c1.dependency AS m\n              FROM closure c1\n              JOIN closure c2 ON c2.dependent = c1.dependency\n                             AND c2.dependency = sc.t\n             WHERE c1.dependent = sc.t\n         ))),\n       'R14',\n       (SELECT json_group_array('x' || e.fact_id) FROM edges e)\nFROM self_cycle sc"
+  },
+  "R15": {
+    "extern": true,
+    "datalog": null,
+    "sql": "INSERT OR IGNORE INTO belief (tick_id, stratum, name, subject, value, rule_id, source_fact_ids)\nSELECT t.tick_id, 5, 'ready', la.ticket,\n       json_object('ready', 1),\n       'R15',\n       COALESCE(\n         (SELECT json_group_array('x' || r.fact_id)\n            FROM obs_relation r\n           WHERE r.tick_id = t.tick_id AND r.relation_type = 'blocks'\n             AND r.target_ticket = la.ticket),\n         json_array())\nFROM tick t\nJOIN cfg es ON es.key = 'eligible_state'\nJOIN obs_linear la ON la.tick_id = t.tick_id\n                  AND la.state IS NOT NULL\n                  AND la.state = es.value_text\nWHERE t.tick_id = :tick\n  AND NOT EXISTS (\n    -- a direct blocker B of A (obs_relation source=B, target=A) whose OWN\n    -- obs_linear state this tick is non-terminal\n    SELECT 1\n      FROM obs_relation r\n      JOIN obs_linear lb ON lb.tick_id = t.tick_id\n                        AND lb.ticket = r.source_ticket\n                        AND lb.state IS NOT NULL\n                        AND lb.state NOT IN ('Done','Canceled','Cancelled')\n     WHERE r.tick_id = t.tick_id\n       AND r.relation_type = 'blocks'\n       AND r.target_ticket = la.ticket)"
+  },
+  "R16": {
+    "extern": true,
+    "datalog": null,
+    "sql": "INSERT OR IGNORE INTO belief (tick_id, stratum, name, subject, value, rule_id, source_fact_ids)\nWITH\n  rank(phase, r) AS (VALUES ('triage', 0), ('research', 1), ('plan', 2), ('implement', 3), ('verify', 4), ('review', 5), ('pr', 6), ('monitor-merge', 7), ('monitor-deploy', 8), ('teardown', 9)),\n  nxt(cur, nextp) AS (VALUES ('triage', 'research'), ('research', 'plan'), ('plan', 'implement'), ('implement', 'verify'), ('verify', 'review'), ('review', 'pr'), ('pr', 'monitor-merge'), ('monitor-merge', 'monitor-deploy'), ('monitor-deploy', 'teardown'), ('teardown', 'done')),\n  -- latest(ticket) = the max-FSM-rank phase present in obs_signal this tick.\n  -- remediate is excluded by the rank JOIN (no rank row), matching the oracle's\n  -- PHASES-only latest-selection loop.\n  latest(tick_id, ticket, phase, r) AS (\n    SELECT s.tick_id, s.ticket, s.phase, rk.r\n      FROM obs_signal s\n      JOIN rank rk ON rk.phase = s.phase\n     WHERE s.tick_id = :tick\n       AND rk.r = (SELECT MAX(rk2.r)\n                     FROM obs_signal s2\n                     JOIN rank rk2 ON rk2.phase = s2.phase\n                    WHERE s2.tick_id = s.tick_id AND s2.ticket = s.ticket)\n  ),\n  -- the latest row joined to its signal (for status + provenance) and the verdict\n  -- + cycle facts. There can be >1 obs_signal row for the latest phase only if a\n  -- producer wrote duplicates; the MIN(fact_id) picks one deterministically and\n  -- status is read from that same row.\n  latest_sig(tick_id, ticket, phase, status, sig_fact_id) AS (\n    SELECT l.tick_id, l.ticket, l.phase, s.status, MIN(s.fact_id)\n      FROM latest l\n      JOIN obs_signal s ON s.tick_id = l.tick_id AND s.ticket = l.ticket AND s.phase = l.phase\n     GROUP BY l.tick_id, l.ticket, l.phase, s.status\n  )\n-- arm A: verify→remediate detour\nSELECT ls.tick_id, 6, 'advance_to', ls.ticket,\n       json_object('from', ls.phase, 'to', 'remediate'),\n       'R16',\n       json_array('s' || ls.sig_fact_id,\n                  (SELECT 'v' || v.fact_id FROM obs_verdict v\n                     WHERE v.tick_id = ls.tick_id AND v.ticket = ls.ticket LIMIT 1),\n                  (SELECT 'c' || c.fact_id FROM obs_cycle c\n                     WHERE c.tick_id = ls.tick_id AND c.ticket = ls.ticket LIMIT 1))\n  FROM latest_sig ls\n WHERE ls.tick_id = :tick\n   AND ls.phase = 'verify'\n   AND ls.status = 'done'\n   AND EXISTS (SELECT 1 FROM obs_verdict v\n                WHERE v.tick_id = ls.tick_id AND v.ticket = ls.ticket AND v.verdict = 'fail')\n   -- budget left: remediate_count < cap (count==cap-1 advances; count==cap does not)\n   AND COALESCE((SELECT c.remediate_count FROM obs_cycle c\n                  WHERE c.tick_id = ls.tick_id AND c.ticket = ls.ticket LIMIT 1), 0) < 3\n   -- remediate not already dispatched this cycle (no remediate signal present)\n   AND NOT EXISTS (SELECT 1 FROM obs_signal s\n                    WHERE s.tick_id = ls.tick_id AND s.ticket = ls.ticket AND s.phase = 'remediate')\nUNION ALL\n-- arm B: normal FSM edge\nSELECT ls.tick_id, 6, 'advance_to', ls.ticket,\n       json_object('from', ls.phase, 'to', n.nextp),\n       'R16',\n       json_array('s' || ls.sig_fact_id)\n  FROM latest_sig ls\n  JOIN nxt n ON n.cur = ls.phase\n WHERE ls.tick_id = :tick\n   -- advance-eligible: done, OR monitor-deploy skipped (CTL-703 carve-out)\n   AND ( ls.status = 'done'\n      OR (ls.status = 'skipped' AND ls.phase = 'monitor-deploy') )\n   -- NOT the verify→remediate detour (arm A owns it): a verify ticket with a\n   -- fail verdict short-circuits in the oracle and never takes verify→review.\n   AND NOT ( ls.phase = 'verify'\n             AND EXISTS (SELECT 1 FROM obs_verdict v\n                          WHERE v.tick_id = ls.tick_id AND v.ticket = ls.ticket AND v.verdict = 'fail') )\n   -- next non-terminal (teardown→done suppresses the advance off teardown)\n   AND n.nextp <> 'done'\n   -- successor not already dispatched\n   AND NOT EXISTS (SELECT 1 FROM obs_signal s\n                    WHERE s.tick_id = ls.tick_id AND s.ticket = ls.ticket AND s.phase = n.nextp)"
+  },
+  "R17": {
+    "extern": true,
+    "datalog": null,
+    "sql": "INSERT OR IGNORE INTO belief (tick_id, stratum, name, subject, value, rule_id, source_fact_ids)\nWITH\n  rank(phase, r) AS (VALUES ('triage', 0), ('research', 1), ('plan', 2), ('implement', 3), ('verify', 4), ('review', 5), ('pr', 6), ('monitor-merge', 7), ('monitor-deploy', 8), ('teardown', 9)),\n  latest(tick_id, ticket, phase, r) AS (\n    SELECT s.tick_id, s.ticket, s.phase, rk.r\n      FROM obs_signal s\n      JOIN rank rk ON rk.phase = s.phase\n     WHERE s.tick_id = :tick\n       AND rk.r = (SELECT MAX(rk2.r)\n                     FROM obs_signal s2\n                     JOIN rank rk2 ON rk2.phase = s2.phase\n                    WHERE s2.tick_id = s.tick_id AND s2.ticket = s.ticket)\n  ),\n  latest_sig(tick_id, ticket, phase, status, sig_fact_id) AS (\n    SELECT l.tick_id, l.ticket, l.phase, s.status, MIN(s.fact_id)\n      FROM latest l\n      JOIN obs_signal s ON s.tick_id = l.tick_id AND s.ticket = l.ticket AND s.phase = l.phase\n     GROUP BY l.tick_id, l.ticket, l.phase, s.status\n  )\nSELECT ls.tick_id, 6, 'cycle_exhausted', ls.ticket,\n       json_object('phase', ls.phase, 'remediate_count',\n         COALESCE((SELECT c.remediate_count FROM obs_cycle c\n                    WHERE c.tick_id = ls.tick_id AND c.ticket = ls.ticket LIMIT 1), 0),\n         'cap', 3),\n       'R17',\n       json_array('s' || ls.sig_fact_id,\n                  (SELECT 'v' || v.fact_id FROM obs_verdict v\n                     WHERE v.tick_id = ls.tick_id AND v.ticket = ls.ticket LIMIT 1),\n                  (SELECT 'c' || c.fact_id FROM obs_cycle c\n                     WHERE c.tick_id = ls.tick_id AND c.ticket = ls.ticket LIMIT 1))\n  FROM latest_sig ls\n WHERE ls.tick_id = :tick\n   AND ls.phase = 'verify'\n   AND ls.status = 'done'\n   AND EXISTS (SELECT 1 FROM obs_verdict v\n                WHERE v.tick_id = ls.tick_id AND v.ticket = ls.ticket AND v.verdict = 'fail')\n   AND COALESCE((SELECT c.remediate_count FROM obs_cycle c\n                  WHERE c.tick_id = ls.tick_id AND c.ticket = ls.ticket LIMIT 1), 0) >= 3"
+  }
+};
+
+  const STRATA = [
+    {id:6, headline:'What happens next', body:'Predicts where each worker advances, spots exhausted cycles.', tech:'FSM advancement · from obs_signal / verdict / cycle'},
+    {id:5, headline:'What is blocked by what', body:'Follows the blocker chain; flags loops that can\'t resolve.', tech:'Recursive dependency · transitive closure (WITH RECURSIVE)'},
+    {id:4, headline:'When it\'s time to get a human', body:'The escalation ladder — cheaper moves first, raise a hand last.', tech:'Escalation ladder · negation over the intent table'},
+    {id:3, headline:'How much capacity is free', body:'A headcount of free slots per host.', tech:'Capacity aggregation · over S2 lease_valid + obs_agent'},
+    {id:2, headline:'Who is alive, and who is wedged', body:'Where ‘running’ becomes ‘alive’ or ‘wedged’.', tech:'Liveness verdicts · stratified negation over S1'},
+    {id:1, headline:'What we directly observe to be true', body:'The ground floor — raw facts, lined up per worker. No judgment yet.', tech:'Ground correlations · reads obs_* (EDB) only'},
+  ];
+
+  const RULES = [
+    {id:'R1', name:'session_registered', s:1, sev:'info',  feeds:[],            reads:[], desc:`The signal's background job shows up in the live agents listing — the session is registered.`},
+    {id:'R2', name:'turn_started',       s:1, sev:'info',  feeds:['R4'],        reads:[], desc:`The session has produced a transcript, so its prompt actually became a running turn.`},
+    {id:'R3', name:'progress_evidence',  s:1, sev:'info',  feeds:['R5','R6'],   reads:[], desc:`The most recent positive evidence of work — the max over heartbeat, transcript, and signal timestamps.`},
+    {id:'R7', name:'worker_dead',        s:1, sev:'warn',  feeds:['R4','R5','R6'], reads:[], desc:`Claude's own durable verdict that the worker is dead — the job is gone or in a terminal state.`},
+
+    {id:'R4', name:'wedged_never_started', s:2, sev:'warn', feeds:['R10'], reads:['R1','R2','R7'], cfg:['never_started_ms'], desc:`A running phase whose session registered but never started a turn in time — a never-started wedge.`},
+    {id:'R5', name:'lease_valid',          s:2, sev:'info', feeds:['R6'],  reads:['R3','R7'], cfg:['lease_window_doc_ms','lease_window_build_ms'], desc:`The phase has progress evidence inside its freshness window, so its lease is still valid.`},
+    {id:'R6', name:'lease_expired',        s:2, sev:'warn', feeds:['R10'], reads:['R5','R7'], desc:`A running phase with no valid lease and not dead — its lease has expired (stalled-alive).`},
+    {id:'R9', name:'board_drift',          s:2, sev:'warn', feeds:[], reads:[], desc:`The Linear board state disagrees with what the running phase is actually doing — board drift.`},
+
+    {id:'R8', name:'free_slots', s:3, sev:'info', feeds:[], reads:[], cfg:['max_parallel','session_cap'], desc:`Free capacity for a host: parallel slots and session slots not currently consumed by valid leases.`},
+
+    {id:'R10', name:'wake_diagnostician', s:4, sev:'warn',  feeds:['R11','R12'], reads:['R4','R6','R10'], cfg:['diag_cooldown_ms'], desc:`Wake the diagnostician for a never-started wedge (no cooldown intent already in the window).`},
+    {id:'R11', name:'action_ineffective', s:4, sev:'warn',  feeds:['R12'], reads:[], cfg:['max_attempts'], desc:`An intent has exhausted its max_attempts with no outcome — the action proved ineffective.`},
+    {id:'R12', name:'escalate_human',     s:4, sev:'error', feeds:[], reads:['R10','R11'], desc:`The diagnostician was woken and the action was ineffective, so the work escalates to a human.`},
+
+    {id:'R13', name:'blocker_rank',   s:5, sev:'info',  feeds:[], reads:[], desc:`A ticket's transitive blocker count, computed over the full dependency closure.`},
+    {id:'R14', name:'cycle_detected', s:5, sev:'error', feeds:[], reads:[], desc:`A dependency cycle exists (A blocks B blocks A) in the relations graph.`},
+    {id:'R15', name:'ready',          s:5, sev:'info',  feeds:[], reads:[], cfg:['eligible_state'], desc:`A ticket is in an eligible state with every blocker done — it is ready to start.`},
+
+    {id:'R16', name:'advance_to',      s:6, sev:'info',  feeds:[], reads:[], desc:`The predicted next phase: the normal FSM edge, or the verify-to-remediate detour when verification fails.`},
+    {id:'R17', name:'cycle_exhausted', s:6, sev:'error', feeds:[], reads:[], desc:`The remediate count has reached its cap — no more retries; the cycle is exhausted.`},
+  ];
+
+  const BY_ID = Object.fromEntries(RULES.map(r => [r.id, r]));
+  const HEAD = Object.fromEntries(STRATA.map(s => [s.id, s.headline]));
+
+  function ruleCard(r){
+    const sev = SEV[r.sev];
+    const feeds = (r.feeds||[]).map(f =>
+      `<span class="chip"><span class="arrow">→</span> ${NAME[f]||f}</span>`).join('');
+    const cfg = (r.cfg||[]).map(k => `<span class="chip mono">${k}</span>`).join('');
+    return `
+      <button class="rc" style="border-left-color:${COLOR[r.s]}" onclick="openRule('${r.id}')">
+        <div class="flex items-center gap-2 flex-wrap">
+          <span class="mono text-[10px] muted">${r.id}</span>
+          <span class="font-medium text-[13px]">${r.name}</span>
+          <span class="sev" style="background:${sev.bg};color:${sev.fg}">${r.sev}</span>
+        </div>
+        <p class="desc">${r.desc}</p>
+        ${feeds ? `<div class="feedrow"><span class="lbl">feeds</span>${feeds}</div>` : ''}
+        ${cfg ? `<div class="feedrow"><span class="lbl">cfg</span>${cfg}</div>` : ''}
+        <div class="src-hint">view source ›</div>
+      </button>`;
+  }
+
+  function lane(st){
+    const rules = RULES.filter(r => r.s === st.id);
+    const cards = rules.map(ruleCard).join('');
+    return `
+      <div class="lane">
+        <div class="lane-label">
+          <div class="flex items-center gap-2">
+            <span class="dot" style="background:${COLOR[st.id]}">${st.id}</span>
+            <span class="font-semibold text-[14px] leading-tight">${st.headline}</span>
+          </div>
+          <p class="text-[12px] muted mt-2 leading-snug">${st.body}</p>
+          <p class="text-[10.5px] faint mono mt-2 leading-snug">${st.tech} · ${rules.length} rule${rules.length>1?'s':''}</p>
+        </div>
+        <div class="lane-cards">${cards}</div>
+      </div>`;
+  }
+
+  document.getElementById('board').innerHTML = STRATA.map(lane).join('');
+
+  // ── drawer ───────────────────────────────────────────
+  let CUR = null, LENS = 'datalog';
+  const relChips = (ids, arrow) => (ids||[]).map(i =>
+    `<span class="chip"><span class="arrow">${arrow}</span> ${NAME[i]||i}</span>`).join('');
+
+  function codePane(r){
+    const c = CODE[r.id] || {};
+    if (LENS === 'english')
+      return `<p class="text-[13.5px] leading-relaxed" style="color:#d4d4d8">${r.desc}</p>`;
+    if (LENS === 'datalog'){
+      if (c.datalog == null)
+        return `<p class="text-xs muted italic">This rule embeds hand-authored SQL (an <em>extern</em> block) — no Datalog source is compiled for it. Switch to <strong>SQL</strong> to read it.</p>`;
+      return `<pre class="codeblk mono">${esc(c.datalog)}</pre>`;
+    }
+    return `<pre class="codeblk mono">${esc(c.sql || '-- SQL unavailable')}</pre>`;
+  }
+  function esc(s){return (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
+
+  function renderDrawer(){
+    const r = BY_ID[CUR]; if(!r) return;
+    const sev = SEV[r.sev];
+    const cfg = (r.cfg||[]).map(k => `<span class="chip mono">${k}</span>`).join('');
+    const seg = (key,label,jargon) =>
+      `<button class="${LENS===key?'on':(jargon?'jargon':'')}" onclick="setLens('${key}')">${label}</button>`;
+    document.getElementById('drawer-body').innerHTML = `
+      <div class="flex items-start gap-3 mb-4">
+        <div class="flex-1 min-w-0">
+          <div class="flex items-center gap-2 text-[11px] faint mb-2">
+            <span class="dot" style="background:${COLOR[r.s]};width:16px;height:16px;font-size:9px">${r.s}</span>
+            <span>S${r.s} · ${HEAD[r.s]}</span>
+          </div>
+          <div class="flex items-center gap-2 flex-wrap">
+            <span class="font-semibold text-[17px]">${r.name}</span>
+            <span class="mono text-xs muted">${r.id}</span>
+            <span class="sev" style="background:${sev.bg};color:${sev.fg}">${r.sev}</span>
+          </div>
+        </div>
+        <button class="xbtn" onclick="closeRule()">×</button>
+      </div>
+      <p class="text-[14px] leading-relaxed mb-4" style="color:#d8d8de">${r.desc}</p>
+      <div class="flex flex-col gap-2 mb-5 text-[11px]">
+        ${r.feeds&&r.feeds.length?`<div class="flex items-center gap-2 flex-wrap"><span class="lbl">feeds</span>${relChips(r.feeds,'→')}</div>`:''}
+        ${r.reads&&r.reads.length?`<div class="flex items-center gap-2 flex-wrap"><span class="lbl">reads</span>${relChips(r.reads,'←')}</div>`:''}
+        ${cfg?`<div class="flex items-center gap-2 flex-wrap"><span class="lbl">thresholds</span>${cfg}</div>`:''}
+      </div>
+      <div class="flex items-center gap-3 mb-2">
+        <span class="text-xs muted">Source</span>
+        <span class="seg">${seg('english','Plain English',false)}${seg('datalog','Datalog',true)}${seg('sql','SQL',true)}</span>
+      </div>
+      <div id="codepane">${codePane(r)}</div>`;
+  }
+  function openRule(id){ CUR=id; LENS='datalog';
+    renderDrawer();
+    document.getElementById('drawer').classList.add('on');
+    document.getElementById('drawer').setAttribute('aria-hidden','false');
+    document.getElementById('scrim').classList.add('on');
+  }
+  function closeRule(){
+    document.getElementById('drawer').classList.remove('on');
+    document.getElementById('drawer').setAttribute('aria-hidden','true');
+    document.getElementById('scrim').classList.remove('on');
+  }
+  function setLens(l){ LENS=l;
+    const r=BY_ID[CUR];
+    document.getElementById('codepane').innerHTML = codePane(r);
+    // refresh toggle active state
+    renderDrawer();
+  }
+  document.addEventListener('keydown', e => { if(e.key==='Escape') closeRule(); });
+</script>
+</body>
+</html>

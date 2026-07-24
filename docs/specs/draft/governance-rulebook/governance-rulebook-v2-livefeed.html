@@ -1,0 +1,998 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Rulebook — Reason · orch-monitor · Direction B “live inference feed”</title>
+<style>
+  :root {
+    --canvas: #0e1116;
+    --panel: #181d24;
+    --card: #20262f;
+    --elevated: #2b333d;
+    --border: rgba(255,255,255,0.11);
+    --border-subtle: rgba(255,255,255,0.07);
+    --hairline: rgba(255,255,255,0.055);
+    --fg: #dde3ea;
+    --dim: #8b95a3;
+    --faint: #5d6672;
+    --blue: #5e9ee8;
+    --green: #41bd7d;
+    --red: #e36b6b;
+    --amber: #d9a843;
+    --purple: #a98ee3;
+    --live: #53cde2;
+    --s1: #4ea1ff;
+    --s2: #eabc3b;
+    --s3: #39d07a;
+    --s4: #ef5d5d;
+    --s5: #a98ee3;
+    --s6: #5e9ee8;
+    --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { background: var(--canvas); color: var(--fg); font-family: var(--sans); font-size: 13px; height: 100%; }
+  body { display: flex; min-height: 100vh; }
+  ::selection { background: rgba(94,158,232,0.35); }
+  a { color: inherit; text-decoration: none; }
+
+  /* ═══ sidebar (fake app chrome — placement context) ═══ */
+  .sidebar {
+    width: 188px; flex: 0 0 188px; background: #0b0e13;
+    border-right: 1px solid var(--border-subtle);
+    display: flex; flex-direction: column; padding: 10px 8px;
+    font-size: 12.5px;
+  }
+  .brand { display: flex; align-items: center; gap: 8px; padding: 4px 8px 12px; }
+  .brand-mark { width: 18px; height: 18px; border-radius: 5px; background: linear-gradient(135deg, #5e9ee8, #a98ee3); display:flex; align-items:center; justify-content:center; font-weight:700; font-size:10px; color:#0e1116; }
+  .brand-name { font-weight: 600; font-size: 13px; line-height: 1.1; }
+  .brand-sub { font-size: 10px; color: var(--dim); }
+  .nav-group { margin-top: 10px; }
+  .nav-group-label {
+    display:flex; align-items:center; justify-content:space-between;
+    padding: 3px 8px; color: var(--dim); font-size: 11px; font-weight: 600;
+  }
+  .nav-group-label .twistie { font-size: 9px; opacity: 0.7; }
+  .nav-item {
+    display: flex; align-items: center; gap: 8px;
+    padding: 4px 8px; border-radius: 6px; color: var(--dim);
+    margin: 1px 0; cursor: default; line-height: 1.5;
+  }
+  .nav-item svg { width: 14px; height: 14px; flex: 0 0 14px; stroke: currentColor; fill: none; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
+  .nav-item:hover { background: rgba(255,255,255,0.04); }
+  .nav-item.active { background: var(--card); color: var(--fg); }
+  .nav-item.active svg { color: var(--blue); }
+  .nav-item .chord { margin-left: auto; font-family: var(--mono); font-size: 9.5px; color: var(--dim); opacity: 0; }
+  .nav-item.active .chord { opacity: 0.85; }
+  .nav-spacer { flex: 1; }
+  .nav-footer { border-top: 1px solid var(--border-subtle); padding-top: 8px; }
+  .nav-lock { margin-left:auto; font-size: 9px; opacity: 0.6; }
+
+  /* ═══ main shell ═══ */
+  .main { flex: 1; min-width: 0; display: flex; flex-direction: column; height: 100vh; }
+
+  .topbar {
+    height: 48px; flex: 0 0 48px; display: flex; align-items: center;
+    padding: 0 20px; border-bottom: 1px solid var(--border-subtle); gap: 10px;
+  }
+  .crumb { display: flex; align-items: center; gap: 7px; font-size: 13px; }
+  .crumb .root { color: var(--dim); }
+  .crumb .sep { color: var(--dim); opacity: 0.6; }
+  .crumb .leaf { color: var(--fg); font-weight: 600; }
+  .topbar-right { margin-left: auto; display: flex; align-items: center; gap: 12px; }
+  .gov-flags { display: flex; gap: 5px; }
+  .gov-chip {
+    font-family: var(--mono); font-size: 10px; color: var(--dim);
+    border: 1px solid var(--border-subtle); border-radius: 5px;
+    padding: 2.5px 7px; background: var(--panel); display: flex; align-items: center; gap: 5px;
+    white-space: nowrap;
+  }
+  .gov-chip .on { color: var(--green); font-size: 8px; }
+  .gov-chip .off { color: var(--dim); font-size: 8px; opacity: 0.8; }
+  .gov-chip.dryrun { color: var(--amber); border-color: rgba(217,168,67,0.3); }
+  .tbtn {
+    font-size: 11.5px; color: var(--dim); background: var(--panel);
+    border: 1px solid var(--border-subtle); border-radius: 6px; padding: 4px 10px;
+    cursor: pointer; font-family: var(--sans); display: flex; align-items: center; gap: 6px;
+  }
+  .tbtn:hover { color: var(--fg); }
+  .tbtn .key { font-family: var(--mono); font-size: 9px; color: var(--faint); border: 1px solid var(--border-subtle); border-radius: 3px; padding: 0 3px; }
+  .host-pick {
+    font-size: 12px; color: var(--fg); background: var(--panel);
+    border: 1px solid var(--border-subtle); border-radius: 6px; padding: 4px 10px;
+    display: flex; align-items: center; gap: 6px; cursor: default;
+  }
+  .host-pick .caret { color: var(--dim); font-size: 9px; }
+  .feed-range {
+    font-family: var(--mono); font-size: 10.5px; color: var(--fg); background: var(--panel);
+    border: 1px solid var(--border-subtle); border-radius: 6px; padding: 4.5px 10px;
+    display: flex; align-items: center; gap: 6px; cursor: default;
+  }
+  .feed-range .lab { color: var(--dim); }
+  .feed-range .caret { color: var(--dim); font-size: 9px; }
+
+  /* engine strip */
+  .engine-strip {
+    background: var(--panel); border-bottom: 1px solid var(--border-subtle);
+    padding: 7px 20px; display: flex; align-items: center; gap: 8px;
+    font-family: var(--mono); font-size: 11.5px; color: var(--dim); white-space: nowrap; overflow: hidden;
+    flex: 0 0 auto;
+  }
+  .engine-strip b { color: var(--fg); font-weight: 600; }
+  .engine-strip .new-n { color: var(--s2); font-weight: 600; }
+  .engine-strip .dark-flag { color: var(--amber); font-weight: 700; }
+  .dot-sep { opacity: 0.45; padding: 0 2px; }
+  .tick-dot {
+    width: 7px; height: 7px; border-radius: 50%; background: var(--live);
+    flex: 0 0 7px; animation: tickpulse 1.4s ease-out 1 both;
+  }
+  @keyframes tickpulse {
+    0% { box-shadow: 0 0 0 0 rgba(83,205,226,0.5); }
+    60% { box-shadow: 0 0 0 6px rgba(83,205,226,0); }
+    100% { box-shadow: 0 0 0 0 rgba(83,205,226,0); }
+  }
+
+  /* ═══ middle: strata stack + focus ═══ */
+  .mid { flex: 1; min-height: 0; display: flex; }
+  .stackcol { flex: 1; min-width: 0; display: flex; flex-direction: column; overflow-y: auto; }
+
+  .stack { flex: 1; position: relative; display: flex; flex-direction: column; min-height: 470px; }
+  .layer { flex: 1 1 0; display: flex; min-height: 56px; padding: 0 8px 0 20px; }
+  .layer + .layer { border-top: 1px solid var(--hairline); }
+  .layer.expanded { flex: 1.7 1 0; }
+
+  .gutter { width: 186px; flex: 0 0 186px; padding-top: 12px; }
+  .glabel {
+    font-family: var(--mono); font-size: 10px; letter-spacing: 0.13em;
+    text-transform: uppercase; color: var(--dim); display: flex; align-items: baseline; gap: 6px;
+  }
+  .glabel .gs { font-weight: 700; }
+  .glabel .tw { margin-left: 2px; font-size: 8px; color: var(--faint); letter-spacing: 0; }
+  .glabel.derive-only { border-bottom: 1px dashed rgba(94,158,232,0.45); padding-bottom: 3px; display: inline-flex; }
+  .gep { font-size: 10px; color: var(--faint); margin-top: 4px; line-height: 1.4; font-family: var(--mono); letter-spacing: 0.02em; }
+
+  .lane { flex: 1; min-width: 0; display: flex; flex-direction: column; justify-content: center; gap: 10px; padding: 9px 0; }
+  .stations { display: flex; flex-wrap: wrap; gap: 2px 18px; align-items: baseline; }
+
+  .station {
+    display: inline-flex; align-items: baseline; gap: 8px;
+    padding: 5px 11px 6px; border-radius: 7px; position: relative;
+    cursor: default; line-height: 1.4;
+  }
+  .station .rid { font-family: var(--mono); font-size: 10.5px; font-weight: 700; color: var(--faint); }
+  .station .sname { font-family: var(--mono); font-size: 12.5px; color: var(--dim); }
+  .station .scount { font-family: var(--mono); font-size: 11px; color: var(--faint); margin-left: 2px; }
+  .station .sdelta { font-family: var(--mono); font-size: 10px; font-weight: 700; }
+  .station .sval { font-family: var(--mono); font-size: 11.5px; color: var(--dim); }
+  .station .sval b { color: var(--amber); font-weight: 600; }
+  .station.quiet .sname { opacity: 0.7; }
+  .station.active { background: rgba(255,255,255,0.035); }
+  .station.active .sname { color: var(--fg); }
+  .station.s1 .rid, .station.s1.active .scount, .station.s1 .sdelta { color: var(--s1); }
+  .station.s2 .rid, .station.s2.active .scount, .station.s2 .sdelta { color: var(--s2); }
+  .station.s3 .rid, .station.s3.active .scount { color: var(--s3); }
+  .station.s4 .rid, .station.s4.active .scount, .station.s4 .sdelta { color: var(--s4); }
+  .station.s5 .rid, .station.s5.active .scount { color: var(--s5); }
+  .station.s6 .rid, .station.s6.active .scount { color: var(--s6); }
+  .station.quiet .rid { color: var(--faint); }
+  /* fired = a NEW (rule, entity) pair entered this tick → 2px underline pulses once */
+  .station.fired::after {
+    content: ""; position: absolute; left: 10px; right: 10px; bottom: 1px; height: 2px;
+    border-radius: 1px; animation: firepulse 0.9s ease-out 1 both;
+  }
+  .station.s2.fired::after { background: var(--s2); }
+  .station.s4.fired::after { background: var(--s4); }
+  @keyframes firepulse { 0% { opacity: 0; } 35% { opacity: 1; } 100% { opacity: 0.75; } }
+  /* lit = on the focused belief's derivation path */
+  .station.lit { background: rgba(255,255,255,0.055); }
+  .station.lit .sname { color: var(--fg); }
+  .station.lit-neg .sname { color: var(--dim); }
+  .station.lit-neg { background: rgba(255,255,255,0.03); }
+
+  .chips { display: flex; flex-wrap: wrap; gap: 5px; align-items: center; padding-left: 11px; }
+  .chips .crule { font-family: var(--mono); font-size: 9.5px; font-weight: 700; color: var(--faint); margin-right: 3px; }
+  .chips .crule.s2 { color: var(--s2); opacity: 0.8; }
+  .chips .crule.s4 { color: var(--s4); opacity: 0.8; }
+  .echip {
+    font-family: var(--mono); font-size: 10.5px; color: var(--fg);
+    background: var(--panel); border: 1px solid var(--border-subtle); border-radius: 5px;
+    padding: 2px 8px; display: inline-flex; align-items: baseline; gap: 6px; white-space: nowrap;
+  }
+  .echip i { font-style: normal; color: var(--faint); font-size: 10px; }
+  .echip.sel { border-color: rgba(234,188,59,0.55); box-shadow: 0 0 0 1px rgba(234,188,59,0.22); }
+  .echip.newchip { border-color: rgba(234,188,59,0.4); }
+  .echip.newchip b { color: var(--s2); font-weight: 700; font-size: 9.5px; }
+  .echip.r4drift { border-style: dashed; }
+
+  /* svg overlay — drawn ONLY for the focused belief's derivation path */
+  #overlay { position: absolute; inset: 0; pointer-events: none; z-index: 1; }
+  .chips { position: relative; z-index: 2; }
+
+  /* ═══ focus panel ═══ */
+  .focus {
+    width: 410px; flex: 0 0 410px; border-left: 1px solid var(--border-subtle);
+    overflow-y: auto; background: rgba(24,29,36,0.45); padding: 10px 14px 8px;
+  }
+  .pinrow { display: flex; align-items: center; gap: 8px; margin-bottom: 5px; }
+  .pinlab {
+    font-family: var(--mono); font-size: 9.5px; letter-spacing: 0.1em; color: var(--dim);
+    border: 1px solid var(--border-subtle); border-radius: 4px; padding: 1.5px 6px; background: var(--panel);
+  }
+  .pinlab b { color: var(--s2); }
+  .pinurl { font-family: var(--mono); font-size: 9.5px; color: var(--faint); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: 1; }
+  .pinx { margin-left: auto; color: var(--faint); font-size: 12px; cursor: pointer; flex: 0 0 auto; }
+
+  .belief-title { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+  .belief-title .bname { font-family: var(--mono); font-size: 14.5px; font-weight: 600; color: var(--s2); }
+  .belief-title .about { font-size: 11.5px; color: var(--dim); }
+  .belief-title .bent {
+    font-family: var(--mono); font-size: 11px; color: var(--fg);
+    background: var(--card); border: 1px solid var(--border-subtle); border-radius: 4px; padding: 1px 7px;
+  }
+  .belief-sub { font-family: var(--mono); font-size: 10.5px; color: var(--dim); margin-top: 4px; }
+  .belief-sub .held { color: var(--fg); }
+
+  .frule-block {
+    margin-top: 7px; border: 1px solid var(--border-subtle); border-radius: 9px;
+    background: var(--panel); padding: 8px 11px 9px;
+  }
+  .frb-head { display: flex; align-items: center; gap: 8px; }
+  .frb-id {
+    font-family: var(--mono); font-size: 10.5px; font-weight: 700; color: var(--s2);
+    background: rgba(234,188,59,0.1); border: 1px solid rgba(234,188,59,0.3);
+    border-radius: 4px; padding: 1px 6px;
+  }
+  .frb-name { font-family: var(--mono); font-size: 12.5px; font-weight: 600; }
+  .frb-strat { margin-left: auto; font-family: var(--mono); font-size: 9.5px; color: var(--faint); }
+  .applies { font-size: 12px; color: var(--dim); margin-top: 6px; line-height: 1.45; }
+  .applies em { color: var(--fg); font-style: normal; font-family: var(--mono); font-size: 11px; }
+  .applies .novalue { color: var(--dim); }
+  .plainsent { font-size: 12.5px; line-height: 1.5; color: var(--fg); margin-top: 6px; }
+  pre.datalog {
+    font-family: var(--mono); font-size: 10px; line-height: 1.42; color: #c4cdd8;
+    background: var(--canvas); border: 1px solid var(--border-subtle); border-radius: 7px;
+    padding: 4px 9px; overflow-x: auto; white-space: pre; margin-top: 5px;
+  }
+  pre.datalog .kw-not { color: var(--red); }
+  pre.datalog .kw-cfg { color: var(--purple); }
+  details.sqld { margin-top: 7px; min-width: 0; }
+  details.sqld summary {
+    font-size: 11.5px; color: var(--dim); cursor: pointer; list-style: none;
+    display: flex; align-items: baseline; gap: 6px; white-space: nowrap; overflow: hidden;
+  }
+  details.sqld summary .lab { flex: 0 0 auto; }
+  details.sqld summary .idn { overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+  details.sqld summary::before { content: "›"; color: var(--faint); transition: transform 0.15s; }
+  details.sqld[open] summary::before { transform: rotate(90deg); }
+  details.sqld summary:hover { color: var(--fg); }
+  details.sqld summary .idn { font-family: var(--mono); font-size: 9.5px; color: var(--faint); }
+  pre.sql {
+    font-family: var(--mono); font-size: 10px; line-height: 1.5; color: #aeb9c6;
+    background: var(--canvas); border: 1px solid var(--border-subtle); border-radius: 7px;
+    padding: 9px 11px; overflow-x: auto; white-space: pre; margin-top: 7px; max-height: 240px; overflow-y: auto;
+  }
+  .frb-meta { margin-top: 6px; display: flex; flex-direction: column; gap: 2px; }
+  .metaline { display: flex; flex-wrap: wrap; gap: 3px 5px; align-items: baseline; font-family: var(--mono); font-size: 10px; color: var(--dim); }
+  .mlabel { font-family: var(--mono); font-size: 9px; color: var(--faint); margin-right: 1px; text-transform: uppercase; letter-spacing: 0.07em; }
+  .mchip {
+    font-family: var(--mono); font-size: 10px; color: var(--dim);
+    background: var(--canvas); border: 1px solid var(--border-subtle); border-radius: 4px;
+    padding: 1px 5px; white-space: nowrap;
+  }
+  .mchip.neg { color: var(--fg); }
+  .mchip.neg .nullset { color: var(--red); margin-right: 3px; }
+  .mchip.cfgv { color: var(--purple); }
+
+  .whyhead { display: flex; align-items: baseline; gap: 8px; margin-top: 7px; }
+  .whyhead h3 { font-size: 12px; font-weight: 650; }
+  .whyhead .asof { font-family: var(--mono); font-size: 9.5px; color: var(--faint); }
+  .whyhead .pathnote { margin-left: auto; font-size: 10px; color: var(--faint); }
+  .tree { padding: 4px 2px 2px 2px; font-family: var(--mono); font-size: 10px; line-height: 1.5; }
+  .tline { display: flex; align-items: flex-start; }
+  .tline .pfx { color: var(--faint); white-space: pre; flex: 0 0 auto; }
+  .tline .tcontent { flex: 1; min-width: 0; }
+  .chip-fact {
+    color: #8fe0b4; background: rgba(65,189,125,0.1); border: 1px solid rgba(65,189,125,0.35);
+    border-radius: 4px; padding: 0.5px 5px; font-size: 9.5px; margin-right: 5px;
+  }
+  .chip-belief {
+    color: #a9c9f0; background: rgba(94,158,232,0.1); border: 1px solid rgba(94,158,232,0.35);
+    border-radius: 4px; padding: 0.5px 5px; font-size: 9.5px; margin-right: 5px;
+  }
+  .chip-neg {
+    color: var(--fg); background: transparent; border: 1px solid var(--border);
+    border-radius: 4px; padding: 0.5px 5px; font-size: 9.5px; margin-right: 5px;
+  }
+  .chip-neg .nullset { color: var(--red); margin-right: 2px; }
+  .tline .ridref { color: var(--dim); font-size: 9.5px; margin-left: 5px; }
+  .tline .tnote { color: var(--dim); font-size: 9.5px; margin-left: 5px; }
+  .tline .factdetail { color: var(--dim); font-size: 9.5px; }
+  .tline .root-dot { color: var(--s2); margin-right: 5px; }
+  .tline .root-name { color: var(--fg); font-weight: 600; }
+  .tline .guard-ok { color: var(--green); margin-left: 4px; }
+  .tree-foot {
+    margin-top: 5px; padding-top: 5px; border-top: 1px dashed var(--border-subtle);
+    font-family: var(--mono); font-size: 10px; color: var(--dim); display: flex; flex-wrap: wrap; gap: 4px 14px; align-items: baseline;
+  }
+  .feeds-link { color: var(--blue); }
+  .why-cmd { color: var(--faint); }
+  .why-cmd b { color: var(--dim); font-weight: 500; }
+
+  .alsohead { display: flex; align-items: baseline; gap: 8px; margin-top: 7px; }
+  .alsohead h3 { font-size: 12px; font-weight: 650; }
+  .alsohead .delta { font-family: var(--mono); font-size: 10px; color: var(--s2); }
+  .subj-row {
+    display: flex; align-items: center; gap: 7px; padding: 1px 6px;
+    border-radius: 6px; font-family: var(--mono); font-size: 10px; color: var(--dim); white-space: nowrap;
+  }
+  .subj-row:hover { background: rgba(255,255,255,0.03); }
+  .subj-chip {
+    font-size: 10px; color: var(--fg); background: var(--card);
+    border: 1px solid var(--border-subtle); border-radius: 4px; padding: 1px 6px;
+  }
+  .subj-row .held { margin-left: auto; }
+  .subj-row .ticks { color: var(--faint); font-size: 9.5px; }
+  .subj-row .tw { font-size: 8.5px; width: 10px; opacity: 0.7; }
+  .subj-row.newrow .subj-chip { border-color: rgba(234,188,59,0.45); }
+  .subj-row.newrow .held { color: var(--s2); }
+  .subj-row.focusedrow { background: var(--card); border: 1px solid var(--border-subtle); color: var(--fg); }
+  .focus-foot { margin-top: 7px; font-size: 10.5px; color: var(--faint); line-height: 1.4; }
+  .focus-foot a { color: var(--dim); border-bottom: 1px dotted var(--faint); cursor: pointer; }
+
+  /* ═══ feed dock ═══ */
+  .feeddock {
+    flex: 0 0 auto; border-top: 1px solid var(--border-subtle); background: var(--canvas);
+    display: flex; flex-direction: column; height: 240px;
+  }
+  .feedbar {
+    display: flex; align-items: center; gap: 8px; padding: 4.5px 20px;
+    border-bottom: 1px solid var(--hairline); flex: 0 0 auto;
+  }
+  .feedbar .ftitle { font-size: 11px; font-weight: 650; color: var(--dim); letter-spacing: 0.05em; text-transform: uppercase; }
+  .fchips { display: flex; gap: 4px; margin-left: 8px; }
+  .fchip {
+    font-family: var(--mono); font-size: 9.5px; color: var(--dim);
+    border: 1px solid var(--border-subtle); border-radius: 4px; padding: 1px 7px; cursor: default;
+  }
+  .fchip.active { background: var(--card); color: var(--fg); border-color: var(--border); }
+  .fchip.entity { color: var(--s2); border-color: rgba(234,188,59,0.3); }
+  .feedbar .followpill {
+    margin-left: auto; font-family: var(--mono); font-size: 9.5px; color: var(--live);
+    display: flex; align-items: center; gap: 5px;
+  }
+  .signature {
+    flex: 0 0 auto; display: flex; align-items: center; gap: 8px;
+    font-family: var(--mono); font-size: 10.5px; color: var(--amber);
+    background: rgba(217,168,67,0.06); border-bottom: 1px solid rgba(217,168,67,0.18);
+    padding: 3.5px 20px;
+  }
+  .signature .view { margin-left: auto; color: var(--amber); opacity: 0.85; cursor: pointer; }
+  .feedrows { flex: 1; overflow-y: auto; font-family: var(--mono); font-size: 11px; padding: 3px 0; }
+  .frow { display: flex; align-items: baseline; gap: 9px; padding: 2.5px 20px; white-space: nowrap; overflow: hidden; }
+  .frow .ft { color: var(--faint); font-size: 10px; flex: 0 0 54px; }
+  .frow .fsign { width: 10px; flex: 0 0 10px; font-weight: 700; }
+  .frow .fsign.plus { color: var(--green); }
+  .frow .fsign.minus { color: var(--red); }
+  .frow .frule { font-weight: 700; font-size: 10px; flex: 0 0 26px; }
+  .frule.s1 { color: var(--s1); } .frule.s2 { color: var(--s2); } .frule.s3 { color: var(--s3); }
+  .frule.s4 { color: var(--s4); } .frule.s5 { color: var(--s5); } .frule.s6 { color: var(--s6); }
+  .frow .fname { color: var(--fg); }
+  .frow .fabout { color: var(--dim); }
+  .frow .fabout b { color: var(--fg); font-weight: 500; }
+  .frow .fcause { color: var(--faint); overflow: hidden; text-overflow: ellipsis; }
+  .frow .fcause .nn { color: var(--red); opacity: 0.8; }
+  .frow.aged { opacity: 0.62; }
+  .frow.aging { opacity: 0.8; }
+  .frow.newest { background: linear-gradient(90deg, rgba(234,188,59,0.07), transparent 65%); }
+  .fdiv {
+    padding: 2.5px 20px; color: var(--faint); font-size: 10px; letter-spacing: 0.03em;
+    font-family: var(--mono); opacity: 0.85;
+  }
+  .feedfoot {
+    flex: 0 0 auto; display: flex; align-items: center; gap: 16px;
+    border-top: 1px solid var(--hairline); padding: 3px 20px;
+    font-family: var(--mono); font-size: 9.5px; color: var(--faint);
+  }
+  .feedfoot .keys { margin-left: auto; }
+  .feedfoot .keys b { color: var(--dim); font-weight: 500; }
+
+  /* ═══ sheets (thresholds + about) ═══ */
+  .sheet-backdrop {
+    position: fixed; inset: 0; background: rgba(8,10,14,0.55); z-index: 50;
+    display: none;
+  }
+  .sheet-backdrop.open { display: block; }
+  .sheet {
+    position: absolute; top: 0; right: 0; bottom: 0; width: 480px; max-width: 92vw;
+    background: var(--panel); border-left: 1px solid var(--border);
+    padding: 18px 22px; overflow-y: auto; box-shadow: -18px 0 50px rgba(0,0,0,0.45);
+  }
+  .sheet h2 { font-size: 15px; font-weight: 650; display: flex; align-items: center; }
+  .sheet h2 .x { margin-left: auto; cursor: pointer; color: var(--dim); font-size: 13px; font-weight: 400; }
+  .sheet .sub { color: var(--dim); font-size: 11.5px; margin: 6px 0 14px; line-height: 1.5; }
+  table.thresholds { width: 100%; border-collapse: collapse; background: var(--canvas); border: 1px solid var(--border-subtle); border-radius: 8px; overflow: hidden; }
+  .thresholds th {
+    text-align: left; font-size: 10px; font-weight: 600; color: var(--dim);
+    letter-spacing: 0.06em; text-transform: uppercase;
+    padding: 7px 12px; border-bottom: 1px solid var(--border-subtle); background: rgba(255,255,255,0.02);
+  }
+  .thresholds td { padding: 6px 12px; border-bottom: 1px solid var(--border-subtle); font-size: 12px; color: var(--fg); }
+  .thresholds tr:last-child td { border-bottom: 0; }
+  .thresholds td.k, .thresholds td.v, .thresholds td.r { font-family: var(--mono); font-size: 11px; }
+  .thresholds td.k { color: var(--purple); }
+  .thresholds td.p { color: var(--dim); }
+  .thresholds td.r { color: var(--dim); }
+  .thresholds tr.fired td { background: rgba(234,188,59,0.07); }
+  .thresholds tr.fired td.r { color: var(--s2); }
+  .sheet .note { font-size: 11px; color: var(--faint); margin-top: 12px; line-height: 1.6; }
+  .sheet .note code { font-family: var(--mono); font-size: 10px; color: var(--dim); }
+  .vocab { margin-top: 4px; }
+  .vocab dt { font-family: var(--mono); font-size: 11px; color: var(--s2); margin-top: 12px; }
+  .vocab dd { font-size: 12px; color: var(--dim); line-height: 1.55; margin-top: 3px; }
+  .vocab dd em { color: var(--fg); font-style: normal; }
+
+  @media (max-width: 1460px) { .focus { width: 372px; flex-basis: 372px; } }
+</style>
+</head>
+<body>
+
+  <!-- ═══ sidebar: Reason group → Process + Rulebook (active) ═══ -->
+  <nav class="sidebar">
+    <div class="brand">
+      <div class="brand-mark">C</div>
+      <div><div class="brand-name">Catalyst</div><div class="brand-sub">orch-monitor</div></div>
+    </div>
+
+    <div class="nav-group">
+      <div class="nav-group-label"><span>Overall</span><span class="twistie">▾</span></div>
+      <div class="nav-item"><svg viewBox="0 0 24 24"><path d="M22 12h-6l-2 3h-4l-2-3H2"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/></svg>Inbox</div>
+      <div class="nav-item"><svg viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/></svg>Tickets</div>
+      <div class="nav-item"><svg viewBox="0 0 24 24"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>Workers</div>
+      <div class="nav-item"><svg viewBox="0 0 24 24"><line x1="10" y1="6" x2="21" y2="6"/><line x1="10" y1="12" x2="21" y2="12"/><line x1="10" y1="18" x2="21" y2="18"/><path d="M4 6h1v4"/><path d="M4 10h2"/><path d="M6 18H4c0-1 2-2 2-3s-1-1.5-2-1"/></svg>Queue</div>
+    </div>
+
+    <div class="nav-group">
+      <div class="nav-group-label"><span>Reason</span><span class="twistie">▾</span></div>
+      <div class="nav-item"><svg viewBox="0 0 24 24"><circle cx="5" cy="6" r="2.2"/><circle cx="19" cy="6" r="2.2"/><circle cx="12" cy="18" r="2.2"/><path d="M7 7.5 10.5 16"/><path d="M17 7.5 13.5 16"/><path d="M7.2 6h9.6"/></svg>Process<span class="chord">g p</span></div>
+      <div class="nav-item active"><svg viewBox="0 0 24 24"><path d="M12 7v14"/><path d="M16 12h2"/><path d="M16 8h2"/><path d="M3 18a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h5a4 4 0 0 1 4 4 4 4 0 0 1 4-4h5a1 1 0 0 1 1 1v13a1 1 0 0 1-1 1h-6a3 3 0 0 0-3 3 3 3 0 0 0-3-3z"/><path d="M6 12h2"/><path d="M6 8h2"/></svg>Rulebook<span class="chord">g r</span></div>
+    </div>
+
+    <div class="nav-group">
+      <div class="nav-group-label"><span>Observe</span><span class="twistie">▾</span></div>
+      <div class="nav-item"><svg viewBox="0 0 24 24"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>Telemetry</div>
+      <div class="nav-item"><svg viewBox="0 0 24 24"><path d="m12 14 4-4"/><path d="M3.34 19a10 10 0 1 1 17.32 0"/></svg>Utilization</div>
+      <div class="nav-item"><svg viewBox="0 0 24 24"><path d="M21 12V7H5a2 2 0 0 1 0-4h14v4"/><path d="M3 5v14a2 2 0 0 0 2 2h16v-5"/><path d="M18 12a2 2 0 0 0 0 4h4v-4Z"/></svg>FinOps</div>
+      <div class="nav-item"><svg viewBox="0 0 24 24"><rect x="2" y="2" width="20" height="8" rx="2"/><rect x="2" y="14" width="20" height="8" rx="2"/><line x1="6" y1="6" x2="6.01" y2="6"/><line x1="6" y1="18" x2="6.01" y2="18"/></svg>Fleet Ops</div>
+      <div class="nav-item"><svg viewBox="0 0 24 24"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg>DevOps<span class="nav-lock">🔒</span></div>
+    </div>
+
+    <div class="nav-spacer"></div>
+    <div class="nav-footer">
+      <div class="nav-item"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 1v4M12 19v4M4.2 4.2l2.8 2.8M17 17l2.8 2.8M1 12h4M19 12h4M4.2 19.8 7 17M17 7l2.8-2.8"/></svg>Settings</div>
+    </div>
+  </nav>
+
+  <!-- ═══ MAIN ═══ -->
+  <div class="main">
+
+    <!-- (A) header -->
+    <header class="topbar">
+      <div class="crumb">
+        <span class="root">Reason</span>
+        <span class="sep">/</span>
+        <span class="leaf">Rulebook</span>
+      </div>
+      <div class="topbar-right">
+        <div class="gov-flags">
+          <span class="gov-chip">shadow <span class="on">●</span></span>
+          <span class="gov-chip">diag <span class="off">○</span></span>
+          <span class="gov-chip">intents <span class="off">○</span></span>
+          <span class="gov-chip">advance <span class="off">○</span></span>
+          <span class="gov-chip dryrun">janitor dry-run</span>
+        </div>
+        <button class="tbtn" id="btnThresholds">Thresholds <span class="key">t</span></button>
+        <button class="tbtn" id="btnAbout">About this engine</button>
+        <div class="host-pick">mini <span class="caret">▾</span></div>
+        <div class="feed-range"><span class="lab">feed:</span> NOW <span class="caret">▾</span></div>
+      </div>
+    </header>
+
+    <!-- (B) engine strip -->
+    <div class="engine-strip">
+      <span class="tick-dot"></span>
+      <span>tick <b>#6951</b></span><span class="dot-sep">·</span>
+      <span>2s ago</span><span class="dot-sep">·</span>
+      <span>host <b>mini</b></span><span class="dot-sep">·</span>
+      <span><b>50</b> beliefs (<span class="new-n">2 new</span> · 0 cleared)</span><span class="dot-sep">·</span>
+      <span>eval 1.8 ms</span><span class="dot-sep">·</span>
+      <span>recording <b>ON</b>, enforcement <span class="dark-flag">DARK</span></span>
+    </div>
+
+    <div class="mid">
+
+      <!-- (C) strata stack — rises ↑, S1 ground at the bottom -->
+      <section class="stackcol">
+        <div class="stack" id="stack">
+
+          <!-- S6 -->
+          <div class="layer" data-s="6">
+            <div class="gutter">
+              <div class="glabel derive-only"><span class="gs" style="color:var(--s6)">S6</span> · PREDICTION <span class="tw">▸</span></div>
+              <div class="gep">derive-only — never acts</div>
+            </div>
+            <div class="lane">
+              <div class="stations">
+                <div class="station s6 active" id="st-R16" title="advance_to — the phase deriveAdvancement WOULD dispatch next · held because free_slots = 0">
+                  <span class="rid">R16</span><span class="sname">advance_to</span><span class="scount">1</span>
+                </div>
+                <div class="station s6 quiet" id="st-R17" title="0 firings since recording began — preconditions never co-occurred, not necessarily broken">
+                  <span class="rid">R17</span><span class="sname">cycle_exhausted</span><span class="scount">·</span>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- S5 -->
+          <div class="layer" data-s="5">
+            <div class="gutter">
+              <div class="glabel"><span class="gs" style="color:var(--s5)">S5</span> · DEPENDENCIES <span class="tw">▸</span></div>
+              <div class="gep">WITH RECURSIVE over relations</div>
+            </div>
+            <div class="lane">
+              <div class="stations">
+                <div class="station s5 active" id="st-R13">
+                  <span class="rid">R13</span><span class="sname">blocker_rank</span><span class="scount">8</span>
+                </div>
+                <div class="station s5 quiet" id="st-R14" title="0 firings since recording began — preconditions never co-occurred, not necessarily broken">
+                  <span class="rid">R14</span><span class="sname">cycle_detected</span><span class="scount">·</span>
+                </div>
+                <div class="station s5 active" id="st-R15">
+                  <span class="rid">R15</span><span class="sname">ready</span><span class="scount">4</span>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- S4 — expanded (entered activity this tick) -->
+          <div class="layer expanded" data-s="4">
+            <div class="gutter">
+              <div class="glabel"><span class="gs" style="color:var(--s4)">S4</span> · ESCALATION <span class="tw">▾</span></div>
+              <div class="gep">¬ over intent</div>
+            </div>
+            <div class="lane">
+              <div class="stations">
+                <div class="station s4 active fired lit" id="st-R10">
+                  <span class="rid">R10</span><span class="sname">wake_diagnostician</span><span class="scount">7</span><span class="sdelta">▲1</span>
+                </div>
+                <div class="station s4 quiet" id="st-R11" title="0 firings since recording began — intents flag is dark, no intent rows exist">
+                  <span class="rid">R11</span><span class="sname">action_ineffective</span><span class="scount">·</span>
+                </div>
+                <div class="station s4 quiet" id="st-R12" title="0 firings since recording began — preconditions never co-occurred, not necessarily broken">
+                  <span class="rid">R12</span><span class="sname">escalate_human</span><span class="scount">·</span>
+                </div>
+              </div>
+              <div class="chips">
+                <span class="crule s4">R10</span>
+                <span class="echip newchip">CTL-769/implement <i>·now</i> <b>▲</b></span>
+                <span class="echip">CTL-722/plan <i>·9h39m</i></span>
+                <span class="echip">CTL-731/implement <i>·9h39m</i></span>
+                <span class="echip">CTL-745/verify <i>·9h39m</i></span>
+                <span class="echip">CTL-748/implement <i>·9h39m</i></span>
+                <span class="echip">CTL-756/plan <i>·9h39m</i></span>
+                <span class="echip">CTL-760/research <i>·9h39m</i></span>
+              </div>
+            </div>
+          </div>
+
+          <!-- S3 -->
+          <div class="layer" data-s="3">
+            <div class="gutter">
+              <div class="glabel"><span class="gs" style="color:var(--s3)">S3</span> · CAPACITY <span class="tw">▸</span></div>
+              <div class="gep">aggregate over S2 + agents</div>
+            </div>
+            <div class="lane">
+              <div class="stations">
+                <div class="station s3 active" id="st-R8" title="min(max_parallel − lease_valid, session_cap − bg sessions) — over-leased: 7 valid leases against a cap of 6, queue admits nothing">
+                  <span class="rid">R8</span><span class="sname">free_slots</span><span class="sval"><b>= 0</b> · min(6−7, 10−7)</span>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- S2 — expanded (entered activity this tick) -->
+          <div class="layer expanded" data-s="2">
+            <div class="gutter">
+              <div class="glabel"><span class="gs" style="color:var(--s2)">S2</span> · LIVENESS VERDICTS <span class="tw">▾</span></div>
+              <div class="gep">¬ over S1</div>
+            </div>
+            <div class="lane">
+              <div class="stations">
+                <div class="station s2 active fired lit" id="st-R4">
+                  <span class="rid">R4</span><span class="sname">wedged_never_started</span><span class="scount">7</span><span class="sdelta">▲1</span>
+                </div>
+                <div class="station s2 active" id="st-R5">
+                  <span class="rid">R5</span><span class="sname">lease_valid</span><span class="scount">7</span>
+                </div>
+                <div class="station s2 quiet" id="st-R6" title="0 firings since recording began — preconditions never co-occurred, not necessarily broken">
+                  <span class="rid">R6</span><span class="sname">lease_expired</span><span class="scount">·</span>
+                </div>
+                <div class="station s2 active" id="st-R9">
+                  <span class="rid">R9</span><span class="sname">board_drift</span><span class="scount">1</span>
+                </div>
+              </div>
+              <div class="chips">
+                <span class="crule s2">R4</span>
+                <span class="echip newchip">CTL-769/implement <i>·2m03s</i> <b>▲</b></span>
+                <span class="echip sel">CTL-722/plan <i>·9h39m</i></span>
+                <span class="echip">CTL-731/implement <i>·9h39m</i></span>
+                <span class="echip">CTL-745/verify <i>·9h39m</i></span>
+                <span class="echip">CTL-748/implement <i>·9h39m</i></span>
+                <span class="echip">CTL-756/plan <i>·9h39m</i></span>
+                <span class="echip">CTL-760/research <i>·9h39m</i></span>
+              </div>
+              <div class="chips">
+                <span class="crule s2">R9</span>
+                <span class="echip r4drift">CTL-748 <i>Todo ≠ Implement · 9h12m</i></span>
+              </div>
+            </div>
+          </div>
+
+          <!-- S1 — collapsed (operator override persisted) -->
+          <div class="layer" data-s="1">
+            <div class="gutter">
+              <div class="glabel"><span class="gs" style="color:var(--s1)">S1</span> · GROUND <span class="tw">▸</span></div>
+              <div class="gep">reads obs_* only</div>
+            </div>
+            <div class="lane">
+              <div class="stations">
+                <div class="station s1 active lit" id="st-R1">
+                  <span class="rid">R1</span><span class="sname">session_registered</span><span class="scount">7</span>
+                </div>
+                <div class="station s1 quiet lit-neg" id="st-R2" title="0 firings since recording began — no worker has ever produced a turn this run. Checked-absent by R4.">
+                  <span class="rid">R2</span><span class="sname">turn_started</span><span class="scount">·</span>
+                </div>
+                <div class="station s1 active" id="st-R3">
+                  <span class="rid">R3</span><span class="sname">progress_evidence</span><span class="scount">7</span>
+                </div>
+                <div class="station s1 quiet lit-neg" id="st-R7" title="quiet this tick — checked-absent by R4">
+                  <span class="rid">R7</span><span class="sname">worker_dead</span><span class="scount">—</span>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <svg id="overlay"></svg>
+        </div>
+      </section>
+
+      <!-- (E) focus panel — belief focus: the payoff state -->
+      <aside class="focus">
+        <div class="pinrow">
+          <span class="pinlab">BELIEF · pinned <b>as of tick #6951</b></span>
+          <span class="pinurl">/rules?belief=R4:CTL-722%2Fplan&amp;tick=6951</span>
+          <span class="pinx">✕</span>
+        </div>
+
+        <div class="belief-title">
+          <span class="bname">wedged_never_started</span>
+          <span class="about">about</span>
+          <span class="bent">CTL-722/plan</span>
+        </div>
+        <div class="belief-sub">held <span class="held">9h39m</span> · ×6948 ticks · entered 08:58:33 (#25)</div>
+
+        <!-- rule anatomy -->
+        <div class="frule-block">
+          <div class="frb-head">
+            <span class="frb-id">R4</span>
+            <span class="frb-name">wedged_never_started</span>
+            <span class="frb-strat">S2 · liveness verdicts</span>
+          </div>
+          <p class="applies">applies to each <em>ticket-phase</em> (e.g. CTL-722/plan) · <span class="novalue">derives no value — its existence is the verdict</span></p>
+          <p class="plainsent">Registered a background session, ≥2m old, no turn ever, not dead — wedged before its first turn (the 2026-06-09 class).</p>
+<pre class="datalog">wedged_never_started(T,P) :-
+  session_registered(T,P,_),
+  obs_signal(T,P, started_at:S),
+  older(S, <span class="kw-cfg">cfg(never_started_ms)</span>),
+  <span class="kw-not">not</span> turn_started(T,P), <span class="kw-not">not</span> worker_dead(T,P).</pre>
+          <details class="sqld">
+            <summary><span class="lab">show executed SQL</span> <span class="idn">the verbatim executed constant · identical by construction</span></summary>
+<pre class="sql">INSERT OR IGNORE INTO belief (tick_id, stratum, name, subject, rule_id, source_fact_ids)
+SELECT t.tick_id, 2, 'wedged_never_started', s.ticket || '/' || s.phase, 'R4',
+       json_array('b' || sr.belief_id, 's' || s.fact_id, 't' || t.tick_id)
+FROM tick t
+JOIN obs_signal s ON s.tick_id = t.tick_id AND s.status = 'running'
+JOIN belief sr    ON sr.tick_id = t.tick_id AND sr.name = 'session_registered'
+                 AND sr.subject = s.ticket || '/' || s.phase
+JOIN cfg c        ON c.key = 'never_started_ms'
+WHERE t.tick_id = :tick
+  AND s.started_at_ms IS NOT NULL
+  AND t.now_ms - s.started_at_ms > c.value_int
+  AND NOT EXISTS (SELECT 1 FROM belief b WHERE b.tick_id = t.tick_id
+                  AND b.name = 'turn_started' AND b.subject = sr.subject)
+  AND NOT EXISTS (SELECT 1 FROM belief b WHERE b.tick_id = t.tick_id
+                  AND b.name = 'worker_dead' AND b.subject = sr.subject)</pre>
+          </details>
+          <div class="frb-meta">
+            <div class="metaline"><span class="mlabel">reads</span> <span class="mchip">obs_signal</span> <span class="mchip">b session_registered · R1</span></div>
+            <div class="metaline"><span class="mlabel">¬ checked-absent</span> <span class="mchip neg"><span class="nullset">∅</span>turn_started · R2</span> <span class="mchip neg"><span class="nullset">∅</span>worker_dead · R7</span></div>
+            <div class="metaline"><span class="mlabel">threshold</span> <span class="mchip cfgv">never_started_ms · 120,000 ms (2m) · live</span> <span class="mlabel">src</span> <span class="mchip">rules.mjs:187</span></div>
+          </div>
+        </div>
+
+        <!-- derivation -->
+        <div class="whyhead">
+          <h3>Why</h3>
+          <span class="asof">derivation at tick #6951</span>
+          <span class="pathnote">↙ the stack is lighting this path</span>
+        </div>
+        <div class="tree">
+          <div class="tline"><span class="pfx"></span><div class="tcontent"><span class="root-dot">●</span><span class="root-name">wedged_never_started(CTL-722/plan)</span><span class="ridref">[R4 · S2]</span></div></div>
+          <div class="tline"><span class="pfx">├─ </span><div class="tcontent"><span class="chip-belief">b session_registered(CTL-722/plan)</span><span class="ridref">[R1 · S1]</span></div></div>
+          <div class="tline"><span class="pfx">│   ├─ </span><div class="tcontent"><span class="chip-fact">s obs_signal #101</span><span class="factdetail">running · bg 5ad5c1ff · 08:56:24Z</span></div></div>
+          <div class="tline"><span class="pfx">│   └─ </span><div class="tcontent"><span class="chip-fact">a obs_agent #102</span><span class="factdetail">background · state=blocked</span></div></div>
+          <div class="tline"><span class="pfx">├─ </span><div class="tcontent"><span class="chip-neg"><span class="nullset">¬</span>turn_started(CTL-722/plan)</span><span class="tnote">— checked, absent this tick</span></div></div>
+          <div class="tline"><span class="pfx">├─ </span><div class="tcontent"><span class="chip-neg"><span class="nullset">¬</span>worker_dead(CTL-722/plan)</span><span class="tnote">— checked, absent this tick</span></div></div>
+          <div class="tline"><span class="pfx">└─ </span><div class="tcontent"><span class="factdetail">guard: now − started_at = 34,724,000 ms &gt; 120,000 ms</span><span class="guard-ok">✓</span></div></div>
+          <div class="tree-foot">
+            <span>feeds ↑ <span class="feeds-link">R10 wake_diagnostician →</span></span>
+            <span class="why-cmd">⧉ <b>catalyst why CTL-722 --tick 6951</b></span>
+          </div>
+        </div>
+
+        <!-- other entities concluding under R4 -->
+        <div class="alsohead">
+          <h3>Also concluding now (7)</h3>
+          <span class="delta">▲1 this tick</span>
+        </div>
+        <div class="subj-row newrow">
+          <span class="tw">▸</span><span class="subj-chip">CTL-769/implement</span>
+          <span class="held">▲ entered this tick</span><span class="ticks">×1</span>
+        </div>
+        <div class="subj-row focusedrow">
+          <span class="tw">▾</span><span class="subj-chip">CTL-722/plan</span>
+          <span class="held">held 9h39m</span><span class="ticks">×6948</span>
+        </div>
+        <div class="subj-row">
+          <span class="tw">▸</span><span class="subj-chip">CTL-731/implement</span>
+          <span class="held">held 9h39m</span><span class="ticks">×6624</span>
+        </div>
+        <div class="subj-row">
+          <span class="tw">▸</span><span class="subj-chip">CTL-745/verify</span>
+          <span class="held">held 9h39m</span><span class="ticks">×6444</span>
+        </div>
+        <div class="subj-row">
+          <span class="tw">▸</span><span class="subj-chip">CTL-748/implement</span>
+          <span class="held">held 9h39m</span><span class="ticks">×6288</span>
+        </div>
+        <div class="subj-row">
+          <span class="tw"> </span><span style="color:var(--faint)">+2 more</span>
+          <span class="held">held 9h39m</span>
+        </div>
+
+        <p class="focus-foot">A belief is a sentence — a predicate <em>about</em> an entity, re-derived every 5s tick. <a id="aboutLink">About this engine ›</a></p>
+      </aside>
+    </div>
+
+    <!-- (D) feed dock — state changes only -->
+    <div class="feeddock">
+      <div class="feedbar">
+        <span class="ftitle">Feed</span>
+        <div class="fchips">
+          <span class="fchip active">all</span>
+          <span class="fchip">S1</span><span class="fchip">S2</span><span class="fchip">S3</span>
+          <span class="fchip">S4</span><span class="fchip">S5</span><span class="fchip">S6</span>
+          <span class="fchip">escalations</span>
+          <span class="fchip entity">CTL-722/plan</span>
+        </div>
+        <span class="followpill">● following · newest ↓</span>
+      </div>
+      <div class="signature">
+        <span>⚠ 6 entities entered wedged_never_started in one tick (#25 · 08:58:33) — shared cause likely</span>
+        <span class="view">view ▸</span>
+      </div>
+      <div class="feedrows" id="feedrows">
+        <div class="fdiv">── ticks #6781–#6868 · 45 re-derived each · no changes (7m20s) ──</div>
+        <div class="frow aged">
+          <span class="ft">18:28:18</span><span class="fsign plus">+</span><span class="frule s6">R16</span>
+          <span class="fname">advance_to</span>
+          <span class="fabout">about <b>CTL-1033</b></span>
+          <span class="fcause">{from: implement → to: verify} · implement done · successor not dispatched · free_slots 0</span>
+        </div>
+        <div class="frow aged">
+          <span class="ft">18:28:18</span><span class="fsign minus">−</span><span class="frule s5">R15</span>
+          <span class="fname">ready</span>
+          <span class="fabout">about <b>CTL-1031</b></span>
+          <span class="fcause">left 'Todo' — state now In Progress · held 3h11m</span>
+        </div>
+        <div class="fdiv">── ticks #6870–#6925 · 45 re-derived each · no changes (4m40s) ──</div>
+        <div class="frow aging">
+          <span class="ft">18:33:03</span><span class="fsign plus">+</span><span class="frule s1">R1</span>
+          <span class="fname">session_registered</span>
+          <span class="fabout">about <b>CTL-769/implement</b></span>
+          <span class="fcause">bg job 9f21c3aa appears in agents listing · kind=background</span>
+        </div>
+        <div class="frow aging">
+          <span class="ft">18:33:03</span><span class="fsign plus">+</span><span class="frule s1">R3</span>
+          <span class="fname">progress_evidence</span>
+          <span class="fabout">about <b>CTL-769/implement</b></span>
+          <span class="fcause">signal updatedAt 18:33:01 · channel: signal</span>
+        </div>
+        <div class="frow aging">
+          <span class="ft">18:33:03</span><span class="fsign plus">+</span><span class="frule s2">R5</span>
+          <span class="fname">lease_valid</span>
+          <span class="fabout">about <b>CTL-769/implement</b></span>
+          <span class="fcause">evidence 2s old ≤ 30m build window</span>
+        </div>
+        <div class="fdiv">── ticks #6927–#6950 · 48 re-derived each · no changes (2m05s) ──</div>
+        <div class="frow newest">
+          <span class="ft">18:35:08</span><span class="fsign plus">+</span><span class="frule s2">R4</span>
+          <span class="fname">wedged_never_started</span>
+          <span class="fabout">about <b>CTL-769/implement</b></span>
+          <span class="fcause">age 2m03s ≫ 2m · <span class="nn">¬turn_started</span> · <span class="nn">¬worker_dead</span></span>
+        </div>
+        <div class="frow newest">
+          <span class="ft">18:35:08</span><span class="fsign plus">+</span><span class="frule s4">R10</span>
+          <span class="fname">wake_diagnostician</span>
+          <span class="fabout">about <b>CTL-769/implement</b></span>
+          <span class="fcause">because wedged_never_started · <span class="nn">¬intent</span> within 10m cooldown</span>
+        </div>
+      </div>
+      <div class="feedfoot">
+        <span>live = SSE /api/beliefs/stream → deduped per (rule · entity) · 15s summary poll reconciles missed frames · re-derivations render no rows — stillness is signal</span>
+        <span class="keys"><b>j/k</b> stations · <b>⏎</b> focus · <b>f</b> pause · <b>t</b> thresholds · <b>g r</b> here</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══ thresholds sheet ═══ -->
+  <div class="sheet-backdrop" id="sheetThresholds">
+    <div class="sheet">
+      <h2>Thresholds <span class="x" data-close="sheetThresholds">✕</span></h2>
+      <p class="sub">Live cfg facts — every window and cap the rules consume, as currently seeded on mini. Values read from <code>/api/beliefs/cfg</code> (hb_cursor:* filtered). Rows highlighted fired this tick.</p>
+      <table class="thresholds">
+        <thead><tr><th>key</th><th>live value</th><th>plainly</th><th>consumed by</th></tr></thead>
+        <tbody>
+          <tr class="fired"><td class="k">never_started_ms</td><td class="v">120,000</td><td class="p">two minutes</td><td class="r">R4</td></tr>
+          <tr><td class="k">lease_window_build_ms</td><td class="v">1,800,000</td><td class="p">thirty minutes</td><td class="r">R5</td></tr>
+          <tr><td class="k">lease_window_doc_ms</td><td class="v">2,700,000</td><td class="p">forty-five minutes</td><td class="r">R5</td></tr>
+          <tr class="fired"><td class="k">diag_cooldown_ms</td><td class="v">600,000</td><td class="p">ten minutes</td><td class="r">R10</td></tr>
+          <tr><td class="k">max_attempts</td><td class="v">2</td><td class="p">two tries</td><td class="r">R11</td></tr>
+          <tr><td class="k">max_parallel</td><td class="v">6</td><td class="p">six workers</td><td class="r">R8</td></tr>
+          <tr><td class="k">session_cap</td><td class="v">10</td><td class="p">ten sessions</td><td class="r">R8</td></tr>
+          <tr><td class="k">eligible_state</td><td class="v">'Todo'</td><td class="p">the queue state</td><td class="r">R15</td></tr>
+        </tbody>
+      </table>
+      <p class="note">A threshold is a <code>cfg</code> fact, not code: the engine joins it like any other premise, so a tuned value changes the next tick's conclusions with full provenance. Absent keys render <code>(default)</code>.</p>
+    </div>
+  </div>
+
+  <!-- ═══ about sheet (vocabulary) ═══ -->
+  <div class="sheet-backdrop" id="sheetAbout">
+    <div class="sheet">
+      <h2>About this engine <span class="x" data-close="sheetAbout">✕</span></h2>
+      <p class="sub">Click a rule, a chip, or a feed row. Every belief is a sentence — a predicate (the rule's name) said about an entity: a ticket-phase like <b>CTL-722/plan</b>, a whole ticket, or a host. The engine re-derives every belief each 5s tick from observations; what you watch here is the belief base changing.</p>
+      <dl class="vocab">
+        <dt>about</dt><dd>the <em>entity</em> a belief is about — the ground argument of the derived predicate. Three kinds exist: ticket-phase (<em>CTL-722/plan</em>), ticket (<em>CTL-722</em>), host (<em>host:mini</em>).</dd>
+        <dt>because</dt><dd>the rule body — the premises that forced the conclusion, positive and negative alike.</dd>
+        <dt>¬ checked, absent this tick</dt><dd>stratified negation: the engine looked for the belief in the completed lower stratum and proved it absent. Equal standing with positive premises.</dd>
+        <dt>threshold</dt><dd>a live <em>cfg</em> fact (window, cap, cooldown) joined into the rule — shown with its humane form (120,000 ms · 2m).</dd>
+        <dt>concludes</dt><dd>the head predicate the rule derives when every premise holds.</dd>
+        <dt>derives {…}</dt><dd>the value payload of a conclusion. Some rules derive none — <em>their existence is the verdict</em> (R4, R6).</dd>
+        <dt>entered / cleared</dt><dd>the only honest live signal: a (rule, entity) pair appearing in — or dropping out of — the belief base between ticks. Re-derivations are stillness.</dd>
+      </dl>
+      <p class="note">Enforcement is <code>DARK</code>: the engine records and reasons, it does not act. R16/R17 predictions never dispatch — see this transition in Journey →</p>
+    </div>
+  </div>
+
+<script>
+  // ── focus-overlay: the ONLY edges ever drawn are the focused belief's
+  //    derivation path (≤8 edges) — endpoints from getBoundingClientRect,
+  //    same technique as the CTL-1020 dependency-graph arrows.
+  var stack = document.getElementById('stack');
+  var svg = document.getElementById('overlay');
+  var NS = 'http://www.w3.org/2000/svg';
+
+  function anchor(id) {
+    var el = document.getElementById(id);
+    var r = el.getBoundingClientRect();
+    var w = stack.getBoundingClientRect();
+    return { cx: r.left - w.left + r.width / 2, top: r.top - w.top, bot: r.bottom - w.top, right: r.right - w.left };
+  }
+  function el(name, attrs) {
+    var e = document.createElementNS(NS, name);
+    for (var k in attrs) e.setAttribute(k, attrs[k]);
+    return e;
+  }
+
+  function draw() {
+    var w = stack.getBoundingClientRect();
+    svg.setAttribute('width', w.width);
+    svg.setAttribute('height', w.height);
+    svg.setAttribute('viewBox', '0 0 ' + w.width + ' ' + w.height);
+    while (svg.firstChild) svg.removeChild(svg.firstChild);
+
+    var EDGES = [
+      // positive premise: R1 session_registered → R4 (upward)
+      { s: 'st-R1', t: 'st-R4', kind: 'pos', tdx: -30 },
+      // negation premises: dashed, ∅ terminal at the consuming end
+      { s: 'st-R2', t: 'st-R4', kind: 'neg', tdx: 10 },
+      { s: 'st-R7', t: 'st-R4', kind: 'neg', tdx: 50 },
+      // feeds ↑: R4 → R10 (the rising direction; the entered pair's dot rides this path)
+      { s: 'st-R4', t: 'st-R10', kind: 'feeds', tdx: 0, bow: 150, dot: true }
+    ];
+
+    EDGES.forEach(function (e) {
+      var a = anchor(e.s), b = anchor(e.t);
+      var sx = a.cx, sy = a.top - 1;
+      var tx = b.cx + (e.tdx || 0), ty = b.bot + 1;
+      var dy = Math.min(46, Math.max(18, (sy - ty) / 2));
+      var bow = e.bow || 0;
+      var d = 'M' + sx + ',' + sy +
+              ' C' + (sx + bow) + ',' + (sy - dy) +
+              ' ' + (tx + bow) + ',' + (ty + dy) +
+              ' ' + tx + ',' + ty;
+      var attrs = { d: d, fill: 'none' };
+      if (e.kind === 'pos') { attrs.stroke = 'rgba(174,185,198,0.85)'; attrs['stroke-width'] = '1.5'; }
+      if (e.kind === 'neg') { attrs.stroke = 'rgba(139,149,163,0.7)'; attrs['stroke-width'] = '1.2'; attrs['stroke-dasharray'] = '4 4'; }
+      if (e.kind === 'feeds') { attrs.stroke = 'rgba(234,188,59,0.45)'; attrs['stroke-width'] = '1.3'; }
+      var p = el('path', attrs);
+      svg.appendChild(p);
+
+      // arrowhead at target (small chevron pointing up)
+      if (e.kind !== 'neg') {
+        svg.appendChild(el('path', {
+          d: 'M' + (tx - 4) + ',' + (ty + 6) + ' L' + tx + ',' + ty + ' L' + (tx + 4) + ',' + (ty + 6),
+          fill: 'none', stroke: attrs.stroke, 'stroke-width': '1.4'
+        }));
+      } else {
+        // ∅ badge — checked-absent, rendered mid-path in the clean inter-layer band
+        var Ln = p.getTotalLength();
+        var mp = p.getPointAtLength(Ln * 0.24);
+        svg.appendChild(el('circle', { cx: mp.x, cy: mp.y, r: 6, fill: '#0e1116', stroke: 'rgba(227,107,107,0.7)', 'stroke-width': '1' }));
+        var t = el('text', { x: mp.x, y: mp.y + 3.4, 'text-anchor': 'middle', 'font-size': '8.5', fill: '#e36b6b', 'font-family': 'ui-monospace, Menlo, monospace' });
+        t.textContent = '∅';
+        svg.appendChild(t);
+      }
+
+      // the ONE rising dot — the entered pair (R4, CTL-769/implement) mid-flight
+      if (e.dot) {
+        var L = p.getTotalLength();
+        var pt = p.getPointAtLength(L * 0.46);
+        svg.appendChild(el('circle', { cx: pt.x, cy: pt.y, r: 8, fill: 'rgba(234,188,59,0.16)' }));
+        svg.appendChild(el('circle', { cx: pt.x, cy: pt.y, r: 3.4, fill: '#eabc3b' }));
+        var lbl = el('text', { x: pt.x + 13, y: pt.y + 3, 'font-size': '10', fill: '#eabc3b', 'font-family': 'ui-monospace, Menlo, monospace' });
+        lbl.textContent = '▲ CTL-769/implement';
+        svg.appendChild(lbl);
+      }
+    });
+  }
+  window.addEventListener('resize', draw);
+  // draw after layout settles
+  requestAnimationFrame(function () { requestAnimationFrame(draw); });
+
+  // feed: auto-follow to newest
+  var fr = document.getElementById('feedrows');
+  fr.scrollTop = fr.scrollHeight;
+
+  // sheets
+  function openSheet(id) { document.getElementById(id).classList.add('open'); }
+  function closeSheets() {
+    document.querySelectorAll('.sheet-backdrop').forEach(function (s) { s.classList.remove('open'); });
+  }
+  document.getElementById('btnThresholds').addEventListener('click', function () { openSheet('sheetThresholds'); });
+  document.getElementById('btnAbout').addEventListener('click', function () { openSheet('sheetAbout'); });
+  document.getElementById('aboutLink').addEventListener('click', function () { openSheet('sheetAbout'); });
+  document.querySelectorAll('[data-close]').forEach(function (x) {
+    x.addEventListener('click', function () { closeSheets(); });
+  });
+  document.querySelectorAll('.sheet-backdrop').forEach(function (b) {
+    b.addEventListener('click', function (ev) { if (ev.target === b) closeSheets(); });
+  });
+  document.addEventListener('keydown', function (ev) {
+    if (ev.key === 'Escape') closeSheets();
+    if (ev.key === 't' && !ev.metaKey && !ev.ctrlKey) openSheet('sheetThresholds');
+  });
+</script>
+</body>
+</html>

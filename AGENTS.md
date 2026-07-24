@@ -262,6 +262,8 @@ Read these on demand:
 - **Architecture & data flow** — `docs/architecture.md`
 - **Run lifecycle** — `docs/orchestrator-overview.md`
 - **Decision records (ADRs)** — `docs/adrs.md`
+- **Specs & mockups** — `docs/specs/` (durable `draft → accepted` home for specs, requirements,
+  and mockups; distinct from ADRs and `thoughts/` — see `docs/specs/README.md`)
 - **Release process** — `docs/releases.md`
 - **Observability signal catalog** — `catalyst-otel/docs/data-dictionary.md` (sister repo: every
   metric, log/event, trace, and alert; see the Observability section above)
