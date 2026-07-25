@@ -985,7 +985,16 @@ run "T65: no agent plist is inert — no target=catalyst-agent line" \
 _agent_reset
 touch "$AGENT_PLIST_FILE"; touch "$AGENT_HEARTBEAT_FILE"
 run "T66: fresh agent breadcrumb is healthy (no kickstart)" \
-  bash -c "bash '$RESPONDER' | grep -q 'heartbeat status=healthy target=catalyst-agent' && ! test -s '${KICKSTART_LOG}'"
+  bash -c "bash '$RESPONDER' | grep -q 'agent-supervision status=healthy target=catalyst-agent' && ! test -s '${KICKSTART_LOG}'"
+
+# T66b (Codex P2): the agent line uses the distinct 'agent-supervision status='
+# prefix, NOT 'heartbeat status=', so it can never be the terminal line doctor's
+# `\bheartbeat status=` freshness anchor keys on — a partial sweep that dies after
+# the agent block but before cloud-sync's heartbeat can't fool doctor.
+_agent_reset
+touch "$AGENT_PLIST_FILE"; touch "$AGENT_HEARTBEAT_FILE"
+run "T66b: the agent supervision line does NOT match doctor's 'heartbeat status=' anchor" \
+  bash -c "bash '$RESPONDER' | grep 'target=catalyst-agent' | { ! grep -q 'heartbeat status='; }"
 
 # T67 (stale): agent plist + old breadcrumb → kickstart com.catalyst.agent, with
 # its OWN attempt marker (never the cloud-sync attempt.* namespace).
@@ -1013,14 +1022,14 @@ run "T68: absent breadcrumb + old plist mtime is stale (kickstart)" \
 _agent_reset
 touch "$AGENT_PLIST_FILE"
 run "T69: absent breadcrumb + fresh plist mtime is NOT stale (no kickstart)" \
-  bash -c "bash '$RESPONDER' | grep -q 'heartbeat status=healthy target=catalyst-agent' && ! test -s '${KICKSTART_LOG}'"
+  bash -c "bash '$RESPONDER' | grep -q 'agent-supervision status=healthy target=catalyst-agent' && ! test -s '${KICKSTART_LOG}'"
 
 # T70 (sub-kill-switch): RESPONDER_AGENT_ENABLED=0 disables the agent block even
 # when stale.
 _agent_reset
 touch "$AGENT_PLIST_FILE"; touch -t 202501010000 "$AGENT_HEARTBEAT_FILE"
 run "T70: RESPONDER_AGENT_ENABLED=0 disables the agent block (no kickstart)" \
-  bash -c "RESPONDER_AGENT_ENABLED=0 bash '$RESPONDER' | grep -q 'heartbeat status=disabled target=catalyst-agent' && ! test -s '${KICKSTART_LOG}'"
+  bash -c "RESPONDER_AGENT_ENABLED=0 bash '$RESPONDER' | grep -q 'agent-supervision status=disabled target=catalyst-agent' && ! test -s '${KICKSTART_LOG}'"
 
 # T71 (cap → escalate): repeated stale → after MAX_ATTEMPTS, escalate with its
 # own one-shot marker + fail-open otel, no further kickstart. MAX=2: kick, kick, escalate.
@@ -1032,13 +1041,13 @@ run "T71: agent strike 1 kickstarts (1 total)" \
 run "T71b: agent strike 2 kickstarts (2 total)" \
   bash -c "RESPONDER_KICKSTART_WAIT_SECS=0 bash '$RESPONDER' >/dev/null; [ \"\$(grep -cF '$AGENT_KICK' '${KICKSTART_LOG}')\" -eq 2 ]"
 run "T71c: agent third strike escalates (heartbeat + no third kickstart)" \
-  bash -c "out=\$(RESPONDER_KICKSTART_WAIT_SECS=0 bash '$RESPONDER'); printf '%s' \"\$out\" | grep -q 'heartbeat status=escalated target=catalyst-agent' && [ \"\$(grep -cF '$AGENT_KICK' '${KICKSTART_LOG}')\" -eq 2 ]"
+  bash -c "out=\$(RESPONDER_KICKSTART_WAIT_SECS=0 bash '$RESPONDER'); printf '%s' \"\$out\" | grep -q 'agent-supervision status=escalated target=catalyst-agent' && [ \"\$(grep -cF '$AGENT_KICK' '${KICKSTART_LOG}')\" -eq 2 ]"
 run "T71d: agent ESCALATED.catalyst-agent one-shot marker written" \
   test -f "${RESPONDER_STATE_DIR}/ESCALATED.catalyst-agent"
 run "T71e: agent escalation emitted fail-open otel with target=catalyst-agent" \
   expect_contains "$SCRATCH_OTEL_LOG" "target=catalyst-agent"
 run "T71f: escalated hold — no re-emit (one-shot), no further kickstart" \
-  bash -c "out=\$(bash '$RESPONDER'); printf '%s' \"\$out\" | grep -q 'heartbeat status=escalated target=catalyst-agent' && [ \"\$(grep -c 'target=catalyst-agent' '${SCRATCH_OTEL_LOG}')\" -eq 1 ]"
+  bash -c "out=\$(bash '$RESPONDER'); printf '%s' \"\$out\" | grep -q 'agent-supervision status=escalated target=catalyst-agent' && [ \"\$(grep -c 'target=catalyst-agent' '${SCRATCH_OTEL_LOG}')\" -eq 1 ]"
 unset RESPONDER_MAX_ATTEMPTS
 
 # T72 (re-arm): a fresh breadcrumb after escalation clears the markers + re-arms.

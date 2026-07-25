@@ -754,7 +754,7 @@ trap _release_sweep_lock EXIT
 
 agent_heartbeat() {
   local status="$1"
-  log "heartbeat status=${status} target=catalyst-agent installed=${AGENT_INSTALLED} stale=${AGENT_STALE} attempts=${AGENT_ATTEMPTS}/${RESPONDER_MAX_ATTEMPTS} escalated=${AGENT_ESCALATED}"
+  log "agent-supervision status=${status} target=catalyst-agent installed=${AGENT_INSTALLED} stale=${AGENT_STALE} attempts=${AGENT_ATTEMPTS}/${RESPONDER_MAX_ATTEMPTS} escalated=${AGENT_ESCALATED}"
 }
 
 # Fail-open agent-scoped escalate (mirrors emit_escalated; own attrs only).
