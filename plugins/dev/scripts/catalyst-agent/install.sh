@@ -54,12 +54,20 @@ fi
 [ -n "${METRICS_ENDPOINT}" ] && echo "install.sh: metrics endpoint → ${METRICS_ENDPOINT}" \
   || echo "install.sh: no metrics endpoint resolved — metric emission disabled"
 
+# CTL-1518: persist the install-time CATALYST_DIR into the plist so the agent
+# resolves its heartbeat breadcrumb under the same dir the health-responder
+# (installed with the same override) probes. Defaults to ${HOME}/catalyst, which
+# is what catalystDir() already resolves when unset — so default nodes are unchanged.
+CATALYST_DIR_VALUE="${CATALYST_DIR:-${HOME}/catalyst}"
+echo "install.sh: CATALYST_DIR → ${CATALYST_DIR_VALUE}"
+
 sed \
   -e "s|REPLACE_WITH_NODE|${NODE_BIN}|g" \
   -e "s|REPLACE_WITH_AGENT|${AGENT}|g" \
   -e "s|REPLACE_WITH_HOME|${HOME}|g" \
   -e "s|REPLACE_WITH_PATH|${INSTALL_PATH}|g" \
   -e "s|REPLACE_WITH_METRICS_ENDPOINT|${METRICS_ENDPOINT}|g" \
+  -e "s|REPLACE_WITH_CATALYST_DIR|${CATALYST_DIR_VALUE}|g" \
   "${TEMPLATE}" > "${TMP}"
 mv "${TMP}" "${DEST}"
 echo "install.sh: wrote ${DEST}"
