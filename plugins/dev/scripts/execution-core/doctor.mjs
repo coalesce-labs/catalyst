@@ -1792,6 +1792,9 @@ function defaultResponderState() {
 // responder.
 const RESPONDER_IN_PROGRESS_GRACE_MS = 300_000;
 
+// Tolerance for the future-timestamp rejection below — see its call sites.
+const CLOCK_SKEW_TOLERANCE_MS = 2_000;
+
 function defaultResponderLogMtimeMs(catalystDir, nowMsFn = () => Date.now()) {
   try {
     const dir = catalystDir || process.env.CATALYST_DIR || resolve(homedir(), "catalyst");
@@ -1970,12 +1973,18 @@ export function checkHealthResponder(deps = {}) {
   const staleAfterMs = Math.max(3 * intervalSecs, 900) * 1000;
   if (typeof mtime === "number") {
     const age = nowMs() - mtime;
-    // A NEGATIVE age (the log's mtime is in the future — a backward clock
-    // step, or a log/state dir restored from a newer snapshot, Codex P2
-    // round 6) must never read as freshness evidence: mirrors the bash-side
-    // sweep lock's own future-timestamp clamp (round 5) — favor a WARN over
-    // silently trusting a clock read that can't be verified.
-    if (age < 0) {
+    // A SUBSTANTIALLY negative age (the log's mtime is in the future — a
+    // backward clock step, or a log/state dir restored from a newer
+    // snapshot, Codex P2 round 6) must never read as freshness evidence:
+    // mirrors the bash-side sweep lock's own future-timestamp clamp (round
+    // 5) — favor a WARN over silently trusting a clock read that can't be
+    // verified. CLOCK_SKEW_TOLERANCE_MS absorbs ordinary write-then-stat
+    // jitter (filesystem mtime can round UP to whole-second granularity on
+    // some CI/container filesystems, putting a just-written file's mtime a
+    // few ms ahead of the very next Date.now() read — caught live on a
+    // Linux CI runner) without opening the door to a genuine clock-skew
+    // scenario, which in practice is minutes to years, not milliseconds.
+    if (age < -CLOCK_SKEW_TOLERANCE_MS) {
       checks.push(mkCheck(
         "responder-dispatch", STATUS.WARN,
         "responder heartbeat log has a timestamp in the future — cannot trust it as freshness evidence (clock skew or a restored snapshot); investigate the host clock and this log's mtime",
@@ -1995,7 +2004,7 @@ export function checkHealthResponder(deps = {}) {
     const pMtime = plistMtimeMs();
     if (typeof pMtime === "number") {
       const page = nowMs() - pMtime;
-      if (page < 0) {
+      if (page < -CLOCK_SKEW_TOLERANCE_MS) {
         checks.push(mkCheck(
           "responder-dispatch", STATUS.WARN,
           "responder plist install timestamp is in the future — cannot trust it as freshness evidence (clock skew or a restored snapshot); investigate the host clock and this plist's mtime",
