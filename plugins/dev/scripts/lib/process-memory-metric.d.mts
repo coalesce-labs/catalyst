@@ -24,7 +24,7 @@ export interface EmitProcessMemoryMetricOptions {
   timeoutMs?: number;
 }
 
-export function resolveCollectorBase(env?: Record<string, string | undefined>): string;
+export function resolveCollectorBase(env?: Record<string, string | undefined>): string | null;
 
 export function buildProcessMemoryMetricsPayload(spec: {
   serviceName: string;
