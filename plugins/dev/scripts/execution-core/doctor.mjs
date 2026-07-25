@@ -1778,8 +1778,17 @@ function defaultResponderState() {
 function defaultResponderLogMtimeMs(catalystDir) {
   try {
     const dir = catalystDir || process.env.CATALYST_DIR || resolve(homedir(), "catalyst");
-    const st = statSync(resolve(dir, "health-responder.log"));
+    const p = resolve(dir, "health-responder.log");
+    const st = statSync(p);
     if (st.size === 0) return null;
+    // Require an actual completed `heartbeat status=` record, not just any
+    // write (Codex P2 round 3): a run that wedges or dies AFTER writing a
+    // diagnostic line (e.g. the hung-launchctl WARN) but BEFORE reaching
+    // heartbeat() still bumps the file's mtime — every write does — so mtime
+    // alone can't distinguish "a sweep completed" from "a sweep started and
+    // died". The heartbeat line is the ONE line every code path (healthy,
+    // acting, degraded, escalated, skipped) guarantees on a completed run.
+    if (!/\bheartbeat status=/.test(readFileSync(p, "utf8"))) return null;
     return st.mtimeMs;
   } catch {
     return null;

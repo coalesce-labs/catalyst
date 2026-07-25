@@ -191,9 +191,31 @@ ESCALATED_MARKER="${RESPONDER_STATE_DIR}/ESCALATED.cloud-sync"
 RESPONDER_TOKEN_FILE="${RESPONDER_TOKEN_FILE:-${HOME}/.config/catalyst/cloud-sync.env}"
 RESPONDER_CLUSTER_ENV_FILE="${RESPONDER_CLUSTER_ENV_FILE:-${HOME}/.config/catalyst/cluster.env}"
 
-# _token_provisioned: true iff any launcher-sourced token file is readable.
+# _token_provisioned: true iff the RESOLVED cloud-sync token variable is
+# actually non-empty after sourcing both launcher-sourced files — NOT merely
+# whether a token file is readable (Codex P1 round 3: an adopted-but-not-yet-
+# provisioned node's cloud-sync.env can exist and be readable while EMPTY —
+# exactly the tokenless-idle case CTL-1509 was designed around. Treating file
+# presence as token presence would kickstart a genuinely idle writer into a
+# false-escalation storm). Mirrors catalyst-stack's install-time token probe
+# byte-for-byte: source both files in a subshell matching launch.sh's view,
+# resolve the env-var NAME via the same config.mjs helper (falls back to the
+# literal CATALYST_CLOUD_TOKEN if bun is unavailable), then check presence of
+# THAT resolved name — never a fixed/guessed variable name.
 _token_provisioned() {
-  [[ -r "$RESPONDER_TOKEN_FILE" || -r "$RESPONDER_CLUSTER_ENV_FILE" ]]
+  local probe
+  probe="$(
+    set +u
+    unset CATALYST_CLOUD_TOKEN_ENV CATALYST_LAYER2_CONFIG_FILE 2>/dev/null || true
+    [[ -r "$RESPONDER_CLUSTER_ENV_FILE" ]] && . "$RESPONDER_CLUSTER_ENV_FILE"
+    [[ -r "$RESPONDER_TOKEN_FILE" ]] && . "$RESPONDER_TOKEN_FILE"
+    name="$(CFG_DIR="${SCRIPT_DIR}/execution-core" bun -e '
+      const m = await import(process.env.CFG_DIR + "/config.mjs");
+      process.stdout.write(m.resolveNodeCloudTokenEnv().envVar);
+    ' 2>/dev/null || printf 'CATALYST_CLOUD_TOKEN')"
+    [[ -n "${!name:-}" ]] && printf yes || printf no
+  )"
+  [[ "$probe" == "yes" ]]
 }
 
 # ─── helpers ────────────────────────────────────────────────────────────────
@@ -472,31 +494,45 @@ _acquire_sweep_lock() {
   SWEEP_LOCK_HELD=1
   return 0
 }
-# _claim_stale_lock: atomically take EXCLUSIVE ownership of breaking a stale
-# lock (Codex P2 round 2). `mv` on the same filesystem is atomic — only ONE
-# concurrent sweep's rename of SWEEP_LOCK_DIR can succeed; every other sweep's
-# `mv` fails with ENOENT (the source is already gone) and returns non-zero.
-# Without this, two sweeps racing the SAME stale-age check could both pass,
-# one recreates a fresh lock, and the other's unconditional `rm -rf` deletes
-# that fresh lock out from under it — defeating the whole reservation.
+# _claim_stale_lock: atomically take EXCLUSIVE ownership of whatever is
+# CURRENTLY at SWEEP_LOCK_DIR and verify — on the claimed, uniquely-owned
+# copy — that it was actually stale, rather than checking staleness on the
+# live path and acting on it afterward (Codex P2 round 3: a check-then-act
+# split has a window between the two steps in which a DIFFERENT contender can
+# already have broken and recreated a fresh lock at the same path; the first
+# contender's stale-age check, performed before that happened, would then
+# still pass, and its `mv` of the NOW-fresh directory would succeed — same
+# path, different underlying instance — destroying the second contender's
+# live lock). Claim-then-verify closes this: `mv` is atomic (only one
+# concurrent claim of a given directory INSTANCE can succeed; every other
+# claim of that same instance fails with ENOENT), and `mv` preserves mtime
+# exactly, so the claimed copy's age is the SAME instance's age — never a
+# newer one swapped in mid-check. A claim that turns out NOT to be stale
+# (mtime says it's live) is put back for its rightful owner; if the put-back
+# itself loses a race (someone else already grabbed the now-empty path), the
+# claimed copy is simply discarded — either way this process falls through to
+# ordinary contention, never leaves TWO directories on disk.
 _claim_stale_lock() {
-  local claim="${SWEEP_LOCK_DIR}.stale.$$"
+  local claim="${SWEEP_LOCK_DIR}.stale.$$" m
   mv "$SWEEP_LOCK_DIR" "$claim" 2>/dev/null || return 1
+  m="$(_mtime "$claim")"
+  if [[ ! "$m" =~ ^[0-9]+$ ]] || (( $(date +%s) - m <= RESPONDER_SWEEP_LOCK_STALE_SECS )); then
+    mv "$claim" "$SWEEP_LOCK_DIR" 2>/dev/null || rm -rf "$claim" 2>/dev/null
+    return 1
+  fi
   rm -rf "$claim" 2>/dev/null || true
   return 0
 }
 if ! is_dry; then
   if ! _acquire_sweep_lock; then
     if [[ -d "$SWEEP_LOCK_DIR" ]]; then
-      _lock_m="$(_mtime "$SWEEP_LOCK_DIR")"
-      if [[ "$_lock_m" =~ ^[0-9]+$ ]] && (( $(date +%s) - _lock_m > RESPONDER_SWEEP_LOCK_STALE_SECS )); then
-        if _claim_stale_lock; then
-          log "broke stale sweep lock (age $(( $(date +%s) - _lock_m ))s > ${RESPONDER_SWEEP_LOCK_STALE_SECS}s) — prior sweep crashed"
-          _acquire_sweep_lock || true
-        fi
-        # A failed claim means another sweep already broke/reacquired it —
-        # fall through to the SWEEP_LOCK_HELD check below like any contention.
+      if _claim_stale_lock; then
+        log "broke stale sweep lock (> ${RESPONDER_SWEEP_LOCK_STALE_SECS}s old) — prior sweep crashed"
+        _acquire_sweep_lock || true
       fi
+      # A failed claim means the lock is live (either genuinely fresh, or an
+      # instance swap was detected and put back) — fall through to the
+      # SWEEP_LOCK_HELD check below like any contention.
       if [[ "$SWEEP_LOCK_HELD" -eq 0 ]]; then
         INSTALLED=0 ALIVE=0 C_DEAD=0 C_STALE=0 C_NORESPAWN=0 ATTEMPTS=0 ESCALATED=0
         log "another sweep holds ${SWEEP_LOCK_DIR} — skipping this run"

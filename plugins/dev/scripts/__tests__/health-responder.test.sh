@@ -682,17 +682,27 @@ _reset
 touch "$PLIST"
 export MOCK_LAST_EXIT=0
 mkdir -p "${HOME}/.config/catalyst"
-touch "${HOME}/.config/catalyst/cloud-sync.env"
-run "T49: exit-0 with a provisioned token file is treated as dead (kickstarts)" \
+# Codex P1 round 3: a token FILE existing is not the same as a token being
+# PROVISIONED — an adopted-but-not-yet-provisioned node's cloud-sync.env can
+# be present and readable while empty (or set an unrelated var), and that
+# must stay idle-by-design, never kickstart. Only a file that actually sets
+# the resolved token variable (CATALYST_CLOUD_TOKEN with no Layer-2 config in
+# this scratch HOME — bun/config.mjs are real, not mocked, here) counts.
+printf 'export SOME_UNRELATED_VAR=1\n' > "${HOME}/.config/catalyst/cloud-sync.env"
+run "T49: an EMPTY/irrelevant token file stays idle-by-design (no kickstart)" \
+  bash -c "bash '$RESPONDER' | grep -q 'idle by design' && ! test -s '${KICKSTART_LOG}'"
+printf 'export CATALYST_CLOUD_TOKEN=test-token-value\n' > "${HOME}/.config/catalyst/cloud-sync.env"
+run "T49x: a REAL provisioned token is treated as a failed bounce (kickstarts)" \
   bash -c "out=\$(RESPONDER_KICKSTART_WAIT_SECS=0 bash '$RESPONDER'); printf '%s' \"\$out\" | grep -q 'failed-bounce signature' && printf '%s' \"\$out\" | grep -q 'dead_writer=1' && test -s '${KICKSTART_LOG}'"
 rm -f "${HOME}/.config/catalyst/cloud-sync.env"
 rm -f "$KICKSTART_LOG"
-run "T49b: exit-0 without a token file stays idle-by-design (no kickstart)" \
+run "T49b: no token file at all stays idle-by-design (no kickstart)" \
   bash -c "bash '$RESPONDER' | grep -q 'idle by design' && ! test -s '${KICKSTART_LOG}'"
 # Codex P1: the launcher sources cluster.env TOO (CTL-1307 shared-token
-# projection) — a token provisioned only there must equally defeat the gate.
-touch "${HOME}/.config/catalyst/cluster.env"
-run "T49c: a token via cluster.env alone also defeats the exit-0 gate" \
+# projection) — a REAL token provisioned only there must equally defeat the
+# gate (an empty cluster.env must NOT).
+printf 'export CATALYST_CLOUD_TOKEN=test-token-value\n' > "${HOME}/.config/catalyst/cluster.env"
+run "T49c: a real token via cluster.env alone also defeats the exit-0 gate" \
   bash -c "RESPONDER_KICKSTART_WAIT_SECS=0 bash '$RESPONDER' | grep -q 'failed-bounce signature' && test -s '${KICKSTART_LOG}'"
 rm -f "${HOME}/.config/catalyst/cluster.env" "$KICKSTART_LOG"
 unset MOCK_LAST_EXIT
@@ -725,6 +735,20 @@ mkdir -p "${RESPONDER_STATE_DIR}/sweep.lock"
 run "T50e: only the first of two racing claims on the same stale lock succeeds" \
   bash -c "mv '${RESPONDER_STATE_DIR}/sweep.lock' '${RESPONDER_STATE_DIR}/sweep.lock.stale.first' 2>/dev/null && ! mv '${RESPONDER_STATE_DIR}/sweep.lock' '${RESPONDER_STATE_DIR}/sweep.lock.stale.second' 2>/dev/null"
 rm -rf "${RESPONDER_STATE_DIR}/sweep.lock.stale.first"
+
+# T50f (Codex P2 round 3): claim-then-verify — a lock that is FRESH when
+# claimed (not actually stale; models the instance-swap window where a
+# different contender already broke+recreated it between another sweep's
+# check and act) must be PUT BACK, not destroyed. Every "found a directory at
+# SWEEP_LOCK_DIR" path now goes through the same claim-then-verify, so a
+# fresh lock exercises the exact protection the instance-swap bug needed.
+_reset
+touch "$PLIST" # dead-writer shape: without protection, this WOULD kickstart
+mkdir -p "${RESPONDER_STATE_DIR}/sweep.lock" # freshly created — NOT stale
+echo -n "someone-elses-token" > "${RESPONDER_STATE_DIR}/sweep.lock/owner"
+run "T50f: a fresh (non-stale) lock is put back intact, never destroyed" \
+  bash -c "bash '$RESPONDER' | grep -q 'heartbeat status=skipped' && ! test -s '${KICKSTART_LOG}' && [ \"\$(cat '${RESPONDER_STATE_DIR}/sweep.lock/owner')\" = 'someone-elses-token' ]"
+rm -rf "${RESPONDER_STATE_DIR}/sweep.lock"
 
 # T51 (item 4): unprunable expired markers degrade EXPLICITLY — and a cap
 # built on that unreliable count refuses to escalate. Root ignores directory

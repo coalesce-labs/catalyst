@@ -1312,6 +1312,52 @@ describe("checkHealthResponder", () => {
     }
   });
 
+  it("WARNs (via the REAL log reader) on a non-empty log with NO completed heartbeat line — diagnostic writes from a wedged run must not read as a live sweep (Codex P2 round 3)", () => {
+    const dir = mkdtempSync(join(tmpdir(), "doctor-hr-nohb-"));
+    writeFileSync(
+      join(dir, "health-responder.log"),
+      "[health-responder r1] WARN: launchctl list timed out after 5s — treating the writer as dead\n",
+    );
+    const oldEnv = process.env.CATALYST_DIR;
+    process.env.CATALYST_DIR = dir;
+    try {
+      const checks = checkHealthResponder({
+        readFile: healthyReadFile,
+        fileExists: () => true,
+        responderState: () => ({ loaded: true, lastExit: 0 }),
+        plistMtimeMs: () => Date.now() - 4 * 3600 * 1000,
+      });
+      expect(checks[0].name).toBe("responder-dispatch");
+      expect(checks[0].status).toBe(STATUS.WARN);
+    } finally {
+      process.env.CATALYST_DIR = oldEnv;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("PASSes (via the REAL log reader) once the log contains a completed heartbeat line", () => {
+    const dir = mkdtempSync(join(tmpdir(), "doctor-hr-hb-"));
+    writeFileSync(
+      join(dir, "health-responder.log"),
+      "[health-responder r1] heartbeat status=healthy installed=1 alive=1 dead_writer=0 stale_lock=0 no_respawn=0 attempts=0/3 escalated=0\n",
+    );
+    const oldEnv = process.env.CATALYST_DIR;
+    process.env.CATALYST_DIR = dir;
+    try {
+      const checks = checkHealthResponder({
+        readFile: healthyReadFile,
+        fileExists: () => true,
+        responderState: () => ({ loaded: true, lastExit: 0 }),
+        plistMtimeMs: () => Date.now() - 4 * 3600 * 1000,
+      });
+      expect(checks[0].name).toBe("responder-health");
+      expect(checks[0].status).toBe(STATUS.PASS);
+    } finally {
+      process.env.CATALYST_DIR = oldEnv;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("passes the plist's CATALYST_DIR (not process.env) into logMtimeMs (Codex P2 round 2)", () => {
     const plistWithDir =
       `<plist><dict><key>ProgramArguments</key><array><string>/bin/bash</string><string>${bakedPath}</string></array>` +
