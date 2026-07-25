@@ -301,6 +301,22 @@ loki.source.file "monitor" {
 	tail_from_end = true
 }
 
+// ----- health-responder.log (plain text) -------------------------------------
+// CTL-1509: the daemon-health responder sweep. Plain `[health-responder …]`
+// lines — the per-sweep heartbeat (dead-responder detectability: absence of
+// this stream's heartbeat in Loki IS the signal) and the `ERROR: escalated`
+// line the escalation contract relies on when the OTel emit is unavailable.
+// Without this source both are host-local only and the degraded-escalation
+// path is invisible remotely.
+loki.source.file "health_responder" {
+	targets = [{
+		__path__     = coalesce(sys.env("CATALYST_HEALTH_RESPONDER_LOG"), "/root/catalyst/health-responder.log"),
+		service_name = "catalyst.health-responder",
+	}]
+	forward_to    = [loki.process.plain.receiver]
+	tail_from_end = true
+}
+
 loki.process "plain" {
 	// No stage.json — unstructured passthrough. The whole line becomes the body.
 	forward_to = [otelcol.receiver.loki.catalyst.receiver]

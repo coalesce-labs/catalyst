@@ -109,34 +109,30 @@ RESPONDER_KICKSTART_WAIT_SECS="${RESPONDER_KICKSTART_WAIT_SECS:-10}"
 # section). Distinct from KICKSTART_WAIT_SECS (the post-kickstart settle).
 RESPONDER_KICKSTART_TIMEOUT_SECS="${RESPONDER_KICKSTART_TIMEOUT_SECS:-20}"
 
-# Guard the bounded-action envelope itself (Codex P2): a zero/negative/garbage
-# window would prune every attempt marker on each sweep — the counter pins at
-# 1, escalation becomes unreachable, and the writer is kickstarted every
-# interval forever, defeating the central safety property. Clamp to sane
-# values rather than trusting the env.
-[[ "$RESPONDER_ATTEMPT_WINDOW_SECS" =~ ^[0-9]+$ && "$RESPONDER_ATTEMPT_WINDOW_SECS" -gt 0 ]] || RESPONDER_ATTEMPT_WINDOW_SECS=3600
-[[ "$RESPONDER_MAX_ATTEMPTS" =~ ^[0-9]+$ ]] || RESPONDER_MAX_ATTEMPTS=3
-[[ "$RESPONDER_KICKSTART_WAIT_SECS" =~ ^[0-9]+$ ]] || RESPONDER_KICKSTART_WAIT_SECS=10
-[[ "$RESPONDER_KICKSTART_TIMEOUT_SECS" =~ ^[0-9]+$ && "$RESPONDER_KICKSTART_TIMEOUT_SECS" -gt 0 ]] || RESPONDER_KICKSTART_TIMEOUT_SECS=20
-# The two detection thresholds get the same treatment (Codex P2 round 2): a
-# non-numeric value would blow up `[[ -gt ]]` arithmetic as an unbound-variable
-# reference under `set -u` (sweep dies BEFORE its heartbeat), and a negative
-# lock threshold would classify every fresh lock as stale and kickstart a
-# healthy writer round after round.
-[[ "$RESPONDER_LOCK_STALE_SECS" =~ ^[0-9]+$ && "$RESPONDER_LOCK_STALE_SECS" -gt 0 ]] || RESPONDER_LOCK_STALE_SECS=900
-[[ "$RESPONDER_SELFHEAL_GRACE_SECS" =~ ^[0-9]+$ ]] || RESPONDER_SELFHEAL_GRACE_SECS=120
-# Force base-10 (Codex P1 round 3): a zero-padded override like
-# RESPONDER_MAX_ATTEMPTS=08 passes the digits regex, but Bash arithmetic parses
-# leading-zero literals as OCTAL — "08" throws "value too great for base", the
-# [[ -ge ]] cap comparison then evaluates FALSE on every sweep, and the
-# responder kickstarts unbounded. $((10#…)) is safe here: every value is
-# digits-only after the guards above.
-RESPONDER_ATTEMPT_WINDOW_SECS=$((10#$RESPONDER_ATTEMPT_WINDOW_SECS))
-RESPONDER_MAX_ATTEMPTS=$((10#$RESPONDER_MAX_ATTEMPTS))
-RESPONDER_KICKSTART_WAIT_SECS=$((10#$RESPONDER_KICKSTART_WAIT_SECS))
-RESPONDER_KICKSTART_TIMEOUT_SECS=$((10#$RESPONDER_KICKSTART_TIMEOUT_SECS))
-RESPONDER_LOCK_STALE_SECS=$((10#$RESPONDER_LOCK_STALE_SECS))
-RESPONDER_SELFHEAL_GRACE_SECS=$((10#$RESPONDER_SELFHEAL_GRACE_SECS))
+# Validate every numeric knob through ONE helper, in the ONLY safe order
+# (Codex rounds 2-4): digits-regex first (garbage → default; a bare [[ -gt ]]
+# on a non-numeric would die as a set -u unbound-variable before the
+# heartbeat), then $((10#…)) base-10 normalization (a zero-padded "08" is
+# OCTAL to bash arithmetic — comparing BEFORE normalizing both octal-errors
+# AND silently swaps a valid override for the default), and only then the
+# range floor (a zero/negative window would prune every marker each sweep,
+# pinning the counter at 1 and kickstarting forever).
+_num() { # _num VALUE DEFAULT MIN — echoes the validated base-10 value
+  local v="$1" d="$2" min="$3"
+  [[ "$v" =~ ^[0-9]+$ ]] || { echo "$d"; return 0; }
+  v=$((10#$v))
+  (( v >= min )) || { echo "$d"; return 0; }
+  echo "$v"
+}
+RESPONDER_ATTEMPT_WINDOW_SECS="$(_num "$RESPONDER_ATTEMPT_WINDOW_SECS" 3600 1)"
+RESPONDER_MAX_ATTEMPTS="$(_num "$RESPONDER_MAX_ATTEMPTS" 3 0)"
+RESPONDER_KICKSTART_WAIT_SECS="$(_num "$RESPONDER_KICKSTART_WAIT_SECS" 10 0)"
+RESPONDER_KICKSTART_TIMEOUT_SECS="$(_num "$RESPONDER_KICKSTART_TIMEOUT_SECS" 20 1)"
+RESPONDER_LOCK_STALE_SECS="$(_num "$RESPONDER_LOCK_STALE_SECS" 900 1)"
+RESPONDER_SELFHEAL_GRACE_SECS="$(_num "$RESPONDER_SELFHEAL_GRACE_SECS" 120 0)"
+# Deadline for the `launchctl list` intentional-exit probe (Codex P2 round 4:
+# the same hung-launchctl class the kickstart deadline guards against).
+RESPONDER_LIST_TIMEOUT_SECS="$(_num "${RESPONDER_LIST_TIMEOUT_SECS:-5}" 5 1)"
 RESPONDER_RUN_ID="${RESPONDER_RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)-$$}"
 # Resolve every state/target path through CATALYST_DIR exactly like the
 # writer's config.mjs catalystDir() (Codex P1 round 3): a node using the
@@ -202,12 +198,38 @@ emit_escalated() {
 # pgrep failing entirely (rc>1) degrades to "not alive" — a wrong kickstart is
 # bounded by the attempt cap; a wrongly-skipped one would leave the writer down.
 # _last_exit_status: LastExitStatus from `launchctl list <label>` ("" when the
-# job is unknown or the output unparseable). Used ONLY inside the
-# already-anomalous installed-but-not-running branch — passive every-sweep
-# detection stays launchctl-free by design (see _writer_alive).
+# job is unknown, the output unparseable, or the probe TIMES OUT). Used ONLY
+# inside the already-anomalous installed-but-not-running branch — passive
+# every-sweep detection stays launchctl-free by design (see _writer_alive).
+# Bounded like the kickstart call (Codex P2 round 4): a hung launchctl here
+# would otherwise wedge the sweep before its heartbeat, and launchd won't
+# start the next StartInterval run while this one lives. "" on timeout means
+# the caller treats the writer as dead (recovery is never lost to a hang).
 _last_exit_status() {
-  launchctl list "$CLOUD_SYNC_LABEL" 2>/dev/null \
-    | sed -n 's/.*"LastExitStatus" *= *\(-\{0,1\}[0-9][0-9]*\).*/\1/p' | head -1
+  local f pid rc="" i out=""
+  f="$(mktemp "${TMPDIR:-/tmp}/responder-lelist.XXXXXX")"
+  launchctl list "$CLOUD_SYNC_LABEL" > "$f" 2>/dev/null &
+  pid=$!
+  for (( i = 0; i < RESPONDER_LIST_TIMEOUT_SECS; i++ )); do
+    if ! kill -0 "$pid" 2>/dev/null; then
+      wait "$pid" 2>/dev/null
+      rc=$?
+      break
+    fi
+    sleep 1
+  done
+  if [[ -z "$rc" ]]; then
+    kill -9 "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    # stderr, NOT stdout: this function runs inside $(…) — a stdout log line
+    # would be captured into the caller's _LE instead of reaching the console.
+    # The plist routes stderr to the same health-responder.log.
+    log "WARN: launchctl list timed out after ${RESPONDER_LIST_TIMEOUT_SECS}s — treating the writer as dead (recovery over politeness)" >&2
+  else
+    out="$(sed -n 's/.*"LastExitStatus" *= *\(-\{0,1\}[0-9][0-9]*\).*/\1/p' "$f" | head -1)"
+  fi
+  rm -f "$f"
+  printf '%s' "$out"
 }
 
 # Scoped to THIS user's launchd-shaped writer invocation (Codex P2): a bare

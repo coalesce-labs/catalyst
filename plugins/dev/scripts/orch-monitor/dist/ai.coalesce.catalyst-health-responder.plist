@@ -55,6 +55,12 @@
   <dict>
     <key>PATH</key>
     <string>REPLACE_PATH</string>
+    <!-- launchd does NOT inherit the installing shell's environment: a node
+         using a nondefault CATALYST_DIR must have it PERSISTED here or the
+         installed sweep would watch $HOME/catalyst — the wrong lock,
+         breadcrumb, and marker dir. Substituted at install time. -->
+    <key>CATALYST_DIR</key>
+    <string>REPLACE_CATALYST_DIR</string>
   </dict>
 
   <key>StandardOutPath</key>

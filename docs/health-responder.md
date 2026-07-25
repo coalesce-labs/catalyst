@@ -84,6 +84,8 @@ is down (the stale-copy-reports-healthy rule), not that everything is fine.
 | `RESPONDER_MAX_ATTEMPTS` | `3` | Kickstarts per window before escalating |
 | `RESPONDER_ATTEMPT_WINDOW_SECS` | `3600` | Attempt-cap window |
 | `RESPONDER_KICKSTART_WAIT_SECS` | `10` | Post-kickstart settle before the re-probe |
+| `RESPONDER_KICKSTART_TIMEOUT_SECS` | `20` | Deadline on the `launchctl kickstart` subprocess — a hung launchctl cannot wedge the sweep |
+| `RESPONDER_LIST_TIMEOUT_SECS` | `5` | Deadline on the `launchctl list` intentional-exit probe (timeout ⇒ treat as dead) |
 | `RESPONDER_STATE_DIR` | `~/catalyst/.health-responder` | Attempt + ESCALATED marker dir |
 | `RESPONDER_SELFHEAL_FILE` | `~/catalyst/cloud-sync.selfheal.json` | CTL-1508 breadcrumb path |
 | `RESPONDER_DRY_RUN` | unset | Set to `1` or use `--dry-run` (log would-kickstart, do nothing) |

@@ -192,6 +192,7 @@ _substitute() {
     -e "s|REPLACE_HOME|${HOME}|g" \
     -e "s|REPLACE_START_INTERVAL|${interval}|g" \
     -e "s|REPLACE_PATH|${agent_path}|g" \
+    -e "s|REPLACE_CATALYST_DIR|${CATALYST_DIR:-${HOME}/catalyst}|g" \
     "$TEMPLATE"
 }
 

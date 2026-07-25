@@ -601,14 +601,20 @@ unset MOCK_LAST_EXIT
 
 # T44 (P2): a failed marker cleanup must not report "re-armed" — the durable
 # ESCALATED marker survived, so degrade loudly and keep the escalated state.
-_reset
-touch "$PLIST"; touch "$MOCK_ALIVE_FILE"; _fresh_lock # healthy probe
-mkdir -p "$RESPONDER_STATE_DIR"
-touch "${RESPONDER_STATE_DIR}/ESCALATED.cloud-sync"
-chmod 500 "$RESPONDER_STATE_DIR"
-run "T44: unremovable markers => degraded, never a false re-arm" \
-  bash -c "bash '$RESPONDER' | grep -q 'heartbeat status=degraded' && test -e '${RESPONDER_STATE_DIR}/ESCALATED.cloud-sync'"
-chmod 700 "$RESPONDER_STATE_DIR"
+# Root ignores directory permissions (Codex round 4 reproduced the failure in
+# a root container), so skip there — the perm mechanism cannot bind root.
+if [[ "$(id -u)" -ne 0 ]]; then
+  _reset
+  touch "$PLIST"; touch "$MOCK_ALIVE_FILE"; _fresh_lock # healthy probe
+  mkdir -p "$RESPONDER_STATE_DIR"
+  touch "${RESPONDER_STATE_DIR}/ESCALATED.cloud-sync"
+  chmod 500 "$RESPONDER_STATE_DIR"
+  run "T44: unremovable markers => degraded, never a false re-arm" \
+    bash -c "bash '$RESPONDER' | grep -q 'heartbeat status=degraded' && test -e '${RESPONDER_STATE_DIR}/ESCALATED.cloud-sync'"
+  chmod 700 "$RESPONDER_STATE_DIR"
+else
+  echo "  SKIP: T44 (running as root — chmod cannot make markers unremovable)"
+fi
 
 # T45 (P1): CATALYST_DIR override resolves the lock/breadcrumb/state paths the
 # same way the writer's catalystDir() does — no $HOME/catalyst hardcode.
@@ -627,6 +633,36 @@ mkdir -p "$RESPONDER_STATE_DIR"
 for i in 1 2 3 4 5 6 7 8; do touch "${RESPONDER_STATE_DIR}/attempt.$(date +%s).$i"; done
 run "T46: RESPONDER_MAX_ATTEMPTS=08 is base-10 — cap still escalates" \
   bash -c "RESPONDER_MAX_ATTEMPTS=08 bash '$RESPONDER' | grep -q 'ERROR: escalated' && ! test -s '${KICKSTART_LOG}'"
+
+# T46b (round 4): the zero-padded value must be HONORED as base-10, not
+# silently replaced by the default — normalization must precede the range
+# check. With MAX=09 and only 3 attempts recorded, the cap is NOT exhausted
+# (3 < 9 → kickstart); a fall-to-default-3 would have escalated instead.
+_reset
+touch "$PLIST"
+mkdir -p "$RESPONDER_STATE_DIR"
+for i in 1 2 3; do touch "${RESPONDER_STATE_DIR}/attempt.$(date +%s).$i"; done
+run "T46b: zero-padded MAX_ATTEMPTS=09 is honored (kickstart, not escalate)" \
+  bash -c "RESPONDER_MAX_ATTEMPTS=09 RESPONDER_KICKSTART_WAIT_SECS=0 bash '$RESPONDER' | grep -qv 'ERROR: escalated' && test -s '${KICKSTART_LOG}'"
+
+# T47 (round 4): a HUNG `launchctl list` probe is bounded too — the sweep
+# still heartbeats and (treating the writer as dead) still recovers.
+_reset
+touch "$PLIST" # dead-writer shape
+mv "$MOCKBIN/launchctl" "${SCRATCH}/launchctl-real-mock2"
+cat > "$MOCKBIN/launchctl" <<'EOF'
+#!/usr/bin/env bash
+[[ "${1:-}" == "list" ]] && sleep 60
+echo "$@" >> "${KICKSTART_LOG:-/tmp/kickstart.log}"
+exit 0
+EOF
+chmod +x "$MOCKBIN/launchctl"
+# Capture-then-grep (NOT `| grep -q`): the WARN is the sweep's FIRST output
+# line, so a short-circuiting grep -q would close the pipe and SIGPIPE-kill
+# the responder before it reaches the kickstart this test asserts.
+run "T47: hung launchctl list times out — sweep proceeds to kickstart" \
+  bash -c "out=\$(RESPONDER_LIST_TIMEOUT_SECS=1 RESPONDER_KICKSTART_WAIT_SECS=0 bash '$RESPONDER' 2>&1); printf '%s' \"\$out\" | grep -q 'launchctl list timed out' && test -s '${KICKSTART_LOG}'"
+mv "${SCRATCH}/launchctl-real-mock2" "$MOCKBIN/launchctl"
 
 # ─── results ────────────────────────────────────────────────────────────────
 
