@@ -570,6 +570,19 @@
             }
           }
         },
+        "responder": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Daemon-health responder tuning (CTL-1509) — consumed at INSTALL time by install-health-responder.sh (repo .catalyst/config.json walk-up), which bakes the value into the LaunchAgent's StartInterval. Node-scoped machine tuning in spirit (like sweep.*), permitted here so a repo can pin the sweep cadence; re-run 'catalyst-stack adopt-cloud-sync' (or install-services) after changing it.",
+          "properties": {
+            "intervalSeconds": {
+              "type": "integer",
+              "minimum": 60,
+              "maximum": 900,
+              "description": "How often the health-responder launchd sweep runs (seconds; the installer clamps to 60-900, default 180)."
+            }
+          }
+        },
         "sweep": {
           "type": "object",
           "deprecated": true,

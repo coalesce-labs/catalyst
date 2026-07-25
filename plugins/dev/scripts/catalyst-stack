@@ -1221,6 +1221,7 @@ cmd_install_services() {
     render_thoughts_sync_plist "$sync_cmd" "$sync_interval"
     render_shipper_plist "$shipper_launcher" "$host_name"
     [[ -x "${SCRIPT_DIR}/install-orphan-sweep.sh" ]] && bash "${SCRIPT_DIR}/install-orphan-sweep.sh" --print-only 2>/dev/null || true
+    [[ -x "${SCRIPT_DIR}/install-health-responder.sh" ]] && bash "${SCRIPT_DIR}/install-health-responder.sh" --print-only 2>/dev/null || true
     return 0
   fi
 
@@ -1279,6 +1280,20 @@ cmd_install_services() {
     warn "install-orphan-sweep.sh not found next to catalyst-stack — reaper not installed"
   fi
 
+  # CTL-1509: cloud-sync health responder (bounded-kickstart sweep). Delegated to
+  # install-health-responder.sh, which bakes the canonical pristine-clone path
+  # (never an ephemeral worktree — the CTL-1306 rule) and is idempotent. Non-fatal —
+  # a responder hiccup must not block the core stack services.
+  if [[ -x "${SCRIPT_DIR}/install-health-responder.sh" ]]; then
+    if bash "${SCRIPT_DIR}/install-health-responder.sh" 2>&1 | sed 's/^/  /'; then
+      log "loaded ai.coalesce.catalyst-health-responder — cloud-sync writer watchdog (bounded kickstart + escalation)"
+    else
+      warn "health-responder install skipped/failed (continuing) — install it from the pristine clone"
+    fi
+  else
+    warn "install-health-responder.sh not found next to catalyst-stack — health responder not installed"
+  fi
+
   # CTL-1407: per-account rate-limit usage sampler (5th agent). Until now com.catalyst.agent
   # was only ever hand-installed (mini-2 alone), so the dashboard's Per-Account Rate-Limit
   # Scoreboard read No-data across the rest of the WORKER fleet. Provision it here so `catalyst-stack
@@ -1328,6 +1343,10 @@ cmd_uninstall_services() {
   # CTL-1306: orphan-sweep reaper (delegated; idempotent, safe if not installed).
   if [[ -x "${SCRIPT_DIR}/install-orphan-sweep.sh" ]]; then
     bash "${SCRIPT_DIR}/install-orphan-sweep.sh" --uninstall 2>&1 | sed 's/^/  /' || true
+  fi
+  # CTL-1509: cloud-sync health responder (delegated; idempotent, safe if not installed).
+  if [[ -x "${SCRIPT_DIR}/install-health-responder.sh" ]]; then
+    bash "${SCRIPT_DIR}/install-health-responder.sh" --uninstall 2>&1 | sed 's/^/  /' || true
   fi
   if [[ -f "$SHIPPER_AGENT_PLIST" ]]; then
     launchctl bootout "$guid" "$SHIPPER_AGENT_PLIST" 2>/dev/null || true
@@ -1589,6 +1608,25 @@ cmd_adopt_cloud_sync() {
     fail "launchctl bootstrap failed for $CLOUD_SYNC_AGENT_PLIST — agent backed out"
   fi
 
+  # CTL-1509 (Codex P1 round 2): install the responder BEFORE the tokenless
+  # return below — a dev/monitor node initially adopted without its token gets
+  # the writer plist now and the token later (kickstart per the printed
+  # instructions), and that later-activated writer must already have its
+  # recovery layer; these classes never run install-services. adopt-cloud-sync
+  # is the ONE class-independent path (install-lifecycle.mjs installAgents).
+  # Idempotent (a worker's install-services double-install is a harmless
+  # bootout+bootstrap reload); non-fatal, same warn+continue contract as the
+  # other delegated installers.
+  if [[ -x "${SCRIPT_DIR}/install-health-responder.sh" ]]; then
+    if bash "${SCRIPT_DIR}/install-health-responder.sh" 2>&1 | sed 's/^/  /'; then
+      log "loaded ai.coalesce.catalyst-health-responder — cloud-sync recovery sweep (CTL-1509)"
+    else
+      warn "install-health-responder.sh failed (continuing) — dead-writer auto-recovery absent on this node"
+    fi
+  else
+    warn "install-health-responder.sh not found next to catalyst-stack — cloud-sync health responder not installed"
+  fi
+
   if [[ "$token_present" != "yes" ]]; then
     log "NOTE: token '$token_env' is not in the launchd-sourced 0600 files — the writer will IDLE (fail-open no-op) until you provision it."
     log "  Provision: add 'export $token_env=...' to ~/.config/catalyst/cloud-sync.env (chmod 600), then:"
@@ -1625,6 +1663,7 @@ cmd_adopt_cloud_sync() {
       warn "could not restart the log-shipper — cloud-sync.log won't reach Loki until Alloy restarts (re-run install-services or restart the shipper agent)"
     fi
   fi
+
 }
 
 # _write_plugin_pull_owner <config-path> <owner> — atomically merge
