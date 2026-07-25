@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from "bun:test";
+import { describe, it, expect, beforeEach, afterEach, spyOn } from "bun:test";
 import {
   mkdtempSync,
   mkdirSync,
@@ -6,12 +6,14 @@ import {
   appendFileSync,
   rmSync,
 } from "node:fs";
+import * as fs from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
   readBacklog,
   tailEventLog,
   readTunnelEventStats,
+  scanFileLines,
   fullReadMetrics,
   recordFullRead,
 } from "../lib/event-log-reader";
@@ -572,6 +574,151 @@ describe("full-read counters (CTL-1232)", () => {
       expect(fullReadMetrics.tunnelStats?.count ?? 0).toBe(before);
     } finally {
       ring.stop();
+    }
+  });
+});
+
+// CTL-1515: the ring-underflow fallbacks must scan the current-month log in
+// bounded CHUNKS (openSync/readSync) — never a single whole-file readFileSync
+// (a ~1.7 GB contiguous transient bun/mimalloc never returns). These tests are
+// a REINTRODUCTION GUARD: they count node:fs readSync/readFileSync so a revert
+// to readFileSync fails CI. Spying the shared `fs` namespace is observed inside
+// event-log-reader.ts even though it destructures its fs imports (Bun's node:fs
+// is a singleton). NOTE: Bun's `mockRestore()` clears the recorded calls, so
+// every count/assertion is captured into a plain variable BEFORE the spy is
+// restored in `finally`.
+describe("scanFileLines (CTL-1515)", () => {
+  it("chunks a file larger than chunkBytes (>1 readSync, no readFileSync) and stitches a multibyte char split across a chunk boundary", () => {
+    const dir = eventsDir();
+    const file = join(dir, "scan.jsonl");
+    // Deterministic byte layout so a chunk boundary provably bisects a 4-byte
+    // emoji. "ab🚀cd" = 61 62 | F0 9F 9A 80 | 63 64 (🚀 occupies bytes 2..5).
+    // With chunkBytes = 4 the first boundary at byte 4 falls INSIDE 🚀
+    // (bytes 2,3 in chunk 1; bytes 4,5 in chunk 2) → the StringDecoder must
+    // carry the partial sequence across the read.
+    const lines = ["ab🚀cd", "second-é-line", "third"];
+    const text = lines.join("\n") + "\n";
+    writeFileSync(file, text);
+    expect(Buffer.byteLength("🚀")).toBe(4); // 4-byte sequence, straddles byte 4
+
+    const readSyncSpy = spyOn(fs, "readSync");
+    const readFileSyncSpy = spyOn(fs, "readFileSync");
+    // Assert INSIDE the try: Bun's mockRestore() clears the recorded calls, so
+    // counts must be read while the spy is live. finally still restores the spy
+    // even if an assertion throws.
+    try {
+      const got: string[] = [];
+      const bytes = scanFileLines(file, (l) => got.push(l), 4);
+      // (a) chunked: many readSync calls for a file far larger than the 4-byte chunk
+      expect(readSyncSpy.mock.calls.length).toBeGreaterThan(1);
+      // (b) NEVER a whole-file readFileSync
+      expect(readFileSyncSpy.mock.calls.length).toBe(0);
+      // Returns bytes scanned = file byte length
+      expect(bytes).toBe(Buffer.byteLength(text));
+      // Parity: same lines as split (scanFileLines omits the trailing empty of a
+      // newline-terminated file, hence the .filter(l => l.length > 0)).
+      expect(got).toEqual(text.split("\n").filter((l) => l.length > 0));
+      // The multibyte line survived byte-exact (no dropped/corrupted char).
+      expect(got[0]).toBe("ab🚀cd");
+      expect(got[1]).toBe("second-é-line");
+    } finally {
+      readSyncSpy.mockRestore();
+      readFileSyncSpy.mockRestore();
+    }
+  });
+
+  it("emits a final line that lacks a trailing newline", () => {
+    const dir = eventsDir();
+    const file = join(dir, "no-trailing-nl.jsonl");
+    writeFileSync(file, "one\ntwo\nthree"); // no trailing "\n"
+    const got: string[] = [];
+    scanFileLines(file, (l) => got.push(l), 3);
+    expect(got).toEqual(["one", "two", "three"]);
+  });
+});
+
+describe("readBacklog / readTunnelEventStats fallback: chunked scan, never readFileSync (CTL-1515)", () => {
+  it("readBacklog empty-predicate fallback (no ring) uses readSync, never readFileSync", async () => {
+    const dir = eventsDir();
+    const now = new Date("2026-05-04T00:00:00Z");
+    const lines = Array.from({ length: 8 }, (_, i) => makeLine(`evt-${i}`));
+    writeFileSync(join(dir, "2026-05.jsonl"), lines.join("\n") + "\n");
+
+    const readSyncSpy = spyOn(fs, "readSync");
+    const readFileSyncSpy = spyOn(fs, "readFileSync");
+    try {
+      const r = await readBacklog({
+        catalystDir: workdir,
+        predicate: "",
+        limit: 3,
+        ring: null,
+        now: () => now,
+      });
+      // Behavioral parity with the old readFileSync path: last 3 non-empty lines.
+      expect(r.length).toBe(3);
+      expect(JSON.parse(r[0]).event).toBe("evt-5");
+      expect(JSON.parse(r[2]).event).toBe("evt-7");
+      // Reintroduction guard: chunked scan ran, no whole-file read.
+      expect(readSyncSpy.mock.calls.length).toBeGreaterThan(0);
+      expect(readFileSyncSpy.mock.calls.length).toBe(0);
+    } finally {
+      readSyncSpy.mockRestore();
+      readFileSyncSpy.mockRestore();
+    }
+  });
+
+  it("readBacklog predicate fallback (no ring) uses readSync, never readFileSync", async () => {
+    const dir = eventsDir();
+    const now = new Date("2026-05-04T00:00:00Z");
+    const lines = [
+      makeLine("github.pr.merged", { i: 0 }),
+      makeLine("linear.issue.created"),
+      makeLine("github.pr.opened", { i: 1 }),
+    ];
+    writeFileSync(join(dir, "2026-05.jsonl"), lines.join("\n") + "\n");
+
+    const readSyncSpy = spyOn(fs, "readSync");
+    const readFileSyncSpy = spyOn(fs, "readFileSync");
+    try {
+      const r = await readBacklog({
+        catalystDir: workdir,
+        predicate: '.event | startswith("github.")',
+        limit: 100,
+        ring: null,
+        now: () => now,
+      });
+      expect(r.length).toBe(2);
+      expect(r.every((l) => (JSON.parse(l) as { event: string }).event.startsWith("github."))).toBe(true);
+      expect(readSyncSpy.mock.calls.length).toBeGreaterThan(0);
+      expect(readFileSyncSpy.mock.calls.length).toBe(0);
+    } finally {
+      readSyncSpy.mockRestore();
+      readFileSyncSpy.mockRestore();
+    }
+  });
+
+  it("readTunnelEventStats file fallback (no ring) uses readSync, never readFileSync — counts unchanged", () => {
+    eventsDir();
+    const lines = [
+      makeGithubLine("org/a", "2026-05-04T10:00:00Z"),
+      makeGithubLine("org/a", "2026-05-04T10:30:00Z"),
+      makeGithubLine("org/b", "2026-05-04T11:00:00Z"),
+    ];
+    writeFileSync(join(workdir, "events", "2026-05.jsonl"), lines.join("\n") + "\n");
+
+    const readSyncSpy = spyOn(fs, "readSync");
+    const readFileSyncSpy = spyOn(fs, "readFileSync");
+    try {
+      const r = readTunnelEventStats(workdir, undefined, () => new Date("2026-05-04T12:00:00Z"));
+      // Byte-identical counts to the old split-based path.
+      expect(r.eventCount24h).toBe(3);
+      expect(r.eventCount24hByRepo).toEqual({ "org/a": 2, "org/b": 1 });
+      // Reintroduction guard.
+      expect(readSyncSpy.mock.calls.length).toBeGreaterThan(0);
+      expect(readFileSyncSpy.mock.calls.length).toBe(0);
+    } finally {
+      readSyncSpy.mockRestore();
+      readFileSyncSpy.mockRestore();
     }
   });
 });

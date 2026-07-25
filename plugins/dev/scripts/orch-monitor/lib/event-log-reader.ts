@@ -12,11 +12,11 @@
 import {
   existsSync,
   statSync,
-  readFileSync,
   openSync,
   readSync,
   closeSync,
 } from "node:fs";
+import { StringDecoder } from "node:string_decoder";
 import { join } from "node:path";
 import { createFilterStream } from "./event-filter";
 import type { EventRing } from "./event-ring";
@@ -55,6 +55,64 @@ function monthlyPath(catalystDir: string, d: Date): string {
   const y = d.getUTCFullYear();
   const m = String(d.getUTCMonth() + 1).padStart(2, "0");
   return join(catalystDir, "events", `${y}-${m}.jsonl`);
+}
+
+/**
+ * CTL-1515: chunk size for {@link scanFileLines}. The bounded forward scan's
+ * peak transient is one chunk, replacing the whole-file `readFileSync` that
+ * allocated a single ~1.7 GB contiguous string bun/mimalloc never returns to
+ * the OS.
+ */
+const SCAN_CHUNK_BYTES = 1 << 20; // 1 MiB
+
+/**
+ * CTL-1515: bounded forward line scan. Reads `path` in `chunkBytes`-sized
+ * chunks via `openSync`/`readSync` (peak transient = one chunk) and invokes
+ * `onLine` once per `\n`-delimited line, in file order. This is the bounded
+ * replacement for the ring-underflow `readFileSync` fallbacks in
+ * {@link readBacklog} and {@link readTunnelEventStats}: a whole-file read of the
+ * current-month log allocated one giant contiguous buffer that Bun/mimalloc
+ * rarely returns to the OS.
+ *
+ * A `node:string_decoder` {@link StringDecoder} carries the partial line across
+ * chunk edges, so a multibyte UTF-8 sequence split on a chunk boundary is
+ * decoded byte-exact (never dropped or mojibake'd). The trailing empty segment
+ * of a newline-terminated file is NOT emitted; a final line lacking a trailing
+ * newline IS emitted. The fd is always closed (try/finally). Returns the total
+ * number of bytes read.
+ */
+export function scanFileLines(
+  path: string,
+  onLine: (line: string) => void,
+  chunkBytes: number = SCAN_CHUNK_BYTES,
+): number {
+  const decoder = new StringDecoder("utf8");
+  const buf = Buffer.allocUnsafe(chunkBytes);
+  const fd = openSync(path, "r");
+  let totalBytes = 0;
+  let pending = "";
+  try {
+    let bytesRead = 0;
+    // `null` position → sequential reads advancing the fd's own cursor; the
+    // peak transient is one chunk (vs a whole-file readFileSync string).
+    while ((bytesRead = readSync(fd, buf, 0, chunkBytes, null)) > 0) {
+      totalBytes += bytesRead;
+      pending += decoder.write(buf.subarray(0, bytesRead));
+      let nl = pending.indexOf("\n");
+      while (nl !== -1) {
+        onLine(pending.slice(0, nl));
+        pending = pending.slice(nl + 1);
+        nl = pending.indexOf("\n");
+      }
+    }
+    // Flush any bytes the decoder was holding, then emit a final unterminated
+    // line (a file ending in "\n" leaves `pending` empty → nothing emitted).
+    pending += decoder.end();
+    if (pending.length > 0) onLine(pending);
+  } finally {
+    closeSync(fd);
+  }
+  return totalBytes;
 }
 
 const BACKOFF_BASE_MS = 200;
@@ -115,22 +173,35 @@ export async function readBacklog(opts: ReadBacklogOpts): Promise<string[]> {
   const path = monthlyPath(opts.catalystDir, now());
   if (!existsSync(path)) return [];
 
-  // Current monthly files are ~17MB at end-of-month; reading the whole file is
-  // fast enough. If files grow significantly we can switch to chunked reads
-  // from the end of the file.
+  // CTL-1515: ring-underflow fallback. Instead of a single whole-file
+  // `readFileSync` (a ~1.7 GB contiguous transient bun/mimalloc never returns),
+  // scan the current-month log in bounded chunks and feed each line to the same
+  // filter path — output is byte-for-byte identical to the old read+split, but
+  // the peak transient is one chunk.
   const _t0 = performance.now();
-  const text = readFileSync(path, "utf8");
-  recordFullRead("readBacklog", text.length, performance.now() - _t0);
-  const allLines = text.split("\n").filter((l) => l.length > 0);
 
   if (!opts.predicate.trim()) {
-    return allLines.slice(-opts.limit);
+    // Empty predicate: rolling last-`limit` non-empty lines (matches the old
+    // `allLines.slice(-limit)`, no JSON validation).
+    const rolling: string[] = [];
+    const bytes = scanFileLines(path, (l) => {
+      if (l.length === 0) return;
+      rolling.push(l);
+      if (rolling.length > opts.limit) rolling.shift();
+    });
+    recordFullRead("readBacklog", bytes, performance.now() - _t0);
+    return rolling;
   }
 
   const stream = createFilterStream(opts.predicate);
   const matches: string[] = [];
   stream.onMatch((l) => matches.push(l));
-  for (const l of allLines) stream.write(l);
+  // `scanFileLines` drives `stream.write` synchronously per line — the same
+  // feed the old `for (const l of allLines)` loop produced (empty/invalid-JSON
+  // lines are dropped inside the stream, just as `.filter(l => l.length > 0)`
+  // + jq did).
+  const bytes = scanFileLines(path, (l) => stream.write(l));
+  recordFullRead("readBacklog", bytes, performance.now() - _t0);
   // Flushing the jq subprocess is a wait-on-stdout. For a 50k-line file we
   // need a few flush cycles to ensure all output drains.
   await stream.flush();
@@ -291,7 +362,11 @@ export function readTunnelEventStats(
     return acc;
   }
 
-  // File fallback (no ring, or ring underflows the 24h window).
+  // File fallback (no ring, or ring underflows the 24h window). CTL-1515:
+  // bounded chunked scan instead of a whole-file `readFileSync` (a ~1.7 GB
+  // contiguous transient bun/mimalloc never returns). Counts are byte-identical
+  // to the old read + `split("\n")` — `accumulateGithubStat` already no-ops on
+  // blank lines.
   const _t0 = performance.now();
   let _fallbackBytes = 0;
   const currentPath = monthlyPath(catalystDir, nowDate);
@@ -300,15 +375,12 @@ export function readTunnelEventStats(
 
   for (const filePath of paths) {
     if (!existsSync(filePath)) continue;
-    let text: string;
     try {
-      text = readFileSync(filePath, "utf8");
+      _fallbackBytes += scanFileLines(filePath, (line) => {
+        accumulateGithubStat(line, cutoffIso, acc);
+      });
     } catch {
       continue;
-    }
-    _fallbackBytes += text.length;
-    for (const line of text.split("\n")) {
-      accumulateGithubStat(line, cutoffIso, acc);
     }
   }
   recordFullRead("tunnelStats", _fallbackBytes, performance.now() - _t0);
