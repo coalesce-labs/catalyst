@@ -250,31 +250,44 @@ _resolve_token_env_via_bun() {
   printf '%s' "$out"
 }
 
+# _token_provisioned's env-isolation subshell below must stay COMMENT-FREE
+# inside the `probe="$( ... )"` body (CTL-1510 hotfix, found live on mini-2):
+# bash 3.2 — the ACTUAL interpreter macOS launchd/cron invoke via the
+# plist's/cron line's hardcoded /bin/bash, never caught by this repo's own
+# test suite because `bash script.sh` there resolves through `env` to a
+# newer Homebrew bash — has a parser defect where multi-line comments
+# containing an unbalanced paren or a stray quote/colon INSIDE a `$(...)`
+# command substitution corrupt its paren-matching. The visible symptom is
+# bizarre and misleading: a `set -u` "unbound variable" (or "bad
+# substitution") error for a variable that IS assigned, at a REPORTED line
+# number that is often a comment line nowhere near the real one. Reproduced
+# 100% with the original heavily-commented version of this function and
+# vanished completely once every comment moved outside the substitution,
+# confirmed under the real system bash (`/bin/bash`, not `env bash`). This is
+# the ONLY multi-statement `="$(...)"` capture in this file — keep the code
+# inside it, keep everything else out.
+#
+# Behavior: unsets CATALYST_CLOUD_TOKEN_ENV so an override can only come from
+# the sourced files (not an ambient value); does NOT unset
+# CATALYST_LAYER2_CONFIG_FILE (unlike catalyst-stack's install-time probe,
+# which strips both to simulate launchd's clean env from an interactive
+# shell) since this responder has no different context to simulate and both
+# the bun path and the bash fallback below need to see a real override.
+# _resolve_token_env_via_bun returning empty means bun was unavailable or its
+# import failed; the fallback then replicates resolveNodeCloudTokenEnv's own
+# precedence in pure bash — env override (from the sourced files) first, then
+# the Layer-2 catalyst.cloud.tokenEnv key, then the standard name — instead
+# of hardcoding the default, which would misclassify a node with a genuinely
+# custom-named token as tokenless whenever bun happens to be unavailable.
 _token_provisioned() {
   local probe
   probe="$(
     set +u
-    # Unset only CATALYST_CLOUD_TOKEN_ENV (require an override to come from
-    # the sourced files below, not some ambient value) — NOT
-    # CATALYST_LAYER2_CONFIG_FILE. Unlike catalyst-stack's install-time probe
-    # (which strips both to simulate launchd's clean env from an interactive
-    # shell), this responder has no "different context to simulate": it
-    # resolves the token using whatever environment it actually runs under —
-    # and both the bun-based primary path (config.mjs's own
-    # getLayer2ConfigPath honors this var) and the pure-bash fallback below
-    # need to see a real CATALYST_LAYER2_CONFIG_FILE override when one is set.
     unset CATALYST_CLOUD_TOKEN_ENV 2>/dev/null || true
     [[ -r "$RESPONDER_CLUSTER_ENV_FILE" ]] && . "$RESPONDER_CLUSTER_ENV_FILE"
     [[ -r "$RESPONDER_TOKEN_FILE" ]] && . "$RESPONDER_TOKEN_FILE"
     name="$(_resolve_token_env_via_bun)"
     if [[ -z "$name" ]]; then
-      # bun unavailable or the import failed — replicate
-      # resolveNodeCloudTokenEnv's own precedence in pure bash (Codex P2
-      # round 4) instead of hardcoding the default: env override (as set by
-      # one of the just-sourced files) wins, then the Layer-2
-      # catalyst.cloud.tokenEnv key, then the standard name. A silent
-      # hardcode here would classify a node with a genuinely custom-named
-      # token as tokenless whenever bun happens to be unavailable.
       if [[ -n "${CATALYST_CLOUD_TOKEN_ENV:-}" ]]; then
         name="$CATALYST_CLOUD_TOKEN_ENV"
       else
