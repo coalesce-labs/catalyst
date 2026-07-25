@@ -1211,6 +1211,8 @@ describe("checkHealthResponder", () => {
       readFile: healthyReadFile,
       fileExists: () => true,
       responderState: () => ({ loaded: true, lastExit: 0 }),
+      logMtimeMs: () => null,
+      plistMtimeMs: () => null,
     });
     expect(checks[0].name).toBe("responder-health");
     expect(checks[0].status).toBe(STATUS.PASS);
@@ -1222,6 +1224,266 @@ describe("checkHealthResponder", () => {
       readFile: healthyReadFile,
       fileExists: () => true,
       responderState: () => ({ loaded: true, lastExit: null }),
+      logMtimeMs: () => null,
+      plistMtimeMs: () => null,
+    });
+    expect(checks[0].name).toBe("responder-health");
+    expect(checks[0].status).toBe(STATUS.PASS);
+  });
+
+  // ─── dispatch staleness (CTL-1510 item 6) ──────────────────────────────────
+  //
+  // "Loaded + clean exit" is not proof of a live schedule: launchd on a fleet
+  // host held the job loaded with LastExitStatus 0 and dispatched NOTHING for
+  // hours. The heartbeat log's mtime is the ground truth (every sweep appends
+  // one line).
+
+  const T0 = 1_800_000_000_000;
+
+  it("WARNs when the heartbeat log is older than 3× the StartInterval (no scheduler dispatching)", () => {
+    const checks = checkHealthResponder({
+      readFile: healthyReadFile,
+      fileExists: () => true,
+      responderState: () => ({ loaded: true, lastExit: 0 }),
+      logMtimeMs: () => T0 - 4 * 3600 * 1000, // 4 h old vs 900 s floor
+      nowMs: () => T0,
+    });
+    expect(checks[0].name).toBe("responder-dispatch");
+    expect(checks[0].status).toBe(STATUS.WARN);
+    expect(checks[0].detail).toContain("crontab");
+  });
+
+  it("PASSes when the heartbeat log is fresh", () => {
+    const checks = checkHealthResponder({
+      readFile: healthyReadFile,
+      fileExists: () => true,
+      responderState: () => ({ loaded: true, lastExit: 0 }),
+      logMtimeMs: () => T0 - 60 * 1000, // 1 min old
+      nowMs: () => T0,
+    });
+    expect(checks[0].name).toBe("responder-health");
+    expect(checks[0].status).toBe(STATUS.PASS);
+  });
+
+  it("WARNs when the responder has NEVER emitted a heartbeat and the install is old (missing log, stale plist mtime)", () => {
+    const checks = checkHealthResponder({
+      readFile: healthyReadFile,
+      fileExists: () => true,
+      responderState: () => ({ loaded: true, lastExit: null }),
+      logMtimeMs: () => null,
+      plistMtimeMs: () => T0 - 4 * 3600 * 1000,
+      nowMs: () => T0,
+    });
+    expect(checks[0].name).toBe("responder-dispatch");
+    expect(checks[0].status).toBe(STATUS.WARN);
+    expect(checks[0].detail).toContain("never emitted");
+  });
+
+  it("stays quiet on a missing log within the fresh-install grace window", () => {
+    const checks = checkHealthResponder({
+      readFile: healthyReadFile,
+      fileExists: () => true,
+      responderState: () => ({ loaded: true, lastExit: null }),
+      logMtimeMs: () => null,
+      plistMtimeMs: () => T0 - 60 * 1000,
+      nowMs: () => T0,
+    });
+    expect(checks[0].name).toBe("responder-health");
+    expect(checks[0].status).toBe(STATUS.PASS);
+  });
+
+  it("WARNs (via the REAL log reader, no injected logMtimeMs) on a zero-byte pre-created log — the log-shipper's own placeholder must not read as a live sweep (Codex P2 round 2)", () => {
+    const dir = mkdtempSync(join(tmpdir(), "doctor-hr-emptylog-"));
+    writeFileSync(join(dir, "health-responder.log"), ""); // log-shipper's touch-if-missing placeholder
+    const oldEnv = process.env.CATALYST_DIR;
+    process.env.CATALYST_DIR = dir;
+    try {
+      const checks = checkHealthResponder({
+        readFile: healthyReadFile,
+        fileExists: () => true,
+        responderState: () => ({ loaded: true, lastExit: 0 }),
+        plistMtimeMs: () => Date.now() - 4 * 3600 * 1000, // install was hours ago
+      });
+      expect(checks[0].name).toBe("responder-dispatch");
+      expect(checks[0].status).toBe(STATUS.WARN);
+    } finally {
+      process.env.CATALYST_DIR = oldEnv;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("WARNs (via the REAL log reader) on a non-empty log with NO completed heartbeat line — diagnostic writes from a wedged run must not read as a live sweep (Codex P2 round 3)", () => {
+    const dir = mkdtempSync(join(tmpdir(), "doctor-hr-nohb-"));
+    writeFileSync(
+      join(dir, "health-responder.log"),
+      "[health-responder r1] WARN: launchctl list timed out after 5s — treating the writer as dead\n",
+    );
+    const oldEnv = process.env.CATALYST_DIR;
+    process.env.CATALYST_DIR = dir;
+    try {
+      const checks = checkHealthResponder({
+        readFile: healthyReadFile,
+        fileExists: () => true,
+        responderState: () => ({ loaded: true, lastExit: 0 }),
+        plistMtimeMs: () => Date.now() - 4 * 3600 * 1000,
+        // Push "now" well past the in-progress grace window (Codex P2 round
+        // 5) — otherwise this synchronously-written file's fresh mtime would
+        // read as "a sweep is currently running", not "died leaving a
+        // permanent diagnostic tail", the exact case this test pins.
+        nowMs: () => Date.now() + 10 * 60 * 1000,
+      });
+      expect(checks[0].name).toBe("responder-dispatch");
+      expect(checks[0].status).toBe(STATUS.WARN);
+    } finally {
+      process.env.CATALYST_DIR = oldEnv;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("PASSes (via the REAL log reader) on a fresh diagnostic-only tail — an in-progress sweep must not false-WARN (Codex P2 round 5)", () => {
+    const dir = mkdtempSync(join(tmpdir(), "doctor-hr-inprogress-"));
+    writeFileSync(
+      join(dir, "health-responder.log"),
+      "[health-responder r1] heartbeat status=healthy installed=1 alive=1 dead_writer=0 stale_lock=0 no_respawn=0 attempts=0/3 escalated=0\n" +
+        "[health-responder r2] WARN: launchctl list timed out after 5s — treating the writer as dead\n",
+    );
+    const oldEnv = process.env.CATALYST_DIR;
+    process.env.CATALYST_DIR = dir;
+    try {
+      const checks = checkHealthResponder({
+        readFile: healthyReadFile,
+        fileExists: () => true,
+        responderState: () => ({ loaded: true, lastExit: 0 }),
+        plistMtimeMs: () => Date.now() - 4 * 3600 * 1000,
+        // Default nowMs (real Date.now()) — the file was just written, so
+        // it's well within the in-progress grace window.
+      });
+      expect(checks[0].name).toBe("responder-health");
+      expect(checks[0].status).toBe(STATUS.PASS);
+    } finally {
+      process.env.CATALYST_DIR = oldEnv;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("PASSes (via the REAL log reader) once the log contains a completed heartbeat line", () => {
+    const dir = mkdtempSync(join(tmpdir(), "doctor-hr-hb-"));
+    writeFileSync(
+      join(dir, "health-responder.log"),
+      "[health-responder r1] heartbeat status=healthy installed=1 alive=1 dead_writer=0 stale_lock=0 no_respawn=0 attempts=0/3 escalated=0\n",
+    );
+    const oldEnv = process.env.CATALYST_DIR;
+    process.env.CATALYST_DIR = dir;
+    try {
+      const checks = checkHealthResponder({
+        readFile: healthyReadFile,
+        fileExists: () => true,
+        responderState: () => ({ loaded: true, lastExit: 0 }),
+        plistMtimeMs: () => Date.now() - 4 * 3600 * 1000,
+      });
+      expect(checks[0].name).toBe("responder-health");
+      expect(checks[0].status).toBe(STATUS.PASS);
+    } finally {
+      process.env.CATALYST_DIR = oldEnv;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("WARNs when an OLD heartbeat is followed by a trailing diagnostic with no new heartbeat (Codex P2 round 4)", () => {
+    const dir = mkdtempSync(join(tmpdir(), "doctor-hr-staleafterhb-"));
+    writeFileSync(
+      join(dir, "health-responder.log"),
+      "[health-responder r1] heartbeat status=healthy installed=1 alive=1 dead_writer=0 stale_lock=0 no_respawn=0 attempts=0/3 escalated=0\n" +
+        "[health-responder r2] WARN: launchctl list timed out after 5s — treating the writer as dead\n",
+    );
+    const oldEnv = process.env.CATALYST_DIR;
+    process.env.CATALYST_DIR = dir;
+    try {
+      const checks = checkHealthResponder({
+        readFile: healthyReadFile,
+        fileExists: () => true,
+        responderState: () => ({ loaded: true, lastExit: 0 }),
+        plistMtimeMs: () => Date.now() - 4 * 3600 * 1000,
+        nowMs: () => Date.now() + 10 * 60 * 1000, // past the in-progress grace window
+      });
+      expect(checks[0].name).toBe("responder-dispatch");
+      expect(checks[0].status).toBe(STATUS.WARN);
+    } finally {
+      process.env.CATALYST_DIR = oldEnv;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("WARNs (never PASSes) on a future-dated log mtime — clock skew must not read as freshness evidence (Codex P2 round 6)", () => {
+    const checks = checkHealthResponder({
+      readFile: healthyReadFile,
+      fileExists: () => true,
+      responderState: () => ({ loaded: true, lastExit: 0 }),
+      logMtimeMs: () => T0 + 60 * 60 * 1000, // 1h in the FUTURE relative to nowMs
+      nowMs: () => T0,
+    });
+    expect(checks[0].name).toBe("responder-dispatch");
+    expect(checks[0].status).toBe(STATUS.WARN);
+    expect(checks[0].detail).toContain("future");
+  });
+
+  it("WARNs (never PASSes) on a future-dated plist mtime when the log is missing (Codex P2 round 6)", () => {
+    const checks = checkHealthResponder({
+      readFile: healthyReadFile,
+      fileExists: () => true,
+      responderState: () => ({ loaded: true, lastExit: 0 }),
+      logMtimeMs: () => null,
+      plistMtimeMs: () => T0 + 60 * 60 * 1000, // 1h in the FUTURE
+      nowMs: () => T0,
+    });
+    expect(checks[0].name).toBe("responder-dispatch");
+    expect(checks[0].status).toBe(STATUS.WARN);
+    expect(checks[0].detail).toContain("future");
+  });
+
+  it("passes the plist's CATALYST_DIR (not process.env) into logMtimeMs (Codex P2 round 2)", () => {
+    const plistWithDir =
+      `<plist><dict><key>ProgramArguments</key><array><string>/bin/bash</string><string>${bakedPath}</string></array>` +
+      `<key>CATALYST_DIR</key><string>/Volumes/Custom &amp; Dir/catalyst</string></dict></plist>`;
+    const seenDirs = [];
+    const checks = checkHealthResponder({
+      readFile: (p) => (p.endsWith(".plist") ? plistWithDir : responderScript),
+      fileExists: () => true,
+      responderState: () => ({ loaded: true, lastExit: 0 }),
+      logMtimeMs: (dir) => { seenDirs.push(dir); return T0 - 60 * 1000; },
+      nowMs: () => T0,
+    });
+    expect(seenDirs).toContain("/Volumes/Custom & Dir/catalyst");
+    expect(checks[0].status).toBe(STATUS.PASS);
+  });
+
+  it("decodes XML entities in the baked path before existence checks (an '&' path plist)", () => {
+    const ampPath = "/Users/x/amp & dir/scripts/health-responder.sh";
+    const encoded = ampPath.replace(/&/g, "&amp;");
+    const seen = [];
+    const checks = checkHealthResponder({
+      readFile: (p) => (p.endsWith(".plist") ? responderPlist(encoded) : responderScript),
+      fileExists: (p) => { seen.push(p); return true; },
+      responderState: () => ({ loaded: true, lastExit: 0 }),
+      logMtimeMs: () => null,
+      plistMtimeMs: () => null,
+    });
+    expect(seen).toContain(ampPath);
+    expect(checks[0].status).toBe(STATUS.PASS);
+    expect(checks[0].detail).toContain(ampPath);
+  });
+
+  it("scales the staleness threshold with the plist's StartInterval", () => {
+    // interval 600 s → stale after 1800 s; a 25-min-old heartbeat is fine.
+    const plistWithInterval =
+      `<plist><dict><key>ProgramArguments</key><array><string>/bin/bash</string><string>${bakedPath}</string></array>` +
+      `<key>StartInterval</key><integer>600</integer></dict></plist>`;
+    const checks = checkHealthResponder({
+      readFile: (p) => (p.endsWith(".plist") ? plistWithInterval : responderScript),
+      fileExists: () => true,
+      responderState: () => ({ loaded: true, lastExit: 0 }),
+      logMtimeMs: () => T0 - 25 * 60 * 1000,
+      nowMs: () => T0,
     });
     expect(checks[0].name).toBe("responder-health");
     expect(checks[0].status).toBe(STATUS.PASS);

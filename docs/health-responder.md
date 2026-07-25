@@ -88,6 +88,8 @@ is down (the stale-copy-reports-healthy rule), not that everything is fine.
 | `RESPONDER_LIST_TIMEOUT_SECS` | `5` | Deadline on the `launchctl list` intentional-exit probe (timeout ⇒ treat as dead) |
 | `RESPONDER_STATE_DIR` | `~/catalyst/.health-responder` | Attempt + ESCALATED marker dir |
 | `RESPONDER_SELFHEAL_FILE` | `~/catalyst/cloud-sync.selfheal.json` | CTL-1508 breadcrumb path |
+| `RESPONDER_TOKEN_FILE` | `~/.config/catalyst/cloud-sync.env` | Presence flips an exit-0 down writer from "idle by design" to the failed-bounce fault (CTL-1510 item 0) |
+| `RESPONDER_SWEEP_LOCK_STALE_SECS` | `300` | Age at which a crashed sweep's whole-sweep lock is broken |
 | `RESPONDER_DRY_RUN` | unset | Set to `1` or use `--dry-run` (log would-kickstart, do nothing) |
 | `RESPONDER_RUN_ID` | timestamp | Tags log lines + telemetry for one run |
 | `CATALYST_REPLICA_DB` | `~/catalyst/catalyst-replica.db` | Lock = `<db>.writer.lock` (mirrors `getReplicaDbPath`) |
@@ -95,6 +97,53 @@ is down (the stale-copy-reports-healthy rule), not that everything is fine.
 
 The launchd schedule comes from `.catalyst/config.json` → `catalyst.responder.intervalSeconds`
 (default 180, clamped 60–900) at install time.
+
+## Scheduling: launchd + cron, Because launchd Alone Cannot Be Trusted
+
+The original design assumed a `StartInterval` sweep "cannot zombie". A fleet host disproved that
+live (mini-2, 2026-07-25): launchd held the job loaded with a clean last exit and dispatched
+**nothing** — the interval spawn stayed pended for hours, and after a clean `bootout`/`bootstrap`
+even `RunAtLoad` stopped firing, while `launchctl kickstart` ran the sweep fine and an older
+`StartInterval` job kept firing in the same gui domain. So the installer now provisions **two
+independent schedulers**:
+
+1. The launchd `StartInterval` LaunchAgent (unchanged), and
+2. a self-tagged user **crontab backstop** (`# ai.coalesce.catalyst-health-responder backstop
+   CTL-1510`), at the interval rounded up to whole minutes, with the plist's PATH + `CATALYST_DIR`
+   inline.
+
+Overlap between the two is serialized by a **whole-sweep `mkdir` reservation**
+(`$RESPONDER_STATE_DIR/sweep.lock`): the loser of the race heartbeats `status=skipped` and exits, so
+a double schedule can never double-kickstart. A lock older than
+`RESPONDER_SWEEP_LOCK_STALE_SECS` belongs to a crashed sweep and is broken. On a read-only state
+dir the sweep proceeds unlocked (it cannot act anyway — the attempt-cap fail-safe refuses).
+
+If **both** schedulers die, `catalyst-doctor`'s `responder-dispatch` check WARNs when the heartbeat
+log's mtime exceeds 3× the plist's `StartInterval` (floor 900 s), and remotely the heartbeat simply
+disappears from Loki (see below).
+
+## Remote Visibility (Loki) and Its Two Known Traps
+
+The heartbeat line ships to Loki as the `catalyst.health-responder` stream (Alloy's 7th) — and
+**absence of the heartbeat in Loki IS the dead-responder signal**. Two operational caveats, both
+learned live:
+
+- **Late-created log files were invisible to Alloy.** Alloy's `loki.source.file` targets are
+  static: a log file that does not exist when Alloy starts was never picked up later, so a host
+  whose responder log appeared minutes after an Alloy restart shipped nothing (dark for 4 h on
+  mini-2 while the other six streams flowed). The log-shipper launcher now **pre-creates every
+  tailed log file** before `exec alloy` (CTL-1510 item 7).
+- **dev/monitor-class hosts have no Alloy at all** (item 2, documented decision): those classes get
+  the responder via `adopt-cloud-sync`, but only `install-services` (worker-class setup) installs
+  the log shipper. On a dev/monitor host the responder's heartbeat and escalation are therefore
+  **host-local only** (`~/catalyst/health-responder.log`) — the Loki absence-signal does not cover
+  them, and remote alerting must not assume it does. **Do not run `catalyst-stack
+  install-services` on a dev/monitor host to get remote coverage** — it is not shipper-only; its
+  `RunAtLoad` also bootstraps the full stack LaunchAgent (`catalyst-stack start`, which starts
+  broker/execution-core), exactly what a class meant to stay daemonless must avoid. There is
+  currently no shipper-only launchd install path; the only way to ship this host's log without
+  installing the daemon stack is running `log-shipper/launch.sh` manually/foreground. Treat
+  host-local-only as the accepted default for these classes.
 
 ## Installation
 
@@ -132,7 +181,9 @@ plist, so a FAILing responder check would block a node from self-healing via joi
 `responder-installed` (plist absent/malformed), `responder-path` (baked program path gone — the
 CTL-1306 silent-death signature), `responder-killswitch` (installed script lacks the
 `RESPONDER_ENABLED` marker — stale install), `responder-loaded` (present but never bootstrapped),
-and `responder-health` (`LastExit` 127 / non-zero). Loaded + exit 0 (or never run yet) is PASS.
+`responder-health` (`LastExit` 127 / non-zero), and `responder-dispatch` (heartbeat log mtime older
+than 3× the `StartInterval` — loaded + clean exit but **no scheduler is actually dispatching**, the
+CTL-1510 launchd wedge). Loaded + exit 0 (or never run yet) with a fresh heartbeat is PASS.
 
 ## Relationship to Other Components
 

@@ -673,6 +673,263 @@ printf '{"ts":%s,"expectRestart":true}\n' "$FUTURE_TS" > "$RESPONDER_SELFHEAL_FI
 run "T48: future-timestamp breadcrumb is invalid — dead-writer still recovers" \
   bash -c "RESPONDER_KICKSTART_WAIT_SECS=0 bash '$RESPONDER' | grep -q 'dead_writer=1' && test -s '${KICKSTART_LOG}'"
 
+# ─── Phase 12: CTL-1510 hardening (T49–T56) ─────────────────────────────────
+
+# T49 (item 0): exit-0 + token file PRESENT is the failed-bounce signature —
+# recovery applies (the live mini-2 incident: bootout SIGTERM → exit 0 →
+# bootstrap never stuck; the old gate held the writer down forever).
+_reset
+touch "$PLIST"
+export MOCK_LAST_EXIT=0
+mkdir -p "${HOME}/.config/catalyst"
+# Codex P1 round 3: a token FILE existing is not the same as a token being
+# PROVISIONED — an adopted-but-not-yet-provisioned node's cloud-sync.env can
+# be present and readable while empty (or set an unrelated var), and that
+# must stay idle-by-design, never kickstart. Only a file that actually sets
+# the resolved token variable (CATALYST_CLOUD_TOKEN with no Layer-2 config in
+# this scratch HOME — bun/config.mjs are real, not mocked, here) counts.
+printf 'export SOME_UNRELATED_VAR=1\n' > "${HOME}/.config/catalyst/cloud-sync.env"
+run "T49: an EMPTY/irrelevant token file stays idle-by-design (no kickstart)" \
+  bash -c "bash '$RESPONDER' | grep -q 'idle by design' && ! test -s '${KICKSTART_LOG}'"
+printf 'export CATALYST_CLOUD_TOKEN=test-token-value\n' > "${HOME}/.config/catalyst/cloud-sync.env"
+run "T49x: a REAL provisioned token is treated as a failed bounce (kickstarts)" \
+  bash -c "out=\$(RESPONDER_KICKSTART_WAIT_SECS=0 bash '$RESPONDER'); printf '%s' \"\$out\" | grep -q 'failed-bounce signature' && printf '%s' \"\$out\" | grep -q 'dead_writer=1' && test -s '${KICKSTART_LOG}'"
+rm -f "${HOME}/.config/catalyst/cloud-sync.env"
+rm -f "$KICKSTART_LOG"
+run "T49b: no token file at all stays idle-by-design (no kickstart)" \
+  bash -c "bash '$RESPONDER' | grep -q 'idle by design' && ! test -s '${KICKSTART_LOG}'"
+# Codex P1: the launcher sources cluster.env TOO (CTL-1307 shared-token
+# projection) — a REAL token provisioned only there must equally defeat the
+# gate (an empty cluster.env must NOT).
+printf 'export CATALYST_CLOUD_TOKEN=test-token-value\n' > "${HOME}/.config/catalyst/cluster.env"
+run "T49c: a real token via cluster.env alone also defeats the exit-0 gate" \
+  bash -c "RESPONDER_KICKSTART_WAIT_SECS=0 bash '$RESPONDER' | grep -q 'failed-bounce signature' && test -s '${KICKSTART_LOG}'"
+rm -f "${HOME}/.config/catalyst/cluster.env" "$KICKSTART_LOG"
+unset MOCK_LAST_EXIT
+
+# T50 (item 5): whole-sweep reservation — a held lock skips the run (visible
+# heartbeat, no probe/act), a stale lock is broken, and a finished sweep
+# releases its lock.
+_reset
+touch "$PLIST" # dead-writer shape: without the lock skip, this WOULD kickstart
+mkdir -p "${RESPONDER_STATE_DIR}/sweep.lock"
+run "T50: contended sweep lock skips the run (heartbeat, no kickstart, foreign lock preserved)" \
+  bash -c "bash '$RESPONDER' | grep -q 'heartbeat status=skipped' && ! test -s '${KICKSTART_LOG}' && test -d '${RESPONDER_STATE_DIR}/sweep.lock'"
+run "T50b: a stale sweep lock is broken and the sweep proceeds" \
+  bash -c "touch -t 202501010000 '${RESPONDER_STATE_DIR}/sweep.lock'; out=\$(RESPONDER_KICKSTART_WAIT_SECS=0 bash '$RESPONDER'); printf '%s' \"\$out\" | grep -q 'broke stale sweep lock' && test -s '${KICKSTART_LOG}'"
+run "T50c: the lock is released when the sweep exits" \
+  bash -c "! test -d '${RESPONDER_STATE_DIR}/sweep.lock'"
+_reset
+run "T50d: dry-run never creates the sweep lock (read-only contract)" \
+  bash -c "bash '$RESPONDER' --dry-run >/dev/null && ! test -e '${RESPONDER_STATE_DIR}/sweep.lock'"
+
+# T50e (Codex P2 round 2): the stale-lock CLAIM must be atomic — only ONE of
+# two sweeps racing the SAME stale lock may successfully rename it aside
+# (health-responder.sh's _claim_stale_lock). A racing pair calling `mv
+# "$SWEEP_LOCK_DIR" <distinct-tmp>` on the SAME source: the first succeeds and
+# the source is now gone, so the second's `mv` of that same (now-nonexistent)
+# source path MUST fail — it can never reach the unconditional `rm -rf` that
+# used to delete a concurrently-reacquired fresh lock out from under its owner.
+_reset
+mkdir -p "${RESPONDER_STATE_DIR}/sweep.lock"
+run "T50e: only the first of two racing claims on the same stale lock succeeds" \
+  bash -c "mv '${RESPONDER_STATE_DIR}/sweep.lock' '${RESPONDER_STATE_DIR}/sweep.lock.stale.first' 2>/dev/null && ! mv '${RESPONDER_STATE_DIR}/sweep.lock' '${RESPONDER_STATE_DIR}/sweep.lock.stale.second' 2>/dev/null"
+rm -rf "${RESPONDER_STATE_DIR}/sweep.lock.stale.first"
+
+# T50f (Codex P2 round 3): claim-then-verify — a lock that is FRESH when
+# claimed (not actually stale; models the instance-swap window where a
+# different contender already broke+recreated it between another sweep's
+# check and act) must be PUT BACK, not destroyed. Every "found a directory at
+# SWEEP_LOCK_DIR" path now goes through the same claim-then-verify, so a
+# fresh lock exercises the exact protection the instance-swap bug needed.
+_reset
+touch "$PLIST" # dead-writer shape: without protection, this WOULD kickstart
+mkdir -p "${RESPONDER_STATE_DIR}/sweep.lock" # freshly created — NOT stale
+echo -n "someone-elses-token" > "${RESPONDER_STATE_DIR}/sweep.lock/owner"
+run "T50f: a fresh (non-stale) lock is put back intact, never destroyed" \
+  bash -c "bash '$RESPONDER' | grep -q 'heartbeat status=skipped' && ! test -s '${KICKSTART_LOG}' && [ \"\$(cat '${RESPONDER_STATE_DIR}/sweep.lock/owner')\" = 'someone-elses-token' ]"
+rm -rf "${RESPONDER_STATE_DIR}/sweep.lock"
+
+# T51 (item 4): unprunable expired markers degrade EXPLICITLY — and a cap
+# built on that unreliable count refuses to escalate. Root ignores directory
+# permissions (same T44 reasoning, Codex P2 round 2: reproduced failing in a
+# root container) — chmod 555 cannot make markers unremovable for root, so
+# skip there; the permission mechanism cannot bind root.
+if [[ "$(id -u)" -ne 0 ]]; then
+  _reset
+  touch "$PLIST" # dead-writer condition
+  mkdir -p "$RESPONDER_STATE_DIR"
+  for i in 1 2 3; do : > "${RESPONDER_STATE_DIR}/attempt.100000000${i}.t"; done # expired (year 2001)
+  chmod 555 "$RESPONDER_STATE_DIR"
+  run "T51: unprunable expired markers log the over-count ERROR" \
+    bash -c "bash '$RESPONDER' | grep -q 'could not be pruned'"
+  run "T51b: cap-on-unreliable-count refuses to escalate (degraded, no kickstart)" \
+    bash -c "out=\$(bash '$RESPONDER'); printf '%s' \"\$out\" | grep -q 'refusing to escalate on unreliable state' && printf '%s' \"\$out\" | grep -q 'heartbeat status=degraded' && ! test -s '${KICKSTART_LOG}'"
+  chmod 755 "$RESPONDER_STATE_DIR"
+else
+  echo "  SKIP: T51 (running as root — chmod cannot make markers unremovable)"
+  echo "  SKIP: T51b (running as root — chmod cannot make markers unremovable)"
+fi
+
+# T52 (item 3): a bake path containing '&' must survive substitution — XML-
+# escaped in the plist (sed's whole-match metacharacter would otherwise mangle
+# the program path into a silent exit-127 loop).
+BAKE_AMP="${BAKE_SCRATCH}/amp & dir/scripts"
+mkdir -p "${BAKE_AMP}/orch-monitor/dist"
+cp "${REPO_ROOT}/plugins/dev/scripts/orch-monitor/dist/ai.coalesce.catalyst-health-responder.plist" \
+   "${BAKE_AMP}/orch-monitor/dist/"
+touch "${BAKE_AMP}/health-responder.sh"
+run "T52: '&' in the bake path is XML-escaped, not sed-mangled" \
+  bash -c "CATALYST_FORCE_BAKE_DIR='${BAKE_AMP}' bash '$INSTALLER' --print-only | grep -qF 'amp &amp; dir/scripts/health-responder.sh'"
+run "T52b: orphan-sweep installer carries the same escaping helper (parity)" \
+  bash -c "grep -q '_escape_repl' '${REPO_ROOT}/plugins/dev/scripts/install-orphan-sweep.sh'"
+# Codex P1: the plist/cron runtime is /bin/bash 3.2 on macOS, where the old
+# parameter-expansion escaping dropped its backslash. Pin the fix by running
+# the SAME substitution under /bin/bash (3.2 on Darwin; still valid elsewhere).
+run "T52c: escaping survives /bin/bash 3.2 semantics" \
+  bash -c "CATALYST_FORCE_BAKE_DIR='${BAKE_AMP}' /bin/bash '$INSTALLER' --print-only | grep -qF 'amp &amp; dir/scripts/health-responder.sh'"
+
+# T53 (item 6): the cron backstop — installed tagged + idempotent, preserves
+# foreign lines, removed on uninstall. crontab is a PATH-shadowed mock; the
+# install path is forced to Darwin so it runs anywhere (launchctl is mocked).
+export MOCK_CRONTAB_FILE="${SCRATCH}/crontab.mock"
+cat > "$MOCKBIN/crontab" <<'EOF'
+#!/usr/bin/env bash
+case "${1:-}" in
+  -l) [[ -f "${MOCK_CRONTAB_FILE:-/nonexistent}" ]] && cat "$MOCK_CRONTAB_FILE"; exit 0 ;;
+  -r) rm -f "${MOCK_CRONTAB_FILE:-/nonexistent}"; exit 0 ;;
+  *)  cat > "${MOCK_CRONTAB_FILE:-/tmp/crontab.mock}"; exit 0 ;;
+esac
+EOF
+chmod +x "$MOCKBIN/crontab"
+CRON_INSTALL="CATALYST_FORCE_OS=Darwin CATALYST_FORCE_BAKE_DIR='${BAKE}' bash '$INSTALLER'"
+run "T53: install writes the tagged cron backstop line" \
+  bash -c "rm -f '$MOCK_CRONTAB_FILE'; eval $CRON_INSTALL >/dev/null && grep -q 'health-responder backstop CTL-1510' '$MOCK_CRONTAB_FILE' && grep -q '^\*/3 ' '$MOCK_CRONTAB_FILE'"
+run "T53b: reinstall is idempotent (exactly one tagged line)" \
+  bash -c "eval $CRON_INSTALL >/dev/null && [ \"\$(grep -c 'CTL-1510' '$MOCK_CRONTAB_FILE')\" -eq 1 ]"
+run "T53c: foreign crontab lines survive install" \
+  bash -c "printf '%s\n' '30 4 * * * /usr/bin/true keepme' > '$MOCK_CRONTAB_FILE'; eval $CRON_INSTALL >/dev/null && grep -q keepme '$MOCK_CRONTAB_FILE' && grep -q 'CTL-1510' '$MOCK_CRONTAB_FILE'"
+run "T53d: uninstall removes the tagged line and keeps foreign lines" \
+  bash -c "bash '$INSTALLER' --uninstall >/dev/null && grep -q keepme '$MOCK_CRONTAB_FILE' && ! grep -q 'CTL-1510' '$MOCK_CRONTAB_FILE'"
+# Codex P2: cron's /bin/sh re-expands $ ` \ inside double quotes — the command
+# paths must be single-quoted. Assert the written line single-quotes the
+# responder path and the PATH env value.
+run "T53e: cron command paths are single-quoted (no sh re-expansion)" \
+  bash -c "rm -f '$MOCK_CRONTAB_FILE'; eval $CRON_INSTALL >/dev/null && grep -qF \"/bin/bash '${BAKE}/health-responder.sh'\" '$MOCK_CRONTAB_FILE' && grep -q \"PATH='\" '$MOCK_CRONTAB_FILE'"
+
+# T54 (item 1): the WRITER's plist persists CATALYST_DIR like the responder's
+# does — text-level structural check on the render function (same idiom as T40).
+run "T54: render_cloud_sync_plist persists CATALYST_DIR" \
+  bash -c "awk '/^render_cloud_sync_plist\(\) \{/,/^\}/' '$STACK' | grep -q '<key>CATALYST_DIR</key>'"
+
+# T55 (item 7): the log-shipper launcher pre-creates every tailed log file —
+# Alloy's static file targets never discover a file created after start, so a
+# missing-at-start log means a permanently dark stream (the mini-2 incident).
+LAUNCH="${REPO_ROOT}/plugins/dev/scripts/log-shipper/launch.sh"
+cat > "$MOCKBIN/alloy" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+chmod +x "$MOCKBIN/alloy"
+ALLOY_DIR="${SCRATCH}/alloy-home"
+run "T55: launch.sh touches all tailed logs before exec'ing alloy" \
+  bash -c "CATALYST_DIR='${ALLOY_DIR}' bash '$LAUNCH' --storage '${ALLOY_DIR}/storage' >/dev/null 2>&1; test -f '${ALLOY_DIR}/health-responder.log' && test -f '${ALLOY_DIR}/cloud-sync.log' && test -f '${ALLOY_DIR}/execution-core/daemon.log' && test -f '${ALLOY_DIR}/broker.log' && test -f '${ALLOY_DIR}/monitor.log' && test -f '${ALLOY_DIR}/updater.log' && test -f '${ALLOY_DIR}/otel-forward.log'"
+
+# T56: sweep-lock + cron-backstop composition — two back-to-back sweeps (the
+# launchd+cron overlap this design accepts) never double-kickstart within one
+# reservation: the second run during a held lock skips.
+_reset
+touch "$PLIST"
+mkdir -p "${RESPONDER_STATE_DIR}/sweep.lock"
+run "T56: overlapped sweep is skipped, then a later sweep acts once" \
+  bash -c "bash '$RESPONDER' | grep -q 'status=skipped' && rmdir '${RESPONDER_STATE_DIR}/sweep.lock' && RESPONDER_KICKSTART_WAIT_SECS=0 bash '$RESPONDER' >/dev/null && [ \"\$(grep -c kickstart '${KICKSTART_LOG}')\" -eq 1 ]"
+
+# ─── Phase 13: CTL-1510 round-4 remediations (T57–T60) ──────────────────────
+#
+# T57-T59: when bun is unavailable, _token_provisioned must replicate
+# resolveNodeCloudTokenEnv's OWN precedence (env override > Layer-2 > default)
+# in pure bash rather than hardcoding CATALYST_CLOUD_TOKEN (Codex P2 round 4).
+# Shadow `bun` with a failing mock — MOCKBIN wins over the real system bun
+# since the responder APPENDS (never prepends) its own SCRIPT_DIR to PATH.
+cat > "$MOCKBIN/bun" <<'EOF'
+#!/usr/bin/env bash
+exit 1
+EOF
+chmod +x "$MOCKBIN/bun"
+
+_reset
+touch "$PLIST"
+export MOCK_LAST_EXIT=0
+mkdir -p "${HOME}/.config/catalyst"
+printf 'export CATALYST_CLOUD_TOKEN_ENV=MY_CUSTOM_TOKEN\nexport MY_CUSTOM_TOKEN=real-value\n' > "${HOME}/.config/catalyst/cloud-sync.env"
+run "T57: bun unavailable + an env-override token name resolves via that name" \
+  bash -c "out=\$(RESPONDER_KICKSTART_WAIT_SECS=0 bash '$RESPONDER'); printf '%s' \"\$out\" | grep -q 'failed-bounce signature' && test -s '${KICKSTART_LOG}'"
+rm -f "${HOME}/.config/catalyst/cloud-sync.env" "$KICKSTART_LOG"
+
+printf 'export ANOTHER_CUSTOM_TOKEN=real-value\n' > "${HOME}/.config/catalyst/cloud-sync.env"
+printf '{"catalyst":{"cloud":{"tokenEnv":"ANOTHER_CUSTOM_TOKEN"}}}' > "${SCRATCH}/layer2-config.json"
+run "T58: bun unavailable + no env override falls back to the Layer-2 tokenEnv key" \
+  bash -c "out=\$(CATALYST_LAYER2_CONFIG_FILE='${SCRATCH}/layer2-config.json' RESPONDER_KICKSTART_WAIT_SECS=0 bash '$RESPONDER'); printf '%s' \"\$out\" | grep -q 'failed-bounce signature' && test -s '${KICKSTART_LOG}'"
+rm -f "${HOME}/.config/catalyst/cloud-sync.env" "$KICKSTART_LOG" "${SCRATCH}/layer2-config.json"
+
+printf 'export CATALYST_CLOUD_TOKEN=real-value\n' > "${HOME}/.config/catalyst/cloud-sync.env"
+run "T59: bun unavailable + no overrides at all falls back to CATALYST_CLOUD_TOKEN" \
+  bash -c "out=\$(CATALYST_LAYER2_CONFIG_FILE=/dev/null RESPONDER_KICKSTART_WAIT_SECS=0 bash '$RESPONDER'); printf '%s' \"\$out\" | grep -q 'failed-bounce signature' && test -s '${KICKSTART_LOG}'"
+rm -f "${HOME}/.config/catalyst/cloud-sync.env" "$KICKSTART_LOG" "$MOCKBIN/bun"
+unset MOCK_LAST_EXIT
+
+# T60 (Codex P2 round 4): the sweep-lock pre-check must never touch a FRESH
+# lock at all — restoring the read-only mtime gate closes the round-3
+# regression where EVERY contention (not just genuinely stale locks) briefly
+# vacated the canonical path. Same observable contract as T50f (fresh lock
+# survives intact) but explicit about the round-4 fix it pins.
+_reset
+touch "$PLIST"
+mkdir -p "${RESPONDER_STATE_DIR}/sweep.lock"
+echo -n "still-fresh-owner" > "${RESPONDER_STATE_DIR}/sweep.lock/owner"
+run "T60: a fresh lock is never claimed/touched — pre-check gates before any mv" \
+  bash -c "bash '$RESPONDER' | grep -q 'heartbeat status=skipped' && ! test -s '${KICKSTART_LOG}' && [ \"\$(cat '${RESPONDER_STATE_DIR}/sweep.lock/owner')\" = 'still-fresh-owner' ]"
+rm -rf "${RESPONDER_STATE_DIR}/sweep.lock"
+
+# T61 (Codex P2 round 5): the token-resolution `bun` subprocess must be
+# bounded like the launchctl probes — a hung bun must not hold the sweep
+# lock forever. Shadow `bun` with a mock that hangs past the configured
+# timeout; the sweep must still complete (falls through to the pure-bash
+# fallback) rather than wedge.
+cat > "$MOCKBIN/bun" <<'EOF'
+#!/usr/bin/env bash
+sleep 60
+EOF
+chmod +x "$MOCKBIN/bun"
+_reset
+touch "$PLIST"
+export MOCK_LAST_EXIT=0
+mkdir -p "${HOME}/.config/catalyst"
+printf 'export CATALYST_CLOUD_TOKEN=real-value\n' > "${HOME}/.config/catalyst/cloud-sync.env"
+run "T61: a hung bun token-resolution probe is bounded — sweep still completes" \
+  bash -c "start=\$(date +%s); out=\$(RESPONDER_TOKEN_RESOLVE_TIMEOUT_SECS=1 RESPONDER_KICKSTART_WAIT_SECS=0 bash '$RESPONDER'); elapsed=\$(( \$(date +%s) - start )); printf '%s' \"\$out\" | grep -q 'failed-bounce signature' && [ \"\$elapsed\" -lt 30 ]"
+rm -f "${HOME}/.config/catalyst/cloud-sync.env" "$MOCKBIN/bun"
+unset MOCK_LAST_EXIT
+
+# T62 (Codex P2 round 5): a FUTURE-dated (clock-skew) lock must not
+# permanently block recovery — a negative signed age would otherwise never
+# exceed any positive stale threshold. touch -t with a far-future timestamp.
+_reset
+touch "$PLIST" # dead-writer shape: without the clamp, this WOULD stay skipped forever
+mkdir -p "${RESPONDER_STATE_DIR}/sweep.lock"
+FUTURE_STAMP="$(date -v+10y +%Y%m%d0000 2>/dev/null || date -d '+10 years' +%Y%m%d0000 2>/dev/null)"
+touch -t "$FUTURE_STAMP" "${RESPONDER_STATE_DIR}/sweep.lock"
+run "T62: a future-dated lock is treated as stale-eligible, not blocked forever" \
+  bash -c "out=\$(RESPONDER_KICKSTART_WAIT_SECS=0 bash '$RESPONDER'); printf '%s' \"\$out\" | grep -q 'broke stale sweep lock' && test -s '${KICKSTART_LOG}'"
+
+# T63 (Codex P2 round 6): the sweep-lock stale-threshold floor must include
+# EVERY bounded subprocess this sweep can spend time in, including the
+# token-resolve timeout added in round 5 — a structural check (same idiom as
+# T54) since the computed RESPONDER_SWEEP_LOCK_STALE_SECS value has no other
+# external observation point.
+run "T63: sweep-lock floor formula includes the token-resolve timeout" \
+  bash -c "grep -q 'RESPONDER_LIST_TIMEOUT_SECS + RESPONDER_TOKEN_RESOLVE_TIMEOUT_SECS + RESPONDER_KICKSTART_TIMEOUT_SECS' '$RESPONDER'"
+
 # ─── results ────────────────────────────────────────────────────────────────
 
 echo ""

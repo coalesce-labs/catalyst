@@ -60,6 +60,11 @@
 #   RESPONDER_KICKSTART_WAIT_SECS  — post-kickstart settle before re-probe, default 10
 #   RESPONDER_STATE_DIR            — marker dir, default ~/catalyst/.health-responder
 #   RESPONDER_SELFHEAL_FILE        — breadcrumb path, default ~/catalyst/cloud-sync.selfheal.json
+#   RESPONDER_TOKEN_FILE           — cloud-sync token file whose presence turns an
+#                                    exit-0 down writer from "idle by design" into
+#                                    the failed-bounce fault (CTL-1510 item 0),
+#                                    default ~/.config/catalyst/cloud-sync.env
+#   RESPONDER_SWEEP_LOCK_STALE_SECS — crashed-sweep lock breaker age, default 300
 #   RESPONDER_DRY_RUN              — set to 1 or use --dry-run flag
 #   RESPONDER_RUN_ID               — default: timestamp-based (set in tests for determinism)
 #   CATALYST_REPLICA_DB            — replica db path (lock = <db>.writer.lock),
@@ -68,6 +73,17 @@
 #   CATALYST_LAUNCHAGENTS_DIR      — default ~/Library/LaunchAgents (mirrors doctor.mjs)
 
 set -uo pipefail
+# Ignore SIGPIPE (CTL-1510 item 5 hardening): a caller piping this script
+# through `grep -q`/`head` (as this suite's own tests do, and as an operator
+# debugging by hand might) closes its end of the pipe as soon as it matches —
+# the NEXT `echo`/`log` write then raises SIGPIPE. Bash's default SIGPIPE
+# disposition kills the process immediately on an uncaught write signal,
+# which skips the sweep-lock-release EXIT trap entirely (confirmed live: the
+# lock survived across three piped invocations in a row). Writes already
+# don't check their return status, so a silently-failed write to a closed
+# pipe is exactly as harmless as before — the difference is the process now
+# always reaches its EXIT trap and releases the lock.
+trap '' PIPE
 
 # Resolve script dir so sibling scripts (emit-otel-event.sh) are found. APPEND
 # to PATH so a test's prepended mock bin still wins (orphan-sweep.sh idiom).
@@ -133,6 +149,21 @@ RESPONDER_SELFHEAL_GRACE_SECS="$(_num "$RESPONDER_SELFHEAL_GRACE_SECS" 120 0)"
 # Deadline for the `launchctl list` intentional-exit probe (Codex P2 round 4:
 # the same hung-launchctl class the kickstart deadline guards against).
 RESPONDER_LIST_TIMEOUT_SECS="$(_num "${RESPONDER_LIST_TIMEOUT_SECS:-5}" 5 1)"
+# Deadline for the token-name-resolution `bun` subprocess (Codex P2 round 5:
+# same hung-subprocess class — see _resolve_token_env_via_bun).
+RESPONDER_TOKEN_RESOLVE_TIMEOUT_SECS="$(_num "${RESPONDER_TOKEN_RESOLVE_TIMEOUT_SECS:-5}" 5 1)"
+# Whole-sweep reservation staleness (CTL-1510 item 5): a lock older than this
+# belongs to a crashed sweep and is broken. Floored BELOW at the worst-case
+# legitimate sweep duration (every bounded-subprocess timeout this sweep can
+# spend waiting on — list, TOKEN RESOLUTION, kickstart, kickstart-wait — round
+# 6 added the token-resolve term, previously missing) + slop (Codex P2: the
+# wait/timeout knobs have no upper bounds, so a configured stale threshold
+# under a legitimate sweep's runtime would let the next invocation break a
+# LIVE lock and reintroduce the concurrent-kickstart race this lock exists to
+# close).
+RESPONDER_SWEEP_LOCK_STALE_SECS="$(_num "${RESPONDER_SWEEP_LOCK_STALE_SECS:-300}" 300 1)"
+_SWEEP_MIN_STALE=$(( RESPONDER_LIST_TIMEOUT_SECS + RESPONDER_TOKEN_RESOLVE_TIMEOUT_SECS + RESPONDER_KICKSTART_TIMEOUT_SECS + RESPONDER_KICKSTART_WAIT_SECS + 60 ))
+(( RESPONDER_SWEEP_LOCK_STALE_SECS < _SWEEP_MIN_STALE )) && RESPONDER_SWEEP_LOCK_STALE_SECS="$_SWEEP_MIN_STALE"
 RESPONDER_RUN_ID="${RESPONDER_RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)-$$}"
 # Resolve every state/target path through CATALYST_DIR exactly like the
 # writer's config.mjs catalystDir() (Codex P1 round 3): a node using the
@@ -152,6 +183,113 @@ CLOUD_SYNC_PLIST="${CATALYST_LAUNCHAGENTS_DIR:-${HOME}/Library/LaunchAgents}/${C
 REPLICA_DB="${CATALYST_REPLICA_DB:-${CATALYST_DIR}/catalyst-replica.db}"
 WRITER_LOCK="${REPLICA_DB}.writer.lock"
 ESCALATED_MARKER="${RESPONDER_STATE_DIR}/ESCALATED.cloud-sync"
+# The operator-provisioned token files the cloud-sync launcher sources
+# (cloud-sync/launch.sh sources BOTH, in this order: cluster.env — the CTL-1307
+# shared-token projection — then the dedicated cloud-sync.env; Codex P1).
+# Presence of EITHER discriminates the two exit-0 flows for the
+# intentional-exit gate (CTL-1510 item 0): tokenless idle no-op (both absent —
+# genuinely idle by design) vs a failed bounce (a token source present —
+# adopt's bootout SIGTERM'd the writer to exit 0 but the bootstrap relaunch
+# never stuck, the live mini-2 incident). NOTE the deliberate trade-off: a
+# manual SIGTERM stop on a token-bearing node now gets kickstarted — an
+# operator who wants the writer to STAY down must use the RESPONDER_ENABLED=0
+# kill-switch (or uninstall); the attempt cap bounds the disagreement either way.
+RESPONDER_TOKEN_FILE="${RESPONDER_TOKEN_FILE:-${HOME}/.config/catalyst/cloud-sync.env}"
+RESPONDER_CLUSTER_ENV_FILE="${RESPONDER_CLUSTER_ENV_FILE:-${HOME}/.config/catalyst/cluster.env}"
+
+# _token_provisioned: true iff the RESOLVED cloud-sync token variable is
+# actually non-empty after sourcing both launcher-sourced files — NOT merely
+# whether a token file is readable (Codex P1 round 3: an adopted-but-not-yet-
+# provisioned node's cloud-sync.env can exist and be readable while EMPTY —
+# exactly the tokenless-idle case CTL-1509 was designed around. Treating file
+# presence as token presence would kickstart a genuinely idle writer into a
+# false-escalation storm). Mirrors catalyst-stack's install-time token probe
+# byte-for-byte: source both files in a subshell matching launch.sh's view,
+# resolve the env-var NAME via the same config.mjs helper (falls back to the
+# literal CATALYST_CLOUD_TOKEN if bun is unavailable), then check presence of
+# THAT resolved name — never a fixed/guessed variable name.
+# _resolve_token_env_via_bun: prints the resolved env-var NAME from
+# resolveNodeCloudTokenEnv(), or prints nothing on timeout/failure/absence.
+# Bounded the same way _last_exit_status bounds `launchctl list` (Codex P2
+# round 5): this runs INSIDE _token_provisioned, which runs AFTER the sweep
+# lock is acquired — an unbounded bun call there would let a wedged bun or
+# module import hold the lock indefinitely, defeating the "short-lived
+# process, cannot zombie" guarantee this whole responder exists to provide.
+# CFG_DIR is exported (not just set) so the backgrounded subshell — a
+# separate process — inherits it; a plain assignment before `(` is NOT
+# exported to that child.
+_resolve_token_env_via_bun() {
+  local out="" f pid rc=""
+  f="$(mktemp "${TMPDIR:-/tmp}/responder-tokenname.XXXXXX")"
+  # Background bun DIRECTLY (a leading VAR=val prefix scopes CFG_DIR to just
+  # this command) rather than wrapping it in a `( ... ) &` subshell — a
+  # subshell wrapper would make $! the WRAPPER's pid, and killing that on
+  # timeout leaves the actual hung bun process orphaned rather than reaped
+  # (found live while testing this fix). Mirrors _last_exit_status's own
+  # backgrounding shape exactly for the same reason.
+  CFG_DIR="${SCRIPT_DIR}/execution-core" bun -e '
+    const m = await import(process.env.CFG_DIR + "/config.mjs");
+    process.stdout.write(m.resolveNodeCloudTokenEnv().envVar);
+  ' > "$f" 2>/dev/null &
+  pid=$!
+  for (( _tri = 0; _tri < RESPONDER_TOKEN_RESOLVE_TIMEOUT_SECS; _tri++ )); do
+    if ! kill -0 "$pid" 2>/dev/null; then
+      wait "$pid" 2>/dev/null
+      rc=$?
+      break
+    fi
+    sleep 1
+  done
+  if [[ -z "$rc" ]]; then
+    kill -9 "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+  elif [[ "$rc" -eq 0 ]]; then
+    out="$(cat "$f" 2>/dev/null)"
+  fi
+  rm -f "$f"
+  printf '%s' "$out"
+}
+
+_token_provisioned() {
+  local probe
+  probe="$(
+    set +u
+    # Unset only CATALYST_CLOUD_TOKEN_ENV (require an override to come from
+    # the sourced files below, not some ambient value) — NOT
+    # CATALYST_LAYER2_CONFIG_FILE. Unlike catalyst-stack's install-time probe
+    # (which strips both to simulate launchd's clean env from an interactive
+    # shell), this responder has no "different context to simulate": it
+    # resolves the token using whatever environment it actually runs under —
+    # and both the bun-based primary path (config.mjs's own
+    # getLayer2ConfigPath honors this var) and the pure-bash fallback below
+    # need to see a real CATALYST_LAYER2_CONFIG_FILE override when one is set.
+    unset CATALYST_CLOUD_TOKEN_ENV 2>/dev/null || true
+    [[ -r "$RESPONDER_CLUSTER_ENV_FILE" ]] && . "$RESPONDER_CLUSTER_ENV_FILE"
+    [[ -r "$RESPONDER_TOKEN_FILE" ]] && . "$RESPONDER_TOKEN_FILE"
+    name="$(_resolve_token_env_via_bun)"
+    if [[ -z "$name" ]]; then
+      # bun unavailable or the import failed — replicate
+      # resolveNodeCloudTokenEnv's own precedence in pure bash (Codex P2
+      # round 4) instead of hardcoding the default: env override (as set by
+      # one of the just-sourced files) wins, then the Layer-2
+      # catalyst.cloud.tokenEnv key, then the standard name. A silent
+      # hardcode here would classify a node with a genuinely custom-named
+      # token as tokenless whenever bun happens to be unavailable.
+      if [[ -n "${CATALYST_CLOUD_TOKEN_ENV:-}" ]]; then
+        name="$CATALYST_CLOUD_TOKEN_ENV"
+      else
+        l2_file="${CATALYST_LAYER2_CONFIG_FILE:-${HOME}/.config/catalyst/config.json}"
+        name=""
+        if [[ -r "$l2_file" ]] && command -v jq >/dev/null 2>&1; then
+          name="$(jq -r '.catalyst.cloud.tokenEnv // empty' "$l2_file" 2>/dev/null)"
+        fi
+        [[ -z "$name" ]] && name="CATALYST_CLOUD_TOKEN"
+      fi
+    fi
+    [[ -n "${!name:-}" ]] && printf yes || printf no
+  )"
+  [[ "$probe" == "yes" ]]
+}
 
 # ─── helpers ────────────────────────────────────────────────────────────────
 
@@ -320,6 +458,12 @@ _probe_selfheal() {
 # free" as time passes, the CTL-624 cool-down-marker idiom. File-backed (not
 # in-memory) because every responder run is a fresh process by design.
 
+# Sets PRUNE_DEGRADED=1 when an expired/unparseable marker SURVIVES its rm
+# (state dir went read-only): those markers keep counting toward the cap, so
+# escalation could fire outside the configured window on phantom attempts.
+# The consumers degrade explicitly (CTL-1510 item 4) instead of acting on the
+# unreliable count — same contract as the _record_attempt / _clear_markers
+# failure paths.
 _prune_attempts() {
   is_dry && return 0 # dry-run is read-only — stale markers are reported, never pruned
   local f ts now
@@ -328,8 +472,15 @@ _prune_attempts() {
     [[ -e "$f" ]] || continue
     ts="${f##*/}"; ts="${ts#attempt.}"; ts="${ts%%.*}"
     # Unparseable marker name → remove it (it can only mis-count).
-    [[ "$ts" =~ ^[0-9]+$ ]] || { rm -f "$f"; continue; }
-    [[ $(( now - ts )) -gt "$RESPONDER_ATTEMPT_WINDOW_SECS" ]] && rm -f "$f"
+    if [[ ! "$ts" =~ ^[0-9]+$ ]]; then
+      rm -f "$f" 2>/dev/null
+      [[ -e "$f" ]] && PRUNE_DEGRADED=1
+      continue
+    fi
+    if [[ $(( now - ts )) -gt "$RESPONDER_ATTEMPT_WINDOW_SECS" ]]; then
+      rm -f "$f" 2>/dev/null
+      [[ -e "$f" ]] && PRUNE_DEGRADED=1
+    fi
   done
   return 0
 }
@@ -390,6 +541,139 @@ fi
 # creation, no marker mutation anywhere — the only dry-run output is log lines.
 is_dry || mkdir -p "$RESPONDER_STATE_DIR" 2>/dev/null || true
 
+# ─── whole-sweep reservation (CTL-1510 item 5) ──────────────────────────────
+#
+# Two overlapping sweeps (manual + scheduled, or launchd + the cron backstop)
+# could both read attempts=N-1 and both kickstart (cap+1). One atomic mkdir
+# closes the window: the sweep that gets the lock dir runs; a contender
+# heartbeats "skipped" and exits (the heartbeat-always contract holds — a
+# skipped sweep is visible, not silent). A lock older than
+# RESPONDER_SWEEP_LOCK_STALE_SECS belongs to a crashed sweep and is broken.
+# Degrades gracefully (adversarial caveat): a read-only state dir means mkdir
+# fails with NO dir present — proceed UNLOCKED (the TOCTOU window returns, but
+# a responder that cannot write state refuses to act anyway via
+# _record_attempt, so the regression is bounded to dry-run-like probing).
+SWEEP_LOCK_DIR="${RESPONDER_STATE_DIR}/sweep.lock"
+SWEEP_LOCK_HELD=0
+# Ownership token (Codex P2): the EXIT trap must only release a lock THIS
+# process acquired — after a stale-break + re-acquire by a newer sweep, the
+# old process's trap would otherwise rmdir the REPLACEMENT's live lock.
+SWEEP_LOCK_TOKEN="${RESPONDER_RUN_ID}.$$"
+_acquire_sweep_lock() {
+  mkdir "$SWEEP_LOCK_DIR" 2>/dev/null || return 1
+  # Owner file write can fail on a weird dir — the lock still holds; the trap
+  # then just leaves it for the stale-breaker (bounded, never wrong-owner rm).
+  printf '%s' "$SWEEP_LOCK_TOKEN" > "${SWEEP_LOCK_DIR}/owner" 2>/dev/null || true
+  SWEEP_LOCK_HELD=1
+  return 0
+}
+# _claim_stale_lock: atomically take EXCLUSIVE ownership of whatever is
+# CURRENTLY at SWEEP_LOCK_DIR and verify — on the claimed, uniquely-owned
+# copy — that it was actually stale, rather than checking staleness on the
+# live path and acting on it afterward (Codex P2 round 3: a check-then-act
+# split has a window between the two steps in which a DIFFERENT contender can
+# already have broken and recreated a fresh lock at the same path; the first
+# contender's stale-age check, performed before that happened, would then
+# still pass, and its `mv` of the NOW-fresh directory would succeed — same
+# path, different underlying instance — destroying the second contender's
+# live lock). Claim-then-verify closes this: `mv` is atomic (only one
+# concurrent claim of a given directory INSTANCE can succeed; every other
+# claim of that same instance fails with ENOENT), and `mv` preserves mtime
+# exactly, so the claimed copy's age is the SAME instance's age — never a
+# newer one swapped in mid-check. A claim that turns out NOT to be stale
+# (mtime says it's live) is put back for its rightful owner; if the put-back
+# itself loses a race (someone else already grabbed the now-empty path), the
+# claimed copy is simply discarded — either way this process falls through to
+# ordinary contention, never leaves TWO directories on disk.
+# _age_secs_or_stale MTIME: age in seconds since MTIME, but a NEGATIVE age
+# (future timestamp — clock stepped backward, or the state dir restored from
+# a newer snapshot, Codex P2 round 5) is clamped to just above the stale
+# threshold instead of blocking forever. Without this, a signed age check
+# NEVER exceeds any positive threshold once pre_m is in the future, so every
+# launchd/cron invocation exits status=skipped until wall time catches up —
+# potentially disabling writer recovery for hours or days. Mirrors the
+# breadcrumb's own future-timestamp handling (T48): favor recovery over
+# indefinitely trusting an untrustworthy clock read.
+_age_secs_or_stale() {
+  local mtime="$1" age
+  age=$(( $(date +%s) - mtime ))
+  if (( age < 0 )); then
+    echo $(( RESPONDER_SWEEP_LOCK_STALE_SECS + 1 ))
+  else
+    echo "$age"
+  fi
+}
+
+_claim_stale_lock() {
+  # Read-only pre-check FIRST (Codex P2 round 4 — a regression in THIS round's
+  # earlier shape): unconditionally attempting the claim on ANY existing lock
+  # (stale or not) creates a vacancy window on EVERY contention, not just
+  # genuinely stale ones — a second contender could rename a THIRD's
+  # brand-new fresh lock away just to inspect it, and while restoring it, a
+  # fourth contender's ordinary mkdir grabs the momentarily-vacant canonical
+  # path. Gating on a cheap, non-destructive mtime read first means this
+  # process only ever ATTEMPTS to touch the lock when it already has reason
+  # to believe it's abandoned — a fresh lock is never touched at all.
+  local pre_m
+  pre_m="$(_mtime "$SWEEP_LOCK_DIR")"
+  [[ "$pre_m" =~ ^[0-9]+$ ]] || return 1
+  (( $(_age_secs_or_stale "$pre_m") > RESPONDER_SWEEP_LOCK_STALE_SECS )) || return 1
+  # Claim-then-reverify (Codex P2 round 3): `mv` is atomic, so of any number
+  # of contenders whose pre-check above passed on the SAME instance, only one
+  # can rename it away; every other's `mv` fails outright (ENOENT). The
+  # reverify closes the residual window between this process's pre-check and
+  # its mv, in which a DIFFERENT contender's own break-and-recreate cycle
+  # could have already replaced the path with a fresh instance (`mv`
+  # preserves mtime exactly, so a mismatch here can only mean a swap
+  # happened) — that fresh copy is put back for its rightful owner rather
+  # than destroyed; the residual window this doesn't close (some FOURTH
+  # party grabbing the canonical path during THIS specific put-back) is the
+  # same bounded, documented risk the sweep lock already accepts (item 5:
+  # "worst case one extra bounded kickstart").
+  local claim="${SWEEP_LOCK_DIR}.stale.$$" m
+  mv "$SWEEP_LOCK_DIR" "$claim" 2>/dev/null || return 1
+  m="$(_mtime "$claim")"
+  if [[ ! "$m" =~ ^[0-9]+$ ]] || (( $(_age_secs_or_stale "$m") <= RESPONDER_SWEEP_LOCK_STALE_SECS )); then
+    mv "$claim" "$SWEEP_LOCK_DIR" 2>/dev/null || rm -rf "$claim" 2>/dev/null
+    return 1
+  fi
+  rm -rf "$claim" 2>/dev/null || true
+  return 0
+}
+if ! is_dry; then
+  if ! _acquire_sweep_lock; then
+    if [[ -d "$SWEEP_LOCK_DIR" ]]; then
+      if _claim_stale_lock; then
+        log "broke stale sweep lock (> ${RESPONDER_SWEEP_LOCK_STALE_SECS}s old) — prior sweep crashed"
+        _acquire_sweep_lock || true
+      fi
+      # A failed claim means the lock is live (either genuinely fresh, or an
+      # instance swap was detected and put back) — fall through to the
+      # SWEEP_LOCK_HELD check below like any contention.
+      if [[ "$SWEEP_LOCK_HELD" -eq 0 ]]; then
+        INSTALLED=0 ALIVE=0 C_DEAD=0 C_STALE=0 C_NORESPAWN=0 ATTEMPTS=0 ESCALATED=0
+        log "another sweep holds ${SWEEP_LOCK_DIR} — skipping this run"
+        heartbeat "skipped"
+        exit 0
+      fi
+    else
+      log "WARN: cannot create sweep lock under ${RESPONDER_STATE_DIR} (read-only?) — proceeding unlocked"
+    fi
+  fi
+fi
+# Release on ANY exit path — only when held AND still ours (see ownership note).
+_release_sweep_lock() {
+  [[ "${SWEEP_LOCK_HELD:-0}" -eq 1 ]] || return 0
+  local owner=""
+  owner="$(cat "${SWEEP_LOCK_DIR}/owner" 2>/dev/null || true)"
+  # Missing owner file (write failed at acquire) or matching token → ours.
+  if [[ -z "$owner" || "$owner" == "$SWEEP_LOCK_TOKEN" ]]; then
+    rm -rf "$SWEEP_LOCK_DIR" 2>/dev/null || true
+  fi
+  return 0
+}
+trap _release_sweep_lock EXIT
+
 # ─── detect ─────────────────────────────────────────────────────────────────
 
 INSTALLED=0
@@ -415,7 +699,21 @@ SETTLING=0
 _LE=""
 if [[ "$INSTALLED" -eq 1 && "$ALIVE" -eq 0 ]]; then
   _LE="$(_last_exit_status)"
-  [[ "$_LE" == "0" ]] && log "writer idle by design (last exit 0 — tokenless no-op or manual stop); not a fault"
+  if [[ "$_LE" == "0" ]]; then
+    # Token-file discrimination (CTL-1510 item 0): exit 0 is only "idle by
+    # design" on a TOKENLESS node. With a token provisioned (either launcher-
+    # sourced file), a down writer with a clean exit is the failed-bounce
+    # signature (bootout's SIGTERM → exit 0 → bootstrap never stuck) — both
+    # KeepAlive={SuccessfulExit:false} and a naive exit-0 gate would suppress
+    # recovery forever. Neutralize the gate so dead-writer/no-respawn
+    # detection applies.
+    if _token_provisioned; then
+      log "writer down with last exit 0 but a token file is provisioned (${RESPONDER_TOKEN_FILE} or ${RESPONDER_CLUSTER_ENV_FILE}) — failed-bounce signature, treating as dead (CTL-1510 item 0)"
+      _LE=""
+    else
+      log "writer idle by design (last exit 0, no token file); not a fault"
+    fi
+  fi
 fi
 
 # Condition 1: dead-writer. Installed-gated: a node without the cloud-sync
@@ -463,8 +761,10 @@ CONDITIONS_CSV="${CONDITIONS_CSV%,}"
 ESCALATED=0
 [[ -f "$ESCALATED_MARKER" ]] && ESCALATED=1
 
+PRUNE_DEGRADED=0
 _prune_attempts
 ATTEMPTS="$(_attempt_count)"
+[[ "$PRUNE_DEGRADED" -eq 1 ]] && log "ERROR: expired attempt markers could not be pruned from ${RESPONDER_STATE_DIR} (read-only?) — attempt count over-counts; fix permissions"
 
 # ─── act ────────────────────────────────────────────────────────────────────
 
@@ -513,6 +813,15 @@ if [[ "$ESCALATED" -eq 1 ]]; then
 fi
 
 if [[ "$ATTEMPTS" -ge "$RESPONDER_MAX_ATTEMPTS" ]]; then
+  # Cap reached on an UNRELIABLE count (unprunable expired markers, CTL-1510
+  # item 4): the "cap" may be phantom attempts from a past incident — a false
+  # escalation outside the window. Degrade explicitly instead of escalating on
+  # state we know is broken; the ERROR above ships to Loki on every sweep.
+  if [[ "$PRUNE_DEGRADED" -eq 1 ]]; then
+    log "ERROR: attempt cap reached but the count includes unprunable expired markers — refusing to escalate on unreliable state; fix ${RESPONDER_STATE_DIR} permissions"
+    heartbeat "degraded"
+    exit 0
+  fi
   # Cap exhausted and the writer is STILL down — bounded response is over.
   # ERROR-severity line (Alloy ships this log to Loki) + fail-open OTel event,
   # then the one-shot marker so we never re-emit or keep kickstarting.

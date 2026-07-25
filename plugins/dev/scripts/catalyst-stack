@@ -1138,6 +1138,10 @@ PLIST
 # churn-restart, while a crash (exit≠0) IS restarted. The token is NEVER placed in
 # EnvironmentVariables (the plist is world-readable); the launcher sources it from a
 # 0600 file at run time. host_name pins CATALYST_HOST_NAME for node→token resolution.
+# CATALYST_DIR is persisted like the responder's plist does (CTL-1510 item 1): on a
+# nondefault-CATALYST_DIR node an unpersisted writer would fall back to $HOME/catalyst
+# while the responder watches the override dir — stale-writer/settling/no-respawn
+# detection go blind and leftover default-dir files can trigger false actions.
 render_cloud_sync_plist() {
   local launcher="$1" host_name="${2:-}"
   local host_env=""
@@ -1183,7 +1187,9 @@ render_cloud_sync_plist() {
     <key>PATH</key>
     <string>$(_stack_agent_path)</string>
     <key>HOME</key>
-    <string>${HOME}</string>${host_env}
+    <string>${HOME}</string>
+    <key>CATALYST_DIR</key>
+    <string>${CATALYST_DIR:-${HOME}/catalyst}</string>${host_env}
   </dict>
 
   <key>StandardOutPath</key>
