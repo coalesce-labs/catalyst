@@ -389,6 +389,31 @@ describe("startFleetHealthProbe tick", () => {
     expect(h2.selfHeals.length).toBe(0); // fired was persisted → no re-reap for the same episode
   });
 
+  test("self-heal does NOT fire while the degraded edge keeps failing to append (Codex P2)", async () => {
+    const selfHeals = [];
+    const clock = recordingClock();
+    const p = startFleetHealthProbe({
+      clock,
+      config: baseConfig({ selfHealEnabled: true, sustainedTicks: 2, swapUsedMbThreshold: 4096, swapUsedMbClearThreshold: 3000 }),
+      readJobsCount: () => 0,
+      listAgents: () => [],
+      psLines: () => [],
+      readSwapUsedMb: () => 5000, // degraded
+      emit: () => false, // every degraded-edge append fails → latch never advances
+      triggerSelfHeal: () => selfHeals.push(1),
+    });
+    await p.tick(); // sustained=1; emit fails, latch stays false
+    await p.tick(); // sustained=2, but _degradedLatched=false → self-heal gated
+    await p.tick();
+    expect(selfHeals.length).toBe(0); // never fired while unlatched
+    // and no inconsistent {latched:false, fired:true} was ever persisted
+    const mpath = join(getFleetHealthDir(), "fleet-health-latch.json");
+    if (existsSync(mpath)) {
+      const m = JSON.parse(readFileSync(mpath, "utf8"));
+      expect(m.latched === false && m.fired === true).toBe(false);
+    }
+  });
+
   test("readFleetHealthConfig clamps swapUsedMbClearThreshold below the trip threshold (Codex P2)", () => {
     process.env.EXECUTION_CORE_FLEET_SWAP_MB_THRESHOLD = "4096";
     process.env.EXECUTION_CORE_FLEET_SWAP_MB_CLEAR_THRESHOLD = "5000"; // >= trip → invalid
@@ -560,7 +585,7 @@ describe("defaultReadSwapUsedMb", () => {
     expect(await defaultReadSwapUsedMb({ platform: "linux" })).toBe(0);
   });
 
-  test("throwing sysctl → 0 safe sentinel", async () => {
+  test("throwing sysctl → null (UNKNOWN, not a healthy 0 — Codex P1)", async () => {
     expect(
       await defaultReadSwapUsedMb({
         platform: "darwin",
@@ -568,13 +593,13 @@ describe("defaultReadSwapUsedMb", () => {
           throw new Error("sysctl missing");
         },
       }),
-    ).toBe(0);
+    ).toBeNull();
   });
 
-  test("no-match output → 0 safe sentinel", async () => {
+  test("no-match / unparseable output → null (UNKNOWN, not a healthy 0 — Codex P1)", async () => {
     expect(
       await defaultReadSwapUsedMb({ platform: "darwin", run: () => "garbage no used field" }),
-    ).toBe(0);
+    ).toBeNull();
   });
 });
 

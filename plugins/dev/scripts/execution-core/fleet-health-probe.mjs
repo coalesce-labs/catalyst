@@ -121,8 +121,10 @@ export async function defaultReadProcsCount(psLines = defaultPsLines) {
 }
 
 // defaultReadSwapUsedMb — parse macOS `sysctl -n vm.swapusage`'s `used = N.NNM`
-// field → integer MB. Non-darwin / parse-error / throw → 0 (safe sentinel,
-// non-crossing). run/platform are injectable for tests.
+// field → integer MB. Non-darwin → 0 (this platform has no swap concept to cross).
+// A READ FAILURE (sysctl throws / unparseable output) → null = UNKNOWN, NOT 0 —
+// a 0 would look healthy and could falsely clear a latched degradation (Codex P1
+// on #2704). run/platform are injectable for tests.
 export async function defaultReadSwapUsedMb({
   platform = process.platform,
   run = () => execFileAsync("sysctl", ["-n", "vm.swapusage"]),
@@ -132,12 +134,12 @@ export async function defaultReadSwapUsedMb({
   try {
     out = await run();
   } catch {
-    return 0;
+    return null; // read failure → unknown (non-crossing for trip AND clear)
   }
   const m = /used\s*=\s*([\d.]+)M/.exec(out ?? "");
-  if (!m) return 0;
+  if (!m) return null; // unparseable → unknown
   const mb = Number(m[1]);
-  return Number.isFinite(mb) ? Math.round(mb) : 0;
+  return Number.isFinite(mb) ? Math.round(mb) : null;
 }
 
 // defaultTriggerSelfHeal — fire the SAME reap intents the 600s orphan-reaper
@@ -408,7 +410,14 @@ export function startFleetHealthProbe({
     // Self-heal fires ONCE per sustained breach episode, boundary-exact at
     // sustained === sustainedTicks, and only when explicitly enabled — only on a
     // trip tick (never in-band, never on a clear tick).
-    if (trip && selfHealEnabled && !_fired && sustained >= sustainedTicks) {
+    if (trip && selfHealEnabled && _degradedLatched && !_fired && sustained >= sustainedTicks) {
+      // Gate on _degradedLatched so `fired` is only ever set within a LATCHED
+      // episode. Without this, a run of failed degraded-edge appends (latch stays
+      // false) could still fire self-heal and persist {latched:false, fired:true} —
+      // an inconsistent state that, after a restart, would suppress self-heal for
+      // the NEXT genuine episode (Codex P2 on #2704). Since the latch only advances
+      // on a successful append, self-heal now waits until the degraded edge is
+      // durably recorded, keeping fired tied to a persisted latched episode.
       _fired = true;
       // Persist the fired flag immediately so a daemon restart while the host is
       // still degraded does not re-invoke self-heal for the same episode (Codex P2).
