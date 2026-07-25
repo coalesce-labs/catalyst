@@ -195,6 +195,10 @@ export function createFilterStream(predicate: string): FilterStream {
       // fixed 50ms flush happened to capture on a large log (CTL-1515). The stdout
       // 'data' handler above drains all output before 'close' fires.
       if (closed) return Promise.resolve();
+      // If jq already exited (e.g. a `halt`-style predicate terminated it before
+      // end() was called), its 'close' has already fired and won't fire again —
+      // resolve immediately instead of waiting forever (Codex P2 on #2730).
+      if (proc.exitCode !== null || proc.signalCode !== null) return Promise.resolve();
       return new Promise<void>((resolve) => {
         let done = false;
         const finish = () => {
