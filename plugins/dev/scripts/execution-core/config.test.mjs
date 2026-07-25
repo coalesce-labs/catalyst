@@ -53,6 +53,8 @@ import {
   readExecutorByPhaseLayer1,
   hasInProcessExecutorRoute,
   codexConfig,
+  readFleetHealthConfig,
+  getFleetHealthDir,
 } from "./config.mjs";
 
 const PREV = process.env.CATALYST_WAIT_WATCHER;
@@ -1537,5 +1539,101 @@ describe("resolveRestoreHoldMs — restore-hold override validation (CTL-1091 P2
   test("non-string (defensive) → default", () => {
     expect(resolveRestoreHoldMs(null, DEF)).toBe(DEF);
     expect(resolveRestoreHoldMs(5000, DEF)).toBe(DEF);
+  });
+});
+
+// ─── readFleetHealthConfig — hysteresis band + machine-appropriate swap (CTL-1503) ───
+// Net-new coverage: config.test.mjs previously had ZERO fleet-health tests. The
+// swap trip default is raised above the normal-swap ceiling and a paired lower
+// `swapUsedMbClearThreshold` is added for the hysteresis band. Both are wired
+// through the same env > Layer-1 > default precedence chain (fleetHealthNumber).
+describe("readFleetHealthConfig (CTL-1503)", () => {
+  const FH_ENVS = [
+    "CATALYST_FLEET_HEALTH",
+    "EXECUTION_CORE_FLEET_HEALTH_INTERVAL_MS",
+    "EXECUTION_CORE_FLEET_JOBS_THRESHOLD",
+    "EXECUTION_CORE_FLEET_SWAP_MB_THRESHOLD",
+    "EXECUTION_CORE_FLEET_SWAP_MB_CLEAR_THRESHOLD",
+    "EXECUTION_CORE_FLEET_AGENTS_THRESHOLD",
+    "EXECUTION_CORE_FLEET_PROCS_THRESHOLD",
+    "EXECUTION_CORE_FLEET_SELF_HEAL",
+    "EXECUTION_CORE_FLEET_SUSTAINED_TICKS",
+  ];
+  let saved;
+  let tmp;
+  beforeEach(() => {
+    saved = {};
+    for (const k of FH_ENVS) {
+      saved[k] = process.env[k];
+      delete process.env[k];
+    }
+    tmp = mkdtempSync(join(tmpdir(), "ctl1503-fh-"));
+  });
+  afterEach(() => {
+    for (const k of FH_ENVS) {
+      if (saved[k] === undefined) delete process.env[k];
+      else process.env[k] = saved[k];
+    }
+    rmSync(tmp, { recursive: true, force: true });
+  });
+
+  const writeL1 = (fleetHealth) => {
+    const cfg = join(tmp, "config.json");
+    writeFileSync(cfg, JSON.stringify({ catalyst: { orchestration: { fleetHealth } } }));
+    return cfg;
+  };
+
+  test("defaults: raised swap trip (24576) + lower clear (16384), rest unchanged", () => {
+    const cfg = readFleetHealthConfig();
+    expect(cfg.swapUsedMbThreshold).toBe(24576);
+    expect(cfg.swapUsedMbClearThreshold).toBe(16384);
+    expect(cfg.jobsThreshold).toBe(500);
+    expect(cfg.agentsThreshold).toBe(12);
+    expect(cfg.procsThreshold).toBe(40);
+    expect(cfg.intervalMs).toBe(120000);
+    expect(cfg.selfHealEnabled).toBe(false);
+    expect(cfg.sustainedTicks).toBe(2);
+  });
+
+  test("env precedence: swap trip + clear thresholds honored from env", () => {
+    process.env.EXECUTION_CORE_FLEET_SWAP_MB_THRESHOLD = "9000";
+    process.env.EXECUTION_CORE_FLEET_SWAP_MB_CLEAR_THRESHOLD = "7000";
+    const cfg = readFleetHealthConfig();
+    expect(cfg.swapUsedMbThreshold).toBe(9000);
+    expect(cfg.swapUsedMbClearThreshold).toBe(7000);
+  });
+
+  test("Layer-1 precedence: swap trip + clear read from .catalyst/config.json", () => {
+    const cfg = readFleetHealthConfig(
+      writeL1({ swapUsedMbThreshold: 5000, swapUsedMbClearThreshold: 4000 }),
+    );
+    expect(cfg.swapUsedMbThreshold).toBe(5000);
+    expect(cfg.swapUsedMbClearThreshold).toBe(4000);
+  });
+
+  test("env beats Layer-1 when both set (clear threshold)", () => {
+    process.env.EXECUTION_CORE_FLEET_SWAP_MB_CLEAR_THRESHOLD = "7000";
+    const cfg = readFleetHealthConfig(writeL1({ swapUsedMbClearThreshold: 4000 }));
+    expect(cfg.swapUsedMbClearThreshold).toBe(7000);
+  });
+
+  test("invalid clear value (negative) falls through to the default", () => {
+    process.env.EXECUTION_CORE_FLEET_SWAP_MB_CLEAR_THRESHOLD = "-5";
+    expect(readFleetHealthConfig().swapUsedMbClearThreshold).toBe(16384);
+  });
+
+  test("invalid clear value (NaN / empty) falls through to the default", () => {
+    process.env.EXECUTION_CORE_FLEET_SWAP_MB_CLEAR_THRESHOLD = "abc";
+    expect(readFleetHealthConfig().swapUsedMbClearThreshold).toBe(16384);
+    process.env.EXECUTION_CORE_FLEET_SWAP_MB_CLEAR_THRESHOLD = "";
+    expect(readFleetHealthConfig().swapUsedMbClearThreshold).toBe(16384);
+  });
+});
+
+describe("getFleetHealthDir (CTL-1503)", () => {
+  test("resolves the fleet-health marker dir under the execution-core dir", () => {
+    const dir = getFleetHealthDir();
+    expect(dir).toContain("execution-core");
+    expect(dir.endsWith("fleet-health")).toBe(true);
   });
 });
