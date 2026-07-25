@@ -2296,10 +2296,15 @@ export function runWatchdogTick({ liveness = sessionLiveness } = {}) {
       }
     }
     // CTL-1516: a session is evictable once it is unambiguously done — reported
-    // `dead` by `claude agents`, or (when liveness is unknown) aged past the
-    // eviction horizon. Collected AFTER the CTL-403 waiting guard so a
-    // legitimately-waiting session is never evicted.
-    if (liv === "dead" || (liv !== "alive" && now - state.ts > HEARTBEAT_EVICT_MS)) {
+    // `dead` by `claude agents`, or (when liveness is unknown) already `stale`
+    // AND aged past the eviction horizon. Requiring `stale` here guarantees
+    // eviction can never precede the configured stale threshold even if an
+    // operator raises FILTER_HEARTBEAT_STALE_MS above HEARTBEAT_EVICT_MS —
+    // otherwise an unmatched session's only heartbeat row could be dropped before
+    // the watchdog would have added it to staleNow and woken its interest (Codex
+    // P2 on #2728). Collected AFTER the CTL-403 waiting guard so a legitimately-
+    // waiting session is never evicted.
+    if (liv === "dead" || (stale && liv !== "alive" && now - state.ts > HEARTBEAT_EVICT_MS)) {
       toEvict.add(sourceId);
     }
     if (stale && !state.notified) {

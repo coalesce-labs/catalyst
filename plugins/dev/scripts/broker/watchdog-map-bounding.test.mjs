@@ -112,6 +112,21 @@ describe("CTL-1516 — runWatchdogTick evicts finished-session map rows", () => 
     expect(w2o.has("sess-alive")).toBe(true);
   });
 
+  test("an unknown-liveness session that is not yet stale is NOT evicted (eviction requires staleness)", () => {
+    const hb = getLastHeartbeat();
+    const w2o = getWorkerToOrchestrator();
+    // Fresh heartbeat + liveness "unknown" → not stale → the age-based backstop
+    // must not drop its heartbeat row before it becomes stale (Codex P2 on #2728:
+    // guards against evicting before the configured stale threshold is reached).
+    hb.set("sess-unknown-fresh", { ts: Date.now(), notified: false });
+    w2o.set("sess-unknown-fresh", "orch-z");
+
+    runWatchdogTick({ liveness: () => "unknown" });
+
+    expect(hb.has("sess-unknown-fresh")).toBe(true);
+    expect(w2o.has("sess-unknown-fresh")).toBe(true);
+  });
+
   test("maps stay bounded across many per-tick-unique dead sessions", () => {
     const hb = getLastHeartbeat();
     const w2o = getWorkerToOrchestrator();
