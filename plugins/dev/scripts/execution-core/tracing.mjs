@@ -26,7 +26,7 @@ import { nodeClass } from "./lib/node-class.mjs";
 // CTL-1517: the OTLP collector base resolver is now shared (the hardcoded default lives in
 // ONE place). This is a zero-dep leaf (no @opentelemetry), so importing it keeps the
 // "missing SDK → no spans, never crash" invariant intact.
-import { resolveCollectorBase } from "../lib/process-memory-metric.mjs";
+import { resolveCollectorBase, DEFAULT_COLLECTOR_BASE } from "../lib/process-memory-metric.mjs";
 
 // CTL-1338: load @opentelemetry/api via createRequire (synchronous — the emit helpers
 // below use trace/context/SpanKind/SpanStatusCode on the sync tick path) wrapped in
@@ -116,9 +116,11 @@ export async function initTracing({ serviceName, dispatchMode = "phase-agents", 
 
     // Same collector otel-forward uses. OTEL_EXPORTER_OTLP_ENDPOINT is the base (otel-forward
     // maps :4317->:4318 for HTTP); we append /v1/traces. Traces to this endpoint route to
-    // Tempo-only (OTL-25). Default to the shared Tailscale collector. CTL-1517: the base
-    // resolution + default is now the shared resolveCollectorBase (one home for the default).
-    const base = resolveCollectorBase(env);
+    // Tempo-only (OTL-25). Default to the shared Tailscale collector. CTL-1517: env
+    // resolution is the shared resolveCollectorBase (which returns null when unconfigured);
+    // tracing keeps the collector default via ?? DEFAULT_COLLECTOR_BASE (the per-process
+    // gauge deliberately does not, to avoid emitting from unconfigured test processes).
+    const base = resolveCollectorBase(env) ?? DEFAULT_COLLECTOR_BASE;
     const exporter = new OTLPTraceExporter({ url: `${base}/v1/traces` });
 
     _provider = new BasicTracerProvider({

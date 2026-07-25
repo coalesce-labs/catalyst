@@ -22,12 +22,18 @@ const FIXED_MEM = { rss: 111_000_000, heapTotal: 90_000_000, heapUsed: 55_000_00
 beforeEach(() => __resetProcessMemoryMetricState());
 
 describe("resolveCollectorBase (CTL-1517 — the critical endpoint correction)", () => {
-  test("falls back to the shared collector default when OTEL_EXPORTER_OTLP_ENDPOINT is unset", () => {
-    expect(resolveCollectorBase({})).toBe("http://100.65.193.30:4318");
+  test("returns null when neither OTEL_EXPORTER_OTLP_ENDPOINT nor CATALYST_OTLP_ENDPOINT is set (no live default)", () => {
+    expect(resolveCollectorBase({})).toBeNull();
   });
 
   test("honors OTEL_EXPORTER_OTLP_ENDPOINT when present", () => {
     expect(resolveCollectorBase({ OTEL_EXPORTER_OTLP_ENDPOINT: "http://collector.internal:4318" })).toBe(
+      "http://collector.internal:4318",
+    );
+  });
+
+  test("honors CATALYST_OTLP_ENDPOINT when OTEL_EXPORTER_OTLP_ENDPOINT is absent", () => {
+    expect(resolveCollectorBase({ CATALYST_OTLP_ENDPOINT: "http://collector.internal:4318" })).toBe(
       "http://collector.internal:4318",
     );
   });
@@ -42,7 +48,6 @@ describe("buildProcessMemoryMetricsPayload — OTLP JSON shape", () => {
     buildProcessMemoryMetricsPayload({
       serviceName: "catalyst.broker",
       memoryUsage: FIXED_MEM,
-      pid: 4242,
       timeUnixNano: "1700000000000000000",
     });
 
@@ -76,36 +81,59 @@ describe("buildProcessMemoryMetricsPayload — OTLP JSON shape", () => {
     expect(byName["process.memory.external"].asDouble).toBe(FIXED_MEM.external);
   });
 
-  test("pid rides ONLY on the data point, encoded as a stringValue (not intValue)", () => {
+  test("the data points carry NO pid label (a restart's dead-pid series can't double-count)", () => {
     const metrics = payload().resourceMetrics[0].scopeMetrics[0].metrics;
     for (const m of metrics) {
       const dp = m.gauge.dataPoints[0];
-      const dpAttrs = attrMap(dp.attributes);
-      expect(dpAttrs.pid).toEqual({ stringValue: "4242" });
-      expect(dpAttrs.pid).not.toHaveProperty("intValue");
+      // The series is keyed only by the resource (service.name + host); the running
+      // process overwrites it on restart, so `sum by (service_name)` never adds a
+      // terminated pid's stale value (Codex P2 on #2732).
+      const dpAttrs = attrMap(dp.attributes ?? []);
+      expect("pid" in dpAttrs).toBe(false);
+      expect("service.name" in dpAttrs).toBe(false); // not duplicated onto the data point
     }
-    // service.name is NOT duplicated onto the data point.
-    const dpAttrs = attrMap(metrics[0].gauge.dataPoints[0].attributes);
-    expect("service.name" in dpAttrs).toBe(false);
   });
 });
 
 describe("emitProcessMemoryMetric — transport contract", () => {
-  test("POSTs to <collector-default>/v1/metrics and resolves true on a 2xx", async () => {
+  test("POSTs to <configured-collector>/v1/metrics and resolves true on a 2xx", async () => {
     let captured = null;
     const fetchImpl = async (url, opts) => {
       captured = { url, opts };
       return { status: 200 };
     };
-    const ok = await emitProcessMemoryMetric({ serviceName: "catalyst.execution-core", env: {}, fetchImpl });
+    const ok = await emitProcessMemoryMetric({
+      serviceName: "catalyst.execution-core",
+      env: { OTEL_EXPORTER_OTLP_ENDPOINT: "http://collector.internal:4318" },
+      fetchImpl,
+    });
     expect(ok).toBe(true);
-    expect(captured.url).toBe("http://100.65.193.30:4318/v1/metrics");
+    expect(captured.url).toBe("http://collector.internal:4318/v1/metrics");
     expect(captured.opts.method).toBe("POST");
     const body = JSON.parse(captured.opts.body);
     const names = body.resourceMetrics[0].scopeMetrics[0].metrics.map((m) => m.name);
     expect(names).toEqual(["process.memory.usage", "process.memory.heap.used", "process.memory.external"]);
     const res = attrMap(body.resourceMetrics[0].resource.attributes);
     expect(res["service.name"]).toEqual({ stringValue: "catalyst.execution-core" });
+  });
+
+  test("no-ops (returns false, never fetches) when no endpoint is configured — no test-process pollution (Codex P1)", async () => {
+    __resetProcessMemoryMetricState();
+    let fetched = false;
+    const fetchImpl = async () => {
+      fetched = true;
+      return { status: 200 };
+    };
+    const warnCalls = [];
+    const ok = await emitProcessMemoryMetric({
+      serviceName: "catalyst.broker",
+      env: {}, // no OTEL_EXPORTER_OTLP_ENDPOINT / CATALYST_OTLP_ENDPOINT
+      fetchImpl,
+      log: { warn: (_obj, msg) => warnCalls.push(msg) },
+    });
+    expect(ok).toBe(false);
+    expect(fetched).toBe(false); // never posts to a live default → no production pollution
+    expect(warnCalls).toHaveLength(1); // but loud once, so a misconfigured daemon is visible
   });
 
   test("is a silent no-op when the POST fetch throws — returns false, never throws, does not warn on a single failure", async () => {
@@ -117,7 +145,7 @@ describe("emitProcessMemoryMetric — transport contract", () => {
     let result;
     await expect(
       (async () => {
-        result = await emitProcessMemoryMetric({ serviceName: "catalyst.svc-throw", env: {}, fetchImpl, log });
+        result = await emitProcessMemoryMetric({ serviceName: "catalyst.svc-throw", env: { OTEL_EXPORTER_OTLP_ENDPOINT: "http://collector.internal:4318" }, fetchImpl, log });
       })(),
     ).resolves.toBeUndefined();
     expect(result).toBe(false);
@@ -132,7 +160,7 @@ describe("emitProcessMemoryMetric — transport contract", () => {
     };
     for (let i = 0; i < 5; i++) {
       // eslint-disable-next-line no-await-in-loop
-      await emitProcessMemoryMetric({ serviceName: "catalyst.svc-repeat", env: {}, fetchImpl, log });
+      await emitProcessMemoryMetric({ serviceName: "catalyst.svc-repeat", env: { OTEL_EXPORTER_OTLP_ENDPOINT: "http://collector.internal:4318" }, fetchImpl, log });
     }
     expect(warnCalls).toHaveLength(1); // exactly one warn despite five failures
     expect(warnCalls[0].msg).toContain("per-process memory gauge is dark");

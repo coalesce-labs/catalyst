@@ -33,7 +33,11 @@ import { buildCatalystResource } from "../execution-core/lib/catalyst-resource.m
 
 // The shared OTel collector's OTLP/HTTP ingest. Same default tracing.mjs uses (which now
 // imports resolveCollectorBase from here so the hardcoded fallback lives in ONE place).
-const DEFAULT_COLLECTOR_BASE = "http://100.65.193.30:4318";
+// The shared-collector default, exported so tracing.mjs (which is off-by-default and
+// wants to fall back to it) applies it AFTER resolveCollectorBase — while the per-process
+// gauge does NOT, so an UNconfigured process (notably a unit test) emits nothing instead
+// of posting test-process samples to the production collector (Codex P1 on #2732).
+export const DEFAULT_COLLECTOR_BASE = "http://100.65.193.30:4318";
 
 // Warn-once only after this many CONSECUTIVE failed POSTs, so a single transient blip is
 // silent (and a genuinely-dark pipe is still loud). A success resets the counter.
@@ -44,18 +48,21 @@ const WARN_AFTER_CONSECUTIVE_FAILURES = 3;
 const DEFAULT_POST_TIMEOUT_MS = 5_000;
 
 /**
- * resolveCollectorBase — resolve the OTLP collector base URL EXACTLY like tracing.mjs:
- * OTEL_EXPORTER_OTLP_ENDPOINT, else the shared-collector default; map the gRPC :4317 to
- * the HTTP :4318; strip trailing slashes. This is the CRITICAL correction for CTL-1517 —
- * 4 of the 5 daemons carry NO OTLP endpoint env, so a naive helper would emit nothing
- * from them; falling back to the collector default makes every daemon emit. Never gate on
- * CATALYST_OTLP_ENDPOINT (no daemon reads it). Pure; never throws.
+ * resolveCollectorBase — resolve the CONFIGURED OTLP collector base URL from the daemon
+ * collector-ingest envs `OTEL_EXPORTER_OTLP_ENDPOINT` then `CATALYST_OTLP_ENDPOINT` (both
+ * documented daemon envs per AGENTS.md); map the gRPC :4317 to the HTTP :4318; strip
+ * trailing slashes. Returns null when NEITHER is set — the caller decides whether to fall
+ * back to a default. The per-process gauge does NOT (an unconfigured process, e.g. a unit
+ * test, emits nothing rather than posting test samples to the production collector under a
+ * daemon service name — Codex P1 on #2732); tracing.mjs applies DEFAULT_COLLECTOR_BASE.
+ * Pure; never throws.
  *
  * @param {Record<string, string|undefined>} [env]
- * @returns {string} base URL with no trailing slash (e.g. "http://100.65.193.30:4318")
+ * @returns {string|null} configured base URL with no trailing slash, or null if unset
  */
 export function resolveCollectorBase(env = process.env) {
-  const raw = (env && env.OTEL_EXPORTER_OTLP_ENDPOINT) || DEFAULT_COLLECTOR_BASE;
+  const raw = env && (env.OTEL_EXPORTER_OTLP_ENDPOINT || env.CATALYST_OTLP_ENDPOINT);
+  if (!raw) return null;
   return String(raw)
     .replace(/:4317\b/, ":4318")
     .replace(/\/+$/, "");
@@ -75,24 +82,28 @@ function stringAttrs(obj = {}) {
 
 /**
  * buildProcessMemoryMetricsPayload — PURE builder for the OTLP/HTTP metrics request body.
- * Exposed so the shape (resource carries service.name; each data point carries pid as a
- * stringValue; three gauges with the semconv names + unit "By") is unit-testable without
- * a network call. Mirrors emit.mjs's asDouble single-type choice (a key must not oscillate
- * int/double across ticks). Never throws.
+ * Exposed so the shape (resource carries service.name + host; three gauges with the
+ * semconv names + unit "By") is unit-testable without a network call. Mirrors emit.mjs's
+ * asDouble single-type choice (a key must not oscillate int/double across ticks). Never
+ * throws.
+ *
+ * The data points carry NO pid label: there is exactly one live process per (service_name,
+ * host), so keying the series by pid would mint a NEW series on every daemon restart while
+ * the dead pid's last-RSS series lingers until Prometheus staleness — and `sum by
+ * (service_name)` would then double-count the terminated process during exactly the
+ * restart / leak-attribution window (Codex P2 on #2732). Omitting pid makes the restarted
+ * process reuse the same (service_name, host) series (last-value wins), so the aggregation
+ * always reflects only the running process.
  *
  * @param {object} spec
  * @param {string} spec.serviceName        catalyst.* service name → resource service.name
  * @param {NodeJS.MemoryUsage} spec.memoryUsage  a process.memoryUsage() snapshot
- * @param {number} spec.pid                process.pid → data-point attribute (stringValue)
  * @param {string|number} spec.timeUnixNano  data-point timestamp in ns
  * @param {string} [spec.host]             optional host override forwarded to the resource
  * @returns {object} the { resourceMetrics: [...] } OTLP JSON body
  */
-export function buildProcessMemoryMetricsPayload({ serviceName, memoryUsage, pid, timeUnixNano, host } = {}) {
+export function buildProcessMemoryMetricsPayload({ serviceName, memoryUsage, timeUnixNano, host } = {}) {
   const resource = buildCatalystResource(host !== undefined ? { serviceName, host } : { serviceName });
-  // pid rides ONLY on the data point, as a stringValue (String(pid)) — NOT intValue, which
-  // some collectors coerce/reject; a string is cross-collector safe and low-cardinality.
-  const pidAttr = { key: "pid", value: { stringValue: String(pid) } };
   const t = String(timeUnixNano ?? "");
   const gauge = (name, value) => ({
     name,
@@ -102,7 +113,6 @@ export function buildProcessMemoryMetricsPayload({ serviceName, memoryUsage, pid
         {
           timeUnixNano: t,
           asDouble: typeof value === "number" && Number.isFinite(value) ? value : 0,
-          attributes: [pidAttr],
         },
       ],
     },
@@ -197,11 +207,14 @@ export async function emitProcessMemoryMetric({
     if (!serviceName || typeof fetchImpl !== "function") return false;
     const base = resolveCollectorBase(env);
     if (!base) {
-      // Defensive: the default fallback makes this unreachable, but honor the plan's
-      // "warn-once if the endpoint is unresolvable" literally.
+      // No configured collector endpoint (OTEL_EXPORTER_OTLP_ENDPOINT /
+      // CATALYST_OTLP_ENDPOINT). The gauge deliberately has NO live default, so an
+      // unconfigured process — notably a unit test that transitively fires this — emits
+      // nothing rather than posting test samples to the production collector (Codex P1).
+      // Warn once so a genuinely-misconfigured daemon is loud.
       if (!_unresolvableWarned.has(serviceName)) {
         _unresolvableWarned.add(serviceName);
-        warnOnce(log, "process-memory-metric: no collector endpoint resolvable — per-process memory gauge disabled", {
+        warnOnce(log, "process-memory-metric: no collector endpoint configured (OTEL_EXPORTER_OTLP_ENDPOINT / CATALYST_OTLP_ENDPOINT) — per-process memory gauge disabled", {
           component: serviceName,
         });
       }
@@ -211,7 +224,6 @@ export async function emitProcessMemoryMetric({
     const payload = buildProcessMemoryMetricsPayload({
       serviceName,
       memoryUsage: process.memoryUsage(),
-      pid: process.pid,
       timeUnixNano: now() * 1_000_000,
       host,
     });
