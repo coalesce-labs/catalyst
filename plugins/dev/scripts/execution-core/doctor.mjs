@@ -1704,7 +1704,7 @@ export function checkReaper(deps = {}) {
   }
 
   const m = xml.match(/<string>([^<]*orphan-sweep\.sh)<\/string>/);
-  const baked = m ? m[1] : null;
+  const baked = m ? decodePlistString(m[1]) : null;
   if (!baked) {
     checks.push(mkCheck(
       "reaper-installed", STATUS.WARN,
@@ -1777,6 +1777,19 @@ function defaultResponderLogMtimeMs() {
   }
 }
 
+// decodePlistString — undo the XML entity encoding a plist <string> carries
+// (CTL-1510 item 3 writes `&amp;` for `&` in baked paths; Codex P2: passing
+// the still-encoded string to existsSync makes doctor report a working agent's
+// path as missing forever). &amp; is decoded LAST so `&amp;lt;` round-trips.
+function decodePlistString(s) {
+  return s
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'")
+    .replace(/&amp;/g, "&");
+}
+
 // checkHealthResponder (CTL-1509) — the periodic cloud-sync health responder
 // (health-responder.sh, the bounded-kickstart sweep) must be installed, LOADED
 // by launchd, its baked program path must still exist, and the installed script
@@ -1808,6 +1821,9 @@ export function checkHealthResponder(deps = {}) {
     // healthy or not — appends exactly one line, so a fresh mtime IS proof of
     // dispatch). null = missing/unreadable.
     logMtimeMs = defaultResponderLogMtimeMs,
+    // Install timestamp proxy for the never-ran-at-all case (Codex P2): the
+    // plist's own mtime. null = unreadable (stay quiet).
+    plistMtimeMs = () => { try { return statSync(plistPath).mtimeMs; } catch { return null; } },
     nowMs = () => Date.now(),
   } = deps;
   const checks = [];
@@ -1824,7 +1840,7 @@ export function checkHealthResponder(deps = {}) {
   }
 
   const m = xml.match(/<string>([^<]*health-responder\.sh)<\/string>/);
-  const baked = m ? m[1] : null;
+  const baked = m ? decodePlistString(m[1]) : null;
   if (!baked) {
     checks.push(mkCheck(
       "responder-installed", STATUS.WARN,
@@ -1888,8 +1904,11 @@ export function checkHealthResponder(deps = {}) {
   // (StartInterval pended; even RunAtLoad stopped firing after a reload).
   // Every sweep appends a heartbeat line, so a log mtime older than 3×
   // StartInterval means NEITHER launchd NOR the cron backstop is dispatching.
-  // A missing log with a loaded job is indistinguishable from never-run-yet —
-  // stay quiet there (RunAtLoad normally writes within seconds of install).
+  // A MISSING log gets the same treatment against the plist's install mtime
+  // (Codex P2): on a host where nothing pre-creates the log (dev/monitor
+  // classes have no Alloy), a never-dispatched job would otherwise read as
+  // never-run-yet and PASS forever. Within the window, missing = legitimately
+  // fresh install (RunAtLoad normally writes within seconds).
   const im = xml.match(/<key>StartInterval<\/key>\s*<integer>(\d+)<\/integer>/);
   const intervalSecs = im ? parseInt(im[1], 10) : 180;
   const mtime = logMtimeMs();
@@ -1901,6 +1920,17 @@ export function checkHealthResponder(deps = {}) {
       `responder heartbeat log is ${ageMin} min old (interval ${intervalSecs}s) — no scheduler is dispatching the sweep (launchd StartInterval wedge, CTL-1510); check 'crontab -l' for the backstop and kickstart once to confirm the job still runs`,
     ));
     return checks;
+  }
+  if (mtime === null) {
+    const pMtime = plistMtimeMs();
+    if (typeof pMtime === "number" && nowMs() - pMtime > staleAfterMs) {
+      const ageMin = Math.round((nowMs() - pMtime) / 60_000);
+      checks.push(mkCheck(
+        "responder-dispatch", STATUS.WARN,
+        `responder has never emitted a heartbeat (no log) ${ageMin} min after install — no scheduler ever dispatched the sweep (launchd StartInterval wedge, CTL-1510); check 'crontab -l' for the backstop and kickstart once to confirm the job still runs`,
+      ));
+      return checks;
+    }
   }
 
   // lastExit === 0 (clean) or null (loaded but never run yet), heartbeat fresh
@@ -1971,7 +2001,7 @@ function defaultReaperHasAbVector() {
     const plist = resolve(homedir(), "Library", "LaunchAgents", "ai.coalesce.catalyst-orphan-sweep.plist");
     const m = readFileSync(plist, "utf8").match(/<string>([^<]*orphan-sweep\.sh)<\/string>/);
     if (!m) return null;
-    return /SWEEP_AB_ENABLED|_ab_browser_roots/.test(readFileSync(m[1], "utf8"));
+    return /SWEEP_AB_ENABLED|_ab_browser_roots/.test(readFileSync(decodePlistString(m[1]), "utf8"));
   } catch { return null; }
 }
 

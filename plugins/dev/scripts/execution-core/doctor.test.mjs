@@ -1212,6 +1212,7 @@ describe("checkHealthResponder", () => {
       fileExists: () => true,
       responderState: () => ({ loaded: true, lastExit: 0 }),
       logMtimeMs: () => null,
+      plistMtimeMs: () => null,
     });
     expect(checks[0].name).toBe("responder-health");
     expect(checks[0].status).toBe(STATUS.PASS);
@@ -1224,6 +1225,7 @@ describe("checkHealthResponder", () => {
       fileExists: () => true,
       responderState: () => ({ loaded: true, lastExit: null }),
       logMtimeMs: () => null,
+      plistMtimeMs: () => null,
     });
     expect(checks[0].name).toBe("responder-health");
     expect(checks[0].status).toBe(STATUS.PASS);
@@ -1261,6 +1263,49 @@ describe("checkHealthResponder", () => {
     });
     expect(checks[0].name).toBe("responder-health");
     expect(checks[0].status).toBe(STATUS.PASS);
+  });
+
+  it("WARNs when the responder has NEVER emitted a heartbeat and the install is old (missing log, stale plist mtime)", () => {
+    const checks = checkHealthResponder({
+      readFile: healthyReadFile,
+      fileExists: () => true,
+      responderState: () => ({ loaded: true, lastExit: null }),
+      logMtimeMs: () => null,
+      plistMtimeMs: () => T0 - 4 * 3600 * 1000,
+      nowMs: () => T0,
+    });
+    expect(checks[0].name).toBe("responder-dispatch");
+    expect(checks[0].status).toBe(STATUS.WARN);
+    expect(checks[0].detail).toContain("never emitted");
+  });
+
+  it("stays quiet on a missing log within the fresh-install grace window", () => {
+    const checks = checkHealthResponder({
+      readFile: healthyReadFile,
+      fileExists: () => true,
+      responderState: () => ({ loaded: true, lastExit: null }),
+      logMtimeMs: () => null,
+      plistMtimeMs: () => T0 - 60 * 1000,
+      nowMs: () => T0,
+    });
+    expect(checks[0].name).toBe("responder-health");
+    expect(checks[0].status).toBe(STATUS.PASS);
+  });
+
+  it("decodes XML entities in the baked path before existence checks (an '&' path plist)", () => {
+    const ampPath = "/Users/x/amp & dir/scripts/health-responder.sh";
+    const encoded = ampPath.replace(/&/g, "&amp;");
+    const seen = [];
+    const checks = checkHealthResponder({
+      readFile: (p) => (p.endsWith(".plist") ? responderPlist(encoded) : responderScript),
+      fileExists: (p) => { seen.push(p); return true; },
+      responderState: () => ({ loaded: true, lastExit: 0 }),
+      logMtimeMs: () => null,
+      plistMtimeMs: () => null,
+    });
+    expect(seen).toContain(ampPath);
+    expect(checks[0].status).toBe(STATUS.PASS);
+    expect(checks[0].detail).toContain(ampPath);
   });
 
   it("scales the staleness threshold with the plist's StartInterval", () => {

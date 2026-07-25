@@ -73,6 +73,17 @@
 #   CATALYST_LAUNCHAGENTS_DIR      — default ~/Library/LaunchAgents (mirrors doctor.mjs)
 
 set -uo pipefail
+# Ignore SIGPIPE (CTL-1510 item 5 hardening): a caller piping this script
+# through `grep -q`/`head` (as this suite's own tests do, and as an operator
+# debugging by hand might) closes its end of the pipe as soon as it matches —
+# the NEXT `echo`/`log` write then raises SIGPIPE. Bash's default SIGPIPE
+# disposition kills the process immediately on an uncaught write signal,
+# which skips the sweep-lock-release EXIT trap entirely (confirmed live: the
+# lock survived across three piped invocations in a row). Writes already
+# don't check their return status, so a silently-failed write to a closed
+# pipe is exactly as harmless as before — the difference is the process now
+# always reaches its EXIT trap and releases the lock.
+trap '' PIPE
 
 # Resolve script dir so sibling scripts (emit-otel-event.sh) are found. APPEND
 # to PATH so a test's prepended mock bin still wins (orphan-sweep.sh idiom).
@@ -139,9 +150,14 @@ RESPONDER_SELFHEAL_GRACE_SECS="$(_num "$RESPONDER_SELFHEAL_GRACE_SECS" 120 0)"
 # the same hung-launchctl class the kickstart deadline guards against).
 RESPONDER_LIST_TIMEOUT_SECS="$(_num "${RESPONDER_LIST_TIMEOUT_SECS:-5}" 5 1)"
 # Whole-sweep reservation staleness (CTL-1510 item 5): a lock older than this
-# belongs to a crashed sweep and is broken. Far above the worst-case sweep
-# (list timeout + kickstart timeout + settle wait ≈ 35s).
+# belongs to a crashed sweep and is broken. Floored BELOW at the worst-case
+# legitimate sweep duration + slop (Codex P2: the wait/timeout knobs have no
+# upper bounds, so a configured stale threshold under a legitimate sweep's
+# runtime would let the next invocation break a LIVE lock and reintroduce the
+# concurrent-kickstart race this lock exists to close).
 RESPONDER_SWEEP_LOCK_STALE_SECS="$(_num "${RESPONDER_SWEEP_LOCK_STALE_SECS:-300}" 300 1)"
+_SWEEP_MIN_STALE=$(( RESPONDER_LIST_TIMEOUT_SECS + RESPONDER_KICKSTART_TIMEOUT_SECS + RESPONDER_KICKSTART_WAIT_SECS + 60 ))
+(( RESPONDER_SWEEP_LOCK_STALE_SECS < _SWEEP_MIN_STALE )) && RESPONDER_SWEEP_LOCK_STALE_SECS="$_SWEEP_MIN_STALE"
 RESPONDER_RUN_ID="${RESPONDER_RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)-$$}"
 # Resolve every state/target path through CATALYST_DIR exactly like the
 # writer's config.mjs catalystDir() (Codex P1 round 3): a node using the
@@ -161,16 +177,24 @@ CLOUD_SYNC_PLIST="${CATALYST_LAUNCHAGENTS_DIR:-${HOME}/Library/LaunchAgents}/${C
 REPLICA_DB="${CATALYST_REPLICA_DB:-${CATALYST_DIR}/catalyst-replica.db}"
 WRITER_LOCK="${REPLICA_DB}.writer.lock"
 ESCALATED_MARKER="${RESPONDER_STATE_DIR}/ESCALATED.cloud-sync"
-# The operator-provisioned token file the cloud-sync launcher sources
-# (cloud-sync/launch.sh). Presence discriminates the two exit-0 flows for the
-# intentional-exit gate (CTL-1510 item 0): tokenless idle no-op (file absent —
-# genuinely idle by design) vs a failed bounce (file present — adopt's bootout
-# SIGTERM'd the writer to exit 0 but the bootstrap relaunch never stuck, the
-# live mini-2 incident). NOTE the deliberate trade-off: a manual SIGTERM stop
-# on a token-bearing node now gets kickstarted — an operator who wants the
-# writer to STAY down must use the RESPONDER_ENABLED=0 kill-switch (or
-# uninstall); the attempt cap bounds the disagreement either way.
+# The operator-provisioned token files the cloud-sync launcher sources
+# (cloud-sync/launch.sh sources BOTH, in this order: cluster.env — the CTL-1307
+# shared-token projection — then the dedicated cloud-sync.env; Codex P1).
+# Presence of EITHER discriminates the two exit-0 flows for the
+# intentional-exit gate (CTL-1510 item 0): tokenless idle no-op (both absent —
+# genuinely idle by design) vs a failed bounce (a token source present —
+# adopt's bootout SIGTERM'd the writer to exit 0 but the bootstrap relaunch
+# never stuck, the live mini-2 incident). NOTE the deliberate trade-off: a
+# manual SIGTERM stop on a token-bearing node now gets kickstarted — an
+# operator who wants the writer to STAY down must use the RESPONDER_ENABLED=0
+# kill-switch (or uninstall); the attempt cap bounds the disagreement either way.
 RESPONDER_TOKEN_FILE="${RESPONDER_TOKEN_FILE:-${HOME}/.config/catalyst/cloud-sync.env}"
+RESPONDER_CLUSTER_ENV_FILE="${RESPONDER_CLUSTER_ENV_FILE:-${HOME}/.config/catalyst/cluster.env}"
+
+# _token_provisioned: true iff any launcher-sourced token file is readable.
+_token_provisioned() {
+  [[ -r "$RESPONDER_TOKEN_FILE" || -r "$RESPONDER_CLUSTER_ENV_FILE" ]]
+}
 
 # ─── helpers ────────────────────────────────────────────────────────────────
 
@@ -436,28 +460,50 @@ is_dry || mkdir -p "$RESPONDER_STATE_DIR" 2>/dev/null || true
 # _record_attempt, so the regression is bounded to dry-run-like probing).
 SWEEP_LOCK_DIR="${RESPONDER_STATE_DIR}/sweep.lock"
 SWEEP_LOCK_HELD=0
+# Ownership token (Codex P2): the EXIT trap must only release a lock THIS
+# process acquired — after a stale-break + re-acquire by a newer sweep, the
+# old process's trap would otherwise rmdir the REPLACEMENT's live lock.
+SWEEP_LOCK_TOKEN="${RESPONDER_RUN_ID}.$$"
+_acquire_sweep_lock() {
+  mkdir "$SWEEP_LOCK_DIR" 2>/dev/null || return 1
+  # Owner file write can fail on a weird dir — the lock still holds; the trap
+  # then just leaves it for the stale-breaker (bounded, never wrong-owner rm).
+  printf '%s' "$SWEEP_LOCK_TOKEN" > "${SWEEP_LOCK_DIR}/owner" 2>/dev/null || true
+  SWEEP_LOCK_HELD=1
+  return 0
+}
 if ! is_dry; then
-  if mkdir "$SWEEP_LOCK_DIR" 2>/dev/null; then
-    SWEEP_LOCK_HELD=1
-  elif [[ -d "$SWEEP_LOCK_DIR" ]]; then
-    _lock_m="$(_mtime "$SWEEP_LOCK_DIR")"
-    if [[ "$_lock_m" =~ ^[0-9]+$ ]] && (( $(date +%s) - _lock_m > RESPONDER_SWEEP_LOCK_STALE_SECS )); then
-      log "breaking stale sweep lock (age $(( $(date +%s) - _lock_m ))s > ${RESPONDER_SWEEP_LOCK_STALE_SECS}s) — prior sweep crashed"
-      rmdir "$SWEEP_LOCK_DIR" 2>/dev/null || true
-      mkdir "$SWEEP_LOCK_DIR" 2>/dev/null && SWEEP_LOCK_HELD=1
+  if ! _acquire_sweep_lock; then
+    if [[ -d "$SWEEP_LOCK_DIR" ]]; then
+      _lock_m="$(_mtime "$SWEEP_LOCK_DIR")"
+      if [[ "$_lock_m" =~ ^[0-9]+$ ]] && (( $(date +%s) - _lock_m > RESPONDER_SWEEP_LOCK_STALE_SECS )); then
+        log "breaking stale sweep lock (age $(( $(date +%s) - _lock_m ))s > ${RESPONDER_SWEEP_LOCK_STALE_SECS}s) — prior sweep crashed"
+        rm -rf "$SWEEP_LOCK_DIR" 2>/dev/null || true
+        _acquire_sweep_lock || true
+      fi
+      if [[ "$SWEEP_LOCK_HELD" -eq 0 ]]; then
+        INSTALLED=0 ALIVE=0 C_DEAD=0 C_STALE=0 C_NORESPAWN=0 ATTEMPTS=0 ESCALATED=0
+        log "another sweep holds ${SWEEP_LOCK_DIR} — skipping this run"
+        heartbeat "skipped"
+        exit 0
+      fi
+    else
+      log "WARN: cannot create sweep lock under ${RESPONDER_STATE_DIR} (read-only?) — proceeding unlocked"
     fi
-    if [[ "$SWEEP_LOCK_HELD" -eq 0 ]]; then
-      INSTALLED=0 ALIVE=0 C_DEAD=0 C_STALE=0 C_NORESPAWN=0 ATTEMPTS=0 ESCALATED=0
-      log "another sweep holds ${SWEEP_LOCK_DIR} — skipping this run"
-      heartbeat "skipped"
-      exit 0
-    fi
-  else
-    log "WARN: cannot create sweep lock under ${RESPONDER_STATE_DIR} (read-only?) — proceeding unlocked"
   fi
 fi
-# Release on ANY exit path — the trap is a no-op when the lock isn't held.
-trap '[[ "${SWEEP_LOCK_HELD:-0}" -eq 1 ]] && rmdir "$SWEEP_LOCK_DIR" 2>/dev/null' EXIT
+# Release on ANY exit path — only when held AND still ours (see ownership note).
+_release_sweep_lock() {
+  [[ "${SWEEP_LOCK_HELD:-0}" -eq 1 ]] || return 0
+  local owner=""
+  owner="$(cat "${SWEEP_LOCK_DIR}/owner" 2>/dev/null || true)"
+  # Missing owner file (write failed at acquire) or matching token → ours.
+  if [[ -z "$owner" || "$owner" == "$SWEEP_LOCK_TOKEN" ]]; then
+    rm -rf "$SWEEP_LOCK_DIR" 2>/dev/null || true
+  fi
+  return 0
+}
+trap _release_sweep_lock EXIT
 
 # ─── detect ─────────────────────────────────────────────────────────────────
 
@@ -486,13 +532,14 @@ if [[ "$INSTALLED" -eq 1 && "$ALIVE" -eq 0 ]]; then
   _LE="$(_last_exit_status)"
   if [[ "$_LE" == "0" ]]; then
     # Token-file discrimination (CTL-1510 item 0): exit 0 is only "idle by
-    # design" on a TOKENLESS node. With a token provisioned, a down writer
-    # with a clean exit is the failed-bounce signature (bootout's SIGTERM →
-    # exit 0 → bootstrap never stuck) — both KeepAlive={SuccessfulExit:false}
-    # and a naive exit-0 gate would suppress recovery forever. Neutralize the
-    # gate so dead-writer/no-respawn detection applies.
-    if [[ -r "$RESPONDER_TOKEN_FILE" ]]; then
-      log "writer down with last exit 0 but a token file is provisioned (${RESPONDER_TOKEN_FILE}) — failed-bounce signature, treating as dead (CTL-1510 item 0)"
+    # design" on a TOKENLESS node. With a token provisioned (either launcher-
+    # sourced file), a down writer with a clean exit is the failed-bounce
+    # signature (bootout's SIGTERM → exit 0 → bootstrap never stuck) — both
+    # KeepAlive={SuccessfulExit:false} and a naive exit-0 gate would suppress
+    # recovery forever. Neutralize the gate so dead-writer/no-respawn
+    # detection applies.
+    if _token_provisioned; then
+      log "writer down with last exit 0 but a token file is provisioned (${RESPONDER_TOKEN_FILE} or ${RESPONDER_CLUSTER_ENV_FILE}) — failed-bounce signature, treating as dead (CTL-1510 item 0)"
       _LE=""
     else
       log "writer idle by design (last exit 0, no token file); not a fault"

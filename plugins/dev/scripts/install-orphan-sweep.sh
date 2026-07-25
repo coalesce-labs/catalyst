@@ -148,17 +148,17 @@ _interval_seconds() {
 # (CTL-1510 item 3, kept in lockstep with install-health-responder.sh): a path
 # like "/Volumes/Catalyst & Data" otherwise breaks TWICE — `&` is sed's
 # whole-match metacharacter (mangled program path → silent exit-127 loop) and
-# a raw `&`/`<`/`>` is invalid inside an XML <string>. Backslash-double first,
-# XML-entity-escape second, sed-metacharacter-escape last.
+# a raw `&`/`<`/`>` is invalid inside an XML <string>. A sed pipeline, NOT
+# bash parameter expansion (Codex P1: /bin/bash 3.2 drops the backslash from
+# `${v//&/\\&}`). Backslash-double first, XML-entity-escape second,
+# sed-metacharacter-escape last.
 _escape_repl() {
-  local v="$1"
-  v="${v//\\/\\\\}"
-  v="${v//&/&amp;}"
-  v="${v//</&lt;}"
-  v="${v//>/&gt;}"
-  v="${v//&/\\&}"
-  v="${v//|/\\|}"
-  printf '%s' "$v"
+  printf '%s' "$1" | sed \
+    -e 's/\\/\\\\/g' \
+    -e 's/&/\&amp;/g' \
+    -e 's/</\&lt;/g' \
+    -e 's/>/\&gt;/g' \
+    -e 's/[&|]/\\&/g'
 }
 
 _substitute() {

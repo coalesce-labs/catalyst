@@ -192,18 +192,18 @@ _agent_path() {
 # (CTL-1510 item 3). A path like "/Volumes/Catalyst & Data" otherwise breaks
 # TWICE: `&` is sed's whole-match metacharacter (mangled program path → silent
 # exit-127 loop) and a raw `&`/`<`/`>` is invalid inside an XML <string>.
-# Order matters: backslash-double first (before we add our own backslashes),
-# XML-entity-escape second, sed-metacharacter-escape last (so the `&` in
-# `&amp;` is itself protected from sed).
+# Implemented as a sed pipeline, NOT bash parameter expansion (Codex P1): the
+# plist/cron runtime is /bin/bash 3.2 on macOS, where `${v//&/\\&}` drops the
+# intended backslash and the corruption returns. Order matters: backslash-
+# double first (before we add our own backslashes), XML-entity-escape second,
+# sed-metacharacter-escape last (so the `&` in `&amp;` is itself protected).
 _escape_repl() {
-  local v="$1"
-  v="${v//\\/\\\\}"
-  v="${v//&/&amp;}"
-  v="${v//</&lt;}"
-  v="${v//>/&gt;}"
-  v="${v//&/\\&}"
-  v="${v//|/\\|}"
-  printf '%s' "$v"
+  printf '%s' "$1" | sed \
+    -e 's/\\/\\\\/g' \
+    -e 's/&/\&amp;/g' \
+    -e 's/</\&lt;/g' \
+    -e 's/>/\&gt;/g' \
+    -e 's/[&|]/\\&/g'
 }
 
 _substitute() {
@@ -330,7 +330,17 @@ if command -v crontab >/dev/null 2>&1; then
   CRON_MINUTES=$(( ( $(_interval_seconds) + 59 ) / 60 ))
   [[ "$CRON_MINUTES" -lt 1 ]] && CRON_MINUTES=1
   [[ "$CRON_MINUTES" -gt 59 ]] && CRON_MINUTES=59
-  CRON_LINE="*/${CRON_MINUTES} * * * * PATH=\"$(_agent_path)\" CATALYST_DIR=\"${CATALYST_DIR:-${HOME}/catalyst}\" /bin/bash \"${BAKE_DIR}/health-responder.sh\" >> \"${CATALYST_DIR:-${HOME}/catalyst}/health-responder.log\" 2>&1 ${CRON_TAG}"
+  # _cron_quote VALUE — single-quote a value for the cron COMMAND field
+  # (Codex P2: double quotes let cron's /bin/sh re-expand `$`, backticks, and
+  # backslashes inside configured paths). Single quotes preserve everything
+  # except `'` itself (closed-escaped-reopened) and `%`, which crontab turns
+  # into a newline unless backslash-escaped — both handled via sed (NOT bash
+  # parameter expansion; /bin/bash 3.2 mangles the escapes, same class as
+  # _escape_repl).
+  _cron_quote() {
+    printf "'%s'" "$(printf '%s' "$1" | sed -e "s/'/'\\\\''/g" -e 's/%/\\%/g')"
+  }
+  CRON_LINE="*/${CRON_MINUTES} * * * * PATH=$(_cron_quote "$(_agent_path)") CATALYST_DIR=$(_cron_quote "${CATALYST_DIR:-${HOME}/catalyst}") /bin/bash $(_cron_quote "${BAKE_DIR}/health-responder.sh") >> $(_cron_quote "${CATALYST_DIR:-${HOME}/catalyst}/health-responder.log") 2>&1 ${CRON_TAG}"
   EXISTING_CRON="$(crontab -l 2>/dev/null | grep -vF "$CRON_TAG" || true)"
   if [[ -n "$EXISTING_CRON" ]]; then
     printf '%s\n%s\n' "$EXISTING_CRON" "$CRON_LINE" | crontab -

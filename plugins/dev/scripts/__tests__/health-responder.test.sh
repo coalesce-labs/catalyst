@@ -689,6 +689,12 @@ rm -f "${HOME}/.config/catalyst/cloud-sync.env"
 rm -f "$KICKSTART_LOG"
 run "T49b: exit-0 without a token file stays idle-by-design (no kickstart)" \
   bash -c "bash '$RESPONDER' | grep -q 'idle by design' && ! test -s '${KICKSTART_LOG}'"
+# Codex P1: the launcher sources cluster.env TOO (CTL-1307 shared-token
+# projection) — a token provisioned only there must equally defeat the gate.
+touch "${HOME}/.config/catalyst/cluster.env"
+run "T49c: a token via cluster.env alone also defeats the exit-0 gate" \
+  bash -c "RESPONDER_KICKSTART_WAIT_SECS=0 bash '$RESPONDER' | grep -q 'failed-bounce signature' && test -s '${KICKSTART_LOG}'"
+rm -f "${HOME}/.config/catalyst/cluster.env" "$KICKSTART_LOG"
 unset MOCK_LAST_EXIT
 
 # T50 (item 5): whole-sweep reservation — a held lock skips the run (visible
@@ -697,8 +703,8 @@ unset MOCK_LAST_EXIT
 _reset
 touch "$PLIST" # dead-writer shape: without the lock skip, this WOULD kickstart
 mkdir -p "${RESPONDER_STATE_DIR}/sweep.lock"
-run "T50: contended sweep lock skips the run (heartbeat, no kickstart)" \
-  bash -c "bash '$RESPONDER' | grep -q 'heartbeat status=skipped' && ! test -s '${KICKSTART_LOG}'"
+run "T50: contended sweep lock skips the run (heartbeat, no kickstart, foreign lock preserved)" \
+  bash -c "bash '$RESPONDER' | grep -q 'heartbeat status=skipped' && ! test -s '${KICKSTART_LOG}' && test -d '${RESPONDER_STATE_DIR}/sweep.lock'"
 run "T50b: a stale sweep lock is broken and the sweep proceeds" \
   bash -c "touch -t 202501010000 '${RESPONDER_STATE_DIR}/sweep.lock'; out=\$(RESPONDER_KICKSTART_WAIT_SECS=0 bash '$RESPONDER'); printf '%s' \"\$out\" | grep -q 'breaking stale sweep lock' && test -s '${KICKSTART_LOG}'"
 run "T50c: the lock is released when the sweep exits" \
@@ -732,6 +738,11 @@ run "T52: '&' in the bake path is XML-escaped, not sed-mangled" \
   bash -c "CATALYST_FORCE_BAKE_DIR='${BAKE_AMP}' bash '$INSTALLER' --print-only | grep -qF 'amp &amp; dir/scripts/health-responder.sh'"
 run "T52b: orphan-sweep installer carries the same escaping helper (parity)" \
   bash -c "grep -q '_escape_repl' '${REPO_ROOT}/plugins/dev/scripts/install-orphan-sweep.sh'"
+# Codex P1: the plist/cron runtime is /bin/bash 3.2 on macOS, where the old
+# parameter-expansion escaping dropped its backslash. Pin the fix by running
+# the SAME substitution under /bin/bash (3.2 on Darwin; still valid elsewhere).
+run "T52c: escaping survives /bin/bash 3.2 semantics" \
+  bash -c "CATALYST_FORCE_BAKE_DIR='${BAKE_AMP}' /bin/bash '$INSTALLER' --print-only | grep -qF 'amp &amp; dir/scripts/health-responder.sh'"
 
 # T53 (item 6): the cron backstop — installed tagged + idempotent, preserves
 # foreign lines, removed on uninstall. crontab is a PATH-shadowed mock; the
@@ -755,6 +766,11 @@ run "T53c: foreign crontab lines survive install" \
   bash -c "printf '%s\n' '30 4 * * * /usr/bin/true keepme' > '$MOCK_CRONTAB_FILE'; eval $CRON_INSTALL >/dev/null && grep -q keepme '$MOCK_CRONTAB_FILE' && grep -q 'CTL-1510' '$MOCK_CRONTAB_FILE'"
 run "T53d: uninstall removes the tagged line and keeps foreign lines" \
   bash -c "bash '$INSTALLER' --uninstall >/dev/null && grep -q keepme '$MOCK_CRONTAB_FILE' && ! grep -q 'CTL-1510' '$MOCK_CRONTAB_FILE'"
+# Codex P2: cron's /bin/sh re-expands $ ` \ inside double quotes — the command
+# paths must be single-quoted. Assert the written line single-quotes the
+# responder path and the PATH env value.
+run "T53e: cron command paths are single-quoted (no sh re-expansion)" \
+  bash -c "rm -f '$MOCK_CRONTAB_FILE'; eval $CRON_INSTALL >/dev/null && grep -qF \"/bin/bash '${BAKE}/health-responder.sh'\" '$MOCK_CRONTAB_FILE' && grep -q \"PATH='\" '$MOCK_CRONTAB_FILE'"
 
 # T54 (item 1): the WRITER's plist persists CATALYST_DIR like the responder's
 # does — text-level structural check on the render function (same idiom as T40).

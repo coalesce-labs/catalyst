@@ -97,19 +97,22 @@ export CATALYST_HEALTH_RESPONDER_LOG="${CATALYST_HEALTH_RESPONDER_LOG:-${CATALYS
 
 mkdir -p "$STORAGE"
 
-# ─── Pre-create every tailed log file (CTL-1510 item 7) ──────────────────────
+# ─── Pre-create every MISSING tailed log file (CTL-1510 item 7) ──────────────
 # Alloy's loki.source.file uses STATIC targets: a file that does not exist when
 # the component starts is NEVER picked up later. Observed live (mini-2,
 # 2026-07-25): adopt restarted Alloy 2 minutes before the health-responder
 # wrote its first log line → that stream was dark in Loki for 4 hours while the
 # other six shipped — fatal for a contract where heartbeat-ABSENCE is the
-# dead-responder signal. Touching each path up front closes the race for every
-# stream (`touch` on an existing file only bumps mtime, which the tailer
-# ignores). Failures are non-fatal: a stream whose dir can't be created just
+# dead-responder signal. Create ONLY missing files — an existing file's mtime
+# must be preserved (Codex P2: doctor's responder-dispatch staleness check
+# reads health-responder.log's mtime as proof of a sweep; a touch here would
+# mask a dead responder for a full staleness window after every shipper
+# restart). Failures are non-fatal: a stream whose dir can't be created just
 # stays a tails-nothing target, exactly as before.
 for _lf in "$CATALYST_BROKER_LOG" "$CATALYST_DAEMON_LOG" "$CATALYST_OTEL_FORWARD_LOG" \
   "$CATALYST_MONITOR_LOG" "$CATALYST_UPDATER_LOG" "$CATALYST_CLOUD_SYNC_LOG" \
   "$CATALYST_HEALTH_RESPONDER_LOG"; do
+  [[ -e "$_lf" ]] && continue
   mkdir -p "$(dirname "$_lf")" 2>/dev/null || true
   touch "$_lf" 2>/dev/null || warn "cannot pre-create $_lf — that stream stays dark until the file exists at the next Alloy restart"
 done
