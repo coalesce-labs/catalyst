@@ -930,6 +930,30 @@ run "T62: a future-dated lock is treated as stale-eligible, not blocked forever"
 run "T63: sweep-lock floor formula includes the token-resolve timeout" \
   bash -c "grep -q 'RESPONDER_LIST_TIMEOUT_SECS + RESPONDER_TOKEN_RESOLVE_TIMEOUT_SECS + RESPONDER_KICKSTART_TIMEOUT_SECS' '$RESPONDER'"
 
+# T64 (CTL-1510 hotfix, own discovery — NOT a Codex round): the ENTIRE
+# script, run under /bin/bash (3.2 on Darwin — the actual interpreter
+# launchd/cron invoke via the plist's/cron line's hardcoded path; every
+# OTHER test in this suite invokes `bash "$RESPONDER"`, which resolves
+# through PATH to a newer Homebrew bash and never exercises 3.2's parser).
+# Found live on mini-2 in production: bash 3.2 has a defect where multi-line
+# comments containing an unbalanced paren/quote/colon INSIDE a `$(...)`
+# command substitution corrupt its paren-matching, surfacing as a bogus
+# "unbound variable" for a variable that IS assigned. This exact scenario
+# (a provisioned real token + a failed-bounce writer) crash-looped the
+# responder every cron cycle for hours before being caught — the writer
+# itself stayed down the whole time since the responder never completed a
+# sweep to kickstart it. Same idiom as T52c (unconditional /bin/bash — exists
+# everywhere; harmlessly passes trivially on a newer Linux /bin/bash).
+_reset
+touch "$PLIST"
+export MOCK_LAST_EXIT=0
+mkdir -p "${HOME}/.config/catalyst"
+printf 'export CATALYST_CLOUD_TOKEN=real-value\n' > "${HOME}/.config/catalyst/cloud-sync.env"
+run "T64: the full script runs clean under real /bin/bash with a provisioned token (production interpreter)" \
+  bash -c "out=\$(RESPONDER_KICKSTART_WAIT_SECS=0 /bin/bash '$RESPONDER' 2>&1); printf '%s' \"\$out\" | grep -q 'unbound variable' && exit 1; printf '%s' \"\$out\" | grep -q 'failed-bounce signature' && test -s '${KICKSTART_LOG}'"
+rm -f "${HOME}/.config/catalyst/cloud-sync.env"
+unset MOCK_LAST_EXIT
+
 # ─── results ────────────────────────────────────────────────────────────────
 
 echo ""
