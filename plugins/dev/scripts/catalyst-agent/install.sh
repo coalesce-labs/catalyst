@@ -61,16 +61,19 @@ fi
 CATALYST_DIR_VALUE="${CATALYST_DIR:-${HOME}/catalyst}"
 echo "install.sh: CATALYST_DIR → ${CATALYST_DIR_VALUE}"
 
-# CTL-1518: escape sed-replacement metacharacters in the substituted values so a
-# path containing `&`, `|`, or `\` (e.g. "/Volumes/Catalyst & Data") can't expand
-# into the matched placeholder and write mangled XML into the plist (Codex P2).
+# CTL-1518: each substituted value lands inside a plist <string>…</string>, so it
+# must be BOTH XML-escaped (so `&`/`<`/`>` don't produce invalid XML — e.g.
+# "/Volumes/Catalyst & Data") AND sed-replacement-escaped (so `&`/`|`/`\` don't
+# expand into the sed match). XML-escape FIRST, then sed-escape the result (Codex P2).
+_xml_escape() { printf '%s' "$1" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g'; }
 _sed_escape() { printf '%s' "$1" | sed -e 's/[\\&|]/\\&/g'; }
-NODE_BIN_E="$(_sed_escape "${NODE_BIN}")"
-AGENT_E="$(_sed_escape "${AGENT}")"
-HOME_E="$(_sed_escape "${HOME}")"
-INSTALL_PATH_E="$(_sed_escape "${INSTALL_PATH}")"
-METRICS_ENDPOINT_E="$(_sed_escape "${METRICS_ENDPOINT}")"
-CATALYST_DIR_VALUE_E="$(_sed_escape "${CATALYST_DIR_VALUE}")"
+_esc() { _sed_escape "$(_xml_escape "$1")"; }
+NODE_BIN_E="$(_esc "${NODE_BIN}")"
+AGENT_E="$(_esc "${AGENT}")"
+HOME_E="$(_esc "${HOME}")"
+INSTALL_PATH_E="$(_esc "${INSTALL_PATH}")"
+METRICS_ENDPOINT_E="$(_esc "${METRICS_ENDPOINT}")"
+CATALYST_DIR_VALUE_E="$(_esc "${CATALYST_DIR_VALUE}")"
 
 sed \
   -e "s|REPLACE_WITH_NODE|${NODE_BIN_E}|g" \
