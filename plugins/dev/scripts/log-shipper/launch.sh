@@ -92,6 +92,8 @@ export CATALYST_UPDATER_LOG="${CATALYST_UPDATER_LOG:-${CATALYST_DIR}/updater.log
 # CTL-1395: the catalyst-cloud-sync writer's log (6th Alloy stream). Exported even when no
 # cloud-sync agent is installed — Alloy's loki.source.file just tails nothing.
 export CATALYST_CLOUD_SYNC_LOG="${CATALYST_CLOUD_SYNC_LOG:-${CATALYST_DIR}/cloud-sync.log}"
+# CTL-1509: the health-responder sweep log (7th stream — plain-line pipeline).
+export CATALYST_HEALTH_RESPONDER_LOG="${CATALYST_HEALTH_RESPONDER_LOG:-${CATALYST_DIR}/health-responder.log}"
 
 mkdir -p "$STORAGE"
 
