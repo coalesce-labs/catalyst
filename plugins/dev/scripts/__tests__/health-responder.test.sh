@@ -664,6 +664,15 @@ run "T47: hung launchctl list times out — sweep proceeds to kickstart" \
   bash -c "out=\$(RESPONDER_LIST_TIMEOUT_SECS=1 RESPONDER_KICKSTART_WAIT_SECS=0 bash '$RESPONDER' 2>&1); printf '%s' \"\$out\" | grep -q 'launchctl list timed out' && test -s '${KICKSTART_LOG}'"
 mv "${SCRATCH}/launchctl-real-mock2" "$MOCKBIN/launchctl"
 
+# T48 (round 5): a FUTURE breadcrumb timestamp must not hold a dead writer in
+# settling forever — it is invalid, and dead-writer recovery proceeds.
+_reset
+touch "$PLIST" # dead-writer shape
+FUTURE_TS=$(( $(date +%s) + 999999 ))
+printf '{"ts":%s,"expectRestart":true}\n' "$FUTURE_TS" > "$RESPONDER_SELFHEAL_FILE"
+run "T48: future-timestamp breadcrumb is invalid — dead-writer still recovers" \
+  bash -c "RESPONDER_KICKSTART_WAIT_SECS=0 bash '$RESPONDER' | grep -q 'dead_writer=1' && test -s '${KICKSTART_LOG}'"
+
 # ─── results ────────────────────────────────────────────────────────────────
 
 echo ""

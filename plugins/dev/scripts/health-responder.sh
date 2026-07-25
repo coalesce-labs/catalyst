@@ -218,6 +218,13 @@ _last_exit_status() {
     fi
     sleep 1
   done
+  # One post-loop recheck (Codex round 5): a probe that finishes DURING the
+  # final sleep would otherwise be discarded as a timeout — and a discarded
+  # LastExitStatus=0 means kickstarting an intentionally idle writer.
+  if [[ -z "$rc" ]] && ! kill -0 "$pid" 2>/dev/null; then
+    wait "$pid" 2>/dev/null
+    rc=$?
+  fi
   if [[ -z "$rc" ]]; then
     kill -9 "$pid" 2>/dev/null || true
     wait "$pid" 2>/dev/null || true
@@ -292,6 +299,15 @@ _probe_selfheal() {
     m="$(_mtime "$RESPONDER_SELFHEAL_FILE")"
     [[ "$m" =~ ^[0-9]+$ ]] || return 0
     SELFHEAL_AGE=$(( now - m ))
+  fi
+  # A FUTURE timestamp (clock skew / corrupt-but-numeric ts) would make the
+  # age negative — permanently "within grace", holding a dead writer in
+  # settling with all recovery suppressed until wall time catches up
+  # (Codex round 5). Treat it as invalid instead: dead-writer recovery applies.
+  if (( SELFHEAL_AGE < 0 )); then
+    log "WARN: self-heal breadcrumb timestamp is in the future (age ${SELFHEAL_AGE}s) — treating the breadcrumb as invalid"
+    SELFHEAL_AGE=""
+    return 0
   fi
   SELFHEAL_VALID=1
   return 0

@@ -63,10 +63,14 @@
     <string>REPLACE_CATALYST_DIR</string>
   </dict>
 
+  <!-- The log must live under the SAME CATALYST_DIR the sweep operates on and
+       Alloy tails (CATALYST_HEALTH_RESPONDER_LOG) — a $HOME/catalyst hardcode
+       here would strand the remote health signal in an untailed file on
+       override nodes (Codex round 5). -->
   <key>StandardOutPath</key>
-  <string>REPLACE_HOME/catalyst/health-responder.log</string>
+  <string>REPLACE_CATALYST_DIR/health-responder.log</string>
 
   <key>StandardErrorPath</key>
-  <string>REPLACE_HOME/catalyst/health-responder.log</string>
+  <string>REPLACE_CATALYST_DIR/health-responder.log</string>
 </dict>
 </plist>
