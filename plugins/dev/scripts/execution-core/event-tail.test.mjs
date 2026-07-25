@@ -68,6 +68,25 @@ describe("scanEventsChunked", () => {
     expect(seen).toEqual([{ event: "alpha" }]); // counted exactly once across chunk boundaries
   });
 
+  test("stitches a multibyte UTF-8 char split across a chunk boundary (CTL-1514, no U+FFFD)", () => {
+    const path = tempLog(['{"e":"a🚀b"}']); // 🚀 = 4 bytes → straddles a 4-byte chunk boundary
+    const seen = [];
+    scanEventsChunked({ path, fromOffset: 0, chunkSize: 4, onEvent: (e) => seen.push(e) });
+    expect(seen).toEqual([{ e: "a🚀b" }]); // char preserved byte-exact, not corrupted to �
+  });
+
+  test("skipFirstLine discards a leading partial line whose suffix is valid JSON (CTL-1514)", () => {
+    // Full line 'XX{"n":7}' is invalid JSON, but its suffix '{"n":7}' parses. A
+    // mid-line fromOffset must not surface that fragment as a bogus event.
+    const path = tempLog(['XX{"n":7}', '{"n":2}']);
+    const noSkip = [];
+    scanEventsChunked({ path, fromOffset: 2, onEvent: (e) => noSkip.push(e) }); // byte 2 = '{'
+    expect(noSkip).toEqual([{ n: 7 }, { n: 2 }]); // the fragment leaks through by default
+    const skip = [];
+    scanEventsChunked({ path, fromOffset: 2, skipFirstLine: true, onEvent: (e) => skip.push(e) });
+    expect(skip).toEqual([{ n: 2 }]); // fragment discarded — only the complete line remains
+  });
+
   test("carries a trailing partial line across an append (leftover threaded back in)", () => {
     const dir = mkdtempSync(join(tmpdir(), "evttail-"));
     const path = join(dir, "events.jsonl");

@@ -5302,6 +5302,20 @@ describe("makeBatchedPhaseCompleteChecker — one pass for N tickets (CTL-1514)"
     makeBatchedPhaseCompleteChecker({ logPath: "/whatever", scan });
     expect(scanCalls).toBe(0);
   });
+
+  test("re-scans the new month's file after the log path rolls over (Codex P2 on #2729)", () => {
+    const monthA = ctl1514TempLog(["phase.research.complete.CTL-100"]);
+    const monthB = ctl1514TempLog(["phase.plan.complete.CTL-200"]);
+    let current = monthA;
+    // logPath as a resolver mimics getEventLogPath() re-resolving each call; a UTC
+    // month boundary mid-sweep flips it to the new file.
+    const check = makeBatchedPhaseCompleteChecker({ logPath: () => current });
+    expect(check("CTL-100", "research")).toBe(true); // scanned month A
+    expect(check("CTL-200", "plan")).toBe(false); // not in A yet
+    current = monthB; // month rolls over
+    expect(check("CTL-200", "plan")).toBe(true); // new file scanned from 0
+    expect(check("CTL-100", "research")).toBe(true); // prior-month completion still deduped
+  });
 });
 
 // ─── CTL-863: reclaimDeadHostWork ────────────────────────────────────────────

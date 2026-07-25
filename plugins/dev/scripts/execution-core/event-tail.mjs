@@ -2,6 +2,7 @@
 // no execution-core deps. Shared by daemon.mjs (live tail), event-scan.mjs
 // (incremental counters), and reaper.mjs (boot replay).
 import { openSync, fstatSync, readSync, closeSync, statSync } from "node:fs";
+import { StringDecoder } from "node:string_decoder";
 
 const DEFAULT_CHUNK = 1 << 20; // 1 MiB — bounds peak memory regardless of file size.
 
@@ -44,6 +45,11 @@ export function scanEventsChunked({
   leftover = "",
   chunkSize = DEFAULT_CHUNK,
   onEvent,
+  // CTL-1514: when starting mid-file (fromOffset > 0) the bytes before the first
+  // newline are the tail of some earlier line; its suffix can independently parse
+  // as valid JSON and pollute the result. Set true to discard everything up to
+  // and including the first newline so scanning always begins on a line boundary.
+  skipFirstLine = false,
 } = {}) {
   let fd;
   let size;
@@ -63,18 +69,35 @@ export function scanEventsChunked({
   try {
     let pos = fromOffset;
     let carry = leftover;
-    // A single reusable buffer for the common full-chunk reads; short final
-    // reads get a right-sized buffer so toString never sees stale tail bytes.
+    let skipping = skipFirstLine && fromOffset > 0;
+    // CTL-1514: decode bytes through a StringDecoder so a multibyte UTF-8 sequence
+    // split across a chunk boundary is stitched (its trailing bytes are buffered
+    // until the next read) instead of each fragment decoding to U+FFFD — which
+    // would silently corrupt an event field while the JSON still parsed.
+    const decoder = new StringDecoder("utf8");
+    // A single reusable buffer for the common full-chunk reads; short final reads
+    // get a right-sized buffer so the decoder never sees stale tail bytes.
     const buf = Buffer.alloc(Math.min(chunkSize, Math.max(1, size - pos)) || 1);
+    const feed = (chunkStr) => {
+      if (skipping) {
+        const nl = chunkStr.indexOf("\n");
+        if (nl === -1) return; // still inside the leading partial line — discard it
+        chunkStr = chunkStr.slice(nl + 1); // resume after the first line boundary
+        skipping = false;
+      }
+      const { events, leftover: next } = parseEventTailChunk(chunkStr, carry);
+      for (const ev of events) onEvent(ev);
+      carry = next;
+    };
     while (pos < size) {
       const want = Math.min(chunkSize, size - pos);
       const slice = want === buf.length ? buf : Buffer.alloc(want);
       readSync(fd, slice, 0, want, pos);
-      const { events, leftover: next } = parseEventTailChunk(slice.toString("utf8"), carry);
-      for (const ev of events) onEvent(ev);
-      carry = next;
+      feed(decoder.write(slice));
       pos += want;
     }
+    const flushed = decoder.end();
+    if (flushed) feed(flushed);
     return { endOffset: size, leftover: carry };
   } finally {
     try {
@@ -115,7 +138,9 @@ export function tailParsedEvents({
   for (let attempt = 0; attempt <= maxDoublings; attempt++) {
     const fromOffset = attempt === maxDoublings ? 0 : Math.max(0, size - window);
     const collected = [];
-    scanEventsChunked({ path, fromOffset, onEvent: (e) => collected.push(e) });
+    // skipFirstLine when seeking mid-file: the bytes before the first newline are
+    // a partial line whose suffix could parse as a bogus event (CTL-1514).
+    scanEventsChunked({ path, fromOffset, skipFirstLine: fromOffset > 0, onEvent: (e) => collected.push(e) });
     if (collected.length >= maxLines || fromOffset === 0) {
       return collected.slice(-maxLines);
     }

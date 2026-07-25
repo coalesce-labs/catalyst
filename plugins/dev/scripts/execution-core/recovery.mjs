@@ -3412,9 +3412,10 @@ export function readClusterAdmission({ logPath = getEventLogPath() } = {}) {
 // bytes ⇒ just an openSync+fstatSync). Lazy — never scans until first called.
 // Best-effort: an unreadable log leaves `seen` as-is and fails open to
 // "not complete", same posture as phaseAlreadyComplete.
-export function makeBatchedPhaseCompleteChecker({ logPath = getEventLogPath(), scan = scanEventsChunked } = {}) {
+export function makeBatchedPhaseCompleteChecker({ logPath = null, scan = scanEventsChunked } = {}) {
   const seen = new Set();
-  let cursor = null; // null = not yet scanned; else the byte offset scanned up to
+  let scannedPath = null;
+  let cursor = 0;
   let leftover = "";
   const ingest = (e) => {
     const name = e?.attributes?.["event.name"];
@@ -3423,10 +3424,22 @@ export function makeBatchedPhaseCompleteChecker({ logPath = getEventLogPath(), s
     }
   };
   return (ticket, phase) => {
+    // Re-resolve the month-partitioned log path on EVERY check (unless a test pins
+    // logPath): a reclaim sweep that spans a UTC month boundary must pick up
+    // completions written to the NEW month's YYYY-MM.jsonl, or it redispatches an
+    // already-complete phase (Codex P2 on #2729). On rollover the cursor resets to
+    // scan the new file from 0, while `seen` carries forward so prior-month
+    // completions still dedup.
+    const path = typeof logPath === "function" ? logPath() : logPath ?? getEventLogPath();
     try {
+      if (path !== scannedPath) {
+        cursor = 0;
+        leftover = "";
+        scannedPath = path;
+      }
       const { endOffset, leftover: next } = scan({
-        path: logPath,
-        fromOffset: cursor === null ? 0 : cursor,
+        path,
+        fromOffset: cursor,
         leftover,
         onEvent: ingest,
       });
