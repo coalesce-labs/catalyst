@@ -64,6 +64,16 @@ export const MAX_BATCH_SIZE = parseInt(process.env.FILTER_BATCH_SIZE ?? "20", 10
 export const LOOKBACK_LINES = 1000;
 export const WATCHDOG_INTERVAL_MS = parseInt(process.env.FILTER_WATCHDOG_INTERVAL_MS ?? "60000", 10);
 export const HEARTBEAT_STALE_MS = parseInt(process.env.FILTER_HEARTBEAT_STALE_MS ?? "180000", 10);
+// CTL-1516: horizon past which a stale session's lastHeartbeat + workerToOrchestrator
+// rows are evicted even when it matched no interest (so it never entered the
+// notified-cleanup path). Bounds both maps across the daemon's whole lifetime —
+// phase-agent session ids are per-job-unique, so without a backstop the maps grow
+// forever. Generous default (30 min ≈ 10× HEARTBEAT_STALE_MS) so only
+// unambiguously-done sessions are dropped.
+export const HEARTBEAT_EVICT_MS = parseInt(
+  process.env.FILTER_HEARTBEAT_EVICT_MS ?? String(30 * 60 * 1000),
+  10
+);
 // CTL-507: replayed orchestrator.status events older than this are skipped on
 // startup so a crashed-without-terminate orchestrator is not resurrected into
 // activeOrchestrators. Generous default (6h) — far longer than the gap between
