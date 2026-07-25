@@ -116,6 +116,7 @@ import { classifyEventStream } from "../lib/event-stream-class.mjs"; // CTL-1488
 // log per the design-review D2 blocker).
 import { evaluateSource } from "../lib/ingestion-recency.mjs";
 import { logDaemonHeartbeat } from "../lib/daemon-heartbeat.mjs";
+import { emitProcessMemoryMetric } from "../lib/process-memory-metric.mjs"; // CTL-1517: per-process RSS/heap gauge
 import {
   MONITOR_SERVICE_NAME,
   GITHUB_SERVICE_NAME,
@@ -2217,6 +2218,9 @@ export function runWatchdogTick({ liveness = sessionLiveness } = {}) {
   // quiet-but-healthy daemon would otherwise read as silent/down). Rides the
   // Alloy .log stream → independent of the otel-forward event pipeline.
   logDaemonHeartbeat(log, "broker");
+  // CTL-1517: per-process RSS/heap OTel gauge on the same watchdog tick (fire-and-forget;
+  // never throws, never blocks) so per-daemon memory becomes attributable in Prometheus.
+  emitProcessMemoryMetric({ serviceName: "catalyst.broker", log }).catch(() => {});
 
   // CTL-352: empty-interests observability. Warn on every tick when the table
   // is empty so a silently-dead broker is loud in broker.log, and emit a

@@ -52,6 +52,7 @@
 import { CatalystReplica } from "@catalyst-cloud/sdk/node";
 import { getCloudSyncSelfHealPath, getHostName, getReplicaDbPath, resolveNodeCloudTokenEnv, HEARTBEAT_INTERVAL_MS } from "./config.mjs";
 import { logDaemonHeartbeat } from "../lib/daemon-heartbeat.mjs";
+import { emitProcessMemoryMetric } from "../lib/process-memory-metric.mjs"; // CTL-1517: per-process RSS/heap gauge
 import { sdkLogRecord } from "./cloud-sync-log.mjs";
 import { classifyStall, clearSelfHealBreadcrumb, exitAfterClose, freshnessFields, readReplicaCounts, writeSelfHealBreadcrumb } from "./cloud-sync-telemetry.mjs";
 import { createRequire } from "node:module";
@@ -243,6 +244,8 @@ let _lastAdvanceMs = Date.now();
 let _stallAlerted = false;
 const emitTelemetry = () => {
   try { logDaemonHeartbeat(hlog, "cloud-sync"); } catch { /* best-effort */ }
+  // CTL-1517: per-process RSS/heap OTel gauge (fire-and-forget; never throws/blocks).
+  emitProcessMemoryMetric({ serviceName: "catalyst.cloud-sync", log: hlog }).catch(() => {});
   let rows = null;
   let maxUpdatedMs = null;
   try { ({ rows, maxUpdatedMs } = readReplicaCounts(replica.sql)); } catch { /* best-effort */ }
