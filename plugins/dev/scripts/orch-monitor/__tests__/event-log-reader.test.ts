@@ -697,6 +697,26 @@ describe("readBacklog / readTunnelEventStats fallback: chunked scan, never readF
     }
   });
 
+  it("predicate fallback returns only the last `limit` matches for a broad predicate — bounded + waits for jq (CTL-1515)", async () => {
+    const dir = eventsDir();
+    const now = new Date("2026-05-04T00:00:00Z");
+    // 50 matching records; a broad predicate matches them all. The rolling buffer
+    // must retain only the last `limit`, and stream.end() must wait for jq to emit
+    // every match so the newest ones aren't cut off by a fixed-delay flush.
+    const lines = Array.from({ length: 50 }, (_, i) => makeLine("github.pr.opened", { i }));
+    writeFileSync(join(dir, "2026-05.jsonl"), lines.join("\n") + "\n");
+    const r = await readBacklog({
+      catalystDir: workdir,
+      predicate: '.event | startswith("github.")',
+      limit: 5,
+      ring: null,
+      now: () => now,
+    });
+    expect(r.length).toBe(5); // bounded to `limit`, not all 50
+    // the newest 5 (i = 45..49), proving end() waited for jq's full output
+    expect(r.map((l) => (JSON.parse(l) as { i: number }).i)).toEqual([45, 46, 47, 48, 49]);
+  });
+
   it("readTunnelEventStats file fallback (no ring) uses readSync, never readFileSync — counts unchanged", () => {
     eventsDir();
     const lines = [

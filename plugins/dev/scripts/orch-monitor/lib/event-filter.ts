@@ -28,6 +28,10 @@ export interface FilterStream {
   drain(): Promise<void>;
   /** Wait briefly for any in-flight stdout to drain. */
   flush(): Promise<void>;
+  /** End input and resolve once the filter has emitted ALL output (jq exited) — so a
+   *  caller reading accumulated matches sees every one, not just what a fixed-delay
+   *  flush happened to capture (CTL-1515). */
+  end(): Promise<void>;
   close(): void;
   onMatch(cb: (line: string) => void): void;
 }
@@ -100,6 +104,9 @@ export function createFilterStream(predicate: string): FilterStream {
       },
       flush(): Promise<void> {
         return Promise.resolve();
+      },
+      end(): Promise<void> {
+        return Promise.resolve(); // synchronous passthrough — all output already emitted
       },
       close(): void {
         closed = true;
@@ -181,6 +188,28 @@ export function createFilterStream(predicate: string): FilterStream {
         }, 50);
       });
       return pendingFlush;
+    },
+    end(): Promise<void> {
+      // End jq's stdin and resolve once it has flushed all output and exited, so a
+      // caller reading accumulated matches sees EVERY match — not just what the
+      // fixed 50ms flush happened to capture on a large log (CTL-1515). The stdout
+      // 'data' handler above drains all output before 'close' fires.
+      if (closed) return Promise.resolve();
+      return new Promise<void>((resolve) => {
+        let done = false;
+        const finish = () => {
+          if (done) return;
+          done = true;
+          resolve();
+        };
+        proc.once("close", finish);
+        proc.once("error", finish); // never hang on a spawn/pipe error
+        try {
+          proc.stdin?.end();
+        } catch {
+          finish();
+        }
+      });
     },
     close(): void {
       if (closed) return;

@@ -12,6 +12,7 @@
 import {
   existsSync,
   statSync,
+  fstatSync,
   openSync,
   readSync,
   closeSync,
@@ -89,13 +90,17 @@ export function scanFileLines(
   const decoder = new StringDecoder("utf8");
   const buf = Buffer.allocUnsafe(chunkBytes);
   const fd = openSync(path, "r");
+  // Snapshot the EOF at open so a file being appended to (a busy producer) can't
+  // keep extending this scan indefinitely — read exactly the bytes present now
+  // (Codex P2 on #2730).
+  const snapshotSize = fstatSync(fd).size;
   let totalBytes = 0;
   let pending = "";
   try {
     let bytesRead = 0;
     // `null` position → sequential reads advancing the fd's own cursor; the
     // peak transient is one chunk (vs a whole-file readFileSync string).
-    while ((bytesRead = readSync(fd, buf, 0, chunkBytes, null)) > 0) {
+    while (totalBytes < snapshotSize && (bytesRead = readSync(fd, buf, 0, Math.min(chunkBytes, snapshotSize - totalBytes), null)) > 0) {
       totalBytes += bytesRead;
       pending += decoder.write(buf.subarray(0, bytesRead));
       let nl = pending.indexOf("\n");
@@ -131,11 +136,15 @@ export async function scanFileLinesAsync(
   const decoder = new StringDecoder("utf8");
   const buf = Buffer.allocUnsafe(chunkBytes);
   const fd = openSync(path, "r");
+  // Snapshot the EOF at open so a file being appended to (a busy producer) can't
+  // keep extending this scan indefinitely — read exactly the bytes present now
+  // (Codex P2 on #2730).
+  const snapshotSize = fstatSync(fd).size;
   let totalBytes = 0;
   let pending = "";
   try {
     let bytesRead = 0;
-    while ((bytesRead = readSync(fd, buf, 0, chunkBytes, null)) > 0) {
+    while (totalBytes < snapshotSize && (bytesRead = readSync(fd, buf, 0, Math.min(chunkBytes, snapshotSize - totalBytes), null)) > 0) {
       totalBytes += bytesRead;
       pending += decoder.write(buf.subarray(0, bytesRead));
       let nl = pending.indexOf("\n");
@@ -232,8 +241,14 @@ export async function readBacklog(opts: ReadBacklogOpts): Promise<string[]> {
   }
 
   const stream = createFilterStream(opts.predicate);
+  // Rolling last-`limit` buffer: a broad predicate on a huge log retains only the
+  // most recent `limit` matches, never the whole file — otherwise the memory the
+  // bounded scan saved just moves into this array (Codex P1 on #2730).
   const matches: string[] = [];
-  stream.onMatch((l) => matches.push(l));
+  stream.onMatch((l) => {
+    matches.push(l);
+    if (matches.length > opts.limit) matches.shift();
+  });
   try {
     // scanFileLinesAsync feeds each line to jq and awaits `drain()` whenever jq's
     // stdin is backpressured — so a slow/stalled jq cannot let the whole ~1.7 GB
@@ -244,10 +259,10 @@ export async function readBacklog(opts: ReadBacklogOpts): Promise<string[]> {
       if (!stream.write(l)) await stream.drain();
     });
     recordFullRead("readBacklog", bytes, performance.now() - _t0);
-    // Flushing the jq subprocess is a wait-on-stdout. For a 50k-line file we need
-    // a few flush cycles to ensure all output drains.
-    await stream.flush();
-    await stream.flush();
+    // Wait for jq to emit EVERY match (it exits when stdin ends) before we return —
+    // the old fixed 50ms double-flush could expire while jq still had pending
+    // input/output on a large log, returning stale early matches (Codex P1 on #2730).
+    await stream.end();
   } finally {
     // Always reap the jq child + its pipes, even if the scan throws mid-stream
     // (e.g. the file disappears between existsSync and openSync) — otherwise the
