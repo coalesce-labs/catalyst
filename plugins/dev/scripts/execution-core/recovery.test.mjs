@@ -5221,6 +5221,120 @@ describe("phaseAlreadyComplete — event-log dedup (CTL-863)", () => {
   });
 });
 
+// ─── CTL-1514: streaming default path + batched checker ──────────────────────
+import { makeBatchedPhaseCompleteChecker } from "./recovery.mjs";
+import { scanEventsChunked } from "./event-tail.mjs";
+import { statSync as ctl1514StatSync } from "node:fs";
+
+function ctl1514TempLog(names) {
+  const dir = mkdtempSync(join(tmpdir(), "ctl1514-recov-"));
+  const path = join(dir, "events.jsonl");
+  writeFileSync(
+    path,
+    names.map((n) => JSON.stringify({ attributes: { "event.name": n } })).join("\n") + "\n"
+  );
+  return path;
+}
+
+describe("phaseAlreadyComplete — streaming default path (CTL-1514)", () => {
+  test("default path (logPath, no readLog) streams the file and finds the event", () => {
+    const path = ctl1514TempLog(["phase.research.complete.CTL-900", "phase.plan.complete.CTL-800"]);
+    expect(phaseAlreadyComplete("CTL-900", "research", { logPath: path })).toBe(true);
+    expect(phaseAlreadyComplete("CTL-800", "plan", { logPath: path })).toBe(true);
+  });
+
+  test("default path returns false for a non-present (ticket, phase)", () => {
+    const path = ctl1514TempLog(["phase.research.complete.CTL-900"]);
+    expect(phaseAlreadyComplete("CTL-900", "plan", { logPath: path })).toBe(false);
+    expect(phaseAlreadyComplete("CTL-123", "research", { logPath: path })).toBe(false);
+  });
+
+  test("default path returns false on a missing file (never throws)", () => {
+    expect(
+      phaseAlreadyComplete("CTL-900", "research", { logPath: join(tmpdir(), "nope-1514.jsonl") })
+    ).toBe(false);
+  });
+});
+
+describe("makeBatchedPhaseCompleteChecker — one pass for N tickets (CTL-1514)", () => {
+  test("correct true/false per (ticket, phase); whole log read once, later calls only resume", () => {
+    const path = ctl1514TempLog(["phase.research.complete.CTL-100", "phase.plan.complete.CTL-200"]);
+    const fromOffsets = [];
+    const scan = (opts) => {
+      fromOffsets.push(opts.fromOffset);
+      return scanEventsChunked(opts);
+    };
+    const check = makeBatchedPhaseCompleteChecker({ logPath: path, scan });
+
+    expect(check("CTL-100", "research")).toBe(true);
+    expect(check("CTL-200", "plan")).toBe(true);
+    expect(check("CTL-300", "research")).toBe(false); // not complete
+    expect(check("CTL-100", "plan")).toBe(false); // wrong phase
+
+    // The first call reads the whole log from offset 0; every later call resumes
+    // from the prior cursor (never re-reads from 0) — one full pass for N tickets,
+    // the rest are zero-byte delta scans.
+    const size = ctl1514StatSync(path).size;
+    expect(fromOffsets[0]).toBe(0);
+    expect(fromOffsets.slice(1)).toEqual([size, size, size]);
+  });
+
+  test("observes a completion appended AFTER the first lookup (Codex P1: no stale duplicate dispatch)", () => {
+    const path = ctl1514TempLog(["phase.research.complete.CTL-100"]);
+    const check = makeBatchedPhaseCompleteChecker({ logPath: path });
+    expect(check("CTL-100", "research")).toBe(true); // first (full) scan
+    expect(check("CTL-200", "plan")).toBe(false); // not present yet
+    // A live host appends CTL-200's completion mid-sweep, after the first lookup:
+    appendFileSync(
+      path,
+      JSON.stringify({ attributes: { "event.name": "phase.plan.complete.CTL-200" } }) + "\n"
+    );
+    // The incremental cursor picks up the newly-appended bytes → true, not stale false.
+    expect(check("CTL-200", "plan")).toBe(true);
+  });
+
+  test("lazy — never scans when no check is invoked (zero dead-host tickets ⇒ zero reads)", () => {
+    let scanCalls = 0;
+    const scan = () => {
+      scanCalls++;
+      return { endOffset: 0, leftover: "" };
+    };
+    makeBatchedPhaseCompleteChecker({ logPath: "/whatever", scan });
+    expect(scanCalls).toBe(0);
+  });
+
+  test("re-scans the new month's file after the log path rolls over (Codex P2 on #2729)", () => {
+    const monthA = ctl1514TempLog(["phase.research.complete.CTL-100"]);
+    const monthB = ctl1514TempLog(["phase.plan.complete.CTL-200"]);
+    let current = monthA;
+    // logPath as a resolver mimics getEventLogPath() re-resolving each call; a UTC
+    // month boundary mid-sweep flips it to the new file.
+    const check = makeBatchedPhaseCompleteChecker({ logPath: () => current });
+    expect(check("CTL-100", "research")).toBe(true); // scanned month A
+    expect(check("CTL-200", "plan")).toBe(false); // not in A yet
+    current = monthB; // month rolls over
+    expect(check("CTL-200", "plan")).toBe(true); // new file scanned from 0
+    expect(check("CTL-100", "research")).toBe(true); // prior-month completion still deduped
+  });
+
+  test("resets the cursor when the same-path log is replaced/truncated (Codex P2 on #2729)", () => {
+    const path = ctl1514TempLog([
+      "phase.research.complete.CTL-100",
+      "phase.plan.complete.CTL-200",
+      "phase.verify.complete.CTL-300",
+    ]);
+    const check = makeBatchedPhaseCompleteChecker({ logPath: path });
+    expect(check("CTL-300", "verify")).toBe(true); // scans the full file, cursor at EOF
+    // Legacy rotation rewrites a SHORTER file at the SAME path with a new completion.
+    writeFileSync(
+      path,
+      JSON.stringify({ attributes: { "event.name": "phase.research.complete.CTL-900" } }) + "\n"
+    );
+    // size < cursor → reset to 0 → the replacement is scanned, not skipped past.
+    expect(check("CTL-900", "research")).toBe(true);
+  });
+});
+
 // ─── CTL-863: reclaimDeadHostWork ────────────────────────────────────────────
 
 import { reclaimDeadHostWork } from "./recovery.mjs";

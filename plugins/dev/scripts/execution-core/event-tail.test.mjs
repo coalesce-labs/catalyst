@@ -11,10 +11,10 @@
 // Run: cd plugins/dev/scripts/execution-core && bun test event-tail.test.mjs
 
 import { describe, test, expect } from "bun:test";
-import { writeFileSync, appendFileSync, mkdtempSync, statSync } from "node:fs";
+import { writeFileSync, appendFileSync, mkdtempSync, statSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { parseEventTailChunk, scanEventsChunked } from "./event-tail.mjs";
+import { parseEventTailChunk, scanEventsChunked, tailParsedEvents } from "./event-tail.mjs";
 
 // parseEventTailChunk — preserve the daemon.mjs contract verbatim.
 describe("parseEventTailChunk", () => {
@@ -68,6 +68,25 @@ describe("scanEventsChunked", () => {
     expect(seen).toEqual([{ event: "alpha" }]); // counted exactly once across chunk boundaries
   });
 
+  test("stitches a multibyte UTF-8 char split across a chunk boundary (CTL-1514, no U+FFFD)", () => {
+    const path = tempLog(['{"e":"a🚀b"}']); // 🚀 = 4 bytes → straddles a 4-byte chunk boundary
+    const seen = [];
+    scanEventsChunked({ path, fromOffset: 0, chunkSize: 4, onEvent: (e) => seen.push(e) });
+    expect(seen).toEqual([{ e: "a🚀b" }]); // char preserved byte-exact, not corrupted to �
+  });
+
+  test("skipFirstLine discards a leading partial line whose suffix is valid JSON (CTL-1514)", () => {
+    // Full line 'XX{"n":7}' is invalid JSON, but its suffix '{"n":7}' parses. A
+    // mid-line fromOffset must not surface that fragment as a bogus event.
+    const path = tempLog(['XX{"n":7}', '{"n":2}']);
+    const noSkip = [];
+    scanEventsChunked({ path, fromOffset: 2, onEvent: (e) => noSkip.push(e) }); // byte 2 = '{'
+    expect(noSkip).toEqual([{ n: 7 }, { n: 2 }]); // the fragment leaks through by default
+    const skip = [];
+    scanEventsChunked({ path, fromOffset: 2, skipFirstLine: true, onEvent: (e) => skip.push(e) });
+    expect(skip).toEqual([{ n: 2 }]); // fragment discarded — only the complete line remains
+  });
+
   test("carries a trailing partial line across an append (leftover threaded back in)", () => {
     const dir = mkdtempSync(join(tmpdir(), "evttail-"));
     const path = join(dir, "events.jsonl");
@@ -83,5 +102,91 @@ describe("scanEventsChunked", () => {
   test("missing file is a no-op (endOffset 0)", () => {
     const r = scanEventsChunked({ path: join(tmpdir(), "does-not-exist-xyz.jsonl"), fromOffset: 0, onEvent: () => {} });
     expect(r.endOffset).toBe(0);
+  });
+});
+
+describe("tailParsedEvents (CTL-1514)", () => {
+  function tempLog(lines, { trailingNewline = true } = {}) {
+    const dir = mkdtempSync(join(tmpdir(), "evttail-"));
+    const path = join(dir, "events.jsonl");
+    writeFileSync(path, lines.join("\n") + (trailingNewline ? "\n" : ""));
+    return path;
+  }
+  // trueTail — the correct semantics: parse EVERY valid line, then take the last
+  // maxLines. tailParsedEvents must equal this exactly. (Note: the OLD
+  // readBoardHealthEventTail did slice(-maxLines) on RAW lines first, so on a
+  // newline-terminated log it lost one slot to the trailing "" — returning 799
+  // for maxLines=800. tailParsedEvents intentionally returns the true last-N
+  // valid events instead: same upper bound, never fewer. See plan §5.5.)
+  function trueTail(path, maxLines) {
+    const all = [];
+    for (const line of readFileSync(path, "utf8").split("\n")) {
+      if (!line) continue;
+      try {
+        all.push(JSON.parse(line));
+      } catch {
+        /* skip */
+      }
+    }
+    return all.slice(-maxLines);
+  }
+
+  test("small file: returns the last N parsed events in order", () => {
+    const path = tempLog(['{"n":1}', '{"n":2}', '{"n":3}', '{"n":4}', '{"n":5}']);
+    expect(tailParsedEvents({ path, maxLines: 3 })).toEqual([{ n: 3 }, { n: 4 }, { n: 5 }]);
+  });
+
+  test("large file: identical to the true parsed tail, exactly maxLines", () => {
+    const lines = Array.from({ length: 5000 }, (_, i) => JSON.stringify({ n: i }));
+    const path = tempLog(lines);
+    const got = tailParsedEvents({ path, maxLines: 800 });
+    expect(got).toEqual(trueTail(path, 800));
+    expect(got).toHaveLength(800);
+    expect(got[0]).toEqual({ n: 4200 });
+    expect(got[799]).toEqual({ n: 4999 });
+  });
+
+  test("window-growth path converges to the correct tail (tiny estimate forces doublings)", () => {
+    const lines = Array.from({ length: 2000 }, (_, i) => JSON.stringify({ n: i }));
+    const path = tempLog(lines);
+    // bytesPerLineEstimate=1 → the first window is far smaller than needed, so
+    // the retry-doubling path (not the fast path) is exercised; result must still
+    // be exactly the true tail.
+    const got = tailParsedEvents({ path, maxLines: 800, bytesPerLineEstimate: 1 });
+    expect(got).toEqual(trueTail(path, 800));
+    expect(got).toHaveLength(800);
+  });
+
+  test("fewer total lines than maxLines: returns all of them", () => {
+    const path = tempLog(['{"n":1}', '{"n":2}']);
+    expect(tailParsedEvents({ path, maxLines: 800 })).toEqual([{ n: 1 }, { n: 2 }]);
+  });
+
+  test("includes a valid final record that lacks a trailing newline (CTL-1514, Codex P2)", () => {
+    const path = tempLog(['{"n":1}', '{"n":2}'], { trailingNewline: false });
+    // {"n":2} is the leftover (no trailing \n); it must still be returned.
+    expect(tailParsedEvents({ path, maxLines: 2 })).toEqual([{ n: 1 }, { n: 2 }]);
+  });
+
+  test("malformed/blank lines in the tail are skipped and don't consume the maxLines budget", () => {
+    const path = tempLog(['{"n":1}', "not-json", "", '{"n":2}', '{"n":3}']);
+    expect(tailParsedEvents({ path, maxLines: 2 })).toEqual([{ n: 2 }, { n: 3 }]);
+  });
+
+  test("empty (0-byte) file → []", () => {
+    const path = tempLog([], { trailingNewline: false });
+    expect(tailParsedEvents({ path, maxLines: 800 })).toEqual([]);
+  });
+
+  test("missing file → [] (never throws)", () => {
+    expect(tailParsedEvents({ path: join(tmpdir(), "nope-xyz-1514.jsonl"), maxLines: 800 })).toEqual([]);
+  });
+
+  test("a single line longer than the 1MiB internal chunk is returned intact", () => {
+    const big = JSON.stringify({ big: "x".repeat(2 * 1024 * 1024) });
+    const path = tempLog([big]);
+    const got = tailParsedEvents({ path, maxLines: 1 });
+    expect(got).toHaveLength(1);
+    expect(got[0].big.length).toBe(2 * 1024 * 1024);
   });
 });
