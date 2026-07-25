@@ -92,8 +92,31 @@ export CATALYST_UPDATER_LOG="${CATALYST_UPDATER_LOG:-${CATALYST_DIR}/updater.log
 # CTL-1395: the catalyst-cloud-sync writer's log (6th Alloy stream). Exported even when no
 # cloud-sync agent is installed — Alloy's loki.source.file just tails nothing.
 export CATALYST_CLOUD_SYNC_LOG="${CATALYST_CLOUD_SYNC_LOG:-${CATALYST_DIR}/cloud-sync.log}"
+# CTL-1509: the health-responder sweep log (7th stream — plain-line pipeline).
+export CATALYST_HEALTH_RESPONDER_LOG="${CATALYST_HEALTH_RESPONDER_LOG:-${CATALYST_DIR}/health-responder.log}"
 
 mkdir -p "$STORAGE"
+
+# ─── Pre-create every MISSING tailed log file (CTL-1510 item 7) ──────────────
+# Alloy's loki.source.file uses STATIC targets: a file that does not exist when
+# the component starts is NEVER picked up later. Observed live (mini-2,
+# 2026-07-25): adopt restarted Alloy 2 minutes before the health-responder
+# wrote its first log line → that stream was dark in Loki for 4 hours while the
+# other six shipped — fatal for a contract where heartbeat-ABSENCE is the
+# dead-responder signal. Create ONLY missing files — an existing file's mtime
+# must be preserved (Codex P2: doctor's responder-dispatch staleness check
+# reads health-responder.log's mtime as proof of a sweep; a touch here would
+# mask a dead responder for a full staleness window after every shipper
+# restart). Failures are non-fatal: a stream whose dir can't be created just
+# stays a tails-nothing target, exactly as before.
+for _lf in "$CATALYST_BROKER_LOG" "$CATALYST_DAEMON_LOG" "$CATALYST_OTEL_FORWARD_LOG" \
+  "$CATALYST_MONITOR_LOG" "$CATALYST_UPDATER_LOG" "$CATALYST_CLOUD_SYNC_LOG" \
+  "$CATALYST_HEALTH_RESPONDER_LOG"; do
+  [[ -e "$_lf" ]] && continue
+  mkdir -p "$(dirname "$_lf")" 2>/dev/null || true
+  touch "$_lf" 2>/dev/null || warn "cannot pre-create $_lf — that stream stays dark until the file exists at the next Alloy restart"
+done
+unset _lf
 
 log "starting alloy (node=${CATALYST_HOST_NAME:-<os-hostname>}, config=$CONFIG, storage=$STORAGE)"
 exec alloy run "$CONFIG" --storage.path "$STORAGE" ${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"}

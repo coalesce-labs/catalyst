@@ -1,5 +1,40 @@
 # Changelog
 
+## [12.36.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.35.0...catalyst-dev-v12.36.0)
+
+Jul 25, 2026
+
+<!-- ai-enhanced -->
+
+### Cloud-Sync Self-Heal & Daemon Health Responder
+
+Two fixes targeting the root causes of the 2026-07-23 replica-writer outage. The cloud-sync writer now exits cleanly within a bounded timeout on both stall and shutdown paths, writes a breadcrumb when it self-heals, and detects half-open sockets in roughly 2 ticks instead of 80+ minutes using SDK `lastFrameAt`. A new stateless launchd sweep runs every 3 minutes to catch the case where the writer dies and launchd fails to respawn it — kicking it back with a bounded, escalating retry rather than depending on `KeepAlive` alone. After merging, run `catalyst-stack install-services` on affected nodes and verify with `catalyst doctor`.
+
+
+
+### PRs
+
+* **dev:** CTL-1509 daemon-health responder — stateless launchd sweep kickstarts a dead/stale cloud-sync writer (bounded, escalating) ([#2710](https://github.com/coalesce-labs/catalyst/issues/2710)) ([6e0ec37](https://github.com/coalesce-labs/catalyst/commit/6e0ec376cb66152f98f872da3685e54a41c1e932))
+* **dev:** CTL-1508 exit-safe cloud-sync self-heal + selfheal breadcrumb + lastFrameAt stall classifier ([#2709](https://github.com/coalesce-labs/catalyst/issues/2709)) ([1e33520](https://github.com/coalesce-labs/catalyst/commit/1e33520fdca612d9f8b02e42bf6fe277f2687ee9))
+
+## [12.35.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.34.0...catalyst-dev-v12.35.0)
+
+Jul 23, 2026
+
+<!-- ai-enhanced -->
+
+### Agent Browser Leak Fix & Scheduler Hardening
+
+Leaked agent-browser Chrome processes that outlived their worker sessions — sometimes pegging a CPU core indefinitely — are now reaped automatically by a new vector in the hourly orphan sweep, which targets runaway or idle Chrome-for-Testing instances while leaving personal Chrome untouched. Workers also receive an idle-timeout environment variable at dispatch so agent-browser shuts itself down after 5 minutes of inactivity on supported versions. Two scheduler fixes round out the release: phantom ticket directories (like `.catalyst`) no longer poison board-health checks, and a transient source conflict during dispatch-time rebase now triggers a single retry against a fresh base before parking the ticket as needs-human.
+
+
+
+### PRs
+
+* **dev:** CTL-1500 reap leaked agent-browser Chrome + idle-timeout + setup-tooling ownership ([#2702](https://github.com/coalesce-labs/catalyst/issues/2702)) ([74fa0a8](https://github.com/coalesce-labs/catalyst/commit/74fa0a8ea2eda2bb96ef53772a320366ef3e87b7))
+* **dev:** CTL-1504 guard scheduler census sites + classify not-found (stop CTC-phantom board-health poison) ([#2698](https://github.com/coalesce-labs/catalyst/issues/2698)) ([6d6d154](https://github.com/coalesce-labs/catalyst/commit/6d6d15411b4fe469b175db9b4ed29a3628d38bf6))
+* **dev:** CTL-1505 retry rebase against fresh origin/&lt;base&gt; before parking a source conflict ([#2701](https://github.com/coalesce-labs/catalyst/issues/2701)) ([17de576](https://github.com/coalesce-labs/catalyst/commit/17de576be99523a232415334918010708ec00ef0))
+
 ## [12.34.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.33.0...catalyst-dev-v12.34.0)
 
 Jul 23, 2026

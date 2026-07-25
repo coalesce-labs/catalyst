@@ -48,6 +48,7 @@ import {
 // transcripts so a doc worker mid in-process fan-out is never judged silent
 // (CTL-662-safe). Used ONLY to break the cold-snapshot doc-phase 6h tie below.
 import { transcriptAgeMs as defaultTranscriptAgeMs } from "./transcript-silence.mjs";
+import { scanEventsChunked } from "./event-tail.mjs"; // CTL-1514: streaming event-log scan
 // CTL-863 fleet-unfreeze (entourage follow-up to #2552): readPeerHeartbeatsSyncCached is
 // the CACHED reader — a 45s in-process TTL cache around the same anchor-issue read, safe
 // here because dead-host detection already tolerates a far larger (10-min) staleness
@@ -3394,31 +3395,134 @@ export function readClusterAdmission({ logPath = getEventLogPath() } = {}) {
   return out;
 }
 
+// makeBatchedPhaseCompleteChecker — CTL-1514. Same (ticket, phase) => bool
+// contract as phaseAlreadyComplete, but backed by ONE full-file scan across all
+// tickets a reclaim call processes instead of one whole-file readFileSync per
+// ticket. Built on the shared scanEventsChunked primitive (CTL-673) so a 300MB+ /
+// ~478K-line log never materializes into a whole-file string + array.
+//
+// The scan is INCREMENTAL, not frozen-at-first-lookup: the first call reads the
+// whole log [0, EOF) into `seen` and remembers the byte cursor; each subsequent
+// call reads only the newly-appended bytes [cursor, newEOF) before answering. So
+// a completion appended by a live host mid-sweep (after the first lookup but
+// before a later ticket's dedup check) is still observed — the previous
+// per-ticket full read would have seen it, and this must too, or recovery
+// dispatches a duplicate phase (Codex P1 on #2729). Cost stays ~one full pass per
+// batch: the first call reads everything, later calls read only the delta (0
+// bytes ⇒ just an openSync+fstatSync). Lazy — never scans until first called.
+// Best-effort: an unreadable log leaves `seen` as-is and fails open to
+// "not complete", same posture as phaseAlreadyComplete.
+export function makeBatchedPhaseCompleteChecker({ logPath = null, scan = scanEventsChunked } = {}) {
+  const seen = new Set();
+  let scannedPath = null;
+  let cursor = 0;
+  let leftover = "";
+  const ingest = (e) => {
+    const name = e?.attributes?.["event.name"];
+    if (typeof name === "string" && name.startsWith("phase.") && name.includes(".complete.")) {
+      seen.add(name);
+    }
+  };
+  return (ticket, phase) => {
+    // Re-resolve the month-partitioned log path on EVERY check (unless a test pins
+    // logPath): a reclaim sweep that spans a UTC month boundary must pick up
+    // completions written to the NEW month's YYYY-MM.jsonl, or it redispatches an
+    // already-complete phase (Codex P2 on #2729). On rollover the cursor resets to
+    // scan the new file from 0, while `seen` carries forward so prior-month
+    // completions still dedup.
+    const path = typeof logPath === "function" ? logPath() : logPath ?? getEventLogPath();
+    try {
+      // Reset the cursor on a path change (month rollover) OR an in-place
+      // truncation/replacement — legacy rotation rewrites a SHORTER file at the same
+      // path, and if size < cursor the old offset is beyond the new EOF so its prefix
+      // would be skipped, permanently missing a completion (mirrors event-scan.mjs's
+      // size<cursor reset). Codex P2 on #2729.
+      let size = null;
+      try {
+        size = statSync(path).size;
+      } catch {
+        /* missing/unreadable → the scan below no-ops; keep prior `seen` */
+      }
+      if (path !== scannedPath || (size !== null && size < cursor)) {
+        cursor = 0;
+        leftover = "";
+        scannedPath = path;
+      }
+      const { endOffset, leftover: next } = scan({
+        path,
+        fromOffset: cursor,
+        leftover,
+        onEvent: ingest,
+      });
+      cursor = endOffset;
+      leftover = next;
+      // A completion written as the final record WITHOUT a trailing newline sits in
+      // `next` (never emitted as a complete line); ingest it if it parses so dedup
+      // doesn't miss it (idempotent — re-parsing the same leftover later is harmless).
+      if (next) {
+        try {
+          const finalName = JSON.parse(next)?.attributes?.["event.name"];
+          if (
+            typeof finalName === "string" &&
+            finalName.startsWith("phase.") &&
+            finalName.includes(".complete.")
+          ) {
+            seen.add(finalName);
+          }
+        } catch {
+          /* genuinely partial line — skip */
+        }
+      }
+    } catch {
+      /* best-effort — keep what we have; fail open to "not complete" */
+    }
+    return seen.has(`phase.${phase}.complete.${ticket}`);
+  };
+}
+
 // phaseAlreadyComplete — true when the unified event log already contains a
 // `phase.<phase>.complete.<ticket>` event. The resume path checks this before
 // re-dispatching so a survivor never re-emits a completion the dead host already
 // emitted (dedup). Best-effort: a missing/unreadable log ⇒ false; never throws.
-export function phaseAlreadyComplete(
-  ticket,
-  phase,
-  { readLog = () => readFileSync(getEventLogPath(), "utf8") } = {}
-) {
+export function phaseAlreadyComplete(ticket, phase, { readLog = null, logPath = getEventLogPath() } = {}) {
   const needle = `phase.${phase}.complete.${ticket}`;
-  let raw;
+  // Back-compat / test seam: when a caller supplies raw text directly, parse it
+  // exactly as before (all existing unit tests inject readLog).
+  if (readLog) {
+    let raw;
+    try {
+      raw = readLog();
+    } catch {
+      return false;
+    }
+    for (const line of raw.split("\n")) {
+      if (!line || !line.includes(needle)) continue;
+      try {
+        if (JSON.parse(line)?.attributes?.["event.name"] === needle) return true;
+      } catch {
+        // partial/malformed line — skip
+      }
+    }
+    return false;
+  }
+  // CTL-1514: default path streams via the shared scanEventsChunked primitive so
+  // a 300MB+ log never materializes into one whole-file string + array for a
+  // single-ticket lookup. (Memory-bounded; scanEventsChunked has no early-exit,
+  // so wall-clock is still O(bytes) — the hot-path time win comes from the
+  // batched checker collapsing N calls into 1, above.)
+  let found = false;
   try {
-    raw = readLog();
+    scanEventsChunked({
+      path: logPath,
+      fromOffset: 0,
+      onEvent: (e) => {
+        if (!found && e?.attributes?.["event.name"] === needle) found = true;
+      },
+    });
   } catch {
     return false;
   }
-  for (const line of raw.split("\n")) {
-    if (!line || !line.includes(needle)) continue;
-    try {
-      if (JSON.parse(line)?.attributes?.["event.name"] === needle) return true;
-    } catch {
-      // partial/malformed line — skip
-    }
-  }
-  return false;
+  return found;
 }
 
 // RESUME_PHASE_ORDER — the linear pipeline phases in forward order, derived from
@@ -3552,7 +3656,9 @@ export async function reclaimDeadHostWork(
     ownerForTicket: ownerFn = ownerForTicket,
     claim = (ticket, phase) => claimDispatchSync({ ticket, hostName: self, phase }),
     inferResume = (ticket, cwd) => inferResumePhase(ticket, { cwd }),
-    alreadyComplete = (ticket, phase) => phaseAlreadyComplete(ticket, phase),
+    // CTL-1514: batched default — ONE streaming log pass shared across every
+    // ticket this call processes, instead of one whole-file read per ticket.
+    alreadyComplete = makeBatchedPhaseCompleteChecker(),
     rebuildWorktree = (ticket) => {
       const result = defaultRebuildWorktree(ticket, { orchDir });
       return result;

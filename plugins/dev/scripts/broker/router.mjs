@@ -26,6 +26,7 @@ import {
   MAX_BATCH_SIZE,
   WATCHDOG_INTERVAL_MS,
   HEARTBEAT_STALE_MS,
+  HEARTBEAT_EVICT_MS,
   ORCH_STATUS_REPLAY_STALE_MS,
   DETERMINISTIC_INTEREST_TYPES,
   isIngestionRecencyEnabled,
@@ -368,6 +369,28 @@ function shouldSkipWake(sourceEventId, interestId) {
 export function __clearEmittedWakeCacheForTest() {
   _emittedWakeCache.clear();
 }
+
+// CTL-1516: delete expired _emittedWakeCache entries. Its keys are per-source-event
+// unique (an event id never recurs), so an expired entry is otherwise never
+// overwritten and the map grows without bound for the life of the process. Swept
+// on the recurring watchdog tick; `expiry <= now` is the exact complement of
+// shouldSkipWake's live-check (`now < expiry`), and unique keys guarantee that
+// removing an expired entry can never cause a duplicate wake.
+function sweepEmittedWakeCache(now = Date.now()) {
+  for (const [key, expiry] of _emittedWakeCache) {
+    if (expiry <= now) _emittedWakeCache.delete(key);
+  }
+}
+
+// Test seams (CTL-1516) — mirror the __clearEmittedWakeCacheForTest pattern so
+// the bounding contract can be asserted without reaching into module internals.
+export function __seedEmittedWakeForTest(key, expiry) {
+  _emittedWakeCache.set(key, expiry);
+}
+export function __emittedWakeCacheSizeForTest() {
+  return _emittedWakeCache.size;
+}
+export { sweepEmittedWakeCache };
 
 // === CTL-1122: ingestion-silence detection (the surviving-process observer) ===
 // The broker tails every event, so it records the last-seen timestamp + event id
@@ -2184,6 +2207,10 @@ function queueEvent(event) {
 export function runWatchdogTick({ liveness = sessionLiveness } = {}) {
   const now = Date.now();
 
+  // CTL-1516: bound the wake-dedup cache each tick (expired keys are otherwise
+  // never reclaimed — see sweepEmittedWakeCache).
+  sweepEmittedWakeCache(now);
+
   // CTL-1280: deterministic liveness heartbeat. One fixed-cadence line to
   // broker.log every watchdog tick (~60s) so an Alloy→Loki liveness check can
   // watch for the heartbeat marker instead of relying on incidental log volume (a
@@ -2236,6 +2263,11 @@ export function runWatchdogTick({ liveness = sessionLiveness } = {}) {
   // a single appendEvent call per interest — avoids N identical wake rows in
   // the HUD when N sessions go stale simultaneously.
   const staleNow = new Map(); // sourceId → { ts, minsAgo }
+  // CTL-1516: sessions to drop from lastHeartbeat + workerToOrchestrator this
+  // tick — definitively dead, or stale past the eviction horizon — so neither map
+  // lingers on an ended (per-job-unique) session id forever. Notified sessions are
+  // deleted in the wake-cleanup below; this Set backstops the unmatched rest.
+  const toEvict = new Set();
   for (const [sourceId, state] of lastHeartbeat) {
     // CTL-672: prefer the `claude agents` truth (resolved via the catalyst.db
     // sess_→UUID bridge); fall back to heartbeat-ts staleness only when the
@@ -2263,10 +2295,26 @@ export function runWatchdogTick({ liveness = sessionLiveness } = {}) {
         /* DB not opened */
       }
     }
+    // CTL-1516: a session is evictable once it is unambiguously done — reported
+    // `dead` by `claude agents`, or (when liveness is unknown) already `stale`
+    // AND aged past the eviction horizon. Requiring `stale` here guarantees
+    // eviction can never precede the configured stale threshold even if an
+    // operator raises FILTER_HEARTBEAT_STALE_MS above HEARTBEAT_EVICT_MS —
+    // otherwise an unmatched session's only heartbeat row could be dropped before
+    // the watchdog would have added it to staleNow and woken its interest (Codex
+    // P2 on #2728). Collected AFTER the CTL-403 waiting guard so a legitimately-
+    // waiting session is never evicted.
+    if (liv === "dead" || (stale && liv !== "alive" && now - state.ts > HEARTBEAT_EVICT_MS)) {
+      toEvict.add(sourceId);
+    }
     if (stale && !state.notified) {
       const minsAgo = Math.round((now - state.ts) / 60_000);
       staleNow.set(sourceId, { ts: state.ts, minsAgo });
     } else if (!stale && state.notified) {
+      // Original CTL-419 re-arm: a recovered session clears its notified flag so a
+      // future stale episode wakes again. (Kept intact — CTL-1516 bounds the maps
+      // via the toEvict backstop below, NOT by deleting on the wake, so this
+      // suppression/re-arm state machine is unchanged.)
       lastHeartbeat.set(sourceId, { ts: state.ts, notified: false });
     }
   }
@@ -2336,9 +2384,29 @@ export function runWatchdogTick({ liveness = sessionLiveness } = {}) {
       log.info({ interestId, sourceId }, "watchdog cleanup: removed stale session");
     }
     for (const sourceId of notifiedSessions) {
+      // CTL-1516: keep the original notified:true re-mark here — do NOT delete on
+      // the wake. Deleting on the first wake dropped workerToOrchestrator (breaking
+      // orchestrator-interest matching for a heartbeat-revived session) and lost
+      // the duplicate-wake suppression the notified:true row provides until an
+      // alive tick re-arms it (Codex P1/P2 on #2728). Unbounded growth is instead
+      // bounded by the toEvict backstop below, which drops a session's rows ONLY
+      // once it is dead or aged past HEARTBEAT_EVICT_MS — a terminal point where a
+      // revival would re-check-in via handleAgentCheckin and recreate both maps.
       const info = staleNow.get(sourceId);
       lastHeartbeat.set(sourceId, { ts: info.ts, notified: true });
     }
+  }
+
+  // CTL-1516: backstop eviction — the ONLY place the maps are bounded. Drop
+  // heartbeat + orchestrator-map rows for sessions that are definitively dead, or
+  // stale AND aged past HEARTBEAT_EVICT_MS. This runs regardless of whether the
+  // session matched an interest, so a session that has been woken (notified:true)
+  // and stays terminal is eventually reclaimed rather than lingering forever, and
+  // an unmatched dead/aged session is reclaimed too. At this terminal horizon a
+  // revival re-checks-in and recreates both maps, so no live association is lost.
+  for (const sourceId of toEvict) {
+    lastHeartbeat.delete(sourceId);
+    workerToOrchestrator.delete(sourceId);
   }
 
   if (watchdogWoke) {
