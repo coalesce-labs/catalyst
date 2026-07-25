@@ -154,12 +154,15 @@ RESPONDER_LIST_TIMEOUT_SECS="$(_num "${RESPONDER_LIST_TIMEOUT_SECS:-5}" 5 1)"
 RESPONDER_TOKEN_RESOLVE_TIMEOUT_SECS="$(_num "${RESPONDER_TOKEN_RESOLVE_TIMEOUT_SECS:-5}" 5 1)"
 # Whole-sweep reservation staleness (CTL-1510 item 5): a lock older than this
 # belongs to a crashed sweep and is broken. Floored BELOW at the worst-case
-# legitimate sweep duration + slop (Codex P2: the wait/timeout knobs have no
-# upper bounds, so a configured stale threshold under a legitimate sweep's
-# runtime would let the next invocation break a LIVE lock and reintroduce the
-# concurrent-kickstart race this lock exists to close).
+# legitimate sweep duration (every bounded-subprocess timeout this sweep can
+# spend waiting on — list, TOKEN RESOLUTION, kickstart, kickstart-wait — round
+# 6 added the token-resolve term, previously missing) + slop (Codex P2: the
+# wait/timeout knobs have no upper bounds, so a configured stale threshold
+# under a legitimate sweep's runtime would let the next invocation break a
+# LIVE lock and reintroduce the concurrent-kickstart race this lock exists to
+# close).
 RESPONDER_SWEEP_LOCK_STALE_SECS="$(_num "${RESPONDER_SWEEP_LOCK_STALE_SECS:-300}" 300 1)"
-_SWEEP_MIN_STALE=$(( RESPONDER_LIST_TIMEOUT_SECS + RESPONDER_KICKSTART_TIMEOUT_SECS + RESPONDER_KICKSTART_WAIT_SECS + 60 ))
+_SWEEP_MIN_STALE=$(( RESPONDER_LIST_TIMEOUT_SECS + RESPONDER_TOKEN_RESOLVE_TIMEOUT_SECS + RESPONDER_KICKSTART_TIMEOUT_SECS + RESPONDER_KICKSTART_WAIT_SECS + 60 ))
 (( RESPONDER_SWEEP_LOCK_STALE_SECS < _SWEEP_MIN_STALE )) && RESPONDER_SWEEP_LOCK_STALE_SECS="$_SWEEP_MIN_STALE"
 RESPONDER_RUN_ID="${RESPONDER_RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)-$$}"
 # Resolve every state/target path through CATALYST_DIR exactly like the

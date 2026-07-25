@@ -1414,6 +1414,33 @@ describe("checkHealthResponder", () => {
     }
   });
 
+  it("WARNs (never PASSes) on a future-dated log mtime — clock skew must not read as freshness evidence (Codex P2 round 6)", () => {
+    const checks = checkHealthResponder({
+      readFile: healthyReadFile,
+      fileExists: () => true,
+      responderState: () => ({ loaded: true, lastExit: 0 }),
+      logMtimeMs: () => T0 + 60 * 60 * 1000, // 1h in the FUTURE relative to nowMs
+      nowMs: () => T0,
+    });
+    expect(checks[0].name).toBe("responder-dispatch");
+    expect(checks[0].status).toBe(STATUS.WARN);
+    expect(checks[0].detail).toContain("future");
+  });
+
+  it("WARNs (never PASSes) on a future-dated plist mtime when the log is missing (Codex P2 round 6)", () => {
+    const checks = checkHealthResponder({
+      readFile: healthyReadFile,
+      fileExists: () => true,
+      responderState: () => ({ loaded: true, lastExit: 0 }),
+      logMtimeMs: () => null,
+      plistMtimeMs: () => T0 + 60 * 60 * 1000, // 1h in the FUTURE
+      nowMs: () => T0,
+    });
+    expect(checks[0].name).toBe("responder-dispatch");
+    expect(checks[0].status).toBe(STATUS.WARN);
+    expect(checks[0].detail).toContain("future");
+  });
+
   it("passes the plist's CATALYST_DIR (not process.env) into logMtimeMs (Codex P2 round 2)", () => {
     const plistWithDir =
       `<plist><dict><key>ProgramArguments</key><array><string>/bin/bash</string><string>${bakedPath}</string></array>` +

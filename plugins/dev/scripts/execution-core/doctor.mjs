@@ -1776,13 +1776,21 @@ function defaultResponderState() {
 // mtime for any tailed log that doesn't yet exist, and that placeholder must
 // not read as "a sweep just dispatched" when no sweep ever has.
 // Generous upper bound on how long a SINGLE sweep can legitimately run before
-// its heartbeat (launchctl-list timeout + kickstart timeout + kickstart-wait
-// settle default to well under a minute combined) — used only to distinguish
-// "a sweep is currently in progress" from "a sweep died leaving stale
-// diagnostics forever" (Codex P2 round 5). Deliberately far below the
-// staleAfterMs dispatch-warning threshold (>=900s) so it can never mask a
-// truly wedged responder.
-const RESPONDER_IN_PROGRESS_GRACE_MS = 120_000;
+// its heartbeat — used only to distinguish "a sweep is currently in
+// progress" from "a sweep died leaving stale diagnostics forever" (Codex P2
+// round 5). Doctor has no visibility into the responder's own bounded-
+// subprocess timeout env overrides (RESPONDER_LIST_TIMEOUT_SECS,
+// RESPONDER_TOKEN_RESOLVE_TIMEOUT_SECS, RESPONDER_KICKSTART_TIMEOUT_SECS,
+// RESPONDER_KICKSTART_WAIT_SECS) — unlike StartInterval, they aren't baked
+// into the plist, so this can't be truly DERIVED from the installed config
+// without a larger design change (persisting them there too). Widened to 5
+// minutes (round 6, Codex P2: 120s was tight enough that a legitimately
+// configured — if unusual — combination of those overrides could exceed it
+// and false-WARN on a still-running sweep) — comfortably covers any
+// realistic override combination while staying far below the staleAfterMs
+// dispatch-warning threshold (>=900s), so it can never mask a truly wedged
+// responder.
+const RESPONDER_IN_PROGRESS_GRACE_MS = 300_000;
 
 function defaultResponderLogMtimeMs(catalystDir, nowMsFn = () => Date.now()) {
   try {
@@ -1960,23 +1968,48 @@ export function checkHealthResponder(deps = {}) {
   const plistCatalystDir = cdirMatch ? decodePlistString(cdirMatch[1]) : null;
   const mtime = logMtimeMs(plistCatalystDir, nowMs);
   const staleAfterMs = Math.max(3 * intervalSecs, 900) * 1000;
-  if (typeof mtime === "number" && nowMs() - mtime > staleAfterMs) {
-    const ageMin = Math.round((nowMs() - mtime) / 60_000);
-    checks.push(mkCheck(
-      "responder-dispatch", STATUS.WARN,
-      `responder heartbeat log is ${ageMin} min old (interval ${intervalSecs}s) — no scheduler is dispatching the sweep (launchd StartInterval wedge, CTL-1510); check 'crontab -l' for the backstop and kickstart once to confirm the job still runs`,
-    ));
-    return checks;
+  if (typeof mtime === "number") {
+    const age = nowMs() - mtime;
+    // A NEGATIVE age (the log's mtime is in the future — a backward clock
+    // step, or a log/state dir restored from a newer snapshot, Codex P2
+    // round 6) must never read as freshness evidence: mirrors the bash-side
+    // sweep lock's own future-timestamp clamp (round 5) — favor a WARN over
+    // silently trusting a clock read that can't be verified.
+    if (age < 0) {
+      checks.push(mkCheck(
+        "responder-dispatch", STATUS.WARN,
+        "responder heartbeat log has a timestamp in the future — cannot trust it as freshness evidence (clock skew or a restored snapshot); investigate the host clock and this log's mtime",
+      ));
+      return checks;
+    }
+    if (age > staleAfterMs) {
+      const ageMin = Math.round(age / 60_000);
+      checks.push(mkCheck(
+        "responder-dispatch", STATUS.WARN,
+        `responder heartbeat log is ${ageMin} min old (interval ${intervalSecs}s) — no scheduler is dispatching the sweep (launchd StartInterval wedge, CTL-1510); check 'crontab -l' for the backstop and kickstart once to confirm the job still runs`,
+      ));
+      return checks;
+    }
   }
   if (mtime === null) {
     const pMtime = plistMtimeMs();
-    if (typeof pMtime === "number" && nowMs() - pMtime > staleAfterMs) {
-      const ageMin = Math.round((nowMs() - pMtime) / 60_000);
-      checks.push(mkCheck(
-        "responder-dispatch", STATUS.WARN,
-        `responder has never emitted a heartbeat (no log) ${ageMin} min after install — no scheduler ever dispatched the sweep (launchd StartInterval wedge, CTL-1510); check 'crontab -l' for the backstop and kickstart once to confirm the job still runs`,
-      ));
-      return checks;
+    if (typeof pMtime === "number") {
+      const page = nowMs() - pMtime;
+      if (page < 0) {
+        checks.push(mkCheck(
+          "responder-dispatch", STATUS.WARN,
+          "responder plist install timestamp is in the future — cannot trust it as freshness evidence (clock skew or a restored snapshot); investigate the host clock and this plist's mtime",
+        ));
+        return checks;
+      }
+      if (page > staleAfterMs) {
+        const ageMin = Math.round(page / 60_000);
+        checks.push(mkCheck(
+          "responder-dispatch", STATUS.WARN,
+          `responder has never emitted a heartbeat (no log) ${ageMin} min after install — no scheduler ever dispatched the sweep (launchd StartInterval wedge, CTL-1510); check 'crontab -l' for the backstop and kickstart once to confirm the job still runs`,
+        ));
+        return checks;
+      }
     }
   }
 

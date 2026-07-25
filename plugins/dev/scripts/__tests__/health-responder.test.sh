@@ -922,6 +922,14 @@ touch -t "$FUTURE_STAMP" "${RESPONDER_STATE_DIR}/sweep.lock"
 run "T62: a future-dated lock is treated as stale-eligible, not blocked forever" \
   bash -c "out=\$(RESPONDER_KICKSTART_WAIT_SECS=0 bash '$RESPONDER'); printf '%s' \"\$out\" | grep -q 'broke stale sweep lock' && test -s '${KICKSTART_LOG}'"
 
+# T63 (Codex P2 round 6): the sweep-lock stale-threshold floor must include
+# EVERY bounded subprocess this sweep can spend time in, including the
+# token-resolve timeout added in round 5 — a structural check (same idiom as
+# T54) since the computed RESPONDER_SWEEP_LOCK_STALE_SECS value has no other
+# external observation point.
+run "T63: sweep-lock floor formula includes the token-resolve timeout" \
+  bash -c "grep -q 'RESPONDER_LIST_TIMEOUT_SECS + RESPONDER_TOKEN_RESOLVE_TIMEOUT_SECS + RESPONDER_KICKSTART_TIMEOUT_SECS' '$RESPONDER'"
+
 # ─── results ────────────────────────────────────────────────────────────────
 
 echo ""
