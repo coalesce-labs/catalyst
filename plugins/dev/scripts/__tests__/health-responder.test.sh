@@ -706,25 +706,46 @@ mkdir -p "${RESPONDER_STATE_DIR}/sweep.lock"
 run "T50: contended sweep lock skips the run (heartbeat, no kickstart, foreign lock preserved)" \
   bash -c "bash '$RESPONDER' | grep -q 'heartbeat status=skipped' && ! test -s '${KICKSTART_LOG}' && test -d '${RESPONDER_STATE_DIR}/sweep.lock'"
 run "T50b: a stale sweep lock is broken and the sweep proceeds" \
-  bash -c "touch -t 202501010000 '${RESPONDER_STATE_DIR}/sweep.lock'; out=\$(RESPONDER_KICKSTART_WAIT_SECS=0 bash '$RESPONDER'); printf '%s' \"\$out\" | grep -q 'breaking stale sweep lock' && test -s '${KICKSTART_LOG}'"
+  bash -c "touch -t 202501010000 '${RESPONDER_STATE_DIR}/sweep.lock'; out=\$(RESPONDER_KICKSTART_WAIT_SECS=0 bash '$RESPONDER'); printf '%s' \"\$out\" | grep -q 'broke stale sweep lock' && test -s '${KICKSTART_LOG}'"
 run "T50c: the lock is released when the sweep exits" \
   bash -c "! test -d '${RESPONDER_STATE_DIR}/sweep.lock'"
 _reset
 run "T50d: dry-run never creates the sweep lock (read-only contract)" \
   bash -c "bash '$RESPONDER' --dry-run >/dev/null && ! test -e '${RESPONDER_STATE_DIR}/sweep.lock'"
 
-# T51 (item 4): unprunable expired markers degrade EXPLICITLY — and a cap
-# built on that unreliable count refuses to escalate.
+# T50e (Codex P2 round 2): the stale-lock CLAIM must be atomic — only ONE of
+# two sweeps racing the SAME stale lock may successfully rename it aside
+# (health-responder.sh's _claim_stale_lock). A racing pair calling `mv
+# "$SWEEP_LOCK_DIR" <distinct-tmp>` on the SAME source: the first succeeds and
+# the source is now gone, so the second's `mv` of that same (now-nonexistent)
+# source path MUST fail — it can never reach the unconditional `rm -rf` that
+# used to delete a concurrently-reacquired fresh lock out from under its owner.
 _reset
-touch "$PLIST" # dead-writer condition
-mkdir -p "$RESPONDER_STATE_DIR"
-for i in 1 2 3; do : > "${RESPONDER_STATE_DIR}/attempt.100000000${i}.t"; done # expired (year 2001)
-chmod 555 "$RESPONDER_STATE_DIR"
-run "T51: unprunable expired markers log the over-count ERROR" \
-  bash -c "bash '$RESPONDER' | grep -q 'could not be pruned'"
-run "T51b: cap-on-unreliable-count refuses to escalate (degraded, no kickstart)" \
-  bash -c "out=\$(bash '$RESPONDER'); printf '%s' \"\$out\" | grep -q 'refusing to escalate on unreliable state' && printf '%s' \"\$out\" | grep -q 'heartbeat status=degraded' && ! test -s '${KICKSTART_LOG}'"
-chmod 755 "$RESPONDER_STATE_DIR"
+mkdir -p "${RESPONDER_STATE_DIR}/sweep.lock"
+run "T50e: only the first of two racing claims on the same stale lock succeeds" \
+  bash -c "mv '${RESPONDER_STATE_DIR}/sweep.lock' '${RESPONDER_STATE_DIR}/sweep.lock.stale.first' 2>/dev/null && ! mv '${RESPONDER_STATE_DIR}/sweep.lock' '${RESPONDER_STATE_DIR}/sweep.lock.stale.second' 2>/dev/null"
+rm -rf "${RESPONDER_STATE_DIR}/sweep.lock.stale.first"
+
+# T51 (item 4): unprunable expired markers degrade EXPLICITLY — and a cap
+# built on that unreliable count refuses to escalate. Root ignores directory
+# permissions (same T44 reasoning, Codex P2 round 2: reproduced failing in a
+# root container) — chmod 555 cannot make markers unremovable for root, so
+# skip there; the permission mechanism cannot bind root.
+if [[ "$(id -u)" -ne 0 ]]; then
+  _reset
+  touch "$PLIST" # dead-writer condition
+  mkdir -p "$RESPONDER_STATE_DIR"
+  for i in 1 2 3; do : > "${RESPONDER_STATE_DIR}/attempt.100000000${i}.t"; done # expired (year 2001)
+  chmod 555 "$RESPONDER_STATE_DIR"
+  run "T51: unprunable expired markers log the over-count ERROR" \
+    bash -c "bash '$RESPONDER' | grep -q 'could not be pruned'"
+  run "T51b: cap-on-unreliable-count refuses to escalate (degraded, no kickstart)" \
+    bash -c "out=\$(bash '$RESPONDER'); printf '%s' \"\$out\" | grep -q 'refusing to escalate on unreliable state' && printf '%s' \"\$out\" | grep -q 'heartbeat status=degraded' && ! test -s '${KICKSTART_LOG}'"
+  chmod 755 "$RESPONDER_STATE_DIR"
+else
+  echo "  SKIP: T51 (running as root — chmod cannot make markers unremovable)"
+  echo "  SKIP: T51b (running as root — chmod cannot make markers unremovable)"
+fi
 
 # T52 (item 3): a bake path containing '&' must survive substitution — XML-
 # escaped in the plist (sed's whole-match metacharacter would otherwise mangle

@@ -472,14 +472,30 @@ _acquire_sweep_lock() {
   SWEEP_LOCK_HELD=1
   return 0
 }
+# _claim_stale_lock: atomically take EXCLUSIVE ownership of breaking a stale
+# lock (Codex P2 round 2). `mv` on the same filesystem is atomic — only ONE
+# concurrent sweep's rename of SWEEP_LOCK_DIR can succeed; every other sweep's
+# `mv` fails with ENOENT (the source is already gone) and returns non-zero.
+# Without this, two sweeps racing the SAME stale-age check could both pass,
+# one recreates a fresh lock, and the other's unconditional `rm -rf` deletes
+# that fresh lock out from under it — defeating the whole reservation.
+_claim_stale_lock() {
+  local claim="${SWEEP_LOCK_DIR}.stale.$$"
+  mv "$SWEEP_LOCK_DIR" "$claim" 2>/dev/null || return 1
+  rm -rf "$claim" 2>/dev/null || true
+  return 0
+}
 if ! is_dry; then
   if ! _acquire_sweep_lock; then
     if [[ -d "$SWEEP_LOCK_DIR" ]]; then
       _lock_m="$(_mtime "$SWEEP_LOCK_DIR")"
       if [[ "$_lock_m" =~ ^[0-9]+$ ]] && (( $(date +%s) - _lock_m > RESPONDER_SWEEP_LOCK_STALE_SECS )); then
-        log "breaking stale sweep lock (age $(( $(date +%s) - _lock_m ))s > ${RESPONDER_SWEEP_LOCK_STALE_SECS}s) — prior sweep crashed"
-        rm -rf "$SWEEP_LOCK_DIR" 2>/dev/null || true
-        _acquire_sweep_lock || true
+        if _claim_stale_lock; then
+          log "broke stale sweep lock (age $(( $(date +%s) - _lock_m ))s > ${RESPONDER_SWEEP_LOCK_STALE_SECS}s) — prior sweep crashed"
+          _acquire_sweep_lock || true
+        fi
+        # A failed claim means another sweep already broke/reacquired it —
+        # fall through to the SWEEP_LOCK_HELD check below like any contention.
       fi
       if [[ "$SWEEP_LOCK_HELD" -eq 0 ]]; then
         INSTALLED=0 ALIVE=0 C_DEAD=0 C_STALE=0 C_NORESPAWN=0 ATTEMPTS=0 ESCALATED=0

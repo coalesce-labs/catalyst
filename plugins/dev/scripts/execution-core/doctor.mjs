@@ -1766,12 +1766,21 @@ function defaultResponderState() {
 }
 
 // defaultResponderLogMtimeMs — mtime (ms) of the responder heartbeat log, or
-// null when missing/unreadable. Same CATALYST_DIR resolution as the responder
-// itself (CTL-1510 item 1: the paths must never disagree).
-function defaultResponderLogMtimeMs() {
+// null when missing/unreadable/EMPTY. catalystDir, when given, is the value
+// baked into the installed plist (Codex P2 round 2: the caller's own
+// process.env.CATALYST_DIR is a transient invocation detail — a doctor run
+// without that env set would check the wrong path on a nondefault-CATALYST_DIR
+// node even though the plist correctly persists it, CTL-1510 item 1). A
+// zero-byte log is treated the SAME as missing (Codex P2 round 2): the
+// log-shipper pre-create fix (item 7) touches a placeholder file with a fresh
+// mtime for any tailed log that doesn't yet exist, and that placeholder must
+// not read as "a sweep just dispatched" when no sweep ever has.
+function defaultResponderLogMtimeMs(catalystDir) {
   try {
-    const dir = process.env.CATALYST_DIR || resolve(homedir(), "catalyst");
-    return statSync(resolve(dir, "health-responder.log")).mtimeMs;
+    const dir = catalystDir || process.env.CATALYST_DIR || resolve(homedir(), "catalyst");
+    const st = statSync(resolve(dir, "health-responder.log"));
+    if (st.size === 0) return null;
+    return st.mtimeMs;
   } catch {
     return null;
   }
@@ -1911,7 +1920,15 @@ export function checkHealthResponder(deps = {}) {
   // fresh install (RunAtLoad normally writes within seconds).
   const im = xml.match(/<key>StartInterval<\/key>\s*<integer>(\d+)<\/integer>/);
   const intervalSecs = im ? parseInt(im[1], 10) : 180;
-  const mtime = logMtimeMs();
+  // Resolve CATALYST_DIR from the INSTALLED plist, not the caller's own
+  // process.env (Codex P2 round 2): a doctor invocation without that env set
+  // would otherwise check the default ~/catalyst path even on a node whose
+  // plist correctly persists a nondefault CATALYST_DIR (item 1), and either
+  // false-WARN on an actively-dispatching responder or false-PASS by reading
+  // an unrelated default-dir log.
+  const cdirMatch = xml.match(/<key>CATALYST_DIR<\/key>\s*<string>([^<]*)<\/string>/);
+  const plistCatalystDir = cdirMatch ? decodePlistString(cdirMatch[1]) : null;
+  const mtime = logMtimeMs(plistCatalystDir);
   const staleAfterMs = Math.max(3 * intervalSecs, 900) * 1000;
   if (typeof mtime === "number" && nowMs() - mtime > staleAfterMs) {
     const ageMin = Math.round((nowMs() - mtime) / 60_000);

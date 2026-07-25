@@ -1292,6 +1292,42 @@ describe("checkHealthResponder", () => {
     expect(checks[0].status).toBe(STATUS.PASS);
   });
 
+  it("WARNs (via the REAL log reader, no injected logMtimeMs) on a zero-byte pre-created log — the log-shipper's own placeholder must not read as a live sweep (Codex P2 round 2)", () => {
+    const dir = mkdtempSync(join(tmpdir(), "doctor-hr-emptylog-"));
+    writeFileSync(join(dir, "health-responder.log"), ""); // log-shipper's touch-if-missing placeholder
+    const oldEnv = process.env.CATALYST_DIR;
+    process.env.CATALYST_DIR = dir;
+    try {
+      const checks = checkHealthResponder({
+        readFile: healthyReadFile,
+        fileExists: () => true,
+        responderState: () => ({ loaded: true, lastExit: 0 }),
+        plistMtimeMs: () => Date.now() - 4 * 3600 * 1000, // install was hours ago
+      });
+      expect(checks[0].name).toBe("responder-dispatch");
+      expect(checks[0].status).toBe(STATUS.WARN);
+    } finally {
+      process.env.CATALYST_DIR = oldEnv;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("passes the plist's CATALYST_DIR (not process.env) into logMtimeMs (Codex P2 round 2)", () => {
+    const plistWithDir =
+      `<plist><dict><key>ProgramArguments</key><array><string>/bin/bash</string><string>${bakedPath}</string></array>` +
+      `<key>CATALYST_DIR</key><string>/Volumes/Custom &amp; Dir/catalyst</string></dict></plist>`;
+    const seenDirs = [];
+    const checks = checkHealthResponder({
+      readFile: (p) => (p.endsWith(".plist") ? plistWithDir : responderScript),
+      fileExists: () => true,
+      responderState: () => ({ loaded: true, lastExit: 0 }),
+      logMtimeMs: (dir) => { seenDirs.push(dir); return T0 - 60 * 1000; },
+      nowMs: () => T0,
+    });
+    expect(seenDirs).toContain("/Volumes/Custom & Dir/catalyst");
+    expect(checks[0].status).toBe(STATUS.PASS);
+  });
+
   it("decodes XML entities in the baked path before existence checks (an '&' path plist)", () => {
     const ampPath = "/Users/x/amp & dir/scripts/health-responder.sh";
     const encoded = ampPath.replace(/&/g, "&amp;");
