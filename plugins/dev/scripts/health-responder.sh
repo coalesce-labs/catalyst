@@ -60,6 +60,11 @@
 #   RESPONDER_KICKSTART_WAIT_SECS  — post-kickstart settle before re-probe, default 10
 #   RESPONDER_STATE_DIR            — marker dir, default ~/catalyst/.health-responder
 #   RESPONDER_SELFHEAL_FILE        — breadcrumb path, default ~/catalyst/cloud-sync.selfheal.json
+#   RESPONDER_TOKEN_FILE           — cloud-sync token file whose presence turns an
+#                                    exit-0 down writer from "idle by design" into
+#                                    the failed-bounce fault (CTL-1510 item 0),
+#                                    default ~/.config/catalyst/cloud-sync.env
+#   RESPONDER_SWEEP_LOCK_STALE_SECS — crashed-sweep lock breaker age, default 300
 #   RESPONDER_DRY_RUN              — set to 1 or use --dry-run flag
 #   RESPONDER_RUN_ID               — default: timestamp-based (set in tests for determinism)
 #   CATALYST_REPLICA_DB            — replica db path (lock = <db>.writer.lock),
@@ -133,6 +138,10 @@ RESPONDER_SELFHEAL_GRACE_SECS="$(_num "$RESPONDER_SELFHEAL_GRACE_SECS" 120 0)"
 # Deadline for the `launchctl list` intentional-exit probe (Codex P2 round 4:
 # the same hung-launchctl class the kickstart deadline guards against).
 RESPONDER_LIST_TIMEOUT_SECS="$(_num "${RESPONDER_LIST_TIMEOUT_SECS:-5}" 5 1)"
+# Whole-sweep reservation staleness (CTL-1510 item 5): a lock older than this
+# belongs to a crashed sweep and is broken. Far above the worst-case sweep
+# (list timeout + kickstart timeout + settle wait ≈ 35s).
+RESPONDER_SWEEP_LOCK_STALE_SECS="$(_num "${RESPONDER_SWEEP_LOCK_STALE_SECS:-300}" 300 1)"
 RESPONDER_RUN_ID="${RESPONDER_RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)-$$}"
 # Resolve every state/target path through CATALYST_DIR exactly like the
 # writer's config.mjs catalystDir() (Codex P1 round 3): a node using the
@@ -152,6 +161,16 @@ CLOUD_SYNC_PLIST="${CATALYST_LAUNCHAGENTS_DIR:-${HOME}/Library/LaunchAgents}/${C
 REPLICA_DB="${CATALYST_REPLICA_DB:-${CATALYST_DIR}/catalyst-replica.db}"
 WRITER_LOCK="${REPLICA_DB}.writer.lock"
 ESCALATED_MARKER="${RESPONDER_STATE_DIR}/ESCALATED.cloud-sync"
+# The operator-provisioned token file the cloud-sync launcher sources
+# (cloud-sync/launch.sh). Presence discriminates the two exit-0 flows for the
+# intentional-exit gate (CTL-1510 item 0): tokenless idle no-op (file absent —
+# genuinely idle by design) vs a failed bounce (file present — adopt's bootout
+# SIGTERM'd the writer to exit 0 but the bootstrap relaunch never stuck, the
+# live mini-2 incident). NOTE the deliberate trade-off: a manual SIGTERM stop
+# on a token-bearing node now gets kickstarted — an operator who wants the
+# writer to STAY down must use the RESPONDER_ENABLED=0 kill-switch (or
+# uninstall); the attempt cap bounds the disagreement either way.
+RESPONDER_TOKEN_FILE="${RESPONDER_TOKEN_FILE:-${HOME}/.config/catalyst/cloud-sync.env}"
 
 # ─── helpers ────────────────────────────────────────────────────────────────
 
@@ -320,6 +339,12 @@ _probe_selfheal() {
 # free" as time passes, the CTL-624 cool-down-marker idiom. File-backed (not
 # in-memory) because every responder run is a fresh process by design.
 
+# Sets PRUNE_DEGRADED=1 when an expired/unparseable marker SURVIVES its rm
+# (state dir went read-only): those markers keep counting toward the cap, so
+# escalation could fire outside the configured window on phantom attempts.
+# The consumers degrade explicitly (CTL-1510 item 4) instead of acting on the
+# unreliable count — same contract as the _record_attempt / _clear_markers
+# failure paths.
 _prune_attempts() {
   is_dry && return 0 # dry-run is read-only — stale markers are reported, never pruned
   local f ts now
@@ -328,8 +353,15 @@ _prune_attempts() {
     [[ -e "$f" ]] || continue
     ts="${f##*/}"; ts="${ts#attempt.}"; ts="${ts%%.*}"
     # Unparseable marker name → remove it (it can only mis-count).
-    [[ "$ts" =~ ^[0-9]+$ ]] || { rm -f "$f"; continue; }
-    [[ $(( now - ts )) -gt "$RESPONDER_ATTEMPT_WINDOW_SECS" ]] && rm -f "$f"
+    if [[ ! "$ts" =~ ^[0-9]+$ ]]; then
+      rm -f "$f" 2>/dev/null
+      [[ -e "$f" ]] && PRUNE_DEGRADED=1
+      continue
+    fi
+    if [[ $(( now - ts )) -gt "$RESPONDER_ATTEMPT_WINDOW_SECS" ]]; then
+      rm -f "$f" 2>/dev/null
+      [[ -e "$f" ]] && PRUNE_DEGRADED=1
+    fi
   done
   return 0
 }
@@ -390,6 +422,43 @@ fi
 # creation, no marker mutation anywhere — the only dry-run output is log lines.
 is_dry || mkdir -p "$RESPONDER_STATE_DIR" 2>/dev/null || true
 
+# ─── whole-sweep reservation (CTL-1510 item 5) ──────────────────────────────
+#
+# Two overlapping sweeps (manual + scheduled, or launchd + the cron backstop)
+# could both read attempts=N-1 and both kickstart (cap+1). One atomic mkdir
+# closes the window: the sweep that gets the lock dir runs; a contender
+# heartbeats "skipped" and exits (the heartbeat-always contract holds — a
+# skipped sweep is visible, not silent). A lock older than
+# RESPONDER_SWEEP_LOCK_STALE_SECS belongs to a crashed sweep and is broken.
+# Degrades gracefully (adversarial caveat): a read-only state dir means mkdir
+# fails with NO dir present — proceed UNLOCKED (the TOCTOU window returns, but
+# a responder that cannot write state refuses to act anyway via
+# _record_attempt, so the regression is bounded to dry-run-like probing).
+SWEEP_LOCK_DIR="${RESPONDER_STATE_DIR}/sweep.lock"
+SWEEP_LOCK_HELD=0
+if ! is_dry; then
+  if mkdir "$SWEEP_LOCK_DIR" 2>/dev/null; then
+    SWEEP_LOCK_HELD=1
+  elif [[ -d "$SWEEP_LOCK_DIR" ]]; then
+    _lock_m="$(_mtime "$SWEEP_LOCK_DIR")"
+    if [[ "$_lock_m" =~ ^[0-9]+$ ]] && (( $(date +%s) - _lock_m > RESPONDER_SWEEP_LOCK_STALE_SECS )); then
+      log "breaking stale sweep lock (age $(( $(date +%s) - _lock_m ))s > ${RESPONDER_SWEEP_LOCK_STALE_SECS}s) — prior sweep crashed"
+      rmdir "$SWEEP_LOCK_DIR" 2>/dev/null || true
+      mkdir "$SWEEP_LOCK_DIR" 2>/dev/null && SWEEP_LOCK_HELD=1
+    fi
+    if [[ "$SWEEP_LOCK_HELD" -eq 0 ]]; then
+      INSTALLED=0 ALIVE=0 C_DEAD=0 C_STALE=0 C_NORESPAWN=0 ATTEMPTS=0 ESCALATED=0
+      log "another sweep holds ${SWEEP_LOCK_DIR} — skipping this run"
+      heartbeat "skipped"
+      exit 0
+    fi
+  else
+    log "WARN: cannot create sweep lock under ${RESPONDER_STATE_DIR} (read-only?) — proceeding unlocked"
+  fi
+fi
+# Release on ANY exit path — the trap is a no-op when the lock isn't held.
+trap '[[ "${SWEEP_LOCK_HELD:-0}" -eq 1 ]] && rmdir "$SWEEP_LOCK_DIR" 2>/dev/null' EXIT
+
 # ─── detect ─────────────────────────────────────────────────────────────────
 
 INSTALLED=0
@@ -415,7 +484,20 @@ SETTLING=0
 _LE=""
 if [[ "$INSTALLED" -eq 1 && "$ALIVE" -eq 0 ]]; then
   _LE="$(_last_exit_status)"
-  [[ "$_LE" == "0" ]] && log "writer idle by design (last exit 0 — tokenless no-op or manual stop); not a fault"
+  if [[ "$_LE" == "0" ]]; then
+    # Token-file discrimination (CTL-1510 item 0): exit 0 is only "idle by
+    # design" on a TOKENLESS node. With a token provisioned, a down writer
+    # with a clean exit is the failed-bounce signature (bootout's SIGTERM →
+    # exit 0 → bootstrap never stuck) — both KeepAlive={SuccessfulExit:false}
+    # and a naive exit-0 gate would suppress recovery forever. Neutralize the
+    # gate so dead-writer/no-respawn detection applies.
+    if [[ -r "$RESPONDER_TOKEN_FILE" ]]; then
+      log "writer down with last exit 0 but a token file is provisioned (${RESPONDER_TOKEN_FILE}) — failed-bounce signature, treating as dead (CTL-1510 item 0)"
+      _LE=""
+    else
+      log "writer idle by design (last exit 0, no token file); not a fault"
+    fi
+  fi
 fi
 
 # Condition 1: dead-writer. Installed-gated: a node without the cloud-sync
@@ -463,8 +545,10 @@ CONDITIONS_CSV="${CONDITIONS_CSV%,}"
 ESCALATED=0
 [[ -f "$ESCALATED_MARKER" ]] && ESCALATED=1
 
+PRUNE_DEGRADED=0
 _prune_attempts
 ATTEMPTS="$(_attempt_count)"
+[[ "$PRUNE_DEGRADED" -eq 1 ]] && log "ERROR: expired attempt markers could not be pruned from ${RESPONDER_STATE_DIR} (read-only?) — attempt count over-counts; fix permissions"
 
 # ─── act ────────────────────────────────────────────────────────────────────
 
@@ -513,6 +597,15 @@ if [[ "$ESCALATED" -eq 1 ]]; then
 fi
 
 if [[ "$ATTEMPTS" -ge "$RESPONDER_MAX_ATTEMPTS" ]]; then
+  # Cap reached on an UNRELIABLE count (unprunable expired markers, CTL-1510
+  # item 4): the "cap" may be phantom attempts from a past incident — a false
+  # escalation outside the window. Degrade explicitly instead of escalating on
+  # state we know is broken; the ERROR above ships to Loki on every sweep.
+  if [[ "$PRUNE_DEGRADED" -eq 1 ]]; then
+    log "ERROR: attempt cap reached but the count includes unprunable expired markers — refusing to escalate on unreliable state; fix ${RESPONDER_STATE_DIR} permissions"
+    heartbeat "degraded"
+    exit 0
+  fi
   # Cap exhausted and the writer is STILL down — bounded response is over.
   # ERROR-severity line (Alloy ships this log to Loki) + fail-open OTel event,
   # then the one-shot marker so we never re-emit or keep kickstarting.

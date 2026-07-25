@@ -1765,6 +1765,18 @@ function defaultResponderState() {
   }
 }
 
+// defaultResponderLogMtimeMs — mtime (ms) of the responder heartbeat log, or
+// null when missing/unreadable. Same CATALYST_DIR resolution as the responder
+// itself (CTL-1510 item 1: the paths must never disagree).
+function defaultResponderLogMtimeMs() {
+  try {
+    const dir = process.env.CATALYST_DIR || resolve(homedir(), "catalyst");
+    return statSync(resolve(dir, "health-responder.log")).mtimeMs;
+  } catch {
+    return null;
+  }
+}
+
 // checkHealthResponder (CTL-1509) — the periodic cloud-sync health responder
 // (health-responder.sh, the bounded-kickstart sweep) must be installed, LOADED
 // by launchd, its baked program path must still exist, and the installed script
@@ -1792,6 +1804,11 @@ export function checkHealthResponder(deps = {}) {
     readFile = (p) => readFileSync(p, "utf8"),
     fileExists = (p) => existsSync(p),
     responderState = defaultResponderState,
+    // CTL-1510 item 6: mtime of the responder heartbeat log (every sweep —
+    // healthy or not — appends exactly one line, so a fresh mtime IS proof of
+    // dispatch). null = missing/unreadable.
+    logMtimeMs = defaultResponderLogMtimeMs,
+    nowMs = () => Date.now(),
   } = deps;
   const checks = [];
 
@@ -1855,15 +1872,39 @@ export function checkHealthResponder(deps = {}) {
       "responder-health", STATUS.WARN,
       "responder last exited 127 (program path unresolved) — reinstall from the pristine clone",
     ));
-  } else if (typeof lastExit === "number" && lastExit !== 0) {
+    return checks;
+  }
+  if (typeof lastExit === "number" && lastExit !== 0) {
     checks.push(mkCheck(
       "responder-health", STATUS.WARN,
       `responder last exited ${lastExit} — check ~/catalyst/health-responder.log`,
     ));
-  } else {
-    // lastExit === 0 (clean) or null (loaded but never run yet)
-    checks.push(mkCheck("responder-health", STATUS.PASS, `health responder installed and healthy (${baked})`));
+    return checks;
   }
+
+  // Dispatch staleness (CTL-1510 item 6): "loaded + clean exit" is NOT proof
+  // the schedule is alive — a fleet host was observed with launchd holding the
+  // job loaded, LastExitStatus 0, and NO automatic spawns for hours
+  // (StartInterval pended; even RunAtLoad stopped firing after a reload).
+  // Every sweep appends a heartbeat line, so a log mtime older than 3×
+  // StartInterval means NEITHER launchd NOR the cron backstop is dispatching.
+  // A missing log with a loaded job is indistinguishable from never-run-yet —
+  // stay quiet there (RunAtLoad normally writes within seconds of install).
+  const im = xml.match(/<key>StartInterval<\/key>\s*<integer>(\d+)<\/integer>/);
+  const intervalSecs = im ? parseInt(im[1], 10) : 180;
+  const mtime = logMtimeMs();
+  const staleAfterMs = Math.max(3 * intervalSecs, 900) * 1000;
+  if (typeof mtime === "number" && nowMs() - mtime > staleAfterMs) {
+    const ageMin = Math.round((nowMs() - mtime) / 60_000);
+    checks.push(mkCheck(
+      "responder-dispatch", STATUS.WARN,
+      `responder heartbeat log is ${ageMin} min old (interval ${intervalSecs}s) — no scheduler is dispatching the sweep (launchd StartInterval wedge, CTL-1510); check 'crontab -l' for the backstop and kickstart once to confirm the job still runs`,
+    ));
+    return checks;
+  }
+
+  // lastExit === 0 (clean) or null (loaded but never run yet), heartbeat fresh
+  checks.push(mkCheck("responder-health", STATUS.PASS, `health responder installed and healthy (${baked})`));
   return checks;
 }
 

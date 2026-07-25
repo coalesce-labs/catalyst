@@ -179,20 +179,42 @@ _interval_seconds() {
 
 # ─── template substitution ──────────────────────────────────────────────────
 
+# PATH for launchd's/cron's otherwise-minimal environment (Codex P2): homebrew
+# jq (the breadcrumb parser — without it the settling hold + no-respawn
+# detection go dark), bun, and the member CLI dirs. Mirrors catalyst-stack's
+# _stack_agent_path (CTL-1289) — keep the two in sync. Shared by the plist
+# substitution AND the cron backstop line (CTL-1510 item 6).
+_agent_path() {
+  echo "${HOME}/.catalyst/bin:${HOME}/.local/node/bin:${HOME}/.local/bin:${HOME}/.bun/bin:/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+}
+
+# _escape_repl VALUE — make VALUE safe to inject into the plist via sed
+# (CTL-1510 item 3). A path like "/Volumes/Catalyst & Data" otherwise breaks
+# TWICE: `&` is sed's whole-match metacharacter (mangled program path → silent
+# exit-127 loop) and a raw `&`/`<`/`>` is invalid inside an XML <string>.
+# Order matters: backslash-double first (before we add our own backslashes),
+# XML-entity-escape second, sed-metacharacter-escape last (so the `&` in
+# `&amp;` is itself protected from sed).
+_escape_repl() {
+  local v="$1"
+  v="${v//\\/\\\\}"
+  v="${v//&/&amp;}"
+  v="${v//</&lt;}"
+  v="${v//>/&gt;}"
+  v="${v//&/\\&}"
+  v="${v//|/\\|}"
+  printf '%s' "$v"
+}
+
 _substitute() {
-  local interval agent_path
+  local interval
   interval="$(_interval_seconds)"
-  # PATH for launchd's otherwise-minimal environment (Codex P2): homebrew jq
-  # (the breadcrumb parser — without it the settling hold + no-respawn
-  # detection go dark), bun, and the member CLI dirs. Mirrors catalyst-stack's
-  # _stack_agent_path (CTL-1289) — keep the two in sync.
-  agent_path="${HOME}/.catalyst/bin:${HOME}/.local/node/bin:${HOME}/.local/bin:${HOME}/.bun/bin:/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
   sed \
-    -e "s|REPLACE_WITH_ABSOLUTE|${BAKE_DIR}|g" \
-    -e "s|REPLACE_HOME|${HOME}|g" \
+    -e "s|REPLACE_WITH_ABSOLUTE|$(_escape_repl "$BAKE_DIR")|g" \
+    -e "s|REPLACE_HOME|$(_escape_repl "$HOME")|g" \
     -e "s|REPLACE_START_INTERVAL|${interval}|g" \
-    -e "s|REPLACE_PATH|${agent_path}|g" \
-    -e "s|REPLACE_CATALYST_DIR|${CATALYST_DIR:-${HOME}/catalyst}|g" \
+    -e "s|REPLACE_PATH|$(_escape_repl "$(_agent_path)")|g" \
+    -e "s|REPLACE_CATALYST_DIR|$(_escape_repl "${CATALYST_DIR:-${HOME}/catalyst}")|g" \
     "$TEMPLATE"
 }
 
@@ -202,10 +224,30 @@ _substitute() {
 # only needs DEST + LABEL, so it must work even from a /tmp checkout or linked
 # worktree (CTL-1306). The guard never gates uninstall.
 
+# Tag marking the responder's cron backstop line (CTL-1510 item 6). A trailing
+# `# comment` inside a crontab COMMAND is a shell comment (cron hands the line
+# to sh), so one self-tagged line is both greppable and inert.
+CRON_TAG="# ai.coalesce.catalyst-health-responder backstop CTL-1510"
+
+# _remove_cron_backstop: drop our tagged line from the user crontab, keeping
+# everything else. No crontab binary / no crontab at all → silent no-op.
+_remove_cron_backstop() {
+  command -v crontab >/dev/null 2>&1 || return 0
+  local existing
+  existing="$(crontab -l 2>/dev/null | grep -vF "$CRON_TAG" || true)"
+  if [[ -n "$existing" ]]; then
+    printf '%s\n' "$existing" | crontab -
+  else
+    crontab -r 2>/dev/null || true
+  fi
+  return 0
+}
+
 if [[ "$UNINSTALL" -eq 1 ]]; then
   launchctl bootout "gui/$(id -u)/${LABEL}" 2>/dev/null || true
   rm -f "$DEST"
-  echo "install-health-responder.sh: uninstalled ${LABEL}"
+  _remove_cron_backstop
+  echo "install-health-responder.sh: uninstalled ${LABEL} (launchd agent + cron backstop)"
   exit 0
 fi
 
@@ -269,3 +311,33 @@ launchctl bootout "gui/$(id -u)/${LABEL}" 2>/dev/null || true
 launchctl bootstrap "gui/$(id -u)" "$DEST"
 echo "install-health-responder.sh: loaded ${LABEL} into gui/$(id -u)"
 echo "install-health-responder.sh: verify with 'launchctl list | grep ${LABEL}'"
+
+# ─── cron backstop (CTL-1510 item 6) ─────────────────────────────────────────
+#
+# launchd cannot be the responder's only scheduler: a fleet host (mini-2,
+# 2026-07-25) was observed accepting this job into its gui domain and then
+# refusing ALL automatic spawns — StartInterval pended indefinitely and even
+# RunAtLoad stopped firing after a clean bootout/bootstrap, while kickstart
+# ran the sweep fine and an older StartInterval job kept firing in the same
+# domain. The watchdog's own scheduling layer therefore has the exact
+# unreliability class it exists to guard against, so a second, independent
+# dispatch path is installed unconditionally: a self-tagged user crontab line.
+# Overlap with a working launchd schedule is serialized by the responder's
+# whole-sweep lock (item 5) — worst case is a skipped-heartbeat sweep, never a
+# double kickstart. Env is inline (cron's default env is bare): the same PATH
+# the plist bakes (jq lives in homebrew) + CATALYST_DIR.
+if command -v crontab >/dev/null 2>&1; then
+  CRON_MINUTES=$(( ( $(_interval_seconds) + 59 ) / 60 ))
+  [[ "$CRON_MINUTES" -lt 1 ]] && CRON_MINUTES=1
+  [[ "$CRON_MINUTES" -gt 59 ]] && CRON_MINUTES=59
+  CRON_LINE="*/${CRON_MINUTES} * * * * PATH=\"$(_agent_path)\" CATALYST_DIR=\"${CATALYST_DIR:-${HOME}/catalyst}\" /bin/bash \"${BAKE_DIR}/health-responder.sh\" >> \"${CATALYST_DIR:-${HOME}/catalyst}/health-responder.log\" 2>&1 ${CRON_TAG}"
+  EXISTING_CRON="$(crontab -l 2>/dev/null | grep -vF "$CRON_TAG" || true)"
+  if [[ -n "$EXISTING_CRON" ]]; then
+    printf '%s\n%s\n' "$EXISTING_CRON" "$CRON_LINE" | crontab -
+  else
+    printf '%s\n' "$CRON_LINE" | crontab -
+  fi
+  echo "install-health-responder.sh: installed cron backstop (*/${CRON_MINUTES} min; launchd StartInterval is not trusted alone — CTL-1510)"
+else
+  echo "install-health-responder.sh: crontab not found — no cron backstop; launchd StartInterval is the ONLY scheduler (unreliable on some hosts, CTL-1510)" >&2
+fi

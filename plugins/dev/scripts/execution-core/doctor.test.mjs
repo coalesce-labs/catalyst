@@ -1211,6 +1211,7 @@ describe("checkHealthResponder", () => {
       readFile: healthyReadFile,
       fileExists: () => true,
       responderState: () => ({ loaded: true, lastExit: 0 }),
+      logMtimeMs: () => null,
     });
     expect(checks[0].name).toBe("responder-health");
     expect(checks[0].status).toBe(STATUS.PASS);
@@ -1222,6 +1223,57 @@ describe("checkHealthResponder", () => {
       readFile: healthyReadFile,
       fileExists: () => true,
       responderState: () => ({ loaded: true, lastExit: null }),
+      logMtimeMs: () => null,
+    });
+    expect(checks[0].name).toBe("responder-health");
+    expect(checks[0].status).toBe(STATUS.PASS);
+  });
+
+  // ─── dispatch staleness (CTL-1510 item 6) ──────────────────────────────────
+  //
+  // "Loaded + clean exit" is not proof of a live schedule: launchd on a fleet
+  // host held the job loaded with LastExitStatus 0 and dispatched NOTHING for
+  // hours. The heartbeat log's mtime is the ground truth (every sweep appends
+  // one line).
+
+  const T0 = 1_800_000_000_000;
+
+  it("WARNs when the heartbeat log is older than 3× the StartInterval (no scheduler dispatching)", () => {
+    const checks = checkHealthResponder({
+      readFile: healthyReadFile,
+      fileExists: () => true,
+      responderState: () => ({ loaded: true, lastExit: 0 }),
+      logMtimeMs: () => T0 - 4 * 3600 * 1000, // 4 h old vs 900 s floor
+      nowMs: () => T0,
+    });
+    expect(checks[0].name).toBe("responder-dispatch");
+    expect(checks[0].status).toBe(STATUS.WARN);
+    expect(checks[0].detail).toContain("crontab");
+  });
+
+  it("PASSes when the heartbeat log is fresh", () => {
+    const checks = checkHealthResponder({
+      readFile: healthyReadFile,
+      fileExists: () => true,
+      responderState: () => ({ loaded: true, lastExit: 0 }),
+      logMtimeMs: () => T0 - 60 * 1000, // 1 min old
+      nowMs: () => T0,
+    });
+    expect(checks[0].name).toBe("responder-health");
+    expect(checks[0].status).toBe(STATUS.PASS);
+  });
+
+  it("scales the staleness threshold with the plist's StartInterval", () => {
+    // interval 600 s → stale after 1800 s; a 25-min-old heartbeat is fine.
+    const plistWithInterval =
+      `<plist><dict><key>ProgramArguments</key><array><string>/bin/bash</string><string>${bakedPath}</string></array>` +
+      `<key>StartInterval</key><integer>600</integer></dict></plist>`;
+    const checks = checkHealthResponder({
+      readFile: (p) => (p.endsWith(".plist") ? plistWithInterval : responderScript),
+      fileExists: () => true,
+      responderState: () => ({ loaded: true, lastExit: 0 }),
+      logMtimeMs: () => T0 - 25 * 60 * 1000,
+      nowMs: () => T0,
     });
     expect(checks[0].name).toBe("responder-health");
     expect(checks[0].status).toBe(STATUS.PASS);
