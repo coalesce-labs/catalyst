@@ -1358,6 +1358,30 @@ describe("checkHealthResponder", () => {
     }
   });
 
+  it("WARNs when an OLD heartbeat is followed by a trailing diagnostic with no new heartbeat (Codex P2 round 4)", () => {
+    const dir = mkdtempSync(join(tmpdir(), "doctor-hr-staleafterhb-"));
+    writeFileSync(
+      join(dir, "health-responder.log"),
+      "[health-responder r1] heartbeat status=healthy installed=1 alive=1 dead_writer=0 stale_lock=0 no_respawn=0 attempts=0/3 escalated=0\n" +
+        "[health-responder r2] WARN: launchctl list timed out after 5s — treating the writer as dead\n",
+    );
+    const oldEnv = process.env.CATALYST_DIR;
+    process.env.CATALYST_DIR = dir;
+    try {
+      const checks = checkHealthResponder({
+        readFile: healthyReadFile,
+        fileExists: () => true,
+        responderState: () => ({ loaded: true, lastExit: 0 }),
+        plistMtimeMs: () => Date.now() - 4 * 3600 * 1000,
+      });
+      expect(checks[0].name).toBe("responder-dispatch");
+      expect(checks[0].status).toBe(STATUS.WARN);
+    } finally {
+      process.env.CATALYST_DIR = oldEnv;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("passes the plist's CATALYST_DIR (not process.env) into logMtimeMs (Codex P2 round 2)", () => {
     const plistWithDir =
       `<plist><dict><key>ProgramArguments</key><array><string>/bin/bash</string><string>${bakedPath}</string></array>` +

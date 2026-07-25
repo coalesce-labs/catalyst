@@ -206,13 +206,41 @@ _token_provisioned() {
   local probe
   probe="$(
     set +u
-    unset CATALYST_CLOUD_TOKEN_ENV CATALYST_LAYER2_CONFIG_FILE 2>/dev/null || true
+    # Unset only CATALYST_CLOUD_TOKEN_ENV (require an override to come from
+    # the sourced files below, not some ambient value) — NOT
+    # CATALYST_LAYER2_CONFIG_FILE. Unlike catalyst-stack's install-time probe
+    # (which strips both to simulate launchd's clean env from an interactive
+    # shell), this responder has no "different context to simulate": it
+    # resolves the token using whatever environment it actually runs under —
+    # and both the bun-based primary path (config.mjs's own
+    # getLayer2ConfigPath honors this var) and the pure-bash fallback below
+    # need to see a real CATALYST_LAYER2_CONFIG_FILE override when one is set.
+    unset CATALYST_CLOUD_TOKEN_ENV 2>/dev/null || true
     [[ -r "$RESPONDER_CLUSTER_ENV_FILE" ]] && . "$RESPONDER_CLUSTER_ENV_FILE"
     [[ -r "$RESPONDER_TOKEN_FILE" ]] && . "$RESPONDER_TOKEN_FILE"
     name="$(CFG_DIR="${SCRIPT_DIR}/execution-core" bun -e '
       const m = await import(process.env.CFG_DIR + "/config.mjs");
       process.stdout.write(m.resolveNodeCloudTokenEnv().envVar);
-    ' 2>/dev/null || printf 'CATALYST_CLOUD_TOKEN')"
+    ' 2>/dev/null)"
+    if [[ -z "$name" ]]; then
+      # bun unavailable or the import failed — replicate
+      # resolveNodeCloudTokenEnv's own precedence in pure bash (Codex P2
+      # round 4) instead of hardcoding the default: env override (as set by
+      # one of the just-sourced files) wins, then the Layer-2
+      # catalyst.cloud.tokenEnv key, then the standard name. A silent
+      # hardcode here would classify a node with a genuinely custom-named
+      # token as tokenless whenever bun happens to be unavailable.
+      if [[ -n "${CATALYST_CLOUD_TOKEN_ENV:-}" ]]; then
+        name="$CATALYST_CLOUD_TOKEN_ENV"
+      else
+        l2_file="${CATALYST_LAYER2_CONFIG_FILE:-${HOME}/.config/catalyst/config.json}"
+        name=""
+        if [[ -r "$l2_file" ]] && command -v jq >/dev/null 2>&1; then
+          name="$(jq -r '.catalyst.cloud.tokenEnv // empty' "$l2_file" 2>/dev/null)"
+        fi
+        [[ -z "$name" ]] && name="CATALYST_CLOUD_TOKEN"
+      fi
+    fi
     [[ -n "${!name:-}" ]] && printf yes || printf no
   )"
   [[ "$probe" == "yes" ]]
@@ -513,6 +541,31 @@ _acquire_sweep_lock() {
 # claimed copy is simply discarded — either way this process falls through to
 # ordinary contention, never leaves TWO directories on disk.
 _claim_stale_lock() {
+  # Read-only pre-check FIRST (Codex P2 round 4 — a regression in THIS round's
+  # earlier shape): unconditionally attempting the claim on ANY existing lock
+  # (stale or not) creates a vacancy window on EVERY contention, not just
+  # genuinely stale ones — a second contender could rename a THIRD's
+  # brand-new fresh lock away just to inspect it, and while restoring it, a
+  # fourth contender's ordinary mkdir grabs the momentarily-vacant canonical
+  # path. Gating on a cheap, non-destructive mtime read first means this
+  # process only ever ATTEMPTS to touch the lock when it already has reason
+  # to believe it's abandoned — a fresh lock is never touched at all.
+  local pre_m
+  pre_m="$(_mtime "$SWEEP_LOCK_DIR")"
+  [[ "$pre_m" =~ ^[0-9]+$ ]] || return 1
+  (( $(date +%s) - pre_m > RESPONDER_SWEEP_LOCK_STALE_SECS )) || return 1
+  # Claim-then-reverify (Codex P2 round 3): `mv` is atomic, so of any number
+  # of contenders whose pre-check above passed on the SAME instance, only one
+  # can rename it away; every other's `mv` fails outright (ENOENT). The
+  # reverify closes the residual window between this process's pre-check and
+  # its mv, in which a DIFFERENT contender's own break-and-recreate cycle
+  # could have already replaced the path with a fresh instance (`mv`
+  # preserves mtime exactly, so a mismatch here can only mean a swap
+  # happened) — that fresh copy is put back for its rightful owner rather
+  # than destroyed; the residual window this doesn't close (some FOURTH
+  # party grabbing the canonical path during THIS specific put-back) is the
+  # same bounded, documented risk the sweep lock already accepts (item 5:
+  # "worst case one extra bounded kickstart").
   local claim="${SWEEP_LOCK_DIR}.stale.$$" m
   mv "$SWEEP_LOCK_DIR" "$claim" 2>/dev/null || return 1
   m="$(_mtime "$claim")"

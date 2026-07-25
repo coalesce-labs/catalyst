@@ -844,6 +844,53 @@ mkdir -p "${RESPONDER_STATE_DIR}/sweep.lock"
 run "T56: overlapped sweep is skipped, then a later sweep acts once" \
   bash -c "bash '$RESPONDER' | grep -q 'status=skipped' && rmdir '${RESPONDER_STATE_DIR}/sweep.lock' && RESPONDER_KICKSTART_WAIT_SECS=0 bash '$RESPONDER' >/dev/null && [ \"\$(grep -c kickstart '${KICKSTART_LOG}')\" -eq 1 ]"
 
+# ─── Phase 13: CTL-1510 round-4 remediations (T57–T60) ──────────────────────
+#
+# T57-T59: when bun is unavailable, _token_provisioned must replicate
+# resolveNodeCloudTokenEnv's OWN precedence (env override > Layer-2 > default)
+# in pure bash rather than hardcoding CATALYST_CLOUD_TOKEN (Codex P2 round 4).
+# Shadow `bun` with a failing mock — MOCKBIN wins over the real system bun
+# since the responder APPENDS (never prepends) its own SCRIPT_DIR to PATH.
+cat > "$MOCKBIN/bun" <<'EOF'
+#!/usr/bin/env bash
+exit 1
+EOF
+chmod +x "$MOCKBIN/bun"
+
+_reset
+touch "$PLIST"
+export MOCK_LAST_EXIT=0
+mkdir -p "${HOME}/.config/catalyst"
+printf 'export CATALYST_CLOUD_TOKEN_ENV=MY_CUSTOM_TOKEN\nexport MY_CUSTOM_TOKEN=real-value\n' > "${HOME}/.config/catalyst/cloud-sync.env"
+run "T57: bun unavailable + an env-override token name resolves via that name" \
+  bash -c "out=\$(RESPONDER_KICKSTART_WAIT_SECS=0 bash '$RESPONDER'); printf '%s' \"\$out\" | grep -q 'failed-bounce signature' && test -s '${KICKSTART_LOG}'"
+rm -f "${HOME}/.config/catalyst/cloud-sync.env" "$KICKSTART_LOG"
+
+printf 'export ANOTHER_CUSTOM_TOKEN=real-value\n' > "${HOME}/.config/catalyst/cloud-sync.env"
+printf '{"catalyst":{"cloud":{"tokenEnv":"ANOTHER_CUSTOM_TOKEN"}}}' > "${SCRATCH}/layer2-config.json"
+run "T58: bun unavailable + no env override falls back to the Layer-2 tokenEnv key" \
+  bash -c "out=\$(CATALYST_LAYER2_CONFIG_FILE='${SCRATCH}/layer2-config.json' RESPONDER_KICKSTART_WAIT_SECS=0 bash '$RESPONDER'); printf '%s' \"\$out\" | grep -q 'failed-bounce signature' && test -s '${KICKSTART_LOG}'"
+rm -f "${HOME}/.config/catalyst/cloud-sync.env" "$KICKSTART_LOG" "${SCRATCH}/layer2-config.json"
+
+printf 'export CATALYST_CLOUD_TOKEN=real-value\n' > "${HOME}/.config/catalyst/cloud-sync.env"
+run "T59: bun unavailable + no overrides at all falls back to CATALYST_CLOUD_TOKEN" \
+  bash -c "out=\$(CATALYST_LAYER2_CONFIG_FILE=/dev/null RESPONDER_KICKSTART_WAIT_SECS=0 bash '$RESPONDER'); printf '%s' \"\$out\" | grep -q 'failed-bounce signature' && test -s '${KICKSTART_LOG}'"
+rm -f "${HOME}/.config/catalyst/cloud-sync.env" "$KICKSTART_LOG" "$MOCKBIN/bun"
+unset MOCK_LAST_EXIT
+
+# T60 (Codex P2 round 4): the sweep-lock pre-check must never touch a FRESH
+# lock at all — restoring the read-only mtime gate closes the round-3
+# regression where EVERY contention (not just genuinely stale locks) briefly
+# vacated the canonical path. Same observable contract as T50f (fresh lock
+# survives intact) but explicit about the round-4 fix it pins.
+_reset
+touch "$PLIST"
+mkdir -p "${RESPONDER_STATE_DIR}/sweep.lock"
+echo -n "still-fresh-owner" > "${RESPONDER_STATE_DIR}/sweep.lock/owner"
+run "T60: a fresh lock is never claimed/touched — pre-check gates before any mv" \
+  bash -c "bash '$RESPONDER' | grep -q 'heartbeat status=skipped' && ! test -s '${KICKSTART_LOG}' && [ \"\$(cat '${RESPONDER_STATE_DIR}/sweep.lock/owner')\" = 'still-fresh-owner' ]"
+rm -rf "${RESPONDER_STATE_DIR}/sweep.lock"
+
 # ─── results ────────────────────────────────────────────────────────────────
 
 echo ""

@@ -1781,14 +1781,20 @@ function defaultResponderLogMtimeMs(catalystDir) {
     const p = resolve(dir, "health-responder.log");
     const st = statSync(p);
     if (st.size === 0) return null;
-    // Require an actual completed `heartbeat status=` record, not just any
-    // write (Codex P2 round 3): a run that wedges or dies AFTER writing a
-    // diagnostic line (e.g. the hung-launchctl WARN) but BEFORE reaching
-    // heartbeat() still bumps the file's mtime — every write does — so mtime
-    // alone can't distinguish "a sweep completed" from "a sweep started and
-    // died". The heartbeat line is the ONE line every code path (healthy,
-    // acting, degraded, escalated, skipped) guarantees on a completed run.
-    if (!/\bheartbeat status=/.test(readFileSync(p, "utf8"))) return null;
+    // Require the log's LAST line to be a completed `heartbeat status=`
+    // record (Codex P2 round 4, tightening round 3's content-only check): an
+    // append-only log can already hold an OLD heartbeat when a LATER sweep
+    // writes a diagnostic and dies before reaching heartbeat() — a bare
+    // substring match anywhere in the file still finds that old heartbeat,
+    // so mtime (bumped by the diagnostic write) would report "fresh" even
+    // though no sweep has completed since. The file is append-only and every
+    // completed run's heartbeat is its LAST write that run, so requiring the
+    // log's actual last line to be a heartbeat is exactly "the most recent
+    // write was a completed sweep" — anything else (diagnostics with no
+    // trailing heartbeat) correctly falls through to the plist-mtime path.
+    const lines = readFileSync(p, "utf8").split("\n").filter((l) => l.trim().length > 0);
+    const last = lines[lines.length - 1];
+    if (!last || !/\bheartbeat status=/.test(last)) return null;
     return st.mtimeMs;
   } catch {
     return null;

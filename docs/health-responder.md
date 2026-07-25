@@ -137,8 +137,13 @@ learned live:
   the responder via `adopt-cloud-sync`, but only `install-services` (worker-class setup) installs
   the log shipper. On a dev/monitor host the responder's heartbeat and escalation are therefore
   **host-local only** (`~/catalyst/health-responder.log`) — the Loki absence-signal does not cover
-  them, and remote alerting must not assume it does. If a dev/monitor host needs remote coverage,
-  install the shipper explicitly (`catalyst-stack install-services`).
+  them, and remote alerting must not assume it does. **Do not run `catalyst-stack
+  install-services` on a dev/monitor host to get remote coverage** — it is not shipper-only; its
+  `RunAtLoad` also bootstraps the full stack LaunchAgent (`catalyst-stack start`, which starts
+  broker/execution-core), exactly what a class meant to stay daemonless must avoid. There is
+  currently no shipper-only launchd install path; the only way to ship this host's log without
+  installing the daemon stack is running `log-shipper/launch.sh` manually/foreground. Treat
+  host-local-only as the accepted default for these classes.
 
 ## Installation
 
