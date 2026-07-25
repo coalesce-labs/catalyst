@@ -1756,6 +1756,15 @@ export function getReplicaDbPath() {
   return process.env.CATALYST_REPLICA_DB || resolve(catalystDir(), "catalyst-replica.db");
 }
 
+// CTL-1508: path to the cloud-sync self-heal breadcrumb — dropped by the writer just
+// before a genuine-stall exit(1), cleared on the next boot's 'live'. Lives beside the
+// writer's log/DB under ~/catalyst so CTL-1509's external responder and doctor find it at
+// a stable path. Re-resolved per call (the catalystDir() idiom) so tests redirect via
+// CATALYST_DIR.
+export function getCloudSyncSelfHealPath() {
+  return resolve(catalystDir(), "cloud-sync.selfheal.json");
+}
+
 // --- Catalyst-Cloud token resolution (CTL-1394) ---
 // The supervised cloud-sync daemon reads its cloud token from a STANDARD env-var NAME —
 // `CATALYST_CLOUD_TOKEN` — on EVERY host (the same name cloud-token-env.mjs / CTL-1307
