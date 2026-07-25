@@ -5224,6 +5224,7 @@ describe("phaseAlreadyComplete — event-log dedup (CTL-863)", () => {
 // ─── CTL-1514: streaming default path + batched checker ──────────────────────
 import { makeBatchedPhaseCompleteChecker } from "./recovery.mjs";
 import { scanEventsChunked } from "./event-tail.mjs";
+import { statSync as ctl1514StatSync } from "node:fs";
 
 function ctl1514TempLog(names) {
   const dir = mkdtempSync(join(tmpdir(), "ctl1514-recov-"));
@@ -5256,11 +5257,11 @@ describe("phaseAlreadyComplete — streaming default path (CTL-1514)", () => {
 });
 
 describe("makeBatchedPhaseCompleteChecker — one pass for N tickets (CTL-1514)", () => {
-  test("correct true/false per (ticket, phase), scanning the log exactly once for N calls", () => {
+  test("correct true/false per (ticket, phase); whole log read once, later calls only resume", () => {
     const path = ctl1514TempLog(["phase.research.complete.CTL-100", "phase.plan.complete.CTL-200"]);
-    let scanCalls = 0;
+    const fromOffsets = [];
     const scan = (opts) => {
-      scanCalls++;
+      fromOffsets.push(opts.fromOffset);
       return scanEventsChunked(opts);
     };
     const check = makeBatchedPhaseCompleteChecker({ logPath: path, scan });
@@ -5270,8 +5271,26 @@ describe("makeBatchedPhaseCompleteChecker — one pass for N tickets (CTL-1514)"
     expect(check("CTL-300", "research")).toBe(false); // not complete
     expect(check("CTL-100", "plan")).toBe(false); // wrong phase
 
-    // 4 checks, ONE streaming pass — the pre-fix default did one full readFileSync per call.
-    expect(scanCalls).toBe(1);
+    // The first call reads the whole log from offset 0; every later call resumes
+    // from the prior cursor (never re-reads from 0) — one full pass for N tickets,
+    // the rest are zero-byte delta scans.
+    const size = ctl1514StatSync(path).size;
+    expect(fromOffsets[0]).toBe(0);
+    expect(fromOffsets.slice(1)).toEqual([size, size, size]);
+  });
+
+  test("observes a completion appended AFTER the first lookup (Codex P1: no stale duplicate dispatch)", () => {
+    const path = ctl1514TempLog(["phase.research.complete.CTL-100"]);
+    const check = makeBatchedPhaseCompleteChecker({ logPath: path });
+    expect(check("CTL-100", "research")).toBe(true); // first (full) scan
+    expect(check("CTL-200", "plan")).toBe(false); // not present yet
+    // A live host appends CTL-200's completion mid-sweep, after the first lookup:
+    appendFileSync(
+      path,
+      JSON.stringify({ attributes: { "event.name": "phase.plan.complete.CTL-200" } }) + "\n"
+    );
+    // The incremental cursor picks up the newly-appended bytes → true, not stale false.
+    expect(check("CTL-200", "plan")).toBe(true);
   });
 
   test("lazy — never scans when no check is invoked (zero dead-host tickets ⇒ zero reads)", () => {

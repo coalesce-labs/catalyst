@@ -3395,41 +3395,47 @@ export function readClusterAdmission({ logPath = getEventLogPath() } = {}) {
   return out;
 }
 
-// scanAllPhaseCompleteEvents — ONE streaming pass over the unified event log,
-// collecting every `phase.<phase>.complete.<ticket>` event.name seen anywhere in
-// the file into a Set. Built on the shared scanEventsChunked primitive (CTL-673)
-// so a 300MB+ / ~478K-line log never materializes into one whole-file string +
-// array. Best-effort: missing/unreadable log ⇒ empty Set; never throws.
-function scanAllPhaseCompleteEvents(logPath = getEventLogPath(), scan = scanEventsChunked) {
-  const seen = new Set();
-  try {
-    scan({
-      path: logPath,
-      fromOffset: 0,
-      onEvent: (e) => {
-        const name = e?.attributes?.["event.name"];
-        if (typeof name === "string" && name.startsWith("phase.") && name.includes(".complete.")) {
-          seen.add(name);
-        }
-      },
-    });
-  } catch {
-    /* best-effort — empty set on failure, same fail-open as phaseAlreadyComplete */
-  }
-  return seen;
-}
-
 // makeBatchedPhaseCompleteChecker — CTL-1514. Same (ticket, phase) => bool
-// contract as phaseAlreadyComplete, but backed by ONE full-file scan per checker
-// instance instead of one per call, and lazy (never scans if the reclaim loop
-// finds zero candidates that reach the dedup check). Used as reclaimDeadHostWork's
-// default `alreadyComplete`, so N in-flight tickets owned by a dead host cost one
-// streaming log pass per tick, not N whole-file readFileSync calls.
+// contract as phaseAlreadyComplete, but backed by ONE full-file scan across all
+// tickets a reclaim call processes instead of one whole-file readFileSync per
+// ticket. Built on the shared scanEventsChunked primitive (CTL-673) so a 300MB+ /
+// ~478K-line log never materializes into a whole-file string + array.
+//
+// The scan is INCREMENTAL, not frozen-at-first-lookup: the first call reads the
+// whole log [0, EOF) into `seen` and remembers the byte cursor; each subsequent
+// call reads only the newly-appended bytes [cursor, newEOF) before answering. So
+// a completion appended by a live host mid-sweep (after the first lookup but
+// before a later ticket's dedup check) is still observed — the previous
+// per-ticket full read would have seen it, and this must too, or recovery
+// dispatches a duplicate phase (Codex P1 on #2729). Cost stays ~one full pass per
+// batch: the first call reads everything, later calls read only the delta (0
+// bytes ⇒ just an openSync+fstatSync). Lazy — never scans until first called.
+// Best-effort: an unreadable log leaves `seen` as-is and fails open to
+// "not complete", same posture as phaseAlreadyComplete.
 export function makeBatchedPhaseCompleteChecker({ logPath = getEventLogPath(), scan = scanEventsChunked } = {}) {
-  let completed = null;
+  const seen = new Set();
+  let cursor = null; // null = not yet scanned; else the byte offset scanned up to
+  let leftover = "";
+  const ingest = (e) => {
+    const name = e?.attributes?.["event.name"];
+    if (typeof name === "string" && name.startsWith("phase.") && name.includes(".complete.")) {
+      seen.add(name);
+    }
+  };
   return (ticket, phase) => {
-    if (completed === null) completed = scanAllPhaseCompleteEvents(logPath, scan);
-    return completed.has(`phase.${phase}.complete.${ticket}`);
+    try {
+      const { endOffset, leftover: next } = scan({
+        path: logPath,
+        fromOffset: cursor === null ? 0 : cursor,
+        leftover,
+        onEvent: ingest,
+      });
+      cursor = endOffset;
+      leftover = next;
+    } catch {
+      /* best-effort — keep what we have; fail open to "not complete" */
+    }
+    return seen.has(`phase.${phase}.complete.${ticket}`);
   };
 }
 
