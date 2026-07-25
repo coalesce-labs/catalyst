@@ -115,6 +115,44 @@ export function scanFileLines(
   return totalBytes;
 }
 
+/**
+ * scanFileLinesAsync — CTL-1515. The async twin of {@link scanFileLines}: same
+ * bounded openSync/readSync chunk scan and StringDecoder line-carry, but it
+ * `await`s `onLine` per line so a consumer can apply backpressure (e.g. await a
+ * jq stdin `drain()`) and keep the whole scan memory-bounded. Kept separate from
+ * the sync `scanFileLines` because `readTunnelEventStats` needs the synchronous
+ * form. Returns the number of bytes scanned; the fd is always closed.
+ */
+export async function scanFileLinesAsync(
+  path: string,
+  onLine: (line: string) => Promise<void> | void,
+  chunkBytes: number = SCAN_CHUNK_BYTES,
+): Promise<number> {
+  const decoder = new StringDecoder("utf8");
+  const buf = Buffer.allocUnsafe(chunkBytes);
+  const fd = openSync(path, "r");
+  let totalBytes = 0;
+  let pending = "";
+  try {
+    let bytesRead = 0;
+    while ((bytesRead = readSync(fd, buf, 0, chunkBytes, null)) > 0) {
+      totalBytes += bytesRead;
+      pending += decoder.write(buf.subarray(0, bytesRead));
+      let nl = pending.indexOf("\n");
+      while (nl !== -1) {
+        await onLine(pending.slice(0, nl));
+        pending = pending.slice(nl + 1);
+        nl = pending.indexOf("\n");
+      }
+    }
+    pending += decoder.end();
+    if (pending.length > 0) await onLine(pending);
+  } finally {
+    closeSync(fd);
+  }
+  return totalBytes;
+}
+
 const BACKOFF_BASE_MS = 200;
 const BACKOFF_CAP_MS = 1600;
 
@@ -196,17 +234,26 @@ export async function readBacklog(opts: ReadBacklogOpts): Promise<string[]> {
   const stream = createFilterStream(opts.predicate);
   const matches: string[] = [];
   stream.onMatch((l) => matches.push(l));
-  // `scanFileLines` drives `stream.write` synchronously per line — the same
-  // feed the old `for (const l of allLines)` loop produced (empty/invalid-JSON
-  // lines are dropped inside the stream, just as `.filter(l => l.length > 0)`
-  // + jq did).
-  const bytes = scanFileLines(path, (l) => stream.write(l));
-  recordFullRead("readBacklog", bytes, performance.now() - _t0);
-  // Flushing the jq subprocess is a wait-on-stdout. For a 50k-line file we
-  // need a few flush cycles to ensure all output drains.
-  await stream.flush();
-  await stream.flush();
-  stream.close();
+  try {
+    // scanFileLinesAsync feeds each line to jq and awaits `drain()` whenever jq's
+    // stdin is backpressured — so a slow/stalled jq cannot let the whole ~1.7 GB
+    // log queue into stdin (that would defeat the bounded-transient goal). Same
+    // feed the old `for (const l of allLines)` loop produced; empty/invalid-JSON
+    // lines are dropped inside the stream (as `.filter(l => l.length > 0)` + jq did).
+    const bytes = await scanFileLinesAsync(path, async (l) => {
+      if (!stream.write(l)) await stream.drain();
+    });
+    recordFullRead("readBacklog", bytes, performance.now() - _t0);
+    // Flushing the jq subprocess is a wait-on-stdout. For a 50k-line file we need
+    // a few flush cycles to ensure all output drains.
+    await stream.flush();
+    await stream.flush();
+  } finally {
+    // Always reap the jq child + its pipes, even if the scan throws mid-stream
+    // (e.g. the file disappears between existsSync and openSync) — otherwise the
+    // SSE caller catches the error and leaves an orphaned subprocess (CTL-1515).
+    stream.close();
+  }
   return matches.slice(-opts.limit);
 }
 

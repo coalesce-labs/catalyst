@@ -20,7 +20,12 @@ export interface ValidationResult {
 }
 
 export interface FilterStream {
-  write(line: string): void;
+  /** Feed one line. Returns false when the sink is backpressured (jq stdin buffer
+   *  full) — the caller should `await drain()` before writing more so a large
+   *  chunked scan stays memory-bounded (CTL-1515). */
+  write(line: string): boolean;
+  /** Resolve once the sink is writable again (or immediately if not backpressured). */
+  drain(): Promise<void>;
   /** Wait briefly for any in-flight stdout to drain. */
   flush(): Promise<void>;
   close(): void;
@@ -80,14 +85,18 @@ export function createFilterStream(predicate: string): FilterStream {
     let cb: ((line: string) => void) | null = null;
     let closed = false;
     return {
-      write(line: string): void {
-        if (closed || !cb) return;
+      write(line: string): boolean {
+        if (closed || !cb) return true;
         try {
           JSON.parse(line);
           cb(line);
         } catch {
           /* drop invalid JSON */
         }
+        return true; // synchronous passthrough — never backpressured
+      },
+      drain(): Promise<void> {
+        return Promise.resolve();
       },
       flush(): Promise<void> {
         return Promise.resolve();
@@ -131,20 +140,34 @@ export function createFilterStream(predicate: string): FilterStream {
   });
 
   return {
-    write(line: string): void {
-      if (closed) return;
+    write(line: string): boolean {
+      if (closed) return true;
       // Pre-validate JSON; jq dies on invalid input so we drop bad lines here
       // (matches the CLI's `2>/dev/null` behavior).
       try {
         JSON.parse(line);
       } catch {
-        return;
+        return true;
       }
       try {
-        proc.stdin?.write(line + "\n");
+        // Return jq stdin's backpressure signal so a chunked scan can await
+        // drain() and stay memory-bounded (CTL-1515).
+        return proc.stdin?.write(line + "\n") ?? true;
       } catch {
-        /* ignore broken pipe */
+        return true; // broken pipe — don't ask the caller to wait
       }
+    },
+    drain(): Promise<void> {
+      const s = proc.stdin;
+      if (closed || !s || !s.writableNeedDrain) return Promise.resolve();
+      return new Promise<void>((resolve) => {
+        const done = () => {
+          s.off("error", done);
+          resolve();
+        };
+        s.once("drain", done);
+        s.once("error", done); // never hang on a broken pipe
+      });
     },
     flush(): Promise<void> {
       if (pendingFlush) return pendingFlush;
