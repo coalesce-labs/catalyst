@@ -2310,12 +2310,13 @@ export function runWatchdogTick({ liveness = sessionLiveness } = {}) {
     if (stale && !state.notified) {
       const minsAgo = Math.round((now - state.ts) / 60_000);
       staleNow.set(sourceId, { ts: state.ts, minsAgo });
+    } else if (!stale && state.notified) {
+      // Original CTL-419 re-arm: a recovered session clears its notified flag so a
+      // future stale episode wakes again. (Kept intact — CTL-1516 bounds the maps
+      // via the toEvict backstop below, NOT by deleting on the wake, so this
+      // suppression/re-arm state machine is unchanged.)
+      lastHeartbeat.set(sourceId, { ts: state.ts, notified: false });
     }
-    // CTL-1516: the former `else if (!stale && state.notified)` re-arm branch is
-    // removed. `notified:true` is no longer written anywhere — a notified session
-    // is now deleted (below), not marked — so a recovered session re-arms simply
-    // by re-checking in fresh via handleAgentCheckin, which recreates its entry
-    // with notified:false.
   }
 
   // Track which sessions were actually woken so we can mark + clean up after.
@@ -2383,22 +2384,26 @@ export function runWatchdogTick({ liveness = sessionLiveness } = {}) {
       log.info({ interestId, sourceId }, "watchdog cleanup: removed stale session");
     }
     for (const sourceId of notifiedSessions) {
-      // CTL-1516: a notified stale session is finished — delete its heartbeat +
-      // orchestrator-map rows (mirroring the interests.delete() above) instead of
-      // re-marking notified:true, which kept the key forever. Since phase-agent
-      // session ids are per-job-unique, the old re-mark grew both maps without
-      // bound. A genuinely revived session recreates its entry fresh via
-      // handleAgentCheckin (notified:false), so this loses no live state.
-      lastHeartbeat.delete(sourceId);
-      workerToOrchestrator.delete(sourceId);
+      // CTL-1516: keep the original notified:true re-mark here — do NOT delete on
+      // the wake. Deleting on the first wake dropped workerToOrchestrator (breaking
+      // orchestrator-interest matching for a heartbeat-revived session) and lost
+      // the duplicate-wake suppression the notified:true row provides until an
+      // alive tick re-arms it (Codex P1/P2 on #2728). Unbounded growth is instead
+      // bounded by the toEvict backstop below, which drops a session's rows ONLY
+      // once it is dead or aged past HEARTBEAT_EVICT_MS — a terminal point where a
+      // revival would re-check-in via handleAgentCheckin and recreate both maps.
+      const info = staleNow.get(sourceId);
+      lastHeartbeat.set(sourceId, { ts: info.ts, notified: true });
     }
   }
 
-  // CTL-1516: backstop eviction — drop heartbeat + orchestrator-map rows for
-  // sessions that are definitively dead or aged past HEARTBEAT_EVICT_MS but
-  // matched no interest (so they never entered notifiedSessions above). Without
-  // this an unmatched dead session's rows would linger forever. Idempotent with
-  // the notified deletes (delete on an already-removed key is a no-op).
+  // CTL-1516: backstop eviction — the ONLY place the maps are bounded. Drop
+  // heartbeat + orchestrator-map rows for sessions that are definitively dead, or
+  // stale AND aged past HEARTBEAT_EVICT_MS. This runs regardless of whether the
+  // session matched an interest, so a session that has been woken (notified:true)
+  // and stays terminal is eventually reclaimed rather than lingering forever, and
+  // an unmatched dead/aged session is reclaimed too. At this terminal horizon a
+  // revival re-checks-in and recreates both maps, so no live association is lost.
   for (const sourceId of toEvict) {
     lastHeartbeat.delete(sourceId);
     workerToOrchestrator.delete(sourceId);
