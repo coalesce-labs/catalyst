@@ -484,6 +484,21 @@ outage can never quarantine a healthy, resolvable, in-flight ticket.
 `SCHEDULER_CIRCUIT_BREAKER_THRESHOLD` is the Linear-independent backstop; the runaway knobs are
 observability only.
 
+### Broker watchdog session eviction (CTL-1516)
+
+The broker's watchdog tick keeps per-session bookkeeping (`lastHeartbeat`, `workerToOrchestrator`)
+and a wake-dedup cache (`_emittedWakeCache`). So these stay bounded over a long-lived broker process,
+the tick sweeps expired wake-cache entries every pass and evicts a session's heartbeat/orchestrator
+rows once it is definitively finished. This knob is an env var on the `catalyst-broker` process:
+
+- `FILTER_HEARTBEAT_EVICT_MS` (default `1800000`, 30 min) — horizon past which a **stale** session's
+  `lastHeartbeat` + `workerToOrchestrator` rows are evicted even if it never matched an interest. A
+  session reported `dead` by `claude agents` is evicted immediately; an unknown-liveness session is
+  evicted only once it is both stale (past `FILTER_HEARTBEAT_STALE_MS`) **and** older than this
+  horizon, so eviction can never precede the stale threshold. Generous by default
+  (≈10× `FILTER_HEARTBEAT_STALE_MS`) so only unambiguously-finished sessions are dropped — a genuine
+  revival simply re-checks-in and recreates the rows.
+
 ### Board-health delegate (CTL-1290)
 
 On a low-frequency cadence the scheduler runs a **whole-board health scan**: a read-only pass that
