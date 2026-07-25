@@ -1775,7 +1775,16 @@ function defaultResponderState() {
 // log-shipper pre-create fix (item 7) touches a placeholder file with a fresh
 // mtime for any tailed log that doesn't yet exist, and that placeholder must
 // not read as "a sweep just dispatched" when no sweep ever has.
-function defaultResponderLogMtimeMs(catalystDir) {
+// Generous upper bound on how long a SINGLE sweep can legitimately run before
+// its heartbeat (launchctl-list timeout + kickstart timeout + kickstart-wait
+// settle default to well under a minute combined) — used only to distinguish
+// "a sweep is currently in progress" from "a sweep died leaving stale
+// diagnostics forever" (Codex P2 round 5). Deliberately far below the
+// staleAfterMs dispatch-warning threshold (>=900s) so it can never mask a
+// truly wedged responder.
+const RESPONDER_IN_PROGRESS_GRACE_MS = 120_000;
+
+function defaultResponderLogMtimeMs(catalystDir, nowMsFn = () => Date.now()) {
   try {
     const dir = catalystDir || process.env.CATALYST_DIR || resolve(homedir(), "catalyst");
     const p = resolve(dir, "health-responder.log");
@@ -1787,15 +1796,21 @@ function defaultResponderLogMtimeMs(catalystDir) {
     // writes a diagnostic and dies before reaching heartbeat() — a bare
     // substring match anywhere in the file still finds that old heartbeat,
     // so mtime (bumped by the diagnostic write) would report "fresh" even
-    // though no sweep has completed since. The file is append-only and every
-    // completed run's heartbeat is its LAST write that run, so requiring the
-    // log's actual last line to be a heartbeat is exactly "the most recent
-    // write was a completed sweep" — anything else (diagnostics with no
-    // trailing heartbeat) correctly falls through to the plist-mtime path.
+    // though no sweep has completed since.
     const lines = readFileSync(p, "utf8").split("\n").filter((l) => l.trim().length > 0);
     const last = lines[lines.length - 1];
-    if (!last || !/\bheartbeat status=/.test(last)) return null;
-    return st.mtimeMs;
+    if (last && /\bheartbeat status=/.test(last)) return st.mtimeMs;
+    // The trailing line isn't a completed heartbeat — EITHER a sweep is
+    // currently mid-run (wrote a diagnostic, heartbeat still pending — the
+    // NORMAL shape while it's inside the launchctl-timeout/kickstart/settle
+    // path) OR a sweep died leaving that diagnostic as a permanent tail
+    // (Codex P2 round 5: requiring the last line to ALWAYS be a heartbeat
+    // false-WARNs on every in-progress sweep). Distinguish by the RECENCY of
+    // that write: within the generous in-progress grace window, trust it as
+    // "still running, not stale" — outside it, nothing has completed since,
+    // genuinely stale.
+    if (nowMsFn() - st.mtimeMs <= RESPONDER_IN_PROGRESS_GRACE_MS) return st.mtimeMs;
+    return null;
   } catch {
     return null;
   }
@@ -1943,7 +1958,7 @@ export function checkHealthResponder(deps = {}) {
   // an unrelated default-dir log.
   const cdirMatch = xml.match(/<key>CATALYST_DIR<\/key>\s*<string>([^<]*)<\/string>/);
   const plistCatalystDir = cdirMatch ? decodePlistString(cdirMatch[1]) : null;
-  const mtime = logMtimeMs(plistCatalystDir);
+  const mtime = logMtimeMs(plistCatalystDir, nowMs);
   const staleAfterMs = Math.max(3 * intervalSecs, 900) * 1000;
   if (typeof mtime === "number" && nowMs() - mtime > staleAfterMs) {
     const ageMin = Math.round((nowMs() - mtime) / 60_000);

@@ -1326,9 +1326,40 @@ describe("checkHealthResponder", () => {
         fileExists: () => true,
         responderState: () => ({ loaded: true, lastExit: 0 }),
         plistMtimeMs: () => Date.now() - 4 * 3600 * 1000,
+        // Push "now" well past the in-progress grace window (Codex P2 round
+        // 5) — otherwise this synchronously-written file's fresh mtime would
+        // read as "a sweep is currently running", not "died leaving a
+        // permanent diagnostic tail", the exact case this test pins.
+        nowMs: () => Date.now() + 10 * 60 * 1000,
       });
       expect(checks[0].name).toBe("responder-dispatch");
       expect(checks[0].status).toBe(STATUS.WARN);
+    } finally {
+      process.env.CATALYST_DIR = oldEnv;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("PASSes (via the REAL log reader) on a fresh diagnostic-only tail — an in-progress sweep must not false-WARN (Codex P2 round 5)", () => {
+    const dir = mkdtempSync(join(tmpdir(), "doctor-hr-inprogress-"));
+    writeFileSync(
+      join(dir, "health-responder.log"),
+      "[health-responder r1] heartbeat status=healthy installed=1 alive=1 dead_writer=0 stale_lock=0 no_respawn=0 attempts=0/3 escalated=0\n" +
+        "[health-responder r2] WARN: launchctl list timed out after 5s — treating the writer as dead\n",
+    );
+    const oldEnv = process.env.CATALYST_DIR;
+    process.env.CATALYST_DIR = dir;
+    try {
+      const checks = checkHealthResponder({
+        readFile: healthyReadFile,
+        fileExists: () => true,
+        responderState: () => ({ loaded: true, lastExit: 0 }),
+        plistMtimeMs: () => Date.now() - 4 * 3600 * 1000,
+        // Default nowMs (real Date.now()) — the file was just written, so
+        // it's well within the in-progress grace window.
+      });
+      expect(checks[0].name).toBe("responder-health");
+      expect(checks[0].status).toBe(STATUS.PASS);
     } finally {
       process.env.CATALYST_DIR = oldEnv;
       rmSync(dir, { recursive: true, force: true });
@@ -1373,6 +1404,7 @@ describe("checkHealthResponder", () => {
         fileExists: () => true,
         responderState: () => ({ loaded: true, lastExit: 0 }),
         plistMtimeMs: () => Date.now() - 4 * 3600 * 1000,
+        nowMs: () => Date.now() + 10 * 60 * 1000, // past the in-progress grace window
       });
       expect(checks[0].name).toBe("responder-dispatch");
       expect(checks[0].status).toBe(STATUS.WARN);

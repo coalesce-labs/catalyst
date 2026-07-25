@@ -891,6 +891,37 @@ run "T60: a fresh lock is never claimed/touched — pre-check gates before any m
   bash -c "bash '$RESPONDER' | grep -q 'heartbeat status=skipped' && ! test -s '${KICKSTART_LOG}' && [ \"\$(cat '${RESPONDER_STATE_DIR}/sweep.lock/owner')\" = 'still-fresh-owner' ]"
 rm -rf "${RESPONDER_STATE_DIR}/sweep.lock"
 
+# T61 (Codex P2 round 5): the token-resolution `bun` subprocess must be
+# bounded like the launchctl probes — a hung bun must not hold the sweep
+# lock forever. Shadow `bun` with a mock that hangs past the configured
+# timeout; the sweep must still complete (falls through to the pure-bash
+# fallback) rather than wedge.
+cat > "$MOCKBIN/bun" <<'EOF'
+#!/usr/bin/env bash
+sleep 60
+EOF
+chmod +x "$MOCKBIN/bun"
+_reset
+touch "$PLIST"
+export MOCK_LAST_EXIT=0
+mkdir -p "${HOME}/.config/catalyst"
+printf 'export CATALYST_CLOUD_TOKEN=real-value\n' > "${HOME}/.config/catalyst/cloud-sync.env"
+run "T61: a hung bun token-resolution probe is bounded — sweep still completes" \
+  bash -c "start=\$(date +%s); out=\$(RESPONDER_TOKEN_RESOLVE_TIMEOUT_SECS=1 RESPONDER_KICKSTART_WAIT_SECS=0 bash '$RESPONDER'); elapsed=\$(( \$(date +%s) - start )); printf '%s' \"\$out\" | grep -q 'failed-bounce signature' && [ \"\$elapsed\" -lt 30 ]"
+rm -f "${HOME}/.config/catalyst/cloud-sync.env" "$MOCKBIN/bun"
+unset MOCK_LAST_EXIT
+
+# T62 (Codex P2 round 5): a FUTURE-dated (clock-skew) lock must not
+# permanently block recovery — a negative signed age would otherwise never
+# exceed any positive stale threshold. touch -t with a far-future timestamp.
+_reset
+touch "$PLIST" # dead-writer shape: without the clamp, this WOULD stay skipped forever
+mkdir -p "${RESPONDER_STATE_DIR}/sweep.lock"
+FUTURE_STAMP="$(date -v+10y +%Y%m%d0000 2>/dev/null || date -d '+10 years' +%Y%m%d0000 2>/dev/null)"
+touch -t "$FUTURE_STAMP" "${RESPONDER_STATE_DIR}/sweep.lock"
+run "T62: a future-dated lock is treated as stale-eligible, not blocked forever" \
+  bash -c "out=\$(RESPONDER_KICKSTART_WAIT_SECS=0 bash '$RESPONDER'); printf '%s' \"\$out\" | grep -q 'broke stale sweep lock' && test -s '${KICKSTART_LOG}'"
+
 # ─── results ────────────────────────────────────────────────────────────────
 
 echo ""

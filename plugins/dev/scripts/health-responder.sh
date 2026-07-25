@@ -149,6 +149,9 @@ RESPONDER_SELFHEAL_GRACE_SECS="$(_num "$RESPONDER_SELFHEAL_GRACE_SECS" 120 0)"
 # Deadline for the `launchctl list` intentional-exit probe (Codex P2 round 4:
 # the same hung-launchctl class the kickstart deadline guards against).
 RESPONDER_LIST_TIMEOUT_SECS="$(_num "${RESPONDER_LIST_TIMEOUT_SECS:-5}" 5 1)"
+# Deadline for the token-name-resolution `bun` subprocess (Codex P2 round 5:
+# same hung-subprocess class — see _resolve_token_env_via_bun).
+RESPONDER_TOKEN_RESOLVE_TIMEOUT_SECS="$(_num "${RESPONDER_TOKEN_RESOLVE_TIMEOUT_SECS:-5}" 5 1)"
 # Whole-sweep reservation staleness (CTL-1510 item 5): a lock older than this
 # belongs to a crashed sweep and is broken. Floored BELOW at the worst-case
 # legitimate sweep duration + slop (Codex P2: the wait/timeout knobs have no
@@ -202,6 +205,48 @@ RESPONDER_CLUSTER_ENV_FILE="${RESPONDER_CLUSTER_ENV_FILE:-${HOME}/.config/cataly
 # resolve the env-var NAME via the same config.mjs helper (falls back to the
 # literal CATALYST_CLOUD_TOKEN if bun is unavailable), then check presence of
 # THAT resolved name — never a fixed/guessed variable name.
+# _resolve_token_env_via_bun: prints the resolved env-var NAME from
+# resolveNodeCloudTokenEnv(), or prints nothing on timeout/failure/absence.
+# Bounded the same way _last_exit_status bounds `launchctl list` (Codex P2
+# round 5): this runs INSIDE _token_provisioned, which runs AFTER the sweep
+# lock is acquired — an unbounded bun call there would let a wedged bun or
+# module import hold the lock indefinitely, defeating the "short-lived
+# process, cannot zombie" guarantee this whole responder exists to provide.
+# CFG_DIR is exported (not just set) so the backgrounded subshell — a
+# separate process — inherits it; a plain assignment before `(` is NOT
+# exported to that child.
+_resolve_token_env_via_bun() {
+  local out="" f pid rc=""
+  f="$(mktemp "${TMPDIR:-/tmp}/responder-tokenname.XXXXXX")"
+  # Background bun DIRECTLY (a leading VAR=val prefix scopes CFG_DIR to just
+  # this command) rather than wrapping it in a `( ... ) &` subshell — a
+  # subshell wrapper would make $! the WRAPPER's pid, and killing that on
+  # timeout leaves the actual hung bun process orphaned rather than reaped
+  # (found live while testing this fix). Mirrors _last_exit_status's own
+  # backgrounding shape exactly for the same reason.
+  CFG_DIR="${SCRIPT_DIR}/execution-core" bun -e '
+    const m = await import(process.env.CFG_DIR + "/config.mjs");
+    process.stdout.write(m.resolveNodeCloudTokenEnv().envVar);
+  ' > "$f" 2>/dev/null &
+  pid=$!
+  for (( _tri = 0; _tri < RESPONDER_TOKEN_RESOLVE_TIMEOUT_SECS; _tri++ )); do
+    if ! kill -0 "$pid" 2>/dev/null; then
+      wait "$pid" 2>/dev/null
+      rc=$?
+      break
+    fi
+    sleep 1
+  done
+  if [[ -z "$rc" ]]; then
+    kill -9 "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+  elif [[ "$rc" -eq 0 ]]; then
+    out="$(cat "$f" 2>/dev/null)"
+  fi
+  rm -f "$f"
+  printf '%s' "$out"
+}
+
 _token_provisioned() {
   local probe
   probe="$(
@@ -218,10 +263,7 @@ _token_provisioned() {
     unset CATALYST_CLOUD_TOKEN_ENV 2>/dev/null || true
     [[ -r "$RESPONDER_CLUSTER_ENV_FILE" ]] && . "$RESPONDER_CLUSTER_ENV_FILE"
     [[ -r "$RESPONDER_TOKEN_FILE" ]] && . "$RESPONDER_TOKEN_FILE"
-    name="$(CFG_DIR="${SCRIPT_DIR}/execution-core" bun -e '
-      const m = await import(process.env.CFG_DIR + "/config.mjs");
-      process.stdout.write(m.resolveNodeCloudTokenEnv().envVar);
-    ' 2>/dev/null)"
+    name="$(_resolve_token_env_via_bun)"
     if [[ -z "$name" ]]; then
       # bun unavailable or the import failed — replicate
       # resolveNodeCloudTokenEnv's own precedence in pure bash (Codex P2
@@ -540,6 +582,25 @@ _acquire_sweep_lock() {
 # itself loses a race (someone else already grabbed the now-empty path), the
 # claimed copy is simply discarded — either way this process falls through to
 # ordinary contention, never leaves TWO directories on disk.
+# _age_secs_or_stale MTIME: age in seconds since MTIME, but a NEGATIVE age
+# (future timestamp — clock stepped backward, or the state dir restored from
+# a newer snapshot, Codex P2 round 5) is clamped to just above the stale
+# threshold instead of blocking forever. Without this, a signed age check
+# NEVER exceeds any positive threshold once pre_m is in the future, so every
+# launchd/cron invocation exits status=skipped until wall time catches up —
+# potentially disabling writer recovery for hours or days. Mirrors the
+# breadcrumb's own future-timestamp handling (T48): favor recovery over
+# indefinitely trusting an untrustworthy clock read.
+_age_secs_or_stale() {
+  local mtime="$1" age
+  age=$(( $(date +%s) - mtime ))
+  if (( age < 0 )); then
+    echo $(( RESPONDER_SWEEP_LOCK_STALE_SECS + 1 ))
+  else
+    echo "$age"
+  fi
+}
+
 _claim_stale_lock() {
   # Read-only pre-check FIRST (Codex P2 round 4 — a regression in THIS round's
   # earlier shape): unconditionally attempting the claim on ANY existing lock
@@ -553,7 +614,7 @@ _claim_stale_lock() {
   local pre_m
   pre_m="$(_mtime "$SWEEP_LOCK_DIR")"
   [[ "$pre_m" =~ ^[0-9]+$ ]] || return 1
-  (( $(date +%s) - pre_m > RESPONDER_SWEEP_LOCK_STALE_SECS )) || return 1
+  (( $(_age_secs_or_stale "$pre_m") > RESPONDER_SWEEP_LOCK_STALE_SECS )) || return 1
   # Claim-then-reverify (Codex P2 round 3): `mv` is atomic, so of any number
   # of contenders whose pre-check above passed on the SAME instance, only one
   # can rename it away; every other's `mv` fails outright (ENOENT). The
@@ -569,7 +630,7 @@ _claim_stale_lock() {
   local claim="${SWEEP_LOCK_DIR}.stale.$$" m
   mv "$SWEEP_LOCK_DIR" "$claim" 2>/dev/null || return 1
   m="$(_mtime "$claim")"
-  if [[ ! "$m" =~ ^[0-9]+$ ]] || (( $(date +%s) - m <= RESPONDER_SWEEP_LOCK_STALE_SECS )); then
+  if [[ ! "$m" =~ ^[0-9]+$ ]] || (( $(_age_secs_or_stale "$m") <= RESPONDER_SWEEP_LOCK_STALE_SECS )); then
     mv "$claim" "$SWEEP_LOCK_DIR" 2>/dev/null || rm -rf "$claim" 2>/dev/null
     return 1
   fi
