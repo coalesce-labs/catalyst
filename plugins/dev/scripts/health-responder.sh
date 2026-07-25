@@ -51,8 +51,20 @@
 # Usage:
 #   health-responder.sh [--dry-run] [--help]
 #
+# A SECOND supervised target rides the same sweep (CTL-1518): the
+# com.catalyst.agent host-metrics sampler (it died on mini-2 and launchd left it
+# dead for 10 days). Its block runs BEFORE the cloud-sync detect — the cloud-sync
+# act path `exit 0`s at several points, so a block after it is unreachable — and
+# is fully inert on nodes without the agent plist. Staleness is the age of the
+# agent's breadcrumb (~/catalyst/catalyst-agent.heartbeat, refreshed each --once
+# tick), falling back to the plist install-mtime when the breadcrumb is absent.
+# Same bounded-kickstart + one-shot-escalation + re-arm contract, with its OWN
+# agent-scoped markers / heartbeat line / OTel escalate.
+#
 # Env overrides (all have production defaults):
 #   RESPONDER_ENABLED              — kill-switch, default 1 (0 = heartbeat-only no-op)
+#   RESPONDER_AGENT_ENABLED        — agent sub-kill-switch, default 1 (0 = agent block off)
+#   RESPONDER_AGENT_STALE_SECS     — agent breadcrumb/plist staleness threshold, default 900
 #   RESPONDER_LOCK_STALE_SECS      — stale-writer threshold, default 900 (15 min)
 #   RESPONDER_SELFHEAL_GRACE_SECS  — no-respawn grace after breadcrumb ts, default 120
 #   RESPONDER_MAX_ATTEMPTS         — kickstarts per window before escalating, default 3
@@ -146,6 +158,11 @@ RESPONDER_KICKSTART_WAIT_SECS="$(_num "$RESPONDER_KICKSTART_WAIT_SECS" 10 0)"
 RESPONDER_KICKSTART_TIMEOUT_SECS="$(_num "$RESPONDER_KICKSTART_TIMEOUT_SECS" 20 1)"
 RESPONDER_LOCK_STALE_SECS="$(_num "$RESPONDER_LOCK_STALE_SECS" 900 1)"
 RESPONDER_SELFHEAL_GRACE_SECS="$(_num "$RESPONDER_SELFHEAL_GRACE_SECS" 120 0)"
+# Second-target (com.catalyst.agent) knobs (CTL-1518). ENABLED is a string
+# compare; STALE_SECS goes through the same validate-then-floor helper as the
+# other thresholds so garbage/zero-padded overrides degrade to the default.
+RESPONDER_AGENT_ENABLED="${RESPONDER_AGENT_ENABLED:-1}"
+RESPONDER_AGENT_STALE_SECS="$(_num "${RESPONDER_AGENT_STALE_SECS:-900}" 900 1)"
 # Deadline for the `launchctl list` intentional-exit probe (Codex P2 round 4:
 # the same hung-launchctl class the kickstart deadline guards against).
 RESPONDER_LIST_TIMEOUT_SECS="$(_num "${RESPONDER_LIST_TIMEOUT_SECS:-5}" 5 1)"
@@ -162,7 +179,15 @@ RESPONDER_TOKEN_RESOLVE_TIMEOUT_SECS="$(_num "${RESPONDER_TOKEN_RESOLVE_TIMEOUT_
 # LIVE lock and reintroduce the concurrent-kickstart race this lock exists to
 # close).
 RESPONDER_SWEEP_LOCK_STALE_SECS="$(_num "${RESPONDER_SWEEP_LOCK_STALE_SECS:-300}" 300 1)"
-_SWEEP_MIN_STALE=$(( RESPONDER_LIST_TIMEOUT_SECS + RESPONDER_TOKEN_RESOLVE_TIMEOUT_SECS + RESPONDER_KICKSTART_TIMEOUT_SECS + RESPONDER_KICKSTART_WAIT_SECS + 60 ))
+# CTL-1518 widened the floor to cover BOTH kickstart budgets: a single sweep can
+# now kickstart the agent (its block reuses RESPONDER_KICKSTART_TIMEOUT/WAIT_SECS)
+# AND the cloud-sync writer, so the worst-case legitimate sweep spends the
+# kickstart timeout+wait TWICE — the second `+ RESPONDER_KICKSTART_TIMEOUT_SECS +
+# RESPONDER_KICKSTART_WAIT_SECS` term. Without it the stale-lock breaker could
+# break a still-live two-target sweep and reintroduce the concurrent-kickstart
+# race the sweep lock exists to close. (The first three terms are unchanged, so
+# the token-resolve-floor invariant test still matches.)
+_SWEEP_MIN_STALE=$(( RESPONDER_LIST_TIMEOUT_SECS + RESPONDER_TOKEN_RESOLVE_TIMEOUT_SECS + RESPONDER_KICKSTART_TIMEOUT_SECS + RESPONDER_KICKSTART_WAIT_SECS + RESPONDER_KICKSTART_TIMEOUT_SECS + RESPONDER_KICKSTART_WAIT_SECS + 60 ))
 (( RESPONDER_SWEEP_LOCK_STALE_SECS < _SWEEP_MIN_STALE )) && RESPONDER_SWEEP_LOCK_STALE_SECS="$_SWEEP_MIN_STALE"
 RESPONDER_RUN_ID="${RESPONDER_RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)-$$}"
 # Resolve every state/target path through CATALYST_DIR exactly like the
@@ -183,6 +208,18 @@ CLOUD_SYNC_PLIST="${CATALYST_LAUNCHAGENTS_DIR:-${HOME}/Library/LaunchAgents}/${C
 REPLICA_DB="${CATALYST_REPLICA_DB:-${CATALYST_DIR}/catalyst-replica.db}"
 WRITER_LOCK="${REPLICA_DB}.writer.lock"
 ESCALATED_MARKER="${RESPONDER_STATE_DIR}/ESCALATED.cloud-sync"
+
+# Second supervised target (CTL-1518): the com.catalyst.agent host-metrics
+# sampler. Its plist lives in the SAME LaunchAgents dir as cloud-sync's; its
+# breadcrumb is written by catalyst-agent.mjs each --once tick, CATALYST_DIR-
+# resolved exactly like config.mjs getHeartbeatPath() so the two never disagree
+# about WHERE to look. AGENT_HEARTBEAT_FILE is overridable so tests can redirect
+# it into scratch. Agent markers use their own agent-attempt.* / ESCALATED.
+# catalyst-agent namespace — never sharing a budget with the cloud-sync markers.
+AGENT_LABEL="com.catalyst.agent"
+AGENT_PLIST="${CATALYST_LAUNCHAGENTS_DIR:-${HOME}/Library/LaunchAgents}/${AGENT_LABEL}.plist"
+AGENT_HEARTBEAT_FILE="${AGENT_HEARTBEAT_FILE:-${CATALYST_DIR}/catalyst-agent.heartbeat}"
+AGENT_ESCALATED_MARKER="${RESPONDER_STATE_DIR}/ESCALATED.catalyst-agent"
 # The operator-provisioned token files the cloud-sync launcher sources
 # (cloud-sync/launch.sh sources BOTH, in this order: cluster.env — the CTL-1307
 # shared-token projection — then the dedicated cloud-sync.env; Codex P1).
@@ -686,6 +723,242 @@ _release_sweep_lock() {
   return 0
 }
 trap _release_sweep_lock EXIT
+
+# ─── agent supervision (CTL-1518) ───────────────────────────────────────────
+#
+# Second supervised target: the com.catalyst.agent host-metrics sampler. It died
+# on mini-2 and launchd left it dead for 10 days — this block is the code
+# backstop for that class of silent death. Same bounded-kickstart + one-shot-
+# escalation + re-arm contract as the cloud-sync path, but with its OWN agent-
+# scoped attempt markers (agent-attempt.*), escalation marker (ESCALATED.
+# catalyst-agent), heartbeat line (target=catalyst-agent), and OTel escalate — so
+# the two targets never share an attempt budget or clobber each other's state.
+#
+# PLACEMENT is load-bearing: this runs BEFORE the cloud-sync detect because the
+# cloud-sync ACT path terminates the script with `exit 0` at several points — a
+# block placed after it would be unreachable. Running first, this block MUST NOT
+# exit; it falls through to the cloud-sync detect, whose heartbeat stays the LAST
+# line of every sweep (the doctor-freshness contract). It runs only after the
+# sweep lock is held (this trap fires after acquisition), so the two targets
+# share the same single-sweep reservation.
+#
+# CRITICAL (CTL-1510 lineage): agent_heartbeat / emit_agent_escalated are
+# SELF-CONTAINED — they read ONLY agent-scoped vars plus globals set at the top
+# of the file. They deliberately do NOT call heartbeat() / emit_escalated(),
+# which reference cloud-sync globals (INSTALLED, ALIVE, C_DEAD, CONDITIONS_CSV,
+# ATTEMPTS, …) that are UNSET here under `set -u`; calling them would abort the
+# sweep before the EXIT trap runs and leak the sweep lock. And every `$(...)`
+# capture below is a single-line single command — NO comments inside a
+# command-substitution capture (the bash 3.2 parser defect that cost CTL-1513 a
+# production incident; the real interpreter is /bin/bash 3.2 via launchd/cron).
+
+agent_heartbeat() {
+  local status="$1"
+  log "heartbeat status=${status} target=catalyst-agent installed=${AGENT_INSTALLED} stale=${AGENT_STALE} attempts=${AGENT_ATTEMPTS}/${RESPONDER_MAX_ATTEMPTS} escalated=${AGENT_ESCALATED}"
+}
+
+# Fail-open agent-scoped escalate (mirrors emit_escalated; own attrs only).
+emit_agent_escalated() {
+  command -v emit-otel-event.sh >/dev/null 2>&1 || return 0
+  emit-otel-event.sh \
+    --event "catalyst.responder.escalated" \
+    --outcome fail \
+    --session-id "$RESPONDER_RUN_ID" \
+    --attr "target=catalyst-agent" \
+    --attr "conditions=agent-stale" \
+    --attr "attempts=${AGENT_ATTEMPTS}" \
+    --attr "windowSecs=${RESPONDER_ATTEMPT_WINDOW_SECS}" >/dev/null 2>&1 || true
+}
+
+# agent-attempt.* markers — a SEPARATE glob namespace from the cloud-sync
+# attempt.* markers (the `attempt.*` glob never matches `agent-attempt.*`), so
+# the two targets prune / count / clear independently.
+_agent_prune_attempts() {
+  is_dry && return 0
+  local f ts now
+  now="$(date +%s)"
+  for f in "${RESPONDER_STATE_DIR}"/agent-attempt.*; do
+    [[ -e "$f" ]] || continue
+    ts="${f##*/}"; ts="${ts#agent-attempt.}"; ts="${ts%%.*}"
+    if [[ ! "$ts" =~ ^[0-9]+$ ]]; then
+      rm -f "$f" 2>/dev/null
+      [[ -e "$f" ]] && AGENT_PRUNE_DEGRADED=1
+      continue
+    fi
+    if [[ $(( now - ts )) -gt "$RESPONDER_ATTEMPT_WINDOW_SECS" ]]; then
+      rm -f "$f" 2>/dev/null
+      [[ -e "$f" ]] && AGENT_PRUNE_DEGRADED=1
+    fi
+  done
+  return 0
+}
+
+_agent_attempt_count() {
+  local n=0 f
+  for f in "${RESPONDER_STATE_DIR}"/agent-attempt.*; do
+    [[ -e "$f" ]] && n=$((n+1))
+  done
+  echo "$n"
+}
+
+# Fail-SAFE like _record_attempt: a marker that cannot be written means the cap
+# cannot bound us, so the caller refuses to kickstart.
+_agent_record_attempt() {
+  : > "${RESPONDER_STATE_DIR}/agent-attempt.$(date +%s).$$" 2>/dev/null
+}
+
+# Returns non-zero when a durable marker SURVIVES the rm (read-only dir) so the
+# caller never reports a false re-arm (mirrors _clear_markers).
+_agent_clear_markers() {
+  rm -f "${RESPONDER_STATE_DIR}"/agent-attempt.* "$AGENT_ESCALATED_MARKER" 2>/dev/null || true
+  [[ -e "$AGENT_ESCALATED_MARKER" ]] && return 1
+  local f
+  for f in "${RESPONDER_STATE_DIR}"/agent-attempt.*; do
+    [[ -e "$f" ]] && return 1
+  done
+  return 0
+}
+
+# _agent_stale_age: seconds since the agent's last liveness signal — the
+# breadcrumb mtime when present, else the plist install mtime (a freshly-
+# installed-but-never-ticked sampler is NOT yet stale). "" when neither is
+# readable. A future mtime (clock skew) clamps to 0/fresh — the safe direction
+# here is to NEVER kickstart a healthy sampler.
+_agent_stale_age() {
+  local now m age
+  now="$(date +%s)"
+  m="$(_mtime "$AGENT_HEARTBEAT_FILE")"
+  [[ "$m" =~ ^[0-9]+$ ]] || m="$(_mtime "$AGENT_PLIST")"
+  [[ "$m" =~ ^[0-9]+$ ]] || { printf ''; return 0; }
+  age=$(( now - m ))
+  (( age < 0 )) && age=0
+  printf '%s' "$age"
+}
+
+# _agent_kickstart: a DUPLICATE of the CTL-1510-hardened cloud-sync deadline-
+# wrapped kickstart (CTL-1518 correction a — NOT a shared refactor; cloud-sync
+# stays literally untouched). Agent-prefixed locals so nothing clobbers the
+# cloud-sync path. Reuses RESPONDER_KICKSTART_TIMEOUT_SECS / _WAIT_SECS. Sets
+# AGENT_KICK_RESULT to recovered|still-down from a post-settle breadcrumb re-probe.
+_agent_kickstart() {
+  local out pid rc="" i uid new_age
+  uid="$(id -u)"
+  out="$(mktemp "${TMPDIR:-/tmp}/responder-agent-kick.XXXXXX")"
+  launchctl kickstart -k "gui/${uid}/${AGENT_LABEL}" > "$out" 2>&1 &
+  pid=$!
+  for (( i = 0; i < RESPONDER_KICKSTART_TIMEOUT_SECS; i++ )); do
+    if ! kill -0 "$pid" 2>/dev/null; then
+      wait "$pid"
+      rc=$?
+      break
+    fi
+    sleep 1
+  done
+  if [[ -z "$rc" ]]; then
+    kill -9 "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    log "agent: kickstart TIMED OUT after ${RESPONDER_KICKSTART_TIMEOUT_SECS}s for gui/${uid}/${AGENT_LABEL} (attempt ${AGENT_ATTEMPTS}/${RESPONDER_MAX_ATTEMPTS} still counted)"
+  elif [[ "$rc" -eq 0 ]]; then
+    sed 's/^/  /' "$out"
+    log "agent: kickstarted gui/${uid}/${AGENT_LABEL} (attempt ${AGENT_ATTEMPTS}/${RESPONDER_MAX_ATTEMPTS})"
+  else
+    sed 's/^/  /' "$out"
+    log "agent: kickstart FAILED for gui/${uid}/${AGENT_LABEL} — label not loaded? (attempt ${AGENT_ATTEMPTS}/${RESPONDER_MAX_ATTEMPTS} still counted)"
+  fi
+  rm -f "$out"
+  [[ "$RESPONDER_KICKSTART_WAIT_SECS" -gt 0 ]] && sleep "$RESPONDER_KICKSTART_WAIT_SECS"
+  new_age="$(_agent_stale_age)"
+  if [[ -n "$new_age" && "$new_age" -le "$RESPONDER_AGENT_STALE_SECS" ]]; then
+    AGENT_KICK_RESULT="recovered"
+  else
+    AGENT_KICK_RESULT="still-down"
+  fi
+}
+
+# Inert on nodes without the agent plist (existing tests + non-sampler nodes stay
+# silent — no agent heartbeat line at all).
+if [[ -f "$AGENT_PLIST" ]]; then
+  AGENT_INSTALLED=1
+  AGENT_STALE=0
+  AGENT_ATTEMPTS=0
+  AGENT_ESCALATED=0
+  AGENT_PRUNE_DEGRADED=0
+  AGENT_KICK_RESULT=""
+
+  if [[ "$RESPONDER_AGENT_ENABLED" != "1" ]]; then
+    agent_heartbeat "disabled"
+  else
+    _AGENT_AGE="$(_agent_stale_age)"
+    if [[ -n "$_AGENT_AGE" && "$_AGENT_AGE" -gt "$RESPONDER_AGENT_STALE_SECS" ]]; then
+      AGENT_STALE=1
+      log "agent: host-metrics breadcrumb ${_AGENT_AGE}s old (> ${RESPONDER_AGENT_STALE_SECS}s) — com.catalyst.agent sampler stale/dead"
+    fi
+    [[ -f "$AGENT_ESCALATED_MARKER" ]] && AGENT_ESCALATED=1
+    _agent_prune_attempts
+    AGENT_ATTEMPTS="$(_agent_attempt_count)"
+    [[ "$AGENT_PRUNE_DEGRADED" -eq 1 ]] && log "agent: ERROR: expired attempt markers could not be pruned from ${RESPONDER_STATE_DIR} (read-only?) — agent attempt count over-counts; fix permissions"
+
+    if [[ "$AGENT_STALE" -eq 0 ]]; then
+      if [[ "$AGENT_ESCALATED" -eq 1 || "$AGENT_ATTEMPTS" -gt 0 ]]; then
+        if is_dry; then
+          log "agent: [dry-run] would re-arm: clear ${AGENT_ATTEMPTS} attempt marker(s) + escalated=${AGENT_ESCALATED}"
+          agent_heartbeat "healthy"
+        elif _agent_clear_markers; then
+          [[ "$AGENT_ESCALATED" -eq 1 ]] && log "agent: condition cleared — re-armed (ESCALATED.catalyst-agent + attempt markers removed)"
+          AGENT_ESCALATED=0
+          AGENT_ATTEMPTS=0
+          agent_heartbeat "healthy"
+        else
+          log "agent: ERROR: condition cleared but markers could not be removed from ${RESPONDER_STATE_DIR} (read-only?) — agent supervision remains ESCALATED on disk; fix permissions"
+          agent_heartbeat "degraded"
+        fi
+      else
+        agent_heartbeat "healthy"
+      fi
+    elif [[ "$AGENT_ESCALATED" -eq 1 ]]; then
+      log "agent: condition active: agent-stale (escalated hold)"
+      agent_heartbeat "escalated"
+    elif [[ "$AGENT_ATTEMPTS" -ge "$RESPONDER_MAX_ATTEMPTS" ]]; then
+      log "agent: condition active: agent-stale"
+      if [[ "$AGENT_PRUNE_DEGRADED" -eq 1 ]]; then
+        log "agent: ERROR: attempt cap reached but the count includes unprunable expired markers — refusing to escalate on unreliable state; fix ${RESPONDER_STATE_DIR} permissions"
+        agent_heartbeat "degraded"
+      elif is_dry; then
+        log "agent: [dry-run] would escalate: ${AGENT_ATTEMPTS}/${RESPONDER_MAX_ATTEMPTS} kickstarts in ${RESPONDER_ATTEMPT_WINDOW_SECS}s did not clear agent-stale"
+        agent_heartbeat "dry-run"
+      else
+        if : > "$AGENT_ESCALATED_MARKER" 2>/dev/null; then
+          AGENT_ESCALATED=1
+          emit_agent_escalated
+        else
+          AGENT_ESCALATED=1
+          log "agent: ERROR: cannot write ESCALATED.catalyst-agent marker under ${RESPONDER_STATE_DIR} — skipping the one-shot OTel emit; fix permissions"
+        fi
+        log "agent: ERROR: escalated — agent-stale persists after ${AGENT_ATTEMPTS}/${RESPONDER_MAX_ATTEMPTS} kickstarts in ${RESPONDER_ATTEMPT_WINDOW_SECS}s; kickstarting stopped until the condition clears (check ~/catalyst/catalyst-agent.log)"
+        agent_heartbeat "escalated"
+      fi
+    elif is_dry; then
+      log "agent: [dry-run] would kickstart gui/$(id -u)/${AGENT_LABEL} (agent-stale)"
+      agent_heartbeat "dry-run"
+    else
+      log "agent: condition active: agent-stale"
+      if ! _agent_record_attempt; then
+        log "agent: ERROR: cannot write attempt marker under ${RESPONDER_STATE_DIR} — refusing to kickstart (attempt cap unenforceable); fix permissions"
+        agent_heartbeat "degraded"
+      else
+        AGENT_ATTEMPTS=$((AGENT_ATTEMPTS+1))
+        _agent_kickstart
+        if [[ "$AGENT_KICK_RESULT" == "recovered" ]]; then
+          log "agent: recovered: com.catalyst.agent breadcrumb is fresh after kickstart"
+          agent_heartbeat "recovered"
+        else
+          log "agent: still-down: com.catalyst.agent breadcrumb still stale after kickstart + ${RESPONDER_KICKSTART_WAIT_SECS}s"
+          agent_heartbeat "still-down"
+        fi
+      fi
+    fi
+  fi
+fi
 
 # ─── detect ─────────────────────────────────────────────────────────────────
 

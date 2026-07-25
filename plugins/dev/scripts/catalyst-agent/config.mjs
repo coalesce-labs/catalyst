@@ -84,6 +84,16 @@ export function getEventLogPath() {
   return resolve(catalystDir(), "events", `${ym}.jsonl`);
 }
 
+// The liveness breadcrumb the standalone agent atomically refreshes after every
+// `--once` tick (CTL-1518). health-responder.sh reads its MTIME (not its body)
+// to tell a silently-dead launchd-managed sampler from a healthy one — the same
+// dead-on-mini-2-for-10-days failure the responder now backstops. Resolved from
+// the SAME CATALYST_DIR root as the event log so a CATALYST_DIR override moves
+// both together (the responder resolves the identical path).
+export function getHeartbeatPath() {
+  return resolve(catalystDir(), "catalyst-agent.heartbeat");
+}
+
 // --- Cadence floor ---
 // The launchd StartInterval and --loop cadence are both driven by intervalMs.
 // 3 min is the hard floor (matches the rate-limit poller floor) so a misset env

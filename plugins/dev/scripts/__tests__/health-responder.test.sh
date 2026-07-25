@@ -954,6 +954,130 @@ run "T64: the full script runs clean under real /bin/bash with a provisioned tok
 rm -f "${HOME}/.config/catalyst/cloud-sync.env"
 unset MOCK_LAST_EXIT
 
+# ─── Phase 14: CTL-1518 agent supervision (T65–T74) ─────────────────────────
+#
+# Second supervised target: the com.catalyst.agent host-metrics sampler. Its
+# block runs BEFORE the cloud-sync detect (the cloud-sync act path `exit 0`s, so
+# a block after it would be unreachable) and is INERT without the agent plist.
+# Same PATH-shadowed launchctl/pgrep mocks — the agent kickstart lands in
+# KICKSTART_LOG as `kickstart -k gui/<uid>/com.catalyst.agent`. Staleness is the
+# breadcrumb mtime, falling back to the plist install-mtime when it is absent.
+
+export AGENT_HEARTBEAT_FILE="${SCRATCH}/catalyst-agent.heartbeat"
+AGENT_PLIST_FILE="${CATALYST_LAUNCHAGENTS_DIR}/com.catalyst.agent.plist"
+AGENT_KICK="kickstart -k gui/$(id -u)/com.catalyst.agent"
+
+# _agent_reset: the cloud-sync _reset PLUS the agent plist + breadcrumb (the
+# state dir removal in _reset already drops any agent-attempt.*/ESCALATED marker).
+_agent_reset() {
+  _reset
+  rm -f "$AGENT_PLIST_FILE" "$AGENT_HEARTBEAT_FILE"
+}
+
+# T65 (inert): no agent plist → no target=catalyst-agent line at all (this is
+# what keeps the whole T1–T64 suite above inert — none of them install it).
+_agent_reset
+touch "$PLIST"; touch "$MOCK_ALIVE_FILE"; _fresh_lock  # cloud-sync healthy
+run "T65: no agent plist is inert — no target=catalyst-agent line" \
+  bash -c "bash '$RESPONDER' | { ! grep -q 'target=catalyst-agent'; }"
+
+# T66 (fresh): agent plist + fresh breadcrumb → healthy, no kickstart.
+_agent_reset
+touch "$AGENT_PLIST_FILE"; touch "$AGENT_HEARTBEAT_FILE"
+run "T66: fresh agent breadcrumb is healthy (no kickstart)" \
+  bash -c "bash '$RESPONDER' | grep -q 'heartbeat status=healthy target=catalyst-agent' && ! test -s '${KICKSTART_LOG}'"
+
+# T67 (stale): agent plist + old breadcrumb → kickstart com.catalyst.agent, with
+# its OWN attempt marker (never the cloud-sync attempt.* namespace).
+_agent_reset
+touch "$AGENT_PLIST_FILE"; touch -t 202501010000 "$AGENT_HEARTBEAT_FILE"
+RESPONDER_KICKSTART_WAIT_SECS=0 bash "$RESPONDER" > "${SCRATCH}/agent-out" 2>&1 || true
+run "T67: stale agent breadcrumb kickstarts com.catalyst.agent" \
+  expect_contains "$KICKSTART_LOG" "$AGENT_KICK"
+run "T67b: stale agent emits its own target=catalyst-agent heartbeat" \
+  expect_contains "${SCRATCH}/agent-out" "target=catalyst-agent"
+run "T67c: stale agent records an agent-scoped attempt marker" \
+  bash -c "ls '${RESPONDER_STATE_DIR}'/agent-attempt.* >/dev/null"
+run "T67d: the agent path did NOT touch the cloud-sync attempt.* namespace" \
+  bash -c "! ls '${RESPONDER_STATE_DIR}'/attempt.* >/dev/null 2>&1"
+
+# T68 (absent breadcrumb, OLD plist): never ticked but installed long ago →
+# plist-mtime fallback is stale → kickstart.
+_agent_reset
+touch -t 202501010000 "$AGENT_PLIST_FILE"
+run "T68: absent breadcrumb + old plist mtime is stale (kickstart)" \
+  bash -c "RESPONDER_KICKSTART_WAIT_SECS=0 bash '$RESPONDER' >/dev/null; grep -qF '$AGENT_KICK' '${KICKSTART_LOG}'"
+
+# T69 (absent breadcrumb, FRESH plist): freshly installed, not yet ticked →
+# plist-mtime fallback is fresh → NOT stale → no kickstart (give it time to tick).
+_agent_reset
+touch "$AGENT_PLIST_FILE"
+run "T69: absent breadcrumb + fresh plist mtime is NOT stale (no kickstart)" \
+  bash -c "bash '$RESPONDER' | grep -q 'heartbeat status=healthy target=catalyst-agent' && ! test -s '${KICKSTART_LOG}'"
+
+# T70 (sub-kill-switch): RESPONDER_AGENT_ENABLED=0 disables the agent block even
+# when stale.
+_agent_reset
+touch "$AGENT_PLIST_FILE"; touch -t 202501010000 "$AGENT_HEARTBEAT_FILE"
+run "T70: RESPONDER_AGENT_ENABLED=0 disables the agent block (no kickstart)" \
+  bash -c "RESPONDER_AGENT_ENABLED=0 bash '$RESPONDER' | grep -q 'heartbeat status=disabled target=catalyst-agent' && ! test -s '${KICKSTART_LOG}'"
+
+# T71 (cap → escalate): repeated stale → after MAX_ATTEMPTS, escalate with its
+# own one-shot marker + fail-open otel, no further kickstart. MAX=2: kick, kick, escalate.
+_agent_reset
+touch "$AGENT_PLIST_FILE"; touch -t 202501010000 "$AGENT_HEARTBEAT_FILE"
+export RESPONDER_MAX_ATTEMPTS=2
+run "T71: agent strike 1 kickstarts (1 total)" \
+  bash -c "RESPONDER_KICKSTART_WAIT_SECS=0 bash '$RESPONDER' >/dev/null; [ \"\$(grep -cF '$AGENT_KICK' '${KICKSTART_LOG}')\" -eq 1 ]"
+run "T71b: agent strike 2 kickstarts (2 total)" \
+  bash -c "RESPONDER_KICKSTART_WAIT_SECS=0 bash '$RESPONDER' >/dev/null; [ \"\$(grep -cF '$AGENT_KICK' '${KICKSTART_LOG}')\" -eq 2 ]"
+run "T71c: agent third strike escalates (heartbeat + no third kickstart)" \
+  bash -c "out=\$(RESPONDER_KICKSTART_WAIT_SECS=0 bash '$RESPONDER'); printf '%s' \"\$out\" | grep -q 'heartbeat status=escalated target=catalyst-agent' && [ \"\$(grep -cF '$AGENT_KICK' '${KICKSTART_LOG}')\" -eq 2 ]"
+run "T71d: agent ESCALATED.catalyst-agent one-shot marker written" \
+  test -f "${RESPONDER_STATE_DIR}/ESCALATED.catalyst-agent"
+run "T71e: agent escalation emitted fail-open otel with target=catalyst-agent" \
+  expect_contains "$SCRATCH_OTEL_LOG" "target=catalyst-agent"
+run "T71f: escalated hold — no re-emit (one-shot), no further kickstart" \
+  bash -c "out=\$(bash '$RESPONDER'); printf '%s' \"\$out\" | grep -q 'heartbeat status=escalated target=catalyst-agent' && [ \"\$(grep -c 'target=catalyst-agent' '${SCRATCH_OTEL_LOG}')\" -eq 1 ]"
+unset RESPONDER_MAX_ATTEMPTS
+
+# T72 (re-arm): a fresh breadcrumb after escalation clears the markers + re-arms.
+_agent_reset
+touch "$AGENT_PLIST_FILE"; touch "$AGENT_HEARTBEAT_FILE"
+mkdir -p "$RESPONDER_STATE_DIR"
+touch "${RESPONDER_STATE_DIR}/ESCALATED.catalyst-agent"
+touch "${RESPONDER_STATE_DIR}/agent-attempt.$(date +%s).1"
+run "T72: agent condition clears → re-arm" \
+  bash -c "bash '$RESPONDER' | grep -q 're-armed'"
+run "T72b: agent ESCALATED marker removed on re-arm" \
+  bash -c "! test -f '${RESPONDER_STATE_DIR}/ESCALATED.catalyst-agent'"
+run "T72c: agent attempt markers removed on re-arm" \
+  bash -c "! ls '${RESPONDER_STATE_DIR}'/agent-attempt.* >/dev/null 2>&1"
+
+# T73 (two plists): cloud-sync healthy + agent stale — the agent kickstart fires
+# AND the sweep STILL ends with a completed cloud-sync `heartbeat status=` line
+# (the doctor-freshness contract survives the second target running first).
+_agent_reset
+touch "$PLIST"; touch "$MOCK_ALIVE_FILE"; _fresh_lock
+touch "$AGENT_PLIST_FILE"; touch -t 202501010000 "$AGENT_HEARTBEAT_FILE"
+RESPONDER_KICKSTART_WAIT_SECS=0 bash "$RESPONDER" > "${SCRATCH}/two-out" 2>&1 || true
+run "T73: two plists — the agent kickstart fires" \
+  expect_contains "$KICKSTART_LOG" "$AGENT_KICK"
+run "T73b: two plists — the agent emitted its own target=catalyst-agent heartbeat" \
+  expect_contains "${SCRATCH}/two-out" "target=catalyst-agent"
+run "T73c: two plists — the sweep still ENDS with a completed cloud-sync heartbeat (doctor freshness)" \
+  bash -c "tail -1 '${SCRATCH}/two-out' | grep -q 'heartbeat status=healthy' && tail -1 '${SCRATCH}/two-out' | { ! grep -q 'target=catalyst-agent'; }"
+run "T73d: two plists — the healthy cloud-sync writer was NOT kickstarted" \
+  bash -c "! grep -q 'ai.coalesce.catalyst-cloud-sync' '${KICKSTART_LOG}'"
+
+# T74 (bash 3.2): the FULL script with the agent block active runs clean under
+# real /bin/bash (3.2 on Darwin — the production interpreter; same idiom as T64).
+# No `unbound variable`, and the agent kickstart still fires.
+_agent_reset
+touch "$AGENT_PLIST_FILE"; touch -t 202501010000 "$AGENT_HEARTBEAT_FILE"
+run "T74: the agent block runs clean under real /bin/bash (production interpreter)" \
+  bash -c "out=\$(RESPONDER_KICKSTART_WAIT_SECS=0 /bin/bash '$RESPONDER' 2>&1); printf '%s' \"\$out\" | grep -q 'unbound variable' && exit 1; grep -qF '$AGENT_KICK' '${KICKSTART_LOG}'"
+
 # ─── results ────────────────────────────────────────────────────────────────
 
 echo ""
