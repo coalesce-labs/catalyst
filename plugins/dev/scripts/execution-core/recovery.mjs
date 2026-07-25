@@ -48,6 +48,7 @@ import {
 // transcripts so a doc worker mid in-process fan-out is never judged silent
 // (CTL-662-safe). Used ONLY to break the cold-snapshot doc-phase 6h tie below.
 import { transcriptAgeMs as defaultTranscriptAgeMs } from "./transcript-silence.mjs";
+import { scanEventsChunked } from "./event-tail.mjs"; // CTL-1514: streaming event-log scan
 // CTL-863 fleet-unfreeze (entourage follow-up to #2552): readPeerHeartbeatsSyncCached is
 // the CACHED reader — a 45s in-process TTL cache around the same anchor-issue read, safe
 // here because dead-host detection already tolerates a far larger (10-min) staleness
@@ -3394,31 +3395,87 @@ export function readClusterAdmission({ logPath = getEventLogPath() } = {}) {
   return out;
 }
 
+// scanAllPhaseCompleteEvents — ONE streaming pass over the unified event log,
+// collecting every `phase.<phase>.complete.<ticket>` event.name seen anywhere in
+// the file into a Set. Built on the shared scanEventsChunked primitive (CTL-673)
+// so a 300MB+ / ~478K-line log never materializes into one whole-file string +
+// array. Best-effort: missing/unreadable log ⇒ empty Set; never throws.
+function scanAllPhaseCompleteEvents(logPath = getEventLogPath(), scan = scanEventsChunked) {
+  const seen = new Set();
+  try {
+    scan({
+      path: logPath,
+      fromOffset: 0,
+      onEvent: (e) => {
+        const name = e?.attributes?.["event.name"];
+        if (typeof name === "string" && name.startsWith("phase.") && name.includes(".complete.")) {
+          seen.add(name);
+        }
+      },
+    });
+  } catch {
+    /* best-effort — empty set on failure, same fail-open as phaseAlreadyComplete */
+  }
+  return seen;
+}
+
+// makeBatchedPhaseCompleteChecker — CTL-1514. Same (ticket, phase) => bool
+// contract as phaseAlreadyComplete, but backed by ONE full-file scan per checker
+// instance instead of one per call, and lazy (never scans if the reclaim loop
+// finds zero candidates that reach the dedup check). Used as reclaimDeadHostWork's
+// default `alreadyComplete`, so N in-flight tickets owned by a dead host cost one
+// streaming log pass per tick, not N whole-file readFileSync calls.
+export function makeBatchedPhaseCompleteChecker({ logPath = getEventLogPath(), scan = scanEventsChunked } = {}) {
+  let completed = null;
+  return (ticket, phase) => {
+    if (completed === null) completed = scanAllPhaseCompleteEvents(logPath, scan);
+    return completed.has(`phase.${phase}.complete.${ticket}`);
+  };
+}
+
 // phaseAlreadyComplete — true when the unified event log already contains a
 // `phase.<phase>.complete.<ticket>` event. The resume path checks this before
 // re-dispatching so a survivor never re-emits a completion the dead host already
 // emitted (dedup). Best-effort: a missing/unreadable log ⇒ false; never throws.
-export function phaseAlreadyComplete(
-  ticket,
-  phase,
-  { readLog = () => readFileSync(getEventLogPath(), "utf8") } = {}
-) {
+export function phaseAlreadyComplete(ticket, phase, { readLog = null, logPath = getEventLogPath() } = {}) {
   const needle = `phase.${phase}.complete.${ticket}`;
-  let raw;
+  // Back-compat / test seam: when a caller supplies raw text directly, parse it
+  // exactly as before (all existing unit tests inject readLog).
+  if (readLog) {
+    let raw;
+    try {
+      raw = readLog();
+    } catch {
+      return false;
+    }
+    for (const line of raw.split("\n")) {
+      if (!line || !line.includes(needle)) continue;
+      try {
+        if (JSON.parse(line)?.attributes?.["event.name"] === needle) return true;
+      } catch {
+        // partial/malformed line — skip
+      }
+    }
+    return false;
+  }
+  // CTL-1514: default path streams via the shared scanEventsChunked primitive so
+  // a 300MB+ log never materializes into one whole-file string + array for a
+  // single-ticket lookup. (Memory-bounded; scanEventsChunked has no early-exit,
+  // so wall-clock is still O(bytes) — the hot-path time win comes from the
+  // batched checker collapsing N calls into 1, above.)
+  let found = false;
   try {
-    raw = readLog();
+    scanEventsChunked({
+      path: logPath,
+      fromOffset: 0,
+      onEvent: (e) => {
+        if (!found && e?.attributes?.["event.name"] === needle) found = true;
+      },
+    });
   } catch {
     return false;
   }
-  for (const line of raw.split("\n")) {
-    if (!line || !line.includes(needle)) continue;
-    try {
-      if (JSON.parse(line)?.attributes?.["event.name"] === needle) return true;
-    } catch {
-      // partial/malformed line — skip
-    }
-  }
-  return false;
+  return found;
 }
 
 // RESUME_PHASE_ORDER — the linear pipeline phases in forward order, derived from
@@ -3552,7 +3609,9 @@ export async function reclaimDeadHostWork(
     ownerForTicket: ownerFn = ownerForTicket,
     claim = (ticket, phase) => claimDispatchSync({ ticket, hostName: self, phase }),
     inferResume = (ticket, cwd) => inferResumePhase(ticket, { cwd }),
-    alreadyComplete = (ticket, phase) => phaseAlreadyComplete(ticket, phase),
+    // CTL-1514: batched default — ONE streaming log pass shared across every
+    // ticket this call processes, instead of one whole-file read per ticket.
+    alreadyComplete = makeBatchedPhaseCompleteChecker(),
     rebuildWorktree = (ticket) => {
       const result = defaultRebuildWorktree(ticket, { orchDir });
       return result;

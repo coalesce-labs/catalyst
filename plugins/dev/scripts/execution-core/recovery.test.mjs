@@ -5221,6 +5221,70 @@ describe("phaseAlreadyComplete — event-log dedup (CTL-863)", () => {
   });
 });
 
+// ─── CTL-1514: streaming default path + batched checker ──────────────────────
+import { makeBatchedPhaseCompleteChecker } from "./recovery.mjs";
+import { scanEventsChunked } from "./event-tail.mjs";
+
+function ctl1514TempLog(names) {
+  const dir = mkdtempSync(join(tmpdir(), "ctl1514-recov-"));
+  const path = join(dir, "events.jsonl");
+  writeFileSync(
+    path,
+    names.map((n) => JSON.stringify({ attributes: { "event.name": n } })).join("\n") + "\n"
+  );
+  return path;
+}
+
+describe("phaseAlreadyComplete — streaming default path (CTL-1514)", () => {
+  test("default path (logPath, no readLog) streams the file and finds the event", () => {
+    const path = ctl1514TempLog(["phase.research.complete.CTL-900", "phase.plan.complete.CTL-800"]);
+    expect(phaseAlreadyComplete("CTL-900", "research", { logPath: path })).toBe(true);
+    expect(phaseAlreadyComplete("CTL-800", "plan", { logPath: path })).toBe(true);
+  });
+
+  test("default path returns false for a non-present (ticket, phase)", () => {
+    const path = ctl1514TempLog(["phase.research.complete.CTL-900"]);
+    expect(phaseAlreadyComplete("CTL-900", "plan", { logPath: path })).toBe(false);
+    expect(phaseAlreadyComplete("CTL-123", "research", { logPath: path })).toBe(false);
+  });
+
+  test("default path returns false on a missing file (never throws)", () => {
+    expect(
+      phaseAlreadyComplete("CTL-900", "research", { logPath: join(tmpdir(), "nope-1514.jsonl") })
+    ).toBe(false);
+  });
+});
+
+describe("makeBatchedPhaseCompleteChecker — one pass for N tickets (CTL-1514)", () => {
+  test("correct true/false per (ticket, phase), scanning the log exactly once for N calls", () => {
+    const path = ctl1514TempLog(["phase.research.complete.CTL-100", "phase.plan.complete.CTL-200"]);
+    let scanCalls = 0;
+    const scan = (opts) => {
+      scanCalls++;
+      return scanEventsChunked(opts);
+    };
+    const check = makeBatchedPhaseCompleteChecker({ logPath: path, scan });
+
+    expect(check("CTL-100", "research")).toBe(true);
+    expect(check("CTL-200", "plan")).toBe(true);
+    expect(check("CTL-300", "research")).toBe(false); // not complete
+    expect(check("CTL-100", "plan")).toBe(false); // wrong phase
+
+    // 4 checks, ONE streaming pass — the pre-fix default did one full readFileSync per call.
+    expect(scanCalls).toBe(1);
+  });
+
+  test("lazy — never scans when no check is invoked (zero dead-host tickets ⇒ zero reads)", () => {
+    let scanCalls = 0;
+    const scan = () => {
+      scanCalls++;
+      return { endOffset: 0, leftover: "" };
+    };
+    makeBatchedPhaseCompleteChecker({ logPath: "/whatever", scan });
+    expect(scanCalls).toBe(0);
+  });
+});
+
 // ─── CTL-863: reclaimDeadHostWork ────────────────────────────────────────────
 
 import { reclaimDeadHostWork } from "./recovery.mjs";

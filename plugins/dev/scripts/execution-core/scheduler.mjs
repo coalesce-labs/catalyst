@@ -64,6 +64,7 @@ export { STAGE_RANK, NON_PREEMPTABLE_PHASES };
 // the sweep and are injected, so the router itself is unit-testable.
 import { readVerifyVerdict } from "./work-done-probes.mjs";
 import { countRemediateCycles, countTicketEventsInWindow } from "./event-scan.mjs";
+import { tailParsedEvents } from "./event-tail.mjs"; // CTL-1514: bounded event-log tail
 import { rankTickets, compareTickets } from "./scheduler-rank.mjs";
 import {
   defaultDispatch,
@@ -3153,20 +3154,15 @@ let _boardHealthLastRunMs = 0;
 // CTL-1257 shared ring (not yet threadable here). Best-effort: any read/parse
 // error degrades to [] so the dependent invariants flag observable:false rather
 // than throwing the tick.
-function readBoardHealthEventTail(maxLines = 800) {
+// CTL-1514: exported for direct unit coverage. Reads the last `maxLines` events
+// via the shared scanEventsChunked primitive (event-tail.mjs, CTL-673) — a
+// bounded ~1.6MB window near EOF — instead of materializing the entire monthly
+// event log (300MB+ / ~478K lines) into one string + array on the SYNCHRONOUS
+// scheduler tick every BOARD_HEALTH_INTERVAL_MS. That whole-file readFileSync was
+// the driver behind the measured 115s scheduler event-loop-delay spikes on mini.
+export function readBoardHealthEventTail(maxLines = 800) {
   try {
-    const raw = readFileSync(getEventLogPath(), "utf8");
-    const lines = raw.split("\n");
-    const out = [];
-    for (const line of lines.slice(-maxLines)) {
-      if (!line) continue;
-      try {
-        out.push(JSON.parse(line));
-      } catch {
-        /* skip a partial/garbled line */
-      }
-    }
-    return out;
+    return tailParsedEvents({ path: getEventLogPath(), maxLines });
   } catch {
     return [];
   }

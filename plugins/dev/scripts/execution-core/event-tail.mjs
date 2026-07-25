@@ -1,7 +1,7 @@
 // event-tail.mjs — byte-correct event-log tail parsing (CTL-673). Leaf module:
 // no execution-core deps. Shared by daemon.mjs (live tail), event-scan.mjs
 // (incremental counters), and reaper.mjs (boot replay).
-import { openSync, fstatSync, readSync, closeSync } from "node:fs";
+import { openSync, fstatSync, readSync, closeSync, statSync } from "node:fs";
 
 const DEFAULT_CHUNK = 1 << 20; // 1 MiB — bounds peak memory regardless of file size.
 
@@ -83,4 +83,43 @@ export function scanEventsChunked({
       /* fd already gone */
     }
   }
+}
+
+// tailParsedEvents — return the last `maxLines` parsed JSON events from `path`,
+// in file order, WITHOUT reading the whole file when the tail fits in a small
+// window near EOF (CTL-1514). scanEventsChunked reads forward from an offset, so
+// this seeds an estimated start offset near EOF and scans forward to EOF; if
+// fewer than `maxLines` valid events came back AND there is more file before the
+// window, it doubles the window and rescans from scratch (never accumulates
+// across attempts — a larger window can reveal one more real line that a smaller
+// window's leading fragment cut off). Bounded to `maxDoublings` retries, after
+// which it forces fromOffset:0 (a full scan) so correctness never depends on the
+// estimate: a file with fewer than maxLines lines, or one containing a
+// pathologically long line, still returns the true last-N tail. Missing/empty
+// file ⇒ []; never throws.
+export function tailParsedEvents({
+  path,
+  maxLines = 800,
+  bytesPerLineEstimate = 2048,
+  maxDoublings = 8,
+} = {}) {
+  let size;
+  try {
+    size = statSync(path).size;
+  } catch {
+    return [];
+  }
+  if (size === 0) return [];
+
+  let window = Math.max(bytesPerLineEstimate * maxLines, 64 * 1024);
+  for (let attempt = 0; attempt <= maxDoublings; attempt++) {
+    const fromOffset = attempt === maxDoublings ? 0 : Math.max(0, size - window);
+    const collected = [];
+    scanEventsChunked({ path, fromOffset, onEvent: (e) => collected.push(e) });
+    if (collected.length >= maxLines || fromOffset === 0) {
+      return collected.slice(-maxLines);
+    }
+    window *= 2;
+  }
+  return []; // unreachable — the final attempt always uses fromOffset 0
 }
