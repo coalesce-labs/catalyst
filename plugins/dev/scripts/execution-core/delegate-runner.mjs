@@ -27,7 +27,7 @@
 // NAMESPACE: this module emits NO events. Dispatch lifecycle events
 // (phase.dispatch.*) are emitted by the detached drainer (delegate-runner-entry.mjs).
 
-import { openSync, mkdirSync } from "node:fs";
+import { openSync, closeSync, mkdirSync } from "node:fs";
 import { spawn as nodeSpawn } from "node:child_process";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -54,6 +54,18 @@ function realClock() {
 function defaultOpenLogFd(logPath) {
   mkdirSync(dirname(logPath), { recursive: true });
   return openSync(logPath, "a");
+}
+
+// defaultCloseLogFd — close the PARENT's copy of the child log fd after the
+// detached spawn has inherited (dup'd) it. CTL-1519: omitting this close leaked
+// exactly one fd per tick (POSIX spawn() forks synchronously and dup's the fd
+// into the child before returning, so the parent's copy is redundant). At the
+// 15s cadence that is ~240 fds/hr, all pointing at delegate-runner.log, marching
+// the long-lived daemon toward EMFILE. Injectable so tests assert the close
+// without operating on a real fd (the fake fds tests inject, e.g. 5/77, must
+// never reach the real closeSync).
+function defaultCloseLogFd(fd) {
+  closeSync(fd);
 }
 
 // defaultIsRunnerRunning — the single-instance guard the timer consults BEFORE
@@ -91,6 +103,7 @@ function defaultIsRunnerRunning(orchDir) {
  * @param {string}   [opts.entryPath]          detached entrypoint (injectable for tests)
  * @param {Function} [opts.spawn]              injectable async spawn (NEVER spawnSync)
  * @param {Function} [opts.openLogFd]          injectable fd opener for the child log
+ * @param {Function} [opts.closeLogFd]         injectable fd closer (CTL-1519: closes the parent copy post-spawn)
  * @param {Function} [opts.isRunnerRunning]    injectable single-instance probe
  * @param {object}   [opts.clock]              fake-clock seam for tests
  */
@@ -101,6 +114,7 @@ export function startDelegateRunnerTimer({
   entryPath = DELEGATE_RUNNER_ENTRY,
   spawn = nodeSpawn,
   openLogFd = defaultOpenLogFd,
+  closeLogFd = defaultCloseLogFd,
   isRunnerRunning = defaultIsRunnerRunning,
   clock = realClock(),
 } = {}) {
@@ -130,15 +144,30 @@ export function startDelegateRunnerTimer({
       // (3) DETACHED spawn + unref. stdin ignored; stdout/stderr → the log fd.
       //     spawn (async) ONLY — never spawnSync (which would block the daemon
       //     loop, the exact thing this whole design moves work OFF of).
-      const child = spawn(process.execPath, [entryPath], {
-        detached: true,
-        stdio: ["ignore", logFd, logFd],
-        // CTL-1331 FU-1: the detached entry resolves its orchDir from
-        // CATALYST_EXECUTION_CORE_DIR — pass it explicitly so the child drains the
-        // correct queue even when the daemon's own env doesn't carry it.
-        env: { ...process.env, CATALYST_EXECUTION_CORE_DIR: orchDir },
-      });
-      if (child && typeof child.unref === "function") child.unref();
+      try {
+        const child = spawn(process.execPath, [entryPath], {
+          detached: true,
+          stdio: ["ignore", logFd, logFd],
+          // CTL-1331 FU-1: the detached entry resolves its orchDir from
+          // CATALYST_EXECUTION_CORE_DIR — pass it explicitly so the child drains the
+          // correct queue even when the daemon's own env doesn't carry it.
+          env: { ...process.env, CATALYST_EXECUTION_CORE_DIR: orchDir },
+        });
+        if (child && typeof child.unref === "function") child.unref();
+      } finally {
+        // (4) CTL-1519: close the PARENT's copy of the log fd. The detached
+        //     child inherited its own dup of this fd (its stdout/stderr) during
+        //     the synchronous POSIX fork, so the parent copy is redundant the
+        //     instant spawn() returns. In `finally` so it also closes if spawn()
+        //     throws (e.g. EAGAIN/EMFILE) — the very error path where leaking the
+        //     just-opened fd would compound exhaustion. Append mode means the
+        //     child's writes are unaffected for its whole lifetime.
+        try {
+          closeLogFd(logFd);
+        } catch (err) {
+          log.warn({ err: err?.message }, "delegate-runner: log fd close failed");
+        }
+      }
     } catch (err) {
       log.warn({ err: err?.message }, "delegate-runner: kick error");
     }
