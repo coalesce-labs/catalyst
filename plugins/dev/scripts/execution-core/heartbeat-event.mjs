@@ -25,6 +25,7 @@ import {
 } from "./config.mjs";
 import { buildCatalystResource } from "./lib/catalyst-resource.mjs";
 import { logDaemonHeartbeat } from "../lib/daemon-heartbeat.mjs";
+import { emitProcessMemoryMetric } from "../lib/process-memory-metric.mjs"; // CTL-1517: per-process RSS/heap gauge
 
 export const HEARTBEAT_EVENT = "node.heartbeat";
 
@@ -148,6 +149,9 @@ export function startHeartbeat({ intervalMs = HEARTBEAT_INTERVAL_MS, logPath, ad
     // so a liveness check can watch the heartbeat marker independent of the
     // otel-forward event pipeline (a quiet-but-healthy daemon must still prove it).
     logDaemonHeartbeat(log, "execution-core");
+    // CTL-1517: per-process RSS/heap OTel gauge on the same tick (fire-and-forget; never
+    // throws, never blocks) so per-daemon memory becomes attributable in Prometheus.
+    emitProcessMemoryMetric({ serviceName: "catalyst.execution-core", log }).catch(() => {});
     return emitHeartbeatEvent({ logPath, admissionFn, governanceFn, inFlightTicketsFn }).catch(() => {});
   };
   const started = tick(); // emit once at boot; Promise for callers that need to await it

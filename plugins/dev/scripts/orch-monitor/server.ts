@@ -22,6 +22,7 @@ import {
 import { readSessionStore } from "./lib/session-store";
 import { readReconcileHealth } from "./lib/reconcile-health-reader"; // CTL-867
 import { DAEMON_HEARTBEAT_MSG } from "../lib/daemon-heartbeat.mjs"; // CTL-1280
+import { emitProcessMemoryMetric } from "../lib/process-memory-metric.mjs"; // CTL-1517: per-process RSS/heap gauge
 import type { BoardPayload } from "./lib/board-data.mjs";
 import { assembleBoard, _getTranscriptCacheSize } from "./lib/board-data.mjs";
 import { createBoardSnapshotManager } from "./lib/board-snapshot.mjs";
@@ -1011,6 +1012,9 @@ export function createServer(opts: CreateServerOptions): BunServer {
         // liveness check can watch for the shared heartbeat marker independent of the
         // otel-forward event pipeline (the heartbeat EVENT above rides otel-forward).
         console.info(`${DAEMON_HEARTBEAT_MSG} (monitor)`);
+        // CTL-1517: per-process RSS/heap OTel gauge on the same ~30s tick (fire-and-forget;
+        // never throws, never blocks) so per-daemon memory becomes attributable in Prometheus.
+        void emitProcessMemoryMetric({ serviceName: "catalyst.monitor", log: console });
       },
     });
 
