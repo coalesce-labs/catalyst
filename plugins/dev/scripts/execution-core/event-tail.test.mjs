@@ -162,6 +162,12 @@ describe("tailParsedEvents (CTL-1514)", () => {
     expect(tailParsedEvents({ path, maxLines: 800 })).toEqual([{ n: 1 }, { n: 2 }]);
   });
 
+  test("includes a valid final record that lacks a trailing newline (CTL-1514, Codex P2)", () => {
+    const path = tempLog(['{"n":1}', '{"n":2}'], { trailingNewline: false });
+    // {"n":2} is the leftover (no trailing \n); it must still be returned.
+    expect(tailParsedEvents({ path, maxLines: 2 })).toEqual([{ n: 1 }, { n: 2 }]);
+  });
+
   test("malformed/blank lines in the tail are skipped and don't consume the maxLines budget", () => {
     const path = tempLog(['{"n":1}', "not-json", "", '{"n":2}', '{"n":3}']);
     expect(tailParsedEvents({ path, maxLines: 2 })).toEqual([{ n: 2 }, { n: 3 }]);

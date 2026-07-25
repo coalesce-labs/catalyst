@@ -3432,7 +3432,18 @@ export function makeBatchedPhaseCompleteChecker({ logPath = null, scan = scanEve
     // completions still dedup.
     const path = typeof logPath === "function" ? logPath() : logPath ?? getEventLogPath();
     try {
-      if (path !== scannedPath) {
+      // Reset the cursor on a path change (month rollover) OR an in-place
+      // truncation/replacement — legacy rotation rewrites a SHORTER file at the same
+      // path, and if size < cursor the old offset is beyond the new EOF so its prefix
+      // would be skipped, permanently missing a completion (mirrors event-scan.mjs's
+      // size<cursor reset). Codex P2 on #2729.
+      let size = null;
+      try {
+        size = statSync(path).size;
+      } catch {
+        /* missing/unreadable → the scan below no-ops; keep prior `seen` */
+      }
+      if (path !== scannedPath || (size !== null && size < cursor)) {
         cursor = 0;
         leftover = "";
         scannedPath = path;
@@ -3445,6 +3456,23 @@ export function makeBatchedPhaseCompleteChecker({ logPath = null, scan = scanEve
       });
       cursor = endOffset;
       leftover = next;
+      // A completion written as the final record WITHOUT a trailing newline sits in
+      // `next` (never emitted as a complete line); ingest it if it parses so dedup
+      // doesn't miss it (idempotent — re-parsing the same leftover later is harmless).
+      if (next) {
+        try {
+          const finalName = JSON.parse(next)?.attributes?.["event.name"];
+          if (
+            typeof finalName === "string" &&
+            finalName.startsWith("phase.") &&
+            finalName.includes(".complete.")
+          ) {
+            seen.add(finalName);
+          }
+        } catch {
+          /* genuinely partial line — skip */
+        }
+      }
     } catch {
       /* best-effort — keep what we have; fail open to "not complete" */
     }

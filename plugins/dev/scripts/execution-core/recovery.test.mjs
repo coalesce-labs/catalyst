@@ -5316,6 +5316,23 @@ describe("makeBatchedPhaseCompleteChecker — one pass for N tickets (CTL-1514)"
     expect(check("CTL-200", "plan")).toBe(true); // new file scanned from 0
     expect(check("CTL-100", "research")).toBe(true); // prior-month completion still deduped
   });
+
+  test("resets the cursor when the same-path log is replaced/truncated (Codex P2 on #2729)", () => {
+    const path = ctl1514TempLog([
+      "phase.research.complete.CTL-100",
+      "phase.plan.complete.CTL-200",
+      "phase.verify.complete.CTL-300",
+    ]);
+    const check = makeBatchedPhaseCompleteChecker({ logPath: path });
+    expect(check("CTL-300", "verify")).toBe(true); // scans the full file, cursor at EOF
+    // Legacy rotation rewrites a SHORTER file at the SAME path with a new completion.
+    writeFileSync(
+      path,
+      JSON.stringify({ attributes: { "event.name": "phase.research.complete.CTL-900" } }) + "\n"
+    );
+    // size < cursor → reset to 0 → the replacement is scanned, not skipped past.
+    expect(check("CTL-900", "research")).toBe(true);
+  });
 });
 
 // ─── CTL-863: reclaimDeadHostWork ────────────────────────────────────────────

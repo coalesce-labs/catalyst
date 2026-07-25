@@ -140,7 +140,23 @@ export function tailParsedEvents({
     const collected = [];
     // skipFirstLine when seeking mid-file: the bytes before the first newline are
     // a partial line whose suffix could parse as a bogus event (CTL-1514).
-    scanEventsChunked({ path, fromOffset, skipFirstLine: fromOffset > 0, onEvent: (e) => collected.push(e) });
+    const { leftover } = scanEventsChunked({
+      path,
+      fromOffset,
+      skipFirstLine: fromOffset > 0,
+      onEvent: (e) => collected.push(e),
+    });
+    // A log whose final record lacks a trailing newline leaves that record in
+    // `leftover` (never emitted as a complete line). Include it if it parses —
+    // the replaced raw.split("\n") parsed it, and board-health/recovery dedup must
+    // not miss the newest event in a truncated / crash-recovered log (Codex P2).
+    if (leftover) {
+      try {
+        collected.push(JSON.parse(leftover));
+      } catch {
+        /* genuinely partial mid-write line — skip, same as the old split path */
+      }
+    }
     if (collected.length >= maxLines || fromOffset === 0) {
       return collected.slice(-maxLines);
     }
