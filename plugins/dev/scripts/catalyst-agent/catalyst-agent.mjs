@@ -22,8 +22,11 @@
 // it keeps `importers` injectable so tests drive runDomain/runOnce with stubs and
 // touch no real network, ps, or keychain.
 
-import { readAgentConfig, log } from "./config.mjs";
+import { readAgentConfig, log, getHeartbeatPath } from "./config.mjs";
 import { makeBuilderEmit, drainPending } from "./emit.mjs";
+import { writeFileSync, renameSync, mkdirSync } from "node:fs";
+import { dirname } from "node:path";
+import { hostname } from "node:os";
 
 const HELP = `catalyst-agent — standalone host telemetry agent (CTL-812)
 
@@ -204,6 +207,31 @@ export async function runOnce({ config = readAgentConfig(), importers } = {}) {
   return results;
 }
 
+/**
+ * writeHeartbeat — refresh the CTL-1518 liveness breadcrumb the health-responder
+ * reads to decide whether this launchd-managed sampler has silently died (it did
+ * on mini-2, dead for 10 days). Written ATOMICALLY (tmp + rename) so a concurrent
+ * reader never stat/reads a torn file, and BEST-EFFORT: any failure is logged at
+ * warn and swallowed — a breadcrumb write must NEVER be what turns a healthy tick
+ * into a crash. `path` / `now` / `host` are injectable so a unit test points it at
+ * a scratch dir and asserts content without touching the real CATALYST_DIR.
+ *
+ * @param {object} [opts]
+ * @param {string} [opts.path=getHeartbeatPath()]  breadcrumb path (CATALYST_DIR-resolved)
+ * @param {number} [opts.now=Date.now()]           epoch-ms timestamp written as `ts`
+ * @param {string} [opts.host=hostname()]          host label written as `host`
+ */
+export function writeHeartbeat({ path = getHeartbeatPath(), now = Date.now(), host = hostname() } = {}) {
+  try {
+    mkdirSync(dirname(path), { recursive: true });
+    const tmp = `${path}.tmp.${process.pid}`;
+    writeFileSync(tmp, `${JSON.stringify({ ts: now, host })}\n`);
+    renameSync(tmp, path);
+  } catch (err) {
+    log.warn({ err: err?.message }, "catalyst-agent: heartbeat breadcrumb write failed (non-fatal)");
+  }
+}
+
 // --- CLI ---
 /**
  * main — parse the flag and dispatch. Exported (and fully seam-injected) so a
@@ -228,6 +256,9 @@ export async function runOnce({ config = readAgentConfig(), importers } = {}) {
 export async function main(argv = process.argv.slice(2), deps = {}) {
   const {
     runOnceImpl = runOnce,
+    // CTL-1518: refresh the liveness breadcrumb after the --once tick. Injectable
+    // so the flag-dispatch tests stay hermetic (no write to the real CATALYST_DIR).
+    writeHeartbeatImpl = writeHeartbeat,
     setIntervalImpl = setInterval,
     clearIntervalImpl = clearInterval,
     onSignal = (name, handler) => process.on(name, handler),
@@ -249,7 +280,16 @@ export async function main(argv = process.argv.slice(2), deps = {}) {
     return 0;
   }
   if (flag === "--once") {
-    await runOnceImpl();
+    // Refresh the breadcrumb in a `finally` so even a transient tick throw still
+    // records that THIS process ran (CTL-1518 reviewer point): the responder
+    // reads the breadcrumb MTIME to distinguish a silently-dead sampler from a
+    // healthy one, and a process that ticked — even partially before throwing —
+    // is not dead. The throw still propagates (unchanged --once error semantics).
+    try {
+      await runOnceImpl();
+    } finally {
+      writeHeartbeatImpl();
+    }
     return 0;
   }
   if (flag === "--loop") {
