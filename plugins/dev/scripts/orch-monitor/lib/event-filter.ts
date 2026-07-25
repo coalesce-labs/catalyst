@@ -20,9 +20,18 @@ export interface ValidationResult {
 }
 
 export interface FilterStream {
-  write(line: string): void;
+  /** Feed one line. Returns false when the sink is backpressured (jq stdin buffer
+   *  full) — the caller should `await drain()` before writing more so a large
+   *  chunked scan stays memory-bounded (CTL-1515). */
+  write(line: string): boolean;
+  /** Resolve once the sink is writable again (or immediately if not backpressured). */
+  drain(): Promise<void>;
   /** Wait briefly for any in-flight stdout to drain. */
   flush(): Promise<void>;
+  /** End input and resolve once the filter has emitted ALL output (jq exited) — so a
+   *  caller reading accumulated matches sees every one, not just what a fixed-delay
+   *  flush happened to capture (CTL-1515). */
+  end(): Promise<void>;
   close(): void;
   onMatch(cb: (line: string) => void): void;
 }
@@ -80,17 +89,24 @@ export function createFilterStream(predicate: string): FilterStream {
     let cb: ((line: string) => void) | null = null;
     let closed = false;
     return {
-      write(line: string): void {
-        if (closed || !cb) return;
+      write(line: string): boolean {
+        if (closed || !cb) return true;
         try {
           JSON.parse(line);
           cb(line);
         } catch {
           /* drop invalid JSON */
         }
+        return true; // synchronous passthrough — never backpressured
+      },
+      drain(): Promise<void> {
+        return Promise.resolve();
       },
       flush(): Promise<void> {
         return Promise.resolve();
+      },
+      end(): Promise<void> {
+        return Promise.resolve(); // synchronous passthrough — all output already emitted
       },
       close(): void {
         closed = true;
@@ -131,20 +147,34 @@ export function createFilterStream(predicate: string): FilterStream {
   });
 
   return {
-    write(line: string): void {
-      if (closed) return;
+    write(line: string): boolean {
+      if (closed) return true;
       // Pre-validate JSON; jq dies on invalid input so we drop bad lines here
       // (matches the CLI's `2>/dev/null` behavior).
       try {
         JSON.parse(line);
       } catch {
-        return;
+        return true;
       }
       try {
-        proc.stdin?.write(line + "\n");
+        // Return jq stdin's backpressure signal so a chunked scan can await
+        // drain() and stay memory-bounded (CTL-1515).
+        return proc.stdin?.write(line + "\n") ?? true;
       } catch {
-        /* ignore broken pipe */
+        return true; // broken pipe — don't ask the caller to wait
       }
+    },
+    drain(): Promise<void> {
+      const s = proc.stdin;
+      if (closed || !s || !s.writableNeedDrain) return Promise.resolve();
+      return new Promise<void>((resolve) => {
+        const done = () => {
+          s.off("error", done);
+          resolve();
+        };
+        s.once("drain", done);
+        s.once("error", done); // never hang on a broken pipe
+      });
     },
     flush(): Promise<void> {
       if (pendingFlush) return pendingFlush;
@@ -158,6 +188,32 @@ export function createFilterStream(predicate: string): FilterStream {
         }, 50);
       });
       return pendingFlush;
+    },
+    end(): Promise<void> {
+      // End jq's stdin and resolve once it has flushed all output and exited, so a
+      // caller reading accumulated matches sees EVERY match — not just what the
+      // fixed 50ms flush happened to capture on a large log (CTL-1515). The stdout
+      // 'data' handler above drains all output before 'close' fires.
+      if (closed) return Promise.resolve();
+      // If jq already exited (e.g. a `halt`-style predicate terminated it before
+      // end() was called), its 'close' has already fired and won't fire again —
+      // resolve immediately instead of waiting forever (Codex P2 on #2730).
+      if (proc.exitCode !== null || proc.signalCode !== null) return Promise.resolve();
+      return new Promise<void>((resolve) => {
+        let done = false;
+        const finish = () => {
+          if (done) return;
+          done = true;
+          resolve();
+        };
+        proc.once("close", finish);
+        proc.once("error", finish); // never hang on a spawn/pipe error
+        try {
+          proc.stdin?.end();
+        } catch {
+          finish();
+        }
+      });
     },
     close(): void {
       if (closed) return;
