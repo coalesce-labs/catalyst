@@ -1,5 +1,22 @@
 # Changelog
 
+## [12.36.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.35.0...catalyst-dev-v12.36.0)
+
+Jul 25, 2026
+
+<!-- ai-enhanced -->
+
+### Cloud-Sync Self-Heal & Daemon Health Responder
+
+Two fixes targeting the root causes of the 2026-07-23 replica-writer outage. The cloud-sync writer now exits cleanly within a bounded timeout on both stall and shutdown paths, writes a breadcrumb when it self-heals, and detects half-open sockets in roughly 2 ticks instead of 80+ minutes using SDK `lastFrameAt`. A new stateless launchd sweep runs every 3 minutes to catch the case where the writer dies and launchd fails to respawn it — kicking it back with a bounded, escalating retry rather than depending on `KeepAlive` alone. After merging, run `catalyst-stack install-services` on affected nodes and verify with `catalyst doctor`.
+
+
+
+### PRs
+
+* **dev:** CTL-1509 daemon-health responder — stateless launchd sweep kickstarts a dead/stale cloud-sync writer (bounded, escalating) ([#2710](https://github.com/coalesce-labs/catalyst/issues/2710)) ([6e0ec37](https://github.com/coalesce-labs/catalyst/commit/6e0ec376cb66152f98f872da3685e54a41c1e932))
+* **dev:** CTL-1508 exit-safe cloud-sync self-heal + selfheal breadcrumb + lastFrameAt stall classifier ([#2709](https://github.com/coalesce-labs/catalyst/issues/2709)) ([1e33520](https://github.com/coalesce-labs/catalyst/commit/1e33520fdca612d9f8b02e42bf6fe277f2687ee9))
+
 ## [12.35.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.34.0...catalyst-dev-v12.35.0)
 
 Jul 23, 2026
