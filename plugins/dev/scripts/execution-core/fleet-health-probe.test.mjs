@@ -20,7 +20,7 @@ import {
   defaultTriggerSelfHeal,
   __resetFleetHealthLatch,
 } from "./fleet-health-probe.mjs";
-import { getFleetHealthDir } from "./config.mjs";
+import { getFleetHealthDir, readFleetHealthConfig } from "./config.mjs";
 import { FLEET_HEALTH_DEGRADED } from "./fleet-health-event.mjs";
 
 // Recording fake clock — same shape as memory-sampler.test.mjs
@@ -332,7 +332,9 @@ describe("startFleetHealthProbe tick", () => {
     await p.tick();
     const recovered = records.filter((r) => r.action === "recovered");
     expect(recovered.length).toBe(1);
-    expect(recovered[0].payload.tripped).toEqual([]); // no signal tripping at recovery
+    // CTL-1503 (Codex P2): the recovery reports the signal set captured at the
+    // degradation edge (the alarm it closes), NOT the empty recovery-tick `tripped`.
+    expect(recovered[0].payload.tripped).toEqual(["swap"]);
   });
 
   test("full episode: high→one degraded; recover→one recovered; high again→one degraded (re-arm)", async () => {
@@ -346,6 +348,59 @@ describe("startFleetHealthProbe tick", () => {
     refs.swap = 5000; // high again
     await p.tick(); // degraded #2 (latch re-armed)
     expect(records.map((r) => r.action)).toEqual(["degraded", "recovered", "degraded"]);
+  });
+
+  test("a failed emit (append returns false) does NOT advance the latch — the edge retries (Codex P1)", async () => {
+    let emitOk = false; // the first append fails, later ones succeed
+    const records = [];
+    const clock = recordingClock();
+    const p = startFleetHealthProbe({
+      clock,
+      config: baseConfig({ swapUsedMbThreshold: 4096, swapUsedMbClearThreshold: 3000 }),
+      readJobsCount: () => 0,
+      listAgents: () => [],
+      psLines: () => [],
+      readSwapUsedMb: () => 5000, // degraded
+      emit: (_payload, { action } = {}) => {
+        records.push(action);
+        return emitOk; // false first (append failed) → latch must not advance
+      },
+      triggerSelfHeal: () => {},
+    });
+    await p.tick(); // degraded edge; emit returns false → latch NOT advanced
+    emitOk = true;
+    await p.tick(); // still unlatched → re-attempts the degraded edge, now succeeds
+    expect(records).toEqual(["degraded", "degraded"]); // retried, not swallowed
+  });
+
+  test("self-heal `fired` persists — a restart mid-episode does NOT re-fire self-heal (Codex P2)", async () => {
+    const cfg = { selfHealEnabled: true, sustainedTicks: 2, swapUsedMbThreshold: 4096, swapUsedMbClearThreshold: 3000 };
+    const h1 = harness({ config: baseConfig(cfg), swap: 5000 });
+    await h1.p.tick(); // degraded, sustained=1
+    await h1.p.tick(); // sustained=2 → self-heal fires + persists fired=true
+    expect(h1.selfHeals.length).toBe(1);
+    // Simulate a daemon restart while STILL degraded: drop in-memory state (same
+    // CATALYST_DIR marker survives) and start a fresh probe.
+    __resetFleetHealthLatch();
+    const h2 = harness({ config: baseConfig(cfg), swap: 5000 });
+    await h2.p.tick(); // hydrates fired=true + latched=true; still degraded
+    await h2.p.tick();
+    await h2.p.tick();
+    expect(h2.selfHeals.length).toBe(0); // fired was persisted → no re-reap for the same episode
+  });
+
+  test("readFleetHealthConfig clamps swapUsedMbClearThreshold below the trip threshold (Codex P2)", () => {
+    process.env.EXECUTION_CORE_FLEET_SWAP_MB_THRESHOLD = "4096";
+    process.env.EXECUTION_CORE_FLEET_SWAP_MB_CLEAR_THRESHOLD = "5000"; // >= trip → invalid
+    try {
+      const c = readFleetHealthConfig();
+      expect(c.swapUsedMbThreshold).toBe(4096);
+      expect(c.swapUsedMbClearThreshold).toBe(4095); // clamped to trip - 1
+      expect(c.swapUsedMbClearThreshold).toBeLessThan(c.swapUsedMbThreshold);
+    } finally {
+      delete process.env.EXECUTION_CORE_FLEET_SWAP_MB_THRESHOLD;
+      delete process.env.EXECUTION_CORE_FLEET_SWAP_MB_CLEAR_THRESHOLD;
+    }
   });
 
   test("hydrated latch {latched:true} + still-degraded first tick → NO re-emit; clear tick → one recovered", async () => {
@@ -422,10 +477,26 @@ describe("classifyFleetHealthClear (pure)", () => {
     ).toBe(false);
   });
 
-  test("null/sentinel readings count as below → never block a clear", () => {
+  test("a null/unavailable reading is UNKNOWN → NOT clear (a reader failure holds the latch, Codex P1)", () => {
+    // Reader failures (jobs/agents/procs → null, swap → null sentinel) must NOT
+    // declare recovery — that would falsely clear a latched degradation.
     expect(
       classifyFleetHealthClear(
-        { jobsCount: null, agentsCount: null, procsCount: null, swapUsedMb: 0 },
+        { jobsCount: null, agentsCount: null, procsCount: null, swapUsedMb: null },
+        CLEAR,
+      ).clear,
+    ).toBe(false);
+    // A single failing reader (swap null) with the rest valid-and-below is still NOT clear.
+    expect(
+      classifyFleetHealthClear(
+        { jobsCount: 0, agentsCount: 0, procsCount: 0, swapUsedMb: null },
+        CLEAR,
+      ).clear,
+    ).toBe(false);
+    // Only when EVERY signal is a valid reading below its clear threshold → clear.
+    expect(
+      classifyFleetHealthClear(
+        { jobsCount: 0, agentsCount: 0, procsCount: 0, swapUsedMb: 0 },
         CLEAR,
       ).clear,
     ).toBe(true);

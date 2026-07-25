@@ -190,11 +190,13 @@ export function classifyFleetHealth(readings, thresholds) {
 /**
  * classifyFleetHealthClear — pure clear-side verdict for the hysteresis band
  * (CTL-1503). Complement of classifyFleetHealth's `>=` trip: `clear` is true iff
- * EVERY signal is strictly `<` its clear threshold, so the band [clear, trip)
- * holds state (a reading == the clear threshold is NOT clear). null/sentinel
- * readings count as below (never block a clear). `clearThresholds.swapUsedMbThreshold`
- * is the LOWER swap clear threshold; jobs/agents/procs clear at their trip
- * threshold (degenerate band).
+ * EVERY signal is a VALID reading strictly `<` its clear threshold, so the band
+ * [clear, trip) holds state (a reading == the clear threshold is NOT clear).
+ * A null/unavailable reading is UNKNOWN, not clear — a health-reader failure must
+ * never declare recovery and release a latched degradation (Codex P1 on #2704);
+ * the swap reader's failure sentinel is null (not 0) for the same reason.
+ * `clearThresholds.swapUsedMbThreshold` is the LOWER swap clear threshold;
+ * jobs/agents/procs clear at their trip threshold (degenerate band).
  *
  * @param {object} readings  { jobsCount, agentsCount, procsCount, swapUsedMb }
  * @param {object} clearThresholds { jobsThreshold, agentsThreshold, procsThreshold, swapUsedMbThreshold }
@@ -204,7 +206,9 @@ export function classifyFleetHealthClear(readings, clearThresholds) {
   const { jobsCount, agentsCount, procsCount, swapUsedMb } = readings ?? {};
   const { jobsThreshold, agentsThreshold, procsThreshold, swapUsedMbThreshold } =
     clearThresholds ?? {};
-  const below = (v, t) => v == null || v < t;
+  // A valid reading strictly below its clear threshold. null/undefined = UNKNOWN
+  // → NOT clear, so a reader failure holds the latch rather than falsely clearing it.
+  const below = (v, t) => v != null && v < t;
   const clear =
     below(jobsCount, jobsThreshold) &&
     below(agentsCount, agentsThreshold) &&
@@ -236,43 +240,58 @@ export function nextFleetHealthLatch(prev, { trip, clear } = {}) {
 // no intervening `recovered`. Best-effort — a persist/hydrate failure never
 // wedges the probe.
 let _degradedLatched = false;
+// CTL-1503 (Codex P2): the durable episode state carried across restarts. `fired`
+// = self-heal already ran this breach episode (so a restart mid-episode doesn't
+// re-reap); `trippedAt` = the signal set captured at the degradation edge (so the
+// paired recovery event can report WHICH alarm it closes — at the recovery tick
+// `tripped` is empty). Both persisted with the latch and hydrated on the first tick.
+let _fired = false;
+let _trippedAt = [];
 let _latchHydrated = false;
 
 function latchMarkerPath() {
   return join(getFleetHealthDir(), "fleet-health-latch.json");
 }
 
-// hydrateLatch — lazily load the persisted latch on the first tick of this
-// process. Absent/malformed marker → latch stays false (never throws).
+// hydrateLatch — lazily load the persisted episode state on the first tick of
+// this process. Absent/malformed marker → unlatched, not-fired, no tripped set
+// (never throws).
 function hydrateLatch() {
   if (_latchHydrated) return;
   _latchHydrated = true;
   try {
-    _degradedLatched = JSON.parse(readFileSync(latchMarkerPath(), "utf8"))?.latched === true;
+    const m = JSON.parse(readFileSync(latchMarkerPath(), "utf8"));
+    _degradedLatched = m?.latched === true;
+    _fired = m?.fired === true;
+    _trippedAt = Array.isArray(m?.tripped) ? m.tripped : [];
   } catch {
     _degradedLatched = false; // absent/malformed → unlatched
+    _fired = false;
+    _trippedAt = [];
   }
 }
 
-// persistLatch — atomically write the latch (tmp + rename) so a restart resumes
-// it. Best-effort; a failure is logged and the probe continues.
-function persistLatch(latched) {
+// persistLatch — atomically write the episode state (tmp + rename) so a restart
+// resumes it. Best-effort; a failure is logged and the probe continues.
+function persistLatch({ latched, fired, tripped }) {
   try {
     const dir = getFleetHealthDir();
     mkdirSync(dir, { recursive: true });
     const tmp = join(dir, `.fleet-health-latch.${randomBytes(4).toString("hex")}.tmp`);
-    writeFileSync(tmp, JSON.stringify({ latched, ts: Date.now() }));
+    writeFileSync(tmp, JSON.stringify({ latched, fired, tripped, ts: Date.now() }));
     renameSync(tmp, latchMarkerPath());
   } catch (err) {
     log.warn?.({ err: err?.message }, "fleet-health-probe: latch persist failed (continuing)");
   }
 }
 
-// __resetFleetHealthLatch — test seam so latch state never leaks across tests
-// (clears the in-memory latch + the hydration flag so the next tick re-reads the
-// CATALYST_DIR-scoped marker). Mirrors __resetFleetFreezeLatch.
+// __resetFleetHealthLatch — test seam so episode state never leaks across tests
+// (clears the in-memory latch/fired/tripped + the hydration flag so the next tick
+// re-reads the CATALYST_DIR-scoped marker). Mirrors __resetFleetFreezeLatch.
 export function __resetFleetHealthLatch() {
   _degradedLatched = false;
+  _fired = false;
+  _trippedAt = [];
   _latchHydrated = false;
 }
 
@@ -315,7 +334,8 @@ export function startFleetHealthProbe({
   void orchDir;
 
   let sustained = 0; // consecutive degraded ticks (count at the edge)
-  let fired = false; // self-heal already fired this breach episode (re-armed on the clear edge)
+  // self-heal-fired is the module-scoped, PERSISTED `_fired` (re-armed on the clear
+  // edge) so a restart mid-episode doesn't re-run the reap (Codex P2 on #2704).
 
   async function tick() {
     // Each signal read is wrapped so a throw yields a NON-CROSSING sentinel,
@@ -323,7 +343,10 @@ export function startFleetHealthProbe({
     const jobsCount = await safeAsync(() => readJobsCount(), null);
     const agentsCount = safe(() => (listAgents() ?? []).length, null);
     const procsCount = await safeAsync(() => defaultReadProcsCount(psLines), null);
-    const swapUsedMb = await safeAsync(() => readSwapUsedMb(), 0);
+    // CTL-1503 (Codex P1): a swap-read failure yields null (a NON-CROSSING sentinel
+    // for both trip `>=` and clear `<`), NOT 0 — 0 would look healthy and could
+    // falsely clear a latched degradation.
+    const swapUsedMb = await safeAsync(() => readSwapUsedMb(), null);
 
     const readings = { jobsCount, agentsCount, procsCount, swapUsedMb };
     // Trip side (>=, absolute thresholds) — unchanged.
@@ -351,29 +374,45 @@ export function startFleetHealthProbe({
     // band leave both untouched (hold).
     if (clear) {
       sustained = 0;
-      fired = false;
+      _fired = false;
     } else if (trip) {
       sustained += 1;
     }
 
-    // Emit ONLY on an edge (degraded/recovered), then persist the new latch AFTER
-    // a successful append (append-first, mirroring fleet-freeze-alert — a failed
-    // emit retries next tick because the latch is not advanced).
+    // Emit ONLY on an edge (degraded/recovered), then advance + persist the latch
+    // AFTER a SUCCESSFUL append. emitFleetHealthEvent returns false (not throws) on
+    // an event-log append failure, so a false result must NOT advance the latch —
+    // otherwise a transient log failure permanently swallows that edge until the
+    // next transition (Codex P1 on #2704). Leaving the latch un-advanced re-attempts
+    // the same edge next tick.
     if (edge) {
+      // A recovery tick has an empty `tripped` (all signals cleared), so report the
+      // signal set captured at the degradation edge — the alarm this recovery closes
+      // (Codex P2 on #2704). A degraded edge reports the fresh `tripped`.
+      const edgeTripped = edge === "degraded" ? tripped : _trippedAt;
+      let emitted = false;
       try {
-        emit({ ...readings, tripped, sustained_n: sustained }, { action: edge });
-        _degradedLatched = latched;
-        persistLatch(latched);
+        emitted =
+          emit({ ...readings, tripped: edgeTripped, sustained_n: sustained }, { action: edge }) !== false;
       } catch (err) {
         log.warn({ err: err?.message }, "fleet-health-probe: emit failed");
+        emitted = false;
+      }
+      if (emitted) {
+        _degradedLatched = latched;
+        _trippedAt = edge === "degraded" ? tripped.slice() : [];
+        persistLatch({ latched, fired: _fired, tripped: _trippedAt });
       }
     }
 
     // Self-heal fires ONCE per sustained breach episode, boundary-exact at
     // sustained === sustainedTicks, and only when explicitly enabled — only on a
     // trip tick (never in-band, never on a clear tick).
-    if (trip && selfHealEnabled && !fired && sustained >= sustainedTicks) {
-      fired = true;
+    if (trip && selfHealEnabled && !_fired && sustained >= sustainedTicks) {
+      _fired = true;
+      // Persist the fired flag immediately so a daemon restart while the host is
+      // still degraded does not re-invoke self-heal for the same episode (Codex P2).
+      persistLatch({ latched: _degradedLatched, fired: _fired, tripped: _trippedAt });
       try {
         triggerSelfHeal();
       } catch (err) {

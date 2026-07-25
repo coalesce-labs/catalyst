@@ -446,8 +446,13 @@
                 },
                 "swapUsedMbThreshold": {
                   "type": "number",
-                  "default": 4096,
-                  "description": "Emit when macOS swap-used MB reaches this value. Env EXECUTION_CORE_FLEET_SWAP_MB_THRESHOLD overrides."
+                  "default": 24576,
+                  "description": "macOS swap-used MB at or above which the swap signal TRIPS (edge-triggered since CTL-1503). Raised above the observed normal-swap ceiling of a 16 GB Mac so it stops firing every tick. Env EXECUTION_CORE_FLEET_SWAP_MB_THRESHOLD overrides."
+                },
+                "swapUsedMbClearThreshold": {
+                  "type": "number",
+                  "default": 16384,
+                  "description": "CTL-1503 hysteresis band: the latched swap degradation CLEARS (fires fleet.health.recovered once) only when swap drops strictly below this LOWER threshold, so a value hovering in the band [clear, trip) cannot re-flap. Clamped below swapUsedMbThreshold if misconfigured. Env EXECUTION_CORE_FLEET_SWAP_MB_CLEAR_THRESHOLD overrides."
                 },
                 "agentsThreshold": {
                   "type": "number",

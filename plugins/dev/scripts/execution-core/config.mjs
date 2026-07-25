@@ -1188,6 +1188,29 @@ function fleetHealthNumber(envVal, l1Val, def) {
 
 export function readFleetHealthConfig(configPath) {
   const l1 = readFleetHealthConfigLayer1(configPath);
+  // CTL-1503 (Codex P2): the swap CLEAR threshold must be STRICTLY below the TRIP
+  // threshold, or a steady swap value at the trip level is simultaneously `trip`
+  // (>=) and `clear` (<) — the latch emits recovery while the breach continues, then
+  // alternates degraded/recovered each tick. Resolve both, then clamp an invalid
+  // clear (>= trip) down to trip-1 with a loud warn so hysteresis is always a real band.
+  const swapTrip = fleetHealthNumber(
+    process.env.EXECUTION_CORE_FLEET_SWAP_MB_THRESHOLD,
+    l1.swapUsedMbThreshold,
+    FLEET_HEALTH_DEFAULTS.swapUsedMbThreshold,
+  );
+  let swapClear = fleetHealthNumber(
+    process.env.EXECUTION_CORE_FLEET_SWAP_MB_CLEAR_THRESHOLD,
+    l1.swapUsedMbClearThreshold,
+    FLEET_HEALTH_DEFAULTS.swapUsedMbClearThreshold,
+  );
+  if (swapClear >= swapTrip) {
+    const clamped = Math.max(0, swapTrip - 1);
+    log.warn(
+      { swapClear, swapTrip, clamped },
+      "fleet-health: swapUsedMbClearThreshold >= swapUsedMbThreshold — clamping clear below trip to keep a real hysteresis band",
+    );
+    swapClear = clamped;
+  }
   return {
     // env=0 disables; otherwise Layer-1 enabled===false disables; else default-on.
     enabled:
@@ -1206,18 +1229,10 @@ export function readFleetHealthConfig(configPath) {
       l1.jobsThreshold,
       FLEET_HEALTH_DEFAULTS.jobsThreshold,
     ),
-    swapUsedMbThreshold: fleetHealthNumber(
-      process.env.EXECUTION_CORE_FLEET_SWAP_MB_THRESHOLD,
-      l1.swapUsedMbThreshold,
-      FLEET_HEALTH_DEFAULTS.swapUsedMbThreshold,
-    ),
+    swapUsedMbThreshold: swapTrip,
     // CTL-1503 — lower clear threshold for the swap hysteresis band; the latch
-    // releases only once swap drops strictly below this. Same precedence chain.
-    swapUsedMbClearThreshold: fleetHealthNumber(
-      process.env.EXECUTION_CORE_FLEET_SWAP_MB_CLEAR_THRESHOLD,
-      l1.swapUsedMbClearThreshold,
-      FLEET_HEALTH_DEFAULTS.swapUsedMbClearThreshold,
-    ),
+    // releases only once swap drops strictly below this (clamped < trip above).
+    swapUsedMbClearThreshold: swapClear,
     agentsThreshold: fleetHealthNumber(
       process.env.EXECUTION_CORE_FLEET_AGENTS_THRESHOLD,
       l1.agentsThreshold,
