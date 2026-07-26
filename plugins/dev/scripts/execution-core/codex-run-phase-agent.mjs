@@ -59,6 +59,7 @@ import {
   symlinkSync,
   unlinkSync,
 } from "node:fs";
+import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join } from "node:path";
 import { codexConfig, log } from "./config.mjs";
 import {
@@ -497,11 +498,12 @@ function appendGitExcludeLine(excludePath, pattern, equivalents = [pattern]) {
 // info/exclude so the codex skills symlink never shows as an untracked file (D7).
 // Reserved for the case where WE created `.agents/skills` WHOLESALE (a fresh
 // top-level symlink, or the pre-existing-our-symlink idempotent no-op) — NEVER
-// for a project-owned real `.agents/skills` dir we only MERGED entries into
-// (CTL-1530 thread ns/nw): a project-owned real dir must not get the blanket
-// exclude, which would silently untrack real, tracked project content sharing
-// that directory. Recognizes the historical equivalents already written by past
-// runs (`.agents`, `/.agents/`, `/.agents`) as already-present. Idempotent +
+// for a project-owned real `.agents/skills` dir (CTL-1530 threads dLZ + dLh +
+// dLX): a real dir is never touched and never git-excluded at all now — see
+// registerDevPluginSkillsIntoCodexHome — so this function's blanket pattern would
+// otherwise silently untrack real, tracked project content sharing that
+// directory. Recognizes the historical equivalents already written by past runs
+// (`.agents`, `/.agents/`, `/.agents`) as already-present. Idempotent +
 // best-effort — never throws.
 function gitExcludeAgents(worktreePath) {
   appendGitExcludeLine(resolveGitExcludePath(worktreePath), ".agents/", [
@@ -512,95 +514,73 @@ function gitExcludeAgents(worktreePath) {
   ]);
 }
 
-// gitExcludePhaseSkillPattern — append ONE managed glob line, with an identifying
-// sentinel comment, to the worktree's git info/exclude: idempotent, and scoped to
-// exactly what mergeCodexSkillsIntoRealDir creates (CTL-1530 thread -6). This
-// REPLACES the former many-per-entry exclude lines (`.agents/skills/<name>` for
-// every merged entry): `git rev-parse --git-path info/exclude` resolves to the
-// PRIMARY repo's COMMON `.git/info/exclude` even from a linked ticket worktree, so
-// a per-entry line there applied to every branch/worktree and survived ticket
-// teardown — a later dispatch injecting a common skill NAME (e.g.
-// `.agents/skills/commit`) could then mask a REAL project skill of that same name
-// with no `git status` entry to surface it. Narrowing the merge to the phase-*
-// prefix (see mergeCodexSkillsIntoRealDir) AND collapsing the exclude to the
-// single glob `.agents/skills/phase-*` removes that collision class entirely: the
-// only way a project's own skill can still collide is by literally naming itself
-// `phase-<something>`, which we call out here rather than pretend doesn't exist.
-// Best-effort — never throws.
-const CODEX_PHASE_SKILL_EXCLUDE_SENTINEL = "# codex-exec phase-skill links (managed)";
-const CODEX_PHASE_SKILL_EXCLUDE_PATTERN = ".agents/skills/phase-*";
-function gitExcludePhaseSkillPattern(worktreePath) {
-  const excludePath = resolveGitExcludePath(worktreePath);
-  if (!excludePath) return;
-  try {
-    let existing = "";
-    try {
-      existing = readFileSync(excludePath, "utf8");
-    } catch {
-      /* no exclude file yet */
-    }
-    const lines = existing.split("\n").map((l) => l.trim());
-    if (lines.includes(CODEX_PHASE_SKILL_EXCLUDE_PATTERN)) return; // already managed
-    mkdirSync(dirname(excludePath), { recursive: true });
-    const prefix = existing.length > 0 && !existing.endsWith("\n") ? "\n" : "";
-    // Don't re-write the sentinel if a stray one survived a hand-pruned pattern
-    // line — only the pattern is load-bearing; duplicate sentinels are clutter.
-    const sentinel = lines.includes(CODEX_PHASE_SKILL_EXCLUDE_SENTINEL)
-      ? ""
-      : `${CODEX_PHASE_SKILL_EXCLUDE_SENTINEL}\n`;
-    appendFileSync(
-      excludePath,
-      `${prefix}${sentinel}${CODEX_PHASE_SKILL_EXCLUDE_PATTERN}\n`,
-    );
-  } catch {
-    /* best-effort */
-  }
-}
-
 // isRunnerOwnedSkillTarget — an ownership heuristic for a symlink target whose
 // checkout-root PREFIX no longer matches the currently configured source (CTL-1530
-// thread -2). `pluginDirs` / `CATALYST_CODEX_PLUGIN_ROOT` can be reconfigured to a
-// DIFFERENT supported checkout between dispatches; a link created by an earlier
-// dispatch still targets the OLD absolute `.../plugins/dev/skills[/…]` path. A
-// strict `target === currentSource` comparison then classifies that link as
-// foreign FOREVER — even once the old checkout is removed, permanently dangling
-// the required phase-* link. Instead: a target whose PATH ENDS WITH
+// thread dLh-adjacent, formerly "-2"). `pluginDirs` / `CATALYST_CODEX_PLUGIN_ROOT`
+// can be reconfigured to a DIFFERENT supported checkout between dispatches; a link
+// created by an earlier dispatch still targets the OLD absolute
+// `.../plugins/dev/skills[/…]` path. A strict `target === currentSource` comparison
+// then classifies that link as foreign FOREVER — even once the old checkout is
+// removed, permanently dangling the required link. A target whose PATH ENDS WITH
 // `plugins/dev/skills` (top-level, `extra` omitted) or `plugins/dev/skills/<name>`
-// (per-entry, `extra` = the entry name) is RUNNER-OWNED regardless of the prefix —
-// this runner is the only writer that ever creates a link shaped exactly like its
-// own dev-plugin skills dir, so a target matching that suffix can never be
-// something a project put there itself. This does NOT weaken the T7 never-delete
-// contract (T7 protects PROJECT content from an over-eager runner): refreshing a
-// link that is provably runner-shaped is not "deleting project content", it's
-// replacing OUR OWN stale artifact. A target that does not match the suffix is a
-// genuine foreign symlink (a project's own link, or something unrelated) and keeps
-// the existing warn+skip behavior untouched.
-function isRunnerOwnedSkillTarget(target, extra = "", worktreePath = "") {
+// (per-entry, `extra` = the entry name) is a NECESSARY condition for runner
+// ownership — but CTL-1530 thread dLa found it is not SUFFICIENT: a project-authored
+// link to an external shared/vendor checkout (e.g.
+// `.agents/skills -> /opt/catalyst/plugins/dev/skills`) matches that suffix too,
+// and the old suffix-only test would unlink + repoint a perfectly valid foreign
+// link. So ownership additionally requires the target to resolve UNDER THE CURRENT
+// USER'S HOME DIRECTORY: this runner only ever links sources from home-rooted
+// checkouts/caches (the dev-plugin checkout, `~/.cache/...`, worktree checkouts
+// under `~/catalyst/wt/...`, etc.) — it never creates a link into `/opt/...` or any
+// other outside-home path, so an outside-home target can never be this runner's own
+// creation, however its suffix looks. `homeDir` is injectable (tests pass a
+// tmpdir-rooted fake "home" so fixtures don't depend on the real machine's $HOME).
+// This does NOT weaken the T7 never-delete contract (T7 protects PROJECT content
+// from an over-eager runner): refreshing a link that is provably both
+// runner-shaped AND home-rooted is not "deleting project content", it's replacing
+// OUR OWN stale artifact. `excludeDir` (the worktree for the top-level/per-entry
+// checks against a real project dir; the resolved CODEX_HOME for the
+// machine-local per-entry checks — see registerDevPluginSkillsIntoCodexHome) is an
+// additional "this can't be ours" guard: our own links always point OUTSIDE that
+// directory (into an external skills-source checkout), so a target that resolves
+// INSIDE it is never something we created and must not be claimed as runner-owned.
+function isRunnerOwnedSkillTarget(target, extra = "", excludeDir = "", homeDir = homedir()) {
   if (typeof target !== "string" || !target) return false;
   // The runner only ever writes ABSOLUTE targets pointing at an EXTERNAL
-  // checkout. A relative target, or an absolute one resolving inside the
-  // worktree, is a project-authored link (e.g. a vendored catalyst checkout
-  // committed as `.agents/skills -> vendor/catalyst/plugins/dev/skills`) —
-  // suffix match alone must never claim it, or the refresh path would unlink
-  // tracked project content.
+  // checkout. A relative target, or an absolute one resolving inside
+  // `excludeDir`, is authored by something other than this runner (e.g. a
+  // vendored catalyst checkout committed as
+  // `.agents/skills -> vendor/catalyst/plugins/dev/skills`) — suffix match
+  // alone must never claim it, or the refresh path would unlink tracked
+  // project content (or, in the CODEX_HOME case, something oddly
+  // self-referential that this runner never creates).
   if (!isAbsolute(target)) return false;
-  if (worktreePath) {
+  if (excludeDir) {
     try {
       const resolvedTarget = realpathSync(target);
-      const resolvedWorktree = realpathSync(worktreePath);
+      const resolvedExcludeDir = realpathSync(excludeDir);
       if (
-        resolvedTarget === resolvedWorktree ||
-        resolvedTarget.startsWith(resolvedWorktree + "/")
+        resolvedTarget === resolvedExcludeDir ||
+        resolvedTarget.startsWith(resolvedExcludeDir + "/")
       ) {
         return false;
       }
     } catch {
       /* dangling target — prefix check on the raw strings below */
     }
-    if (target === worktreePath || target.startsWith(worktreePath + "/")) return false;
+    if (target === excludeDir || target.startsWith(excludeDir + "/")) return false;
   }
   const suffix = extra ? join("plugins", "dev", "skills", extra) : join("plugins", "dev", "skills");
-  return target === suffix || target.endsWith(`/${suffix}`);
+  if (!(target === suffix || target.endsWith(`/${suffix}`))) return false;
+  // dLa: suffix-shaped is necessary but not sufficient — also require home-rooted.
+  let insideHome = false;
+  try {
+    const resolvedTarget = realpathSync(target);
+    insideHome = resolvedTarget === homeDir || resolvedTarget.startsWith(homeDir + "/");
+  } catch {
+    insideHome = target === homeDir || target.startsWith(homeDir + "/");
+  }
+  return insideHome;
 }
 
 // resolveGitInfoExcludeFallback — manual info/exclude resolution when `git` is
@@ -626,51 +606,84 @@ function resolveGitInfoExcludeFallback(worktreePath) {
   return null;
 }
 
-// mergeCodexSkillsIntoRealDir — CTL-1530 (thread ns, NARROWED by thread -6): when
+// registerDevPluginSkillsIntoCodexHome — CTL-1530 (threads dLZ + dLh + dLX): when
 // `.agents/skills` is a REAL, project-owned directory (e.g. a dual-harness-migrated
-// project), MERGE in ONLY the phase-agent skills the codex worker actually needs —
-// entries matching /^phase-/ (buildCodexPrompt's generated prompt only ever
-// invokes /catalyst-dev:phase-* skills; see harnessShim) — rather than the entire
-// dev-plugin skills dir. Merging the whole dir would inject arbitrary skill NAMES
-// (e.g. `commit`) into the project's real skills tree, each needing its own
-// git-exclude line in the COMMON (cross-worktree, teardown-surviving)
-// `.git/info/exclude` — exactly the collision class thread -6 closes (see
-// gitExcludePhaseSkillPattern). Narrowing to phase-* keeps the merge surface, and
-// therefore the exclude surface, as small as what codex actually needs. For each
-// phase-* entry in the source skills dir: ABSENT in the real dir → create our
-// per-entry symlink; present and OUR symlink pointing at the CURRENT source →
-// idempotent no-op; present and a symlink that is RUNNER-OWNED but STALE (an
-// earlier dispatch's link against an old checkout root — CTL-1530 thread -2, see
-// isRunnerOwnedSkillTarget) → unlink + refresh to the current source; present and
-// anything else (a project-owned entry, a foreign symlink, or an unreadable link)
-// → leave it untouched, WARN per-entry, and skip — this runner never touches an
-// entry it does not own or provably used to own. Every symlink WE create or
-// refresh here is covered by the single managed exclude pattern
-// `.agents/skills/phase-*` (never the blanket `.agents/` — see gitExcludeAgents),
-// because the surrounding real directory is project-owned and must stay tracked
-// as-is. Best-effort per entry — one bad entry (a readdir/symlink failure) never
-// aborts the rest.
-function mergeCodexSkillsIntoRealDir(skillsDir, skillsSrc, { worktreePath, logger } = {}) {
-  let entries = [];
-  try {
-    entries = readdirSync(skillsSrc);
-  } catch (err) {
+// project), the runner used to MERGE per-entry symlinks straight into that real
+// tree. Three findings against that design compound into "structurally broken",
+// not just buggy, so this REPLACES it entirely rather than patching it further:
+//
+//   - dLZ: `.git/info/exclude` is the repo's COMMON exclude file — it is shared by
+//     EVERY linked worktree of the same repo (`git rev-parse --git-path
+//     info/exclude` resolves there even from a ticket worktree). A pattern written
+//     for one ticket's dispatch persisted across every other worktree and outlived
+//     that ticket's teardown, so a later dispatch injecting a skill NAME could mask
+//     a REAL project skill of that same name in a completely different worktree
+//     with no `git status` entry to surface it.
+//   - dLh: narrowing the merge to `/^phase-/` (the prior fix for a different
+//     problem) broke codex's ability to run its OWN generated prompts: buildCodexPrompt
+//     only ever invokes `/catalyst-dev:phase-*` wrappers, but those wrappers
+//     THEMSELVES delegate to non-phase Catalyst skills — phase-plan -> create-plan,
+//     phase-research -> research-codebase, phase-implement -> implement-plan,
+//     phase-pr -> create-pr, phase-review -> review-comments, etc. Codex discovers
+//     slash commands through `.agents/skills`, so filtering to phase-* only
+//     silently broke every migrated pipeline phase that delegates.
+//   - dLX: the merged phase-* links (plus the exclude pattern they required) look,
+//     to `migrate-dual-harness.sh`'s trackability audit, like ambiguous project
+//     content — adding them to `DEST_PATHS` made the classifier return rc 4 on
+//     every subsequent run.
+//
+// The common root cause is touching a project-owned real `.agents/skills` AT ALL:
+// this runner is not the owner of that directory (or the repo's shared exclude
+// file) and has no business writing into either. So when the directory is real, we
+// now do NOT touch it and do NOT write any git exclude — instead we register the
+// FULL dev-plugin skills set (not just phase-*, closing dLh) as per-entry symlinks
+// under `<codexHome>/skills/`, the machine-local, out-of-repo directory this runner
+// already resolves for auth (codexConfig's `codexHome`). CODEX_HOME is entirely our
+// own territory (nothing else lives there), so unlike a worktree's `.agents/skills`
+// there is no risk of shadowing project content, and nothing here is ever
+// `git add`-able (closing dLX — there is simply nothing left for the migration
+// audit to see).
+//
+// Per entry: ABSENT in `<codexHome>/skills/` -> create our symlink; present and OUR
+// symlink pointing at the CURRENT source -> idempotent no-op; present and a symlink
+// that is RUNNER-OWNED but STALE (an earlier dispatch's link against an old
+// checkout root, home-rooted per thread dLa — see isRunnerOwnedSkillTarget) ->
+// unlink + refresh to the current source; present and anything else (an unrelated
+// entry, a foreign symlink, or an unreadable link) -> leave it untouched, WARN
+// per-entry, and skip — CODEX_HOME/skills is machine/runner territory, but we still
+// never clobber a non-matching entry. Best-effort per entry — one bad entry (a
+// readdir/symlink failure) never aborts the rest.
+function registerDevPluginSkillsIntoCodexHome(codexHome, skillsSrc, { logger, homeDir } = {}) {
+  if (!codexHome) {
     try {
       logger?.warn?.(
-        { skillsSrc, err: err?.message },
-        "codex-exec: ensureCodexSkills could not read the dev-plugin skills source dir — skipping the merge into the real .agents/skills",
+        { skillsSrc },
+        "codex-exec: ensureCodexSkills found a real project-owned .agents/skills dir but no codexHome is configured — skipping machine-local skills registration",
       );
     } catch {
       /* logging must never break a dispatch */
     }
     return;
   }
-  // thread -6: only the phase-* skills a codex worker's generated prompt can ever
-  // invoke — see the function doc for why this is the whole fix, not a subset of it.
-  const phaseEntries = entries.filter((name) => /^phase-/.test(name));
-  for (const name of phaseEntries) {
+  const destDir = join(codexHome, "skills");
+  let entries = [];
+  try {
+    mkdirSync(destDir, { recursive: true });
+    entries = readdirSync(skillsSrc);
+  } catch (err) {
+    try {
+      logger?.warn?.(
+        { skillsSrc, destDir, err: err?.message },
+        "codex-exec: ensureCodexSkills could not prepare CODEX_HOME/skills or read the dev-plugin skills source dir — skipping registration",
+      );
+    } catch {
+      /* logging must never break a dispatch */
+    }
+    return;
+  }
+  for (const name of entries) {
     const srcEntry = join(skillsSrc, name);
-    const destEntry = join(skillsDir, name);
+    const destEntry = join(destDir, name);
     let existingEntry = null;
     try {
       existingEntry = lstatSync(destEntry);
@@ -686,29 +699,20 @@ function mergeCodexSkillsIntoRealDir(skillsDir, skillsSrc, { worktreePath, logge
           /* unreadable link — treat as foreign, never clobber */
         }
         if (target === srcEntry) {
-          // OUR symlink already in place, current source — still re-ensure the
-          // managed exclude pattern (an operator may have pruned the line
-          // while the link survived; without this, `git add -A` in the
-          // worktree could stage the machine-local absolute symlink into the
-          // project repo).
-          gitExcludePhaseSkillPattern(worktreePath);
-          continue;
+          continue; // OUR symlink already in place, current source — idempotent no-op
         }
-        if (isRunnerOwnedSkillTarget(target, name, worktreePath)) {
-          // RUNNER-OWNED but STALE (thread -2): the checkout root moved since
-          // this link was created. Refreshing it does not violate T7 (which
-          // protects PROJECT content) — a target ending in
-          // `plugins/dev/skills/<name>` is provably this runner's own past
-          // creation, never something a project put at this path.
+        if (isRunnerOwnedSkillTarget(target, name, destDir, homeDir)) {
+          // RUNNER-OWNED but STALE (thread dLa): the checkout root moved since
+          // this link was created. Refreshing it never touches project content
+          // — CODEX_HOME/skills has none.
           try {
             unlinkSync(destEntry);
             symlinkSync(srcEntry, destEntry);
-            gitExcludePhaseSkillPattern(worktreePath);
           } catch (err) {
             try {
               logger?.warn?.(
-                { worktreePath, destEntry, target, wanted: srcEntry, err: err?.message },
-                "codex-exec: .agents/skills/<phase-name> is a stale runner-owned symlink (old checkout root) but refreshing it failed — leaving it as-is",
+                { destEntry, target, wanted: srcEntry, err: err?.message },
+                "codex-exec: CODEX_HOME/skills/<name> is a stale runner-owned symlink (old checkout root) but refreshing it failed — leaving it as-is",
               );
             } catch {
               /* logging must never break a dispatch */
@@ -717,13 +721,13 @@ function mergeCodexSkillsIntoRealDir(skillsDir, skillsSrc, { worktreePath, logge
           continue;
         }
       }
-      // Present and not ours, and not a stale-but-owned link (a project-owned
-      // entry, a foreign symlink, or an unreadable link) — leave it untouched,
-      // warn per-entry, skip.
+      // Present and not ours, and not a stale-but-owned link (a foreign symlink,
+      // an unrelated entry, or an unreadable link) — leave it untouched, warn
+      // per-entry, skip.
       try {
         logger?.warn?.(
-          { worktreePath, destEntry, wanted: srcEntry },
-          "codex-exec: .agents/skills/<phase-name> already exists and is not our symlink — leaving it untouched (skipping this phase skill; codex may not discover it)",
+          { destEntry, wanted: srcEntry },
+          "codex-exec: CODEX_HOME/skills/<name> already exists and is not our symlink — leaving it untouched (skipping this skill; codex may not discover it)",
         );
       } catch {
         /* logging must never break a dispatch */
@@ -732,12 +736,11 @@ function mergeCodexSkillsIntoRealDir(skillsDir, skillsSrc, { worktreePath, logge
     }
     try {
       symlinkSync(srcEntry, destEntry);
-      gitExcludePhaseSkillPattern(worktreePath);
     } catch (err) {
       try {
         logger?.warn?.(
-          { worktreePath, destEntry, err: err?.message },
-          "codex-exec: ensureCodexSkills failed to create a per-entry phase-skill symlink",
+          { destEntry, err: err?.message },
+          "codex-exec: ensureCodexSkills failed to create a per-entry CODEX_HOME/skills symlink",
         );
       } catch {
         /* logging must never break a dispatch */
@@ -760,19 +763,23 @@ function mergeCodexSkillsIntoRealDir(skillsDir, skillsSrc, { worktreePath, logge
 // ARBITRARY project worktrees, so a pre-existing `.agents/skills` may be the project's
 // or user's real Codex skills (a real dir) or a foreign symlink — the old unlink-first
 // setup deleted it (DATA LOSS). Only touch the link when SAFE:
-//   - ABSENT                       → create our symlink;
+//   - ABSENT                       → create our symlink (wholesale ownership);
 //   - OUR symlink (→ CURRENT src)  → idempotent no-op;
 //   - RUNNER-OWNED but STALE       → unlink + refresh to the current source
-//     (CTL-1530 thread -2; see isRunnerOwnedSkillTarget) — a link created by an
-//     earlier dispatch against a DIFFERENT checkout root is provably ours (its
-//     target path ends in `plugins/dev/skills`), so refreshing it does not touch
-//     anything T7 protects (project content never lives at that shape).
+//     (CTL-1530 thread dLa; see isRunnerOwnedSkillTarget) — a link created by an
+//     earlier dispatch against a DIFFERENT, home-rooted checkout root is provably
+//     ours (its target path ends in `plugins/dev/skills`), so refreshing it does
+//     not touch anything T7 protects (project content never lives at that shape);
 //   - FOREIGN symlink              → leave it untouched, WARN LOUDLY, and skip;
-//   - real dir (project-owned)     → MERGE per-entry (CTL-1530 thread ns; see
-//                                     mergeCodexSkillsIntoRealDir) rather than
-//                                     skip wholesale — a migrated project's real
-//                                     skills dir must not shadow the phase skills.
-export function ensureCodexSkills(worktreePath, { pluginDirs, pluginRoot, log: logger = log } = {}) {
+//   - real dir (project-owned)     → NEVER touched, NEVER git-excluded (CTL-1530
+//     threads dLZ + dLh + dLX — see registerDevPluginSkillsIntoCodexHome for why
+//     the prior per-entry MERGE approach was structurally broken, not just buggy).
+//     Instead the full dev-plugin skills set is registered machine-locally under
+//     `<codexHome>/skills/`, entirely outside the project worktree/repo.
+export function ensureCodexSkills(
+  worktreePath,
+  { pluginDirs, pluginRoot, codexHome, log: logger = log, homeDir } = {},
+) {
   try {
     if (!worktreePath) return;
     const devRoot = pluginRoot ?? resolveDevPluginRoot(pluginDirs);
@@ -823,13 +830,14 @@ export function ensureCodexSkills(worktreePath, { pluginDirs, pluginRoot, log: l
           gitExcludeAgents(worktreePath);
           return;
         }
-        if (isRunnerOwnedSkillTarget(target, "", worktreePath)) {
-          // RUNNER-OWNED but STALE (CTL-1530 thread -2): pluginDirs /
+        if (isRunnerOwnedSkillTarget(target, "", worktreePath, homeDir)) {
+          // RUNNER-OWNED but STALE (CTL-1530 thread dLa): pluginDirs /
           // codex.pluginRoot was reconfigured to a different checkout since
           // this link was created. Refreshing it does not violate the T7
           // never-delete contract — T7 protects PROJECT content, and a
-          // target ending in `plugins/dev/skills` is provably this runner's
-          // own past creation, never something a project would place there.
+          // home-rooted target ending in `plugins/dev/skills` is provably
+          // this runner's own past creation, never something a project would
+          // place there.
           try {
             unlinkSync(skillsLink);
             symlinkSync(skillsSrc, skillsLink);
@@ -861,13 +869,12 @@ export function ensureCodexSkills(worktreePath, { pluginDirs, pluginRoot, log: l
       }
       if (existing.isDirectory()) {
         // A REAL, project-owned skills directory (e.g. a dual-harness-migrated
-        // project — CTL-1530 thread ns). MERGE ONLY the phase-* entries the
-        // codex worker needs (thread -6) instead of skipping wholesale or
-        // merging everything; never touch what we don't own (T7). Excluded via
-        // the single managed `.agents/skills/phase-*` pattern — never the
-        // blanket `.agents/` (thread nw — that would falsely mark this real,
-        // tracked project directory as ignored).
-        mergeCodexSkillsIntoRealDir(skillsLink, skillsSrc, { worktreePath, logger });
+        // project). NEVER touched, NEVER git-excluded (T7 + CTL-1530 threads
+        // dLZ + dLh + dLX — see registerDevPluginSkillsIntoCodexHome's doc for
+        // why the prior in-tree per-entry merge was structurally broken).
+        // Instead register the full dev-plugin skills set machine-locally
+        // under CODEX_HOME/skills so codex can still discover them.
+        registerDevPluginSkillsIntoCodexHome(codexHome, skillsSrc, { logger, homeDir });
         return;
       }
       // Anything else (e.g. a plain file at .agents/skills) — not ours, leave it.
@@ -1207,7 +1214,9 @@ export async function codexRunPhaseAgent(
   // Symlink .agents/skills + git-exclude .agents/ before spawn (best-effort).
   // CTL-1457 (T4): pass cfg.pluginRoot so the skills source honors the same
   // codex.pluginRoot override CLAUDE_PLUGIN_ROOT uses (falls back to spec.pluginDirs).
-  prepareWorktree(wt, { pluginDirs: spec.pluginDirs, pluginRoot: cfg.pluginRoot });
+  // CTL-1530: also pass cfg.codexHome — the real-project-dir path registers the
+  // dev-plugin skills there instead of touching the worktree's .agents/skills.
+  prepareWorktree(wt, { pluginDirs: spec.pluginDirs, pluginRoot: cfg.pluginRoot, codexHome: cfg.codexHome });
 
   // Register in the in-process worker registry (executor-tagged). Registered
   // BEFORE the semaphore so a parked worker still reads as live.

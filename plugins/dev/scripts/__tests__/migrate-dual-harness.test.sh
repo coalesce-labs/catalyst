@@ -477,6 +477,58 @@ assert_eq "28 internallink: link still resolves after the move" "real body" "$(c
 #     error, not bash's raw parameter-expansion failure (rc 1).
 bash "$SCRIPT" --repo >/dev/null 2>&1; assert_eq "29 --repo as final arg: rc=2" 2 "$?"
 
+# 30. noncanonical RELATIVE .claude/skills link that resolves correctly through
+#     the checkout name → rewrite (rc 10 dry-run; --fix rewrites to the literal
+#     ../.agents/skills), NOT ok — renaming/cloning the checkout would dangle it.
+R="$SCRATCH/relnoncanon"; mkdir -p "$R/.claude" "$R/.agents/skills/foo"
+printf '@AGENTS.md\n' >"$R/CLAUDE.md"
+printf '# AGENTS.md\n\n## Skills\n\nsee `.agents/skills/`\n' >"$R/AGENTS.md"
+printf 'body\n' >"$R/.agents/skills/foo/SKILL.md"
+ln -s "../../$(basename "$R")/.agents/skills" "$R/.claude/skills"
+run "$R"; assert_eq "30 relnoncanon: dry-run rc=10 (rewrite needed)" 10 "$?"
+run "$R" --fix; assert_eq "30 relnoncanon: --fix rc=0" 0 "$?"
+assert_eq "30 relnoncanon: link rewritten to canonical relative" "../.agents/skills" "$(readlink "$R/.claude/skills")"
+run "$R"; assert_eq "30 relnoncanon: rerun rc=0" 0 "$?"
+
+# 31. empty .agents/skills + no .claude/skills → NO symlink scheduled (git can't
+#     track an empty dir; a committed link would dangle on fresh clones).
+R="$SCRATCH/emptyas"; mkdir -p "$R/.agents/skills"
+printf '@AGENTS.md\n' >"$R/CLAUDE.md"
+printf '# AGENTS.md\n' >"$R/AGENTS.md"
+run "$R"; assert_eq "31 emptyas: dry-run rc=0 (nothing to wire)" 0 "$?"
+run "$R" --fix; assert_eq "31 emptyas: --fix rc=0" 0 "$?"
+[[ ! -e "$R/.claude/skills" && ! -L "$R/.claude/skills" ]] && pass "31 emptyas: no symlink created" || fail "31 emptyas: no symlink created"
+
+# 32. already-wired "ok" layout whose .agents is a symlink to an outside dir →
+#     rc 4 (canonical tree lives outside the repo; false green on fresh clones).
+R="$SCRATCH/okoutside"; mkdir -p "$R/.claude" "$SCRATCH/okoutside-real/skills/foo"
+printf '@AGENTS.md\n' >"$R/CLAUDE.md"
+printf '# AGENTS.md\n' >"$R/AGENTS.md"
+printf 'external body\n' >"$SCRATCH/okoutside-real/skills/foo/SKILL.md"
+ln -s "$SCRATCH/okoutside-real" "$R/.agents"
+ln -s '../.agents/skills' "$R/.claude/skills"
+run "$R" >/dev/null 2>&1; assert_eq "32 okoutside: dry-run rc=4" 4 "$?"
+run "$R" --fix >/dev/null 2>&1; assert_eq "32 okoutside: --fix rc=4" 4 "$?"
+
+# 33. byte-identical trees with a NON-executable-bit mode difference (0644 vs
+#     0600) → rc 4 (mode comparison uses recorded bits, not [[ -x ]] access).
+R="$SCRATCH/modebits"; mkdir -p "$R/.claude/skills/foo" "$R/.agents/skills/foo"
+printf '@AGENTS.md\n' >"$R/CLAUDE.md"
+printf '# AGENTS.md\n' >"$R/AGENTS.md"
+printf 'same content\n' >"$R/.claude/skills/foo/data.txt"
+printf 'same content\n' >"$R/.agents/skills/foo/data.txt"
+chmod 644 "$R/.claude/skills/foo/data.txt"; chmod 600 "$R/.agents/skills/foo/data.txt"
+run "$R" --fix >/dev/null 2>&1; assert_eq "33 modebits: --fix rc=4 (0644 vs 0600)" 4 "$?"
+[[ -d "$R/.claude/skills" && ! -L "$R/.claude/skills" ]] && pass "33 modebits: nothing collapsed" || fail "33 modebits: nothing collapsed"
+
+# 34. CLAUDE.md is a FIFO → rc 4 both modes (never redirect into a FIFO).
+R="$SCRATCH/fifodoc"; mkdir -p "$R"
+printf '# AGENTS.md\n' >"$R/AGENTS.md"
+mkfifo "$R/CLAUDE.md"
+run "$R" >/dev/null 2>&1; assert_eq "34 fifodoc: dry-run rc=4" 4 "$?"
+run "$R" --fix >/dev/null 2>&1; assert_eq "34 fifodoc: --fix rc=4" 4 "$?"
+[[ -p "$R/CLAUDE.md" ]] && pass "34 fifodoc: FIFO untouched" || fail "34 fifodoc: FIFO untouched"
+
 echo ""
 echo "migrate-dual-harness.test.sh: ${PASSES} passed, ${FAILURES} failed"
 [[ $FAILURES -eq 0 ]]

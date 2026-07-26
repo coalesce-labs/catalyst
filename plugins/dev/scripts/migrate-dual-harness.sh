@@ -124,6 +124,10 @@ AS="$REPO/.agents/skills"
 # Refuse before any classification runs.
 for doc_path in "$CLA" "$AG"; do
 	[[ -L "$doc_path" ]] && die "${doc_path#"$REPO"/} is a symlink — instruction documents must be regular files, not symlinks (dangling or not); replace it with a real file and re-run" 4
+	# Any other non-regular entry (FIFO, socket, directory, device) is just as
+	# unusable: classification would treat it as absent (-f is false) and a
+	# --fix redirect into a FIFO blocks forever. Refuse before classification.
+	[[ -e "$doc_path" && ! -f "$doc_path" ]] && die "${doc_path#"$REPO"/} exists but is not a regular file — instruction documents must be regular files; replace it and re-run" 4
 done
 
 # --- reject git-ignored instruction documents ----------------------------------
@@ -236,14 +240,16 @@ if [[ -L "$AS" ]]; then
 	fi
 elif [[ -L "$CS" ]]; then
 	if [[ -d "$AS" ]] && [[ -n "$(realdir "$CS")" ]] && [[ "$(realdir "$CS")" == "$(realdir "$AS")" ]]; then
-		# Resolves correctly — but only the canonical RELATIVE spelling is
-		# left alone. An absolute link resolves fine here-and-now but breaks
-		# the moment the repo is cloned or relocated elsewhere on disk, so
-		# it's a mechanical fix (rewrite to relative), not a terminal "ok".
-		case "$(readlink "$CS")" in
-		/*) SKILLS_ACTION="rewrite" ;;
-		*) SKILLS_ACTION="ok" ;;
-		esac
+		# Resolves correctly — but ONLY the literal portable spelling
+		# `../.agents/skills` is a terminal "ok". An absolute link breaks on
+		# clone/relocate; so does a noncanonical relative one that routes
+		# through the checkout name (e.g. `../../reponame/.agents/skills`).
+		# Both are mechanical fixes (rewrite to the canonical relative form).
+		if [[ "$(readlink "$CS")" == "../.agents/skills" ]]; then
+			SKILLS_ACTION="ok"
+		else
+			SKILLS_ACTION="rewrite"
+		fi
 	else
 		SKILLS_ACTION="ambiguous"
 		SKILLS_MSG=".claude/skills is a symlink to '$(readlink "$CS")', which does not resolve to .agents/skills"
@@ -267,17 +273,18 @@ elif [[ -d "$CS" ]]; then
 				# runnable helper (e.g. a skill's run.sh) would silently
 				# downgrade it from 0755 to 0644. Compare every counterpart
 				# pair's -x bit before trusting the collapse.
+				# Compare the recorded permission bits, not [[ -x ]] (effective
+				# access): as root, -x is true whenever ANY execute bit is set,
+				# so 0100-vs-0001 mode pairs would wrongly compare equal.
+				# GNU `stat -c %a` first, BSD `stat -f %Lp` fallback (macOS).
 				while IFS= read -r cs_file; do
 					rel_path="${cs_file#"$CS"/}"
 					as_file="$AS/$rel_path"
-					cs_x=0; as_x=0
-					[[ -x "$cs_file" ]] && cs_x=1
-					[[ -x "$as_file" ]] && as_x=1
-					if [[ "$cs_x" != "$as_x" ]]; then
-						cs_word="non-executable"; [[ $cs_x -eq 1 ]] && cs_word="executable"
-						as_word="non-executable"; [[ $as_x -eq 1 ]] && as_word="executable"
+					cs_mode="$(stat -c %a "$cs_file" 2>/dev/null || stat -f %Lp "$cs_file" 2>/dev/null)"
+					as_mode="$(stat -c %a "$as_file" 2>/dev/null || stat -f %Lp "$as_file" 2>/dev/null)"
+					if [[ "$cs_mode" != "$as_mode" ]]; then
 						SKILLS_ACTION="ambiguous"
-						SKILLS_MSG="byte-identical but file modes differ: '${rel_path}' is ${cs_word} under .claude/skills but ${as_word} under .agents/skills"
+						SKILLS_MSG="byte-identical but file modes differ: '${rel_path}' is mode ${cs_mode:-unreadable} under .claude/skills but ${as_mode:-unreadable} under .agents/skills"
 						break
 					fi
 				done < <(find "$CS" -type f)
@@ -297,7 +304,15 @@ elif [[ -e "$CS" ]]; then
 	SKILLS_MSG=".claude/skills exists but is neither a symlink nor a directory"
 else
 	if [[ -d "$AS" ]]; then
-		SKILLS_ACTION="symlink-only"
+		if [[ -n "$(ls -A "$AS" 2>/dev/null)" ]]; then
+			SKILLS_ACTION="symlink-only"
+		else
+			# Git cannot record an empty directory, so a compatibility symlink
+			# onto an empty .agents/skills would commit as a dangling link on
+			# every fresh clone. Nothing to wire until the dir has content.
+			SKILLS_ACTION="none"
+			say "note: .agents/skills exists but is empty — skipping the .claude/skills symlink (git cannot track an empty directory; a committed link would dangle on fresh clones)"
+		fi
 	elif [[ -e "$AS" ]]; then
 		SKILLS_ACTION="ambiguous"
 		SKILLS_MSG=".agents/skills exists but is not a directory"
@@ -354,11 +369,15 @@ fi
 # are real directories directly under the repo root — a symlinked .claude or
 # .agents ancestor would make the relative ../.agents/skills link land (and
 # dangle) in the physical target instead. Refuse rather than wire a broken link.
+# "ok" is included too: an already-wired layout that only resolves through a
+# symlinked ancestor (e.g. `.agents -> /tmp/outside`) has its canonical tree
+# OUTSIDE the repo — it would be missing on any other machine or fresh clone,
+# so reporting it healthy would be a false green.
 case "$SKILLS_ACTION" in
-move | symlink-only | collapse | rewrite)
+move | symlink-only | collapse | rewrite | ok)
 	if [[ -L "$REPO/.claude" || -L "$REPO/.agents" ]]; then
 		SKILLS_ACTION="ambiguous"
-		SKILLS_MSG=".claude or .agents is itself a symlink — the relative .claude/skills -> ../.agents/skills link would dangle in the physical target"
+		SKILLS_MSG=".claude or .agents is itself a symlink — the canonical skills tree would live (or the relative link would dangle) outside the repo's physical tree"
 	fi
 	;;
 esac

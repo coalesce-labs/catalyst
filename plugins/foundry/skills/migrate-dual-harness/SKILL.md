@@ -58,7 +58,7 @@ Branch on the exit code:
 | `10` | mechanical changes needed (bridge / skills wiring / pointer) — no monolithic problem | Phase 3 |
 | `11` | `CLAUDE.md` is monolithic — needs the intelligent split | Phase 3 (mechanical parts only), then Phase 4 |
 | `2` | bad usage (`--repo` not a dir, unknown flag) | fix the invocation and re-run |
-| `4` | ambiguous skills state (message says exactly what conflicts) | resolve by hand per the printed message, then re-run |
+| `4` | ambiguous skills state (message says exactly what conflicts) | STOP — surface the script's stderr diagnostic verbatim; never modify either skills tree yourself; present the conflict and ask the human operator to resolve it, then re-run the classifier (Phase 2) to verify |
 | `5` | I/O error | inspect the printed message |
 
 ## Phase 3: Mechanical fix
@@ -73,8 +73,10 @@ bash "$SCRIPT" --repo . --fix 2>&1
 - After fixing from rc `10`, re-run the Phase 2 dry-run and require rc `0`.
 - After fixing from rc `11`, re-run the Phase 2 dry-run and expect rc `11` again (the monolithic
   split is still outstanding) — proceed to Phase 4.
-- rc `4` (ambiguous skills state) is never auto-resolved — report the exact conflict from the
-  script's message and stop; do not touch either skills tree by hand.
+- rc `4` (ambiguous skills state) is a STOP, not an auto-fix and not a retry loop: surface the
+  script's stderr diagnostic verbatim to the user and never modify either skills tree yourself —
+  resolving the conflict is a decision for the human operator. Present the conflict and ask; once
+  they've resolved it, re-run the classifier (Phase 2) to verify.
 
 ## Phase 4: Intelligent split (rc 11 only)
 
@@ -152,5 +154,7 @@ Print a summary table:
   script collapses that to a symlink, guarded by `diff -r`.
 - **Idempotent.** Re-running any phase against an already-converged repo is a no-op.
 - **rc `4` is a stop sign, not a retry loop.** Ambiguous skills state means two real trees with
-  different content, or a symlink pointing somewhere unexpected — resolve it by hand per the
-  script's message before re-running.
+  different content, or a symlink pointing somewhere unexpected. The agent must never modify
+  either skills tree itself — surface the script's stderr diagnostic verbatim and present the
+  conflict to the human operator; resolving it is their decision, not the agent's. Re-run the
+  classifier (Phase 2) to verify only after they've resolved it.
