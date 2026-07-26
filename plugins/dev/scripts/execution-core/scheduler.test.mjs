@@ -86,6 +86,8 @@ import {
   convergeDispositionLabel,
   HELD_LABEL_WAITING,
   HELD_LABEL_NEEDS_INPUT,
+  // CTL-1524 (C4a): hoisted dead-host computation (one surviving-roster read)
+  computeDeadHosts,
 } from "./scheduler.mjs";
 import { createTicketStateCache } from "./linear-cache.mjs";
 import { fetchTicketsBatch } from "./linear-query.mjs"; // CTL-784: cache-reuse tests drive the real batch
@@ -12440,5 +12442,86 @@ describe("CTL-764 Phase 5 — schedulerTick emits worker.transition events", () 
       (e) => e.ticket === "CTL-R53" && e.toDisposition === null && e.source === "scheduler-admission"
     );
     expect(cleared).toBeUndefined();
+  });
+});
+
+// ─── CTL-1524 (C4a) — computeDeadHosts calls computeSurvivingRoster ONCE ──────
+// The daemon's board-health binding used to read
+//   roster.filter((h) => !computeSurvivingRoster(roster).includes(h))
+// which re-ran the whole surviving computation once PER HOST. computeSurvivingRoster's
+// default readHeartbeats is readClusterHeartbeats — a whole-file read of the event log
+// (883MB on mini, ~305ms under bun), so at N=2 one deadHosts evaluation cost TWO full-log
+// reads (~610ms), which is exactly the measured 609.6ms "board-health" lap floor.
+describe("computeDeadHosts (CTL-1524 C4a)", () => {
+  test("invokes computeSurvivingRoster EXACTLY ONCE regardless of roster size", () => {
+    for (const size of [2, 3, 8, 25]) {
+      const roster = Array.from({ length: size }, (_, i) => `host-${i}`);
+      let calls = 0;
+      computeDeadHosts(roster, {
+        computeSurviving: (r) => {
+          calls++;
+          return r.slice(0, 1); // only the first host survives
+        },
+      });
+      expect(calls).toBe(1); // NOT `size` — the pre-CTL-1524 binding scaled with N
+    }
+  });
+
+  test("returns exactly the roster minus the surviving set", () => {
+    const roster = ["mini", "mini-2", "laptop"];
+    const dead = computeDeadHosts(roster, { computeSurviving: () => ["mini"] });
+    expect(dead.sort()).toEqual(["laptop", "mini-2"]);
+  });
+
+  test("byte-identical to the old per-host filter for every REACHABLE survivor subset", () => {
+    const roster = ["a", "b", "c", "d"];
+    // Every NON-EMPTY subset — the full reachable range of computeSurvivingRoster,
+    // which guarantees `alive.length > 0 ? alive : roster` and so can never return
+    // []. (The unreachable empty case is deliberately NOT byte-identical: see the
+    // degenerate-survivor-set test below, where the old filter would have called the
+    // entire fleet dead and the new one fails safe to no failover.)
+    const subsets = [["a"], ["b", "d"], ["a", "b", "c", "d"], ["a", "c"], ["d"]];
+    for (const surviving of subsets) {
+      const oldWay = roster.filter((h) => !surviving.includes(h));
+      const newWay = computeDeadHosts(roster, { computeSurviving: () => surviving });
+      expect(newWay).toEqual(oldWay);
+    }
+  });
+
+  test("single-host / empty / non-array roster → EMPTY dead set with NO read at all", () => {
+    let calls = 0;
+    const spy = (r) => {
+      calls++;
+      return r;
+    };
+    expect(computeDeadHosts(["solo"], { computeSurviving: spy })).toEqual([]);
+    expect(computeDeadHosts([], { computeSurviving: spy })).toEqual([]);
+    expect(computeDeadHosts(null, { computeSurviving: spy })).toEqual([]);
+    expect(computeDeadHosts(undefined, { computeSurviving: spy })).toEqual([]);
+    expect(calls).toBe(0); // N<=1 short-circuits before the heartbeat read
+  });
+
+  test("FAIL-SAFE preserved: a degrade-to-full-roster survivor set yields NO dead hosts", () => {
+    // computeSurvivingRoster returns the FULL roster when the heartbeat read throws or
+    // everyone looks dead. That must mean "no failover this tick", never "all dead".
+    const roster = ["mini", "mini-2"];
+    expect(computeDeadHosts(roster, { computeSurviving: (r) => r })).toEqual([]);
+  });
+
+  test("a degenerate survivor set (empty/non-array/throw) yields NO dead hosts, never 'all dead'", () => {
+    const roster = ["mini", "mini-2"];
+    // computeSurvivingRoster never returns empty (`alive.length > 0 ? alive : roster`),
+    // so these mean the computation misbehaved — not that the fleet died. Declaring
+    // every host dead here would hand the whole board to a foreign failover.
+    expect(computeDeadHosts(roster, { computeSurviving: () => [] })).toEqual([]);
+    expect(computeDeadHosts(roster, { computeSurviving: () => null })).toEqual([]);
+    expect(computeDeadHosts(roster, { computeSurviving: () => undefined })).toEqual([]);
+    expect(
+      computeDeadHosts(roster, {
+        computeSurviving: () => {
+          throw new Error("heartbeat read blew up");
+        },
+      })
+    ).toEqual([]);
   });
 });

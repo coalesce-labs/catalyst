@@ -307,6 +307,21 @@ function deriveRing(events, nowMs) {
 }
 
 // ── (1) assembleBoardState — the ONE impure reader (reads only, never writes) ─
+// resolveDeadHosts — CTL-1524 (C4b). Accept EITHER a resolved array (the historical
+// contract, still used by bare ticks and unit tests) OR a zero-arg thunk the caller
+// wants evaluated lazily. The daemon binds a thunk because resolving it costs a
+// whole-log heartbeat read; every consumer below wants a plain array. Never throws —
+// a failed liveness read degrades to "no provably-dead hosts", which is the same
+// fail-safe computeSurvivingRoster already applies (no failover, never a double-act).
+export function resolveDeadHosts(deadHosts) {
+  try {
+    const v = typeof deadHosts === "function" ? deadHosts() : deadHosts;
+    return Array.isArray(v) ? v : [];
+  } catch {
+    return [];
+  }
+}
+
 export function assembleBoardState({
   orchDir,
   getBoard = () => [],
@@ -398,7 +413,9 @@ export function assembleBoardState({
     signals,
     eligible,
     roster: Array.isArray(roster) ? roster : [],
-    deadHosts: Array.isArray(deadHosts) ? deadHosts : [],
+    // CTL-1524 (C4b): resolve here too, so a direct assembleBoardState caller may
+    // also pass a thunk. Already-resolved arrays pass through untouched.
+    deadHosts: resolveDeadHosts(deadHosts),
     self: self ?? "",
     multiHost: !!multiHost,
     // CTL-1157 off-gate: carried so evaluateInvariants can skip the cohort checks
@@ -1254,13 +1271,17 @@ export function boardHealthPass({
   if (mode === "off") return { ran: false, reason: "off" }; // strict no-op
   const nowMs = now();
   if (isThrottledFn(lastRunMs, intervalMs, nowMs)) {
-    return { ran: false, reason: "throttled" }; // no emit, no act
+    return { ran: false, reason: "throttled" }; // no emit, no act, NO deadHosts read
   }
 
   const board = assembleBoardState({
     orchDir, getBoard, getWorkerSignals, getEligible,
     roster, self, multiHost, capacity, readEventRing, ownerForTicket, repoForTicket, getReconcileMarkers,
-    getPrStatusMap, deadHosts, mode, now,
+    // CTL-1524 (C4b): resolved HERE — past the `off` branch and past the throttle —
+    // so the expensive whole-log heartbeat read behind the daemon's thunk is paid
+    // only on a tick that actually proceeds, not on all ~59 throttled ticks between
+    // 5-minute passes. Arrays still work unchanged (resolveDeadHosts is a no-op).
+    getPrStatusMap, deadHosts: resolveDeadHosts(deadHosts), mode, now,
     getDeferredBoardHealthTickets, sanctionedNeedsHuman, // CTL-1432 (B2/B3)
   });
   const invariants = evaluateInvariants(board, { mode });

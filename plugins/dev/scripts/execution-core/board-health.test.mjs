@@ -19,6 +19,8 @@ import {
   buildBoardContext,
   buildBoardScanEvent,
   boardHealthPass,
+  // CTL-1524 (C4b): lazy deadHosts resolution (array OR thunk)
+  resolveDeadHosts,
 } from "./board-health.mjs";
 // CTL-1435 (Codex P1/P2): round-trip the REAL emit envelope so the ring test
 // exercises the production body.payload.details nesting + attribute promotion.
@@ -1428,5 +1430,109 @@ describe("buildRecoveryEnvelope — recovery.act_dispatched promotion (CTL-1435)
   test("non-dispatch scan → attributes['recovery.act_dispatched'] === 0", () => {
     const env = buildRecoveryEnvelope(mkEvent({ dispatched: false, anchor: null, skippedReason: "all-candidates-cooldown" }));
     expect(env.attributes["recovery.act_dispatched"]).toBe(0);
+  });
+});
+
+// ─── CTL-1524 (C4b) — deadHosts is resolved LAZILY, past the throttle ─────────
+// The scheduler used to evaluate `_boardHealth.deadHosts(roster)` EAGERLY at the
+// call site, so boardHealthPass's 5-minute internal throttle could never protect it:
+// the whole-log heartbeat read behind it was paid on every tick, ~59 of every 60 of
+// which the throttle then discarded. The seam now accepts a THUNK (and still an
+// array), and boardHealthPass calls it only once it has decided to proceed.
+describe("boardHealthPass — CTL-1524 C4b lazy deadHosts", () => {
+  test("THROTTLED pass → the thunk is NEVER invoked", () => {
+    let calls = 0;
+    const r = boardHealthPass(
+      flaggedDeps({
+        mode: "shadow",
+        lastRunMs: NOW, // just ran
+        intervalMs: 5 * MIN, // → throttled
+        deadHosts: () => {
+          calls++;
+          return ["mini-2"];
+        },
+      })
+    );
+    expect(r).toEqual({ ran: false, reason: "throttled" });
+    expect(calls).toBe(0); // the expensive read was not paid on a discarded tick
+  });
+
+  test("mode:off → the thunk is NEVER invoked either (strict no-op)", () => {
+    let calls = 0;
+    const r = boardHealthPass(
+      flaggedDeps({
+        mode: "off",
+        deadHosts: () => {
+          calls++;
+          return ["mini-2"];
+        },
+      })
+    );
+    expect(r).toEqual({ ran: false, reason: "off" });
+    expect(calls).toBe(0);
+  });
+
+  test("PROCEEDING pass → the thunk is invoked EXACTLY ONCE", () => {
+    let calls = 0;
+    const r = boardHealthPass(
+      flaggedDeps({
+        mode: "shadow",
+        deadHosts: () => {
+          calls++;
+          return ["mini-2"];
+        },
+      })
+    );
+    expect(r.ran).toBe(true);
+    expect(calls).toBe(1);
+  });
+
+  test("BACKWARD COMPATIBLE: a plain ARRAY still works exactly as before", () => {
+    const emits = [];
+    const r = boardHealthPass(
+      flaggedDeps({ mode: "shadow", deadHosts: ["mini-2"], emit: (e) => emits.push(e) })
+    );
+    expect(r.ran).toBe(true);
+    expect(emits.length).toBe(1); // the pass ran to completion on an array seam
+  });
+
+  test("a thunk and the equivalent array produce the SAME board state", () => {
+    const fromArray = assembleBoardState({ roster: ["mini", "mini-2"], deadHosts: ["mini-2"] });
+    const fromThunk = assembleBoardState({ roster: ["mini", "mini-2"], deadHosts: () => ["mini-2"] });
+    expect(fromThunk.deadHosts).toEqual(fromArray.deadHosts);
+    expect(fromThunk.deadHosts).toEqual(["mini-2"]);
+  });
+});
+
+describe("resolveDeadHosts (CTL-1524 C4b)", () => {
+  test("passes an array through untouched", () => {
+    expect(resolveDeadHosts(["a", "b"])).toEqual(["a", "b"]);
+    expect(resolveDeadHosts([])).toEqual([]);
+  });
+
+  test("invokes a thunk exactly once and returns its array", () => {
+    let calls = 0;
+    const out = resolveDeadHosts(() => {
+      calls++;
+      return ["dead-1"];
+    });
+    expect(calls).toBe(1);
+    expect(out).toEqual(["dead-1"]);
+  });
+
+  test("NEVER throws: a throwing thunk degrades to an empty dead set", () => {
+    expect(
+      resolveDeadHosts(() => {
+        throw new Error("heartbeat read blew up");
+      })
+    ).toEqual([]);
+  });
+
+  test("non-array inputs / non-array thunk returns degrade to []", () => {
+    expect(resolveDeadHosts(undefined)).toEqual([]);
+    expect(resolveDeadHosts(null)).toEqual([]);
+    expect(resolveDeadHosts("mini-2")).toEqual([]);
+    expect(resolveDeadHosts(() => null)).toEqual([]);
+    expect(resolveDeadHosts(() => "nope")).toEqual([]);
   });
 });
