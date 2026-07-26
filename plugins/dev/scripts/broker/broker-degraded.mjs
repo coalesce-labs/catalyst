@@ -88,7 +88,7 @@
 // activity reading and the event append are INJECTED by the router, so the whole
 // machine is unit-testable with no DB, no clock, and no event log.
 
-import { mkdirSync, readFileSync, writeFileSync, renameSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync, renameSync, rmSync } from "node:fs";
 import { homedir } from "node:os";
 import { resolve, dirname, join } from "node:path";
 import { randomBytes } from "node:crypto";
@@ -224,16 +224,57 @@ export function getBrokerDegradedLatchPath() {
 }
 
 // hydrateLatch — lazily load the persisted episode on this process's first tick.
-// Absent/malformed marker → unlatched (never throws).
+// Never throws.
+//
+// THE FAILURE TAXONOMY MATTERS (Codex round 3). The original broad catch marked the
+// latch hydrated and treated EVERY failure as "no open episode", so a TRANSIENT read
+// error (EIO, a momentary permission loss, an obstructed path) on a restart
+// PERMANENTLY discarded a REAL open episode: the still-anomalous condition then
+// re-earned the debounce and emitted a DUPLICATE `degraded` — precisely the defect
+// the durable latch exists to prevent. Absence and corruption are CONFIRMATIONS;
+// an unreadable marker is not. So:
+//
+//   ENOENT (marker absent)   → CONFIRMED unlatched. Hydrated; never retried.
+//   read OK, body unparseable→ CONFIRMED unlatched (a marker we cannot trust is no
+//                              marker — the existing, tested corrupt-marker
+//                              behavior). Hydrated; never retried.
+//   ANY OTHER read error     → TRANSIENT / UNKNOWN. Warn, leave `_hydrated` false so
+//                              the NEXT tick re-reads, and leave the in-memory latch
+//                              untouched — we have learned nothing about the episode.
+//
+// The un-hydrated state deliberately does NOT gate the tick: a marker that is
+// unreadable forever must not disable the detector forever. The retry runs on every
+// tick, so with the sustained-tick debounce hydration gets several chances before any
+// edge can fire; and once an edge DOES advance the latch, checkBrokerDegraded pins
+// `_hydrated = true` so a later successful read cannot clobber authoritative memory.
 function hydrateLatch() {
   if (_hydrated) return;
+  let raw;
+  try {
+    raw = readFileSync(getBrokerDegradedLatchPath(), "utf8");
+  } catch (err) {
+    if (err?.code === "ENOENT") {
+      _hydrated = true; // CONFIRMED: there is no episode on disk
+      _latched = false;
+      _latchedAtMs = null;
+      return;
+    }
+    // Transient: stay un-hydrated so the next tick retries, and touch nothing.
+    log.warn?.(
+      { err: err?.message, code: err?.code },
+      "broker-degraded: latch hydrate failed (transient — will retry)"
+    );
+    return;
+  }
+  // The read succeeded, so whatever is on disk IS the marker — a body we cannot
+  // parse is a confirmed-unusable marker, not an unknown one.
   _hydrated = true;
   try {
-    const m = JSON.parse(readFileSync(getBrokerDegradedLatchPath(), "utf8"));
+    const m = JSON.parse(raw);
     _latched = m?.latched === true;
     _latchedAtMs = Number.isFinite(m?.latchedAtMs) ? m.latchedAtMs : null;
   } catch {
-    _latched = false; // absent/malformed → unlatched
+    _latched = false; // malformed → unlatched
     _latchedAtMs = null;
   }
 }
@@ -242,6 +283,12 @@ function hydrateLatch() {
 // failure is warned and the detector continues (the in-memory latch still holds
 // for this process's lifetime).
 function persistLatch({ latched, latchedAtMs }) {
+  // Hoisted out of the try so the catch can clean it up (Codex round 3). The tmp
+  // name is per-call random, so an orphan is never overwritten by the next attempt:
+  // with the round-2 retry re-calling this on EVERY watchdog tick, a PERSISTENT
+  // obstruction (a directory at the marker path, EPERM on the rename, …) leaked one
+  // hidden tmp file per minute forever → inode/disk exhaustion.
+  let tmp = null;
   try {
     const path = getBrokerDegradedLatchPath();
     const dir = dirname(path);
@@ -250,11 +297,21 @@ function persistLatch({ latched, latchedAtMs }) {
     // BASENAME is dot-prefixed (mirrors fleet-health-probe.mjs) so a crash landing
     // between write and rename leaves a HIDDEN orphan rather than a visible piece of
     // debris in the operator-facing ~/catalyst root.
-    const tmp = join(dir, `.broker-degraded-latch.${randomBytes(4).toString("hex")}.tmp`);
+    tmp = join(dir, `.broker-degraded-latch.${randomBytes(4).toString("hex")}.tmp`);
     writeFileSync(tmp, JSON.stringify({ latched, latchedAtMs, ts: Date.now() }));
     renameSync(tmp, path);
     return true;
   } catch (err) {
+    if (tmp !== null) {
+      // Nested + swallowed: cleanup must NEVER turn a best-effort persist failure
+      // into a throw that escapes runWatchdogTick. `force` already tolerates an
+      // absent file (the write itself may be what failed).
+      try {
+        rmSync(tmp, { force: true });
+      } catch {
+        /* nothing further to do — the retry next tick uses a fresh name */
+      }
+    }
     log.warn?.({ err: err?.message }, "broker-degraded: latch persist failed (will retry)");
     return false;
   }
@@ -382,6 +439,11 @@ export function checkBrokerDegraded({
 
   _latched = latched;
   _latchedAtMs = degraded ? nowMs : null;
+  // An edge has been emitted, so the IN-MEMORY episode is now authoritative. Pin
+  // hydration closed (it may still be un-hydrated after a transient read failure —
+  // see hydrateLatch) so a later successful read of a stale/absent marker can never
+  // clobber the state we just committed to the event log.
+  _hydrated = true;
   _persistPending = !persistLatch({ latched: _latched, latchedAtMs: _latchedAtMs });
   return edge;
 }

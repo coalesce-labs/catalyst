@@ -156,6 +156,21 @@ const orchestratorStatusMap = getOrchestratorStatusMap();
 // FILTER_BROKER_DEGRADED_GRACE_MS knob (was the hard-coded CTL-352
 // DEGRADED_THRESHOLD_MS).
 
+// CTL-1523 (Codex round 3): an interest-return EDGE that happens BETWEEN two
+// watchdog ticks. Replacing the CTL-352 synchronous re-arm with the watchdog's
+// periodic `interests.size` SAMPLE lost the one-shot case: an interest that
+// registers AND deregisters inside the ~60 s tick interval is never observed, so
+// the `recovered` never fires and the stale latch suppresses every later degraded
+// episode until the fleet goes idle. Record the EDGE instead of re-introducing an
+// out-of-band re-arm (which is what left a degraded unpaired in the ledger).
+// Set by the registration paths, consumed and cleared once per watchdog tick.
+let _sawInterestSinceLastTick = false;
+// Cannot throw: a bare boolean assignment, deliberately no I/O and no logging, so
+// it is safe to call from any hot registration path.
+function noteInterestRegistered() {
+  _sawInterestSinceLastTick = true;
+}
+
 // CTL-993: merge-to-main plugin-checkout refresh wiring. The broker module lives
 // at <repo>/plugins/dev/scripts/broker/router.mjs, so the repo .catalyst config
 // (which carries feedback.githubRepo) is four levels up. The machine config path
@@ -1002,7 +1017,10 @@ export function handleRegister(event) {
   // CTL-1523: the CTL-352 out-of-band re-arm (setDegradedEmittedAt(null)) is gone.
   // "Interests came back" is now the CLEAR EDGE and must be observed by the
   // watchdog so it emits the paired broker.daemon.recovered — a silent re-arm here
-  // would leave a degraded with no recovery in the ledger.
+  // would leave a degraded with no recovery in the ledger. We record only that the
+  // edge HAPPENED, so a registration that is gone again before the next tick is
+  // still counted (see _sawInterestSinceLastTick).
+  noteInterestRegistered();
   persistBrokerState();
 }
 
@@ -1125,7 +1143,9 @@ function _autoRegisterPrLifecycle(sessionId, prNumber, orchestrator, ticket, rep
   log.info({ sessionId, prNumber }, "auto-correlated pr_lifecycle for session");
   saveInterests();
   setLastRegisterAt(new Date().toISOString());
-  // CTL-1523: no out-of-band re-arm — the watchdog observes the clear edge.
+  // CTL-1523: no out-of-band re-arm — the watchdog observes the clear edge, and
+  // this records the edge so a between-tick registration is not missed.
+  noteInterestRegistered();
   persistBrokerState();
 }
 
@@ -1940,7 +1960,9 @@ function _autoPrLifecycleFromTicket(ticket, prNumber, interestsMap, repo) {
   if (changed) {
     saveInterests();
     setLastRegisterAt(new Date().toISOString());
-    // CTL-1523: no out-of-band re-arm — the watchdog observes the clear edge.
+    // CTL-1523: no out-of-band re-arm — the watchdog observes the clear edge, and
+    // this records the edge so a between-tick registration is not missed.
+    noteInterestRegistered();
     persistBrokerState();
   }
 }
@@ -2311,8 +2333,21 @@ export function runWatchdogTick({ liveness = sessionLiveness } = {}) {
       );
     }
   }
+  // CTL-1523 (Codex round 3): feed the detector the interest count AS OBSERVED OVER
+  // THE WHOLE TICK INTERVAL, not just at this instant. A one-shot interest that
+  // registered and deregistered since the last tick still PROVES the broker
+  // processed a registration (it is demonstrably not silently dead), so it must
+  // clear an open episode — and must not trip a new one. Consume-and-clear: the
+  // edge counts for exactly one tick, and is cleared unconditionally (even when the
+  // detector is dormant) so a stale edge can never leak into a later interval.
+  const sawInterestEdge = _sawInterestSinceLastTick;
+  _sawInterestSinceLastTick = false;
+  // 1 = "at least one registration was observed this interval" when the live table
+  // is empty again; otherwise the real size. The detector only ever asks
+  // empty-vs-non-empty of this number.
+  const observedInterestCount = interests.size > 0 ? interests.size : sawInterestEdge ? 1 : 0;
   checkBrokerDegraded({
-    interestCount: interests.size,
+    interestCount: observedInterestCount,
     uptimeMs: brokerUptimeMs,
     brokerStartedAt,
     fleetActive,

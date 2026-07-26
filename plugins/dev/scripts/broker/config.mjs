@@ -143,9 +143,23 @@ export function isAlertEmitEnabled() {
 // FILTER_PILEUP_THRESHOLD=abc → NaN → `count >= NaN` is always false → the
 // detector silently never fires; =0 → always true → a spurious pile-up on an
 // empty board. A bad value falls back to the default and is logged loudly.
-function parseIntKnob(envVal, dflt, { min }) {
+//
+// WHOLE-STRING VALIDATION (Codex round 3). `parseInt` is PREFIX-lenient: "1.5" and
+// "1garbage" both parse as 1, so a partially-parsed value slipped through as a
+// plausible-looking number and the warn path never ran. For
+// FILTER_BROKER_DEGRADED_SUSTAINED_TICKS that silently ELIMINATED the debounce —
+// the detector fired after ONE anomalous tick instead of the documented 5, while
+// the operator read the env file and believed otherwise. Every knob routed through
+// this helper is a whole integer (a millisecond count or a tick count); none has a
+// unit suffix or a fractional form, so requiring the WHOLE (trimmed) string to be
+// an integer changes nothing for any realistic existing value and routes typos to
+// the warn + default path that already exists for NaN.
+export function parseIntKnob(envVal, dflt, { min = 0 } = {}) {
   if (envVal === undefined) return dflt;
-  const n = parseInt(envVal, 10);
+  const raw = typeof envVal === "string" ? envVal.trim() : envVal;
+  // Reject "" / "   " / "1.5" / "1garbage" / "abc" / "1e5" — anything that is not
+  // exactly an optionally-signed run of digits.
+  const n = /^[+-]?\d+$/.test(String(raw)) ? Number(raw) : NaN;
   if (!Number.isFinite(n) || n < min) {
     log.warn({ envVal, dflt, min }, "alert config: invalid knob value — using default");
     return dflt;

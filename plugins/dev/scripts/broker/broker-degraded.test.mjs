@@ -10,7 +10,15 @@
 // Run: cd plugins/dev/scripts/broker && bun test broker-degraded.test.mjs
 
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync, mkdirSync } from "node:fs";
+import {
+  mkdtempSync,
+  rmSync,
+  writeFileSync,
+  readFileSync,
+  existsSync,
+  mkdirSync,
+  readdirSync,
+} from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
@@ -678,5 +686,105 @@ describe("checkBrokerDegraded — a failed latch persist is retried (review roun
     expect(anomalousTick(() => true)).toBe("degraded");
     expect(__getBrokerDegradedLatchForTest().persistPending).toBe(false);
     expect(JSON.parse(readFileSync(getBrokerDegradedLatchPath(), "utf8")).latched).toBe(true);
+  });
+
+  // Codex round 3 (T1): persistLatch writes a UNIQUELY-NAMED tmp file and then
+  // renames it. If the rename throws, that tmp file is orphaned — and because the
+  // round-2 retry re-calls persistLatch on EVERY watchdog tick, a PERSISTENT
+  // obstruction leaked one hidden tmp file per minute forever (inode/disk
+  // exhaustion). The cleanup must run in the catch, and must never itself throw.
+  test("a persistently failing rename leaves NO orphan .tmp files (the inode leak)", () => {
+    const markerPath = getBrokerDegradedLatchPath();
+    mkdirSync(markerPath, { recursive: true }); // rename onto a DIRECTORY always fails
+
+    const emitted = [];
+    expect(() => anomalousTick((e) => (emitted.push(e.action), true))).not.toThrow();
+    expect(emitted).toEqual(["degraded"]);
+    expect(__getBrokerDegradedLatchForTest().persistPending).toBe(true);
+
+    // Several more ticks: each one retries the persist and fails the same way.
+    for (let i = 0; i < 5; i++) {
+      expect(() => anomalousTick(() => true)).not.toThrow();
+    }
+    expect(__getBrokerDegradedLatchForTest().persistPending).toBe(true);
+
+    const leftovers = readdirSync(dir).filter(
+      (f) => f.startsWith(".broker-degraded-latch.") && f.endsWith(".tmp"),
+    );
+    expect(leftovers, `orphaned tmp files: ${leftovers.join(", ")}`).toEqual([]);
+  });
+});
+
+// Codex round 3 (T3): hydrateLatch's failure taxonomy. A CONFIRMED unlatched state
+// (marker absent, or present-but-unparseable) is final; any OTHER read failure is
+// merely UNKNOWN and must stay retryable — the old broad catch turned one transient
+// EIO on a restart into the permanent loss of a real open episode, whose continuing
+// anomaly then re-earned the debounce and emitted a DUPLICATE degraded.
+describe("hydrateLatch — a TRANSIENT read failure stays retryable (Codex round 3)", () => {
+  let dir;
+  let prevCatalystDir;
+  let prevEnabled;
+
+  const IDLE = { interestCount: 0, uptimeMs: GRACE + 1, fleetActive: false };
+  const run = (readings, emit) =>
+    checkBrokerDegraded({ ...readings, graceMs: GRACE, sustainedTicks: 1, emit });
+
+  beforeEach(() => {
+    prevCatalystDir = process.env.CATALYST_DIR;
+    prevEnabled = process.env.FILTER_BROKER_DEGRADED_ENABLED;
+    dir = mkdtempSync(join(tmpdir(), "broker-degraded-hydrate-"));
+    process.env.CATALYST_DIR = dir;
+    process.env.FILTER_BROKER_DEGRADED_ENABLED = "1";
+    __resetBrokerDegradedLatchForTest();
+  });
+  afterEach(() => {
+    __resetBrokerDegradedLatchForTest();
+    if (prevCatalystDir === undefined) delete process.env.CATALYST_DIR;
+    else process.env.CATALYST_DIR = prevCatalystDir;
+    if (prevEnabled === undefined) delete process.env.FILTER_BROKER_DEGRADED_ENABLED;
+    else process.env.FILTER_BROKER_DEGRADED_ENABLED = prevEnabled;
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("EISDIR (marker path obstructed) is NOT confirmed-unlatched — and it retries", () => {
+    // A DIRECTORY at the marker path makes readFileSync throw EISDIR, not ENOENT:
+    // the same shape as a transient EIO / permission loss.
+    const markerPath = getBrokerDegradedLatchPath();
+    mkdirSync(markerPath, { recursive: true });
+
+    const calls = [];
+    const emit = (p) => (calls.push(p), true);
+    expect(() => run(IDLE, emit)).not.toThrow();
+    // Nothing was learned: hydration is NOT closed, so the next tick re-reads.
+    expect(__getBrokerDegradedLatchForTest().hydrated).toBe(false);
+    expect(__getBrokerDegradedLatchForTest().latched).toBe(false);
+    expect(calls).toHaveLength(0); // and no orphan `recovered` was invented
+
+    // The obstruction clears, revealing the REAL open episode that was behind it.
+    // With the old broad catch this episode was already permanently discarded.
+    rmSync(markerPath, { recursive: true, force: true });
+    writeFileSync(
+      markerPath,
+      JSON.stringify({ latched: true, latchedAtMs: Date.now() - 60_000, ts: Date.now() }),
+    );
+
+    expect(run(IDLE, emit)).toBe("recovered"); // the owed recovery still fires
+    expect(__getBrokerDegradedLatchForTest().hydrated).toBe(true);
+    expect(calls[0].detail.reason).toBe("fleet idle");
+    expect(typeof calls[0].detail.degradedForMs).toBe("number");
+  });
+
+  test("ENOENT (absent) and a malformed body stay CONFIRMED unlatched — no retry", () => {
+    // (a) absent
+    expect(existsSync(getBrokerDegradedLatchPath())).toBe(false);
+    expect(run(IDLE, () => true)).toBeNull();
+    expect(__getBrokerDegradedLatchForTest().hydrated).toBe(true);
+
+    // (b) present but unparseable — a marker we cannot trust is no marker
+    __resetBrokerDegradedLatchForTest();
+    writeFileSync(getBrokerDegradedLatchPath(), "{not json");
+    expect(run(IDLE, () => true)).toBeNull();
+    expect(__getBrokerDegradedLatchForTest().hydrated).toBe(true);
+    expect(__getBrokerDegradedLatchForTest().latched).toBe(false);
   });
 });

@@ -21,7 +21,12 @@ import { mkdtempSync, rmSync, readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { getEventLogPath, BROKER_DEGRADED_SUSTAINED_TICKS } from "./config.mjs";
-import { runWatchdogTick, handleRegister, __clearIngestionRecencyForTest } from "./router.mjs";
+import {
+  runWatchdogTick,
+  handleRegister,
+  handleDeregister,
+  __clearIngestionRecencyForTest,
+} from "./router.mjs";
 import {
   __resetBrokerDegradedLatchForTest,
   getBrokerDegradedLatchPath,
@@ -209,6 +214,43 @@ describe("the paired recovery event (CTL-1523)", () => {
     expect(recovered[0].body.payload.interestCount).toBe(0);
     ticks(3);
     expect(recoveredEvents()).toHaveLength(1);
+  });
+
+  // Codex round 3 (T4): the interest-return edge that falls BETWEEN two ticks.
+  // Replacing the CTL-352 synchronous re-arm with the watchdog's periodic
+  // `interests.size` sample lost the one-shot case entirely: an interest that
+  // registers AND deregisters inside the ~60 s tick interval was never observed, so
+  // the `recovered` never fired and the stale latch suppressed every later degraded
+  // episode until the fleet went idle.
+  test("(d') an interest registered AND deregistered BETWEEN ticks still recovers", () => {
+    pastGrace();
+    openActivityGate();
+    ticks(SUSTAINED);
+    expect(degradedEvents()).toHaveLength(1);
+
+    // A whole interest lifecycle with NO intervening watchdog tick.
+    handleRegister({
+      event: "filter.register",
+      orchestrator: "orch-oneshot",
+      detail: { interest_id: "oneshot-1", notify_event: "filter.wake.oneshot-1", prompt: "p" },
+    });
+    handleDeregister({
+      event: "filter.deregister",
+      orchestrator: "orch-oneshot",
+      detail: { interest_id: "oneshot-1" },
+    });
+
+    // The live table is empty again at sampling time — the sample alone sees nothing.
+    ticks(1);
+    const recovered = recoveredEvents();
+    expect(recovered).toHaveLength(1);
+    expect(recovered[0].body.payload.reason).toBe("interests registered");
+
+    // The edge is consumed by that one tick: it does not linger and re-clear later,
+    // and the still-anomalous condition has to re-earn the full debounce.
+    ticks(SUSTAINED - 2);
+    expect(recoveredEvents()).toHaveLength(1);
+    expect(degradedEvents()).toHaveLength(1);
   });
 
   test("a re-armed episode after a recovery emits a SECOND degraded", () => {
