@@ -420,6 +420,14 @@ jobs:
         # exit-127'd the reaper fleet-wide. Runs the REAL refusal paths.
         working-directory: plugins/dev/scripts
         run: bash __tests__/install-orphan-sweep-guard.test.sh
+      - name: CTL-1534 negative controls (shadow consumer + parity harness self-tests)
+        # Rule 8: the load-bearing control must run where it is most useful — a clean,
+        # secret-free CI checkout. Both binaries exit 0 ONLY when every seeded detector
+        # fired and the positive control stayed green; a detector that stops firing fails
+        # the gate here instead of on a developer's laptop.
+        run: |
+          bun cloud-event-consumer.mjs --self-test
+          bun parity-harness.mjs --self-test
 
       - name: Run stable unit tests
         # EXCLUDED SUITES — do NOT add these back without fixing the underlying
@@ -486,6 +494,8 @@ jobs:
             tick-timing.test.mjs \
             tracing.test.mjs \
             cloud-token-env.test.mjs \
+            cloud-event-consumer.test.mjs \
+            parity-harness.test.mjs \
             cluster-claim-sync.test.mjs \
             cluster-claim.test.mjs \
             comms-drain.test.mjs \
