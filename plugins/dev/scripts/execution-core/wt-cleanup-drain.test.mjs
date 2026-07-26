@@ -317,7 +317,7 @@ describe("sweepWtCleanupQueue — CTL-1524 C2 free-gate short-circuit", () => {
     expect(m.reasons).toEqual(["unknown-provenance"]);
     expect(m.shortCircuit).toBe("unknown-provenance");
     expect(m.reasonsPartial).toBe(true); // NOT "provenance was the only failing gate"
-    expect(m.lastShortCircuitAt).toBeTruthy();
+    expect(m.shortCircuitSince).toBeTruthy(); // write-once: FIRST short-circuit, not latest
     expect(m.worktreePath).toBe(alive); // identity preserved
   });
 
@@ -530,6 +530,130 @@ describe("sweepWtCleanupQueue — CTL-1524 C3 bounded, fair batch", () => {
     const m = JSON.parse(readFileSync(file, "utf8"));
     expect(m.reasons).toEqual(["not-merged", "dirty-worktree"]); // NOT clobbered
     expect(m.lastAttemptAt).toBeTruthy(); // stamp applied on top
+  });
+
+  // ── Codex review (PR #2747, P2 x2) ─────────────────────────────────────────
+  it("the short-circuit refresh is IDEMPOTENT — an already-recorded marker is never rewritten again", async () => {
+    // This cohort is strictly monotonic, so rewriting each retained marker on every
+    // 600s fire would make write volume grow with queue depth forever.
+    const wt = join(tmp, "wt", "IDEM-1");
+    const file = writeMarker(queueDir, { worktreePath: wt, ticket: "CTL-IDEM" });
+    const writes = [];
+    const opts = () => ({
+      queueDir,
+      pathExists: () => true,
+      hasProvenance: () => false, // always short-circuits
+      writeFileFn: (p, str) => {
+        writes.push(p);
+        writeFileSync(p, str);
+      },
+      confirmMerged: () => {
+        throw new Error("must not be reached");
+      },
+      safeTeardown: () => {
+        throw new Error("must not be reached");
+      },
+      log: silentLog(),
+    });
+
+    const first = await sweepWtCleanupQueue(opts());
+    expect(first.shortCircuited).toBe(1);
+    expect(first.shortCircuitWrites).toBe(1); // first sweep records it
+    expect(writes.length).toBe(1);
+
+    const m = JSON.parse(readFileSync(file, "utf8"));
+    expect(m.shortCircuit).toBe("unknown-provenance");
+    expect(m.reasonsPartial).toBe(true);
+    expect(m.shortCircuitSince).toBeTruthy();
+
+    // Steady state: still counted, but ZERO further writes across many fires.
+    for (let i = 0; i < 5; i++) {
+      const again = await sweepWtCleanupQueue(opts());
+      expect(again.shortCircuited).toBe(1); // still observed
+      expect(again.shortCircuitWrites).toBe(0); // but never rewritten
+    }
+    expect(writes.length).toBe(1);
+    // The first-recorded timestamp is preserved, not churned.
+    expect(JSON.parse(readFileSync(file, "utf8")).shortCircuitSince).toBe(m.shortCircuitSince);
+  });
+
+  it("the short-circuit WRITE budget is bounded per fire (paces a large first-time backfill)", async () => {
+    for (let i = 0; i < 10; i++) {
+      writeMarker(queueDir, { worktreePath: join(tmp, "wt", `SC-${i}`), ticket: `CTL-SC${i}` });
+    }
+    const r = await sweepWtCleanupQueue({
+      queueDir,
+      pathExists: () => true,
+      hasProvenance: () => false,
+      shortCircuitWriteCap: 3,
+      log: silentLog(),
+    });
+    expect(r.shortCircuited).toBe(10); // all still observed (free)
+    expect(r.shortCircuitWrites).toBe(3); // but writes bounded
+    expect(r.shortCircuitWriteCapped).toBe(true);
+  });
+
+  it("rotation still advances when the attempt stamp CANNOT be persisted (unwritable marker)", async () => {
+    // With batchCap=1, a single marker whose stamp write always fails would keep the
+    // oldest sort key, sort first every fire, and starve every other worktree forever.
+    const tickets = ["CTL-W1", "CTL-W2", "CTL-W3"];
+    for (const t of tickets) {
+      writeMarker(queueDir, { worktreePath: join(tmp, "wt", t), ticket: t });
+    }
+    const seen = [];
+    let clock = Date.parse("2026-07-25T00:00:00.000Z");
+    const memo = new Map(); // fresh per test — no cross-test leakage
+    const sweepOnce = () =>
+      sweepWtCleanupQueue({
+        queueDir,
+        pathExists: () => true,
+        hasProvenance: () => true,
+        confirmMerged: () => true,
+        // EVERY marker write fails — the on-disk lastAttemptAt can never land.
+        writeFileFn: () => {
+          throw new Error("EROFS: read-only file system");
+        },
+        safeTeardown: (args) => {
+          seen.push(args.ticket);
+          return { removed: false, deferred: true, reasons: ["x"] };
+        },
+        batchCap: 1,
+        attemptMemo: memo,
+        now: () => (clock += 60_000),
+        log: silentLog(),
+      });
+
+    await sweepOnce();
+    await sweepOnce();
+    await sweepOnce();
+
+    // No marker on disk carries a stamp...
+    for (const t of tickets) {
+      const m = JSON.parse(readFileSync(markerFile(queueDir, join(tmp, "wt", t)), "utf8"));
+      expect(m.lastAttemptAt).toBeUndefined();
+    }
+    // ...yet every ticket still got its turn: rotation came from the in-process memo.
+    expect(seen.length).toBe(3);
+    expect([...new Set(seen)].sort()).toEqual(tickets);
+    await sweepOnce();
+    expect(seen[3]).toBe(seen[0]); // and it cycles, rather than repeating a prefix
+  });
+
+  it("the rotation memo is pruned to the live marker set (cannot outgrow the queue)", async () => {
+    const memo = new Map();
+    memo.set(join(queueDir, "stale-marker-that-no-longer-exists.json"), 123);
+    writeMarker(queueDir, { worktreePath: join(tmp, "wt", "P1"), ticket: "CTL-P1" });
+    await sweepWtCleanupQueue({
+      queueDir,
+      pathExists: () => true,
+      hasProvenance: () => true,
+      confirmMerged: () => true,
+      safeTeardown: () => ({ removed: false, deferred: true, reasons: ["x"] }),
+      attemptMemo: memo,
+      log: silentLog(),
+    });
+    expect([...memo.keys()].some((k) => k.includes("stale-marker"))).toBe(false);
+    expect(memo.size).toBe(1); // exactly the one live marker
   });
 
   it("the default batch cap is small (2) — the old 100 could never trip at the observed n=15", async () => {

@@ -47,13 +47,33 @@ const DEFAULT_QUEUE_DIR = join(homedir(), "catalyst", "wt-cleanup-queue");
 // Override with CATALYST_WT_DRAIN_BATCH_CAP (existing env idiom).
 const DEFAULT_BATCH_CAP = 2;
 
+// Per-fire bound on short-circuit marker WRITES. The refresh below is idempotent,
+// so steady state is zero writes; this only paces the one-time backfill when a
+// large pre-existing queue is swept for the first time. Override with
+// CATALYST_WT_DRAIN_SC_WRITE_CAP.
+const DEFAULT_SHORT_CIRCUIT_WRITE_CAP = 100;
+
+// DEFAULT_ATTEMPT_MEMO — in-process rotation clock, keyed by marker file path.
+// stampAttempt records the attempt here REGARDLESS of whether persisting
+// `lastAttemptAt` to disk succeeded. Without it, a marker the daemon cannot rewrite
+// (read-only/full queue dir, bad perms) keeps the oldest sort key forever, sorts
+// first on every fire, and — once batchCap such markers exist — consumes the whole
+// batch budget in perpetuity so no other worktree ever gets an expensive attempt.
+// The daemon is long-lived and sweeps run in-process, so this survives across fires.
+// Pruned to the live marker set each sweep, so it cannot outgrow the queue.
+const DEFAULT_ATTEMPT_MEMO = new Map();
+
 // attemptOrderMs — the marker's last EXPENSIVE attempt as an epoch-ms sort key.
 // Never-attempted (and unparseable) sorts to 0 ⇒ picked first. Used to rotate the
 // bounded batch least-recently-attempted-first so a stable readdir order cannot
-// starve a marker at the tail of the queue forever (C3).
-function attemptOrderMs(marker) {
-  const v = Date.parse(marker?.lastAttemptAt ?? "");
-  return Number.isFinite(v) ? v : 0;
+// starve a marker at the tail of the queue forever (C3). Takes the LATER of the
+// on-disk stamp and the in-process memo: when the write succeeded they agree, and
+// when it failed the memo is the only truthful record.
+function attemptOrderMs(marker, file, memo) {
+  const disk = Date.parse(marker?.lastAttemptAt ?? "");
+  const diskMs = Number.isFinite(disk) ? disk : 0;
+  const memoMs = Number(memo?.get(file)) || 0;
+  return Math.max(diskMs, memoMs);
 }
 
 // defaultConfirmMerged — confirm a marker's PR is GitHub-merged, the SAME dual-field
@@ -106,6 +126,9 @@ export async function sweepWtCleanupQueue({
   // up-front with the SAME orchDirs. Injected so the unit test can drive both sides.
   hasProvenance = hasOrchProvenance,
   batchCap = Number(process.env.CATALYST_WT_DRAIN_BATCH_CAP) || DEFAULT_BATCH_CAP,
+  shortCircuitWriteCap = Number(process.env.CATALYST_WT_DRAIN_SC_WRITE_CAP) ||
+    DEFAULT_SHORT_CIRCUIT_WRITE_CAP,
+  attemptMemo = DEFAULT_ATTEMPT_MEMO,
   now = () => Date.now(),
   log = defaultLog,
 } = {}) {
@@ -117,8 +140,10 @@ export async function sweepWtCleanupQueue({
     removed: 0,
     stillDeferred: 0,
     shortCircuited: 0, // CTL-1524 (C2): resolved by the free provenance gate alone
+    shortCircuitWrites: 0, // marker refreshes actually written (idempotent ⇒ ~0 at rest)
     errors: 0,
     batchCapped: false,
+    shortCircuitWriteCapped: false,
     durationMs: 0,
   };
 
@@ -139,6 +164,8 @@ export async function sweepWtCleanupQueue({
           errors: result.errors,
           batchCapped: result.batchCapped,
           shortCircuited: result.shortCircuited,
+          shortCircuitWrites: result.shortCircuitWrites,
+          shortCircuitWriteCapped: result.shortCircuitWriteCapped,
         },
         "wt-cleanup-drain: sweep timing"
       );
@@ -186,9 +213,22 @@ export async function sweepWtCleanupQueue({
     entries.push({ file, marker, worktreePath });
   }
 
+  // Prune the rotation memo to the live marker set, so it is bounded by queue depth
+  // and cannot retain keys for markers that have been cleared.
+  try {
+    const live = new Set(entries.map((e) => e.file));
+    for (const k of attemptMemo.keys()) if (!live.has(k)) attemptMemo.delete(k);
+  } catch {
+    /* memo is an optimisation only — never let it break the sweep */
+  }
+
   // C3 — least-recently-attempted first. Array.prototype.sort is stable, so markers
   // that have never had an expensive attempt (key 0) keep their relative order.
-  entries.sort((a, b) => attemptOrderMs(a.marker) - attemptOrderMs(b.marker));
+  entries.sort(
+    (a, b) =>
+      attemptOrderMs(a.marker, a.file, attemptMemo) -
+      attemptOrderMs(b.marker, b.file, attemptMemo)
+  );
 
   for (const { file, marker, worktreePath } of entries) {
     // Already-gone worktree → just clear the stale marker (the post-removal bulk).
@@ -222,6 +262,22 @@ export async function sweepWtCleanupQueue({
     }
     if (!provenance) {
       result.shortCircuited++;
+      // The refresh is IDEMPOTENT. This cohort is strictly monotonic — once a
+      // worker dir is GC'd at teardown, provenance can never be re-established —
+      // so rewriting every retained marker on every 600s fire would make write
+      // volume scale with queue depth forever, writing content that never changes
+      // after the first time. Write only when the marker does not already record
+      // this short-circuit; at rest this cohort therefore costs ZERO writes and
+      // its per-marker work is one stat plus one existsSync. The cap paces the
+      // one-time backfill when a large pre-existing queue is first swept.
+      const alreadyRecorded =
+        marker.shortCircuit === "unknown-provenance" && marker.reasonsPartial === true;
+      if (alreadyRecorded) continue;
+      if (result.shortCircuitWrites >= shortCircuitWriteCap) {
+        result.shortCircuitWriteCapped = true;
+        continue;
+      }
+      result.shortCircuitWrites++;
       try {
         writeFileFn(
           file,
@@ -237,7 +293,9 @@ export async function sweepWtCleanupQueue({
             reasons: ["unknown-provenance"],
             shortCircuit: "unknown-provenance",
             reasonsPartial: true,
-            lastShortCircuitAt: new Date(now()).toISOString(),
+            // WRITE-ONCE, so this is when the short-circuit was FIRST recorded —
+            // not the latest sweep that observed it. Named accordingly.
+            shortCircuitSince: new Date(now()).toISOString(),
           })
         );
       } catch {
@@ -279,7 +337,7 @@ export async function sweepWtCleanupQueue({
     } catch (err) {
       log.warn({ worktreePath, err: err?.message }, "wt-cleanup-drain: safeTeardown threw");
       result.errors++;
-      stampAttempt({ file, marker, attemptedAt, readFileFn, writeFileFn, pathExists });
+      stampAttempt({ file, marker, attemptedAt, readFileFn, writeFileFn, pathExists, attemptMemo });
       continue;
     }
 
@@ -296,7 +354,7 @@ export async function sweepWtCleanupQueue({
       }
     } else {
       result.stillDeferred++;
-      stampAttempt({ file, marker, attemptedAt, readFileFn, writeFileFn, pathExists });
+      stampAttempt({ file, marker, attemptedAt, readFileFn, writeFileFn, pathExists, attemptMemo });
     }
   }
 
@@ -308,7 +366,26 @@ export async function sweepWtCleanupQueue({
 // deferWorktreeCleanup just wrote (its FULL reason set) rather than clobbering it
 // with the pre-attempt copy. Best-effort and never throws: a failed stamp costs at
 // most one unfair rotation, never correctness.
-function stampAttempt({ file, marker, attemptedAt, readFileFn, writeFileFn, pathExists }) {
+function stampAttempt({
+  file,
+  marker,
+  attemptedAt,
+  readFileFn,
+  writeFileFn,
+  pathExists,
+  attemptMemo,
+}) {
+  // Record the attempt in-process FIRST, before any fallible IO. This is what keeps
+  // rotation fair when the on-disk stamp cannot be persisted: a marker the daemon
+  // cannot rewrite would otherwise keep the oldest sort key, sort first on every
+  // fire, and permanently consume the batch budget (with batchCap=1, ONE unwritable
+  // marker is enough to starve every other worktree forever).
+  try {
+    const ms = Date.parse(attemptedAt);
+    if (Number.isFinite(ms)) attemptMemo?.set?.(file, ms);
+  } catch {
+    /* memo is an optimisation only */
+  }
   try {
     if (!pathExists(file)) return; // teardown cleared it mid-flight — never resurrect
   } catch {
