@@ -103,6 +103,17 @@ export interface Attributes {
   "linear.team.key"?: string;
   "linear.actor.id"?: string;
 
+  // Provider webhook delivery id (catalyst-defined; no OTel semconv yet).
+  // CTL-1532: the provider's OWN idempotency key — `x-github-delivery` /
+  // `linear-delivery` — verbatim. Both handlers already read it for in-process
+  // dedup; stamping it here makes it durable so the smee-produced event log can
+  // be JOINED against the catalyst-cloud `/events/stream` feed, which carries the
+  // same value as `deliveryId`. Verified event-scoped (not per-subscription) for
+  // BOTH providers: the identical id reaches the smee webhook and the cloud app.
+  // Without this the smee/cloud parity harness matches ZERO rows — and a
+  // mismatch-only harness cannot tell a zero-match join from perfect parity.
+  "webhook.delivery.id"?: string;
+
   // Deployment semconv (OTel published)
   "deployment.environment"?: string;
   "deployment.id"?: number;
