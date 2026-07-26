@@ -2823,8 +2823,9 @@ describe("CTL-352 broker state + degraded event", () => {
   const logPathNow = () => join(tmpDir, "events", `${new Date().toISOString().slice(0, 7)}.jsonl`);
 
   // CTL-1523: the detector is OPT-IN and dormant by default (an empty interest table
-  // carries no information in phase-agents mode — see config.mjs), so every test in
-  // this block that expects an emit must arm it explicitly.
+  // carries no information under execution-core dispatch, which registers no
+  // interests at all — see config.mjs), so every test in this block that expects an
+  // emit must arm it explicitly.
   let prevDegradedEnabled;
 
   beforeEach(async () => {

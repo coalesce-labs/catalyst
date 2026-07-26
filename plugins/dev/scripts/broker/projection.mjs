@@ -196,13 +196,20 @@ export function buildBrokerState({ probe } = {}) {
     supportedInterestTypes: [...DETERMINISTIC_INTEREST_TYPES],
     // CTL-352: liveness fields for the HUD pill and operators.
     // CTL-1523: the heuristic this comment used to advertise — "interests.size === 0
-    // with stale lastWakeAt ⇒ silently-dead broker" — is FALSE in phase-agents mode.
-    // Interest registration is legacy-only (dormant since the 2026-06-07 cutover), so
-    // an empty table with no wakes is the CORRECT steady state, not a death signal;
-    // acting on it produced 104 false broker.daemon.degraded emissions in one month.
-    // See broker-degraded.mjs for the full reasoning (that detector is now opt-in and
-    // dormant by default). The real silently-dead-broker signal is CTL-1122
-    // ingestion-recency: catalyst.ingestion.stale / catalyst.alert.raised(system_down).
+    // with stale lastWakeAt ⇒ silently-dead broker" — is FALSE under execution-core
+    // dispatch, where nothing registers interests at all: an empty table with no wakes
+    // is the CORRECT steady state, not a death signal, and acting on it produced 104
+    // false broker.daemon.degraded emissions in one month. (On a legacy-wave host,
+    // which DOES register interests via orchestrate-register-interests.sh, an empty
+    // table is genuinely anomalous.) See broker-degraded.mjs for the full reasoning —
+    // that detector is now opt-in and dormant by default.
+    //
+    // No in-process field can report a DEAD broker: these values are produced by the
+    // broker itself, so they simply stop being written. CTL-1122 ingestion-recency
+    // (catalyst.ingestion.stale / catalyst.alert.raised(system_down)) detects an
+    // ingestion STALL while the broker is alive; proving the process itself is gone
+    // takes an EXTERNAL absence check (Loki `absent_over_time` on
+    // `broker.daemon.heartbeat` / the broker `.log` stream).
     // These fields remain useful as raw operator readouts — just not as a verdict.
     interestCount: interests.size,
     lastWakeAt: getLastWakeAt(),

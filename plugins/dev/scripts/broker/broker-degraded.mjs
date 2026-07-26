@@ -1,14 +1,15 @@
-// broker-degraded.mjs — CTL-1523. The broker's own "am I silently dead?" detector:
-// the pure classifier/latch machine behind `broker.daemon.degraded` and its new
-// paired `broker.daemon.recovered`, plus the DURABLE latch that survives a restart.
+// broker-degraded.mjs — CTL-1523. The broker's own "is my interest table empty while
+// the fleet is working?" detector: the pure classifier/latch machine behind
+// `broker.daemon.degraded` and its new paired `broker.daemon.recovered`, plus the
+// DURABLE latch that survives a restart. (NOT a dead-broker detector — it runs inside
+// the broker; see "THIS IS NOT A DEAD-BROKER DETECTOR" below.)
 //
 // WHY THIS EXISTS (the bug it fixes). CTL-352's gate consulted only
 // `interests.size === 0` and uptime, so it could not distinguish a SILENTLY-DEAD
-// broker (its intent) from a GENUINELY-IDLE fleet. Since the 2026-06-07
-// phase-agents cutover, interest registration is legacy-only (every
-// `filter.register` producer lives in plugins/legacy/) and correctly dormant — so
-// an empty interest table is the CORRECT steady state and the gate fired on every
-// quiet fleet. Worse, the one-shot guard (`degradedEmittedAt`) lived only in module
+// broker (its intent) from a GENUINELY-IDLE fleet. On an EXECUTION-CORE host no
+// component registers interests at all (see the scoping note below), so an empty
+// interest table is the CORRECT steady state and the gate fired on every quiet
+// fleet. Worse, the one-shot guard (`degradedEmittedAt`) lived only in module
 // memory and was never persisted, so every broker restart (~5/day from
 // merge-triggered stack reloads) re-armed it: all 104 July emissions on mini fired
 // at uptimeMs ∈ [300s, 343s] — the FIRST watchdog tick past the 5-minute grace
@@ -17,11 +18,11 @@
 // THE FIX — two changes, mirroring the CTL-1503 fleet-health-probe idiom:
 //
 //  1. A DISCRIMINATOR. The trip now requires the fleet to be ACTIVE
-//     (hasActiveWorkers, via the router's fail-closed fleetIsActive wrapper): no
+//     (hasActiveWorkers, via the router's tri-state fleetActivity wrapper): no
 //     interests WHILE work is in flight is the anomaly; no interests while nothing
 //     is running is Tuesday. Plus a sustained-tick debounce. Deliberately NO second
-//     "is the broker ingesting" probe — a dead tailer already surfaces through the
-//     CTL-1122 checkSourceRecency path (catalyst.ingestion.stale →
+//     "is the broker ingesting" probe — a stalled tailer already surfaces through
+//     the CTL-1122 checkSourceRecency path (catalyst.ingestion.stale →
 //     catalyst.alert.raised(system_down)); duplicating it here would double-page.
 //
 //  2. An EDGE-TRIGGER + DURABLE LATCH. `degraded` fires ONCE on the healthy→anomalous
@@ -32,9 +33,16 @@
 //     latch only advances on a SUCCESSFUL append, so a transient log failure retries
 //     the same edge next tick instead of swallowing it.
 //
-// An IDLE fleet CLEARS a latched episode (paired `recovered`, reason "fleet idle")
-// rather than holding it — same ledger-balancing choice checkSourceRecency makes for
-// its gated sources, so every degraded has exactly one recovered.
+// A PROVEN-IDLE fleet CLEARS a latched episode (paired `recovered`, reason "fleet
+// idle") rather than holding it — same ledger-balancing choice checkSourceRecency
+// makes for its gated sources, so every degraded has exactly one recovered.
+//
+// UNKNOWN ACTIVITY HOLDS THE LATCH (review F2). The activity reading is TRI-STATE:
+// true / false (proven idle) / null (the worker-table read failed — we know nothing).
+// `null` neither trips nor clears. Collapsing it into `false` was a real defect: a
+// transient SQLite failure emitted a FALSE `recovered` (reason "fleet idle") and
+// persisted the cleared latch, so when the DB came back the still-anomalous condition
+// re-tripped after the debounce — one uninterrupted episode reported as two.
 //
 // READING A `recovered` — the two reasons are NOT equally informative:
 //
@@ -43,19 +51,38 @@
 //   • reason: "fleet idle" — INCONCLUSIVE. It means only that the DISCRIMINATOR went
 //     dark: with no work in flight there is nothing left to distinguish a dead broker
 //     from a correctly-quiet one, so the episode is closed to keep the ledger
-//     balanced. It is NOT evidence the broker recovered. In the legacy mode where
-//     this detector is enabled, hasActiveWorkers ages rows out at 30 minutes, so a
-//     genuinely DEAD broker will auto-"recover" this way once the fleet quiesces.
-//     Never treat a "fleet idle" recovered as an all-clear — for that, consult the
-//     CTL-1122 ingestion-recency signal (catalyst.ingestion.stale /
-//     catalyst.alert.raised(system_down)), which observes real ingestion.
+//     balanced. It is NOT evidence the broker recovered. On the legacy-wave hosts
+//     where this detector is enabled, hasActiveWorkers ages rows out at 30 minutes,
+//     so a genuinely DEAD broker will auto-"recover" this way once the fleet
+//     quiesces. Never treat a "fleet idle" recovered as an all-clear.
+//
+// THIS IS NOT A DEAD-BROKER DETECTOR, AND NEITHER IS checkSourceRecency. Both run
+// INSIDE the broker process, so neither can emit anything once that process is gone —
+// watching either as a death signal means watching a series that disappears with the
+// thing it was meant to report on. checkSourceRecency detects an ingestion STALL
+// (monitor/GitHub sources gone silent) while the broker is ALIVE. Detecting a fully
+// dead broker requires an EXTERNAL, absence-based check on the broker's own
+// heartbeat/log series — e.g. a Loki `absent_over_time` alert on
+// `broker.daemon.heartbeat` or the broker `.log` stream. (Absence, not
+// `count_over_time == 0`: a fully-dead daemon is a MISSING series, which a count
+// cannot assert — see AGENTS.md → Observability.)
 //
 // DORMANT BY DEFAULT (see isBrokerDegradedDetectorEnabled in config.mjs). The
 // detector is OPT-IN via FILTER_BROKER_DEGRADED_ENABLED=1 and evaluates nothing when
-// unset: in phase-agents mode the `interests.size === 0` conjunct is permanently true
-// (registration is legacy-only), so the gate would degenerate to "the fleet has been
-// busy for N ticks". It is retained for legacy wave-orchestration hosts, where
-// interests ARE registered and the conjunct genuinely discriminates.
+// unset.
+//
+// SCOPING — the permanently-empty interest table is a property of EXECUTION-CORE
+// DISPATCH, not of every configuration named `phase-agents` (review F5). The
+// execution-core daemon runs no `filter.register` producer at all, so on such a host
+// `interests.size === 0` can never be false and the gate degenerates to "the fleet
+// has been busy for N ticks". By contrast, a LEGACY-WAVE host — one running the
+// `/catalyst-legacy:orchestrate` skill, which invokes
+// plugins/dev/scripts/orchestrate-register-interests.sh — DOES register interests:
+// that script emits the three deterministic interests (pr_lifecycle,
+// ticket_lifecycle, comms_lifecycle) UNCONDITIONALLY, plus a per-ticket
+// phase_lifecycle interest when `dispatchMode` is `phase-agents`. On those hosts an
+// empty table IS anomalous and the conjunct genuinely discriminates — which is
+// exactly the deployment where FILTER_BROKER_DEGRADED_ENABLED=1 belongs.
 //
 // This module is a near-leaf: it imports only config.mjs (knobs + logger). The
 // activity reading and the event append are INJECTED by the router, so the whole
@@ -81,11 +108,12 @@ export const BROKER_RECOVERED_EVENT = "broker.daemon.recovered";
 /**
  * classifyBrokerDegraded — PURE per-tick trip classifier. `anomalous` is true only
  * when ALL of: the interest table is empty, the startup grace has elapsed, AND the
- * fleet is actively working. `fleetActive` is a strict-true check so an `undefined`
- * (reader unavailable) never trips — the no-false-alarm default, matching the
- * router's fail-closed fleetIsActive.
+ * fleet is actively working. `fleetActive` is TRI-STATE (true / false / null) and
+ * this is a strict-true check, so `null` (reader unavailable) and `undefined` never
+ * trip — the no-false-alarm default. Only a POSITIVE activity reading is evidence of
+ * an anomaly.
  *
- * @param {object} readings { interestCount, uptimeMs, fleetActive }
+ * @param {object} readings { interestCount, uptimeMs, fleetActive } fleetActive: true|false|null
  * @param {object} [thresholds] { graceMs }
  * @returns {{anomalous:boolean, emptyInterests:boolean, pastGrace:boolean, fleetActive:boolean}}
  */
@@ -106,17 +134,27 @@ export function classifyBrokerDegraded(
 
 /**
  * classifyBrokerDegradedClear — PURE clear-side verdict. The complement of the trip's
- * two live inputs: interests came back, OR the fleet went idle. Uptime plays no part
- * (it only ever grows). `reason` names WHICH condition cleared it, for the recovered
- * event's detail; interests-came-back wins when both hold, since it is the
+ * two live inputs: interests came back, OR the fleet is PROVEN idle. Uptime plays no
+ * part (it only ever grows). `reason` names WHICH condition cleared it, for the
+ * recovered event's detail; interests-came-back wins when both hold, since it is the
  * affirmative proof that the broker is not dead.
  *
- * @param {object} readings { interestCount, fleetActive }
+ * TRI-STATE CONTRACT (review F2). Both edges demand POSITIVE evidence, so an UNKNOWN
+ * activity reading (`null`/`undefined` — the worker-table read failed) can do neither:
+ *
+ *   fleetActive === true   → neither (the anomaly, if any, persists) — trip side owns it
+ *   fleetActive === false  → CLEAR, reason "fleet idle" (proven idle)
+ *   fleetActive == null    → NEITHER trip nor clear; a latched episode HOLDS
+ *
+ * The old `!== true` test collapsed unknown into idle, so one transient SQLite failure
+ * produced a false `recovered` and a duplicate degraded edge when the DB came back.
+ *
+ * @param {object} readings { interestCount, fleetActive } fleetActive: true|false|null
  * @returns {{clear:boolean, reason:("interests registered"|"fleet idle"|null)}}
  */
 export function classifyBrokerDegradedClear({ interestCount, fleetActive } = {}) {
   if (interestCount > 0) return { clear: true, reason: "interests registered" };
-  if (fleetActive !== true) return { clear: true, reason: "fleet idle" };
+  if (fleetActive === false) return { clear: true, reason: "fleet idle" };
   return { clear: false, reason: null };
 }
 
@@ -262,7 +300,20 @@ export function checkBrokerDegraded({
   graceMs = BROKER_DEGRADED_GRACE_MS,
   sustainedTicks = BROKER_DEGRADED_SUSTAINED_TICKS,
 } = {}) {
-  if (!isBrokerDegradedDetectorEnabled()) return null;
+  if (!isBrokerDegradedDetectorEnabled()) {
+    // Review F4: DISCARD any unfinished debounce run while disabled. The knob is
+    // read at call time, so it can flip mid-run; leaving the counters standing let
+    // pre-disable observations count toward a POST-re-enable alarm (4 anomalous
+    // ticks → disable → conditions clear → re-enable during a NEW anomaly → the
+    // first new tick crosses a threshold of 5 after ONE tick of the new condition).
+    // A debounce run must be contiguous AND wholly observed while armed.
+    _sustained = 0;
+    _tripRunLength = null;
+    // Deliberately NOT touched: the durable latch (_latched/_latchedAtMs) and the
+    // hydration flag. An OPEN episode must survive the switch so it can still be
+    // paired with its `recovered` — that is existing intended behavior.
+    return null;
+  }
 
   const { anomalous } = classifyBrokerDegraded({ interestCount, uptimeMs, fleetActive }, { graceMs });
   const { clear, reason: clearReason } = classifyBrokerDegradedClear({ interestCount, fleetActive });

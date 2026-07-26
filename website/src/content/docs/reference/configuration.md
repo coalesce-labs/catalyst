@@ -580,6 +580,48 @@ daemon. These knobs are env vars on the `catalyst-broker` process:
   - `FILTER_PILEUP_COOLDOWN_MS` (default `3600000`) — minimum gap after a clear before it can
     re-fire (flap guard).
 
+### Broker-degraded detector (CTL-1523)
+
+The broker's watchdog can edge-trigger a `broker.daemon.degraded` / `broker.daemon.recovered` pair
+when its **interest table is empty while the fleet is actively working** — an empty table on an idle
+fleet is the healthy steady state, so the fleet-activity reading is the discriminator. The episode is
+edge-triggered with a **durable latch** (`~/catalyst/broker-degraded-latch.json`), so a broker
+restart mid-episode resumes rather than re-emitting.
+
+**The detector is dormant by default and only meaningful on legacy-wave hosts.** Under
+**execution-core dispatch** nothing registers interests at all, so `interests.size === 0` is
+permanently true and the gate carries no information. That is a property of execution-core, **not**
+of every configuration named `phase-agents`: a **legacy-wave** host — one driving
+`/catalyst-legacy:orchestrate`, which invokes `plugins/dev/scripts/orchestrate-register-interests.sh`
+— does register interests (`pr_lifecycle` + `ticket_lifecycle` + `comms_lifecycle` unconditionally,
+plus a per-ticket `phase_lifecycle` when `dispatchMode` is `phase-agents`). There an empty interest
+table IS anomalous, and that is the deployment where enabling this is appropriate. These knobs are
+env vars on the `catalyst-broker` process:
+
+- `FILTER_BROKER_DEGRADED_ENABLED` (default **off**; set to exactly `1` to enable) — opt-in
+  kill-switch. Unset (or any other value) means the detector evaluates nothing and emits nothing.
+  Read at call time, so it toggles without a broker restart. Flipping it **off** discards any
+  in-progress debounce run, so a re-enable re-earns the full sustained-tick threshold; an
+  already-open episode survives the switch and still emits its paired `recovered`.
+- `FILTER_BROKER_DEGRADED_GRACE_MS` (default `300000`, 5 min) — startup grace. An empty interest
+  table is not judged at all until the broker has been up this long, so a still-warming process never
+  trips.
+- `FILTER_BROKER_DEGRADED_SUSTAINED_TICKS` (default `5`) — consecutive anomalous watchdog ticks
+  (~60s each) required before the degraded edge fires. The run must be contiguous: any non-anomalous
+  tick resets it, so a single-tick blip cannot page.
+
+The fleet-activity reading is **tri-state** — active, proven idle, or *unknown* (the worker-table read
+failed). Only a proven-idle fleet closes an open episode (`recovered`, reason `fleet idle`); an
+unknown reading neither trips nor clears, so a transient DB failure cannot manufacture a false
+recovery followed by a duplicate degraded edge.
+
+**This is not a dead-broker detector**, and neither is the ingestion-silence detector above: both run
+inside the broker process, so a dead broker emits neither. `checkSourceRecency` detects an ingestion
+**stall** while the broker is **alive**. Detecting a fully-dead broker requires an **external,
+absence-based** check on the broker's own heartbeat/log series — e.g. a Loki `absent_over_time` alert
+on `broker.daemon.heartbeat` or the broker `.log` stream (absence, because a fully-dead daemon is a
+*missing series*, which `count_over_time == 0` cannot assert).
+
 ### Node admission state on the heartbeat (CTL-1322)
 
 A daemon that is **alive but not accepting new work** (draining, or a liveness-cold hold) otherwise

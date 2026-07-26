@@ -10,7 +10,7 @@
 // Run: cd plugins/dev/scripts/broker && bun test broker-degraded.test.mjs
 
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
@@ -64,6 +64,13 @@ describe("classifyBrokerDegraded — the trip classifier (CTL-1523)", () => {
     [
       "fleetActive undefined (reader unavailable) → NOT anomalous (fail closed)",
       { interestCount: 0, uptimeMs: GRACE + 60_000, fleetActive: undefined },
+      false,
+    ],
+    [
+      // Review F2: null is the router's explicit UNKNOWN. Only a POSITIVE activity
+      // reading is evidence of an anomaly — unknown must never trip.
+      "fleetActive null (UNKNOWN — the activity read failed) → NOT anomalous",
+      { interestCount: 0, uptimeMs: GRACE + 60_000, fleetActive: null },
       false,
     ],
     [
@@ -124,10 +131,23 @@ describe("classifyBrokerDegradedClear — the clear-side verdict (CTL-1523)", ()
       { interestCount: 0, fleetActive: true },
       { clear: false, reason: null },
     ],
+    // Review F2: UNKNOWN activity is not "idle". Both edges demand positive
+    // evidence, so null/undefined can neither trip nor clear — a latched episode
+    // holds until the reading is trustworthy again.
     [
-      "unknown activity with empty interests → clear (fail closed, same as trip side)",
+      "UNKNOWN activity (null) with empty interests → NOT clear (the latch holds)",
+      { interestCount: 0, fleetActive: null },
+      { clear: false, reason: null },
+    ],
+    [
+      "UNKNOWN activity (undefined) with empty interests → NOT clear",
       { interestCount: 0, fleetActive: undefined },
-      { clear: true, reason: "fleet idle" },
+      { clear: false, reason: null },
+    ],
+    [
+      "UNKNOWN activity but interests came back → still clear (affirmative proof of life)",
+      { interestCount: 4, fleetActive: null },
+      { clear: true, reason: "interests registered" },
     ],
   ];
 
@@ -137,9 +157,9 @@ describe("classifyBrokerDegradedClear — the clear-side verdict (CTL-1523)", ()
     });
   }
 
-  test("trip and clear are mutually exclusive across the whole input grid", () => {
+  test("trip and clear are mutually exclusive across the whole tri-state input grid", () => {
     for (const interestCount of [0, 1]) {
-      for (const fleetActive of [true, false]) {
+      for (const fleetActive of [true, false, null]) {
         for (const uptimeMs of [0, GRACE + 1]) {
           const { anomalous } = classifyBrokerDegraded(
             { interestCount, uptimeMs, fleetActive },
@@ -149,6 +169,21 @@ describe("classifyBrokerDegradedClear — the clear-side verdict (CTL-1523)", ()
           expect(anomalous && clear).toBe(false);
         }
       }
+    }
+  });
+
+  // Review F2: the tri-state contract as one explicit statement — UNKNOWN activity
+  // with an empty table is the ONE grid cell where NEITHER edge holds. (Every other
+  // cell resolves to a trip, a clear, or a below-grace hold.)
+  test("UNKNOWN activity + empty interests past grace → NEITHER trip NOR clear", () => {
+    for (const unknown of [null, undefined]) {
+      const { anomalous } = classifyBrokerDegraded(
+        { interestCount: 0, uptimeMs: GRACE + 1, fleetActive: unknown },
+        { graceMs: GRACE },
+      );
+      const { clear } = classifyBrokerDegradedClear({ interestCount: 0, fleetActive: unknown });
+      expect(anomalous, `unknown: ${String(unknown)}`).toBe(false);
+      expect(clear, `unknown: ${String(unknown)}`).toBe(false);
     }
   });
 });
@@ -369,6 +404,200 @@ describe("checkBrokerDegraded — the driver's failure semantics (CTL-1523)", ()
     expect(run(IDLE, (p) => (calls.push(p), true))).toBe("recovered");
     expect(calls[0].detail.reason).toBe("fleet idle");
     expect(typeof calls[0].detail.degradedForMs).toBe("number");
+  });
+});
+
+// ─── Review F2: UNKNOWN activity must not move the latch ─────────────────────
+// The defect: fleetActivity() collapsed a failed worker-table read into `false`, so a
+// transient SQLite outage looked exactly like a proven-idle fleet — the detector
+// emitted a FALSE `recovered` (reason "fleet idle"), PERSISTED the cleared latch, and
+// then re-tripped the same uninterrupted episode once the DB came back. Driven here
+// end-to-end through checkBrokerDegraded, latch marker and all.
+describe("checkBrokerDegraded — UNKNOWN activity holds the latch (CTL-1523 review F2)", () => {
+  let dir;
+  let prevCatalystDir;
+  let prevEnabled;
+
+  const ANOMALOUS = { interestCount: 0, uptimeMs: GRACE + 1, fleetActive: true };
+  const IDLE = { interestCount: 0, uptimeMs: GRACE + 1, fleetActive: false };
+  const UNKNOWN = { interestCount: 0, uptimeMs: GRACE + 1, fleetActive: null };
+  const run = (readings, emit, { sustainedTicks = 1 } = {}) =>
+    checkBrokerDegraded({ ...readings, graceMs: GRACE, sustainedTicks, emit });
+
+  beforeEach(() => {
+    prevCatalystDir = process.env.CATALYST_DIR;
+    prevEnabled = process.env.FILTER_BROKER_DEGRADED_ENABLED;
+    dir = mkdtempSync(join(tmpdir(), "broker-degraded-tristate-"));
+    process.env.CATALYST_DIR = dir;
+    process.env.FILTER_BROKER_DEGRADED_ENABLED = "1";
+    __resetBrokerDegradedLatchForTest();
+  });
+  afterEach(() => {
+    __resetBrokerDegradedLatchForTest();
+    if (prevCatalystDir === undefined) delete process.env.CATALYST_DIR;
+    else process.env.CATALYST_DIR = prevCatalystDir;
+    if (prevEnabled === undefined) delete process.env.FILTER_BROKER_DEGRADED_ENABLED;
+    else process.env.FILTER_BROKER_DEGRADED_ENABLED = prevEnabled;
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("(a) LATCHED + activity UNKNOWN → no event, and the episode stays latched", () => {
+    expect(run(ANOMALOUS, () => true)).toBe("degraded");
+    expect(__getBrokerDegradedLatchForTest().latched).toBe(true);
+
+    // The DB read starts failing. Many ticks of pure ignorance must change nothing.
+    const calls = [];
+    for (let i = 0; i < 10; i++) {
+      expect(run(UNKNOWN, (p) => (calls.push(p), true))).toBeNull();
+    }
+    expect(calls).toHaveLength(0); // NO false "recovered"
+    expect(__getBrokerDegradedLatchForTest().latched).toBe(true);
+    // …and the DURABLE marker still records the open episode, so a restart mid-outage
+    // resumes it rather than re-emitting a duplicate degraded.
+    expect(JSON.parse(readFileSync(getBrokerDegradedLatchPath(), "utf8")).latched).toBe(true);
+  });
+
+  test("(b) LATCHED + activity PROVEN idle → exactly one recovered", () => {
+    expect(run(ANOMALOUS, () => true)).toBe("degraded");
+
+    const calls = [];
+    const emit = (p) => (calls.push(p), true);
+    expect(run(IDLE, emit)).toBe("recovered");
+    expect(calls).toHaveLength(1);
+    expect(calls[0].detail.reason).toBe("fleet idle");
+    expect(__getBrokerDegradedLatchForTest().latched).toBe(false);
+    // Idempotent: further idle ticks do not re-emit.
+    for (let i = 0; i < 3; i++) expect(run(IDLE, emit)).toBeNull();
+    expect(calls).toHaveLength(1);
+  });
+
+  test("(b') the DB recovers to idle after an unknown window → ONE recovered, not two edges", () => {
+    expect(run(ANOMALOUS, () => true)).toBe("degraded");
+    const calls = [];
+    const emit = (p) => (calls.push(p), true);
+    for (let i = 0; i < 5; i++) run(UNKNOWN, emit); // outage
+    expect(calls).toHaveLength(0);
+    expect(run(IDLE, emit)).toBe("recovered"); // DB back, fleet genuinely idle
+    expect(calls.map((c) => c.action)).toEqual(["recovered"]);
+  });
+
+  test("(b'') the DB recovers to STILL-ANOMALOUS → no duplicate degraded (still latched)", () => {
+    expect(run(ANOMALOUS, () => true)).toBe("degraded");
+    const calls = [];
+    const emit = (p) => (calls.push(p), true);
+    for (let i = 0; i < 5; i++) run(UNKNOWN, emit);
+    // The condition never actually went away — the latch held through the blind
+    // window, so the reappearing anomaly is the SAME episode, not a new edge.
+    for (let i = 0; i < 5; i++) expect(run(ANOMALOUS, emit)).toBeNull();
+    expect(calls).toHaveLength(0);
+    expect(__getBrokerDegradedLatchForTest().latched).toBe(true);
+  });
+
+  test("(c) UNLATCHED + activity UNKNOWN + empty interests past grace → NEVER trips", () => {
+    const calls = [];
+    const emit = (p) => (calls.push(p), true);
+    // sustainedTicks=1 (the most trip-happy setting there is) and 50 ticks: unknown
+    // activity is not evidence, so no number of ticks can manufacture an alarm.
+    for (let i = 0; i < 50; i++) {
+      expect(run(UNKNOWN, emit, { sustainedTicks: 1 })).toBeNull();
+    }
+    expect(calls).toHaveLength(0);
+    expect(__getBrokerDegradedLatchForTest().latched).toBe(false);
+    expect(existsSync(getBrokerDegradedLatchPath())).toBe(false);
+  });
+});
+
+// ─── Review F4: the debounce must not survive a disabled interval ────────────
+describe("checkBrokerDegraded — disabling discards the debounce run (CTL-1523 review F4)", () => {
+  let dir;
+  let prevCatalystDir;
+  let prevEnabled;
+
+  const ANOMALOUS = { interestCount: 0, uptimeMs: GRACE + 1, fleetActive: true };
+  const IDLE = { interestCount: 0, uptimeMs: GRACE + 1, fleetActive: false };
+  const SUSTAINED = 5;
+  const run = (readings, emit) =>
+    checkBrokerDegraded({ ...readings, graceMs: GRACE, sustainedTicks: SUSTAINED, emit });
+
+  beforeEach(() => {
+    prevCatalystDir = process.env.CATALYST_DIR;
+    prevEnabled = process.env.FILTER_BROKER_DEGRADED_ENABLED;
+    dir = mkdtempSync(join(tmpdir(), "broker-degraded-f4-"));
+    process.env.CATALYST_DIR = dir;
+    process.env.FILTER_BROKER_DEGRADED_ENABLED = "1";
+    __resetBrokerDegradedLatchForTest();
+  });
+  afterEach(() => {
+    __resetBrokerDegradedLatchForTest();
+    if (prevCatalystDir === undefined) delete process.env.CATALYST_DIR;
+    else process.env.CATALYST_DIR = prevCatalystDir;
+    if (prevEnabled === undefined) delete process.env.FILTER_BROKER_DEGRADED_ENABLED;
+    else process.env.FILTER_BROKER_DEGRADED_ENABLED = prevEnabled;
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  // The exact reported sequence: 4 anomalous ticks (one short of the threshold) →
+  // DISABLE → conditions clear → RE-ENABLE during a NEW anomaly. Before the fix the
+  // stale counter carried over and the very first tick of the new condition emitted
+  // degraded after ONE observed tick instead of five.
+  test("4 anomalous ticks → disable → clear → re-enable: the new run re-earns all 5 ticks", () => {
+    const calls = [];
+    const emit = (p) => (calls.push(p), true);
+
+    for (let i = 0; i < SUSTAINED - 1; i++) expect(run(ANOMALOUS, emit)).toBeNull();
+    expect(__getBrokerDegradedLatchForTest().sustained).toBe(SUSTAINED - 1);
+
+    // Operator flips the detector off. The unfinished run is discarded on the spot.
+    process.env.FILTER_BROKER_DEGRADED_ENABLED = "0";
+    expect(run(ANOMALOUS, emit)).toBeNull();
+    expect(__getBrokerDegradedLatchForTest().sustained).toBe(0);
+    expect(__getBrokerDegradedLatchForTest().tripRunLength).toBeNull();
+
+    // Conditions clear while disabled, then a NEW anomaly begins and the detector is
+    // re-enabled part-way into it.
+    run(IDLE, emit);
+    process.env.FILTER_BROKER_DEGRADED_ENABLED = "1";
+
+    // The first four ticks of the NEW condition must stay silent…
+    for (let i = 0; i < SUSTAINED - 1; i++) expect(run(ANOMALOUS, emit)).toBeNull();
+    expect(calls).toHaveLength(0);
+    // …and only the fifth trips, reporting an honest run length of 5.
+    expect(run(ANOMALOUS, emit)).toBe("degraded");
+    expect(calls).toHaveLength(1);
+    expect(calls[0].detail.sustainedTicks).toBe(SUSTAINED);
+  });
+
+  test("a single disabled tick mid-run resets the counter (the run must be contiguous AND armed)", () => {
+    const emit = () => true;
+    for (let i = 0; i < SUSTAINED - 1; i++) run(ANOMALOUS, emit);
+    process.env.FILTER_BROKER_DEGRADED_ENABLED = "0";
+    run(ANOMALOUS, emit);
+    process.env.FILTER_BROKER_DEGRADED_ENABLED = "1";
+    // Immediately re-armed and still anomalous: this is tick 1 of a fresh run, so the
+    // next SUSTAINED-1 ticks must remain silent.
+    for (let i = 0; i < SUSTAINED - 1; i++) expect(run(ANOMALOUS, emit)).toBeNull();
+    expect(run(ANOMALOUS, emit)).toBe("degraded");
+  });
+
+  test("an OPEN episode SURVIVES a disabled interval — the durable latch is untouched", () => {
+    const emit = () => true;
+    for (let i = 0; i < SUSTAINED; i++) run(ANOMALOUS, emit);
+    expect(__getBrokerDegradedLatchForTest().latched).toBe(true);
+
+    process.env.FILTER_BROKER_DEGRADED_ENABLED = "0";
+    const whileOff = [];
+    for (let i = 0; i < 5; i++) {
+      expect(run(IDLE, (p) => (whileOff.push(p), true))).toBeNull();
+    }
+    expect(whileOff).toHaveLength(0); // inert while off
+    expect(__getBrokerDegradedLatchForTest().latched).toBe(true); // episode preserved
+    expect(JSON.parse(readFileSync(getBrokerDegradedLatchPath(), "utf8")).latched).toBe(true);
+
+    // Re-armed: the owed `recovered` still fires, so the ledger stays balanced.
+    process.env.FILTER_BROKER_DEGRADED_ENABLED = "1";
+    const calls = [];
+    expect(run(IDLE, (p) => (calls.push(p), true))).toBe("recovered");
+    expect(calls[0].detail.reason).toBe("fleet idle");
   });
 });
 

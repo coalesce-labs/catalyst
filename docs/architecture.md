@@ -384,12 +384,22 @@ strings.
 
 That degraded/recovered pair is an EDGE-TRIGGERED episode with a **durable latch** (marker
 `~/catalyst/broker-degraded-latch.json`), and it is **OPT-IN and dormant by default** — it evaluates
-nothing unless `FILTER_BROKER_DEGRADED_ENABLED=1`. In `phase-agents` mode its `interests.size === 0`
-conjunct is permanently true (interest registration is legacy-only, dormant since the 2026-06-07
-cutover), so the gate carries no information; it is retained for legacy wave-orchestration hosts,
-where interests are registered. **The real silently-dead-broker detector is CTL-1122's
-`checkSourceRecency`** (`catalyst.ingestion.stale` + `catalyst.alert.raised(system_down)`), which
-watches actual ingestion recency and is unaffected by this knob.
+nothing unless `FILTER_BROKER_DEGRADED_ENABLED=1`. Under **execution-core dispatch** its
+`interests.size === 0` conjunct is permanently true (the daemon runs no `filter.register` producer),
+so the gate carries no information there. That is a property of execution-core, **not** of every
+configuration named `phase-agents`: a **legacy-wave** host — one driving
+`/catalyst-legacy:orchestrate`, which invokes `plugins/dev/scripts/orchestrate-register-interests.sh`
+— does register interests (pr/ticket/comms unconditionally, plus a per-ticket `phase_lifecycle` when
+`dispatchMode` is `phase-agents`), so there an empty table IS anomalous and enabling the knob is
+appropriate.
+
+**Neither this detector nor CTL-1122's `checkSourceRecency` can detect a fully-dead broker** — both
+execute inside the broker process, so a dead broker emits neither. `checkSourceRecency` detects an
+ingestion **stall** (an upstream source gone silent) while the broker is **alive**, via
+`catalyst.ingestion.stale` + `catalyst.alert.raised(system_down)`. Proving the process itself is gone
+requires an **external absence-based check** on the broker's own heartbeat/log series — a Loki
+`absent_over_time` alert on `broker.daemon.heartbeat` or the broker `.log` stream (absence, because a
+fully-dead daemon is a *missing series*, which `count_over_time == 0` cannot assert).
 
 **`KNOWN_PHASES`** (canonical 10, in order): `triage`, `research`, `plan`, `implement`, `verify`,
 `review`, `pr`, `monitor-merge`, `monitor-deploy`, `teardown`.

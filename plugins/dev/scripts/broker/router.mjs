@@ -590,9 +590,16 @@ function checkSourceRecency(source, now) {
     downAfterMs: source.downAfterMs,
   });
   let severity = ungatedSeverity;
-  if (source.gated && !fleetIsActive(now)) {
-    // Gate closed: the fleet isn't working, so webhook silence is expected, not
-    // a fault. Force "up" → no stale, and a clean clear of any open outage.
+  // CTL-1523 review F2: fleetActivity is now tri-state, but this CTL-1122 gate keeps
+  // its original FAIL-CLOSED semantics exactly — only a demonstrably-active fleet
+  // (=== true) holds the gate open, so both "proven idle" (false) and "unknown"
+  // (null, the old catch-returns-false case) force "up" as they always did. Do not
+  // relax this to `=== false`: an unreadable worker table must never license a
+  // github-silence page.
+  if (source.gated && fleetActivity(now) !== true) {
+    // Gate closed: the fleet isn't working (or we cannot tell), so webhook silence
+    // is expected, not a fault. Force "up" → no stale, and a clean clear of any
+    // open outage.
     severity = "up";
   }
   const { state, emit } = nextRecencyAlarmState(prevAlarm, {
@@ -750,17 +757,28 @@ function checkNeedsHumanPileup(now) {
   return emit;
 }
 
-// fleetIsActive — the activity-gate input for gated recency sources. Defensive
-// wrapper around hasActiveWorkers: a watchdog tick must NEVER throw, and the
-// broker-state DB read could fail (e.g. closed handle in an isolated unit test,
-// or a transient error). On failure, fail the gate CLOSED (treat as no active
-// work) — the no-false-alarm safe default, consistent with the detector's
-// fail-open-to-"up" philosophy.
-function fleetIsActive(now) {
+// fleetActivity — the activity reading shared by the gated recency sources and the
+// CTL-1523 broker-degraded detector. Defensive wrapper around hasActiveWorkers: a
+// watchdog tick must NEVER throw, and the broker-state DB read could fail (e.g. a
+// closed handle in an isolated unit test, or a transient error).
+//
+// TRI-STATE (CTL-1523 review F2). The reading is deliberately three-valued:
+//   true  — the fleet is demonstrably working
+//   false — PROVEN idle (the read succeeded and found no active worker)
+//   null  — UNKNOWN (the read failed; we know nothing either way)
+//
+// Collapsing null into false was the defect: a transient SQLite failure looked
+// identical to a proven-idle fleet, so the degraded detector cleared its latch and
+// emitted a FALSE `broker.daemon.recovered` (reason "fleet idle"); when the DB
+// recovered, the still-anomalous condition re-tripped after the debounce, producing a
+// duplicate degraded edge from one uninterrupted episode. Consumers must now decide
+// explicitly what "unknown" means for them (the detector HOLDS its latch; see
+// classifyBrokerDegradedClear).
+function fleetActivity(now) {
   try {
     return hasActiveWorkers(new Date(now).toISOString());
   } catch {
-    return false;
+    return null; // unknown — NOT proven idle
   }
 }
 
@@ -2258,27 +2276,40 @@ export function runWatchdogTick({ liveness = sessionLiveness } = {}) {
   emitProcessMemoryMetric({ serviceName: "catalyst.broker", log }).catch(() => {});
 
   // CTL-352 / CTL-1523: empty-interests observability. The signal is only an
-  // anomaly when the fleet is ACTIVELY WORKING — interest registration is
-  // legacy-only and correctly dormant in phase-agents mode, so an empty table on
-  // an idle fleet is the healthy steady state, not a silently-dead broker. The
-  // gate, the sustained-tick debounce, and the durable edge latch live in
-  // broker-degraded.mjs; this call supplies the two side effects.
+  // anomaly when the fleet is ACTIVELY WORKING — under execution-core dispatch no
+  // component registers interests at all, so an empty table on an idle fleet is the
+  // healthy steady state, not a silently-dead broker. The gate, the sustained-tick
+  // debounce, and the durable edge latch live in broker-degraded.mjs; this call
+  // supplies the two side effects.
   //
   // NOTE: the log-level split below is INDEPENDENT of the detector's opt-in knob —
   // it is plain broker.log hygiene and always applies. checkBrokerDegraded itself is
   // dormant unless FILTER_BROKER_DEGRADED_ENABLED=1 (it returns null on its first
-  // line), so on a normal phase-agents host this call is a no-op; the real
-  // silently-dead-broker detector is the CTL-1122 checkSourceRecency pass below.
+  // line), so on an execution-core host this call is a no-op.
+  //
+  // Neither this nor the CTL-1122 checkSourceRecency pass below can detect a FULLY
+  // DEAD broker: both execute inside this process. checkSourceRecency detects an
+  // ingestion STALL while the broker is alive; a dead broker is a MISSING series and
+  // needs an EXTERNAL absence check (Loki `absent_over_time` on
+  // `broker.daemon.heartbeat` / the broker `.log` stream).
   const brokerStartedAt = getBrokerStartedAt();
   const startedTs = brokerStartedAt ? new Date(brokerStartedAt).getTime() : now;
   const brokerUptimeMs = now - startedTs;
-  const fleetActive = fleetIsActive(now);
+  // Tri-state (CTL-1523 review F2): true | false (proven idle) | null (unknown).
+  const fleetActive = fleetActivity(now);
   if (interests.size === 0) {
     // CTL-1523: split by the same discriminator the detector uses. An empty table
-    // WHILE work is in flight is a real anomaly (warn); on an idle fleet it is
-    // expected and was drowning broker.log (~171 lines / 2.85h on mini) → debug.
-    if (fleetActive) log.warn({ uptimeMs: brokerUptimeMs }, "watchdog: no registered interests");
-    else log.debug({ uptimeMs: brokerUptimeMs }, "watchdog: no registered interests (fleet idle)");
+    // WHILE work is in flight is a real anomaly (warn); on an idle fleet — or when
+    // the activity read is unavailable, where we have no anomaly claim to make — it
+    // is expected and was drowning broker.log (~171 lines / 2.85h on mini) → debug.
+    if (fleetActive === true) {
+      log.warn({ uptimeMs: brokerUptimeMs }, "watchdog: no registered interests");
+    } else {
+      log.debug(
+        { uptimeMs: brokerUptimeMs, fleetActive },
+        "watchdog: no registered interests (fleet idle or activity unknown)",
+      );
+    }
   }
   checkBrokerDegraded({
     interestCount: interests.size,

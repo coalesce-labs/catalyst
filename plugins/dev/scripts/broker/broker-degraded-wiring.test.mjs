@@ -90,10 +90,12 @@ beforeEach(() => {
   prevCatalystDir = process.env.CATALYST_DIR;
   dir = mkdtempSync(join(tmpdir(), "broker-degraded-wiring-"));
   process.env.CATALYST_DIR = dir;
-  // CTL-1523: the detector is OPT-IN and dormant by default (in phase-agents mode the
-  // empty-interests conjunct is permanently true, so the gate carries no information
-  // — see isBrokerDegradedDetectorEnabled). Every wiring case below asserts the
-  // ARMED behaviour, so arm it here; the opt-in-gate block overrides locally.
+  // CTL-1523: the detector is OPT-IN and dormant by default (under execution-core
+  // dispatch nothing registers interests, so the empty-interests conjunct is
+  // permanently true and the gate carries no information — see
+  // isBrokerDegradedDetectorEnabled; on a legacy-wave host, which DOES register
+  // interests, it discriminates). Every wiring case below asserts the ARMED
+  // behaviour, so arm it here; the opt-in-gate block overrides locally.
   prevDegradedEnabled = process.env.FILTER_BROKER_DEGRADED_ENABLED;
   process.env.FILTER_BROKER_DEGRADED_ENABLED = "1";
   closeBrokerStateDb();
@@ -271,7 +273,7 @@ describe("the opt-in gate (CTL-1523)", () => {
     }
   };
 
-  // (g) THE DEFAULT. Unset is the production state on every phase-agents host: the
+  // (g) THE DEFAULT. Unset is the production state on every execution-core host: the
   // detector must be completely inert — no event, and no latch marker written.
   for (const [label, value] of [
     ["UNSET — the production default", undefined],
@@ -296,5 +298,46 @@ describe("the opt-in gate (CTL-1523)", () => {
       ticks(SUSTAINED);
       expect(degradedEvents()).toHaveLength(1);
     });
+  });
+});
+
+// CTL-1523 (review): the ONLY site that actually PRODUCES the `null` (unknown)
+// activity reading is fleetActivity's catch in router.mjs. Every other F2 test
+// injects `fleetActive` straight into the pure classifiers or into
+// checkBrokerDegraded, so reverting that catch to `return false` left the whole
+// suite green — which de-fanged the fix. This pins it end-to-end: a real
+// broker-state read failure must be UNKNOWN (latch holds), never "proven idle"
+// (which would emit a false `recovered` and then a duplicate degraded edge once
+// the DB recovers).
+describe("an unavailable activity reading is UNKNOWN, not idle (end-to-end)", () => {
+  test("a broker-state read failure holds a latched episode instead of clearing it", () => {
+    pastGrace();
+    openActivityGate();
+    ticks(SUSTAINED);
+    expect(degradedEvents()).toHaveLength(1);
+    expect(recoveredEvents()).toHaveLength(0);
+
+    // Make the REAL read fail the way a transient SQLite error would: the
+    // handle is gone, so hasActiveWorkers throws and fleetActivity catches.
+    closeBrokerStateDb();
+
+    expect(() => ticks(10)).not.toThrow(); // runWatchdogTick must never throw
+    expect(recoveredEvents()).toHaveLength(0); // <- the guard: no false recovery
+    expect(degradedEvents()).toHaveLength(1); // and no duplicate degraded
+
+    // The durable latch is still open, so the owed recovery is still owed.
+    const latch = JSON.parse(readFileSync(getBrokerDegradedLatchPath(), "utf8"));
+    expect(latch.latched).toBe(true);
+
+    // Once the read works again AND the fleet is genuinely idle, it clears once.
+    // (Reopening alone is not enough: the worker row is still fresh, so activity
+    // reads `true` — which is itself the point, unknown never became idle.)
+    openBrokerStateDb(join(dir, "broker-state.db"));
+    ticks(1);
+    expect(recoveredEvents()).toHaveLength(0); // still active, still no recovery
+    closeActivityGate();
+    ticks(1);
+    expect(recoveredEvents()).toHaveLength(1);
+    expect(recoveredEvents()[0].attributes["event.name"]).toBe(BROKER_RECOVERED_EVENT);
   });
 });

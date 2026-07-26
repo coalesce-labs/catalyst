@@ -163,31 +163,43 @@ export const PILEUP_COOLDOWN_MS = parseIntKnob(process.env.FILTER_PILEUP_COOLDOW
 // and then deliberately parked). OPT-IN: unset (the default) means the detector
 // evaluates nothing and emits nothing.
 //
-// WHY DORMANT BY DEFAULT. In `phase-agents` mode the trip condition carries no
-// information, because one of its two conjuncts is PERMANENTLY true:
-// `interests.size === 0` can never be false. Interest registration is legacy-only —
-// every `filter.register` producer lives in plugins/legacy/, dormant since the
-// 2026-06-07 cutover — and neither in-router auto-register path can break the tie:
-// `_autoRegisterPrLifecycle` only fires when an agent reports a claimed_pr, and
-// `_autoPrLifecycleFromTicket` only fires when an EXISTING interest already watches
-// the ticket, so an empty table stays empty. With that conjunct pinned true the gate
-// degenerates to "the fleet has been active for N contiguous ticks", which would emit
-// roughly one degraded/recovered pair per busy/idle cycle — trading the CTL-352
-// restart-driven false positive for a busy-window-driven one. Not a trade worth making.
+// WHY DORMANT BY DEFAULT. Under EXECUTION-CORE DISPATCH the trip condition carries
+// no information, because one of its two conjuncts is PERMANENTLY true:
+// `interests.size === 0` can never be false. The execution-core daemon runs no
+// `filter.register` producer at all, and neither in-router auto-register path can
+// break the tie: `_autoRegisterPrLifecycle` only fires when an agent reports a
+// claimed_pr, and `_autoPrLifecycleFromTicket` only fires when an EXISTING interest
+// already watches the ticket, so an empty table stays empty. With that conjunct
+// pinned true the gate degenerates to "the fleet has been active for N contiguous
+// ticks", which would emit roughly one degraded/recovered pair per busy/idle cycle —
+// trading the CTL-352 restart-driven false positive for a busy-window-driven one.
+// Not a trade worth making, and execution-core is what every current host runs.
 //
-// WHY IT IS KEPT. Legacy wave-orchestration mode (plugins/legacy, dispatchMode
-// `oneshot-legacy`) DOES register interests, so there the empty-table conjunct is
-// genuinely discriminating and the detector is meaningful — flip
-// FILTER_BROKER_DEGRADED_ENABLED=1 on such a host.
+// WHY IT IS KEPT — and where to enable it. The empty-table property belongs to
+// execution-core dispatch, NOT to every configuration named `phase-agents`. A
+// LEGACY-WAVE host (one driving `/catalyst-legacy:orchestrate`, which invokes
+// plugins/dev/scripts/orchestrate-register-interests.sh) DOES register interests:
+// that script emits pr_lifecycle + ticket_lifecycle + comms_lifecycle
+// UNCONDITIONALLY, plus a per-ticket phase_lifecycle interest when `dispatchMode` is
+// `phase-agents`. On such a host an empty interest table IS anomalous, the conjunct
+// genuinely discriminates, and FILTER_BROKER_DEGRADED_ENABLED=1 is appropriate.
 //
-// THE REAL DEAD-BROKER DETECTOR IS ELSEWHERE, and is unaffected by this knob:
-// CTL-1122's `checkSourceRecency` over RECENCY_SOURCES (router.mjs) watches actual
-// ingestion recency and emits `catalyst.ingestion.stale` +
-// `catalyst.alert.raised(system_down)` when ingestion really stops. That is the
-// signal to trust for "is the broker silently dead".
+// THIS IS NOT A DEAD-BROKER DETECTOR — and neither is CTL-1122's `checkSourceRecency`
+// over RECENCY_SOURCES (router.mjs), despite both living in this process. That is the
+// point: BOTH run INSIDE the broker, so once the broker dies neither can emit
+// anything. checkSourceRecency detects an ingestion STALL (an upstream source —
+// monitor/GitHub — gone silent) while the broker is ALIVE, emitting
+// `catalyst.ingestion.stale` + `catalyst.alert.raised(system_down)`; that is the
+// signal to trust for "has ingestion stopped". Detecting a FULLY DEAD broker requires
+// an EXTERNAL absence check on the broker's own heartbeat/log series — a Loki
+// `absent_over_time` alert on `broker.daemon.heartbeat` or the broker `.log` stream
+// (absence, because a dead daemon is a MISSING series that `count_over_time == 0`
+// cannot assert).
 //
 // The check is call-time (parity with isAlertEmitEnabled) so an operator can flip it
-// without a broker restart.
+// without a broker restart. Flipping it OFF discards any in-progress debounce run,
+// so a re-enable always re-earns the full sustained-tick threshold; an already-open
+// episode survives the switch and still emits its paired `recovered`.
 export function isBrokerDegradedDetectorEnabled() {
   return process.env.FILTER_BROKER_DEGRADED_ENABLED === "1";
 }
