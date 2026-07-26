@@ -571,14 +571,16 @@ describe("ensureCodexSkills", () => {
     rmSync(elsewhere, { recursive: true, force: true });
   });
 
-  // CTL-1530 (thread ns): a PRE-EXISTING REAL .agents/skills directory (e.g. a
-  // dual-harness-migrated project) is now MERGE-AWARE rather than skipped
-  // wholesale — the project's own entries are preserved untouched (T7), and the
-  // MISSING dev-plugin skill entries are added as per-entry symlinks so a Codex
-  // phase worker can still discover /catalyst-dev:phase-*. Each symlink WE create
-  // is git-excluded by its SPECIFIC path, never the blanket `.agents/` pattern
-  // (thread nw — a project-owned real dir must not get the blanket exclude).
-  test("MERGE-AWARE: real project-owned .agents/skills dir gets missing dev-plugin skills added per-entry, excluded per-entry, no blanket .agents/ exclude, project entries untouched", () => {
+  // CTL-1530 (thread ns, narrowed by thread -6): a PRE-EXISTING REAL
+  // .agents/skills directory (e.g. a dual-harness-migrated project) is now
+  // MERGE-AWARE rather than skipped wholesale — the project's own entries are
+  // preserved untouched (T7), and the MISSING phase-* dev-plugin skill entries
+  // are added as per-entry symlinks so a Codex phase worker can still discover
+  // /catalyst-dev:phase-*. Every symlink WE create is covered by the single
+  // managed exclude pattern `.agents/skills/phase-*` (thread -6) — never a
+  // per-entry line, and never the blanket `.agents/` pattern (thread nw — a
+  // project-owned real dir must not get the blanket exclude).
+  test("MERGE-AWARE: real project-owned .agents/skills dir gets missing phase-* dev-plugin skills added per-entry, covered by ONE managed exclude pattern, no blanket .agents/ exclude, project entries untouched", () => {
     const wt = mkdtempSync(join(tmpdir(), "codex-wt-merge-"));
     const checkout = mkdtempSync(join(tmpdir(), "codex-checkout-merge-"));
     const devDir = join(checkout, "plugins", "dev");
@@ -601,7 +603,7 @@ describe("ensureCodexSkills", () => {
     // The project's own entry is untouched.
     expect(readFileSync(join(realSkills, "my-project-skill", "SKILL.md"), "utf8")).toContain("do not touch");
 
-    // Missing dev-plugin skills were added as per-entry symlinks.
+    // Missing phase-* dev-plugin skills were added as per-entry symlinks.
     const triageLink = join(realSkills, "phase-triage");
     const planLink = join(realSkills, "phase-plan");
     expect(lstatSync(triageLink).isSymbolicLink()).toBe(true);
@@ -609,11 +611,43 @@ describe("ensureCodexSkills", () => {
     expect(lstatSync(planLink).isSymbolicLink()).toBe(true);
     expect(readlinkSync(planLink)).toBe(join(skillsSrc, "phase-plan"));
 
-    // Per-entry excludes, NOT the blanket .agents/ pattern.
+    // ONE managed exclude pattern with its identifying sentinel — NOT
+    // per-entry lines, and NOT the blanket .agents/ pattern.
     const exclude = readFileSync(join(wt, ".git", "info", "exclude"), "utf8");
-    expect(exclude).toContain(".agents/skills/phase-triage");
-    expect(exclude).toContain(".agents/skills/phase-plan");
+    expect(exclude).toContain("# codex-exec phase-skill links (managed)");
+    expect(exclude).toContain(".agents/skills/phase-*");
+    expect(exclude).not.toContain(".agents/skills/phase-triage");
+    expect(exclude).not.toContain(".agents/skills/phase-plan");
     expect(exclude.split("\n").map((l) => l.trim())).not.toContain(".agents/");
+
+    rmSync(wt, { recursive: true, force: true });
+    rmSync(checkout, { recursive: true, force: true });
+  });
+
+  // CTL-1530 (thread -6): the merge is narrowed to phase-* entries ONLY — a
+  // common dev-plugin skill NAME (e.g. `commit`) is never touched, so a
+  // project independently owning a skill of that name can never collide.
+  test("phase-* FILTERING: a non-phase dev-plugin skill is never merged into a real project dir", () => {
+    const wt = mkdtempSync(join(tmpdir(), "codex-wt-merge-filter-"));
+    const checkout = mkdtempSync(join(tmpdir(), "codex-checkout-filter-"));
+    const devDir = join(checkout, "plugins", "dev");
+    const skillsSrc = join(devDir, "skills");
+    mkdirSync(join(skillsSrc, "phase-triage"), { recursive: true });
+    mkdirSync(join(skillsSrc, "commit"), { recursive: true }); // NOT phase-*
+    Bun.spawnSync(["git", "init"], { cwd: wt });
+
+    const realSkills = join(wt, ".agents", "skills");
+    mkdirSync(realSkills, { recursive: true });
+
+    ensureCodexSkills(wt, { pluginDirs: [devDir] });
+
+    // phase-triage merged in as usual.
+    expect(lstatSync(join(realSkills, "phase-triage")).isSymbolicLink()).toBe(true);
+    // "commit" is never created — the merge never looked at it.
+    expect(() => lstatSync(join(realSkills, "commit"))).toThrow();
+
+    const exclude = readFileSync(join(wt, ".git", "info", "exclude"), "utf8");
+    expect(exclude).not.toContain("commit");
 
     rmSync(wt, { recursive: true, force: true });
     rmSync(checkout, { recursive: true, force: true });
@@ -621,7 +655,7 @@ describe("ensureCodexSkills", () => {
 
   // CTL-1530 (thread ns): re-running the merge over an already-merged real dir is
   // an idempotent no-op — our own per-entry symlinks are recognized and never
-  // duplicated (link or exclude line).
+  // duplicated (link or managed exclude pattern/sentinel — thread -6).
   test("MERGE is idempotent on a second run: no duplicate excludes, links unchanged, no throw", () => {
     const wt = mkdtempSync(join(tmpdir(), "codex-wt-merge-idem-"));
     const checkout = mkdtempSync(join(tmpdir(), "codex-checkout-merge-idem-"));
@@ -641,7 +675,9 @@ describe("ensureCodexSkills", () => {
     expect(readlinkSync(link)).toBe(join(skillsSrc, "phase-triage"));
 
     const exclude = readFileSync(join(wt, ".git", "info", "exclude"), "utf8");
-    expect(exclude.split("\n").filter((l) => l.trim() === ".agents/skills/phase-triage").length).toBe(1);
+    const trimmed = exclude.split("\n").map((l) => l.trim());
+    expect(trimmed.filter((l) => l === ".agents/skills/phase-*").length).toBe(1);
+    expect(trimmed.filter((l) => l === "# codex-exec phase-skill links (managed)").length).toBe(1);
 
     rmSync(wt, { recursive: true, force: true });
     rmSync(checkout, { recursive: true, force: true });
@@ -681,10 +717,10 @@ describe("ensureCodexSkills", () => {
     expect(lstatSync(planLink).isSymbolicLink()).toBe(true);
     expect(readlinkSync(planLink)).toBe(join(skillsSrc, "phase-plan"));
 
-    // The collision produced NO exclude entry for phase-triage (we didn't create it).
+    // The managed exclude pattern was written for the successful merge (a
+    // single glob, thread -6 — it does not name either entry individually).
     const exclude = readFileSync(join(wt, ".git", "info", "exclude"), "utf8");
-    expect(exclude).not.toContain(".agents/skills/phase-triage");
-    expect(exclude).toContain(".agents/skills/phase-plan");
+    expect(exclude).toContain(".agents/skills/phase-*");
 
     rmSync(wt, { recursive: true, force: true });
     rmSync(checkout, { recursive: true, force: true });
@@ -726,6 +762,96 @@ describe("ensureCodexSkills", () => {
 
     rmSync(wt, { recursive: true, force: true });
     rmSync(overrideDev, { recursive: true, force: true });
+  });
+
+  // CTL-1530 (thread -2): a top-level symlink created by an earlier dispatch
+  // against an OLD checkout path is RUNNER-OWNED (its target ends in
+  // `plugins/dev/skills`) even though the prefix no longer matches the
+  // currently configured source. It must be refreshed, not permanently
+  // skipped as foreign — otherwise, once the old checkout is removed, the
+  // link dangles forever and codex can never discover the phase skills.
+  test("STALE runner-owned top-level symlink (old checkout root) is refreshed to the current source", () => {
+    const wt = mkdtempSync(join(tmpdir(), "codex-wt-stale-top-"));
+    const oldCheckout = mkdtempSync(join(tmpdir(), "codex-old-checkout-"));
+    const newCheckout = mkdtempSync(join(tmpdir(), "codex-new-checkout-"));
+    const oldSkills = join(oldCheckout, "plugins", "dev", "skills");
+    const newDevDir = join(newCheckout, "plugins", "dev");
+    const newSkills = join(newDevDir, "skills");
+    mkdirSync(oldSkills, { recursive: true });
+    mkdirSync(newSkills, { recursive: true });
+    Bun.spawnSync(["git", "init"], { cwd: wt });
+    mkdirSync(join(wt, ".agents"), { recursive: true });
+    const link = join(wt, ".agents", "skills");
+    // Simulate an earlier dispatch's link against the OLD checkout.
+    Bun.spawnSync(["ln", "-s", oldSkills, link]);
+    // The old checkout is gone — this is the exact scenario the fix targets:
+    // a dangling link classified foreign forever by a strict string compare.
+    rmSync(oldCheckout, { recursive: true, force: true });
+
+    ensureCodexSkills(wt, { pluginDirs: [newDevDir] });
+
+    expect(lstatSync(link).isSymbolicLink()).toBe(true);
+    expect(readlinkSync(link)).toBe(newSkills); // refreshed to the CURRENT source
+
+    rmSync(wt, { recursive: true, force: true });
+    rmSync(newCheckout, { recursive: true, force: true });
+  });
+
+  // CTL-1530 (thread -2): the SAME ownership heuristic applies to a per-entry
+  // link merged into a real, project-owned .agents/skills dir.
+  test("STALE runner-owned per-entry symlink (old checkout root) inside a real dir is refreshed", () => {
+    const wt = mkdtempSync(join(tmpdir(), "codex-wt-stale-entry-"));
+    const oldCheckout = mkdtempSync(join(tmpdir(), "codex-old-checkout-entry-"));
+    const newCheckout = mkdtempSync(join(tmpdir(), "codex-new-checkout-entry-"));
+    const oldSkillsSrc = join(oldCheckout, "plugins", "dev", "skills");
+    const newDevDir = join(newCheckout, "plugins", "dev");
+    const newSkillsSrc = join(newDevDir, "skills");
+    mkdirSync(join(oldSkillsSrc, "phase-triage"), { recursive: true });
+    mkdirSync(join(newSkillsSrc, "phase-triage"), { recursive: true });
+    Bun.spawnSync(["git", "init"], { cwd: wt });
+
+    const realSkills = join(wt, ".agents", "skills");
+    mkdirSync(realSkills, { recursive: true });
+    const entryLink = join(realSkills, "phase-triage");
+    Bun.spawnSync(["ln", "-s", join(oldSkillsSrc, "phase-triage"), entryLink]);
+    rmSync(oldCheckout, { recursive: true, force: true }); // old checkout gone — link now dangles
+
+    ensureCodexSkills(wt, { pluginDirs: [newDevDir] });
+
+    expect(lstatSync(entryLink).isSymbolicLink()).toBe(true);
+    expect(readlinkSync(entryLink)).toBe(join(newSkillsSrc, "phase-triage"));
+
+    rmSync(wt, { recursive: true, force: true });
+    rmSync(newCheckout, { recursive: true, force: true });
+  });
+
+  // CTL-1530 (thread -2): the ownership heuristic must NOT widen what counts as
+  // foreign — a per-entry symlink pointing somewhere that does NOT end in
+  // `plugins/dev/skills/<name>` is a genuine foreign link and keeps the
+  // existing warn+skip behavior, never refreshed.
+  test("FOREIGN per-entry symlink (not runner-shaped) inside a real dir is left untouched + warned", () => {
+    const wt = mkdtempSync(join(tmpdir(), "codex-wt-foreign-entry-"));
+    const checkout = mkdtempSync(join(tmpdir(), "codex-checkout-foreign-entry-"));
+    const devDir = join(checkout, "plugins", "dev");
+    const skillsSrc = join(devDir, "skills");
+    mkdirSync(join(skillsSrc, "phase-triage"), { recursive: true });
+    Bun.spawnSync(["git", "init"], { cwd: wt });
+
+    const realSkills = join(wt, ".agents", "skills");
+    mkdirSync(realSkills, { recursive: true });
+    const elsewhere = mkdtempSync(join(tmpdir(), "codex-elsewhere-entry-"));
+    const entryLink = join(realSkills, "phase-triage");
+    Bun.spawnSync(["ln", "-s", elsewhere, entryLink]);
+    const warns = [];
+
+    ensureCodexSkills(wt, { pluginDirs: [devDir], log: { warn: (...a) => warns.push(a) } });
+
+    expect(readlinkSync(entryLink)).toBe(elsewhere); // untouched
+    expect(warns.length).toBe(1); // loud per-entry skip
+
+    rmSync(wt, { recursive: true, force: true });
+    rmSync(checkout, { recursive: true, force: true });
+    rmSync(elsewhere, { recursive: true, force: true });
   });
 });
 

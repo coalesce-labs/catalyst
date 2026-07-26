@@ -17,6 +17,12 @@ with no bridge) onto the target dual-harness layout, applying every mechanical f
 and only asking the model to do the one thing a script can't: split a monolithic `CLAUDE.md`
 into its portable core and its Claude-specific remainder.
 
+**User-invoked only.** This skill sets `disable-model-invocation: true`, so nothing can
+auto-trigger it as a handoff — not `catalyst-foundry:setup-catalyst` (which hits this exact
+case at its rc `11` row) and not `check-project-setup.sh`'s §10 checkup warning. Both merely
+*reference* `/catalyst-foundry:migrate-dual-harness` and tell the user to run it themselves;
+invoke this skill directly (`/catalyst-foundry:migrate-dual-harness`) to perform the split.
+
 ## Target layout
 
 - `AGENTS.md` — portable, tool-agnostic instructions (canonical).

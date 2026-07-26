@@ -103,9 +103,23 @@ else
 	warnings+=("  Run: bash plugins/dev/scripts/setup-webhooks.sh")
 fi
 
-# 3. Check CLAUDE.md has Catalyst snippet
+# 3. Check CLAUDE.md has Catalyst snippet — a thin `@AGENTS.md` bridge (the
+#    CTL-1530 dual-harness layout) deliberately does NOT repeat the phrase
+#    itself; it lives in the imported AGENTS.md instead. Follow a whole-line
+#    `@AGENTS.md` bridge to AGENTS.md before concluding the snippet is
+#    missing, so a correctly migrated bridge repo isn't told to re-add it to
+#    the wrong file. Only warn when BOTH the bridge target and CLAUDE.md
+#    itself lack the phrase.
 if [[ -f "CLAUDE.md" ]]; then
-	if ! grep -q "Catalyst Development Workflow" CLAUDE.md 2>/dev/null; then
+	if grep -q "Catalyst Development Workflow" CLAUDE.md 2>/dev/null; then
+		: # present directly in CLAUDE.md
+	elif grep -qx '@AGENTS.md' CLAUDE.md 2>/dev/null && [[ -f "AGENTS.md" ]]; then
+		if ! grep -q "Catalyst Development Workflow" AGENTS.md 2>/dev/null; then
+			warnings+=("CLAUDE.md is a thin @AGENTS.md bridge, but the imported AGENTS.md is missing the Catalyst workflow snippet")
+			warnings+=("  Add the snippet from: plugins/dev/templates/CLAUDE_SNIPPET.md")
+			warnings+=("  Or run: cat plugins/dev/templates/CLAUDE_SNIPPET.md >> AGENTS.md")
+		fi
+	else
 		warnings+=("CLAUDE.md is missing the Catalyst workflow snippet")
 		warnings+=("  Add the snippet from: plugins/dev/templates/CLAUDE_SNIPPET.md")
 		warnings+=("  Or run: cat plugins/dev/templates/CLAUDE_SNIPPET.md >> CLAUDE.md")
@@ -624,7 +638,11 @@ if [[ ( -f AGENTS.md || -f CLAUDE.md || -e .claude/skills || -L .claude/skills |
 		fi
 		;;
 	10)
-		warnings+=("Repo is single-harness (missing @AGENTS.md bridge, skills wiring, or the AGENTS.md skills pointer) — Fix: bash ${DUAL_HARNESS_SCRIPT} --repo . --fix")
+		if [[ ! -f AGENTS.md && ! -f CLAUDE.md ]]; then
+			warnings+=("Repo has no AGENTS.md/CLAUDE.md docs pair AND needs skills wiring (dual-harness dry-run rc=10) — Fix in order: bash ${SEEDER} --repo . --fix (creates the docs pair), then bash ${DUAL_HARNESS_SCRIPT} --repo . --fix (wires .agents/skills + .claude/skills), then re-run this checkup")
+		else
+			warnings+=("Repo is single-harness (missing @AGENTS.md bridge, skills wiring, or the AGENTS.md skills pointer) — Fix: bash ${DUAL_HARNESS_SCRIPT} --repo . --fix")
+		fi
 		;;
 	11)
 		warnings+=("CLAUDE.md is monolithic and needs the intelligent AGENTS.md/CLAUDE.md split — run the catalyst-foundry:migrate-dual-harness skill")

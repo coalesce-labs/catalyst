@@ -39,11 +39,19 @@
 # tree against itself through the symlink ("identical" => collapse), and the
 # collapse's `rm -rf .claude/skills` then destroys the only copy of the content:
 #   absent / absent                          -> nothing to do
-#   symlink -> ../.agents/skills (or an
-#     absolute path resolving to it) / dir   -> OK, canonical
+#   symlink -> ../.agents/skills / dir       -> OK, canonical
+#   symlink -> an absolute path resolving
+#     to .agents/skills / dir                -> mechanical fix: rewrite the link
+#                                               to the relative ../.agents/skills
+#                                               (an absolute link resolves fine
+#                                               here but breaks on clone/relocate)
 #   symlink -> anything else / any           -> rc 4, ambiguous, touch nothing
 #   real dir / absent                        -> move .claude/skills -> .agents/skills,
-#                                               symlink .claude/skills back
+#                                               symlink .claude/skills back (refused
+#                                               as rc 4 instead if any symlink inside
+#                                               .claude/skills resolves outside the
+#                                               tree, or is dangling — its base would
+#                                               change after the move)
 #   absent / real dir                        -> symlink .claude/skills -> ../.agents/skills
 #   real dir / real dir, `diff -r` identical -> collapse .claude/skills to a symlink
 #     (belt-and-braces: refused as rc 4 instead if the two paths resolve to the
@@ -61,15 +69,18 @@
 #   0  - dual-ok (dry-run) or all needed mechanical fixes applied and now dual-ok
 #        (--fix); also no-harness once skills are also clean/none (see above).
 #   10 - dry-run: mechanical changes needed (bridge / skills wiring / skills
-#        pointer), and no monolithic-split problem. Also used for no-harness
-#        dry-run when skills wiring is needed.
+#        pointer / absolute-symlink rewrite), and no monolithic-split problem.
+#        Also used for no-harness dry-run when skills wiring is needed.
 #   11 - monolithic CLAUDE.md needs the intelligent split (with or without --fix;
 #        under --fix the mechanical parts — skills wiring, pointer if AGENTS.md
 #        exists — are still applied first). Run the
 #        catalyst-foundry:migrate-dual-harness skill to split CLAUDE.md.
 #   2  - bad usage.
-#   4  - ambiguous skills state, or a symlinked/git-ignored instruction document or
-#        skills destination (message names the exact conflict); touches nothing.
+#   4  - ambiguous skills state (including a .claude/skills move whose tree
+#        contains a symlink that would escape it or dangle after relocation),
+#        or a symlinked/git-ignored instruction document, or a git-ignored
+#        skills destination path (message names the exact conflict via
+#        `git check-ignore -v`); touches nothing.
 #   5  - I/O failure.
 set -uo pipefail
 
@@ -77,9 +88,16 @@ FIX=0 REPO="." QUIET=0
 while [[ $# -gt 0 ]]; do
 	case "$1" in
 	--fix) FIX=1 ;;
-	--repo) REPO="${2:?--repo needs a dir}"; shift ;;
+	--repo)
+		if [[ $# -lt 2 ]]; then
+			echo "migrate-dual-harness: --repo needs a dir" >&2
+			exit 2
+		fi
+		REPO="$2"
+		shift
+		;;
 	--quiet) QUIET=1 ;;
-	-h | --help) sed -n '2,73p' "$0"; exit 0 ;;
+	-h | --help) sed -n '2,84p' "$0"; exit 0 ;;
 	*) echo "migrate-dual-harness: unknown arg '$1'" >&2; exit 2 ;;
 	esac
 	shift
@@ -108,6 +126,23 @@ for doc_path in "$CLA" "$AG"; do
 	[[ -L "$doc_path" ]] && die "${doc_path#"$REPO"/} is a symlink — instruction documents must be regular files, not symlinks (dangling or not); replace it with a real file and re-run" 4
 done
 
+# --- reject git-ignored instruction documents ----------------------------------
+# A thin CLAUDE.md bridge that imports an AGENTS.md the repo's own git-ignore
+# rules exclude (or vice versa) can never be committed correctly: `git add -A`
+# stages one half of the pair and silently omits the other, so a fresh clone
+# gets a bridge importing a file that doesn't exist there. Refuse before any
+# classification or fix runs. Only meaningful inside a git repo; a non-git
+# directory has no ignore rules to violate.
+if git -C "$REPO" rev-parse --git-dir >/dev/null 2>&1; then
+	for doc_path in "$AG" "$CLA"; do
+		doc_rel="${doc_path#"$REPO"/}"
+		if git -C "$REPO" check-ignore -q -- "$doc_rel" 2>/dev/null; then
+			doc_ignore_detail="$(git -C "$REPO" check-ignore -v -- "$doc_rel" 2>/dev/null)"
+			die "${doc_rel} is git-ignored (${doc_ignore_detail}) — an ignored instruction document can never be committed; delete that exclude rule and re-run" 4
+		fi
+	done
+fi
+
 # --- verbatim from ensure-agent-house-rules.sh (deliberate duplication — that
 # script is intentionally self-contained; do not refactor either copy to share
 # this code). Only the fence/comment-aware defenced() helper and the
@@ -130,11 +165,33 @@ defenced() {
 			}
 			print line }' "$1"
 }
+# Anywhere-in-file, not line-1-only: matches the seeder's established
+# claude_imports_agents() semantics (verbatim copy) and the validated reference
+# repo (catalyst-otel has intro prose before its @AGENTS.md import, OTL-58).
+# Requiring line 1 would misclassify that reference repo as monolithic.
+# Residual risk (accepted deliberately): a genuinely monolithic CLAUDE.md with
+# a stray standalone `@AGENTS.md` line anywhere in its body reads as an
+# already-migrated bridge even though portable content is still stranded in
+# CLAUDE.md.
 claude_imports_agents() { [[ -f "$CLA" ]] || return 1; grep -Fxq "$BRIDGE_LINE" <<<"$(defenced "$CLA" 1)"; }
 # --- end verbatim block ------------------------------------------------------
 
 # Real (symlink-resolved) path of a directory, or empty if it doesn't resolve.
 realdir() { ( cd -P "$1" 2>/dev/null && pwd ) || true; }
+
+# Resolve a symlink's immediate target directory to a physical (symlink-free)
+# path via cd -P — no readlink -f / realpath on macOS bash 3.2. Empty output
+# means some hop doesn't exist; caller treats that as unresolvable/dangling.
+resolve_symlink_target_dir() {
+	local link="$1" link_dir target target_dir
+	link_dir="$(cd -P "$(dirname "$link")" 2>/dev/null && pwd)" || return 1
+	target="$(readlink "$link")" || return 1
+	case "$target" in
+	/*) target_dir="$(dirname "$target")" ;;
+	*) target_dir="${link_dir}/$(dirname "$target")" ;;
+	esac
+	(cd -P "$target_dir" 2>/dev/null && pwd)
+}
 
 REPO_REL_CLA="${CLA#"$REPO"/}"
 REPO_REL_AG="${AG#"$REPO"/}"
@@ -179,7 +236,14 @@ if [[ -L "$AS" ]]; then
 	fi
 elif [[ -L "$CS" ]]; then
 	if [[ -d "$AS" ]] && [[ -n "$(realdir "$CS")" ]] && [[ "$(realdir "$CS")" == "$(realdir "$AS")" ]]; then
-		SKILLS_ACTION="ok"
+		# Resolves correctly — but only the canonical RELATIVE spelling is
+		# left alone. An absolute link resolves fine here-and-now but breaks
+		# the moment the repo is cloned or relocated elsewhere on disk, so
+		# it's a mechanical fix (rewrite to relative), not a terminal "ok".
+		case "$(readlink "$CS")" in
+		/*) SKILLS_ACTION="rewrite" ;;
+		*) SKILLS_ACTION="ok" ;;
+		esac
 	else
 		SKILLS_ACTION="ambiguous"
 		SKILLS_MSG=".claude/skills is a symlink to '$(readlink "$CS")', which does not resolve to .agents/skills"
@@ -253,12 +317,45 @@ if [[ "$SKILLS_ACTION" == "collapse" ]] && [[ -n "$(find "$CS" "$AS" -type l -pr
 	SKILLS_MSG="a symlink exists inside .claude/skills or .agents/skills — cannot prove the trees are independent copies (diff -r follows symlinks), refusing to collapse"
 fi
 
+# A move relocates .claude/skills's PARENT directory to .agents/skills, so any
+# symlink inside it whose resolved target lies OUTSIDE that tree would answer
+# to a different base afterward (a relative target is reinterpreted from the
+# new .agents/skills location; an absolute target is untouched but the link
+# itself moved away from it). A dangling link can't be proven safe either, so
+# it is treated the same as an escape. Links resolving INSIDE the tree are
+# fine — they move together with it.
+if [[ "$SKILLS_ACTION" == "move" ]]; then
+	CS_REAL_BASE="$(realdir "$CS")"
+	while IFS= read -r link_path; do
+		rel_link="${link_path#"$CS"/}"
+		if [[ ! -e "$link_path" ]]; then
+			SKILLS_ACTION="ambiguous"
+			SKILLS_MSG=".claude/skills contains a dangling symlink ('${rel_link}') — cannot prove its target stays inside the tree after the move"
+			break
+		fi
+		target_dir_real="$(resolve_symlink_target_dir "$link_path")"
+		if [[ -z "$target_dir_real" ]]; then
+			SKILLS_ACTION="ambiguous"
+			SKILLS_MSG=".claude/skills contains a symlink ('${rel_link}') whose target could not be resolved — cannot prove it stays inside the tree after the move"
+			break
+		fi
+		case "$target_dir_real" in
+		"$CS_REAL_BASE" | "$CS_REAL_BASE"/*) : ;;
+		*)
+			SKILLS_ACTION="ambiguous"
+			SKILLS_MSG=".claude/skills contains a symlink ('${rel_link}') resolving outside the tree — its base would change after the move"
+			break
+			;;
+		esac
+	done < <(find "$CS" -type l 2>/dev/null)
+fi
+
 # The fixes below create/move entries under .claude/ and .agents/ assuming both
 # are real directories directly under the repo root — a symlinked .claude or
 # .agents ancestor would make the relative ../.agents/skills link land (and
 # dangle) in the physical target instead. Refuse rather than wire a broken link.
 case "$SKILLS_ACTION" in
-move | symlink-only | collapse)
+move | symlink-only | collapse | rewrite)
 	if [[ -L "$REPO/.claude" || -L "$REPO/.agents" ]]; then
 		SKILLS_ACTION="ambiguous"
 		SKILLS_MSG=".claude or .agents is itself a symlink — the relative .claude/skills -> ../.agents/skills link would dangle in the physical target"
@@ -277,20 +374,53 @@ esac
 # the same fresh-clone failure latent — surface it retroactively, not just when
 # a move is in flight.
 case "$SKILLS_ACTION" in
-move | symlink-only | collapse | ok)
+move | symlink-only | collapse | ok | rewrite)
 	if git -C "$REPO" rev-parse --git-dir >/dev/null 2>&1; then
-		if git -C "$REPO" check-ignore -q .agents/skills 2>/dev/null; then
-			GIT_IGNORE_DETAIL="$(git -C "$REPO" check-ignore -v .agents/skills 2>/dev/null)"
+		# Check the actual DESTINATION pathnames that will exist under
+		# .agents/skills, not just the directory itself — an ignore rule that
+		# matches only descendants (`.agents/skills/**`, or a global `*.md`)
+		# is invisible to `check-ignore .agents/skills` alone: the directory
+		# itself isn't ignored, only its future contents are, so the old
+		# single-path probe reported the move as trackable while a later
+		# `git add -A` would have silently omitted every file under it. For a
+		# pending move the destinations are computed from .claude/skills (the
+		# content hasn't moved yet); for collapse/ok/symlink-only/rewrite the
+		# content already lives at .agents/skills. The bare directory path is
+		# always included too (covers an empty tree). `check-ignore --stdin`
+		# (with -v) prints one line per MATCHED path and exits 0 if any
+		# matched, 1 if none did — so branch on captured output, not on the
+		# pipeline's own exit status (set -o pipefail would otherwise fold a
+		# clean "nothing ignored" rc=1 into a surrounding pipeline).
+		DEST_PATHS=".agents/skills"$'\n'
+		case "$SKILLS_ACTION" in
+		move)
+			while IFS= read -r cs_file; do
+				DEST_PATHS="${DEST_PATHS}.agents/skills/${cs_file#"$CS"/}"$'\n'
+			done < <(find "$CS" \( -type f -o -type l \) 2>/dev/null)
+			;;
+		collapse | ok | symlink-only | rewrite)
+			while IFS= read -r as_file; do
+				DEST_PATHS="${DEST_PATHS}.agents/skills/${as_file#"$AS"/}"$'\n'
+			done < <(find "$AS" \( -type f -o -type l \) 2>/dev/null)
+			;;
+		esac
+		# Decide with the NON-verbose form: it prints only genuinely-ignored
+		# paths. `-v` would also print paths matched by NEGATION patterns
+		# (`!.agents/skills`), which are explicitly NOT ignored — deciding on
+		# -v output would falsely refuse a repo that un-ignores the tree.
+		GIT_IGNORE_HITS="$(printf '%s' "$DEST_PATHS" | git -C "$REPO" check-ignore --stdin 2>/dev/null)"
+		if [[ -n "$GIT_IGNORE_HITS" ]]; then
+			GIT_IGNORE_HIT_PATH="$(printf '%s\n' "$GIT_IGNORE_HITS" | head -n 1)"
+			GIT_IGNORE_FIRST="$(git -C "$REPO" check-ignore -v -- "$GIT_IGNORE_HIT_PATH" 2>/dev/null | head -n 1)"
 			SKILLS_ACTION="ambiguous"
-			SKILLS_MSG=".agents/skills is git-ignored (${GIT_IGNORE_DETAIL}) — delete that exclude line and re-run"
+			SKILLS_MSG="${GIT_IGNORE_HIT_PATH} is git-ignored (${GIT_IGNORE_FIRST}) — delete that exclude line and re-run"
 		fi
 	fi
 	;;
 esac
 
 if [[ "$SKILLS_ACTION" == "ambiguous" ]]; then
-	say "ambiguous skills state: ${SKILLS_MSG} — refusing to touch either directory. Resolve by hand and re-run."
-	exit 4
+	die "ambiguous skills state: ${SKILLS_MSG} — refusing to touch either directory. Resolve by hand and re-run." 4
 fi
 
 # HAS_SKILLS reflects the canonical tree's non-emptiness, checked BEFORE any
@@ -301,7 +431,7 @@ fi
 HAS_SKILLS=0
 case "$SKILLS_ACTION" in
 move) [[ -n "$(ls -A "$CS" 2>/dev/null)" ]] && HAS_SKILLS=1 ;;
-ok | symlink-only | collapse) [[ -n "$(ls -A "$AS" 2>/dev/null)" ]] && HAS_SKILLS=1 ;;
+ok | symlink-only | collapse | rewrite) [[ -n "$(ls -A "$AS" 2>/dev/null)" ]] && HAS_SKILLS=1 ;;
 none) : ;;
 esac
 
@@ -344,6 +474,16 @@ move)
 		say "✓ fixed: moved .claude/skills to .agents/skills and symlinked .claude/skills -> ../.agents/skills"
 	else
 		say "would MOVE .claude/skills to .agents/skills and symlink .claude/skills -> ../.agents/skills"
+	fi
+	;;
+rewrite)
+	NEED_FIX=1
+	if [[ $FIX -eq 1 ]]; then
+		rm "$CS" || die "failed to remove .claude/skills symlink"
+		ln -s '../.agents/skills' "$CS" || die "failed to symlink .claude/skills"
+		say "✓ fixed: rewrote .claude/skills symlink to relative ../.agents/skills"
+	else
+		say "would REWRITE .claude/skills symlink to relative ../.agents/skills"
 	fi
 	;;
 symlink-only)

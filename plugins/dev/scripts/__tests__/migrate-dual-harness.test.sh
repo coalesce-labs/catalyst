@@ -149,18 +149,24 @@ has "8 monoskills: CLAUDE.md content preserved" "## Setup" "$R/CLAUDE.md"
 bash "$SCRIPT" --repo "$SCRATCH/no/such/dir" >/dev/null 2>&1; assert_eq "9 bad --repo: rc=2" 2 "$?"
 bash "$SCRIPT" --repo "$SCRATCH" --bogus-flag >/dev/null 2>&1; assert_eq "9 unknown flag: rc=2" 2 "$?"
 
-# 10. absolute-path symlink resolving correctly to .agents/skills → treated as
-#     OK (rc 0), not recreated.
+# 10. absolute-path symlink resolving correctly to .agents/skills → no longer
+#     "ok" — it's a mechanical fix: dry-run rc 10 (would REWRITE) with the
+#     tree left untouched; --fix rewrites it to the canonical relative
+#     ../.agents/skills (rm the symlink only, never rm -rf — it's a symlink —
+#     then re-link); content stays reachable; rerun is rc 0 (idempotent).
 R="$SCRATCH/abssymlink"; mkdir -p "$R/.claude" "$R/.agents/skills/foo"
 printf '@AGENTS.md\n\n## Claude notes\nx\n' >"$R/CLAUDE.md"
 printf 'body\n' >"$R/.agents/skills/foo/SKILL.md"
 printf '# AGENTS.md\n\n## What\ny\n\n## Skills\n\nRepository skills live in `.agents/skills/` — Claude Code finds them via the `.claude/skills`\nsymlink; any agent can read the path directly.\n' >"$R/AGENTS.md"
 ln -s "$R/.agents/skills" "$R/.claude/skills"
 BEFORE="$(tree_snapshot "$R")"
-run "$R"; assert_eq "10 abssymlink: dry-run rc=0" 0 "$?"
+run "$R"; assert_eq "10 abssymlink: dry-run rc=10 (would REWRITE, not ok)" 10 "$?"
+assert_eq "10 abssymlink: dry-run tree unchanged" "$BEFORE" "$(tree_snapshot "$R")"
 run "$R" --fix; assert_eq "10 abssymlink: --fix rc=0" 0 "$?"
-assert_eq "10 abssymlink: tree unchanged (not recreated)" "$BEFORE" "$(tree_snapshot "$R")"
-assert_eq "10 abssymlink: symlink target left as absolute path" "$R/.agents/skills" "$(readlink "$R/.claude/skills")"
+[[ -L "$R/.claude/skills" ]] && pass "10 abssymlink: .claude/skills still a symlink after --fix" || fail "10 abssymlink: .claude/skills still a symlink after --fix"
+assert_eq "10 abssymlink: symlink rewritten to relative ../.agents/skills" "../.agents/skills" "$(readlink "$R/.claude/skills")"
+assert_eq "10 abssymlink: content still reachable through the rewritten link" "body" "$(cat "$R/.claude/skills/foo/SKILL.md")"
+run "$R"; assert_eq "10 abssymlink: rerun dry-run rc=0 (idempotent)" 0 "$?"
 
 # 11. reverse-wired: real .claude/skills + .agents/skills -> ../.claude/skills
 #     (the only copy of the content sits under .claude/skills; .agents/skills
@@ -382,6 +388,94 @@ run "$R"; assert_eq "23 tokenbound: dry-run rc=10 (.agents/skills-old does not c
 run "$R" --fix; assert_eq "23 tokenbound: --fix rc=0" 0 "$?"
 assert_eq "23 tokenbound: pointer heading appended exactly once" 1 "$(count "$R/AGENTS.md" '## Skills')"
 run "$R"; assert_eq "23 tokenbound: rerun dry-run rc=0 (real pointer now recognized)" 0 "$?"
+
+# 24. descendant-only ignore rule ('.agents/skills/**') catches the pending
+#     move's destination FILES even though it does NOT match the bare
+#     .agents/skills directory path itself — exactly the gap where checking
+#     only the directory (not the files that will land under it) reported a
+#     move as trackable when `git add -A` would have silently omitted every
+#     file under it. rc 4 both modes, tree untouched; removing the rule lets
+#     the move proceed normally.
+R="$SCRATCH/descendantignore"; mkdir -p "$R/.claude/skills/foo"
+(cd "$R" && git init -q)
+printf '@AGENTS.md\n\n## Claude notes\nx\n' >"$R/CLAUDE.md"
+printf '# AGENTS.md\n\n## What\ny\n' >"$R/AGENTS.md"
+printf 'skill body\n' >"$R/.claude/skills/foo/SKILL.md"
+printf '.agents/skills/**\n' >"$R/.git/info/exclude"
+BEFORE="$(tree_snapshot "$R")"
+run "$R" >/dev/null 2>&1; assert_eq "24 descendantignore: dry-run rc=4 (descendant-only rule)" 4 "$?"
+assert_eq "24 descendantignore: dry-run tree unchanged" "$BEFORE" "$(tree_snapshot "$R")"
+run "$R" --fix >/dev/null 2>&1; assert_eq "24 descendantignore: --fix rc=4" 4 "$?"
+assert_eq "24 descendantignore: --fix tree unchanged" "$BEFORE" "$(tree_snapshot "$R")"
+rm -f "$R/.git/info/exclude"
+run "$R" >/dev/null 2>&1; assert_eq "24 descendantignore: dry-run rc=10 once the rule is removed" 10 "$?"
+run "$R" --fix; assert_eq "24 descendantignore: --fix rc=0 once the rule is removed" 0 "$?"
+[[ -L "$R/.claude/skills" ]] && pass "24 descendantignore: .claude/skills now a symlink" || fail "24 descendantignore: .claude/skills now a symlink"
+assert_eq "24 descendantignore: file preserved" "skill body" "$(cat "$R/.agents/skills/foo/SKILL.md")"
+
+# 25. global '*.md' ignore rule catches every skill file (SKILL.md) by
+#     basename, without matching the bare .agents/skills directory path
+#     (CLAUDE.md/AGENTS.md are explicitly un-ignored at repo root so this
+#     fixture isolates the SKILLS destination check from the docs-ignore
+#     preflight in test 26) → rc 4.
+R="$SCRATCH/globalmdignore"; mkdir -p "$R/.claude/skills/foo"
+(cd "$R" && git init -q)
+printf '@AGENTS.md\n\n## Claude notes\nx\n' >"$R/CLAUDE.md"
+printf '# AGENTS.md\n\n## What\ny\n' >"$R/AGENTS.md"
+printf 'skill body\n' >"$R/.claude/skills/foo/SKILL.md"
+printf '*.md\n!/CLAUDE.md\n!/AGENTS.md\n' >"$R/.git/info/exclude"
+BEFORE="$(tree_snapshot "$R")"
+run "$R" >/dev/null 2>&1; assert_eq "25 globalmdignore: dry-run rc=4 (*.md catches SKILL.md)" 4 "$?"
+assert_eq "25 globalmdignore: dry-run tree unchanged" "$BEFORE" "$(tree_snapshot "$R")"
+run "$R" --fix >/dev/null 2>&1; assert_eq "25 globalmdignore: --fix rc=4" 4 "$?"
+assert_eq "25 globalmdignore: --fix tree unchanged" "$BEFORE" "$(tree_snapshot "$R")"
+
+# 26. AGENTS.md itself is git-ignored → rc 4 before any classification runs
+#     (never create a bridge that imports an uncommittable file).
+R="$SCRATCH/agentsignoreddoc"; mkdir -p "$R"
+(cd "$R" && git init -q)
+printf '# AGENTS.md\n\n## What\ny\n' >"$R/AGENTS.md"
+printf 'AGENTS.md\n' >"$R/.git/info/exclude"
+BEFORE="$(tree_snapshot "$R")"
+OUT_DRY="$(bash "$SCRIPT" --repo "$R" 2>&1)"; RC_DRY=$?
+assert_eq "26 agentsignoreddoc: dry-run rc=4" 4 "$RC_DRY"
+echo "$OUT_DRY" | grep -qF "AGENTS.md is git-ignored" && pass "26 agentsignoreddoc: message names AGENTS.md" || fail "26 agentsignoreddoc: message names AGENTS.md" "$OUT_DRY"
+assert_eq "26 agentsignoreddoc: dry-run tree unchanged" "$BEFORE" "$(tree_snapshot "$R")"
+OUT_FIX="$(bash "$SCRIPT" --repo "$R" --fix 2>&1)"; RC_FIX=$?
+assert_eq "26 agentsignoreddoc: --fix rc=4" 4 "$RC_FIX"
+assert_eq "26 agentsignoreddoc: --fix tree unchanged" "$BEFORE" "$(tree_snapshot "$R")"
+
+# 27. .claude/skills contains a symlink whose resolved target lies OUTSIDE the
+#     tree → the move would change the link's effective base, so rc 4 both
+#     modes, nothing touched.
+R="$SCRATCH/escapinglink"; mkdir -p "$R/.claude/skills" "$R/outside-dir"
+printf '@AGENTS.md\n\n## Claude notes\nx\n' >"$R/CLAUDE.md"
+printf '# AGENTS.md\n\n## What\ny\n' >"$R/AGENTS.md"
+printf 'outside body\n' >"$R/outside-dir/thing.txt"
+ln -s '../../outside-dir/thing.txt' "$R/.claude/skills/escape-link"
+BEFORE="$(tree_snapshot "$R")"
+run "$R" >/dev/null 2>&1; assert_eq "27 escapinglink: dry-run rc=4" 4 "$?"
+assert_eq "27 escapinglink: dry-run tree unchanged" "$BEFORE" "$(tree_snapshot "$R")"
+run "$R" --fix >/dev/null 2>&1; assert_eq "27 escapinglink: --fix rc=4" 4 "$?"
+assert_eq "27 escapinglink: --fix tree unchanged" "$BEFORE" "$(tree_snapshot "$R")"
+assert_eq "27 escapinglink: outside content untouched" "outside body" "$(cat "$R/outside-dir/thing.txt")"
+
+# 28. .claude/skills contains a symlink whose resolved target lies INSIDE the
+#     tree → fine, it moves together with the tree; --fix succeeds and the
+#     link still resolves (now under .agents/skills).
+R="$SCRATCH/internallink"; mkdir -p "$R/.claude/skills/foo" "$R/.claude/skills/bar"
+printf '@AGENTS.md\n\n## Claude notes\nx\n' >"$R/CLAUDE.md"
+printf '# AGENTS.md\n\n## What\ny\n' >"$R/AGENTS.md"
+printf 'real body\n' >"$R/.claude/skills/foo/SKILL.md"
+ln -s '../foo/SKILL.md' "$R/.claude/skills/bar/link-to-foo"
+run "$R"; assert_eq "28 internallink: dry-run rc=10" 10 "$?"
+run "$R" --fix; assert_eq "28 internallink: --fix rc=0" 0 "$?"
+[[ -L "$R/.agents/skills/bar/link-to-foo" ]] && pass "28 internallink: link moved with the tree" || fail "28 internallink: link moved with the tree"
+assert_eq "28 internallink: link still resolves after the move" "real body" "$(cat "$R/.agents/skills/bar/link-to-foo")"
+
+# 29. --repo as the final argument (no value follows) → documented rc 2 usage
+#     error, not bash's raw parameter-expansion failure (rc 1).
+bash "$SCRIPT" --repo >/dev/null 2>&1; assert_eq "29 --repo as final arg: rc=2" 2 "$?"
 
 echo ""
 echo "migrate-dual-harness.test.sh: ${PASSES} passed, ${FAILURES} failed"
