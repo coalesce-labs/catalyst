@@ -10,10 +10,13 @@ import { describe, it, test, expect, mock } from "bun:test";
 import {
   ProcReaper,
   classifyProc,
+  classifyPreCwd,
+  isCommandDenylisted,
   isOrphaned,
   cwdUnderWorktreeRoot,
   buildAllowlist,
   collectLiveAgentSubtree,
+  parseLsofCwdBatch,
   parsePsRows,
   parseEtime,
 } from "./proc-reaper.mjs";
@@ -199,6 +202,9 @@ function ctx(overrides = {}) {
     killableCommands: new Set(["node", "bun"]),
     minEtimeSec: 900,
     cwdForPid: () => `${WT_ROOT}/CTL-X`, // lsof cwd resolver; default = under wt
+    // CTL-1531: cwd-deleted probe (widened-class ONLY). Default false = the cwd
+    // is GONE, i.e. the kill-eligible direction, mirroring cwdForPid's default.
+    cwdExists: () => false,
     worktreePath: null,
     ...overrides,
   };
@@ -249,8 +255,11 @@ describe("classifyProc kill-gate (ALL must hold else SPARE)", () => {
     expect(v.action).toBe("spare");
     expect(v.reason).toBe("live-agent-owned");
   });
-  test("command not in killableCommands → spare(reason command-not-killable)", async () => {
-    const row = { pid: 10, ppid: 1, command: "python", etimeSec: 1000, args: "python x.py" };
+  // CTL-1531: the command gate now admits a WIDENED class (any command, strict
+  // ppid===1, deleted cwd under the worktree root). A non-killable command that
+  // is NOT strictly ppid-1 still spares on the original reason.
+  test("command not in killableCommands AND ppid!==1 → spare(reason command-not-killable)", async () => {
+    const row = { pid: 10, ppid: 7, command: "python", etimeSec: 1000, args: "python x.py" };
     const v = await classifyProc(row, ctx());
     expect(v.action).toBe("spare");
     expect(v.reason).toBe("command-not-killable");
@@ -703,5 +712,710 @@ describe("ProcReaper.sweep — targeted teardown sweep", () => {
     expect(r2.reaped.map((x) => x.pid)).not.toContain(800); // sibling untouched
     expect(killProc.calls.some(([pid]) => pid === 800 && killProc.calls)).toBe(false);
     expect(killProc.calls.filter(([pid, s]) => pid === 800 && s !== 0)).toHaveLength(0);
+  });
+});
+
+// ─── CTL-1531: the WIDENED any-command orphan class ──────────────────────────
+//
+// The motivating incident (2026-07-25→26): four `sh -c "while :; do :; done"`
+// processes pegged ~4 cores for 16.5h. cwd = ~/catalyst/wt/evergreen/evr-23, a
+// DELETED worktree; PPID 1. `killableCommands = {node,bun}` made them invisible.
+//
+// The widening gates on OWNERSHIP EVIDENCE instead of the command name:
+//   cwd under the worktree root  AND  cwd path no longer exists  AND  ppid === 1
+// It is admitted as an OR *inside* the command gate, so EVERY downstream gate
+// (orphan / cwd-known / live-agent / under-wt / target-worktree / etime) plus
+// the allowlist and LIVE_TREE gates ahead of it still run on the widened row.
+
+const SH_ARGS = "sh -c while :; do :; done";
+
+function shRow(overrides = {}) {
+  return { pid: 4444, ppid: 1, command: "sh", etimeSec: 59400, args: SH_ARGS, ...overrides };
+}
+
+describe("CTL-1531 classifyProc — widened any-command orphan class", () => {
+  test("non-node/bun orphan with DELETED cwd under the worktree root → kill", async () => {
+    const v = await classifyProc(
+      shRow(),
+      ctx({ cwdForPid: () => `${WT_ROOT}/evergreen/evr-23`, cwdExists: () => false })
+    );
+    expect(v.action).toBe("kill");
+    expect(v.reason).toBe("orphan-any-command-deleted-cwd");
+    expect(v.widened).toBe(true);
+  });
+
+  test("same process but cwd is a LIVE worktree → spare(reason cwd-still-exists)", async () => {
+    const v = await classifyProc(
+      shRow(),
+      ctx({ cwdForPid: () => `${WT_ROOT}/CTL-999`, cwdExists: () => true })
+    );
+    expect(v.action).toBe("spare");
+    expect(v.reason).toBe("cwd-still-exists");
+  });
+
+  test("same process but cwd OUTSIDE the worktree root → spare(not-under-worktree-root) even with a deleted cwd", async () => {
+    const v = await classifyProc(
+      shRow(),
+      ctx({ cwdForPid: () => "/Users/test/scratch/deleted-dir", cwdExists: () => false })
+    );
+    expect(v.action).toBe("spare");
+    expect(v.reason).toBe("not-under-worktree-root");
+  });
+
+  test("PPID !== 1 (live parent) → NOT widened, spare(command-not-killable)", async () => {
+    const v = await classifyProc(
+      shRow({ ppid: 5000 }),
+      ctx({ byPid: new Map([[5000, { pid: 5000, ppid: 1 }]]), cwdExists: () => false })
+    );
+    expect(v.action).toBe("spare");
+    expect(v.reason).toBe("command-not-killable");
+  });
+
+  test("STRICT ppid===1: a vanished-parent orphan (isOrphaned true, ppid!==1) is NOT widened", async () => {
+    // isOrphaned() also returns true when the parent is absent from the ps
+    // snapshot. That branch is a snapshot RACE and must never admit an
+    // arbitrary command — the widened class requires literal ppid === 1.
+    expect(isOrphaned({ pid: 4444, ppid: 9999 }, new Map())).toBe(true);
+    const v = await classifyProc(shRow({ ppid: 9999 }), ctx({ cwdExists: () => false }));
+    expect(v.action).toBe("spare");
+    expect(v.reason).toBe("command-not-killable");
+  });
+
+  test("cwd probe unavailable (null) → spare(cwd-unknown) — FAIL CLOSED", async () => {
+    const v = await classifyProc(shRow(), ctx({ cwdForPid: () => null }));
+    expect(v.action).toBe("spare");
+    expect(v.reason).toBe("cwd-unknown");
+  });
+
+  test("cwd-exists probe unavailable (null) → spare(cwd-exists-unknown) — FAIL CLOSED", async () => {
+    const v = await classifyProc(shRow(), ctx({ cwdExists: () => null }));
+    expect(v.action).toBe("spare");
+    expect(v.reason).toBe("cwd-exists-unknown");
+  });
+
+  test("allowlisted argv still wins over the widened class", async () => {
+    const row = shRow({ args: "sh -c bun run /x/broker/index.mjs" });
+    const v = await classifyProc(row, ctx({ cwdExists: () => false }));
+    expect(v.action).toBe("spare");
+    expect(v.reason).toBe("allowlisted");
+  });
+
+  test("allowlisted pid (self / daemon / LIVE_TREE) still wins over the widened class", async () => {
+    const v = await classifyProc(
+      shRow({ pid: 77 }),
+      ctx({ allowlist: buildAllowlist({ selfPid: 77 }), cwdExists: () => false })
+    );
+    expect(v.action).toBe("spare");
+    expect(v.reason).toBe("allowlisted");
+  });
+
+  test("a live agent's cwd prefix still spares the widened class", async () => {
+    const v = await classifyProc(
+      shRow(),
+      ctx({
+        liveAgentCwds: new Set([`${WT_ROOT}/CTL-X`]),
+        cwdForPid: () => `${WT_ROOT}/CTL-X/sub`,
+        cwdExists: () => false,
+      })
+    );
+    expect(v.action).toBe("spare");
+    expect(v.reason).toBe("live-agent-owned");
+  });
+
+  test("etime floor still applies to the widened class", async () => {
+    const v = await classifyProc(shRow({ etimeSec: 10 }), ctx({ cwdExists: () => false }));
+    expect(v.action).toBe("spare");
+    expect(v.reason).toBe("too-young");
+  });
+
+  test("targeted worktreePath scope still applies to the widened class", async () => {
+    const v = await classifyProc(
+      shRow(),
+      ctx({
+        worktreePath: `${WT_ROOT}/CTL-X`,
+        cwdForPid: () => `${WT_ROOT}/CTL-X9`,
+        cwdExists: () => false,
+      })
+    );
+    expect(v.action).toBe("spare");
+    expect(v.reason).toBe("outside-target-worktree");
+  });
+
+  test("REGRESSION: node/bun keep the legacy predicate — a LIVE cwd is still killable", async () => {
+    // The widened deleted-cwd conjunct must apply to the widened class ONLY.
+    // Narrowing node/bun to "deleted cwd" would silently drop existing coverage.
+    const row = { pid: 10, ppid: 1, command: "node", etimeSec: 1000, args: "node x.mjs" };
+    const v = await classifyProc(row, ctx({ cwdExists: () => true }));
+    expect(v.action).toBe("kill");
+    expect(v.reason).toBe("orphan-node-under-worktree");
+    expect(v.widened).toBe(false);
+  });
+
+  test("REGRESSION: node/bun with a VANISHED parent (ppid!==1) are still killable", async () => {
+    const row = { pid: 10, ppid: 9999, command: "bun", etimeSec: 1000, args: "bun x.mjs" };
+    const v = await classifyProc(row, ctx({ cwdExists: () => true }));
+    expect(v.action).toBe("kill");
+  });
+});
+
+// A `sh -c` runaway fixture: PPID 1, cwd = a DELETED worktree under the root.
+function shOrphanFixture({ mode = "shadow", agentsOk = true, extra = {} } = {}) {
+  const SH_PID = 4444;
+  const GONE_WT = `${WT_ROOT}/evergreen/evr-23`;
+  const psLines = [`${SH_PID} 1 1200 16:30:00 ${SH_ARGS}`];
+  const emit = recordingEmit();
+  const killProc = recordingKill({ alive: new Set([SH_PID]) });
+  const reaper = new ProcReaper({
+    mode,
+    worktreeRoot: WT_ROOT,
+    graceMs: 5000,
+    minEtimeSec: 900,
+    psLister: () => psLines,
+    lsofCwd: () => GONE_WT,
+    cwdExists: () => false, // the worktree was deleted out from under it
+    agentsResult: () => ({ ok: agentsOk, agents: [] }),
+    killProc,
+    sleep: async () => {},
+    selfPid: 1,
+    parentPid: 2,
+    daemonPids: [],
+    emit,
+    log: silentLog(),
+    ...extra,
+  });
+  return { reaper, emit, killProc, SH_PID, GONE_WT };
+}
+
+describe("CTL-1531 ProcReaper.sweep — widened class end-to-end", () => {
+  it("SHADOW (the default): the `sh` runaway is REPORTED as would-reap and killed NOTHING", async () => {
+    const { reaper, emit, killProc, SH_PID } = shOrphanFixture({ mode: "shadow" });
+    await reaper.sweep({}); // sweep 1 — two-sweep persistence
+    const r2 = await reaper.sweep({});
+    expect(killProc.calls.filter(([, s]) => s !== 0)).toHaveLength(0);
+    expect(r2.reaped).toHaveLength(0);
+    expect(r2.wouldReap.map((x) => x.pid)).toContain(SH_PID);
+    const entry = r2.wouldReap.find((x) => x.pid === SH_PID);
+    expect(entry.command).toBe("sh");
+    expect(entry.widened).toBe(true);
+    expect(entry.reason).toBe("orphan-any-command-deleted-cwd");
+  });
+
+  it("SHADOW: the would-reap event carries the widened reason so the new class is separable in Loki", async () => {
+    const { emit, reaper } = shOrphanFixture({ mode: "shadow" });
+    await reaper.sweep({});
+    await reaper.sweep({});
+    const ev = emit.calls.find((c) => c.type === "procOrphans.would-reap");
+    expect(ev).toBeDefined();
+    expect(ev.fields.command).toBe("sh");
+    expect(ev.fields.reason).toBe("orphan-any-command-deleted-cwd");
+  });
+
+  it("SHADOW: the newly-visible candidate is LOGGED clearly (widened flagged)", async () => {
+    const lines = [];
+    const log = {
+      info: (f, m) => lines.push({ f, m }),
+      warn: () => {},
+      error: () => {},
+    };
+    const { reaper } = shOrphanFixture({ mode: "shadow", extra: { log } });
+    await reaper.sweep({});
+    await reaper.sweep({});
+    const hit = lines.find((l) => l.f?.widened === true && l.f?.pid === 4444);
+    expect(hit).toBeDefined();
+    expect(hit.m.toLowerCase()).toContain("widened");
+    expect(hit.f.args).toBe(SH_ARGS);
+  });
+
+  it("ENFORCE (explicit opt-in only): the `sh` runaway is reaped after two sweeps", async () => {
+    const { reaper, killProc, SH_PID } = shOrphanFixture({ mode: "enforce" });
+    await reaper.sweep({});
+    const r2 = await reaper.sweep({});
+    expect(r2.reaped.map((x) => x.pid)).toContain(SH_PID);
+    const signals = killProc.calls.map(([, s]) => s);
+    expect(signals.indexOf("SIGTERM")).toBeLessThan(signals.indexOf("SIGKILL"));
+  });
+
+  it("a LIVE worktree cwd → the `sh` process is spared, never killed (enforce)", async () => {
+    const { reaper, killProc } = shOrphanFixture({
+      mode: "enforce",
+      extra: { cwdExists: () => true, killProc: () => { throw new Error("must not kill"); } },
+    });
+    await reaper.sweep({});
+    const r2 = await reaper.sweep({});
+    expect(r2.reaped).toHaveLength(0);
+    expect(r2.spared.some((s) => s.reason === "cwd-still-exists")).toBe(true);
+  });
+
+  it("cwd OUTSIDE the worktree root is NEVER a candidate regardless of ppid/command (enforce)", async () => {
+    const { reaper } = shOrphanFixture({
+      mode: "enforce",
+      extra: {
+        lsofCwd: () => "/Users/test/tmp/deleted-scratch",
+        cwdExists: () => false,
+        killProc: () => { throw new Error("must not kill"); },
+      },
+    });
+    await reaper.sweep({});
+    const r2 = await reaper.sweep({});
+    expect(r2.reaped).toHaveLength(0);
+    expect(r2.spared.some((s) => s.reason === "not-under-worktree-root")).toBe(true);
+  });
+
+  it("a throwing cwd-exists probe degrades safe (enforce kills nothing)", async () => {
+    const { reaper } = shOrphanFixture({
+      mode: "enforce",
+      extra: {
+        cwdExists: () => { throw new Error("stat boom"); },
+        killProc: () => { throw new Error("must not kill"); },
+      },
+    });
+    await reaper.sweep({});
+    const r2 = await reaper.sweep({});
+    expect(r2.reaped).toHaveLength(0);
+    expect(r2.spared.some((s) => s.reason === "cwd-exists-unknown")).toBe(true);
+  });
+
+  it("CATASTROPHE GUARD still aborts the widened class too", async () => {
+    const { reaper, killProc, emit } = shOrphanFixture({ mode: "enforce", agentsOk: false });
+    await reaper.sweep({});
+    const r2 = await reaper.sweep({});
+    expect(killProc.calls.filter(([, s]) => s !== 0)).toHaveLength(0);
+    expect(r2.reaped).toHaveLength(0);
+    expect(emit.calls.some((c) => c.fields?.reason === "agents-unreadable")).toBe(true);
+  });
+
+  it("SELF-PROTECTION: the reaper never selects its own pid or its parent pid", async () => {
+    const psLines = [
+      `901 1 1200 16:30:00 ${SH_ARGS}`, // == selfPid
+      `902 1 1200 16:30:00 ${SH_ARGS}`, // == parentPid
+      `903 1 1200 16:30:00 ${SH_ARGS}`, // an unrelated widened orphan
+    ];
+    const killProc = recordingKill({ alive: new Set([901, 902, 903]) });
+    const reaper = new ProcReaper({
+      mode: "enforce",
+      worktreeRoot: WT_ROOT,
+      minEtimeSec: 900,
+      psLister: () => psLines,
+      lsofCwd: () => `${WT_ROOT}/evergreen/evr-23`,
+      cwdExists: () => false,
+      agentsResult: () => ({ ok: true, agents: [] }),
+      killProc,
+      sleep: async () => {},
+      selfPid: 901,
+      parentPid: 902,
+      emit: recordingEmit(),
+      log: silentLog(),
+    });
+    await reaper.sweep({});
+    const r2 = await reaper.sweep({});
+    const reapedPids = r2.reaped.map((x) => x.pid);
+    expect(reapedPids).not.toContain(901);
+    expect(reapedPids).not.toContain(902);
+    expect(reapedPids).toContain(903);
+    expect(killProc.calls.filter(([p, s]) => p === 901 && s !== 0)).toHaveLength(0);
+    expect(killProc.calls.filter(([p, s]) => p === 902 && s !== 0)).toHaveLength(0);
+  });
+
+  it("two-sweep argv persistence still guards pid reuse for the widened class", async () => {
+    // `sh` pids recycle far faster than node/bun pids, so the full-argv match is
+    // strictly MORE load-bearing here.
+    const first = `4444 1 1200 16:30:00 ${SH_ARGS}`;
+    const reused = `4444 1 1200 00:20:00 sh -c echo hello`;
+    let n = 0;
+    const killProc = recordingKill({ alive: new Set([4444]) });
+    const reaper = new ProcReaper({
+      mode: "enforce",
+      worktreeRoot: WT_ROOT,
+      minEtimeSec: 900,
+      psLister: () => (++n === 1 ? [first] : [reused]),
+      lsofCwd: () => `${WT_ROOT}/evergreen/evr-23`,
+      cwdExists: () => false,
+      agentsResult: () => ({ ok: true, agents: [] }),
+      killProc,
+      sleep: async () => {},
+      selfPid: 1,
+      parentPid: 2,
+      emit: recordingEmit(),
+      log: silentLog(),
+    });
+    await reaper.sweep({});
+    const r2 = await reaper.sweep({});
+    expect(r2.reaped).toHaveLength(0);
+    expect(killProc.calls.filter(([, s]) => s !== 0)).toHaveLength(0);
+  });
+
+  it("defaults are unchanged: shadow mode, killableCommands = {node,bun}, a real cwdExists seam", () => {
+    const reaper = new ProcReaper({ psLister: () => [], log: silentLog() });
+    expect(reaper.mode).toBe("shadow");
+    expect([...reaper.killableCommands].sort()).toEqual(["bun", "node"]);
+    expect(typeof reaper.cwdExists).toBe("function");
+    // The default probe answers a real boolean for a path that certainly exists.
+    expect(reaper.cwdExists(process.cwd())).toBe(true);
+  });
+});
+
+describe("CTL-1531 buildAllowlist — parentPid self-protection", () => {
+  test("parentPid joins selfPid/daemonPids/LIVE_TREE in the never-kill pid set", () => {
+    const allow = buildAllowlist({ selfPid: 42, parentPid: 43, daemonPids: [7] });
+    expect(allow.pids.has(42)).toBe(true);
+    expect(allow.pids.has(43)).toBe(true);
+    expect(allow.pids.has(7)).toBe(true);
+  });
+});
+
+// ─── CTL-1531 review #3/#4 — the widened-class command DENYLIST ──────────────
+//
+// A tmux/screen server is ppid-1 BY CONSTRUCTION and inherits its cwd from the
+// shell that started it, so under the widened (any-command) admission it is a
+// syntactically perfect candidate and ONE kill closes every pane the operator
+// has open. The shell sibling has guarded this since the first draft; the mjs
+// side shipped with only DEFAULT_ALLOWLIST_PATTERNS.
+
+describe("CTL-1531 isCommandDenylisted", () => {
+  // The exact strings the shell-side review measured. A bare `^tmux$` anchor
+  // matches NONE of the first two — the trailing `:` of setproctitle's
+  // `progname: ` form is what defeated the original regex.
+  test("matches the `progname: ` setproctitle form (the form these procs ACTUALLY advertise)", () => {
+    expect(isCommandDenylisted("tmux: server (/private/tmp/tmux-501/default)", "tmux:")).toBe(true);
+    expect(isCommandDenylisted("sshd: ryan [priv]", "sshd:")).toBe(true);
+  });
+
+  test("matches the plain absolute-path form too", () => {
+    expect(isCommandDenylisted("/opt/homebrew/bin/tmux new-session", "tmux")).toBe(true);
+  });
+
+  test("matches a denied program hidden PAST argv[0] (full-argv scan)", () => {
+    expect(isCommandDenylisted("nohup /usr/local/bin/thing", "nohup")).toBe(true);
+    expect(isCommandDenylisted("/usr/bin/env screen -S build", "env")).toBe(true);
+  });
+
+  test("case-insensitive (GNU screen's server advertises itself as SCREEN)", () => {
+    expect(isCommandDenylisted("SCREEN -S foo", "screen")).toBe(true);
+  });
+
+  test("does NOT deny the motivating incident argv — the widening must still work", () => {
+    expect(isCommandDenylisted("sh -c while :; do :; done", "sh")).toBe(false);
+    expect(isCommandDenylisted("bun run /x/foo.ts", "bun")).toBe(false);
+  });
+
+  test("substring-only lookalikes are NOT denied (anchored, not a substring match)", () => {
+    expect(isCommandDenylisted("/x/sshd_helper.py run", "sshd_helper.py")).toBe(false);
+    expect(isCommandDenylisted("/x/tmuxinator start", "tmuxinator")).toBe(false);
+  });
+
+  test("non-string / empty input → false (never throws)", () => {
+    expect(isCommandDenylisted(null, null)).toBe(false);
+    expect(isCommandDenylisted("", "")).toBe(false);
+  });
+});
+
+describe("CTL-1531 classifyProc — denylist applies to the WIDENED class only", () => {
+  test("a ppid-1 `tmux: server` with a deleted cwd under the wt root is SPARED", async () => {
+    const row = {
+      pid: 900,
+      ppid: 1,
+      command: "tmux:",
+      etimeSec: 100000,
+      args: "tmux: server (/private/tmp/tmux-501/default)",
+    };
+    const v = await classifyProc(row, ctx());
+    expect(v.action).toBe("spare");
+    expect(v.reason).toBe("command-denylisted");
+  });
+
+  test("the same shape with a non-denied command is still KILLED (denylist is not a blanket bail)", async () => {
+    const row = { pid: 901, ppid: 1, command: "sh", etimeSec: 100000, args: "sh -c while :; do :; done" };
+    const v = await classifyProc(row, ctx());
+    expect(v.action).toBe("kill");
+    expect(v.widened).toBe(true);
+  });
+
+  test("node/bun are NEVER denied — the legacy class keeps its exact pre-CTL-1531 reach", async () => {
+    // `node` is not on the denylist, but prove the gate is widened-only by
+    // routing a would-be-denied argv through the killable-command path.
+    const row = { pid: 902, ppid: 1, command: "node", etimeSec: 100000, args: "node /x/tmux/build.mjs" };
+    const v = await classifyProc(row, ctx({ cwdExists: () => true }));
+    expect(v.action).toBe("kill");
+    expect(v.widened).toBe(false);
+  });
+});
+
+// ─── CTL-1531 review #1 — batched cwd resolution (the 93x regression) ────────
+//
+// The widened admission stopped gate (3) from being the cheap bail: on a real
+// host it cut the rows spared before the cwd probe from ~1344 to ~286, pushing
+// ~1061 extra rows into a SEQUENTIAL per-pid execFile. At ~55ms of node spawn
+// overhead each that is a 585ms → 54,525ms sweep — on the execution-core
+// daemon's event loop, off the 600s reaper timer.
+
+describe("CTL-1531 parseLsofCwdBatch", () => {
+  test("parses the `lsof -Fpn` record stream into pid → cwd", () => {
+    const out = parseLsofCwdBatch("p407\nfcwd\nn/Users/ryan\np630\nfcwd\nn/\np9\nfcwd\nn/tmp/x\n");
+    expect(out.get(407)).toBe("/Users/ryan");
+    expect(out.get(630)).toBe("/");
+    expect(out.get(9)).toBe("/tmp/x");
+    expect(out.size).toBe(3);
+  });
+
+  test("a pid with no `n` record is ABSENT (unknown → the caller spares)", () => {
+    const out = parseLsofCwdBatch("p1\nfcwd\np2\nfcwd\nn/a\n");
+    expect(out.has(1)).toBe(false);
+    expect(out.get(2)).toBe("/a");
+  });
+
+  test("takes only the FIRST n record per pid and ignores junk/empty lines", () => {
+    const out = parseLsofCwdBatch("p5\nfcwd\nn/first\nn/second\n\nzzz\np0\nn/bad-pid\n");
+    expect(out.get(5)).toBe("/first");
+    expect(out.has(0)).toBe(false);
+  });
+
+  test("empty / non-string input → empty map (never throws)", () => {
+    expect(parseLsofCwdBatch("").size).toBe(0);
+    expect(parseLsofCwdBatch(null).size).toBe(0);
+    expect(parseLsofCwdBatch(undefined).size).toBe(0);
+  });
+
+  // A timed-out lsof still yields its partial stdout (execFileTolerant keeps it),
+  // and that stream can stop mid-line. A truncated path would be a REAL,
+  // currently-nonexistent path under the worktree root — it would manufacture a
+  // perfect widened kill candidate for a process whose cwd is somewhere else.
+  test("an UNTERMINATED trailing record is discarded, not read as a real cwd", () => {
+    const truncated = "p10\nfcwd\nn/Users/ryan/wt/CTL-1\np11\nfcwd\nn/Users/ryan/wt/CTL-2";
+    const out = parseLsofCwdBatch(truncated);
+    expect(out.get(10)).toBe("/Users/ryan/wt/CTL-1"); // complete record, kept
+    expect(out.has(11)).toBe(false); // truncated record, dropped → unknown → spare
+  });
+
+  test("a truncated `p` header alone cannot mis-key a later path", () => {
+    const out = parseLsofCwdBatch("p10\nfcwd\nn/a\np1");
+    expect(out.get(10)).toBe("/a");
+    expect(out.size).toBe(1);
+  });
+});
+
+describe("CTL-1531 ProcReaper.sweep — ONE batched cwd probe, not one per pid", () => {
+  // 300 rows that all clear the cheap gates and therefore all need a cwd. The
+  // pre-fix loop issued 300 execFiles; the fix issues exactly one batch call.
+  function bigFixture(extra = {}) {
+    const rows = [];
+    for (let i = 0; i < 300; i++) {
+      rows.push(psLine({ pid: 5000 + i, ppid: 1, etime: "30:00", command: "sh -c while :; do :; done" }));
+    }
+    const batchCalls = [];
+    const singleCalls = [];
+    return {
+      batchCalls,
+      singleCalls,
+      reaper: new ProcReaper({
+        mode: "shadow",
+        worktreeRoot: WT_ROOT,
+        psLister: () => rows,
+        lsofCwd: (pid) => {
+          singleCalls.push(pid);
+          return `${WT_ROOT}/CTL-X`;
+        },
+        lsofCwdBatch: (pids) => {
+          batchCalls.push([...pids]);
+          return new Map(pids.map((p) => [p, `${WT_ROOT}/CTL-X`]));
+        },
+        cwdExists: () => false,
+        agentsResult: () => ({ ok: true, agents: [] }),
+        killProc: recordingKill(),
+        sleep: async () => {},
+        selfPid: 1,
+        parentPid: 2,
+        emit: recordingEmit(),
+        log: silentLog(),
+        ...extra,
+      }),
+    };
+  }
+
+  it("resolves 300 candidate cwds in ONE batch call and ZERO per-pid calls", async () => {
+    const { reaper, batchCalls, singleCalls } = bigFixture();
+    await reaper.sweep({});
+    expect(batchCalls).toHaveLength(1);
+    expect(batchCalls[0]).toHaveLength(300);
+    expect(singleCalls).toHaveLength(0);
+  });
+
+  it("the batch is asked ONLY for pids that actually reach the cwd probe", async () => {
+    // 3 rows: one probe-eligible, one allowlisted, one with a live ancestor.
+    const rows = [
+      psLine({ pid: 10, ppid: 1, etime: "30:00", command: "sh -c while :; do :; done" }),
+      psLine({ pid: 11, ppid: 1, etime: "30:00", command: "node /x/broker/index.mjs" }),
+      psLine({ pid: 12, ppid: 99, etime: "30:00", command: "node /x/a.mjs" }),
+      psLine({ pid: 99, ppid: 500, etime: "30:00", command: "bash" }),
+    ];
+    const batchCalls = [];
+    const reaper = new ProcReaper({
+      mode: "shadow",
+      worktreeRoot: WT_ROOT,
+      psLister: () => rows,
+      lsofCwd: () => `${WT_ROOT}/CTL-X`,
+      lsofCwdBatch: (pids) => {
+        batchCalls.push([...pids]);
+        return new Map(pids.map((p) => [p, `${WT_ROOT}/CTL-X`]));
+      },
+      cwdExists: () => false,
+      agentsResult: () => ({ ok: true, agents: [] }),
+      killProc: recordingKill(),
+      sleep: async () => {},
+      selfPid: 1,
+      parentPid: 2,
+      emit: recordingEmit(),
+      log: silentLog(),
+    });
+    await reaper.sweep({});
+    expect(batchCalls).toHaveLength(1);
+    expect(batchCalls[0].sort((a, b) => a - b)).toEqual([10]);
+  });
+
+  it("a pid the batch cannot answer for is UNKNOWN → spared, and never retried per-pid", async () => {
+    const rows = [
+      psLine({ pid: 10, ppid: 1, etime: "30:00", command: "sh -c while :; do :; done" }),
+      psLine({ pid: 11, ppid: 1, etime: "30:00", command: "sh -c while :; do :; done" }),
+    ];
+    const singleCalls = [];
+    const reaper = new ProcReaper({
+      mode: "shadow",
+      worktreeRoot: WT_ROOT,
+      psLister: () => rows,
+      lsofCwd: (pid) => {
+        singleCalls.push(pid);
+        return `${WT_ROOT}/CTL-X`;
+      },
+      // pid 11 is simply absent from the answer — exactly what real lsof does
+      // for a process it lacks permission to read.
+      lsofCwdBatch: () => new Map([[10, `${WT_ROOT}/CTL-X`]]),
+      cwdExists: () => false,
+      agentsResult: () => ({ ok: true, agents: [] }),
+      killProc: recordingKill(),
+      sleep: async () => {},
+      selfPid: 1,
+      parentPid: 2,
+      emit: recordingEmit(),
+      log: silentLog(),
+    });
+    await reaper.sweep({});
+    const r = await reaper.sweep({});
+    expect(r.wouldReap.map((x) => x.pid)).toEqual([10]);
+    expect(r.spared.find((x) => x.pid === 11).reason).toBe("cwd-unknown");
+    expect(singleCalls).toHaveLength(0); // no per-pid fallback storm
+  });
+
+  it("a THROWING batch probe degrades to 'every cwd unknown' — the sweep kills nothing", async () => {
+    const rows = [psLine({ pid: 10, ppid: 1, etime: "30:00", command: "node /x/a.mjs" })];
+    const killProc = recordingKill();
+    const reaper = new ProcReaper({
+      mode: "enforce",
+      worktreeRoot: WT_ROOT,
+      psLister: () => rows,
+      lsofCwd: () => `${WT_ROOT}/CTL-X`,
+      lsofCwdBatch: () => {
+        throw new Error("lsof timed out");
+      },
+      cwdExists: () => false,
+      agentsResult: () => ({ ok: true, agents: [] }),
+      killProc,
+      sleep: async () => {},
+      selfPid: 1,
+      parentPid: 2,
+      emit: recordingEmit(),
+      log: silentLog(),
+    });
+    await reaper.sweep({});
+    const r = await reaper.sweep({});
+    expect(r.reaped).toHaveLength(0);
+    expect(killProc.calls).toHaveLength(0);
+    expect(r.spared[0].reason).toBe("cwd-unknown");
+  });
+
+  it("the shadow would-reap event reuses the cached cwd (no extra probe per candidate)", async () => {
+    const rows = [psLine({ pid: 10, ppid: 1, etime: "30:00", command: "node /x/a.mjs" })];
+    const singleCalls = [];
+    const emit = recordingEmit();
+    const reaper = new ProcReaper({
+      mode: "shadow",
+      worktreeRoot: WT_ROOT,
+      psLister: () => rows,
+      lsofCwd: (pid) => {
+        singleCalls.push(pid);
+        return `${WT_ROOT}/CTL-X`;
+      },
+      lsofCwdBatch: (pids) => new Map(pids.map((p) => [p, `${WT_ROOT}/CTL-X`])),
+      cwdExists: () => false,
+      agentsResult: () => ({ ok: true, agents: [] }),
+      killProc: recordingKill(),
+      sleep: async () => {},
+      selfPid: 1,
+      parentPid: 2,
+      emit,
+      log: silentLog(),
+    });
+    await reaper.sweep({});
+    await reaper.sweep({});
+    expect(emit.calls.find((c) => c.type === "procOrphans.would-reap").fields.worktreePath).toBe(
+      `${WT_ROOT}/CTL-X`
+    );
+    expect(singleCalls).toHaveLength(0);
+  });
+
+  it("injecting only the single-pid seam keeps a fully hermetic per-pid path (no real lsof)", async () => {
+    // Guards the constructor rule: the native batch is adopted ONLY when lsofCwd
+    // is also the native default, so every pre-existing test stays hermetic.
+    const rows = [psLine({ pid: 10, ppid: 1, etime: "30:00", command: "node /x/a.mjs" })];
+    const singleCalls = [];
+    const reaper = new ProcReaper({
+      mode: "shadow",
+      worktreeRoot: WT_ROOT,
+      psLister: () => rows,
+      lsofCwd: (pid) => {
+        singleCalls.push(pid);
+        return `${WT_ROOT}/CTL-X`;
+      },
+      agentsResult: () => ({ ok: true, agents: [] }),
+      killProc: recordingKill(),
+      sleep: async () => {},
+      selfPid: 1,
+      parentPid: 2,
+      emit: recordingEmit(),
+      log: silentLog(),
+    });
+    expect(reaper.lsofCwdBatch).toBeNull();
+    await reaper.sweep({});
+    expect(singleCalls).toEqual([10]);
+  });
+
+  it("the production default DOES adopt the native batch seam", () => {
+    const reaper = new ProcReaper({ psLister: () => [], log: silentLog() });
+    expect(typeof reaper.lsofCwdBatch).toBe("function");
+  });
+});
+
+describe("CTL-1531 classifyPreCwd — the IO-free prefetch gate matches classifyProc", () => {
+  test("every terminal spare reason is reached WITHOUT touching a cwd seam", async () => {
+    const cases = [
+      [{ pid: 1, ppid: 1, command: "node", etimeSec: 9e5, args: "node /x/broker/index.mjs" }, "allowlisted"],
+      [{ pid: 2, ppid: 5, command: "sh", etimeSec: 9e5, args: "sh -c :" }, "command-not-killable"],
+      [{ pid: 3, ppid: 1, command: "tmux:", etimeSec: 9e5, args: "tmux: server" }, "command-denylisted"],
+    ];
+    for (const [row, reason] of cases) {
+      const c = ctx({
+        byPid: new Map([[5, { pid: 5 }]]),
+        cwdForPid: () => {
+          throw new Error("cwd probe must NOT run for a row the cheap gates already spared");
+        },
+      });
+      expect(classifyPreCwd(row, c).reason).toBe(reason);
+      expect((await classifyProc(row, c)).reason).toBe(reason); // same verdict, same path
+    }
+  });
+
+  test("a row that needs a cwd is reported as 'probe' and carries the widened flag", () => {
+    const widenedRow = { pid: 10, ppid: 1, command: "sh", etimeSec: 9e5, args: "sh -c :" };
+    const legacyRow = { pid: 11, ppid: 1, command: "node", etimeSec: 9e5, args: "node a.mjs" };
+    expect(classifyPreCwd(widenedRow, ctx())).toEqual({ action: "probe", widened: true });
+    expect(classifyPreCwd(legacyRow, ctx())).toEqual({ action: "probe", widened: false });
   });
 });

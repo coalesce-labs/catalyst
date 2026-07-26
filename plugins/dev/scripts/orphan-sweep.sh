@@ -3,7 +3,19 @@
 # on unattended hosts. Complements the execution-core real-time reaper (CTL-657).
 #
 # Vectors:
-#   1. Stale bun/node/turbo procs whose backing worktree is gone
+#   1. Stale procs whose backing directory is gone. TWO branches (a UNION — the
+#      widened branch never narrows the legacy one):
+#        a. legacy  — command matches `bun run|turbo|node`, cwd resolvable, cwd
+#                     gone. Path-unrestricted (it reclaims debris in /tmp,
+#                     ~/.codex/plugins/cache and <repo>/.claude/worktrees too).
+#        b. widened — CTL-1531. ANY command, but ONLY on hard ownership evidence:
+#                     cwd under $SWEEP_WT_ROOT AND that cwd no longer exists AND
+#                     ppid == 1, plus a never-kill argv allowlist, a command
+#                     denylist, and self/ancestor protection. Motivated by four
+#                     `sh -c "while :; do :; done"` orphans that pegged ~4 cores
+#                     for 16.5h from a deleted worktree while the hourly sweep
+#                     walked past them ~16 times (a bare `sh` never matched the
+#                     legacy pgrep pattern).
 #   2. Orphaned/idle worktrees (multi-signal classifier, CTL-1030)
 #   3. Stale phase signals: status=running + dead bg_job_id >30 min
 #   4. Trunk repo cache dirs, mtime >30 days
@@ -24,6 +36,13 @@
 #   SWEEP_WT_ROOT               — default: $HOME/catalyst/wt
 #   SWEEP_STALE_SECS            — default: 1800 (30 min)
 #   SWEEP_CACHE_MTIME_DAYS      — default: 30
+#   SWEEP_PROC_WIDEN            — vector-1 widened branch: off|shadow|enforce.
+#                                 DEFAULT shadow — ADR-023 "dark by default": a new
+#                                 destructive vector ships observing, and the flip to
+#                                 enforce is operator-owned (set it in the LaunchAgent's
+#                                 EnvironmentVariables), never enable-on-merge.
+#   SWEEP_PROC_WIDEN_MAX_KILLS  — per-run cap on widened kills (default 5, 0 = uncapped)
+#   SWEEP_PROC_WIDEN_MIN_AGE_SECS — min process age for a widened kill (default 900 / 15 min)
 #   SWEEP_AB_ENABLED            — agent-browser reaper on/off (default 1)
 #   SWEEP_AB_CPU_THRESHOLD      — runaway browser %CPU threshold (default 30)
 #   SWEEP_AB_MIN_AGE_SECS       — min browser age for the runaway rule (default 600)
@@ -164,6 +183,22 @@ _init_roots() {
   SWEEP_INCLUDE_GLOBAL_CLAUDE_WT="${SWEEP_INCLUDE_GLOBAL_CLAUDE_WT:-1}"
   SWEEP_PROJECT_CLAUDE_WT="${SWEEP_PROJECT_CLAUDE_WT:-${SCRIPT_DIR%/plugins/dev/scripts}/.claude/worktrees}"
   SWEEP_CONFIG_PATH="${SWEEP_CONFIG_PATH:-$(_resolve_sweep_config_path)}"
+  # CTL-1531: vector-1 widened (any-command) branch. off|shadow|enforce.
+  # DEFAULT shadow, per ADR-023 ("Dark by default"; "Rejected: enable-on-merge").
+  # This branch is the WEAKER-gated of the two widened implementations — unlike
+  # proc-reaper.mjs it has no live-agent correlation and no two-sweep persistence,
+  # so it kills on FIRST observation — and the installed LaunchAgent sets no
+  # EnvironmentVariables, which makes this in-script default the production value.
+  # The flip to enforce is operator-owned and belongs in the plist.
+  SWEEP_PROC_WIDEN="${SWEEP_PROC_WIDEN:-shadow}"
+  case "$SWEEP_PROC_WIDEN" in
+    off|shadow|enforce) ;;
+    *) log "sweep config: SWEEP_PROC_WIDEN='${SWEEP_PROC_WIDEN}' invalid (allowed off|shadow|enforce); falling back to shadow" >&2
+       SWEEP_PROC_WIDEN=shadow ;;
+  esac
+  # CTL-1531 corroboration bounds for the widened branch (see sweep_procs_widened).
+  SWEEP_PROC_WIDEN_MAX_KILLS="${SWEEP_PROC_WIDEN_MAX_KILLS:-5}"
+  SWEEP_PROC_WIDEN_MIN_AGE_SECS="${SWEEP_PROC_WIDEN_MIN_AGE_SECS:-900}"
   # CTL-1500: agent-browser reaper knobs (production defaults; all overridable).
   SWEEP_AB_ENABLED="${SWEEP_AB_ENABLED:-1}"
   SWEEP_AB_CPU_THRESHOLD="${SWEEP_AB_CPU_THRESHOLD:-30}"
@@ -449,7 +484,7 @@ sweep_signals() {
   done < <(find "$root" -name 'phase-*.json' -type f 2>/dev/null | sort)
 }
 
-# ─── vector 1: stale bun/node/turbo proc kill ───────────────────────────────
+# ─── vector 1: stale proc kill (legacy + CTL-1531 widened branch) ───────────
 
 _proc_cwd() {
   lsof -p "$1" -a -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | head -1
@@ -459,10 +494,230 @@ _candidate_pids() {
   pgrep -f 'bun run|turbo|node' 2>/dev/null || true
 }
 
+# ── CTL-1531: self / ancestor protection ────────────────────────────────────
+# The legacy branch was spared only ACCIDENTALLY: `/bin/bash orphan-sweep.sh`
+# never matched `bun run|turbo|node`. Under an any-command candidate set that
+# accident is gone, so self-protection has to be an explicit gate. The set is
+# seeded with $$, $PPID and pid 1, then walked up the real ancestor chain.
+#
+# _sweep_self_pids POPULATES the cache but prints NOTHING. The caller must read
+# $_SWEEP_SELF_PIDS directly: reading it through a command substitution — the
+# original `case "$(_sweep_self_pids)"` — runs the whole function in a SUBSHELL,
+# so the memo assignment is discarded and the ancestor walk (up to 32 `ps` forks)
+# re-ran on EVERY candidate. With ~1000 ppid==1 rows on a real host that is tens
+# of thousands of wasted forks per sweep.
+_SWEEP_SELF_PIDS=""
+_sweep_self_pids() {
+  [[ -n "$_SWEEP_SELF_PIDS" ]] && return 0
+  local p="$$" n=0 parent
+  _SWEEP_SELF_PIDS=" 1 $$ ${PPID:-1} "
+  while [[ "$p" =~ ^[0-9]+$ ]] && [[ "$p" -gt 1 ]] && [[ $n -lt 32 ]]; do
+    parent="$(ps -o ppid= -p "$p" 2>/dev/null | tr -d ' ' | head -1)"
+    [[ "$parent" =~ ^[0-9]+$ ]] || break
+    _SWEEP_SELF_PIDS="${_SWEEP_SELF_PIDS}${parent} "
+    p="$parent"
+    n=$((n+1))
+  done
+  return 0
+}
+
+_is_self_or_ancestor() {
+  _sweep_self_pids                       # no $( ) — must mutate THIS shell
+  case "$_SWEEP_SELF_PIDS" in *" $1 "*) return 0 ;; esac
+  return 1
+}
+
+# ── CTL-1531: never-kill argv allowlist / command denylist ──────────────────
+# Allowlist mirrors proc-reaper.mjs DEFAULT_ALLOWLIST_PATTERNS — the fleet's own
+# control plane must never be reapable, and a hand-started daemon
+# (`cd ~/catalyst/wt/CTL-x && bun run … & disown`) is ppid 1 with cwd under wt.
+_PROC_ALLOWLIST_RE='execution-core/daemon\.mjs|broker/index\.mjs|orch-monitor/server\.ts|tailscale|ipnextension|orphan-sweep\.sh|catalyst-stack'
+# Denylist of command basenames: session multiplexers and login/init plumbing.
+# A tmux/screen server is daemonized (ppid 1 BY CONSTRUCTION) and inherits its
+# cwd from whatever shell first started it — one kill nukes every pane the
+# operator has open. An orphaned ssh tunnel keeps working with a deleted cwd.
+#
+# The trailing `:?` is LOAD-BEARING. These processes advertise themselves with
+# setproctitle's `progname: ` form, verified against real title strings:
+#     "tmux: server (/private/tmp/tmux-501/default)"  → argv[0] = "tmux:"
+#     "sshd: ryan [priv]"                             → argv[0] = "sshd:"
+# so the original bare `^tmux$` anchor did NOT deny the very processes the
+# denylist exists to protect — only the rare `/opt/homebrew/bin/tmux new-session`
+# form matched. Mirrored in proc-reaper.mjs DEFAULT_DENY_COMMAND_RE.
+_PROC_DENY_CMD_RE='^(tmux|tmux-server|screen|sshd|ssh|mosh-server|login|launchd|init|systemd|nohup):?$'
+
+# _argv_denied <argv> — true when ANY whitespace-separated argv token basenames
+# to a denied command. Scanning the FULL argv (not just argv[0]) is deliberate:
+# `nohup tmux …`, `/usr/bin/env screen …` and `sh -c "ssh …"` all hide the denied
+# program past position 0. Over-SPARING is the safe direction for a killer.
+# Pure bash tokenization + ONE grep (the old form forked awk + basename + 2 greps
+# per candidate, and there are ~1000 ppid==1 rows on a real host).
+_argv_denied() {
+  local argv="$1" tok out="" noglob_was_set=0
+  local IFS=$' \t\n'
+  case "$-" in *f*) noglob_was_set=1 ;; esac
+  set -f                                   # tokens may contain * or ? — never glob
+  for tok in $argv; do
+    tok="${tok##*/}"                       # basename, no subprocess
+    [[ -n "$tok" ]] && out="${out}${tok}"$'\n'
+  done
+  [[ "$noglob_was_set" == "1" ]] || set +f
+  [[ -n "$out" ]] || return 1
+  printf '%s' "$out" | grep -qiE "$_PROC_DENY_CMD_RE"
+}
+
+# lsof reports the PHYSICAL (symlink-resolved) path, so compare the cwd against
+# both the configured root and its `pwd -P` form. Segment-anchored, never a
+# substring match (~/catalyst/wt-backup must not match ~/catalyst/wt).
+_wt_root_forms() {
+  local root="${SWEEP_WT_ROOT%/}" phys
+  [[ -n "$root" ]] || return 0
+  printf '%s\n' "$root"
+  if [[ -d "$root" ]]; then
+    phys="$(cd "$root" 2>/dev/null && pwd -P)"
+    [[ -n "$phys" && "$phys" != "$root" ]] && printf '%s\n' "$phys"
+  fi
+  return 0
+}
+
+_cwd_under_wt_root() {
+  local cwd="$1" root
+  [[ -n "$cwd" ]] || return 1
+  while IFS= read -r root; do
+    [[ -n "$root" ]] || continue
+    [[ "$cwd" == "$root" || "$cwd" == "$root"/* ]] && return 0
+  done < <(_wt_root_forms)
+  return 1
+}
+
+_widened_candidate_pids() {
+  ps -axo pid=,ppid= 2>/dev/null | awk '$2 == 1 { print $1 }'
+}
+
+# _proc_etime_secs <pid> — process age in seconds, or "" when unreadable.
+# ps etime forms: MM:SS / HH:MM:SS / DD-HH:MM:SS. Unreadable/malformed → "" so
+# the caller fails CLOSED (an unknown age can never clear the floor).
+_proc_etime_secs() {
+  ps -o etime= -p "$1" 2>/dev/null | head -1 | awk '
+    { gsub(/^[ \t]+|[ \t]+$/, "", $0); if ($0 == "") exit 0
+      d = 0; s = $0
+      i = index(s, "-"); if (i > 0) { d = substr(s, 1, i-1) + 0; s = substr(s, i+1) }
+      n = split(s, p, ":")
+      if (n == 2)      secs = p[1]*60 + p[2]
+      else if (n == 3) secs = p[1]*3600 + p[2]*60 + p[3]
+      else exit 0
+      print d*86400 + secs }'
+}
+
+# sweep_procs_widened — the CTL-1531 branch. Gates, in order, ALL of which must
+# hold; every ambiguous probe FAILS CLOSED (skip, never kill).
+#
+# CORROBORATION + BOUNDS (CTL-1531 review). Unlike proc-reaper.mjs this branch has
+# no live-agent correlation and no two-sweep persistence — it kills on FIRST
+# observation — so "cwd is gone" is doing almost all the work. That predicate is
+# CORRELATED across the whole host: rename or unmount $SWEEP_WT_ROOT and EVERY
+# process beneath it satisfies it in the same pass. Three cheap bounds:
+#   • root-absent early bail — if the root itself is missing, the signal is about
+#     the ROOT, not about any individual process. Never mass-signal on it.
+#   • per-run cap (SWEEP_PROC_WIDEN_MAX_KILLS, default 5) — mirrors the sibling
+#     destructive vector's SWEEP_MAX_REMOVALS. A real orphan leak is a handful of
+#     procs; anything larger is a root-level event and wants a human.
+#   • age floor (SWEEP_PROC_WIDEN_MIN_AGE_SECS, default 900) — matches
+#     proc-reaper.mjs minEtimeSec, and keeps a just-spawned process (whose
+#     worktree is mid-teardown) out of the candidate set.
+sweep_procs_widened() {
+  local mode="${SWEEP_PROC_WIDEN:-shadow}"
+  [[ "$mode" == "off" ]] && return 0
+
+  # BOUND 1 — root-absent early bail. `[[ -d $cwd ]]` would be false for every
+  # process under a renamed/unmounted root at once; that is a root-level fault,
+  # not N independent orphans.
+  local root="${SWEEP_WT_ROOT%/}"
+  if [[ -z "$root" || ! -d "$root" ]]; then
+    log "widened proc sweep: worktree root '${root}' is absent — skipping (a missing root makes EVERY cwd under it look gone)"
+    return 0
+  fi
+
+  local cap="${SWEEP_PROC_WIDEN_MAX_KILLS:-5}"
+  local min_age="${SWEEP_PROC_WIDEN_MIN_AGE_SECS:-900}"
+  [[ "$cap" =~ ^[0-9]+$ ]] || cap=5
+  [[ "$min_age" =~ ^[0-9]+$ ]] || min_age=900
+  local acted=0 deferred=0
+  local pid ppid cwd argv age
+  while IFS= read -r pid; do
+    # (a) a well-formed pid that is not init
+    [[ "$pid" =~ ^[0-9]+$ ]] || continue
+    [[ "$pid" -gt 1 ]] || continue
+    # (b) SELF-PROTECTION: never the sweep, its shell, or any ancestor
+    _is_self_or_ancestor "$pid" && continue
+    # (c) already considered by the legacy branch this run → no double-signal
+    case " ${_SWEEP_PROC_SEEN} " in *" ${pid} "*) continue ;; esac
+    # (d) PPID must be EXACTLY 1, re-read here rather than trusted from the
+    #     enumeration (a stale snapshot must never widen the candidate set)
+    ppid="$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ' | head -1)"
+    [[ "$ppid" == "1" ]] || continue
+    # (e) argv must be readable; unreadable → skip (cannot check the allowlist)
+    argv="$(ps -o command= -p "$pid" 2>/dev/null | head -1)"
+    [[ -n "$argv" ]] || continue
+    # (f) hard never-kill argv allowlist
+    printf '%s' "$argv" | grep -qiE "$_PROC_ALLOWLIST_RE" && continue
+    # (g) hard command denylist (session multiplexers / login / init plumbing),
+    #     matched over the FULL argv with the `progname:` form anchored
+    _argv_denied "$argv" && continue
+    # (h) BOUND 3 — age floor; unreadable age fails CLOSED
+    age="$(_proc_etime_secs "$pid")"
+    [[ "$age" =~ ^[0-9]+$ ]] || continue
+    [[ "$age" -ge "$min_age" ]] || continue
+    # (i) cwd must be resolvable; unknown → skip (conservative, as legacy)
+    cwd="$(_proc_cwd "$pid")"
+    [[ -n "$cwd" ]] || continue
+    # (j) cwd MUST be inside catalyst-managed worktree space. Nothing outside
+    #     $SWEEP_WT_ROOT is ever a widened candidate, whatever its ppid/command.
+    _cwd_under_wt_root "$cwd" || continue
+    # (k) that cwd must be GONE (the worktree was deleted out from under it)
+    [[ -d "$cwd" ]] && continue
+
+    if is_dry; then
+      log "[dry-run] would kill $pid (orphan; cwd gone under wt root: $cwd; argv: $argv)"
+      continue
+    fi
+    if [[ "$mode" == "shadow" ]]; then
+      log "[shadow] would kill $pid (orphan; cwd gone under wt root: $cwd; argv: $argv)"
+      continue
+    fi
+    # BOUND 2 — per-run cap. Counted only on the enforcing path so shadow keeps
+    # reporting the FULL candidate set (that is the signal the operator needs to
+    # size the cap before flipping to enforce).
+    if [[ "$cap" -gt 0 && "$acted" -ge "$cap" ]]; then
+      deferred=$((deferred+1))
+      continue
+    fi
+    # TOCTOU re-check immediately before signalling: a worktree can be recreated,
+    # and a pid can be recycled, between the gate and the kill.
+    [[ "$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ' | head -1)" == "1" ]] || continue
+    [[ "$(ps -o command= -p "$pid" 2>/dev/null | head -1)" == "$argv" ]] || continue
+    [[ -d "$cwd" ]] && continue
+    env kill "$pid" 2>/dev/null && {
+      acted=$((acted+1))
+      log "killed $pid (orphan; cwd gone under wt root: $cwd; argv: $argv)"
+      emit_reclaim orphan_proc "$pid"
+    }
+  done < <(_widened_candidate_pids)
+  [[ "$deferred" -gt 0 ]] && log "widened proc sweep: cap reached (${cap}), ${deferred} deferred to the next run"
+  return 0
+}
+
+# pids already considered by the legacy branch this run (dedupe across branches).
+_SWEEP_PROC_SEEN=""
+
 sweep_procs() {
   local pid cwd
+  _SWEEP_PROC_SEEN=""
   while IFS= read -r pid; do
     [[ "$pid" =~ ^[0-9]+$ ]] || continue
+    # CTL-1531: never signal the sweep itself, its shell, or any ancestor.
+    _is_self_or_ancestor "$pid" && continue
+    _SWEEP_PROC_SEEN="${_SWEEP_PROC_SEEN} ${pid}"
     cwd="$(_proc_cwd "$pid")"
     [[ -n "$cwd" ]] || continue    # unknown cwd → conservative skip
     [[ -d "$cwd" ]] && continue    # cwd exists → live, skip
@@ -472,6 +727,7 @@ sweep_procs() {
     fi
     env kill "$pid" 2>/dev/null && { log "killed $pid (cwd gone: $cwd)"; emit_reclaim bun_proc "$pid"; }
   done < <(_candidate_pids)
+  sweep_procs_widened
 }
 
 # ─── vector 2: multi-signal worktree reclamation (CTL-1030) ─────────────────
@@ -881,7 +1137,7 @@ main() {
     log "=== DRY RUN — no changes will be made ==="
   fi
 
-  log "starting sweep (vectors: trunk_cache, signals, procs, worktrees, agent_browser)"
+  log "starting sweep (vectors: trunk_cache, signals, procs[widen=${SWEEP_PROC_WIDEN}], worktrees, agent_browser)"
 
   _SWEEP_START_EPOCH="$(date -u +%s)"
   sweep_trunk_cache

@@ -8,7 +8,7 @@ orphaned resources on unattended hosts. It complements the execution-core real-t
 
 | # | Vector | What | Safety gate |
 |---|--------|------|-------------|
-| 1 | Stale processes | `bun`/`node`/`turbo` procs whose backing worktree is gone | Kill ONLY if proc CWD no longer exists on disk; unknown CWD → skip |
+| 1 | Stale processes | Procs whose backing directory is gone. **Two branches, a UNION.** (a) *legacy*: `bun run`/`turbo`/`node` procs, path-unrestricted (it also reclaims debris in `/tmp`, `~/.codex/plugins/cache` and `<repo>/.claude/worktrees`). (b) *widened* (CTL-1531, `SWEEP_PROC_WIDEN`): **any** command, but only under `$SWEEP_WT_ROOT` — the motivating case was four `sh -c "while :; do :; done"` loops that pegged ~4 cores for 16.5 h from a deleted worktree and that `pgrep -f 'bun run\|turbo\|node'` structurally could not see | Kill ONLY if proc CWD no longer exists on disk; unknown CWD → skip. The widened branch adds: `ppid == 1` (re-read, not trusted from the snapshot), cwd segment-anchored under `$SWEEP_WT_ROOT`, an argv allowlist (fleet control plane), a command denylist (`tmux`/`screen`/`sshd`/… incl. the `progname:` setproctitle form), self/ancestor protection, an age floor, a per-run cap, a root-absent early bail, and a TOCTOU re-check immediately before signalling |
 | 2 | Done-ticket worktrees | Worktrees for Linear "Done" tickets not cleaned by `/teardown` | `worktree-presweep.sh` stops sessions first; `git status --porcelain` must be clean; NEVER removes dirty worktrees |
 | 3 | Stale phase signals | `status=running` signals whose `bg_job_id` is dead and >30 min old | Flip ONLY if `bg_job_id` absent from `claude agents --json`; never touch interactive-kind or terminal statuses |
 | 4 | Trunk repo cache dirs | `~/.cache/trunk/repos` entries with mtime >30 days | mtime only; no live-process guard needed |
@@ -88,7 +88,10 @@ launchctl unload ~/Library/LaunchAgents/ai.coalesce.catalyst-orphan-sweep.plist
 |----------|---------|---------|
 | `SWEEP_TRUNK_CACHE_DIR` | `$HOME/.cache/trunk/repos` | Vector 4 root |
 | `SWEEP_WORKERS_GLOB_ROOT` | `$HOME/catalyst` | Vector 3 root (scans `*/workers/*/phase-*.json`) |
-| `SWEEP_WT_ROOT` | `$HOME/catalyst/wt` | Vector 2 worktree root |
+| `SWEEP_WT_ROOT` | `$HOME/catalyst/wt` | Vector 2 worktree root — and the hard boundary for vector 1's widened branch |
+| `SWEEP_PROC_WIDEN` | `shadow` | Vector 1 widened branch: `off` \| `shadow` \| `enforce`. **Dark by default** (ADR-023) — the flip to `enforce` is operator-owned and belongs in the LaunchAgent's `EnvironmentVariables`, because the installed plist sets none and this in-script default IS the production value. An unrecognized value warns and falls back to `shadow`. |
+| `SWEEP_PROC_WIDEN_MAX_KILLS` | `5` | Per-run cap on widened kills (`0` = uncapped), mirroring vector 2's `SWEEP_MAX_REMOVALS`. Enforcing path only, so `shadow` still reports every candidate. Overflow is logged and deferred. |
+| `SWEEP_PROC_WIDEN_MIN_AGE_SECS` | `900` | Minimum process age for a widened kill (matches `procReaper.minEtimeSec`). Unreadable age → skip. |
 | `SWEEP_STALE_SECS` | `1800` | Staleness threshold for vector 3 |
 | `SWEEP_CACHE_MTIME_DAYS` | `30` | Cache age threshold for vector 4 |
 | `SWEEP_LINEAR_TEAMS` | `CTL ADV` | Teams to query for Done tickets (vector 2) |

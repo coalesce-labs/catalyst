@@ -20,6 +20,36 @@
 //     AND not in LIVE_TREE / live-agent cwd AND cwd known AND cwd under the
 //     worktree root AND etime ≥ minEtimeSec AND (sweep-level) the agents read
 //     SUCCEEDED AND the orphan persisted across ≥2 consecutive sweeps.
+//
+// CTL-1531 — the WIDENED any-command orphan class. A real incident (2026-07-25→26)
+// had four `sh -c "while :; do :; done"` processes peg ~4 cores for 16.5h with
+// cwd = ~/catalyst/wt/evergreen/evr-23 (a DELETED worktree) and PPID 1. The
+// command∈{node,bun} conjunct made them structurally invisible: the hourly sweep
+// walked past them ~16 times. The fix gates on OWNERSHIP EVIDENCE instead of the
+// command name — a process qualifies for the widened class when ALL of:
+//     cwd under the worktree root  AND  cwd path no longer EXISTS  AND  ppid === 1
+// The widening is expressed as an OR *inside* the command gate, deliberately, so
+// that every gate that already ran before it (allowlist, LIVE_TREE) and every
+// gate after it (orphan, cwd-known, live-agent cwd prefix, under-worktree-root,
+// target worktree, etime) plus the sweep-level catastrophe guard and the
+// two-sweep full-argv persistence STILL apply to the widened row, unchanged.
+// The widened class is STRICTLY ppid===1 — isOrphaned's wider "parent vanished
+// from the ps snapshot" branch is a snapshot race and must never admit an
+// arbitrary command. Both new probes FAIL CLOSED (unknown ⇒ spare). The widened
+// class additionally carries a COMMAND DENYLIST (DEFAULT_DENY_COMMAND_RE) that
+// the node/bun class never needed: a tmux/screen server is ppid-1 BY
+// CONSTRUCTION and inherits its cwd from whatever shell first started it, so one
+// kill nukes every pane the operator has open.
+//
+// CTL-1531 PERF — the widened admission is what makes gate (3) stop being the
+// cheap bail: on a real host it cut the rows reaching the cwd probe from ~1344
+// spared to ~286, pushing ~1061 extra rows into a per-pid `lsof` execFile inside
+// a SEQUENTIAL await loop (585ms sweep → 54.5s). The cost is node's PER-EXECFILE
+// SPAWN overhead (~55ms), not lsof (1058 bare-shell lsof calls take ~350ms). The
+// sweep therefore resolves every cwd it can possibly need in ONE batched
+// `lsof -a -d cwd -Fpn -p <csv>` call (measured 451ms/1046 pids, ~120x cheaper).
+// This matters because sweep() runs INSIDE the execution-core daemon off the
+// 600s orphan-reaper timer — the exact event-loop path CTL-1524 just unblocked.
 //   • CATASTROPHE GUARD: a FAILED `claude agents` read (agentsResult.ok===false)
 //     ABORTS the whole sweep — kill nothing. Treating read-failure as
 //     agents-absent would collapse LIVE_TREE to empty and authorize a host-wide
@@ -30,11 +60,12 @@
 // DEFAULT mode:"shadow" — emits procOrphans.would-reap, kills NOTHING. Bakes on
 // mini before any enforce flip (like stall-janitor CTL-1004 + cost-cap CTL-1137).
 //
-// ALL IO is injected (psLister/lsofCwd/agentsResult/killProc/sleep/now)
-// so the unit tests never spawn a subprocess, run ps/lsof, touch ~/.claude, or
-// signal a real pid.
+// ALL IO is injected (psLister/lsofCwd/lsofCwdBatch/cwdExists/agentsResult/
+// killProc/sleep/now) so the unit tests never spawn a subprocess, run ps/lsof/
+// stat, touch ~/.claude, or signal a real pid.
 
 import { execFile, execFileSync } from "node:child_process";
+import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename } from "node:path";
 import { emitReapIntent } from "./reap-intent.mjs";
@@ -51,6 +82,52 @@ const DEFAULT_ALLOWLIST_PATTERNS = Object.freeze([
   "tailscale",
   "ipnextension",
 ]);
+
+// CTL-1531 — the WIDENED-class-only command DENYLIST (mirrors orphan-sweep.sh's
+// _PROC_DENY_CMD_RE). The node/bun class never needed one: `node`/`bun` are not
+// session multiplexers or login plumbing. The widened class admits ANY command,
+// so a tmux/screen server — which is daemonized (ppid 1 BY CONSTRUCTION) and
+// inherits its cwd from whatever shell first started it — becomes syntactically
+// eligible, and ONE kill nukes every pane the operator has open. An orphaned ssh
+// tunnel likewise keeps working fine with a deleted cwd.
+//
+// The trailing `:?` is load-bearing: setproctitle's `progname: ` form is what
+// these processes actually advertise —
+//     "tmux: server (/private/tmp/tmux-501/default)"  → argv[0] = "tmux:"
+//     "sshd: ryan [priv]"                             → argv[0] = "sshd:"
+// so a bare `^tmux$` anchor NEVER matches the very processes it exists to guard.
+const DEFAULT_DENY_COMMAND_RE =
+  /^(tmux|tmux-server|screen|sshd|ssh|mosh-server|login|launchd|init|systemd|nohup):?$/i;
+
+/**
+ * isCommandDenylisted — CTL-1531. True when ANY whitespace-separated argv token
+ * basenames to a denied command. Matching the FULL argv (not just argv[0]) is
+ * deliberate: `nohup tmux …`, `/usr/bin/env screen …` and `sh -c "ssh …"` all
+ * hide the denied program past position 0, and over-SPARING is the safe
+ * direction for a process killer. A trailing `:` is stripped before the test so
+ * the `progname: ` setproctitle form cannot defeat the anchor.
+ *
+ * Whitespace tokenization DOES over-match on this host (measured): `/usr/sbin/
+ * universalaccessd launchd -s` and `…/CoreServices/Screen Time.app/…` both trip
+ * it. That is accepted and intentional — every such row is SPARED, and a killer
+ * that spares four system daemons it was never going to reach (they fail
+ * `not-under-worktree-root` anyway) is strictly better than one that misses a
+ * `tmux:` server. The motivating incident argv (`sh -c while :; do :; done`)
+ * contains no denied token, so the widening still does its job.
+ */
+export function isCommandDenylisted(args, command = null, denyRe = DEFAULT_DENY_COMMAND_RE) {
+  const re = denyRe instanceof RegExp ? denyRe : DEFAULT_DENY_COMMAND_RE;
+  const tokens = [];
+  if (typeof command === "string" && command) tokens.push(command);
+  if (typeof args === "string" && args) {
+    for (const tok of args.split(/\s+/)) if (tok) tokens.push(tok);
+  }
+  for (const tok of tokens) {
+    const bare = basename(tok).replace(/:+$/, "");
+    if (bare && re.test(bare)) return true;
+  }
+  return false;
+}
 
 // ─── Pure: ps parsing (pid ppid rss etime command) ───────────────────────────
 
@@ -169,19 +246,25 @@ export function collectLiveAgentSubtree(liveAgents, byPid, childrenByPpid) {
 // ─── Pure: allowlist ─────────────────────────────────────────────────────────
 
 /**
- * buildAllowlist — the hard never-kill set. Combines a pid set (self + daemon +
- * the whole LIVE_TREE) and an argv-substring pattern list (default + operator-
- * configured, lowercased). A candidate is allowlisted if its pid is in the set
- * OR its lowercased argv contains any pattern.
+ * buildAllowlist — the hard never-kill set. Combines a pid set (self + PARENT +
+ * daemon + the whole LIVE_TREE) and an argv-substring pattern list (default +
+ * operator-configured, lowercased). A candidate is allowlisted if its pid is in
+ * the set OR its lowercased argv contains any pattern.
+ *
+ * CTL-1531: `parentPid` is part of the set because the widened any-command class
+ * makes the sweep's own supervising shell/process a syntactically eligible row.
+ * Self-protection must be an explicit gate, not an accident of the command name.
  */
 export function buildAllowlist({
   selfPid,
+  parentPid,
   daemonPids = [],
   liveAgentSubtreePids = new Set(),
   allowlistPatterns = [],
 } = {}) {
   const pids = new Set();
   if (Number.isFinite(Number(selfPid))) pids.add(Number(selfPid));
+  if (Number.isFinite(Number(parentPid)) && Number(parentPid) > 0) pids.add(Number(parentPid));
   for (const p of daemonPids) {
     const n = Number(p);
     if (Number.isFinite(n) && n > 0) pids.add(n);
@@ -202,22 +285,23 @@ function isArgvAllowlisted(args, patterns) {
 // ─── Pure: the kill gate ─────────────────────────────────────────────────────
 
 /**
- * classifyProc — PURE kill-gate. Returns { action:'kill'|'spare', reason }.
- * ALL conditions must hold for 'kill', else SPARE with the first failing reason.
- * The ordering puts the never-kill allowlist + LIVE_TREE FIRST (so an
- * allowlisted/live proc is never even probed), then orphan/command/cwd/etime.
+ * classifyPreCwd — PURE and IO-FREE. Gates (1)-(4) of the kill gate: allowlist,
+ * LIVE_TREE, command / widened admission (+ the widened command denylist), and
+ * orphanhood. Returns either a terminal `{action:'spare', reason}` verdict, or
+ * `{action:'probe', widened}` meaning "this row still needs its cwd resolved".
+ *
+ * Split out of classifyProc for CTL-1531's batched cwd prefetch: sweep() runs
+ * this cheap pass over the WHOLE ps snapshot first, so it knows the exact pid set
+ * that needs a cwd before it spends a single execFile. Both callers share this
+ * one implementation, so the prefetch set can never drift from the real gate.
  */
-export async function classifyProc(row, ctx) {
+export function classifyPreCwd(row, ctx) {
   const {
     byPid,
-    liveAgentCwds,
     liveAgentSubtreePids,
     allowlist,
-    worktreeRoot,
     killableCommands,
-    minEtimeSec,
-    cwdForPid,
-    worktreePath,
+    denyCommandRe = DEFAULT_DENY_COMMAND_RE,
   } = ctx;
 
   // (1) hard never-kill: pid in allowlist set (self/daemon/LIVE_TREE) OR argv pattern.
@@ -231,13 +315,46 @@ export async function classifyProc(row, ctx) {
     return { action: "spare", reason: "live-agent-owned" };
   }
 
-  // (3) command must be killable (node/bun) — anything else is never ours to kill.
-  if (!killableCommands.has(row.command)) {
+  // (3) command must be killable (node/bun) — OR (CTL-1531) the row must qualify
+  //     for the WIDENED any-command class. Widened admission is deliberately an
+  //     OR *here*, so gates (1)-(2) above and (4)-(10) below all still apply to
+  //     the widened row; the widened-only deleted-cwd conjunct is gate (7b).
+  //     STRICT ppid === 1: isOrphaned's wider "parent vanished from the ps
+  //     snapshot" branch is a snapshot race and must never admit an arbitrary
+  //     command. Anything else keeps the original spare reason (and, crucially,
+  //     never pays for the lsof/stat probes below).
+  const commandKillable = killableCommands.has(row.command);
+  const widened = !commandKillable && row.ppid === 1;
+  if (!commandKillable && !widened) {
     return { action: "spare", reason: "command-not-killable" };
+  }
+
+  // (3b) WIDENED CLASS ONLY: the command denylist (session multiplexers, login /
+  //      init plumbing). node/bun are never denied, so the legacy class is
+  //      untouched. See DEFAULT_DENY_COMMAND_RE for why this is not optional.
+  if (widened && isCommandDenylisted(row.args, row.command, denyCommandRe)) {
+    return { action: "spare", reason: "command-denylisted" };
   }
 
   // (4) must be orphaned (reparented to launchd / vanished parent).
   if (!isOrphaned(row, byPid)) return { action: "spare", reason: "has-live-ancestor" };
+
+  return { action: "probe", widened };
+}
+
+/**
+ * classifyProc — the full kill gate. Returns { action:'kill'|'spare', reason }.
+ * ALL conditions must hold for 'kill', else SPARE with the first failing reason.
+ * The ordering puts the never-kill allowlist + LIVE_TREE FIRST (so an
+ * allowlisted/live proc is never even probed), then orphan/command/cwd/etime.
+ */
+export async function classifyProc(row, ctx) {
+  const { liveAgentCwds, worktreeRoot, minEtimeSec, cwdForPid, cwdExists, worktreePath } = ctx;
+
+  // (1)-(4): the cheap, IO-free gates.
+  const pre = classifyPreCwd(row, ctx);
+  if (pre.action !== "probe") return pre;
+  const widened = pre.widened === true;
 
   // (5) cwd must be resolvable; unknown cwd → SPARE (degrade safe).
   const cwd = await cwdForPid(row.pid);
@@ -262,6 +379,19 @@ export async function classifyProc(row, ctx) {
     return { action: "spare", reason: "not-under-worktree-root" };
   }
 
+  // (7b) CTL-1531, WIDENED CLASS ONLY: the cwd must no longer EXIST. This is the
+  //      ownership evidence that stands in for the command-name gate — a shell a
+  //      human left sitting in a LIVE worktree is never a candidate; only debris
+  //      whose backing tree was deleted out from under it is. FAIL CLOSED: a
+  //      probe that cannot answer (null/undefined/non-boolean) SPARES.
+  //      node/bun deliberately skip this gate — narrowing them to "deleted cwd"
+  //      would be a silent coverage REGRESSION of the pre-CTL-1531 behavior.
+  if (widened) {
+    const exists = typeof cwdExists === "function" ? await cwdExists(cwd) : null;
+    if (typeof exists !== "boolean") return { action: "spare", reason: "cwd-exists-unknown" };
+    if (exists) return { action: "spare", reason: "cwd-still-exists" };
+  }
+
   // (8) targeted teardown sweep: scope to one worktree path (boundary-safe).
   if (worktreePath && !cwdUnderWorktreeRoot(cwd, worktreePath)) {
     return { action: "spare", reason: "outside-target-worktree" };
@@ -270,7 +400,11 @@ export async function classifyProc(row, ctx) {
   // (9) etime corroboration floor (never a SOLE gate — all the above ran first).
   if ((row.etimeSec ?? 0) < minEtimeSec) return { action: "spare", reason: "too-young" };
 
-  return { action: "kill", reason: "orphan-node-under-worktree" };
+  return {
+    action: "kill",
+    reason: widened ? "orphan-any-command-deleted-cwd" : "orphan-node-under-worktree",
+    widened,
+  };
 }
 
 // ─── Default IO seams (replaced wholesale in tests) ──────────────────────────
@@ -294,9 +428,36 @@ async function defaultPsLister() {
   }
 }
 
+// execFileTolerant — like execFileAsync but NEVER rejects: it resolves with
+// whatever stdout was produced, even on a non-zero exit. Required for batched
+// lsof: `lsof -p <1500 pids>` exits 1 whenever ANY listed pid is gone or
+// unreadable (measured on this host: exit 1 with 1155 valid process records),
+// so rejecting would throw away the entire batch on a single dead pid.
+function execFileTolerant(bin, args, opts = {}) {
+  return new Promise((resolve) => {
+    try {
+      execFile(bin, args, { encoding: "utf8", ...opts }, (_err, stdout) =>
+        resolve(typeof stdout === "string" ? stdout : "")
+      );
+    } catch {
+      resolve("");
+    }
+  });
+}
+
+// lsof probes are bounded so ONE hung mount cannot wedge the daemon's reaper
+// handler (the single-pid path shipped with no timeout at all).
+const LSOF_TIMEOUT_MS = 5000;
+// Chunk size for the batched probe. 1493 pids in one call measured 561ms, so
+// this is not about lsof cost — it bounds the argv length and the per-call
+// blast radius of a timeout (a timed-out chunk loses only its own pids).
+const LSOF_BATCH_CHUNK = 512;
+
 async function defaultLsofCwd(pid) {
   try {
-    const out = await execFileAsync("lsof", ["-a", "-p", String(pid), "-d", "cwd", "-Fn"]);
+    const out = await execFileAsync("lsof", ["-a", "-p", String(pid), "-d", "cwd", "-Fn"], {
+      timeout: LSOF_TIMEOUT_MS,
+    });
     // -Fn output: lines like `pPID`, `fcwd`, `n/abs/path`. The cwd path line
     // starts with 'n'.
     for (const line of out.split("\n")) {
@@ -306,6 +467,72 @@ async function defaultLsofCwd(pid) {
   } catch {
     return null; // unreadable → spare (degrade safe)
   }
+}
+
+/**
+ * parseLsofCwdBatch — PURE. Parses `lsof -Fpn` record streams into pid → cwd.
+ * The stream is a flat sequence of tagged lines; a `p<PID>` line opens a process
+ * set and every following `n<path>` belongs to it until the next `p`:
+ *     p407 / fcwd / n/Users/ryan / p630 / fcwd / n/ ...
+ * Only the FIRST `n` per pid is taken (one cwd fd per process). Unparseable or
+ * empty records are dropped — a pid absent from the result is UNKNOWN, and
+ * unknown spares.
+ *
+ * SAFETY — the UNTERMINATED TAIL IS DISCARDED. `execFileTolerant` deliberately
+ * keeps the stdout of a lsof that hit its timeout (or otherwise exited non-zero),
+ * and such a stream can end mid-line. A truncated `n/Users/ryan/catalyst/wt/CTL-1`
+ * would be read as a real, currently-nonexistent path under the worktree root —
+ * i.e. it would MANUFACTURE a perfect widened kill candidate out of a process
+ * whose actual cwd is somewhere else entirely. Only the last line can be partial,
+ * so if the text does not end in a newline that line is dropped outright.
+ */
+export function parseLsofCwdBatch(stdout) {
+  const out = new Map();
+  const text = String(stdout ?? "");
+  const lines = text.split("\n");
+  if (text && !text.endsWith("\n")) lines.pop(); // truncated tail → never trusted
+  let pid = null;
+  for (const line of lines) {
+    if (!line) continue;
+    if (line[0] === "p") {
+      const n = Number(line.slice(1));
+      pid = Number.isFinite(n) && n > 0 ? n : null;
+      continue;
+    }
+    if (line[0] === "n" && pid !== null && !out.has(pid)) {
+      const path = line.slice(1);
+      if (path) out.set(pid, path);
+    }
+  }
+  return out;
+}
+
+/**
+ * defaultLsofCwdBatch — resolve MANY pids' cwds in ONE lsof call per chunk.
+ * Returns Map<pid, path>; a pid lsof could not answer for is simply absent.
+ * This is the CTL-1531 perf fix: the previous per-pid execFile loop cost ~55ms
+ * of node spawn overhead PER PID (585ms → 54.5s once the widened admission
+ * pushed ~1061 extra rows into it), and that loop ran on the execution-core
+ * daemon's event loop.
+ */
+async function defaultLsofCwdBatch(pids) {
+  const out = new Map();
+  const list = (Array.isArray(pids) ? pids : [])
+    .map((p) => Number(p))
+    .filter((p) => Number.isFinite(p) && p > 0);
+  if (list.length === 0) return out;
+  for (let i = 0; i < list.length; i += LSOF_BATCH_CHUNK) {
+    const chunk = list.slice(i, i + LSOF_BATCH_CHUNK);
+    const stdout = await execFileTolerant(
+      "lsof",
+      ["-a", "-d", "cwd", "-Fpn", "-p", chunk.join(",")],
+      { timeout: LSOF_TIMEOUT_MS, maxBuffer: 16 * 1024 * 1024 }
+    );
+    for (const [pid, path] of parseLsofCwdBatch(stdout)) {
+      if (!out.has(pid)) out.set(pid, path);
+    }
+  }
+  return out;
 }
 
 // defaultKillProc — wraps process.kill; never throws. Returns true when the call
@@ -319,6 +546,19 @@ function defaultKillProc(pid, signal) {
     return true;
   } catch {
     return false;
+  }
+}
+
+// defaultCwdExists — CTL-1531's "does the cwd path still exist?" probe. MUST
+// return a real boolean (a non-boolean is read as "unknown" and spares). Kept a
+// separate injectable seam so the widened-class tests drive deletion purely as a
+// predicate: no test ever touches the filesystem.
+function defaultCwdExists(path) {
+  if (typeof path !== "string" || !path) return null; // unknown → spare
+  try {
+    return existsSync(path);
+  } catch {
+    return null; // unreadable → spare (degrade safe)
   }
 }
 
@@ -338,11 +578,15 @@ export class ProcReaper {
     killableCommands = new Set(["node", "bun"]),
     psLister = defaultPsLister,
     lsofCwd = defaultLsofCwd,
+    lsofCwdBatch = null,
+    cwdExists = defaultCwdExists,
+    denyCommandRe = DEFAULT_DENY_COMMAND_RE,
     agentsResult = () => listClaudeAgentsResult(),
     killProc = defaultKillProc,
     sleep = realSleep,
     now = () => Date.now(),
     selfPid = process.pid,
+    parentPid = process.ppid,
     daemonPids = [],
     allowlistPatterns = [],
     log = defaultLog,
@@ -355,11 +599,24 @@ export class ProcReaper {
     this.killableCommands = killableCommands;
     this.psLister = psLister;
     this.lsofCwd = lsofCwd;
+    // Batched cwd seam. Explicit injection always wins. Otherwise the fast
+    // native batch is used ONLY when the single-pid seam is also the native
+    // default — so a test (or caller) that injects `lsofCwd` alone keeps a fully
+    // hermetic per-pid path and never shells out to the real lsof.
+    this.lsofCwdBatch =
+      typeof lsofCwdBatch === "function"
+        ? lsofCwdBatch
+        : lsofCwd === defaultLsofCwd
+          ? defaultLsofCwdBatch
+          : null;
+    this.cwdExists = cwdExists;
+    this.denyCommandRe = denyCommandRe instanceof RegExp ? denyCommandRe : DEFAULT_DENY_COMMAND_RE;
     this.agentsResult = agentsResult;
     this.killProc = killProc;
     this.sleep = sleep;
     this.now = now;
     this.selfPid = selfPid;
+    this.parentPid = parentPid;
     this.daemonPids = daemonPids;
     this.allowlistPatterns = allowlistPatterns;
     this.log = log;
@@ -434,6 +691,7 @@ export class ProcReaper {
 
     const allowlist = buildAllowlist({
       selfPid: this.selfPid,
+      parentPid: this.parentPid,
       daemonPids: this.daemonPids,
       liveAgentSubtreePids,
       allowlistPatterns: this.allowlistPatterns,
@@ -446,10 +704,29 @@ export class ProcReaper {
       allowlist,
       worktreeRoot: this.worktreeRoot,
       killableCommands: this.killableCommands,
+      denyCommandRe: this.denyCommandRe,
       minEtimeSec: this.minEtimeSec,
-      cwdForPid: (pid) => this._safeCwd(pid),
+      // Assigned below, once the batched prefetch has run. classifyPreCwd (the
+      // only thing called before that) never touches it.
+      cwdForPid: null,
+      cwdExists: (path) => this._safeCwdExists(path),
       worktreePath,
     };
+
+    // CTL-1531 PERF — batched cwd prefetch. Run the IO-FREE gates over the whole
+    // snapshot first to learn the EXACT pid set that will need a cwd, then
+    // resolve all of them in ONE lsof call. Without this the widened admission
+    // pushes ~1061 extra rows into a sequential per-pid execFile (~55ms of node
+    // spawn overhead each) and the sweep goes 585ms → 54.5s ON THE DAEMON EVENT
+    // LOOP. `cwdCache` is authoritative for every pid it was asked about: a pid
+    // lsof could not answer for is cached as null (= unknown = spare) rather
+    // than retried per-pid, which is what keeps the worst case cheap too.
+    const needCwd = [];
+    for (const row of rows) {
+      if (classifyPreCwd(row, ctx).action === "probe") needCwd.push(row.pid);
+    }
+    const cwdCache = await this._safeCwdBatch(needCwd);
+    ctx.cwdForPid = (pid) => (cwdCache.has(pid) ? cwdCache.get(pid) : this._safeCwd(pid));
 
     // Classify every row. Collect this-sweep kill candidates for persistence.
     const thisSweepCandidates = new Map();
@@ -474,22 +751,46 @@ export class ProcReaper {
         report.spared.push({ pid: row.pid, command: row.command, reason: "awaiting-second-sweep" });
         continue;
       }
-      // Persisted across ≥2 sweeps → act.
+      // Persisted across ≥2 sweeps → act. CTL-1531: carry `reason`/`widened` on
+      // the report entry AND the emitted event so the newly-visible any-command
+      // class is separable from the legacy node/bun class in Loki/Prometheus
+      // during the shadow bake, and log it explicitly (there was no log at all
+      // on the would-reap path before — the shadow signal was event-only).
+      const widened = v.widened === true;
       if (this.mode === "shadow") {
-        report.wouldReap.push({ pid: row.pid, command: row.command });
+        report.wouldReap.push({
+          pid: row.pid,
+          command: row.command,
+          reason: v.reason,
+          widened,
+        });
+        this.log.info(
+          { pid: row.pid, command: row.command, args: row.args, reason: v.reason, widened },
+          widened
+            ? "proc-reaper [shadow]: WOULD reap WIDENED orphan (CTL-1531: any command, ppid=1, cwd deleted under worktree root)"
+            : "proc-reaper [shadow]: WOULD reap orphan node/bun under worktree root"
+        );
         await this._safeEmit("procOrphans.would-reap", {
           pid: row.pid,
           command: row.command,
-          worktreePath: await this._safeCwd(row.pid),
+          reason: v.reason,
+          worktreePath: await ctx.cwdForPid(row.pid),
         });
       } else if (this.mode === "enforce") {
         const killed = await this._terminateWithGrace(row);
         if (killed) {
-          report.reaped.push({ pid: row.pid, command: row.command });
+          report.reaped.push({ pid: row.pid, command: row.command, reason: v.reason, widened });
+          this.log.info(
+            { pid: row.pid, command: row.command, args: row.args, reason: v.reason, widened },
+            widened
+              ? "proc-reaper [enforce]: reaped WIDENED orphan (CTL-1531)"
+              : "proc-reaper [enforce]: reaped orphan node/bun"
+          );
           await this._safeEmit("procOrphans.reaped", {
             pid: row.pid,
             command: row.command,
-            worktreePath: await this._safeCwd(row.pid),
+            reason: v.reason,
+            worktreePath: await ctx.cwdForPid(row.pid),
           });
         }
       }
@@ -531,6 +832,60 @@ export class ProcReaper {
   async _safeCwd(pid) {
     try {
       return await this.lsofCwd(pid);
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * _safeCwdBatch — CTL-1531. Resolve many cwds at once, returning a Map that is
+   * AUTHORITATIVE for every requested pid: each is pre-seeded to null (unknown →
+   * spare) and only overwritten by a real string answer. That pre-seed is what
+   * stops the caller from silently falling back to a per-pid execFile for the
+   * ~20% of pids lsof cannot read — which would reintroduce the exact spawn
+   * storm this fix exists to remove.
+   *
+   * A total batch failure (throw / timeout / no batch seam available) therefore
+   * degrades to "every cwd unknown" ⇒ the sweep kills nothing. Fail closed.
+   */
+  async _safeCwdBatch(pids) {
+    const out = new Map();
+    const unique = [
+      ...new Set(
+        (Array.isArray(pids) ? pids : []).map((p) => Number(p)).filter((p) => Number.isFinite(p) && p > 0)
+      ),
+    ];
+    if (unique.length === 0) return out;
+    for (const p of unique) out.set(p, null);
+
+    if (typeof this.lsofCwdBatch !== "function") {
+      // No batch seam (a test injected only the single-pid seam) → per-pid.
+      for (const p of unique) out.set(p, await this._safeCwd(p));
+      return out;
+    }
+    try {
+      const res = await this.lsofCwdBatch(unique);
+      const entries = res instanceof Map ? res.entries() : Object.entries(res ?? {});
+      for (const [k, v] of entries) {
+        const pid = Number(k);
+        if (out.has(pid)) out.set(pid, typeof v === "string" && v ? v : null);
+      }
+    } catch (err) {
+      this.log.warn(
+        { err: err?.message, pids: unique.length },
+        "proc-reaper: batched cwd probe failed — treating every cwd as unknown (sweep spares all)"
+      );
+    }
+    return out;
+  }
+
+  // CTL-1531 — "does this cwd path still exist?", normalized to true|false|null.
+  // A throw, or any non-boolean answer, becomes null = UNKNOWN, and classifyProc
+  // spares on unknown. Fail closed by construction.
+  async _safeCwdExists(path) {
+    try {
+      const r = await this.cwdExists(path);
+      return typeof r === "boolean" ? r : null;
     } catch {
       return null;
     }

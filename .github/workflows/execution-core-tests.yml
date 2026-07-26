@@ -43,6 +43,11 @@ on:
       - "plugins/dev/scripts/catalyst-stack"
       - "plugins/dev/scripts/install-cli.sh"
       - "plugins/dev/scripts/check-setup.sh"
+      # CTL-1531: orphan-sweep.sh is a DESTRUCTIVE, kill-processes script whose
+      # only guard is __tests__/orphan-sweep.test.sh (run below). Before CTL-1531
+      # it appeared in no workflow at all, so a change to its kill gates could
+      # merge entirely unverified.
+      - "plugins/dev/scripts/orphan-sweep.sh"
       - "plugins/dev/scripts/__tests__/**"
       # CTL-1387: the CLI-reference generator + the page it drives are guarded by
       # cli-reference-drift.test.sh below; a change to either must run this suite.
@@ -68,6 +73,11 @@ on:
       - "plugins/dev/scripts/catalyst-stack"
       - "plugins/dev/scripts/install-cli.sh"
       - "plugins/dev/scripts/check-setup.sh"
+      # CTL-1531: orphan-sweep.sh is a DESTRUCTIVE, kill-processes script whose
+      # only guard is __tests__/orphan-sweep.test.sh (run below). Before CTL-1531
+      # it appeared in no workflow at all, so a change to its kill gates could
+      # merge entirely unverified.
+      - "plugins/dev/scripts/orphan-sweep.sh"
       - "plugins/dev/scripts/__tests__/**"
       # CTL-1387: see the pull_request note above.
       - "plugins/dev/scripts/gen-cli-reference.sh"
@@ -193,6 +203,18 @@ jobs:
         # --fix / exit-code contract.
         working-directory: plugins/dev/scripts
         run: bash __tests__/migrate-dual-harness.test.sh
+
+      - name: orphan-sweep kill-gate test (CTL-1531)
+        # orphan-sweep.sh KILLS PROCESSES and removes worktrees, and had ZERO CI
+        # coverage before CTL-1531. The suite is fully hermetic — ps, lsof, pgrep
+        # and kill are all mocked into a scratch $PATH, $HOME is redirected to a
+        # temp dir, and no real process is ever enumerated or signalled.
+        working-directory: plugins/dev/scripts
+        run: bash __tests__/orphan-sweep.test.sh
+
+      - name: orphan-sweep LaunchAgent plist test (CTL-1531)
+        working-directory: plugins/dev/scripts
+        run: bash __tests__/orphan-sweep-plist.test.sh
 
       - name: Run stable unit tests
         # EXCLUDED SUITES — do NOT add these back without fixing the underlying

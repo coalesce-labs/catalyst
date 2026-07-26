@@ -25,6 +25,25 @@ export SWEEP_RUN_ID="testrun"
 # phases so their fixed pgrep/ps mocks (or the real host) can't trip it. The
 # dedicated Phase 10 turns it back on with fully-mocked pgrep/ps/kill.
 export SWEEP_AB_ENABLED=0
+# CTL-1531: the widened (any-command) vector-1 branch enumerates the process
+# table with `ps`, which is NOT mocked in phases 1-9 — and several early phases
+# run the REAL, non-dry sweep before the pgrep/lsof/kill mocks exist. Keep the
+# branch inert everywhere except its dedicated Phase 11 (which mocks ps, lsof,
+# pgrep and kill) so a plain test run can never signal a real host process.
+export SWEEP_PROC_WIDEN=off
+
+# CTL-1531 SAFETY: vector 1 enumerates the HOST process table via `pgrep`, and
+# phases 1-3 run the REAL, non-dry sweep BEFORE the per-phase pgrep/lsof/kill
+# mocks exist. On an unmocked machine — a CI runner is full of live `node`
+# processes — the legacy branch could therefore resolve a real pid's cwd and
+# `env kill` it. Seed an INERT pgrep for the whole suite so no phase can ever
+# reach a real process; every phase that needs a candidate set overwrites this
+# with its own fixture.
+cat > "$MOCKBIN/pgrep" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+chmod +x "$MOCKBIN/pgrep"
 
 # ─── harness ────────────────────────────────────────────────────────────────
 
@@ -64,6 +83,10 @@ expect_not_contains() {
   local file="$1" needle="$2"
   ! grep -qF "$needle" "$file"
 }
+
+# Exported so the assertions can be used INSIDE the `bash -c` subshells that
+# `run` executes (a plain function definition is not inherited by a new bash).
+export -f expect_contains expect_not_contains
 
 # ─── Phase 1: skeleton + dry-run harness (T1–T5) ───────────────────────────
 
@@ -1580,6 +1603,411 @@ run "T74: SWEEP_AB_ENABLED=0 reaps nothing" \
 _ab_clear
 unset SWEEP_AB_ENABLED SWEEP_AB_SOCKET_DIR
 rm -f "$MOCKBIN/pgrep" "$MOCKBIN/ps"
+
+
+# ─── Phase 11: vector 1 WIDENED — any-command orphan (CTL-1531, T75-T100) ───
+#
+# Motivating incident (2026-07-25→26): four `sh -c "while :; do :; done"` procs
+# pegged ~4 cores for 16.5h. cwd = ~/catalyst/wt/evergreen/evr-23 (a DELETED
+# worktree), PPID 1. `pgrep -f 'bun run|turbo|node'` never saw a bare `sh`, so
+# the hourly sweep walked past them ~16 times.
+#
+# The widened branch is a UNION with (never a replacement for) the legacy branch:
+#   legacy : command matches bun run|turbo|node AND cwd resolvable AND cwd gone
+#   widened: ANY command AND ppid==1 AND cwd resolvable AND cwd under the wt root
+#            AND cwd gone AND argv not allowlisted AND command not denylisted
+#            AND age >= floor AND not the sweep itself / its shell / any ancestor
+#            AND under the per-run cap AND the wt root itself still exists
+#
+# Hermetic: ps, lsof, pgrep and kill are all mocked — NO real process is ever
+# enumerated or signalled. `env kill` resolves through $MOCKBIN, which only
+# appends to $KILL_LOG.
+
+WIDEN_WT="${SCRATCH}/wt_widen"
+mkdir -p "${WIDEN_WT}/CTL-999"          # a LIVE worktree
+# ${WIDEN_WT}/evergreen/evr-23 intentionally NOT created (the deleted worktree)
+WIDEN_GONE="${WIDEN_WT}/evergreen/evr-23"
+WIDEN_LIVE="${WIDEN_WT}/CTL-999"
+WIDEN_OUTSIDE_GONE="${SCRATCH}/outside-deleted-dir"   # NOT created, NOT under wt
+# SEGMENT-ANCHORING fixture: a SIBLING whose path has $WIDEN_WT as a STRING
+# prefix but not a PATH prefix. `"$cwd" == "$root"/*` rejects it; mutating that
+# conjunct to the substring form `"$cwd" == "$root"*` would accept it, so this
+# fixture is what makes the anchoring assertion non-vacuous.
+WIDEN_SIBLING_GONE="${WIDEN_WT}-backup/x"
+export WIDEN_GONE WIDEN_LIVE WIDEN_OUTSIDE_GONE WIDEN_SIBLING_GONE
+
+export SWEEP_WT_ROOT="$WIDEN_WT"
+export SWEEP_WORKERS_GLOB_ROOT="${SCRATCH}/catalyst_widen"; mkdir -p "$SWEEP_WORKERS_GLOB_ROOT"
+export SWEEP_TRUNK_CACHE_DIR="${SCRATCH}/trunkcache_widen"; mkdir -p "$SWEEP_TRUNK_CACHE_DIR"
+export SWEEP_INCLUDE_GLOBAL_CLAUDE_WT=0
+export SWEEP_PROJECT_CLAUDE_WT=""
+export SWEEP_FORCE_POWER=battery      # keep vector 2 inert
+export SWEEP_SELF_PID_FILE="${SCRATCH}/sweep-self.pid"
+export SWEEP_ANCESTOR_PID_FILE="${SCRATCH}/sweep-ancestor.pid"
+export WIDEN_MOCK_STATE="${SCRATCH}/widen-mock-state"; mkdir -p "$WIDEN_MOCK_STATE"
+
+# pgrep mock: the LEGACY candidate set. Driven by $WIDEN_LEGACY_PIDS.
+cat > "$MOCKBIN/pgrep" <<'EOF'
+#!/usr/bin/env bash
+if [[ "${1:-}" == "-f" ]]; then printf '%s\n' ${WIDEN_LEGACY_PIDS:-}; fi
+exit 0
+EOF
+chmod +x "$MOCKBIN/pgrep"
+
+# ps mock:
+#   `-axo pid=,ppid=`   → $WIDEN_PS_ROWS, plus the sweep's OWN pid and its
+#                         GRANDPARENT presented as perfectly kill-eligible ppid=1
+#                         rows (the self- and ancestor-protection fixtures).
+#   `-o ppid= -p N`     → $WPPID_N; $WPPID2_N from the 2nd call on (TOCTOU)
+#   `-o command= -p N`  → $WCMD_N;  $WCMD2_N  from the 2nd call on (TOCTOU)
+#   `-o etime= -p N`    → $WETIME_N (default 16:40:00 = 60000s, well over the floor)
+#
+# For a pid NOT declared in $WIDEN_FIXTURE_PIDS the ppid answer is the REAL one
+# from /bin/ps. That is what makes the ancestor WALK observable: with the old
+# blanket `default 1`, _sweep_self_pids' walk terminated on its first step and
+# the walk was never exercised at all. The two introspected pids (self,
+# grandparent) are forced back to ppid=1 so they still reach the gate under test.
+cat > "$MOCKBIN/ps" <<'EOF'
+#!/usr/bin/env bash
+axo=0; fmt=""; pid=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -axo) axo=1; shift 2 ;;
+    -o) fmt="$2"; shift 2 ;;
+    -p) pid="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+if [[ "$axo" == "1" ]]; then
+  printf '%s\n' "${WIDEN_PS_ROWS:-}"
+  # Walk to the TOPMOST orphan-sweep.sh ancestor = the sweep's own $$.
+  p="$PPID"; last=""; n=0; chain=""
+  while [[ -n "$p" && "$p" -gt 1 && "$n" -lt 24 ]]; do
+    c="$(/bin/ps -o command= -p "$p" 2>/dev/null)"
+    case "$c" in *orphan-sweep.sh*) last="$p" ;; esac
+    chain="$chain $p"
+    p="$(/bin/ps -o ppid= -p "$p" 2>/dev/null | tr -d ' ')"; n=$((n+1))
+  done
+  if [[ -n "$last" ]]; then
+    printf '%s\n' "$last" > "${SWEEP_SELF_PID_FILE}"
+    printf '%s 1\n' "$last"
+  fi
+  # A FAR ancestor: the topmost non-init pid on the mock's own chain. It is
+  # reachable ONLY by _sweep_self_pids' WALK (the seed covers just $$ and $PPID),
+  # so it is what makes the walk observable.
+  top=""
+  for q in $chain; do top="$q"; done
+  if [[ -n "$top" && "$top" != "$last" ]] && [[ "$top" -gt 1 ]]; then
+    printf '%s\n' "$top" > "${SWEEP_ANCESTOR_PID_FILE}"   # write BEFORE emitting
+    printf '%s 1\n' "$top"
+  fi
+  exit 0
+fi
+# per-pid invocation counter (drives the TOCTOU second-read fixtures)
+_n_file="${WIDEN_MOCK_STATE:-/tmp}/${fmt%=}-${pid}"
+_n=$(( $(cat "$_n_file" 2>/dev/null || echo 0) + 1 )); printf '%s' "$_n" > "$_n_file"
+case "$fmt" in
+  ppid=)
+    eval "v2=\"\${WPPID2_${pid}:-}\""
+    if [[ -n "$v2" && "$_n" -ge 2 ]]; then printf '%s\n' "$v2"; exit 0; fi
+    eval "v=\"\${WPPID_${pid}:-}\""
+    if [[ -n "$v" ]]; then printf '%s\n' "$v"; exit 0; fi
+    # The introspected self / ancestor pids must still REACH the gate under test,
+    # so from the 2nd read on they claim ppid=1 (otherwise their real ppid would
+    # bail them out at gate (d) and T82/T89 would pass vacuously). Read #1 stays
+    # TRUTHFUL because that is _sweep_self_pids' own ancestor walk — forcing 1
+    # there would terminate the walk at its first step and defeat the fixture.
+    if [[ "$_n" -ge 2 ]]; then
+      if [[ -s "${SWEEP_SELF_PID_FILE:-/nonexistent}" && "$pid" == "$(cat "${SWEEP_SELF_PID_FILE}")" ]]; then
+        printf '1\n'; exit 0
+      fi
+      if [[ -s "${SWEEP_ANCESTOR_PID_FILE:-/nonexistent}" && "$pid" == "$(cat "${SWEEP_ANCESTOR_PID_FILE}")" ]]; then
+        printf '1\n'; exit 0
+      fi
+    fi
+    case " ${WIDEN_FIXTURE_PIDS:-} " in
+      *" ${pid} "*) printf '1\n' ;;                                  # fixture default
+      *) /bin/ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ' ;;        # REAL ancestry
+    esac
+    ;;
+  command=)
+    eval "v2=\"\${WCMD2_${pid}:-}\""
+    if [[ -n "$v2" && "$_n" -ge 2 ]]; then printf '%s\n' "$v2"; exit 0; fi
+    eval "v=\"\${WCMD_${pid}-__DEFAULT__}\""     # single '-': set-but-EMPTY is honoured
+    [[ "$v" == "__DEFAULT__" ]] && v="sh -c while :; do :; done"
+    [[ -n "$v" ]] && printf '%s\n' "$v"
+    ;;
+  etime=)
+    eval "v=\"\${WETIME_${pid}-__DEFAULT__}\""
+    [[ "$v" == "__DEFAULT__" ]] && v="16:40:00"   # 60000s — well over the 900s floor
+    [[ -n "$v" ]] && printf '%s\n' "$v"
+    ;;
+esac
+exit 0
+EOF
+chmod +x "$MOCKBIN/ps"
+
+# lsof mock: cwd per pid via $WCWD_<pid>; default = the deleted worktree, so any
+# pid the fixture does not name still looks maximally kill-eligible.
+cat > "$MOCKBIN/lsof" <<'EOF'
+#!/usr/bin/env bash
+pid=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in -p) pid="$2"; shift 2 ;; *) shift ;; esac
+done
+eval "v=\"\${WCWD_${pid}-__DEFAULT__}\""
+[[ "$v" == "__DEFAULT__" ]] && v="${WIDEN_GONE}"
+[[ -n "$v" ]] && printf 'n%s\n' "$v"
+exit 0
+EOF
+chmod +x "$MOCKBIN/lsof"
+
+cat > "$MOCKBIN/kill" <<'EOF'
+#!/usr/bin/env bash
+echo "$@" >> "${KILL_LOG}"
+EOF
+chmod +x "$MOCKBIN/kill"
+
+_widen_clear() {
+  local v
+  for v in $(env | sed -n 's/^\(W\(CMD2\|PPID2\|ETIME\|CMD\|CWD\|PPID\)_[0-9]*\)=.*/\1/p'); do unset "$v"; done
+  unset WIDEN_PS_ROWS WIDEN_LEGACY_PIDS WIDEN_FIXTURE_PIDS
+  unset SWEEP_PROC_WIDEN_MAX_KILLS SWEEP_PROC_WIDEN_MIN_AGE_SECS
+  rm -f "$KILL_LOG" "$SWEEP_SELF_PID_FILE" "$SWEEP_ANCESTOR_PID_FILE"
+  rm -f "${WIDEN_MOCK_STATE}"/* 2>/dev/null || true
+}
+
+# ── the full fixture: one row per behavior under test ────────────────────────
+_widen_fixture() {
+  _widen_clear
+  export WIDEN_PS_ROWS="2001 1
+2002 1
+2003 1
+2004 500
+2005 1
+2006 1
+2007 1
+2008 1
+2009 1
+2010 1
+2011 1
+2012 1"
+  export WIDEN_FIXTURE_PIDS="2001 2002 2003 2004 2005 2006 2007 2008 2009 2010 2011 2012 3001"
+  # 2001 — the incident: bare `sh`, ppid 1, cwd = DELETED worktree under wt root
+  export WCMD_2001="sh -c while :; do :; done"; export WCWD_2001="$WIDEN_GONE"
+  # 2002 — same shape but cwd is a LIVE worktree
+  export WCMD_2002="sh -c while :; do :; done"; export WCWD_2002="$WIDEN_LIVE"
+  # 2003 — deleted cwd but OUTSIDE the worktree root
+  export WCMD_2003="sh -c while :; do :; done"; export WCWD_2003="$WIDEN_OUTSIDE_GONE"
+  # 2004 — deleted cwd under wt root but PPID != 1
+  export WCMD_2004="sh -c while :; do :; done"; export WCWD_2004="$WIDEN_GONE"
+  export WPPID_2004="500"
+  # 2005 — cwd probe returns nothing (fail closed)
+  export WCMD_2005="sh -c while :; do :; done"; export WCWD_2005=""
+  # 2006 — allowlisted argv (the fleet control plane)
+  export WCMD_2006="sh -c bun run /x/broker/index.mjs"; export WCWD_2006="$WIDEN_GONE"
+  # 2007 — denylisted command in the `progname: ` setproctitle form (CTL-1531
+  #        review #4: a bare ^tmux$ anchor does NOT match "tmux: server …")
+  export WCMD_2007="tmux: server (/private/tmp/tmux-501/default)"; export WCWD_2007="$WIDEN_GONE"
+  # 2008 — argv UNREADABLE (ps prints nothing) → cannot check the allowlist → skip
+  export WCMD_2008=""; export WCWD_2008="$WIDEN_GONE"
+  # 2009 — too YOUNG for the age floor
+  export WCMD_2009="sh -c while :; do :; done"; export WCWD_2009="$WIDEN_GONE"
+  export WETIME_2009="00:30"
+  # 2010 — TOCTOU: argv CHANGES between the gate read and the pre-kill re-read
+  export WCMD_2010="sh -c while :; do :; done"; export WCWD_2010="$WIDEN_GONE"
+  export WCMD2_2010="sh -c a-completely-different-process"
+  # 2011 — TOCTOU: ppid CHANGES between the gate read and the pre-kill re-read
+  export WCMD_2011="sh -c while :; do :; done"; export WCWD_2011="$WIDEN_GONE"
+  export WPPID2_2011="777"
+  # 2012 — SEGMENT ANCHORING: cwd is a SIBLING of the wt root sharing its string
+  #        prefix ("${WIDEN_WT}-backup/x"), gone, ppid 1 — must NEVER be killed
+  export WCMD_2012="sh -c while :; do :; done"; export WCWD_2012="$WIDEN_SIBLING_GONE"
+}
+
+_widen_fixture
+rm -f "$SCRATCH_OTEL_LOG"
+run "T75: widened sweep (enforce) exits 0" \
+  bash -c "SWEEP_PROC_WIDEN=enforce bash '$SWEEP'"
+
+run "T75a: bare-sh orphan w/ DELETED cwd under wt root IS killed" \
+  bash -c "grep -qw '2001' '${KILL_LOG}'"
+
+run "T76: same shape but LIVE worktree cwd NOT killed" \
+  bash -c "! grep -qw '2002' '${KILL_LOG}'"
+
+run "T77: deleted cwd OUTSIDE ~/catalyst/wt NEVER killed" \
+  bash -c "! grep -qw '2003' '${KILL_LOG}'"
+
+run "T78: PPID != 1 NOT killed" \
+  bash -c "! grep -qw '2004' '${KILL_LOG}'"
+
+run "T79: unresolvable cwd NOT killed (fail closed)" \
+  bash -c "! grep -qw '2005' '${KILL_LOG}'"
+
+run "T80: allowlisted argv (broker/index.mjs) NEVER killed" \
+  bash -c "! grep -qw '2006' '${KILL_LOG}'"
+
+run "T81: denylisted 'tmux: server' setproctitle form NEVER killed" \
+  bash -c "! grep -qw '2007' '${KILL_LOG}'"
+
+run "T82: SELF-PROTECTION — the sweep never signals its own pid" \
+  bash -c 'test -s "${SWEEP_SELF_PID_FILE}" && ! grep -qw "$(cat "${SWEEP_SELF_PID_FILE}")" "${KILL_LOG}"'
+
+run "T83: widened kill emits the distinct orphan_proc otel vector" \
+  bash -c "grep -q 'orphan_proc' '${SCRATCH_OTEL_LOG}'"
+
+# ── CTL-1531 review #6: gates that shipped with ZERO coverage ────────────────
+
+run "T89: ANCESTOR WALK — a FAR ancestor is spared (walk-only; the seed covers only \$\$ and \$PPID)" \
+  bash -c 'test -s "${SWEEP_ANCESTOR_PID_FILE}" \
+    && test "$(cat "${SWEEP_ANCESTOR_PID_FILE}")" != "$(cat "${SWEEP_SELF_PID_FILE}")" \
+    && ! grep -qw "$(cat "${SWEEP_ANCESTOR_PID_FILE}")" "${KILL_LOG}"'
+
+# Review #8: _is_self_or_ancestor used to read the set through `$(_sweep_self_pids)`
+# — a COMMAND SUBSTITUTION, so the memo assignment landed in a subshell and was
+# discarded, re-running the up-to-32-fork ancestor walk for EVERY candidate. The
+# ps mock counts its per-pid invocations, so the walk's own reads are countable:
+# memoized ⇒ the ancestor pid is asked for its ppid exactly once per sweep.
+run "T89b: the self/ancestor set is MEMOIZED (the walk runs once per sweep, not once per candidate)" \
+  bash -c 'test -s "${SWEEP_ANCESTOR_PID_FILE}" \
+    && n="$(cat "${WIDEN_MOCK_STATE}/ppid-$(cat "${SWEEP_ANCESTOR_PID_FILE}")" 2>/dev/null || echo 0)" \
+    && test "$n" -ge 1 && test "$n" -le 3'
+
+run "T90: UNREADABLE argv NOT killed (cannot evaluate the allowlist → fail closed)" \
+  bash -c "! grep -qw '2008' '${KILL_LOG}'"
+
+run "T91: AGE FLOOR — a process younger than SWEEP_PROC_WIDEN_MIN_AGE_SECS NOT killed" \
+  bash -c "! grep -qw '2009' '${KILL_LOG}'"
+
+run "T92: TOCTOU — argv changed between gate and kill → NOT killed" \
+  bash -c "! grep -qw '2010' '${KILL_LOG}'"
+
+run "T93: TOCTOU — ppid changed between gate and kill → NOT killed" \
+  bash -c "! grep -qw '2011' '${KILL_LOG}'"
+
+# SEGMENT ANCHORING. "${WIDEN_WT}-backup/x" shares $SWEEP_WT_ROOT as a STRING
+# prefix but is not under it. Without this fixture, mutating
+# `[[ "$cwd" == "$root"/* ]]` to `[[ "$cwd" == "$root"* ]]` leaves the suite green.
+run "T94: SEGMENT ANCHORING — a sibling-prefix path (<root>-backup/x) is NOT under the root" \
+  bash -c "! grep -qw '2012' '${KILL_LOG}'"
+
+# ── shadow / off / dry-run / invalid / SHIPPED DEFAULT ───────────────────────
+_widen_fixture
+run "T84: SWEEP_PROC_WIDEN=shadow kills nothing but logs the candidate" \
+  bash -c "SWEEP_PROC_WIDEN=shadow bash '$SWEEP' 2>&1 | grep -q 'would kill 2001' && ! test -s '${KILL_LOG}'"
+
+# T85 REWRITE (CTL-1531 review #6). The original was VACUOUS twice over:
+# `grep -qv 'would kill 2001'` succeeds on ANY non-matching line (the banner
+# always prints one), and it was chained with `;` so its status was discarded
+# outright — only `! test -s "$KILL_LOG"` decided the test.
+_widen_fixture
+run "T85: SWEEP_PROC_WIDEN=off kills nothing AND logs no candidate" \
+  bash -c "SWEEP_PROC_WIDEN=off bash '$SWEEP' > '${SCRATCH}/t85.out' 2>&1 \
+    && expect_not_contains '${SCRATCH}/t85.out' 'would kill 2001' \
+    && ! test -s '${KILL_LOG}'"
+
+_widen_fixture
+run "T86: --dry-run kills nothing even in enforce" \
+  bash -c "SWEEP_PROC_WIDEN=enforce bash '$SWEEP' --dry-run && ! test -s '${KILL_LOG}'"
+
+# The SHIPPED DEFAULT. Every other widened test passes the mode explicitly and
+# the harness forces `off` globally, so the value an unconfigured production host
+# actually runs was never asserted. ADR-023 requires it to be `shadow` (dark by
+# default; the flip to enforce is operator-owned) — the installed LaunchAgent
+# sets no EnvironmentVariables, so this in-script default IS production.
+_widen_fixture
+run "T95: SHIPPED DEFAULT (SWEEP_PROC_WIDEN unset) is shadow — logs, kills nothing" \
+  bash -c "env -u SWEEP_PROC_WIDEN bash '$SWEEP' > '${SCRATCH}/t95.out' 2>&1 \
+    && expect_contains '${SCRATCH}/t95.out' '[shadow] would kill 2001' \
+    && expect_contains '${SCRATCH}/t95.out' 'widen=shadow' \
+    && ! test -s '${KILL_LOG}'"
+
+_widen_fixture
+run "T96: INVALID mode warns and falls back to shadow (never to enforce)" \
+  bash -c "SWEEP_PROC_WIDEN=bogus bash '$SWEEP' > '${SCRATCH}/t96.out' 2>&1 \
+    && expect_contains '${SCRATCH}/t96.out' \"SWEEP_PROC_WIDEN='bogus' invalid\" \
+    && expect_contains '${SCRATCH}/t96.out' '[shadow] would kill 2001' \
+    && ! test -s '${KILL_LOG}'"
+
+# ── CTL-1531 review #7: bounds + corroboration on the widened branch ─────────
+
+# Per-run cap. 2001/2010/2011/2012 etc. are ineligible for other reasons, so the
+# cap fixture declares its own set of uniformly-eligible pids.
+_widen_clear
+export WIDEN_PS_ROWS="2101 1
+2102 1
+2103 1
+2104 1
+2105 1"
+export WIDEN_FIXTURE_PIDS="2101 2102 2103 2104 2105"
+run "T97: PER-RUN CAP — enforce kills at most SWEEP_PROC_WIDEN_MAX_KILLS, defers the rest" \
+  bash -c "SWEEP_PROC_WIDEN=enforce SWEEP_PROC_WIDEN_MAX_KILLS=2 bash '$SWEEP' > '${SCRATCH}/t97.out' 2>&1 \
+    && test \"\$(wc -l < '${KILL_LOG}' | tr -d ' ')\" = '2' \
+    && expect_contains '${SCRATCH}/t97.out' 'cap reached (2), 3 deferred'"
+
+# Shadow must still report the FULL candidate set — the cap is what sizes the
+# operator's enforce decision, so capping the shadow report would hide it.
+_widen_clear
+export WIDEN_PS_ROWS="2101 1
+2102 1
+2103 1
+2104 1
+2105 1"
+export WIDEN_FIXTURE_PIDS="2101 2102 2103 2104 2105"
+run "T98: the cap does NOT truncate the shadow report (all 5 candidates logged)" \
+  bash -c "SWEEP_PROC_WIDEN=shadow SWEEP_PROC_WIDEN_MAX_KILLS=2 bash '$SWEEP' > '${SCRATCH}/t98.out' 2>&1 \
+    && test \"\$(grep -c 'would kill 21' '${SCRATCH}/t98.out')\" = '5' \
+    && ! test -s '${KILL_LOG}'"
+
+# Root-absent early bail. A renamed/unmounted $SWEEP_WT_ROOT makes EVERY cwd
+# beneath it satisfy "cwd is gone" in the SAME pass — a root-level fault, not N
+# independent orphans. Without the bail this fixture SIGTERMs all 5 at once.
+_widen_clear
+export WIDEN_PS_ROWS="2101 1
+2102 1
+2103 1
+2104 1
+2105 1"
+export WIDEN_FIXTURE_PIDS="2101 2102 2103 2104 2105"
+run "T99: ROOT-ABSENT bail — a missing SWEEP_WT_ROOT kills nothing and says why" \
+  bash -c "SWEEP_PROC_WIDEN=enforce SWEEP_WT_ROOT='${SCRATCH}/wt_widen_ABSENT' bash '$SWEEP' > '${SCRATCH}/t99.out' 2>&1 \
+    && expect_contains '${SCRATCH}/t99.out' 'is absent — skipping' \
+    && ! test -s '${KILL_LOG}'"
+
+# ── UNION: the legacy branch keeps its path-unrestricted coverage ────────────
+# Production evidence (orphan-sweep.log) shows vector 1 killing gone-cwd node/bun
+# procs in /private/tmp, ~/.codex/plugins/cache and <repo>/.claude/worktrees —
+# none under ~/catalyst/wt. Narrowing the LEGACY branch to the wt root would be a
+# silent coverage regression, so the widening must be a UNION.
+_widen_fixture
+export WIDEN_LEGACY_PIDS="3001"
+export WCWD_3001="$WIDEN_OUTSIDE_GONE"    # gone, and NOT under the worktree root
+run "T87: legacy branch still kills a gone-cwd node/bun proc OUTSIDE the wt root" \
+  bash -c "SWEEP_PROC_WIDEN=enforce bash '$SWEEP' && grep -qw '3001' '${KILL_LOG}'"
+
+_widen_fixture
+export WIDEN_LEGACY_PIDS="3001"
+export WCWD_3001="$WIDEN_OUTSIDE_GONE"
+run "T88: legacy branch is unaffected by SWEEP_PROC_WIDEN=off" \
+  bash -c "SWEEP_PROC_WIDEN=off bash '$SWEEP' && grep -qw '3001' '${KILL_LOG}'"
+
+# CROSS-BRANCH DEDUPE. A pid in BOTH candidate sets (legacy pgrep match AND
+# ppid==1 with a gone cwd under the wt root) must be acted on exactly ONCE —
+# otherwise it is signalled twice and emits two reclaim events for one process.
+_widen_fixture
+export WIDEN_LEGACY_PIDS="2001"
+rm -f "$SCRATCH_OTEL_LOG"
+run "T100a: CROSS-BRANCH DEDUPE — a pid in both branches is killed exactly once" \
+  bash -c "SWEEP_PROC_WIDEN=enforce bash '$SWEEP' \
+    && test \"\$(grep -cw '2001' '${KILL_LOG}')\" = '1'"
+
+run "T100b: CROSS-BRANCH DEDUPE — and emits exactly one reclaim vector for it" \
+  bash -c "test \"\$(grep -c 'orphan_proc\|bun_proc' '${SCRATCH_OTEL_LOG}')\" = '1'"
+
+_widen_clear
+unset WIDEN_LEGACY_PIDS SWEEP_SELF_PID_FILE SWEEP_ANCESTOR_PID_FILE WIDEN_MOCK_STATE
+rm -f "$MOCKBIN/pgrep" "$MOCKBIN/ps" "$MOCKBIN/lsof"
 
 # ─── results ────────────────────────────────────────────────────────────────
 
