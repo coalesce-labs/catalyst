@@ -600,9 +600,13 @@ env vars on the `catalyst-broker` process:
 
 - `FILTER_BROKER_DEGRADED_ENABLED` (default **off**; set to exactly `1` to enable) — opt-in
   kill-switch. Unset (or any other value) means the detector evaluates nothing and emits nothing.
-  Read at call time, so it toggles without a broker restart. Flipping it **off** discards any
-  in-progress debounce run, so a re-enable re-earns the full sustained-tick threshold; an
-  already-open episode survives the switch and still emits its paired `recovered`.
+  **Changing this requires a broker restart.** The value is read at call time, so it takes effect
+  without a code reload — but a running daemon's `process.env` is fixed at launch and there is no
+  runtime control path that mutates it, so editing the env file (or exporting in a shell) does
+  **not** reach a live broker. Restart it, or you will believe the detector is armed while it is
+  still dormant. Flipping it **off** discards any in-progress debounce run, so a re-enable re-earns
+  the full sustained-tick threshold; an already-open episode survives the switch and still emits
+  its paired `recovered`.
 - `FILTER_BROKER_DEGRADED_GRACE_MS` (default `300000`, 5 min) — startup grace. An empty interest
   table is not judged at all until the broker has been up this long, so a still-warming process never
   trips.

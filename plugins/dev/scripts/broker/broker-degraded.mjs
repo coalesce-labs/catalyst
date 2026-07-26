@@ -195,6 +195,15 @@ export function nextBrokerDegradedLatch(prev, { trip, clear } = {}) {
 let _latched = false;
 let _latchedAtMs = null; // when the open episode started (for degradedForMs)
 let _hydrated = false;
+// Codex P2 (#2740): the marker write can fail (e.g. a temporarily unwritable
+// CATALYST_DIR) AFTER the event append already succeeded and `_latched` advanced.
+// Swallowing that left memory and disk disagreeing with nothing to reconcile them,
+// so a later restart hydrated an absent/stale marker and re-emitted a duplicate
+// edge for the same episode — defeating the whole point of the durable latch.
+// When a write fails we remember it and retry on every subsequent tick until it
+// lands. In-memory state stays authoritative meanwhile, so the retry never changes
+// what is emitted; it only makes the on-disk copy catch up.
+let _persistPending = false;
 let _sustained = 0; // in-memory only: a restart deliberately re-earns the debounce
 // The run length AT THE TICK THE GATE FIRST CROSSED, held across retries. The live
 // _sustained counter keeps incrementing while a failed append re-attempts the same
@@ -244,8 +253,10 @@ function persistLatch({ latched, latchedAtMs }) {
     const tmp = join(dir, `.broker-degraded-latch.${randomBytes(4).toString("hex")}.tmp`);
     writeFileSync(tmp, JSON.stringify({ latched, latchedAtMs, ts: Date.now() }));
     renameSync(tmp, path);
+    return true;
   } catch (err) {
-    log.warn?.({ err: err?.message }, "broker-degraded: latch persist failed (continuing)");
+    log.warn?.({ err: err?.message }, "broker-degraded: latch persist failed (will retry)");
+    return false;
   }
 }
 
@@ -259,6 +270,7 @@ export function __resetBrokerDegradedLatchForTest() {
   _hydrated = false;
   _sustained = 0;
   _tripRunLength = null;
+  _persistPending = false;
 }
 
 export function __getBrokerDegradedLatchForTest() {
@@ -268,6 +280,7 @@ export function __getBrokerDegradedLatchForTest() {
     sustained: _sustained,
     tripRunLength: _tripRunLength,
     hydrated: _hydrated,
+    persistPending: _persistPending,
   };
 }
 
@@ -319,6 +332,15 @@ export function checkBrokerDegraded({
   const { clear, reason: clearReason } = classifyBrokerDegradedClear({ interestCount, fleetActive });
 
   hydrateLatch();
+
+  // Codex P2 (#2740): reconcile a previously-failed marker write before doing
+  // anything else. Until this lands, disk disagrees with memory and a restart
+  // would re-emit an edge we already emitted. Runs after hydrateLatch so it can
+  // never clobber the on-disk episode with un-hydrated defaults.
+  if (_persistPending) {
+    _persistPending = !persistLatch({ latched: _latched, latchedAtMs: _latchedAtMs });
+  }
+
   _sustained = nextBrokerDegradedSustained(_sustained, anomalous);
 
   const trip = anomalous && _sustained >= sustainedTicks;
@@ -360,6 +382,6 @@ export function checkBrokerDegraded({
 
   _latched = latched;
   _latchedAtMs = degraded ? nowMs : null;
-  persistLatch({ latched: _latched, latchedAtMs: _latchedAtMs });
+  _persistPending = !persistLatch({ latched: _latched, latchedAtMs: _latchedAtMs });
   return edge;
 }

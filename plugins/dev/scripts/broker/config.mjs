@@ -196,8 +196,12 @@ export const PILEUP_COOLDOWN_MS = parseIntKnob(process.env.FILTER_PILEUP_COOLDOW
 // (absence, because a dead daemon is a MISSING series that `count_over_time == 0`
 // cannot assert).
 //
-// The check is call-time (parity with isAlertEmitEnabled) so an operator can flip it
-// without a broker restart. Flipping it OFF discards any in-progress debounce run,
+// The check is call-time (parity with isAlertEmitEnabled), so it takes effect without
+// a code reload — but changing it STILL REQUIRES A BROKER RESTART (Codex P2, #2740).
+// A running daemon's process.env is fixed at launch and nothing in this repo mutates
+// the flag at runtime, so editing the env file or exporting in a shell does not reach
+// a live broker; without the restart an operator can believe the detector is armed
+// while it is still dormant. Flipping it OFF discards any in-progress debounce run,
 // so a re-enable always re-earns the full sustained-tick threshold; an already-open
 // episode survives the switch and still emits its paired `recovered`.
 export function isBrokerDegradedDetectorEnabled() {

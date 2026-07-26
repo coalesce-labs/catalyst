@@ -610,3 +610,73 @@ describe("event names (CTL-1523)", () => {
     }
   });
 });
+
+// Codex P2 (#2740): the marker write can fail AFTER the event append succeeded and
+// `_latched` advanced. Swallowing that left memory and disk disagreeing with nothing
+// to reconcile them, so a restart hydrated a stale/absent marker and re-emitted a
+// duplicate edge for the same episode — defeating the durable latch entirely.
+describe("checkBrokerDegraded — a failed latch persist is retried (review round 2)", () => {
+  let dir;
+  let prevCatalystDir;
+  let prevEnabled;
+  beforeEach(() => {
+    prevCatalystDir = process.env.CATALYST_DIR;
+    prevEnabled = process.env.FILTER_BROKER_DEGRADED_ENABLED;
+    dir = mkdtempSync(join(tmpdir(), "broker-degraded-persist-"));
+    process.env.CATALYST_DIR = dir;
+    process.env.FILTER_BROKER_DEGRADED_ENABLED = "1";
+    __resetBrokerDegradedLatchForTest();
+  });
+  afterEach(() => {
+    if (prevCatalystDir === undefined) delete process.env.CATALYST_DIR;
+    else process.env.CATALYST_DIR = prevCatalystDir;
+    if (prevEnabled === undefined) delete process.env.FILTER_BROKER_DEGRADED_ENABLED;
+    else process.env.FILTER_BROKER_DEGRADED_ENABLED = prevEnabled;
+    rmSync(dir, { recursive: true, force: true });
+    __resetBrokerDegradedLatchForTest();
+  });
+
+  const anomalousTick = (emit) =>
+    checkBrokerDegraded({
+      interestCount: 0,
+      uptimeMs: 6 * 60 * 1000,
+      fleetActive: true,
+      emit,
+      sustainedTicks: 1,
+    });
+
+  test("a persist failure is remembered and retried until it lands", () => {
+    // Make the marker directory unwritable by planting a DIRECTORY where the marker
+    // file must go — writeFileSync/renameSync then fail while the append succeeds.
+    const markerPath = getBrokerDegradedLatchPath();
+    mkdirSync(markerPath, { recursive: true });
+
+    const emitted = [];
+    expect(anomalousTick((e) => (emitted.push(e.action), true))).toBe("degraded");
+    expect(emitted).toEqual(["degraded"]);
+    // In-memory latch advanced (the edge really was emitted) but disk did NOT.
+    expect(__getBrokerDegradedLatchForTest().latched).toBe(true);
+    expect(__getBrokerDegradedLatchForTest().persistPending).toBe(true);
+
+    // Still failing → still pending, and no duplicate edge is emitted meanwhile.
+    expect(anomalousTick(() => true)).toBeNull();
+    expect(__getBrokerDegradedLatchForTest().persistPending).toBe(true);
+    expect(emitted).toEqual(["degraded"]);
+
+    // Clear the obstruction: the very next tick reconciles disk with memory.
+    rmSync(markerPath, { recursive: true, force: true });
+    expect(anomalousTick(() => true)).toBeNull();
+    expect(__getBrokerDegradedLatchForTest().persistPending).toBe(false);
+
+    // And the marker now reflects the OPEN episode, so a restart resumes it
+    // instead of re-emitting — which is the whole point.
+    const marker = JSON.parse(readFileSync(getBrokerDegradedLatchPath(), "utf8"));
+    expect(marker.latched).toBe(true);
+  });
+
+  test("a successful persist leaves nothing pending", () => {
+    expect(anomalousTick(() => true)).toBe("degraded");
+    expect(__getBrokerDegradedLatchForTest().persistPending).toBe(false);
+    expect(JSON.parse(readFileSync(getBrokerDegradedLatchPath(), "utf8")).latched).toBe(true);
+  });
+});
