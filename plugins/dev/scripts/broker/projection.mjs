@@ -194,8 +194,16 @@ export function buildBrokerState({ probe } = {}) {
     // CTL-447: enumerate the deterministic interest types this broker supports
     // so `catalyst-broker status --json` can advertise them to clients.
     supportedInterestTypes: [...DETERMINISTIC_INTEREST_TYPES],
-    // CTL-352: liveness fields so the HUD pill and operators can detect a
-    // silently-dead broker (interests.size === 0 with stale lastWakeAt).
+    // CTL-352: liveness fields for the HUD pill and operators.
+    // CTL-1523: the heuristic this comment used to advertise — "interests.size === 0
+    // with stale lastWakeAt ⇒ silently-dead broker" — is FALSE in phase-agents mode.
+    // Interest registration is legacy-only (dormant since the 2026-06-07 cutover), so
+    // an empty table with no wakes is the CORRECT steady state, not a death signal;
+    // acting on it produced 104 false broker.daemon.degraded emissions in one month.
+    // See broker-degraded.mjs for the full reasoning (that detector is now opt-in and
+    // dormant by default). The real silently-dead-broker signal is CTL-1122
+    // ingestion-recency: catalyst.ingestion.stale / catalyst.alert.raised(system_down).
+    // These fields remain useful as raw operator readouts — just not as a verdict.
     interestCount: interests.size,
     lastWakeAt: getLastWakeAt(),
     lastRegisterAt: getLastRegisterAt(),

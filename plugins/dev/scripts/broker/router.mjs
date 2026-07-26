@@ -41,6 +41,8 @@ import {
   INGESTION_RECENCY_HOLDDOWN_MS,
   INGESTION_SEED_BYTES,
   getPrevMonthEventLogPath,
+  BROKER_DEGRADED_GRACE_MS,
+  BROKER_DEGRADED_SUSTAINED_TICKS,
 } from "./config.mjs";
 import {
   getInterests,
@@ -51,9 +53,15 @@ import {
   getBrokerStartedAt,
   setLastWakeAt,
   setLastRegisterAt,
-  getDegradedEmittedAt,
-  setDegradedEmittedAt,
 } from "./state.mjs";
+// CTL-1523: the broker-degraded detector (fleet-activity-gated, sustained,
+// durably latched). The pure machine + latch live in the leaf module; the router
+// supplies the two side effects — the activity reading and the event append.
+import {
+  checkBrokerDegraded,
+  BROKER_DEGRADED_EVENT,
+  BROKER_RECOVERED_EVENT,
+} from "./broker-degraded.mjs";
 import {
   saveInterests,
   persistBrokerState,
@@ -144,8 +152,9 @@ const workerToOrchestrator = getWorkerToOrchestrator();
 const waitingSessions = getWaitingSessionsMap();
 const orchestratorStatusMap = getOrchestratorStatusMap();
 
-// CTL-352: empty-interests degraded threshold (5-minute startup grace).
-const DEGRADED_THRESHOLD_MS = 5 * 60 * 1000;
+// CTL-1523: the empty-interests startup grace moved to config.mjs as the
+// FILTER_BROKER_DEGRADED_GRACE_MS knob (was the hard-coded CTL-352
+// DEGRADED_THRESHOLD_MS).
 
 // CTL-993: merge-to-main plugin-checkout refresh wiring. The broker module lives
 // at <repo>/plugins/dev/scripts/broker/router.mjs, so the repo .catalyst config
@@ -755,6 +764,30 @@ function fleetIsActive(now) {
   }
 }
 
+// emitBrokerDegradedEvent — the append side effect the CTL-1523 detector injects.
+// Returns true on a successful append, false on any failure, and NEVER throws:
+// checkBrokerDegraded advances its durable latch only on true, so a transient
+// event-log failure re-attempts the same edge next tick instead of losing it.
+// (appendEvent itself is void and CAN throw — appendFileSync — hence the wrap.)
+function emitBrokerDegradedEvent({ action, detail }) {
+  const degraded = action === "degraded";
+  try {
+    appendEvent({
+      event: degraded ? BROKER_DEGRADED_EVENT : BROKER_RECOVERED_EVENT,
+      orchestrator: null,
+      worker: null,
+      severity: degraded ? "WARN" : "INFO",
+      detail,
+    });
+    return true;
+  } catch (err) {
+    // Optional-call for parity with the two sites in broker-degraded.mjs: this
+    // rides runWatchdogTick, which must NEVER throw.
+    log.warn?.({ err: err?.message, action }, "broker-degraded: event append failed");
+    return false;
+  }
+}
+
 // Test seams (CTL-1122) — mirror the _emittedWakeCache __…ForTest pattern.
 export function __clearIngestionRecencyForTest() {
   _lastSeenByService.clear();
@@ -948,8 +981,10 @@ export function handleRegister(event) {
   }
   saveInterests();
   setLastRegisterAt(new Date().toISOString());
-  // CTL-352: a fresh registration arms a future degraded event.
-  setDegradedEmittedAt(null);
+  // CTL-1523: the CTL-352 out-of-band re-arm (setDegradedEmittedAt(null)) is gone.
+  // "Interests came back" is now the CLEAR EDGE and must be observed by the
+  // watchdog so it emits the paired broker.daemon.recovered — a silent re-arm here
+  // would leave a degraded with no recovery in the ledger.
   persistBrokerState();
 }
 
@@ -1072,7 +1107,7 @@ function _autoRegisterPrLifecycle(sessionId, prNumber, orchestrator, ticket, rep
   log.info({ sessionId, prNumber }, "auto-correlated pr_lifecycle for session");
   saveInterests();
   setLastRegisterAt(new Date().toISOString());
-  setDegradedEmittedAt(null);
+  // CTL-1523: no out-of-band re-arm — the watchdog observes the clear edge.
   persistBrokerState();
 }
 
@@ -1887,7 +1922,7 @@ function _autoPrLifecycleFromTicket(ticket, prNumber, interestsMap, repo) {
   if (changed) {
     saveInterests();
     setLastRegisterAt(new Date().toISOString());
-    setDegradedEmittedAt(null);
+    // CTL-1523: no out-of-band re-arm — the watchdog observes the clear edge.
     persistBrokerState();
   }
 }
@@ -2222,33 +2257,42 @@ export function runWatchdogTick({ liveness = sessionLiveness } = {}) {
   // never throws, never blocks) so per-daemon memory becomes attributable in Prometheus.
   emitProcessMemoryMetric({ serviceName: "catalyst.broker", log }).catch(() => {});
 
-  // CTL-352: empty-interests observability. Warn on every tick when the table
-  // is empty so a silently-dead broker is loud in broker.log, and emit a
-  // one-shot broker.daemon.degraded event after the 5-minute startup grace so
-  // downstream consumers (HUD, alerts) can pair startup ↔ degraded.
+  // CTL-352 / CTL-1523: empty-interests observability. The signal is only an
+  // anomaly when the fleet is ACTIVELY WORKING — interest registration is
+  // legacy-only and correctly dormant in phase-agents mode, so an empty table on
+  // an idle fleet is the healthy steady state, not a silently-dead broker. The
+  // gate, the sustained-tick debounce, and the durable edge latch live in
+  // broker-degraded.mjs; this call supplies the two side effects.
+  //
+  // NOTE: the log-level split below is INDEPENDENT of the detector's opt-in knob —
+  // it is plain broker.log hygiene and always applies. checkBrokerDegraded itself is
+  // dormant unless FILTER_BROKER_DEGRADED_ENABLED=1 (it returns null on its first
+  // line), so on a normal phase-agents host this call is a no-op; the real
+  // silently-dead-broker detector is the CTL-1122 checkSourceRecency pass below.
+  const brokerStartedAt = getBrokerStartedAt();
+  const startedTs = brokerStartedAt ? new Date(brokerStartedAt).getTime() : now;
+  const brokerUptimeMs = now - startedTs;
+  const fleetActive = fleetIsActive(now);
   if (interests.size === 0) {
-    const brokerStartedAt = getBrokerStartedAt();
-    const startedTs = brokerStartedAt ? new Date(brokerStartedAt).getTime() : now;
-    const uptimeMs = now - startedTs;
-    log.warn({ uptimeMs }, "watchdog: no registered interests");
-    if (uptimeMs > DEGRADED_THRESHOLD_MS && getDegradedEmittedAt() === null) {
-      appendEvent({
-        event: "broker.daemon.degraded",
-        orchestrator: null,
-        worker: null,
-        severity: "WARN",
-        detail: {
-          reason: "no registered interests",
-          uptimeMs,
-          brokerStartedAt,
-        },
-      });
-      setDegradedEmittedAt(new Date().toISOString());
-      persistBrokerState();
-    }
-  } else if (getDegradedEmittedAt() !== null) {
-    setDegradedEmittedAt(null);
+    // CTL-1523: split by the same discriminator the detector uses. An empty table
+    // WHILE work is in flight is a real anomaly (warn); on an idle fleet it is
+    // expected and was drowning broker.log (~171 lines / 2.85h on mini) → debug.
+    if (fleetActive) log.warn({ uptimeMs: brokerUptimeMs }, "watchdog: no registered interests");
+    else log.debug({ uptimeMs: brokerUptimeMs }, "watchdog: no registered interests (fleet idle)");
   }
+  checkBrokerDegraded({
+    interestCount: interests.size,
+    uptimeMs: brokerUptimeMs,
+    brokerStartedAt,
+    fleetActive,
+    nowMs: now,
+    // Both knobs injected explicitly (they default to the same config constants
+    // inside the detector) so the wiring reads as one config surface rather than
+    // half-explicit / half-defaulted.
+    graceMs: BROKER_DEGRADED_GRACE_MS,
+    sustainedTicks: BROKER_DEGRADED_SUSTAINED_TICKS,
+    emit: emitBrokerDegradedEvent,
+  });
 
   // CTL-1122: judge each ingestion source's liveness from its event recency —
   // the surviving-process observation the 11h silent outage proved we were

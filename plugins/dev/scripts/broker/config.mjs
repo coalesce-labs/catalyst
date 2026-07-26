@@ -159,6 +159,48 @@ export const PILEUP_THRESHOLD = parseIntKnob(process.env.FILTER_PILEUP_THRESHOLD
 export const PILEUP_PERSISTENCE_MS = parseIntKnob(process.env.FILTER_PILEUP_PERSISTENCE_MS, 300000, { min: 0 });
 export const PILEUP_COOLDOWN_MS = parseIntKnob(process.env.FILTER_PILEUP_COOLDOWN_MS, 3600000, { min: 0 });
 
+// CTL-1523: broker-degraded detector (the CTL-352 empty-interests signal, fixed —
+// and then deliberately parked). OPT-IN: unset (the default) means the detector
+// evaluates nothing and emits nothing.
+//
+// WHY DORMANT BY DEFAULT. In `phase-agents` mode the trip condition carries no
+// information, because one of its two conjuncts is PERMANENTLY true:
+// `interests.size === 0` can never be false. Interest registration is legacy-only —
+// every `filter.register` producer lives in plugins/legacy/, dormant since the
+// 2026-06-07 cutover — and neither in-router auto-register path can break the tie:
+// `_autoRegisterPrLifecycle` only fires when an agent reports a claimed_pr, and
+// `_autoPrLifecycleFromTicket` only fires when an EXISTING interest already watches
+// the ticket, so an empty table stays empty. With that conjunct pinned true the gate
+// degenerates to "the fleet has been active for N contiguous ticks", which would emit
+// roughly one degraded/recovered pair per busy/idle cycle — trading the CTL-352
+// restart-driven false positive for a busy-window-driven one. Not a trade worth making.
+//
+// WHY IT IS KEPT. Legacy wave-orchestration mode (plugins/legacy, dispatchMode
+// `oneshot-legacy`) DOES register interests, so there the empty-table conjunct is
+// genuinely discriminating and the detector is meaningful — flip
+// FILTER_BROKER_DEGRADED_ENABLED=1 on such a host.
+//
+// THE REAL DEAD-BROKER DETECTOR IS ELSEWHERE, and is unaffected by this knob:
+// CTL-1122's `checkSourceRecency` over RECENCY_SOURCES (router.mjs) watches actual
+// ingestion recency and emits `catalyst.ingestion.stale` +
+// `catalyst.alert.raised(system_down)` when ingestion really stops. That is the
+// signal to trust for "is the broker silently dead".
+//
+// The check is call-time (parity with isAlertEmitEnabled) so an operator can flip it
+// without a broker restart.
+export function isBrokerDegradedDetectorEnabled() {
+  return process.env.FILTER_BROKER_DEGRADED_ENABLED === "1";
+}
+// Startup grace before an empty interest table can be judged at all (unchanged
+// 5-minute default — it was the CTL-352 DEGRADED_THRESHOLD_MS).
+export const BROKER_DEGRADED_GRACE_MS = parseIntKnob(
+  process.env.FILTER_BROKER_DEGRADED_GRACE_MS, 300000, { min: 0 });
+// Consecutive anomalous watchdog ticks (~60s each) required before the degraded
+// edge fires — a single-tick blip (e.g. a worker row that just went fresh while
+// interests are mid-reload) must not page.
+export const BROKER_DEGRADED_SUSTAINED_TICKS = parseIntKnob(
+  process.env.FILTER_BROKER_DEGRADED_SUSTAINED_TICKS, 5, { min: 1 });
+
 // --- Event log ---
 export function getEventLogPath() {
   const now = new Date();

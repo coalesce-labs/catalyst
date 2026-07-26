@@ -373,9 +373,23 @@ strings.
 | Space                                                                   | Rule                                                                                                                           |
 | ----------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
 | `filter.*`                                                              | Broker interest-management only (else filter-wake loop).                                                                       |
-| `broker.daemon.*`                                                       | Broker heartbeats/startup/shutdown only.                                                                                       |
+| `broker.daemon.*`                                                       | Broker lifecycle/health only (see the member list below).                                                                      |
 | `session.heartbeat`                                                     | Exact match; broker liveness pings only (CTL-401).                                                                             |
 | `phase.<name>.(complete\|failed\|turn-cap-exhausted\|skipped).<ticket>` | Routing namespace matched by `PHASE_EVENT_PATTERN`; `<name>` must be in `KNOWN_PHASES` or `INTENTIONAL_PHASE_SLOT_EXCEPTIONS`. |
+
+**`broker.daemon.*` members** (the complete emitted set, verified): `broker.daemon.startup` and
+`broker.daemon.shutdown` (`index.mjs`), `broker.daemon.heartbeat` (`index.mjs`), `broker.daemon.gc`
+(`gc-startup.mjs`), `broker.daemon.prose_disabled` (`router.mjs`), and the CTL-1523
+`broker.daemon.degraded` / `broker.daemon.recovered` pair (`broker-degraded.mjs`).
+
+That degraded/recovered pair is an EDGE-TRIGGERED episode with a **durable latch** (marker
+`~/catalyst/broker-degraded-latch.json`), and it is **OPT-IN and dormant by default** — it evaluates
+nothing unless `FILTER_BROKER_DEGRADED_ENABLED=1`. In `phase-agents` mode its `interests.size === 0`
+conjunct is permanently true (interest registration is legacy-only, dormant since the 2026-06-07
+cutover), so the gate carries no information; it is retained for legacy wave-orchestration hosts,
+where interests are registered. **The real silently-dead-broker detector is CTL-1122's
+`checkSourceRecency`** (`catalyst.ingestion.stale` + `catalyst.alert.raised(system_down)`), which
+watches actual ingestion recency and is unaffected by this knob.
 
 **`KNOWN_PHASES`** (canonical 10, in order): `triage`, `research`, `plan`, `implement`, `verify`,
 `review`, `pr`, `monitor-merge`, `monitor-deploy`, `teardown`.
