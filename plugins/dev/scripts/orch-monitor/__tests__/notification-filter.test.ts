@@ -2,6 +2,7 @@ import { describe, it, expect } from "bun:test";
 import {
   shouldNotify,
   createNotificationProjector,
+  resolveDaemonNotifyHoldMs,
 } from "../lib/notification-filter";
 
 describe("shouldNotify (template parity with lib.rs)", () => {
@@ -132,7 +133,12 @@ describe("createNotificationProjector (edge detection + dedup)", () => {
   });
 
   it("daemon transition healthy→offline fires once, not on the steady state", () => {
-    const p = createNotificationProjector();
+    // CTL-1522: with the hold, an immediate-edge assertion needs the clock to
+    // advance past it. holdMs=0 disables the hold so the escalation is observed
+    // on its own frame. Note 0 is "no hold", not a byte-identical rollback —
+    // seed-announce and orphan-recovery suppression are unconditional. See the
+    // daemonNotifyHoldMs docstring (Codex P2, #2739).
+    const p = createNotificationProjector({ daemonNotifyHoldMs: 0 });
     p.project(board({ daemon: "healthy" })); // establishes prev
     const a = p.project(board({ daemon: "offline" }));
     const b = p.project(board({ daemon: "offline" }));
@@ -147,5 +153,164 @@ describe("createNotificationProjector (edge detection + dedup)", () => {
     expect(p.project(board({ anomaly: true }))).toEqual([]); // stays true: no re-fire
     p.project(board({ anomaly: false }));
     expect(p.project(board({ anomaly: true }))).toHaveLength(1); // new rising edge
+  });
+});
+
+// CTL-1522: the daemon branch used to be a naked edge trigger — every flip of
+// the heartbeat-freshness signal pushed, in BOTH directions, with no dedupe.
+// Measured on mini: 1,100 heartbeat gaps >90s in July and ZERO >300s, i.e. the
+// daemon never actually died yet ~300 phone pushes/day went out. These pin the
+// sustained-hold behavior that replaced it.
+describe("createNotificationProjector — daemon notify hold (CTL-1522)", () => {
+  const HOLD = 180_000;
+
+  /** Projector driven by an explicit clock the test advances by hand. */
+  const harness = (holdMs = HOLD) => {
+    let clock = 1_000_000;
+    const p = createNotificationProjector({
+      now: () => clock,
+      daemonNotifyHoldMs: holdMs,
+    });
+    return {
+      /** Advance the clock, project one frame, return the notification titles. */
+      at(deltaMs: number, daemon: "healthy" | "degraded" | "offline") {
+        clock += deltaMs;
+        return p.project({ daemon }).map((n) => n.title);
+      },
+      /** Advance the clock, project one frame, return the full notifications. */
+      full(deltaMs: number, daemon: "healthy" | "degraded" | "offline") {
+        clock += deltaMs;
+        return p.project({ daemon });
+      },
+    };
+  };
+
+  it("first frame seeds silently even when already degraded", () => {
+    const h = harness();
+    expect(h.at(0, "degraded")).toEqual([]);
+  });
+
+  it("a sub-hold degraded blip pushes nothing in EITHER direction", () => {
+    // The 1,100-gaps case: a ~46s excursion past the 90s freshness window.
+    const h = harness();
+    h.at(0, "healthy");
+    expect(h.at(90_000, "degraded")).toEqual([]);
+    expect(h.at(46_000, "healthy")).toEqual([]);
+    // and no orphan "recovered" on any later steady-state frame either
+    expect(h.at(600_000, "healthy")).toEqual([]);
+  });
+
+  it("sustained degraded pushes exactly once, at hold expiry", () => {
+    const h = harness();
+    h.at(0, "healthy");
+    h.at(1, "degraded"); // anchor
+    expect(h.at(HOLD - 1, "degraded")).toEqual([]); // one tick short
+    expect(h.at(1, "degraded")).toEqual(["Catalyst — daemon degraded"]);
+    expect(h.at(1, "degraded")).toEqual([]); // steady state: no repeat
+    expect(h.at(600_000, "degraded")).toEqual([]);
+  });
+
+  it("REGRESSION GUARD: a mid-hold degraded→offline escalation does not restart the clock", () => {
+    // If the hold anchored on the exact value instead of healthy-vs-not, this
+    // push would slide out to HOLD after the escalation and a real death would
+    // be announced late.
+    const h = harness();
+    h.at(0, "healthy");
+    h.at(1, "degraded"); // anchor here
+    expect(h.at(110_000, "offline")).toEqual([]); // escalated mid-hold
+    const out = h.full(HOLD - 110_000, "offline"); // hold measured from the ANCHOR
+    expect(out.map((n) => n.title)).toEqual(["Catalyst — daemon degraded"]);
+    expect(out[0]?.body).toBe("Daemon state: offline");
+  });
+
+  it("a real death escalates to offline once the escalation clears its own hold", () => {
+    // Heartbeat stops: board reads degraded at 90s (anchor) and the degraded
+    // push — the one that actually wakes a human — fires at 270s. The board
+    // reads offline at 300s; that refinement is held on its OWN value so a
+    // transient offline frame cannot buzz (Codex P2), landing at 300s + HOLD.
+    const h = harness();
+    h.at(0, "healthy");
+    h.at(90_000, "degraded");
+    expect(h.at(HOLD, "degraded")).toEqual(["Catalyst — daemon degraded"]);
+    h.at(30_000, "offline"); // value anchor for the escalation
+    expect(h.at(HOLD - 1, "offline")).toEqual([]); // still holding
+    const out = h.full(1, "offline");
+    expect(out.map((n) => n.title)).toEqual(["Catalyst — daemon degraded"]);
+    expect(out[0]?.body).toBe("Daemon state: offline");
+    expect(h.at(1, "offline")).toEqual([]); // escalates exactly once
+  });
+
+  it("a transient offline frame inside an announced episode does NOT buzz again", () => {
+    // Codex P2 (#2739): healthy → degraded past the hold → ONE offline frame
+    // (the productionDaemonHealth bare-catch path) → back to degraded. The
+    // offline must not push, because the transient never persisted.
+    const h = harness();
+    h.at(0, "healthy");
+    h.at(1, "degraded");
+    expect(h.at(HOLD, "degraded")).toEqual(["Catalyst — daemon degraded"]);
+    expect(h.at(3_000, "offline")).toEqual([]); // single spurious frame
+    expect(h.at(3_000, "degraded")).toEqual([]); // and back — still silent
+    expect(h.at(600_000, "degraded")).toEqual([]);
+  });
+
+  it("de-escalation offline→degraded does not buzz", () => {
+    const h = harness();
+    h.at(0, "healthy");
+    h.at(1, "offline");
+    expect(h.at(HOLD, "offline")).toEqual(["Catalyst — daemon degraded"]);
+    expect(h.at(1, "degraded")).toEqual([]); // improving: silent
+  });
+
+  it("recovery fires only after a degraded actually fired, and only once", () => {
+    const h = harness();
+    h.at(0, "healthy");
+    h.at(1, "degraded");
+    expect(h.at(HOLD, "degraded")).toEqual(["Catalyst — daemon degraded"]);
+    h.at(1, "healthy"); // recovery anchor
+    expect(h.at(HOLD - 1, "healthy")).toEqual([]); // still holding
+    expect(h.at(1, "healthy")).toEqual(["Catalyst — daemon recovered"]);
+    expect(h.at(600_000, "healthy")).toEqual([]); // no repeat
+  });
+
+  it("a spurious one-frame offline (the bare-catch path) is absorbed", () => {
+    // productionDaemonHealth returns "offline" from a bare catch, so any
+    // transient heartbeat-read throw used to be an instant push.
+    const h = harness();
+    h.at(0, "healthy");
+    expect(h.at(3_000, "offline")).toEqual([]);
+    expect(h.at(3_000, "healthy")).toEqual([]);
+  });
+
+  it("holdMs=0 restores immediate-edge escalation", () => {
+    const h = harness(0);
+    h.at(0, "healthy");
+    expect(h.at(1, "degraded")).toEqual(["Catalyst — daemon degraded"]);
+    expect(h.at(1, "healthy")).toEqual(["Catalyst — daemon recovered"]);
+  });
+
+  it("defaults to the module hold when no option is passed", () => {
+    // Guards the production call path: server.ts passes undefined when the env
+    // knob is unset, which must NOT collapse to 0.
+    const p = createNotificationProjector();
+    p.project({ daemon: "healthy" });
+    expect(p.project({ daemon: "degraded" })).toEqual([]);
+  });
+});
+
+// Codex P2 (#2739): a bare Number(env) coerces "" to 0 and accepts negatives,
+// either of which silently disables the hold and restores the storm. Mirrors
+// resolveRestoreHoldMs (execution-core/config.mjs), which exists because
+// CTL-1091 hit exactly this trap.
+describe("resolveDaemonNotifyHoldMs (CTL-1522)", () => {
+  it("falls back to the default for unset / blank / non-numeric / negative", () => {
+    for (const raw of [undefined, "", "   ", "\t", "abc", "-1", "-0.5", "NaN", "Infinity"]) {
+      expect(resolveDaemonNotifyHoldMs(raw)).toBeUndefined();
+    }
+  });
+
+  it("accepts a finite value >= 0, including an explicit 0 opt-out", () => {
+    expect(resolveDaemonNotifyHoldMs("0")).toBe(0);
+    expect(resolveDaemonNotifyHoldMs("180000")).toBe(180_000);
+    expect(resolveDaemonNotifyHoldMs(" 240000 ")).toBe(240_000);
   });
 });
