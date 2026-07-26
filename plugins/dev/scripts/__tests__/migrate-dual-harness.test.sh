@@ -208,17 +208,19 @@ assert_eq "12b dangling AS (with real CS): dry-run tree unchanged" "$BEFORE" "$(
 run "$R" --fix >/dev/null 2>&1; assert_eq "12b dangling AS (with real CS): --fix rc=4" 4 "$?"
 assert_eq "12b dangling AS (with real CS): --fix tree unchanged" "$BEFORE" "$(tree_snapshot "$R")"
 
-# 13. empty .agents/skills + correct symlink + bridged docs → rc 0, NO pointer
-#     appended (HAS_SKILLS must gate on non-emptiness), no changes at all.
+# 13. empty .agents/skills + correct symlink + bridged docs → rc 4 (round-4
+#     review pJJ: git cannot record the empty target, so the committed link
+#     dangles on fresh clones — refused loudly, and certainly no pointer),
+#     no changes at all.
 R="$SCRATCH/emptyskills"; mkdir -p "$R/.claude" "$R/.agents/skills"
 printf '@AGENTS.md\n\n## Claude notes\nx\n' >"$R/CLAUDE.md"
 printf '# AGENTS.md\n\n## What\ny\n' >"$R/AGENTS.md"
 ln -s '../.agents/skills' "$R/.claude/skills"
 BEFORE="$(tree_snapshot "$R")"
-run "$R"; assert_eq "13 emptyskills: dry-run rc=0" 0 "$?"
+run "$R" >/dev/null 2>&1; assert_eq "13 emptyskills: dry-run rc=4" 4 "$?"
 lacks "13 emptyskills: dry-run: no pointer appended" '## Skills' "$R/AGENTS.md"
 assert_eq "13 emptyskills: dry-run tree unchanged" "$BEFORE" "$(tree_snapshot "$R")"
-run "$R" --fix; assert_eq "13 emptyskills: --fix rc=0" 0 "$?"
+run "$R" --fix >/dev/null 2>&1; assert_eq "13 emptyskills: --fix rc=4" 4 "$?"
 lacks "13 emptyskills: --fix: still no pointer" '## Skills' "$R/AGENTS.md"
 assert_eq "13 emptyskills: --fix tree unchanged" "$BEFORE" "$(tree_snapshot "$R")"
 
@@ -528,6 +530,38 @@ mkfifo "$R/CLAUDE.md"
 run "$R" >/dev/null 2>&1; assert_eq "34 fifodoc: dry-run rc=4" 4 "$?"
 run "$R" --fix >/dev/null 2>&1; assert_eq "34 fifodoc: --fix rc=4" 4 "$?"
 [[ -p "$R/CLAUDE.md" ]] && pass "34 fifodoc: FIFO untouched" || fail "34 fifodoc: FIFO untouched"
+
+# 35. git repo ignoring `.claude/` with skills pending symlink-only wiring →
+#     rc 4 (the compatibility link itself would be committed nowhere; fresh
+#     clones would give Claude no skills while the migrator reports success).
+R="$SCRATCH/claudeignored"; mkdir -p "$R/.agents/skills/foo"
+printf '@AGENTS.md\n' >"$R/CLAUDE.md"
+printf '# AGENTS.md\n\nsee \x60.agents/skills/\x60\n' >"$R/AGENTS.md"
+printf 'body\n' >"$R/.agents/skills/foo/SKILL.md"
+git -C "$R" init -q
+printf '.claude/\n' >"$R/.git/info/exclude"
+run "$R" >/dev/null 2>&1; assert_eq "35 claudeignored: dry-run rc=4" 4 "$?"
+run "$R" --fix >/dev/null 2>&1; assert_eq "35 claudeignored: --fix rc=4" 4 "$?"
+[[ ! -e "$R/.claude/skills" ]] && pass "35 claudeignored: no ignored symlink created" || fail "35 claudeignored: no ignored symlink created"
+
+# 36. byte-identical trees but a DIRECTORY mode differs (0755 vs 0700) → rc 4.
+R="$SCRATCH/dirmode"; mkdir -p "$R/.claude/skills/foo" "$R/.agents/skills/foo"
+printf '@AGENTS.md\n' >"$R/CLAUDE.md"
+printf '# AGENTS.md\n' >"$R/AGENTS.md"
+printf 'same content\n' >"$R/.claude/skills/foo/SKILL.md"
+printf 'same content\n' >"$R/.agents/skills/foo/SKILL.md"
+chmod 755 "$R/.claude/skills/foo"; chmod 700 "$R/.agents/skills/foo"
+run "$R" --fix >/dev/null 2>&1; assert_eq "36 dirmode: --fix rc=4 (0755 vs 0700 dir)" 4 "$?"
+[[ -d "$R/.claude/skills" && ! -L "$R/.claude/skills" ]] && pass "36 dirmode: nothing collapsed" || fail "36 dirmode: nothing collapsed"
+
+# 37. correctly-spelled link onto an EMPTY .agents/skills → rc 4 (git cannot
+#     record the empty target; the committed link dangles on fresh clones).
+R="$SCRATCH/oklinkempty"; mkdir -p "$R/.claude" "$R/.agents/skills"
+printf '@AGENTS.md\n' >"$R/CLAUDE.md"
+printf '# AGENTS.md\n' >"$R/AGENTS.md"
+ln -s '../.agents/skills' "$R/.claude/skills"
+run "$R" >/dev/null 2>&1; assert_eq "37 oklinkempty: dry-run rc=4" 4 "$?"
+run "$R" --fix >/dev/null 2>&1; assert_eq "37 oklinkempty: --fix rc=4" 4 "$?"
 
 echo ""
 echo "migrate-dual-harness.test.sh: ${PASSES} passed, ${FAILURES} failed"

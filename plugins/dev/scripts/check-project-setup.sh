@@ -113,7 +113,11 @@ fi
 if [[ -f "CLAUDE.md" ]]; then
 	if grep -q "Catalyst Development Workflow" CLAUDE.md 2>/dev/null; then
 		: # present directly in CLAUDE.md
-	elif grep -qx '@AGENTS.md' CLAUDE.md 2>/dev/null && [[ -f "AGENTS.md" ]]; then
+	elif grep -qE '^@AGENTS\.md[[:space:]]*$' CLAUDE.md 2>/dev/null && [[ -f "AGENTS.md" ]]; then
+		# -E with a trailing [[:space:]]* so a CRLF or trailing-whitespace
+		# bridge line still matches (the migrator's defenced() detection
+		# normalizes both; a raw -qx here would miss them and emit a false
+		# "append the snippet to CLAUDE.md" warning).
 		if ! grep -q "Catalyst Development Workflow" AGENTS.md 2>/dev/null; then
 			warnings+=("CLAUDE.md is a thin @AGENTS.md bridge, but the imported AGENTS.md is missing the Catalyst workflow snippet")
 			warnings+=("  Add the snippet from: plugins/dev/templates/CLAUDE_SNIPPET.md")

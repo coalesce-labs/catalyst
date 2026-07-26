@@ -245,7 +245,13 @@ elif [[ -L "$CS" ]]; then
 		# clone/relocate; so does a noncanonical relative one that routes
 		# through the checkout name (e.g. `../../reponame/.agents/skills`).
 		# Both are mechanical fixes (rewrite to the canonical relative form).
-		if [[ "$(readlink "$CS")" == "../.agents/skills" ]]; then
+		# And an EMPTY canonical tree behind a committed link is refused: git
+		# cannot record the empty directory, so every fresh clone would get a
+		# dangling .claude/skills while checkup reads green.
+		if [[ -z "$(ls -A "$AS" 2>/dev/null)" ]]; then
+			SKILLS_ACTION="ambiguous"
+			SKILLS_MSG=".claude/skills points at an EMPTY .agents/skills — git cannot track an empty directory, so the committed link dangles on fresh clones; add content or remove the link"
+		elif [[ "$(readlink "$CS")" == "../.agents/skills" ]]; then
 			SKILLS_ACTION="ok"
 		else
 			SKILLS_ACTION="rewrite"
@@ -265,6 +271,14 @@ elif [[ -d "$CS" ]]; then
 				# ancestor). A collapse must never be a same-dir no-op — refuse.
 				SKILLS_ACTION="ambiguous"
 				SKILLS_MSG=".claude/skills and .agents/skills resolve to the same physical directory"
+			elif [[ -n "$(find "$CS" "$AS" -type l -print 2>/dev/null | head -n 1)" ]]; then
+				# Refuse nested symlinks BEFORE diff -r: implementations that
+				# dereference links would otherwise traverse arbitrarily large
+				# external checkouts / recursive mounts during a dry-run or
+				# checkup, only to have the state rejected as ambiguous anyway
+				# (the same guard used to run post-diff; order matters).
+				SKILLS_ACTION="ambiguous"
+				SKILLS_MSG="a symlink exists inside .claude/skills or .agents/skills — cannot prove the trees are independent copies (diff -r follows symlinks), refusing to collapse"
 			elif diff -r "$CS" "$AS" >/dev/null 2>&1; then
 				SKILLS_ACTION="collapse"
 				# diff -r proves byte-identical CONTENT but never compares the
@@ -277,17 +291,28 @@ elif [[ -d "$CS" ]]; then
 				# access): as root, -x is true whenever ANY execute bit is set,
 				# so 0100-vs-0001 mode pairs would wrongly compare equal.
 				# GNU `stat -c %a` first, BSD `stat -f %Lp` fallback (macOS).
-				while IFS= read -r cs_file; do
+				# Directories too (not just files): a collapse keeps only the
+				# .agents/skills copy, so a 0755-vs-0700 directory pair would
+				# silently drop group access / setgid semantics. The tree
+				# roots themselves are compared first (-mindepth 1 skips them
+				# in the loop, where the rel-path arithmetic needs a child).
+				cs_mode="$(stat -c %a "$CS" 2>/dev/null || stat -f %Lp "$CS" 2>/dev/null)"
+				as_mode="$(stat -c %a "$AS" 2>/dev/null || stat -f %Lp "$AS" 2>/dev/null)"
+				if [[ "$cs_mode" != "$as_mode" ]]; then
+					SKILLS_ACTION="ambiguous"
+					SKILLS_MSG="byte-identical but the tree roots' modes differ: .claude/skills is mode ${cs_mode:-unreadable} but .agents/skills is ${as_mode:-unreadable}"
+				fi
+				[[ "$SKILLS_ACTION" == "collapse" ]] && while IFS= read -r cs_file; do
 					rel_path="${cs_file#"$CS"/}"
 					as_file="$AS/$rel_path"
 					cs_mode="$(stat -c %a "$cs_file" 2>/dev/null || stat -f %Lp "$cs_file" 2>/dev/null)"
 					as_mode="$(stat -c %a "$as_file" 2>/dev/null || stat -f %Lp "$as_file" 2>/dev/null)"
 					if [[ "$cs_mode" != "$as_mode" ]]; then
 						SKILLS_ACTION="ambiguous"
-						SKILLS_MSG="byte-identical but file modes differ: '${rel_path}' is mode ${cs_mode:-unreadable} under .claude/skills but ${as_mode:-unreadable} under .agents/skills"
+						SKILLS_MSG="byte-identical but modes differ: '${rel_path}' is mode ${cs_mode:-unreadable} under .claude/skills but ${as_mode:-unreadable} under .agents/skills"
 						break
 					fi
-				done < <(find "$CS" -type f)
+				done < <(find "$CS" -mindepth 1 \( -type f -o -type d \))
 			else
 				SKILLS_ACTION="ambiguous"
 				SKILLS_MSG=".claude/skills and .agents/skills both exist as real directories and differ"
@@ -321,16 +346,9 @@ else
 	fi
 fi
 
-# A collapse deletes .claude/skills, so it must be PROVEN a redundant copy.
-# `diff -r` dereferences symlinks (BSD diff has no --no-dereference), so a
-# symlink anywhere inside either tree can make the "copy" compare equal to the
-# original it points at (e.g. .agents/skills/foo -> ../../.claude/skills/foo) —
-# deleting the only real content. Refuse to collapse if either tree contains
-# any symlink at any depth.
-if [[ "$SKILLS_ACTION" == "collapse" ]] && [[ -n "$(find "$CS" "$AS" -type l -print 2>/dev/null | head -n 1)" ]]; then
-	SKILLS_ACTION="ambiguous"
-	SKILLS_MSG="a symlink exists inside .claude/skills or .agents/skills — cannot prove the trees are independent copies (diff -r follows symlinks), refusing to collapse"
-fi
+# (The nested-symlink collapse refusal now runs INSIDE the classification,
+# BEFORE diff -r — see the both-real-dirs branch — so a dereferencing diff can
+# never traverse external checkouts / recursive mounts first.)
 
 # A move relocates .claude/skills's PARENT directory to .agents/skills, so any
 # symlink inside it whose resolved target lies OUTSIDE that tree would answer
@@ -410,7 +428,10 @@ move | symlink-only | collapse | ok | rewrite)
 		# matched, 1 if none did — so branch on captured output, not on the
 		# pipeline's own exit status (set -o pipefail would otherwise fold a
 		# clean "nothing ignored" rc=1 into a surrounding pipeline).
-		DEST_PATHS=".agents/skills"$'\n'
+		# The Claude compatibility link is audited too: a repo ignoring
+		# `.claude/` (or `.claude/skills`) would commit the canonical tree but
+		# omit the symlink, leaving Claude Code with no skills on a fresh clone.
+		DEST_PATHS=".agents/skills"$'\n'".claude/skills"$'\n'
 		case "$SKILLS_ACTION" in
 		move)
 			while IFS= read -r cs_file; do

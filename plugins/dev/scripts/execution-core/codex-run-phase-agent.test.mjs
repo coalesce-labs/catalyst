@@ -19,7 +19,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { Readable } from "node:stream";
 import {
   assertCodexAuth,
@@ -717,80 +717,123 @@ describe("ensureCodexSkills", () => {
     rmSync(overrideDev, { recursive: true, force: true });
   });
 
-  // CTL-1530 (thread dLa): a top-level symlink created by an earlier dispatch
-  // against an OLD, home-rooted checkout path is RUNNER-OWNED (its target ends in
-  // `plugins/dev/skills` AND resolves under the runner's home dir) even though the
-  // prefix no longer matches the currently configured source. It must be
-  // refreshed, not permanently skipped as foreign — otherwise, once the old
-  // checkout is removed, the link dangles forever and codex can never discover the
-  // phase skills. `homeDir` is injected as the tmpdir root so the fixture's
-  // mkdtemp'd checkouts read as "home-rooted" without touching the real $HOME.
-  test("STALE runner-owned top-level symlink (old checkout root) is refreshed to the current source", () => {
-    const home = mkdtempSync(join(tmpdir(), "codex-home-stale-top-"));
-    const wt = mkdtempSync(join(home, "codex-wt-stale-top-"));
-    const oldCheckout = mkdtempSync(join(home, "codex-old-checkout-"));
-    const newCheckout = mkdtempSync(join(home, "codex-new-checkout-"));
-    const oldSkills = join(oldCheckout, "plugins", "dev", "skills");
+  // CTL-1530 (thread pJD): a top-level symlink this runner ACTUALLY created
+  // against an OLD checkout path is PROVEN runner-owned by the link registry
+  // (<codexHome>/codex-exec-links.json), even though the prefix no longer
+  // matches the currently configured source. It must be refreshed, not
+  // permanently skipped as foreign — otherwise, once the old checkout is
+  // removed, the link dangles forever and codex can never discover the phase
+  // skills. Seeded via a REAL first call (establishing genuine registry proof,
+  // not a hand-crafted `ln -s`) so this exercises the exact production path.
+  test("STALE runner-owned top-level symlink (old checkout root), PROVEN by the registry, is refreshed to the current source", () => {
+    const wt = mkdtempSync(join(tmpdir(), "codex-wt-stale-top-"));
+    const codexHome = mkdtempSync(join(tmpdir(), "codex-home-stale-top-"));
+    const oldCheckout = mkdtempSync(join(tmpdir(), "codex-old-checkout-"));
+    const newCheckout = mkdtempSync(join(tmpdir(), "codex-new-checkout-"));
+    const oldDevDir = join(oldCheckout, "plugins", "dev");
+    const oldSkills = join(oldDevDir, "skills");
     const newDevDir = join(newCheckout, "plugins", "dev");
     const newSkills = join(newDevDir, "skills");
     mkdirSync(oldSkills, { recursive: true });
     mkdirSync(newSkills, { recursive: true });
     Bun.spawnSync(["git", "init"], { cwd: wt });
-    mkdirSync(join(wt, ".agents"), { recursive: true });
+
+    // An earlier dispatch actually ran against the OLD checkout — this is the
+    // real write path, so the registry now holds genuine proof.
+    ensureCodexSkills(wt, { pluginDirs: [oldDevDir], codexHome });
     const link = join(wt, ".agents", "skills");
-    // Simulate an earlier dispatch's link against the OLD checkout.
-    Bun.spawnSync(["ln", "-s", oldSkills, link]);
-    // The old checkout is gone — this is the exact scenario the fix targets:
-    // a dangling link classified foreign forever by a strict string compare.
+    expect(readlinkSync(link)).toBe(oldSkills);
+    // The old checkout is gone — the link now dangles.
     rmSync(oldCheckout, { recursive: true, force: true });
 
-    ensureCodexSkills(wt, { pluginDirs: [newDevDir], homeDir: home });
+    ensureCodexSkills(wt, { pluginDirs: [newDevDir], codexHome });
 
     expect(lstatSync(link).isSymbolicLink()).toBe(true);
     expect(readlinkSync(link)).toBe(newSkills); // refreshed to the CURRENT source
 
-    rmSync(home, { recursive: true, force: true });
+    rmSync(wt, { recursive: true, force: true });
+    rmSync(codexHome, { recursive: true, force: true });
+    rmSync(newCheckout, { recursive: true, force: true });
   });
 
-  // CTL-1530 (thread dLa): a project-authored top-level link to an EXTERNAL,
-  // shared/vendor Catalyst checkout OUTSIDE the runner's home directory (e.g.
-  // `.agents/skills -> /opt/catalyst/plugins/dev/skills`) matches the
-  // runner-owned SUFFIX but must still be preserved — this runner never creates a
-  // link into an outside-home path, so it can never be this runner's own past
-  // creation however its suffix looks. No homeDir override needed: the real
-  // machine's actual home directory is never `/opt`, so the default homedir()
-  // check alone proves this out-of-home.
-  test("foreign top-level link with a runner-shaped target OUTSIDE the home dir (e.g. /opt/...) is preserved untouched + warned, never repointed", () => {
-    const wt = mkdtempSync(join(tmpdir(), "codex-wt-opt-foreign-"));
+  // CTL-1530 (thread pJD — the actual repro): a project-authored top-level link
+  // that LOOKS exactly like something this runner would write (absolute, ends in
+  // `plugins/dev/skills`, even home-rooted — e.g.
+  // `.agents/skills -> ~/src/catalyst/plugins/dev/skills`, a reasonable vendored
+  // checkout convention) but that THIS runner never created — no registry entry
+  // proves it — must be preserved untouched, never repointed. The old
+  // shape-only heuristic (home-rooted + suffix match) wrongly classified this
+  // exact case as runner-owned; the registry-proof model fixes it.
+  test("project-authored link that LOOKS runner-shaped (home-rooted, suffix-matching) but has NO registry entry is preserved untouched + warned (pJD repro)", () => {
+    const wt = mkdtempSync(join(tmpdir(), "codex-wt-pjd-repro-"));
+    const codexHome = mkdtempSync(join(tmpdir(), "codex-home-pjd-repro-"));
     Bun.spawnSync(["git", "init"], { cwd: wt });
     mkdirSync(join(wt, ".agents"), { recursive: true });
     const link = join(wt, ".agents", "skills");
-    const optTarget = "/opt/catalyst/plugins/dev/skills"; // suffix-matches; need not exist on disk
-    Bun.spawnSync(["ln", "-s", optTarget, link]);
+    // A project's OWN vendored-checkout link — this runner never wrote it, and
+    // no registry entry says otherwise.
+    const projectTarget = join(tmpdir(), "codex-pjd-vendor-", "src", "catalyst", "plugins", "dev", "skills");
+    mkdirSync(projectTarget, { recursive: true });
+    Bun.spawnSync(["ln", "-s", projectTarget, link]);
     const warns = [];
 
     ensureCodexSkills(wt, {
       pluginDirs: ["/some/other/checkout/plugins/dev"],
+      codexHome,
       log: { warn: (...a) => warns.push(a) },
     });
 
     expect(lstatSync(link).isSymbolicLink()).toBe(true);
-    expect(readlinkSync(link)).toBe(optTarget); // untouched — never repointed
+    expect(readlinkSync(link)).toBe(projectTarget); // untouched — never repointed
     expect(warns.length).toBe(1); // loud skip, exactly like any other foreign link
 
     rmSync(wt, { recursive: true, force: true });
+    rmSync(codexHome, { recursive: true, force: true });
+    rmSync(dirname(projectTarget), { recursive: true, force: true });
   });
 
-  // CTL-1530 (threads dLZ + dLh + dLa): the SAME ownership heuristic applies to a
-  // per-entry link this runner registers under CODEX_HOME/skills (the machine-local
-  // registration target for a real, project-owned .agents/skills dir).
-  test("STALE runner-owned per-entry symlink (old checkout root) inside CODEX_HOME/skills is refreshed; the real project dir stays untouched", () => {
-    const home = mkdtempSync(join(tmpdir(), "codex-home-stale-entry-"));
-    const wt = mkdtempSync(join(home, "codex-wt-stale-entry-"));
-    const codexHome = mkdtempSync(join(home, "codex-home-dir-stale-entry-"));
-    const oldCheckout = mkdtempSync(join(home, "codex-old-checkout-entry-"));
-    const newCheckout = mkdtempSync(join(home, "codex-new-checkout-entry-"));
-    const oldSkillsSrc = join(oldCheckout, "plugins", "dev", "skills");
+  // CTL-1530 (thread pJD): a corrupt/unparseable registry file must NEVER be
+  // treated as "empty but trustworthy" — a link that WOULD otherwise be provably
+  // ours (a genuine registry entry exists) is preserved, not refreshed, once the
+  // registry file can no longer be parsed.
+  test("corrupt link registry → preserved, never refreshed (fail-safe)", () => {
+    const wt = mkdtempSync(join(tmpdir(), "codex-wt-corrupt-registry-"));
+    const codexHome = mkdtempSync(join(tmpdir(), "codex-home-corrupt-registry-"));
+    const oldCheckout = mkdtempSync(join(tmpdir(), "codex-old-checkout-corrupt-"));
+    const newCheckout = mkdtempSync(join(tmpdir(), "codex-new-checkout-corrupt-"));
+    const oldDevDir = join(oldCheckout, "plugins", "dev");
+    const newDevDir = join(newCheckout, "plugins", "dev");
+    mkdirSync(join(oldDevDir, "skills"), { recursive: true });
+    mkdirSync(join(newDevDir, "skills"), { recursive: true });
+    Bun.spawnSync(["git", "init"], { cwd: wt });
+
+    // Establish genuine proof, then corrupt the registry file that holds it.
+    ensureCodexSkills(wt, { pluginDirs: [oldDevDir], codexHome });
+    const link = join(wt, ".agents", "skills");
+    const originalTarget = readlinkSync(link);
+    rmSync(oldCheckout, { recursive: true, force: true });
+    writeFileSync(join(codexHome, "codex-exec-links.json"), "{not valid json");
+
+    ensureCodexSkills(wt, { pluginDirs: [newDevDir], codexHome });
+
+    expect(readlinkSync(link)).toBe(originalTarget); // preserved — registry unreadable, no proof
+
+    rmSync(wt, { recursive: true, force: true });
+    rmSync(codexHome, { recursive: true, force: true });
+    rmSync(newCheckout, { recursive: true, force: true });
+  });
+
+  // CTL-1530 (thread pJD): the SAME registry-proof contract applies to a
+  // per-entry link this runner registers under CODEX_HOME/skills (the
+  // machine-local registration target for a real, project-owned .agents/skills
+  // dir). Seeded via a real first call so the registry holds genuine proof.
+  test("STALE runner-owned per-entry symlink (old checkout root), PROVEN by the registry, inside CODEX_HOME/skills is refreshed; the real project dir stays untouched", () => {
+    const wt = mkdtempSync(join(tmpdir(), "codex-wt-stale-entry-"));
+    const codexHome = mkdtempSync(join(tmpdir(), "codex-home-dir-stale-entry-"));
+    const oldCheckout = mkdtempSync(join(tmpdir(), "codex-old-checkout-entry-"));
+    const newCheckout = mkdtempSync(join(tmpdir(), "codex-new-checkout-entry-"));
+    const oldDevDir = join(oldCheckout, "plugins", "dev");
+    const oldSkillsSrc = join(oldDevDir, "skills");
     const newDevDir = join(newCheckout, "plugins", "dev");
     const newSkillsSrc = join(newDevDir, "skills");
     mkdirSync(join(oldSkillsSrc, "phase-triage"), { recursive: true });
@@ -799,14 +842,14 @@ describe("ensureCodexSkills", () => {
 
     const realSkills = join(wt, ".agents", "skills");
     mkdirSync(realSkills, { recursive: true }); // a REAL, project-owned dir
-    const homeSkillsDir = join(codexHome, "skills");
-    mkdirSync(homeSkillsDir, { recursive: true });
-    const entryLink = join(homeSkillsDir, "phase-triage");
-    // Simulate an earlier dispatch's registration against the OLD checkout.
-    Bun.spawnSync(["ln", "-s", join(oldSkillsSrc, "phase-triage"), entryLink]);
+
+    // An earlier dispatch actually registered against the OLD checkout.
+    ensureCodexSkills(wt, { pluginDirs: [oldDevDir], codexHome });
+    const entryLink = join(codexHome, "skills", "phase-triage");
+    expect(readlinkSync(entryLink)).toBe(join(oldSkillsSrc, "phase-triage"));
     rmSync(oldCheckout, { recursive: true, force: true }); // old checkout gone — link now dangles
 
-    ensureCodexSkills(wt, { pluginDirs: [newDevDir], codexHome, homeDir: home });
+    ensureCodexSkills(wt, { pluginDirs: [newDevDir], codexHome });
 
     expect(lstatSync(entryLink).isSymbolicLink()).toBe(true);
     expect(readlinkSync(entryLink)).toBe(join(newSkillsSrc, "phase-triage")); // refreshed
@@ -814,15 +857,16 @@ describe("ensureCodexSkills", () => {
     expect(lstatSync(realSkills).isSymbolicLink()).toBe(false);
     expect(lstatSync(realSkills).isDirectory()).toBe(true);
 
-    rmSync(home, { recursive: true, force: true });
+    rmSync(wt, { recursive: true, force: true });
+    rmSync(codexHome, { recursive: true, force: true });
+    rmSync(newCheckout, { recursive: true, force: true });
   });
 
-  // CTL-1530 (thread dLa): the ownership heuristic must NOT widen what counts as
-  // foreign — a CODEX_HOME/skills per-entry symlink pointing somewhere that does
-  // NOT end in `plugins/dev/skills/<name>` is a genuine foreign link and keeps the
-  // existing warn+skip behavior, never refreshed; the real project dir is
-  // untouched either way.
-  test("FOREIGN per-entry symlink (not runner-shaped) inside CODEX_HOME/skills is left untouched + warned", () => {
+  // CTL-1530 (thread pJD): a CODEX_HOME/skills per-entry symlink with no
+  // registry proof — whether a genuinely unrelated foreign link, or one that
+  // merely LOOKS runner-shaped — is left untouched, warned, and never
+  // refreshed; the real project dir is untouched either way.
+  test("FOREIGN (or unproven) per-entry symlink inside CODEX_HOME/skills is left untouched + warned", () => {
     const wt = mkdtempSync(join(tmpdir(), "codex-wt-foreign-entry-"));
     const checkout = mkdtempSync(join(tmpdir(), "codex-checkout-foreign-entry-"));
     const codexHome = mkdtempSync(join(tmpdir(), "codex-home-foreign-entry-"));
