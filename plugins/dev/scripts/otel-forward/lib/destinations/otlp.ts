@@ -6,7 +6,7 @@ import {
   HttpError, classifyStatus, parseRetryAfter,
   withHttpRetry, type HttpRetryPolicy, type HttpRetryClock,
 } from "../retry.ts";
-import { appendToDlq, drainDlqBounded, DEFAULT_MAX_DRAIN_BATCHES } from "../dlq.ts";
+import { appendToDlq, drainDlqBounded, DEFAULT_MAX_DRAIN_BATCHES, type DrainOutcome } from "../dlq.ts";
 import { partitionByAge } from "../age-filter.ts";
 import { log } from "../logger.ts";
 import { buildCanonicalEnvelope } from "../canonical.ts";
@@ -145,7 +145,7 @@ export class OtlpSender {
   private makeDrainSend(
     rawSend: (b: CanonicalEvent[]) => Promise<void>,
     windowMs: number
-  ): (batch: unknown[]) => Promise<void | "dropped"> {
+  ): (batch: unknown[]) => Promise<DrainOutcome> {
     return async (batch: unknown[]) => {
       const events = batch as CanonicalEvent[];
       const { fresh, aged } = partitionByAge(events, Date.now(), windowMs);

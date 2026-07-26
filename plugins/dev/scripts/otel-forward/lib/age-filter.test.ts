@@ -1,10 +1,13 @@
 import { describe, test, expect } from "bun:test";
 import { partitionByAge } from "./age-filter.ts";
-import type { CanonicalEvent } from "../../../orch-monitor/lib/canonical-event.ts";
+import type { CanonicalEvent } from "../../orch-monitor/lib/canonical-event.ts";
 
 function makeEvent(tsIso: string): CanonicalEvent {
   return {
     ts: tsIso,
+    id: "00000000-0000-4000-8000-000000000000",
+    traceId: null,
+    spanId: null,
     severityText: "INFO",
     severityNumber: 9,
     resource: {

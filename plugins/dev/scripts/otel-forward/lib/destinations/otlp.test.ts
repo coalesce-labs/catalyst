@@ -534,7 +534,7 @@ describe("OtlpSender Phase 4 — drain age-drop + terminal-drop", () => {
       return Promise.resolve(new Response(null, { status: 200 }));
     }) as unknown as typeof fetch;
 
-    const { OtlpSender } = await import("./otlp.ts?p4-age");
+    const { OtlpSender } = await import("./otlp.ts");
     const dlqPath = join(dir, "dlq-p4age.jsonl");
     const eventLogPath = join(dir, "events-p4age.jsonl");
 
@@ -555,7 +555,7 @@ describe("OtlpSender Phase 4 — drain age-drop + terminal-drop", () => {
     expect(dlqDepth(dlqPath)).toBe(0); // both entries consumed (aged-dropped + fresh delivered)
     const drops = readDropEvents(eventLogPath);
     expect(drops.length).toBe(1);
-    expect((drops[0].attributes as Record<string, unknown>)["catalyst.observability.drop_reason"]).toBe("aged");
+    expect((drops[0].attributes as unknown as Record<string, unknown>)["catalyst.observability.drop_reason"]).toBe("aged");
 
     rmSync(dir, { recursive: true });
   });
@@ -568,7 +568,7 @@ describe("OtlpSender Phase 4 — drain age-drop + terminal-drop", () => {
       return Promise.resolve(new Response(null, { status: 400 })); // drain → terminal
     }) as unknown as typeof fetch;
 
-    const { OtlpSender } = await import("./otlp.ts?p4-term");
+    const { OtlpSender } = await import("./otlp.ts");
     const dlqPath = join(dir, "dlq-p4term.jsonl");
     const eventLogPath = join(dir, "events-p4term.jsonl");
 
@@ -587,7 +587,7 @@ describe("OtlpSender Phase 4 — drain age-drop + terminal-drop", () => {
     expect(dlqDepth(dlqPath)).toBe(0); // entry consumed (terminal-dropped), NOT requeued
     const drops = readDropEvents(eventLogPath);
     expect(drops.length).toBe(1);
-    expect((drops[0].attributes as Record<string, unknown>)["catalyst.observability.drop_reason"]).toBe("terminal_4xx");
+    expect((drops[0].attributes as unknown as Record<string, unknown>)["catalyst.observability.drop_reason"]).toBe("terminal_4xx");
 
     rmSync(dir, { recursive: true });
   });
@@ -600,7 +600,7 @@ describe("OtlpSender Phase 4 — drain age-drop + terminal-drop", () => {
       return Promise.resolve(new Response(null, { status: 503 })); // drain → retryable
     }) as unknown as typeof fetch;
 
-    const { OtlpSender } = await import("./otlp.ts?p4-retryable");
+    const { OtlpSender } = await import("./otlp.ts");
     const dlqPath = join(dir, "dlq-p4retry.jsonl");
 
     appendToDlq(dlqPath, [makeFreshEvent({ attributes: { "event.name": "q1" } })]);
@@ -651,7 +651,7 @@ describe("OtlpSender Phase 3 — status classification + age-partition", () => {
       Promise.resolve(new Response(null, { status: 503 }))
     ) as unknown as typeof fetch;
 
-    const { OtlpSender } = await import("./otlp.ts?phase3-503");
+    const { OtlpSender } = await import("./otlp.ts");
     const dlqPath = join(dir, "dlq-503.jsonl");
     const eventLogPath = join(dir, "events-503.jsonl");
     const sender = new OtlpSender({
@@ -677,7 +677,7 @@ describe("OtlpSender Phase 3 — status classification + age-partition", () => {
       return Promise.resolve(new Response(null, { status: 400 }));
     }) as unknown as typeof fetch;
 
-    const { OtlpSender } = await import("./otlp.ts?phase3-400");
+    const { OtlpSender } = await import("./otlp.ts");
     const dlqPath = join(dir, "dlq-400.jsonl");
     const eventLogPath = join(dir, "events-400.jsonl");
     const sender = new OtlpSender({
@@ -692,7 +692,7 @@ describe("OtlpSender Phase 3 — status classification + age-partition", () => {
     expect(fetchCalls).toBe(1);
     const drops = readDropEvents(eventLogPath);
     expect(drops.length).toBe(1);
-    expect((drops[0].attributes as Record<string, unknown>)["catalyst.observability.drop_reason"]).toBe("terminal_4xx");
+    expect((drops[0].attributes as unknown as Record<string, unknown>)["catalyst.observability.drop_reason"]).toBe("terminal_4xx");
     expect((drops[0].body?.payload as Record<string, unknown>)?.count).toBe(1);
     rmSync(dir, { recursive: true });
   });
@@ -702,7 +702,7 @@ describe("OtlpSender Phase 3 — status classification + age-partition", () => {
       Promise.resolve(new Response(null, { status: 500 }))
     ) as unknown as typeof fetch;
 
-    const { OtlpSender } = await import("./otlp.ts?phase3-500");
+    const { OtlpSender } = await import("./otlp.ts");
     const dlqPath = join(dir, "dlq-500.jsonl");
     const sender = new OtlpSender({
       endpoint: "http://127.0.0.1:4318",
@@ -720,7 +720,7 @@ describe("OtlpSender Phase 3 — status classification + age-partition", () => {
       Promise.reject(new Error("connection refused"))
     ) as unknown as typeof fetch;
 
-    const { OtlpSender } = await import("./otlp.ts?phase3-net");
+    const { OtlpSender } = await import("./otlp.ts");
     const dlqPath = join(dir, "dlq-net.jsonl");
     const eventLogPath = join(dir, "events-net.jsonl");
     const sender = new OtlpSender({
@@ -746,7 +746,7 @@ describe("OtlpSender Phase 3 — status classification + age-partition", () => {
       return new Response(null, { status: 200 });
     }) as unknown as typeof fetch;
 
-    const { OtlpSender } = await import("./otlp.ts?phase3-mixed");
+    const { OtlpSender } = await import("./otlp.ts");
     const dlqPath = join(dir, "dlq-mixed.jsonl");
     const eventLogPath = join(dir, "events-mixed.jsonl");
     const sender = new OtlpSender({
@@ -774,7 +774,7 @@ describe("OtlpSender Phase 3 — status classification + age-partition", () => {
     // forward_dropped event with reason="aged" and count=1
     const drops = readDropEvents(eventLogPath);
     expect(drops.length).toBe(1);
-    expect((drops[0].attributes as Record<string, unknown>)["catalyst.observability.drop_reason"]).toBe("aged");
+    expect((drops[0].attributes as unknown as Record<string, unknown>)["catalyst.observability.drop_reason"]).toBe("aged");
     expect((drops[0].body?.payload as Record<string, unknown>)?.count).toBe(1);
 
     rmSync(dir, { recursive: true });
@@ -787,7 +787,7 @@ describe("OtlpSender Phase 3 — status classification + age-partition", () => {
       return Promise.resolve(new Response(null, { status: 200 }));
     }) as unknown as typeof fetch;
 
-    const { OtlpSender } = await import("./otlp.ts?phase3-allaged");
+    const { OtlpSender } = await import("./otlp.ts");
     const dlqPath = join(dir, "dlq-allaged.jsonl");
     const eventLogPath = join(dir, "events-allaged.jsonl");
     const sender = new OtlpSender({
@@ -803,7 +803,7 @@ describe("OtlpSender Phase 3 — status classification + age-partition", () => {
     expect(dlqDepth(dlqPath)).toBe(0);
     const drops = readDropEvents(eventLogPath);
     expect(drops.length).toBe(1);
-    expect((drops[0].attributes as Record<string, unknown>)["catalyst.observability.drop_reason"]).toBe("aged");
+    expect((drops[0].attributes as unknown as Record<string, unknown>)["catalyst.observability.drop_reason"]).toBe("aged");
     expect((drops[0].body?.payload as Record<string, unknown>)?.count).toBe(2);
 
     rmSync(dir, { recursive: true });
