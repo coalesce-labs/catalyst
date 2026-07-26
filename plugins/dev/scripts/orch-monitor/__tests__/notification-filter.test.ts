@@ -2,6 +2,7 @@ import { describe, it, expect } from "bun:test";
 import {
   shouldNotify,
   createNotificationProjector,
+  resolveDaemonNotifyHoldMs,
 } from "../lib/notification-filter";
 
 describe("shouldNotify (template parity with lib.rs)", () => {
@@ -133,7 +134,10 @@ describe("createNotificationProjector (edge detection + dedup)", () => {
 
   it("daemon transition healthy→offline fires once, not on the steady state", () => {
     // CTL-1522: with the hold, an immediate-edge assertion needs the clock to
-    // advance past it. holdMs=0 pins the legacy edge semantics directly.
+    // advance past it. holdMs=0 disables the hold so the escalation is observed
+    // on its own frame. Note 0 is "no hold", not a byte-identical rollback —
+    // seed-announce and orphan-recovery suppression are unconditional. See the
+    // daemonNotifyHoldMs docstring (Codex P2, #2739).
     const p = createNotificationProjector({ daemonNotifyHoldMs: 0 });
     p.project(board({ daemon: "healthy" })); // establishes prev
     const a = p.project(board({ daemon: "offline" }));
@@ -219,17 +223,34 @@ describe("createNotificationProjector — daemon notify hold (CTL-1522)", () => 
     expect(out[0]?.body).toBe("Daemon state: offline");
   });
 
-  it("a real death still escalates to offline on time once degraded has fired", () => {
-    // Heartbeat stops: board reads degraded at 90s (anchor), degraded push at
-    // 270s, board reads offline at 300s → fires immediately, hold already spent.
+  it("a real death escalates to offline once the escalation clears its own hold", () => {
+    // Heartbeat stops: board reads degraded at 90s (anchor) and the degraded
+    // push — the one that actually wakes a human — fires at 270s. The board
+    // reads offline at 300s; that refinement is held on its OWN value so a
+    // transient offline frame cannot buzz (Codex P2), landing at 300s + HOLD.
     const h = harness();
     h.at(0, "healthy");
     h.at(90_000, "degraded");
     expect(h.at(HOLD, "degraded")).toEqual(["Catalyst — daemon degraded"]);
-    const out = h.full(30_000, "offline");
+    h.at(30_000, "offline"); // value anchor for the escalation
+    expect(h.at(HOLD - 1, "offline")).toEqual([]); // still holding
+    const out = h.full(1, "offline");
     expect(out.map((n) => n.title)).toEqual(["Catalyst — daemon degraded"]);
     expect(out[0]?.body).toBe("Daemon state: offline");
     expect(h.at(1, "offline")).toEqual([]); // escalates exactly once
+  });
+
+  it("a transient offline frame inside an announced episode does NOT buzz again", () => {
+    // Codex P2 (#2739): healthy → degraded past the hold → ONE offline frame
+    // (the productionDaemonHealth bare-catch path) → back to degraded. The
+    // offline must not push, because the transient never persisted.
+    const h = harness();
+    h.at(0, "healthy");
+    h.at(1, "degraded");
+    expect(h.at(HOLD, "degraded")).toEqual(["Catalyst — daemon degraded"]);
+    expect(h.at(3_000, "offline")).toEqual([]); // single spurious frame
+    expect(h.at(3_000, "degraded")).toEqual([]); // and back — still silent
+    expect(h.at(600_000, "degraded")).toEqual([]);
   });
 
   it("de-escalation offline→degraded does not buzz", () => {
@@ -273,5 +294,23 @@ describe("createNotificationProjector — daemon notify hold (CTL-1522)", () => 
     const p = createNotificationProjector();
     p.project({ daemon: "healthy" });
     expect(p.project({ daemon: "degraded" })).toEqual([]);
+  });
+});
+
+// Codex P2 (#2739): a bare Number(env) coerces "" to 0 and accepts negatives,
+// either of which silently disables the hold and restores the storm. Mirrors
+// resolveRestoreHoldMs (execution-core/config.mjs), which exists because
+// CTL-1091 hit exactly this trap.
+describe("resolveDaemonNotifyHoldMs (CTL-1522)", () => {
+  it("falls back to the default for unset / blank / non-numeric / negative", () => {
+    for (const raw of [undefined, "", "   ", "\t", "abc", "-1", "-0.5", "NaN", "Infinity"]) {
+      expect(resolveDaemonNotifyHoldMs(raw)).toBeUndefined();
+    }
+  });
+
+  it("accepts a finite value >= 0, including an explicit 0 opt-out", () => {
+    expect(resolveDaemonNotifyHoldMs("0")).toBe(0);
+    expect(resolveDaemonNotifyHoldMs("180000")).toBe(180_000);
+    expect(resolveDaemonNotifyHoldMs(" 240000 ")).toBe(240_000);
   });
 });

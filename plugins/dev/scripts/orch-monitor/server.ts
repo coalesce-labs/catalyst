@@ -7,6 +7,7 @@ import webpush from "web-push";
 import * as pushStore from "./lib/push-subscriptions";
 import {
   createNotificationProjector,
+  resolveDaemonNotifyHoldMs,
   type ProjectorBoard,
 } from "./lib/notification-filter";
 import { createPushBridge } from "./lib/push-bridge";
@@ -1456,11 +1457,9 @@ export function createServer(opts: CreateServerOptions): BunServer {
   // sensitive. Widening the display window to quiet notifications was tried once
   // (CTL-1169, 30s→90s) and the storm returned. Unset → the module default;
   // 0 restores the pre-CTL-1522 immediate-edge behavior.
-  const daemonNotifyHoldMs = Number.isFinite(
-    Number(process.env.MONITOR_DAEMON_NOTIFY_HOLD_MS),
-  )
-    ? Number(process.env.MONITOR_DAEMON_NOTIFY_HOLD_MS)
-    : undefined;
+  const daemonNotifyHoldMs = resolveDaemonNotifyHoldMs(
+    process.env.MONITOR_DAEMON_NOTIFY_HOLD_MS,
+  );
 
   const productionDaemonHealth = async (): Promise<DaemonHealth> => {
     try {

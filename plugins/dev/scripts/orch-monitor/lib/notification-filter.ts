@@ -100,10 +100,42 @@ const DAEMON_RANK: Record<DaemonHealth, number> = {
   offline: 2,
 };
 
+/**
+ * Parse the MONITOR_DAEMON_NOTIFY_HOLD_MS override with the documented fallback
+ * semantics. Valid: a finite value >= 0, INCLUDING an explicit 0 (opt-out: no
+ * hold). Invalid → undefined → the caller's default. Invalid means unset, empty
+ * or whitespace-only, non-numeric, OR negative.
+ *
+ * A bare `Number(env)` coerces "" to 0 and accepts negatives, either of which
+ * silently disables the hold and restores the notification storm. Mirrors
+ * resolveRestoreHoldMs (execution-core/config.mjs), which exists because
+ * CTL-1091 hit exactly this trap. Codex P2, PR #2739. Exported for unit tests.
+ */
+export function resolveDaemonNotifyHoldMs(
+  raw: string | undefined,
+): number | undefined {
+  if (typeof raw !== "string" || raw.trim() === "") return undefined;
+  const n = Number(raw);
+  return Number.isFinite(n) && n >= 0 ? n : undefined;
+}
+
 export interface NotificationProjectorOptions {
   /** Injectable clock (tests drive it directly). Defaults to Date.now. */
   now?: () => number;
-  /** Override DAEMON_NOTIFY_HOLD_MS. 0 restores immediate-edge behavior. */
+  /**
+   * Override DAEMON_NOTIFY_HOLD_MS. 0 disables the hold, so escalations notify
+   * on the frame they are observed.
+   *
+   * NOTE: 0 is "no hold", NOT a byte-identical rollback to the pre-CTL-1522
+   * transition-based projector. Two suppressions are unconditional design
+   * properties and are deliberately NOT governed by the hold (Codex P2, #2739):
+   *   - a non-healthy value observed on the SEEDING frame is still announced
+   *     once it satisfies the hold. Suppressing it would mean a monitor that
+   *     restarts into an ongoing outage never reports it — the
+   *     stale-copy-reports-healthy failure mode.
+   *   - a "recovered" is never emitted for an episode that never announced a
+   *     degraded, so a blip cannot produce an orphan recovery.
+   */
   daemonNotifyHoldMs?: number;
 }
 
@@ -130,6 +162,12 @@ export function createNotificationProjector(
   let daemonSeeded = false;
   let daemonHealthy: boolean | undefined;
   let daemonSince = 0;
+  // The exact observed value and when it last changed. Separate from
+  // daemonHealthy/daemonSince (which track only healthy-vs-not) because an
+  // escalation INSIDE an already-announced episode is held on its own value —
+  // see the ready check below.
+  let daemonObserved: DaemonHealth | undefined;
+  let daemonValueSince = 0;
   // The most severe state this episode has already announced; null = no open
   // episode. Gates both the repeat-suppression and the paired recovery: a blip
   // that never pushed can never push an orphan "recovered".
@@ -168,6 +206,8 @@ export function createNotificationProjector(
           daemonSeeded = true;
           daemonHealthy = healthy;
           daemonSince = t;
+          daemonObserved = observed;
+          daemonValueSince = t;
         } else {
           // Anchor on healthy-vs-NOT, not on the exact value, so a mid-hold
           // degraded→offline escalation does not restart the clock.
@@ -175,11 +215,24 @@ export function createNotificationProjector(
             daemonHealthy = healthy;
             daemonSince = t;
           }
+          if (observed !== daemonObserved) {
+            daemonObserved = observed;
+            daemonValueSince = t;
+          }
           const held = t - daemonSince >= holdMs;
           if (!healthy) {
             const notifiedRank =
               daemonNotified === null ? 0 : DAEMON_RANK[daemonNotified];
-            if (held && DAEMON_RANK[observed] > notifiedRank) {
+            // The FIRST announcement of an episode rides the healthy→unhealthy
+            // anchor, so a real death is announced on time and reports whatever
+            // it has escalated to by then. A LATER escalation inside an already
+            // announced episode must clear the hold on its OWN value — otherwise
+            // one spurious `offline` frame (productionDaemonHealth's bare catch)
+            // buzzes a second time even though the transient never persisted.
+            // Codex P2, PR #2739.
+            const ready =
+              daemonNotified === null ? held : t - daemonValueSince >= holdMs;
+            if (ready && DAEMON_RANK[observed] > notifiedRank) {
               const n = shouldNotify({ kind: "daemon", to: observed });
               if (n) out.push(n);
               daemonNotified = observed;
