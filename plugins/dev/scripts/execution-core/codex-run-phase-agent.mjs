@@ -52,6 +52,7 @@ import {
   appendFileSync,
   lstatSync,
   mkdirSync,
+  readdirSync,
   readFileSync,
   readlinkSync,
   realpathSync,
@@ -449,25 +450,30 @@ export function buildCodexEnv(spec, cfg) {
   return env;
 }
 
-// gitExcludeAgents — append `.agents/` to the worktree's git info/exclude so the
-// codex skills symlink never shows as an untracked file (D7 — net-new; no existing
-// pattern). Handles the worktree `.git` being a FILE pointing at the real gitdir
-// by asking git for the resolved path. Idempotent + best-effort — never throws.
-function gitExcludeAgents(worktreePath) {
-  const pattern = ".agents/";
-  let excludePath = null;
+// resolveGitExcludePath — the worktree's git info/exclude absolute path (via
+// `git rev-parse --git-path info/exclude`, falling back to manual `.git`
+// resolution — see resolveGitInfoExcludeFallback — for a `git`-less
+// environment). Handles the worktree `.git` being a FILE pointing at the real
+// gitdir (a linked worktree). null when neither resolves. Best-effort.
+function resolveGitExcludePath(worktreePath) {
   try {
     const res = spawnSync("git", ["-C", worktreePath, "rev-parse", "--git-path", "info/exclude"], {
       encoding: "utf8",
     });
     if (res && res.status === 0 && typeof res.stdout === "string" && res.stdout.trim()) {
       const rel = res.stdout.trim();
-      excludePath = isAbsolute(rel) ? rel : join(worktreePath, rel);
+      return isAbsolute(rel) ? rel : join(worktreePath, rel);
     }
   } catch {
     /* fall through to the manual resolver */
   }
-  if (!excludePath) excludePath = resolveGitInfoExcludeFallback(worktreePath);
+  return resolveGitInfoExcludeFallback(worktreePath);
+}
+
+// appendGitExcludeLine — append `pattern` as its own line to `excludePath`,
+// idempotently: a no-op when any of `equivalents` (defaults to just `pattern`
+// itself) is already present as a trimmed line. Best-effort — never throws.
+function appendGitExcludeLine(excludePath, pattern, equivalents = [pattern]) {
   if (!excludePath) return;
   try {
     let existing = "";
@@ -476,17 +482,43 @@ function gitExcludeAgents(worktreePath) {
     } catch {
       /* no exclude file yet */
     }
-    const present = existing
-      .split("\n")
-      .map((l) => l.trim())
-      .some((l) => l === pattern || l === ".agents" || l === "/.agents/" || l === "/.agents");
-    if (present) return;
+    const lines = existing.split("\n").map((l) => l.trim());
+    if (equivalents.some((eq) => lines.includes(eq))) return;
     mkdirSync(dirname(excludePath), { recursive: true });
     const prefix = existing.length > 0 && !existing.endsWith("\n") ? "\n" : "";
     appendFileSync(excludePath, `${prefix}${pattern}\n`);
   } catch {
     /* best-effort */
   }
+}
+
+// gitExcludeAgents — append the BLANKET `.agents/` pattern to the worktree's git
+// info/exclude so the codex skills symlink never shows as an untracked file (D7).
+// Reserved for the case where WE created `.agents/skills` WHOLESALE (a fresh
+// top-level symlink, or the pre-existing-our-symlink idempotent no-op) — NEVER
+// for a project-owned real `.agents/skills` dir we only MERGED entries into
+// (CTL-1530 thread ns/nw): a project-owned real dir must not get the blanket
+// exclude, which would silently untrack real, tracked project content sharing
+// that directory. Recognizes the historical equivalents already written by past
+// runs (`.agents`, `/.agents/`, `/.agents`) as already-present. Idempotent +
+// best-effort — never throws.
+function gitExcludeAgents(worktreePath) {
+  appendGitExcludeLine(resolveGitExcludePath(worktreePath), ".agents/", [
+    ".agents/",
+    ".agents",
+    "/.agents/",
+    "/.agents",
+  ]);
+}
+
+// gitExcludePath — append a SPECIFIC path (relative to the worktree root, e.g.
+// `.agents/skills/phase-triage`) as its own line in the worktree's git
+// info/exclude, idempotently (CTL-1530 thread ns). Used by the per-entry MERGE
+// into a real, project-owned `.agents/skills` dir to exclude only the entries WE
+// created — never the blanket `.agents/` pattern (see gitExcludeAgents). Best-
+// effort — never throws.
+function gitExcludePath(worktreePath, relPath) {
+  appendGitExcludeLine(resolveGitExcludePath(worktreePath), relPath);
 }
 
 // resolveGitInfoExcludeFallback — manual info/exclude resolution when `git` is
@@ -512,6 +544,90 @@ function resolveGitInfoExcludeFallback(worktreePath) {
   return null;
 }
 
+// mergeCodexSkillsIntoRealDir — CTL-1530 (thread ns): when `.agents/skills` is a
+// REAL, project-owned directory (e.g. a dual-harness-migrated project), MERGE the
+// dev-plugin skills in per-entry rather than skipping the whole setup — otherwise
+// a migrated project's Codex phase worker can never discover the
+// /catalyst-dev:phase-* skills its prompt asks for, even though the project dir
+// itself is real and must be preserved (CTL-1457 T7). For each entry in the
+// source skills dir: ABSENT in the real dir → create our per-entry symlink;
+// present and OUR symlink (readlink === the source entry) → idempotent no-op;
+// present and anything else (a project-owned entry, a foreign symlink, or an
+// unreadable link) → leave it untouched, WARN per-entry, and skip — this runner
+// never touches an entry it does not own. Every symlink WE create here is
+// git-excluded by its SPECIFIC path (never the blanket `.agents/` — see
+// gitExcludeAgents/gitExcludePath), because the surrounding real directory is
+// project-owned and must stay tracked as-is. Best-effort per entry — one bad
+// entry (a readdir/symlink failure) never aborts the rest.
+function mergeCodexSkillsIntoRealDir(skillsDir, skillsSrc, { worktreePath, logger } = {}) {
+  let entries = [];
+  try {
+    entries = readdirSync(skillsSrc);
+  } catch (err) {
+    try {
+      logger?.warn?.(
+        { skillsSrc, err: err?.message },
+        "codex-exec: ensureCodexSkills could not read the dev-plugin skills source dir — skipping the merge into the real .agents/skills",
+      );
+    } catch {
+      /* logging must never break a dispatch */
+    }
+    return;
+  }
+  for (const name of entries) {
+    const srcEntry = join(skillsSrc, name);
+    const destEntry = join(skillsDir, name);
+    let existingEntry = null;
+    try {
+      existingEntry = lstatSync(destEntry);
+    } catch {
+      /* absent — fall through to create our per-entry symlink */
+    }
+    if (existingEntry) {
+      if (existingEntry.isSymbolicLink()) {
+        let target = null;
+        try {
+          target = readlinkSync(destEntry);
+        } catch {
+          /* unreadable link — treat as foreign, never clobber */
+        }
+        if (target === srcEntry) {
+          // OUR symlink already in place — still re-ensure the per-entry
+          // exclude (an operator may have pruned the line while the link
+          // survived; without this, `git add -A` in the worktree could stage
+          // the machine-local absolute symlink into the project repo).
+          gitExcludePath(worktreePath, join(".agents", "skills", name));
+          continue;
+        }
+      }
+      // Present and not ours (a project-owned entry, a foreign symlink, or an
+      // unreadable link) — leave it untouched, warn per-entry, skip.
+      try {
+        logger?.warn?.(
+          { worktreePath, destEntry, wanted: srcEntry },
+          "codex-exec: .agents/skills/<name> already exists and is not our symlink — leaving it untouched (skipping this skill; codex may not discover it)",
+        );
+      } catch {
+        /* logging must never break a dispatch */
+      }
+      continue;
+    }
+    try {
+      symlinkSync(srcEntry, destEntry);
+      gitExcludePath(worktreePath, join(".agents", "skills", name));
+    } catch (err) {
+      try {
+        logger?.warn?.(
+          { worktreePath, destEntry, err: err?.message },
+          "codex-exec: ensureCodexSkills failed to create a per-entry skills symlink",
+        );
+      } catch {
+        /* logging must never break a dispatch */
+      }
+    }
+  }
+}
+
 // ensureCodexSkills — symlink <worktreePath>/.agents/skills to the pristine
 // dev-plugin skills dir so a Codex worker can discover the /catalyst-dev:phase-*
 // skills (Codex reads `.agents/skills`, not Claude plugins), and git-exclude
@@ -526,9 +642,13 @@ function resolveGitInfoExcludeFallback(worktreePath) {
 // ARBITRARY project worktrees, so a pre-existing `.agents/skills` may be the project's
 // or user's real Codex skills (a real dir) or a foreign symlink — the old unlink-first
 // setup deleted it (DATA LOSS). Only touch the link when SAFE:
-//   - ABSENT               → create our symlink;
-//   - OUR symlink (→ src)  → idempotent no-op;
-//   - real dir / FOREIGN symlink → leave it untouched, WARN LOUDLY, and skip.
+//   - ABSENT                     → create our symlink;
+//   - OUR symlink (→ src)        → idempotent no-op;
+//   - FOREIGN symlink            → leave it untouched, WARN LOUDLY, and skip;
+//   - real dir (project-owned)   → MERGE per-entry (CTL-1530 thread ns; see
+//                                   mergeCodexSkillsIntoRealDir) rather than
+//                                   skip wholesale — a migrated project's real
+//                                   skills dir must not shadow the phase skills.
 export function ensureCodexSkills(worktreePath, { pluginDirs, pluginRoot, log: logger = log } = {}) {
   try {
     if (!worktreePath) return;
@@ -537,6 +657,26 @@ export function ensureCodexSkills(worktreePath, { pluginDirs, pluginRoot, log: l
     const skillsSrc = join(devRoot, "skills");
     const agentsDir = join(worktreePath, ".agents");
     const skillsLink = join(agentsDir, "skills");
+    // A symlinked `.agents` component is foreign (a project committing
+    // `.agents -> elsewhere` would have every write below land in the external
+    // target) — mirror the migrator's ancestor guard: warn + skip, touch nothing.
+    let agentsDirStat = null;
+    try {
+      agentsDirStat = lstatSync(agentsDir);
+    } catch {
+      /* absent — mkdir below creates it */
+    }
+    if (agentsDirStat?.isSymbolicLink()) {
+      try {
+        logger?.warn?.(
+          { worktreePath, agentsDir },
+          "codex-exec: .agents is itself a symlink — leaving it untouched (skipping codex skills setup; codex may not discover the phase skills)",
+        );
+      } catch {
+        /* logging must never break a dispatch */
+      }
+      return;
+    }
     mkdirSync(agentsDir, { recursive: true });
     // Probe the existing entry WITHOUT removing anything.
     let existing = null;
@@ -554,13 +694,34 @@ export function ensureCodexSkills(worktreePath, { pluginDirs, pluginRoot, log: l
           /* unreadable link — treat as foreign, never clobber */
         }
         if (target === skillsSrc) {
-          // OUR symlink already in place — idempotent no-op (still ensure the exclude).
+          // OUR symlink already in place — idempotent no-op (still ensure the
+          // blanket exclude — WE own this path wholesale).
           gitExcludeAgents(worktreePath);
           return;
         }
+        // A symlink pointing at something ELSE — foreign, this runner does NOT
+        // own it. Leave it exactly as-is and skip (best-effort, non-fatal).
+        try {
+          logger?.warn?.(
+            { worktreePath, skillsLink, wanted: skillsSrc },
+            "codex-exec: .agents/skills already exists and is not our symlink — leaving it untouched (skipping codex skills setup; codex may not discover the phase skills)",
+          );
+        } catch {
+          /* logging must never break a dispatch */
+        }
+        return;
       }
-      // A real directory OR a symlink pointing at something ELSE — this runner does
-      // NOT own it. Leave it exactly as-is and skip (best-effort, non-fatal).
+      if (existing.isDirectory()) {
+        // A REAL, project-owned skills directory (e.g. a dual-harness-migrated
+        // project — CTL-1530 thread ns). MERGE per-entry instead of skipping
+        // wholesale: only ADD entries absent from the real dir; never touch what
+        // we don't own (T7). Per-entry excludes only — never the blanket
+        // `.agents/` (thread nw — that would falsely mark this real, tracked
+        // project directory as ignored).
+        mergeCodexSkillsIntoRealDir(skillsLink, skillsSrc, { worktreePath, logger });
+        return;
+      }
+      // Anything else (e.g. a plain file at .agents/skills) — not ours, leave it.
       try {
         logger?.warn?.(
           { worktreePath, skillsLink, wanted: skillsSrc },

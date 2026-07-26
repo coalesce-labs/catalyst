@@ -48,7 +48,7 @@ Branch on the exit code:
 
 | rc | Meaning | Next step |
 |----|---------|-----------|
-| `0` | already `dual-ok`, or `no-harness` (out of scope for this skill) | Phase 5 (house rules), then done |
+| `0` | already `dual-ok`, or `no-harness` (out of scope for this skill) | Phase 5 (house rules) — for `no-harness`, re-run the mechanical fix per Phase 5's note — then Phase 6 |
 | `10` | mechanical changes needed (bridge / skills wiring / pointer) — no monolithic problem | Phase 3 |
 | `11` | `CLAUDE.md` is monolithic — needs the intelligent split | Phase 3 (mechanical parts only), then Phase 4 |
 | `2` | bad usage (`--repo` not a dir, unknown flag) | fix the invocation and re-run |
@@ -107,6 +107,16 @@ dual-harness layout, but always worth syncing while touching the agent docs):
 ```bash
 bash "${CATALYST_DEV_SCRIPTS}/ensure-agent-house-rules.sh" --repo . --fix 2>&1
 ```
+
+- **`no-harness` repos:** the seeder creates the `AGENTS.md`/`CLAUDE.md` pair from scratch (the
+  doc-pair itself is out of scope for `migrate-dual-harness.sh` — see Phase 2's `no-harness` note),
+  even when Phase 3 already wired the skills tree. The freshly created `AGENTS.md` can't yet carry
+  the `## Skills` pointer, so re-run the mechanical fix to pick it up (and the `@AGENTS.md` bridge,
+  if still missing) **before** the final verification:
+
+  ```bash
+  bash "$SCRIPT" --repo . --fix 2>&1
+  ```
 
 ## Phase 6: Verify
 

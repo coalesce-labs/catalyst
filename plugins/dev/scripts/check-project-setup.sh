@@ -613,7 +613,15 @@ if [[ ( -f AGENTS.md || -f CLAUDE.md || -e .claude/skills || -L .claude/skills |
 	bash "$DUAL_HARNESS_SCRIPT" --repo "$PWD" --quiet >/dev/null 2>&1 || dh_rc=$?
 	case $dh_rc in
 	0)
-		echo -e "${GREEN}✓ dual-harness layout OK${NC} — AGENTS.md/CLAUDE.md bridge and skills wiring are current."
+		# rc 0 also covers "no-harness once skills are clean" (migrate-dual-harness.sh's
+		# documented behavior when neither doc exists) — printing the green dual-harness
+		# line in that case would be a false green: the docs pair is still missing
+		# entirely. Only claim the dual-harness layout is OK when at least one doc exists.
+		if [[ ! -f AGENTS.md && ! -f CLAUDE.md ]]; then
+			warnings+=("Dual-harness skills wiring is current but the AGENTS.md/CLAUDE.md docs pair is missing — Fix: bash ${SEEDER} --repo . --fix, then re-run checkup")
+		else
+			echo -e "${GREEN}✓ dual-harness layout OK${NC} — AGENTS.md/CLAUDE.md bridge and skills wiring are current."
+		fi
 		;;
 	10)
 		warnings+=("Repo is single-harness (missing @AGENTS.md bridge, skills wiring, or the AGENTS.md skills pointer) — Fix: bash ${DUAL_HARNESS_SCRIPT} --repo . --fix")

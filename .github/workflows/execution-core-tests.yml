@@ -48,6 +48,10 @@ on:
       # cli-reference-drift.test.sh below; a change to either must run this suite.
       - "plugins/dev/scripts/gen-cli-reference.sh"
       - "website/src/content/docs/reference/catalyst-cli.md"
+      # CTL-1530: the dual-harness migrator and its checkup §10 wiring — a change to
+      # either must run migrate-dual-harness.test.sh below.
+      - "plugins/dev/scripts/migrate-dual-harness.sh"
+      - "plugins/dev/scripts/check-project-setup.sh"
       - ".github/workflows/execution-core-tests.yml"
   push:
     branches: [main]
@@ -68,6 +72,10 @@ on:
       # CTL-1387: see the pull_request note above.
       - "plugins/dev/scripts/gen-cli-reference.sh"
       - "website/src/content/docs/reference/catalyst-cli.md"
+      # CTL-1530: the dual-harness migrator and its checkup §10 wiring — a change to
+      # either must run migrate-dual-harness.test.sh below.
+      - "plugins/dev/scripts/migrate-dual-harness.sh"
+      - "plugins/dev/scripts/check-project-setup.sh"
       - ".github/workflows/execution-core-tests.yml"
 
 jobs:

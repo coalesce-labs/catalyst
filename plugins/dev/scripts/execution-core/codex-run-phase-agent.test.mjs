@@ -545,27 +545,146 @@ describe("ensureCodexSkills", () => {
     expect(() => ensureCodexSkills(undefined, {})).not.toThrow();
   });
 
-  // CTL-1457 (T7): a PRE-EXISTING real .agents/skills directory (the project's/user's own
-  // Codex skills) is NEVER clobbered — the runner must not `rm -r` a path it does not own.
-  test("pre-existing real .agents/skills dir → NOT clobbered; a warning is logged; no symlink created", () => {
-    const wt = mkdtempSync(join(tmpdir(), "codex-wt-real-"));
-    const checkout = mkdtempSync(join(tmpdir(), "codex-checkout-real-"));
+  // CTL-1457 (T7): a PRE-EXISTING FOREIGN symlink at .agents/skills (pointing at
+  // something other than our skills source) is NEVER touched — this is the
+  // top-level symlink check, unchanged by the CTL-1530 merge-aware work below
+  // (that only applies when the existing entry is a REAL directory).
+  test("pre-existing FOREIGN symlink at .agents/skills → left untouched; warns once; no merge attempted", () => {
+    const wt = mkdtempSync(join(tmpdir(), "codex-wt-foreign-"));
+    const checkout = mkdtempSync(join(tmpdir(), "codex-checkout-foreign-"));
     const devDir = join(checkout, "plugins", "dev");
     mkdirSync(join(devDir, "skills"), { recursive: true });
-    // A REAL .agents/skills dir with a sentinel file the runner must preserve.
-    const realSkills = join(wt, ".agents", "skills");
-    mkdirSync(realSkills, { recursive: true });
-    const sentinel = join(realSkills, "SENTINEL.md");
-    writeFileSync(sentinel, "user-owned skill — do not delete");
+    const elsewhere = mkdtempSync(join(tmpdir(), "codex-elsewhere-"));
+    mkdirSync(join(wt, ".agents"), { recursive: true });
+    const foreignLink = join(wt, ".agents", "skills");
+    Bun.spawnSync(["ln", "-s", elsewhere, foreignLink]);
     const warns = [];
 
     ensureCodexSkills(wt, { pluginDirs: [devDir], log: { warn: (...a) => warns.push(a) } });
 
-    // The sentinel survives and .agents/skills is still a real dir (NOT replaced by a symlink).
-    expect(lstatSync(sentinel).isFile()).toBe(true);
-    expect(readFileSync(sentinel, "utf8")).toContain("do not delete");
-    expect(lstatSync(realSkills).isSymbolicLink()).toBe(false);
+    expect(lstatSync(foreignLink).isSymbolicLink()).toBe(true);
+    expect(readlinkSync(foreignLink)).toBe(elsewhere); // untouched
     expect(warns.length).toBe(1); // loud skip
+
+    rmSync(wt, { recursive: true, force: true });
+    rmSync(checkout, { recursive: true, force: true });
+    rmSync(elsewhere, { recursive: true, force: true });
+  });
+
+  // CTL-1530 (thread ns): a PRE-EXISTING REAL .agents/skills directory (e.g. a
+  // dual-harness-migrated project) is now MERGE-AWARE rather than skipped
+  // wholesale — the project's own entries are preserved untouched (T7), and the
+  // MISSING dev-plugin skill entries are added as per-entry symlinks so a Codex
+  // phase worker can still discover /catalyst-dev:phase-*. Each symlink WE create
+  // is git-excluded by its SPECIFIC path, never the blanket `.agents/` pattern
+  // (thread nw — a project-owned real dir must not get the blanket exclude).
+  test("MERGE-AWARE: real project-owned .agents/skills dir gets missing dev-plugin skills added per-entry, excluded per-entry, no blanket .agents/ exclude, project entries untouched", () => {
+    const wt = mkdtempSync(join(tmpdir(), "codex-wt-merge-"));
+    const checkout = mkdtempSync(join(tmpdir(), "codex-checkout-merge-"));
+    const devDir = join(checkout, "plugins", "dev");
+    const skillsSrc = join(devDir, "skills");
+    mkdirSync(join(skillsSrc, "phase-triage"), { recursive: true });
+    mkdirSync(join(skillsSrc, "phase-plan"), { recursive: true });
+    Bun.spawnSync(["git", "init"], { cwd: wt });
+
+    // A REAL, project-owned .agents/skills dir with its own unrelated skill.
+    const realSkills = join(wt, ".agents", "skills");
+    mkdirSync(join(realSkills, "my-project-skill"), { recursive: true });
+    writeFileSync(join(realSkills, "my-project-skill", "SKILL.md"), "project-owned — do not touch");
+
+    ensureCodexSkills(wt, { pluginDirs: [devDir] });
+
+    // The real directory itself is preserved (never replaced by a symlink).
+    expect(lstatSync(realSkills).isSymbolicLink()).toBe(false);
+    expect(lstatSync(realSkills).isDirectory()).toBe(true);
+
+    // The project's own entry is untouched.
+    expect(readFileSync(join(realSkills, "my-project-skill", "SKILL.md"), "utf8")).toContain("do not touch");
+
+    // Missing dev-plugin skills were added as per-entry symlinks.
+    const triageLink = join(realSkills, "phase-triage");
+    const planLink = join(realSkills, "phase-plan");
+    expect(lstatSync(triageLink).isSymbolicLink()).toBe(true);
+    expect(readlinkSync(triageLink)).toBe(join(skillsSrc, "phase-triage"));
+    expect(lstatSync(planLink).isSymbolicLink()).toBe(true);
+    expect(readlinkSync(planLink)).toBe(join(skillsSrc, "phase-plan"));
+
+    // Per-entry excludes, NOT the blanket .agents/ pattern.
+    const exclude = readFileSync(join(wt, ".git", "info", "exclude"), "utf8");
+    expect(exclude).toContain(".agents/skills/phase-triage");
+    expect(exclude).toContain(".agents/skills/phase-plan");
+    expect(exclude.split("\n").map((l) => l.trim())).not.toContain(".agents/");
+
+    rmSync(wt, { recursive: true, force: true });
+    rmSync(checkout, { recursive: true, force: true });
+  });
+
+  // CTL-1530 (thread ns): re-running the merge over an already-merged real dir is
+  // an idempotent no-op — our own per-entry symlinks are recognized and never
+  // duplicated (link or exclude line).
+  test("MERGE is idempotent on a second run: no duplicate excludes, links unchanged, no throw", () => {
+    const wt = mkdtempSync(join(tmpdir(), "codex-wt-merge-idem-"));
+    const checkout = mkdtempSync(join(tmpdir(), "codex-checkout-merge-idem-"));
+    const devDir = join(checkout, "plugins", "dev");
+    const skillsSrc = join(devDir, "skills");
+    mkdirSync(join(skillsSrc, "phase-triage"), { recursive: true });
+    Bun.spawnSync(["git", "init"], { cwd: wt });
+    const realSkills = join(wt, ".agents", "skills");
+    mkdirSync(realSkills, { recursive: true });
+
+    ensureCodexSkills(wt, { pluginDirs: [devDir] });
+    const link = join(realSkills, "phase-triage");
+    expect(readlinkSync(link)).toBe(join(skillsSrc, "phase-triage"));
+
+    expect(() => ensureCodexSkills(wt, { pluginDirs: [devDir] })).not.toThrow();
+    expect(lstatSync(realSkills).isSymbolicLink()).toBe(false); // still the real dir
+    expect(readlinkSync(link)).toBe(join(skillsSrc, "phase-triage"));
+
+    const exclude = readFileSync(join(wt, ".git", "info", "exclude"), "utf8");
+    expect(exclude.split("\n").filter((l) => l.trim() === ".agents/skills/phase-triage").length).toBe(1);
+
+    rmSync(wt, { recursive: true, force: true });
+    rmSync(checkout, { recursive: true, force: true });
+  });
+
+  // CTL-1530 (thread ns): a same-named PROJECT-OWNED entry inside the real dir is a
+  // per-entry collision — left untouched + warned, never overwritten — while any
+  // OTHER, non-colliding dev-plugin skill in the same run still gets merged in.
+  test("MERGE collision: a same-named project-owned entry is left untouched + warned per-entry; other entries still merged", () => {
+    const wt = mkdtempSync(join(tmpdir(), "codex-wt-merge-collide-"));
+    const checkout = mkdtempSync(join(tmpdir(), "codex-checkout-collide-"));
+    const devDir = join(checkout, "plugins", "dev");
+    const skillsSrc = join(devDir, "skills");
+    mkdirSync(join(skillsSrc, "phase-triage"), { recursive: true });
+    mkdirSync(join(skillsSrc, "phase-plan"), { recursive: true });
+    Bun.spawnSync(["git", "init"], { cwd: wt });
+
+    const realSkills = join(wt, ".agents", "skills");
+    // The project already has ITS OWN real "phase-triage" dir — a name collision.
+    mkdirSync(join(realSkills, "phase-triage"), { recursive: true });
+    writeFileSync(
+      join(realSkills, "phase-triage", "SKILL.md"),
+      "project's own phase-triage — do not overwrite",
+    );
+    const warns = [];
+
+    ensureCodexSkills(wt, { pluginDirs: [devDir], log: { warn: (...a) => warns.push(a) } });
+
+    // The colliding entry is untouched (NOT replaced by our symlink).
+    const collided = join(realSkills, "phase-triage");
+    expect(lstatSync(collided).isSymbolicLink()).toBe(false);
+    expect(readFileSync(join(collided, "SKILL.md"), "utf8")).toContain("do not overwrite");
+    expect(warns.length).toBe(1); // exactly one per-entry warning for the collision
+
+    // The non-colliding entry was still merged in.
+    const planLink = join(realSkills, "phase-plan");
+    expect(lstatSync(planLink).isSymbolicLink()).toBe(true);
+    expect(readlinkSync(planLink)).toBe(join(skillsSrc, "phase-plan"));
+
+    // The collision produced NO exclude entry for phase-triage (we didn't create it).
+    const exclude = readFileSync(join(wt, ".git", "info", "exclude"), "utf8");
+    expect(exclude).not.toContain(".agents/skills/phase-triage");
+    expect(exclude).toContain(".agents/skills/phase-plan");
 
     rmSync(wt, { recursive: true, force: true });
     rmSync(checkout, { recursive: true, force: true });

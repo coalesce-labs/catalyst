@@ -68,7 +68,8 @@
 #        exists — are still applied first). Run the
 #        catalyst-foundry:migrate-dual-harness skill to split CLAUDE.md.
 #   2  - bad usage.
-#   4  - ambiguous skills state (message names the exact conflict); touches nothing.
+#   4  - ambiguous skills state, or a symlinked/git-ignored instruction document or
+#        skills destination (message names the exact conflict); touches nothing.
 #   5  - I/O failure.
 set -uo pipefail
 
@@ -78,7 +79,7 @@ while [[ $# -gt 0 ]]; do
 	--fix) FIX=1 ;;
 	--repo) REPO="${2:?--repo needs a dir}"; shift ;;
 	--quiet) QUIET=1 ;;
-	-h | --help) sed -n '2,72p' "$0"; exit 0 ;;
+	-h | --help) sed -n '2,73p' "$0"; exit 0 ;;
 	*) echo "migrate-dual-harness: unknown arg '$1'" >&2; exit 2 ;;
 	esac
 	shift
@@ -94,6 +95,18 @@ CLA="$REPO/CLAUDE.md"
 AG="$REPO/AGENTS.md"
 CS="$REPO/.claude/skills"
 AS="$REPO/.agents/skills"
+
+# --- reject symlinked instruction documents ------------------------------------
+# CLAUDE.md / AGENTS.md must be regular files, never symlinks — dangling or not.
+# A dangling `CLAUDE.md -> ../outside.md` fails the `-f "$CLA"` probe below
+# (dangling symlinks are not -f), so doc classification would treat the bridge
+# as absent (e.g. "codex-only") — but `--fix`'s `>"$CLA"` open-for-write
+# follows the symlink and creates/overwrites `outside.md` OUTSIDE --repo,
+# reporting success while the repo's own CLAUDE.md stays a dangling symlink.
+# Refuse before any classification runs.
+for doc_path in "$CLA" "$AG"; do
+	[[ -L "$doc_path" ]] && die "${doc_path#"$REPO"/} is a symlink — instruction documents must be regular files, not symlinks (dangling or not); replace it with a real file and re-run" 4
+done
 
 # --- verbatim from ensure-agent-house-rules.sh (deliberate duplication — that
 # script is intentionally self-contained; do not refactor either copy to share
@@ -184,6 +197,26 @@ elif [[ -d "$CS" ]]; then
 				SKILLS_MSG=".claude/skills and .agents/skills resolve to the same physical directory"
 			elif diff -r "$CS" "$AS" >/dev/null 2>&1; then
 				SKILLS_ACTION="collapse"
+				# diff -r proves byte-identical CONTENT but never compares the
+				# executable bit — a collapse keeps ONLY the .agents/skills copy
+				# (rm -rf .claude/skills + symlink), so a mode mismatch on a
+				# runnable helper (e.g. a skill's run.sh) would silently
+				# downgrade it from 0755 to 0644. Compare every counterpart
+				# pair's -x bit before trusting the collapse.
+				while IFS= read -r cs_file; do
+					rel_path="${cs_file#"$CS"/}"
+					as_file="$AS/$rel_path"
+					cs_x=0; as_x=0
+					[[ -x "$cs_file" ]] && cs_x=1
+					[[ -x "$as_file" ]] && as_x=1
+					if [[ "$cs_x" != "$as_x" ]]; then
+						cs_word="non-executable"; [[ $cs_x -eq 1 ]] && cs_word="executable"
+						as_word="non-executable"; [[ $as_x -eq 1 ]] && as_word="executable"
+						SKILLS_ACTION="ambiguous"
+						SKILLS_MSG="byte-identical but file modes differ: '${rel_path}' is ${cs_word} under .claude/skills but ${as_word} under .agents/skills"
+						break
+					fi
+				done < <(find "$CS" -type f)
 			else
 				SKILLS_ACTION="ambiguous"
 				SKILLS_MSG=".claude/skills and .agents/skills both exist as real directories and differ"
@@ -229,6 +262,28 @@ move | symlink-only | collapse)
 	if [[ -L "$REPO/.claude" || -L "$REPO/.agents" ]]; then
 		SKILLS_ACTION="ambiguous"
 		SKILLS_MSG=".claude or .agents is itself a symlink — the relative .claude/skills -> ../.agents/skills link would dangle in the physical target"
+	fi
+	;;
+esac
+
+# The migrated canonical skills tree must be trackable by git — otherwise a
+# plain `git add -A` after the fix silently omits .agents/skills (e.g. a stale
+# `.agents/` line in .git/info/exclude left behind by, say, the Codex runner's
+# gitExcludeAgents), staging the .claude/skills deletion + new symlink but NOT
+# the moved content — fresh clones then get a dangling link and no project
+# skills. Only applies inside a git repo; `git check-ignore -v`'s own output
+# names the exact source file:line so the fix is copy-pasteable.
+# "ok" is included: a repo already migrated while the exclusion was in place has
+# the same fresh-clone failure latent — surface it retroactively, not just when
+# a move is in flight.
+case "$SKILLS_ACTION" in
+move | symlink-only | collapse | ok)
+	if git -C "$REPO" rev-parse --git-dir >/dev/null 2>&1; then
+		if git -C "$REPO" check-ignore -q .agents/skills 2>/dev/null; then
+			GIT_IGNORE_DETAIL="$(git -C "$REPO" check-ignore -v .agents/skills 2>/dev/null)"
+			SKILLS_ACTION="ambiguous"
+			SKILLS_MSG=".agents/skills is git-ignored (${GIT_IGNORE_DETAIL}) — delete that exclude line and re-run"
+		fi
 	fi
 	;;
 esac
@@ -318,7 +373,13 @@ esac
 NEED_POINTER=0
 if [[ $HAS_SKILLS -eq 1 ]]; then
 	if [[ -f "$AG" ]]; then
-		grep -qF '.agents/skills' "$AG" || NEED_POINTER=1
+		# defenced() blanks fenced-code and HTML-comment lines, so a mention
+		# inside a ```code block``` or <!-- comment --> doesn't suppress the
+		# fix (it isn't a real pointer). The match is token-bounded so unrelated
+		# names like `.agents/skills-old` don't count either. A genuine prose
+		# mention outside a fence still counts — conservative, never risks
+		# duplicating the pointer section.
+		grep -Eq '(^|[^.[:alnum:]_-])\.agents/skills([^[:alnum:]_-]|$)' <<<"$(defenced "$AG" 1)" || NEED_POINTER=1
 	elif [[ "$DOC_STATE" != "claude-only-monolithic" ]] && [[ "$DOC_STATE" != "no-harness" ]]; then
 		# AGENTS.md doesn't exist yet but will (bridge-no-agents fix above) — the
 		# freshly created file obviously lacks the pointer.
