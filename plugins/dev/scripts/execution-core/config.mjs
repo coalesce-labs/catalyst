@@ -924,6 +924,39 @@ export const HEARTBEAT_INTERVAL_MS =
 export const HEARTBEAT_GRACE_MS =
   Number(process.env.EXECUTION_CORE_HEARTBEAT_GRACE_MS) || 600_000;
 
+// CTL-1529 — how far back the BOUNDED heartbeat tail read tries to reach.
+//
+// The heartbeat read used to materialize the whole monthly event log (883 MB on
+// mini, ~1.9 s per read, 3-4 reads per scheduler tick, one giant contiguous
+// buffer bun/mimalloc never returns to the OS). It is now a time-covering tail.
+// Two numbers govern it, and they are NOT the same thing:
+//
+//   HEARTBEAT_GRACE_MS       — the CORRECTNESS FLOOR. The tail must provably span
+//     at least this, or "absent from the tail" carries no information about
+//     liveness at all and the reader must refuse to answer (see
+//     scanLocalHeartbeats). Derived, never hardcoded — an operator raising
+//     EXECUTION_CORE_HEARTBEAT_GRACE_MS must not silently break the guarantee.
+//
+//   HEARTBEAT_TAIL_WINDOW_MS — the TARGET window (this constant). Everything above
+//     the floor is margin bought to preserve the whole-file read's
+//     PRESENT-BUT-STALE classification: a host whose heartbeats stopped hours ago
+//     must keep resolving as "seen, but stale" (⇒ proven dead ⇒ its work is
+//     reclaimed) rather than collapsing to "absent" (⇒ not proven dead ⇒ work
+//     strands forever). 12 h at the default grace (72 x 10 min) costs ~17 MB on
+//     mini's densest observed month — 2 % of the 64 MiB cap and 0.02x the
+//     whole-file read it replaces.
+//
+// Beyond this window a host absent from the tail is reported absent. That is not
+// a new horizon: the cross-host peer transport already answers over a 60-minute
+// Loki window (loki-liveness.mjs), and getEventLogPath() is current-month-only,
+// so the whole-file read already forgets everything at each UTC month rollover.
+// Floored at HEARTBEAT_GRACE_MS so a misconfigured override cannot drop below the
+// correctness floor.
+export const HEARTBEAT_TAIL_WINDOW_MS = Math.max(
+  HEARTBEAT_GRACE_MS,
+  Number(process.env.EXECUTION_CORE_HEARTBEAT_TAIL_WINDOW_MS) || HEARTBEAT_GRACE_MS * 72,
+);
+
 // resolveRestoreHoldMs — parse the CTL-1091 restore-hold override with the
 // documented fallback semantics. Valid: a finite value >= 0, INCLUDING an explicit
 // 0 (opt-out: disables the hold, admitting a restored host immediately). Invalid →

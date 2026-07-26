@@ -34,6 +34,9 @@ on:
       # gate the broker cutover invariant in broker/plugin-refresh.mjs, so a PR touching
       # only the broker must run this suite too (Codex P2).
       - "plugins/dev/scripts/broker/**"
+      # CTL-1529: event-log-read-guard.test.mjs scans orch-monitor for whole-file
+      # event-log reads, so an orch-monitor-only change must run this suite.
+      - "plugins/dev/scripts/orch-monitor/**"
       # CTL-1369: the catalyst-install launcher, the `catalyst` router, and the CLI
       # registration (install-cli.sh / check-setup.sh) are the production entry path to
       # `catalyst install|uninstall|reinstall`; changing them must run the smoke test below.
@@ -61,6 +64,9 @@ on:
       # gate the broker cutover invariant in broker/plugin-refresh.mjs, so a PR touching
       # only the broker must run this suite too (Codex P2).
       - "plugins/dev/scripts/broker/**"
+      # CTL-1529: event-log-read-guard.test.mjs scans orch-monitor for whole-file
+      # event-log reads, so an orch-monitor-only change must run this suite.
+      - "plugins/dev/scripts/orch-monitor/**"
       # CTL-1369: launcher / router / CLI-registration entry path (see PR-trigger note above).
       - "plugins/dev/scripts/catalyst-install"
       - "plugins/dev/scripts/catalyst"
@@ -281,6 +287,8 @@ jobs:
             event-cursor.test.mjs \
             event-scan.test.mjs \
             event-tail.test.mjs \
+            event-log-window.test.mjs \
+            event-log-read-guard.test.mjs \
             fence-guard.test.mjs \
             fence-guard-integration.test.mjs \
             terminal-done-cooldown.test.mjs \

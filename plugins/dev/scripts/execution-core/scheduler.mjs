@@ -178,6 +178,11 @@ import {
   // reasoning / diagnostician) HRW-gate over the SURVIVING roster — a dead
   // node's stuck work fails over to a live owner instead of stranding.
   readClusterHeartbeats,
+  // CTL-1529: the per-tick bounded heartbeat reader. ONE time-covering tail scan
+  // shared by every liveness consumer in a tick, with the grace-window guarantee
+  // opted in (an unprovable window throws → each consumer's existing catch
+  // degrades to the FULL roster).
+  makeTickHeartbeatReader,
   deadHosts,
   survivingRoster,
   defaultAppendDispatchFailedEvent,
@@ -450,12 +455,20 @@ export function computeSurvivingRoster(
 // would be the destructive direction.
 export function computeDeadHosts(
   roster,
-  { computeSurviving = computeSurvivingRoster } = {}
+  // CTL-1529: `readHeartbeats` threads the tick's SHARED bounded heartbeat reader
+  // in, so board-health's dead-host set reuses the same single tail scan as
+  // _survivors()/_dispatchRoster() instead of making a fourth read. `computeSurviving`
+  // remains the pre-existing direct seam (tests inject it); when both are absent
+  // this is byte-identical to the pre-CTL-1529 default.
+  { computeSurviving = null, readHeartbeats = undefined } = {}
 ) {
   if (!Array.isArray(roster) || roster.length <= 1) return [];
+  const compute =
+    computeSurviving ??
+    ((r) => computeSurvivingRoster(r, readHeartbeats ? { readHeartbeats } : {}));
   let alive;
   try {
-    alive = computeSurviving(roster);
+    alive = compute(roster);
   } catch {
     return [];
   }
@@ -3591,6 +3604,19 @@ export function schedulerTick(
     // failover deterministically without writing heartbeat events. Single-host is
     // still a no-op regardless (multiHost gate short-circuits before it is read).
     dispatchSurvivingRoster = undefined,
+    // CTL-1529: the tick's SHARED bounded heartbeat reader. The daemon (runTick)
+    // constructs ONE per tick with makeTickHeartbeatReader and threads it here so
+    // _survivors(), _dispatchRoster(), and board-health's dead-host set all reuse a
+    // single time-covering tail scan instead of making 3-4 whole-file reads of the
+    // same 883 MB log. Undefined (bare unit tick) ⇒ this tick builds its own, so
+    // the sharing still holds inside a standalone schedulerTick call. The memo's
+    // lifetime is exactly this tick's closure — it cannot go stale across ticks.
+    //
+    // It does NOT merge the two liveness gates: each consumer still passes its own
+    // requirePeerView and merges peers onto its own COPY of the shared map
+    // (dispatch = positive liveness, recovery = fail-open; CTL-1524 kept those
+    // paths separate on purpose).
+    readHeartbeats: _tickReadHeartbeats = undefined,
     // CTL-729: progress-watchdog seams. Defaults keep every existing bare unit
     // tick inert (null silence probe → predicate no-ops via "no-transcript").
     watchdog: {
@@ -3757,12 +3783,17 @@ export function schedulerTick(
   // Computed lazily + memoized once per tick via the shared computeSurvivingRoster
   // helper: the heartbeat read only fires the first time a recovery pass actually
   // has candidates, and only when multiHost.
+  //
+  // CTL-1529: the heartbeat read itself is now a BOUNDED, time-covering tail, and
+  // `tickReadHeartbeats` is shared with _dispatchRoster() and board-health so the
+  // tick makes ONE local scan instead of 3-4 whole-file reads.
+  const tickReadHeartbeats = _tickReadHeartbeats ?? makeTickHeartbeatReader();
   let _survivorRoster = null;
   const _survivors = () => {
     if (_survivorRoster) return _survivorRoster;
     _survivorRoster = Array.isArray(recoverySurvivingRoster)
       ? recoverySurvivingRoster
-      : computeSurvivingRoster(roster);
+      : computeSurvivingRoster(roster, { readHeartbeats: tickReadHeartbeats });
     return _survivorRoster;
   };
   const ownsForRecovery = (ticket) => !multiHost || ownedBy(ticket, _survivors(), self);
@@ -3797,6 +3828,11 @@ export function schedulerTick(
           self,
           nowMs: now(),
           persist: true,
+          // CTL-1529: same shared per-tick bounded read as _survivors(); the
+          // positive-liveness semantics stay entirely on this side of the seam
+          // (readPositiveLive still passes requirePeerView:true and filters on its
+          // own copy of the map).
+          readHeartbeats: tickReadHeartbeats,
           onDegrade: warnDispatchRosterOutage, // CTL-1091 F2: surface outage→full-roster
         })
       : roster;
@@ -5184,9 +5220,14 @@ export function schedulerTick(
           // throttle was consulted. boardHealthPass now calls this only once it has
           // decided to proceed. Backward-compatible: a plain ARRAY is still accepted
           // (bare ticks / tests that pass one directly).
+          // CTL-1529: pass the tick's SHARED bounded reader as the second arg so
+          // the (still lazy, still throttle-gated) dead-host resolution reuses the
+          // same single tail scan as _survivors()/_dispatchRoster() rather than
+          // making a fourth read. A binding that ignores the second arg keeps
+          // working unchanged.
           deadHosts:
             typeof _boardHealth.deadHosts === "function"
-              ? () => _boardHealth.deadHosts(roster)
+              ? () => _boardHealth.deadHosts(roster, { readHeartbeats: tickReadHeartbeats })
               : (_boardHealth.deadHosts ?? []),
           lastRunMs: _boardHealthLastRunMs,
           // emit defaults to defaultEmitEvent. CTL-1300: thread the optional `act`
@@ -7094,6 +7135,17 @@ function runTick() {
     // tick (which captures that tick's synchronous block) before doing this
     // tick's work, then reset. Cheap no-op when the monitor is disabled.
     emitEventLoopDelay();
+    // CTL-1529: ONE bounded heartbeat scan for the WHOLE tick. Every liveness
+    // consumer below (diagnostician ownsSubject, schedulerTick's _survivors +
+    // _dispatchRoster + board-health dead-host set, and reclaimDeadHostWork) shares
+    // this reader, so the tick performs a single time-covering tail read instead of
+    // 3-4 whole-file reads of the monthly event log (883 MB on mini, ~1.9 s each).
+    //
+    // LIFETIME: this const. It is constructed fresh at the top of every tick and
+    // dies with the tick's stack frame, so a cached scan can never leak into a
+    // later tick. Lazy — nothing is read until a consumer actually asks, which
+    // preserves CTL-1524's win that an idle single-host tick reads nothing at all.
+    const tickReadHeartbeats = makeTickHeartbeatReader();
     // CTL-676 + CTL-678: hot-reload the concurrency knobs by re-reading the
     // project config at the top of every tick. When `configPath` is unset
     // (back-compat scheduler harnesses that never threaded it), fall back to
@@ -7168,8 +7220,11 @@ function runTick() {
           // (the lone host owns everything), so ownsSubject is always true.
           const diagRoster = getClusterHosts();
           const diagSelf = getHostName();
+          // CTL-1529: reuse the tick's shared bounded heartbeat read.
           const diagSurvivors =
-            diagRoster.length > 1 ? computeSurvivingRoster(diagRoster) : diagRoster;
+            diagRoster.length > 1
+              ? computeSurvivingRoster(diagRoster, { readHeartbeats: tickReadHeartbeats })
+              : diagRoster;
           const ownsSubject = (subject) =>
             diagRoster.length <= 1 ||
             ownedBy(String(subject).split("/")[0], diagSurvivors, diagSelf);
@@ -7260,6 +7315,8 @@ function runTick() {
     // procedural values (freeSlots, maxParallel, inFlightCount, etc.) without
     // re-deriving them. The bare call is replaced by const tickResult = ...
     const tickResult = schedulerTick(runningOpts.orchDir, {
+      // CTL-1529: the tick's SHARED bounded heartbeat reader (see runTick's head).
+      readHeartbeats: tickReadHeartbeats,
       readEligible: runningOpts.readEligible,
       dispatch: runningOpts.dispatch,
       dispatchMode: runningOpts.dispatchMode, // CTL-1365a: stamp the Tier-1 tick-timing line
@@ -7624,9 +7681,11 @@ function runTick() {
             return null;
           }
         },
-        // CTL-1524 (C4a): ONE computeSurvivingRoster call (⇒ one whole-log heartbeat
-        // read), not one per host. See computeDeadHosts above.
-        deadHosts: (roster) => computeDeadHosts(roster),
+        // CTL-1524 (C4a): ONE computeSurvivingRoster call (⇒ one heartbeat read),
+        // not one per host. See computeDeadHosts above.
+        // CTL-1529: `o` carries the tick's shared bounded reader (schedulerTick
+        // supplies it), so that one read is the SAME read the rest of the tick used.
+        deadHosts: (roster, o = {}) => computeDeadHosts(roster, o),
         // CTL-1157 (MUST-FIX 2): iterate the ordered candidate list and dispatch
         // the FIRST actionable (non-cooldown/non-latched) candidate — instead of
         // returning {dispatched:false} on the first skip, which wedged the whole
@@ -7723,7 +7782,16 @@ function runTick() {
       // CTL-1481: thread the replica (second arg — the seams object) so the
       // takeover stamp's label read stays off live Linear (replica-first, loud
       // live fallback inside the stamp).
-      reclaimDeadHostWork({ orchDir: runningOpts.orchDir }, { replica: runningOpts.replica }).catch((err) => {
+      reclaimDeadHostWork(
+        { orchDir: runningOpts.orchDir },
+        {
+          replica: runningOpts.replica,
+          // CTL-1529: the tick's shared bounded read. A HeartbeatWindowError from
+          // an unprovable window rejects here and the .catch below skips the sweep
+          // for this tick — the conservative direction (no reclaim on unproven data).
+          readHeartbeats: () => tickReadHeartbeats({}),
+        }
+      ).catch((err) => {
         log.warn({ err: err?.message }, "ctl-863: reclaimDeadHostWork tick failed — continuing");
       });
     }

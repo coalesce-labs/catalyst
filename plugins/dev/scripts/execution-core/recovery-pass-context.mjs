@@ -32,6 +32,7 @@
 import { readFileSync, readdirSync, existsSync } from "node:fs";
 import { join } from "node:path";
 
+import { scanEventsSince } from "./event-tail.mjs"; // CTL-1529: bounded event-log scan
 import { ownerForTicket } from "./hrw.mjs";
 import { getClusterHosts, getHostName } from "./config.mjs";
 
@@ -119,37 +120,38 @@ function eventLogPath() {
   return join(eventsDir, `${ym}.jsonl`);
 }
 
-function collectEventLog() {
+// CTL-1529: bounded. This ran once per recovery-pass worker launch and
+// materialized the entire monthly log (883 MB on mini) plus a ~1.4M-element split
+// array, to find recent escalations. A sweep only cares about RECENT ones, so the
+// natural bound is a time window: ESCALATION_LOOKBACK_MS back from now, capped in
+// bytes by scanEventsSince. The pre-existing failure mode was silent — the catch
+// dropped source 2 entirely and the sweep looked plausible but incomplete.
+const ESCALATION_LOOKBACK_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
+
+function collectEventLog({ nowMs = Date.now(), windowMs = ESCALATION_LOOKBACK_MS } = {}) {
   const items = [];
   const path = eventLogPath();
   if (!existsSync(path)) return items;
-  let raw;
   try {
-    raw = readFileSync(path, "utf8");
+    scanEventsSince({
+      path,
+      targetSinceMs: nowMs - windowMs,
+      lineFilter: (line) => line.includes("recovery."),
+      onEvent: (evt) => {
+        const name = evt?.attributes?.["event.name"] || "";
+        if (!/^recovery\.(escalated|would-escalate)$/.test(name)) return;
+        const ticket = evt?.body?.payload?.ticket || evt?.attributes?.["event.label"] || "";
+        if (!ticket) return;
+        items.push({
+          ticket,
+          source: "log",
+          eventName: name,
+          reason: evt?.body?.payload?.reason || "-",
+        });
+      },
+    });
   } catch {
     return items;
-  }
-  for (const line of raw.split("\n")) {
-    const trimmed = line.trim();
-    if (!trimmed) continue;
-    const evt = (() => {
-      try {
-        return JSON.parse(trimmed);
-      } catch {
-        return null;
-      }
-    })();
-    if (!evt) continue;
-    const name = evt?.attributes?.["event.name"] || "";
-    if (!/^recovery\.(escalated|would-escalate)$/.test(name)) continue;
-    const ticket = evt?.body?.payload?.ticket || evt?.attributes?.["event.label"] || "";
-    if (!ticket) continue;
-    items.push({
-      ticket,
-      source: "log",
-      eventName: name,
-      reason: evt?.body?.payload?.reason || "-",
-    });
   }
   return items;
 }

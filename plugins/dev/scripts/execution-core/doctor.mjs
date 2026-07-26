@@ -58,6 +58,7 @@ import {
   getClusterRepoDir,
   getClusterSyncStatePath,
 } from "./config.mjs";
+import { scanEventsSince } from "./event-tail.mjs"; // CTL-1529: bounded event-log scan
 import { ownedBy } from "./hrw.mjs";
 import { readPeerHeartbeats } from "./cluster-heartbeat.mjs";
 // CTL-1481: the canonical worker-ownership label names — imported (not
@@ -1321,27 +1322,28 @@ function monthlyLogPath(eventsDir, date) {
 // Scans every supplied monthly log path (current + prior month near a boundary).
 // All reads are injectable + fail-open (a missing/unreadable log → no degrade
 // observed, never throws). Returns a single Check.
-function scanRecentBgFallback({ paths, readEventLog, now, recentWindowMs }) {
+// CTL-1529: `scan` replaces the old whole-file `readEventLog(p) -> string` seam.
+// The default is a bounded, TIME-covering tail — a natural fit here because this
+// check already has a window (`recentWindowMs`, 24h) and a `cutoff`. The old
+// default read the current AND prior monthly log in full (up to ~1.7 GB of string
+// near a month boundary on mini) and, on a node runtime, threw ERR_STRING_TOO_LONG
+// straight into the `catch` below — which reports "no degrades observed" and
+// returns PASS. That made a fail-CLOSED node-activation gate fail OPEN on the very
+// signal it calls authoritative. Bounding the read removes that failure mode.
+// checkSdkDaemonEnv still accepts the legacy string seam for existing tests.
+function scanRecentBgFallback({ paths, scan, now, recentWindowMs }) {
   const cutoff = now() - recentWindowMs;
   const hours = Math.round(recentWindowMs / 3_600_000);
   let recent = 0;
   let latestTs = null;
   for (const p of paths) {
-    let body = "";
+    const events = [];
     try {
-      body = readEventLog(p);
+      scan({ path: p, sinceMs: cutoff, onEvent: (e) => events.push(e) });
     } catch {
-      body = ""; // absent/unreadable → treat as "no degrades observed" (fail-open)
+      // absent/unreadable → treat as "no degrades observed" (fail-open)
     }
-    for (const line of body.split("\n")) {
-      const s = line.trim();
-      if (!s) continue;
-      let evt;
-      try {
-        evt = JSON.parse(s);
-      } catch {
-        continue; // tolerate partial/corrupt lines
-      }
+    for (const evt of events) {
       if (evt?.attributes?.["event.name"] !== "execution-core.executor.bg-fallback") continue;
       const t = Date.parse(evt?.ts ?? evt?.observedTs ?? "");
       if (Number.isNaN(t)) continue;
@@ -1427,7 +1429,12 @@ export function checkSdkDaemonEnv(deps = {}) {
     platform = process.platform,
     // Recent sdk→bg silent-degrade scan over the unified event log (current + prior month).
     eventsDir = dirname(getEventLogPath()),
-    readEventLog = (p) => readFileSync(p, "utf8"),
+    // CTL-1529: legacy whole-string seam, kept ONLY for existing tests that inject
+    // a synthetic log body. Undefined in production, where the bounded `scanEventLog`
+    // default below is used instead.
+    readEventLog = undefined,
+    // CTL-1529: the bounded event-log scan seam (see scanRecentBgFallback).
+    scanEventLog = undefined,
     now = () => Date.now(),
     recentWindowMs = 24 * 60 * 60 * 1000, // 24h
   } = deps;
@@ -1560,7 +1567,31 @@ export function checkSdkDaemonEnv(deps = {}) {
   const paths = [monthlyLogPath(eventsDir, new Date(now()))];
   const prev = monthlyLogPath(eventsDir, new Date(now() - recentWindowMs));
   if (prev !== paths[0]) paths.push(prev);
-  checks.push(scanRecentBgFallback({ paths, readEventLog, now, recentWindowMs }));
+  // CTL-1529: resolve the scan seam. Explicit scanEventLog > legacy string seam
+  // (tests) > the bounded time-covering tail (production).
+  const scan =
+    scanEventLog ??
+    (readEventLog
+      ? ({ path, onEvent }) => {
+          for (const line of String(readEventLog(path) ?? "").split("\n")) {
+            const s = line.trim();
+            if (!s) continue;
+            try {
+              onEvent(JSON.parse(s));
+            } catch {
+              /* tolerate partial/corrupt lines */
+            }
+          }
+        }
+      : ({ path, sinceMs, onEvent }) => {
+          scanEventsSince({
+            path,
+            targetSinceMs: sinceMs,
+            lineFilter: (line) => line.includes("execution-core.executor.bg-fallback"),
+            onEvent,
+          });
+        });
+  checks.push(scanRecentBgFallback({ paths, scan, now, recentWindowMs }));
 
   return checks;
 }

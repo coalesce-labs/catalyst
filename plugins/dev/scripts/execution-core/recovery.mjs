@@ -39,6 +39,7 @@ import {
   REVIVE_MAX_AGE_MS,
   GHOST_GRACE_MS,
   HEARTBEAT_GRACE_MS,
+  HEARTBEAT_TAIL_WINDOW_MS, // CTL-1529: bounded heartbeat tail target window
   ZOMBIE_STALE_FLOOR_MS,
   NEVER_STARTED_MS,
   DEAD_DOC_WORKER_TRANSCRIPT_SILENCE_MS,
@@ -48,7 +49,7 @@ import {
 // transcripts so a doc worker mid in-process fan-out is never judged silent
 // (CTL-662-safe). Used ONLY to break the cold-snapshot doc-phase 6h tie below.
 import { transcriptAgeMs as defaultTranscriptAgeMs } from "./transcript-silence.mjs";
-import { scanEventsChunked } from "./event-tail.mjs"; // CTL-1514: streaming event-log scan
+import { scanEventsChunked, scanEventsSince, DEFAULT_TAIL_MAX_BYTES } from "./event-tail.mjs"; // CTL-1514 / CTL-1529: bounded event-log scans
 // CTL-863 fleet-unfreeze (entourage follow-up to #2552): readPeerHeartbeatsSyncCached is
 // the CACHED reader — a 45s in-process TTL cache around the same anchor-issue read, safe
 // here because dead-host detection already tolerates a far larger (10-min) staleness
@@ -3232,22 +3233,193 @@ export function recoverStartup({ orchDir, exec, statJob, detectCold = detectCold
   };
 }
 
+// ─── CTL-859 / CTL-1529: cluster heartbeat reads ─────────────────────────────
+//
+// HEARTBEAT_TAIL_MAX_BYTES — CTL-1529 byte cap for the bounded heartbeat tail.
+// See DEFAULT_TAIL_MAX_BYTES in event-tail.mjs for the derivation; overridable per
+// host because log density varies ~3x across the fleet.
+export const HEARTBEAT_TAIL_MAX_BYTES =
+  Number(process.env.EXECUTION_CORE_HEARTBEAT_TAIL_MAX_BYTES) || DEFAULT_TAIL_MAX_BYTES;
+
+// HeartbeatWindowError — CTL-1529. Raised when the bounded tail could NOT prove it
+// spans HEARTBEAT_GRACE_MS and the caller asked for that guarantee.
+//
+// Tagged with a distinct `code` on purpose: readClusterHeartbeats ALREADY throws
+// for an unrelated reason (requirePeerView with no trustworthy cross-host view),
+// and both throws land in the same catch sites. Without the tag a genuine cap
+// exhaustion would be permanently misread as a Loki/anchor outage.
+export class HeartbeatWindowError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "HeartbeatWindowError";
+    this.code = "ERR_HEARTBEAT_WINDOW_UNCOVERED";
+  }
+}
+
+// scanLocalHeartbeats — CTL-1529. ONE bounded, time-covering pass over the LOCAL
+// monthly event log that projects every `node.heartbeat` record twice:
+//   • lastSeen[host]   — newest ts per host (readClusterHeartbeats)
+//   • admission[host]  — the newest record's admission block (readClusterAdmission)
+// Both readers used to make their own separate whole-file read of the very same
+// lines; sharing one pass is why this returns both.
+//
+// THE CRUX — why this is time-bounded and not byte-bounded. `deadHosts` is the one
+// consumer that distinguishes ABSENT from PRESENT-BUT-STALE: absent ⇒ "not proven
+// dead" ⇒ never reclaimed; stale ⇒ dead ⇒ reclaimed and re-homed. A fixed
+// N-megabyte tail silently converts the second into the first (on a busy day 1 MB
+// of this log spans ~14 minutes), so a genuinely dead host's work strands forever
+// with no event and no log line. A tail that provably spans the grace window makes
+// "absent" mean something again, and HEARTBEAT_TAIL_WINDOW_MS's margin above that
+// floor keeps hours-old heartbeats classified exactly as the whole-file read
+// classified them.
+//
+// Returns { lastSeen, admission, covered, oldestTs, windowBytes, size, reachedBof }.
+// `covered:false` is the ONLY new state (cap exhausted before the grace floor) —
+// it is reported, never swallowed; readClusterHeartbeats turns it into a throw for
+// callers that opt in. Peak transient is ONE chunk regardless of file size.
+export function scanLocalHeartbeats({
+  logPath = getEventLogPath(),
+  nowMs = Date.now(),
+  graceMs = HEARTBEAT_GRACE_MS,
+  windowMs = HEARTBEAT_TAIL_WINDOW_MS,
+  maxBytes = HEARTBEAT_TAIL_MAX_BYTES,
+  chunkSize = undefined,
+  initialWindow = undefined,
+  onRead = null,
+  scan = scanEventsSince,
+} = {}) {
+  const lastSeen = {};
+  const newest = {}; // host -> { ts, admission|null }
+  let res;
+  try {
+    res = scan({
+      path: logPath,
+      targetSinceMs: nowMs - windowMs,
+      requiredSinceMs: nowMs - graceMs,
+      maxBytes,
+      ...(chunkSize === undefined ? {} : { chunkSize }),
+      ...(initialWindow === undefined ? {} : { initialWindow }),
+      onRead,
+      // Cheap pre-JSON.parse gate, preserved verbatim from the whole-file readers.
+      lineFilter: (line) => line.includes(HEARTBEAT_EVENT),
+      onEvent: (evt) => {
+        if (evt?.attributes?.["event.name"] !== HEARTBEAT_EVENT) return;
+        const host = evt?.body?.payload?.["host.name"] ?? evt?.resource?.["host.name"];
+        const ts = evt?.ts;
+        if (typeof host !== "string" || host.length === 0) return;
+        if (typeof ts !== "string" || ts.length === 0) return;
+        // Keep the latest ts per host (ISO-8601 sorts lexicographically; the local
+        // log is uniformly second-precision — heartbeat-event.mjs strips millis).
+        if (!lastSeen[host] || ts > lastSeen[host]) lastSeen[host] = ts;
+        // Track the newest line per host EVEN IF it carries no admission, so a
+        // fresh heartbeat with admission:null correctly clears a stale hold.
+        const prev = newest[host];
+        if (!prev || ts > prev.ts) {
+          newest[host] = { ts, admission: evt?.body?.payload?.admission ?? null };
+        }
+      },
+    });
+  } catch {
+    // An unexpected I/O failure means we learned NOTHING this pass. Report it as
+    // uncovered rather than as an empty-but-trustworthy map: an empty map would
+    // read as "every host absent", and for the recovery consumer that is the
+    // strand direction. covered:false routes opted-in callers to the documented
+    // full-roster degrade instead.
+    return {
+      lastSeen: {},
+      admission: {},
+      covered: false,
+      oldestTs: null,
+      windowBytes: 0,
+      size: 0,
+      reachedBof: false,
+    };
+  }
+  const admission = {};
+  for (const [host, rec] of Object.entries(newest)) {
+    if (rec.admission && typeof rec.admission === "object") admission[host] = rec.admission;
+  }
+  return {
+    lastSeen,
+    admission,
+    covered: res.covered,
+    oldestTs: res.oldestTs,
+    windowBytes: res.windowBytes,
+    size: res.size,
+    reachedBof: res.reachedBof,
+  };
+}
+
+// makeHeartbeatScanMemo — CTL-1529. ONE local heartbeat scan shared by every
+// consumer inside a single scheduler tick.
+//
+// LIFETIME IS THE CLOSURE, and that is the whole safety argument: the daemon
+// constructs a fresh memo at the top of each `runTick` and lets it fall out of
+// scope when the tick ends, so a cached scan can never be observed by a LATER
+// tick. There is no TTL to misconfigure and no global to forget to invalidate.
+// Lazy — nothing is read until the first consumer actually asks.
+export function makeHeartbeatScanMemo({ scan = scanLocalHeartbeats, ...opts } = {}) {
+  let memo = null;
+  return () => (memo ??= scan(opts));
+}
+
+// makeTickHeartbeatReader — CTL-1529. The per-tick drop-in for
+// `readClusterHeartbeats` that (a) shares one local scan across the tick's 3-4
+// liveness consumers and (b) opts INTO the grace-window guarantee, so a tail that
+// cannot prove its depth throws instead of quietly reporting a stale host as
+// absent. Every production consumer of this reader already catches and degrades to
+// the FULL roster — which is the conservative direction for BOTH the fail-open
+// recovery gate (empty dead set ⇒ no reclaim) and the positive-liveness dispatch
+// gate (outage ⇒ each node owns only its own HRW slice).
+//
+// It does NOT collapse the two gates into one call: each consumer still passes its
+// own `requirePeerView` and still runs its own peer merge on a COPY of the shared
+// map. Only the expensive local file scan is shared (CTL-1524 kept those two paths
+// deliberately separate; this preserves that).
+export function makeTickHeartbeatReader({ scanLocal = null, ...scanOpts } = {}) {
+  const memo = scanLocal ?? makeHeartbeatScanMemo(scanOpts);
+  return (opts = {}) => readClusterHeartbeats({ ...opts, scanLocal: memo, requireGraceWindow: true });
+}
+
 // readClusterHeartbeats — CTL-859. Scan the unified event log for
 // `node.heartbeat` events and return the most-recent ISO timestamp seen for
-// each host: { [hostName]: lastSeenISO }. DORMANT for now — no caller consumes
-// this in PR1; later PRs (takeover/healing) use it to decide "dead" = no
-// heartbeat for a generous grace window (see the design doc: 5–10 min).
+// each host: { [hostName]: lastSeenISO }, merged with the cross-host peer view.
 //
 // Reads the host name from the event payload (body.payload["host.name"]),
 // falling back to the resource block (resource["host.name"]). Best-effort:
-// missing log, unreadable file, and malformed lines are skipped, never thrown.
+// missing log, unreadable file, and malformed lines are skipped, never thrown —
+// EXCEPT for the two documented opt-in throws (requirePeerView, requireGraceWindow),
+// both of which route to a conservative full-roster degrade at every call site.
 // `logPath` is injectable for tests; defaults to the same getEventLogPath()
 // every emitter uses.
+//
+// CTL-1529: the local scan is a BOUNDED time-covering tail (scanLocalHeartbeats),
+// not a whole-file read. Peak transient is one chunk regardless of log size.
 export function readClusterHeartbeats({
   logPath = getEventLogPath(),
   roster = getClusterHosts(),
   anchorIssue = getLivenessAnchorIssue(),
   readPeers = defaultReadPeers, // CTL-1420 (#17): loki|linear source-aware peer read
+  // CTL-1529 bounded-read seams. `scanLocal` is a zero-arg memo (makeHeartbeatScanMemo)
+  // shared across a tick; when supplied it WINS over logPath/nowMs/tuning. Tuning
+  // params exist for tests — production uses the config-derived defaults.
+  nowMs = Date.now(),
+  graceMs = HEARTBEAT_GRACE_MS,
+  windowMs = HEARTBEAT_TAIL_WINDOW_MS,
+  maxBytes = HEARTBEAT_TAIL_MAX_BYTES,
+  chunkSize = undefined,
+  initialWindow = undefined,
+  onRead = null,
+  scanLocal = null,
+  // CTL-1529: opt IN to the grace-window guarantee. TRUE ⇒ a tail that cannot
+  // prove it spans graceMs THROWS (HeartbeatWindowError) instead of returning a
+  // map in which "absent" is meaningless. Set by makeTickHeartbeatReader for the
+  // liveness gates, whose catches all degrade to the FULL roster. Left FALSE for
+  // display/CLI callers (orch-monitor's footer + cluster view,
+  // archive-stale-host-workers) which have no try/catch and already render an
+  // absent host as offline — a truncated best-effort map is strictly better for
+  // them than a 500 or a crash.
+  requireGraceWindow = false,
   // CTL-1091 (Codex P1 #3): when TRUE — the DISPATCH positive-liveness path — a
   // multi-host roster with NO trustworthy cross-host view THROWS instead of
   // returning a local-only map. "No trustworthy view" = the peer transport is
@@ -3264,32 +3436,29 @@ export function readClusterHeartbeats({
   // docs/architecture.md.
   requirePeerView = false,
 } = {}) {
-  const lastSeen = {};
-  let raw;
-  try {
-    raw = readFileSync(logPath, "utf8");
-  } catch {
-    // no event log yet — continue to peer merge below if multi-host
+  // CTL-1529: bounded, time-covering tail — no longer a whole-file readFileSync.
+  const scanned = scanLocal
+    ? scanLocal()
+    : scanLocalHeartbeats({
+        logPath,
+        nowMs,
+        graceMs,
+        windowMs,
+        maxBytes,
+        chunkSize,
+        initialWindow,
+        onRead,
+      });
+  if (requireGraceWindow && !scanned.covered) {
+    throw new HeartbeatWindowError(
+      `ctl-1529: bounded heartbeat tail could not prove ${graceMs}ms of coverage ` +
+        `(scanned ${scanned.windowBytes}B of ${scanned.size}B, oldest=${scanned.oldestTs ?? "none"}); ` +
+        `refusing to report a stale host as absent — caller degrades to the full roster`,
+    );
   }
-  if (raw) {
-    for (const line of raw.split("\n")) {
-      if (!line) continue;
-      if (!line.includes(HEARTBEAT_EVENT)) continue; // cheap pre-filter
-      let evt;
-      try {
-        evt = JSON.parse(line);
-      } catch {
-        continue; // partial/garbage line
-      }
-      if (evt?.attributes?.["event.name"] !== HEARTBEAT_EVENT) continue;
-      const host = evt?.body?.payload?.["host.name"] ?? evt?.resource?.["host.name"];
-      const ts = evt?.ts;
-      if (typeof host !== "string" || host.length === 0) continue;
-      if (typeof ts !== "string" || ts.length === 0) continue;
-      // Keep the latest ts per host (ISO-8601 sorts lexicographically).
-      if (!lastSeen[host] || ts > lastSeen[host]) lastSeen[host] = ts;
-    }
-  }
+  // COPY: the peer merge below mutates this map, and `scanned` may be a memo
+  // shared with the tick's other liveness consumers (whose peer view differs).
+  const lastSeen = { ...scanned.lastSeen };
 
   // CTL-1090: multi-host cross-host merge. Single-host (roster<=1) ⇒ exact no-op.
   // CTL-1420 (#17): gate on the ACTIVE source's transport (loki: Loki URL; linear:
@@ -3360,39 +3529,29 @@ export function readClusterHeartbeats({
 // whose newest admission is null/absent is omitted. Best-effort/fail-open: missing
 // or unreadable log → {}; malformed lines skipped; never throws. `logPath`
 // injectable for tests.
-export function readClusterAdmission({ logPath = getEventLogPath() } = {}) {
-  const byHost = {}; // host -> { ts, admission|null }
-  let raw;
-  try {
-    raw = readFileSync(logPath, "utf8");
-  } catch {
-    return {}; // no event log yet
-  }
-  for (const line of raw.split("\n")) {
-    if (!line) continue;
-    if (!line.includes(HEARTBEAT_EVENT)) continue; // cheap pre-filter
-    let evt;
-    try {
-      evt = JSON.parse(line);
-    } catch {
-      continue; // partial/garbage line
-    }
-    if (evt?.attributes?.["event.name"] !== HEARTBEAT_EVENT) continue;
-    const host = evt?.body?.payload?.["host.name"] ?? evt?.resource?.["host.name"];
-    const ts = evt?.ts;
-    if (typeof host !== "string" || host.length === 0) continue;
-    if (typeof ts !== "string" || ts.length === 0) continue;
-    // Track the newest line per host EVEN IF it carries no admission, so a fresh
-    // heartbeat with admission:null correctly clears a host's stale hold.
-    const admission = evt?.body?.payload?.admission;
-    const prev = byHost[host];
-    if (!prev || ts > prev.ts) byHost[host] = { ts, admission: admission ?? null };
-  }
-  const out = {};
-  for (const [host, rec] of Object.entries(byHost)) {
-    if (rec.admission && typeof rec.admission === "object") out[host] = rec.admission;
-  }
-  return out;
+//
+// CTL-1529: bounded. This is the SIBLING whole-file read the ticket's inventory
+// found next to readClusterHeartbeats — same lines, same newest-per-host reduce,
+// but unmemoized on the monitor's 60s anchor poll, so it was the single
+// highest-FREQUENCY full read in the fleet. It now shares scanLocalHeartbeats'
+// one bounded pass. NO grace-window guarantee is required here: admission is a
+// display projection with no liveness semantics, and its fail-open direction is
+// "no admission info ⇒ render live", never a fabricated hold. A truncated window
+// can therefore only omit a hold, which is exactly the pre-existing fail-open
+// posture (a missing/unreadable log already returned {}).
+export function readClusterAdmission({
+  logPath = getEventLogPath(),
+  nowMs = Date.now(),
+  chunkSize = undefined,
+  initialWindow = undefined,
+  maxBytes = HEARTBEAT_TAIL_MAX_BYTES,
+  onRead = null,
+  scanLocal = null,
+} = {}) {
+  const scanned = scanLocal
+    ? scanLocal()
+    : scanLocalHeartbeats({ logPath, nowMs, maxBytes, chunkSize, initialWindow, onRead });
+  return { ...scanned.admission };
 }
 
 // makeBatchedPhaseCompleteChecker — CTL-1514. Same (ticket, phase) => bool
@@ -3647,7 +3806,12 @@ function writeLocalClusterGeneration(orchDir, ticket, generation) {
 export async function reclaimDeadHostWork(
   { orchDir },
   {
-    readHeartbeats = () => readClusterHeartbeats({}),
+    // CTL-1529: the bare default opts INTO the grace-window guarantee. This sweep
+    // is the one that turns "proven dead" into reclaimed work, so it must never act
+    // on a tail that cannot prove it spans the grace window — the throw propagates
+    // to the caller's .catch and the sweep is skipped for this tick (conservative:
+    // no reclaim on unproven data). Production threads the tick's SHARED reader in.
+    readHeartbeats = () => readClusterHeartbeats({ requireGraceWindow: true }),
     roster = getClusterHosts(),
     self = getHostName(),
     graceMs = HEARTBEAT_GRACE_MS,
