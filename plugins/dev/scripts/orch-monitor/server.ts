@@ -7,6 +7,7 @@ import webpush from "web-push";
 import * as pushStore from "./lib/push-subscriptions";
 import {
   createNotificationProjector,
+  resolveDaemonNotifyHoldMs,
   type ProjectorBoard,
 } from "./lib/notification-filter";
 import { createPushBridge } from "./lib/push-bridge";
@@ -1448,6 +1449,17 @@ export function createServer(opts: CreateServerOptions): BunServer {
   // New /api/fsm/*, /api/beliefs/*, /api/governance, /api/journey/:ticket
   // routes insert between the /api/beliefs/stream branch and the 404 fallthrough.
   // Re-locate this anchor by grep after each insertion — cited line numbers shift.
+
+  // CTL-1522: how long a non-healthy daemon state must hold before the
+  // notification projector pushes. This is the NOTIFICATION layer's debounce and
+  // is deliberately separate from the healthy-window below, which governs the
+  // liveness DISPLAY (footer dot, /api/nav/stream, cluster view) and must stay
+  // sensitive. Widening the display window to quiet notifications was tried once
+  // (CTL-1169, 30s→90s) and the storm returned. Unset → the module default;
+  // 0 restores the pre-CTL-1522 immediate-edge behavior.
+  const daemonNotifyHoldMs = resolveDaemonNotifyHoldMs(
+    process.env.MONITOR_DAEMON_NOTIFY_HOLD_MS,
+  );
 
   const productionDaemonHealth = async (): Promise<DaemonHealth> => {
     try {
@@ -4211,7 +4223,9 @@ export function createServer(opts: CreateServerOptions): BunServer {
         if (url.pathname === "/api/notifications/stream") {
           let unsubNotif: (() => void) | null = null;
           let closedNotif = false;
-          const notifProjector = createNotificationProjector();
+          const notifProjector = createNotificationProjector({
+            daemonNotifyHoldMs,
+          });
           const emitNotifications = (
             controller: ReadableStreamDefaultController<Uint8Array>,
             pb: ProjectorBoard,
@@ -4702,7 +4716,7 @@ export function createServer(opts: CreateServerOptions): BunServer {
   if (pushBridgeOpt !== false) {
     const bridge = createPushBridge({
       store: pushStore,
-      projector: createNotificationProjector(),
+      projector: createNotificationProjector({ daemonNotifyHoldMs }),
     });
     // Register the unsubscribe so server.stop() tears the bridge down BEFORE it
     // calls pushStore.closeDb(). Otherwise an orphaned board subscription on the
