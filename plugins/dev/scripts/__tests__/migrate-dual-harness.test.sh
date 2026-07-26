@@ -563,6 +563,37 @@ ln -s '../.agents/skills' "$R/.claude/skills"
 run "$R" >/dev/null 2>&1; assert_eq "37 oklinkempty: dry-run rc=4" 4 "$?"
 run "$R" --fix >/dev/null 2>&1; assert_eq "37 oklinkempty: --fix rc=4" 4 "$?"
 
+# 38. EMPTY .claude/skills real dir, .agents/skills absent → nothing to migrate
+#     (rc 0, no move, no symlink — an empty target would be untrackable and the
+#     wired result would be refused rc 4 by the next run anyway).
+R="$SCRATCH/emptycs"; mkdir -p "$R/.claude/skills"
+printf '@AGENTS.md\n' >"$R/CLAUDE.md"
+printf '# AGENTS.md\n' >"$R/AGENTS.md"
+run "$R"; assert_eq "38 emptycs: dry-run rc=0" 0 "$?"
+run "$R" --fix; assert_eq "38 emptycs: --fix rc=0" 0 "$?"
+[[ -d "$R/.claude/skills" && ! -L "$R/.claude/skills" && ! -e "$R/.agents" ]] && pass "38 emptycs: nothing moved or linked" || fail "38 emptycs: nothing moved or linked"
+
+# 39. .claude/skills contains a nested .gitignore → rc 4 (its rules travel with
+#     the tree; the destination probe cannot audit them in advance).
+R="$SCRATCH/nestedignore"; mkdir -p "$R/.claude/skills/foo"
+printf '@AGENTS.md\n' >"$R/CLAUDE.md"
+printf '# AGENTS.md\n' >"$R/AGENTS.md"
+printf 'body\n' >"$R/.claude/skills/foo/SKILL.md"
+printf 'foo/SKILL.md\n' >"$R/.claude/skills/.gitignore"
+run "$R" >/dev/null 2>&1; assert_eq "39 nestedignore: dry-run rc=4" 4 "$?"
+run "$R" --fix >/dev/null 2>&1; assert_eq "39 nestedignore: --fix rc=4" 4 "$?"
+[[ -d "$R/.claude/skills" && ! -L "$R/.claude/skills" ]] && pass "39 nestedignore: nothing moved" || fail "39 nestedignore: nothing moved"
+
+# 40. .claude/skills is a git submodule / nested repo (has .git) → rc 4.
+R="$SCRATCH/submodule"; mkdir -p "$R/.claude/skills/foo"
+printf '@AGENTS.md\n' >"$R/CLAUDE.md"
+printf '# AGENTS.md\n' >"$R/AGENTS.md"
+printf 'body\n' >"$R/.claude/skills/foo/SKILL.md"
+printf 'gitdir: ../../.git/modules/skills\n' >"$R/.claude/skills/.git"
+run "$R" >/dev/null 2>&1; assert_eq "40 submodule: dry-run rc=4" 4 "$?"
+run "$R" --fix >/dev/null 2>&1; assert_eq "40 submodule: --fix rc=4" 4 "$?"
+[[ -d "$R/.claude/skills" && ! -L "$R/.claude/skills" ]] && pass "40 submodule: nothing moved" || fail "40 submodule: nothing moved"
+
 echo ""
 echo "migrate-dual-harness.test.sh: ${PASSES} passed, ${FAILURES} failed"
 [[ $FAILURES -eq 0 ]]

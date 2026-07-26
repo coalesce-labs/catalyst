@@ -321,6 +321,28 @@ elif [[ -d "$CS" ]]; then
 			SKILLS_ACTION="ambiguous"
 			SKILLS_MSG=".agents/skills exists but is not a directory"
 		fi
+	elif [[ -e "$CS/.git" ]]; then
+		# A checked-out git submodule (or nested repo): moving it stages a
+		# gitlink at the new path while .gitmodules still names the old one —
+		# fresh clones can't init it. Refuse; migrating submodule metadata is
+		# a human decision.
+		SKILLS_ACTION="ambiguous"
+		SKILLS_MSG=".claude/skills is a git submodule / nested git repo — moving it would break its .gitmodules path mapping; migrate the submodule by hand"
+	elif [[ -z "$(ls -A "$CS" 2>/dev/null)" ]]; then
+		# Empty legacy tree: nothing to wire. Moving it would create an empty
+		# .agents/skills (untrackable by git) plus a symlink that dangles on
+		# every fresh clone — and the next run would refuse it as rc 4 anyway.
+		SKILLS_ACTION="none"
+		say "note: .claude/skills exists but is empty — nothing to migrate (git cannot track an empty directory)"
+	elif [[ -n "$(find "$CS" -name .gitignore -print 2>/dev/null | head -n 1)" ]]; then
+		# A .gitignore INSIDE the moving tree travels with it, so its rules
+		# apply at the NEW base after the move — the destination-path ignore
+		# probe below (which asks git about the CURRENT rules) cannot see
+		# them. A rule matching a moved file would silently drop that skill
+		# from the commit. Refuse; the operator decides what the nested
+		# ignore file should mean at the new location.
+		SKILLS_ACTION="ambiguous"
+		SKILLS_MSG=".claude/skills contains a .gitignore that would move with the tree — its rules at the new .agents/skills base cannot be audited in advance; resolve it by hand"
 	else
 		SKILLS_ACTION="move"
 	fi

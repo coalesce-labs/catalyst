@@ -111,18 +111,23 @@ fi
 #    the wrong file. Only warn when BOTH the bridge target and CLAUDE.md
 #    itself lack the phrase.
 if [[ -f "CLAUDE.md" ]]; then
-	if grep -q "Catalyst Development Workflow" CLAUDE.md 2>/dev/null; then
-		: # present directly in CLAUDE.md
-	elif grep -qE '^@AGENTS\.md[[:space:]]*$' CLAUDE.md 2>/dev/null && [[ -f "AGENTS.md" ]]; then
-		# -E with a trailing [[:space:]]* so a CRLF or trailing-whitespace
-		# bridge line still matches (the migrator's defenced() detection
-		# normalizes both; a raw -qx here would miss them and emit a false
-		# "append the snippet to CLAUDE.md" warning).
+	# Bridge detection FIRST: on a real @AGENTS.md bridge the canonical file is
+	# AGENTS.md, so the snippet must be validated THERE regardless of whether a
+	# stray duplicate still sits in CLAUDE.md (Codex reads only AGENTS.md — a
+	# CLAUDE.md-only copy would leave it without the workflow while checkup
+	# reads green). The -E trailing [[:space:]]* tolerates CRLF/whitespace,
+	# matching the migrator's normalized detection.
+	if grep -qE '^@AGENTS\.md[[:space:]]*$' CLAUDE.md 2>/dev/null && [[ -f "AGENTS.md" ]]; then
 		if ! grep -q "Catalyst Development Workflow" AGENTS.md 2>/dev/null; then
 			warnings+=("CLAUDE.md is a thin @AGENTS.md bridge, but the imported AGENTS.md is missing the Catalyst workflow snippet")
 			warnings+=("  Add the snippet from: plugins/dev/templates/CLAUDE_SNIPPET.md")
 			warnings+=("  Or run: cat plugins/dev/templates/CLAUDE_SNIPPET.md >> AGENTS.md")
+			if grep -q "Catalyst Development Workflow" CLAUDE.md 2>/dev/null; then
+				warnings+=("  (a copy exists in CLAUDE.md — move it into AGENTS.md so both agents see it)")
+			fi
 		fi
+	elif grep -q "Catalyst Development Workflow" CLAUDE.md 2>/dev/null; then
+		: # monolithic CLAUDE.md with the snippet present directly
 	else
 		warnings+=("CLAUDE.md is missing the Catalyst workflow snippet")
 		warnings+=("  Add the snippet from: plugins/dev/templates/CLAUDE_SNIPPET.md")
@@ -626,7 +631,7 @@ fi
 #     (same rationale as §9's seeder delegation) — warn, never fatal. Guarded like §9: skip a
 #     repo with no agent doc and no skills dir at all (nothing to converge).
 DUAL_HARNESS_SCRIPT="${SCRIPT_DIR}/migrate-dual-harness.sh"
-if [[ ( -f AGENTS.md || -f CLAUDE.md || -e .claude/skills || -L .claude/skills || -e .agents/skills || -L .agents/skills ) && -x "$DUAL_HARNESS_SCRIPT" ]]; then
+if [[ ( -e AGENTS.md || -L AGENTS.md || -e CLAUDE.md || -L CLAUDE.md || -e .claude/skills || -L .claude/skills || -e .agents/skills || -L .agents/skills ) && -x "$DUAL_HARNESS_SCRIPT" ]]; then
 	dh_rc=0
 	bash "$DUAL_HARNESS_SCRIPT" --repo "$PWD" --quiet >/dev/null 2>&1 || dh_rc=$?
 	case $dh_rc in

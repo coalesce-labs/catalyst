@@ -85,11 +85,17 @@ This is the one step a script cannot do — reconciling prose requires model jud
 1. **Read `CLAUDE.md` IN FULL.** Not a partial read — every line needs a classification
    decision below.
 2. **Partition every line/section** into:
-   - **Claude-specific** — `@`-import lines, `.claude/` paths, Claude Code plugin/marketplace/
-     session mechanics, `claude` CLI invocations, MCP registration commands that are
-     Claude-scoped.
+   - **Claude-specific** — `.claude/` paths, Claude Code plugin/marketplace/session mechanics,
+     `claude` CLI invocations, MCP registration commands that are Claude-scoped.
    - **Portable** — everything else (architecture, conventions, workflow rules, anything that
      applies regardless of which agent is driving).
+   - **`@`-import lines are classified by their TARGET, not by their syntax** (the `@` mechanism
+     is Claude-only, but what it imports usually isn't): read the imported file; if its content
+     is portable guidance (e.g. `@docs/development.md`), reference it from `AGENTS.md` as a
+     plain read-this path (like the Reference Docs pattern) so Codex sees it too, and the
+     `@`-import may stay in the bridge for Claude's auto-load. Only an import whose target is
+     genuinely Claude-specific stays bridge-only. Never let portable guidance survive solely
+     behind an `@`-import Codex cannot interpret.
 3. **Merge the portable content into `AGENTS.md`**:
    - If `AGENTS.md` doesn't exist, create it from the portable content.
    - If `AGENTS.md` already exists, merge without duplicating — **existing `AGENTS.md` sections

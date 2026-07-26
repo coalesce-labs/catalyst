@@ -13,6 +13,7 @@ import {
   lstatSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   readlinkSync,
   rmSync,
@@ -790,6 +791,158 @@ describe("ensureCodexSkills", () => {
     rmSync(wt, { recursive: true, force: true });
     rmSync(codexHome, { recursive: true, force: true });
     rmSync(dirname(projectTarget), { recursive: true, force: true });
+  });
+
+  // CTL-1530 (thread zc0 — the pJD repro extended): a project-authored link
+  // that already points at the CURRENT configured source is the idempotent
+  // no-op branch (`target === skillsSrc`), NOT the registry check — but the OLD
+  // code self-healed a registry entry for it anyway ("adopting" a link this
+  // runner never created). Prove the fix: register nothing on that no-op, so a
+  // LATER pluginRoot change finds no proof and leaves the (now-mismatched)
+  // project link untouched + warned, rather than repointing it.
+  test("project-authored top-level link pointing at the CURRENT source is never adopted into the registry; a later root change preserves it + warns (zc0)", () => {
+    const wt = mkdtempSync(join(tmpdir(), "codex-wt-zc0-top-"));
+    const codexHome = mkdtempSync(join(tmpdir(), "codex-home-zc0-top-"));
+    const checkoutA = mkdtempSync(join(tmpdir(), "codex-checkout-zc0-a-"));
+    const checkoutB = mkdtempSync(join(tmpdir(), "codex-checkout-zc0-b-"));
+    const devDirA = join(checkoutA, "plugins", "dev");
+    const devDirB = join(checkoutB, "plugins", "dev");
+    const skillsA = join(devDirA, "skills");
+    mkdirSync(skillsA, { recursive: true });
+    mkdirSync(join(devDirB, "skills"), { recursive: true });
+    Bun.spawnSync(["git", "init"], { cwd: wt });
+    mkdirSync(join(wt, ".agents"), { recursive: true });
+    const link = join(wt, ".agents", "skills");
+    // A project independently authored this link — it happens to already
+    // point at what would be the current source under devDirA. This runner
+    // never created it (no ensureCodexSkills call has happened yet).
+    Bun.spawnSync(["ln", "-s", skillsA, link]);
+
+    // First call: pluginDirs matches the link's existing target exactly, so
+    // this hits the idempotent-no-op branch — must NOT register anything.
+    ensureCodexSkills(wt, { pluginDirs: [devDirA], codexHome });
+    expect(readlinkSync(link)).toBe(skillsA); // untouched, still correct
+
+    // Second call: the configured root changes. With no registry proof for
+    // this link, it must be preserved + warned — never repointed.
+    const warns = [];
+    ensureCodexSkills(wt, { pluginDirs: [devDirB], codexHome, log: { warn: (...a) => warns.push(a) } });
+
+    expect(readlinkSync(link)).toBe(skillsA); // STILL untouched — never adopted, never repointed
+    expect(warns.length).toBe(1); // loud skip
+
+    rmSync(wt, { recursive: true, force: true });
+    rmSync(codexHome, { recursive: true, force: true });
+    rmSync(checkoutA, { recursive: true, force: true });
+    rmSync(checkoutB, { recursive: true, force: true });
+  });
+
+  // CTL-1530 (thread zc0): the SAME "never adopt a coincidental match" rule
+  // applies to a per-entry link registered under CODEX_HOME/skills (a real
+  // project-owned .agents/skills dir).
+  test("project-authored per-entry CODEX_HOME/skills link pointing at the CURRENT source is never adopted; a later root change preserves it + warns (zc0)", () => {
+    const wt = mkdtempSync(join(tmpdir(), "codex-wt-zc0-entry-"));
+    const codexHome = mkdtempSync(join(tmpdir(), "codex-home-zc0-entry-"));
+    const checkoutA = mkdtempSync(join(tmpdir(), "codex-checkout-zc0-entry-a-"));
+    const checkoutB = mkdtempSync(join(tmpdir(), "codex-checkout-zc0-entry-b-"));
+    const devDirA = join(checkoutA, "plugins", "dev");
+    const devDirB = join(checkoutB, "plugins", "dev");
+    const skillsSrcA = join(devDirA, "skills");
+    mkdirSync(join(skillsSrcA, "phase-triage"), { recursive: true });
+    mkdirSync(join(devDirB, "skills", "phase-triage"), { recursive: true });
+    Bun.spawnSync(["git", "init"], { cwd: wt });
+
+    const realSkills = join(wt, ".agents", "skills");
+    mkdirSync(realSkills, { recursive: true }); // a REAL, project-owned dir
+    const homeSkillsDir = join(codexHome, "skills");
+    mkdirSync(homeSkillsDir, { recursive: true });
+    const entryLink = join(homeSkillsDir, "phase-triage");
+    // A pre-existing entry that happens to already match devDirA's source —
+    // this runner never wrote it via symlinkSync.
+    Bun.spawnSync(["ln", "-s", join(skillsSrcA, "phase-triage"), entryLink]);
+
+    ensureCodexSkills(wt, { pluginDirs: [devDirA], codexHome });
+    expect(readlinkSync(entryLink)).toBe(join(skillsSrcA, "phase-triage")); // untouched, still correct
+
+    const warns = [];
+    ensureCodexSkills(wt, { pluginDirs: [devDirB], codexHome, log: { warn: (...a) => warns.push(a) } });
+
+    expect(readlinkSync(entryLink)).toBe(join(skillsSrcA, "phase-triage")); // STILL untouched
+    expect(warns.length).toBeGreaterThan(0); // loud skip
+
+    rmSync(wt, { recursive: true, force: true });
+    rmSync(codexHome, { recursive: true, force: true });
+    rmSync(checkoutA, { recursive: true, force: true });
+    rmSync(checkoutB, { recursive: true, force: true });
+  });
+
+  // CTL-1530 (thread zdB): a refresh failure must leave the OLD, still-usable
+  // link completely in place — never removed and then unable to be replaced.
+  // Simulated by making the `.agents` directory unwritable so the atomic
+  // refresh's temp-symlink creation fails immediately (before anything is
+  // touched), which exercises the "leave dest untouched on failure" contract.
+  test("refresh failure (unwritable dir) leaves the ORIGINAL top-level link untouched + warns, never discarded (zdB)", () => {
+    const wt = mkdtempSync(join(tmpdir(), "codex-wt-zdb-top-"));
+    const codexHome = mkdtempSync(join(tmpdir(), "codex-home-zdb-top-"));
+    const oldCheckout = mkdtempSync(join(tmpdir(), "codex-old-checkout-zdb-"));
+    const newCheckout = mkdtempSync(join(tmpdir(), "codex-new-checkout-zdb-"));
+    const oldDevDir = join(oldCheckout, "plugins", "dev");
+    const newDevDir = join(newCheckout, "plugins", "dev");
+    mkdirSync(join(oldDevDir, "skills"), { recursive: true });
+    mkdirSync(join(newDevDir, "skills"), { recursive: true });
+    Bun.spawnSync(["git", "init"], { cwd: wt });
+
+    // Establish genuine registry proof for a link against the OLD checkout.
+    ensureCodexSkills(wt, { pluginDirs: [oldDevDir], codexHome });
+    const link = join(wt, ".agents", "skills");
+    const originalTarget = readlinkSync(link);
+    rmSync(oldCheckout, { recursive: true, force: true }); // dangles — now stale-refresh-eligible
+
+    // Make .agents unwritable so the atomic refresh's temp-symlink creation
+    // fails (EACCES) before `link` is ever touched.
+    chmodSync(join(wt, ".agents"), 0o555);
+    const warns = [];
+    try {
+      ensureCodexSkills(wt, {
+        pluginDirs: [newDevDir],
+        codexHome,
+        log: { warn: (...a) => warns.push(a) },
+      });
+    } finally {
+      chmodSync(join(wt, ".agents"), 0o755); // restore so cleanup can rmSync
+    }
+
+    expect(readlinkSync(link)).toBe(originalTarget); // the OLD link survives, untouched
+    expect(warns.length).toBeGreaterThan(0); // the failure was logged, not swallowed silently
+
+    rmSync(wt, { recursive: true, force: true });
+    rmSync(codexHome, { recursive: true, force: true });
+    rmSync(newCheckout, { recursive: true, force: true });
+  });
+
+  // CTL-1530 (thread zc_): writeLinkRegistry's tmp-file + renameSync must never
+  // leave an orphaned `.codex-tmp-*` file behind after a successful write, and
+  // the registry file itself must always be valid, complete JSON — never a
+  // partial write a concurrent reader could observe.
+  test("registry writes are atomic: no orphaned temp file, registry always valid JSON (zc_)", () => {
+    const wt = mkdtempSync(join(tmpdir(), "codex-wt-zc-atomic-"));
+    const codexHome = mkdtempSync(join(tmpdir(), "codex-home-zc-atomic-"));
+    const checkout = mkdtempSync(join(tmpdir(), "codex-checkout-zc-atomic-"));
+    const devDir = join(checkout, "plugins", "dev");
+    mkdirSync(join(devDir, "skills"), { recursive: true });
+    Bun.spawnSync(["git", "init"], { cwd: wt });
+
+    ensureCodexSkills(wt, { pluginDirs: [devDir], codexHome });
+
+    const entries = readdirSync(codexHome);
+    expect(entries).toContain("codex-exec-links.json");
+    expect(entries.some((e) => e.includes(".codex-tmp-"))).toBe(false); // no leftover temp file
+    // The registry file is valid, complete JSON (never a partial write).
+    expect(() => JSON.parse(readFileSync(join(codexHome, "codex-exec-links.json"), "utf8"))).not.toThrow();
+
+    rmSync(wt, { recursive: true, force: true });
+    rmSync(codexHome, { recursive: true, force: true });
+    rmSync(checkout, { recursive: true, force: true });
   });
 
   // CTL-1530 (thread pJD): a corrupt/unparseable registry file must NEVER be

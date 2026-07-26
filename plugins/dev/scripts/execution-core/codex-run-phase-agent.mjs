@@ -56,6 +56,7 @@ import {
   readFileSync,
   readlinkSync,
   realpathSync,
+  renameSync,
   symlinkSync,
   unlinkSync,
   writeFileSync,
@@ -568,22 +569,79 @@ function readLinkRegistry(codexHome) {
   }
 }
 
-// writeLinkRegistry — best-effort full-object overwrite (never merges; callers
-// pass the complete desired registry). Never throws: a write failure only means a
+// writeLinkRegistry — best-effort ATOMIC full-object overwrite (never merges;
+// callers pass the complete desired registry): write to a temp file in the SAME
+// directory, then renameSync it over the registry path (rename(2) atomically
+// replaces the destination on POSIX). This guarantees a concurrent reader NEVER
+// observes a partially-written file — readLinkRegistry always sees either the
+// OLD complete registry or the NEW complete one, never a truncated write
+// misread as corrupt (thread zc_). Never throws: a write failure only means a
 // FUTURE run can't prove ownership of what we're writing now, which degrades
 // safely (that future link is treated as foreign, never as "provably ours to
 // clobber"). A corrupt existing file is silently REPLACED by design — a write
 // here is establishing NEW proof, not verifying old proof, so discarding
-// unparseable history is safe; the only consequence is some other, unrelated
-// past link loses its proof and is left foreign on its next encounter.
+// unparseable history is safe.
+//
+// Concurrency note (thread zc_, deliberate — NOT a bug to fix later): this
+// module does NOT take a cross-process lock around the registry's
+// read-modify-write. The normal daemon and a detached delegate runner can both
+// dispatch through codex-exec against the SAME codexHome concurrently, each
+// read the same prior registry object, and then each independently overwrite
+// the whole file — the LATER write wins and the EARLIER write's new entries
+// are silently dropped (a lost update). This residual race is intentionally
+// left unlocked because it is fail-safe by construction: a lost entry means
+// the registry no longer holds PROOF for that link, so
+// isRegisteredWorktreeSkillsOwner / isRegisteredCodexHomeSkillOwner return
+// false for it, and the affected link is left FOREIGN — preserved and warned,
+// never wrongly repointed. The unsafe direction (proving ownership of
+// something a process did NOT actually write) is impossible from a lost
+// update; only the safe direction (temporarily losing proof of something a
+// process DID write, until its next successful registration) is reachable.
+// Cross-process locking would only close a gap whose failure mode is already
+// conservative — not worth the added complexity.
 function writeLinkRegistry(codexHome, registry) {
   const path = resolveLinkRegistryPath(codexHome);
   if (!path) return;
+  const tmp = `${path}.codex-tmp-${process.pid}`;
   try {
     mkdirSync(dirname(path), { recursive: true });
-    writeFileSync(path, JSON.stringify(registry, null, 2));
+    writeFileSync(tmp, JSON.stringify(registry, null, 2));
+    renameSync(tmp, path);
   } catch {
-    /* best-effort */
+    try {
+      unlinkSync(tmp);
+    } catch {
+      /* best-effort cleanup; also covers "never got far enough to create tmp" */
+    }
+  }
+}
+
+// atomicSymlink — replace `dest` with a fresh symlink to `target`, ATOMICALLY:
+// create the new link at a temp name in the SAME directory, then renameSync it
+// over `dest` (rename(2) atomically replaces an existing entry on POSIX). `dest`
+// is therefore always either the OLD link or the NEW link — an unlink-then-link
+// sequence has a window where `dest` is ABSENT, so any failure between the two
+// steps discards a still-usable old link (thread zdB); this has no such window.
+// On any failure, the temp file is cleaned up (best-effort) and the error is
+// RE-THROWN so the caller's existing catch/log path still fires — `dest` itself
+// is left completely untouched (still the OLD link) in every failure case.
+function atomicSymlink(target, dest) {
+  const tmp = `${dest}.codex-tmp-${process.pid}`;
+  try {
+    unlinkSync(tmp); // best-effort: clear a stale temp left by a crashed prior attempt
+  } catch {
+    /* absent — the common case */
+  }
+  symlinkSync(target, tmp);
+  try {
+    renameSync(tmp, dest);
+  } catch (err) {
+    try {
+      unlinkSync(tmp);
+    } catch {
+      /* best-effort cleanup */
+    }
+    throw err;
   }
 }
 
@@ -709,18 +767,22 @@ function resolveGitInfoExcludeFallback(worktreePath) {
 // `git add`-able (closing dLX — there is simply nothing left for the migration
 // audit to see).
 //
-// Per entry: ABSENT in `<codexHome>/skills/` -> create our symlink (and record it
-// in the link registry — see above); present and OUR symlink pointing at the
-// CURRENT source -> idempotent no-op (self-heals the registry entry in case a
-// prior write failed or the registry was corrupt); present and a symlink that the
-// registry PROVES is ours but is STALE (an earlier dispatch's link against an old
-// checkout root — see isRegisteredCodexHomeSkillOwner) -> unlink + refresh to the
-// current source + update the registry; present and anything else (an unrelated
-// entry, a foreign symlink, an unproven "looks like ours" link, or an unreadable
-// link) -> leave it untouched, WARN per-entry, and skip — CODEX_HOME/skills is
-// machine/runner territory, but we still never clobber a non-proven entry.
-// Best-effort per entry — one bad entry (a readdir/symlink failure) never aborts
-// the rest.
+// Per entry: ABSENT in `<codexHome>/skills/` -> create our symlink and record it
+// in the link registry; present and OUR symlink pointing at the CURRENT source ->
+// idempotent no-op — NEVER writes the registry here (CTL-1530 thread zc0: an
+// existing link that happens to already point at `srcEntry` is not proof we
+// created it — a project-authored link could coincidentally match; only a
+// symlinkSync THIS runner just performed earns a registry entry, so a plain
+// path-match with no prior proof stays UNREGISTERED and therefore un-repointable
+// later); present and a symlink that the registry PROVES is ours but is STALE
+// (an earlier dispatch's link against an old checkout root — see
+// isRegisteredCodexHomeSkillOwner) -> atomically refresh to the current source
+// (thread zdB — see atomicSymlink) + update the registry; present and anything
+// else (an unrelated entry, a foreign symlink, an unproven "looks like ours"
+// link, or an unreadable link) -> leave it untouched, WARN per-entry, and skip —
+// CODEX_HOME/skills is machine/runner territory, but we still never clobber a
+// non-proven entry. Best-effort per entry — one bad entry (a readdir/symlink
+// failure) never aborts the rest.
 function registerDevPluginSkillsIntoCodexHome(codexHome, skillsSrc, { logger } = {}) {
   if (!codexHome) {
     try {
@@ -767,22 +829,27 @@ function registerDevPluginSkillsIntoCodexHome(codexHome, skillsSrc, { logger } =
           /* unreadable link — treat as foreign, never clobber */
         }
         if (target === srcEntry) {
-          recordCodexHomeSkillLink(codexHome, name, srcEntry); // self-heal the registry
-          continue; // OUR symlink already in place, current source — idempotent no-op
+          // thread zc0: NOT registered here — a matching target alone is not
+          // proof we wrote it (see the function doc). The link is discoverable
+          // either way; only registering it would let a later refresh wrongly
+          // adopt it.
+          continue; // OUR-or-coincidental symlink already correct — idempotent no-op
         }
         if (isRegisteredCodexHomeSkillOwner(codexHome, name, target)) {
           // RUNNER-OWNED-STALE, PROVEN by the registry (thread pJD): the checkout
           // root moved since this link was created. Refreshing it never touches
-          // project content — CODEX_HOME/skills has none.
+          // project content — CODEX_HOME/skills has none. ATOMIC (thread zdB —
+          // see atomicSymlink): `destEntry` is either the OLD link or the NEW
+          // one, never briefly absent, so a mid-refresh failure never discards a
+          // still-usable old link.
           try {
-            unlinkSync(destEntry);
-            symlinkSync(srcEntry, destEntry);
+            atomicSymlink(srcEntry, destEntry);
             recordCodexHomeSkillLink(codexHome, name, srcEntry);
           } catch (err) {
             try {
               logger?.warn?.(
                 { destEntry, target, wanted: srcEntry, err: err?.message },
-                "codex-exec: CODEX_HOME/skills/<name> is a stale runner-owned symlink (old checkout root) but refreshing it failed — leaving it as-is",
+                "codex-exec: CODEX_HOME/skills/<name> is a stale runner-owned symlink (old checkout root) but the atomic refresh to <wanted> failed — the ORIGINAL link is left in place, untouched",
               );
             } catch {
               /* logging must never break a dispatch */
@@ -838,11 +905,16 @@ function registerDevPluginSkillsIntoCodexHome(codexHome, skillsSrc, { logger } =
 //   - ABSENT                       → create our symlink (wholesale ownership),
 //     recording the write in the link registry (CTL-1530 thread pJD — see
 //     isRegisteredWorktreeSkillsOwner);
-//   - OUR symlink (→ CURRENT src)  → idempotent no-op;
-//   - RUNNER-OWNED-STALE, PROVEN by the registry → unlink + refresh to the
-//     current source; a link that merely LOOKS runner-shaped but has no
-//     registry proof is treated as FOREIGN (thread pJD closed the false
-//     positive this used to allow — see the registry doc comment above);
+//   - OUR-or-coincidental symlink (→ CURRENT src) → idempotent no-op, NEVER
+//     registered here (thread zc0): matching the current source is not proof
+//     WE wrote it — a project-authored link could coincidentally match, and
+//     "adopting" it into the registry would let a later pluginRoot change
+//     repoint a link this runner never created;
+//   - RUNNER-OWNED-STALE, PROVEN by the registry → atomically refresh (thread
+//     zdB — see atomicSymlink) to the current source; a link that merely LOOKS
+//     runner-shaped but has no registry proof is treated as FOREIGN (thread
+//     pJD closed the false positive this used to allow — see the registry doc
+//     comment above);
 //   - FOREIGN symlink              → leave it untouched, WARN LOUDLY, and skip;
 //   - real dir (project-owned)     → NEVER touched, NEVER git-excluded (CTL-1530
 //     threads dLZ + dLh + dLX — see registerDevPluginSkillsIntoCodexHome for why
@@ -897,11 +969,13 @@ export function ensureCodexSkills(
           /* unreadable link — treat as foreign, never clobber */
         }
         if (target === skillsSrc) {
-          // OUR symlink already in place, pointing at the CURRENT source —
-          // idempotent no-op (still ensure the blanket exclude — WE own this
-          // path wholesale — and self-heal the registry entry in case a prior
-          // write failed or the registry was corrupt).
-          recordWorktreeSkillsLink(codexHome, worktreePath, skillsSrc);
+          // OUR-or-coincidental symlink already in place, pointing at the
+          // CURRENT source — idempotent no-op (still ensure the blanket
+          // exclude — WE own this path wholesale either way). NOT registered
+          // here (thread zc0): a matching target alone is not proof we wrote
+          // it, so a project-authored link that happens to already point at
+          // skillsSrc is never adopted into the registry and can never later
+          // be repointed by the stale-refresh branch below.
           gitExcludeAgents(worktreePath);
           return;
         }
@@ -912,17 +986,19 @@ export function ensureCodexSkills(
           // that WE wrote the exact target currently on disk — so refreshing
           // it does not violate the T7 never-delete contract (T7 protects
           // PROJECT content; this is provably our own past creation, not
-          // inferred from what the path merely looks like).
+          // inferred from what the path merely looks like). ATOMIC (thread
+          // zdB — see atomicSymlink): `skillsLink` is either the OLD link or
+          // the NEW one, never briefly absent, so a mid-refresh failure never
+          // discards a still-usable old link.
           try {
-            unlinkSync(skillsLink);
-            symlinkSync(skillsSrc, skillsLink);
+            atomicSymlink(skillsSrc, skillsLink);
             recordWorktreeSkillsLink(codexHome, worktreePath, skillsSrc);
             gitExcludeAgents(worktreePath);
           } catch (err) {
             try {
               logger?.warn?.(
                 { worktreePath, skillsLink, target, wanted: skillsSrc, err: err?.message },
-                "codex-exec: .agents/skills is a stale runner-owned symlink (old checkout root) but refreshing it failed — leaving it as-is",
+                "codex-exec: .agents/skills is a stale runner-owned symlink (old checkout root) but the atomic refresh to <wanted> failed — the ORIGINAL link is left in place, untouched",
               );
             } catch {
               /* logging must never break a dispatch */
