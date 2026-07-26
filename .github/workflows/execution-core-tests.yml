@@ -178,6 +178,14 @@ jobs:
         working-directory: plugins/dev/scripts
         run: bash __tests__/review-comments-headless.test.sh
 
+      - name: migrate-dual-harness test (CTL-1530)
+        # Covers the dual-harness classification (dual-ok / codex-only /
+        # claude-only-monolithic / no-harness), the skills-dir state machine
+        # (.claude/skills symlink vs .agents/skills), and the dry-run /
+        # --fix / exit-code contract.
+        working-directory: plugins/dev/scripts
+        run: bash __tests__/migrate-dual-harness.test.sh
+
       - name: Run stable unit tests
         # EXCLUDED SUITES — do NOT add these back without fixing the underlying
         # timing / sandbox incompatibility:

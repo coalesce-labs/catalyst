@@ -1,0 +1,370 @@
+#!/usr/bin/env bash
+# migrate-dual-harness.sh — migrate a single-harness repo (Claude-only monolithic
+# CLAUDE.md, or Codex-only AGENTS.md-with-no-bridge) to the dual-harness layout so
+# BOTH Claude Code and Codex load the same instructions and the same skills.
+#
+# WHY: `ensure-agent-house-rules.sh` seeds one canonical block into whichever doc a
+# repo already has; it does not establish the AGENTS.md/CLAUDE.md pair itself, and it
+# never touches skills. A Claude-only repo (monolithic CLAUDE.md, skills only under
+# `.claude/skills/`) or a Codex-only repo (AGENTS.md, no CLAUDE.md bridge) stays
+# single-harness forever. This script is the mechanical migrator for that gap.
+#
+# Target layout (validated in catalyst-otel, OTL-58 / PR #115):
+#   - AGENTS.md       — portable, tool-agnostic instructions (canonical)
+#   - CLAUDE.md       — thin bridge: `@AGENTS.md` line 1 + only Claude-specific notes
+#   - .agents/skills/ — canonical skills dir (must be a REAL directory, or absent)
+#   - .claude/skills  — committed RELATIVE symlink -> ../.agents/skills
+#   - AGENTS.md carries a `## Skills` pointer section when skills exist (non-empty)
+#   - no .codex/ dir needed — Codex reads AGENTS.md and .agents/skills/ natively
+#
+# Classification (computed every run, independent of the skills state below):
+#   dual-ok                - CLAUDE.md imports @AGENTS.md; AGENTS.md exists
+#   codex-only              - AGENTS.md exists, no CLAUDE.md
+#   claude-only-monolithic  - CLAUDE.md exists, does NOT import @AGENTS.md (even if
+#                             an unreferenced AGENTS.md also exists — the split must
+#                             reconcile them; this script never does that split)
+#   no-harness              - neither doc exists. Out of scope for the docs pair
+#                             (note points at `ensure-agent-house-rules.sh --fix`,
+#                             which creates it) — but skills classification and the
+#                             mechanical skills fix STILL run in this case; only the
+#                             pointer step is n/a (there is no AGENTS.md to hold it).
+#
+# Skills state machine (independent of docs state; `.claude/skills` vs `.agents/skills`).
+# `.agents/skills` must be the canonical REAL directory (or absent) — so the very
+# first check below is `[[ -L "$AS" ]]`, BEFORE any -e/-d probe of $AS, in every
+# branch. A repo can be wired in reverse (`.claude/skills` real, `.agents/skills` a
+# symlink back to it, e.g. `../.claude/skills`) or `.agents/skills` can be a plain
+# dangling symlink — both must stop at rc 4, never fall through to "none"/"move"/
+# "collapse". Without this guard a reverse-wired repo's `diff -r` compares the real
+# tree against itself through the symlink ("identical" => collapse), and the
+# collapse's `rm -rf .claude/skills` then destroys the only copy of the content:
+#   absent / absent                          -> nothing to do
+#   symlink -> ../.agents/skills (or an
+#     absolute path resolving to it) / dir   -> OK, canonical
+#   symlink -> anything else / any           -> rc 4, ambiguous, touch nothing
+#   real dir / absent                        -> move .claude/skills -> .agents/skills,
+#                                               symlink .claude/skills back
+#   absent / real dir                        -> symlink .claude/skills -> ../.agents/skills
+#   real dir / real dir, `diff -r` identical -> collapse .claude/skills to a symlink
+#     (belt-and-braces: refused as rc 4 instead if the two paths resolve to the
+#     same physical directory — a collapse must never be a same-dir no-op)
+#   real dir / real dir, differ              -> rc 4, ambiguous, touch nothing
+#   any / .agents/skills is itself a symlink -> rc 4, ambiguous, touch nothing
+#     (reverse-wired OR dangling — regardless of whether .claude/skills exists)
+#
+# Usage:
+#   migrate-dual-harness.sh [--repo DIR] [--fix] [--quiet] [-h|--help]
+#     (no --fix) -> dry-run: report what WOULD change; writes NOTHING, ever.
+#     --fix      -> apply the mechanical fixes in place.
+#
+# Exit codes:
+#   0  - dual-ok (dry-run) or all needed mechanical fixes applied and now dual-ok
+#        (--fix); also no-harness once skills are also clean/none (see above).
+#   10 - dry-run: mechanical changes needed (bridge / skills wiring / skills
+#        pointer), and no monolithic-split problem. Also used for no-harness
+#        dry-run when skills wiring is needed.
+#   11 - monolithic CLAUDE.md needs the intelligent split (with or without --fix;
+#        under --fix the mechanical parts — skills wiring, pointer if AGENTS.md
+#        exists — are still applied first). Run the
+#        catalyst-foundry:migrate-dual-harness skill to split CLAUDE.md.
+#   2  - bad usage.
+#   4  - ambiguous skills state (message names the exact conflict); touches nothing.
+#   5  - I/O failure.
+set -uo pipefail
+
+FIX=0 REPO="." QUIET=0
+while [[ $# -gt 0 ]]; do
+	case "$1" in
+	--fix) FIX=1 ;;
+	--repo) REPO="${2:?--repo needs a dir}"; shift ;;
+	--quiet) QUIET=1 ;;
+	-h | --help) sed -n '2,72p' "$0"; exit 0 ;;
+	*) echo "migrate-dual-harness: unknown arg '$1'" >&2; exit 2 ;;
+	esac
+	shift
+done
+
+say() { [[ $QUIET -eq 1 ]] || printf '%s\n' "$*"; }
+die() { echo "migrate-dual-harness: $1" >&2; exit "${2:-5}"; }
+
+[[ -d "$REPO" ]] || die "--repo '$REPO' is not a directory" 2
+
+BRIDGE_LINE='@AGENTS.md'
+CLA="$REPO/CLAUDE.md"
+AG="$REPO/AGENTS.md"
+CS="$REPO/.claude/skills"
+AS="$REPO/.agents/skills"
+
+# --- verbatim from ensure-agent-house-rules.sh (deliberate duplication — that
+# script is intentionally self-contained; do not refactor either copy to share
+# this code). Only the fence/comment-aware defenced() helper and the
+# claude_imports_agents() detection are copied; everything below this block is new.
+defenced() {
+	awk -v sc="${2:-0}" '
+		function ls3(s){ for(k=0;k<3;k++){ if(substr(s,1,1)==" ") s=substr(s,2); else break } return s }
+		{ line=$0; sub(/\r$/,"",line); sub(/[[:space:]]+$/,"",line); ls=ls3(line)
+			if (sc=="1") {
+				if (incomment) { if (line ~ /-->/) incomment=0; print ""; next }
+				if (ls ~ /^<!--/) { if (line !~ /-->/) incomment=1; print ""; next }
+			}
+			if (!infence) {
+				if (match(ls, /^(`+|~+)/)) { d=substr(ls,RSTART,RLENGTH)
+					if (length(d) >= 3) { infence=1; fchar=substr(d,1,1); flen=length(d); print ""; next } }
+			} else {
+				if (match(ls, /^(`+|~+)/) && ls ~ /^[`~]+[[:space:]]*$/) { d=substr(ls,RSTART,RLENGTH)
+					if (substr(d,1,1)==fchar && length(d) >= flen) { infence=0; print ""; next } }
+				print ""; next
+			}
+			print line }' "$1"
+}
+claude_imports_agents() { [[ -f "$CLA" ]] || return 1; grep -Fxq "$BRIDGE_LINE" <<<"$(defenced "$CLA" 1)"; }
+# --- end verbatim block ------------------------------------------------------
+
+# Real (symlink-resolved) path of a directory, or empty if it doesn't resolve.
+realdir() { ( cd -P "$1" 2>/dev/null && pwd ) || true; }
+
+REPO_REL_CLA="${CLA#"$REPO"/}"
+REPO_REL_AG="${AG#"$REPO"/}"
+
+# --- classify docs state ------------------------------------------------------
+if [[ -f "$CLA" ]]; then
+	if claude_imports_agents; then
+		if [[ -f "$AG" ]]; then
+			DOC_STATE="dual-ok"
+		else
+			DOC_STATE="bridge-no-agents"
+		fi
+	else
+		DOC_STATE="claude-only-monolithic"
+	fi
+elif [[ -f "$AG" ]]; then
+	DOC_STATE="codex-only"
+else
+	DOC_STATE="no-harness"
+fi
+
+if [[ "$DOC_STATE" == "no-harness" ]]; then
+	say "no AGENTS.md or CLAUDE.md found in ${REPO} — the docs pair is out of scope for migrate-dual-harness.sh. Run \`ensure-agent-house-rules.sh --fix\` first (it creates the doc pair). Still checking skills wiring below."
+fi
+
+# --- classify skills state (independent of docs state) -----------------------
+# .agents/skills must be the canonical REAL directory (or absent) — so `-L "$AS"`
+# is checked FIRST, before any -e/-d probe of $AS, in every branch. See the
+# skills-state-machine note in the header for why: a reverse-wired repo
+# (.claude/skills real, .agents/skills -> ../.claude/skills) or a dangling
+# .agents/skills symlink must both stop here at rc 4, never reach "collapse"
+# (which would `diff -r` the real tree against itself through the symlink, see
+# it as "identical", then `rm -rf` the only copy) or "none"/"move".
+SKILLS_ACTION="none"
+SKILLS_MSG=""
+if [[ -L "$AS" ]]; then
+	SKILLS_ACTION="ambiguous"
+	if [[ -e "$AS" ]]; then
+		SKILLS_MSG=".agents/skills is a symlink (-> '$(readlink "$AS")') — it must be the canonical real directory, not a symlink"
+	else
+		SKILLS_MSG=".agents/skills is a dangling symlink (-> '$(readlink "$AS")')"
+	fi
+elif [[ -L "$CS" ]]; then
+	if [[ -d "$AS" ]] && [[ -n "$(realdir "$CS")" ]] && [[ "$(realdir "$CS")" == "$(realdir "$AS")" ]]; then
+		SKILLS_ACTION="ok"
+	else
+		SKILLS_ACTION="ambiguous"
+		SKILLS_MSG=".claude/skills is a symlink to '$(readlink "$CS")', which does not resolve to .agents/skills"
+	fi
+elif [[ -d "$CS" ]]; then
+	if [[ -e "$AS" ]]; then
+		if [[ -d "$AS" ]]; then
+			CS_REAL="$(realdir "$CS")"
+			AS_REAL="$(realdir "$AS")"
+			if [[ -n "$CS_REAL" ]] && [[ "$CS_REAL" == "$AS_REAL" ]]; then
+				# Belt-and-braces: neither path is a symlink itself, but they
+				# resolve to the same physical directory (e.g. a symlinked
+				# ancestor). A collapse must never be a same-dir no-op — refuse.
+				SKILLS_ACTION="ambiguous"
+				SKILLS_MSG=".claude/skills and .agents/skills resolve to the same physical directory"
+			elif diff -r "$CS" "$AS" >/dev/null 2>&1; then
+				SKILLS_ACTION="collapse"
+			else
+				SKILLS_ACTION="ambiguous"
+				SKILLS_MSG=".claude/skills and .agents/skills both exist as real directories and differ"
+			fi
+		else
+			SKILLS_ACTION="ambiguous"
+			SKILLS_MSG=".agents/skills exists but is not a directory"
+		fi
+	else
+		SKILLS_ACTION="move"
+	fi
+elif [[ -e "$CS" ]]; then
+	SKILLS_ACTION="ambiguous"
+	SKILLS_MSG=".claude/skills exists but is neither a symlink nor a directory"
+else
+	if [[ -d "$AS" ]]; then
+		SKILLS_ACTION="symlink-only"
+	elif [[ -e "$AS" ]]; then
+		SKILLS_ACTION="ambiguous"
+		SKILLS_MSG=".agents/skills exists but is not a directory"
+	else
+		SKILLS_ACTION="none"
+	fi
+fi
+
+# A collapse deletes .claude/skills, so it must be PROVEN a redundant copy.
+# `diff -r` dereferences symlinks (BSD diff has no --no-dereference), so a
+# symlink anywhere inside either tree can make the "copy" compare equal to the
+# original it points at (e.g. .agents/skills/foo -> ../../.claude/skills/foo) —
+# deleting the only real content. Refuse to collapse if either tree contains
+# any symlink at any depth.
+if [[ "$SKILLS_ACTION" == "collapse" ]] && [[ -n "$(find "$CS" "$AS" -type l -print 2>/dev/null | head -n 1)" ]]; then
+	SKILLS_ACTION="ambiguous"
+	SKILLS_MSG="a symlink exists inside .claude/skills or .agents/skills — cannot prove the trees are independent copies (diff -r follows symlinks), refusing to collapse"
+fi
+
+# The fixes below create/move entries under .claude/ and .agents/ assuming both
+# are real directories directly under the repo root — a symlinked .claude or
+# .agents ancestor would make the relative ../.agents/skills link land (and
+# dangle) in the physical target instead. Refuse rather than wire a broken link.
+case "$SKILLS_ACTION" in
+move | symlink-only | collapse)
+	if [[ -L "$REPO/.claude" || -L "$REPO/.agents" ]]; then
+		SKILLS_ACTION="ambiguous"
+		SKILLS_MSG=".claude or .agents is itself a symlink — the relative .claude/skills -> ../.agents/skills link would dangle in the physical target"
+	fi
+	;;
+esac
+
+if [[ "$SKILLS_ACTION" == "ambiguous" ]]; then
+	say "ambiguous skills state: ${SKILLS_MSG} — refusing to touch either directory. Resolve by hand and re-run."
+	exit 4
+fi
+
+# HAS_SKILLS reflects the canonical tree's non-emptiness, checked BEFORE any
+# mechanical fix below runs — so "move" (pre-move) inspects .claude/skills, the
+# location that still holds the content at this point, and every other action
+# inspects .agents/skills. An empty skills tree must never earn an AGENTS.md
+# pointer (there would be nothing at the path the pointer describes).
+HAS_SKILLS=0
+case "$SKILLS_ACTION" in
+move) [[ -n "$(ls -A "$CS" 2>/dev/null)" ]] && HAS_SKILLS=1 ;;
+ok | symlink-only | collapse) [[ -n "$(ls -A "$AS" 2>/dev/null)" ]] && HAS_SKILLS=1 ;;
+none) : ;;
+esac
+
+NEED_FIX=0
+
+# --- docs mechanical fix (never applies to claude-only-monolithic — that split
+# needs LLM judgment and is out of scope for this script; also never applies to
+# no-harness — establishing the doc pair itself is ensure-agent-house-rules.sh's
+# job, not this script's) ------------------------------------------------------
+case "$DOC_STATE" in
+codex-only)
+	NEED_FIX=1
+	if [[ $FIX -eq 1 ]]; then
+		printf '%s\n\n## Bridge\n\nAll portable project guidance lives in `AGENTS.md` (imported above). Add only tool-specific notes here.\n' "$BRIDGE_LINE" >"$CLA" || die "failed to create $CLA"
+		say "✓ fixed: created ${REPO_REL_CLA} (@AGENTS.md bridge)"
+	else
+		say "would CREATE ${REPO_REL_CLA} as a thin @AGENTS.md bridge"
+	fi
+	;;
+bridge-no-agents)
+	NEED_FIX=1
+	if [[ $FIX -eq 1 ]]; then
+		printf '# AGENTS.md\n\nPortable, tool-agnostic guidance for AI coding agents working in this repository.\n' >"$AG" || die "failed to create $AG"
+		say "✓ fixed: created ${REPO_REL_AG} (portable core; CLAUDE.md already imports it)"
+	else
+		say "would CREATE ${REPO_REL_AG} (portable core; CLAUDE.md already imports it)"
+	fi
+	;;
+dual-ok | claude-only-monolithic | no-harness) : ;;
+esac
+
+# --- skills mechanical fix -----------------------------------------------------
+case "$SKILLS_ACTION" in
+move)
+	NEED_FIX=1
+	if [[ $FIX -eq 1 ]]; then
+		mkdir -p "$REPO/.agents" || die "failed to mkdir ${REPO}/.agents"
+		mv "$CS" "$AS" || die "failed to move .claude/skills to .agents/skills"
+		ln -s '../.agents/skills' "$CS" || die "failed to symlink .claude/skills"
+		say "✓ fixed: moved .claude/skills to .agents/skills and symlinked .claude/skills -> ../.agents/skills"
+	else
+		say "would MOVE .claude/skills to .agents/skills and symlink .claude/skills -> ../.agents/skills"
+	fi
+	;;
+symlink-only)
+	NEED_FIX=1
+	if [[ $FIX -eq 1 ]]; then
+		mkdir -p "$REPO/.claude" || die "failed to mkdir ${REPO}/.claude"
+		ln -s '../.agents/skills' "$CS" || die "failed to symlink .claude/skills"
+		say "✓ fixed: symlinked .claude/skills -> ../.agents/skills"
+	else
+		say "would SYMLINK .claude/skills -> ../.agents/skills"
+	fi
+	;;
+collapse)
+	NEED_FIX=1
+	if [[ $FIX -eq 1 ]]; then
+		rm -rf "$CS" || die "failed to remove duplicate .claude/skills"
+		ln -s '../.agents/skills' "$CS" || die "failed to symlink .claude/skills"
+		say "✓ fixed: collapsed identical .claude/skills into a symlink -> ../.agents/skills"
+	else
+		say "would COLLAPSE identical .claude/skills into a symlink -> ../.agents/skills"
+	fi
+	;;
+ok | none) : ;;
+esac
+
+# --- AGENTS.md skills pointer --------------------------------------------------
+NEED_POINTER=0
+if [[ $HAS_SKILLS -eq 1 ]]; then
+	if [[ -f "$AG" ]]; then
+		grep -qF '.agents/skills' "$AG" || NEED_POINTER=1
+	elif [[ "$DOC_STATE" != "claude-only-monolithic" ]] && [[ "$DOC_STATE" != "no-harness" ]]; then
+		# AGENTS.md doesn't exist yet but will (bridge-no-agents fix above) — the
+		# freshly created file obviously lacks the pointer.
+		NEED_POINTER=1
+	fi
+	# claude-only-monolithic with no AGENTS.md at all: never fabricate AGENTS.md
+	# just to hold a pointer — that split is out of scope for this script.
+	# no-harness: same reasoning — the docs pair itself is out of scope here.
+fi
+
+if [[ $NEED_POINTER -eq 1 ]]; then
+	if [[ $FIX -eq 1 ]]; then
+		[[ -f "$AG" ]] || die "internal error: ${REPO_REL_AG} missing when adding skills pointer"
+		if [[ -s "$AG" ]] && [[ -n "$(tail -c1 "$AG")" ]]; then
+			printf '\n' >>"$AG" || die "failed to append to ${REPO_REL_AG}"
+		fi
+		printf '\n## Skills\n\nRepository skills live in `.agents/skills/` — Claude Code finds them via the `.claude/skills`\nsymlink; any agent can read the path directly.\n' >>"$AG" || die "failed to append skills pointer to ${REPO_REL_AG}"
+		say "✓ fixed: added '## Skills' pointer to ${REPO_REL_AG}"
+	else
+		say "would ADD a '## Skills' pointer section to ${REPO_REL_AG}"
+	fi
+fi
+
+# --- final classification / exit ----------------------------------------------
+if [[ "$DOC_STATE" == "claude-only-monolithic" ]]; then
+	say "${REPO_REL_CLA} is monolithic (does not import @AGENTS.md) — needs the intelligent split. Run the catalyst-foundry:migrate-dual-harness skill to split CLAUDE.md."
+	exit 11
+fi
+
+if [[ $FIX -eq 1 ]]; then
+	if [[ "$DOC_STATE" == "no-harness" ]]; then
+		say "✓ skills wiring OK in ${REPO} (docs pair still out of scope for migrate-dual-harness.sh)"
+	else
+		say "✓ dual-harness layout OK in ${REPO}"
+	fi
+	exit 0
+fi
+
+if [[ $NEED_FIX -eq 1 || $NEED_POINTER -eq 1 ]]; then
+	say "(dry-run — re-run with --fix to apply)"
+	exit 10
+fi
+
+if [[ "$DOC_STATE" == "no-harness" ]]; then
+	say "✓ skills wiring already OK in ${REPO} (docs pair still out of scope for migrate-dual-harness.sh)"
+else
+	say "✓ dual-harness layout already OK in ${REPO}"
+fi
+exit 0

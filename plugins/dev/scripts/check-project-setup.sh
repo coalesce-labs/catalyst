@@ -599,6 +599,34 @@ if [[ ( -f AGENTS.md || -f CLAUDE.md ) && -x "$SEEDER" ]]; then
 	fi
 fi
 
+# 10. Dual-harness layout — Claude Code AND Codex both load instructions + skills (CTL-1530).
+#     migrate-dual-harness.sh classifies the repo against the target layout (AGENTS.md canonical
+#     + thin `@AGENTS.md` CLAUDE.md bridge + a `.agents/skills` dir with a `.claude/skills`
+#     symlink onto it) and reports exactly what's needed to converge a single-harness repo
+#     (Claude-only monolithic CLAUDE.md, or Codex-only AGENTS.md-with-no-bridge). Delegate
+#     detection to the script's own dry-run rather than re-implementing its classification here
+#     (same rationale as §9's seeder delegation) — warn, never fatal. Guarded like §9: skip a
+#     repo with no agent doc and no skills dir at all (nothing to converge).
+DUAL_HARNESS_SCRIPT="${SCRIPT_DIR}/migrate-dual-harness.sh"
+if [[ ( -f AGENTS.md || -f CLAUDE.md || -e .claude/skills || -L .claude/skills || -e .agents/skills || -L .agents/skills ) && -x "$DUAL_HARNESS_SCRIPT" ]]; then
+	dh_rc=0
+	bash "$DUAL_HARNESS_SCRIPT" --repo "$PWD" --quiet >/dev/null 2>&1 || dh_rc=$?
+	case $dh_rc in
+	0)
+		echo -e "${GREEN}✓ dual-harness layout OK${NC} — AGENTS.md/CLAUDE.md bridge and skills wiring are current."
+		;;
+	10)
+		warnings+=("Repo is single-harness (missing @AGENTS.md bridge, skills wiring, or the AGENTS.md skills pointer) — Fix: bash ${DUAL_HARNESS_SCRIPT} --repo . --fix")
+		;;
+	11)
+		warnings+=("CLAUDE.md is monolithic and needs the intelligent AGENTS.md/CLAUDE.md split — run the catalyst-foundry:migrate-dual-harness skill")
+		;;
+	*)
+		warnings+=("Dual-harness layout is ambiguous (migrate-dual-harness.sh returned ${dh_rc}) — inspect: bash ${DUAL_HARNESS_SCRIPT} --repo .")
+		;;
+	esac
+fi
+
 # Report errors (fatal)
 if [[ ${#errors[@]} -gt 0 ]]; then
 	echo -e "${RED}ERROR: Project setup incomplete${NC}"
