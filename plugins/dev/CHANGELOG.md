@@ -1,5 +1,31 @@
 # Changelog
 
+## [12.37.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.36.0...catalyst-dev-v12.37.0)
+
+Jul 26, 2026
+
+<!-- ai-enhanced -->
+
+### Daemon Stability & Memory Audit Remediation
+
+This release fixes a cluster of runtime reliability issues discovered during a live memory and health audit on production nodes. The most impactful changes stop a 115-second scheduler stall caused by reading a 300 MB event log on every tick (now a bounded cursor scan), close a file-descriptor leak in the delegate-runner that was trending toward EMFILE, and silence ~300 spurious "daemon degraded" phone notifications per day by replacing a naked edge trigger in the notification filter with a 180-second sustained-state hold. Also included: per-process RSS/heap OTel gauges on every daemon so future leaks can be attributed to a specific service, edge-triggered fleet-health probes that fire once per degradation episode instead of on every tick, and a health-responder backstop that now supervises the host-metrics sampler so a silently dead agent gets auto-kickstarted rather than going unnoticed for days.
+
+
+
+### PRs
+
+* **dev:** CTL-1503 edge-triggered fleet-health probe (hysteresis band + recovered event + durable latch) ([#2704](https://github.com/coalesce-labs/catalyst/issues/2704)) ([a4dc53e](https://github.com/coalesce-labs/catalyst/commit/a4dc53e23923cfc63487e9a14e4b2f533836effc))
+* **dev:** CTL-1517 per-process RSS/heap OTel gauge on every daemon (leak attribution) ([#2732](https://github.com/coalesce-labs/catalyst/issues/2732)) ([8c85824](https://github.com/coalesce-labs/catalyst/commit/8c85824aeba204f9c02fefb942789b13d51bbf96))
+* **dev:** CTL-1518 health-responder supervises com.catalyst.agent sampler (self-heal backstop) ([#2731](https://github.com/coalesce-labs/catalyst/issues/2731)) ([b3ae705](https://github.com/coalesce-labs/catalyst/commit/b3ae705d24ddada36b9f93437130c4668e8bd9d7))
+* **dev:** CTL-1510 health-responder hardening — token-aware exit-0 gate, sweep lock, cron backstop + 5 more edges ([#2714](https://github.com/coalesce-labs/catalyst/issues/2714)) ([92ac2ec](https://github.com/coalesce-labs/catalyst/commit/92ac2ecf6ee70098518438fd67ad89dc05feea69))
+* **dev:** CTL-1513 bash-3.2 comment-parsing crash in _token_provisioned (production hotfix) ([#2719](https://github.com/coalesce-labs/catalyst/issues/2719)) ([ffd7da1](https://github.com/coalesce-labs/catalyst/commit/ffd7da1eb8df739a33115f84f6f5b5cf97772add))
+* **dev:** CTL-1514 tail event log by cursor in execution-core (stop 115s scheduler stalls) ([#2729](https://github.com/coalesce-labs/catalyst/issues/2729)) ([ac009d9](https://github.com/coalesce-labs/catalyst/commit/ac009d9994ba69a899fedf40b083e7154e3a9dff))
+* **dev:** CTL-1515 bound orch-monitor readBacklog/readTunnelEventStats fallbacks (chunked scan) ([#2730](https://github.com/coalesce-labs/catalyst/issues/2730)) ([9ea4502](https://github.com/coalesce-labs/catalyst/commit/9ea4502f2dc04d61dbe60558942657347143deae))
+* **dev:** CTL-1516 bound broker _emittedWakeCache + heartbeat/orchestrator maps ([#2728](https://github.com/coalesce-labs/catalyst/issues/2728)) ([2001242](https://github.com/coalesce-labs/catalyst/commit/20012422935a92e53718d99a2c63ac4e428605b0))
+* **dev:** CTL-1519 close delegate-runner log fd after detached spawn (fd leak → EMFILE) ([#2727](https://github.com/coalesce-labs/catalyst/issues/2727)) ([5709d17](https://github.com/coalesce-labs/catalyst/commit/5709d1786aed452fce8c98a83d2a22b6e6ac0049))
+* **dev:** CTL-1522 hold daemon-degraded notifications so a transient heartbeat stall never pushes ([#2739](https://github.com/coalesce-labs/catalyst/issues/2739)) ([5b56cef](https://github.com/coalesce-labs/catalyst/commit/5b56cef189fad0143314989a4a9bd4ed6cbc88fb))
+* **dev:** CTL-1523 stop the broker reporting daemon-degraded on an idle fleet ([#2740](https://github.com/coalesce-labs/catalyst/issues/2740)) ([4a58ddd](https://github.com/coalesce-labs/catalyst/commit/4a58ddda026b22640c008bf34d46d0472a119c72))
+
 ## [12.36.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.35.0...catalyst-dev-v12.36.0)
 
 Jul 25, 2026
