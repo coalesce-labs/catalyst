@@ -1,17 +1,22 @@
 # Changelog
 
-## [12.37.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.36.0...catalyst-dev-v12.37.0) (2026-07-26)
+## [12.37.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.36.0...catalyst-dev-v12.37.0)
+
+Jul 26, 2026
+
+<!-- ai-enhanced -->
+
+### Daemon Stability & Memory Audit Remediation
+
+This release fixes a cluster of runtime reliability issues discovered during a live memory and health audit on production nodes. The most impactful changes stop a 115-second scheduler stall caused by reading a 300 MB event log on every tick (now a bounded cursor scan), close a file-descriptor leak in the delegate-runner that was trending toward EMFILE, and silence ~300 spurious "daemon degraded" phone notifications per day by replacing a naked edge trigger in the notification filter with a 180-second sustained-state hold. Also included: per-process RSS/heap OTel gauges on every daemon so future leaks can be attributed to a specific service, edge-triggered fleet-health probes that fire once per degradation episode instead of on every tick, and a health-responder backstop that now supervises the host-metrics sampler so a silently dead agent gets auto-kickstarted rather than going unnoticed for days.
 
 
-### Features
+
+### PRs
 
 * **dev:** CTL-1503 edge-triggered fleet-health probe (hysteresis band + recovered event + durable latch) ([#2704](https://github.com/coalesce-labs/catalyst/issues/2704)) ([a4dc53e](https://github.com/coalesce-labs/catalyst/commit/a4dc53e23923cfc63487e9a14e4b2f533836effc))
 * **dev:** CTL-1517 per-process RSS/heap OTel gauge on every daemon (leak attribution) ([#2732](https://github.com/coalesce-labs/catalyst/issues/2732)) ([8c85824](https://github.com/coalesce-labs/catalyst/commit/8c85824aeba204f9c02fefb942789b13d51bbf96))
 * **dev:** CTL-1518 health-responder supervises com.catalyst.agent sampler (self-heal backstop) ([#2731](https://github.com/coalesce-labs/catalyst/issues/2731)) ([b3ae705](https://github.com/coalesce-labs/catalyst/commit/b3ae705d24ddada36b9f93437130c4668e8bd9d7))
-
-
-### Bug Fixes
-
 * **dev:** CTL-1510 health-responder hardening — token-aware exit-0 gate, sweep lock, cron backstop + 5 more edges ([#2714](https://github.com/coalesce-labs/catalyst/issues/2714)) ([92ac2ec](https://github.com/coalesce-labs/catalyst/commit/92ac2ecf6ee70098518438fd67ad89dc05feea69))
 * **dev:** CTL-1513 bash-3.2 comment-parsing crash in _token_provisioned (production hotfix) ([#2719](https://github.com/coalesce-labs/catalyst/issues/2719)) ([ffd7da1](https://github.com/coalesce-labs/catalyst/commit/ffd7da1eb8df739a33115f84f6f5b5cf97772add))
 * **dev:** CTL-1514 tail event log by cursor in execution-core (stop 115s scheduler stalls) ([#2729](https://github.com/coalesce-labs/catalyst/issues/2729)) ([ac009d9](https://github.com/coalesce-labs/catalyst/commit/ac009d9994ba69a899fedf40b083e7154e3a9dff))
