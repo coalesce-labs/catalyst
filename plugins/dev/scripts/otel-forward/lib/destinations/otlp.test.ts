@@ -504,6 +504,124 @@ describe("OtlpSender DLQ drain — outside withRetry (CTL-1060)", () => {
   });
 });
 
+// CTL-1506 Phase 4: DLQ drain path — age-drop + terminal-drop
+describe("OtlpSender Phase 4 — drain age-drop + terminal-drop", () => {
+  let dir: string;
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "otlp-p4-test-"));
+  });
+
+  function makeEvent(overrides: Partial<CanonicalEvent> = {}): CanonicalEvent {
+    return { ...SAMPLE_EVENT, ...overrides };
+  }
+  function makeFreshEvent(overrides: Partial<CanonicalEvent> = {}): CanonicalEvent {
+    return makeEvent({ ts: new Date().toISOString(), ...overrides });
+  }
+  function makeAgedEvent(): CanonicalEvent {
+    return makeEvent({ ts: new Date(Date.now() - 8 * 24 * 3600 * 1000).toISOString() });
+  }
+  function readDropEvents(p: string): CanonicalEvent[] {
+    if (!existsSync(p)) return [];
+    return readFileSync(p, "utf8").trim().split("\n").filter(Boolean)
+      .map((l) => JSON.parse(l) as CanonicalEvent)
+      .filter((e) => e.attributes["event.name"] === "catalyst.observability.forward_dropped");
+  }
+
+  test("age-drop on drain: aged entry discarded-with-counter, fresh delivered; DLQ ends empty", async () => {
+    let callCount = 0;
+    global.fetch = mock(() => {
+      callCount++;
+      return Promise.resolve(new Response(null, { status: 200 }));
+    }) as unknown as typeof fetch;
+
+    const { OtlpSender } = await import("./otlp.ts?p4-age");
+    const dlqPath = join(dir, "dlq-p4age.jsonl");
+    const eventLogPath = join(dir, "events-p4age.jsonl");
+
+    // Seed DLQ: one aged batch, one fresh batch
+    appendToDlq(dlqPath, [makeAgedEvent()]);
+    appendToDlq(dlqPath, [makeFreshEvent()]);
+
+    const sender = new OtlpSender({
+      endpoint: "http://127.0.0.1:4318",
+      dlqPath,
+      eventLogPath,
+      lokiAcceptWindowMs: 3_600_000,
+    });
+
+    // Primary succeeds → triggers drain
+    await sender.flush([makeFreshEvent()]);
+
+    expect(dlqDepth(dlqPath)).toBe(0); // both entries consumed (aged-dropped + fresh delivered)
+    const drops = readDropEvents(eventLogPath);
+    expect(drops.length).toBe(1);
+    expect((drops[0].attributes as Record<string, unknown>)["catalyst.observability.drop_reason"]).toBe("aged");
+
+    rmSync(dir, { recursive: true });
+  });
+
+  test("terminal 4xx on a drained fresh batch → entry dropped (counter), not requeued", async () => {
+    let callCount = 0;
+    global.fetch = mock(() => {
+      callCount++;
+      if (callCount === 1) return Promise.resolve(new Response(null, { status: 200 })); // primary
+      return Promise.resolve(new Response(null, { status: 400 })); // drain → terminal
+    }) as unknown as typeof fetch;
+
+    const { OtlpSender } = await import("./otlp.ts?p4-term");
+    const dlqPath = join(dir, "dlq-p4term.jsonl");
+    const eventLogPath = join(dir, "events-p4term.jsonl");
+
+    appendToDlq(dlqPath, [makeFreshEvent()]);
+
+    const sender = new OtlpSender({
+      endpoint: "http://127.0.0.1:4318",
+      dlqPath,
+      eventLogPath,
+      lokiAcceptWindowMs: Number.MAX_SAFE_INTEGER,
+      httpRetryPolicy: { maxElapsedMs: 0 },
+    });
+
+    await sender.flush([makeFreshEvent()]);
+
+    expect(dlqDepth(dlqPath)).toBe(0); // entry consumed (terminal-dropped), NOT requeued
+    const drops = readDropEvents(eventLogPath);
+    expect(drops.length).toBe(1);
+    expect((drops[0].attributes as Record<string, unknown>)["catalyst.observability.drop_reason"]).toBe("terminal_4xx");
+
+    rmSync(dir, { recursive: true });
+  });
+
+  test("retryable 503 on drain → drain stops, batch + remainder requeued (backpressure preserved)", async () => {
+    let callCount = 0;
+    global.fetch = mock(() => {
+      callCount++;
+      if (callCount === 1) return Promise.resolve(new Response(null, { status: 200 })); // primary
+      return Promise.resolve(new Response(null, { status: 503 })); // drain → retryable
+    }) as unknown as typeof fetch;
+
+    const { OtlpSender } = await import("./otlp.ts?p4-retryable");
+    const dlqPath = join(dir, "dlq-p4retry.jsonl");
+
+    appendToDlq(dlqPath, [makeFreshEvent({ attributes: { "event.name": "q1" } })]);
+    appendToDlq(dlqPath, [makeFreshEvent({ attributes: { "event.name": "q2" } })]);
+
+    const sender = new OtlpSender({
+      endpoint: "http://127.0.0.1:4318",
+      dlqPath,
+      lokiAcceptWindowMs: Number.MAX_SAFE_INTEGER,
+      httpRetryPolicy: { maxElapsedMs: 0 },
+    });
+
+    await sender.flush([makeFreshEvent()]);
+
+    // Both DLQ entries remain (drain stopped on first failure, requeued)
+    expect(dlqDepth(dlqPath)).toBe(2);
+
+    rmSync(dir, { recursive: true });
+  });
+});
+
 // CTL-1506: HTTP status classification, age-partition, drop counters (Phase 3)
 describe("OtlpSender Phase 3 — status classification + age-partition", () => {
   let dir: string;

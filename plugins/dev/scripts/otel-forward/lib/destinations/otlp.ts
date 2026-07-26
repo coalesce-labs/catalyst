@@ -205,7 +205,7 @@ export class OtlpSender {
     this.opts.onBatchDelivered?.(fresh);
     await drainDlqBounded(
       this.opts.dlqPath,
-      this.makeDrainSend(rawSend, windowMs) as (b: unknown[]) => Promise<void>,
+      this.makeDrainSend(rawSend, windowMs),
       {
         maxBatches: this.opts.maxDrainBatches ?? DEFAULT_MAX_DRAIN_BATCHES,
         onBatchDelivered: this.opts.onBatchDelivered
