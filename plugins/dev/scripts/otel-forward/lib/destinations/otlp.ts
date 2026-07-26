@@ -2,7 +2,6 @@ import { appendFileSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import type { CanonicalEvent } from "../../../orch-monitor/lib/canonical-event.ts";
 import {
-  withRetry, DEFAULT_RETRY_DELAYS_MS,
   HttpError, classifyStatus, parseRetryAfter,
   withHttpRetry, type HttpRetryPolicy, type HttpRetryClock,
 } from "../retry.ts";
@@ -216,5 +215,3 @@ export class OtlpSender {
   }
 }
 
-// Keep withRetry export for PostHog/Cloudflare callers that import it from here
-export { withRetry, DEFAULT_RETRY_DELAYS_MS };

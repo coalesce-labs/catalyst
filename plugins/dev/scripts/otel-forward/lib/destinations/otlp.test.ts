@@ -756,8 +756,6 @@ describe("OtlpSender Phase 3 — status classification + age-partition", () => {
       lokiAcceptWindowMs: 3_600_000,
     });
 
-    const freshEvent = makeEvent();   // ts = "2026-05-08T04:34:45Z" — 8+ days ago actually...
-    // Use a definitely fresh ts (very recent)
     const realFresh = makeEvent({ ts: new Date().toISOString() });
     const realAged = makeAgedEvent();
 
@@ -806,6 +804,38 @@ describe("OtlpSender Phase 3 — status classification + age-partition", () => {
     expect((drops[0].attributes as unknown as Record<string, unknown>)["catalyst.observability.drop_reason"]).toBe("aged");
     expect((drops[0].body?.payload as Record<string, unknown>)?.count).toBe(2);
 
+    rmSync(dir, { recursive: true });
+  });
+
+  test("fully-aged primary batch → pre-existing DLQ entries are NOT drained (early-return invariant)", async () => {
+    // When all incoming records are aged, flush() returns early before touching the DLQ.
+    // This locks in the design: a fully-aged flush is not a trigger for DLQ drainage.
+    let fetchCalls = 0;
+    global.fetch = mock(() => {
+      fetchCalls++;
+      return Promise.resolve(new Response(null, { status: 200 }));
+    }) as unknown as typeof fetch;
+
+    const { OtlpSender } = await import("./otlp.ts");
+    const dlqPath = join(dir, "dlq-allaged-withdlq.jsonl");
+    const eventLogPath = join(dir, "events-allaged-withdlq.jsonl");
+
+    // Pre-load two DLQ entries
+    appendToDlq(dlqPath, [makeEvent({ ts: new Date().toISOString() })]);
+    appendToDlq(dlqPath, [makeEvent({ ts: new Date().toISOString() })]);
+    expect(dlqDepth(dlqPath)).toBe(2);
+
+    const sender = new OtlpSender({
+      endpoint: "http://127.0.0.1:4318",
+      dlqPath,
+      eventLogPath,
+      lokiAcceptWindowMs: 3_600_000,
+    });
+
+    await sender.flush([makeAgedEvent(), makeAgedEvent()]);
+
+    expect(fetchCalls).toBe(0);         // no network calls
+    expect(dlqDepth(dlqPath)).toBe(2);  // DLQ untouched — early return before drain
     rmSync(dir, { recursive: true });
   });
 });
