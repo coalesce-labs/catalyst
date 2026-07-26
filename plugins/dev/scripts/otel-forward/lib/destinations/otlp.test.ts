@@ -210,6 +210,12 @@ describe("OtlpSender flush failure events (CTL-1008 Phase 4)", () => {
     return { ...SAMPLE_EVENT, ...overrides };
   }
 
+  // Use a fresh timestamp so age-partitioning (CTL-1506) doesn't drop events
+  // before they reach the network path these tests exercise.
+  function makeFreshEvent(overrides: Partial<CanonicalEvent> = {}): CanonicalEvent {
+    return makeEvent({ ts: new Date().toISOString(), ...overrides });
+  }
+
   test("appends a forward_failed canonical event after all retries exhausted", async () => {
     global.fetch = mock(() =>
       Promise.reject(new Error("connection refused"))
@@ -223,9 +229,10 @@ describe("OtlpSender flush failure events (CTL-1008 Phase 4)", () => {
       endpoint: "http://127.0.0.1:1",
       dlqPath,
       eventLogPath,
-      retryDelaysMs: [0, 0, 0],
+      httpRetryPolicy: { maxElapsedMs: 0 },
+      lokiAcceptWindowMs: Number.MAX_SAFE_INTEGER,
     });
-    await sender.flush([makeEvent()]);
+    await sender.flush([makeFreshEvent()]);
 
     expect(existsSync(eventLogPath)).toBe(true);
     const lines = readFileSync(eventLogPath, "utf8").trim().split("\n").filter(Boolean);
@@ -251,7 +258,8 @@ describe("OtlpSender flush failure events (CTL-1008 Phase 4)", () => {
       endpoint: "http://127.0.0.1:1",
       dlqPath,
       eventLogPath,
-      retryDelaysMs: [0, 0, 0],
+      httpRetryPolicy: { maxElapsedMs: 0 },
+      lokiAcceptWindowMs: Number.MAX_SAFE_INTEGER,
     });
 
     // Batch that already consists of forward_failed events
@@ -292,7 +300,8 @@ describe("OtlpSender flush failure events (CTL-1008 Phase 4)", () => {
       endpoint: "http://127.0.0.1:1",
       dlqPath,
       eventLogPath,
-      retryDelaysMs: [0, 0, 0],
+      httpRetryPolicy: { maxElapsedMs: 0 },
+      lokiAcceptWindowMs: Number.MAX_SAFE_INTEGER,
     });
 
     const mixedBatch = [
@@ -330,8 +339,8 @@ describe("OtlpSender flush failure events (CTL-1008 Phase 4)", () => {
     const eventLogPath = join(dir, "events3.jsonl");
     const dlqPath = join(dir, "dlq3.jsonl");
 
-    const sender = new OtlpSender({ endpoint: "http://127.0.0.1:4318", dlqPath, eventLogPath });
-    await sender.flush([makeEvent()]);
+    const sender = new OtlpSender({ endpoint: "http://127.0.0.1:4318", dlqPath, eventLogPath, lokiAcceptWindowMs: Number.MAX_SAFE_INTEGER });
+    await sender.flush([makeFreshEvent()]);
 
     expect(existsSync(eventLogPath)).toBe(false);
 
@@ -349,6 +358,11 @@ describe("OtlpSender DLQ drain — outside withRetry (CTL-1060)", () => {
     return { ...SAMPLE_EVENT, ...overrides };
   }
 
+  // Fresh ts so age-partition (CTL-1506) doesn't drop events before reaching the network path.
+  function makeFreshEvent(overrides: Partial<CanonicalEvent> = {}): CanonicalEvent {
+    return makeEvent({ ts: new Date().toISOString(), ...overrides });
+  }
+
   test("drain failure does not re-dead-letter the primary (drain is outside withRetry)", async () => {
     // Primary fetch succeeds; all subsequent calls (drain) fail.
     let callCount = 0;
@@ -362,16 +376,17 @@ describe("OtlpSender DLQ drain — outside withRetry (CTL-1060)", () => {
     const dlqPath = join(dir, "drain-dlq.jsonl");
     const eventLogPath = join(dir, "drain-events.jsonl");
 
-    // Seed DLQ with a known batch
-    appendToDlq(dlqPath, [makeEvent({ attributes: { "event.name": "queued.event" } })]);
+    // Seed DLQ with a known batch (fresh ts so age-partition doesn't drop it)
+    appendToDlq(dlqPath, [makeFreshEvent({ attributes: { "event.name": "queued.event" } })]);
 
     const sender = new OtlpSender({
       endpoint: "http://127.0.0.1:4318",
       dlqPath,
       eventLogPath,
-      retryDelaysMs: [0, 0, 0],
+      httpRetryPolicy: { maxElapsedMs: 0 },
+      lokiAcceptWindowMs: Number.MAX_SAFE_INTEGER,
     });
-    await sender.flush([makeEvent({ attributes: { "event.name": "primary.event" } })]);
+    await sender.flush([makeFreshEvent({ attributes: { "event.name": "primary.event" } })]);
 
     // Primary was delivered successfully — it must NOT be in the DLQ.
     // Only the original queued.event batch should remain (drain failed).
@@ -390,16 +405,17 @@ describe("OtlpSender DLQ drain — outside withRetry (CTL-1060)", () => {
     const { OtlpSender } = await import("./otlp.ts");
     const dlqPath = join(dir, "nofail-dlq.jsonl");
 
-    // Seed DLQ with one existing batch
-    appendToDlq(dlqPath, [makeEvent({ attributes: { "event.name": "existing.batch" } })]);
+    // Seed DLQ with one existing batch (fresh ts so age-partition doesn't drop it)
+    appendToDlq(dlqPath, [makeFreshEvent({ attributes: { "event.name": "existing.batch" } })]);
     expect(dlqDepth(dlqPath)).toBe(1);
 
     const sender = new OtlpSender({
       endpoint: "http://127.0.0.1:1",
       dlqPath,
-      retryDelaysMs: [0, 0, 0],
+      httpRetryPolicy: { maxElapsedMs: 0 },
+      lokiAcceptWindowMs: Number.MAX_SAFE_INTEGER,
     });
-    await sender.flush([makeEvent({ attributes: { "event.name": "primary.event" } })]);
+    await sender.flush([makeFreshEvent({ attributes: { "event.name": "primary.event" } })]);
 
     // DLQ now has both: original batch + newly dead-lettered primary
     expect(dlqDepth(dlqPath)).toBe(2);
@@ -415,25 +431,25 @@ describe("OtlpSender DLQ drain — outside withRetry (CTL-1060)", () => {
     const { OtlpSender } = await import("./otlp.ts");
     const dlqPath = join(dir, "bounded-dlq.jsonl");
 
-    // Seed DLQ with 60 batches
+    // Seed DLQ with 60 batches (fresh ts so age-partition doesn't drop them)
     for (let i = 0; i < 60; i++) {
-      appendToDlq(dlqPath, [makeEvent({ attributes: { "event.name": `batch.${i}` } })]);
+      appendToDlq(dlqPath, [makeFreshEvent({ attributes: { "event.name": `batch.${i}` } })]);
     }
     expect(dlqDepth(dlqPath)).toBe(60);
 
     const sender = new OtlpSender({
       endpoint: "http://127.0.0.1:4318",
       dlqPath,
-      retryDelaysMs: [0],
+      lokiAcceptWindowMs: Number.MAX_SAFE_INTEGER,
       maxDrainBatches: 50,
     });
 
     // First flush: drains 50, leaves 10
-    await sender.flush([makeEvent()]);
+    await sender.flush([makeFreshEvent()]);
     expect(dlqDepth(dlqPath)).toBe(10);
 
     // Second flush: drains remaining 10
-    await sender.flush([makeEvent()]);
+    await sender.flush([makeFreshEvent()]);
     expect(dlqDepth(dlqPath)).toBe(0);
 
     rmSync(dir, { recursive: true });
@@ -446,20 +462,20 @@ describe("OtlpSender DLQ drain — outside withRetry (CTL-1060)", () => {
 
     const { OtlpSender } = await import("./otlp.ts");
     const dlqPath = join(dir, "obd-dlq.jsonl");
-    appendToDlq(dlqPath, [makeEvent()]);
-    appendToDlq(dlqPath, [makeEvent()]);
+    appendToDlq(dlqPath, [makeFreshEvent()]);
+    appendToDlq(dlqPath, [makeFreshEvent()]);
 
     let deliveredCount = 0;
     const sender = new OtlpSender({
       endpoint: "http://127.0.0.1:4318",
       dlqPath,
-      retryDelaysMs: [0],
+      lokiAcceptWindowMs: Number.MAX_SAFE_INTEGER,
       onBatchDelivered: () => {
         deliveredCount++;
       },
     });
 
-    await sender.flush([makeEvent()]);
+    await sender.flush([makeFreshEvent()]);
     // 1 primary + 2 DLQ batches = 3 calls to onBatchDelivered
     expect(deliveredCount).toBe(3);
     rmSync(dir, { recursive: true });
@@ -475,14 +491,203 @@ describe("OtlpSender DLQ drain — outside withRetry (CTL-1060)", () => {
     const sender = new OtlpSender({
       endpoint: "http://127.0.0.1:1",
       dlqPath,
-      retryDelaysMs: [0, 0, 0],
+      httpRetryPolicy: { maxElapsedMs: 0 },
+      lokiAcceptWindowMs: Number.MAX_SAFE_INTEGER,
       onBatchDelivered: () => {
         deliveredCount++;
       },
     });
 
-    await sender.flush([makeEvent()]);
+    await sender.flush([makeFreshEvent()]);
     expect(deliveredCount).toBe(0);
+    rmSync(dir, { recursive: true });
+  });
+});
+
+// CTL-1506: HTTP status classification, age-partition, drop counters (Phase 3)
+describe("OtlpSender Phase 3 — status classification + age-partition", () => {
+  let dir: string;
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "otlp-p3-test-"));
+  });
+
+  function makeEvent(overrides: Partial<CanonicalEvent> = {}): CanonicalEvent {
+    return { ...SAMPLE_EVENT, ...overrides };
+  }
+
+  function makeAgedEvent(): CanonicalEvent {
+    // 8 days ago — well outside any Loki accept window
+    const ts = new Date(Date.now() - 8 * 24 * 3600 * 1000).toISOString();
+    return makeEvent({ ts });
+  }
+
+  function readDropEvents(eventLogPath: string): CanonicalEvent[] {
+    if (!existsSync(eventLogPath)) return [];
+    return readFileSync(eventLogPath, "utf8").trim().split("\n").filter(Boolean)
+      .map((l) => JSON.parse(l) as CanonicalEvent)
+      .filter((e) => e.attributes["event.name"] === "catalyst.observability.forward_dropped");
+  }
+
+  test("503 retryable → fresh batch DLQ'd, forward_failed emitted (fast policy)", async () => {
+    global.fetch = mock(() =>
+      Promise.resolve(new Response(null, { status: 503 }))
+    ) as unknown as typeof fetch;
+
+    const { OtlpSender } = await import("./otlp.ts?phase3-503");
+    const dlqPath = join(dir, "dlq-503.jsonl");
+    const eventLogPath = join(dir, "events-503.jsonl");
+    const sender = new OtlpSender({
+      endpoint: "http://127.0.0.1:4318",
+      dlqPath,
+      eventLogPath,
+      httpRetryPolicy: { maxElapsedMs: 0 },
+      lokiAcceptWindowMs: Number.MAX_SAFE_INTEGER,
+    });
+    await sender.flush([makeEvent({ ts: new Date().toISOString() })]);
+    expect(dlqDepth(dlqPath)).toBe(1);
+    const lines = readFileSync(eventLogPath, "utf8").trim().split("\n").filter(Boolean);
+    const failed = lines.map((l) => JSON.parse(l) as CanonicalEvent)
+      .filter((e) => e.attributes["event.name"] === "catalyst.observability.forward_failed");
+    expect(failed.length).toBe(1);
+    rmSync(dir, { recursive: true });
+  });
+
+  test("400 terminal → dropped, NOT DLQ'd; forward_dropped event emitted", async () => {
+    let fetchCalls = 0;
+    global.fetch = mock(() => {
+      fetchCalls++;
+      return Promise.resolve(new Response(null, { status: 400 }));
+    }) as unknown as typeof fetch;
+
+    const { OtlpSender } = await import("./otlp.ts?phase3-400");
+    const dlqPath = join(dir, "dlq-400.jsonl");
+    const eventLogPath = join(dir, "events-400.jsonl");
+    const sender = new OtlpSender({
+      endpoint: "http://127.0.0.1:4318",
+      dlqPath,
+      eventLogPath,
+      httpRetryPolicy: { maxElapsedMs: 0 },
+      lokiAcceptWindowMs: Number.MAX_SAFE_INTEGER,
+    });
+    await sender.flush([makeEvent({ ts: new Date().toISOString() })]);
+    expect(dlqDepth(dlqPath)).toBe(0);
+    expect(fetchCalls).toBe(1);
+    const drops = readDropEvents(eventLogPath);
+    expect(drops.length).toBe(1);
+    expect((drops[0].attributes as Record<string, unknown>)["catalyst.observability.drop_reason"]).toBe("terminal_4xx");
+    expect((drops[0].body?.payload as Record<string, unknown>)?.count).toBe(1);
+    rmSync(dir, { recursive: true });
+  });
+
+  test("500 retryable → DLQ'd under fast policy (same as 503)", async () => {
+    global.fetch = mock(() =>
+      Promise.resolve(new Response(null, { status: 500 }))
+    ) as unknown as typeof fetch;
+
+    const { OtlpSender } = await import("./otlp.ts?phase3-500");
+    const dlqPath = join(dir, "dlq-500.jsonl");
+    const sender = new OtlpSender({
+      endpoint: "http://127.0.0.1:4318",
+      dlqPath,
+      httpRetryPolicy: { maxElapsedMs: 0 },
+      lokiAcceptWindowMs: Number.MAX_SAFE_INTEGER,
+    });
+    await sender.flush([makeEvent({ ts: new Date().toISOString() })]);
+    expect(dlqDepth(dlqPath)).toBe(1);
+    rmSync(dir, { recursive: true });
+  });
+
+  test("network error still DLQs fresh batch + emits forward_failed (regression)", async () => {
+    global.fetch = mock(() =>
+      Promise.reject(new Error("connection refused"))
+    ) as unknown as typeof fetch;
+
+    const { OtlpSender } = await import("./otlp.ts?phase3-net");
+    const dlqPath = join(dir, "dlq-net.jsonl");
+    const eventLogPath = join(dir, "events-net.jsonl");
+    const sender = new OtlpSender({
+      endpoint: "http://127.0.0.1:1",
+      dlqPath,
+      eventLogPath,
+      httpRetryPolicy: { maxElapsedMs: 0 },
+      lokiAcceptWindowMs: Number.MAX_SAFE_INTEGER,
+    });
+    await sender.flush([makeEvent({ ts: new Date().toISOString() })]);
+    expect(dlqDepth(dlqPath)).toBe(1);
+    const lines = readFileSync(eventLogPath, "utf8").trim().split("\n").filter(Boolean);
+    const failed = lines.map((l) => JSON.parse(l) as CanonicalEvent)
+      .filter((e) => e.attributes["event.name"] === "catalyst.observability.forward_failed");
+    expect(failed.length).toBe(1);
+    rmSync(dir, { recursive: true });
+  });
+
+  test("mixed aged+fresh batch — only fresh POSTed, aged dropped-with-counter, no DLQ", async () => {
+    const requestBodies: unknown[] = [];
+    global.fetch = mock(async (url: string, init: RequestInit) => {
+      requestBodies.push(JSON.parse(init.body as string));
+      return new Response(null, { status: 200 });
+    }) as unknown as typeof fetch;
+
+    const { OtlpSender } = await import("./otlp.ts?phase3-mixed");
+    const dlqPath = join(dir, "dlq-mixed.jsonl");
+    const eventLogPath = join(dir, "events-mixed.jsonl");
+    const sender = new OtlpSender({
+      endpoint: "http://127.0.0.1:4318",
+      dlqPath,
+      eventLogPath,
+      lokiAcceptWindowMs: 3_600_000,
+    });
+
+    const freshEvent = makeEvent();   // ts = "2026-05-08T04:34:45Z" — 8+ days ago actually...
+    // Use a definitely fresh ts (very recent)
+    const realFresh = makeEvent({ ts: new Date().toISOString() });
+    const realAged = makeAgedEvent();
+
+    await sender.flush([realAged, realFresh]);
+
+    // Fetch should be called once with only the fresh record
+    expect(requestBodies.length).toBe(1);
+    const body = requestBodies[0] as { resourceLogs: unknown[] };
+    expect(body.resourceLogs.length).toBe(1); // only the fresh event
+
+    // No DLQ
+    expect(dlqDepth(dlqPath)).toBe(0);
+
+    // forward_dropped event with reason="aged" and count=1
+    const drops = readDropEvents(eventLogPath);
+    expect(drops.length).toBe(1);
+    expect((drops[0].attributes as Record<string, unknown>)["catalyst.observability.drop_reason"]).toBe("aged");
+    expect((drops[0].body?.payload as Record<string, unknown>)?.count).toBe(1);
+
+    rmSync(dir, { recursive: true });
+  });
+
+  test("fully-aged batch → no send, no DLQ, drop counter emitted", async () => {
+    let fetchCalls = 0;
+    global.fetch = mock(() => {
+      fetchCalls++;
+      return Promise.resolve(new Response(null, { status: 200 }));
+    }) as unknown as typeof fetch;
+
+    const { OtlpSender } = await import("./otlp.ts?phase3-allaged");
+    const dlqPath = join(dir, "dlq-allaged.jsonl");
+    const eventLogPath = join(dir, "events-allaged.jsonl");
+    const sender = new OtlpSender({
+      endpoint: "http://127.0.0.1:4318",
+      dlqPath,
+      eventLogPath,
+      lokiAcceptWindowMs: 3_600_000,
+    });
+
+    await sender.flush([makeAgedEvent(), makeAgedEvent()]);
+
+    expect(fetchCalls).toBe(0);
+    expect(dlqDepth(dlqPath)).toBe(0);
+    const drops = readDropEvents(eventLogPath);
+    expect(drops.length).toBe(1);
+    expect((drops[0].attributes as Record<string, unknown>)["catalyst.observability.drop_reason"]).toBe("aged");
+    expect((drops[0].body?.payload as Record<string, unknown>)?.count).toBe(2);
+
     rmSync(dir, { recursive: true });
   });
 });
