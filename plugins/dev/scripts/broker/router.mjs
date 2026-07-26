@@ -59,6 +59,7 @@ import {
 // supplies the two side effects — the activity reading and the event append.
 import {
   checkBrokerDegraded,
+  isBrokerDegradedLatchOpen,
   BROKER_DEGRADED_EVENT,
   BROKER_RECOVERED_EVENT,
 } from "./broker-degraded.mjs";
@@ -2340,8 +2341,14 @@ export function runWatchdogTick({ liveness = sessionLiveness } = {}) {
   // clear an open episode — and must not trip a new one. Consume-and-clear: the
   // edge counts for exactly one tick, and is cleared unconditionally (even when the
   // detector is dormant) so a stale edge can never leak into a later interval.
+  // Codex round 4: the edge is EVIDENCE, so it is retained until it has actually
+  // been acted on. It is read here but cleared only AFTER the detector runs, and
+  // only if no episode is left open — mirroring the latch's own emit-then-advance
+  // discipline. Clearing it up front meant a failed `recovered` append destroyed
+  // the one thing that made the clear verdict true, stranding the latch open (and
+  // suppressing later degraded events) until an unrelated registration or an idle
+  // fleet came along.
   const sawInterestEdge = _sawInterestSinceLastTick;
-  _sawInterestSinceLastTick = false;
   // 1 = "at least one registration was observed this interval" when the live table
   // is empty again; otherwise the real size. The detector only ever asks
   // empty-vs-non-empty of this number.
@@ -2359,6 +2366,11 @@ export function runWatchdogTick({ liveness = sessionLiveness } = {}) {
     sustainedTicks: BROKER_DEGRADED_SUSTAINED_TICKS,
     emit: emitBrokerDegradedEvent,
   });
+  // Retire the edge only once it can no longer be needed: either it was acted on
+  // (the episode closed) or there was no open episode for it to close. If an
+  // episode is STILL open the recovery has not landed — keep the evidence so the
+  // next tick retries. Guarded so a detector throw can never strand the flag set.
+  if (sawInterestEdge && !isBrokerDegradedLatchOpen()) _sawInterestSinceLastTick = false;
 
   // CTL-1122: judge each ingestion source's liveness from its event recency —
   // the surviving-process observation the 11h silent outage proved we were

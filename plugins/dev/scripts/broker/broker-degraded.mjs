@@ -447,3 +447,19 @@ export function checkBrokerDegraded({
   _persistPending = !persistLatch({ latched: _latched, latchedAtMs: _latchedAtMs });
   return edge;
 }
+
+/**
+ * isBrokerDegradedLatchOpen — is there an OPEN episode owing a `recovered`?
+ *
+ * Codex P2 round 4 (#2740): the router's cross-tick interest-registration edge is
+ * the only evidence that makes the clear verdict true for a one-shot interest. If
+ * it is consumed unconditionally and the `recovered` append then FAILS, that
+ * evidence is gone: the latch stays open and no later active/empty tick can retry
+ * the recovery, so the episode suppresses every subsequent degraded until an
+ * unrelated registration or an idle fleet happens along. The router therefore
+ * retains the edge while an episode is still open — same emit-then-advance
+ * discipline the latch itself uses. Reads in-memory state only; never throws.
+ */
+export function isBrokerDegradedLatchOpen() {
+  return _latched === true;
+}

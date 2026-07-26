@@ -17,7 +17,7 @@
 // Run: cd plugins/dev/scripts/broker && bun test broker-degraded-wiring.test.mjs
 
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
-import { mkdtempSync, rmSync, readFileSync, existsSync } from "node:fs";
+import { mkdtempSync, rmSync, readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { getEventLogPath, BROKER_DEGRADED_SUSTAINED_TICKS } from "./config.mjs";
@@ -35,6 +35,7 @@ import {
 } from "./broker-degraded.mjs";
 import { openBrokerStateDb, closeBrokerStateDb, upsertWorkerState } from "./broker-state.mjs";
 import {
+  getInterests,
   clearInterests,
   clearLastHeartbeat,
   __resetBrokerStartedAtForTest,
@@ -83,6 +84,9 @@ function closeActivityGate(ticket = "CTL-1523") {
     eventId: "e2",
     eventTs: new Date(Date.now() + 1000).toISOString(),
   });
+}
+function interestsSize() {
+  return getInterests().size;
 }
 function ticks(n) {
   for (let i = 0; i < n; i++) runWatchdogTick();
@@ -381,5 +385,43 @@ describe("an unavailable activity reading is UNKNOWN, not idle (end-to-end)", ()
     ticks(1);
     expect(recoveredEvents()).toHaveLength(1);
     expect(recoveredEvents()[0].attributes["event.name"]).toBe(BROKER_RECOVERED_EVENT);
+  });
+});
+
+// Codex P2 round 4 (#2740): the cross-tick registration edge is EVIDENCE, and the
+// only thing making the clear verdict true for a one-shot interest. Consuming it
+// before the append meant a FAILED `recovered` destroyed it — latch stranded open,
+// suppressing every later degraded until an unrelated registration or an idle fleet.
+describe("the interest edge survives a failed recovery append (round 4)", () => {
+  test("a failed recovered retries on the next tick instead of losing the edge", () => {
+    pastGrace();
+    openActivityGate();
+    ticks(SUSTAINED);
+    expect(degradedEvents()).toHaveLength(1);
+
+    // One-shot interest: registers and deregisters entirely between ticks.
+    handleRegister({
+      event: "filter.register",
+      orchestrator: "orch-round4",
+      detail: { interest_id: "r4", notify_event: "filter.wake.r4", prompt: "p" },
+    });
+    handleDeregister({ event: "filter.deregister", detail: { interest_id: "r4" } });
+    expect(interestsSize()).toBe(0); // live table is empty again
+
+    // Make the append fail for this tick by pointing the event log at a directory.
+    const logPath = getEventLogPath();
+    const saved = readFileSync(logPath, "utf8");
+    rmSync(logPath, { force: true });
+    mkdirSync(logPath, { recursive: true });
+    ticks(1);
+    // Append failed, so the episode is still open and owes a recovered.
+    rmSync(logPath, { recursive: true, force: true });
+    writeFileSync(logPath, saved);
+    expect(recoveredEvents()).toHaveLength(0);
+
+    // The edge must NOT have been spent: the next tick retries and lands it.
+    ticks(1);
+    expect(recoveredEvents()).toHaveLength(1);
+    expect(recoveredEvents()[0].body.payload.reason).toBe("interests registered");
   });
 });
