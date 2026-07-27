@@ -1536,3 +1536,125 @@ describe("resolveDeadHosts (CTL-1524 C4b)", () => {
     expect(resolveDeadHosts(() => "nope")).toEqual([]);
   });
 });
+
+// ─── CTL-1475: unowned in-flight ────────────────────────────────────────────
+// The blind spot every other invariant misses by construction. A ticket whose
+// Linear state CLAIMS a worker is on it, with no worker and no PR to back that
+// claim, was invisible: admission only pulls Todo, the recovery census scans
+// worker dirs, and every other cohort keys on an artifact these tickets lack.
+describe("checkUnownedInFlight (CTL-1475)", () => {
+  const HOUR = 3_600_000;
+  const NOW = Date.parse("2026-07-27T00:00:00.000Z");
+  const at = (hoursAgo) => new Date(NOW - hoursAgo * HOUR).toISOString();
+  const board = (o = {}) =>
+    mkBoard({ now: NOW, mode: "enforce", ...o });
+  const one = (over = {}) =>
+    new Map([["CTL-9", { id: "CTL-9", state: "Implement", updatedAt: at(72), ...over }]]);
+
+  test("flags a ticket whose state claims in-flight with no worker and no PR", () => {
+    const r = evaluateInvariants(board({ ticketsById: one() })).unownedInFlight;
+    expect(r.observable).toBe(true);
+    expect(r.ok).toBe(false);
+    expect(r.flagged).toEqual(["CTL-9"]);
+  });
+
+  test("does NOT flag when the pipeline has a signal for it (any signal = it is known)", () => {
+    const r = evaluateInvariants(
+      board({ ticketsById: one(), signals: [{ ticket: "CTL-9", status: "running" }] })
+    ).unownedInFlight;
+    expect(r.ok).toBe(true);
+    expect(r.flagged).toEqual([]);
+  });
+
+  test("does NOT flag a ticket with an open PR — a PR IS ownership", () => {
+    const r = evaluateInvariants(
+      board({
+        ticketsById: one({ pr_number: 42 }),
+        prStatusMap: mkPrStatusMap([{ number: 42, status: "open", repo: "r" }]),
+      })
+    ).unownedInFlight;
+    expect(r.ok).toBe(true);
+  });
+
+  test("does NOT flag a FRESH ticket (a worker between phases must never trip this)", () => {
+    const r = evaluateInvariants(board({ ticketsById: one({ updatedAt: at(2) }) })).unownedInFlight;
+    expect(r.ok).toBe(true);
+  });
+
+  test("does NOT flag a terminal ticket", () => {
+    const r = evaluateInvariants(board({ ticketsById: one({ state: "Done" }) })).unownedInFlight;
+    expect(r.ok).toBe(true);
+  });
+
+  test("does NOT flag Todo/Backlog — those are not a claim of ownership", () => {
+    for (const state of ["Todo", "Backlog"]) {
+      const r = evaluateInvariants(board({ ticketsById: one({ state }) })).unownedInFlight;
+      expect(r.ok).toBe(true);
+    }
+  });
+
+  test("FAILS SAFE on an unreadable timestamp — unknown age is never staleness", () => {
+    const r = evaluateInvariants(
+      board({ ticketsById: one({ updatedAt: "not-a-date" }) })
+    ).unownedInFlight;
+    expect(r.ok).toBe(true);
+    expect(r.unobservableAges).toBe(1);
+  });
+
+  // REGRESSION: the replica stores updated_at as an epoch-ms INTEGER, not an ISO
+  // string, and Date.parse(number) is NaN. With parse-only, all 13 live in-flight
+  // tickets read as "age unknown" and the invariant reported a permanently clean
+  // board — blind on the exact population it exists to catch. Caught by running it
+  // against real data, not by any unit test, which is why this one exists.
+  test("accepts an epoch-ms NUMBER timestamp (the shape the replica actually stores)", () => {
+    const ms = NOW - 72 * HOUR;
+    const r = evaluateInvariants(board({ ticketsById: one({ updatedAt: ms }) })).unownedInFlight;
+    expect(r.ok).toBe(false);
+    expect(r.flagged).toEqual(["CTL-9"]);
+    expect(r.unobservableAges).toBe(0);
+  });
+
+  test("accepts a numeric STRING timestamp too", () => {
+    const r = evaluateInvariants(
+      board({ ticketsById: one({ updatedAt: String(NOW - 72 * HOUR) }) })
+    ).unownedInFlight;
+    expect(r.ok).toBe(false);
+  });
+
+  test("a FRESH epoch-ms timestamp is still spared (the number path honours the age gate)", () => {
+    const r = evaluateInvariants(
+      board({ ticketsById: one({ updatedAt: NOW - 2 * HOUR }) })
+    ).unownedInFlight;
+    expect(r.ok).toBe(true);
+  });
+
+  test("is not observable with no ticket descriptors", () => {
+    const r = evaluateInvariants(board({ ticketsById: new Map() })).unownedInFlight;
+    expect(r.observable).toBe(false);
+    expect(r.ok).toBe(true);
+  });
+
+  test("proposes a tier3 ESCALATION, never an auto re-dispatch", () => {
+    const inv = evaluateInvariants(board({ ticketsById: one() }));
+    const moves = proposeMoves(inv, { sanctionedNeedsHuman: [] });
+    const m = moves.tier3.find((x) => x.move === "escalate-unowned-in-flight");
+    expect(m).toBeTruthy();
+    expect(m.ticket).toBe("CTL-9");
+    // it must NOT appear in the actionable tiers — these tickets have no artifact
+    // explaining WHY they are parked, so acting automatically could re-dispatch
+    // work a human is deliberately holding.
+    expect(moves.tier1.some((x) => x.ticket === "CTL-9")).toBe(false);
+    expect(moves.tier2.some((x) => x.ticket === "CTL-9")).toBe(false);
+  });
+
+  test("an operator-sanctioned ticket is not re-proposed", () => {
+    const inv = evaluateInvariants(board({ ticketsById: one() }));
+    const moves = proposeMoves(inv, { sanctionedNeedsHuman: ["CTL-9"] });
+    expect(moves.tier3.some((x) => x.move === "escalate-unowned-in-flight")).toBe(false);
+  });
+
+  test("mode:off omits the invariant entirely (the off set stays byte-identical)", () => {
+    const off = evaluateInvariants(board({ ticketsById: one(), mode: "off" }));
+    expect(off.unownedInFlight).toBeUndefined();
+  });
+});

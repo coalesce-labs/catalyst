@@ -56,6 +56,12 @@ const DEFAULT_THRESHOLDS = {
   // combine with one fresh scan to fake a "K consecutive" run. 60 min gives K=6 at
   // 5-min cadence (~30-min real span) generous headroom while rejecting hour+ gaps.
   actuationLivenessWindowMs: Number(process.env.CATALYST_BH_ACTUATION_WINDOW_MS) || 60 * 60_000,
+  // CTL-1475: how long a ticket may ASSERT it is in flight with nothing backing
+  // that claim before it is flagged. Generous on purpose — a real worker between
+  // phases, a slow review, or a brief daemon restart must never trip this. The
+  // observed population sat like this for WEEKS, so 24h is already far past any
+  // legitimate gap while staying well inside "a human would call this stuck".
+  unownedInFlightMs: Number(process.env.CATALYST_BH_UNOWNED_INFLIGHT_MS) || 24 * 3_600_000,
 };
 
 // single-LLM cadence floor: most ticks are a near-instant no-op (cheap gates),
@@ -86,6 +92,13 @@ const BLOCKER_DONE_RE = /done|complete|merged|cancel|duplicate/i;
 // filter_state status that means the PR already landed/shipped.
 const PR_STATE_RE = /^pr$|in.?review/i;
 const PR_MERGED_RE = /^(merged|deployed)$/i;
+// CTL-1475: a Linear state that ASSERTS a worker is on the ticket right now.
+// These are the build states the pipeline moves a ticket through — each one is a
+// claim ("this is being implemented"), not a label. When the claim outlives the
+// worker, nothing reclaims it: admission only pulls Todo, the recovery census
+// scans worker dirs, and every existing invariant keys on a pipeline artifact
+// these tickets do not have. So they rot, invisibly, forever.
+const IN_FLIGHT_STATE_RE = /^(research|plan|implement|validate|remediate|pr)$|in.?review|in.?progress/i;
 // label/status forms of "needs a human".
 const NEEDS_HUMAN_LABEL_RE = /needs.?human/i;
 const NEEDS_HUMAN_STATUSES = new Set(["needs-human", "needs_human", "stalled"]);
@@ -202,6 +215,15 @@ function isLiveWorkerStatus(status) {
 // board-health never proposes recovery for already-terminal work whose only
 // remaining signal is a stale cached label (the CTL-1157/1162 stale-label class
 // that terminal-needs-human-reconcile strips lazily).
+// tsMillis — epoch-ms number | numeric string | ISO string → ms, else NaN.
+// Producers disagree on the wire shape; a timestamp reader that understands only
+// one of them fails SILENTLY (every row reads "unknown age"), so it understands both.
+function tsMillis(v) {
+  if (typeof v === "number") return Number.isFinite(v) ? v : NaN;
+  if (typeof v !== "string" || v === "") return NaN;
+  if (/^\d+$/.test(v)) return Number(v);
+  return Date.parse(v);
+}
 function isTerminalLinearState(d) {
   const state = d?.state ?? d?.linear_state ?? null;
   return state != null && BLOCKER_DONE_RE.test(String(state));
@@ -480,6 +502,9 @@ export function evaluateInvariants(boardState, { thresholds = DEFAULT_THRESHOLDS
       // observable ONLY in enforce (shadow not-dispatching is by-design telemetry),
       // so the off-mode invariant set stays byte-identical to origin/main.
       actuationLiveness: () => checkActuationLiveness(boardState, thresholds),
+      // CTL-1475: work that asserts it is in flight while nothing owns it. Cohort-
+      // gated like its siblings so the `off` invariant set stays byte-identical.
+      unownedInFlight: () => checkUnownedInFlight(boardState, thresholds),
     });
   }
   const out = {};
@@ -737,6 +762,71 @@ function checkActuationLiveness(b, t) {
 // state whose linked PR has already merged/deployed — the GitHub-PR→Done
 // automation was removed (multi-PR tickets falsely went Done on first merge), so
 // nothing advances these now. Empty prStatusMap ⇒ observable:false (shadow-safe).
+// #11 — CTL-1475: UNOWNED IN-FLIGHT. A ticket whose Linear state asserts a worker
+// is on it, where no worker exists and no PR is open, past `unownedInFlightMs`.
+//
+// This is the blind spot every other invariant misses BY CONSTRUCTION, and the
+// reason is worth stating: admission only pulls `Todo`, the recovery census scans
+// worker DIRS, and workerAge / orphanedOpenPr / phantomMergedPr / needsHumanPile
+// all key on an artifact — a signal file, a PR, a label — that these tickets do
+// not have. A ticket hand-moved to `Implement`, or one whose worker died without
+// writing a terminal signal, therefore has NOTHING pointing at it. It is not that
+// the machinery decides to skip it; the machinery cannot see it at all.
+//
+// Observed 2026-07-14 (CTL-1475 audit): ~12 such tickets. Re-measured 2026-07-27:
+// 11 CTL tickets in in-flight states with ZERO worker dirs across BOTH hosts,
+// while the fleet's 10 workers were all for other tickets. Thirteen days, no
+// movement, nothing proposed — because nothing could name them.
+//
+// Deliberately conservative: a ticket is flagged only when EVERY positive sign of
+// ownership is absent (no live worker signal, no open PR) AND it is stale past the
+// threshold. Any evidence of ownership spares it — a false negative here costs one
+// more scan, a false positive re-dispatches work a human is holding.
+function checkUnownedInFlight(b, t) {
+  const tickets = b?.ticketsById;
+  if (!(tickets instanceof Map) || tickets.size === 0) {
+    return invariant(true, 0, false, [], "no ticket descriptors → unowned-in-flight not observable");
+  }
+  const nowMs = Number.isFinite(b?.now) ? b.now : Date.now();
+  const limit = t?.unownedInFlightMs ?? DEFAULT_THRESHOLDS.unownedInFlightMs;
+  // Any signal at all — live OR terminal — means the pipeline HAS touched this
+  // ticket, so it is not the hand-moved/orphaned shape this cohort is about.
+  // (workerAge and the PR cohorts already cover a ticket with a stale worker.)
+  const hasAnySignal = new Set(b.signals?.filter((s) => s?.ticket).map((s) => s.ticket) ?? []);
+  const prMap = b.prStatusMap instanceof Map ? b.prStatusMap : null;
+  const flagged = [];
+  let unobservableAges = 0;
+  for (const [id, d] of tickets) {
+    const state = d?.state ?? d?.linear_state ?? null;
+    if (!state || !IN_FLIGHT_STATE_RE.test(String(state))) continue;
+    if (isTerminalLinearState(d)) continue;
+    if (hasAnySignal.has(id)) continue; // the pipeline knows about it
+    if (prNumberOf(d) != null && prMap && prMap.size > 0) continue; // an open PR IS ownership
+    const updatedAt = d?.updatedAt ?? d?.updated_at ?? null;
+    // Accept BOTH shapes. The replica stores these as epoch-millisecond INTEGERS
+    // (1782759683683) while other producers use ISO strings, and Date.parse() on a
+    // number yields NaN — which lands in the unreadable-age branch below. Verified
+    // against the live board: with parse-only, all 13 in-flight tickets read as
+    // "age unknown" and the invariant reported a permanently clean board. It would
+    // have shipped blind on the exact population it exists to catch.
+    const ts = tsMillis(updatedAt);
+    // Fail SAFE on an unreadable timestamp: without an age we cannot prove
+    // staleness, and flagging on "unknown" would re-dispatch fresh work.
+    if (!Number.isFinite(ts)) { unobservableAges++; continue; }
+    if (nowMs - ts >= limit) flagged.push(id);
+  }
+  return invariant(
+    flagged.length === 0,
+    flagged.length,
+    true,
+    flagged,
+    flagged.length === 0
+      ? "no unowned in-flight tickets"
+      : `${flagged.length} ticket(s) assert an in-flight state with no worker and no open PR past ${Math.round(limit / 3_600_000)}h`,
+    { unobservableAges, thresholdMs: limit },
+  );
+}
+
 function checkPhantomMergedPr(b) {
   const map = b.prStatusMap;
   if (!(map instanceof Map) || map.size === 0) {
@@ -1033,6 +1123,16 @@ export function proposeMoves(invariants, _b) {
   // escalated once → tier2 (review, lower urgency than the actionable PR work).
   for (const t of invariants.frozenNeedsHuman?.flagged ?? []) {
     if (!invariants.frozenNeedsHuman.ok && !sanction(t)) tier2.push({ ticket: t, move: "review-needs-human", rationale: "needs-human label frozen past threshold" });
+  }
+  // CTL-1475: tier3 = ESCALATE, deliberately not tier1/2. These tickets have no
+  // pipeline artifact, so the automation cannot know WHY they are parked — a human
+  // may be holding one on purpose. Auto-resetting them to Todo would re-dispatch
+  // work someone is sitting on. Surfacing them is the whole fix: they were
+  // invisible, and a named ticket a human can act on beats a wrong action.
+  for (const t of invariants.unownedInFlight?.flagged ?? []) {
+    if (!invariants.unownedInFlight.ok && !sanction(t)) {
+      tier3.push({ ticket: t, move: "escalate-unowned-in-flight", rationale: "Linear state claims in-flight but there is no worker and no open PR" });
+    }
   }
   for (const h of invariants.strandedNode?.flagged ?? []) {
     if (!invariants.strandedNode.ok) tier3.push({ host: h, move: "escalate-stranded-node", rationale: "rostered node owns work but reconcile is failing" });
