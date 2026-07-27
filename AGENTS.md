@@ -60,13 +60,16 @@ replica-read rule below is absolute).
   create an empty DB), and a bare `linearis issues read <ID>` hits the rate-limited API and 429s the
   shared fleet quota — don't reach for it even as a fallback; the skill's helper owns the loud
   stale/absent path. Writes and list/search go through `linearis`.
-- **Spawning a background process → make it self-terminating; never let cleanup be load-bearing.**
-  A background process must not be able to outlive the command that started it. Wrap every one in
-  `timeout` (e.g. `timeout 120 <cmd> &`) so it dies on its own **even if every cleanup line you
-  wrote is broken**; an unbounded `while :; do :; done` has no place in this repo. This is not
-  hypothetical — four such spinners leaked out of one test run and burned ~4 CPU cores for 16.5
-  hours while the script that spawned them reported `cleanup verified`. Three traps, all of which
-  fired in that incident:
+- **Spawning a background process → make the LOOP ITSELF self-limiting; never let cleanup be
+  load-bearing.** A background process must not be able to outlive the command that started it.
+  Give it its own deadline so it dies on its own **even if every cleanup line you wrote is broken**
+  — an unbounded `while :; do :; done` has no place in this repo. Prefer a self-limiting loop; it
+  needs no external command and is portable:
+  `end=$((SECONDS+120)); while [ $SECONDS -lt $end ]; do :; done`. (`timeout` / `gtimeout` are a
+  convenience *if* present — stock macOS, the fleet's primary launchd environment, ships neither
+  and GNU coreutils is not a dependency, so never depend on them.) This is not hypothetical — four
+  such spinners leaked out of one test run and burned ~4 CPU cores for 16.5 hours while the script
+  that spawned them reported `cleanup verified`. Three traps, all of which fired in that incident:
   - **The shell here is `zsh`, which does NOT word-split an unquoted parameter.**
     `PIDS="$PIDS $!"; for p in $PIDS; do kill $p; done` iterates **once**, with the whole string as
     a single argument, and dies with `illegal pid`. Collect into an array (`pids+=($!)`) and iterate
@@ -77,8 +80,8 @@ replica-read rule below is absolute).
     `ps -p "$p" >/dev/null 2>&1 && { echo "LEAKED: $p"; exit 1; }` — the same discipline the
     worktree-safety gates already use.
   - **Backgrounded children survive a normal exit.** When your command returns, `&` children
-    reparent to PID 1 and run forever. Perversely, a command that *times out* has its process group
-    torn down, so the run that "succeeds" is the one that leaks.
+    reparent to PID 1 and run forever, which is precisely why the deadline has to live inside the
+    child rather than in the parent's cleanup.
 
   Before reporting a background task complete, prove the machine is clean (e.g. `pgrep -fl 'while :'`).
   Scoping applies too: write only inside your own worktree, and chain with `cd <dir> && <cmd>` — a

@@ -65,7 +65,7 @@
 // stat, touch ~/.claude, or signal a real pid.
 
 import { execFile, execFileSync } from "node:child_process";
-import { existsSync } from "node:fs";
+import { statSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename } from "node:path";
 import { emitReapIntent } from "./reap-intent.mjs";
@@ -98,6 +98,37 @@ const DEFAULT_ALLOWLIST_PATTERNS = Object.freeze([
 // so a bare `^tmux$` anchor NEVER matches the very processes it exists to guard.
 const DEFAULT_DENY_COMMAND_RE =
   /^(tmux|tmux-server|screen|sshd|ssh|mosh-server|login|launchd|init|systemd|nohup):?$/i;
+
+// ─── CTL-1531 P1-a: the widened class's OWN rollout mode ─────────────────────
+//
+// The widened any-command class must NOT inherit authority from the legacy
+// node/bun reaper's `mode`. A host that already carries
+// `orphanReaper.procReaper.mode: "enforce"` (an operator flip that was granted
+// for the NARROW node/bun class, after that class's own shadow bake) would
+// otherwise, the instant this ships, gain authority to SIGTERM **any** PPID-1
+// command whose cwd looks deleted — skipping the shadow observation window and
+// the operator-owned flip ADR-023 requires ("Dark by default"; "Three-state
+// off → shadow → enforce"; "Gated criteria flips"; "Rejected: enable-on-merge").
+//
+// So the widened class gets an INDEPENDENT three-state knob, `widenMode`, that
+// defaults to "shadow" REGARDLESS of `mode` — the exact mirror of the .sh side's
+// SWEEP_PROC_WIDEN. Semantics:
+//   off     → the widened admission is not even evaluated; classifyPreCwd spares
+//             on the pre-CTL-1531 reason, so unsetting fully reverts the feature.
+//   shadow  → widened rows are classified and REPORTED (would-reap + log +
+//             event) but are never signalled, even when mode === "enforce".
+//   enforce → widened rows follow `mode` (so BOTH gates must be open to kill).
+// The legacy node/bun class is untouched by this knob in every state.
+export const WIDEN_MODES = Object.freeze(["off", "shadow", "enforce"]);
+
+/**
+ * normalizeWidenMode — PURE. Any value that is not exactly one of
+ * off|shadow|enforce degrades to "shadow" (never to "enforce"): a typo in the
+ * Layer-1 config must not silently arm a process killer.
+ */
+export function normalizeWidenMode(value) {
+  return WIDEN_MODES.includes(value) ? value : "shadow";
+}
 
 /**
  * isCommandDenylisted — CTL-1531. True when ANY whitespace-separated argv token
@@ -302,6 +333,12 @@ export function classifyPreCwd(row, ctx) {
     allowlist,
     killableCommands,
     denyCommandRe = DEFAULT_DENY_COMMAND_RE,
+    // CTL-1531 P1-a: the widened class's own rollout mode. "off" removes the
+    // widened admission entirely (full revert-by-unset, ADR-023 §5); shadow and
+    // enforce both ADMIT the row here — the difference between them is whether
+    // the sweep is allowed to signal it, which is decided in sweep(), not here,
+    // so that shadow still produces the would-reap observation the flip needs.
+    widenMode = "shadow",
   } = ctx;
 
   // (1) hard never-kill: pid in allowlist set (self/daemon/LIVE_TREE) OR argv pattern.
@@ -323,8 +360,13 @@ export function classifyPreCwd(row, ctx) {
   //     snapshot" branch is a snapshot race and must never admit an arbitrary
   //     command. Anything else keeps the original spare reason (and, crucially,
   //     never pays for the lsof/stat probes below).
+  //     CTL-1531 P1-a: the widened admission is additionally gated on its OWN
+  //     rollout mode. widenMode "off" ⇒ the conjunct below is never evaluated
+  //     and the row spares on the EXACT pre-CTL-1531 reason, so unsetting the
+  //     knob is a byte-identical revert of the whole feature (ADR-023 §5).
   const commandKillable = killableCommands.has(row.command);
-  const widened = !commandKillable && row.ppid === 1;
+  const widened =
+    !commandKillable && normalizeWidenMode(widenMode) !== "off" && row.ppid === 1;
   if (!commandKillable && !widened) {
     return { action: "spare", reason: "command-not-killable" };
   }
@@ -553,12 +595,29 @@ function defaultKillProc(pid, signal) {
 // return a real boolean (a non-boolean is read as "unknown" and spares). Kept a
 // separate injectable seam so the widened-class tests drive deletion purely as a
 // predicate: no test ever touches the filesystem.
-function defaultCwdExists(path) {
+//
+// CTL-1531 P1-b — this MUST NOT use existsSync(). existsSync swallows EVERY
+// stat error and returns plain `false`, so an UNANSWERABLE probe (EACCES on a
+// mode-000 parent, EIO on a failing disk, ESTALE / ENOTCONN on a dropped NFS or
+// SMB mount, EPERM under a sandbox) is indistinguishable from "the worktree was
+// deleted" — the exact inversion of the fail-closed rule this gate exists to
+// enforce, and it fires on the widened class where the deleted-cwd conjunct is
+// the ONLY ownership evidence for killing an arbitrary command. statSync
+// surfaces the errno, so "definitely gone" (ENOENT — and ENOTDIR, which likewise
+// proves the path cannot resolve) stays separable from "cannot tell".
+// `stat` is injectable ONLY so the errno discrimination below can be pinned: EIO
+// and ESTALE cannot be provoked on a real filesystem, and treating either as
+// "definitely gone" would make a flaky mount look like positive kill evidence.
+// Production always uses statSync.
+export function defaultCwdExists(path, { stat = statSync } = {}) {
   if (typeof path !== "string" || !path) return null; // unknown → spare
   try {
-    return existsSync(path);
-  } catch {
-    return null; // unreadable → spare (degrade safe)
+    stat(path);
+    return true;
+  } catch (err) {
+    const code = err?.code;
+    if (code === "ENOENT" || code === "ENOTDIR") return false; // definitely gone
+    return null; // EACCES / EIO / ESTALE / EPERM / … → CANNOT TELL → spare
   }
 }
 
@@ -572,6 +631,10 @@ const realSleep = (ms) => new Promise((r) => setTimeout(r, ms));
 export class ProcReaper {
   constructor({
     mode = "shadow",
+    // CTL-1531 P1-a: INDEPENDENT rollout mode for the widened any-command class.
+    // Defaults to "shadow" even when `mode` is already "enforce" — see
+    // WIDEN_MODES. Mirrors the .sh side's SWEEP_PROC_WIDEN.
+    widenMode = "shadow",
     worktreeRoot = `${homedir()}/catalyst/wt`,
     graceMs = 5000,
     minEtimeSec = 900,
@@ -593,6 +656,9 @@ export class ProcReaper {
     emit = emitReapIntent,
   } = {}) {
     this.mode = mode;
+    // Normalized on the way in: an unrecognized value degrades to "shadow",
+    // never to "enforce" (a config typo must not arm a process killer).
+    this.widenMode = normalizeWidenMode(widenMode);
     this.worktreeRoot = worktreeRoot;
     this.graceMs = graceMs;
     this.minEtimeSec = minEtimeSec;
@@ -705,6 +771,7 @@ export class ProcReaper {
       worktreeRoot: this.worktreeRoot,
       killableCommands: this.killableCommands,
       denyCommandRe: this.denyCommandRe,
+      widenMode: this.widenMode,
       minEtimeSec: this.minEtimeSec,
       // Assigned below, once the batched prefetch has run. classifyPreCwd (the
       // only thing called before that) never touches it.
@@ -756,8 +823,30 @@ export class ProcReaper {
       // class is separable from the legacy node/bun class in Loki/Prometheus
       // during the shadow bake, and log it explicitly (there was no log at all
       // on the would-reap path before — the shadow signal was event-only).
+      //
+      // CTL-1531 P1-d — the log NEVER carries `row.args`. The widened class
+      // admits ARBITRARY commands, and an arbitrary argv routinely carries an
+      // API token, a password, an `Authorization:` header or a pre-signed URL
+      // (`curl -H "Authorization: Bearer …"`, `psql "postgres://u:p@…"`,
+      // `foo --api-key=…`). These log lines go to the structured execution-core
+      // log, which Alloy ships to Loki — so merely OBSERVING the widened class
+      // in the DEFAULT shadow mode would write secrets to disk and off-host,
+      // with no enforce flip anywhere in the picture. `row.command` is already
+      // the basename of argv[0] (see parsePsRows) and is the most that is safe
+      // to print. The full argv stays IN MEMORY ONLY, where it is genuinely
+      // load-bearing: the two-sweep persistence map and the pre-SIGKILL
+      // re-match, both of which are pid-reuse guards.
       const widened = v.widened === true;
-      if (this.mode === "shadow") {
+      // CTL-1531 P1-a: the widened class answers to its OWN mode. Only
+      // widenMode === "enforce" lets a widened candidate follow `mode`; in every
+      // other state it is pinned to shadow, so a host already at
+      // procReaper.mode:"enforce" still merely OBSERVES the new class.
+      const effectiveMode = widened
+        ? this.widenMode === "enforce"
+          ? this.mode
+          : "shadow"
+        : this.mode;
+      if (effectiveMode === "shadow") {
         report.wouldReap.push({
           pid: row.pid,
           command: row.command,
@@ -765,7 +854,7 @@ export class ProcReaper {
           widened,
         });
         this.log.info(
-          { pid: row.pid, command: row.command, args: row.args, reason: v.reason, widened },
+          { pid: row.pid, command: row.command, reason: v.reason, widened },
           widened
             ? "proc-reaper [shadow]: WOULD reap WIDENED orphan (CTL-1531: any command, ppid=1, cwd deleted under worktree root)"
             : "proc-reaper [shadow]: WOULD reap orphan node/bun under worktree root"
@@ -776,12 +865,27 @@ export class ProcReaper {
           reason: v.reason,
           worktreePath: await ctx.cwdForPid(row.pid),
         });
-      } else if (this.mode === "enforce") {
+      } else if (effectiveMode === "enforce") {
+        // CTL-1531 P2-f: re-establish the widened ownership conjunction from a
+        // FRESH read immediately before the first signal (see
+        // _revalidateWidened for why the classification snapshot is stale here).
+        if (widened && !(await this._revalidateWidened(row, ctx))) {
+          report.spared.push({
+            pid: row.pid,
+            command: row.command,
+            reason: "widened-revalidation-failed",
+          });
+          this.log.warn(
+            { pid: row.pid, command: row.command, reason: "widened-revalidation-failed" },
+            "proc-reaper: widened candidate no longer proves ownership at signal time — sparing"
+          );
+          continue;
+        }
         const killed = await this._terminateWithGrace(row);
         if (killed) {
           report.reaped.push({ pid: row.pid, command: row.command, reason: v.reason, widened });
           this.log.info(
-            { pid: row.pid, command: row.command, args: row.args, reason: v.reason, widened },
+            { pid: row.pid, command: row.command, reason: v.reason, widened },
             widened
               ? "proc-reaper [enforce]: reaped WIDENED orphan (CTL-1531)"
               : "proc-reaper [enforce]: reaped orphan node/bun"
@@ -799,6 +903,75 @@ export class ProcReaper {
     // Roll persistence forward: remember THIS sweep's candidates for the next.
     this._priorCandidates = thisSweepCandidates;
     return report;
+  }
+
+  /**
+   * _revalidateWidened — CTL-1531 P2-f. Re-establish the FULL widened ownership
+   * conjunction from a fresh read, immediately before the first signal.
+   *
+   * Why the classification verdict is not enough: every candidate is classified
+   * from ONE ps snapshot, then the verdicts are processed SERIALLY, and each
+   * enforcing candidate sleeps `graceMs` (default 5s) inside _terminateWithGrace
+   * before the next one is reached. The 10th candidate is therefore signalled
+   * ~45s after the snapshot that justified it — ample time for a pid to be
+   * recycled, a worktree to be recreated by `create-worktree.sh`, a new agent to
+   * claim the tree, or the process to be adopted by a live supervisor.
+   * _terminateWithGrace's existing argv re-match runs only AFTER the SIGTERM has
+   * already been delivered, so it protects the SIGKILL and nothing else.
+   *
+   * Re-checked here, all from reads taken NOW:
+   *   • the pid is still present with the SAME full argv (pid-reuse guard)
+   *   • ppid is STILL exactly 1 (not re-adopted by a live supervisor)
+   *   • it is not (a descendant of) a live claude agent
+   *   • its cwd still resolves, is still under the worktree root (and the
+   *     targeted worktree when the sweep is scoped), is not under a live agent's
+   *     cwd, and is still DELETED
+   *
+   * ANY unanswerable probe ⇒ false ⇒ no signal. Fail closed, like every other
+   * gate in this file. Applies to the WIDENED class only: the legacy node/bun
+   * class keeps its exact pre-CTL-1531 path.
+   */
+  async _revalidateWidened(row, ctx = null) {
+    // (1) fresh ps: same pid, same full argv, still strictly ppid === 1.
+    let fresh;
+    try {
+      fresh = parsePsRows(await this.psLister());
+    } catch {
+      return false;
+    }
+    const cur = fresh.find((r) => r.pid === row.pid);
+    if (!cur || cur.args !== row.args || cur.ppid !== 1) return false;
+
+    // (2) live-agent ownership, re-read. A FAILED read is the catastrophe-guard
+    //     condition and must spare here exactly as it aborts the sweep.
+    let agentsRes;
+    try {
+      agentsRes = this.agentsResult();
+    } catch {
+      return false;
+    }
+    if (!agentsRes || agentsRes.ok !== true) return false;
+    const agents = Array.isArray(agentsRes.agents) ? agentsRes.agents : [];
+    const byPid = new Map(fresh.map((r) => [r.pid, r]));
+    const childrenByPpid = new Map();
+    for (const r of fresh) {
+      if (!childrenByPpid.has(r.ppid)) childrenByPpid.set(r.ppid, []);
+      childrenByPpid.get(r.ppid).push(r.pid);
+    }
+    if (collectLiveAgentSubtree(agents, byPid, childrenByPpid).has(row.pid)) return false;
+
+    // (3) cwd re-probe — deliberately the single-pid seam, NOT the batch cache
+    //     the classification pass filled; a cached path is the stale value this
+    //     whole method exists to distrust.
+    const cwd = await this._safeCwd(row.pid);
+    if (typeof cwd !== "string" || !cwd) return false;
+    for (const a of agents) {
+      if (a?.cwd && cwdUnderWorktreeRoot(cwd, a.cwd)) return false;
+    }
+    if (!cwdUnderWorktreeRoot(cwd, this.worktreeRoot)) return false;
+    const targetPath = ctx?.worktreePath ?? null;
+    if (targetPath && !cwdUnderWorktreeRoot(cwd, targetPath)) return false;
+    return (await this._safeCwdExists(cwd)) === false; // true OR unknown ⇒ spare
   }
 
   // SIGTERM → wait graceMs → re-probe kill(pid,0) → SIGKILL only if still alive.
@@ -826,7 +999,35 @@ export class ProcReaper {
       return false;
     }
     this.killProc(row.pid, "SIGKILL");
-    return true;
+    // CTL-1531 (Codex P2-i): kill(2) returns on DELIVERY, not on exit. A process
+    // wedged in uninterruptible sleep (D state on a hung mount) — or one we lack
+    // permission to signal — survives SIGKILL. Returning true unconditionally
+    // reported a PHANTOM reclamation: the pid landed in report.reaped and emitted
+    // procOrphans.reaped while the process kept running, so every sweep would
+    // re-"reap" it forever. Mirror the shell's _proc_gone_within: confirm the exit.
+    return await this._confirmGone(row.pid);
+  }
+
+  // _confirmGone — poll kill(pid,0) until the pid is CONFIRMED gone, bounded.
+  // Fail-CLOSED in the reporting direction: if we cannot prove it exited (probe
+  // throws, or it is still alive at the deadline) we return false, so the sweep
+  // UNDER-reports rather than emitting a reclamation that never happened.
+  async _confirmGone(pid, { attempts = 5, intervalMs = 200 } = {}) {
+    for (let i = 0; i < attempts; i++) {
+      let alive;
+      try {
+        alive = this.killProc(pid, 0);
+      } catch {
+        alive = true; // unprobeable ⇒ do NOT claim it was reaped
+      }
+      if (!alive) return true;
+      if (i < attempts - 1) await this.sleep(intervalMs);
+    }
+    this.log.warn(
+      { pid },
+      "proc-reaper: pid survived SIGKILL (unconfirmed exit) — NOT counted as reaped"
+    );
+    return false;
   }
 
   async _safeCwd(pid) {

@@ -43,6 +43,11 @@
 #                                 EnvironmentVariables), never enable-on-merge.
 #   SWEEP_PROC_WIDEN_MAX_KILLS  — per-run cap on widened kills (default 5, 0 = uncapped)
 #   SWEEP_PROC_WIDEN_MIN_AGE_SECS — min process age for a widened kill (default 900 / 15 min)
+#   SWEEP_PROC_WIDEN_GRACE_SECS — seconds to wait for a CONFIRMED exit after each of
+#                                 SIGTERM and SIGKILL before recording a widened
+#                                 reclamation (default 5). All three are parsed as
+#                                 BOUNDED base-10 integers; anything bash arithmetic
+#                                 could not evaluate falls back to the default loudly.
 #   SWEEP_AB_ENABLED            — agent-browser reaper on/off (default 1)
 #   SWEEP_AB_CPU_THRESHOLD      — runaway browser %CPU threshold (default 30)
 #   SWEEP_AB_MIN_AGE_SECS       — min browser age for the runaway rule (default 600)
@@ -609,6 +614,112 @@ _proc_etime_secs() {
       print d*86400 + secs }'
 }
 
+# ── CTL-1531 P1-c: bounded base-10 integer config parsing ───────────────────
+#
+# `[[ "$v" =~ ^[0-9]+$ ]]` is NOT sufficient validation for a value that is later
+# fed to bash arithmetic. It accepts:
+#   • `08` / `09`  — bash's arithmetic context treats a leading zero as OCTAL, so
+#     `[[ 08 -gt 0 ]]` is a fatal "value too great for base" error. Under
+#     `set -uo pipefail` (no `-e`) that error is printed and the test evaluates
+#     FALSE, which silently turns the per-run cap OFF for every candidate — a
+#     destructive sweep running UNCAPPED.
+#   • values past bash's signed 64-bit range — `999…9` (20+ digits) wraps to a
+#     NEGATIVE integer, so `acted >= cap` is false forever: uncapped again.
+# Both failure modes are silent and both fail OPEN, which is the wrong direction
+# for a killer. Parse explicitly in base 10 (`10#`), bound the digit count so the
+# `10#` conversion itself can never overflow, range-check, and fall back to the
+# safe default LOUDLY.
+#
+# Returns through the global $_SWEEP_INT rather than stdout: `log` writes to
+# stdout, so a `$(...)`-capturing helper would swallow its own warning into the
+# parsed value.
+_SWEEP_INT=0
+_sweep_bounded_int() {
+  local raw="$1" def="$2" min="$3" max="$4" name="$5" val
+  _SWEEP_INT="$def"
+  # ≤9 digits ⇒ ≤999,999,999, comfortably inside every arithmetic range.
+  if [[ ! "$raw" =~ ^[0-9]{1,9}$ ]]; then
+    log "sweep config: ${name}='${raw}' is not a base-10 integer in [${min},${max}] — falling back to ${def}"
+    return 0
+  fi
+  val=$((10#$raw))                          # 10# defuses the 08/09 octal trap
+  if [[ "$val" -lt "$min" || "$val" -gt "$max" ]]; then
+    log "sweep config: ${name}='${raw}' out of range [${min},${max}] — falling back to ${def}"
+    return 0
+  fi
+  _SWEEP_INT="$val"
+  return 0
+}
+
+# ── CTL-1531 P2-h: tri-state cwd probe (present | gone | unknown) ────────────
+#
+# `[[ -d "$cwd" ]]` is FALSE for a deleted directory AND for one that merely
+# cannot be stat'd — EACCES (a mode-000 or root-owned parent), EIO (failing
+# disk), ESTALE / ENOTCONN (a dropped NFS or SMB mount), EPERM (sandbox). On the
+# widened branch "the cwd is gone" is the ONLY ownership evidence for killing an
+# arbitrary process, so reading an unanswerable probe as "gone" is a fail-OPEN
+# inversion — and the unanswerable cases are exactly the CORRELATED ones (one
+# unmounted volume makes every process beneath it look orphaned at once).
+#
+# Reserve the kill path for a definite ENOENT: `stat` surfaces the errno in its
+# message, so "No such file or directory" is separable from every other failure.
+# Anything we cannot classify stays `unknown`, and unknown SPARES.
+# Result lands in $_SWEEP_CWD_STATE (global, for the same stdout reason as above).
+_SWEEP_CWD_STATE=unknown
+_probe_cwd_state() {
+  local p="$1" err rc
+  _SWEEP_CWD_STATE=unknown
+  [[ -n "$p" ]] || return 0
+  if [[ -d "$p" ]]; then _SWEEP_CWD_STATE=present; return 0; fi
+  # LC_ALL=C pins the errno TEXT we match on. Under a non-English locale the
+  # message would not match and the state would fall through to `unknown` —
+  # safe (it spares) but it would silently disable the whole widened branch.
+  err="$(LC_ALL=C stat -- "$p" 2>&1 >/dev/null)"; rc=$?
+  if [[ "$rc" -eq 0 ]]; then
+    # stat succeeds but `-d` was false: the path EXISTS and is not a directory.
+    # Not our debris — never kill on it.
+    _SWEEP_CWD_STATE=present
+    return 0
+  fi
+  case "$err" in
+    *"No such file or directory"*) _SWEEP_CWD_STATE=gone ;;
+    *) _SWEEP_CWD_STATE=unknown ;;
+  esac
+  return 0
+}
+
+# ── CTL-1531 P2-i: liveness probe + confirmed-exit wait ─────────────────────
+#
+# Deliberately `ps`, never `kill -0`: the sweep signals through `env kill`, so a
+# `kill -0` liveness probe would be indistinguishable from the destructive call
+# in an audit (and in the test harness's mock). Empty output ⇒ the pid is gone.
+_proc_alive() {
+  [[ -n "$(ps -o pid= -p "$1" 2>/dev/null | tr -d ' ')" ]]
+}
+
+# _proc_gone_within <pid> <grace_secs> — 0 when the pid is CONFIRMED gone.
+# Probes immediately, then once per second up to <grace_secs>.
+_proc_gone_within() {
+  local pid="$1" grace="$2" i=0
+  while :; do
+    _proc_alive "$pid" || return 0
+    [[ "$i" -ge "$grace" ]] && return 1
+    sleep 1
+    i=$((i+1))
+  done
+}
+
+# _argv_basename <argv> — argv[0]'s basename, into $_SWEEP_ARGV_BASE.
+# CTL-1531 P1-e: this is the MOST that may appear in a log line. See the log
+# calls in sweep_procs_widened for why the full argv must never be written.
+_SWEEP_ARGV_BASE=""
+_argv_basename() {
+  local first="${1%% *}"
+  _SWEEP_ARGV_BASE="${first##*/}"
+  [[ -n "$_SWEEP_ARGV_BASE" ]] || _SWEEP_ARGV_BASE="?"
+  return 0
+}
+
 # sweep_procs_widened — the CTL-1531 branch. Gates, in order, ALL of which must
 # hold; every ambiguous probe FAILS CLOSED (skip, never kill).
 #
@@ -638,12 +749,30 @@ sweep_procs_widened() {
     return 0
   fi
 
-  local cap="${SWEEP_PROC_WIDEN_MAX_KILLS:-5}"
-  local min_age="${SWEEP_PROC_WIDEN_MIN_AGE_SECS:-900}"
-  [[ "$cap" =~ ^[0-9]+$ ]] || cap=5
-  [[ "$min_age" =~ ^[0-9]+$ ]] || min_age=900
-  local acted=0 deferred=0
-  local pid ppid cwd argv age
+  # P1-c: explicit bounded base-10 parsing. A value bash's arithmetic cannot
+  # evaluate (`08`, `09`, a 20-digit number) previously made every later `[[ …
+  # -gt … ]]` error out and evaluate FALSE, silently uncapping the sweep.
+  local cap min_age grace
+  _sweep_bounded_int "${SWEEP_PROC_WIDEN_MAX_KILLS:-5}" 5 0 100000 SWEEP_PROC_WIDEN_MAX_KILLS
+  cap="$_SWEEP_INT"
+  _sweep_bounded_int "${SWEEP_PROC_WIDEN_MIN_AGE_SECS:-900}" 900 0 999999999 SWEEP_PROC_WIDEN_MIN_AGE_SECS
+  min_age="$_SWEEP_INT"
+  _sweep_bounded_int "${SWEEP_PROC_WIDEN_GRACE_SECS:-5}" 5 0 300 SWEEP_PROC_WIDEN_GRACE_SECS
+  grace="$_SWEEP_INT"
+  # Two counters, two ceilings (P2-i made them distinguishable):
+  #   acted     — CONFIRMED terminations. Bounded by `cap`. Counting confirmed
+  #               exits rather than delivered signals is what stops a process
+  #               that traps/ignores SIGTERM from consuming a cap slot — and
+  #               therefore crowding a REAL orphan out of the run — every single
+  #               sweep, forever.
+  #   signalled — candidates we sent ANY signal to. Bounded by `cap * 2`, because
+  #               a candidate is worth at most two signals (SIGTERM, then
+  #               SIGKILL). This is the blast-radius bound that the
+  #               confirmation-based cap can no longer provide on its own: a host
+  #               where nothing responds to signals must not turn "cap 5" into
+  #               unbounded signalling.
+  local acted=0 deferred=0 signalled=0
+  local pid ppid cwd cwd_now argv age
   while IFS= read -r pid; do
     # (a) a well-formed pid that is not init
     [[ "$pid" =~ ^[0-9]+$ ]] || continue
@@ -674,34 +803,82 @@ sweep_procs_widened() {
     # (j) cwd MUST be inside catalyst-managed worktree space. Nothing outside
     #     $SWEEP_WT_ROOT is ever a widened candidate, whatever its ppid/command.
     _cwd_under_wt_root "$cwd" || continue
-    # (k) that cwd must be GONE (the worktree was deleted out from under it)
-    [[ -d "$cwd" ]] && continue
+    # (k) P2-h — that cwd must be DEFINITELY gone. `[[ -d ]]` alone cannot tell a
+    #     deleted worktree from one we simply cannot stat (EACCES/EIO/ESTALE);
+    #     only a definite ENOENT reaches the kill path, everything else spares.
+    _probe_cwd_state "$cwd"
+    [[ "$_SWEEP_CWD_STATE" == "gone" ]] || continue
 
+    # P1-e: log the pid, the command BASENAME and the reason — NEVER the full
+    # argv. The widened branch admits ARBITRARY commands, and an arbitrary argv
+    # routinely carries an API token, a password, an `Authorization:` header or a
+    # pre-signed URL (`curl -H "Authorization: Bearer …"`, `psql "postgres://…"`,
+    # `foo --api-key=…`). These lines go to the PERSISTENT ~/catalyst/orphan-
+    # sweep.log, so merely OBSERVING this class in the DEFAULT shadow mode would
+    # write secrets to disk — no enforce flip required. The full argv stays in
+    # the `$argv` shell variable only, where it is load-bearing: the pre-kill
+    # TOCTOU re-match below is a pid-reuse guard and needs an exact comparison.
+    _argv_basename "$argv"
     if is_dry; then
-      log "[dry-run] would kill $pid (orphan; cwd gone under wt root: $cwd; argv: $argv)"
+      log "[dry-run] would kill $pid (cmd: ${_SWEEP_ARGV_BASE}; orphan; cwd gone under wt root: $cwd)"
       continue
     fi
     if [[ "$mode" == "shadow" ]]; then
-      log "[shadow] would kill $pid (orphan; cwd gone under wt root: $cwd; argv: $argv)"
+      log "[shadow] would kill $pid (cmd: ${_SWEEP_ARGV_BASE}; orphan; cwd gone under wt root: $cwd)"
       continue
     fi
-    # BOUND 2 — per-run cap. Counted only on the enforcing path so shadow keeps
-    # reporting the FULL candidate set (that is the signal the operator needs to
-    # size the cap before flipping to enforce).
+    # BOUND 2 — per-run cap on CONFIRMED terminations. Counted only on the
+    # enforcing path so shadow keeps reporting the FULL candidate set (that is
+    # the signal the operator needs to size the cap before flipping to enforce).
     if [[ "$cap" -gt 0 && "$acted" -ge "$cap" ]]; then
       deferred=$((deferred+1))
       continue
+    fi
+    # BOUND 2b — blast-radius bound on SIGNALS. Reached only when signals are
+    # being delivered without producing exits, i.e. a host in a state no sweep
+    # can fix. Stop rather than pile on more.
+    if [[ "$cap" -gt 0 && "$signalled" -ge $((cap * 2)) ]]; then
+      log "widened proc sweep: signal bound reached ($((cap * 2))) with only ${acted} confirmed termination(s) — stopping this run (a human should look at this host)"
+      break
     fi
     # TOCTOU re-check immediately before signalling: a worktree can be recreated,
     # and a pid can be recycled, between the gate and the kill.
     [[ "$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ' | head -1)" == "1" ]] || continue
     [[ "$(ps -o command= -p "$pid" 2>/dev/null | head -1)" == "$argv" ]] || continue
-    [[ -d "$cwd" ]] && continue
-    env kill "$pid" 2>/dev/null && {
-      acted=$((acted+1))
-      log "killed $pid (orphan; cwd gone under wt root: $cwd; argv: $argv)"
-      emit_reclaim orphan_proc "$pid"
-    }
+    # P2-g: RE-PROBE the cwd. Re-reading ppid and argv while testing the CACHED
+    # `$cwd` from classification defeats the point of the re-check — the pid that
+    # matters here is a *recycled* one, and a recycled pid has its own cwd that
+    # this loop has never looked at. (A worktree recreated under the same path is
+    # the other half: `create-worktree.sh` is running concurrently with the
+    # sweep.) Ask lsof again, and re-apply BOTH the under-root and the definitely-
+    # gone gates to whatever it answers now.
+    cwd_now="$(_proc_cwd "$pid")"
+    [[ -n "$cwd_now" ]] || continue
+    _cwd_under_wt_root "$cwd_now" || continue
+    _probe_cwd_state "$cwd_now"
+    [[ "$_SWEEP_CWD_STATE" == "gone" ]] || continue
+
+    # P2-i: `kill` reports that the signal was DELIVERED, not that the target
+    # EXITED. A process that traps or ignores SIGTERM used to be logged as
+    # "killed", consume a cap slot and emit a false `orphan_proc` reclamation on
+    # every single run, forever. Confirm the exit before recording anything:
+    # SIGTERM → wait → re-probe → escalate to SIGKILL → wait → re-probe.
+    if ! env kill "$pid" 2>/dev/null; then
+      log "widened proc sweep: SIGTERM to $pid failed (already gone, or not ours) — nothing recorded"
+      continue
+    fi
+    signalled=$((signalled+1))
+    if ! _proc_gone_within "$pid" "$grace"; then
+      log "widened proc sweep: $pid survived SIGTERM after ${grace}s — escalating to SIGKILL"
+      env kill -9 "$pid" 2>/dev/null || true
+      if ! _proc_gone_within "$pid" "$grace"; then
+        log "widened proc sweep: $pid STILL alive after SIGKILL — no reclamation recorded (cmd: ${_SWEEP_ARGV_BASE}; cwd: $cwd_now)"
+        continue
+      fi
+    fi
+    acted=$((acted+1))
+    log "killed $pid (cmd: ${_SWEEP_ARGV_BASE}; orphan; cwd gone under wt root: $cwd_now)"
+    emit_reclaim orphan_proc "$pid"
   done < <(_widened_candidate_pids)
   [[ "$deferred" -gt 0 ]] && log "widened proc sweep: cap reached (${cap}), ${deferred} deferred to the next run"
   return 0

@@ -1742,6 +1742,14 @@ case "$fmt" in
     [[ "$v" == "__DEFAULT__" ]] && v="16:40:00"   # 60000s — well over the 900s floor
     [[ -n "$v" ]] && printf '%s\n' "$v"
     ;;
+  # CTL-1531 P2-i: the post-signal LIVENESS probe (`ps -o pid= -p N`). EMPTY by
+  # default = "the pid is gone", i.e. every signal is confirmed to have worked.
+  # $WALIVE_<pid>=1 makes that pid a process that traps/ignores SIGTERM AND
+  # SIGKILL and stays alive — the case that used to be logged as "killed".
+  pid=)
+    eval "v=\"\${WALIVE_${pid}:-}\""
+    [[ -n "$v" ]] && printf '%s\n' "$pid"
+    ;;
 esac
 exit 0
 EOF
@@ -1749,12 +1757,24 @@ chmod +x "$MOCKBIN/ps"
 
 # lsof mock: cwd per pid via $WCWD_<pid>; default = the deleted worktree, so any
 # pid the fixture does not name still looks maximally kill-eligible.
+# CTL-1531 P2-g: $WCWD2_<pid> is the answer from the SECOND call on, which is
+# what the pre-kill cwd RE-PROBE sees (the gate probe is call #1). It is how a
+# recycled pid / recreated worktree is driven without touching a real process.
 cat > "$MOCKBIN/lsof" <<'EOF'
 #!/usr/bin/env bash
 pid=""
 while [[ $# -gt 0 ]]; do
   case "$1" in -p) pid="$2"; shift 2 ;; *) shift ;; esac
 done
+_n_file="${WIDEN_MOCK_STATE:-/tmp}/lsof-${pid}"
+_n=$(( $(cat "$_n_file" 2>/dev/null || echo 0) + 1 )); printf '%s' "$_n" > "$_n_file"
+# Single '-' + sentinel: a WCWD2_ that is set but EMPTY means "lsof can no longer
+# answer for this pid at re-probe time", which is a distinct fixture from unset.
+eval "v2=\"\${WCWD2_${pid}-__UNSET__}\""
+if [[ "$v2" != "__UNSET__" && "$_n" -ge 2 ]]; then
+  [[ -n "$v2" ]] && printf 'n%s\n' "$v2"
+  exit 0
+fi
 eval "v=\"\${WCWD_${pid}-__DEFAULT__}\""
 [[ "$v" == "__DEFAULT__" ]] && v="${WIDEN_GONE}"
 [[ -n "$v" ]] && printf 'n%s\n' "$v"
@@ -1768,11 +1788,20 @@ echo "$@" >> "${KILL_LOG}"
 EOF
 chmod +x "$MOCKBIN/kill"
 
+# NOTE: the per-pid fixture vars MUST be enumerated with `compgen -v` + `grep -E`,
+# not `sed`. The original form used GNU BRE alternation (`\(a\|b\)`), which BSD
+# sed — the sed on every macOS host in this fleet, and the one this suite runs
+# under — does not support: the expression matched nothing, so `_widen_clear`
+# silently cleared NO fixture variables at all. That was invisible while every
+# fixture used a disjoint pid block and re-exported each var it cared about; it
+# stops being invisible the moment two fixtures share a pid (e.g. an age-floor
+# case followed by a log-content case on the same pid, which then inherits the
+# previous case's `WETIME_`).
 _widen_clear() {
   local v
-  for v in $(env | sed -n 's/^\(W\(CMD2\|PPID2\|ETIME\|CMD\|CWD\|PPID\)_[0-9]*\)=.*/\1/p'); do unset "$v"; done
+  for v in $(compgen -v | grep -E '^W(CMD2?|PPID2?|CWD2?|ETIME|ALIVE)_[0-9]+$'); do unset "$v"; done
   unset WIDEN_PS_ROWS WIDEN_LEGACY_PIDS WIDEN_FIXTURE_PIDS
-  unset SWEEP_PROC_WIDEN_MAX_KILLS SWEEP_PROC_WIDEN_MIN_AGE_SECS
+  unset SWEEP_PROC_WIDEN_MAX_KILLS SWEEP_PROC_WIDEN_MIN_AGE_SECS SWEEP_PROC_WIDEN_GRACE_SECS
   rm -f "$KILL_LOG" "$SWEEP_SELF_PID_FILE" "$SWEEP_ANCESTOR_PID_FILE"
   rm -f "${WIDEN_MOCK_STATE}"/* 2>/dev/null || true
 }
@@ -1974,6 +2003,252 @@ run "T99: ROOT-ABSENT bail — a missing SWEEP_WT_ROOT kills nothing and says wh
   bash -c "SWEEP_PROC_WIDEN=enforce SWEEP_WT_ROOT='${SCRATCH}/wt_widen_ABSENT' bash '$SWEEP' > '${SCRATCH}/t99.out' 2>&1 \
     && expect_contains '${SCRATCH}/t99.out' 'is absent — skipping' \
     && ! test -s '${KILL_LOG}'"
+
+# ════════════════════════════════════════════════════════════════════════════
+# CTL-1531 Codex round 1 — P1-c / P1-e / P2-g / P2-h / P2-i regressions
+# ════════════════════════════════════════════════════════════════════════════
+
+# A run of N uniformly-eligible widened candidates starting at pid 2201. Every
+# gate defaults to the kill-eligible answer, so the ONLY thing under test is the
+# bound/probe the individual case varies.
+_widen_uniform() {
+  local n="$1" i rows="" pids=""
+  _widen_clear
+  for ((i = 0; i < n; i++)); do
+    rows="${rows}$((2201 + i)) 1"$'\n'
+    pids="${pids}$((2201 + i)) "
+  done
+  export WIDEN_PS_ROWS="${rows%$'\n'}"
+  export WIDEN_FIXTURE_PIDS="$pids"
+}
+
+# ── P1-c: cap values Bash arithmetic cannot evaluate ────────────────────────
+#
+# `[[ "$cap" =~ ^[0-9]+$ ]]` accepted values that later BLEW UP in arithmetic:
+#   • `08`/`09` — a leading zero means OCTAL, and 8/9 are not octal digits, so
+#     `[[ 08 -gt 0 ]]` is a fatal "value too great for base". Under `set -uo
+#     pipefail` (no `-e`) the error prints and the test evaluates FALSE.
+#   • `9223372036854775808` (2^63) — wraps NEGATIVE, so `cap -gt 0` is false.
+# Either way the guard `[[ "$cap" -gt 0 && "$acted" -ge "$cap" ]]` is false for
+# EVERY candidate and the destructive sweep silently runs UNCAPPED. Both cases
+# are asserted by COUNTING kills, so a revert flips the count.
+
+_widen_uniform 10
+run "T101: OCTAL cap ('08') is parsed base-10, not left to blow up and uncap the sweep" \
+  bash -c "SWEEP_PROC_WIDEN=enforce SWEEP_PROC_WIDEN_MAX_KILLS=08 bash '$SWEEP' > '${SCRATCH}/t101.out' 2>&1 \
+    && test \"\$(wc -l < '${KILL_LOG}' | tr -d ' ')\" = '8' \
+    && expect_contains '${SCRATCH}/t101.out' 'cap reached (8), 2 deferred'"
+
+_widen_uniform 7
+run "T102: cap past Bash's signed range falls back to the safe default (5), LOUDLY" \
+  bash -c "SWEEP_PROC_WIDEN=enforce SWEEP_PROC_WIDEN_MAX_KILLS=9223372036854775808 bash '$SWEEP' > '${SCRATCH}/t102.out' 2>&1 \
+    && expect_contains '${SCRATCH}/t102.out' \"SWEEP_PROC_WIDEN_MAX_KILLS='9223372036854775808' is not a base-10 integer\" \
+    && expect_contains '${SCRATCH}/t102.out' 'falling back to 5' \
+    && test \"\$(wc -l < '${KILL_LOG}' | tr -d ' ')\" = '5'"
+
+_widen_uniform 7
+run "T103: a non-numeric cap warns LOUDLY before falling back (the old form failed silently)" \
+  bash -c "SWEEP_PROC_WIDEN=enforce SWEEP_PROC_WIDEN_MAX_KILLS=lots bash '$SWEEP' > '${SCRATCH}/t103.out' 2>&1 \
+    && expect_contains '${SCRATCH}/t103.out' \"SWEEP_PROC_WIDEN_MAX_KILLS='lots' is not a base-10 integer\" \
+    && test \"\$(wc -l < '${KILL_LOG}' | tr -d ' ')\" = '5'"
+
+_widen_uniform 7
+run "T104: an out-of-range cap (>100000) falls back to 5" \
+  bash -c "SWEEP_PROC_WIDEN=enforce SWEEP_PROC_WIDEN_MAX_KILLS=999999 bash '$SWEEP' > '${SCRATCH}/t104.out' 2>&1 \
+    && expect_contains '${SCRATCH}/t104.out' 'out of range [0,100000]' \
+    && test \"\$(wc -l < '${KILL_LOG}' | tr -d ' ')\" = '5'"
+
+# The same octal trap on the AGE FLOOR fails the other way: `[[ 60000 -ge 09 ]]`
+# errors and evaluates FALSE, so NOTHING is ever killed and the knob is inert.
+_widen_uniform 1
+run "T105: OCTAL min-age ('09') is parsed base-10 (the floor stays functional, not inert)" \
+  bash -c "SWEEP_PROC_WIDEN=enforce SWEEP_PROC_WIDEN_MIN_AGE_SECS=09 bash '$SWEEP' > /dev/null 2>&1 \
+    && grep -qw '2201' '${KILL_LOG}'"
+
+_widen_uniform 1
+export WETIME_2201="00:30"     # 30s — under the fallback floor of 900
+run "T106: a garbage min-age falls back to 900 LOUDLY (and a 30s process is still spared)" \
+  bash -c "SWEEP_PROC_WIDEN=enforce SWEEP_PROC_WIDEN_MIN_AGE_SECS=soon bash '$SWEEP' > '${SCRATCH}/t106.out' 2>&1 \
+    && expect_contains '${SCRATCH}/t106.out' \"SWEEP_PROC_WIDEN_MIN_AGE_SECS='soon' is not a base-10 integer\" \
+    && ! test -s '${KILL_LOG}'"
+
+# ── P1-e: the full argv must NEVER reach ~/catalyst/orphan-sweep.log ────────
+#
+# The widened branch admits ARBITRARY commands, and arbitrary argv routinely
+# carries an API token, a password, an Authorization header or a signed URL.
+# This log is persistent, so merely OBSERVING the class in the DEFAULT shadow
+# mode wrote secrets to disk — no enforce flip required.
+WIDEN_SECRET="sk-live-51H4xQzTOPSECRETvalue"
+_widen_uniform 1
+export WCMD_2201="sh -c curl -H Authorization: Bearer ${WIDEN_SECRET} https://api.example.com/x?sig=${WIDEN_SECRET}"
+run "T107: SHADOW never logs the argv, but still identifies the pid + command basename" \
+  bash -c "SWEEP_PROC_WIDEN=shadow bash '$SWEEP' > '${SCRATCH}/t107.out' 2>&1 \
+    && expect_not_contains '${SCRATCH}/t107.out' '${WIDEN_SECRET}' \
+    && expect_not_contains '${SCRATCH}/t107.out' 'Authorization' \
+    && expect_contains '${SCRATCH}/t107.out' '[shadow] would kill 2201 (cmd: sh;'"
+
+_widen_uniform 1
+export WCMD_2201="sh -c curl -H Authorization: Bearer ${WIDEN_SECRET} https://api.example.com/x"
+run "T108: ENFORCE never logs the argv on the kill path either" \
+  bash -c "SWEEP_PROC_WIDEN=enforce bash '$SWEEP' > '${SCRATCH}/t108.out' 2>&1 \
+    && expect_not_contains '${SCRATCH}/t108.out' '${WIDEN_SECRET}' \
+    && expect_contains '${SCRATCH}/t108.out' 'killed 2201 (cmd: sh;' \
+    && grep -qw '2201' '${KILL_LOG}'"
+
+_widen_uniform 1
+export WCMD_2201="sh -c curl -H Authorization: Bearer ${WIDEN_SECRET} https://api.example.com/x"
+run "T109: --dry-run never logs the argv either" \
+  bash -c "SWEEP_PROC_WIDEN=enforce bash '$SWEEP' --dry-run > '${SCRATCH}/t109.out' 2>&1 \
+    && expect_not_contains '${SCRATCH}/t109.out' '${WIDEN_SECRET}' \
+    && expect_contains '${SCRATCH}/t109.out' '[dry-run] would kill 2201 (cmd: sh;'"
+
+# The argv is dropped from the LOG only — it is still held in memory, where it is
+# load-bearing as the pre-kill pid-reuse guard. T92 already covers the guard; this
+# pins that the secret-bearing form is matched exactly (no truncation/basename).
+_widen_uniform 1
+export WCMD_2201="sh -c curl -H Authorization: Bearer ${WIDEN_SECRET} https://api.example.com/x"
+export WCMD2_2201="sh -c a-completely-different-process"
+run "T110: argv is still RETAINED IN MEMORY for the pid-reuse re-match (drop is log-only)" \
+  bash -c "SWEEP_PROC_WIDEN=enforce bash '$SWEEP' > /dev/null 2>&1 && ! test -s '${KILL_LOG}'"
+
+# ── P2-g: the pre-kill re-check must RE-PROBE the cwd, not re-test the cache ──
+#
+# The TOCTOU block re-read ppid and argv but tested the CACHED $cwd from
+# classification. The pid that matters there is a RECYCLED one, and a recycled
+# pid has its own cwd this loop had never looked at; the other half is a worktree
+# recreated by create-worktree.sh running concurrently with the sweep.
+_widen_uniform 1
+export WCWD_2201="$WIDEN_GONE"      # classification: deleted, under the root
+export WCWD2_2201="$WIDEN_LIVE"     # signal time: the worktree is BACK on disk
+run "T111: the worktree was RE-CREATED between the gate and the kill → NOT killed" \
+  bash -c "SWEEP_PROC_WIDEN=enforce bash '$SWEEP' > /dev/null 2>&1 && ! test -s '${KILL_LOG}'"
+
+_widen_uniform 1
+export WCWD_2201="$WIDEN_GONE"
+export WCWD2_2201="$WIDEN_OUTSIDE_GONE"   # signal time: cwd left the wt root
+run "T112: the cwd MOVED out from under the worktree root before the kill → NOT killed" \
+  bash -c "SWEEP_PROC_WIDEN=enforce bash '$SWEEP' > /dev/null 2>&1 && ! test -s '${KILL_LOG}'"
+
+_widen_uniform 1
+export WCWD_2201="$WIDEN_GONE"
+export WCWD2_2201=""                      # signal time: cwd unresolvable
+run "T113: an unresolvable cwd at signal time → NOT killed (fail closed)" \
+  bash -c "SWEEP_PROC_WIDEN=enforce bash '$SWEEP' > /dev/null 2>&1 && ! test -s '${KILL_LOG}'"
+
+# ── P2-h: an INACCESSIBLE cwd is UNKNOWN, not "deleted" ─────────────────────
+#
+# `[[ -d "$cwd" ]]` is false for a deleted directory AND for one that merely
+# cannot be stat'd — EACCES (a mode-000 parent), EIO, ESTALE on a dropped mount.
+# On this branch "the cwd is gone" is the ONLY ownership evidence for killing an
+# arbitrary process, and the unanswerable cases are exactly the CORRELATED ones.
+# Real filesystem fixture: a real mode-000 parent, so the errno is genuine.
+WIDEN_WALLED="${WIDEN_WT}/walled"
+WIDEN_WALLED_CWD="${WIDEN_WALLED}/evr-99"
+mkdir -p "$WIDEN_WALLED_CWD"
+chmod 000 "$WIDEN_WALLED"
+export WIDEN_WALLED_CWD
+# Asserted through SHADOW, deliberately. Shadow is the shipped default and never
+# reaches the pre-kill re-probe, so this isolates the CLASSIFICATION gate: with
+# `[[ -d "$cwd" ]]` an EACCES path is reported as a would-kill candidate, i.e.
+# the operator's shadow evidence — the entire basis for the enforce flip — is
+# built on processes whose cwd was never actually shown to be deleted.
+_widen_uniform 1
+export WCWD_2201="$WIDEN_WALLED_CWD"
+run "T114: SHADOW — a cwd that cannot be stat'd (EACCES) is UNKNOWN → not even a candidate" \
+  bash -c "SWEEP_PROC_WIDEN=shadow bash '$SWEEP' > '${SCRATCH}/t114.out' 2>&1 \
+    && expect_not_contains '${SCRATCH}/t114.out' 'would kill 2201'"
+
+_widen_uniform 1
+export WCWD_2201="$WIDEN_WALLED_CWD"
+run "T114b: ENFORCE — the same EACCES cwd is never signalled" \
+  bash -c "SWEEP_PROC_WIDEN=enforce bash '$SWEEP' > /dev/null 2>&1 && ! test -s '${KILL_LOG}'"
+
+# Non-vacuity, both modes: the SAME fixture shape with a definite ENOENT does
+# reach the candidate set and the kill path, so T114/T114b are measuring the
+# errno and not some unrelated bail.
+_widen_uniform 1
+export WCWD_2201="${WIDEN_WT}/definitely-absent/evr-99"
+run "T115: NON-VACUITY (shadow) — the same shape with a definite ENOENT IS a candidate" \
+  bash -c "SWEEP_PROC_WIDEN=shadow bash '$SWEEP' > '${SCRATCH}/t115.out' 2>&1 \
+    && expect_contains '${SCRATCH}/t115.out' 'would kill 2201'"
+
+_widen_uniform 1
+export WCWD_2201="${WIDEN_WT}/definitely-absent/evr-99"
+run "T115b: NON-VACUITY (enforce) — …and IS killed" \
+  bash -c "SWEEP_PROC_WIDEN=enforce bash '$SWEEP' > /dev/null 2>&1 && grep -qw '2201' '${KILL_LOG}'"
+
+# A cwd that EXISTS but is not a directory (a file left at the path) is not our
+# debris either — `stat` succeeds, so the state is `present`, never `gone`.
+WIDEN_FILE_CWD="${WIDEN_WT}/a-file-not-a-dir"
+: > "$WIDEN_FILE_CWD"
+_widen_uniform 1
+export WCWD_2201="$WIDEN_FILE_CWD"
+run "T116: a cwd path that exists but is NOT a directory → present, NOT killed" \
+  bash -c "SWEEP_PROC_WIDEN=enforce bash '$SWEEP' > /dev/null 2>&1 && ! test -s '${KILL_LOG}'"
+
+# ── P2-i: `kill` reports DELIVERY, not EXIT ────────────────────────────────
+#
+# A process that traps or ignores SIGTERM used to be logged as "killed", consume
+# a cap slot and emit a false `orphan_proc` reclamation on EVERY run, forever.
+# $WALIVE_<pid> makes the mock `ps -o pid= -p N` keep answering, i.e. the pid
+# never dies. Grace is set to 0 so the confirmation wait does not sleep.
+_widen_uniform 1
+export WALIVE_2201=1
+rm -f "$SCRATCH_OTEL_LOG"
+run "T117: a process that survives SIGTERM+SIGKILL is NOT logged as killed" \
+  bash -c "SWEEP_PROC_WIDEN=enforce SWEEP_PROC_WIDEN_GRACE_SECS=0 bash '$SWEEP' > '${SCRATCH}/t117.out' 2>&1 \
+    && expect_not_contains '${SCRATCH}/t117.out' 'killed 2201 (cmd:' \
+    && expect_contains '${SCRATCH}/t117.out' 'STILL alive after SIGKILL'"
+
+run "T118: …and emits NO orphan_proc reclamation for it" \
+  bash -c "! grep -q 'orphan_proc' '${SCRATCH_OTEL_LOG}' 2>/dev/null"
+
+run "T119: …but DOES escalate to SIGKILL first (the escalation is not skipped)" \
+  bash -c "grep -q -- '-9 2201' '${KILL_LOG}' \
+    && expect_contains '${SCRATCH}/t117.out' 'survived SIGTERM after 0s — escalating to SIGKILL'"
+
+# A stubborn process must not crowd a REAL orphan out of the per-run cap.
+# Order matters: 2201 (stubborn) is enumerated before 2202 (reapable), cap = 1.
+_widen_clear
+export WIDEN_PS_ROWS="2201 1
+2202 1"
+export WIDEN_FIXTURE_PIDS="2201 2202"
+export WALIVE_2201=1
+rm -f "$SCRATCH_OTEL_LOG"
+run "T120: a signal-ignoring process does NOT consume cap capacity (the real orphan is still reaped)" \
+  bash -c "SWEEP_PROC_WIDEN=enforce SWEEP_PROC_WIDEN_MAX_KILLS=1 SWEEP_PROC_WIDEN_GRACE_SECS=0 bash '$SWEEP' > '${SCRATCH}/t120.out' 2>&1 \
+    && expect_contains '${SCRATCH}/t120.out' 'killed 2202 (cmd: sh;' \
+    && expect_not_contains '${SCRATCH}/t120.out' 'killed 2201 (cmd:'"
+
+run "T121: …and exactly ONE reclamation is emitted (for the process that actually exited)" \
+  bash -c "test \"\$(grep -c 'orphan_proc' '${SCRATCH_OTEL_LOG}')\" = '1'"
+
+# …but signalling is still BOUNDED. Confirmed-exit accounting alone cannot bound
+# a host where NOTHING responds to signals, so a second ceiling caps delivered
+# signals at cap × 2 (each candidate is worth SIGTERM + SIGKILL and no more).
+# cap=2 ⇒ 4 candidates signalled × 2 signals = 8 kill.log lines, then stop.
+_widen_uniform 8
+export WALIVE_2201=1 WALIVE_2202=1 WALIVE_2203=1 WALIVE_2204=1
+export WALIVE_2205=1 WALIVE_2206=1 WALIVE_2207=1 WALIVE_2208=1
+run "T122: signalling stays BOUNDED when everything ignores signals (stops at cap x 2, says why)" \
+  bash -c "SWEEP_PROC_WIDEN=enforce SWEEP_PROC_WIDEN_MAX_KILLS=2 SWEEP_PROC_WIDEN_GRACE_SECS=0 bash '$SWEEP' > '${SCRATCH}/t122.out' 2>&1 \
+    && expect_contains '${SCRATCH}/t122.out' 'signal bound reached (4) with only 0 confirmed termination(s) — stopping this run' \
+    && test \"\$(wc -l < '${KILL_LOG}' | tr -d ' ')\" = '8'"
+
+# NON-VACUITY for the whole P2-i block: with the default (mock) liveness answer
+# — the pid IS gone after SIGTERM — the reclamation is recorded and no SIGKILL
+# escalation happens at all.
+_widen_uniform 1
+rm -f "$SCRATCH_OTEL_LOG"
+run "T123: NON-VACUITY — a CONFIRMED exit records the reclamation and never escalates" \
+  bash -c "SWEEP_PROC_WIDEN=enforce SWEEP_PROC_WIDEN_GRACE_SECS=0 bash '$SWEEP' > '${SCRATCH}/t123.out' 2>&1 \
+    && expect_contains '${SCRATCH}/t123.out' 'killed 2201 (cmd: sh;' \
+    && grep -q 'orphan_proc' '${SCRATCH_OTEL_LOG}' \
+    && ! grep -q -- '-9 2201' '${KILL_LOG}'"
+
+chmod 755 "$WIDEN_WALLED"          # let the EXIT trap's rm -rf reclaim it
+rm -f "$WIDEN_FILE_CWD"
+_widen_clear
 
 # ── UNION: the legacy branch keeps its path-unrestricted coverage ────────────
 # Production evidence (orphan-sweep.log) shows vector 1 killing gone-cwd node/bun

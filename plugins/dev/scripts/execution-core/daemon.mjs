@@ -1220,9 +1220,16 @@ function startReaperAndTimer({
   // (selfPid defaults to process.pid; broker/monitor are covered by the argv
   // allowlist patterns). A disabled config ("off") makes every sweep an empty
   // no-op.
+  // CTL-1531: `widenMode` is a SEPARATE knob from `mode`. The widened
+  // any-command orphan class ships dark (shadow) on its own three-state gate, so
+  // a host already carrying procReaper.mode:"enforce" — granted for the narrow
+  // node/bun class after ITS shadow bake — does not silently inherit authority
+  // to SIGTERM an arbitrary PPID-1 command. Flipping it is operator-owned
+  // (ADR-023), exactly like the .sh side's SWEEP_PROC_WIDEN.
   const procCfg = orphanReaperConfig?.procReaper ?? {};
   const procReaper = new ProcReaper({
     mode: procCfg.mode ?? "shadow",
+    widenMode: procCfg.widenMode ?? "shadow",
     ...(procCfg.graceMs != null ? { graceMs: Number(procCfg.graceMs) } : {}),
     ...(procCfg.minEtimeSec != null ? { minEtimeSec: Number(procCfg.minEtimeSec) } : {}),
     ...(procCfg.worktreeRoot ? { worktreeRoot: procCfg.worktreeRoot } : {}),

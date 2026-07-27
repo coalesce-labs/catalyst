@@ -1141,6 +1141,45 @@ describe("startReaperAndTimer — injects a production ProcReaper (CTL-1165 D2)"
     expect(typeof capturedOpts.procReaper.sweep).toBe("function");
     // Default-safe: shadow mode emits would-reap, kills nothing.
     expect(capturedOpts.procReaper.mode).toBe("shadow");
+    // CTL-1531 P1-a: the widened any-command class carries its OWN rollout mode
+    // and it too ships dark. This assertion is what stops a future config change
+    // from arming the widened killer as a side effect of `mode: "enforce"` —
+    // the daemon must pass widenMode through as a SEPARATE, independently
+    // defaulted knob (ADR-023 "dark by default", one knob per actuator).
+    expect(capturedOpts.procReaper.widenMode).toBe("shadow");
+    stopDaemon();
+  });
+
+  // The assertion above is VACUOUS on its own: with an empty procReaper config both
+  // `procCfg.mode ?? "shadow"` and a hypothetical `procCfg.widenMode ?? procCfg.mode
+  // ?? "shadow"` evaluate to "shadow", so it cannot tell an INDEPENDENT knob from one
+  // that merely inherits. This case supplies mode:"enforce" and NO widenMode, which is
+  // exactly the deployment ADR-023 forbids arming implicitly — a host already running
+  // the legacy node/bun reaper in enforce must NOT thereby arm the widened
+  // any-command class. It goes RED under the inheriting mutation.
+  test("mode:enforce with no widenMode does NOT arm the widened class (independent knob, ADR-023)", () => {
+    let capturedOpts = null;
+    const fakeReaper = {
+      handle: () => Promise.resolve(),
+      bootReplay: () => Promise.resolve(),
+    };
+    startDaemon({
+      recover: () => {},
+      reconcileBoot: () => {},
+      startMonitor: () => {},
+      startScheduler: () => {},
+      watchRegistry: false,
+      enableReaper: true,
+      orphanReaperConfig: { procReaper: { mode: "enforce" } },
+      makeReaper: (opts) => {
+        capturedOpts = opts;
+        return fakeReaper;
+      },
+      pollMs: 0,
+      debounceMs: 600_000,
+    });
+    expect(capturedOpts.procReaper.mode).toBe("enforce"); // legacy class honours config
+    expect(capturedOpts.procReaper.widenMode).toBe("shadow"); // widened class stays dark
     stopDaemon();
   });
 });
