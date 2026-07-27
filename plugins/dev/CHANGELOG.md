@@ -1,5 +1,18 @@
 # Changelog
 
+## [12.38.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.37.0...catalyst-dev-v12.38.0) (2026-07-27)
+
+
+### Features
+
+* **dev:** CTL-1530 dual-harness migration (migrate-dual-harness.sh + checkup §10 + foundry skill) ([#2753](https://github.com/coalesce-labs/catalyst/issues/2753)) ([0afc204](https://github.com/coalesce-labs/catalyst/commit/0afc204fd049cf6b9f9c6f7a2a87b5a032742bec))
+
+
+### Bug Fixes
+
+* **dev:** CTL-1524 unblock the daemon event loop in wt-cleanup-drain (free provenance gate first + bounded burst) ([#2747](https://github.com/coalesce-labs/catalyst/issues/2747)) ([d31c9c6](https://github.com/coalesce-labs/catalyst/commit/d31c9c609534d67fd872938ac10c86d19c875bda))
+* **dev:** CTL-1532 stamp the provider delivery id on webhook envelopes ([#2751](https://github.com/coalesce-labs/catalyst/issues/2751)) ([708437b](https://github.com/coalesce-labs/catalyst/commit/708437b1acfaf235d5cb6882ce5a27f116f06f55))
+
 ## [12.37.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.36.0...catalyst-dev-v12.37.0)
 
 Jul 26, 2026

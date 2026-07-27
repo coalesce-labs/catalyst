@@ -1,5 +1,14 @@
 # Changelog
 
+## [2.3.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-foundry-v2.2.0...catalyst-foundry-v2.3.0) (2026-07-27)
+
+
+### Features
+
+* **dev:** CTL-1530 dual-harness migration (migrate-dual-harness.sh + checkup §10 + foundry skill) ([#2753](https://github.com/coalesce-labs/catalyst/issues/2753)) ([0afc204](https://github.com/coalesce-labs/catalyst/commit/0afc204fd049cf6b9f9c6f7a2a87b5a032742bec))
+* **foundry:** CTL-1530 add quality-review phase to migrate-dual-harness skill ([#2759](https://github.com/coalesce-labs/catalyst/issues/2759)) ([1a55693](https://github.com/coalesce-labs/catalyst/commit/1a556932f0ccc8c2c1034b651c6022c751adc570))
+* **foundry:** CTL-1536 document sidecar/mutating-pair invocation-safety convention in migrate-dual-harness skill ([#2761](https://github.com/coalesce-labs/catalyst/issues/2761)) ([adff262](https://github.com/coalesce-labs/catalyst/commit/adff2621328e33eaec93a54891e33d1090183d9d))
+
 ## [2.2.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-foundry-v2.1.0...catalyst-foundry-v2.2.0)
 
 Jul 21, 2026
