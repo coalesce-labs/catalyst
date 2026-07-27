@@ -245,6 +245,10 @@ jobs:
         # and the baked program path is a purpose-built scratch dir handed in via
         # CATALYST_FORCE_BAKE_DIR — nothing is ever loaded into real launchd.
         working-directory: plugins/dev/scripts
+        # NOTE: the runner is ubuntu and the installer is a macOS LaunchAgent, so
+        # this suite SKIPS here (loudly, rc=0) and its 38 assertions only execute
+        # on a developer Mac. Wiring it in still catches a syntax/gate break; it
+        # is NOT full CI coverage. A macos-latest job would close that.
         run: bash __tests__/install-orphan-sweep.test.sh
 
       - name: orphan-sweep installer ephemeral-path guard test (CTL-1306)

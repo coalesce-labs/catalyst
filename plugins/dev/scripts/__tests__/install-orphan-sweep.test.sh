@@ -5,6 +5,22 @@
 
 set -uo pipefail
 
+# PLATFORM GATE. install-orphan-sweep.sh installs a macOS LaunchAgent and refuses
+# to run on anything else — on Linux it prints "non-Darwin platform detected" and
+# exits 0, so every "should refuse <bad path>" assertion sees rc=0 and fails for a
+# reason that has nothing to do with what it tests. Skip LOUDLY rather than let a
+# Linux CI job report red on a macOS-only installer.
+#
+# BE CLEAR ABOUT THE COST: the CI runner is ubuntu, so this suite is SKIPPED there
+# and its 38 assertions only really execute on a developer's Mac. That is partial
+# coverage, not the "now wired into CI" it might look like from the workflow file.
+# Closing it properly needs a macos-latest job.
+if [[ "$(uname -s)" != "Darwin" ]]; then
+  echo "SKIP: install-orphan-sweep.test.sh requires macOS (installer is a LaunchAgent);"
+  echo "      this run was on $(uname -s) — 0 assertions executed."
+  exit 0
+fi
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../../../.." && pwd)"
 INSTALLER="${REPO_ROOT}/plugins/dev/scripts/install-orphan-sweep.sh"
